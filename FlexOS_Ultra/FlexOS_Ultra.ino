@@ -933,7 +933,7 @@ static void drawWallpaper(uint16_t* buf, bool blobs){
 // #############################################################
 // ##  LIQUID GLASS (aproximacion iOS 26 en software)
 // ##  Panel reutilizable: desenfoca el fondo real (box-blur),
-// ##  tinte sutil, gradiente de grosor y brillo especular animado.
+// ##  tinte sutil y gradiente de grosor.
 // #############################################################
 static bool uiGlass = false;               // estilo activo (togglea en Ajustes)
 // Modo de apariencia (Ajustes -> Pantalla -> Modo de apariencia). true = Modo
@@ -946,13 +946,11 @@ static bool uiGlass = false;               // estilo activo (togglea en Ajustes)
 // colores propio por pantalla, no un cambio mecanico.
 static bool gDark = true;
 static int  gIconStyle = 0;                // estilo de iconos: 0 = Plano, 1 = Vidrio (fondo Liquid Glass en drawAppIcon)
-static bool glDrawSpec = true;             // false = vidrio base SIN destello (se anima aparte con glassSheen)
 static uint16_t* glassBuf = NULL;          // scratch de region (PSRAM)
 // NOTA: aqui vivia 'wallBuf' ("wallpaper limpio para animar el brillo"). Era
 // memoria muerta: se reservaban 768 KB y se copiaban enteros en CADA
-// renderHome(), pero NINGUNA funcion lo leia jamas. El brillo se anima en
-// realidad desde homeBuf (animateHomeGlass) y desde lockBuf. Eliminado:
-// -768 KB de PSRAM y -768 KB de memcpy por cada repintado del escritorio.
+// renderHome(), pero NINGUNA funcion lo leia jamas. Eliminado: -768 KB de
+// PSRAM y -768 KB de memcpy por cada repintado del escritorio.
 // Linea temporal para el blur. Se indexa por ANCHO (pasada horizontal) y
 // por ALTO (pasada vertical) del panel de turno, asi que debe cubrir el
 // mayor de los dos lados de la pantalla, no solo SCR_H, o un panel mas
@@ -994,7 +992,7 @@ static int glInset(int j, int h, int rad){
   if(j >= h - rad){ int dy = j - (h - rad); return rad - isqrt32(rad * rad - dy * dy); }
   return 0;
 }
-// Panel Liquid Glass reutilizable. t = millis() (anima el brillo).
+// Panel Liquid Glass reutilizable (estatico: blur + tinte + gradiente).
 // "Ex" permite fijar el radio del box-blur (blurR). glassBlur() es una suma
 // corrediza O(w*h) que NO depende de blurR (ver mas arriba), asi que subir
 // blurR no cuesta rendimiento extra -- solo cambia cuanto se difumina el
@@ -1002,7 +1000,7 @@ static int glInset(int j, int h, int rad){
 // blurR=6, es decir: comportamiento IDENTICO al anterior en los ~19 sitios
 // existentes que ya la usan. Se penso para el panel rapido, que quiere un
 // vidrio mas "esmerilado" que el resto del sistema.
-static void drawLiquidGlassPanelEx(int x, int y, int w, int h, int rad, uint16_t tint, uint32_t t, int blurR){
+static void drawLiquidGlassPanelEx(int x, int y, int w, int h, int rad, uint16_t tint, int blurR){
   // GUARDA DE LANDSCAPE (Modo PC). Esta funcion lee y escribe el buffer con
   // indexacion VERTICAL directa (gBuf + (y+j)*SCR_W + x), asi que ignora por
   // completo la rotacion de gLand. En Modo PC cada drawAppIcon() de estilo
@@ -1021,7 +1019,6 @@ static void drawLiquidGlassPanelEx(int x, int y, int w, int h, int rad, uint16_t
   if(2 * rad > w) rad = w / 2; if(2 * rad > h) rad = h / 2;
   for(int j = 0; j < h; j++) memcpy(glassBuf + (size_t)j * w, gBuf + (size_t)(y + j) * SCR_W + x, w * 2);
   glassBlur(w, h, blurR);
-  int off = (int)((t / 16) % (uint32_t)(w + h + 120)) - 60;
   for(int j = 0; j < h; j++){
     int yy = y + j; if(yy < gClipY0 || yy > gClipY1) continue;   // respeta la banda de recorte
     int ins = glInset(j, h, rad);
@@ -1032,8 +1029,6 @@ static void drawLiquidGlassPanelEx(int x, int y, int w, int h, int rad, uint16_t
       uint16_t out = mix565(src[i], tint, 58);
       if(fj < h * 0.45f) out = mix565(out, rgb565(255,255,255), (uint8_t)((1.0f - fj / (h * 0.45f)) * 26));
       else               out = mix565(out, rgb565(0,0,0), (uint8_t)(((fj - h * 0.45f) / (h * 0.55f)) * 30));
-      int band = (i + j) - off; if(band < 0) band = -band;
-      if(glDrawSpec && band < 70){ float in2 = 1.0f - band / 70.0f; out = mix565(out, rgb565(255,255,255), (uint8_t)(in2 * in2 * 72)); }
       dst[i] = out;
     }
     uint16_t bcol = (j < 3) ? rgb565(255,255,255) : (j < h / 2 ? rgb565(205,214,228) : rgb565(22,28,40));
@@ -1041,33 +1036,8 @@ static void drawLiquidGlassPanelEx(int x, int y, int w, int h, int rad, uint16_t
     dst[w - 1 - ins] = mix565(dst[w - 1 - ins], bcol, 130);
   }
 }
-static void drawLiquidGlassPanel(int x, int y, int w, int h, int rad, uint16_t tint, uint32_t t){
-  drawLiquidGlassPanelEx(x, y, w, h, rad, tint, t, 6);   // blur original, sin cambios, para el resto del sistema
-}
-// Destello diagonal MOVIL barato: se dibuja sobre un panel de vidrio ya compuesto,
-// una vez por frame de animacion (no re-desenfoca). Recortado a la forma redondeada.
-// Sigue el ultimo punto tocado (gTouchX/Y, actualizados en flexPollTouch() -- estas
-// son variables sueltas y no parte de "struct Touch" porque esa struct se define
-// mucho mas abajo en el archivo, despues de glassSheen(); usar T.x/T.y aqui
-// arriba no compilaria).
-static int      gTouchX = SCR_W / 2, gTouchY = SCR_H / 2;
-static uint32_t gTouchMs = 0;              // millis() del ultimo toque (o arrastre) visto
-#define GLASS_TOUCH_FOLLOW_MS 2500         // cuanto tiempo "sigue" el reflejo tras soltar, antes de volver al barrido ambiental
-static void glassSheen(int x, int y, int w, int h, int rad, uint32_t t){
-  if(2 * rad > w) rad = w / 2; if(2 * rad > h) rad = h / 2;
-  int off;
-  if(t - gTouchMs < GLASS_TOUCH_FOLLOW_MS)               // toque reciente: el reflejo emana de ahi
-    off = (gTouchX - x) + (gTouchY - y);
-  else                                                    // sin toque reciente: barrido ambiental de siempre
-    off = (int)((t / 5) % (uint32_t)(w + h + 120)) - 60;
-  for(int j = 2; j < h - 2; j++){
-    int yy = y + j; if(yy < gClipY0 || yy > gClipY1) continue;
-    int ins = glInset(j, h, rad);
-    for(int i = ins + 1; i < w - ins - 1; i++){
-      int band = (i + j) - off; if(band < 0) band = -band;
-      if(band < 28){ int a = (28 - band) * 3; pxA(x + i, yy, rgb565(255,255,255), (uint8_t)(a > 96 ? 96 : a)); }
-    }
-  }
+static void drawLiquidGlassPanel(int x, int y, int w, int h, int rad, uint16_t tint){
+  drawLiquidGlassPanelEx(x, y, w, h, rad, tint, 6);   // blur original, sin cambios, para el resto del sistema
 }
 // Wallpaper desenfocado reutilizable (fondo del desbloqueo y de Recientes, estilo iOS)
 static uint16_t* blurBg = NULL;
@@ -1078,7 +1048,6 @@ static void ensureBlurBg(){
   uint16_t* old = gBuf;
   drawWallpaper(blurBg, true);
   setBuf(blurBg);
-  glDrawSpec = false; drawLiquidGlassPanel(0, 0, SCR_W, SCR_H, 0, rgb565(18,24,42), 0); glDrawSpec = true;
   fillRectA(0, 0, SCR_W, SCR_H, rgb565(8,10,18), 70);
   setBuf(old);
 }
@@ -3093,10 +3062,8 @@ enum { IC_RELOJ, IC_GALERIA, IC_MULTIMEDIA, IC_ALMACEN, IC_MODOPC, IC_NOTAS,
 
 static void iconBase(int x, int y, int S, uint16_t bg, int rf100){
   int r = S * rf100 / 100;
-  if(gIconStyle == 1){                     // estilo "Vidrio": fondo Liquid Glass (sin destello barrido; ver drawAppIcon)
-    glDrawSpec = false;
-    drawLiquidGlassPanel(x, y, S, S, r, bg, 0);
-    glDrawSpec = true;
+  if(gIconStyle == 1){                     // estilo "Vidrio": fondo Liquid Glass (ver drawAppIcon)
+    drawLiquidGlassPanel(x, y, S, S, r, bg);
   } else {                                 // estilo "Plano" (original)
     fillRoundRect(x, y, S, S, r, bg);
     // sutil brillo superior
@@ -3295,7 +3262,6 @@ static void flexPollTouch(){
   bool wasDown = T.down;
   if(ev == 1){
     T.x = gx; T.y = gy; T.lastMs = now;
-    gTouchX = gx; gTouchY = gy; gTouchMs = now;   // para glassSheen(): reflejo que sigue el dedo
     if(!wasDown){ T.down = true; T.pressed = true; T.startX = gx; T.startY = gy; T.downMs = now; T.moved = false; }
     else if(abs((int)gx - T.startX) > 12 || abs((int)gy - T.startY) > 12) T.moved = true;
   } else if(ev == 0){
@@ -3776,7 +3742,7 @@ static void lockGlyph(int kind, int cx, int cy, uint16_t col){
 // el resto de superficies de la app.
 static void lockWidgetCard(int y, int kind, const char* title, const char* val, uint16_t accent){
   int x = 28, w = SCR_W - 56, h = 50;
-  if(uiGlass){ glDrawSpec = false; drawLiquidGlassPanel(x, y, w, h, 16, rgb565(40,50,90), 0); glDrawSpec = true; }
+  if(uiGlass){ drawLiquidGlassPanel(x, y, w, h, 16, rgb565(40,50,90)); }
   else fillRoundRectA(x, y, w, h, 16, rgb565(255,255,255), 45);
   lockGlyph(kind, x + 30, y + h / 2, accent);
   drawText(x + 54, y + 9, title, 2, rgb565(255,255,255));
@@ -3788,7 +3754,7 @@ static void renderLock(){
   drawWifi(SCR_W - 66, 40, 12, rgb565(255,255,255));
   drawBattery(SCR_W - 46, 31, 30, 15, 82, rgb565(255,255,255));
   if(gLockWidgets & LW_CLOCK){
-    if(uiGlass){ glDrawSpec = false; drawLiquidGlassPanel(28, 198, SCR_W - 56, 252, 28, rgb565(40,62,128), 0); glDrawSpec = true; }  // vidrio tras el reloj (destello aparte)
+    if(uiGlass){ drawLiquidGlassPanel(28, 198, SCR_W - 56, 252, 28, rgb565(40,62,128)); }  // vidrio tras el reloj
     char cs[8]; clkStr12(cs, sizeof(cs));
     drawBigClock(cs, SCR_W / 2, 242, 140, 18, rgb565(255,255,255));
     char ds[64]; buildLongDate(ds, sizeof(ds));
@@ -3822,7 +3788,7 @@ static void showLock(){ blitToFb(lockBuf); flxFlushAll(); }
 
 // ---------------- HOME ----------------
 // Widgets del escritorio (clima, noticias, dock) en estilo Liquid Glass
-// o plano segun uiGlass. tm = millis() para animar el brillo especular.
+// o plano segun uiGlass.
 // Calcula el rectangulo de cada widget del Home segun gWidgetWide. Mutuamente
 // excluyente: si uno esta "ancho" ocupa toda la fila (mismo alto de siempre,
 // 120px) y el otro no se dibuja ese frame -- asi la rejilla de apps de abajo
@@ -3840,9 +3806,8 @@ static void drawHomeWidgets(uint32_t tm){
   int wx, wy, cw, ch, nx, ny, nw, nh; bool climaVis, newsVis;
   widgetLayout(wx, wy, cw, ch, climaVis, nx, ny, nw, nh, newsVis);
   uint16_t W = rgb565(255,255,255);
-  glDrawSpec = false;                        // vidrio base (el destello se anima con glassSheen)
   if(climaVis){
-    if(uiGlass) drawLiquidGlassPanel(wx, wy, cw, ch, 20, rgb565(30,72,150), tm);
+    if(uiGlass) drawLiquidGlassPanel(wx, wy, cw, ch, 20, rgb565(30,72,150));
     else fillRoundRect(wx, wy, cw, ch, 20, rgb565(28,58,120));
     drawText(wx + 16, wy + 16, t(S_WEATHER), 2, W);
     fillCircle(wx + cw - 42, wy + 34, 13, rgb565(250,205,60));
@@ -3854,18 +3819,17 @@ static void drawHomeWidgets(uint32_t tm){
     drawText(wx + 16, wy + ch - 22, "Lima, Peru", 1, rgb565(215,224,240));
   }
   if(newsVis){
-    if(uiGlass) drawLiquidGlassPanel(nx, ny, nw, nh, 20, rgb565(205,212,226), tm);
+    if(uiGlass) drawLiquidGlassPanel(nx, ny, nw, nh, 20, rgb565(205,212,226));
     else fillRoundRect(nx, ny, nw, nh, 20, rgb565(240,242,246));
     uint16_t ntxt = uiGlass ? W : rgb565(40,40,50), nsub = uiGlass ? rgb565(238,240,248) : rgb565(120,120,132);
     drawText(nx + 16, ny + 16, t(S_NEWS), 2, ntxt);
     drawTextC(nx + nw / 2, ny + nh / 2, t(S_NONEWS), 1, nsub);
   }
   int dkx = 24, dky = SCR_H - 176, dkw = SCR_W - 48, dkh = 96;
-  if(uiGlass) drawLiquidGlassPanel(dkx, dky, dkw, dkh, 28, rgb565(180,186,206), tm);
+  if(uiGlass) drawLiquidGlassPanel(dkx, dky, dkw, dkh, 28, rgb565(180,186,206));
   else fillRoundRectA(dkx, dky, dkw, dkh, 28, W, 45);
   int dS = 64, inner = dkw - 32, dgap = (inner - 4 * dS) / 3;
   for(int i = 0; i < 4; i++){ int ix = dkx + 16 + i * (dS + dgap), iy = dky + (dkh - dS) / 2; drawAppIcon(12 + i, ix, iy, dS); }
-  glDrawSpec = true;
 }
 
 static void renderHome(){
@@ -3959,8 +3923,6 @@ static void lockTick(){
     else { animateTo(lockOff, 0); lockOff = 0; lastLockOff = -1; showLock(); }
   }
 }
-// Anima el brillo especular de los paneles glass del escritorio:
-// restaura las regiones desde el wallpaper limpio y repinta con millis().
 // #############################################################
 // ##  MODO EDICION del Home (long-press, jiggle, drag & drop)
 // #############################################################
@@ -4021,7 +3983,7 @@ static void edRender(){
   // estilo es Vidrio se limita el refresco de ESTA funcion a ~20 fps (50 ms).
   // Ojo: esto es un throttle LOCAL (reutiliza edMs, declarada mas arriba y
   // hasta ahora sin usar) -- a proposito NO se toca uiAnimMs, que es el
-  // throttle compartido del sheen/qsPanel/ripple y no debe frenarse por esto.
+  // throttle compartido de qsPanel/ripple y no debe frenarse por esto.
   // En estilo Plano no hay throttle: se conserva el mismo refresco fluido de
   // siempre.
   if(gIconStyle == 1){
@@ -4048,7 +4010,7 @@ static void edRender(){
   }
   if(edDrag >= 0){                                                              // icono arrastrado (translucido)
     int dx = (int)edDragX, dy = (int)edDragY, s = 72;
-    if(uiGlass) drawLiquidGlassPanel(dx - 6, dy - 6, s + 12, s + 12, 16, rgb565(120,140,205), t);
+    if(uiGlass) drawLiquidGlassPanel(dx - 6, dy - 6, s + 12, s + 12, 16, rgb565(120,140,205));
     else fillRoundRectA(dx - 6, dy - 6, s + 12, s + 12, 16, rgb565(60,80,140), 150);
     drawAppIcon(homeOrder[edDrag], dx, dy, s);
   }
@@ -4088,32 +4050,6 @@ static void edTick(){
     return;
   }
   // reposo: el jiggle continuo lo mueve uiTick()
-}
-
-static unsigned long homeGlassMs = 0;
-static void animateHomeGlass(){
-  if(!uiGlass || !bbuf) return;
-  setBuf(bbuf);
-  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;   // recorte completo (evita lineas de borde)
-  uint32_t t = millis();
-  // BANDA COMPLETA A PROPOSITO (auto-reparacion). Restaurar solo las dos franjas
-  // del sheen es mas barato, pero deja de repintar la zona central (filas
-  // ~192..623): cualquier resto que otro render deje ahi se queda PEGADO para
-  // siempre. Repintar la banda entera desde homeBuf en cada frame garantiza que
-  // el escritorio se auto-repara en <40 ms pase lo que pase. La correccion vale
-  // mas que el ahorro de ancho de banda.
-  const int y0 = 64, y1 = 726;                           // banda continua (sin costuras internas)
-  for(int j = y0; j <= y1; j++) memcpy(bbuf + (size_t)j * SCR_W, homeBuf + (size_t)j * SCR_W, SCR_W * 2);
-  glassSheen(24, 72, 208, 120, 20, t);
-  glassSheen(248, 72, 208, 120, 20, t);
-  glassSheen(24, SCR_H - 176, SCR_W - 48, 96, 28, t);
-  // El tirador (x[0..12], y[340..460]) queda a la IZQUIERDA y ENTRE las franjas
-  // de sheen (widgets hasta y=191, dock desde y=624), asi que jamas se solapa
-  // con ellas: permanece intacto en fb y no hace falta restaurarlo ni
-  // re-estamparlo. (Antes se re-estampaba cada frame por precaucion; era un
-  // dibujo redundante que ahora se elimina.)
-  sbDrawTabHandle();          // el tirador vuelve a estamparse encima del vidrio animado
-  present(y0, y1);
 }
 
 // ---- Destello de reflejo al tocar un icono (estilo "Vidrio") ----
@@ -4254,7 +4190,7 @@ static void appDrawHeader(int id){
 static void appPlaceholderEnter(){
   setBuf(fb);
   int cy = (WIN_TOP + WIN_BOT) / 2;
-  if(uiGlass) drawLiquidGlassPanel(36, cy - 168, SCR_W - 72, 268, 26, rgb565(50,72,146), millis());  // modal glass
+  if(uiGlass) drawLiquidGlassPanel(36, cy - 168, SCR_W - 72, 268, 26, rgb565(50,72,146));  // modal glass
   drawAppIcon(gAppId, SCR_W / 2 - 44, cy - 130, 88);
   drawTextC(SCR_W / 2, cy + 6, t(S_SOON), 3, rgb565(232,234,240));
   drawTextC(SCR_W / 2, cy + 48, t(S_M2), 2, rgb565(140,150,166));
@@ -4565,7 +4501,7 @@ static int setRowY0[SET_ROW_MAX], setRowY1[SET_ROW_MAX], setRowN = 0;
 static int setRowCard(int y, int rIcon, uint16_t iCol, const char* title, const char* val, bool chevron){
   int rh = 60, mr = DP_X + DP_W - 26;
   if(setRowN < SET_ROW_MAX){ setRowY0[setRowN] = y; setRowY1[setRowN] = y + rh; setRowN++; }  // registra el rango real de esta fila
-  if(uiGlass) drawLiquidGlassPanel(DP_X, y, DP_W, rh - 8, 12, SET_CARD_GLASS, millis());  // tarjeta vidrio
+  if(uiGlass) drawLiquidGlassPanel(DP_X, y, DP_W, rh - 8, 12, SET_CARD_GLASS);  // tarjeta vidrio
   else fillRoundRect(DP_X, y, DP_W, rh - 8, 12, SET_CARD_BG);
   drawRowGlyph(rIcon, DP_X + 22, y + (rh - 8) / 2, iCol);
   drawTextClip(DP_X + 44, y + 10, title, 2, SET_TXT_HI, mr);
@@ -4850,7 +4786,7 @@ static void calcGrid(int &gx, int &gy, int &bw, int &bh, int &gap){
   gap = 12; gx = 16; gy = WIN_TOP + 120; bw = (SCR_W - 32 - 3 * gap) / 4; bh = 86;
 }
 static int calcKeyY0 = 0, calcKeyY1 = 0;
-static void calcRender(){                              // compone base (teclas glass SIN sheen) en lockBuf, luego vuelca
+static void calcRender(){                              // compone la base de teclas glass en lockBuf, luego vuelca
   setBuf(lockBuf);
   fillRect(0, WIN_TOP, SCR_W, WIN_BOT - WIN_TOP, WIN_BG);
   fillRoundRect(16, WIN_TOP + 8, SCR_W - 32, 92, 14, rgb565(28,31,40));
@@ -4864,7 +4800,7 @@ static void calcRender(){                              // compone base (teclas g
     if(c == 3 || (r == 4 && c == 2)) bg = rgb565(245,150,40);
     else if(r == 0)                  bg = rgb565(70,74,86);
     else                             bg = rgb565(92,96,110);
-    if(uiGlass){ glDrawSpec = false; drawLiquidGlassPanel(x, y, bw, bh, 14, bg, 0); glDrawSpec = true; }
+    if(uiGlass){ drawLiquidGlassPanel(x, y, bw, bh, 14, bg); }
     else fillRoundRect(x, y, bw, bh, 14, bg);
     int fs = (strlen(tl) > 1) ? 3 : 4;
     drawTextC(x + bw / 2, y + bh / 2 - (fs == 4 ? 15 : 11), tl, fs, rgb565(248,248,252));
@@ -4872,15 +4808,6 @@ static void calcRender(){                              // compone base (teclas g
   setBuf(fb);
   fbCopyBand(lockBuf, WIN_TOP, WIN_BOT - 1);   // antes: memcpy de filas COMPLETAS -> dentro de una ventana borraba el escritorio
   flxFlush(WIN_TOP, WIN_BOT);
-}
-static void calcAnimSheen(){                           // reflejo movil sobre las teclas (uiTick)
-  if(!uiGlass || calcKeyY1 <= calcKeyY0) return;
-  setBuf(bbuf);
-  for(int j = calcKeyY0; j < calcKeyY1; j++) memcpy(bbuf + (size_t)j * SCR_W, lockBuf + (size_t)j * SCR_W, SCR_W * 2);
-  int gx, gy, bw, bh, gap; calcGrid(gx, gy, bw, bh, gap);
-  uint32_t t = millis();
-  for(int r = 0; r < 5; r++) for(int c = 0; c < 4; c++){ int x = gx + c * (bw + gap), y = gy + r * (bh + gap); glassSheen(x, y, bw, bh, 14, t); }
-  present(calcKeyY0, calcKeyY1);
 }
 static void calcRenderDisplay(){                       // solo el display (al teclear) -> responsivo
   // Mismo bug que tenia sbDrawTabOnApp(): dos dibujos SEPARADOS directo en
@@ -5004,28 +4931,23 @@ static void pcOpen(int app){
   }
 }
 // Panel glass para LANDSCAPE (Modo PC): drawLiquidGlassPanel escribe en coords
-// portrait y no rota, asi que aqui uso primitivas rotacion-aware (fillRoundRectA
-// + reflejo con pxA). Translucido + sheen + borde, sin blur.
-static void pcGlassPanel(int x, int y, int w, int h, int rad, uint16_t tint, uint32_t t){
-  // Le faltaba el mismo resguardo que ya tienen fillRoundRect/fillRoundRectA/
-  // drawLiquidGlassPanelEx: sin esto, rad llegaba SIN recortar hasta glInset()
-  // y el bucle de reflejo de abajo -- con una ventana lo bastante chica (o un
-  // rad grande a proposito) el inset calculado podia superar la mitad de w/h,
-  // dejando manchas en las esquinas en vez de la curva limpia.
+// portrait y no rota, asi que aqui uso primitivas rotacion-aware
+// (fillRoundRectA). Translucido + borde, sin blur.
+static void pcGlassPanel(int x, int y, int w, int h, int rad, uint16_t tint){
+  // Mismo resguardo que ya tienen fillRoundRect/fillRoundRectA/
+  // drawLiquidGlassPanelEx: con una ventana lo bastante chica (o un rad grande
+  // a proposito) un rad sin recortar dejaria manchas en las esquinas en vez de
+  // la curva limpia.
   if(rad < 0) rad = 0;
   if(2 * rad > w) rad = w / 2;
   if(2 * rad > h) rad = h / 2;
   fillRoundRectA(x, y, w, h, rad, tint, 205);
-  int off = (int)((t / 22) % (uint32_t)(w + h)) - h / 2;
-  for(int j = 3; j < h - 3; j += 2){ int ins = glInset(j, h, rad), sxp = off - j + w / 2;
-    for(int i = -16; i <= 16; i++){ int xi = sxp + i; if(xi > ins + 1 && xi < w - ins - 1){ int a = 16 - (i < 0 ? -i : i); if(a > 0) pxA(x + xi, y + j, rgb565(255,255,255), (uint8_t)a); } }
-  }
   drawRoundRect(x, y, w, h, rad, rgb565(210,220,240));
 }
 static void pcDrawWindow(PWin* wn){
   int x = wn->x, y = wn->y, w = wn->w, h = wn->h;
   fillRoundRect(x + 4, y + 6, w, h, 12, rgb565(8,10,18));       // sombra
-  if(uiGlass) pcGlassPanel(x, y, w, h, 12, rgb565(232,238,250), millis());   // cuerpo glass
+  if(uiGlass) pcGlassPanel(x, y, w, h, 12, rgb565(232,238,250));   // cuerpo glass
   else fillRoundRect(x, y, w, h, 12, rgb565(246,247,251));                    // cuerpo plano
   fillRoundRect(x, y, w, 32, 12, rgb565(45,90,200));            // barra de titulo
   fillRect(x, y + 18, w, 14, rgb565(45,90,200));
@@ -5051,7 +4973,7 @@ static void pcRender(){
   }
   for(int i = 0; i < 4; i++) if(pwins[i].open) pcDrawWindow(&pwins[i]);
   int tb = LH - 46;                                            // barra de tareas
-  if(uiGlass) pcGlassPanel(0, tb, LW, 46, 0, rgb565(30,36,54), millis());
+  if(uiGlass) pcGlassPanel(0, tb, LW, 46, 0, rgb565(30,36,54));
   else fillRect(0, tb, LW, 46, rgb565(24,28,42));
   int sx = LW / 2 - 140;
   fillRoundRect(sx, tb + 9, 28, 28, 6, rgb565(45,90,200));     // boton Inicio (logo 2x2)
@@ -5065,7 +4987,7 @@ static void pcRender(){
   char sd[40]; buildShortDate(sd, sizeof(sd)); drawTextR(LW - 16, tb + 28, sd, 1, rgb565(200,206,224));
   if(pcStartOpen){                                             // menu Inicio
     int mx = sx - 6, my = tb - 208, mw = 250, mh = 198;
-    if(uiGlass) pcGlassPanel(mx, my, mw, mh, 12, rgb565(40,46,66), millis());
+    if(uiGlass) pcGlassPanel(mx, my, mw, mh, 12, rgb565(40,46,66));
     else fillRoundRect(mx, my, mw, mh, 12, rgb565(34,38,54));
     drawText(mx + 16, my + 12, "Aplicaciones", 2, rgb565(220,224,238));
     const int mi[5] = { IC_NAV, IC_NOTAS, IC_CALC, IC_AJUSTES, IC_ALMACEN };
@@ -5163,7 +5085,7 @@ static void qsTileIcon(int idx, int cx, int cy, uint16_t col){
 static void qsCircleBtn(int idx, int cx, int cy){
   int d = QS_CIRC_D, x = cx - d / 2, y = cy - d / 2;
   fillRoundRectA(x + 2, y + 3, d, d, d / 2, rgb565(0,0,0), 55);            // sombra sutil
-  if(uiGlass) drawLiquidGlassPanel(x, y, d, d, d / 2, rgb565(56,62,86), millis());
+  if(uiGlass) drawLiquidGlassPanel(x, y, d, d, d / 2, rgb565(56,62,86));
   else fillRoundRect(x, y, d, d, d / 2, rgb565(38,42,56));
   drawRoundRect(x, y, d, d, d / 2, rgb565(90,98,120));                     // borde sutil
   qsTileIcon(idx, cx, cy - 10, rgb565(220,224,236));
@@ -5173,7 +5095,7 @@ static void qsCircleBtn(int idx, int cx, int cy){
 // Pastilla ancha de toggle (Ahorro Ultra -- el unico toggle real que queda).
 static void qsTogglePill(int x, int y, int w, int h, bool on){
   fillRoundRectA(x + 2, y + 4, w, h, h / 2, rgb565(0,0,0), 55);
-  if(uiGlass) drawLiquidGlassPanel(x, y, w, h, h / 2, on ? rgb565(255,150,40) : rgb565(56,62,86), millis());
+  if(uiGlass) drawLiquidGlassPanel(x, y, w, h, h / 2, on ? rgb565(255,150,40) : rgb565(56,62,86));
   else fillRoundRect(x, y, w, h, h / 2, on ? rgb565(210,110,20) : rgb565(38,42,56));
   drawRoundRect(x, y, w, h, h / 2, on ? rgb565(255,190,110) : rgb565(90,98,120));
   qsTileIcon(4, x + h / 2, y + h / 2, rgb565(255,255,255));
@@ -5187,11 +5109,10 @@ static int  qsLastY = 0;
 // dibuja titulo + tiles + etiqueta y pista del slider en el gBuf actual (sin relleno/perilla)
 static void qsDrawContent(){
   drawText(24, 40, "Ajustes r\xC3\xA1pidos", 3, rgb565(240,244,252));
-  glDrawSpec = false;                                            // elementos SIN reflejo horneado (se anima con sheen en qsRender)
   // Brillo: pista de la capsula vertical (el relleno ambar es dinamico, se
   // pinta cada frame en qsRender porque cambia con el arrastre / PWM real)
   fillRoundRectA(QS_CAP_X + 3, QS_CAP_Y + 5, QS_CAP_W, QS_CAP_H, QS_CAP_R, rgb565(0,0,0), 55);
-  if(uiGlass) drawLiquidGlassPanel(QS_CAP_X, QS_CAP_Y, QS_CAP_W, QS_CAP_H, QS_CAP_R, rgb565(40,46,64), millis());
+  if(uiGlass) drawLiquidGlassPanel(QS_CAP_X, QS_CAP_Y, QS_CAP_W, QS_CAP_H, QS_CAP_R, rgb565(40,46,64));
   else fillRoundRect(QS_CAP_X, QS_CAP_Y, QS_CAP_W, QS_CAP_H, QS_CAP_R, rgb565(32,36,50));
   drawRoundRect(QS_CAP_X, QS_CAP_Y, QS_CAP_W, QS_CAP_H, QS_CAP_R, rgb565(80,86,106));
   // Ventanas / Modo PC / Ajustes: columna de 3 circulos (acciones reales)
@@ -5200,7 +5121,6 @@ static void qsDrawContent(){
   qsCircleBtn(5, QS_CIRC_CX, QS_CIRC_CY(2));
   // Ahorro Ultra: pastilla ancha (toggle real, cambia la frecuencia de la CPU)
   qsTogglePill(QS_PILL_X, QS_PILL_Y, QS_PILL_W, QS_PILL_H, qsPower);
-  glDrawSpec = true;
 }
 // compone la cortina COMPLETA una sola vez en qsBuf (parte cara)
 static void qsCompose(){
@@ -5210,9 +5130,7 @@ static void qsCompose(){
   setBuf(qsBuf);
   int c0 = gClipY0, c1 = gClipY1; gClipY0 = 0; gClipY1 = SCR_H - 1;
   if(uiGlass){
-    glDrawSpec = false;
-    drawLiquidGlassPanelEx(0, 0, SCR_W, SCR_H, 0, rgb565(26,34,60), millis(), 11);   // cortina Liquid Glass (blur mas fuerte que el resto del sistema; ver drawLiquidGlassPanelEx)
-    glDrawSpec = true;
+    drawLiquidGlassPanelEx(0, 0, SCR_W, SCR_H, 0, rgb565(26,34,60), 11);   // cortina Liquid Glass (blur mas fuerte que el resto del sistema; ver drawLiquidGlassPanelEx)
     fillRectA(0, 0, SCR_W, SCR_H, rgb565(12,14,24), 140);                       // oscurecer para legibilidad (sin tocar: preserva el contraste ya afinado)
   } else {
     fillRectA(0, 0, SCR_W, SCR_H, rgb565(14,16,26), 234);                       // glassmorphism plano
@@ -5224,13 +5142,6 @@ static void qsCompose(){
   qsDirty = false;
 }
 // por-frame: SOLO copia la banda revelada (memcpy) + relleno del slider + flush de banda
-static void qsSpecular(int py, uint32_t t){        // destello diagonal que se desliza sobre la cortina
-  int off = (int)((t / 14) % (uint32_t)(SCR_W + py + 80)) - 40;
-  for(int y = 0; y < py; y += 2){
-    int cx = off - y + SCR_W / 2;
-    for(int i = -44; i <= 44; i++){ int x = cx + i; if((unsigned)x < SCR_W){ int a = 16 - (i < 0 ? -i : i) / 3; if(a > 0) pxA(x, y, rgb565(255,255,255), (uint8_t)a); } }
-  }
-}
 static void qsRender(){
   if(qsPanelY <= 0){ blitToFb(homeBuf); flxFlushAll(); qsLastY = 0; return; }
   if(qsDirty || !qsBuf) qsCompose();
@@ -5240,7 +5151,7 @@ static void qsRender(){
   for(int j = 0; j < py; j++) memcpy(bbuf + (size_t)j * SCR_W, qsBuf + (size_t)j * SCR_W, SCR_W * 2);
   int maxY = py > qsLastY ? py : qsLastY; if(maxY > SCR_H) maxY = SCR_H;
   for(int j = py; j < maxY; j++) memcpy(bbuf + (size_t)j * SCR_W, homeBuf + (size_t)j * SCR_W, SCR_W * 2);
-  uint32_t t = millis();                        // fuera del if: la usan tambien el destello de toque y la sombra de abajo
+  uint32_t t = millis();                        // la usan el destello de toque y la sombra de abajo
   // RECORTE AL BORDE DE LA CORTINA. La capsula de Brillo ocupa y=92..422 y solo
   // se comprobaba "if(QS_CAP_Y < py)": con la cortina a medio abrir (py~100) se
   // pintaban >300 filas POR DEBAJO del borde, encima del escritorio. Eso producia
@@ -5250,13 +5161,7 @@ static void qsRender(){
   // Recortando a py, ningun elemento de la cortina puede salirse de ella.
   const int oCY1 = gClipY1, oCY0 = gClipY0, oCX0 = gClipX0, oCX1 = gClipX1;
   gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = py - 1;
-  if(uiGlass){
-    if(QS_CAP_Y < py) glassSheen(QS_CAP_X, QS_CAP_Y, QS_CAP_W, QS_CAP_H, QS_CAP_R, t);
-    for(int i = 0; i < 3; i++){ int cy = QS_CIRC_CY(i); if(cy - QS_CIRC_R < py) glassSheen(QS_CIRC_CX - QS_CIRC_R, cy - QS_CIRC_R, QS_CIRC_D, QS_CIRC_D, QS_CIRC_R, t); }
-    if(QS_PILL_Y < py) glassSheen(QS_PILL_X, QS_PILL_Y, QS_PILL_W, QS_PILL_H, QS_PILL_R, t);
-    qsSpecular(py, t);                                                 // destello diagonal ambiental sobre toda la cortina
-  }
-  if(qsFlashIdx >= 0){                                                // destello de feedback al tocar (2=Ventanas,3=Modo PC,4=Ahorro Ultra,5=Ajustes)
+  if(qsFlashIdx >= 0){                                               // destello de feedback al tocar (2=Ventanas,3=Modo PC,4=Ahorro Ultra,5=Ajustes)
     uint32_t e = t - qsFlashMs;
     if(e < QS_FLASH_DUR_MS){
       float p = 1.0f - (float)e / QS_FLASH_DUR_MS;                    // se desvanece
@@ -5808,7 +5713,7 @@ static void noteDrawFuncRow(){
 }
 static void noteRenderKeyboard(){
   setBuf(fb);
-  if(uiGlass) drawLiquidGlassPanel(0, KB_Y - 4, SCR_W, SCR_H - (KB_Y - 4), 0, rgb565(36,40,58), millis());
+  if(uiGlass) drawLiquidGlassPanel(0, KB_Y - 4, SCR_W, SCR_H - (KB_Y - 4), 0, rgb565(36,40,58));
   else fillRect(0, KB_Y - 4, SCR_W, SCR_H - (KB_Y - 4), rgb565(18,20,28));
   for(int r = 0; r < KB_ROWS; r++) for(int c = 0; c < KB_COLS; c++){
     int x = KB_X + c * (KB_KW + KB_GAP), y = KB_Y + r * (KB_KH + KB_GAP);
@@ -5966,7 +5871,7 @@ static void simpCards(const char* title, const char* items[], int n){
   drawTextC(SCR_W / 2, WIN_TOP + 14, title, 3, rgb565(255,255,255));
   for(int i = 0; i < n; i++){
     int y = WIN_TOP + 70 + i * 92;
-    if(uiGlass) drawLiquidGlassPanel(20, y, SCR_W - 40, 76, 14, rgb565(60,80,150), millis());
+    if(uiGlass) drawLiquidGlassPanel(20, y, SCR_W - 40, 76, 14, rgb565(60,80,150));
     else fillRoundRect(20, y, SCR_W - 40, 76, 14, rgb565(40,44,58));
     drawText(40, y + 16, items[i], 3, rgb565(255,255,255));
     drawText(40, y + 48, "Proximamente", 1, rgb565(150,158,180));
@@ -8057,9 +7962,7 @@ static void hwDrawWizard(){
       for(int r = 0; r < nc; r++){
         DetectedModule* m = &detectedModules[idxs[r]];
         int cy = HW_LIST_Y0 + r * HW_ROW_H;
-        glDrawSpec = false;
-        drawLiquidGlassPanel(HW_CARD_X, cy, HW_CARD_W, HW_CARD_H, 12, rgb565(40, 60, 130), millis());
-        glDrawSpec = true;
+        drawLiquidGlassPanel(HW_CARD_X, cy, HW_CARD_W, HW_CARD_H, 12, rgb565(40, 60, 130));
         drawModuleIcon(m->type, HW_CARD_X + 8, cy + 8, 32);
         char label[48];
         if(m->i2cAddr) snprintf(label, sizeof(label), "%s (0x%02X)", m->name, m->i2cAddr);
@@ -8077,9 +7980,7 @@ static void hwDrawWizard(){
     drawTextC(SCR_W / 2, WIN_TOP + 16, t, 2, rgb565(255, 255, 255));
 
     int px = 16, py = WIN_TOP + 52, pw = SCR_W - 32, ph = (HW_ACT_Y - 12) - (WIN_TOP + 52);
-    glDrawSpec = false;
-    drawLiquidGlassPanel(px, py, pw, ph, 12, rgb565(24, 40, 80), millis());
-    glDrawSpec = true;
+    drawLiquidGlassPanel(px, py, pw, ph, 12, rgb565(24, 40, 80));
 
     // Volcar hwCode linea a linea (split por '\n')
     int ly = py + 12, lineNo = 1;
@@ -8270,13 +8171,6 @@ static void swCardFrame(int x, int y, int w, int h, int rad){
   fillRoundRect(x, y, w, h, rad, rgb565(26,30,44));
   drawRoundRect(x, y, w, h, rad, rgb565(95,105,138));
 }
-static void swSheen(int x, int y, int w, int h, int rad, uint32_t t){   // reflejo diagonal en movimiento
-  int off = (int)((t / 20) % (uint32_t)(w + h)) - h / 2;
-  for(int j = 3; j < h - 3; j += 2){
-    int ins = glInset(j, h, rad), sxp = off - j + w / 2;
-    for(int i = -18; i <= 18; i++){ int xi = sxp + i; if(xi > ins + 1 && xi < w - ins - 1){ int a = 22 - (i < 0 ? -i : i); if(a > 0) pxA(x + xi, y + j, rgb565(255,255,255), (uint8_t)a); } }
-  }
-}
 static void swRender(float scale){                        // completo (solo animacion de entrada)
   setBuf(bbuf);
   if(blurBg) memcpy(bbuf, blurBg, (size_t)SCR_W * SCR_H * 2); else fillRect(0, 0, SCR_W, SCR_H, rgb565(8,10,16));
@@ -8291,7 +8185,6 @@ static void swRender(float scale){                        // completo (solo anim
     swCardFrame(x, y, cw, ch, 22);
     if(swTasks[i].thumb) blitThumbScaled(swTasks[i].thumb, x + 8, y + 8, cw - 16, ch - 52);
     else { fillRoundRect(x + 8, y + 8, cw - 16, ch - 52, 14, rgb565(28,32,44)); drawAppIcon(swTasks[i].appID, x + cw / 2 - 30, y + ch / 2 - 70, 60); }
-    swSheen(x, y, cw, ch, 22, millis());
     drawTextC(x + cw / 2, y + ch - 32, appName(swTasks[i].appID), 2, rgb565(255,255,255));
   }
   drawTextC(SCR_W / 2, SCR_H - 28, "Desliza una tarjeta arriba para cerrar", 1, rgb565(130,138,158));
@@ -8311,7 +8204,6 @@ static void swRenderCards(){
     swCardFrame(x, y, SW_CW, SW_CH, 22);
     if(swTasks[i].thumb) blitThumbScaled(swTasks[i].thumb, x + 8, y + 8, SW_CW - 16, SW_CH - 52);
     else { fillRoundRect(x + 8, y + 8, SW_CW - 16, SW_CH - 52, 14, rgb565(28,32,44)); drawAppIcon(swTasks[i].appID, x + SW_CW / 2 - 30, y + SW_CH / 2 - 70, 60); }
-    swSheen(x, y, SW_CW, SW_CH, 22, millis());
     drawTextC(x + SW_CW / 2, y + SW_CH - 32, appName(swTasks[i].appID), 2, rgb565(255,255,255));
   }
   present(32, 604);
@@ -8459,7 +8351,7 @@ static void wmDrawWindow(int idx){
   WindowInstance& w = wmWins[idx];
   if(w.minimized) return;                                                         // minimizada: se dibuja como burbuja (sbDrawMinBubbles)
   fillRoundRect(w.x + 3, w.y + 4, w.w, w.h, 12, rgb565(6,8,14));                 // sombra
-  if(uiGlass) pcGlassPanel(w.x, w.y, w.w, w.h, 12, rgb565(232,238,250), millis());  // cuerpo (glass ligero, fluido)
+  if(uiGlass) pcGlassPanel(w.x, w.y, w.w, w.h, 12, rgb565(232,238,250));  // cuerpo (glass ligero, fluido)
   else fillRoundRect(w.x, w.y, w.w, w.h, 12, rgb565(244,246,250));
   uint16_t tb = w.isFocused ? rgb565(45,90,200) : rgb565(92,100,120);            // barra de titulo
   fillRoundRect(w.x, w.y, w.w, 30, 12, tb); fillRect(w.x, w.y + 16, w.w, 14, tb);
@@ -9003,7 +8895,7 @@ static bool sbSplitPickerAt(int px, int py, int &appID){
 static void sbDrawSplitPicker(){
   int y0 = SB_PANEL_TOP + (WM_NAV - SB_PANEL_TOP) / 2;
   int cellW = SCR_W / SB_SPLIT_COLS, cellH = (WM_NAV - SB_PANEL_TOP) / 2 / SB_SPLIT_COLS;
-  if(uiGlass) drawLiquidGlassPanel(0, y0, SCR_W, WM_NAV - y0, 0, rgb565(40,54,110), millis());
+  if(uiGlass) drawLiquidGlassPanel(0, y0, SCR_W, WM_NAV - y0, 0, rgb565(40,54,110));
   else fillRect(0, y0, SCR_W, WM_NAV - y0, rgb565(28,32,52));
   drawTextC(SCR_W / 2, y0 + 6, "Elige la otra app", 2, rgb565(210,216,235));
   for(int a = 0; a < 16; a++){
@@ -9075,7 +8967,7 @@ static void sbDrawBottomBtns(){
 // mascara) + botones fijos + (en arrastre) silueta bajo el dedo y zonas de drop.
 static void sbDrawPanel(){
   int ph = SB_PANEL_BOT - SB_PANEL_TOP;
-  if(uiGlass) drawLiquidGlassPanel(0, SB_PANEL_TOP, SB_PANEL_W, ph, 18, rgb565(40,54,110), millis());
+  if(uiGlass) drawLiquidGlassPanel(0, SB_PANEL_TOP, SB_PANEL_W, ph, 18, rgb565(40,54,110));
   else fillRoundRect(0, SB_PANEL_TOP, SB_PANEL_W, ph, 18, rgb565(28,32,52));
   sbDrawScreenshotBtn();
   int c0 = gClipY0, c1 = gClipY1;                       // recorte estricto de la lista (mismo patron que Ajustes)
@@ -9149,7 +9041,7 @@ static void sbRevealFrame(int w){
   sbDrawWindowsSorted();
   sbDrawMinBubbles();
   if(w > 2){
-    if(uiGlass) drawLiquidGlassPanel(0, SB_PANEL_TOP, w, SB_PANEL_BOT - SB_PANEL_TOP, 18, rgb565(40,54,110), millis());
+    if(uiGlass) drawLiquidGlassPanel(0, SB_PANEL_TOP, w, SB_PANEL_BOT - SB_PANEL_TOP, 18, rgb565(40,54,110));
     else fillRoundRect(0, SB_PANEL_TOP, w, SB_PANEL_BOT - SB_PANEL_TOP, 18, rgb565(28,32,52));
   } else sbDrawTabHandle();
   present(0, SCR_H - 1);
@@ -9557,10 +9449,10 @@ static void lsuRenderSel(){
   lsuBack();
   drawTextC(SCR_W / 2, 74, "Bloqueo de pantalla", 3, rgb565(255,255,255));
   drawTextC(SCR_W / 2, 118, "Elige un metodo", 2, rgb565(150,158,180));
-  int bw = SCR_W - 80, bh = 120, y1 = 220, y2 = y1 + bh + 30; uint32_t t = millis();
+  int bw = SCR_W - 80, bh = 120, y1 = 220, y2 = y1 + bh + 30;
   const char* lbl[2] = { "PIN", "Contrase\xC3\xB1" "a" }; int ys[2] = { y1, y2 };
   for(int k = 0; k < 2; k++){
-    if(uiGlass){ glDrawSpec = false; drawLiquidGlassPanel(40, ys[k], bw, bh, 22, rgb565(50,90,200), t); glDrawSpec = true; glassSheen(40, ys[k], bw, bh, 22, t); }
+    if(uiGlass){ drawLiquidGlassPanel(40, ys[k], bw, bh, 22, rgb565(50,90,200)); }
     else fillRoundRect(40, ys[k], bw, bh, 22, rgb565(46,82,182));
     drawTextC(SCR_W / 2, ys[k] + bh / 2 - 18, lbl[k], 4, rgb565(255,255,255));
   }
@@ -9580,7 +9472,7 @@ static void lsuComposePin(){                          // base de vidrio en lockB
   drawTextC(SCR_W / 2, 60, lsuVerify ? "Introduce el PIN" : "Crear PIN", lsuVerify ? 3 : 4, rgb565(255,255,255));
   for(int i = 0; i < 12; i++){
     int x, y, w, h; lsuPinRect(i, x, y, w, h);
-    if(uiGlass){ glDrawSpec = false; drawLiquidGlassPanel(x, y, w, h, 16, rgb565(48,60,110), 0); glDrawSpec = true; }
+    if(uiGlass){ drawLiquidGlassPanel(x, y, w, h, 16, rgb565(48,60,110)); }
     else fillRoundRect(x, y, w, h, 16, rgb565(44,54,92));
     uint16_t col = (i == 9) ? rgb565(230,180,90) : (i == 11) ? rgb565(120,220,150) : rgb565(255,255,255);
     drawTextC(x + w / 2, y + h / 2 - 12, PIN_KEYS[i], 3, col);
@@ -9594,10 +9486,8 @@ static void lsuAnimPin(){                              // puntos dinamicos + des
   int n = strlen(lsuPin);
   uint16_t dc = (lsuWrong && millis() - lsuWrong < 500) ? rgb565(235,70,70) : rgb565(90,150,240);
   for(int i = 0; i < 8; i++){ int cx = SCR_W / 2 - 4 * 28 + 14 + i * 28; if(i < n) fillCircle(cx, 150, 8, dc); else drawCircle(cx, 150, 8, rgb565(90,100,130)); }
-  uint32_t t = millis();
   for(int i = 0; i < 12; i++){
     int x, y, w, h; lsuPinRect(i, x, y, w, h);
-    if(uiGlass) glassSheen(x, y, w, h, 16, t);
     if(i == lsuPress){ float p = (millis() - lsuPressMs) / 200.0f; if(p < 1) fillRoundRectA(x, y, w, h, 16, rgb565(255,255,255), (uint8_t)((1 - p) * 90)); else lsuPress = -1; }
   }
   present(120, 700);
@@ -9606,7 +9496,7 @@ static void lsuAnimPin(){                              // puntos dinamicos + des
 // ---- Teclado alfanumerico para contraseña (con offset para el slide) ----
 static void lsuDrawKb(int yoff){
   int ky = KB_Y + yoff;
-  if(uiGlass){ glDrawSpec = false; drawLiquidGlassPanel(0, ky - 4, SCR_W, SCR_H - (ky - 4), 0, rgb565(36,40,58), millis()); glDrawSpec = true; }
+  if(uiGlass){ drawLiquidGlassPanel(0, ky - 4, SCR_W, SCR_H - (ky - 4), 0, rgb565(36,40,58)); }
   else fillRect(0, ky - 4, SCR_W, SCR_H - (ky - 4), rgb565(18,20,28));
   for(int r = 0; r < KB_ROWS; r++) for(int c = 0; c < KB_COLS; c++){
     int x = KB_X + c * (KB_KW + KB_GAP), y = ky + r * (KB_KH + KB_GAP);
@@ -9641,7 +9531,7 @@ static void lsuEnter(){
 }
 static void lsuTick(){
   if(lsuMode == LSU_SEL){
-    lsuRenderSel();                                    // destello continuo
+    // El selector es ESTATICO (lo pinta lsuEnter): no hay nada que animar aqui.
     if(T.tap){
       if(T.x < 48 && T.y < 48){ lsuExit(); return; }
       int bw = SCR_W - 80, y1 = 220, bh = 120, y2 = y1 + bh + 30;
@@ -9906,7 +9796,7 @@ static void wifiRenderPass(int yoff){
   int cnt = utf8Count(wifiPass);
   for(int i = 0; i < cnt && i < 18; i++) fillCircle(30 + i * 24, 120, 7, rgb565(90,150,240));
   int ky = KB_Y + yoff;
-  if(uiGlass){ glDrawSpec = false; drawLiquidGlassPanel(0, ky - 4, SCR_W, SCR_H - (ky - 4), 0, rgb565(36,40,58), millis()); glDrawSpec = true; }
+  if(uiGlass){ drawLiquidGlassPanel(0, ky - 4, SCR_W, SCR_H - (ky - 4), 0, rgb565(36,40,58)); }
   else fillRect(0, ky - 4, SCR_W, SCR_H - (ky - 4), rgb565(18,20,28));
   for(int r = 0; r < KB_ROWS; r++) for(int c = 0; c < KB_COLS; c++){
     int x = KB_X + c * (KB_KW + KB_GAP), y = ky + r * (KB_KH + KB_GAP);
@@ -10065,9 +9955,8 @@ static void wifiTick(){
 // ##  ------------------------------------------------------
 // ##  FIX aplicado tras el bug de parpadeo + tarjetas pegadas:
 // ##  la isla ya NO compone sobre fb (el buffer que flxPresenter
-// ##  lee por DMA en otro core). Ahora sigue el mismo patron que
-// ##  animateHomeGlass(): restaura la banda limpia copiando desde
-// ##  homeBuf hacia bbuf, dibuja las tarjetas sobre bbuf, y cruza
+// ##  lee por DMA en otro core). Ahora restaura la banda limpia
+// ##  copiando desde homeBuf hacia bbuf, dibuja las tarjetas sobre bbuf, y cruza
 // ##  a fb con un unico present() atomico. bbuf es de un solo
 // ##  escritor (el loop task); nadie mas lo lee, asi que el
 // ##  presenter nunca puede capturar un frame a medio pintar.
@@ -10083,10 +9972,9 @@ static void wifiTick(){
 // ##  DESVIACION DELIBERADA respecto al plan original: el vidrio
 // ##  se RE-HORNEA cada frame (drawLiquidGlassPanel) en vez de
 // ##  "hornear una vez". Se hace asi solo porque son <=3 tarjetas
-// ##  pequenas (448x64) y el coste es bajo; permite que el destello
-// ##  (glassSheen) y el deslizamiento reutilicen el mismo camino
-// ##  sin cachear un buffer por tarjeta. El blur costoso (pantalla
-// ##  completa) se sigue evitando.
+// ##  pequenas (448x64) y el coste es bajo; permite que el
+// ##  deslizamiento reutilice el mismo camino sin cachear un buffer
+// ##  por tarjeta. El blur costoso (pantalla completa) se sigue evitando.
 // #############################################################
 
 // Icono del modulo: reutiliza los iconos de app existentes (mapeo simple)
@@ -10107,8 +9995,8 @@ static void drawModuleIcon(ModuleType type, int x, int y, int S){
 
 // Restaura la banda limpia EN bbuf, copiando desde homeBuf (siempre al dia:
 // se recompone solo en cada cambio de minuto, al salir de edicion, etc.).
-// Mismo patron que animateHomeGlass(): homeBuf es la fuente, bbuf el lienzo
-// de trabajo. Ya no hace falta snapshot manual (notifSnapshotBg desaparece).
+// homeBuf es la fuente y bbuf el lienzo de trabajo. Ya no hace falta
+// snapshot manual (notifSnapshotBg desaparece).
 static void notifRestoreBg(){
   if(!homeBuf || !bbuf) return;
   memcpy(bbuf + (size_t)NOTIF_BAND_TOP * SCR_W, homeBuf + (size_t)NOTIF_BAND_TOP * SCR_W,
@@ -10153,14 +10041,10 @@ static void notifDrawTail(int cx, int topY, uint16_t col){
 static void notifDrawCard(Notification* n, int cardY){
   int x = NOTIF_MARGIN_X + (int)n->slideX;       // al deslizar a la izq, x se vuelve negativo
   int y = cardY, w = NOTIF_CARD_W, h = NOTIF_CARD_H;
-  uint32_t t = millis();
   notifDrawTail(x + w / 2, y, rgb565(90, 120, 200));   // primero: la tarjeta se dibuja justo debajo, sin solaparla
-  // Vidrio base (blur) + destello animado. drawLiquidGlassPanel recorta x<0
+  // Vidrio base (blur). drawLiquidGlassPanel recorta x<0
   // conservando el borde derecho -> el deslizamiento a la izquierda sale natural.
-  glDrawSpec = false;
-  drawLiquidGlassPanel(x, y, w, h, NOTIF_RAD, rgb565(40, 60, 130), t);
-  glDrawSpec = true;
-  glassSheen(x, y, w, h, NOTIF_RAD, t);
+  drawLiquidGlassPanel(x, y, w, h, NOTIF_RAD, rgb565(40, 60, 130));
   // Degradado extra estilo burbuja (mas claro arriba, mas oscuro abajo).
   // Fila a fila con glInset() -- igual que drawLiquidGlassPanel -- para no
   // salirse de las esquinas redondeadas (una fillRectA plana sí se saldría).
@@ -10342,9 +10226,7 @@ static void notifTick(){
   gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
 
   // Componer en bbuf (nadie mas lo lee): restaurar fondo limpio y dibujar las
-  // tarjetas encima. Mismo patron que animateHomeGlass(), con el que ademas
-  // hay exclusion mutua (uiTick no anima el vidrio del Home mientras la isla
-  // este activa) para que nadie mas presente esta banda -> sin parpadeo.
+  // tarjetas encima. Nadie mas presenta esta banda -> sin parpadeo.
   setBuf(bbuf);
   notifRestoreBg();
   for(int i = 0; i < gNotifCount; i++){
@@ -10539,21 +10421,18 @@ void setup(){
   gState = ST_SPLASH;
 }
 
-// Bucle de animacion continuo del vidrio (destello) — corre pase lo que pase,
-// no solo cuando hay un tap. Compone off-screen (anti-flicker) via cada render.
+// Bucle de animacion continuo de la UI — corre pase lo que pase, no solo
+// cuando hay un tap. Compone off-screen (anti-flicker) via cada render.
 static unsigned long uiAnimMs = 0;
 static void uiTick(){
-  // El sheen del Home y el ripple del icono son animaciones puramente TEMPORALES
-  // (su posicion es funcion de millis(), no un paso fijo por frame) y, tras el
-  // repintado parcial de animateHomeGlass/animateIconRipple, cuestan muy poco por
-  // frame. Por eso ESAS DOS rutas se refrescan a ~60 fps: el reflejo se ve
-  // claramente mas fluido con trayectoria IDENTICA. El resto (edicion, cortina,
-  // calculadora, ventanas) conserva su cadencia de ~26 fps -- algunas llevan
-  // pasos por-frame (p.ej. el resorte de iconos en Modo Edicion) y acelerarlas
-  // cambiaria su VELOCIDAD, no solo su suavidad; por eso no se tocan.
-  // El ripple SI puede ir a 60 fps: restaura exactamente la franja que dibuja, asi
-  // que es correcto por construccion y muy barato. El sheen del Home vuelve a su
-  // cadencia original porque repinta la banda completa (ver animateHomeGlass).
+  // El ripple del icono es una animacion puramente TEMPORAL (su posicion es
+  // funcion de millis(), no un paso fijo por frame) y, tras el repintado
+  // parcial de animateIconRipple, cuesta muy poco por frame. Por eso ESA ruta
+  // se refresca a ~60 fps: restaura exactamente la franja que dibuja, asi que
+  // es correcta por construccion y muy barata. El resto (edicion, cortina)
+  // conserva su cadencia de ~26 fps -- algunas llevan pasos por-frame (p.ej.
+  // el resorte de iconos en Modo Edicion) y acelerarlas cambiaria su
+  // VELOCIDAD, no solo su suavidad; por eso no se tocan.
   bool fastPath = (gState == ST_HOME && gRippleActive && !sbOwnsScreen()
                    && qsPanelY <= 0 && !editMode);
   unsigned long interval = fastPath ? 16 : 38;
@@ -10561,14 +10440,9 @@ static void uiTick(){
   uiAnimMs = millis();
   if(gState == ST_HOME){
     if(sbOwnsScreen()){}                         // Panel Edge activo: cede el control por completo (ver sbTick/sbRenderOverlay)
-    else if(qsPanelY > 0) qsRender();            // cortina visible: destello continuo (incluso durante el drag)
+    else if(qsPanelY > 0) qsRender();            // cortina visible: anima el destello de toque (incluso durante el drag)
     else if(editMode) edRender();               // jiggle continuo
-    else if(gRippleActive) animateIconRipple(); // destello del icono tocado (Vidrio), ~0.5s, tiene prioridad
-    else if(uiGlass && gNotifCount == 0 && !notifBandOn) animateHomeGlass();  // widgets + dock (cede la banda a la isla)
-  } else if(gState == ST_WINMGR){
-    if(uiGlass) wmRender();                      // sheen de las ventanas
-  } else if(gState == ST_APP && gAppId == IC_CALC && !sbOwnsScreen()){
-    calcAnimSheen();                             // reflejo de las teclas de la calculadora
+    else if(gRippleActive) animateIconRipple(); // destello del icono tocado (Vidrio), ~0.5s
   }
 }
 
