@@ -997,9 +997,12 @@ static void drawLiquidGlassPanelEx(int x, int y, int w, int h, int rad, uint16_t
     // izq. blanco fuerte, arriba-der. blanco tenue, abajo-izq. sombra tenue,
     // abajo-der. sombra fuerte) en vez de una franja horizontal identica en
     // ambos bordes. GLASS_CORNER_STRONG/WEAK promedian 130 (el valor de antes)
-    // para no cambiar el "peso" total del borde, solo redistribuirlo. Sigue
-    // siendo funcion de j nada mas: mismos 2 pixeles por fila de siempre.
-    const uint8_t GLASS_CORNER_STRONG = 172, GLASS_CORNER_WEAK = 88;
+    // para no cambiar el "peso" total del borde, solo redistribuirlo: el delta
+    // es de +-20% sobre ese 130. Sigue siendo funcion de j nada mas: mismos 2
+    // pixeles por fila de siempre. Si hay que retocar la intensidad, mover los
+    // dos valores de forma simetrica alrededor de 130 (STRONG = 130 + d,
+    // WEAK = 130 - d) para que el borde no gane ni pierda peso total.
+    const uint8_t GLASS_CORNER_STRONG = 156, GLASS_CORNER_WEAK = 104;
     bool topZone = (j < h / 2);
     uint8_t sL = topZone ? GLASS_CORNER_STRONG : GLASS_CORNER_WEAK;   // izquierda: blanco fuerte / sombra tenue
     uint8_t sR = topZone ? GLASS_CORNER_WEAK   : GLASS_CORNER_STRONG; // derecha: blanco tenue / sombra fuerte
