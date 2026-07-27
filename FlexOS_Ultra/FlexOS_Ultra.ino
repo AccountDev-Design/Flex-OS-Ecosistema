@@ -472,7 +472,6 @@ static uint16_t* fb      = NULL;
 static uint16_t* bbuf    = NULL;   // back buffer: se compone el frame aqui y se vuelca de una vez (anti-flicker)
 static uint16_t* lockBuf = NULL;
 static uint16_t* homeBuf = NULL;
-static uint16_t* appSnapBuf = NULL;   // instantanea de una App (ver seccion Panel Edge / Sidebar Dock)
 
 // Destino de dibujo actual (todas las primitivas escriben aqui)
 static uint16_t* gBuf = NULL;
@@ -481,15 +480,7 @@ static inline void setBuf(uint16_t* b){ gBuf = b; }
 static volatile bool gReady = false;
 // Banda de recorte vertical (para listas con scroll). Por defecto: toda la pantalla.
 static int gClipY0 = 0, gClipY1 = SCR_H - 1;
-static int gClipX0 = 0, gClipX1 = SCR_W - 1;   // recorte horizontal (viewport de ventanas)
-// Desplazamiento de dibujo: se SUMA a cada coordenada antes del recorte de
-// arriba. Por defecto (0,0) es un no-op total -- byte-identico al comportamiento
-// previo. Solo se pone distinto de (0,0) mientras se ejecuta enter()/tick() de
-// una app REAL alojada dentro de una ventana flotante (ver wmRunHostedApp() en
-// la seccion Window Manager): traduce las coordenadas nativas de la app
-// (pensadas para pantalla completa) al rectangulo real de su ventana. NO aplica
-// en modo landscape (gLand, Modo PC), que usa su propia rotacion (putPhys).
-static int gOffX = 0, gOffY = 0;
+static int gClipX0 = 0, gClipX1 = SCR_W - 1;   // recorte horizontal
 static volatile int  gDirtyY0 = 0x7FFF, gDirtyY1 = -1;
 static portMUX_TYPE  gMux = portMUX_INITIALIZER_UNLOCKED;
 // Handle del presenter. Sirve para DESPERTARLO en cuanto una banda queda lista,
@@ -518,39 +509,13 @@ static void flxFlush(int y0, int y1){
 static inline void flxFlushAll(){ flxFlush(0, SCR_H - 1); }
 // Vuelca la banda [y0,y1] del back buffer a fb de una sola pasada y la marca dirty.
 // Componer en bbuf y presentar asi evita que el presenter muestre cuadros a medias.
-// RECORTE DE VOLCADO PARA APPS ALOJADAS EN VENTANAS.
-// Las primitivas de dibujo respetan gClip*/gOff*, pero los VOLCADOS (memcpy de
-// buffer -> fb) copiaban FILAS COMPLETAS de borde a borde. Cuando una app corre
-// dentro de una ventana del Panel Edge, esas filas completas arrasaban todo lo
-// que hubiera a los lados: la barra de estado, el tirador y el propio Panel Edge
-// desaparecian, y la pantalla quedaba inservible. Con estas variables el volcado
-// se limita al rectangulo interior de la ventana activa. Fuera de una ventana
-// gWinBlit es false y el comportamiento es EXACTAMENTE el de siempre (memcpy de
-// filas completas, misma velocidad, sin coste extra).
-static bool gWinBlit = false;
-static int  gWinBX0 = 0, gWinBX1 = SCR_W - 1, gWinBY0 = 0, gWinBY1 = SCR_H - 1;
-
-// Copia la banda [y0,y1] de src a fb. Sin ventana activa: una sola pasada por
-// fila completa (ruta rapida original). Con ventana activa: solo las columnas
-// del rectangulo interior, para no pisar el escritorio.
+// Copia la banda [y0,y1] de src a fb de una sola pasada por fila completa.
 static void fbCopyBand(const uint16_t* src, int y0, int y1){
   if(!src) return;
   if(y0 < 0) y0 = 0;
   if(y1 >= SCR_H) y1 = SCR_H - 1;
-  if(!gWinBlit){
-    if(y0 > y1) return;
-    memcpy(fb + (size_t)y0 * SCR_W, src + (size_t)y0 * SCR_W, (size_t)(y1 - y0 + 1) * SCR_W * 2);
-    return;
-  }
-  if(y0 < gWinBY0) y0 = gWinBY0;
-  if(y1 > gWinBY1) y1 = gWinBY1;
   if(y0 > y1) return;
-  int x0 = gWinBX0 < 0 ? 0 : gWinBX0;
-  int x1 = gWinBX1 >= SCR_W ? SCR_W - 1 : gWinBX1;
-  if(x0 > x1) return;
-  const size_t bytes = (size_t)(x1 - x0 + 1) * 2;
-  for(int j = y0; j <= y1; j++)
-    memcpy(fb + (size_t)j * SCR_W + x0, src + (size_t)j * SCR_W + x0, bytes);
+  memcpy(fb + (size_t)y0 * SCR_W, src + (size_t)y0 * SCR_W, (size_t)(y1 - y0 + 1) * SCR_W * 2);
 }
 
 static void present(int y0, int y1){
@@ -602,8 +567,7 @@ static bool flxGfxInit(){
   bbuf    = (uint16_t*)heap_caps_aligned_alloc(64, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   lockBuf = (uint16_t*)heap_caps_aligned_alloc(64, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   homeBuf = (uint16_t*)heap_caps_aligned_alloc(64, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  appSnapBuf = (uint16_t*)heap_caps_aligned_alloc(64, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if(!fb || !bbuf || !lockBuf || !homeBuf || !appSnapBuf){
+  if(!fb || !bbuf || !lockBuf || !homeBuf){
     Serial.println(F("[GFX] ERROR: sin PSRAM para framebuffers"));
     return false;
   }
@@ -675,7 +639,6 @@ static inline void putPhysA(int lx, int ly, uint16_t c, uint8_t a){
 }
 static inline void px(int x, int y, uint16_t c){
   if(gLand){ putPhys(x, y, c); return; }
-  x += gOffX; y += gOffY;
   if((unsigned)x >= SCR_W || (unsigned)y >= SCR_H) return;
   if(y < gClipY0 || y > gClipY1 || x < gClipX0 || x > gClipX1) return;
   gBuf[(size_t)y * SCR_W + x] = c;
@@ -683,7 +646,6 @@ static inline void px(int x, int y, uint16_t c){
 // pixel con alpha (0..255) sobre lo que ya hay en gBuf
 static inline void pxA(int x, int y, uint16_t c, uint8_t a){
   if(gLand){ putPhysA(x, y, c, a); return; }
-  x += gOffX; y += gOffY;
   if((unsigned)x >= SCR_W || (unsigned)y >= SCR_H) return;
   if(y < gClipY0 || y > gClipY1 || x < gClipX0 || x > gClipX1) return;
   if(a >= 255){ gBuf[(size_t)y * SCR_W + x] = c; return; }
@@ -694,7 +656,6 @@ static inline void pxA(int x, int y, uint16_t c, uint8_t a){
 static void hLine(int x, int y, int w, uint16_t c){
   if(w <= 0) return;
   if(gLand){ for(int i = 0; i < w; i++) putPhys(x + i, y, c); return; }
-  x += gOffX; y += gOffY;
   if((unsigned)y >= SCR_H) return;
   if(y < gClipY0 || y > gClipY1) return;
   if(x < 0){ w += x; x = 0; }
@@ -714,7 +675,6 @@ static void hLineA(int x, int y, int w, uint16_t c, uint8_t a){
   if(a >= 255){ hLine(x, y, w, c); return; }
   if(a == 0 || w <= 0) return;
   if(gLand){ for(int i = 0; i < w; i++) pxA(x + i, y, c, a); return; }   // landscape: ruta original
-  x += gOffX; y += gOffY;
   if((unsigned)y >= SCR_H) return;
   if(y < gClipY0 || y > gClipY1) return;
   if(x < 0){ w += x; x = 0; }
@@ -728,7 +688,6 @@ static void hLineA(int x, int y, int w, uint16_t c, uint8_t a){
 static void vLine(int x, int y, int h, uint16_t c){
   if(h <= 0) return;
   if(gLand){ for(int i = 0; i < h; i++) putPhys(x, y + i, c); return; }
-  x += gOffX; y += gOffY;
   if((unsigned)x >= SCR_W || x < gClipX0 || x > gClipX1) return;   // recorte horizontal
   if(y < 0){ h += y; y = 0; }
   if(y < gClipY0){ h -= (gClipY0 - y); y = gClipY0; }
@@ -3485,12 +3444,6 @@ static void renderLock(); static void showLock();
 static void renderHome(); static void showHome(); static bool hitHomeIcon(int px, int py, int &id);
 static void enterHome();  static void enterApp(int id); static void appTick();
 static void swPushAndCapture(uint8_t id); static void activarMultitarea(); static void swTick();  // App Switcher
-static void wmEnter(); static void wmTick(); static bool wmTouchWindows();  // WindowManager
-static void wmTickHostedApps(); static void wmRunHostedApp(int idx, bool isEnter); static bool wmCloseIfHosted();  // Apps reales alojadas en ventanas
-static bool sbTick(); static void sbDrawTabHandle(); static bool sbOwnsScreen(); static void sbDrawTabOnApp();  // Panel Edge (Sidebar Dock)
-static void sbRenderOverlay(); static void sbPinnedLoad();                                                 // Panel Edge: composicion + carga de la lista anclada
-static void sbDrawMinBubbles(); static bool sbHitMinBubble(int px, int py, int &idx);                       // burbujas de ventana minimizada
-static void wmClampWin(int idx); static int wmCtrlCX(int wx, int ww, int i); static void wmCtrlAction(int idx, int b);  // barra de control de ventana (Imagen A)
 static void lsuEnter(); static void lsuTick();             // Seguridad -> Bloqueo (PIN/Contraseña)
 static void lsuStartVerify();                              // pedir PIN/contraseña al desbloquear
 static void composeUnlock(int off); static void animateTo(int from, int to);
@@ -3498,7 +3451,7 @@ static void lockTick(); static void homeTick();
 static bool handleiOSGestures();                          // gestos de la barra inferior (modo iOS)
 
 // ---- Estado global ----
-enum { ST_SPLASH = 0, ST_OOBE_LANG, ST_OOBE_NAME, ST_LOCK, ST_HOME, ST_APP, ST_SWITCHER, ST_WINMGR, ST_LOCKSETUP, ST_WIFI };
+enum { ST_SPLASH = 0, ST_OOBE_LANG, ST_OOBE_NAME, ST_LOCK, ST_HOME, ST_APP, ST_SWITCHER, ST_LOCKSETUP, ST_WIFI };
 static int  gState = ST_SPLASH;
 static unsigned long splashStart = 0;
 static int  lockOff = 0, lastLockOff = -1;
@@ -3520,7 +3473,7 @@ static bool qsDirty    = true;     // qsBuf debe recomponerse
 static int  keyN = 0;
 static int  kX[48], kY[48], kW[48], kH[48], kCode[48];
 
-static void blitToFb(uint16_t* src){ fbCopyBand(src, 0, SCR_H - 1); }  // respeta el recorte de ventana (ver fbCopyBand)
+static void blitToFb(uint16_t* src){ fbCopyBand(src, 0, SCR_H - 1); }
 
 // ---------------- Banda forense de arranque ----------------
 static const char* resetReasonStr(){
@@ -3868,7 +3821,6 @@ static void renderHome(){
   } else {
     drawHomeIndicator(SCR_H, 220);                                        // barra de gestos
   }
-  sbDrawTabHandle();                    // tirador del Panel Edge (horneado en homeBuf, ver seccion Sidebar Dock)
   setBuf(fb);
 }
 static void showHome(){ blitToFb(homeBuf); flxFlushAll(); }
@@ -4085,14 +4037,9 @@ static void animateIconRipple(){
   } else {
     gRippleActive = false;                                // termino: este frame sale limpio (sin circulo)
   }
-  sbDrawTabHandle();          // el ripple (circulo desde un icono de la col. izq.)
-                              // puede alcanzar la franja del tirador: re-estamparlo
-                              // lo mantiene por encima. Si su franja no cae dentro
-                              // del volcado, no se presenta -> el tirador queda intacto.
   present(y0, y1);
 }
 static void homeTick(){
-  if(sbTick()) return;                 // Panel Edge (arrastre activo / panel abierto / ventanas flotantes)
   if(editMode){ edTick(); return; }
   if(gNavMode == 1 && handleiOSGestures()) return;   // gestos iOS antes que los toques normales
   // destello Liquid Glass al posar el dedo sobre un icono (solo estilo "Vidrio")
@@ -4129,8 +4076,6 @@ static void homeTick(){
 typedef struct { void (*enter)(); void (*tick)(); uint8_t flags; } FlexApp;
 #define APP_CUSTOM_HEADER 1   // la app pinta su propia cabecera (no la centrada)
 #define APP_OWN_TOUCH     2   // la app gestiona TODOS sus toques (solo swipe-derecha cierra)
-#define APP_NO_WINDOW     4   // NO se puede alojar en una ventana flotante/Split Screen (ver sbOpenFloating/sbTick):
-                               // exige pantalla completa (cambia gLand o gState internamente -- Modo PC, Ajustes/Wi-Fi)
 static void settingsEnter(); static void settingsTick();   // Ajustes (M3), abajo
 static void wifiSettingsEnter(); static void wifiTick();    // Ajustes -> Red e Internet -> Wi-Fi, abajo
 static void calcEnter(); static void calcTick();           // Calculadora (M2), abajo
@@ -4215,7 +4160,7 @@ static FlexApp APP_REG[16] = {
   { galEnter, NULL, 0 },                           // 1  Galeria (REAL, M2)
   { vidEnter, vidTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH },  // 2  Multimedia (esqueleto)
   { almEnter, NULL, 0 },                           // 3  Almacenamiento (REAL)
-  { pcEnter, pcTick, APP_CUSTOM_HEADER | APP_NO_WINDOW },  // 4  Modo PC (REAL, M4) -- usa render landscape (gLand): incompatible con ventana
+  { pcEnter, pcTick, APP_CUSTOM_HEADER },                  // 4  Modo PC (REAL, M4) -- usa render landscape (gLand)
   { noteEnter, noteTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH },// 5  Notas + teclado (REAL)
   { eduEnter, NULL, 0 },                           // 6  Educacion (REAL)
   { navEnter, NULL, 0 },                           // 7  Navegador (REAL)
@@ -4223,7 +4168,7 @@ static FlexApp APP_REG[16] = {
   { bienEnter, bienTick, 0 },                      // 9  Bienestar (REAL, M2)
   { paintEnter, paintTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH },// 10 Paint (REAL)
   { geoEnter, geoTick, APP_OWN_TOUCH | APP_CUSTOM_HEADER }, // 11 Juegos (Geo Dash, REAL)
-  { settingsEnter, settingsTick, APP_CUSTOM_HEADER | APP_NO_WINDOW },// 12 Ajustes (REAL, M3) -- Wi-Fi/PIN cambian gState a pantalla completa: incompatible con ventana
+  { settingsEnter, settingsTick, APP_CUSTOM_HEADER },      // 12 Ajustes (REAL, M3) -- Wi-Fi/PIN cambian gState a pantalla completa
   { calcEnter, calcTick, 0 },                      // 13 Calculadora (REAL, M2)
   { calEnter, calTick, 0 },                        // 14 Calendario (REAL, M2)
   { camEnter, camTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH },  // 15 Camara (esqueleto)
@@ -4259,12 +4204,6 @@ static void winRevealAnim(int id, bool opening){
 }
 
 static void appClose(){
-  // Si esto se disparo desde el boton "atras" propio de una app alojada DENTRO
-  // de una ventana flotante/Split Screen (ver wmRunHostedApp), NO se debe cerrar
-  // la app a pantalla completa (que ni siquiera es la que esta en la ventana) --
-  // se cierra unicamente esa ventana, y ya. wmCloseIfHosted() vive en la seccion
-  // Window Manager (usa wmHostedWin, wmRemove()); un solo punto de verdad.
-  if(wmCloseIfHosted()) return;
   swPushAndCapture(gAppId);        // guarda miniatura para el App Switcher
   // winRevealAnim compone la animacion SOBRE homeBuf: si Ajustes lo dejo sucio,
   // hay que recomponerlo ANTES, o la animacion de cierre encoge hacia el
@@ -4284,8 +4223,7 @@ static void enterApp(int id){
   flxFlushAll();
 }
 static void appTick(){
-  if(gLand){ if(APP_REG[gAppId].tick) APP_REG[gAppId].tick(); return; }  // Modo PC: gestiona todo, el Panel Edge no aplica aqui
-  if(sbTick()) return;                               // Panel Edge: misma prioridad que en homeTick()
+  if(gLand){ if(APP_REG[gAppId].tick) APP_REG[gAppId].tick(); return; }  // Modo PC: gestiona todo por su cuenta
   if(gNavMode == 1 && handleiOSGestures()) return;   // gestos iOS: swipe-arriba -> Home/multitarea
   // Cierre universal: tocar "atras" (nav; y cabecera en apps normales). Gesto swipe-to-close eliminado.
   bool back = false;  // antes: T.swipeRight -> deshabilitado a peticion, ya no cierra la app
@@ -4296,7 +4234,6 @@ static void appTick(){
   }
   if(back){ appClose(); return; }
   if(APP_REG[gAppId].tick) APP_REG[gAppId].tick();
-  sbDrawTabOnApp();   // reafirma el tirador sobre fb (las Apps no tienen un homeBuf donde hornearlo una vez)
 }
 
 static void enterHome(){
@@ -4806,11 +4743,11 @@ static void calcRender(){                              // compone la base de tec
     drawTextC(x + bw / 2, y + bh / 2 - (fs == 4 ? 15 : 11), tl, fs, rgb565(248,248,252));
   }
   setBuf(fb);
-  fbCopyBand(lockBuf, WIN_TOP, WIN_BOT - 1);   // antes: memcpy de filas COMPLETAS -> dentro de una ventana borraba el escritorio
+  fbCopyBand(lockBuf, WIN_TOP, WIN_BOT - 1);   // solo la banda de la app (no filas de borde a borde)
   flxFlush(WIN_TOP, WIN_BOT);
 }
 static void calcRenderDisplay(){                       // solo el display (al teclear) -> responsivo
-  // Mismo bug que tenia sbDrawTabOnApp(): dos dibujos SEPARADOS directo en
+  // Dos dibujos SEPARADOS directo en
   // fb (fillRoundRect + drawTextR) antes de un solo flxFlush. Como esta
   // funcion se llama en CADA tecla tocada, era el candidato mas probable
   // para el "parpadeo al hacer algo en una app" -- se nota mucho mas que
@@ -4820,7 +4757,7 @@ static void calcRenderDisplay(){                       // solo el display (al te
   setBuf(lockBuf);
   fillRoundRect(16, WIN_TOP + 8, SCR_W - 32, 92, 14, rgb565(28,31,40));
   drawTextR(SCR_W - 34, WIN_TOP + 44, calcDisp, 5, rgb565(255,255,255));
-  fbCopyBand(lockBuf, y0, y1);                 // idem: recortado a la ventana si la app esta alojada
+  fbCopyBand(lockBuf, y0, y1);                 // idem: solo la banda que cambia
   setBuf(fb);
   flxFlush(y0, y1);
 }
@@ -5035,18 +4972,18 @@ static void pcTick(){
 
 // #############################################################
 // ##  PANEL RAPIDO (cortina deslizable estilo Android/iOS)
-// ##  Arrastre desde el borde superior + glassmorphism + 7 controles.
+// ##  Arrastre desde el borde superior + glassmorphism + 4 controles.
 // #############################################################
 static int  qsPanelY = 0;        // 0 = oculto, SCR_H = abierto del todo
 static bool qsDragging = false;
 static bool qsPower = false;             // Ahorro Ultra -- el UNICO bool de estado que hacia falta (Wi-Fi/BT se quitaron: no tenian radio real detras, ver resumen de cambios)
-static int  qsFlashIdx = -1;             // control con destello de toque activo (-1 = ninguno). Usa el mismo indice que qsTileIcon: 2=Ventanas, 3=Modo PC, 4=Ahorro Ultra, 5=Ajustes
+static int  qsFlashIdx = -1;             // control con destello de toque activo (-1 = ninguno). Usa el mismo indice que qsTileIcon: 3=Modo PC, 4=Ahorro Ultra, 5=Ajustes
 static unsigned long qsFlashMs = 0;      // millis() del toque que disparo el destello
 #define QS_FLASH_DUR_MS 220              // duracion del destello de feedback al tocar
 
 // Geometria centralizada del panel rapido, estilo Control Center de iOS.
-// A PROPOSITO solo hay 5 controles -- son los UNICOS respaldados por una
-// funcion real en este archivo (ver qsApplyPower/wmEnter/enterApp/setBacklight
+// A PROPOSITO solo hay 4 controles -- son los UNICOS respaldados por una
+// funcion real en este archivo (ver qsApplyPower/enterApp/setBacklight
 // mas abajo). No se incluyen Wi-Fi, Bluetooth ni bateria (%) porque ese
 // codigo no controla ningun radio real ni lee ningun sensor real todavia.
 #define QS_CAP_X 24                      // capsula vertical de Brillo (PWM real)
@@ -5054,10 +4991,15 @@ static unsigned long qsFlashMs = 0;      // millis() del toque que disparo el de
 #define QS_CAP_W 140
 #define QS_CAP_H 330
 #define QS_CAP_R (QS_CAP_W / 2)
-#define QS_CIRC_D 90                     // columna de circulos: Ventanas / Modo PC / Ajustes
+#define QS_CIRC_D 90                     // columna de circulos: Modo PC / Ajustes
 #define QS_CIRC_R (QS_CIRC_D / 2)
 #define QS_CIRC_CX (QS_CAP_X + QS_CAP_W + 18 + (SCR_W - 24 - (QS_CAP_X + QS_CAP_W + 18)) / 2)
-#define QS_CIRC_CY(i) (QS_CAP_Y + QS_CIRC_R + (i) * 120)
+// Los dos circulos se centran VERTICALMENTE contra la capsula de Brillo (que
+// va de QS_CAP_Y a QS_CAP_Y+QS_CAP_H): con la columna de 3 de antes bastaba
+// con apilarlos desde arriba, pero con 2 eso dejaba un hueco muerto abajo.
+#define QS_CIRC_N 2
+#define QS_CIRC_GAP 120
+#define QS_CIRC_CY(i) (QS_CAP_Y + QS_CAP_H / 2 - ((QS_CIRC_N - 1) * QS_CIRC_GAP) / 2 + (i) * QS_CIRC_GAP)
 #define QS_PILL_X 24                     // pastilla Ahorro Ultra (cambia la frecuencia real de la CPU)
 #define QS_PILL_Y (QS_CAP_Y + QS_CAP_H + 18)
 #define QS_PILL_W (SCR_W - 48)
@@ -5066,9 +5008,6 @@ static unsigned long qsFlashMs = 0;      // millis() del toque que disparo el de
 
 static void qsTileIcon(int idx, int cx, int cy, uint16_t col){
   switch(idx){
-    case 2:                                                      // Ventanas (dos ventanas)
-      drawRoundRect(cx - 12, cy - 10, 16, 13, 2, col);
-      fillRoundRect(cx - 2, cy - 2, 15, 13, 2, col); break;
     case 3:                                                      // Modo PC (monitor)
       drawRoundRect(cx - 14, cy - 11, 28, 20, 3, col);
       fillRect(cx - 4, cy + 9, 8, 4, col); fillRect(cx - 10, cy + 13, 20, 3, col); break;
@@ -5079,7 +5018,7 @@ static void qsTileIcon(int idx, int cx, int cy, uint16_t col){
     case 5: drawSetCatIcon(0, cx - 14, cy - 14, 28, col); break; // Ajustes (engranaje)
   }
 }
-// Boton circular de accion (Ventanas / Modo PC / Ajustes). idx usa la misma
+// Boton circular de accion (Modo PC / Ajustes). idx usa la misma
 // numeracion que qsTileIcon. rad = d/2 en un cuadro d x d = circulo perfecto
 // (mismo truco que usan los iconos redondos en el resto del sistema).
 static void qsCircleBtn(int idx, int cx, int cy){
@@ -5089,7 +5028,7 @@ static void qsCircleBtn(int idx, int cx, int cy){
   else fillRoundRect(x, y, d, d, d / 2, rgb565(38,42,56));
   drawRoundRect(x, y, d, d, d / 2, rgb565(90,98,120));                     // borde sutil
   qsTileIcon(idx, cx, cy - 10, rgb565(220,224,236));
-  const char* lab = idx == 2 ? "Ventanas" : idx == 3 ? "Modo PC" : "Ajustes";
+  const char* lab = idx == 3 ? "Modo PC" : "Ajustes";
   drawTextC(cx, cy + 20, lab, 1, rgb565(190,196,212));
 }
 // Pastilla ancha de toggle (Ahorro Ultra -- el unico toggle real que queda).
@@ -5115,10 +5054,9 @@ static void qsDrawContent(){
   if(uiGlass) drawLiquidGlassPanel(QS_CAP_X, QS_CAP_Y, QS_CAP_W, QS_CAP_H, QS_CAP_R, rgb565(40,46,64));
   else fillRoundRect(QS_CAP_X, QS_CAP_Y, QS_CAP_W, QS_CAP_H, QS_CAP_R, rgb565(32,36,50));
   drawRoundRect(QS_CAP_X, QS_CAP_Y, QS_CAP_W, QS_CAP_H, QS_CAP_R, rgb565(80,86,106));
-  // Ventanas / Modo PC / Ajustes: columna de 3 circulos (acciones reales)
-  qsCircleBtn(2, QS_CIRC_CX, QS_CIRC_CY(0));
-  qsCircleBtn(3, QS_CIRC_CX, QS_CIRC_CY(1));
-  qsCircleBtn(5, QS_CIRC_CX, QS_CIRC_CY(2));
+  // Modo PC / Ajustes: columna de 2 circulos (acciones reales)
+  qsCircleBtn(3, QS_CIRC_CX, QS_CIRC_CY(0));
+  qsCircleBtn(5, QS_CIRC_CX, QS_CIRC_CY(1));
   // Ahorro Ultra: pastilla ancha (toggle real, cambia la frecuencia de la CPU)
   qsTogglePill(QS_PILL_X, QS_PILL_Y, QS_PILL_W, QS_PILL_H, qsPower);
 }
@@ -5161,7 +5099,7 @@ static void qsRender(){
   // Recortando a py, ningun elemento de la cortina puede salirse de ella.
   const int oCY1 = gClipY1, oCY0 = gClipY0, oCX0 = gClipX0, oCX1 = gClipX1;
   gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = py - 1;
-  if(qsFlashIdx >= 0){                                               // destello de feedback al tocar (2=Ventanas,3=Modo PC,4=Ahorro Ultra,5=Ajustes)
+  if(qsFlashIdx >= 0){                                               // destello de feedback al tocar (3=Modo PC,4=Ahorro Ultra,5=Ajustes)
     uint32_t e = t - qsFlashMs;
     if(e < QS_FLASH_DUR_MS){
       float p = 1.0f - (float)e / QS_FLASH_DUR_MS;                    // se desvanece
@@ -5169,7 +5107,7 @@ static void qsRender(){
       if(qsFlashIdx == 4){
         if(QS_PILL_Y < py) fillRoundRectA(QS_PILL_X, QS_PILL_Y, QS_PILL_W, QS_PILL_H, QS_PILL_R, rgb565(255,255,255), a);
       } else {
-        int ci = qsFlashIdx == 5 ? 2 : qsFlashIdx - 2;                 // 2->0, 3->1, 5->2
+        int ci = qsFlashIdx == 5 ? 1 : 0;                              // 3->0, 5->1
         int cy = QS_CIRC_CY(ci);
         if(cy - QS_CIRC_R < py) fillRoundRectA(QS_CIRC_CX - QS_CIRC_R, cy - QS_CIRC_R, QS_CIRC_D, QS_CIRC_D, QS_CIRC_R, rgb565(255,255,255), a);
       }
@@ -5209,14 +5147,13 @@ static void qsAnimTo(int target){
 }
 static void qsApplyPower(){ setCpuFrequencyMhz(qsPower ? 160 : 360); }
 static bool qsTapTile(int px, int py){
-  const int idxOf[3] = { 2, 3, 5 };                     // Ventanas, Modo PC, Ajustes
-  for(int i = 0; i < 3; i++){
+  const int idxOf[QS_CIRC_N] = { 3, 5 };               // Modo PC, Ajustes
+  for(int i = 0; i < QS_CIRC_N; i++){
     int cy = QS_CIRC_CY(i), dx = px - QS_CIRC_CX, dy = py - cy;
     if(dx * dx + dy * dy <= QS_CIRC_R * QS_CIRC_R){     // hit-test circular real (no la caja cuadrada)
       qsFlashIdx = idxOf[i]; qsFlashMs = millis();       // destello de feedback al tocar (ver overlay en qsRender)
       switch(idxOf[i]){
-        case 2: qsPanelY = 0; wmEnter(); return true;                // abrir WindowManager
-        case 3: qsPanelY = 0; enterApp(IC_MODOPC); return true;      // -> framework de ventanas
+        case 3: qsPanelY = 0; enterApp(IC_MODOPC); return true;      // -> Modo PC
         case 5: qsPanelY = 0; enterApp(IC_AJUSTES); return true;     // -> Ajustes
       }
     }
@@ -5287,21 +5224,14 @@ static void vidDecodeFrame(uint16_t* buf, int f){
   }
 }
 static void vidBlit(){                 // vuelca el buffer FRONT al area de render
-  // Antes escribia en una posicion FIJA de pantalla (VID_RX/VID_RY) saltandose
-  // gOff*/gClip*: alojado en una ventana del Panel Edge, el video se pintaba
-  // fuera de su ventana y arrasaba el escritorio. Ahora aplica el desplazamiento
-  // de la ventana y recorta a su rectangulo interior. Sin ventana, gOff* son 0 y
-  // el recorte es la pantalla entera -> comportamiento identico al original.
-  const int cx0 = gWinBlit ? (gWinBX0 < 0 ? 0 : gWinBX0) : 0;
-  const int cx1 = gWinBlit ? (gWinBX1 >= SCR_W ? SCR_W - 1 : gWinBX1) : SCR_W - 1;
-  const int cy0 = gWinBlit ? (gWinBY0 < 0 ? 0 : gWinBY0) : 0;
-  const int cy1 = gWinBlit ? (gWinBY1 >= SCR_H ? SCR_H - 1 : gWinBY1) : SCR_H - 1;
+  const int cx0 = 0, cx1 = SCR_W - 1;
+  const int cy0 = 0, cy1 = SCR_H - 1;
   int drawn0 = SCR_H, drawn1 = -1;
   for(int y = 0; y < VID_H; y++){
-    const int dy = VID_RY + y + gOffY;
+    const int dy = VID_RY + y;
     if(dy < cy0 || dy > cy1) continue;
     const uint16_t* srcRow = vidFront + (size_t)y * VID_W;
-    int x0 = VID_RX + gOffX, x1 = x0 + VID_W - 1;
+    int x0 = VID_RX, x1 = x0 + VID_W - 1;
     if(x0 < cx0){ srcRow += (size_t)(cx0 - x0); x0 = cx0; }   // recorta por la izquierda (avanza el origen)
     if(x1 > cx1) x1 = cx1;                                     // recorta por la derecha
     if(x0 > x1) continue;
@@ -5889,8 +5819,8 @@ static void eduEnter(){ const char* it[4] = { "Electr\xC3\xB3nica b\xC3\xA1sica"
 // ##  ORIENTACION HORIZONTAL: se dibuja rotado 90 sobre el panel
 // ##  portrait usando el modo landscape ya existente (gLand). El
 // ##  lienzo LOGICO es 800x480 (LW x LH). Igual que el Modo PC, la
-// ##  app pone gLand=true y es la unica que gestiona la pantalla
-// ##  (el Panel Edge no aplica); al salir se restaura gLand=false.
+// ##  app pone gLand=true y es la unica que gestiona la pantalla;
+// ##  al salir se restaura gLand=false.
 // ##
 // ##  Patron: APP_OWN_TOUCH | APP_CUSTOM_HEADER -- posee TODA la
 // ##  pantalla y TODOS los toques, compone en bbuf y vuelca con
@@ -8277,1119 +8207,6 @@ static void swTick(){
 }
 
 // #############################################################
-// ##  WINDOW MANAGER (portrait 480x800): ventanas flotantes
-// ##  redimensionables + split-screen 2/4 + z-order + recorte
-// ##  de viewport. Respeta la barra de navegacion (Y >= 750).
-// #############################################################
-struct WindowInstance {
-  uint8_t appID; int x, y, w, h; bool isFloating; uint8_t zIndex; bool isFocused; bool used;
-  bool minimized;   // Panel Edge / barra de control: ventana colapsada a una burbuja
-                    // flotante en el borde (ver sbDrawMinBubbles/sbHitMinBubble). No se
-                    // dibuja ni ejecuta su tick mientras esta minimizada; tap en la burbuja restaura.
-};
-#define WM_MAX   4
-#define WM_TOOLB 46          // barra de herramientas superior
-#define WM_NAV   750         // area util termina aqui (Y >= 750 reservado)
-static WindowInstance wmWins[WM_MAX];
-static int wmCount = 0, wmMode = 0, wmDrag = -1, wmAction = 0, wmDX = 0, wmDY = 0;
-static uint8_t wmZTop = 0;
-static int8_t wmNeedContent = -1;  // ventana cuyo contenido hay que repintar tras mover/redimensionar (ver wmTouchWindows)
-static int8_t wmHostedWin = -1;   // indice en wmWins[] cuya app real se esta ejecutando AHORA MISMO (ver wmRunHostedApp); -1 = ninguna
-static const uint8_t WM_APPS[4] = { 5, 13, 1, 14 };   // Notas, Calculadora, Galeria, Calendario
-
-static void wmFocus(int idx){
-  if(idx < 0 || idx >= wmCount) return;
-  wmWins[idx].zIndex = ++wmZTop;
-  for(int i = 0; i < wmCount; i++) wmWins[i].isFocused = (i == idx);
-}
-static int wmAdd(uint8_t appID){
-  if(wmCount >= WM_MAX) return -1;
-  int n = wmCount;
-  wmWins[n].appID = appID; wmWins[n].isFloating = true; wmWins[n].used = true; wmWins[n].minimized = false;
-  wmWins[n].x = 22 + n * 26; wmWins[n].y = 66 + n * 26; wmWins[n].w = 300; wmWins[n].h = 360;
-  wmWins[n].zIndex = ++wmZTop;
-  wmCount++; wmMode = 0;
-  wmFocus(n);
-  return n;
-}
-static void wmRemove(int idx){
-  if(idx < 0 || idx >= wmCount) return;
-  for(int i = idx; i < wmCount - 1; i++) wmWins[i] = wmWins[i + 1];
-  wmCount--;
-}
-static int wmTopAt(int px, int py){                   // ventana superior (mayor z) bajo el punto
-  int best = -1, bz = -1;
-  for(int i = 0; i < wmCount; i++){ WindowInstance& w = wmWins[i];
-    if(w.minimized) continue;                        // minimizada: no captura toques (pasan a la burbuja)
-    if(px >= w.x && px < w.x + w.w && py >= w.y && py < w.y + w.h && w.zIndex > bz){ bz = w.zIndex; best = i; }
-  }
-  return best;
-}
-// Divide el area util (480 x 704) en 2 (lado a lado) o 4 (cuadrantes)
-static void setWindowLayout(int mode){
-  wmMode = mode;
-  int uh = WM_NAV - WM_TOOLB;
-  if(mode == 2){
-    if(wmCount >= 1){ wmWins[0].x = 0;   wmWins[0].y = WM_TOOLB; wmWins[0].w = 240; wmWins[0].h = uh; wmWins[0].isFloating = false; }
-    if(wmCount >= 2){ wmWins[1].x = 240; wmWins[1].y = WM_TOOLB; wmWins[1].w = 240; wmWins[1].h = uh; wmWins[1].isFloating = false; }
-  } else if(mode == 4){
-    int hh = uh / 2, px[4] = { 0, 240, 0, 240 }, py[4] = { WM_TOOLB, WM_TOOLB, WM_TOOLB + hh, WM_TOOLB + hh };
-    for(int i = 0; i < wmCount && i < 4; i++){ wmWins[i].x = px[i]; wmWins[i].y = py[i]; wmWins[i].w = 240; wmWins[i].h = hh; wmWins[i].isFloating = false; }
-  }
-}
-// Centro X del boton `i` (0..4, de izquierda a derecha) de la barra de control de
-// una ventana de ancho `ww` cuyo borde izquierdo esta en `wx`. Fuente unica: la
-// usan TANTO wmDrawWindow() (dibujar) como wmTouchWindows() (hit-test), para que
-// el boton que se ve y el que responde al toque nunca se desincronicen.
-static int wmCtrlCX(int wx, int ww, int i){
-  const int n = 5, bw = 24, gap = 4;
-  int totalW = n * bw + (n - 1) * gap;
-  int x0 = wx + ww - 8 - totalW;                  // barra pegada al borde derecho de la ventana
-  return x0 + i * (bw + gap) + bw / 2;
-}
-static void wmDrawWindow(int idx){
-  WindowInstance& w = wmWins[idx];
-  if(w.minimized) return;                                                         // minimizada: se dibuja como burbuja (sbDrawMinBubbles)
-  fillRoundRect(w.x + 3, w.y + 4, w.w, w.h, 12, rgb565(6,8,14));                 // sombra
-  if(uiGlass) pcGlassPanel(w.x, w.y, w.w, w.h, 12, rgb565(232,238,250));  // cuerpo (glass ligero, fluido)
-  else fillRoundRect(w.x, w.y, w.w, w.h, 12, rgb565(244,246,250));
-  uint16_t tb = w.isFocused ? rgb565(45,90,200) : rgb565(92,100,120);            // barra de titulo
-  fillRoundRect(w.x, w.y, w.w, 30, 12, tb); fillRect(w.x, w.y + 16, w.w, 14, tb);
-  drawText(w.x + 12, w.y + 7, appName(w.appID), 2, rgb565(255,255,255));
-  // Barra de control estilo Samsung (Imagen A), de izquierda a derecha:
-  // 0 restaurar (tamano por defecto) · 1 minimizar (burbuja) · 2 split ·
-  // 3 expandir (maximizar) · 4 cerrar. Glifos vectoriales sobre la barra de titulo.
-  uint16_t gcol = rgb565(255,255,255);
-  int cyb = w.y + 15;
-  int c0 = wmCtrlCX(w.x, w.w, 0);                                                 // restaurar: cuadro pequeno
-  drawRoundRect(c0 - 6, cyb - 6, 12, 12, 2, gcol);
-  int c1 = wmCtrlCX(w.x, w.w, 1);                                                 // minimizar: guion
-  fillRect(c1 - 7, cyb - 1, 14, 2, gcol);
-  int c2 = wmCtrlCX(w.x, w.w, 2);                                                 // split: dos rectangulos
-  drawRoundRect(c2 - 8, cyb - 6, 16, 12, 2, gcol);
-  strokeSegAA(c2, cyb - 6, c2, cyb + 6, 1.2f, gcol);
-  int c3 = wmCtrlCX(w.x, w.w, 3);                                                 // expandir: flechas diagonales
-  strokeSegAA(c3 - 6, cyb - 6, c3 + 6, cyb + 6, 1.6f, gcol);
-  strokeSegAA(c3 - 6, cyb - 6, c3 - 1, cyb - 6, 1.6f, gcol);
-  strokeSegAA(c3 - 6, cyb - 6, c3 - 6, cyb - 1, 1.6f, gcol);
-  strokeSegAA(c3 + 6, cyb + 6, c3 + 1, cyb + 6, 1.6f, gcol);
-  strokeSegAA(c3 + 6, cyb + 6, c3 + 6, cyb + 1, 1.6f, gcol);
-  int c4 = wmCtrlCX(w.x, w.w, 4);                                                 // cerrar: X
-  strokeSegAA(c4 - 6, cyb - 6, c4 + 6, cyb + 6, 1.8f, gcol);
-  strokeSegAA(c4 - 6, cyb + 6, c4 + 6, cyb - 6, 1.8f, gcol);
-  // El cuerpo (fillRoundRect/pcGlassPanel de arriba) YA cubre el area de contenido
-  // con un fondo neutro -- de eso vive hasta que la app real dibuje encima (ver
-  // wmRunHostedApp(), que corre en un paso APARTE, fuera de bbuf, justo despues de
-  // que esta funcion se compone y presenta via wmRender()/sbRenderOverlay()).
-  strokeSegAA(w.x + w.w - 16, w.y + w.h - 4, w.x + w.w - 4, w.y + w.h - 16, 1.6f, rgb565(120,126,140));  // asa de redimension
-  strokeSegAA(w.x + w.w - 10, w.y + w.h - 4, w.x + w.w - 4, w.y + w.h - 10, 1.6f, rgb565(120,126,140));
-}
-// Rectangulo INTERIOR de una ventana (fuente unica: antes vivia inline en
-// wmDrawWindow(), ahora tambien lo necesita wmRunHostedApp() para saber donde
-// recortar/desplazar el dibujo de la app alojada).
-static void wmContentRect(int idx, int &ix, int &iy, int &iw, int &ih){
-  ix = wmWins[idx].x + 6; iy = wmWins[idx].y + 34; iw = wmWins[idx].w - 12; ih = wmWins[idx].h - 40;
-}
-// Y "nativa" donde una app empieza a pintar su contenido si viviera a pantalla
-// completa: 0 para las de cabecera propia (APP_CUSTOM_HEADER, dueñas de toda la
-// pantalla), o WIN_TOP para las normales (bajo el marco/cabecera generica que
-// wmDrawWindow() ya reemplaza por la barra de titulo de la ventana).
-static int wmAppOriginY(uint8_t appID){
-  return (APP_REG[appID].flags & APP_CUSTOM_HEADER) ? 0 : WIN_TOP;
-}
-// Ejecuta enter() (isEnter=true, una vez al crear la ventana) o tick() (cada
-// vuelta de loop() mientras este abierta) de la app REAL alojada en wmWins[idx],
-// con gOffX/gOffY + gClip* limitados a su rectangulo interior -- la app dibuja
-// con sus coordenadas nativas de siempre (piensa que tiene toda la pantalla) y
-// aqui se traducen+recortan a su ventana. La app dibuja/parpadea-nunca via su
-// propio setBuf(fb)+flxFlush(), exactamente igual que a pantalla completa: no
-// pasa por bbuf, asi que NO hace falta sbRenderOverlay() para verla, solo para
-// mover/redimensionar/enfocar/cerrar (eso lo sigue haciendo wmTouchWindows()).
-// El toque global T se remapea a las coordenadas nativas de la app SOLO si esta
-// ventana es la dueña del gesto actual (wmDrag==idx && wmAction==0, ver
-// wmTouchWindows() mas abajo); en cualquier otro caso la app recibe un toque
-// neutro, para poder seguir animando (ej. reloj) sin interpretar toques ajenos
-// (otra ventana, el propio Panel Edge, etc.). Todo se restaura al salir, incluso
-// si la app cierra su propia ventana desde dentro (ver appClose()/wmCloseIfHosted).
-static void wmRunHostedApp(int idx, bool isEnter){
-  if(idx < 0 || idx >= wmCount) return;
-  uint8_t appID = wmWins[idx].appID;
-  if(APP_REG[appID].flags & APP_NO_WINDOW) return;              // salvaguarda (nunca deberia crearse una ventana con esta app)
-  void (*fn)() = isEnter ? APP_REG[appID].enter : APP_REG[appID].tick;
-  if(!fn) return;
-  int ix, iy, iw, ih; wmContentRect(idx, ix, iy, iw, ih);
-  if(iw <= 0 || ih <= 0) return;
-  int oX0 = gClipX0, oX1 = gClipX1, oY0 = gClipY0, oY1 = gClipY1, oOffX = gOffX, oOffY = gOffY;
-  gClipX0 = ix; gClipX1 = ix + iw - 1; gClipY0 = iy; gClipY1 = iy + ih - 1;
-  gOffX = ix; gOffY = iy - wmAppOriginY(appID);
-  // Ademas del recorte de DIBUJO (gClip*), activa el recorte de VOLCADO: las
-  // apps que se componen en un buffer y hacen memcpy a fb (Calculadora, Video,
-  // cualquier blitToFb/present) quedan confinadas a esta ventana y ya no borran
-  // la barra de estado ni el Panel Edge. Ver fbCopyBand().
-  bool oWB = gWinBlit; int oBX0 = gWinBX0, oBX1 = gWinBX1, oBY0 = gWinBY0, oBY1 = gWinBY1;
-  gWinBlit = true; gWinBX0 = ix; gWinBX1 = ix + iw - 1; gWinBY0 = iy; gWinBY1 = iy + ih - 1;
-  Touch realT = T;
-  bool ownsGesture = !isEnter && wmDrag == idx && wmAction == 0;
-  if(ownsGesture){ T.x -= gOffX; T.y -= gOffY; T.startX -= gOffX; T.startY -= gOffY; }  // dx/dy son deltas: no cambian
-  else {
-    T.down = false; T.pressed = false; T.released = false; T.tap = false; T.moved = false;
-    T.swipeUp = false; T.swipeDown = false; T.swipeLeft = false; T.swipeRight = false;
-  }
-  int8_t prevHost = wmHostedWin; wmHostedWin = (int8_t)idx;
-  int prevAppId = gAppId; gAppId = appID;              // por si algo interno de la app lo consulta (defensivo)
-  fn();
-  gAppId = prevAppId;
-  wmHostedWin = prevHost;
-  T = realT;
-  gClipX0 = oX0; gClipX1 = oX1; gClipY0 = oY0; gClipY1 = oY1; gOffX = oOffX; gOffY = oOffY;
-  gWinBlit = oWB; gWinBX0 = oBX0; gWinBX1 = oBX1; gWinBY0 = oBY0; gWinBY1 = oBY1;   // restaura SIEMPRE (aunque la app se cierre sola)
-}
-// Tick de TODAS las apps alojadas en ventanas abiertas -- se llama en cada
-// vuelta mientras wmCount>0 (igual que appTick() para una app a pantalla
-// completa); cada app decide sola cuando redibujar (su propio patron ya
-// probado, ej. "if(gMinChanged)"). Iteracion defensiva: si una app se cierra a
-// si misma (appClose() -> wmCloseIfHosted() -> wmRemove()) el arreglo se
-// compacta, asi que NO se avanza el indice ese ciclo (ver notifTick(), mismo
-// criterio ya usado en este archivo para arreglos que pueden mutar mientras se
-// recorren).
-// Repinta el contenido de la ventana marcada por wmTouchWindows() tras un
-// mover/redimensionar. Se llama SIEMPRE despues de recomponer el marco.
-static void wmFlushPendingContent(){
-  if(wmNeedContent < 0) return;
-  int idx = wmNeedContent; wmNeedContent = -1;
-  if(idx < wmCount) wmRunHostedApp(idx, true);   // enter() = repintado completo a la nueva geometria
-}
-static void wmTickHostedApps(){
-  for(int i = 0; i < wmCount; ){
-    if(wmWins[i].minimized){ i++; continue; }        // minimizada: su app no dibuja (viviria en coords viejas)
-    int before = wmCount;
-    wmRunHostedApp(i, false);
-    if(wmCount < before) continue;
-    i++;
-  }
-}
-// Si hay una app alojada ejecutandose ahora mismo (ver wmRunHostedApp), cierra
-// SOLO su ventana y devuelve true -- para que appClose() (pensado para apps a
-// pantalla completa) no actue quando lo dispara el boton "atras" interno de una
-// app que en realidad vive dentro de una ventana (Notas/Paint/Video/Camara/
-// GeoDash tienen su propio boton de "atras" que llama a appClose()).
-static bool wmCloseIfHosted(){
-  if(wmHostedWin < 0) return false;
-  int idx = wmHostedWin; wmHostedWin = -1;
-  wmRemove(idx);
-  return true;
-}
-static void wmRender(){
-  setBuf(bbuf);
-  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
-  for(int y = 0; y < SCR_H; y++) hLine(0, y, SCR_W, mix565(rgb565(18,26,48), rgb565(30,44,80), (uint8_t)(y * 255 / (SCR_H - 1))));
-  fillRect(0, 0, SCR_W, WM_TOOLB, rgb565(24,28,44));                             // barra de herramientas
-  drawText(12, 12, "Ventanas", 3, rgb565(240,244,252));
-  fillRoundRect(SCR_W - 212, 8, 44, 30, 8, rgb565(50,110,235)); drawTextC(SCR_W - 190, 12, "+", 3, rgb565(255,255,255));
-  fillRoundRect(SCR_W - 162, 8, 44, 30, 8, rgb565(56,62,86));   drawTextC(SCR_W - 140, 15, "2", 2, rgb565(240,244,252));
-  fillRoundRect(SCR_W - 112, 8, 44, 30, 8, rgb565(56,62,86));   drawTextC(SCR_W - 90, 15, "4", 2, rgb565(240,244,252));
-  fillRoundRect(SCR_W - 62, 8, 54, 30, 8, rgb565(180,60,60));   drawTextC(SCR_W - 35, 16, "Salir", 1, rgb565(255,255,255));
-  if(wmCount == 0) drawTextC(SCR_W / 2, SCR_H / 2, "Sin ventanas - pulsa +", 2, rgb565(180,188,205));
-  int order[WM_MAX]; for(int i = 0; i < wmCount; i++) order[i] = i;               // dibujar por z ascendente
-  for(int a = 0; a < wmCount; a++) for(int b = a + 1; b < wmCount; b++)
-    if(wmWins[order[b]].zIndex < wmWins[order[a]].zIndex){ int t = order[a]; order[a] = order[b]; order[b] = t; }
-  for(int i = 0; i < wmCount; i++) wmDrawWindow(order[i]);
-  sbDrawMinBubbles();                                                             // burbujas de ventanas minimizadas (fuente unica con el overlay)
-  present(0, SCR_H - 1);
-}
-static void wmEnter(){
-  gState = ST_WINMGR; wmCount = 0; wmZTop = 0; wmMode = 0; wmDrag = -1; wmAction = 0;
-  int i0 = wmAdd(WM_APPS[0]), i1 = wmAdd(WM_APPS[1]);
-  wmRender();                              // marco de ambas primero (bbuf/present)
-  if(i0 >= 0) wmRunHostedApp(i0, true);    // contenido real despues (fb/flxFlush propio de cada app)
-  if(i1 >= 0) wmRunHostedApp(i1, true);
-}
-static void wmExit(){ gState = ST_HOME; renderHome(); showHome(); }
-// Logica de toques SOBRE una ventana ya existente (enfocar, mover,
-// redimensionar, cerrar). Extraida de wmTick() para reutilizarla tambien
-// desde el overlay del Panel Edge sobre el Home (ver sbTick(), seccion
-// Sidebar Dock mas abajo) -- una sola fuente de verdad para el arrastre
-// de ventanas, en vez de duplicar esta logica en dos sitios. Devuelve
-// true si el toque fue consumido por una ventana (hace falta repintar).
-static bool wmTouchWindows(){
-  if(T.pressed){
-    // Burbuja de una ventana minimizada: restaurar. Se comprueba ANTES que wmTopAt
-    // (la ventana minimizada no captura toques) y en ambos contextos (Modo PC y
-    // overlay del Panel Edge). El repintado lo hace el llamante; aqui solo se marca
-    // la ventana para repintar su contenido tras recomponer el marco (wmNeedContent).
-    int bi;
-    if(sbHitMinBubble(T.x, T.y, bi)){ wmWins[bi].minimized = false; wmFocus(bi); wmNeedContent = (int8_t)bi; wmDrag = -1; return true; }
-    int idx = wmTopAt(T.x, T.y);
-    if(idx < 0){ wmDrag = -1; return false; }
-    bool wasFocused = wmWins[idx].isFocused;
-    wmFocus(idx);
-    WindowInstance& w = wmWins[idx];
-    if(T.y >= w.y && T.y < w.y + 30){                      // barra de titulo: primero los 5 botones de control
-      for(int b = 0; b < 5; b++){
-        if(abs(T.x - wmCtrlCX(w.x, w.w, b)) <= 13 && abs(T.y - (w.y + 15)) <= 15){ wmCtrlAction(idx, b); wmDrag = -1; return true; }
-      }
-    }
-    if(T.x >= w.x + w.w - 22 && T.y >= w.y + w.h - 22){ wmDrag = idx; wmAction = 2; return true; }                  // redimensionar
-    if(T.y < w.y + 30){ wmDrag = idx; wmAction = 1; wmDX = T.x - w.x; wmDY = T.y - w.y; return true; }              // mover (zona libre de la barra)
-    wmDrag = idx; wmAction = 0;                            // contenido: lo atiende wmRunHostedApp() (ver wmTickHostedApps)
-    return !wasFocused;                                    // solo recomponer marco si el foco realmente cambio
-  }
-  if(T.down && wmDrag >= 0){
-    WindowInstance& w = wmWins[wmDrag];
-    if(wmAction == 1){                                           // MOVER (barra de titulo)
-      w.x = T.x - wmDX; w.y = T.y - wmDY; w.isFloating = true;
-      if(w.x < 0) w.x = 0; if(w.x + w.w > SCR_W) w.x = SCR_W - w.w;
-      if(w.y < WM_TOOLB) w.y = WM_TOOLB; if(w.y + w.h > WM_NAV) w.y = WM_NAV - w.h;
-      return true;
-    } else if(wmAction == 2){                                    // REDIMENSIONAR (esquina, min 150x150)
-      w.w = T.x - w.x; w.h = T.y - w.y; w.isFloating = true;
-      if(w.w < 150) w.w = 150; if(w.h < 150) w.h = 150;
-      if(w.x + w.w > SCR_W) w.w = SCR_W - w.x; if(w.y + w.h > WM_NAV) w.h = WM_NAV - w.y;
-      return true;
-    }
-    return false;
-  }
-  if(T.released){
-    // Al soltar tras MOVER o REDIMENSIONAR, el marco se recompone pero el area
-    // de contenido se queda con el fondo neutro que pinta wmDrawWindow(): la
-    // ventana quedaba GRIS y muerta para siempre, porque el tick() de casi
-    // todas las apps solo repinta cuando algo cambia. Se marca la ventana para
-    // que el llamante repinte su contenido JUSTO DESPUES de recomponer el marco
-    // (el orden importa: primero marco, luego contenido encima).
-    if(wmDrag >= 0 && (wmAction == 1 || wmAction == 2)){
-      wmNeedContent = (int8_t)wmDrag; wmDrag = -1; wmAction = 0; return true;
-    }
-    wmDrag = -1; wmAction = 0;
-  }
-  return false;
-}
-static void wmTick(){
-  if(T.tap && T.y < WM_TOOLB){                                  // barra de herramientas
-    if(T.x >= SCR_W - 212 && T.x < SCR_W - 168){
-      int ni = wmAdd(WM_APPS[wmCount % 4]); wmRender();
-      if(ni >= 0) wmRunHostedApp(ni, true);
-    }
-    else if(T.x >= SCR_W - 162 && T.x < SCR_W - 118){ setWindowLayout(2); wmRender(); }
-    else if(T.x >= SCR_W - 112 && T.x < SCR_W - 68){ setWindowLayout(4); wmRender(); }
-    else if(T.x >= SCR_W - 62){ wmExit(); }
-    return;
-  }
-  if(wmTouchWindows()){ wmRender(); wmFlushPendingContent(); }   // marco y, si toca, contenido de la ventana movida/redimensionada
-  int beforeCount = wmCount;
-  wmTickHostedApps();                        // contenido real de cada ventana, cada vuelta (self-throttle propio de cada app)
-  if(wmCount != beforeCount) wmRender();      // una app se cerro sola (boton "atras" propio) -> recomponer el marco
-}
-
-// #############################################################
-// ##  PANEL EDGE (SIDEBAR DOCK) -- Fase 3 (reescrito para paridad Samsung)
-// ##  Tirador en el borde izquierdo. Se ABRE de dos formas (como el Edge
-// ##  Panel real): un TOQUE simple, o ARRASTRANDO el tirador hacia el
-// ##  centro (el panel se revela siguiendo al dedo; al soltar decide por
-// ##  posicion/velocidad si termina de abrir o se retrae).
-// ##
-// ##  Con el panel abierto:
-// ##    · TOQUE sobre un icono         -> abre la app en VENTANA FLOTANTE
-// ##                                      (crece desde el icono). Imagen A:
-// ##                                      barra de control (restaurar /
-// ##                                      minimizar / split / expandir /
-// ##                                      cerrar) en el borde superior.
-// ##    · LONG-PRESS + arrastrar icono -> lo despega y sigue al dedo:
-// ##        Y < SB_DROP_TOP            -> Split Screen (mitad superior = la
-// ##                                      app soltada; abajo, selector).
-// ##        SB_DROP_TOP..SB_DROP_BOT   -> Ventana Flotante en ese punto.
-// ##        Y > SB_DROP_BOT            -> Cancelar (resorte de vuelta).
-// ##    · SCROLL vertical de la lista con REBOTE (rubber-band) en los
-// ##      extremos y recorte estricto a la mascara del panel.
-// ##    · Boton de CAPTURA (arriba) y, fijos abajo, REJILLA (añadir apps)
-// ##      y LAPIZ (modo edicion: jiggle + quitar con X + reordenar).
-// ##
-// ##  DECISION DE DISENO (documentada; cambia el comportamiento previo):
-// ##  el Panel Edge sigue ACCESIBLE con ventanas abiertas (wmCount>0), como
-// ##  en Samsung real -- el tirador se dibuja SOBRE las ventanas y el panel
-// ##  se puede abrir para lanzar mas apps o rellenar el Split. Antes se
-// ##  ocultaba hasta cerrar todo; ahora no. sbOwnsScreen() sigue siendo la
-// ##  unica fuente de verdad de "quien manda en la pantalla".
-// ##
-// ##  Composicion SIEMPRE offscreen (bbuf) + present() de una pasada, para
-// ##  no mostrar nunca un frame a medio dibujar (mismo patron del resto del
-// ##  sistema). Fondo: homeBuf en Home, appSnapBuf (instantanea de fb) en
-// ##  una App -- se congela al abrir el panel y se reanuda al cerrar.
-// #############################################################
-enum GestureState { GEST_IDLE, GEST_PRESSED, GEST_DRAGGING, GEST_SCROLLING, GEST_HANDLE, GEST_REORDER };
-
-#define SB_TAB_X        12          // ancho del tirador (franja pegada al borde)
-#define SB_TAB_Y        340         // Y del tirador (ligeramente sobre el centro)
-#define SB_TAB_H        120
-#define SB_PANEL_W      92          // ancho del panel abierto
-#define SB_PANEL_TOP    64          // borde superior del panel (bajo la barra de estado)
-#define SB_PANEL_BOT    WM_NAV      // borde inferior del panel (=750, respeta la nav)
-#define SB_ICON_S       56
-#define SB_ICON_X       ((SB_PANEL_W - SB_ICON_S) / 2)   // iconos centrados en el panel (=18)
-#define SB_ICON_GAP     22          // separacion vertical entre iconos
-#define SB_MAX_PINNED   16          // como mucho, TODAS las apps (0..15) ancladas al panel
-#define SB_SHOT_Y       (SB_PANEL_TOP + 12)               // boton de captura (fijo, arriba) =76
-#define SB_LIST_TOP     (SB_SHOT_Y + SB_ICON_S + 16)      // primer icono con sbScrollY==0  =148
-#define SB_BTN_S        52          // lado de los botones fijos inferiores
-#define SB_BTN_X        ((SB_PANEL_W - SB_BTN_S) / 2)     // centrados (=20)
-#define SB_PENCIL_Y     (SB_PANEL_BOT - SB_BTN_S - 14)    // lapiz (modo edicion) =684
-#define SB_GRID_Y       (SB_PENCIL_Y - SB_BTN_S - 10)     // rejilla (añadir apps) =622
-#define SB_LIST_BOT     (SB_GRID_Y - 14)                  // fondo de la mascara de la lista =608
-#define SB_MASK_TOP     SB_LIST_TOP   // mascara visible/tactil de la lista: NADA fuera de aqui
-#define SB_MASK_BOT     SB_LIST_BOT
-#define SB_LONGPRESS    350UL       // ms sin moverse para pasar a arrastre/reordenar (mas agil que 500, ver nota)
-#define SB_DROP_TOP     150         // Y < 150            -> Split Screen
-#define SB_DROP_BOT     650         // Y > 650            -> Cancelar (resorte). 150..650 -> Flotante
-#define SB_OPEN_ANIM_MS 200UL       // duracion de TODAS las animaciones del panel (ease-out cubico)
-#define SB_SPLIT_COLS   4           // selector del split: grid 4x4 -- 16 apps exactas, sin scroll
-#define SB_SPLIT_ICON_S 64
-#define SB_FRAME_MS     30UL        // throttle del redibujado continuo durante arrastre/scroll (~33/seg)
-#define SB_OVERSCROLL   64          // margen elastico de rebote en los extremos del scroll
-#define SB_MIN_BUB_S    54          // diametro de la burbuja de una ventana minimizada
-
-// Nota SB_LONGPRESS: 350 ms se siente mas cercano al long-press real de un
-// Samsung (500 ms arrastraba tarde). El umbral de movimiento (12 px) decide
-// antes que el tiempo si el dedo se desplaza: mover = scroll, quieto = arrastre.
-
-static bool          sbPanelOpen        = false;
-static bool          sbEditMode         = false;   // lapiz: jiggle + quitar + reordenar
-static bool          sbAddPickerOpen     = false;   // rejilla: selector de apps para añadir/quitar del panel
-static GestureState  sbGesture          = GEST_IDLE;
-static int8_t        sbDragIcon         = -1;       // slot 0..sbPinnedCount-1 en arrastre/reorden (o -1)
-static float         sbDragX = 0, sbDragY = 0;      // posicion del icono arrastrado (sigue al dedo)
-static unsigned long sbPressMs = 0;
-static int           sbPressX = 0, sbPressY = 0;
-static int           sbScrollY = 0;                 // desplazamiento de la lista (puede salirse en el rebote)
-static int           sbScrollLastY = 0;             // Y del dedo el frame anterior (delta del scroll)
-static int           sbHandleReveal = 0;            // ancho revelado del panel durante el arrastre del tirador
-static bool          sbSplitBottomPicker = false;   // wmWins[] ya tiene la mitad superior; falta elegir la inferior
-static unsigned long sbFrameMs = 0;                 // throttle del redibujado continuo
-static unsigned long sbStuckMs = 0;                 // watchdog de estados transitorios (ultimo recurso)
-
-// ---- Lista de apps ancladas al panel (fuente propia, editable) --------------
-// Antes el panel reutilizaba homeOrder[]+dock; para poder AÑADIR/QUITAR/REORDENAR
-// desde el modo edicion sin tocar la rejilla del Home, el panel tiene su propia
-// lista persistida. Por defecto: las 16 apps. Persistencia con el mismo patron
-// que homeOrder (prefs "flexos").
-static uint8_t sbPinned[SB_MAX_PINNED];
-static int     sbPinnedCount = 0;
-static void sbPinnedDefault(){ sbPinnedCount = 16; for(int i = 0; i < 16; i++) sbPinned[i] = (uint8_t)i; }
-static void sbPinnedSave(){
-  prefs.begin("flexos", false);
-  prefs.putBytes("sbpin", sbPinned, SB_MAX_PINNED);
-  prefs.putInt("sbpinc", sbPinnedCount);
-  prefs.end();
-}
-static void sbPinnedLoad(){
-  prefs.begin("flexos", true);
-  size_t n = prefs.getBytes("sbpin", sbPinned, SB_MAX_PINNED);
-  int c = prefs.getInt("sbpinc", -1);
-  prefs.end();
-  if(n != SB_MAX_PINNED || c < 1 || c > SB_MAX_PINNED){ sbPinnedDefault(); return; }
-  bool seen[16] = { false };                         // validacion: appID<16 y sin duplicados en [0,c)
-  for(int i = 0; i < c; i++){ if(sbPinned[i] >= 16 || seen[sbPinned[i]]){ sbPinnedDefault(); return; } seen[sbPinned[i]] = true; }
-  sbPinnedCount = c;
-}
-static bool sbIsPinned(uint8_t appID){ for(int i = 0; i < sbPinnedCount; i++) if(sbPinned[i] == appID) return true; return false; }
-static void sbPinAdd(uint8_t appID){ if(sbPinnedCount >= SB_MAX_PINNED || sbIsPinned(appID)) return; sbPinned[sbPinnedCount++] = appID; sbPinnedSave(); }
-static void sbPinRemove(int slot){
-  if(slot < 0 || slot >= sbPinnedCount) return;
-  for(int i = slot; i < sbPinnedCount - 1; i++) sbPinned[i] = sbPinned[i + 1];
-  sbPinnedCount--; sbPinnedSave();
-}
-// OJO: NO persiste. El reorden se llama en cada cruce de slot durante el
-// arrastre; guardar en NVS aqui desgastaria la flash y daria tirones. Se
-// persiste UNA vez al soltar (ver rama GEST_REORDER de T.released en sbTick).
-static void sbPinMove(int from, int to){
-  if(from < 0 || to < 0 || from >= sbPinnedCount || to >= sbPinnedCount || from == to) return;
-  uint8_t v = sbPinned[from];
-  if(from < to) for(int i = from; i < to; i++) sbPinned[i] = sbPinned[i + 1];
-  else          for(int i = from; i > to; i--) sbPinned[i] = sbPinned[i - 1];
-  sbPinned[to] = v;
-}
-// Slot -> appID real. Fuente unica para dibujar la lista Y para el hit-test.
-static uint8_t sbAppId(int slot){ return (slot >= 0 && slot < sbPinnedCount) ? sbPinned[slot] : 0; }
-
-// ---- Geometria de la lista --------------------------------------------------
-// Y del icono `i` con el scroll actual. Usada al dibujar (sbDrawPanel) Y al
-// tocar (sbIconAt/sbSlotAtY): una sola funcion, imposible desincronizar.
-static int sbIconY(int i){ return SB_LIST_TOP + i * (SB_ICON_S + SB_ICON_GAP) - sbScrollY; }
-static int sbScrollMax(){
-  if(sbPinnedCount <= 0) return 0;
-  int contentH = (sbPinnedCount - 1) * (SB_ICON_S + SB_ICON_GAP) + SB_ICON_S;   // hasta el FONDO del ultimo icono
-  int visH = SB_LIST_BOT - SB_LIST_TOP;
-  int mx = contentH - visH;
-  return (mx > 0) ? mx : 0;                          // asi el ultimo icono se ve COMPLETO al final del scroll
-}
-// Fondo sobre el que compone el overlay: homeBuf en Home, appSnapBuf en una App.
-static uint16_t* sbBgBuf(){ return (gState == ST_APP) ? appSnapBuf : homeBuf; }
-
-// ---- Tirador ----------------------------------------------------------------
-// Pastilla semi-transparente con marca central (grip). Se hornea en homeBuf
-// desde renderHome() (Home) y se recompone en el overlay sobre las ventanas.
-static void sbDrawTabHandle(){
-  fillRoundRect(0, SB_TAB_Y, SB_TAB_X, SB_TAB_H, 6, rgb565(90,110,190));
-  fillRoundRect(3, SB_TAB_Y + SB_TAB_H / 2 - 14, 4, 28, 2, rgb565(230,234,250));  // grip
-}
-// Igual, pero reafirmado sobre fb dentro de una App (no hay homeBuf donde
-// hornearlo). Throttle ~8/seg. Compone ENTERO en bbuf (copiando la banda real
-// de fb primero) y vuelca de una pasada -> nunca se ve a medio pintar aunque el
-// presentador (Core 0) lea fb en mitad del dibujo.
-static unsigned long sbTabAppMs = 0;
-static void sbDrawTabOnApp(){
-  if(!bbuf || !fb) return;               // guarda nula coherente con el resto de la seccion
-  unsigned long now = millis();
-  if(now - sbTabAppMs < 120) return;
-  sbTabAppMs = now;
-  for(int j = SB_TAB_Y; j <= SB_TAB_Y + SB_TAB_H; j++)
-    memcpy(bbuf + (size_t)j * SCR_W, fb + (size_t)j * SCR_W, SCR_W * 2);
-  setBuf(bbuf);
-  sbDrawTabHandle();
-  present(SB_TAB_Y, SB_TAB_Y + SB_TAB_H);
-}
-static bool sbHitTab(int px, int py){
-  return px >= 0 && px < SB_TAB_X && py >= SB_TAB_Y && py <= SB_TAB_Y + SB_TAB_H;
-}
-
-// ---- Hit-tests del panel ----------------------------------------------------
-// Icono `which` bajo (px,py), con el scroll aplicado (via sbIconY) y recortado a
-// la mascara: no se puede tocar lo que no se ve.
-static bool sbIconAt(int px, int py, int &which){
-  if(px < SB_ICON_X - 4 || px > SB_ICON_X + SB_ICON_S + 4) return false;
-  for(int i = 0; i < sbPinnedCount; i++){
-    int iy = sbIconY(i);
-    if(iy + SB_ICON_S < SB_MASK_TOP || iy > SB_MASK_BOT) continue;
-    if(py >= iy && py <= iy + SB_ICON_S){ which = i; return true; }
-  }
-  return false;
-}
-// Slot cuyo CENTRO vertical esta mas cerca de py (para el reorden en edicion).
-static bool sbSlotAtY(int py, int &slot){
-  for(int i = 0; i < sbPinnedCount; i++){
-    int iy = sbIconY(i);
-    if(iy + SB_ICON_S < SB_MASK_TOP || iy > SB_MASK_BOT) continue;
-    if(py >= iy && py <= iy + SB_ICON_S){ slot = i; return true; }
-  }
-  return false;
-}
-static bool sbHitScreenshot(int px, int py){ return px >= SB_ICON_X && px <= SB_ICON_X + SB_ICON_S && py >= SB_SHOT_Y && py <= SB_SHOT_Y + SB_ICON_S; }
-static bool sbHitGridBtn(int px, int py){ return px >= SB_BTN_X && px <= SB_BTN_X + SB_BTN_S && py >= SB_GRID_Y && py <= SB_GRID_Y + SB_BTN_S; }
-static bool sbHitPencilBtn(int px, int py){ return px >= SB_BTN_X && px <= SB_BTN_X + SB_BTN_S && py >= SB_PENCIL_Y && py <= SB_PENCIL_Y + SB_BTN_S; }
-// Badge "X" de quitar (modo edicion) sobre el icono `slot`.
-static bool sbHitRemoveBadge(int px, int py, int &slot){
-  for(int i = 0; i < sbPinnedCount; i++){
-    int iy = sbIconY(i);
-    if(iy + SB_ICON_S < SB_MASK_TOP || iy > SB_MASK_BOT) continue;
-    int bx = SB_ICON_X + 8, by = iy + 8, dx = px - bx, dy = py - by;
-    if(dx * dx + dy * dy <= 13 * 13){ slot = i; return true; }
-  }
-  return false;
-}
-
-// ---- Burbujas de ventanas minimizadas --------------------------------------
-// Una ventana minimizada colapsa a un circulo con su icono, apilado en el borde
-// derecho. Tap en la burbuja -> restaurar. Posicion determinista (no se guarda
-// estado extra): el orden es el de aparicion en wmWins[]. Dibujo y hit-test
-// comparten sbMinBubblePos() -> imposible desincronizar lo que se ve y se toca.
-static void sbMinBubblePos(int order, int &cx, int &cy){
-  cx = SCR_W - SB_MIN_BUB_S / 2 - 6;
-  cy = 120 + order * (SB_MIN_BUB_S + 12) + SB_MIN_BUB_S / 2;
-}
-static void sbDrawMinBubbles(){
-  int order = 0;
-  for(int i = 0; i < wmCount; i++){
-    if(!wmWins[i].minimized) continue;
-    int cx, cy; sbMinBubblePos(order, cx, cy); order++;
-    fillCircleA(cx + 2, cy + 3, SB_MIN_BUB_S / 2, rgb565(6,8,14), 120);   // sombra
-    fillCircle(cx, cy, SB_MIN_BUB_S / 2, rgb565(40,54,110));
-    drawAppIcon(wmWins[i].appID, cx - 18, cy - 18, 36);                    // icono centrado (mas pequeno que la burbuja)
-  }
-}
-static bool sbHitMinBubble(int px, int py, int &idx){
-  int order = 0;
-  for(int i = 0; i < wmCount; i++){
-    if(!wmWins[i].minimized) continue;
-    int cx, cy; sbMinBubblePos(order, cx, cy); order++;
-    int dx = px - cx, dy = py - cy;
-    if(dx * dx + dy * dy <= (SB_MIN_BUB_S / 2) * (SB_MIN_BUB_S / 2)){ idx = i; return true; }
-  }
-  return false;
-}
-
-static void sbOpenPanel(){  sbPanelOpen = true;  sbGesture = GEST_IDLE; sbDragIcon = -1; sbEditMode = false; sbAddPickerOpen = false;
-                            if(sbScrollY < 0) sbScrollY = 0; if(sbScrollY > sbScrollMax()) sbScrollY = sbScrollMax(); }
-static void sbClosePanel(){ sbPanelOpen = false; sbGesture = GEST_IDLE; sbDragIcon = -1; sbEditMode = false; sbAddPickerOpen = false; }
-// true mientras el Panel Edge (panel/arrastre/ventanas/selectores) tiene el
-// control visual. uiTick() la consulta para NO lanzar animaciones que pelean
-// por bbuf. Fuente unica de verdad -- ninguna bandera aparte que desincronizar.
-static bool sbOwnsScreen(){ return sbPanelOpen || sbAddPickerOpen || sbSplitBottomPicker || sbGesture != GEST_IDLE || wmCount > 0; }
-
-// ---- Acciones de la barra de control de ventana (Imagen A) -------------------
-// Definidas aqui (necesitan sbSplitBottomPicker); declaradas arriba para que
-// wmDrawWindow()/wmTouchWindows() (seccion Window Manager, mas arriba) las usen.
-// NO recomponen: solo mutan estado y marcan wmNeedContent -- el llamante
-// (wmTick()->wmRender() o sbTick()->sbRenderOverlay()) recompone con el
-// renderer correcto de su contexto.
-static void wmClampWin(int idx){
-  WindowInstance& w = wmWins[idx];
-  if(w.w < 150) w.w = 150; if(w.h < 150) w.h = 150;
-  if(w.w > SCR_W) w.w = SCR_W; if(w.h > WM_NAV - SB_PANEL_TOP) w.h = WM_NAV - SB_PANEL_TOP;
-  if(w.x < 0) w.x = 0; if(w.x + w.w > SCR_W) w.x = SCR_W - w.w;
-  if(w.y < SB_PANEL_TOP) w.y = SB_PANEL_TOP; if(w.y + w.h > WM_NAV) w.y = WM_NAV - w.h;
-}
-static void wmCtrlAction(int idx, int b){
-  if(idx < 0 || idx >= wmCount) return;
-  WindowInstance& w = wmWins[idx];
-  switch(b){
-    case 0:  // RESTAURAR: tamano/posicion flotante por defecto (420x560, centrada)
-      w.isFloating = true; w.w = 420; w.h = 560; w.x = (SCR_W - w.w) / 2; w.y = SB_PANEL_TOP;
-      wmClampWin(idx); wmNeedContent = (int8_t)idx; break;
-    case 1:  // MINIMIZAR: a burbuja (no se dibuja ni ejecuta su tick)
-      w.minimized = true; break;
-    case 2:  // SPLIT: esta ventana pasa a mitad superior + selector de la inferior
-      w.isFloating = false; w.x = 0; w.y = SB_PANEL_TOP; w.w = SCR_W; w.h = (WM_NAV - SB_PANEL_TOP) / 2;
-      sbSplitBottomPicker = true; wmNeedContent = (int8_t)idx; break;
-    case 3:  // EXPANDIR: maximizar al area util (sigue siendo ventana)
-      w.isFloating = true; w.x = 0; w.y = SB_PANEL_TOP; w.w = SCR_W; w.h = WM_NAV - SB_PANEL_TOP;
-      wmNeedContent = (int8_t)idx; break;
-    case 4:  // CERRAR
-      wmRemove(idx); if(wmCount == 0) sbSplitBottomPicker = false; break;
-  }
-}
-
-// Abre appID como ventana flotante centrada en (cx,cy) -- reutiliza wmWins[]
-// (mismo almacen que el Window Manager de pantalla completa) SIN cambiar gState.
-static void sbOpenFloating(uint8_t appID, int cx, int cy){
-  if(wmCount >= WM_MAX) return;
-  if(APP_REG[appID].flags & APP_NO_WINDOW) return;
-  int n = wmCount;
-  wmWins[n].appID = appID; wmWins[n].isFloating = true; wmWins[n].used = true; wmWins[n].minimized = false;
-  wmWins[n].w = 420; wmWins[n].h = 560;
-  wmWins[n].x = cx - wmWins[n].w / 2; wmWins[n].y = cy - wmWins[n].h / 2;
-  if(wmWins[n].x < 0) wmWins[n].x = 0;
-  if(wmWins[n].x + wmWins[n].w > SCR_W) wmWins[n].x = SCR_W - wmWins[n].w;
-  if(wmWins[n].y < SB_PANEL_TOP) wmWins[n].y = SB_PANEL_TOP;
-  if(wmWins[n].y + wmWins[n].h > WM_NAV) wmWins[n].y = WM_NAV - wmWins[n].h;
-  wmWins[n].zIndex = ++wmZTop;
-  wmCount++;
-  wmFocus(n);
-}
-// Cierra TODO (ventanas/split/panel) y abre appID a pantalla completa -- para
-// apps que exigen pantalla completa (APP_NO_WINDOW: Modo PC, Ajustes) al
-// tocarlas en el panel: no se pueden alojar en una ventana.
-static void sbLaunchFull(uint8_t appID){
-  wmCount = 0; wmHostedWin = -1; sbSplitBottomPicker = false;
-  sbClosePanel();
-  enterApp((int)appID);
-}
-
-// ---- Selector de la mitad inferior del Split (grid 4x4, TODAS las apps) ------
-static bool sbSplitPickerAt(int px, int py, int &appID){
-  int y0 = SB_PANEL_TOP + (WM_NAV - SB_PANEL_TOP) / 2;
-  if(px < 0 || px >= SCR_W || py < y0 || py >= WM_NAV) return false;
-  int cellW = SCR_W / SB_SPLIT_COLS, cellH = (WM_NAV - SB_PANEL_TOP) / 2 / SB_SPLIT_COLS;
-  int col = px / cellW; if(col >= SB_SPLIT_COLS) col = SB_SPLIT_COLS - 1;
-  int row = (py - y0) / cellH; if(row >= SB_SPLIT_COLS) row = SB_SPLIT_COLS - 1;
-  appID = row * SB_SPLIT_COLS + col;
-  return appID >= 0 && appID < 16;
-}
-static void sbDrawSplitPicker(){
-  int y0 = SB_PANEL_TOP + (WM_NAV - SB_PANEL_TOP) / 2;
-  int cellW = SCR_W / SB_SPLIT_COLS, cellH = (WM_NAV - SB_PANEL_TOP) / 2 / SB_SPLIT_COLS;
-  if(uiGlass) drawLiquidGlassPanel(0, y0, SCR_W, WM_NAV - y0, 0, rgb565(40,54,110));
-  else fillRect(0, y0, SCR_W, WM_NAV - y0, rgb565(28,32,52));
-  drawTextC(SCR_W / 2, y0 + 6, "Elige la otra app", 2, rgb565(210,216,235));
-  for(int a = 0; a < 16; a++){
-    int col = a % SB_SPLIT_COLS, row = a / SB_SPLIT_COLS;
-    int ix = col * cellW + (cellW - SB_SPLIT_ICON_S) / 2;
-    int iy = y0 + 24 + row * cellH + (cellH - SB_SPLIT_ICON_S) / 2;
-    drawAppIcon(a, ix, iy, SB_SPLIT_ICON_S);
-  }
-}
-
-// ---- Selector "añadir apps" (rejilla del panel, modo edicion) ---------------
-static void sbDrawAddPicker(){
-  const int cols = 4, s = 64, rows = 4;
-  int gw = cols * s + (cols - 1) * 24, gx0 = (SCR_W - gw) / 2;
-  int gh = rows * s + (rows - 1) * 24 + 80, gy0 = (SCR_H - gh) / 2;
-  fillRoundRectA(gx0 - 24, gy0 - 24, gw + 48, gh + 16, 24, rgb565(18,22,40), 235);
-  drawTextC(SCR_W / 2, gy0 - 16, "A\xC3\xB1" "adir al panel", 2, rgb565(230,234,250));
-  for(int a = 0; a < 16; a++){
-    int c = a % cols, r = a / cols, ix = gx0 + c * (s + 24), iy = gy0 + 30 + r * (s + 24);
-    drawAppIcon(a, ix, iy, s);
-    if(sbIsPinned((uint8_t)a)){                       // ya anclada: tic verde
-      fillCircle(ix + s - 8, iy + 8, 9, rgb565(70,200,120));
-      strokeSegAA(ix + s - 12, iy + 8, ix + s - 9, iy + 12, 1.6f, rgb565(255,255,255));
-      strokeSegAA(ix + s - 9, iy + 12, ix + s - 4, iy + 4, 1.6f, rgb565(255,255,255));
-    }
-  }
-  fillRoundRect(SCR_W / 2 - 50, gy0 + gh - 40, 100, 34, 12, rgb565(50,110,235));
-  drawTextC(SCR_W / 2, gy0 + gh - 32, "Listo", 2, rgb565(255,255,255));
-}
-static void sbAddPickerTick(){
-  if(!T.tap) return;
-  const int cols = 4, s = 64, rows = 4;
-  int gw = cols * s + (cols - 1) * 24, gx0 = (SCR_W - gw) / 2;
-  int gh = rows * s + (rows - 1) * 24 + 80, gy0 = (SCR_H - gh) / 2;
-  if(T.y >= gy0 + gh - 40 && T.y <= gy0 + gh - 6 && T.x >= SCR_W / 2 - 50 && T.x <= SCR_W / 2 + 50){ sbAddPickerOpen = false; sbRenderOverlay(); return; }
-  for(int a = 0; a < 16; a++){
-    int c = a % cols, r = a / cols, ix = gx0 + c * (s + 24), iy = gy0 + 30 + r * (s + 24);
-    if(T.x >= ix && T.x <= ix + s && T.y >= iy && T.y <= iy + s){
-      if(sbIsPinned((uint8_t)a)){ for(int i = 0; i < sbPinnedCount; i++) if(sbPinned[i] == a){ sbPinRemove(i); break; } }
-      else sbPinAdd((uint8_t)a);
-      if(sbScrollY > sbScrollMax()) sbScrollY = sbScrollMax();
-      sbRenderOverlay(); return;
-    }
-  }
-  if(T.x < gx0 - 24 || T.x > gx0 + gw + 24 || T.y < gy0 - 24 || T.y > gy0 + gh){ sbAddPickerOpen = false; sbRenderOverlay(); }
-}
-
-// ---- Botones fijos del panel ------------------------------------------------
-static void sbDrawScreenshotBtn(){
-  int x = SB_ICON_X, y = SB_SHOT_Y, s = SB_ICON_S, m = 12;
-  fillRoundRect(x, y, s, s, 14, rgb565(52,66,120));
-  uint16_t w = rgb565(230,234,250);                   // glifo: 4 esquinas (captura con seleccion)
-  strokeSegAA(x + m, y + m, x + m + 10, y + m, 1.6f, w);         strokeSegAA(x + m, y + m, x + m, y + m + 10, 1.6f, w);
-  strokeSegAA(x + s - m, y + m, x + s - m - 10, y + m, 1.6f, w); strokeSegAA(x + s - m, y + m, x + s - m, y + m + 10, 1.6f, w);
-  strokeSegAA(x + m, y + s - m, x + m + 10, y + s - m, 1.6f, w); strokeSegAA(x + m, y + s - m, x + m, y + s - m - 10, 1.6f, w);
-  strokeSegAA(x + s - m, y + s - m, x + s - m - 10, y + s - m, 1.6f, w); strokeSegAA(x + s - m, y + s - m, x + s - m, y + s - m - 10, 1.6f, w);
-}
-static void sbDrawBottomBtns(){
-  uint16_t w = rgb565(230,234,250);
-  int gy = SB_GRID_Y, s = SB_BTN_S, x = SB_BTN_X;      // rejilla (añadir apps)
-  fillRoundRect(x, gy, s, s, 14, sbAddPickerOpen ? rgb565(70,110,220) : rgb565(46,56,96));
-  for(int r = 0; r < 3; r++) for(int c = 0; c < 3; c++) fillCircle(x + 16 + c * 10, gy + 16 + r * 10, 2, w);
-  int py = SB_PENCIL_Y;                                 // lapiz (modo edicion)
-  fillRoundRect(x, py, s, s, 14, sbEditMode ? rgb565(70,110,220) : rgb565(46,56,96));
-  strokeSegAA(x + 16, py + s - 16, x + s - 16, py + 16, 2.2f, w);   // cuerpo
-  strokeSegAA(x + 14, py + s - 14, x + 20, py + s - 20, 2.2f, w);   // punta
-}
-// Pinta el panel completo: fondo glass + captura + lista (recortada a la
-// mascara) + botones fijos + (en arrastre) silueta bajo el dedo y zonas de drop.
-static void sbDrawPanel(){
-  int ph = SB_PANEL_BOT - SB_PANEL_TOP;
-  if(uiGlass) drawLiquidGlassPanel(0, SB_PANEL_TOP, SB_PANEL_W, ph, 18, rgb565(40,54,110));
-  else fillRoundRect(0, SB_PANEL_TOP, SB_PANEL_W, ph, 18, rgb565(28,32,52));
-  sbDrawScreenshotBtn();
-  int c0 = gClipY0, c1 = gClipY1;                       // recorte estricto de la lista (mismo patron que Ajustes)
-  gClipY0 = SB_MASK_TOP; gClipY1 = SB_MASK_BOT;
-  unsigned long now = millis();
-  for(int i = 0; i < sbPinnedCount; i++){
-    if(i == sbDragIcon && (sbGesture == GEST_DRAGGING || sbGesture == GEST_REORDER)) continue;   // se dibuja siguiendo al dedo
-    int iy = sbIconY(i);
-    if(iy + SB_ICON_S < SB_MASK_TOP || iy > SB_MASK_BOT) continue;
-    int jx = 0, jy = 0;
-    if(sbEditMode){ jx = (int)(2.0f * sinf(now * 0.012f + i * 1.3f)); jy = (int)(2.0f * cosf(now * 0.011f + i * 1.7f)); }
-    drawAppIcon(sbAppId(i), SB_ICON_X + jx, iy + jy, SB_ICON_S);
-    if(sbEditMode){                                      // badge "X" para quitar
-      int bx = SB_ICON_X + jx + 8, by = iy + jy + 8;
-      fillCircle(bx, by, 8, rgb565(230,70,70));
-      strokeSegAA(bx - 3, by - 3, bx + 3, by + 3, 1.6f, rgb565(255,255,255));
-      strokeSegAA(bx - 3, by + 3, bx + 3, by - 3, 1.6f, rgb565(255,255,255));
-    }
-  }
-  gClipY0 = c0; gClipY1 = c1;
-  sbDrawBottomBtns();
-  if(sbGesture == GEST_DRAGGING && sbDragIcon >= 0){     // arrastre fuera del panel (crear ventana/split)
-    int s = (int)(SB_ICON_S * 0.9f), dx = (int)sbDragX - s / 2, dy = (int)sbDragY - s / 2;
-    if(sbDragY < SB_DROP_TOP)        fillRectA(0, 0, SCR_W, SB_DROP_TOP, rgb565(60,140,255), 60);
-    else if(sbDragY <= SB_DROP_BOT)  fillRectA(0, SB_DROP_TOP, SCR_W, SB_DROP_BOT - SB_DROP_TOP, rgb565(70,200,120), 40);
-    fillRoundRectA(dx - 6, dy - 6, s + 12, s + 12, 14, rgb565(60,90,180), 150);
-    drawAppIcon(sbAppId(sbDragIcon), dx, dy, s);
-  }
-  if(sbGesture == GEST_REORDER && sbDragIcon >= 0){       // reorden dentro del panel (modo edicion)
-    int dx = SB_ICON_X, dy = (int)sbDragY - SB_ICON_S / 2;
-    if(dy < SB_MASK_TOP) dy = SB_MASK_TOP; if(dy > SB_MASK_BOT - SB_ICON_S) dy = SB_MASK_BOT - SB_ICON_S;
-    fillRoundRectA(dx - 4, dy - 4, SB_ICON_S + 8, SB_ICON_S + 8, 12, rgb565(60,90,180), 120);
-    drawAppIcon(sbAppId(sbDragIcon), dx, dy, SB_ICON_S);
-  }
-}
-
-// ---- Composicion del overlay (fuente unica) ---------------------------------
-// Dibuja las ventanas no minimizadas por z ascendente. Extraida para no
-// duplicar el bucle en cada animacion (reveal/split/floating/screenshot).
-static void sbDrawWindowsSorted(){
-  int order[WM_MAX], m = 0;
-  for(int i = 0; i < wmCount; i++) if(!wmWins[i].minimized) order[m++] = i;
-  for(int a = 0; a < m; a++) for(int b = a + 1; b < m; b++)
-    if(wmWins[order[b]].zIndex < wmWins[order[a]].zIndex){ int t = order[a]; order[a] = order[b]; order[b] = t; }
-  for(int i = 0; i < m; i++) wmDrawWindow(order[i]);
-}
-// Compone TODA la pantalla: fondo + ventanas + burbujas + selectores + panel o
-// tirador. Full-frame en bbuf y present() de una pasada (anti-parpadeo).
-static void sbRenderOverlay(){
-  uint16_t* bg = sbBgBuf();
-  if(!bbuf || !bg) return;
-  setBuf(bbuf);
-  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
-  memcpy(bbuf, bg, (size_t)SCR_W * SCR_H * 2);
-  sbDrawWindowsSorted();
-  sbDrawMinBubbles();
-  if(sbSplitBottomPicker) sbDrawSplitPicker();
-  if(sbPanelOpen)         sbDrawPanel();
-  else                    sbDrawTabHandle();            // tirador SOBRE las ventanas (Samsung real)
-  if(sbAddPickerOpen)     sbDrawAddPicker();            // encima de todo
-  present(0, SCR_H - 1);
-}
-// Un frame del panel a medio revelar (ancho `w`) durante el arrastre del
-// tirador: fondo + ventanas + burbujas + rectangulo glass de ancho w.
-static void sbRevealFrame(int w){
-  uint16_t* bg = sbBgBuf();
-  if(!bbuf || !bg) return;
-  setBuf(bbuf);
-  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
-  memcpy(bbuf, bg, (size_t)SCR_W * SCR_H * 2);
-  sbDrawWindowsSorted();
-  sbDrawMinBubbles();
-  if(w > 2){
-    if(uiGlass) drawLiquidGlassPanel(0, SB_PANEL_TOP, w, SB_PANEL_BOT - SB_PANEL_TOP, 18, rgb565(40,54,110));
-    else fillRoundRect(0, SB_PANEL_TOP, w, SB_PANEL_BOT - SB_PANEL_TOP, 18, rgb565(28,32,52));
-  } else sbDrawTabHandle();
-  present(0, SCR_H - 1);
-}
-// Termina de abrir (ancho actual -> completo, ease-out) y compone el panel con
-// los iconos. Bucle acotado a 200 ms, alimentando el watchdog.
-static void sbFinishOpenAnim(int startW){
-  uint32_t t0 = millis();
-  for(;;){
-    uint32_t e = millis() - t0; if(e > SB_OPEN_ANIM_MS) e = SB_OPEN_ANIM_MS;
-    float p = (float)e / SB_OPEN_ANIM_MS; p = 1 - (1 - p) * (1 - p) * (1 - p);
-    int w = startW + (int)((SB_PANEL_W - startW) * p);
-    sbRevealFrame(w); esp_task_wdt_reset();
-    if(e >= SB_OPEN_ANIM_MS) break;
-  }
-  sbRenderOverlay();
-}
-// Retrae (ancho actual -> 0) y restaura el fondo (panel cancelado).
-static void sbRestoreBackground();
-static void sbRevealCancel(int startW){
-  uint32_t t0 = millis();
-  for(;;){
-    uint32_t e = millis() - t0; if(e > SB_OPEN_ANIM_MS) e = SB_OPEN_ANIM_MS;
-    float p = (float)e / SB_OPEN_ANIM_MS; p = 1 - (1 - p) * (1 - p) * (1 - p);
-    int w = startW - (int)(startW * p);
-    sbRevealFrame(w); esp_task_wdt_reset();
-    if(e >= SB_OPEN_ANIM_MS) break;
-  }
-  sbRestoreBackground();
-}
-
-// Split Screen: la app soltada arriba "crece" desde el punto de soltado hasta
-// la mitad superior. Se AÑADE como ventana no flotante (no clobbera otras
-// ventanas ya abiertas -- el panel es accesible con ventanas) y se abre el
-// selector de la mitad inferior.
-static void sbSplitOpenAnim(uint8_t appID, int originX, int originY){
-  uint16_t* bg = sbBgBuf();
-  if(bbuf && bg){
-    uint32_t t0 = millis();
-    int fx = originX - 28, fy = originY - 28, fw = 56, fh = 56;
-    int tx = 0, ty = SB_PANEL_TOP, tw = SCR_W, th = (WM_NAV - SB_PANEL_TOP) / 2;
-    for(;;){
-      uint32_t e = millis() - t0; if(e > SB_OPEN_ANIM_MS) e = SB_OPEN_ANIM_MS;
-      float p = (float)e / SB_OPEN_ANIM_MS; p = 1 - (1 - p) * (1 - p) * (1 - p);
-      setBuf(bbuf);
-      gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
-      memcpy(bbuf, bg, (size_t)SCR_W * SCR_H * 2);
-      sbDrawWindowsSorted(); sbDrawMinBubbles();
-      int x = fx + (int)((tx - fx) * p), y = fy + (int)((ty - fy) * p);
-      int w = fw + (int)((tw - fw) * p), h = fh + (int)((th - fh) * p);
-      fillRoundRect(x, y, w, h, (int)(16 * (1 - p)), rgb565(30,34,48));
-      present(0, SCR_H - 1); esp_task_wdt_reset();
-      if(e >= SB_OPEN_ANIM_MS) break;
-    }
-  }
-  int n = wmCount;
-  wmWins[n].appID = appID; wmWins[n].isFloating = false; wmWins[n].used = true; wmWins[n].minimized = false;
-  wmWins[n].x = 0; wmWins[n].y = SB_PANEL_TOP; wmWins[n].w = SCR_W; wmWins[n].h = (WM_NAV - SB_PANEL_TOP) / 2;
-  wmWins[n].zIndex = ++wmZTop; wmCount++;
-  sbSplitBottomPicker = true; wmFocus(n);
-  sbRenderOverlay();
-  wmRunHostedApp(n, true);
-}
-static void sbOpenSplitBottom(uint8_t appID){
-  if(wmCount >= WM_MAX){ sbSplitBottomPicker = false; sbRenderOverlay(); return; }
-  if(APP_REG[appID].flags & APP_NO_WINDOW) return;      // exige pantalla completa: el selector sigue esperando otra
-  int y0 = SB_PANEL_TOP + (WM_NAV - SB_PANEL_TOP) / 2, n = wmCount;
-  wmWins[n].appID = appID; wmWins[n].isFloating = false; wmWins[n].used = true; wmWins[n].minimized = false;
-  wmWins[n].x = 0; wmWins[n].y = y0; wmWins[n].w = SCR_W; wmWins[n].h = WM_NAV - y0;
-  wmWins[n].zIndex = ++wmZTop; wmCount++;
-  sbSplitBottomPicker = false; wmFocus(n);
-  sbRenderOverlay();
-  wmRunHostedApp(n, true);
-}
-// Cancelar el arrastre (zona inferior / app sin ventana): el icono vuelve a su
-// slot con resorte (0.2s ease-out). El panel se queda abierto.
-static void sbCancelDragAnim(){
-  if(sbDragIcon < 0){ sbGesture = GEST_IDLE; return; }
-  uint32_t t0 = millis();
-  float fx = sbDragX, fy = sbDragY;
-  float tx = SB_ICON_X + SB_ICON_S / 2.0f, ty = (float)sbIconY(sbDragIcon) + SB_ICON_S / 2.0f;
-  for(;;){
-    uint32_t e = millis() - t0; if(e > SB_OPEN_ANIM_MS) e = SB_OPEN_ANIM_MS;
-    float p = (float)e / SB_OPEN_ANIM_MS; p = 1 - (1 - p) * (1 - p) * (1 - p);
-    sbDragX = fx + (tx - fx) * p; sbDragY = fy + (ty - fy) * p;
-    sbRenderOverlay(); esp_task_wdt_reset();
-    if(e >= SB_OPEN_ANIM_MS) break;
-  }
-  sbGesture = GEST_IDLE; sbDragIcon = -1;
-  sbRenderOverlay();
-}
-// Abrir una app como ventana flotante con crecimiento desde el icono (toque
-// simple en el panel). Reutiliza sbOpenFloating para la creacion real.
-static void sbOpenFloatingAnim(uint8_t appID, int cx, int cy){
-  if(wmCount >= WM_MAX) return;
-  if(APP_REG[appID].flags & APP_NO_WINDOW) return;
-  int tw = 420, th = 560, tx = cx - tw / 2, ty = cy - th / 2;
-  if(tx < 0) tx = 0; if(tx + tw > SCR_W) tx = SCR_W - tw;
-  if(ty < SB_PANEL_TOP) ty = SB_PANEL_TOP; if(ty + th > WM_NAV) ty = WM_NAV - th;
-  uint16_t* bg = sbBgBuf();
-  if(bbuf && bg){
-    uint32_t t0 = millis();
-    for(;;){
-      uint32_t e = millis() - t0; if(e > SB_OPEN_ANIM_MS) e = SB_OPEN_ANIM_MS;
-      float p = (float)e / SB_OPEN_ANIM_MS; p = 1 - (1 - p) * (1 - p) * (1 - p);
-      setBuf(bbuf);
-      gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
-      memcpy(bbuf, bg, (size_t)SCR_W * SCR_H * 2);
-      sbDrawWindowsSorted(); sbDrawMinBubbles();
-      int x = cx + (int)((tx - cx) * p), y = cy + (int)((ty - cy) * p);
-      int w = 56 + (int)((tw - 56) * p), h = 56 + (int)((th - 56) * p);
-      fillRoundRect(x, y, w, h, 12, rgb565(244,246,250));
-      present(0, SCR_H - 1); esp_task_wdt_reset();
-      if(e >= SB_OPEN_ANIM_MS) break;
-    }
-  }
-  int n = wmCount;
-  sbOpenFloating(appID, cx, cy);
-  sbRenderOverlay();
-  if(wmCount > n) wmRunHostedApp(n, true);
-}
-// Captura de pantalla: destello blanco de confirmacion (feedback identico al de
-// un movil). Sin capa de almacenamiento (SD/SPIFFS) todavia no se guarda a
-// disco -- ver hoja de ruta; queda pendiente cuando exista almacenamiento.
-static void sbDoScreenshot(){
-  uint16_t* bg = sbBgBuf();
-  if(!bbuf || !bg) return;
-  uint32_t t0 = millis(), dur = 180;
-  for(;;){
-    uint32_t e = millis() - t0; if(e > dur) e = dur;
-    float p = (float)e / dur; uint8_t a = (uint8_t)((1 - p) * 220);
-    setBuf(bbuf);
-    gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
-    memcpy(bbuf, bg, (size_t)SCR_W * SCR_H * 2);
-    sbDrawWindowsSorted(); sbDrawMinBubbles();
-    if(sbPanelOpen) sbDrawPanel(); else sbDrawTabHandle();
-    fillRectA(0, 0, SCR_W, SCR_H, rgb565(255,255,255), a);
-    present(0, SCR_H - 1); esp_task_wdt_reset();
-    if(e >= dur) break;
-  }
-  sbRenderOverlay();
-}
-// Rebote del scroll: si sbScrollY se salio de [0,max], vuelve con resorte.
-static void sbScrollSettle(){
-  int mx = sbScrollMax();
-  int target = (sbScrollY < 0) ? 0 : (sbScrollY > mx ? mx : sbScrollY);
-  if(target == sbScrollY){ sbRenderOverlay(); return; }
-  int from = sbScrollY; uint32_t t0 = millis(), dur = 160;
-  for(;;){
-    uint32_t e = millis() - t0; if(e > dur) e = dur;
-    float p = (float)e / dur; p = 1 - (1 - p) * (1 - p);
-    sbScrollY = from + (int)((target - from) * p);
-    sbRenderOverlay(); esp_task_wdt_reset();
-    if(e >= dur) break;
-  }
-  sbScrollY = target; sbRenderOverlay();
-}
-// Restaura el fondo tras cerrar el panel/cancelar sin dejar residuos. Si aun
-// hay overlay activo (ventanas/panel/selectores) recompone; si no, vuelve al
-// camino normal del Home o deja la App (su contenido sigue intacto en fb).
-static void sbRestoreBackground(){
-  if(wmCount > 0 || sbPanelOpen || sbAddPickerOpen || sbSplitBottomPicker){ sbRenderOverlay(); return; }
-  if(gState == ST_HOME){ if(gHomeDirty) renderHome(); showHome(); }
-  else {
-    // ST_APP: fb pudo quedar "sucio" si hubo ventanas flotantes alojadas (su
-    // contenido se pinto dentro de fb en el rectangulo de cada ventana). El unico
-    // fb LIMPIO del fondo congelado es appSnapBuf (capturado al abrir el panel);
-    // se restaura antes de volcar para no arrastrar restos de las ventanas. La
-    // App reanuda su tick() a partir del siguiente frame (sbTick devuelve false).
-    if(appSnapBuf && fb) memcpy(fb, appSnapBuf, (size_t)SCR_W * SCR_H * 2);
-    flxFlushAll();
-  }
-}
-
-// #############################################################
-// ##  Maquina de estados de gestos del Panel Edge. Se llama desde
-// ##  homeTick()/appTick() ANTES que el resto, para tener prioridad
-// ##  total mientras esta activo. Devuelve true si consumio el toque.
-// #############################################################
-static bool sbTick(){
-  // 0) WATCHDOG (ultimo recurso). Los estados GEST_* son transitorios: solo
-  //    valen mientras un dedo toca. Si el controlador no reporto un release
-  //    limpio y el gesto se quedo a medias sin T.down, tras 800 ms se fuerza
-  //    IDLE. NO toca sbPanelOpen/wmCount (mirar el panel/ventanas sin tocar es
-  //    normal). Las vias de salida NORMALES estan en cada rama de release; esto
-  //    es solo la red de seguridad, no el mecanismo principal.
-  if(sbGesture != GEST_IDLE && !T.down){
-    if(sbStuckMs == 0) sbStuckMs = millis();
-    else if(millis() - sbStuckMs > 800){ sbGesture = GEST_IDLE; sbDragIcon = -1; sbStuckMs = 0; sbRenderOverlay(); }
-  } else sbStuckMs = 0;
-
-  // 1) Selector "añadir apps" abierto: absorbe todo.
-  if(sbAddPickerOpen){ sbAddPickerTick(); return true; }
-
-  // 2) Selector de la mitad inferior del Split: un tap elige la app.
-  if(sbSplitBottomPicker && T.tap){
-    int appID;
-    if(sbSplitPickerAt(T.x, T.y, appID)){ sbOpenSplitBottom((uint8_t)appID); return true; }
-  }
-
-  // 3) Arrastrando un icono FUERA del panel (crear ventana / split / cancelar).
-  if(sbGesture == GEST_DRAGGING){
-    if(T.down){
-      sbDragX = T.x; sbDragY = T.y;
-      unsigned long now = millis(); if(now - sbFrameMs >= SB_FRAME_MS){ sbFrameMs = now; sbRenderOverlay(); }
-      return true;
-    }
-    if(T.released){
-      uint8_t appID = sbAppId(sbDragIcon);
-      if(APP_REG[appID].flags & APP_NO_WINDOW){ sbCancelDragAnim(); return true; }   // exige pantalla completa: rebota
-      if(T.y < SB_DROP_TOP){                                                          // Split Screen
-        if(wmCount >= WM_MAX){ sbCancelDragAnim(); return true; }                     // sin hueco: rebota
-        sbSplitOpenAnim(appID, (int)sbDragX, (int)sbDragY);
-        sbDragIcon = -1; sbGesture = GEST_IDLE; sbPanelOpen = false; return true;
-      }
-      if(T.y > SB_DROP_BOT){ sbCancelDragAnim(); return true; }                       // zona inferior: cancelar
-      if(wmCount >= WM_MAX){ sbCancelDragAnim(); return true; }                       // Flotante sin hueco: rebota
-      int n = wmCount;                                                                // Ventana Flotante en el punto
-      sbGesture = GEST_IDLE; sbDragIcon = -1; sbPanelOpen = false;
-      sbOpenFloating(appID, T.x, T.y); sbRenderOverlay();
-      if(wmCount > n) wmRunHostedApp(n, true);
-      return true;
-    }
-    return true;
-  }
-
-  // 4) Arrastrando el TIRADOR para abrir (reveal progresivo siguiendo al dedo).
-  if(sbGesture == GEST_HANDLE){
-    if(T.down){
-      int rv = T.x; if(rv < 0) rv = 0; if(rv > SB_PANEL_W) rv = SB_PANEL_W;
-      sbHandleReveal = rv;
-      unsigned long now = millis(); if(now - sbFrameMs >= SB_FRAME_MS){ sbFrameMs = now; sbRevealFrame(rv); }
-      return true;
-    }
-    if(T.released){
-      int dur = (int)(millis() - sbPressMs), adx = abs(T.x - sbPressX), ady = abs(T.y - sbPressY);
-      bool tap = (dur < 300 && adx < 16 && ady < 16);                                 // toque simple = abrir
-      sbGesture = GEST_IDLE;
-      if(sbHandleReveal >= (SB_PANEL_W * 45 / 100) || tap){ sbOpenPanel(); sbFinishOpenAnim(sbHandleReveal); }
-      else sbRevealCancel(sbHandleReveal);
-      return true;
-    }
-    return true;
-  }
-
-  // 5) PANEL ABIERTO: botones, iconos (tap=abrir / long-press=arrastrar),
-  //    scroll con rebote, reorden en edicion, o toque fuera = cerrar.
-  if(sbPanelOpen){
-    if(T.tap){   // los botones fijos resetean el gesto al consumir el tap (sin GEST_PRESSED colgado)
-      if(sbHitScreenshot(T.x, T.y)){ sbGesture = GEST_IDLE; sbDragIcon = -1; sbDoScreenshot(); return true; }
-      if(sbHitGridBtn(T.x, T.y)){ sbGesture = GEST_IDLE; sbDragIcon = -1; sbAddPickerOpen = true; sbRenderOverlay(); return true; }
-      if(sbHitPencilBtn(T.x, T.y)){ sbGesture = GEST_IDLE; sbDragIcon = -1; sbEditMode = !sbEditMode; sbRenderOverlay(); return true; }
-      if(sbEditMode){ int slot; if(sbHitRemoveBadge(T.x, T.y, slot)){ sbGesture = GEST_IDLE; sbDragIcon = -1; sbPinRemove(slot); if(sbScrollY > sbScrollMax()) sbScrollY = sbScrollMax(); sbRenderOverlay(); return true; } }
-    }
-    if(T.pressed){
-      int which;
-      if(sbIconAt(T.x, T.y, which)){                    // sobre un icono: espera tap o long-press
-        sbGesture = GEST_PRESSED; sbDragIcon = which;
-        sbPressMs = millis(); sbPressX = T.x; sbPressY = T.y; sbScrollLastY = T.y;
-        return true;
-      }
-      if(T.x <= SB_PANEL_W){                            // dentro del panel, fuera de iconos: scroll o long-press->edicion
-        sbGesture = GEST_PRESSED; sbDragIcon = -1;
-        sbPressMs = millis(); sbPressX = T.x; sbPressY = T.y; sbScrollLastY = T.y;
-        return true;
-      }
-      sbClosePanel(); sbRestoreBackground(); return true;   // fuera del panel: cerrar
-    }
-    if(T.down && sbGesture == GEST_PRESSED){
-      int adx = abs(T.x - sbPressX), ady = abs(T.y - sbPressY);
-      if(sbDragIcon >= 0){
-        if(adx < 12 && ady < 12 && (millis() - sbPressMs) > SB_LONGPRESS){
-          if(sbEditMode){ sbGesture = GEST_REORDER; sbDragX = T.x; sbDragY = T.y; }
-          else { sbGesture = GEST_DRAGGING; sbDragX = T.x; sbDragY = T.y; }
-          sbRenderOverlay(); return true;
-        }
-        if(ady >= 12 && ady >= adx){ sbGesture = GEST_SCROLLING; sbScrollLastY = T.y; return true; }
-        return true;
-      } else {
-        if(adx < 12 && ady < 12 && (millis() - sbPressMs) > SB_LONGPRESS){ sbEditMode = !sbEditMode; sbGesture = GEST_IDLE; sbRenderOverlay(); return true; }
-        if(ady >= 12 && ady >= adx){ sbGesture = GEST_SCROLLING; sbScrollLastY = T.y; return true; }
-        return true;
-      }
-    }
-    if(T.down && sbGesture == GEST_SCROLLING){
-      int dy = T.y - sbScrollLastY; sbScrollLastY = T.y;
-      int mx = sbScrollMax();
-      if(sbScrollY < 0 || sbScrollY > mx) sbScrollY -= dy / 2;   // zona de rebote: resistencia (mitad)
-      else sbScrollY -= dy;
-      if(sbScrollY < -SB_OVERSCROLL) sbScrollY = -SB_OVERSCROLL;
-      if(sbScrollY > mx + SB_OVERSCROLL) sbScrollY = mx + SB_OVERSCROLL;
-      unsigned long now = millis(); if(now - sbFrameMs >= SB_FRAME_MS){ sbFrameMs = now; sbRenderOverlay(); }
-      return true;
-    }
-    if(T.down && sbGesture == GEST_REORDER){
-      sbDragX = T.x; sbDragY = T.y;
-      int over; if(sbSlotAtY((int)sbDragY, over) && over != sbDragIcon){ sbPinMove(sbDragIcon, over); sbDragIcon = over; }
-      unsigned long now = millis(); if(now - sbFrameMs >= SB_FRAME_MS){ sbFrameMs = now; sbRenderOverlay(); }
-      return true;
-    }
-    if(T.released){
-      if(sbGesture == GEST_PRESSED && sbDragIcon >= 0){          // TAP sobre icono -> abrir ventana flotante
-        int adx = abs(T.x - sbPressX), ady = abs(T.y - sbPressY);
-        if(adx < 16 && ady < 16 && (millis() - sbPressMs) < 550){
-          uint8_t appID = sbAppId(sbDragIcon);
-          int iconCx = SB_ICON_X + SB_ICON_S / 2, iconCy = sbIconY(sbDragIcon) + SB_ICON_S / 2;
-          sbGesture = GEST_IDLE; sbDragIcon = -1;
-          if(APP_REG[appID].flags & APP_NO_WINDOW){ sbLaunchFull(appID); return true; }   // pantalla completa
-          if(wmCount >= WM_MAX){ return true; }                                            // sin hueco: ignora, panel abierto
-          sbClosePanel();
-          sbOpenFloatingAnim(appID, iconCx, iconCy);
-          return true;
-        }
-      }
-      if(sbGesture == GEST_REORDER) sbPinnedSave();      // persiste el nuevo orden UNA vez, al soltar
-      sbGesture = GEST_IDLE; sbDragIcon = -1;
-      if(sbScrollY < 0 || sbScrollY > sbScrollMax()) sbScrollSettle();   // rebote de vuelta
-      else sbRenderOverlay();
-      return true;
-    }
-    return true;                                        // panel abierto: absorbe cualquier otro toque
-  }
-
-  // 6) PANEL CERRADO: el tirador abre (tap o arrastre). Dentro de una App se
-  //    captura fb ANTES (unica copia del contenido; a partir de aqui su tick
-  //    queda en pausa mientras sbTick consuma el toque).
-  if(T.pressed && sbHitTab(T.startX, T.startY)){
-    if(gState == ST_APP && appSnapBuf && fb) memcpy(appSnapBuf, fb, (size_t)SCR_W * SCR_H * 2);
-    sbGesture = GEST_HANDLE; sbHandleReveal = 0;
-    sbPressMs = millis(); sbPressX = T.x; sbPressY = T.y;
-    return true;
-  }
-
-  // 7) Con ventanas abiertas (y sin tocar el tirador/panel): sus toques
-  //    (burbujas/controles/mover/redimensionar/cerrar) + tick de las alojadas.
-  if(wmCount > 0){
-    if(wmTouchWindows()){ sbRenderOverlay(); wmFlushPendingContent(); }
-    int before = wmCount;
-    wmTickHostedApps();
-    if(wmCount != before) sbRenderOverlay();
-    if(wmCount == 0){ sbSplitBottomPicker = false; sbRestoreBackground(); }
-    return true;
-  }
-
-  return false;
-}
-
-// #############################################################
 // ##  SEGURIDAD -> BLOQUEO (PIN / Contraseña)
 // ##  Todo compone en bbuf y presenta de una vez (anti-flicker).
 // #############################################################
@@ -10105,7 +8922,7 @@ static void notifPushDemo(){
 // maquina de estados del tactil.
 static void notifHandleTouch(){
   // La isla solo recibe toques cuando es visible (Home principal desbloqueado).
-  if(gState != ST_HOME || qsPanelY != 0 || editMode || sbOwnsScreen()){ notifDragIdx = -1; return; }
+  if(gState != ST_HOME || qsPanelY != 0 || editMode){ notifDragIdx = -1; return; }
   // Toques en tarjetas (cerrar, flick, iniciar arrastre)
   for(int i = 0; i < gNotifCount; i++){
     if(!gNotifs[i].active || gNotifs[i].phase == NP_OUT) continue;
@@ -10174,7 +8991,7 @@ static void notifTick(){
   // durante el bloqueo esperan congeladas y su animacion de entrada + los 5 s
   // arrancan al llegar aqui. Asi tambien evitamos el conflicto de dibujo con
   // otras pantallas (que son quienes deben poseer el fb en ese momento).
-  if(gState != ST_HOME || qsPanelY != 0 || editMode || sbOwnsScreen()){
+  if(gState != ST_HOME || qsPanelY != 0 || editMode){
     if(!notifPaused){ notifPaused = true; notifPauseT0 = millis(); }   // marca el inicio de la pausa (p.ej. se abrio una app)
     return;
   }
@@ -10399,7 +9216,6 @@ void setup(){
   cfgLoad();
   setBacklight(gBright);          // aplica el brillo guardado
   homeOrderLoad();                // orden de iconos del Home
-  sbPinnedLoad();                 // lista de apps ancladas al Panel Edge (persistida)
 
   clkBootMs = millis();
   seedMinOfDay = 13 * 60 + 23;      // siembra: sab 4 jul, 13:23 (como tus imagenes)
@@ -10433,14 +9249,12 @@ static void uiTick(){
   // conserva su cadencia de ~26 fps -- algunas llevan pasos por-frame (p.ej.
   // el resorte de iconos en Modo Edicion) y acelerarlas cambiaria su
   // VELOCIDAD, no solo su suavidad; por eso no se tocan.
-  bool fastPath = (gState == ST_HOME && gRippleActive && !sbOwnsScreen()
-                   && qsPanelY <= 0 && !editMode);
+  bool fastPath = (gState == ST_HOME && gRippleActive && qsPanelY <= 0 && !editMode);
   unsigned long interval = fastPath ? 16 : 38;
   if(millis() - uiAnimMs < interval) return;
   uiAnimMs = millis();
   if(gState == ST_HOME){
-    if(sbOwnsScreen()){}                         // Panel Edge activo: cede el control por completo (ver sbTick/sbRenderOverlay)
-    else if(qsPanelY > 0) qsRender();            // cortina visible: anima el destello de toque (incluso durante el drag)
+    if(qsPanelY > 0) qsRender();                // cortina visible: anima el destello de toque (incluso durante el drag)
     else if(editMode) edRender();               // jiggle continuo
     else if(gRippleActive) animateIconRipple(); // destello del icono tocado (Vidrio), ~0.5s
   }
@@ -10465,14 +9279,12 @@ void loop(){
     case ST_HOME:
       if(minChanged && qsPanelY == 0 && !editMode){
         renderHome();                    // refresca el cache homeBuf (offscreen: setBuf(homeBuf)...setBuf(fb), sin tocar pantalla)
-        if(sbOwnsScreen()) sbRenderOverlay();  // Panel Edge/ventanas visibles: recompone CON ellas encima (nunca las tapa)
-        else                showHome();        // camino normal, sin cambios
+        showHome();
       }
       if(editMode || !qsHandle()) homeTick();     // en edicion, saltar la cortina
       break;
     case ST_APP:       appTick(); break;
     case ST_SWITCHER:  swTick(); break;
-    case ST_WINMGR:    wmTick(); break;
     case ST_LOCKSETUP: lsuTick(); break;
     case ST_WIFI:      wifiTick(); break;
   }
