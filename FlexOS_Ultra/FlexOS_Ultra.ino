@@ -990,9 +990,22 @@ static void drawLiquidGlassPanelEx(int x, int y, int w, int h, int rad, uint16_t
       else               out = mix565(out, rgb565(0,0,0), (uint8_t)(((fj - h * 0.45f) / (h * 0.55f)) * 30));
       dst[i] = out;
     }
+    // Highlight direccional (luz simulada desde la esquina superior-izquierda):
+    // mismo bcol de siempre por fila (blanco arriba, negro abajo), pero la
+    // FUERZA de la mezcla se pondera distinto por lado en vez de usar 130 fijo
+    // en los dos bordes. Asi las 4 esquinas quedan con peso propio (arriba-
+    // izq. blanco fuerte, arriba-der. blanco tenue, abajo-izq. sombra tenue,
+    // abajo-der. sombra fuerte) en vez de una franja horizontal identica en
+    // ambos bordes. GLASS_CORNER_STRONG/WEAK promedian 130 (el valor de antes)
+    // para no cambiar el "peso" total del borde, solo redistribuirlo. Sigue
+    // siendo funcion de j nada mas: mismos 2 pixeles por fila de siempre.
+    const uint8_t GLASS_CORNER_STRONG = 172, GLASS_CORNER_WEAK = 88;
+    bool topZone = (j < h / 2);
+    uint8_t sL = topZone ? GLASS_CORNER_STRONG : GLASS_CORNER_WEAK;   // izquierda: blanco fuerte / sombra tenue
+    uint8_t sR = topZone ? GLASS_CORNER_WEAK   : GLASS_CORNER_STRONG; // derecha: blanco tenue / sombra fuerte
     uint16_t bcol = (j < 3) ? rgb565(255,255,255) : (j < h / 2 ? rgb565(205,214,228) : rgb565(22,28,40));
-    dst[ins] = mix565(dst[ins], bcol, 130);
-    dst[w - 1 - ins] = mix565(dst[w - 1 - ins], bcol, 130);
+    dst[ins] = mix565(dst[ins], bcol, sL);
+    dst[w - 1 - ins] = mix565(dst[w - 1 - ins], bcol, sR);
   }
 }
 static void drawLiquidGlassPanel(int x, int y, int w, int h, int rad, uint16_t tint){
