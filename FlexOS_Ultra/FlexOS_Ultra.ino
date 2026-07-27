@@ -919,6 +919,18 @@ static uint16_t  glLine[(SCR_W > SCR_H ? SCR_W : SCR_H)];
 static inline void un565(uint16_t c, int &r, int &g, int &b){ r = (c >> 11) & 0x1F; g = (c >> 5) & 0x3F; b = c & 0x1F; }
 static inline uint16_t pk565(int r, int g, int b){ return (uint16_t)((r << 11) | (g << 5) | b); }
 
+// Luma aproximada directamente en dominio 565, sin float y sin multiplicacion
+// real: el compilador reduce *5 a (x<<2)+x y *2 a x<<1. Devuelve 0..266 en vez
+// de 0..255, y NO se normaliza a proposito: solo se usa para comparar dos lumas
+// entre si (la del fondo contra la del tinte), y ambas viven en este mismo
+// dominio, asi que la resta es consistente. El error medio contra la luma
+// perceptual real es de ~5 niveles sobre 255, de sobra para decidir cuanto
+// tinte aplicar. Reutiliza un565 en vez de repetir el desempaquetado.
+static inline int glassLuma(uint16_t c){
+  int r, g, b; un565(c, r, g, b);
+  return ((r + g) * 5 + b * 2) >> 1;
+}
+
 // box-blur (suma corrediza) sobre glassBuf de ancho w, alto h
 static void glassBlur(int w, int h, int R){
   int r, g, b;
@@ -956,9 +968,21 @@ static int glInset(int j, int h, int rad){
 // corrediza O(w*h) que NO depende de blurR (ver mas arriba), asi que subir
 // blurR no cuesta rendimiento extra -- solo cambia cuanto se difumina el
 // fondo. drawLiquidGlassPanel() de siempre (abajo) sigue llamando a esta con
-// blurR=6, es decir: comportamiento IDENTICO al anterior en los ~19 sitios
-// existentes que ya la usan. Se penso para el panel rapido, que quiere un
-// vidrio mas "esmerilado" que el resto del sistema.
+// blurR=6, es decir: mismo blur que antes en los ~19 sitios existentes que ya
+// la usan. Se penso para el panel rapido, que quiere un vidrio mas
+// "esmerilado" que el resto del sistema.
+//
+// TINTE ADAPTATIVO: el porcentaje de mezcla del tinte ya no es el 58 fijo de
+// antes; se mueve dentro de [GLASS_TINT_MIN..GLASS_TINT_MAX] segun cuanto
+// difiera la luminancia del tinte respecto a la del fondo que quedo debajo del
+// panel. Esto SI cambia el aspecto de los ~19 sitios existentes (cambio pedido
+// y aprobado a proposito, no un efecto colateral): el blur y la geometria son
+// los de siempre, solo respira el tinte. GLASS_TINT_BASE es el valor historico
+// y queda como respaldo defensivo por si no se pudo tomar ninguna muestra.
+// GLASS_TINT_DIFF_MAX es potencia de dos a proposito: convierte la division
+// del mapeo en un desplazamiento.
+static const uint8_t GLASS_TINT_BASE = 58, GLASS_TINT_MIN = 46, GLASS_TINT_MAX = 70;
+static const int     GLASS_TINT_DIFF_MAX = 128;
 static void drawLiquidGlassPanelEx(int x, int y, int w, int h, int rad, uint16_t tint, int blurR){
   // GUARDA DE LANDSCAPE (Modo PC). Esta funcion lee y escribe el buffer con
   // indexacion VERTICAL directa (gBuf + (y+j)*SCR_W + x), asi que ignora por
@@ -976,7 +1000,33 @@ static void drawLiquidGlassPanelEx(int x, int y, int w, int h, int rad, uint16_t
   if(x + w > SCR_W) w = SCR_W - x; if(y + h > SCR_H) h = SCR_H - y;
   if(w <= 0 || h <= 0) return;
   if(2 * rad > w) rad = w / 2; if(2 * rad > h) rad = h / 2;
-  for(int j = 0; j < h; j++) memcpy(glassBuf + (size_t)j * w, gBuf + (size_t)(y + j) * SCR_W + x, w * 2);
+  // Sampleo del fondo para el tinte adaptativo. Se engancha al loop de memcpy
+  // que YA existe -- sin pasada extra, sin buffer nuevo, solo dos acumuladores
+  // en stack -- y lee 1 de cada 4 filas por 1 de cada 8 columnas, o sea 1/32 de
+  // los pixeles. Se mide ANTES del blur, sobre la region recien copiada. Se
+  // deja el memcpy en bloque en vez de acumular pixel a pixel porque copiar por
+  // bytes seria mas caro que el propio muestreo disperso.
+  uint32_t lumaSum = 0; int lumaN = 0;
+  for(int j = 0; j < h; j++){
+    uint16_t* row = glassBuf + (size_t)j * w;
+    memcpy(row, gBuf + (size_t)(y + j) * SCR_W + x, w * 2);
+    if((j & 3) == 0) for(int i = 0; i < w; i += 8){ lumaSum += (uint32_t)glassLuma(row[i]); lumaN++; }
+  }
+  // Cuanto MAS se parecen en luminancia el tinte y el fondo, MENOS tinte se
+  // aplica: si ya comparten tono, cargarle tinte solo lo aplana en un bloque
+  // liso, y conviene dejar ver el fondo. Cuanto mas difieren, mas tinte, para
+  // que el panel afirme su propio color en vez de lavarse contra el fondo. Un
+  // solo valor absoluto cubre los cuatro casos sin ramas: tinte oscuro sobre
+  // fondo oscuro y tinte claro sobre fondo claro dan diferencia chica (poco
+  // tinte); los dos cruzados dan diferencia grande (mas tinte). Todo esto se
+  // calcula UNA vez por panel, no por pixel.
+  uint8_t tintMix = GLASS_TINT_BASE;
+  if(lumaN > 0){
+    int dif = (int)(lumaSum / (uint32_t)lumaN) - glassLuma(tint);
+    if(dif < 0) dif = -dif;
+    if(dif > GLASS_TINT_DIFF_MAX) dif = GLASS_TINT_DIFF_MAX;
+    tintMix = (uint8_t)(GLASS_TINT_MIN + (dif * (GLASS_TINT_MAX - GLASS_TINT_MIN)) / GLASS_TINT_DIFF_MAX);
+  }
   glassBlur(w, h, blurR);
   for(int j = 0; j < h; j++){
     int yy = y + j; if(yy < gClipY0 || yy > gClipY1) continue;   // respeta la banda de recorte
@@ -985,7 +1035,7 @@ static void drawLiquidGlassPanelEx(int x, int y, int w, int h, int rad, uint16_t
     uint16_t* dst = gBuf + (size_t)yy * SCR_W + x;
     float fj = (float)j;
     for(int i = ins; i < w - ins; i++){
-      uint16_t out = mix565(src[i], tint, 58);
+      uint16_t out = mix565(src[i], tint, tintMix);   // tinte adaptativo (ver arriba), antes fijo en 58
       if(fj < h * 0.45f) out = mix565(out, rgb565(255,255,255), (uint8_t)((1.0f - fj / (h * 0.45f)) * 26));
       else               out = mix565(out, rgb565(0,0,0), (uint8_t)(((fj - h * 0.45f) / (h * 0.55f)) * 30));
       dst[i] = out;
