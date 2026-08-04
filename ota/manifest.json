@@ -1,7 +1,7 @@
 {
   "flex_os_ultra": {
-    "version": "1.0.0",
-    "url": "https://raw.githubusercontent.com/AccountDev-Design/Flex-OS-Ecosistema/main/ota/flexos_ultra.bin",
+        "version": "1.1.0",
+        "url": "https://raw.githubusercontent.com/AccountDev-Design/Flex-OS-Ecosistema/main/ota/flexos_ultra.bin",
     "size": 1835008,
     "md5": "00000000000000000000000000000000",
     "changelog": "Sistema global de actualizaciones OTA.\nNuevo panel Ajustes > Actualizaciones.\nNotificacion flotante estilo One UI.\nCorrecciones de estabilidad."
