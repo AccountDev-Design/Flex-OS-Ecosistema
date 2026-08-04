@@ -62,6 +62,14 @@
 #include "esp_sleep.h"           // deep sleep real + ext1/timer como fuente de despertar (ESP32-P4)
 #include "driver/gpio.h"         // gpio_hold_en / gpio_deep_sleep_hold_en (mantener RST del GT911 en sleep)
 
+// SISTEMA GLOBAL DE ACTUALIZACIONES OTA. Solo la API publica: toda la
+// logica (red, JSON, descarga por streaming, instalacion e interfaz One
+// UI) vive en FlexOS_OTA.cpp, que es comun a las tres placas. La version
+// de firmware y la URL del manifiesto se definen DENTRO de esa cabecera
+// -- no aqui -- porque el .cpp es una unidad de traduccion aparte y un
+// #define hecho en este .ino no llegaria hasta ella.
+#include "FlexOS_OTA.h"
+
 // -------------------------------------------------------------
 //  Tipos usados como PARAMETRO de alguna funcion (FGlyph en fgPix/
 //  drawGlyphScaled, PWin en pcDrawWindow, DexFit en dexHostFit/
@@ -5866,7 +5874,7 @@ static void settingsDetailContent(int cat){
     y = setRowCard(y, RI_CAL,     rgb565(235,90,90),  "Fecha y hora", v, true);
     y = setRowCard(y, RI_CLOCK,   rgb565(90,120,230), "Formato de hora", g24h ? "24 horas" : "12 horas", true);
     y = setRowCard(y, RI_PIN,     rgb565(230,80,80),  "Zona horaria", "GMT-05:00 Lima", true);
-    y = setRowCard(y, RI_REFRESH, rgb565(60,160,230), "Actualizaciones", "Proximamente", true);
+    y = setRowCard(y, RI_REFRESH, rgb565(60,160,230), "Actualizaciones", flexOtaStatusText(), true);
     y = setRowCard(y, RI_CLOUD,   rgb565(120,160,230),"Copias de seguridad", "Proximamente", true);
     y = setRowCard(y, RI_RESET,   rgb565(220,80,80),  "Restablecer", "Opciones de fabrica", true);
     y += 12; y = drawDeviceInfo(y);
@@ -6143,6 +6151,7 @@ static void settingsRowAction(int cat, int idx){
   if(cat == 0){
     if(idx == 0){ cfgLang = (cfgLang + 1) % 6; cfgSavePrefs(); gHomeDirty = true; settingsRender(); }         // idioma (cicla)
     else if(idx == 2){ g24h = !g24h; cfgSavePrefs(); gHomeDirty = true; settingsRenderDetailOnly(); }         // formato 12/24
+    else if(idx == 4) flexOtaOpenSettings();                                                                 // Actualizaciones -> pantalla OTA
   } else if(cat == 1){
     if(idx == 0){ gBright += 25; if(gBright > 100) gBright = 25; setBacklight(gBright); cfgSavePrefs(); settingsRenderDetailOnly(); }  // brillo real
     else if(idx == 1){ uiGlass = !uiGlass; cfgSavePrefs(); gHomeDirty = true; settingsRenderDetailOnly(); }    // estilo Liquid Glass
@@ -16284,6 +16293,12 @@ static void hwDetectTick(){
   }
 }
 
+// Puente del modulo OTA. Va AQUI, y no arriba, a proposito: implementa
+// las funciones otaHost* llamando a las primitivas graficas del sistema
+// (fillRect, drawText, present, setBuf...), que son `static` y por tanto
+// solo existen a partir del punto del fichero en que se definieron.
+#include "FlexOS_OTA_Bridge.h"
+
 
 void setup(){
   Serial.begin(115200);
@@ -16320,6 +16335,7 @@ void setup(){
 
   flexTouchInit();       // GT911: fallo suave (si no aparece, se sigue sin tactil)
   bootInitRadioSafe();   // WiFi/C6: BYPASS -> nunca bloquea el arranque
+  flexOtaBegin();        // OTA: crea la tarea de fondo (prioridad baja). No conecta ni descarga nada aqui.
   cfgLoad();
   setBacklight(gBright);          // aplica el brillo guardado
   homeOrderLoad();                // orden de iconos del Home
@@ -16399,6 +16415,7 @@ void loop(){
   suspFadeTick();         // SUSPENSION/APAGADO: un paso del fundido de backlight (no bloqueante)
   autoLockTick();         // FASE 1: bloqueo por inactividad (lee T sin filtrar, antes de que nadie consuma el toque)
   notifHandleTouch();     // la isla intercepta toques dentro de sus tarjetas (Fase 1)
+  flexOtaTouchBridge();   // OTA: si hay overlay visible, se queda el toque antes que nadie
   hwDetectTick();         // deteccion I2C incremental, mismo contexto que el tactil (Fase 2)
   bool minChanged = clkUpdate();
   gMinChanged = minChanged;
@@ -16431,6 +16448,7 @@ void loop(){
   kioskTick();            // FASE 4: refresca el candado y escucha el gesto de salida
   uiTick();               // animacion continua del vidrio
   notifTick();            // isla dinamica: anima y compone sobre la pantalla activa (Fase 1)
+  flexOtaRender();        // OTA: ULTIMA capa del pipeline grafico (nunca toca el fb de una app)
   delay(5);
 }
 

@@ -60,9 +60,28 @@
 //    CPU Frequency:      240 MHz
 //    Flash Size:         4MB (32Mb)       · Flash Mode: QIO 80MHz
 //    PSRAM:              Disabled         <-- la placa no la tiene
-//    Partition Scheme:   Huge APP (3MB No OTA/1MB SPIFFS)  <-- OBLIGATORIO
+//    Partition Scheme:   ver la nota de abajo  <-- CAMBIA CON EL OTA
 //    Upload Speed:       921600
 //    Core Debug Level:   None
+//
+//  PARTICIONES Y OTA  (LEER ANTES DE COMPILAR)
+//  -------------------------------------------
+//  Una actualizacion OTA necesita DOS particiones de aplicacion: se
+//  escribe en la que no esta corriendo y solo al final se cambia el
+//  arranque. Por eso el esquema historico de esta placa,
+//  "Huge APP (3MB No OTA/1MB SPIFFS)", NO sirve: tiene una sola.
+//
+//    · CON OTA     -> Partition Scheme: "Minimal SPIFFS
+//                     (1.9MB APP with OTA/190KB SPIFFS)"
+//                     El sketch tiene que caber en 1,9 MB.
+//    · SIN OTA     -> deja "Huge APP (3MB No OTA/1MB SPIFFS)" y pon
+//                     -DFLEXOS_OTA_ON=0 (o edita FLEXOS_OTA_ON en
+//                     FlexOS_OTA.h). El modulo se compila a nada y el
+//                     resto del sistema queda EXACTAMENTE igual.
+//
+//  Si te olvidas de cambiar el esquema no pasa nada malo: el modulo
+//  detecta que no hay segunda particion ANTES de descargar un solo
+//  byte y muestra "Particion sin soporte OTA". No se toca la flash.
 //
 //  LIBRERIA EXTRA NECESARIA: ninguna. El driver de pantalla y el
 //  del tactil son nativos (driver/spi_master) y viven dentro de
@@ -91,6 +110,18 @@
 #include "esp_task_wdt.h"        // TWDT: esp_task_wdt_reset() en loop()
 #include "esp_sleep.h"           // deep sleep real + ext1 como fuente de despertar
 #include "driver/gpio.h"         // gpio_hold_en / gpio_deep_sleep_hold_en (congelar pines en sleep)
+
+// SISTEMA GLOBAL DE ACTUALIZACIONES OTA. Solo la API publica: toda la
+// logica (red, JSON, descarga por streaming, instalacion e interfaz One
+// UI) vive en FlexOS_OTA.cpp, que es comun a las tres placas. La version
+// de firmware y la URL del manifiesto se definen DENTRO de esa cabecera
+// -- no aqui -- porque el .cpp es una unidad de traduccion aparte y un
+// #define hecho en este .ino no llegaria hasta ella.
+//
+// IMPORTANTE EN ESTA PLACA: el OTA necesita un esquema de particion CON
+// dos particiones de app. El que documenta la cabecera de este fichero
+// ("Huge APP 3MB No OTA") NO las tiene. Ver la nota del bloque ENTORNO.
+#include "FlexOS_OTA.h"
 
 
 // -------------------------------------------------------------
@@ -6848,7 +6879,7 @@ static void settingsDetailContent(int cat){
     y = setRowCard(y, RI_CAL,     rgb565(235,90,90),  "Fecha y hora", v, true);
     y = setRowCard(y, RI_CLOCK,   rgb565(90,120,230), "Formato de hora", g24h ? "24 horas" : "12 horas", true);
     y = setRowCard(y, RI_PIN,     rgb565(230,80,80),  "Zona horaria", "GMT-05:00 Lima", true);
-    y = setRowCard(y, RI_REFRESH, rgb565(60,160,230), "Actualizaciones", "Proximamente", true);
+    y = setRowCard(y, RI_REFRESH, rgb565(60,160,230), "Actualizaciones", flexOtaStatusText(), true);
     y = setRowCard(y, RI_CLOUD,   rgb565(120,160,230),"Copias de seguridad", "Proximamente", true);
     y = setRowCard(y, RI_RESET,   rgb565(220,80,80),  "Restablecer", "Opciones de fabrica", true);
     y += 12; y = drawDeviceInfo(y);
@@ -7133,6 +7164,7 @@ static void settingsRowAction(int cat, int idx){
   if(cat == 0){
     if(idx == 0){ cfgLang = (cfgLang + 1) % 6; cfgSavePrefs(); gHomeDirty = true; settingsRender(); }         // idioma (cicla)
     else if(idx == 2){ g24h = !g24h; cfgSavePrefs(); gHomeDirty = true; settingsRenderDetailOnly(); }         // formato 12/24
+    else if(idx == 4) flexOtaOpenSettings();                                                                 // Actualizaciones -> pantalla OTA
   } else if(cat == 1){
     if(idx == 0){ gBright += 25; if(gBright > 100) gBright = 25; setBacklight(gBright); cfgSavePrefs(); settingsRenderDetailOnly(); }  // brillo real
     else if(idx == 1){ uiGlass = !uiGlass; cfgSavePrefs(); gHomeDirty = true; settingsRenderDetailOnly(); }    // estilo Liquid Glass
@@ -17642,6 +17674,12 @@ static void tcalTick(){
   tcalRender();
 }
 
+// Puente del modulo OTA. Va AQUI, y no arriba, a proposito: implementa
+// las funciones otaHost* llamando a las primitivas graficas del sistema
+// (fillRect, drawText, present, setBuf...), que son `static` y por tanto
+// solo existen a partir del punto del fichero en que se definieron.
+#include "FlexOS_OTA_Bridge.h"
+
 void setup(){
   Serial.begin(115200);
   delay(60);
@@ -17693,6 +17731,7 @@ void setup(){
   bool needCal = (gtOk && (!tsCalibDone() || digitalRead(PIN_TP_IRQ) == LOW));
   flexI2CInit();         // bus I2C de modulos externos (FASE 2)
   bootInitRadioSafe();   // WiFi: nunca bloquea el arranque
+  flexOtaBegin();        // OTA: crea la tarea de fondo (prioridad baja). No conecta ni descarga nada aqui.
   cfgLoad();
   setBacklight(gBright);          // aplica el brillo guardado
   homeOrderLoad();                // orden de iconos del Home
@@ -17779,6 +17818,7 @@ void loop(){
   suspFadeTick();         // SUSPENSION/APAGADO: un paso del fundido de backlight (no bloqueante)
   autoLockTick();         // FASE 1: bloqueo por inactividad (lee T sin filtrar, antes de que nadie consuma el toque)
   notifHandleTouch();     // la isla intercepta toques dentro de sus tarjetas (Fase 1)
+  flexOtaTouchBridge();   // OTA: si hay overlay visible, se queda el toque antes que nadie
   hwDetectTick();         // deteccion I2C incremental, mismo contexto que el tactil (Fase 2)
   bool minChanged = clkUpdate();
   gMinChanged = minChanged;
@@ -17812,6 +17852,7 @@ void loop(){
   kioskTick();            // FASE 4: refresca el candado y escucha el gesto de salida
   uiTick();               // animacion continua del vidrio
   notifTick();            // isla dinamica: anima y compone sobre la pantalla activa (Fase 1)
+  flexOtaRender();        // OTA: ULTIMA capa del pipeline grafico (nunca toca el fb de una app)
   delay(5);
 }
 
