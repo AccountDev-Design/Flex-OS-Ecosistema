@@ -111,6 +111,26 @@ static volatile uint32_t     gBps      = 0;    // velocidad suavizada (B/s)
 static volatile bool         gCancel   = false;
 static volatile bool         gHasUpd   = false; // hay version nueva confirmada
 
+// Candado de los campos de progreso. Cada campo por separado ya seria
+// atomico (32 bits alineados), pero la UI los pinta JUNTOS: sin esto
+// podia dibujar el porcentaje nuevo al lado del contador de bytes viejo
+// -- una cifra incoherente durante un cuadro. La seccion critica es de
+// cuatro asignaciones, asi que no cuesta nada medible.
+static portMUX_TYPE gProgMux = portMUX_INITIALIZER_UNLOCKED;
+
+// Instantanea coherente de todo el progreso, para que el render trabaje
+// sobre valores de un mismo momento.
+struct OtaProgSnap { uint8_t pct; uint32_t done, total, bps; FlexOtaState st; };
+static void otaProgSnapshot(OtaProgSnap* s){
+  portENTER_CRITICAL(&gProgMux);
+  s->pct   = gPercent;
+  s->done  = gDone;
+  s->total = gTotal;
+  s->bps   = gBps;
+  portEXIT_CRITICAL(&gProgMux);
+  s->st    = gState;
+}
+
 // Ordenes de la UI hacia la tarea (una sola palabra, sin cola: la
 // ultima orden gana, que es exactamente lo que quiere el usuario).
 enum : uint8_t { CMD_NONE = 0, CMD_CHECK, CMD_INSTALL };
@@ -375,6 +395,50 @@ static bool otaCheck(){
   return true;
 }
 
+// -------------------------------------------------------------
+//  ¿Es este MD5 utilizable de verdad?
+//  Exige 32 digitos hexadecimales Y que no sean todo ceros. Lo
+//  segundo es lo importante: "00000000000000000000000000000000" es
+//  el valor de relleno que llevan los manifiestos de ejemplo, mide
+//  32 caracteres y por tanto pasaba cualquier filtro de longitud.
+//  Pasarselo a Update.setMD5() condena la actualizacion: el MD5 real
+//  de la imagen nunca sera 32 ceros, asi que Update.end() falla
+//  siempre y la descarga termina en "Firmware corrupto".
+// -------------------------------------------------------------
+static bool otaMd5Usable(const char* s){
+  if(!s || strlen(s) != 32) return false;
+  bool allZero = true;
+  for(int i = 0; i < 32; i++){
+    char c = s[i];
+    bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+    if(!hex) return false;               // no es hexadecimal -> inservible
+    if(c != '0') allZero = false;
+  }
+  return !allZero;                        // 32 ceros = relleno, no un hash
+}
+
+// -------------------------------------------------------------
+//  Traza de diagnostico. Se emite al empezar, cada 10% y al acabar.
+//  Lleva lo necesario para explicar un reinicio aleatorio sin tener
+//  que reproducirlo con un depurador conectado:
+//    core   -> en que nucleo corre de verdad la tarea OTA
+//    heap   -> memoria libre (y el minimo historico)
+//    pila   -> bytes que le SOBRAN a la tarea en su peor momento;
+//              si esto se acerca a 0, el reinicio es desbordamiento
+//              de pila y hay que subir FLEXOS_OTA_TASK_STACK
+//    bytes  -> escritos vs esperados
+// -------------------------------------------------------------
+static void otaLogProgress(const char* tag, uint32_t written, uint32_t total){
+  Serial.printf("[OTA] %-13s core=%d  pct=%3u  bytes=%u/%u  heap=%u (min %u)  pila_libre=%u\n",
+                tag,
+                (int)xPortGetCoreID(),
+                (unsigned)(total ? (uint32_t)((uint64_t)written * 100u / total) : 0u),
+                (unsigned)written, (unsigned)total,
+                (unsigned)esp_get_free_heap_size(),
+                (unsigned)esp_get_minimum_free_heap_size(),
+                (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
+}
+
 // ---- Paso 2: descarga por streaming + instalacion -----------------
 static bool otaInstall(){
   if(!gHasUpd || !gUrl[0]) return otaFail(OTA_ERR_BAD_URL);
@@ -407,9 +471,26 @@ static bool otaInstall(){
   if(!Update.begin(total, U_FLASH)){                                      // no cabe en la particion
     http.end(); return otaFail(OTA_ERR_BEGIN);
   }
-  // Integridad REAL: si el manifiesto trae md5, Update lo verifica al
-  // cerrar y rechaza la imagen si no cuadra (-> OTA_ERR_CORRUPT).
-  if(gMd5[0] && strlen(gMd5) == 32) Update.setMD5(gMd5);
+  // Integridad REAL: si el manifiesto trae un MD5 DE VERDAD, Update lo
+  // verifica al cerrar y rechaza la imagen si no cuadra.
+  //
+  // El filtro otaMd5Usable() no es cosmetico: el manifiesto de ejemplo
+  // se publico con "00000000000000000000000000000000" como relleno. Esa
+  // cadena tiene 32 caracteres, asi que la comprobacion anterior
+  // (strlen == 32) la daba por buena y se la pasaba a Update.setMD5().
+  // Al cerrar, el MD5 real de la imagen jamas coincide con 32 ceros ->
+  // Update.end() fallaba SIEMPRE -> "Firmware corrupto" al final de cada
+  // descarga completa. Ahora un relleno se ignora (con aviso por Serial)
+  // en vez de condenar la actualizacion.
+  if(otaMd5Usable(gMd5)){
+    Update.setMD5(gMd5);
+    Serial.printf("[OTA] verificacion MD5 activa: %s\n", gMd5);
+  } else if(gMd5[0]){
+    Serial.printf("[OTA] AVISO: md5 del manifiesto no utilizable (\"%s\"); se omite la verificacion MD5.\n"
+                  "[OTA]        La imagen se sigue validando por cabecera y tamano.\n", gMd5);
+  } else {
+    Serial.println(F("[OTA] AVISO: el manifiesto no trae md5; se omite la verificacion MD5."));
+  }
 
   otaSet(OTA_DOWNLOADING);
   WiFiClient* st = http.getStreamPtr();
@@ -417,6 +498,9 @@ static bool otaInstall(){
 
   uint32_t written = 0, last = millis();
   uint32_t spdBytes = 0, spdT0 = millis();
+  uint8_t  logStep = 0;                    // ultimo tramo de 10% registrado
+
+  otaLogProgress("inicio", 0, total);
 
   while(written < total){
     // --- Cancelacion: se atiende en cada vuelta ---
@@ -429,32 +513,69 @@ static bool otaInstall(){
       int r = st->readBytes(gChunk, want);
       if(r <= 0){ vTaskDelay(pdMS_TO_TICKS(2)); continue; }
 
-      if(Update.write(gChunk, (size_t)r) != (size_t)r){                  // fallo de escritura en flash
+      // --- ESCRITURA EN FLASH, SERIALIZADA CON LA SUBIDA AL PANEL ---
+      // Escribir en la flash SPI apaga la cache de los dos nucleos. Si el
+      // presenter (Core 0) estuviera en mitad de su DMA hacia el MIPI-DSI,
+      // el FIFO del panel se vaciaria y saldria un frame basura: ese era
+      // el destello cian que aparecia en cada 1%. Con el candado del
+      // panel tomado, la escritura espera a que la subida en vuelo
+      // termine y el presenter no puede empezar otra mientras tanto.
+      // El bloque es de 4 KB (~1-3 ms), muy por debajo del presupuesto
+      // de 33 ms por cuadro de la UI.
+      otaHostLockPanel();
+      size_t w = Update.write(gChunk, (size_t)r);
+      otaHostUnlockPanel();
+
+      if(w != (size_t)r){                                               // fallo de escritura en flash
+        Serial.printf("[OTA] ERROR de escritura: pedidos %d, escritos %u\n", r, (unsigned)w);
         Update.abort(); http.end(); return otaFail(OTA_ERR_WRITE);
       }
       written  += (uint32_t)r;
       spdBytes += (uint32_t)r;
       last      = millis();
 
-      // Publicacion del progreso (escalares volatiles: la UI los lee sin bloquear)
+      // Publicacion del progreso bajo seccion critica: los cuatro campos
+      // se actualizan juntos, asi que la UI nunca puede leer un
+      // porcentaje nuevo con un contador de bytes viejo (o al reves).
+      uint8_t pct = (uint8_t)((uint64_t)written * 100u / total);
+      portENTER_CRITICAL(&gProgMux);
       gDone    = written;
-      gPercent = (uint8_t)((uint64_t)written * 100u / total);
+      gPercent = pct;
+      portEXIT_CRITICAL(&gProgMux);
 
       uint32_t dt = millis() - spdT0;
       if(dt >= 500){                       // velocidad suavizada cada 0,5 s
         uint32_t inst = (uint32_t)((uint64_t)spdBytes * 1000u / dt);
+        portENTER_CRITICAL(&gProgMux);
         gBps = gBps ? (uint32_t)(((uint64_t)gBps * 3u + inst) / 4u) : inst;
+        portEXIT_CRITICAL(&gProgMux);
         spdBytes = 0; spdT0 = millis();
       }
+
+      // Diagnostico cada 10%: si vuelve a aparecer un reinicio aleatorio,
+      // el ultimo tramo registrado dice donde y con cuanta memoria/pila.
+      if(pct / 10 > logStep){
+        logStep = pct / 10;
+        otaLogProgress("descarga", written, total);
+      }
+
+      // Cede la CPU entre bloques. La tarea OTA y el loop() grafico
+      // comparten el Core 1 con la MISMA prioridad (1), asi que sin esta
+      // cesion explicita el reparto dependeria solo del corte por tick:
+      // la UI se veria a tirones y el TWDT del loopTask se acercaria
+      // demasiado a su limite.
+      vTaskDelay(1);
     } else {
       if(!st->connected() && !st->available()) break;                    // conexion cerrada antes de tiempo
       if(millis() - last > FLEXOS_OTA_STALL_TIMEOUT){                    // ni un byte en 15 s
+        Serial.printf("[OTA] TIMEOUT sin datos en %u bytes de %u\n", (unsigned)written, (unsigned)total);
         Update.abort(); http.end(); return otaFail(OTA_ERR_TIMEOUT);
       }
       vTaskDelay(pdMS_TO_TICKS(4));        // cede CPU: el hilo grafico sigue a 30-60 fps
     }
   }
   http.end();
+  otaLogProgress("fin descarga", written, total);
 
   if(written != total){ Update.abort(); return otaFail(OTA_ERR_TRUNCATED); }
 
@@ -463,14 +584,25 @@ static bool otaInstall(){
   vTaskDelay(pdMS_TO_TICKS(120));          // deja ver el estado en pantalla
 
   otaSet(OTA_INSTALLING);
-  if(!Update.end(true)){                   // valida MD5 + cabecera de imagen
+  // Update.end() vuelca el ultimo bloque y sella la particion: tambien
+  // escribe en flash, asi que va bajo el mismo candado que el resto de
+  // escrituras (misma razon: no solapar con la DMA del panel).
+  otaHostLockPanel();
+  bool endOk = Update.end(true);           // valida MD5 + cabecera de imagen
+  otaHostUnlockPanel();
+
+  if(!endOk){
+    Serial.printf("[OTA] Update.end() fallo, codigo=%u: %s\n",
+                  (unsigned)Update.getError(), Update.errorString());
     Update.abort();
     return otaFail(OTA_ERR_CORRUPT);
   }
   if(!Update.isFinished()){
+    Serial.println(F("[OTA] Update.isFinished() == false tras end()"));
     Update.abort();
     return otaFail(OTA_ERR_CORRUPT);
   }
+  otaLogProgress("instalada", written, total);
 
   // --- Finalizacion ----------------------------------------------
   otaSet(OTA_FINALIZING);
@@ -884,32 +1016,62 @@ static void otaDrawModal(){
 // =============================================================
 //  CAPA 3 · PANTALLA DE INSTALACION
 // =============================================================
-static void otaDrawProgress(){
+// Extremos de la BANDA DINAMICA (porcentaje, barra y cifras): lo unico
+// que cambia mientras baja el firmware.
+static int gProgDynTop = 0, gProgDynBot = 0;
+
+// full = true  -> pinta la pantalla entera y publica 0..H-1
+// full = false -> repinta SOLO la banda dinamica y publica esa franja
+//
+// POR QUE IMPORTA: la version anterior hacia siempre lo primero, asi que
+// cada 1% copiaba el framebuffer completo (480x800 = 768 KB) y lanzaba
+// una subida DMA de pantalla entera al MIPI-DSI. Eso, mas de 100 veces
+// durante una descarga y compitiendo con el trafico SDIO del C6 y con
+// las escrituras en flash, es lo que llenaba la ventana de riesgo del
+// destello cian. Ahora un tick de progreso mueve ~190 filas en vez de
+// 800: cerca de un 76% menos de trafico hacia el panel.
+//
+// El aspecto NO cambia: mismas coordenadas, mismos textos, mismo estilo.
+static void otaDrawProgress(bool full){
   int W = otaHostScrW(), H = otaHostScrH();
-  FlexOtaState s = gState;
-  uint8_t pct = gPercent;
+  OtaProgSnap p; otaProgSnapshot(&p);          // lectura coherente del progreso
+  bool bad = (p.st == OTA_ERROR);
+  if(bad) full = true;                          // el error tiene otra composicion
 
-  otaHostBeginCompose();
-  otaHostFillRect(0, 0, W, H, cBg());
-
-  int y = H / 2 - (OTA_MODAL_H / 2);
-  if(y < 60) y = 60;
-
-  int is = OTA_ICON + 20;
-  bool bad = (s == OTA_ERROR);
-  if(bad) otaGlyphErr(( W - is) / 2, y, is, cErr(), otaHostRGB(255,255,255));
-  else    otaGlyphUpdate((W - is) / 2, y, is, cAccent(), otaHostRGB(255,255,255));
-  y += is + 24;
-
-  otaHostTextC(W / 2, y, bad ? "No se pudo actualizar" : "Actualizando FlexOS", OTA_SZ_HEAD, cTxtHi());
-  y += OTA_SZ_HEAD * 10 + 10;
+  // --- Geometria, calculada igual en las dos rutas ---
+  int yTop = H / 2 - (OTA_MODAL_H / 2);
+  if(yTop < 60) yTop = 60;
+  int is    = OTA_ICON + 20;
+  int yHead = yTop + is + 24;
+  int yVer  = yHead + OTA_SZ_HEAD * 10 + 10;
+  int yDyn  = yVer + OTA_SZ_SMALL * 10 + 30;   // aqui empieza lo que cambia
+  int dynH  = OTA_SZ_BIG * 10 + 22 + 10 + 26
+            + OTA_SZ_BODY * 10 + 12
+            + (OTA_SZ_SMALL * 10 + 6) * 2 + 8;
+  if(yDyn + dynH > H - 1) dynH = H - 1 - yDyn;
+  gProgDynTop = yDyn; gProgDynBot = yDyn + dynH - 1;
 
   char l[72];
-  snprintf(l, sizeof(l), "%s %s", FLEXOS_OTA_PLAT_NAME, gRemoteVer);
-  otaHostTextC(W / 2, y, l, OTA_SZ_SMALL, cTxtLo());
-  y += OTA_SZ_SMALL * 10 + 30;
+  otaHostBeginCompose();
 
+  if(full){
+    otaHostFillRect(0, 0, W, H, cBg());
+    if(bad) otaGlyphErr((W - is) / 2, yTop, is, cErr(), otaHostRGB(255,255,255));
+    else    otaGlyphUpdate((W - is) / 2, yTop, is, cAccent(), otaHostRGB(255,255,255));
+    otaHostTextC(W / 2, yHead, bad ? "No se pudo actualizar" : "Actualizando FlexOS",
+                 OTA_SZ_HEAD, cTxtHi());
+    snprintf(l, sizeof(l), "%s %s", FLEXOS_OTA_PLAT_NAME, gRemoteVer);
+    otaHostTextC(W / 2, yVer, l, OTA_SZ_SMALL, cTxtLo());
+  } else {
+    // Solo la franja que cambia. El recorte impide que un texto largo se
+    // salga de la banda publicada y deje restos fuera de ella.
+    otaHostClip(yDyn, yDyn + dynH - 1);
+    otaHostFillRect(0, yDyn, W, dynH, cBg());
+  }
+
+  // --- Rama de error (siempre pintado completo) ---
   if(bad){
+    int y = yDyn;
     otaHostTextC(W / 2, y, otaErrText(gError), OTA_SZ_BODY, cErr());
     y += OTA_SZ_BODY * 10 + 16;
     otaHostTextC(W / 2, y, "El equipo no se ha modificado.", OTA_SZ_SMALL, cTxtLo());
@@ -917,51 +1079,58 @@ static void otaDrawProgress(){
     btnReset();
     int bw = W - 2 * (OTA_M + 40);
     otaButton(BT_CLOSE, (W - bw) / 2, y, bw, OTA_BTN_H, "Entendido", true);
+    otaHostClip(0, H - 1);
     otaHostEndCompose(0, H - 1);
     return;
   }
 
-  // Porcentaje gigante
-  snprintf(l, sizeof(l), "%u%%", (unsigned)pct);
+  // --- Banda dinamica ---
+  int y = yDyn;
+  snprintf(l, sizeof(l), "%u%%", (unsigned)p.pct);          // porcentaje gigante
   otaHostTextC(W / 2, y, l, OTA_SZ_BIG, cTxtHi());
   y += OTA_SZ_BIG * 10 + 22;
 
-  // Barra
-  otaProgressBar(OTA_M + 24, y, W - 2 * (OTA_M + 24), 10, pct);
+  otaProgressBar(OTA_M + 24, y, W - 2 * (OTA_M + 24), 10, p.pct);   // barra
   y += 26;
 
-  // Estado + cifras
-  otaHostTextC(W / 2, y, otaPhaseText(s), OTA_SZ_BODY, cAccent());
+  otaHostTextC(W / 2, y, otaPhaseText(p.st), OTA_SZ_BODY, cAccent());
   y += OTA_SZ_BODY * 10 + 12;
 
-  if(gTotal > 0){
+  if(p.total > 0){
     char a[24], b[24];
-    otaFmtBytes(gDone, a, sizeof(a));
-    otaFmtBytes(gTotal, b, sizeof(b));
+    otaFmtBytes(p.done,  a, sizeof(a));
+    otaFmtBytes(p.total, b, sizeof(b));
     snprintf(l, sizeof(l), "%s / %s", a, b);
     otaHostTextC(W / 2, y, l, OTA_SZ_SMALL, cTxtLo());
     y += OTA_SZ_SMALL * 10 + 6;
   }
-  if(gBps > 0 && s == OTA_DOWNLOADING){
-    char v[24]; otaFmtBytes(gBps, v, sizeof(v));
+  if(p.bps > 0 && p.st == OTA_DOWNLOADING){
+    char v[24]; otaFmtBytes(p.bps, v, sizeof(v));
     snprintf(l, sizeof(l), "%s/s", v);
     otaHostTextC(W / 2, y, l, OTA_SZ_SMALL, cTxtLo());
-    y += OTA_SZ_SMALL * 10 + 6;
   }
 
-  y += 24;
-  btnReset();
-  // Cancelar SOLO mientras se puede abortar sin dejar nada a medias.
-  // A partir de OTA_INSTALLING ya no se ofrece: la imagen se esta
-  // cerrando y cortar ahi no aportaria nada bueno.
-  if(s == OTA_CONNECTING || s == OTA_DOWNLOADING){
-    int bw = W - 2 * (OTA_M + 40);
-    otaButton(BT_CANCEL, (W - bw) / 2, y, bw, OTA_BTN_H, "Cancelar", false);
-  } else if(s == OTA_REBOOTING){
-    otaHostTextC(W / 2, y + 8, "El equipo se reiniciara solo", OTA_SZ_SMALL, cTxtLo());
+  // --- Pie: solo en pintado completo ---
+  //  btnReset()/otaButton NO pueden ejecutarse en el repintado parcial:
+  //  vaciarian el registro de zonas pulsables en cada 1% y "Cancelar"
+  //  dejaria de responder entre tick y tick.
+  if(full){
+    int yBtn = yDyn + dynH + 16;
+    btnReset();
+    // Cancelar SOLO mientras se puede abortar sin dejar nada a medias.
+    // A partir de OTA_INSTALLING ya no se ofrece: la imagen se esta
+    // cerrando y cortar ahi no aportaria nada bueno.
+    if(p.st == OTA_CONNECTING || p.st == OTA_DOWNLOADING){
+      int bw = W - 2 * (OTA_M + 40);
+      otaButton(BT_CANCEL, (W - bw) / 2, yBtn, bw, OTA_BTN_H, "Cancelar", false);
+    } else if(p.st == OTA_REBOOTING){
+      otaHostTextC(W / 2, yBtn + 8, "El equipo se reiniciara solo", OTA_SZ_SMALL, cTxtLo());
+    }
+    otaHostEndCompose(0, H - 1);
+  } else {
+    otaHostClip(0, H - 1);
+    otaHostEndCompose(gProgDynTop, gProgDynBot);   // solo la franja
   }
-
-  otaHostEndCompose(0, H - 1);
 }
 
 // =============================================================
@@ -1301,9 +1470,14 @@ void flexOtaRender(){
   if(gOv == OVERLAY_DOWNLOADING){
     uint8_t pct = gPercent;
     bool anim = (millis() - gOvT0 < OTA_ANIM_IN);
-    if(gOvDirty || anim || s != gShownState || pct != gShownPct){
+    // Pintado COMPLETO solo cuando cambia algo del marco fijo (fase de la
+    // instalacion, primera aparicion). Un simple avance de porcentaje
+    // repinta unicamente la banda dinamica -- que es lo que evita mandar
+    // 768 KB al panel mas de cien veces durante una descarga.
+    bool needFull = (gOvDirty || anim || s != gShownState);
+    if(needFull || pct != gShownPct){
       gShownState = s; gShownPct = pct; gOvDirty = false;
-      otaDrawProgress();
+      otaDrawProgress(needFull);
     }
     return;
   }
