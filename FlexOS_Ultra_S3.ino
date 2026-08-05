@@ -16759,7 +16759,28 @@ static void poffWakeGate(){
 // -------------------------------------------------------------
 #define FLEXOS_WIFI_TIMEOUT_MS 15000
 
+// Declarados mas abajo (necesitan wifiSavedSSID y el resto del bloque
+// Wi-Fi), pero bootInitRadioSafe() los usa: prototipos aqui.
+static bool wifiCredsLoad();
+#if FLEXOS_ENABLE_WIFI
+static void wifiTryAutoConnect();
+#endif
+
 static void bootInitRadioSafe(){
+#if FLEXOS_ENABLE_WIFI
+  // RECONEXION AUTOMATICA. Si hay una red guardada de una sesion anterior,
+  // se intenta en una tarea de fondo con 15 s de limite. El arranque NO se
+  // bloquea: setup() sigue y la UI aparece igual de rapido que siempre.
+  // Si no hay nada guardado, o el intento falla, todo queda como antes y
+  // el usuario configura a mano desde Ajustes > Red e Internet > Wi-Fi.
+  // (el SSID concreto lo imprime wifiAutoConnTask, que ya vive dentro del
+  // bloque Wi-Fi y por tanto SI ve wifiSavedSSID)
+  if(wifiCredsLoad()){
+    Serial.println(F("[NET] hay red guardada -> reconexion automatica en segundo plano"));
+    wifiTryAutoConnect();
+    return;
+  }
+#endif
   Serial.println(F("[NET] WiFi nativo del S3 en modo bajo demanda -> Ajustes > Red e Internet > Wi-Fi"));
 }
 
@@ -16800,9 +16821,74 @@ static char     wifiConnSSID[33] = "";
 static char     wifiConnPass[64] = "";
 static char     wifiConnIP[24]   = "";
 
+// #############################################################
+// ##  CREDENCIALES GUARDADAS (NVS) + RECONEXION AUTOMATICA
+// ##  ------------------------------------------------------
+// ##  Antes, la red elegida a mano solo vivia en RAM: cada
+// ##  apagado obligaba a repetir escaneo + seleccion + clave.
+// ##  Ahora, la PRIMERA conexion correcta guarda SSID y clave en
+// ##  NVS (namespace propio "flexos_wifi", separado de "flexos"
+// ##  para que un borrado de ajustes no arrastre la red y al
+// ##  reves), y el arranque las reutiliza en segundo plano.
+// #############################################################
+#define WIFI_NVS_NS    "flexos_wifi"
+#define WIFI_NVS_SSID  "ssid"
+#define WIFI_NVS_PASS  "pass"
+
+static char          wifiSavedSSID[33] = "";
+static char          wifiSavedPass[64] = "";
+static volatile bool gWifiAutoBusy  = false;   // intento automatico en curso
+static volatile bool gWifiAutoDone  = false;   // ya se intento (con exito o no)
+
+static bool wifiCredsExist(){ return wifiSavedSSID[0] != 0; }
+
+// Carga las credenciales de NVS a RAM. Se llama una vez en el arranque.
+static bool wifiCredsLoad(){
+  Preferences p;
+  if(!p.begin(WIFI_NVS_NS, true)){ wifiSavedSSID[0] = 0; wifiSavedPass[0] = 0; return false; }
+  String s = p.getString(WIFI_NVS_SSID, "");
+  String w = p.getString(WIFI_NVS_PASS, "");
+  p.end();
+  s.toCharArray(wifiSavedSSID, sizeof(wifiSavedSSID));
+  w.toCharArray(wifiSavedPass, sizeof(wifiSavedPass));
+  return wifiCredsExist();
+}
+
+// Guarda (solo si algo cambio: escribir NVS sin necesidad desgasta la flash).
+static void wifiCredsSave(const char* ssid, const char* pass){
+  if(!ssid || !ssid[0]) return;
+  if(!strcmp(wifiSavedSSID, ssid) && !strcmp(wifiSavedPass, pass ? pass : "")) return;
+  Preferences p;
+  if(!p.begin(WIFI_NVS_NS, false)) return;
+  p.putString(WIFI_NVS_SSID, ssid);
+  p.putString(WIFI_NVS_PASS, pass ? pass : "");
+  p.end();
+  strncpy(wifiSavedSSID, ssid, sizeof(wifiSavedSSID) - 1); wifiSavedSSID[sizeof(wifiSavedSSID) - 1] = 0;
+  strncpy(wifiSavedPass, pass ? pass : "", sizeof(wifiSavedPass) - 1); wifiSavedPass[sizeof(wifiSavedPass) - 1] = 0;
+  Serial.printf("[WiFi] red guardada: %s\n", wifiSavedSSID);
+}
+
+// Olvida la red (cambio de router). Borra NVS y la copia en RAM.
+static void wifiCredsForget(){
+  Preferences p;
+  if(p.begin(WIFI_NVS_NS, false)){ p.clear(); p.end(); }
+  wifiSavedSSID[0] = 0; wifiSavedPass[0] = 0;
+  gWifiAutoDone = true;                      // no reintentar en esta sesion
+  Serial.println(F("[WiFi] red guardada borrada"));
+}
+
+// GUARD DE MODO. Todo intento de escaneo o conexion pasa por aqui: el
+// driver debe estar en STA antes de tocarlo. Llamar a WiFi.mode() cuando
+// ya se esta en el modo pedido es innecesario y en el transporte hosted
+// del C6 reinicia la interfaz sin motivo, asi que solo se cambia si hace
+// falta de verdad.
+static void wifiEnsureStaMode(){
+  if(WiFi.getMode() != WIFI_STA) WiFi.mode(WIFI_STA);
+}
+
 #if FLEXOS_ENABLE_WIFI
 static void wifiScanTask(void*){
-  WiFi.mode(WIFI_STA);
+  wifiEnsureStaMode();
   int n = WiFi.scanNetworks();                // bloqueante, pero en su PROPIA tarea: loop() sigue vivo
   // ANTI-CRASH: construir la lista FUERA de toda seccion critica. La version
   // anterior copiaba dentro de portENTER_CRITICAL(&wifiMux), pero WiFi.SSID()
@@ -16834,7 +16920,7 @@ static void wifiScanTask(void*){
   vTaskDelete(NULL);
 }
 static void wifiConnTask(void*){
-  WiFi.mode(WIFI_STA);
+  wifiEnsureStaMode();
   WiFi.begin(wifiConnSSID, wifiConnPass);
   uint32_t t0 = millis();
   while(WiFi.status() != WL_CONNECTED && millis() - t0 < FLEXOS_WIFI_TIMEOUT_MS){
@@ -16845,6 +16931,10 @@ static void wifiConnTask(void*){
     IPAddress ip = WiFi.localIP();
     String ips = ip.toString();
     ips.toCharArray(wifiConnIP, sizeof(wifiConnIP));
+    // PERSISTENCIA: solo se guarda lo que YA se ha comprobado que
+    // funciona. Guardar antes de confirmar dejaria una clave erronea
+    // fija en NVS y el equipo reintentaria con ella en cada arranque.
+    wifiCredsSave(wifiConnSSID, wifiConnPass);
     wifiUIState = WUI_OK;
   } else {
     gNetOnline = false;
@@ -16853,10 +16943,59 @@ static void wifiConnTask(void*){
   }
   vTaskDelete(NULL);
 }
+
+// ---- RECONEXION AUTOMATICA AL ARRANCAR ----------------------------
+// Misma forma que wifiConnTask (tarea propia en el Core 1, 8 KB de pila,
+// cesiones con vTaskDelay), pero NO toca wifiUIState: corre de fondo con
+// la pantalla de Wi-Fi cerrada, y esa variable pertenece a esa pantalla.
+// Si tocara wifiUIState, abrir Ajustes > Wi-Fi a mitad del intento
+// mostraria un "Conectando..." que el usuario no ha pedido.
+static void wifiAutoConnTask(void*){
+  Serial.printf("[WiFi] reconexion automatica a \"%s\"...\n", wifiSavedSSID);
+  wifiEnsureStaMode();
+  WiFi.begin(wifiSavedSSID, wifiSavedPass);
+  uint32_t t0 = millis();
+  while(WiFi.status() != WL_CONNECTED && millis() - t0 < FLEXOS_WIFI_TIMEOUT_MS){
+    vTaskDelay(pdMS_TO_TICKS(200));
+  }
+  if(WiFi.status() == WL_CONNECTED){
+    gNetOnline = true;
+    IPAddress ip = WiFi.localIP();
+    String ips = ip.toString();
+    ips.toCharArray(wifiConnIP, sizeof(wifiConnIP));
+    strncpy(wifiConnSSID, wifiSavedSSID, sizeof(wifiConnSSID) - 1);
+    wifiConnSSID[sizeof(wifiConnSSID) - 1] = 0;
+    Serial.printf("[WiFi] reconectado. IP %s\n", wifiConnIP);
+  } else {
+    // Fallo (router apagado, clave cambiada, fuera de alcance): se suelta
+    // la radio y NO se borra nada. Las credenciales siguen guardadas para
+    // el proximo arranque; el usuario puede entrar a Ajustes > Wi-Fi y
+    // configurar a mano, que es el camino de siempre.
+    gNetOnline = false;
+    WiFi.disconnect(true, true);
+    Serial.println(F("[WiFi] reconexion automatica fallida -> queda la configuracion manual"));
+  }
+  gWifiAutoBusy = false;
+  gWifiAutoDone = true;
+  vTaskDelete(NULL);
+}
+
+// Lanza el intento automatico si hay algo guardado. No bloquea el arranque.
+static void wifiTryAutoConnect(){
+  if(gWifiAutoBusy || gWifiAutoDone) return;
+  if(!wifiCredsExist()){
+    gWifiAutoDone = true;
+    Serial.println(F("[WiFi] sin red guardada -> configuracion manual"));
+    return;
+  }
+  gWifiAutoBusy = true;
+  xTaskCreatePinnedToCore(wifiAutoConnTask, "wifiAuto", 8192, NULL, 1, NULL, 1);
+}
 #endif
 
 static void wifiStartScan(){
 #if FLEXOS_ENABLE_WIFI
+  wifiEnsureStaMode();
   wifiUIState = WUI_SCANNING;
   portENTER_CRITICAL(&wifiMux); wifiNetCount = 0; portEXIT_CRITICAL(&wifiMux);
   xTaskCreatePinnedToCore(wifiScanTask, "wifiScan", 8192, NULL, 1, NULL, 1);   // 8KB: scanNetworks() + String necesitan mas que 6KB (evita stack overflow)
@@ -16865,6 +17004,7 @@ static void wifiStartScan(){
 static void wifiStartConnect(){
 #if FLEXOS_ENABLE_WIFI
   if(wifiSel < 0 || wifiSel >= WIFI_MAX_NETS){ wifiUIState = WUI_LIST; return; }  // indice invalido -> nunca leer wifiNets[] fuera de rango
+  wifiEnsureStaMode();
   strncpy(wifiConnSSID, wifiNets[wifiSel].ssid, sizeof(wifiConnSSID) - 1); wifiConnSSID[sizeof(wifiConnSSID) - 1] = 0;
   strncpy(wifiConnPass, wifiPass, sizeof(wifiConnPass) - 1); wifiConnPass[sizeof(wifiConnPass) - 1] = 0;
   wifiUIState = WUI_CONNECTING;
@@ -16876,11 +17016,37 @@ static void wifiPassBackspace(){ int L = strlen(wifiPass); if(L > 0){ int q = L 
 static void wifiBack(){ strokeSegAA(30, 26, 18, 18, 2.4f, rgb565(255,255,255)); strokeSegAA(18, 18, 30, 10, 2.4f, rgb565(255,255,255)); }
 
 static int wifiRowY(int i){ return 150 + i * 66; }
+
+// Geometria de los botones del pie. UNA sola fuente para el dibujo y para
+// el tap: si el "Olvidar red" aparece o desaparece segun haya red guardada,
+// las dos rutas cambian a la vez y la zona pulsable no puede desalinearse
+// de lo pintado (mismo criterio que setRowCard/setRowY0 en Ajustes).
+static void wifiBtnRects(int& by, int& sx, int& sw, int& fx, int& fw){
+  by = SCR_H - 90;
+  if(wifiCredsExist()){                       // dos botones lado a lado
+    int w = (SCR_W - 48 - 12) / 2;
+    sx = 24;              sw = w;
+    fx = 24 + w + 12;     fw = w;
+  } else {                                    // solo "Buscar redes", centrado
+    sx = SCR_W / 2 - 110; sw = 220;
+    fx = 0;               fw = 0;
+  }
+}
+
 static void wifiRenderList(){
   setBuf(fb);
   fillRect(0, 0, SCR_W, SCR_H, rgb565(14,16,24));
   wifiBack();
   drawTextC(SCR_W / 2, 60, "Wi-Fi", 4, rgb565(255,255,255));
+  // Estado de la red recordada, justo bajo el titulo.
+  if(wifiCredsExist()){
+    char sv[64];
+    bool on = (WiFi.status() == WL_CONNECTED);
+    snprintf(sv, sizeof(sv), "%s %s", on ? "Conectado a" : "Red guardada:", wifiSavedSSID);
+    drawTextC(SCR_W / 2, 112, sv, 1, on ? rgb565(120,220,160) : rgb565(150,158,178));
+  } else if(gWifiAutoBusy){
+    drawTextC(SCR_W / 2, 112, "Reconectando...", 1, rgb565(150,158,178));
+  }
   int cnt; portENTER_CRITICAL(&wifiMux); cnt = wifiNetCount; portEXIT_CRITICAL(&wifiMux);
   if(wifiUIState == WUI_SCANNING){
     drawTextC(SCR_W / 2, 300, "Buscando redes...", 2, rgb565(160,170,196));
@@ -16898,9 +17064,14 @@ static void wifiRenderList(){
       }
     }
   }
-  int by = SCR_H - 90;                        // boton "Buscar redes" (reescanear)
-  fillRoundRect(SCR_W / 2 - 110, by, 220, 56, 16, rgb565(60,110,235));
-  drawTextC(SCR_W / 2, by + 18, wifiUIState == WUI_SCANNING ? "Buscando..." : "Buscar redes", 2, rgb565(255,255,255));
+  int by, sx, sw, fx, fw;
+  wifiBtnRects(by, sx, sw, fx, fw);
+  fillRoundRect(sx, by, sw, 56, 16, rgb565(60,110,235));       // "Buscar redes" (reescanear)
+  drawTextC(sx + sw / 2, by + 18, wifiUIState == WUI_SCANNING ? "Buscando..." : "Buscar redes", 2, rgb565(255,255,255));
+  if(fw > 0){                                                   // "Olvidar red" (cambio de router)
+    fillRoundRect(fx, by, fw, 56, 16, rgb565(58,62,80));
+    drawTextC(fx + fw / 2, by + 18, "Olvidar red", 2, rgb565(240,180,180));
+  }
   flxFlushAll();
 }
 static void wifiRenderPass(int yoff){
@@ -16998,8 +17169,18 @@ static void wifiTick(){
     case WUI_LIST: {
       if(T.tap){
         if(T.x < 48 && T.y < 48){ wifiExit(); return; }
-        int by = SCR_H - 90;
-        if(T.y >= by && T.y <= by + 56 && T.x >= SCR_W/2 - 110 && T.x <= SCR_W/2 + 110){ wifiStartScan(); return; }
+        int by, sx, sw, fx, fw;
+        wifiBtnRects(by, sx, sw, fx, fw);
+        if(T.y >= by && T.y <= by + 56){
+          if(T.x >= sx && T.x <= sx + sw){ wifiStartScan(); return; }
+          if(fw > 0 && T.x >= fx && T.x <= fx + fw){       // Olvidar red guardada
+            wifiCredsForget();
+            WiFi.disconnect(true, true);                   // suelta tambien la sesion en curso
+            gNetOnline = false;
+            wifiRenderList();                              // el boton desaparece al no haber red
+            return;
+          }
+        }
         int cnt; portENTER_CRITICAL(&wifiMux); cnt = wifiNetCount; portEXIT_CRITICAL(&wifiMux);
         for(int i = 0; i < cnt; i++){
           int y = wifiRowY(i); if(y > SCR_H - 60) break;

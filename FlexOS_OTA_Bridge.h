@@ -46,6 +46,20 @@ bool otaHostDark() { return gDark;   }
 bool otaHostGlass(){ return uiGlass; }
 
 // =============================================================
+//  EXCLUSION PANEL <-> FLASH
+//  -------------------------------------------------------------
+//  flxFbMux es el mismo mutex que el presenter toma alrededor de
+//  esp_lcd_panel_draw_bitmap() + la espera de fin de DMA. Prestarselo
+//  a la tarea OTA para que envuelva Update.write() garantiza que una
+//  escritura en flash (que apaga la cache de ambos nucleos) nunca
+//  coincida con una subida al panel en vuelo -> se acabo el destello
+//  cian. No hay riesgo de interbloqueo: ninguno de los dos lados lo
+//  toma de forma anidada, y es un mutex con herencia de prioridad.
+// =============================================================
+void otaHostLockPanel()  { fbLock();   }
+void otaHostUnlockPanel(){ fbUnlock(); }
+
+// =============================================================
 //  COMPOSICION
 //  -------------------------------------------------------------
 //  El OTA compone SIEMPRE en bbuf y publica la banda ya terminada

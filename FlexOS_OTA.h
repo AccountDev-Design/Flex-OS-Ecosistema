@@ -38,6 +38,13 @@
 #include <stdint.h>
 #include <stddef.h>
 
+// sdkconfig.h ANTES que nada: de ahi salen las macros CONFIG_IDF_TARGET_*
+// con las que este fichero decide la plataforma (bloque 2). Esta cabecera
+// la incluye tambien el .ino ANTES de <Arduino.h>, asi que no se puede dar
+// por hecho que alguien ya las haya definido: sin este include, la
+// deteccion caeria siempre en el #error del final del bloque 2.
+#include "sdkconfig.h"
+
 // =============================================================
 //  1) VERSION DE FIRMWARE Y ORIGEN DEL MANIFIESTO
 //  -------------------------------------------------------------
@@ -121,8 +128,14 @@
   #define FLEXOS_OTA_MIN_HEAP     48000
 #else
   #define FLEXOS_OTA_CHUNK        4096
+  // 16 KB de pila. Antes eran 12 KB y la tarea se quedaba corta de
+  // margen: el handshake TLS de mbedTLS y HTTPClient anidan bastantes
+  // marcos, y un desbordamiento de pila aqui aparece como un reinicio
+  // aleatorio a mitad de la descarga -- exactamente el sintoma que se
+  // vio en placa. La marca de agua real se registra por Serial cada
+  // 10% (ver otaLogProgress) para poder ajustarlo con datos.
+  #define FLEXOS_OTA_TASK_STACK   16384
   #define FLEXOS_OTA_MANIFEST_MAX 4096
-  #define FLEXOS_OTA_TASK_STACK   12288
   #define FLEXOS_OTA_CHANGELOG_MAX 320
   #define FLEXOS_OTA_MIN_HEAP     56000
 #endif
@@ -251,6 +264,23 @@ int  otaHostScrH();          // alto  logico  (800 Ultra/S3 · 640 Pro)
 bool otaHostIsHome();        // el escritorio esta visible y libre
 bool otaHostDark();          // gDark   (modo oscuro / claro)
 bool otaHostGlass();         // uiGlass (Liquid Glass activado)
+
+// --- Exclusion PANEL <-> FLASH  (arregla el parpadeo cian) ---------
+//  Toman el MISMO mutex que el presenter grafico usa alrededor de
+//  esp_lcd_panel_draw_bitmap() + espera de fin de DMA.
+//
+//  Por que hace falta: escribir en la flash SPI obliga al IDF a
+//  deshabilitar la cache de los DOS nucleos mientras dura la
+//  operacion. Si en ese instante el presenter (Core 0) esta subiendo
+//  el framebuffer al panel MIPI-DSI, su DMA se queda sin poder leer y
+//  el FIFO del DSI se vacia: el panel pinta un frame basura -- el
+//  destello cian de milisegundos que aparecia en cada 1%.
+//
+//  Tomando este candado alrededor de Update.write(), la escritura en
+//  flash espera a que la subida en curso termine, y el presenter no
+//  puede arrancar una nueva mientras se escribe. Nunca se solapan.
+void otaHostLockPanel();
+void otaHostUnlockPanel();
 
 // --- Composicion (NUNCA se dibuja sobre el fb de una app) ----------
 void otaHostBeginCompose();              // setBuf(bbuf) + recorte completo
