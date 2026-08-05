@@ -15468,6 +15468,13 @@ static void autoLockTick(){
   // decidido y bloquear a medias solo puede romper la animacion.
   if(SUSPEND_ON && gSuspOn) return;
   if(POWEROFF_ON && (gState == ST_POWEROFF_CONFIRM || gState == ST_POWEROFF_ANIM)) return;
+  // NUNCA auto-bloquear con una actualizacion en marcha. Una descarga no
+  // genera toques, asi que el temporizador de inactividad vencia a mitad
+  // de la OTA (30 s por defecto): caia la pantalla de bloqueo, se
+  // repintaba a pantalla completa peleandose con la de progreso, y el
+  // usuario se encontraba pidiendo el PIN mientras se estaba flasheando.
+  // Tambien se respeta cualquier capa OTA a pantalla completa.
+  if(flexOtaBusy() || flexOtaOwnsScreen()){ gLastTouchMs = millis(); return; }
   // Ni encima de la calibracion tactil: el usuario puede tardar en apuntar
   // bien a las cruces, y bloquear a mitad dejaria la calibracion sin
   // terminar y sin restaurar el respaldo.
@@ -16675,6 +16682,51 @@ static void poffAnimTick(){
 #endif
 }
 
+// -------------------------------------------------------------
+//  ALIMENTACION DEFENSIVA DEL TASK WATCHDOG
+//  -------------------------------------------------------------
+//  esp_task_wdt_reset() solo es valido si la tarea que llama esta
+//  SUSCRITA al TWDT. Si no lo esta devuelve ESP_ERR_NOT_FOUND y el
+//  componente task_wdt imprime un ERROR por CADA llamada:
+//
+//      E (17336) task_wdt: esp_task_wdt_reset(705): task not found
+//
+//  Desde loop(), que da unas 200 vueltas por segundo, eso satura el
+//  puerto serie y deja el log inservible para diagnosticar nada mas.
+//
+//  Por que se puede perder la suscripcion: levantar la pila WiFi (en el
+//  P4, el enlace esp-hosted/SDIO con el C6) reinicializa el TWDT y con
+//  el se va la lista de suscriptores. Antes no se notaba porque la
+//  radio no se encendia nunca sola; en cuanto el arranque empezo a
+//  levantarla, el bucle aparecio en cada boot.
+//
+//  Diseño: en el caso normal esto es UNA sola llamada por vuelta, igual
+//  de barato que antes. En cuanto falla UNA vez se deja de llamar y se
+//  pasa a reintentar la suscripcion cada 5 s -- asi el log ve una linea
+//  en la transicion y como mucho una cada 5 s, nunca un bucle. Y si el
+//  TWDT vuelve a estar disponible, la vigilancia se recupera sola: no
+//  se abandona nunca de forma permanente.
+// -------------------------------------------------------------
+static void flexFeedWdt(){
+  static bool     subscribed = true;      // Arduino suscribe el loopTask al arrancar
+  static uint32_t nextTry    = 0;
+  if(subscribed){
+    if(esp_task_wdt_reset() == ESP_OK) return;          // caso normal
+    subscribed = false;                                 // se perdio la suscripcion
+    nextTry    = millis() + 5000;
+    Serial.println(F("[WDT] loopTask ya no esta suscrito al Task Watchdog; reintentando cada 5 s"));
+    return;
+  }
+  uint32_t now = millis();
+  if(now < nextTry) return;                             // sin insistir: eso es lo que inundaba
+  nextTry = now + 5000;
+  if(esp_task_wdt_add(NULL) == ESP_OK){
+    subscribed = true;
+    Serial.println(F("[WDT] loopTask resuscrito al Task Watchdog"));
+    esp_task_wdt_reset();
+  }
+}
+
 // ---- Filtro de arranque: 3 segundos de presion sostenida ----------------
 // POR QUE ASI (es el punto mas delicado de todo el apagado):
 // En deep sleep el loop() no existe, asi que NO hay forma de cronometrar los 3
@@ -16704,7 +16756,7 @@ static void poffWakeGate(){
   if(!gtOk) return;                                      // sin tactil no hay forma de confirmar: se arranca
   uint32_t t0 = millis(), heldFrom = 0;
   while(millis() - t0 < POFF_WAKE_GATE_MS){
-    esp_task_wdt_reset();                                // el TWDT se alimenta igual que en loop()
+    flexFeedWdt();                                       // el TWDT se alimenta igual que en loop() (defensivo)
     uint16_t gx = 0, gy = 0;
     gtPoll(gx, gy);
     int n = (millis() - gtFingersMs > 120) ? 0 : (int)gtFingers;
@@ -16759,29 +16811,36 @@ static void poffWakeGate(){
 // -------------------------------------------------------------
 #define FLEXOS_WIFI_TIMEOUT_MS 15000
 
-// Declarados mas abajo (necesitan wifiSavedSSID y el resto del bloque
-// Wi-Fi), pero bootInitRadioSafe() los usa: prototipos aqui.
+// Definido mas abajo (necesita wifiSavedSSID y el resto del bloque Wi-Fi).
 static bool wifiCredsLoad();
-#if FLEXOS_ENABLE_WIFI
-static void wifiTryAutoConnect();
-#endif
 
+// Cuanto se espera desde el arranque antes del PRIMER intento de
+// reconexion automatica. No es un adorno: da tiempo a que el panel, el
+// tactil y el escritorio esten en marcha, de modo que un fallo al
+// levantar la radio se vea con el sistema ya vivo y no a mitad del
+// arranque.
+#define FLEXOS_WIFI_AUTOCONN_DELAY_MS 6000
+
+// -------------------------------------------------------------
+//  setup() NO TOCA LA RADIO. NI UNA SOLA VEZ.
+//  -------------------------------------------------------------
+//  Esta placa lleva radio nativa, asi que aqui no hay el enlace SDIO
+//  fragil del P4; aun asi se mantiene EL MISMO criterio en las tres
+//  variantes del sistema. Levantar la pila WiFi dentro de setup() dejo
+//  de ser aceptable cuando se comprobo que puede reinicializar el Task
+//  Watchdog y tumbar la suscripcion del loopTask, lo que inunda el log
+//  con "task_wdt: esp_task_wdt_reset(705): task not found" desde el
+//  primer arranque. Una sola regla para las tres placas es ademas mas
+//  facil de razonar que una excepcion por variante.
+//
+//  Aqui solo se leen las credenciales de NVS -- eso es flash, no radio,
+//  y es seguro. El intento real lo dispara wifiAutoReconnectTick()
+//  desde loop(), ya con el sistema arrancado.
+// -------------------------------------------------------------
 static void bootInitRadioSafe(){
-#if FLEXOS_ENABLE_WIFI
-  // RECONEXION AUTOMATICA. Si hay una red guardada de una sesion anterior,
-  // se intenta en una tarea de fondo con 15 s de limite. El arranque NO se
-  // bloquea: setup() sigue y la UI aparece igual de rapido que siempre.
-  // Si no hay nada guardado, o el intento falla, todo queda como antes y
-  // el usuario configura a mano desde Ajustes > Red e Internet > Wi-Fi.
-  // (el SSID concreto lo imprime wifiAutoConnTask, que ya vive dentro del
-  // bloque Wi-Fi y por tanto SI ve wifiSavedSSID)
-  if(wifiCredsLoad()){
-    Serial.println(F("[NET] hay red guardada -> reconexion automatica en segundo plano"));
-    wifiTryAutoConnect();
-    return;
-  }
-#endif
-  Serial.println(F("[NET] WiFi nativo del S3 en modo bajo demanda -> Ajustes > Red e Internet > Wi-Fi"));
+  bool saved = wifiCredsLoad();          // solo NVS: no levanta la radio
+  if(saved) Serial.println(F("[NET] hay red guardada -> se intentara reconectar tras el arranque (nunca dentro de setup)"));
+  else      Serial.println(F("[NET] WiFi nativo del S3 en modo bajo demanda -> Ajustes > Red e Internet > Wi-Fi"));
 }
 
 // ---- BLE opcional (ahora NATIVO) ----------------------------------------
@@ -16991,7 +17050,33 @@ static void wifiTryAutoConnect(){
   gWifiAutoBusy = true;
   xTaskCreatePinnedToCore(wifiAutoConnTask, "wifiAuto", 8192, NULL, 1, NULL, 1);
 }
+#endif   // FLEXOS_ENABLE_WIFI
+
+// -------------------------------------------------------------
+//  RECONEXION AUTOMATICA DIFERIDA  (se llama desde loop())
+//  -------------------------------------------------------------
+//  Se ejecuta en cada vuelta pero solo hace algo UNA vez, y nunca
+//  antes de que el sistema este operativo: escritorio o pantalla de
+//  bloqueo, y unos segundos despues del encendido.
+//
+//  El retraso NO es cosmetico. La radio de esta placa cuelga de un
+//  co-procesador C6 por SDIO, y levantarla dentro de setup() es lo que
+//  producia el bucle de "PANIC (crash)" que documenta el bloque "EL
+//  ARRANQUE YA NUNCA TOCA LA RADIO". Disparandola desde aqui, el
+//  enlace se abre en la misma ventana contenida y observable que la
+//  ruta manual: si el C6 falla, el sistema ya esta vivo y el fallo se
+//  ve, en vez de llevarse por delante el arranque entero.
+// -------------------------------------------------------------
+static void wifiAutoReconnectTick(){
+#if FLEXOS_ENABLE_WIFI
+  if(gWifiAutoDone || gWifiAutoBusy) return;
+  if(gState != ST_HOME && gState != ST_LOCK) return;      // aun arrancando: esperar
+  if(millis() < FLEXOS_WIFI_AUTOCONN_DELAY_MS) return;
+  if(!wifiCredsExist()){ gWifiAutoDone = true; return; }
+  Serial.println(F("[WiFi] sistema listo -> lanzando reconexion automatica"));
+  wifiTryAutoConnect();
 #endif
+}
 
 static void wifiStartScan(){
 #if FLEXOS_ENABLE_WIFI
@@ -18313,15 +18398,43 @@ static void uiTick(){
 }
 
 void loop(){
-  esp_task_wdt_reset();   // alimenta el TWDT del loopTask en cada vuelta (API 3.x/IDF5)
+  flexFeedWdt();          // alimenta el TWDT solo si loopTask sigue suscrito (ver arriba)
   flexPollTouch();        // (aqui dentro corre tambien el detector de doble-tap de la suspension)
   suspFadeTick();         // SUSPENSION/APAGADO: un paso del fundido de backlight (no bloqueante)
   autoLockTick();         // FASE 1: bloqueo por inactividad (lee T sin filtrar, antes de que nadie consuma el toque)
   notifHandleTouch();     // la isla intercepta toques dentro de sus tarjetas (Fase 1)
   flexOtaTouchBridge();   // OTA: si hay overlay visible, se queda el toque antes que nadie
   hwDetectTick();         // deteccion I2C incremental, mismo contexto que el tactil (Fase 2)
+  wifiAutoReconnectTick();// reconexion WiFi diferida (la radio NUNCA se toca en setup(); ver bootInitRadioSafe)
   bool minChanged = clkUpdate();
   gMinChanged = minChanged;
+
+  // -----------------------------------------------------------
+  //  PANTALLA EN EXCLUSIVA PARA EL OTA
+  //  ---------------------------------------------------------
+  //  Con una capa OTA a pantalla completa (changelog, progreso o
+  //  ajustes de actualizacion), NINGUN otro subsistema dibuja.
+  //
+  //  Por que: el overlay no cambia gState -- durante una descarga
+  //  seguimos en ST_HOME. Sin este corte, en cada vuelta se
+  //  ejecutaban igualmente homeTick(), kioskTick(), uiTick() y
+  //  notifTick(), y todos ellos componen en el MISMO bbuf y
+  //  publican su banda con present(). Entre dos repintados del OTA
+  //  se colaba una banda con el fondo del escritorio -- un degradado
+  //  azul/verde -- justo encima de la pantalla de progreso: ese era
+  //  el "parpadeo cian" en cada 1%. No era una carrera entre
+  //  nucleos (el presenter es el unico que habla con el panel y ya
+  //  estaba protegido por flxFbMux): era que nadie tenia la
+  //  propiedad exclusiva de la pantalla.
+  //
+  //  El tactil, el TWDT, la deteccion I2C y la radio SIGUEN
+  //  corriendo arriba: aqui solo se corta el DIBUJO.
+  // -----------------------------------------------------------
+  if(flexOtaOwnsScreen()){
+    flexOtaRender();
+    delay(5);
+    return;
+  }
 
   switch(gState){
     case ST_SPLASH:    splashTick(); break;

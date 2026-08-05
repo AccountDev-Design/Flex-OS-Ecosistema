@@ -1307,6 +1307,13 @@ bool flexOtaBusy(){
          s == OTA_VERIFYING || s == OTA_INSTALLING || s == OTA_FINALIZING || s == OTA_REBOOTING;
 }
 
+// La tarjeta flotante NO cuenta: es pequeña, vive sobre el escritorio y
+// necesita que el escritorio se siga dibujando debajo. Las otras tres
+// capas ocupan la pantalla entera y deben tenerla en exclusiva.
+bool flexOtaOwnsScreen(){
+  return gOv == OVERLAY_CHANGELOG || gOv == OVERLAY_DOWNLOADING || gOv == OVERLAY_SETTINGS;
+}
+
 // =============================================================
 //  TACTIL  (se llama TEMPRANO en loop, junto a notifHandleTouch)
 //  -------------------------------------------------------------
@@ -1515,6 +1522,7 @@ FlexOtaError flexOtaError()        { return OTA_ERR_NONE; }
 OverlayState flexOtaOverlay()      { return OVERLAY_HIDDEN; }
 bool         flexOtaOverlayActive(){ return false; }
 bool         flexOtaBusy()         { return false; }
+bool         flexOtaOwnsScreen()   { return false; }
 const char*  flexOtaLocalVersion() { return FLEXOS_FW_VERSION; }
 const char*  flexOtaRemoteVersion(){ return ""; }
 const char*  flexOtaChangelog()    { return ""; }
