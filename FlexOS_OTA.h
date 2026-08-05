@@ -242,6 +242,20 @@ FlexOtaError flexOtaError();
 OverlayState flexOtaOverlay();
 bool         flexOtaOverlayActive();   // hay capa OTA visible
 bool         flexOtaBusy();            // hay trabajo de red en curso
+
+// TRUE cuando hay una capa OTA A PANTALLA COMPLETA (changelog, progreso
+// o ajustes). Mientras lo sea, el .ino debe dejar de dibujar TODO lo
+// demas: escritorio, cortina, isla de notificaciones, kiosco...
+//
+// Por que hace falta: fb y bbuf son compartidos por todos los
+// subsistemas graficos, y cada uno publica su propia banda con
+// present(). Si el escritorio o la isla siguen componiendo mientras el
+// OTA ocupa la pantalla, sus bandas se cuelan ENCIMA del progreso entre
+// dos repintados del OTA -- y como el fondo del escritorio es un
+// degradado azul/verde, eso se ve como un destello cian de milisegundos
+// en cada avance del porcentaje. No es una carrera entre nucleos: es
+// que nadie tenia la propiedad exclusiva de la pantalla.
+bool         flexOtaOwnsScreen();
 const char*  flexOtaLocalVersion();    // "1.0.0"
 const char*  flexOtaRemoteVersion();   // "1.2.0" ("" si aun no se sabe)
 const char*  flexOtaChangelog();
