@@ -58,6 +58,11 @@
 //    Flash Size:         16MB (128Mb)     · Flash Mode: QIO 80MHz
 //    PSRAM:              OPI PSRAM        <-- OBLIGATORIO (N16R8)
 //    Partition Scheme:   16M Flash (3MB APP/9.9MB FATFS)
+//                        (o cualquiera con SPIFFS: FlexOS_FS monta
+//                        LittleFS sobre la zona de datos probando las
+//                        etiquetas spiffs/littlefs/ffat/storage. La
+//                        primera vez la formatea -- hasta ahora esa
+//                        zona no guardaba nada, los ajustes van en NVS.)
 //                        o cualquiera con >=3MB de app + SPIFFS
 //    USB CDC On Boot:    Enabled (recomendado, deja libre UART0)
 //    Arduino Runs On / Events Run On: Core 1 (por defecto)
@@ -100,6 +105,30 @@
 // -- no aqui -- porque el .cpp es una unidad de traduccion aparte y un
 // #define hecho en este .ino no llegaria hasta ella.
 #include "FlexOS_OTA.h"
+
+// SISTEMA DE ARCHIVOS REAL (LittleFS). Toda la logica de ficheros vive en
+// FlexOS_FS.cpp -- comun a las tres placas -- para no tener tres copias de
+// lo mismo que se desincronicen. Aqui solo se dibuja.
+#include "FlexOS_FS.h"
+
+// ---- DISPONIBILIDAD REAL DE BLE ------------------------------------------
+// No se escribe a mano "el P4 no tiene BLE": se le pregunta al SDK. soc_caps.h
+// define SOC_BLE_SUPPORTED solo en los chips que llevan radio Bluetooth, asi
+// que el interruptor de BLE queda deshabilitado con "No disponible" en las
+// placas que no pueden hacerlo, y funcional en las que si -- decidido en
+// tiempo de COMPILACION, sin listas de modelos que mantener.
+#include "soc/soc_caps.h"
+#if defined(SOC_BLE_SUPPORTED) && SOC_BLE_SUPPORTED
+  #define FLEXOS_BLE_HW 1
+#else
+  #define FLEXOS_BLE_HW 0
+#endif
+#ifndef FLEXOS_ENABLE_BLE
+  #define FLEXOS_ENABLE_BLE FLEXOS_BLE_HW
+#endif
+#if FLEXOS_ENABLE_BLE
+  #include <BLEDevice.h>
+#endif
 
 // -------------------------------------------------------------
 //  Tipos usados como PARAMETRO de alguna funcion (FGlyph en fgPix/
@@ -574,6 +603,14 @@ static uint16_t i2cSweepId    = 0;                 // id del barrido (para recon
 // vive toda junto a bootInitRadioSafe(), al final del archivo.
 #define FLEXOS_ENABLE_WIFI 1
 static volatile bool gNetOnline = false;   // true tras un WiFi.begin() exitoso; lo lee la UI (Ajustes, icono, etc.)
+
+// Estado de las OTRAS dos radios, aqui arriba por el mismo motivo que
+// gNetOnline: la pantalla de Ajustes lee los tres para pintar la categoria
+// "Red e Internet", y esta ANTES en el archivo que la seccion de radio.
+//   gAirplane -> modo avion (persistido en NVS, clave "airpl")
+//   gBleOn    -> hay advertising BLE activo AHORA MISMO
+static bool gAirplane = false;
+static bool gBleOn    = false;
 
 // #############################################################
 // ##  CAPA DE HARDWARE  ·  ESP32-S3 N16R8
@@ -5315,7 +5352,12 @@ static void noteInsert(const char* s);                    // Notas: insercion en
 // ST_KBSET (Fase E del teclado) se anade tambien al final, por identico motivo.
 // ST_TOUCHCAL (calibracion tactil del port S3) va el ultimo, por lo mismo.
 enum { ST_SPLASH = 0, ST_OOBE_LANG, ST_OOBE_NAME, ST_LOCK, ST_HOME, ST_APP, ST_SWITCHER, ST_LOCKSETUP, ST_WIFI, ST_CTX, ST_KIOSKSET,
-       ST_POWEROFF_CONFIRM, ST_POWEROFF_ANIM, ST_KBSET, ST_TOUCHCAL };
+       ST_POWEROFF_CONFIRM, ST_POWEROFF_ANIM, ST_KBSET, ST_TOUCHCAL,
+       // Anadidos AL FINAL por el mismo motivo que los anteriores: no mover
+       // el valor de ningun estado ya existente.
+       ST_CONN,        // Conectividad: Wifi / BLE / Modo avion
+       ST_FILES };     // Explorador de archivos real
+
 static int  gState = ST_SPLASH;
 static unsigned long splashStart = 0;
 static int  lockOff = 0, lastLockOff = -1;
@@ -6039,6 +6081,12 @@ static void camEnter(); static void camTick();             // Camara (esqueleto)
 static void noteEnter(); static void noteTick();           // Notas + teclado 4 capas
 static void almEnter(); static void eduEnter(); static void navEnter();  // apps simples
 static void ideEnter(); static void ideTick(); static void paintEnter(); static void paintTick();
+static void almTick();                                     // Almacenamiento: tap en "Ver..."
+static void filesTick();                                   // Explorador de archivos (ST_FILES)
+static void connEnter(); static void connTick();           // Conectividad (ST_CONN)
+static void flexBleStop(); static bool flexBleStart();     // radio BLE real
+static void connWifiSub(char* out, size_t n);              // SSID real para Ajustes
+static void connBleSub(char* out, size_t n);
 static void geoEnter(); static void geoTick();   // Juegos -> Geo Dash (clon de Geometry Dash)
 
 // Rect del icono en el escritorio (para animar la apertura desde el)
@@ -6268,7 +6316,7 @@ static FlexApp APP_REG[16] = {
   { appRelojEnter, appRelojTick, APP_FLEX },              // 0  Reloj  (REAL)
   { galEnter, NULL, APP_FLEX },                           // 1  Galeria (REAL, M2)
   { vidEnter, vidTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH },  // 2  Multimedia (esqueleto)
-  { almEnter, NULL, APP_FLEX },                           // 3  Almacenamiento (REAL)
+  { almEnter, almTick, APP_FLEX },                        // 3  Almacenamiento (REAL: LittleFS + PSRAM)
   { pcEnter, pcTick, APP_CUSTOM_HEADER },                  // 4  Modo PC (REAL, M4) -- usa render landscape (gLand)
   { noteEnter, noteTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH },// 5  Notas + teclado (REAL)
   { eduEnter, NULL, APP_FLEX },                           // 6  Educacion (REAL)
@@ -6727,6 +6775,20 @@ static void settingsDetailContent(int cat){
                    gKbSize == KB_SIZE_COMPACT ? "Compacto" : gKbSize == KB_SIZE_BIG ? "Grande" : "Normal", true);
 #endif
     y += 8; drawText(DP_X, y, "Toca una fila para cambiar su estilo", 1, SET_TXT_MUTE); y += 24;
+  } else if(cat == 3){                      // Red e Internet (datos REALES)
+    char rv0[64]; connWifiSub(rv0, sizeof(rv0));
+    // Se quitan los parentesis del subtitulo de la pantalla de Conectividad:
+    // aqui la fila ya tiene su propio titulo delante.
+    char* rvp = rv0; int rvl = strlen(rv0);
+    if(rvl > 1 && rv0[0] == '(' && rv0[rvl - 1] == ')'){ rv0[rvl - 1] = 0; rvp = rv0 + 1; }
+    char rv1[64]; connBleSub(rv1, sizeof(rv1));
+    char* rbp = rv1; int rbl = strlen(rv1);
+    if(rbl > 1 && rv1[0] == '(' && rv1[rbl - 1] == ')'){ rv1[rbl - 1] = 0; rbp = rv1 + 1; }
+    y = setRowCard(y, RI_GLOBE, rgb565(60,150,235), "Conectividad",
+                   gAirplane ? "Modo avi\xC3\xB3n activo" : "Wifi, BLE y modo avi\xC3\xB3n", true);
+    y = setRowCard(y, RI_CLOUD, rgb565(70,120,225), "Wi-Fi", rvp, true);
+    y = setRowCard(y, RI_DOT,   rgb565(90,110,235), "Bluetooth (BLE)", rbp, true);
+    y += 8; drawText(DP_X, y, "Los interruptores encienden la radio de verdad", 1, SET_TXT_MUTE); y += 24;
   } else if(cat == 6){                      // Seguridad (funcional)
     const char* lt = gLockType == 1 ? "PIN configurado" : gLockType == 2 ? "Contrase\xC3\xB1" "a configurada" : "Deslizar";
     y = setRowCard(y, RI_DOT, rgb565(220,120,120), "Bloqueo", lt, true);
@@ -6742,18 +6804,19 @@ static void settingsDetailContent(int cat){
     const char* rt[3] = {0,0,0}; const char* rv[3] = {0,0,0}; int rn = 0;
     switch(cat){
       case 2: rt[0]="Volumen";rv[0]="70%"; rt[1]="Tono";rv[1]="Predeterminado"; rn=2; break;
-      case 3:
-        rt[0]="Wi-Fi";
-#if FLEXOS_ENABLE_WIFI
-        rv[0] = gNetOnline ? "Conectado" : "Desactivado";
-#else
-        rv[0] = "No disponible";
-#endif
-        rt[1]="Bluetooth";rv[1]="No disponible"; rn=2; break;
+      // (la categoria 3 tiene ahora su propia rama, con datos reales)
       case 4: rt[0]="GPIO";rv[0]="Configurable"; rt[1]="Perifericos";rv[1]="Ninguno"; rn=2; break;
       case 6: rt[0]="Bloqueo";rv[0]="Deslizar"; rt[1]="PIN";rv[1]="No configurado"; rn=2; break;
       case 7: rt[0]="Nivel";rv[0]="82%"; rt[1]="Ahorro";rv[1]="Desactivado"; rn=2; break;
-      case 8: rt[0]="Interna";rv[0]="6.2 / 16 GB"; rt[1]="Tarjeta SD";rv[1]="No insertada"; rn=2; break;
+      case 8: {   // valores REALES de la particion de datos
+        static char s8a[32], s8b[32];
+        char u8[16], t8[16];
+        flexFsFmtSize(flexFsUsedBytes(), u8, sizeof(u8));
+        flexFsFmtSize(flexFsTotalBytes(), t8, sizeof(t8));
+        snprintf(s8a, sizeof(s8a), "%s / %s", u8, t8);
+        flexFsFmtSize(flexFsCatSize(FLEXFS_CAT_TRASH), s8b, sizeof(s8b));
+        rt[0]="Interna"; rv[0]= flexFsReady() ? s8a : "No montada";
+        rt[1]="Papelera"; rv[1]=s8b; rn=2; } break;
       case 9: rt[0]="Depuracion";rv[0]="En pantalla"; rt[1]="Banda reinicio";rv[1]="Solo crash"; rn=2; break;
       case 10: rt[0]="Version";rv[0]="FlexOS 1.0"; rt[1]="Logs";rv[1]="Puerto serie"; rn=2; break;
       default: rn=0; break;
@@ -6990,7 +7053,13 @@ static void settingsRowAction(int cat, int idx){
     else if(idx == 3) kbsEnter();                                                                       // FASE E: Ajustes del teclado
 #endif
   } else if(cat == 3){
-    if(idx == 0) wifiSettingsEnter();                                                       // Red e Internet -> Wi-Fi
+    if(idx == 0) connEnter();                                                            // Conectividad (Wifi/BLE/Modo avion)
+    else if(idx == 1) wifiSettingsEnter();                                               // Red e Internet -> Wi-Fi
+    else if(idx == 2){                                                                   // Bluetooth (BLE): conmuta de verdad
+      if(!FLEXOS_ENABLE_BLE || gAirplane) return;
+      if(gBleOn) flexBleStop(); else flexBleStart();
+      settingsRenderDetailOnly();
+    }
   } else if(cat == 6){
     if(idx == 0) lsuEnter();                                                                 // Seguridad -> Bloqueo (PIN/Contraseña)
     else if(idx == 1){                                                                       // Seguridad -> Bloqueo de inactividad
@@ -11353,7 +11422,27 @@ static int kbCurrentWord(const char* buf, int cur, char* out, int outsz){
   return n;
 }
 
-static char noteBuffer[512] = "";
+// ---- Memoria de trabajo del editor de Notas -------------------------------
+// El texto que se esta editando es un buffer de TRABAJO, no el fichero: vive
+// en PSRAM cuando la placa la tiene (Ultra / Ultra S3), porque son 4 KB que no
+// hacen ninguna falta en la RAM interna, que es el recurso escaso. El fichero
+// real en /Notas se escribe al salir del editor y 2 s despues de la ultima
+// tecla (ver noteSave). En una placa sin PSRAM (Pro) se usa el arreglo
+// estatico de siempre: menos capacidad, pero exactamente el mismo
+// comportamiento.
+#define NOTE_BUF_PSRAM 4096
+static char   noteBufStatic[512] = "";
+static char*  noteBuffer = noteBufStatic;
+static size_t noteBufMax = sizeof(noteBufStatic);
+static char   noteTitleBar[FLEXFS_NAME_MAX] = "Notas";   // titulo del editor = nombre real del fichero
+static void noteBufInit(){
+  if(noteBuffer != noteBufStatic) return;                // ya se amplio
+  if(heap_caps_get_total_size(MALLOC_CAP_SPIRAM) == 0) return;
+  char* p = (char*)heap_caps_malloc(NOTE_BUF_PSRAM, MALLOC_CAP_SPIRAM);
+  if(!p) return;
+  memcpy(p, noteBufStatic, sizeof(noteBufStatic));
+  noteBuffer = p; noteBufMax = NOTE_BUF_PSRAM;
+}
 // estado del pop-up de acentos
 static int kbLpKey = -1, kbPopX = 0, kbPopY = 0, kbPopN = 0, kbPopW = 40, kbPopG = 4;
 static bool kbPopup = false;
@@ -11380,7 +11469,7 @@ static void noteDeleteSel(){
 static void noteInsert(const char* s){            // inserta en el cursor (reemplaza seleccion si hay)
   if(noteHasSel()) noteDeleteSel();
   int L = strlen(noteBuffer), sl = strlen(s);
-  if(L + sl >= (int)sizeof(noteBuffer) - 1) return;
+  if(L + sl >= (int)noteBufMax - 1) return;
   if(noteCur < 0) noteCur = 0; if(noteCur > L) noteCur = L;
   memmove(noteBuffer + noteCur + sl, noteBuffer + noteCur, L - noteCur + 1);
   memcpy(noteBuffer + noteCur, s, sl);
@@ -11719,7 +11808,7 @@ static void noteRenderAll(){
   fillRect(0, 0, SCR_W, SCR_H, rgb565(12,14,20));
   strokeSegAA(30, 26, 18, 18, 2.4f, rgb565(255,255,255));
   strokeSegAA(18, 18, 30, 10, 2.4f, rgb565(255,255,255));
-  drawTextC(SCR_W / 2, 14, "Notas", 3, rgb565(255,255,255));
+  drawTextC(SCR_W / 2, 14, noteTitleBar, 3, rgb565(255,255,255));   // nombre REAL del fichero abierto
   kbChipsBuild();
   noteDrawText();
   noteRenderKeyboard(0);
@@ -11927,7 +12016,7 @@ static void handleKeyRelease(int px, int py){
 // FASE G: animacion de apertura del teclado en Notas (0.3 s, interpolada,
 // mismo espiritu que lsuKbAnim del Bloqueo, que ya la tenia).
 static uint32_t noteKbAnim = 0;
-static void noteEnter(){
+static void noteEditorEnter(){
   mapaActivo = LAYOUT_ES; kbLangEs = true; kbShift = false; kbLpKey = -1; kbPopup = false;
   noteCur = strlen(noteBuffer); noteClearSel(); noteHandleDrag = 0;
   kbExtrasOn = true;                     // Notas SI muestra barra y chips
@@ -11937,7 +12026,7 @@ static void noteEnter(){
   noteKbAnim = KB_ANIM_POLISH_ON ? millis() : 0;
   noteRenderAll();
 }
-static void noteTick(){
+static void noteEditorTick(){
   int txTop = 48, txBot = noteTxtBot();
 
   // 0) FASE G - apertura del teclado: se interpola el desplazamiento vertical y
@@ -12069,6 +12158,772 @@ static void noteTick(){
     }
     handleKeyRelease(T.x, T.y); kbLpKey = -1;         // teclado
   }
+}
+
+// #############################################################
+// ##  KIT DE ARCHIVOS  ·  piezas de interfaz compartidas por
+// ##  Notas, Paint y el Explorador de archivos
+// ##  ------------------------------------------------------
+// ##  Las tres pantallas hacen LO MISMO sobre ficheros
+// ##  distintos: una rejilla o lista de elementos, el menu
+// ##  contextual de 4 acciones (Seleccionar / Eliminar /
+// ##  Renombrar / Papelera) y un dialogo de nombre con teclado.
+// ##  Escribirlo tres veces era garantizar que las tres se
+// ##  comportaran distinto ante el mismo error, asi que vive
+// ##  aqui una sola vez.
+// ##
+// ##  REGLA DEL KIT: estas piezas NO simulan nada. Cada accion
+// ##  llama a flexFs* (que toca el fichero real) y devuelve lo
+// ##  que de verdad paso; quien la usa vuelve a leer el
+// ##  directorio y repinta con lo que hay. Si un borrado falla,
+// ##  el elemento sigue en la lista -- porque sigue en el disco.
+// #############################################################
+#define FK_ACT_SEL    0
+#define FK_ACT_DEL    1
+#define FK_ACT_REN    2
+#define FK_ACT_TRASH  3
+#define FK_MENU_W    258
+#define FK_MENU_RH    46
+#define FK_MENU_PAD   10
+
+static const char* FK_MENU_LBL[4] = { "Seleccionar", "Eliminar", "Renombrar", "Papelera" };
+
+// ---- Texto ajustado a una caja (para la vista previa REAL de una nota) ----
+// Corta por caracteres, no por palabras, a proposito: el contenido de una nota
+// puede ser una sola cadena larguisima sin espacios (como en las capturas) y un
+// ajuste por palabras la dejaria fuera de la tarjeta.
+static void fkTextBox(int x, int y, int w, int h, const char* s, int size, uint16_t col){
+  if(!s || !*s) return;
+  int lh = uiLineH(size) + 4, cy = y, li = 0;
+  char line[80];
+  const char* p = s;
+  while(*p && cy + lh <= y + h){
+    unsigned char b = (unsigned char)*p;
+    if(b == '\n' || b == '\r'){ line[li] = 0; if(li) drawText(x, cy, line, size, col); cy += lh; li = 0; p++; continue; }
+    int cl = 1;
+    if((b & 0xE0) == 0xC0) cl = 2; else if((b & 0xF0) == 0xE0) cl = 3; else if((b & 0xF8) == 0xF0) cl = 4;
+    if(li + cl >= (int)sizeof(line) - 1){ line[li] = 0; drawText(x, cy, line, size, col); cy += lh; li = 0; }
+    memcpy(line + li, p, cl); line[li + cl] = 0;
+    if(textW(line, size) > w){
+      if(li == 0){ p += cl; continue; }        // un solo caracter mas ancho que la caja: se descarta
+      line[li] = 0; drawText(x, cy, line, size, col); cy += lh; li = 0; continue;
+    }
+    li += cl; p += cl;
+  }
+  if(li && cy + lh <= y + h){ line[li] = 0; drawText(x, cy, line, size, col); }
+}
+
+// ---- Iconos del menu contextual (vectoriales, como el resto del sistema) ----
+static void fkMenuGlyph(int k, int cx, int cy){
+  uint16_t w = rgb565(255,255,255), red = rgb565(228,60,60), gr = rgb565(90,96,110);
+  if(k == FK_ACT_SEL){                                  // mano que pulsa
+    fillRoundRect(cx - 5, cy - 10, 10, 14, 4, gr);
+    strokeSegAA(cx - 11, cy - 12, cx - 14, cy - 16, 1.8f, gr);
+    strokeSegAA(cx,      cy - 14, cx,      cy - 19, 1.8f, gr);
+    strokeSegAA(cx + 11, cy - 12, cx + 14, cy - 16, 1.8f, gr);
+    fillRoundRect(cx - 8, cy + 2, 16, 8, 3, gr);
+  } else if(k == FK_ACT_DEL){                           // papelera roja (borrado definitivo)
+    fillRect(cx - 10, cy - 12, 20, 3, red);
+    fillRect(cx - 4,  cy - 16, 8,  3, red);
+    fillRoundRect(cx - 8, cy - 8, 16, 20, 3, red);
+    fillRect(cx - 3, cy - 4, 2, 12, rgb565(255,255,255));
+    fillRect(cx + 1, cy - 4, 2, 12, rgb565(255,255,255));
+  } else if(k == FK_ACT_REN){                           // campo de texto con cursor
+    fillRoundRect(cx - 14, cy - 7, 20, 14, 3, rgb565(40,44,56));
+    fillRect(cx + 8, cy - 10, 2, 20, rgb565(40,44,56));
+    fillRect(cx + 5, cy - 10, 8, 2,  rgb565(40,44,56));
+    fillRect(cx + 5, cy + 8,  8, 2,  rgb565(40,44,56));
+  } else {                                              // papelera blanca (mover a Papelera)
+    fillRect(cx - 10, cy - 12, 20, 3, w);
+    fillRect(cx - 4,  cy - 16, 8,  3, w);
+    drawRoundRect(cx - 8, cy - 8, 16, 20, 3, w);
+    fillRect(cx - 3, cy - 4, 2, 12, w);
+    fillRect(cx + 1, cy - 4, 2, 12, w);
+  }
+}
+
+static bool fkMenuOn = false;
+static int  fkMenuX = 0, fkMenuY = 0;
+
+static void fkMenuGeom(int &x, int &y, int &w, int &h){
+  w = FK_MENU_W;
+  h = 4 * FK_MENU_RH + 2 * FK_MENU_PAD;
+  x = fkMenuX; y = fkMenuY;
+  if(x + w > SCR_W - 8) x = SCR_W - 8 - w;
+  if(x < 8) x = 8;
+  if(y + h > SCR_H - 70) y = SCR_H - 70 - h;
+  if(y < 30) y = 30;
+}
+
+static void fkMenuDraw(){
+  int x, y, w, h; fkMenuGeom(x, y, w, h);
+  if(uiGlass) drawLiquidGlassPanel(x, y, w, h, 18, rgb565(210,214,222));
+  else        fillRoundRect(x, y, w, h, 18, rgb565(206,210,218));
+  for(int i = 0; i < 4; i++){
+    int ry = y + FK_MENU_PAD + i * FK_MENU_RH;
+    drawText(x + 16, ry + 10, FK_MENU_LBL[i], 3, rgb565(16,18,24));
+    fkMenuGlyph(i, x + w - 32, ry + FK_MENU_RH / 2);
+  }
+  flxFlush(y - 2, y + h + 2);
+}
+
+static void fkMenuOpen(int px, int py){ fkMenuOn = true; fkMenuX = px; fkMenuY = py; fkMenuDraw(); }
+
+// -1 = toque fuera del panel (cierra sin accion); 0..3 = accion elegida.
+static int fkMenuHit(int px, int py){
+  int x, y, w, h; fkMenuGeom(x, y, w, h);
+  if(px < x || px > x + w || py < y || py > y + h) return -1;
+  int i = (py - y - FK_MENU_PAD) / FK_MENU_RH;
+  if(i < 0) i = 0; if(i > 3) i = 3;
+  return i;
+}
+
+// #############################################################
+// ##  DIALOGO DE NOMBRE (renombrar / crear con nombre propio)
+// ##  Reutiliza EL MISMO teclado del sistema (mapaActivo,
+// ##  kbPaintKey, kbCellAt...) que usan Notas y la clave de
+// ##  Wi-Fi: no hay un segundo teclado que mantener.
+// #############################################################
+static bool fkNameOn = false;
+static char fkNameBuf[FLEXFS_NAME_MAX] = "";
+static char fkNameTitle[40] = "";
+
+static void fkNameDraw(){
+  setBuf(fb);
+  fillRect(0, 0, SCR_W, kbPanelTop(), rgb565(14,16,24));
+  drawTextC(SCR_W / 2, 40, fkNameTitle, 3, rgb565(255,255,255));
+  strokeSegAA(30, 46, 18, 38, 2.4f, rgb565(255,255,255));      // chevron: cancelar
+  strokeSegAA(18, 38, 30, 30, 2.4f, rgb565(255,255,255));
+  int fy = 130;
+  fillRoundRect(24, fy, SCR_W - 48, 56, 14, rgb565(30,34,48));
+  drawTextClip(38, fy + 16, fkNameBuf, 2, rgb565(240,242,248), SCR_W - 40);
+  int cw = textW(fkNameBuf, 2);
+  fillRect(38 + cw + 2, fy + 14, 2, 28, rgb565(120,170,250));       // cursor
+  drawTextC(SCR_W / 2, fy + 76, "Escribe el nombre y pulsa Guardar", 1, rgb565(140,148,168));
+
+  int ky = KB_Y;
+  if(uiGlass) drawLiquidGlassPanel(0, ky - 4, SCR_W, SCR_H - (ky - 4), 0, rgb565(36,40,58));
+  else        fillRect(0, ky - 4, SCR_W, SCR_H - (ky - 4), rgb565(18,20,28));
+  int fs = kbFontSize();
+  for(int r = 0; r < KB_ROWS; r++) for(int c = 0; c < KB_COLS; c++){
+    int x = KB_X + c * (KB_KW + KB_GAP), y = ky + r * (KB_KH + KB_GAP);
+    const char* k = mapaActivo[r][c];
+    char u[6];
+    if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ u[0] = (char)(k[0] - 32); u[1] = 0; k = u; }
+    kbPaintKey(x, y, KB_KW, KB_KH, k, fs, kbColKey(), kbColKeyTxt(), false);
+  }
+  int fry = ky + 3 * (KB_KH + KB_GAP);
+  const char* lb[KB_FKEYS] = { "shift", kbLayerLabel(), kbLangEs ? "ES" : "EN", "espacio", "<-", "Guardar" };
+  for(int i = 0; i < KB_FKEYS; i++) kbFKey(kbFKeyX(i), fry, kbFKeyW(i), lb[i], (i == 0) && kbShift);
+  flxFlushAll();
+}
+
+static void fkNameOpen(const char* title, const char* initial){
+  fkNameOn = true;
+  strncpy(fkNameTitle, title, sizeof(fkNameTitle) - 1); fkNameTitle[sizeof(fkNameTitle) - 1] = 0;
+  strncpy(fkNameBuf, initial ? initial : "", sizeof(fkNameBuf) - 1); fkNameBuf[sizeof(fkNameBuf) - 1] = 0;
+  mapaActivo = LAYOUT_ES; kbLangEs = true; kbShift = false;
+  kbExtrasOn = false; kbApplySize(); kbMtSurfaceReset();
+  fkNameDraw();
+}
+
+static void fkNameAppend(const char* s){
+  int L = strlen(fkNameBuf), sl = strlen(s);
+  // '/' partiria la ruta y dejaria el fichero en otra carpeta sin avisar.
+  if(strchr(s, '/')) return;
+  if(L + sl < (int)sizeof(fkNameBuf) - 1){ memcpy(fkNameBuf + L, s, sl); fkNameBuf[L + sl] = 0; }
+}
+static void fkNameBack(){
+  int L = strlen(fkNameBuf);
+  if(L > 0){ int q = L - 1; while(q > 0 && (fkNameBuf[q] & 0xC0) == 0x80) q--; fkNameBuf[q] = 0; }
+}
+
+// 0 = sigue abierto, 1 = aceptado (fkNameBuf es valido), -1 = cancelado.
+static int fkNameTick(){
+  if(!T.released) return 0;
+  int fi = kbFRowHit(T.x, T.y);
+  if(fi >= 0){
+    if(fi == 0){ kbShift = !kbShift; fkNameDraw(); return 0; }
+    if(fi == 1){ mapaActivo = (mapaActivo == LAYOUT_NUM) ? LAYOUT_EMOJI
+                             : (mapaActivo == LAYOUT_EMOJI) ? (kbLangEs ? LAYOUT_ES : LAYOUT_EN)
+                             : LAYOUT_NUM; fkNameDraw(); return 0; }
+    if(fi == 2){ kbLangEs = !kbLangEs;
+                 if(mapaActivo == LAYOUT_ES || mapaActivo == LAYOUT_EN) mapaActivo = kbLangEs ? LAYOUT_ES : LAYOUT_EN;
+                 fkNameDraw(); return 0; }
+    if(fi == 3){ fkNameAppend(" "); fkNameDraw(); return 0; }
+    if(fi == 4){ fkNameBack(); fkNameDraw(); return 0; }
+    if(fi == 5){ fkNameOn = false; return strlen(fkNameBuf) > 0 ? 1 : -1; }
+    return 0;
+  }
+  if(T.tap && T.y < 90 && T.x < 60){ fkNameOn = false; return -1; }   // esquina sup. izq. = cancelar
+  int cell = kbCellAt(T.x, T.y);
+  if(cell >= 0){
+    const char* k = mapaActivo[cell / KB_COLS][cell % KB_COLS];
+    char u[6];
+    if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ u[0] = (char)(k[0] - 32); u[1] = 0; k = u; kbShift = false; }
+    fkNameAppend(k);
+    fkNameDraw();
+  }
+  return 0;
+}
+
+// #############################################################
+// ##  CONFIRMACION (borrado definitivo, vaciar papelera...)
+// ##  Un borrado real no se pregunta con un toast: si el
+// ##  usuario dice que si, el fichero desaparece del disco y no
+// ##  hay vuelta atras.
+// #############################################################
+static bool fkAskOn = false;
+static char fkAskMsg[72] = "";
+static char fkAskSub[72] = "";
+
+static void fkAskGeom(int &x, int &y, int &w, int &h){ w = SCR_W - 72; h = 220; x = 36; y = (SCR_H - h) / 2; }
+
+static void fkAskDraw(){
+  int x, y, w, h; fkAskGeom(x, y, w, h);
+  setBuf(fb);
+  if(uiGlass) drawLiquidGlassPanel(x, y, w, h, 24, rgb565(60,64,88));
+  else        fillRoundRect(x, y, w, h, 24, rgb565(34,38,50));
+  drawTextC(SCR_W / 2, y + 26, fkAskMsg, 2, rgb565(255,255,255));
+  if(fkAskSub[0]) drawTextC(SCR_W / 2, y + 62, fkAskSub, 1, rgb565(170,178,196));
+  int by = y + h - 76, bw = (w - 48) / 2;
+  fillRoundRect(x + 16, by, bw, 56, 16, rgb565(70,74,90));
+  drawTextC(x + 16 + bw / 2, by + 18, "Cancelar", 2, rgb565(240,242,248));
+  fillRoundRect(x + 32 + bw, by, bw, 56, 16, rgb565(220,70,70));
+  drawTextC(x + 32 + bw + bw / 2, by + 18, "Borrar", 2, rgb565(255,255,255));
+  flxFlush(y - 2, y + h + 2);
+}
+
+static void fkAskOpen(const char* msg, const char* sub){
+  fkAskOn = true;
+  strncpy(fkAskMsg, msg, sizeof(fkAskMsg) - 1); fkAskMsg[sizeof(fkAskMsg) - 1] = 0;
+  strncpy(fkAskSub, sub ? sub : "", sizeof(fkAskSub) - 1); fkAskSub[sizeof(fkAskSub) - 1] = 0;
+  fkAskDraw();
+}
+
+// 0 = sigue abierto, 1 = confirmado, -1 = cancelado.
+static int fkAskTick(){
+  if(!T.tap) return 0;
+  int x, y, w, h; fkAskGeom(x, y, w, h);
+  int by = y + h - 76, bw = (w - 48) / 2;
+  if(T.y >= by && T.y <= by + 56){
+    if(T.x >= x + 16 && T.x <= x + 16 + bw){ fkAskOn = false; return -1; }
+    if(T.x >= x + 32 + bw && T.x <= x + 32 + 2 * bw){ fkAskOn = false; return 1; }
+  }
+  if(T.x < x || T.x > x + w || T.y < y || T.y > y + h){ fkAskOn = false; return -1; }
+  return 0;
+}
+
+// ---- Aviso de "sin almacenamiento" ---------------------------
+// Cuando LittleFS no monta, estas pantallas NO tienen nada real que
+// ensenar. Antes que inventar una lista vacia bonita, se dice el
+// motivo exacto y como arreglarlo.
+static void fkNoFsScreen(const char* titulo){
+  setBuf(fb);
+  fillRect(0, 0, SCR_W, SCR_H, rgb565(14,16,24));
+  strokeSegAA(30, 26, 18, 18, 2.4f, rgb565(255,255,255));
+  strokeSegAA(18, 18, 30, 10, 2.4f, rgb565(255,255,255));
+  drawTextC(SCR_W / 2, 40, titulo, 3, rgb565(255,255,255));
+  drawTextC(SCR_W / 2, 300, "Sin almacenamiento", 3, rgb565(240,140,140));
+  drawTextC(SCR_W / 2, 344, flexFsError(), 1, rgb565(170,178,196));
+  drawTextC(SCR_W / 2, 380, "Arduino IDE > Herramientas > Partition Scheme", 1, rgb565(140,148,168));
+  flxFlushAll();
+}
+
+// #############################################################
+// ##  PAPELERA  ·  navegador compartido de /Papelera
+// ##  ------------------------------------------------------
+// ##  Lo abren Notas, Paint y el Explorador. Lista lo que hay
+// ##  DE VERDAD en /Papelera y ofrece las dos unicas cosas que
+// ##  se pueden hacer con un fichero tirado: devolverlo a su
+// ##  sitio o borrarlo para siempre.
+// ##
+// ##  La ruta original no se guarda en un indice aparte: viaja
+// ##  DENTRO del nombre del fichero ('/' se codifica como '@'),
+// ##  asi que restaurar es exacto aunque el sistema se apague a
+// ##  media operacion. Ver flexFsTrash() en FlexOS_FS.cpp.
+// #############################################################
+#define FK_TRASH_MAX  16
+#define FK_TRASH_TOP  120
+#define FK_TRASH_RH    66
+
+static bool        fkTrashOn = false;
+static FlexFsEntry fkTrashList[FK_TRASH_MAX];
+static int         fkTrashN = 0;
+static int         fkTrashSel = -1;
+static int         fkTrashScroll = 0;
+static int         fkTrashDragY0 = 0, fkTrashDragS0 = 0;
+static bool        fkTrashDragging = false;
+
+static void fkTrashReload(){
+  fkTrashN = flexFsList(FLEXFS_DIR_TRASH, fkTrashList, FK_TRASH_MAX);
+  if(fkTrashSel >= fkTrashN) fkTrashSel = -1;
+}
+
+static int fkTrashRowY(int i){ return FK_TRASH_TOP + i * FK_TRASH_RH - fkTrashScroll; }
+
+static int fkTrashMaxScroll(){
+  int need = FK_TRASH_TOP + fkTrashN * FK_TRASH_RH + 30;
+  int m = need - (SCR_H - 140);
+  return m > 0 ? m : 0;
+}
+
+static void fkTrashRender(){
+  setBuf(fb);
+  fillRect(0, 0, SCR_W, SCR_H, rgb565(14,16,24));
+  strokeSegAA(30, 26, 18, 18, 2.4f, rgb565(255,255,255));
+  strokeSegAA(18, 18, 30, 10, 2.4f, rgb565(255,255,255));
+  drawTextC(SCR_W / 2, 34, "Papelera", 4, rgb565(255,255,255));
+
+  char hdr[64];
+  uint32_t used = flexFsDirSize(FLEXFS_DIR_TRASH);
+  char sz[24]; flexFsFmtSize(used, sz, sizeof(sz));
+  snprintf(hdr, sizeof(hdr), "%d elementos  ·  %s", fkTrashN, sz);
+  drawTextC(SCR_W / 2, 86, hdr, 1, rgb565(150,158,178));
+
+  if(fkTrashN == 0){
+    drawTextC(SCR_W / 2, 320, "La papelera est\xC3\xA1 vac\xC3\xAD" "a", 2, rgb565(150,158,178));
+  }
+  for(int i = 0; i < fkTrashN; i++){
+    int y = fkTrashRowY(i);
+    if(y + FK_TRASH_RH < FK_TRASH_TOP - 40 || y > SCR_H - 130) continue;
+    bool sel = (i == fkTrashSel);
+    fillRoundRect(16, y, SCR_W - 32, FK_TRASH_RH - 8, 14, sel ? rgb565(46,56,84) : rgb565(30,34,48));
+    // Se muestra la ruta ORIGINAL decodificada: es lo unico que le dice al
+    // usuario de donde salio ese fichero.
+    char origen[FLEXFS_PATH_MAX];
+    if(!flexFsTrashOrigin(fkTrashList[i].name, origen, sizeof(origen)))
+      snprintf(origen, sizeof(origen), "%s", fkTrashList[i].name);
+    const char* nm = strrchr(origen, '/');
+    nm = nm ? nm + 1 : origen;
+    drawTextClip(30, y + 8, nm, 2, rgb565(240,242,248), SCR_W - 40);
+    char sub[FLEXFS_PATH_MAX + 24], s2[24];
+    flexFsFmtSize(fkTrashList[i].size, s2, sizeof(s2));
+    snprintf(sub, sizeof(sub), "%s  ·  %s", origen, s2);
+    drawTextClip(30, y + 34, sub, 1, rgb565(140,148,168), SCR_W - 40);
+  }
+
+  int by = SCR_H - 122;
+  if(fkTrashSel >= 0){
+    int bw = (SCR_W - 48) / 2;
+    fillRoundRect(16, by, bw, 56, 16, rgb565(60,150,110));
+    drawTextC(16 + bw / 2, by + 18, "Restaurar", 2, rgb565(255,255,255));
+    fillRoundRect(32 + bw, by, bw, 56, 16, rgb565(200,60,60));
+    drawTextC(32 + bw + bw / 2, by + 18, "Borrar", 2, rgb565(255,255,255));
+  } else if(fkTrashN > 0){
+    fillRoundRect(SCR_W / 2 - 120, by, 240, 56, 16, rgb565(70,74,90));
+    drawTextC(SCR_W / 2, by + 18, "Vaciar papelera", 2, rgb565(250,190,190));
+  }
+  if(fkAskOn) fkAskDraw();
+  flxFlushAll();
+}
+
+static void fkTrashOpen(){
+  fkTrashOn = true; fkTrashSel = -1; fkTrashScroll = 0; fkAskOn = false;
+  fkTrashReload();
+  fkTrashRender();
+}
+
+// Devuelve true mientras la papelera siga abierta (el llamante no debe
+// hacer nada mas); false cuando el usuario ha salido.
+static bool fkTrashTick(){
+  if(!fkTrashOn) return false;
+
+  if(fkAskOn){
+    int r = fkAskTick();
+    if(r == 1){
+      if(fkTrashSel >= 0 && fkTrashSel < fkTrashN){
+        char p[FLEXFS_PATH_MAX];
+        snprintf(p, sizeof(p), "%s/%s", FLEXFS_DIR_TRASH, fkTrashList[fkTrashSel].name);
+        flexFsDelete(p);                       // definitivo: ya no hay vuelta atras
+      } else {
+        flexFsEmptyTrash();
+      }
+      fkTrashSel = -1; fkTrashReload();
+    }
+    if(r != 0) fkTrashRender();
+    return true;
+  }
+
+  int maxS = fkTrashMaxScroll();
+  if(T.pressed){ fkTrashDragY0 = T.y; fkTrashDragS0 = fkTrashScroll; fkTrashDragging = false; }
+  if(T.down && maxS > 0){
+    int dy = fkTrashDragY0 - T.y;
+    if(!fkTrashDragging && abs(dy) > 8) fkTrashDragging = true;
+    if(fkTrashDragging){
+      int ns = fkTrashDragS0 + dy;
+      if(ns < 0) ns = 0; if(ns > maxS) ns = maxS;
+      if(ns != fkTrashScroll){ fkTrashScroll = ns; fkTrashRender(); }
+      return true;
+    }
+  }
+  if(T.released && fkTrashDragging){ fkTrashDragging = false; return true; }
+  if(!T.tap) return true;
+
+  if(T.x < 60 && T.y < 60){ fkTrashOn = false; return false; }      // volver
+
+  int by = SCR_H - 122;
+  if(T.y >= by && T.y <= by + 56){
+    if(fkTrashSel >= 0){
+      int bw = (SCR_W - 48) / 2;
+      if(T.x <= 16 + bw){
+        char nm[FLEXFS_NAME_MAX];
+        strncpy(nm, fkTrashList[fkTrashSel].name, sizeof(nm) - 1); nm[sizeof(nm) - 1] = 0;
+        flexFsRestore(nm);                     // vuelve a su carpeta original, de verdad
+        fkTrashSel = -1; fkTrashReload(); fkTrashRender(); return true;
+      }
+      if(T.x >= 32 + bw){
+        char stem[FLEXFS_NAME_MAX]; flexFsStem(fkTrashList[fkTrashSel].name, stem, sizeof(stem));
+        fkAskOpen("\xC2\xBF" "Borrar definitivamente?", stem);
+        return true;
+      }
+    } else if(fkTrashN > 0 && T.x > SCR_W / 2 - 120 && T.x < SCR_W / 2 + 120){
+      fkAskOpen("\xC2\xBF" "Vaciar la papelera?", "Se borrar\xC3\xA1 todo su contenido");
+      return true;
+    }
+  }
+  for(int i = 0; i < fkTrashN; i++){
+    int y = fkTrashRowY(i);
+    if(T.y >= y && T.y < y + FK_TRASH_RH - 8){ fkTrashSel = (fkTrashSel == i) ? -1 : i; fkTrashRender(); return true; }
+  }
+  return true;
+}
+
+// #############################################################
+// ##  APP NOTAS  ·  lista de notas REALES en /Notas
+// ##  ------------------------------------------------------
+// ##  Cada tarjeta es un fichero .txt de verdad: el titulo sale
+// ##  del NOMBRE del fichero y la vista previa de sus primeros
+// ##  bytes, leidos del disco. No hay texto de relleno en
+// ##  ninguna parte -- una nota vacia se ve vacia.
+// ##
+// ##  El editor sigue siendo el de siempre (teclado de 4 capas,
+// ##  seleccion, portapapeles): lo unico que cambia es que
+// ##  ahora esta ATADO a un fichero. Se carga al abrirlo y se
+// ##  guarda al salir y 2 s despues de la ultima tecla, para
+// ##  que un apagon no se lleve lo escrito.
+// #############################################################
+#define NOTE_MAX_LIST   16
+#define NOTE_PREV_LEN    96
+#define NOTE_COLS        2
+#define NOTE_CARD_TOP   96
+#define NOTE_AUTOSAVE_MS 2000
+
+static FlexFsEntry noteList[NOTE_MAX_LIST];
+static char        notePrev[NOTE_MAX_LIST][NOTE_PREV_LEN];
+static int         noteListN = 0;
+static int         noteView  = 0;                        // 0 = lista, 1 = editor
+static int         noteSelIdx = -1;                      // elemento sobre el que actua el menu
+static char        notePath[FLEXFS_PATH_MAX] = "";       // fichero abierto en el editor
+static int         noteScroll = 0;
+static bool        noteMulti = false;                    // modo "Seleccionar"
+static uint32_t    noteMask = 0;                         // marcados en modo seleccion
+static uint32_t    noteDirtyMs = 0;                      // ultima tecla (autoguardado)
+static bool        noteLongFired = false;
+static int         noteDragY0 = 0, noteDragS0 = 0;
+static bool        noteDragging = false;
+
+static void noteRenderList();
+static void noteEditorEnter();
+static void noteEditorTick();
+
+// Relee /Notas del disco. Se llama al entrar y despues de CADA
+// operacion: la lista siempre es un reflejo de lo que hay, nunca un
+// estado en RAM que se actualiza "a mano" y se puede desincronizar.
+static void noteReload(){
+  noteListN = flexFsList(FLEXFS_DIR_NOTAS, noteList, NOTE_MAX_LIST);
+  for(int i = 0; i < noteListN; i++){
+    notePrev[i][0] = 0;
+    if(noteList[i].dir) continue;
+    char p[FLEXFS_PATH_MAX];
+    snprintf(p, sizeof(p), "%s/%s", FLEXFS_DIR_NOTAS, noteList[i].name);
+    flexFsReadText(p, notePrev[i], NOTE_PREV_LEN);      // contenido REAL del fichero
+  }
+  if(noteScroll > noteListN) noteScroll = 0;
+}
+
+static int noteCardH(){
+  // Proporcional a la pantalla: el Pro tiene 640 px de alto logico y con una
+  // altura fija de 300 solo cabia una fila.
+  int h = (SCR_H - NOTE_CARD_TOP - 90) / 2 - 44;
+  if(h < 120) h = 120;
+  if(h > 300) h = 300;
+  return h;
+}
+static void noteCardRect(int i, int &x, int &y, int &w, int &h){
+  int col = i % NOTE_COLS, row = i / NOTE_COLS;
+  w = (SCR_W - 3 * 16) / NOTE_COLS;
+  h = noteCardH();
+  x = 16 + col * (w + 16);
+  y = NOTE_CARD_TOP + row * (h + 44) - noteScroll;
+}
+
+static int noteMaxScroll(){
+  int rows = (noteListN + NOTE_COLS - 1) / NOTE_COLS;
+  int need = NOTE_CARD_TOP + rows * (noteCardH() + 44) + 40;
+  int m = need - (SCR_H - 60);
+  return m > 0 ? m : 0;
+}
+
+// Boton flotante de nueva nota (abajo a la derecha, como en la captura).
+static void noteFabRect(int &x, int &y, int &r){ r = 56; x = SCR_W - 84; y = SCR_H - 150; }
+
+static void noteDrawFab(){
+  int fx, fy, fr; noteFabRect(fx, fy, fr);
+  fillCircle(fx, fy, fr, rgb565(16,18,24));
+  fillCircle(fx, fy, fr - 5, rgb565(250,250,252));
+  fillRoundRect(fx - 22, fy - 24, 34, 44, 4, rgb565(20,22,30));
+  for(int i = 0; i < 3; i++) fillRect(fx - 17, fy - 17 + i * 10, 24 - i * 6, 4, rgb565(250,250,252));
+  strokeSegAA(fx + 4, fy + 18, fx + 24, fy - 6, 5.0f, rgb565(20,22,30));   // lapiz
+  strokeSegAA(fx + 22, fy - 8, fx + 27, fy - 13, 4.0f, rgb565(20,22,30));
+}
+
+static void noteRenderList(){
+  setBuf(fb);
+  fillRect(0, 0, SCR_W, SCR_H, rgb565(214,214,214));
+  drawText(16, 24, "Notas:", 5, rgb565(16,18,24));
+  // Tres puntos: menu del elemento seleccionado (o de la app si no hay ninguno).
+  for(int i = 0; i < 3; i++) fillCircle(SCR_W - 28, 34 + i * 16, 5, rgb565(16,18,24));
+  strokeSegAA(30, 26, 18, 18, 2.4f, rgb565(16,18,24));       // chevron de volver
+  strokeSegAA(18, 18, 30, 10, 2.4f, rgb565(16,18,24));
+
+  if(noteListN == 0){
+    drawTextC(SCR_W / 2, 320, "No hay notas todav\xC3\xAD" "a", 3, rgb565(90,94,104));
+    drawTextC(SCR_W / 2, 364, "Pulsa el boton de abajo para crear una", 1, rgb565(120,124,136));
+  }
+  for(int i = 0; i < noteListN; i++){
+    int x, y, w, h; noteCardRect(i, x, y, w, h);
+    if(y + h < 60 || y > SCR_H) continue;
+    char title[FLEXFS_NAME_MAX];
+    flexFsStem(noteList[i].name, title, sizeof(title));      // titulo = nombre REAL del fichero
+    drawTextC(x + w / 2, y - 34, title, 2, rgb565(16,18,24));
+    fillRoundRect(x, y, w, h, 14, rgb565(255,255,255));
+    if(noteMulti && (noteMask & (1UL << i))){
+      drawRoundRect(x, y, w, h, 14, rgb565(60,120,235));
+      drawRoundRect(x + 1, y + 1, w - 2, h - 2, 13, rgb565(60,120,235));
+      fillCircle(x + w - 20, y + 20, 11, rgb565(60,120,235));
+      strokeSegAA(x + w - 26, y + 20, x + w - 22, y + 25, 2.4f, rgb565(255,255,255));
+      strokeSegAA(x + w - 22, y + 25, x + w - 14, y + 14, 2.4f, rgb565(255,255,255));
+    }
+    if(notePrev[i][0]) fkTextBox(x + 10, y + 10, w - 20, h - 20, notePrev[i], 2, rgb565(24,26,34));
+    else               drawText(x + 10, y + 10, "(vac\xC3\xAD" "a)", 2, rgb565(170,174,184));
+  }
+  if(noteMulti){
+    // Barra de acciones del modo seleccion: opera sobre TODOS los marcados.
+    int by = SCR_H - 128;
+    fillRoundRect(12, by, SCR_W - 24, 60, 16, rgb565(30,34,46));
+    drawText(28, by + 20, "Selecci\xC3\xB3n", 2, rgb565(240,242,248));
+    drawTextR(SCR_W - 140, by + 20, "Papelera", 2, rgb565(250,210,120));
+    drawTextR(SCR_W - 28,  by + 20, "Salir", 2, rgb565(180,188,205));
+  } else {
+    noteDrawFab();
+  }
+  if(fkMenuOn) fkMenuDraw();
+  flxFlushAll();
+}
+
+// Ruta completa del elemento i de la lista.
+static void notePathOf(int i, char* out, size_t n){
+  snprintf(out, n, "%s/%s", FLEXFS_DIR_NOTAS, noteList[i].name);
+}
+
+// Abre el editor sobre un fichero REAL: lo lee entero a la memoria de
+// trabajo (PSRAM) y deja el cursor al final.
+static void noteOpen(int i){
+  if(i < 0 || i >= noteListN) return;
+  notePathOf(i, notePath, sizeof(notePath));
+  noteBufInit();
+  flexFsReadText(notePath, noteBuffer, noteBufMax);
+  flexFsStem(noteList[i].name, noteTitleBar, sizeof(noteTitleBar));
+  noteView = 1; noteDirtyMs = 0;
+  noteEditorEnter();
+}
+
+// Guardado REAL del editor al fichero abierto.
+static void noteSave(){
+  if(noteView != 1 || !notePath[0]) return;
+  flexFsWriteText(notePath, noteBuffer);
+  noteDirtyMs = 0;
+}
+
+static void noteBackToList(){
+  noteSave();
+  noteView = 0; notePath[0] = 0;
+  noteReload();
+  noteRenderList();
+}
+
+// Nueva nota: crea el FICHERO ya, vacio, con el primer numero libre de
+// la carpeta. Si el fichero no se crea (disco lleno), no aparece nada en
+// la lista -- porque no existe.
+static void noteNew(){
+  char full[FLEXFS_PATH_MAX];
+  if(!flexFsNewName(FLEXFS_DIR_NOTAS, "Sin t\xC3\xAD" "tulo", FLEXFS_EXT_NOTE, full, sizeof(full))) return;
+  if(!flexFsWriteText(full, "")) return;
+  noteReload();
+  for(int i = 0; i < noteListN; i++){
+    char p[FLEXFS_PATH_MAX]; notePathOf(i, p, sizeof(p));
+    if(!strcmp(p, full)){ noteOpen(i); return; }
+  }
+  noteRenderList();
+}
+
+// Accion del menu contextual sobre la nota seleccionada. TODAS tocan el
+// fichero real; ninguna se limita a cambiar la pantalla.
+static void noteMenuAction(int act){
+  char p[FLEXFS_PATH_MAX];
+  if(noteSelIdx >= 0 && noteSelIdx < noteListN) notePathOf(noteSelIdx, p, sizeof(p));
+  else p[0] = 0;
+  if(act == FK_ACT_SEL){
+    noteMulti = true; noteMask = 0;
+    if(noteSelIdx >= 0) noteMask |= (1UL << noteSelIdx);
+  } else if(act == FK_ACT_DEL){
+    if(p[0]){
+      char stem[FLEXFS_NAME_MAX]; flexFsStem(noteList[noteSelIdx].name, stem, sizeof(stem));
+      fkAskOpen("\xC2\xBF" "Borrar definitivamente?", stem);
+      return;                                  // el borrado ocurre al confirmar
+    }
+  } else if(act == FK_ACT_REN){
+    if(p[0]){
+      char stem[FLEXFS_NAME_MAX]; flexFsStem(noteList[noteSelIdx].name, stem, sizeof(stem));
+      fkNameOpen("Renombrar nota", stem);
+      return;
+    }
+  } else if(act == FK_ACT_TRASH){
+    if(p[0]){ flexFsTrash(p); noteSelIdx = -1; noteReload(); }  // a /Papelera de verdad
+    else { fkTrashOpen(); return; }            // sin seleccion: abre la papelera
+  }
+  noteRenderList();
+}
+
+static void noteListTick(){
+  // --- Dialogos modales: se comen el toque hasta que se cierran ---
+  if(fkTrashOn){ if(!fkTrashTick()){ noteReload(); noteRenderList(); } return; }
+  if(fkAskOn){
+    int r = fkAskTick();
+    if(r == 1 && noteSelIdx >= 0 && noteSelIdx < noteListN){
+      char p[FLEXFS_PATH_MAX]; notePathOf(noteSelIdx, p, sizeof(p));
+      flexFsDelete(p);                          // borrado DEFINITIVO real
+      noteSelIdx = -1; noteReload();
+    }
+    if(r != 0) noteRenderList();
+    return;
+  }
+  if(fkNameOn){
+    int r = fkNameTick();
+    if(r == 1 && noteSelIdx >= 0 && noteSelIdx < noteListN){
+      char p[FLEXFS_PATH_MAX]; notePathOf(noteSelIdx, p, sizeof(p));
+      flexFsRename(p, fkNameBuf);               // renombrado REAL en el disco
+      noteSelIdx = -1; noteReload();
+    }
+    if(r != 0) noteRenderList();
+    return;
+  }
+  if(fkMenuOn){
+    if(T.tap){
+      int a = fkMenuHit(T.x, T.y);
+      fkMenuOn = false;
+      if(a >= 0) noteMenuAction(a);
+      else       noteRenderList();
+    }
+    return;
+  }
+
+  // --- Scroll ---
+  // T.dx/T.dy solo se rellenan AL SOLTAR (ver tDoRelease), asi que el arrastre
+  // se sigue con el mismo patron que la lista de Ajustes: ancla al presionar y
+  // delta vivo contra esa ancla. Umbral de 8 px para no confundir toque con
+  // arrastre.
+  int maxS = noteMaxScroll();
+  if(T.pressed){ noteDragY0 = T.y; noteDragS0 = noteScroll; noteDragging = false; }
+  if(T.down && maxS > 0){
+    int dy = noteDragY0 - T.y;
+    if(!noteDragging && abs(dy) > 8) noteDragging = true;
+    if(noteDragging){
+      int ns = noteDragS0 + dy;
+      if(ns < 0) ns = 0; if(ns > maxS) ns = maxS;
+      if(ns != noteScroll){ noteScroll = ns; noteRenderList(); }
+      noteLongFired = true;
+      return;
+    }
+  }
+  if(T.released && noteDragging){ noteDragging = false; return; }
+
+  // --- Long-press sobre una tarjeta -> menu contextual ---
+  if(T.down && !noteLongFired && (millis() - T.downMs) > 550
+     && abs(T.x - T.startX) < 14 && abs(T.y - T.startY) < 14){
+    for(int i = 0; i < noteListN; i++){
+      int x, y, w, h; noteCardRect(i, x, y, w, h);
+      if(T.startX >= x && T.startX <= x + w && T.startY >= y && T.startY <= y + h){
+        noteLongFired = true; noteSelIdx = i;
+        fkMenuOpen(T.x, T.y - 40);
+        return;
+      }
+    }
+    noteLongFired = true;
+  }
+  if(!T.down) noteLongFired = false;
+
+  if(!T.tap) return;
+
+  // --- Tres puntos de la cabecera ---
+  if(T.x > SCR_W - 60 && T.y < 80){ noteSelIdx = -1; fkMenuOpen(SCR_W - 40, 60); return; }
+  // --- Volver al escritorio ---
+  if(T.x < 60 && T.y < 60){ appClose(); return; }
+
+  // --- Barra del modo seleccion ---
+  if(noteMulti){
+    int by = SCR_H - 128;
+    if(T.y >= by && T.y <= by + 60){
+      if(T.x > SCR_W - 100){ noteMulti = false; noteMask = 0; noteRenderList(); return; }
+      if(T.x > SCR_W - 230){
+        for(int i = 0; i < noteListN; i++) if(noteMask & (1UL << i)){
+          char p[FLEXFS_PATH_MAX]; notePathOf(i, p, sizeof(p));
+          flexFsTrash(p);                        // a la papelera, de verdad, uno a uno
+        }
+        noteMulti = false; noteMask = 0; noteReload(); noteRenderList(); return;
+      }
+    }
+  } else {
+    int fx, fy, fr; noteFabRect(fx, fy, fr);
+    long ddx = T.x - fx, ddy = T.y - fy;
+    if(ddx * ddx + ddy * ddy <= (long)fr * fr){ noteNew(); return; }
+  }
+
+  // --- Tarjetas ---
+  for(int i = 0; i < noteListN; i++){
+    int x, y, w, h; noteCardRect(i, x, y, w, h);
+    if(T.x >= x && T.x <= x + w && T.y >= y && T.y <= y + h){
+      if(noteMulti){ noteMask ^= (1UL << i); noteRenderList(); }
+      else noteOpen(i);
+      return;
+    }
+  }
+}
+
+// ---- Puntos de entrada de la app (los que ve APP_REG) ----
+static void noteEnter(){
+  noteBufInit();
+  if(!flexFsReady()){ fkNoFsScreen("Notas"); return; }
+  noteView = 0; noteMulti = false; noteMask = 0; noteSelIdx = -1;
+  fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
+  noteReload();
+  noteRenderList();
+}
+
+static void noteTick(){
+  if(!flexFsReady()){ if(T.tap && T.x < 60 && T.y < 60) appClose(); return; }
+  if(noteView == 0){ noteListTick(); return; }
+
+  // Editor: la esquina superior izquierda vuelve a la lista GUARDANDO.
+  if(T.tap && T.x < 60 && T.y < 44 && !clipPanelOn && !noteMenu && !kbPopup && !kbMoreOn){
+    noteBackToList(); return;
+  }
+  int lenBefore = strlen(noteBuffer);
+  noteEditorTick();
+  // Autoguardado: 2 s despues de la ultima modificacion real del texto.
+  if((int)strlen(noteBuffer) != lenBefore) noteDirtyMs = millis();
+  if(noteDirtyMs && millis() - noteDirtyMs > NOTE_AUTOSAVE_MS) noteSave();
 }
 
 // #############################################################
@@ -12567,11 +13422,53 @@ static int simpBar(int y, const char* label, const char* val, int pct, uint16_t 
   if(pct > 0) fillRoundRect(bx, byr, bw * pct / 100, barH, barH / 2, col);
   return byr + barH + uiPad();
 }
-// ALMACENAMIENTO · adaptativa.
-//   Esencial   : las tres barras (Flash, PSRAM, SD).
-//   Opcional 1 : resumen en tarjetas con totales -- aparece cuando quedan
-//                >= 80 px libres bajo las barras (si no, se omite entero).
-//   Opcional 2 : pie de ayuda -- aparece si aun sobran >= 18 px.
+// #############################################################
+// ##  ALMACENAMIENTO  ·  todo lo que muestra sale de leer el
+// ##  sistema de archivos y el SDK, en el momento de pintarlo
+// ##  ------------------------------------------------------
+// ##  De donde sale cada numero:
+// ##    · "Almacenamiento interno" -> LittleFS.totalBytes() y
+// ##      LittleFS.usedBytes() (via flexFsTotalBytes/UsedBytes).
+// ##      Es el espacio de la PARTICION DE DATOS, que es el
+// ##      unico que el usuario puede llenar; no el tamano del
+// ##      chip de flash, que incluye el propio firmware y no se
+// ##      puede usar para guardar nada.
+// ##    · "PSRAM" -> heap_caps_get_total_size/free_size con
+// ##      MALLOC_CAP_SPIRAM. En una placa sin PSRAM (Pro) el
+// ##      total es 0 y la fila lo dice, no finge un porcentaje.
+// ##    · Categorias -> suma recursiva de los ficheros de cada
+// ##      carpeta real (flexFsCatSize).
+// ##    · "Archivos grandes" -> recorrido completo del arbol
+// ##      quedandose con los mayores (flexFsLargest).
+// #############################################################
+#define ALM_BIG_MAX 3
+
+static FlexFsBig almBig[ALM_BIG_MAX];
+static int       almBigN = 0;
+static uint32_t  almCat[FLEXFS_CAT_N];
+static int       almVerY0 = 0, almVerY1 = 0;      // zona pulsable real de "Ver..."
+
+static const char* ALM_CAT_NAME[FLEXFS_CAT_N] = { "Documentos", "Sistema", "Aplicaciones", "Papelera" };
+static const uint16_t ALM_CAT_COL[FLEXFS_CAT_N] = {
+  rgb565(245,85,85), rgb565(250,215,95), rgb565(95,225,110), rgb565(60,205,240) };
+
+static void filesEnter();                          // explorador (ST_FILES), mas abajo
+
+// Relee TODO lo que se muestra. Se llama al entrar a la app y al volver
+// del explorador: si el usuario borro algo alli, aqui se ve al instante.
+static void almScan(){
+  for(int i = 0; i < FLEXFS_CAT_N; i++) almCat[i] = flexFsCatSize(i);
+  almBigN = flexFsLargest(almBig, ALM_BIG_MAX);
+}
+
+// Icono de carpeta (el mismo que usa el explorador).
+static void almFolderIcon(int x, int y, int s){
+  uint16_t body = rgb565(250,205,90), tab = rgb565(240,175,60);
+  fillRoundRect(x, y + s / 5, s, s * 3 / 4, s / 8, tab);
+  fillRoundRect(x, y + s / 5, s * 5 / 9, s / 4, s / 10, tab);
+  fillRoundRect(x + s / 10, y + s / 3, s - s / 10, s * 3 / 5, s / 9, body);
+}
+
 static void almEnter(){
   setBuf(fb);
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
@@ -12580,39 +13477,349 @@ static void almEnter(){
   int y = by + pad;
   y = uiTitle(bx, y, bw, "Almacenamiento", rgb565(255,255,255), uiFontH(bh / 12));
   y += gap / 2;
-  y = simpBar(y, "Flash (sistema)", "~2 / 16 MB", 13, rgb565(90,160,240));
-  size_t pf = heap_caps_get_free_size(MALLOC_CAP_SPIRAM), pt = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
-  int up = pt > 0 ? (int)(100 - (uint64_t)pf * 100 / pt) : 0;
-  char v[40]; snprintf(v, sizeof(v), "%d%% en uso", up);
-  y = simpBar(y, "PSRAM", v, up, rgb565(90,180,120));
-  y = simpBar(y, "Tarjeta SD", "No insertada", 0, rgb565(200,120,80));
-  int rest = (by + bh) - y - pad;
-  uint8_t aSum = uiSection(0, rest >= 80 && bw >= 240);
-  if(aSum){
-    int n = 3, g = gap, cw = (bw - 2 * pad - (n - 1) * g) / n;
-    int chh = rest > 120 ? 120 : rest;
-    char t1[24], t2[24], t3[24];
-    snprintf(t1, sizeof(t1), "%u MB", (unsigned)(pt / (1024 * 1024)));
-    snprintf(t2, sizeof(t2), "%u MB", (unsigned)(pf / (1024 * 1024)));
-    snprintf(t3, sizeof(t3), "%u KB", (unsigned)(esp_get_free_heap_size() / 1024));
-    const char* lb[3] = { "PSRAM total", "PSRAM libre", "RAM libre" };
-    const char* vl[3] = { t1, t2, t3 };
-    for(int i = 0; i < n; i++){
-      int x = bx + pad + i * (cw + g);
-      uiRectA(x, y, cw, chh, uiPad(), rgb565(30,34,46), aSum);
-      uiTextC(x + cw / 2, y + chh / 2 - uiLineH(2) - 8, lb[i], uiFontFit(lb[i], cw - 12, 2), rgb565(150,160,185), aSum);
-      uiTextC(x + cw / 2, y + chh / 2 + 2, vl[i], uiFontFit(vl[i], cw - 12, 3), rgb565(225,232,245), aSum);
-    }
-    y += chh + gap;
+
+  if(!flexFsReady()){
+    drawTextC(bx + bw / 2, y + 40, "Sin almacenamiento", 3, rgb565(240,140,140));
+    drawTextC(bx + bw / 2, y + 84, flexFsError(), 1, rgb565(170,178,196));
+    drawTextC(bx + bw / 2, y + 112, "Elige un Partition Scheme con SPIFFS", 1, rgb565(140,148,168));
+    almVerY0 = almVerY1 = 0;
+    flxFlush(WIN_TOP, WIN_BOT);
+    return;
   }
-  uint8_t aFoot = uiSection(1, (by + bh) - y - pad >= 18);
-  if(aFoot){
-    const char* tip = "Inserta una microSD para mas espacio";
-    uiTextC(bx + bw / 2, by + bh - pad - uiLineH(2), tip,
-            uiFontFit(tip, bw - 2 * pad, 2), rgb565(140,148,168), aFoot);
+  almScan();
+
+  // ---- Barra 1: particion de datos (lo unico que el usuario llena) ----
+  uint32_t tot = flexFsTotalBytes(), usd = flexFsUsedBytes();
+  int pctFs = tot ? (int)((uint64_t)usd * 100 / tot) : 0;
+  char vt[48], su[24], st[24];
+  flexFsFmtSize(usd, su, sizeof(su));
+  flexFsFmtSize(tot, st, sizeof(st));
+  snprintf(vt, sizeof(vt), "%s / %s  (%d%%)", su, st, pctFs);
+  y = simpBar(y, "Almacenamiento interno", vt, pctFs, rgb565(90,160,240));
+
+  // ---- Barra 2: PSRAM ----
+  size_t pt = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+  size_t pf = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+  if(pt > 0){
+    int pctPs = (int)(100 - (uint64_t)pf * 100 / pt);
+    char vp[48];
+    snprintf(vp, sizeof(vp), "%u / %u MB  (%d%%)",
+             (unsigned)((pt - pf) / 1048576u), (unsigned)(pt / 1048576u), pctPs);
+    y = simpBar(y, "PSRAM", vp, pctPs, rgb565(90,180,120));
+  } else {
+    // Sin PSRAM (ESP32 clasico): se dice, no se pinta una barra a 0 que
+    // parezca una PSRAM vacia.
+    y = simpBar(y, "PSRAM", "No disponible en esta placa", 0, rgb565(120,124,140));
+  }
+
+  // ---- Categorias: tamano REAL de cada conjunto de carpetas ----
+  y += gap / 2;
+  int rowH = uiLineH(2) + 12;
+  for(int i = 0; i < FLEXFS_CAT_N; i++){
+    if(y + rowH > by + bh - pad) break;
+    fillCircle(bx + pad * 2 + 8, y + rowH / 2 - 2, 8, ALM_CAT_COL[i]);
+    drawText(bx + pad * 2 + 26, y, ALM_CAT_NAME[i], 2, rgb565(228,232,242));
+    char sz[24]; flexFsFmtSize(almCat[i], sz, sizeof(sz));
+    drawTextR(bx + bw - pad * 2, y, sz, 2, rgb565(160,168,186));
+    y += rowH;
+  }
+
+  // ---- Archivos grandes: los mayores del sistema, de verdad ----
+  y += gap;
+  if(y + 40 < by + bh - pad){
+    drawText(bx + pad * 2, y, "Archivos grandes", 2, rgb565(240,242,248));
+    y += uiLineH(2) + 6;
+    if(almBigN == 0){
+      drawText(bx + pad * 2, y, "No hay archivos guardados", 1, rgb565(140,148,168));
+      y += 22;
+    }
+    for(int i = 0; i < almBigN; i++){
+      if(y + 44 > by + bh - pad) break;
+      almFolderIcon(bx + pad * 2, y, 34);
+      const char* nm = strrchr(almBig[i].path, '/');
+      nm = nm ? nm + 1 : almBig[i].path;
+      drawTextClip(bx + pad * 2 + 46, y, nm, 2, rgb565(228,232,242), bx + bw - pad * 2);
+      char sz[24], ln[64]; flexFsFmtSize(almBig[i].size, sz, sizeof(sz));
+      snprintf(ln, sizeof(ln), "%s  ·  %s", almBig[i].path, sz);
+      drawTextClip(bx + pad * 2 + 46, y + 22, ln, 1, rgb565(150,158,178), bx + bw - pad);
+      y += 46;
+    }
+  }
+
+  // ---- Fila "Todos los archivos ... Ver..." -> explorador REAL ----
+  y += gap / 2;
+  if(y + 46 <= by + bh - pad / 2){
+    fillRoundRect(bx + pad, y, bw - 2 * pad, 44, 12, rgb565(34,38,50));
+    drawText(bx + pad * 2, y + 12, "Todos los archivos", 2, rgb565(228,232,242));
+    drawTextR(bx + bw - pad * 2, y + 12, "Ver...", 2, rgb565(120,170,250));
+    almVerY0 = y; almVerY1 = y + 44;
+  } else {
+    almVerY0 = almVerY1 = 0;
   }
   flxFlush(WIN_TOP, WIN_BOT);
 }
+
+static void almTick(){
+  if(!T.tap) return;
+  if(almVerY1 > almVerY0 && T.y >= almVerY0 && T.y <= almVerY1) filesEnter();
+}
+
+// #############################################################
+// ##  EXPLORADOR DE ARCHIVOS  (ST_FILES)
+// ##  ------------------------------------------------------
+// ##  Lista lo que hay. El numero de elementos de cada carpeta
+// ##  se obtiene ABRIENDO la carpeta y contando (flexFsCount
+// ##  dentro de flexFsList), no de una tabla fija: por eso un
+// ##  "6 elementos" baja a 5 en cuanto se borra uno.
+// ##
+// ##  El menu contextual es el mismo kit que usan Notas y Paint,
+// ##  asi que las cuatro acciones se comportan igual en las tres
+// ##  pantallas y operan sobre el fichero real.
+// #############################################################
+#define FILES_MAX     24
+#define FILES_TOP    128
+#define FILES_RH      70
+
+static FlexFsEntry filesList[FILES_MAX];
+static int         filesN = 0;
+static char        filesDir[FLEXFS_PATH_MAX] = "/";
+static int         filesSelIdx = -1;
+static int         filesScroll = 0;
+static int         filesDragY0 = 0, filesDragS0 = 0;
+static bool        filesDragging = false, filesLongFired = false;
+static bool        filesMulti = false;
+static uint32_t    filesMask = 0;
+
+static void filesRender();
+
+static void filesReload(){
+  filesN = flexFsList(filesDir, filesList, FILES_MAX);
+  if(filesSelIdx >= filesN) filesSelIdx = -1;
+  int maxRows = filesN;
+  if(filesScroll > maxRows * FILES_RH) filesScroll = 0;
+}
+
+static void filesPathOf(int i, char* out, size_t n){
+  if(!strcmp(filesDir, "/")) snprintf(out, n, "/%s", filesList[i].name);
+  else                       snprintf(out, n, "%s/%s", filesDir, filesList[i].name);
+}
+
+// Fila 0 = ".." cuando no estamos en la raiz. Se cuenta en el layout para
+// que el indice de la lista y la fila dibujada no puedan desalinearse.
+static bool filesHasUp(){ return strcmp(filesDir, "/") != 0; }
+static int  filesRowY(int row){ return FILES_TOP + row * FILES_RH - filesScroll; }
+static int  filesMaxScroll(){
+  int rows = filesN + (filesHasUp() ? 1 : 0);
+  int need = FILES_TOP + rows * FILES_RH + 30;
+  int m = need - (SCR_H - 80);
+  return m > 0 ? m : 0;
+}
+
+static void filesRender(){
+  setBuf(fb);
+  fillRect(0, 0, SCR_W, SCR_H, rgb565(214,214,214));
+  drawText(16, 22, "Archivos:", 5, rgb565(16,18,24));
+  strokeSegAA(30, 26, 18, 18, 2.4f, rgb565(16,18,24));
+  strokeSegAA(18, 18, 30, 10, 2.4f, rgb565(16,18,24));
+  for(int i = 0; i < 3; i++) fillCircle(SCR_W - 26, 32 + i * 15, 5, rgb565(16,18,24));
+  drawTextClip(16, 84, filesDir, 2, rgb565(60,64,74), SCR_W - 60);
+
+  int row = 0;
+  if(filesHasUp()){
+    int y = filesRowY(row++);
+    if(y > 40 && y < SCR_H - 60){
+      fillRoundRect(12, y, SCR_W - 24, FILES_RH - 8, 12, rgb565(178,178,178));
+      almFolderIcon(28, y + 12, 38);
+      drawText(84, y + 18, "..", 3, rgb565(16,18,24));
+      drawTextR(SCR_W - 28, y + 22, "subir", 1, rgb565(70,74,84));
+    }
+  }
+  for(int i = 0; i < filesN; i++){
+    int y = filesRowY(row++);
+    if(y + FILES_RH < 40 || y > SCR_H - 50) continue;
+    bool sel = filesMulti && (filesMask & (1UL << i));
+    fillRoundRect(12, y, SCR_W - 24, FILES_RH - 8, 12, sel ? rgb565(150,180,235) : rgb565(178,178,178));
+    if(filesList[i].dir) almFolderIcon(28, y + 12, 38);
+    else {
+      fillRoundRect(30, y + 10, 30, 42, 5, rgb565(250,250,252));
+      fillRect(30, y + 10, 30, 8, rgb565(200,204,214));
+    }
+    drawTextClip(84, y + 10, filesList[i].name, 3, rgb565(16,18,24), SCR_W - 150);
+    char sub[32];
+    if(filesList[i].dir) snprintf(sub, sizeof(sub), "%u elementos", (unsigned)filesList[i].items);
+    else                 flexFsFmtSize(filesList[i].size, sub, sizeof(sub));
+    drawTextR(SCR_W - 28, y + 40, sub, 2, rgb565(50,54,64));
+  }
+  if(filesN == 0 && !filesHasUp())
+    drawTextC(SCR_W / 2, 320, "Carpeta vac\xC3\xAD" "a", 3, rgb565(70,74,84));
+
+  if(filesMulti){
+    int by = SCR_H - 128;
+    fillRoundRect(12, by, SCR_W - 24, 60, 16, rgb565(30,34,46));
+    drawText(28, by + 20, "Selecci\xC3\xB3n", 2, rgb565(240,242,248));
+    drawTextR(SCR_W - 140, by + 20, "Papelera", 2, rgb565(250,210,120));
+    drawTextR(SCR_W - 28,  by + 20, "Salir", 2, rgb565(180,188,205));
+  }
+  if(fkMenuOn) fkMenuDraw();
+  flxFlushAll();
+}
+
+static void filesEnter(){
+  if(!flexFsReady()){ fkNoFsScreen("Archivos"); gState = ST_FILES; return; }
+  gState = ST_FILES;
+  snprintf(filesDir, sizeof(filesDir), "/");
+  filesSelIdx = -1; filesScroll = 0; filesMulti = false; filesMask = 0;
+  fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
+  filesReload();
+  filesRender();
+}
+
+static void filesExit(){
+  // Volver a Almacenamiento REPINTANDO: si desde aqui se borro o renombro
+  // algo, los tamanos de la pantalla anterior ya no valen. Ademas hay que
+  // rehacer el marco de la app entero (barra de estado y nav): el explorador
+  // dibuja a pantalla completa y se lo ha llevado por delante.
+  gState = ST_APP;
+  setBuf(fb);
+  fillRect(0, 0, SCR_W, SCR_H, WIN_BG);
+  appDrawChrome(gAppId);
+  appDrawHeader(gAppId);
+  almEnter();
+  flxFlushAll();
+}
+
+static void filesGoUp(){
+  char* s = strrchr(filesDir, '/');
+  if(!s || s == filesDir){ snprintf(filesDir, sizeof(filesDir), "/"); }
+  else *s = 0;
+  filesScroll = 0; filesSelIdx = -1; filesMulti = false; filesMask = 0;
+  filesReload(); filesRender();
+}
+
+static void filesMenuAction(int act){
+  char p[FLEXFS_PATH_MAX];
+  if(filesSelIdx >= 0 && filesSelIdx < filesN) filesPathOf(filesSelIdx, p, sizeof(p));
+  else p[0] = 0;
+  if(act == FK_ACT_SEL){
+    filesMulti = true; filesMask = 0;
+    if(filesSelIdx >= 0) filesMask |= (1UL << filesSelIdx);
+  } else if(act == FK_ACT_DEL){
+    if(p[0]){ fkAskOpen("\xC2\xBF" "Borrar definitivamente?", filesList[filesSelIdx].name); return; }
+  } else if(act == FK_ACT_REN){
+    if(p[0]){
+      char stem[FLEXFS_NAME_MAX]; flexFsStem(filesList[filesSelIdx].name, stem, sizeof(stem));
+      fkNameOpen("Renombrar", stem);
+      return;
+    }
+  } else if(act == FK_ACT_TRASH){
+    if(p[0]){ flexFsTrash(p); filesSelIdx = -1; filesReload(); }
+    else { fkTrashOpen(); return; }               // sin seleccion: abre la papelera
+  }
+  filesRender();
+}
+
+static void filesTick(){
+  if(!flexFsReady()){ if(T.tap && T.x < 60 && T.y < 60) filesExit(); return; }
+  if(fkTrashOn){ if(!fkTrashTick()){ filesReload(); filesRender(); } return; }
+  if(fkAskOn){
+    int r = fkAskTick();
+    if(r == 1 && filesSelIdx >= 0 && filesSelIdx < filesN){
+      char p[FLEXFS_PATH_MAX]; filesPathOf(filesSelIdx, p, sizeof(p));
+      flexFsDelete(p);
+      filesSelIdx = -1; filesReload();
+    }
+    if(r != 0) filesRender();
+    return;
+  }
+  if(fkNameOn){
+    int r = fkNameTick();
+    if(r == 1 && filesSelIdx >= 0 && filesSelIdx < filesN){
+      char p[FLEXFS_PATH_MAX]; filesPathOf(filesSelIdx, p, sizeof(p));
+      flexFsRename(p, fkNameBuf);
+      filesSelIdx = -1; filesReload();
+    }
+    if(r != 0) filesRender();
+    return;
+  }
+  if(fkMenuOn){
+    if(T.tap){
+      int a = fkMenuHit(T.x, T.y);
+      fkMenuOn = false;
+      if(a >= 0) filesMenuAction(a);
+      else       filesRender();
+    }
+    return;
+  }
+
+  int maxS = filesMaxScroll();
+  if(T.pressed){ filesDragY0 = T.y; filesDragS0 = filesScroll; filesDragging = false; }
+  if(T.down && maxS > 0){
+    int dy = filesDragY0 - T.y;
+    if(!filesDragging && abs(dy) > 8) filesDragging = true;
+    if(filesDragging){
+      int ns = filesDragS0 + dy;
+      if(ns < 0) ns = 0; if(ns > maxS) ns = maxS;
+      if(ns != filesScroll){ filesScroll = ns; filesRender(); }
+      filesLongFired = true;
+      return;
+    }
+  }
+  if(T.released && filesDragging){ filesDragging = false; return; }
+
+  int base = filesHasUp() ? 1 : 0;
+  if(T.down && !filesLongFired && (millis() - T.downMs) > 550
+     && abs(T.x - T.startX) < 14 && abs(T.y - T.startY) < 14){
+    for(int i = 0; i < filesN; i++){
+      int y = filesRowY(base + i);
+      if(T.startY >= y && T.startY < y + FILES_RH - 8){
+        filesLongFired = true; filesSelIdx = i;
+        fkMenuOpen(T.x, T.y - 40);
+        return;
+      }
+    }
+    filesLongFired = true;
+  }
+  if(!T.down) filesLongFired = false;
+  if(!T.tap) return;
+
+  if(T.x > SCR_W - 60 && T.y < 76){ filesSelIdx = -1; fkMenuOpen(SCR_W - 40, 56); return; }
+  if(T.x < 60 && T.y < 60){ filesExit(); return; }
+
+  if(filesMulti){
+    int by = SCR_H - 128;
+    if(T.y >= by && T.y <= by + 60){
+      if(T.x > SCR_W - 100){ filesMulti = false; filesMask = 0; filesRender(); return; }
+      if(T.x > SCR_W - 230){
+        for(int i = 0; i < filesN; i++) if(filesMask & (1UL << i)){
+          char p[FLEXFS_PATH_MAX]; filesPathOf(i, p, sizeof(p));
+          flexFsTrash(p);
+        }
+        filesMulti = false; filesMask = 0; filesReload(); filesRender(); return;
+      }
+    }
+  }
+  if(filesHasUp()){
+    int y = filesRowY(0);
+    if(T.y >= y && T.y < y + FILES_RH - 8){ filesGoUp(); return; }
+  }
+  for(int i = 0; i < filesN; i++){
+    int y = filesRowY(base + i);
+    if(T.y >= y && T.y < y + FILES_RH - 8){
+      if(filesMulti){ filesMask ^= (1UL << i); filesRender(); return; }
+      if(filesList[i].dir){
+        char p[FLEXFS_PATH_MAX]; filesPathOf(i, p, sizeof(p));
+        strncpy(filesDir, p, sizeof(filesDir) - 1); filesDir[sizeof(filesDir) - 1] = 0;
+        filesScroll = 0; filesSelIdx = -1;
+        filesReload(); filesRender();
+      } else {
+        filesSelIdx = i;
+        fkMenuOpen(SCR_W / 2 - 60, y + 30);       // un fichero suelto: acciones sobre el
+      }
+      return;
+    }
+  }
+}
+
 // EDUCACION (y cualquier app de lista de tarjetas) · adaptativa.
 //   Esencial   : la lista de tarjetas, repartida en COLUMNAS segun el ancho
 //                (una columna necesita >= 220 px), de modo que al ensanchar la
@@ -14920,53 +16127,451 @@ static void ideTick(){
 }
 
 
-// ---- Paint: lienzo con dibujo tactil real ----
-#define P_TOP 96
-#define P_BOT (SCR_H - 66)
-static uint16_t pColor = 0;
-static int pPrevX = -1, pPrevY = -1, pSize = 4;
+// #############################################################
+// ##  APP PAINT  ·  galeria + lienzo, sobre ficheros REALES
+// ##  ------------------------------------------------------
+// ##  FORMATO: cada dibujo es un .fxp en /Paint, o sea la lista
+// ##  de trazos serializada (ver el bloque de justificacion en
+// ##  FlexOS_FS.h). Resumen del porque: un bitmap RGB565 del
+// ##  lienzo son ~542 KB por dibujo -- no cabe ni uno en la
+// ##  particion de datos del Pro y llena la del Ultra con
+// ##  cuatro. Un dibujo por trazos ronda los 3-8 KB, se
+// ##  redibuja a cualquier escala (que es exactamente lo que
+// ##  necesita la MINIATURA de la galeria: los mismos trazos
+// ##  reproducidos mas pequenos, no una imagen aparte) y se
+// ##  puede ampliar trazo a trazo sin reescribir el fichero.
+// ##
+// ##  GUARDADO: al levantar el dedo. No hay boton "guardar" que
+// ##  se pueda olvidar, y un apagon solo se lleva el trazo que
+// ##  estaba a medias.
+// ##
+// ##  RENDER: el lienzo NUNCA se repinta entero mientras se
+// ##  dibuja. Cada segmento vuelca solo la franja de filas que
+// ##  ha tocado (flxFlush(y0, y1)), igual que hacia la version
+// ##  anterior de esta app y que el resto del sistema.
+// #############################################################
+#define P_TOP           96
+#define P_BOT           (SCR_H - 66)
+#define PAINT_CX        8
+#define PAINT_CW        (SCR_W - 16)
+#define PAINT_CH        (P_BOT - P_TOP)
+#define PAINT_MAX_PTS   512            // puntos por trazo (buffer de trabajo)
+#define PAINT_MAX_LIST  16
+#define PAINT_COLS       2
+#define PAINT_CARD_TOP  118
+
 static const uint16_t P_PAL[6] = { rgb565(30,30,40), rgb565(230,60,60), rgb565(240,150,40),
                                    rgb565(240,210,50), rgb565(80,180,120), rgb565(60,120,235) };
+static const uint8_t  P_SIZES[3] = { 3, 6, 12 };
+
+static int       paintView    = 0;                 // 0 = galeria, 1 = lienzo
+static FlexFsEntry paintList[PAINT_MAX_LIST];
+static int       paintListN   = 0;
+static int       paintSelIdx  = -1;
+static char      paintPath[FLEXFS_PATH_MAX] = "";
+static int       paintScroll  = 0;
+static int       paintDragY0 = 0, paintDragS0 = 0;
+static bool      paintDragging = false, paintLongFired = false;
+static bool      paintMulti   = false;
+static uint32_t  paintMask    = 0;
+
+static uint16_t  pColor  = 0;
+static int       pSizeIx = 1;
+static int16_t*  pStroke = NULL;                   // trazo en curso (PSRAM)
+static int       pStrokeN = 0;
+static int       pPrevX = -1, pPrevY = -1;
+
+static void paintRenderGallery();
+static void paintRenderCanvas();
+
+// Buffer de TRABAJO del trazo en curso. Va a PSRAM cuando la placa la
+// tiene (Ultra y Ultra S3): son 2 KB que no hacen falta en la RAM
+// interna, que es el recurso escaso. En el Pro, sin PSRAM, cae al heap
+// normal -- y si tampoco hubiera, la app lo dice en vez de dibujar sin
+// poder guardar.
+static void paintBufInit(){
+  if(pStroke) return;
+  size_t bytes = (size_t)PAINT_MAX_PTS * 2 * sizeof(int16_t);
+  if(heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0)
+    pStroke = (int16_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+  if(!pStroke) pStroke = (int16_t*)malloc(bytes);
+}
+
+// ---- Reproduccion de trazos -------------------------------------------
+// El MISMO callback sirve para el lienzo a tamano real y para las
+// miniaturas: solo cambia la escala con la que flexPaintReplay entrega
+// los segmentos. Por eso una miniatura no puede "no parecerse" al
+// dibujo: es el dibujo.
+static void paintSegCb(int x0, int y0, int x1, int y1, uint16_t color, int radius, void* user){
+  (void)user;
+  if(x0 == x1 && y0 == y1) fillCircleAA((float)x0, (float)y0, (float)radius, color);
+  else                     strokeSegAA((float)x0, (float)y0, (float)x1, (float)y1, (float)radius, color);
+}
+
+static void paintPathOf(int i, char* out, size_t n){
+  snprintf(out, n, "%s/%s", FLEXFS_DIR_PAINT, paintList[i].name);
+}
+
+static void paintReload(){
+  paintListN = flexFsList(FLEXFS_DIR_PAINT, paintList, PAINT_MAX_LIST);
+  if(paintScroll > paintListN) paintScroll = 0;
+}
+
+// ---- Galeria ----------------------------------------------------------
+static void paintCardRect(int i, int &x, int &y, int &w, int &h){
+  int col = i % PAINT_COLS, row = i / PAINT_COLS;
+  w = (SCR_W - 3 * 16) / PAINT_COLS;
+  h = (int)(w * (float)PAINT_CH / (float)PAINT_CW);      // misma proporcion que el lienzo
+  if(h > 340) h = 340;
+  x = 16 + col * (w + 16);
+  y = PAINT_CARD_TOP + row * (h + 46) - paintScroll;
+}
+
+static int paintMaxScroll(){
+  int x, y, w, h; paintCardRect(0, x, y, w, h);
+  int rows = (paintListN + PAINT_COLS - 1) / PAINT_COLS;
+  int need = PAINT_CARD_TOP + rows * (h + 46) + 40;
+  int m = need - (SCR_H - 60);
+  return m > 0 ? m : 0;
+}
+
+static void paintFabRect(int &x, int &y, int &r){ r = 52; x = SCR_W - 76; y = SCR_H - 146; }
+
+static void paintRenderGallery(){
+  setBuf(fb);
+  fillRect(0, 0, SCR_W, SCR_H, rgb565(158,158,158));
+  drawText(16, 22, "Paint", 5, rgb565(16,18,24));
+  strokeSegAA(30, 26, 18, 18, 2.4f, rgb565(16,18,24));
+  strokeSegAA(18, 18, 30, 10, 2.4f, rgb565(16,18,24));
+  for(int i = 0; i < 3; i++) fillCircle(SCR_W - 26, 32 + i * 15, 5, rgb565(16,18,24));
+
+  if(paintListN == 0){
+    drawTextC(SCR_W / 2, 320, "No hay dibujos todav\xC3\xAD" "a", 3, rgb565(40,44,54));
+    drawTextC(SCR_W / 2, 364, "Pulsa + para crear uno", 1, rgb565(60,64,74));
+  }
+  for(int i = 0; i < paintListN; i++){
+    int x, y, w, h; paintCardRect(i, x, y, w, h);
+    if(y + h < 60 || y > SCR_H) continue;
+    char title[FLEXFS_NAME_MAX];
+    flexFsStem(paintList[i].name, title, sizeof(title));
+    drawTextC(x + w / 2, y - 34, title, 2, rgb565(16,18,24));
+    fillRoundRect(x, y, w, h, 12, rgb565(255,255,255));
+
+    // MINIATURA REAL: se reproducen los trazos del fichero a escala.
+    char p[FLEXFS_PATH_MAX]; paintPathOf(i, p, sizeof(p));
+    float sc = (float)(w - 8) / (float)PAINT_CW;
+    int savedX0 = gClipX0, savedX1 = gClipX1, savedY0 = gClipY0, savedY1 = gClipY1;
+    gClipX0 = x + 4; gClipX1 = x + w - 4; gClipY0 = y + 4; gClipY1 = y + h - 4;
+    flexPaintReplay(p, sc, x + 4, y + 4, paintSegCb, NULL);
+    gClipX0 = savedX0; gClipX1 = savedX1; gClipY0 = savedY0; gClipY1 = savedY1;
+
+    if(paintMulti && (paintMask & (1UL << i))){
+      drawRoundRect(x, y, w, h, 12, rgb565(60,120,235));
+      drawRoundRect(x + 1, y + 1, w - 2, h - 2, 11, rgb565(60,120,235));
+      fillCircle(x + w - 18, y + 18, 10, rgb565(60,120,235));
+      strokeSegAA(x + w - 23, y + 18, x + w - 20, y + 22, 2.2f, rgb565(255,255,255));
+      strokeSegAA(x + w - 20, y + 22, x + w - 13, y + 13, 2.2f, rgb565(255,255,255));
+    }
+  }
+  if(paintMulti){
+    int by = SCR_H - 128;
+    fillRoundRect(12, by, SCR_W - 24, 60, 16, rgb565(30,34,46));
+    drawText(28, by + 20, "Selecci\xC3\xB3n", 2, rgb565(240,242,248));
+    drawTextR(SCR_W - 140, by + 20, "Papelera", 2, rgb565(250,210,120));
+    drawTextR(SCR_W - 28,  by + 20, "Salir", 2, rgb565(180,188,205));
+  } else {
+    int fx, fy, fr; paintFabRect(fx, fy, fr);
+    drawTextR(fx - fr - 6, fy - 34, "Nuevo dibujo", 2, rgb565(16,18,24));
+    fillCircle(fx, fy, fr, rgb565(16,18,24));
+    fillCircle(fx, fy, fr - 5, rgb565(255,255,255));
+    fillRoundRect(fx - 22, fy - 5, 44, 10, 4, rgb565(16,18,24));
+    fillRoundRect(fx - 5, fy - 22, 10, 44, 4, rgb565(16,18,24));
+  }
+  if(fkMenuOn) fkMenuDraw();
+  flxFlushAll();
+}
+
+// ---- Lienzo -----------------------------------------------------------
 static void paintTools(){
   setBuf(fb);
-  int y = SCR_H - 56, sw = 42, gap = 8, x = 16;
+  int y = SCR_H - 58, sw = 34, gap = 6, x0 = 10;
   fillRect(0, P_BOT, SCR_W, SCR_H - P_BOT, rgb565(18,20,28));
   for(int i = 0; i < 6; i++){
-    int cx = x + i * (sw + gap) + sw / 2;
+    int cx = x0 + i * (sw + gap) + sw / 2;
     fillCircle(cx, y + sw / 2, sw / 2 - 2, P_PAL[i]);
-    if(P_PAL[i] == pColor){ drawCircle(cx, y + sw / 2, sw / 2, rgb565(255,255,255)); drawCircle(cx, y + sw / 2, sw / 2 - 1, rgb565(255,255,255)); }
+    if(P_PAL[i] == pColor){
+      drawCircle(cx, y + sw / 2, sw / 2, rgb565(255,255,255));
+      drawCircle(cx, y + sw / 2, sw / 2 - 1, rgb565(255,255,255));
+    }
   }
-  fillRoundRect(SCR_W - 92, y + 2, 78, 40, 10, rgb565(60,64,78));
-  drawTextC(SCR_W - 53, y + 12, "Limpiar", 2, rgb565(240,242,248));
+  // Grosor: tres puntos de tamano real (lo que se ve es lo que se pinta).
+  int gx = x0 + 6 * (sw + gap) + 8;
+  fillRoundRect(gx, y, 44, sw, 8, rgb565(40,44,58));
+  fillCircle(gx + 22, y + sw / 2, P_SIZES[pSizeIx], rgb565(240,242,248));
+  fillRoundRect(gx + 52, y, 76, sw, 8, rgb565(60,64,78));
+  drawTextC(gx + 90, y + 9, "Deshacer", 1, rgb565(240,242,248));
+  fillRoundRect(gx + 134, y, 66, sw, 8, rgb565(120,54,54));
+  drawTextC(gx + 167, y + 9, "Limpiar", 1, rgb565(255,235,235));
   flxFlush(P_BOT, SCR_H - 1);
 }
-static void paintEnter(){
-  setBuf(fb); fillRect(0, 0, SCR_W, SCR_H, rgb565(16,18,26));
+
+static void paintRenderCanvas(){
+  setBuf(fb);
+  fillRect(0, 0, SCR_W, P_TOP, rgb565(16,18,26));
   strokeSegAA(30, 26, 18, 18, 2.4f, rgb565(255,255,255));
   strokeSegAA(18, 18, 30, 10, 2.4f, rgb565(255,255,255));
-  drawTextC(SCR_W / 2, 14, "Paint", 3, rgb565(255,255,255));
-  fillRect(8, P_TOP, SCR_W - 16, P_BOT - P_TOP, rgb565(250,250,252));   // lienzo
-  pColor = P_PAL[0]; pPrevX = pPrevY = -1;
+  char title[FLEXFS_NAME_MAX];
+  flexFsStem(paintPath, title, sizeof(title));
+  drawTextC(SCR_W / 2, 30, title, 3, rgb565(255,255,255));
+  FlexPaintHdr hd;
+  if(flexPaintHeader(paintPath, &hd)){
+    char sub[48];
+    snprintf(sub, sizeof(sub), "%u trazos guardados", (unsigned)hd.strokes);
+    drawTextC(SCR_W / 2, 66, sub, 1, rgb565(150,158,178));
+  }
+  fillRect(PAINT_CX, P_TOP, PAINT_CW, PAINT_CH, rgb565(250,250,252));
+  // El lienzo se reconstruye desde el FICHERO, no desde un buffer en RAM:
+  // lo que se ve al abrir un dibujo es exactamente lo que hay guardado.
+  int sx0 = gClipX0, sx1 = gClipX1, sy0 = gClipY0, sy1 = gClipY1;
+  gClipX0 = PAINT_CX; gClipX1 = PAINT_CX + PAINT_CW - 1;
+  gClipY0 = P_TOP;    gClipY1 = P_BOT - 1;
+  flexPaintReplay(paintPath, 1.0f, PAINT_CX, P_TOP, paintSegCb, NULL);
+  gClipX0 = sx0; gClipX1 = sx1; gClipY0 = sy0; gClipY1 = sy1;
   paintTools();
   flxFlushAll();
 }
-static void paintTick(){
-  if(T.down && T.y >= P_TOP && T.y <= P_BOT && T.x >= 8 && T.x <= SCR_W - 8){
-    setBuf(fb);
-    int y0, y1;
-    if(pPrevX >= 0){ strokeSeg(pPrevX, pPrevY, T.x, T.y, pSize, pColor); y0 = min(pPrevY, T.y); y1 = max(pPrevY, T.y); }
-    else { fillCircle(T.x, T.y, pSize, pColor); y0 = y1 = T.y; }
-    pPrevX = T.x; pPrevY = T.y;
-    flxFlush(y0 - pSize - 1, y1 + pSize + 1);
+
+static void paintOpen(int i){
+  if(i < 0 || i >= paintListN) return;
+  paintPathOf(i, paintPath, sizeof(paintPath));
+  paintBufInit();
+  pStrokeN = 0; pPrevX = pPrevY = -1;
+  paintView = 1;
+  paintRenderCanvas();
+}
+
+// Nuevo dibujo: crea el FICHERO ya (cabecera .fxp con 0 trazos) con el
+// primer numero libre de /Paint, y entra a el. Aparece en la lista
+// porque existe en el disco, no porque se haya anadido a un array.
+static void paintNew(){
+  char full[FLEXFS_PATH_MAX];
+  if(!flexFsNewName(FLEXFS_DIR_PAINT, "Dibujo", FLEXFS_EXT_PAINT, full, sizeof(full))) return;
+  if(!flexPaintCreate(full, PAINT_CW, PAINT_CH)) return;
+  paintReload();
+  for(int i = 0; i < paintListN; i++){
+    char p[FLEXFS_PATH_MAX]; paintPathOf(i, p, sizeof(p));
+    if(!strcmp(p, full)){ paintOpen(i); return; }
+  }
+  paintRenderGallery();
+}
+
+// Cierra el trazo en curso escribiendolo en el fichero.
+static void paintFlushStroke(){
+  if(pStrokeN > 0 && pStroke && paintPath[0])
+    flexPaintAppend(paintPath, pColor, P_SIZES[pSizeIx], pStroke, (uint16_t)pStrokeN);
+  pStrokeN = 0; pPrevX = pPrevY = -1;
+}
+
+static void paintMenuAction(int act){
+  char p[FLEXFS_PATH_MAX];
+  if(paintSelIdx >= 0 && paintSelIdx < paintListN) paintPathOf(paintSelIdx, p, sizeof(p));
+  else p[0] = 0;
+  if(act == FK_ACT_SEL){
+    paintMulti = true; paintMask = 0;
+    if(paintSelIdx >= 0) paintMask |= (1UL << paintSelIdx);
+  } else if(act == FK_ACT_DEL){
+    if(p[0]){
+      char stem[FLEXFS_NAME_MAX]; flexFsStem(paintList[paintSelIdx].name, stem, sizeof(stem));
+      fkAskOpen("\xC2\xBF" "Borrar definitivamente?", stem);
+      return;
+    }
+  } else if(act == FK_ACT_REN){
+    if(p[0]){
+      char stem[FLEXFS_NAME_MAX]; flexFsStem(paintList[paintSelIdx].name, stem, sizeof(stem));
+      fkNameOpen("Renombrar dibujo", stem);
+      return;
+    }
+  } else if(act == FK_ACT_TRASH){
+    if(p[0]){ flexFsTrash(p); paintSelIdx = -1; paintReload(); }
+    else { fkTrashOpen(); return; }               // sin seleccion: abre la papelera
+  }
+  paintRenderGallery();
+}
+
+static void paintGalleryTick(){
+  if(fkTrashOn){ if(!fkTrashTick()){ paintReload(); paintRenderGallery(); } return; }
+  if(fkAskOn){
+    int r = fkAskTick();
+    if(r == 1 && paintSelIdx >= 0 && paintSelIdx < paintListN){
+      char p[FLEXFS_PATH_MAX]; paintPathOf(paintSelIdx, p, sizeof(p));
+      flexFsDelete(p);
+      paintSelIdx = -1; paintReload();
+    }
+    if(r != 0) paintRenderGallery();
     return;
   }
-  if(!T.down){ pPrevX = pPrevY = -1; }
-  if(T.tap){
-    if(T.x < 48 && T.y < 48){ appClose(); return; }
-    int y = SCR_H - 56, sw = 42, gap = 8, x = 16;
-    for(int i = 0; i < 6; i++){ int cx = x + i * (sw + gap) + sw / 2; if(T.x >= cx - sw / 2 && T.x <= cx + sw / 2 && T.y >= y && T.y <= y + sw){ pColor = P_PAL[i]; paintTools(); return; } }
-    if(T.x >= SCR_W - 92 && T.y >= y){ setBuf(fb); fillRect(8, P_TOP, SCR_W - 16, P_BOT - P_TOP, rgb565(250,250,252)); flxFlush(P_TOP, P_BOT); return; }
+  if(fkNameOn){
+    int r = fkNameTick();
+    if(r == 1 && paintSelIdx >= 0 && paintSelIdx < paintListN){
+      char p[FLEXFS_PATH_MAX]; paintPathOf(paintSelIdx, p, sizeof(p));
+      flexFsRename(p, fkNameBuf);
+      paintSelIdx = -1; paintReload();
+    }
+    if(r != 0) paintRenderGallery();
+    return;
   }
+  if(fkMenuOn){
+    if(T.tap){
+      int a = fkMenuHit(T.x, T.y);
+      fkMenuOn = false;
+      if(a >= 0) paintMenuAction(a);
+      else       paintRenderGallery();
+    }
+    return;
+  }
+
+  int maxS = paintMaxScroll();
+  if(T.pressed){ paintDragY0 = T.y; paintDragS0 = paintScroll; paintDragging = false; }
+  if(T.down && maxS > 0){
+    int dy = paintDragY0 - T.y;
+    if(!paintDragging && abs(dy) > 8) paintDragging = true;
+    if(paintDragging){
+      int ns = paintDragS0 + dy;
+      if(ns < 0) ns = 0; if(ns > maxS) ns = maxS;
+      if(ns != paintScroll){ paintScroll = ns; paintRenderGallery(); }
+      paintLongFired = true;
+      return;
+    }
+  }
+  if(T.released && paintDragging){ paintDragging = false; return; }
+
+  if(T.down && !paintLongFired && (millis() - T.downMs) > 550
+     && abs(T.x - T.startX) < 14 && abs(T.y - T.startY) < 14){
+    for(int i = 0; i < paintListN; i++){
+      int x, y, w, h; paintCardRect(i, x, y, w, h);
+      if(T.startX >= x && T.startX <= x + w && T.startY >= y && T.startY <= y + h){
+        paintLongFired = true; paintSelIdx = i;
+        fkMenuOpen(T.x, T.y - 40);
+        return;
+      }
+    }
+    paintLongFired = true;
+  }
+  if(!T.down) paintLongFired = false;
+  if(!T.tap) return;
+
+  if(T.x > SCR_W - 60 && T.y < 76){ paintSelIdx = -1; fkMenuOpen(SCR_W - 40, 56); return; }
+  if(T.x < 60 && T.y < 60){ appClose(); return; }
+
+  if(paintMulti){
+    int by = SCR_H - 128;
+    if(T.y >= by && T.y <= by + 60){
+      if(T.x > SCR_W - 100){ paintMulti = false; paintMask = 0; paintRenderGallery(); return; }
+      if(T.x > SCR_W - 230){
+        for(int i = 0; i < paintListN; i++) if(paintMask & (1UL << i)){
+          char p[FLEXFS_PATH_MAX]; paintPathOf(i, p, sizeof(p));
+          flexFsTrash(p);
+        }
+        paintMulti = false; paintMask = 0; paintReload(); paintRenderGallery(); return;
+      }
+    }
+  } else {
+    int fx, fy, fr; paintFabRect(fx, fy, fr);
+    long ddx = T.x - fx, ddy = T.y - fy;
+    if(ddx * ddx + ddy * ddy <= (long)fr * fr){ paintNew(); return; }
+  }
+  for(int i = 0; i < paintListN; i++){
+    int x, y, w, h; paintCardRect(i, x, y, w, h);
+    if(T.x >= x && T.x <= x + w && T.y >= y && T.y <= y + h){
+      if(paintMulti){ paintMask ^= (1UL << i); paintRenderGallery(); }
+      else paintOpen(i);
+      return;
+    }
+  }
+}
+
+static void paintCanvasTick(){
+  // ---- Trazo: interpolacion suave y volcado SOLO de la franja tocada ----
+  if(T.down && T.y >= P_TOP && T.y < P_BOT && T.x >= PAINT_CX && T.x < PAINT_CX + PAINT_CW){
+    int rad = P_SIZES[pSizeIx];
+    setBuf(fb);
+    int y0, y1;
+    if(pPrevX >= 0){
+      // Se descartan los puntos casi pegados: el GT911 entrega muestras muy
+      // juntas y guardarlas todas engorda el fichero sin cambiar el trazo.
+      int ddx = T.x - pPrevX, ddy = T.y - pPrevY;
+      if(ddx * ddx + ddy * ddy < 4) return;
+      strokeSegAA((float)pPrevX, (float)pPrevY, (float)T.x, (float)T.y, (float)rad, pColor);
+      y0 = min(pPrevY, T.y); y1 = max(pPrevY, T.y);
+    } else {
+      fillCircleAA((float)T.x, (float)T.y, (float)rad, pColor);
+      y0 = y1 = T.y;
+    }
+    if(pStroke && pStrokeN < PAINT_MAX_PTS){
+      pStroke[pStrokeN * 2]     = (int16_t)(T.x - PAINT_CX);   // coordenadas del LIENZO
+      pStroke[pStrokeN * 2 + 1] = (int16_t)(T.y - P_TOP);
+      pStrokeN++;
+    } else if(pStroke && pStrokeN >= PAINT_MAX_PTS){
+      // Trazo larguisimo: se cierra y se empieza otro, sin perder nada.
+      int lx = pPrevX, ly = pPrevY;
+      paintFlushStroke();
+      pStroke[0] = (int16_t)(lx - PAINT_CX); pStroke[1] = (int16_t)(ly - P_TOP);
+      pStrokeN = 1;
+    }
+    pPrevX = T.x; pPrevY = T.y;
+    flxFlush(y0 - rad - 1, y1 + rad + 1);
+    return;
+  }
+  // ---- Dedo levantado: el trazo se ESCRIBE en el fichero ----
+  if(!T.down && pStrokeN > 0) paintFlushStroke();
+  if(!T.down){ pPrevX = pPrevY = -1; }
+
+  if(!T.tap) return;
+  if(T.x < 48 && T.y < 48){                       // volver a la galeria
+    paintFlushStroke();
+    paintView = 0; paintReload(); paintRenderGallery();
+    return;
+  }
+  int y = SCR_H - 58, sw = 34, gap = 6, x0 = 10;
+  if(T.y >= y - 4 && T.y <= y + sw + 4){
+    for(int i = 0; i < 6; i++){
+      int cx = x0 + i * (sw + gap) + sw / 2;
+      if(T.x >= cx - sw / 2 && T.x <= cx + sw / 2){ pColor = P_PAL[i]; paintTools(); return; }
+    }
+    int gx = x0 + 6 * (sw + gap) + 8;
+    if(T.x >= gx && T.x < gx + 44){ pSizeIx = (pSizeIx + 1) % 3; paintTools(); return; }
+    if(T.x >= gx + 52 && T.x < gx + 128){         // DESHACER real: recorta el fichero
+      if(flexPaintUndo(paintPath)) paintRenderCanvas();
+      return;
+    }
+    if(T.x >= gx + 134){                          // LIMPIAR real: deja el .fxp a 0 trazos
+      if(flexPaintClear(paintPath)) paintRenderCanvas();
+      return;
+    }
+  }
+}
+
+static void paintEnter(){
+  paintBufInit();
+  if(!flexFsReady()){ fkNoFsScreen("Paint"); return; }
+  if(!pStroke){                                   // sin memoria no se puede guardar: se dice
+    setBuf(fb);
+    fillRect(0, 0, SCR_W, SCR_H, rgb565(14,16,24));
+    drawTextC(SCR_W / 2, 320, "Sin memoria para el lienzo", 2, rgb565(240,140,140));
+    flxFlushAll();
+    return;
+  }
+  pColor = P_PAL[0];
+  paintView = 0; paintMulti = false; paintMask = 0; paintSelIdx = -1;
+  fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
+  paintReload();
+  paintRenderGallery();
+}
+
+static void paintTick(){
+  if(!flexFsReady() || !pStroke){ if(T.tap && T.x < 60 && T.y < 60) appClose(); return; }
+  if(paintView == 0) paintGalleryTick();
+  else               paintCanvasTick();
 }
 
 // #############################################################
@@ -17357,6 +18962,300 @@ static void wifiTick(){
 // ##  por tarjeta. El blur costoso (pantalla completa) se sigue evitando.
 // #############################################################
 
+// #############################################################
+// ##  CONECTIVIDAD  ·  Wi-Fi / BLE / Modo avion   (ST_CONN)
+// ##  ------------------------------------------------------
+// ##  Los tres interruptores encienden y apagan radio DE
+// ##  VERDAD. Ninguno es un booleano que solo cambia de color:
+// ##
+// ##   · Wi-Fi     -> WiFi.mode(WIFI_STA) + WiFi.begin() con la
+// ##                  red guardada, o WiFi.scanNetworks() (en su
+// ##                  tarea) si aun no hay ninguna. Al apagar,
+// ##                  WiFi.disconnect(true,true) + WIFI_OFF.
+// ##                  El subtitulo es WiFi.SSID(): el nombre
+// ##                  REAL de la red a la que se esta conectado.
+// ##   · BLE       -> BLEDevice::init() + advertising real (el
+// ##                  equipo aparece como "FlexOS" en cualquier
+// ##                  movil) y BLEDevice::deinit(true) al
+// ##                  apagar. En una placa SIN radio Bluetooth
+// ##                  el interruptor queda deshabilitado con la
+// ##                  etiqueta "No disponible", y eso se decide
+// ##                  en COMPILACION mirando SOC_BLE_SUPPORTED
+// ##                  del propio SDK -- no esta escrito a mano
+// ##                  para un chip concreto.
+// ##   · Modo avion-> apaga las dos radios llamando a las
+// ##                  funciones reales de apagado y deja los
+// ##                  otros dos interruptores bloqueados
+// ##                  mientras este activo. Se guarda en NVS y,
+// ##                  si estaba activo, el arranque NO lanza la
+// ##                  reconexion automatica de Wi-Fi.
+// #############################################################
+#define CONN_CARD_X   14
+#define CONN_CARD_W   (SCR_W - 28)
+#define CONN_ROW_H    112
+#define CONN_CARD1_Y  110
+#define CONN_CARD2_Y  (CONN_CARD1_Y + 2 * CONN_ROW_H + 26)
+
+// (gAirplane y gBleOn se declaran arriba del todo, junto a gNetOnline: la
+//  pantalla de Ajustes -- que esta ANTES en el archivo -- necesita leerlos.)
+
+// ---- BLE real -------------------------------------------------
+// FLEXOS_BLE_HW lo decide el SDK (soc_caps.h) segun el chip que se
+// esta compilando. FLEXOS_ENABLE_BLE permite ademas apagarlo a mano
+// cuando la placa SI tiene radio pero no sobra flash para la pila BLE
+// (ver la cabecera del sketch de la placa correspondiente).
+static bool flexBleStart(){
+#if FLEXOS_ENABLE_BLE
+  if(gBleOn) return true;
+  BLEDevice::init("FlexOS");
+  BLEAdvertising* adv = BLEDevice::getAdvertising();
+  if(!adv){ BLEDevice::deinit(true); return false; }
+  adv->setScanResponse(true);
+  adv->start();                      // desde aqui el equipo es visible de verdad
+  gBleOn = true;
+  Serial.println(F("[BLE] advertising activo como \"FlexOS\""));
+  return true;
+#else
+  return false;
+#endif
+}
+
+static void flexBleStop(){
+#if FLEXOS_ENABLE_BLE
+  if(!gBleOn) return;
+  BLEAdvertising* adv = BLEDevice::getAdvertising();
+  if(adv) adv->stop();
+  BLEDevice::deinit(true);           // libera el controlador, no solo la capa alta
+  gBleOn = false;
+  Serial.println(F("[BLE] apagado"));
+#endif
+}
+
+// ---- Wi-Fi real -----------------------------------------------
+static bool connWifiOn(){
+#if FLEXOS_ENABLE_WIFI
+  return WiFi.getMode() != WIFI_OFF;
+#else
+  return false;
+#endif
+}
+
+static void connWifiSet(bool on){
+#if FLEXOS_ENABLE_WIFI
+  if(on){
+    if(gAirplane) return;                       // bloqueo real, no visual
+    wifiEnsureStaMode();                        // enciende la pila en modo estacion
+    if(wifiCredsExist()){
+      // Hay red guardada -> WiFi.begin() real contra ella, en su tarea
+      // (loop() no se bloquea; misma ruta que la reconexion de arranque).
+      gWifiAutoDone = false; gWifiAutoBusy = false;
+      wifiTryAutoConnect();
+    } else {
+      wifiStartScan();                          // sin red guardada -> escaneo real
+    }
+  } else {
+    WiFi.disconnect(true, true);                // suelta la conexion y libera la STA
+    WiFi.mode(WIFI_OFF);                        // y apaga la radio
+    gNetOnline = false;
+    gWifiAutoDone = true;                       // que no vuelva a encenderse sola
+  }
+#else
+  (void)on;
+#endif
+}
+
+// Subtitulo del Wi-Fi: SSID REAL, nunca un nombre de ejemplo.
+static void connWifiSub(char* out, size_t n){
+#if !FLEXOS_ENABLE_WIFI
+  snprintf(out, n, "(No disponible)");
+#else
+  if(gAirplane){ snprintf(out, n, "(Modo avi\xC3\xB3n)"); return; }
+  if(!connWifiOn()){ snprintf(out, n, "(Desactivado)"); return; }
+  if(WiFi.status() == WL_CONNECTED){
+    String s = WiFi.SSID();
+    if(s.length() > 0) snprintf(out, n, "(%s)", s.c_str());
+    else               snprintf(out, n, "(Conectado)");
+    return;
+  }
+  if(gWifiAutoBusy)               { snprintf(out, n, "(Conectando...)"); return; }
+  if(wifiUIState == WUI_SCANNING) { snprintf(out, n, "(Buscando redes...)"); return; }
+  snprintf(out, n, "(No conectado)");
+#endif
+}
+
+static void connBleSub(char* out, size_t n){
+#if !FLEXOS_BLE_HW
+  // El chip que se esta compilando no tiene radio Bluetooth (caso del
+  // ESP32-P4, que delega el Wi-Fi en un C6 pero no expone BLE).
+  snprintf(out, n, "(No disponible)");
+#elif !FLEXOS_ENABLE_BLE
+  snprintf(out, n, "(Desactivado al compilar)");
+#else
+  if(gAirplane)   snprintf(out, n, "(Modo avi\xC3\xB3n)");
+  else if(gBleOn) snprintf(out, n, "(Visible como \"FlexOS\")");
+  else            snprintf(out, n, "(Desactivado)");
+#endif
+}
+
+static void connSaveState(){
+  prefs.begin("flexos", false);
+  prefs.putBool("airpl", gAirplane);
+  prefs.end();
+}
+
+// Se llama desde setup(). Solo lee NVS (flash, no radio): sigue en pie la
+// regla de que el arranque NO toca la radio.
+static void connBootRestore(){
+  prefs.begin("flexos", true);
+  gAirplane = prefs.getBool("airpl", false);
+  prefs.end();
+#if FLEXOS_ENABLE_WIFI
+  // Si el equipo se apago en modo avion, el arranque no debe reconectar
+  // solo: seria encender una radio que el usuario dejo apagada.
+  if(gAirplane) gWifiAutoDone = true;
+#endif
+  if(gAirplane) Serial.println(F("[RADIO] modo avion activo desde el arranque"));
+}
+
+static void connAirplaneSet(bool on){
+  gAirplane = on;
+  if(on){
+    flexBleStop();          // apagado real de las dos radios
+    connWifiSet(false);
+  }
+  connSaveState();
+}
+
+// ---- Interruptor (pastilla) -----------------------------------
+static void connPill(int x, int y, int w, int h, bool on, bool enabled){
+  uint16_t track = !enabled ? rgb565(150,152,158) : (on ? rgb565(20,215,90) : rgb565(150,152,158));
+  fillRoundRect(x, y, w, h, h / 2, track);
+  int r = h / 2 - 4;
+  int cx = on ? (x + w - h / 2) : (x + h / 2);
+  fillCircle(cx, y + h / 2, r, rgb565(255,255,255));
+  if(!enabled){                                  // aspa tenue: no se puede tocar
+    strokeSegAA(cx - 6, y + h / 2 - 6, cx + 6, y + h / 2 + 6, 1.6f, rgb565(190,192,198));
+    strokeSegAA(cx + 6, y + h / 2 - 6, cx - 6, y + h / 2 + 6, 1.6f, rgb565(190,192,198));
+  }
+}
+
+// Geometria de las tres filas. UNA sola fuente para dibujo y para el
+// tap: no puede desalinearse lo pintado de lo pulsable.
+static void connRowRect(int i, int &x, int &y, int &w, int &h){
+  x = CONN_CARD_X; w = CONN_CARD_W; h = CONN_ROW_H;
+  if(i == 0)      y = CONN_CARD1_Y;
+  else if(i == 1) y = CONN_CARD1_Y + CONN_ROW_H;
+  else            y = CONN_CARD2_Y;
+}
+
+static bool connRowEnabled(int i){
+  if(i == 2) return true;                        // modo avion siempre se puede tocar
+  if(gAirplane) return false;                    // con el avion puesto, los otros dos no
+  if(i == 0) return FLEXOS_ENABLE_WIFI ? true : false;
+  return FLEXOS_ENABLE_BLE ? true : false;
+}
+
+static bool connRowOn(int i){
+  if(i == 0) return connWifiOn();
+  if(i == 1) return gBleOn;
+  return gAirplane;
+}
+
+// Solo el CONTENIDO de la fila (titulo, subtitulo y pastilla). El fondo lo
+// pinta connPaintCards con esquinas redondeadas: si cada fila se rellenara a si
+// misma con un rectangulo recto, se comeria las esquinas de la tarjeta.
+static void connDrawRow(int i){
+  int x, y, w, h; connRowRect(i, x, y, w, h);
+  uint16_t tx = rgb565(16,18,24), sb = rgb565(60,64,74);
+  const char* title = (i == 0) ? "Wifi" : (i == 1) ? "BLE" : "Modo avi\xC3\xB3n";
+  char sub[64]; sub[0] = 0;
+  if(i == 0) connWifiSub(sub, sizeof(sub));
+  else if(i == 1) connBleSub(sub, sizeof(sub));
+  bool en = connRowEnabled(i);
+  drawText(x + 22, y + (sub[0] ? 16 : 36), title, 5, en ? tx : rgb565(110,114,124));
+  if(sub[0]) drawTextClip(x + 22, y + 62, sub, 3, en ? sb : rgb565(130,134,144), x + w - 130);
+  connPill(x + w - 116, y + h / 2 - 22, 100, 44, connRowOn(i), en);
+}
+
+// Las dos tarjetas, enteras. Se pinta primero el fondo redondeado y despues
+// el contenido de cada fila: asi el repintado parcial (connRefresh) deja
+// exactamente el mismo resultado que el completo.
+static void connPaintCards(){
+  fillRoundRect(CONN_CARD_X, CONN_CARD1_Y, CONN_CARD_W, 2 * CONN_ROW_H, 24, rgb565(214,214,214));
+  connDrawRow(0);
+  connDrawRow(1);
+  fillRect(CONN_CARD_X + 8, CONN_CARD1_Y + CONN_ROW_H - 1, CONN_CARD_W - 16, 2, rgb565(20,22,28));
+  fillRoundRect(CONN_CARD_X, CONN_CARD2_Y, CONN_CARD_W, CONN_ROW_H, 24, rgb565(214,214,214));
+  connDrawRow(2);
+}
+
+static void connRender(){
+  setBuf(fb);
+  fillRect(0, 0, SCR_W, SCR_H, rgb565(244,244,244));
+  strokeSegAA(30, 26, 18, 18, 2.4f, rgb565(16,18,24));
+  strokeSegAA(18, 18, 30, 10, 2.4f, rgb565(16,18,24));
+  drawTextC(SCR_W / 2, 30, "Conectividad", 3, rgb565(16,18,24));
+  connPaintCards();
+  if(gAirplane)
+    drawTextC(SCR_W / 2, CONN_CARD2_Y + CONN_ROW_H + 24,
+              "Con el modo avi\xC3\xB3n activo, Wifi y BLE quedan apagados", 1, rgb565(90,94,104));
+  flxFlushAll();
+}
+
+// Repinta SOLO la banda de las tarjetas. Se usa cuando el estado cambia por
+// causas externas (la tarea de conexion termino y ya hay SSID real): no se
+// repinta la pantalla entera por un cambio de subtitulo.
+static void connRefresh(){
+  setBuf(fb);
+  connPaintCards();
+  flxFlush(CONN_CARD1_Y - 2, CONN_CARD2_Y + CONN_ROW_H + 2);
+}
+
+static char     connLastSub[64] = "";
+static uint32_t connPollMs = 0;
+
+static void connEnter(){
+  gState = ST_CONN;
+  connLastSub[0] = 0;
+  connRender();
+}
+
+static void connExit(){ gState = ST_APP; settingsRender(); }
+
+static void connTick(){
+  // Refresco por cambio REAL de estado: se compara el subtitulo que tocaria
+  // pintar con el ultimo pintado. Mientras no cambie nada, no se toca la
+  // pantalla (ni un solo flxFlush de balde).
+  //
+  // La comprobacion va limitada a 4 veces por segundo A PROPOSITO: WiFi.SSID()
+  // devuelve un String (malloc + free) y hacerlo en cada vuelta de loop() -que
+  // corre cada ~5 ms- seria fragmentar el heap para nada. El SSID no cambia
+  // 200 veces por segundo.
+  if(millis() - connPollMs > 250){
+    connPollMs = millis();
+    char now[64]; connWifiSub(now, sizeof(now));
+    if(strcmp(now, connLastSub)){
+      strncpy(connLastSub, now, sizeof(connLastSub) - 1);
+      connLastSub[sizeof(connLastSub) - 1] = 0;
+      connRefresh();
+    }
+  }
+
+  if(!T.tap) return;
+  if(T.x < 60 && T.y < 60){ connExit(); return; }
+  for(int i = 0; i < 3; i++){
+    int x, y, w, h; connRowRect(i, x, y, w, h);
+    if(T.x < x || T.x > x + w || T.y < y || T.y > y + h) continue;
+    if(!connRowEnabled(i)) return;                       // deshabilitado: no hace nada
+    if(i == 0)      connWifiSet(!connWifiOn());
+    else if(i == 1){ if(gBleOn) flexBleStop(); else flexBleStart(); }
+    else            connAirplaneSet(!gAirplane);
+    connLastSub[0] = 0;                                  // fuerza el refresco de la banda
+    connRender();
+    return;
+  }
+}
+
 // Icono del modulo: reutiliza los iconos de app existentes (mapeo simple)
 static void drawModuleIcon(ModuleType type, int x, int y, int S){
   int id = IC_AJUSTES;
@@ -18318,6 +20217,14 @@ void setup(){
   bootInitRadioSafe();   // WiFi: nunca bloquea el arranque
   flexOtaBegin();        // OTA: crea la tarea de fondo (prioridad baja). No conecta ni descarga nada aqui.
   cfgLoad();
+
+  // SISTEMA DE ARCHIVOS. Es flash, no radio: montarlo aqui NO viola la regla
+  // de "setup() no toca la radio". Si falla, las pantallas que dependen de el
+  // lo dicen en pantalla (fkNoFsScreen) en vez de ensenar datos inventados.
+  if(!flexFsBegin()) Serial.printf("[FS] no montado: %s\n", flexFsError());
+  else Serial.printf("[FS] LittleFS: %lu / %lu bytes usados\n",
+                     (unsigned long)flexFsUsedBytes(), (unsigned long)flexFsTotalBytes());
+  connBootRestore();              // modo avion guardado (solo lee NVS, no toca radio)
   setBacklight(gBright);          // aplica el brillo guardado
   homeOrderLoad();                // orden de iconos del Home
   // TECLADO (Fases A-D): geometria del tamano guardado, ranuras fijadas del
@@ -18460,6 +20367,8 @@ void loop(){
     case ST_POWEROFF_CONFIRM: poffTick(); break;    // APAGADO: slider "desliza para apagar"
     case ST_POWEROFF_ANIM:    poffAnimTick(); break;// APAGADO: animacion final (no vuelve)
     case ST_KBSET:            kbsTick(); break;     // FASE E: Ajustes del teclado
+    case ST_CONN:             connTick(); break;    // Conectividad: Wifi / BLE / Modo avion
+    case ST_FILES:            filesTick(); break;   // Explorador de archivos real
     case ST_TOUCHCAL:         tcalTick(); break;    // PORT S3: calibracion tactil (no bloqueante)
   }
   kioskTick();            // FASE 4: refresca el candado y escucha el gesto de salida
@@ -18505,5 +20414,10 @@ void loop(){
 //      bajo demanda solo para ahorrar RAM y bateria (ver bootInitRadioSafe).
 //    · Bateria real por ADC (usar ADC1: el ADC2 no convive con el WiFi).
 //      El brillo por PWM del backlight YA esta hecho en este port (LEDC).
-//    · Almacenamiento en SD / SPIFFS para fondos y ajustes.
+//    · [HECHO] Almacenamiento REAL en LittleFS (FlexOS_FS.h/.cpp):
+//      carpetas /Paint, /Notas, /System, /Documentos y /Papelera,
+//      con Paint, Notas, Almacenamiento y el Explorador de archivos
+//      operando sobre ficheros de verdad.
+//    · Pendiente: tarjeta SD como volumen adicional y fondos de
+//      pantalla cargados desde fichero.
 // #############################################################
