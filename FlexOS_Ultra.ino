@@ -1489,8 +1489,11 @@ static const FlexTheme kThemeLight = {
   /*keyAlt  */TC(214,219,230)
 };
 
-// Paleta activa. Un select de puntero: sin copias, sin estado que sincronizar.
-static inline const FlexTheme& TH(){ return gDark ? kThemeDark : kThemeLight; }
+// Paleta activa. Se expresa como macro para que el preprocesador de sketches de
+// Arduino NO intente autogenerar un prototipo de funcion que use FlexTheme antes
+// de haber visto la declaracion del struct. La expresion condicional conserva
+// referencia al objeto const elegido: sin copias, sin RAM y sin trabajo extra.
+#define TH() (gDark ? kThemeDark : kThemeLight)
 
 // Atajos por SIGNIFICADO (lo que se usa en el codigo de dibujo).
 #define TH_PAGE    (TH().page)
