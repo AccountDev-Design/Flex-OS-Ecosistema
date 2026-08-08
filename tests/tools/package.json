@@ -1,0 +1,10 @@
+{
+  "name": "flexos-test-tools",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Utilidades de host para generar/verificar los ficheros de prueba del navegador de Flex OS.",
+  "type": "commonjs",
+  "dependencies": {
+    "jpeg-js": "^0.4.4"
+  }
+}

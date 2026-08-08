@@ -1,0 +1,4 @@
+# Artefactos de las pruebas de host
+tests/host/build/
+tests/tools/node_modules/
+server/node_modules/

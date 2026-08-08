@@ -128,6 +128,14 @@
 // lo mismo que se desincronicen. Aqui solo se dibuja.
 #include "FlexOS_FS.h"
 
+// NAVEGADOR REAL. La app 7 deja de ser una maqueta: la interfaz, las
+// pestanas, el omnibox, el historial, los favoritos, la cache y el
+// reproductor viven en FlexOS_BrowserApp.cpp (comun a las tres placas)
+// y el contenido de los sitios lo rasteriza un servicio remoto con
+// Chromium (ver server/). Aqui solo se declara la API; el puente con
+// las primitivas de dibujo se incluye abajo, antes de setup().
+#include "FlexOS_Browser.h"
+
 // ---- DISPONIBILIDAD REAL DE BLE ------------------------------------------
 // No se escribe a mano "el P4 no tiene BLE": se le pregunta al SDK. soc_caps.h
 // define SOC_BLE_SUPPORTED solo en los chips que llevan radio Bluetooth, asi
@@ -6275,7 +6283,8 @@ static void calEnter(); static void calTick();             // Calendario (M2)
 static void vidEnter(); static void vidTick();             // Multimedia (esqueleto)
 static void tcalAppEnter();                                // Calibrar Touch (asistente de calibracion)
 static void noteEnter(); static void noteTick();           // Notas + teclado 4 capas
-static void almEnter(); static void eduEnter(); static void navEnter();  // apps simples
+static void almEnter(); static void eduEnter();                         // apps simples
+static void navEnter(); static void navTick();                          // Navegador (FlexOS_Browser*)
 static void ideEnter(); static void ideTick(); static void paintEnter(); static void paintTick();
 static void almTick();                                     // Almacenamiento: tap en "Ver..."
 static void filesTick();                                   // Explorador de archivos (ST_FILES)
@@ -6515,7 +6524,7 @@ static FlexApp APP_REG[16] = {
   { pcEnter, pcTick, APP_CUSTOM_HEADER },                  // 4  Modo PC (REAL, M4) -- usa render landscape (gLand)
   { noteEnter, noteTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH },// 5  Notas + teclado (REAL)
   { eduEnter, NULL, APP_FLEX },                           // 6  Educacion (REAL)
-  { navEnter, NULL, APP_FLEX },                           // 7  Navegador (REAL)
+  { navEnter, navTick, APP_FLEX | APP_OWN_TOUCH },         // 7  Navegador (REAL: remoto + omnibox + pestanas)
   { ideEnter, ideTick, APP_FLEX },                        // 8  Code IDE (REAL + Asistente de Hardware)
   { bienEnter, bienTick, APP_FLEX },                      // 9  Bienestar (REAL, M2)
   { paintEnter, paintTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH },// 10 Paint (REAL)
@@ -6582,6 +6591,12 @@ static void appClose(){
   // llame a appClose desde su propio tick. Poniendolo aqui no hay que ir
   // parcheando cada camino por separado (y ninguno nuevo se escapa).
   if(KIOSK_ON && kioskOn) return;
+  // NAVEGADOR: mantiene un socket abierto, una tarea de red y buffers
+  // grandes en PSRAM. Soltarlo SOLO desde su propio menu dejaria fugas
+  // por las otras vias de cierre (boton atras, chevron, gesto de la
+  // barra iOS, cierre de la ventana de DeX). Se hace aqui, que es el
+  // unico punto por el que pasan TODAS. flexBrowserExit() es idempotente.
+  if(gAppId == IC_NAV) flexBrowserExit();
   if(gHosted){ gHostReq = 1; return; }        // dentro de una ventana: cierra la VENTANA
   // El FRAMEWORK devuelve el motor a portrait, no la app. Antes cada app
   // landscape tenia que acordarse de hacer gLand=false por su cuenta (pcExit,
@@ -15547,59 +15562,26 @@ static void geoTick(){
   if(gScreen == GS_SELECT){ geoSelectTick(); return; }
   geoGameTick();
 }
-// NAVEGADOR · adaptativo.
-//   Esencial   : barra de direcciones + estado de conexion.
-//   Opcional 1 : barra de pestanas -- aparece cuando el lienzo pasa de 360 px
-//                de ancho (una pestana legible necesita >= 110 px y queremos
-//                al menos tres).
-//   Opcional 2 : globo/ilustracion -- aparece solo si quedan >= 120 px libres
-//                bajo la barra; por debajo de eso se omite entera en vez de
-//                encogerla hasta no distinguirse.
-static void navEnter(){
-  setBuf(fb);
-  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
-  fillRect(bx, by, bw, bh, WIN_BG);
-  int pad = uiPad(), gap = uiGap();
-  int y = by + pad;
-  int fsT = uiFontFit("Navegador", bw - 2 * pad, uiFontH(bh / 12));
-  drawTextC(bx + bw / 2, y, "Navegador", fsT, rgb565(255,255,255));
-  y += uiLineH(fsT) + gap;
-  uint8_t aTabs = uiSection(0, bw >= 360);
-  if(aTabs){
-    int nt = 3, tw = (bw - 2 * pad - (nt - 1) * gap) / nt;
-    int thh = bh / 14; if(thh < 20) thh = 20; if(thh > 34) thh = 34;
-    const char* tabs[3] = { "Inicio", "Marcadores", "Historial" };
-    for(int i = 0; i < nt; i++){
-      int x = bx + pad + i * (tw + gap);
-      uiRectA(x, y, tw, thh, thh / 3, i == 0 ? rgb565(58,86,150) : rgb565(34,38,50), aTabs);
-      uiTextC(x + tw / 2, y + thh / 2 - uiLineH(2) / 2, tabs[i],
-              uiFontFit(tabs[i], tw - 10, 2), rgb565(225,232,245), aTabs);
-    }
-    y += thh + gap;
-  }
-  int barH = bh / 10; if(barH < 26) barH = 26; if(barH > 48) barH = 48;
-  fillRoundRect(bx + pad, y, bw - 2 * pad, barH, barH / 3, rgb565(240,242,248));
-  drawText(bx + pad * 2, y + barH / 2 - uiLineH(2) / 2, "https://",
-           uiFontFit("https://", bw - 4 * pad, 2), rgb565(120,126,140));
-  y += barH + gap;
-  int rest = (by + bh) - y - pad;
-  uint8_t aGlobe = uiSection(1, rest >= 120);
-  int cy;
-  if(aGlobe){
-    int rr = (rest - 40) / 2; if(rr > bw / 4) rr = bw / 4; if(rr > 70) rr = 70;
-    cy = y + rr + 6;
-    uint16_t gc = mix565(WIN_BG, rgb565(80,120,200), aGlobe);
-    drawCircle(bx + bw / 2, cy, rr, gc); drawCircle(bx + bw / 2, cy, rr - 1, gc);
-    vLine(bx + bw / 2, cy - rr, 2 * rr, gc);
-    hLine(bx + bw / 2 - rr, cy, 2 * rr, gc);
-    y = cy + rr + gap;
-  }
-  const char* st = "Sin conexi\xC3\xB3n - modo offline";
-  int fy = by + bh - pad - uiLineH(2);
-  if(fy < y) fy = y;
-  drawTextC(bx + bw / 2, fy, st, uiFontFit(st, bw - 2 * pad, 2), rgb565(160,168,188));
-  flxFlush(WIN_TOP, WIN_BOT);
-}
+// NAVEGADOR
+//   La implementacion ANTIGUA de navEnter() vivia aqui: pintaba una
+//   barra de direcciones falsa con el texto "https://", tres pestanas
+//   decorativas ("Inicio", "Marcadores", "Historial") que no hacian
+//   nada, un globo dibujado a mano y el pie "Sin conexion - modo
+//   offline". Era una MAQUETA: no habia red, ni entrada de texto, ni
+//   navegacion.
+//
+//   Se ha sustituido entera, no ampliada, porque no habia nada
+//   reutilizable: ni un estado, ni un parser, ni un modelo de pestanas.
+//   La app real es ahora navEnter()/navTick() y vive en
+//   FlexOS_Browser_Bridge.h (incluido antes de setup()), que a su vez
+//   se apoya en FlexOS_BrowserApp.cpp -- comun a las tres placas, con
+//   la misma logica de siempre de este proyecto: los .ino dibujan, los
+//   modulos comunes hacen el trabajo.
+//
+//   Lo que SI se conserva del diseno anterior: la app sigue siendo
+//   APP_FLEX (maqueta contra el lienzo real, asi que funciona igual a
+//   pantalla completa y dentro de una ventana de Modo PC/DeX) y sigue
+//   respetando el tema semantico global.
 // #############################################################
 // ##  ASISTENTE DE HARDWARE  (FASE 3, dentro de Code IDE)
 // ##  ------------------------------------------------------
@@ -19842,6 +19824,10 @@ static void tcalTick(){
 // (fillRect, drawText, present, setBuf...), que son `static` y por tanto
 // solo existen a partir del punto del fichero en que se definieron.
 #include "FlexOS_OTA_Bridge.h"
+// Puente del NAVEGADOR. Va aqui, y no arriba, por la misma razon que el
+// del OTA: necesita que las primitivas de dibujo Y el teclado (kb*) ya
+// esten definidos. Define navEnter()/navTick().
+#include "FlexOS_Browser_Bridge.h"
 
 void setup(){
   Serial.begin(115200);
@@ -19894,6 +19880,7 @@ void setup(){
   bool needCal = (gtOk && (!tsCalibDone() || digitalRead(PIN_TP_IRQ) == LOW));
   flexI2CInit();         // bus I2C de modulos externos (FASE 2)
   bootInitRadioSafe();   // WiFi: nunca bloquea el arranque
+  flexBrowserBegin();    // Navegador: carga ajustes, historial y favoritos. No abre red.
   flexOtaBegin();        // OTA: crea la tarea de fondo (prioridad baja). No conecta ni descarga nada aqui.
   cfgLoad();
 

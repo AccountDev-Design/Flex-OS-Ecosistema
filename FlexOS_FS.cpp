@@ -513,6 +513,35 @@ bool flexFsWriteText(const char* path, const char* txt){
 }
 
 // -------------------------------------------------------------
+//  BINARIO
+//  ------------------------------------------------------------
+//  Las funciones de texto de arriba no valen para datos con bytes 0
+//  dentro (dan por hecho una cadena terminada). El historial y los
+//  favoritos del navegador son registros de tamano fijo, asi que
+//  necesitan este par. Se anaden aqui, en el modulo comun, para no
+//  meter LittleFS en los .ino -- que es justo lo que este fichero
+//  existe para evitar.
+// -------------------------------------------------------------
+int flexFsReadBin(const char* path, void* buf, size_t n){
+  if(!fsMounted || !buf || n == 0) return -1;
+  File f = LittleFS.open(path, "r");
+  if(!f) return -1;
+  size_t r = f.read((uint8_t*)buf, n);
+  f.close();
+  return (int)r;
+}
+
+bool flexFsWriteBin(const char* path, const void* buf, size_t n){
+  if(!fsMounted) return false;
+  if(n > 0 && !buf) return false;
+  File f = LittleFS.open(path, "w");
+  if(!f) return false;
+  size_t w = n ? f.write((const uint8_t*)buf, n) : 0;
+  f.close();
+  return w == n;
+}
+
+// -------------------------------------------------------------
 //  PAINT: dibujo por trazos
 // -------------------------------------------------------------
 static bool paintReadHdr(File& f, FlexPaintHdr* h){

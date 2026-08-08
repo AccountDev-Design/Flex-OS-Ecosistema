@@ -196,6 +196,19 @@ int      flexFsReadText(const char* path, char* out, size_t n);
 bool     flexFsWriteText(const char* path, const char* txt);
 
 // -------------------------------------------------------------
+//  BINARIO (registros de tamano fijo)
+//  ------------------------------------------------------------
+//  Lo usa el navegador para el historial y los favoritos: son
+//  estructuras con bytes 0 dentro, asi que las funciones de texto de
+//  arriba no sirven. Se ponen aqui, y no en el .ino, por la misma
+//  regla de siempre: LittleFS solo se toca desde este modulo.
+// -------------------------------------------------------------
+// Lee hasta `n` bytes. Devuelve los leidos, o -1 si no se pudo abrir.
+int      flexFsReadBin(const char* path, void* buf, size_t n);
+// Escribe `n` bytes reemplazando el fichero. false si no se escribio todo.
+bool     flexFsWriteBin(const char* path, const void* buf, size_t n);
+
+// -------------------------------------------------------------
 //  PAINT (dibujo vectorial por trazos)
 //  ------------------------------------------------------------
 //  POR QUE TRAZOS Y NO UN MAPA DE BITS
