@@ -757,8 +757,13 @@ static void brOnFrame(const FbpHeader* h, const uint8_t* payload){
     if(gFrDone && xSemaphoreTake(gFrDone, pdMS_TO_TICKS(50)) == pdTRUE) break;
     if(brHostMillis() - t0 > 5000){
       // La interfaz no responde (app minimizada, dialogo del sistema...).
-      // Se cierra la sesion y se reconecta: es lo unico que NO puede
-      // dejar el buffer a medio reutilizar mientras alguien lo lee.
+      // Se marca el frame como consumido ANTES de soltar el socket: el
+      // buffer se va a reutilizar en la reconexion, y dejar gFrReady en
+      // true haria que la interfaz lo decodificara mientras se
+      // reescribe. Perder un frame es gratis; leer un buffer a medio
+      // escribir, no.
+      gFrReady = false;
+      gStats.framesDropped++;
       gNetState = BRN_ERROR;
       wsDisconnect();
       return;
@@ -2469,6 +2474,20 @@ void flexBrowserExit(){
   gNetState = BRN_OFF;
 
   gFrReady = false;
+
+  // SOLO se libera si la tarea de red ha muerto de verdad. Si por lo que
+  // fuera siguiera viva (un socket colgado en una lectura larga), borrar
+  // ahora sus colas, sus semaforos y su buffer seria un uso de memoria
+  // liberada -- el fallo mas dificil de diagnosticar que puede tener
+  // esto. Dejarlo reservado "pierde" unos KB hasta el siguiente Enter,
+  // que los reutiliza; es infinitamente preferible.
+  if(gNetTask){
+    Serial.println(F("[NAV] la tarea de red no termino a tiempo: "
+                     "los buffers se conservan hasta la proxima apertura"));
+    brMeasure();
+    return;
+  }
+
   brFreeBuffers();
   // Las listas se sueltan tambien: ya estan en disco y volver a leerlas
   // al abrir cuesta una lectura de LittleFS, no memoria permanente.

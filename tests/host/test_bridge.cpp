@@ -45,6 +45,7 @@ unsigned long millis(){ return g_ms; }
 void delay(unsigned long ms){ g_ms += ms; }
 uint32_t esp_random(){ return 0x12345678u; }
 uint32_t esp_get_free_heap_size(){ return 200000; }
+__FlexSerial Serial;
 void* heap_caps_malloc(size_t n, uint32_t){ return malloc(n); }
 size_t heap_caps_get_free_size(uint32_t){ return 200000; }
 size_t heap_caps_get_total_size(uint32_t){ return 4u * 1024 * 1024; }

@@ -62,6 +62,7 @@ unsigned long millis(){ return g_ms; }
 void delay(unsigned long ms){ g_ms += ms; }
 uint32_t esp_random(){ return (uint32_t)std::rand(); }
 uint32_t esp_get_free_heap_size(){ return 200000; }
+__FlexSerial Serial;
 
 static long g_liveAllocs = 0;
 static size_t g_liveBytes = 0;
