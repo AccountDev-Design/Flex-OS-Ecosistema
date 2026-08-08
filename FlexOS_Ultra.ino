@@ -1314,17 +1314,203 @@ static void drawWallpaper(uint16_t* buf, bool blobs){
 // ##  Panel reutilizable: desenfoca el fondo real (box-blur),
 // ##  tinte sutil y gradiente de grosor.
 // #############################################################
-static bool uiGlass = false;               // estilo activo (togglea en Ajustes)
-// Modo de apariencia (Ajustes -> Pantalla -> Modo de apariencia). true = Modo
-// oscuro (comportamiento de siempre, por defecto). false = Modo claro.
-// ALCANCE: por ahora retematiza la app Ajustes (donde vive el selector),
-// que es donde vive PAGE_BG y los colores de tarjeta/texto de esa app (ver
-// mas abajo, junto a PAGE_BG). Inicio, Bloqueo, notificaciones, ventanas y
-// el resto de apps tienen su propia paleta oscura, muy afinada a mano, y no
-// se tocan en esta pasada -- retematizarlas de verdad necesita un diseno de
-// colores propio por pantalla, no un cambio mecanico.
+// MATERIAL de las superficies (Ajustes -> Personalizacion -> Personalizar UI).
+// true = Liquid Glass (drawLiquidGlassPanel / drawGlassCardFlat con el tinte de
+// la paleta activa). false = superficies PLANAS de la paleta activa.
+// ORTOGONAL a gDark: el vidrio funciona y conserva contraste en las dos
+// apariencias, porque el tinte y el texto salen del tema, no de un valor fijo.
+static bool uiGlass = false;
+// APARIENCIA (Ajustes -> Pantalla -> Modo de apariencia). true = oscura (valor
+// por defecto de siempre, y el que reciben las placas que aun no tienen la
+// clave NVS "dark"). false = clara.
+// ALCANCE: GLOBAL. gDark elige la paleta semantica activa (ver TEMA SEMANTICO,
+// justo debajo) y esa paleta es la fuente de verdad de color de TODO el
+// sistema: shell de apps, barra de estado y navegacion, Inicio y widgets,
+// Ajustes, Notas y su teclado, Paint, Almacenamiento, Wi-Fi, OTA, bloqueo/PIN,
+// notificaciones, panel rapido, multitarea, Modo PC, dialogos y menus.
 static bool gDark = true;
 static int  gIconStyle = 0;                // estilo de iconos: 0 = Plano, 1 = Vidrio (fondo Liquid Glass en drawAppIcon)
+
+// #############################################################
+// ##  TEMA SEMANTICO GLOBAL  ·  fuente de verdad de color
+// ##  ------------------------------------------------------
+// ##  Los componentes piden color por SIGNIFICADO (fondo de pagina, texto
+// ##  secundario, borde, accion destructiva...), nunca por valor RGB ni con
+// ##  un ternario "gDark ? A : B" repetido por el archivo. Cambiar de
+// ##  apariencia es cambiar QUE struct devuelve TH(); ningun llamante se
+// ##  entera.
+// ##
+// ##  COSTE EN LA PLACA (restricciones del P4 + RGB565):
+// ##   · dos structs const de 27 uint16_t -> 108 bytes en .rodata (FLASH),
+// ##     no en RAM ni en PSRAM;
+// ##   · TC() es una expresion constante en tiempo de COMPILACION (no la
+// ##     funcion rgb565(), que no es constexpr), asi que los literales se
+// ##     empaquetan a RGB565 al compilar y las tablas viven en flash;
+// ##   · TH() es un simple select de puntero: cero asignaciones, cero
+// ##     trabajo por pixel, cero buffers nuevos.
+// #############################################################
+// Empaquetado RGB565 en tiempo de compilacion (mismo bit a bit que rgb565()).
+#define TC(r,g,b) ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
+
+struct FlexTheme {
+  uint16_t page;       // fondo principal de pagina (pantallas a pantalla completa)
+  uint16_t win;        // fondo de ventana (marco estandar de app)
+  uint16_t surf;       // superficie / tarjeta plana
+  uint16_t surf2;      // superficie elevada (menu, dialogo, tecla, chip)
+  uint16_t glass;      // tinte de Liquid Glass para 'surf'
+  uint16_t glass2;     // tinte de Liquid Glass para 'surf2' (elevado)
+  uint16_t txt;        // texto principal
+  uint16_t txt2;       // texto secundario / valor
+  uint16_t mute;       // texto atenuado (ayuda, pie, deshabilitado)
+  uint16_t nav;        // iconos de navegacion y de barra de estado
+  uint16_t border;     // borde de superficie
+  uint16_t divider;    // divisor / separador dentro de una superficie
+  uint16_t disabled;   // control desactivado (relleno)
+  uint16_t track;      // track de switch/slider apagado
+  uint16_t sel;        // seleccion / foco (resaltado de texto, fila activa)
+  uint16_t scrim;      // overlay para atenuar lo que hay detras de un modal
+  uint16_t shadow;     // sombra proyectada
+  uint16_t onAcc;      // texto/icono SOBRE una accion primaria o destructiva
+  uint16_t primary;    // accion primaria
+  uint16_t danger;     // accion destructiva
+  uint16_t ok;         // estado: exito
+  uint16_t warn;       // estado: advertencia
+  uint16_t err;        // estado: error
+  uint16_t accSoft;    // acento suave (texto de enlace/valor destacado sobre superficie)
+  // Teclado. Van en la paleta y no como "surf/surf2" reutilizados porque la
+  // relacion entre panel y tecla se INVIERTE entre apariencias (igual que en
+  // iOS y Gboard): en oscuro la tecla es mas CLARA que el panel, en claro la
+  // tecla es blanca y el panel gris. Declararlo aqui evita el unico ternario
+  // "gDark ? A : B" que si haria falta en el codigo de dibujo.
+  uint16_t keyPanel;   // fondo del panel del teclado
+  uint16_t keyFace;    // relleno de tecla normal
+  uint16_t keyAlt;     // relleno de tecla de funcion (shift, ?123, borrar...)
+};
+
+// Paleta OSCURA: son los mismos valores afinados a mano que ya tenia el
+// sistema (WIN_BG 18,20,28 / tarjeta 34,38,50 / texto 240,242,248...), asi que
+// una placa que actualice ve EXACTAMENTE lo de siempre hasta que el usuario
+// toque el selector.
+static const FlexTheme kThemeDark = {
+  /*page   */ TC( 18, 20, 28),
+  /*win    */ TC( 18, 20, 28),
+  /*surf   */ TC( 34, 38, 50),
+  /*surf2  */ TC( 48, 54, 72),
+  /*glass  */ TC( 48, 54, 72),
+  /*glass2 */ TC( 40, 50, 90),
+  /*txt    */ TC(240,242,248),
+  /*txt2   */ TC(160,166,182),
+  /*mute   */ TC(120,126,142),
+  /*nav    */ TC(232,236,246),
+  /*border */ TC( 66, 74, 94),
+  /*divider*/ TC( 52, 58, 74),
+  /*disabled*/TC(124,130,146),
+  /*track  */ TC( 56, 62, 86),
+  /*sel    */ TC( 48, 92,168),
+  /*scrim  */ TC(  8, 10, 18),
+  /*shadow */ TC(  0,  0,  0),
+  /*onAcc  */ TC(255,255,255),
+  /*primary*/ TC( 60,110,235),
+  /*danger */ TC(200, 70, 70),
+  /*ok     */ TC( 90,200,140),
+  /*warn   */ TC(240,180, 90),
+  /*err    */ TC(235, 80, 80),
+  /*accSoft*/ TC(140,180,250),
+  /*keyPanel*/TC( 30, 34, 46),
+  /*keyFace */TC( 52, 56, 70),
+  /*keyAlt  */TC( 66, 70, 86)
+};
+// Paleta CLARA: mismo esqueleto semantico. Los pares texto/superficie estan
+// elegidos para no bajar de ~4.5:1 (texto principal) ni de ~3:1 (secundario)
+// sobre su superficie, en plano y sobre el tinte de vidrio.
+static const FlexTheme kThemeLight = {
+  /*page   */ TC(244,247,251),
+  /*win    */ TC(244,247,251),
+  /*surf   */ TC(255,255,255),
+  /*surf2  */ TC(236,240,248),
+  /*glass  */ TC(246,248,252),
+  /*glass2 */ TC(224,232,246),
+  /*txt    */ TC( 20, 22, 30),
+  /*txt2   */ TC( 96,102,116),
+  /*mute   */ TC(132,138,152),
+  /*nav    */ TC( 34, 38, 50),
+  /*border */ TC(202,210,224),
+  /*divider*/ TC(224,229,238),
+  /*disabled*/TC(132,138,150),
+  /*track  */ TC(202,208,220),
+  /*sel    */ TC(178,206,246),
+  /*scrim  */ TC( 34, 40, 54),
+  /*shadow */ TC( 70, 80,100),
+  /*onAcc  */ TC(255,255,255),
+  /*primary*/ TC( 45, 95,225),
+  /*danger */ TC(196, 52, 52),
+  /*ok     */ TC( 22,140, 88),
+  /*warn   */ TC(176,116, 12),
+  /*err    */ TC(204, 46, 46),
+  /*accSoft*/ TC( 40, 92,190),
+  /*keyPanel*/TC(222,226,236),
+  /*keyFace */TC(255,255,255),
+  /*keyAlt  */TC(214,219,230)
+};
+
+// Paleta activa. Un select de puntero: sin copias, sin estado que sincronizar.
+static inline const FlexTheme& TH(){ return gDark ? kThemeDark : kThemeLight; }
+
+// Atajos por SIGNIFICADO (lo que se usa en el codigo de dibujo).
+#define TH_PAGE    (TH().page)
+#define TH_WIN     (TH().win)
+#define TH_SURF    (TH().surf)
+#define TH_SURF2   (TH().surf2)
+#define TH_GLASS   (TH().glass)
+#define TH_GLASS2  (TH().glass2)
+#define TH_TXT     (TH().txt)
+#define TH_TXT2    (TH().txt2)
+#define TH_MUTE    (TH().mute)
+#define TH_NAV     (TH().nav)
+#define TH_BORDER  (TH().border)
+#define TH_DIV     (TH().divider)
+#define TH_DIS     (TH().disabled)
+#define TH_TRACK   (TH().track)
+#define TH_SEL     (TH().sel)
+#define TH_SCRIM   (TH().scrim)
+#define TH_SHADOW  (TH().shadow)
+#define TH_ONACC   (TH().onAcc)
+#define TH_PRIM    (TH().primary)
+#define TH_DANGER  (TH().danger)
+#define TH_OK      (TH().ok)
+#define TH_WARN    (TH().warn)
+#define TH_ERR     (TH().err)
+#define TH_ACCS    (TH().accSoft)
+#define TH_KEYPANEL (TH().keyPanel)
+#define TH_KEYFACE  (TH().keyFace)
+#define TH_KEYALT   (TH().keyAlt)
+
+// Chrome que vive SOBRE EL WALLPAPER: barra de estado del Inicio y del Bloqueo,
+// etiquetas de los iconos, glifos de la barra de navegacion, reloj grande y
+// texto de "desliza para desbloquear".
+// EXCEPCION DELIBERADA, y centralizada aqui en vez de repartida en literales: el
+// wallpaper es CONTENIDO (no se retine con el tema) y siempre es un degradado
+// saturado y oscuro, asi que su chrome se mantiene claro en las DOS apariencias.
+// Con la paleta clara quedaria texto casi negro sobre morado/azul: ilegible.
+#define TH_ONWALL   TC(255,255,255)   // texto e iconos sobre el wallpaper
+#define TH_ONWALL2  TC(215,222,238)   // secundario sobre el wallpaper
+#define TH_WALLSURF TC( 44, 54, 92)   // tarjeta/tecla apoyada en el wallpaper (plano)
+#define TH_WALLSURF2 TC(48, 60,110)   // idem, tinte de Liquid Glass
+#define TH_WALLPANEL TC(36, 40, 58)   // panel grande (teclado) sobre el wallpaper
+
+// Superficie que toca usar segun el MATERIAL activo. Con Liquid Glass el
+// llamante pinta el panel de vidrio con TH_GLASS/TH_GLASS2 de tinte; sin el,
+// rellena plano con TH_SURF/TH_SURF2. Estas dos funciones existen para que un
+// llamante que solo necesita "el color de la tarjeta" (bordes, textos de
+// respaldo, glcBuild) no tenga que repetir el if.
+static inline uint16_t thCard(){  return uiGlass ? TH().glass  : TH().surf;  }
+static inline uint16_t thCard2(){ return uiGlass ? TH().glass2 : TH().surf2; }
+
+// Propagacion inmediata de un cambio de tema/material. Se DEFINE mas abajo
+// (necesita ver gHomeDirty, qsDirty, glcValid, el fondo cacheado de Modo PC y
+// las miniaturas de multitarea); aqui solo el prototipo, porque los llamantes
+// -- Ajustes y el panel de Modo PC -- aparecen antes en el archivo.
+static void themeChanged(bool save = true);
 static uint16_t* glassBuf = NULL;          // scratch de region (PSRAM)
 // NOTA: aqui vivia 'wallBuf' ("wallpaper limpio para animar el brillo"). Era
 // memoria muerta: se reservaban 768 KB y se copiaban enteros en CADA
@@ -1456,6 +1642,10 @@ static void drawLiquidGlassPanelEx(int x, int y, int w, int h, int rad, uint16_t
     float fj = (float)j;
     for(int i = ins; i < w - ins; i++){
       uint16_t out = mix565(src[i], tint, tintMix);   // tinte adaptativo (ver arriba), antes fijo en 58
+      // Especular y sombreado del MATERIAL: es un blanco y un negro de luz
+      // (como el brillo de un cristal real), no un color de tema. Se aplican
+      // SOBRE el tinte, que si viene del tema, asi que el vidrio se aclara u
+      // oscurece solo con la paleta activa.
       if(fj < h * 0.45f) out = mix565(out, rgb565(255,255,255), (uint8_t)((1.0f - fj / (h * 0.45f)) * 26));
       else               out = mix565(out, rgb565(0,0,0), (uint8_t)(((fj - h * 0.45f) / (h * 0.55f)) * 30));
       dst[i] = out;
@@ -1476,6 +1666,8 @@ static void drawLiquidGlassPanelEx(int x, int y, int w, int h, int rad, uint16_t
     bool topZone = (j < h / 2);
     uint8_t sL = topZone ? GLASS_CORNER_STRONG : GLASS_CORNER_WEAK;   // izquierda: blanco fuerte / sombra tenue
     uint8_t sR = topZone ? GLASS_CORNER_WEAK   : GLASS_CORNER_STRONG; // derecha: blanco tenue / sombra fuerte
+    // Borde del cristal: reflejo claro arriba y sombra abajo. Requisito
+    // GRAFICO del material (da el grosor), no una superficie del tema.
     uint16_t bcol = (j < 3) ? rgb565(255,255,255) : (j < h / 2 ? rgb565(205,214,228) : rgb565(22,28,40));
     dst[ins] = mix565(dst[ins], bcol, sL);
     dst[w - 1 - ins] = mix565(dst[w - 1 - ins], bcol, sR);
@@ -1570,6 +1762,10 @@ static void ensureBlurBg(){
   gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
   drawWallpaper(blurBg, true);
   setBuf(blurBg);
+  // Velo del wallpaper DESENFOCADO. El wallpaper es contenido del usuario y no
+  // se retine con el tema; este velo solo lo oscurece para que lo que se apoye
+  // encima (Recientes, verificacion de clave, apagado) tenga contraste. Es el
+  // mismo en las dos apariencias -- por eso esas pantallas usan TH_ONWALL.
   fillRectA(0, 0, SCR_W, SCR_H, rgb565(8,10,18), 70);
   setBuf(old);
   gLand = wl;
@@ -3598,6 +3794,10 @@ static void iconBase(int x, int y, int S, uint16_t bg, int rf100){
 static void drawAppIcon(int id, int x, int y, int S){
   int cx = x + S / 2, cy = y + S / 2;
   int tk = S / 12; if(tk < 2) tk = 2;               // grosor de trazo generico
+  // ICONOS DE APP: son MARCA. Cada uno tiene su color y su glifo, igual que en
+  // iOS o Android, y no cambian con la apariencia del sistema (lo que cambia es
+  // el fondo sobre el que se dibujan). gIconStyle si los afecta: es la
+  // preferencia de ESTILO de icono, ortogonal a gDark y a uiGlass.
   uint16_t WHITE = rgb565(255,255,255);
   switch(id){
     case IC_RELOJ: {
@@ -4549,6 +4749,9 @@ static const char* resetReasonStr(){
 // normal NO aparece: el arranque va directo al splash limpio.
 static void showBootBanner(){
   setBuf(fb);
+  // SPLASH: negro sobre negro a proposito, en las dos apariencias. Es el arranque
+  // del panel (backlight subiendo desde 0) y un fondo claro aqui daria un fogonazo
+  // en la cara del usuario; ademas corre antes de que la UI del tema exista.
   fillRect(0, 0, SCR_W, SCR_H, rgb565(0,0,0));
   drawTextC(SCR_W / 2, SCR_H / 2 - 24, "FlexOS Ultra", 3, rgb565(235,238,245));
   char b[72];
@@ -4604,6 +4807,9 @@ static void splashTick(){
 // ---------------- OOBE: idioma ----------------
 static void renderOobeLang(){
   drawWallpaper(fb, false); setBuf(fb);
+  // OOBE (primer arranque): se pinta SOBRE EL WALLPAPER y ocurre ANTES de que el
+  // usuario haya podido elegir apariencia -- todavia no hay preferencia que
+  // respetar. Misma regla que el resto del chrome sobre wallpaper: claro siempre.
   drawTextC(SCR_W / 2, 78, t(S_SELLANG), 3, rgb565(255,255,255));
   int rowH = 74, gap = 14, x = 44, w = SCR_W - 88, y0 = 158;
   for(int i = 0; i < NLANG; i++){
@@ -4725,7 +4931,7 @@ static void buildShortDate(char* out, size_t n){
 // ---------------- LOCK ----------------
 // Barra de gestos (estilo iOS): pildora fina centrada cerca del borde inferior.
 // yBottom = borde inferior de referencia (normalmente SCR_H). col por defecto blanca.
-static void drawHomeIndicator(int yBottom, uint8_t alpha, uint16_t col = rgb565(255,255,255)){
+static void drawHomeIndicator(int yBottom, uint8_t alpha, uint16_t col = TH_ONWALL){
   int barW = 130, barH = 5, radius = 2;
   int x = (SCR_W - barW) / 2;
   int y = yBottom - 20 - barH;          // 20 px de margen desde el borde
@@ -4758,23 +4964,28 @@ static void lockGlyph(int kind, int cx, int cy, uint16_t col){
 // el resto de superficies de la app.
 static void lockWidgetCard(int y, int kind, const char* title, const char* val, uint16_t accent){
   int x = 28, w = SCR_W - 56, h = 50;
-  if(uiGlass){ drawLiquidGlassPanel(x, y, w, h, 16, rgb565(40,50,90)); }
-  else fillRoundRectA(x, y, w, h, 16, rgb565(255,255,255), 45);
-  lockGlyph(kind, x + 30, y + h / 2, accent);
-  drawText(x + 54, y + 9, title, 2, rgb565(255,255,255));
-  drawText(x + 54, y + 30, val, 1, rgb565(205,214,232));
+  // Superficie del TEMA sobre el wallpaper: casi opaca (deja asomar el fondo,
+  // que es lo que le daba identidad) pero con el color y el texto de la paleta
+  // activa, asi la tarjeta se lee igual de bien en claro y en oscuro.
+  if(uiGlass){ drawLiquidGlassPanel(x, y, w, h, 16, TH_GLASS2); }
+  else fillRoundRectA(x, y, w, h, 16, TH_SURF, 215);
+  lockGlyph(kind, x + 30, y + h / 2, accent);            // accent = color de CONTENIDO del widget
+  drawText(x + 54, y + 9, title, 2, TH_TXT);
+  drawText(x + 54, y + 30, val, 1, TH_TXT2);
 }
 
 static void renderLock(){
   drawWallpaper(lockBuf, false); setBuf(lockBuf);
-  drawWifi(SCR_W - 66, 40, 12, rgb565(255,255,255));
-  drawBattery(SCR_W - 46, 31, 30, 15, 82, rgb565(255,255,255));
+  // Barra de estado y reloj van DIRECTAMENTE sobre el wallpaper -> TH_ONWALL
+  // (ver la nota de la excepcion en el bloque TEMA SEMANTICO).
+  drawWifi(SCR_W - 66, 40, 12, TH_ONWALL);
+  drawBattery(SCR_W - 46, 31, 30, 15, 82, TH_ONWALL);
   if(gLockWidgets & LW_CLOCK){
-    if(uiGlass){ drawLiquidGlassPanel(28, 198, SCR_W - 56, 252, 28, rgb565(40,62,128)); }  // vidrio tras el reloj
+    if(uiGlass){ drawLiquidGlassPanel(28, 198, SCR_W - 56, 252, 28, TH_GLASS2); }  // vidrio tras el reloj
     char cs[8]; clkStr12(cs, sizeof(cs));
-    drawBigClock(cs, SCR_W / 2, 242, 140, 18, rgb565(255,255,255));
+    drawBigClock(cs, SCR_W / 2, 242, 140, 18, TH_ONWALL);
     char ds[64]; buildLongDate(ds, sizeof(ds));
-    drawTextC(SCR_W / 2, 242 + 140 + 36, ds, 3, rgb565(255,255,255));
+    drawTextC(SCR_W / 2, 242 + 140 + 36, ds, 3, TH_ONWALL);
   }
   // widgets opcionales (clima/calendario/notificaciones), apilados debajo
   // del reloj -- o mas arriba si el reloj esta desactivado, para no dejar
@@ -4796,8 +5007,8 @@ static void renderLock(){
     lockWidgetCard(wy, 2, t(S_NOTIFS), val, rgb565(230,180,90));
     wy += 60;
   }
-  fillRoundRect(SCR_W / 2 - 70, SCR_H - 150, 140, 10, 5, rgb565(255,255,255));
-  drawTextC(SCR_W / 2, SCR_H - 118, t(S_SWIPE), 2, rgb565(255,255,255));
+  fillRoundRect(SCR_W / 2 - 70, SCR_H - 150, 140, 10, 5, TH_ONWALL);
+  drawTextC(SCR_W / 2, SCR_H - 118, t(S_SWIPE), 2, TH_ONWALL);
   setBuf(fb);
 }
 static void showLock(){ blitToFb(lockBuf); flxFlushAll(); }
@@ -4821,7 +5032,10 @@ static void widgetLayout(int &cx, int &cy, int &cw, int &ch, bool &climaVis,
 static void drawHomeWidgets(uint32_t tm){
   int wx, wy, cw, ch, nx, ny, nw, nh; bool climaVis, newsVis;
   widgetLayout(wx, wy, cw, ch, climaVis, nx, ny, nw, nh, newsVis);
-  uint16_t W = rgb565(255,255,255);
+  // El widget del CLIMA conserva su azul de marca y su texto blanco: es
+  // CONTENIDO del widget (cielo + sol), no chrome del sistema. Ver la lista de
+  // excepciones deliberadas.
+  uint16_t W = TH_ONWALL;
   if(climaVis){
     if(uiGlass) drawLiquidGlassPanel(wx, wy, cw, ch, 20, rgb565(30,72,150));
     else fillRoundRect(wx, wy, cw, ch, 20, rgb565(28,58,120));
@@ -4832,18 +5046,21 @@ static void drawHomeWidgets(uint32_t tm){
     fillRect(wx + cw - 58, wy + 53, 28, 10, rgb565(236,240,248));
     { int ex = drawText(wx + 16, wy + 48, "21", 4, W);
       drawCircle(ex + 7, wy + 52, 4, W); drawCircle(ex + 7, wy + 52, 3, W); }
-    drawText(wx + 16, wy + ch - 22, "Lima, Peru", 1, rgb565(215,224,240));
+    drawText(wx + 16, wy + ch - 22, "Lima, Peru", 1, TH_ONWALL2);
   }
+  // El widget de NOTICIAS si es una superficie del sistema: antes era una
+  // tarjeta blanca fija con texto casi negro (y texto blanco al activar el
+  // vidrio, o sea dos disenos distintos). Ahora es la superficie del tema, con
+  // sus textos, en los dos materiales.
   if(newsVis){
-    if(uiGlass) drawLiquidGlassPanel(nx, ny, nw, nh, 20, rgb565(205,212,226));
-    else fillRoundRect(nx, ny, nw, nh, 20, rgb565(240,242,246));
-    uint16_t ntxt = uiGlass ? W : rgb565(40,40,50), nsub = uiGlass ? rgb565(238,240,248) : rgb565(120,120,132);
-    drawText(nx + 16, ny + 16, t(S_NEWS), 2, ntxt);
-    drawTextC(nx + nw / 2, ny + nh / 2, t(S_NONEWS), 1, nsub);
+    if(uiGlass) drawLiquidGlassPanel(nx, ny, nw, nh, 20, TH_GLASS);
+    else fillRoundRectA(nx, ny, nw, nh, 20, TH_SURF, 235);
+    drawText(nx + 16, ny + 16, t(S_NEWS), 2, TH_TXT);
+    drawTextC(nx + nw / 2, ny + nh / 2, t(S_NONEWS), 1, TH_TXT2);
   }
   int dkx = 24, dky = SCR_H - 176, dkw = SCR_W - 48, dkh = 96;
-  if(uiGlass) drawLiquidGlassPanel(dkx, dky, dkw, dkh, 28, rgb565(180,186,206));
-  else fillRoundRectA(dkx, dky, dkw, dkh, 28, W, 45);
+  if(uiGlass) drawLiquidGlassPanel(dkx, dky, dkw, dkh, 28, TH_GLASS2);
+  else fillRoundRectA(dkx, dky, dkw, dkh, 28, TH_SURF, 90);
   int dS = 64, inner = dkw - 32, dgap = (inner - 4 * dS) / 3;
   for(int i = 0; i < 4; i++){ int ix = dkx + 16 + i * (dS + dgap), iy = dky + (dkh - dS) / 2; drawAppIcon(12 + i, ix, iy, dS); }
 }
@@ -4854,11 +5071,11 @@ static void renderHome(){
   qsDirty    = true;                       // la cortina se compone de homeBuf: invalidar su cache
   // barra de estado
   char cs[12]; clkStrBar(cs, sizeof(cs));
-  drawText(20, 16, cs, 2, rgb565(255,255,255));
+  drawText(20, 16, cs, 2, TH_ONWALL);
   char sd[48]; buildShortDate(sd, sizeof(sd));
-  drawText(20, 40, sd, 1, rgb565(238,240,246));
-  drawWifi(SCR_W - 66, 28, 11, rgb565(255,255,255));
-  drawBattery(SCR_W - 46, 20, 30, 15, 82, rgb565(255,255,255));
+  drawText(20, 40, sd, 1, TH_ONWALL2);
+  drawWifi(SCR_W - 66, 28, 11, TH_ONWALL);
+  drawBattery(SCR_W - 46, 20, 30, 15, 82, TH_ONWALL);
   // widgets (clima, noticias) + dock: estilo Liquid Glass o plano
   drawHomeWidgets(millis());
   // rejilla de apps 4x3
@@ -4867,15 +5084,15 @@ static void renderHome(){
     int c = i % 4, r = i / 4;
     int ix = gx0 + c * 120, iy = gy0 + r * rowStep;
     drawAppIcon(homeOrder[i], ix, iy, S);
-    drawTextC(ix + S / 2, iy + S + 6, appName(homeOrder[i]), 2, rgb565(255,255,255));
+    drawTextC(ix + S / 2, iy + S + 6, appName(homeOrder[i]), 2, TH_ONWALL);
   }
   // puntos de pagina
   int dotsY = gy0 + 2 * rowStep + S + 34;
   for(int i = 0; i < 3; i++)
-    fillCircleA(SCR_W / 2 - 18 + i * 18, dotsY, 4, rgb565(255,255,255), i == 0 ? 255 : 110);
+    fillCircleA(SCR_W / 2 - 18 + i * 18, dotsY, 4, TH_ONWALL, i == 0 ? 255 : 110);
   // barra de navegacion: botones clasicos o barra de gestos (modo iOS)
   if(gNavMode == 0){
-    int ny = SCR_H - 52; uint16_t nv = rgb565(255,255,255);
+    int ny = SCR_H - 52; uint16_t nv = TH_ONWALL;
     int bx = SCR_W / 6;
     fillTriangle(bx - 10, ny + 8, bx + 8, ny - 2, bx + 8, ny + 18, nv);   // atras
     drawCircle(SCR_W / 2, ny + 8, 12, nv); drawCircle(SCR_W / 2, ny + 8, 11, nv); // inicio
@@ -5009,10 +5226,10 @@ static void edMove(int from, int to){        // reinserta el icono (desplaza los
 // toque en el asa es mas confiable que afinar un umbral de distancia de
 // arrastre, y evita tocar la maquina de estados de edDrag/dwell de abajo).
 static void drawWidgetHandle(int x, int y){
-  fillRoundRect(x, y, 24, 24, 8, rgb565(255,255,255));
-  strokeSegAA(x + 6, y + 16, x + 16, y + 6, 2.0f, rgb565(60,80,140));
-  strokeSegAA(x + 6, y + 10, x + 10, y + 6, 2.0f, rgb565(60,80,140));
-  strokeSegAA(x + 14, y + 18, x + 18, y + 14, 2.0f, rgb565(60,80,140));
+  fillRoundRect(x, y, 24, 24, 8, TH_SURF);
+  strokeSegAA(x + 6, y + 16, x + 16, y + 6, 2.0f, TH_PRIM);
+  strokeSegAA(x + 6, y + 10, x + 10, y + 6, 2.0f, TH_PRIM);
+  strokeSegAA(x + 14, y + 18, x + 18, y + 14, 2.0f, TH_PRIM);
 }
 static bool widgetHandleAt(int px, int py, int &which){
   int cx, cy, cw, ch, nx, ny, nw, nh; bool cv, nv;
@@ -5062,11 +5279,11 @@ static void edRender(){
   }
   if(edDrag >= 0){                                                              // icono arrastrado (translucido)
     int dx = (int)edDragX, dy = (int)edDragY, s = 72;
-    if(uiGlass) drawLiquidGlassPanel(dx - 6, dy - 6, s + 12, s + 12, 16, rgb565(120,140,205));
-    else fillRoundRectA(dx - 6, dy - 6, s + 12, s + 12, 16, rgb565(60,80,140), 150);
+    if(uiGlass) drawLiquidGlassPanel(dx - 6, dy - 6, s + 12, s + 12, 16, TH_GLASS2);
+    else fillRoundRectA(dx - 6, dy - 6, s + 12, s + 12, 16, TH_SEL, 150);
     drawAppIcon(homeOrder[edDrag], dx, dy, s);
   }
-  drawTextC(SCR_W / 2, 176, "Arrastra los iconos - Inicio para salir", 1, rgb565(230,234,244));
+  drawTextC(SCR_W / 2, 176, "Arrastra los iconos - Inicio para salir", 1, TH_ONWALL2);   // sobre el wallpaper
   present(120, 580);
 }
 static void edEnter(){
@@ -5132,7 +5349,7 @@ static void animateIconRipple(){
     float   p = (float)e / RIPPLE_DUR_MS;                // 0..1
     int     r = (int)(RIPPLE_MAX_R * p);                  // crece
     uint8_t a = (uint8_t)(160 * (1.0f - p));              // se desvanece
-    if(r > 0 && a > 0) fillCircleA(gRippleX, gRippleY, r, rgb565(255,255,255), a);
+    if(r > 0 && a > 0) fillCircleA(gRippleX, gRippleY, r, TH_ONWALL, a);   // ripple sobre el wallpaper
   } else {
     gRippleActive = false;                                // termino: este frame sale limpio (sin circulo)
   }
@@ -5187,7 +5404,7 @@ static void homeTick(){
 // de APP_REG), asi que la expansion siempre las conoce.
 #define WIN_TOP (gHosted ? 0 : 96)
 #define WIN_BOT (gHosted ? gAppH : (SCR_H - 64))
-#define WIN_BG  rgb565(18, 20, 28)  // fondo de ventana (oscuro, profesional)
+#define WIN_BG  TH_WIN              // fondo de ventana: lo elige la paleta activa (ver TEMA SEMANTICO)
 
 typedef struct { void (*enter)(); void (*tick)(); uint8_t flags; } FlexApp;
 #define APP_CUSTOM_HEADER 1   // la app pinta su propia cabecera (no la centrada)
@@ -5256,7 +5473,10 @@ static void getIconRect(int id, int &rx, int &ry, int &rs){
 static void appDrawChrome(int id){
   if(gHosted){ (void)id; return; }   // embebida: la ventana ya tiene su barra de titulo
   setBuf(fb);
-  uint16_t W = rgb565(255,255,255);
+  // Barra de estado y de navegacion del marco de app: van sobre el fondo de
+  // VENTANA del tema (no sobre el wallpaper), asi que usan el color de iconos
+  // de navegacion de la paleta activa.
+  uint16_t W = TH_NAV;
   char cs[12]; clkStrBar(cs, sizeof(cs));
   drawText(20, 16, cs, 2, W);
   drawWifi(SCR_W - 66, 28, 11, W);
@@ -5275,7 +5495,7 @@ static void appDrawChrome(int id){
 // APP_CUSTOM_HEADER se saltan esto y pintan su propia cabecera.
 static void appDrawHeader(int id){
   if(gHosted) return;                // el nombre de la app lo pone la barra de titulo
-  uint16_t W = rgb565(255,255,255);
+  uint16_t W = TH_TXT;
   int hy = 50;
   strokeSegAA(30, hy + 16, 18, hy + 8, 2.4f, W);
   strokeSegAA(18, hy + 8, 30, hy, 2.4f, W);
@@ -5391,10 +5611,10 @@ static inline void uiTextR(int rx, int y, const char* t, int fs, uint16_t c, uin
 static void appPlaceholderEnter(){
   setBuf(fb);
   int cy = (WIN_TOP + WIN_BOT) / 2;
-  if(uiGlass) drawLiquidGlassPanel(36, cy - 168, SCR_W - 72, 268, 26, rgb565(50,72,146));  // modal glass
+  if(uiGlass) drawLiquidGlassPanel(36, cy - 168, SCR_W - 72, 268, 26, TH_GLASS2);  // modal glass
   drawAppIcon(gAppId, SCR_W / 2 - 44, cy - 130, 88);
-  drawTextC(SCR_W / 2, cy + 6, t(S_SOON), 3, rgb565(232,234,240));
-  drawTextC(SCR_W / 2, cy + 48, t(S_M2), 2, rgb565(140,150,166));
+  drawTextC(SCR_W / 2, cy + 6, t(S_SOON), 3, TH_TXT);
+  drawTextC(SCR_W / 2, cy + 48, t(S_M2), 2, TH_TXT2);
 }
 // (2) App REAL de referencia: Reloj (prueba el patron completo)
 // RELOJ · adaptativo.
@@ -5417,14 +5637,14 @@ static void appRelojRender(){
   if(capH < 22) capH = 22;
   int thick = capH / 8; if(thick < 3) thick = 3;
   int cy = by + pad + bh / 12;
-  drawBigClock(cs, bx + bw / 2, cy, capH, thick, rgb565(255,255,255));
+  drawBigClock(cs, bx + bw / 2, cy, capH, thick, TH_TXT);
   int y = cy + capH + pad;
   int rest = (by + bh) - y - pad;
   char ds[64]; buildLongDate(ds, sizeof(ds));
   uint8_t aDate = uiSection(0, rest >= 26);
   if(aDate){
     int fs = uiFontFit(ds, bw - 2 * pad, uiFontH(rest / 3 > 30 ? 30 : rest));
-    uiTextC(bx + bw / 2, y, ds, fs, rgb565(200,210,230), aDate);
+    uiTextC(bx + bw / 2, y, ds, fs, TH_TXT2, aDate);
     y += uiLineH(fs) + pad;
     rest = (by + bh) - y - pad;
   }
@@ -5439,16 +5659,16 @@ static void appRelojRender(){
     const char* val[2] = { sd, doy };
     for(int i = 0; i < n; i++){
       int x = bx + pad + i * (cw + g);
-      uiRectA(x, y, cw, chh, uiPad(), rgb565(30,34,46), aCards);
+      uiRectA(x, y, cw, chh, uiPad(), thCard(), aCards);
       int fl = uiFontFit(lbl[i], cw - 16, 2);
-      uiTextC(x + cw / 2, y + chh / 2 - uiLineH(fl) - 6, lbl[i], fl, rgb565(150,160,185), aCards);
+      uiTextC(x + cw / 2, y + chh / 2 - uiLineH(fl) - 6, lbl[i], fl, TH_TXT2, aCards);
       int fv = uiFontFit(val[i], cw - 16, 3);
-      uiTextC(x + cw / 2, y + chh / 2 + 2, val[i], fv, rgb565(225,232,245), aCards);
+      uiTextC(x + cw / 2, y + chh / 2 + 2, val[i], fv, TH_TXT, aCards);
     }
     y += chh + pad;
   }
   int fy = by + bh - pad - uiLineH(2);
-  if(fy > y) drawTextC(bx + bw / 2, fy, "Reloj de FlexOS", uiFontFit("Reloj de FlexOS", bw - 2 * pad, 2), rgb565(120,132,152));
+  if(fy > y) drawTextC(bx + bw / 2, fy, "Reloj de FlexOS", uiFontFit("Reloj de FlexOS", bw - 2 * pad, 2), TH_MUTE);
   flxFlush(WIN_TOP, WIN_BOT);
 }
 static void appRelojEnter(){ appRelojRender(); }
@@ -5478,7 +5698,7 @@ static FlexApp APP_REG[16] = {
 #define WIN_ANIM_MS 100                              // 0.1 s exactos, basado en tiempo
 static void winRevealAnim(int id, bool opening){
   int ix, iy, is; getIconRect(id, ix, iy, is);
-  uint16_t bg = (APP_REG[id].flags & APP_CUSTOM_HEADER) ? rgb565(244,247,251) : WIN_BG;
+  uint16_t bg = (APP_REG[id].flags & APP_CUSTOM_HEADER) ? TH_PAGE : WIN_BG;
   uint32_t t0 = millis(), dur = WIN_ANIM_MS;
   // FLUIDEZ: antes cada frame recopiaba homeBuf ENTERO (768 KB de PSRAM leidos y
   // escritos, ~10 ms) y volcaba la pantalla completa, aunque la forma solo
@@ -5653,20 +5873,21 @@ static bool handleiOSGestures(){
 #define SET_NAV_MS   270                    // duracion de la transicion entre pantallas
 #define SET_ANIM_Y0  40                     // banda que se desplaza (la barra de estado
 #define SET_ANIM_Y1  (SCR_H - 60)           //  y la de navegacion se quedan quietas)
-// PAGE_BG y la paleta de abajo dependen de gDark (Ajustes -> Pantalla ->
-// Modo de apariencia). Colores de MARCA/acento (los puntitos de colores de
-// cada fila, iconos como Wi-Fi o el reloj) se dejan igual en ambos modos a
-// proposito -- es el fondo y el texto lo que define si algo "se ve" claro
-// u oscuro, y es lo unico que cambia aqui.
-#define PAGE_BG        (gDark ? rgb565(18,20,28)     : rgb565(244,247,251))   // fondo de pagina
-#define SET_CARD_BG    (gDark ? rgb565(34,38,50)     : rgb565(255,255,255))   // fondo de tarjeta (fila/sidebar)
-#define SET_CARD_GLASS (gDark ? rgb565(48,54,72)     : rgb565(246,248,252))   // tinte de vidrio de la tarjeta
-#define SET_TXT_HI     (gDark ? rgb565(240,242,248)  : rgb565(20,22,30))      // texto principal
-#define SET_TXT_LO     (gDark ? rgb565(160,166,182)  : rgb565(120,126,140))   // texto secundario / valor
-#define SET_TXT_MUTE   (gDark ? rgb565(120,126,142)  : rgb565(140,146,160))   // texto de ayuda / pie
-#define SET_CHEV       (gDark ? rgb565(110,116,132)  : rgb565(160,165,178))   // chevron
-#define SET_SIDE_SUB   (gDark ? rgb565(150,156,172)  : rgb565(140,145,158))   // subtitulo de la barra lateral
-#define SET_NAVPILL    (gDark ? rgb565(200,204,214)  : rgb565(60,64,74))      // pildora de gestos (modo iOS)
+// Los nombres PAGE_BG / SET_* se CONSERVAN (los usan decenas de llamantes y
+// tambien las pantallas de clave), pero ya no son una segunda paleta: son
+// alias del TEMA SEMANTICO GLOBAL, o sea de la misma fuente de verdad que usa
+// el resto del sistema. Colores de MARCA/acento (los puntitos de colores de
+// cada fila) siguen siendo fijos a proposito -- es el fondo y el texto lo que
+// define si algo "se ve" claro u oscuro.
+#define PAGE_BG        TH_PAGE      // fondo de pagina
+#define SET_CARD_BG    TH_SURF      // fondo de tarjeta (fila/sidebar)
+#define SET_CARD_GLASS TH_GLASS     // tinte de vidrio de la tarjeta
+#define SET_TXT_HI     TH_TXT       // texto principal
+#define SET_TXT_LO     TH_TXT2      // texto secundario / valor
+#define SET_TXT_MUTE   TH_MUTE      // texto de ayuda / pie
+#define SET_CHEV       TH_MUTE      // chevron
+#define SET_SIDE_SUB   TH_TXT2      // subtitulo de la barra lateral
+#define SET_NAVPILL    TH_NAV       // pildora de gestos (modo iOS)
 
 static const char* SET_CAT[12] = {
   "General","Pantalla","Sonido","Red e Internet","Dispositivos",
@@ -5753,7 +5974,7 @@ static void drawRowGlyph(int k, int cx, int cy, uint16_t col){
       strokeSegAA(cx, cy, cx + 4, cy, 1.4f, col); break;
     case RI_PIN:
       fillCircle(cx, cy - 3, 7, col); fillTriangle(cx - 6, cy, cx + 6, cy, cx, cy + 9, col);
-      fillCircle(cx, cy - 3, 3, rgb565(255,255,255)); break;
+      fillCircle(cx, cy - 3, 3, thCard()); break;      // hueco del pin: color de la TARJETA, no blanco fijo
     case RI_REFRESH:
       arcStroke(cx, cy, 9, 30, 300, 2, col);
       fillTriangle(cx + 8, cy - 7, cx + 14, cy - 4, cx + 7, cy - 1, col); break;
@@ -5775,7 +5996,7 @@ static void drawSetCatIcon(int cat, int x, int y, int S, uint16_t col){
       fillCircleAA(cx, cy, S * 0.18f, col);
       for(int k = 0; k < 8; k++){ float a = k * 0.7853982f;
         fillCircleAA(cx + cosf(a) * S * 0.30f, cy + sinf(a) * S * 0.30f, S * 0.065f, col); }
-      fillCircleAA(cx, cy, S * 0.08f, rgb565(255,255,255)); break;
+      fillCircleAA(cx, cy, S * 0.08f, thCard()); break; // hueco del engranaje: color de la TARJETA
     case 1: // sol
       fillCircleAA(cx, cy, S * 0.15f, col);
       for(int k = 0; k < 8; k++){ float a = k * 0.7853982f;
@@ -5867,6 +6088,10 @@ static void settingsDetailContent(int cat){
   int base = DLIST_TOP - setScroll;
   int y = base + 6;
   char v[48];
+  // Los circulitos de color de cada fila son ACENTOS DE MARCA por categoria (el
+  // patron de One UI / Ajustes de iOS): identifican la fila y son iguales en las
+  // dos apariencias. Lo que define si algo "se ve" claro u oscuro es la tarjeta y
+  // el texto, y esos si salen del tema.
   uint16_t ic = rgb565(70,120,225);
   if(cat == 0){
     y = setRowCard(y, RI_GLOBE,   rgb565(60,140,235), "Idioma", langNameCur(), true);
@@ -6114,7 +6339,7 @@ static void settingsAnimate(int fromView, int toView, int dir){
       if(edge > 0 && edge <= SCR_W){
         for(int k = 1; k <= 8; k++){
           int x = edge - k; if(x < 0) break;
-          d[x] = mix565(d[x], rgb565(0,0,0), (uint8_t)(70 - k * 8));
+          d[x] = mix565(d[x], TH_SHADOW, (uint8_t)(70 - k * 8));
         }
       }
     }
@@ -6154,15 +6379,18 @@ static void settingsRowAction(int cat, int idx){
     else if(idx == 4) flexOtaOpenSettings();                                                                 // Actualizaciones -> pantalla OTA
   } else if(cat == 1){
     if(idx == 0){ gBright += 25; if(gBright > 100) gBright = 25; setBacklight(gBright); cfgSavePrefs(); settingsRenderDetailOnly(); }  // brillo real
-    else if(idx == 1){ uiGlass = !uiGlass; cfgSavePrefs(); gHomeDirty = true; settingsRenderDetailOnly(); }    // estilo Liquid Glass
-    else if(idx == 2){ gDark = !gDark; cfgSavePrefs(); settingsRender(); }  // Modo de apariencia: oscuro <-> claro (aplica ya, sin reiniciar)
+    // MATERIAL (Liquid Glass <-> plano) y APARIENCIA (oscuro <-> claro) son dos
+    // preferencias ORTOGONALES: cada una toca SOLO su flag y delega en
+    // themeChanged(), que guarda en NVS, invalida las caches visuales y repinta.
+    else if(idx == 1){ uiGlass = !uiGlass; themeChanged(); }
+    else if(idx == 2){ gDark   = !gDark;   themeChanged(); }
     else if(idx == 3){ gNavMode = (gNavMode == 0) ? 1 : 0; cfgSavePrefs(); gHomeDirty = true; settingsRender(); } // barra: botones <-> gestos (redibuja tambien la barra inferior)
     else if(idx == 4){ gLockWidgets ^= LW_CLOCK;   cfgSavePrefs(); settingsRenderDetailOnly(); }  // Bloqueo: reloj grande
     else if(idx == 5){ gLockWidgets ^= LW_WEATHER; cfgSavePrefs(); settingsRenderDetailOnly(); }  // Bloqueo: clima
     else if(idx == 6){ gLockWidgets ^= LW_CAL;     cfgSavePrefs(); settingsRenderDetailOnly(); }  // Bloqueo: calendario
     else if(idx == 7){ gLockWidgets ^= LW_NOTIF;   cfgSavePrefs(); settingsRenderDetailOnly(); }  // Bloqueo: notificaciones
   } else if(cat == 5){
-    if(idx == 0){ uiGlass = !uiGlass; cfgSavePrefs(); gHomeDirty = true; settingsRenderDetailOnly(); }         // Personalizar UI
+    if(idx == 0){ uiGlass = !uiGlass; themeChanged(); }                                                       // Personalizar UI (material)
     else if(idx == 1){ gIconStyle = (gIconStyle == 0) ? 1 : 0; cfgSavePrefs(); gHomeDirty = true; settingsRenderDetailOnly(); }  // estilo de iconos: Plano <-> Vidrio
     else if(idx == 2){ gAnimStyle = (gAnimStyle + 1) % 3; cfgSavePrefs(); settingsRenderDetailOnly(); }  // transiciones: zoom -> fundido -> deslizar -> zoom
 #if KB_SETTINGS_ON
@@ -6409,10 +6637,10 @@ static void calcRender(){
   int dx, dy, dw, dh; calcDispRect(dx, dy, dw, dh);
   if(dh > 0){
     int drad = dh / 5; if(drad > 14) drad = 14; if(drad < 2) drad = 2;
-    fillRoundRect(dx, dy, dw, dh, drad, rgb565(28,31,40));
+    fillRoundRect(dx, dy, dw, dh, drad, TH_SURF);
     int dfs = dh >= 90 ? 5 : dh >= 64 ? 4 : dh >= 40 ? 3 : 2;
     while(dfs > 1 && textW(calcDisp, dfs) > dw - 20) dfs--;
-    drawTextR(dx + dw - 10, dy + dh / 2 - dfs * 4, calcDisp, dfs, rgb565(255,255,255));
+    drawTextR(dx + dw - 10, dy + dh / 2 - dfs * 4, calcDisp, dfs, TH_TXT);
   }
   int gx, gy, bw, bh, gap; calcGrid(gx, gy, bw, bh, gap);
   calcKeyY0 = gy - 4; calcKeyY1 = gy + 5 * (bh + gap) + 4;
@@ -6421,16 +6649,19 @@ static void calcRender(){
   for(int r = 0; r < 5; r++) for(int c = 0; c < 4; c++){
     int x = gx + c * (bw + gap), y = gy + r * (bh + gap);
     const char* tl = CALC_LBL[r][c];
+    // La columna de operadores conserva su NARANJA de marca (identidad de la
+    // app, igual en las dos apariencias). El resto de teclas son superficies.
     uint16_t bg;
     if(c == 3 || (r == 4 && c == 2)) bg = rgb565(245,150,40);
-    else if(r == 0)                  bg = rgb565(70,74,86);
-    else                             bg = rgb565(92,96,110);
+    else if(r == 0)                  bg = TH_SURF2;
+    else                             bg = thCard2();
     // drawLiquidGlassPanel solo es correcto en portrait sin rotar; con lienzo
     // apaisado (ventana ancha) se usa el relleno plano.
     if(uiGlass && !gLand) drawLiquidGlassPanel(x, y, bw, bh, rad, bg);
     else fillRoundRect(x, y, bw, bh, rad, bg);
     int fs = calcFontFor(bw, bh, tl);
-    drawTextC(x + bw / 2, y + bh / 2 - fs * 4 + 1, tl, fs, rgb565(248,248,252));
+    bool acc = (c == 3 || (r == 4 && c == 2));
+    drawTextC(x + bw / 2, y + bh / 2 - fs * 4 + 1, tl, fs, acc ? TH_ONACC : TH_TXT);
   }
   // Panel lateral opcional: memoria e historial. Aparece/desaparece entero.
   int sw = calcSideW();
@@ -6439,21 +6670,21 @@ static void calcRender(){
     int pad, gapL, dhL, bwL, bhL; calcLayout(pad, gapL, dhL, bwL, bhL);
     (void)gapL; (void)dhL; (void)bwL; (void)bhL;
     int sx = bx + bw0, sy = by, shh = bh0;
-    uiRectA(sx + pad / 2, sy + pad, sw - pad, shh - 2 * pad, pad, rgb565(30,34,46), aSide);
+    uiRectA(sx + pad / 2, sy + pad, sw - pad, shh - 2 * pad, pad, thCard(), aSide);
     int ix = sx + pad, iw = sw - 2 * pad, iy = sy + pad * 2;
-    uiTextC(sx + sw / 2, iy, "Memoria", uiFontFit("Memoria", iw, 3), rgb565(150,160,190), aSide);
+    uiTextC(sx + sw / 2, iy, "Memoria", uiFontFit("Memoria", iw, 3), TH_TXT2, aSide);
     iy += uiLineH(3) + pad;
     const char* mk[3] = { "MC", "MR", "M+" };
     int mh = (shh / 8) < 30 ? 30 : (shh / 8);
     for(int i = 0; i < 3; i++){
-      uiRectA(ix, iy, iw, mh, mh / 4, rgb565(70,74,86), aSide);
-      uiTextC(sx + sw / 2, iy + mh / 2 - uiLineH(2), mk[i], uiFontFit(mk[i], iw - 8, 3), rgb565(240,244,252), aSide);
+      uiRectA(ix, iy, iw, mh, mh / 4, TH_SURF2, aSide);
+      uiTextC(sx + sw / 2, iy + mh / 2 - uiLineH(2), mk[i], uiFontFit(mk[i], iw - 8, 3), TH_TXT, aSide);
       iy += mh + pad / 2;
     }
     iy += pad;
-    uiTextC(sx + sw / 2, iy, "Resultado", uiFontFit("Resultado", iw, 2), rgb565(150,160,190), aSide);
+    uiTextC(sx + sw / 2, iy, "Resultado", uiFontFit("Resultado", iw, 2), TH_TXT2, aSide);
     iy += uiLineH(2) + 4;
-    uiTextC(sx + sw / 2, iy, calcDisp, uiFontFit(calcDisp, iw, 3), rgb565(200,230,255), aSide);
+    uiTextC(sx + sw / 2, iy, calcDisp, uiFontFit(calcDisp, iw, 3), TH_ACCS, aSide);
   }
   if(!host){ setBuf(fb); fbCopyBand(lockBuf, WIN_TOP, WIN_BOT - 1); }
   flxFlush(WIN_TOP, WIN_BOT);
@@ -6472,10 +6703,10 @@ static void calcRenderDisplay(){                       // solo el display (al te
   setBuf(host ? fb : lockBuf);
   fillRect(dx - 2, y0, dw + 4, y1 - y0, WIN_BG);  // borra el valor anterior
   int drad = dh / 5; if(drad > 14) drad = 14; if(drad < 2) drad = 2;
-  fillRoundRect(dx, dy, dw, dh, drad, rgb565(28,31,40));
+  fillRoundRect(dx, dy, dw, dh, drad, TH_SURF);
   int dfs = dh >= 90 ? 5 : dh >= 64 ? 4 : dh >= 40 ? 3 : 2;
   while(dfs > 1 && textW(calcDisp, dfs) > dw - 20) dfs--;
-  drawTextR(dx + dw - 10, dy + dh / 2 - dfs * 4, calcDisp, dfs, rgb565(255,255,255));
+  drawTextR(dx + dw - 10, dy + dh / 2 - dfs * 4, calcDisp, dfs, TH_TXT);
   if(!host){ fbCopyBand(lockBuf, y0, y1); setBuf(fb); }
   flxFlush(y0, y1);
 }
@@ -6520,13 +6751,13 @@ static void calRender(){
 
   int y = by + pad;
   int fsH = uiFontFit(hdr, gridW, uiFontH(bh / 12));
-  drawTextC(bx + pad + gridW / 2, y, hdr, fsH, rgb565(255,255,255));
+  drawTextC(bx + pad + gridW / 2, y, hdr, fsH, TH_TXT);
   y += uiLineH(fsH) + gap / 2;
 
   const char* wd[7] = { "D", "L", "M", "M", "J", "V", "S" };
   int cw = gridW / 7;
   int fsW = uiFontFit("W", cw - 2, 2);
-  for(int i = 0; i < 7; i++) drawTextC(bx + pad + i * cw + cw / 2, y, wd[i], fsW, rgb565(150,160,190));
+  for(int i = 0; i < 7; i++) drawTextC(bx + pad + i * cw + cw / 2, y, wd[i], fsW, TH_TXT2);
   y += uiLineH(fsW) + gap / 2;
 
   int fw = ((rtcWd - (rtcD - 1)) % 7 + 7) % 7;
@@ -6541,21 +6772,21 @@ static void calRender(){
     int cell = fw + d - 1, r = cell / 7, c = cell % 7;
     int cx = bx + pad + c * cw + cw / 2, cy = y + r * ch;
     if(cy + ch > by + bh) break;                       // nunca fuera del marco
-    if(d == rtcD) fillCircle(cx, cy + ch / 2, rad, rgb565(58,120,235));
+    if(d == rtcD) fillCircle(cx, cy + ch / 2, rad, TH_PRIM);      // dia de hoy: seleccion
     char ds[4]; snprintf(ds, sizeof(ds), "%d", d);
-    drawTextC(cx, cy + ch / 2 - uiLineH(fsD) / 2, ds, fsD, d == rtcD ? rgb565(255,255,255) : rgb565(220,224,235));
+    drawTextC(cx, cy + ch / 2 - uiLineH(fsD) / 2, ds, fsD, d == rtcD ? TH_ONACC : TH_TXT);
   }
   if(aSide){
     int sx = bx + pad + gridW + gap, sy = by + pad;
     int shh = bh - 2 * pad;
-    uiRectA(sx, sy, sideW, shh, pad, rgb565(30,34,46), aSide);
-    uiTextC(sx + sideW / 2, sy + pad, "Hoy", uiFontFit("Hoy", sideW - 16, 3), rgb565(150,160,190), aSide);
+    uiRectA(sx, sy, sideW, shh, pad, thCard(), aSide);
+    uiTextC(sx + sideW / 2, sy + pad, "Hoy", uiFontFit("Hoy", sideW - 16, 3), TH_TXT2, aSide);
     char dd[8]; snprintf(dd, sizeof(dd), "%d", rtcD);
     int fsBig = uiFontFit(dd, sideW - 24, uiFontH(shh / 3));
-    uiTextC(sx + sideW / 2, sy + shh / 2 - uiLineH(fsBig), dd, fsBig, rgb565(120,200,255), aSide);
+    uiTextC(sx + sideW / 2, sy + shh / 2 - uiLineH(fsBig), dd, fsBig, TH_ACCS, aSide);
     char ld[64]; buildLongDate(ld, sizeof(ld));
     uiTextC(sx + sideW / 2, sy + shh / 2 + uiLineH(2), ld,
-            uiFontFit(ld, sideW - 16, 2), rgb565(210,218,235), aSide);
+            uiFontFit(ld, sideW - 16, 2), TH_TXT, aSide);
   }
   flxFlush(WIN_TOP, WIN_BOT);
 }
@@ -6576,12 +6807,12 @@ static void bienRender(){
   fillRect(bx0, by, bw0, bh, WIN_BG);
   int pad = uiPad(), gap = uiGap();
   int y = by + pad;
-  y = uiTitle(bx0, y, bw0, "Bienestar del equipo", rgb565(255,255,255), uiFontH(bh / 12));
+  y = uiTitle(bx0, y, bw0, "Bienestar del equipo", TH_TXT, uiFontH(bh / 12));
   char up[40]; buildUptime(up, sizeof(up));
   int fsUp = uiFontFit(up, bw0 - 2 * pad, uiFontH(bh / 6));
-  drawTextC(bx0 + bw0 / 2, y, up, fsUp, rgb565(120,200,255));
+  drawTextC(bx0 + bw0 / 2, y, up, fsUp, TH_ACCS);
   y += uiLineH(fsUp) + 2;
-  drawTextC(bx0 + bw0 / 2, y, "tiempo encendido", uiFontFit("tiempo encendido", bw0 - 2 * pad, 2), rgb565(150,160,185));
+  drawTextC(bx0 + bw0 / 2, y, "tiempo encendido", uiFontFit("tiempo encendido", bw0 - 2 * pad, 2), TH_TXT2);
   y += uiLineH(2) + gap;
 
   size_t pf = heap_caps_get_free_size(MALLOC_CAP_SPIRAM), pt = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
@@ -6592,30 +6823,30 @@ static void bienRender(){
   int cx1 = bx0 + pad;
   int barH = bh / 16; if(barH < 10) barH = 10; if(barH > 20) barH = 20;
   int fsL = uiFontFit("RAM interna libre", colW / 2, 2);
-  drawText(cx1, y, "PSRAM", fsL, rgb565(220,224,235));
+  drawText(cx1, y, "PSRAM", fsL, TH_TXT);
   snprintf(v, sizeof(v), "%d%% en uso", usedp);
-  drawTextR(cx1 + colW, y, v, fsL, rgb565(180,188,205));
+  drawTextR(cx1 + colW, y, v, fsL, TH_TXT2);
   int barY = y + uiLineH(fsL) + 6;
-  fillRoundRect(cx1, barY, colW, barH, barH / 2, rgb565(48,52,66));
-  fillRoundRect(cx1, barY, colW * usedp / 100, barH, barH / 2, rgb565(90,180,120));
+  fillRoundRect(cx1, barY, colW, barH, barH / 2, TH_TRACK);                        // track apagado
+  fillRoundRect(cx1, barY, colW * usedp / 100, barH, barH / 2, TH_OK);             // relleno: estado
   if(aCol){
     int cx2 = cx1 + colW + gap;
-    uiText(cx2, y, "RAM interna", fsL, rgb565(220,224,235), aCol);
+    uiText(cx2, y, "RAM interna", fsL, TH_TXT, aCol);
     snprintf(v, sizeof(v), "%u KB", (unsigned)(esp_get_free_heap_size() / 1024));
-    uiTextR(cx2 + colW, y, v, fsL, rgb565(180,188,205), aCol);
+    uiTextR(cx2 + colW, y, v, fsL, TH_TXT2, aCol);
     int fr = (int)getCpuFrequencyMhz();
-    uiRectA(cx2, barY, colW, barH, barH / 2, rgb565(48,52,66), aCol);
+    uiRectA(cx2, barY, colW, barH, barH / 2, TH_TRACK, aCol);
     int pctF = fr > 360 ? 100 : fr * 100 / 360;
-    uiRectA(cx2, barY, colW * pctF / 100, barH, barH / 2, rgb565(120,150,240), aCol);
+    uiRectA(cx2, barY, colW * pctF / 100, barH, barH / 2, TH_PRIM, aCol);
     snprintf(v, sizeof(v), "CPU %d MHz", fr);
-    uiText(cx2, barY + barH + 6, v, uiFontFit(v, colW, 2), rgb565(160,170,195), aCol);
+    uiText(cx2, barY + barH + 6, v, uiFontFit(v, colW, 2), TH_TXT2, aCol);
   }
   y = barY + barH + uiLineH(2) + gap;
   uint8_t aFoot = uiSection(1, (by + bh) - y - pad >= 20);
   if(aFoot){
     const char* tip = "Recuerda descansar la vista";
     uiTextC(bx0 + bw0 / 2, by + bh - pad - uiLineH(2), tip,
-            uiFontFit(tip, bw0 - 2 * pad, 2), rgb565(150,160,185), aFoot);
+            uiFontFit(tip, bw0 - 2 * pad, 2), TH_MUTE, aFoot);
   }
   flxFlush(WIN_TOP, WIN_BOT);
 }
@@ -6636,12 +6867,14 @@ static void galRender(){
   int y0 = by + pad;
   const char* ttl = "Galer\xC3\xAD" "a";
   int fsT = uiFontFit(ttl, bw - 2 * pad, uiFontH(bh / 12));
-  drawTextC(bx + bw / 2, y0, ttl, fsT, rgb565(255,255,255));
+  drawTextC(bx + bw / 2, y0, ttl, fsT, TH_TXT);
   int gy = y0 + uiLineH(fsT) + gap;
   int cols = (bw - 2 * pad + gap) / (92 + gap); if(cols < 2) cols = 2; if(cols > 6) cols = 6;
   int tw = (bw - 2 * pad - (cols - 1) * gap) / cols;
   int th = tw * 3 / 4;
   int gx = bx + pad;
+  // Las miniaturas son CONTENIDO (mini-paisajes generados): sus colores no
+  // siguen el tema, igual que no lo harian unas fotos reales del usuario.
   uint16_t sky[6] = { rgb565(120,180,235), rgb565(250,200,120), rgb565(180,150,220),
                       rgb565(120,210,190), rgb565(240,160,170), rgb565(150,170,235) };
   uint16_t sun[6] = { rgb565(255,240,150), rgb565(255,120,80), rgb565(255,230,180),
@@ -6665,7 +6898,7 @@ static void galRender(){
   if(aFoot){
     char cnt[40]; snprintf(cnt, sizeof(cnt), "%d de 12 elementos", shown);
     uiTextC(bx + bw / 2, by + bh - pad - uiLineH(2), cnt,
-            uiFontFit(cnt, bw - 2 * pad, 2), rgb565(150,160,185), aFoot);
+            uiFontFit(cnt, bw - 2 * pad, 2), TH_MUTE, aFoot);
   }
   flxFlush(WIN_TOP, WIN_BOT);
 }
@@ -6730,20 +6963,23 @@ static void galEnter(){ galRender(); }
 #define DEX_FND_H      404
 #define DEX_NP_W       360         // panel de notificaciones / ajustes rapidos
 
-// ---- Paleta. Sigue el MISMO gDark del resto de FlexOS Ultra: DeX no tiene
-//      tema propio, usa el del sistema (requisito explicito). ----
-#define DEX_ACCENT   rgb565(60,130,246)
-#define DEX_TB_BG    (gDark ? rgb565(16,19,28)    : rgb565(240,243,249))
-#define DEX_TB_GLASS (gDark ? rgb565(20,25,38)    : rgb565(246,248,252))
-#define DEX_PANEL    (gDark ? rgb565(30,35,48)    : rgb565(252,253,255))
-#define DEX_PANEL2   (gDark ? rgb565(42,48,64)    : rgb565(234,238,246))
-#define DEX_TXT_HI   (gDark ? rgb565(238,241,249) : rgb565(24,27,36))
-#define DEX_TXT_LO   (gDark ? rgb565(150,157,175) : rgb565(110,116,132))
-#define DEX_BORDER   (gDark ? rgb565(66,74,94)    : rgb565(202,210,224))
-#define DEX_WIN_BG   (gDark ? rgb565(30,34,46)    : rgb565(250,251,253))
-#define DEX_WIN_BODY (gDark ? rgb565(24,27,37)    : rgb565(252,253,255))
-#define DEX_TTL_ACT  (gDark ? rgb565(54,62,82)    : rgb565(224,230,240))
-#define DEX_TTL_INA  (gDark ? rgb565(38,43,58)    : rgb565(240,242,247))
+// ---- Paleta. DeX NO tiene tema propio: son alias del TEMA SEMANTICO GLOBAL,
+//      igual que PAGE_BG/SET_* en Ajustes. Los nombres se conservan porque los
+//      usan decenas de llamantes del subsistema dex*. ----
+#define DEX_ACCENT   TH_PRIM        // acento del escritorio = accion primaria del tema
+#define DEX_TB_BG    TH_PAGE        // barra de tareas (fondo plano)
+#define DEX_TB_GLASS TH_GLASS       // barra de tareas (tinte Liquid Glass)
+#define DEX_PANEL    TH_SURF        // panel / cajon / menu
+#define DEX_PANEL2   TH_SURF2       // panel elevado (fila resaltada, chip)
+#define DEX_TXT_HI   TH_TXT
+#define DEX_TXT_LO   TH_TXT2
+#define DEX_BORDER   TH_BORDER
+#define DEX_WIN_BG   TH_SURF        // marco de ventana
+#define DEX_WIN_BODY TH_WIN         // cuerpo de ventana (lienzo de la app hospedada)
+#define DEX_TTL_ACT  TH_SURF2       // barra de titulo de la ventana ACTIVA
+// Inactiva: se APAGA respecto al marco (hacia el fondo de pagina), asi sigue
+// distinguiendose de DEX_TTL_ACT en las dos apariencias sin un color propio.
+#define DEX_TTL_INA  mix565(TH_SURF, TH_PAGE, 110)
 
 enum { SNAP_FREE = 0, SNAP_L, SNAP_R, SNAP_TL, SNAP_TR, SNAP_BL, SNAP_BR, SNAP_MAX };
 enum { DXA_NONE = 0, DXA_OPEN, DXA_CLOSE, DXA_MIN, DXA_RESTORE, DXA_GEOM };
@@ -7346,7 +7582,7 @@ static void pcGlassPanel(int x, int y, int w, int h, int rad, uint16_t tint){
   if(2 * rad > w) rad = w / 2;
   if(2 * rad > h) rad = h / 2;
   fillRoundRectA(x, y, w, h, rad, tint, 205);
-  drawRoundRect(x, y, w, h, rad, gDark ? rgb565(96,106,130) : rgb565(210,220,240));
+  drawRoundRect(x, y, w, h, rad, TH_BORDER);
 }
 // Superficie estandar de DeX: sigue el MISMO flag uiGlass del resto del sistema.
 static void dexSurface(int x, int y, int w, int h, int rad, uint16_t tint){
@@ -7360,6 +7596,9 @@ static void dexSurface(int x, int y, int w, int h, int rad, uint16_t tint){
 // entrar y cada vez que cambia la variante o el modo claro/oscuro.
 static void dexWallpaperDraw(int bx, int bw){
   uint16_t a, b;
+  // WALLPAPER de Modo PC: es CONTENIDO (el fondo de escritorio), no chrome. Aun
+  // asi tiene variante clara y oscura propias, como cualquier wallpaper dinamico,
+  // y las elige el mismo gDark del sistema.
   if(dexWall == 0){      a = gDark ? rgb565(10,16,38)  : rgb565(150,186,236);
                          b = gDark ? rgb565(28,64,124) : rgb565(226,236,250); }
   else if(dexWall == 1){ a = gDark ? rgb565(28,12,44)  : rgb565(214,196,238);
@@ -7411,9 +7650,9 @@ static void dexWallpaper(){
 
 // ---- Iconos vectoriales de la barra ----
 static void dexIcoChip(int x, int y, int s, bool on, uint16_t &fgOut){
-  uint16_t bg = on ? DEX_ACCENT : (gDark ? rgb565(44,50,66) : rgb565(224,229,240));
+  uint16_t bg = on ? DEX_ACCENT : TH_SURF2;
   fillRoundRect(x, y, s, s, s / 4, bg);
-  fgOut = on ? rgb565(255,255,255) : DEX_TXT_HI;
+  fgOut = on ? TH_ONACC : DEX_TXT_HI;
 }
 static void dexIcoGrid(int x, int y, int s, bool on){            // cajon de apps
   uint16_t c; dexIcoChip(x, y, s, on, c);
@@ -7435,11 +7674,11 @@ static void dexIcoBell(int x, int y, int s, bool badge){         // notificacion
   fillRoundRect(cx - s / 3, top + s / 2 - 2, 2 * (s / 3), 3, 1, c);
   fillRect(cx - 1, top - 3, 3, 3, c);
   fillCircle(cx, top + s / 2 + 3, 2, c);
-  if(badge) fillCircle(x + s - 5, y + 5, 4, rgb565(235,80,80));
+  if(badge) fillCircle(x + s - 5, y + 5, 4, TH_ERR);          // punto de aviso: color de ESTADO
 }
 static void dexIcoGear(int x, int y, int s, bool on){            // ajustes rapidos
   uint16_t c; dexIcoChip(x, y, s, on, c);
-  uint16_t bg = on ? DEX_ACCENT : (gDark ? rgb565(44,50,66) : rgb565(224,229,240));
+  uint16_t bg = on ? DEX_ACCENT : TH_SURF2;
   int cx = x + s / 2, cy = y + s / 2, r = s / 4;
   fillCircle(cx, cy, r, c);
   fillCircle(cx, cy, r / 2, bg);
@@ -7474,9 +7713,9 @@ static void dexWinButtons(int i, int x, int y, int w, bool active){
   uint16_t fg = active ? DEX_TXT_HI : DEX_TXT_LO;
   for(int k = 0; k < 3; k++){
     int bx, by, bw, bh; dexWinBtnRect(x, y, w, k, bx, by, bw, bh);
-    if(k == 2) fillRoundRectA(bx, by, bw, bh, 5, rgb565(226,76,76), active ? 200 : 90);
+    if(k == 2) fillRoundRectA(bx, by, bw, bh, 5, TH_DANGER, active ? 200 : 90);   // cerrar: accion destructiva
     int cx = bx + bw / 2, cy = by + bh / 2;
-    uint16_t c = (k == 2) ? rgb565(255,255,255) : fg;
+    uint16_t c = (k == 2) ? TH_ONACC : fg;
     if(k == 0){                                                  // minimizar
       fillRect(cx - 5, cy + 3, 11, 2, c);
     } else if(k == 1){                                           // maximizar / restaurar
@@ -7914,7 +8153,7 @@ static void dexWinContent(int i, int app, int x, int y, int w, int h, bool activ
 static void dexDrawWindow(int i, int x, int y, int w, int h, bool active){
   if(w < 20 || h < 20 || dexCull(x, w)) return;
   int rad = 14; if(2 * rad > w) rad = w / 2; if(2 * rad > h) rad = h / 2;
-  fillRoundRectA(x + 3, y + 6, w, h, rad, rgb565(4,6,12), active ? 100 : 62);    // sombra
+  fillRoundRectA(x + 3, y + 6, w, h, rad, TH_SHADOW, active ? 100 : 62);         // sombra
   dexSurface(x, y, w, h, rad, DEX_WIN_BG);                                       // cuerpo
   uint16_t tc = active ? DEX_TTL_ACT : DEX_TTL_INA;                              // barra de titulo
   int th = DEX_TTL_H; if(th > h) th = h;
@@ -7929,7 +8168,7 @@ static void dexDrawWindow(int i, int x, int y, int w, int h, bool active){
   }
   dexWinContent(i, pwins[i].app, x + 1, y + th, w - 2, h - th - 1, active);
   // Ventana inactiva: velo sutil (la "transicion de opacidad" activa/inactiva).
-  if(!active) fillRoundRectA(x, y, w, h, rad, gDark ? rgb565(0,0,0) : rgb565(20,26,44), 34);
+  if(!active) fillRoundRectA(x, y, w, h, rad, TH_SCRIM, 34);
 }
 // Version simplificada para abrir/cerrar/minimizar: crece o encoge con fundido.
 // A proposito NO pinta el contenido -- seria tirar trabajo a la basura en cada
@@ -7937,7 +8176,7 @@ static void dexDrawWindow(int i, int x, int y, int w, int h, bool active){
 static void dexDrawWinAnim(int x, int y, int w, int h, int app, uint8_t a){
   if(w < 6 || h < 6 || dexCull(x, w)) return;
   int rad = 14; if(2 * rad > w) rad = w / 2; if(2 * rad > h) rad = h / 2;
-  fillRoundRectA(x + 2, y + 4, w, h, rad, rgb565(4,6,12), (uint8_t)(a * 70 / 255));
+  fillRoundRectA(x + 2, y + 4, w, h, rad, TH_SHADOW, (uint8_t)(a * 70 / 255));
   fillRoundRectA(x, y, w, h, rad, DEX_WIN_BG, a);
   int th = DEX_TTL_H * h / 260; if(th < 6) th = 6;
   if(th > DEX_TTL_H) th = DEX_TTL_H;
@@ -7952,9 +8191,9 @@ static void dexDrawGhost(){                          // contorno fantasma del sn
   if(dexSnapGhost == SNAP_FREE) return;
   int x, y, w, h; dexSnapRect(dexSnapGhost, x, y, w, h);
   if(dexCull(x, w)) return;
-  fillRoundRectA(x + 6, y + 6, w - 12, h - 12, 16, rgb565(190,214,255), 70);
-  drawRoundRect(x + 6, y + 6, w - 12, h - 12, 16, rgb565(150,192,255));
-  drawRoundRect(x + 7, y + 7, w - 14, h - 14, 15, rgb565(118,168,250));
+  fillRoundRectA(x + 6, y + 6, w - 12, h - 12, 16, mix565(TH_PRIM, TH_SURF, 150), 70);
+  drawRoundRect(x + 6, y + 6, w - 12, h - 12, 16, mix565(TH_PRIM, TH_SURF, 110));
+  drawRoundRect(x + 7, y + 7, w - 14, h - 14, 15, TH_PRIM);
 }
 // Se conserva la firma original (PWin*): es la razon por la que el tipo PWin vive
 // arriba del todo del archivo (ver el comentario de los tipos).
@@ -8082,7 +8321,7 @@ static bool dexPopupFrame(int &x, int &y, int w, int h, int rad){
   if(p >= 0.999f){
     x = (LW - w) / 2; y = (dexWorkBottom() - h) / 2;
     if(dexCull(x, w)) return false;
-    fillRoundRectA(x + 4, y + 8, w, h, rad, rgb565(4,6,12), 110);
+    fillRoundRectA(x + 4, y + 8, w, h, rad, TH_SHADOW, 110);
     dexSurface(x, y, w, h, rad, DEX_PANEL);
     return true;
   }
@@ -8092,7 +8331,7 @@ static bool dexPopupFrame(int &x, int &y, int w, int h, int rad){
   x = ax; y = ay;
   if(dexCull(ax, aw)) return false;
   uint8_t a = (uint8_t)(235 * p);
-  fillRoundRectA(ax + 4, ay + 8, aw, ah, rad, rgb565(4,6,12), (uint8_t)(90 * p));
+  fillRoundRectA(ax + 4, ay + 8, aw, ah, rad, TH_SHADOW, (uint8_t)(90 * p));
   fillRoundRectA(ax, ay, aw, ah, rad, DEX_PANEL, a);
   return false;
 }
@@ -8201,7 +8440,7 @@ static void dexNotifDraw(){
   if(dexCull(nx, nw)) return;
   int visH = (int)(nh * p);                       // cortina: se despliega hacia abajo
   if(visH < 8) return;
-  fillRoundRectA(nx + 4, ny + 6, nw, visH, 18, rgb565(4,6,12), (uint8_t)(110 * p));
+  fillRoundRectA(nx + 4, ny + 6, nw, visH, 18, TH_SHADOW, (uint8_t)(110 * p));
   if(p < 0.999f){                                 // aun desplegandose: solo la caja
     fillRoundRectA(nx, ny, nw, visH, 18, DEX_PANEL, (uint8_t)(255 * p));
     return;
@@ -8212,7 +8451,7 @@ static void dexNotifDraw(){
     int x, y, w, h; dexNpTile(i, nx, ny, x, y, w, h);
     bool on = dexNpState(i);
     fillRoundRect(x, y, w, h, 12, on ? DEX_ACCENT : DEX_PANEL2);
-    uint16_t tc = on ? rgb565(255,255,255) : DEX_TXT_HI;
+    uint16_t tc = on ? TH_ONACC : DEX_TXT_HI;
     fillCircle(x + 20, y + 20, 8, tc);
     fillCircle(x + 20, y + 20, on ? 3 : 5, on ? DEX_ACCENT : DEX_PANEL2);
     dexTextFit(x + 10, y + 36, dexNpLabel(i), 1, tc, w - 20);
@@ -8238,8 +8477,8 @@ static void dexNotifDraw(){
     ly += 48;
   }
   int ey = dexNpExitY(ny, nh);
-  fillRoundRect(nx + 12, ey, nw - 24, DEX_NP_EXIT_H, 12, rgb565(180,60,60));
-  drawTextC(nx + nw / 2, ey + DEX_NP_EXIT_H / 2 - 8, "Salir de Modo PC", 2, rgb565(255,255,255));
+  fillRoundRect(nx + 12, ey, nw - 24, DEX_NP_EXIT_H, 12, TH_DANGER);        // salir de Modo PC: accion destructiva
+  drawTextC(nx + nw / 2, ey + DEX_NP_EXIT_H / 2 - 8, "Salir de Modo PC", 2, TH_ONACC);
 }
 
 // ---- Recientes (selector de tareas propio de este modo) ----
@@ -8264,10 +8503,10 @@ static void dexRecentsDraw(){
   float p = dexOvProg();
   if(p <= 0.01f) return;
   int dx = 0, dw = LW;
-  if(dexBand(dx, dw)) fillRectA(dx, 0, dw, dexWorkBottom(), rgb565(4,6,14), (uint8_t)(170 * p));
+  if(dexBand(dx, dw)) fillRectA(dx, 0, dw, dexWorkBottom(), TH_SCRIM, (uint8_t)(170 * p));
   int list[4]; int n = dexRecList(list);
   if(n == 0){
-    drawTextC(LW / 2, dexWorkBottom() / 2 - 10, "Sin ventanas abiertas", 3, rgb565(226,232,244));
+    drawTextC(LW / 2, dexWorkBottom() / 2 - 10, "Sin ventanas abiertas", 3, TH_TXT);
     return;
   }
   for(int i = 0; i < n; i++){
@@ -8275,7 +8514,7 @@ static void dexRecentsDraw(){
     if(i == dexRecDrag) y += dexRecDY;
     int w = DEX_REC_W, h = DEX_REC_H;
     if(dexCull(x, w)) continue;
-    fillRoundRectA(x + 3, y + 6, w, h, 14, rgb565(2,4,10), (uint8_t)(120 * p));
+    fillRoundRectA(x + 3, y + 6, w, h, 14, TH_SHADOW, (uint8_t)(120 * p));
     fillRoundRect(x, y, w, h, 14, DEX_WIN_BG);
     drawRoundRect(x, y, w, h, 14, DEX_BORDER);
     fillRoundRect(x, y, w, 24, 14, DEX_TTL_ACT);
@@ -8291,7 +8530,7 @@ static void dexRecentsDraw(){
     strokeSegAA((float)(cx - 4), (float)(cy + 4), (float)(cx + 4), (float)(cy - 4), 1.5f, DEX_TXT_HI);
   }
   drawTextC(LW / 2, dexWorkBottom() - 40,
-            "Arrastra una tarjeta hacia arriba para cerrarla", 1, rgb565(198,206,222));
+            "Arrastra una tarjeta hacia arriba para cerrarla", 1, TH_TXT2);
 }
 
 // ---- Menu contextual ----
@@ -8329,14 +8568,14 @@ static void dexMenuGeom(int &x, int &y, int &w, int &h){
 static void dexMenuDraw(){
   int x, y, w, h; dexMenuGeom(x, y, w, h);
   if(dexCull(x, w)) return;
-  fillRoundRectA(x + 3, y + 5, w, h, 12, rgb565(4,6,12), 120);
+  fillRoundRectA(x + 3, y + 5, w, h, 12, TH_SHADOW, 120);
   dexSurface(x, y, w, h, 12, DEX_PANEL);
   int n = dexMenuCount(dexMenuKind);
   for(int i = 0; i < n; i++){
     int iy = y + 5 + i * DEX_MENU_IH;
     bool danger = (dexMenuKind == 2 && i == 4) || (dexMenuKind == 1 && i == 3);
     dexTextFit(x + 14, iy + 8, dexMenuLabel(dexMenuKind, i), 2,
-               danger ? rgb565(236,110,110) : DEX_TXT_HI, w - 28);
+               danger ? TH_DANGER : DEX_TXT_HI, w - 28);
   }
 }
 
@@ -8348,9 +8587,9 @@ static void dexPadGeom(int &x, int &y, int &w, int &h){
 static void dexPadDraw(){
   int x, y, w, h; dexPadGeom(x, y, w, h);
   if(dexCull(x, w)) return;
-  fillRoundRectA(x, y, w, h, 14, gDark ? rgb565(10,14,24) : rgb565(210,218,232), 190);
+  fillRoundRectA(x, y, w, h, 14, TH_SURF, 190);
   drawRoundRect(x, y, w, h, 14, DEX_BORDER);
-  hLine(x + 10, y + h - 30, w - 20, DEX_BORDER);
+  hLine(x + 10, y + h - 30, w - 20, TH_DIV);          // divisor DENTRO de la superficie
   drawTextC(x + w / 2, y + 12, "Touchpad", 1, DEX_TXT_LO);
   drawTextC(x + w / 2, y + h - 22, "Toca = clic · Manten = menu", 1, DEX_TXT_LO);
 }
@@ -8376,6 +8615,9 @@ static uint8_t dexCursorShape(){
 static void dexCursorDraw(){
   int x = dexCurX, y = dexCurY;
   if(dexCull(x - 8, 26)) return;
+  // CURSOR del touchpad: blanco con contorno negro, en las dos apariencias. Es la
+  // unica combinacion que se ve sobre cualquier cosa que haya debajo (wallpaper,
+  // ventana clara, ventana oscura, una app hospedada). Requisito grafico.
   uint16_t W = rgb565(255,255,255), K = rgb565(24,28,38);
   uint8_t sh = dexCursorShape();
   if(sh == 2){                                    // cursor de texto
@@ -8632,8 +8874,10 @@ static bool dexNotifTouch(){
   for(int i = 0; i < 4; i++){
     int x, y, w, h; dexNpTile(i, nx, ny, x, y, w, h);
     if(pTap && dexInBox(pX, pY, x, y, w, h)){
-      if(i == 0){ uiGlass = !uiGlass; cfgSavePrefs(); gHomeDirty = true; }
-      else if(i == 1){ gDark = !gDark; cfgSavePrefs(); gHomeDirty = true; }
+      // Material y apariencia son ORTOGONALES: cada uno cambia su flag y pasa
+      // por el mismo themeChanged() que Ajustes (NVS + invalidacion de caches).
+      if(i == 0){ uiGlass = !uiGlass; themeChanged(); }
+      else if(i == 1){ gDark = !gDark; themeChanged(); }
       else if(i == 2){ dexTbAuto = !dexTbAuto; if(dexTbAuto) dexTbIdle = millis(); else dexTbShow(); dexClampAll(); }
       else { dexPadOn = !dexPadOn; if(dexPadOn){ dexCurX = LW / 2; dexCurY = LH / 2 - 40; } }
       dexMarkAll(); dexDirty = true; return true;
@@ -9039,23 +9283,28 @@ static void qsTileIcon(int idx, int cx, int cy, uint16_t col){
 static void qsCircleBtn(int idx, int cx, int cy){
   int d = QS_CIRC_D, x = cx - d / 2, y = cy - d / 2;
   bool danger = (idx == 6);                                                // Apagar: acento rojo, como en iOS/Android
-  fillRoundRectA(x + 2, y + 3, d, d, d / 2, rgb565(0,0,0), 55);            // sombra sutil
-  if(uiGlass) drawLiquidGlassPanel(x, y, d, d, d / 2, danger ? rgb565(96,44,50) : rgb565(56,62,86));
-  else fillRoundRect(x, y, d, d, d / 2, danger ? rgb565(72,32,38) : rgb565(38,42,56));
-  drawRoundRect(x, y, d, d, d / 2, danger ? rgb565(190,90,90) : rgb565(90,98,120));   // borde sutil
-  qsTileIcon(idx, cx, cy - 10, danger ? rgb565(255,120,110) : rgb565(220,224,236));
+  // El circulo "Apagar" conserva su significado destructivo en las dos
+  // apariencias: se tine con TH_DANGER en vez de con un rojo fijo.
+  uint16_t face = danger ? mix565(thCard2(), TH_DANGER, 70) : thCard2();
+  fillRoundRectA(x + 2, y + 3, d, d, d / 2, TH_SHADOW, 55);                // sombra sutil
+  if(uiGlass) drawLiquidGlassPanel(x, y, d, d, d / 2, face);
+  else fillRoundRect(x, y, d, d, d / 2, face);
+  drawRoundRect(x, y, d, d, d / 2, danger ? TH_DANGER : TH_BORDER);        // borde sutil
+  qsTileIcon(idx, cx, cy - 10, danger ? TH_DANGER : TH_TXT);
   const char* lab = idx == 3 ? "Modo PC" : idx == 6 ? "Apagar" : "Ajustes";
-  drawTextC(cx, cy + 20, lab, 1, danger ? rgb565(240,170,170) : rgb565(190,196,212));
+  drawTextC(cx, cy + 20, lab, 1, danger ? TH_DANGER : TH_TXT2);
 }
 // Pastilla ancha de toggle (Ahorro Ultra -- el unico toggle real que queda).
 static void qsTogglePill(int x, int y, int w, int h, bool on){
-  fillRoundRectA(x + 2, y + 4, w, h, h / 2, rgb565(0,0,0), 55);
-  if(uiGlass) drawLiquidGlassPanel(x, y, w, h, h / 2, on ? rgb565(255,150,40) : rgb565(56,62,86));
-  else fillRoundRect(x, y, w, h, h / 2, on ? rgb565(210,110,20) : rgb565(38,42,56));
-  drawRoundRect(x, y, w, h, h / 2, on ? rgb565(255,190,110) : rgb565(90,98,120));
-  qsTileIcon(4, x + h / 2, y + h / 2, rgb565(255,255,255));
-  drawText(x + h + 12, y + 14, "Ahorro Ultra", 2, rgb565(255,255,255));
-  drawText(x + h + 12, y + 40, on ? "Activado - 160 MHz" : "Desactivado - 360 MHz", 1, rgb565(220,224,236));
+  // Encendido = ambar de ADVERTENCIA (el ahorro limita la CPU): estado, no
+  // decoracion, asi que se toma de la paleta. Apagado = track de switch.
+  fillRoundRectA(x + 2, y + 4, w, h, h / 2, TH_SHADOW, 55);
+  if(uiGlass) drawLiquidGlassPanel(x, y, w, h, h / 2, on ? TH_WARN : thCard2());
+  else fillRoundRect(x, y, w, h, h / 2, on ? TH_WARN : TH_TRACK);
+  drawRoundRect(x, y, w, h, h / 2, on ? TH_WARN : TH_BORDER);
+  qsTileIcon(4, x + h / 2, y + h / 2, on ? TH_ONACC : TH_TXT);
+  drawText(x + h + 12, y + 14, "Ahorro Ultra", 2, on ? TH_ONACC : TH_TXT);
+  drawText(x + h + 12, y + 40, on ? "Activado - 160 MHz" : "Desactivado - 360 MHz", 1, on ? TH_ONACC : TH_TXT2);
 }
 static uint16_t* qsBuf = NULL;      // cortina precompuesta (para arrastre fluido)
 static int  qsLastY = 0;
@@ -9063,13 +9312,13 @@ static int  qsLastY = 0;
 
 // dibuja titulo + tiles + etiqueta y pista del slider en el gBuf actual (sin relleno/perilla)
 static void qsDrawContent(){
-  drawText(24, 40, "Ajustes r\xC3\xA1pidos", 3, rgb565(240,244,252));
+  drawText(24, 40, "Ajustes r\xC3\xA1pidos", 3, TH_TXT);
   // Brillo: pista de la capsula vertical (el relleno ambar es dinamico, se
   // pinta cada frame en qsRender porque cambia con el arrastre / PWM real)
-  fillRoundRectA(QS_CAP_X + 3, QS_CAP_Y + 5, QS_CAP_W, QS_CAP_H, QS_CAP_R, rgb565(0,0,0), 55);
-  if(uiGlass) drawLiquidGlassPanel(QS_CAP_X, QS_CAP_Y, QS_CAP_W, QS_CAP_H, QS_CAP_R, rgb565(40,46,64));
-  else fillRoundRect(QS_CAP_X, QS_CAP_Y, QS_CAP_W, QS_CAP_H, QS_CAP_R, rgb565(32,36,50));
-  drawRoundRect(QS_CAP_X, QS_CAP_Y, QS_CAP_W, QS_CAP_H, QS_CAP_R, rgb565(80,86,106));
+  fillRoundRectA(QS_CAP_X + 3, QS_CAP_Y + 5, QS_CAP_W, QS_CAP_H, QS_CAP_R, TH_SHADOW, 55);
+  if(uiGlass) drawLiquidGlassPanel(QS_CAP_X, QS_CAP_Y, QS_CAP_W, QS_CAP_H, QS_CAP_R, TH_GLASS2);
+  else fillRoundRect(QS_CAP_X, QS_CAP_Y, QS_CAP_W, QS_CAP_H, QS_CAP_R, TH_TRACK);
+  drawRoundRect(QS_CAP_X, QS_CAP_Y, QS_CAP_W, QS_CAP_H, QS_CAP_R, TH_BORDER);
   // Modo PC / Ajustes: columna de 2 circulos (acciones reales)
   qsCircleBtn(3, QS_CIRC_CX, QS_CIRC_CY(0));
   qsCircleBtn(5, QS_CIRC_CX, QS_CIRC_CY(1));
@@ -9087,11 +9336,16 @@ static void qsCompose(){
   setBuf(qsBuf);
   int c0 = gClipY0, c1 = gClipY1; gClipY0 = 0; gClipY1 = SCR_H - 1;
   if(uiGlass){
-    drawLiquidGlassPanelEx(0, 0, SCR_W, SCR_H, 0, rgb565(26,34,60), 11);   // cortina Liquid Glass (blur mas fuerte que el resto del sistema; ver drawLiquidGlassPanelEx)
-    fillRectA(0, 0, SCR_W, SCR_H, rgb565(12,14,24), 140);                       // oscurecer para legibilidad (sin tocar: preserva el contraste ya afinado)
+    // Cortina Liquid Glass sobre el escritorio. El tinte y el velo salen de la
+    // paleta activa, asi que en tema claro queda una cortina clara (con texto
+    // oscuro) y en oscuro la de siempre. El velo va a 140/234 justo para que la
+    // superficie quede casi al color de pagina: es lo que garantiza el
+    // contraste del texto sin depender del wallpaper que haya debajo.
+    drawLiquidGlassPanelEx(0, 0, SCR_W, SCR_H, 0, TH_GLASS2, 11);
+    fillRectA(0, 0, SCR_W, SCR_H, TH_PAGE, 140);
   } else {
-    fillRectA(0, 0, SCR_W, SCR_H, rgb565(14,16,26), 234);                       // glassmorphism plano
-    fillRectA(0, 0, SCR_W, 130, rgb565(30,42,74), 46);                          // tinte superior
+    fillRectA(0, 0, SCR_W, SCR_H, TH_PAGE, 234);                                // glassmorphism plano
+    fillRectA(0, 0, SCR_W, 130, TH_SURF2, 46);                                  // tinte superior
   }
   qsDrawContent();
   gClipY0 = c0; gClipY1 = c1;
@@ -9124,29 +9378,33 @@ static void qsRender(){
       float p = 1.0f - (float)e / QS_FLASH_DUR_MS;                    // se desvanece
       uint8_t a = (uint8_t)(120 * p);
       if(qsFlashIdx == 4){
-        if(QS_PILL_Y < py) fillRoundRectA(QS_PILL_X, QS_PILL_Y, QS_PILL_W, QS_PILL_H, QS_PILL_R, rgb565(255,255,255), a);
+        if(QS_PILL_Y < py) fillRoundRectA(QS_PILL_X, QS_PILL_Y, QS_PILL_W, QS_PILL_H, QS_PILL_R, TH_TXT, a);
       } else {
         int ci = qsFlashIdx == 5 ? 1 : qsFlashIdx == 6 ? 2 : 0;        // 3->0, 5->1, 6->2
         int cy = QS_CIRC_CY(ci);
-        if(cy - QS_CIRC_R < py) fillRoundRectA(QS_CIRC_CX - QS_CIRC_R, cy - QS_CIRC_R, QS_CIRC_D, QS_CIRC_D, QS_CIRC_R, rgb565(255,255,255), a);
+        if(cy - QS_CIRC_R < py) fillRoundRectA(QS_CIRC_CX - QS_CIRC_R, cy - QS_CIRC_R, QS_CIRC_D, QS_CIRC_D, QS_CIRC_R, TH_TXT, a);
       }
     } else qsFlashIdx = -1;
   }
   // Brillo: relleno ambar dinamico (cambia con el arrastre / PWM real) + icono + %
   if(QS_CAP_Y < py){
     int fillH = QS_CAP_H * gBright / 100;
+    // El relleno ambar del brillo es funcional (representa "cuanta luz hay"),
+    // como el amarillo del sol: se conserva en las dos apariencias.
     if(fillH > 0) fillRoundRect(QS_CAP_X, QS_CAP_Y + QS_CAP_H - fillH, QS_CAP_W, fillH, QS_CAP_R, rgb565(255,190,40));
     drawSetCatIcon(1, QS_CAP_X + QS_CAP_W / 2 - 14, QS_CAP_Y + QS_CAP_H - 44, 28, rgb565(70,50,10));   // sol: casi siempre cae sobre el relleno
     char pb[8]; snprintf(pb, sizeof(pb), "%d%%", gBright);
-    drawTextC(QS_CAP_X + QS_CAP_W / 2, QS_CAP_Y + QS_CAP_H - 74, pb, 2, gBright >= 25 ? rgb565(70,50,10) : rgb565(255,255,255));
+    // Con el relleno alto el % cae SOBRE el ambar (marron oscuro fijo, legible
+    // en los dos temas); con el relleno bajo cae sobre el track -> texto del tema.
+    drawTextC(QS_CAP_X + QS_CAP_W / 2, QS_CAP_Y + QS_CAP_H - 74, pb, 2, gBright >= 25 ? rgb565(70,50,10) : TH_TXT);
   }
   gClipY0 = oCY0; gClipY1 = oCY1; gClipX0 = oCX0; gClipX1 = oCX1;      // fin del recorte a la cortina
   int shY = py, shEnd = shY + 18; if(shEnd > maxY) shEnd = maxY;       // sombra suave bajo el borde movil de la cortina
   for(int yy = shY; yy < shEnd; yy++){
     uint8_t a = (uint8_t)(70 * (1.0f - (float)(yy - shY) / 18.0f));
-    if(a > 0) hLineA(0, yy, SCR_W, rgb565(0,0,0), a);
+    if(a > 0) hLineA(0, yy, SCR_W, TH_SHADOW, a);
   }
-  fillRoundRect(SCR_W / 2 - 28, py - 14, 56, 5, 2, rgb565(180,185,200));
+  fillRoundRect(SCR_W / 2 - 28, py - 14, 56, 5, 2, TH_MUTE);          // tirador de la cortina
   present(0, maxY);
   qsLastY = py;
 }
@@ -9353,36 +9611,36 @@ static void vidBlit(){                 // vuelca el buffer FRONT al area de rend
 static void vidDrawSeek(){
   int sbx = 24, sby = 434, sbw = SCR_W - 48;
   setBuf(fb);
-  fillRoundRect(sbx, sby, sbw, 8, 4, rgb565(50,54,68));
-  fillRoundRect(sbx, sby, sbw * vidFrame / VID_TOTAL, 8, 4, rgb565(80,160,240));
-  fillCircle(sbx + sbw * vidFrame / VID_TOTAL, sby + 4, 10, rgb565(255,255,255));
+  fillRoundRect(sbx, sby, sbw, 8, 4, TH_TRACK);
+  fillRoundRect(sbx, sby, sbw * vidFrame / VID_TOTAL, 8, 4, TH_PRIM);
+  fillCircle(sbx + sbw * vidFrame / VID_TOTAL, sby + 4, 10, TH_TXT);
   char tc[24]; snprintf(tc, sizeof(tc), "%d / %d", vidFrame, VID_TOTAL);
-  fillRect(sbx, sby + 18, 160, 20, rgb565(10,12,18));
-  drawText(sbx, sby + 18, tc, 2, rgb565(150,158,180));
+  fillRect(sbx, sby + 18, 160, 20, TH_PAGE);
+  drawText(sbx, sby + 18, tc, 2, TH_TXT2);
   flxFlush(sby - 12, sby + 40);
 }
 static void vidDrawControls(){
   setBuf(fb);
   int pcx = SCR_W / 2, pcy = 366;
-  fillCircle(pcx, pcy, 30, rgb565(50,110,235));           // play/pausa
-  if(vidPlaying){ fillRect(pcx - 9, pcy - 12, 6, 24, rgb565(255,255,255)); fillRect(pcx + 3, pcy - 12, 6, 24, rgb565(255,255,255)); }
-  else fillTriangle(pcx - 8, pcy - 12, pcx - 8, pcy + 12, pcx + 12, pcy, rgb565(255,255,255));
+  fillCircle(pcx, pcy, 30, TH_PRIM);                      // play/pausa
+  if(vidPlaying){ fillRect(pcx - 9, pcy - 12, 6, 24, TH_ONACC); fillRect(pcx + 3, pcy - 12, 6, 24, TH_ONACC); }
+  else fillTriangle(pcx - 8, pcy - 12, pcx - 8, pcy + 12, pcx + 12, pcy, TH_ONACC);
   int scx = pcx + 92;
-  fillCircle(scx, pcy, 22, rgb565(60,64,78));             // stop
-  fillRect(scx - 8, pcy - 8, 16, 16, rgb565(230,90,90));
+  fillCircle(scx, pcy, 22, thCard2());                    // stop
+  fillRect(scx - 8, pcy - 8, 16, 16, TH_DANGER);
   flxFlush(pcy - 34, pcy + 34);
 }
 static void vidRenderAll(){
   setBuf(fb);
-  fillRect(0, 0, SCR_W, SCR_H, rgb565(10,12,18));
-  strokeSegAA(30, 26, 18, 18, 2.4f, rgb565(255,255,255));  // back (esq. sup-izq)
-  strokeSegAA(18, 18, 30, 10, 2.4f, rgb565(255,255,255));
-  drawTextC(SCR_W / 2, 14, "Multimedia", 3, rgb565(255,255,255));
-  drawRoundRect(VID_RX - 2, VID_RY - 2, VID_W + 4, VID_H + 4, 6, rgb565(40,44,58));
-  vidBlit();
+  fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
+  strokeSegAA(30, 26, 18, 18, 2.4f, TH_NAV);              // back (esq. sup-izq)
+  strokeSegAA(18, 18, 30, 10, 2.4f, TH_NAV);
+  drawTextC(SCR_W / 2, 14, "Multimedia", 3, TH_TXT);
+  drawRoundRect(VID_RX - 2, VID_RY - 2, VID_W + 4, VID_H + 4, 6, TH_BORDER);
+  vidBlit();                                              // el VIDEO es contenido: no se retine
   vidDrawControls();
   vidDrawSeek();
-  drawTextC(SCR_W / 2, 476, "Fuente: patron de prueba (enchufa SD + MJPEG)", 1, rgb565(120,128,150));
+  drawTextC(SCR_W / 2, 476, "Fuente: patron de prueba (enchufa SD + MJPEG)", 1, TH_MUTE);
   flxFlushAll();
 }
 static void vidEnter(){
@@ -9488,6 +9746,12 @@ static void camRenderPreview(){
     for(int px = 0; px < SCR_W; px++){ int sx = cx0 + px * cw / SCR_W; drow[px] = srow[sx]; }
   }
   setBuf(fb);
+  // EXCEPCION DELIBERADA: el HUD de la Camara vive sobre el VISOR (una imagen
+  // que ocupa toda la pantalla y cuyo color no controla el sistema). Como en
+  // cualquier camara, sus controles son blancos sobre velos negros
+  // semitransparentes: es la unica combinacion legible sea cual sea la escena,
+  // y retenirla con la paleta clara daria texto casi negro sobre la foto.
+  // Igual criterio que el lienzo de Paint o los colores de los juegos.
   if(camNight) fillRectA(0, 0, SCR_W, SCR_H, rgb565(10,20,45), 120);          // modo noche
   if(camExpo > 55) fillRectA(0, 0, SCR_W, SCR_H, rgb565(255,255,255), (camExpo - 55) * 3);
   else if(camExpo < 45) fillRectA(0, 0, SCR_W, SCR_H, rgb565(0,0,0), (45 - camExpo) * 3);
@@ -9714,16 +9978,24 @@ static bool kbSizeCheck(){
 }
 
 // ---- Colores del teclado (Fase E: contraste alto + opacidad + estilo) ----
-// Se resuelven en funcion de gKbHiCon en vez de estar escritos a mano en cada
-// funcion de dibujo, que era lo que hacia imposible anadir un tema.
-static uint16_t kbColKey(){     return gKbHiCon ? rgb565(0,0,0)       : rgb565(52,56,70); }
-static uint16_t kbColKeyTxt(){  return gKbHiCon ? rgb565(255,255,255) : rgb565(240,242,248); }
-static uint16_t kbColFn(){      return gKbHiCon ? rgb565(24,24,24)    : rgb565(66,70,86); }
-static uint16_t kbColFnOn(){    return gKbHiCon ? rgb565(255,210,0)   : rgb565(60,110,235); }
-static uint16_t kbColFnOnTxt(){ return gKbHiCon ? rgb565(0,0,0)       : rgb565(240,242,248); }
-static uint16_t kbColPanel(){   return gKbHiCon ? rgb565(0,0,0)       : rgb565(36,40,58); }
-static uint16_t kbColEdge(){    return gKbHiCon ? rgb565(255,255,255) : rgb565(96,102,124); }
-static uint16_t kbColPress(){   return gKbHiCon ? rgb565(255,210,0)   : rgb565(96,132,235); }
+// Se resuelven aqui, en un solo sitio, en vez de estar escritos a mano en cada
+// funcion de dibujo. Dos ejes INDEPENDIENTES:
+//   · gKbHiCon (Ajustes del teclado -> contraste alto) gana siempre: negro puro
+//     con texto blanco y ambar de foco. Es una ayuda de ACCESIBILIDAD, asi que a
+//     proposito NO sigue la paleta -- su valor es justamente ser extrema.
+//   · si no, salen del TEMA SEMANTICO, o sea que el teclado se aclara u oscurece
+//     con el resto del sistema en vez de quedarse en su gris fijo.
+static uint16_t kbColKey(){     return gKbHiCon ? rgb565(0,0,0)       : TH_KEYFACE; }
+static uint16_t kbColKeyTxt(){  return gKbHiCon ? rgb565(255,255,255) : TH_TXT; }
+static uint16_t kbColFn(){      return gKbHiCon ? rgb565(24,24,24)    : TH_KEYALT; }
+static uint16_t kbColFnOn(){    return gKbHiCon ? rgb565(255,210,0)   : TH_PRIM; }
+static uint16_t kbColFnOnTxt(){ return gKbHiCon ? rgb565(0,0,0)       : TH_ONACC; }
+// Panel: con Liquid Glass el TINTE del tema; plano, el fondo de teclado del tema.
+static uint16_t kbColPanel(){   return gKbHiCon ? rgb565(0,0,0)       : (uiGlass ? TH_GLASS : TH_KEYPANEL); }
+static uint16_t kbColEdge(){    return gKbHiCon ? rgb565(255,255,255) : TH_BORDER; }
+// Tecla PRESIONADA: acento primario mezclado hacia la cara de la tecla, asi
+// destaca sobre ella tanto en oscuro como en claro.
+static uint16_t kbColPress(){   return gKbHiCon ? rgb565(255,210,0)   : mix565(TH_PRIM, TH_KEYFACE, 60); }
 // Tamano de letra de las teclas (Fase E). El sistema de tallas de drawText es
 // entero (1,2,3...), asi que "Tamano de fuente" mueve esa talla, no un factor.
 static int kbFontSize(){ return gKbFontSc == 0 ? 1 : gKbFontSc == 2 ? 3 : 2; }
@@ -10296,7 +10568,7 @@ static int noteTxtBot(){ return kbPanelTop() - 8; }
 static int curSX, curSY, hASX, hASY, hBSX, hBSY, noteMenuX, noteMenuY;
 static void noteDrawText(){
   setBuf(fb);
-  fillRect(8, 48, SCR_W - 16, noteTxtBot() - 48, rgb565(24,26,34));
+  fillRect(8, 48, SCR_W - 16, noteTxtBot() - 48, TH_SURF);       // hoja de la nota
   int x = 18, y = 60, maxX = SCR_W - 18, lh = 26, size = 2;
   float sc = fontSc(size);
   const char* s = noteBuffer; int bi = 0;
@@ -10314,7 +10586,7 @@ static void noteDrawText(){
       if(spellOn && inWord){
         char wtmp[40]; int wn = bi - wsBi; if(wn > 39) wn = 39;
         memcpy(wtmp, noteBuffer + wsBi, wn); wtmp[wn] = 0;
-        if(wsY == y && wn >= 3 && !kbDictHas(wtmp)) for(int px = wsX; px < x; px += 3) fillRect(px, y + lh - 7, 2, 2, rgb565(226,96,96));
+        if(wsY == y && wn >= 3 && !kbDictHas(wtmp)) for(int px = wsX; px < x; px += 3) fillRect(px, y + lh - 7, 2, 2, TH_ERR);
         inWord = false;
       }
       if(bi == noteCur){ curSX = x; curSY = y; } if(bi == noteSelA){ hASX = x; hASY = y; } if(bi == noteSelB){ hBSX = x; hBSY = y; }
@@ -10329,14 +10601,14 @@ static void noteDrawText(){
       else if(!wb && inWord){
         char wtmp[40]; int wn = bi - wsBi; if(wn > 39) wn = 39;
         memcpy(wtmp, noteBuffer + wsBi, wn); wtmp[wn] = 0;
-        if(wsY == y && wn >= 3 && !kbDictHas(wtmp)) for(int px = wsX; px < x; px += 3) fillRect(px, y + lh - 7, 2, 2, rgb565(226,96,96));
+        if(wsY == y && wn >= 3 && !kbDictHas(wtmp)) for(int px = wsX; px < x; px += 3) fillRect(px, y + lh - 7, 2, 2, TH_ERR);
         inWord = false;
       }
     }
     if(bi == noteCur){ curSX = x; curSY = y; } if(bi == noteSelA){ hASX = x; hASY = y; } if(bi == noteSelB){ hBSX = x; hBSY = y; }
-    if(hasSel && bi >= noteSelA && bi < noteSelB) fillRect(x - 1, y - 2, w + 1, lh - 4, rgb565(48,92,168));  // resaltado
+    if(hasSel && bi >= noteSelA && bi < noteSelB) fillRect(x - 1, y - 2, w + 1, lh - 4, TH_SEL);   // resaltado de seleccion
     char one[6]; int n = nb; if(n > 5) n = 5; for(int i = 0; i < n; i++) one[i] = save[i]; one[n] = 0;
-    drawText(x, y, one, size, rgb565(235,238,246));
+    drawText(x, y, one, size, TH_TXT);
     x += w; bi += nb;
   }
   // Ultima palabra del texto. Si el cursor esta justo ahi es que se esta
@@ -10345,21 +10617,21 @@ static void noteDrawText(){
   if(spellOn && inWord && noteCur != bi){
     char wtmp[40]; int wn = bi - wsBi; if(wn > 39) wn = 39;
     memcpy(wtmp, noteBuffer + wsBi, wn); wtmp[wn] = 0;
-    if(wsY == y && wn >= 3 && !kbDictHas(wtmp)) for(int px = wsX; px < x; px += 3) fillRect(px, y + lh - 7, 2, 2, rgb565(226,96,96));
+    if(wsY == y && wn >= 3 && !kbDictHas(wtmp)) for(int px = wsX; px < x; px += 3) fillRect(px, y + lh - 7, 2, 2, TH_ERR);
   }
   if(bi == noteCur){ curSX = x; curSY = y; } if(bi == noteSelA){ hASX = x; hASY = y; } if(bi == noteSelB){ hBSX = x; hBSY = y; }
   if(hasSel){                                       // manijas (gotas arrastrables)
-    vLine(hASX, hASY - 2, 24, rgb565(90,150,240)); fillCircle(hASX, hASY + 24, 7, rgb565(90,150,240));
-    vLine(hBSX, hBSY - 2, 24, rgb565(90,150,240)); fillCircle(hBSX, hBSY + 24, 7, rgb565(90,150,240));
+    vLine(hASX, hASY - 2, 24, TH_PRIM); fillCircle(hASX, hASY + 24, 7, TH_PRIM);
+    vLine(hBSX, hBSY - 2, 24, TH_PRIM); fillCircle(hBSX, hBSY + 24, 7, TH_PRIM);
   } else {
-    fillRect(curSX + 1, curSY - 2, 2, 22, rgb565(90,150,240));   // cursor
+    fillRect(curSX + 1, curSY - 2, 2, 22, TH_PRIM);   // cursor
   }
   if(noteMenu){                                     // menu contextual flotante
     const char* it[4] = { "Cortar", "Copiar", "Pegar", "Todo" };
     int bw = 92, gap = 4, tot = 4 * bw + 3 * gap, mx = (SCR_W - tot) / 2, my = hASY - 44; if(my < 50) my = 50;
     noteMenuX = mx; noteMenuY = my;
-    fillRoundRect(mx - 6, my - 6, tot + 12, 40, 8, rgb565(38,42,56));
-    for(int i = 0; i < 4; i++){ int bx = mx + i * (bw + gap); fillRoundRect(bx, my, bw, 28, 6, rgb565(58,64,84)); drawTextC(bx + bw / 2, my + 7, it[i], 2, rgb565(240,244,252)); }
+    fillRoundRect(mx - 6, my - 6, tot + 12, 40, 8, thCard2());       // menu flotante de seleccion
+    for(int i = 0; i < 4; i++){ int bx = mx + i * (bw + gap); fillRoundRect(bx, my, bw, 28, 6, TH_SURF2); drawTextC(bx + bw / 2, my + 7, it[i], 2, TH_TXT); }
   }
   // FASE G - chip flotante "Copiado": vive DENTRO del area de texto, asi que se
   // borra solo con el siguiente repintado de esta misma banda. Se desvanece en
@@ -10369,8 +10641,8 @@ static void noteDrawText(){
     if(dt < 1200){
       uint8_t a = (dt < 800) ? 230 : (uint8_t)(230 - (dt - 800) * 230 / 400);
       int tw = textW(kbToastTxt, 2) + 34, tx = (SCR_W - tw) / 2, ty = noteTxtBot() - 46;
-      fillRoundRectA(tx, ty, tw, 32, 16, rgb565(28,32,44), a);
-      drawTextCA(SCR_W / 2, ty + 9, kbToastTxt, 2, rgb565(235,240,250), a);
+      fillRoundRectA(tx, ty, tw, 32, 16, thCard2(), a);
+      drawTextCA(SCR_W / 2, ty + 9, kbToastTxt, 2, TH_TXT, a);
     }
   }
   // Se vuelca hasta el borde mismo del panel del teclado: entre el final del
@@ -10472,7 +10744,7 @@ static void kbDrawToolbar(int yoff){
   int y0 = kbToolbarY() + yoff, cy = y0 + 26;
   for(int i = 0; i < KB_TB_N; i++){
     int cx = kbToolX(i);
-    fillCircle(cx, cy, 21, gKbHiCon ? rgb565(24,24,24) : rgb565(52,58,76));
+    fillCircle(cx, cy, 21, kbColKey());
     kbToolIcon(i, cx, cy, kbColKeyTxt());
   }
 }
@@ -10522,7 +10794,7 @@ static void kbDrawChips(int yoff){
   int cw = (SCR_W - 12) / kbChipN;
   for(int i = 0; i < kbChipN; i++){
     int x = 6 + i * cw;
-    if(i > 0) fillRectA(x, y0 + 8, 1, 16, kbColEdge(), 120);
+    if(i > 0) fillRectA(x, y0 + 8, 1, 16, gKbHiCon ? kbColEdge() : TH_DIV, 160);   // divisor entre chips
     drawTextCA(x + cw / 2, y0 + 8, kbChipTxt[i], 2, kbColKeyTxt(), a);
   }
 }
@@ -10542,8 +10814,8 @@ static void noteRenderKeyboard(int yoff){
   //   desenfocaba el desenfoque... por eso empeoraba tecla a tecla.
   //   Con el fondo plano debajo, el vidrio muestrea siempre lo mismo que cuando
   //   se repinta la pantalla entera: identico aspecto, cero acumulacion.
-  fillRect(0, top - 2, SCR_W, SCR_H - (top - 2), rgb565(12,14,20));
-  kbPaintPanel(py, uiGlass ? kbColPanel() : (gKbHiCon ? rgb565(0,0,0) : rgb565(18,20,28)));
+  fillRect(0, top - 2, SCR_W, SCR_H - (top - 2), TH_PAGE);
+  kbPaintPanel(py, kbColPanel());
   kbDrawToolbar(yoff);
   kbDrawChips(yoff);
   int fs = kbFontSize();
@@ -10561,10 +10833,10 @@ static void noteRenderKeyboard(int yoff){
 }
 static void noteRenderAll(){
   setBuf(fb);
-  fillRect(0, 0, SCR_W, SCR_H, rgb565(12,14,20));
-  strokeSegAA(30, 26, 18, 18, 2.4f, rgb565(255,255,255));
-  strokeSegAA(18, 18, 30, 10, 2.4f, rgb565(255,255,255));
-  drawTextC(SCR_W / 2, 14, "Notas", 3, rgb565(255,255,255));
+  fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
+  strokeSegAA(30, 26, 18, 18, 2.4f, TH_NAV);
+  strokeSegAA(18, 18, 30, 10, 2.4f, TH_NAV);
+  drawTextC(SCR_W / 2, 14, "Notas", 3, TH_TXT);
   kbChipsBuild();
   noteDrawText();
   noteRenderKeyboard(0);
@@ -10580,11 +10852,11 @@ static void kbRenderPopup(int cell){
   int py0 = ky - ph - 10;
   kbPopX = px0; kbPopY = py0; kbPopN = n; kbPopW = pw; kbPopG = gap;
   setBuf(fb);
-  fillRoundRect(px0 - 6, py0 - 6, totw + 12, ph + 12, 10, rgb565(40,44,58));
+  fillRoundRect(px0 - 6, py0 - 6, totw + 12, ph + 12, 10, thCard2());     // popup de acentos
   for(int i = 0; i < n; i++){
     int x = px0 + i * (pw + gap);
-    fillRoundRect(x, py0, pw, ph, 8, rgb565(64,68,86));
-    drawTextC(x + pw / 2, py0 + ph / 2 - 12, var[i], 3, rgb565(255,255,255));
+    fillRoundRect(x, py0, pw, ph, 8, kbColKey());
+    drawTextC(x + pw / 2, py0 + ph / 2 - 12, var[i], 3, kbColKeyTxt());
   }
   flxFlush(py0 - 8, ky + KB_KH);
 }
@@ -10644,39 +10916,39 @@ static void clipCardRect(int k, int &x, int &y, int &w, int &h){
 static void clipRenderPanel(){
   clipBuildVis();
   setBuf(fb);
-  fillRect(0, 0, SCR_W, SCR_H, rgb565(12,14,20));
+  fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
   // Cabecera, al espiritu de la captura: icono de teclado a la izquierda, pin y
   // papelera a la derecha.
-  fillRect(0, 0, SCR_W, 64, rgb565(20,23,32));
-  drawRoundRect(14, 22, 26, 20, 4, rgb565(235,238,246));
-  for(int i = 0; i < 3; i++) fillRect(19 + i * 7, 28, 4, 3, rgb565(235,238,246));
-  hLine(20, 36, 14, rgb565(235,238,246));
-  drawText(54, 20, "Portapapeles", 3, rgb565(255,255,255));
+  fillRect(0, 0, SCR_W, 64, thCard());
+  drawRoundRect(14, 22, 26, 20, 4, TH_NAV);
+  for(int i = 0; i < 3; i++) fillRect(19 + i * 7, 28, 4, 3, TH_NAV);
+  hLine(20, 36, 14, TH_NAV);
+  drawText(54, 20, "Portapapeles", 3, TH_TXT);
   { int cx = SCR_W - 96, cy = 32;                                  // pin (filtra fijados)
-    fillCircle(cx, cy, 20, clipFilterPin ? rgb565(60,110,235) : rgb565(40,45,60));
-    fillRect(cx - 2, cy - 2, 4, 12, rgb565(240,242,248));
-    fillRoundRect(cx - 7, cy - 11, 14, 9, 3, rgb565(240,242,248)); }
+    fillCircle(cx, cy, 20, clipFilterPin ? TH_PRIM : TH_SURF2);
+    fillRect(cx - 2, cy - 2, 4, 12, clipFilterPin ? TH_ONACC : TH_TXT);
+    fillRoundRect(cx - 7, cy - 11, 14, 9, 3, clipFilterPin ? TH_ONACC : TH_TXT); }
   { int cx = SCR_W - 42, cy = 32;                                  // papelera (vaciar no fijados)
-    fillCircle(cx, cy, 20, clipAskClear ? rgb565(200,70,70) : rgb565(40,45,60));
-    fillRoundRect(cx - 8, cy - 6, 16, 15, 3, rgb565(240,242,248));
-    fillRect(cx - 10, cy - 9, 20, 3, rgb565(240,242,248));
-    fillRect(cx - 3, cy - 12, 6, 3, rgb565(240,242,248)); }
+    fillCircle(cx, cy, 20, clipAskClear ? TH_DANGER : TH_SURF2);     // vaciar: accion destructiva
+    fillRoundRect(cx - 8, cy - 6, 16, 15, 3, clipAskClear ? TH_ONACC : TH_TXT);
+    fillRect(cx - 10, cy - 9, 20, 3, clipAskClear ? TH_ONACC : TH_TXT);
+    fillRect(cx - 3, cy - 12, 6, 3, clipAskClear ? TH_ONACC : TH_TXT); }
   if(clipAskClear){
-    drawTextC(SCR_W / 2, 74, "Toca otra vez la papelera para vaciar (los fijados se quedan)", 1, rgb565(240,180,120));
+    drawTextC(SCR_W / 2, 74, "Toca otra vez la papelera para vaciar (los fijados se quedan)", 1, TH_WARN);
   } else {
     char sub[64]; snprintf(sub, sizeof(sub), "%d visibles - %d de %d ranuras en uso%s",
                            clipVisN, clipCount(), CLIP_SLOTS, clipFilterPin ? " - filtro: fijadas" : "");
-    drawTextC(SCR_W / 2, 76, sub, 1, rgb565(150,158,178));
+    drawTextC(SCR_W / 2, 76, sub, 1, TH_TXT2);
   }
   if(clipVisN == 0){
-    drawTextC(SCR_W / 2, 300, "Nada copiado todavia", 2, rgb565(150,158,178));
-    drawTextC(SCR_W / 2, 330, "Selecciona texto y toca Copiar", 1, rgb565(110,118,138));
+    drawTextC(SCR_W / 2, 300, "Nada copiado todavia", 2, TH_TXT2);
+    drawTextC(SCR_W / 2, 330, "Selecciona texto y toca Copiar", 1, TH_MUTE);
   }
   for(int k = 0; k < clipVisN && k < 8; k++){
     int x, y, w, h; clipCardRect(k, x, y, w, h);
     int i = clipVis[k];
-    if(uiGlass) drawLiquidGlassPanel(x, y, w, h, 12, rgb565(44,50,68));
-    else fillRoundRect(x, y, w, h, 12, rgb565(34,38,50));
+    if(uiGlass) drawLiquidGlassPanel(x, y, w, h, 12, TH_GLASS);
+    else fillRoundRect(x, y, w, h, 12, TH_SURF);
     // Texto recortado a 3 lineas con elipsis (la ficha no crece: la rejilla es fija)
     const char* s = gClip[i].text;
     int ty = y + 10, lx = x + 10, maxr = x + w - 34, lines = 0;
@@ -10686,18 +10958,18 @@ static void clipRenderPanel(){
       bool last = (s[p + 1] == 0);
       if(textW(ln, 1) > maxr - lx - 6 || lp >= 38 || s[p] == '\n' || last){
         if(!last && lines == 2){ ln[lp > 2 ? lp - 2 : 0] = 0; strncat(ln, "...", sizeof(ln) - strlen(ln) - 1); }
-        drawTextClip(lx, ty, ln, 1, rgb565(228,232,242), maxr);
+        drawTextClip(lx, ty, ln, 1, TH_TXT, maxr);
         ty += 16; lines++; lp = 0; ln[0] = 0;
       }
     }
     { int px2 = x + w - 20, py2 = y + 16;                          // pin de la ficha
-      fillRect(px2 - 2, py2 - 1, 4, 9, gClip[i].pinned ? rgb565(90,170,255) : rgb565(96,102,120));
-      fillRoundRect(px2 - 6, py2 - 9, 12, 8, 2, gClip[i].pinned ? rgb565(90,170,255) : rgb565(96,102,120)); }
+      fillRect(px2 - 2, py2 - 1, 4, 9, gClip[i].pinned ? TH_PRIM : TH_MUTE);
+      fillRoundRect(px2 - 6, py2 - 9, 12, 8, 2, gClip[i].pinned ? TH_PRIM : TH_MUTE); }
     { int px2 = x + w - 20, py2 = y + h - 18;                      // borrar esta ficha
-      strokeSegAA(px2 - 5, py2 - 5, px2 + 5, py2 + 5, 2.0f, rgb565(200,110,110));
-      strokeSegAA(px2 + 5, py2 - 5, px2 - 5, py2 + 5, 2.0f, rgb565(200,110,110)); }
+      strokeSegAA(px2 - 5, py2 - 5, px2 + 5, py2 + 5, 2.0f, TH_DANGER);
+      strokeSegAA(px2 + 5, py2 - 5, px2 - 5, py2 + 5, 2.0f, TH_DANGER); }
   }
-  drawTextC(SCR_W / 2, SCR_H - 44, "Toca una ficha para pegarla en el cursor", 1, rgb565(120,128,148));
+  drawTextC(SCR_W / 2, SCR_H - 44, "Toca una ficha para pegarla en el cursor", 1, TH_MUTE);
   flxFlushAll();
 }
 // Devuelve true si el toque era para el panel (siempre que este abierto).
@@ -10738,9 +11010,9 @@ static void kbDrawMore(){
   kbMoreX = SCR_W - w - 10; kbMoreY = kbToolbarY() - h - 6;
   if(kbMoreY < 60) kbMoreY = 60;
   setBuf(fb);
-  fillRoundRect(kbMoreX, kbMoreY, w, h, 12, rgb565(38,42,56));
+  fillRoundRect(kbMoreX, kbMoreY, w, h, 12, thCard2());          // menu "mas" del teclado
   for(int i = 0; i < KB_MORE_N; i++)
-    drawText(kbMoreX + 14, kbMoreY + 10 + i * 38 + 8, KB_MORE_LBL[i], 2, rgb565(238,242,250));
+    drawText(kbMoreX + 14, kbMoreY + 10 + i * 38 + 8, KB_MORE_LBL[i], 2, TH_TXT);
   flxFlush(kbMoreY - 2, kbMoreY + h + 2);
 }
 static int kbMoreHit(int px, int py){
@@ -10962,7 +11234,7 @@ static bool kbsDragging = false;
 #define KBS_BOT    (SCR_H - 24)
 
 static uint16_t kbsBg(){    return PAGE_BG; }
-static uint16_t kbsCard(){  return uiGlass ? SET_CARD_GLASS : SET_CARD_BG; }
+static uint16_t kbsCard(){  return thCard(); }
 // Fila a todo el ancho, con el mismo lenguaje visual que setRowCard (tarjeta,
 // titulo, valor y chevron). "on" atenua el texto cuando la fila esta apagada
 // por hardware (voz, capturas, haptica).
@@ -10974,8 +11246,10 @@ static int kbsRow(int y, const char* title, const char* val, bool chevron, bool 
   // scroll, tal cual esta configurado.
   if(uiGlass) drawGlassCardFlat(x, y, w, rh - 8, 12, kbsCard(), kbsBg());
   else fillRoundRect(x, y, w, rh - 8, 12, kbsCard());
-  uint16_t tc = enabled ? SET_TXT_HI : SET_TXT_MUTE;
-  uint16_t vc = enabled ? SET_TXT_LO : SET_TXT_MUTE;
+  // Fila DESACTIVADA (funcion que este hardware no puede dar): color de control
+  // desactivado del tema, no un gris fijo.
+  uint16_t tc = enabled ? SET_TXT_HI : TH_DIS;
+  uint16_t vc = enabled ? SET_TXT_LO : TH_DIS;
   drawTextClip(x + 16, y + 8, title, 2, tc, x + w - 28);
   if(val) drawTextClip(x + 16, y + 32, val, 1, vc, x + w - 28);
   if(chevron && enabled){
@@ -10999,7 +11273,7 @@ static const char* kbsOnOff(bool b){ return b ? "Activado" : "Desactivado"; }
 // Es el MISMO teclado (misma geometria, mismos colores, mismo kbCellAt), solo
 // que escribe en el campo enfocado en vez de en una nota.
 static void kbsEditorKb(){
-  kbPaintPanel(KB_Y - 4, uiGlass ? kbColPanel() : rgb565(18,20,28));
+  kbPaintPanel(KB_Y - 4, kbColPanel());
   int fs = kbFontSize();
   for(int r = 0; r < KB_ROWS; r++) for(int c = 0; c < KB_COLS; c++){
     int x = KB_X + c * (KB_KW + KB_GAP), y = KB_Y + r * (KB_KH + KB_GAP);
@@ -11125,14 +11399,14 @@ static void kbsContent(){
       const char* lbl = f == 0 ? "Abreviaci\xC3\xB3n (lo que escribes)" : "Expansi\xC3\xB3n (lo que aparece)";
       drawText(16, fy, lbl, 1, SET_TXT_LO);
       fillRoundRect(12, fy + 18, SCR_W - 24, 42, 10, uiGlass ? SET_CARD_GLASS : SET_CARD_BG);
-      if(kbsScField == f) drawRoundRect(12, fy + 18, SCR_W - 24, 42, 10, rgb565(70,130,240));
+      if(kbsScField == f) drawRoundRect(12, fy + 18, SCR_W - 24, 42, 10, TH_PRIM);   // campo enfocado
       drawTextClip(24, fy + 30, f == 0 ? kbsScA : kbsScE, 2, SET_TXT_HI, SCR_W - 30);
     }
     { int by = KBS_TOP + 160;
-      fillRoundRect(12, by, (SCR_W - 36) / 2, 46, 12, rgb565(60,110,235));
-      drawTextC(12 + (SCR_W - 36) / 4, by + 14, "Guardar", 2, rgb565(255,255,255));
-      fillRoundRect(24 + (SCR_W - 36) / 2, by, (SCR_W - 36) / 2, 46, 12, rgb565(150,60,60));
-      drawTextC(24 + (SCR_W - 36) / 2 + (SCR_W - 36) / 4, by + 14, "Borrar", 2, rgb565(255,255,255)); }
+      fillRoundRect(12, by, (SCR_W - 36) / 2, 46, 12, TH_PRIM);            // accion primaria
+      drawTextC(12 + (SCR_W - 36) / 4, by + 14, "Guardar", 2, TH_ONACC);
+      fillRoundRect(24 + (SCR_W - 36) / 2, by, (SCR_W - 36) / 2, 46, 12, TH_DANGER);   // destructiva
+      drawTextC(24 + (SCR_W - 36) / 2 + (SCR_W - 36) / 4, by + 14, "Borrar", 2, TH_ONACC); }
     kbsEditorKb();
   }
   kbsContentH = (y + kbsScroll) - KBS_TOP + 20;
@@ -11400,11 +11674,11 @@ static int simpBar(int y, const char* label, const char* val, int pct, uint16_t 
   int bx = bxx + pad * 2, bw = bww - pad * 4;
   if(bw < 60){ bx = bxx + pad; bw = bww - 2 * pad; }
   int fs = uiFontFit(label, bw / 2, 2);
-  drawText(bx, y, label, fs, rgb565(225,229,240));
-  drawTextR(bx + bw, y, val, uiFontFit(val, bw / 2, 2), rgb565(180,188,205));
+  drawText(bx, y, label, fs, TH_TXT);
+  drawTextR(bx + bw, y, val, uiFontFit(val, bw / 2, 2), TH_TXT2);
   int barH = bhh / 22; if(barH < 9) barH = 9; if(barH > 20) barH = 20;
   int byr = y + uiLineH(fs) + 6;
-  fillRoundRect(bx, byr, bw, barH, barH / 2, rgb565(48,52,66));
+  fillRoundRect(bx, byr, bw, barH, barH / 2, TH_TRACK);     // track de la barra (apagado)
   if(pct > 0) fillRoundRect(bx, byr, bw * pct / 100, barH, barH / 2, col);
   return byr + barH + uiPad();
 }
@@ -11419,8 +11693,10 @@ static void almEnter(){
   fillRect(bx, by, bw, bh, WIN_BG);
   int pad = uiPad(), gap = uiGap();
   int y = by + pad;
-  y = uiTitle(bx, y, bw, "Almacenamiento", rgb565(255,255,255), uiFontH(bh / 12));
+  y = uiTitle(bx, y, bw, "Almacenamiento", TH_TXT, uiFontH(bh / 12));
   y += gap / 2;
+  // Los tres colores de relleno identifican CADA MEDIO (flash / PSRAM / SD),
+  // como las porciones de un grafico: son datos, no chrome, y no siguen el tema.
   y = simpBar(y, "Flash (sistema)", "~2 / 16 MB", 13, rgb565(90,160,240));
   size_t pf = heap_caps_get_free_size(MALLOC_CAP_SPIRAM), pt = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
   int up = pt > 0 ? (int)(100 - (uint64_t)pf * 100 / pt) : 0;
@@ -11440,9 +11716,9 @@ static void almEnter(){
     const char* vl[3] = { t1, t2, t3 };
     for(int i = 0; i < n; i++){
       int x = bx + pad + i * (cw + g);
-      uiRectA(x, y, cw, chh, uiPad(), rgb565(30,34,46), aSum);
-      uiTextC(x + cw / 2, y + chh / 2 - uiLineH(2) - 8, lb[i], uiFontFit(lb[i], cw - 12, 2), rgb565(150,160,185), aSum);
-      uiTextC(x + cw / 2, y + chh / 2 + 2, vl[i], uiFontFit(vl[i], cw - 12, 3), rgb565(225,232,245), aSum);
+      uiRectA(x, y, cw, chh, uiPad(), thCard(), aSum);
+      uiTextC(x + cw / 2, y + chh / 2 - uiLineH(2) - 8, lb[i], uiFontFit(lb[i], cw - 12, 2), TH_TXT2, aSum);
+      uiTextC(x + cw / 2, y + chh / 2 + 2, vl[i], uiFontFit(vl[i], cw - 12, 3), TH_TXT, aSum);
     }
     y += chh + gap;
   }
@@ -11450,7 +11726,7 @@ static void almEnter(){
   if(aFoot){
     const char* tip = "Inserta una microSD para mas espacio";
     uiTextC(bx + bw / 2, by + bh - pad - uiLineH(2), tip,
-            uiFontFit(tip, bw - 2 * pad, 2), rgb565(140,148,168), aFoot);
+            uiFontFit(tip, bw - 2 * pad, 2), TH_MUTE, aFoot);
   }
   flxFlush(WIN_TOP, WIN_BOT);
 }
@@ -11468,7 +11744,7 @@ static void simpCards(const char* title, const char* items[], int n){
   int pad = uiPad(), gap = uiGap();
   int y0 = by + pad;
   int fsT = uiFontFit(title, bw - 2 * pad, uiFontH(bh / 12));
-  drawTextC(bx + bw / 2, y0, title, fsT, rgb565(255,255,255));
+  drawTextC(bx + bw / 2, y0, title, fsT, TH_TXT);
   y0 += uiLineH(fsT) + gap;
   int cols = (bw - 2 * pad + gap) / (220 + gap); if(cols < 1) cols = 1; if(cols > 3) cols = 3;
   int rows = (n + cols - 1) / cols;
@@ -11483,12 +11759,12 @@ static void simpCards(const char* title, const char* items[], int n){
     int c = i % cols, r = i / cols;
     int x = bx + pad + c * (cw + gap), y = y0 + r * (chh + gap);
     if(y + chh > by + bh) break;                     // nunca fuera del marco
-    if(uiGlass && !gLand) drawLiquidGlassPanel(x, y, cw, chh, rad, rgb565(60,80,150));
-    else fillRoundRect(x, y, cw, chh, rad, rgb565(40,44,58));
+    if(uiGlass && !gLand) drawLiquidGlassPanel(x, y, cw, chh, rad, TH_GLASS);
+    else fillRoundRect(x, y, cw, chh, rad, TH_SURF);
     int fsI = uiFontFit(items[i], cw - 2 * pad, uiFontH(chh / 2));
     int ty = aSub ? (y + chh / 2 - uiLineH(fsI)) : (y + chh / 2 - uiLineH(fsI) / 2);
-    drawText(x + pad, ty, items[i], fsI, rgb565(255,255,255));
-    if(aSub) uiText(x + pad, ty + uiLineH(fsI) + 4, "Proximamente", 1, rgb565(150,158,180), aSub);
+    drawText(x + pad, ty, items[i], fsI, TH_TXT);
+    if(aSub) uiText(x + pad, ty + uiLineH(fsI) + 4, "Proximamente", 1, TH_TXT2, aSub);
   }
   flxFlush(WIN_TOP, WIN_BOT);
 }
@@ -13469,7 +13745,7 @@ static void navEnter(){
   int pad = uiPad(), gap = uiGap();
   int y = by + pad;
   int fsT = uiFontFit("Navegador", bw - 2 * pad, uiFontH(bh / 12));
-  drawTextC(bx + bw / 2, y, "Navegador", fsT, rgb565(255,255,255));
+  drawTextC(bx + bw / 2, y, "Navegador", fsT, TH_TXT);
   y += uiLineH(fsT) + gap;
   uint8_t aTabs = uiSection(0, bw >= 360);
   if(aTabs){
@@ -13478,16 +13754,16 @@ static void navEnter(){
     const char* tabs[3] = { "Inicio", "Marcadores", "Historial" };
     for(int i = 0; i < nt; i++){
       int x = bx + pad + i * (tw + gap);
-      uiRectA(x, y, tw, thh, thh / 3, i == 0 ? rgb565(58,86,150) : rgb565(34,38,50), aTabs);
+      uiRectA(x, y, tw, thh, thh / 3, i == 0 ? TH_SEL : thCard(), aTabs);      // pestana activa = seleccion
       uiTextC(x + tw / 2, y + thh / 2 - uiLineH(2) / 2, tabs[i],
-              uiFontFit(tabs[i], tw - 10, 2), rgb565(225,232,245), aTabs);
+              uiFontFit(tabs[i], tw - 10, 2), TH_TXT, aTabs);
     }
     y += thh + gap;
   }
   int barH = bh / 10; if(barH < 26) barH = 26; if(barH > 48) barH = 48;
-  fillRoundRect(bx + pad, y, bw - 2 * pad, barH, barH / 3, rgb565(240,242,248));
+  fillRoundRect(bx + pad, y, bw - 2 * pad, barH, barH / 3, TH_SURF);           // barra de direcciones
   drawText(bx + pad * 2, y + barH / 2 - uiLineH(2) / 2, "https://",
-           uiFontFit("https://", bw - 4 * pad, 2), rgb565(120,126,140));
+           uiFontFit("https://", bw - 4 * pad, 2), TH_MUTE);
   y += barH + gap;
   int rest = (by + bh) - y - pad;
   uint8_t aGlobe = uiSection(1, rest >= 120);
@@ -13495,7 +13771,7 @@ static void navEnter(){
   if(aGlobe){
     int rr = (rest - 40) / 2; if(rr > bw / 4) rr = bw / 4; if(rr > 70) rr = 70;
     cy = y + rr + 6;
-    uint16_t gc = mix565(WIN_BG, rgb565(80,120,200), aGlobe);
+    uint16_t gc = mix565(WIN_BG, TH_PRIM, aGlobe);
     drawCircle(bx + bw / 2, cy, rr, gc); drawCircle(bx + bw / 2, cy, rr - 1, gc);
     vLine(bx + bw / 2, cy - rr, 2 * rr, gc);
     hLine(bx + bw / 2 - rr, cy, 2 * rr, gc);
@@ -13504,7 +13780,7 @@ static void navEnter(){
   const char* st = "Sin conexi\xC3\xB3n - modo offline";
   int fy = by + bh - pad - uiLineH(2);
   if(fy < y) fy = y;
-  drawTextC(bx + bw / 2, fy, st, uiFontFit(st, bw - 2 * pad, 2), rgb565(160,168,188));
+  drawTextC(bx + bw / 2, fy, st, uiFontFit(st, bw - 2 * pad, 2), TH_TXT2);
   flxFlush(WIN_TOP, WIN_BOT);
 }
 // #############################################################
@@ -13562,11 +13838,11 @@ static void drawModuleIcon(ModuleType type, int x, int y, int S);
 static void ideEnter(){
   setBuf(fb);
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
-  fillRect(bx, by, bw, bh, rgb565(20,22,30));
+  fillRect(bx, by, bw, bh, TH_WIN);
   int pad = uiPad(), gap = uiGap();
   int y = by + pad;
   int fsT = uiFontFit("Code IDE", bw - 2 * pad, uiFontH(bh / 12));
-  drawTextC(bx + bw / 2, y, "Code IDE", fsT, rgb565(255,255,255));
+  drawTextC(bx + bw / 2, y, "Code IDE", fsT, TH_TXT);
   y += uiLineH(fsT) + gap;
   int sideW = bw / 4; if(sideW > 190) sideW = 190;
   uint8_t aSide = uiSection(0, bw >= 470);
@@ -13583,26 +13859,28 @@ static void ideEnter(){
     int ly = y + i * lineH;
     if(ly + lineH > codeBot) break;
     char ln[8]; snprintf(ln, sizeof(ln), "%2d", i + 1);
-    drawText(bx + pad, ly, ln, fsC, rgb565(90,96,112));
+    drawText(bx + pad, ly, ln, fsC, TH_MUTE);                        // numero de linea
+    // El COLOR DEL CODIGO es resaltado de sintaxis: es contenido del editor y
+    // se conserva igual en las dos apariencias (como en cualquier IDE).
     drawText(bx + pad + gut, ly, code[i], uiFontFit(code[i], codeW - gut, fsC), rgb565(150,220,180));
   }
   if(aSide){
     int sx = bx + pad + codeW + gap;
-    uiRectA(sx, y, sideW, codeBot - y, pad, rgb565(26,29,40), aSide);
-    uiTextC(sx + sideW / 2, y + pad, "Simbolos", uiFontFit("Simbolos", sideW - 12, 2), rgb565(150,160,190), aSide);
+    uiRectA(sx, y, sideW, codeBot - y, pad, thCard(), aSide);
+    uiTextC(sx + sideW / 2, y + pad, "Simbolos", uiFontFit("Simbolos", sideW - 12, 2), TH_TXT2, aSide);
     const char* sym[3] = { "setup()", "loop()", "FlexOS.h" };
     int syy = y + pad + uiLineH(2) + gap;
     for(int i = 0; i < 3; i++){
-      uiText(sx + pad, syy, sym[i], uiFontFit(sym[i], sideW - 2 * pad, 2), rgb565(200,215,235), aSide);
+      uiText(sx + pad, syy, sym[i], uiFontFit(sym[i], sideW - 2 * pad, 2), TH_TXT, aSide);
       syy += uiLineH(2) + 6;
     }
   }
   hwWizardActive = false; hwSelModule = -1; hwCopied = false;
   int bwn = bw - 2 * pad; if(bwn > 320) bwn = 320;
   int bxn = bx + (bw - bwn) / 2, byn = by + bh - pad - btnH;
-  fillRoundRect(bxn, byn, bwn, btnH, btnH / 4, rgb565(60,110,235));
+  fillRoundRect(bxn, byn, bwn, btnH, btnH / 4, TH_PRIM);
   drawTextC(bx + bw / 2, byn + btnH / 2 - uiLineH(2), "Asistente de Hardware",
-            uiFontFit("Asistente de Hardware", bwn - 12, 3), rgb565(255,255,255));
+            uiFontFit("Asistente de Hardware", bwn - 12, 3), TH_ONACC);
   flxFlush(WIN_TOP, WIN_BOT);
 }
 
@@ -13646,35 +13924,35 @@ static void hwDrawWizard(){
 
   if(hwSelModule < 0){
     // ---- Vista LISTA ----
-    drawTextC(SCR_W / 2, WIN_TOP + 16, "Asistente de Hardware", 3, rgb565(255, 255, 255));
+    drawTextC(SCR_W / 2, WIN_TOP + 16, "Asistente de Hardware", 3, TH_TXT);
     int idxs[MAX_MODULES_DETECTED];
     int nc = hwActiveList(idxs, MAX_MODULES_DETECTED);
     if(nc == 0){
-      drawTextC(SCR_W / 2, WIN_TOP + 120, "No hay modulos I2C detectados", 2, rgb565(170, 178, 196));
-      drawTextC(SCR_W / 2, WIN_TOP + 150, "Conecta un sensor al bus (SDA=7, SCL=8)", 1, rgb565(130, 138, 158));
+      drawTextC(SCR_W / 2, WIN_TOP + 120, "No hay modulos I2C detectados", 2, TH_TXT2);
+      drawTextC(SCR_W / 2, WIN_TOP + 150, "Conecta un sensor al bus (SDA=7, SCL=8)", 1, TH_MUTE);
     } else {
       for(int r = 0; r < nc; r++){
         DetectedModule* m = &detectedModules[idxs[r]];
         int cy = HW_LIST_Y0 + r * HW_ROW_H;
-        drawLiquidGlassPanel(HW_CARD_X, cy, HW_CARD_W, HW_CARD_H, 12, rgb565(40, 60, 130));
+        drawLiquidGlassPanel(HW_CARD_X, cy, HW_CARD_W, HW_CARD_H, 12, TH_GLASS);
         drawModuleIcon(m->type, HW_CARD_X + 8, cy + 8, 32);
         char label[48];
         if(m->i2cAddr) snprintf(label, sizeof(label), "%s (0x%02X)", m->name, m->i2cAddr);
         else           snprintf(label, sizeof(label), "%s", m->name);
-        drawText(HW_CARD_X + 50, cy + 16, label, 2, rgb565(240, 242, 248));
-        drawTextC(HW_CARD_X + HW_CARD_W - 46, cy + 18, "Config", 1, rgb565(180, 200, 255));
+        drawText(HW_CARD_X + 50, cy + 16, label, 2, TH_TXT);
+        drawTextC(HW_CARD_X + HW_CARD_W - 46, cy + 18, "Config", 1, TH_ACCS);
       }
     }
-    fillRoundRect(HW_CLOSE_X, HW_CLOSE_Y, HW_CLOSE_W, HW_CLOSE_H, 14, rgb565(70, 74, 90));
-    drawTextC(SCR_W / 2, HW_CLOSE_Y + 14, "Cerrar", 2, rgb565(255, 255, 255));
+    fillRoundRect(HW_CLOSE_X, HW_CLOSE_Y, HW_CLOSE_W, HW_CLOSE_H, 14, TH_SURF2);
+    drawTextC(SCR_W / 2, HW_CLOSE_Y + 14, "Cerrar", 2, TH_TXT);
   } else {
     // ---- Vista CODIGO (solo lectura) ----
     DetectedModule* m = &detectedModules[hwSelModule];
     char t[40]; snprintf(t, sizeof(t), "Codigo: %s", m->name);
-    drawTextC(SCR_W / 2, WIN_TOP + 16, t, 2, rgb565(255, 255, 255));
+    drawTextC(SCR_W / 2, WIN_TOP + 16, t, 2, TH_TXT);
 
     int px = 16, py = WIN_TOP + 52, pw = SCR_W - 32, ph = (HW_ACT_Y - 12) - (WIN_TOP + 52);
-    drawLiquidGlassPanel(px, py, pw, ph, 12, rgb565(24, 40, 80));
+    drawLiquidGlassPanel(px, py, pw, ph, 12, TH_GLASS);
 
     // Volcar hwCode linea a linea (split por '\n')
     int ly = py + 12, lineNo = 1;
@@ -13686,16 +13964,16 @@ static void hwDrawWizard(){
       line[li] = 0;
       if(*p == '\n') p++;
       char num[6]; snprintf(num, sizeof(num), "%2d", lineNo++);
-      drawText(px + 10, ly, num,  1, rgb565(90, 96, 112));
-      drawText(px + 38, ly, line, 1, rgb565(150, 220, 180));
+      drawText(px + 10, ly, num,  1, TH_MUTE);
+      drawText(px + 38, ly, line, 1, rgb565(150, 220, 180));   // resaltado de sintaxis: contenido
       ly += 18;
       if(ly > py + ph - 16) break;
     }
 
-    fillRoundRect(HW_BACK_X, HW_ACT_Y, HW_ACT_W, HW_ACT_H, 12, rgb565(70, 74, 90));
-    drawTextC(HW_BACK_X + HW_ACT_W / 2, HW_ACT_Y + 14, "Volver", 2, rgb565(255, 255, 255));
-    fillRoundRect(HW_COPY_X, HW_ACT_Y, HW_ACT_W, HW_ACT_H, 12, hwCopied ? rgb565(46, 160, 90) : rgb565(60, 110, 235));
-    drawTextC(HW_COPY_X + HW_ACT_W / 2, HW_ACT_Y + 14, hwCopied ? "Copiado" : "Copiar", 2, rgb565(255, 255, 255));
+    fillRoundRect(HW_BACK_X, HW_ACT_Y, HW_ACT_W, HW_ACT_H, 12, TH_SURF2);
+    drawTextC(HW_BACK_X + HW_ACT_W / 2, HW_ACT_Y + 14, "Volver", 2, TH_TXT);
+    fillRoundRect(HW_COPY_X, HW_ACT_Y, HW_ACT_W, HW_ACT_H, 12, hwCopied ? TH_OK : TH_PRIM);   // "Copiado" = exito
+    drawTextC(HW_COPY_X + HW_ACT_W / 2, HW_ACT_Y + 14, hwCopied ? "Copiado" : "Copiar", 2, TH_ONACC);
   }
   flxFlush(WIN_TOP, WIN_BOT);
 }
@@ -13753,27 +14031,34 @@ static void ideTick(){
 #define P_BOT (SCR_H - 66)
 static uint16_t pColor = 0;
 static int pPrevX = -1, pPrevY = -1, pSize = 4;
+// PAINT · QUE SIGUE EL TEMA Y QUE NO.
+//   SI  : cabecera, chevron de volver, barra de herramientas, boton "Limpiar" y
+//         el anillo de seleccion del color -- son chrome del sistema.
+//   NO  : el LIENZO (papel neutro, siempre claro) ni la PALETA de dibujo. Son
+//         CONTENIDO: recolorearlos cambiaria el dibujo del usuario y romperia la
+//         nocion de "papel blanco" que la app da por supuesta al limpiar.
 static const uint16_t P_PAL[6] = { rgb565(30,30,40), rgb565(230,60,60), rgb565(240,150,40),
                                    rgb565(240,210,50), rgb565(80,180,120), rgb565(60,120,235) };
+#define P_CANVAS  rgb565(250,250,252)      // papel del lienzo: contenido, NO tema
 static void paintTools(){
   setBuf(fb);
   int y = SCR_H - 56, sw = 42, gap = 8, x = 16;
-  fillRect(0, P_BOT, SCR_W, SCR_H - P_BOT, rgb565(18,20,28));
+  fillRect(0, P_BOT, SCR_W, SCR_H - P_BOT, thCard());
   for(int i = 0; i < 6; i++){
     int cx = x + i * (sw + gap) + sw / 2;
-    fillCircle(cx, y + sw / 2, sw / 2 - 2, P_PAL[i]);
-    if(P_PAL[i] == pColor){ drawCircle(cx, y + sw / 2, sw / 2, rgb565(255,255,255)); drawCircle(cx, y + sw / 2, sw / 2 - 1, rgb565(255,255,255)); }
+    fillCircle(cx, y + sw / 2, sw / 2 - 2, P_PAL[i]);          // color de dibujo: contenido
+    if(P_PAL[i] == pColor){ drawCircle(cx, y + sw / 2, sw / 2, TH_TXT); drawCircle(cx, y + sw / 2, sw / 2 - 1, TH_TXT); }
   }
-  fillRoundRect(SCR_W - 92, y + 2, 78, 40, 10, rgb565(60,64,78));
-  drawTextC(SCR_W - 53, y + 12, "Limpiar", 2, rgb565(240,242,248));
+  fillRoundRect(SCR_W - 92, y + 2, 78, 40, 10, TH_SURF2);
+  drawTextC(SCR_W - 53, y + 12, "Limpiar", 2, TH_TXT);
   flxFlush(P_BOT, SCR_H - 1);
 }
 static void paintEnter(){
-  setBuf(fb); fillRect(0, 0, SCR_W, SCR_H, rgb565(16,18,26));
-  strokeSegAA(30, 26, 18, 18, 2.4f, rgb565(255,255,255));
-  strokeSegAA(18, 18, 30, 10, 2.4f, rgb565(255,255,255));
-  drawTextC(SCR_W / 2, 14, "Paint", 3, rgb565(255,255,255));
-  fillRect(8, P_TOP, SCR_W - 16, P_BOT - P_TOP, rgb565(250,250,252));   // lienzo
+  setBuf(fb); fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
+  strokeSegAA(30, 26, 18, 18, 2.4f, TH_NAV);
+  strokeSegAA(18, 18, 30, 10, 2.4f, TH_NAV);
+  drawTextC(SCR_W / 2, 14, "Paint", 3, TH_TXT);
+  fillRect(8, P_TOP, SCR_W - 16, P_BOT - P_TOP, P_CANVAS);   // lienzo (contenido)
   pColor = P_PAL[0]; pPrevX = pPrevY = -1;
   paintTools();
   flxFlushAll();
@@ -13793,7 +14078,7 @@ static void paintTick(){
     if(T.x < 48 && T.y < 48){ appClose(); return; }
     int y = SCR_H - 56, sw = 42, gap = 8, x = 16;
     for(int i = 0; i < 6; i++){ int cx = x + i * (sw + gap) + sw / 2; if(T.x >= cx - sw / 2 && T.x <= cx + sw / 2 && T.y >= y && T.y <= y + sw){ pColor = P_PAL[i]; paintTools(); return; } }
-    if(T.x >= SCR_W - 92 && T.y >= y){ setBuf(fb); fillRect(8, P_TOP, SCR_W - 16, P_BOT - P_TOP, rgb565(250,250,252)); flxFlush(P_TOP, P_BOT); return; }
+    if(T.x >= SCR_W - 92 && T.y >= y){ setBuf(fb); fillRect(8, P_TOP, SCR_W - 16, P_BOT - P_TOP, P_CANVAS); flxFlush(P_TOP, P_BOT); return; }
   }
 }
 
@@ -13872,14 +14157,16 @@ static void blitThumbScaled(uint16_t* th, int dx, int dy, int dw, int dh){
 // Marco tipo vidrio (barato: sobre el fondo oscuro uniforme el blur no aporta,
 // asi el carrusel corre fluido). drawLiquidGlassPanel se reserva para superficies con contenido detras.
 static void swCardFrame(int x, int y, int w, int h, int rad){
-  fillRoundRect(x, y, w, h, rad, rgb565(26,30,44));
-  drawRoundRect(x, y, w, h, rad, rgb565(95,105,138));
+  fillRoundRect(x, y, w, h, rad, TH_SURF);
+  drawRoundRect(x, y, w, h, rad, TH_BORDER);
 }
 static void swRender(float scale){                        // completo (solo animacion de entrada)
   setBuf(bbuf);
-  if(blurBg) memcpy(bbuf, blurBg, (size_t)SCR_W * SCR_H * 2); else fillRect(0, 0, SCR_W, SCR_H, rgb565(8,10,16));
-  drawTextC(SCR_W / 2, 6, "Recientes", 3, rgb565(240,244,252));
-  if(swCount == 0) drawTextC(SCR_W / 2, SCR_H / 2, "Sin apps recientes", 2, rgb565(150,158,180));
+  // Fondo = wallpaper desenfocado (contenido) -> los rotulos que caen encima
+  // usan TH_ONWALL, no el texto de pagina.
+  if(blurBg) memcpy(bbuf, blurBg, (size_t)SCR_W * SCR_H * 2); else fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
+  drawTextC(SCR_W / 2, 6, "Recientes", 3, TH_ONWALL);
+  if(swCount == 0) drawTextC(SCR_W / 2, SCR_H / 2, "Sin apps recientes", 2, TH_ONWALL2);
   int cw = (int)(SW_CW * scale), ch = (int)(SW_CH * scale);
   for(int i = 0; i < swCount; i++){
     int cx = SCR_W / 2 + i * SW_STEP - (int)swScrollPx;
@@ -13888,18 +14175,18 @@ static void swRender(float scale){                        // completo (solo anim
     if(i == swLiftCard) y -= (int)swLiftY;
     swCardFrame(x, y, cw, ch, 22);
     if(swTasks[i].thumb) blitThumbScaled(swTasks[i].thumb, x + 8, y + 8, cw - 16, ch - 52);
-    else { fillRoundRect(x + 8, y + 8, cw - 16, ch - 52, 14, rgb565(28,32,44)); drawAppIcon(swTasks[i].appID, x + cw / 2 - 30, y + ch / 2 - 70, 60); }
-    drawTextC(x + cw / 2, y + ch - 32, appName(swTasks[i].appID), 2, rgb565(255,255,255));
+    else { fillRoundRect(x + 8, y + 8, cw - 16, ch - 52, 14, TH_SURF2); drawAppIcon(swTasks[i].appID, x + cw / 2 - 30, y + ch / 2 - 70, 60); }
+    drawTextC(x + cw / 2, y + ch - 32, appName(swTasks[i].appID), 2, TH_TXT);
   }
-  drawTextC(SCR_W / 2, SCR_H - 28, "Desliza una tarjeta arriba para cerrar", 1, rgb565(130,138,158));
+  drawTextC(SCR_W / 2, SCR_H - 28, "Desliza una tarjeta arriba para cerrar", 1, TH_ONWALL2);
   present(0, SCR_H - 1);
 }
 // por-frame: SOLO repinta y vuelca la banda de las tarjetas (mucho mas ligero)
 static void swRenderCards(){
   setBuf(bbuf);
   if(blurBg){ for(int j = 32; j < 604; j++) memcpy(bbuf + (size_t)j * SCR_W, blurBg + (size_t)j * SCR_W, SCR_W * 2); }
-  else fillRect(0, 32, SCR_W, 572, rgb565(8,10,16));
-  if(swCount == 0) drawTextC(SCR_W / 2, SCR_H / 2, "Sin apps recientes", 2, rgb565(150,158,180));
+  else fillRect(0, 32, SCR_W, 572, TH_PAGE);
+  if(swCount == 0) drawTextC(SCR_W / 2, SCR_H / 2, "Sin apps recientes", 2, TH_ONWALL2);
   for(int i = 0; i < swCount; i++){
     int cx = SCR_W / 2 + i * SW_STEP - (int)swScrollPx;
     if(cx < -SW_CW || cx > SCR_W + SW_CW) continue;
@@ -13907,8 +14194,8 @@ static void swRenderCards(){
     if(i == swLiftCard) y -= (int)swLiftY;
     swCardFrame(x, y, SW_CW, SW_CH, 22);
     if(swTasks[i].thumb) blitThumbScaled(swTasks[i].thumb, x + 8, y + 8, SW_CW - 16, SW_CH - 52);
-    else { fillRoundRect(x + 8, y + 8, SW_CW - 16, SW_CH - 52, 14, rgb565(28,32,44)); drawAppIcon(swTasks[i].appID, x + SW_CW / 2 - 30, y + SW_CH / 2 - 70, 60); }
-    drawTextC(x + SW_CW / 2, y + SW_CH - 32, appName(swTasks[i].appID), 2, rgb565(255,255,255));
+    else { fillRoundRect(x + 8, y + 8, SW_CW - 16, SW_CH - 52, 14, TH_SURF2); drawAppIcon(swTasks[i].appID, x + SW_CW / 2 - 30, y + SW_CH / 2 - 70, 60); }
+    drawTextC(x + SW_CW / 2, y + SW_CH - 32, appName(swTasks[i].appID), 2, TH_TXT);
   }
   present(32, 604);
 }
@@ -14002,21 +14289,26 @@ static const char* PIN_KEYS[12] = { "1","2","3","4","5","6","7","8","9","<","0",
 static bool lsuVerify = false;                       // true = desbloquear (verificar), false = crear
 static char lsuSaved[64] = "";                       // clave guardada a comparar
 static uint32_t lsuWrong = 0;                        // millis del ultimo error (para el flash rojo)
-// ---- Tema de las pantallas de clave (reutiliza la paleta de Ajustes) ----
-// REGLA: gDark solo manda cuando el fondo es el color SOLIDO de pagina, o sea
-// al CREAR la clave. Al VERIFICAR, el fondo es el wallpaper desenfocado -- una
-// foto-- y ahi el modo claro pondria texto oscuro y tarjetas blancas encima que
-// no se leerian. En ese caso se conservan exactamente los colores de siempre.
-// El uiGlass, en cambio, ya se respetaba y se sigue respetando en los dos casos.
-static uint16_t lsuBgCol()   { return lsuVerify ? rgb565(12,14,22)    : PAGE_BG; }
-static uint16_t lsuCardCol() { return lsuVerify ? rgb565(44,54,92)    : SET_CARD_BG; }
-static uint16_t lsuGlassCol(){ return lsuVerify ? rgb565(48,60,110)   : SET_CARD_GLASS; }
-static uint16_t lsuKbBgCol() { return lsuVerify ? rgb565(18,20,28)    : PAGE_BG; }
-static uint16_t lsuKbGlass() { return lsuVerify ? rgb565(36,40,58)    : SET_CARD_GLASS; }
-static uint16_t lsuKeyCol()  { return lsuVerify ? rgb565(52,56,70)    : SET_CARD_BG; }
-static uint16_t lsuTxtHi()   { return lsuVerify ? rgb565(255,255,255) : SET_TXT_HI; }
-static uint16_t lsuTxtLo()   { return lsuVerify ? rgb565(150,158,180) : SET_TXT_LO; }
-static uint16_t lsuKeyTxt()  { return lsuVerify ? rgb565(240,242,248) : SET_TXT_HI; }
+// ---- Tema de las pantallas de clave (PIN / contrasena) ----
+// Las dos ramas piden color POR SIGNIFICADO al tema global; lo que cambia es
+// SOBRE QUE se dibuja, que es lo que decide el par de colores correcto:
+//   · CREAR la clave (desde Ajustes): el fondo es el color SOLIDO de pagina, asi
+//     que todo sale de la paleta activa -- en tema claro la pantalla es clara.
+//   · VERIFICAR: el fondo es el WALLPAPER DESENFOCADO, o sea contenido del
+//     usuario que el tema no retine (ver TH_ONWALL en el bloque TEMA SEMANTICO).
+//     Ahi se usan las superficies "sobre wallpaper", identicas en las dos
+//     apariencias: con la paleta clara habria tarjetas casi blancas y texto casi
+//     negro flotando sobre una foto oscura, ilegibles.
+// El MATERIAL (uiGlass) es ortogonal y se respeta en los dos casos.
+static uint16_t lsuBgCol()   { return lsuVerify ? TH_SCRIM      : PAGE_BG; }
+static uint16_t lsuCardCol() { return lsuVerify ? TH_WALLSURF   : SET_CARD_BG; }
+static uint16_t lsuGlassCol(){ return lsuVerify ? TH_WALLSURF2  : SET_CARD_GLASS; }
+static uint16_t lsuKbBgCol() { return lsuVerify ? TH_WALLPANEL  : PAGE_BG; }
+static uint16_t lsuKbGlass() { return lsuVerify ? TH_WALLPANEL  : SET_CARD_GLASS; }
+static uint16_t lsuKeyCol()  { return lsuVerify ? TH_WALLSURF   : SET_CARD_BG; }
+static uint16_t lsuTxtHi()   { return lsuVerify ? TH_ONWALL     : SET_TXT_HI; }
+static uint16_t lsuTxtLo()   { return lsuVerify ? TH_ONWALL2    : SET_TXT_LO; }
+static uint16_t lsuKeyTxt()  { return lsuVerify ? TH_ONWALL     : SET_TXT_HI; }
 
 static void lsuBg(){
   if(lsuVerify && blurBg) memcpy(gBuf, blurBg, (size_t)SCR_W * SCR_H * 2);   // wallpaper borroso
@@ -14211,16 +14503,16 @@ static void lockWaitTick(){
   lockWaitBase(y0, y1);
   if(first){
     const char* m1 = "Demasiados intentos fallidos";
-    drawTextC(SCR_W / 2, LW_MSG_Y, m1, uiFontFit(m1, SCR_W - 40, 2), rgb565(240,160,150));
+    drawTextC(SCR_W / 2, LW_MSG_Y, m1, uiFontFit(m1, SCR_W - 40, 2), TH_ERR);      // estado: error
     if(lockFails >= LOCK_FAILS_HARD){                          // mensaje explicito del tramo largo
       const char* m2 = "Bloqueo temporal de 5 minutos";
-      drawTextC(SCR_W / 2, LW_MSG2_Y, m2, uiFontFit(m2, SCR_W - 40, 2), rgb565(205,150,145));
+      drawTextC(SCR_W / 2, LW_MSG2_Y, m2, uiFontFit(m2, SCR_W - 40, 2), lsuTxtLo());
     }
   }
   char cd[16];
   if(secs >= 60) snprintf(cd, sizeof(cd), "%d:%02d", secs / 60, secs % 60);
   else           snprintf(cd, sizeof(cd), "%d s", secs);
-  drawTextC(SCR_W / 2, LW_NUM_Y, cd, 4, rgb565(255,255,255));
+  drawTextC(SCR_W / 2, LW_NUM_Y, cd, 4, lsuTxtHi());
   present(y0, y1);
   setBuf(fb);
   lockWaitLastSec = secs; lockWaitPainted = true;
@@ -14343,10 +14635,12 @@ static void autoLockTick(){
 #define KIOSK_BOX_H 32
 static void kioskBadgePaint(){
   int bx = KIOSK_BADGE_X, by = KIOSK_BADGE_Y, bs = KIOSK_BADGE_S;
-  fillRoundRectA(bx, by, bs, bs, 7, rgb565(16,18,26), 200);
-  fillCircleA(bx + bs / 2, by + 9, 5, rgb565(238,241,248), 255);            // arco del candado
-  fillCircleA(bx + bs / 2, by + 9, 3, rgb565(16,18,26), 255);
-  fillRoundRectA(bx + 5, by + 11, bs - 10, 9, 2, rgb565(238,241,248), 255); // cuerpo
+  // El candado se sella sobre CUALQUIER app (Paint, Juegos, la Camara...), asi
+  // que la pastilla lleva su propio contraste: fondo del tema y glifo del tema.
+  fillRoundRectA(bx, by, bs, bs, 7, TH_PAGE, 200);
+  fillCircleA(bx + bs / 2, by + 9, 5, TH_TXT, 255);            // arco del candado
+  fillCircleA(bx + bs / 2, by + 9, 3, TH_PAGE, 255);
+  fillRoundRectA(bx + 5, by + 11, bs - 10, 9, 2, TH_TXT, 255); // cuerpo
 }
 // Llamada desde flxFlush con la banda que se va a publicar. Sale enseguida en el
 // caso normal (kiosco apagado, o banda que no toca la esquina del candado), asi
@@ -14471,13 +14765,13 @@ static void kioskSetBase(int id){
   drawTextC(SCR_W / 2, 344, s3, uiFontFit(s3, SCR_W - 40, 2), SET_TXT_LO);
   const char* s4 = "esquina y escribe tu clave del sistema";
   drawTextC(SCR_W / 2, 366, s4, uiFontFit(s4, SCR_W - 40, 2), SET_TXT_LO);
-  // "Cancelar" es una tarjeta normal (tema), "Iniciar" conserva el azul de
-  // acento: los colores de MARCA no cambian con gDark, igual que en Ajustes.
+  // "Cancelar" es una tarjeta normal del tema; "Iniciar" es la ACCION PRIMARIA,
+  // asi que toma TH_PRIM (y su texto TH_ONACC) de la paleta activa.
   if(uiGlass) drawLiquidGlassPanel(30, KS_BTN_Y, KS_BTN_W, KS_BTN_H, 20, SET_CARD_GLASS);
   else        fillRoundRect(30, KS_BTN_Y, KS_BTN_W, KS_BTN_H, 20, SET_CARD_BG);
   drawTextC(30 + KS_BTN_W / 2, KS_BTN_Y + KS_BTN_H / 2 - 9, "Cancelar", 2, SET_TXT_HI);
-  fillRoundRect(SCR_W - 30 - KS_BTN_W, KS_BTN_Y, KS_BTN_W, KS_BTN_H, 20, rgb565(46,82,182));
-  drawTextC(SCR_W - 30 - KS_BTN_W / 2, KS_BTN_Y + KS_BTN_H / 2 - 9, "Iniciar", 2, rgb565(255,255,255));
+  fillRoundRect(SCR_W - 30 - KS_BTN_W, KS_BTN_Y, KS_BTN_W, KS_BTN_H, 20, TH_PRIM);
+  drawTextC(SCR_W - 30 - KS_BTN_W / 2, KS_BTN_Y + KS_BTN_H / 2 - 9, "Iniciar", 2, TH_ONACC);
   setBuf(fb);
 }
 static void kioskSetRender(){
@@ -14489,10 +14783,12 @@ static void kioskSetRender(){
     int y = kioskSetY0 < kioskSetY1 ? kioskSetY0 : kioskSetY1;
     int w = kioskSetX1 - kioskSetX0; if(w < 0) w = -w;
     int h = kioskSetY1 - kioskSetY0; if(h < 0) h = -h;
-    fillRectA(x, y, w, h, rgb565(235,90,80), 95);
-    drawRoundRect(x, y, w, h, 4, rgb565(246,150,140));
+    // Zona EXCLUIDA del tactil: rojo de estado (significa "aqui no se toca"),
+    // se conserva en las dos apariencias.
+    fillRectA(x, y, w, h, TH_ERR, 95);
+    drawRoundRect(x, y, w, h, 4, TH_ERR);
     char b[24]; snprintf(b, sizeof(b), "%d x %d", w, h);
-    drawTextC(x + w / 2, y + h / 2 - 9, b, 2, rgb565(255,255,255));
+    drawTextC(x + w / 2, y + h / 2 - 9, b, 2, SET_TXT_HI);
   }
   present(0, SCR_H - 1);
   setBuf(fb);
@@ -14587,19 +14883,19 @@ static const char* ctxLabel(int i){
 static void ctxGlyph(int kind, int x, int y, int s, uint8_t a){
   uint16_t hole = ctxPanelCol();
   if(kind == 0){                                        // candado
-    uint16_t c = rgb565(235,80,80);
+    uint16_t c = TH_DANGER;                            // bloquear app: accion destructiva
     fillCircleA(x + s / 2, y + s / 3, s / 4, c, a);     // arco
     fillCircleA(x + s / 2, y + s / 3, s / 6, hole, a);
     fillRoundRectA(x + 3, y + s / 2 - 2, s - 6, s / 2 + 1, 3, c, a);   // cuerpo
   } else if(kind == 1){                                 // rejilla de iconos (Modo edicion)
-    uint16_t c = rgb565(140,150,172);
+    uint16_t c = TH_TXT2;
     int q = (s - 5) / 2;
     fillRoundRectA(x,             y,             q, q, 2, c, a);
     fillRoundRectA(x + q + 5,     y,             q, q, 2, c, a);
     fillRoundRectA(x,             y + q + 5,     q, q, 2, c, a);
     fillRoundRectA(x + q + 5,     y + q + 5,     q, q, 2, c, a);
   } else {                                              // pantalla con candado (Modo kiosco)
-    uint16_t c = rgb565(110,200,155);
+    uint16_t c = TH_OK;
     fillRoundRectA(x, y + 1, s, s - 7, 3, c, a);        // marco
     fillRoundRectA(x + 3, y + 4, s - 6, s - 13, 2, hole, a);
     fillRoundRectA(x + s / 2 - 3, y + s / 2 - 5, 6, 7, 1, c, a);       // candado dentro
@@ -14837,9 +15133,9 @@ static void lsuRenderSel(){
   int bw = SCR_W - 80, bh = 120, y1 = 220, y2 = y1 + bh + 30;
   const char* lbl[2] = { "PIN", "Contrase\xC3\xB1" "a" }; int ys[2] = { y1, y2 };
   for(int k = 0; k < 2; k++){
-    if(uiGlass){ drawLiquidGlassPanel(40, ys[k], bw, bh, 22, rgb565(50,90,200)); }
-    else fillRoundRect(40, ys[k], bw, bh, 22, rgb565(46,82,182));
-    drawTextC(SCR_W / 2, ys[k] + bh / 2 - 18, lbl[k], 4, rgb565(255,255,255));
+    if(uiGlass){ drawLiquidGlassPanel(40, ys[k], bw, bh, 22, mix565(TH_PRIM, TH_SURF, 60)); }
+    else fillRoundRect(40, ys[k], bw, bh, 22, TH_PRIM);
+    drawTextC(SCR_W / 2, ys[k] + bh / 2 - 18, lbl[k], 4, TH_ONACC);
   }
   present(0, SCR_H - 1);
 }
@@ -14859,7 +15155,7 @@ static void lsuComposePin(){                          // base de vidrio en lockB
     int x, y, w, h; lsuPinRect(i, x, y, w, h);
     if(uiGlass){ drawLiquidGlassPanel(x, y, w, h, 16, lsuGlassCol()); }
     else fillRoundRect(x, y, w, h, 16, lsuCardCol());
-    uint16_t col = (i == 9) ? rgb565(230,180,90) : (i == 11) ? rgb565(120,220,150) : lsuTxtHi();
+    uint16_t col = (i == 9) ? TH_WARN : (i == 11) ? TH_OK : lsuTxtHi();   // '<' borrar, 'OK' confirmar
     drawTextC(x + w / 2, y + h / 2 - 12, PIN_KEYS[i], 3, col);
   }
   setBuf(bbuf);
@@ -14893,11 +15189,11 @@ static void lsuAnimPin(){                              // puntos dinamicos + des
     }
   }
   int n = strlen(lsuPin);
-  uint16_t dc = (lsuWrong && millis() - lsuWrong < 500) ? rgb565(235,70,70) : rgb565(90,150,240);
-  for(int i = 0; i < 8; i++){ int cx = SCR_W / 2 - 4 * 28 + 14 + i * 28 + sh; if(i < n) fillCircle(cx, 150, 8, dc); else drawCircle(cx, 150, 8, rgb565(90,100,130)); }
+  uint16_t dc = (lsuWrong && millis() - lsuWrong < 500) ? TH_ERR : TH_PRIM;
+  for(int i = 0; i < 8; i++){ int cx = SCR_W / 2 - 4 * 28 + 14 + i * 28 + sh; if(i < n) fillCircle(cx, 150, 8, dc); else drawCircle(cx, 150, 8, lsuTxtLo()); }
   for(int i = 0; i < 12; i++){
     int x, y, w, h; lsuPinRect(i, x, y, w, h);
-    if(i == lsuPress){ float p = (millis() - lsuPressMs) / 200.0f; if(p < 1) fillRoundRectA(x + sh, y, w, h, 16, rgb565(255,255,255), (uint8_t)((1 - p) * 90)); else lsuPress = -1; }
+    if(i == lsuPress){ float p = (millis() - lsuPressMs) / 200.0f; if(p < 1) fillRoundRectA(x + sh, y, w, h, 16, lsuTxtHi(), (uint8_t)((1 - p) * 90)); else lsuPress = -1; }
   }
   present(120, 700);
 }
@@ -14934,7 +15230,7 @@ static void lsuPaintPass(int yoff, int xoff){
   lsuBack();
   drawTextC(SCR_W / 2, 50, lsuVerify ? "Introduce contrase\xC3\xB1" "a" : "Crear contrase\xC3\xB1" "a", 3, lsuTxtHi());
   int cnt = utf8Count(lsuPass);
-  for(int i = 0; i < cnt && i < 18; i++) fillCircle(30 + i * 24 + xoff, 120, 7, rgb565(90,150,240));
+  for(int i = 0; i < cnt && i < 18; i++) fillCircle(30 + i * 24 + xoff, 120, 7, TH_PRIM);
   lsuDrawKb(yoff, xoff);
 }
 static void lsuRenderPass(int yoff, int xoff){
@@ -15244,27 +15540,30 @@ static void poffDrawStatic(){
   // Fondo: wallpaper borroso ya cacheado (el mismo que usa la verificacion de
   // PIN) + un velo oscuro para que el panel de vidrio tenga contra que destacar.
   if(blurBg) memcpy(gBuf, blurBg, (size_t)SCR_W * SCR_H * 2);
-  else       fillRect(0, 0, SCR_W, SCR_H, rgb565(10,12,20));
-  fillRectA(0, 0, SCR_W, SCR_H, rgb565(8,10,18), 150);
+  else       fillRect(0, 0, SCR_W, SCR_H, TH_SCRIM);
+  fillRectA(0, 0, SCR_W, SCR_H, TH_SCRIM, 150);
 
   // Panel Liquid Glass envolvente: se REUTILIZA drawLiquidGlassPanelEx tal cual
   // (con su sombra/blur variable/especular/refraccion segun las flags GLASS_*),
   // no se reinventa ningun sistema de vidrio nuevo.
-  drawLiquidGlassPanelEx(28, 232, SCR_W - 56, 424, 44, rgb565(40,30,42), 9);
+  // El velo de arriba deja el fondo oscuro en las DOS apariencias (es wallpaper
+  // desenfocado, contenido), asi que el panel y sus textos usan las superficies
+  // "sobre wallpaper" del tema -- misma regla que la verificacion de PIN.
+  drawLiquidGlassPanelEx(28, 232, SCR_W - 56, 424, 44, TH_WALLPANEL, 9);
 
-  drawTextC(SCR_W / 2, 268, "\xC2\xBF" "Apagar FlexOS?", 3, rgb565(245,238,240));
-  drawTextC(SCR_W / 2, 306, "El sistema entrar\xC3\xA1 en reposo profundo", 1, rgb565(198,190,196));
+  drawTextC(SCR_W / 2, 268, "\xC2\xBF" "Apagar FlexOS?", 3, TH_ONWALL);
+  drawTextC(SCR_W / 2, 306, "El sistema entrar\xC3\xA1 en reposo profundo", 1, TH_ONWALL2);
 
   // Pista del slider (vacia). El relleno y el pomo son dinamicos.
-  fillRoundRectA(POFF_TRACK_X + 2, POFF_TRACK_Y + 4, POFF_TRACK_W, POFF_TRACK_H, POFF_TRACK_R, rgb565(0,0,0), 60);
-  drawLiquidGlassPanelEx(POFF_TRACK_X, POFF_TRACK_Y, POFF_TRACK_W, POFF_TRACK_H, POFF_TRACK_R, rgb565(52,74,70), 7);
-  drawRoundRect(POFF_TRACK_X, POFF_TRACK_Y, POFF_TRACK_W, POFF_TRACK_H, POFF_TRACK_R, rgb565(120,150,144));
+  fillRoundRectA(POFF_TRACK_X + 2, POFF_TRACK_Y + 4, POFF_TRACK_W, POFF_TRACK_H, POFF_TRACK_R, TH_SHADOW, 60);
+  drawLiquidGlassPanelEx(POFF_TRACK_X, POFF_TRACK_Y, POFF_TRACK_W, POFF_TRACK_H, POFF_TRACK_R, TH_WALLSURF, 7);
+  drawRoundRect(POFF_TRACK_X, POFF_TRACK_Y, POFF_TRACK_W, POFF_TRACK_H, POFF_TRACK_R, TH_ONWALL2);
 
   // Boton Cancelar (vuelve al estado previo sin ningun efecto secundario).
-  fillRoundRectA(POFF_CAN_X + 2, POFF_CAN_Y + 4, POFF_CAN_W, POFF_CAN_H, POFF_CAN_R, rgb565(0,0,0), 60);
-  drawLiquidGlassPanelEx(POFF_CAN_X, POFF_CAN_Y, POFF_CAN_W, POFF_CAN_H, POFF_CAN_R, rgb565(52,58,80), 7);
-  drawRoundRect(POFF_CAN_X, POFF_CAN_Y, POFF_CAN_W, POFF_CAN_H, POFF_CAN_R, rgb565(120,128,150));
-  drawTextC(SCR_W / 2, POFF_CAN_Y + POFF_CAN_H / 2 - 9, "Cancelar", 2, rgb565(235,238,248));
+  fillRoundRectA(POFF_CAN_X + 2, POFF_CAN_Y + 4, POFF_CAN_W, POFF_CAN_H, POFF_CAN_R, TH_SHADOW, 60);
+  drawLiquidGlassPanelEx(POFF_CAN_X, POFF_CAN_Y, POFF_CAN_W, POFF_CAN_H, POFF_CAN_R, TH_WALLSURF, 7);
+  drawRoundRect(POFF_CAN_X, POFF_CAN_Y, POFF_CAN_W, POFF_CAN_H, POFF_CAN_R, TH_ONWALL2);
+  drawTextC(SCR_W / 2, POFF_CAN_Y + POFF_CAN_H / 2 - 9, "Cancelar", 2, TH_ONWALL);
 }
 // Pinta pomo + relleno + rotulo sobre la banda ya restaurada del buffer activo.
 static void poffDrawKnob(){
@@ -15276,19 +15575,19 @@ static void poffDrawKnob(){
   if(fw > POFF_TRACK_W) fw = POFF_TRACK_W;
   if(poffKnob > 0)
     fillRoundRectA(POFF_TRACK_X, POFF_TRACK_Y, fw, POFF_TRACK_H, POFF_TRACK_R,
-                   rgb565(200,60,55), (uint8_t)(40 + p * 130 / 100));
+                   TH_DANGER, (uint8_t)(40 + p * 130 / 100));      // apagar: accion destructiva
 
   // Rotulo "desliza para apagar": se desvanece conforme el pomo avanza (a los
   // 100% ya no estorba al pomo, que esta justo encima).
   int lblA = 235 - p * 2;
   if(lblA > 0)
     drawTextCA(POFF_TRACK_X + POFF_TRACK_W / 2 + 18, POFF_TRACK_Y + POFF_TRACK_H / 2 - 9,
-               "desliza para apagar", 2, rgb565(236,240,238), (uint8_t)lblA);
+               "desliza para apagar", 2, TH_ONWALL, (uint8_t)lblA);
 
   // Pomo blanco con el simbolo de apagado en rojo (referencia: iOS).
-  fillCircleA(kx + POFF_KNOB_R + 1, POFF_TRACK_Y + POFF_TRACK_H / 2 + 2, POFF_KNOB_R, rgb565(0,0,0), 70);
-  fillCircle(kx + POFF_KNOB_R, POFF_TRACK_Y + POFF_TRACK_H / 2, POFF_KNOB_R, rgb565(252,252,252));
-  qsTileIcon(6, kx + POFF_KNOB_R, POFF_TRACK_Y + POFF_TRACK_H / 2, rgb565(226,46,40));
+  fillCircleA(kx + POFF_KNOB_R + 1, POFF_TRACK_Y + POFF_TRACK_H / 2 + 2, POFF_KNOB_R, TH_SHADOW, 70);
+  fillCircle(kx + POFF_KNOB_R, POFF_TRACK_Y + POFF_TRACK_H / 2, POFF_KNOB_R, TH_ONWALL);
+  qsTileIcon(6, kx + POFF_KNOB_R, POFF_TRACK_Y + POFF_TRACK_H / 2, TH_DANGER);
 }
 // Un frame de la pantalla de confirmacion. SOLO se recompone la banda del
 // slider: el resto (titulo, vidrio, Cancelar) es estatico y ya esta en fb desde
@@ -15481,7 +15780,7 @@ static void poffAnimTick(){
       uint16_t* old = gBuf; setBuf(bbuf);
       int c0 = gClipY0, c1 = gClipY1;
       gClipY0 = POFF_TXT_BY0; gClipY1 = POFF_TXT_BY1;
-      if(a) drawTextCA(SCR_W / 2, POFF_TXT_Y, "Flex OS", POFF_TXT_SZ, rgb565(240,242,250), a);
+      if(a) drawTextCA(SCR_W / 2, POFF_TXT_Y, "Flex OS", POFF_TXT_SZ, TH_ONWALL, a);   // sobre el fundido a negro del apagado
       gClipY0 = c0; gClipY1 = c1;
       setBuf(old);
       present(POFF_TXT_BY0, POFF_TXT_BY1);
@@ -15911,7 +16210,7 @@ static void wifiStartConnect(){
 }
 static void wifiPassAppend(const char* s){ int L = strlen(wifiPass), sl = strlen(s); if(L + sl < (int)sizeof(wifiPass) - 1){ memcpy(wifiPass + L, s, sl); wifiPass[L + sl] = 0; } }
 static void wifiPassBackspace(){ int L = strlen(wifiPass); if(L > 0){ int q = L - 1; while(q > 0 && (wifiPass[q] & 0xC0) == 0x80) q--; wifiPass[q] = 0; } }
-static void wifiBack(){ strokeSegAA(30, 26, 18, 18, 2.4f, rgb565(255,255,255)); strokeSegAA(18, 18, 30, 10, 2.4f, rgb565(255,255,255)); }
+static void wifiBack(){ strokeSegAA(30, 26, 18, 18, 2.4f, TH_NAV); strokeSegAA(18, 18, 30, 10, 2.4f, TH_NAV); }
 
 static int wifiRowY(int i){ return 150 + i * 66; }
 
@@ -15933,56 +16232,57 @@ static void wifiBtnRects(int& by, int& sx, int& sw, int& fx, int& fw){
 
 static void wifiRenderList(){
   setBuf(fb);
-  fillRect(0, 0, SCR_W, SCR_H, rgb565(14,16,24));
+  fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
   wifiBack();
-  drawTextC(SCR_W / 2, 60, "Wi-Fi", 4, rgb565(255,255,255));
+  drawTextC(SCR_W / 2, 60, "Wi-Fi", 4, TH_TXT);
   // Estado de la red recordada, justo bajo el titulo.
   if(wifiCredsExist()){
     char sv[64];
     bool on = (WiFi.status() == WL_CONNECTED);
     snprintf(sv, sizeof(sv), "%s %s", on ? "Conectado a" : "Red guardada:", wifiSavedSSID);
-    drawTextC(SCR_W / 2, 112, sv, 1, on ? rgb565(120,220,160) : rgb565(150,158,178));
+    drawTextC(SCR_W / 2, 112, sv, 1, on ? TH_OK : TH_TXT2);   // "conectado" = estado de exito (se conserva en los dos temas)
   } else if(gWifiAutoBusy){
-    drawTextC(SCR_W / 2, 112, "Reconectando...", 1, rgb565(150,158,178));
+    drawTextC(SCR_W / 2, 112, "Reconectando...", 1, TH_TXT2);
   }
   int cnt; portENTER_CRITICAL(&wifiMux); cnt = wifiNetCount; portEXIT_CRITICAL(&wifiMux);
   if(wifiUIState == WUI_SCANNING){
-    drawTextC(SCR_W / 2, 300, "Buscando redes...", 2, rgb565(160,170,196));
+    drawTextC(SCR_W / 2, 300, "Buscando redes...", 2, TH_TXT2);
   } else if(cnt == 0){
-    drawTextC(SCR_W / 2, 300, "No se encontraron redes", 2, rgb565(160,170,196));
+    drawTextC(SCR_W / 2, 300, "No se encontraron redes", 2, TH_TXT2);
   } else {
     for(int i = 0; i < cnt; i++){
       int y = wifiRowY(i); if(y > SCR_H - 60) break;
-      fillRoundRect(24, y, SCR_W - 48, 56, 14, rgb565(30,34,48));
-      drawWifi(56, y + 28, 13, rgb565(255,255,255));
-      drawTextClip(88, y + 12, wifiNets[i].ssid, 2, rgb565(240,242,248), SCR_W - 100);
+      if(uiGlass) drawGlassCardFlat(24, y, SCR_W - 48, 56, 14, TH_GLASS, TH_PAGE);
+      else        fillRoundRect(24, y, SCR_W - 48, 56, 14, TH_SURF);
+      drawWifi(56, y + 28, 13, TH_TXT);
+      drawTextClip(88, y + 12, wifiNets[i].ssid, 2, TH_TXT, SCR_W - 100);
       if(wifiNets[i].secure){
-        fillRoundRect(SCR_W - 80, y + 20, 16, 14, 3, rgb565(180,186,204));
-        arcStroke(SCR_W - 72, y + 20, 6, 180, 360, 2, rgb565(180,186,204));
+        fillRoundRect(SCR_W - 80, y + 20, 16, 14, 3, TH_TXT2);
+        arcStroke(SCR_W - 72, y + 20, 6, 180, 360, 2, TH_TXT2);
       }
     }
   }
   int by, sx, sw, fx, fw;
   wifiBtnRects(by, sx, sw, fx, fw);
-  fillRoundRect(sx, by, sw, 56, 16, rgb565(60,110,235));       // "Buscar redes" (reescanear)
-  drawTextC(sx + sw / 2, by + 18, wifiUIState == WUI_SCANNING ? "Buscando..." : "Buscar redes", 2, rgb565(255,255,255));
-  if(fw > 0){                                                   // "Olvidar red" (cambio de router)
-    fillRoundRect(fx, by, fw, 56, 16, rgb565(58,62,80));
-    drawTextC(fx + fw / 2, by + 18, "Olvidar red", 2, rgb565(240,180,180));
+  fillRoundRect(sx, by, sw, 56, 16, TH_PRIM);                   // "Buscar redes" (reescanear)
+  drawTextC(sx + sw / 2, by + 18, wifiUIState == WUI_SCANNING ? "Buscando..." : "Buscar redes", 2, TH_ONACC);
+  if(fw > 0){                                                   // "Olvidar red" (cambio de router): accion destructiva
+    fillRoundRect(fx, by, fw, 56, 16, TH_SURF2);
+    drawTextC(fx + fw / 2, by + 18, "Olvidar red", 2, TH_DANGER);
   }
   flxFlushAll();
 }
 static void wifiRenderPass(int yoff){
   setBuf(bbuf);
-  fillRect(0, 0, SCR_W, SCR_H, rgb565(14,16,24));
+  fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
   wifiBack();
   char title[48]; snprintf(title, sizeof(title), "Contrase\xC3\xB1" "a de %s", wifiNets[wifiSel].ssid);
-  drawTextC(SCR_W / 2, 50, title, 2, rgb565(255,255,255));
+  drawTextC(SCR_W / 2, 50, title, 2, TH_TXT);
   int cnt = utf8Count(wifiPass);
-  for(int i = 0; i < cnt && i < 18; i++) fillCircle(30 + i * 24, 120, 7, rgb565(90,150,240));
+  for(int i = 0; i < cnt && i < 18; i++) fillCircle(30 + i * 24, 120, 7, TH_PRIM);
   int ky = KB_Y + yoff;
-  if(uiGlass){ drawLiquidGlassPanel(0, ky - 4, SCR_W, SCR_H - (ky - 4), 0, rgb565(36,40,58)); }
-  else fillRect(0, ky - 4, SCR_W, SCR_H - (ky - 4), rgb565(18,20,28));
+  if(uiGlass){ drawLiquidGlassPanel(0, ky - 4, SCR_W, SCR_H - (ky - 4), 0, kbColPanel()); }
+  else fillRect(0, ky - 4, SCR_W, SCR_H - (ky - 4), kbColPanel());
   int fs = kbFontSize();
   for(int r = 0; r < KB_ROWS; r++) for(int c = 0; c < KB_COLS; c++){
     int x = KB_X + c * (KB_KW + KB_GAP), y = ky + r * (KB_KH + KB_GAP);
@@ -15998,42 +16298,56 @@ static void wifiRenderPass(int yoff){
 }
 static void wifiRenderStatus(){
   setBuf(fb);
-  fillRect(0, 0, SCR_W, SCR_H, rgb565(14,16,24));
+  fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
   wifiBack();
   if(wifiUIState == WUI_OK){
-    drawCircle(SCR_W / 2, 280, 46, rgb565(90,220,140)); drawCircle(SCR_W / 2, 280, 45, rgb565(90,220,140));
-    strokeSegAA(SCR_W / 2 - 20, 280, SCR_W / 2 - 4, 300, 4.0f, rgb565(90,220,140));
-    strokeSegAA(SCR_W / 2 - 4, 300, SCR_W / 2 + 26, 260, 4.0f, rgb565(90,220,140));
-    drawTextC(SCR_W / 2, 350, "Conectado", 3, rgb565(255,255,255));
+    // El circulo y el tick son ESTADO (exito): conservan su significado en las
+    // dos apariencias, solo se toma el verde de la paleta activa.
+    drawCircle(SCR_W / 2, 280, 46, TH_OK); drawCircle(SCR_W / 2, 280, 45, TH_OK);
+    strokeSegAA(SCR_W / 2 - 20, 280, SCR_W / 2 - 4, 300, 4.0f, TH_OK);
+    strokeSegAA(SCR_W / 2 - 4, 300, SCR_W / 2 + 26, 260, 4.0f, TH_OK);
+    drawTextC(SCR_W / 2, 350, "Conectado", 3, TH_TXT);
     char ipl[40]; snprintf(ipl, sizeof(ipl), "IP: %s", wifiConnIP);
-    drawTextC(SCR_W / 2, 390, ipl, 2, rgb565(160,170,196));
-    fillRoundRect(SCR_W / 2 - 100, SCR_H - 120, 200, 56, 16, rgb565(60,110,235));
-    drawTextC(SCR_W / 2, SCR_H - 102, "Listo", 2, rgb565(255,255,255));
+    drawTextC(SCR_W / 2, 390, ipl, 2, TH_TXT2);
+    fillRoundRect(SCR_W / 2 - 100, SCR_H - 120, 200, 56, 16, TH_PRIM);
+    drawTextC(SCR_W / 2, SCR_H - 102, "Listo", 2, TH_ONACC);
   } else if(wifiUIState == WUI_CONNECTING){
-    drawTextC(SCR_W / 2, 280, "Conectando...", 3, rgb565(255,255,255));
+    drawTextC(SCR_W / 2, 280, "Conectando...", 3, TH_TXT);
     char sub[48]; snprintf(sub, sizeof(sub), "a %s", wifiConnSSID);
-    drawTextC(SCR_W / 2, 320, sub, 2, rgb565(160,170,196));
+    drawTextC(SCR_W / 2, 320, sub, 2, TH_TXT2);
   } else {                                     // WUI_FAIL
-    drawCircle(SCR_W / 2, 280, 46, rgb565(230,90,90)); drawCircle(SCR_W / 2, 280, 45, rgb565(230,90,90));
-    strokeSegAA(SCR_W / 2 - 14, 264, SCR_W / 2 + 14, 296, 4.0f, rgb565(230,90,90));
-    strokeSegAA(SCR_W / 2 + 14, 264, SCR_W / 2 - 14, 296, 4.0f, rgb565(230,90,90));
-    drawTextC(SCR_W / 2, 350, "No se pudo conectar", 3, rgb565(255,255,255));
-    drawTextC(SCR_W / 2, 388, "Contrase\xC3\xB1" "a incorrecta o red fuera de rango", 1, rgb565(160,170,196));
-    fillRoundRect(SCR_W / 2 - 210, SCR_H - 120, 200, 56, 16, rgb565(70,74,90));
-    drawTextC(SCR_W / 2 - 110, SCR_H - 102, "Cancelar", 2, rgb565(255,255,255));
-    fillRoundRect(SCR_W / 2 + 10, SCR_H - 120, 200, 56, 16, rgb565(60,110,235));
-    drawTextC(SCR_W / 2 + 110, SCR_H - 102, "Reintentar", 2, rgb565(255,255,255));
+    drawCircle(SCR_W / 2, 280, 46, TH_ERR); drawCircle(SCR_W / 2, 280, 45, TH_ERR);
+    strokeSegAA(SCR_W / 2 - 14, 264, SCR_W / 2 + 14, 296, 4.0f, TH_ERR);
+    strokeSegAA(SCR_W / 2 + 14, 264, SCR_W / 2 - 14, 296, 4.0f, TH_ERR);
+    drawTextC(SCR_W / 2, 350, "No se pudo conectar", 3, TH_TXT);
+    drawTextC(SCR_W / 2, 388, "Contrase\xC3\xB1" "a incorrecta o red fuera de rango", 1, TH_TXT2);
+    fillRoundRect(SCR_W / 2 - 210, SCR_H - 120, 200, 56, 16, TH_SURF2);
+    drawTextC(SCR_W / 2 - 110, SCR_H - 102, "Cancelar", 2, TH_TXT);
+    fillRoundRect(SCR_W / 2 + 10, SCR_H - 120, 200, 56, 16, TH_PRIM);
+    drawTextC(SCR_W / 2 + 110, SCR_H - 102, "Reintentar", 2, TH_ONACC);
   }
   flxFlushAll();
 }
 static void wifiRenderUnavail(){
   setBuf(fb);
-  fillRect(0, 0, SCR_W, SCR_H, rgb565(14,16,24));
+  fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
   wifiBack();
-  drawTextC(SCR_W / 2, 60, "Wi-Fi", 4, rgb565(255,255,255));
-  drawTextC(SCR_W / 2, 300, "Wi-Fi desactivado en este build", 2, rgb565(160,170,196));
-  drawTextC(SCR_W / 2, 334, "(FLEXOS_ENABLE_WIFI = 0 en el .ino)", 1, rgb565(120,128,150));
+  drawTextC(SCR_W / 2, 60, "Wi-Fi", 4, TH_TXT);
+  drawTextC(SCR_W / 2, 300, "Wi-Fi desactivado en este build", 2, TH_TXT2);
+  drawTextC(SCR_W / 2, 334, "(FLEXOS_ENABLE_WIFI = 0 en el .ino)", 1, TH_MUTE);
   flxFlushAll();
+}
+// Repinta la pantalla de Wi-Fi que este a la vista. Lo usa themeChanged() para
+// que un cambio de tema hecho desde el Modo PC (o desde cualquier otra ruta que
+// deje Wi-Fi abierto) se vea al momento, sin tocar la maquina de estados.
+static void wifiSettingsRepaint(){
+#if FLEXOS_ENABLE_WIFI
+  if(wifiUIState == WUI_PASS)                                          wifiRenderPass(0);
+  else if(wifiUIState == WUI_LIST || wifiUIState == WUI_SCANNING)       wifiRenderList();
+  else                                                                  wifiRenderStatus();
+#else
+  wifiRenderUnavail();
+#endif
 }
 static void wifiExit(){ gState = ST_APP; settingsRender(); }
 
@@ -16234,28 +16548,28 @@ static void notifDrawTail(int cx, int topY, uint16_t col){
 static void notifDrawCard(Notification* n, int cardY){
   int x = NOTIF_MARGIN_X + (int)n->slideX;       // al deslizar a la izq, x se vuelve negativo
   int y = cardY, w = NOTIF_CARD_W, h = NOTIF_CARD_H;
-  notifDrawTail(x + w / 2, y, rgb565(90, 120, 200));   // primero: la tarjeta se dibuja justo debajo, sin solaparla
+  notifDrawTail(x + w / 2, y, thCard2());   // primero: la tarjeta se dibuja justo debajo, sin solaparla
   // Vidrio base (blur). drawLiquidGlassPanel recorta x<0
   // conservando el borde derecho -> el deslizamiento a la izquierda sale natural.
-  drawLiquidGlassPanel(x, y, w, h, NOTIF_RAD, rgb565(40, 60, 130));
+  drawLiquidGlassPanel(x, y, w, h, NOTIF_RAD, TH_GLASS2);
   // Degradado extra estilo burbuja (mas claro arriba, mas oscuro abajo).
   // Fila a fila con glInset() -- igual que drawLiquidGlassPanel -- para no
   // salirse de las esquinas redondeadas (una fillRectA plana sí se saldría).
   for(int j = 0; j < h; j++){
     int ins = glInset(j, h, NOTIF_RAD);
     uint8_t a = (uint8_t)(42 - 42 * j / h);
-    if(a > 0) hLineA(x + ins, y + j, w - 2 * ins, rgb565(255,255,255), a);
+    if(a > 0) hLineA(x + ins, y + j, w - 2 * ins, TH_TXT, a);
   }
-  drawRoundRect(x, y, w, h, NOTIF_RAD, rgb565(200, 210, 230));
+  drawRoundRect(x, y, w, h, NOTIF_RAD, TH_BORDER);
   // Icono 40x40 (las primitivas acotan coords negativas: seguro fuera de pantalla)
   drawModuleIcon(n->mod.type, x + 12, y + (h - 40) / 2, 40);
   // Textos
-  drawText(x + 62, y + 14, n->mod.name, 2, rgb565(255, 255, 255));
-  drawText(x + 62, y + 38, n->mod.sub,  1, rgb565(205, 214, 232));
+  drawText(x + 62, y + 14, n->mod.name, 2, TH_TXT);
+  drawText(x + 62, y + 38, n->mod.sub,  1, TH_TXT2);
   // Boton cerrar (X)
   int cx = x + w - 22, cy = y + 20;
-  strokeSegAA(cx - 5, cy - 5, cx + 5, cy + 5, 1.8f, rgb565(255, 255, 255));
-  strokeSegAA(cx - 5, cy + 5, cx + 5, cy - 5, 1.8f, rgb565(255, 255, 255));
+  strokeSegAA(cx - 5, cy - 5, cx + 5, cy + 5, 1.8f, TH_TXT);
+  strokeSegAA(cx - 5, cy + 5, cx + 5, cy - 5, 1.8f, TH_TXT);
 }
 
 // ---- Trigger de PRUEBA (solo Fase 1; se retira/reemplaza en Fase 2) ----
@@ -16556,6 +16870,76 @@ static void hwDetectTick(){
     probes++;
     if(i2cScanCursor >= I2C_SCAN_HI){ i2cSweeping = false; i2cEndSweep(); }
     else i2cScanCursor++;
+  }
+}
+
+// #############################################################
+// ##  PROPAGACION DE UN CAMBIO DE TEMA  ·  themeChanged()
+// ##  ------------------------------------------------------
+// ##  Punto UNICO al que llaman todos los sitios que tocan gDark o uiGlass
+// ##  (Ajustes -> Pantalla, Ajustes -> Personalizacion y el panel de Modo PC).
+// ##  Hace las tres cosas que hacian falta para que el tema se aplique sin
+// ##  reiniciar:
+// ##    1) persiste por el flujo NVS de siempre (cfgSavePrefs, namespace
+// ##       "flexos", mismas claves "dark"/"glass": nada que migrar);
+// ##    2) invalida TODAS las caches visuales que guardan pixeles ya
+// ##       tematizados -- escritorio (homeBuf), cortina del panel rapido
+// ##       (qsBuf), tarjeta Liquid Glass cacheada (glcCard), fondo de Modo PC
+// ##       (dexBg) y las miniaturas de Recientes, que son capturas del
+// ##       framebuffer hechas con el tema ANTERIOR;
+// ##    3) repinta la pantalla que este a la vista.
+// ##  Lo que NO hace, a proposito: liberar y volver a reservar buffers grandes.
+// ##  homeBuf, qsBuf, glcCard, dexBg y blurBg conservan su memoria (misma
+// ##  geometria, mismo formato RGB565); solo se marcan como sucios para que su
+// ##  proximo uso los recomponga. Cambiar de tema no mueve ni un byte de PSRAM.
+// ##  Va aqui, justo antes de setup(), porque necesita ver los renderers de
+// ##  todas las pantallas (Ajustes, Wi-Fi, Ajustes del teclado, Inicio...).
+// #############################################################
+static void themeChanged(bool save){
+  if(save) cfgSavePrefs();                    // 1) NVS: mismo flujo y mismas claves de siempre
+
+  // 2) caches visuales dependientes del tema (ninguna se libera: solo se marca)
+  gHomeDirty = true;                          // homeBuf: iconos, etiquetas y widgets del escritorio
+  qsDirty    = true;                          // qsBuf: la cortina se compone a partir de homeBuf
+  glcValid   = false;                          // tarjeta Liquid Glass cacheada (tinte y fondo cambian)
+  dexBgWall  = 0xFF;                           // fondo de Modo PC: fuerza dexBgBuild() en el proximo frame
+  // Miniaturas de Recientes: son capturas del framebuffer, o sea pixeles con el
+  // tema viejo dentro. Se sueltan (y se recuperan solos la proxima vez que se
+  // salga de esa app) en lugar de mostrar tarjetas con la apariencia anterior.
+  for(int i = 0; i < swCount; i++)
+    if(swTasks[i].thumb){ free(swTasks[i].thumb); swTasks[i].thumb = NULL; }
+  // La isla dinamica recompone su tarjeta desde cero en cada aparicion, y
+  // blurBg es el wallpaper desenfocado (contenido del usuario, no tema): ni una
+  // ni otro necesitan invalidarse.
+
+  // 3) repintado de la pantalla actual. Modo PC (app 4) queda fuera a
+  // proposito: su propio bucle (pcTick) redibuja el escritorio entero en cada
+  // frame y ya reconstruye dexBg al ver que dexBgWall cambio.
+  if(gState == ST_APP && gAppId == 4) return;
+  switch(gState){
+    case ST_HOME:     renderHome(); showHome(); break;
+    case ST_LOCK:     renderLock(); showLock(); break;
+    case ST_APP:
+      // Ajustes es de donde sale el 99% de los cambios de tema: se repinta con
+      // su propio render, que CONSERVA la navegacion (setView), la seleccion y
+      // el scroll -- volver a llamar a settingsEnter() devolveria al usuario a
+      // la lista de categorias en cuanto tocara el interruptor.
+      if(gAppId == 12){ settingsRender(); break; }
+      // El resto de apps se re-maquetan por la via de siempre (gRelayout), que
+      // es la misma que usa Modo PC al redimensionar una ventana: enter() debe
+      // RE-DIBUJAR, no re-inicializar.
+      // Paint (10) y Juegos (11) quedan fuera a proposito: su enter() reinicia
+      // CONTENIDO -- limpia el lienzo, vuelve al menu de juegos-- y un cambio de
+      // apariencia no puede destruir lo que el usuario tenga a medias. Ahi el
+      // tema nuevo entra al volver a abrir la app.
+      if(gAppId != 10 && gAppId != 11 && APP_REG[gAppId].enter){
+        gRelayout = true; APP_REG[gAppId].enter(); gRelayout = false;
+      }
+      break;
+    case ST_KBSET:    kbsRender(); break;
+    case ST_WIFI:     wifiSettingsRepaint(); break;
+    case ST_SWITCHER: swRenderCards(); break;
+    default: break;                            // splash/OOBE/apagado: se repintan solos
   }
 }
 

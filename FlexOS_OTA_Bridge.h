@@ -42,6 +42,13 @@ int  otaHostScrH(){ return SCR_H; }
 // restaurar banda a banda con garantias.
 bool otaHostIsHome(){ return gState == ST_HOME && qsPanelY == 0 && !editMode; }
 
+// APARIENCIA y MATERIAL del sistema. Este par es el UNICO punto por el que el
+// modulo OTA (compartido por Ultra, Ultra S3 y Pro) conoce el tema: no ve la
+// paleta semantica del sketch -- que es `static` y vive dentro del .ino-- sino
+// las dos preferencias, y resuelve sus propios colores claros/oscuros a partir
+// de ellas (cBg/cCard/cTxtHi... en FlexOS_OTA.cpp).
+// Por eso las pantallas de OTA ya siguen el tema: al cambiar gDark o uiGlass,
+// la siguiente vez que el modulo pinta, pinta con la apariencia nueva.
 bool otaHostDark() { return gDark;   }
 bool otaHostGlass(){ return uiGlass; }
 
