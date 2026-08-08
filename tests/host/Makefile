@@ -43,6 +43,7 @@ JPEG_SRC := $(ROOT)/FlexOS_JPEG.cpp
 APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge
+TOOLS := $(BUILD)/jpegcheck
 
 .PHONY: all run all-boards fixtures clean
 all: run
@@ -67,7 +68,15 @@ $(BUILD)/test_app: test_app.cpp $(APP_SRC) $(CORE_SRC) $(JPEG_SRC) | $(BUILD)
 $(BUILD)/test_bridge: test_bridge.cpp $(ROOT)/FlexOS_Browser_Bridge.h $(APP_SRC) $(CORE_SRC) $(JPEG_SRC) | $(BUILD)
 	$(CXX) $(COMMON) $(DEVFLAGS) -Wno-unused-function -o $@ test_bridge.cpp $(APP_SRC) $(CORE_SRC) $(JPEG_SRC)
 
-run: $(BINS)
+# Herramienta que usa la prueba de extremo a extremo del servicio para
+# comprobar que los JPEG que envia son decodificables POR EL FIRMWARE.
+$(BUILD)/jpegcheck: jpegcheck.cpp $(JPEG_SRC) $(ROOT)/FlexOS_JPEG.h | $(BUILD)
+	$(CXX) $(CXXSTD) -O2 $(WARN) -o $@ jpegcheck.cpp $(JPEG_SRC)
+
+.PHONY: tools
+tools: $(TOOLS)
+
+run: $(BINS) $(TOOLS)
 	@echo
 	@$(BUILD)/test_jpeg ../fixtures
 	@echo
@@ -78,6 +87,7 @@ run: $(BINS)
 	@$(BUILD)/test_bridge
 	@echo
 	@echo "Todas las pruebas de host han pasado."
+	@echo "Herramienta lista: $(BUILD)/jpegcheck (la usa server/test/e2e.test.js)."
 
 # El codigo de dispositivo cambia de presupuestos y de capacidades segun
 # la placa, asi que se compila y se ejecuta en los tres perfiles.

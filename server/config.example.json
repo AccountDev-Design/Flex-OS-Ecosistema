@@ -1,0 +1,100 @@
+{
+  "_comentario": [
+    "Copia este fichero a config.json y cambia lo que marque CAMBIAR.",
+    "NUNCA subas config.json al repositorio: lleva credenciales.",
+    "Arranque:  node src/server.js --config config.json"
+  ],
+
+  "host": "0.0.0.0",
+  "port": 8443,
+
+  "_tls": [
+    "Certificado y clave en PEM. Si faltan, el servicio arranca en HTTP/WS",
+    "PLANO y lo avisa por consola: eso solo vale para una red de",
+    "laboratorio. En produccion, o pones certificados aqui, o pones un",
+    "proxy inverso con TLS delante (ver README, 'Certificados')."
+  ],
+  "tls": {
+    "key": null,
+    "cert": null
+  },
+
+  "_devices": [
+    "Una entrada por placa. El 'token' es la credencial que se escribe en",
+    "el dispositivo (Navegador -> menu -> Ajustes -> Credencial).",
+    "Genera uno con:  node -e \"console.log(require('crypto').randomBytes(24).toString('base64url'))\"",
+    "Minimo 16 caracteres. Sin ninguna entrada aqui el servicio NO arranca:",
+    "un servicio de navegacion sin credenciales es un proxy abierto."
+  ],
+  "devices": [
+    { "id": "salon-ultra", "token": "CAMBIAR-pon-aqui-un-token-largo-y-aleatorio" }
+  ],
+
+  "limits": {
+    "maxSessions": 4,
+    "maxTabsPerSession": 6,
+    "sessionIdleMs": 600000,
+    "navigationTimeoutMs": 25000,
+    "maxViewportW": 1280,
+    "maxViewportH": 1280,
+    "maxFrameBytes": 196608,
+    "maxBytesPerMinute": 12582912,
+    "maxUrlLength": 2048
+  },
+
+  "_capture": [
+    "bandHeight: altura de cada banda en pixeles de pantalla. Mas bajo =",
+    "menos latencia por banda y mas fluido el tacto en el dispositivo;",
+    "mas alto = menos mensajes. 160-240 va bien para 480x800.",
+    "keyframeEveryMs: cada cuanto se reenvia la pagina entera aunque no",
+    "haya cambiado (recupera de un frame perdido)."
+  ],
+  "capture": {
+    "bandHeight": 200,
+    "minIntervalMs": 90,
+    "keyframeEveryMs": 8000,
+    "jpegQualityMin": 20,
+    "jpegQualityMax": 90
+  },
+
+  "_media": [
+    "Reproduccion de <video> como fotogramas JPEG (MJPEG). SIN AUDIO:",
+    "ninguna placa de Flex OS tiene salida de audio cableada. No se",
+    "eluden DRM ni controles de acceso; el contenido protegido queda",
+    "fuera de alcance."
+  ],
+  "media": {
+    "enabled": true,
+    "fps": 8,
+    "maxWidth": 640,
+    "quality": 45
+  },
+
+  "_security": [
+    "allowPrivate: deja que el navegador remoto alcance redes internas.",
+    "  DEJALO EN false salvo en un laboratorio aislado.",
+    "allowHosts: lista blanca explicita de nombres para desarrollo.",
+    "allowedPorts: null = cualquiera; [80, 443] para cerrarlo mas."
+  ],
+  "security": {
+    "allowPrivate": false,
+    "allowHosts": [],
+    "allowedPorts": null,
+    "blockDownloads": true
+  },
+
+  "_browser": [
+    "executablePath: null = el Chromium que instale Playwright",
+    "  (npm run browsers). Ponlo a mano si ya tienes uno."
+  ],
+  "browser": {
+    "executablePath": null,
+    "headless": true,
+    "userAgent": null,
+    "locale": "es-ES",
+    "timezone": "Europe/Madrid",
+    "args": []
+  },
+
+  "logLevel": "info"
+}

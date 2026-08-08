@@ -5,6 +5,10 @@
   "description": "Utilidades de host para generar/verificar los ficheros de prueba del navegador de Flex OS.",
   "type": "commonjs",
   "dependencies": {
-    "jpeg-js": "^0.4.4"
+    "jpeg-js": "^0.4.4",
+    "sharp": "^0.33.0"
+  },
+  "scripts": {
+    "fixtures": "node make-fixtures.js"
   }
 }

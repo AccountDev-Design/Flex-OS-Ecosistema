@@ -299,8 +299,18 @@ static void testLifecycle(){
   std::printf("[app] ciclo de vida y liberacion de recursos\n");
   long a0 = g_liveAllocs;
   flexBrowserBegin();
-  long afterBegin = g_liveAllocs;
-  CHECK(afterBegin > a0, "Begin no reservo el historial ni los favoritos");
+  // Begin() NO debe reservar nada: corre en el arranque del sistema y no
+  // se deshace nunca, asi que cualquier reserva suya seria memoria
+  // ocupada de forma permanente por una app que quiza no se abra.
+  CHECK(g_liveAllocs == a0, "Begin reservo %ld bloques; deberia no reservar ninguno",
+        g_liveAllocs - a0);
+
+  // Enter() SI reserva (historial, favoritos, buffers de red) y Exit()
+  // tiene que devolverlo todo.
+  flexBrowserEnter();
+  CHECK(g_liveAllocs > a0, "Enter no reservo nada");
+  flexBrowserExit();
+  CHECK(g_liveAllocs == a0, "Exit dejo %ld bloques vivos", g_liveAllocs - a0);
 
   for(int round = 0; round < 3; round++){
     long before = g_liveAllocs;

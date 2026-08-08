@@ -44,10 +44,12 @@
 //                              omnibox, validacion de URL/SSRF, paginas
 //                              internas, historial, favoritos, ajustes,
 //                              codec del protocolo, telemetria
-//    FlexOS_BrowserNet.cpp     transporte real (solo ARDUINO): cliente
-//                              WebSocket sobre TLS + tarea de red
-//    FlexOS_BrowserUI.cpp      interfaz y gestos (solo ARDUINO)
-//    FlexOS_Browser_Bridge.h   puente con las primitivas del .ino
+//    FlexOS_BrowserApp.cpp     lado DISPOSITIVO (solo ARDUINO): memoria y
+//                              capacidades medidas, persistencia, cliente
+//                              WebSocket sobre TLS en su propia tarea,
+//                              decodificacion de frames, interfaz y gestos
+//    FlexOS_Browser_Bridge.h   puente con las primitivas del .ino y
+//                              teclado del omnibox (solo ARDUINO)
 //
 //  El nucleo se compila TAMBIEN en el PC (tests/host) para poder
 //  probar de verdad el analizador del omnibox y el protocolo.
@@ -159,10 +161,10 @@ extern "C" {
   #define FLEXBR_HIST_MAX       24
   #define FLEXBR_BM_MAX         12
   #define FLEXBR_NET_STACK      6144
-  // Suelo de heap interno libre por debajo del cual NI SE INTENTA la
-  // sesion remota: TLS (mbedTLS) mas el buffer de recepcion no caben y
-  // el resultado seria un reinicio. Se comprueba EN EJECUCION.
-  #define FLEXBR_MIN_FREE_HEAP  92000
+  // Sin PSRAM TODO sale del heap interno: el buffer de recepcion, el
+  // historial y los favoritos. Hay que contarlo para no prometer una
+  // sesion remota que despues no cabe.
+  #define FLEXBR_OWN_INTERNAL   (32u * 1024u + 15u * 1024u + 7u * 1024u)
 #elif FLEXBR_PLAT_ULTRA_S3
   #define FLEXBR_KEYFRAME_MAX   131072   // 128 KB en PSRAM
   #define FLEXBR_TILE_MAX       49152    // 48 KB
@@ -170,7 +172,7 @@ extern "C" {
   #define FLEXBR_HIST_MAX       80
   #define FLEXBR_BM_MAX         40
   #define FLEXBR_NET_STACK      8192
-  #define FLEXBR_MIN_FREE_HEAP  48000
+  #define FLEXBR_OWN_INTERNAL   0u        // los buffers grandes van a PSRAM
 #else  /* ULTRA (P4) y HOST */
   #define FLEXBR_KEYFRAME_MAX   196608   // 192 KB en PSRAM
   #define FLEXBR_TILE_MAX       65536    // 64 KB
@@ -178,8 +180,34 @@ extern "C" {
   #define FLEXBR_HIST_MAX       120
   #define FLEXBR_BM_MAX         60
   #define FLEXBR_NET_STACK      10240
-  #define FLEXBR_MIN_FREE_HEAP  48000
+  #define FLEXBR_OWN_INTERNAL   0u        // los buffers grandes van a PSRAM
 #endif
+
+// -------------------------------------------------------------
+//  DOS UMBRALES DE HEAP, Y NO UNO, PORQUE SE MIRAN EN MOMENTOS
+//  DISTINTOS:
+//
+//    FLEXBR_TLS_HEAP      heap INTERNO libre que hace falta EN EL
+//                         MOMENTO DE CONECTAR. Es lo que reserva
+//                         mbedTLS para sus buffers de registro mas el
+//                         socket. Se comprueba en la tarea de red,
+//                         cuando los buffers del navegador YA estan
+//                         reservados.
+//    FLEXBR_MIN_FREE_HEAP el anterior MAS lo que el propio navegador va
+//                         a reservar del heap interno (0 en las placas
+//                         con PSRAM). Se comprueba AL ABRIR LA APP,
+//                         antes de reservar nada, para decidir si la
+//                         sesion remota es viable. Si no lo es, la
+//                         capacidad se apaga y la interfaz explica por
+//                         que, con el numero real de KB.
+//
+//  Un solo umbral daba un falso positivo en Flex OS Pro: pasaba la
+//  comprobacion al abrir, se reservaban 54 KB y despues TLS ya no cabia.
+// -------------------------------------------------------------
+#ifndef FLEXBR_TLS_HEAP
+#define FLEXBR_TLS_HEAP       46000u
+#endif
+#define FLEXBR_MIN_FREE_HEAP  (FLEXBR_TLS_HEAP + FLEXBR_OWN_INTERNAL)
 
 // -------------------------------------------------------------
 //  Capacidades. Se resuelven EN EJECUCION (memoria medida, PSRAM

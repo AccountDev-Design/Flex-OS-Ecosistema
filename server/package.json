@@ -1,0 +1,20 @@
+{
+  "name": "flexos-browser-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Servicio remoto de navegacion para Flex OS Ultra: ejecuta Chromium con Playwright y devuelve la pagina rasterizada al dispositivo por WebSocket (protocolo FBP/1).",
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "src/server.js",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js",
+    "browsers": "playwright install --with-deps chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0",
+    "sharp": "^0.33.0",
+    "ws": "^8.18.0"
+  }
+}

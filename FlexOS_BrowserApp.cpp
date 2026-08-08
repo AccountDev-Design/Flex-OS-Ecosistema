@@ -911,7 +911,10 @@ static void brNetTask(void*){
         continue;
       }
 #endif
-      if(brHostFreeHeap() < FLEXBR_MIN_FREE_HEAP){
+      // Aqui se compara contra FLEXBR_TLS_HEAP y no contra
+      // FLEXBR_MIN_FREE_HEAP: los buffers del navegador ya estan
+      // reservados, asi que lo que queda por caber es solo TLS.
+      if(brHostFreeHeap() < FLEXBR_TLS_HEAP){
         brSetError("Memoria insuficiente para abrir la sesi\xC3\xB3n");
         gNetState = BRN_ERROR;
         vTaskDelay(pdMS_TO_TICKS(3000));
@@ -2341,14 +2344,12 @@ void flexBrowserBegin(){
   memset(&gMedia, 0, sizeof(gMedia));
   brLoadSettings();
   brComputeCaps();
-  // Las listas viven en PSRAM cuando la hay: en el Pro son pequenas a
-  // proposito (FLEXBR_HIST_MAX = 24) y caben en el heap interno.
-  gHist = (BrHistEntry*)brHostAlloc(sizeof(BrHistEntry) * FLEXBR_HIST_MAX, true);
-  gBm   = (BrBookmark*)brHostAlloc(sizeof(BrBookmark) * FLEXBR_BM_MAX, true);
-  if(gHist) memset(gHist, 0, sizeof(BrHistEntry) * FLEXBR_HIST_MAX);
-  if(gBm)   memset(gBm, 0, sizeof(BrBookmark) * FLEXBR_BM_MAX);
-  brLoadHistory();
-  brLoadBookmarks();
+  // OJO: el historial y los favoritos NO se reservan aqui. Begin() corre
+  // en el arranque del sistema y no se deshace nunca, asi que reservar
+  // ahi las listas dejaria memoria ocupada de forma permanente por una
+  // app que quiza no se abra: en Flex OS Pro son ~21 KB de RAM INTERNA,
+  // que es justo la que necesita TLS despues. Se reservan en Enter() y
+  // se sueltan en Exit(); el contenido vive en LittleFS, no en RAM.
   brTabInit(0);
   gTab = 0;
   gView = BRV_INTERNAL;
@@ -2368,6 +2369,15 @@ void flexBrowserEnter(){
   brLoadSettings();
   brComputeCaps();
 
+  // Listas en memoria mientras la app este abierta (ver Begin).
+  if(!gHist){
+    gHist = (BrHistEntry*)brHostAlloc(sizeof(BrHistEntry) * FLEXBR_HIST_MAX, true);
+    if(gHist){ memset(gHist, 0, sizeof(BrHistEntry) * FLEXBR_HIST_MAX); brLoadHistory(); }
+  }
+  if(!gBm){
+    gBm = (BrBookmark*)brHostAlloc(sizeof(BrBookmark) * FLEXBR_BM_MAX, true);
+    if(gBm){ memset(gBm, 0, sizeof(BrBookmark) * FLEXBR_BM_MAX); brLoadBookmarks(); }
+  }
   if(!brAllocBuffers()){
     brSetError("Sin memoria para el navegador");
     gCaps &= ~FLEXBR_CAP_REMOTE;
@@ -2460,6 +2470,10 @@ void flexBrowserExit(){
 
   gFrReady = false;
   brFreeBuffers();
+  // Las listas se sueltan tambien: ya estan en disco y volver a leerlas
+  // al abrir cuesta una lectura de LittleFS, no memoria permanente.
+  if(gHist){ brHostFree(gHist); gHist = NULL; gHistN = 0; }
+  if(gBm){ brHostFree(gBm); gBm = NULL; gBmN = 0; }
   if(gCmdQ){ vQueueDelete(gCmdQ); gCmdQ = NULL; }
   if(gUrlQ){ vQueueDelete(gUrlQ); gUrlQ = NULL; }
   if(gFrDone){ vSemaphoreDelete(gFrDone); gFrDone = NULL; }
