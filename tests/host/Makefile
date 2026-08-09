@@ -53,7 +53,7 @@ $(BUILD):
 
 # --- nucleo portable: con sanitizers ---
 $(BUILD)/test_jpeg: test_jpeg.cpp $(JPEG_SRC) $(ROOT)/FlexOS_JPEG.h | $(BUILD)
-	$(CXX) $(COMMON) $(SAN) -o $@ test_jpeg.cpp $(JPEG_SRC)
+	$(CXX) $(COMMON) $(SAN) -pthread -o $@ test_jpeg.cpp $(JPEG_SRC)
 
 $(BUILD)/test_browser: test_browser.cpp $(CORE_SRC) $(ROOT)/FlexOS_Browser.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_browser.cpp $(CORE_SRC)

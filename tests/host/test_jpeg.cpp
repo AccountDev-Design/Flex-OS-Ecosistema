@@ -26,6 +26,7 @@
 #include <cmath>
 #include <string>
 #include <vector>
+#include <pthread.h>
 
 // ---- mini framework ----
 static int g_fail = 0, g_run = 0;
@@ -345,6 +346,84 @@ static void testRejects(const std::string& dir){
   }
 }
 
+// =============================================================
+//  EL DECODIFICADOR TIENE QUE CABER EN UNA PILA DE MICROCONTROLADOR
+//  ------------------------------------------------------------
+//  En la placa, el dibujo corre en el `loopTask` de arduino-esp32:
+//  8192 BYTES de pila. En el PC la pila del proceso son megas, asi que
+//  un decodificador que reserve 8 KB de estado como local pasa todas
+//  las pruebas aqui y revienta la placa en el primer frame de verdad.
+//  Eso fue un fallo real en la ESP32-P4: pantalla de un solo color y
+//  "PANIC / fatal exception / core dump" al recibir la primera imagen.
+//
+//  Por eso esta prueba decodifica dentro de un hilo con una pila
+//  DELIBERADAMENTE PEQUENA (16 KB, el doble de la del loopTask, para
+//  dejar sitio a la cadena de llamadas del navegador). Si alguien
+//  vuelve a poner una estructura grande en la pila, esto se cae aqui
+//  -- que es donde tiene que caerse.
+// =============================================================
+struct StackProbe {
+  std::string path;
+  int         rc;
+  long        rows;
+};
+
+static bool probeRowCb(void* user, int y, int w, const uint16_t* px){
+  (void)y; (void)px;
+  StackProbe* p = (StackProbe*)user;
+  p->rows += w > 0 ? 1 : 0;
+  return true;
+}
+
+static void* probeThread(void* arg){
+  StackProbe* p = (StackProbe*)arg;
+  std::vector<uint8_t> data;
+  if(!readFile(p->path, data)){ p->rc = -1000; return NULL; }
+  FlexJpegInfo info;
+  // Igual que hace el navegador: primero sondea y despues decodifica.
+  FlexJpegInfo probe;
+  p->rc = flexJpegProbe(data.data(), data.size(), &probe);
+  if(p->rc == FLEXJPG_OK)
+    p->rc = flexJpegDecode(data.data(), data.size(), probe.width, 0,
+                           (uint32_t)probe.width * (uint32_t)probe.height * 2u,
+                           &info, probeRowCb, p, NULL, NULL);
+  return NULL;
+}
+
+static void testSmallStack(const std::string& dir){
+  std::printf("[pila] el decodificador cabe en la pila del loopTask\n");
+  // La imagen mas grande de la coleccion: 480x800, la peor de todas para
+  // el consumo de pila (mas MCU por fila, tablas Huffman completas).
+  StackProbe p;
+  p.path = dir + "/page480.jpg";
+  p.rc = -999;
+  p.rows = 0;
+
+  pthread_attr_t at;
+  pthread_attr_init(&at);
+  // 16 KB. El loopTask de arduino-esp32 tiene 8 KB; se deja el doble
+  // porque aqui abajo hay ademas el marco de pthread y el del propio
+  // test.
+  if(pthread_attr_setstacksize(&at, 16 * 1024) != 0){
+    std::printf("   (omitida: la plataforma no deja fijar el tamano de pila)\n");
+    pthread_attr_destroy(&at);
+    return;
+  }
+  pthread_t th;
+  if(pthread_create(&th, &at, probeThread, &p) != 0){
+    std::printf("   (omitida: no se pudo crear el hilo de pila pequena)\n");
+    pthread_attr_destroy(&at);
+    return;
+  }
+  pthread_join(th, NULL);
+  pthread_attr_destroy(&at);
+
+  CHECK(p.rc == FLEXJPG_OK,
+        "decodificar 480x800 en una pila de 16 KB devolvio %d", p.rc);
+  CHECK(p.rows > 700, "solo se emitieron %ld filas", p.rows);
+  std::printf("   480x800 decodificada en una pila de 16 KB: %ld filas\n", p.rows);
+}
+
 int main(int argc, char** argv){
   std::string dir = argc > 1 ? argv[1] : fixtureDir();
   std::printf("=== FlexOS · decodificador JPEG · ficheros en %s ===\n", dir.c_str());
@@ -356,6 +435,7 @@ int main(int argc, char** argv){
   testExact(dir, fx);
   testScaling(dir);
   testRejects(dir);
+  testSmallStack(dir);
   std::printf("=== %d comprobaciones, %d fallos ===\n", g_run, g_fail);
   return g_fail ? 1 : 0;
 }

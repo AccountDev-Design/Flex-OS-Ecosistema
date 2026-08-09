@@ -513,6 +513,18 @@ void brHostBlitRow(int x, int y, int w, const uint16_t* src){
   if(x + w - 1 > gClipX1) w = gClipX1 - x + 1;
   if(w <= 0) return;
 
+  // (c) Y un tope DURO contra el lienzo fisico, sin depender de que (a) y
+  //     (b) esten bien calculados. Los dos primeros recortes son de
+  //     maquetacion; este es de seguridad de memoria: debajo hay un
+  //     memcpy sobre el framebuffer, y un descuadre en el area de
+  //     contenido o en la banda de recorte no puede convertirse en una
+  //     escritura fuera del buffer.
+  if(y < 0 || y >= SCR_H) return;
+  if(x < 0){ int d = -x; src += d; w -= d; x = 0; }
+  if(x >= SCR_W) return;
+  if(x + w > SCR_W) w = SCR_W - x;
+  if(w <= 0) return;
+
 #if FLEXBR_PLAT_PRO
   // ESP32 clasico: el lienzo LOGICO (480x640) no coincide con el
   // framebuffer FISICO (240x320) -- el escalado vive dentro de las

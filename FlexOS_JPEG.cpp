@@ -455,24 +455,54 @@ static int jpegParseHeaders(JDec* d, const uint8_t* data, size_t len, bool heade
 // -------------------------------------------------------------
 //  API: solo cabecera
 // -------------------------------------------------------------
+// -------------------------------------------------------------
+//  EL ESTADO DEL DECODIFICADOR NO VA EN LA PILA. NUNCA.
+//  ------------------------------------------------------------
+//  `sizeof(JDec)` son 8240 bytes: las ocho tablas de Huffman (4 DC +
+//  4 AC) ocupan 944 B cada una porque llevan una tabla rapida de 256
+//  entradas para resolver los codigos cortos en un solo acceso.
+//
+//  En el PC eso da exactamente igual: la pila de un proceso son megas,
+//  y por eso las pruebas de host decodificaban una imagen de 480x800
+//  sin inmutarse. En la placa NO: el dibujo corre en el `loopTask` de
+//  arduino-esp32, cuya pila son 8192 BYTES. Declarar `JDec d;` ahi
+//  desbordaba la pila entera en cuanto llegaba el primer frame de
+//  verdad -- antes incluso de decodificar un solo bloque.
+//
+//  Sintoma exacto en la ESP32-P4: la pantalla se llena de basura de un
+//  solo color y acto seguido salta "PANIC / fatal exception / core
+//  dump" y el sistema se reinicia. No es la URL, ni la Wi-Fi, ni el
+//  token, ni el JPEG: es la pila.
+//
+//  Asi que el estado va al monton (heap), con el mismo asignador que
+//  ya se usa para los planos de muestras. Son unos 8 KB temporales por
+//  banda, y como todas las reservas son del MISMO tamano el asignador
+//  reutiliza el mismo bloque una y otra vez: no fragmenta.
+//
+//  Regla para el futuro: en este fichero, nada de mas de ~256 bytes se
+//  declara como local.
+// -------------------------------------------------------------
+static void* jdefAlloc(size_t n){ return malloc(n); }
+static void  jdefFree(void* p){ free(p); }
+
 int flexJpegProbe(const uint8_t* data, size_t len, FlexJpegInfo* info){
   if(!data || len < 4 || !info) return FLEXJPG_ERR_ARG;
-  JDec d; memset(&d, 0, sizeof(d));
-  int r = jpegParseHeaders(&d, data, len, true);
+  JDec* d = (JDec*)jdefAlloc(sizeof(JDec));
+  if(!d) return FLEXJPG_ERR_MEMORY;
+  memset(d, 0, sizeof(*d));
+  int r = jpegParseHeaders(d, data, len, true);
   memset(info, 0, sizeof(*info));
-  info->progressive = d.progressive;
-  info->width = d.width; info->height = d.height;
-  info->outWidth = d.width; info->outHeight = d.height;
-  info->components = d.ncomp; info->scaleDenom = 1;
+  info->progressive = d->progressive;
+  info->width = d->width; info->height = d->height;
+  info->outWidth = d->width; info->outHeight = d->height;
+  info->components = d->ncomp; info->scaleDenom = 1;
+  jdefFree(d);
   return r < 0 ? r : FLEXJPG_OK;
 }
 
 // -------------------------------------------------------------
 //  API: decodificacion completa
 // -------------------------------------------------------------
-static void* jdefAlloc(size_t n){ return malloc(n); }
-static void  jdefFree(void* p){ free(p); }
-
 int flexJpegDecode(const uint8_t* data, size_t len,
                    int maxW, int maxH, uint32_t maxPixels,
                    FlexJpegInfo* infoOut,
@@ -482,9 +512,13 @@ int flexJpegDecode(const uint8_t* data, size_t len,
   if(!af) af = jdefAlloc;
   if(!ff) ff = jdefFree;
 
-  JDec d; memset(&d, 0, sizeof(d));
+  // Ver el bloque de arriba: 8240 bytes al monton, jamas a la pila.
+  JDec* dp = (JDec*)af(sizeof(JDec));
+  if(!dp) return FLEXJPG_ERR_MEMORY;
+  memset(dp, 0, sizeof(*dp));
+  JDec& d = *dp;
   int sosEnd = jpegParseHeaders(&d, data, len, false);
-  if(sosEnd < 0) return sosEnd;
+  if(sosEnd < 0){ ff(dp); return sosEnd; }
 
   // ---- Divisor de escala: el menor que hace que quepa ----
   int S = 1;
@@ -495,14 +529,14 @@ int flexJpegDecode(const uint8_t* data, size_t len,
     if(maxH > 0 && oh > maxH) fits = false;
     if(maxPixels && (uint32_t)ow * (uint32_t)oh > maxPixels) fits = false;
     if(fits) break;
-    if(S >= 8) return FLEXJPG_ERR_TOOBIG;
+    if(S >= 8){ ff(dp); return FLEXJPG_ERR_TOOBIG; }
     S <<= 1;
   }
   int outW = (d.width + S - 1) / S;
   int outH = (d.height + S - 1) / S;
 
   for(int c = 0; c < d.ncomp; c++)
-    if(!d.quantSet[d.comp[c].tq]) return FLEXJPG_ERR_BADMARKER;
+    if(!d.quantSet[d.comp[c].tq]){ ff(dp); return FLEXJPG_ERR_BADMARKER; }
 
   d.mcuW  = 8 * d.hmax;  d.mcuH = 8 * d.vmax;
   d.mcusX = (d.width  + d.mcuW - 1) / d.mcuW;
@@ -674,6 +708,7 @@ int flexJpegDecode(const uint8_t* data, size_t len,
 done:
   if(outRow) ff(outRow);
   for(int c = 0; c < FLEXJPG_MAX_COMPONENTS; c++) if(planes[c]) ff(planes[c]);
+  ff(dp);
   return rc;
 }
 

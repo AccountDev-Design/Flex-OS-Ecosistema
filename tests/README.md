@@ -67,7 +67,7 @@ node make-fixtures.js
 
 ```
 === FlexOS · decodificador JPEG · ficheros en ../fixtures ===
-=== 191 comprobaciones, 0 fallos ===
+=== 193 comprobaciones, 0 fallos ===
 === FlexOS · nucleo del navegador ===
 === 382 comprobaciones, 0 fallos ===
 === FlexOS · app del navegador (Flex OS Ultra) ===

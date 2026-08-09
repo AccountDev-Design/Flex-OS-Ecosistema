@@ -634,3 +634,56 @@ cientos de píxeles — el «scroll fantasma».
 `flex://settings`, arrastra 96 px sobre las teclas y compara el
 framebuffer del área de Ajustes. Sin la captura exclusiva: 45 321
 píxeles cambiados. Con ella: 0.
+
+
+---
+
+## D33 · El estado del decodificador JPEG va al montón, nunca a la pila
+
+**Decidido.** `JDec` se reserva con el asignador (`af`/`ff` en
+`flexJpegDecode`, `malloc`/`free` en `flexJpegProbe`) en vez de
+declararse como variable local.
+
+**Por qué.** `sizeof(JDec)` son **8240 bytes**: las ocho tablas de
+Huffman (4 DC + 4 AC) ocupan 944 B cada una porque llevan una tabla
+rápida de 256 entradas para resolver de un golpe los códigos cortos.
+
+En el PC eso da igual — la pila de un proceso son megas — y por eso las
+pruebas de host decodificaban una imagen de 480×800 sin inmutarse. En la
+placa **no**: el dibujo corre en el `loopTask` de arduino-esp32, cuya
+pila son **8192 bytes**. Declarar `JDec d;` ahí desbordaba la pila
+entera en cuanto llegaba el primer frame de verdad, antes incluso de
+decodificar un bloque.
+
+Síntoma exacto en la ESP32-P4: la pantalla se llena de basura de un solo
+color y acto seguido salta `PANIC / fatal exception / core dump` y el
+sistema se reinicia. No era la URL, ni la Wi-Fi, ni el token, ni el
+JPEG: era la pila. El mismo `.ino` ya llevaba comentarios de haber
+subido otras tareas de 6 KB a 8 KB por este motivo.
+
+Son ~8 KB temporales por banda, y como todas las reservas son del mismo
+tamaño el asignador reutiliza el mismo bloque: no fragmenta.
+
+**Regla que queda escrita en el fichero**: en `FlexOS_JPEG.cpp`, nada de
+más de ~256 bytes se declara como local.
+
+**Comprobado**: `tests/host/test_jpeg.cpp`, prueba «el decodificador cabe
+en la pila del loopTask» — decodifica `page480.jpg` (480×800, el peor
+caso de la colección) dentro de un hilo con una pila de **16 KB**, el
+doble de la del `loopTask`. Con `JDec` en la pila, ASan aborta con
+*stack-overflow*; con la reserva en el montón, emite las 800 filas.
+
+---
+
+## D34 · Tope duro contra el lienzo físico en `brHostBlitRow`
+
+**Decidido.** Además de recortar contra el área de contenido y contra la
+banda de recorte del motor, `brHostBlitRow()` acota `x` e `y` contra
+`SCR_W`/`SCR_H` sin condiciones antes del `memcpy`.
+
+**Por qué.** Los dos primeros recortes son de **maquetación**: expresan
+dónde *debe* dibujarse la página. El tercero es de **seguridad de
+memoria**: debajo hay un `memcpy` directo sobre el framebuffer, y un
+descuadre en el área de contenido o una banda de recorte mal puesta no
+puede convertirse nunca en una escritura fuera del buffer. Cuestan
+cuatro comparaciones por fila.

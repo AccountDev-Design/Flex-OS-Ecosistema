@@ -219,13 +219,13 @@ make all-boards      # el código de dispositivo en los tres perfiles
 
 | Batería | Qué comprueba | Comprobaciones |
 |---|---|---|
-| `test_jpeg` | El decodificador contra **libjpeg-turbo**: 4:4:4, 4:2:0, 4:2:2, 4:4:0, gris, dimensiones impares, marcadores de reinicio, escalado 1/2·1/4·1/8, progresivo rechazado, 70 truncamientos, datos corruptos, cancelación, fallo de reserva. Con ASan+UBSan. | 191 |
+| `test_jpeg` | El decodificador contra **libjpeg-turbo**, y **que quepa en la pila del `loopTask`** (decodifica 480×800 dentro de un hilo con 16 KB de pila). 4:4:4, 4:2:0, 4:2:2, 4:4:0, gris, dimensiones impares, marcadores de reinicio, escalado 1/2·1/4·1/8, progresivo rechazado, 70 truncamientos, datos corruptos, cancelación, fallo de reserva. Con ASan+UBSan. | 193 |
 | `test_browser` | Omnibox (los 7 casos, esquemas prohibidos, IP en todas sus formas, inyección de control, límites), codec FBP/1 byte a byte con todos los truncamientos, SHA-1 contra los vectores del RFC 3174, `Sec-WebSocket-Accept` contra el vector del RFC 6455. Con ASan+UBSan. | 382 |
 | `test_app` | Ciclo de vida (Enter reserva / Exit libera **todo**, tres vueltas), el dibujo nunca sale del área de contenido, capacidades medidas con motivo legible, omnibox y teclado con UTF-8, persistencia agrupada. En los tres perfiles de placa. | 41 |
 | `test_bridge` | El puente compila y funciona contra un `.ino` simulado: geometría del teclado, recorte de `brHostBlitRow`, **el teclado se dibuja visible** (se cuentan píxeles en su franja) a pantalla completa y en Modo PC/DeX, **al cerrarse no deja ni un píxel** por debajo de `WIN_BOT`, **con el teclado abierto un arrastre no mueve Ajustes**, y el navegador no deja instalada una banda de recorte estrecha. | 31 |
 | `test_net` | **El transporte de verdad**: `WiFiClient` sobre sockets TCP POSIX, `xTaskCreatePinnedToCore` lanzando hilos reales, semáforos y colas reales, y al otro lado un servidor WebSocket que habla FBP/1 y **manda el primer FRAME troceado con una pausa de 400 ms en mitad del mensaje**. Comprueba el apretón de manos, el HELLO, el NAVIGATE, la recepción del JPEG, su decodificación y su volcado — sin una sola reconexión. | 8 |
 
-**Resultado actual: 653 comprobaciones, 0 fallos.**
+**Resultado actual: 655 comprobaciones, 0 fallos.**
 
 `test_net` es la única batería de host que ejercita `wsHandshake()`,
 `wsReadMessage()` y `brNetTask()` completos. Es la que reproduce —y
@@ -329,7 +329,8 @@ lo medido.
 | 27 | **Credencial inválida** | Cambiar un carácter de la credencial y navegar | «Credencial rechazada por el servicio», y el mismo texto por Serial |
 | 28 | **El servicio no manda imágenes** | Servidor accesible pero con Chromium parado | Tras 12 s: «El servicio no envía imágenes de la página», con el número de mensajes recibidos |
 | 29 | **Teclado: cierre limpio** | Tocar la barra de direcciones, escribir, pulsar **Ir**; repetir volviendo atrás y guardando ajustes | No queda **ninguna** parte del teclado dibujada — en particular la fila inferior (shift · ?123 · Es · espacio · borrar · Ir) |
-| 30 | **Teclado y desplazamiento** | `flex://settings` → tocar «Servidor de navegación» → escribir una dirección larga arrastrando el dedo entre teclas | La lista de Ajustes **no se mueve** ni un píxel mientras el teclado está abierto, y al cerrarlo no hay salto |
+| 30 | **Primera carga sin reinicio** | Con el servicio en marcha, `example.com` → Ir | La página se dibuja. **No** debe aparecer pantalla de un solo color ni `PANIC / fatal exception`: eso era el desbordamiento de pila del decodificador (D33) |
+| 31 | **Teclado y desplazamiento** | `flex://settings` → tocar «Servidor de navegación» → escribir una dirección larga arrastrando el dedo entre teclas | La lista de Ajustes **no se mueve** ni un píxel mientras el teclado está abierto, y al cerrarlo no hay salto |
 
 **Plantilla para anotar lo medido** (rellenar en la placa):
 
@@ -489,9 +490,11 @@ Activo por defecto (`FLEXBR_NETDEBUG 1`; se apaga con
 [NAV] Sesión abierta: esperando la página
 [NET] NAVIGATE canal=1 -> https://example.com/ (45 B)
 [NAV] Cargando la página...
-[NET] FRAME seq=7 canal=1 480x200 en (0,0) 14452 B
-[NET] FRAME seq=8 canal=1 480x200 en (0,200) 11938 B
+[NET] primer FRAME: canal=1 480x200 en (0,0) 14452 B
 ```
+
+Sólo se traza el **primer** frame de cada navegación: una línea por
+banda inunda el monitor serie sin aportar nada.
 
 Y un fallo dice exactamente dónde:
 

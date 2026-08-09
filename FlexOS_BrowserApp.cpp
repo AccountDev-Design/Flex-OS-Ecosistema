@@ -866,10 +866,15 @@ static void brOnFrame(const FbpHeader* h, const uint8_t* payload){
     return;
   }
   gLastFrameMs = brHostMillis();
+  // Solo se traza el PRIMER frame de cada navegacion. Una linea por
+  // banda inunda el monitor serie y no aporta nada: lo util es saber
+  // que la primera imagen llego y con que geometria.
+  if(gNavWaiting){
+    BR_NETLOG("[NET] primer FRAME: canal=%u %ux%u en (%d,%d) %u B\n",
+              (unsigned)h->channel, (unsigned)f.w, (unsigned)f.h,
+              (int)f.x, (int)f.y, (unsigned)f.imgLen);
+  }
   gNavWaiting = false;
-  BR_NETLOG("[NET] FRAME seq=%u canal=%u %ux%u en (%d,%d) %u B\n",
-            (unsigned)h->seq, (unsigned)h->channel, (unsigned)f.w, (unsigned)f.h,
-            (int)f.x, (int)f.y, (unsigned)f.imgLen);
   // Contrapresion: si la interfaz aun no ha dibujado el frame anterior,
   // NO se acumula otro. El de ahora es mas util que el de antes.
   if(gFrReady){ gStats.framesDropped++; }
