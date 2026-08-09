@@ -36,6 +36,11 @@
 #include "FlexOS_Browser.h"
 #include "FlexOS_FS.h"
 
+// Guardia de version (ver el bloque 0 de FlexOS_Browser.h).
+static_assert(FLEXBR_BUILD == 3,
+  "FlexOS_Browser_Bridge.h y FlexOS_Browser.h son de versiones distintas: "
+  "copia otra vez LOS CUATRO ficheros del navegador a la carpeta del sketch.");
+
 #if FLEXBR_ON
 
 // =============================================================
@@ -75,30 +80,88 @@ static int brKbTop(){
   return top;
 }
 
+// -------------------------------------------------------------
+//  DIAGNOSTICO DEL CAMINO FISICO DE DIBUJO
+//  ------------------------------------------------------------
+//  A 1 (por defecto mientras se depura el teclado en hardware),
+//  brKbRender() deja constancia de lo que HACE DE VERDAD en la placa:
+//
+//   · Por Serial, una vez cada 700 ms: si se ejecuto, en QUE buffer
+//     escribio (comparado con fb / bbuf / el lienzo de DeX), como
+//     quedo la banda de recorte, la region exacta que se manda al
+//     panel, si el motor estaba en landscape, y -- lo decisivo -- el
+//     valor RELEIDO de un pixel del interior de una tecla. Si ese
+//     pixel trae el color de la tecla, el dibujo llego al
+//     framebuffer y el problema esta despues (flush/presenter); si
+//     trae otra cosa, no llego, y el problema esta antes.
+//
+//   · En pantalla, dos marcas de 12x12: magenta en la esquina
+//     superior izquierda de la franja del teclado y cian en la
+//     inferior derecha. Se escriben DIRECTAMENTE en el framebuffer
+//     (fb[y*SCR_W+x]), saltandose px(), la banda de recorte, gBuf y
+//     cualquier rotacion. Si se ven las marcas pero no las teclas,
+//     el transporte al panel funciona y el fallo esta en las
+//     primitivas; si no se ve ninguna, el fallo esta en el flush o
+//     en la region que se sube.
+//
+//  Se apaga con -DFLEXBR_KBDEBUG=0 (o poniendolo a 0 aqui) cuando ya
+//  no haga falta: no deja rastro en el binario.
+// -------------------------------------------------------------
+#ifndef FLEXBR_KBDEBUG
+#define FLEXBR_KBDEBUG 1
+#endif
+
+// Marca escrita a pelo en el framebuffer real. No pasa por px() ni por
+// gBuf a proposito: es el unico dibujo del sistema que no puede fallar
+// por culpa del estado grafico, y por eso sirve de referencia.
+#if FLEXBR_KBDEBUG
+static void brKbDebugMark(int x, int y, uint16_t c){
+  if(!fb) return;
+  for(int j = 0; j < 12; j++){
+    int yy = y + j;
+    if(yy < 0 || yy >= SCR_H) continue;
+    for(int i = 0; i < 12; i++){
+      int xx = x + i;
+      if(xx < 0 || xx >= SCR_W) continue;
+      fb[(size_t)yy * SCR_W + xx] = c;
+    }
+  }
+}
+#endif
+
+// -------------------------------------------------------------
+//  DIBUJO DEL TECLADO
+//  ------------------------------------------------------------
+//  Aqui se toma el control COMPLETO del estado grafico y se devuelve
+//  tal cual estaba. No se usa setBuf(): setBuf desvia a gRtTarget
+//  cuando la app corre hospedada en una ventana de Modo PC, y el
+//  teclado es del SISTEMA -- tiene que ir al framebuffer real pase lo
+//  que pase. Tampoco se hereda la banda de recorte de nadie: se
+//  instala la del teclado y se restaura la anterior al salir.
+//
+//  Esta funcion es la ULTIMA capa del cuadro (la llama navTick al
+//  final), asi que lo que pinte no lo puede tapar ningun repintado
+//  posterior de la app.
+// -------------------------------------------------------------
 static void brKbRender(){
   if(!flexBrowserKeyboardOpen()) return;
-  setBuf(fb);
-  int dy = brKbDY();
-  int bottom = brKbBottom();
-  int ky = KB_Y + dy;
-  int panelTop = brKbTop();
-  if(panelTop >= bottom) return;            // ventana demasiado baja: nada que pintar
 
-  // EL TECLADO ABRE SU PROPIA BANDA DE RECORTE.
-  //
-  // No es redundante con que el navegador reponga la suya: es la
-  // garantia de que el teclado se ve SIEMPRE, sin depender de quien
-  // haya dibujado antes ni de en que orden. El fallo que motivo esto
-  // (ESP32-P4: el teclado escribia pero no se veia) era exactamente
-  // eso -- otra capa habia dejado la banda estrecha y px() descartaba
-  // en silencio cada pixel del teclado.
-  //
-  // Se recorta a la franja del teclado, ni mas ni menos: asi el teclado
-  // tampoco puede pintar por encima del contenido de la app.
-  gClipY0 = panelTop < 0 ? 0 : panelTop;
-  gClipY1 = bottom - 1;
-  gClipX0 = 0;
-  gClipX1 = SCR_W - 1;
+  const int dy       = brKbDY();
+  const int bottom   = brKbBottom();
+  const int ky       = KB_Y + dy;
+  const int panelTop = brKbTop();
+  if(panelTop >= bottom || !fb) return;      // ventana demasiado baja o sin lienzo
+
+  // ---- se guarda TODO el estado grafico ----
+  uint16_t* oBuf = gBuf;
+  const int  oy0 = gClipY0, oy1 = gClipY1, ox0 = gClipX0, ox1 = gClipX1;
+  const bool oLand = gLand;
+
+  gBuf    = fb;              // framebuffer real, sin desvios
+  gLand   = false;           // el teclado siempre es vertical
+  gClipY0 = panelTop; gClipY1 = bottom - 1;
+  gClipX0 = 0;        gClipX1 = SCR_W - 1;
+
   // Cabecera del campo: que se esta editando y el texto actual. Se pinta
   // aqui y no en el navegador porque este trozo de pantalla pertenece al
   // teclado (el area de contenido de la app termina en panelTop).
@@ -112,10 +175,14 @@ static void brKbRender(){
   if(tw <= SCR_W - 24) drawText(12, panelTop + 16, txt, 2, brHostColor(BRC_TXT));
   else                 drawTextR(SCR_W - 12, panelTop + 16, txt, 2, brHostColor(BRC_TXT));
 
+  // El panel de vidrio escribe en gBuf con indexacion directa y se salta
+  // la banda de recorte (ver drawLiquidGlassPanelEx). Con el teclado eso
+  // daria igual porque la franja es suya entera, pero se usa la ruta
+  // plana cuando el vidrio esta apagado, como en el resto del sistema.
   if(uiGlass) drawLiquidGlassPanel(0, ky - 4, SCR_W, bottom - (ky - 4), 0, kbColPanel());
   else        fillRect(0, ky - 4, SCR_W, bottom - (ky - 4), kbColPanel());
 
-  int fs = kbFontSize();
+  const int fs = kbFontSize();
   for(int r = 0; r < KB_ROWS; r++) for(int c = 0; c < KB_COLS; c++){
     int x = KB_X + c * (KB_KW + KB_GAP), y = ky + r * (KB_KH + KB_GAP);
     const char* k = mapaActivo[r][c];
@@ -123,11 +190,44 @@ static void brKbRender(){
     if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ u[0] = (char)(k[0] - 32); u[1] = 0; k = u; }
     kbPaintKey(x, y, KB_KW, KB_KH, k, fs, kbColKey(), kbColKeyTxt(), false);
   }
-  int fy = ky + 3 * (KB_KH + KB_GAP);
+  const int fy = ky + 3 * (KB_KH + KB_GAP);
   const char* lb[KB_FKEYS] = { "shift", kbLayerLabel(), kbLangEs ? "ES" : "EN", "espacio", "<-", "Ir" };
   for(int i = 0; i < KB_FKEYS; i++) kbFKey(kbFKeyX(i), fy, kbFKeyW(i), lb[i], (i == 0) && kbShift);
+
+#if FLEXBR_KBDEBUG
+  // Pixel de control: el centro de la primera tecla de la segunda fila.
+  const int probeX = KB_X + KB_KW / 2;
+  const int probeY = ky + (KB_KH + KB_GAP) + KB_KH / 2;
+  uint16_t probe = 0xFFFF;
+  if(probeX >= 0 && probeX < SCR_W && probeY >= 0 && probeY < SCR_H)
+    probe = fb[(size_t)probeY * SCR_W + probeX];
+  brKbDebugMark(0, panelTop, rgb565(255, 0, 255));               // magenta: inicio de la franja
+  brKbDebugMark(SCR_W - 12, bottom - 12, rgb565(0, 255, 255));   // cian: final de la franja
+  static uint32_t dbgLast = 0;
+  static uint32_t dbgN = 0;
+  dbgN++;
+  if(millis() - dbgLast > 700){
+    dbgLast = millis();
+    Serial.printf("[KB] #%u buf=%s(%p) fb=%p land=%d hosted=%d gAppH=%d\n",
+                  (unsigned)dbgN,
+                  (gBuf == fb ? "fb" : (gBuf == bbuf ? "bbuf" : "otro")),
+                  (void*)gBuf, (void*)fb, (int)gLand, (int)gHosted, gAppH);
+    Serial.printf("     franja=%d..%d  ky=%d  clip=y[%d..%d] x[%d..%d]  kbSize=%d %dx%d\n",
+                  panelTop, bottom - 1, ky, gClipY0, gClipY1, gClipX0, gClipX1,
+                  gKbSize, KB_KW, KB_KH);
+    Serial.printf("     pixel(%d,%d)=0x%04X  esperado tecla=0x%04X panel=0x%04X  opac=%d glass=%d hiCon=%d estilo=%d\n",
+                  probeX, probeY, probe, kbColKey(), kbColPanel(),
+                  gKbOpacity, (int)uiGlass, (int)gKbHiCon, gKbStyle);
+  }
+#endif
+
+  // ---- se devuelve el estado grafico EXACTAMENTE como estaba ----
+  gBuf = oBuf; gLand = oLand;
+  gClipY0 = oy0; gClipY1 = oy1; gClipX0 = ox0; gClipX1 = ox1;
+
+  // El volcado va DESPUES de restaurar: flxFlush no mira el recorte, y
+  // asi la banda que se sube al panel es exactamente la del teclado.
   flxFlush(panelTop, bottom - 1);
-  brHostClipReset();          // se deja la pantalla entera para el siguiente
 }
 
 // Devuelve true si el toque se consumio dentro del teclado.
@@ -149,7 +249,9 @@ static bool brKbTouch(){
     else if(fi == 3) flexBrowserKeyText(" ");
     else if(fi == 4) flexBrowserKeyBackspace();
     else { flexBrowserKeyEnter(); return true; }
-    brKbRender();
+    // No se repinta aqui: lo hace navTick al FINAL del cuadro, que es
+    // quien garantiza que el teclado sea la ultima capa. Repintar aqui
+    // ademas seria dibujarlo dos veces por pulsacion.
     return true;
   }
   int cell = kbCellAt(T.x, ty);
@@ -162,7 +264,6 @@ static bool brKbTouch(){
     } else {
       flexBrowserKeyText(k);
     }
-    brKbRender();
   }
   return true;
 }
@@ -445,6 +546,9 @@ static void navEnter(){
   // maquetar tras cambiar de tamano (arrastrando el borde de una ventana
   // de DeX). En ese caso no hay que reiniciar la sesion: basta repintar.
   if(gRelayout){ flexBrowserTick(); return; }
+  // Si FlexOS_BrowserApp.cpp fuera de otra version, esto no enlaza y el
+  // error dice el nombre de la funcion -- que es la instruccion.
+  flexBrVersionGuard_v3_copia_los_4_ficheros_del_navegador();
   brKbWasOpen = false;
   kbExtrasOn = false;                      // sin portapapeles en el omnibox
   mapaActivo = LAYOUT_ES; kbLangEs = true; kbShift = false;
@@ -474,15 +578,25 @@ static void navTick(){
   // 3) El navegador.
   flexBrowserTick();
 
-  // 4) EL TECLADO SE DIBUJA SIEMPRE DESPUES DEL CONTENIDO DE LA APP.
-  //    Se repinta cuando se abre y cada vez que el navegador ha
-  //    repintado su area: asi ningun redibujado posterior de la app lo
-  //    puede dejar tapado o a medias. Mientras nada de eso ocurre solo
-  //    se repinta al pulsar una tecla (brKbTouch), no por cuadro --
-  //    redibujar 60 teclas en cada frame costaria demasiado.
-  bool repainted = flexBrowserRepaintedFull();
+  // 4) EL TECLADO ES LA ULTIMA CAPA DEL CUADRO, SIEMPRE.
+  //
+  //    Se repinta en CADA vuelta mientras esta abierto, no solo al
+  //    abrirse ni solo al pulsar. Es a proposito, y despues de que la
+  //    version "solo cuando hace falta" fallara en la placa: cualquier
+  //    repintado de la app, del marco de ventana o de una capa del
+  //    sistema que caiga sobre la franja del teclado queda tapado por
+  //    este dibujo antes de que el cuadro llegue al panel. Con la
+  //    version condicional bastaba con que UN camino de repintado se
+  //    escapara del analisis para que el teclado desapareciera y ya no
+  //    volviera nunca.
+  //
+  //    Coste: unas 36 teclas por cuadro. En la practica el sistema esta
+  //    parado mientras se escribe, y la certeza vale mas que esos
+  //    milisegundos. Si hiciera falta afinarlo, el sitio es este -- no
+  //    dentro de brKbRender.
+  (void)flexBrowserRepaintedFull();          // se consume: ya no decide nada
   bool nowOpen = flexBrowserKeyboardOpen();
-  if(nowOpen && (!brKbWasOpen || repainted)) brKbRender();
+  if(nowOpen) brKbRender();
   brKbWasOpen = nowOpen;
 
   // 5) Cierre pedido desde el menu del propio navegador.

@@ -336,6 +336,92 @@ Heap tras 20 aperturas/cierres:             ______ KB
 
 ---
 
+## 7.4 Diagnóstico del teclado en hardware
+
+El teclado se dibuja desde `brKbRender()` en `FlexOS_Browser_Bridge.h`.
+Si en la placa **responde al tacto pero no se ve**, el firmware trae un
+diagnóstico que dice exactamente dónde se corta el camino. Está activo
+por defecto (`FLEXBR_KBDEBUG 1`); se apaga poniéndolo a 0 en el puente
+o con `-DFLEXBR_KBDEBUG=0`.
+
+### Marcas en pantalla
+
+Al dibujarse el teclado aparecen dos cuadrados de 12×12 px:
+
+* **magenta** en la esquina superior izquierda de la franja del teclado,
+* **cian** en la esquina inferior derecha.
+
+Se escriben **directamente en el framebuffer** (`fb[y*SCR_W+x]`),
+saltándose `px()`, la banda de recorte, `gBuf` y cualquier rotación.
+Por eso separan el problema en dos mitades limpias:
+
+| Qué se ve | Qué significa |
+|---|---|
+| Marcas **y** teclas | Todo bien. |
+| Marcas **sí**, teclas **no** | El volcado al panel funciona; el fallo está en las primitivas de dibujo o en la banda de recorte. |
+| **Ninguna** marca | El fallo está en el volcado (`flxFlush`/presenter) o en la región que se sube: los píxeles ni siquiera llegan al panel. |
+
+### Traza por Serial (115200 baudios)
+
+Una línea cada 700 ms mientras el teclado esté abierto:
+
+```
+[KB] #142 buf=fb(0x48000000) fb=0x48000000 land=0 hosted=0 gAppH=800
+     franja=508..799  ky=546  clip=y[508..799] x[0..479]  kbSize=1 45x60
+     pixel(28,608)=0x35BA  esperado tecla=0x35BA panel=0x2124  opac=100 glass=0 hiCon=0 estilo=0
+```
+
+Cómo leerla:
+
+* **si no sale ninguna línea** → `brKbRender()` no se está ejecutando.
+  Mira si `flexBrowserKeyboardOpen()` es cierto y si `navTick` es el
+  tick registrado en `APP_REG[7]`.
+* **`buf=` distinto de `fb`** → se está dibujando en otro lienzo (el de
+  una ventana de Modo PC, por ejemplo) y por eso no llega al panel.
+* **`clip=` distinto de la franja** → alguien dejó puesta otra banda de
+  recorte y los píxeles se descartan.
+* **`pixel(...)` ≠ `esperado tecla`** → el dibujo **no** llegó al
+  framebuffer: el problema está antes del volcado.
+* **`pixel(...)` = `esperado tecla` pero no se ve nada** → el dibujo sí
+  llegó al framebuffer; el problema está en el volcado o en que algo
+  reescribe esa franja después.
+* **`land=1`** → el motor está en horizontal y las coordenadas se
+  reinterpretan; el teclado fuerza vertical, así que esto no debería
+  salir nunca.
+
+### Por qué el teclado se repinta en cada vuelta
+
+`navTick()` llama a `brKbRender()` **al final de cada cuadro** mientras
+el teclado está abierto, no solo al abrirlo ni solo al pulsar. Es una
+decisión deliberada (ver D26): con la versión condicional bastaba con
+que un camino de repintado se escapara del análisis para que el teclado
+desapareciera y no volviera nunca. Cuesta unas 36 teclas por cuadro y
+garantiza que el teclado sea siempre la última capa.
+
+### Si has actualizado y no cambia nada
+
+El navegador son **cuatro ficheros** que se copian a mano a la carpeta
+del sketch. Si actualizas solo alguno, antes compilaba igual y fallaba
+en silencio. Ahora **no**: hay una guardia de versión que da un error
+claro en compilación o en enlace:
+
+```
+error: static assertion failed: FlexOS_BrowserApp.cpp y FlexOS_Browser.h
+son de versiones distintas: copia otra vez LOS CUATRO ficheros del
+navegador a la carpeta del sketch.
+```
+
+o, si el que se quedó viejo es `FlexOS_BrowserApp.cpp`:
+
+```
+undefined reference to `flexBrVersionGuard_v3_copia_los_4_ficheros_del_navegador'
+```
+
+Los cuatro son: `FlexOS_Browser.h`, `FlexOS_Browser.cpp`,
+`FlexOS_BrowserApp.cpp` y `FlexOS_Browser_Bridge.h`.
+
+---
+
 ## 8. Limitaciones reales
 
 Dichas sin rodeos, porque saberlas de antemano evita perder el tiempo:

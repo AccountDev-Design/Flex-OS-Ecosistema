@@ -429,3 +429,67 @@ hit-test deshace el desplazamiento antes de preguntar a `kbCellAt` y
 
 **Probado** en `test_bridge` con una ventana de 600 px: 140.160 píxeles
 dentro de la ventana, **0 fuera**, y la tecla pulsada es la correcta.
+
+---
+
+## D26 · El teclado se repinta en cada cuadro, y toma el control total del estado gráfico
+
+**Contexto.** Después de D24 (reponer la banda de recorte) el teclado
+**seguía invisible en la ESP32-P4 real**, aunque las teclas respondían y
+escribían. La prueba de host pasaba: el simulador no reproduce el camino
+físico (framebuffer, `setBuf`, presenter, volcado por bandas).
+
+**Qué se descartó leyendo el código.** Nada en `loop()` repinta la franja
+del teclado durante `ST_APP`: `uiTick()` y `notifTick()` salen antes si
+`gState != ST_HOME`, y `flexOtaRender()` no dibuja si no hay overlay.
+`kbPaintKey` y `kbFKey` son primitivas normales, sin estado oculto. La
+foto de la pantalla confirma que la app **sí** reserva el hueco (el
+contenido termina exactamente en `y=508`), o sea que
+`flexBrowserKeyboardOpen()` es cierto y la geometría es correcta.
+
+**Decidido.** En vez de seguir persiguiendo *cuál* de los caminos de
+repintado era el culpable, se elimina la categoría entera:
+
+1. `brKbRender()` **no usa `setBuf()`**: escribe `gBuf = fb`
+   directamente. `setBuf()` desvía a `gRtTarget` cuando la app corre
+   hospedada en Modo PC, y el teclado es del sistema — tiene que ir al
+   framebuffer real siempre.
+2. Guarda y restaura **todo** el estado gráfico: `gBuf`, las cuatro
+   coordenadas de recorte y `gLand`. Entra con el estado que sea y sale
+   dejándolo idéntico.
+3. `navTick()` lo llama **al final de cada cuadro** mientras el teclado
+   está abierto. Ya no depende de detectar «cuándo hace falta».
+4. El volcado (`flxFlush`) va **después** de restaurar el estado, para
+   que la banda que se sube al panel sea exactamente la del teclado.
+
+**Coste.** Unas 36 teclas por cuadro mientras se escribe. Se acepta: el
+sistema está prácticamente parado en ese momento, y la certeza vale más
+que esos milisegundos. Si hubiera que afinarlo, el sitio es `navTick`,
+no `brKbRender`.
+
+**Y además, diagnóstico.** Como no hay placa para verificar, el firmware
+lleva instrumentación activada por defecto (`FLEXBR_KBDEBUG`): dos marcas
+escritas a pelo en el framebuffer y una traza por Serial con el buffer de
+destino, la banda de recorte, la región volcada y **el valor releído de
+un píxel dentro de una tecla**. Eso convierte «no se ve» en un dato
+concreto. Ver `docs/NAVEGADOR.md`, sección 7.4.
+
+---
+
+## D27 · Guardia de versión entre los cuatro ficheros del navegador
+
+**Decidido.** `FLEXBR_BUILD` en la cabecera, un `static_assert` en cada
+fichero, y una función cuyo nombre lleva la versión dentro
+(`flexBrVersionGuard_v3_...`) que el puente llama y
+`FlexOS_BrowserApp.cpp` define.
+
+**Por qué.** El navegador se instala copiando cuatro ficheros a mano a
+la carpeta del sketch. Actualizar solo alguno **compilaba igual** y
+fallaba en la placa de forma silenciosa — exactamente el tipo de fallo
+que ya costó dos ciclos de flasheo. Ahora un fichero desincronizado da
+un error de compilación con la instrucción escrita en el mensaje, o un
+error de enlace con el nombre de la función, que dice lo mismo.
+
+**Comprobado**: subiendo `FLEXBR_BUILD` solo en la cabecera, el
+compilador emite «...son de versiones distintas: copia otra vez LOS
+CUATRO ficheros del navegador a la carpeta del sketch».

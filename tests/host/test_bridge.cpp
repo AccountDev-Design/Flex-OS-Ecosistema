@@ -99,8 +99,13 @@ void vQueueDelete(QueueHandle_t h){ delete (StubQueue*)h; }
 #define SCR_H   800
 
 static uint16_t g_fb[SCR_W * SCR_H];
+static uint16_t g_bbuf[SCR_W * SCR_H];
 static uint16_t* fb   = g_fb;
+static uint16_t* bbuf = g_bbuf;
 static uint16_t* gBuf = g_fb;
+// Preferencias del teclado que consulta el diagnostico del puente.
+static int  gKbSize = 1, gKbOpacity = 100, gKbStyle = 0;
+static bool gKbHiCon = false;
 static int gClipY0 = 0, gClipY1 = SCR_H - 1;
 static int gClipX0 = 0, gClipX1 = SCR_W - 1;
 static bool gLand = false, gHosted = false, gDark = true, uiGlass = false;

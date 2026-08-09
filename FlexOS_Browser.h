@@ -77,6 +77,27 @@ extern "C" {
 #endif
 
 // =============================================================
+//  0) GUARDIA DE VERSION ENTRE FICHEROS
+//  -------------------------------------------------------------
+//  El navegador son CUATRO ficheros que se copian a mano a la carpeta
+//  del sketch (FlexOS_Browser.h/.cpp, FlexOS_BrowserApp.cpp y
+//  FlexOS_Browser_Bridge.h). Si se actualiza solo alguno, el proyecto
+//  COMPILA IGUAL y el fallo aparece en la placa como un
+//  comportamiento raro y silencioso -- que es lo peor posible de
+//  diagnosticar sin depurador.
+//
+//  Aqui se cierra esa puerta de dos formas:
+//   · cada fichero comprueba en COMPILACION que ve este mismo numero;
+//   · el puente llama a una funcion cuyo NOMBRE lleva el numero
+//     dentro, asi que un FlexOS_BrowserApp.cpp viejo da un error de
+//     ENLACE que dice literalmente lo que hay que hacer.
+//
+//  Sube este numero cuando cambie algo que obligue a recopiar todo.
+// =============================================================
+#define FLEXBR_BUILD 3
+void flexBrVersionGuard_v3_copia_los_4_ficheros_del_navegador(void);
+
+// =============================================================
 //  1) INTERRUPTORES MAESTROS
 //  -------------------------------------------------------------
 //  Mismo patron que GLASS_*_ON / KIOSK_ON / FLEXOS_OTA_ON: cada
