@@ -222,9 +222,9 @@ make all-boards      # el código de dispositivo en los tres perfiles
 | `test_jpeg` | El decodificador contra **libjpeg-turbo**: 4:4:4, 4:2:0, 4:2:2, 4:4:0, gris, dimensiones impares, marcadores de reinicio, escalado 1/2·1/4·1/8, progresivo rechazado, 70 truncamientos, datos corruptos, cancelación, fallo de reserva. Con ASan+UBSan. | 191 |
 | `test_browser` | Omnibox (los 7 casos, esquemas prohibidos, IP en todas sus formas, inyección de control, límites), codec FBP/1 byte a byte con todos los truncamientos, SHA-1 contra los vectores del RFC 3174, `Sec-WebSocket-Accept` contra el vector del RFC 6455. Con ASan+UBSan. | 382 |
 | `test_app` | Ciclo de vida (Enter reserva / Exit libera **todo**, tres vueltas), el dibujo nunca sale del área de contenido, capacidades medidas con motivo legible, omnibox y teclado con UTF-8, persistencia agrupada. En los tres perfiles de placa. | 41 |
-| `test_bridge` | El puente compila y funciona contra un `.ino` simulado: geometría del teclado, recorte de `brHostBlitRow`. | 15 |
+| `test_bridge` | El puente compila y funciona contra un `.ino` simulado: geometría del teclado, recorte de `brHostBlitRow`, **el teclado se dibuja visible** (se cuentan píxeles en su franja) a pantalla completa y en Modo PC/DeX, y el navegador no deja instalada una banda de recorte estrecha. | 22 |
 
-**Resultado actual: 629 comprobaciones, 0 fallos.**
+**Resultado actual: 636 comprobaciones, 0 fallos.**
 
 Precisión del decodificador frente a libjpeg-turbo, medida en **pasos de
 RGB565** (0 = idéntico, 1 = el mínimo representable en pantalla):
@@ -374,6 +374,12 @@ Dichas sin rodeos, porque saberlas de antemano evita perder el tiempo:
 
 ## 9. Qué garantiza el diseño frente a una página hostil
 
+* **El teclado se dibuja siempre por encima de la app.** El navegador
+  repone la banda de recorte a pantalla completa al terminar de pintar,
+  el teclado abre la suya propia antes de dibujar, y el puente lo
+  repinta después de cada repintado del contenido. Hay un test que
+  cuenta píxeles reales en la franja del teclado, porque «se llamó a la
+  función de dibujo» y «se ve» no son lo mismo.
 * Una página externa **no puede pintar fuera del área de contenido**.
   Es una comprobación, no una convención: `brHostBlitRow` recorta contra
   el rectángulo de la app y contra la banda de recorte del motor

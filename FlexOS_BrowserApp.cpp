@@ -55,6 +55,11 @@ static char        gErr[FLEXBR_ERRMSG_MAX] = "";
 static uint32_t    gErrMs = 0;
 static bool        gNeedFullRedraw = true;
 static bool        gNeedChromeRedraw = true;
+// true cuando brRenderAll() acaba de repintar el area de contenido. Lo
+// consume el puente para volver a dibujar el teclado ENCIMA: asi el
+// teclado siempre queda por delante de la app, pase lo que pase con el
+// orden de repintado.
+static bool        gDidFullRepaint = false;
 
 // Edicion de texto (omnibox, campos de Ajustes y escritura en la pagina).
 enum { BRE_NONE = 0, BRE_OMNIBOX, BRE_SERVER, BRE_TOKEN, BRE_SEARCHTPL, BRE_PAGEKEY };
@@ -2000,9 +2005,33 @@ static void brRenderChrome(){
 
 static void brRenderAll(){
   int x, y, w, h; brHostContentRect(&x, &y, &w, &h);
+
+  // La banda de recorte se estrecha al area de contenido como red de
+  // seguridad (que ningun sub-dibujo se salga por un redondeo), pero
+  // HAY QUE REPONERLA AL SALIR, por todos los caminos.
+  //
+  // No reponerla fue un fallo real en la placa: con el teclado abierto,
+  // el area de contenido termina justo donde empieza el teclado, asi que
+  // la banda quedaba en [96..507] y TODO lo que el teclado pintaba
+  // despues (fondo, teclas, letras) caia fuera y px() lo descartaba. El
+  // sintoma era el peor posible para depurar: el teclado recibia los
+  // toques y escribia, pero no se veia.
   brHostClip(y, y + h - 1);
-  if(gView == BRV_TABS){ brDrawTabsView(); gNeedFullRedraw = false; return; }
-  if(gView == BRV_MEDIA){ brDrawMediaPlayer(true); gNeedFullRedraw = false; return; }
+
+  if(gView == BRV_TABS){
+    brDrawTabsView();
+    gNeedFullRedraw = false;
+    brHostClipReset();
+    gDidFullRepaint = true;
+    return;
+  }
+  if(gView == BRV_MEDIA){
+    brDrawMediaPlayer(true);
+    gNeedFullRedraw = false;
+    brHostClipReset();
+    gDidFullRepaint = true;
+    return;
+  }
 
   brHostFillRect(x, y, w, h, brHostColor(BRC_WIN));
   brDrawTabBar();
@@ -2014,6 +2043,8 @@ static void brRenderAll(){
   brHostFlush(y, y + h - 1);
   gNeedFullRedraw = false;
   gNeedChromeRedraw = false;
+  brHostClipReset();
+  gDidFullRepaint = true;
 }
 
 // =============================================================
@@ -2452,6 +2483,12 @@ void flexBrowserTick(){
 
   // 6) Persistencia agrupada.
   flexBrowserFlushPersist(false);
+
+  // 7) INVARIANTE: el navegador nunca deja instalada una banda de
+  //    recorte estrecha. Quien dibuje despues -- el teclado del sistema,
+  //    la isla de notificaciones, la tarjeta del OTA -- tiene que
+  //    encontrar la pantalla entera disponible.
+  brHostClipReset();
 }
 
 void flexBrowserExit(){
@@ -2508,6 +2545,12 @@ bool flexBrowserWantsClose(){
   if(!gWantClose) return false;
   gWantClose = false;
   return true;
+}
+
+bool flexBrowserRepaintedFull(){
+  bool v = gDidFullRepaint;
+  gDidFullRepaint = false;
+  return v;
 }
 
 bool flexBrowserHandleSystemBack(){
@@ -2643,6 +2686,7 @@ void flexBrowserEnter(){}
 void flexBrowserTick(){}
 void flexBrowserExit(){}
 bool flexBrowserWantsClose(){ return true; }
+bool flexBrowserRepaintedFull(){ return false; }
 bool flexBrowserHandleSystemBack(){ return false; }
 void flexBrowserKeyText(const char*){}
 void flexBrowserKeyBackspace(){}

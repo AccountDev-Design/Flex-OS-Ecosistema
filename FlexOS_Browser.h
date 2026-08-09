@@ -617,6 +617,11 @@ void flexBrowserEnter();     // el usuario abrio la app
 void flexBrowserTick();      // una vez por frame mientras la app esta viva
 void flexBrowserExit();      // el usuario cerro la app: libera TODO
 bool flexBrowserWantsClose();// la app pide cerrarse (el .ino llama a appClose)
+// true (y se limpia) si el navegador acaba de repintar su area de
+// contenido. El puente lo consulta para volver a dibujar el teclado
+// ENCIMA: asi el teclado queda siempre por delante de la app, sin
+// depender de en que orden ocurran los repintados.
+bool flexBrowserRepaintedFull();
 
 // Entrada de texto desde el teclado del sistema (la gestiona el puente).
 void flexBrowserKeyText(const char* utf8);
@@ -708,6 +713,13 @@ void brHostTextR(int rx, int y, const char* s, int size, uint16_t c);
 void brHostTextClip(int x, int y, const char* s, int size, uint16_t c, int maxRight);
 int  brHostTextW(const char* s, int size);
 void brHostClip(int y0, int y1);
+// Devuelve la banda de recorte a la PANTALLA ENTERA. Es obligatorio
+// llamarla al terminar de dibujar: si el navegador deja instalada su
+// banda -- que con el teclado abierto acaba justo donde empieza el
+// teclado -- lo siguiente que pinte cualquiera (el propio teclado, la
+// isla de notificaciones, la tarjeta del OTA) se recorta y desaparece
+// sin ningun aviso.
+void brHostClipReset();
 void brHostFlush(int y0, int y1);
 // Vuelca una fila de pixeles RGB565 ya decodificados. Es el unico
 // camino por el que la pagina remota llega a la pantalla, y recorta

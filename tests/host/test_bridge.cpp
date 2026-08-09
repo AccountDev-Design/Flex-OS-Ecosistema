@@ -275,6 +275,43 @@ int main(){
   brHostContentRect(&x, &y, &w, &h);
   CHECK(y + h <= kt, "el contenido (%d..%d) invade el teclado (%d)", y, y + h, kt);
 
+  // EL TECLADO TIENE QUE VERSE.
+  //
+  // Regresion de un fallo real en la placa (ESP32-P4): al tocar la barra
+  // de direcciones el teclado recibia las pulsaciones y escribia, pero no
+  // se dibujaba NADA. La causa era la banda de recorte del motor grafico:
+  // brRenderAll() la estrechaba al area de contenido -- que, con el
+  // teclado abierto, termina justo donde empieza el teclado -- y no la
+  // restauraba. Todo lo que el teclado pintaba despues caia fuera de
+  // gClipY0/gClipY1 y px() lo descartaba en silencio.
+  //
+  // Se cuentan pixeles de verdad en la franja del teclado: es lo unico
+  // que distingue "se dibujo" de "se llamo a la funcion de dibujo".
+  {
+    std::memset(g_fb, 0, sizeof(g_fb));
+    navTick();                                  // repinta la app y el teclado
+    brKbRender();                               // y explicitamente el teclado
+    long enTeclado = 0, filasConPixeles = 0;
+    for(int yy = kt; yy < SCR_H; yy++){
+      long fila = 0;
+      for(int xx = 0; xx < SCR_W; xx++) if(g_fb[yy * SCR_W + xx]) fila++;
+      enTeclado += fila;
+      if(fila > 0) filasConPixeles++;
+    }
+    CHECK(enTeclado > 20000, "el teclado solo pinto %ld pixeles: no se ve", enTeclado);
+    CHECK(filasConPixeles > (SCR_H - kt) * 3 / 4,
+          "solo %ld de %d filas del teclado tienen pixeles", filasConPixeles, SCR_H - kt);
+    std::printf("   teclado: %ld pixeles en %ld filas (franja %d..%d)\n",
+                enTeclado, filasConPixeles, kt, SCR_H - 1);
+  }
+
+  // El navegador no puede dejar instalada su banda de recorte: si lo
+  // hiciera, lo siguiente que dibujara el sistema (el teclado, la isla de
+  // notificaciones, la tarjeta del OTA) saldria cortado.
+  CHECK(gClipY0 == 0 && gClipY1 == SCR_H - 1,
+        "el navegador dejo el recorte en [%d..%d] en vez de la pantalla entera",
+        gClipY0, gClipY1);
+
   // Escribir con el teclado real del sistema: se pulsa la tecla 'a'.
   {
     int cell = 1 * KB_COLS + 0;                    // fila 2, columna 1 -> 'a'
@@ -302,6 +339,9 @@ int main(){
     navTick();
     CHECK(!T.tap, "el teclado no consumio el toque");
     T.tap = false; T.released = false;
+    // Ese punto cae sobre la tecla "shift", asi que se deja el teclado
+    // como estaba: si no, el estado se arrastraria al siguiente bloque.
+    kbShift = false;
   }
 
   // brHostBlitRow recorta contra el area de contenido: una fila fuera
@@ -328,6 +368,57 @@ int main(){
         }
     CHECK(inside > 0, "brHostBlitRow no pinto nada dentro del contenido");
     CHECK(outside == 0, "brHostBlitRow se salio en %ld pixeles", outside);
+  }
+
+  // MODO PC / DeX: el teclado se ancla al borde inferior de la VENTANA,
+  // no al de la pantalla. Es el mismo fallo de la misma familia: la
+  // geometria kb* del sistema es absoluta a la pantalla, asi que sin
+  // desplazarla el teclado caeria por debajo del area visible de la
+  // ventana y volveria a responder sin verse.
+  {
+    gHosted = true;
+    gAppW = SCR_W;
+    gAppH = 600;
+    std::memset(g_fb, 0, sizeof(g_fb));
+    brKbRender();
+
+    int kt2 = brHostKeyboardTop();
+    CHECK(kt2 > 0 && kt2 < gAppH, "tope del teclado en DeX fuera de la ventana: %d", kt2);
+
+    long dentro = 0, fuera = 0;
+    for(int yy = 0; yy < SCR_H; yy++)
+      for(int xx = 0; xx < SCR_W; xx++)
+        if(g_fb[yy * SCR_W + xx]){
+          if(yy >= kt2 && yy < gAppH) dentro++;
+          else fuera++;
+        }
+    CHECK(dentro > 20000, "en DeX el teclado solo pinto %ld pixeles visibles", dentro);
+    CHECK(fuera == 0, "en DeX el teclado pinto %ld pixeles fuera de la ventana", fuera);
+    std::printf("   teclado en DeX (ventana de %d px): %ld pixeles en la franja %d..%d\n",
+                gAppH, dentro, kt2, gAppH - 1);
+
+    // Y el toque tiene que seguir cayendo en la tecla correcta pese al
+    // desplazamiento: se pulsa 'a' con las coordenadas de la VENTANA.
+    flexBrowserKeyCancel();
+    kbShift = false;
+    T.tap = true; T.released = true;
+    T.x = SCR_W / 2; T.y = 40;                   // omnibox dentro de la ventana
+    navTick();
+    T.tap = false; T.released = false;
+    if(flexBrowserKeyboardOpen()){
+      int dy = gAppH - SCR_H;
+      int kx = KB_X + 0 * (KB_KW + KB_GAP) + KB_KW / 2;
+      int ky2 = KB_Y + 1 * (KB_KH + KB_GAP) + KB_KH / 2 + dy;
+      T.tap = true; T.released = true; T.x = kx; T.y = ky2;
+      navTick();
+      T.tap = false; T.released = false;
+      CHECK(!std::strcmp(flexBrowserEditText(), "a"),
+            "en DeX la tecla pulsada dio \"%s\", esperado \"a\"", flexBrowserEditText());
+    }
+
+    gHosted = false;
+    gAppH = SCR_H;
+    flexBrowserKeyCancel();
   }
 
   // Cancelar y cerrar.

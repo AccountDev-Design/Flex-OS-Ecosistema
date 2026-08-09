@@ -71,7 +71,7 @@ node make-fixtures.js
 === FlexOS · app del navegador (Flex OS Ultra) ===
 === 41 comprobaciones, 0 fallos ===
 === FlexOS · puente del navegador ===
-=== 15 comprobaciones, 0 fallos ===
+=== 22 comprobaciones, 0 fallos ===
 ```
 
 Las pruebas del servicio remoto están en `server/` (`npm test`), e

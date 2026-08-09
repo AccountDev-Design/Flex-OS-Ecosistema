@@ -225,6 +225,7 @@ void brHostTextClip(int x, int y, const char* s, int size, uint16_t c, int maxRi
 }
 int  brHostTextW(const char* s, int size){ return textWidth(s, size); }
 void brHostClip(int, int){}
+void brHostClipReset(){}
 void brHostFlush(int, int){}
 
 // Este es el unico camino por el que la PAGINA REMOTA llega a la

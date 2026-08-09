@@ -370,3 +370,62 @@ test no distinguiría eso de un fallo de verdad. En pasos de 565, 0 es
 idéntico y 1 es el mínimo representable: la métrica dice algo. Con ella,
 las rejillas de prueba dan error **exactamente 0** y las fotos reales,
 0,07–0,47 de media.
+
+---
+
+## D24 · La banda de recorte se repone siempre, y el teclado abre la suya
+
+**Contexto.** Fallo real en la placa (ESP32-P4): al tocar la barra de
+direcciones del Navegador, el teclado **recibía las pulsaciones y
+escribía**, pero no se dibujaba nada en pantalla.
+
+**Causa.** `brRenderAll()` estrechaba la banda de recorte del motor
+gráfico al área de contenido de la app y **no la reponía**. Con el
+teclado abierto, esa área termina justo donde empieza el teclado
+(`[96..507]` en Ultra), así que todo lo que el teclado pintaba después
+—fondo, teclas, letras— caía fuera de `gClipY0/gClipY1` y `px()` lo
+descartaba en silencio. El síntoma era el peor posible para depurar:
+todo funcionaba menos verlo.
+
+**Decidido.** Tres capas, no una:
+
+1. `brRenderAll()` repone la banda a pantalla completa por **todos** sus
+   caminos de salida, y `flexBrowserTick()` lo garantiza al final de
+   cada cuadro como invariante.
+2. `brKbRender()` **abre su propia banda** (`[panelTop … borde inferior]`)
+   antes de dibujar y la repone al acabar. Así el teclado se ve
+   independientemente de quién haya pintado antes y en qué orden — y
+   tampoco puede pintar sobre el contenido de la app.
+3. El puente repinta el teclado **después** de cada repintado del
+   contenido (`flexBrowserRepaintedFull()`), no solo al abrirlo.
+
+**Por qué las tres y no solo la primera.** La primera arregla *esta*
+instancia; la segunda y la tercera cierran la *clase* de fallo. El coste
+es de unas pocas líneas y el beneficio es que ningún reordenamiento
+futuro del dibujo puede volver a esconder el teclado.
+
+**Prueba de regresión.** `test_bridge` cuenta **píxeles reales** en la
+franja del teclado (140.160 en 292 filas) y comprueba que el navegador
+deja el recorte en la pantalla entera. Antes del arreglo daba 0 píxeles.
+
+---
+
+## D25 · En Modo PC/DeX el teclado se ancla a la ventana, no a la pantalla
+
+**Decidido.** El teclado se desplaza `gAppH - SCR_H` cuando la app corre
+hospedada en una ventana de DeX.
+
+**Por qué.** La geometría `kb*` del sistema es **absoluta a la pantalla**
+(`KB_Y` se calcula desde `SCR_H`). Dentro de una ventana el lienzo mide
+`gAppH`, así que sin desplazarla el teclado quedaba por debajo del área
+visible: exactamente el mismo síntoma que D24, teclas que responden pero
+no se ven.
+
+**Riesgo de regresión: ninguno en el camino principal.** A pantalla
+completa el desplazamiento es exactamente 0, así que el código que de
+verdad se ejecuta en el 99 % de los casos no cambia ni un píxel. El
+hit-test deshace el desplazamiento antes de preguntar a `kbCellAt` y
+`kbFRowHit`, que siguen razonando en coordenadas absolutas.
+
+**Probado** en `test_bridge` con una ventana de 600 px: 140.160 píxeles
+dentro de la ventana, **0 fuera**, y la tecla pulsada es la correcta.

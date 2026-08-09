@@ -51,36 +51,69 @@
 // =============================================================
 static bool brKbWasOpen = false;
 
+// Borde inferior contra el que se ancla el teclado, y desplazamiento
+// respecto a la geometria kb* del sistema (que es SIEMPRE absoluta a la
+// pantalla).
+//
+// A pantalla completa el desplazamiento es EXACTAMENTE 0: el camino que
+// de verdad se usa no cambia ni un pixel. Dentro de una ventana de Modo
+// PC/DeX el lienzo de la app mide gAppH, no SCR_H, asi que sin esto el
+// teclado se dibujaria por debajo del area visible de la ventana y
+// pasaria lo mismo que en la pantalla completa: teclas que responden
+// pero que no se ven.
+static int brKbBottom(){ return gHosted ? gAppH : SCR_H; }
+static int brKbDY(){ return gHosted ? (gAppH - SCR_H) : 0; }
+
 // Altura reservada por el teclado. El navegador maqueta CONTRA esto
 // (brHostKeyboardTop), asi que su contenido nunca queda debajo de las
 // teclas y no hace falta desplazar nada a mano.
 static int brKbTop(){
-  if(!flexBrowserKeyboardOpen()) return SCR_H;
-  int top = kbPanelTop() - 34;          // 34 px para la linea del campo
-  if(top < 80) top = 80;
+  if(!flexBrowserKeyboardOpen()) return brKbBottom();
+  int top = kbPanelTop() - 34 + brKbDY();   // 34 px para la linea del campo
+  int floorY = gHosted ? 0 : 80;
+  if(top < floorY) top = floorY;
   return top;
 }
 
 static void brKbRender(){
   if(!flexBrowserKeyboardOpen()) return;
   setBuf(fb);
-  int ky = KB_Y;
+  int dy = brKbDY();
+  int bottom = brKbBottom();
+  int ky = KB_Y + dy;
   int panelTop = brKbTop();
+  if(panelTop >= bottom) return;            // ventana demasiado baja: nada que pintar
+
+  // EL TECLADO ABRE SU PROPIA BANDA DE RECORTE.
+  //
+  // No es redundante con que el navegador reponga la suya: es la
+  // garantia de que el teclado se ve SIEMPRE, sin depender de quien
+  // haya dibujado antes ni de en que orden. El fallo que motivo esto
+  // (ESP32-P4: el teclado escribia pero no se veia) era exactamente
+  // eso -- otra capa habia dejado la banda estrecha y px() descartaba
+  // en silencio cada pixel del teclado.
+  //
+  // Se recorta a la franja del teclado, ni mas ni menos: asi el teclado
+  // tampoco puede pintar por encima del contenido de la app.
+  gClipY0 = panelTop < 0 ? 0 : panelTop;
+  gClipY1 = bottom - 1;
+  gClipX0 = 0;
+  gClipX1 = SCR_W - 1;
   // Cabecera del campo: que se esta editando y el texto actual. Se pinta
   // aqui y no en el navegador porque este trozo de pantalla pertenece al
   // teclado (el area de contenido de la app termina en panelTop).
   // Los colores salen de brHostColor() y no de las macros TH_* del .ino:
   // esas solo existen en Ultra (el tema semantico aun no esta en las otras
   // dos placas) y este fichero es el MISMO para las tres.
-  fillRect(0, panelTop, SCR_W, SCR_H - panelTop, brHostColor(BRC_PAGE));
+  fillRect(0, panelTop, SCR_W, bottom - panelTop, brHostColor(BRC_PAGE));
   drawText(12, panelTop + 4, flexBrowserEditLabel(), 1, brHostColor(BRC_MUTE));
   const char* txt = flexBrowserEditText();
   int tw = textW(txt, 2);
   if(tw <= SCR_W - 24) drawText(12, panelTop + 16, txt, 2, brHostColor(BRC_TXT));
   else                 drawTextR(SCR_W - 12, panelTop + 16, txt, 2, brHostColor(BRC_TXT));
 
-  if(uiGlass) drawLiquidGlassPanel(0, ky - 4, SCR_W, SCR_H - (ky - 4), 0, kbColPanel());
-  else        fillRect(0, ky - 4, SCR_W, SCR_H - (ky - 4), kbColPanel());
+  if(uiGlass) drawLiquidGlassPanel(0, ky - 4, SCR_W, bottom - (ky - 4), 0, kbColPanel());
+  else        fillRect(0, ky - 4, SCR_W, bottom - (ky - 4), kbColPanel());
 
   int fs = kbFontSize();
   for(int r = 0; r < KB_ROWS; r++) for(int c = 0; c < KB_COLS; c++){
@@ -93,7 +126,8 @@ static void brKbRender(){
   int fy = ky + 3 * (KB_KH + KB_GAP);
   const char* lb[KB_FKEYS] = { "shift", kbLayerLabel(), kbLangEs ? "ES" : "EN", "espacio", "<-", "Ir" };
   for(int i = 0; i < KB_FKEYS; i++) kbFKey(kbFKeyX(i), fy, kbFKeyW(i), lb[i], (i == 0) && kbShift);
-  flxFlush(panelTop, SCR_H - 1);
+  flxFlush(panelTop, bottom - 1);
+  brHostClipReset();          // se deja la pantalla entera para el siguiente
 }
 
 // Devuelve true si el toque se consumio dentro del teclado.
@@ -101,7 +135,11 @@ static bool brKbTouch(){
   if(!flexBrowserKeyboardOpen()) return false;
   if(T.y < brKbTop()) return false;              // por encima: es de la app
   if(!T.tap){ return true; }                     // el area del teclado consume todo
-  int fi = kbFRowHit(T.x, T.y);
+  // Las funciones kb* del sistema razonan en coordenadas ABSOLUTAS de
+  // pantalla, asi que se deshace el desplazamiento antes de
+  // preguntarles. A pantalla completa dy es 0: la identidad.
+  const int ty = T.y - brKbDY();
+  int fi = kbFRowHit(T.x, ty);
   if(fi >= 0){
     if(fi == 0) kbShift = !kbShift;
     else if(fi == 1) mapaActivo = (mapaActivo == LAYOUT_NUM) ? LAYOUT_EMOJI
@@ -114,7 +152,7 @@ static bool brKbTouch(){
     brKbRender();
     return true;
   }
-  int cell = kbCellAt(T.x, T.y);
+  int cell = kbCellAt(T.x, ty);
   if(cell >= 0){
     const char* k = mapaActivo[cell / KB_COLS][cell % KB_COLS];
     if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){
@@ -269,6 +307,10 @@ void brHostClip(int y0, int y1){
   if(y0 < 0) y0 = 0;
   if(y1 > SCR_H - 1) y1 = SCR_H - 1;
   gClipY0 = y0; gClipY1 = y1;
+}
+void brHostClipReset(){
+  gClipY0 = 0; gClipY1 = SCR_H - 1;
+  gClipX0 = 0; gClipX1 = SCR_W - 1;
 }
 
 // -------------------------------------------------------------
@@ -432,10 +474,15 @@ static void navTick(){
   // 3) El navegador.
   flexBrowserTick();
 
-  // 4) El teclado se (re)dibuja cuando se abre; mientras esta abierto
-  //    solo se repinta al pulsar (brKbTouch), no por cuadro.
+  // 4) EL TECLADO SE DIBUJA SIEMPRE DESPUES DEL CONTENIDO DE LA APP.
+  //    Se repinta cuando se abre y cada vez que el navegador ha
+  //    repintado su area: asi ningun redibujado posterior de la app lo
+  //    puede dejar tapado o a medias. Mientras nada de eso ocurre solo
+  //    se repinta al pulsar una tecla (brKbTouch), no por cuadro --
+  //    redibujar 60 teclas en cada frame costaria demasiado.
+  bool repainted = flexBrowserRepaintedFull();
   bool nowOpen = flexBrowserKeyboardOpen();
-  if(nowOpen && !brKbWasOpen) brKbRender();
+  if(nowOpen && (!brKbWasOpen || repainted)) brKbRender();
   brKbWasOpen = nowOpen;
 
   // 5) Cierre pedido desde el menu del propio navegador.
