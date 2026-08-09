@@ -10408,29 +10408,20 @@ static bool camSensorTryInit(framesize_t frameSize, const char* profile){
     sensor->set_exposure_ctrl(sensor, 1);
   }
 
-  // No se declara la camara lista solo porque init devolvio ESP_OK:
-  // se exige un frame RGB565 real. Asi el patron "SIN SENAL" refleja
-  // un fallo verdadero y el arranque puede probar el perfil de reserva.
-  camera_fb_t* probe = esp_camera_fb_get();
-  if(!probe || probe->format != PIXFORMAT_RGB565){
-    if(probe) esp_camera_fb_return(probe);
-    Serial.printf("[CAM] perfil %s: sensor detectado pero sin frame RGB565\n", profile);
-    esp_camera_deinit();
-    delay(80);
-    return false;
-  }
-  int probeW = (int)probe->width, probeH = (int)probe->height;
-  esp_camera_fb_return(probe);
-
+  // IMPORTANTE: no pedir un frame dentro de setup(). esp_camera_fb_get()
+  // puede esperar al VSYNC durante varios segundos si el sensor esta mudo;
+  // como el splash todavia no corre, eso deja la TFT completamente negra.
+  // La primera captura se hace despues, desde la tarea camTaskFn, sin frenar
+  // ni el arranque, ni el tactil, ni el presenter de pantalla.
   camSensorOk = true;
-  Serial.printf("[CAM] OV2640 OK: %s, %dx%d RGB565, XCLK %d MHz, 1 FB en PSRAM\n",
-                profile, probeW, probeH, CAM_XCLK_HZ / 1000000);
+  Serial.printf("[CAM] OV2640 inicializado: %s, XCLK %d MHz, 1 FB en PSRAM\n",
+                profile, CAM_XCLK_HZ / 1000000);
   return true;
 }
 
-// Arranca el OV2640 y valida el primer fotograma. HVGA conserva la
-// calidad original; si el sensor o la PSRAM no sostienen esa reserva,
-// QVGA es un fallback automatico y sigue alimentando la misma UI.
+// Arranca el OV2640 sin bloquear el arranque esperando un fotograma.
+// HVGA conserva la calidad original; QVGA queda como fallback cuando
+// el propio esp_camera_init() rechaza la reserva principal.
 static bool camSensorInit(){
   camSensorOk = false;
   if(!psramFound()){
