@@ -63,9 +63,10 @@
 //    Arduino Runs On / Events Run On: Core 1 (por defecto)
 //
 //  LIBRERIA EXTRA NECESARIA: ninguna. esp_camera viene dentro del
-//  propio core arduino-esp32 v3.x (ESP32 Camera Driver). No hace
-//  falta TFT_eSPI: el driver de pantalla es nativo esp_lcd + SPI
-//  y vive dentro de este mismo .ino.
+//  propio core arduino-esp32 v3.x (ESP32 Camera Driver). No existe
+//  un User_Setup.h separado: controlador, rotacion, formato de color,
+//  frecuencias y TODOS los pines de TFT/tactil/camara se configuran
+//  dentro de este mismo .ino. El driver usa esp_lcd + SPI nativos.
 //
 //  DEPURACION SIN PC (trabajas solo desde el movil):
 //    Si algo peta antes de dibujar, el motivo del ultimo reinicio
@@ -233,23 +234,17 @@ static ClipItem gClip[CLIP_SLOTS];
 #define PX_H    480         // alto  FISICO del panel en portrait
 
 // ---- MODO DE PRESENTACION ------------------------------------
-//  0 = ESTIRAR (POR DEFECTO). Usa los 320x480 FISICOS COMPLETOS, sin
-//      un solo pixel de margen negro: 480->320 es 2/3 exacto y
-//      800->480 es 3/5 exacto. Cuesta un ~11% de ensanchamiento
-//      horizontal, que en la practica no se nota.
-//  1 = AJUSTAR. Mantiene la proporcion exacta de FlexOS reduciendo
-//      480x800 por 3/5 a 288x480 y centrando -> deja dos franjas
-//      negras de 16 px a los lados.
+//  0 = ESTIRAR. Usa los 320x480 FISICOS COMPLETOS, pero cambia la
+//      proporcion del lienzo 480x800: los circulos se vuelven ovalos,
+//      el texto se ensancha y la vista de camara se ve deformada.
+//  1 = AJUSTAR (POR DEFECTO). Conserva la proporcion exacta de FlexOS:
+//      reduce 480x800 por 3/5 a 288x480 y centra la imagen. Quedan dos
+//      franjas negras discretas de 16 px, una a cada lado.
 //
-// POR QUE ESTIRAR ES ADEMAS MAS NITIDO (no solo mas grande):
-// en horizontal la reduccion pasa de 3/5 (se conserva el 60% de las
-// columnas) a 2/3 (se conserva el 67%). Es un 11% mas de informacion
-// real por fila, y sobre una fuente de 5x7 px eso se nota de
-// inmediato: los trazos verticales de las letras dejan de fundirse.
-//
-// Los DOS modos son razones enteras exactas, asi que ninguno de los
-// dos necesita divisiones ni coma flotante por pixel.
-#define TFT_PRESENT_FIT   0
+// Los DOS modos usan razones enteras exactas, sin coma flotante por
+// pixel. AJUSTAR es el modo correcto cuando importa la geometria real
+// de la interfaz y de la camara.
+#define TFT_PRESENT_FIT   1
 
 #if TFT_PRESENT_FIT
   #define PX_CW   288                 // ancho util (480 * 3/5)
@@ -10342,13 +10337,11 @@ static int   camEisX = 0, camEisY = 0;   // <<< EIS: offset suavizado (real: de 
 // resolucion (algunos OV2640 con cable largo lo hacen), baja a
 // FRAMESIZE_QVGA: el resto del codigo se adapta solo.
 #define CAM_FRAMESIZE   FRAMESIZE_HVGA
-// Reloj maestro del sensor. Manda directamente en los fps: el OV2640
-// entrega un fotograma cada N ciclos de XCLK, asi que subir de 20 a 24
-// MHz son ~20% mas de fps gratis.
-// 24 MHz es el maximo practico del OV2640 en DVP y funciona en la
-// mayoria de estas placas. SI LA CAMARA NO ARRANCA o las imagenes salen
-// rotas/rayadas, vuelve a 20000000: es el valor conservador y seguro.
-#define CAM_XCLK_HZ     24000000
+// Reloj maestro del sensor. Se fija en 20 MHz, el valor conservador
+// usado por los ejemplos de esp32-camera. La configuracion anterior
+// forzaba 24 MHz: ese margen extra depende del modulo y del flex DVP,
+// y en algunas OV2640 hace que la deteccion o el primer frame fallen.
+#define CAM_XCLK_HZ     20000000
 // Promediado 2x2 al girar y escalar el fotograma del sensor.
 // El sensor da 480x320 y hay que llevarlo a 480x720 dentro de la escena,
 // o sea AMPLIAR. Con vecino-mas-cercano puro cada pixel del sensor se
@@ -10377,9 +10370,9 @@ static bool camLutOk = false;
 
 // Arranca el OV2640. Se llama una sola vez desde setup(); si falla, el
 // sistema entero sigue funcionando y solo la app Camara lo nota.
-static bool camSensorInit(){
+static bool camSensorTryInit(framesize_t frameSize, const char* profile){
   camera_config_t c = {};
-  c.ledc_channel = LEDC_CHANNEL_2;      // canales 0/1 los puede usar el backlight
+  c.ledc_channel = LEDC_CHANNEL_2;      // separado del PWM del backlight
   c.ledc_timer   = LEDC_TIMER_2;
   c.pin_d0 = CAM_PIN_D0;   c.pin_d1 = CAM_PIN_D1;   c.pin_d2 = CAM_PIN_D2;   c.pin_d3 = CAM_PIN_D3;
   c.pin_d4 = CAM_PIN_D4;   c.pin_d5 = CAM_PIN_D5;   c.pin_d6 = CAM_PIN_D6;   c.pin_d7 = CAM_PIN_D7;
@@ -10388,35 +10381,70 @@ static bool camSensorInit(){
   c.pin_sccb_sda = CAM_PIN_SIOD; c.pin_sccb_scl = CAM_PIN_SIOC;
   c.pin_pwdn  = CAM_PIN_PWDN;  c.pin_reset = CAM_PIN_RESET;
   c.xclk_freq_hz = CAM_XCLK_HZ;
-  c.pixel_format = PIXFORMAT_RGB565;    // sin JPEG -> sin decodificador, cero latencia
-  c.frame_size   = CAM_FRAMESIZE;
-  // Doble buffer EN PSRAM: el sensor llena uno mientras la app lee el
-  // otro, asi que la captura nunca espera al VSYNC. Con GRAB_LATEST
-  // ademas se descartan los frames viejos: la vista previa va SIEMPRE
-  // en tiempo real, nunca acumula retraso.
-  c.fb_count     = 2;
+  c.pixel_format = PIXFORMAT_RGB565;    // sin JPEG -> sin decodificador
+  c.frame_size   = frameSize;
+  c.jpeg_quality = 12;                  // el campo debe quedar inicializado aunque no usemos JPEG
+
+  // Un framebuffer del driver es deliberado. La app ya tiene su propio
+  // ping-pong de escena; duplicarlo tambien dentro de esp_camera gastaba
+  // PSRAM y activaba captura continua sin aportar estabilidad. Con uno,
+  // el driver solo llena el buffer cuando la tarea lo solicita.
+  c.fb_count     = 1;
   c.fb_location  = CAMERA_FB_IN_PSRAM;
-  c.grab_mode    = CAMERA_GRAB_LATEST;
+  c.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
+
   esp_err_t e = esp_camera_init(&c);
   if(e != ESP_OK){
-    Serial.printf("[CAM] OV2640 no responde (0x%x) -> la app Camara mostrara el patron de prueba\n", e);
-    camSensorOk = false;
+    Serial.printf("[CAM] perfil %s: esp_camera_init fallo 0x%x\n", profile, e);
     return false;
   }
-  sensor_t* s = esp_camera_sensor_get();
-  if(s){
-    // Ajustes de imagen: se dejan en automatico (que es lo que espera la
-    // UI de la app, que ya tiene su propio control de exposicion por
-    // software) y se corrige el volteo tipico del modulo OV2640.
-    s->set_vflip(s, 1);
-    s->set_hmirror(s, 0);
-    s->set_whitebal(s, 1);
-    s->set_gain_ctrl(s, 1);
-    s->set_exposure_ctrl(s, 1);
+
+  sensor_t* sensor = esp_camera_sensor_get();
+  if(sensor){
+    sensor->set_vflip(sensor, 1);
+    sensor->set_hmirror(sensor, 0);
+    sensor->set_whitebal(sensor, 1);
+    sensor->set_gain_ctrl(sensor, 1);
+    sensor->set_exposure_ctrl(sensor, 1);
   }
+
+  // No se declara la camara lista solo porque init devolvio ESP_OK:
+  // se exige un frame RGB565 real. Asi el patron "SIN SENAL" refleja
+  // un fallo verdadero y el arranque puede probar el perfil de reserva.
+  camera_fb_t* probe = esp_camera_fb_get();
+  if(!probe || probe->format != PIXFORMAT_RGB565){
+    if(probe) esp_camera_fb_return(probe);
+    Serial.printf("[CAM] perfil %s: sensor detectado pero sin frame RGB565\n", profile);
+    esp_camera_deinit();
+    delay(80);
+    return false;
+  }
+  int probeW = (int)probe->width, probeH = (int)probe->height;
+  esp_camera_fb_return(probe);
+
   camSensorOk = true;
-  Serial.println(F("[CAM] OV2640 OK (RGB565, doble buffer en PSRAM)"));
+  Serial.printf("[CAM] OV2640 OK: %s, %dx%d RGB565, XCLK %d MHz, 1 FB en PSRAM\n",
+                profile, probeW, probeH, CAM_XCLK_HZ / 1000000);
   return true;
+}
+
+// Arranca el OV2640 y valida el primer fotograma. HVGA conserva la
+// calidad original; si el sensor o la PSRAM no sostienen esa reserva,
+// QVGA es un fallback automatico y sigue alimentando la misma UI.
+static bool camSensorInit(){
+  camSensorOk = false;
+  if(!psramFound()){
+    Serial.println(F("[CAM] sin PSRAM: no se puede reservar el framebuffer"));
+    return false;
+  }
+  if(camSensorTryInit(CAM_FRAMESIZE, "HVGA estable")) return true;
+
+  Serial.println(F("[CAM] reintentando con QVGA de bajo consumo"));
+  delay(80);
+  if(camSensorTryInit(FRAMESIZE_QVGA, "QVGA reserva")) return true;
+
+  Serial.println(F("[CAM] OV2640 no disponible -> la app mostrara SIN SENAL"));
+  return false;
 }
 
 // Construye las LUTs en cuanto se conoce el tamano real del sensor.
