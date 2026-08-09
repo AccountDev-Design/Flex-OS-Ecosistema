@@ -17,7 +17,7 @@
 #include "FlexOS_Browser.h"
 
 // Guardia de version (ver el bloque 0 de FlexOS_Browser.h).
-static_assert(FLEXBR_BUILD == 3,
+static_assert(FLEXBR_BUILD == 4,
   "FlexOS_Browser.cpp y FlexOS_Browser.h son de versiones distintas: "
   "copia otra vez LOS CUATRO ficheros del navegador a la carpeta del sketch.");
 

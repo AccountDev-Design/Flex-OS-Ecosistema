@@ -37,7 +37,7 @@
 #include "FlexOS_FS.h"
 
 // Guardia de version (ver el bloque 0 de FlexOS_Browser.h).
-static_assert(FLEXBR_BUILD == 3,
+static_assert(FLEXBR_BUILD == 4,
   "FlexOS_Browser_Bridge.h y FlexOS_Browser.h son de versiones distintas: "
   "copia otra vez LOS CUATRO ficheros del navegador a la carpeta del sketch.");
 
@@ -55,6 +55,12 @@ static_assert(FLEXBR_BUILD == 3,
 //  quiere. El Wi-Fi lo apaga por la misma razon.
 // =============================================================
 static bool brKbWasOpen = false;
+
+// Franja que ocupo el teclado la ultima vez que se dibujo. Se guarda
+// porque al cerrarse HAY QUE BORRARLA, y para entonces brKbTop() ya
+// devuelve el borde inferior (el teclado ya no esta abierto).
+static int brKbLastTop = -1;
+static int brKbLastBottom = -1;
 
 // Borde inferior contra el que se ancla el teclado, y desplazamiento
 // respecto a la geometria kb* del sistema (que es SIEMPRE absoluta a la
@@ -107,8 +113,12 @@ static int brKbTop(){
 //  Se apaga con -DFLEXBR_KBDEBUG=0 (o poniendolo a 0 aqui) cuando ya
 //  no haga falta: no deja rastro en el binario.
 // -------------------------------------------------------------
+//  A 0 desde que el teclado se confirmo visible en la ESP32-P4 (la fila
+//  de funciones se veia pintada sobre el navegador, que es la prueba de
+//  que brKbRender llega al panel). Se deja el codigo porque volver a
+//  activarlo es cambiar este 0 por un 1.
 #ifndef FLEXBR_KBDEBUG
-#define FLEXBR_KBDEBUG 1
+#define FLEXBR_KBDEBUG 0
 #endif
 
 // Marca escrita a pelo en el framebuffer real. No pasa por px() ni por
@@ -151,6 +161,15 @@ static void brKbRender(){
   const int ky       = KB_Y + dy;
   const int panelTop = brKbTop();
   if(panelTop >= bottom || !fb) return;      // ventana demasiado baja o sin lienzo
+
+  // Se apunta la franja EXACTA que se va a pintar. Hace falta al
+  // cerrar: la fila de funciones (shift, ?123, Es, espacio, borrar, Ir)
+  // vive entre y=732 y y=792 a pantalla completa, mientras que el area
+  // util de la app termina en WIN_BOT = 736. Esos 56 px de mas no los
+  // repinta NADIE cuando el teclado se cierra, y por eso quedaba la
+  // fila inferior flotando sobre el navegador. brKbErase() los borra.
+  brKbLastTop = panelTop;
+  brKbLastBottom = bottom;
 
   // ---- se guarda TODO el estado grafico ----
   uint16_t* oBuf = gBuf;
@@ -228,6 +247,58 @@ static void brKbRender(){
   // El volcado va DESPUES de restaurar: flxFlush no mira el recorte, y
   // asi la banda que se sube al panel es exactamente la del teclado.
   flxFlush(panelTop, bottom - 1);
+}
+
+// -------------------------------------------------------------
+//  BORRADO DE LA FRANJA DEL TECLADO
+//  ------------------------------------------------------------
+//  Cuando el teclado se cierra -- "Ir", atras, cambio de pantalla,
+//  guardar ajustes, perder el foco -- no basta con dejar de dibujarlo:
+//  sus pixeles siguen en el framebuffer y nadie los pisa.
+//
+//  Concretamente, a pantalla completa el area util de la app llega
+//  hasta WIN_BOT (SCR_H-64 = 736) y la fila de funciones del teclado
+//  ocupa hasta y=792. Al cerrarse, el navegador repintaba lo suyo hasta
+//  736 y esos ultimos 56 px se quedaban intactos: la fila de shift /
+//  ?123 / Es / espacio / borrar / Ir flotando sobre la pagina. Es
+//  exactamente el sintoma que se vio en la placa.
+//
+//  Aqui se borra la franja entera y se repone lo que le corresponde a
+//  esa zona: el marco del sistema (barra de navegacion). El contenido
+//  de la app lo repinta el propio navegador en el mismo cuadro, porque
+//  se le pide un repintado completo con el area ya crecida.
+// -------------------------------------------------------------
+static void brKbErase(){
+  if(brKbLastTop < 0 || !fb) { brKbLastTop = brKbLastBottom = -1; return; }
+  int top = brKbLastTop, bottom = brKbLastBottom;
+  brKbLastTop = brKbLastBottom = -1;
+  if(top < 0) top = 0;
+  if(bottom > SCR_H) bottom = SCR_H;
+  if(bottom <= top) return;
+
+  uint16_t* oBuf = gBuf;
+  const int  oy0 = gClipY0, oy1 = gClipY1, ox0 = gClipX0, ox1 = gClipX1;
+  const bool oLand = gLand;
+
+  gBuf    = fb;
+  gLand   = false;
+  gClipY0 = top; gClipY1 = bottom - 1;
+  gClipX0 = 0;   gClipX1 = SCR_W - 1;
+
+  fillRect(0, top, SCR_W, bottom - top, brHostColor(BRC_WIN));
+
+  gBuf = oBuf; gLand = oLand;
+  gClipY0 = oy0; gClipY1 = oy1; gClipX0 = ox0; gClipX1 = ox1;
+
+  // El marco del sistema (barra de estado arriba, barra de navegacion
+  // abajo) se repinta entero: es barato y evita razonar sobre que trozo
+  // cayo dentro de la franja borrada.
+  appDrawChrome(IC_NAV);
+
+  // Y el navegador vuelve a pintar su contenido con el area ya completa.
+  flexBrowserForceRepaint();
+
+  flxFlush(top, bottom - 1);
 }
 
 // Devuelve true si el toque se consumio dentro del teclado.
@@ -548,8 +619,9 @@ static void navEnter(){
   if(gRelayout){ flexBrowserTick(); return; }
   // Si FlexOS_BrowserApp.cpp fuera de otra version, esto no enlaza y el
   // error dice el nombre de la funcion -- que es la instruccion.
-  flexBrVersionGuard_v3_copia_los_4_ficheros_del_navegador();
+  flexBrVersionGuard_v4_copia_los_4_ficheros_del_navegador();
   brKbWasOpen = false;
+  brKbLastTop = brKbLastBottom = -1;
   kbExtrasOn = false;                      // sin portapapeles en el omnibox
   mapaActivo = LAYOUT_ES; kbLangEs = true; kbShift = false;
   kbApplySize();
@@ -557,9 +629,42 @@ static void navEnter(){
 }
 
 static void navTick(){
+  // 0) ¿SE CERRO EL TECLADO DESDE LA VUELTA ANTERIOR?
+  //    Se comprueba ANTES de nada para que el borrado y el repintado
+  //    del navegador ocurran en el MISMO cuadro: si se hiciera al
+  //    final, habria un cuadro con la franja en blanco.
+  //    Cubre TODAS las salidas por igual, porque mira el estado y no el
+  //    camino: "Ir", atras del sistema, chevron, guardar ajustes,
+  //    cambio de pagina interna o perdida de foco.
+  if(brKbWasOpen && !flexBrowserKeyboardOpen()){
+    brKbErase();
+    flexBrowserCancelDrag();     // el toque que cerro no deja gesto vivo
+    brHostConsumeTouch();        // ni genera un tap en lo que hay debajo
+    brKbWasOpen = false;
+  }
+
   // 1) El teclado se queda con sus toques antes que nadie.
   bool kbOpen = flexBrowserKeyboardOpen();
-  if(kbOpen && brKbTouch()) brHostConsumeTouch();
+  if(kbOpen){
+    // CAPTURA EXCLUSIVA: mientras el teclado esta abierto, el toque es
+    // suyo entero -- este dentro o fuera de la franja de teclas. Un
+    // toque por encima cierra el teclado en vez de accionar lo que haya
+    // detras, que es lo que hace cualquier teclado del sistema, y sobre
+    // todo evita que el mismo dedo escriba y desplace Ajustes a la vez.
+    if(!brKbTouch()){
+      if(T.tap) flexBrowserKeyCancel();     // toque fuera: cerrar, sin mas
+    }
+    brHostConsumeTouch();
+    // Si acaba de cerrarse por el toque de arriba, se borra ya: asi el
+    // repintado del navegador de este mismo cuadro llega con el area
+    // completa.
+    if(!flexBrowserKeyboardOpen()){
+      brKbErase();
+      flexBrowserCancelDrag();
+      brKbWasOpen = false;
+      kbOpen = false;
+    }
+  }
 
   // 2) Boton "atras" del sistema y chevron de la cabecera. Con
   //    APP_OWN_TOUCH el framework ya no los mira, asi que se atienden
@@ -597,6 +702,7 @@ static void navTick(){
   (void)flexBrowserRepaintedFull();          // se consume: ya no decide nada
   bool nowOpen = flexBrowserKeyboardOpen();
   if(nowOpen) brKbRender();
+  else if(brKbWasOpen) brKbErase();          // cerrado dentro de flexBrowserTick()
   brKbWasOpen = nowOpen;
 
   // 5) Cierre pedido desde el menu del propio navegador.

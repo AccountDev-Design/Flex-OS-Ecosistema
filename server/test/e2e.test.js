@@ -333,6 +333,36 @@ test('extremo a extremo: servicio real, Chromium real, JPEG que la placa sabe le
     }
   });
 
+  await t.test('un NAVIGATE pegado al HELLO no tumba la sesion', async () => {
+    // Regresion de un fallo real en la placa. El dispositivo encola la
+    // navegacion mientras aun se esta conectando, asi que el NAVIGATE
+    // sale INMEDIATAMENTE detras del HELLO -- antes de que el servicio
+    // haya terminado de autenticar y de abrir el contexto de Chromium.
+    //
+    // Con el manejador de mensajes reentrante, el segundo mensaje veia
+    // `authed` todavia en false, respondia "Falta autenticacion" y
+    // cerraba una sesion valida; el dispositivo reconectaba y volvia a
+    // pasar lo mismo. Sintoma: el navegador se queda cargando para
+    // siempre y no llega ni un frame.
+    const d2 = new FakeDevice(`ws://127.0.0.1:${port}/v1/session`);
+    await d2.ready;
+    d2.hello(TOKEN);
+    d2.navigate(`http://localhost:${pagePort}/`);     // sin esperar al WELCOME
+
+    const w = await d2.wait((m) => m.type === proto.S.WELCOME, 15000);
+    assert.ok(w, 'no llego WELCOME');
+    const err = d2.msgs.find((m) => m.type === proto.S.ERROR);
+    assert.ok(!err, 'el servicio respondio con un error al NAVIGATE adelantado');
+    // Y la navegacion adelantada se atiende: llegan bandas.
+    const f = await d2.wait((m) => m.type === proto.S.FRAME, 25000);
+    assert.ok(f, 'la navegacion enviada junto al HELLO no produjo ninguna imagen');
+    d2.close();
+    const t0 = Date.now();
+    while (svc.sessions.size > 1 && Date.now() - t0 < 5000) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  });
+
   await t.test('cerrar la conexion libera la sesion', async () => {
     assert.strictEqual(svc.sessions.size, 1);
     dev.close();

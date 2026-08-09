@@ -94,8 +94,8 @@ extern "C" {
 //
 //  Sube este numero cuando cambie algo que obligue a recopiar todo.
 // =============================================================
-#define FLEXBR_BUILD 3
-void flexBrVersionGuard_v3_copia_los_4_ficheros_del_navegador(void);
+#define FLEXBR_BUILD 4
+void flexBrVersionGuard_v4_copia_los_4_ficheros_del_navegador(void);
 
 // =============================================================
 //  1) INTERRUPTORES MAESTROS
@@ -658,6 +658,15 @@ const char* flexBrowserEditLabel();
 // Boton "atras" del sistema. Devuelve true si el navegador lo consumio
 // (retrocedio en el historial o cerro una capa); false = cierra la app.
 bool flexBrowserHandleSystemBack();
+
+// Fuerza un repintado COMPLETO del area de contenido en el siguiente
+// tick. Lo usa el puente cuando el teclado se cierra: el area util de la
+// app acaba de crecer y lo que habia debajo del teclado es basura.
+void flexBrowserForceRepaint();
+// Anula cualquier arrastre/desplazamiento en curso. Lo llama el puente al
+// abrir y al cerrar el teclado, para que el toque que abre o cierra no
+// deje un gesto a medias que luego mueva la pagina o la lista de Ajustes.
+void flexBrowserCancelDrag();
 
 // Consulta de estado para la interfaz y para flex://about.
 const BrStats*    flexBrowserStats();

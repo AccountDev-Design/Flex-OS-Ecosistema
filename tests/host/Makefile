@@ -42,7 +42,7 @@ CORE_SRC := $(ROOT)/FlexOS_Browser.cpp
 JPEG_SRC := $(ROOT)/FlexOS_JPEG.cpp
 APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 
-BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge
+BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net
 TOOLS := $(BUILD)/jpegcheck
 
 .PHONY: all run all-boards fixtures clean
@@ -68,6 +68,12 @@ $(BUILD)/test_app: test_app.cpp $(APP_SRC) $(CORE_SRC) $(JPEG_SRC) | $(BUILD)
 $(BUILD)/test_bridge: test_bridge.cpp $(ROOT)/FlexOS_Browser_Bridge.h $(APP_SRC) $(CORE_SRC) $(JPEG_SRC) | $(BUILD)
 	$(CXX) $(COMMON) $(DEVFLAGS) -Wno-unused-function -o $@ test_bridge.cpp $(APP_SRC) $(CORE_SRC) $(JPEG_SRC)
 
+# Transporte de verdad: sockets TCP POSIX, hilos y semaforos reales.
+# Es la unica prueba de host que ejercita wsHandshake/wsReadMessage y la
+# tarea de red completa, asi que necesita -pthread.
+$(BUILD)/test_net: test_net.cpp $(APP_SRC) $(CORE_SRC) $(JPEG_SRC) | $(BUILD)
+	$(CXX) $(COMMON) $(DEVFLAGS) -pthread -o $@ test_net.cpp $(APP_SRC) $(CORE_SRC) $(JPEG_SRC)
+
 # Herramienta que usa la prueba de extremo a extremo del servicio para
 # comprobar que los JPEG que envia son decodificables POR EL FIRMWARE.
 $(BUILD)/jpegcheck: jpegcheck.cpp $(JPEG_SRC) $(ROOT)/FlexOS_JPEG.h | $(BUILD)
@@ -86,6 +92,8 @@ run: $(BINS) $(TOOLS)
 	@echo
 	@$(BUILD)/test_bridge
 	@echo
+	@$(BUILD)/test_net ../fixtures
+	@echo
 	@echo "Todas las pruebas de host han pasado."
 	@echo "Herramienta lista: $(BUILD)/jpegcheck (la usa server/test/e2e.test.js)."
 
@@ -95,15 +103,16 @@ all-boards:
 	@for b in "" S3 ESP32; do \
 	  echo "=================== perfil: $${b:-P4} ==================="; \
 	  $(MAKE) --no-print-directory clean-dev BOARD=$$b >/dev/null; \
-	  $(MAKE) --no-print-directory $(BUILD)/test_app $(BUILD)/test_bridge BOARD=$$b || exit 1; \
+	  $(MAKE) --no-print-directory $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net BOARD=$$b || exit 1; \
 	  $(BUILD)/test_app || exit 1; \
 	  $(BUILD)/test_bridge || exit 1; \
+	  $(BUILD)/test_net ../fixtures || exit 1; \
 	done
 	@$(MAKE) --no-print-directory clean-dev
 	@echo "Los tres perfiles de placa compilan y pasan."
 
 clean-dev:
-	@rm -f $(BUILD)/test_app $(BUILD)/test_bridge
+	@rm -f $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net
 
 fixtures:
 	cd ../tools && npm install --silent && node make-fixtures.js

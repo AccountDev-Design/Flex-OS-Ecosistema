@@ -162,6 +162,12 @@ static void uiBox(int &x, int &y, int &w, int &h){
 }
 static bool g_appClosed = false;
 static void appClose(){ g_appClosed = true; }
+// Marco de ventana del sistema. En el .ino pinta la barra de estado y la
+// de navegacion; aqui solo hace falta que exista y que se pueda contar
+// cuantas veces la repone el puente al borrar el teclado.
+#define IC_NAV 7
+static int g_chromeDrawn = 0;
+static void appDrawChrome(int id){ (void)id; g_chromeDrawn++; }
 
 // ---- teclado (mismas firmas que en los tres .ino) ----
 #define KB_COLS 10
@@ -424,6 +430,141 @@ int main(){
     gHosted = false;
     gAppH = SCR_H;
     flexBrowserKeyCancel();
+  }
+
+  // -----------------------------------------------------------
+  //  AL CERRARSE, EL TECLADO NO PUEDE DEJAR NI UNA FILA PINTADA
+  //  ----------------------------------------------------------
+  //  Regresion de un fallo real en la ESP32-P4: tras usar el teclado y
+  //  volver al navegador quedaba visible SOLO su fila inferior (shift,
+  //  ?123, Es, espacio, borrar, Ir) flotando sobre la pagina.
+  //
+  //  La causa es geometrica y se comprueba aqui numericamente: la fila
+  //  de funciones llega hasta KB_Y+3*(KB_KH+KB_GAP)+KB_KH, que a
+  //  pantalla completa cae POR DEBAJO de WIN_BOT -- el borde del area
+  //  que la app repinta. Nadie borraba esa franja.
+  {
+    // Se abre el teclado y se pinta.
+    flexBrowserKeyCancel();
+    T.tap = true; T.released = true; T.x = SCR_W / 2; T.y = 96 + 40;
+    navTick();
+    T.tap = false; T.released = false;
+    if(!flexBrowserKeyboardOpen()){
+      T.tap = true; T.released = true; T.y = 96 + 60;
+      navTick();
+      T.tap = false; T.released = false;
+    }
+    CHECK(flexBrowserKeyboardOpen(), "no se pudo abrir el teclado para la prueba de borrado");
+
+    // La fila de funciones sobresale del area util: si no, esta prueba
+    // no estaria comprobando el caso que fallo.
+    int filaFuncBot = KB_Y + 3 * (KB_KH + KB_GAP) + KB_KH;
+    CHECK(filaFuncBot > WIN_BOT,
+          "la fila de funciones (%d) ya no sobresale de WIN_BOT (%d): "
+          "revisa que esta prueba siga teniendo sentido", filaFuncBot, WIN_BOT);
+
+    std::memset(g_fb, 0, sizeof(g_fb));
+    brKbRender();
+    long antes = 0;
+    for(int yy = WIN_BOT; yy < SCR_H; yy++)
+      for(int xx = 0; xx < SCR_W; xx++) if(g_fb[yy * SCR_W + xx]) antes++;
+    CHECK(antes > 0, "el teclado no pinto nada por debajo de WIN_BOT: prueba invalida");
+
+    // Se cierra como lo hace "Ir": el estado cambia y navTick tiene que
+    // borrar la franja entera en el mismo cuadro.
+    int chromeAntes = g_chromeDrawn;
+    flexBrowserKeyEnter();
+    navTick();
+    CHECK(!flexBrowserKeyboardOpen(), "\"Ir\" no cerro el teclado");
+    CHECK(g_chromeDrawn > chromeAntes,
+          "al borrar el teclado no se repuso el marco del sistema");
+
+    // Ni un pixel del teclado puede quedar por debajo del area util.
+    long resto = 0, filas = 0;
+    for(int yy = WIN_BOT; yy < SCR_H; yy++){
+      long fila = 0;
+      for(int xx = 0; xx < SCR_W; xx++) if(g_fb[yy * SCR_W + xx] != brHostColor(BRC_WIN)) fila++;
+      resto += fila;
+      if(fila) filas++;
+    }
+    CHECK(resto == 0,
+          "quedaron %ld pixeles del teclado en %ld filas por debajo de WIN_BOT",
+          resto, filas);
+    CHECK(brKbLastTop < 0, "la franja del teclado sigue marcada como pintada");
+  }
+
+  // -----------------------------------------------------------
+  //  CON EL TECLADO ABIERTO, AJUSTES NO SE DESPLAZA
+  //  ----------------------------------------------------------
+  //  Regresion del tercer fallo de la placa: al escribir en "Servidor de
+  //  navegacion" el mismo dedo desplazaba la lista de Ajustes, porque el
+  //  manejador de desplazamiento reacciona a `down` (no a `tap`) y
+  //  brHostConsumeTouch() -- correctamente -- no toca T.down.
+  //
+  //  Ahora el navegador ignora el tactil entero mientras hay un campo en
+  //  edicion. Se comprueba arrastrando dentro de la franja del teclado y
+  //  verificando que el desplazamiento de la pagina interna no cambia.
+  {
+    flexBrowserKeyCancel();
+    navTick();
+
+    // Se llega a Ajustes por el camino normal: omnibox -> "flex://settings".
+    T.tap = true; T.released = true; T.x = SCR_W / 2; T.y = 96 + 40;
+    navTick();
+    T.tap = false; T.released = false;
+    if(!flexBrowserKeyboardOpen()){
+      T.tap = true; T.released = true; T.y = 96 + 60;
+      navTick();
+      T.tap = false; T.released = false;
+    }
+    const char* destino = "flex://settings";
+    for(const char* p = destino; *p; p++){ char c[2] = { *p, 0 }; flexBrowserKeyText(c); }
+    flexBrowserKeyEnter();
+    navTick();
+
+    // Y se abre el campo "Servidor" tocando su fila: eso deja el teclado
+    // abierto SOBRE la lista de Ajustes, que es la situacion del fallo.
+    int intentos = 0;
+    while(!flexBrowserKeyboardOpen() && intentos < 12){
+      T.down = true; T.pressed = true; T.x = SCR_W / 2; T.y = 96 + 120 + intentos * 20;
+      navTick();
+      T.pressed = false; T.tap = true; T.released = true; T.down = false;
+      navTick();
+      T.tap = false; T.released = false;
+      intentos++;
+    }
+    CHECK(flexBrowserKeyboardOpen(), "no se pudo abrir un campo de Ajustes");
+
+    // Estado visible de la lista ANTES del arrastre. No se mira una
+    // variable interna: se mira lo que hay pintado, que es lo que el
+    // usuario ve moverse.
+    navTick();
+    static uint16_t antesFb[SCR_W * 200];
+    const int muestraY = 96 + 40;
+    std::memcpy(antesFb, g_fb + (size_t)muestraY * SCR_W, sizeof(antesFb));
+
+    // Arrastre largo dentro del teclado: pressed, varios down, released.
+    int kx = KB_X + KB_KW / 2;
+    int ky0 = KB_Y + KB_KH / 2;
+    T.down = true; T.pressed = true; T.x = kx; T.y = ky0;
+    navTick();
+    T.pressed = false;
+    for(int i = 1; i <= 8; i++){
+      T.y = ky0 - i * 12;                      // el dedo sube 96 px en total
+      T.moved = true;
+      navTick();
+    }
+    T.moved = false;
+    T.released = true; T.down = false;
+    navTick();
+    T.released = false;
+
+    CHECK(flexBrowserKeyboardOpen(), "el arrastre sobre el teclado cerro el campo");
+    long cambiados = 0;
+    for(size_t i = 0; i < sizeof(antesFb) / sizeof(antesFb[0]); i++)
+      if(antesFb[i] != g_fb[(size_t)muestraY * SCR_W + i]) cambiados++;
+    CHECK(cambiados == 0,
+          "el arrastre sobre el teclado movio %ld pixeles de Ajustes", cambiados);
   }
 
   // Cancelar y cerrar.

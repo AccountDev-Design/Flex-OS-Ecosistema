@@ -213,7 +213,7 @@ salida del IDE al compilar.
 
 ```bash
 cd tests/host
-make                 # las cuatro baterías, perfil Ultra
+make                 # las cinco baterías, perfil Ultra
 make all-boards      # el código de dispositivo en los tres perfiles
 ```
 
@@ -222,9 +222,16 @@ make all-boards      # el código de dispositivo en los tres perfiles
 | `test_jpeg` | El decodificador contra **libjpeg-turbo**: 4:4:4, 4:2:0, 4:2:2, 4:4:0, gris, dimensiones impares, marcadores de reinicio, escalado 1/2·1/4·1/8, progresivo rechazado, 70 truncamientos, datos corruptos, cancelación, fallo de reserva. Con ASan+UBSan. | 191 |
 | `test_browser` | Omnibox (los 7 casos, esquemas prohibidos, IP en todas sus formas, inyección de control, límites), codec FBP/1 byte a byte con todos los truncamientos, SHA-1 contra los vectores del RFC 3174, `Sec-WebSocket-Accept` contra el vector del RFC 6455. Con ASan+UBSan. | 382 |
 | `test_app` | Ciclo de vida (Enter reserva / Exit libera **todo**, tres vueltas), el dibujo nunca sale del área de contenido, capacidades medidas con motivo legible, omnibox y teclado con UTF-8, persistencia agrupada. En los tres perfiles de placa. | 41 |
-| `test_bridge` | El puente compila y funciona contra un `.ino` simulado: geometría del teclado, recorte de `brHostBlitRow`, **el teclado se dibuja visible** (se cuentan píxeles en su franja) a pantalla completa y en Modo PC/DeX, y el navegador no deja instalada una banda de recorte estrecha. | 22 |
+| `test_bridge` | El puente compila y funciona contra un `.ino` simulado: geometría del teclado, recorte de `brHostBlitRow`, **el teclado se dibuja visible** (se cuentan píxeles en su franja) a pantalla completa y en Modo PC/DeX, **al cerrarse no deja ni un píxel** por debajo de `WIN_BOT`, **con el teclado abierto un arrastre no mueve Ajustes**, y el navegador no deja instalada una banda de recorte estrecha. | 31 |
+| `test_net` | **El transporte de verdad**: `WiFiClient` sobre sockets TCP POSIX, `xTaskCreatePinnedToCore` lanzando hilos reales, semáforos y colas reales, y al otro lado un servidor WebSocket que habla FBP/1 y **manda el primer FRAME troceado con una pausa de 400 ms en mitad del mensaje**. Comprueba el apretón de manos, el HELLO, el NAVIGATE, la recepción del JPEG, su decodificación y su volcado — sin una sola reconexión. | 8 |
 
-**Resultado actual: 636 comprobaciones, 0 fallos.**
+**Resultado actual: 653 comprobaciones, 0 fallos.**
+
+`test_net` es la única batería de host que ejercita `wsHandshake()`,
+`wsReadMessage()` y `brNetTask()` completos. Es la que reproduce —y
+cierra— el fallo de «se conecta, autentica y no llega ni un frame»: con
+el lector antiguo da `frames ok=0 malos=7`; con el actual,
+`frames ok=1 malos=0 reconexiones=0`.
 
 Precisión del decodificador frente a libjpeg-turbo, medida en **pasos de
 RGB565** (0 = idéntico, 1 = el mínimo representable en pantalla):
@@ -318,6 +325,11 @@ lo medido.
 | 23 | Multimedia | Una página con `<video>` sin DRM → ⋮ → Reproducir vídeo | Se abre el reproductor; play/pausa y barra responden; dice «sin audio» |
 | 24 | Multimedia no disponible | Lo mismo en Flex OS Pro | «El reproductor necesita PSRAM» — no un fallo mudo |
 | 25 | **Las demás apps y el OTA** | Recorrer las 16 apps y lanzar una búsqueda de OTA | Todo igual que antes |
+| 26 | **Diagnóstico de sesión** | Poner una dirección de servidor con un puerto donde no escucha nadie y abrir `example.com` | El área de página **no** se queda en negro: dice «Conexión rechazada por *host*:*puerto*», con contadores a cero |
+| 27 | **Credencial inválida** | Cambiar un carácter de la credencial y navegar | «Credencial rechazada por el servicio», y el mismo texto por Serial |
+| 28 | **El servicio no manda imágenes** | Servidor accesible pero con Chromium parado | Tras 12 s: «El servicio no envía imágenes de la página», con el número de mensajes recibidos |
+| 29 | **Teclado: cierre limpio** | Tocar la barra de direcciones, escribir, pulsar **Ir**; repetir volviendo atrás y guardando ajustes | No queda **ninguna** parte del teclado dibujada — en particular la fila inferior (shift · ?123 · Es · espacio · borrar · Ir) |
+| 30 | **Teclado y desplazamiento** | `flex://settings` → tocar «Servidor de navegación» → escribir una dirección larga arrastrando el dedo entre teclas | La lista de Ajustes **no se mueve** ni un píxel mientras el teclado está abierto, y al cerrarlo no hay salto |
 
 **Plantilla para anotar lo medido** (rellenar en la placa):
 
@@ -340,9 +352,12 @@ Heap tras 20 aperturas/cierres:             ______ KB
 
 El teclado se dibuja desde `brKbRender()` en `FlexOS_Browser_Bridge.h`.
 Si en la placa **responde al tacto pero no se ve**, el firmware trae un
-diagnóstico que dice exactamente dónde se corta el camino. Está activo
-por defecto (`FLEXBR_KBDEBUG 1`); se apaga poniéndolo a 0 en el puente
-o con `-DFLEXBR_KBDEBUG=0`.
+diagnóstico que dice exactamente dónde se corta el camino.
+
+**Viene apagado** (`FLEXBR_KBDEBUG 0`) desde que el teclado se confirmó
+visible en la ESP32-P4. Para volver a activarlo, pon el `#define` a 1 en
+el puente o compila con `-DFLEXBR_KBDEBUG=1`. Con él apagado no queda
+nada en el binario.
 
 ### Marcas en pantalla
 
@@ -414,11 +429,94 @@ navegador a la carpeta del sketch.
 o, si el que se quedó viejo es `FlexOS_BrowserApp.cpp`:
 
 ```
-undefined reference to `flexBrVersionGuard_v3_copia_los_4_ficheros_del_navegador'
+undefined reference to `flexBrVersionGuard_v4_copia_los_4_ficheros_del_navegador'
 ```
 
 Los cuatro son: `FlexOS_Browser.h`, `FlexOS_Browser.cpp`,
 `FlexOS_BrowserApp.cpp` y `FlexOS_Browser_Bridge.h`.
+
+---
+
+## 7.5 Diagnóstico de la sesión de red en hardware
+
+Si el navegador **se queda cargando y no llega ninguna página**, ya no
+hay que adivinar: la propia pantalla lo dice, y por Serial hay el
+detalle completo.
+
+### En pantalla
+
+Mientras la pestaña activa no tenga ninguna imagen, el área de página
+pinta un panel con:
+
+* un punto de color y el estado (`Sin sesión`, `Sin Wi-Fi`,
+  `Conectando`, `Autenticando`, `Sesión activa`, `Con errores`);
+* la **frase de la etapa actual**, que es la que distingue un caso de
+  otro;
+* la dirección del servidor configurada (la credencial **nunca** se
+  pinta);
+* contadores: mensajes recibidos, imágenes dibujadas, errores y KB.
+
+Frases y qué significan:
+
+| Frase | Qué pasa |
+|---|---|
+| `Sin servidor configurado (flex://settings)` | No hay dirección guardada. |
+| `Sin Wi-Fi: conéctate desde Ajustes` | La placa no está asociada. |
+| `La dirección del servidor no es válida` | `ws://…`/`wss://…` mal escrito. |
+| `Conectando con host:puerto` | TCP en curso. |
+| `Conexión rechazada por host:puerto` | Nadie escucha ahí, o un cortafuegos. **El caso más común es que el servicio esté escuchando solo en `127.0.0.1`**: pon `"host": "0.0.0.0"` en `config.json` (el servicio ahora lo avisa al arrancar). |
+| `El servicio no aceptó el WebSocket (ruta …)` | Llegó al puerto pero la ruta no es `/v1/session`, o hay un proxy delante. |
+| `Autenticando (con/SIN credencial)` | HELLO enviado. Si dice «SIN credencial», no hay token guardado. |
+| `Sin respuesta al saludo: revisa la credencial` | 10 s sin WELCOME. Se corta y se reintenta. |
+| `Credencial no válida` | El servicio rechazó el token. |
+| `Sesión abierta: esperando la página` | Todo bien; falta navegar. |
+| `Cargando la página...` | NAVIGATE enviado. |
+| `Sin imágenes tras N s (M mensajes)` | El servicio habla pero no manda bandas. Mira el log del servicio. |
+| `Imagen no válida del servicio` / `Imagen ilegible (código N)` | Llegó un FRAME que no se pudo interpretar o decodificar. |
+| `Se perdió la conexión con el servicio` | Lectura fallida: se cierra y se reconecta con retroceso exponencial. |
+
+### Por Serial (115200 baudios)
+
+Activo por defecto (`FLEXBR_NETDEBUG 1`; se apaga con
+`-DFLEXBR_NETDEBUG=0`). Una sesión normal se ve así:
+
+```
+[NET] destino=192.168.1.7:8443 ruta=/v1/session tls=0 permitirWs=1
+[NET] TCP abierto, negociando WebSocket...
+[NET] HELLO enviado: 78 B  vista=480x548  cred=si
+[NAV] Autenticando (con credencial)
+[NET] WELCOME: sesion aceptada
+[NAV] Sesión abierta: esperando la página
+[NET] NAVIGATE canal=1 -> https://example.com/ (45 B)
+[NAV] Cargando la página...
+[NET] FRAME seq=7 canal=1 480x200 en (0,0) 14452 B
+[NET] FRAME seq=8 canal=1 480x200 en (0,200) 11938 B
+```
+
+Y un fallo dice exactamente dónde:
+
+```
+[NET] destino=192.168.1.7:8443 ruta=/v1/session tls=0 permitirWs=1
+[NAV] Conexión rechazada por 192.168.1.7:8443
+```
+
+Un aviso especial salta si pasan 12 s desde un NAVIGATE sin recibir una
+sola imagen:
+
+```
+[NET] AVISO: 12030 ms desde NAVIGATE sin ningun FRAME (estado=4 mensajes=6 bytes=812)
+```
+
+`estado=4` es `BRN_READY`: la sesión está viva y el servicio responde —
+así que el problema está en el servicio, no en la red. El log del
+servicio (`node src/server.js --config config.json`) dirá el resto.
+
+### Nada de esto bloquea la interfaz
+
+Toda la red vive en su propia tarea de FreeRTOS. El hilo gráfico nunca
+llama a `connect()`, `read()` ni `write()`: las frases de estado se
+escriben desde la tarea de red y el hilo gráfico solo las pinta cuando
+cambian, y repintando **solo** el área de página.
 
 ---
 

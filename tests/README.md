@@ -20,6 +20,8 @@ tests/
     test_browser.cpp   omnibox, validación de URL, codec FBP/1, SHA-1/base64
     test_app.cpp       código de dispositivo: ciclo de vida, dibujo, capacidades
     test_bridge.cpp    el puente, contra un .ino simulado
+    test_net.cpp       el transporte real: sockets TCP, hilos y un
+                       servidor WebSocket que trocea el primer frame
     jpegcheck.cpp      herramienta: decodifica un JPEG con el decodificador del firmware
     stub/              entorno Arduino simulado (ver stub/README.md)
     Makefile
@@ -71,8 +73,17 @@ node make-fixtures.js
 === FlexOS · app del navegador (Flex OS Ultra) ===
 === 41 comprobaciones, 0 fallos ===
 === FlexOS · puente del navegador ===
-=== 22 comprobaciones, 0 fallos ===
+=== 31 comprobaciones, 0 fallos ===
+=== FlexOS · transporte del navegador sobre sockets reales ===
+=== 8 comprobaciones, 0 fallos ===
 ```
+
+`test_net` es la única que ejercita `wsHandshake()`, `wsReadMessage()` y
+la tarea de red completas: `WiFiClient` va sobre sockets POSIX,
+`xTaskCreatePinnedToCore` lanza hilos de verdad, y el servidor del otro
+lado manda el primer FRAME troceado con una pausa de 400 ms en mitad del
+mensaje para reproducir el fallo de desincronización que dejaba el
+navegador cargando para siempre.
 
 Las pruebas del servicio remoto están en `server/` (`npm test`), e
 incluyen una de extremo a extremo que decodifica lo que el servicio

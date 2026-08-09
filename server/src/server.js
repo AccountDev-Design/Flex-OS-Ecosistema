@@ -139,7 +139,24 @@ class BrowserService {
       }
     }, 8000);
 
-    ws.on('message', async (data, isBinary) => {
+    // Los mensajes se tratan DE UNO EN UNO y en orden.
+    //
+    // El manejador es async y espera dentro (autenticar, abrir el
+    // contexto de Chromium, navegar), asi que sin esta cadena se
+    // REENTRA: el mensaje N+1 empieza mientras el N sigue a medias. Hoy
+    // el caso concreto de "HELLO y NAVIGATE pegados" -- que es lo que
+    // manda el dispositivo cuando el usuario escribe la direccion antes
+    // de que la sesion este abierta -- sale bien por como reparte los
+    // eventos `ws`, pero depende de un detalle de planificacion que
+    // nadie garantiza. Serializar aqui cuesta una promesa por mensaje y
+    // elimina la clase entera de fallos.
+    //
+    // (El dispositivo, por su parte, ya no envia comandos hasta tener el
+    // WELCOME: son dos barreras independientes, igual que con las URL.)
+    let cola = Promise.resolve();
+    const enOrden = (fn) => { cola = cola.then(fn, fn); return cola; };
+
+    ws.on('message', (data, isBinary) => enOrden(async () => {
       if (!isBinary) return;                          // FBP es binario
       const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
       const msg = proto.readHeader(buf);
@@ -177,7 +194,7 @@ class BrowserService {
         this.log.warn(`[${s.id}] error tratando 0x${msg.type.toString(16)}: ${e.message}`);
         s.sendError(msg.channel, proto.ERR.PROTOCOL, 'Mensaje no valido');
       }
-    });
+    }));
 
     ws.on('close', () => {
       clearTimeout(helloTimer);
@@ -257,6 +274,24 @@ async function main() {
     svc.log.info(`  control : ${scheme}://${cfg.host}:${cfg.port}/v1/health`);
     svc.log.info(`  sesion  : ${wsScheme}://${cfg.host}:${cfg.port}/v1/session`);
     svc.log.info(`  pon esa direccion de sesion en el dispositivo: Navegador -> menu -> Ajustes -> Servidor`);
+    // Escuchar solo en loopback es el motivo mas comun de que la placa se
+    // quede "cargando": el servicio arranca sin un solo error y aun asi
+    // ninguna otra maquina de la red puede alcanzarlo.
+    if (cfg.host === '127.0.0.1' || cfg.host === 'localhost' || cfg.host === '::1') {
+      svc.log.warn(`ATENCION: el servicio escucha SOLO en ${cfg.host}. Ningun dispositivo`);
+      svc.log.warn(`de la red podra conectarse. Pon "host": "0.0.0.0" en config.json.`);
+    }
+  });
+
+  // Un intento de conexion a una ruta que no es /v1/session no llega
+  // nunca a wss.on('connection') y desaparecia en silencio. Se registra:
+  // es justo lo que hace falta ver cuando la direccion del dispositivo
+  // trae una ruta equivocada.
+  server.on('upgrade', (req, socket) => {
+    let p = '';
+    try { p = new URL(req.url, 'http://x').pathname; } catch { p = String(req.url || ''); }
+    if (p !== '/v1/session')
+      svc.log.warn(`upgrade rechazado desde ${socket.remoteAddress}: ruta "${p}" (se espera /v1/session)`);
   });
 
   const bye = async (sig) => {

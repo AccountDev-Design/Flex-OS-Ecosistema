@@ -480,7 +480,7 @@ concreto. Ver `docs/NAVEGADOR.md`, sección 7.4.
 
 **Decidido.** `FLEXBR_BUILD` en la cabecera, un `static_assert` en cada
 fichero, y una función cuyo nombre lleva la versión dentro
-(`flexBrVersionGuard_v3_...`) que el puente llama y
+(`flexBrVersionGuard_v4_...`) que el puente llama y
 `FlexOS_BrowserApp.cpp` define.
 
 **Por qué.** El navegador se instala copiando cuatro ficheros a mano a
@@ -493,3 +493,144 @@ error de enlace con el nombre de la función, que dice lo mismo.
 **Comprobado**: subiendo `FLEXBR_BUILD` solo en la cabecera, el
 compilador emite «...son de versiones distintas: copia otra vez LOS
 CUATRO ficheros del navegador a la carpeta del sketch».
+
+
+---
+
+## D28 · Dos plazos de espera distintos en la lectura del WebSocket
+
+**Decidido.** `wsReadMessage()` usa **dos relojes**: `BR_WS_POLL_MS`
+(40 ms) para preguntar «¿hay algo que leer?» y `BR_WS_MSG_MS` (9 s) para
+terminar un mensaje **que ya ha empezado**. Y cualquier fallo de lectura
+es **fatal**: se cierra el socket y se reconecta.
+
+**Por qué.** Con un único plazo corto para las dos cosas, el saludo y el
+WELCOME — que son diminutos — entraban bien, pero el primer FRAME de
+verdad son decenas de KB y bastaba un hueco de 120 ms en la Wi-Fi para
+abandonar la lectura **a mitad de mensaje**. El socket seguía
+`connected()`, así que el código antiguo **no reconectaba**, y la
+siguiente lectura interpretaba bytes del JPEG como si fueran una cabecera
+WebSocket: desincronización permanente. El síntoma en la placa era
+exactamente el que se reportó — «se conecta, autentica y después no llega
+ni un frame nunca más».
+
+En un flujo con tramado no existe la recuperación parcial: o el mensaje
+entra entero, o la conexión ya no es fiable. Por eso ahora sólo hay dos
+resultados posibles: mensaje completo, o reconexión.
+
+**Comprobado**: `tests/host/test_net.cpp` levanta un servidor WebSocket
+real que envía el FRAME troceado y con una pausa de 400 ms en mitad del
+mensaje. Con el lector antiguo: `frames ok=0 malos=7`. Con este:
+`frames ok=1 malos=0 reconexiones=0`.
+
+---
+
+## D29 · El dispositivo no envía comandos hasta tener el WELCOME
+
+**Decidido.** La tarea de red sólo vacía la cola de comandos cuando
+`gNetState == BRN_READY`. Los comandos esperan en la cola; no se pierde
+ninguno.
+
+**Por qué.** El usuario escribe la dirección mientras el navegador
+todavía se está conectando, así que el `NAVIGATE` sale inmediatamente
+detrás del `HELLO`. El servicio aún está autenticando y abriendo el
+contexto de Chromium, que tarda cientos de milisegundos. Enviar
+comandos antes de que la sesión esté abierta no aporta nada — no hay
+pestaña donde aplicarlos — y sí abre la puerta a que el servicio los
+trate como tráfico sin autenticar.
+
+Del otro lado se cerró la misma puerta: el servicio serializa los
+mensajes de cada sesión en una cadena de promesas, de modo que el
+manejador `async` no se reentra. Dos barreras independientes, igual que
+con la validación de URL.
+
+**Comprobado**: `server/test/e2e.test.js`, «un NAVIGATE pegado al HELLO
+no tumba la sesión» — con Chromium real, llegan WELCOME y bandas, y
+ningún ERROR.
+
+---
+
+## D30 · El área de página nunca se queda en negro: cuenta qué pasa
+
+**Decidido.** Mientras la pestaña activa no tenga ninguna imagen, el área
+de página pinta un **panel de estado de sesión**: estado del transporte,
+frase de la etapa actual, dirección del servidor y contadores de
+mensajes, imágenes, errores y KB. Se refresca cada vez que cambia la
+etapa, repintando **sólo esa región**.
+
+**Por qué.** «Pantalla negra cargando para siempre» no es un fallo
+diagnosticable: no distingue *conexión rechazada* de *credencial
+inválida* de *el servicio no manda imágenes*. Ahora sí, y sin abrir el
+monitor serie.
+
+El texto que se pinta es **siempre propio**: los mensajes del servicio
+pasan por `flexBrErrorText()` según su código, así que un servicio
+comprometido no puede escribir lo que quiera en la pantalla. Y la
+credencial no se pinta nunca — sólo la dirección del servidor.
+
+Por Serial hay el mismo detalle y más (`FLEXBR_NETDEBUG`, activo por
+defecto): destino, apertura del TCP, apretón de manos, HELLO enviado con
+el tamaño de vista, WELCOME, cada NAVIGATE con su URL, cada FRAME con su
+geometría y tamaño, y el resultado de decodificar. Más un aviso si pasan
+12 s desde un NAVIGATE sin que llegue una sola imagen.
+
+---
+
+## D31 · Al cerrarse, el teclado borra su franja — que es más alta que el área de la app
+
+**Decidido.** El puente apunta la franja exacta que pintó el teclado
+(`brKbLastTop`/`brKbLastBottom`) y, en cuanto `kbOpen` pasa a falso,
+`brKbErase()` la rellena, repinta el marco del sistema
+(`appDrawChrome`) y pide al navegador un repintado completo con el área
+ya crecida.
+
+**Por qué.** La geometría no cuadra, y ése era el fallo: a pantalla
+completa la fila de funciones del teclado (shift, ?123, Es, espacio,
+borrar, Ir) ocupa hasta **y = 792**, mientras que el área útil de la app
+termina en **WIN_BOT = 736**. Al cerrarse el teclado, el navegador
+repintaba lo suyo hasta 736 y esos **56 píxeles** se quedaban intactos:
+la fila inferior del teclado flotando sobre la página. Nadie era
+responsable de esa franja porque no pertenece a la app.
+
+El borrado se hace **al principio** de `navTick`, no al final, para que
+el repintado del navegador ocurra en el mismo cuadro: si no, habría un
+fotograma con la franja en blanco.
+
+**Comprobado**: `tests/host/test_bridge.cpp` cuenta píxeles por debajo de
+`WIN_BOT` antes y después de cerrar. Sin el borrado: 30 720 píxeles en
+64 filas. Con él: 0.
+
+---
+
+## D32 · Con el teclado abierto, el navegador no mira ni un toque
+
+**Decidido.** `brHandleTouch()` retorna de inmediato mientras
+`gEditTarget != BRE_NONE`, y un toque fuera de la franja de teclas
+cierra el teclado en vez de accionar lo que haya detrás. Además, un
+arrastre sólo cuenta si **empezó** en el navegador (`gDragArmed`).
+
+**Por qué.** El teclado escribía y la lista de Ajustes se desplazaba con
+el mismo dedo, hasta hacer imposible escribir en «Servidor de
+navegación» o «Credencial del dispositivo».
+
+La causa exacta: `brHostConsumeTouch()` limpia `pressed`, `released`,
+`tap`, `moved` y los swipes, pero **no toca `T.down`** — y hace bien,
+porque `T.down` lo gobierna la máquina de estados del táctil del sistema
+y escribirlo la corrompería. El manejador de desplazamiento de las
+páginas internas, en cambio, reacciona a `down`, no a `tap`. Resultado:
+el puente consumía el toque correctamente y el desplazamiento se
+disparaba igual.
+
+Consumir el toque no bastaba, y tocar `T.down` no era una opción. La
+solución correcta es la captura exclusiva: mientras hay un campo en
+edición, el toque es del teclado entero.
+
+`gDragArmed` cierra el otro extremo del problema: al cerrarse el
+teclado, el dedo puede seguir apoyado. Sin esa marca, el siguiente
+`down` se comparaba contra un origen viejo y daba un salto de lista de
+cientos de píxeles — el «scroll fantasma».
+
+**Comprobado**: `tests/host/test_bridge.cpp` abre un campo de
+`flex://settings`, arrastra 96 px sobre las teclas y compara el
+framebuffer del área de Ajustes. Sin la captura exclusiva: 45 321
+píxeles cambiados. Con ella: 0.

@@ -24,10 +24,10 @@
 #include "FlexOS_Browser.h"
 
 // Guardia de version (ver el bloque 0 de FlexOS_Browser.h).
-static_assert(FLEXBR_BUILD == 3,
+static_assert(FLEXBR_BUILD == 4,
   "FlexOS_BrowserApp.cpp y FlexOS_Browser.h son de versiones distintas: "
   "copia otra vez LOS CUATRO ficheros del navegador a la carpeta del sketch.");
-void flexBrVersionGuard_v3_copia_los_4_ficheros_del_navegador(void){}
+void flexBrVersionGuard_v4_copia_los_4_ficheros_del_navegador(void){}
 
 #if FLEXBR_ON_DEVICE && FLEXBR_ON
 
@@ -43,6 +43,7 @@ void flexBrVersionGuard_v3_copia_los_4_ficheros_del_navegador(void){}
 #include "esp_system.h"
 #include "esp_random.h"
 #include <strings.h>
+#include <stdarg.h>
 #include "FlexOS_JPEG.h"
 
 // =============================================================
@@ -520,6 +521,67 @@ static bool brPushNavigate(const char* url){
   return brPushCmd(FBP_C_NAVIGATE, (uint8_t)(gTab + 1), 0, 0, 0, 0, 0, 0, NULL);
 }
 
+// -------------------------------------------------------------
+//  DIAGNOSTICO DE LA SESION
+//  ------------------------------------------------------------
+//  Un navegador que se queda "cargando" para siempre sin decir por que
+//  es imposible de arreglar desde el sofa. Aqui hay DOS salidas de la
+//  misma informacion:
+//
+//   · Por Serial (BR_NETLOG): cada etapa del transporte con su
+//     resultado -- resolucion de la URL, conexion TCP, apreton de
+//     manos WebSocket, HELLO enviado, WELCOME recibido, NAVIGATE
+//     enviado, cada FRAME con su tamano, y el resultado de
+//     decodificarlo.
+//
+//   · En pantalla (brNetInfo -> brDrawSessionStatus): una frase corta
+//     en el area de pagina mientras no haya llegado ningun frame. Es
+//     lo que convierte "pantalla negra" en "conexion rechazada",
+//     "credencial rechazada", "sin respuesta del servicio" o
+//     "esperando la primera imagen".
+//
+//  Se apaga con -DFLEXBR_NETDEBUG=0.
+// -------------------------------------------------------------
+#ifndef FLEXBR_NETDEBUG
+#define FLEXBR_NETDEBUG 1
+#endif
+#if FLEXBR_NETDEBUG
+  #define BR_NETLOG(...) do{ Serial.printf(__VA_ARGS__); }while(0)
+#else
+  #define BR_NETLOG(...) do{}while(0)
+#endif
+
+// Frase de estado y relojes del diagnostico. Los escribe la tarea de
+// red y los lee el hilo grafico; son valores sueltos, no una estructura
+// que haya que leer coherente, asi que basta con `volatile` y el mutex
+// para el texto.
+static char              gNetInfo[80] = "";
+static volatile uint32_t gNetInfoSeq  = 0;   // sube en cada cambio de frase
+static volatile uint32_t gLastFrameMs = 0;   // ultimo FRAME recibido
+static volatile uint32_t gNavSentMs   = 0;   // ultimo NAVIGATE enviado
+static volatile bool     gNavWaiting  = false;
+static volatile uint32_t gMsgsIn      = 0;   // mensajes FBP completos recibidos
+static volatile bool     gWarnedNoFrames = false;
+
+// Cuanto se espera un primer frame tras navegar antes de avisar.
+#define BR_FIRSTFRAME_WARN_MS 12000
+
+static void brNetInfo(const char* fmt, ...){
+  char b[80];
+  va_list ap; va_start(ap, fmt);
+  vsnprintf(b, sizeof(b), fmt, ap);
+  va_end(ap);
+  bool changed;
+  brLock();
+  changed = (strcmp(b, gNetInfo) != 0);
+  if(changed) memcpy(gNetInfo, b, sizeof(b) < sizeof(gNetInfo) ? sizeof(b) : sizeof(gNetInfo));
+  brUnlock();
+  if(changed){
+    gNetInfoSeq++;
+    BR_NETLOG("[NAV] %s\n", b);
+  }
+}
+
 // ---- socket ----
 static WiFiClient*       gSock = NULL;
 static WiFiClientSecure* gTls  = NULL;
@@ -534,6 +596,30 @@ static void wsDisconnect(){
 
 // Lee exactamente `n` bytes o falla. Cede CPU mientras espera: nunca
 // hace espera activa (dispararia el watchdog de la tarea).
+// -------------------------------------------------------------
+//  DOS TIEMPOS DE ESPERA DISTINTOS, Y ESTA ES LA RAZON
+//  ------------------------------------------------------------
+//  El sondeo ("¿hay algo?") y la lectura de un mensaje YA EMPEZADO
+//  no se pueden medir con el mismo reloj.
+//
+//  Con un unico plazo corto para las dos cosas paso lo siguiente en la
+//  placa: el apreton de manos y el WELCOME -- que son diminutos --
+//  entraban bien, pero el primer FRAME de verdad son decenas de KB y
+//  basta un hueco de 120 ms en la Wi-Fi para que la lectura se
+//  abandone A MITAD DE MENSAJE. El socket seguia CONECTADO, asi que no
+//  se reconectaba, y la siguiente lectura interpretaba bytes de la
+//  imagen como si fueran una cabecera WebSocket: desincronizacion
+//  permanente. Sintoma exacto: se conecta, autentica, y despues no
+//  llega ni un frame nunca mas.
+//
+//  Ahora: si no hay NADA que leer se devuelve 0 y el tramado queda
+//  intacto; en cuanto empieza un mensaje se lee entero con un plazo
+//  generoso, y cualquier fallo es FATAL -- se cierra la conexion y se
+//  reconecta, que es lo unico correcto en un flujo con tramas.
+// -------------------------------------------------------------
+#define BR_WS_POLL_MS   40      // sondeo: cuanto se espera a que aparezca el primer byte
+#define BR_WS_MSG_MS    9000    // mensaje ya empezado: hasta que llegue entero
+
 static bool sockReadFull(uint8_t* p, size_t n, uint32_t toMs){
   uint32_t t0 = brHostMillis();
   size_t got = 0;
@@ -597,11 +683,28 @@ static bool wsSendFrame(uint8_t opcode, const uint8_t* data, size_t n){
 // `buf`. Devuelve los bytes o -1. Responde a ping y a close por su
 // cuenta. Un mensaje mas grande que el buffer se descarta ENTERO en
 // vez de truncarse: medio JPEG no es medio dibujo, es basura.
-static int wsReadMessage(uint8_t* buf, size_t cap, uint32_t toMs){
+// Devuelve:  >0 bytes del mensaje  ·  0 no habia nada que leer (el
+// tramado sigue intacto)  ·  -1 FATAL, hay que cerrar la conexion  ·
+// -2 mensaje descartado por no caber (el tramado sigue intacto).
+static int wsReadMessage(uint8_t* buf, size_t cap, uint32_t pollMs){
   size_t total = 0;
+  bool started = false;
   for(;;){
+    // Sondeo solo ANTES del primer byte del mensaje. A partir de ahi
+    // el mensaje esta empezado y abandonarlo desincronizaria el flujo.
+    if(!started){
+      uint32_t t0 = brHostMillis();
+      while(gSock && gSock->connected() && gSock->available() <= 0){
+        if(gNetStop) return -1;
+        if(brHostMillis() - t0 > pollMs) return 0;      // nada pendiente
+        vTaskDelay(pdMS_TO_TICKS(2));
+      }
+      if(!gSock || !gSock->connected()) return -1;
+    }
+    const uint32_t toMs = BR_WS_MSG_MS;
     uint8_t h[2];
     if(!sockReadFull(h, 2, toMs)) return -1;
+    started = true;
     bool fin = (h[0] & 0x80) != 0;
     uint8_t op = (uint8_t)(h[0] & 0x0F);
     bool masked = (h[1] & 0x80) != 0;
@@ -639,14 +742,19 @@ static int wsReadMessage(uint8_t* buf, size_t cap, uint32_t toMs){
       }
       continue;
     }
-    if(total + (size_t)len > cap){                     // no cabe: se tira entero
+    if(total + (size_t)len > cap){                     // no cabe: se tira ENTERO
+      // Se drena exactamente `len` bytes: asi el flujo queda alineado y
+      // la sesion sobrevive. Si el drenaje falla, el tramado ya no es
+      // fiable y hay que cerrar.
       for(uint64_t rem = len; rem > 0; ){
         uint8_t junk[128]; size_t c = (size_t)(rem < sizeof(junk) ? rem : sizeof(junk));
         if(!sockReadFull(junk, c, toMs)) return -1;
         rem -= c;
       }
       gStats.framesBad++;
-      if(fin) return -2;                               // -2 = mensaje descartado, sesion viva
+      BR_NETLOG("[NET] mensaje de %u B descartado: no cabe en %u B\n",
+                (unsigned)len, (unsigned)cap);
+      if(fin) return -2;                               // sesion viva, tramado intacto
       continue;
     }
     if(len && !sockReadFull(buf + total, (size_t)len, toMs)) return -1;
@@ -751,7 +859,17 @@ static void brOnNavigated(const char* url, uint8_t ch){
 
 static void brOnFrame(const FbpHeader* h, const uint8_t* payload){
   FbpFrame f;
-  if(!fbpParseFrame(payload, h->len, &f)){ gStats.framesBad++; return; }
+  if(!fbpParseFrame(payload, h->len, &f)){
+    gStats.framesBad++;
+    BR_NETLOG("[NET] FRAME invalido: %u B no siguen el formato\n", (unsigned)h->len);
+    brNetInfo("Imagen no v\xC3\xA1lida del servicio");
+    return;
+  }
+  gLastFrameMs = brHostMillis();
+  gNavWaiting = false;
+  BR_NETLOG("[NET] FRAME seq=%u canal=%u %ux%u en (%d,%d) %u B\n",
+            (unsigned)h->seq, (unsigned)h->channel, (unsigned)f.w, (unsigned)f.h,
+            (int)f.x, (int)f.y, (unsigned)f.imgLen);
   // Contrapresion: si la interfaz aun no ha dibujado el frame anterior,
   // NO se acumula otro. El de ahora es mas util que el de antes.
   if(gFrReady){ gStats.framesDropped++; }
@@ -836,8 +954,14 @@ static void brHandleMessage(int len){
   switch(h.type){
     case FBP_S_WELCOME: {
       FbpWelcome w;
-      if(!fbpParseWelcome(p, h.len, &w)){ brSetError(flexBrErrorText(FBP_ERR_PROTOCOL)); gNetState = BRN_ERROR; return; }
+      if(!fbpParseWelcome(p, h.len, &w)){
+        BR_NETLOG("[NET] WELCOME ilegible (%u B)\n", (unsigned)h.len);
+        brNetInfo("Respuesta del servicio no reconocida");
+        brSetError(flexBrErrorText(FBP_ERR_PROTOCOL)); gNetState = BRN_ERROR; return;
+      }
       gNetState = BRN_READY;
+      brNetInfo("Sesi\xC3\xB3n abierta: esperando la p\xC3\xA1gina");
+      BR_NETLOG("[NET] WELCOME: sesion aceptada\n");
       gNeedFullRedraw = true;
       break;
     }
@@ -868,6 +992,8 @@ static void brHandleMessage(int len){
         char msg[FLEXBR_ERRMSG_MAX];
         snprintf(msg, sizeof(msg), "%s", flexBrErrorText(e.code));
         brSetError(msg);
+        brNetInfo("%s", msg);
+        BR_NETLOG("[NET] ERROR del servicio: codigo=%u (%s)\n", (unsigned)e.code, msg);
         if(e.code == FBP_ERR_AUTH || e.code == FBP_ERR_EXPIRED) gNetState = BRN_ERROR;
       }
       break;
@@ -887,6 +1013,11 @@ static bool brSendPending(uint8_t* tx, size_t txCap){
         char url[FLEXBR_URL_MAX];
         if(!gUrlQ || xQueueReceive(gUrlQ, url, 0) != pdTRUE) break;
         n = fbpBuildNavigate(tx, txCap, seq++, c.ch, url);
+        gNavSentMs = brHostMillis();
+        gNavWaiting = true;
+        gWarnedNoFrames = false;
+        brNetInfo("Cargando la p\xC3\xA1gina...");
+        BR_NETLOG("[NET] NAVIGATE canal=%u -> %s (%d B)\n", (unsigned)c.ch, url, n);
         break;
       }
       case FBP_C_POINTER: n = fbpBuildPointer(tx, txCap, seq++, c.ch, c.u1, (uint16_t)c.a, (uint16_t)c.b, c.u2); break;
@@ -904,16 +1035,25 @@ static bool brSendPending(uint8_t* tx, size_t txCap){
 static void brNetTask(void*){
   uint8_t tx[FLEXBR_URL_MAX + 64];
   uint32_t backoff = 1000;
-  uint32_t lastPing = 0, lastAck = 0;
+  uint32_t lastPing = 0, lastAck = 0, helloMs = 0;
 
   while(!gNetStop){
     // ---- conexion ----
     if(gNetState != BRN_READY && gNetState != BRN_HANDSHAKE){
-      if(!brHostOnline()){ gNetState = BRN_NOWIFI; vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
-      if(!gSt.server[0]){ gNetState = BRN_OFF; vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
+      if(!brHostOnline()){
+        gNetState = BRN_NOWIFI;
+        brNetInfo("Sin Wi-Fi: con\xC3\xA9" "ctate desde Ajustes");
+        vTaskDelay(pdMS_TO_TICKS(1000)); continue;
+      }
+      if(!gSt.server[0]){
+        gNetState = BRN_OFF;
+        brNetInfo("Sin servidor configurado (flex://settings)");
+        vTaskDelay(pdMS_TO_TICKS(1000)); continue;
+      }
 
       bool tls; char host[FLEXBR_HOST_MAX]; uint16_t port; char path[128];
       if(!flexBrParseWsUrl(gSt.server, &tls, host, sizeof(host), &port, path, sizeof(path))){
+        brNetInfo("La direcci\xC3\xB3n del servidor no es v\xC3\xA1lida");
         brSetError("La direcci\xC3\xB3n del servidor no es v\xC3\xA1lida");
         gNetState = BRN_ERROR;
         vTaskDelay(pdMS_TO_TICKS(3000));
@@ -938,6 +1078,9 @@ static void brNetTask(void*){
       }
 
       gNetState = BRN_CONNECTING;
+      brNetInfo("Conectando con %s:%u%s", host, (unsigned)port, tls ? " (TLS)" : "");
+      BR_NETLOG("[NET] destino=%s:%u ruta=%s tls=%d permitirWs=%d\n",
+                host, (unsigned)port, path, (int)tls, (int)gSt.allowInsecure);
       wsDisconnect();
       if(tls){
         gTls = new WiFiClientSecure();
@@ -956,16 +1099,19 @@ static void brNetTask(void*){
       if(!gSock->connect(host, port)){
         wsDisconnect();
         gNetState = BRN_ERROR;
+        brNetInfo("Conexi\xC3\xB3n rechazada por %s:%u", host, (unsigned)port);
         brSetError("No se pudo conectar con el servicio");
         gStats.reconnects++;
         vTaskDelay(pdMS_TO_TICKS(backoff));
         if(backoff < 16000) backoff *= 2;         // retroceso exponencial acotado
         continue;
       }
+      BR_NETLOG("[NET] TCP abierto, negociando WebSocket...\n");
       gNetState = BRN_HANDSHAKE;
       if(!wsHandshake(host, port, path)){
         wsDisconnect();
         gNetState = BRN_ERROR;
+        brNetInfo("El servicio no acept\xC3\xB3 el WebSocket (ruta %s)", path);
         brSetError("El servicio rechaz\xC3\xB3 la conexi\xC3\xB3n");
         gStats.reconnects++;
         vTaskDelay(pdMS_TO_TICKS(backoff));
@@ -978,28 +1124,81 @@ static void brNetTask(void*){
                             (uint16_t)cw, (uint16_t)brContentPageH(),
                             gSt.quality, gSt.profile, gCaps);
       if(n <= 0 || !wsSendFrame(0x2, tx, (size_t)n)){
+        BR_NETLOG("[NET] no se pudo enviar HELLO (n=%d)\n", n);
         wsDisconnect(); gNetState = BRN_ERROR; continue;
       }
+      brNetInfo("Autenticando (%s credencial)", gSt.token[0] ? "con" : "SIN");
+      BR_NETLOG("[NET] HELLO enviado: %d B  vista=%ux%u  cred=%s\n",
+                n, (unsigned)cw, (unsigned)brContentPageH(),
+                gSt.token[0] ? "si" : "NO CONFIGURADA");
       backoff = 1000;
+      helloMs = brHostMillis();
       lastPing = lastAck = brHostMillis();
     }
 
+    // Si el servicio no contesta al HELLO no hay nada que esperar: sin
+    // WELCOME nunca va a llegar un frame. Se corta y se reintenta en vez
+    // de quedarse en "cargando" para siempre.
+    if(gNetState == BRN_HANDSHAKE && helloMs && brHostMillis() - helloMs > 10000){
+      brNetInfo("Sin respuesta al saludo: revisa la credencial");
+      brSetError("El servicio no respondi\xC3\xB3 al saludo");
+      BR_NETLOG("[NET] timeout esperando WELCOME (10 s)\n");
+      helloMs = 0;
+      wsDisconnect(); gNetState = BRN_ERROR; gStats.reconnects++;
+      vTaskDelay(pdMS_TO_TICKS(backoff));
+      if(backoff < 16000) backoff *= 2;
+      continue;
+    }
+
     // ---- comandos salientes ----
-    if(!brSendPending(tx, sizeof(tx))){
+    // SOLO con la sesion ya abierta (WELCOME recibido). Mandar un
+    // NAVIGATE pegado al HELLO fue el segundo fallo real de la placa:
+    // el usuario escribe la direccion mientras el navegador todavia esta
+    // conectando, el comando se queda en la cola y sale inmediatamente
+    // detras del saludo. El servicio, que aun estaba autenticando (abrir
+    // un contexto de Chromium tarda cientos de ms), lo ve como un
+    // mensaje "sin autenticar" y CIERRA la sesion. El dispositivo
+    // reconecta, vuelve a pasar lo mismo, y la pagina no carga nunca.
+    //
+    // Los comandos esperan en la cola: no se pierde ninguno.
+    if(gNetState == BRN_READY && !brSendPending(tx, sizeof(tx))){
+      BR_NETLOG("[NET] fallo al enviar: se reconecta\n");
+      brNetInfo("Se perdi\xC3\xB3 la conexi\xC3\xB3n al enviar");
       wsDisconnect(); gNetState = BRN_ERROR; gStats.reconnects++; continue;
     }
 
     // ---- mensaje entrante ----
-    int r = wsReadMessage(gRx, gRxCap, 120);
+    // Un -1 es SIEMPRE fatal para el tramado, este el socket "conectado"
+    // o no: si se abandona un mensaje a medias, los bytes que quedan en
+    // el flujo se leerian despues como si fueran una cabecera WebSocket
+    // y la sesion no se recupera nunca. Antes solo se reconectaba cuando
+    // el socket ya estaba caido, y ese era justo el caso que dejaba el
+    // navegador cargando para siempre.
+    int r = wsReadMessage(gRx, gRxCap, BR_WS_POLL_MS);
     if(r == -1){
-      if(gSock && !gSock->connected()){
-        wsDisconnect(); gNetState = BRN_ERROR; gStats.reconnects++;
-      }
-    } else if(r >= 0){
-      brHandleMessage(r);
+      BR_NETLOG("[NET] lectura fallida (tramado perdido): se reconecta\n");
+      brNetInfo("Se perdi\xC3\xB3 la conexi\xC3\xB3n con el servicio");
+      wsDisconnect(); gNetState = BRN_ERROR; gStats.reconnects++;
+      helloMs = 0;
+      vTaskDelay(pdMS_TO_TICKS(200));
+      continue;
     }
+    if(r > 0){ gMsgsIn++; brHandleMessage(r); }
 
     uint32_t now = brHostMillis();
+
+    // ---- vigilancia: se navego y no llega ni un frame ----
+    if(gNavWaiting && !gWarnedNoFrames && gNavSentMs &&
+       now - gNavSentMs > BR_FIRSTFRAME_WARN_MS){
+      gWarnedNoFrames = true;
+      brNetInfo("Sin im\xC3\xA1genes tras %us (%u mensajes)",
+                (unsigned)((now - gNavSentMs) / 1000), (unsigned)gMsgsIn);
+      brSetError("El servicio no env\xC3\xAD" "a im\xC3\xA1genes de la p\xC3\xA1gina");
+      BR_NETLOG("[NET] AVISO: %u ms desde NAVIGATE sin ningun FRAME "
+                "(estado=%d mensajes=%u bytes=%u)\n",
+                (unsigned)(now - gNavSentMs), gNetState,
+                (unsigned)gMsgsIn, (unsigned)gStats.bytesIn);
+    }
     if(gNetState == BRN_READY){
       if(now - lastPing > 15000){
         lastPing = now;
@@ -1209,6 +1408,9 @@ static void brDrawPendingFrame(){
         // Un frame ilegible no se deja a medias en pantalla: se pide uno
         // completo. Si el fallo se repite, el contador de la telemetria
         // lo delata (flex://about) en vez de tapar el problema.
+        BR_NETLOG("[JPG] no se pudo decodificar (%u B, codigo %d)\n",
+                  (unsigned)f.imgLen, rc);
+        brNetInfo("Imagen ilegible (c\xC3\xB3" "digo %d)", rc);
         brPushCmd(FBP_C_REQ_FRAME, (uint8_t)(gTab + 1), 0, 0, 0, 0, 0, 0, NULL);
       }
     }
@@ -1227,6 +1429,78 @@ static void brDrawPendingFrame(){
   if(gFrDone) xSemaphoreGive(gFrDone);
 }
 
+// -------------------------------------------------------------
+//  PANEL DE ESTADO DE LA SESION
+//  ------------------------------------------------------------
+//  Mientras no haya llegado ninguna imagen, el area de pagina NO se
+//  queda en negro: cuenta en que punto esta la sesion y contra que
+//  servidor. Es exactamente la diferencia entre "esta roto" y "la
+//  credencial no vale" o "el servicio no responde".
+//
+//  Se pinta con las primitivas del sistema, nunca con texto que venga
+//  del servicio (los mensajes remotos ya pasan por flexBrErrorText).
+// -------------------------------------------------------------
+static const char* brNetStateName(int s){
+  switch(s){
+    case BRN_OFF:        return "Sin sesi\xC3\xB3n";
+    case BRN_NOWIFI:     return "Sin Wi-Fi";
+    case BRN_CONNECTING: return "Conectando";
+    case BRN_HANDSHAKE:  return "Autenticando";
+    case BRN_READY:      return "Sesi\xC3\xB3n activa";
+    default:             return "Con errores";
+  }
+}
+
+static void brDrawSessionStatus(int px, int py, int pw, int ph){
+  uint16_t txt  = brHostColor(BRC_TXT);
+  uint16_t mute = brHostColor(BRC_MUTE);
+  uint16_t dot  = (gNetState == BRN_READY) ? brHostColor(BRC_OK)
+                : (gNetState == BRN_ERROR || gNetState == BRN_NOWIFI) ? brHostColor(BRC_ERR)
+                : brHostColor(BRC_WARN);
+
+  int cx = px + pw / 2;
+  int y  = py + ph / 3;
+  if(y < py + 24) y = py + 24;
+
+  brHostFillCircle(cx, y, 7, dot);
+  y += 22;
+  brHostTextC(cx, y, brNetStateName(gNetState), 2, txt);
+  y += 30;
+
+  // Frase de la etapa actual (la escribe la tarea de red).
+  char info[80];
+  brLock();
+  snprintf(info, sizeof(info), "%s", gNetInfo);
+  brUnlock();
+  if(info[0]){
+    brHostTextC(cx, y, info, 1, mute);
+    y += 20;
+  }
+
+  // Contra que servidor, sin la credencial: nunca se pinta el token.
+  if(gSt.server[0]){
+    char line[FLEXBR_SERVER_MAX + 16];
+    snprintf(line, sizeof(line), "%s", gSt.server);
+    brHostTextC(cx, y, line, 1, mute);
+    y += 18;
+  }
+
+  // Contadores: separan "no llega nada" de "llega y no se dibuja".
+  char c1[72];
+  snprintf(c1, sizeof(c1), "mensajes %u  ·  im\xC3\xA1genes %u  ·  err %u  ·  %u KB",
+           (unsigned)gMsgsIn, (unsigned)gStats.framesOk,
+           (unsigned)gStats.framesBad, (unsigned)(gStats.bytesIn / 1024u));
+  brHostTextC(cx, y, c1, 1, mute);
+  y += 22;
+
+  if(!gSt.server[0])
+    brHostTextC(cx, y, "Configura el servicio en flex://settings", 1, mute);
+  else if(gNetState == BRN_NOWIFI)
+    brHostTextC(cx, y, "Conecta el Wi-Fi desde Ajustes del sistema", 1, mute);
+  else if(gWarnedNoFrames)
+    brHostTextC(cx, y, "El servicio responde pero no manda im\xC3\xA1genes", 1, mute);
+}
+
 // Repinta la pagina desde la cache. Si no hay cache, pide un frame.
 static void brRepaintPageFromCache(){
   int px, py, pw, ph; brPageRect(&px, &py, &pw, &ph);
@@ -1241,6 +1515,9 @@ static void brRepaintPageFromCache(){
     }
     if(gStripsStale) brPushCmd(FBP_C_REQ_FRAME, (uint8_t)(gTab + 1), 0, 0, 0, 0, 0, 0, NULL);
   } else {
+    // Sin nada que repintar: en vez de un rectangulo negro se explica en
+    // que punto esta la sesion.
+    brDrawSessionStatus(px, py, pw, ph);
     brPushCmd(FBP_C_REQ_FRAME, (uint8_t)(gTab + 1), 0, 0, 0, 0, 0, 0, NULL);
   }
   brHostFlush(py, py + ph - 1);
@@ -2057,6 +2334,12 @@ static void brRenderAll(){
 //  8) INTERFAZ: TACTIL
 // =============================================================
 static bool     gDragging = false;
+// Un arrastre solo cuenta si EMPEZO aqui (hubo un `pressed` que el
+// navegador vio). Sin esto, un dedo que venia de otra capa -- el
+// teclado, tipicamente -- entraba en el manejador de desplazamiento con
+// un origen viejo y daba un salto de lista de cientos de pixeles: el
+// "scroll fantasma" que se veia al pulsar "Ir".
+static bool     gDragArmed = false;
 static int      gDragLastY = 0, gDragLastX = 0;
 static uint32_t gLastScrollMs = 0;
 static int      gScrollAccX = 0, gScrollAccY = 0;
@@ -2170,8 +2453,8 @@ static void brSettingsAction(int row){
 static void brTouchPage(const BrTouch* t, int px, int py, int pw, int ph){
   if(gTabs[gTab].view != BRV_PAGE) return;
   uint8_t ch = (uint8_t)(gTab + 1);
-  if(t->pressed){ gDragging = false; gDragLastX = t->x; gDragLastY = t->y; gScrollAccX = gScrollAccY = 0; }
-  if(t->down && !t->pressed){
+  if(t->pressed){ gDragging = false; gDragArmed = true; gDragLastX = t->x; gDragLastY = t->y; gScrollAccX = gScrollAccY = 0; }
+  if(gDragArmed && t->down && !t->pressed){
     int dx = t->x - gDragLastX, dy = t->y - gDragLastY;
     if(!gDragging && (dy > 8 || dy < -8 || dx > 10 || dx < -10)) gDragging = true;
     if(gDragging){
@@ -2188,6 +2471,12 @@ static void brTouchPage(const BrTouch* t, int px, int py, int pw, int ph){
     }
   }
   if(t->released){
+    if(!gDragArmed){                 // dedo heredado de otra capa: se ignora
+      gDragging = false;
+      gScrollAccX = gScrollAccY = 0;
+      return;
+    }
+    gDragArmed = false;
     if(gDragging){
       if(gScrollAccX || gScrollAccY)
         brPushCmd(FBP_C_SCROLL, ch, (int16_t)(-gScrollAccX), (int16_t)(-gScrollAccY), 0, 0, 0, 0, NULL);
@@ -2201,7 +2490,47 @@ static void brTouchPage(const BrTouch* t, int px, int py, int pw, int ph){
   }
 }
 
+// Anula cualquier gesto en curso. Se llama al abrir y al cerrar el
+// teclado: el toque que abre el campo y el que pulsa "Ir" no deben
+// dejar un arrastre a medias que despues mueva la pagina o la lista.
+void flexBrowserCancelDrag(){
+  gDragging = false;
+  gDragArmed = false;
+  gScrollAccX = gScrollAccY = 0;
+  gDragLastX = gDragLastY = 0;
+  gLastScrollMs = brHostMillis();
+}
+
+void flexBrowserForceRepaint(){
+  gNeedFullRedraw = true;
+  gNeedChromeRedraw = true;
+}
+
 static void brHandleTouch(){
+  // -----------------------------------------------------------
+  //  CAPTURA EXCLUSIVA DEL TECLADO
+  //  ----------------------------------------------------------
+  //  Con el teclado abierto el navegador NO mira ni un toque. Ni el
+  //  desplazamiento de Ajustes, ni el de la pagina, ni los botones de
+  //  la barra: nada.
+  //
+  //  Sin esto pasaba lo que se vio en la placa: el mismo dedo que
+  //  pulsaba una tecla entraba tambien en el manejador de
+  //  desplazamiento de flex://settings -- que reacciona a `down`, no a
+  //  `tap`, y por eso el puente no lo podia frenar consumiendo el
+  //  toque -- y la lista se movia debajo del dedo mientras se
+  //  escribia. El teclado ya atendio su parte en navTick ANTES de
+  //  llegar aqui; lo unico correcto para el resto del toque es
+  //  ignorarlo.
+  //
+  //  Se anula ademas el arrastre en curso en cada vuelta, para que al
+  //  cerrarse el teclado no quede un gesto vivo de antes.
+  // -----------------------------------------------------------
+  if(gEditTarget != BRE_NONE){
+    flexBrowserCancelDrag();
+    return;
+  }
+
   BrTouch t; brHostGetTouch(&t);
   int x, y, w, h; brHostContentRect(&x, &y, &w, &h);
   int px, py, pw, ph; brPageRect(&px, &py, &pw, &ph);
@@ -2336,8 +2665,9 @@ static void brHandleTouch(){
 
   // --- contenido ---
   if(gTabs[gTab].view == BRV_INTERNAL){
-    // Desplazamiento de la lista interna.
-    if(t.down && !t.pressed && t.y >= py){
+    // Desplazamiento de la lista interna. SOLO si el dedo empezo aqui
+    // (gDragArmed): un dedo heredado de otra capa no mueve la lista.
+    if(gDragArmed && t.down && !t.pressed && t.y >= py){
       int dy = t.y - gDragLastY;
       if(!gDragging && (dy > 6 || dy < -6)) gDragging = true;
       if(gDragging){
@@ -2348,7 +2678,7 @@ static void brHandleTouch(){
         brDrawInternal();
       }
     }
-    if(t.pressed){ gDragging = false; gDragLastY = t.y; }
+    if(t.pressed){ gDragging = false; gDragArmed = true; gDragLastY = t.y; }
     if(t.tap && !gDragging && t.y >= py){
       int page = gTabs[gTab].page;
       int rowH = 46;
@@ -2369,7 +2699,7 @@ static void brHandleTouch(){
       }
       brHostConsumeTouch();
     }
-    if(t.released) gDragging = false;
+    if(t.released){ gDragging = false; gDragArmed = false; }
     return;
   }
   brTouchPage(&t, px, py, pw, ph);
@@ -2468,6 +2798,29 @@ void flexBrowserTick(){
   // 4) Estado de red: un cambio se refleja en la barra.
   static int lastNet = -1;
   if(gNetState != lastNet){ lastNet = gNetState; gNeedChromeRedraw = true; }
+
+  // 4b) Panel de estado de la sesion. Mientras la pestana activa no
+  //     tenga ninguna imagen, cada cambio de etapa se repinta -- sin
+  //     redibujar toda la app, solo el area de pagina. Esto es lo que
+  //     hace que el usuario vea "conectando", "autenticando",
+  //     "credencial rechazada" en lugar de un rectangulo negro fijo.
+  {
+    static uint32_t lastInfoSeq = 0xFFFFFFFFu;
+    if(gView == BRV_PAGE && gTabs[gTab].used && gTabs[gTab].view == BRV_PAGE &&
+       !gTabs[gTab].hasFrame && !gNeedFullRedraw){
+      if(lastInfoSeq != gNetInfoSeq){
+        lastInfoSeq = gNetInfoSeq;
+        int px, py, pw, ph; brPageRect(&px, &py, &pw, &ph);
+        brHostClip(py, py + ph - 1);
+        brHostFillRect(px, py, pw, ph, brHostColor(BRC_PAGE));
+        brDrawSessionStatus(px, py, pw, ph);
+        brHostClipReset();
+        brHostFlush(py, py + ph - 1);
+      }
+    } else {
+      lastInfoSeq = 0xFFFFFFFFu;
+    }
+  }
 
   // 5) Reloj del reproductor. La posicion se estima con el reloj local
   //    entre avisos del servicio: es una barra de progreso, no una

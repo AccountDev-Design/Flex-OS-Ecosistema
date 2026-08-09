@@ -295,6 +295,33 @@ dispositivo (solo para pruebas).
 dispositivo no coincide con ninguno de `devices[]`. Ojo con los espacios
 al copiarlo.
 
+**El dispositivo dice «Conexión rechazada por *host*:*puerto*»** — el
+servicio no es alcanzable desde la red. Por orden de probabilidad:
+
+1. **El servicio escucha solo en loopback.** Si `config.json` tiene
+   `"host": "127.0.0.1"`, ninguna otra máquina puede conectarse aunque
+   el arranque no dé ningún error. Ponlo en `"0.0.0.0"`. Desde esta
+   versión el servicio lo avisa al arrancar:
+   `ATENCION: el servicio escucha SOLO en 127.0.0.1`.
+2. El cortafuegos del equipo bloquea el puerto
+   (`sudo ufw allow 8443/tcp`).
+3. La IP que hay escrita en el dispositivo ya no es la del servidor
+   (DHCP). Compruébalo con `ip addr`.
+
+Para descartar la red desde el propio servidor:
+`curl http://<ip>:<puerto>/v1/health` desde otra máquina.
+
+**El dispositivo se queda en «Sesión abierta: esperando la página»** —
+la sesión está autenticada y el transporte va bien, así que el problema
+está en el servicio. Mira su log: aparecerá el destino rechazado por el
+guardián, un fallo de navegación o un error de Chromium. Si el
+dispositivo llega a decir «Sin imágenes tras N s», el log del servicio
+tiene la respuesta.
+
+**En el log del servicio: `upgrade rechazado desde …: ruta "/" (se
+espera /v1/session)`** — la dirección del dispositivo no lleva la ruta.
+Tiene que ser `ws://host:puerto/v1/session`, no `ws://host:puerto`.
+
 **«Memoria insuficiente» en el dispositivo** — el navegador no arranca la
 sesión remota si no hay heap interno suficiente para TLS. Cierra otras
 apps. En Flex OS Pro el margen es muy estrecho: es esperable.
