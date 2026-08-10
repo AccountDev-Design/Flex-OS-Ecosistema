@@ -10,11 +10,11 @@
 //  con camara OV2640 y una pantalla TFT SPI de 4.0 pulgadas con
 //  panel tactil resistivo.
 //
-//  NADA del sistema operativo ha cambiado. La UI sigue viviendo,
-//  como siempre, en un lienzo LOGICO de 480x800 en PSRAM: todas
-//  las coordenadas, layouts, animaciones y hit-boxes de las 16
-//  apps son BIT A BIT las mismas que en la version P4. Lo unico
-//  que se ha reescrito es la CAPA DE HARDWARE, es decir, los tres
+//  La logica y las apps siguen siendo las mismas, pero la geometria
+//  del S3 se adapta a un lienzo LOGICO de 533x800 en PSRAM. Esa es
+//  la proporcion real del panel 320x480: los layouts que dependen de
+//  SCR_W ganan ancho util y llenan el TFT sin estirar el resultado.
+//  Tambien se reescribe la CAPA DE HARDWARE, es decir, los tres
 //  puntos por los que el sistema toca el silicio:
 //
 //    1) ENCENDER LA PANTALLA  -> flexPanelInit()
@@ -26,11 +26,10 @@
 //         ANTES: esp_lcd_panel_draw_bitmap() sobre el panel DPI,
 //                1:1, porque el panel ERA de 480x800.
 //         AHORA: flxPanelBlitBand(), que reescala la banda sucia
-//                del lienzo logico 480x800 al panel FISICO de
-//                320x480 y la sube por SPI con DMA. El escalado
-//                es una razon ENTERA exacta (3/5) con filtro de
-//                caja 2x2, asi que el texto pequeno se sigue
-//                leyendo y no cuesta ninguna division por pixel.
+//                del lienzo logico 533x800 al panel FISICO de
+//                320x480 y la sube por SPI con DMA. Ambos ejes
+//                usan practicamente el mismo factor, con filtro
+//                de caja 2x2 para mantener legible el texto pequeno.
 //    3) HACER FUNCIONAR EL TACTIL -> gt* + flexTouchInit()
 //         ANTES: GT911 capacitivo por I2C, ya calibrado de fabrica.
 //         AHORA: XPT2046 resistivo por SPI -- driver, umbral de
@@ -38,9 +37,9 @@
 //                claves de NVS TRANSPLANTADOS TAL CUAL desde
 //                ArduOS Z Ultra Pro v3.33 (ver el bloque
 //                "CAPA DE HARDWARE"). Se traduce de coordenadas
-//                fisicas 320x480 a las logicas 480x800 con la
-//                inversa EXACTA de la transformacion del
-//                presenter, asi que las hit-boxes no se mueven.
+//                fisicas 320x480 a las logicas 533x800 con la
+//                misma transformacion por extremos que usa el
+//                presenter, asi que imagen y hit-boxes coinciden.
 //
 //  ADEMAS: la app CAMARA ya no dibuja el patron "SIN SENAL". El
 //  hook camCapture() que el proyecto dejaba preparado esta ahora
@@ -231,7 +230,7 @@ static ClipItem gClip[CLIP_SLOTS];
 // El TFT SPI de 4.0" es 480x320 en su orientacion natural (landscape).
 // FlexOS es un sistema PORTRAIT, asi que el panel se usa girado:
 // MADCTL lo deja en 320 (ancho) x 480 (alto) y el presenter escala
-// el lienzo logico 480x800 a esa superficie.
+// el lienzo logico 533x800 a esa superficie.
 #define PX_W    320         // ancho FISICO del panel en portrait
 #define PX_H    480         // alto  FISICO del panel en portrait
 
@@ -1123,7 +1122,7 @@ static void panelSleepIn(){
 // ##  ENVOLTORIO gt*: el resto de FlexOS llama a gtPoll() y
 // ##  gtPollMulti() -nombres heredados del GT911- desde una docena
 // ##  de sitios. Se mantienen tal cual, con la misma firma y el
-// ##  mismo contrato (coordenadas ya en el espacio LOGICO 480x800),
+// ##  mismo contrato (coordenadas ya en el espacio LOGICO 533x800),
 // ##  para que ni el motor de gestos, ni el teclado, ni el kiosco,
 // ##  ni la suspension tengan que cambiar una sola linea.
 // #############################################################
@@ -1166,7 +1165,7 @@ static void panelSleepIn(){
 // capacitivo con filtro interno). Sin esta zona muerta, ese ruido
 // entra en el scroll como micro-saltos hacia delante y hacia atras:
 // eso es exactamente la sensacion de "el scroll se traba".
-// Se mide en pixeles LOGICOS (480x800) desde el punto donde bajo el
+// Se mide en pixeles LOGICOS (533x800) desde el punto donde bajo el
 // dedo; hasta superarla, el toque no cuenta como movimiento.
 #define TS_DRAG_DEADZONE  3
 
@@ -1310,7 +1309,7 @@ static TsSample tsSample(){
 //      Por eso las constantes de calibracion de ArduOS -y la pantalla
 //      de calibracion que las calcula- siguen significando lo mismo.
 //
-//   2) FISICO -> LOGICO (480x800). Es la INVERSA EXACTA de lo que hace
+//   2) FISICO -> LOGICO (533x800). Es la INVERSA EXACTA de lo que hace
 //      flxPanelBlitBand al pintar. Si el presenter dibuja el pixel
 //      logico (lx,ly) en el fisico (16 + lx*3/5, ly*3/5), entonces un
 //      toque en (fx,fy) corresponde a ((fx-16)*5/3, fy*5/3). Como las
@@ -1496,7 +1495,7 @@ static void flexI2CInit(){
 // #############################################################
 
 // #############################################################
-// ##  MOTOR GRAFICO NATIVO 480x800  (original de FlexOS)
+// ##  MOTOR GRAFICO NATIVO 533x800  (original de FlexOS)
 // ##  Framebuffer en PSRAM + presenter en core 0 + primitivas
 // #############################################################
 
@@ -4205,7 +4204,7 @@ static void drawTextR(int rx, int y, const char* s, int size, uint16_t col){ dra
 static void fillTriangle(int x0,int y0,int x1,int y1,int x2,int y2,uint16_t c){
   int minx = min(x0, min(x1, x2)), maxx = max(x0, max(x1, x2));
   int miny = min(y0, min(y1, y2)), maxy = max(y0, max(y1, y2));
-  // En modo landscape (gLand) el lienzo LOGICO es 800x480, no 480x800: recortar
+  // En modo landscape (gLand) el lienzo LOGICO es 800x533, no 533x800: recortar
   // contra los limites correctos para no perder los triangulos con x logica >=480
   // (picos/naves/wave del juego Geo Dash). En portrait no cambia nada.
   int bcw = gLand ? SCR_H : SCR_W, bch = gLand ? SCR_W : SCR_H;
@@ -14983,9 +14982,9 @@ static void paintTick(){
 // ##  swipe-arriba para cerrar (free), toque para maximizar.
 // #############################################################
 #define SW_MAX  6
-#define TH_W    150
+#define TH_W    167
 #define TH_H    250
-#define SW_CW   260
+#define SW_CW   268
 #define SW_CH   430
 #define SW_STEP 288
 #define SW_TOP  150
@@ -14998,7 +14997,7 @@ static int   swLiftCard = -1, swGesture = 0;                     // 0 nada, 1 ho
 static float swStartX, swStartY, swLastX2, swLastY2;
 
 static uint16_t* swAllocThumb(){ return (uint16_t*)heap_caps_malloc((size_t)TH_W * TH_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); }
-static void captureThumb(uint16_t* dst){                          // reduce fb 480x800 -> 150x250
+static void captureThumb(uint16_t* dst){                          // reduce fb 533x800 -> 167x250 sin deformar
   for(int j = 0; j < TH_H; j++){
     int sy = j * SCR_H / TH_H; uint16_t* d = dst + (size_t)j * TH_W;
     for(int i = 0; i < TH_W; i++) d[i] = fb[(size_t)sy * SCR_W + i * SCR_W / TH_W];
