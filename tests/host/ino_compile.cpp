@@ -150,6 +150,7 @@ static void geoEnterSelect();
 //  unidad de traduccion (el .ino se incluye arriba), asi que main()
 //  puede llamar a las funciones static del sketch sin exportarlas.
 // #############################################################
+static void testPanelRapido();
 static int gFails = 0;
 static void chk(bool ok, const char* what){
   if(!ok){ printf("  FALLO: %s\n", what); gFails++; }
@@ -160,6 +161,130 @@ static void chkDate(uint32_t utc, int ey, int emo, int ed, int ewd, int eh, int 
   if(!ok) printf("  FALLO: %s -> %04d-%02d-%02d wd%d %02d:%02d (esperado %04d-%02d-%02d wd%d %02d:%02d)\n",
                  what, rtcY, rtcMo, rtcD, rtcWd, rtcH, rtcMin, ey, emo, ed, ewd, eh, emi);
   if(!ok) gFails++;
+}
+
+// #############################################################
+//  PRUEBAS DEL PANEL RAPIDO GLOBAL
+//  ------------------------------------------------------------
+//  Se ejercita la maquina de gestos de verdad: se reservan los
+//  framebuffers (flxGfxInit con los dobles) y se le dan toques
+//  sinteticos. Lo que se comprueba es exactamente lo que el panel
+//  promete: que nunca sale de su rango, que al soltar acaba abierto
+//  o cerrado -- nunca a medias --, que encima de una app captura su
+//  fondo y lo libera al cerrar, y que cualquier cambio de estado lo
+//  deja limpio.
+// #############################################################
+static void touchReset(){
+  T = Touch();
+}
+// Un cuadro con el dedo BAJANDO en (x, y). first = el cuadro del contacto.
+static void touchDrag(int x, int y, bool first){
+  touchReset();
+  T.down = true; T.pressed = first; T.x = x; T.y = y;
+  T.startX = x; T.startY = first ? y : T.startY;
+}
+
+static void testPanelRapido(){
+  printf("Panel rapido global\n");
+  if(!flxGfxInit()){ printf("  FALLO: no se pudieron reservar los framebuffers\n"); gFails++; return; }
+  drawWallpaper(homeBuf, false);              // fondo valido para componer la cortina
+  setBuf(fb);
+
+  // --- no se abre donde no debe ---
+  gState = ST_HOME; gLand = true;
+  chk(!qsCanOpen(), "en horizontal (Modo PC) la cortina esta desactivada");
+  gLand = false; gHosted = true;
+  chk(!qsCanOpen(), "dentro de una ventana de DeX la cortina esta desactivada");
+  gHosted = false; editMode = true;
+  chk(!qsCanOpen(), "en Modo Edicion la cortina esta desactivada");
+  editMode = false;
+  gState = ST_LOCK;  chk(!qsCanOpen(), "en la pantalla de bloqueo no se abre");
+  gState = ST_APP;   chk(qsCanOpen(),  "encima de una app SI se abre");
+  gState = ST_HOME;  chk(qsCanOpen(),  "en el escritorio se abre");
+
+  // --- apertura encima de una app: captura el fondo ---
+  gState = ST_APP; gAppId = 0;
+  gTestMs = 10000;
+  int startY = 10, y = startY;
+  touchDrag(240, y, true);
+  chk(qsGlobalHandle(), "el gesto del borde superior lo captura la cortina");
+  chk(qsOverApp && qsAppSnap != NULL, "encima de una app se captura su ultimo cuadro");
+
+  // --- arrastre: la posicion nunca sale de [0, SCR_H] ---
+  bool enRango = true;
+  for(int i = 0; i < 40; i++){
+    gTestMs += 16; y += 10;
+    T.startY = startY; touchDrag(240, y, false); T.startY = startY;
+    qsGlobalHandle();
+    if(qsPanelY < 0 || qsPanelY > SCR_H) enRango = false;
+  }
+  chk(enRango, "la posicion se mantiene dentro del rango durante el arrastre");
+
+  // Un tiron muy por debajo del borde inferior tampoco la saca de rango.
+  gTestMs += 16; T.startY = startY; touchDrag(240, 100000, false); T.startY = startY;
+  qsGlobalHandle();
+  chk(qsPanelY >= 0 && qsPanelY <= SCR_H, "un arrastre desmedido queda acotado");
+
+  // --- soltar tras un arrastre largo: se completa la apertura ---
+  gTestMs += 16; touchReset(); T.released = true;
+  qsGlobalHandle();
+  int guardia = 0;
+  while(qsAnimOn && guardia++ < 500){ gTestMs += 16; qsAnimStep(); }
+  chk(!qsAnimOn, "la animacion de apertura termina");
+  chk(qsPanelY == SCR_H, "un arrastre largo acaba con la cortina ABIERTA del todo");
+  qsForceClose();
+
+  // --- EL UMBRAL DEL 40%, sin ayuda del lanzamiento ---
+  // Se arrastra DESPACIO (2 px cada 100 ms, muy por debajo de QS_FLICK) hasta
+  // una fraccion concreta y se suelta. Asi lo que decide es la POSICION, no la
+  // velocidad: es exactamente el criterio que promete el panel.
+  const int umbral = (SCR_H * QS_OPEN_PCT) / 100;
+  chk(umbral == 320, "el umbral de apertura es el 40% de la pantalla");
+  for(int caso = 0; caso < 2; caso++){
+    int destino = (caso == 0) ? umbral - 40 : umbral + 40;    // 35% y 45%
+    gState = ST_APP;
+    gTestMs += 1000;
+    touchDrag(240, 10, true);
+    chk(qsGlobalHandle(), caso == 0 ? "agarre (caso 35%)" : "agarre (caso 45%)");
+    for(int yy = 12; yy <= 10 + destino; yy += 2){
+      gTestMs += 100;                                         // 2 px / 100 ms = 0,02 px/ms
+      T.startY = 10; touchDrag(240, yy, false); T.startY = 10;
+      qsGlobalHandle();
+    }
+    bool esperadoAbrir = (qsPanelY >= umbral);
+    chk(esperadoAbrir == (caso == 1), "el arrastre lento acaba del lado del umbral que toca");
+    gTestMs += 100; touchReset(); T.released = true; qsGlobalHandle();
+    guardia = 0;
+    while(qsAnimOn && guardia++ < 500){ gTestMs += 16; qsAnimStep(); }
+    chk(qsPanelY == 0 || qsPanelY == SCR_H, "al soltar nunca queda a medias");
+    chk(qsPanelY == (esperadoAbrir ? SCR_H : 0),
+        esperadoAbrir ? "por encima del 40% se completa la apertura"
+                      : "por debajo del 40% se cierra del todo");
+    if(qsPanelY == 0) chk(qsAppSnap == NULL, "al cerrar se libera la captura de la app");
+    qsForceClose();
+  }
+
+  // --- cierre forzado por cambio de estado ---
+  gTestMs += 1000; touchDrag(240, 10, true); qsGlobalHandle();
+  for(int i = 0; i < 30; i++){ gTestMs += 16; T.startY = 10; touchDrag(240, 10 + i * 20, false); T.startY = 10; qsGlobalHandle(); }
+  chk(qsPanelY > 0, "la cortina esta a medio abrir antes del cierre forzado");
+  chk(qsAppSnap != NULL, "y con la captura de la app viva");
+  qsForceClose();
+  chk(qsPanelY == 0 && !qsDragging && !qsAnimOn, "qsForceClose deja la cortina cerrada y sin gesto");
+  chk(qsAppSnap == NULL, "qsForceClose libera la captura de la app");
+  chk(!T.tap && !T.pressed && !T.released && !T.swipeUp, "qsForceClose suelta el toque");
+
+  // --- un estado no permitido cierra la cortina por su cuenta ---
+  gTestMs += 1000; gState = ST_APP;
+  touchDrag(240, 10, true); qsGlobalHandle();
+  for(int i = 0; i < 10; i++){ gTestMs += 16; T.startY = 10; touchDrag(240, 10 + i * 20, false); T.startY = 10; qsGlobalHandle(); }
+  chk(qsPanelY > 0, "cortina abierta antes de cambiar de estado");
+  gState = ST_LOCK;                                    // p.ej. bloqueo por inactividad
+  chk(!qsGlobalHandle(), "en un estado no permitido la cortina no se queda el toque");
+  chk(qsPanelY == 0 && qsAppSnap == NULL, "y se cierra sola, liberando la captura");
+  gState = ST_HOME;
+
+  if(!gFails) printf("  Panel rapido: todas las comprobaciones pasan.\n");
 }
 
 int main(){
@@ -224,5 +349,8 @@ int main(){
 
   if(gFails){ printf("%d comprobacion(es) del reloj han fallado.\n", gFails); return 1; }
   printf("  Reloj: todas las comprobaciones pasan.\n");
+
+  testPanelRapido();
+  if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

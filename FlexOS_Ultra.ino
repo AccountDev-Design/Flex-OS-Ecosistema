@@ -4112,6 +4112,12 @@ static void suspWakeLockScreen();
 // teclado; aqui solo el prototipo (primitivos en la firma). Lo necesita el
 // gesto de suspension: ver el VETO AL TECLEAR en suspGestureUpdate.
 static bool kbTypingNow();
+// PANEL RAPIDO GLOBAL: cierre limpio y obligatorio. Se define con el resto de
+// la cortina (mucho mas abajo), pero lo llaman TODOS los cambios de estado que
+// estan antes en el archivo -- suspender, abrir o cerrar una app, volver al
+// escritorio, bloquear, apagar, Modo PC y kiosco. Firma sin tipos propios, como
+// exige el auto-prototipado de Arduino.
+static void qsForceClose();
 
 // Arranca un fundido de backlight NO bloqueante hacia 'to' (0..100).
 static void suspFadeTo(int to){
@@ -4126,6 +4132,7 @@ static void suspFadeTo(int to){
 }
 static void suspEnter(){
   if(gSuspOn) return;
+  qsForceClose();                    // apagar la pantalla no deja la cortina a medias
   gSuspBright = gBright;             // brillo del usuario, intacto (blWritePct no lo toca)
   gSuspOn = true; gSuspDark = false;
   suspFadeTo(0);
@@ -5921,6 +5928,9 @@ static void winRevealAnim(int id, bool opening){
 }
 
 static void appClose(){
+  // La cortina no puede sobrevivir a un cambio de app: se cierra y suelta el
+  // toque ANTES de tocar nada mas (ver qsForceClose).
+  qsForceClose();
   // FASE 4: un unico candado cierra TODAS las salidas de la app -- boton atras,
   // chevron de la cabecera, gesto rapido de la barra iOS, y cualquier app que
   // llame a appClose desde su propio tick. Poniendolo aqui no hay que ir
@@ -5956,6 +5966,7 @@ static void appClose(){
   enterHome();
 }
 static void enterApp(int id){
+  qsForceClose();                 // ninguna app se abre con la cortina a medias
   // FASE 4: en kiosco solo se puede estar en la app clavada. Esto bloquea que
   // una app abra otra a pantalla completa y deje kioskApp apuntando a otro sitio.
   if(KIOSK_ON && kioskOn && id != kioskApp) return;
@@ -5989,6 +6000,7 @@ static void appTick(){
 }
 
 static void enterHome(){
+  qsForceClose();                 // volver al escritorio nunca deja la cortina a medias
   gState = ST_HOME; lockOff = 0; lastLockOff = -1;
   // Antes se volcaba homeBuf tal cual. Si venias de Ajustes de cambiar idioma,
   // formato de hora, Liquid Glass o estilo de iconos, homeBuf seguia siendo el
@@ -9522,9 +9534,90 @@ static void qsTogglePill(int x, int y, int w, int h, bool on){
   drawText(x + h + 12, y + 14, "Ahorro Ultra", 2, on ? TH_ONACC : TH_TXT);
   drawText(x + h + 12, y + 40, on ? "Activado - 160 MHz" : "Desactivado - 360 MHz", 1, on ? TH_ONACC : TH_TXT2);
 }
-static uint16_t* qsBuf = NULL;      // cortina precompuesta (para arrastre fluido)
+// #############################################################
+// ##  LA CORTINA ES UNA CAPA GLOBAL, NO UNA PANTALLA DEL HOME
+// ##  ------------------------------------------------------
+// ##  Antes la cortina solo existia en ST_HOME y se componia
+// ##  SIEMPRE sobre homeBuf. Por eso no se podia abrir con una app
+// ##  delante: no habia ningun fondo valido sobre el que componer,
+// ##  y qsHandle() se llamaba desde la rama ST_HOME del switch de
+// ##  estado, o sea despues de que la app ya hubiera visto el toque.
+// ##
+// ##  Ahora:
+// ##    · el FONDO es qsBgSrc(): homeBuf en el escritorio, y una
+// ##      captura del ultimo cuadro de la app cuando hay una app
+// ##      delante. La captura se hace UNA vez, al empezar el gesto,
+// ##      y se libera en cuanto la cortina se cierra del todo.
+// ##    · el gesto se atiende en qsGlobalHandle(), que loop() llama
+// ##      ANTES del switch de estado: si el dedo entra por el borde
+// ##      superior, la cortina se queda con el toque entero y la app
+// ##      de debajo no llega a verlo.
+// ##    · mientras la cortina esta visible, la app de debajo NO
+// ##      recibe ni gestos ni botones: su tick no se ejecuta.
+// ##    · la animacion ya no bloquea. Antes qsAnimTo() giraba en un
+// ##      bucle con delay(1) durante 150-300 ms, y en ese tiempo no
+// ##      se sondeaba el tactil ni corria nada mas. Ahora es una
+// ##      maquina de estados que avanza un paso por cuadro desde
+// ##      uiTick(), con el avance sacado del reloj.
+// ##
+// ##  MODO PC / DeX HORIZONTAL: la cortina queda DESACTIVADA a
+// ##  proposito (ver qsCanOpen). Su geometria esta escrita para
+// ##  480x800 en vertical y ahi no encaja; hara falta una version
+// ##  propia. Es una limitacion declarada, no un olvido.
+// #############################################################
+#define QS_EDGE_H        30              // franja del borde superior que captura el gesto
+#define QS_OPEN_PCT      40              // al soltar: >=40% del recorrido -> abrir; si no, cerrar
+#define QS_SHADOW_H      18              // alto de la sombra bajo el borde movil
+#define QS_HANDLE_MARGIN 22              // margen por encima del borde donde vive el asa
+
+static uint16_t* qsBuf     = NULL;   // cortina precompuesta (para arrastre fluido)
+static uint16_t* qsAppSnap = NULL;   // ultimo cuadro de la app de debajo (solo mientras haga falta)
+static bool      qsOverApp = false;  // la cortina esta encima de una app, no del escritorio
 static int  qsLastY = 0;
+static bool qsCapDirty = false;      // el relleno del brillo cambio: hay que repintar la capsula
 // qsDirty se declara arriba, junto a gHomeDirty (invalidacion de caches).
+
+// Fondo sobre el que se compone la cortina. Nunca devuelve un puntero nulo
+// silencioso: si la captura de la app no existe, se cae al escritorio, que
+// siempre esta reservado.
+static inline uint16_t* qsBgSrc(){
+  if(qsOverApp && qsAppSnap) return qsAppSnap;
+  return homeBuf;
+}
+// Captura el cuadro actual de la app. 768 KB de PSRAM que solo viven mientras
+// la cortina esta a la vista. fbLock() garantiza que no se copia un fb a medio
+// subir por la DMA -- el mismo candado que usa el resto del compositor.
+static bool qsCaptureApp(){
+  if(!qsAppSnap)
+    qsAppSnap = (uint16_t*)heap_caps_malloc((size_t)SCR_W * SCR_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(!qsAppSnap) return false;                 // sin memoria: la cortina no se abre (mejor que abrirla rota)
+  fbLock();
+  memcpy(qsAppSnap, fb, (size_t)SCR_W * SCR_H * 2);
+  fbUnlock();
+  qsOverApp = true;
+  qsDirty   = true;                            // el fondo cambio: recomponer la cortina
+  return true;
+}
+static void qsFreeApp(){
+  if(qsAppSnap){ heap_caps_free(qsAppSnap); qsAppSnap = NULL; }
+  qsOverApp = false;
+}
+
+// ---- ESTADO DEL GESTO ---------------------------------------------
+// Vive aqui arriba porque lo tocan tanto el arrastre (mas abajo) como el
+// cierre forzado, que se llama desde cualquier cambio de estado del sistema.
+#define QS_SMOOTH_TAU 26.0f      // ms: constante del suavizado de posicion
+#define QS_VEL_TAU    45.0f      // ms: constante del filtro de velocidad
+#define QS_FLICK      0.45f      // px/ms (~450 px/s) para considerarlo un lanzamiento
+static float    qsVel = 0;       // velocidad filtrada del dedo, px/ms
+static int      qsPrevY = 0;
+static uint32_t qsPrevMs = 0;
+static int      qsDragBase = 0, qsDragY0 = 0;
+static bool     qsDragMoved = false;   // el gesto ya paso de umbral: es arrastre, no toque
+// Posicion interpolada de la cortina en coma flotante. La comparten el
+// arrastre (suavizado) y la animacion, asi que soltar el dedo continua desde
+// donde estaba EXACTAMENTE, sin el micro-salto de reenganche.
+static float    qsPosF = 0;
 
 // dibuja titulo + tiles + etiqueta y pista del slider en el gBuf actual (sin relleno/perilla)
 static void qsDrawContent(){
@@ -9545,18 +9638,25 @@ static void qsDrawContent(){
   qsTogglePill(QS_PILL_X, QS_PILL_Y, QS_PILL_W, QS_PILL_H, qsPower);
 }
 // compone la cortina COMPLETA una sola vez en qsBuf (parte cara)
+// Esta es la UNICA funcion que desenfoca (Liquid Glass a pantalla completa).
+// Se ejecuta al empezar el gesto y solo se repite si el fondo o el tema
+// cambian: durante el arrastre no se recalcula ni un pixel de vidrio.
 static void qsCompose(){
+  uint16_t* bg = qsBgSrc();
+  if(!bg) return;
   if(!qsBuf) qsBuf = (uint16_t*)heap_caps_malloc((size_t)SCR_W * SCR_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if(!qsBuf) return;
-  memcpy(qsBuf, homeBuf, (size_t)SCR_W * SCR_H * 2);
+  memcpy(qsBuf, bg, (size_t)SCR_W * SCR_H * 2);
   setBuf(qsBuf);
-  int c0 = gClipY0, c1 = gClipY1; gClipY0 = 0; gClipY1 = SCR_H - 1;
+  int c0 = gClipY0, c1 = gClipY1, cx0 = gClipX0, cx1 = gClipX1;
+  gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
   if(uiGlass){
-    // Cortina Liquid Glass sobre el escritorio. El tinte y el velo salen de la
-    // paleta activa, asi que en tema claro queda una cortina clara (con texto
-    // oscuro) y en oscuro la de siempre. El velo va a 140/234 justo para que la
-    // superficie quede casi al color de pagina: es lo que garantiza el
-    // contraste del texto sin depender del wallpaper que haya debajo.
+    // Cortina Liquid Glass sobre lo que hubiera debajo. El tinte y el velo
+    // salen de la paleta activa, asi que en tema claro queda una cortina clara
+    // (con texto oscuro) y en oscuro la de siempre. El velo va a 140/234 justo
+    // para que la superficie quede casi al color de pagina: es lo que garantiza
+    // el contraste del texto sin depender de lo que haya debajo -- wallpaper o
+    // la propia app.
     drawLiquidGlassPanelEx(0, 0, SCR_W, SCR_H, 0, TH_GLASS2, 11);
     fillRectA(0, 0, SCR_W, SCR_H, TH_PAGE, 140);
   } else {
@@ -9564,46 +9664,100 @@ static void qsCompose(){
     fillRectA(0, 0, SCR_W, 130, TH_SURF2, 46);                                  // tinte superior
   }
   qsDrawContent();
-  gClipY0 = c0; gClipY1 = c1;
+  gClipY0 = c0; gClipY1 = c1; gClipX0 = cx0; gClipX1 = cx1;
   setBuf(fb);
   qsDirty = false;
 }
-// por-frame: SOLO copia la banda revelada (memcpy) + relleno del slider + flush de banda
-static void qsRender(){
-  if(qsPanelY <= 0){ blitToFb(homeBuf); flxFlushAll(); qsLastY = 0; return; }
-  if(qsDirty || !qsBuf) qsCompose();
-  if(!qsBuf){ blitToFb(homeBuf); flxFlushAll(); return; }
-  setBuf(bbuf);
-  int py = qsPanelY < SCR_H ? qsPanelY : SCR_H;
-  for(int j = 0; j < py; j++) memcpy(bbuf + (size_t)j * SCR_W, qsBuf + (size_t)j * SCR_W, SCR_W * 2);
-  int maxY = py > qsLastY ? py : qsLastY; if(maxY > SCR_H) maxY = SCR_H;
-  for(int j = py; j < maxY; j++) memcpy(bbuf + (size_t)j * SCR_W, homeBuf + (size_t)j * SCR_W, SCR_W * 2);
-  uint32_t t = millis();                        // la usan el destello de toque y la sombra de abajo
-  // RECORTE AL BORDE DE LA CORTINA. La capsula de Brillo ocupa y=92..422 y solo
-  // se comprobaba "if(QS_CAP_Y < py)": con la cortina a medio abrir (py~100) se
-  // pintaban >300 filas POR DEBAJO del borde, encima del escritorio. Eso producia
-  // (a) la barra ambar saliendose de la tarjeta, (b) la pastilla amarilla flotando
-  // sobre los iconos y (c) restos que se quedaban PEGADOS: qsRender solo restaura
-  // hasta max(py, qsLastY), asi que lo pintado mas abajo nunca se limpiaba.
-  // Recortando a py, ningun elemento de la cortina puede salirse de ella.
-  const int oCY1 = gClipY1, oCY0 = gClipY0, oCX0 = gClipX0, oCX1 = gClipX1;
-  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = py - 1;
-  if(qsFlashIdx >= 0){                                               // destello de feedback al tocar (3=Modo PC,4=Ahorro Ultra,5=Ajustes)
-    uint32_t e = t - qsFlashMs;
-    if(e < QS_FLASH_DUR_MS){
-      float p = 1.0f - (float)e / QS_FLASH_DUR_MS;                    // se desvanece
-      uint8_t a = (uint8_t)(120 * p);
-      if(qsFlashIdx == 4){
-        if(QS_PILL_Y < py) fillRoundRectA(QS_PILL_X, QS_PILL_Y, QS_PILL_W, QS_PILL_H, QS_PILL_R, TH_TXT, a);
-      } else {
-        int ci = qsFlashIdx == 5 ? 1 : qsFlashIdx == 6 ? 2 : 0;        // 3->0, 5->1, 6->2
-        int cy = QS_CIRC_CY(ci);
-        if(cy - QS_CIRC_R < py) fillRoundRectA(QS_CIRC_CX - QS_CIRC_R, cy - QS_CIRC_R, QS_CIRC_D, QS_CIRC_D, QS_CIRC_R, TH_TXT, a);
-      }
-    } else qsFlashIdx = -1;
+
+// ---- REPINTADO POR BANDAS SUCIAS ----------------------------------
+// La version anterior recopiaba TODA la zona revelada en cada cuadro
+// (hasta 800 filas de memcpy) aunque el borde solo se hubiera movido 3 px.
+// Ahora se acumula la union de lo que puede haber cambiado -- el recorrido
+// del borde, su sombra, el asa, y los dos unicos elementos dinamicos de la
+// cortina (el relleno del brillo y el destello de un boton) -- y se compone
+// y publica SOLO esa banda.
+static int qsDy0 = 0x7FFF, qsDy1 = -1;
+static inline void qsMark(int y0, int y1){
+  if(y0 < qsDy0) qsDy0 = y0;
+  if(y1 > qsDy1) qsDy1 = y1;
+}
+// Rango vertical del control que esta destellando (misma numeracion que
+// qsTileIcon: 3 = Modo PC, 4 = Ahorro Ultra, 5 = Ajustes, 6 = Apagar).
+static void qsFlashRect(int idx, int &y0, int &y1){
+  if(idx == 4){ y0 = QS_PILL_Y; y1 = QS_PILL_Y + QS_PILL_H; return; }
+  int ci = (idx == 5) ? 1 : (idx == 6) ? 2 : 0;
+  int cy = QS_CIRC_CY(ci);
+  y0 = cy - QS_CIRC_R; y1 = cy + QS_CIRC_R;
+}
+
+// full = true fuerza el repintado de toda la zona visible (lo usa el primer
+// cuadro tras componer y cualquier cambio de tema).
+static void qsRender(bool full){
+  uint16_t* bg = qsBgSrc();
+  if(!bg) return;
+  if(qsPanelY <= 0){
+    // Cerrada del todo: se restaura el fondo entero UNA vez y se sale.
+    if(qsLastY > 0 || full){ blitToFb(bg); flxFlushAll(); qsLastY = 0; }
+    return;
   }
-  // Brillo: relleno ambar dinamico (cambia con el arrastre / PWM real) + icono + %
-  if(QS_CAP_Y < py){
+  if(qsDirty || !qsBuf){ qsCompose(); full = true; }
+  if(!qsBuf){ blitToFb(bg); flxFlushAll(); return; }
+
+  int py = qsPanelY < SCR_H ? qsPanelY : SCR_H;
+  qsDy0 = 0x7FFF; qsDy1 = -1;
+
+  // 1) recorrido del borde (con su asa por arriba y su sombra por abajo)
+  int mlo = py < qsLastY ? py : qsLastY;
+  int mhi = py > qsLastY ? py : qsLastY;
+  if(py != qsLastY) qsMark(mlo - QS_HANDLE_MARGIN, mhi + QS_SHADOW_H);
+  // 2) destello de un boton (se desvanece con el tiempo: hay que repintarlo)
+  if(qsFlashIdx >= 0){
+    if(millis() - qsFlashMs < QS_FLASH_DUR_MS){ int f0, f1; qsFlashRect(qsFlashIdx, f0, f1); qsMark(f0, f1); }
+    else { int f0, f1; qsFlashRect(qsFlashIdx, f0, f1); qsMark(f0, f1); qsFlashIdx = -1; }   // ultimo cuadro: limpiarlo
+  }
+  // 3) relleno del brillo (solo cuando el usuario lo esta moviendo)
+  if(qsCapDirty){ qsMark(QS_CAP_Y, QS_CAP_Y + QS_CAP_H); qsCapDirty = false; }
+  // 4) repintado completo pedido
+  if(full) qsMark(0, mhi + QS_SHADOW_H);
+
+  if(qsDy1 < qsDy0){ qsLastY = py; return; }         // nada que hacer este cuadro
+  int cutTop = qsDy0 < 0 ? 0 : qsDy0;
+  int cutBot = qsDy1 > SCR_H - 1 ? SCR_H - 1 : qsDy1;
+  if(cutBot < cutTop){ qsLastY = py; return; }
+
+  setBuf(bbuf);
+  // Base de la banda: por encima del borde manda la cortina; por debajo, el
+  // fondo (escritorio o captura de la app), que es lo que "restaura" las filas
+  // que la cortina acaba de dejar libres.
+  for(int j = cutTop; j <= cutBot; j++){
+    const uint16_t* src = (j < py) ? qsBuf : bg;
+    memcpy(bbuf + (size_t)j * SCR_W, src + (size_t)j * SCR_W, SCR_W * 2);
+  }
+
+  const int oCY0 = gClipY0, oCY1 = gClipY1, oCX0 = gClipX0, oCX1 = gClipX1;
+  gClipX0 = 0; gClipX1 = SCR_W - 1;
+  // RECORTE AL BORDE DE LA CORTINA. Nada de la cortina puede pintarse por
+  // debajo de su propio borde: es lo que producia la barra ambar saliendose de
+  // la tarjeta y la pastilla flotando sobre los iconos con la cortina a medio
+  // abrir. Y por arriba se recorta a la banda sucia, para no tocar filas que
+  // este cuadro no va a publicar.
+  gClipY0 = cutTop;
+  gClipY1 = (cutBot < py - 1) ? cutBot : py - 1;
+  if(gClipY1 >= gClipY0){
+    if(qsFlashIdx >= 0){                       // destello de feedback al toque
+      uint32_t e = millis() - qsFlashMs;
+      if(e < QS_FLASH_DUR_MS){
+        float p = 1.0f - (float)e / QS_FLASH_DUR_MS;      // se desvanece
+        uint8_t a = (uint8_t)(120 * p);
+        if(qsFlashIdx == 4) fillRoundRectA(QS_PILL_X, QS_PILL_Y, QS_PILL_W, QS_PILL_H, QS_PILL_R, TH_TXT, a);
+        else {
+          int ci = qsFlashIdx == 5 ? 1 : qsFlashIdx == 6 ? 2 : 0;   // 3->0, 5->1, 6->2
+          int cy = QS_CIRC_CY(ci);
+          fillRoundRectA(QS_CIRC_CX - QS_CIRC_R, cy - QS_CIRC_R, QS_CIRC_D, QS_CIRC_D, QS_CIRC_R, TH_TXT, a);
+        }
+      }
+    }
+    // Brillo: relleno ambar dinamico (cambia con el arrastre / PWM real) + icono + %
     int fillH = QS_CAP_H * gBright / 100;
     // El relleno ambar del brillo es funcional (representa "cuanta luz hay"),
     // como el amarillo del sol: se conserva en las dos apariencias.
@@ -9614,51 +9768,91 @@ static void qsRender(){
     // en los dos temas); con el relleno bajo cae sobre el track -> texto del tema.
     drawTextC(QS_CAP_X + QS_CAP_W / 2, QS_CAP_Y + QS_CAP_H - 74, pb, 2, gBright >= 25 ? rgb565(70,50,10) : TH_TXT);
   }
-  gClipY0 = oCY0; gClipY1 = oCY1; gClipX0 = oCX0; gClipX1 = oCX1;      // fin del recorte a la cortina
-  int shY = py, shEnd = shY + 18; if(shEnd > maxY) shEnd = maxY;       // sombra suave bajo el borde movil de la cortina
-  for(int yy = shY; yy < shEnd; yy++){
-    uint8_t a = (uint8_t)(70 * (1.0f - (float)(yy - shY) / 18.0f));
+  // Sombra y asa: fuera del recorte a la cortina (la sombra cae por debajo del
+  // borde a proposito), pero dentro de la banda que se va a publicar.
+  gClipY0 = cutTop; gClipY1 = cutBot;
+  for(int yy = py; yy < py + QS_SHADOW_H; yy++){
+    uint8_t a = (uint8_t)(70 * (1.0f - (float)(yy - py) / (float)QS_SHADOW_H));
     if(a > 0) hLineA(0, yy, SCR_W, TH_SHADOW, a);
   }
   fillRoundRect(SCR_W / 2 - 28, py - 14, 56, 5, 2, TH_MUTE);          // tirador de la cortina
-  present(0, maxY);
+  gClipY0 = oCY0; gClipY1 = oCY1; gClipX0 = oCX0; gClipX1 = oCX1;
+
+  present(cutTop, cutBot);
   qsLastY = py;
 }
-// Posicion interpolada de la cortina en coma flotante. La comparte el arrastre
-// (suavizado) y la animacion, asi que soltar el dedo continua desde donde
-// estaba EXACTAMENTE, sin el micro-salto de reenganche.
-static float qsPosF = 0;
-// Animacion de la cortina, BASADA EN TIEMPO (antes: 16 pasos fijos con
-// delay(12), o sea una duracion que dependia de lo que costara cada cuadro).
-// Curva ease-in-out cubica sin rebote: el easeOutBack de antes se pasaba del
-// destino y habia que recortarlo contra 0 y SCR_H, lo que producia un frenazo
-// seco justo al cerrar. Ahora arranca y asienta suave, y como el avance sale
-// del reloj el recorrido dura lo mismo a 30 o a 90 fps.
-static void qsAnimTo(int target){
-  int from = qsPanelY;
-  if(target < 0) target = 0; if(target > SCR_H) target = SCR_H;
-  int dist = target > from ? target - from : from - target;
-  if(dist > 0){
-    uint32_t dur = 150 + (uint32_t)((uint32_t)dist * 150u / (uint32_t)SCR_H);   // 150..300 ms segun recorrido
-    uint32_t t0 = millis();
-    for(;;){
-      uint32_t e = millis() - t0; if(e > dur) e = dur;
-      float p = (float)e / (float)dur;
-      float ip = 1.0f - p;
-      p = (p < 0.5f) ? (4.0f * p * p * p) : (1.0f - 4.0f * ip * ip * ip);       // ease-in-out cubica
-      int ny = from + (int)((target - from) * p + (target > from ? 0.5f : -0.5f));
-      if(ny < 0) ny = 0; if(ny > SCR_H) ny = SCR_H;
-      // Sin delay fijo: el ritmo lo marca el panel. Si el reloj todavia no ha
-      // movido la posicion, se cede el turno en vez de repetir un cuadro
-      // identico (mismo recorrido, sin quemar ciclos ni calentar de balde).
-      if(ny != qsPanelY){ qsPanelY = ny; qsRender(); }
-      else if(e < dur) delay(1);
-      if(e >= dur) break;
-    }
-  }
-  qsPanelY = target; qsPosF = (float)target; qsRender();
-  if(target <= 0){ qsPanelY = 0; blitToFb(homeBuf); flxFlushAll(); }
+
+// ---- ANIMACION NO BLOQUEANTE --------------------------------------
+// Antes esto era un bucle for(;;) con delay(1) dentro: durante 150-300 ms el
+// sistema no sondeaba el tactil, no alimentaba el TWDT y no dejaba correr a
+// nadie mas. Con la cortina encima de una app eso es inaceptable, asi que
+// ahora qsAnimTo() solo PROGRAMA el movimiento y qsAnimStep() -- llamada una
+// vez por cuadro desde uiTick() -- lo avanza. El avance sale del reloj
+// (millis), no de un paso fijo por cuadro: el recorrido dura lo mismo a 30
+// que a 90 fps. Curva ease-in-out cubica, sin rebote.
+static bool     qsAnimOn   = false;
+static int      qsAnimFrom = 0, qsAnimDest = 0;
+static uint32_t qsAnimT0   = 0, qsAnimDur = 1;
+
+// Estado final de "cerrada": restaura el fondo entero y suelta la captura de
+// la app. Es el UNICO sitio donde se libera qsAppSnap.
+static void qsSettleClosed(){
+  qsPanelY = 0; qsPosF = 0; qsLastY = 0; qsVel = 0;
+  uint16_t* bg = qsBgSrc();
+  if(bg){ blitToFb(bg); flxFlushAll(); }
+  qsFreeApp();
+  qsDirty = true;                     // la proxima apertura se compone de nuevo
 }
+static void qsAnimTo(int target){
+  if(target < 0) target = 0; if(target > SCR_H) target = SCR_H;
+  int from = qsPanelY;
+  int dist = target > from ? target - from : from - target;
+  if(dist == 0){
+    qsAnimOn = false;
+    qsPanelY = target; qsPosF = (float)target;
+    if(target <= 0) qsSettleClosed(); else qsRender(false);
+    return;
+  }
+  qsAnimFrom = from; qsAnimDest = target;
+  qsAnimT0   = millis();
+  qsAnimDur  = 150 + (uint32_t)((uint32_t)dist * 150u / (uint32_t)SCR_H);   // 150..300 ms segun recorrido
+  qsAnimOn   = true;
+}
+static void qsAnimStep(){
+  if(!qsAnimOn) return;
+  uint32_t e = millis() - qsAnimT0; if(e > qsAnimDur) e = qsAnimDur;
+  float p = (float)e / (float)qsAnimDur;
+  float ip = 1.0f - p;
+  p = (p < 0.5f) ? (4.0f * p * p * p) : (1.0f - 4.0f * ip * ip * ip);       // ease-in-out cubica
+  int ny = qsAnimFrom + (int)((qsAnimDest - qsAnimFrom) * p + (qsAnimDest > qsAnimFrom ? 0.5f : -0.5f));
+  if(ny < 0) ny = 0; if(ny > SCR_H) ny = SCR_H;
+  if(ny != qsPanelY){ qsPanelY = ny; qsPosF = (float)ny; qsRender(false); }
+  if(e < qsAnimDur) return;
+  qsAnimOn = false;
+  qsPanelY = qsAnimDest; qsPosF = (float)qsAnimDest;
+  if(qsAnimDest <= 0) qsSettleClosed();
+  else                qsRender(false);
+}
+
+// CIERRE LIMPIO Y OBLIGATORIO. Lo llama TODO cambio de estado que pueda
+// dejar la cortina a medias: abrir o cerrar una app, volver al escritorio,
+// bloquear, apagar la pantalla, apagar el equipo, entrar en Modo PC
+// (cambio de orientacion), multitarea y kiosco. Deja la cortina en 0, suelta
+// el toque para que el gesto no se propague a la pantalla nueva, y libera la
+// captura de la app. No repinta: quien cambia de estado ya pinta su pantalla.
+static void qsForceClose(){
+  bool wasOpen = (qsPanelY != 0) || qsDragging || qsAnimOn;
+  qsAnimOn = false; qsDragging = false; qsDragMoved = false;
+  qsPanelY = 0; qsPosF = 0; qsLastY = 0; qsVel = 0;
+  qsFlashIdx = -1; qsCapDirty = false;
+  qsFreeApp();
+  if(wasOpen){
+    qsDirty = true;                                  // el fondo de la proxima vez sera otro
+    T.tap = false; T.pressed = false; T.released = false; T.moved = false;
+    T.swipeUp = T.swipeDown = T.swipeLeft = T.swipeRight = false;
+  }
+}
+
 static void qsApplyPower(){ setCpuFrequencyMhz(qsPower ? 160 : 360); }
 static bool qsTapTile(int px, int py){
 #if POWEROFF_ON
@@ -9670,23 +9864,29 @@ static bool qsTapTile(int px, int py){
     int cy = QS_CIRC_CY(i), dx = px - QS_CIRC_CX, dy = py - cy;
     if(dx * dx + dy * dy <= QS_CIRC_R * QS_CIRC_R){     // hit-test circular real (no la caja cuadrada)
       qsFlashIdx = idxOf[i]; qsFlashMs = millis();       // destello de feedback al tocar (ver overlay en qsRender)
+      // Las tres acciones ABANDONAN la cortina: se cierra limpiamente ANTES de
+      // cambiar de pantalla (qsForceClose suelta ademas la captura de la app).
+      // Las tres acciones salen de la cortina. Si habia una app abierta se
+      // CIERRA por su camino normal (appClose) antes de abrir la nueva: sin
+      // eso, abrir Ajustes desde encima del Navegador dejaria su tarea de red
+      // y sus buffers vivos, porque enterApp() no cierra nada.
       switch(idxOf[i]){
-        case 3: qsPanelY = 0; enterApp(IC_MODOPC); return true;      // -> Modo PC
-        case 5: qsPanelY = 0; enterApp(IC_AJUSTES); return true;     // -> Ajustes
+        case 3: qsForceClose(); if(gState == ST_APP) appClose(); enterApp(IC_MODOPC);  return true;  // -> Modo PC
+        case 5: qsForceClose(); if(gState == ST_APP) appClose(); enterApp(IC_AJUSTES); return true;  // -> Ajustes
         // Apagar NO apaga aqui: lleva a la pantalla de confirmacion (ST_POWEROFF_CONFIRM).
-        case 6: qsPanelY = 0; qsFlashIdx = -1; poffEnter(); return true;
+        case 6: qsForceClose(); poffEnter(); return true;
       }
     }
   }
   if(px >= QS_PILL_X && px <= QS_PILL_X + QS_PILL_W && py >= QS_PILL_Y && py <= QS_PILL_Y + QS_PILL_H){
     qsFlashIdx = 4; qsFlashMs = millis();
     qsPower = !qsPower; qsApplyPower();
-    qsDirty = true; qsRender(); return true;
+    qsDirty = true; qsRender(true); return true;
   }
   return false;
 }
 // Devuelve true si la cortina consumio el toque (esta activa)
-// ARRASTRE DE LA CORTINA (reescrito).
+// ARRASTRE DE LA CORTINA.
 //   · Antes: qsPanelY = T.y en crudo. Con la cortina ABIERTA (py = 800) y el
 //     dedo agarrando el borde superior, el primer cuadro del gesto la mandaba
 //     de 800 a ~20 de golpe: un salto de casi toda la pantalla en un solo
@@ -9697,25 +9897,30 @@ static bool qsTapTile(int px, int py){
 //   · La velocidad se mide en px/ms y el suavizado usa una constante de TIEMPO,
 //     no un factor por cuadro: la respuesta es identica a cualquier cadencia y
 //     el umbral de "flick" ya no depende de cuantos cuadros diera el sistema.
-#define QS_SMOOTH_TAU 26.0f      // ms: constante del suavizado de posicion
-#define QS_VEL_TAU    45.0f      // ms: constante del filtro de velocidad
-#define QS_FLICK      0.45f      // px/ms (~450 px/s) para considerarlo un lanzamiento
-static float qsVel = 0; static int qsPrevY = 0;
-static uint32_t qsPrevMs = 0;
-static int qsDragBase = 0, qsDragY0 = 0;
-static bool qsDragMoved = false;         // el gesto ya paso de umbral: es arrastre, no toque
+//   · La posicion se acota a [0, SCR_H] en TODOS los caminos (arrastre,
+//     suavizado y animacion): la cortina no puede salirse de su rango ni
+//     siquiera un cuadro.
 // Zona por la que se puede agarrar la cortina ABIERTA para cerrarla: el borde
 // superior de siempre y toda el area vacia de debajo de la pastilla (donde esta
 // el asa y donde ya se podia tocar para cerrar). Los controles quedan fuera, asi
 // que arrastrar sobre un boton sigue siendo tocar ese boton.
-static inline bool qsGrabZone(int y){ return y < 30 || y > QS_PILL_Y + QS_PILL_H; }
+static inline bool qsGrabZone(int y){ return y < QS_EDGE_H || y > QS_PILL_Y + QS_PILL_H; }
 // Punto de agarre: fija el origen del delta y sincroniza el interpolador con la
 // posicion actual, para que el gesto arranque sin escalon.
 static void qsGrab(){
+  qsAnimOn = false;                        // un gesto nuevo cancela la animacion en curso
   qsDragging = true; qsDragMoved = false;
   qsDragBase = qsPanelY; qsDragY0 = T.y;
   qsPosF = (float)qsPanelY;
   qsPrevY = T.y; qsPrevMs = millis(); qsVel = 0;
+}
+// Decision al soltar: por encima del 40% del recorrido se completa la
+// apertura; por debajo se cierra del todo. Nunca queda a medias.
+static void qsRelease(){
+  if(qsVel > QS_FLICK)       qsAnimTo(SCR_H);                  // lanzamiento hacia abajo -> abrir
+  else if(qsVel < -QS_FLICK) qsAnimTo(0);                      // lanzamiento hacia arriba -> cerrar
+  else if(qsPanelY >= (SCR_H * QS_OPEN_PCT) / 100) qsAnimTo(SCR_H);
+  else                                             qsAnimTo(0);
 }
 static bool qsHandle(){
   if(qsDragging){
@@ -9737,9 +9942,10 @@ static bool qsHandle(){
       float a = 1.0f - expf(-dt / QS_SMOOTH_TAU);             // suavizado corregido por tiempo
       qsPosF += ((float)target - qsPosF) * a;
       if(fabsf((float)target - qsPosF) < 0.75f) qsPosF = (float)target;   // asienta exacto
+      if(qsPosF < 0) qsPosF = 0; if(qsPosF > (float)SCR_H) qsPosF = (float)SCR_H;
       int ny = (int)(qsPosF + 0.5f);
       if(ny < 0) ny = 0; if(ny > SCR_H) ny = SCR_H;
-      if(ny != qsPanelY){ qsPanelY = ny; qsRender(); }
+      if(ny != qsPanelY){ qsPanelY = ny; qsRender(false); }
     } else {
       qsDragging = false;
       if(!qsDragMoved){
@@ -9748,20 +9954,18 @@ static bool qsHandle(){
         qsPanelY = qsDragBase; qsPosF = (float)qsDragBase;
         if(T.tap && qsPanelY >= SCR_H){
           if(!qsTapTile(T.x, T.y) && T.y > QS_PILL_Y + QS_PILL_H) qsAnimTo(0);
-        } else if(qsPanelY < SCR_H && qsPanelY > 0) qsAnimTo(qsPanelY < SCR_H / 2 ? 0 : SCR_H);
-        else qsRender();
+        } else if(qsPanelY > 0) qsRelease();
+        else qsSettleClosed();
         return true;
       }
-      if(qsVel > QS_FLICK) qsAnimTo(SCR_H);                 // lanzamiento hacia abajo -> abrir
-      else if(qsVel < -QS_FLICK) qsAnimTo(0);               // lanzamiento hacia arriba -> cerrar
-      else if(qsPanelY < SCR_H / 2) qsAnimTo(0); else qsAnimTo(SCR_H);   // si no, por posicion
+      qsRelease();
     }
     return true;
   }
   if(qsPanelY >= SCR_H){
     if(T.down && T.x >= QS_CAP_X - 14 && T.x <= QS_CAP_X + QS_CAP_W + 14 && T.y >= QS_CAP_Y - 14 && T.y <= QS_CAP_Y + QS_CAP_H + 14){
       int v = (QS_CAP_Y + QS_CAP_H - T.y) * 100 / QS_CAP_H; if(v < 0) v = 0; if(v > 100) v = 100;   // arriba = 100%, abajo = 0%
-      setBacklight(v); qsRender(); return true;                 // brillo real (PWM)
+      setBacklight(v); qsCapDirty = true; qsRender(false); return true;          // brillo real (PWM)
     }
     // Cerrar arrastrando: el asa de abajo (o el borde de arriba) mueve la
     // cortina 1:1 con el dedo. Antes solo se podia agarrar arriba y la cortina
@@ -9772,11 +9976,46 @@ static bool qsHandle(){
     if(T.tap){ if(!qsTapTile(T.x, T.y) && T.y > QS_PILL_Y + QS_PILL_H) qsAnimTo(0); return true; }
     return true;                                                // consume todo mientras abierto
   }
-  // cerrado: capturar arrastre desde la zona caliente (borde superior 0..30 px).
-  // qsPanelY NO se salta a T.y: el gesto empieza en 0 y la cortina sale del
-  // borde siguiendo el delta del dedo (misma formula que al cerrar).
-  if(T.pressed && T.startY < 30){ qsDirty = true; qsGrab(); qsRender(); return true; }
+  if(qsPanelY > 0) return true;                                 // a medio camino sin dedo: la anima uiTick
   return false;
+}
+
+// ---- PUNTO DE ENTRADA GLOBAL --------------------------------------
+// loop() lo llama ANTES del switch de estado. Devuelve true cuando la
+// cortina se ha quedado con el toque; en ese caso la pantalla de debajo
+// (escritorio o app) no ejecuta su tick en este cuadro, asi que ni sus
+// gestos ni sus botones responden mientras la cortina esta a la vista.
+static bool qsCanOpen(){
+  if(gLand)   return false;    // Modo PC / DeX horizontal: version propia pendiente (ver cabecera)
+  if(gHosted) return false;    // app dentro de una ventana de DeX: la cortina es del sistema, no de la ventana
+  if(editMode) return false;   // Modo Edicion del Home tiene su propio arrastre
+  if(KIOSK_ON && kioskOn) return false;
+  if(flexOtaOwnsScreen() || flexOtaOverlayActive()) return false;
+  return (gState == ST_HOME || gState == ST_APP);
+}
+static bool qsGlobalHandle(){
+  // Estados en los que la cortina no pinta nada: si quedaba abierta (p.ej. el
+  // usuario bloqueo el equipo con el gesto a medias), se cierra en seco.
+  if(!qsCanOpen()){
+    if(qsPanelY != 0 || qsDragging || qsAnimOn) qsForceClose();
+    return false;
+  }
+  if(qsAnimOn) return true;                     // animando: el toque no llega a nadie
+  if(qsPanelY > 0 || qsDragging) return qsHandle();
+  // Cerrada: solo se abre desde la franja del borde superior. Con una app
+  // delante hay que capturar antes su ultimo cuadro; si no hay PSRAM para
+  // ello, la cortina simplemente no se abre y la app conserva el gesto.
+  if(!(T.pressed && T.startY < QS_EDGE_H)) return false;
+  if(gState == ST_APP){
+    if(!qsCaptureApp()) return false;
+  } else if(qsOverApp) {
+    qsFreeApp();                                // volvimos al escritorio: la captura sobra
+    qsDirty = true;
+  }
+  qsDirty = true;
+  qsGrab();
+  qsRender(true);
+  return true;
 }
 
 // #############################################################
@@ -19346,13 +19585,21 @@ static void uiTick(){
   // Subir su cadencia a ~60 fps solo la hace mas suave, no mas rapida -- y a 26
   // fps un gesto rapido avanzaba tanto entre cuadro y cuadro que el movimiento
   // se veia a saltos.
-  bool fastPath = (gState == ST_HOME && !editMode && (gRippleActive || qsPanelY > 0));
+  bool qsVisible = (qsPanelY > 0 || qsAnimOn);
+  bool fastPath = qsVisible || (gState == ST_HOME && !editMode && gRippleActive);
   unsigned long interval = fastPath ? 16 : 38;
   if(millis() - uiAnimMs < interval) return;
   uiAnimMs = millis();
+  // LA CORTINA VA PRIMERO Y EN CUALQUIER ESTADO. Ya no es una pantalla del
+  // escritorio: puede estar encima de una app, y su animacion de apertura y
+  // cierre (antes un bucle bloqueante) se avanza aqui, un paso por cuadro.
+  if(qsVisible){
+    if(qsAnimOn) qsAnimStep();                  // apertura/cierre: avance por reloj, sin bloquear
+    else         qsRender(false);               // visible y quieta: solo el destello de un boton
+    return;
+  }
   if(gState == ST_HOME){
-    if(qsPanelY > 0) qsRender();                // cortina visible: anima el destello de toque (incluso durante el drag)
-    else if(editMode) edRender();               // jiggle continuo
+    if(editMode) edRender();                    // jiggle continuo
     else if(gRippleActive) animateIconRipple(); // destello del icono tocado (Vidrio), ~0.5s
   }
 }
@@ -19398,6 +19645,30 @@ void loop(){
     return;
   }
 
+  // -----------------------------------------------------------
+  //  PANEL RAPIDO GLOBAL
+  //  ---------------------------------------------------------
+  //  Va ANTES del switch de estado a proposito. Si el gesto entra
+  //  por el borde superior, la cortina se queda con el toque
+  //  ENTERO y la pantalla de debajo -- escritorio o app -- no
+  //  llega a verlo. Mientras esta a la vista devuelve true en cada
+  //  vuelta, asi que el tick de la app no corre: ni sus gestos ni
+  //  sus botones responden por debajo del panel.
+  //
+  //  En Modo PC / DeX horizontal qsCanOpen() devuelve false y esto
+  //  no hace nada (ver la cabecera del panel).
+  // -----------------------------------------------------------
+  if(qsGlobalHandle()){
+    kioskTick();
+    uiTick();               // anima la cortina (apertura, cierre y destello)
+    notifTick();            // no dibuja (la isla se pausa con la cortina), pero SI
+                            // contabiliza la pausa: sin esta llamada, al cerrar la
+                            // cortina todas las tarjetas caducarian de golpe
+    flexOtaRender();
+    delay(5);
+    return;
+  }
+
   switch(gState){
     case ST_SPLASH:    splashTick(); break;
     case ST_OOBE_LANG: oobeLangTick(); break;
@@ -19407,11 +19678,11 @@ void loop(){
       lockTick();
       break;
     case ST_HOME:
-      if(minChanged && qsPanelY == 0 && !editMode){
+      if(minChanged && qsPanelY == 0 && !qsAnimOn && !editMode){
         renderHome();                    // refresca el cache homeBuf (offscreen: setBuf(homeBuf)...setBuf(fb), sin tocar pantalla)
         showHome();
       }
-      if(editMode || !qsHandle()) homeTick();     // en edicion, saltar la cortina
+      homeTick();     // la cortina ya se atendio arriba (qsGlobalHandle)
       break;
     case ST_APP:       appTick(); break;
     case ST_SWITCHER:  swTick(); break;
