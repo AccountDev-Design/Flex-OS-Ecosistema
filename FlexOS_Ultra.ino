@@ -9859,12 +9859,21 @@ static bool     qsAnimOn   = false;
 static int      qsAnimFrom = 0, qsAnimDest = 0;
 static uint32_t qsAnimT0   = 0, qsAnimDur = 1;
 
+// Devuelve a la pantalla lo que habia DEBAJO de la cortina. Hace falta antes de
+// cualquier salida que vaya a LEER el framebuffer: appClose() captura de fb la
+// miniatura de multitarea y winRevealAnim() encoge desde lo que haya en
+// pantalla. Sin esto, la miniatura de la app seria una foto de la cortina.
+static void qsRestoreBg(){
+  uint16_t* bg = qsBgSrc();
+  if(!bg) return;
+  blitToFb(bg); flxFlushAll();
+  qsLastY = 0;
+}
 // Estado final de "cerrada": restaura el fondo entero y suelta la captura de
 // la app. Es el UNICO sitio donde se libera qsAppSnap.
 static void qsSettleClosed(){
-  qsPanelY = 0; qsPosF = 0; qsLastY = 0; qsVel = 0;
-  uint16_t* bg = qsBgSrc();
-  if(bg){ blitToFb(bg); flxFlushAll(); }
+  qsPanelY = 0; qsPosF = 0; qsVel = 0;
+  qsRestoreBg();                      // pone en pantalla el escritorio o la app de debajo
   qsFreeApp();
   qsDirty = true;                     // la proxima apertura se compone de nuevo
 }
@@ -9928,13 +9937,17 @@ static bool qsTapTile(int px, int py){
   for(int i = 0; i < QS_CIRC_N; i++){
     int cy = QS_CIRC_CY(i), dx = px - QS_CIRC_CX, dy = py - cy;
     if(dx * dx + dy * dy <= QS_CIRC_R * QS_CIRC_R){     // hit-test circular real (no la caja cuadrada)
-      qsFlashIdx = idxOf[i]; qsFlashMs = millis();       // destello de feedback al tocar (ver overlay en qsRender)
-      // Las tres acciones ABANDONAN la cortina: se cierra limpiamente ANTES de
-      // cambiar de pantalla (qsForceClose suelta ademas la captura de la app).
-      // Las tres acciones salen de la cortina. Si habia una app abierta se
-      // CIERRA por su camino normal (appClose) antes de abrir la nueva: sin
-      // eso, abrir Ajustes desde encima del Navegador dejaria su tarea de red
-      // y sus buffers vivos, porque enterApp() no cierra nada.
+      // Los tres circulos NO destellan: la accion cambia de pantalla en el
+      // mismo cuadro, asi que el destello no llegaria a dibujarse nunca. (La
+      // pastilla de abajo si destella: esa se queda dentro de la cortina.)
+      //
+      // Las tres ABANDONAN la cortina, y se cierra limpiamente ANTES de
+      // cambiar de pantalla -- qsForceClose suelta ademas la captura de la
+      // app. Si habia una app abierta se CIERRA por su camino normal
+      // (appClose) antes de abrir la nueva: sin eso, abrir Ajustes desde
+      // encima del Navegador dejaria su tarea de red y sus buffers vivos,
+      // porque enterApp() no cierra nada.
+      qsRestoreBg();                        // la pantalla vuelve a ser la de debajo
       switch(idxOf[i]){
         case 3: qsForceClose(); if(gState == ST_APP) appClose(); enterApp(IC_MODOPC);  return true;  // -> Modo PC
         case 5: qsForceClose(); if(gState == ST_APP) appClose(); enterApp(IC_AJUSTES); return true;  // -> Ajustes
@@ -10077,9 +10090,12 @@ static bool qsGlobalHandle(){
     qsFreeApp();                                // volvimos al escritorio: la captura sobra
     qsDirty = true;
   }
+  // qsDirty deja la cortina pendiente de componerse: el PRIMER cuadro en que
+  // el dedo la mueva hara el vidrio y el repintado completo. Aqui no se vuelca
+  // nada -- el fondo que se veria es exactamente el que ya hay en pantalla, y
+  // copiar 768 KB para dejarlo igual solo anadiria latencia al inicio del gesto.
   qsDirty = true;
   qsGrab();
-  qsRender(true);
   return true;
 }
 
@@ -18555,10 +18571,18 @@ static void clkSaveNvs(){
 // que arrancar en 1970 o en la semilla de fabrica.
 static void clkLoadNvs(){
   Preferences p;
+  // PRIMER ARRANQUE. begin(..., true) abre en SOLO LECTURA y devuelve false si
+  // el namespace todavia no existe -- que es justo lo que pasa en un equipo
+  // recien flasheado. Tomar eso por "NVS averiado" pintaria un error en
+  // Ajustes en cada equipo nuevo. Por eso se reintenta en lectura/escritura,
+  // que ADEMAS crea el namespace: solo si eso tambien falla hay un problema
+  // real de almacenamiento.
   if(!p.begin(TIME_NVS_NS, true)){
-    gTimeNvsOk = false;
-    Serial.println(F("[TIME] NVS no disponible -> hora de fabrica"));
-    return;
+    if(!p.begin(TIME_NVS_NS, false)){
+      gTimeNvsOk = false;
+      Serial.println(F("[TIME] NVS no disponible -> hora de fabrica"));
+      return;
+    }
   }
   gTimeNvsOk = true;
   uint64_t e = p.getULong64(TIME_NVS_EPOCH, 0);
@@ -19569,10 +19593,15 @@ static void newsSaveCenter(){
 static void newsLoad(){
   newsCfgDefaults();
   Preferences p;
+  // Igual que en el reloj: en un equipo recien flasheado el namespace no
+  // existe y la apertura en solo lectura falla. Se reintenta en escritura
+  // (que lo crea) antes de dar el almacenamiento por perdido.
   if(!p.begin(NEWS_NVS_NS, true)){
-    gNewsNvsOk = false;
-    Serial.println(F("[NEWS] NVS no disponible -> sin configuracion persistente"));
-    return;
+    if(!p.begin(NEWS_NVS_NS, false)){
+      gNewsNvsOk = false;
+      Serial.println(F("[NEWS] NVS no disponible -> sin configuracion persistente"));
+      return;
+    }
   }
   gNewsNvsOk = true;
   NewsCfg tmp;
