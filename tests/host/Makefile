@@ -96,7 +96,14 @@ INOWARN  := $(WARN) -Wno-unused-function -Wno-unused-variable \
             -Wno-misleading-indentation -Wno-format-truncation \
             -Wno-maybe-uninitialized
 
-ino: ino_compile.cpp $(INO_SRC) | $(BUILD)
+# Dos comprobaciones, no una:
+#   1. check_protos.py reproduce la regla del AUTO-PROTOTIPADO del IDE de
+#      Arduino (todo tipo que salga en una firma tiene que estar definido antes
+#      de la primera funcion). g++ no la aplica, asi que sin esto el sketch
+#      puede compilar aqui y fallar en el IDE con "does not name a type".
+#   2. g++ compila el sketch entero.
+ino: ino_compile.cpp $(INO_SRC) check_protos.py | $(BUILD)
+	@python3 check_protos.py $(INO_SRC)
 	@$(CXX) $(CXXSTD) -fsyntax-only $(INOWARN) $(INOFLAGS) -x c++ ino_compile.cpp
 	@echo "FlexOS_Ultra.ino compila."
 

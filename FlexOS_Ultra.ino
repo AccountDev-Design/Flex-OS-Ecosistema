@@ -340,6 +340,32 @@ struct Notification {
   bool           armed;         // false = encolada pero aun no mostrada; se arma al verse en Home
 };
 
+// ---- UNA NOTICIA YA NORMALIZADA ----
+// Vive AQUI ARRIBA por el mismo motivo que FGlyph, PWin, DexFit, Touch y
+// DetectedModule (ver el bloque de tipos del principio del fichero): el IDE
+// de Arduino genera un prototipo de CADA funcion del sketch y los inserta
+// todos juntos ANTES de la primera funcion. newsCenterPush(), newsScore() y
+// newsAnnounce() reciben un NewsItem*, asi que si el tipo se definiera donde
+// se usa -- con el resto del servicio de noticias, al final del fichero --
+// esos prototipos autogenerados no lo conocerian todavia y la compilacion
+// fallaria con "'NewsItem' does not name a type". g++ no autogenera nada, asi
+// que este fallo SOLO aparece en el IDE: lo vigila tests/host/check_protos.py.
+//
+// Los dos tamanos suben con la estructura porque dimensionan sus campos. El
+// resto de constantes del servicio (NEWS_URL_MAX, NEWS_KEY_MAX...) se quedan
+// abajo, con su modulo, porque no hacen falta aqui.
+#define NEWS_TITLE_MAX      88
+#define NEWS_SRC_MAX        28
+struct NewsItem {
+  uint32_t idHash;                     // huella del ID (ver newsHash)
+  uint32_t when;                       // epoca UTC de publicacion (0 = desconocida)
+  char     title[NEWS_TITLE_MAX];
+  char     source[NEWS_SRC_MAX];
+  uint8_t  cat;                        // 0..4, o 0xFF si el servicio no la dio
+  bool     important;
+  bool     unread;
+};
+
 // ---- Estado global de la cola ----
 static Notification gNotifs[NOTIF_MAX];
 static int          gNotifCount  = 0;
@@ -19431,8 +19457,8 @@ static void notifTick(){
 #define NEWS_URL_MAX       160    // plantilla de la URL escrita por el usuario
 #define NEWS_KEY_MAX        80    // clave o token
 #define NEWS_CTRY_MAX       12    // "pe", "es", "latam"...
-#define NEWS_TITLE_MAX      88
-#define NEWS_SRC_MAX        28
+// NEWS_TITLE_MAX y NEWS_SRC_MAX estan arriba del todo, junto a struct NewsItem
+// (los necesita para dimensionar sus campos).
 #define NEWS_LINK_MAX      160    // se recibe y se valida, pero no se persiste (ver abajo)
 #define NEWS_CENTER_MAX     20    // Centro de noticias persistente
 #define NEWS_SEEN_MAX       64    // historial de IDs ya vistos
@@ -19481,16 +19507,10 @@ struct NewsCfg {
 static NewsCfg gNews;
 static bool    gNewsNvsOk = true;      // false = NVS no disponible -> error real en pantalla
 
-// ---- Una noticia ya normalizada ----
-struct NewsItem {
-  uint32_t idHash;                     // huella del ID (ver newsHash)
-  uint32_t when;                       // epoca UTC de publicacion (0 = desconocida)
-  char     title[NEWS_TITLE_MAX];
-  char     source[NEWS_SRC_MAX];
-  uint8_t  cat;                        // 0..4, o 0xFF si el servicio no la dio
-  bool     important;
-  bool     unread;
-};
+// (struct NewsItem y sus dos tamanos viven ARRIBA DEL TODO, con el resto de
+//  tipos que aparecen en la firma de alguna funcion. Ver el bloque
+//  "UNA NOTICIA YA NORMALIZADA" al principio del fichero y el motivo ahi
+//  explicado: el auto-prototipado del IDE de Arduino.)
 
 // ---- Centro de noticias PERSISTENTE ----
 // Las tarjetas de 5 segundos de la isla son un AVISO, no un historial: aqui es
