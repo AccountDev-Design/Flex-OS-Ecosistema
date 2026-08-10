@@ -330,6 +330,31 @@ static void testNoticias(){
   newsParseBody(J1, strlen(J1));
   chk(gNewsStage[0].idHash == h0 && gNewsStage[2].idHash == h2, "los ids son estables entre consultas");
 
+  // --- fechas: formatos aceptados y basura rechazada ---
+  chk(newsParseWhen("2026-08-10T14:05:00Z") == 1786370700u, "ISO-8601 completo con Z");
+  chk(newsParseWhen("2026-08-10T14:05:00+00:00") == 1786370700u, "ISO-8601 con desfase (se lee como UTC)");
+  chk(newsParseWhen("2026-08-10T14:05") == 1786370700u, "ISO-8601 sin segundos");
+  chk(newsParseWhen("2026-08-10 14:05:00") == 1786370700u, "separador de espacio en vez de T");
+  chk(newsParseWhen("2026-08-10") == 1786320000u, "solo fecha -> medianoche UTC");
+  static const char* FECHAS_MALAS[] = {
+    "", "hoy", "2026", "2026-08", "26-08-10", "2026-13-10T00:00:00Z",
+    "2026-08-32T00:00:00Z", "1999-01-01T00:00:00Z", "2026-08-10T99:00:00Z",
+    "2026-08-10TXX:05:00Z", "----------", "2026/08/10",
+  };
+  bool fechasOk = true;
+  for(size_t i = 0; i < sizeof(FECHAS_MALAS) / sizeof(FECHAS_MALAS[0]); i++)
+    if(newsParseWhen(FECHAS_MALAS[i]) != 0) fechasOk = false;
+  chk(fechasOk, "una fecha ilegible da 0, no una fecha inventada");
+
+  // --- etiquetas de categoria, sin distinguir mayusculas ---
+  chk(newsParseCat("technology") == 2, "slug \"technology\"");
+  chk(newsParseCat("TECHNOLOGY") == 2, "el slug no distingue mayusculas");
+  chk(newsParseCat("Tech") == 2, "sinonimo \"tech\"");
+  chk(newsParseCat("SPORTS") == 4, "slug \"sports\"");
+  chk(newsParseCat("deporte") == 4, "sinonimo en castellano");
+  chk(newsParseCat("cocina") == 0xFF, "una etiqueta desconocida no se fuerza a ninguna");
+  chk(newsParseCat("") == 0xFF, "etiqueta vacia -> sin clasificar");
+
   // --- claves alternativas del array ---
   static const char* J2 = "{\"items\":[{\"title\":\"Con items\"}]}";
   chk(newsParseBody(J2, strlen(J2)) == 1, "array bajo \"items\"");

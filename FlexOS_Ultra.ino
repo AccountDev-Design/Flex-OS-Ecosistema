@@ -19815,13 +19815,54 @@ static const char* nNextObj(const char* p, const char* ae, const char** os, cons
   }
   return NULL;                                   // llaves desbalanceadas -> se corta aqui
 }
+// Comparacion sin distinguir mayusculas, PROPIA. No se usa strcasecmp: vive en
+// <strings.h> (POSIX), no en <string.h>, y no esta garantizada en todos los
+// cores de Arduino. Solo pliega ASCII, que es justo lo que hace falta -- las
+// etiquetas con acentos ("Peru", "Tecnologia") se comparan byte a byte.
+static bool nEqI(const char* a, const char* b){
+  if(!a || !b) return false;
+  while(*a && *b){
+    char ca = *a++, cb = *b++;
+    if(ca >= 'A' && ca <= 'Z') ca = (char)(ca + 32);
+    if(cb >= 'A' && cb <= 'Z') cb = (char)(cb + 32);
+    if(ca != cb) return false;
+  }
+  return *a == 0 && *b == 0;
+}
+// Lee n digitos decimales. Devuelve false si no hay exactamente n.
+static bool nDigits(const char** p, int n, int* out){
+  int v = 0;
+  for(int i = 0; i < n; i++){
+    char c = **p;
+    if(c < '0' || c > '9') return false;
+    v = v * 10 + (c - '0');
+    (*p)++;
+  }
+  *out = v;
+  return true;
+}
 // Fecha ISO-8601 "2026-08-10T14:05:00Z" -> epoca UTC. Devuelve 0 si no encaja:
 // una fecha ilegible NO invalida la noticia, solo se queda sin fecha.
+// Se parsea a mano en vez de con sscanf: el formato es fijo, la entrada viene
+// de la red y asi no depende de que el runtime traiga scanf con anchura.
 static uint32_t newsParseWhen(const char* s){
   if(!s) return 0;
-  int y = 0, mo = 0, d = 0, h = 0, mi = 0, sec = 0;
-  if(sscanf(s, "%4d-%2d-%2dT%2d:%2d:%2d", &y, &mo, &d, &h, &mi, &sec) < 5) return 0;
+  int y, mo, d, h = 0, mi = 0, sec = 0;
+  const char* p = s;
+  if(!nDigits(&p, 4, &y))  return 0;
+  if(*p++ != '-') return 0;
+  if(!nDigits(&p, 2, &mo)) return 0;
+  if(*p++ != '-') return 0;
+  if(!nDigits(&p, 2, &d))  return 0;
+  if(*p == 'T' || *p == ' '){                    // la hora es opcional
+    p++;
+    if(!nDigits(&p, 2, &h))  return 0;
+    if(*p++ != ':') return 0;
+    if(!nDigits(&p, 2, &mi)) return 0;
+    if(*p == ':'){ p++; if(!nDigits(&p, 2, &sec)) sec = 0; }
+  }
   if(y < 2000 || y > 2100 || mo < 1 || mo > 12 || d < 1 || d > 31) return 0;
+  if(h > 23 || mi > 59 || sec > 60) return 0;
   long days = clkDaysFromCivil(y, mo, d);
   return (uint32_t)(days * 86400L + h * 3600L + mi * 60L + sec);
 }
@@ -19830,13 +19871,13 @@ static uint32_t newsParseWhen(const char* s){
 static uint8_t newsParseCat(const char* s){
   if(!s || !*s) return 0xFF;
   for(int i = 0; i < NEWS_NCATS; i++){
-    if(!strcasecmp(s, NEWS_CAT_SLUG[i])) return (uint8_t)i;
-    if(!strcasecmp(s, NEWS_CAT_NAME[i])) return (uint8_t)i;
+    if(nEqI(s, NEWS_CAT_SLUG[i])) return (uint8_t)i;
+    if(nEqI(s, NEWS_CAT_NAME[i])) return (uint8_t)i;
   }
   // Sinonimos frecuentes de las APIs publicas.
-  if(!strcasecmp(s, "general") || !strcasecmp(s, "nacional")) return 0;
-  if(!strcasecmp(s, "tech")) return 2;
-  if(!strcasecmp(s, "sport") || !strcasecmp(s, "deporte")) return 4;
+  if(nEqI(s, "general") || nEqI(s, "nacional")) return 0;
+  if(nEqI(s, "tech")) return 2;
+  if(nEqI(s, "sport") || nEqI(s, "deporte")) return 4;
   return 0xFF;
 }
 
@@ -20918,7 +20959,6 @@ void loop(){
   wifiAutoReconnectTick();// reconexion WiFi diferida (la radio NUNCA se toca en setup(); ver bootInitRadioSafe)
   ntpTick();              // NTP: decide CUANDO pedir hora. La red corre en su tarea, nunca aqui
   clkPersistTick();       // guarda la hora en NVS una vez por hora (arranque sin internet)
-  newsTick();             // NOTICIAS: decide CUANDO consultar y consume el resultado. La red va aparte
   bool minChanged = clkUpdate();
   gMinChanged = minChanged;
 
@@ -20948,6 +20988,12 @@ void loop(){
     delay(5);
     return;
   }
+
+  // NOTICIAS. Va DESPUES del corte del OTA a proposito: al consumir un
+  // resultado puede refrescar el escritorio o estampar el contador en la
+  // barra, y durante una actualizacion la pantalla es del OTA en exclusiva.
+  // Ademas asi no se compite por el ancho de banda con la descarga.
+  newsTick();             // decide CUANDO consultar; la red corre en su propia tarea
 
   // -----------------------------------------------------------
   //  PANEL RAPIDO GLOBAL
