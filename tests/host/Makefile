@@ -86,13 +86,27 @@ tools: $(TOOLS)
 # Compila FlexOS_Ultra.ino entero contra los dobles de inostub/. No
 # ejecuta nada: sirve para que un error de tipos o de nombres en el
 # sketch salte aqui, sin arduino-cli ni el core de ESP32.
-INO_SRC := $(ROOT)/FlexOS_Ultra.ino
+INO_SRC  := $(ROOT)/FlexOS_Ultra.ino
+INOFLAGS := -Iinostub -I$(ROOT) -DARDUINO=200
+INOWARN  := $(WARN) -Wno-unused-function -Wno-unused-variable \
+            -Wno-misleading-indentation -Wno-format-truncation
+
 ino: ino_compile.cpp $(INO_SRC) | $(BUILD)
-	@$(CXX) $(CXXSTD) -fsyntax-only $(WARN) -Wno-unused-function -Wno-unused-variable -Wno-misleading-indentation \
-	   -Iinostub -I$(ROOT) -DARDUINO=200 -x c++ ino_compile.cpp
+	@$(CXX) $(CXXSTD) -fsyntax-only $(INOWARN) $(INOFLAGS) -x c++ ino_compile.cpp
 	@echo "FlexOS_Ultra.ino compila."
 
-run: ino $(BINS) $(TOOLS)
+# El mismo TU, pero ENLAZADO y EJECUTADO: main() comprueba el calendario y la
+# conversion de zona del reloj del sistema, que son aritmetica pura y por tanto
+# verificables de verdad en el PC. Los modulos hermanos (OTA, FS, navegador)
+# entran como dobles: ya tienen sus propias pruebas.
+$(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) | $(BUILD)
+	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(INOFLAGS) -x c++ -c ino_compile.cpp -o $(BUILD)/ino_compile.o
+	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(INOFLAGS) -c ino_extern_stubs.cpp -o $(BUILD)/ino_extern_stubs.o
+	@$(CXX) -o $@ $(BUILD)/ino_compile.o $(BUILD)/ino_extern_stubs.o
+
+run: ino $(BUILD)/test_ino $(BINS) $(TOOLS)
+	@echo
+	@$(BUILD)/test_ino
 	@echo
 	@$(BUILD)/test_jpeg ../fixtures
 	@echo

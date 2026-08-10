@@ -18,6 +18,7 @@
 #include "Preferences.h"
 #include "WiFi.h"
 #include "WiFiClientSecure.h"
+#include "WiFiUdp.h"
 #include "HTTPClient.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
@@ -39,7 +40,9 @@ __FlexSerial Serial;
 TwoWire      Wire;
 __FlexWiFi   WiFi;
 
-unsigned long millis(){ return 0; }
+// Reloj virtual: las pruebas de abajo lo mueven a voluntad.
+unsigned long gTestMs = 0;
+unsigned long millis(){ return gTestMs; }
 unsigned long micros(){ return 0; }
 void delay(unsigned long){}
 void delayMicroseconds(unsigned long){}
@@ -139,4 +142,87 @@ static void geoEnterSelect();
 // El sketch entero, tal cual va a la placa.
 #include "../../FlexOS_Ultra.ino"
 
-int main(){ return 0; }
+// #############################################################
+//  PRUEBAS DEL RELOJ DEL SISTEMA
+//  ------------------------------------------------------------
+//  El calendario y la conversion de zona son aritmetica pura, asi
+//  que se pueden comprobar de verdad en el PC. Estan DENTRO de esta
+//  unidad de traduccion (el .ino se incluye arriba), asi que main()
+//  puede llamar a las funciones static del sketch sin exportarlas.
+// #############################################################
+static int gFails = 0;
+static void chk(bool ok, const char* what){
+  if(!ok){ printf("  FALLO: %s\n", what); gFails++; }
+}
+static void chkDate(uint32_t utc, int ey, int emo, int ed, int ewd, int eh, int emi, const char* what){
+  gTestMs = 100000; clkSetEpoch(utc); clkLastMin = -1; clkUpdate();
+  bool ok = (rtcY==ey && rtcMo==emo && rtcD==ed && rtcWd==ewd && rtcH==eh && rtcMin==emi);
+  if(!ok) printf("  FALLO: %s -> %04d-%02d-%02d wd%d %02d:%02d (esperado %04d-%02d-%02d wd%d %02d:%02d)\n",
+                 what, rtcY, rtcMo, rtcD, rtcWd, rtcH, rtcMin, ey, emo, ed, ewd, eh, emi);
+  if(!ok) gFails++;
+}
+
+int main(){
+  printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
+
+  // --- ida y vuelta del calendario, dia a dia, durante 40 anos ---
+  for(long d = -3653; d < 11323; d++){       // 1960-01-01 .. 2000+31 anos
+    int y, m, dd; clkCivilFromDays(d, y, m, dd);
+    chk(clkDaysFromCivil(y, m, dd) == d, "ida y vuelta civil<->dias");
+    if(gFails) break;
+  }
+  chk(clkDaysFromCivil(1970, 1, 1) == 0,     "1970-01-01 es el dia 0");
+  chk(clkDaysFromCivil(2000, 3, 1) == 11017, "2000-03-01 (ano bisiesto secular)");
+
+  // --- fechas concretas, ya convertidas a hora de Lima ---
+  // 1970-01-01 00:00 UTC = 1969-12-31 19:00 en Lima. Jueves 1 -> miercoles 3.
+  chkDate(0, 1969, 12, 31, 3, 19, 0, "epoca UNIX en Lima");
+  // 2026-07-04 18:23 UTC = sabado 4 jul 13:23 local: la semilla de fabrica.
+  chkDate(1783189380u, 2026, 7, 4, 6, 13, 23, "semilla de fabrica");
+  // Medianoche local exacta: 2026-01-01 05:00 UTC = jueves 1 ene 00:00 Lima.
+  chkDate(1767243600u, 2026, 1, 1, 4, 0, 0, "medianoche local");
+  // Un minuto ANTES: sigue siendo 31 dic 23:59 -> el cambio de dia va con el desfase.
+  chkDate(1767243540u, 2025, 12, 31, 3, 23, 59, "un minuto antes de medianoche local");
+  // 29 de febrero de un ano bisiesto (2028-02-29 12:00 UTC = 07:00 Lima, martes).
+  chkDate(1835438400u, 2028, 2, 29, 2, 7, 0, "29 de febrero");
+
+  // --- la semilla de fabrica produce la fecha de siempre ---
+  gTestMs = 5000; seedMinOfDay = FLEXOS_CLK_SEED_MIN; clkSeedFactory(); clkUpdate();
+  chk(rtcY==2026 && rtcMo==7 && rtcD==4 && rtcH==13 && rtcMin==23 && rtcWd==6,
+      "clkSeedFactory reproduce sab 4 jul 2026 13:23");
+
+  // --- el reloj avanza con millis() y solo avisa al cambiar el minuto ---
+  gTestMs = 5000; clkSetEpoch(1783189380u); clkUpdate();
+  gTestMs = 5000 + 30000; chk(!clkUpdate(), "30 s no cambian el minuto");
+  gTestMs = 5000 + 61000; chk(clkUpdate(),  "61 s si cambian el minuto");
+  chk(rtcMin == 24, "el minuto avanzo a :24");
+
+  // --- re-anclaje: doblar el tiempo en la epoca no mueve el reloj ---
+  gTestMs = 5000; clkSetEpoch(1783189380u); clkUpdate();
+  gTestMs = 5000 + 3600001UL;                       // pasa de una hora -> re-ancla
+  clkUpdate();
+  chk(rtcH == 14 && rtcMin == 23, "tras re-anclar, +1 h exacta");
+  chk(clkRefMs == gTestMs, "el ancla se movio a millis() actual");
+  gTestMs += 60000; clkUpdate();
+  chk(rtcH == 14 && rtcMin == 24, "el reloj sigue avanzando tras el re-anclaje");
+
+  // --- desbordamiento de millis(): la resta sin signo da el delta correcto ---
+  gTestMs = 0xFFFFF000UL; clkSetEpoch(1783189380u); clkUpdate();
+  gTestMs = 0xFFFFF000UL + 120000UL;                 // cruza el desbordamiento de 32 bits
+  clkUpdate();
+  chk(rtcH == 13 && rtcMin == 25, "el reloj cruza el desbordamiento de millis()");
+
+  // --- textos de Ajustes: nunca revelan mas de lo que deben ---
+  char b[64];
+  gNtpLastSyncUtc = 0; ntpLastSyncText(b, sizeof(b));
+  chk(!strcmp(b, "Nunca"), "sin sincronizar -> \"Nunca\"");
+  gTestMs = 1000; clkSetEpoch(1783189380u); clkUpdate();
+  gNtpLastSyncUtc = 1783189380u; ntpLastSyncText(b, sizeof(b));
+  chk(!strcmp(b, "Hoy 13:23"), "sincronizado hoy");
+  gNtpLastSyncUtc = 1783189380u - 86400u; ntpLastSyncText(b, sizeof(b));
+  chk(!strcmp(b, "Ayer 13:23"), "sincronizado ayer");
+
+  if(gFails){ printf("%d comprobacion(es) del reloj han fallado.\n", gFails); return 1; }
+  printf("  Reloj: todas las comprobaciones pasan.\n");
+  return 0;
+}

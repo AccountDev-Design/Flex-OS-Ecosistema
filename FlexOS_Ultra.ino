@@ -62,6 +62,7 @@
 #include "esp_heap_caps.h"
 #include "esp_system.h"          // esp_reset_reason() para la banda forense
 #include <WiFi.h>                // pila WiFi (transporte hosted C6 por debajo, AUTO)
+#include <WiFiUdp.h>             // socket UDP del cliente NTP (ver "HORA REAL POR NTP")
 #include "esp_task_wdt.h"        // TWDT: esp_task_wdt_reset() en loop()
 #include "esp_sleep.h"           // deep sleep real + ext1/timer como fuente de despertar (ESP32-P4)
 #include "driver/gpio.h"         // gpio_hold_en / gpio_deep_sleep_hold_en (mantener RST del GT911 en sleep)
@@ -267,6 +268,7 @@ static ClipItem gClip[CLIP_SLOTS];
 #define POFF_WAKE_POLL_MS 400 // ruta alternativa: cada cuanto despierta el temporizador a mirar el tactil
 #define POFF_WAKE_HOLD_MS 3000 // presion sostenida necesaria para completar el arranque (requisito: ~3 s)
 #define POFF_WAKE_GATE_MS 4200 // ventana total del filtro de arranque antes de rendirse y volver a dormir
+
 
 // #############################################################
 // ##  ISLA DINAMICA · tipos y estado  (FASE 1: solo la isla)
@@ -4661,36 +4663,150 @@ static const char* MO_SHORT[5][12] = {
   {"gen","feb","mar","apr","mag","giu","lug","ago","set","ott","nov","dic"},
 };
 
-// -------- Reloj interno (sin NTP; se siembra a sab, 4 jul 13:23) --------
+// #############################################################
+// ##  RELOJ DEL SISTEMA  ·  epoca UTC + zona fija de Lima
+// ##  ------------------------------------------------------
+// ##  Antes el reloj era un contador de MINUTOS desde el arranque
+// ##  sembrado a mano (sab 4 jul 2026, 13:23) que avanzaba la fecha
+// ##  dia a dia con un bucle. No habia forma de meterle una hora
+// ##  real: no existia ningun instante absoluto que fijar.
+// ##
+// ##  Ahora la fuente de verdad es UNA epoca UTC en segundos
+// ##  (clkEpochRef) anclada a un millis() (clkRefMs). De ahi salen
+// ##  rtcY/rtcMo/rtcD/rtcWd/rtcH/rtcMin exactamente igual que
+// ##  antes, asi que NINGUN llamante cambia: la pantalla de
+// ##  bloqueo, el widget, la barra de estado y Ajustes siguen
+// ##  leyendo las mismas variables.
+// ##
+// ##  ZONA HORARIA: Peru (America/Lima) es UTC-5 TODO el ano --
+// ##  no aplica horario de verano desde 1994. Por eso el desfase
+// ##  es una constante y no hay tabla de reglas que mantener.
+// ##
+// ##  SIN NTP el reloj sigue funcionando igual que siempre: con la
+// ##  ultima hora guardada en NVS, o con la semilla de fabrica si
+// ##  el equipo nunca se ha sincronizado.
+// #############################################################
+
+// Desfase fijo de Lima. Negativo = al oeste de Greenwich.
+#define FLEXOS_TZ_OFFSET_SEC   (-5 * 3600)
+// Semilla de fabrica (la de siempre): sabado 4 de julio de 2026, 13:23 LOCAL.
+#define FLEXOS_CLK_SEED_Y      2026
+#define FLEXOS_CLK_SEED_MO     7
+#define FLEXOS_CLK_SEED_D      4
+#define FLEXOS_CLK_SEED_MIN    (13 * 60 + 23)
+// Suelo de cordura: 1 ene 2026 00:00 UTC. Cualquier epoca por debajo es
+// basura (un servidor que responde ceros, un NVS a medio escribir) y se
+// rechaza en vez de dejar el reloj en 1970.
+#define FLEXOS_CLK_MIN_EPOCH   1767225600UL
+
 static int rtcY = 2026, rtcMo = 7, rtcD = 4, rtcWd = 6, rtcH = 13, rtcMin = 23;
-static long          seedMinOfDay = 13 * 60 + 23;
 static unsigned long clkBootMs = 0;
 static long          clkLastMin = -1;
+// Semilla en minutos del dia. Se conserva por compatibilidad con setup(),
+// que la fija antes del primer clkUpdate().
+static long          seedMinOfDay = FLEXOS_CLK_SEED_MIN;
+
+// ---- Ancla absoluta del reloj ----
+static uint32_t      clkEpochRef = 0;      // segundos UTC del instante anclado
+static unsigned long clkRefMs    = 0;      // millis() de ese mismo instante
+static bool          clkAnchored = false;  // ya hay ancla (semilla, NVS o NTP)
 
 static int daysInMonth(int y, int m){
   static const int dm[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
   if(m == 2 && ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0)) return 29;
   return dm[m - 1];
 }
-static void clkSetDate(long addDays){
-  int Y = 2026, Mo = 7, D = 4, Wd = 6;
-  for(long i = 0; i < addDays; i++){
-    D++; Wd = (Wd + 1) % 7;
-    if(D > daysInMonth(Y, Mo)){ D = 1; Mo++; if(Mo > 12){ Mo = 1; Y++; } }
-  }
-  rtcY = Y; rtcMo = Mo; rtcD = D; rtcWd = Wd;
+
+// Dias civiles <-> dias desde 1970-01-01. Algoritmo de calendario
+// proleptico gregoriano de Howard Hinnant: aritmetica entera pura, sin
+// bucles y sin tablas, valido para cualquier ano. Sustituye al bucle
+// "avanza un dia N veces" de antes, que con una fecha real (miles de
+// dias desde la semilla) habria costado miles de iteraciones POR CUADRO.
+static long clkDaysFromCivil(int y, int m, int d){
+  y -= (m <= 2);
+  long era = (y >= 0 ? y : y - 399) / 400;
+  unsigned yoe = (unsigned)(y - era * 400);                       // [0, 399]
+  unsigned doy = (unsigned)((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1);
+  unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;           // [0, 146096]
+  return era * 146097L + (long)doe - 719468L;
 }
+static void clkCivilFromDays(long z, int &y, int &m, int &d){
+  z += 719468L;
+  long era = (z >= 0 ? z : z - 146096L) / 146097L;
+  unsigned doe = (unsigned)(z - era * 146097L);                   // [0, 146096]
+  unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  long yy = (long)yoe + era * 400;
+  unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);         // [0, 365]
+  unsigned mp = (5 * doy + 2) / 153;                              // [0, 11]
+  d = (int)(doy - (153 * mp + 2) / 5 + 1);                        // [1, 31]
+  m = (int)(mp < 10 ? mp + 3 : mp - 9);                           // [1, 12]
+  y = (int)(yy + (m <= 2));
+}
+
+// Segundos UTC AHORA. La resta de millis() se hace en aritmetica sin signo,
+// asi que el desbordamiento de millis() (~49,7 dias) da el delta correcto;
+// ademas clkUpdate() re-ancla cada hora, con lo que el delta nunca se acerca
+// siquiera a ese limite.
+static uint32_t clkNowUtc(){
+  if(!clkAnchored) return 0;
+  return clkEpochRef + (uint32_t)((millis() - clkRefMs) / 1000UL);
+}
+// Fija el ancla. Se usa igual para la semilla, para NVS y para NTP.
+static void clkSetEpoch(uint32_t utc){
+  clkEpochRef = utc; clkRefMs = millis(); clkAnchored = true;
+  clkLastMin = -1;                    // fuerza el repintado del minuto
+}
+// Ancla de fabrica: la misma fecha y hora que sembraba la version anterior.
+static void clkSeedFactory(){
+  long days = clkDaysFromCivil(FLEXOS_CLK_SEED_Y, FLEXOS_CLK_SEED_MO, FLEXOS_CLK_SEED_D);
+  clkSetEpoch((uint32_t)(days * 86400L + seedMinOfDay * 60L - FLEXOS_TZ_OFFSET_SEC));
+}
+// Compat: la version anterior exportaba clkSetDate(addDays) para mover la
+// fecha. Se conserva la firma porque es barata y deja el reloj coherente si
+// algun dia hace falta desplazarlo a mano.
+static void clkSetDate(long addDays){
+  if(!clkAnchored) clkSeedFactory();
+  clkSetEpoch(clkNowUtc() + (uint32_t)(addDays * 86400L));
+}
+
 // devuelve true si cambio el minuto (para repintar el reloj)
 static bool clkUpdate(){
-  long mins = seedMinOfDay + (long)((millis() - clkBootMs) / 60000UL);
-  long mod = mins % 1440; if(mod < 0) mod += 1440;
-  int h = (int)(mod / 60), mi = (int)(mod % 60);
+  if(!clkAnchored) clkSeedFactory();
+  // Re-anclaje horario: dobla el tiempo transcurrido dentro de la epoca y
+  // reinicia el contador de millis(). Mantiene el delta siempre pequeno (por
+  // debajo del desbordamiento de millis) sin mover ni un segundo el reloj.
+  if(millis() - clkRefMs > 3600000UL) clkSetEpoch(clkNowUtc());
+
+  long local = (long)clkNowUtc() + FLEXOS_TZ_OFFSET_SEC;
+  long days  = local / 86400L; long rem = local % 86400L;
+  if(rem < 0){ rem += 86400L; days--; }            // division hacia -inf (fechas antes de 1970)
+  long mins = days * 1440L + rem / 60L;
   if(mins == clkLastMin) return false;
   clkLastMin = mins;
-  rtcH = h; rtcMin = mi;
-  clkSetDate(mins / 1440);
+  rtcH   = (int)(rem / 3600L);
+  rtcMin = (int)((rem % 3600L) / 60L);
+  clkCivilFromDays(days, rtcY, rtcMo, rtcD);
+  long w = (days + 4) % 7; if(w < 0) w += 7;       // 1970-01-01 fue jueves
+  rtcWd = (int)w;
   return true;
 }
+
+// #############################################################
+// ##  NTP  ·  API que consume la pantalla de Ajustes
+// ##  ------------------------------------------------------
+// ##  La implementacion vive junto al resto de la red (mucho mas
+// ##  abajo, tras la pantalla de Wi-Fi) porque necesita el socket
+// ##  y la tarea de fondo. Aqui solo se declara lo que Ajustes
+// ##  -- que esta ANTES en el archivo -- necesita llamar.
+// #############################################################
+static void ntpRequestSync(bool userAsked);      // pide una sincronizacion (no bloquea)
+static void ntpOnWifiUp();                       // el Wi-Fi acaba de enlazar
+static void ntpStateText(char* out, size_t n);   // "Sincronizado", "Sin conexion", ...
+static void ntpLastSyncText(char* out, size_t n);// "hoy 13:24" / "nunca"
+static bool ntpIsBusy();                         // hay una consulta en vuelo
+static void clkSaveNvs();                        // vuelca la hora actual a NVS (lo usa tambien el apagado)
+static bool gTimeNvsOk = true;                   // false = NVS no disponible (error real en Ajustes)
+
 // Reloj "H:MM" pelado. Lo usa el RELOJ GIGANTE vectorial (bloqueo y app Reloj),
 // que solo sabe dibujar digitos y ':' -> aqui NO puede entrar el AM/PM.
 static void clkStr12(char* out, size_t n){
@@ -6163,7 +6279,18 @@ static void settingsDetailContent(int cat){
     settingsDateTimeStr(v, sizeof(v));
     y = setRowCard(y, RI_CAL,     rgb565(235,90,90),  "Fecha y hora", v, true);
     y = setRowCard(y, RI_CLOCK,   rgb565(90,120,230), "Formato de hora", g24h ? "24 horas" : "12 horas", true);
-    y = setRowCard(y, RI_PIN,     rgb565(230,80,80),  "Zona horaria", "GMT-05:00 Lima", true);
+    y = setRowCard(y, RI_PIN,     rgb565(230,80,80),  "Zona horaria", "GMT-05:00 Lima (sin DST)", false);
+    // --- HORA REAL POR NTP (filas 4, 5 y 6) ---
+    // La fila de estado y la de "ultima sincronizacion" son informativas (sin
+    // chevron): tocarlas no hace nada, igual que las de "Acerca de". La
+    // accionable es la tercera.
+    char nv[64]; ntpStateText(nv, sizeof(nv));
+    y = setRowCard(y, RI_CLOUD,   gTimeNvsOk ? rgb565(60,170,220) : rgb565(220,80,80),
+                   "Sincronizaci\xC3\xB3n autom\xC3\xA1tica", nv, false);
+    char lv[48]; ntpLastSyncText(lv, sizeof(lv));
+    y = setRowCard(y, RI_CLOCK,   rgb565(90,120,230), "\xC3\x9Altima sincronizaci\xC3\xB3n", lv, false);
+    y = setRowCard(y, RI_REFRESH, rgb565(80,180,120), "Sincronizar ahora",
+                   ntpIsBusy() ? "Sincronizando..." : "Consultar el servidor de hora", true);
     y = setRowCard(y, RI_REFRESH, rgb565(60,160,230), "Actualizaciones", flexOtaStatusText(), true);
     y = setRowCard(y, RI_CLOUD,   rgb565(120,160,230),"Copias de seguridad", "Proximamente", true);
     y = setRowCard(y, RI_RESET,   rgb565(220,80,80),  "Restablecer", "Opciones de fabrica", true);
@@ -6456,7 +6583,10 @@ static void settingsRowAction(int cat, int idx){
   if(cat == 0){
     if(idx == 0){ cfgLang = (cfgLang + 1) % 6; cfgSavePrefs(); gHomeDirty = true; settingsRender(); }         // idioma (cicla)
     else if(idx == 2){ g24h = !g24h; cfgSavePrefs(); gHomeDirty = true; settingsRenderDetailOnly(); }         // formato 12/24
-    else if(idx == 4) flexOtaOpenSettings();                                                                 // Actualizaciones -> pantalla OTA
+    // idx 3 (zona horaria), 4 (estado NTP) y 5 (ultima sincronizacion) son
+    // informativas: no tienen accion. La zona de Lima es fija por diseno.
+    else if(idx == 6){ ntpRequestSync(true); settingsRenderDetailOnly(); }                                    // Sincronizar ahora
+    else if(idx == 7) flexOtaOpenSettings();                                                                 // Actualizaciones -> pantalla OTA
   } else if(cat == 1){
     if(idx == 0){ gBright += 25; if(gBright > 100) gBright = 25; setBacklight(gBright); cfgSavePrefs(); settingsRenderDetailOnly(); }  // brillo real
     // MATERIAL (Liquid Glass <-> plano) y APARIENCIA (oscuro <-> claro) son dos
@@ -17321,6 +17451,9 @@ static void poffSaveCleanFlag(){
   prefs.putBool("cleanoff", true);
   prefs.putInt("bright", gBright);      // el brillo del usuario, para restaurarlo al encender
   prefs.end();
+  // La hora tambien: es el momento MAS tardio en que se conoce, asi que al
+  // volver a encender (quiza sin internet) el reloj arranca donde se quedo.
+  clkSaveNvs();
 }
 
 // ---- Animacion de apagado ----------------------------------------------
@@ -17693,6 +17826,7 @@ static void wifiConnTask(void*){
     // funciona. Guardar antes de confirmar dejaria una clave erronea
     // fija en NVS y el equipo reintentaria con ella en cada arranque.
     wifiCredsSave(wifiConnSSID, wifiConnPass);
+    ntpOnWifiUp();                          // hay red: la hora real ya se puede pedir
     wifiUIState = WUI_OK;
   } else {
     gNetOnline = false;
@@ -17723,6 +17857,7 @@ static void wifiAutoConnTask(void*){
     ips.toCharArray(wifiConnIP, sizeof(wifiConnIP));
     strncpy(wifiConnSSID, wifiSavedSSID, sizeof(wifiConnSSID) - 1);
     wifiConnSSID[sizeof(wifiConnSSID) - 1] = 0;
+    ntpOnWifiUp();                          // hay red: la hora real ya se puede pedir
     Serial.printf("[WiFi] reconectado. IP %s\n", wifiConnIP);
   } else {
     // Fallo (router apagado, clave cambiada, fuera de alcance): se suelta
@@ -18042,6 +18177,264 @@ static void wifiTick(){
     }
   }
 #endif
+}
+
+// #############################################################
+// ##  HORA REAL POR NTP  ·  Lima (UTC-5, sin horario de verano)
+// ##  ------------------------------------------------------
+// ##  COMO FUNCIONA
+// ##    · Cliente SNTP propio sobre UDP (48 bytes, RFC 4330). No se
+// ##      usa configTime()/lwIP-SNTP a proposito: ese arranca un
+// ##      re-sondeo periodico propio que no se puede acotar desde
+// ##      aqui, y el requisito es sincronizar cada 6 h, no de forma
+// ##      continua. Con el socket propio, el ritmo lo marca este
+// ##      fichero y el socket se cierra en cuanto termina.
+// ##    · Todo ocurre en una tarea de fondo (Core 1, prioridad 1).
+// ##      loop() NUNCA espera a la red: ntpTick() solo mira banderas
+// ##      y lanza la tarea, y la tarea escribe el resultado en
+// ##      variables volatiles. El renderizado no se entera.
+// ##    · Al conectar el Wi-Fi se pide una sincronizacion. Despues,
+// ##      una cada NTP_PERIOD_MS (6 h).
+// ##    · Si falla, espera progresiva (30 s, 60 s, 2 min... hasta
+// ##      30 min) en vez de martillear el servidor.
+// ##    · Perder el Wi-Fi NO para el reloj: la hora sigue saliendo
+// ##      del ancla (epoca + millis), que es independiente de la red.
+// ##    · La ultima hora buena se guarda en NVS. Tras un reinicio sin
+// ##      internet, el sistema arranca con esa hora APROXIMADA (nunca
+// ##      salta a 1970) y lo dice en Ajustes hasta volver a sincronizar.
+// #############################################################
+#include <WiFiUdp.h>
+
+#define NTP_PERIOD_MS     (6UL * 3600UL * 1000UL)   // resincronizacion: 6 h
+#define NTP_FIRST_DELAY   1500                      // margen tras conectar antes del primer intento
+#define NTP_TIMEOUT_MS    4000                      // espera maxima por respuesta de UN servidor
+#define NTP_PORT          123
+#define NTP_PKT_SIZE      48
+#define NTP_EPOCH_DELTA   2208988800UL              // segundos entre 1900-01-01 y 1970-01-01
+#define NTP_BACKOFF_MIN   30000UL                   // 30 s tras el primer fallo
+#define NTP_BACKOFF_MAX   1800000UL                 // techo: 30 min
+
+// Tres servidores publicos. Se prueban en orden y el primero que conteste
+// gana; asi un servidor caido no deja al equipo sin hora.
+static const char* NTP_SERVERS[3] = { "pool.ntp.org", "time.google.com", "time.cloudflare.com" };
+
+enum { NTPS_NEVER = 0, NTPS_OK, NTPS_FAIL, NTPS_BUSY };
+static volatile uint8_t  gNtpState   = NTPS_NEVER;
+static volatile bool     gNtpBusy    = false;
+static volatile uint32_t gNtpDoneMs  = 0;      // millis() del ultimo intento terminado
+static uint32_t gNtpLastSyncUtc = 0;           // epoca UTC de la ultima sincronizacion correcta
+static bool     gNtpFromNvs     = false;       // la hora actual viene de NVS, no de la red
+static uint8_t  gNtpFails       = 0;           // fallos seguidos (espera progresiva)
+static uint32_t gNtpNextMs      = 0;           // millis() del proximo intento permitido
+static bool     gNtpUserAsked   = false;       // el intento en curso lo pidio el usuario
+
+#define TIME_NVS_NS    "flexos_time"
+#define TIME_NVS_EPOCH "epoch"
+#define TIME_NVS_SYNC  "lastsync"
+
+// ---- Persistencia de la hora --------------------------------------
+// Se guarda la epoca UTC actual (no la local): la conversion a Lima se hace
+// siempre al leer, asi que un cambio futuro de zona no invalida lo guardado.
+static void clkSaveNvs(){
+  if(!clkAnchored) return;
+  uint32_t now = clkNowUtc();
+  if(now < FLEXOS_CLK_MIN_EPOCH) return;          // nunca persistir una hora que ya sabemos mala
+  Preferences p;
+  if(!p.begin(TIME_NVS_NS, false)){ gTimeNvsOk = false; return; }
+  gTimeNvsOk = true;
+  p.putULong64(TIME_NVS_EPOCH, (uint64_t)now);
+  p.putULong64(TIME_NVS_SYNC,  (uint64_t)gNtpLastSyncUtc);
+  p.end();
+}
+// Arranque: recupera la ultima hora conocida. Es una hora APROXIMADA (el
+// equipo ha estado apagado un rato sin contar), pero es infinitamente mejor
+// que arrancar en 1970 o en la semilla de fabrica.
+static void clkLoadNvs(){
+  Preferences p;
+  if(!p.begin(TIME_NVS_NS, true)){
+    gTimeNvsOk = false;
+    Serial.println(F("[TIME] NVS no disponible -> hora de fabrica"));
+    return;
+  }
+  gTimeNvsOk = true;
+  uint64_t e = p.getULong64(TIME_NVS_EPOCH, 0);
+  uint64_t l = p.getULong64(TIME_NVS_SYNC,  0);
+  p.end();
+  if(e >= FLEXOS_CLK_MIN_EPOCH){
+    clkSetEpoch((uint32_t)e);
+    gNtpLastSyncUtc = (uint32_t)l;
+    gNtpFromNvs = true;
+    Serial.println(F("[TIME] hora recuperada de NVS (aproximada hasta sincronizar)"));
+  }
+}
+
+// ---- Cliente SNTP ---------------------------------------------------
+// Consulta UN servidor. Devuelve la epoca UTC o 0 si no contesta.
+// El socket se abre y se CIERRA aqui dentro pase lo que pase: ni un
+// descriptor queda vivo entre intentos.
+static uint32_t ntpQuery(const char* host){
+  WiFiUDP udp;
+  if(!udp.begin(0)) return 0;                     // puerto local efimero
+  uint8_t pkt[NTP_PKT_SIZE];
+  memset(pkt, 0, sizeof(pkt));
+  pkt[0] = 0xE3;      // LI = 3 (sin aviso), VN = 4, Mode = 3 (cliente)
+  pkt[1] = 0;         // stratum
+  pkt[2] = 6;         // polling interval
+  pkt[3] = 0xEC;      // precision
+  pkt[12] = 0x31; pkt[13] = 0x4E; pkt[14] = 0x31; pkt[15] = 0x34;   // reference id
+  uint32_t got = 0;
+  if(udp.beginPacket(host, NTP_PORT)){
+    udp.write(pkt, NTP_PKT_SIZE);
+    if(udp.endPacket()){
+      uint32_t t0 = millis();
+      while(millis() - t0 < NTP_TIMEOUT_MS){
+        int n = udp.parsePacket();
+        if(n >= NTP_PKT_SIZE){
+          if(udp.read(pkt, NTP_PKT_SIZE) == NTP_PKT_SIZE){
+            // Bytes 40..43: marca de tiempo de transmision, segundos desde 1900.
+            uint32_t secs1900 = ((uint32_t)pkt[40] << 24) | ((uint32_t)pkt[41] << 16) |
+                                ((uint32_t)pkt[42] << 8)  |  (uint32_t)pkt[43];
+            if(secs1900 > NTP_EPOCH_DELTA){
+              uint32_t utc = secs1900 - NTP_EPOCH_DELTA;
+              if(utc >= FLEXOS_CLK_MIN_EPOCH) got = utc;   // filtro de cordura
+            }
+          }
+          break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));            // cede CPU: no hay espera activa
+      }
+    }
+  }
+  udp.stop();                                     // cierre incondicional del socket
+  return got;
+}
+
+static void ntpTask(void*){
+  uint32_t utc = 0;
+  for(int i = 0; i < 3 && utc == 0; i++){
+    if(WiFi.status() != WL_CONNECTED) break;      // el Wi-Fi cayo a mitad: no insistir
+    utc = ntpQuery(NTP_SERVERS[i]);
+  }
+  if(utc){
+    clkSetEpoch(utc);
+    gNtpLastSyncUtc = utc;
+    gNtpFromNvs = false;
+    gNtpFails   = 0;
+    gNtpState   = NTPS_OK;
+    clkSaveNvs();
+    Serial.println(F("[NTP] hora sincronizada"));
+  } else {
+    if(gNtpFails < 8) gNtpFails++;
+    gNtpState = NTPS_FAIL;
+    Serial.println(F("[NTP] sin respuesta -> se reintentara mas tarde"));
+  }
+  gNtpDoneMs = millis();
+  gNtpBusy   = false;
+  vTaskDelete(NULL);
+}
+
+// El Wi-Fi acaba de enlazar: adelanta la proxima sincronizacion. Se llama
+// desde las dos tareas de conexion (manual y automatica), que son los UNICOS
+// puntos donde se confirma un enlace correcto.
+static void ntpOnWifiUp(){
+  gNtpFails  = 0;
+  gNtpNextMs = millis() + NTP_FIRST_DELAY;
+  if(!gNtpNextMs) gNtpNextMs = 1;         // 0 esta reservado para "nunca programada"
+}
+
+// Pide una sincronizacion. NO bloquea: solo lanza la tarea si procede.
+// userAsked = true viene del boton "Sincronizar ahora" de Ajustes y salta la
+// espera progresiva (el usuario ha pedido el intento a proposito).
+static void ntpRequestSync(bool userAsked){
+#if FLEXOS_ENABLE_WIFI
+  if(gNtpBusy) return;
+  if(gAirplane) return;
+  if(WiFi.status() != WL_CONNECTED) return;
+  if(!userAsked && gNtpNextMs && (int32_t)(millis() - gNtpNextMs) < 0) return;
+  gNtpBusy = true; gNtpState = NTPS_BUSY; gNtpUserAsked = userAsked;
+  if(xTaskCreatePinnedToCore(ntpTask, "ntp", 4096, NULL, 1, NULL, 1) != pdPASS){
+    gNtpBusy = false; gNtpState = NTPS_FAIL;
+  }
+#else
+  (void)userAsked;
+#endif
+}
+
+// Ritmo del reloj: se llama desde loop(), cuesta unas comparaciones.
+// Aqui NO hay red: solo decide CUANDO hay que pedirla.
+static void ntpTick(){
+#if FLEXOS_ENABLE_WIFI
+  uint32_t now = millis();
+  if(gNtpBusy) return;
+  // Un intento acaba de terminar: programa el siguiente. Correcto -> 6 h.
+  // Fallido -> espera progresiva 30 s, 1 min, 2 min... con techo de 30 min.
+  if(gNtpDoneMs){
+    uint32_t done = gNtpDoneMs; gNtpDoneMs = 0;
+    if(gNtpState == NTPS_OK) gNtpNextMs = done + NTP_PERIOD_MS;
+    else {
+      uint32_t wait = NTP_BACKOFF_MIN << (gNtpFails > 0 ? (gNtpFails - 1) : 0);
+      if(wait > NTP_BACKOFF_MAX || wait < NTP_BACKOFF_MIN) wait = NTP_BACKOFF_MAX;
+      gNtpNextMs = done + wait;
+    }
+    return;
+  }
+  if(gAirplane || WiFi.status() != WL_CONNECTED) return;
+  // Primera sincronizacion de la sesion: en cuanto haya red y el sistema
+  // este operativo (no a mitad del arranque).
+  if(gNtpNextMs == 0){
+    if(gState != ST_HOME && gState != ST_LOCK) return;
+    if(now < NTP_FIRST_DELAY) return;
+    ntpRequestSync(false);
+    if(gNtpBusy) gNtpNextMs = now + NTP_PERIOD_MS;   // se reajusta al terminar
+    return;
+  }
+  if((int32_t)(now - gNtpNextMs) >= 0) ntpRequestSync(false);
+#endif
+}
+
+// Guardado periodico de la hora (una vez por hora). Sin esto, un corte de
+// corriente perderia hasta 6 h de reloj; con esto, como mucho una.
+static void clkPersistTick(){
+  static uint32_t lastSave = 0;
+  if(!clkAnchored) return;
+  if(lastSave && millis() - lastSave < 3600000UL) return;
+  lastSave = millis(); if(!lastSave) lastSave = 1;
+  clkSaveNvs();
+}
+
+// ---- Textos para Ajustes -------------------------------------------
+static bool ntpIsBusy(){ return gNtpBusy; }
+static void ntpStateText(char* out, size_t n){
+#if !FLEXOS_ENABLE_WIFI
+  snprintf(out, n, "Wi-Fi desactivado en este build");
+#else
+  if(!gTimeNvsOk){ snprintf(out, n, "Error: almacenamiento NVS no disponible"); return; }
+  if(gNtpBusy){ snprintf(out, n, "Sincronizando..."); return; }
+  switch(gNtpState){
+    case NTPS_OK:   snprintf(out, n, "Sincronizado - UTC-5 (Lima)"); break;
+    case NTPS_FAIL: snprintf(out, n, gAirplane ? "Modo avi\xC3\xB3n activo"
+                                    : (WiFi.status() == WL_CONNECTED ? "Sin respuesta del servidor" : "Sin conexi\xC3\xB3n Wi-Fi")); break;
+    default:
+      if(gNtpFromNvs)                     snprintf(out, n, "Hora aproximada (sin sincronizar)");
+      else if(gAirplane)                  snprintf(out, n, "Modo avi\xC3\xB3n activo");
+      else if(WiFi.status() != WL_CONNECTED) snprintf(out, n, "Esperando Wi-Fi");
+      else                                snprintf(out, n, "Pendiente");
+      break;
+  }
+#endif
+}
+static void ntpLastSyncText(char* out, size_t n){
+  if(gNtpLastSyncUtc < FLEXOS_CLK_MIN_EPOCH){ snprintf(out, n, "Nunca"); return; }
+  long local = (long)gNtpLastSyncUtc + FLEXOS_TZ_OFFSET_SEC;
+  long days  = local / 86400L, rem = local % 86400L;
+  if(rem < 0){ rem += 86400L; days--; }
+  int y, mo, d; clkCivilFromDays(days, y, mo, d);
+  long nowLocal = (long)clkNowUtc() + FLEXOS_TZ_OFFSET_SEC;
+  long nowDays  = nowLocal / 86400L; if(nowLocal % 86400L < 0) nowDays--;
+  int hh = (int)(rem / 3600L), mm = (int)((rem % 3600L) / 60L);
+  if(days == nowDays)          snprintf(out, n, "Hoy %02d:%02d", hh, mm);
+  else if(days == nowDays - 1) snprintf(out, n, "Ayer %02d:%02d", hh, mm);
+  else                         snprintf(out, n, "%02d/%02d/%04d %02d:%02d", d, mo, y, hh, mm);
 }
 
 // #############################################################
@@ -18898,8 +19291,13 @@ void setup(){
                 gKbSize, KB_KW, KB_KH, KB_GAP, KB_X, kbSizeCheck() ? "si" : "NO");
 
   clkBootMs = millis();
-  seedMinOfDay = 13 * 60 + 23;      // siembra: sab 4 jul, 13:23 (como tus imagenes)
-  clkLastMin = -1;
+  seedMinOfDay = FLEXOS_CLK_SEED_MIN;   // semilla de fabrica: sab 4 jul 2026, 13:23
+  clkSeedFactory();
+  // Ultima hora conocida (NVS). Si existe, pisa la semilla: tras un reinicio
+  // sin internet el equipo arranca con una hora APROXIMADA en vez de con la
+  // fecha de fabrica. Si el almacenamiento no responde, gTimeNvsOk queda a
+  // false y Ajustes lo dice con un error real, no en silencio.
+  clkLoadNvs();
   clkUpdate();
 
   // Pantalla de diagnostico SOLO si el reinicio fue ANORMAL
@@ -18968,6 +19366,8 @@ void loop(){
   flexOtaTouchBridge();   // OTA: si hay overlay visible, se queda el toque antes que nadie
   hwDetectTick();         // deteccion I2C incremental, mismo contexto que el tactil (Fase 2)
   wifiAutoReconnectTick();// reconexion WiFi diferida (la radio NUNCA se toca en setup(); ver bootInitRadioSafe)
+  ntpTick();              // NTP: decide CUANDO pedir hora. La red corre en su tarea, nunca aqui
+  clkPersistTick();       // guarda la hora en NVS una vez por hora (arranque sin internet)
   bool minChanged = clkUpdate();
   gMinChanged = minChanged;
 
