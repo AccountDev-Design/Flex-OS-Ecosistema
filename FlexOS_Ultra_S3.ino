@@ -209,17 +209,19 @@ static ClipItem gClip[CLIP_SLOTS];
 
 
 // =============================================================
-// GEOMETRIA LOGICA  (NO SE TOCA -- es la del sistema entero)
+// GEOMETRIA LOGICA ADAPTADA AL PANEL DEL S3
 // =============================================================
-// Todo FlexOS -las 16 apps, el Home, Ajustes, el teclado, el Modo
-// PC, la isla dinamica, el kiosco- esta escrito contra ESTAS dos
-// constantes. Cambiarlas romperia cada layout del proyecto, asi
-// que en el port al S3 se quedan EXACTAMENTE como estaban: el
-// lienzo sigue siendo 480x800 en PSRAM. Lo que cambia es solo el
-// ultimo paso, cuando el presenter baja ese lienzo al panel real.
-#define SCR_W   480
+// El panel portrait mide 320x480, proporcion 2:3. Para conservar esa
+// proporcion sin franjas ni deformacion, FlexOS S3 compone en 533x800:
+// 533/800 es la aproximacion entera mas cercana a 2/3. El presenter
+// reduce ambos ejes practicamente por el mismo factor (3/5).
+//
+// Al ampliar el ancho LOGICO en vez de estirar la imagen terminada,
+// los layouts basados en SCR_W se redistribuyen: barras, tarjetas,
+// teclado, camara y zonas tactiles usan el ancho adicional de verdad.
+#define SCR_W   533
 #define SCR_H   800
-// Modo horizontal (PC): coords logicas landscape 800x480, rotadas 90 al panel
+// Modo horizontal (PC): coords logicas landscape 800x533, rotadas 90 al panel
 #define LW      SCR_H
 #define LH      SCR_W
 
@@ -233,31 +235,13 @@ static ClipItem gClip[CLIP_SLOTS];
 #define PX_W    320         // ancho FISICO del panel en portrait
 #define PX_H    480         // alto  FISICO del panel en portrait
 
-// ---- MODO DE PRESENTACION ------------------------------------
-//  0 = ESTIRAR. Usa los 320x480 FISICOS COMPLETOS, pero cambia la
-//      proporcion del lienzo 480x800: los circulos se vuelven ovalos,
-//      el texto se ensancha y la vista de camara se ve deformada.
-//  1 = AJUSTAR (POR DEFECTO). Conserva la proporcion exacta de FlexOS:
-//      reduce 480x800 por 3/5 a 288x480 y centra la imagen. Quedan dos
-//      franjas negras discretas de 16 px, una a cada lado.
-//
-// Los DOS modos usan razones enteras exactas, sin coma flotante por
-// pixel. AJUSTAR es el modo correcto cuando importa la geometria real
-// de la interfaz y de la camara.
-#define TFT_PRESENT_FIT   1
-
-#if TFT_PRESENT_FIT
-  #define PX_CW   288                 // ancho util (480 * 3/5)
-  #define PX_X0   ((PX_W - PX_CW)/2)  // 16 px de margen a cada lado
-  #define PX_SX_NUM 5                 // logicoX = fisicoX * 5/3
-  #define PX_SX_DEN 3
-#else
-  #define PX_CW   320
-  #define PX_X0   0
-  #define PX_SX_NUM 3                 // logicoX = fisicoX * 3/2
-  #define PX_SX_DEN 2
-#endif
-#define PX_SY_NUM 5                   // logicoY = fisicoY * 5/3
+// ---- PRESENTACION A PANTALLA COMPLETA, SIN DEFORMAR ------------
+// El lienzo 533x800 llena los 320x480 pixeles fisicos. No hay margen
+// negro ni un escalado diferente por eje. El mapeo horizontal usa los
+// extremos exactos (0..532 -> 0..319); el vertical es 5/3 exacto.
+#define PX_CW   PX_W
+#define PX_X0   0
+#define PX_SY_NUM 5
 #define PX_SY_DEN 3
 
 // Filtro de caja 2x2 al reducir. Cuesta 3 operaciones enteras por
@@ -269,7 +253,7 @@ static ClipItem gClip[CLIP_SLOTS];
 // Filtro de caja 3x3 (FALLBACK OPCIONAL, apagado por defecto).
 // Solo entra en juego si TFT_SMOOTH_SCALE tambien vale 1.
 //
-// CUANDO USARLO: si con TFT_PRESENT_FIT=0 + 2x2 el texto todavia te
+// CUANDO USARLO: si con el escalado proporcional 2x2 el texto todavia te
 // parece "blando". El 3x3 promedia 9 pixeles de origen por pixel de
 // salida en vez de 4, asi que suaviza mas el aliasing... pero ojo,
 // SUAVIZAR MAS NO ES LO MISMO QUE VER MAS NITIDO: a partir de cierto
@@ -827,18 +811,17 @@ static void tftFillSolid(int x0, int y0, int x1, int y1, uint16_t color){
 }
 
 // #############################################################
-// ##  ESCALADO 480x800 (logico) -> 320x480 (fisico)
+// ##  ESCALADO 533x800 (logico) -> 320x480 (fisico)
 // ##  ------------------------------------------------------
-// ##  ESTE es el corazon del port. FlexOS entero sigue dibujando
-// ##  en un lienzo de 480x800 -ni una coordenada del sistema ha
-// ##  cambiado- y aqui, en el ultimo metro, esa imagen se reduce
-// ##  al panel real.
+// ##  ESTE es el corazon del port. FlexOS S3 dibuja en un lienzo
+// ##  533x800, con la misma proporcion del panel. Aqui se reduce
+// ##  uniformemente y sin franjas hasta los 320x480 pixeles reales.
 // ##
-// ##  POR QUE UNA RAZON ENTERA: 800 -> 480 es exactamente 3/5, y
-// ##  480 -> 320 es exactamente 2/3 (modo ESTIRAR, el de por
-// ##  defecto). Al ser exactas no hay coma flotante, no hay
-// ##  acumulacion de error y el mapa de columnas cabe en una LUT
-// ##  calculada una sola vez.
+// ##  POR QUE NO SE DEFORMA: 800 -> 480 es exactamente 3/5.
+// ##  En horizontal se reparten los extremos 0..532 sobre 0..319;
+// ##  la diferencia frente a 3/5 es menor de una milesima y no
+// ##  altera visualmente circulos, texto ni la imagen de camara.
+// ##  La LUT se calcula una sola vez y evita coma flotante por pixel.
 // ##
 // ##  POR QUE FILTRO DE CAJA Y NO VECINO MAS CERCANO: reducir con
 // ##  vecino-mas-cercano TIRA filas y columnas enteras (2 de cada 5
@@ -1022,7 +1005,7 @@ static bool flexPanelInit(){
   // 1) LUT de columnas + buffers de composicion (una sola vez)
   if(!flxChunk[0]){
     for(int px = 0; px < PX_CW; px++){
-      int sx = (px * PX_SX_NUM) / PX_SX_DEN;
+      int sx = (int)(((int64_t)px * (SCR_W - 1) + (PX_CW - 1) / 2) / (PX_CW - 1));
       if(sx > SCR_W - 1) sx = SCR_W - 1;
       flxColMap[px] = (uint16_t)sx;
     }
@@ -1348,7 +1331,7 @@ static void tsToLogical(uint16_t rawX, uint16_t rawY, uint16_t &lx, uint16_t &ly
   if(fx < 0) fx = 0; if(fx > PX_W - 1) fx = PX_W - 1;
   if(fy < 0) fy = 0; if(fy > PX_H - 1) fy = PX_H - 1;
 
-  long gx = ((fx - PX_X0) * PX_SX_NUM) / PX_SX_DEN;   // fisico -> logico (inversa del presenter)
+  long gx = ((fx - PX_X0) * (long)(SCR_W - 1) + (PX_CW - 1) / 2) / (PX_CW - 1); // fisico -> logico, mismos extremos que el presenter
   long gy = (fy * PX_SY_NUM) / PX_SY_DEN;
   if(gx < 0) gx = 0; if(gx > SCR_W - 1) gx = SCR_W - 1;
   if(gy < 0) gy = 0; if(gy > SCR_H - 1) gy = SCR_H - 1;
@@ -1357,6 +1340,10 @@ static void tsToLogical(uint16_t rawX, uint16_t rawY, uint16_t &lx, uint16_t &ly
 }
 
 // ---- Calibracion en NVS (claves de ArduOS) -------------------
+// Version 2 corresponde a la geometria 533x800 a pantalla completa.
+// Una calibracion anterior se invalida UNA sola vez para evitar que
+// coordenadas mal guardadas dejen el equipo sin tactil.
+#define TOUCH_CAL_VERSION 2
 static void tsCalibLoad(){
   Preferences p;
   p.begin("flexos", true);
@@ -1374,14 +1361,16 @@ static void tsCalibSave(){
   p.putShort("TYM", T_YMIN);
   p.putShort("TYX", T_YMAX);
   p.putBool("tcal", true);
+  p.putUChar("tcv", TOUCH_CAL_VERSION);
   p.end();
 }
 static bool tsCalibDone(){
   Preferences p;
   p.begin("flexos", true);
   bool d = p.getBool("tcal", false);
+  uint8_t v = p.getUChar("tcv", 0);
   p.end();
-  return d;
+  return d && v == TOUCH_CAL_VERSION;
 }
 // Marca el dispositivo como SIN calibrar. Solo la usa el "Cancelar" de la
 // pantalla de calibracion cuando NO habia una calibracion previa: como ahora
@@ -5358,7 +5347,7 @@ static void showBootBanner(){
   char b[72];
   snprintf(b, sizeof(b), "ultimo reinicio: %s", resetReasonStr());
   drawTextC(SCR_W / 2, SCR_H / 2 + 22, b, 1, rgb565(240,185,90));
-  drawTextC(SCR_W / 2, SCR_H / 2 + 42, "ESP32-S3 - 480x800 sobre panel 320x480", 1, rgb565(140,150,170));
+  drawTextC(SCR_W / 2, SCR_H / 2 + 42, "ESP32-S3 - interfaz proporcional 533x800 -> 320x480", 1, rgb565(140,150,170));
   flxFlushAll();
   delay(2200);
 }
@@ -17864,8 +17853,8 @@ static void hwDetectTick(){
 // ##  menos. La distancia mide lo que de verdad importa: cuanto se
 // ##  aleja el dedo del sitio.
 // ##
-// ##  LOS TRES TRAMOS (en pixeles LOGICOS; el panel fisico es 2/3
-// ##  en X y 3/5 en Y, asi que 1 px fisico ~ 1,5 px logicos):
+// ##  LOS TRES TRAMOS (en pixeles LOGICOS; ambos ejes del panel se
+// ##  presentan aproximadamente a 3/5, asi que 1 px fisico ~ 1,67 logicos):
 // ##    VERDE   <= 20 logicos (~13 fisicos, ~2 mm)  excelente
 // ##    AMARILLO <= 45 logicos (~30 fisicos, ~4 mm) aceptable
 // ##    ROJO     > 45                               poco precisa
@@ -17917,7 +17906,7 @@ static const int16_t TS_CAL_Y[4] = { TS_CAL_MARGIN_Y, TS_CAL_MARGIN_Y,
 // la MISMA razon entera que usa el presenter para dibujar. Asi un punto
 // dibujado aqui aparece exactamente sobre el pixel fisico que se quiere
 // medir, y la comparacion con el toque es justa.
-static inline int tcalPhysToLogX(int fx){ return ((fx - PX_X0) * PX_SX_NUM) / PX_SX_DEN; }
+static inline int tcalPhysToLogX(int fx){ return (int)(((int64_t)(fx - PX_X0) * (SCR_W - 1) + (PX_CW - 1) / 2) / (PX_CW - 1)); }
 static inline int tcalPhysToLogY(int fy){ return (fy * PX_SY_NUM) / PX_SY_DEN; }
 
 static void tcalCross(int fx, int fy, uint16_t col){
