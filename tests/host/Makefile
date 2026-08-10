@@ -88,21 +88,31 @@ tools: $(TOOLS)
 # sketch salte aqui, sin arduino-cli ni el core de ESP32.
 INO_SRC  := $(ROOT)/FlexOS_Ultra.ino
 INOFLAGS := -Iinostub -I$(ROOT) -DARDUINO=200
+# -Wmaybe-uninitialized: falso positivo del ARNES. Los dobles de I2C devuelven
+# siempre "sin datos", asi que al inlinear gtPollMulti el compilador ve la rama
+# imposible en la que se usa el buffer sin rellenar -- el codigo real hace
+# "if(!gtRd(...)) break;" justo antes. Con el driver de verdad no aparece.
 INOWARN  := $(WARN) -Wno-unused-function -Wno-unused-variable \
-            -Wno-misleading-indentation -Wno-format-truncation
+            -Wno-misleading-indentation -Wno-format-truncation \
+            -Wno-maybe-uninitialized
 
 ino: ino_compile.cpp $(INO_SRC) | $(BUILD)
 	@$(CXX) $(CXXSTD) -fsyntax-only $(INOWARN) $(INOFLAGS) -x c++ ino_compile.cpp
 	@echo "FlexOS_Ultra.ino compila."
 
-# El mismo TU, pero ENLAZADO y EJECUTADO: main() comprueba el calendario y la
-# conversion de zona del reloj del sistema, que son aritmetica pura y por tanto
-# verificables de verdad en el PC. Los modulos hermanos (OTA, FS, navegador)
-# entran como dobles: ya tienen sus propias pruebas.
+# El mismo TU, pero ENLAZADO y EJECUTADO: main() comprueba el reloj del sistema,
+# la maquina de gestos del panel rapido y el servicio de noticias -- las tres
+# partes que son logica pura y por tanto verificables de verdad en el PC. Los
+# modulos hermanos (OTA, FS, navegador) entran como dobles: ya tienen sus
+# propias pruebas.
+#
+# CON SANITIZERS: el lector de JSON de las noticias mastica bytes que vienen de
+# la red, asi que un desbordamiento ahi no puede quedarse en "parece que
+# funciona". Mismo criterio que el resto de pruebas del nucleo portable.
 $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) | $(BUILD)
-	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(INOFLAGS) -x c++ -c ino_compile.cpp -o $(BUILD)/ino_compile.o
-	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(INOFLAGS) -c ino_extern_stubs.cpp -o $(BUILD)/ino_extern_stubs.o
-	@$(CXX) -o $@ $(BUILD)/ino_compile.o $(BUILD)/ino_extern_stubs.o
+	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -x c++ -c ino_compile.cpp -o $(BUILD)/ino_compile.o
+	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -c ino_extern_stubs.cpp -o $(BUILD)/ino_extern_stubs.o
+	@$(CXX) $(SAN) -o $@ $(BUILD)/ino_compile.o $(BUILD)/ino_extern_stubs.o
 
 run: ino $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@echo

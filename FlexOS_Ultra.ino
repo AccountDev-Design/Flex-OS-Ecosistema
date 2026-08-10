@@ -63,6 +63,8 @@
 #include "esp_system.h"          // esp_reset_reason() para la banda forense
 #include <WiFi.h>                // pila WiFi (transporte hosted C6 por debajo, AUTO)
 #include <WiFiUdp.h>             // socket UDP del cliente NTP (ver "HORA REAL POR NTP")
+#include <HTTPClient.h>          // cliente HTTP/HTTPS del servicio de NOTICIAS
+#include <WiFiClientSecure.h>    // TLS para endpoints https del servicio de NOTICIAS
 #include "esp_task_wdt.h"        // TWDT: esp_task_wdt_reset() en loop()
 #include "esp_sleep.h"           // deep sleep real + ext1/timer como fuente de despertar (ESP32-P4)
 #include "driver/gpio.h"         // gpio_hold_en / gpio_deep_sleep_hold_en (mantener RST del GT911 en sleep)
@@ -290,14 +292,21 @@ enum ModuleType {
   MOD_LED,
   MOD_BUTTON,
   MOD_SERVO,
-  MOD_I2C_GENERIC
+  MOD_I2C_GENERIC,
+  // La isla dejo de ser solo para hardware: el servicio de NOTICIAS tambien
+  // avisa por ella. Se anade AL FINAL para no mover ningun valor anterior.
+  MOD_NEWS
 };
 
-// Un modulo detectado (o simulado en Fase 1)
+// Un modulo detectado (o una noticia: ver MOD_NEWS)
 struct DetectedModule {
   ModuleType    type;
-  char          name[24];       // "Sensor BME280"
-  char          sub[28];        // "I2C 0x76 detectado"
+  // name/sub crecen respecto a 24/28: un titular no cabe en 24 caracteres.
+  // Los llamantes de hardware escriben con snprintf acotado, asi que
+  // agrandarlos no cambia nada para ellos. El dibujo recorta al ancho real
+  // de la tarjeta (drawTextClip), no al tamano del buffer.
+  char          name[72];       // "Sensor BME280" / titular de la noticia
+  char          sub[40];        // "I2C 0x76 detectado" / "fuente - categoria"
   uint8_t       i2cAddr;        // 0 si no es I2C
   uint8_t       pins[4];        // reservado para Fase 2 (asignacion de pines)
   uint8_t       numPins;
@@ -4865,6 +4874,19 @@ static void poffEnter();                                  // APAGADO: pantalla d
 static void poffTick();                                   // APAGADO: arrastre del slider + cancelar
 static void poffBeginAnim();                              // APAGADO: confirmado -> arranca la animacion final
 static void poffAnimTick();                               // APAGADO: un paso de la animacion (fundido + "Flex OS" + deep sleep)
+// SERVICIO DE NOTICIAS. Se define abajo del todo (necesita la red, el teclado
+// y la isla), pero Ajustes, el escritorio y el marco de las apps -- todos
+// ANTES en el archivo -- necesitan estas cuatro cosas. Firmas con tipos
+// primitivos, como exige el auto-prototipado de Arduino.
+static void newsSettingsEnter();                          // Ajustes -> Red e Internet -> Noticias
+static int  newsUnreadCount();                            // no leidas en el Centro de noticias
+static const char* newsTopTitle();                        // titular mas reciente (widget del Home)
+static const char* newsTopSource();
+static void newsBadge(uint16_t col);                      // insignia discreta de la barra de estado
+static void newsStateText(char* out, size_t n);           // "Correcto - 14:05", "Falta configurar...", errores
+// Texto recortado por la derecha. Se define con el resto de Ajustes; el widget
+// de Noticias del escritorio esta antes y tambien lo necesita.
+static int  drawTextClip(int x, int y, const char* s, int size, uint16_t col, int maxRight);
 static void kbsEnter();                                   // FASE E: Ajustes -> Teclado (pantalla propia)
 static void kbsTick();                                    // FASE E: su tick, desde loop()
 static void noteRenderAll();                              // Notas: repintado completo (lo llaman el portapapeles y los chips)
@@ -4880,7 +4902,8 @@ enum { ST_SPLASH = 0, ST_OOBE_LANG, ST_OOBE_NAME, ST_LOCK, ST_HOME, ST_APP, ST_S
        // Anadidos AL FINAL por el mismo motivo que los anteriores: no mover
        // el valor de ningun estado ya existente.
        ST_CONN,        // Conectividad: Wifi / BLE / Modo avion
-       ST_FILES };     // Explorador de archivos real
+       ST_FILES,       // Explorador de archivos real
+       ST_NEWS };      // Ajustes > Red e Internet > Noticias (servicio configurable)
 
 static int  gState = ST_SPLASH;
 static unsigned long splashStart = 0;
@@ -5231,7 +5254,42 @@ static void drawHomeWidgets(uint32_t tm){
     if(uiGlass) drawLiquidGlassPanel(nx, ny, nw, nh, 20, TH_GLASS);
     else fillRoundRectA(nx, ny, nw, nh, 20, TH_SURF, 235);
     drawText(nx + 16, ny + 16, t(S_NEWS), 2, TH_TXT);
-    drawTextC(nx + nw / 2, ny + nh / 2, t(S_NONEWS), 1, TH_TXT2);
+    // Titular REAL del Centro de noticias. Si no hay ninguno -- porque el
+    // servicio no esta configurado o aun no ha traido nada -- se conserva el
+    // texto de siempre: el widget nunca inventa un titular.
+    const char* h = newsTopTitle();
+    if(h && h[0]){
+      // Dos lineas cortadas por palabras: un titular no cabe en una sola.
+      int maxr = nx + nw - 14;
+      const char* p2 = h;
+      for(int line = 0; line < 2 && *p2; line++){
+        char part[48]; int k = 0;
+        int lastSp = -1;
+        while(p2[k] && k < (int)sizeof(part) - 1){
+          if(p2[k] == ' ') lastSp = k;
+          part[k] = p2[k];
+          part[k + 1] = 0;
+          if(textW(part, 1) > (maxr - (nx + 14))){        // se paso de ancho
+            if(lastSp > 0){ part[lastSp] = 0; k = lastSp; }
+            else            part[k] = 0;
+            break;
+          }
+          k++;
+        }
+        if(k <= 0) break;
+        drawTextClip(nx + 14, ny + 44 + line * 18, part, 1, TH_TXT, maxr);
+        p2 += k;
+        while(*p2 == ' ') p2++;
+      }
+      const char* src = newsTopSource();
+      if(src && src[0]) drawTextClip(nx + 14, ny + nh - 22, src, 1, TH_TXT2, maxr);
+      int un = newsUnreadCount();
+      if(un > 0){
+        char ub[6]; snprintf(ub, sizeof(ub), "%d", un > 9 ? 9 : un);
+        fillCircle(nx + nw - 22, ny + 24, 10, TH_DANGER);
+        drawTextC(nx + nw - 22, ny + 17, ub, 1, TH_ONACC);
+      }
+    } else drawTextC(nx + nw / 2, ny + nh / 2, t(S_NONEWS), 1, TH_TXT2);
   }
   int dkx = 24, dky = SCR_H - 176, dkw = SCR_W - 48, dkh = 96;
   if(uiGlass) drawLiquidGlassPanel(dkx, dky, dkw, dkh, 28, TH_GLASS2);
@@ -5251,6 +5309,7 @@ static void renderHome(){
   drawText(20, 40, sd, 1, TH_ONWALL2);
   drawWifi(SCR_W - 66, 28, 11, TH_ONWALL);
   drawBattery(SCR_W - 46, 20, 30, 15, 82, TH_ONWALL);
+  newsBadge(TH_ONWALL);                    // noticias sin leer: punto discreto con el contador
   // widgets (clima, noticias) + dock: estilo Liquid Glass o plano
   drawHomeWidgets(millis());
   // rejilla de apps 4x3
@@ -5663,6 +5722,9 @@ static void appDrawChrome(int id){
   drawText(20, 16, cs, 2, W);
   drawWifi(SCR_W - 66, 28, 11, W);
   drawBattery(SCR_W - 46, 20, 30, 15, 82, W);
+  // NOTICIAS con una app abierta: NO se interrumpe al usuario con la isla.
+  // Lo unico que aparece es este contador discreto en la barra.
+  newsBadge(W);
   if(gNavMode == 0){
     int ny = SCR_H - 52;
     fillTriangle(SCR_W / 6 - 10, ny + 8, SCR_W / 6 + 8, ny - 2, SCR_W / 6 + 8, ny + 18, W);
@@ -6349,6 +6411,8 @@ static void settingsDetailContent(int cat){
                    gAirplane ? "Modo avi\xC3\xB3n activo" : "Wifi, BLE y modo avi\xC3\xB3n", true);
     y = setRowCard(y, RI_CLOUD, rgb565(70,120,225), "Wi-Fi", rvp, true);
     y = setRowCard(y, RI_DOT,   rgb565(90,110,235), "Bluetooth (BLE)", rbp, true);
+    { char nv2[64]; newsStateText(nv2, sizeof(nv2));
+      y = setRowCard(y, RI_CLOUD, rgb565(230,150,60), "Noticias", nv2, true); }
     y += 8; drawText(DP_X, y, "Los interruptores encienden la radio de verdad", 1, SET_TXT_MUTE); y += 24;
   } else if(cat == 6){                      // Seguridad (funcional)
     const char* lt = gLockType == 1 ? "PIN configurado" : gLockType == 2 ? "Contrase\xC3\xB1" "a configurada" : "Deslizar";
@@ -6626,6 +6690,7 @@ static void settingsRowAction(int cat, int idx){
       if(gBleOn) flexBleStop(); else flexBleStart();
       settingsRenderDetailOnly();
     }
+    else if(idx == 3) newsSettingsEnter();                                               // Noticias (servicio configurable)
   } else if(cat == 6){
     if(idx == 0) lsuEnter();                                                                 // Seguridad -> Bloqueo (PIN/Contraseña)
     else if(idx == 1){                                                                       // Seguridad -> Bloqueo de inactividad
@@ -19010,6 +19075,7 @@ static void drawModuleIcon(ModuleType type, int x, int y, int S){
     case MOD_BUTTON:      id = IC_NOTAS;   break;
     case MOD_SERVO:       id = IC_MODOPC;  break;
     case MOD_I2C_GENERIC: id = IC_ALMACEN; break;
+    case MOD_NEWS:        id = IC_EDU;     break;   // noticias: icono de "lectura"
     default:              id = IC_AJUSTES; break;
   }
   drawAppIcon(id, x, y, S);
@@ -19078,9 +19144,11 @@ static void notifDrawCard(Notification* n, int cardY){
   drawRoundRect(x, y, w, h, NOTIF_RAD, TH_BORDER);
   // Icono 40x40 (las primitivas acotan coords negativas: seguro fuera de pantalla)
   drawModuleIcon(n->mod.type, x + 12, y + (h - 40) / 2, 40);
-  // Textos
-  drawText(x + 62, y + 14, n->mod.name, 2, TH_TXT);
-  drawText(x + 62, y + 38, n->mod.sub,  1, TH_TXT2);
+  // Textos. RECORTADOS al borde derecho de la tarjeta: los titulares de
+  // noticias son mucho mas largos que un "Sensor BME280" y sin esto se
+  // saldrian por el lado (y por encima del boton de cerrar).
+  drawTextClip(x + 62, y + 14, n->mod.name, 2, TH_TXT,  x + w - 32);
+  drawTextClip(x + 62, y + 38, n->mod.sub,  1, TH_TXT2, x + w - 32);
   // Boton cerrar (X)
   int cx = x + w - 22, cy = y + 20;
   strokeSegAA(cx - 5, cy - 5, cx + 5, cy + 5, 1.8f, TH_TXT);
@@ -19268,6 +19336,1240 @@ static void notifTick(){
   if(gNotifCount == 0) notifBandOn = false;
 }
 
+
+// #############################################################
+// ##  NOTICIAS REALES  ·  servicio HTTP/HTTPS CONFIGURABLE
+// ##  ------------------------------------------------------
+// ##  NINGUNA CLAVE, URL PRIVADA NI TOKEN VIVE EN ESTE CODIGO.
+// ##  Todo -- endpoint, clave, pais, categorias, frecuencia --
+// ##  lo escribe el usuario en Ajustes > Red e Internet >
+// ##  Noticias, con el teclado tactil, y se guarda en NVS
+// ##  (namespace propio "flexos_news"). El firmware sale de
+// ##  fabrica SIN servicio configurado y lo dice en pantalla.
+// ##
+// ##  ARQUITECTURA
+// ##    · La consulta corre en una tarea de fondo (Core 1). El
+// ##      bucle de dibujo NUNCA abre un socket ni espera a la red.
+// ##    · La tarea deja el resultado en un area de traspaso; el
+// ##      trabajo de UI y de NVS lo hace newsTick() ya en el
+// ##      contexto de loop(). Asi ninguna tarea de red dibuja ni
+// ##      escribe en flash.
+// ##    · El cuerpo JSON se lee a un buffer ACOTADO (NEWS_HTTP_MAX)
+// ##      reservado en PSRAM al empezar la consulta y liberado al
+// ##      terminar, pase lo que pase. El socket tambien.
+// ##    · Solo se extraen ID, titulo, fuente, categoria, fecha y
+// ##      (opcionalmente) enlace. Nunca el cuerpo del articulo, ni
+// ##      imagenes, ni video.
+// ##
+// ##  FORMATO JSON MINIMO QUE ESPERA FLEX OS
+// ##  --------------------------------------
+// ##  La respuesta es un objeto con un ARRAY de articulos. La clave
+// ##  del array puede ser cualquiera de: "articles", "items",
+// ##  "results", "data" o "news" -- se prueban en ese orden, asi que
+// ##  la mayoria de APIs publicas encajan sin adaptador.
+// ##
+// ##    {
+// ##      "articles": [
+// ##        {
+// ##          "id":          "a1b2c3",              // opcional
+// ##          "title":       "Titular de la noticia",
+// ##          "source":      "Nombre del medio",     // o {"name":"..."}
+// ##          "category":    "peru",                 // opcional
+// ##          "publishedAt": "2026-08-10T14:05:00Z", // opcional
+// ##          "url":         "https://...",          // opcional
+// ##          "important":   true                    // opcional
+// ##        }
+// ##      ]
+// ##    }
+// ##
+// ##  Lo UNICO obligatorio es "title". Sinonimos aceptados:
+// ##    title  -> title | headline | titulo
+// ##    source -> source | sourceName | fuente   (objeto con "name" tambien vale)
+// ##    fecha  -> publishedAt | published | date | fecha
+// ##    id     -> id | guid | uuid   (si falta, se deriva del titulo)
+// ##    urgente-> important | breaking | urgent | destacada
+// ##
+// ##  PLANTILLA DE LA URL
+// ##  -------------------
+// ##  La URL que escribe el usuario puede llevar marcadores, que se
+// ##  sustituyen en cada consulta:
+// ##      {key}       la clave o token
+// ##      {country}   el pais o region
+// ##      {category}  la categoria que toca en esta consulta
+// ##      {max}       el maximo de resultados (5)
+// ##  Ejemplo (servicio ficticio):
+// ##      https://api.ejemplo.com/v1/top?country={country}
+// ##             &category={category}&pageSize={max}&apiKey={key}
+// ##  Si la URL NO lleva {key} y hay clave guardada, se manda en la
+// ##  cabecera "X-Api-Key". Nunca en los dos sitios a la vez.
+// #############################################################
+
+#define NEWS_URL_MAX       160    // plantilla de la URL escrita por el usuario
+#define NEWS_KEY_MAX        80    // clave o token
+#define NEWS_CTRY_MAX       12    // "pe", "es", "latam"...
+#define NEWS_TITLE_MAX      88
+#define NEWS_SRC_MAX        28
+#define NEWS_LINK_MAX      160    // se recibe y se valida, pero no se persiste (ver abajo)
+#define NEWS_CENTER_MAX     20    // Centro de noticias persistente
+#define NEWS_SEEN_MAX       64    // historial de IDs ya vistos
+#define NEWS_MAX_RESULTS     5    // maximo de articulos por consulta
+#define NEWS_HTTP_MAX     3072    // techo del cuerpo JSON que se lee (bytes)
+#define NEWS_HTTP_TIMEOUT 8000    // ms de espera por la respuesta
+#define NEWS_BACKOFF_MIN 60000UL  // 1 min tras el primer fallo
+#define NEWS_BACKOFF_MAX 3600000UL// techo de la espera progresiva: 1 h
+
+// Categorias. El indice es el que se guarda en cada noticia; el bit, el que
+// se guarda en la configuracion.
+#define NEWS_NCATS 5
+static const char* NEWS_CAT_NAME[NEWS_NCATS] = {
+  "Per\xC3\xBA", "Mundo", "Tecnolog\xC3\xAD" "a", "Ciencia", "Deportes" };
+// Lo que se envia al servicio en {category}. Son las etiquetas habituales de
+// las APIs de noticias; el usuario puede prescindir de ellas si su endpoint no
+// usa el marcador {category}.
+static const char* NEWS_CAT_SLUG[NEWS_NCATS] = {
+  "peru", "world", "technology", "science", "sports" };
+
+enum { NFREQ_MANUAL = 0, NFREQ_30M, NFREQ_1H, NFREQ_3H, NFREQ_6H, NFREQ_N };
+static const uint32_t NEWS_FREQ_MS[NFREQ_N] = {
+  0, 30UL * 60000UL, 60UL * 60000UL, 3UL * 3600000UL, 6UL * 3600000UL };
+static const char* NEWS_FREQ_NAME[NFREQ_N] = {
+  "Manual", "Cada 30 min", "Cada 1 hora", "Cada 3 horas", "Cada 6 horas" };
+
+// Presets del horario silencioso. Se eligen ciclando la fila, para no obligar
+// a teclear una hora en un teclado tactil.
+static const uint16_t NEWS_QUIET_FROM[4] = { 21 * 60, 22 * 60, 23 * 60, 0 };
+static const uint16_t NEWS_QUIET_TO[4]   = {  6 * 60,  7 * 60,  8 * 60, 9 * 60 };
+
+// ---- Configuracion (toda en NVS, nunca en el codigo) ----
+struct NewsCfg {
+  char     url[NEWS_URL_MAX];
+  char     key[NEWS_KEY_MAX];
+  char     country[NEWS_CTRY_MAX];
+  uint8_t  cats;            // mascara de bits (1 << indice)
+  uint8_t  freq;            // NFREQ_*
+  uint8_t  maxNotif;        // avisos emergentes por consulta: 1..3
+  bool     onlyImportant;
+  bool     enabled;
+  bool     quietOn;
+  uint8_t  quietFromIdx;
+  uint8_t  quietToIdx;
+};
+static NewsCfg gNews;
+static bool    gNewsNvsOk = true;      // false = NVS no disponible -> error real en pantalla
+
+// ---- Una noticia ya normalizada ----
+struct NewsItem {
+  uint32_t idHash;                     // huella del ID (ver newsHash)
+  uint32_t when;                       // epoca UTC de publicacion (0 = desconocida)
+  char     title[NEWS_TITLE_MAX];
+  char     source[NEWS_SRC_MAX];
+  uint8_t  cat;                        // 0..4, o 0xFF si el servicio no la dio
+  bool     important;
+  bool     unread;
+};
+
+// ---- Centro de noticias PERSISTENTE ----
+// Las tarjetas de 5 segundos de la isla son un AVISO, no un historial: aqui es
+// donde viven las noticias. Sobrevive al reinicio (NVS) y guarda hasta 20.
+static NewsItem gNewsCenter[NEWS_CENTER_MAX];
+static uint8_t  gNewsCount  = 0;
+static uint8_t  gNewsUnread = 0;
+
+// ---- Historial de IDs ya vistos ----
+// Se guardan HUELLAS de 32 bits (FNV-1a), no los IDs enteros: 64 IDs de hasta
+// 40 caracteres serian 2,5 KB en NVS y en RAM, y aqui bastan 256 bytes. La
+// unica consecuencia posible de una colision es no avisar de una noticia; con
+// 64 entradas la probabilidad es despreciable.
+static uint32_t gNewsSeen[NEWS_SEEN_MAX];
+static uint8_t  gNewsSeenN = 0;        // cuantas huellas validas hay
+static uint8_t  gNewsSeenHead = 0;     // siguiente ranura a sobrescribir (anillo)
+
+// ---- Estado del servicio ----
+enum { NERR_NONE = 0, NERR_NOCFG, NERR_NOWIFI, NERR_HTTP, NERR_JSON, NERR_MEM, NERR_EMPTY };
+static volatile bool     gNewsBusy   = false;
+static volatile bool     gNewsResult = false;   // la tarea dejo algo que consumir
+static volatile uint8_t  gNewsErr    = NERR_NONE;
+static volatile int      gNewsHttp   = 0;       // codigo HTTP del ultimo intento
+static NewsItem gNewsStage[NEWS_MAX_RESULTS];   // traspaso tarea -> loop
+static volatile uint8_t  gNewsStageN = 0;
+static uint8_t  gNewsFails   = 0;
+static uint32_t gNewsNextMs  = 0;
+static uint32_t gNewsLastOk  = 0;               // epoca UTC de la ultima consulta correcta
+static uint8_t  gNewsCatCur  = 0;               // categoria que toca consultar (rotacion)
+static bool     gNewsTestReq = false;           // la consulta en curso es "Probar conexion"
+static uint8_t  gNewsTestRes = 0;               // 0 sin probar, 1 correcta, 2 fallida
+
+#define NEWS_NVS_NS "flexos_news"
+
+// -------------------------------------------------------------
+//  Huella de un ID. FNV-1a de 32 bits: una multiplicacion y un
+//  XOR por caracter, sin tablas.
+// -------------------------------------------------------------
+static uint32_t newsHash(const char* s){
+  uint32_t h = 2166136261u;
+  if(!s) return h;
+  while(*s){ h ^= (uint8_t)*s++; h *= 16777619u; }
+  return h ? h : 1u;                 // 0 se reserva para "ranura vacia"
+}
+
+// -------------------------------------------------------------
+//  ENMASCARADO DE LA CLAVE
+//  La clave NUNCA se muestra entera ni se imprime por el puerto
+//  serie. En pantalla se dibujan 8 puntos y los 4 ultimos
+//  caracteres (••••••••ABCD). Se dibujan como circulos, no como
+//  un caracter de fuente, para que se vea igual en cualquier
+//  tamano y no dependa de que la fuente tenga el glifo.
+// -------------------------------------------------------------
+static void newsDrawMasked(int x, int y, const char* secret, uint16_t col){
+  int n = secret ? (int)strlen(secret) : 0;
+  if(n == 0){ drawText(x, y, "(sin configurar)", 1, col); return; }
+  for(int i = 0; i < 8; i++) fillCircle(x + 4 + i * 10, y + 6, 3, col);
+  int shown = n >= 4 ? 4 : n;
+  char tail[6];
+  memcpy(tail, secret + (n - shown), shown); tail[shown] = 0;
+  drawText(x + 86, y, tail, 1, col);
+}
+
+// -------------------------------------------------------------
+//  PERSISTENCIA
+//  Tres claves independientes en el namespace "flexos_news":
+//  "cfg" (configuracion + credenciales), "center" (el centro de
+//  noticias) y "seen" (las huellas). Separadas a proposito:
+//  borrar credenciales no tiene por que borrar el historial.
+// -------------------------------------------------------------
+static void newsCfgDefaults(){
+  memset(&gNews, 0, sizeof(gNews));
+  gNews.cats     = 0x1F;              // las cinco categorias
+  gNews.freq     = NFREQ_1H;
+  gNews.maxNotif = 1;                 // por defecto: SOLO la mas relevante
+  gNews.enabled  = false;             // sin servicio configurado no se consulta nada
+  gNews.quietOn  = true;
+  gNews.quietFromIdx = 1;             // 22:00
+  gNews.quietToIdx   = 1;             // 07:00
+  snprintf(gNews.country, sizeof(gNews.country), "pe");
+}
+static void newsSaveCfg(){
+  Preferences p;
+  if(!p.begin(NEWS_NVS_NS, false)){ gNewsNvsOk = false; return; }
+  gNewsNvsOk = true;
+  p.putBytes("cfg", &gNews, sizeof(gNews));
+  p.end();
+}
+static void newsSaveCenter(){
+  Preferences p;
+  if(!p.begin(NEWS_NVS_NS, false)){ gNewsNvsOk = false; return; }
+  gNewsNvsOk = true;
+  p.putBytes("center", gNewsCenter, sizeof(gNewsCenter));
+  p.putUInt("ccount", gNewsCount);
+  p.putBytes("seen", gNewsSeen, sizeof(gNewsSeen));
+  p.putUInt("seenn", gNewsSeenN);
+  p.putUInt("seenh", gNewsSeenHead);
+  p.end();
+}
+static void newsLoad(){
+  newsCfgDefaults();
+  Preferences p;
+  if(!p.begin(NEWS_NVS_NS, true)){
+    gNewsNvsOk = false;
+    Serial.println(F("[NEWS] NVS no disponible -> sin configuracion persistente"));
+    return;
+  }
+  gNewsNvsOk = true;
+  NewsCfg tmp;
+  if(p.getBytes("cfg", &tmp, sizeof(tmp)) == sizeof(tmp)){
+    gNews = tmp;
+    // Saneado: los valores fuera de rango de un NVS de otra version no pueden
+    // desbordar nada mas abajo.
+    gNews.url[NEWS_URL_MAX - 1] = 0;
+    gNews.key[NEWS_KEY_MAX - 1] = 0;
+    gNews.country[NEWS_CTRY_MAX - 1] = 0;
+    if(gNews.freq >= NFREQ_N) gNews.freq = NFREQ_1H;
+    if(gNews.maxNotif < 1) gNews.maxNotif = 1;
+    if(gNews.maxNotif > 3) gNews.maxNotif = 3;
+    gNews.cats &= 0x1F;
+    if(gNews.quietFromIdx > 3) gNews.quietFromIdx = 1;
+    if(gNews.quietToIdx   > 3) gNews.quietToIdx   = 1;
+  }
+  if(p.getBytes("center", gNewsCenter, sizeof(gNewsCenter)) == sizeof(gNewsCenter)){
+    gNewsCount = (uint8_t)p.getUInt("ccount", 0);
+    if(gNewsCount > NEWS_CENTER_MAX) gNewsCount = NEWS_CENTER_MAX;
+    gNewsUnread = 0;
+    for(int i = 0; i < gNewsCount; i++){
+      gNewsCenter[i].title[NEWS_TITLE_MAX - 1] = 0;
+      gNewsCenter[i].source[NEWS_SRC_MAX - 1]  = 0;
+      if(gNewsCenter[i].unread) gNewsUnread++;
+    }
+  } else gNewsCount = 0;
+  if(p.getBytes("seen", gNewsSeen, sizeof(gNewsSeen)) == sizeof(gNewsSeen)){
+    gNewsSeenN    = (uint8_t)p.getUInt("seenn", 0);
+    gNewsSeenHead = (uint8_t)p.getUInt("seenh", 0);
+    if(gNewsSeenN > NEWS_SEEN_MAX)    gNewsSeenN = NEWS_SEEN_MAX;
+    if(gNewsSeenHead >= NEWS_SEEN_MAX) gNewsSeenHead = 0;
+  } else { gNewsSeenN = 0; gNewsSeenHead = 0; }
+}
+// Borrado de credenciales. Deja la configuracion de PRESENTACION (categorias,
+// frecuencia, horario) y se lleva por delante lo sensible: URL y clave. Ademas
+// APAGA el servicio, para que no quede consultando a ninguna parte.
+static void newsWipeCreds(){
+  memset(gNews.url, 0, sizeof(gNews.url));
+  memset(gNews.key, 0, sizeof(gNews.key));
+  gNews.enabled = false;
+  gNewsTestRes  = 0;
+  gNewsErr      = NERR_NOCFG;
+  gNewsNextMs   = 0;
+  gNewsFails    = 0;
+  newsSaveCfg();
+  Serial.println(F("[NEWS] credenciales borradas"));   // sin decir cuales eran
+}
+
+static bool newsConfigured(){ return gNews.url[0] != 0; }
+
+// ---- Historial de vistos ----
+static bool newsSeenHas(uint32_t h){
+  for(int i = 0; i < gNewsSeenN; i++) if(gNewsSeen[i] == h) return true;
+  return false;
+}
+static void newsSeenAdd(uint32_t h){
+  if(h == 0 || newsSeenHas(h)) return;
+  gNewsSeen[gNewsSeenHead] = h;
+  gNewsSeenHead = (uint8_t)((gNewsSeenHead + 1) % NEWS_SEEN_MAX);
+  if(gNewsSeenN < NEWS_SEEN_MAX) gNewsSeenN++;
+}
+
+// ---- Centro de noticias ----
+static void newsCenterPush(const NewsItem* it){
+  if(gNewsCount >= NEWS_CENTER_MAX){          // desplaza: la mas vieja se cae
+    memmove(&gNewsCenter[1], &gNewsCenter[0], sizeof(NewsItem) * (NEWS_CENTER_MAX - 1));
+    if(gNewsCenter[NEWS_CENTER_MAX - 1].unread && gNewsUnread > 0) gNewsUnread--;
+    gNewsCount = NEWS_CENTER_MAX - 1;
+  } else if(gNewsCount > 0){
+    memmove(&gNewsCenter[1], &gNewsCenter[0], sizeof(NewsItem) * gNewsCount);
+  }
+  gNewsCenter[0] = *it;
+  gNewsCenter[0].unread = true;
+  gNewsCount++;
+  if(gNewsUnread < 255) gNewsUnread++;
+}
+static void newsMarkAllRead(){
+  for(int i = 0; i < gNewsCount; i++) gNewsCenter[i].unread = false;
+  gNewsUnread = 0;
+  newsSaveCenter();
+}
+static int  newsUnreadCount(){ return gNewsUnread; }
+static const char* newsTopTitle(){  return gNewsCount ? gNewsCenter[0].title  : NULL; }
+static const char* newsTopSource(){ return gNewsCount ? gNewsCenter[0].source : NULL; }
+
+// ---- Horario silencioso ----
+// Compara el minuto del dia LOCAL con el intervalo elegido, tratando bien el
+// caso que cruza la medianoche (22:00 -> 07:00).
+static bool newsInQuiet(){
+  if(!gNews.quietOn) return false;
+  int from = NEWS_QUIET_FROM[gNews.quietFromIdx & 3];
+  int to   = NEWS_QUIET_TO[gNews.quietToIdx & 3];
+  int now  = rtcH * 60 + rtcMin;
+  if(from == to) return false;
+  if(from < to) return now >= from && now < to;
+  return now >= from || now < to;                 // cruza medianoche
+}
+
+// #############################################################
+// ##  LECTOR DE JSON ACOTADO  (sin libreria externa)
+// ##  ------------------------------------------------------
+// ##  Mismo enfoque que el manifiesto del OTA: escaneo directo
+// ##  sobre el buffer, sin construir ningun arbol en memoria. Aqui
+// ##  ademas la busqueda de claves es CONSCIENTE DE LA PROFUNDIDAD,
+// ##  para que "title" dentro de un subobjeto ("source":{...}) no
+// ##  se confunda con el "title" del articulo.
+// #############################################################
+static inline bool nWs(char c){ return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
+
+// Valor de "key" buscada SOLO a nivel 0 de [bs,be). Devuelve el primer
+// caracter del valor, o NULL.
+static const char* nVal(const char* bs, const char* be, const char* key){
+  if(!bs || !be || be <= bs) return NULL;
+  size_t kl = strlen(key);
+  int depth = 0; bool instr = false;
+  for(const char* p = bs; p < be; p++){
+    if(instr){
+      if(*p == '\\' && p + 1 < be){ p++; continue; }
+      if(*p == '"') instr = false;
+      continue;
+    }
+    if(*p == '"'){
+      if(depth == 0 && (size_t)(be - p) > kl + 1 &&
+         !strncmp(p + 1, key, kl) && p[1 + kl] == '"'){
+        const char* q = p + 2 + kl;
+        while(q < be && nWs(*q)) q++;
+        if(q < be && *q == ':'){
+          q++;
+          while(q < be && nWs(*q)) q++;
+          return q < be ? q : NULL;
+        }
+      }
+      instr = true;
+      continue;
+    }
+    if(*p == '{' || *p == '[') depth++;
+    else if(*p == '}' || *p == ']'){ if(depth == 0) break; depth--; }
+  }
+  return NULL;
+}
+// Copia una cadena JSON (con escapes) a un buffer acotado. Devuelve false si
+// no habia una cadena o si quedo sin cerrar (JSON corrupto).
+static bool nStr(const char* p, const char* be, char* out, size_t cap){
+  if(!p || !be || p >= be || *p != '"' || cap == 0) return false;
+  p++; size_t n = 0;
+  while(p < be && *p != '"'){
+    char c = *p++;
+    if(c == '\\' && p < be){
+      char e = *p++;
+      switch(e){
+        case 'n': case 'r': case 't': c = ' '; break;
+        case 'u': for(int i = 0; i < 4 && p < be; i++) p++; c = '?'; break;  // sin tabla Unicode
+        default:  c = e; break;                                             // \" \\ \/ ...
+      }
+    }
+    if(n + 1 < cap) out[n++] = c;
+  }
+  out[n] = 0;
+  return (p < be && *p == '"');
+}
+// Cadena de la primera clave que exista de una lista de sinonimos. Si el valor
+// es un OBJETO, se busca dentro su clave "name" (el caso de "source").
+static bool nStrAny(const char* bs, const char* be, const char* const* keys, int nk,
+                    char* out, size_t cap){
+  for(int i = 0; i < nk; i++){
+    const char* v = nVal(bs, be, keys[i]);
+    if(!v) continue;
+    if(*v == '"') return nStr(v, be, out, cap);
+    if(*v == '{'){
+      const char* ob = v + 1;
+      const char* oe = be;
+      int depth = 1; bool instr = false;
+      for(const char* q = v + 1; q < be; q++){
+        if(instr){ if(*q == '\\' && q + 1 < be){ q++; continue; } if(*q == '"') instr = false; continue; }
+        if(*q == '"'){ instr = true; continue; }
+        if(*q == '{') depth++;
+        else if(*q == '}'){ if(--depth == 0){ oe = q; break; } }
+      }
+      const char* nv = nVal(ob, oe, "name");
+      if(nv && *nv == '"') return nStr(nv, oe, out, cap);
+    }
+  }
+  return false;
+}
+static bool nBoolAny(const char* bs, const char* be, const char* const* keys, int nk){
+  for(int i = 0; i < nk; i++){
+    const char* v = nVal(bs, be, keys[i]);
+    if(v && !strncmp(v, "true", 4)) return true;
+  }
+  return false;
+}
+// Acota el contenido del objeto raiz. El buscador de claves trabaja a NIVEL 0
+// del rango que se le da, asi que hay que quitarle las llaves exteriores: si no,
+// todo el documento estaria a profundidad 1 y no encontraria nada.
+static void nTrimOuter(const char** bs, const char** be){
+  const char* p = *bs;
+  while(p < *be && nWs(*p)) p++;
+  if(p >= *be || *p != '{') return;
+  int depth = 0; bool instr = false;
+  for(const char* q = p; q < *be; q++){
+    if(instr){ if(*q == '\\' && q + 1 < *be){ q++; continue; } if(*q == '"') instr = false; continue; }
+    if(*q == '"'){ instr = true; continue; }
+    if(*q == '{') depth++;
+    else if(*q == '}'){ if(--depth == 0){ *bs = p + 1; *be = q; return; } }
+  }
+  *bs = p + 1;                       // objeto sin cerrar: se aprovecha lo que hay
+}
+// Acota un array [ ... ] que empieza en 'v'. as = tras '[', ae = en ']'.
+static bool nArrayAt(const char* v, const char* be, const char** as, const char** ae){
+  if(!v || v >= be || *v != '[') return false;
+  int depth = 0; bool instr = false;
+  for(const char* q = v; q < be; q++){
+    if(instr){ if(*q == '\\' && q + 1 < be){ q++; continue; } if(*q == '"') instr = false; continue; }
+    if(*q == '"'){ instr = true; continue; }
+    if(*q == '[' || *q == '{') depth++;
+    else if(*q == ']' || *q == '}'){ if(--depth == 0){ *as = v + 1; *ae = q; return true; } }
+  }
+  return false;                      // array sin cerrar -> JSON corrupto
+}
+// Acota el array de la primera clave que exista. as = tras '[', ae = en ']'.
+static bool nArrayAny(const char* bs, const char* be, const char* const* keys, int nk,
+                      const char** as, const char** ae){
+  for(int i = 0; i < nk; i++){
+    const char* v = nVal(bs, be, keys[i]);
+    if(nArrayAt(v, be, as, ae)) return true;
+  }
+  return false;
+}
+// Siguiente objeto { ... } del array, a partir de p. Devuelve NULL al acabar.
+static const char* nNextObj(const char* p, const char* ae, const char** os, const char** oe){
+  while(p < ae && *p != '{') p++;
+  if(p >= ae) return NULL;
+  int depth = 0; bool instr = false;
+  for(const char* q = p; q < ae; q++){
+    if(instr){ if(*q == '\\' && q + 1 < ae){ q++; continue; } if(*q == '"') instr = false; continue; }
+    if(*q == '"'){ instr = true; continue; }
+    if(*q == '{') depth++;
+    else if(*q == '}'){ if(--depth == 0){ *os = p + 1; *oe = q; return q + 1; } }
+  }
+  return NULL;                                   // llaves desbalanceadas -> se corta aqui
+}
+// Fecha ISO-8601 "2026-08-10T14:05:00Z" -> epoca UTC. Devuelve 0 si no encaja:
+// una fecha ilegible NO invalida la noticia, solo se queda sin fecha.
+static uint32_t newsParseWhen(const char* s){
+  if(!s) return 0;
+  int y = 0, mo = 0, d = 0, h = 0, mi = 0, sec = 0;
+  if(sscanf(s, "%4d-%2d-%2dT%2d:%2d:%2d", &y, &mo, &d, &h, &mi, &sec) < 5) return 0;
+  if(y < 2000 || y > 2100 || mo < 1 || mo > 12 || d < 1 || d > 31) return 0;
+  long days = clkDaysFromCivil(y, mo, d);
+  return (uint32_t)(days * 86400L + h * 3600L + mi * 60L + sec);
+}
+// Categoria por su etiqueta. Se acepta tanto el slug ("technology") como el
+// nombre en castellano; si no encaja nada, 0xFF = sin clasificar.
+static uint8_t newsParseCat(const char* s){
+  if(!s || !*s) return 0xFF;
+  for(int i = 0; i < NEWS_NCATS; i++){
+    if(!strcasecmp(s, NEWS_CAT_SLUG[i])) return (uint8_t)i;
+    if(!strcasecmp(s, NEWS_CAT_NAME[i])) return (uint8_t)i;
+  }
+  // Sinonimos frecuentes de las APIs publicas.
+  if(!strcasecmp(s, "general") || !strcasecmp(s, "nacional")) return 0;
+  if(!strcasecmp(s, "tech")) return 2;
+  if(!strcasecmp(s, "sport") || !strcasecmp(s, "deporte")) return 4;
+  return 0xFF;
+}
+
+// Rellena gNewsStage a partir del cuerpo JSON. Devuelve el numero de
+// articulos leidos (0 = el JSON no traia ninguno reconocible).
+static int newsParseBody(const char* buf, size_t len){
+  static const char* K_ARR[]  = { "articles", "items", "results", "data", "news" };
+  static const char* K_TIT[]  = { "title", "headline", "titulo" };
+  static const char* K_SRC[]  = { "source", "sourceName", "fuente" };
+  static const char* K_WHEN[] = { "publishedAt", "published", "date", "fecha" };
+  static const char* K_ID[]   = { "id", "guid", "uuid" };
+  static const char* K_CAT[]  = { "category", "categoria", "section" };
+  static const char* K_IMP[]  = { "important", "breaking", "urgent", "destacada" };
+  static const char* K_URL[]  = { "url", "link", "enlace" };
+
+  const char* bs = buf;
+  const char* be = buf + len;
+  const char* as = NULL; const char* ae = NULL;
+  // Raiz: normalmente un objeto con el array dentro. Algunos servicios
+  // devuelven el array PELADO, asi que ese caso tambien se acepta.
+  const char* raw = bs;
+  while(raw < be && nWs(*raw)) raw++;
+  if(raw < be && *raw == '['){
+    if(!nArrayAt(raw, be, &as, &ae)) return 0;
+  } else {
+    nTrimOuter(&bs, &be);
+    if(!nArrayAny(bs, be, K_ARR, 5, &as, &ae)) return 0;
+  }
+
+  int n = 0;
+  const char* p = as;
+  while(n < NEWS_MAX_RESULTS){
+    const char* os = NULL; const char* oe = NULL;
+    p = nNextObj(p, ae, &os, &oe);
+    if(!p) break;
+    NewsItem* it = &gNewsStage[n];
+    memset(it, 0, sizeof(*it));
+    if(!nStrAny(os, oe, K_TIT, 3, it->title, sizeof(it->title))) continue;   // sin titulo no hay noticia
+    if(!it->title[0]) continue;
+    if(!nStrAny(os, oe, K_SRC, 3, it->source, sizeof(it->source)))
+      snprintf(it->source, sizeof(it->source), "Noticias");
+    char tmp[NEWS_LINK_MAX];
+    if(nStrAny(os, oe, K_WHEN, 4, tmp, sizeof(tmp))) it->when = newsParseWhen(tmp);
+    if(nStrAny(os, oe, K_CAT, 3, tmp, sizeof(tmp))) it->cat = newsParseCat(tmp);
+    else                                            it->cat = 0xFF;
+    // ID: si el servicio no da uno, se deriva del titulo + la fuente. Es
+    // estable entre consultas, que es lo unico que necesita el historial.
+    if(nStrAny(os, oe, K_ID, 3, tmp, sizeof(tmp)) && tmp[0]) it->idHash = newsHash(tmp);
+    else {
+      char mix[NEWS_TITLE_MAX + NEWS_SRC_MAX + 2];
+      snprintf(mix, sizeof(mix), "%s|%s", it->title, it->source);
+      it->idHash = newsHash(mix);
+    }
+    it->important = nBoolAny(os, oe, K_IMP, 4);
+    // El ENLACE se lee (para validar el formato del servicio) pero no se
+    // guarda: 20 enlaces serian 3 KB mas de NVS y de RAM, y hoy no hay
+    // ninguna accion en la interfaz que lo consuma. Cuando la haya, aqui
+    // esta el punto donde engancharlo.
+    (void)nStrAny(os, oe, K_URL, 3, tmp, sizeof(tmp));
+    n++;
+  }
+  return n;
+}
+
+// #############################################################
+// ##  CONSULTA EN SEGUNDO PLANO
+// #############################################################
+// Sustituye los marcadores de la plantilla. Devuelve false si el resultado no
+// cabe en el buffer: mejor no consultar que consultar una URL truncada.
+static bool newsBuildUrl(char* out, size_t cap, uint8_t catIdx){
+  size_t o = 0;
+  const char* p = gNews.url;
+  char nbuf[8];
+  snprintf(nbuf, sizeof(nbuf), "%d", NEWS_MAX_RESULTS);
+  while(*p){
+    const char* rep = NULL;
+    size_t skip = 0;
+    if(*p == '{'){
+      if(!strncmp(p, "{key}", 5))          { rep = gNews.key;     skip = 5; }
+      else if(!strncmp(p, "{country}", 9)) { rep = gNews.country; skip = 9; }
+      else if(!strncmp(p, "{category}", 10)){ rep = (catIdx < NEWS_NCATS) ? NEWS_CAT_SLUG[catIdx] : ""; skip = 10; }
+      else if(!strncmp(p, "{max}", 5))     { rep = nbuf;          skip = 5; }
+    }
+    if(rep){
+      size_t rl = strlen(rep);
+      if(o + rl >= cap) return false;
+      memcpy(out + o, rep, rl); o += rl; p += skip;
+    } else {
+      if(o + 1 >= cap) return false;
+      out[o++] = *p++;
+    }
+  }
+  out[o] = 0;
+  return o > 0;
+}
+
+static void newsTask(void*){
+  gNewsStageN = 0;
+  gNewsErr    = NERR_NONE;
+  gNewsHttp   = 0;
+
+  char* url = (char*)heap_caps_malloc(NEWS_URL_MAX + NEWS_KEY_MAX + 64, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  char* buf = (char*)heap_caps_malloc(NEWS_HTTP_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(!url || !buf){
+    gNewsErr = NERR_MEM;
+  } else if(!newsBuildUrl(url, NEWS_URL_MAX + NEWS_KEY_MAX + 64, gNewsCatCur)){
+    gNewsErr = NERR_NOCFG;
+  } else if(WiFi.status() != WL_CONNECTED){
+    gNewsErr = NERR_NOWIFI;
+  } else {
+    bool https = !strncmp(url, "https://", 8);
+    WiFiClientSecure sec;
+    WiFiClient       plain;
+    HTTPClient       http;
+    bool opened;
+    if(https){
+      // TLS SIN fijar certificado: el endpoint lo elige el usuario en tiempo
+      // de ejecucion, asi que no hay ninguna CA que se pueda incrustar aqui
+      // de antemano. Es una decision consciente y acotada: por este socket
+      // solo viajan titulares publicos y la clave que el propio usuario ha
+      // configurado. Para fijar una CA habria que anadirla tambien en Ajustes.
+      sec.setInsecure();
+      sec.setTimeout(NEWS_HTTP_TIMEOUT / 1000);
+      opened = http.begin(sec, url);
+    } else {
+      plain.setTimeout(NEWS_HTTP_TIMEOUT / 1000);
+      opened = http.begin(plain, url);
+    }
+    if(!opened){
+      gNewsErr = NERR_HTTP;
+    } else {
+      http.setTimeout(NEWS_HTTP_TIMEOUT);
+      http.setConnectTimeout(NEWS_HTTP_TIMEOUT);
+      http.useHTTP10(true);                       // sin trozos: el cuerpo llega de una pieza
+      http.addHeader("Accept", "application/json");
+      // La clave solo va en la cabecera si NO estaba ya puesta en la plantilla
+      // de la URL. Nunca se manda dos veces.
+      if(gNews.key[0] && !strstr(gNews.url, "{key}")) http.addHeader("X-Api-Key", gNews.key);
+      int code = http.GET();
+      gNewsHttp = code;
+      if(code != 200){
+        gNewsErr = NERR_HTTP;
+      } else {
+        int len = http.getSize();
+        WiFiClient* st = http.getStreamPtr();
+        size_t n = 0;
+        uint32_t t0 = millis();
+        while(st && n + 1 < NEWS_HTTP_MAX && (len < 0 || n < (size_t)len)){
+          int av = st->available();
+          if(av > 0){
+            size_t room = NEWS_HTTP_MAX - 1 - n;
+            int r = st->read((uint8_t*)buf + n, av > (int)room ? room : (size_t)av);
+            if(r > 0){ n += (size_t)r; t0 = millis(); }
+          } else {
+            if(!st->connected() && st->available() == 0) break;
+            if(millis() - t0 > NEWS_HTTP_TIMEOUT) break;
+            vTaskDelay(pdMS_TO_TICKS(10));        // cede CPU: nada de espera activa
+          }
+        }
+        buf[n] = 0;
+        int got = newsParseBody(buf, n);
+        if(got <= 0) gNewsErr = (n == 0) ? NERR_HTTP : NERR_JSON;
+        else         gNewsStageN = (uint8_t)got;
+      }
+      http.end();                                 // cierra el socket pase lo que pase
+    }
+  }
+  if(url) heap_caps_free(url);
+  if(buf) heap_caps_free(buf);                    // el cuerpo JSON no sobrevive a la consulta
+
+  gNewsResult = true;
+  gNewsBusy   = false;
+  vTaskDelete(NULL);
+}
+
+// Lanza una consulta. NO bloquea. userAsked = "Probar conexion" o
+// "Buscar ahora": salta la espera progresiva y el modo Manual.
+static void newsRequest(bool userAsked, bool isTest){
+#if FLEXOS_ENABLE_WIFI
+  if(gNewsBusy) return;
+  if(!newsConfigured()){ gNewsErr = NERR_NOCFG; if(isTest) gNewsTestRes = 2; return; }
+  if(gAirplane || WiFi.status() != WL_CONNECTED){
+    gNewsErr = NERR_NOWIFI; if(isTest) gNewsTestRes = 2; return;
+  }
+  if(!userAsked){
+    if(!gNews.enabled) return;
+    if(gNews.freq == NFREQ_MANUAL) return;
+    if(gNewsNextMs && (int32_t)(millis() - gNewsNextMs) < 0) return;
+  }
+  gNewsTestReq = isTest;
+  gNewsBusy    = true;
+  gNewsResult  = false;
+  if(xTaskCreatePinnedToCore(newsTask, "news", 6144, NULL, 1, NULL, 1) != pdPASS){
+    gNewsBusy = false; gNewsErr = NERR_MEM;
+    if(isTest) gNewsTestRes = 2;
+  }
+#else
+  (void)userAsked; (void)isTest;
+#endif
+}
+
+// ---- Relevancia ----
+// Criterio, en este orden: las marcadas como importantes por el servicio, las
+// de una categoria que el usuario tiene activada, y a igualdad la mas reciente
+// (y si no hay fecha, el orden en que las mando el servicio).
+static int newsScore(const NewsItem* it, int idx){
+  int s = 0;
+  if(it->important) s += 1000;
+  if(it->cat < NEWS_NCATS && (gNews.cats & (1 << it->cat))) s += 100;
+  s += (NEWS_MAX_RESULTS - idx);          // desempate por orden de llegada
+  return s;
+}
+
+// ---- Aviso emergente ----
+// Solo se muestra cuando es apropiado: escritorio desbloqueado, sin cortina,
+// sin Modo Edicion, fuera del horario silencioso y con la pantalla encendida.
+// Con una app abierta NO se interrumpe: la noticia se queda en el Centro y lo
+// unico que cambia es el contador discreto de la barra de estado.
+static bool newsPopupOk(){
+  if(newsInQuiet()) return false;
+  if(gSuspOn) return false;
+  if(gState != ST_HOME) return false;
+  if(qsPanelY != 0 || editMode) return false;
+  if(KIOSK_ON && kioskOn) return false;
+  return true;
+}
+static void newsAnnounce(const NewsItem* it){
+  DetectedModule m;
+  memset(&m, 0, sizeof(m));
+  m.type = MOD_NEWS;
+  m.active = true;
+  m.detectedAt = millis();
+  snprintf(m.name, sizeof(m.name), "%s", it->title);
+  if(it->cat < NEWS_NCATS) snprintf(m.sub, sizeof(m.sub), "%s - %s", it->source, NEWS_CAT_NAME[it->cat]);
+  else                     snprintf(m.sub, sizeof(m.sub), "%s", it->source);
+  notifPush(&m);
+}
+
+// Refresco en caliente de la insignia con una app abierta. Se define con el
+// resto de la insignia, al final del modulo.
+static void newsBadgeStamp();
+
+// ---- Consumo del resultado (ya en el contexto de loop) ----
+static void newsConsume(){
+  gNewsResult = false;
+  uint8_t got = gNewsStageN;
+  gNewsStageN = 0;
+
+  if(gNewsErr != NERR_NONE || got == 0){
+    if(gNewsErr == NERR_NONE) gNewsErr = NERR_EMPTY;
+    if(gNewsFails < 8) gNewsFails++;
+    if(gNewsTestReq) gNewsTestRes = 2;
+    // ESPERA PROGRESIVA. Un servicio caido, una clave mala o un JSON que no
+    // encaja no pueden convertirse en un martilleo cada minuto (ni en una
+    // lluvia de notificaciones): se dobla la espera hasta el techo de 1 h y el
+    // error se cuenta en Ajustes, no en la pantalla del usuario.
+    uint32_t wait = NEWS_BACKOFF_MIN << (gNewsFails > 0 ? (gNewsFails - 1) : 0);
+    if(wait > NEWS_BACKOFF_MAX || wait < NEWS_BACKOFF_MIN) wait = NEWS_BACKOFF_MAX;
+    gNewsNextMs = millis() + wait;
+    gNewsTestReq = false;
+    return;
+  }
+
+  gNewsFails = 0;
+  gNewsLastOk = clkNowUtc();
+  if(gNewsTestReq){ gNewsTestRes = 1; gNewsTestReq = false; }
+
+  // Rotacion de categoria para la SIGUIENTE consulta: una por vuelta, para que
+  // cada respuesta siga siendo pequena.
+  if(gNews.cats){
+    for(int k = 0; k < NEWS_NCATS; k++){
+      gNewsCatCur = (uint8_t)((gNewsCatCur + 1) % NEWS_NCATS);
+      if(gNews.cats & (1 << gNewsCatCur)) break;
+    }
+  }
+
+  // 1) descartar lo ya visto y quedarse solo con lo NUEVO
+  int nuevos[NEWS_MAX_RESULTS]; int nn = 0;
+  for(int i = 0; i < got; i++){
+    if(newsSeenHas(gNewsStage[i].idHash)) continue;
+    if(gNews.onlyImportant && !gNewsStage[i].important) { newsSeenAdd(gNewsStage[i].idHash); continue; }
+    nuevos[nn++] = i;
+  }
+  for(int i = 0; i < got; i++) newsSeenAdd(gNewsStage[i].idHash);
+
+  if(nn == 0){ gNewsNextMs = millis() + NEWS_FREQ_MS[gNews.freq]; newsSaveCenter(); return; }
+
+  // 2) ordenar por relevancia (seleccion directa: como mucho 5 elementos)
+  for(int a = 0; a < nn - 1; a++)
+    for(int b = a + 1; b < nn; b++)
+      if(newsScore(&gNewsStage[nuevos[b]], nuevos[b]) > newsScore(&gNewsStage[nuevos[a]], nuevos[a])){
+        int t = nuevos[a]; nuevos[a] = nuevos[b]; nuevos[b] = t;
+      }
+
+  // 3) TODAS las nuevas van al Centro persistente (de la menos a la mas
+  //    relevante, para que la mas relevante quede la primera de la lista).
+  for(int i = nn - 1; i >= 0; i--) newsCenterPush(&gNewsStage[nuevos[i]]);
+
+  // 4) aviso emergente: como mucho gNews.maxNotif (1 por defecto, 3 como tope)
+  //    y SOLO si el momento es apropiado. Si no lo es, la noticia no se pierde:
+  //    ya esta en el Centro y el contador de la barra lo refleja.
+  if(newsPopupOk()){
+    int avisos = gNews.maxNotif; if(avisos > nn) avisos = nn;
+    for(int i = 0; i < avisos; i++) newsAnnounce(&gNewsStage[nuevos[i]]);
+  }
+
+  gHomeDirty = true;                      // el widget de Noticias del escritorio cambia
+  // Refresco INMEDIATO del contador. Sin esto habria que esperar al siguiente
+  // cambio de minuto para ver que hay algo nuevo.
+  if(gState == ST_HOME && qsPanelY == 0 && !qsAnimOn && !editMode && !gSuspOn){
+    renderHome(); showHome();
+  } else {
+    newsBadgeStamp();
+  }
+  gNewsNextMs = millis() + NEWS_FREQ_MS[gNews.freq];
+  newsSaveCenter();
+}
+
+// Ritmo del servicio. Se llama desde loop() y solo compara relojes: aqui no
+// hay red, no hay JSON y no hay flash.
+static void newsTick(){
+#if FLEXOS_ENABLE_WIFI
+  if(gNewsResult){ newsConsume(); return; }
+  if(gNewsBusy) return;
+  if(!gNews.enabled || !newsConfigured()) return;
+  if(gNews.freq == NFREQ_MANUAL) return;
+  if(gAirplane || WiFi.status() != WL_CONNECTED) return;
+  if(gState != ST_HOME && gState != ST_LOCK && gState != ST_APP) return;   // aun arrancando
+  if(gNewsNextMs == 0){ gNewsNextMs = millis() + 4000; return; }           // margen tras enlazar
+  if((int32_t)(millis() - gNewsNextMs) < 0) return;
+  newsRequest(false, false);
+#endif
+}
+
+// ---- Textos de estado (Ajustes) ----
+static void newsStateText(char* out, size_t n){
+#if !FLEXOS_ENABLE_WIFI
+  snprintf(out, n, "Wi-Fi desactivado en este build");
+#else
+  if(!gNewsNvsOk){          snprintf(out, n, "Error: almacenamiento NVS no disponible"); return; }
+  if(!newsConfigured()){    snprintf(out, n, "Falta configurar el servicio"); return; }
+  if(gNewsBusy){            snprintf(out, n, "Consultando..."); return; }
+  if(!gNews.enabled){       snprintf(out, n, "Desactivado"); return; }
+  switch(gNewsErr){
+    case NERR_NOWIFI: snprintf(out, n, gAirplane ? "Modo avi\xC3\xB3n activo" : "Sin conexi\xC3\xB3n Wi-Fi"); break;
+    // El codigo HTTP SI se muestra (es diagnostico util y no revela nada);
+    // la clave y la URL, jamas.
+    case NERR_HTTP:   snprintf(out, n, "Error del servicio (HTTP %d)", gNewsHttp); break;
+    case NERR_JSON:   snprintf(out, n, "Respuesta no reconocida (JSON)"); break;
+    case NERR_MEM:    snprintf(out, n, "Sin memoria para la consulta"); break;
+    case NERR_EMPTY:  snprintf(out, n, "El servicio no devolvi\xC3\xB3 noticias"); break;
+    case NERR_NOCFG:  snprintf(out, n, "Falta configurar el servicio"); break;
+    default:
+      if(gNewsLastOk >= FLEXOS_CLK_MIN_EPOCH){
+        long local = (long)gNewsLastOk + FLEXOS_TZ_OFFSET_SEC;
+        long rem = local % 86400L; if(rem < 0) rem += 86400L;
+        snprintf(out, n, "Correcto - %02d:%02d", (int)(rem / 3600L), (int)((rem % 3600L) / 60L));
+      } else snprintf(out, n, "Activado - a\xC3\xBAn sin consultar");
+      break;
+  }
+#endif
+}
+
+// #############################################################
+// ##  AJUSTES > RED E INTERNET > NOTICIAS   (ST_NEWS)
+// ##  ------------------------------------------------------
+// ##  Aqui se escribe TODO lo que el firmware no trae: endpoint,
+// ##  clave, pais, categorias, frecuencia, tope de avisos, filtro
+// ##  de importantes y horario silencioso. Con el teclado tactil
+// ##  del sistema -- el mismo de la clave del Wi-Fi -- para no
+// ##  inventar un segundo teclado.
+// ##
+// ##  La clave se muestra SIEMPRE enmascarada (ocho puntos y los
+// ##  cuatro ultimos caracteres). Al editarla el campo arranca
+// ##  VACIO: no se vuelca la clave guardada a la pantalla ni
+// ##  siquiera para corregirla; se reemplaza entera o se deja
+// ##  como estaba.
+// #############################################################
+#define NEWS_TOP     116
+#define NEWS_BOT     (SCR_H - 24)
+#define NEWS_ROW_MAX 20
+
+enum { NP_MAIN = 0, NP_CATS, NP_EDIT };
+enum { NEF_URL = 0, NEF_KEY, NEF_CTRY };
+
+static int  newsPage = NP_MAIN, newsField = NEF_URL;
+static int  newsScroll = 0, newsContentH = 0;
+static int  newsRowY0[NEWS_ROW_MAX], newsRowY1[NEWS_ROW_MAX], newsRowN = 0;
+static int  newsDragY0 = 0, newsDragS0 = 0;
+static bool newsDragging = false;
+static char newsEdBuf[NEWS_URL_MAX];
+static bool newsSecretRow[NEWS_ROW_MAX];      // esta fila pinta la clave enmascarada
+
+static void newsRender();
+static void newsRenderList();
+
+// Fila de la lista. secret = el valor es la clave y se dibuja enmascarada.
+static int newsRow(int y, const char* title, const char* val, bool chevron, bool secret, uint16_t tint){
+  int rh = 62, x = 12, w = SCR_W - 24;
+  if(newsRowN < NEWS_ROW_MAX){
+    newsRowY0[newsRowN] = y; newsRowY1[newsRowN] = y + rh;
+    newsSecretRow[newsRowN] = secret; newsRowN++;
+  }
+  if(uiGlass) drawGlassCardFlat(x, y, w, rh - 8, 12, TH_GLASS, PAGE_BG);
+  else        fillRoundRect(x, y, w, rh - 8, 12, TH_SURF);
+  drawTextClip(x + 16, y + 8, title, 2, tint ? tint : SET_TXT_HI, x + w - 28);
+  if(secret) newsDrawMasked(x + 16, y + 34, gNews.key, SET_TXT_LO);
+  else if(val) drawTextClip(x + 16, y + 32, val, 1, SET_TXT_LO, x + w - 28);
+  if(chevron){
+    int chx = x + w - 18, chy = y + (rh - 8) / 2;
+    strokeSegAA(chx - 3, chy - 6, chx + 3, chy, 2.0f, SET_CHEV);
+    strokeSegAA(chx + 3, chy, chx - 3, chy + 6, 2.0f, SET_CHEV);
+  }
+  return y + rh;
+}
+static int newsSection(int y, const char* t){ drawText(16, y, t, 2, SET_TXT_HI); return y + 30; }
+static const char* newsOnOff(bool b){ return b ? "Activado" : "Desactivado"; }
+
+// Resumen de las categorias activas, recortado al ancho de la fila.
+static void newsCatsSummary(char* out, size_t n){
+  if(!gNews.cats){ snprintf(out, n, "Ninguna - no se consultara nada"); return; }
+  out[0] = 0;
+  for(int i = 0; i < NEWS_NCATS; i++){
+    if(!(gNews.cats & (1 << i))) continue;
+    if(out[0]) strncat(out, ", ", n - strlen(out) - 1);
+    strncat(out, NEWS_CAT_NAME[i], n - strlen(out) - 1);
+  }
+}
+
+static void newsContent(){
+  newsRowN = 0;
+  int y = NEWS_TOP - newsScroll;
+  char v[96];
+  if(newsPage == NP_CATS){
+    for(int i = 0; i < NEWS_NCATS; i++)
+      y = newsRow(y, NEWS_CAT_NAME[i], newsOnOff((gNews.cats & (1 << i)) != 0), false, false, 0);
+    y += 8;
+    drawTextClip(16, y, "Cada consulta pide UNA categoria, rotando entre las", 1, SET_TXT_MUTE, SCR_W - 16); y += 18;
+    drawTextClip(16, y, "activas. Asi cada respuesta sigue siendo pequena.", 1, SET_TXT_MUTE, SCR_W - 16); y += 24;
+  } else {
+    newsStateText(v, sizeof(v));
+    y = newsRow(y, "Estado del servicio", v, false, false, 0);
+    snprintf(v, sizeof(v), "%d en el centro - %d sin leer", gNewsCount, gNewsUnread);
+    y = newsRow(y, "Centro de noticias", v, true, false, 0);
+
+    y += 6; y = newsSection(y, "Servicio");
+    y = newsRow(y, "Noticias activadas", newsOnOff(gNews.enabled), false, false, 0);
+    y = newsRow(y, "URL del servicio", gNews.url[0] ? gNews.url : "(sin configurar)", true, false, 0);
+    y = newsRow(y, "Clave o token", NULL, true, true, 0);
+    y = newsRow(y, "Pa\xC3\xADs o regi\xC3\xB3n", gNews.country[0] ? gNews.country : "(sin configurar)", true, false, 0);
+    newsCatsSummary(v, sizeof(v));
+    y = newsRow(y, "Categor\xC3\xAD" "as", v, true, false, 0);
+
+    y += 6; y = newsSection(y, "Avisos");
+    y = newsRow(y, "Frecuencia", NEWS_FREQ_NAME[gNews.freq], false, false, 0);
+    snprintf(v, sizeof(v), "%d por consulta (m\xC3\xA1ximo 3)", gNews.maxNotif);
+    y = newsRow(y, "M\xC3\xA1ximo de notificaciones", v, false, false, 0);
+    y = newsRow(y, "Solo importantes", newsOnOff(gNews.onlyImportant), false, false, 0);
+    y = newsRow(y, "Horario silencioso", newsOnOff(gNews.quietOn), false, false, 0);
+    snprintf(v, sizeof(v), "%02d:00", NEWS_QUIET_FROM[gNews.quietFromIdx & 3] / 60);
+    y = newsRow(y, "Silencio desde", v, false, false, 0);
+    snprintf(v, sizeof(v), "%02d:00", NEWS_QUIET_TO[gNews.quietToIdx & 3] / 60);
+    y = newsRow(y, "Silencio hasta", v, false, false, 0);
+
+    y += 6; y = newsSection(y, "Mantenimiento");
+    const char* tr = gNewsBusy ? "Consultando..."
+                   : gNewsTestRes == 1 ? "\xC3\x9Altima prueba: correcta"
+                   : gNewsTestRes == 2 ? "\xC3\x9Altima prueba: fallida"
+                   : "Consulta el servicio ahora mismo";
+    y = newsRow(y, "Probar conexi\xC3\xB3n", tr, false, false, 0);
+    y = newsRow(y, "Borrar credenciales", "Borra la URL y la clave de NVS", false, false, TH_DANGER);
+
+    y += 10;
+    drawTextClip(16, y, "La URL admite {key} {country} {category} {max}.", 1, SET_TXT_MUTE, SCR_W - 16); y += 18;
+    drawTextClip(16, y, "Nada de esto se guarda en el firmware: solo en NVS.", 1, SET_TXT_MUTE, SCR_W - 16); y += 24;
+  }
+  newsContentH = (y + newsScroll) - NEWS_TOP + 20;
+}
+
+// ---- Editor de un campo (con el teclado del sistema) ----
+static const char* newsFieldTitle(){
+  return newsField == NEF_URL ? "URL del servicio"
+       : newsField == NEF_KEY ? "Clave o token"
+                              : "Pa\xC3\xADs o regi\xC3\xB3n";
+}
+static void newsAppendField(const char* s){
+  int cap = newsField == NEF_URL ? NEWS_URL_MAX : newsField == NEF_KEY ? NEWS_KEY_MAX : NEWS_CTRY_MAX;
+  int L = strlen(newsEdBuf), sl = strlen(s);
+  if(L + sl >= cap - 1) return;
+  memcpy(newsEdBuf + L, s, sl); newsEdBuf[L + sl] = 0;
+}
+static void newsBackField(){
+  int L = strlen(newsEdBuf);
+  if(L <= 0) return;
+  int q = L - 1; while(q > 0 && (newsEdBuf[q] & 0xC0) == 0x80) q--;   // retrocede un caracter UTF-8 entero
+  newsEdBuf[q] = 0;
+}
+static void newsCommitField(){
+  if(newsField == NEF_KEY){
+    // Campo vacio = "no tocar la clave". Asi salir del editor sin escribir
+    // nada no borra por accidente una clave que si estaba puesta.
+    if(newsEdBuf[0]) snprintf(gNews.key, sizeof(gNews.key), "%s", newsEdBuf);
+  } else if(newsField == NEF_URL){
+    snprintf(gNews.url, sizeof(gNews.url), "%s", newsEdBuf);
+    if(!gNews.url[0]) gNews.enabled = false;      // sin URL no hay servicio que activar
+  } else {
+    snprintf(gNews.country, sizeof(gNews.country), "%s", newsEdBuf);
+  }
+  memset(newsEdBuf, 0, sizeof(newsEdBuf));        // el buffer de trabajo no retiene la clave
+  gNewsTestRes = 0;
+  gNewsFails = 0; gNewsNextMs = 0;                // configuracion nueva: se reintenta ya
+  newsSaveCfg();
+}
+static void newsEditOpen(int field){
+  newsField = field;
+  memset(newsEdBuf, 0, sizeof(newsEdBuf));
+  // La URL y el pais se precargan para poder corregirlos. LA CLAVE NO: nunca
+  // se vuelca a la pantalla, ni siquiera para editarla.
+  if(field == NEF_URL)       snprintf(newsEdBuf, sizeof(newsEdBuf), "%s", gNews.url);
+  else if(field == NEF_CTRY) snprintf(newsEdBuf, sizeof(newsEdBuf), "%s", gNews.country);
+  mapaActivo = LAYOUT_ES; kbLangEs = true; kbShift = false;
+  kbExtrasOn = false; kbApplySize(); kbMtSurfaceReset();
+  newsPage = NP_EDIT;
+  newsRender();
+}
+static void newsDrawEditor(){
+  drawText(52, 20, newsFieldTitle(), 3, SET_TXT_HI);
+  int bx = 16, by = 84, bw = SCR_W - 32, bh = 56;
+  if(uiGlass) drawGlassCardFlat(bx, by, bw, bh, 12, TH_GLASS, PAGE_BG);
+  else        fillRoundRect(bx, by, bw, bh, 12, TH_SURF);
+  drawRoundRect(bx, by, bw, bh, 12, TH_BORDER);
+  if(newsField == NEF_KEY){
+    // Mientras se teclea la clave se muestran puntos, uno por caracter (hasta
+    // 24): confirma que el teclado responde sin ensenar el secreto.
+    int n = utf8Count(newsEdBuf); if(n > 24) n = 24;
+    if(n == 0) drawText(bx + 14, by + 20, "Escribe la clave...", 1, TH_MUTE);
+    for(int i = 0; i < n; i++) fillCircle(bx + 18 + i * 16, by + bh / 2, 5, TH_PRIM);
+  } else {
+    if(!newsEdBuf[0]) drawText(bx + 14, by + 20, newsField == NEF_URL ? "https://..." : "pe", 1, TH_MUTE);
+    else              drawTextClip(bx + 14, by + 18, newsEdBuf, 1, SET_TXT_HI, bx + bw - 14);
+  }
+  if(newsField == NEF_KEY)
+    drawTextClip(16, by + bh + 8, "Se guarda en NVS. Nunca se muestra entera.", 1, SET_TXT_MUTE, SCR_W - 16);
+  else if(newsField == NEF_URL)
+    drawTextClip(16, by + bh + 8, "Marcadores: {key} {country} {category} {max}", 1, SET_TXT_MUTE, SCR_W - 16);
+  // El mismo teclado del sistema (misma geometria y mismos colores).
+  kbPaintPanel(KB_Y - 4, kbColPanel());
+  int fs = kbFontSize();
+  for(int r = 0; r < KB_ROWS; r++) for(int c = 0; c < KB_COLS; c++){
+    int x = KB_X + c * (KB_KW + KB_GAP), y = KB_Y + r * (KB_KH + KB_GAP);
+    const char* k = mapaActivo[r][c];
+    char u[6];
+    if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ u[0] = (char)(k[0] - 32); u[1] = 0; k = u; }
+    kbPaintKey(x, y, KB_KW, KB_KH, k, fs, kbColKey(), kbColKeyTxt(), false);
+  }
+  int fy = kbFuncY();
+  const char* lb[KB_FKEYS] = { "shift", kbLayerLabel(), kbLangEs ? "ES" : "EN", "espacio", "<-", "OK" };
+  for(int i = 0; i < KB_FKEYS; i++) kbFKey(kbFKeyX(i), fy, kbFKeyW(i), lb[i], (i == 0) && kbShift);
+}
+
+static void newsPaint(){
+  fillRect(0, 0, SCR_W, SCR_H, PAGE_BG);
+  strokeSegAA(30, 40, 18, 32, 2.4f, SET_TXT_HI);            // flecha de volver
+  strokeSegAA(18, 32, 30, 24, 2.4f, SET_TXT_HI);
+  if(newsPage == NP_EDIT){ newsDrawEditor(); return; }
+  drawText(52, 20, newsPage == NP_CATS ? "Categor\xC3\xAD" "as" : "Noticias", 3, SET_TXT_HI);
+  if(newsPage == NP_MAIN)
+    drawTextClip(52, 62, "Servicio configurable - nada viene de f\xC3\xA1" "brica", 1, SET_TXT_LO, SCR_W - 12);
+  int c0 = gClipY0, c1 = gClipY1;
+  gClipY0 = NEWS_TOP - 8; gClipY1 = NEWS_BOT;
+  newsContent();
+  gClipY0 = c0; gClipY1 = c1;
+}
+// Se compone en bbuf y se publica de una vez: el cuadro llega entero al panel.
+static void newsRender(){
+  setBuf(bbuf);
+  newsPaint();
+  present(0, SCR_H - 1);
+  setBuf(fb);
+}
+static void newsRenderList(){
+  setBuf(bbuf);
+  fillRect(0, NEWS_TOP - 10, SCR_W, NEWS_BOT - (NEWS_TOP - 10), PAGE_BG);
+  int c0 = gClipY0, c1 = gClipY1;
+  gClipY0 = NEWS_TOP - 10; gClipY1 = NEWS_BOT;
+  newsContent();
+  gClipY0 = c0; gClipY1 = c1;
+  present(NEWS_TOP - 10, NEWS_BOT);
+  setBuf(fb);
+}
+static void newsSettingsEnter(){
+  newsPage = NP_MAIN; newsScroll = 0; newsDragging = false;
+  memset(newsEdBuf, 0, sizeof(newsEdBuf));
+  gState = ST_NEWS;
+  newsRender();
+}
+static void newsSettingsExit(){
+  memset(newsEdBuf, 0, sizeof(newsEdBuf));   // el buffer de edicion no sobrevive a la pantalla
+  gState = ST_APP;
+  settingsRender();
+}
+// Accion al tocar la fila idx de la pagina principal.
+static void newsRowAction(int idx){
+  switch(idx){
+    case 0: return;                                             // estado: informativa
+    case 1: newsMarkAllRead(); break;                           // Centro: marcar todo leido
+    case 2:
+      if(!newsConfigured()) return;                             // sin URL no hay nada que activar
+      gNews.enabled = !gNews.enabled;
+      gNewsFails = 0; gNewsNextMs = 0;
+      newsSaveCfg();
+      break;
+    case 3: newsEditOpen(NEF_URL);  return;
+    case 4: newsEditOpen(NEF_KEY);  return;
+    case 5: newsEditOpen(NEF_CTRY); return;
+    case 6: newsPage = NP_CATS; newsScroll = 0; newsRender(); return;
+    case 7: gNews.freq = (uint8_t)((gNews.freq + 1) % NFREQ_N); gNewsNextMs = 0; newsSaveCfg(); break;
+    case 8: gNews.maxNotif = (uint8_t)(gNews.maxNotif >= 3 ? 1 : gNews.maxNotif + 1); newsSaveCfg(); break;
+    case 9: gNews.onlyImportant = !gNews.onlyImportant; newsSaveCfg(); break;
+    case 10: gNews.quietOn = !gNews.quietOn; newsSaveCfg(); break;
+    case 11: gNews.quietFromIdx = (uint8_t)((gNews.quietFromIdx + 1) & 3); newsSaveCfg(); break;
+    case 12: gNews.quietToIdx   = (uint8_t)((gNews.quietToIdx   + 1) & 3); newsSaveCfg(); break;
+    case 13: gNewsTestRes = 0; newsRequest(true, true); break;  // Probar conexion
+    case 14: newsWipeCreds(); break;                            // Borrar credenciales
+    default: return;
+  }
+  newsRender();
+}
+static void newsSettingsTick(){
+  // ---- Editor de texto ----
+  if(newsPage == NP_EDIT){
+    if(!T.tap) return;
+    if(T.x < 48 && T.y < 52){                          // volver SIN guardar
+      memset(newsEdBuf, 0, sizeof(newsEdBuf));
+      newsPage = NP_MAIN; newsRender(); return;
+    }
+    int fi = kbFRowHit(T.x, T.y);
+    if(fi >= 0){
+      if(fi == 0) kbShift = !kbShift;
+      else if(fi == 1) mapaActivo = (mapaActivo == LAYOUT_NUM) ? LAYOUT_EMOJI : (mapaActivo == LAYOUT_EMOJI) ? (kbLangEs ? LAYOUT_ES : LAYOUT_EN) : LAYOUT_NUM;
+      else if(fi == 2){ kbLangEs = !kbLangEs; if(mapaActivo == LAYOUT_ES || mapaActivo == LAYOUT_EN) mapaActivo = kbLangEs ? LAYOUT_ES : LAYOUT_EN; }
+      else if(fi == 3) newsAppendField(" ");
+      else if(fi == 4) newsBackField();
+      else { newsCommitField(); newsPage = NP_MAIN; newsRender(); return; }   // OK
+      newsRender(); return;
+    }
+    int cell = kbCellAt(T.x, T.y);
+    if(cell >= 0){
+      const char* k = mapaActivo[cell / KB_COLS][cell % KB_COLS];
+      if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ char u[2] = { (char)(k[0] - 32), 0 }; newsAppendField(u); kbShift = false; }
+      else newsAppendField(k);
+      newsRender();
+    }
+    return;
+  }
+
+  if(T.tap && T.x < 48 && T.y < 52){                   // volver
+    if(newsPage == NP_MAIN) newsSettingsExit();
+    else { newsPage = NP_MAIN; newsScroll = 0; newsRender(); }
+    return;
+  }
+
+  // Arrastre real de la lista (mismo patron que Ajustes y Teclado).
+  int vp = NEWS_BOT - NEWS_TOP, maxS = newsContentH - vp; if(maxS < 0) maxS = 0;
+  if(T.pressed){ newsDragY0 = T.y; newsDragS0 = newsScroll; newsDragging = false; }
+  if(T.down && maxS > 0){
+    int dy = newsDragY0 - T.y;
+    if(!newsDragging && abs(dy) > 6) newsDragging = true;
+    if(newsDragging){
+      int ns = newsDragS0 + dy;
+      if(ns < 0) ns = 0; if(ns > maxS) ns = maxS;
+      if(ns != newsScroll){ newsScroll = ns; newsRenderList(); }
+      return;
+    }
+  }
+  if(T.released && newsDragging){ newsDragging = false; newsRender(); return; }
+  if(T.tap && !newsDragging && T.y >= NEWS_TOP - 8 && T.y <= NEWS_BOT){
+    for(int i = 0; i < newsRowN; i++){
+      if(T.y < newsRowY0[i] || T.y >= newsRowY1[i]) continue;
+      if(newsPage == NP_CATS){
+        if(i < NEWS_NCATS){ gNews.cats ^= (1 << i); newsSaveCfg(); newsRender(); }
+        return;
+      }
+      newsRowAction(i);
+      return;
+    }
+  }
+  // Repintado cuando el estado cambia solo (la consulta de fondo termino).
+  static uint8_t shownBusy = 0xFF;
+  uint8_t nowBusy = (uint8_t)((gNewsBusy ? 1 : 0) | (gNewsTestRes << 1));
+  if(nowBusy != shownBusy){ shownBusy = nowBusy; if(newsPage == NP_MAIN) newsRenderList(); }
+}
+
+// ---- INSIGNIA DISCRETA DE LA BARRA DE ESTADO ----
+// Con una app abierta las noticias NO interrumpen: lo unico que aparece es
+// este punto con el numero de no leidas, junto al icono de Wi-Fi.
+#define NEWS_BADGE_CX (SCR_W - 92)
+#define NEWS_BADGE_CY 27
+#define NEWS_BADGE_R  10
+static void newsBadge(uint16_t col){
+  int n = gNewsUnread;
+  if(n <= 0) return;
+  fillCircle(NEWS_BADGE_CX, NEWS_BADGE_CY, NEWS_BADGE_R, TH_DANGER);
+  char b[4];
+  snprintf(b, sizeof(b), "%d", n > 9 ? 9 : n);
+  drawTextC(NEWS_BADGE_CX, NEWS_BADGE_CY - 7, b, 1, TH_ONACC);
+  (void)col;
+}
+// Estampa la insignia SIN repintar la app. Solo se hace cuando la app usa el
+// marco estandar del sistema: si la app pinta su propia cabecera (juegos,
+// Paint, camara, Modo PC), esa esquina es SUYA y no se toca -- la noticia
+// espera en el Centro y se vera al volver al escritorio.
+static void newsBadgeStamp(){
+  if(gState != ST_APP || gLand || gHosted || gSuspOn) return;
+  if(KIOSK_ON && kioskOn) return;
+  if(APP_REG[gAppId].flags & APP_CUSTOM_HEADER) return;
+  if(gNewsUnread <= 0) return;
+  int y0 = NEWS_BADGE_CY - NEWS_BADGE_R - 1;
+  int y1 = NEWS_BADGE_CY + NEWS_BADGE_R + 1;
+  uint16_t* prev = gBuf;
+  int c0 = gClipY0, c1 = gClipY1, cx0 = gClipX0, cx1 = gClipX1;
+  gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
+  setBuf(fb);
+  // El candado es el mismo que usa todo el compositor: mientras la DMA sube
+  // una banda, nadie reescribe fb por debajo.
+  fbLock();
+  fillRect(NEWS_BADGE_CX - NEWS_BADGE_R - 2, y0, 2 * NEWS_BADGE_R + 4, y1 - y0 + 1, WIN_BG);
+  newsBadge(TH_NAV);
+  fbUnlock();
+  gBuf = prev;
+  gClipY0 = c0; gClipY1 = c1; gClipX0 = cx0; gClipX1 = cx1;
+  flxFlush(y0, y1);                   // toma el candado por su cuenta: va DESPUES de soltarlo
+}
 
 // #############################################################
 // ##  DETECCION DE HARDWARE I2C  (FASE 2)
@@ -19519,6 +20821,7 @@ void setup(){
   else Serial.printf("[FS] LittleFS: %lu / %lu bytes usados\n",
                      (unsigned long)flexFsUsedBytes(), (unsigned long)flexFsTotalBytes());
   connBootRestore();              // modo avion guardado (solo lee NVS, no toca radio)
+  newsLoad();                     // NOTICIAS: configuracion, credenciales y centro (NVS, no red)
   setBacklight(gBright);          // aplica el brillo guardado
   homeOrderLoad();                // orden de iconos del Home
   // TECLADO (Fases A-D): geometria del tamano guardado, ranuras fijadas del
@@ -19615,6 +20918,7 @@ void loop(){
   wifiAutoReconnectTick();// reconexion WiFi diferida (la radio NUNCA se toca en setup(); ver bootInitRadioSafe)
   ntpTick();              // NTP: decide CUANDO pedir hora. La red corre en su tarea, nunca aqui
   clkPersistTick();       // guarda la hora en NVS una vez por hora (arranque sin internet)
+  newsTick();             // NOTICIAS: decide CUANDO consultar y consume el resultado. La red va aparte
   bool minChanged = clkUpdate();
   gMinChanged = minChanged;
 
@@ -19695,6 +20999,7 @@ void loop(){
     case ST_KBSET:            kbsTick(); break;     // FASE E: Ajustes del teclado
     case ST_CONN:             connTick(); break;    // Conectividad: Wifi / BLE / Modo avion
     case ST_FILES:            filesTick(); break;   // Explorador de archivos real
+    case ST_NEWS:             newsSettingsTick(); break;  // Ajustes -> Noticias (servicio configurable)
   }
   kioskTick();            // FASE 4: refresca el candado y escucha el gesto de salida
   uiTick();               // animacion continua del vidrio
