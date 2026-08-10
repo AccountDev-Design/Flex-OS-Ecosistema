@@ -45,7 +45,7 @@ APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net
 TOOLS := $(BUILD)/jpegcheck
 
-.PHONY: all run all-boards fixtures clean
+.PHONY: all run all-boards fixtures clean ino
 all: run
 
 $(BUILD):
@@ -82,7 +82,17 @@ $(BUILD)/jpegcheck: jpegcheck.cpp $(JPEG_SRC) $(ROOT)/FlexOS_JPEG.h | $(BUILD)
 .PHONY: tools
 tools: $(TOOLS)
 
-run: $(BINS) $(TOOLS)
+# --- COMPILACION DEL SKETCH COMPLETO (sin placa) ---
+# Compila FlexOS_Ultra.ino entero contra los dobles de inostub/. No
+# ejecuta nada: sirve para que un error de tipos o de nombres en el
+# sketch salte aqui, sin arduino-cli ni el core de ESP32.
+INO_SRC := $(ROOT)/FlexOS_Ultra.ino
+ino: ino_compile.cpp $(INO_SRC) | $(BUILD)
+	@$(CXX) $(CXXSTD) -fsyntax-only $(WARN) -Wno-unused-function -Wno-unused-variable -Wno-misleading-indentation \
+	   -Iinostub -I$(ROOT) -DARDUINO=200 -x c++ ino_compile.cpp
+	@echo "FlexOS_Ultra.ino compila."
+
+run: ino $(BINS) $(TOOLS)
 	@echo
 	@$(BUILD)/test_jpeg ../fixtures
 	@echo

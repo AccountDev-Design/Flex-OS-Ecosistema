@@ -1,0 +1,4 @@
+#pragma once
+#define SOC_RTCIO_PIN_COUNT 16
+#define SOC_PM_SUPPORT_EXT1_WAKEUP 1
+#define SOC_DEEP_SLEEP_SUPPORTED 1
