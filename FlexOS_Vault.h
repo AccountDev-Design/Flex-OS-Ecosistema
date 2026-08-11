@@ -377,3 +377,45 @@ bool     flexVaultEqualCT(const void* a, const void* b, size_t n);
 // Borrado de memoria sensible que el compilador NO puede eliminar
 // por "codigo muerto".
 void     flexVaultWipe(void* p, size_t n);
+
+// -------------------------------------------------------------
+//  BLOQUEO DEL SISTEMA (Ajustes -> Seguridad y privacidad ->
+//  Bloqueo)  ·  ahora con hash y sal
+//  ------------------------------------------------------------
+//  Hasta esta version, el PIN y la contrasena de la PANTALLA DE
+//  BLOQUEO se guardaban en NVS TAL CUAL, en texto legible (claves
+//  "lockpin" y "lockpass"). Cualquiera que volcara la particion de
+//  NVS los leia directamente, y ademas quedaban ahi para siempre.
+//
+//  Estas funciones lo sustituyen por sal aleatoria de 16 bytes +
+//  PBKDF2-HMAC-SHA256, comparado en tiempo constante. Viven en este
+//  modulo, y no en el sketch, por dos razones: la criptografia ya
+//  esta aqui (no hay que duplicar PBKDF2) y asi se puede probar en el
+//  PC con NVS y cripto de verdad.
+//
+//  MIGRACION DE QUIEN YA TIENE CLAVE PUESTA
+//  flexLockMigrate() se llama en cada arranque. Si encuentra una
+//  clave en texto legible, la convierte a hash con sal y BORRA la
+//  clave antigua de NVS. El usuario no nota nada: sigue entrando con
+//  el mismo PIN. Si no hay nada que migrar, no escribe.
+//
+//  LO QUE SE SIGUE GUARDANDO EN CLARO, Y POR QUE
+//  La LONGITUD del PIN (no el PIN). La pantalla de bloqueo
+//  autoconfirma al llegar al numero de digitos guardado, que es como
+//  se comportaba antes y lo que hace cualquier telefono. Los puntos
+//  en pantalla ya revelan esa longitud mientras se escribe, asi que
+//  guardarla no anade ninguna informacion que un observador no tenga.
+// -------------------------------------------------------------
+// 0 = sin clave, 1 = PIN, 2 = contrasena.
+int      flexLockType();
+// Longitud del PIN guardado (0 si es contrasena o no hay clave).
+int      flexLockLen();
+// Guarda una clave nueva (genera sal nueva). type = 1 PIN, 2 contrasena.
+bool     flexLockSet(const char* secret, int type);
+// Comprueba una clave contra el hash guardado, en tiempo constante.
+bool     flexLockVerify(const char* secret);
+// Quita la clave del sistema (deja el bloqueo en "Deslizar").
+bool     flexLockClear();
+// 1 = habia una clave en texto legible y se ha migrado a hash,
+// 0 = no habia nada que migrar, -1 = no se pudo completar.
+int      flexLockMigrate();

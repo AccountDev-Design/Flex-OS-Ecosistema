@@ -81,6 +81,10 @@
 // FlexOS_FS.cpp -- comun a las tres placas -- para no tener tres copias de
 // lo mismo que se desincronicen. Aqui solo se dibuja.
 #include "FlexOS_FS.h"
+// FLEX VAULT (Carpeta segura). Trae ademas el hash con sal del bloqueo
+// del sistema: el PIN y la contrasena de la pantalla de bloqueo ya no se
+// guardan en texto legible. Ver FlexOS_Vault.h.
+#include "FlexOS_Vault.h"
 
 // NAVEGADOR REAL. La app 7 deja de ser una maqueta: la interfaz, las
 // pestanas, el omnibox, el historial, los favoritos, la cache y el
@@ -4797,6 +4801,12 @@ static uint32_t clkNowUtc(){
 static void clkSetEpoch(uint32_t utc){
   clkEpochRef = utc; clkRefMs = millis(); clkAnchored = true;
   clkLastMin = -1;                    // fuerza el repintado del minuto
+  // FLEX VAULT: el modulo de la boveda no sabe la hora (no toca la red ni
+  // el reloj). Se la damos aqui, en el UNICO punto por el que pasan la
+  // semilla, NVS y NTP, para que el registro de seguridad y los "ultimo
+  // acceso" lleven una hora de verdad. Si el reloj nunca se ancla, la
+  // boveda ensena "sin hora" en vez de inventarse una fecha.
+  flexVaultSetClock(utc);
 }
 // Ancla de fabrica: la misma fecha y hora que sembraba la version anterior.
 static void clkSeedFactory(){
@@ -16350,7 +16360,15 @@ static uint32_t lsuKbAnim = 0;                       // millis al abrir el tecla
 static uint32_t lsuAnimMs = 0;
 static const char* PIN_KEYS[12] = { "1","2","3","4","5","6","7","8","9","<","0","OK" };
 static bool lsuVerify = false;                       // true = desbloquear (verificar), false = crear
-static char lsuSaved[64] = "";                       // clave guardada a comparar
+// LA CLAVE YA NO SE COPIA A RAM. Antes aqui vivia una copia en claro
+// del PIN/contrasena guardado (lsuSaved) para compararla con strcmp.
+// Ahora la comprobacion la hace flexLockVerify(), que deriva el hash de
+// lo que escribe el usuario y lo compara en tiempo constante contra el
+// hash de NVS: en ningun momento existe la clave del usuario en una
+// variable del sketch. De la clave guardada solo se lee su LONGITUD,
+// para poder autoconfirmar el PIN al completar sus digitos (lo mismo que
+// ya revelan los puntos de la pantalla).
+static int  lsuSavedLen = 0;
 static uint32_t lsuWrong = 0;                        // millis del ultimo error (para el flash rojo)
 // ---- Tema de las pantallas de clave (PIN / contrasena) ----
 // Las dos ramas piden color POR SIGNIFICADO al tema global; lo que cambia es
@@ -17182,8 +17200,25 @@ static void lsuUnlock(){
   }
   showHome();
 }
-static void lsuSavePin(){ prefs.begin("flexos", false); prefs.putString("lockpin", lsuPin); prefs.putInt("locktype", 1); prefs.end(); gLockType = 1; lsuExit(); }
-static void lsuSavePass(){ prefs.begin("flexos", false); prefs.putString("lockpass", lsuPass); prefs.putInt("locktype", 2); prefs.end(); gLockType = 2; lsuExit(); }
+// GUARDAR LA CLAVE DEL SISTEMA. Antes esto escribia el PIN y la
+// contrasena TAL CUAL en NVS ("lockpin"/"lockpass"), asi que cualquiera
+// que volcara la particion los leia. Ahora se delega en flexLockSet(),
+// que guarda sal aleatoria + PBKDF2-HMAC-SHA256 y borra de NVS los
+// restos en texto legible. El resto del flujo (gLockType, lsuExit) no
+// cambia.
+//
+// El buffer de la clave se BORRA despues de guardarla: ya no hace falta
+// para nada y no tiene por que seguir en RAM.
+static void lsuSavePin(){
+  if(flexLockSet(lsuPin, 1)) gLockType = 1;
+  flexVaultWipe(lsuPin, sizeof(lsuPin));
+  lsuExit();
+}
+static void lsuSavePass(){
+  if(flexLockSet(lsuPass, 2)) gLockType = 2;
+  flexVaultWipe(lsuPass, sizeof(lsuPass));
+  lsuExit();
+}
 static void lsuBack(){ uint16_t c = lsuTxtHi(); strokeSegAA(30, 26, 18, 18, 2.4f, c); strokeSegAA(18, 18, 30, 10, 2.4f, c); }
 
 // ---- Selector PIN / Contraseña ----
@@ -17367,13 +17402,13 @@ static void lsuTick(){
           lsuPress = i; lsuPressMs = millis();
           if(i == 9){ int L = strlen(lsuPin); if(L > 0) lsuPin[L - 1] = 0; }                         // borrar
           else if(i == 11){                                                                          // OK
-            if(lsuVerify){ if(!strcmp(lsuPin, lsuSaved)) lsuUnlock(); else { lsuWrong = millis(); lsuPin[0] = 0; lockOnFail(); lsuShakeStart(); } return; }
+            if(lsuVerify){ if(flexLockVerify(lsuPin)) lsuUnlock(); else { lsuWrong = millis(); lsuPin[0] = 0; lockOnFail(); lsuShakeStart(); } return; }
             else if(strlen(lsuPin) >= 4){ lsuSavePin(); return; }
           }
           else if(strlen(lsuPin) < 8){                                                               // digito
             int L = strlen(lsuPin); lsuPin[L] = PIN_KEYS[i][0]; lsuPin[L + 1] = 0;
-            if(lsuVerify && (int)strlen(lsuPin) == (int)strlen(lsuSaved) && strlen(lsuSaved) > 0){
-              if(!strcmp(lsuPin, lsuSaved)) lsuUnlock(); else { lsuWrong = millis(); lsuPin[0] = 0; lockOnFail(); lsuShakeStart(); }
+            if(lsuVerify && lsuSavedLen > 0 && (int)strlen(lsuPin) == lsuSavedLen){
+              if(flexLockVerify(lsuPin)) lsuUnlock(); else { lsuWrong = millis(); lsuPin[0] = 0; lockOnFail(); lsuShakeStart(); }
               return;
             }
           }
@@ -17438,7 +17473,7 @@ static void lsuTick(){
       else if(fi == 2){ kbLangEs = !kbLangEs; if(mapaActivo == LAYOUT_ES || mapaActivo == LAYOUT_EN) mapaActivo = kbLangEs ? LAYOUT_ES : LAYOUT_EN; }
       else if(fi == 3) lsuPassAppend(" ");
       else if(fi == 4){ int L = strlen(lsuPass); if(L > 0){ int q = L - 1; while(q > 0 && (lsuPass[q] & 0xC0) == 0x80) q--; lsuPass[q] = 0; } }
-      else { if(lsuVerify){ if(!strcmp(lsuPass, lsuSaved)) lsuUnlock(); else { lsuWrong = millis(); lsuPass[0] = 0; lockOnFail(); lsuShakeStart(); lsuRenderPass(0, 0); } return; } else if(strlen(lsuPass) >= 4){ lsuSavePass(); return; } }
+      else { if(lsuVerify){ if(flexLockVerify(lsuPass)) lsuUnlock(); else { lsuWrong = millis(); lsuPass[0] = 0; lockOnFail(); lsuShakeStart(); lsuRenderPass(0, 0); } return; } else if(strlen(lsuPass) >= 4){ lsuSavePass(); return; } }
       lsuRenderPass(0, 0); return;
     }
     if(kbFastActive()) return;                          // ya la escribio la via rapida
@@ -17466,10 +17501,12 @@ static void lsuStartVerify(){
   gLand = false;
   gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
   setBuf(fb);
-  prefs.begin("flexos", true);
-  String s = (gLockType == 1) ? prefs.getString("lockpin", "") : prefs.getString("lockpass", "");
-  prefs.end();
-  s.toCharArray(lsuSaved, sizeof(lsuSaved));
+  // AQUI YA NO SE LEE LA CLAVE. Antes se sacaba de NVS en texto legible
+  // y se dejaba en lsuSaved durante toda la pantalla de verificacion --
+  // o sea, la clave del usuario viva en RAM mientras la pedia. Ahora
+  // solo se lee su LONGITUD (para autoconfirmar el PIN al completarlo);
+  // la comprobacion la hace flexLockVerify() con el hash de NVS.
+  lsuSavedLen = flexLockLen();
   lsuVerify = true; lsuWrong = 0; lsuPin[0] = 0; lsuPass[0] = 0; lsuPress = -1;
   mapaActivo = LAYOUT_ES; kbLangEs = true; kbShift = false;
   kbExtrasOn = false; kbApplySize(); kbMtSurfaceReset();   // sin barra ni chips en la verificacion
@@ -20902,6 +20939,21 @@ void setup(){
   bootInitRadioSafe();   // WiFi/C6: BYPASS -> nunca bloquea el arranque
   flexBrowserBegin();    // Navegador: carga ajustes, historial y favoritos. No abre red.
   flexOtaBegin();        // OTA: crea la tarea de fondo (prioridad baja). No conecta ni descarga nada aqui.
+
+  // SEGURIDAD DEL BLOQUEO: migracion del PIN/contrasena guardados en
+  // TEXTO LEGIBLE por las versiones anteriores a hash con sal. Va ANTES de
+  // cfgLoad() para que lo que lea de "locktype" ya sea el estado
+  // definitivo. Si no hay nada que migrar no escribe en NVS.
+  //
+  // Es una migracion en tres pasos (escribir el hash, comprobar que valida
+  // la misma clave, y solo entonces borrar el texto legible), asi que un
+  // fallo a mitad deja el telefono abriendose con la clave de siempre en
+  // vez de dejar al usuario fuera. Ver flexLockMigrate en FlexOS_Vault.h.
+  {
+    int mg = flexLockMigrate();
+    if(mg > 0)      Serial.println(F("[SEG] clave del bloqueo migrada a hash con sal"));
+    else if(mg < 0) Serial.println(F("[SEG] no se pudo migrar la clave: se conserva la anterior"));
+  }
   cfgLoad();
 
   // SISTEMA DE ARCHIVOS. Es flash, no radio: montarlo aqui NO viola la regla
@@ -20910,6 +20962,11 @@ void setup(){
   if(!flexFsBegin()) Serial.printf("[FS] no montado: %s\n", flexFsError());
   else Serial.printf("[FS] LittleFS: %lu / %lu bytes usados\n",
                      (unsigned long)flexFsUsedBytes(), (unsigned long)flexFsTotalBytes());
+
+  // FLEX VAULT. Solo carga el sobre de la clave y los contadores de NVS:
+  // la boveda arranca SIEMPRE cerrada y no se descifra nada aqui. Necesita
+  // el sistema de archivos montado, por eso va justo despues.
+  flexVaultBegin();
   connBootRestore();              // modo avion guardado (solo lee NVS, no toca radio)
   newsLoad();                     // NOTICIAS: configuracion, credenciales y centro (NVS, no red)
   setBacklight(gBright);          // aplica el brillo guardado

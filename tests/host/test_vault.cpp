@@ -675,6 +675,97 @@ static void testAislamiento(){
   chk(!flexFsPrivDelete("/Notas/a.txt"),             "ni borra fuera de ella");
 }
 
+
+// -------------------------------------------------------------
+//  BLOQUEO DEL SISTEMA: hash con sal y migracion del texto legible
+// -------------------------------------------------------------
+static void testBloqueoSistema(){
+  printf("Bloqueo del sistema (hash con sal y migracion)\n");
+  prefsTestClear();
+
+  chk(flexLockType() == 0, "sin clave configurada al principio");
+  chk(!flexLockVerify("1234"), "y no valida ninguna clave");
+  chk(flexLockMigrate() == 0, "sin clave no hay nada que migrar");
+
+  chk(flexLockSet("1234", 1), "se configura un PIN");
+  chk(flexLockType() == 1, "queda como PIN");
+  chk(flexLockLen() == 4, "y se recuerda su longitud");
+  chk(flexLockVerify("1234"),  "el PIN correcto valida");
+  chk(!flexLockVerify("1235"), "uno incorrecto no");
+  chk(!flexLockVerify(""),     "ni la cadena vacia");
+
+  // El PIN NO puede estar en NVS en texto legible.
+  Preferences p;
+  p.begin("flexos", true);
+  chk(p.getString("lockpin", "@").length() == 1, "no queda ningun lockpin en NVS");
+  chk(p.getString("lockpass", "@").length() == 1, "ni ningun lockpass");
+  uint8_t h[32];
+  chk(p.getBytes("lockhsh", h, sizeof(h)) == sizeof(h), "si hay un hash de 32 bytes");
+  uint8_t sl[16];
+  chk(p.getBytes("lockslt", sl, sizeof(sl)) == sizeof(sl), "y una sal de 16 bytes");
+  p.end();
+  // El hash no puede ser el PIN disfrazado.
+  chk(memcmp(h, "1234", 4) != 0, "el hash no empieza por el PIN");
+
+  // Dos claves iguales en dos configuraciones distintas dan hashes
+  // distintos: eso es lo que aporta la sal.
+  uint8_t h1[32]; memcpy(h1, h, 32);
+  chk(flexLockSet("1234", 1), "se vuelve a configurar el MISMO PIN");
+  p.begin("flexos", true);
+  p.getBytes("lockhsh", h, sizeof(h));
+  p.end();
+  chk(memcmp(h1, h, 32) != 0, "el hash es distinto (sal nueva)");
+  chk(flexLockVerify("1234"), "y sigue validando el PIN");
+
+  chk(flexLockSet("mi contrasena larga", 2), "se configura una contrasena");
+  chk(flexLockType() == 2, "queda como contrasena");
+  chk(flexLockLen() == 0, "y la longitud no se expone para contrasenas");
+  chk(flexLockVerify("mi contrasena larga"), "la contrasena valida");
+  chk(!flexLockVerify("mi contrasena larga "), "un espacio de mas no");
+
+  chk(flexLockClear(), "se puede quitar la clave");
+  chk(flexLockType() == 0, "y el bloqueo vuelve a Deslizar");
+  chk(!flexLockVerify("mi contrasena larga"), "ya no valida nada");
+
+  // ---- MIGRACION del usuario que ya tenia PIN en texto legible ----
+  prefsTestClear();
+  p.begin("flexos", false);
+  p.putString("lockpin", "2580");        // exactamente como lo guardaba la version anterior
+  p.putInt("locktype", 1);
+  p.end();
+  chk(flexLockVerify("2580") == false, "antes de migrar no hay hash que validar");
+  chk(flexLockMigrate() == 1, "la migracion detecta la clave en texto legible");
+  chk(flexLockVerify("2580"), "y despues el MISMO PIN sigue abriendo");
+  chk(flexLockType() == 1, "el tipo de bloqueo se conserva");
+  chk(flexLockLen() == 4, "y la longitud tambien");
+  p.begin("flexos", true);
+  chk(p.getString("lockpin", "@").length() == 1, "el PIN en texto legible se BORRO de NVS");
+  p.end();
+  chk(flexLockMigrate() == 0, "y migrar otra vez no hace nada");
+
+  // Lo mismo con contrasena.
+  prefsTestClear();
+  p.begin("flexos", false);
+  p.putString("lockpass", "contrasena antigua");
+  p.putInt("locktype", 2);
+  p.end();
+  chk(flexLockMigrate() == 1, "migra tambien una contrasena");
+  chk(flexLockVerify("contrasena antigua"), "que sigue abriendo igual");
+  p.begin("flexos", true);
+  chk(p.getString("lockpass", "@").length() == 1, "y desaparece de NVS en claro");
+  p.end();
+
+  // Caso mixto: una version intermedia que dejara las dos cosas.
+  p.begin("flexos", false);
+  p.putString("lockpass", "contrasena antigua");
+  p.end();
+  chk(flexLockMigrate() == 1, "si reaparece texto legible junto al hash, se limpia");
+  p.begin("flexos", true);
+  chk(p.getString("lockpass", "@").length() == 1, "y se va de NVS");
+  p.end();
+  chk(flexLockVerify("contrasena antigua"), "sin perder el acceso");
+}
+
 int main(){
   printf("\n=== FlexOS \xc2\xb7 Flex Vault (Carpeta segura) ===\n");
   testKdf();
@@ -687,6 +778,7 @@ int main(){
   testApps();
   testRegistro();
   testAislamiento();
+  testBloqueoSistema();
   printf("=== %d comprobaciones, %d fallos ===\n", gChecks, gFails);
   return gFails ? 1 : 0;
 }

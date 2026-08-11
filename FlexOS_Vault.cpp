@@ -1404,3 +1404,180 @@ void flexVaultSetAutoLockMs(uint32_t ms){
   vAutoLock = ms;
   fxvSaveSettings();
 }
+
+// #############################################################
+// ##  BLOQUEO DEL SISTEMA  ·  hash con sal y migracion
+// ##  ------------------------------------------------------
+// ##  Ver la explicacion larga en FlexOS_Vault.h. Resumen: el PIN y
+// ##  la contrasena de la pantalla de bloqueo se guardaban en NVS en
+// ##  texto legible; aqui se sustituyen por sal + PBKDF2 y se migra
+// ##  al usuario que ya tenia clave puesta, sin que tenga que hacer
+// ##  nada ni volver a configurarla.
+// ##
+// ##  Se usa el MISMO namespace de NVS que el resto de los ajustes
+// ##  del sistema ("flexos") porque locktype ya vive ahi y el sketch
+// ##  lo lee en su arranque. Las claves nuevas son:
+// ##     lockslt  sal de 16 bytes
+// ##     lockhsh  PBKDF2-HMAC-SHA256 de 32 bytes
+// ##     lockitr  iteraciones con las que se calculo
+// ##     locklen  longitud del PIN (para autoconfirmar en pantalla)
+// ##  Y las que desaparecen: lockpin, lockpass.
+// #############################################################
+#define FXV_SYS_NS "flexos"
+
+// Iteraciones del bloqueo de pantalla. Menos que las de la boveda a
+// proposito: esto se evalua en el camino critico de desbloquear el
+// telefono (varias veces al dia) y no protege un almacen cifrado,
+// solo la entrada a la interfaz. 12.000 con el acelerador SHA del P4
+// es imperceptible y sigue encareciendo mucho la fuerza bruta.
+#define FXV_LOCK_ITERS 12000
+
+int flexLockType(){
+  Preferences p;
+  p.begin(FXV_SYS_NS, true);
+  int t = p.getInt("locktype", 0);
+  p.end();
+  return (t == 1 || t == 2) ? t : 0;
+}
+
+int flexLockLen(){
+  Preferences p;
+  p.begin(FXV_SYS_NS, true);
+  int t = p.getInt("locktype", 0);
+  int l = p.getInt("locklen", 0);
+  p.end();
+  return t == 1 ? l : 0;
+}
+
+// Escribe sal + hash. `dropPlain` decide si tambien se borra la clave
+// en texto legible de la version antigua. La migracion lo hace en DOS
+// pasos (escribir, comprobar, borrar) para no dejar nunca al usuario
+// sin ninguna de las dos: si la escritura del hash falla a medias, la
+// clave antigua sigue ahi y el telefono se sigue abriendo.
+static bool fxvLockStore(const char* secret, int type, bool dropPlain){
+  uint8_t salt[FXV_SALT_LEN], hash[FXV_KEY_LEN];
+  flexVaultRandomBytes(salt, sizeof(salt));
+  flexVaultKdf(secret, salt, sizeof(salt), FXV_LOCK_ITERS, hash, sizeof(hash));
+
+  Preferences p;
+  p.begin(FXV_SYS_NS, false);
+  bool ok = p.putBytes("lockslt", salt, sizeof(salt)) == sizeof(salt);
+  if(ok) ok = p.putBytes("lockhsh", hash, sizeof(hash)) == sizeof(hash);
+  if(ok) p.putUInt("lockitr", FXV_LOCK_ITERS);
+  if(ok) p.putInt("locklen", (int)strlen(secret));
+  if(ok) p.putInt("locktype", type);
+  if(ok && dropPlain){
+    p.remove("lockpin");
+    p.remove("lockpass");
+  }
+  p.end();
+  flexVaultWipe(hash, sizeof(hash));
+  flexVaultWipe(salt, sizeof(salt));
+  return ok;
+}
+
+bool flexLockSet(const char* secret, int type){
+  if(!secret || !secret[0]) return false;
+  if(type != 1 && type != 2) return false;
+  // Al poner una clave NUEVA se borra de NVS cualquier resto en texto
+  // legible de la version anterior: aqui, no "algun dia".
+  return fxvLockStore(secret, type, true);
+}
+
+bool flexLockVerify(const char* secret){
+  if(!secret) return false;
+  uint8_t salt[FXV_SALT_LEN], want[FXV_KEY_LEN];
+  uint32_t iters;
+  Preferences p;
+  p.begin(FXV_SYS_NS, true);
+  size_t gs = p.getBytes("lockslt", salt, sizeof(salt));
+  size_t gh = p.getBytes("lockhsh", want, sizeof(want));
+  iters = p.getUInt("lockitr", FXV_LOCK_ITERS);
+  p.end();
+  if(gs != sizeof(salt) || gh != sizeof(want)) return false;
+  if(iters == 0 || iters > 1000000u) return false;
+
+  uint8_t got[FXV_KEY_LEN];
+  flexVaultKdf(secret, salt, sizeof(salt), iters, got, sizeof(got));
+  // Tiempo constante: comparar con memcmp filtraria, por lo que tarda
+  // en volver, cuantos bytes del hash coincidian.
+  bool ok = flexVaultEqualCT(got, want, sizeof(got));
+  flexVaultWipe(got, sizeof(got));
+  flexVaultWipe(want, sizeof(want));
+  return ok;
+}
+
+bool flexLockClear(){
+  Preferences p;
+  p.begin(FXV_SYS_NS, false);
+  p.remove("lockslt");
+  p.remove("lockhsh");
+  p.remove("lockitr");
+  p.remove("locklen");
+  p.remove("lockpin");
+  p.remove("lockpass");
+  p.putInt("locktype", 0);
+  p.end();
+  return true;
+}
+
+int flexLockMigrate(){
+  Preferences p;
+  p.begin(FXV_SYS_NS, true);
+  int  type = p.getInt("locktype", 0);
+  bool haveHash = false;
+  {
+    uint8_t probe[FXV_KEY_LEN];
+    haveHash = p.getBytes("lockhsh", probe, sizeof(probe)) == sizeof(probe);
+    flexVaultWipe(probe, sizeof(probe));
+  }
+  String old = (type == 1) ? p.getString("lockpin", "") : p.getString("lockpass", "");
+  p.end();
+
+  if(haveHash){
+    // Ya esta migrado. Aun asi se limpia cualquier resto en texto
+    // legible: si una version intermedia dejo las dos cosas, el
+    // texto legible tiene que irse igual.
+    if(old.length() > 0){
+      Preferences q;
+      q.begin(FXV_SYS_NS, false);
+      q.remove("lockpin");
+      q.remove("lockpass");
+      q.end();
+      return 1;
+    }
+    return 0;
+  }
+  if(type == 0 || old.length() == 0) return 0;      // no hay clave que migrar
+
+  char buf[FLEXVAULT_SECRET_MAX];
+  old.toCharArray(buf, sizeof(buf));
+
+  // Paso 1: escribir el hash SIN tocar todavia la clave antigua.
+  bool ok = fxvLockStore(buf, type, false);
+  // Paso 2: comprobar que el hash recien escrito valida esa misma
+  // clave. Es la parte que convierte esto en una migracion segura:
+  // solo si el usuario va a poder entrar con su PIN de siempre se
+  // borra el texto legible.
+  if(ok) ok = flexLockVerify(buf);
+  flexVaultWipe(buf, sizeof(buf));
+  if(!ok){
+    // No se pudo: se deja TODO como estaba (la clave antigua sigue
+    // siendo la valida) y se avisa. Preferible a un telefono que no se
+    // abre.
+    Preferences q;
+    q.begin(FXV_SYS_NS, false);
+    q.remove("lockslt");
+    q.remove("lockhsh");
+    q.remove("lockitr");
+    q.end();
+    return -1;
+  }
+  // Paso 3: ahora si, fuera la clave en texto legible.
+  Preferences q;
+  q.begin(FXV_SYS_NS, false);
+  q.remove("lockpin");
+  q.remove("lockpass");
+  q.end();
+  return 1;
+}
