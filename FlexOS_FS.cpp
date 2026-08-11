@@ -28,6 +28,38 @@ static const char* fsErr     = "sin montar";
 #define FS_MAX_DEPTH 5
 
 // -------------------------------------------------------------
+//  FILTRO DEL ALMACEN DE FLEX VAULT
+//  ------------------------------------------------------------
+//  Una sola funcion decide si una ruta pertenece a la boveda, y
+//  TODOS los recorridos publicos de este modulo la consultan. Es la
+//  razon por la que el contenido de la Carpeta segura no puede
+//  aparecer en Archivos, en Almacenamiento, en la Galeria, en el
+//  Finder de Modo PC ni en ninguna pantalla futura: no es que la
+//  interfaz lo esconda, es que la capa que abre los directorios no
+//  lo entrega.
+//
+//  Se compara el prefijo completo y ademas se exige que lo que sigue
+//  sea '/' o fin de cadena, para que un fichero legitimo llamado
+//  "/.fxvaultXY" (que no es la boveda) no quede oculto por error.
+// -------------------------------------------------------------
+bool flexFsIsVaultPath(const char* path){
+  if(!path) return false;
+  const char* p = path;
+  if(p[0] != '/') return false;
+  size_t vl = strlen(FLEXFS_DIR_VAULT);
+  if(strncmp(p, FLEXFS_DIR_VAULT, vl) != 0) return false;
+  return p[vl] == 0 || p[vl] == '/';
+}
+
+// El nombre suelto de una entrada de directorio, visto desde la
+// raiz. Los recorridos de la raiz reciben "\.fxvault" sin ruta, asi
+// que ademas del filtro por ruta hace falta este por nombre.
+static bool isVaultEntryName(const char* name){
+  if(!name) return false;
+  return strcmp(name, FLEXFS_DIR_VAULT + 1) == 0;   // ".fxvault"
+}
+
+// -------------------------------------------------------------
 //  Utilidades de ruta (sin String: buffers fijos)
 // -------------------------------------------------------------
 
@@ -110,11 +142,13 @@ uint32_t flexFsUsedBytes(){  return fsMounted ? (uint32_t)LittleFS.usedBytes()  
 
 bool flexFsExists(const char* path){
   if(!fsMounted || !path || !path[0]) return false;
+  if(flexFsIsVaultPath(path)) return false;      // la boveda no existe para la capa normal
   return LittleFS.exists(path);
 }
 
 bool flexFsIsDir(const char* path){
   if(!fsMounted) return false;
+  if(flexFsIsVaultPath(path)) return false;
   File f = LittleFS.open(path);
   if(!f) return false;
   bool d = f.isDirectory();
@@ -124,6 +158,7 @@ bool flexFsIsDir(const char* path){
 
 uint32_t flexFsSize(const char* path){
   if(!fsMounted) return 0;
+  if(flexFsIsVaultPath(path)) return 0;
   File f = LittleFS.open(path, "r");
   if(!f) return 0;
   uint32_t s = f.isDirectory() ? 0 : (uint32_t)f.size();
@@ -133,6 +168,7 @@ uint32_t flexFsSize(const char* path){
 
 bool flexFsMkdir(const char* path){
   if(!fsMounted) return false;
+  if(flexFsIsVaultPath(path)) return false;      // solo flexFsVaultInit crea la boveda
   if(LittleFS.exists(path)) return true;
   return LittleFS.mkdir(path);
 }
@@ -142,22 +178,30 @@ bool flexFsMkdir(const char* path){
 // -------------------------------------------------------------
 int flexFsCount(const char* dir){
   if(!fsMounted) return 0;
+  if(flexFsIsVaultPath(dir)) return 0;
   File d = LittleFS.open(dir);
   if(!d || !d.isDirectory()){ if(d) d.close(); return 0; }
   int n = 0;
   File e = d.openNextFile();
-  while(e){ n++; e.close(); e = d.openNextFile(); }
+  while(e){
+    if(!isVaultEntryName(baseName(e.name()))) n++;    // la boveda no se cuenta
+    e.close(); e = d.openNextFile();
+  }
   d.close();
   return n;
 }
 
 static uint32_t dirSizeRec(const char* dir, int depth){
   if(depth > FS_MAX_DEPTH) return 0;
+  if(flexFsIsVaultPath(dir)) return 0;
   File d = LittleFS.open(dir);
   if(!d || !d.isDirectory()){ if(d) d.close(); return 0; }
   uint32_t total = 0;
   File e = d.openNextFile();
   while(e){
+    if(isVaultEntryName(baseName(e.name()))){         // los bytes cifrados no
+      e.close(); e = d.openNextFile(); continue;      // entran en ningun total
+    }
     if(e.isDirectory()){
       char sub[FLEXFS_PATH_MAX];
       joinPath(dir, baseName(e.name()), sub, sizeof(sub));
@@ -190,6 +234,7 @@ static int cmpEntry(const FlexFsEntry* a, const FlexFsEntry* b){
 
 int flexFsList(const char* dir, FlexFsEntry* out, int maxn){
   if(!fsMounted || !out || maxn <= 0) return 0;
+  if(flexFsIsVaultPath(dir)) return 0;            // no se puede listar la boveda
   File d = LittleFS.open(dir);
   if(!d || !d.isDirectory()){ if(d) d.close(); return 0; }
 
@@ -197,6 +242,9 @@ int flexFsList(const char* dir, FlexFsEntry* out, int maxn){
   File e = d.openNextFile();
   while(e && n < maxn){
     const char* nm = baseName(e.name());
+    if(isVaultEntryName(nm)){                     // la boveda no aparece en la lista
+      e.close(); e = d.openNextFile(); continue;
+    }
     strncpy(out[n].name, nm, FLEXFS_NAME_MAX - 1);
     out[n].name[FLEXFS_NAME_MAX - 1] = 0;
     out[n].dir   = e.isDirectory();
@@ -244,10 +292,14 @@ uint32_t flexFsCatSize(int cat){
 // el coste en RAM es constante sea cual sea el numero de ficheros.
 static void bigWalk(const char* dir, int depth, FlexFsBig* out, int maxn, int* used){
   if(depth > FS_MAX_DEPTH) return;
+  if(flexFsIsVaultPath(dir)) return;
   File d = LittleFS.open(dir);
   if(!d || !d.isDirectory()){ if(d) d.close(); return; }
   File e = d.openNextFile();
   while(e){
+    if(isVaultEntryName(baseName(e.name()))){      // "los mas grandes" nunca
+      e.close(); e = d.openNextFile(); continue;   // delata un fichero privado
+    }
     char full[FLEXFS_PATH_MAX];
     joinPath(dir, baseName(e.name()), full, sizeof(full));
     if(e.isDirectory()){
@@ -304,6 +356,9 @@ static bool deleteRec(const char* path, int depth){
 
 bool flexFsDelete(const char* path){
   if(!fsMounted || !path || !path[0] || !strcmp(path, "/")) return false;
+  // Nadie borra la boveda desde la capa normal: eso solo lo hace
+  // Flex Vault, con la clave delante.
+  if(flexFsIsVaultPath(path)) return false;
   return deleteRec(path, 0);
 }
 
@@ -342,6 +397,7 @@ static const char* extOf(const char* name){
 
 bool flexFsRename(const char* path, const char* newName){
   if(!fsMounted || !path || !newName || !newName[0]) return false;
+  if(flexFsIsVaultPath(path)) return false;
   if(strchr(newName, '/')) return false;              // solo nombre, sin rutas
 
   char dir[FLEXFS_PATH_MAX]; parentDir(path, dir, sizeof(dir));
@@ -384,6 +440,9 @@ bool flexFsTrash(const char* path){
   if(!fsMounted || !path || !path[0]) return false;
   // La papelera no se tira a si misma.
   if(!strncmp(path, FLEXFS_DIR_TRASH, strlen(FLEXFS_DIR_TRASH))) return false;
+  // Y la boveda tampoco: un elemento cifrado en la papelera seria
+  // exactamente la fuga que Flex Vault existe para evitar.
+  if(flexFsIsVaultPath(path)) return false;
   flexFsMkdir(FLEXFS_DIR_TRASH);
 
   char enc[FLEXFS_NAME_MAX];
@@ -463,6 +522,7 @@ void flexFsStem(const char* name, char* out, size_t n){
 
 bool flexFsNewName(const char* dir, const char* base, const char* ext, char* out, size_t n){
   if(!fsMounted) return false;
+  if(flexFsIsVaultPath(dir)) return false;
   for(int k = 1; k < 1000; k++){
     char nm[FLEXFS_NAME_MAX];
     snprintf(nm, sizeof(nm), "%s %d%s", base, k, ext ? ext : "");
@@ -494,6 +554,7 @@ void flexFsFmtSize(uint32_t b, char* out, size_t n){
 int flexFsReadText(const char* path, char* out, size_t n){
   if(!fsMounted || !out || n == 0) return -1;
   out[0] = 0;
+  if(flexFsIsVaultPath(path)) return -1;
   File f = LittleFS.open(path, "r");
   if(!f) return -1;
   size_t r = f.read((uint8_t*)out, n - 1);
@@ -504,6 +565,7 @@ int flexFsReadText(const char* path, char* out, size_t n){
 
 bool flexFsWriteText(const char* path, const char* txt){
   if(!fsMounted) return false;
+  if(flexFsIsVaultPath(path)) return false;
   File f = LittleFS.open(path, "w");
   if(!f) return false;
   size_t len = txt ? strlen(txt) : 0;
@@ -524,6 +586,7 @@ bool flexFsWriteText(const char* path, const char* txt){
 // -------------------------------------------------------------
 int flexFsReadBin(const char* path, void* buf, size_t n){
   if(!fsMounted || !buf || n == 0) return -1;
+  if(flexFsIsVaultPath(path)) return -1;
   File f = LittleFS.open(path, "r");
   if(!f) return -1;
   size_t r = f.read((uint8_t*)buf, n);
@@ -533,6 +596,7 @@ int flexFsReadBin(const char* path, void* buf, size_t n){
 
 bool flexFsWriteBin(const char* path, const void* buf, size_t n){
   if(!fsMounted) return false;
+  if(flexFsIsVaultPath(path)) return false;
   if(n > 0 && !buf) return false;
   File f = LittleFS.open(path, "w");
   if(!f) return false;
@@ -681,4 +745,176 @@ bool flexPaintUndo(const char* path){
   if(!ok){ LittleFS.remove(tmp); return false; }
   LittleFS.remove(path);
   return LittleFS.rename(tmp, path);
+}
+
+// -------------------------------------------------------------
+//  PAINT DESDE MEMORIA (lo necesita Flex Vault)
+//  ------------------------------------------------------------
+//  Un dibujo privado vive CIFRADO. Para previsualizarlo se descifra
+//  a RAM y se reproduce desde ahi. La alternativa -escribir un .fxp
+//  temporal en claro y llamar a flexPaintReplay- dejaria el dibujo
+//  privado a la vista en la particion de datos durante ese rato (y
+//  para siempre si se corta la corriente a mitad). De ahi estas dos
+//  funciones: misma logica de recorrido, distinta fuente de bytes.
+// -------------------------------------------------------------
+bool flexPaintHeaderMem(const void* data, size_t len, FlexPaintHdr* out){
+  if(!data || !out || len < sizeof(FlexPaintHdr)) return false;
+  memcpy(out, data, sizeof(FlexPaintHdr));
+  return out->magic[0] == FLEXPAINT_MAGIC0 && out->magic[1] == FLEXPAINT_MAGIC1 &&
+         out->magic[2] == FLEXPAINT_MAGIC2 && out->magic[3] == FLEXPAINT_MAGIC3;
+}
+
+bool flexPaintReplayMem(const void* data, size_t len, float sc, int ox, int oy,
+                        FlexPaintSegCb cb, void* user){
+  if(!data || !cb) return false;
+  FlexPaintHdr hd;
+  if(!flexPaintHeaderMem(data, len, &hd)) return false;
+
+  const uint8_t* p   = (const uint8_t*)data;
+  size_t         off = sizeof(FlexPaintHdr);
+
+  for(uint16_t s = 0; s < hd.strokes; s++){
+    // Cada lectura comprueba que los bytes existen ANTES de usarlos:
+    // estos bytes vienen de descifrar un fichero que pudo quedar a
+    // medias, asi que un contador de trazos que no cuadre tiene que
+    // acabar en "se dibuja lo que hay", no en leer fuera del buffer.
+    if(off + sizeof(FlexPaintStroke) > len) break;
+    FlexPaintStroke st;
+    memcpy(&st, p + off, sizeof(st));
+    off += sizeof(st);
+    int rad = (int)(st.size * sc + 0.5f);
+    if(rad < 1) rad = 1;
+    int px = 0, py = 0;
+    for(uint16_t i = 0; i < st.pts; i++){
+      if(off + 4 > len){ s = hd.strokes; break; }
+      int16_t xy[2];
+      memcpy(xy, p + off, 4);
+      off += 4;
+      int x = ox + (int)(xy[0] * sc + 0.5f);
+      int y = oy + (int)(xy[1] * sc + 0.5f);
+      if(i == 0) cb(x, y, x, y, st.color, rad, user);
+      else       cb(px, py, x, y, st.color, rad, user);
+      px = x; py = y;
+    }
+  }
+  return true;
+}
+
+// -------------------------------------------------------------
+//  LECTURA / ESCRITURA PARCIAL
+//  ------------------------------------------------------------
+//  Flex Vault cifra un fichero grande por bloques: lee 4 KB del
+//  original, los cifra y los anade al blob. Sin estas dos funciones
+//  habria que cargar el fichero entero en RAM, que es exactamente lo
+//  que no se puede hacer con una foto de varios MB en una placa con
+//  la PSRAM compartida con tres framebuffers.
+// -------------------------------------------------------------
+int flexFsReadAt(const char* path, uint32_t off, void* buf, size_t n){
+  if(!fsMounted || !buf || n == 0) return -1;
+  if(flexFsIsVaultPath(path)) return -1;
+  File f = LittleFS.open(path, "r");
+  if(!f) return -1;
+  if(off){
+    if(!f.seek(off)){ f.close(); return 0; }      // mas alla del final: 0 bytes
+  }
+  size_t r = f.read((uint8_t*)buf, n);
+  f.close();
+  return (int)r;
+}
+
+bool flexFsAppendBin(const char* path, const void* buf, size_t n){
+  if(!fsMounted) return false;
+  if(flexFsIsVaultPath(path)) return false;
+  if(n > 0 && !buf) return false;
+  File f = LittleFS.open(path, "a");
+  if(!f) return false;
+  size_t w = n ? f.write((const uint8_t*)buf, n) : 0;
+  f.close();
+  return w == n;
+}
+
+// -------------------------------------------------------------
+//  ALMACEN DE FLEX VAULT (acceso privilegiado)
+//  ------------------------------------------------------------
+//  Estas funciones son la puerta de servicio del almacen cifrado.
+//  TODAS empiezan comprobando que la ruta esta dentro de la boveda,
+//  asi que no se pueden usar para saltarse ningun otro filtro del
+//  modulo: lo unico que hacen es dar acceso a la habitacion que las
+//  funciones publicas se niegan a abrir.
+//
+//  Aqui NO hay criptografia. Los bytes que entran y salen ya vienen
+//  cifrados de FlexOS_Vault.cpp. Este modulo nunca ve una clave.
+// -------------------------------------------------------------
+bool flexFsVaultInit(){
+  if(!fsMounted) return false;
+  if(!LittleFS.exists(FLEXFS_DIR_VAULT))  LittleFS.mkdir(FLEXFS_DIR_VAULT);
+  if(!LittleFS.exists(FLEXFS_DIR_VAULTD)) LittleFS.mkdir(FLEXFS_DIR_VAULTD);
+  return LittleFS.exists(FLEXFS_DIR_VAULT) && LittleFS.exists(FLEXFS_DIR_VAULTD);
+}
+
+bool flexFsPrivExists(const char* path){
+  if(!fsMounted || !flexFsIsVaultPath(path)) return false;
+  return LittleFS.exists(path);
+}
+
+uint32_t flexFsPrivSize(const char* path){
+  if(!fsMounted || !flexFsIsVaultPath(path)) return 0;
+  File f = LittleFS.open(path, "r");
+  if(!f) return 0;
+  uint32_t s = f.isDirectory() ? 0 : (uint32_t)f.size();
+  f.close();
+  return s;
+}
+
+int flexFsPrivRead(const char* path, uint32_t off, void* buf, size_t n){
+  if(!fsMounted || !flexFsIsVaultPath(path) || !buf || n == 0) return -1;
+  File f = LittleFS.open(path, "r");
+  if(!f) return -1;
+  if(off){
+    if(!f.seek(off)){ f.close(); return 0; }
+  }
+  size_t r = f.read((uint8_t*)buf, n);
+  f.close();
+  return (int)r;
+}
+
+bool flexFsPrivAppend(const char* path, const void* buf, size_t n){
+  if(!fsMounted || !flexFsIsVaultPath(path)) return false;
+  if(n > 0 && !buf) return false;
+  File f = LittleFS.open(path, "a");
+  if(!f) return false;
+  size_t w = n ? f.write((const uint8_t*)buf, n) : 0;
+  f.close();
+  return w == n;
+}
+
+bool flexFsPrivWrite(const char* path, const void* buf, size_t n){
+  if(!fsMounted || !flexFsIsVaultPath(path)) return false;
+  if(n > 0 && !buf) return false;
+  File f = LittleFS.open(path, "w");
+  if(!f) return false;
+  size_t w = n ? f.write((const uint8_t*)buf, n) : 0;
+  f.close();
+  return w == n;
+}
+
+bool flexFsPrivDelete(const char* path){
+  if(!fsMounted || !flexFsIsVaultPath(path)) return false;
+  if(!LittleFS.exists(path)) return true;                  // ya no esta: hecho
+  return LittleFS.remove(path);
+}
+
+uint32_t flexFsPrivDirSize(const char* dir){
+  if(!fsMounted || !flexFsIsVaultPath(dir)) return 0;
+  File d = LittleFS.open(dir);
+  if(!d || !d.isDirectory()){ if(d) d.close(); return 0; }
+  uint32_t total = 0;
+  File e = d.openNextFile();
+  while(e){
+    if(!e.isDirectory()) total += (uint32_t)e.size();
+    e.close();
+    e = d.openNextFile();
+  }
+  d.close();
+  return total;
 }

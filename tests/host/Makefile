@@ -42,7 +42,8 @@ CORE_SRC := $(ROOT)/FlexOS_Browser.cpp
 JPEG_SRC := $(ROOT)/FlexOS_JPEG.cpp
 APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 
-BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net
+BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net \
+        $(BUILD)/test_vault
 TOOLS := $(BUILD)/jpegcheck
 
 .PHONY: all run all-boards fixtures clean ino
@@ -57,6 +58,17 @@ $(BUILD)/test_jpeg: test_jpeg.cpp $(JPEG_SRC) $(ROOT)/FlexOS_JPEG.h | $(BUILD)
 
 $(BUILD)/test_browser: test_browser.cpp $(CORE_SRC) $(ROOT)/FlexOS_Browser.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_browser.cpp $(CORE_SRC)
+
+# --- Flex Vault: cripto y almacen cifrado ---
+# Se compila el modulo REAL (FlexOS_Vault.cpp) con OpenSSL como
+# backend (en la placa es mbedTLS con el acelerador del P4) y con un
+# sistema de archivos y una NVS en memoria, que viven en el propio
+# test. CON sanitizers: aqui se manejan longitudes, desplazamientos y
+# buffers de bloque, y un desbordamiento en esa aritmetica no puede
+# quedarse en "parece que funciona".
+VAULTFLAGS := -Ivaultstub -Iinostub -I$(ROOT) -DARDUINO=200 -Wno-format-truncation
+$(BUILD)/test_vault: test_vault.cpp $(ROOT)/FlexOS_Vault.cpp $(ROOT)/FlexOS_Vault.h $(ROOT)/FlexOS_FS.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(VAULTFLAGS) -o $@ test_vault.cpp $(ROOT)/FlexOS_Vault.cpp -lcrypto
 
 # --- codigo de dispositivo: con el entorno simulado ---
 # Sin sanitizers a proposito: el simulador define las funciones de
@@ -124,6 +136,8 @@ $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) | $(BUILD)
 run: ino $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@echo
 	@$(BUILD)/test_ino
+	@echo
+	@$(BUILD)/test_vault
 	@echo
 	@$(BUILD)/test_jpeg ../fixtures
 	@echo
