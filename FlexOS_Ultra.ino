@@ -19618,6 +19618,27 @@ struct NewsCfg {
 static NewsCfg gNews;
 static bool    gNewsNvsOk = true;      // false = NVS no disponible -> error real en pantalla
 
+// TLS DEL SERVICIO DE NOTICIAS.
+// El endpoint lo elige el usuario en tiempo de ejecucion, asi que no hay
+// ninguna CA que se pueda incrustar de antemano en el firmware. Antes eso se
+// resolvia llamando siempre a setInsecure(), es decir aceptando CUALQUIER
+// certificado: por ese socket viaja la CLAVE DE API del usuario, asi que quien
+// se pusiera en medio se la quedaba.
+//
+// Ahora hay dos niveles, y el que se aplica por defecto es el seguro:
+//   1. Si el core trae el paquete de certificados raiz de ESP-IDF, se valida
+//      contra el. Eso cubre cualquier servicio publico con un certificado
+//      normal, sin que el usuario tenga que hacer nada.
+//   2. Si no lo trae, o el certificado no valida, la consulta NO se hace --
+//      salvo que el usuario active a mano "Aceptar certificado sin verificar"
+//      en Ajustes -> Noticias, con su advertencia delante.
+//
+// Se guarda en su PROPIA clave de NVS ("tlsins") en vez de dentro de NewsCfg:
+// anadir un campo a la struct cambiaria su tamano y newsLoad descartaria la
+// configuracion guardada, o sea que actualizar el firmware borraria la URL y la
+// clave de quien ya las tenia puestas.
+static bool gNewsTlsInsecure = false;
+
 // (struct NewsItem y sus dos tamanos viven ARRIBA DEL TODO, con el resto de
 //  tipos que aparecen en la firma de alguna funcion. Ver el bloque
 //  "UNA NOTICIA YA NORMALIZADA" al principio del fichero y el motivo ahi
@@ -19640,7 +19661,9 @@ static uint8_t  gNewsSeenN = 0;        // cuantas huellas validas hay
 static uint8_t  gNewsSeenHead = 0;     // siguiente ranura a sobrescribir (anillo)
 
 // ---- Estado del servicio ----
-enum { NERR_NONE = 0, NERR_NOCFG, NERR_NOWIFI, NERR_HTTP, NERR_JSON, NERR_MEM, NERR_EMPTY };
+// NERR_TLS se anade AL FINAL: los valores anteriores no se mueven.
+enum { NERR_NONE = 0, NERR_NOCFG, NERR_NOWIFI, NERR_HTTP, NERR_JSON, NERR_MEM, NERR_EMPTY,
+       NERR_TLS };
 static volatile bool     gNewsBusy   = false;
 static volatile bool     gNewsResult = false;   // la tarea dejo algo que consumir
 static volatile uint8_t  gNewsErr    = NERR_NONE;
@@ -19654,6 +19677,12 @@ static uint8_t  gNewsCatCur  = 0;               // categoria que toca consultar 
 static bool     gNewsTestReq = false;           // la consulta en curso es "Probar conexion"
 static uint8_t  gNewsTestRes = 0;               // 0 sin probar, 1 correcta, 2 fallida
 
+// CA raiz del servicio de noticias. Vacia por defecto: el endpoint lo elige el
+// usuario, asi que no hay una CA que valga para todos. Ver el bloque de
+// gNewsTlsInsecure mas abajo.
+#ifndef FLEXOS_NEWS_ROOT_CA
+#define FLEXOS_NEWS_ROOT_CA ""
+#endif
 #define NEWS_NVS_NS "flexos_news"
 
 // -------------------------------------------------------------
@@ -19708,6 +19737,7 @@ static void newsSaveCfg(){
   if(!p.begin(NEWS_NVS_NS, false)){ gNewsNvsOk = false; return; }
   gNewsNvsOk = true;
   p.putBytes("cfg", &gNews, sizeof(gNews));
+  p.putBool("tlsins", gNewsTlsInsecure);
   p.end();
 }
 static void newsSaveCenter(){
@@ -19735,6 +19765,7 @@ static void newsLoad(){
     }
   }
   gNewsNvsOk = true;
+  gNewsTlsInsecure = p.getBool("tlsins", false);      // por defecto: NO se acepta sin verificar
   NewsCfg tmp;
   if(p.getBytes("cfg", &tmp, sizeof(tmp)) == sizeof(tmp)){
     gNews = tmp;
@@ -20154,12 +20185,30 @@ static void newsTask(void*){
     HTTPClient       http;
     bool opened;
     if(https){
-      // TLS SIN fijar certificado: el endpoint lo elige el usuario en tiempo
-      // de ejecucion, asi que no hay ninguna CA que se pueda incrustar aqui
-      // de antemano. Es una decision consciente y acotada: por este socket
-      // solo viajan titulares publicos y la clave que el propio usuario ha
-      // configurado. Para fijar una CA habria que anadirla tambien en Ajustes.
-      sec.setInsecure();
+      // TLS: se valida contra el paquete de certificados raiz de ESP-IDF si el
+      // core lo trae. Si no lo trae, la consulta solo sale con el permiso
+      // EXPLICITO del usuario (Ajustes -> Noticias), porque por este socket
+      // viaja su clave de API. Ver el bloque de gNewsTlsInsecure.
+      // Si quien publica el firmware fija un proveedor de noticias concreto,
+      // puede incrustar su CA raiz aqui (-DFLEXOS_NEWS_ROOT_CA="...") y la
+      // validacion pasa a ser real sin que el usuario tenga que hacer nada.
+      // Por defecto esta vacia, porque el endpoint es configurable.
+      //
+      // NO se usa el paquete de certificados de ESP-IDF a proposito: la firma
+      // de WiFiClientSecure::setCACertBundle cambio entre versiones del core
+      // (uno o dos argumentos), y meter aqui una llamada que no se puede
+      // probar en esta maquina es la forma de que el firmware no compile en la
+      // placa de otro. Cuando se fije la version del core, entra en una linea.
+      const char* nca = FLEXOS_NEWS_ROOT_CA;
+      bool verified = (nca && nca[0]);
+      if(verified) sec.setCACert(nca);
+      if(!verified && !gNewsTlsInsecure){
+        gNewsErr = NERR_TLS;
+        heap_caps_free(url); heap_caps_free(buf);
+        gNewsBusy = false;
+        return;
+      }
+      if(!verified) sec.setInsecure();       // permiso explicito del usuario
       sec.setTimeout(NEWS_HTTP_TIMEOUT / 1000);
       opened = http.begin(sec, url);
     } else {
@@ -20389,6 +20438,7 @@ static void newsStateText(char* out, size_t n){
     case NERR_JSON:   snprintf(out, n, "Respuesta no reconocida (JSON)"); break;
     case NERR_MEM:    snprintf(out, n, "Sin memoria para la consulta"); break;
     case NERR_EMPTY:  snprintf(out, n, "El servicio no devolvi\xC3\xB3 noticias"); break;
+    case NERR_TLS:    snprintf(out, n, "Certificado no verificado (act\xC3\xADvalo si conf\xC3\xAD" "as)"); break;
     case NERR_NOCFG:  snprintf(out, n, "Falta configurar el servicio"); break;
     default:
       if(gNewsLastOk >= FLEXOS_CLK_MIN_EPOCH){
@@ -20509,6 +20559,10 @@ static void newsContent(){
                    : "Consulta el servicio ahora mismo";
     y = newsRow(y, "Probar conexi\xC3\xB3n", tr, false, false, 0);
     y = newsRow(y, "Borrar credenciales", "Borra la URL y la clave de NVS", false, false, TH_DANGER);
+    y = newsRow(y, "Aceptar certificado sin verificar",
+                gNewsTlsInsecure ? "Activado - tu clave de API viaja sin comprobar el servidor"
+                                 : "Desactivado (recomendado)",
+                false, false, gNewsTlsInsecure ? TH_WARN : 0);
 
     y += 10;
     drawTextClip(16, y, "La URL admite {key} {country} {category} {max}.", 1, SET_TXT_MUTE, SCR_W - 16); y += 18;
@@ -20662,6 +20716,11 @@ static void newsRowAction(int idx){
     case 12: gNews.quietToIdx   = (uint8_t)((gNews.quietToIdx   + 1) & 3); newsSaveCfg(); break;
     case 13: gNewsTestRes = 0; newsRequest(true, true); break;  // Probar conexion
     case 14: newsWipeCreds(); break;                            // Borrar credenciales
+    case 15:                                                    // TLS sin verificar
+      gNewsTlsInsecure = !gNewsTlsInsecure;
+      gNewsFails = 0; gNewsNextMs = 0;
+      newsSaveCfg();
+      break;
     default: return;
   }
   newsRender();

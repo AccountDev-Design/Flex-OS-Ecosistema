@@ -65,12 +65,40 @@
 #define FLEXOS_OTA_MANIFEST_URL  "https://raw.githubusercontent.com/AccountDev-Design/Flex-OS-Ecosistema/main/ota/manifest.json"
 #endif
 
-// Certificado raiz del servidor (PEM). Si se deja vacio se acepta
-// cualquier certificado (setInsecure): comodo para probar, NO para
-// produccion. Con un CA definido, un certificado que no valide da
-// OTA_ERR_TLS -- que es justo el estado "certificado invalido".
+// Certificado raiz del servidor (PEM). Con un CA definido, un
+// certificado que no valide da OTA_ERR_TLS -- que es justo el estado
+// "certificado invalido".
 #ifndef FLEXOS_OTA_ROOT_CA
 #define FLEXOS_OTA_ROOT_CA  ""
+#endif
+
+// -------------------------------------------------------------
+//  TLS SIN VERIFICAR: PROHIBIDO EN UNA VERSION PUBLICABLE
+//  ------------------------------------------------------------
+//  Antes, si FLEXOS_OTA_ROOT_CA estaba vacio, el modulo llamaba a
+//  setInsecure() y descargaba el firmware aceptando CUALQUIER
+//  certificado. Eso convierte la actualizacion en la mejor via de
+//  entrada que tiene el dispositivo: quien controle la red puede
+//  responder al manifiesto con su propio servidor y servir el binario
+//  que quiera. Que la descarga luego cuadre con el MD5 del manifiesto
+//  no ayuda: el manifiesto viene por el MISMO canal, asi que el
+//  atacante pone los dos.
+//
+//  Ahora hay un interruptor explicito y su valor por defecto es 0:
+//    · FLEXOS_OTA_ALLOW_INSECURE = 0 (por defecto)
+//      Sin CA no se conecta. La OTA falla con OTA_ERR_NO_CA y la
+//      interfaz dice "Falta el certificado del servidor". Preferible
+//      con diferencia a una actualizacion que se deja suplantar.
+//    · FLEXOS_OTA_ALLOW_INSECURE = 1
+//      Solo para una placa de pruebas, y hay que pedirlo a mano en la
+//      linea de compilacion (-DFLEXOS_OTA_ALLOW_INSECURE=1). Nunca en
+//      un binario que se publique.
+//
+//  Como se pone en produccion: define FLEXOS_OTA_ROOT_CA con el PEM de
+//  la CA raiz del servidor del manifiesto y deja este interruptor en 0.
+// -------------------------------------------------------------
+#ifndef FLEXOS_OTA_ALLOW_INSECURE
+#define FLEXOS_OTA_ALLOW_INSECURE  0
 #endif
 
 // Interruptor maestro. A 0, el modulo compila a casi nada (los hooks
@@ -84,6 +112,56 @@
 // del boot y solo si hay red). A 0, solo se busca a peticion del usuario.
 #ifndef FLEXOS_OTA_AUTOCHECK
 #define FLEXOS_OTA_AUTOCHECK  1
+#endif
+
+// -------------------------------------------------------------
+//  FIRMA DIGITAL Y ANTI-ROLLBACK  ·  arquitectura preparada, NO
+//  activada todavia
+//  ------------------------------------------------------------
+//  Los dos interruptores de abajo estan a 0 A PROPOSITO: activarlos
+//  cambia lo que el dispositivo acepta como firmware valido, y eso
+//  tiene que probarse primero en una placa de pruebas. Lo que ya esta
+//  hecho es la ARQUITECTURA, para que encenderlos sea un cambio
+//  pequeno y no un rediseno:
+//
+//  1. FIRMA (FLEXOS_OTA_REQUIRE_SIGNATURE)
+//     El manifiesto admite ya dos campos nuevos, "sig" y "sigalg",
+//     que el lector reconoce y guarda (ver FlexOtaInfo). Con el
+//     interruptor a 1, una entrada SIN firma se rechaza con
+//     OTA_ERR_NO_SIG y una firma que no valide con OTA_ERR_BAD_SIG.
+//     Plan: Ed25519 sobre el hash SHA-256 del binario, con la clave
+//     PUBLICA incrustada en el firmware (FLEXOS_OTA_PUBKEY). Ed25519
+//     porque mbedTLS lo trae y la clave publica son 32 bytes.
+//     Lo que falta para encenderlo: generar el par de claves, firmar
+//     los binarios al publicarlos y meter la clave publica aqui.
+//
+//  2. ANTI-ROLLBACK (FLEXOS_OTA_ANTIROLLBACK)
+//     Impide instalar una version ANTERIOR a la que ya corre, que es
+//     como se explota una vulnerabilidad ya corregida: se obliga al
+//     dispositivo a volver al firmware que la tenia. El comparador de
+//     versiones que ya existe (otaVerCmp) da esto casi gratis; con el
+//     interruptor a 1, una version menor que la instalada se rechaza
+//     con OTA_ERR_ROLLBACK en vez de instalarse.
+//     No se activa aun porque el anti-rollback DE VERDAD necesita el
+//     contador seguro de eFuses (esp_efuse_update_secure_version), y
+//     los eFuses son irreversibles: ni un fallo de calculo se puede
+//     deshacer. Esta version deja la comprobacion en software, que ya
+//     frena la degradacion normal, y no toca ni un eFuse.
+//
+//  MIENTRAS SIGAN A 0 el comportamiento es exactamente el de siempre,
+//  asi que ninguna placa se queda sin poder actualizarse por esto.
+// -------------------------------------------------------------
+#ifndef FLEXOS_OTA_REQUIRE_SIGNATURE
+#define FLEXOS_OTA_REQUIRE_SIGNATURE  0
+#endif
+#ifndef FLEXOS_OTA_ANTIROLLBACK
+#define FLEXOS_OTA_ANTIROLLBACK       0
+#endif
+// Clave PUBLICA de firma (Ed25519, 32 bytes en hexadecimal). Vacia
+// mientras la firma no este activada. Aqui NUNCA va una clave privada:
+// la privada se queda en el sitio desde el que se publica.
+#ifndef FLEXOS_OTA_PUBKEY
+#define FLEXOS_OTA_PUBKEY  ""
 #endif
 
 // =============================================================
@@ -187,7 +265,13 @@ enum FlexOtaError : uint8_t {
   OTA_ERR_WRITE,          // error escribiendo en la particion
   OTA_ERR_TRUNCATED,      // la descarga acabo antes de tiempo
   OTA_ERR_CORRUPT,        // Update.end(): MD5/magic invalido
-  OTA_ERR_CANCELLED       // el usuario cancelo
+  OTA_ERR_CANCELLED,      // el usuario cancelo
+  // Codigos nuevos. Se anaden AL FINAL a proposito: los valores de los
+  // anteriores no se mueven (la interfaz y los logs los usan).
+  OTA_ERR_NO_CA,          // falta el certificado del servidor y no se acepta TLS sin verificar
+  OTA_ERR_NO_SIG,         // el manifiesto no trae firma y la firma es obligatoria
+  OTA_ERR_BAD_SIG,        // la firma no valida contra la clave publica
+  OTA_ERR_ROLLBACK        // la version ofrecida es ANTERIOR a la instalada
 };
 
 // Capa de overlay activa. El render OTA es SIEMPRE lo ultimo del

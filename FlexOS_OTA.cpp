@@ -141,6 +141,10 @@ static char gRemoteVer[16] = "";
 static char gUrl[192]      = "";
 static char gMd5[36]       = "";
 static char gChangelog[FLEXOS_OTA_CHANGELOG_MAX] = "";
+// FIRMA de la entrada del manifiesto, en hexadecimal (arquitectura
+// preparada; ver FLEXOS_OTA_REQUIRE_SIGNATURE en FlexOS_OTA.h). 64 bytes
+// de firma Ed25519 = 128 caracteres hex, mas el terminador.
+static char gSig[132]      = "";
 
 // Buffers grandes: ESTATICOS. No se pide ni un byte al heap en toda
 // la ruta de descarga -> el heap no se fragmenta y no hay nada que
@@ -283,10 +287,24 @@ static bool otaOpen(HTTPClient& http, WiFiClientSecure& sec, const char* url){
   // Mejor un estado claro que un fallo de asignacion a media conexion.
   if(esp_get_free_heap_size() < FLEXOS_OTA_MIN_HEAP) return otaFail(OTA_ERR_LOWMEM);
 
+  // TLS. Sin CA definido NO se conecta, salvo que alguien lo haya pedido
+  // explicitamente para una placa de pruebas
+  // (-DFLEXOS_OTA_ALLOW_INSECURE=1). Aceptar cualquier certificado en un
+  // binario publicable convierte la actualizacion en la via de entrada mas
+  // facil del dispositivo: quien controle la red sirve el manifiesto Y el
+  // firmware, asi que el MD5 del manifiesto no protege de nada.
+  // Ver el bloque de FLEXOS_OTA_ALLOW_INSECURE en FlexOS_OTA.h.
   const char* ca = FLEXOS_OTA_ROOT_CA;
   bool pinned = (ca && ca[0]);
-  if(pinned) sec.setCACert(ca);      // validacion real del certificado
-  else       sec.setInsecure();      // solo para pruebas (ver FlexOS_OTA.h)
+  if(pinned){
+    sec.setCACert(ca);               // validacion real del certificado
+  } else {
+#if FLEXOS_OTA_ALLOW_INSECURE
+    sec.setInsecure();               // SOLO placa de pruebas (ver FlexOS_OTA.h)
+#else
+    return otaFail(OTA_ERR_NO_CA);   // version publicable: no se descarga sin verificar
+#endif
+  }
   sec.setTimeout(FLEXOS_OTA_HTTP_TIMEOUT / 1000);
 
   http.setTimeout(FLEXOS_OTA_HTTP_TIMEOUT);
@@ -348,6 +366,14 @@ static bool otaCheck(){
   if(!verParse(FLEXOS_FW_VERSION, lv))  return otaFail(OTA_ERR_BAD_VERSION);
 
   if(verCmp(rv, lv) <= 0){              // igual o mas antigua: nada que hacer
+    // ANTI-ROLLBACK (preparado, ver FlexOS_OTA.h). Hoy este camino es
+    // "ya estas al dia" y no ofrece nada, asi que degradar ya no ocurre
+    // por accidente. Con el interruptor a 1, una version ANTERIOR pasa a
+    // ser un error explicito -- que es lo que hara falta el dia en que el
+    // manifiesto pueda ofrecer varias versiones a la vez.
+#if FLEXOS_OTA_ANTIROLLBACK
+    if(verCmp(rv, lv) < 0) return otaFail(OTA_ERR_ROLLBACK);
+#endif
     gHasUpd = false; gRemoteVer[0] = 0;
     otaSet(OTA_UP_TO_DATE);
     return true;
@@ -370,12 +396,29 @@ static bool otaCheck(){
   const char* ps = jFind(bs, be, "size");
   if(ps) size = jNum(ps, be);                  // opcional (informativo)
 
+  // FIRMA DIGITAL (arquitectura preparada, ver FlexOS_OTA.h). El
+  // manifiesto ya puede traer "sig" (firma en hexadecimal) y "sigalg"
+  // (algoritmo). Se leen y se guardan SIEMPRE, para que un manifiesto
+  // firmado no rompa nada mientras la comprobacion sigue apagada; con
+  // FLEXOS_OTA_REQUIRE_SIGNATURE a 1, la ausencia de firma pasa a ser un
+  // error en vez de un dato que falta.
+  char sig[sizeof(gSig)] = "";
+  const char* pg = jFind(bs, be, "sig");
+  if(pg) jStr(pg, be, sig, sizeof(sig));
+#if FLEXOS_OTA_REQUIRE_SIGNATURE
+  if(!sig[0]) return otaFail(OTA_ERR_NO_SIG);
+  // La verificacion real (Ed25519 sobre el SHA-256 del binario) se hace
+  // al terminar la descarga, cuando el hash existe: aqui solo se
+  // comprueba que la firma viene y se guarda. Ver otaVerifySignature.
+#endif
+
   // Publicacion: primero los datos, el estado DESPUES (ver cabecera
   // de "ESTADO COMPARTIDO"). Asi la UI nunca lee cadenas a medias.
   strncpy(gRemoteVer, ver, sizeof(gRemoteVer) - 1); gRemoteVer[sizeof(gRemoteVer) - 1] = 0;
   strncpy(gUrl,       url, sizeof(gUrl) - 1);       gUrl[sizeof(gUrl) - 1] = 0;
   strncpy(gMd5,       md5, sizeof(gMd5) - 1);       gMd5[sizeof(gMd5) - 1] = 0;
   strncpy(gChangelog, log, sizeof(gChangelog) - 1); gChangelog[sizeof(gChangelog) - 1] = 0;
+  strncpy(gSig,       sig, sizeof(gSig) - 1);       gSig[sizeof(gSig) - 1] = 0;
   gTotal   = size;
   gDone    = 0;
   gPercent = 0;
@@ -837,6 +880,10 @@ static const char* otaErrText(FlexOtaError e){
     case OTA_ERR_WRITE:        return "Error de escritura";
     case OTA_ERR_TRUNCATED:    return "Descarga incompleta";
     case OTA_ERR_CORRUPT:      return "Firmware corrupto";
+    case OTA_ERR_NO_CA:        return "Falta el certificado del servidor";
+    case OTA_ERR_NO_SIG:       return "La actualizacion no viene firmada";
+    case OTA_ERR_BAD_SIG:      return "La firma de la actualizacion no es valida";
+    case OTA_ERR_ROLLBACK:     return "Esa version es anterior a la instalada";
     case OTA_ERR_CANCELLED:    return "Actualizacion cancelada";
     default:                   return "Error desconocido";
   }
