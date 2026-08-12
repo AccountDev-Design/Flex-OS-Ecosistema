@@ -31,6 +31,9 @@ const char* flexOtaStatusText(){ return "Sin comprobar"; }
 // ---- Sistema de archivos ----
 bool        flexFsBegin(){ return false; }
 bool        flexFsReady(){ return false; }
+bool        flexFsIsDir(const char*){ return false; }
+uint32_t    flexFsSize(const char*){ return 0; }
+bool        flexFsExists(const char*){ return false; }
 const char* flexFsError(){ return "no montado"; }
 uint32_t    flexFsUsedBytes(){ return 0; }
 uint32_t    flexFsTotalBytes(){ return 0; }

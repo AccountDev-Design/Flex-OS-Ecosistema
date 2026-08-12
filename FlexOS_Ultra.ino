@@ -4159,6 +4159,8 @@ static void vaultTick();                                  // su tick, desde loop
 static void vaultRender();                                // repintado completo
 static void vaultLockFromSystem(int reason);              // cierre desde fuera (pantalla, apagado, bloqueo...)
 static void vaultStatusText(char* out, size_t n);          // texto de la fila de Ajustes
+static bool vaultMoveRequest(const char* path, int kind);  // "Mover a Carpeta segura" desde una app
+static const char* vaultMoveError();                       // motivo si vaultMoveRequest devolvio false
 static void suspWakeLockScreen();
 // true mientras hay dedos sobre la rejilla del teclado. Se define abajo, con el
 // teclado; aqui solo el prototipo (primitivos en la firma). Lo necesita el
@@ -5731,7 +5733,7 @@ static bool settingsHandleBack();
 static void wifiSettingsEnter(); static void wifiTick();    // Ajustes -> Red e Internet -> Wi-Fi, abajo
 static void calcEnter(); static void calcTick();           // Calculadora (M2), abajo
 static void pcEnter(); static void pcTick();               // Modo PC (M4), abajo
-static void galEnter();                                    // Galeria (M2)
+static void galEnter(); static void galTick();              // Galeria (contenido real + Flex Vault)
 static void bienEnter(); static void bienTick();           // Bienestar (M2)
 static void calEnter(); static void calTick();             // Calendario (M2)
 static void vidEnter(); static void vidTick();             // Multimedia (esqueleto)
@@ -5979,7 +5981,7 @@ static void appRelojTick(){ if(gMinChanged) appRelojRender(); }
 // ---- Registro de apps (indices = enum IC_*) ----
 static FlexApp APP_REG[16] = {
   { appRelojEnter, appRelojTick, APP_FLEX },              // 0  Reloj  (REAL)
-  { galEnter, NULL, APP_FLEX },                           // 1  Galeria (REAL, M2)
+  { galEnter, galTick, APP_FLEX },                        // 1  Galeria (REAL: JPEG de /Documentos + dibujos de /Paint)
   { vidEnter, vidTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH },  // 2  Multimedia (esqueleto)
   { almEnter, almTick, APP_FLEX },                        // 3  Almacenamiento (REAL: LittleFS + PSRAM)
   { pcEnter, pcTick, APP_CUSTOM_HEADER },                  // 4  Modo PC (REAL, M4) -- usa render landscape (gLand)
@@ -7216,50 +7218,12 @@ static void bienTick(){ if(gMinChanged) bienRender(); }
 //                ancho real (miniatura minima legible de 92 px), asi que al
 //                ensanchar la ventana no queda hueco: entran mas columnas.
 //   Opcional 1 : pie con el recuento de elementos -- aparece si sobran >= 18 px.
-static void galRender(){
-  setBuf(fb);
-  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
-  fillRect(bx, by, bw, bh, WIN_BG);
-  int pad = uiPad(), gap = uiGap();
-  int y0 = by + pad;
-  const char* ttl = "Galer\xC3\xAD" "a";
-  int fsT = uiFontFit(ttl, bw - 2 * pad, uiFontH(bh / 12));
-  drawTextC(bx + bw / 2, y0, ttl, fsT, TH_TXT);
-  int gy = y0 + uiLineH(fsT) + gap;
-  int cols = (bw - 2 * pad + gap) / (92 + gap); if(cols < 2) cols = 2; if(cols > 6) cols = 6;
-  int tw = (bw - 2 * pad - (cols - 1) * gap) / cols;
-  int th = tw * 3 / 4;
-  int gx = bx + pad;
-  // Las miniaturas son CONTENIDO (mini-paisajes generados): sus colores no
-  // siguen el tema, igual que no lo harian unas fotos reales del usuario.
-  uint16_t sky[6] = { rgb565(120,180,235), rgb565(250,200,120), rgb565(180,150,220),
-                      rgb565(120,210,190), rgb565(240,160,170), rgb565(150,170,235) };
-  uint16_t sun[6] = { rgb565(255,240,150), rgb565(255,120,80), rgb565(255,230,180),
-                      rgb565(255,255,210), rgb565(255,210,120), rgb565(255,245,190) };
-  uint16_t mtn[6] = { rgb565(60,110,90), rgb565(120,80,60), rgb565(80,70,110),
-                      rgb565(50,110,110), rgb565(120,70,90), rgb565(70,90,130) };
-  int rowsFit = ((by + bh) - gy - pad + gap) / (th + gap); if(rowsFit < 1) rowsFit = 1;
-  int shown = cols * rowsFit; if(shown > 12) shown = 12;
-  int rad = tw / 10; if(rad < 3) rad = 3;
-  for(int i = 0; i < shown; i++){
-    int c = i % cols, r = i / cols, x = gx + c * (tw + gap), y = gy + r * (th + gap), k = i % 6;
-    fillRoundRect(x, y, tw, th, rad, sky[k]);
-    fillCircle(x + tw - tw / 5, y + th / 5, tw / 9 + 1, sun[k]);
-    fillTriangle(x + tw / 20, y + th - th / 20, x + tw / 2 - tw / 14, y + th - th * 2 / 5,
-                 x + tw - tw / 5, y + th - th / 20, mtn[k]);
-    fillTriangle(x + tw / 2, y + th - th / 20, x + tw - tw / 6, y + th - th / 3,
-                 x + tw - tw / 20, y + th - th / 20, mix565(mtn[k], rgb565(0,0,0), 60));
-  }
-  int fy = gy + ((shown + cols - 1) / cols) * (th + gap);
-  uint8_t aFoot = uiSection(0, (by + bh) - fy - pad >= 18);
-  if(aFoot){
-    char cnt[40]; snprintf(cnt, sizeof(cnt), "%d de 12 elementos", shown);
-    uiTextC(bx + bw / 2, by + bh - pad - uiLineH(2), cnt,
-            uiFontFit(cnt, bw - 2 * pad, 2), TH_MUTE, aFoot);
-  }
-  flxFlush(WIN_TOP, WIN_BOT);
-}
-static void galEnter(){ galRender(); }
+// La GALERIA vive mas abajo, junto al resto de las pantallas que usan el kit de
+// ficheros (menu de pulsacion larga, renombrar, papelera): necesita fkMenu*,
+// fkAsk*, fkName* y fkTrash*, que se definen despues de este punto. Aqui solo
+// quedaba su version antigua de miniaturas generadas, que ya no existe.
+
+
 
 // #############################################################
 // ##  MODO PC  (Milestone 4)  ·  Samsung DeX STANDALONE
@@ -11830,11 +11794,19 @@ static void noteEditorTick(){
 #define FK_ACT_DEL    1
 #define FK_ACT_REN    2
 #define FK_ACT_TRASH  3
-#define FK_MENU_W    258
+// FLEX VAULT: quinta accion OPCIONAL. Solo la ofrecen las pantallas que
+// manejan un elemento concreto y movible (Galeria, Notas, Archivos, Paint), y
+// solo cuando la boveda tiene sentido ahi. El menu sigue teniendo cuatro filas
+// en el resto de sitios: fkMenuN decide cuantas hay, asi que anadirla no
+// cambia ni la geometria ni el comportamiento de las pantallas que no la piden.
+#define FK_ACT_VAULT  4
+#define FK_MENU_W    272
 #define FK_MENU_RH    46
 #define FK_MENU_PAD   10
 
-static const char* FK_MENU_LBL[4] = { "Seleccionar", "Eliminar", "Renombrar", "Papelera" };
+static const char* FK_MENU_LBL[5] = { "Seleccionar", "Eliminar", "Renombrar", "Papelera",
+                                      "Mover a Carpeta segura" };
+static int fkMenuN = 4;                 // filas del menu abierto (4 o 5)
 
 // ---- Texto ajustado a una caja (para la vista previa REAL de una nota) ----
 // Corta por caracteres, no por palabras, a proposito: el contenido de una nota
@@ -11881,12 +11853,17 @@ static void fkMenuGlyph(int k, int cx, int cy){
     fillRect(cx + 8, cy - 10, 2, 20, rgb565(40,44,56));
     fillRect(cx + 5, cy - 10, 8, 2,  rgb565(40,44,56));
     fillRect(cx + 5, cy + 8,  8, 2,  rgb565(40,44,56));
-  } else {                                              // papelera blanca (mover a Papelera)
+  } else if(k == FK_ACT_TRASH){                         // papelera blanca (mover a Papelera)
     fillRect(cx - 10, cy - 12, 20, 3, w);
     fillRect(cx - 4,  cy - 16, 8,  3, w);
     drawRoundRect(cx - 8, cy - 8, 16, 20, 3, w);
     fillRect(cx - 3, cy - 4, 2, 12, w);
     fillRect(cx + 1, cy - 4, 2, 12, w);
+  } else {                                              // candado cerrado (Flex Vault)
+    uint16_t v = rgb565(120,80,190);
+    fillRoundRect(cx - 10, cy - 3, 20, 16, 4, v);
+    arcStroke(cx, cy - 3, 6, 180, 360, 3, v);
+    fillCircle(cx, cy + 5, 2, rgb565(255,255,255));
   }
 }
 
@@ -11895,7 +11872,7 @@ static int  fkMenuX = 0, fkMenuY = 0;
 
 static void fkMenuGeom(int &x, int &y, int &w, int &h){
   w = FK_MENU_W;
-  h = 4 * FK_MENU_RH + 2 * FK_MENU_PAD;
+  h = fkMenuN * FK_MENU_RH + 2 * FK_MENU_PAD;
   x = fkMenuX; y = fkMenuY;
   if(x + w > SCR_W - 8) x = SCR_W - 8 - w;
   if(x < 8) x = 8;
@@ -11907,22 +11884,33 @@ static void fkMenuDraw(){
   int x, y, w, h; fkMenuGeom(x, y, w, h);
   if(uiGlass) drawLiquidGlassPanel(x, y, w, h, 18, rgb565(210,214,222));
   else        fillRoundRect(x, y, w, h, 18, rgb565(206,210,218));
-  for(int i = 0; i < 4; i++){
+  for(int i = 0; i < fkMenuN; i++){
     int ry = y + FK_MENU_PAD + i * FK_MENU_RH;
-    drawText(x + 16, ry + 10, FK_MENU_LBL[i], 3, rgb565(16,18,24));
+    // La fila de la boveda va con su color, para que no se confunda con
+    // "Papelera": una lleva el elemento a un sitio del que se recupera, la otra
+    // lo saca del sistema de archivos normal.
+    uint16_t tc = (i == FK_ACT_VAULT) ? rgb565(90,50,160) : rgb565(16,18,24);
+    drawTextClip(x + 16, ry + 10, FK_MENU_LBL[i], (i == FK_ACT_VAULT) ? 2 : 3, tc, x + w - 42);
     fkMenuGlyph(i, x + w - 32, ry + FK_MENU_RH / 2);
   }
   flxFlush(y - 2, y + h + 2);
 }
 
-static void fkMenuOpen(int px, int py){ fkMenuOn = true; fkMenuX = px; fkMenuY = py; fkMenuDraw(); }
+// La version de siempre: cuatro filas, sin Flex Vault. La usan las pantallas
+// que no mueven contenido (y asi no cambia nada de lo que ya funcionaba).
+static void fkMenuOpen(int px, int py){ fkMenuOn = true; fkMenuN = 4; fkMenuX = px; fkMenuY = py; fkMenuDraw(); }
+// Con la quinta fila. `withVault` lo decide quien llama: solo tiene sentido si
+// hay un elemento concreto seleccionado y es un fichero (no una carpeta).
+static void fkMenuOpenV(int px, int py, bool withVault){
+  fkMenuOn = true; fkMenuN = withVault ? 5 : 4; fkMenuX = px; fkMenuY = py; fkMenuDraw();
+}
 
-// -1 = toque fuera del panel (cierra sin accion); 0..3 = accion elegida.
+// -1 = toque fuera del panel (cierra sin accion); 0..fkMenuN-1 = accion elegida.
 static int fkMenuHit(int px, int py){
   int x, y, w, h; fkMenuGeom(x, y, w, h);
   if(px < x || px > x + w || py < y || py > y + h) return -1;
   int i = (py - y - FK_MENU_PAD) / FK_MENU_RH;
-  if(i < 0) i = 0; if(i > 3) i = 3;
+  if(i < 0) i = 0; if(i > fkMenuN - 1) i = fkMenuN - 1;
   return i;
 }
 
@@ -12442,6 +12430,18 @@ static void noteMenuAction(int act){
   } else if(act == FK_ACT_TRASH){
     if(p[0]){ flexFsTrash(p); noteSelIdx = -1; noteReload(); }  // a /Papelera de verdad
     else { fkTrashOpen(); return; }            // sin seleccion: abre la papelera
+  } else if(act == FK_ACT_VAULT){
+    // FLEX VAULT: la nota se cifra y se mueve DENTRO de la boveda. Deja de
+    // existir en /Notas, asi que desaparece de esta lista y solo se abre desde
+    // Flex Vault. Si la boveda esta cerrada, vaultMoveRequest se lleva la
+    // pantalla para pedir la clave y completa el movimiento despues.
+    if(p[0]){
+      noteSelIdx = -1;
+      if(vaultMoveRequest(p, FXV_KIND_NOTE)){
+        if(gState == ST_VAULT) return;         // se fue a pedir la clave
+        noteReload();
+      }
+    }
   }
   noteRenderList();
 }
@@ -12506,7 +12506,7 @@ static void noteListTick(){
       int x, y, w, h; noteCardRect(i, x, y, w, h);
       if(T.startX >= x && T.startX <= x + w && T.startY >= y && T.startY <= y + h){
         noteLongFired = true; noteSelIdx = i;
-        fkMenuOpen(T.x, T.y - 40);
+        fkMenuOpenV(T.x, T.y - 40, true);   // con "Mover a Carpeta segura"
         return;
       }
     }
@@ -13367,6 +13367,17 @@ static void filesMenuAction(int act){
   } else if(act == FK_ACT_TRASH){
     if(p[0]){ flexFsTrash(p); filesSelIdx = -1; filesReload(); }
     else { fkTrashOpen(); return; }               // sin seleccion: abre la papelera
+  } else if(act == FK_ACT_VAULT){
+    // FLEX VAULT: el fichero se cifra dentro de la boveda y desaparece del
+    // explorador. La clase se deduce de la extension, para que una foto acabe
+    // en Galeria privada y un .txt en Notas privadas.
+    if(p[0] && filesSelIdx >= 0 && !filesList[filesSelIdx].dir){
+      filesSelIdx = -1;
+      if(vaultMoveRequest(p, -1)){
+        if(gState == ST_VAULT) return;            // se fue a pedir la clave
+        filesReload();
+      }
+    }
   }
   filesRender();
 }
@@ -13426,7 +13437,10 @@ static void filesTick(){
       int y = filesRowY(base + i);
       if(T.startY >= y && T.startY < y + FILES_RH - 8){
         filesLongFired = true; filesSelIdx = i;
-        fkMenuOpen(T.x, T.y - 40);
+        // Solo los FICHEROS pueden ir a la boveda: mover una carpeta entera
+        // pediria cifrar su arbol, y prometerlo sin hacerlo seria peor que no
+        // ofrecerlo. Ver vaultMoveRequest.
+        fkMenuOpenV(T.x, T.y - 40, !filesList[i].dir);
         return;
       }
     }
@@ -13466,7 +13480,7 @@ static void filesTick(){
         filesReload(); filesRender();
       } else {
         filesSelIdx = i;
-        fkMenuOpen(SCR_W / 2 - 60, y + 30);       // un fichero suelto: acciones sobre el
+        fkMenuOpenV(SCR_W / 2 - 60, y + 30, true);  // un fichero suelto: acciones sobre el
       }
       return;
     }
@@ -16003,6 +16017,17 @@ static void paintMenuAction(int act){
   } else if(act == FK_ACT_TRASH){
     if(p[0]){ flexFsTrash(p); paintSelIdx = -1; paintReload(); }
     else { fkTrashOpen(); return; }               // sin seleccion: abre la papelera
+  } else if(act == FK_ACT_VAULT){
+    // FLEX VAULT: el dibujo se cifra y sale de /Paint. Dentro de la boveda se
+    // sigue VIENDO: la Galeria privada lo descifra a RAM y reproduce sus trazos
+    // desde ahi (flexPaintReplayMem), sin escribir ningun .fxp en claro.
+    if(p[0]){
+      paintSelIdx = -1;
+      if(vaultMoveRequest(p, FXV_KIND_PHOTO)){
+        if(gState == ST_VAULT) return;
+        paintReload();
+      }
+    }
   }
   paintRenderGallery();
 }
@@ -16060,7 +16085,7 @@ static void paintGalleryTick(){
       int x, y, w, h; paintCardRect(i, x, y, w, h);
       if(T.startX >= x && T.startX <= x + w && T.startY >= y && T.startY <= y + h){
         paintLongFired = true; paintSelIdx = i;
-        fkMenuOpen(T.x, T.y - 40);
+        fkMenuOpenV(T.x, T.y - 40, true);   // con "Mover a Carpeta segura"
         return;
       }
     }
@@ -20942,6 +20967,404 @@ static void themeChanged(bool save){
 }
 
 // #############################################################
+// ##  GALERIA  ·  contenido REAL
+// ##  ------------------------------------------------------
+// ##  Antes esta app dibujaba doce mini-paisajes generados: bonitos,
+// ##  pero no eran ficheros de nadie. No se podia abrir uno, ni
+// ##  borrarlo, ni -- y esto es lo que la traia aqui -- moverlo a la
+// ##  Carpeta segura, porque no habia nada que mover.
+// ##
+// ##  Ahora lista lo que hay DE VERDAD en la particion de datos:
+// ##    · imagenes JPEG de /Documentos
+// ##    · dibujos .fxp de /Paint
+// ##  Las miniaturas tampoco son adorno: el JPEG se decodifica de
+// ##  verdad (a la caja de la miniatura, no a tamano completo) y el
+// ##  dibujo se reproduce con sus trazos reales a escala.
+// ##
+// ##  Si no hay ninguna imagen, se dice que no hay ninguna. Ensenar
+// ##  paisajes de relleno en una galeria vacia es justo el tipo de
+// ##  dato inventado que este proyecto no se permite.
+// #############################################################
+#define GAL_MAX     24
+#define GAL_COLS     3
+
+// Un elemento de la galeria: ruta REAL en la particion.
+static char     galPath[GAL_MAX][FLEXFS_PATH_MAX];
+static char     galName[GAL_MAX][FLEXFS_NAME_MAX];
+static uint32_t galSize[GAL_MAX];
+static bool     galIsDraw[GAL_MAX];              // .fxp (dibujo) o JPEG
+static int      galN = 0;
+static int      galScroll = 0;
+static int      galSelIdx = -1;
+static bool     galLongFired = false;
+static bool     galMulti = false;
+static uint32_t galMask = 0;
+static int      galDragY0 = 0, galDragS0 = 0;
+static bool     galDragging = false;
+static int      galView = 0;                     // 0 = rejilla, 1 = un elemento a pantalla completa
+static void galRender();
+
+// Extensiones que la galeria reconoce. La comparacion es propia (sin
+// strcasecmp, que es POSIX y no esta garantizada en todos los cores).
+static bool galExtIs(const char* name, const char* ext){
+  size_t ln = strlen(name), le = strlen(ext);
+  if(ln < le) return false;
+  const char* a = name + ln - le;
+  for(size_t k = 0; k < le; k++){
+    char ca = a[k], cb = ext[k];
+    if(ca >= 'A' && ca <= 'Z') ca = (char)(ca + 32);
+    if(cb >= 'A' && cb <= 'Z') cb = (char)(cb + 32);
+    if(ca != cb) return false;
+  }
+  return true;
+}
+static bool galIsImage(const char* name){
+  return galExtIs(name, ".jpg") || galExtIs(name, ".jpeg");
+}
+
+// Recorre las dos carpetas y se queda con lo que sabe ensenar. Se llama
+// al entrar y despues de CADA operacion: la rejilla es un reflejo de lo
+// que hay en disco, no un estado en RAM que se pueda desincronizar.
+static void galReload(){
+  galN = 0;
+  if(!flexFsReady()) return;
+  const char* dirs[2] = { FLEXFS_DIR_DOCS, FLEXFS_DIR_PAINT };
+  FlexFsEntry e[GAL_MAX];
+  for(int d = 0; d < 2 && galN < GAL_MAX; d++){
+    int n = flexFsList(dirs[d], e, GAL_MAX);
+    for(int i = 0; i < n && galN < GAL_MAX; i++){
+      if(e[i].dir) continue;
+      bool draw = galExtIs(e[i].name, FLEXFS_EXT_PAINT);
+      if(!draw && !galIsImage(e[i].name)) continue;
+      snprintf(galPath[galN], FLEXFS_PATH_MAX, "%s/%s", dirs[d], e[i].name);
+      snprintf(galName[galN], FLEXFS_NAME_MAX, "%s", e[i].name);
+      galSize[galN]   = e[i].size;
+      galIsDraw[galN] = draw;
+      galN++;
+    }
+  }
+  if(galSelIdx >= galN) galSelIdx = -1;
+  if(galN == 0){ galMulti = false; galMask = 0; }
+}
+
+// ---- Miniaturas ----
+// Estado del destino de la fila que entrega el decodificador JPEG. Es
+// estatico porque el callback no puede llevar contexto de C++.
+static int galImgX, galImgY, galImgW, galImgH, galImgRows;
+
+static bool galJpegRow(void* user, int y, int w, const uint16_t* rgb){
+  (void)user;
+  int dy = galImgY + y;
+  if(dy < 0 || dy >= SCR_H) return true;
+  if(dy > galImgY + galImgH) return false;            // ya se lleno la caja
+  int n = w;
+  if(galImgX + n > SCR_W) n = SCR_W - galImgX;
+  if(n > 0) memcpy(gBuf + (size_t)dy * SCR_W + galImgX, rgb, (size_t)n * 2);
+  galImgRows = y + 1;
+  return true;
+}
+static void* galJpegAlloc(size_t n){
+  void* p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  return p ? p : malloc(n);
+}
+static void galJpegFree(void* p){ heap_caps_free(p); }
+
+static void galPaintSeg(int x0, int y0, int x1, int y1, uint16_t color, int radius, void* user){
+  (void)user;
+  strokeSegAA(galImgX + x0, galImgY + y0, galImgX + x1, galImgY + y1,
+              (float)(radius > 0 ? radius : 1), color);
+}
+
+// Dibuja el contenido de un elemento dentro de la caja (x,y,w,h). Para
+// los JPEG hay un tope de tamano: por encima de el se ensena el marco
+// con su nombre en vez de gastar segundos de CPU en la rejilla.
+#define GAL_JPEG_MAX_BYTES (256 * 1024)
+static void galDrawThumb(int i, int x, int y, int w, int h){
+  if(galIsDraw[i]){
+    fillRect(x, y, w, h, rgb565(250,250,252));
+    FlexPaintHdr hd;
+    if(flexPaintHeader(galPath[i], &hd) && hd.w && hd.h){
+      float sc = (float)w / (float)hd.w, sy = (float)h / (float)hd.h;
+      if(sy < sc) sc = sy;
+      galImgX = x + (w - (int)(hd.w * sc)) / 2;
+      galImgY = y + (h - (int)(hd.h * sc)) / 2;
+      flexPaintReplay(galPath[i], sc, 0, 0, galPaintSeg, NULL);
+    }
+    return;
+  }
+  fillRect(x, y, w, h, rgb565(28,30,38));
+  if(galSize[i] == 0 || galSize[i] > GAL_JPEG_MAX_BYTES){
+    drawTextC(x + w / 2, y + h / 2 - 8, "JPEG", 2, rgb565(150,156,170));
+    return;
+  }
+  uint8_t* buf = (uint8_t*)heap_caps_malloc(galSize[i], MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(!buf) buf = (uint8_t*)malloc(galSize[i]);
+  if(!buf){ drawTextC(x + w / 2, y + h / 2 - 8, "sin RAM", 1, rgb565(150,156,170)); return; }
+  int rd = flexFsReadBin(galPath[i], buf, galSize[i]);
+  if(rd > 0){
+    FlexJpegInfo inf;
+    if(flexJpegProbe(buf, (size_t)rd, &inf) == FLEXJPG_OK){
+      int den = 1, dw = inf.width, dh = inf.height;
+      while(den < 8 && (dw / den > w || dh / den > h)) den *= 2;
+      galImgX = x + (w - dw / den) / 2;
+      galImgY = y + (h - dh / den) / 2;
+      galImgW = w; galImgH = h; galImgRows = 0;
+      int r = flexJpegDecode(buf, (size_t)rd, w, h, 0, NULL,
+                             galJpegRow, NULL, galJpegAlloc, galJpegFree);
+      if(r != FLEXJPG_OK && galImgRows == 0)
+        drawTextC(x + w / 2, y + h / 2 - 8, "no se puede abrir", 1, rgb565(150,156,170));
+    } else {
+      drawTextC(x + w / 2, y + h / 2 - 8, "no es JPEG", 1, rgb565(150,156,170));
+    }
+  }
+  free(buf);
+}
+
+// ---- Geometria de la rejilla ----
+static void galCellRect(int i, int &x, int &y, int &w, int &h){
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+  int pad = uiPad(), gap = uiGap();
+  w = (bw - 2 * pad - (GAL_COLS - 1) * gap) / GAL_COLS;
+  h = w;
+  int c = i % GAL_COLS, r = i / GAL_COLS;
+  x = bx + pad + c * (w + gap);
+  y = by + 64 + r * (h + 26) - galScroll;
+}
+static int galMaxScroll(){
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+  int x, y, w, h; galCellRect(0, x, y, w, h);
+  int rows = (galN + GAL_COLS - 1) / GAL_COLS;
+  int need = 64 + rows * (h + 26) + 40;
+  int m = need - bh;
+  return m > 0 ? m : 0;
+}
+
+static void galRenderGrid(){
+  setBuf(fb);
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+  fillRect(bx, by, bw, bh, WIN_BG);
+  int pad = uiPad();
+  drawText(bx + pad, by + 14, "Galer\xC3\xAD" "a", 4, TH_TXT);
+  { char cnt[48];
+    snprintf(cnt, sizeof(cnt), "%d elemento%s", galN, galN == 1 ? "" : "s");
+    drawTextR(bx + bw - pad, by + 26, cnt, 1, TH_TXT2); }
+  // Tres puntos: menu de la app (papelera) cuando no hay nada seleccionado.
+  for(int i = 0; i < 3; i++) fillCircle(bx + bw - pad - 4, by + 52 + i * 12, 4, TH_NAV);
+
+  if(!flexFsReady()){
+    drawTextC(bx + bw / 2, by + bh / 2 - 20, "Sin almacenamiento", 3, TH_TXT2);
+    drawTextC(bx + bw / 2, by + bh / 2 + 16, flexFsError(), 1, TH_MUTE);
+  } else if(galN == 0){
+    drawTextC(bx + bw / 2, by + bh / 2 - 30, "No hay im\xC3\xA1genes", 3, TH_TXT2);
+    drawTextC(bx + bw / 2, by + bh / 2 + 6, "Aqu\xC3\xAD" " apareceran las fotos de /Documentos", 1, TH_MUTE);
+    drawTextC(bx + bw / 2, by + bh / 2 + 26, "y los dibujos de Paint", 1, TH_MUTE);
+  }
+  for(int i = 0; i < galN; i++){
+    int x, y, w, h; galCellRect(i, x, y, w, h);
+    if(y + h < by + 40 || y > by + bh) continue;
+    int rad = w / 10; if(rad < 3) rad = 3;
+    fillRoundRect(x, y, w, h, rad, TH_SURF2);
+    // El recorte deja la miniatura dentro de la celda: el decodificador
+    // escribe filas completas y sin esto se saldria por los bordes.
+    int ox0 = gClipX0, ox1 = gClipX1, oy0 = gClipY0, oy1 = gClipY1;
+    gClipX0 = x; gClipX1 = x + w - 1; gClipY0 = y; gClipY1 = y + h - 1;
+    galDrawThumb(i, x + 2, y + 2, w - 4, h - 4);
+    gClipX0 = ox0; gClipX1 = ox1; gClipY0 = oy0; gClipY1 = oy1;
+    if(galMulti && (galMask & (1UL << i))){
+      drawRoundRect(x, y, w, h, rad, TH_PRIM);
+      drawRoundRect(x + 1, y + 1, w - 2, h - 2, rad, TH_PRIM);
+      fillCircle(x + w - 16, y + 16, 10, TH_PRIM);
+      strokeSegAA(x + w - 21, y + 16, x + w - 17, y + 21, 2.2f, TH_ONACC);
+      strokeSegAA(x + w - 17, y + 21, x + w - 10, y + 11, 2.2f, TH_ONACC);
+    }
+    drawTextClip(x, y + h + 4, galName[i], 1, TH_TXT2, x + w);
+  }
+  if(galMulti){
+    int aby = by + bh - 68;
+    if(uiGlass) drawLiquidGlassPanel(bx + 12, aby, bw - 24, 56, 16, TH_GLASS2);
+    else        fillRoundRect(bx + 12, aby, bw - 24, 56, 16, TH_SURF2);
+    drawText(bx + 28, aby + 18, "Selecci\xC3\xB3n", 2, TH_TXT);
+    drawTextR(bx + bw - 140, aby + 18, "Papelera", 2, TH_WARN);
+    drawTextR(bx + bw - 28,  aby + 18, "Salir", 2, TH_TXT2);
+  }
+  if(fkMenuOn) fkMenuDraw();
+  flxFlush(WIN_TOP, WIN_BOT);
+}
+
+// ---- Un elemento a pantalla completa ----
+static void galRenderOne(){
+  setBuf(fb);
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+  fillRect(bx, by, bw, bh, WIN_BG);
+  int pad = uiPad();
+  if(galSelIdx < 0 || galSelIdx >= galN){ galView = 0; galRenderGrid(); return; }
+  drawTextClip(bx + pad, by + 14, galName[galSelIdx], 3, TH_TXT, bx + bw - pad);
+  char sz[24]; flexFsFmtSize(galSize[galSelIdx], sz, sizeof(sz));
+  drawTextR(bx + bw - pad, by + 52, sz, 1, TH_TXT2);
+  int top = by + 74, hgt = bh - 74 - 20;
+  int ox0 = gClipX0, ox1 = gClipX1, oy0 = gClipY0, oy1 = gClipY1;
+  gClipX0 = bx + pad; gClipX1 = bx + bw - pad - 1; gClipY0 = top; gClipY1 = top + hgt - 1;
+  galDrawThumb(galSelIdx, bx + pad, top, bw - 2 * pad, hgt);
+  gClipX0 = ox0; gClipX1 = ox1; gClipY0 = oy0; gClipY1 = oy1;
+  drawTextC(bx + bw / 2, by + bh - 18, "Toca para volver", 1, TH_MUTE);
+  if(fkMenuOn) fkMenuDraw();
+  flxFlush(WIN_TOP, WIN_BOT);
+}
+
+static void galRender(){
+  if(galView == 1) galRenderOne();
+  else             galRenderGrid();
+}
+
+// ---- Acciones del menu contextual ----
+static void galMenuAction(int act){
+  char p[FLEXFS_PATH_MAX];
+  if(galSelIdx >= 0 && galSelIdx < galN) snprintf(p, sizeof(p), "%s", galPath[galSelIdx]);
+  else p[0] = 0;
+  if(act == FK_ACT_SEL){
+    galMulti = true; galMask = 0;
+    if(galSelIdx >= 0) galMask |= (1UL << galSelIdx);
+  } else if(act == FK_ACT_DEL){
+    if(p[0]){ fkAskOpen("\xC2\xBF" "Borrar definitivamente?", galName[galSelIdx]); return; }
+  } else if(act == FK_ACT_REN){
+    if(p[0]){
+      char stem[FLEXFS_NAME_MAX]; flexFsStem(galName[galSelIdx], stem, sizeof(stem));
+      fkNameOpen("Renombrar", stem);
+      return;
+    }
+  } else if(act == FK_ACT_TRASH){
+    if(p[0]){ flexFsTrash(p); galSelIdx = -1; galView = 0; galReload(); }
+    else { fkTrashOpen(); return; }
+  } else if(act == FK_ACT_VAULT){
+    // FLEX VAULT: la imagen (o el dibujo) se cifra dentro de la boveda y
+    // desaparece de la galeria normal. A partir de ahi solo se abre desde
+    // Galeria privada.
+    if(p[0]){
+      galSelIdx = -1; galView = 0;
+      if(vaultMoveRequest(p, FXV_KIND_PHOTO)){
+        if(gState == ST_VAULT) return;         // se fue a pedir la clave
+        galReload();
+      }
+    }
+  }
+  galRender();
+}
+
+static void galTick(){
+  // --- Dialogos modales del kit de ficheros ---
+  if(fkTrashOn){ if(!fkTrashTick()){ galReload(); galRender(); } return; }
+  if(fkAskOn){
+    int r = fkAskTick();
+    if(r == 1 && galSelIdx >= 0 && galSelIdx < galN){
+      flexFsDelete(galPath[galSelIdx]);        // borrado DEFINITIVO real
+      galSelIdx = -1; galView = 0; galReload();
+    }
+    if(r != 0) galRender();
+    return;
+  }
+  if(fkNameOn){
+    int r = fkNameTick();
+    if(r == 1 && galSelIdx >= 0 && galSelIdx < galN){
+      flexFsRename(galPath[galSelIdx], fkNameBuf);
+      galSelIdx = -1; galReload();
+    }
+    if(r != 0) galRender();
+    return;
+  }
+  if(fkMenuOn){
+    if(T.tap){
+      int a = fkMenuHit(T.x, T.y);
+      fkMenuOn = false;
+      if(a >= 0) galMenuAction(a);
+      else       galRender();
+    }
+    return;
+  }
+
+  // --- Un elemento a pantalla completa: tocar vuelve a la rejilla ---
+  if(galView == 1){
+    if(T.tap){ galView = 0; galSelIdx = -1; galRender(); }
+    return;
+  }
+
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+  int pad = uiPad();
+
+  // --- Scroll de la rejilla ---
+  int maxS = galMaxScroll();
+  if(T.pressed){ galDragY0 = T.y; galDragS0 = galScroll; galDragging = false; }
+  if(T.down && maxS > 0){
+    if(!galDragging && abs(T.y - galDragY0) > 10) galDragging = true;
+    if(galDragging){
+      int ns = galDragS0 + (galDragY0 - T.y);
+      if(ns < 0) ns = 0;
+      if(ns > maxS) ns = maxS;
+      if(ns != galScroll){ galScroll = ns; galRender(); }
+      return;
+    }
+  }
+
+  // --- Pulsacion larga: menu del elemento, con Flex Vault ---
+  // Los dialogos del kit dibujan en coordenadas de pantalla completa, asi
+  // que dentro de una ventana de Modo PC no se ofrecen: saldrian fuera de
+  // la ventana.
+  if(!gHosted && !gLand && T.down && !galLongFired && (millis() - T.downMs) > 550
+     && abs(T.x - T.startX) < 14 && abs(T.y - T.startY) < 14){
+    for(int i = 0; i < galN; i++){
+      int x, y, w, h; galCellRect(i, x, y, w, h);
+      if(T.startX >= x && T.startX <= x + w && T.startY >= y && T.startY <= y + h){
+        galLongFired = true; galSelIdx = i;
+        fkMenuOpenV(T.x, T.y - 40, true);
+        return;
+      }
+    }
+    galLongFired = true;
+  }
+  if(!T.down) galLongFired = false;
+  if(!T.tap) return;
+  if(galDragging){ galDragging = false; return; }
+
+  // --- Barra del modo seleccion ---
+  if(galMulti){
+    int aby = by + bh - 68;
+    if(T.y >= aby && T.y <= aby + 56){
+      if(T.x > bx + bw - 100){ galMulti = false; galMask = 0; galRender(); return; }
+      if(T.x > bx + bw - 230){
+        for(int i = 0; i < galN; i++) if(galMask & (1UL << i)) flexFsTrash(galPath[i]);
+        galMulti = false; galMask = 0; galSelIdx = -1; galReload(); galRender(); return;
+      }
+      return;
+    }
+  }
+  // --- Menu de la app (papelera) ---
+  if(!galMulti && T.x > bx + bw - pad - 26 && T.y < by + 78){
+    galSelIdx = -1;
+    fkMenuOpen(bx + bw - 120, by + 70);
+    return;
+  }
+  // --- Toque sobre un elemento ---
+  for(int i = 0; i < galN; i++){
+    int x, y, w, h; galCellRect(i, x, y, w, h);
+    if(T.x < x || T.x > x + w || T.y < y || T.y > y + h) continue;
+    if(galMulti){ galMask ^= (1UL << i); galRender(); return; }
+    galSelIdx = i; galView = 1;
+    galRender();
+    return;
+  }
+}
+
+static void galEnter(){
+  // gRelayout = true significa "re-dibuja con la geometria nueva", no
+  // "empieza de cero": conserva la vista y el scroll del usuario.
+  if(!gRelayout){
+    galView = 0; galSelIdx = -1; galScroll = 0;
+    galMulti = false; galMask = 0;
+    fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
+  }
+  galReload();
+  galRender();
+}
+// #############################################################
 // ##  FLEX VAULT  ·  INTERFAZ (Carpeta segura)
 // ##  Ajustes -> Seguridad y privacidad -> Flex Vault
 // ##  ------------------------------------------------------
@@ -21029,6 +21452,15 @@ static char     vwText[VW_TEXT_MAX];
 static int      vwTextN = 0;
 static uint8_t* vwBlob  = NULL;
 static size_t   vwBlobN = 0;
+
+// "Mover a Carpeta segura" pendiente de que el usuario meta la clave, y la
+// pantalla a la que hay que devolverlo al salir de la boveda (ver
+// vaultMoveRequest y vaultExit).
+static char vwPendPath[FLEXFS_PATH_MAX] = "";
+static int  vwPendKind = FXV_KIND_FILE;
+static int  vwRetState = -1;
+static int  vwRetApp   = -1;
+static const char* vwMoveErr = "";
 
 static FlexVaultItem vwItems[VW_MAX_ITEMS];
 static int           vwItemsN = 0;
@@ -21928,12 +22360,23 @@ static void vaultRender(){
 // funcion), asi que se hace aqui y no en la pantalla que llama.
 static void vaultExit(){
   vaultLockNow(FXV_LOCK_EXIT);
+  flexVaultWipe(vwPendPath, sizeof(vwPendPath));
   vwForget();
-  gState = ST_APP;
-  gAppId = 12;                       // Ajustes
+  // Si se entro desde "Mover a Carpeta segura", se vuelve a la app de la que
+  // venia el usuario -- no a Ajustes, que es donde no estaba.
+  int ret = vwRetState;
+  int retApp = vwRetApp;
+  vwRetState = -1; vwRetApp = -1;
   setBuf(fb);
-  fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
-  settingsRender();
+  if(ret == ST_FILES){ filesEnter(); return; }
+  gState = ST_APP;
+  gAppId = (ret == ST_APP && retApp >= 0) ? retApp : 12;   // 12 = Ajustes
+  fillRect(0, 0, SCR_W, SCR_H, gAppId == 12 ? TH_PAGE : WIN_BG);
+  if(gAppId == 12){ settingsRender(); return; }
+  appDrawChrome(gAppId);
+  appDrawHeader(gAppId);
+  if(APP_REG[gAppId].enter) APP_REG[gAppId].enter();
+  flxFlushAll();
 }
 
 // El unico camino de cierre. Idempotente: se puede llamar desde todos
@@ -21972,6 +22415,70 @@ static void vaultLockFromSystem(int reason){
   }
 }
 
+// -------------------------------------------------------------
+//  "MOVER A CARPETA SEGURA" DESDE UNA APP
+//  ------------------------------------------------------------
+//  Lo llaman Galeria, Notas, Archivos y Paint desde su menu de
+//  pulsacion larga. Tres caminos posibles, y ninguno mueve nada sin la
+//  clave delante:
+//    · Boveda ABIERTA -> se cifra y se mueve ya. La app recarga su
+//      lista y el elemento ha desaparecido de ella.
+//    · Boveda CERRADA -> se recuerda el elemento, se pide la clave, y
+//      el movimiento ocurre justo despues de abrirla.
+//    · Boveda SIN CREAR -> se lleva al usuario a crearla, y al terminar
+//      se mueve el elemento.
+//  En los dos ultimos casos se guarda de donde venia el usuario, para
+//  devolverlo a SU app al salir de la boveda en vez de dejarlo en
+//  Ajustes.
+// -------------------------------------------------------------
+const char* vaultMoveError(){ return vwMoveErr; }
+
+// Ejecuta el movimiento pendiente (si habia uno). Se llama al abrir o
+// crear la boveda.
+static void vwRunPending(){
+  if(!vwPendPath[0]) return;
+  bool ok = flexVaultImport(vwPendPath, vwPendKind, -1);
+  int kind = vwPendKind;
+  flexVaultWipe(vwPendPath, sizeof(vwPendPath));
+  if(ok){
+    vwOpenList(kind);
+    vwToast("Movido a Carpeta segura");
+  } else {
+    vwToast(flexVaultError());
+  }
+}
+
+static bool vaultMoveRequest(const char* path, int kind){
+  vwMoveErr = "";
+  if(!path || !path[0]){ vwMoveErr = "Elemento no valido"; return false; }
+  if(!flexFsReady()){ vwMoveErr = "Sin almacenamiento"; return false; }
+  if(flexFsIsDir(path)){
+    vwMoveErr = "Las carpetas todav\xC3\xAD" "a no se pueden mover a la b\xC3\xB3veda";
+    return false;
+  }
+  if(KIOSK_ON && kioskOn){ vwMoveErr = "No disponible en modo kiosco"; return false; }
+
+  if(flexVaultUnlocked()){
+    if(!flexVaultImport(path, kind, -1)){ vwMoveErr = flexVaultError(); return false; }
+    return true;
+  }
+  // Hay que autenticarse (o crear la boveda) antes de mover nada.
+  snprintf(vwPendPath, sizeof(vwPendPath), "%s", path);
+  vwPendKind = kind;
+  vwRetState = gState;
+  vwRetApp   = gAppId;
+  gState = ST_VAULT;
+  gLand = false;
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
+  fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
+  vwScroll = 0; vwItemMenu = -1; vwMsg[0] = 0;
+  vwLastTouch = millis();
+  if(!flexVaultExists()) vwView = VW_SETUP_SEL;
+  else                   vwGoKeypad(VK_OPEN, flexVaultLockType());
+  vaultRender();
+  return true;                       // el movimiento se completara tras la clave
+}
+
 // Punto de entrada desde Ajustes -> Seguridad y privacidad -> Flex Vault.
 static void vaultSettingsEnter(){
   if(KIOSK_ON && kioskOn) return;          // en kiosco no se abre la boveda
@@ -21993,6 +22500,7 @@ static void vaultSettingsEnter(){
 static void vwAfterUnlock(){
   vwLogN = flexVaultLogRead(vwLog, FLEXVAULT_LOG_MAX);
   vwGoHome();
+  vwRunPending();            // "Mover a Carpeta segura" que esperaba la clave
   vaultRender();
 }
 
