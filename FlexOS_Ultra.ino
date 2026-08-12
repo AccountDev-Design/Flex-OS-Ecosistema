@@ -22605,6 +22605,7 @@ static bool vaultMoveRequest(const char* path, int kind){
     return false;
   }
   if(KIOSK_ON && kioskOn){ vwMoveErr = "No disponible en modo kiosco"; return false; }
+  if(gHosted || gLand){ vwMoveErr = "Sal de Modo PC para usar la Carpeta segura"; return false; }
 
   if(flexVaultUnlocked()){
     if(!flexVaultImport(path, kind, -1)){ vwMoveErr = flexVaultError(); return false; }
@@ -22630,6 +22631,11 @@ static bool vaultMoveRequest(const char* path, int kind){
 // Punto de entrada desde Ajustes -> Seguridad y privacidad -> Flex Vault.
 static void vaultSettingsEnter(){
   if(KIOSK_ON && kioskOn) return;          // en kiosco no se abre la boveda
+  // MODO PC: no se abre dentro de una ventana. dexHostRun restaura gState al
+  // acabar el tick de la app hospedada, asi que la boveda quedaria a medias, y
+  // ademas se compondria una pantalla completa dentro del lienzo de la ventana.
+  // La fila de Ajustes lo dice (ver vaultStatusText), no falla en silencio.
+  if(gHosted || gLand) return;
   if(!flexFsReady()){ fkNoFsScreen("Flex Vault"); gState = ST_VAULT; vwView = VW_HOME; return; }
   gState = ST_VAULT;
   gLand = false;
@@ -23107,6 +23113,7 @@ static void vaultTick(){
 // Texto de la fila de Ajustes -> Seguridad y privacidad -> Flex Vault. Dice el
 // estado REAL: si no existe, si esta cerrada, o si esta abierta y cuanto ocupa.
 static void vaultStatusText(char* out, size_t n){
+  if(gHosted || gLand){ snprintf(out, n, "Abre Flex Vault fuera de Modo PC"); return; }
   if(!flexFsReady()){ snprintf(out, n, "Sin almacenamiento"); return; }
   if(!flexVaultExists()){ snprintf(out, n, "Sin configurar - toca para crearla"); return; }
   if(!flexVaultUnlocked()){

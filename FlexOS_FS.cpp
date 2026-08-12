@@ -472,6 +472,13 @@ bool flexFsRestore(const char* trashName){
 
   char dst[FLEXFS_PATH_MAX];
   if(!flexFsTrashOrigin(trashName, dst, sizeof(dst))) return false;
+  // La ruta de destino sale del NOMBRE del fichero de la papelera, o sea de
+  // datos que estan en el disco y se pueden manipular. Un nombre fabricado
+  // como "@.fxvault@algo" se decodificaria a "/.fxvault/algo" y la restauracion
+  // escribiria DENTRO del almacen de Flex Vault, que es la unica carpeta que
+  // esta capa no debe tocar nunca. Se comprueba aqui, en el unico sitio en el
+  // que una ruta de destino no la elige el codigo.
+  if(flexFsIsVaultPath(dst)) return false;
 
   // La carpeta de destino pudo borrarse mientras el fichero estaba
   // en la papelera: se recrea antes de devolverlo a su sitio.

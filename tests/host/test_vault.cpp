@@ -685,6 +685,12 @@ static void testAislamiento(){
   chk(flexFsIsVaultPath("/.fxvault/d/3.b"),  "y cualquier ruta de dentro");
   chk(!flexFsIsVaultPath("/.fxvaultXY"),     "un nombre parecido NO es la boveda");
   chk(!flexFsIsVaultPath("/Notas/a.txt"),    "ni una ruta normal");
+  // La papelera codifica la ruta original en el NOMBRE del fichero, asi que un
+  // nombre fabricado podria intentar restaurar DENTRO de la boveda. La ruta
+  // decodificada se reconoce como boveda, que es lo que hace que flexFsRestore
+  // la rechace.
+  chk(flexFsIsVaultPath("/.fxvault/algo"),
+      "una ruta decodificada de la papelera hacia la boveda se reconoce");
 
   // La capa normal se niega a tocar el almacen, aunque se le pida
   // explicitamente con la ruta correcta.
