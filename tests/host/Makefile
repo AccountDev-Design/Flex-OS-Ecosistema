@@ -128,10 +128,11 @@ ino: ino_compile.cpp $(INO_SRC) check_protos.py | $(BUILD)
 # CON SANITIZERS: el lector de JSON de las noticias mastica bytes que vienen de
 # la red, asi que un desbordamiento ahi no puede quedarse en "parece que
 # funciona". Mismo criterio que el resto de pruebas del nucleo portable.
-$(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) | $(BUILD)
+$(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(JPEG_SRC) | $(BUILD)
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -x c++ -c ino_compile.cpp -o $(BUILD)/ino_compile.o
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -c ino_extern_stubs.cpp -o $(BUILD)/ino_extern_stubs.o
-	@$(CXX) $(SAN) -o $@ $(BUILD)/ino_compile.o $(BUILD)/ino_extern_stubs.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(JPEG_SRC) -o $(BUILD)/ino_jpeg.o
+	@$(CXX) $(SAN) -o $@ $(BUILD)/ino_compile.o $(BUILD)/ino_extern_stubs.o $(BUILD)/ino_jpeg.o
 
 run: ino $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@echo
