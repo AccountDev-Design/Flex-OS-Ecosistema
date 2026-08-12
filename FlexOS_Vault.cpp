@@ -1000,24 +1000,36 @@ int flexVaultChangeSecret(const char* oldSecret, const char* newSecret, int lock
 // -------------------------------------------------------------
 //  CONTENIDO
 // -------------------------------------------------------------
-int flexVaultCount(int kind){
+// Un elemento entra en la seleccion si su clase y su propietario
+// cuadran. El propietario es lo que mantiene separados los datos de una
+// app privada de los que el usuario movio a mano.
+static bool fxvMatch(const FxvRec* r, int kind, int appId){
+  if(r->kind == FXV_KIND_APP) return false;             // datos internos: no son contenido listable
+  if(kind != FXV_KIND_ANY && r->kind != kind) return false;
+  if(appId == FXV_APP_ANY) return true;
+  return (int)r->appId == appId;
+}
+
+int flexVaultCountFor(int kind, int appId){
   if(!vOpen || !vIdx) return 0;
   int n = 0;
-  for(int i = 0; i < vIdxN; i++){
-    if(vIdx[i].kind == FXV_KIND_APP) continue;          // datos de app: no son contenido listable
-    if(kind == FXV_KIND_ANY || vIdx[i].kind == kind) n++;
-  }
+  for(int i = 0; i < vIdxN; i++) if(fxvMatch(&vIdx[i], kind, appId)) n++;
   return n;
 }
 
+int flexVaultCount(int kind){ return flexVaultCountFor(kind, -1); }
+
 int flexVaultList(int kind, FlexVaultItem* out, int maxn){
+  return flexVaultListFor(kind, -1, out, maxn);
+}
+
+int flexVaultListFor(int kind, int appId, FlexVaultItem* out, int maxn){
   if(!vOpen || !vIdx || !out || maxn <= 0) return 0;
   int n = 0;
   // El indice se mantiene con el mas reciente al final, asi que se
   // recorre al reves para entregar "lo ultimo que entro primero".
   for(int i = vIdxN - 1; i >= 0 && n < maxn; i--){
-    if(kind != FXV_KIND_ANY && vIdx[i].kind != kind) continue;
-    if(kind == FXV_KIND_ANY && vIdx[i].kind == FXV_KIND_APP) continue;
+    if(!fxvMatch(&vIdx[i], kind, appId)) continue;
     out[n].id      = vIdx[i].id;
     out[n].kind    = vIdx[i].kind;
     out[n].appId   = vIdx[i].appId;

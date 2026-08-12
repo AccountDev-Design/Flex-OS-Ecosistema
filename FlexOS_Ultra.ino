@@ -21409,7 +21409,8 @@ enum { VW_SETUP_SEL = 0,   // primera vez: elegir PIN o contrasena
        VW_APPMAN,          // gestionar apps privadas
        VW_REMOVE,          // que hacer con los datos al quitar una app
        VW_LOG,             // registro de seguridad
-       VW_NOTE };          // editor de una nota privada
+       VW_NOTE,            // editor de una nota privada
+       VW_APPDET };        // una app privada: abrir, bloquear, quitar
 
 // Para que sirve el teclado que esta en pantalla.
 enum { VK_CREATE = 0,      // crear la clave de la boveda
@@ -21425,6 +21426,13 @@ enum { VK_CREATE = 0,      // crear la clave de la boveda
 
 static int      vwView    = VW_HOME;
 static int      vwKind    = FXV_KIND_PHOTO;
+// De QUIEN son los elementos de la lista abierta: -1 = los que el usuario
+// movio a mano desde Galeria/Notas/Archivos; >= 0 = los de esa app privada.
+// Es lo que mantiene los datos de una app privada separados de verdad: la
+// seccion general de Notas privadas NO ensena las notas de la Notas privada,
+// y al quitar la app se sabe exactamente cuales son suyas.
+static int      vwListApp = -1;
+static int      vwPendApp = -1;      // app privada que hay que abrir tras la clave
 static int      vwKeyFor  = VK_OPEN;
 static int      vwKeyMode = FLEXVAULT_LOCK_PIN;   // PIN o contrasena en el teclado
 static int      vwScroll  = 0;
@@ -21477,6 +21485,7 @@ static int vwRowY0[VW_ROWS_MAX], vwRowY1[VW_ROWS_MAX], vwRowAct[VW_ROWS_MAX];
 // la lista", para no necesitar una tabla aparte.
 enum { VA_NONE = 0, VA_GAL, VA_NOTES, VA_FILES, VA_APPS, VA_APPMAN, VA_LOG,
        VA_CHGKEY, VA_LOCKNOW, VA_AUTOLOCK, VA_NEWNOTE,
+       VA_APPOPEN, VA_APPLOCK, VA_APPDEL,
        VA_ITEM_BASE = 1000, VA_APP_BASE = 2000 };
 
 static void vaultRender();
@@ -21704,16 +21713,31 @@ static void vwRenderHome(){
 //  PANTALLA: lista de contenido privado (VW_LIST)
 // -------------------------------------------------------------
 static void vwReload(){
-  vwItemsN = flexVaultList(vwKind, vwItems, VW_MAX_ITEMS);
+  vwItemsN = flexVaultListFor(vwKind, vwListApp, vwItems, VW_MAX_ITEMS);
+}
+
+// La clase de contenido "natural" de cada app privada: es lo que se abre al
+// pulsar Abrir en Gestionar apps privadas.
+static int vwAppKind(int appId){
+  if(appId == 5) return FXV_KIND_NOTE;    // Notas
+  if(appId == 1) return FXV_KIND_PHOTO;   // Galeria
+  return FXV_KIND_FILE;                   // Archivos y el resto
 }
 
 static void vwRenderList(){
   setBuf(fb);
   fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
-  char sub[48];
-  snprintf(sub, sizeof(sub), "%d elemento%s dentro de Flex Vault",
-           vwItemsN, vwItemsN == 1 ? "" : "s");
-  vwHeader(vwKindName(vwKind), sub);
+  char sub[64], ttl[48];
+  if(vwListApp >= 0){
+    snprintf(ttl, sizeof(ttl), "%s privada", appName(vwListApp));
+    snprintf(sub, sizeof(sub), "%d elemento%s, separados de la app normal",
+             vwItemsN, vwItemsN == 1 ? "" : "s");
+  } else {
+    snprintf(ttl, sizeof(ttl), "%s", vwKindName(vwKind));
+    snprintf(sub, sizeof(sub), "%d elemento%s dentro de Flex Vault",
+             vwItemsN, vwItemsN == 1 ? "" : "s");
+  }
+  vwHeader(ttl, sub);
   vwRowsReset();
 
   int y = 78 - vwScroll;
@@ -22100,6 +22124,54 @@ static void vwRenderAppMan(){
   flxFlushAll();
 }
 
+
+// -------------------------------------------------------------
+//  PANTALLA: una app privada (VW_APPDET)
+//  ------------------------------------------------------------
+//  Es la pantalla de "Gestionar apps privadas" para UNA app: cuanto
+//  ocupa, cuando se uso por ultima vez, y las tres acciones que pide la
+//  funcion -- Abrir, Bloquear y Quitar de la boveda.
+//
+//  Que significa BLOQUEAR de verdad: no es una etiqueta. Con el candado
+//  puesto, abrir esa app privada CIERRA la boveda y vuelve a pedir la
+//  clave; solo despues se abre. Sin eso, "bloqueada" seria un adorno.
+// -------------------------------------------------------------
+static void vwRenderAppDet(){
+  setBuf(fb);
+  fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
+  if(vwAppSel < 0){ vwView = VW_APPMAN; vwRenderAppMan(); return; }
+  vwHeader(appName(vwAppSel), "Versi\xC3\xB3n privada dentro de Flex Vault");
+  vwRowsReset();
+
+  char v[64], sz[16], st[32];
+  flexFsFmtSize(flexVaultAppBytes(vwAppSel), sz, sizeof(sz));
+  vwStamp(flexVaultAppLast(vwAppSel), st, sizeof(st));
+  int y = 84;
+  drawText(26, y, "Almacenamiento usado", 1, TH_TXT2);
+  drawTextR(SCR_W - 26, y, sz, 1, TH_TXT); y += 24;
+  drawText(26, y, "\xC3\x9A" "ltimo acceso", 1, TH_TXT2);
+  drawTextR(SCR_W - 26, y, st, 1, TH_TXT); y += 24;
+  snprintf(v, sizeof(v), "%d", flexVaultCountFor(vwAppKind(vwAppSel), vwAppSel));
+  drawText(26, y, "Elementos privados", 1, TH_TXT2);
+  drawTextR(SCR_W - 26, y, v, 1, TH_TXT); y += 34;
+
+  y = vwRow(y, VA_APPOPEN, "Abrir",
+            flexVaultAppLocked(vwAppSel) ? "Pedir\xC3\xA1 la clave de Flex Vault"
+                                         : "Sus datos privados, separados de la app normal",
+            true, TH_OK);
+  y = vwRow(y, VA_APPLOCK,
+            flexVaultAppLocked(vwAppSel) ? "Desbloquear" : "Bloquear",
+            flexVaultAppLocked(vwAppSel)
+              ? "Se abrir\xC3\xA1 sin volver a pedir la clave"
+              : "Cerrar\xC3\xA1 la b\xC3\xB3veda y pedir\xC3\xA1 la clave al abrirla",
+            false, rgb565(220,120,120));
+  y = vwRow(y, VA_APPDEL, "Quitar de la b\xC3\xB3veda",
+            "Preguntar\xC3\xA1 qu\xC3\xA9 hacer con sus datos", true, rgb565(120,120,140));
+  vwDragS0 = 0;
+  vwDrawMsg();
+  flxFlushAll();
+}
+
 // -------------------------------------------------------------
 //  PANTALLA: que hacer con los datos al quitar una app (VW_REMOVE)
 // -------------------------------------------------------------
@@ -22333,10 +22405,24 @@ static void vwGoHome(){
 
 static void vwOpenList(int kind){
   vwKind = kind;
+  vwListApp = -1;                     // secciones generales de la boveda
   vwScroll = 0;
   vwItemMenu = -1;
   vwReload();
   vwView = VW_LIST;
+  vwLastTouch = millis();
+}
+
+// Abre la version PRIVADA de una app: los mismos gestos que la app normal,
+// pero sobre los datos cifrados de la boveda y solo los suyos.
+static void vwOpenAppList(int appId){
+  vwKind = vwAppKind(appId);
+  vwListApp = appId;
+  vwScroll = 0;
+  vwItemMenu = -1;
+  vwReload();
+  vwView = VW_LIST;
+  flexVaultAppTouch(appId);
   vwLastTouch = millis();
 }
 
@@ -22351,6 +22437,7 @@ static void vaultRender(){
     case VW_REMOVE:    vwRenderRemove();   break;
     case VW_LOG:       vwRenderLog();      break;
     case VW_NOTE:      vwRenderNote();     break;
+    case VW_APPDET:    vwRenderAppDet();   break;
     default:           vwRenderHome();     break;
   }
 }
@@ -22361,6 +22448,8 @@ static void vaultRender(){
 static void vaultExit(){
   vaultLockNow(FXV_LOCK_EXIT);
   flexVaultWipe(vwPendPath, sizeof(vwPendPath));
+  vwPendApp = -1;
+  vwListApp = -1;
   vwForget();
   // Si se entro desde "Mover a Carpeta segura", se vuelve a la app de la que
   // venia el usuario -- no a Ajustes, que es donde no estaba.
@@ -22501,6 +22590,10 @@ static void vwAfterUnlock(){
   vwLogN = flexVaultLogRead(vwLog, FLEXVAULT_LOG_MAX);
   vwGoHome();
   vwRunPending();            // "Mover a Carpeta segura" que esperaba la clave
+  if(vwPendApp >= 0){        // app privada bloqueada que se queria abrir
+    int id = vwPendApp; vwPendApp = -1;
+    vwOpenAppList(id);
+  }
   vaultRender();
 }
 
@@ -22612,7 +22705,7 @@ static void vwNewPrivateNote(){
     if(!taken) break;
   }
   uint16_t id = 0;
-  if(!flexVaultCreateItem(name, FXV_KIND_NOTE, -1, &id)){
+  if(!flexVaultCreateItem(name, FXV_KIND_NOTE, vwListApp, &id)){
     vwToast(flexVaultError());
     vaultRender();
     return;
@@ -22806,7 +22899,10 @@ static void vaultTick(){
     switch(vwView){
       case VW_HOME:   vaultExit(); return;
       case VW_ITEM:   vwContentClear(); vwView = VW_LIST; vwReload(); vaultRender(); return;
-      case VW_REMOVE: vwView = VW_APPMAN; vaultRender(); return;
+      case VW_REMOVE: vwView = VW_APPDET; vaultRender(); return;
+      case VW_APPDET: vwView = VW_APPMAN; vwAppSel = -1; vaultRender(); return;
+      case VW_LIST:   if(vwListApp >= 0){ vwListApp = -1; vwView = VW_APPMAN; vaultRender(); return; }
+                      vwGoHome(); vaultRender(); return;
       default:        vwGoHome(); vaultRender(); return;
     }
   }
@@ -22893,14 +22989,41 @@ static void vaultTick(){
 
   if(vwView == VW_APPMAN){
     if(act >= VA_APP_BASE){
-      int id = act - VA_APP_BASE;
-      // Un toque alterna el candado propio de la app; para quitarla se
-      // entra en la pantalla de datos desde "Anadir apps". Se avisa.
-      flexVaultAppSetLocked(id, !flexVaultAppLocked(id));
-      vwToast(flexVaultAppLocked(id)
+      vwAppSel = act - VA_APP_BASE;
+      vwView = VW_APPDET; vwScroll = 0;
+      vaultRender();
+    }
+    return;
+  }
+
+  if(vwView == VW_APPDET){
+    if(vwAppSel < 0) return;
+    if(act == VA_APPOPEN){
+      if(flexVaultAppLocked(vwAppSel)){
+        // BLOQUEADA de verdad: se cierra la boveda y se pide la clave. Al
+        // acertar, vwRunPendingApp abre esta app.
+        vwPendApp = vwAppSel;
+        vaultLockNow(FXV_LOCK_MANUAL);
+        vwGoKeypad(VK_OPEN, flexVaultLockType());
+        vwToast("Esta app privada est\xC3\xA1 bloqueada");
+      } else {
+        vwOpenAppList(vwAppSel);
+      }
+      vaultRender();
+      return;
+    }
+    if(act == VA_APPLOCK){
+      flexVaultAppSetLocked(vwAppSel, !flexVaultAppLocked(vwAppSel));
+      vwToast(flexVaultAppLocked(vwAppSel)
               ? "Bloqueada: pedir\xC3\xA1 la clave al abrirla"
               : "Desbloqueada dentro de la b\xC3\xB3veda");
       vaultRender();
+      return;
+    }
+    if(act == VA_APPDEL){
+      vwView = VW_REMOVE; vwScroll = 0;
+      vaultRender();
+      return;
     }
     return;
   }
@@ -22914,7 +23037,7 @@ static void vaultTick(){
                       what == FXV_APPDATA_KEEP   ? "Datos mantenidos cifrados en la b\xC3\xB3veda" :
                                                    "Datos eliminados definitivamente";
       vwAppSel = -1;
-      vwView = VW_APPS;
+      vwView = VW_APPMAN;
       vwToast(m);
       vaultRender();
     }

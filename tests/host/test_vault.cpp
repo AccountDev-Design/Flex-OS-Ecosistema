@@ -583,6 +583,32 @@ static void testApps(){
   chk(flexVaultImport("/Notas/AppPriv.txt", FXV_KIND_NOTE, 5), "entra un dato de la app");
   chk(flexVaultAppBytes(5) > strlen(d1), "los bytes cifrados de la app se miden");
 
+  // SEPARACION REAL de los datos: una nota de la app privada NO aparece en la
+  // seccion general de Notas privadas, y al contrario.
+  const char* d2 = "nota-que-movio-el-usuario";
+  flexFsWriteBin("/Notas/Mia.txt", d2, strlen(d2));
+  chk(flexVaultImport("/Notas/Mia.txt", FXV_KIND_NOTE, -1), "y una nota del usuario");
+  chk(flexVaultCount(FXV_KIND_NOTE) == 1,
+      "la seccion general solo ensena la del usuario");
+  chk(flexVaultCountFor(FXV_KIND_NOTE, 5) == 1,
+      "la app privada solo ensena la suya");
+  chk(flexVaultCountFor(FXV_KIND_NOTE, FXV_APP_ANY) == 2,
+      "y contando todas salen las dos");
+  FlexVaultItem li[4];
+  chk(flexVaultListFor(FXV_KIND_NOTE, 5, li, 4) == 1 && !strcmp(li[0].name, "AppPriv.txt"),
+      "el listado por app entrega la de la app");
+  chk(flexVaultListFor(FXV_KIND_NOTE, -1, li, 4) == 1 && !strcmp(li[0].name, "Mia.txt"),
+      "y el general la del usuario");
+  // Quitar la app NO puede llevarse la nota del usuario.
+  chk(flexVaultAppRemove(5, FXV_APPDATA_EXPORT), "se quita la app devolviendo SUS datos");
+  chk(fsHas("/Notas/AppPriv.txt"), "vuelve la de la app");
+  chk(!fsHas("/Notas/Mia.txt"), "y la del usuario SIGUE en la boveda");
+  chk(flexVaultCount(FXV_KIND_NOTE) == 1, "efectivamente sigue dentro");
+  // Se deja como estaba para las comprobaciones siguientes.
+  flexVaultDelete(li[0].id);
+  flexVaultAppAdd(5);
+  flexVaultImport("/Notas/AppPriv.txt", FXV_KIND_NOTE, 5);
+
   chk(!flexVaultAppLocked(5), "sin candado propio al principio");
   flexVaultAppSetLocked(5, true);
   chk(flexVaultAppLocked(5), "se le puede poner candado propio");
@@ -591,21 +617,21 @@ static void testApps(){
   // Quitar la app MANTENIENDO los datos cifrados.
   chk(flexVaultAppRemove(5, FXV_APPDATA_KEEP), "se quita manteniendo los datos");
   chk(!flexVaultAppAdded(5), "la app ya no esta anadida");
-  chk(flexVaultCount(FXV_KIND_NOTE) == 1, "pero sus datos siguen cifrados dentro");
+  chk(flexVaultCountFor(FXV_KIND_NOTE, 5) == 1, "pero sus datos siguen cifrados dentro");
   chk(!fsHas("/Notas/AppPriv.txt"), "y NO han vuelto a la app normal");
 
   // Volver a anadirla y quitarla DEVOLVIENDO los datos.
   chk(flexVaultAppAdd(5), "se vuelve a anadir");
   chk(flexVaultAppRemove(5, FXV_APPDATA_EXPORT), "se quita devolviendo los datos");
   chk(fsHas("/Notas/AppPriv.txt"), "el dato vuelve a la app normal");
-  chk(flexVaultCount(FXV_KIND_NOTE) == 0, "y sale de la boveda");
+  chk(flexVaultCountFor(FXV_KIND_NOTE, 5) == 0, "y sale de la boveda");
 
   // Y la tercera opcion: borrado definitivo.
   flexVaultAppAdd(5);
   flexVaultImport("/Notas/AppPriv.txt", FXV_KIND_NOTE, 5);
-  chk(flexVaultCount(FXV_KIND_NOTE) == 1, "vuelve a entrar");
+  chk(flexVaultCountFor(FXV_KIND_NOTE, 5) == 1, "vuelve a entrar");
   chk(flexVaultAppRemove(5, FXV_APPDATA_WIPE), "se quita eliminando los datos");
-  chk(flexVaultCount(FXV_KIND_NOTE) == 0, "ya no esta en la boveda");
+  chk(flexVaultCountFor(FXV_KIND_NOTE, 5) == 0, "ya no esta en la boveda");
   chk(!fsHas("/Notas/AppPriv.txt"), "ni ha vuelto a la app normal: se elimino");
   chk(!fsContains(d1, strlen(d1)), "y no queda ni un byte suyo en la particion");
 }

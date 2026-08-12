@@ -108,6 +108,8 @@ int      flexVaultUnlock(const char*){ return FXV_ERR_STATE; }
 void     flexVaultLock(int){}
 int      flexVaultChangeSecret(const char*, const char*, int){ return FXV_ERR_STATE; }
 int      flexVaultList(int, FlexVaultItem*, int){ return 0; }
+int      flexVaultListFor(int, int, FlexVaultItem*, int){ return 0; }
+int      flexVaultCountFor(int, int){ return 0; }
 bool     flexVaultGet(uint16_t, FlexVaultItem*){ return false; }
 bool     flexVaultImport(const char*, int, int){ return false; }
 bool     flexVaultExport(uint16_t, char* out, size_t n){ if(out && n) out[0] = 0; return false; }

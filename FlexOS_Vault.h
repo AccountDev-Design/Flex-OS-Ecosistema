@@ -267,8 +267,23 @@ int      flexVaultChangeSecret(const char* oldSecret, const char* newSecret, int
 // -------------------------------------------------------------
 //  CONTENIDO
 // -------------------------------------------------------------
-// Lista elementos de una clase, mas recientes primero.
+// Lista elementos de una clase, mas recientes primero. Solo los que NO
+// pertenecen a una app privada (los que el usuario movio a mano desde
+// Galeria, Notas o Archivos).
 int      flexVaultList(int kind, FlexVaultItem* out, int maxn);
+
+// Igual, pero eligiendo de QUIEN son los elementos:
+//   appId >= 0  -> solo los de esa app privada
+//   appId == -1 -> solo los que no son de ninguna app (lo que hace
+//                  flexVaultList)
+//   appId == FXV_APP_ANY -> todos, sin distinguir
+// Existe para que los datos de una app privada esten de VERDAD
+// separados: la seccion general de Notas privadas no ensena las notas
+// de la Notas privada, y al quitar la app se sabe exactamente que
+// elementos son suyos.
+#define FXV_APP_ANY (-2)
+int      flexVaultListFor(int kind, int appId, FlexVaultItem* out, int maxn);
+int      flexVaultCountFor(int kind, int appId);
 
 // Datos de un elemento por id.
 bool     flexVaultGet(uint16_t id, FlexVaultItem* out);
