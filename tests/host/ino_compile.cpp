@@ -152,6 +152,7 @@ static void geoEnterSelect();
 // #############################################################
 static void testPanelRapido();
 static void testNoticias();
+static void testCajaApps();
 static int gFails = 0;
 static void chk(bool ok, const char* what){
   if(!ok){ printf("  FALLO: %s\n", what); gFails++; }
@@ -495,6 +496,152 @@ static void testNoticias(){
   if(!gFails) printf("  Noticias: todas las comprobaciones pasan.\n");
 }
 
+
+// #############################################################
+//  PRUEBAS DE LA CAJA DE APLICACIONES (cajon de apps)
+//  ------------------------------------------------------------
+//  Lo que se comprueba aqui es la parte que NO depende del panel:
+//  el registro central y sus invariantes. Son justo las reglas que,
+//  si se rompen, dejan una app inalcanzable o un icono fantasma en
+//  el escritorio -- y eso no se puede descubrir mirando la pantalla.
+// #############################################################
+static void drwTestReset(){
+  drawerRegistryDefaults();
+  for(int i = 0; i < 12; i++) homeOrder[i] = (uint8_t)i;
+  homeOrderNormalize();
+  drwQLen = 0; drwQuery[0] = 0; drwShowHid = false; drwKbOn = false;
+  drwScroll = 0; drwVel = 0; drwSlide = 0;
+  drwFilter();
+}
+static int drwSlotOf(int id){
+  for(int i = 0; i < 12; i++) if(homeOrder[i] == (uint8_t)id) return i;
+  return -1;
+}
+static bool drwInList(int id){
+  for(int i = 0; i < drwN; i++) if(drwList[i] == id) return true;
+  return false;
+}
+static void testCajaApps(){
+  printf("Caja de aplicaciones\n");
+  drwTestReset();
+
+  // --- reparto de fabrica: exactamente el escritorio de siempre ---
+  chk(gAppHidden == 0, "de fabrica no hay ninguna app oculta");
+  for(int id = 0; id < 12; id++) chk(appIsFav(id),  "las doce de la rejilla nacen en Inicio");
+  for(int id = 12; id < 16; id++) chk(!appIsFav(id), "las cuatro del dock no ocupan rejilla");
+  chk(drwN == 16, "la caja muestra las 16 apps del registro");
+
+  // --- normalizacion: una ranura con una app no favorita se vacia ---
+  gAppFav &= (uint16_t)~(1u << 5);
+  homeOrderNormalize();
+  chk(drwSlotOf(5) < 0, "quitar la marca de favorita libera su ranura");
+  // --- y una favorita sin ranura recupera hueco ---
+  gAppFav |= (uint16_t)(1u << 5);
+  homeOrderNormalize();
+  chk(drwSlotOf(5) >= 0, "una favorita sin ranura ocupa el primer hueco");
+
+  // --- escritorio lleno: la marca se retira, no se inventa una ranura 13 ---
+  drwTestReset();
+  gAppFav |= (uint16_t)(1u << IC_AJUSTES);        // 13 favoritas para 12 ranuras
+  homeOrderNormalize();
+  int nfav = 0;
+  for(int id = 0; id < 16; id++) if(appIsFav(id)) nfav++;
+  chk(nfav == 12, "nunca hay mas favoritas que ranuras en el escritorio");
+  for(int i = 0; i < 12; i++) chk(homeOrder[i] == HOME_EMPTY || appIsFav(homeOrder[i]),
+                                  "ninguna ranura apunta a una app que no sea favorita");
+
+  // --- quitar y volver a poner desde el menu contextual ---
+  drwTestReset();
+  int slot3 = drwSlotOf(3);
+  drwFavToggle(3);
+  chk(!appIsFav(3), "\"Quitar de inicio\" borra la marca");
+  chk(homeOrder[slot3] == HOME_EMPTY, "y deja su ranura vacia (no recoloca la rejilla)");
+  chk(drwInList(3), "pero la app sigue en la caja");
+  drwFavToggle(3);
+  chk(appIsFav(3) && drwSlotOf(3) >= 0, "\"Anadir a inicio\" la devuelve a una ranura");
+
+  // --- ocultar: sale de la caja Y del escritorio, y se puede recuperar ---
+  drwTestReset();
+  drwHideToggle(7);
+  chk(appIsHidden(7),  "\"Ocultar\" marca la app");
+  chk(!appIsFav(7),    "una app oculta no puede quedarse en Inicio");
+  chk(drwSlotOf(7) < 0,"y su ranura queda libre");
+  chk(!drwInList(7),   "la caja ya no la lista");
+  drwShowHid = true; drwFilter();
+  chk(drwInList(7),    "con \"ver ocultas\" vuelve a aparecer (unica via para mostrarla)");
+  drwHideToggle(7);
+  chk(!appIsHidden(7), "\"Mostrar\" la recupera");
+  drwShowHid = false; drwFilter();
+  chk(drwInList(7),    "y vuelve a la caja normal");
+
+  // --- Ajustes no se puede ocultar: es la unica salida del sistema ---
+  drwTestReset();
+  chk(!appCanHide(IC_AJUSTES), "Ajustes nunca se puede ocultar");
+  drwHideToggle(IC_AJUSTES);
+  chk(!appIsHidden(IC_AJUSTES), "y el intento no tiene efecto");
+
+  // --- buscador: filtra sobre el nombre localizado, sin distinguir mayusculas ---
+  drwTestReset();
+  snprintf(drwQuery, sizeof(drwQuery), "cal"); drwQLen = 3; drwFilter();
+  chk(drwN >= 2 && drwInList(IC_CALC) && drwInList(IC_CALEND), "\"cal\" encuentra Calculadora y Calendario");
+  chk(!drwInList(IC_RELOJ), "y descarta lo que no casa");
+  snprintf(drwQuery, sizeof(drwQuery), "zzz"); drwQLen = 3; drwFilter();
+  chk(drwN == 0, "una busqueda sin resultados deja la rejilla vacia, no basura");
+
+  // --- geometria: nada se sale de los 480x800 ---
+  drwTestReset();
+  for(int i = 0; i < drwN; i++){
+    int x, y; drwCellXY(i, x, y);
+    chk(x >= 0 && x + DRW_ICON_S <= SCR_W, "cada icono cabe a lo ancho de la pantalla");
+    chk(y >= DRW_GRID_TOP, "ninguna fila empieza por encima de la rejilla");
+  }
+  chk(DRW_COL_X0 + 3 * DRW_COL_STEP + DRW_ICON_S <= SCR_W, "las 4 columnas caben en 480 px");
+  chk(drwGridBot() <= SCR_H - DRW_NAV_H, "la rejilla no invade la barra de navegacion");
+
+  // --- limite de desplazamiento: el scroll nunca se escapa del rango ---
+  drwScroll = -500.0f; drwClampScroll();
+  chk(drwScroll == 0.0f, "no se puede arrastrar por encima de la primera fila");
+  drwScroll = 99999.0f; drwClampScroll();
+  chk(drwScroll == (float)drwMaxScroll(), "ni por debajo de la ultima");
+  chk(drwMaxScroll() >= 0, "el recorrido maximo nunca es negativo");
+  // Con el teclado desplegado la ventana encoge: el recorrido tiene que crecer
+  // y el scroll seguir dentro de rango (aqui es donde antes se salia el ultimo icono).
+  int mSin = drwMaxScroll();
+  drwKbOn = true;
+  chk(drwMaxScroll() >= mSin, "abrir el teclado no reduce el recorrido disponible");
+  drwScroll = 99999.0f; drwClampScroll();
+  chk(drwScroll <= (float)drwMaxScroll(), "con teclado el scroll sigue acotado");
+  drwKbOn = false; drwScroll = 0; drwClampScroll();
+
+  // --- el tactil nunca devuelve una celda que no existe ---
+  drwTestReset();
+  for(int y = 0; y < SCR_H; y += 7)
+    for(int x = 0; x < SCR_W; x += 11){
+      int c = drwHitCell(x, y);
+      chk(c == -1 || (c >= 0 && c < drwN), "drwHitCell solo devuelve celdas reales");
+      if(gFails) break;
+    }
+  chk(drwHitCell(240, 10) < 0, "la cabecera no es rejilla");
+  chk(drwHitCell(240, SCR_H - 20) < 0, "la barra de navegacion tampoco");
+
+  // --- la caja cede el paso a los overlays globales ---
+  gState = ST_HOME; gLand = false; gHosted = false; editMode = false;
+  qsPanelY = 0; qsAnimOn = false; qsDragging = false;
+  chk(drawerCanOpen(), "desde el escritorio limpio si se puede abrir");
+  qsPanelY = 200;
+  chk(!drawerCanOpen(), "con el panel rapido a la vista manda el panel rapido");
+  qsPanelY = 0; editMode = true;
+  chk(!drawerCanOpen(), "en Modo Edicion no se abre");
+  editMode = false; gLand = true;
+  chk(!drawerCanOpen(), "en horizontal (Modo PC) no se abre");
+  gLand = false; gState = ST_APP;
+  chk(!drawerCanOpen(), "dentro de una app tampoco: el gesto es del escritorio");
+  gState = ST_HOME;
+
+  drwTestReset();
+  if(!gFails) printf("  Caja de aplicaciones: todas las comprobaciones pasan.\n");
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -560,6 +707,7 @@ int main(){
 
   testPanelRapido();
   testNoticias();
+  testCajaApps();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

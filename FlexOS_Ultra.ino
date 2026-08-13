@@ -4416,6 +4416,23 @@ static bool gBootCleanOff = false;                    // este arranque viene de 
 // mismo que usan homeOrder[], drawAppIcon() y enterApp()), y 16 apps caben
 // exactas en un uint16_t. Un solo getInt/putInt, cero snprintf de claves.
 static uint16_t gAppLock = 0;                         // bit i = app i bloqueada (NVS "applockm")
+// ---- CAJA DE APLICACIONES: visibilidad y favoritas -----------------------
+// Mismo criterio que gAppLock: un bit por app, indexado por su id (= indice en
+// APP_REG), un solo entero en NVS. gAppFav dice que apps se ven en el
+// escritorio; gAppHidden, cuales se esconden tambien de la caja. Se declaran
+// aqui, junto al resto de la configuracion, porque renderHome() y
+// homeOrderLoad() -- ambos ANTES del bloque de la caja -- ya los necesitan.
+// El valor de fabrica (todas favoritas, ninguna oculta) se calcula en
+// drawerRegistryDefaults() a partir del campo 'dflt' de APP_REG.
+static uint16_t gAppFav    = 0x0FFF;                  // bit i = app i en el escritorio (NVS "appfav")
+static uint16_t gAppHidden = 0;                       // bit i = app i oculta        (NVS "apphide")
+#define HOME_EMPTY 0xFF                               // ranura vacia en homeOrder[]
+static inline bool appIsFav(int id){    return (id >= 0 && id < 16) && (gAppFav    & (uint16_t)(1u << id)) != 0; }
+static inline bool appIsHidden(int id){ return (id >= 0 && id < 16) && (gAppHidden & (uint16_t)(1u << id)) != 0; }
+// Ajustes NUNCA se puede ocultar: es la unica pantalla desde la que se
+// recupera el resto del sistema, y una caja sin Ajustes deja al usuario sin
+// salida. La fila del menu contextual se dibuja atenuada, no desaparece.
+static inline bool appCanHide(int id){  return id != IC_AJUSTES; }
 // Que hacer cuando la verificacion de PIN/contrasena ACIERTA. Es lo que permite
 // reutilizar lsuStartVerify() para todo (pantalla, apps, kiosco) sin crear una
 // segunda ruta de verificacion.
@@ -4922,6 +4939,13 @@ static void lockTick(); static void homeTick();
 static bool handleiOSGestures();                          // gestos de la barra inferior (modo iOS)
 static void lsuStartVerifyFor(int what, int id);          // FASE 3: verificar y luego hacer algo (abrir app, kiosco...)
 static void ctxOpen(int slot); static void ctxTick();     // FASE 2: menu contextual de long-press
+// CAJA DE APLICACIONES (estilo One UI). Se define abajo del todo -- necesita el
+// registro, enterApp y el escritorio ya pintados -- pero homeTick() (que abre
+// con el gesto) y loop() (que la anima) estan antes. Firmas con tipos
+// primitivos, como exige el auto-prototipado de Arduino.
+static void drawerOpen();                                 // gesto hacia arriba desde Inicio
+static void drawerTick();                                 // su tick, desde loop() (ST_DRAWER)
+static bool drawerCanOpen();                              // false si manda un overlay global
 static void kioskShowBadge();                             // FASE 4: candado discreto de "kiosco activo"
 static void kioskSetTick();                               // FASE 4: pantalla de definir el area excluida
 static void kioskExitNow();                               // FASE 4: salida ya verificada
@@ -4963,7 +4987,14 @@ enum { ST_SPLASH = 0, ST_OOBE_LANG, ST_OOBE_NAME, ST_LOCK, ST_HOME, ST_APP, ST_S
        // para que no pueda aparecer en Recientes, en el buscador de Modo PC ni
        // debajo del panel rapido y la isla de notificaciones. Ver la cabecera
        // del bloque FLEX VAULT - INTERFAZ.
-       ST_VAULT };
+       ST_VAULT,
+       // CAJA DE APLICACIONES. Estado propio y anadido AL FINAL, por el mismo
+       // motivo que todos los anteriores: ningun valor ya existente se mueve.
+       // Es un estado y no un modo dentro de ST_HOME porque tiene su propio
+       // gesto, su propio scroll y su propio menu contextual, y porque asi la
+       // isla de notificaciones y el panel rapido -- que se apagan solos fuera
+       // de ST_HOME -- no compiten por el mismo framebuffer.
+       ST_DRAWER };
 
 static int  gState = ST_SPLASH;
 static unsigned long splashStart = 0;
@@ -5374,7 +5405,11 @@ static void renderHome(){
   drawHomeWidgets(millis());
   // rejilla de apps 4x3
   int S = 72, gx0 = 24, gy0 = 212, rowStep = 112;
+  // Solo las apps FAVORITAS. homeOrder[] puede tener ranuras vacias
+  // (HOME_EMPTY) desde que existe la Caja de aplicaciones: quitar una app de
+  // Inicio deja su hueco, no recoloca el resto de la rejilla.
   if(!editMode) for(int i = 0; i < 12; i++){                    // en Modo Edicion los pinta edRender()
+    if(homeOrder[i] == HOME_EMPTY) continue;
     int c = i % 4, r = i / 4;
     int ix = gx0 + c * 120, iy = gy0 + r * rowStep;
     drawAppIcon(homeOrder[i], ix, iy, S);
@@ -5401,6 +5436,7 @@ static void showHome(){ blitToFb(homeBuf); flxFlushAll(); }
 static bool hitHomeIcon(int px, int py, int &id){
   int S = 72, gx0 = 24, gy0 = 212, rowStep = 112;
   for(int i = 0; i < 12; i++){
+    if(homeOrder[i] == HOME_EMPTY) continue;     // hueco: no hay nada que tocar ahi
     int c = i % 4, r = i / 4;
     int ix = gx0 + c * 120, iy = gy0 + r * rowStep;
     if(px >= ix - 6 && px <= ix + S + 6 && py >= iy && py <= iy + S + 16){ id = homeOrder[i]; return true; }
@@ -5494,12 +5530,61 @@ static void edSetDrag(int tx, int ty){
 }
 static unsigned long edHoverMs = 0, edMs = 0;
 
-static void homeOrderSave(){ prefs.begin("flexos", false); prefs.putBytes("hord", homeOrder, 12); prefs.end(); }
+// PERSISTENCIA DEL ESCRITORIO Y DEL REGISTRO. Tres claves en la misma
+// namespace "flexos" y una sola apertura de NVS por guardado: el orden de las
+// ranuras (12 bytes) y los dos bitmasks. Se llama SOLO al cambiar algo (soltar
+// un icono en Modo Edicion, o una accion del menu contextual de la caja), nunca
+// por frame ni desde un bucle. Sin String: buffers fijos.
+static void homeOrderSave(){
+  prefs.begin("flexos", false);
+  prefs.putBytes("hord", homeOrder, 12);
+  prefs.putInt("appfav",  (int)gAppFav);
+  prefs.putInt("apphide", (int)gAppHidden);
+  prefs.end();
+}
+// Valores de fabrica: se derivan del campo 'dflt' de APP_REG, que es el unico
+// sitio donde se declara que apps nacen en el escritorio. APP_REG esta definido
+// mas abajo en el archivo, asi que esto se declara aqui y se define alli.
+static void drawerRegistryDefaults();
+// Deja homeOrder[] y los bitmasks en un estado COHERENTE pase lo que pase con
+// lo que hubiera en NVS (version anterior del firmware, prefs corruptas, una
+// app retirada del registro). Reglas, en este orden:
+//   1. una ranura con un id fuera de 0..15, repetido, oculto o no favorito -> se vacia;
+//   2. toda app favorita que no tenga ranura -> ocupa el primer hueco;
+//   3. si ya no quedan huecos, se le quita la marca de favorita (el escritorio
+//      tiene 12 ranuras y no puede mentir sobre cuantas caben).
+static void homeOrderNormalize(){
+  bool seen[16] = { false };
+  for(int i = 0; i < 12; i++){
+    uint8_t v = homeOrder[i];
+    if(v >= 16 || seen[v] || !appIsFav(v) || appIsHidden(v)){ homeOrder[i] = HOME_EMPTY; continue; }
+    seen[v] = true;
+  }
+  for(int id = 0; id < 16; id++){
+    if(!appIsFav(id) || appIsHidden(id) || seen[id]) continue;
+    int slot = -1;
+    for(int i = 0; i < 12 && slot < 0; i++) if(homeOrder[i] == HOME_EMPTY) slot = i;
+    if(slot < 0){ gAppFav &= (uint16_t)~(1u << id); continue; }   // escritorio lleno
+    homeOrder[slot] = (uint8_t)id; seen[id] = true;
+  }
+}
 static void homeOrderLoad(){
-  prefs.begin("flexos", true); size_t n = prefs.getBytes("hord", homeOrder, 12); prefs.end();
-  if(n != 12){ for(int i = 0; i < 12; i++) homeOrder[i] = i; return; }
-  bool seen[12] = { false };                 // valida: ids unicos 0..11 (por si prefs corruptas)
-  for(int i = 0; i < 12; i++){ if(homeOrder[i] >= 12 || seen[homeOrder[i]]){ for(int j = 0; j < 12; j++) homeOrder[j] = j; return; } seen[homeOrder[i]] = true; }
+  prefs.begin("flexos", true);
+  size_t n = prefs.getBytes("hord", homeOrder, 12);
+  // -1 como valor por defecto hace de centinela de "la clave no existe": un
+  // bitmask valido siempre cae en 0..0xFFFF, asi que no hay ambiguedad. Se
+  // prefiere a isKey() para no depender de una API que no esta en todos los
+  // cores de ESP32.
+  int fav  = prefs.getInt("appfav",  -1);
+  int hide = prefs.getInt("apphide", -1);
+  prefs.end();
+  // Primer arranque (o actualizacion desde una version sin estas claves): el
+  // reparto de fabrica sale del registro, no de constantes sueltas.
+  if(fav < 0){ drawerRegistryDefaults(); }
+  else { gAppFav = (uint16_t)fav; gAppHidden = (uint16_t)(hide < 0 ? 0 : hide); }
+  if(n != 12) for(int i = 0; i < 12; i++) homeOrder[i] = (uint8_t)i;
+  gAppHidden &= (uint16_t)~(1u << IC_AJUSTES);        // Ajustes nunca oculto (ver appCanHide)
+  homeOrderNormalize();
 }
 static void edSlotXY(int slot, int &x, int &y){ int c = slot % 4, r = slot / 4; x = 24 + c * 120; y = 212 + r * 112; }
 static int  edSlotAt(int px, int py){
@@ -5563,7 +5648,7 @@ static void edRender(){
     if(nv) drawWidgetHandle(nx + nw - 30, ny + nh - 30);
   }
   for(int i = 0; i < 12; i++){
-    if(i == edDrag) continue;
+    if(i == edDrag || homeOrder[i] == HOME_EMPTY) continue;     // ranura vacia: nada que temblar
     int tx, ty; edSlotXY(i, tx, ty);
     edCurX[i] += (tx - edCurX[i]) * 0.2f; edCurY[i] += (ty - edCurY[i]) * 0.2f;   // resorte
     float ph = i * 0.6f;
@@ -5595,7 +5680,9 @@ static void edTick(){
   if(T.pressed){
     int which;
     if(widgetHandleAt(T.x, T.y, which)){ widgetToggleSize(which); edRender(); return; }
-    edDrag = edSlotAt(T.x, T.y); edSetDrag(T.x, T.y); edHoverSlot = -1; edRender(); return;
+    edDrag = edSlotAt(T.x, T.y);
+    if(edDrag >= 0 && homeOrder[edDrag] == HOME_EMPTY) edDrag = -1;   // no se arrastra un hueco
+    edSetDrag(T.x, T.y); edHoverSlot = -1; edRender(); return;
   }
   if(T.down && edDrag >= 0){
     edSetDrag(T.x, T.y);
@@ -5649,6 +5736,13 @@ static void animateIconRipple(){
   }
   present(y0, y1);
 }
+// ORIGEN ALTERNATIVO DE LA ANIMACION. Una app abierta desde la Caja de
+// aplicaciones puede no estar en el escritorio (no es favorita) o estar en otra
+// ranura; sin esto, winRevealAnim la haria crecer desde un sitio que no es el
+// icono que el usuario acaba de tocar. La caja anota aqui el rectangulo REAL
+// del icono pulsado y getIconRect lo prefiere, pero SOLO para esa app: asi el
+// dato no se queda pegado y afectando a la siguiente apertura desde Inicio.
+static int gIconOvrApp = -1, gIconOvrX = 0, gIconOvrY = 0, gIconOvrS = 72;
 static void homeTick(){
   if(editMode){ edTick(); return; }
   if(gNavMode == 1 && handleiOSGestures()) return;   // gestos iOS antes que los toques normales
@@ -5664,13 +5758,26 @@ static void homeTick(){
   if(T.down && edSlotAt(T.startX, T.startY) >= 0 && (millis() - T.downMs) > 1000
      && abs(T.x - T.startX) < 12 && abs(T.y - T.startY) < 12){
     int slot = edSlotAt(T.startX, T.startY);
+    if(homeOrder[slot] == HOME_EMPTY) return;        // hueco de la rejilla: no hay app sobre la que actuar
     if(CTXMENU_ON){ ctxOpen(slot); return; }
     edEnter(); edDrag = slot; edSetDrag(T.x, T.y); return;
   }
+  // CAJA DE APLICACIONES: deslizar hacia ARRIBA desde el escritorio. Va
+  // DESPUES del long-press y del gesto de la barra iOS, y ANTES del tap, para
+  // no pisar a ninguno de los dos:
+  //   · T.swipeUp solo lo pone tDoRelease() cuando el dedo recorrio mas de 55
+  //     px en vertical, asi que jamas coincide con un tap (que exige <16 px);
+  //   · el panel rapido ya se atendio en loop() -- qsGlobalHandle() -- y solo
+  //     escucha gestos que EMPIEZAN en el borde superior, por eso aqui se exige
+  //     que el dedo arranque por debajo de la barra de estado;
+  //   · en modo gestos (gNavMode==1) la franja inferior es de handleiOSGestures,
+  //     que se ejecuta arriba y devuelve true si se queda el gesto.
+  if(T.swipeUp && drawerCanOpen() && T.startY > 96){ drawerOpen(); return; }
   if(T.tap){
     if(T.x > SCR_W * 2 / 3 && T.y > SCR_H - 72){ activarMultitarea(); return; }   // boton Recientes
     int id;
     if(hitHomeIcon(T.x, T.y, id)){
+      gIconOvrApp = -1;              // se abre desde su ranura real, no desde la caja
       // FASE 3: si la app tiene candado, la verificacion va ANTES de abrirla.
       // Se reutiliza lsuStartVerify (misma UI, mismo contador de fallos, misma
       // espera progresiva de la Fase 1); al acertar, lsuFinishAfter abre la app
@@ -5700,7 +5807,19 @@ static void homeTick(){
 #define WIN_BOT (gHosted ? gAppH : (SCR_H - 64))
 #define WIN_BG  TH_WIN              // fondo de ventana: lo elige la paleta activa (ver TEMA SEMANTICO)
 
-typedef struct { void (*enter)(); void (*tick)(); uint8_t flags; } FlexApp;
+// REGISTRO CENTRAL DE APPS. Una app de Flex OS ES su entrada en APP_REG, y su
+// ID UNICO es el indice de esa entrada (el mismo del enum IC_*). Todo lo demas
+// cuelga de ese id, sin listas paralelas que puedan desincronizarse:
+//   · id       -> indice en APP_REG (0..15)
+//   · nombre   -> appName(id), localizado en APP[16][5]
+//   · icono    -> drawAppIcon(id, x, y, S), vectorial
+//   · callback -> enter() / tick() de esta misma estructura
+//   · categoria-> campo 'cat' (APP_CAT_*), lo usa la Caja de aplicaciones
+//   · visible / favoritaEnInicio -> bits en gAppHidden / gAppFav (NVS), con
+//     'dflt' como valor de fabrica de cada app. Son bitmasks y no campos de la
+//     estructura porque cambian en caliente y hay que persistirlos: dos enteros
+//     en NVS en vez de dieciseis claves (mismo criterio que gAppLock).
+typedef struct { void (*enter)(); void (*tick)(); uint8_t flags; uint8_t cat; uint8_t dflt; } FlexApp;
 #define APP_CUSTOM_HEADER 1   // la app pinta su propia cabecera (no la centrada)
 #define APP_OWN_TOUCH     2   // la app gestiona TODOS sus toques (solo swipe-derecha cierra)
 #define APP_LAND          4   // la app dibuja en LANDSCAPE (pone gLand por su cuenta)
@@ -5752,6 +5871,7 @@ static void geoEnter(); static void geoTick();   // Juegos -> Geo Dash (clon de 
 
 // Rect del icono en el escritorio (para animar la apertura desde el)
 static void getIconRect(int id, int &rx, int &ry, int &rs){
+  if(id == gIconOvrApp){ rx = gIconOvrX; ry = gIconOvrY; rs = gIconOvrS; return; }
   if(id < 12){
     // La rejilla se dibuja por SLOT (homeOrder[slot] = id de app), no por id.
     // Antes esto calculaba la casilla con id%4 e id/4, o sea daba por hecho que
@@ -5978,25 +6098,64 @@ static void appRelojRender(){
 static void appRelojEnter(){ appRelojRender(); }
 static void appRelojTick(){ if(gMinChanged) appRelojRender(); }
 
+// ---- Categorias del registro (campo 'cat' de FlexApp) ----
+// Numeros y no una cadena por app: la etiqueta visible se localiza en
+// APP_CAT_NAME[cat][idioma], igual que APP[id][idioma] hace con los nombres.
+#define APP_CAT_ESENCIAL 0
+#define APP_CAT_MEDIA    1
+#define APP_CAT_TRABAJO  2
+#define APP_CAT_SISTEMA  3
+#define APP_CAT_OCIO     4
+#define APP_CAT_N        5
+// Valor de fabrica del campo 'dflt': que apps nacen en el escritorio. Se usa
+// UNA vez, la primera que arranca el equipo (o al restablecer): a partir de ahi
+// manda lo guardado en NVS.
+// De fabrica son favoritas las doce de la rejilla, exactamente las mismas que
+// se veian antes de que existiera la caja: una placa que actualice no nota
+// ningun cambio en su escritorio. Las cuatro del dock (12..15) NO llevan la
+// marca porque el dock ya las tiene fijadas; el usuario puede anadirlas a la
+// rejilla desde la caja si quiere.
+#define APP_DEF_FAV      1   // aparece en la rejilla de Inicio de fabrica
+#define APP_DEF_DOCK     0   // no en la rejilla (vive en el dock)
+static const char* APP_CAT_NAME[APP_CAT_N][5] = {
+  {"Esenciales","Essentials","Essentiels","Essenciais","Essenziali"},
+  {"Multimedia","Media","M\xC3\xA9" "dias","M\xC3\xAD" "dia","Multimedia"},
+  {"Productividad","Productivity","Productivit\xC3\xA9","Produtividade","Produttivit\xC3\xA0"},
+  {"Sistema","System","Syst\xC3\xA8" "me","Sistema","Sistema"},
+  {"Ocio","Fun","Loisirs","Lazer","Svago"},
+};
 // ---- Registro de apps (indices = enum IC_*) ----
 static FlexApp APP_REG[16] = {
-  { appRelojEnter, appRelojTick, APP_FLEX },              // 0  Reloj  (REAL)
-  { galEnter, galTick, APP_FLEX },                        // 1  Galeria (REAL: JPEG de /Documentos + dibujos de /Paint)
-  { vidEnter, vidTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH },  // 2  Multimedia (esqueleto)
-  { almEnter, almTick, APP_FLEX },                        // 3  Almacenamiento (REAL: LittleFS + PSRAM)
-  { pcEnter, pcTick, APP_CUSTOM_HEADER },                  // 4  Modo PC (REAL, M4) -- usa render landscape (gLand)
-  { noteEnter, noteTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH },// 5  Notas + teclado (REAL)
-  { eduEnter, NULL, APP_FLEX },                           // 6  Educacion (REAL)
-  { navEnter, navTick, APP_FLEX | APP_OWN_TOUCH },         // 7  Navegador (REAL: remoto + omnibox + pestanas)
-  { ideEnter, ideTick, APP_FLEX },                        // 8  Code IDE (REAL + Asistente de Hardware)
-  { bienEnter, bienTick, APP_FLEX },                      // 9  Bienestar (REAL, M2)
-  { paintEnter, paintTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH },// 10 Paint (REAL)
-  { geoEnter, geoTick, APP_OWN_TOUCH | APP_CUSTOM_HEADER | APP_LAND }, // 11 Juegos (Geo Dash, REAL)
-  { settingsEnter, settingsTick, APP_CUSTOM_HEADER },      // 12 Ajustes (REAL, M3) -- Wi-Fi/PIN cambian gState a pantalla completa
-  { calcEnter, calcTick, APP_FLEX },               // 13 Calculadora (REAL, M2) -- app de referencia del modo embebido
-  { calEnter, calTick, APP_FLEX },                        // 14 Calendario (REAL, M2)
-  { camEnter, camTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH },  // 15 Camara (esqueleto)
+  { appRelojEnter, appRelojTick, APP_FLEX, APP_CAT_ESENCIAL, APP_DEF_FAV },              // 0  Reloj  (REAL)
+  { galEnter, galTick, APP_FLEX, APP_CAT_MEDIA, APP_DEF_FAV },                        // 1  Galeria (REAL: JPEG de /Documentos + dibujos de /Paint)
+  { vidEnter, vidTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_MEDIA, APP_DEF_FAV },  // 2  Multimedia (esqueleto)
+  { almEnter, almTick, APP_FLEX, APP_CAT_SISTEMA, APP_DEF_FAV },                        // 3  Almacenamiento (REAL: LittleFS + PSRAM)
+  { pcEnter, pcTick, APP_CUSTOM_HEADER, APP_CAT_SISTEMA, APP_DEF_FAV },                  // 4  Modo PC (REAL, M4) -- usa render landscape (gLand)
+  { noteEnter, noteTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_TRABAJO, APP_DEF_FAV },// 5  Notas + teclado (REAL)
+  { eduEnter, NULL, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_FAV },                           // 6  Educacion (REAL)
+  { navEnter, navTick, APP_FLEX | APP_OWN_TOUCH, APP_CAT_ESENCIAL, APP_DEF_FAV },         // 7  Navegador (REAL: remoto + omnibox + pestanas)
+  { ideEnter, ideTick, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_FAV },                        // 8  Code IDE (REAL + Asistente de Hardware)
+  { bienEnter, bienTick, APP_FLEX, APP_CAT_SISTEMA, APP_DEF_FAV },                      // 9  Bienestar (REAL, M2)
+  { paintEnter, paintTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_OCIO, APP_DEF_FAV },// 10 Paint (REAL)
+  { geoEnter, geoTick, APP_OWN_TOUCH | APP_CUSTOM_HEADER | APP_LAND, APP_CAT_OCIO, APP_DEF_FAV }, // 11 Juegos (Geo Dash, REAL)
+  { settingsEnter, settingsTick, APP_CUSTOM_HEADER, APP_CAT_SISTEMA, APP_DEF_DOCK },      // 12 Ajustes (REAL, M3) -- Wi-Fi/PIN cambian gState a pantalla completa
+  { calcEnter, calcTick, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_DOCK },               // 13 Calculadora (REAL, M2) -- app de referencia del modo embebido
+  { calEnter, calTick, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_DOCK },                        // 14 Calendario (REAL, M2)
+  { camEnter, camTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_MEDIA, APP_DEF_DOCK },  // 15 Camara (esqueleto)
 };
+static const char* appCatName(int id){
+  int c = (id >= 0 && id < 16) ? APP_REG[id].cat : APP_CAT_SISTEMA;
+  if(c < 0 || c >= APP_CAT_N) c = APP_CAT_SISTEMA;
+  return APP_CAT_NAME[c][LI()];
+}
+// Reparto de fabrica de favoritas/ocultas. Lo declara homeOrderLoad() mucho mas
+// arriba (necesita llamarlo en el primer arranque) y se define AQUI porque es
+// donde vive el registro del que sale: si manana una app nace fuera del
+// escritorio, basta con quitarle APP_DEF_FAV en su fila de APP_REG.
+static void drawerRegistryDefaults(){
+  gAppFav = 0; gAppHidden = 0;
+  for(int id = 0; id < 16; id++) if(APP_REG[id].dflt & APP_DEF_FAV) gAppFav |= (uint16_t)(1u << id);
+}
 
 // Animacion de apertura/cierre: la ventana crece/encoge desde el icono
 #define WIN_ANIM_MS 100                              // 0.1 s exactos, basado en tiempo
@@ -6122,6 +6281,7 @@ static void appTick(){
 }
 
 static void enterHome(){
+  gIconOvrApp = -1;               // el origen prestado por la caja de apps caduca aqui (ver getIconRect)
   qsForceClose();                 // volver al escritorio nunca deja la cortina a medias
   gState = ST_HOME; lockOff = 0; lastLockOff = -1;
   // Antes se volcaba homeBuf tal cual. Si venias de Ajustes de cambiar idioma,
@@ -16743,7 +16903,10 @@ static void autoLockTick(){
   // no arranque ya vencido y vuelva a bloquear al instante.
   if(T.down || T.pressed || T.released){ gLastTouchMs = millis(); return; }
   if(!gAutoLockMs) return;
-  if(gState != ST_HOME && gState != ST_APP) return;
+  // La Caja de aplicaciones cuenta como escritorio: dejarla fuera de esta lista
+  // seria un agujero -- el equipo se quedaria encendido para siempre con la
+  // caja abierta y el temporizador de inactividad parado.
+  if(gState != ST_HOME && gState != ST_APP && gState != ST_DRAWER) return;
   if(gLand || gHosted) return;                // Modo PC / app hospedada: no se toca
   if(qsPanelY != 0) return;                   // cortina abierta: no bloquear a media interaccion
   if(!gLastTouchMs){ gLastTouchMs = millis(); return; }
@@ -17164,6 +17327,780 @@ static void ctxTick(){
     }
     ctxClose(-1);                                     // fuera del panel -> cancelar
   }
+}
+
+// #############################################################
+// ##  CAJA DE APLICACIONES  (cajon de apps, estilo One UI)
+// ##  ------------------------------------------------------
+// ##  Hoja a pantalla completa que sube desde el escritorio con un
+// ##  deslizamiento hacia arriba y baja con uno hacia abajo, el
+// ##  boton Atras o el boton Inicio. Muestra TODAS las apps
+// ##  visibles del registro central (APP_REG), mientras que el
+// ##  escritorio muestra solo las favoritas.
+// ##
+// ##  COMO DIBUJA (y por que no parpadea ni bloquea el bucle)
+// ##  ------------------------------------------------------
+// ##  · El fondo de la hoja -- wallpaper + capa oscura -- se compone
+// ##    UNA vez en drwPage (PSRAM) y de ahi solo se hacen memcpy por
+// ##    banda. Ningun filtro corre por cuadro: es la unica forma de
+// ##    sostener el scroll a 60 fps en 480x800.
+// ##  · Cada cuadro se compone en bbuf y se publica con present() de
+// ##    una sola vez, igual que el resto del sistema.
+// ##  · La animacion de subida/bajada avanza por RELOJ (millis()),
+// ##    un paso por vuelta de loop(). No hay delay() ni bucles
+// ##    propios: si el sistema va lento, la animacion pierde cuadros
+// ##    pero NUNCA dura mas ni congela el tactil.
+// ##  · Con la hoja quieta solo se recompone la BANDA de la rejilla,
+// ##    y dentro de ella solo se dibujan las filas visibles.
+// ##
+// ##  PRIORIDAD DE TOQUES
+// ##  ------------------------------------------------------
+// ##  drawerTick() se llama desde el switch de gState, es decir
+// ##  DESPUES de notifHandleTouch(), flexOtaTouchBridge() y
+// ##  qsGlobalHandle(): cualquier overlay global (OTA, isla de
+// ##  notificaciones, panel rapido) ya vio el toque antes. Ademas,
+// ##  si una capa OTA es duena de la pantalla, la caja ni dibuja ni
+// ##  escucha (ver la primera guarda de drawerTick).
+// #############################################################
+
+// ---- Geometria (fija para el panel vertical de 480x800) ----
+#define DRW_ANIM_MS    240        // subida/bajada
+#define DRW_ICON_S     72         // mismo tamano que la rejilla del escritorio
+#define DRW_COL_X0     24
+#define DRW_COL_STEP   120        // 4 columnas: 24 + 3*120 + 72 = 456 <= 480
+#define DRW_ROW_STEP   116        // icono + nombre + aire
+#define DRW_GRID_TOP   152
+#define DRW_NAV_H      76         // banda inferior (botones o barra de gestos)
+#define DRW_SEARCH_Y   74
+#define DRW_SEARCH_H   58
+#define DRW_SEARCH_R   29
+#define DRW_SHEET_RAD  28         // esquinas superiores redondeadas de la hoja
+#define DRW_KB_H       178        // teclado del buscador (solo cuando esta abierto)
+#define DRW_LP_MS      600        // pulsacion larga -> menu contextual
+#define DRW_CTX_ROWS   4
+#define DRW_CTX_ROW_H  56
+#define DRW_CTX_W      262
+#define DRW_CTX_RAD    20
+#define DRW_QMAX       14         // caracteres del buscador
+
+// ---- Estado ----
+static uint16_t* drwPage    = NULL;   // fondo de la hoja ya compuesto (PSRAM, se reutiliza)
+static int       drwPageSig = -1;     // apariencia con la que se compuso drwPage
+static bool      drwOn      = false;  // la caja es la pantalla activa
+static int       drwAnim    = 0;      // 0 quieta · 1 subiendo · 2 bajando
+static uint32_t  drwAnimMs  = 0;
+static float     drwSlide   = (float)SCR_H;   // 0 = abierta del todo · SCR_H = fuera de pantalla
+static int       drwLastSlide = SCR_H;        // para calcular la banda sucia del cuadro
+static float     drwScroll  = 0.0f;   // desplazamiento de la rejilla (px)
+static float     drwVel     = 0.0f;   // inercia (px/s)
+static bool      drwDrag    = false;
+static int       drwDragY0  = 0, drwDragLastY = 0;
+static float     drwDragS0  = 0.0f;
+static uint32_t  drwDragMs  = 0;
+static bool      drwMoved   = false;
+static int       drwList[16], drwN = 0;       // ids visibles tras filtrar (del registro)
+static char      drwQuery[DRW_QMAX + 1] = { 0 };
+static int       drwQLen    = 0;
+static bool      drwKbOn    = false;  // teclado del buscador desplegado
+static bool      drwShowHid = false;  // "ver apps ocultas" (unica via para volver a mostrarlas)
+static bool      drwCtxOn   = false;  // menu contextual de pulsacion larga
+static int       drwCtxApp  = -1, drwCtxX = 0, drwCtxY = 0;
+static bool      drwInfoOn  = false;  // ficha "Informacion"
+static int       drwPendApp = -1;     // app a abrir cuando termine la bajada
+static bool      drwPendSw  = false;  // ir a Recientes cuando termine la bajada
+static bool      drwFull    = true;   // hay que recomponer la pantalla entera
+static bool      drwDirty   = true;   // hay que recomponer la banda de la rejilla
+static uint32_t  drwFrameMs = 0;
+static int       drwLpApp   = -1;     // app bajo el dedo (para no repetir el long-press)
+
+// ---- Geometria derivada ----
+static inline int drwGridBot(){ return drwKbOn ? (SCR_H - DRW_KB_H - 8) : (SCR_H - DRW_NAV_H); }
+static inline int drwRows(){ return (drwN + 3) / 4; }
+static int drwMaxScroll(){
+  int content = drwRows() * DRW_ROW_STEP + 16;
+  int view    = drwGridBot() - DRW_GRID_TOP;
+  int m = content - view;
+  return m > 0 ? m : 0;
+}
+static void drwClampScroll(){
+  int m = drwMaxScroll();
+  if(drwScroll < 0){ drwScroll = 0; drwVel = 0; }
+  if(drwScroll > (float)m){ drwScroll = (float)m; drwVel = 0; }
+}
+// Rectangulo de la celda i EN COORDENADAS DE CONTENIDO (sin scroll ni hoja).
+static void drwCellXY(int i, int &x, int &y){
+  x = DRW_COL_X0 + (i % 4) * DRW_COL_STEP;
+  y = DRW_GRID_TOP + (i / 4) * DRW_ROW_STEP;
+}
+// Indice de la celda bajo (px,py) en coordenadas de PANTALLA, o -1.
+static int drwHitCell(int px, int py){
+  if(py < DRW_GRID_TOP || py >= drwGridBot()) return -1;
+  int cy = py + (int)drwScroll - (int)drwSlide;
+  int r = (cy - DRW_GRID_TOP) / DRW_ROW_STEP;
+  if(r < 0 || (cy - DRW_GRID_TOP) < 0) return -1;
+  int c = (px - DRW_COL_X0) / DRW_COL_STEP;
+  if(px < DRW_COL_X0 || c < 0 || c > 3) return -1;
+  int cellX = DRW_COL_X0 + c * DRW_COL_STEP;
+  if(px > cellX + DRW_ICON_S + 12) return -1;             // pasillo entre columnas
+  int i = r * 4 + c;
+  return (i >= 0 && i < drwN) ? i : -1;
+}
+
+// ---- Filtro: el UNICO sitio donde se decide que apps entran en la caja ----
+// Sale del registro central: id 0..15, fuera las ocultas (salvo en modo "ver
+// ocultas") y fuera las que no casen con el buscador. dexMatch() ya existe y
+// hace exactamente esta comparacion sin distinguir mayusculas; se reutiliza en
+// vez de escribir una segunda.
+static void drwFilter(){
+  drwN = 0;
+  for(int id = 0; id < 16; id++){
+    if(appIsHidden(id) && !drwShowHid) continue;
+    if(!dexMatch(appName(id), drwQuery, drwQLen)) continue;
+    drwList[drwN++] = id;
+  }
+}
+
+// ---- Fondo de la hoja -------------------------------------------------
+// Wallpaper + capa oscura, compuesto UNA vez en PSRAM y reutilizado en cada
+// apertura. La firma (tema + vidrio) detecta el unico caso en que hay que
+// rehacerlo: que el usuario haya cambiado la apariencia en Ajustes. Si no hay
+// PSRAM para la pagina se cae con elegancia a blurBg (el velo que ya usan
+// Recientes y el apagado) y, en ultimo extremo, al propio escritorio: la caja
+// sigue funcionando, solo pierde el oscurecido extra.
+static inline int drwSig(){ return (gDark ? 1 : 0) | (uiGlass ? 2 : 0); }
+static void drwBuildPage(){
+  if(drwPage && drwPageSig == drwSig()) return;
+  if(!drwPage) drwPage = (uint16_t*)heap_caps_malloc((size_t)SCR_W * SCR_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(!drwPage) return;                                    // sin PSRAM: se usara blurBg/homeBuf
+  ensureBlurBg();
+  const uint16_t* src = blurBg ? blurBg : homeBuf;
+  if(!src){ heap_caps_free(drwPage); drwPage = NULL; return; }
+  memcpy(drwPage, src, (size_t)SCR_W * SCR_H * 2);
+  // Velo extra: la caja tapa el escritorio entero y lleva mucho texto encima,
+  // asi que necesita mas contraste que Recientes. Se aplica AQUI, una sola vez,
+  // y no por cuadro (que es justo lo que no se puede hacer a 60 fps).
+  uint16_t* old = gBuf;
+  bool wl = gLand; gLand = false;
+  int sx0 = gClipX0, sx1 = gClipX1, sy0 = gClipY0, sy1 = gClipY1;
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
+  setBuf(drwPage);
+  fillRectA(0, 0, SCR_W, SCR_H, rgb565(6, 8, 16), 96);
+  setBuf(old);
+  gLand = wl;
+  gClipX0 = sx0; gClipX1 = sx1; gClipY0 = sy0; gClipY1 = sy1;
+  drwPageSig = drwSig();
+}
+static inline const uint16_t* drwBgSrc(){
+  if(drwPage) return drwPage;
+  if(blurBg)  return blurBg;
+  return homeBuf;
+}
+
+// ---- Dibujo de las piezas ---------------------------------------------
+// Lupa vectorial del buscador (sin bitmaps, como el resto del sistema).
+static void drwGlyphSearch(int cx, int cy, int r, uint16_t col){
+  drawCircle(cx, cy, r, col);
+  drawCircle(cx, cy, r - 1, col);
+  strokeSegAA((float)(cx + r * 7 / 10), (float)(cy + r * 7 / 10),
+              (float)(cx + r * 15 / 10), (float)(cy + r * 15 / 10), 1.6f, col);
+}
+// Ojo: interruptor de "ver apps ocultas". Tachado cuando esta apagado.
+static void drwGlyphEye(int cx, int cy, int s, bool on, uint16_t col){
+  int w = s, h = s / 2;
+  for(int i = -w / 2; i <= w / 2; i++){
+    float t = (float)i / (float)(w / 2);
+    int dy = (int)(h * 0.5f * (1.0f - t * t));
+    pxA(cx + i, cy - dy, col, 235);
+    pxA(cx + i, cy + dy, col, 235);
+  }
+  fillCircleA(cx, cy, s / 6, col, 235);
+  if(!on) strokeSegAA((float)(cx - w / 2), (float)(cy + h / 2), (float)(cx + w / 2), (float)(cy - h / 2), 1.6f, col);
+}
+// Buscador grande estilo One UI. 'settled' distingue el cuadro final (vidrio
+// real) de los de la animacion (relleno plano): drawLiquidGlassPanel hace un
+// blur de verdad y no puede correr en cada cuadro de una animacion.
+static void drwDrawSearch(int sy, bool settled){
+  int x = 24, y = DRW_SEARCH_Y + sy, w = SCR_W - 48, h = DRW_SEARCH_H;
+  // Si el pildoro no cae en la banda que se esta componiendo, ni se toca. Es lo
+  // que evita que un cuadro de scroll -- que solo recompone la rejilla -- pague
+  // el blur del vidrio, y ademas drawLiquidGlassPanel no respeta gClipY: sin
+  // esta guarda escribiria en bbuf fuera de la banda publicada.
+  if(y + h - 1 < gClipY0 || y > gClipY1) return;
+  if(uiGlass && settled) drawLiquidGlassPanel(x, y, w, h, DRW_SEARCH_R, TH_GLASS2);
+  else                   fillRoundRectA(x, y, w, h, DRW_SEARCH_R, TH_SURF, 150);
+  drwGlyphSearch(x + 30, y + h / 2, 10, TH_ONWALL);
+  if(drwQLen > 0) drawText(x + 54, y + h / 2 - 8, drwQuery, 2, TH_ONWALL);
+  else            drawText(x + 54, y + h / 2 - 8, "Buscar aplicaciones", 2, TH_ONWALL2);
+  drwGlyphEye(x + w - 32, y + h / 2, 22, drwShowHid, drwShowHid ? TH_PRIM : TH_ONWALL2);
+}
+// Teclado compacto del buscador. Es propio de la caja: no toca ni el teclado
+// del sistema (Notas) ni el del OOBE, asi que no puede desconfigurarlos.
+static const char* DRW_KB_ROW[3] = { "qwertyuiop", "asdfghjkl", "zxcvbnm" };
+static void drwKbKeyRect(int row, int col, int sy, int &x, int &y, int &w, int &h){
+  int n = (int)strlen(DRW_KB_ROW[row]);
+  w = 42; h = 46;
+  int gap = 4, total = n * w + (n - 1) * gap;
+  x = (SCR_W - total) / 2 + col * (w + gap);
+  y = SCR_H - DRW_KB_H + 14 + row * (h + 6) + sy;
+  if(row == 2){ x += 54; }                 // hueco a los lados para cerrar y borrar
+}
+static void drwKbSideRect(bool erase, int sy, int &x, int &y, int &w, int &h){
+  int kx, ky, kw, kh; drwKbKeyRect(2, 0, sy, kx, ky, kw, kh);
+  w = 50; h = kh; y = ky;
+  x = erase ? (SCR_W - 12 - w) : 12;
+}
+static void drwDrawKeyboard(int sy){
+  int top = SCR_H - DRW_KB_H + sy;
+  if(top + DRW_KB_H - 1 < gClipY0 || top > gClipY1) return;
+  fillRectA(0, top, SCR_W, DRW_KB_H, rgb565(0, 0, 0), 120);
+  for(int r = 0; r < 3; r++){
+    int n = (int)strlen(DRW_KB_ROW[r]);
+    for(int c = 0; c < n; c++){
+      int x, y, w, h; drwKbKeyRect(r, c, sy, x, y, w, h);
+      fillRoundRectA(x, y, w, h, 10, TH_SURF, 170);
+      char k[2] = { DRW_KB_ROW[r][c], 0 };
+      drawTextC(x + w / 2, y + h / 2 - 8, k, 2, TH_ONWALL);
+    }
+  }
+  int x, y, w, h;
+  drwKbSideRect(false, sy, x, y, w, h);                   // cerrar teclado
+  fillRoundRectA(x, y, w, h, 10, TH_SURF, 120);
+  strokeSegAA((float)(x + w / 2 - 9), (float)(y + h / 2 - 4), (float)(x + w / 2), (float)(y + h / 2 + 5), 2.0f, TH_ONWALL2);
+  strokeSegAA((float)(x + w / 2 + 9), (float)(y + h / 2 - 4), (float)(x + w / 2), (float)(y + h / 2 + 5), 2.0f, TH_ONWALL2);
+  drwKbSideRect(true, sy, x, y, w, h);                    // borrar
+  fillRoundRectA(x, y, w, h, 10, TH_SURF, 120);
+  strokeSegAA((float)(x + 14), (float)(y + h / 2), (float)(x + w - 14), (float)(y + h / 2), 2.0f, TH_ONWALL);
+}
+// Banda inferior: los MISMOS botones (o la misma barra de gestos) que el
+// escritorio, para que Atras e Inicio esten donde el usuario ya los busca.
+static void drwDrawNav(int sy){
+  if(drwKbOn) return;
+  if(SCR_H - DRW_NAV_H + sy > gClipY1 || SCR_H - 1 + sy < gClipY0) return;
+  if(gNavMode == 0){
+    int ny = SCR_H - 52 + sy; uint16_t nv = TH_ONWALL;
+    int bx = SCR_W / 6;
+    fillTriangle(bx - 10, ny + 8, bx + 8, ny - 2, bx + 8, ny + 18, nv);
+    drawCircle(SCR_W / 2, ny + 8, 12, nv); drawCircle(SCR_W / 2, ny + 8, 11, nv);
+    int rx = SCR_W * 5 / 6;
+    drawRoundRect(rx - 11, ny - 3, 22, 22, 4, nv);
+  } else drawHomeIndicator(SCR_H + sy, 220);
+}
+// Cabecera: hora, fecha corta y estado, como en el escritorio.
+static void drwDrawStatus(int sy){
+  if(64 + sy < gClipY0 || sy > gClipY1) return;
+  char cs[12]; clkStrBar(cs, sizeof(cs));
+  drawText(20, 16 + sy, cs, 2, TH_ONWALL);
+  char sd[48]; buildShortDate(sd, sizeof(sd));
+  drawText(20, 40 + sy, sd, 1, TH_ONWALL2);
+  drawWifi(SCR_W - 66, 28 + sy, 11, TH_ONWALL);
+  drawBattery(SCR_W - 46, 20 + sy, 30, 15, 82, TH_ONWALL);
+}
+// Rejilla: SOLO las filas que caen dentro de la banda visible. Con 16 apps la
+// diferencia es pequena, pero la regla es la que hace que la caja siga siendo
+// fluida cuando el registro crezca.
+static void drwDrawGrid(int sy, int y0, int y1){
+  int gTop = DRW_GRID_TOP + sy, gBot = drwGridBot() + sy;
+  int c0 = gClipY0, c1 = gClipY1;
+  gClipY0 = (y0 > gTop) ? y0 : gTop;
+  gClipY1 = (y1 < gBot - 1) ? y1 : gBot - 1;
+  if(gClipY0 <= gClipY1){
+    // ICONOS PLANOS A PROPOSITO. drawLiquidGlassPanel indexa el buffer a pelo y
+    // NO respeta gClipY, asi que un icono a medio salir de la banda pintaria
+    // fuera de ella; y ademas son hasta 20 blancos por cuadro, que no caben en
+    // el presupuesto de un scroll a 60 fps. El estilo Vidrio se conserva donde
+    // si es viable: buscador, menu contextual y ficha de informacion.
+    int oldStyle = gIconStyle; gIconStyle = 0;
+    int scroll = (int)drwScroll;
+    int r0 = (scroll - DRW_ROW_STEP) / DRW_ROW_STEP; if(r0 < 0) r0 = 0;
+    int r1 = (scroll + (gBot - gTop)) / DRW_ROW_STEP + 1;
+    int rows = drwRows(); if(r1 > rows - 1) r1 = rows - 1;
+    for(int r = r0; r <= r1; r++){
+      for(int c = 0; c < 4; c++){
+        int i = r * 4 + c; if(i >= drwN) break;
+        int id = drwList[i];
+        int cx, cy; drwCellXY(i, cx, cy);
+        int ix = cx, iy = cy - scroll + sy;
+        if(iy > gClipY1 || iy + DRW_ROW_STEP < gClipY0) continue;
+        drawAppIcon(id, ix, iy, DRW_ICON_S);
+        if(appIsHidden(id)) fillRoundRectA(ix, iy, DRW_ICON_S, DRW_ICON_S, DRW_ICON_S * 22 / 100, rgb565(0,0,0), 130);
+        if(APPLOCK_ON && appLockGet(id))
+          fillRoundRectA(ix + DRW_ICON_S - 18, iy + DRW_ICON_S - 18, 16, 16, 5, TH_DANGER, 230);
+        const char* nm = appName(id);
+        int fs = uiFontFit(nm, DRW_COL_STEP - 14, 2);
+        drawTextC(ix + DRW_ICON_S / 2, iy + DRW_ICON_S + 8, nm, fs,
+                  appIsHidden(id) ? TH_ONWALL2 : TH_ONWALL);
+      }
+    }
+    gIconStyle = oldStyle;
+    if(drwN == 0)
+      drawTextC(SCR_W / 2, gTop + 60, "Sin resultados", 3, TH_ONWALL2);
+  }
+  gClipY0 = c0; gClipY1 = c1;
+}
+
+// ---- Composicion de una banda ------------------------------------------
+// Unico punto que sabe como se ve la caja. Lo usan el cuadro normal, la
+// animacion, el scroll, el menu contextual y la ficha de informacion, asi que
+// no hay dos maneras distintas de dibujar lo mismo.
+static void drwCompose(int y0, int y1, bool settled){
+  if(y0 < 0) y0 = 0; if(y1 > SCR_H - 1) y1 = SCR_H - 1; if(y0 > y1) return;
+  setBuf(bbuf);
+  int c0 = gClipY0, c1 = gClipY1, cx0 = gClipX0, cx1 = gClipX1;
+  gClipY0 = y0; gClipY1 = y1; gClipX0 = 0; gClipX1 = SCR_W - 1;
+  int sy = (int)drwSlide;
+  const uint16_t* bg = drwBgSrc();
+  for(int j = y0; j <= y1; j++){
+    const uint16_t* src = (j < sy) ? homeBuf : bg;
+    if(!src) src = homeBuf;
+    if(src) memcpy(bbuf + (size_t)j * SCR_W, src + (size_t)j * SCR_W, SCR_W * 2);
+  }
+  // Esquinas superiores redondeadas: en las primeras filas de la hoja se
+  // devuelve el escritorio a los lados, asi el borde no es un corte recto.
+  if(homeBuf && sy > 0 && sy < SCR_H){
+    for(int k = 0; k < DRW_SHEET_RAD; k++){
+      int j = sy + k; if(j < y0 || j > y1 || j >= SCR_H) continue;
+      int ins = rrInset(k, SCR_H, DRW_SHEET_RAD);
+      if(ins <= 0) continue;
+      memcpy(bbuf + (size_t)j * SCR_W, homeBuf + (size_t)j * SCR_W, (size_t)ins * 2);
+      memcpy(bbuf + (size_t)j * SCR_W + (SCR_W - ins), homeBuf + (size_t)j * SCR_W + (SCR_W - ins), (size_t)ins * 2);
+    }
+  }
+  drwDrawStatus(sy);
+  drwDrawSearch(sy, settled);
+  drwDrawGrid(sy, y0, y1);
+  if(drwKbOn) drwDrawKeyboard(sy);
+  drwDrawNav(sy);
+  gClipY0 = c0; gClipY1 = c1; gClipX0 = cx0; gClipX1 = cx1;
+}
+
+// ---- Menu contextual de pulsacion larga --------------------------------
+// Cuatro acciones, las cuatro reales: abrir, favorita si/no, visible si/no e
+// informacion. Vive DENTRO de ST_DRAWER (no es un gState nuevo) para no tocar
+// el menu contextual del escritorio, que sigue exactamente igual.
+static bool drwHomeHasSlot(){
+  for(int i = 0; i < 12; i++) if(homeOrder[i] == HOME_EMPTY) return true;
+  return false;
+}
+static const char* drwCtxLabel(int i){
+  switch(i){
+    case 0:  return "Abrir";
+    case 1:  if(appIsFav(drwCtxApp)) return "Quitar de inicio";
+             return drwHomeHasSlot() ? "A\xC3\xB1" "adir a inicio" : "Inicio completo";
+    case 2:  return appIsHidden(drwCtxApp) ? "Mostrar" : "Ocultar";
+    default: return "Informaci\xC3\xB3n";
+  }
+}
+static bool drwCtxEnabled(int i){
+  // Una fila inerte se dibuja atenuada y no responde: se VE por que no se
+  // puede usar, en vez de aceptar el toque y no hacer nada.
+  if(i == 1) return appIsFav(drwCtxApp) || (drwHomeHasSlot() && !appIsHidden(drwCtxApp));
+  if(i == 2) return appCanHide(drwCtxApp);          // Ajustes no se puede ocultar
+  return true;
+}
+static void drwCtxGlyph(int kind, int x, int y, int s, uint16_t col){
+  if(kind == 0){                                     // flecha de abrir
+    strokeSegAA((float)x, (float)(y + s / 2), (float)(x + s), (float)(y + s / 2), 2.0f, col);
+    strokeSegAA((float)(x + s - 9), (float)(y + s / 2 - 8), (float)(x + s), (float)(y + s / 2), 2.0f, col);
+    strokeSegAA((float)(x + s - 9), (float)(y + s / 2 + 8), (float)(x + s), (float)(y + s / 2), 2.0f, col);
+  } else if(kind == 1){                              // estrella (favorita)
+    fillCircleA(x + s / 2, y + s / 2, s / 3, col, 230);
+    fillCircleA(x + s / 2, y + s / 2, s / 3 - 4, uiGlass ? TH_GLASS : TH_SURF, 200);
+  } else if(kind == 2){                              // ojo
+    drwGlyphEye(x + s / 2, y + s / 2, s - 4, !appIsHidden(drwCtxApp), col);
+  } else {                                           // "i" de informacion
+    drawCircle(x + s / 2, y + s / 2, s / 2 - 1, col);
+    fillRect(x + s / 2 - 1, y + s / 2 - 5, 2, 10, col);
+    fillRect(x + s / 2 - 1, y + s / 2 - 9, 2, 2, col);
+  }
+}
+static void drwCtxDraw(){
+  int h = DRW_CTX_ROWS * DRW_CTX_ROW_H;
+  if(uiGlass) drawLiquidGlassPanel(drwCtxX, drwCtxY, DRW_CTX_W, h, DRW_CTX_RAD, TH_GLASS);
+  else        fillRoundRectA(drwCtxX, drwCtxY, DRW_CTX_W, h, DRW_CTX_RAD, TH_SURF, 242);
+  for(int i = 0; i < DRW_CTX_ROWS; i++){
+    int ry = drwCtxY + i * DRW_CTX_ROW_H;
+    if(i > 0) fillRectA(drwCtxX + 14, ry, DRW_CTX_W - 28, 1, TH_TXT2, 80);
+    bool en = drwCtxEnabled(i);
+    uint16_t col = en ? TH_TXT : TH_TXT2;
+    const char* lb = drwCtxLabel(i);
+    int fs = uiFontFit(lb, DRW_CTX_W - 76, 3);
+    drawText(drwCtxX + 18, ry + DRW_CTX_ROW_H / 2 - uiLineH(fs) / 2, lb, fs, col);
+    drwCtxGlyph(i, drwCtxX + DRW_CTX_W - 44, ry + DRW_CTX_ROW_H / 2 - 13, 26, col);
+  }
+}
+static void drwCtxBand(int &y0, int &y1){
+  y0 = drwCtxY - 4; y1 = drwCtxY + DRW_CTX_ROWS * DRW_CTX_ROW_H + 4;
+  if(y0 < 0) y0 = 0; if(y1 > SCR_H - 1) y1 = SCR_H - 1;
+}
+static void drwCtxOpen(int cell){
+  if(cell < 0 || cell >= drwN) return;
+  drwCtxApp = drwList[cell];
+  int cx, cy; drwCellXY(cell, cx, cy);
+  int iy = cy - (int)drwScroll;
+  int px = cx + DRW_ICON_S + 12;
+  int h  = DRW_CTX_ROWS * DRW_CTX_ROW_H;
+  if(px + DRW_CTX_W > SCR_W - 8) px = cx - 12 - DRW_CTX_W;   // no cabe a la derecha
+  if(px < 8) px = 8;
+  if(px > SCR_W - 8 - DRW_CTX_W) px = SCR_W - 8 - DRW_CTX_W;
+  int py = iy;
+  if(py < DRW_GRID_TOP) py = DRW_GRID_TOP;
+  if(py > SCR_H - 8 - h) py = SCR_H - 8 - h;
+  drwCtxX = px; drwCtxY = py;
+  drwCtxOn = true; drwVel = 0; drwDrag = false;
+  drwFull = true;
+}
+
+// ---- Ficha de informacion ----------------------------------------------
+#define DRW_INFO_W 344
+#define DRW_INFO_H 244
+static void drwInfoBand(int &y0, int &y1){
+  y0 = (SCR_H - DRW_INFO_H) / 2 - 4; y1 = y0 + DRW_INFO_H + 8;
+  if(y0 < 0) y0 = 0; if(y1 > SCR_H - 1) y1 = SCR_H - 1;
+}
+static void drwInfoDraw(){
+  int x = (SCR_W - DRW_INFO_W) / 2, y = (SCR_H - DRW_INFO_H) / 2;
+  if(uiGlass) drawLiquidGlassPanel(x, y, DRW_INFO_W, DRW_INFO_H, 24, TH_GLASS);
+  else        fillRoundRectA(x, y, DRW_INFO_W, DRW_INFO_H, 24, TH_SURF, 245);
+  int id = drwCtxApp;
+  { int oldStyle = gIconStyle; gIconStyle = 0;
+    drawAppIcon(id, x + 20, y + 20, 56);
+    gIconStyle = oldStyle; }
+  const char* nm = appName(id);
+  drawText(x + 88, y + 28, nm, uiFontFit(nm, DRW_INFO_W - 108, 3), TH_TXT);
+  drawText(x + 88, y + 54, appCatName(id), 2, TH_TXT2);
+  char ln[48];
+  int ty = y + 96;
+  snprintf(ln, sizeof(ln), "Id de registro: %d", id);
+  drawText(x + 20, ty, ln, 2, TH_TXT2); ty += 26;
+  snprintf(ln, sizeof(ln), "En inicio: %s", appIsFav(id) ? "s\xC3\xAD" : "no");
+  drawText(x + 20, ty, ln, 2, TH_TXT2); ty += 26;
+  snprintf(ln, sizeof(ln), "Visible: %s", appIsHidden(id) ? "no" : "s\xC3\xAD");
+  drawText(x + 20, ty, ln, 2, TH_TXT2); ty += 26;
+  snprintf(ln, sizeof(ln), "Bloqueada: %s", (APPLOCK_ON && appLockGet(id)) ? "s\xC3\xAD" : "no");
+  drawText(x + 20, ty, ln, 2, TH_TXT2);
+  drawTextC(x + DRW_INFO_W / 2, y + DRW_INFO_H - 30, "Toca para cerrar", 1, TH_TXT2);
+}
+
+// ---- Acciones del menu -------------------------------------------------
+// Cada accion que cambia el registro guarda EN EL ACTO (una sola apertura de
+// NVS, tres claves) y renumera la caja. No hay escrituras por cuadro.
+static void drwFavToggle(int id){
+  if(id < 0 || id > 15) return;
+  if(appIsFav(id)){
+    gAppFav &= (uint16_t)~(1u << id);
+    for(int i = 0; i < 12; i++) if(homeOrder[i] == (uint8_t)id) homeOrder[i] = HOME_EMPTY;
+  } else {
+    if(appIsHidden(id)) return;                    // una app oculta no puede estar en Inicio
+    int slot = -1;
+    for(int i = 0; i < 12 && slot < 0; i++) if(homeOrder[i] == HOME_EMPTY) slot = i;
+    if(slot < 0) return;                           // escritorio lleno: no se miente al usuario
+    gAppFav |= (uint16_t)(1u << id);
+    homeOrder[slot] = (uint8_t)id;
+  }
+  homeOrderNormalize();
+  homeOrderSave();
+  gHomeDirty = true;                               // homeBuf ya no refleja el escritorio real
+}
+static void drwHideToggle(int id){
+  if(id < 0 || id > 15 || !appCanHide(id)) return;
+  if(appIsHidden(id)){
+    gAppHidden &= (uint16_t)~(1u << id);
+  } else {
+    gAppHidden |= (uint16_t)(1u << id);
+    gAppFav    &= (uint16_t)~(1u << id);           // fuera de la caja: tambien fuera de Inicio
+    for(int i = 0; i < 12; i++) if(homeOrder[i] == (uint8_t)id) homeOrder[i] = HOME_EMPTY;
+  }
+  homeOrderNormalize();
+  homeOrderSave();
+  gHomeDirty = true;
+  drwFilter();
+  drwClampScroll();
+}
+
+// ---- Apertura, cierre y animacion --------------------------------------
+static bool drawerCanOpen(){
+  if(gLand || gHosted) return false;              // Modo PC / app hospedada: no es su escritorio
+  if(editMode) return false;                      // Modo Edicion tiene su propio arrastre
+  if(KIOSK_ON && kioskOn) return false;           // kiosco: no se sale de la app clavada
+  if(flexOtaOwnsScreen() || flexOtaOverlayActive()) return false;
+  if(qsPanelY != 0 || qsAnimOn || qsDragging) return false;   // manda el panel rapido
+  return gState == ST_HOME;
+}
+static void drwResetView(){
+  drwScroll = 0; drwVel = 0; drwDrag = false; drwMoved = false;
+  drwCtxOn = false; drwInfoOn = false; drwCtxApp = -1; drwLpApp = -1;
+  drwKbOn = false; drwQLen = 0; drwQuery[0] = 0; drwShowHid = false;
+}
+static void drawerOpen(){
+  if(!drawerCanOpen()) return;
+  // El fondo se compone ANTES de arrancar la animacion, con el escritorio aun
+  // en pantalla: es la unica reserva grande de la caja y se hace una vez por
+  // sesion (o al cambiar la apariencia), nunca durante el movimiento.
+  drwBuildPage();
+  if(gHomeDirty) renderHome();                    // la hoja se compone sobre homeBuf: no puede estar viejo
+  drwResetView();
+  drwFilter();
+  drwPendApp = -1; drwPendSw = false;
+  drwOn = true;
+  drwSlide = (float)SCR_H; drwLastSlide = SCR_H;
+  drwAnim = 1; drwAnimMs = millis(); if(!drwAnimMs) drwAnimMs = 1;
+  drwFull = true; drwDirty = true;
+  gRippleActive = false;                          // el destello del icono no sobrevive al gesto
+  gState = ST_DRAWER;
+}
+// Empieza la bajada. La accion pendiente (abrir una app, ir a Recientes) se
+// ejecuta cuando la hoja ha terminado de salir, no al tocar: asi la caja nunca
+// desaparece de golpe y la app recibe el toque siguiente ya limpia.
+static void drwStartClose(int pendApp, bool pendSwitcher){
+  if(drwAnim == 2) return;
+  drwPendApp = pendApp; drwPendSw = pendSwitcher;
+  drwCtxOn = false; drwInfoOn = false; drwKbOn = false;
+  drwDrag = false; drwVel = 0;
+  drwAnim = 2; drwAnimMs = millis(); if(!drwAnimMs) drwAnimMs = 1;
+}
+static void drwFinishClose(){
+  drwOn = false; drwAnim = 0; drwSlide = (float)SCR_H;
+  int app = drwPendApp; bool sw = drwPendSw;
+  drwPendApp = -1; drwPendSw = false;
+  gState = ST_HOME;
+  if(gHomeDirty) renderHome();
+  showHome();                                     // escritorio limpio, de un solo volcado
+  if(app >= 0){
+    // Candado por app: la verificacion va ANTES de abrir, por la MISMA ruta que
+    // usa el escritorio (lsuStartVerifyFor -> lsuFinishAfter -> enterApp). La
+    // caja no abre una segunda puerta.
+    if(APPLOCK_ON && appLockGet(app) && gLockType > 0){ lsuStartVerifyFor(LSU_AFTER_OPENAPP, app); return; }
+    enterApp(app);
+    return;
+  }
+  if(sw) activarMultitarea();
+}
+// Un paso de la animacion. Interpolada por TIEMPO (no por cuadro): si el
+// sistema pierde cuadros la hoja llega igual de rapido, solo con menos pasos.
+static void drwAnimStep(){
+  uint32_t e = millis() - drwAnimMs;
+  float p = (float)e / (float)DRW_ANIM_MS; if(p > 1.0f) p = 1.0f;
+  float ease = 1.0f - (1.0f - p) * (1.0f - p) * (1.0f - p);     // ease-out cubico
+  drwSlide = (drwAnim == 1) ? (float)SCR_H * (1.0f - ease) : (float)SCR_H * ease;
+  int sy = (int)drwSlide;
+  int band0 = sy < drwLastSlide ? sy : drwLastSlide;
+  drwLastSlide = sy;
+  bool done = (p >= 1.0f);
+  if(done && drwAnim == 1){
+    drwAnim = 0; drwSlide = 0; band0 = 0;
+    drwFull = false; drwDirty = false;   // este mismo cuadro ya es el definitivo
+  }
+  drwCompose(band0 - 2, SCR_H - 1, drwAnim == 0);
+  present(band0 - 2, SCR_H - 1);
+  setBuf(fb);
+  if(done && drwAnim == 2) drwFinishClose();
+}
+
+// ---- Toques -------------------------------------------------------------
+static void drwKbTouch(){
+  if(!T.tap) return;
+  int sy = 0;
+  for(int r = 0; r < 3; r++){
+    int n = (int)strlen(DRW_KB_ROW[r]);
+    for(int c = 0; c < n; c++){
+      int x, y, w, h; drwKbKeyRect(r, c, sy, x, y, w, h);
+      if(T.x >= x && T.x < x + w && T.y >= y && T.y < y + h){
+        if(drwQLen < DRW_QMAX){ drwQuery[drwQLen++] = DRW_KB_ROW[r][c]; drwQuery[drwQLen] = 0; }
+        drwFilter(); drwScroll = 0; drwClampScroll(); drwFull = true; return;
+      }
+    }
+  }
+  int x, y, w, h;
+  drwKbSideRect(true, sy, x, y, w, h);
+  if(T.x >= x && T.x < x + w && T.y >= y && T.y < y + h){
+    if(drwQLen > 0) drwQuery[--drwQLen] = 0;
+    drwFilter(); drwScroll = 0; drwClampScroll(); drwFull = true; return;
+  }
+  drwKbSideRect(false, sy, x, y, w, h);
+  if(T.x >= x && T.x < x + w && T.y >= y && T.y < y + h){
+    drwKbOn = false; drwClampScroll(); drwFull = true; return;
+  }
+}
+// Devuelve true si el toque se consumio en la cabecera (buscador / ojo).
+static bool drwHeaderTouch(){
+  if(!T.tap) return false;
+  int x = 24, y = DRW_SEARCH_Y, w = SCR_W - 48, h = DRW_SEARCH_H;
+  if(T.y < y || T.y >= y + h || T.x < x || T.x >= x + w) return false;
+  if(T.x >= x + w - 54){                          // ojo: ver / esconder las ocultas
+    drwShowHid = !drwShowHid;
+    drwFilter(); drwClampScroll(); drwFull = true; return true;
+  }
+  drwKbOn = !drwKbOn;                             // el resto del pildoro abre el teclado
+  drwClampScroll(); drwFull = true;
+  return true;
+}
+static void drwScrollTouch(){
+  int gTop = DRW_GRID_TOP, gBot = drwGridBot();
+  uint32_t now = millis();
+  if(T.pressed && T.y >= gTop && T.y < gBot){
+    drwDrag = true; drwMoved = false; drwVel = 0;
+    drwDragY0 = T.y; drwDragLastY = T.y; drwDragS0 = drwScroll; drwDragMs = now;
+    return;
+  }
+  if(drwDrag && T.down){
+    int dy = T.y - drwDragY0;
+    // MISMO umbral que usa tDoRelease para decidir que un toque es un tap
+    // (<16 px). Con uno mas estrecho, un dedo que tiembla 12 px marcaba el
+    // gesto como arrastre y el toque ya no abria la app.
+    if(abs(dy) >= 16) drwMoved = true;
+    float ns = drwDragS0 - (float)dy;
+    float old = drwScroll;
+    drwScroll = ns; drwClampScroll();
+    uint32_t dt = now - drwDragMs;
+    if(dt >= 12){                                  // velocidad para la inercia
+      drwVel = (float)(drwDragLastY - T.y) * 1000.0f / (float)dt;
+      drwDragLastY = T.y; drwDragMs = now;
+    }
+    if((int)old != (int)drwScroll) drwDirty = true;
+    return;
+  }
+  if(drwDrag && !T.down){
+    drwDrag = false;
+    if(!drwMoved) drwVel = 0;                      // fue un toque, no un arrastre
+  }
+}
+static void drwInertiaStep(uint32_t dt){
+  if(drwDrag || drwVel == 0.0f) return;
+  float d = drwVel * (float)dt / 1000.0f;
+  float old = drwScroll;
+  drwScroll += d;
+  drwClampScroll();
+  float k = 1.0f - (float)dt / 160.0f; if(k < 0) k = 0;
+  drwVel *= k;
+  if(drwVel > -24.0f && drwVel < 24.0f) drwVel = 0;
+  if((int)old != (int)drwScroll) drwDirty = true;
+}
+
+// ---- Tick ---------------------------------------------------------------
+static void drawerTick(){
+  // 1. OVERLAYS GLOBALES PRIMERO. El panel rapido, la isla y el puente tactil
+  //    del OTA ya corrieron en loop() antes del switch; lo unico que falta es
+  //    apartarse cuando una capa OTA es DUENA de la pantalla: ni se dibuja ni
+  //    se escucha, y al volver se repinta entera.
+  if(flexOtaOwnsScreen() || flexOtaOverlayActive()){ drwFull = true; return; }
+  if(!drwOn){ gState = ST_HOME; showHome(); return; }   // defensivo: nunca deberia pasar
+
+  // 2. ANIMACION EN CURSO: el toque no llega a nadie (igual que en la cortina).
+  if(drwAnim){ drwAnimStep(); return; }
+
+  uint32_t now = millis();
+
+  // Cambio de minuto: la cabecera de la caja lleva el mismo reloj que el
+  // escritorio y tiene que seguirlo.
+  if(gMinChanged) drwFull = true;
+  // Cada pulsacion nueva decide sobre que celda (si alguna) puede actuar la
+  // pulsacion larga. Reevaluarlo AQUI y no dentro del scroll es lo que impide
+  // que mantener el dedo sobre la cabecera abra el menu de la ultima app que
+  // se toco en la rejilla.
+  if(T.pressed) drwLpApp = drwHitCell(T.x, T.y);
+  // El final del arrastre se cierra AQUI, antes de repartir el toque: el dedo
+  // puede levantarse sobre el teclado o la cabecera, y alli drwScrollTouch() ni
+  // siquiera se llama. Sin esto drwDrag se quedaba encallado en true y la
+  // inercia -- que se calla mientras hay un dedo arrastrando -- no volvia.
+  if(drwDrag && !T.down){ drwDrag = false; if(!drwMoved) drwVel = 0; }
+
+  // 3. FICHA DE INFORMACION: modal. Consume el toque y SALE -- si dejara pasar
+  //    el gesto, cerrar la ficha hacia abajo cerraria tambien la caja.
+  if(drwInfoOn){
+    if(T.tap || T.swipeDown || T.swipeUp){ drwInfoOn = false; drwFull = true; return; }
+    int y0, y1; drwInfoBand(y0, y1);
+    drwCompose(y0, y1, true); drwInfoDraw(); present(y0, y1); setBuf(fb);
+    return;
+  }
+
+  // 4. MENU CONTEXTUAL: modal sobre la caja. Mismo criterio que la ficha --
+  //    pase lo que pase con el toque, aqui se acaba el cuadro: una fila que
+  //    caiga sobre la barra de navegacion no puede ademas cerrar la caja.
+  if(drwCtxOn){
+    if(T.tap){
+      int hit = -1;
+      if(T.x >= drwCtxX && T.x < drwCtxX + DRW_CTX_W && T.y >= drwCtxY){
+        int r = (T.y - drwCtxY) / DRW_CTX_ROW_H;
+        if(r >= 0 && r < DRW_CTX_ROWS) hit = r;
+      }
+      int app = drwCtxApp;
+      if(hit < 0){ drwCtxOn = false; drwFull = true; }            // fuera del panel: cancelar
+      else if(!drwCtxEnabled(hit)){ return; }                     // fila inerte: ni siquiera cierra
+      else if(hit == 0){ drwCtxOn = false; drwStartClose(app, false); return; }
+      else if(hit == 1){ drwFavToggle(app);  drwCtxOn = false; drwFull = true; }
+      else if(hit == 2){ drwHideToggle(app); drwCtxOn = false; drwFull = true; }
+      else             { drwCtxOn = false; drwInfoOn = true;   drwFull = true; }
+      return;
+    }
+    if(T.swipeDown || T.swipeUp){ drwCtxOn = false; drwFull = true; return; }
+    int y0, y1; drwCtxBand(y0, y1);
+    drwCompose(y0, y1, true); drwCtxDraw(); present(y0, y1); setBuf(fb);
+    return;
+  }
+
+  // 5. CIERRES. Atras / Inicio / Recientes de la barra inferior, gesto hacia
+  //    abajo y gesto de la barra iOS. El gesto hacia abajo SOLO cierra con la
+  //    rejilla arriba del todo: si hay scroll, deslizar hacia abajo es
+  //    desplazar la lista, que es lo que espera cualquiera.
+  if(!drwKbOn && T.tap && T.y > SCR_H - DRW_NAV_H && gNavMode == 0){
+    if(T.x < SCR_W / 3)            { drwStartClose(-1, false); return; }   // Atras
+    else if(T.x < SCR_W * 2 / 3)   { drwStartClose(-1, false); return; }   // Inicio
+    else                           { drwStartClose(-1, true);  return; }   // Recientes
+  }
+  if(gNavMode == 1 && T.released && T.startY > SCR_H - 44 && (T.startY - T.y) > 30){
+    drwStartClose(-1, false); return;                                      // barra de gestos
+  }
+  if(T.swipeDown && !drwKbOn && (drwScroll <= 0.5f || T.startY < DRW_GRID_TOP)){
+    drwStartClose(-1, false); return;
+  }
+
+  // 6. TECLADO Y CABECERA (antes que la rejilla: estan por encima de ella).
+  if(drwKbOn && T.y >= SCR_H - DRW_KB_H){ drwKbTouch(); }
+  else if(drwHeaderTouch()){ /* consumido */ }
+  else {
+    // 7. PULSACION LARGA sobre un icono -> menu contextual.
+    if(T.down && drwLpApp >= 0 && !drwMoved && (now - T.downMs) > DRW_LP_MS
+       && abs(T.x - T.startX) < 12 && abs(T.y - T.startY) < 12){
+      int cell = drwLpApp; drwLpApp = -1;
+      drwCtxOpen(cell);
+      return;
+    }
+    // 8. SCROLL con inercia.
+    drwScrollTouch();
+    // 9. TOQUE SIMPLE -> abrir la app (la caja se cierra primero, ver drwStartClose).
+    if(T.tap && !drwMoved){
+      int cell = drwHitCell(T.x, T.y);
+      if(cell >= 0){
+        int id = drwList[cell];
+        // Origen de la animacion de apertura: el icono REAL que se acaba de
+        // tocar, aunque la app no este en el escritorio (ver gIconOvrApp).
+        int cx, cy; drwCellXY(cell, cx, cy);
+        gIconOvrApp = id; gIconOvrX = cx; gIconOvrY = cy - (int)drwScroll; gIconOvrS = DRW_ICON_S;
+        drwStartClose(id, false);
+        return;
+      }
+    }
+  }
+
+  // 10. INERCIA + PINTADO. Sin cambios que dibujar no se toca la pantalla:
+  //     la caja quieta no gasta ancho de banda de PSRAM ni del panel.
+  static uint32_t drwPrevMs = 0;
+  uint32_t dt = drwPrevMs ? (now - drwPrevMs) : 16;
+  if(dt > 100) dt = 100;
+  drwPrevMs = now;
+  drwInertiaStep(dt);
+  if(!drwFull && !drwDirty) return;
+  if(now - drwFrameMs < 16) return;                 // ~60 fps como techo
+  drwFrameMs = now;
+  if(drwFull){
+    drwCompose(0, SCR_H - 1, true); present(0, SCR_H - 1);
+    drwFull = false; drwDirty = false;
+  } else {
+    int y0 = DRW_GRID_TOP, y1 = drwGridBot() - 1;
+    drwCompose(y0, y1, true); present(y0, y1);
+    drwDirty = false;
+  }
+  setBuf(fb);
 }
 
 // #############################################################
@@ -23389,6 +24326,7 @@ void loop(){
     case ST_FILES:            filesTick(); break;   // Explorador de archivos real
     case ST_NEWS:             newsSettingsTick(); break;  // Ajustes -> Noticias (servicio configurable)
     case ST_VAULT:            vaultTick(); break;          // Flex Vault (Carpeta segura)
+    case ST_DRAWER:           drawerTick(); break;         // Caja de aplicaciones (One UI)
   }
   kioskTick();            // FASE 4: refresca el candado y escucha el gesto de salida
   uiTick();               // animacion continua del vidrio
