@@ -90,6 +90,19 @@
 // decodifica desde el buffer descifrado que vive en RAM.
 #include "FlexOS_JPEG.h"
 
+// FLEX INTELLIGENCE. Tres modulos propios, por el mismo criterio que el
+// resto del ecosistema: la LOGICA vive fuera del .ino y se prueba en el
+// PC, y aqui solo se dibuja y se conecta.
+//   · FlexOS_Spell  -> corrector ortografico local (sin red)
+//   · FlexOS_Cowork -> motor de trabajos en segundo plano
+//   · FlexOS_AI     -> configuracion, cliente HTTPS y lista blanca
+// Los tres se compilan a nada fuera del ESP32-P4 (ver FLEXOS_AI_ENABLED):
+// Flex Intelligence es una funcion de Flex OS Ultra y no cambia ni un byte
+// del firmware de Ultra S3 ni de Pro.
+#include "FlexOS_Spell.h"
+#include "FlexOS_Cowork.h"
+#include "FlexOS_AI.h"
+
 // NAVEGADOR REAL. La app 7 deja de ser una maqueta: la interfaz, las
 // pestanas, el omnibox, el historial, los favoritos, la cache y el
 // reproductor viven en FlexOS_BrowserApp.cpp (comun a las tres placas)
@@ -339,6 +352,23 @@ struct DetectedModule {
 // ---- Fase de animacion de cada notificacion ----
 enum NotifPhase { NP_IN, NP_IDLE, NP_DRAG, NP_OUT, NP_SPRING };
 
+// DE DONDE VIENE una notificacion. La isla nacio para avisar de modulos
+// I2C detectados y luego se le sumaron las noticias; ahora tambien avisa
+// de los trabajos de Flex Cowork. Es LA MISMA cola y el mismo gestor --
+// no un segundo sistema paralelo --: lo unico que cambia es como se
+// dibuja la tarjeta y que botones lleva.
+#define NSRC_MODULE 0    // hardware detectado / noticia (comportamiento de siempre)
+#define NSRC_COWORK 1    // un trabajo de Flex Intelligence
+
+// Boton principal de una tarjeta de Cowork. El secundario es siempre
+// "descartar" (la X y el deslizamiento a la izquierda).
+#define NACT_NONE    0
+#define NACT_OPEN    1   // abrir Flex Intelligence en ese trabajo
+#define NACT_APPLY   2   // aplicar el resultado
+#define NACT_VIEW    3   // ver resultado
+#define NACT_RETRY   4   // reintentar
+#define NACT_CANCEL  5   // cancelar la tarea (sigue activa)
+
 struct Notification {
   DetectedModule mod;
   bool           active;
@@ -346,6 +376,10 @@ struct Notification {
   uint32_t       bornMs;        // inicio de la animacion de entrada (se fija al ARMARSE en Home)
   float          slideX;        // desplazamiento horizontal (descarte); 0 = en su sitio
   bool           armed;         // false = encolada pero aun no mostrada; se arma al verse en Home
+  uint8_t        src;           // NSRC_*
+  uint32_t       jobId;         // trabajo de Cowork al que apunta (0 si no es de Cowork)
+  uint8_t        act;           // NACT_* del boton principal
+  bool           sticky;        // no se auto-descarta a los 5 s (pide intervencion del usuario)
 };
 
 // ---- UNA NOTICIA YA NORMALIZADA ----
@@ -20787,6 +20821,7 @@ static void notifRestoreBg(){
 }
 
 // Encola una notificacion a partir de un modulo
+static void notifRemove(int idx);          // definida justo debajo; la usa notifPushJob
 static void notifPush(const DetectedModule* m){
   if(gNotifCount >= NOTIF_MAX) return;           // cola llena: se descarta (Fase 1)
   Notification* n = &gNotifs[gNotifCount++];
@@ -20796,6 +20831,46 @@ static void notifPush(const DetectedModule* m){
   n->bornMs = millis();
   n->slideX = 0.0f;
   n->armed  = false;            // se arma (entrada + 5 s) al hacerse visible en Home
+  n->src    = NSRC_MODULE;
+  n->jobId  = 0;
+  n->act    = NACT_NONE;
+  n->sticky = false;
+}
+
+// Encola una tarjeta de FLEX COWORK. Misma cola, mismo gestor, mismas
+// animaciones: lo unico propio es el origen, el trabajo al que apunta y
+// el boton de accion.
+//
+// `sticky` = la tarjeta NO se auto-descarta a los 5 s. Se usa cuando el
+// trabajo necesita al usuario ("Necesito tu permiso para continuar",
+// "el documento cambio: revisa antes de aplicar"): un aviso que exige
+// una decision y desaparece solo es un aviso que no sirve.
+static void notifPushJob(uint32_t jobId, const char* title, const char* sub,
+                         uint8_t act, bool sticky){
+  if(gNotifCount >= NOTIF_MAX){
+    // Cola llena: antes de descartar el aviso nuevo se intenta hacer
+    // sitio sacando la tarjeta mas vieja que NO pida intervencion. Un
+    // "traduccion terminada" puede irse; un "necesito tu permiso", no.
+    int drop = -1;
+    for(int i = 0; i < gNotifCount; i++) if(!gNotifs[i].sticky){ drop = i; break; }
+    if(drop < 0) return;
+    notifRemove(drop);
+  }
+  Notification* n = &gNotifs[gNotifCount++];
+  memset(&n->mod, 0, sizeof(n->mod));
+  n->mod.type   = MOD_NEWS;                  // icono generico; el de Cowork lo pinta su propia ruta
+  n->mod.active = true;
+  snprintf(n->mod.name, sizeof(n->mod.name), "%s", title ? title : "Flex Intelligence");
+  snprintf(n->mod.sub,  sizeof(n->mod.sub),  "%s", sub   ? sub   : "");
+  n->active = true;
+  n->phase  = NP_IN;
+  n->bornMs = millis();
+  n->slideX = 0.0f;
+  n->armed  = false;
+  n->src    = NSRC_COWORK;
+  n->jobId  = jobId;
+  n->act    = act;
+  n->sticky = sticky;
 }
 
 // Elimina la ranura idx y compacta la cola
@@ -20820,6 +20895,16 @@ static inline float notifEaseOut(float p){ float q = 1.0f - p; return 1.0f - q *
 static void notifDrawTail(int cx, int topY, uint16_t col){
   fillTriangle(cx - 8, topY, cx + 8, topY, cx, topY - 9, col);
 }
+// Piezas compartidas con la TARJETA FLOTANTE (definidas mas abajo, con
+// ella): el destello de Flex Intelligence, la etiqueta del boton y el
+// despachador de acciones. Se declaran aqui porque la isla del
+// escritorio y la tarjeta flotante dibujan la MISMA tarjeta de Cowork
+// -- es un solo gestor de notificaciones, no dos.
+#define NFL_BTN_W 92
+static void nflSparkIcon(int cx, int cy, int r, uint16_t col);
+static const char* nflActLabel(uint8_t act);
+static void flexAiNotifAction(int idx, uint8_t act);
+
 // Dibuja una tarjeta en la coordenada Y dada (aplica su slideX horizontal)
 static void notifDrawCard(Notification* n, int cardY){
   int x = NOTIF_MARGIN_X + (int)n->slideX;       // al deslizar a la izq, x se vuelve negativo
@@ -20837,17 +20922,40 @@ static void notifDrawCard(Notification* n, int cardY){
     if(a > 0) hLineA(x + ins, y + j, w - 2 * ins, TH_TXT, a);
   }
   drawRoundRect(x, y, w, h, NOTIF_RAD, TH_BORDER);
-  // Icono 40x40 (las primitivas acotan coords negativas: seguro fuera de pantalla)
-  drawModuleIcon(n->mod.type, x + 12, y + (h - 40) / 2, 40);
-  // Textos. RECORTADOS al borde derecho de la tarjeta: los titulares de
-  // noticias son mucho mas largos que un "Sensor BME280" y sin esto se
-  // saldrian por el lado (y por encima del boton de cerrar).
-  drawTextClip(x + 62, y + 14, n->mod.name, 2, TH_TXT,  x + w - 32);
-  drawTextClip(x + 62, y + 38, n->mod.sub,  1, TH_TXT2, x + w - 32);
-  // Boton cerrar (X)
-  int cx = x + w - 22, cy = y + 20;
-  strokeSegAA(cx - 5, cy - 5, cx + 5, cy + 5, 1.8f, TH_TXT);
-  strokeSegAA(cx - 5, cy + 5, cx + 5, cy - 5, 1.8f, TH_TXT);
+  // Icono 40x40 (las primitivas acotan coords negativas: seguro fuera de
+  // pantalla). Las tarjetas de Cowork llevan el destello de Flex
+  // Intelligence en vez del icono de modulo: se reconocen de un vistazo.
+  if(n->src == NSRC_COWORK){
+    fillCircle(x + 32, y + h / 2, 19, TH_PRIM);
+    nflSparkIcon(x + 32, y + h / 2, 11, TH_ONACC);
+  } else {
+    drawModuleIcon(n->mod.type, x + 12, y + (h - 40) / 2, 40);
+  }
+  // Boton de accion (solo Cowork). Se calcula ANTES de los textos para poder
+  // recortarlos contra su borde izquierdo: sin eso, un titulo largo se
+  // dibujaria por debajo del boton.
+  int bw = 0, bx = 0, bh = 0, by = 0;
+  if(n->src == NSRC_COWORK && n->act != NACT_NONE){
+    bw = NFL_BTN_W; bh = h - 22;
+    bx = x + w - bw - 12; by = y + (h - bh) / 2;
+  }
+  int tRight = bw ? (bx - 8) : (x + w - 32);
+  // Textos. RECORTADOS al borde derecho util: los titulares de noticias son
+  // mucho mas largos que un "Sensor BME280" y sin esto se saldrian por el
+  // lado (y por encima del boton).
+  drawTextClip(x + 62, y + 14, n->mod.name, 2, TH_TXT,  tRight);
+  drawTextClip(x + 62, y + 38, n->mod.sub,  1, TH_TXT2, tRight);
+  if(bw){
+    fillRoundRect(bx, by, bw, bh, bh / 2, TH_PRIM);
+    const char* lb = nflActLabel(n->act);
+    int fs = textW(lb, 2) <= bw - 12 ? 2 : 1;
+    drawTextC(bx + bw / 2, by + (bh - (fs == 2 ? 14 : 8)) / 2, lb, fs, TH_ONACC);
+  } else {
+    // Boton cerrar (X)
+    int cx = x + w - 22, cy = y + 20;
+    strokeSegAA(cx - 5, cy - 5, cx + 5, cy + 5, 1.8f, TH_TXT);
+    strokeSegAA(cx - 5, cy + 5, cx + 5, cy - 5, 1.8f, TH_TXT);
+  }
 }
 
 // ---- Trigger de PRUEBA (solo Fase 1; se retira/reemplaza en Fase 2) ----
@@ -20897,10 +21005,22 @@ static void notifHandleTouch(){
     int cardY = NOTIF_Y0 + i * (NOTIF_CARD_H + NOTIF_GAP);
     int x0 = NOTIF_MARGIN_X, x1 = NOTIF_MARGIN_X + NOTIF_CARD_W;
     int y0 = cardY, y1 = cardY + NOTIF_CARD_H;
-    // Boton cerrar (X) arriba-derecha
-    int cx = NOTIF_MARGIN_X + NOTIF_CARD_W - 22, cy = cardY + 20;
-    if(T.tap && abs(T.x - cx) < 16 && abs(T.y - cy) < 16){
-      gNotifs[i].phase = NP_OUT; T.tap = false; T.pressed = false; return;
+    // Boton de accion de una tarjeta de Cowork (ocupa el sitio de la X).
+    if(gNotifs[i].src == NSRC_COWORK && gNotifs[i].act != NACT_NONE){
+      int bw = NFL_BTN_W, bh = NOTIF_CARD_H - 22;
+      int bx = x1 - bw - 12, by = cardY + (NOTIF_CARD_H - bh) / 2;
+      if(T.tap && T.x >= bx && T.x <= bx + bw && T.y >= by && T.y <= by + bh){
+        uint8_t act = gNotifs[i].act;
+        T.tap = false; T.pressed = false;
+        flexAiNotifAction(i, act);
+        return;
+      }
+    } else {
+      // Boton cerrar (X) arriba-derecha
+      int cx = NOTIF_MARGIN_X + NOTIF_CARD_W - 22, cy = cardY + 20;
+      if(T.tap && abs(T.x - cx) < 16 && abs(T.y - cy) < 16){
+        gNotifs[i].phase = NP_OUT; T.tap = false; T.pressed = false; return;
+      }
     }
     // Flick rapido a la izquierda sobre la tarjeta
     if(T.swipeLeft && T.startY >= y0 && T.startY <= y1){
@@ -20993,7 +21113,10 @@ static void notifTick(){
         if(millis() - n->bornMs >= 280) n->phase = NP_IDLE;
         break;
       case NP_IDLE:
-        if(millis() - n->bornMs >= NOTIF_HOLD_MS) n->phase = NP_OUT;   // auto-descarte a los 5 s
+        // Las tarjetas `sticky` NO caducan: piden una decision del usuario
+        // ("Necesito tu permiso para continuar", "el documento cambio").
+        // Un aviso que exige respuesta y se va solo es un aviso inutil.
+        if(!n->sticky && millis() - n->bornMs >= NOTIF_HOLD_MS) n->phase = NP_OUT;
         break;
       case NP_SPRING:
         n->slideX += (0.0f - n->slideX) * 0.35f;           // muelle de vuelta
@@ -21029,6 +21152,375 @@ static void notifTick(){
 
   // Banda vaciada: el frame de limpieza ya se compuso y volco arriba.
   if(gNotifCount == 0) notifBandOn = false;
+}
+
+// #############################################################
+// ##  TARJETA FLOTANTE  ·  la isla FUERA del escritorio
+// ##  ------------------------------------------------------
+// ##  POR QUE HACE FALTA
+// ##  ------------------
+// ##  notifTick() solo dibuja en el Home: alli el fondo se recupera
+// ##  gratis copiandolo de homeBuf, que es una captura del escritorio
+// ##  que ya existe. Encima de una app cualquiera no hay ninguna
+// ##  captura equivalente -- y no la puede haber: el contenido lo pinta
+// ##  la app cuando le parece.
+// ##
+// ##  Cowork trabaja mientras el usuario sigue usando el sistema, asi
+// ##  que sus avisos tienen que poder salir sobre CUALQUIER cosa: una
+// ##  app vertical, un juego horizontal, el teclado abierto. La
+// ##  solucion es la de siempre en este proyecto: GUARDAR el trozo de
+// ##  fb que la tarjeta va a tapar, dibujar encima, y devolverlo al
+// ##  descartarla. Un solo rectangulo, no la pantalla entera.
+// ##
+// ##  MISMA COLA, MISMO GESTOR. Esto no es un segundo sistema de
+// ##  notificaciones: lee gNotifs[], respeta las mismas fases de
+// ##  animacion y el mismo deslizamiento a la izquierda. Lo unico
+// ##  propio es de donde saca el fondo y, en horizontal, la
+// ##  maquetacion.
+// ##
+// ##  HORIZONTAL DE VERDAD. En landscape la tarjeta NO es la vertical
+// ##  girada: es una barra ancha y baja, con el icono, el texto y el
+// ##  boton en fila, maquetada en coordenadas logicas 800x480. Las
+// ##  primitivas ya saben rotar (gLand), asi que se dibuja igual de
+// ##  nitida que en vertical.
+// #############################################################
+
+// Rectangulo guardado. Se dimensiona para el PEOR de los dos casos:
+//   · vertical  : 480 de ancho x 108 de alto  = 51.840 px
+//   · horizontal: 96 de ancho  x 800 de alto  = 76.800 px
+// (en horizontal el rectangulo FISICO es alto y estrecho aunque la
+// tarjeta se vea ancha y baja: la rotacion cambia los papeles de los
+// ejes). Se reserva el mayor de los dos, en PSRAM, y solo la primera
+// vez que hace falta una tarjeta fuera del escritorio.
+#define NFL_SAVE_PX     76800
+#define NFL_MARGIN      14
+#define NFL_H           72              // alto de la tarjeta (vertical y horizontal)
+#define NFL_RAD         22
+#define NFL_TOP         46              // borde superior en vertical
+#define NFL_LTOP        14              // borde superior (logico) en horizontal
+#define NFL_HOLD_MS   5200
+#define NFL_IN_MS      260
+
+static uint16_t* nflSave   = NULL;      // fondo guardado (PSRAM)
+static bool      nflHasBg  = false;     // hay fondo guardado que devolver
+static int       nflSX = 0, nflSY = 0, nflSW = 0, nflSH = 0;   // rect FISICO guardado
+static bool      nflLandSaved = false;  // el fondo se guardo estando en horizontal
+static int       nflIdx    = -1;        // ranura de gNotifs[] que se esta mostrando
+static uint32_t  nflFrameMs = 0;
+static bool      nflDragging = false;
+
+// Geometria LOGICA de la tarjeta (vertical: 480x800; horizontal: 800x480).
+static void nflBox(int &x, int &y, int &w, int &h){
+  if(gLand){
+    // Barra ancha arriba. Se deja libre el tercio izquierdo de la
+    // pantalla porque ahi es donde los juegos ponen su cruceta: la
+    // tarjeta no puede taparle los controles al usuario.
+    w = LW / 2 + 60; if(w > LW - 2 * NFL_MARGIN) w = LW - 2 * NFL_MARGIN;
+    h = NFL_H - 8;
+    x = LW - NFL_MARGIN - w;
+    y = NFL_LTOP;
+  } else {
+    x = NFL_MARGIN;
+    y = NFL_TOP;
+    w = SCR_W - 2 * NFL_MARGIN;
+    h = NFL_H;
+  }
+}
+
+// Rectangulo FISICO que la tarjeta puede llegar a tocar, incluida su
+// salida deslizandose. Es lo que se guarda y lo que se devuelve.
+static void nflPhysRect(int &x, int &y, int &w, int &h){
+  int lx, ly, lw, lh; nflBox(lx, ly, lw, lh);
+  if(gLand){
+    // logico (lx,ly) -> fisico x = (SCR_W-1)-ly, y = lx
+    y = 0;                              // la tarjeta se desliza hasta salir por lx<0
+    h = lx + lw + 8; if(h > SCR_H) h = SCR_H;
+    x = (SCR_W - 1) - (ly + lh) - 4; if(x < 0) x = 0;
+    w = lh + 10; if(x + w > SCR_W) w = SCR_W - x;
+  } else {
+    x = 0;                              // se desliza hasta salir por la izquierda
+    w = SCR_W;
+    y = ly - 26; if(y < 0) y = 0;       // 26 = caida de la animacion de entrada
+    h = lh + 34; if(y + h > SCR_H) h = SCR_H - y;
+  }
+}
+
+static bool nflEnsureBuf(){
+  if(nflSave) return true;
+  nflSave = (uint16_t*)heap_caps_malloc((size_t)NFL_SAVE_PX * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  return nflSave != NULL;
+}
+
+// Guarda el trozo de fb que la tarjeta va a tapar. Se hace UNA vez, al
+// aparecer, no por frame: si se recapturara en cada cuadro se guardaria
+// la tarjeta anterior como si fuera fondo y quedaria pegada (el mismo
+// error que ya documenta noteRenderKeyboard con el vidrio).
+static bool nflSaveBg(){
+  if(!nflEnsureBuf()) return false;
+  int x, y, w, h; nflPhysRect(x, y, w, h);
+  if(w <= 0 || h <= 0) return false;
+  if((size_t)w * (size_t)h > (size_t)NFL_SAVE_PX) return false;   // no cabe: mejor no dibujar que corromper
+  fbLock();
+  for(int j = 0; j < h; j++)
+    memcpy(nflSave + (size_t)j * w, fb + (size_t)(y + j) * SCR_W + x, (size_t)w * 2);
+  fbUnlock();
+  nflSX = x; nflSY = y; nflSW = w; nflSH = h;
+  nflLandSaved = gLand;
+  nflHasBg = true;
+  return true;
+}
+
+// Devuelve el fondo guardado a bbuf, para componer encima.
+static void nflRestoreBgTo(uint16_t* dst){
+  if(!nflHasBg || !dst) return;
+  for(int j = 0; j < nflSH; j++)
+    memcpy(dst + (size_t)(nflSY + j) * SCR_W + nflSX, nflSave + (size_t)j * nflSW, (size_t)nflSW * 2);
+}
+
+// Suelta el fondo: devuelve el trozo intacto a la pantalla.
+static void nflDropBg(){
+  if(!nflHasBg) return;
+  setBuf(bbuf);
+  nflRestoreBgTo(bbuf);
+  present(nflSY, nflSY + nflSH - 1);
+  setBuf(fb);
+  nflHasBg = false;
+  nflIdx   = -1;
+}
+
+// Icono de Flex Intelligence en pequeno (el destello del icono de la
+// app, sin su fondo): asi la tarjeta se reconoce de un vistazo como
+// suya y no como una deteccion de hardware.
+static void nflSparkIcon(int cx, int cy, int r, uint16_t col){
+  float R = (float)r, B = R * 0.42f;
+  fillTriangle(cx, cy - (int)R, cx - (int)B, cy, cx + (int)B, cy, col);
+  fillTriangle(cx, cy + (int)R, cx - (int)B, cy, cx + (int)B, cy, col);
+  fillTriangle(cx - (int)R, cy, cx, cy - (int)B, cx, cy + (int)B, col);
+  fillTriangle(cx + (int)R, cy, cx, cy - (int)B, cx, cy + (int)B, col);
+}
+
+static const char* nflActLabel(uint8_t act){
+  switch(act){
+    case NACT_OPEN:   return "Abrir";
+    case NACT_APPLY:  return "Aplicar";
+    case NACT_VIEW:   return "Ver";
+    case NACT_RETRY:  return "Reintentar";
+    case NACT_CANCEL: return "Cancelar";
+    default:          return "";
+  }
+}
+
+// Rect LOGICO del boton de accion dentro de la tarjeta.
+static bool nflBtnBox(const Notification* n, int &bx, int &by, int &bw, int &bh){
+  if(!n || n->act == NACT_NONE) return false;
+  int x, y, w, h; nflBox(x, y, w, h);
+  bw = NFL_BTN_W; bh = h - 24;
+  bx = x + w - bw - 12;
+  by = y + (h - bh) / 2;
+  return true;
+}
+
+// Dibuja la tarjeta con su desplazamiento. `dy` es la caida de la
+// animacion de entrada (vertical) o el mismo efecto sobre el eje corto
+// (horizontal).
+static void nflDrawCard(const Notification* n, float slideX, int dyIn){
+  int x, y, w, h; nflBox(x, y, w, h);
+  if(gLand) x += (int)slideX;               // en horizontal se desliza por el eje LOGICO X
+  else    { x += (int)slideX; y -= dyIn; }
+  if(!gLand) y += 0;
+  if(gLand) y -= dyIn;
+
+  // Material: el mismo Liquid Glass del resto del sistema en vertical.
+  // En horizontal drawLiquidGlassPanel no vale (indexa el buffer sin
+  // rotar: lo dice su propia guarda), asi que se usa el panel plano
+  // tintado, que es lo que ya hace Modo PC.
+  if(gLand) fillRoundRectA(x, y, w, h, NFL_RAD, TH_GLASS2, 232);
+  else      drawLiquidGlassPanel(x, y, w, h, NFL_RAD, TH_GLASS2);
+  drawRoundRect(x, y, w, h, NFL_RAD, TH_BORDER);
+
+  int icx = x + 30, icy = y + h / 2;
+  if(n->src == NSRC_COWORK){
+    fillCircle(icx, icy, 17, TH_PRIM);
+    nflSparkIcon(icx, icy, 10, TH_ONACC);
+  } else {
+    drawModuleIcon(n->mod.type, x + 12, y + (h - 36) / 2, 36);
+  }
+
+  int bx, by, bw, bh;
+  bool hasBtn = nflBtnBox(n, bx, by, bw, bh);
+  if(gLand){ bx += (int)slideX; by -= dyIn; }
+  else     { bx += (int)slideX; by -= dyIn; }
+  int textRight = hasBtn ? (bx - 10) : (x + w - 34);
+
+  drawTextClip(x + 54, y + 14, n->mod.name, 2, TH_TXT,  textRight);
+  if(n->mod.sub[0]) drawTextClip(x + 54, y + 40, n->mod.sub, 1, TH_TXT2, textRight);
+
+  if(hasBtn){
+    fillRoundRect(bx, by, bw, bh, bh / 2, TH_PRIM);
+    const char* lb = nflActLabel(n->act);
+    int fs = textW(lb, 2) <= bw - 12 ? 2 : 1;
+    drawTextC(bx + bw / 2, by + (bh - (fs == 2 ? 14 : 8)) / 2, lb, fs, TH_ONACC);
+  }
+  // Cerrar (X). Mismo sitio relativo que en la isla del escritorio.
+  int cx = x + w - 18, cy = y + 16;
+  if(!hasBtn){
+    strokeSegAA(cx - 5, cy - 5, cx + 5, cy + 5, 1.8f, TH_TXT);
+    strokeSegAA(cx - 5, cy + 5, cx + 5, cy - 5, 1.8f, TH_TXT);
+  }
+}
+
+// La ranura que toca mostrar flotando: la primera activa que no se este
+// yendo. Solo se muestra UNA a la vez fuera del escritorio -- apilar
+// tres tarjetas encima de un juego seria taparlo entero.
+static int nflPick(){
+  for(int i = 0; i < gNotifCount; i++)
+    if(gNotifs[i].active && gNotifs[i].phase != NP_OUT) return i;
+  return -1;
+}
+
+// true si la tarjeta flotante debe estar en pantalla ahora mismo.
+static bool nflWanted(){
+  if(gNotifCount == 0) return false;
+  if(gState == ST_HOME && qsPanelY == 0 && !editMode) return false;  // ahi manda la isla de siempre
+  if(gState == ST_SPLASH || gState == ST_OOBE_LANG || gState == ST_OOBE_NAME) return false;
+  if(gState == ST_LOCK) return false;               // en la pantalla de bloqueo no se filtra nada
+  if(flexOtaOwnsScreen()) return false;             // la pantalla es del OTA en exclusiva
+  if(qsPanelY != 0) return false;                   // con la cortina desplegada, la cortina manda
+  return nflPick() >= 0;
+}
+
+// Toques de la tarjeta flotante. Devuelve true si se queda el toque.
+// Se llama ANTES que nada en loop(), igual que notifHandleTouch.
+static bool nflHandleTouch(){
+  if(!nflHasBg || nflIdx < 0 || nflIdx >= gNotifCount) return false;
+  Notification* n = &gNotifs[nflIdx];
+  if(!n->active || n->phase == NP_OUT) return false;
+  // Coordenadas del dedo EN EL MISMO sistema en que esta maquetada la
+  // tarjeta. En horizontal hay que rotarlas igual que hacen los juegos.
+  int tx = gLand ? T.y : T.x;
+  int ty = gLand ? ((SCR_W - 1) - T.x) : T.y;
+  int sx = gLand ? T.startY : T.startX;
+  int sy = gLand ? ((SCR_W - 1) - T.startX) : T.startY;
+
+  int x, y, w, h; nflBox(x, y, w, h);
+  bool inside = (tx >= x && tx <= x + w && ty >= y && ty <= y + h);
+  bool startedInside = (sx >= x && sx <= x + w && sy >= y && sy <= y + h);
+
+  int bx, by, bw, bh;
+  if(T.tap && inside && nflBtnBox(n, bx, by, bw, bh) &&
+     tx >= bx && tx <= bx + bw && ty >= by && ty <= by + bh){
+    uint8_t act = n->act;
+    int idx = nflIdx;
+    T.tap = false; T.pressed = false; T.released = false;
+    flexAiNotifAction(idx, act);
+    return true;
+  }
+  // Cerrar (X) -- solo existe cuando no hay boton de accion.
+  if(T.tap && inside && n->act == NACT_NONE &&
+     tx >= x + w - 34 && ty <= y + 32){
+    n->phase = NP_OUT; T.tap = false; T.pressed = false; return true;
+  }
+  // ARRASTRE A LA IZQUIERDA = DESCARTAR LA TARJETA. Solo eso: el
+  // trabajo sigue donde estaba y el resultado se queda en el historial
+  // de Cowork hasta que el usuario lo borre a mano. Cancelar la tarea y
+  // borrar el resultado son OTRAS dos acciones, y viven en la app.
+  if(T.down && startedInside){
+    float d = (float)(tx - sx);
+    if(d < -6.0f || nflDragging){
+      nflDragging = true;
+      if(d > 0) d = 0;
+      if(d < -(float)(w + 60)) d = -(float)(w + 60);
+      n->slideX = d;
+      n->phase  = NP_DRAG;
+      T.tap = false; T.swipeLeft = false; T.swipeRight = false;
+      return true;
+    }
+  }
+  if(nflDragging && !T.down){
+    nflDragging = false;
+    n->phase = (n->slideX < -(float)w / 4.0f) ? NP_OUT : NP_SPRING;
+    T.tap = false; T.released = false;
+    return true;
+  }
+  // Tocar el cuerpo de una tarjeta de Cowork la abre; y en cualquier
+  // caso el toque NO se propaga a la app de debajo: una tarjeta que
+  // dispara ademas un disparo del juego que hay detras seria peor que
+  // no tener tarjeta.
+  if(T.tap && inside){
+    int idx = nflIdx;
+    uint8_t act = (n->src == NSRC_COWORK) ? NACT_OPEN : NACT_NONE;
+    T.tap = false; T.pressed = false;
+    if(act != NACT_NONE) flexAiNotifAction(idx, act);
+    else n->phase = NP_OUT;
+    return true;
+  }
+  if((T.pressed || T.down) && inside){ T.pressed = false; return true; }
+  return false;
+}
+
+// Un paso de la tarjeta flotante. Se llama como ULTIMA capa grafica,
+// justo antes que el OTA, para que quede por encima de todo lo demas.
+static void nflTick(){
+  if(!nflWanted()){
+    if(nflHasBg) nflDropBg();
+    nflDragging = false;
+    return;
+  }
+  int idx = nflPick();
+  if(idx < 0){ if(nflHasBg) nflDropBg(); return; }
+
+  // Cambio de tarjeta, o de orientacion con una tarjeta puesta: hay que
+  // devolver el fondo viejo antes de capturar el nuevo. Sin esto, girar
+  // a horizontal con una tarjeta en pantalla dejaria el rectangulo
+  // vertical congelado encima del juego.
+  if(nflHasBg && (idx != nflIdx || nflLandSaved != gLand)) nflDropBg();
+
+  if(!nflHasBg){
+    if(!nflSaveBg()) return;              // sin PSRAM: no se dibuja (y no se corrompe nada)
+    nflIdx = idx;
+    gNotifs[idx].armed  = true;
+    gNotifs[idx].bornMs = millis();
+    gNotifs[idx].phase  = NP_IN;
+    gNotifs[idx].slideX = 0.0f;
+  }
+
+  uint32_t now = millis();
+  if(now - nflFrameMs < 33) return;       // ~30 fps, igual que la isla del escritorio
+  nflFrameMs = now;
+
+  Notification* n = &gNotifs[idx];
+  switch(n->phase){
+    case NP_IN:     if(now - n->bornMs >= NFL_IN_MS) n->phase = NP_IDLE; break;
+    case NP_IDLE:   if(!n->sticky && now - n->bornMs >= NFL_HOLD_MS) n->phase = NP_OUT; break;
+    case NP_SPRING: n->slideX += (0.0f - n->slideX) * 0.35f;
+                    if(n->slideX > -0.5f){ n->slideX = 0.0f; n->phase = NP_IDLE; }
+                    break;
+    case NP_OUT: {
+      int lw = gLand ? (LW / 2 + 60) : (SCR_W - 2 * NFL_MARGIN);
+      n->slideX -= (float)lw * 0.18f + 6.0f;
+      if(n->slideX < -(float)(lw + 40)){
+        nflDropBg();
+        notifRemove(idx);
+        return;
+      }
+    } break;
+    default: break;
+  }
+
+  int dyIn = 0;
+  if(n->phase == NP_IN){
+    float p = (float)(now - n->bornMs) / (float)NFL_IN_MS; if(p > 1.0f) p = 1.0f;
+    dyIn = (int)((1.0f - notifEaseOut(p)) * 22.0f);
+  }
+
+  setBuf(bbuf);
+  int oc0 = gClipY0, oc1 = gClipY1, ox0 = gClipX0, ox1 = gClipX1;
+  gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
+  nflRestoreBgTo(bbuf);
+  nflDrawCard(n, n->slideX, dyIn);
+  gClipY0 = oc0; gClipY1 = oc1; gClipX0 = ox0; gClipX1 = ox1;
+  present(nflSY, nflSY + nflSH - 1);
+  setBuf(fb);
 }
 
 
@@ -25486,6 +25978,1679 @@ static void vaultStatusText(char* out, size_t n){
   snprintf(out, n, "Abierta ahora - %s en uso", sz);
 }
 
+
+// #############################################################
+// ##  FLEX INTELLIGENCE  ·  INTEGRACION CON EL SISTEMA
+// ##  ==========================================================
+// ##  Este bloque es TODO lo que Flex Intelligence anade al .ino:
+// ##  la configuracion persistente, la tarea de fondo de Cowork,
+// ##  la activacion por pulsacion larga, el panel tipo "rodea para
+// ##  buscar", la app y sus Ajustes.
+// ##
+// ##  Lo que NO esta aqui, a proposito: el corrector (FlexOS_Spell),
+// ##  el motor de trabajos (FlexOS_Cowork) y el cliente del servidor
+// ##  (FlexOS_AI). Son modulos aparte porque son logica pura y se
+// ##  prueban en el PC; aqui solo se dibuja y se conecta, que es el
+// ##  reparto de siempre en este proyecto.
+// ##
+// ##  NO DEPENDE DEL OTA. Ni una llamada a flexOta* sale de este
+// ##  bloque salvo para CEDERLE la pantalla cuando el OTA la tiene
+// ##  en exclusiva. Compilado con -DFLEXOS_OTA_ON=0 (la version que
+// ##  se instala por USB) Flex Intelligence funciona igual.
+// #############################################################
+
+// -------------------------------------------------------------
+//  1) CONFIGURACION PERSISTENTE  (NVS, namespace propio)
+//  -------------------------------------------------------------
+//  Namespace aparte de "flexos" por la misma razon que el servicio de
+//  Noticias tiene el suyo: aqui vive un TOKEN. Tenerlo en su propio
+//  espacio permite borrarlo entero -- "Olvidar este servidor" -- sin
+//  rozar ni un ajuste del sistema.
+// -------------------------------------------------------------
+#define AI_NVS_NS "flexos_ai"
+
+static void aiPrefsLoad(){
+  aiConfigDefaults();
+  AiConfig* c = aiConfig();
+  prefs.begin(AI_NVS_NS, true);
+  // Se lee con el mismo patron que el resto del .ino (String + toCharArray)
+  // y no con el overload de char*: ese solo existe en algunas versiones
+  // del core de ESP32, y usarlo aqui haria que el firmware no compilara
+  // en la maquina de otro.
+  { String v = prefs.getString("url", ""); v.toCharArray(c->url,   sizeof(c->url));   }
+  { String v = prefs.getString("dev", ""); v.toCharArray(c->devId, sizeof(c->devId)); }
+  { String v = prefs.getString("tok", ""); v.toCharArray(c->token, sizeof(c->token)); }
+  c->perms       = (uint8_t)prefs.getInt("perms", 0);
+  c->enabled     = prefs.getBool("on",      true);
+  c->autoCorrect = prefs.getBool("autoc",   false);
+  c->localOnly   = prefs.getBool("localon", false);
+  c->openMode    = (uint8_t)prefs.getInt("openm", AI_OPEN_PANEL);
+  {
+    // La CA raiz puede ocupar 2 KB: demasiado para la pila de una tarea
+    // de Arduino, asi que se usa un estatico de funcion y se PISA al
+    // salir. Lo que no puede pasar es que un certificado (y menos el
+    // token, que se lee en el mismo sitio) quede residiendo en RAM
+    // despues de arrancar.
+    static char ca[AI_CA_MAX];
+    ca[0] = 0;
+    { String v = prefs.getString("ca", ""); v.toCharArray(ca, sizeof(ca)); }
+    aiSetRootCa(ca);
+    memset(ca, 0, sizeof(ca));
+  }
+  prefs.end();
+  // El identificador de dispositivo se genera solo la primera vez a
+  // partir del nombre del equipo: el usuario puede cambiarlo, pero no
+  // tiene por que inventarselo para empezar.
+  if(!c->devId[0]) snprintf(c->devId, sizeof(c->devId), "flexos-p4");
+}
+
+static void aiPrefsSave(){
+  AiConfig* c = aiConfig();
+  prefs.begin(AI_NVS_NS, false);
+  prefs.putString("url", c->url);
+  prefs.putString("dev", c->devId);
+  prefs.putString("tok", c->token);
+  prefs.putInt("perms",  (int)c->perms);
+  prefs.putBool("on",      c->enabled);
+  prefs.putBool("autoc",   c->autoCorrect);
+  prefs.putBool("localon", c->localOnly);
+  prefs.putInt("openm",  (int)c->openMode);
+  prefs.putString("ca", aiRootCa());
+  prefs.end();
+}
+
+// Borra TODO lo del servidor. Es lo que ejecuta "Olvidar este
+// servidor" en Ajustes: no basta con vaciar la estructura en RAM,
+// porque el token seguiria en la flash.
+static void aiPrefsForget(){
+  prefs.begin(AI_NVS_NS, false);
+  prefs.clear();
+  prefs.end();
+  aiConfigDefaults();
+  aiSetRootCa(NULL);
+}
+
+// -------------------------------------------------------------
+//  2) DICCIONARIO PERSONAL DEL CORRECTOR
+//  -------------------------------------------------------------
+//  Una palabra por linea en /System/spell.txt. Se guarda solo cuando
+//  cambia, no por tecla.
+// -------------------------------------------------------------
+#define AI_SPELL_PATH "/System/spell.txt"
+static bool gSpellDirty = false;
+
+static void aiSpellLoad(){
+  flexSpellBegin();
+  flexSpellSetLang(kbLangEs ? FLEX_SPELL_ES : FLEX_SPELL_EN);
+  if(!flexFsReady()) return;
+  char buf[FLEX_SPELL_USER_MAX * (FLEX_SPELL_USER_LEN + 1) + 4];
+  int n = flexFsReadText(AI_SPELL_PATH, buf, sizeof(buf));
+  if(n > 0) flexSpellImport(buf, (size_t)n);
+  gSpellDirty = false;
+}
+static void aiSpellSave(){
+  if(!gSpellDirty || !flexFsReady()) return;
+  char buf[FLEX_SPELL_USER_MAX * (FLEX_SPELL_USER_LEN + 1) + 4];
+  size_t n = flexSpellExport(buf, sizeof(buf));
+  buf[n] = 0;
+  flexFsWriteText(AI_SPELL_PATH, buf);
+  gSpellDirty = false;
+}
+
+// -------------------------------------------------------------
+//  3) ALMACEN Y PERSISTENCIA DE COWORK
+// -------------------------------------------------------------
+#define AI_COWORK_PATH "/System/cowork.dat"
+static CoworkJob* gCwSlots = NULL;
+static bool       gCwDirty = false;
+
+static void aiCoworkLoad(){
+  if(!gCwSlots) return;
+  if(!flexFsReady()) return;
+  static uint8_t blob[2048];
+  int n = flexFsReadBin(AI_COWORK_PATH, blob, sizeof(blob));
+  if(n > 0) coworkImport(blob, (size_t)n);
+  gCwDirty = false;
+}
+static void aiCoworkSave(){
+  if(!gCwDirty || !gCwSlots || !flexFsReady()) return;
+  static uint8_t blob[2048];
+  size_t n = coworkExport(blob, sizeof(blob));
+  if(n > 0) flexFsWriteBin(AI_COWORK_PATH, blob, n);
+  gCwDirty = false;
+}
+
+// -------------------------------------------------------------
+//  4) TAREA DE FONDO
+//  -------------------------------------------------------------
+//  DONDE VIVE Y POR QUE. Nucleo 1, prioridad 1: exactamente el mismo
+//  sitio que las otras tareas de red del sistema (wifiAuto, wifiScan,
+//  ntp, news). El presenter vive en el NUCLEO 0 con prioridad 3 y no
+//  se toca: Cowork no puede quitarle tiempo aunque se pase media hora
+//  esperando a un servidor.
+//
+//  LO QUE ESTA TAREA NO HACE, NUNCA:
+//    · no dibuja ni una linea (no toca fb, bbuf, homeBuf ni setBuf);
+//    · no llama a nada de la UI;
+//    · no usa delay() -- solo vTaskDelay, que cede la CPU.
+//  Su unico canal con el sistema es el estado de FlexOS_Cowork, que
+//  el hilo de UI consulta en flexAiPump(). Es el mismo contrato que
+//  ya cumplen el OTA y las Noticias.
+// -------------------------------------------------------------
+static TaskHandle_t gCwTask   = NULL;
+static volatile bool gCwBusy  = false;
+static volatile bool gCwWake  = false;      // hay trabajo nuevo que mirar
+static volatile uint32_t gCwLocalDone = 0;  // id del ultimo trabajo resuelto EN LOCAL
+
+// Corrector LOCAL de un texto entero. Es lo que permite que "Corregir"
+// funcione sin servidor y sin red: se recorre palabra a palabra, se
+// corrige solo lo que tiene confianza alta y se cuenta cuantas se
+// tocaron. Corre en la tarea de fondo, no en el hilo grafico.
+static int aiLocalCorrect(const char* in, size_t inLen, char* out, size_t cap){
+  size_t o = 0;
+  size_t i = 0;
+  int fixed = 0;
+  char word[FLEX_SPELL_WORD_MAX + 2];
+  char fix [FLEX_SPELL_WORD_MAX + 2];
+  while(i < inLen && in[i] && o + 1 < cap){
+    unsigned char c = (unsigned char)in[i];
+    bool sep = (c < 0x80) && !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '\'');
+    if(sep){ out[o++] = (char)c; i++; continue; }
+    size_t start = i, wl = 0;
+    while(i < inLen && in[i] && wl + 1 < sizeof(word)){
+      unsigned char d = (unsigned char)in[i];
+      bool s2 = (d < 0x80) && !((d >= 'a' && d <= 'z') || (d >= 'A' && d <= 'Z') || d == '\'');
+      if(s2) break;
+      word[wl++] = in[i++];
+    }
+    word[wl] = 0;
+    const char* emit = word;
+    // 2 ms por palabra: en un texto de 200 palabras eso es medio
+    // segundo de tarea de fondo, que nadie nota, y ni un microsegundo
+    // del hilo que dibuja.
+    if(flexSpellCheckable(word) && !flexSpellKnown(word) &&
+       flexSpellAutoFix(word, fix, sizeof(fix), 2000)){
+      emit = fix;
+      fixed++;
+    }
+    size_t el = strlen(emit);
+    if(o + el + 1 >= cap){ o += 0; break; }
+    memcpy(out + o, emit, el); o += el;
+    (void)start;
+  }
+  out[o < cap ? o : cap - 1] = 0;
+  return fixed;
+}
+
+static void coworkTaskFn(void*){
+  for(;;){
+    // Espera pasiva. El aviso llega de flexAiPump() cuando hay trabajo;
+    // el tiempo de espera es la red de seguridad para las esperas de
+    // reintento, que vencen solas.
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500));
+    for(;;){
+      CoworkJob* j = coworkNextForNetwork(millis());
+      if(!j) break;
+      uint32_t id   = j->id;
+      uint8_t  kind = j->kind;
+      gCwBusy = true;
+
+      // Copia LOCAL de la entrada: en cuanto se suelte el control, el
+      // hilo de UI puede cancelar el trabajo y borrar su snapshot. Leer
+      // j->in mientras se hace la peticion seria una carrera.
+      static char inBuf[CW_IN_MAX];
+      size_t inLen = j->inLen < sizeof(inBuf) ? j->inLen : sizeof(inBuf) - 1;
+      memcpy(inBuf, j->in, inLen);
+      inBuf[inLen] = 0;
+      uint32_t srcHash = j->srcHash;
+      char srcPath[CW_SRC_MAX];
+      snprintf(srcPath, sizeof(srcPath), "%s", j->src);
+
+      coworkBeginWork(id, millis());
+
+      // ---- RUTA LOCAL ----
+      // Corregir NO necesita servidor. Si el usuario no ha configurado
+      // ninguno, o eligio "solo en el dispositivo", se resuelve aqui
+      // con el corrector local en vez de fallar con "sin configurar":
+      // es una funcion rapida y tiene que funcionar sin red.
+      bool localOk = false;
+      if(kind == CW_KIND_CORRECT && (!aiConfigured() || aiConfig()->localOnly)){
+        static char outBuf[CW_OUT_MAX];
+        int fixed = aiLocalCorrect(inBuf, inLen, outBuf, sizeof(outBuf));
+        uint32_t nowHash = srcHash;
+        if(srcPath[0]){
+          // Se relee el documento para saber si cambio mientras tanto.
+          static char cur[CW_IN_MAX];
+          int rn = flexFsReadText(srcPath, cur, sizeof(cur));
+          nowHash = (rn > 0) ? coworkHash(cur, (size_t)rn) : srcHash;
+          memset(cur, 0, sizeof(cur));
+        }
+        coworkFinish(id, outBuf, strlen(outBuf), nowHash, fixed > 0, millis());
+        CoworkJob* d = coworkFind(id);
+        if(d) snprintf(d->err_, sizeof(d->err_), "%d", fixed);   // n de palabras corregidas
+        memset(outBuf, 0, sizeof(outBuf));
+        gCwLocalDone = id;
+        localOk = true;
+      }
+
+      if(!localOk){
+        AiResult res;
+        coworkWaitServer(id, millis());
+        uint8_t rc = aiQuery(kind, inBuf, inLen, NULL, &res);
+        if(rc == AI_ERR_NONE){
+          uint32_t nowHash = srcHash;
+          if(srcPath[0]){
+            static char cur[CW_IN_MAX];
+            int rn = flexFsReadText(srcPath, cur, sizeof(cur));
+            nowHash = (rn > 0) ? coworkHash(cur, (size_t)rn) : srcHash;
+            memset(cur, 0, sizeof(cur));
+          }
+          coworkFinish(id, res.text, res.textLen, nowHash, res.needsConfirm, millis());
+          CoworkJob* d = coworkFind(id);
+          if(d){ d->needsConfirm = res.needsConfirm || d->srcChanged; }
+        } else {
+          // Los codigos de FlexOS_AI y los de Cowork son vocabularios
+          // distintos a proposito (uno es del cliente, otro del motor
+          // de trabajos): se traducen aqui, en un solo sitio.
+          uint8_t ce = CW_ERR_HTTP;
+          switch(rc){
+            case AI_ERR_NOCFG:   ce = CW_ERR_NOCFG;   break;
+            case AI_ERR_NONET:   ce = CW_ERR_NONET;   break;
+            case AI_ERR_TLS:     ce = CW_ERR_TLS;     break;
+            case AI_ERR_AUTH:    ce = CW_ERR_DENIED;  break;
+            case AI_ERR_DENIED:  ce = CW_ERR_DENIED;  break;
+            case AI_ERR_DISABLED:ce = CW_ERR_DENIED;  break;
+            case AI_ERR_PARSE:   ce = CW_ERR_PARSE;   break;
+            case AI_ERR_TIMEOUT: ce = CW_ERR_TIMEOUT; break;
+            case AI_ERR_TOOBIG:  ce = CW_ERR_TOOBIG;  break;
+            case AI_ERR_MEM:     ce = CW_ERR_MEM;     break;
+            default: break;
+          }
+          coworkFail(id, ce, aiErrorText(rc), millis());
+        }
+        memset(&res, 0, sizeof(res));
+      }
+      // La copia local llevaba texto del usuario (y puede haber venido
+      // de Flex Vault): se pisa en cuanto deja de hacer falta.
+      memset(inBuf, 0, sizeof(inBuf));
+      gCwBusy = false;
+      vTaskDelay(pdMS_TO_TICKS(20));       // respira entre trabajos
+    }
+  }
+}
+
+// -------------------------------------------------------------
+//  5) NOTIFICACIONES DE COWORK
+//  -------------------------------------------------------------
+//  Un trabajo produce como mucho UNA tarjeta, y solo al cambiar de
+//  estado a uno terminal. El estado que ya se anuncio se recuerda para
+//  no repetir la misma tarjeta en cada vuelta de loop().
+// -------------------------------------------------------------
+#define AI_ANN_MAX 8
+static uint32_t gAnnId   [AI_ANN_MAX];
+static uint8_t  gAnnState[AI_ANN_MAX];
+static int      gAnnN = 0;
+
+// Devuelve true si este trabajo esta en este estado por primera vez.
+static bool aiAnnounceOnce(uint32_t id, uint8_t st){
+  for(int i = 0; i < gAnnN; i++){
+    if(gAnnId[i] != id) continue;
+    if(gAnnState[i] == st) return false;
+    gAnnState[i] = st;
+    return true;
+  }
+  if(gAnnN >= AI_ANN_MAX){
+    for(int i = 1; i < AI_ANN_MAX; i++){ gAnnId[i - 1] = gAnnId[i]; gAnnState[i - 1] = gAnnState[i]; }
+    gAnnN = AI_ANN_MAX - 1;
+  }
+  gAnnId[gAnnN] = id; gAnnState[gAnnN] = st; gAnnN++;
+  return true;
+}
+
+static void aiAnnounceJob(const CoworkJob* j){
+  if(!j) return;
+  char title[64], sub[40];
+  uint8_t act = NACT_VIEW;
+  bool sticky = false;
+  switch(j->state){
+    case CW_DONE:
+      if(j->srcChanged){
+        // ESTE es el caso que no se puede aplicar solo: el usuario
+        // siguio escribiendo mientras Cowork trabajaba.
+        snprintf(title, sizeof(title), "%s: el documento cambi\xC3\xB3", coworkKindName(j->kind));
+        snprintf(sub, sizeof(sub), "Revisa antes de aplicar");
+        act = NACT_VIEW; sticky = true;
+      } else if(j->kind == CW_KIND_CORRECT){
+        int fixed = atoi(j->err_);
+        if(fixed > 0) snprintf(title, sizeof(title), "Corregi %d palabra%s", fixed, fixed == 1 ? "" : "s");
+        else          snprintf(title, sizeof(title), "Sin faltas que corregir");
+        snprintf(sub, sizeof(sub), "%s", j->title);
+        act = fixed > 0 ? NACT_APPLY : NACT_VIEW;
+      } else if(j->needsConfirm){
+        snprintf(title, sizeof(title), "%s listo", coworkKindName(j->kind));
+        snprintf(sub, sizeof(sub), "Necesito tu confirmaci\xC3\xB3n");
+        act = NACT_VIEW; sticky = true;
+      } else {
+        snprintf(title, sizeof(title), "%s terminado", coworkKindName(j->kind));
+        snprintf(sub, sizeof(sub), "%s", j->title);
+        act = NACT_VIEW;
+      }
+      break;
+    case CW_ERROR:
+      snprintf(title, sizeof(title), "No se pudo completar");
+      snprintf(sub, sizeof(sub), "%s", j->err_[0] ? j->err_ : "Error");
+      // Sin conexion y sin configurar no se arreglan reintentando en el
+      // acto: uno pide red y el otro pide ir a Ajustes.
+      act = (j->err == CW_ERR_NOCFG || j->err == CW_ERR_DENIED) ? NACT_OPEN : NACT_RETRY;
+      sticky = true;
+      break;
+    case CW_PAUSED:
+      snprintf(title, sizeof(title), "Tarea pausada");
+      snprintf(sub, sizeof(sub), "%s",
+               j->pauseWhy == CW_PAUSE_BATTERY ? "Para ahorrar bater\xC3\xAD" "a" :
+               j->pauseWhy == CW_PAUSE_LOAD    ? "Hay una app pesada abierta" :
+               j->pauseWhy == CW_PAUSE_NET     ? "Sin conexi\xC3\xB3n" : "Pausada por ti");
+      act = NACT_OPEN;
+      break;
+    default:
+      return;
+  }
+  notifPushJob(j->id, title, sub, act, sticky);
+}
+
+// -------------------------------------------------------------
+//  6) ARRANQUE Y PASO PERIODICO
+// -------------------------------------------------------------
+static void flexAiOpenApp(uint32_t focusJob);      // definida con la app, mas abajo
+static uint32_t gAiFocusJob = 0;                   // trabajo que la app debe enseñar al abrirse
+
+static void flexAiBegin(){
+  aiPrefsLoad();
+  aiSpellLoad();
+  // Los trabajos viven en PSRAM: son ~17 KB que no tienen por que
+  // gastar la RAM interna, que es el recurso escaso de esta placa. Sin
+  // PSRAM, Flex Intelligence se queda sin cola y lo dice en la app en
+  // vez de fingir que encola.
+  gCwSlots = (CoworkJob*)heap_caps_malloc(sizeof(CoworkJob) * CW_MAX_JOBS,
+                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(gCwSlots){
+    coworkAttachStorage(gCwSlots, CW_MAX_JOBS);
+    aiCoworkLoad();
+    // Prioridad 1 en el NUCLEO 1: el mismo sitio que el resto de tareas
+    // de red del sistema. El presenter (nucleo 0, prioridad 3) no la ve.
+    if(xTaskCreatePinnedToCore(coworkTaskFn, "cowork", 6144, NULL, 1, &gCwTask, 1) != pdPASS)
+      gCwTask = NULL;
+  }
+}
+
+// Despierta a la tarea de fondo. Es lo unico que el hilo de UI le dice.
+static void flexAiKick(){ if(gCwTask) xTaskNotifyGive(gCwTask); }
+
+// Un paso desde loop(). Barato: la mayoria de las vueltas no hace nada.
+static void flexAiPump(){
+  if(!gCwSlots) return;
+  static uint32_t lastMs = 0;
+  uint32_t now = millis();
+  if(now - lastMs < 120) return;                 // ~8 veces por segundo es de sobra
+  lastMs = now;
+
+  // CARGA DEL SISTEMA. Con la camara, un juego o cualquier app en
+  // horizontal delante, los trabajos no urgentes se pausan: Cowork
+  // baja el ritmo en vez de pelearse por la CPU justo cuando mas
+  // fotogramas hacen falta. Al cerrar esa app se reanudan SOLOS, y
+  // solo los que pauso este motivo -- lo que el usuario paro a mano
+  // sigue pausado.
+  bool heavy = (gState == ST_APP && (gAppId == IC_CAMARA || gAppId == IC_JUEGOS)) || gLand;
+  static bool wasHeavy = false;
+  if(heavy && !wasHeavy) coworkPauseAll(CW_PAUSE_LOAD);
+  if(!heavy && wasHeavy) coworkResumeAll(CW_PAUSE_LOAD);
+  wasHeavy = heavy;
+
+  if(coworkPump(now) > 0) gCwDirty = true;
+
+  // Anuncios: una tarjeta por cambio a un estado terminal.
+  for(int i = 0; i < coworkCount(); i++){
+    CoworkJob* j = coworkAt(i);
+    if(!j) continue;
+    if(j->state != CW_DONE && j->state != CW_ERROR && j->state != CW_PAUSED) continue;
+    if(!aiAnnounceOnce(j->id, j->state)) continue;
+    aiAnnounceJob(j);
+    if(j->state == CW_DONE) gCwDirty = true;
+  }
+
+  if(coworkNextForNetwork(now)) flexAiKick();
+
+  // Guardado diferido: nunca en la misma vuelta en que algo cambia, y
+  // nunca mientras se dibuja una animacion.
+  static uint32_t saveAt = 0;
+  if(gCwDirty && saveAt == 0) saveAt = now + 1500;
+  if(saveAt && (int32_t)(now - saveAt) >= 0){ aiCoworkSave(); aiSpellSave(); saveAt = 0; }
+}
+
+// Encola un trabajo desde la UI, tomando el snapshot aqui mismo.
+// Devuelve el id, o 0 si no se pudo (y entonces quien llama lo dice).
+static uint32_t flexAiSubmit(uint8_t kind, const char* title,
+                             const char* text, size_t len, const char* srcPath){
+  if(!gCwSlots) return 0;
+  uint32_t h = srcPath && srcPath[0] ? coworkHash(text, len) : 0;
+  uint32_t id = coworkSubmit(kind, title, text, len, srcPath, h, 0, millis());
+  if(id) flexAiKick();
+  return id;
+}
+
+// -------------------------------------------------------------
+//  7) ACCIONES DE LAS TARJETAS
+// -------------------------------------------------------------
+static void flexAiApplyResult(uint32_t jobId, bool* okOut);
+
+static void flexAiNotifAction(int idx, uint8_t act){
+  if(idx < 0 || idx >= gNotifCount) return;
+  uint32_t jobId = gNotifs[idx].jobId;
+  switch(act){
+    case NACT_VIEW:
+    case NACT_OPEN:
+      gNotifs[idx].phase = NP_OUT;
+      coworkMarkSeen(jobId);
+      flexAiOpenApp(jobId);
+      break;
+    case NACT_APPLY: {
+      bool ok = false;
+      flexAiApplyResult(jobId, &ok);
+      coworkMarkSeen(jobId);
+      gNotifs[idx].phase = NP_OUT;
+      if(!ok) notifPushJob(jobId, "No se pudo aplicar", "Abre Flex Intelligence", NACT_OPEN, true);
+      gCwDirty = true;
+    } break;
+    case NACT_RETRY: {
+      CoworkJob* j = coworkFind(jobId);
+      if(j && j->state == CW_ERROR){
+        // Reintentar A MANO devuelve los intentos: el usuario ha
+        // decidido que las condiciones cambiaron (encendio el WiFi,
+        // arreglo el servidor). Conservar el contador agotado haria
+        // que el boton no hiciera nada, que es peor que no tenerlo.
+        j->tries     = 0;
+        j->retryAtMs = 0;
+        j->startMs   = 0;
+        j->state     = CW_QUEUED;
+        j->err       = CW_ERR_NONE;
+        flexAiKick();
+      }
+      gNotifs[idx].phase = NP_OUT;
+    } break;
+    case NACT_CANCEL:
+      coworkCancel(jobId);
+      gNotifs[idx].phase = NP_OUT;
+      gCwDirty = true;
+      break;
+    default:
+      gNotifs[idx].phase = NP_OUT;
+      break;
+  }
+}
+
+// -------------------------------------------------------------
+//  8) ACTIVACION POR PULSACION LARGA
+//  -------------------------------------------------------------
+//  MAQUINA DE ESTADOS EXPLICITA, y no un "if millis()-downMs > 700"
+//  suelto, porque hay que distinguir cinco cosas que comparten el
+//  mismo dedo:
+//
+//    AIL_IDLE     nada en curso
+//    AIL_CAND     el dedo esta en la zona y podria ser larga
+//    AIL_FIRED    confirmada -> Flex Intelligence abierta
+//    AIL_NAV      el dedo se movio: es un gesto de navegacion
+//    AIL_CANCEL   fuera de zona o soltado antes de tiempo
+//
+//  LA REGLA QUE EVITA LA DOBLE ACCION: al confirmarse la pulsacion
+//  larga se marca gAiLpConsumed, y el manejador del toque corto (ir a
+//  Inicio, o el gesto de la barra) comprueba esa marca y NO hace nada.
+//  Sin ella, soltar el dedo despues de abrir el panel dispararia
+//  ademas el Inicio y el usuario acabaria en el escritorio con el
+//  panel encima: exactamente el fallo que hay que evitar.
+// -------------------------------------------------------------
+#define AI_LP_MS        700     // lo que hay que aguantar
+#define AI_LP_TOL       14      // px de movimiento que cancela
+#define AIL_IDLE   0
+#define AIL_CAND   1
+#define AIL_FIRED  2
+#define AIL_NAV    3
+#define AIL_CANCEL 4
+
+static uint8_t  gAiLp        = AIL_IDLE;
+static uint32_t gAiLpT0      = 0;
+static bool     gAiLpConsumed = false;   // esta pulsacion ya la gasto el panel
+static void flexAiOverlayOpen();
+
+// Zona caliente del boton de INICIO (navegacion por botones). Es el
+// circulo central de la barra, con un margen generoso: el objetivo
+// dibujado mide 24 px y el dedo no acierta a 24 px.
+static bool aiLpHomeBtnZone(int px, int py){
+  if(gLand) return false;                     // en horizontal no hay barra de botones
+  int ny = SCR_H - 52;
+  return (px > SCR_W / 3 && px < SCR_W * 2 / 3 && py >= ny - 18 && py <= ny + 30);
+}
+// Zona caliente de la BARRA DE GESTOS: el tercio central de la franja
+// inferior. Los laterales se dejan libres a proposito -- ahi es donde
+// empiezan los gestos de "atras" de borde.
+static bool aiLpGestZone(int px, int py){
+  if(gLand) return false;
+  return (py > SCR_H - 46 && px > SCR_W / 3 && px < SCR_W * 2 / 3);
+}
+
+// true si Flex Intelligence puede abrirse ahora mismo. Se comprueba
+// aqui y no en cada llamante para que la respuesta sea una sola.
+static bool flexAiCanOpen(){
+  if(!aiConfig()->enabled) return false;
+  if(gState == ST_SPLASH || gState == ST_OOBE_LANG || gState == ST_OOBE_NAME) return false;
+  if(gState == ST_LOCK || gState == ST_LOCKSETUP) return false;   // con la pantalla bloqueada, no
+  if(KIOSK_ON && kioskOn) return false;                           // en kiosco no hay salidas
+  if(flexOtaOwnsScreen() || flexOtaOverlayActive()) return false;
+  if(qsPanelY != 0) return false;
+  return true;
+}
+
+// Un paso de la maquina. Devuelve true si el toque es SUYO y nadie mas
+// debe verlo en esta vuelta.
+static bool flexAiLongPressTick(){
+  // Una pulsacion ya consumida se ignora ENTERA hasta que el dedo se
+  // levante: es lo que impide la doble accion.
+  if(gAiLpConsumed){
+    if(!T.down){ gAiLpConsumed = false; gAiLp = AIL_IDLE; }
+    T.tap = false; T.released = false; T.pressed = false;
+    T.swipeUp = false; T.swipeDown = false; T.swipeLeft = false; T.swipeRight = false;
+    return true;
+  }
+  if(!flexAiCanOpen()){ gAiLp = AIL_IDLE; return false; }
+
+  bool zone = (gNavMode == 0) ? aiLpHomeBtnZone(T.startX, T.startY)
+                              : aiLpGestZone(T.startX, T.startY);
+  if(!T.down){ gAiLp = AIL_IDLE; return false; }
+  if(!zone){   gAiLp = AIL_IDLE; return false; }
+
+  int dx = T.x - T.startX, dy = T.y - T.startY;
+  int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
+
+  switch(gAiLp){
+    case AIL_IDLE:
+      gAiLp   = AIL_CAND;
+      gAiLpT0 = T.downMs;
+      return false;                       // aun no es nuestro: puede ser un toque normal
+    case AIL_CAND:
+      // MOVIMIENTO = NAVEGACION. En cuanto el dedo pasa la tolerancia,
+      // esto deja de ser una pulsacion larga y vuelve a ser lo que
+      // siempre fue: el gesto de subir a Inicio o al selector. No se
+      // "compite" por el gesto -- se cede.
+      if(adx > AI_LP_TOL || ady > AI_LP_TOL){ gAiLp = AIL_NAV; return false; }
+      if(millis() - gAiLpT0 >= AI_LP_MS){
+        gAiLp = AIL_FIRED;
+        gAiLpConsumed = true;
+        // Se consumen TODOS los flags de evento antes de abrir: el
+        // toque que abrio el panel no puede llegar tambien a la app de
+        // debajo ni al escritorio.
+        T.tap = false; T.pressed = false; T.released = false;
+        T.swipeUp = false; T.swipeDown = false; T.swipeLeft = false; T.swipeRight = false;
+        flexAiOverlayOpen();
+        return true;
+      }
+      return false;
+    case AIL_NAV:
+    case AIL_CANCEL:
+    default:
+      return false;
+  }
+}
+
+// -------------------------------------------------------------
+//  9) PANEL "RODEA PARA BUSCAR"  (Circle to Search)
+//  -------------------------------------------------------------
+//  QUE HACE: congela visualmente lo que hay en pantalla, lo desenfoca
+//  y oscurece un poco, y pone encima el panel de Flex Intelligence con
+//  "Que quieres hacer?" y sus acciones.
+//
+//  EL DESENFOQUE SE CALCULA UNA SOLA VEZ. Se captura fb entero, se
+//  reduce a 1/4 de lado (120x200) y se desenfoca AHI -- 16 veces menos
+//  pixeles --; lo unico que se repite al redibujar es la ampliacion,
+//  que es una lectura por pixel sin aritmetica de vecindad. Desenfocar
+//  la pantalla entera en cada frame seria imposible a 60 fps; asi el
+//  coste real esta en la apertura y el panel, una vez quieto, no
+//  recalcula nada (aiOvDirty). Es la misma idea que ya usa
+//  ensureBlurBg() con el wallpaper, pero sobre una captura viva.
+//
+//  LA APP DE DEBAJO NO SE TOCA: no se cierra, no se le hace tick, no
+//  pierde estado. Y al cerrar el panel NO se le pide que se repinte:
+//  se devuelve la CAPTURA SIN DESENFOCAR, pixel a pixel. Repintar
+//  llamando a enter() habria sido volver a ejecutar la inicializacion
+//  de la app -- que en varias (Calculadora, Ajustes) tambien reinicia
+//  su estado, o sea que salir del panel le habria borrado al usuario
+//  lo que tuviera a medias.
+// -------------------------------------------------------------
+#define AIOV_SHRINK   4                            // factor de reduccion para el desenfoque
+#define AIOV_SW       (SCR_W / AIOV_SHRINK)        // 120
+#define AIOV_SH       (SCR_H / AIOV_SHRINK)        // 200
+#define AIOV_OPEN_MS  180
+
+static uint16_t* aiOvShot  = NULL;      // captura EXACTA de fb (para devolverla al cerrar)
+static uint16_t* aiOvSmall = NULL;      // la misma imagen reducida y YA desenfocada
+static bool      aiOvOpen  = false;
+static bool      aiOvLand  = false;     // se abrio en horizontal
+static uint32_t  aiOvT0    = 0;
+static int       aiOvSel   = -1;        // accion resaltada
+static bool      aiOvDirty = true;
+
+// Acciones del panel. El orden es el de uso real: corregir y resumir
+// son lo que se pide a diario.
+#define AIOV_ACTS 5
+static const char* AIOV_LABEL[AIOV_ACTS] = { "Corregir", "Resumir", "Traducir", "Analizar imagen", "Crear tarea" };
+static const uint8_t AIOV_KIND[AIOV_ACTS] = { CW_KIND_CORRECT, CW_KIND_SUMMARY, CW_KIND_TRANSLATE,
+                                              CW_KIND_IMAGE,   CW_KIND_ANALYZE };
+
+// Desenfoque de caja sobre el lienzo reducido. Dos pasadas separables
+// (horizontal y vertical): el mismo criterio que glassBlur, pero aqui
+// sobre 24.000 pixeles en vez de 384.000.
+static void aiOvBlurSmall(int r){
+  if(!aiOvSmall) return;
+  static uint16_t line[AIOV_SW > AIOV_SH ? AIOV_SW : AIOV_SH];
+  for(int y = 0; y < AIOV_SH; y++){
+    uint16_t* row = aiOvSmall + (size_t)y * AIOV_SW;
+    memcpy(line, row, (size_t)AIOV_SW * 2);
+    for(int x = 0; x < AIOV_SW; x++){
+      int a = x - r, b = x + r;
+      if(a < 0) a = 0; if(b >= AIOV_SW) b = AIOV_SW - 1;
+      uint32_t sr = 0, sg = 0, sb = 0; int n = 0;
+      for(int i = a; i <= b; i++){
+        uint16_t c = line[i];
+        sr += (c >> 11) & 0x1F; sg += (c >> 5) & 0x3F; sb += c & 0x1F; n++;
+      }
+      row[x] = (uint16_t)(((sr / n) << 11) | ((sg / n) << 5) | (sb / n));
+    }
+  }
+  for(int x = 0; x < AIOV_SW; x++){
+    for(int y = 0; y < AIOV_SH; y++) line[y] = aiOvSmall[(size_t)y * AIOV_SW + x];
+    for(int y = 0; y < AIOV_SH; y++){
+      int a = y - r, b = y + r;
+      if(a < 0) a = 0; if(b >= AIOV_SH) b = AIOV_SH - 1;
+      uint32_t sr = 0, sg = 0, sb = 0; int n = 0;
+      for(int i = a; i <= b; i++){
+        uint16_t c = line[i];
+        sr += (c >> 11) & 0x1F; sg += (c >> 5) & 0x3F; sb += c & 0x1F; n++;
+      }
+      aiOvSmall[(size_t)y * AIOV_SW + x] = (uint16_t)(((sr / n) << 11) | ((sg / n) << 5) | (sb / n));
+    }
+  }
+}
+
+// Captura fb tal cual (para restaurarlo al cerrar) y deja ademas su
+// version reducida y desenfocada lista para ampliar. UNA sola vez.
+static bool aiOvCapture(){
+  if(!aiOvShot)  aiOvShot  = (uint16_t*)heap_caps_aligned_alloc(64, (size_t)SCR_W * SCR_H * 2,
+                                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(!aiOvSmall) aiOvSmall = (uint16_t*)heap_caps_malloc((size_t)AIOV_SW * AIOV_SH * 2,
+                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(!aiOvShot || !aiOvSmall) return false;
+  // La captura se hace bajo el candado del panel: mientras la DMA2D
+  // esta subiendo fb, leerlo daria una mezcla de dos cuadros.
+  fbLock();
+  memcpy(aiOvShot, fb, (size_t)SCR_W * SCR_H * 2);
+  fbUnlock();
+  // Reduccion por muestreo: se toma un pixel de cada AIOV_SHRINK. Para
+  // una imagen que se va a desenfocar de todas formas, promediar el
+  // bloque entero costaria 16 lecturas por pixel y el resultado seria
+  // indistinguible despues del blur.
+  for(int y = 0; y < AIOV_SH; y++){
+    const uint16_t* src = aiOvShot + (size_t)(y * AIOV_SHRINK) * SCR_W;
+    uint16_t* dst = aiOvSmall + (size_t)y * AIOV_SW;
+    for(int x = 0; x < AIOV_SW; x++) dst[x] = src[x * AIOV_SHRINK];
+  }
+  aiOvBlurSmall(2);
+  return true;
+}
+
+// Amplia la version desenfocada a pantalla completa dentro de `dst` y
+// le aplica el velo oscuro. No recalcula el desenfoque: solo lee.
+static void aiOvPaintBg(uint16_t* dst){
+  uint16_t veil = rgb565(8, 10, 20);
+  for(int y = 0; y < SCR_H; y++){
+    const uint16_t* src = aiOvSmall + (size_t)(y / AIOV_SHRINK) * AIOV_SW;
+    uint16_t* row = dst + (size_t)y * SCR_W;
+    for(int x = 0; x < SCR_W; x++) row[x] = mix565(src[x / AIOV_SHRINK], veil, 96);
+  }
+}
+
+// Geometria LOGICA del panel. En horizontal NO es el vertical girado:
+// es una hoja ancha y baja con las acciones en dos columnas, maquetada
+// contra 800x480.
+static void aiOvBox(int &x, int &y, int &w, int &h){
+  if(gLand){
+    w = LW - 120; h = LH - 120;
+    x = (LW - w) / 2; y = (LH - h) / 2;
+  } else {
+    w = SCR_W - 36; h = 330;
+    x = 18; y = SCR_H - h - 96;
+  }
+}
+// Rect logico de la accion i.
+static void aiOvActBox(int i, int &x, int &y, int &w, int &h){
+  int bx, by, bw, bh; aiOvBox(bx, by, bw, bh);
+  int pad = 16;
+  if(gLand){
+    int cols = 3, rows = 2;
+    int cw = (bw - 2 * pad - (cols - 1) * 10) / cols;
+    int ch = 52;
+    int y0 = by + bh - pad - rows * (ch + 10) + 10;
+    x = bx + pad + (i % cols) * (cw + 10);
+    y = y0 + (i / cols) * (ch + 10);
+    w = cw; h = ch;
+  } else {
+    int cols = 2;
+    int cw = (bw - 2 * pad - 10) / cols;
+    int ch = 52;
+    int y0 = by + 130;
+    x = bx + pad + (i % cols) * (cw + 10);
+    y = y0 + (i / cols) * (ch + 10);
+    w = cw; h = ch;
+  }
+}
+
+static void flexAiOverlayClose(bool repaintBelow);
+static void flexAiOpenTool(uint8_t kind);
+
+static void flexAiOverlayOpen(){
+  if(aiOvOpen) return;
+  if(!flexAiCanOpen()) return;
+  // Modo "aplicacion completa": el usuario prefiere la app entera. Se
+  // respeta y no se abre panel ninguno.
+  if(aiConfig()->openMode == AI_OPEN_APP){ flexAiOpenApp(0); return; }
+  if(!aiOvCapture()) { flexAiOpenApp(0); return; }   // sin PSRAM: se abre la app
+  aiOvOpen  = true;
+  aiOvLand  = gLand;
+  aiOvT0    = millis();
+  aiOvSel   = -1;
+  aiOvDirty = true;
+}
+
+static void aiOvRender(){
+  uint32_t e = millis() - aiOvT0;
+  float p = (e >= AIOV_OPEN_MS) ? 1.0f : (float)e / (float)AIOV_OPEN_MS;
+  float ep = 1.0f - (1.0f - p) * (1.0f - p) * (1.0f - p);   // ease-out cubica
+
+  setBuf(bbuf);
+  bool wl = gLand; gLand = false;
+  gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
+  aiOvPaintBg(bbuf);          // ampliar la version ya desenfocada + velo
+  gLand = aiOvLand;
+
+  int bx, by, bw, bh; aiOvBox(bx, by, bw, bh);
+  // Entrada: la hoja sube desde abajo (vertical) o crece desde el
+  // centro (horizontal), con el mismo ease-out del resto del sistema.
+  int slide = (int)((1.0f - ep) * (gLand ? 40 : 80));
+  by += slide;
+
+  fillRoundRectA(bx, by, bw, bh, 26, TH_SURF, (uint8_t)(238 * ep));
+  drawRoundRect(bx, by, bw, bh, 26, TH_BORDER);
+
+  int pad = 16;
+  { int icx = bx + pad + 18, icy = by + pad + 20;
+    fillCircle(icx, icy, 17, TH_PRIM);
+    nflSparkIcon(icx, icy, 10, TH_ONACC); }
+  drawText(bx + pad + 46, by + pad + 6, "Flex Intelligence", 2, TH_TXT);
+  drawText(bx + pad + 46, by + pad + 28, aiConfigured() ? "Conectado a tu servidor"
+                                                        : "Sin servidor - funciones locales", 1, TH_TXT2);
+  drawText(bx + pad, by + pad + 56, "\xC2\xBFQu\xC3\xA9 quieres hacer?", 3, TH_TXT);
+
+  // Entrada de texto (abre la app con el teclado: aqui no cabe uno).
+  { int ex = bx + pad, ey = by + (gLand ? pad + 86 : pad + 88);
+    int ew = bw - 2 * pad, eh = 34;
+    if(!gLand || bh > 200){
+      fillRoundRect(ex, ey, ew, eh, 17, thCard());
+      drawRoundRect(ex, ey, ew, eh, 17, TH_BORDER);
+      drawText(ex + 14, ey + 10, "Escribe lo que necesitas...", 1, TH_MUTE);
+    } }
+
+  for(int i = 0; i < AIOV_ACTS; i++){
+    int ax, ay, aw, ah; aiOvActBox(i, ax, ay, aw, ah);
+    ay += slide;
+    bool on = (aiOvSel == i);
+    fillRoundRect(ax, ay, aw, ah, 14, on ? TH_PRIM : thCard());
+    if(!on) drawRoundRect(ax, ay, aw, ah, 14, TH_BORDER);
+    int fs = textW(AIOV_LABEL[i], 2) <= aw - 16 ? 2 : 1;
+    drawTextC(ax + aw / 2, ay + (ah - (fs == 2 ? 14 : 8)) / 2,
+              AIOV_LABEL[i], fs, on ? TH_ONACC : TH_TXT);
+  }
+  drawTextC(bx + bw / 2, by + bh - 22, "Toca fuera para cerrar", 1, TH_MUTE);
+
+  gLand = wl;
+  present(0, SCR_H - 1);
+  setBuf(fb);
+}
+
+static void flexAiOverlayClose(bool repaintBelow){
+  if(!aiOvOpen) return;
+  aiOvOpen = false;
+  aiOvSel  = -1;
+  if(repaintBelow && aiOvShot){
+    // La pantalla vuelve EXACTAMENTE a como estaba, pixel a pixel,
+    // desde la captura sin desenfocar. Ni se le pide a la app que se
+    // repinte ni se le hace tick: no se ha enterado de nada.
+    fbCopyBand(aiOvShot, 0, SCR_H - 1);
+    flxFlushAll();
+  }
+}
+
+// Un paso del panel. Devuelve true mientras se quede la pantalla.
+static bool flexAiOverlayTick(){
+  if(!aiOvOpen) return false;
+
+  // Orientacion cambiada con el panel abierto (una app horizontal que
+  // se cierra): la captura ya no vale. Se cierra en vez de enseñar una
+  // imagen girada.
+  if(gLand != aiOvLand){ flexAiOverlayClose(true); return false; }
+
+  int tx = gLand ? T.y : T.x;
+  int ty = gLand ? ((SCR_W - 1) - T.x) : T.y;
+
+  if(T.tap){
+    int bx, by, bw, bh; aiOvBox(bx, by, bw, bh);
+    bool inside = (tx >= bx && tx <= bx + bw && ty >= by && ty <= by + bh);
+    if(!inside){
+      // FUERA DEL PANEL = CERRAR. La app de debajo no recibe este
+      // toque: cerrar el panel y ademas pulsar un boton del juego que
+      // hay detras seria una accion que el usuario no pidio.
+      T.tap = false; T.pressed = false; T.released = false;
+      flexAiOverlayClose(true);
+      return true;
+    }
+    for(int i = 0; i < AIOV_ACTS; i++){
+      int ax, ay, aw, ah; aiOvActBox(i, ax, ay, aw, ah);
+      if(tx < ax || tx > ax + aw || ty < ay || ty > ay + ah) continue;
+      T.tap = false; T.pressed = false;
+      uint8_t kind = AIOV_KIND[i];
+      flexAiOverlayClose(false);
+      flexAiOpenTool(kind);
+      return true;
+    }
+    // Entrada de texto o cualquier otro punto del panel: se abre la app,
+    // que es donde hay teclado.
+    T.tap = false; T.pressed = false;
+    flexAiOverlayClose(false);
+    flexAiOpenApp(0);
+    return true;
+  }
+  // ATRAS (boton o gesto) cierra el panel.
+  if(gNavMode == 0 && T.tap && !gLand && T.y >= SCR_H - 62 && T.x < SCR_W / 3){
+    T.tap = false; flexAiOverlayClose(true); return true;
+  }
+  if(T.swipeRight || T.swipeDown){
+    T.swipeRight = false; T.swipeDown = false;
+    flexAiOverlayClose(true);
+    return true;
+  }
+  // Mientras el panel esta abierto, NADIE de debajo ve el toque.
+  T.tap = false; T.pressed = false; T.released = false;
+  T.swipeUp = false; T.swipeLeft = false;
+
+  if(aiOvDirty || millis() - aiOvT0 < AIOV_OPEN_MS){
+    aiOvRender();
+    if(millis() - aiOvT0 >= AIOV_OPEN_MS) aiOvDirty = false;
+  }
+  return true;
+}
+
+// -------------------------------------------------------------
+//  10) LA APP  ·  Flex Intelligence
+//  -------------------------------------------------------------
+//  Cuatro pestanas, ni una mas: Asistente (la conversacion),
+//  Herramientas (corregir/resumir/traducir/tono/analizar),
+//  Cowork (trabajos y resultados) y Ajustes (servidor, permisos,
+//  privacidad, corrector).
+//
+//  ES APP_FLEX: maqueta contra el lienzo real (uiBox), asi que
+//  funciona igual a pantalla completa y dentro de una ventana de
+//  Modo PC. Y es APP_OWN_TOUCH porque gestiona sus propios toques
+//  -- incluido el teclado.
+//
+//  NO INVENTA NADA. Si no hay servidor configurado, lo dice y
+//  ofrece configurarlo; si no hay red, lo dice. Ni un mensaje de
+//  ejemplo, ni una respuesta simulada.
+// -------------------------------------------------------------
+#define AIT_CHAT  0
+#define AIT_TOOLS 1
+#define AIT_WORK  2
+#define AIT_SET   3
+#define AIT_N     4
+static const char* AI_TAB_NAME[AIT_N] = { "Asistente", "Herramientas", "Cowork", "Ajustes" };
+
+// Historial de conversacion. ACOTADO y persistente: 12 turnos de 160
+// caracteres viven en PSRAM y se guardan en /System/aichat.txt. Doce y
+// no "los que quepan" porque un historial sin limite en una placa con
+// 768 KB de framebuffers es una fuga con buenos modales.
+#define AI_CHAT_MAX   12
+#define AI_CHAT_LEN  160
+#define AI_CHAT_PATH "/System/aichat.txt"
+struct AiChatTurn { bool mine; char text[AI_CHAT_LEN]; };
+static AiChatTurn* gChat  = NULL;
+static int         gChatN = 0;
+static bool        gChatDirty = false;
+
+static int  gAiTab      = AIT_CHAT;
+static int  gAiScroll   = 0;
+static int  gAiSelJob   = -1;          // trabajo abierto en detalle (indice), -1 = lista
+static bool gAiKbOn     = false;       // teclado de la app abierto
+static char gAiInput[AI_CHAT_LEN] = "";
+static int  gAiInputLen = 0;
+static int  gAiSetRow   = -1;          // fila de Ajustes en edicion
+static char gAiToast[64] = "";
+static uint32_t gAiToastMs = 0;
+
+static void aiChatEnsure(){
+  if(gChat) return;
+  gChat = (AiChatTurn*)heap_caps_calloc(AI_CHAT_MAX, sizeof(AiChatTurn),
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+static void aiChatPush(bool mine, const char* txt){
+  aiChatEnsure();
+  if(!gChat || !txt) return;
+  if(gChatN >= AI_CHAT_MAX){
+    for(int i = 1; i < AI_CHAT_MAX; i++) gChat[i - 1] = gChat[i];
+    gChatN = AI_CHAT_MAX - 1;
+  }
+  gChat[gChatN].mine = mine;
+  snprintf(gChat[gChatN].text, AI_CHAT_LEN, "%s", txt);
+  gChatN++;
+  gChatDirty = true;
+}
+static void aiChatLoad(){
+  aiChatEnsure();
+  if(!gChat || !flexFsReady()) return;
+  static char buf[AI_CHAT_MAX * (AI_CHAT_LEN + 4)];
+  int n = flexFsReadText(AI_CHAT_PATH, buf, sizeof(buf));
+  if(n <= 0) return;
+  gChatN = 0;
+  int i = 0;
+  while(i < n && gChatN < AI_CHAT_MAX){
+    // Formato: un turno por linea, primer caracter '>' (mio) o '<'.
+    bool mine = (buf[i] == '>');
+    if(buf[i] != '>' && buf[i] != '<'){ while(i < n && buf[i] != '\n') i++; i++; continue; }
+    i++;
+    int k = 0;
+    while(i < n && buf[i] != '\n' && k < AI_CHAT_LEN - 1) gChat[gChatN].text[k++] = buf[i++];
+    gChat[gChatN].text[k] = 0;
+    gChat[gChatN].mine = mine;
+    gChatN++;
+    while(i < n && buf[i] != '\n') i++;
+    i++;
+  }
+  gChatDirty = false;
+}
+static void aiChatSave(){
+  if(!gChatDirty || !gChat || !flexFsReady()) return;
+  static char buf[AI_CHAT_MAX * (AI_CHAT_LEN + 4)];
+  size_t o = 0;
+  for(int i = 0; i < gChatN; i++){
+    int w = snprintf(buf + o, sizeof(buf) - o, "%c%s\n", gChat[i].mine ? '>' : '<', gChat[i].text);
+    if(w < 0 || (size_t)w >= sizeof(buf) - o) break;
+    o += (size_t)w;
+  }
+  buf[o] = 0;
+  flexFsWriteText(AI_CHAT_PATH, buf);
+  gChatDirty = false;
+}
+static void aiChatClear(){
+  gChatN = 0; gChatDirty = true;
+  if(flexFsReady()) flexFsDelete(AI_CHAT_PATH);
+}
+
+static void aiToast(const char* m){ snprintf(gAiToast, sizeof(gAiToast), "%s", m); gAiToastMs = millis(); }
+
+static void flexAiRender();
+
+// El teclado y los Ajustes de la app se definen justo debajo (necesitan
+// gAiInput, aiToast y AISET_ROWS, que se declaran aqui). Estas dos
+// lineas son lo unico que hace falta para que el orden funcione en el
+// IDE de Arduino, que autogenera los prototipos al principio.
+static bool aiKeyboardTick();
+static void aiSettingsTap(int row);
+static int  gAiSetMaxScroll = 0;
+
+
+// Aplica el resultado de un trabajo a su documento de origen. Es la
+// UNICA via por la que Flex Intelligence escribe en un fichero del
+// usuario, y solo se llega aqui con una confirmacion por delante.
+static void flexAiApplyResult(uint32_t jobId, bool* okOut){
+  if(okOut) *okOut = false;
+  CoworkJob* j = coworkFind(jobId);
+  if(!j || j->state != CW_DONE || j->outLen == 0) return;
+  if(!j->src[0] || !flexFsReady()) return;
+  if(!flexFsWriteText(j->src, j->out)) return;
+  j->needsConfirm = false;
+  j->srcChanged   = false;
+  if(okOut) *okOut = true;
+  gCwDirty = true;
+}
+
+// Abre la app, opcionalmente enfocando un trabajo concreto.
+static void flexAiOpenApp(uint32_t focusJob){
+  gAiFocusJob = focusJob;
+  if(focusJob){
+    gAiTab = AIT_WORK;
+    gAiSelJob = -1;
+    for(int i = 0; i < coworkCount(); i++){
+      CoworkJob* j = coworkAt(i);
+      if(j && j->id == focusJob){ gAiSelJob = i; break; }
+    }
+  }
+  gIconOvrApp = -1;
+  if(gState == ST_APP && gAppId == IC_FLEXAI){ flexAiRender(); return; }
+  enterApp(IC_FLEXAI);
+}
+
+// Abre la app en Herramientas con una tarea ya elegida (viene del panel).
+static void flexAiOpenTool(uint8_t kind){
+  gAiTab = AIT_TOOLS;
+  gAiSelJob = -1;
+  // Se encola sobre lo que haya en el portapapeles del sistema, que es
+  // lo unico que Flex Intelligence puede saber que el usuario "tenia
+  // delante" sin espiar la app de debajo. Si esta vacio se abre la app
+  // y se dice, en vez de mandar un texto en blanco al servidor.
+  const char* src = clipboard;
+  size_t len = strlen(src);
+  if(len == 0){
+    flexAiOpenApp(0);
+    aiToast("Copia primero el texto que quieras usar");
+    return;
+  }
+  char title[CW_TITLE_MAX];
+  snprintf(title, sizeof(title), "%s (portapapeles)", coworkKindName(kind));
+  uint32_t id = flexAiSubmit(kind, title, src, len, NULL);
+  flexAiOpenApp(id);
+  if(!id) aiToast("No se pudo encolar la tarea");
+}
+
+// ---- Dibujo ----
+static void aiDrawTabs(int bx, int by, int bw){
+  int h = 38, seg = (bw - 24) / AIT_N;
+  fillRoundRect(bx + 12, by, bw - 24, h, h / 2, thCard());
+  for(int i = 0; i < AIT_N; i++){
+    int sx = bx + 12 + i * seg;
+    bool on = (gAiTab == i);
+    if(on) fillRoundRect(sx + 2, by + 2, seg - 4, h - 4, (h - 4) / 2, TH_PRIM);
+    int fs = textW(AI_TAB_NAME[i], 2) <= seg - 8 ? 2 : 1;
+    drawTextC(sx + seg / 2, by + (h - (fs == 2 ? 14 : 8)) / 2, AI_TAB_NAME[i], fs,
+              on ? TH_ONACC : TH_TXT2);
+  }
+}
+
+// Estado REAL del servicio, en una linea. Nunca dice "listo" si no lo esta.
+static void aiStatusLine(char* out, size_t n){
+  AiConfig* c = aiConfig();
+  if(!c->enabled)                      { snprintf(out, n, "Desactivada en Ajustes"); return; }
+  if(c->localOnly)                     { snprintf(out, n, "Solo en el dispositivo"); return; }
+  if(!aiValidUrl(c->url) || !c->token[0]){ snprintf(out, n, "Sin configurar"); return; }
+  if(!aiHasRootCa())                   { snprintf(out, n, "Falta el certificado del servidor"); return; }
+#if FLEXOS_ENABLE_WIFI
+  if(gAirplane)                        { snprintf(out, n, "Modo avi\xC3\xB3n"); return; }
+  if(WiFi.status() != WL_CONNECTED)    { snprintf(out, n, "Sin conexi\xC3\xB3n"); return; }
+#endif
+  if(gCwBusy)                          { snprintf(out, n, "Trabajando..."); return; }
+  int act = coworkActiveCount();
+  if(act > 0){ snprintf(out, n, "%d tarea%s en curso", act, act == 1 ? "" : "s"); return; }
+  snprintf(out, n, "Listo");
+}
+
+static void aiDrawChat(int bx, int by, int bw, int bh){
+  char st[48]; aiStatusLine(st, sizeof(st));
+  drawTextC(bx + bw / 2, by + 4, st, 1, TH_TXT2);
+  int y = by + 24;
+  int bot = by + bh - (gAiKbOn ? 0 : 52);
+  if(gChatN == 0){
+    // Estado vacio HONESTO: lo que puede hacer y lo que le falta.
+    drawTextC(bx + bw / 2, y + 40, "A\xC3\xBAn no hay conversaci\xC3\xB3n", 2, TH_TXT2);
+    if(!aiConfigured())
+      drawTextC(bx + bw / 2, y + 70, "Configura tu servidor en Ajustes", 1, TH_MUTE);
+    else
+      drawTextC(bx + bw / 2, y + 70, "Escribe abajo para empezar", 1, TH_MUTE);
+    return;
+  }
+  // Se dibuja de abajo arriba: lo ultimo es lo que importa.
+  int cy = bot - 8;
+  for(int i = gChatN - 1; i >= 0 && cy > y; i--){
+    const AiChatTurn* t = &gChat[i];
+    int maxw = bw - 60;
+    // Alto: se parte en lineas de ~34 caracteres (fuente 1 a este ancho).
+    int per = maxw / 6; if(per < 8) per = 8;
+    int len = (int)strlen(t->text);
+    int lines = (len + per - 1) / per; if(lines < 1) lines = 1;
+    int ch = lines * 14 + 16;
+    cy -= ch + 6;
+    if(cy < y) break;
+    int cw = bw - 40, cx = t->mine ? (bx + 30) : (bx + 10);
+    fillRoundRect(cx, cy, cw, ch, 12, t->mine ? TH_PRIM : thCard());
+    uint16_t tc = t->mine ? TH_ONACC : TH_TXT;
+    for(int l = 0; l < lines; l++){
+      char part[48];
+      int off = l * per, take = len - off; if(take > per) take = per;
+      if(take <= 0) break;
+      if(take > (int)sizeof(part) - 1) take = (int)sizeof(part) - 1;
+      memcpy(part, t->text + off, take); part[take] = 0;
+      drawTextClip(cx + 10, cy + 8 + l * 14, part, 1, tc, cx + cw - 8);
+    }
+  }
+}
+
+static void aiDrawTools(int bx, int by, int bw, int bh){
+  static const char* TL[6] = { "Corregir", "Resumir", "Traducir", "Cambiar tono", "Analizar texto", "Explicar error" };
+  drawText(bx + 14, by + 4, "Sobre el portapapeles del sistema", 1, TH_TXT2);
+  int y = by + 26, h = 46;
+  for(int i = 0; i < 6 && y + h < by + bh - 8; i++){
+    fillRoundRect(bx + 12, y, bw - 24, h, 14, thCard());
+    drawText(bx + 26, y + (h - 14) / 2, TL[i], 2, TH_TXT);
+    drawTextR(bx + bw - 26, y + (h - 8) / 2, ">", 1, TH_MUTE);
+    y += h + 8;
+  }
+  if(!clipboard[0]) drawTextC(bx + bw / 2, by + bh - 20, "El portapapeles est\xC3\xA1 vac\xC3\xAD" "o", 1, TH_MUTE);
+}
+
+static const uint8_t AI_TOOL_KIND[6] = { CW_KIND_CORRECT, CW_KIND_SUMMARY, CW_KIND_TRANSLATE,
+                                         CW_KIND_TONE,    CW_KIND_ANALYZE, CW_KIND_EXPLAIN };
+
+static void aiDrawWork(int bx, int by, int bw, int bh){
+  if(!gCwSlots){
+    drawTextC(bx + bw / 2, by + bh / 2 - 10, "Sin memoria para la cola", 2, TH_TXT2);
+    drawTextC(bx + bw / 2, by + bh / 2 + 16, "Esta placa no tiene PSRAM libre", 1, TH_MUTE);
+    return;
+  }
+  if(gAiSelJob >= 0 && gAiSelJob < coworkCount()){
+    CoworkJob* j = coworkAt(gAiSelJob);
+    if(!j){ gAiSelJob = -1; return; }
+    drawText(bx + 14, by + 4, coworkKindName(j->kind), 2, TH_TXT);
+    drawTextR(bx + bw - 14, by + 8, coworkStateName(j->state), 1, TH_TXT2);
+    int y = by + 30;
+    if(j->srcChanged){
+      // EL AVISO QUE NO SE PUEDE OMITIR: el origen cambio mientras se
+      // trabajaba. Se dice antes que el resultado, no despues.
+      fillRoundRect(bx + 12, y, bw - 24, 40, 12, TH_DANGER);
+      drawTextC(bx + bw / 2, y + 6,  "El documento cambi\xC3\xB3 mientras trabajaba", 1, TH_ONACC);
+      drawTextC(bx + bw / 2, y + 22, "Revisa antes de aplicar", 1, TH_ONACC);
+      y += 48;
+    }
+    if(j->state == CW_ERROR && j->err_[0]){
+      drawTextClip(bx + 14, y, j->err_, 1, TH_DANGER, bx + bw - 14);
+      y += 20;
+    }
+    // Resultado, recortado al area.
+    int per = (bw - 40) / 6; if(per < 8) per = 8;
+    int len = (int)j->outLen;
+    for(int off = 0; off < len && y < by + bh - 60; off += per){
+      char part[64];
+      int take = len - off; if(take > per) take = per;
+      if(take > (int)sizeof(part) - 1) take = (int)sizeof(part) - 1;
+      memcpy(part, j->out + off, take); part[take] = 0;
+      drawTextClip(bx + 16, y, part, 1, TH_TXT, bx + bw - 16);
+      y += 14;
+    }
+    // Botones: aplicar (si hay documento), descartar resultado, volver.
+    int byy = by + bh - 46, bwid = (bw - 36) / 3;
+    for(int i = 0; i < 3; i++){
+      const char* lb = (i == 0) ? "Aplicar" : (i == 1) ? "Eliminar" : "Volver";
+      bool on = (i == 0 && j->src[0] && j->state == CW_DONE);
+      int x = bx + 12 + i * (bwid + 6);
+      fillRoundRect(x, byy, bwid, 38, 12, (i == 0 && on) ? TH_PRIM : thCard());
+      int fs = textW(lb, 2) <= bwid - 10 ? 2 : 1;
+      drawTextC(x + bwid / 2, byy + (38 - (fs == 2 ? 14 : 8)) / 2, lb, fs,
+                (i == 0 && on) ? TH_ONACC : (i == 0 ? TH_MUTE : TH_TXT));
+    }
+    return;
+  }
+  int n = coworkCount();
+  if(n == 0){
+    drawTextC(bx + bw / 2, by + bh / 2 - 10, "No hay tareas", 2, TH_TXT2);
+    drawTextC(bx + bw / 2, by + bh / 2 + 16, "Las que crees apareceran aqu\xC3\xAD", 1, TH_MUTE);
+    return;
+  }
+  int y = by + 6, h = 52;
+  for(int i = 0; i < n && y + h < by + bh; i++){
+    CoworkJob* j = coworkAt(i);
+    if(!j) continue;
+    fillRoundRect(bx + 12, y, bw - 24, h, 12, thCard());
+    drawTextClip(bx + 24, y + 8, j->title[0] ? j->title : coworkKindName(j->kind), 2, TH_TXT, bx + bw - 100);
+    drawTextClip(bx + 24, y + 30, coworkStateName(j->state), 1,
+                 j->state == CW_ERROR ? TH_DANGER : TH_TXT2, bx + bw - 100);
+    if(j->progress != 0xFF && j->state != CW_DONE){
+      char pc[8]; snprintf(pc, sizeof(pc), "%u%%", (unsigned)j->progress);
+      drawTextR(bx + bw - 26, y + 20, pc, 1, TH_TXT2);
+    } else if(j->state == CW_DONE && !j->seen){
+      fillCircle(bx + bw - 30, y + h / 2, 5, TH_PRIM);      // sin ver
+    }
+    y += h + 8;
+  }
+}
+
+// ---- Ajustes de la app ----
+#define AISET_ROWS 11
+static const char* AI_SET_LABEL[AISET_ROWS] = {
+  "Flex Intelligence", "Servidor (HTTPS)", "Identificador", "Token",
+  "Certificado ra\xC3\xADz", "Permitir texto", "Permitir im\xC3\xA1genes",
+  "Permitir archivos", "Solo en el dispositivo", "Autocorregir al escribir",
+  "Al mantener pulsado"
+};
+
+static void aiSetValue(int i, char* out, size_t n){
+  AiConfig* c = aiConfig();
+  switch(i){
+    case 0: snprintf(out, n, "%s", c->enabled ? "Activada" : "Desactivada"); break;
+    case 1: snprintf(out, n, "%s", c->url[0] ? c->url : "Sin configurar"); break;
+    case 2: snprintf(out, n, "%s", c->devId); break;
+    // EL TOKEN NUNCA SE ENSEÑA. Ni entero ni a medias: un token
+    // parcialmente visible sigue siendo material para adivinar el resto,
+    // y de todas formas el usuario no lo necesita para saber si lo puso.
+    case 3: snprintf(out, n, "%s", c->token[0] ? "Guardado" : "Sin token"); break;
+    case 4: snprintf(out, n, "%s", aiHasRootCa() ? "Instalado" : "Falta"); break;
+    case 5: snprintf(out, n, "%s", (c->perms & AI_PERM_TEXT)  ? "S\xC3\xAD" : "No"); break;
+    case 6: snprintf(out, n, "%s", (c->perms & AI_PERM_IMAGE) ? "S\xC3\xAD" : "No"); break;
+    case 7: snprintf(out, n, "%s", (c->perms & AI_PERM_FILES) ? "S\xC3\xAD" : "No"); break;
+    case 8: snprintf(out, n, "%s", c->localOnly ? "S\xC3\xAD" : "No"); break;
+    case 9: snprintf(out, n, "%s", c->autoCorrect ? "S\xC3\xAD" : "No"); break;
+    case 10:snprintf(out, n, "%s", c->openMode == AI_OPEN_APP ? "Aplicaci\xC3\xB3n completa" : "Panel r\xC3\xA1pido"); break;
+    default: out[0] = 0; break;
+  }
+}
+
+static void aiDrawSettings(int bx, int by, int bw, int bh){
+  int y = by + 6 - gAiScroll, h = 46;
+  for(int i = 0; i < AISET_ROWS; i++){
+    if(y + h > by && y < by + bh){
+      fillRoundRect(bx + 12, y, bw - 24, h, 12, thCard());
+      drawTextClip(bx + 24, y + 6, AI_SET_LABEL[i], 2, TH_TXT, bx + bw - 40);
+      char v[AI_URL_MAX]; aiSetValue(i, v, sizeof(v));
+      drawTextClip(bx + 24, y + 27, v, 1,
+                   (i == 4 && !aiHasRootCa()) ? TH_DANGER : TH_TXT2, bx + bw - 30);
+    }
+    y += h + 6;
+  }
+  // Acciones al final: probar conexion y olvidar servidor.
+  for(int k = 0; k < 2; k++){
+    if(y + h > by && y < by + bh){
+      const char* lb = k == 0 ? "Probar conexi\xC3\xB3n" : "Olvidar este servidor";
+      fillRoundRect(bx + 12, y, bw - 24, h, 12, k == 0 ? TH_PRIM : thCard());
+      drawTextC(bx + bw / 2, y + (h - 14) / 2, lb, 2, k == 0 ? TH_ONACC : TH_DANGER);
+    }
+    y += h + 6;
+  }
+  // Nota de privacidad: donde esta el limite, dicho sin rodeos.
+  if(y + 60 > by && y < by + bh){
+    drawTextClip(bx + 16, y + 4,  "Flex Vault no se lee nunca sin que abras", 1, TH_MUTE, bx + bw - 16);
+    drawTextClip(bx + 16, y + 20, "la b\xC3\xB3veda y elijas el archivo a mano.", 1, TH_MUTE, bx + bw - 16);
+    drawTextClip(bx + 16, y + 36, "No se env\xC3\xAD" "an PIN, claves ni registros.", 1, TH_MUTE, bx + bw - 16);
+  }
+  gAiSetMaxScroll = (AISET_ROWS + 2) * (h + 6) + 70 - bh;
+  if(gAiSetMaxScroll < 0) gAiSetMaxScroll = 0;
+}
+
+static void flexAiRender(){
+  setBuf(fb);
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+  fillRect(bx, by, bw, bh, WIN_BG);
+  // Cabecera propia (la app es APP_OWN_TOUCH y pinta su chevron).
+  strokeSegAA(30, by + 22, 18, by + 14, 2.4f, TH_TXT);
+  strokeSegAA(18, by + 14, 30, by + 6,  2.4f, TH_TXT);
+  { int icx = bx + bw / 2 - 66, icy = by + 14;
+    fillCircle(icx, icy, 13, TH_PRIM);
+    nflSparkIcon(icx, icy, 8, TH_ONACC); }
+  drawText(bx + bw / 2 - 46, by + 6, "Flex Intelligence", 2, TH_TXT);
+
+  aiDrawTabs(bx, by + 38, bw);
+  int cy = by + 84, ch = bh - 84;
+  if(gAiKbOn) ch = kbPanelTop() - cy - 6;
+  if(ch < 40) ch = 40;
+
+  switch(gAiTab){
+    case AIT_TOOLS: aiDrawTools(bx, cy, bw, ch); break;
+    case AIT_WORK:  aiDrawWork (bx, cy, bw, ch); break;
+    case AIT_SET:   aiDrawSettings(bx, cy, bw, ch); break;
+    default:        aiDrawChat (bx, cy, bw, ch); break;
+  }
+
+  // Barra de entrada (solo en Asistente y sin teclado abierto).
+  if(gAiTab == AIT_CHAT && !gAiKbOn){
+    int ey = by + bh - 46;
+    fillRoundRect(bx + 12, ey, bw - 84, 38, 19, thCard());
+    drawRoundRect(bx + 12, ey, bw - 84, 38, 19, TH_BORDER);
+    drawTextClip(bx + 26, ey + 12, gAiInputLen ? gAiInput : "Escribe un mensaje...", 1,
+                 gAiInputLen ? TH_TXT : TH_MUTE, bx + bw - 80);
+    fillCircle(bx + bw - 34, ey + 19, 19, TH_PRIM);
+    strokeSegAA(bx + bw - 41, ey + 19, bx + bw - 27, ey + 19, 2.2f, TH_ONACC);
+    strokeSegAA(bx + bw - 33, ey + 12, bx + bw - 27, ey + 19, 2.2f, TH_ONACC);
+    strokeSegAA(bx + bw - 33, ey + 26, bx + bw - 27, ey + 19, 2.2f, TH_ONACC);
+  }
+  if(gAiToast[0] && millis() - gAiToastMs < 2600){
+    int tw = textW(gAiToast, 1) + 28;
+    if(tw > bw - 24) tw = bw - 24;
+    fillRoundRectA(bx + (bw - tw) / 2, by + bh - 92, tw, 30, 15, TH_SURF, 240);
+    drawTextC(bx + bw / 2, by + bh - 82, gAiToast, 1, TH_TXT);
+  }
+  if(gAiKbOn) noteRenderKeyboard(0);
+  flxFlush(by, by + bh - 1);
+}
+
+static void flexAiEnter(){
+  if(!gRelayout){
+    gAiScroll = 0;
+    gAiKbOn   = false;
+    if(!gAiFocusJob) gAiSelJob = -1;
+    gAiFocusJob = 0;
+    aiChatLoad();
+  }
+  flexAiRender();
+}
+
+// Envia lo escrito al asistente. Es un trabajo de Cowork mas: se encola
+// y la respuesta llega por el mismo camino que las demas.
+static void aiSendInput(){
+  if(gAiInputLen == 0) return;
+  aiChatPush(true, gAiInput);
+  if(!aiConfigured()){
+    // No se inventa una respuesta. Se dice exactamente que falta.
+    aiChatPush(false, aiConfig()->localOnly
+                        ? "Est\xC3\xA1s en modo solo local: configura un servidor para conversar."
+                        : "A\xC3\xBAn no hay servidor configurado. Ve a Ajustes > Servidor.");
+  } else {
+    uint32_t id = flexAiSubmit(CW_KIND_ANALYZE, "Consulta", gAiInput, (size_t)gAiInputLen, NULL);
+    if(id) aiChatPush(false, "Trabajando en ello... te aviso al terminar.");
+    else   aiChatPush(false, "No se pudo encolar: la cola est\xC3\xA1 llena.");
+  }
+  gAiInput[0] = 0; gAiInputLen = 0;
+  aiChatSave();
+}
+
+static void flexAiTick(){
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+
+  // Teclado abierto: manda el teclado (misma ruta que usa Notas).
+  if(gAiKbOn){
+    if(T.tap && T.y < kbPanelTop()){ gAiKbOn = false; flexAiRender(); return; }
+    // La escritura la resuelve el teclado comun sobre gAiInput.
+    if(aiKeyboardTick()) flexAiRender();
+    return;
+  }
+
+  // Chevron / atras
+  if(T.tap && T.y <= by + 34 && T.x < 72){
+    if(gAiSelJob >= 0){ gAiSelJob = -1; flexAiRender(); return; }
+    appClose(); return;
+  }
+  if(gNavMode == 0 && T.tap && T.y >= SCR_H - 62 && T.x < SCR_W / 3){
+    if(gAiSelJob >= 0){ gAiSelJob = -1; flexAiRender(); return; }
+    appClose(); return;
+  }
+
+  // Pestanas
+  if(T.tap && T.y >= by + 38 && T.y <= by + 76){
+    int seg = (bw - 24) / AIT_N;
+    int i = (T.x - (bx + 12)) / (seg > 0 ? seg : 1);
+    if(i >= 0 && i < AIT_N && T.x >= bx + 12){
+      gAiTab = i; gAiScroll = 0; gAiSelJob = -1;
+      T.tap = false; flexAiRender(); return;
+    }
+  }
+
+  int cy = by + 84, ch = bh - 84;
+
+  if(gAiTab == AIT_CHAT){
+    int ey = by + bh - 46;
+    if(T.tap && T.y >= ey && T.y <= ey + 38){
+      if(T.x >= bx + bw - 54){ aiSendInput(); flexAiRender(); return; }
+      gAiKbOn = true; kbMtSurfaceReset(); flexAiRender(); return;
+    }
+  } else if(gAiTab == AIT_TOOLS){
+    int y = cy + 26, h = 46;
+    for(int i = 0; i < 6; i++){
+      if(T.tap && T.y >= y && T.y <= y + h){
+        T.tap = false;
+        if(!clipboard[0]){ aiToast("Copia primero el texto que quieras usar"); flexAiRender(); return; }
+        char title[CW_TITLE_MAX];
+        snprintf(title, sizeof(title), "%s (portapapeles)", coworkKindName(AI_TOOL_KIND[i]));
+        uint32_t id = flexAiSubmit(AI_TOOL_KIND[i], title, clipboard, strlen(clipboard), NULL);
+        aiToast(id ? "Tarea creada" : "La cola est\xC3\xA1 llena");
+        gAiTab = AIT_WORK;
+        flexAiRender();
+        return;
+      }
+      y += h + 8;
+    }
+  } else if(gAiTab == AIT_WORK){
+    if(gAiSelJob >= 0 && gAiSelJob < coworkCount()){
+      CoworkJob* j = coworkAt(gAiSelJob);
+      int byy = cy + ch - 46, bwid = (bw - 36) / 3;
+      if(j && T.tap && T.y >= byy && T.y <= byy + 38){
+        int i = (T.x - (bx + 12)) / (bwid + 6);
+        T.tap = false;
+        if(i == 0){
+          if(j->src[0] && j->state == CW_DONE){
+            bool ok = false; flexAiApplyResult(j->id, &ok);
+            aiToast(ok ? "Aplicado" : "No se pudo aplicar");
+          } else aiToast("Este resultado no tiene documento de origen");
+        } else if(i == 1){
+          // ELIMINAR es la tercera accion, distinta de descartar la
+          // tarjeta y de cancelar la tarea: aqui SI desaparece.
+          coworkDelete(j->id); gAiSelJob = -1; gCwDirty = true;
+          aiToast("Resultado eliminado");
+        } else { gAiSelJob = -1; }
+        flexAiRender();
+        return;
+      }
+      return;
+    }
+    int y = cy + 6, h = 52;
+    for(int i = 0; i < coworkCount(); i++){
+      if(T.tap && T.y >= y && T.y <= y + h){
+        CoworkJob* j = coworkAt(i);
+        T.tap = false;
+        if(j){
+          if(j->state == CW_QUEUED || j->state == CW_WORKING || j->state == CW_WAITING || j->state == CW_PREP){
+            // Una tarea ACTIVA se cancela; un resultado se abre. Son
+            // cosas distintas y no comparten boton.
+            coworkCancel(j->id); gCwDirty = true; aiToast("Tarea cancelada");
+          } else {
+            coworkMarkSeen(j->id); gAiSelJob = i;
+          }
+        }
+        flexAiRender();
+        return;
+      }
+      y += h + 8;
+    }
+  } else if(gAiTab == AIT_SET){
+    if(T.swipeUp || T.swipeDown){
+      gAiScroll += T.swipeUp ? 60 : -60;
+      if(gAiScroll < 0) gAiScroll = 0;
+      if(gAiScroll > gAiSetMaxScroll) gAiScroll = gAiSetMaxScroll;
+      T.swipeUp = T.swipeDown = false;
+      flexAiRender(); return;
+    }
+    if(T.tap){
+      int y = cy + 6 - gAiScroll, h = 46;
+      for(int i = 0; i < AISET_ROWS + 2; i++){
+        if(T.y >= y && T.y <= y + h){ T.tap = false; aiSettingsTap(i); flexAiRender(); return; }
+        y += h + 6;
+      }
+    }
+  }
+}
+
+
+// -------------------------------------------------------------
+//  11) EL TECLADO COMUN, APUNTANDO A OTRO TEXTO
+//  -------------------------------------------------------------
+//  Flex Intelligence NO trae su propio teclado. Usa el de Flex OS tal
+//  cual -- multitoque, acentos, capas, chips, corrector -- y lo unico
+//  que hace es CAMBIARLE EL DESTINO: noteBuffer ya era un puntero (lo
+//  es desde que el editor de Notas se mudo a PSRAM), asi que basta con
+//  apuntarlo al buffer de entrada de la app mientras dure la escritura
+//  y devolverlo despues.
+//
+//  Por que asi y no con un teclado propio: un segundo teclado seria un
+//  segundo sitio donde arreglar cada fallo, y el corrector, los chips
+//  y el multitoque tendrian que duplicarse. Reapuntar el destino son
+//  seis lineas y lo hereda todo.
+// -------------------------------------------------------------
+static char*  aiKbSaveBuf = NULL;
+static size_t aiKbSaveMax = 0;
+static int    aiKbSaveCur = 0;
+static bool   aiKbBound   = false;
+
+static void aiKbBind(){
+  if(aiKbBound) return;
+  aiKbSaveBuf = noteBuffer; aiKbSaveMax = noteBufMax; aiKbSaveCur = noteCur;
+  noteBuffer  = gAiInput;   noteBufMax  = sizeof(gAiInput);
+  noteCur     = gAiInputLen;
+  noteSelA = noteSelB = -1;
+  aiKbBound = true;
+}
+static void aiKbUnbind(){
+  if(!aiKbBound) return;
+  gAiInputLen = (int)strlen(gAiInput);
+  noteBuffer = aiKbSaveBuf; noteBufMax = aiKbSaveMax; noteCur = aiKbSaveCur;
+  noteSelA = noteSelB = -1;
+  aiKbBound = false;
+}
+
+// Un paso del teclado dentro de la app. Devuelve true si algo cambio y
+// hay que repintar. Es la MISMA maquinaria que usa Notas: via rapida
+// multitoque si el panel la soporta, y la clasica al soltar si no.
+static bool aiKeyboardTick(){
+  aiKbBind();
+  bool changed = false;
+  // Via rapida (Fase B): la tecla se escribe al TOCAR.
+  int ev = kbMtPoll();
+  for(int e = 0; e < ev; e++){
+    if(kbEvFn[e] >= 0){ noteFuncKey(kbEvFn[e]); changed = true; continue; }
+    int cell = kbEvCell[e];
+    if(cell < 0) continue;
+    int r = cell / KB_COLS, c = cell % KB_COLS;
+    kbPressChar(mapaActivo[r][c]);
+    changed = true;
+  }
+  // Ruta clasica: solo si la rapida no ha demostrado funcionar (si no,
+  // las dos escribirian la misma tecla -- ver kbFastActive).
+  if(!kbFastActive() && T.tap){
+    kbTypingMark();
+    int fn = kbFRowHit(T.x, T.y);
+    if(fn >= 0){ noteFuncKey(fn); changed = true; }
+    else {
+      int chip = kbChipHit(T.x, T.y);
+      if(chip >= 0){ kbApplyChip(chip); changed = true; }
+      else {
+        int cell = kbCellAt(T.x, T.y);
+        if(cell >= 0){
+          int r = cell / KB_COLS, c = cell % KB_COLS;
+          kbPressChar(mapaActivo[r][c]);
+          changed = true;
+        }
+      }
+    }
+  }
+  if(changed){
+    gAiInputLen = (int)strlen(gAiInput);
+    kbChipsBuild();
+    // ENTER envia: es lo que espera cualquiera al escribirle a un
+    // asistente. El salto de linea que noteFuncKey acaba de meter se
+    // quita antes de mandarlo.
+    if(gAiInputLen > 0 && gAiInput[gAiInputLen - 1] == '\n'){
+      gAiInput[--gAiInputLen] = 0;
+      noteCur = gAiInputLen;
+      aiKbUnbind();
+      aiSendInput();
+      gAiKbOn = false;
+      return true;
+    }
+  }
+  return changed;
+}
+
+// -------------------------------------------------------------
+//  12) AJUSTES DE LA APP  ·  toques
+//  -------------------------------------------------------------
+//  Los campos de texto (URL, identificador, token, certificado) se
+//  escriben con el teclado del sistema en una pantalla propia, no aqui:
+//  ver aiFieldOpen. Las casillas se conmutan en el sitio.
+// -------------------------------------------------------------
+static int  gAiField = -1;                 // campo en edicion (-1 = ninguno)
+static char gAiFieldBuf[AI_CA_MAX];
+static char*  aiFieldSaveBuf = NULL;
+static size_t aiFieldSaveMax = 0;
+static int    aiFieldSaveCur = 0;
+
+static void aiFieldOpen(int which){
+  AiConfig* c = aiConfig();
+  gAiField = which;
+  switch(which){
+    case 1: snprintf(gAiFieldBuf, sizeof(gAiFieldBuf), "%s", c->url[0] ? c->url : "https://"); break;
+    case 2: snprintf(gAiFieldBuf, sizeof(gAiFieldBuf), "%s", c->devId); break;
+    // El token y el certificado se editan SIEMPRE en blanco: no se
+    // vuelca lo guardado en un campo visible. Escribir uno nuevo lo
+    // sustituye; dejarlo vacio y aceptar lo borra.
+    case 3: gAiFieldBuf[0] = 0; break;
+    case 4: gAiFieldBuf[0] = 0; break;
+    default: gAiField = -1; return;
+  }
+  aiFieldSaveBuf = noteBuffer; aiFieldSaveMax = noteBufMax; aiFieldSaveCur = noteCur;
+  noteBuffer = gAiFieldBuf; noteBufMax = sizeof(gAiFieldBuf);
+  noteCur = (int)strlen(gAiFieldBuf);
+  noteSelA = noteSelB = -1;
+  kbMtSurfaceReset();
+}
+
+static void aiFieldClose(bool accept){
+  if(gAiField < 0) return;
+  AiConfig* c = aiConfig();
+  if(accept){
+    switch(gAiField){
+      case 1:
+        if(aiValidUrl(gAiFieldBuf)) snprintf(c->url, sizeof(c->url), "%s", gAiFieldBuf);
+        else aiToast("La URL tiene que empezar por https://");
+        break;
+      case 2: snprintf(c->devId, sizeof(c->devId), "%s", gAiFieldBuf); break;
+      case 3: snprintf(c->token, sizeof(c->token), "%s", gAiFieldBuf); break;
+      case 4: aiSetRootCa(gAiFieldBuf);
+              if(gAiFieldBuf[0] && !aiHasRootCa()) aiToast("Eso no parece un certificado PEM");
+              break;
+      default: break;
+    }
+    aiPrefsSave();
+  }
+  // El buffer del campo pudo llevar un token: se pisa, no solo se deja.
+  memset(gAiFieldBuf, 0, sizeof(gAiFieldBuf));
+  noteBuffer = aiFieldSaveBuf; noteBufMax = aiFieldSaveMax; noteCur = aiFieldSaveCur;
+  noteSelA = noteSelB = -1;
+  gAiField = -1;
+}
+
+static void aiSettingsTap(int row){
+  AiConfig* c = aiConfig();
+  switch(row){
+    case 0: c->enabled = !c->enabled; aiPrefsSave(); break;
+    case 1: case 2: case 3: case 4:
+      aiFieldOpen(row); gAiKbOn = true; break;
+    case 5: c->perms ^= AI_PERM_TEXT;  aiPrefsSave(); break;
+    case 6: c->perms ^= AI_PERM_IMAGE; aiPrefsSave(); break;
+    case 7: c->perms ^= AI_PERM_FILES; aiPrefsSave(); break;
+    case 8: c->localOnly = !c->localOnly; aiPrefsSave(); break;
+    case 9:
+      // Autocorregir solo tiene sentido con el corrector encendido.
+      if(!c->autoCorrect && !gKbSpell){ gKbSpell = true; cfgSavePrefs(); }
+      c->autoCorrect = !c->autoCorrect; aiPrefsSave();
+      break;
+    case 10: c->openMode = (c->openMode == AI_OPEN_APP) ? AI_OPEN_PANEL : AI_OPEN_APP; aiPrefsSave(); break;
+    case AISET_ROWS:      // Probar conexion
+      aiToast(aiErrorText(aiSelfTest()));
+      break;
+    case AISET_ROWS + 1:  // Olvidar este servidor
+      aiPrefsForget();
+      aiToast("Servidor olvidado");
+      break;
+    default: break;
+  }
+}
+
 // Puente del modulo OTA. Va AQUI, y no arriba, a proposito: implementa
 // las funciones otaHost* llamando a las primitivas graficas del sistema
 // (fillRect, drawText, present, setBuf...), que son `static` y por tanto
@@ -25562,6 +27727,12 @@ void setup(){
   // la boveda arranca SIEMPRE cerrada y no se descifra nada aqui. Necesita
   // el sistema de archivos montado, por eso va justo despues.
   flexVaultBegin();
+  // FLEX INTELLIGENCE. Va DESPUES de flexFsBegin() y de flexVaultBegin() a
+  // proposito: al arrancar lee de LittleFS el diccionario personal del
+  // corrector y el historial de trabajos terminados, y sin el sistema de
+  // archivos montado esas dos lecturas fallarian en silencio y el usuario
+  // se encontraria con que "se le olvidan" las palabras que acepto.
+  flexAiBegin();
   connBootRestore();              // modo avion guardado (solo lee NVS, no toca radio)
   newsLoad();                     // NOTICIAS: configuracion, credenciales y centro (NVS, no red)
   setBacklight(gBright);          // aplica el brillo guardado
@@ -25654,6 +27825,31 @@ void loop(){
   flexPollTouch();        // (aqui dentro corre tambien el detector de doble-tap de la suspension)
   suspFadeTick();         // SUSPENSION/APAGADO: un paso del fundido de backlight (no bloqueante)
   autoLockTick();         // FASE 1: bloqueo por inactividad (lee T sin filtrar, antes de que nadie consuma el toque)
+  // -----------------------------------------------------------
+  //  FLEX INTELLIGENCE
+  //  ---------------------------------------------------------
+  //  ORDEN, que aqui es todo. Los tres van ANTES que cualquier otro
+  //  consumidor de toques:
+  //
+  //   1. El PANEL, mientras esta abierto, se queda la pantalla entera
+  //      igual que hace el OTA: nada de debajo dibuja ni recibe el
+  //      dedo. La app que hay detras no se entera de que existe.
+  //   2. La TARJETA FLOTANTE se queda el toque solo DENTRO de su area
+  //      (nflHandleTouch devuelve false fuera), asi que un juego sigue
+  //      recibiendo los suyos con una notificacion en pantalla.
+  //   3. La PULSACION LARGA de Inicio / barra de gestos. Va antes que
+  //      cronoOverlayTouch y notifHandleTouch para poder marcar la
+  //      pulsacion como consumida y que nadie mas la vea -- es lo que
+  //      impide que abrir el panel dispare ademas el Inicio.
+  // -----------------------------------------------------------
+  if(flexAiOverlayTick()){
+    flexAiPump();
+    delay(5);
+    return;
+  }
+  nflHandleTouch();
+  flexAiLongPressTick();
+
   cronoOverlayTouch();    // CRONOMETRO: la capsula y su tarjeta se quedan el toque antes que la isla
   notifHandleTouch();     // la isla intercepta toques dentro de sus tarjetas (Fase 1)
   flexOtaTouchBridge();   // OTA: si hay overlay visible, se queda el toque antes que nadie
@@ -25778,6 +27974,8 @@ void loop(){
   uiTick();               // animacion continua del vidrio
   notifTick();            // isla dinamica: anima y compone sobre la pantalla activa (Fase 1)
   cronoCapsuleTick();     // CRONOMETRO: capsula de la barra (solo repinta al cambiar el segundo)
+  flexAiPump();           // COWORK: un paso del motor (no dibuja; solo estado y avisos)
+  nflTick();              // COWORK: tarjeta flotante sobre apps y juegos (capa por encima de todo)
   flexOtaRender();        // OTA: ULTIMA capa del pipeline grafico (nunca toca el fb de una app)
   delay(5);
 }
