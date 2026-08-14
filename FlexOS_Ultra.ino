@@ -5897,9 +5897,16 @@ static bool hpTick(){
   if(!hpDragging) return false;
   if(T.down){
     int dx = T.x - T.startX;
-    // Acotado a una pagina: mas alla no hay nada que enseñar.
-    if(dx >  SCR_W) dx =  SCR_W;
-    if(dx < -SCR_W) dx = -SCR_W;
+    // ACOTADO A UNA PAGINA Y A SU DIRECCION. Lo primero es obvio: mas
+    // alla de una pantalla no hay nada que enseñar. Lo segundo no
+    // tanto: una vez elegida la pagina destino, arrastrar hacia el
+    // OTRO lado dejaria un hueco en pantalla sin nada detras -- la
+    // pagina vecina compuesta esta a un solo lado --, y ese hueco
+    // enseñaria lo que hubiera quedado en el buffer de composicion.
+    // Se acota a cero por ese lado: la pagina se para, no se despega.
+    int dir = (hpTo > hpFrom) ? 1 : -1;
+    if(dir > 0){ if(dx > 0) dx = 0; if(dx < -SCR_W) dx = -SCR_W; }
+    else       { if(dx < 0) dx = 0; if(dx >  SCR_W) dx =  SCR_W; }
     hpDx = dx;
     T.tap = false; T.swipeLeft = false; T.swipeRight = false; T.swipeUp = false; T.swipeDown = false;
     uint32_t now = millis();
@@ -26442,10 +26449,8 @@ static void aiCoworkSave(){
 //  el hilo de UI consulta en flexAiPump(). Es el mismo contrato que
 //  ya cumplen el OTA y las Noticias.
 // -------------------------------------------------------------
-static TaskHandle_t gCwTask   = NULL;
-static volatile bool gCwBusy  = false;
-static volatile bool gCwWake  = false;      // hay trabajo nuevo que mirar
-static volatile uint32_t gCwLocalDone = 0;  // id del ultimo trabajo resuelto EN LOCAL
+static TaskHandle_t gCwTask  = NULL;
+static volatile bool gCwBusy = false;       // la tarea esta con un trabajo ahora mismo
 
 // Corrector LOCAL de un texto entero. Es lo que permite que "Corregir"
 // funcione sin servidor y sin red: se recorre palabra a palabra, se
@@ -26534,7 +26539,6 @@ static void coworkTaskFn(void*){
         CoworkJob* d = coworkFind(id);
         if(d) snprintf(d->err_, sizeof(d->err_), "%d", fixed);   // n de palabras corregidas
         memset(outBuf, 0, sizeof(outBuf));
-        gCwLocalDone = id;
         localOk = true;
       }
 
@@ -27152,6 +27156,19 @@ static bool flexAiOverlayTick(){
 
   int tx = gLand ? T.y : T.x;
   int ty = gLand ? ((SCR_W - 1) - T.x) : T.y;
+
+  // Realimentacion de pulsado: la accion bajo el dedo se resalta
+  // mientras se mantiene. Sin esto, tocar un boton del panel no da
+  // ninguna señal hasta que la accion ya ha ocurrido.
+  if(T.pressed || (!T.down && aiOvSel >= 0)){
+    int was = aiOvSel;
+    aiOvSel = -1;
+    if(T.pressed) for(int i = 0; i < AIOV_ACTS; i++){
+      int ax, ay, aw, ah; aiOvActBox(i, ax, ay, aw, ah);
+      if(tx >= ax && tx <= ax + aw && ty >= ay && ty <= ay + ah){ aiOvSel = i; break; }
+    }
+    if(aiOvSel != was) aiOvDirty = true;
+  }
 
   if(T.tap){
     int bx, by, bw, bh; aiOvBox(bx, by, bw, bh);

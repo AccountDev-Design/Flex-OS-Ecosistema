@@ -70,9 +70,6 @@ static void cwCopy(char* dst, size_t cap, const char* src){
   dst[l] = 0;
 }
 
-static inline bool cwLive(const CoworkJob* j){
-  return j->state != CW_CANCELLED;
-}
 static inline bool cwFinished(const CoworkJob* j){
   return j->state == CW_DONE || j->state == CW_ERROR || j->state == CW_CANCELLED;
 }
