@@ -132,6 +132,27 @@ struct CoworkJob {
 };
 
 // -------------------------------------------------------------
+//  EXCLUSION ENTRE TAREAS
+//  -------------------------------------------------------------
+//  El motor lo tocan DOS hilos: el de la interfaz (encolar, cancelar,
+//  borrar, pintar la lista) y el de fondo, que hace el trabajo. Compactar
+//  la cola al borrar un elemento MUEVE las estructuras de sitio, asi que
+//  sin proteccion el hilo de fondo podria estar leyendo el snapshot de un
+//  trabajo justo cuando el otro lo desplaza.
+//
+//  El candado no se crea aqui: este modulo no conoce FreeRTOS y tiene que
+//  seguir compilando en el PC. Se le PASA -- dos funciones -- y el motor
+//  las llama alrededor de todo lo que toca la cola. Sin candado puesto,
+//  las llamadas son punteros nulos y no se hace nada: exactamente el
+//  comportamiento de siempre, que es lo que quieren las pruebas de host
+//  (un solo hilo).
+//
+//  IMPORTANTE: el candado tiene que ser RECURSIVO. Hay caminos que se
+//  anidan de verdad -- coworkPump() llama a coworkFail() --, y con un
+//  mutex normal eso seria un interbloqueo instantaneo.
+void coworkSetLock(void (*lock)(void), void (*unlock)(void));
+
+// -------------------------------------------------------------
 //  CICLO DE VIDA
 // -------------------------------------------------------------
 

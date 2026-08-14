@@ -80,6 +80,13 @@ uint32_t ulTaskNotifyTake(BaseType_t, TickType_t){ return 0; }
 BaseType_t xTaskNotifyGive(TaskHandle_t){ return pdTRUE; }
 UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t){ return 1024; }
 SemaphoreHandle_t xSemaphoreCreateMutex(){ return (SemaphoreHandle_t)1; }
+// Mutex recursivo: lo usa el candado del motor de trabajos. Aqui no
+// simula exclusion ninguna -- las pruebas corren en un hilo -- pero
+// tiene que existir para enlazar, y devolver pdTRUE es exactamente lo
+// que hace un mutex libre.
+SemaphoreHandle_t xSemaphoreCreateRecursiveMutex(){ return (SemaphoreHandle_t)1; }
+BaseType_t xSemaphoreTakeRecursive(SemaphoreHandle_t, TickType_t){ return pdTRUE; }
+BaseType_t xSemaphoreGiveRecursive(SemaphoreHandle_t){ return pdTRUE; }
 SemaphoreHandle_t xSemaphoreCreateBinary(){ return (SemaphoreHandle_t)1; }
 BaseType_t xSemaphoreTake(SemaphoreHandle_t, TickType_t){ return pdTRUE; }
 BaseType_t xSemaphoreGive(SemaphoreHandle_t){ return pdTRUE; }

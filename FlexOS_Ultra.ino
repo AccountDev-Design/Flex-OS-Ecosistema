@@ -26452,6 +26452,26 @@ static void aiCoworkSave(){
 static TaskHandle_t gCwTask  = NULL;
 static volatile bool gCwBusy = false;       // la tarea esta con un trabajo ahora mismo
 
+// EXCLUSION HILO DE UI <-> HILO DE FONDO. El motor de trabajos lo tocan
+// los dos: la interfaz encola, cancela, borra y pinta la lista, y la
+// tarea de fondo lee el snapshot y escribe el resultado. Borrar un
+// trabajo COMPACTA la cola -- mueve las estructuras de sitio --, asi que
+// sin esto la tarea podria estar leyendo un snapshot justo cuando la UI
+// lo desplaza. La ventana es de microsegundos, pero las dos tareas viven
+// en el mismo nucleo y se pueden interrumpir.
+//
+// RECURSIVO, y no un mutex normal: hay caminos que se anidan de verdad
+// (coworkPump llama a coworkFail), y con un mutex normal eso seria un
+// interbloqueo instantaneo la primera vez que un trabajo agota su
+// tiempo maximo.
+//
+// Es un candado PROPIO, no flxFbMux: ese protege el framebuffer contra
+// la DMA del panel, y prestarselo aqui pondria a la tarea de fondo a
+// competir con el presenter -- justo lo contrario de lo que se busca.
+static SemaphoreHandle_t gCwMux = NULL;
+static void cwMuxLock(){   if(gCwMux) xSemaphoreTakeRecursive(gCwMux, portMAX_DELAY); }
+static void cwMuxUnlock(){ if(gCwMux) xSemaphoreGiveRecursive(gCwMux); }
+
 // Corrector LOCAL de un texto entero. Es lo que permite que "Corregir"
 // funcione sin servidor y sin red: se recorre palabra a palabra, se
 // corrige solo lo que tiene confianza alta y se cuenta cuantas se
@@ -26683,6 +26703,11 @@ static void flexAiBegin(){
   gCwSlots = (CoworkJob*)heap_caps_malloc(sizeof(CoworkJob) * CW_MAX_JOBS,
                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if(gCwSlots){
+    // El candado se crea y se conecta ANTES de tocar la cola y, sobre
+    // todo, antes de crear la tarea de fondo: en cuanto esa tarea
+    // arranca ya puede haber dos hilos dentro del motor.
+    gCwMux = xSemaphoreCreateRecursiveMutex();
+    coworkSetLock(cwMuxLock, cwMuxUnlock);
     coworkAttachStorage(gCwSlots, CW_MAX_JOBS);
     aiCoworkLoad();
     // Prioridad 1 en el NUCLEO 1: el mismo sitio que el resto de tareas

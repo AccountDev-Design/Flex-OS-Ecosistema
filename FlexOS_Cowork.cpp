@@ -16,12 +16,24 @@
 //  dentro: en un sistema que ya tiene la PSRAM repartida entre
 //  framebuffers, quien decide donde vive esto es el .ino.
 // =============================================================
+// Candado que pone el llamante (ver coworkSetLock en la cabecera). Sin
+// el, las dos llamadas son nulas y el motor se comporta exactamente como
+// antes: es lo que quieren las pruebas de host, que corren en un hilo.
+static void (*gCwLock)(void)   = NULL;
+static void (*gCwUnlock)(void) = NULL;
+static inline void cwLock(){   if(gCwLock)   gCwLock();   }
+static inline void cwUnlock(){ if(gCwUnlock) gCwUnlock(); }
+
+void coworkSetLock(void (*lock)(void), void (*unlock)(void)){
+  gCwLock = lock; gCwUnlock = unlock;
+}
+
 static CoworkJob* gCw    = NULL;
 static int        gCwCap = 0;
 static int        gCwN   = 0;
 static uint32_t   gCwSeq = 0;      // siguiente id; nunca vuelve atras
 
-void coworkBegin(){
+void cwI_coworkBegin(){
   gCwN = 0;
   // El contador de ids NO se reinicia a proposito: dentro de una
   // sesion, un id que ya se uso no se vuelve a usar aunque se vacie
@@ -31,7 +43,7 @@ void coworkBegin(){
   if(gCw && gCwCap > 0) memset(gCw, 0, sizeof(CoworkJob) * (size_t)gCwCap);
 }
 
-void coworkAttachStorage(CoworkJob* slots, int n){
+void cwI_coworkAttachStorage(CoworkJob* slots, int n){
   gCw    = slots;
   gCwCap = (slots && n > 0) ? n : 0;
   if(gCwCap > CW_MAX_JOBS) gCwCap = CW_MAX_JOBS;
@@ -106,7 +118,7 @@ static bool cwMakeRoom(){
 // =============================================================
 //  ENCOLAR
 // =============================================================
-uint32_t coworkSubmit(uint8_t kind, const char* title,
+uint32_t cwI_coworkSubmit(uint8_t kind, const char* title,
                       const char* in, size_t inLen,
                       const char* src, uint32_t srcHash,
                       uint32_t budgetMs, uint32_t nowMs){
@@ -140,26 +152,26 @@ uint32_t coworkSubmit(uint8_t kind, const char* title,
 // =============================================================
 //  CONSULTA
 // =============================================================
-int coworkCount(){ return gCwN; }
+int cwI_coworkCount(){ return gCwN; }
 
-CoworkJob* coworkAt(int i){
+CoworkJob* cwI_coworkAt(int i){
   if(!coworkReady() || i < 0 || i >= gCwN) return NULL;
   return &gCw[i];
 }
 
-CoworkJob* coworkFind(uint32_t id){
+CoworkJob* cwI_coworkFind(uint32_t id){
   if(!coworkReady() || id == 0) return NULL;
   for(int i = 0; i < gCwN; i++) if(gCw[i].id == id) return &gCw[i];
   return NULL;
 }
 
-int coworkActiveCount(){
+int cwI_coworkActiveCount(){
   int n = 0;
   for(int i = 0; i < gCwN; i++) if(!cwFinished(&gCw[i])) n++;
   return n;
 }
 
-int coworkUnseenCount(){
+int cwI_coworkUnseenCount(){
   int n = 0;
   for(int i = 0; i < gCwN; i++) if(gCw[i].state == CW_DONE && !gCw[i].seen) n++;
   return n;
@@ -193,7 +205,7 @@ const char* coworkKindName(uint8_t kind){
   }
 }
 
-CoworkJob* coworkNextForNetwork(uint32_t nowMs){
+CoworkJob* cwI_coworkNextForNetwork(uint32_t nowMs){
   if(!coworkReady()) return NULL;
   // UNA sola operacion pesada de red a la vez: si ya hay alguien
   // trabajando o esperando al servidor, no se saca a nadie mas.
@@ -212,7 +224,7 @@ CoworkJob* coworkNextForNetwork(uint32_t nowMs){
 // =============================================================
 //  CONTROL
 // =============================================================
-bool coworkCancel(uint32_t id){
+bool cwI_coworkCancel(uint32_t id){
   CoworkJob* j = coworkFind(id);
   if(!j) return false;
   if(j->state == CW_DONE || j->state == CW_CANCELLED) return false;
@@ -227,7 +239,7 @@ bool coworkCancel(uint32_t id){
   return true;
 }
 
-bool coworkPause(uint32_t id, uint8_t why){
+bool cwI_coworkPause(uint32_t id, uint8_t why){
   CoworkJob* j = coworkFind(id);
   if(!j) return false;
   if(cwFinished(j)) return false;
@@ -241,7 +253,7 @@ bool coworkPause(uint32_t id, uint8_t why){
   return true;
 }
 
-bool coworkResume(uint32_t id){
+bool cwI_coworkResume(uint32_t id){
   CoworkJob* j = coworkFind(id);
   if(!j || j->state != CW_PAUSED) return false;
   j->state    = CW_QUEUED;
@@ -249,14 +261,14 @@ bool coworkResume(uint32_t id){
   return true;
 }
 
-bool coworkMarkSeen(uint32_t id){
+bool cwI_coworkMarkSeen(uint32_t id){
   CoworkJob* j = coworkFind(id);
   if(!j) return false;
   j->seen = true;
   return true;
 }
 
-bool coworkDelete(uint32_t id){
+bool cwI_coworkDelete(uint32_t id){
   if(!coworkReady()) return false;
   for(int i = 0; i < gCwN; i++){
     if(gCw[i].id != id) continue;
@@ -269,7 +281,7 @@ bool coworkDelete(uint32_t id){
   return false;
 }
 
-void coworkPauseAll(uint8_t why){
+void cwI_coworkPauseAll(uint8_t why){
   for(int i = 0; i < gCwN; i++){
     CoworkJob* j = &gCw[i];
     if(cwFinished(j) || j->state == CW_PAUSED) continue;
@@ -278,7 +290,7 @@ void coworkPauseAll(uint8_t why){
   }
 }
 
-void coworkResumeAll(uint8_t why){
+void cwI_coworkResumeAll(uint8_t why){
   for(int i = 0; i < gCwN; i++){
     CoworkJob* j = &gCw[i];
     // Solo los pausados POR ESE motivo: si el usuario paro una tarea
@@ -289,7 +301,7 @@ void coworkResumeAll(uint8_t why){
   }
 }
 
-bool coworkAnyPaused(uint8_t why){
+bool cwI_coworkAnyPaused(uint8_t why){
   for(int i = 0; i < gCwN; i++)
     if(gCw[i].state == CW_PAUSED && gCw[i].pauseWhy == why) return true;
   return false;
@@ -298,7 +310,7 @@ bool coworkAnyPaused(uint8_t why){
 // =============================================================
 //  TRANSICIONES QUE DISPARA EL TRABAJADOR
 // =============================================================
-void coworkBeginWork(uint32_t id, uint32_t nowMs){
+void cwI_coworkBeginWork(uint32_t id, uint32_t nowMs){
   CoworkJob* j = coworkFind(id);
   if(!j || cwFinished(j) || j->state == CW_PAUSED) return;
   if(j->startMs == 0) j->startMs = nowMs;
@@ -306,21 +318,21 @@ void coworkBeginWork(uint32_t id, uint32_t nowMs){
   j->progress = 0;
 }
 
-void coworkWaitServer(uint32_t id, uint32_t nowMs){
+void cwI_coworkWaitServer(uint32_t id, uint32_t nowMs){
   CoworkJob* j = coworkFind(id);
   if(!j || cwFinished(j) || j->state == CW_PAUSED) return;
   if(j->startMs == 0) j->startMs = nowMs;
   j->state = CW_WAITING;
 }
 
-void coworkProgress(uint32_t id, uint8_t pct){
+void cwI_coworkProgress(uint32_t id, uint8_t pct){
   CoworkJob* j = coworkFind(id);
   if(!j || cwFinished(j)) return;
   if(pct != 0xFF && pct > 100) pct = 100;
   j->progress = pct;
 }
 
-void coworkFinish(uint32_t id, const char* out, size_t outLen,
+void cwI_coworkFinish(uint32_t id, const char* out, size_t outLen,
                   uint32_t srcHashNow, bool needsConfirm, uint32_t nowMs){
   CoworkJob* j = coworkFind(id);
   if(!j || j->state == CW_CANCELLED) return;
@@ -355,7 +367,7 @@ static bool cwRetryable(uint8_t e){
   return e == CW_ERR_NONET || e == CW_ERR_HTTP || e == CW_ERR_TIMEOUT || e == CW_ERR_MEM;
 }
 
-void coworkFail(uint32_t id, uint8_t errCode, const char* msg, uint32_t nowMs){
+void cwI_coworkFail(uint32_t id, uint8_t errCode, const char* msg, uint32_t nowMs){
   CoworkJob* j = coworkFind(id);
   if(!j || j->state == CW_CANCELLED) return;
   j->tries++;
@@ -387,7 +399,7 @@ void coworkFail(uint32_t id, uint8_t errCode, const char* msg, uint32_t nowMs){
 // =============================================================
 //  AVANCE
 // =============================================================
-int coworkPump(uint32_t nowMs){
+int cwI_coworkPump(uint32_t nowMs){
   if(!coworkReady()) return 0;
   int changed = 0;
   for(int i = 0; i < gCwN; i++){
@@ -430,7 +442,7 @@ static uint32_t cwGet32(const uint8_t* p){
   return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-size_t coworkExport(uint8_t* out, size_t n){
+size_t cwI_coworkExport(uint8_t* out, size_t n){
   if(!out || n < 12 || !coworkReady()) return 0;
   size_t o = 0;
   cwPut32(out + o, CW_BLOB_MAGIC);   o += 4;
@@ -461,7 +473,7 @@ size_t coworkExport(uint8_t* out, size_t n){
   return o;
 }
 
-bool coworkImport(const uint8_t* blob, size_t n){
+bool cwI_coworkImport(const uint8_t* blob, size_t n){
   if(!coworkReady() || !blob || n < 12) return false;
   if(cwGet32(blob) != CW_BLOB_MAGIC) return false;
   if(cwGet32(blob + 4) != CW_BLOB_VERSION) return false;
@@ -518,4 +530,186 @@ bool coworkImport(const uint8_t* blob, size_t n){
   // equivocado.
   gCwSeq = maxId;
   return true;
+}
+
+// =============================================================
+//  ENVOLTURAS CON CANDADO
+//  -------------------------------------------------------------
+//  Todo lo publico pasa por aqui. Las funciones de arriba (cwI_*) son
+//  la logica y NO tocan el candado, asi que pueden llamarse entre
+//  ellas sin pensar en el anidamiento; el candado se toma una sola vez,
+//  en el borde del modulo.
+//
+//  Las CONSULTAS tambien van protegidas, y no por exceso de celo:
+//  coworkAt() y coworkFind() devuelven un PUNTERO a una estructura que
+//  el otro hilo puede estar desplazando al compactar la cola. Leer el
+//  indice sin candado es exactamente la carrera que hay que cerrar.
+//
+//  Sin candado puesto (pruebas de host, un solo hilo) esto son dos
+//  llamadas a punteros nulos: coste cero.
+// =============================================================
+void coworkBegin(){
+  cwLock();
+  cwI_coworkBegin();
+  cwUnlock();
+}
+
+void coworkAttachStorage(CoworkJob* slots, int n){
+  cwLock();
+  cwI_coworkAttachStorage(slots, n);
+  cwUnlock();
+}
+
+uint32_t coworkSubmit(uint8_t kind, const char* title, const char* in, size_t inLen, const char* src, uint32_t srcHash, uint32_t budgetMs, uint32_t nowMs){
+  cwLock();
+  uint32_t r = cwI_coworkSubmit(kind, title, in, inLen, src, srcHash, budgetMs, nowMs);
+  cwUnlock();
+  return r;
+}
+
+CoworkJob* coworkNextForNetwork(uint32_t nowMs){
+  cwLock();
+  CoworkJob* r = cwI_coworkNextForNetwork(nowMs);
+  cwUnlock();
+  return r;
+}
+
+bool coworkCancel(uint32_t id){
+  cwLock();
+  bool r = cwI_coworkCancel(id);
+  cwUnlock();
+  return r;
+}
+
+bool coworkPause(uint32_t id, uint8_t why){
+  cwLock();
+  bool r = cwI_coworkPause(id, why);
+  cwUnlock();
+  return r;
+}
+
+bool coworkResume(uint32_t id){
+  cwLock();
+  bool r = cwI_coworkResume(id);
+  cwUnlock();
+  return r;
+}
+
+bool coworkDelete(uint32_t id){
+  cwLock();
+  bool r = cwI_coworkDelete(id);
+  cwUnlock();
+  return r;
+}
+
+void coworkPauseAll(uint8_t why){
+  cwLock();
+  cwI_coworkPauseAll(why);
+  cwUnlock();
+}
+
+void coworkResumeAll(uint8_t why){
+  cwLock();
+  cwI_coworkResumeAll(why);
+  cwUnlock();
+}
+
+void coworkBeginWork(uint32_t id, uint32_t nowMs){
+  cwLock();
+  cwI_coworkBeginWork(id, nowMs);
+  cwUnlock();
+}
+
+void coworkWaitServer(uint32_t id, uint32_t nowMs){
+  cwLock();
+  cwI_coworkWaitServer(id, nowMs);
+  cwUnlock();
+}
+
+void coworkProgress(uint32_t id, uint8_t pct){
+  cwLock();
+  cwI_coworkProgress(id, pct);
+  cwUnlock();
+}
+
+void coworkFinish(uint32_t id, const char* out, size_t outLen, uint32_t srcHashNow, bool needsConfirm, uint32_t nowMs){
+  cwLock();
+  cwI_coworkFinish(id, out, outLen, srcHashNow, needsConfirm, nowMs);
+  cwUnlock();
+}
+
+void coworkFail(uint32_t id, uint8_t errCode, const char* msg, uint32_t nowMs){
+  cwLock();
+  cwI_coworkFail(id, errCode, msg, nowMs);
+  cwUnlock();
+}
+
+int coworkPump(uint32_t nowMs){
+  cwLock();
+  int r = cwI_coworkPump(nowMs);
+  cwUnlock();
+  return r;
+}
+
+size_t coworkExport(uint8_t* out, size_t n){
+  cwLock();
+  size_t r = cwI_coworkExport(out, n);
+  cwUnlock();
+  return r;
+}
+
+bool coworkImport(const uint8_t* blob, size_t n){
+  cwLock();
+  bool r = cwI_coworkImport(blob, n);
+  cwUnlock();
+  return r;
+}
+
+bool coworkMarkSeen(uint32_t id){
+  cwLock();
+  bool r = cwI_coworkMarkSeen(id);
+  cwUnlock();
+  return r;
+}
+
+CoworkJob* coworkAt(int i){
+  cwLock();
+  CoworkJob* r = cwI_coworkAt(i);
+  cwUnlock();
+  return r;
+}
+
+CoworkJob* coworkFind(uint32_t id){
+  cwLock();
+  CoworkJob* r = cwI_coworkFind(id);
+  cwUnlock();
+  return r;
+}
+
+int coworkCount(){
+  cwLock();
+  int r = cwI_coworkCount();
+  cwUnlock();
+  return r;
+}
+
+int coworkActiveCount(){
+  cwLock();
+  int r = cwI_coworkActiveCount();
+  cwUnlock();
+  return r;
+}
+
+int coworkUnseenCount(){
+  cwLock();
+  int r = cwI_coworkUnseenCount();
+  cwUnlock();
+  return r;
+}
+
+bool coworkAnyPaused(uint8_t why){
+  cwLock();
+  bool r = cwI_coworkAnyPaused(why);
+  cwUnlock();
+  return r;
 }
