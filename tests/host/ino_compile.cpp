@@ -153,6 +153,7 @@ static void geoEnterSelect();
 static void testPanelRapido();
 static void testNoticias();
 static void testCajaApps();
+static void testCronometro();
 static int gFails = 0;
 static void chk(bool ok, const char* what){
   if(!ok){ printf("  FALLO: %s\n", what); gFails++; }
@@ -642,6 +643,171 @@ static void testCajaApps(){
   if(!gFails) printf("  Caja de aplicaciones: todas las comprobaciones pasan.\n");
 }
 
+
+// #############################################################
+//  PRUEBAS DEL CRONOMETRO
+//  ------------------------------------------------------------
+//  El modelo de tiempo del cronometro es aritmetica pura sobre
+//  millis(), asi que se puede comprobar DE VERDAD en el PC con el
+//  reloj virtual: lo que se verifica aqui es exactamente lo que el
+//  modulo promete -- que el tiempo sale del acumulado y no de un
+//  contador por frame, que el desbordamiento de millis() no lo
+//  rompe, que la lista de vueltas nunca se sale de su array y que
+//  la capsula reserva un ancho estable (de eso depende que pueda
+//  repintarse encima de si misma sin restaurar el fondo).
+// #############################################################
+static void cronoTestReset(){
+  gTestMs = 100000;
+  cronoReset();
+  gCronoCard = CC_HIDDEN;
+  gCronoCapOn = false;
+}
+static void testCronometro(){
+  printf("Cronometro\n");
+  cronoTestReset();
+  char b[16];
+
+  // --- estado inicial ---
+  chk(!cronoActive(),           "de fabrica el cronometro esta inactivo");
+  chk(cronoElapsed() == 0,      "y marca cero");
+  chk(cronoCurLapNo() == 1,     "la primera vuelta es la 1");
+
+  // --- el tiempo sale de millis(), no de un contador por frame ---
+  cronoStart();
+  gTestMs += 12345;
+  chk(cronoElapsed() == 12345,  "corriendo: el tiempo es millis() - t0");
+  gTestMs += 1;                 // un solo frame mas: nada de acumular a mano
+  chk(cronoElapsed() == 12346,  "avanza con el reloj, no con el numero de cuadros");
+
+  // --- pausa: consolida y CONGELA ---
+  cronoPause();
+  chk(gCronoSt == CRONO_PAUSE,  "pausado");
+  gTestMs += 500000;            // medio minuto largo parado
+  chk(cronoElapsed() == 12346,  "en pausa el tiempo no avanza");
+  chk(cronoActive(),            "pausado sigue contando como activo (capsula visible)");
+
+  // --- reanudar: no se pierde ni se regala tiempo ---
+  cronoStart();
+  gTestMs += 1000;
+  chk(cronoElapsed() == 13346,  "al continuar se suma sobre lo acumulado");
+
+  // --- vueltas: parcial y total ---
+  cronoTestReset();
+  cronoStart();
+  gTestMs += 32180; cronoLapMark();       // vuelta 1
+  gTestMs += 13410; cronoLapMark();       // vuelta 2
+  gTestMs +=  2230; cronoLapMark();       // vuelta 3
+  gTestMs +=  2500; cronoLapMark();       // vuelta 4
+  chk(gCronoNLaps == 4,                        "cuatro vueltas guardadas");
+  chk(gCronoLaps[0].split == 32180,            "parcial de la vuelta 1");
+  chk(gCronoLaps[1].split == 13410,            "parcial de la vuelta 2");
+  chk(gCronoLaps[3].total == 50320,            "total acumulado de la vuelta 4");
+  chk(cronoCurLapNo() == 5,                    "la vuelta en curso es la 5");
+  chk(gCronoBest  == 2,                        "la mas rapida es la 3 (indice 2)");
+  chk(gCronoWorst == 0,                        "la mas lenta es la 1 (indice 0)");
+  gTestMs += 5410;
+  chk(cronoLapElapsed() == 5410,               "la vuelta en curso cuenta desde la ultima marca");
+
+  // --- con menos de tres vueltas NO se colorea nada ---
+  cronoTestReset(); cronoStart();
+  gTestMs += 1000; cronoLapMark();
+  gTestMs += 2000; cronoLapMark();
+  chk(gCronoBest < 0 && gCronoWorst < 0, "con dos vueltas no hay mejor ni peor");
+
+  // --- lista llena: se descarta la mas antigua, nunca se desborda ---
+  cronoTestReset(); cronoStart();
+  for(int i = 0; i < CRONO_MAX_LAPS + 7; i++){ gTestMs += 1000 + i; cronoLapMark(); }
+  chk(gCronoNLaps == CRONO_MAX_LAPS,  "la lista se queda en su tope");
+  chk(gCronoLap0 == 8,                "el indice 0 pasa a ser la vuelta 8");
+  chk(cronoCurLapNo() == CRONO_MAX_LAPS + 8, "la numeracion visible nunca retrocede");
+  bool crece = true;
+  for(int i = 1; i < (int)gCronoNLaps; i++)
+    if(gCronoLaps[i].total <= gCronoLaps[i-1].total) crece = false;
+  chk(crece, "los totales guardados siguen ordenados tras compactar");
+  chk(gCronoBest >= 0 && gCronoBest < (int)gCronoNLaps,   "el indice de la mejor vuelta esta dentro del array");
+  chk(gCronoWorst >= 0 && gCronoWorst < (int)gCronoNLaps, "el indice de la peor vuelta esta dentro del array");
+
+  // --- DESBORDAMIENTO DE millis() ---
+  // Se arranca justo antes de la vuelta del contador de 32 bits y se coloca el
+  // reloj virtual en el valor YA desbordado. La resta sin signo tiene que dar
+  // el intervalo real, no un salto de 49 dias.
+  cronoTestReset();
+  gTestMs = 0xFFFFF000UL;                       // 4096 ms para desbordar
+  cronoStart();
+  gTestMs = 115904UL;                           // (0xFFFFF000 + 120000) mod 2^32
+  chk(cronoElapsed() == 120000UL, "el cronometro cruza el desbordamiento de millis()");
+  cronoLapMark();
+  chk(gCronoNLaps == 1 && gCronoLaps[0].split == 120000UL,
+      "la vuelta marcada al cruzar el desbordamiento es correcta");
+  gTestMs += 30000;
+  cronoPause();
+  chk(cronoElapsed() == 150000UL, "y la pausa consolida el total correcto");
+
+  // --- formateador unico ---
+  cronoFmt(b, sizeof(b), 0, true);            chk(!strcmp(b, "00:00.00"), "formato 0 con centesimas");
+  cronoFmt(b, sizeof(b), 55730, true);        chk(!strcmp(b, "00:55.73"), "formato MM:SS.cc");
+  cronoFmt(b, sizeof(b), 72870, true);        chk(!strcmp(b, "01:12.87"), "formato de la referencia");
+  cronoFmt(b, sizeof(b), 72870, false);       chk(!strcmp(b, "01:12"),    "formato compacto (sin centesimas)");
+  cronoFmt(b, sizeof(b), 3723456UL, true);    chk(!strcmp(b, "1:02:03.45"), "mas de una hora, con centesimas");
+  cronoFmt(b, sizeof(b), 3723456UL, false);   chk(!strcmp(b, "1:02:03"),    "mas de una hora, compacto");
+
+  // --- la capsula reserva un ancho ESTABLE dentro de su clase de formato ---
+  cronoTestReset(); cronoStart();
+  gTestMs += 1000;      int w1 = cronoCapsuleW();
+  gTestMs += 3540000UL; int w2 = cronoCapsuleW();     // 59:01, sigue en MM:SS
+  chk(w1 == w2, "el ancho de la capsula no depende de los digitos (se repinta sobre si misma)");
+  gTestMs += 120000UL;  int w3 = cronoCapsuleW();     // ya pasa de 1 h -> H:MM:SS
+  chk(w3 > w2, "al pasar de una hora la capsula CRECE (la nueva tapa a la vieja)");
+  chk(cronoCapsuleRight() <= SCR_W - 66 - 12,
+      "la capsula nunca invade el Wi-Fi ni la bateria");
+
+  // --- la capsula no se dibuja donde no debe ---
+  gState = ST_LOCK;  chk(cronoBarSurface() == 0, "en el bloqueo no hay capsula");
+  gState = ST_HOME; gLand = true;
+  chk(cronoBarSurface() == 0, "en Modo PC (horizontal) tampoco");
+  gLand = false; editMode = true;
+  chk(cronoBarSurface() == 0, "en Modo Edicion tampoco");
+  editMode = false;
+  chk(cronoBarSurface() == 1, "en el escritorio si (superficie homeBuf + fb)");
+  gState = ST_APP; gAppId = IC_RELOJ;
+  chk(cronoBarSurface() == 2, "y en el marco estandar de una app tambien");
+  gAppId = IC_PAINT;                                   // APP_CUSTOM_HEADER
+  chk(cronoBarSurface() == 0, "una app con cabecera propia conserva su esquina");
+  gAppId = 0; gState = ST_HOME;
+
+  // --- tarjeta expandida: subsistema propio, NO la isla de notificaciones ---
+  int notifAntes = gNotifCount;
+  setBuf(fb);
+  cronoBarClock(16, TH_ONWALL);                        // deja gCronoCapX/On coherentes
+  chk(gCronoCapOn, "con el cronometro activo la barra pinta la capsula");
+  cronoCardOpen();
+  chk(cronoCardVisible(), "la capsula abre la tarjeta");
+  chk(gNotifCount == notifAntes, "la tarjeta NO se encola en gNotifs[]");
+  // La animacion termina sola por tiempo, sin delay() de por medio.
+  for(int i = 0; i < 20 && gCronoCard != CC_OPEN; i++){ gTestMs += 20; cronoCardTick(); }
+  chk(gCronoCard == CC_OPEN, "la expansion termina por tiempo (sin delay)");
+  gTestMs += 60000;
+  cronoCardTick();
+  chk(cronoCardVisible(), "es PERSISTENTE: no caduca a los 5 s como una notificacion");
+  cronoCardClose();
+  for(int i = 0; i < 20 && gCronoCard != CC_HIDDEN; i++){ gTestMs += 20; cronoCardTick(); }
+  chk(gCronoCard == CC_HIDDEN, "la contraccion termina y libera la pantalla");
+  // Si otra pantalla se adueña del fb, la tarjeta se retira sin restaurar nada.
+  cronoCardOpen();
+  chk(cronoCardVisible(), "se puede volver a abrir (los buffers se reutilizan)");
+  gState = ST_LOCK;
+  cronoCardTick();
+  chk(!cronoCardVisible(), "al bloquearse la pantalla la tarjeta se retira sola");
+  gState = ST_HOME;
+
+  // --- reinicio: todo a cero y la capsula desaparece ---
+  cronoReset();
+  chk(!cronoActive() && gCronoNLaps == 0 && cronoElapsed() == 0 && gCronoLap0 == 1,
+      "reiniciar deja el cronometro como recien arrancado");
+  cronoTestReset();
+  if(!gFails) printf("  Cronometro: todas las comprobaciones pasan.\n");
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -708,6 +874,7 @@ int main(){
   testPanelRapido();
   testNoticias();
   testCajaApps();
+  testCronometro();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }
