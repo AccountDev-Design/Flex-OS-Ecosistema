@@ -3947,9 +3947,21 @@ static void arcStroke(float cx, float cy, float r, float a0, float a1, int thick
   }
 }
 
+// IC_FLEXAI (Flex Intelligence) va AL FINAL, con el id 16. Que sea el
+// ultimo no es estetica: el id de una app ES su indice en APP_REG y
+// tambien su bit en gAppFav / gAppHidden / gAppLock, que estan
+// guardados en NVS desde la primera version. Insertarla en medio
+// correria los ids de todas las de despues y una placa que actualice
+// se encontraria los candados, las favoritas y el orden del escritorio
+// aplicados a OTRAS apps. Al final, lo guardado sigue significando
+// exactamente lo mismo.
 enum { IC_RELOJ, IC_GALERIA, IC_MULTIMEDIA, IC_ALMACEN, IC_MODOPC, IC_NOTAS,
        IC_EDU, IC_NAV, IC_CODE, IC_BIEN, IC_PAINT, IC_JUEGOS,
-       IC_AJUSTES, IC_CALC, IC_CALEND, IC_CAMARA };
+       IC_AJUSTES, IC_CALC, IC_CALEND, IC_CAMARA, IC_FLEXAI };
+// Numero de apps del registro. Existe para que "16" deje de estar
+// escrito a mano en catorce bucles: anadir la siguiente app es cambiar
+// este numero y su fila de APP_REG, no ir a buscarlos uno por uno.
+#define APP_N 17
 
 static void iconBase(int x, int y, int S, uint16_t bg, int rf100){
   int r = S * rf100 / 100;
@@ -4109,6 +4121,34 @@ static void drawAppIcon(int id, int x, int y, int S){
       fillCircle(cx, cy, (int)(S * 0.16f), rgb565(60,72,95));
       fillCircle(cx - (int)(S * 0.06f), cy - (int)(S * 0.06f), (int)(S * 0.05f), rgb565(150,175,205));
       fillRoundRect(x + (int)(S * 0.66f), y + (int)(S * 0.18f), (int)(S * 0.10f), (int)(S * 0.06f), 2, rgb565(190,190,195));
+    } break;
+    case IC_FLEXAI: {
+      // FLEX INTELLIGENCE. Un destello de cuatro puntas sobre fondo
+      // indigo, con dos chispas menores. Es una forma propia y no una
+      // "estrellita de IA" generica: se dibuja con las mismas
+      // primitivas que el resto (triangulos y circulos), asi que
+      // escala igual de bien a 64 px en el dock que a 88 px en el
+      // marco de la app, y hereda el estilo Vidrio como las demas.
+      iconBase(x, y, S, rgb565(78,66,196), 22);
+      uint16_t sp = rgb565(232,236,255);
+      // Destello principal: cuatro triangulos con la punta hacia
+      // fuera y la base en el centro. Con la base estrecha (S*0.13)
+      // las cuatro puntas se juntan en una sola figura de brazos
+      // concavos, que es lo que da la forma de destello en vez de
+      // una cruz gruesa.
+      { float R = S * 0.30f, B = S * 0.13f;
+        fillTriangle(cx, cy - R, cx - B, cy, cx + B, cy, sp);      // arriba
+        fillTriangle(cx, cy + R, cx - B, cy, cx + B, cy, sp);      // abajo
+        fillTriangle(cx - R, cy, cx, cy - B, cx, cy + B, sp);      // izquierda
+        fillTriangle(cx + R, cy, cx, cy - B, cx, cy + B, sp); }    // derecha
+      // Dos chispas: la grande arriba-derecha, la pequena abajo-izq.
+      { float r2 = S * 0.115f, b2 = S * 0.045f;
+        int ax = cx + (int)(S * 0.27f), ay = cy - (int)(S * 0.26f);
+        fillTriangle(ax, ay - r2, ax - b2, ay, ax + b2, ay, sp);
+        fillTriangle(ax, ay + r2, ax - b2, ay, ax + b2, ay, sp);
+        fillTriangle(ax - r2, ay, ax, ay - b2, ax, ay + b2, sp);
+        fillTriangle(ax + r2, ay, ax, ay - b2, ax, ay + b2, sp); }
+      fillCircle(cx - (int)(S * 0.26f), cy + (int)(S * 0.26f), (int)(S * 0.045f), rgb565(190,200,250));
     } break;
   }
 }
@@ -4494,7 +4534,7 @@ static bool gBootCleanOff = false;                    // este arranque viene de 
 // IDENTIFICADOR UNICO de cada FlexApp ya es su indice en APP_REG (0..15, el
 // mismo que usan homeOrder[], drawAppIcon() y enterApp()), y 16 apps caben
 // exactas en un uint16_t. Un solo getInt/putInt, cero snprintf de claves.
-static uint16_t gAppLock = 0;                         // bit i = app i bloqueada (NVS "applockm")
+static uint32_t gAppLock = 0;                         // bit i = app i bloqueada (NVS "applockm")
 // ---- CAJA DE APLICACIONES: visibilidad y favoritas -----------------------
 // Mismo criterio que gAppLock: un bit por app, indexado por su id (= indice en
 // APP_REG), un solo entero en NVS. gAppFav dice que apps se ven en el
@@ -4503,11 +4543,11 @@ static uint16_t gAppLock = 0;                         // bit i = app i bloqueada
 // homeOrderLoad() -- ambos ANTES del bloque de la caja -- ya los necesitan.
 // El valor de fabrica (todas favoritas, ninguna oculta) se calcula en
 // drawerRegistryDefaults() a partir del campo 'dflt' de APP_REG.
-static uint16_t gAppFav    = 0x0FFF;                  // bit i = app i en el escritorio (NVS "appfav")
-static uint16_t gAppHidden = 0;                       // bit i = app i oculta        (NVS "apphide")
+static uint32_t gAppFav    = 0x0FFF;                  // bit i = app i en el escritorio (NVS "appfav")
+static uint32_t gAppHidden = 0;                       // bit i = app i oculta        (NVS "apphide")
 #define HOME_EMPTY 0xFF                               // ranura vacia en homeOrder[]
-static inline bool appIsFav(int id){    return (id >= 0 && id < 16) && (gAppFav    & (uint16_t)(1u << id)) != 0; }
-static inline bool appIsHidden(int id){ return (id >= 0 && id < 16) && (gAppHidden & (uint16_t)(1u << id)) != 0; }
+static inline bool appIsFav(int id){    return (id >= 0 && id < APP_N) && (gAppFav    & (uint32_t)(1u << id)) != 0; }
+static inline bool appIsHidden(int id){ return (id >= 0 && id < APP_N) && (gAppHidden & (uint32_t)(1u << id)) != 0; }
 // Ajustes NUNCA se puede ocultar: es la unica pantalla desde la que se
 // recupera el resto del sistema, y una caja sin Ajustes deja al usuario sin
 // salida. La fila del menu contextual se dibuja atenuada, no desaparece.
@@ -4713,12 +4753,12 @@ static void lockFailsSave(){
 // ---- FASE 2: candado por app (bitmask indexado por indice de APP_REG) ----
 static bool appLockGet(int id){
   if(!APPLOCK_ON || id < 0 || id > 15) return false;
-  return (gAppLock & (uint16_t)(1u << id)) != 0;
+  return (gAppLock & (uint32_t)(1u << id)) != 0;
 }
 static void appLockSet(int id, bool on){
   if(id < 0 || id > 15) return;
-  if(on) gAppLock |=  (uint16_t)(1u << id);
-  else   gAppLock &= (uint16_t)~(1u << id);
+  if(on) gAppLock |=  (uint32_t)(1u << id);
+  else   gAppLock &= (uint32_t)~(1u << id);
   prefs.begin("flexos", false);
   prefs.putInt("applockm", (int)gAppLock);
   prefs.end();
@@ -4790,7 +4830,7 @@ static const char* CH[S_NSTR][5] = {
 static const char* t(int id){ return CH[id][LI()]; }
 
 // Etiquetas de apps. Mismo orden que el enum IC_*.
-static const char* APP[16][5] = {
+static const char* APP[APP_N][5] = {
   {"Reloj","Clock","Horloge","Rel\xC3\xB3gio","Orologio"},
   {"Galer\xC3\xAD" "a","Gallery","Galerie","Galeria","Galleria"},
   {"Multimedia","Media","Multim\xC3\xA9" "dia","Multim\xC3\xAD" "dia","Multimedia"},
@@ -4807,6 +4847,9 @@ static const char* APP[16][5] = {
   {"Calculadora","Calculator","Calculatrice","Calculadora","Calcolatrice"},
   {"Calendario","Calendar","Calendrier","Calend\xC3\xA1rio","Calendario"},
   {"C\xC3\xA1mara","Camera","Appareil","C\xC3\xA2mera","Fotocamera"},
+  // Flex Intelligence NO se traduce: es el nombre de la funcion, igual
+  // que "Code IDE" o "Modo PC" se quedan como estan en las cinco lenguas.
+  {"Flex Intelligence","Flex Intelligence","Flex Intelligence","Flex Intelligence","Flex Intelligence"},
 };
 static const char* appName(int id){ return APP[id][LI()]; }
 
@@ -5111,7 +5154,26 @@ static int  lockOff = 0, lastLockOff = -1;
 static int  oobeSel = 0;
 static int  gAppId  = 0;
 static bool editMode = false;                                   // Modo Edicion del Home
-static uint8_t homeOrder[12] = { 0,1,2,3,4,5,6,7,8,9,10,11 };   // app id por slot (reordenable)
+// #############################################################
+// ##  ESCRITORIO POR PAGINAS
+// ##  ------------------------------------------------------
+// ##  Los tres circulos de debajo de la rejilla llevaban ahi desde el
+// ##  Milestone 1, pero solo el primero se pintaba encendido: no habia
+// ##  segunda pagina que mostrar. Ahora si la hay, y son EXACTAMENTE
+// ##  esas tres: la rejilla pasa de 12 ranuras a 3x12 = 36.
+// ##
+// ##  COMPATIBILIDAD CON LO YA GUARDADO: la clave NVS "hord" media 12
+// ##  bytes. Al leerla se migra -- esos 12 bytes son la PAGINA 0 y las
+// ##  otras dos nacen vacias -- asi que una placa que actualice se
+// ##  encuentra su escritorio exactamente como lo dejo, con sus
+// ##  iconos en sus sitios, y las apps nuevas caen solas en la
+// ##  pagina 2. Ni un icono se mueve.
+// #############################################################
+#define HOME_PAGES 3
+#define HOME_SLOTS 12                                  // ranuras por pagina (rejilla 4x3)
+#define HOME_TOTAL (HOME_PAGES * HOME_SLOTS)
+static uint8_t homeOrder[HOME_TOTAL] = { 0,1,2,3,4,5,6,7,8,9,10,11 };  // app id por ranura (reordenable)
+static int     gHomePage = 0;                          // pagina visible (0..HOME_PAGES-1)
 static bool gMinChanged = false;   // lo pone loop(): true cuando cambia el minuto
 
 // ---- Invalidacion de caches de pantalla ----
@@ -5498,10 +5560,70 @@ static void drawHomeWidgets(uint32_t tm){
   for(int i = 0; i < 4; i++){ int ix = dkx + 16 + i * (dS + dgap), iy = dky + (dkh - dS) / 2; drawAppIcon(12 + i, ix, iy, dS); }
 }
 
-static void renderHome(){
-  drawWallpaper(homeBuf, true); setBuf(homeBuf);
-  gHomeDirty = false;                      // homeBuf ya refleja los ajustes actuales
-  qsDirty    = true;                       // la cortina se compone de homeBuf: invalidar su cache
+// GEOMETRIA DE LA REJILLA. Estaba repetida como numeros sueltos en
+// renderHome, hitHomeIcon, edSlotXY, edSlotAt y getIconRect: cinco
+// copias de "24, 212, 120, 112, 72" que habia que cambiar a la vez o
+// dejar iconos que se ven en un sitio y responden en otro. Ahora sale
+// de aqui, y la banda de la rejilla (HOME_BAND_*) es ademas lo unico
+// que hay que recomponer al pasar de pagina.
+#define HOME_ICON_S   72
+#define HOME_GX0      24
+#define HOME_GY0      212
+#define HOME_COLSTEP  120
+#define HOME_ROWSTEP  112
+#define HOME_DOTS_Y   (HOME_GY0 + 2 * HOME_ROWSTEP + HOME_ICON_S + 34)   // 542
+// Franja que cambia al pasar de pagina: rejilla + etiquetas + puntos.
+// Todo lo de arriba (barra de estado, widgets) y lo de abajo (dock,
+// barra de navegacion) es identico en las tres paginas, asi que el
+// deslizamiento solo mueve esta banda -- ni un pixel mas.
+#define HOME_BAND_TOP (HOME_GY0 - 6)                                     // 206
+#define HOME_BAND_BOT (HOME_DOTS_Y + 18)                                 // 560
+#define HOME_BAND_H   (HOME_BAND_BOT - HOME_BAND_TOP)
+
+static inline void homeSlotXY(int slot, int &x, int &y){
+  int c = slot % 4, r = slot / 4;
+  x = HOME_GX0 + c * HOME_COLSTEP;
+  y = HOME_GY0 + r * HOME_ROWSTEP;
+}
+
+// Dibuja la rejilla de UNA pagina en el buffer activo. No limpia el
+// fondo: quien llama ya puso ahi el wallpaper.
+static void homeDrawGrid(int page, int xoff){
+  if(page < 0 || page >= HOME_PAGES) return;
+  for(int i = 0; i < HOME_SLOTS; i++){
+    uint8_t id = homeOrder[page * HOME_SLOTS + i];
+    if(id == HOME_EMPTY) continue;
+    int ix, iy; homeSlotXY(i, ix, iy);
+    ix += xoff;
+    // Fuera de pantalla del todo: ni se dibuja. Durante el arrastre
+    // esto ahorra la mitad de los iconos en cuanto la pagina lleva
+    // medio recorrido, que es justo cuando mas hay que ir rapido.
+    if(ix + HOME_ICON_S < 0 || ix > SCR_W) continue;
+    drawAppIcon(id, ix, iy, HOME_ICON_S);
+    drawTextC(ix + HOME_ICON_S / 2, iy + HOME_ICON_S + 6, appName(id), 2, TH_ONWALL);
+  }
+}
+
+// Los tres puntos. El activo va opaco y algo mas gordo; los otros,
+// tenues. Con `frac` (0..1 del recorrido hacia `to`) el punto se
+// desplaza CON el dedo en vez de saltar al soltar: es el detalle que
+// hace que el indicador se sienta parte del gesto y no un aviso
+// posterior.
+static void homeDrawDots(int from, int to, float frac){
+  int n = HOME_PAGES;
+  int x0 = SCR_W / 2 - (n - 1) * 9;
+  for(int i = 0; i < n; i++) fillCircleA(x0 + i * 18, HOME_DOTS_Y, 4, TH_ONWALL, 110);
+  float pos = (float)from + ((float)(to - from)) * frac;
+  int   cx  = (int)(x0 + pos * 18.0f + 0.5f);
+  fillCircleA(cx, HOME_DOTS_Y, 5, TH_ONWALL, 255);
+}
+
+// Compone el escritorio de `page` ENTERO en `dst`. Es la funcion que
+// antes se llamaba renderHome y solo sabia de una pagina.
+static void renderHomeInto(uint16_t* dst, int page){
+  if(!dst) return;
+  uint16_t* old = gBuf;
+  drawWallpaper(dst, true); setBuf(dst);
   // barra de estado. La hora y la capsula del cronometro salen de la MISMA
   // funcion (cronoBarClock) que usa el marco de las apps: es el unico sitio
   // donde se decide esa geometria, asi que las dos barras no pueden divergir.
@@ -5513,22 +5635,11 @@ static void renderHome(){
   newsBadge(TH_ONWALL);                    // noticias sin leer: punto discreto con el contador
   // widgets (clima, noticias) + dock: estilo Liquid Glass o plano
   drawHomeWidgets(millis());
-  // rejilla de apps 4x3
-  int S = 72, gx0 = 24, gy0 = 212, rowStep = 112;
-  // Solo las apps FAVORITAS. homeOrder[] puede tener ranuras vacias
-  // (HOME_EMPTY) desde que existe la Caja de aplicaciones: quitar una app de
-  // Inicio deja su hueco, no recoloca el resto de la rejilla.
-  if(!editMode) for(int i = 0; i < 12; i++){                    // en Modo Edicion los pinta edRender()
-    if(homeOrder[i] == HOME_EMPTY) continue;
-    int c = i % 4, r = i / 4;
-    int ix = gx0 + c * 120, iy = gy0 + r * rowStep;
-    drawAppIcon(homeOrder[i], ix, iy, S);
-    drawTextC(ix + S / 2, iy + S + 6, appName(homeOrder[i]), 2, TH_ONWALL);
-  }
-  // puntos de pagina
-  int dotsY = gy0 + 2 * rowStep + S + 34;
-  for(int i = 0; i < 3; i++)
-    fillCircleA(SCR_W / 2 - 18 + i * 18, dotsY, 4, TH_ONWALL, i == 0 ? 255 : 110);
+  // rejilla de apps 4x3 de ESTA pagina. homeOrder[] puede tener ranuras
+  // vacias (HOME_EMPTY) desde que existe la Caja de aplicaciones: quitar una
+  // app de Inicio deja su hueco, no recoloca el resto de la rejilla.
+  if(!editMode) homeDrawGrid(page, 0);     // en Modo Edicion los pinta edRender()
+  homeDrawDots(page, page, 0.0f);
   // barra de navegacion: botones clasicos o barra de gestos (modo iOS)
   if(gNavMode == 0){
     int ny = SCR_H - 52; uint16_t nv = TH_ONWALL;
@@ -5540,16 +5651,22 @@ static void renderHome(){
   } else {
     drawHomeIndicator(SCR_H, 220);                                        // barra de gestos
   }
+  setBuf(old);
+}
+
+static void renderHome(){
+  gHomeDirty = false;                      // homeBuf ya refleja los ajustes actuales
+  qsDirty    = true;                       // la cortina se compone de homeBuf: invalidar su cache
+  renderHomeInto(homeBuf, gHomePage);
   setBuf(fb);
 }
 static void showHome(){ blitToFb(homeBuf); flxFlushAll(); }
 static bool hitHomeIcon(int px, int py, int &id){
-  int S = 72, gx0 = 24, gy0 = 212, rowStep = 112;
-  for(int i = 0; i < 12; i++){
-    if(homeOrder[i] == HOME_EMPTY) continue;     // hueco: no hay nada que tocar ahi
-    int c = i % 4, r = i / 4;
-    int ix = gx0 + c * 120, iy = gy0 + r * rowStep;
-    if(px >= ix - 6 && px <= ix + S + 6 && py >= iy && py <= iy + S + 16){ id = homeOrder[i]; return true; }
+  for(int i = 0; i < HOME_SLOTS; i++){
+    uint8_t a = homeOrder[gHomePage * HOME_SLOTS + i];
+    if(a == HOME_EMPTY) continue;          // hueco: no hay nada que tocar ahi
+    int ix, iy; homeSlotXY(i, ix, iy);
+    if(px >= ix - 6 && px <= ix + HOME_ICON_S + 6 && py >= iy && py <= iy + HOME_ICON_S + 16){ id = a; return true; }
   }
   int dkx = 24, dky = SCR_H - 176, dkw = SCR_W - 48, dkh = 96, dS = 64, inner = dkw - 32, dgap = (inner - 4 * dS) / 3;
   for(int i = 0; i < 4; i++){
@@ -5557,6 +5674,215 @@ static bool hitHomeIcon(int px, int py, int &id){
     if(px >= ix && px <= ix + dS && py >= iy && py <= iy + dS){ id = 12 + i; return true; }
   }
   return false;
+}
+
+// #############################################################
+// ##  DESLIZAMIENTO ENTRE PAGINAS DEL ESCRITORIO
+// ##  ------------------------------------------------------
+// ##  COMO NO SE HACE: recomponer el escritorio entero en cada frame
+// ##  del arrastre. Serian dos wallpapers, dos juegos de widgets con
+// ##  su Liquid Glass y hasta 24 iconos vectoriales por cuadro -- muy
+// ##  lejos de poder seguir al dedo.
+// ##
+// ##  COMO SE HACE: se aprovecha que las dos paginas comparten TODO
+// ##  menos la rejilla. La barra de estado, los widgets, el dock y la
+// ##  barra de navegacion son identicos, asi que:
+// ##
+// ##    · la pagina vecina se compone UNA sola vez, al empezar el
+// ##      gesto, en su propio lienzo de PSRAM (hpBuf);
+// ##    · cada frame del arrastre son DOS memcpy por fila dentro de
+// ##      la banda de la rejilla [HOME_BAND_TOP, HOME_BAND_BOT) --
+// ##      un trozo de homeBuf y otro de hpBuf, cada uno desplazado--,
+// ##      mas los tres puntos redibujados encima;
+// ##    · el resto de la pantalla NI SE TOCA: fuera de esa banda, fb
+// ##      ya es correcto.
+// ##
+// ##  Es el mismo criterio que ya usan drwPage en la Caja de
+// ##  aplicaciones y la banda de la isla de notificaciones: componer
+// ##  una vez, mover memoria despues.
+// ##
+// ##  SIN PSRAM PARA hpBuf no hay animacion, pero SI hay cambio de
+// ##  pagina: se salta directo a la pagina destino. Se degrada, no se
+// ##  rompe.
+// #############################################################
+#define HP_DRAG_MIN     18        // px que hay que recorrer para que esto sea un arrastre de pagina
+#define HP_SETTLE_MS   190        // duracion del acomodo al soltar
+#define HP_FLICK_MS    320        // por debajo de esto, un gesto corto cuenta como golpe seco
+#define HP_FLICK_PX     42        // ...y con esta distancia minima
+static uint16_t* hpBuf     = NULL;     // lienzo de la pagina VECINA, ya compuesto
+static int       hpBufPage = -1;       // que pagina hay compuesta ahi
+static bool      hpDragging = false;
+static int       hpDx      = 0;        // desplazamiento actual del dedo (px, + = hacia la derecha)
+static int       hpFrom = 0, hpTo = 0; // paginas implicadas
+static bool      hpSettling = false;
+static uint32_t  hpSettleT0 = 0;
+static int       hpSettleFrom = 0;     // dx del que arranca el acomodo
+static int       hpSettleTo   = 0;     // dx al que llega (0 = se queda, -+SCR_W = cambia)
+static uint32_t  hpFrameMs = 0;
+
+static bool hpEnsureBuf(){
+  if(hpBuf) return true;
+  hpBuf = (uint16_t*)heap_caps_aligned_alloc(64, (size_t)SCR_W * SCR_H * 2,
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  hpBufPage = -1;
+  return hpBuf != NULL;
+}
+
+// Deja compuesta en hpBuf la pagina `page`. Devuelve false si no hay
+// PSRAM: el llamante entonces cambia de pagina sin animar.
+static bool hpPrepare(int page){
+  if(page < 0 || page >= HOME_PAGES) return false;
+  if(!hpEnsureBuf()) return false;
+  if(hpBufPage == page) return true;      // ya esta: ir y volver no recompone
+  renderHomeInto(hpBuf, page);
+  hpBufPage = page;
+  return true;
+}
+
+// Un frame del arrastre/acomodo. `dx` es lo que se ha movido la pagina
+// ACTUAL; la vecina va pegada a su lado.
+static void hpRenderFrame(int dx){
+  if(!homeBuf) return;
+  setBuf(bbuf);
+  gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
+  int dir = (hpTo > hpFrom) ? 1 : -1;     // +1 = la vecina entra por la derecha
+  int nx  = dx + dir * SCR_W;             // desplazamiento de la vecina
+  for(int y = HOME_BAND_TOP; y < HOME_BAND_BOT; y++){
+    uint16_t* row = bbuf + (size_t)y * SCR_W;
+    // Pagina actual, desplazada dx.
+    const uint16_t* src = homeBuf + (size_t)y * SCR_W;
+    int s0 = dx < 0 ? -dx : 0;                       // primera columna de origen visible
+    int d0 = dx > 0 ?  dx : 0;                       // donde cae en pantalla
+    int wA = SCR_W - (dx < 0 ? -dx : dx);
+    if(wA > 0) memcpy(row + d0, src + s0, (size_t)wA * 2);
+    // Pagina vecina, desplazada nx. Solo si hay lienzo compuesto.
+    if(hpBuf && hpBufPage == hpTo){
+      const uint16_t* srcB = hpBuf + (size_t)y * SCR_W;
+      int b0 = nx < 0 ? -nx : 0;
+      int e0 = nx > 0 ?  nx : 0;
+      int wB = SCR_W - (nx < 0 ? -nx : nx);
+      if(wB > 0 && e0 < SCR_W){
+        if(e0 + wB > SCR_W) wB = SCR_W - e0;
+        memcpy(row + e0, srcB + b0, (size_t)wB * 2);
+      }
+    }
+  }
+  // Los puntos NO se desplazan con las paginas: se quedan fijos y lo
+  // que se mueve es cual esta encendido. Van encima de la banda ya
+  // compuesta, asi que hay que repintar su fondo primero -- que es la
+  // fila de la pagina de origen sin desplazar.
+  { int y0 = HOME_DOTS_Y - 8, y1 = HOME_DOTS_Y + 10;
+    for(int y = y0; y <= y1 && y < HOME_BAND_BOT; y++)
+      memcpy(bbuf + (size_t)y * SCR_W, homeBuf + (size_t)y * SCR_W, (size_t)SCR_W * 2); }
+  { float frac = (float)(dx < 0 ? -dx : dx) / (float)SCR_W;
+    if(frac > 1.0f) frac = 1.0f;
+    homeDrawDots(hpFrom, hpTo, frac); }
+  present(HOME_BAND_TOP, HOME_BAND_BOT - 1);
+  setBuf(fb);
+}
+
+// Salta a `page` sin animar (sin PSRAM, o desde la Caja de apps).
+static void homeGoPage(int page){
+  if(page < 0) page = 0;
+  if(page >= HOME_PAGES) page = HOME_PAGES - 1;
+  if(page == gHomePage) return;
+  gHomePage = page;
+  renderHome();
+  showHome();
+}
+
+// Empieza un arrastre si el gesto lo es de verdad. Devuelve true si a
+// partir de ahora el toque es suyo.
+static bool hpTryStart(){
+  if(hpDragging || hpSettling || editMode) return false;
+  if(!T.down) return false;
+  int dx = T.x - T.startX, dy = T.y - T.startY;
+  int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
+  // Horizontal DE VERDAD: mas del doble que la componente vertical.
+  // Sin esta condicion, el gesto de abrir la Caja de aplicaciones
+  // (hacia arriba, casi nunca perfectamente recto) empezaria a
+  // arrastrar la pagina en cuanto se torciera un poco.
+  if(adx < HP_DRAG_MIN || adx < ady * 2) return false;
+  // Solo dentro de la banda de la rejilla: sobre los widgets, el dock
+  // o la barra de navegacion el gesto sigue siendo de quien era.
+  if(T.startY < HOME_BAND_TOP || T.startY >= HOME_BAND_BOT) return false;
+  int to = gHomePage + (dx < 0 ? 1 : -1);
+  if(to < 0 || to >= HOME_PAGES){
+    // Borde: no hay pagina a ese lado. No se arrastra -- ni siquiera
+    // con resistencia: el escritorio tiene tres paginas y fingir que
+    // hay una cuarta a medias solo confunde.
+    return false;
+  }
+  hpFrom = gHomePage; hpTo = to;
+  if(!hpPrepare(to)) return false;
+  hpDragging = true;
+  hpDx = dx;
+  return true;
+}
+
+// Arranca el acomodo hacia `settle` (0 = vuelve, +-SCR_W = cambia).
+static void hpStartSettle(int settle){
+  hpDragging   = false;
+  hpSettling   = true;
+  hpSettleT0   = millis();
+  hpSettleFrom = hpDx;
+  hpSettleTo   = settle;
+}
+
+// Un paso del deslizamiento. Devuelve true mientras se quede el toque
+// y la pantalla.
+static bool hpTick(){
+  if(hpSettling){
+    // Acomodo por TIEMPO, no por pasos: a 30 o a 60 fps dura lo mismo.
+    uint32_t e = millis() - hpSettleT0;
+    if(e >= HP_SETTLE_MS){
+      hpSettling = false;
+      if(hpSettleTo != 0){
+        gHomePage = hpTo;
+        // AQUI NO SE COPIA NI SE REDIBUJA NADA: se INTERCAMBIAN los dos
+        // punteros. hpBuf ya tiene compuesta la pagina destino y homeBuf
+        // tiene compuesta la de origen, que es exactamente lo que hace
+        // falta cachear para la vuelta. Un swap de punteros en vez de
+        // 768 KB de memcpy -- y sobre todo en vez de recomponer
+        // wallpaper, widgets, dock e iconos justo en el ultimo frame de
+        // la animacion, que es donde mas se notaria el tiron.
+        if(hpBuf && hpBufPage == hpTo){
+          uint16_t* t = homeBuf; homeBuf = hpBuf; hpBuf = t;
+          hpBufPage = hpFrom;
+          qsDirty = true;      // la cortina se compone de homeBuf: su cache ya no vale
+        } else renderHome();
+      }
+      showHome();
+      return true;
+    }
+    float p = (float)e / (float)HP_SETTLE_MS;
+    float q = 1.0f - p; q = 1.0f - q * q * q;      // ease-out cubica, la del resto del sistema
+    hpRenderFrame(hpSettleFrom + (int)((hpSettleTo - hpSettleFrom) * q));
+    return true;
+  }
+  if(!hpDragging) return false;
+  if(T.down){
+    int dx = T.x - T.startX;
+    // Acotado a una pagina: mas alla no hay nada que enseñar.
+    if(dx >  SCR_W) dx =  SCR_W;
+    if(dx < -SCR_W) dx = -SCR_W;
+    hpDx = dx;
+    T.tap = false; T.swipeLeft = false; T.swipeRight = false; T.swipeUp = false; T.swipeDown = false;
+    uint32_t now = millis();
+    if(now - hpFrameMs >= 16){ hpFrameMs = now; hpRenderFrame(hpDx); }   // ~60 fps como techo
+    return true;
+  }
+  // Soltar: se acomoda a la pagina mas cercana, salvo que el gesto
+  // haya sido un golpe seco -- corto pero rapido --, que cuenta como
+  // intencion de cambiar aunque no haya llegado a la mitad.
+  int adx = hpDx < 0 ? -hpDx : hpDx;
+  unsigned long dur = millis() - T.downMs;
+  bool flick  = (dur < HP_FLICK_MS && adx > HP_FLICK_PX);
+  bool change = flick || adx > SCR_W / 4;
+  int dir = (hpTo > hpFrom) ? 1 : -1;
+  hpStartSettle(change ? -dir * SCR_W : 0);
+  T.tap = false; T.released = false; T.swipeLeft = false; T.swipeRight = false;
+  return true;
 }
 
 // ---------------- Desbloqueo con fisica (composicion) ----------------
@@ -5647,7 +5973,13 @@ static unsigned long edHoverMs = 0, edMs = 0;
 // por frame ni desde un bucle. Sin String: buffers fijos.
 static void homeOrderSave(){
   prefs.begin("flexos", false);
-  prefs.putBytes("hord", homeOrder, 12);
+  // Clave NUEVA ("hordp") para las 36 ranuras. La vieja ("hord", 12
+  // bytes) se deja INTACTA a proposito: si el usuario vuelve a una
+  // version anterior del firmware por USB, se encuentra su escritorio
+  // de una pagina tal cual estaba en vez de una clave con un tamano
+  // que esa version no sabe leer.
+  prefs.putBytes("hordp", homeOrder, HOME_TOTAL);
+  prefs.putInt("appn", APP_N);          // cuantas apps conocia este firmware (ver homeOrderLoad)
   prefs.putInt("appfav",  (int)gAppFav);
   prefs.putInt("apphide", (int)gAppHidden);
   prefs.end();
@@ -5656,6 +5988,9 @@ static void homeOrderSave(){
 // sitio donde se declara que apps nacen en el escritorio. APP_REG esta definido
 // mas abajo en el archivo, asi que esto se declara aqui y se define alli.
 static void drawerRegistryDefaults();
+// Aplica el valor de fabrica SOLO a las apps con id >= fromId. Se define
+// junto a APP_REG (mas abajo) porque de ahi sale el campo 'dflt'.
+static void drawerRegistryAdopt(int fromId);
 // Deja homeOrder[] y los bitmasks en un estado COHERENTE pase lo que pase con
 // lo que hubiera en NVS (version anterior del firmware, prefs corruptas, una
 // app retirada del registro). Reglas, en este orden:
@@ -5664,51 +5999,94 @@ static void drawerRegistryDefaults();
 //   3. si ya no quedan huecos, se le quita la marca de favorita (el escritorio
 //      tiene 12 ranuras y no puede mentir sobre cuantas caben).
 static void homeOrderNormalize(){
-  bool seen[16] = { false };
-  for(int i = 0; i < 12; i++){
+  bool seen[APP_N] = { false };
+  for(int i = 0; i < HOME_TOTAL; i++){
     uint8_t v = homeOrder[i];
-    if(v >= 16 || seen[v] || !appIsFav(v) || appIsHidden(v)){ homeOrder[i] = HOME_EMPTY; continue; }
+    if(v >= APP_N || seen[v] || !appIsFav(v) || appIsHidden(v)){ homeOrder[i] = HOME_EMPTY; continue; }
     seen[v] = true;
   }
-  for(int id = 0; id < 16; id++){
+  // Toda app favorita sin ranura ocupa el PRIMER hueco libre, recorriendo
+  // las paginas en orden. Con la pagina 1 llena -- que es como esta hoy un
+  // escritorio de fabrica -- Flex Intelligence cae sola en la primera
+  // ranura de la pagina 2, sin mover ni un icono de los que ya estaban.
+  for(int id = 0; id < APP_N; id++){
     if(!appIsFav(id) || appIsHidden(id) || seen[id]) continue;
     int slot = -1;
-    for(int i = 0; i < 12 && slot < 0; i++) if(homeOrder[i] == HOME_EMPTY) slot = i;
-    if(slot < 0){ gAppFav &= (uint16_t)~(1u << id); continue; }   // escritorio lleno
+    for(int i = 0; i < HOME_TOTAL && slot < 0; i++) if(homeOrder[i] == HOME_EMPTY) slot = i;
+    if(slot < 0){ gAppFav &= (uint32_t)~(1u << id); continue; }   // escritorio lleno de verdad
     homeOrder[slot] = (uint8_t)id; seen[id] = true;
   }
 }
 static void homeOrderLoad(){
   prefs.begin("flexos", true);
-  size_t n = prefs.getBytes("hord", homeOrder, 12);
+  // Primero la clave nueva (36 ranuras). Si no existe, se MIGRA la
+  // vieja de 12 bytes: esos doce iconos son la pagina 0 y las otras
+  // dos nacen vacias. Asi una placa que actualiza conserva su
+  // escritorio exactamente como estaba.
+  size_t n = prefs.getBytes("hordp", homeOrder, HOME_TOTAL);
+  if(n != HOME_TOTAL){
+    uint8_t legacy[HOME_SLOTS];
+    size_t ln = prefs.getBytes("hord", legacy, HOME_SLOTS);
+    for(int i = 0; i < HOME_TOTAL; i++) homeOrder[i] = HOME_EMPTY;
+    if(ln == HOME_SLOTS){
+      for(int i = 0; i < HOME_SLOTS; i++) homeOrder[i] = legacy[i];
+      n = HOME_TOTAL;                       // migrada: cuenta como valida
+    }
+  }
   // -1 como valor por defecto hace de centinela de "la clave no existe": un
   // bitmask valido siempre cae en 0..0xFFFF, asi que no hay ambiguedad. Se
   // prefiere a isKey() para no depender de una API que no esta en todos los
   // cores de ESP32.
   int fav  = prefs.getInt("appfav",  -1);
   int hide = prefs.getInt("apphide", -1);
+  int known = prefs.getInt("appn", 16);      // cuantas apps conocia el firmware que guardo esto
   prefs.end();
   // Primer arranque (o actualizacion desde una version sin estas claves): el
   // reparto de fabrica sale del registro, no de constantes sueltas.
   if(fav < 0){ drawerRegistryDefaults(); }
-  else { gAppFav = (uint16_t)fav; gAppHidden = (uint16_t)(hide < 0 ? 0 : hide); }
-  if(n != 12) for(int i = 0; i < 12; i++) homeOrder[i] = (uint8_t)i;
-  gAppHidden &= (uint16_t)~(1u << IC_AJUSTES);        // Ajustes nunca oculto (ver appCanHide)
+  else {
+    gAppFav = (uint32_t)fav; gAppHidden = (uint32_t)(hide < 0 ? 0 : hide);
+    // APPS NUEVAS EN UNA PLACA QUE ACTUALIZA. Los bitmasks guardados son
+    // de un firmware que solo conocia `known` apps, asi que las que hay a
+    // partir de ese indice NO estan representadas: sin esto, Flex
+    // Intelligence quedaria en "no favorita" -- o sea invisible en el
+    // escritorio -- para todo el que actualice, y solo aparecerian en una
+    // instalacion desde cero. Se les aplica su valor de fabrica UNA vez, y
+    // a partir de ahi manda lo que decida el usuario.
+    if(known < APP_N) drawerRegistryAdopt(known);
+  }
+  // Primer arranque de verdad (ni clave nueva ni vieja): las doce de
+  // siempre en la pagina 0, y el resto vacio.
+  if(n != HOME_TOTAL){
+    for(int i = 0; i < HOME_TOTAL; i++) homeOrder[i] = HOME_EMPTY;
+    for(int i = 0; i < HOME_SLOTS; i++) homeOrder[i] = (uint8_t)i;
+  }
+  gAppHidden &= (uint32_t)~(1u << IC_AJUSTES);        // Ajustes nunca oculto (ver appCanHide)
   homeOrderNormalize();
 }
-static void edSlotXY(int slot, int &x, int &y){ int c = slot % 4, r = slot / 4; x = 24 + c * 120; y = 212 + r * 112; }
+// MODO EDICION Y PAGINAS. Las ranuras que maneja el Modo Edicion son
+// LOCALES a la pagina visible (0..11) y se traducen a la ranura global
+// con edSlot(). Se hace asi -- y no reordenando las 36 a la vez --
+// porque arrastrar un icono de una pagina a otra necesitaria ademas un
+// gesto de "empujar el borde para cambiar de pagina" mientras se
+// sostiene el icono, y mezclar eso con el dwell de 400 ms daria dos
+// gestos peleandose por el mismo dedo. Reordenar dentro de la pagina
+// funciona igual que siempre; mover una app de pagina se hace desde la
+// Caja de aplicaciones, que ya sabe hacerlo.
+static inline int edSlot(int local){ return gHomePage * HOME_SLOTS + local; }
+static void edSlotXY(int slot, int &x, int &y){ homeSlotXY(slot, x, y); }
 static int  edSlotAt(int px, int py){
-  if(px < 24 || py < 212) return -1;
-  int c = (px - 24) / 120, r = (py - 212) / 112;
+  if(px < HOME_GX0 || py < HOME_GY0) return -1;
+  int c = (px - HOME_GX0) / HOME_COLSTEP, r = (py - HOME_GY0) / HOME_ROWSTEP;
   if(c < 0 || c > 3 || r < 0 || r > 2) return -1;
-  int slot = r * 4 + c; return slot < 12 ? slot : -1;
+  int slot = r * 4 + c; return slot < HOME_SLOTS ? slot : -1;
 }
 static void edMove(int from, int to){        // reinserta el icono (desplaza los demas)
-  if(from == to || from < 0 || to < 0 || from >= 12 || to >= 12) return;
-  uint8_t v = homeOrder[from];
-  if(from < to) for(int i = from; i < to; i++) homeOrder[i] = homeOrder[i + 1];
-  else          for(int i = from; i > to; i--) homeOrder[i] = homeOrder[i - 1];
-  homeOrder[to] = v;
+  if(from == to || from < 0 || to < 0 || from >= HOME_SLOTS || to >= HOME_SLOTS) return;
+  uint8_t v = homeOrder[edSlot(from)];
+  if(from < to) for(int i = from; i < to; i++) homeOrder[edSlot(i)] = homeOrder[edSlot(i + 1)];
+  else          for(int i = from; i > to; i--) homeOrder[edSlot(i)] = homeOrder[edSlot(i - 1)];
+  homeOrder[edSlot(to)] = v;
 }
 // Asa de resize de los widgets del Home (Fase 1: alterna 2 tamanos --
 // normal/ancho -- no arrastre continuo. Con solo 2 estados posibles, un
@@ -5757,20 +6135,20 @@ static void edRender(){
     if(cv) drawWidgetHandle(cx + cw - 30, cy + ch - 30);
     if(nv) drawWidgetHandle(nx + nw - 30, ny + nh - 30);
   }
-  for(int i = 0; i < 12; i++){
-    if(i == edDrag || homeOrder[i] == HOME_EMPTY) continue;     // ranura vacia: nada que temblar
+  for(int i = 0; i < HOME_SLOTS; i++){
+    if(i == edDrag || homeOrder[edSlot(i)] == HOME_EMPTY) continue;   // ranura vacia: nada que temblar
     int tx, ty; edSlotXY(i, tx, ty);
     edCurX[i] += (tx - edCurX[i]) * 0.2f; edCurY[i] += (ty - edCurY[i]) * 0.2f;   // resorte
     float ph = i * 0.6f;
     int ox = (int)(2 * sinf(t * 0.02f + ph)), oy = (int)(2 * cosf(t * 0.017f + ph));  // temblor +-2px
     int s = 64, off = (72 - s) / 2;                                              // escala ~90%
-    drawAppIcon(homeOrder[i], (int)edCurX[i] + off + ox, (int)edCurY[i] + off + oy, s);
+    drawAppIcon(homeOrder[edSlot(i)], (int)edCurX[i] + off + ox, (int)edCurY[i] + off + oy, s);
   }
   if(edDrag >= 0){                                                              // icono arrastrado (translucido)
     int dx = (int)edDragX, dy = (int)edDragY, s = 72;
     if(uiGlass) drawLiquidGlassPanel(dx - 6, dy - 6, s + 12, s + 12, 16, TH_GLASS2);
     else fillRoundRectA(dx - 6, dy - 6, s + 12, s + 12, 16, TH_SEL, 150);
-    drawAppIcon(homeOrder[edDrag], dx, dy, s);
+    drawAppIcon(homeOrder[edSlot(edDrag)], dx, dy, s);
   }
   drawTextC(SCR_W / 2, 176, "Arrastra los iconos - Inicio para salir", 1, TH_ONWALL2);   // sobre el wallpaper
   present(120, 580);
@@ -5778,7 +6156,7 @@ static void edRender(){
 static void edEnter(){
   editMode = true;
   renderHome();                              // homeBuf sin rejilla (editMode salta el grid)
-  for(int i = 0; i < 12; i++){ int x, y; edSlotXY(i, x, y); edCurX[i] = x; edCurY[i] = y; }
+  for(int i = 0; i < HOME_SLOTS; i++){ int x, y; edSlotXY(i, x, y); edCurX[i] = x; edCurY[i] = y; }
   edDrag = -1; edHoverSlot = -1;
 }
 static void edExit(){
@@ -5791,7 +6169,7 @@ static void edTick(){
     int which;
     if(widgetHandleAt(T.x, T.y, which)){ widgetToggleSize(which); edRender(); return; }
     edDrag = edSlotAt(T.x, T.y);
-    if(edDrag >= 0 && homeOrder[edDrag] == HOME_EMPTY) edDrag = -1;   // no se arrastra un hueco
+    if(edDrag >= 0 && homeOrder[edSlot(edDrag)] == HOME_EMPTY) edDrag = -1;   // no se arrastra un hueco
     edSetDrag(T.x, T.y); edHoverSlot = -1; edRender(); return;
   }
   if(T.down && edDrag >= 0){
@@ -5855,6 +6233,13 @@ static void animateIconRipple(){
 static int gIconOvrApp = -1, gIconOvrX = 0, gIconOvrY = 0, gIconOvrS = 72;
 static void homeTick(){
   if(editMode){ edTick(); return; }
+  // PAGINAS DEL ESCRITORIO. Va lo PRIMERO de todo (antes incluso que los
+  // gestos iOS) porque una vez que el dedo esta arrastrando una pagina, el
+  // toque es suyo hasta que se suelte: si el gesto de la barra inferior o
+  // el de la Caja de aplicaciones pudieran robarlo a mitad de recorrido, la
+  // pagina se quedaria a medias en pantalla.
+  if(hpTick()) return;
+  if(hpTryStart()){ hpTick(); return; }
   if(gNavMode == 1 && handleiOSGestures()) return;   // gestos iOS antes que los toques normales
   // destello Liquid Glass al posar el dedo sobre un icono (solo estilo "Vidrio")
   if(T.pressed && gIconStyle == 1){
@@ -5868,7 +6253,7 @@ static void homeTick(){
   if(T.down && edSlotAt(T.startX, T.startY) >= 0 && (millis() - T.downMs) > 1000
      && abs(T.x - T.startX) < 12 && abs(T.y - T.startY) < 12){
     int slot = edSlotAt(T.startX, T.startY);
-    if(homeOrder[slot] == HOME_EMPTY) return;        // hueco de la rejilla: no hay app sobre la que actuar
+    if(homeOrder[edSlot(slot)] == HOME_EMPTY) return;   // hueco de la rejilla: no hay app sobre la que actuar
     if(CTXMENU_ON){ ctxOpen(slot); return; }
     edEnter(); edDrag = slot; edSetDrag(T.x, T.y); return;
   }
@@ -5920,8 +6305,8 @@ static void homeTick(){
 // REGISTRO CENTRAL DE APPS. Una app de Flex OS ES su entrada en APP_REG, y su
 // ID UNICO es el indice de esa entrada (el mismo del enum IC_*). Todo lo demas
 // cuelga de ese id, sin listas paralelas que puedan desincronizarse:
-//   · id       -> indice en APP_REG (0..15)
-//   · nombre   -> appName(id), localizado en APP[16][5]
+//   · id       -> indice en APP_REG (0..APP_N-1)
+//   · nombre   -> appName(id), localizado en APP[APP_N][5]
 //   · icono    -> drawAppIcon(id, x, y, S), vectorial
 //   · callback -> enter() / tick() de esta misma estructura
 //   · categoria-> campo 'cat' (APP_CAT_*), lo usa la Caja de aplicaciones
@@ -5978,21 +6363,32 @@ static void flexBleStop(); static bool flexBleStart();     // radio BLE real
 static void connWifiSub(char* out, size_t n);              // SSID real para Ajustes
 static void connBleSub(char* out, size_t n);
 static void geoEnter(); static void geoTick();   // Juegos -> Geo Dash (clon de Geometry Dash)
+static void flexAiEnter(); static void flexAiTick();   // Flex Intelligence (asistente + Cowork)
 
 // Rect del icono en el escritorio (para animar la apertura desde el)
 static void getIconRect(int id, int &rx, int &ry, int &rs){
   if(id == gIconOvrApp){ rx = gIconOvrX; ry = gIconOvrY; rs = gIconOvrS; return; }
-  if(id < 12){
+  // EL DOCK son EXACTAMENTE los ids 12..15. Antes bastaba con "id < 12"
+  // porque 12..15 era todo lo que quedaba; con una app 16 en el
+  // registro, ese else calcularia i = 4 y colocaria el origen de la
+  // animacion fuera del dock.
+  bool inDock = (id >= 12 && id <= 15);
+  if(!inDock){
     // La rejilla se dibuja por SLOT (homeOrder[slot] = id de app), no por id.
     // Antes esto calculaba la casilla con id%4 e id/4, o sea daba por hecho que
     // cada app sigue en su casilla original. En cuanto se reordenaban los iconos
     // en Modo Edicion, la animacion de apertura crecia desde donde ESTABA la app
     // antes: mover Notas al hueco de la Calculadora hacia que Notas se abriera
     // desde el sitio de la Calculadora. Hay que buscar en que slot esta hoy.
-    int slot = id;
-    for(int s = 0; s < 12; s++) if(homeOrder[s] == id){ slot = s; break; }
-    int S = 72, gx0 = 24, gy0 = 212, rowStep = 112;
-    rx = gx0 + (slot % 4) * 120; ry = gy0 + (slot / 4) * rowStep; rs = S;
+    int slot = (id < HOME_SLOTS) ? id : 0;   // respaldo acotado a la rejilla
+    // Y solo cuenta si esta en la PAGINA VISIBLE: si el icono vive en
+    // otra pagina no esta en pantalla, y hacer crecer la ventana desde
+    // sus coordenadas dibujaria la animacion partiendo de un sitio
+    // donde el usuario no ve nada. En ese caso se queda la casilla que
+    // le tocaria por id, que es el comportamiento de siempre.
+    for(int sl = 0; sl < HOME_SLOTS; sl++)
+      if(homeOrder[gHomePage * HOME_SLOTS + sl] == id){ slot = sl; break; }
+    homeSlotXY(slot, rx, ry); rs = HOME_ICON_S;
   } else {
     int dkx = 24, dky = SCR_H - 176, dkw = SCR_W - 48, dkh = 96, dS = 64;
     int inner = dkw - 32, dgap = (inner - 4 * dS) / 3, i = id - 12;
@@ -6317,7 +6713,7 @@ static const char* APP_CAT_NAME[APP_CAT_N][5] = {
   {"Ocio","Fun","Loisirs","Lazer","Svago"},
 };
 // ---- Registro de apps (indices = enum IC_*) ----
-static FlexApp APP_REG[16] = {
+static FlexApp APP_REG[APP_N] = {
   { appRelojEnter, appRelojTick, APP_FLEX, APP_CAT_ESENCIAL, APP_DEF_FAV },              // 0  Reloj  (REAL)
   { galEnter, galTick, APP_FLEX, APP_CAT_MEDIA, APP_DEF_FAV },                        // 1  Galeria (REAL: JPEG de /Documentos + dibujos de /Paint)
   { vidEnter, vidTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_MEDIA, APP_DEF_FAV },  // 2  Multimedia (esqueleto)
@@ -6334,9 +6730,13 @@ static FlexApp APP_REG[16] = {
   { calcEnter, calcTick, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_DOCK },               // 13 Calculadora (REAL, M2) -- app de referencia del modo embebido
   { calEnter, calTick, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_DOCK },                        // 14 Calendario (REAL, M2)
   { camEnter, camTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_MEDIA, APP_DEF_DOCK },  // 15 Camara (esqueleto)
+  // 16 Flex Intelligence (REAL). APP_DEF_FAV: nace en el escritorio, y como
+  // la primera pagina esta llena, homeOrderNormalize() la coloca sola en la
+  // primera ranura libre de la SEGUNDA pagina. Nada se mueve de sitio.
+  { flexAiEnter, flexAiTick, APP_FLEX | APP_OWN_TOUCH, APP_CAT_SISTEMA, APP_DEF_FAV },
 };
 static const char* appCatName(int id){
-  int c = (id >= 0 && id < 16) ? APP_REG[id].cat : APP_CAT_SISTEMA;
+  int c = (id >= 0 && id < APP_N) ? APP_REG[id].cat : APP_CAT_SISTEMA;
   if(c < 0 || c >= APP_CAT_N) c = APP_CAT_SISTEMA;
   return APP_CAT_NAME[c][LI()];
 }
@@ -6346,7 +6746,12 @@ static const char* appCatName(int id){
 // escritorio, basta con quitarle APP_DEF_FAV en su fila de APP_REG.
 static void drawerRegistryDefaults(){
   gAppFav = 0; gAppHidden = 0;
-  for(int id = 0; id < 16; id++) if(APP_REG[id].dflt & APP_DEF_FAV) gAppFav |= (uint16_t)(1u << id);
+  for(int id = 0; id < APP_N; id++) if(APP_REG[id].dflt & APP_DEF_FAV) gAppFav |= (uint32_t)(1u << id);
+}
+static void drawerRegistryAdopt(int fromId){
+  if(fromId < 0) fromId = 0;
+  for(int id = fromId; id < APP_N; id++)
+    if(APP_REG[id].dflt & APP_DEF_FAV) gAppFav |= (uint32_t)(1u << id);
 }
 
 // Animacion de apertura/cierre: la ventana crece/encoge desde el icono
@@ -7828,7 +8233,7 @@ static bool dexMatch(const char* name, const char* q, int qn){
 }
 static int dexFilterApps(int* out, int maxn){
   int n = 0;
-  for(int i = 0; i < 16 && n < maxn; i++) if(dexMatch(appName(i), dexQuery, dexQLen)) out[n++] = i;
+  for(int i = 0; i < APP_N && n < maxn; i++) if(dexMatch(appName(i), dexQuery, dexQLen)) out[n++] = i;
   return n;
 }
 
@@ -8802,7 +9207,7 @@ static void dexHostServe(int i){
   int req = gHostReq, reqApp = gHostReqApp;
   gHostReq = 0; gHostReqApp = -1;
   if(req == 1) dexCloseWin(i);
-  else if(req == 2 && reqApp >= 0 && reqApp < 16){
+  else if(req == 2 && reqApp >= 0 && reqApp < APP_N){
     int ix, iy, is; dexTbAppRect(reqApp, ix, iy, is);
     dexOpenFrom(reqApp, ix, iy, is);
   }
@@ -17444,7 +17849,7 @@ static void ctxRender(float p){
 }
 static void ctxOpen(int slot){
   if(!CTXMENU_ON || slot < 0 || slot > 11) return;
-  ctxApp = homeOrder[slot];
+  ctxApp = homeOrder[gHomePage * HOME_SLOTS + slot];
   // Geometria REAL del icono pulsado: la misma rejilla que pinta renderHome()
   // (gx0=24, gy0=212, paso de columna 120, paso de fila 112, icono de 72).
   int ix = 24 + (slot % 4) * 120;
@@ -17590,7 +17995,7 @@ static int       drwDragY0  = 0, drwDragLastY = 0;
 static float     drwDragS0  = 0.0f;
 static uint32_t  drwDragMs  = 0;
 static bool      drwMoved   = false;
-static int       drwList[16], drwN = 0;       // ids visibles tras filtrar (del registro)
+static int       drwList[APP_N], drwN = 0;    // ids visibles tras filtrar (del registro)
 static char      drwQuery[DRW_QMAX + 1] = { 0 };
 static int       drwQLen    = 0;
 static bool      drwKbOn    = false;  // teclado del buscador desplegado
@@ -17645,7 +18050,7 @@ static int drwHitCell(int px, int py){
 // vez de escribir una segunda.
 static void drwFilter(){
   drwN = 0;
-  for(int id = 0; id < 16; id++){
+  for(int id = 0; id < APP_N; id++){
     if(appIsHidden(id) && !drwShowHid) continue;
     if(!dexMatch(appName(id), drwQuery, drwQLen)) continue;
     drwList[drwN++] = id;
@@ -17870,7 +18275,7 @@ static void drwCompose(int y0, int y1, bool settled){
 // informacion. Vive DENTRO de ST_DRAWER (no es un gState nuevo) para no tocar
 // el menu contextual del escritorio, que sigue exactamente igual.
 static bool drwHomeHasSlot(){
-  for(int i = 0; i < 12; i++) if(homeOrder[i] == HOME_EMPTY) return true;
+  for(int i = 0; i < HOME_TOTAL; i++) if(homeOrder[i] == HOME_EMPTY) return true;
   return false;
 }
 static const char* drwCtxLabel(int i){
@@ -17979,14 +18384,14 @@ static void drwInfoDraw(){
 static void drwFavToggle(int id){
   if(id < 0 || id > 15) return;
   if(appIsFav(id)){
-    gAppFav &= (uint16_t)~(1u << id);
-    for(int i = 0; i < 12; i++) if(homeOrder[i] == (uint8_t)id) homeOrder[i] = HOME_EMPTY;
+    gAppFav &= (uint32_t)~(1u << id);
+    for(int i = 0; i < HOME_TOTAL; i++) if(homeOrder[i] == (uint8_t)id) homeOrder[i] = HOME_EMPTY;
   } else {
     if(appIsHidden(id)) return;                    // una app oculta no puede estar en Inicio
     int slot = -1;
     for(int i = 0; i < 12 && slot < 0; i++) if(homeOrder[i] == HOME_EMPTY) slot = i;
     if(slot < 0) return;                           // escritorio lleno: no se miente al usuario
-    gAppFav |= (uint16_t)(1u << id);
+    gAppFav |= (uint32_t)(1u << id);
     homeOrder[slot] = (uint8_t)id;
   }
   homeOrderNormalize();
@@ -17996,10 +18401,10 @@ static void drwFavToggle(int id){
 static void drwHideToggle(int id){
   if(id < 0 || id > 15 || !appCanHide(id)) return;
   if(appIsHidden(id)){
-    gAppHidden &= (uint16_t)~(1u << id);
+    gAppHidden &= (uint32_t)~(1u << id);
   } else {
-    gAppHidden |= (uint16_t)(1u << id);
-    gAppFav    &= (uint16_t)~(1u << id);           // fuera de la caja: tambien fuera de Inicio
+    gAppHidden |= (uint32_t)(1u << id);
+    gAppFav    &= (uint32_t)~(1u << id);           // fuera de la caja: tambien fuera de Inicio
     for(int i = 0; i < 12; i++) if(homeOrder[i] == (uint8_t)id) homeOrder[i] = HOME_EMPTY;
   }
   homeOrderNormalize();
