@@ -107,6 +107,14 @@ int  flexSpellLang();
 // "HOLA" son la misma palabra.
 bool flexSpellKnown(const char* word);
 
+// Version BARATA de la anterior: mira solo el diccionario personal y la
+// lista de terminos tecnicos (unas 120 entradas), no los diccionarios
+// generales. Existe para el subrayado de palabras dudosas del teclado,
+// que se evalua por CADA palabra en CADA repintado del texto: ahi no se
+// puede pagar un recorrido del diccionario completo. El teclado la
+// combina con su propia lista, que ya tenia.
+bool flexSpellKnownFast(const char* word);
+
 // true si merece la pena analizar esta palabra. Devuelve false para
 // palabras muy cortas (<3 letras), con digitos, con simbolos, en
 // MAYUSCULAS completas (siglas) o mas largas que FLEX_SPELL_WORD_MAX.

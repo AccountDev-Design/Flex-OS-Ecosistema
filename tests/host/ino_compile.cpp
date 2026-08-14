@@ -154,6 +154,11 @@ static void testPanelRapido();
 static void testNoticias();
 static void testCajaApps();
 static void testCronometro();
+static void testLongPress();
+static void testPaginasHome();
+static void testNotifCowork();
+static void testCorrectorTeclado();
+static void testPrivacidadVault();
 static int gFails = 0;
 static void chk(bool ok, const char* what){
   if(!ok){ printf("  FALLO: %s\n", what); gFails++; }
@@ -508,14 +513,20 @@ static void testNoticias(){
 // #############################################################
 static void drwTestReset(){
   drawerRegistryDefaults();
-  for(int i = 0; i < 12; i++) homeOrder[i] = (uint8_t)i;
+  // Escritorio de fabrica: las doce de siempre en la pagina 0 y las
+  // otras dos paginas vacias. Es el estado del que parte una placa
+  // recien instalada, y desde el que homeOrderNormalize() decide donde
+  // cae cada app nueva.
+  for(int i = 0; i < HOME_TOTAL; i++) homeOrder[i] = HOME_EMPTY;
+  for(int i = 0; i < HOME_SLOTS; i++) homeOrder[i] = (uint8_t)i;
+  gHomePage = 0;
   homeOrderNormalize();
   drwQLen = 0; drwQuery[0] = 0; drwShowHid = false; drwKbOn = false;
   drwScroll = 0; drwVel = 0; drwSlide = 0;
   drwFilter();
 }
 static int drwSlotOf(int id){
-  for(int i = 0; i < 12; i++) if(homeOrder[i] == (uint8_t)id) return i;
+  for(int i = 0; i < HOME_TOTAL; i++) if(homeOrder[i] == (uint8_t)id) return i;
   return -1;
 }
 static bool drwInList(int id){
@@ -530,25 +541,33 @@ static void testCajaApps(){
   chk(gAppHidden == 0, "de fabrica no hay ninguna app oculta");
   for(int id = 0; id < 12; id++) chk(appIsFav(id),  "las doce de la rejilla nacen en Inicio");
   for(int id = 12; id < 16; id++) chk(!appIsFav(id), "las cuatro del dock no ocupan rejilla");
-  chk(drwN == 16, "la caja muestra las 16 apps del registro");
+  chk(appIsFav(IC_FLEXAI), "Flex Intelligence nace en el escritorio");
+  chk(drwN == APP_N, "la caja muestra todas las apps del registro");
+  // Y CAE EN LA PAGINA 2, sin mover ni un icono de la primera: la
+  // pagina 0 esta llena con las doce de siempre.
+  { int slot = -1;
+    for(int i = 0; i < HOME_TOTAL; i++) if(homeOrder[i] == IC_FLEXAI){ slot = i; break; }
+    chk(slot == HOME_SLOTS, "y ocupa la PRIMERA ranura de la segunda pagina");
+    for(int i = 0; i < HOME_SLOTS; i++) chk(homeOrder[i] == (uint8_t)i,
+        "las doce de la primera pagina se quedan donde estaban"); }
 
   // --- normalizacion: una ranura con una app no favorita se vacia ---
-  gAppFav &= (uint16_t)~(1u << 5);
+  gAppFav &= (uint32_t)~(1u << 5);
   homeOrderNormalize();
   chk(drwSlotOf(5) < 0, "quitar la marca de favorita libera su ranura");
   // --- y una favorita sin ranura recupera hueco ---
-  gAppFav |= (uint16_t)(1u << 5);
+  gAppFav |= (uint32_t)(1u << 5);
   homeOrderNormalize();
   chk(drwSlotOf(5) >= 0, "una favorita sin ranura ocupa el primer hueco");
 
-  // --- escritorio lleno: la marca se retira, no se inventa una ranura 13 ---
+  // --- escritorio lleno: la marca se retira, no se inventa una ranura 37 ---
   drwTestReset();
-  gAppFav |= (uint16_t)(1u << IC_AJUSTES);        // 13 favoritas para 12 ranuras
+  for(int id = 0; id < APP_N; id++) gAppFav |= (uint32_t)(1u << id);   // todas favoritas
   homeOrderNormalize();
   int nfav = 0;
-  for(int id = 0; id < 16; id++) if(appIsFav(id)) nfav++;
-  chk(nfav == 12, "nunca hay mas favoritas que ranuras en el escritorio");
-  for(int i = 0; i < 12; i++) chk(homeOrder[i] == HOME_EMPTY || appIsFav(homeOrder[i]),
+  for(int id = 0; id < APP_N; id++) if(appIsFav(id)) nfav++;
+  chk(nfav <= HOME_TOTAL, "nunca hay mas favoritas que ranuras en el escritorio");
+  for(int i = 0; i < HOME_TOTAL; i++) chk(homeOrder[i] == HOME_EMPTY || appIsFav(homeOrder[i]),
                                   "ninguna ranura apunta a una app que no sea favorita");
 
   // --- quitar y volver a poner desde el menu contextual ---
@@ -808,6 +827,587 @@ static void testCronometro(){
   if(!gFails) printf("  Cronometro: todas las comprobaciones pasan.\n");
 }
 
+
+// #############################################################
+//  FLEX INTELLIGENCE  ·  interaccion (dentro del sketch)
+//  ------------------------------------------------------------
+//  Aqui se prueban las maquinas de estado que viven EN EL .ino y
+//  que no se pueden ver desde fuera: la pulsacion larga, el
+//  deslizamiento entre paginas del escritorio y el descarte de
+//  una tarjeta de notificacion.
+//
+//  Se hace moviendo la estructura T (el estado tactil de alto
+//  nivel) y el reloj virtual a mano, que es exactamente lo que
+//  hace el driver del GT911 en la placa. Nada de esto necesita
+//  pantalla: se comprueba el ESTADO al que se llega, no los
+//  pixeles.
+// #############################################################
+
+// Deja el tactil en reposo.
+static void tReset(){
+  memset(&T, 0, sizeof(T));
+}
+// Simula que el dedo BAJA en (x,y) en el instante `ms`.
+static void tDown(int x, int y, unsigned long ms){
+  gTestMs = ms;
+  tReset();
+  T.down = true; T.pressed = true;
+  T.x = T.startX = x;
+  T.y = T.startY = y;
+  T.downMs = ms;
+}
+// El dedo SIGUE abajo, ahora en (x,y).
+static void tMove(int x, int y, unsigned long ms){
+  gTestMs = ms;
+  T.pressed = false;
+  T.down = true;
+  T.x = x; T.y = y;
+  T.moved = true;
+}
+// El dedo SE LEVANTA.
+static void tUp(unsigned long ms, bool tap){
+  gTestMs = ms;
+  T.down = false; T.pressed = false;
+  T.released = true;
+  T.tap = tap;
+}
+
+static void testLongPress(){
+  printf("Activacion de Flex Intelligence (pulsacion larga)\n");
+  aiConfigDefaults();
+  aiConfig()->enabled = true;
+  gState = ST_HOME; qsPanelY = 0; editMode = false; kioskOn = false; gLand = false;
+  gAiLp = AIL_IDLE; gAiLpConsumed = false; aiOvOpen = false;
+
+  const int hx = SCR_W / 2, hy = SCR_H - 52 + 4;   // centro del boton de Inicio
+
+  // ---- NAVEGACION POR BOTONES ----
+  gNavMode = 0;
+
+  // (1) TOQUE CORTO: se suelta antes de los 700 ms. No debe abrir nada,
+  //     y sobre todo NO debe consumir el toque: la accion normal de
+  //     Inicio tiene que seguir su camino.
+  tDown(hx, hy, 1000);
+  chk(!flexAiLongPressTick(), "toque corto: el panel no se queda el toque");
+  chk(gAiLp == AIL_CAND,      "pero queda como candidato a pulsacion larga");
+  tMove(hx, hy, 1400);                            // 400 ms: aun no
+  chk(!flexAiLongPressTick(), "a los 400 ms sigue sin ser larga");
+  chk(!aiOvOpen,              "y no se ha abierto nada");
+  tUp(1450, true);
+  chk(!flexAiLongPressTick(), "al soltar antes de tiempo, el toque sigue siendo de Inicio");
+  chk(T.tap,                  "y el tap NO se consumio");
+  chk(!aiOvOpen,              "el panel sigue cerrado");
+
+  // (2) PULSACION LARGA CONFIRMADA a los 700 ms.
+  gAiLp = AIL_IDLE; gAiLpConsumed = false;
+  tDown(hx, hy, 2000);
+  flexAiLongPressTick();
+  tMove(hx, hy, 2400);
+  chk(!flexAiLongPressTick(), "a 400 ms todavia no");
+  tMove(hx, hy, 2705);                            // 705 ms
+  chk(flexAiLongPressTick(),  "a los 700 ms se confirma y el toque es suyo");
+  chk(gAiLp == AIL_FIRED,     "la maquina llega a CONFIRMADA");
+  chk(gAiLpConsumed,          "la pulsacion queda marcada como consumida");
+
+  // (3) LA REGLA QUE EVITA LA DOBLE ACCION. Al soltar el dedo despues de
+  //     abrir el panel, el toque NO puede llegar tambien a Inicio: si
+  //     llegara, el usuario acabaria en el escritorio con el panel
+  //     encima -- que es exactamente lo que no puede pasar.
+  tUp(2800, true);
+  chk(flexAiLongPressTick(), "al soltar, la pulsacion consumida se queda el evento");
+  chk(!T.tap,                "y el tap de Inicio queda ANULADO");
+  chk(!T.released,           "igual que el released");
+  chk(!gAiLpConsumed,        "levantar el dedo limpia la marca para la proxima");
+
+  // (4) CANCELACION POR MOVIMIENTO: si el dedo se va, esto vuelve a ser
+  //     un gesto de navegacion y se CEDE, no se compite por el.
+  gAiLp = AIL_IDLE; gAiLpConsumed = false; aiOvOpen = false;
+  tDown(hx, hy, 4000);
+  flexAiLongPressTick();
+  tMove(hx, hy - (AI_LP_TOL + 6), 4100);          // se paso de la tolerancia
+  chk(!flexAiLongPressTick(), "movido: el toque deja de ser nuestro");
+  chk(gAiLp == AIL_NAV,       "la maquina pasa a GESTO DE NAVEGACION");
+  tMove(hx, hy - 60, 4900);                       // y aunque aguante 900 ms...
+  chk(!flexAiLongPressTick(), "...ya no se confirma nunca");
+  chk(!aiOvOpen,              "el panel no se abre");
+
+  // (5) FUERA DE ZONA: mantener el dedo en mitad de la pantalla no abre
+  //     nada. La zona caliente es el boton, no la pantalla entera.
+  gAiLp = AIL_IDLE;
+  tDown(SCR_W / 2, SCR_H / 2, 6000);
+  flexAiLongPressTick();
+  tMove(SCR_W / 2, SCR_H / 2, 6800);
+  chk(!flexAiLongPressTick(), "fuera de la zona no se activa");
+  chk(gAiLp == AIL_IDLE,      "ni siquiera llega a candidato");
+
+  // ---- NAVEGACION POR GESTOS ----
+  gNavMode = 1;
+  gAiLp = AIL_IDLE; gAiLpConsumed = false; aiOvOpen = false;
+  const int gx = SCR_W / 2, gy = SCR_H - 20;      // centro de la barra de gestos
+
+  // (6) Dedo quieto en el centro de la barra: se activa.
+  tDown(gx, gy, 8000);
+  flexAiLongPressTick();
+  tMove(gx, gy, 8750);
+  chk(flexAiLongPressTick(), "gestos: mantener quieto en el centro activa");
+  chk(gAiLp == AIL_FIRED,    "y confirma");
+  tUp(8800, true);
+  flexAiLongPressTick();
+
+  // (7) DESLIZAMIENTO VERTICAL: es el gesto de Inicio de siempre y se
+  //     conserva intacto.
+  gAiLp = AIL_IDLE; gAiLpConsumed = false;
+  tDown(gx, gy, 9000);
+  flexAiLongPressTick();
+  tMove(gx, gy - 50, 9100);
+  chk(!flexAiLongPressTick(), "un deslizamiento vertical NO activa");
+  chk(gAiLp == AIL_NAV,       "sigue siendo navegacion");
+  tMove(gx, gy - 90, 9900);
+  chk(!flexAiLongPressTick(), "aunque se mantenga despues de deslizar");
+
+  // (8) DESLIZAMIENTO HORIZONTAL sobre la barra: tampoco.
+  gAiLp = AIL_IDLE;
+  tDown(gx, gy, 10000);
+  flexAiLongPressTick();
+  tMove(gx + 40, gy, 10100);
+  chk(!flexAiLongPressTick(), "un deslizamiento horizontal tampoco activa");
+  chk(gAiLp == AIL_NAV,       "es navegacion");
+
+  // (9) Los LATERALES de la barra se dejan libres: ahi viven los gestos
+  //     de borde.
+  gAiLp = AIL_IDLE;
+  tDown(10, gy, 11000);
+  flexAiLongPressTick();
+  tMove(10, gy, 11800);
+  chk(!flexAiLongPressTick(), "el borde izquierdo de la barra no activa");
+
+  // (10) DONDE NO SE PUEDE ABRIR. Con la pantalla bloqueada, en kiosco o
+  //      con Flex Intelligence desactivada, ni se intenta.
+  gNavMode = 0;
+  gAiLp = AIL_IDLE;
+  gState = ST_LOCK;
+  chk(!flexAiCanOpen(), "bloqueado: no se puede abrir");
+  gState = ST_HOME;
+  kioskOn = true;
+  chk(!flexAiCanOpen(), "en kiosco: no se puede abrir");
+  kioskOn = false;
+  aiConfig()->enabled = false;
+  chk(!flexAiCanOpen(), "desactivada en Ajustes: no se puede abrir");
+  aiConfig()->enabled = true;
+  qsPanelY = 100;
+  chk(!flexAiCanOpen(), "con la cortina desplegada: no se puede abrir");
+  qsPanelY = 0;
+  chk(flexAiCanOpen(),  "y en el escritorio normal, si");
+
+  tReset();
+  gAiLp = AIL_IDLE; gAiLpConsumed = false;
+  if(!gFails) printf("  Pulsacion larga: todas las comprobaciones pasan.\n");
+}
+
+static void testPaginasHome(){
+  printf("Paginas del escritorio\n");
+  drwTestReset();
+  gState = ST_HOME; editMode = false; gLand = false;
+  gHomePage = 0; hpDragging = false; hpSettling = false; hpBuf = NULL; hpBufPage = -1;
+
+  // La app 17 esta en la pagina 1 y NO se ve desde la 0.
+  { int id;
+    chk(!hitHomeIcon(HOME_GX0 + 10, HOME_GY0 + 10, id) || id != IC_FLEXAI,
+        "en la pagina 0 no se toca Flex Intelligence");
+    gHomePage = 1;
+    chk(hitHomeIcon(HOME_GX0 + 10, HOME_GY0 + 10, id) && id == IC_FLEXAI,
+        "en la pagina 1 su icono responde en la primera casilla");
+    gHomePage = 0; }
+
+  // El dock responde igual en TODAS las paginas: no se mueve de pagina.
+  { int id;
+    int dkx = 24, dky = SCR_H - 176, dkh = 96, dS = 64;
+    int ix = dkx + 16, iy = dky + (dkh - dS) / 2;
+    chk(hitHomeIcon(ix + 4, iy + 4, id) && id == 12, "el dock responde en la pagina 0");
+    gHomePage = 2;
+    chk(hitHomeIcon(ix + 4, iy + 4, id) && id == 12, "y tambien en la pagina 2");
+    gHomePage = 0; }
+
+  // --- el arrastre solo empieza si el gesto es HORIZONTAL de verdad ---
+  int gy = HOME_GY0 + 40;
+  tDown(300, gy, 1000);
+  chk(!hpTryStart(), "sin haberse movido, no hay arrastre");
+  tMove(300 - 6, gy, 1050);
+  chk(!hpTryStart(), "6 px no bastan");
+  tMove(300, gy - 60, 1100);
+  chk(!hpTryStart(), "un gesto VERTICAL no arrastra paginas");
+
+  // Sin PSRAM para el lienzo de la pagina vecina no hay animacion, pero
+  // tampoco un fallo: hpTryStart devuelve false y el escritorio sigue
+  // respondiendo. (En el arnes heap_caps_aligned_alloc si funciona, asi
+  // que aqui la ruta que se ejercita es la buena.)
+  tDown(300, gy, 2000);
+  tMove(300 - 40, gy, 2050);                       // horizontal, hacia la izquierda
+  bool started = hpTryStart();
+  chk(started, "un gesto horizontal claro inicia el arrastre");
+  if(started){
+    chk(hpFrom == 0 && hpTo == 1, "hacia la izquierda se va a la pagina siguiente");
+    chk(hpDragging,               "queda en arrastre");
+    // Recorrido corto: al soltar VUELVE a su pagina.
+    tMove(300 - 50, gy, 2400);                     // 50 px, lento (400 ms)
+    hpTick();
+    tUp(2500, false);
+    hpTick();
+    chk(hpSettling,          "al soltar arranca el acomodo");
+    chk(hpSettleTo == 0,     "y con poco recorrido vuelve a la pagina de origen");
+    gTestMs = 2500 + HP_SETTLE_MS + 10;
+    hpTick();
+    chk(!hpSettling,         "el acomodo termina");
+    chk(gHomePage == 0,      "y el escritorio se queda donde estaba");
+  }
+
+  // --- recorrido largo: CAMBIA de pagina ---
+  hpDragging = false; hpSettling = false; gHomePage = 0;
+  tDown(400, gy, 3000);
+  tMove(400 - 40, gy, 3050);
+  if(hpTryStart()){
+    tMove(400 - (SCR_W / 2), gy, 3600);            // mas de media pantalla
+    hpTick();
+    tUp(3700, false);
+    hpTick();
+    chk(hpSettleTo != 0, "con mas de un cuarto de pantalla, cambia");
+    gTestMs = 3700 + HP_SETTLE_MS + 10;
+    hpTick();
+    chk(gHomePage == 1, "y se queda en la pagina 1");
+  }
+
+  // --- golpe seco: corto pero rapido, tambien cambia ---
+  hpDragging = false; hpSettling = false; gHomePage = 0;
+  tDown(400, gy, 5000);
+  tMove(400 - 40, gy, 5030);
+  if(hpTryStart()){
+    tMove(400 - (HP_FLICK_PX + 10), gy, 5100);     // poco recorrido...
+    hpTick();
+    tUp(5150, false);                              // ...pero en 150 ms
+    hpTick();
+    chk(hpSettleTo != 0, "un golpe seco corto pero rapido cambia de pagina");
+    gTestMs = 5150 + HP_SETTLE_MS + 10;
+    hpTick();
+    chk(gHomePage == 1, "y llega a la pagina siguiente");
+  }
+
+  // --- en los BORDES no hay pagina a la que ir ---
+  hpDragging = false; hpSettling = false; gHomePage = 0;
+  tDown(300, gy, 7000);
+  tMove(300 + 40, gy, 7050);                       // hacia la derecha desde la pagina 0
+  chk(!hpTryStart(), "desde la primera pagina no se arrastra hacia atras");
+  gHomePage = HOME_PAGES - 1;
+  tDown(300, gy, 7200);
+  tMove(300 - 40, gy, 7250);
+  chk(!hpTryStart(), "desde la ultima pagina no se arrastra hacia delante");
+
+  // --- fuera de la banda de la rejilla el gesto es de otro ---
+  gHomePage = 0;
+  tDown(300, 100, 8000);                           // sobre los widgets
+  tMove(260, 100, 8050);
+  chk(!hpTryStart(), "sobre los widgets no se arrastran paginas");
+  tDown(300, SCR_H - 30, 8200);                    // sobre la barra de navegacion
+  tMove(260, SCR_H - 30, 8250);
+  chk(!hpTryStart(), "sobre la barra de navegacion tampoco");
+
+  // --- en Modo Edicion, nunca ---
+  editMode = true;
+  tDown(300, gy, 9000);
+  tMove(260, gy, 9050);
+  chk(!hpTryStart(), "en Modo Edicion no se cambia de pagina arrastrando");
+  editMode = false;
+
+  tReset();
+  hpDragging = false; hpSettling = false; gHomePage = 0;
+  if(!gFails) printf("  Paginas del escritorio: todas las comprobaciones pasan.\n");
+}
+
+static void testNotifCowork(){
+  printf("Notificaciones de Cowork\n");
+  // La cola de la isla se comparte con las notificaciones de hardware:
+  // se vacia antes de empezar para no arrastrar nada de otra bateria.
+  gNotifCount = 0;
+  notifDragIdx = -1;
+  memset(gNotifs, 0, sizeof(gNotifs));
+
+  notifPushJob(42, "Resumen listo", "Se creo una nota", NACT_VIEW, false);
+  chk(gNotifCount == 1,                    "encola una tarjeta de Cowork");
+  chk(gNotifs[0].src == NSRC_COWORK,       "marcada como de Cowork");
+  chk(gNotifs[0].jobId == 42,              "apuntando a su trabajo");
+  chk(gNotifs[0].act == NACT_VIEW,         "con su boton");
+  chk(!gNotifs[0].sticky,                  "y caducando sola");
+
+  // Una tarjeta que PIDE UNA DECISION no caduca a los 5 s: un aviso que
+  // exige respuesta y desaparece solo es un aviso que no sirve.
+  notifPushJob(43, "Necesito tu permiso", "Para continuar", NACT_OPEN, true);
+  chk(gNotifs[1].sticky, "la que pide intervencion es persistente");
+
+  // Cola llena: se hace sitio sacando la mas vieja que NO pida
+  // intervencion, no la primera que haya.
+  notifPushJob(44, "Traduccion terminada", "", NACT_VIEW, false);
+  chk(gNotifCount == NOTIF_MAX, "la cola llega a su tope");
+  notifPushJob(45, "Cuarta", "", NACT_VIEW, false);
+  chk(gNotifCount == NOTIF_MAX, "y no lo pasa");
+  { bool has43 = false, has45 = false;
+    for(int i = 0; i < gNotifCount; i++){
+      if(gNotifs[i].jobId == 43) has43 = true;
+      if(gNotifs[i].jobId == 45) has45 = true;
+    }
+    chk(has43, "la que pedia intervencion NO se descarto");
+    chk(has45, "y la nueva si entro"); }
+
+  // --- DESLIZAR A LA IZQUIERDA SOLO DESCARTA LA TARJETA ---
+  // Es la distincion que pide el enunciado: descartar la tarjeta,
+  // cancelar la tarea y borrar el resultado son tres cosas distintas.
+  // Esta -- la del gesto -- es la que NO toca el trabajo.
+  gNotifCount = 0;
+  memset(gNotifs, 0, sizeof(gNotifs));
+  notifPushJob(50, "Resumen listo", "", NACT_VIEW, false);
+  gNotifs[0].armed = true;
+  gNotifs[0].phase = NP_IDLE;
+  gState = ST_HOME; qsPanelY = 0; editMode = false;
+
+  // Arrastre a la izquierda por debajo del umbral: vuelve a su sitio.
+  int cardY = NOTIF_Y0 + 10;
+  tDown(NOTIF_MARGIN_X + 100, cardY, 1000);
+  notifHandleTouch();
+  chk(notifDragIdx == 0, "el dedo agarra la tarjeta");
+  tMove(NOTIF_MARGIN_X + 100 - 30, cardY, 1050);
+  notifHandleTouch();
+  chk(gNotifs[0].phase == NP_DRAG, "y la arrastra");
+  chk(gNotifs[0].slideX < 0,       "hacia la izquierda");
+  tUp(1100, false);
+  notifHandleTouch();
+  chk(gNotifs[0].phase == NP_SPRING, "poco recorrido: vuelve a su sitio");
+  chk(gNotifCount == 1,              "y la tarjeta sigue ahi");
+
+  // Arrastre largo: se descarta la TARJETA.
+  gNotifs[0].phase = NP_IDLE; gNotifs[0].slideX = 0; notifDragIdx = -1;
+  tDown(NOTIF_MARGIN_X + 100, cardY, 2000);
+  notifHandleTouch();
+  tMove(NOTIF_MARGIN_X + 100 - (NOTIF_CARD_W / 2), cardY, 2100);
+  notifHandleTouch();
+  tUp(2200, false);
+  notifHandleTouch();
+  chk(gNotifs[0].phase == NP_OUT, "pasado el umbral, la tarjeta se va");
+  // Y lo que importa: el TRABAJO no se ha tocado. La tarjeta es un
+  // aviso; el resultado vive en Cowork hasta que el usuario lo borre.
+  chk(gNotifs[0].jobId == 50, "la tarjeta sigue apuntando a su trabajo");
+
+  // Un arrastre HACIA LA DERECHA no descarta nada.
+  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs)); notifDragIdx = -1;
+  notifPushJob(51, "Otra", "", NACT_VIEW, false);
+  gNotifs[0].armed = true; gNotifs[0].phase = NP_IDLE;
+  tDown(NOTIF_MARGIN_X + 100, cardY, 3000);
+  notifHandleTouch();
+  tMove(NOTIF_MARGIN_X + 100 + 120, cardY, 3100);
+  notifHandleTouch();
+  chk(gNotifs[0].slideX == 0.0f, "hacia la derecha la tarjeta no se mueve");
+  tUp(3200, false);
+  notifHandleTouch();
+  chk(gNotifs[0].phase != NP_OUT, "y no se descarta");
+
+  // --- geometria de la tarjeta flotante en las dos orientaciones ---
+  // En horizontal NO es la vertical girada: es una barra ancha y baja,
+  // y deja libre el lado por donde los juegos ponen sus controles.
+  { int x, y, w, h;
+    gLand = false; nflBox(x, y, w, h);
+    chk(w > h,            "vertical: la tarjeta es mas ancha que alta");
+    chk(x >= 0 && x + w <= SCR_W, "y cabe a lo ancho de la pantalla");
+    chk(y >= 0 && y + h <= SCR_H, "y a lo alto");
+    int pw = w;
+    gLand = true; nflBox(x, y, w, h);
+    chk(w > h,            "horizontal: sigue siendo ancha y baja, no girada");
+    chk(w != pw,          "con un ancho PROPIO, no el de vertical estirado");
+    chk(x + w <= LW,      "cabe en el lienzo horizontal 800x480");
+    chk(y + h <= LH,      "sin salirse por abajo");
+    chk(x > LW / 4,       "y deja libre el lado donde los juegos ponen los controles");
+    gLand = false; }
+
+  // El rectangulo que se guarda para poder devolver el fondo tiene que
+  // caber en el buffer reservado, en las DOS orientaciones. Si no
+  // cupiera, nflSaveBg se niega a dibujar -- pero es mejor saberlo aqui.
+  { int x, y, w, h;
+    gLand = false; nflPhysRect(x, y, w, h);
+    chk((long)w * h <= NFL_SAVE_PX, "vertical: el fondo guardado cabe en su buffer");
+    chk(x >= 0 && y >= 0 && x + w <= SCR_W && y + h <= SCR_H, "y esta dentro de la pantalla");
+    gLand = true; nflPhysRect(x, y, w, h);
+    chk((long)w * h <= NFL_SAVE_PX, "horizontal: tambien cabe");
+    chk(x >= 0 && y >= 0 && x + w <= SCR_W && y + h <= SCR_H, "y tambien esta dentro");
+    gLand = false; }
+
+  // --- cuando NO debe salir la tarjeta flotante ---
+  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  notifPushJob(60, "Algo", "", NACT_VIEW, false);
+  gState = ST_HOME; qsPanelY = 0; editMode = false;
+  chk(!nflWanted(), "en el escritorio manda la isla de siempre, no la flotante");
+  gState = ST_APP;
+  chk(nflWanted(),  "encima de una app SI sale");
+  gState = ST_LOCK;
+  chk(!nflWanted(), "en la pantalla de bloqueo NO se filtra nada");
+  gState = ST_APP; qsPanelY = 200;
+  chk(!nflWanted(), "con la cortina desplegada, manda la cortina");
+  qsPanelY = 0;
+  gState = ST_SPLASH;
+  chk(!nflWanted(), "durante el arranque tampoco");
+  gState = ST_APP;
+  gNotifCount = 0;
+  chk(!nflWanted(), "sin tarjetas no hay nada que enseñar");
+
+  tReset();
+  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  notifDragIdx = -1; gState = ST_HOME;
+  if(!gFails) printf("  Notificaciones de Cowork: todas las comprobaciones pasan.\n");
+}
+
+static void testCorrectorTeclado(){
+  printf("Corrector en el teclado\n");
+  flexSpellBegin();
+  flexSpellSetLang(FLEX_SPELL_ES);
+  aiConfigDefaults();
+  gKbSpell = true;                       // corrector activado en Ajustes
+  aiConfig()->autoCorrect = false;       // autocorregir apagado (el de fabrica)
+
+  // El teclado escribe sobre el buffer de Notas; aqui se usa el
+  // estatico, que es el mismo camino que en una placa sin PSRAM.
+  static char buf[512];
+  char*  saveBuf = noteBuffer;
+  size_t saveMax = noteBufMax;
+  noteBuffer = buf; noteBufMax = sizeof(buf);
+
+  // --- sugerencias tras terminar la palabra ---
+  snprintf(buf, sizeof(buf), "njota ");
+  noteCur = (int)strlen(buf);
+  kbSpellClear();
+  kbSpellOnWordEnd();
+  chk(kbSpStart == 0,           "encuentra la palabra que acaba de terminar");
+  chk(kbSpLen == 5,             "con su longitud exacta");
+  chk(!strcmp(kbSpWord, "njota"), "y su texto");
+  chk(kbSpSugN > 0,             "propone correcciones");
+  chk(!strcmp(kbSpSug[0], "nota"), "la primera es \"nota\"");
+
+  // --- aceptar una sugerencia SUSTITUYE solo esa palabra ---
+  snprintf(buf, sizeof(buf), "njota mas texto");
+  noteCur = 6;                            // justo detras del espacio
+  kbSpellClear();
+  kbSpellOnWordEnd();
+  chk(kbSpSugN > 0, "vuelve a proponer");
+  kbSpellAccept(0);
+  chk(!strcmp(buf, "nota mas texto"), "aceptar sustituye SOLO la palabra dudosa");
+  chk(noteCur == 5,                   "y el cursor se ajusta a lo que crecio/encogio");
+  chk(kbSpSugN == 0,                  "y se limpia el estado");
+  chk(flexSpellKnown("nota"),         "la palabra aceptada queda aprendida");
+
+  // --- autocorreccion + DESHACER ---
+  aiConfig()->autoCorrect = true;
+  flexSpellBegin();                       // olvidar lo aprendido arriba
+  flexSpellSetLang(FLEX_SPELL_ES);
+  snprintf(buf, sizeof(buf), "njota ");
+  noteCur = (int)strlen(buf);
+  kbSpellClear();
+  kbSpellOnWordEnd();
+  chk(!strcmp(buf, "nota "), "con autocorregir activado, se corrige sola");
+  chk(kbSpUndo,              "y queda marcada como deshacible");
+  chk(!strcmp(kbSpUndoTxt, "njota"), "guardando lo que el usuario escribio");
+  kbSpellUndoFix();
+  chk(!strcmp(buf, "njota "), "deshacer devuelve exactamente lo escrito");
+  chk(!kbSpUndo,              "y se consume");
+  // Y APRENDE la palabra: si el usuario la escribio a proposito y ademas
+  // rechazo la correccion, no hay que volver a corregirsela.
+  chk(flexSpellKnown("njota"), "deshacer aprende la palabra del usuario");
+
+  // --- una palabra CORRECTA no se toca ---
+  flexSpellBegin(); flexSpellSetLang(FLEX_SPELL_ES);
+  snprintf(buf, sizeof(buf), "nota ");
+  noteCur = (int)strlen(buf);
+  kbSpellClear();
+  kbSpellOnWordEnd();
+  chk(!strcmp(buf, "nota "), "una palabra correcta se queda igual");
+  chk(kbSpSugN == 0,         "y no se proponen correcciones");
+  chk(!kbSpUndo,             "ni hay nada que deshacer");
+
+  // --- con el corrector APAGADO no pasa nada ---
+  gKbSpell = false;
+  snprintf(buf, sizeof(buf), "njota ");
+  noteCur = (int)strlen(buf);
+  kbSpellClear();
+  kbSpellOnWordEnd();
+  chk(!strcmp(buf, "njota "), "con el corrector apagado, el texto no se toca");
+  chk(kbSpSugN == 0,          "y no hay sugerencias");
+  gKbSpell = true;
+
+  // --- SEGURIDAD DE LA SUSTITUCION ---
+  // Si el buffer cambio por debajo desde que se analizo, sustituir a
+  // ciegas destrozaria el texto. Se comprueba y se abandona.
+  aiConfig()->autoCorrect = false;
+  flexSpellBegin(); flexSpellSetLang(FLEX_SPELL_ES);
+  snprintf(buf, sizeof(buf), "njota ");
+  noteCur = (int)strlen(buf);
+  kbSpellClear();
+  kbSpellOnWordEnd();
+  chk(kbSpStart >= 0, "hay una palabra marcada");
+  snprintf(buf, sizeof(buf), "otra cosa distinta");   // el texto cambio por debajo
+  noteCur = (int)strlen(buf);
+  chk(!kbSpellReplace("nota"), "no se sustituye sobre un texto que ya no coincide");
+  chk(!strcmp(buf, "otra cosa distinta"), "y el texto queda intacto");
+
+  // Buffer vacio y offsets imposibles: nada revienta.
+  buf[0] = 0; noteCur = 0;
+  kbSpellClear();
+  kbSpellOnWordEnd();
+  chk(kbSpStart < 0, "con el buffer vacio no hay nada que analizar");
+  chk(!kbSpellReplace("x"), "y sustituir sin palabra marcada no hace nada");
+
+  // El disparo por PAUSA analiza la palabra a medias (sin terminador).
+  flexSpellBegin(); flexSpellSetLang(FLEX_SPELL_ES);
+  snprintf(buf, sizeof(buf), "guardsr");
+  noteCur = (int)strlen(buf);
+  kbSpellClear();
+  kbSpPending = true; kbSpLastKeyMs = 1000;
+  gTestMs = 1000 + KB_SPELL_PAUSE_MS - 10;
+  kbSpellPauseTick();
+  chk(kbSpSugN == 0, "antes de la pausa no se analiza");
+  gTestMs = 1000 + KB_SPELL_PAUSE_MS + 10;
+  kbSpPending = true;
+  kbSpellPauseTick();
+  chk(kbSpSugN > 0, "cumplida la pausa, si");
+  chk(!strcmp(kbSpSug[0], "guardar"), "y propone la correccion buena");
+
+  noteBuffer = saveBuf; noteBufMax = saveMax; noteCur = 0;
+  kbSpellClear();
+  if(!gFails) printf("  Corrector en el teclado: todas las comprobaciones pasan.\n");
+}
+
+static void testPrivacidadVault(){
+  printf("Privacidad de Flex Vault");
+  printf("\n");
+  aiConfigDefaults();
+  aiConfig()->perms = AI_PERM_TEXT;
+
+  // Sin consentimiento NO se lee nada, ni con la boveda abierta.
+  chk(!aiVaultConsentHas(9), "de entrada no hay consentimiento");
+  chk(!vwSendToAi(9),        "sin consentimiento no se envia nada");
+
+  // El consentimiento es de UN item y de UN solo uso.
+  aiVaultConsentGrant(9);
+  chk(aiVaultConsentHas(9),  "concedido para el item 9");
+  chk(!aiVaultConsentHas(10),"no vale para el item 10");
+  // El doble de la boveda de este arnes dice que esta CERRADA, asi que
+  // vwSendToAi se para en la primera puerta -- que es justo la primera
+  // regla: sin boveda abierta no se lee, tenga el permiso que tenga.
+  chk(!flexVaultUnlocked(),  "la boveda esta cerrada en el arnes");
+  chk(!vwSendToAi(9),        "con la boveda cerrada no se envia, aunque haya permiso");
+
+  // Cerrar la boveda CADUCA el consentimiento, venga de donde venga el
+  // cierre (pantalla, inactividad, salida manual).
+  aiVaultConsentGrant(9);
+  vaultLockNow(FXV_LOCK_SCREEN);
+  chk(!aiVaultConsentHas(9), "al cerrar la boveda, el permiso caduca");
+
+  aiVaultConsentClear();
+  if(!gFails) printf("  Privacidad de Flex Vault: todas las comprobaciones pasan.\n");
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -875,6 +1475,11 @@ int main(){
   testNoticias();
   testCajaApps();
   testCronometro();
+  testLongPress();
+  testPaginasHome();
+  testNotifCowork();
+  testCorrectorTeclado();
+  testPrivacidadVault();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

@@ -15,6 +15,12 @@
   #include <WiFiClientSecure.h>
   #include <HTTPClient.h>
   #include "esp_heap_caps.h"
+  // vTaskDelay: la espera del socket cede la CPU en vez de girar en
+  // vacio. En el core de Arduino-ESP32 estas dos cabeceras llegan por
+  // Arduino.h, pero no en todas las versiones -- incluirlas aqui hace
+  // que el modulo no dependa de ese detalle.
+  #include "freertos/FreeRTOS.h"
+  #include "freertos/task.h"
 #endif
 
 // =============================================================

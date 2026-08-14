@@ -12,12 +12,17 @@
 // host) el modulo se compila igual, con la macro vacia: en el ESP32
 // el acceso a flash es transparente para lectura de bytes, asi que el
 // MISMO codigo vale en los dos sitios sin pgm_read_byte.
-#ifdef ARDUINO
-  #include <pgmspace.h>
-#else
-  #ifndef PROGMEM
-    #define PROGMEM
+// __has_include y no #ifdef ARDUINO: el arnes de pruebas del sketch
+// compila con -DARDUINO=200 para que el .ino se crea en Arduino, pero
+// ahi no existe pgmspace.h. Lo que decide es si la cabecera ESTA, no si
+// alguien definio una macro.
+#if defined(__has_include)
+  #if __has_include(<pgmspace.h>)
+    #include <pgmspace.h>
   #endif
+#endif
+#ifndef PROGMEM
+  #define PROGMEM
 #endif
 
 // =============================================================
@@ -486,6 +491,12 @@ bool flexSpellKnown(const char* word){
   if(gSpLang != FLEX_SPELL_EN && spBlobFindExact(SP_ES, word)) return true;
   if(gSpLang != FLEX_SPELL_ES && spBlobFindExact(SP_EN, word)) return true;
   return false;
+}
+
+bool flexSpellKnownFast(const char* word){
+  if(!word || !word[0]) return true;
+  if(spUserHas(word)) return true;
+  return spBlobFindExact(SP_TECH, word) != NULL;
 }
 
 bool flexSpellCheckable(const char* word){

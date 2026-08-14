@@ -43,7 +43,7 @@ JPEG_SRC := $(ROOT)/FlexOS_JPEG.cpp
 APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net \
-        $(BUILD)/test_vault
+        $(BUILD)/test_vault $(BUILD)/test_spell $(BUILD)/test_cowork $(BUILD)/test_ai
 TOOLS := $(BUILD)/jpegcheck
 
 .PHONY: all run all-boards fixtures clean ino
@@ -69,6 +69,26 @@ $(BUILD)/test_browser: test_browser.cpp $(CORE_SRC) $(ROOT)/FlexOS_Browser.h | $
 VAULTFLAGS := -Ivaultstub -Iinostub -I$(ROOT) -DARDUINO=200 -Wno-format-truncation
 $(BUILD)/test_vault: test_vault.cpp $(ROOT)/FlexOS_Vault.cpp $(ROOT)/FlexOS_Vault.h $(ROOT)/FlexOS_FS.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) $(VAULTFLAGS) -o $@ test_vault.cpp $(ROOT)/FlexOS_Vault.cpp -lcrypto
+
+# --- FLEX INTELLIGENCE: los tres modulos, con sanitizers ---
+# Son logica PURA y portable (no incluyen Arduino.h), asi que se compilan
+# y se ejecutan en el PC exactamente igual que en la placa. CON
+# sanitizers a proposito: el corrector hace aritmetica de indices sobre
+# una matriz de programacion dinamica, Cowork lee un fichero binario que
+# puede llegar truncado, y el cliente mastica JSON que viene de la red.
+# Un desbordamiento en cualquiera de los tres no puede quedarse en
+# "parece que funciona".
+AIFLAGS := -I$(ROOT)
+$(BUILD)/test_spell: test_spell.cpp $(ROOT)/FlexOS_Spell.cpp $(ROOT)/FlexOS_Spell.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(AIFLAGS) -o $@ test_spell.cpp $(ROOT)/FlexOS_Spell.cpp
+
+$(BUILD)/test_cowork: test_cowork.cpp $(ROOT)/FlexOS_Cowork.cpp $(ROOT)/FlexOS_Cowork.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(AIFLAGS) -o $@ test_cowork.cpp $(ROOT)/FlexOS_Cowork.cpp
+
+# test_ai necesita ademas inostub/ por sdkconfig.h (de ahi sale el
+# CONFIG_IDF_TARGET_* con el que el modulo decide la plataforma).
+$(BUILD)/test_ai: test_ai.cpp $(ROOT)/FlexOS_AI.cpp $(ROOT)/FlexOS_AI.h $(ROOT)/FlexOS_Cowork.cpp | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(AIFLAGS) -Iinostub -o $@ test_ai.cpp $(ROOT)/FlexOS_AI.cpp $(ROOT)/FlexOS_Cowork.cpp
 
 # --- codigo de dispositivo: con el entorno simulado ---
 # Sin sanitizers a proposito: el simulador define las funciones de
@@ -128,15 +148,30 @@ ino: ino_compile.cpp $(INO_SRC) check_protos.py | $(BUILD)
 # CON SANITIZERS: el lector de JSON de las noticias mastica bytes que vienen de
 # la red, asi que un desbordamiento ahi no puede quedarse en "parece que
 # funciona". Mismo criterio que el resto de pruebas del nucleo portable.
-$(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(JPEG_SRC) | $(BUILD)
+# Los modulos de Flex Intelligence se enlazan DE VERDAD (no como dobles):
+# son portables, asi que el sketch de prueba ejercita el corrector, el
+# motor de trabajos y el cliente reales, no un sustituto que siempre
+# dice que si.
+AI_SRC := $(ROOT)/FlexOS_Spell.cpp $(ROOT)/FlexOS_Cowork.cpp $(ROOT)/FlexOS_AI.cpp
+$(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(JPEG_SRC) $(AI_SRC) | $(BUILD)
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -x c++ -c ino_compile.cpp -o $(BUILD)/ino_compile.o
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -c ino_extern_stubs.cpp -o $(BUILD)/ino_extern_stubs.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(JPEG_SRC) -o $(BUILD)/ino_jpeg.o
-	@$(CXX) $(SAN) -o $@ $(BUILD)/ino_compile.o $(BUILD)/ino_extern_stubs.o $(BUILD)/ino_jpeg.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INOFLAGS) -c $(ROOT)/FlexOS_Spell.cpp  -o $(BUILD)/ino_spell.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INOFLAGS) -c $(ROOT)/FlexOS_Cowork.cpp -o $(BUILD)/ino_cowork.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INOFLAGS) -c $(ROOT)/FlexOS_AI.cpp     -o $(BUILD)/ino_ai.o
+	@$(CXX) $(SAN) -o $@ $(BUILD)/ino_compile.o $(BUILD)/ino_extern_stubs.o $(BUILD)/ino_jpeg.o \
+	                     $(BUILD)/ino_spell.o $(BUILD)/ino_cowork.o $(BUILD)/ino_ai.o
 
 run: ino $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@echo
 	@$(BUILD)/test_ino
+	@echo
+	@$(BUILD)/test_spell
+	@echo
+	@$(BUILD)/test_cowork
+	@echo
+	@$(BUILD)/test_ai
 	@echo
 	@$(BUILD)/test_vault
 	@echo

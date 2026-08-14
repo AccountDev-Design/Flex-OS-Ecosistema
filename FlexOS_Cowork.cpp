@@ -233,7 +233,12 @@ bool coworkCancel(uint32_t id){
 bool coworkPause(uint32_t id, uint8_t why){
   CoworkJob* j = coworkFind(id);
   if(!j) return false;
-  if(cwFinished(j) || j->state == CW_PAUSED) return false;
+  if(cwFinished(j)) return false;
+  // Pausar algo YA PAUSADO no es un error: cambia el MOTIVO. Importa
+  // porque coworkResumeAll() solo reanuda lo que pauso ese mismo motivo.
+  // Si el sistema pausa por carga y el usuario pausa encima a mano, sin
+  // esto el motivo seguiria siendo "carga" y cerrar la camara le
+  // reanudaria por la espalda una tarea que habia parado el.
   j->state    = CW_PAUSED;
   j->pauseWhy = why;
   return true;

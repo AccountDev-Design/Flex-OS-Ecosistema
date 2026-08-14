@@ -11776,6 +11776,11 @@ static bool kbSameWord(const char* a, const char* b){
 // un corrector gramatical.
 static bool kbDictHas(const char* w){
   if(!w || !w[0]) return true;
+  // Terminos del ecosistema (FlexOS, ESP32, Arduino...) y palabras que el
+  // usuario ya acepto. Va PRIMERO y es barato -- unas 120 entradas -- para
+  // que "FlexOS" deje de salir subrayado sin encarecer el dibujo del texto,
+  // que evalua esto por cada palabra en cada repintado.
+  if(flexSpellKnownFast(w)) return true;
   const char* const* d = kbLangEs ? KB_DICT_ES : KB_DICT_EN;
   int n = kbLangEs ? KB_DICT_ES_N : KB_DICT_EN_N;
   for(int i = 0; i < n; i++) if(kbSameWord(d[i], w)) return true;
@@ -11914,10 +11919,17 @@ static void selectWordAt(int bi){
   int b = bi; while(b < L){ if(!isWordByte((unsigned char)noteBuffer[b])) break; b = utf8Next(noteBuffer, b); }
   if(b > a){ noteSelA = a; noteSelB = b; noteCur = b; noteMenu = true; }
 }
+// Corrector ortografico: se define con la franja de chips, mas abajo.
+static void kbSpellNoteKey(bool terminator);
+static void kbSpellClear();
 static void kbPressChar(const char* s){
   if(kbShift && s[1] == 0 && s[0] >= 'a' && s[0] <= 'z'){ char u[2] = { (char)(s[0] - 32), 0 }; noteInsert(u); kbShift = false; }
   else if(kbShift && !strcmp(s, "\xC3\xB1")){ noteInsert("\xC3\x91"); kbShift = false; }
   else noteInsert(s);
+  // Una tecla CIERRA palabra si no es una letra: el punto, la coma, los
+  // dos puntos y el resto de la puntuacion valen tanto como el espacio.
+  bool term = (s[1] == 0) && !((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z') || s[0] == '\'');
+  kbSpellNoteKey(term);
 }
 // variantes acentuadas (solo las que tiene la fuente). Devuelve el numero.
 static int kbGetVariants(char b, const char* var[4]){
@@ -12133,6 +12145,186 @@ static void kbDrawToolbar(int yoff){
 static const char* kbChipTxt[4];
 static int      kbChipN = 0;
 static uint32_t kbChipMs = 0;          // cuando cambio la lista (para el fundido de la Fase G)
+
+// #############################################################
+// ##  CORRECTOR EN EL TECLADO  ·  Flex Intelligence
+// ##  ------------------------------------------------------
+// ##  CUANDO SE ANALIZA, que es lo que decide si esto se nota o
+// ##  no: SOLO al TERMINAR una palabra -- espacio, punto, coma,
+// ##  Enter -- o tras una pausa breve escribiendo. NUNCA en cada
+// ##  letra, y NUNCA el documento entero. Analizar en cada
+// ##  pulsacion seria recorrer el diccionario mil veces por
+// ##  frase, justo mientras el dedo se mueve.
+// ##
+// ##  Y aun asi el analisis lleva PRESUPUESTO (2 ms): si se
+// ##  agota, el corrector devuelve lo mejor que haya encontrado
+// ##  hasta ahi. En el peor caso da menos sugerencias, nunca un
+// ##  frame perdido.
+// ##
+// ##  LA AUTOCORRECCION SE PUEDE DESHACER SIEMPRE. Se guarda lo
+// ##  que habia escrito el usuario y el primer chip pasa a ser
+// ##  "Deshacer". Corregir sin marcha atras es peor que no
+// ##  corregir: el usuario pierde lo que quiso escribir y no
+// ##  tiene forma de recuperarlo.
+// ##
+// ##  Todo esto vive en el teclado COMUN, asi que funciona en
+// ##  cualquier superficie que lo use (Notas, Flex Intelligence,
+// ##  el navegador...), no en una app concreta.
+// #############################################################
+// Lo marca el corrector cuando aprende una palabra; lo consume el
+// guardado diferido de Flex Intelligence (aiSpellSave), mucho mas abajo.
+// Se declara aqui porque el teclado se define ANTES que ese bloque.
+static bool gSpellDirty = false;
+
+#define KB_SPELL_PAUSE_MS 900          // pausa que dispara el analisis sin terminador
+#define KB_SPELL_BUDGET   2000         // microsegundos por analisis
+
+static char     kbSpWord[FLEX_SPELL_WORD_MAX + 2] = "";   // palabra analizada
+static char     kbSpSug [3][FLEX_SPELL_WORD_MAX + 2];     // sus sugerencias (copiadas: el motor reusa su almacen)
+static int      kbSpSugN   = 0;
+static int      kbSpStart  = -1;        // offset de la palabra en el buffer
+static int      kbSpLen    = 0;
+static bool     kbSpUndo   = false;     // la ultima correccion fue automatica y se puede deshacer
+static char     kbSpUndoTxt[FLEX_SPELL_WORD_MAX + 2] = "";
+static uint32_t kbSpLastKeyMs = 0;
+static bool     kbSpPending   = false;  // hay una palabra a medias sin analizar
+
+static inline bool kbSpellOn(){ return gKbSpell; }
+
+// Deja el corrector sin nada que ofrecer. Se llama al cambiar de
+// superficie o al aceptar una sugerencia.
+static void kbSpellClear(){
+  kbSpSugN = 0; kbSpStart = -1; kbSpLen = 0;
+  kbSpUndo = false; kbSpWord[0] = 0; kbSpUndoTxt[0] = 0;
+}
+
+// Analiza la ULTIMA palabra completa que hay antes de `cur`. `cur`
+// apunta justo detras del terminador recien escrito (o al final de lo
+// escrito, si el disparo fue por pausa).
+static void kbSpellAnalyze(int cur, bool afterTerminator){
+  kbSpSugN = 0; kbSpStart = -1; kbSpLen = 0;
+  if(!kbSpellOn() || !noteBuffer) return;
+  int end = cur;
+  if(afterTerminator){
+    // Saltar hacia atras el terminador (y los espacios que hubiera).
+    while(end > 0){
+      unsigned char c = (unsigned char)noteBuffer[end - 1];
+      if(c >= 0x80) break;
+      if((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '\'') break;
+      end--;
+    }
+  }
+  if(end <= 0) return;
+  int a = end;
+  while(a > 0){
+    unsigned char c = (unsigned char)noteBuffer[a - 1];
+    if(c < 0x80 && !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '\'')) break;
+    a--;
+  }
+  int len = end - a;
+  if(len <= 0 || len > FLEX_SPELL_WORD_MAX) return;
+  memcpy(kbSpWord, noteBuffer + a, len);
+  kbSpWord[len] = 0;
+  if(!flexSpellCheckable(kbSpWord)){ kbSpWord[0] = 0; return; }
+  if(flexSpellKnown(kbSpWord)){ kbSpWord[0] = 0; return; }
+  kbSpStart = a; kbSpLen = len;
+
+  FlexSpellSug sug[3];
+  int n = flexSpellSuggest(kbSpWord, sug, 3, KB_SPELL_BUDGET);
+  for(int i = 0; i < n && i < 3; i++){
+    // Se COPIA: flexSpellSuggest reutiliza su propio almacen en la
+    // siguiente llamada, y los chips viven hasta el proximo repintado.
+    // Guardar los punteros seria quedarse con cadenas que cambian solas.
+    flexSpellApplyCase(kbSpWord, sug[i].word, kbSpSug[i], sizeof(kbSpSug[i]));
+  }
+  kbSpSugN = n < 3 ? n : 3;
+}
+
+// Sustituye en el buffer la palabra analizada por `rep`. Devuelve false
+// si el buffer se movio por debajo (el usuario siguio escribiendo) y ya
+// no coincide con lo que se analizo: entonces no se toca nada.
+static bool kbSpellReplace(const char* rep){
+  if(kbSpStart < 0 || kbSpLen <= 0 || !rep || !noteBuffer) return false;
+  int L = (int)strlen(noteBuffer);
+  if(kbSpStart + kbSpLen > L) return false;
+  if(memcmp(noteBuffer + kbSpStart, kbSpWord, (size_t)kbSpLen) != 0) return false;
+  int rl = (int)strlen(rep);
+  if(L - kbSpLen + rl >= (int)noteBufMax - 1) return false;
+  memmove(noteBuffer + kbSpStart + rl, noteBuffer + kbSpStart + kbSpLen,
+          (size_t)(L - kbSpStart - kbSpLen + 1));
+  memcpy(noteBuffer + kbSpStart, rep, (size_t)rl);
+  // El cursor se mueve solo lo que crecio o encogio la palabra: si el
+  // usuario ya habia escrito detras, su posicion relativa se conserva.
+  noteCur += (rl - kbSpLen);
+  if(noteCur < 0) noteCur = 0;
+  int NL = (int)strlen(noteBuffer);
+  if(noteCur > NL) noteCur = NL;
+  kbSpLen = rl;
+  snprintf(kbSpWord, sizeof(kbSpWord), "%s", rep);
+  return true;
+}
+
+// Acepta la sugerencia i. Aprende la palabra elegida: la proxima vez
+// pesara mas (y dejara de marcarse si el usuario la escribio el).
+static void kbSpellAccept(int i){
+  if(i < 0 || i >= kbSpSugN) return;
+  if(kbSpellReplace(kbSpSug[i])){
+    flexSpellLearn(kbSpSug[i]);
+    gSpellDirty = true;
+  }
+  kbSpellClear();
+}
+
+// Deshace la ultima autocorreccion, devolviendo lo que el usuario
+// habia escrito, y APRENDE esa palabra: si la escribio a proposito y
+// ademas rechazo la correccion, no hay que volver a corregirsela.
+static void kbSpellUndoFix(){
+  if(!kbSpUndo) return;
+  if(kbSpellReplace(kbSpUndoTxt)){
+    flexSpellLearn(kbSpUndoTxt);
+    gSpellDirty = true;
+  }
+  kbSpellClear();
+}
+
+// Se llama tras terminar una palabra. Autocorrige si procede y deja
+// listas las sugerencias para la franja de chips.
+static void kbSpellOnWordEnd(){
+  if(!kbSpellOn()){ kbSpellClear(); return; }
+  kbSpellAnalyze(noteCur, true);
+  if(kbSpStart < 0) return;
+  if(aiConfig()->autoCorrect){
+    char fix[FLEX_SPELL_WORD_MAX + 2];
+    if(flexSpellAutoFix(kbSpWord, fix, sizeof(fix), KB_SPELL_BUDGET)){
+      snprintf(kbSpUndoTxt, sizeof(kbSpUndoTxt), "%s", kbSpWord);
+      if(kbSpellReplace(fix)){
+        kbSpUndo = true;
+        // Tras autocorregir, el primer chip pasa a ser "Deshacer": la
+        // marcha atras tiene que estar a un toque, no escondida.
+        kbSpSugN = 0;
+      }
+    }
+  }
+}
+
+// Disparo por PAUSA: el usuario dejo de escribir a mitad de palabra.
+// Se llama desde el tick de la superficie, no desde el render.
+static void kbSpellPauseTick(){
+  if(!kbSpellOn() || !kbSpPending) return;
+  if(millis() - kbSpLastKeyMs < KB_SPELL_PAUSE_MS) return;
+  kbSpPending = false;
+  kbSpellAnalyze(noteCur, false);
+}
+
+// Marca que se acaba de escribir. `terminator` = la tecla cerraba una
+// palabra (espacio, Enter, puntuacion).
+static void kbSpellNoteKey(bool terminator){
+  kbSpLastKeyMs = millis();
+  if(!kbSpellOn()) return;
+  if(terminator){ kbSpPending = false; kbSpellOnWordEnd(); }
+  else          { kbSpPending = true;  if(!kbSpUndo) kbSpellClear(); }
+}
+
 static void kbChipsBuild(){
   const char* prev[4]; int prevN = kbChipN;
   for(int i = 0; i < prevN && i < 4; i++) prev[i] = kbChipTxt[i];
@@ -12140,6 +12332,14 @@ static void kbChipsBuild(){
   if(!kbChipsWant()) return;
   if(mapaActivo == LAYOUT_NUM){
     for(int i = 0; i < KB_SYMS; i++) kbChipTxt[kbChipN++] = kbSymAt(i);
+  } else if(kbSpUndo){
+    // Autocorregido: lo unico que importa ahora es poder deshacerlo.
+    kbChipTxt[kbChipN++] = "Deshacer";
+  } else if(kbSpSugN > 0){
+    // Hay una palabra dudosa: sus correcciones GANAN a las
+    // completaciones por prefijo. Corregir lo que ya esta mal importa
+    // mas que adivinar lo que viene.
+    for(int i = 0; i < kbSpSugN && kbChipN < 3; i++) kbChipTxt[kbChipN++] = kbSpSug[i];
   } else {
     char w[40];
     if(kbCurrentWord(noteBuffer, noteCur, w, sizeof(w)) > 0) kbChipN = kbSuggest(w, kbChipTxt, 3);
@@ -12249,9 +12449,13 @@ static void noteFuncKey(int i){
     else mapaActivo = LAYOUT_NUM;
   }
   else if(i == 2){ kbLangEs = !kbLangEs; if(mapaActivo == LAYOUT_ES || mapaActivo == LAYOUT_EN) mapaActivo = kbLangEs ? LAYOUT_ES : LAYOUT_EN; }
-  else if(i == 3) noteInsert(" ");
-  else if(i == 4) noteBackspace();
-  else if(i == 5) noteInsert("\n");
+  else if(i == 3){ noteInsert(" ");  kbSpellNoteKey(true);  }
+  else if(i == 4){ noteBackspace();
+    // Borrar invalida lo analizado: los offsets guardados ya no apuntan
+    // a la palabra que se marco, y sustituir a ciegas destrozaria el
+    // texto. Se olvida y se vuelve a analizar cuando toque.
+    kbSpellClear(); kbSpellNoteKey(false); }
+  else if(i == 5){ noteInsert("\n"); kbSpellNoteKey(true);  }
 }
 // FASE F: aceptar un chip. En la capa numerica el chip es un simbolo y se
 // inserta tal cual; en las de letras SUSTITUYE la palabra en construccion y
@@ -12259,6 +12463,14 @@ static void noteFuncKey(int i){
 static void kbApplyChip(int i){
   if(i < 0 || i >= kbChipN) return;
   if(mapaActivo == LAYOUT_NUM){ noteInsert(kbChipTxt[i]); return; }
+  // CORRECTOR. Un chip de correccion NO se comporta como uno de
+  // autocompletado: no borra la palabra que hay bajo el cursor, sino
+  // que sustituye EXACTAMENTE la que se marco como dudosa -- que
+  // normalmente ya quedo detras, con su espacio escrito. Confundir las
+  // dos rutas es lo que haria que aceptar una correccion se comiera lo
+  // que el usuario estaba escribiendo ahora.
+  if(kbSpUndo){ kbSpellUndoFix(); return; }
+  if(kbSpSugN > 0){ kbSpellAccept(i); return; }
   const char* w = kbChipTxt[i];
   char tmp[40];
   while(kbCurrentWord(noteBuffer, noteCur, tmp, sizeof(tmp)) > 0) noteBackspace();
@@ -13362,6 +13574,13 @@ static void noteTick(){
   }
   int lenBefore = strlen(noteBuffer);
   noteEditorTick();
+  // CORRECTOR, disparo POR PAUSA: el usuario dejo una palabra a medias y
+  // ha parado de escribir. Va en el tick y no en el render -- analizar
+  // mientras se dibuja seria meter el diccionario en el hilo grafico --,
+  // y si produce sugerencias nuevas se repinta la franja de chips.
+  { int before = kbSpSugN;
+    kbSpellPauseTick();
+    if(kbSpSugN != before){ kbChipsBuild(); noteRenderKeyboard(0); } }
   // Autoguardado: 2 s despues de la ultima modificacion real del texto.
   if((int)strlen(noteBuffer) != lenBefore) noteDirtyMs = millis();
   if(noteDirtyMs && millis() - noteDirtyMs > NOTE_AUTOSAVE_MS) noteSave();
@@ -24354,6 +24573,20 @@ static char     vwMsg[96] = "";
 static int      vwAppSel  = -1;                   // app sobre la que actua VW_REMOVE
 static uint16_t vwOpenId  = 0;                    // elemento abierto en VW_ITEM
 static int      vwItemMenu = -1;                  // indice con el menu de acciones abierto
+// Opciones del menu de un elemento. La quinta (enviar a Flex
+// Intelligence) es la unica via por la que contenido de la boveda puede
+// salir del dispositivo, y exige boveda abierta + eleccion manual del
+// archivo + confirmacion viendo QUE se envia. Ver vwSendToAi.
+#define VWM_OPEN   0
+#define VWM_RENAME 1
+#define VWM_EXPORT 2
+#define VWM_DELETE 3
+#define VWM_SENDAI 4
+#define VWM_N      5
+// Que se esta confirmando en el dialogo compartido de "si/no".
+#define VWASK_DELETE 0
+#define VWASK_SENDAI 1
+static int vwAskWhat = VWASK_DELETE;
 static bool     vwLongFired = false;
 
 // Clave que se esta escribiendo. Se BORRA en cuanto se usa: ver
@@ -24675,13 +24908,13 @@ static void vwRenderList(){
 
   // Menu de acciones del elemento (se dibuja encima).
   if(vwItemMenu >= 0 && vwItemMenu < vwItemsN){
-    int w = 300, h = 4 * 52 + 20, x = (SCR_W - w) / 2, my = (SCR_H - h) / 2;
+    int w = 300, h = VWM_N * 52 + 20, x = (SCR_W - w) / 2, my = (SCR_H - h) / 2;
     if(uiGlass) drawLiquidGlassPanel(x, my, w, h, 18, TH_GLASS2);
     else        fillRoundRect(x, my, w, h, 18, TH_SURF2);
-    const char* lb[4] = { "Abrir", "Renombrar", "Sacar de la b\xC3\xB3veda",
-                          "Eliminar definitivamente" };
-    uint16_t cl[4] = { TH_TXT, TH_TXT, TH_TXT, TH_ERR };
-    for(int i = 0; i < 4; i++)
+    const char* lb[VWM_N] = { "Abrir", "Renombrar", "Sacar de la b\xC3\xB3veda",
+                              "Eliminar definitivamente", "Enviar a Flex Intelligence" };
+    uint16_t cl[VWM_N] = { TH_TXT, TH_TXT, TH_TXT, TH_ERR, TH_TXT };
+    for(int i = 0; i < VWM_N; i++)
       drawTextClip(x + 18, my + 10 + i * 52 + 16, lb[i], 2, cl[i], x + w - 12);
   }
   vwDrawMsg();
@@ -24693,7 +24926,7 @@ static void vwRenderList(){
 static void vwMenuRect(int i, int &x, int &y, int &w, int &h){
   w = 300; h = 52;
   x = (SCR_W - w) / 2;
-  int th = 4 * 52 + 20;
+  int th = VWM_N * 52 + 20;
   y = (SCR_H - th) / 2 + 10 + i * 52;
 }
 
@@ -25381,6 +25614,13 @@ static void vaultExit(){
 // El unico camino de cierre. Idempotente: se puede llamar desde todos
 // los sitios sin comprobar nada antes.
 static void vaultLockNow(int reason){
+  // FLEX INTELLIGENCE. El permiso de un solo uso para leer un item de la
+  // boveda CADUCA AQUI, en el mismo sitio y en el mismo momento en que se
+  // tira la clave. Da igual por que se cierre -- inactividad, pantalla
+  // apagada, salida manual, suspension --: si la boveda ya no esta
+  // abierta, el consentimiento tampoco vale. Ponerlo aqui y no en cada
+  // llamante es lo que garantiza que no se olvide en ninguna ruta.
+  aiVaultConsentClear();
   // Si habia una nota privada a medias, se guarda CIFRADA antes de tirar
   // la clave: cerrar por inactividad no puede costarle al usuario lo que
   // acababa de escribir.
@@ -25572,9 +25812,62 @@ static void vwKeyConfirm(){
   vaultRender();
 }
 
+// ENVIAR A FLEX INTELLIGENCE. Es la UNICA via por la que contenido de
+// Flex Vault puede salir del dispositivo, y pasa por las cinco puertas
+// que exige la politica de privacidad:
+//   1. la boveda tiene que estar ABIERTA ahora mismo;
+//   2. el usuario ha elegido ESTE archivo a mano (esta en su menu);
+//   3. se le enseña QUE se va a enviar (nombre y tamano) y se le pide
+//      confirmacion -- fkAskOpen, la misma que usa "eliminar";
+//   4. al aceptar se concede un permiso DE UN SOLO USO para ese item;
+//   5. el acceso queda anotado en el registro de seguridad de la boveda.
+// El contenido descifrado se copia al snapshot del trabajo y se PISA
+// aqui mismo: no queda una copia temporal esperando a nadie.
+static uint32_t flexAiSubmit(uint8_t kind, const char* title,
+                             const char* text, size_t len, const char* srcPath);
+static bool vwSendToAi(uint16_t id){
+  if(!flexVaultUnlocked()) return false;
+  if(!aiVaultConsentHas(id)) return false;         // sin permiso concedido, ni se lee
+  FlexVaultItem it;
+  if(!flexVaultGet(id, &it)) return false;
+  static char buf[CW_IN_MAX];
+  int n = flexVaultRead(id, buf, sizeof(buf) - 1);
+  bool ok = false;
+  if(n > 0){
+    buf[n] = 0;
+    char title[CW_TITLE_MAX];
+    snprintf(title, sizeof(title), "%s (b\xC3\xB3veda)", it.name);
+    // Sin ruta de origen a proposito: un resultado NUNCA se puede
+    // aplicar de vuelta sobre un archivo de la boveda por la via
+    // automatica. Si el usuario lo quiere dentro, lo mete el.
+    ok = flexAiSubmit(CW_KIND_ANALYZE, title, buf, (size_t)n, NULL) != 0;
+  }
+  flexVaultWipe(buf, sizeof(buf));                 // ni una copia temporal sobrevive
+  // FXV_EV_OUT ("salio un elemento") es exactamente lo que ha pasado, y
+  // es un evento que la boveda ya sabe registrar y mostrar en su
+  // historial de seguridad. Inventar un codigo nuevo obligaria a tocar
+  // el modulo compartido -- y a que Ultra S3 y Pro lo entendieran -- para
+  // decir lo mismo.
+  flexVaultLogAdd(FXV_EV_OUT, 0);
+  aiVaultConsentClear();                           // el permiso era de un solo uso
+  return ok;
+}
+
 static void vwItemAction(int act){
   if(vwItemMenu < 0 || vwItemMenu >= vwItemsN) return;
   uint16_t id = vwItems[vwItemMenu].id;
+  if(act == VWM_SENDAI){
+    if(!aiConfig()->enabled || (aiConfig()->perms & AI_PERM_TEXT) == 0){
+      // Se dice lo que falta en vez de fallar sin explicacion.
+      vwToast("Activa \"Permitir texto\" en Flex Intelligence");
+      vwItemMenu = -1; vaultRender(); return;
+    }
+    char what[96];
+    snprintf(what, sizeof(what), "Se enviar\xC3\xA1 \"%s\" a tu servidor", vwItems[vwItemMenu].name);
+    vwAskWhat = VWASK_SENDAI;
+    fkAskOpen("\xC2\xBFEnviar a Flex Intelligence?", what);
+    return;
+  }
   if(act == 0){                                   // Abrir
     vwItemMenu = -1;
     vwOpenId = id;
@@ -25607,6 +25900,7 @@ static void vwItemAction(int act){
     return;
   }
   // Eliminar definitivamente
+  vwAskWhat = VWASK_DELETE;
   fkAskOpen("\xC2\xBF" "Eliminar de la b\xC3\xB3veda?", vwItems[vwItemMenu].name);
 }
 
@@ -25677,11 +25971,23 @@ static void vaultTick(){
     int r = fkAskTick();
     if(r == 1 && vwItemMenu >= 0 && vwItemMenu < vwItemsN){
       uint16_t id = vwItems[vwItemMenu].id;
-      bool ok = flexVaultDelete(id);
+      // El MISMO dialogo sirve para dos cosas muy distintas -- borrar y
+      // enviar a Flex Intelligence --, asi que quien lo abrio deja dicho
+      // cual era. Sin esta marca, confirmar un envio borraria el archivo.
+      if(vwAskWhat == VWASK_SENDAI){
+        // La confirmacion ES el consentimiento: se concede aqui, para
+        // ESTE item, y vwSendToAi lo consume y lo borra en el acto.
+        aiVaultConsentGrant(id);
+        bool ok = vwSendToAi(id);
+        vwToast(ok ? "Enviado a Flex Intelligence" : "No se pudo enviar");
+      } else {
+        bool ok = flexVaultDelete(id);
+        vwToast(ok ? "Eliminado de la b\xC3\xB3veda" : flexVaultError());
+      }
       vwItemMenu = -1;
+      vwAskWhat  = VWASK_DELETE;
       vwReload();
-      vwToast(ok ? "Eliminado de la b\xC3\xB3veda" : flexVaultError());
-    } else if(r != 0) vwItemMenu = -1;
+    } else if(r != 0){ vwItemMenu = -1; vwAskWhat = VWASK_DELETE; }
     if(r != 0) vaultRender();
     return;
   }
@@ -25801,7 +26107,7 @@ static void vaultTick(){
   // ---- Menu de acciones de un elemento ----
   if(vwView == VW_LIST && vwItemMenu >= 0){
     if(T.tap){
-      for(int i = 0; i < 4; i++){
+      for(int i = 0; i < VWM_N; i++){
         int x, y, w, h; vwMenuRect(i, x, y, w, h);
         if(T.x >= x && T.x <= x + w && T.y >= y && T.y <= y + h){ vwItemAction(i); return; }
       }
@@ -26077,7 +26383,6 @@ static void aiPrefsForget(){
 //  cambia, no por tecla.
 // -------------------------------------------------------------
 #define AI_SPELL_PATH "/System/spell.txt"
-static bool gSpellDirty = false;
 
 static void aiSpellLoad(){
   flexSpellBegin();
@@ -27519,6 +27824,10 @@ static void aiKbUnbind(){
 static bool aiKeyboardTick(){
   aiKbBind();
   bool changed = false;
+  // Disparo del corrector POR PAUSA: el usuario dejo la palabra a medias.
+  // Va aqui, en el tick, y no en el render: analizar mientras se dibuja
+  // seria meter el diccionario dentro del hilo grafico.
+  { int before = kbSpSugN; kbSpellPauseTick(); if(kbSpSugN != before) changed = true; }
   // Via rapida (Fase B): la tecla se escribe al TOCAR.
   int ev = kbMtPoll();
   for(int e = 0; e < ev; e++){
