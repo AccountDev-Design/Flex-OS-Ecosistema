@@ -11,18 +11,49 @@ repositorio aunque esta compilación no lo use.
 
 ---
 
+## 0. Tamaños reales (compilación verificada)
+
+Compilado de verdad para `esp32:esp32:esp32p4` con **core ESP32 3.1.3**,
+PSRAM activada, flash de 16 MB y la tabla de particiones de este
+repositorio:
+
+| | |
+|---|---|
+| Firmware (`.bin`) | **1 493 120 B** (1,42 MB) |
+| Partición `app0` | 5 242 880 B (5,00 MB) |
+| Ocupación | **28,5 %** |
+| Libre en `app0` | **3 749 760 B** (3,58 MB) |
+| RAM estática (interna) | **90 652 B** de 327 680 (27,7 %) |
+| Libre para variables locales | 237 028 B |
+
+Coste de Flex Intelligence sobre la versión anterior, medido compilando
+las dos con el mismo core y los mismos flags: **+56,8 KB de flash** y
+**+10,8 KB de RAM interna**. Los buffers de trabajo grandes (el fichero
+que se abre para buscar dentro, los snapshots, el historial) viven en
+**PSRAM**, no en RAM interna.
+
+PSRAM adicional, reservada bajo demanda y sólo si hace falta: ~1,7 MB en
+cachés de imagen (página vecina del escritorio, captura del panel, fondo
+de la tarjeta flotante) y ~27 KB de datos (cola de trabajos, chat,
+buffers de trabajo). Sin PSRAM el sistema arranca igual y esas funciones
+se degradan diciéndolo.
+
+---
+
 ## 1. Compilar en modo USB (sin OTA)
 
 El módulo OTA ya tenía su interruptor maestro desde que se escribió
 (`FLEXOS_OTA_ON`, en `FlexOS_OTA.h`). No hace falta borrar ni tocar una
 línea de él: basta con apagarlo al compilar.
 
-```
+```bash
 arduino-cli compile \
-  --fqbn esp32:esp32:esp32p4 \
+  --fqbn esp32:esp32:esp32p4:PSRAM=enabled,FlashSize=16M \
   --build-property "compiler.cpp.extra_flags=-DFLEXOS_OTA_ON=0" \
-  FlexOS_Ultra.ino
+  <carpeta-del-sketch>
 ```
+
+(El comando completo, con la tabla de particiones, está en el apartado 2.)
 
 Con `FLEXOS_OTA_ON=0`:
 
@@ -73,8 +104,9 @@ coredump, data, coredump, 0xFF0000, 0x10000,
 
 Notas de por qué es así:
 
-* **5 MB para la app** es holgado a propósito. Flex OS Ultra ronda
-  1,3 MB hoy; dejar 5 evita tener que cambiar la tabla de particiones —
+* **5 MB para la app** es holgado a propósito. Flex OS Ultra mide
+  1,42 MB medidos (28,5 % de la partición); dejar 5 evita tener que
+  cambiar la tabla de particiones —
   y por tanto borrar LittleFS — durante mucho tiempo. Cambiar la tabla
   **es** lo que hace perder los archivos del usuario.
 * **`otadata` se conserva aunque no haya OTA.** Ocupa 8 KB y quitarla
@@ -86,15 +118,34 @@ Notas de por qué es así:
 
 ### Guardar esto como CSV
 
-Guarda la tabla en `flexos_ultra_usb.csv` y compila con:
+El fichero está en la raíz del repositorio como
+`flexos_ultra_usb.csv`, y `tests/host/test_parts.py` (que corre con
+`make`) comprueba que cuadra: sin solapes, sin salirse de los 16 MB, con
+las particiones de app alineadas a 64 KB y con una sola de aplicación.
 
-```
+Copia `flexos_ultra_usb.csv` a la carpeta del sketch como
+`partitions.csv` y compila:
+
+```bash
+cp flexos_ultra_usb.csv <carpeta-del-sketch>/partitions.csv
+
+arduino-cli core install esp32:esp32@3.1.3
 arduino-cli compile \
-  --fqbn esp32:esp32:esp32p4:PartitionScheme=custom \
-  --build-property "build.partitions=flexos_ultra_usb" \
+  --fqbn esp32:esp32:esp32p4:PartitionScheme=custom,PSRAM=enabled,FlashSize=16M \
   --build-property "compiler.cpp.extra_flags=-DFLEXOS_OTA_ON=0" \
-  FlexOS_Ultra.ino
+  <carpeta-del-sketch>
 ```
+
+`PartitionScheme=custom` es lo que hace que se lea el `partitions.csv`
+de la carpeta del sketch. Se puede comprobar que se aplicó mirando el
+`.partitions.bin` generado: debe dar `app0` de 5120 KB y `spiffs` de
+11136 KB, no el esquema por defecto.
+
+> **Nota sobre el aviso de tamaño.** Con `PartitionScheme=custom`,
+> `arduino-cli` imprime «Maximum is 16777216 bytes» — el tamaño de la
+> flash entera, no el de `app0`. El límite real es la partición: 5 MB.
+> Con 1,42 MB de firmware sobra de largo, pero el porcentaje que imprime
+> la herramienta (8 %) no es el que cuenta; el real es 28,5 %.
 
 ---
 
