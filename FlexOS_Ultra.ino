@@ -26602,6 +26602,160 @@ static int aiLocalCorrect(const char* in, size_t inLen, char* out, size_t cap){
   return fixed;
 }
 
+
+// Rutas que Flex Intelligence nunca toca (Vault, /System, ocultas). Se
+// define con las acciones estructuradas, mas abajo; la busqueda la
+// necesita antes para no listar lo que no debe.
+static bool aiPathForbidden(const char* p);
+
+// #############################################################
+// ##  BUSQUEDA LOCAL DE ARCHIVOS  ·  Cowork, sin red
+// ##  ------------------------------------------------------
+// ##  Corre ENTERA en la placa. No sale ni un byte al servidor: ni
+// ##  el nombre de los ficheros, ni su contenido, ni la consulta.
+// ##  Por eso funciona sin configurar nada y sin conexion.
+// ##
+// ##  DONDE BUSCA, Y SOLO AHI: /Notas, /Documentos y /Paint. Son las
+// ##  tres carpetas de contenido del usuario.
+// ##
+// ##  DONDE NO BUSCA, Y NO ES POR OLVIDO:
+// ##    · /.fxvault -- Flex Vault. Ni el nombre de un elemento sale
+// ##      de ahi por esta via: la boveda tiene su propia puerta, con
+// ##      su clave y su confirmacion.
+// ##    · /System -- ajustes, diccionario, historial de Cowork, chat.
+// ##      Nada de eso es "un archivo del usuario" y enseñarlo en una
+// ##      lista de resultados solo serviria para filtrar por accidente
+// ##      lo que el sistema guarda de si mismo.
+// ##    · /Papelera -- lo borrado esta borrado.
+// ##    · Cualquier ruta oculta (empieza por punto).
+// ##
+// ##  LIMITES, para que no congele nada. La busqueda corre en la
+// ##  tarea de fondo y ademas cede la CPU cada pocos ficheros, pero
+// ##  eso no basta: sin topes, una carpeta con mil ficheros de 100 KB
+// ##  seria minutos de lectura de flash. Se acotan las cuatro cosas
+// ##  que pueden crecer: cuantos resultados, cuantos ficheros se
+// ##  miran, cuanto pesa el mayor que se abre para leer dentro, y
+// ##  cuanto tiempo total.
+// ##
+// ##  SE PUEDE CANCELAR de verdad: el bucle mira el estado del
+// ##  trabajo, y si el usuario lo cancelo, para y no escribe nada.
+// #############################################################
+#define AIF_MAX_RESULTS   12      // resultados que se enseñan
+#define AIF_MAX_FILES    240      // ficheros que se llegan a mirar
+#define AIF_MAX_CONTENT 8192      // tamano maximo para mirar DENTRO
+#define AIF_BUDGET_MS   6000      // tope de tiempo de la busqueda entera
+#define AIF_YIELD_EVERY   16      // cada cuantos ficheros se cede la CPU
+
+// Carpetas donde se busca. La lista es blanca a proposito: anadir una
+// carpeta es una decision consciente, no algo que pase solo porque
+// alguien cree un directorio nuevo.
+static const char* AIF_DIRS[] = { FLEXFS_DIR_NOTAS, FLEXFS_DIR_DOCS, FLEXFS_DIR_PAINT };
+#define AIF_DIRS_N ((int)(sizeof(AIF_DIRS) / sizeof(AIF_DIRS[0])))
+
+// true si la extension es texto plano que se puede mirar por dentro
+// SIN riesgo: nada binario, nada que haya que interpretar.
+static bool aifTextExt(const char* name){
+  size_t l = strlen(name);
+  if(l > 4 && (!strcasecmp(name + l - 4, ".txt") || !strcasecmp(name + l - 4, ".csv") ||
+               !strcasecmp(name + l - 4, ".log") || !strcasecmp(name + l - 4, ".ino"))) return true;
+  if(l > 5 && (!strcasecmp(name + l - 5, ".note") || !strcasecmp(name + l - 5, ".json"))) return true;
+  return false;
+}
+
+// true si esta app del sistema puede abrir ese fichero. Es lo que
+// decide si un resultado ofrece "abrir" o solo se lista: no se ofrece
+// abrir algo que acabaria en una pantalla vacia.
+static bool aifOpenable(const char* name){
+  size_t l = strlen(name);
+  if(aifTextExt(name)) return true;                                    // Notas
+  if(l > 4 && (!strcasecmp(name + l - 4, ".jpg") ||
+               !strcasecmp(name + l - 4, ".fpn"))) return true;        // Galeria / Paint
+  if(l > 5 && !strcasecmp(name + l - 5, ".jpeg")) return true;
+  return false;
+}
+
+// Comparacion sin distinguir mayusculas ni tildes, sobre el mismo
+// plegado que usa el corrector: buscar "cancion" encuentra "canción".
+static bool aifMatch(const char* hay, const char* needle){
+  if(!needle || !needle[0]) return true;
+  char fh[128], fn[64];
+  flexSpellFold(hay, fh, sizeof(fh));
+  flexSpellFold(needle, fn, sizeof(fn));
+  if(!fn[0]) return true;
+  return strstr(fh, fn) != NULL;
+}
+
+// La busqueda. Escribe el informe en `out` y devuelve cuantos
+// resultados encontro (o -1 si la cancelaron). Corre en la tarea de
+// fondo: aqui se puede leer flash y dormir sin molestar a nadie.
+static int aiLocalFind(uint32_t jobId, const char* query, char* out, size_t cap){
+  size_t o = 0;
+  int found = 0, looked = 0;
+  uint32_t t0 = millis();
+  bool truncated = false;
+
+  out[0] = 0;
+  if(!flexFsReady()){ snprintf(out, cap, "Sin almacenamiento montado."); return 0; }
+
+  static FlexFsEntry ents[48];
+  static char body[AIF_MAX_CONTENT + 1];
+
+  for(int d = 0; d < AIF_DIRS_N && found < AIF_MAX_RESULTS; d++){
+    // La lista blanca de arriba ya excluye Vault, /System y la
+    // papelera, pero se vuelve a comprobar aqui: si manana alguien
+    // anade una carpeta a AIF_DIRS sin pensarlo, esta guarda lo para.
+    if(aiPathForbidden(AIF_DIRS[d])) continue;
+    if(flexFsIsVaultPath(AIF_DIRS[d])) continue;
+
+    int n = flexFsList(AIF_DIRS[d], ents, (int)(sizeof(ents) / sizeof(ents[0])));
+    for(int i = 0; i < n && found < AIF_MAX_RESULTS; i++){
+      if(ents[i].dir) continue;                       // sin recursion: estas carpetas son planas
+      if(ents[i].name[0] == '.') continue;            // oculto
+
+      // CANCELACION y TIEMPO, comprobados EN EL BUCLE. Un tope que solo
+      // se mira al final no es un tope.
+      { CoworkJob* j = coworkFind(jobId);
+        if(!j || j->state == CW_CANCELLED) return -1; }
+      if(millis() - t0 > AIF_BUDGET_MS){ truncated = true; break; }
+      if(++looked > AIF_MAX_FILES){ truncated = true; break; }
+      if((looked % AIF_YIELD_EVERY) == 0) vTaskDelay(pdMS_TO_TICKS(2));   // cede CPU
+
+      bool hit = aifMatch(ents[i].name, query);
+      // Si el nombre no coincide, se mira DENTRO -- pero solo en texto
+      // plano y solo si el fichero es pequeno. Abrir un .jpg de 2 MB
+      // para buscar una palabra no tiene sentido y ademas cuesta.
+      if(!hit && aifTextExt(ents[i].name) && ents[i].size > 0 && ents[i].size <= AIF_MAX_CONTENT){
+        char path[FLEXFS_PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", AIF_DIRS[d], ents[i].name);
+        int rn = flexFsReadText(path, body, sizeof(body));
+        if(rn > 0){ body[rn] = 0; hit = aifMatch(body, query); }
+        // El contenido se pisa SIEMPRE, coincida o no: es un documento
+        // del usuario y no tiene por que quedarse en RAM despues.
+        memset(body, 0, sizeof(body));
+      }
+      if(!hit) continue;
+
+      char sz[16]; flexFsFmtSize(ents[i].size, sz, sizeof(sz));
+      int w = snprintf(out + o, cap - o, "%s%s/%s  (%s)%s",
+                       found ? "\n" : "", AIF_DIRS[d], ents[i].name, sz,
+                       aifOpenable(ents[i].name) ? "" : "  [no se puede abrir]");
+      if(w < 0 || (size_t)w >= cap - o){ truncated = true; break; }
+      o += (size_t)w;
+      found++;
+    }
+  }
+
+  if(found == 0){
+    snprintf(out, cap, "Sin resultados para \"%s\".\nSe buscó en /Notas, /Documentos y /Paint.",
+             query && query[0] ? query : "");
+  } else if(truncated && o + 40 < cap){
+    // Se DICE que la lista esta cortada. Una lista incompleta que
+    // parece completa es peor que no buscar.
+    snprintf(out + o, cap - o, "\n(b\xC3\xBAsqueda acotada: puede haber m\xC3\xA1s)");
+  }
+  return found;
+}
+
 static void coworkTaskFn(void*){
   for(;;){
     // Espera pasiva. El aviso llega de flexAiPump() cuando hay trabajo;
@@ -26634,7 +26788,25 @@ static void coworkTaskFn(void*){
       // con el corrector local en vez de fallar con "sin configurar":
       // es una funcion rapida y tiene que funcionar sin red.
       bool localOk = false;
-      if(kind == CW_KIND_CORRECT && (!aiConfigured() || aiConfig()->localOnly)){
+      // BUSCAR ARCHIVOS ES SIEMPRE LOCAL. No es "local si no hay
+      // servidor": es local y punto. Mandar la lista de ficheros del
+      // usuario -- o su contenido -- a un servidor para buscar en ella
+      // seria justo lo contrario de lo que pide una busqueda local.
+      if(kind == CW_KIND_FIND){
+        static char outBuf[CW_OUT_MAX];
+        int n = aiLocalFind(id, inBuf, outBuf, sizeof(outBuf));
+        if(n < 0){
+          // Cancelada: el estado ya es CW_CANCELLED, no se toca.
+        } else {
+          coworkSetAction(id, AI_ACT_SHOW_TEXT, NULL);
+          coworkFinish(id, outBuf, strlen(outBuf), 0, false, millis());
+          CoworkJob* d = coworkFind(id);
+          if(d) snprintf(d->err_, sizeof(d->err_), "%d", n);   // n de resultados
+        }
+        memset(outBuf, 0, sizeof(outBuf));
+        localOk = true;
+      }
+      if(!localOk && kind == CW_KIND_CORRECT && (!aiConfigured() || aiConfig()->localOnly)){
         static char outBuf[CW_OUT_MAX];
         int fixed = aiLocalCorrect(inBuf, inLen, outBuf, sizeof(outBuf));
         uint32_t nowHash = srcHash;
@@ -28043,21 +28215,29 @@ static void aiDrawChat(int bx, int by, int bw, int bh){
   }
 }
 
+#define AI_TOOLS_N 7
+static const char* AI_TOOL_LABEL[AI_TOOLS_N] = {
+  "Corregir", "Resumir", "Traducir", "Cambiar tono", "Analizar texto", "Explicar error",
+  "Buscar archivos" };
+static const uint8_t AI_TOOL_KIND[AI_TOOLS_N] = {
+  CW_KIND_CORRECT, CW_KIND_SUMMARY, CW_KIND_TRANSLATE,
+  CW_KIND_TONE,    CW_KIND_ANALYZE, CW_KIND_EXPLAIN, CW_KIND_FIND };
+
 static void aiDrawTools(int bx, int by, int bw, int bh){
-  static const char* TL[6] = { "Corregir", "Resumir", "Traducir", "Cambiar tono", "Analizar texto", "Explicar error" };
   drawText(bx + 14, by + 4, "Sobre el portapapeles del sistema", 1, TH_TXT2);
-  int y = by + 26, h = 46;
-  for(int i = 0; i < 6 && y + h < by + bh - 8; i++){
+  int y = by + 26, h = 44;
+  for(int i = 0; i < AI_TOOLS_N && y + h < by + bh - 8; i++){
+    bool local = (AI_TOOL_KIND[i] == CW_KIND_FIND);
     fillRoundRect(bx + 12, y, bw - 24, h, 14, thCard());
-    drawText(bx + 26, y + (h - 14) / 2, TL[i], 2, TH_TXT);
-    drawTextR(bx + bw - 26, y + (h - 8) / 2, ">", 1, TH_MUTE);
-    y += h + 8;
+    drawText(bx + 26, y + (h - 14) / 2, AI_TOOL_LABEL[i], 2, TH_TXT);
+    // Se marca lo que NO sale del dispositivo. Es informacion que el
+    // usuario quiere ver ANTES de tocar, no despues.
+    if(local) drawTextR(bx + bw - 26, y + (h - 8) / 2, "en el dispositivo", 1, TH_OK);
+    else      drawTextR(bx + bw - 26, y + (h - 8) / 2, ">", 1, TH_MUTE);
+    y += h + 6;
   }
   if(!clipboard[0]) drawTextC(bx + bw / 2, by + bh - 20, "El portapapeles est\xC3\xA1 vac\xC3\xAD" "o", 1, TH_MUTE);
 }
-
-static const uint8_t AI_TOOL_KIND[6] = { CW_KIND_CORRECT, CW_KIND_SUMMARY, CW_KIND_TRANSLATE,
-                                         CW_KIND_TONE,    CW_KIND_ANALYZE, CW_KIND_EXPLAIN };
 
 static void aiDrawWork(int bx, int by, int bw, int bh){
   if(!gCwSlots){
@@ -28321,20 +28501,25 @@ static void flexAiTick(){
       gAiKbOn = true; kbMtSurfaceReset(); flexAiRender(); return;
     }
   } else if(gAiTab == AIT_TOOLS){
-    int y = cy + 26, h = 46;
-    for(int i = 0; i < 6; i++){
+    int y = cy + 26, h = 44;
+    for(int i = 0; i < AI_TOOLS_N; i++){
       if(T.tap && T.y >= y && T.y <= y + h){
         T.tap = false;
         if(!clipboard[0]){ aiToast("Copia primero el texto que quieras usar"); flexAiRender(); return; }
         char title[CW_TITLE_MAX];
-        snprintf(title, sizeof(title), "%s (portapapeles)", coworkKindName(AI_TOOL_KIND[i]));
+        // La busqueda se titula con lo que se busca, no con "(portapapeles)":
+        // en la lista de Cowork lo util es ver QUE se buscaba.
+        if(AI_TOOL_KIND[i] == CW_KIND_FIND)
+          snprintf(title, sizeof(title), "Buscar \"%.24s\"", clipboard);
+        else
+          snprintf(title, sizeof(title), "%s (portapapeles)", coworkKindName(AI_TOOL_KIND[i]));
         uint32_t id = flexAiSubmit(AI_TOOL_KIND[i], title, clipboard, strlen(clipboard), NULL);
         aiToast(id ? "Tarea creada" : "La cola est\xC3\xA1 llena");
         gAiTab = AIT_WORK;
         flexAiRender();
         return;
       }
-      y += h + 8;
+      y += h + 6;
     }
   } else if(gAiTab == AIT_WORK){
     if(gAiSelJob >= 0 && gAiSelJob < coworkCount()){
