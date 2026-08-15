@@ -26792,6 +26792,15 @@ static void aiAnnounceJob(const CoworkJob* j){
 static void flexAiOpenApp(uint32_t focusJob);      // definida con la app, mas abajo
 static void aiToast(const char* m);                // aviso corto dentro de la app
 static void aiConfirmOpen(uint32_t jobId);         // tarjeta de confirmacion de una accion
+static bool aiConfirmOpenNow();
+static bool aiChatResolve();                       // completa los turnos que esperaban respuesta
+static void aiActionSummary(const CoworkJob* j, char* out, size_t n);
+static void aiChatSave();
+static void flexAiRender();
+// Pestana visible de la app. Se declara aqui porque flexAiPump necesita
+// saber si el chat esta delante para repintarlo al llegar una respuesta.
+#define AIT_CHAT  0
+extern int gAiTab;
 static uint32_t gAiFocusJob = 0;                   // trabajo que la app debe enseñar al abrirse
 
 // ANALIZAR IMAGEN: FUNCION FUTURA, Y SE DICE.
@@ -26853,6 +26862,20 @@ static void flexAiPump(){
   wasHeavy = heavy;
 
   if(coworkPump(now) > 0) gCwDirty = true;
+
+  // LA CONVERSACION SE COMPLETA SOLA. Va aqui -- en el paso periodico y
+  // no en el tick de la app -- para que un trabajo lanzado desde el chat
+  // se resuelva aunque el usuario este en el escritorio o en otra
+  // pestana: al volver, la respuesta ya esta puesta. Y como esto corre
+  // en el hilo de UI, no bloquea nada: la peticion sigue en la tarea de
+  // fondo.
+  if(aiChatResolve()){
+    aiChatSave();
+    // Si el chat esta a la vista, se repinta ya. Si no, no se toca la
+    // pantalla: el turno actualizado se vera al abrirlo.
+    if(gState == ST_APP && gAppId == IC_FLEXAI && gAiTab == AIT_CHAT && !aiConfirmOpenNow())
+      flexAiRender();
+  }
 
   // Anuncios: una tarjeta por cambio a un estado terminal.
   //
@@ -27428,7 +27451,6 @@ static bool flexAiOverlayTick(){
 //  ofrece configurarlo; si no hay red, lo dice. Ni un mensaje de
 //  ejemplo, ni una respuesta simulada.
 // -------------------------------------------------------------
-#define AIT_CHAT  0
 #define AIT_TOOLS 1
 #define AIT_WORK  2
 #define AIT_SET   3
@@ -27442,12 +27464,18 @@ static const char* AI_TAB_NAME[AIT_N] = { "Asistente", "Herramientas", "Cowork",
 #define AI_CHAT_MAX   12
 #define AI_CHAT_LEN  160
 #define AI_CHAT_PATH "/System/aichat.txt"
-struct AiChatTurn { bool mine; char text[AI_CHAT_LEN]; };
+// Un turno de la conversacion. `jobId` != 0 marca un turno que TODAVIA
+// espera un resultado: es el mensaje "Trabajando en ello..." que hay que
+// sustituir por la respuesta cuando llegue. Sin esta referencia, el
+// chat se quedaba con el "estoy en ello" para siempre y la respuesta
+// solo aparecia en la pestana de Cowork -- que es justo lo que hace que
+// una conversacion no parezca una conversacion.
+struct AiChatTurn { bool mine; uint32_t jobId; char text[AI_CHAT_LEN]; };
 static AiChatTurn* gChat  = NULL;
 static int         gChatN = 0;
 static bool        gChatDirty = false;
 
-static int  gAiTab      = AIT_CHAT;
+int         gAiTab      = AIT_CHAT;   // no static: lo consulta flexAiPump, definido antes
 static int  gAiScroll   = 0;
 static int  gAiSelJob   = -1;          // trabajo abierto en detalle (indice), -1 = lista
 static bool gAiKbOn     = false;       // teclado de la app abierto
@@ -27469,10 +27497,61 @@ static void aiChatPush(bool mine, const char* txt){
     for(int i = 1; i < AI_CHAT_MAX; i++) gChat[i - 1] = gChat[i];
     gChatN = AI_CHAT_MAX - 1;
   }
-  gChat[gChatN].mine = mine;
+  gChat[gChatN].mine  = mine;
+  gChat[gChatN].jobId = 0;
   snprintf(gChat[gChatN].text, AI_CHAT_LEN, "%s", txt);
   gChatN++;
   gChatDirty = true;
+}
+// Igual, pero dejando el turno ENGANCHADO a un trabajo: cuando ese
+// trabajo termine, aiChatResolve lo sustituye por la respuesta.
+static void aiChatPushPending(const char* txt, uint32_t jobId){
+  aiChatPush(false, txt);
+  if(gChat && gChatN > 0) gChat[gChatN - 1].jobId = jobId;
+}
+
+// Sustituye los turnos que esperaban por su resultado. Se llama desde
+// flexAiPump (hilo de UI), asi que la conversacion se completa sola
+// aunque el usuario este mirando otra pestana o el escritorio.
+// Devuelve true si cambio algo.
+static bool aiChatResolve(){
+  if(!gChat || gChatN == 0) return false;
+  bool changed = false;
+  for(int i = 0; i < gChatN; i++){
+    if(gChat[i].jobId == 0) continue;
+    CoworkJob* j = coworkFind(gChat[i].jobId);
+    if(!j){
+      // El trabajo desaparecio (lo borro el usuario, o lo descarto el
+      // historial al llenarse). No se deja el "estoy en ello" colgado.
+      snprintf(gChat[i].text, AI_CHAT_LEN, "La tarea ya no est\xC3\xA1 disponible.");
+      gChat[i].jobId = 0; changed = true; continue;
+    }
+    if(j->state == CW_DONE){
+      if(j->action != AI_ACT_NONE && j->action != AI_ACT_SHOW_TEXT){
+        // Hay algo que APLICAR: no se aplica solo ni se esconde el
+        // texto -- se dice que esta listo y donde confirmarlo.
+        char sum[96]; aiActionSummary(j, sum, sizeof(sum));
+        snprintf(gChat[i].text, AI_CHAT_LEN, "Listo. %s - revisa y confirma en Cowork.", sum);
+      } else if(j->outLen > 0){
+        snprintf(gChat[i].text, AI_CHAT_LEN, "%s", j->out);
+      } else {
+        snprintf(gChat[i].text, AI_CHAT_LEN, "Termin\xC3\xB3 sin respuesta.");
+      }
+      coworkMarkSeen(j->id);
+      gChat[i].jobId = 0; changed = true;
+    } else if(j->state == CW_ERROR){
+      // Mensaje ENTENDIBLE, no un codigo: el usuario tiene que saber si
+      // el problema es suyo (sin configurar) o del momento (sin red).
+      snprintf(gChat[i].text, AI_CHAT_LEN, "No pude responder: %s",
+               j->err_[0] ? j->err_ : "error desconocido");
+      gChat[i].jobId = 0; changed = true;
+    } else if(j->state == CW_CANCELLED){
+      snprintf(gChat[i].text, AI_CHAT_LEN, "Cancelado.");
+      gChat[i].jobId = 0; changed = true;
+    }
+  }
+  if(changed) gChatDirty = true;
+  return changed;
 }
 static void aiChatLoad(){
   aiChatEnsure();
@@ -27490,7 +27569,8 @@ static void aiChatLoad(){
     int k = 0;
     while(i < n && buf[i] != '\n' && k < AI_CHAT_LEN - 1) gChat[gChatN].text[k++] = buf[i++];
     gChat[gChatN].text[k] = 0;
-    gChat[gChatN].mine = mine;
+    gChat[gChatN].mine  = mine;
+    gChat[gChatN].jobId = 0;
     gChatN++;
     while(i < n && buf[i] != '\n') i++;
     i++;
@@ -27502,7 +27582,12 @@ static void aiChatSave(){
   static char buf[AI_CHAT_MAX * (AI_CHAT_LEN + 4)];
   size_t o = 0;
   for(int i = 0; i < gChatN; i++){
-    int w = snprintf(buf + o, sizeof(buf) - o, "%c%s\n", gChat[i].mine ? '>' : '<', gChat[i].text);
+    // Un turno PENDIENTE no se guarda como pendiente: al reiniciar, el
+    // trabajo que esperaba ya no existe (los activos no sobreviven), y
+    // restaurar un "Trabajando en ello..." que nunca se va a resolver
+    // seria dejar una mentira en el historial.
+    const char* txt = gChat[i].jobId ? "(interrumpido al reiniciar)" : gChat[i].text;
+    int w = snprintf(buf + o, sizeof(buf) - o, "%c%s\n", gChat[i].mine ? '>' : '<', txt);
     if(w < 0 || (size_t)w >= sizeof(buf) - o) break;
     o += (size_t)w;
   }
@@ -28183,7 +28268,7 @@ static void aiSendInput(){
                         : "A\xC3\xBAn no hay servidor configurado. Ve a Ajustes > Servidor.");
   } else {
     uint32_t id = flexAiSubmit(CW_KIND_ANALYZE, "Consulta", gAiInput, (size_t)gAiInputLen, NULL);
-    if(id) aiChatPush(false, "Trabajando en ello... te aviso al terminar.");
+    if(id) aiChatPushPending("Trabajando en ello...", id);
     else   aiChatPush(false, "No se pudo encolar: la cola est\xC3\xA1 llena.");
   }
   gAiInput[0] = 0; gAiInputLen = 0;
