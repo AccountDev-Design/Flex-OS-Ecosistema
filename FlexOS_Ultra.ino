@@ -21183,6 +21183,10 @@ static void notifDrawTail(int cx, int topY, uint16_t col){
 // escritorio y la tarjeta flotante dibujan la MISMA tarjeta de Cowork
 // -- es un solo gestor de notificaciones, no dos.
 #define NFL_BTN_W 92
+// "La interfaz de Flex Intelligence puede aparecer ahora mismo": en esta
+// version, false mientras haya una app en horizontal. Se define con el
+// resto de Flex Intelligence, mucho mas abajo, pero la isla la necesita.
+static bool flexAiUiAllowed();
 static void nflSparkIcon(int cx, int cy, int r, uint16_t col);
 static const char* nflActLabel(uint8_t act);
 static void flexAiNotifAction(int idx, uint8_t act);
@@ -21570,6 +21574,18 @@ static void nflDropBg(){
   nflIdx   = -1;
 }
 
+// Olvida el fondo SIN devolverlo. Es para cuando lo que hay debajo ya
+// no es lo que se capturo: al girar a horizontal, o al ceder la
+// pantalla, la app de debajo se ha repintado entera y devolver el
+// rectangulo guardado estamparia un trozo de la pantalla ANTERIOR
+// encima de la nueva. En ese caso lo correcto es no tocar nada: la app
+// ya ha dibujado lo suyo.
+static void nflForgetBg(){
+  nflHasBg = false;
+  nflIdx   = -1;
+  nflDragging = false;
+}
+
 // Icono de Flex Intelligence en pequeno (el destello del icono de la
 // app, sin su fondo): asi la tarjeta se reconoce de un vistazo como
 // suya y no como una deteccion de hardware.
@@ -21663,6 +21679,7 @@ static int nflPick(){
 // true si la tarjeta flotante debe estar en pantalla ahora mismo.
 static bool nflWanted(){
   if(gNotifCount == 0) return false;
+  if(!flexAiUiAllowed()) return false;   // horizontal: nada encima (ver el bloque de arriba)
   if(gState == ST_HOME && qsPanelY == 0 && !editMode) return false;  // ahi manda la isla de siempre
   if(gState == ST_SPLASH || gState == ST_OOBE_LANG || gState == ST_OOBE_NAME) return false;
   if(gState == ST_LOCK) return false;               // en la pantalla de bloqueo no se filtra nada
@@ -21744,7 +21761,12 @@ static bool nflHandleTouch(){
 // justo antes que el OTA, para que quede por encima de todo lo demas.
 static void nflTick(){
   if(!nflWanted()){
-    if(nflHasBg) nflDropBg();
+    // Si la razon de callarse es que estamos en horizontal (o
+    // embebidos), la pantalla ya la ha repintado otro: el fondo
+    // guardado corresponde a una orientacion que ya no existe y
+    // devolverlo dejaria un recuadro de la pantalla anterior encima
+    // del juego. Se olvida sin repintar.
+    if(nflHasBg){ if(flexAiUiAllowed()) nflDropBg(); else nflForgetBg(); }
     nflDragging = false;
     return;
   }
@@ -21755,7 +21777,13 @@ static void nflTick(){
   // devolver el fondo viejo antes de capturar el nuevo. Sin esto, girar
   // a horizontal con una tarjeta en pantalla dejaria el rectangulo
   // vertical congelado encima del juego.
-  if(nflHasBg && (idx != nflIdx || nflLandSaved != gLand)) nflDropBg();
+  // Cambio de tarjeta: se devuelve el fondo antes de capturar el nuevo.
+  // Cambio de ORIENTACION con una tarjeta puesta: el fondo guardado ya
+  // no vale y devolverlo seria estampar la pantalla anterior, asi que
+  // solo se olvida. (Hoy este segundo caso no deberia darse -- en
+  // horizontal no se dibujan tarjetas -- pero la regla vale igual.)
+  if(nflHasBg && nflLandSaved != gLand)  nflForgetBg();
+  else if(nflHasBg && idx != nflIdx)     nflDropBg();
 
   if(!nflHasBg){
     if(!nflSaveBg()) return;              // sin PSRAM: no se dibuja (y no se corrompe nada)
@@ -25928,7 +25956,13 @@ static void vwItemAction(int act){
     char what[96];
     snprintf(what, sizeof(what), "Se enviar\xC3\xA1 \"%s\" a tu servidor", vwItems[vwItemMenu].name);
     vwAskWhat = VWASK_SENDAI;
-    fkAskOpen("\xC2\xBFEnviar a Flex Intelligence?", what);
+    // El literal se PARTE tras \xBF a proposito: en C, un escape
+    // hexadecimal se traga todos los digitos hex que le sigan, y la
+    // "E" de "Enviar" es uno de ellos -- "\xBFE" se leeria como el
+    // caracter 0xBFE, que no cabe en un char. Es el mismo motivo por
+    // el que en este fichero ya estan partidos "\xC3\xB1" "o" y
+    // "\xC3\xA1" "cter".
+    fkAskOpen("\xC2\xBF" "Enviar a Flex Intelligence?", what);
     return;
   }
   if(act == 0){                                   // Abrir
@@ -26747,7 +26781,19 @@ static void aiAnnounceJob(const CoworkJob* j){
 //  6) ARRANQUE Y PASO PERIODICO
 // -------------------------------------------------------------
 static void flexAiOpenApp(uint32_t focusJob);      // definida con la app, mas abajo
+static void aiToast(const char* m);                // aviso corto dentro de la app
 static uint32_t gAiFocusJob = 0;                   // trabajo que la app debe enseñar al abrirse
+
+// ANALIZAR IMAGEN: FUNCION FUTURA, Y SE DICE.
+// Esta version no lee la camara, no hace capturas, no reconoce texto en
+// imagenes y no envia ningun fichero de imagen a ningun sitio. El boton
+// se queda -- el sitio esta reservado y la maqueta no cambiara cuando
+// llegue -- pero al tocarlo EXPLICA que aun no existe, en vez de encolar
+// un trabajo que nadie podria atender. Fingir que analiza una foto que
+// nadie ha capturado seria mentir sobre lo unico que de verdad importa
+// saber aqui: si esto ve o no ve tus imagenes.
+static inline bool aiKindImplemented(uint8_t kind){ return kind != CW_KIND_IMAGE; }
+#define AI_IMAGE_SOON "Analizar im\xC3\xA1genes llegar\xC3\xA1 en una versi\xC3\xB3n futura"
 
 static void flexAiBegin(){
   aiPrefsLoad();
@@ -26799,13 +26845,29 @@ static void flexAiPump(){
   if(coworkPump(now) > 0) gCwDirty = true;
 
   // Anuncios: una tarjeta por cambio a un estado terminal.
-  for(int i = 0; i < coworkCount(); i++){
-    CoworkJob* j = coworkAt(i);
-    if(!j) continue;
-    if(j->state != CW_DONE && j->state != CW_ERROR && j->state != CW_PAUSED) continue;
-    if(!aiAnnounceOnce(j->id, j->state)) continue;
-    aiAnnounceJob(j);
-    if(j->state == CW_DONE) gCwDirty = true;
+  //
+  // EN HORIZONTAL NO SE ANUNCIA NADA, y la clave es que tampoco se
+  // MARCA como anunciado: el trabajo sigue terminado y sin anunciar,
+  // asi que en cuanto el usuario vuelva a vertical -- cierre el juego,
+  // salga de Modo PC -- esta misma vuelta lo anuncia. El resultado no
+  // se pierde ni se enseña tarde: se enseña cuando se puede ver.
+  if(flexAiUiAllowed()){
+    for(int i = 0; i < coworkCount(); i++){
+      CoworkJob* j = coworkAt(i);
+      if(!j) continue;
+      if(j->state != CW_DONE && j->state != CW_ERROR && j->state != CW_PAUSED) continue;
+      if(!aiAnnounceOnce(j->id, j->state)) continue;
+      aiAnnounceJob(j);
+      if(j->state == CW_DONE) gCwDirty = true;
+    }
+  } else {
+    // Aunque se calle, el resultado hay que guardarlo igual: si el
+    // equipo se queda sin bateria dentro del juego, el trabajo
+    // terminado tiene que estar en disco.
+    for(int i = 0; i < coworkCount(); i++){
+      CoworkJob* j = coworkAt(i);
+      if(j && j->state == CW_DONE && !j->seen){ gCwDirty = true; break; }
+    }
   }
 
   if(coworkNextForNetwork(now)) flexAiKick();
@@ -26822,6 +26884,9 @@ static void flexAiPump(){
 static uint32_t flexAiSubmit(uint8_t kind, const char* title,
                              const char* text, size_t len, const char* srcPath){
   if(!gCwSlots) return 0;
+  // Puerta unica: una tarea que aun no existe no se encola por ninguna
+  // via, venga del panel, de la app o de donde sea. Ver aiKindImplemented.
+  if(!aiKindImplemented(kind)) return 0;
   uint32_t h = srcPath && srcPath[0] ? coworkHash(text, len) : 0;
   uint32_t id = coworkSubmit(kind, title, text, len, srcPath, h, 0, millis());
   if(id) flexAiKick();
@@ -26927,9 +26992,38 @@ static bool aiLpGestZone(int px, int py){
   return (py > SCR_H - 46 && px > SCR_W / 3 && px < SCR_W * 2 / 3);
 }
 
+// #############################################################
+// ##  FLEX INTELLIGENCE EN HORIZONTAL: DESACTIVADA EN ESTA VERSION
+// ##  ------------------------------------------------------
+// ##  QUE SIGNIFICA: mientras haya una app en orientacion horizontal
+// ##  -- Modo PC/DeX, los juegos, cualquier app APP_LAND -- Flex
+// ##  Intelligence NO se activa, NO se dibuja y NO interrumpe:
+// ##    · ni por pulsacion larga ni por gesto;
+// ##    · ni el panel, ni las tarjetas flotantes, ni la interfaz de
+// ##      Cowork por encima.
+// ##
+// ##  QUE NO SIGNIFICA: no se ha quitado nada. El motor de trabajos
+// ##  sigue corriendo por detras y los resultados se GUARDAN; solo se
+// ##  callan hasta que el usuario vuelva al escritorio, salga de
+// ##  horizontal o abra la app. Y la maquetacion horizontal que ya
+// ##  existe -- la tarjeta ancha, el panel en 800x480 -- se conserva
+// ##  entera, sin usar, lista para una version futura.
+// ##
+// ##  UNA SOLA FUNCION lo decide, y todos los caminos preguntan aqui.
+// ##  Repartir la condicion por cada llamante es como se acaba con una
+// ##  tarjeta que sale igual encima de un juego porque a ese sitio se
+// ##  le olvido la comprobacion.
+// #############################################################
+static bool flexAiUiAllowed(){
+  if(gLand)   return false;    // cualquier app dibujando en horizontal
+  if(gHosted) return false;    // app embebida en una ventana de Modo PC
+  return true;
+}
+
 // true si Flex Intelligence puede abrirse ahora mismo. Se comprueba
 // aqui y no en cada llamante para que la respuesta sea una sola.
 static bool flexAiCanOpen(){
+  if(!flexAiUiAllowed()) return false;
   if(!aiConfig()->enabled) return false;
   if(gState == ST_SPLASH || gState == ST_OOBE_LANG || gState == ST_OOBE_NAME) return false;
   if(gState == ST_LOCK || gState == ST_LOCKSETUP) return false;   // con la pantalla bloqueada, no
@@ -27199,12 +27293,15 @@ static void aiOvRender(){
   for(int i = 0; i < AIOV_ACTS; i++){
     int ax, ay, aw, ah; aiOvActBox(i, ax, ay, aw, ah);
     ay += slide;
-    bool on = (aiOvSel == i);
+    bool on   = (aiOvSel == i);
+    bool soon = !aiKindImplemented(AIOV_KIND[i]);
     fillRoundRect(ax, ay, aw, ah, 14, on ? TH_PRIM : thCard());
     if(!on) drawRoundRect(ax, ay, aw, ah, 14, TH_BORDER);
     int fs = textW(AIOV_LABEL[i], 2) <= aw - 16 ? 2 : 1;
+    // Una accion que todavia no existe se dibuja ATENUADA: se ve que
+    // esta ahi y que no esta lista, sin tener que tocarla para saberlo.
     drawTextC(ax + aw / 2, ay + (ah - (fs == 2 ? 14 : 8)) / 2,
-              AIOV_LABEL[i], fs, on ? TH_ONACC : TH_TXT);
+              AIOV_LABEL[i], fs, on ? TH_ONACC : (soon ? TH_MUTE : TH_TXT));
   }
   drawTextC(bx + bw / 2, by + bh - 22, "Toca fuera para cerrar", 1, TH_MUTE);
 
@@ -27268,6 +27365,11 @@ static bool flexAiOverlayTick(){
       T.tap = false; T.pressed = false;
       uint8_t kind = AIOV_KIND[i];
       flexAiOverlayClose(false);
+      if(!aiKindImplemented(kind)){
+        flexAiOpenApp(0);            // se abre la app y se explica; no se encola nada
+        aiToast(AI_IMAGE_SOON);
+        return true;
+      }
       flexAiOpenTool(kind);
       return true;
     }
