@@ -480,8 +480,8 @@ static uint8_t aiDoQuery(const char* reqBody, size_t reqLen, AiResult* res){
       }
       if(rc != AI_ERR_TIMEOUT){
         resp[got] = 0;
-        rc = aiParseResponse(resp, got, res) ? AI_ERR_NONE
-                                             : (res->err ? res->err : AI_ERR_PARSE);
+        rc = aiParseResponse(resp, got, res) ? (uint8_t)AI_ERR_NONE
+                                             : (res->err ? res->err : (uint8_t)AI_ERR_PARSE);
       }
     }
     http.end();

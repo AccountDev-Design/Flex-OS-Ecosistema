@@ -42,6 +42,10 @@ __FlexWiFi   WiFi;
 
 // Reloj virtual: las pruebas de abajo lo mueven a voluntad.
 unsigned long gTestMs = 0;
+static unsigned gDelayCalls = 0;
+static unsigned gPinnedTaskCreates = 0;
+static unsigned gSemTakeCalls = 0;
+static unsigned gPanelDrawCalls = 0;
 unsigned long millis(){ return gTestMs; }
 unsigned long micros(){ return 0; }
 void delay(unsigned long){}
@@ -72,9 +76,9 @@ void esp_restart(){}
 void portENTER_CRITICAL(portMUX_TYPE*){}
 void portEXIT_CRITICAL(portMUX_TYPE*){}
 BaseType_t xTaskCreate(TaskFunction_t, const char*, uint32_t, void*, UBaseType_t, TaskHandle_t*){ return pdPASS; }
-BaseType_t xTaskCreatePinnedToCore(TaskFunction_t, const char*, uint32_t, void*, UBaseType_t, TaskHandle_t*, BaseType_t){ return pdPASS; }
+BaseType_t xTaskCreatePinnedToCore(TaskFunction_t, const char*, uint32_t, void*, UBaseType_t, TaskHandle_t*, BaseType_t){ gPinnedTaskCreates++; return pdPASS; }
 void vTaskDelete(TaskHandle_t){}
-void vTaskDelay(TickType_t){}
+void vTaskDelay(TickType_t){ gDelayCalls++; }
 TaskHandle_t xTaskGetCurrentTaskHandle(){ return nullptr; }
 uint32_t ulTaskNotifyTake(BaseType_t, TickType_t){ return 0; }
 BaseType_t xTaskNotifyGive(TaskHandle_t){ return pdTRUE; }
@@ -88,7 +92,7 @@ SemaphoreHandle_t xSemaphoreCreateRecursiveMutex(){ return (SemaphoreHandle_t)1;
 BaseType_t xSemaphoreTakeRecursive(SemaphoreHandle_t, TickType_t){ return pdTRUE; }
 BaseType_t xSemaphoreGiveRecursive(SemaphoreHandle_t){ return pdTRUE; }
 SemaphoreHandle_t xSemaphoreCreateBinary(){ return (SemaphoreHandle_t)1; }
-BaseType_t xSemaphoreTake(SemaphoreHandle_t, TickType_t){ return pdTRUE; }
+BaseType_t xSemaphoreTake(SemaphoreHandle_t, TickType_t){ gSemTakeCalls++; return pdTRUE; }
 BaseType_t xSemaphoreGive(SemaphoreHandle_t){ return pdTRUE; }
 BaseType_t xSemaphoreGiveFromISR(SemaphoreHandle_t, BaseType_t*){ return pdTRUE; }
 void vSemaphoreDelete(SemaphoreHandle_t){}
@@ -124,7 +128,7 @@ esp_err_t esp_lcd_panel_io_del(esp_lcd_panel_io_handle_t){ return ESP_OK; }
 esp_err_t esp_lcd_panel_init(esp_lcd_panel_handle_t){ return ESP_OK; }
 esp_err_t esp_lcd_panel_reset(esp_lcd_panel_handle_t){ return ESP_OK; }
 esp_err_t esp_lcd_panel_del(esp_lcd_panel_handle_t){ return ESP_OK; }
-esp_err_t esp_lcd_panel_draw_bitmap(esp_lcd_panel_handle_t, int, int, int, int, const void*){ return ESP_OK; }
+esp_err_t esp_lcd_panel_draw_bitmap(esp_lcd_panel_handle_t, int, int, int, int, const void*){ gPanelDrawCalls++; return ESP_OK; }
 esp_err_t esp_lcd_panel_disp_on_off(esp_lcd_panel_handle_t, bool){ return ESP_OK; }
 esp_err_t esp_lcd_panel_disp_sleep(esp_lcd_panel_handle_t, bool){ return ESP_OK; }
 
@@ -217,7 +221,19 @@ static void touchDrag(int x, int y, bool first){
 
 static void testPanelRapido(){
   printf("Panel rapido global\n");
+  // En la placa los crea flexPanelInit(), que no se ejecuta en el host.
+  flxPanel = (esp_lcd_panel_handle_t)1;
+  flxDpiSem = (SemaphoreHandle_t)1;
+  gPinnedTaskCreates = gSemTakeCalls = gPanelDrawCalls = 0;
   if(!flxGfxInit()){ printf("  FALLO: no se pudieron reservar los framebuffers\n"); gFails++; return; }
+  chk(gPinnedTaskCreates == 0,
+      "el compositor no crea una tarea paralela que pueda leer fb a medio dibujar");
+  chk(gPanelDrawCalls == 1 && gSemTakeCalls == 2,
+      "el primer cuadro se envia una vez y espera su final DMA2D");
+  gSemTakeCalls = gPanelDrawCalls = 0;
+  flxFlush(100, 120);
+  chk(gPanelDrawCalls == 1 && gSemTakeCalls == 2,
+      "cada flush drena el token viejo y espera el callback antes de devolver");
   drawWallpaper(homeBuf, false);              // fondo valido para componer la cortina
   setBuf(fb);
 
@@ -868,7 +884,7 @@ static void testCronometro(){
 
 // Deja el tactil en reposo.
 static void tReset(){
-  memset(&T, 0, sizeof(T));
+  T = Touch();
 }
 // Simula que el dedo BAJA en (x,y) en el instante `ms`.
 static void tDown(int x, int y, unsigned long ms){
@@ -2227,6 +2243,36 @@ static void testNotifUnaSola(){
     gLand = false; nflForgetBg();
     chk(!nflHasBg && nflSavedState < 0, "olvidarla la deja del todo limpia"); }
 
+  // --- 8. AL ABRIR LA CAJA, LA ISLA SALE SIN DEJAR UN RECORTE VIEJO ---
+  // El aviso no se descarta: solo se pausa mientras la caja anima sobre un
+  // escritorio limpio. Asi no queda el fragmento de Home que se veia pegado
+  // sobre el borde superior de la caja en el video.
+  { gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+    notifBandOn = false; notifPaused = false; notifDragIdx = -1;
+    gState = ST_HOME; gTestMs = 450000;
+    notifPushJob(96, "Trabajo listo", "Nota creada", NACT_VIEW, false);
+    gNotifs[0].armed = true; gNotifs[0].bornMs = gTestMs - 1000;
+    notifBandOn = true;
+    for(int y = NOTIF_BAND_TOP; y < NOTIF_BAND_BOT; y++){
+      for(int x = 0; x < SCR_W; x++){
+        homeBuf[(size_t)y * SCR_W + x] = (uint16_t)(0x1000u + (unsigned)y);
+        bbuf[(size_t)y * SCR_W + x] = 0x7BEF;
+        fb[(size_t)y * SCR_W + x] = 0x7BEF;
+      }
+    }
+    notifPauseForDrawer();
+    chk(gNotifCount == 1 && gNotifs[0].armed,
+        "abrir la caja conserva la notificacion y su lugar en la cola");
+    chk(notifPaused && !notifBandOn && notifDragIdx < 0,
+        "pero pausa y retira por completo su tarjeta visible");
+    bool limpio = true;
+    for(int y = NOTIF_BAND_TOP; y < NOTIF_BAND_BOT && limpio; y++)
+      for(int x = 0; x < SCR_W; x++)
+        if(fb[(size_t)y * SCR_W + x] != homeBuf[(size_t)y * SCR_W + x]){
+          limpio = false; break;
+        }
+    chk(limpio, "la banda restaurada coincide pixel a pixel con el Home limpio"); }
+
   // Limpieza.
   gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
   notifDragIdx = -1; notifBandOn = false; notifPaused = false;
@@ -2294,16 +2340,15 @@ static void testDeslizarPaginas(){
     chk(d == 0 && s == 120 && w == SCR_W - 120, "hacia la izquierda, por la derecha"); }
 
   // --- 2. UN FRAME REAL NO DEJA RASTRO DEL ANTERIOR ---
-  // homeBuf y hpBuf se rellenan con dos colores planos distintos, y
+  // homeBuf y el cache COMPACTO hpBuf se rellenan con dos colores planos
+  // distintos, y
   // bbuf con un tercero que NO debe sobrevivir en ninguna fila de la
   // banda. Es la comprobacion de pixeles del "resto del frame anterior".
   { const uint16_t COL_A = 0x1234, COL_B = 0x4321, VENENO = 0x7BEF;
     if(!hpEnsureBuf()){ chk(false, "hay lienzo para la pagina vecina"); }
     else {
-      for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++){
-        homeBuf[i] = COL_A;
-        hpBuf[i]   = COL_B;
-      }
+      for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++) homeBuf[i] = COL_A;
+      for(size_t i = 0; i < HP_BUF_PIXELS; i++) hpBuf[i] = COL_B;
       hpBufPage = 1; hpFrom = 0; hpTo = 1;    // hacia la izquierda: la 1 entra por la derecha
       int malos = 0, cortes = 0;
       for(int dx = -SCR_W + 1; dx <= -1; dx += 37){
@@ -2396,6 +2441,16 @@ static void testDeslizarPaginas(){
     gHomePage = 0; }
 
   chk(HOME_PAGES == 3, "siguen siendo tres paginas");
+
+  // --- 6. CACHE COMPACTO Y COOPERATIVO ---
+  chk(HP_BUF_PIXELS == (size_t)SCR_W * HOME_BAND_H,
+      "la pagina vecina reserva exactamente la banda movil");
+  chk(HP_BUF_PIXELS * 2 < (size_t)SCR_W * SCR_H * 2,
+      "y no otro framebuffer completo de 768 KB");
+  gDelayCalls = 0; hpBufPage = -1;
+  chk(hpPrepare(1), "la pagina vecina se puede preparar en el cache compacto");
+  chk(gDelayCalls > 0,
+      "la composicion larga cede CPU y alimenta el WDT durante el trabajo");
 
   hpDragging = false; hpSettling = false; hpBufPage = -1;
   gHomePage = 0; tReset();

@@ -16,10 +16,9 @@
 //    1) ENCENDER LA PANTALLA  -> flexPanelInit()
 //         LDO canal 3 @2.5V (PHY MIPI) + bus DSI 2 lanes @500Mbps
 //         + panel DPI 480x800 @34MHz + tabla DCS del ST7701.
-//    2) MOSTRAR COLORES       -> el mecanismo de "presenter":
-//         un framebuffer en PSRAM + una tarea en el core 0 que
-//         sube las filas sucias al panel (esp_lcd_panel_draw_bitmap).
-//         AQUI reescrito NATIVO (una sola resolucion, sin escalado).
+//    2) MOSTRAR COLORES       -> flush MIPI-DSI sincronizado:
+//         framebuffer en PSRAM + DMA2D, esperando el callback de fin
+//         antes de reutilizar memoria (una sola resolucion, sin escalado).
 //    3) HACER FUNCIONAR EL TACTIL -> gt* + flexTouchInit()
 //         GT911 por I2C (SDA=7, SCL=8, RST=3), coords 0..479 x
 //         0..799 ya calibradas de fabrica -> se usan DIRECTAS.
@@ -763,11 +762,18 @@ static bool flexPanelInit(){
   esp_lcd_panel_io_tx_param(flxPanelIo, 0x29, NULL, 0);  // DISPON
   delay(20);
 
-  // 7) Callback de fin de flush (sincroniza el presenter)
+  // 7) Callback de fin de flush (libera el buffer que acaba de leer DMA2D)
   flxDpiSem = xSemaphoreCreateBinary();
+  if(!flxDpiSem){
+    Serial.println(F("[HW] ERROR: sin semaforo para DMA2D"));
+    return false;
+  }
   esp_lcd_dpi_panel_event_callbacks_t cbs = {};
   cbs.on_color_trans_done = flxDpiFlushDone;
-  esp_lcd_dpi_panel_register_event_callbacks(flxPanel, &cbs, flxDpiSem);
+  if(esp_lcd_dpi_panel_register_event_callbacks(flxPanel, &cbs, flxDpiSem) != ESP_OK){
+    Serial.println(F("[HW] ERROR: callback DMA2D no registrado"));
+    return false;
+  }
 
   gBlPwm = ledcAttach(PIN_LCD_BL, 20000, 8);   // backlight ON con brillo PWM
   if(gBlPwm) setBacklight(gBright);
@@ -975,11 +981,11 @@ static int gtPollMulti(){
 
 // #############################################################
 // ##  MOTOR GRAFICO NATIVO 480x800  (original de FlexOS)
-// ##  Framebuffer en PSRAM + presenter en core 0 + primitivas
+// ##  Framebuffers en PSRAM + flush DMA2D sincronizado + primitivas
 // #############################################################
 
 // Tres capas en PSRAM (la placa tiene de sobra):
-//   fb       -> lo que el presenter sube al panel
+//   fb       -> cuadro logico que flxFlush sube al panel
 //   lockBuf  -> pantalla de bloqueo pre-renderizada (swipe fluido)
 //   homeBuf  -> escritorio pre-renderizado
 static uint16_t* fb      = NULL;
@@ -1004,35 +1010,33 @@ static uint16_t* gRtTarget = NULL;
 static bool      gRtDirty  = false;   // la app pidio volcar algo desde el ultimo reset
 static inline void setBuf(uint16_t* b){ gBuf = (gRtTarget && b == fb) ? gRtTarget : b; }
 
-static volatile bool gReady = false;
 // Banda de recorte vertical (para listas con scroll). Por defecto: toda la pantalla.
 static int gClipY0 = 0, gClipY1 = SCR_H - 1;
 static int gClipX0 = 0, gClipX1 = SCR_W - 1;   // recorte horizontal
-static volatile int  gDirtyY0 = 0x7FFF, gDirtyY1 = -1;
-static portMUX_TYPE  gMux = portMUX_INITIALIZER_UNLOCKED;
-// EXCLUSION COMPOSICION <-> SUBIDA AL PANEL.
-// El presenter sube fb con esp_lcd_panel_draw_bitmap, que es ASINCRONO: la DMA2D
-// sigue LEYENDO fb despues de que la llamada vuelva (por eso hay una espera al
-// semaforo de fin de DMA). Sin este candado, el hilo de UI podia estar
-// escribiendo el cuadro N+1 en fb mientras la DMA todavia leia el cuadro N: la
-// mitad de arriba salia con la posicion nueva y la de abajo con la vieja. Ese
-// era el "vidrio liquido que se parte en lineas" del Panel Rapido -- y por eso
-// dependia de la velocidad del gesto: cuanto mas rapido el dedo, mas distancia
-// entre las dos posiciones y mas separadas se veian las costuras.
-// El candado lo toma el presenter alrededor de (draw_bitmap + espera de DMA) y
-// lo toma tambien todo volcado en bloque a fb (fbCopyBand/blitToFb/present), que
-// es por donde pasan TODAS las animaciones compuestas del sistema. Resultado:
-// un cuadro nunca se pisa a si mismo a medio subir, a cualquier velocidad.
-static SemaphoreHandle_t flxFbMux = NULL;
-static inline void fbLock(){   if(flxFbMux) xSemaphoreTake(flxFbMux, portMAX_DELAY); }
-static inline void fbUnlock(){ if(flxFbMux) xSemaphoreGive(flxFbMux); }
-// Handle del presenter. Sirve para DESPERTARLO en cuanto una banda queda lista,
-// en vez de que descubra el trabajo en su siguiente sondeo periodico. Con esto
-// baja la latencia de dibujo (antes: hasta ~11 ms de espera muerta) y se elimina
-// el micro-stutter que aparecia al desfasar el ritmo de composicion de la UI
-// contra la rejilla fija de 11 ms del presenter. NO cambia que pixeles se pintan
-// -- solo CUANDO se suben al panel (siempre bandas ya terminadas en fb).
-static TaskHandle_t  flxPresenterTask = NULL;
+// PRESENTACION SIN HILO PARALELO.
+//
+// El panel DPI refresca continuamente su framebuffer interno. La version
+// anterior lanzaba esp_lcd_panel_draw_bitmap() desde una segunda tarea y
+// protegia fb con un mutex. Eso no alcanzaba: la mayor parte de las primitivas
+// dibuja directamente en fb, fuera del mutex, y podia empezar el cuadro N+1
+// mientras DMA2D todavia copiaba el N. El resultado real en la placa eran
+// iconos dobles, franjas de dos paginas y, si draw_bitmap quedaba esperando
+// mientras retenia el mutex, loopTask bloqueada en portMAX_DELAY hasta TASK_WDT.
+//
+// Ahora hay UN solo propietario del pipeline: la tarea de UI. flxFlush() inicia
+// la transferencia y espera el callback on_color_trans_done ANTES de devolver;
+// es el mismo contrato de "flush ready" del ejemplo MIPI-DSI de Espressif. La
+// espera duerme la tarea (no gira ni mata al idle task) y esta acotada: nunca
+// existe una espera infinita dentro del compositor.
+static bool     flxFlushFault = false;
+static uint32_t flxFlushFaultMs = 0;
+
+// Ya no hay un lector de fb en paralelo. Se conservan estos dos wrappers porque
+// varias capturas de overlays delimitan con ellos una lectura coherente; son
+// no-op deliberados y evitan mantener un mutex que pueda volver a introducir
+// una espera circular en el futuro.
+static inline void fbLock(){}
+static inline void fbUnlock(){}
 
 // FASE 4 del Modo Kiosco: se define mucho mas abajo (necesita las primitivas de
 // dibujo), pero se declara aqui porque flxFlush -el unico punto por el que TODO
@@ -1043,29 +1047,37 @@ static void flxFlush(int y0, int y1){
   if(gRtTarget){ gRtDirty = true; return; }   // app hospedada: no toca el panel
   if(y0 < 0) y0 = 0; if(y1 >= SCR_H) y1 = SCR_H - 1;
   if(y0 > y1) return;
-  // El candado del kiosco se estampa ANTES de marcar la banda como sucia: asi
-  // ninguna banda llega nunca al presenter sin el, y no puede parpadear aunque
-  // la app de encima repinte su esquina en cada frame. Escribe en fb, asi que
-  // va bajo el mismo candado que el resto de la composicion (aqui nadie lo
-  // tiene tomado todavia: fbCopyBand lo suelta antes de llamar a flxFlush).
-  fbLock();
+  // El candado del kiosco se estampa ANTES de transferir la banda: ninguna
+  // actualizacion llega al panel sin el, aunque la app repinte esa esquina.
   kioskStampBadge(y0, y1);
-  fbUnlock();
-  portENTER_CRITICAL(&gMux);
-  if(y0 < gDirtyY0) gDirtyY0 = y0;
-  if(y1 > gDirtyY1) gDirtyY1 = y1;
-  portEXIT_CRITICAL(&gMux);
-  // Aviso al presenter. flxFlush SIEMPRE corre en contexto de tarea (nunca en
-  // ISR: el callback de fin de DMA usa su propio semaforo, flxDpiSem), asi que
-  // xTaskNotifyGive es correcto. La notificacion de FreeRTOS se "latchea": si
-  // llega mientras el presenter todavia no esta bloqueado, se recuerda y el
-  // frame no se pierde. Varios avisos seguidos colapsan en un solo despertar que
-  // sube la UNION de las bandas sucias ya coalescida arriba -> sin volcados de mas.
-  if(flxPresenterTask) xTaskNotifyGive(flxPresenterTask);
+  if(!flxPanel || !flxDpiSem || !fb) return;
+
+  // Un token viejo haria que la espera siguiente terminase ANTES que la DMA
+  // actual. Se drena siempre justo antes de iniciar una transferencia.
+  (void)xSemaphoreTake(flxDpiSem, 0);    // binario: como maximo puede haber un token viejo
+  esp_err_t rc = esp_lcd_panel_draw_bitmap(flxPanel, 0, y0, SCR_W, y1 + 1,
+                                            fb + (size_t)y0 * SCR_W);
+  if(rc != ESP_OK){
+    uint32_t now = millis();
+    if(!flxFlushFault || now - flxFlushFaultMs > 2000)
+      Serial.println(F("[GFX] draw_bitmap fallo; cuadro descartado"));
+    flxFlushFault = true; flxFlushFaultMs = now;
+    return;
+  }
+  // 120 ms son mas de siete periodos a 60 Hz. Si no llega el callback hay un
+  // fallo del driver/panel; se sale en vez de retener un mutex para siempre.
+  if(xSemaphoreTake(flxDpiSem, pdMS_TO_TICKS(120)) != pdTRUE){
+    uint32_t now = millis();
+    if(!flxFlushFault || now - flxFlushFaultMs > 2000)
+      Serial.println(F("[GFX] timeout esperando DMA2D; compositor liberado"));
+    flxFlushFault = true; flxFlushFaultMs = now;
+    return;
+  }
+  flxFlushFault = false;
 }
 static inline void flxFlushAll(){ flxFlush(0, SCR_H - 1); }
-// Vuelca la banda [y0,y1] del back buffer a fb de una sola pasada y la marca dirty.
-// Componer en bbuf y presentar asi evita que el presenter muestre cuadros a medias.
+// Vuelca la banda [y0,y1] del back buffer a fb de una sola pasada.
+// Componer en bbuf y presentar asi evita publicar cuadros a medias.
 // Copia la banda [y0,y1] de src a fb de una sola pasada por fila completa.
 static void fbCopyBand(const uint16_t* src, int y0, int y1){
   if(!src) return;
@@ -1074,12 +1086,7 @@ static void fbCopyBand(const uint16_t* src, int y0, int y1){
   if(y0 > y1) return;
   uint16_t* dst = gRtTarget ? gRtTarget : fb;      // app hospedada: a su lienzo
   if(dst == src) return;
-  // Solo hay carrera con la DMA cuando el destino es fb de verdad (el lienzo de
-  // una ventana de DeX no lo lee nadie mas).
-  bool guard = (dst == fb);
-  if(guard) fbLock();
   memcpy(dst + (size_t)y0 * SCR_W, src + (size_t)y0 * SCR_W, (size_t)(y1 - y0 + 1) * SCR_W * 2);
-  if(guard) fbUnlock();
 }
 
 static void present(int y0, int y1){
@@ -1088,40 +1095,10 @@ static void present(int y0, int y1){
   flxFlush(y0, y1);
 }
 
-static void flxPresenter(void*){
-  for(;;){
-    // Duerme hasta que alguien ensucie una banda (flxFlush -> xTaskNotifyGive).
-    // El timeout de 15 ms es una RED DE SEGURIDAD: aunque un aviso nunca deberia
-    // perderse (la notificacion se latchea), si por lo que fuera se perdiera, el
-    // presenter despierta igual y sube cualquier region pendiente -> jamas se
-    // queda un frame "colgado". pdTRUE = limpia la cuenta al salir (se comporta
-    // como un semaforo binario). Antes aqui habia un vTaskDelay(11) fijo que
-    // dormia SIEMPRE, aunque hubiera un frame listo para subir de inmediato.
-    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(15));
-    if(!gReady) continue;
-    int y0, y1;
-    portENTER_CRITICAL(&gMux);
-    y0 = gDirtyY0; y1 = gDirtyY1;
-    gDirtyY0 = 0x7FFF; gDirtyY1 = -1;
-    portEXIT_CRITICAL(&gMux);
-    if(y1 >= y0){
-      // El candado cubre la subida ENTERA (llamada + fin de DMA): mientras la
-      // DMA2D lee fb, ningun volcado de composicion puede reescribirlo debajo.
-      fbLock();
-      esp_lcd_panel_draw_bitmap(flxPanel, 0, y0, SCR_W, y1 + 1,
-                                fb + (size_t)y0 * SCR_W);
-      // Espera a que la DMA2D termine antes del siguiente volcado (serializa los
-      // draws por fin-de-DMA: nunca se solapan ni "inundan" el bus del panel).
-      xSemaphoreTake(flxDpiSem, pdMS_TO_TICKS(100));
-      fbUnlock();
-    }
-  }
-}
-
 static bool flxGfxInit(){
   size_t bytes = (size_t)SCR_W * SCR_H * 2;
   // Alineados a 64 bytes = tamano de linea de cache de la PSRAM del P4.
-  // El presenter vuelca BANDAS parciales (fb + y0*SCR_W) a la DMA2D, que
+  // flxFlush vuelca BANDAS parciales (fb + y0*SCR_W) a la DMA2D, que
   // exige un write-back de cache limpio del origen antes de leer. Si fb
   // no arranca en una frontera de 64B, el offset y0*SCR_W de una banda
   // puede caer a mitad de linea de cache: el write-back deja sin
@@ -1141,15 +1118,14 @@ static bool flxGfxInit(){
   }
   memset(fb, 0, bytes);
   setBuf(fb);
-  // Antes de arrancar el presenter: si el mutex no existiera, fbLock/fbUnlock
-  // son no-ops y el comportamiento seria el de siempre (sin proteccion), nunca
-  // un cuelgue.
-  flxFbMux = xSemaphoreCreateMutex();
   // Primer volcado en negro
-  esp_lcd_panel_draw_bitmap(flxPanel, 0, 0, SCR_W, SCR_H, fb);
-  xSemaphoreTake(flxDpiSem, pdMS_TO_TICKS(200));
-  gReady = true;
-  xTaskCreatePinnedToCore(flxPresenter, "flxPresenter", 4096, NULL, 3, &flxPresenterTask, 0);
+  (void)xSemaphoreTake(flxDpiSem, 0);
+  if(esp_lcd_panel_draw_bitmap(flxPanel, 0, 0, SCR_W, SCR_H, fb) != ESP_OK){
+    Serial.println(F("[GFX] ERROR: fallo el primer flush DMA2D"));
+    return false;
+  }
+  if(xSemaphoreTake(flxDpiSem, pdMS_TO_TICKS(200)) != pdTRUE)
+    Serial.println(F("[GFX] aviso: primer flush sin callback DMA2D"));
   return true;
 }
 
@@ -1507,42 +1483,56 @@ static void strokeSegAA(float x0, float y0, float x1, float y1, float rad, uint1
 // Degradado diagonal 3 paradas: verde (arriba-dcha) -> azul (centro)
 // -> violeta (abajo-izq), igual que tus imagenes. Opcional: blobs.
 // El degradado se repinta ENTERO en cada renderHome()/renderLock(), o sea una
-// vez por minuto. La version anterior hacia, por cada uno de los 384.000
-// pixeles: 2 divisiones + 1 mix565 (que a su vez hacia 3 divisiones mas).
+// vez por minuto. Para las paginas del escritorio tambien se puede pedir solo
+// la banda de iconos: evita regenerar 768 KB cuando realmente cambian 354 filas.
+// La version anterior hacia, por cada uno de los 384.000 pixeles:
+// 2 divisiones + 1 mix565 (que a su vez hacia 3 divisiones mas).
 // Dos observaciones lo tiran casi todo abajo:
 //   1) 'ty' NO depende de x, pero se recalculaba 480 veces por fila.
 //   2) el color solo depende de t = (tx+ty)/2, que vive en [0,255]: caben
 //      los 256 colores posibles en una tabla y el bucle interior pasa a ser
 //      una simple consulta. Coste: 992 B de RAM estatica, una sola vez.
 // El resultado en pantalla es BIT A BIT el mismo que antes.
-static void drawWallpaper(uint16_t* buf, bool blobs){
-  const uint16_t green  = rgb565(80, 224, 74);    // arriba-derecha
-  const uint16_t blue   = rgb565(40, 150, 245);   // centro
-  const uint16_t purple = rgb565(112, 46, 230);   // abajo-izquierda
-  static uint16_t gradLut[256];                   // color por t          (512 B)
-  static uint8_t  txLut[SCR_W];                   // rampa horizontal      (480 B)
-  static bool     lutReady = false;
-  if(!lutReady){
+static uint16_t wallGradLut[256];                  // color por t          (512 B)
+static uint8_t  wallTxLut[SCR_W];                  // rampa horizontal      (480 B)
+static bool     wallLutReady = false;
+static void wallpaperEnsureLut(){
+  if(!wallLutReady){
+    const uint16_t green  = rgb565(80, 224, 74);   // arriba-derecha
+    const uint16_t blue   = rgb565(40, 150, 245);  // centro
+    const uint16_t purple = rgb565(112, 46, 230);  // abajo-izquierda
     for(int t = 0; t < 256; t++)
-      gradLut[t] = (t < 128) ? mix565(purple, blue,  (uint8_t)(t * 2))
-                             : mix565(blue,   green, (uint8_t)((t - 128) * 2));
-    for(int x = 0; x < SCR_W; x++) txLut[x] = (uint8_t)((x * 255) / (SCR_W - 1));
-    lutReady = true;
+      wallGradLut[t] = (t < 128) ? mix565(purple, blue,  (uint8_t)(t * 2))
+                                 : mix565(blue,   green, (uint8_t)((t - 128) * 2));
+    for(int x = 0; x < SCR_W; x++) wallTxLut[x] = (uint8_t)((x * 255) / (SCR_W - 1));
+    wallLutReady = true;
   }
+}
+// Pinta [y0,y1] inclusive. Tambien fuerza su propio viewport: un scroll o una
+// app que haya dejado gClip estrecho no puede recortar el fondo y crear una
+// franja negra permanente en el siguiente escritorio.
+static void drawWallpaperRows(uint16_t* buf, bool blobs, int y0, int y1){
+  if(!buf) return;
+  if(y0 < 0) y0 = 0; if(y1 >= SCR_H) y1 = SCR_H - 1; if(y0 > y1) return;
+  wallpaperEnsureLut();
   uint16_t* old = gBuf; setBuf(buf);
-  for(int y = 0; y < SCR_H; y++){
+  int cx0 = gClipX0, cx1 = gClipX1, cy0 = gClipY0, cy1 = gClipY1;
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = y0; gClipY1 = y1;
+  for(int y = y0; y <= y1; y++){
     // t=1 arriba-derecha, t=0 abajo-izquierda. 'ty' es invariante en x.
     int ty = ((SCR_H - 1 - y) * 255) / (SCR_H - 1);
     uint16_t* row = buf + (size_t)y * SCR_W;
-    for(int x = 0; x < SCR_W; x++) row[x] = gradLut[(txLut[x] + ty) >> 1];
+    for(int x = 0; x < SCR_W; x++) row[x] = wallGradLut[(wallTxLut[x] + ty) >> 1];
   }
   if(blobs){
     // dos manchas suaves mas claras (como el escritorio de tus imagenes)
     fillCircleA(360, 150, 220, rgb565(150, 235, 180), 60);
     fillCircleA(90,  560, 260, rgb565(150, 160, 240), 55);
   }
+  gClipX0 = cx0; gClipX1 = cx1; gClipY0 = cy0; gClipY1 = cy1;
   setBuf(old);
 }
+static void drawWallpaper(uint16_t* buf, bool blobs){ drawWallpaperRows(buf, blobs, 0, SCR_H - 1); }
 
 // #############################################################
 // ##  LIQUID GLASS (aproximacion iOS 26 en software)
@@ -5151,6 +5141,7 @@ static void ctxOpen(int slot); static void ctxTick();     // FASE 2: menu contex
 static void drawerOpen();                                 // gesto hacia arriba desde Inicio
 static void drawerTick();                                 // su tick, desde loop() (ST_DRAWER)
 static bool drawerCanOpen();                              // false si manda un overlay global
+static void notifPauseForDrawer();                        // limpia la isla sin perder su cola
 static void kioskShowBadge();                             // FASE 4: candado discreto de "kiosco activo"
 static void kioskSetTick();                               // FASE 4: pantalla de definir el area excluida
 static void kioskExitNow();                               // FASE 4: salida ya verificada
@@ -5653,9 +5644,19 @@ static inline void homeSlotXY(int slot, int &x, int &y){
   y = HOME_GY0 + r * HOME_ROWSTEP;
 }
 
+// Cede el nucleo durante composiciones largas. Ademas de alimentar loopTask,
+// el vTaskDelay deja correr al idle task que tambien vigila el TWDT del P4.
+// Se usa entre iconos, nunca dentro de un bucle por pixel.
+static void uiRenderCooperate(){
+  if(esp_task_wdt_status(NULL) == ESP_OK) esp_task_wdt_reset();
+  vTaskDelay(pdMS_TO_TICKS(1));
+}
+
 // Dibuja la rejilla de UNA pagina en el buffer activo. No limpia el
-// fondo: quien llama ya puso ahi el wallpaper.
-static void homeDrawGrid(int page, int xoff){
+// fondo: quien llama ya puso ahi el wallpaper. cooperative=true se usa al
+// preparar una pagina fuera de pantalla: doce iconos Liquid Glass seguidos no
+// pueden monopolizar loopTask hasta disparar TASK_WDT.
+static void homeDrawGridWork(int page, int xoff, bool cooperative){
   if(page < 0 || page >= HOME_PAGES) return;
   for(int i = 0; i < HOME_SLOTS; i++){
     uint8_t id = homeOrder[page * HOME_SLOTS + i];
@@ -5668,6 +5669,7 @@ static void homeDrawGrid(int page, int xoff){
     if(ix + HOME_ICON_S < 0 || ix > SCR_W) continue;
     drawAppIcon(id, ix, iy, HOME_ICON_S);
     drawTextC(ix + HOME_ICON_S / 2, iy + HOME_ICON_S + 6, appName(id), 2, TH_ONWALL);
+    if(cooperative && (i & 1)) uiRenderCooperate();
   }
 }
 
@@ -5705,7 +5707,7 @@ static void renderHomeInto(uint16_t* dst, int page){
   // rejilla de apps 4x3 de ESTA pagina. homeOrder[] puede tener ranuras
   // vacias (HOME_EMPTY) desde que existe la Caja de aplicaciones: quitar una
   // app de Inicio deja su hueco, no recoloca el resto de la rejilla.
-  if(!editMode) homeDrawGrid(page, 0);     // en Modo Edicion los pinta edRender()
+  if(!editMode) homeDrawGridWork(page, 0, true); // cede entre iconos: nunca monopoliza loopTask
   homeDrawDots(page, page, 0.0f);
   // barra de navegacion: botones clasicos o barra de gestos (modo iOS)
   if(gNavMode == 0){
@@ -5756,7 +5758,7 @@ static bool hitHomeIcon(int px, int py, int &id){
 // ##  barra de navegacion son identicos, asi que:
 // ##
 // ##    · la pagina vecina se compone UNA sola vez, al empezar el
-// ##      gesto, en su propio lienzo de PSRAM (hpBuf);
+// ##      gesto, en un cache COMPACTO de solo la banda movil (hpBuf);
 // ##    · cada frame del arrastre son DOS memcpy por fila dentro de
 // ##      la banda de la rejilla [HOME_BAND_TOP, HOME_BAND_BOT) --
 // ##      un trozo de homeBuf y otro de hpBuf, cada uno desplazado--,
@@ -5776,7 +5778,7 @@ static bool hitHomeIcon(int px, int py, int &id){
 #define HP_SETTLE_MS   190        // duracion del acomodo al soltar
 #define HP_FLICK_MS    320        // por debajo de esto, un gesto corto cuenta como golpe seco
 #define HP_FLICK_PX     42        // ...y con esta distancia minima
-static uint16_t* hpBuf     = NULL;     // lienzo de la pagina VECINA, ya compuesto
+static uint16_t* hpBuf     = NULL;     // cache compacto: HOME_BAND_H filas de la pagina vecina
 static int       hpBufPage = -1;       // que pagina hay compuesta ahi
 static bool      hpDragging = false;
 static int       hpDx      = 0;        // desplazamiento actual del dedo (px, + = hacia la derecha)
@@ -5787,9 +5789,12 @@ static int       hpSettleFrom = 0;     // dx del que arranca el acomodo
 static int       hpSettleTo   = 0;     // dx al que llega (0 = se queda, -+SCR_W = cambia)
 static uint32_t  hpFrameMs = 0;
 
+#define HP_FRAME_MS      33        // 30 fps estables: no saturar PSRAM + DMA2D
+#define HP_BUF_PIXELS    ((size_t)SCR_W * HOME_BAND_H)
+
 static bool hpEnsureBuf(){
   if(hpBuf) return true;
-  hpBuf = (uint16_t*)heap_caps_aligned_alloc(64, (size_t)SCR_W * SCR_H * 2,
+  hpBuf = (uint16_t*)heap_caps_aligned_alloc(64, HP_BUF_PIXELS * 2,
                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   hpBufPage = -1;
   return hpBuf != NULL;
@@ -5801,7 +5806,24 @@ static bool hpPrepare(int page){
   if(page < 0 || page >= HOME_PAGES) return false;
   if(!hpEnsureBuf()) return false;
   if(hpBufPage == page) return true;      // ya esta: ir y volver no recompone
-  renderHomeInto(hpBuf, page);
+
+  // La banda de iconos no contiene widgets, dock ni barra de estado: debajo
+  // solo hay wallpaper. Se regenera ESA banda en bbuf, se dibuja la rejilla y
+  // se guarda compacta. Antes se rehacia una pantalla completa de 768 KB aqui,
+  // justo al reconocer el gesto, con blur de widgets y dock incluidos; era el
+  // pico que congelaba el dedo y podia dejar al TWDT sin respirar.
+  drawWallpaperRows(bbuf, true, HOME_BAND_TOP, HOME_BAND_BOT - 1);
+  uiRenderCooperate();                    // el fondo ya recorrio ~170k pixeles
+  uint16_t* old = gBuf; setBuf(bbuf);
+  int cx0 = gClipX0, cx1 = gClipX1, cy0 = gClipY0, cy1 = gClipY1;
+  gClipX0 = 0; gClipX1 = SCR_W - 1;
+  gClipY0 = HOME_BAND_TOP; gClipY1 = HOME_BAND_BOT - 1;
+  homeDrawGridWork(page, 0, true);
+  homeDrawDots(page, page, 0.0f);
+  uiRenderCooperate();                    // tambien cede si la pagina esta vacia
+  gClipX0 = cx0; gClipX1 = cx1; gClipY0 = cy0; gClipY1 = cy1;
+  setBuf(old);
+  memcpy(hpBuf, bbuf + (size_t)HOME_BAND_TOP * SCR_W, HP_BUF_PIXELS * 2);
   hpBufPage = page;
   return true;
 }
@@ -5847,7 +5869,7 @@ static void hpRenderFrame(int dx){
       memcpy(row + aDst, homeBuf + (size_t)y * SCR_W + aSrc, (size_t)aW * 2);
     // Pagina vecina, recortada al suyo.
     if(bW > 0)
-      memcpy(row + bDst, hpBuf + (size_t)y * SCR_W + bSrc, (size_t)bW * 2);
+      memcpy(row + bDst, hpBuf + (size_t)(y - HOME_BAND_TOP) * SCR_W + bSrc, (size_t)bW * 2);
     // COLUMNAS QUE NO ESCRIBE NADIE. Solo puede pasar si el lienzo de la
     // vecina no llego a componerse (sin PSRAM). Sin esto, esa franja
     // conserva lo que hubiera en bbuf -- un trozo del frame anterior, o
@@ -5933,20 +5955,20 @@ static bool hpTick(){
       hpSettling = false;
       if(hpSettleTo != 0){
         gHomePage = hpTo;
-        // AQUI NO SE COPIA NI SE REDIBUJA NADA: se INTERCAMBIAN los dos
-        // punteros. hpBuf ya tiene compuesta la pagina destino y homeBuf
-        // tiene compuesta la de origen, que es exactamente lo que hace
-        // falta cachear para la vuelta. Un swap de punteros en vez de
-        // 768 KB de memcpy -- y sobre todo en vez de recomponer
-        // wallpaper, widgets, dock e iconos justo en el ultimo frame de
-        // la animacion, que es donde mas se notaria el tiron.
+        // Solo cambia la banda de rejilla. hpBuf es compacto, asi que se copia
+        // a su posicion dentro de homeBuf; barra, widgets, dock y navegacion
+        // permanecen intactos. Son ~340 KB una vez al terminar, frente a
+        // intercambiar dos pantallas completas y conservar 768 KB de cache.
         if(hpBuf && hpBufPage == hpTo){
-          uint16_t* t = homeBuf; homeBuf = hpBuf; hpBuf = t;
-          hpBufPage = hpFrom;
+          memcpy(homeBuf + (size_t)HOME_BAND_TOP * SCR_W, hpBuf, HP_BUF_PIXELS * 2);
+          hpBufPage = -1;
           qsDirty = true;      // la cortina se compone de homeBuf: su cache ya no vale
         } else renderHome();
       }
-      showHome();
+      // El ultimo frame puede no haber caido exactamente en +-SCR_W. Publicar
+      // solo la banda deja el resultado final exacto sin otro flush de 768 KB.
+      fbCopyBand(homeBuf, HOME_BAND_TOP, HOME_BAND_BOT - 1);
+      flxFlush(HOME_BAND_TOP, HOME_BAND_BOT - 1);
       return true;
     }
     float p = (float)e / (float)HP_SETTLE_MS;
@@ -5970,7 +5992,7 @@ static bool hpTick(){
     hpDx = dx;
     T.tap = false; T.swipeLeft = false; T.swipeRight = false; T.swipeUp = false; T.swipeDown = false;
     uint32_t now = millis();
-    if(now - hpFrameMs >= 16){ hpFrameMs = now; hpRenderFrame(hpDx); }   // ~60 fps como techo
+    if(now - hpFrameMs >= HP_FRAME_MS){ hpFrameMs = now; hpRenderFrame(hpDx); }
     return true;
   }
   // Soltar: se acomoda a la pagina mas cercana, salvo que el gesto
@@ -6381,6 +6403,9 @@ static void animateIconRipple(){
 static int gIconOvrApp = -1, gIconOvrX = 0, gIconOvrY = 0, gIconOvrS = 72;
 static void homeTick(){
   if(editMode){ edTick(); return; }
+  if(gHomeDirty && !hpDragging && !hpSettling){
+    renderHome(); showHome();
+  }
   // PAGINAS DEL ESCRITORIO. Va lo PRIMERO de todo (antes incluso que los
   // gestos iOS) porque una vez que el dedo esta arrastrando una pagina, el
   // toque es suyo hasta que se suelte: si el gesto de la barra inferior o
@@ -7606,7 +7631,7 @@ static void settingsPaintPage(int view){
 }
 // Repintado completo. Se compone en bbuf y se publica de una sola vez con
 // present(): un cuadro entero o ninguno. Antes se dibujaba fila a fila DIRECTO
-// sobre fb mientras el presenter podia estar subiendolo, que es de donde salian
+// sobre fb mientras DMA2D podia estar leyendolo, que es de donde salian
 // los parpadeos y las costuras al repintar.
 static void settingsRender(){
   setBuf(bbuf);
@@ -14053,7 +14078,7 @@ static void kbsPaint(){
   gClipY0 = c0; gClipY1 = c1;
 }
 // Se compone en bbuf y se publica de una vez: el cuadro llega entero al panel,
-// nunca a medias (ver el candado de composicion en flxPresenter).
+// nunca a medias (flxFlush no devuelve hasta que DMA2D libera el cuadro).
 static void kbsRender(){
   setBuf(bbuf);
   kbsPaint();
@@ -16754,7 +16779,7 @@ static void geoTick(){
 // ##  copiar al portapapeles global (clipboard[]). Se dibuja
 // ##  a fb con flxFlush una sola vez por cambio de estado
 // ##  (nada lo redibuja por frame durante ST_APP con el IDE),
-// ##  asi que no hay parpadeo ni conflicto con el presenter.
+// ##  asi que no hay parpadeo ni otra transferencia en paralelo.
 // #############################################################
 
 // Estado del asistente
@@ -18008,10 +18033,9 @@ static void autoLockTick(){
 // CONSTRUCCION antes de cualquier subida DMA.
 //
 // Por que no basta con repintarlo desde kioskTick: geoRenderGame (Geo Dash)
-// compone en bbuf y hace present(0, SCR_H-1) en cada frame, y el presenter sube
-// fb de forma ASINCRONA desde el core 0. Repintando despues del present hay una
-// ventana en la que el presenter ya empezo a subir la banda sin el candado -- se
-// vea mas o menos seguido, sigue parpadeando. Estampando dentro de flxFlush esa
+// compone en bbuf y hace present(0, SCR_H-1) en cada frame, y flxFlush sube
+// fb por DMA2D. Repintando despues del present habia una ventana en la que la
+// transferencia ya habia empezado sin el candado. Estampando dentro de flxFlush esa
 // ventana no existe: la banda nunca se publica sin el candado dentro.
 // Recuadro que envuelve al candado con margen. Es la banda que se comprueba en
 // flxFlush y la que publica kioskShowBadge, asi que tiene que seguir a
@@ -18554,6 +18578,7 @@ static void drwBuildPage(){
   if(!drwPage) drwPage = (uint16_t*)heap_caps_malloc((size_t)SCR_W * SCR_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if(!drwPage) return;                                    // sin PSRAM: se usara blurBg/homeBuf
   ensureBlurBg();
+  uiRenderCooperate();
   const uint16_t* src = blurBg ? blurBg : homeBuf;
   if(!src){ heap_caps_free(drwPage); drwPage = NULL; return; }
   memcpy(drwPage, src, (size_t)SCR_W * SCR_H * 2);
@@ -18566,6 +18591,7 @@ static void drwBuildPage(){
   gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
   setBuf(drwPage);
   fillRectA(0, 0, SCR_W, SCR_H, rgb565(6, 8, 16), 96);
+  uiRenderCooperate();
   setBuf(old);
   gLand = wl;
   gClipX0 = sx0; gClipX1 = sx1; gClipY0 = sy0; gClipY1 = sy1;
@@ -18923,11 +18949,16 @@ static void drwResetView(){
 }
 static void drawerOpen(){
   if(!drawerCanOpen()) return;
+  // La isla usa translucencia calculada sobre el escritorio. Si se dejara
+  // visible mientras la hoja sube, conservaria ese fondo viejo sobre la caja
+  // y produciria exactamente el rectangulo partido de la foto. Se limpia su
+  // banda, pero la notificacion sigue en la cola y reaparece al volver a Home.
+  notifPauseForDrawer();
   // El fondo se compone ANTES de arrancar la animacion, con el escritorio aun
   // en pantalla: es la unica reserva grande de la caja y se hace una vez por
   // sesion (o al cambiar la apariencia), nunca durante el movimiento.
-  drwBuildPage();
   if(gHomeDirty) renderHome();                    // la hoja se compone sobre homeBuf: no puede estar viejo
+  drwBuildPage();
   drwResetView();
   drwFilter();
   drwPendApp = -1; drwPendSw = false;
@@ -18968,6 +18999,13 @@ static void drwFinishClose(){
 // Un paso de la animacion. Interpolada por TIEMPO (no por cuadro): si el
 // sistema pierde cuadros la hoja llega igual de rapido, solo con menos pasos.
 static void drwAnimStep(){
+  // Una hoja completa implica fondo + hasta 17 iconos + transferencia DPI.
+  // A 60 fps saturaba PSRAM/DMA2D y la animacion podia quedarse congelada a
+  // media pantalla. A 30 fps la posicion sigue dependiendo del reloj, pero
+  // cada cuadro termina antes de iniciar el siguiente.
+  uint32_t now = millis();
+  if(drwFrameMs && now - drwFrameMs < 33) return;
+  drwFrameMs = now;
   uint32_t e = millis() - drwAnimMs;
   float p = (float)e / (float)DRW_ANIM_MS; if(p > 1.0f) p = 1.0f;
   float ease = 1.0f - (1.0f - p) * (1.0f - p) * (1.0f - p);     // ease-out cubico
@@ -19180,7 +19218,7 @@ static void drawerTick(){
   drwPrevMs = now;
   drwInertiaStep(dt);
   if(!drwFull && !drwDirty) return;
-  if(now - drwFrameMs < 16) return;                 // ~60 fps como techo
+  if(now - drwFrameMs < 33) return;                 // 30 fps: presupuesto real de PSRAM/DMA2D
   drwFrameMs = now;
   if(drwFull){
     drwCompose(0, SCR_H - 1, true); present(0, SCR_H - 1);
@@ -20933,12 +20971,12 @@ static void ntpLastSyncText(char* out, size_t n){
 // ##  ISLA DINAMICA · logica y render  (FASE 1, parche anti-flicker)
 // ##  ------------------------------------------------------
 // ##  FIX aplicado tras el bug de parpadeo + tarjetas pegadas:
-// ##  la isla ya NO compone sobre fb (el buffer que flxPresenter
-// ##  lee por DMA en otro core). Ahora restaura la banda limpia
+// ##  la isla ya NO compone sobre fb (el buffer que DMA2D transfiere).
+// ##  Ahora restaura la banda limpia
 // ##  copiando desde homeBuf hacia bbuf, dibuja las tarjetas sobre bbuf, y cruza
 // ##  a fb con un unico present() atomico. bbuf es de un solo
-// ##  escritor (el loop task); nadie mas lo lee, asi que el
-// ##  presenter nunca puede capturar un frame a medio pintar.
+// ##  escritor (el loop task); nadie mas lo lee, y flxFlush espera
+// ##  a que la transferencia termine antes del cuadro siguiente.
 // ##  Por eso el compose (restore+dibujar+present) solo corre con
 // ##  gState==ST_HOME: homeBuf solo es un fondo valido ahi. El
 // ##  avance de fases sigue sin condicion (es aritmetica pura).
@@ -21309,6 +21347,20 @@ static void notifRestoreBg(){
   if(!homeBuf || !bbuf) return;
   memcpy(bbuf + (size_t)NOTIF_BAND_TOP * SCR_W, homeBuf + (size_t)NOTIF_BAND_TOP * SCR_W,
          (size_t)SCR_W * NOTIF_BAND_H * 2);
+}
+
+// Quita visualmente la isla antes de que la Caja de aplicaciones empiece a
+// subir. No descarta ni desarma la notificacion: congela su reloj y la deja en
+// cola para que vuelva sobre un fondo nuevo al regresar al escritorio.
+static void notifPauseForDrawer(){
+  if(gNotifCount == 0 && !notifBandOn) return;
+  if(!notifPaused){ notifPaused = true; notifPauseT0 = millis(); }
+  notifDragIdx = -1;
+  if(!notifBandOn || !homeBuf || !bbuf) return;
+  notifRestoreBg();
+  present(NOTIF_BAND_TOP, NOTIF_BAND_BOT - 1);
+  setBuf(fb);
+  notifBandOn = false;
 }
 
 // Huella de identidad de un aviso. FNV-1a sobre el origen y lo que de
@@ -21720,7 +21772,7 @@ static void notifTick(){
     }
     notifDrawCard(&gNotifs[i], cardY);
   }
-  // Volcado atomico bbuf->fb de una banda ya terminada. El presenter nunca ve
+  // Volcado atomico bbuf->fb de una banda ya terminada. DMA2D nunca ve
   // un fb a medio pintar.
   present(NOTIF_BAND_TOP, NOTIF_BAND_BOT - 1);
 
@@ -23897,7 +23949,7 @@ static int cronoFitBig(const char* s, int maxw, int maxSize){
   return fs;
 }
 
-// ESFERA. Se compone SIEMPRE en bbuf y se publica con present(): el presenter
+// ESFERA. Se compone SIEMPRE en bbuf y se publica con present(): DMA2D
 // nunca ve un fb a medio pintar (mismo patron que la isla de notificaciones).
 static void cronoDrawDial(){
   int y0 = gCL.dialY0, y1 = gCL.dialY1;
@@ -23909,7 +23961,7 @@ static void cronoDrawDial(){
   int c0 = gClipY0, c1 = gClipY1, cx0 = gClipX0, cx1 = gClipX1;
   gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
   // Componer en bbuf y publicar con present() es lo correcto a pantalla
-  // completa: el presenter nunca ve un fb a medio pintar. Pero present() copia
+  // completa: DMA2D nunca ve un fb a medio pintar. Pero present() copia
   // FILAS ENTERAS, y dentro de una ventana de DeX (o en horizontal) el lienzo
   // de la app no ocupa la fila entera: se acabaria volcando lo que hubiera en
   // bbuf fuera del area util. Ahi se dibuja directo, que es lo que hacen las
@@ -26959,9 +27011,8 @@ static void aiCoworkSave(){
 //  -------------------------------------------------------------
 //  DONDE VIVE Y POR QUE. Nucleo 1, prioridad 1: exactamente el mismo
 //  sitio que las otras tareas de red del sistema (wifiAuto, wifiScan,
-//  ntp, news). El presenter vive en el NUCLEO 0 con prioridad 3 y no
-//  se toca: Cowork no puede quitarle tiempo aunque se pase media hora
-//  esperando a un servidor.
+//  ntp, news). Cowork no dibuja y por tanto no compite con el pipeline
+//  MIPI aunque pase media hora esperando a un servidor.
 //
 //  LO QUE ESTA TAREA NO HACE, NUNCA:
 //    · no dibuja ni una linea (no toca fb, bbuf, homeBuf ni setBuf);
@@ -26987,9 +27038,8 @@ static volatile bool gCwBusy = false;       // la tarea esta con un trabajo ahor
 // interbloqueo instantaneo la primera vez que un trabajo agota su
 // tiempo maximo.
 //
-// Es un candado PROPIO, no flxFbMux: ese protege el framebuffer contra
-// la DMA del panel, y prestarselo aqui pondria a la tarea de fondo a
-// competir con el presenter -- justo lo contrario de lo que se busca.
+// Es un candado PROPIO del motor: nunca se comparte con el framebuffer ni
+// con la DMA del panel.
 static SemaphoreHandle_t gCwMux = NULL;
 static void cwMuxLock(){   if(gCwMux) xSemaphoreTakeRecursive(gCwMux, portMAX_DELAY); }
 static void cwMuxUnlock(){ if(gCwMux) xSemaphoreGiveRecursive(gCwMux); }
@@ -27272,7 +27322,7 @@ static void coworkTaskFn(void*){
         coworkFinish(id, outBuf, strlen(outBuf), nowHash, fixed > 0, millis());
         CoworkJob* d = coworkFind(id);
         if(d) snprintf(d->err_, sizeof(d->err_), "%d", fixed);   // n de palabras corregidas
-        memset(outBuf, 0, sizeof(outBuf));
+        memset(outBuf, 0, CW_OUT_MAX);
         localOk = true;
       }
 
@@ -27579,7 +27629,7 @@ static void flexAiBegin(){
     coworkAttachStorage(gCwSlots, CW_MAX_JOBS);
     aiCoworkLoad();
     // Prioridad 1 en el NUCLEO 1: el mismo sitio que el resto de tareas
-    // de red del sistema. El presenter (nucleo 0, prioridad 3) no la ve.
+    // de red del sistema. La tarea grafica/UI no queda involucrada.
     if(xTaskCreatePinnedToCore(coworkTaskFn, "cowork", 6144, NULL, 1, &gCwTask, 1) != pdPASS)
       gCwTask = NULL;
   }
@@ -29673,10 +29723,8 @@ void loop(){
   //  publican su banda con present(). Entre dos repintados del OTA
   //  se colaba una banda con el fondo del escritorio -- un degradado
   //  azul/verde -- justo encima de la pantalla de progreso: ese era
-  //  el "parpadeo cian" en cada 1%. No era una carrera entre
-  //  nucleos (el presenter es el unico que habla con el panel y ya
-  //  estaba protegido por flxFbMux): era que nadie tenia la
-  //  propiedad exclusiva de la pantalla.
+  //  el "parpadeo cian" en cada 1%. No era una carrera entre nucleos:
+  //  era que nadie tenia la propiedad exclusiva de la pantalla.
   //
   //  El tactil, el TWDT, la deteccion I2C y la radio SIGUEN
   //  corriendo arriba: aqui solo se corta el DIBUJO.
@@ -29793,7 +29841,7 @@ void loop(){
 //
 //  Milestone 1 (ESTE archivo) — COMPLETO:
 //    · Capa HW nativa 480x800 (panel ST7701 + GT911) reusada de ArduOS
-//    · Motor grafico propio (framebuffers PSRAM + presenter core 0)
+//    · Motor grafico propio (framebuffers PSRAM + DMA2D sincronizada)
 //    · Fuente 5x7 con acentos UTF-8 (es/fr/pt/it) + reloj vectorial
 //    · Splash con fundido · OOBE (6 idiomas + teclado QWERTY)
 //    · Bloqueo con reloj gigante y desbloqueo con fisica (swipe-up)
