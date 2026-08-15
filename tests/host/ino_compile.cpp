@@ -176,6 +176,7 @@ static void testNoHorizontal();
 static void testNotifUnaSola();
 static void testDeslizarPaginas();
 static void testCabeceras();
+static void testListasConScroll();
 // Almacen de trabajos para las pruebas: la placa lo pone en PSRAM, aqui
 // basta con un array estatico.
 static CoworkJob gTestJobs[CW_MAX_JOBS];
@@ -2499,6 +2500,92 @@ static void testCabeceras(){
   if(!gFails) printf("  Cabecera de app: todas las comprobaciones pasan.\n");
 }
 
+
+// #############################################################
+//  LISTAS CON SCROLL: NADA ESCRIBE FUERA DEL VIEWPORT
+//  ------------------------------------------------------------
+//  En el video de Flex Vault, al arrastrar la lista hacia arriba,
+//  "Ultimo acceso", "Bloqueo automatico" e "Intentos fallidos" se
+//  apilan unos sobre otros en la banda de la cabecera. La causa:
+//  el unico filtro por elemento miraba el borde de ABAJO
+//  (`if(y + alto >= 58)`), asi que con `y` muy negativo la tarjeta
+//  se dibujaba entera encima del titulo.
+//
+//  La prueba pinta contenido a proposito FUERA del viewport y
+//  comprueba, pixel a pixel, que no llega.
+// #############################################################
+static void testListasConScroll(){
+  printf("Listas con scroll: recorte del viewport\n");
+  gLand = false;
+  const uint16_t FONDO = 0x0000, TINTA = 0xFFFF;
+
+  // --- El recorte funciona en las dos direcciones ---
+  { memset(bbuf, 0, (size_t)SCR_W * SCR_H * 2);
+    setBuf(bbuf);
+    uiClipViewport(VW_VP_TOP, SCR_H - 1);
+    // Una tarjeta que empieza MUY por encima del viewport, como una fila
+    // arrastrada hacia arriba, con sus textos en la banda de la cabecera.
+    fillRoundRect(12, -90, SCR_W - 24, 176, 16, TINTA);
+    drawText(26, -30, "Ultimo acceso", 1, TINTA);
+    drawText(26, 10,  "Bloqueo automatico", 1, TINTA);
+    int arriba = 0;
+    for(int y = 0; y < VW_VP_TOP; y++)
+      for(int x = 0; x < SCR_W; x++)
+        if(bbuf[(size_t)y * SCR_W + x] != FONDO) arriba++;
+    chk(arriba == 0, "una fila subida no escribe NI UN PIXEL en la cabecera");
+    // Y lo que si cae dentro del viewport se dibuja: el recorte no
+    // apaga la lista, solo la contiene.
+    int dentro = 0;
+    for(int y = VW_VP_TOP; y < SCR_H; y++)
+      for(int x = 0; x < SCR_W; x++)
+        if(bbuf[(size_t)y * SCR_W + x] != FONDO) dentro++;
+    chk(dentro > 500, "y la parte que si entra en el viewport se ve"); }
+
+  // --- Por abajo igual ---
+  { memset(bbuf, 0, (size_t)SCR_W * SCR_H * 2);
+    setBuf(bbuf);
+    uiClipViewport(VW_VP_TOP, SCR_H - 120);
+    fillRoundRect(12, SCR_H - 200, SCR_W - 24, 176, 16, TINTA);
+    int abajo = 0;
+    for(int y = SCR_H - 119; y < SCR_H; y++)
+      for(int x = 0; x < SCR_W; x++)
+        if(bbuf[(size_t)y * SCR_W + x] != FONDO) abajo++;
+    chk(abajo == 0, "y tampoco por debajo del viewport"); }
+
+  // --- El viewport deja libre la cabecera de Flex Vault ---
+  chk(VW_VP_TOP >= 56,  "el viewport de Flex Vault empieza bajo su cabecera");
+  chk(FILES_VP_TOP > UIHDR_H, "el de Archivos, bajo la cabecera y la ruta");
+
+  // --- Se restaura siempre: ninguna pantalla hereda un recorte estrecho ---
+  { uiClipViewport(100, 200);
+    uiClipFull();
+    chk(gClipY0 == 0 && gClipY1 == SCR_H - 1, "uiClipFull devuelve todas las filas");
+    chk(gClipX0 == 0 && gClipX1 == SCR_W - 1, "y todas las columnas"); }
+
+  // --- Un recorte anidado INTERSECA, no sustituye ---
+  // Es lo que hace la miniatura de Paint dentro de su tarjeta: si la
+  // tarjeta esta a medio salir, sus trazos no pueden escaparse arriba.
+  { memset(bbuf, 0, (size_t)SCR_W * SCR_H * 2);
+    setBuf(bbuf);
+    uiClipViewport(UIHDR_ZONE + 4, SCR_H - 1);
+    int sx0 = gClipX0, sx1 = gClipX1, sy0 = gClipY0, sy1 = gClipY1;
+    int cy = 10;                                   // tarjeta subida: y = 10
+    gClipX0 = max(sx0, 12); gClipX1 = min(sx1, SCR_W - 12);
+    gClipY0 = max(sy0, cy); gClipY1 = min(sy1, cy + 200);
+    fillRect(0, 0, SCR_W, SCR_H, TINTA);           // la miniatura, a lo bestia
+    gClipX0 = sx0; gClipX1 = sx1; gClipY0 = sy0; gClipY1 = sy1;
+    int fuera = 0;
+    for(int y = 0; y < UIHDR_ZONE + 4; y++)
+      for(int x = 0; x < SCR_W; x++)
+        if(bbuf[(size_t)y * SCR_W + x] != FONDO) fuera++;
+    chk(fuera == 0, "un recorte anidado no puede ampliar el del viewport"); }
+
+  setBuf(fb);
+  uiClipFull();
+  tReset();
+  if(!gFails) printf("  Listas con scroll: todas las comprobaciones pasan.\n");
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -2581,6 +2668,7 @@ int main(){
   testNotifUnaSola();
   testDeslizarPaginas();
   testCabeceras();
+  testListasConScroll();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

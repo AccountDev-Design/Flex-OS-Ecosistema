@@ -6750,6 +6750,39 @@ static void uiHdrDraw(const char* title, int fs, uint16_t txt, uint16_t nav, boo
   drawTextClip(UIHDR_TX, UIHDR_CY - uiLineH(fs) / 2, title, fs, txt, UIHDR_TX + avail);
 }
 
+// #############################################################
+// ##  VIEWPORT DE UNA LISTA CON SCROLL
+// ##  ------------------------------------------------------
+// ##  Toda pantalla con cabecera fija y contenido que se arrastra
+// ##  tiene el mismo fallo latente: las filas se dibujan en
+// ##  `y - scroll`, y la unica proteccion era un "if" por elemento
+// ##  del tipo `if(y + alto >= 58)`. Ese if mira el borde de
+// ##  ABAJO. Con la lista subida, `y` se vuelve muy negativo, la
+// ##  condicion sigue siendo cierta y la tarjeta se dibuja
+// ##  entera... encima de la cabecera. Eso es lo que en el video
+// ##  de Flex Vault apila "Ultimo acceso", "Bloqueo automatico" e
+// ##  "Intentos fallidos" unos sobre otros en la banda de arriba.
+// ##
+// ##  La solucion no es anadir el otro if en cada uno de los
+// ##  cincuenta sitios que dibujan una fila: es que el area con
+// ##  scroll tenga un RECORTE EXCLUSIVO. Dentro de el, un elemento
+// ##  a medio salir se corta por donde toca; fuera, no se escribe
+// ##  ni un pixel por mucho que se equivoque una coordenada.
+// ##
+// ##  No cuesta nada: gClipY0/gClipY1 ya los respetan todas las
+// ##  primitivas, asi que esto no anade trabajo por frame.
+// #############################################################
+static inline void uiClipViewport(int top, int bot){
+  if(top < 0) top = 0;
+  if(bot > SCR_H - 1) bot = SCR_H - 1;
+  gClipY0 = top; gClipY1 = bot;
+  gClipX0 = 0;   gClipX1 = SCR_W - 1;
+}
+static inline void uiClipFull(){
+  gClipY0 = 0; gClipY1 = SCR_H - 1;
+  gClipX0 = 0; gClipX1 = SCR_W - 1;
+}
+
 // ---- Contenido de apps ----
 // (1) Placeholder para apps aun no implementadas (dentro de la ventana)
 static void appPlaceholderEnter(){
@@ -13507,6 +13540,10 @@ static void noteRenderList(){
   // flecha se dibujaba dentro de la "N" de "Notas".
   uiHdrDraw("Notas:", 5, TH_TXT, TH_NAV, true);
 
+  // De aqui abajo manda el viewport. El titulo de cada tarjeta se dibuja
+  // 34 px POR ENCIMA de ella, asi que una tarjeta a medio salir escribia
+  // su nombre dentro de la cabecera aunque la tarjeta ya no se viera.
+  uiClipViewport(UIHDR_ZONE + 4, SCR_H - 1);
   if(noteListN == 0){
     drawTextC(SCR_W / 2, 320, "No hay notas todav\xC3\xAD" "a", 3, TH_TXT2);
     drawTextC(SCR_W / 2, 364, "Pulsa el boton de abajo para crear una", 1, TH_MUTE);
@@ -13529,6 +13566,7 @@ static void noteRenderList(){
     if(notePrev[i][0]) fkTextBox(x + 10, y + 10, w - 20, h - 20, notePrev[i], 2, TH_TXT);
     else               drawText(x + 10, y + 10, "(vac\xC3\xAD" "a)", 2, TH_MUTE);
   }
+  uiClipFull();                     // barra de seleccion, boton flotante y menu, encima
   if(noteMulti){
     // Barra de acciones del modo seleccion: opera sobre TODOS los marcados.
     int by = SCR_H - 128;
@@ -14418,6 +14456,9 @@ static void almTick(){
 // #############################################################
 #define FILES_MAX     24
 #define FILES_TOP    128
+// Primera fila del area con scroll: justo debajo de la cabecera comun y
+// de la linea de la ruta.
+#define FILES_VP_TOP (UIHDR_H + 34)
 #define FILES_RH      70
 
 static FlexFsEntry filesList[FILES_MAX];
@@ -14461,6 +14502,11 @@ static void filesRender(){
   uiHdrDraw("Archivos:", 5, TH_TXT, TH_NAV, true);   // el nombre no cambia: solo donde empieza
   drawTextClip(16, UIHDR_H + 8, filesDir, 2, TH_TXT2, SCR_W - 60);
 
+  // Cabecera y ruta son FIJAS; de FILES_VP_TOP para abajo manda el
+  // viewport. Sin este recorte, una fila a medio salir por arriba se
+  // dibujaba entera -- su tarjeta tapaba la ruta y el titulo --, porque
+  // el unico filtro miraba el borde de abajo (y + FILES_RH < 40).
+  uiClipViewport(FILES_VP_TOP, SCR_H - 1);
   int row = 0;
   if(filesHasUp()){
     int y = filesRowY(row++);
@@ -14492,6 +14538,7 @@ static void filesRender(){
   }
   if(filesN == 0 && !filesHasUp())
     drawTextC(SCR_W / 2, 320, "Carpeta vac\xC3\xAD" "a", 3, TH_MUTE);
+  uiClipFull();                       // la barra de seleccion y el menu van encima
 
   if(filesMulti){
     int by = SCR_H - 128;
@@ -17054,6 +17101,9 @@ static void paintRenderGallery(){
   fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
   uiHdrDraw("Paint", 5, TH_TXT, TH_NAV, true);
 
+  // Mismo criterio que en Notas: el nombre va encima de la tarjeta, asi
+  // que sin viewport se colaba en la cabecera al subir la galeria.
+  uiClipViewport(UIHDR_ZONE + 4, SCR_H - 1);
   if(paintListN == 0){
     drawTextC(SCR_W / 2, 320, "No hay dibujos todav\xC3\xAD" "a", 3, TH_TXT2);
     drawTextC(SCR_W / 2, 364, "Pulsa + para crear uno", 1, TH_MUTE);
@@ -17070,7 +17120,10 @@ static void paintRenderGallery(){
     char p[FLEXFS_PATH_MAX]; paintPathOf(i, p, sizeof(p));
     float sc = (float)(w - 8) / (float)PAINT_CW;
     int savedX0 = gClipX0, savedX1 = gClipX1, savedY0 = gClipY0, savedY1 = gClipY1;
-    gClipX0 = x + 4; gClipX1 = x + w - 4; gClipY0 = y + 4; gClipY1 = y + h - 4;
+    // INTERSECCION, no sustitucion: si la tarjeta esta a medio salir por
+    // arriba, su miniatura no puede escaparse del viewport de la galeria.
+    gClipX0 = max(savedX0, x + 4);     gClipX1 = min(savedX1, x + w - 4);
+    gClipY0 = max(savedY0, y + 4);     gClipY1 = min(savedY1, y + h - 4);
     flexPaintReplay(p, sc, x + 4, y + 4, paintSegCb, NULL);
     gClipX0 = savedX0; gClipX1 = savedX1; gClipY0 = savedY0; gClipY1 = savedY1;
 
@@ -17082,6 +17135,7 @@ static void paintRenderGallery(){
       strokeSegAA(x + w - 20, y + 22, x + w - 13, y + 13, 2.2f, TH_ONACC);
     }
   }
+  uiClipFull();                     // barra de seleccion, boton flotante y menu, encima
   if(paintMulti){
     int by = SCR_H - 128;
     if(uiGlass) drawLiquidGlassPanel(12, by, SCR_W - 24, 60, 16, TH_GLASS2);
@@ -24907,6 +24961,10 @@ enum { VK_CREATE = 0,      // crear la clave de la boveda
 
 #define VW_MAX_ITEMS   24        // elementos por pantalla de lista
 #define VW_ROW_H       62
+// Primera fila del area con SCROLL. La cabecera (chevron, titulo y
+// subtitulo) ocupa hasta y=52; por debajo manda el viewport y nada de lo
+// que se arrastra puede escribir por encima de esta linea.
+#define VW_VP_TOP      56
 #define VW_ROWS_MAX    30
 #define VW_TEXT_MAX    2048      // nota privada descifrada en RAM
 #define VW_BLOB_MAX    (512 * 1024)   // tope para previsualizar en RAM
@@ -25132,6 +25190,7 @@ static void vwRenderHome(){
   vwHeader("Flex Vault", "Carpeta segura");
   vwRowsReset();
 
+  uiClipViewport(VW_VP_TOP, SCR_H - 1);   // nada del contenido puede pisar la cabecera
   int y = 78 - vwScroll;
 
   // ---- Tarjeta de estado ----
@@ -25205,6 +25264,7 @@ static void vwRenderHome(){
     drawText(26, y, "Secure Boot y Flash Encryption siguen", 1, TH_MUTE); y += 18;
     drawText(26, y, "desactivados: la fuerza de la clave importa.", 1, TH_MUTE); y += 18;
   }
+  uiClipFull();                           // el aviso flotante va por encima de todo
   vwDragS0 = y + vwScroll;                       // alto total del contenido
   vwDrawMsg();
   flxFlushAll();
@@ -25241,6 +25301,7 @@ static void vwRenderList(){
   vwHeader(ttl, sub);
   vwRowsReset();
 
+  uiClipViewport(VW_VP_TOP, SCR_H - 1);   // nada del contenido puede pisar la cabecera
   int y = 78 - vwScroll;
   if(vwItemsN == 0){
     drawTextC(SCR_W / 2, 300, "Todav\xC3\xAD" "a no hay nada aqu\xC3\xAD", 3, TH_TXT2);
@@ -25262,6 +25323,7 @@ static void vwRenderList(){
     y = vwRow(y, VA_NEWNOTE, "Nueva nota privada",
               "Se crea ya cifrada dentro de la b\xC3\xB3veda", false, TH_OK);
   }
+  uiClipFull();                           // el aviso flotante va por encima de todo
   vwDragS0 = y + vwScroll;
 
   // Menu de acciones del elemento (se dibuja encima).
@@ -25568,6 +25630,7 @@ static void vwRenderApps(){
   fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
   vwHeader("A\xC3\xB1" "adir apps", "Apps con versi\xC3\xB3n privada dentro de Flex Vault");
   vwRowsReset();
+  uiClipViewport(VW_VP_TOP, SCR_H - 1);   // nada del contenido puede pisar la cabecera
   int y = 78 - vwScroll;
 
   for(int i = 0; i < 6; i++){
@@ -25588,6 +25651,7 @@ static void vwRenderApps(){
     drawText(26, y, "b\xC3\xB3veda: Ajustes, actualizaciones, seguridad,", 1, TH_MUTE); y += 18;
     drawText(26, y, "bloqueo, apagado y Modo PC quedan fuera.", 1, TH_MUTE); y += 18;
   }
+  uiClipFull();                           // el aviso flotante va por encima de todo
   vwDragS0 = y + vwScroll;
   vwDrawMsg();
   flxFlushAll();
@@ -25601,6 +25665,7 @@ static void vwRenderAppMan(){
   fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
   vwHeader("Apps privadas", "Almacenamiento, acceso y candado de cada una");
   vwRowsReset();
+  uiClipViewport(VW_VP_TOP, SCR_H - 1);   // nada del contenido puede pisar la cabecera
   int y = 78 - vwScroll;
   int n = 0;
 
@@ -25620,6 +25685,7 @@ static void vwRenderAppMan(){
     drawTextC(SCR_W / 2, 300, "No hay apps privadas", 3, TH_TXT2);
     drawTextC(SCR_W / 2, 344, "A\xC3\xB1" "adelas desde \"A\xC3\xB1" "adir apps\"", 1, TH_MUTE);
   }
+  uiClipFull();                           // el aviso flotante va por encima de todo
   vwDragS0 = y + vwScroll;
   vwDrawMsg();
   flxFlushAll();
@@ -25740,6 +25806,7 @@ static void vwRenderLog(){
   fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
   vwHeader("Registro de seguridad", "Sin nombres ni contenido, y cifrado");
   vwRowsReset();
+  uiClipViewport(VW_VP_TOP, SCR_H - 1);   // nada del contenido puede pisar la cabecera
   int y = 78 - vwScroll;
   if(vwLogN == 0) drawTextC(SCR_W / 2, 300, "Sin actividad registrada", 3, TH_TXT2);
   for(int i = 0; i < vwLogN; i++){
@@ -25748,6 +25815,7 @@ static void vwRenderLog(){
                   (vwLog[i].ev == FXV_EV_UNLOCK) ? TH_OK : rgb565(120,150,160);
     y = vwRow(y, VA_NONE, vwEvName(vwLog[i].ev, vwLog[i].aux), st, false, ac);
   }
+  uiClipFull();                           // el aviso flotante va por encima de todo
   vwDragS0 = y + vwScroll;
   vwDrawMsg();
   flxFlushAll();
@@ -25928,6 +25996,9 @@ static void vwOpenAppList(int appId){
 }
 
 static void vaultRender(){
+  // Cada pantalla que use viewport lo pone y lo quita, pero se empieza
+  // siempre con el recorte completo: ninguna puede heredar el de otra.
+  uiClipFull();
   switch(vwView){
     case VW_SETUP_SEL: vwRenderSetupSel(); break;
     case VW_KEYPAD:    vwRenderKeypad(0);  break;
