@@ -347,7 +347,22 @@ struct DetectedModule {
 };
 
 // ---- Geometria de la isla ----
-#define NOTIF_MAX         3
+//
+// UNA TARJETA A LA VEZ. NOTIF_MAX sigue siendo la profundidad de la
+// COLA (lo que cabe esperando), pero solo NOTIF_VISIBLE tarjetas se
+// dibujan. Apilar tres avisos encima del escritorio tapaba los widgets,
+// daba dos botones de cerrar a la vez y -- lo peor -- estiraba la banda
+// hasta y=284, que se solapa con la banda de la rejilla (HOME_BAND_TOP
+// = 206). Dos compositores escribiendo en bbuf sobre las mismas filas
+// es exactamente lo que dejaba mitades de pagina antigua durante el
+// deslizamiento: la isla reponia ahi el escritorio SIN desplazar justo
+// despues de que hpRenderFrame lo hubiera dejado desplazado.
+//
+// Con una sola tarjeta la banda acaba en y=126, muy por encima de la
+// rejilla: las dos zonas ya no pueden pisarse, y de paso cada frame de
+// la isla mueve 110 filas en vez de 258.
+#define NOTIF_MAX         3        // profundidad de la COLA
+#define NOTIF_VISIBLE     1        // tarjetas dibujadas a la vez
 #define NOTIF_MARGIN_X    16
 #define NOTIF_CARD_W      (SCR_W - 2 * NOTIF_MARGIN_X)                        // 448
 #define NOTIF_CARD_H      64
@@ -357,8 +372,8 @@ struct DetectedModule {
 #define NOTIF_ENTER_DROP  24                                                  // caida de la animacion de entrada (px)
 #define NOTIF_HOLD_MS     5000                                                // ms visible antes de auto-descartarse
 #define NOTIF_BAND_TOP    (NOTIF_Y0 - NOTIF_ENTER_DROP - 6)                   // 26
-#define NOTIF_BAND_BOT    (NOTIF_Y0 + NOTIF_MAX * (NOTIF_CARD_H + NOTIF_GAP) + 6) // 284
-#define NOTIF_BAND_H      (NOTIF_BAND_BOT - NOTIF_BAND_TOP)                   // 258
+#define NOTIF_BAND_BOT    (NOTIF_Y0 + NOTIF_VISIBLE * (NOTIF_CARD_H + NOTIF_GAP) + 6) // 126
+#define NOTIF_BAND_H      (NOTIF_BAND_BOT - NOTIF_BAND_TOP)                   // 100
 
 // ---- Fase de animacion de cada notificacion ----
 enum NotifPhase { NP_IN, NP_IDLE, NP_DRAG, NP_OUT, NP_SPRING };
@@ -391,6 +406,13 @@ struct Notification {
   uint32_t       jobId;         // trabajo de Cowork al que apunta (0 si no es de Cowork)
   uint8_t        act;           // NACT_* del boton principal
   bool           sticky;        // no se auto-descarta a los 5 s (pide intervencion del usuario)
+  // HUELLA DE IDENTIDAD, para no encolar dos veces el mismo aviso. El
+  // escaneo I2C vuelve a pasar cada pocos segundos y el mismo trabajo de
+  // Cowork puede avisar de varias etapas: sin esto la cola se llenaba de
+  // tres copias de "Dispositivo I2C" y se veian apiladas. Con la huella,
+  // el aviso repetido REFRESCA el que ya hay (texto, boton y cuenta
+  // atras) en vez de anadir otra tarjeta.
+  uint32_t       key;
 };
 
 // ---- UNA NOTICIA YA NORMALIZADA ----
@@ -21103,6 +21125,38 @@ static void drawModuleIcon(ModuleType type, int x, int y, int S){
   drawAppIcon(id, x, y, S);
 }
 
+// #############################################################
+// ##  PANTALLAS EN LAS QUE NO SE NOTIFICA NADA
+// ##  ------------------------------------------------------
+// ##  UNA sola funcion, y todos los caminos preguntan aqui: la isla
+// ##  del escritorio, la tarjeta flotante y cualquier aviso futuro.
+// ##  Repartir la lista por cada llamante es como acabo saliendo una
+// ##  tarjeta de "Dispositivo I2C" ENCIMA del teclado del PIN --
+// ##  nflWanted() comprobaba ST_LOCK pero se le habia olvidado
+// ##  ST_LOCKSETUP, que es donde se teclea la clave de verdad.
+// ##
+// ##  Las notificaciones NO se pierden: se quedan en la cola, sin
+// ##  armar, y su animacion de entrada y su cuenta atras arrancan
+// ##  cuando el usuario vuelve a una pantalla normal. Un aviso que
+// ##  caduca mientras estas desbloqueando es un aviso que nunca
+// ##  llegaste a ver.
+// #############################################################
+static bool notifSecureScreen(){
+  switch(gState){
+    case ST_SPLASH:            // arranque: aun no hay sesion
+    case ST_OOBE_LANG:         // primera configuracion
+    case ST_OOBE_NAME:
+    case ST_LOCK:              // bloqueo
+    case ST_LOCKSETUP:         // alta y VERIFICACION de PIN/contrasena
+    case ST_VAULT:             // Flex Vault: clave y contenido privado
+    case ST_POWEROFF_CONFIRM:  // apagado en curso
+    case ST_POWEROFF_ANIM:
+      return true;
+    default:
+      return false;
+  }
+}
+
 // Restaura la banda limpia EN bbuf, copiando desde homeBuf (siempre al dia:
 // se recompone solo en cada cambio de minuto, al salir de edicion, etc.).
 // homeBuf es la fuente y bbuf el lienzo de trabajo. Ya no hace falta
@@ -21113,9 +21167,47 @@ static void notifRestoreBg(){
          (size_t)SCR_W * NOTIF_BAND_H * 2);
 }
 
+// Huella de identidad de un aviso. FNV-1a sobre el origen y lo que de
+// verdad lo identifica: para Cowork, el trabajo; para un modulo, su tipo
+// y su direccion I2C (y el nombre, que distingue dos noticias del mismo
+// servicio). El texto secundario NO entra: "0x18 detectado" y "0x18
+// listo" son el MISMO dispositivo y deben refrescar la tarjeta, no
+// anadir otra.
+static uint32_t notifKeyOf(uint8_t src, uint32_t jobId, const DetectedModule* m){
+  uint32_t h = 2166136261u;
+  h = (h ^ src) * 16777619u;
+  for(int i = 0; i < 4; i++) h = (h ^ ((jobId >> (8 * i)) & 0xFF)) * 16777619u;
+  if(m){
+    h = (h ^ (uint8_t)m->type)    * 16777619u;
+    h = (h ^ (uint8_t)m->i2cAddr) * 16777619u;
+    for(const char* p = m->name; *p; p++) h = (h ^ (uint8_t)*p) * 16777619u;
+  }
+  return h ? h : 1u;               // 0 queda reservado a "sin huella"
+}
+
+// Ranura activa con esa huella, o -1. Las que ya se estan yendo (NP_OUT)
+// no cuentan: el usuario acaba de descartarlas y volver a rellenarlas
+// seria devolverle el aviso que quito.
+static int notifFindKey(uint32_t key){
+  if(!key) return -1;
+  for(int i = 0; i < gNotifCount; i++)
+    if(gNotifs[i].active && gNotifs[i].phase != NP_OUT && gNotifs[i].key == key) return i;
+  return -1;
+}
+
 // Encola una notificacion a partir de un modulo
 static void notifRemove(int idx);          // definida justo debajo; la usa notifPushJob
 static void notifPush(const DetectedModule* m){
+  uint32_t key = notifKeyOf(NSRC_MODULE, 0, m);
+  int dup = notifFindKey(key);
+  if(dup >= 0){
+    // Ya esta en la cola: se refresca en su sitio. Si estaba VISIBLE se le
+    // reinicia la cuenta atras (el aviso vuelve a ser noticia); si estaba
+    // esperando, sigue esperando su turno y no se cuela por delante.
+    gNotifs[dup].mod = *m;
+    if(gNotifs[dup].armed) gNotifs[dup].bornMs = millis();
+    return;
+  }
   if(gNotifCount >= NOTIF_MAX) return;           // cola llena: se descarta (Fase 1)
   Notification* n = &gNotifs[gNotifCount++];
   n->mod    = *m;
@@ -21128,6 +21220,7 @@ static void notifPush(const DetectedModule* m){
   n->jobId  = 0;
   n->act    = NACT_NONE;
   n->sticky = false;
+  n->key    = key;
 }
 
 // Encola una tarjeta de FLEX COWORK. Misma cola, mismo gestor, mismas
@@ -21140,6 +21233,20 @@ static void notifPush(const DetectedModule* m){
 // una decision y desaparece solo es un aviso que no sirve.
 static void notifPushJob(uint32_t jobId, const char* title, const char* sub,
                          uint8_t act, bool sticky){
+  // Un trabajo avisa varias veces (empieza, pide permiso, termina). Es
+  // SIEMPRE la misma tarjeta: se reescribe en su sitio en vez de apilar
+  // tres avisos del mismo trabajo.
+  uint32_t key = notifKeyOf(NSRC_COWORK, jobId, NULL);
+  int dup = jobId ? notifFindKey(key) : -1;
+  if(dup >= 0){
+    Notification* d = &gNotifs[dup];
+    snprintf(d->mod.name, sizeof(d->mod.name), "%s", title ? title : "Flex Intelligence");
+    snprintf(d->mod.sub,  sizeof(d->mod.sub),  "%s", sub   ? sub   : "");
+    d->act    = act;
+    d->sticky = sticky;
+    if(d->armed) d->bornMs = millis();     // la noticia es nueva: vuelve a contar
+    return;
+  }
   if(gNotifCount >= NOTIF_MAX){
     // Cola llena: antes de descartar el aviso nuevo se intenta hacer
     // sitio sacando la tarjeta mas vieja que NO pida intervencion. Un
@@ -21164,6 +21271,7 @@ static void notifPushJob(uint32_t jobId, const char* title, const char* sub,
   n->jobId  = jobId;
   n->act    = act;
   n->sticky = sticky;
+  n->key    = key;
 }
 
 // Elimina la ranura idx y compacta la cola
@@ -21295,10 +21403,15 @@ static void notifPushDemo(){
 // maquina de estados del tactil.
 static void notifHandleTouch(){
   // La isla solo recibe toques cuando es visible (Home principal desbloqueado).
-  if(gState != ST_HOME || qsPanelY != 0 || editMode){ notifDragIdx = -1; return; }
-  // Toques en tarjetas (cerrar, flick, iniciar arrastre)
-  for(int i = 0; i < gNotifCount; i++){
-    if(!gNotifs[i].active || gNotifs[i].phase == NP_OUT) continue;
+  if(gState != ST_HOME || qsPanelY != 0 || editMode || notifSecureScreen() ||
+     hpDragging || hpSettling){ notifDragIdx = -1; return; }
+  // Toques en tarjetas (cerrar, flick, iniciar arrastre). SOLO las
+  // visibles: las de la cola no tienen pixeles en pantalla, asi que un
+  // deslizamiento sobre la tarjeta de arriba no puede descartarlas de
+  // paso -- descarta la que se ve, y solo esa.
+  int shown = gNotifCount < NOTIF_VISIBLE ? gNotifCount : NOTIF_VISIBLE;
+  for(int i = 0; i < shown; i++){
+    if(!gNotifs[i].active || !gNotifs[i].armed || gNotifs[i].phase == NP_OUT) continue;
     int cardY = NOTIF_Y0 + i * (NOTIF_CARD_H + NOTIF_GAP);
     int x0 = NOTIF_MARGIN_X, x1 = NOTIF_MARGIN_X + NOTIF_CARD_W;
     int y0 = cardY, y1 = cardY + NOTIF_CARD_H;
@@ -21376,7 +21489,14 @@ static void notifTick(){
   // durante el bloqueo esperan congeladas y su animacion de entrada + los 5 s
   // arrancan al llegar aqui. Asi tambien evitamos el conflicto de dibujo con
   // otras pantallas (que son quienes deben poseer el fb en ese momento).
-  if(gState != ST_HOME || qsPanelY != 0 || editMode){
+  //
+  // Y MIENTRAS SE PASA DE PAGINA, tampoco. hpRenderFrame() esta escribiendo
+  // en bbuf las mismas filas que la isla y presentandolas desplazadas; si la
+  // isla repusiera ahi el escritorio SIN desplazar, media pantalla quedaria
+  // en la pagina vieja y media en la nueva. Se cede el turno: la isla vuelve
+  // -- con su tiempo intacto, via notifPaused -- en cuanto el gesto acaba.
+  if(gState != ST_HOME || qsPanelY != 0 || editMode || notifSecureScreen() ||
+     hpDragging || hpSettling){
     if(!notifPaused){ notifPaused = true; notifPauseT0 = millis(); }   // marca el inicio de la pausa (p.ej. se abrio una app)
     return;
   }
@@ -21392,8 +21512,15 @@ static void notifTick(){
   }
   if(gNotifCount > 0) notifBandOn = true;
 
+  // UNA a la vez: solo las NOTIF_VISIBLE primeras de la cola se arman,
+  // se animan y se dibujan. Las de detras esperan su turno intactas --
+  // ni cuentan los 5 s ni ocupan pixeles -- y entran en cuanto la de
+  // delante se va. Eso es lo que convierte gNotifs[] en una cola de
+  // verdad en vez de una pila de tarjetas superpuestas.
+  int shown = gNotifCount < NOTIF_VISIBLE ? gNotifCount : NOTIF_VISIBLE;
+
   // Armar la entrada de las notificaciones aun no mostradas
-  for(int i = 0; i < gNotifCount; i++){
+  for(int i = 0; i < shown; i++){
     if(!gNotifs[i].armed){
       gNotifs[i].armed  = true;
       gNotifs[i].phase  = NP_IN;
@@ -21403,8 +21530,13 @@ static void notifTick(){
   }
 
   // Avanzar fases de animacion
-  for(int i = 0; i < gNotifCount; i++){
+  for(int i = 0; i < shown; i++){
     Notification* n = &gNotifs[i];
+    // Al salir la de delante, la siguiente sube a esta ranura en el MISMO
+    // frame, todavia sin armar. No se le avanza la fase aqui: su bornMs es
+    // el de cuando se encolo, asi que la caducidad de 5 s la mataria de
+    // golpe sin haberse visto nunca. Se arma en la vuelta siguiente.
+    if(!n->armed) continue;
     switch(n->phase){
       case NP_IN:
         if(millis() - n->bornMs >= 280) n->phase = NP_IDLE;
@@ -21434,8 +21566,9 @@ static void notifTick(){
   // tarjetas encima. Nadie mas presenta esta banda -> sin parpadeo.
   setBuf(bbuf);
   notifRestoreBg();
-  for(int i = 0; i < gNotifCount; i++){
-    if(!gNotifs[i].active) continue;
+  if(gNotifCount < shown) shown = gNotifCount;         // alguna se fue en el bucle de fases
+  for(int i = 0; i < shown; i++){
+    if(!gNotifs[i].active || !gNotifs[i].armed) continue;
     int cardY = NOTIF_Y0 + i * (NOTIF_CARD_H + NOTIF_GAP);
     if(gNotifs[i].phase == NP_IN){
       float p = (millis() - gNotifs[i].bornMs) / 280.0f; if(p > 1.0f) p = 1.0f;
@@ -21502,6 +21635,12 @@ static uint16_t* nflSave   = NULL;      // fondo guardado (PSRAM)
 static bool      nflHasBg  = false;     // hay fondo guardado que devolver
 static int       nflSX = 0, nflSY = 0, nflSW = 0, nflSH = 0;   // rect FISICO guardado
 static bool      nflLandSaved = false;  // el fondo se guardo estando en horizontal
+// PANTALLA en la que se capturo el fondo. Si cambia, la captura ya no
+// describe nada: la pantalla nueva se ha pintado entera por su cuenta y
+// devolver el rectangulo guardado estamparia un trozo de la anterior
+// encima. Fue exactamente asi como un recorte de la app se colaba sobre
+// el teclado del PIN al bloquear con una tarjeta puesta.
+static int       nflSavedState = -1;
 static int       nflIdx    = -1;        // ranura de gNotifs[] que se esta mostrando
 static uint32_t  nflFrameMs = 0;
 static bool      nflDragging = false;
@@ -21562,7 +21701,8 @@ static bool nflSaveBg(){
     memcpy(nflSave + (size_t)j * w, fb + (size_t)(y + j) * SCR_W + x, (size_t)w * 2);
   fbUnlock();
   nflSX = x; nflSY = y; nflSW = w; nflSH = h;
-  nflLandSaved = gLand;
+  nflLandSaved  = gLand;
+  nflSavedState = gState;
   nflHasBg = true;
   return true;
 }
@@ -21574,15 +21714,35 @@ static void nflRestoreBgTo(uint16_t* dst){
     memcpy(dst + (size_t)(nflSY + j) * SCR_W + nflSX, nflSave + (size_t)j * nflSW, (size_t)nflSW * 2);
 }
 
+// Olvida el fondo SIN devolverlo. Es para cuando lo que hay debajo ya
+// no es lo que se capturo: al girar a horizontal, al pasar a otra
+// pantalla o al ceder el fb, quien esta ahora se ha repintado entero y
+// devolver el rectangulo guardado estamparia un trozo de la pantalla
+// ANTERIOR encima de la nueva. En ese caso lo correcto es no tocar nada.
+static void nflForgetBg();
+
+// true si la captura guardada sigue describiendo lo que hay debajo. Deja
+// de valer en cuanto cambia la orientacion (los ejes se intercambian) o
+// la pantalla (otra la ha repintado entera). Es LA condicion que decide
+// entre devolver el fondo y olvidarlo, y esta en un solo sitio para que
+// no vuelva a haber una ruta a la que se le olvide preguntar.
+static inline bool nflBgStillValid(){
+  return nflHasBg && nflLandSaved == gLand && nflSavedState == gState;
+}
+
 // Suelta el fondo: devuelve el trozo intacto a la pantalla.
 static void nflDropBg(){
   if(!nflHasBg) return;
+  // Guarda de ultima hora: nadie debe poder devolver una captura muerta,
+  // ni por un camino nuevo que se anada manana.
+  if(!nflBgStillValid()){ nflForgetBg(); return; }
   setBuf(bbuf);
   nflRestoreBgTo(bbuf);
   present(nflSY, nflSY + nflSH - 1);
   setBuf(fb);
   nflHasBg = false;
   nflIdx   = -1;
+  nflSavedState = -1;
 }
 
 // Olvida el fondo SIN devolverlo. Es para cuando lo que hay debajo ya
@@ -21594,6 +21754,7 @@ static void nflDropBg(){
 static void nflForgetBg(){
   nflHasBg = false;
   nflIdx   = -1;
+  nflSavedState = -1;
   nflDragging = false;
 }
 
@@ -21692,8 +21853,12 @@ static bool nflWanted(){
   if(gNotifCount == 0) return false;
   if(!flexAiUiAllowed()) return false;   // horizontal: nada encima (ver el bloque de arriba)
   if(gState == ST_HOME && qsPanelY == 0 && !editMode) return false;  // ahi manda la isla de siempre
-  if(gState == ST_SPLASH || gState == ST_OOBE_LANG || gState == ST_OOBE_NAME) return false;
-  if(gState == ST_LOCK) return false;               // en la pantalla de bloqueo no se filtra nada
+  // Bloqueo, teclado del PIN, alta de clave, Flex Vault, OOBE, apagado:
+  // la lista esta en notifSecureScreen() y NO se repite aqui. Repetirla
+  // fue justamente el fallo: aqui se comprobaba ST_LOCK pero no
+  // ST_LOCKSETUP, que es donde se teclea la clave, y la tarjeta salia
+  // encima del teclado numerico.
+  if(notifSecureScreen()) return false;
   if(flexOtaOwnsScreen()) return false;             // la pantalla es del OTA en exclusiva
   if(qsPanelY != 0) return false;                   // con la cortina desplegada, la cortina manda
   return nflPick() >= 0;
@@ -21772,12 +21937,13 @@ static bool nflHandleTouch(){
 // justo antes que el OTA, para que quede por encima de todo lo demas.
 static void nflTick(){
   if(!nflWanted()){
-    // Si la razon de callarse es que estamos en horizontal (o
-    // embebidos), la pantalla ya la ha repintado otro: el fondo
-    // guardado corresponde a una orientacion que ya no existe y
-    // devolverlo dejaria un recuadro de la pantalla anterior encima
-    // del juego. Se olvida sin repintar.
-    if(nflHasBg){ if(flexAiUiAllowed()) nflDropBg(); else nflForgetBg(); }
+    // Devolver el fondo SOLO si sigue describiendo lo que hay debajo.
+    // Si nos callamos porque se giro a horizontal, o porque se paso al
+    // teclado del PIN / al bloqueo / a Flex Vault, la pantalla nueva se
+    // ha pintado entera por su cuenta: estampar ahi el rectangulo
+    // guardado dejaria un recorte de la pantalla ANTERIOR encima. En ese
+    // caso lo correcto es no tocar ni un pixel.
+    if(nflHasBg){ if(nflBgStillValid()) nflDropBg(); else nflForgetBg(); }
     nflDragging = false;
     return;
   }
@@ -21793,8 +21959,8 @@ static void nflTick(){
   // no vale y devolverlo seria estampar la pantalla anterior, asi que
   // solo se olvida. (Hoy este segundo caso no deberia darse -- en
   // horizontal no se dibujan tarjetas -- pero la regla vale igual.)
-  if(nflHasBg && nflLandSaved != gLand)  nflForgetBg();
-  else if(nflHasBg && idx != nflIdx)     nflDropBg();
+  if(nflHasBg && !nflBgStillValid())  nflForgetBg();
+  else if(nflHasBg && idx != nflIdx)  nflDropBg();
 
   if(!nflHasBg){
     if(!nflSaveBg()) return;              // sin PSRAM: no se dibuja (y no se corrompe nada)

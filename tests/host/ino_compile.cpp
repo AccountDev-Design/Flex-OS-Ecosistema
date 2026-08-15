@@ -173,6 +173,7 @@ static void testChatFinal();
 static void testBusqueda();
 static void testBateria();
 static void testNoHorizontal();
+static void testNotifUnaSola();
 // Almacen de trabajos para las pruebas: la placa lo pone en PSRAM, aqui
 // basta con un array estatico.
 static CoworkJob gTestJobs[CW_MAX_JOBS];
@@ -2040,6 +2041,194 @@ static void testNoHorizontal(){
   if(!gFails) printf("  Sin interferencia en horizontal: todas las comprobaciones pasan.\n");
 }
 
+// #############################################################
+//  UNA SOLA NOTIFICACION FLOTANTE, Y NUNCA SOBRE EL PIN
+//  ------------------------------------------------------------
+//  Regresion de los fallos que se ven en el video de la placa:
+//    · tres tarjetas apiladas encima de los widgets del escritorio,
+//      con dos botones de cerrar a la vez;
+//    · una tarjeta de "Dispositivo I2C" dibujada ENCIMA del teclado
+//      del PIN (nflWanted comprobaba ST_LOCK pero no ST_LOCKSETUP);
+//    · el mismo dispositivo encolado tres veces por el rescaneo I2C;
+//    · la banda de la isla llegando hasta y=284, solapada con la
+//      banda de la rejilla (HOME_BAND_TOP = 206), que es lo que
+//      mezclaba pagina vieja y pagina nueva al deslizar.
+//
+//  Las comprobaciones de pixeles son de verdad: se compone en los
+//  framebuffers reales y se compara fb contra homeBuf.
+// #############################################################
+static void testNotifUnaSola(){
+  printf("Notificaciones: una a la vez, y nunca sobre el PIN\n");
+  gNotifCount = 0; notifDragIdx = -1; notifBandOn = false; notifPaused = false;
+  memset(gNotifs, 0, sizeof(gNotifs));
+  gState = ST_HOME; qsPanelY = 0; editMode = false; gLand = false; gHosted = false;
+  hpDragging = false; hpSettling = false;
+
+  // --- 1. LAS DOS BANDAS NO PUEDEN PISARSE ---
+  // Es la comprobacion estructural: mientras la isla acabe por encima de
+  // donde empieza la rejilla, ningun ajuste de coordenadas arregla el
+  // deslizamiento entre paginas, porque son dos compositores escribiendo
+  // en bbuf sobre las mismas filas.
+  chk(NOTIF_BAND_BOT <= HOME_BAND_TOP,
+      "la banda de la isla acaba antes de que empiece la de la rejilla");
+  chk(NOTIF_VISIBLE == 1, "solo se dibuja UNA tarjeta a la vez");
+  chk(NOTIF_MAX >= NOTIF_VISIBLE, "y la cola puede guardar mas de las que se ven");
+  chk(NOTIF_Y0 + NOTIF_CARD_H <= NOTIF_BAND_BOT,
+      "la tarjeta visible cabe entera dentro de su banda");
+
+  // --- 2. PANTALLAS SEGURAS ---
+  // La del video: el teclado del PIN. Y las demas de la misma familia.
+  { const struct { int st; const char* q; } seg[] = {
+      { ST_SPLASH,           "durante el arranque" },
+      { ST_OOBE_LANG,        "en la primera configuracion (idioma)" },
+      { ST_OOBE_NAME,        "en la primera configuracion (nombre)" },
+      { ST_LOCK,             "en la pantalla de bloqueo" },
+      { ST_LOCKSETUP,        "en el TECLADO DEL PIN" },
+      { ST_VAULT,            "en Flex Vault" },
+      { ST_POWEROFF_CONFIRM, "apagando (confirmacion)" },
+      { ST_POWEROFF_ANIM,    "apagando (animacion)" } };
+    gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+    notifPushJob(70, "Dispositivo I2C", "0x18 detectado", NACT_VIEW, false);
+    for(unsigned k = 0; k < sizeof(seg) / sizeof(seg[0]); k++){
+      gState = seg[k].st;
+      char q[96];
+      snprintf(q, sizeof(q), "no se notifica %s", seg[k].q);
+      chk(notifSecureScreen(), q);
+      snprintf(q, sizeof(q), "y la tarjeta flotante tampoco sale %s", seg[k].q);
+      chk(!nflWanted(), q);
+    }
+    gState = ST_APP;
+    chk(!notifSecureScreen(), "encima de una app normal si se notifica");
+    chk(nflWanted(),          "y la tarjeta flotante sale"); }
+
+  // --- 3. LA COLA NO SE PIERDE MIENTRAS SE DESBLOQUEA ---
+  // Un aviso que caduca mientras tecleas el PIN es un aviso que nunca
+  // llegaste a ver. Se queda sin armar y arranca al volver al escritorio.
+  { gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+    notifBandOn = false; notifPaused = false; notifLastMs = 0;
+    gTestMs = 100000;
+    gState = ST_LOCKSETUP;
+    notifPushJob(71, "Resumen listo", "Se creo una nota", NACT_VIEW, false);
+    for(int f = 0; f < 30; f++){ gTestMs += 40; notifTick(); }
+    chk(gNotifCount == 1,       "el aviso espera en la cola mientras se teclea el PIN");
+    chk(!gNotifs[0].armed,      "sin armar: su cuenta atras no ha empezado");
+    chk(gNotifs[0].phase != NP_OUT, "y no ha caducado");
+    gState = ST_HOME;
+    gTestMs += 40; notifTick();
+    chk(gNotifs[0].armed,       "al volver al escritorio SI se arma");
+    chk(gNotifs[0].bornMs == (uint32_t)gTestMs, "y su cuenta atras arranca ahora"); }
+
+  // --- 4. UNA SOLA TARJETA DIBUJADA, AUNQUE HAYA TRES EN LA COLA ---
+  { gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+    notifBandOn = false; notifPaused = false; notifLastMs = 0;
+    gState = ST_HOME; gTestMs = 200000;
+    notifPushJob(80, "Primera",  "", NACT_VIEW, false);
+    notifPushJob(81, "Segunda",  "", NACT_VIEW, false);
+    notifPushJob(82, "Tercera",  "", NACT_VIEW, false);
+    chk(gNotifCount == 3, "las tres entran en la cola");
+
+    // Fondo conocido y fb igual a el: cualquier pixel distinto despues
+    // del tick es algo que ha dibujado la isla.
+    drawWallpaper(homeBuf, false);
+    memcpy(fb, homeBuf, (size_t)SCR_W * SCR_H * 2);
+    setBuf(fb);
+    gTestMs += 40; notifTick();
+    gTestMs += 300; notifTick();          // ya pasada la animacion de entrada
+
+    chk(gNotifs[0].armed,  "la primera de la cola se arma");
+    chk(!gNotifs[1].armed, "la segunda espera su turno");
+    chk(!gNotifs[2].armed, "y la tercera tambien");
+
+    // Pixeles: la banda de la isla ha cambiado; TODO lo de debajo, no.
+    int cambiadosDentro = 0, cambiadosFuera = 0;
+    for(int y = 0; y < SCR_H; y++)
+      for(int x = 0; x < SCR_W; x++)
+        if(fb[(size_t)y * SCR_W + x] != homeBuf[(size_t)y * SCR_W + x]){
+          if(y >= NOTIF_BAND_TOP && y < NOTIF_BAND_BOT) cambiadosDentro++;
+          else                                          cambiadosFuera++;
+        }
+    chk(cambiadosDentro > 2000, "la tarjeta visible se ha dibujado de verdad");
+    chk(cambiadosFuera == 0,
+        "y NI UN PIXEL fuera de su banda: ni segunda tarjeta, ni widgets tocados");
+
+    // Y la banda no llega a los widgets del escritorio (que empiezan a
+    // media pantalla) ni a la rejilla.
+    chk(NOTIF_BAND_BOT < HOME_GY0, "la isla no alcanza la rejilla de apps"); }
+
+  // --- 5. DEDUPLICACION POR ORIGEN E IDENTIDAD ---
+  { gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+    gTestMs = 300000;
+    DetectedModule m; memset(&m, 0, sizeof(m));
+    m.active = true; m.type = MOD_I2C_GENERIC; m.i2cAddr = 0x18;
+    snprintf(m.name, sizeof(m.name), "Dispositivo I2C");
+    snprintf(m.sub,  sizeof(m.sub),  "0x18 detectado");
+    notifPush(&m);
+    chk(gNotifCount == 1, "el dispositivo se anuncia una vez");
+    notifPush(&m);
+    notifPush(&m);
+    chk(gNotifCount == 1, "y el rescaneo I2C NO lo encola tres veces");
+    // El texto secundario cambia pero es el MISMO dispositivo: refresca.
+    snprintf(m.sub, sizeof(m.sub), "0x18 listo");
+    notifPush(&m);
+    chk(gNotifCount == 1, "un cambio de subtitulo refresca, no duplica");
+    chk(!strcmp(gNotifs[0].mod.sub, "0x18 listo"), "y el texto es el nuevo");
+    // Otra direccion I2C SI es otro dispositivo.
+    m.i2cAddr = 0x76; snprintf(m.name, sizeof(m.name), "Sensor BME280");
+    notifPush(&m);
+    chk(gNotifCount == 2, "otro dispositivo si es otro aviso");
+
+    // Cowork: el mismo trabajo avisa varias veces y es la MISMA tarjeta.
+    gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+    notifPushJob(90, "Trabajando", "Resumiendo", NACT_NONE, false);
+    notifPushJob(90, "Resumen listo", "Se creo una nota", NACT_VIEW, false);
+    chk(gNotifCount == 1,              "el mismo trabajo no encola dos tarjetas");
+    chk(gNotifs[0].act == NACT_VIEW,   "la tarjeta se actualiza con el boton nuevo");
+    notifPushJob(91, "Otro trabajo", "", NACT_VIEW, false);
+    chk(gNotifCount == 2,              "otro trabajo si es otra tarjeta"); }
+
+  // --- 6. DESCARTAR LA TARJETA NO CANCELA NI BORRA EL TRABAJO ---
+  { coworkAttachStorage(gTestJobs, CW_MAX_JOBS);
+    gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs)); notifDragIdx = -1;
+    uint32_t id = coworkSubmit(CW_KIND_SUMMARY, "S", "x", 1, NULL, 0, 0, 1000);
+    coworkBeginWork(id, 1000);
+    coworkFinish(id, "resultado", 9, 0, false, 1100);
+    notifPushJob(id, "Resumen listo", "", NACT_VIEW, false);
+    gNotifs[0].armed = true; gNotifs[0].phase = NP_IDLE;
+    gState = ST_HOME; qsPanelY = 0; editMode = false;
+    int cardY = NOTIF_Y0 + 10;
+    tDown(NOTIF_MARGIN_X + 100, cardY, 4000);
+    notifHandleTouch();
+    tMove(NOTIF_MARGIN_X + 100 - (NOTIF_CARD_W / 2), cardY, 4100);
+    notifHandleTouch();
+    tUp(4200, false);
+    notifHandleTouch();
+    chk(gNotifs[0].phase == NP_OUT,             "el deslizamiento descarta la tarjeta");
+    CoworkJob* j = coworkFind(id);
+    chk(j != NULL && j->state == CW_DONE,       "pero el trabajo sigue terminado");
+    chk(j != NULL && j->outLen > 0,             "y su resultado sigue guardado");
+    coworkDelete(id); }
+
+  // --- 7. UNA CAPTURA DE FONDO MUERTA NO SE DEVUELVE ---
+  // Es la otra cara del mismo fallo: si se bloquea con una tarjeta
+  // puesta, devolver el rectangulo guardado estamparia un recorte de la
+  // app ENCIMA del teclado del PIN.
+  { gState = ST_APP; gLand = false;
+    nflHasBg = true; nflLandSaved = false; nflSavedState = ST_APP;
+    chk(nflBgStillValid(), "en la misma pantalla la captura sigue valiendo");
+    gState = ST_LOCKSETUP;
+    chk(!nflBgStillValid(), "al pasar al teclado del PIN, ya no");
+    gState = ST_APP; gLand = true;
+    chk(!nflBgStillValid(), "y al girar a horizontal, tampoco");
+    gLand = false; nflForgetBg();
+    chk(!nflHasBg && nflSavedState < 0, "olvidarla la deja del todo limpia"); }
+
+  // Limpieza.
+  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  notifDragIdx = -1; notifBandOn = false; notifPaused = false;
+  gState = ST_HOME; gLand = false; tReset();
+  if(!gFails) printf("  Una notificacion a la vez: todas las comprobaciones pasan.\n");
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -2119,6 +2308,7 @@ int main(){
   testBusqueda();
   testBateria();
   testNoHorizontal();
+  testNotifUnaSola();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }
