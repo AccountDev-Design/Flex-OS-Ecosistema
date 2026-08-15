@@ -28370,6 +28370,7 @@ static void flexAiRender();
 // lineas son lo unico que hace falta para que el orden funcione en el
 // IDE de Arduino, que autogenera los prototipos al principio.
 static bool aiKeyboardTick();
+static void aiKbShow(bool on);   // abre/cierra el teclado de la app (ver el bloque 11)
 static void aiSettingsTap(int row);
 static int  gAiSetMaxScroll = 0;
 
@@ -28969,10 +28970,42 @@ static void aiDrawSettings(int bx, int by, int bw, int bh){
   if(gAiSetMaxScroll < 0) gAiSetMaxScroll = 0;
 }
 
+// Alto de la barra de entrada y su borde SUPERIOR. En un solo sitio
+// porque lo usan el render (para dibujarla y para saber cuanto sitio le
+// queda al contenido) y el tacto (para saber donde responde). Cuando
+// estaban por separado, abrir el teclado movia la barra y el hit-test se
+// quedaba donde estaba.
+#define AI_INPUT_H 38
+static int aiInputTop(int by, int bh){
+  if(gAiKbOn){
+    int y = kbPanelTop() - AI_INPUT_H - 8;      // pegada encima del panel
+    if(y < by + 90) y = by + 90;
+    return y;
+  }
+  return by + bh - 46;
+}
+
+// Ultima fila que compone flexAiRender(). Con el teclado abierto el panel
+// de teclas baja hasta el borde inferior de la PANTALLA, muy por debajo de
+// la ventana de la app (WIN_BOT = SCR_H - 64): publicar solo la ventana
+// dejaba las ultimas filas -- la fila de funciones del teclado -- sin
+// subir, y ahi seguia viendose lo que hubiera antes.
+static int aiRenderBottom(int by, int bh){
+  int b = by + bh - 1;
+  if(gAiKbOn && SCR_H - 1 > b) b = SCR_H - 1;
+  return b;
+}
+
 static void flexAiRender(){
   setBuf(fb);
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
   fillRect(bx, by, bw, bh, WIN_BG);
+  // La franja entre el fondo de la ventana y el borde de la pantalla es
+  // de la barra de navegacion. Con el teclado abierto queda debajo del
+  // panel de teclas, asi que tambien es nuestra: si no se pinta, se ve
+  // por debajo del teclado lo que hubiera antes -- el dock del
+  // escritorio, en el video.
+  if(gAiKbOn && by + bh < SCR_H) fillRect(0, by + bh, SCR_W, SCR_H - (by + bh), WIN_BG);
   // Cabecera propia (la app es APP_OWN_TOUCH y pinta su chevron).
   strokeSegAA(30, by + 22, 18, by + 14, 2.4f, TH_TXT);
   strokeSegAA(18, by + 14, 30, by + 6,  2.4f, TH_TXT);
@@ -28982,8 +29015,14 @@ static void flexAiRender(){
   drawText(bx + bw / 2 - 46, by + 6, "Flex Intelligence", 2, TH_TXT);
 
   aiDrawTabs(bx, by + 38, bw);
-  int cy = by + 84, ch = bh - 84;
-  if(gAiKbOn) ch = kbPanelTop() - cy - 6;
+  // EL TECLADO ES PARTE DEL PANEL, NO UNA CAPA SUELTA ENCIMA DEL
+  // ESCRITORIO. Con el teclado abierto, la app se maqueta contra el borde
+  // superior del panel de teclas y la barra de entrada se queda pegada
+  // justo encima -- que es lo unico que hace falta para poder LEER lo que
+  // se escribe. Antes la barra se ocultaba al abrir el teclado
+  // (`&& !gAiKbOn`), asi que se escribia a ciegas.
+  int inTop = aiInputTop(by, bh);
+  int cy = by + 84, ch = inTop - 8 - cy;
   if(ch < 40) ch = 40;
 
   switch(gAiTab){
@@ -28993,17 +29032,28 @@ static void flexAiRender(){
     default:        aiDrawChat (bx, cy, bw, ch); break;
   }
 
-  // Barra de entrada (solo en Asistente y sin teclado abierto).
-  if(gAiTab == AIT_CHAT && !gAiKbOn){
-    int ey = by + bh - 46;
-    fillRoundRect(bx + 12, ey, bw - 84, 38, 19, thCard());
-    drawRoundRect(bx + 12, ey, bw - 84, 38, 19, TH_BORDER);
-    drawTextClip(bx + 26, ey + 12, gAiInputLen ? gAiInput : "Escribe un mensaje...", 1,
+  // Barra de entrada (solo en Asistente). Se dibuja SIEMPRE, con y sin
+  // teclado: es donde se ve el texto que se esta escribiendo.
+  if(gAiTab == AIT_CHAT){
+    int ey = inTop;
+    fillRoundRect(bx + 12, ey, bw - 84, AI_INPUT_H, AI_INPUT_H / 2, thCard());
+    drawRoundRect(bx + 12, ey, bw - 84, AI_INPUT_H, AI_INPUT_H / 2, TH_BORDER);
+    // Con el teclado abierto se enseña la COLA del texto: al pasar del
+    // ancho del campo, lo que interesa es lo ultimo tecleado, no el
+    // principio. drawTextClip recorta por la derecha, asi que el
+    // desplazamiento se hace eligiendo desde donde se pinta.
+    const char* shown = gAiInputLen ? gAiInput : "Escribe un mensaje...";
+    int maxw = bw - 84 - 28;
+    if(gAiInputLen){
+      while(*shown && textW(shown, 1) > maxw) shown++;
+    }
+    drawTextClip(bx + 26, ey + (AI_INPUT_H - 8) / 2, shown, 1,
                  gAiInputLen ? TH_TXT : TH_MUTE, bx + bw - 80);
-    fillCircle(bx + bw - 34, ey + 19, 19, TH_PRIM);
-    strokeSegAA(bx + bw - 41, ey + 19, bx + bw - 27, ey + 19, 2.2f, TH_ONACC);
-    strokeSegAA(bx + bw - 33, ey + 12, bx + bw - 27, ey + 19, 2.2f, TH_ONACC);
-    strokeSegAA(bx + bw - 33, ey + 26, bx + bw - 27, ey + 19, 2.2f, TH_ONACC);
+    int scy = ey + AI_INPUT_H / 2;
+    fillCircle(bx + bw - 34, scy, 19, TH_PRIM);
+    strokeSegAA(bx + bw - 41, scy, bx + bw - 27, scy, 2.2f, TH_ONACC);
+    strokeSegAA(bx + bw - 33, scy - 7, bx + bw - 27, scy, 2.2f, TH_ONACC);
+    strokeSegAA(bx + bw - 33, scy + 7, bx + bw - 27, scy, 2.2f, TH_ONACC);
   }
   if(gAiToast[0] && millis() - gAiToastMs < 2600){
     int tw = textW(gAiToast, 1) + 28;
@@ -29015,13 +29065,13 @@ static void flexAiRender(){
   // un modal y mientras esta abierto no hay nada mas que tocar.
   if(aiConfirmOpenNow()) aiDrawConfirm(bx, by, bw, bh);
   else if(gAiKbOn)       noteRenderKeyboard(0);
-  flxFlush(by, by + bh - 1);
+  flxFlush(by, aiRenderBottom(by, bh));
 }
 
 static void flexAiEnter(){
   if(!gRelayout){
     gAiScroll = 0;
-    gAiKbOn   = false;
+    aiKbShow(false);
     // OJO: aqui NO se cierra gAiConfirmJob. La tarjeta "Aplicar" abre la
     // app y la confirmacion en la misma vuelta, y enterApp() llama a
     // enter() por el medio: limpiarla aqui la cerraria antes de que el
@@ -29063,7 +29113,16 @@ static void flexAiTick(){
 
   // Teclado abierto: manda el teclado (misma ruta que usa Notas).
   if(gAiKbOn){
-    if(T.tap && T.y < kbPanelTop()){ gAiKbOn = false; flexAiRender(); return; }
+    // La barra de entrada vive JUSTO encima del panel de teclas y forma
+    // parte del teclado, no del fondo: tocarla no lo cierra. Su boton de
+    // enviar tampoco -- si lo hiciera, el gesto mas natural (escribir y
+    // pulsar la flecha) cerraria el teclado en vez de mandar el mensaje.
+    int ey = aiInputTop(by, bh);
+    bool onInput = (gAiTab == AIT_CHAT && T.y >= ey && T.y <= ey + AI_INPUT_H);
+    if(T.tap && onInput && T.x >= bx + bw - 54){
+      T.tap = false; aiSendInput(); flexAiRender(); return;
+    }
+    if(T.tap && T.y < kbPanelTop() && !onInput){ aiKbShow(false); flexAiRender(); return; }
     // La escritura la resuelve el teclado comun sobre gAiInput.
     if(aiKeyboardTick()) flexAiRender();
     return;
@@ -29092,10 +29151,10 @@ static void flexAiTick(){
   int cy = by + 84, ch = bh - 84;
 
   if(gAiTab == AIT_CHAT){
-    int ey = by + bh - 46;
-    if(T.tap && T.y >= ey && T.y <= ey + 38){
+    int ey = aiInputTop(by, bh);          // misma funcion que usa el render
+    if(T.tap && T.y >= ey && T.y <= ey + AI_INPUT_H){
       if(T.x >= bx + bw - 54){ aiSendInput(); flexAiRender(); return; }
-      gAiKbOn = true; kbMtSurfaceReset(); flexAiRender(); return;
+      aiKbShow(true); flexAiRender(); return;
     }
   } else if(gAiTab == AIT_TOOLS){
     int y = cy + 26, h = 44;
@@ -29195,6 +29254,28 @@ static void flexAiTick(){
 //  y el multitoque tendrian que duplicarse. Reapuntar el destino son
 //  seis lineas y lo hereda todo.
 // -------------------------------------------------------------
+// ABRIR Y CERRAR EL TECLADO POR UN SOLO SITIO. Antes se ponia
+// "gAiKbOn = true" a mano en dos sitios y a false en tres, y en ninguno
+// se encendia kbExtrasOn -- la bandera que decide si el panel lleva
+// barra superior y FILA DE SUGERENCIAS. Resultado: el teclado de Flex
+// Intelligence salia sin la fila de chips, asi que el corrector local
+// trabajaba y no tenia donde enseñar nada. Notas si la encendia; esta
+// no. Un flag repartido por cinco sitios acaba siempre asi.
+static void aiKbShow(bool on){
+  if(gAiKbOn == on) return;
+  gAiKbOn = on;
+  if(on){
+    kbExtrasOn = true;          // barra + fila de sugerencias, como en Notas
+    kbApplySize();
+    kbChipsBuild();
+    kbMtSurfaceReset();
+  } else {
+    kbExtrasOn = false;
+    kbApplySize();
+    kbMtReset();
+  }
+}
+
 static char*  aiKbSaveBuf = NULL;
 static size_t aiKbSaveMax = 0;
 static int    aiKbSaveCur = 0;
@@ -29266,7 +29347,7 @@ static bool aiKeyboardTick(){
       noteCur = gAiInputLen;
       aiKbUnbind();
       aiSendInput();
-      gAiKbOn = false;
+      aiKbShow(false);
       return true;
     }
   }
@@ -29336,7 +29417,7 @@ static void aiSettingsTap(int row){
   switch(row){
     case 0: c->enabled = !c->enabled; aiPrefsSave(); break;
     case 1: case 2: case 3: case 4:
-      aiFieldOpen(row); gAiKbOn = true; break;
+      aiFieldOpen(row); aiKbShow(true); break;
     case 5: c->perms ^= AI_PERM_TEXT;  aiPrefsSave(); break;
     case 6: c->perms ^= AI_PERM_IMAGE; aiPrefsSave(); break;
     case 7: c->perms ^= AI_PERM_FILES; aiPrefsSave(); break;

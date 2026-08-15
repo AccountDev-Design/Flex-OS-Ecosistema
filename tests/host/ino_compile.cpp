@@ -178,6 +178,7 @@ static void testDeslizarPaginas();
 static void testCabeceras();
 static void testListasConScroll();
 static void testTarjetaCronometro();
+static void testTecladoIA();
 // Almacen de trabajos para las pruebas: la placa lo pone en PSRAM, aqui
 // basta con un array estatico.
 static CoworkJob gTestJobs[CW_MAX_JOBS];
@@ -2672,6 +2673,103 @@ static void testTarjetaCronometro(){
   if(!gFails) printf("  Tarjeta del cronometro: todas las comprobaciones pasan.\n");
 }
 
+
+
+// #############################################################
+//  EL TECLADO DE FLEX INTELLIGENCE ES DEL PANEL, NO DEL FONDO
+//  ------------------------------------------------------------
+//  En el video se ve el teclado dibujado directamente sobre el
+//  escritorio: encima de el se leen los iconos del dock, y no hay
+//  ni panel, ni campo de texto, ni fila de sugerencias.
+//
+//  Tres causas, las tres comprobables aqui:
+//    · flexAiRender() publicaba solo la ventana de la app
+//      (WIN_TOP..WIN_BOT = 96..735), pero el panel de teclas llega
+//      hasta la ultima fila de la PANTALLA (799). Las ultimas ~60
+//      filas -- la fila de funciones -- no se subian nunca, y ahi
+//      seguia lo que hubiera antes;
+//    · kbExtrasOn no se encendia nunca en esta app, asi que el
+//      panel salia sin barra ni fila de sugerencias (Notas si la
+//      encendia). El corrector local trabajaba sin sitio donde
+//      enseñar el resultado;
+//    · la barra de entrada se ocultaba justo al abrir el teclado
+//      (`gAiTab == AIT_CHAT && !gAiKbOn`), asi que se escribia a
+//      ciegas.
+// #############################################################
+static void testTecladoIA(){
+  printf("Teclado de Flex Intelligence\n");
+  aiConfigDefaults();
+  gLand = false; gHosted = false; gState = ST_APP; gAppId = IC_FLEXAI;
+  gAiTab = AIT_CHAT;
+  aiKbShow(false);
+
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+
+  // --- 1. LO QUE SE COMPONE ES LO QUE SE PUBLICA ---
+  chk(aiRenderBottom(by, bh) == by + bh - 1,
+      "sin teclado, se publica exactamente la ventana de la app");
+  aiKbShow(true);
+  chk(gAiKbOn, "el teclado se abre");
+  chk(kbRowsTop() + 4 * (KB_KH + KB_GAP) > by + bh,
+      "el panel de teclas SI baja por debajo de la ventana de la app");
+  chk(aiRenderBottom(by, bh) == SCR_H - 1,
+      "con teclado, se publica hasta la ultima fila de la pantalla");
+  chk(aiRenderBottom(by, bh) >= kbRowsTop() + 4 * (KB_KH + KB_GAP) - 1 ||
+      aiRenderBottom(by, bh) == SCR_H - 1,
+      "es decir: la fila de funciones entra en el volcado");
+
+  // --- 2. BARRA Y FILA DE SUGERENCIAS ENCENDIDAS ---
+  chk(kbExtrasOn, "con el teclado abierto, el panel lleva sus extras");
+  chk(kbTopH() > 0, "y por tanto tiene una franja propia por encima de las teclas");
+  chk(kbPanelTop() < kbRowsTop(), "la franja de extras queda ARRIBA, sin comerse las teclas");
+  chk(kbChipsY() >= kbToolbarY(), "los chips van debajo de la barra, no encima de ella");
+  chk(kbChipsY() + kbChipsH() <= kbRowsTop(),
+      "y la fila de sugerencias acaba antes de la primera fila de teclas");
+
+  // --- 3. EL CAMPO DE TEXTO SE VE MIENTRAS SE ESCRIBE ---
+  { int ey = aiInputTop(by, bh);
+    chk(ey + AI_INPUT_H <= kbPanelTop(),
+        "con teclado, la barra de entrada cabe justo encima del panel");
+    chk(ey > by + 84, "y por debajo de las pestanas: no las tapa");
+    aiKbShow(false);
+    int ey2 = aiInputTop(by, bh);
+    chk(ey2 + AI_INPUT_H <= by + bh, "sin teclado, la barra sigue dentro de la ventana");
+    chk(ey2 != ey, "y las dos posiciones son distintas: la barra SUBE con el teclado"); }
+
+  // --- 4. DIBUJO Y TACTO USAN LA MISMA GEOMETRIA ---
+  // Es lo que evita el clasico "se ve aqui y responde alla".
+  { aiKbShow(true);
+    int ey = aiInputTop(by, bh);
+    int antes = ey;
+    aiKbShow(false);
+    aiKbShow(true);
+    chk(aiInputTop(by, bh) == antes, "la posicion de la barra es estable, no depende del orden"); }
+
+  // --- 5. AL CERRAR, EL TECLADO NO DEJA NADA ENCENDIDO ---
+  aiKbShow(false);
+  chk(!gAiKbOn,      "el teclado se cierra");
+  chk(!kbExtrasOn,   "y apaga sus extras: la siguiente pantalla no los hereda");
+  chk(kbTopH() == 0, "la franja de extras desaparece con el");
+
+  // --- 6. LAS TECLAS SIGUEN SIENDO TOCABLES ---
+  // El area sensible de una tecla es su paso completo, no el rectangulo
+  // pintado: no puede haber huecos muertos entre teclas.
+  { aiKbShow(true);
+    chk(KB_KH >= 44, "cada tecla mide al menos 44 px de alto");
+    int c0 = kbCellAt(KB_X + 2, KB_Y + 2);
+    int c1 = kbCellAt(KB_X + KB_KW + 1, KB_Y + 2);      // justo en la separacion
+    chk(c0 == 0,  "la primera tecla responde");
+    chk(c1 >= 0,  "y la separacion entre teclas tambien pertenece a alguna");
+    aiKbShow(false); }
+
+  // Limpieza.
+  aiKbShow(false);
+  gState = ST_HOME; gAppId = 0; gAiTab = AIT_CHAT;
+  kbExtrasOn = false; kbApplySize();
+  tReset();
+  if(!gFails) printf("  Teclado de Flex Intelligence: todas las comprobaciones pasan.\n");
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -2756,6 +2854,7 @@ int main(){
   testCabeceras();
   testListasConScroll();
   testTarjetaCronometro();
+  testTecladoIA();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }
