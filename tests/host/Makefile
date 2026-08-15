@@ -163,7 +163,14 @@ $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(JPEG_SRC) $
 	@$(CXX) $(SAN) -o $@ $(BUILD)/ino_compile.o $(BUILD)/ino_extern_stubs.o $(BUILD)/ino_jpeg.o \
 	                     $(BUILD)/ino_spell.o $(BUILD)/ino_cowork.o $(BUILD)/ino_ai.o
 
-run: ino $(BUILD)/test_ino $(BINS) $(TOOLS)
+# La tabla de particiones de la version USB. No es codigo, pero una tabla
+# mal cuadrada no falla al compilar: falla al grabar, o peor, arranca y se
+# lleva por delante los archivos del usuario.
+.PHONY: parts
+parts:
+	@python3 test_parts.py $(ROOT)/flexos_ultra_usb.csv
+
+run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@echo
 	@$(BUILD)/test_ino
 	@echo

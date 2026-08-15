@@ -1,0 +1,42 @@
+# #############################################################
+#  Flex OS Ultra (ESP32-P4) · particiones para instalacion por USB
+#  ------------------------------------------------------------
+#  Flash de 16 MB. UNA sola particion de aplicacion: esta version se
+#  graba por cable y no usa OTA, asi que no hay que reservar una
+#  segunda copia del firmware.
+#
+#  Se usa junto con -DFLEXOS_OTA_ON=0. Ver docs/INSTALACION-USB-P4.md
+#  para el comando completo de compilacion.
+#
+#  POR QUE ESTAS MEDIDAS
+#  ---------------------
+#  · app0 = 5 MB, holgado a proposito. Flex OS Ultra ronda 1,3 MB hoy.
+#    Cambiar la tabla de particiones es JUSTO lo que hace perder los
+#    archivos del usuario, asi que se deja sitio para no tener que
+#    tocarla en mucho tiempo.
+#
+#  · otadata se CONSERVA aunque aqui no haya OTA. Son 8 KB, y quitarla
+#    desplazaria todo lo de detras -- o sea, obligaria a reformatear
+#    LittleFS. Dejandola donde esta, reactivar el OTA manana es solo un
+#    cambio de tabla y no le cuesta los datos a nadie.
+#
+#  · La subtipo "spiffs" es la que el nucleo de Arduino monta como
+#    LittleFS por omision; el nombre es historico. flexFsBegin() prueba
+#    las etiquetas spiffs/littlefs/ffat/storage, asi que cualquiera de
+#    las cuatro vale -- se deja "spiffs" por ser la que espera el IDE.
+#
+#  · coredump al final: un volcado en caso de fallo no puede comerse
+#    espacio de los datos del usuario, y al estar al final se puede
+#    recortar sin mover nada.
+#
+#  COMPROBACION DE CUADRE (lo verifica tests/host/test_parts.py):
+#      0x510000 = 0x10000 + 0x500000          app0 termina donde empieza spiffs
+#      0xFF0000 = 0x510000 + 0xAE0000         spiffs termina donde empieza coredump
+#      0x1000000 = 0xFF0000 + 0x10000         y todo suma 16 MB exactos
+# #############################################################
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x5000,
+otadata,    data, ota,      0xE000,   0x2000,
+app0,       app,  factory,  0x10000,  0x500000,
+spiffs,     data, spiffs,   0x510000, 0xAE0000,
+coredump,   data, coredump, 0xFF0000, 0x10000,
