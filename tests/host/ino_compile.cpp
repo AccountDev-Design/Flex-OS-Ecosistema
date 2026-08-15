@@ -175,6 +175,7 @@ static void testBateria();
 static void testNoHorizontal();
 static void testNotifUnaSola();
 static void testDeslizarPaginas();
+static void testCabeceras();
 // Almacen de trabajos para las pruebas: la placa lo pone en PSRAM, aqui
 // basta con un array estatico.
 static CoworkJob gTestJobs[CW_MAX_JOBS];
@@ -2398,6 +2399,106 @@ static void testDeslizarPaginas(){
   if(!gFails) printf("  Deslizamiento entre paginas: todas las comprobaciones pasan.\n");
 }
 
+
+// #############################################################
+//  CABECERA DE APP: LA FLECHA Y EL TITULO NO SE TOCAN
+//  ------------------------------------------------------------
+//  En Archivos, Notas y Paint el chevron de volver se dibujaba
+//  DENTRO de la primera letra del titulo. La comprobacion es de
+//  pixeles y por separado: se pinta solo la flecha, se anota su
+//  caja; se pinta solo el titulo, se anota la suya; y se exige que
+//  no compartan ni un pixel.
+// #############################################################
+static void testCabeceras(){
+  printf("Cabecera de app\n");
+  const uint16_t FONDO = 0x0000;
+  gLand = false;
+
+  // Caja de lo que dibuja `f` sobre un lienzo limpio.
+  struct Caja { int x0, y0, x1, y1; bool hay; };
+  auto medir = [&](void (*f)(uint16_t), uint16_t col) -> Caja {
+    memset(bbuf, 0, (size_t)SCR_W * SCR_H * 2);
+    setBuf(bbuf);
+    gClipX0 = 0; gClipY0 = 0; gClipX1 = SCR_W - 1; gClipY1 = SCR_H - 1;
+    f(col);
+    Caja c = { SCR_W, SCR_H, -1, -1, false };
+    for(int y = 0; y < UIHDR_H + 20; y++)
+      for(int x = 0; x < SCR_W; x++)
+        if(bbuf[(size_t)y * SCR_W + x] != FONDO){
+          if(x < c.x0) c.x0 = x;  if(x > c.x1) c.x1 = x;
+          if(y < c.y0) c.y0 = y;  if(y > c.y1) c.y1 = y;
+          c.hay = true;
+        }
+    return c;
+  };
+
+  const uint16_t TINTA = 0xFFFF;
+  Caja fl = medir(uiHdrChevron, TINTA);
+  chk(fl.hay, "el chevron se dibuja");
+  chk(fl.x0 >= 0 && fl.x1 < UIHDR_ZONE, "y cabe entero dentro de su zona tactil");
+  chk(fl.y0 >= 0 && fl.y1 < UIHDR_ZONE, "tambien a lo alto");
+  // Centrado de verdad: los margenes a cada lado de la zona no difieren
+  // mas de 2 px. Antes estaba pegado a la esquina superior izquierda.
+  chk(abs(fl.x0 - (UIHDR_ZONE - 1 - fl.x1)) <= 2, "el chevron esta centrado horizontalmente");
+  chk(abs(fl.y0 - (UIHDR_ZONE - 1 - fl.y1)) <= 2, "y verticalmente");
+
+  Caja pt = medir(uiHdrDots, TINTA);
+  chk(pt.hay, "los tres puntos se dibujan");
+  chk(pt.x0 >= SCR_W - UIHDR_ZONE, "dentro de su zona tactil");
+  chk(pt.x1 < SCR_W - 4,           "y con margen a la derecha");
+  chk(pt.y1 < UIHDR_ZONE,          "sin pasarse de la banda");
+
+  // Zonas tactiles: al menos 44x44 y sin solaparse.
+  chk(UIHDR_ZONE >= 44, "la zona de atras mide al menos 44 px");
+  chk(uiHdrBackHit(2, 2) && uiHdrBackHit(UIHDR_ZONE - 1, UIHDR_ZONE - 1),
+      "y responde en toda su superficie");
+  chk(!uiHdrBackHit(UIHDR_ZONE, 10), "sin invadir la del titulo");
+  chk(uiHdrMenuHit(SCR_W - 2, 2),    "la del menu responde en su esquina");
+  chk(!uiHdrMenuHit(SCR_W - UIHDR_ZONE - 1, 10), "y tampoco invade el titulo");
+  chk(!uiHdrBackHit(10, UIHDR_ZONE), "por debajo de la cabecera ya no responde");
+
+  // --- LO DEL VIDEO: titulo y flecha en la misma cabecera ---
+  { const char* titulos[] = { "Archivos:", "Notas:", "Paint" };
+    for(unsigned k = 0; k < 3; k++){
+      memset(bbuf, 0, (size_t)SCR_W * SCR_H * 2);
+      setBuf(bbuf);
+      gClipX0 = 0; gClipY0 = 0; gClipX1 = SCR_W - 1; gClipY1 = SCR_H - 1;
+      // Solo el titulo, con la misma llamada que hace uiHdrDraw.
+      int fs = 5, avail = UIHDR_TR - UIHDR_TX;
+      while(fs > 1 && textW(titulos[k], fs) > avail) fs--;
+      drawTextClip(UIHDR_TX, UIHDR_CY - uiLineH(fs) / 2, titulos[k], fs, TINTA, UIHDR_TX + avail);
+      int tx0 = SCR_W, tx1 = -1;
+      for(int y = 0; y < UIHDR_H + 20; y++)
+        for(int x = 0; x < SCR_W; x++)
+          if(bbuf[(size_t)y * SCR_W + x] != FONDO){
+            if(x < tx0) tx0 = x;  if(x > tx1) tx1 = x;
+          }
+      char q[96];
+      snprintf(q, sizeof(q), "\"%s\": el titulo empieza DESPUES de la zona de atras", titulos[k]);
+      chk(tx0 > fl.x1, q);
+      snprintf(q, sizeof(q), "\"%s\": y no llega a la zona del menu", titulos[k]);
+      chk(tx1 < SCR_W - UIHDR_ZONE, q);
+    } }
+
+  // Un titulo absurdamente largo se reduce y se recorta, pero NO invade
+  // el boton del menu.
+  { memset(bbuf, 0, (size_t)SCR_W * SCR_H * 2);
+    setBuf(bbuf);
+    gClipX0 = 0; gClipY0 = 0; gClipX1 = SCR_W - 1; gClipY1 = SCR_H - 1;
+    uiHdrDraw("Un titulo larguisimo que no cabe de ninguna manera aqui",
+              5, TINTA, TINTA, true);
+    int enMedio = 0;
+    for(int y = 0; y < UIHDR_ZONE; y++)
+      for(int x = UIHDR_TR; x < SCR_W - UIHDR_ZONE; x++)
+        if(bbuf[(size_t)y * SCR_W + x] != FONDO) enMedio++;
+    chk(enMedio == 0, "un titulo larguisimo se recorta antes del menu"); }
+
+  setBuf(fb);
+  gClipX0 = 0; gClipY0 = 0; gClipX1 = SCR_W - 1; gClipY1 = SCR_H - 1;
+  tReset();
+  if(!gFails) printf("  Cabecera de app: todas las comprobaciones pasan.\n");
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -2479,6 +2580,7 @@ int main(){
   testNoHorizontal();
   testNotifUnaSola();
   testDeslizarPaginas();
+  testCabeceras();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

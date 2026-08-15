@@ -6683,6 +6683,73 @@ static inline void uiTextR(int rx, int y, const char* t, int fs, uint16_t c, uin
   drawTextA(rx - textW(t, fs), y, t, fs, c, a);
 }
 
+// #############################################################
+// ##  CABECERA DE APP  ·  una sola geometria para todas
+// ##  ------------------------------------------------------
+// ##  El chevron de volver estaba copiado como dos strokeSegAA con
+// ##  coordenadas literales en trece sitios, y el titulo lo ponia
+// ##  cada pantalla donde le parecia. En Archivos, Notas y Paint el
+// ##  titulo empezaba en x=16 y el chevron ocupaba x=18..30: la
+// ##  flecha quedaba DENTRO de la primera letra. No era un pixel de
+// ##  mas -- se leia "Archivos" con un palo cruzado encima.
+// ##
+// ##  Aqui esta la geometria, una vez:
+// ##
+// ##    0            56              SCR_W-56        SCR_W
+// ##    |--- atras ---|--- titulo ----|--- menu ------|
+// ##
+// ##  · las dos zonas tactiles miden 56x56, por encima de los 44x44
+// ##    minimos, y el glifo va CENTRADO en la suya (antes estaba
+// ##    pegado a la esquina, asi que la mitad de la zona tactil no
+// ##    tenia nada debajo);
+// ##  · el titulo empieza donde acaba la zona de atras mas un
+// ##    margen, y se recorta antes de la del menu: no puede compartir
+// ##    ni un pixel con ninguna de las dos por largo que sea;
+// ##  · misma altura y misma linea base en todas las pantallas, para
+// ##    que al pasar de una app a otra la cabecera no salte.
+// #############################################################
+#define UIHDR_ZONE   56                       // lado de las zonas tactiles (>= 44)
+#define UIHDR_H      76                       // alto de la banda de cabecera
+#define UIHDR_GAP     8                       // aire entre una zona y el texto
+#define UIHDR_TX     (UIHDR_ZONE + UIHDR_GAP) // primera columna del titulo
+#define UIHDR_TR     (SCR_W - UIHDR_ZONE - UIHDR_GAP)  // ultima columna util del titulo
+#define UIHDR_CY     (UIHDR_ZONE / 2)         // centro vertical de los glifos
+
+// Zonas tactiles. Se preguntan con estas funciones y no con literales,
+// para que el sitio donde se dibuja y el sitio donde responde no puedan
+// separarse nunca.
+static inline bool uiHdrBackHit(int px, int py){
+  return px >= 0 && px < UIHDR_ZONE && py >= 0 && py < UIHDR_ZONE;
+}
+static inline bool uiHdrMenuHit(int px, int py){
+  return px >= SCR_W - UIHDR_ZONE && px < SCR_W && py >= 0 && py < UIHDR_ZONE;
+}
+
+// Chevron de volver, centrado en su zona.
+static void uiHdrChevron(uint16_t col){
+  int cx = UIHDR_ZONE / 2, cy = UIHDR_CY, a = 8;
+  strokeSegAA((float)(cx + a / 2), (float)(cy - a), (float)(cx - a / 2), (float)cy, 2.4f, col);
+  strokeSegAA((float)(cx - a / 2), (float)cy, (float)(cx + a / 2), (float)(cy + a), 2.4f, col);
+}
+
+// Tres puntos del menu, centrados en la suya.
+static void uiHdrDots(uint16_t col){
+  int cx = SCR_W - UIHDR_ZONE / 2;
+  for(int i = -1; i <= 1; i++) fillCircle(cx, UIHDR_CY + i * 14, 4, col);
+}
+
+// La cabecera entera. `fs` es el tamano del titulo; si no cabe entre las
+// dos zonas se reduce, y si aun asi no cabe se recorta -- nunca se
+// desborda sobre un boton.
+static void uiHdrDraw(const char* title, int fs, uint16_t txt, uint16_t nav, bool menu){
+  uiHdrChevron(nav);
+  if(menu) uiHdrDots(nav);
+  if(!title || !title[0]) return;
+  int avail = (menu ? UIHDR_TR : SCR_W - UIHDR_GAP) - UIHDR_TX;
+  while(fs > 1 && textW(title, fs) > avail) fs--;
+  drawTextClip(UIHDR_TX, UIHDR_CY - uiLineH(fs) / 2, title, fs, txt, UIHDR_TX + avail);
+}
+
 // ---- Contenido de apps ----
 // (1) Placeholder para apps aun no implementadas (dentro de la ventana)
 static void appPlaceholderEnter(){
@@ -13434,11 +13501,11 @@ static void noteDrawFab(){
 static void noteRenderList(){
   setBuf(fb);
   fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
-  drawText(16, 24, "Notas:", 5, TH_TXT);
-  // Tres puntos: menu del elemento seleccionado (o de la app si no hay ninguno).
-  for(int i = 0; i < 3; i++) fillCircle(SCR_W - 28, 34 + i * 16, 5, TH_NAV);
-  strokeSegAA(30, 26, 18, 18, 2.4f, TH_NAV);       // chevron de volver
-  strokeSegAA(18, 18, 30, 10, 2.4f, TH_NAV);
+  // Cabecera comun: chevron centrado en su zona, titulo empezando DESPUES
+  // de esa zona y tres puntos con su propio margen a la derecha. Antes el
+  // titulo arrancaba en x=16 y el chevron ocupaba x=18..30, asi que la
+  // flecha se dibujaba dentro de la "N" de "Notas".
+  uiHdrDraw("Notas:", 5, TH_TXT, TH_NAV, true);
 
   if(noteListN == 0){
     drawTextC(SCR_W / 2, 320, "No hay notas todav\xC3\xAD" "a", 3, TH_TXT2);
@@ -13634,9 +13701,9 @@ static void noteListTick(){
   if(!T.tap) return;
 
   // --- Tres puntos de la cabecera ---
-  if(T.x > SCR_W - 60 && T.y < 80){ noteSelIdx = -1; fkMenuOpen(SCR_W - 40, 60); return; }
+  if(uiHdrMenuHit(T.x, T.y)){ noteSelIdx = -1; fkMenuOpen(SCR_W - 40, UIHDR_ZONE); return; }
   // --- Volver al escritorio ---
-  if(T.x < 60 && T.y < 60){ appClose(); return; }
+  if(uiHdrBackHit(T.x, T.y)){ appClose(); return; }
 
   // --- Barra del modo seleccion ---
   if(noteMulti){
@@ -14391,11 +14458,8 @@ static int  filesMaxScroll(){
 static void filesRender(){
   setBuf(fb);
   fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
-  drawText(16, 22, "Archivos:", 5, TH_TXT);
-  strokeSegAA(30, 26, 18, 18, 2.4f, TH_NAV);
-  strokeSegAA(18, 18, 30, 10, 2.4f, TH_NAV);
-  for(int i = 0; i < 3; i++) fillCircle(SCR_W - 26, 32 + i * 15, 5, TH_NAV);
-  drawTextClip(16, 84, filesDir, 2, TH_TXT2, SCR_W - 60);
+  uiHdrDraw("Archivos:", 5, TH_TXT, TH_NAV, true);   // el nombre no cambia: solo donde empieza
+  drawTextClip(16, UIHDR_H + 8, filesDir, 2, TH_TXT2, SCR_W - 60);
 
   int row = 0;
   if(filesHasUp()){
@@ -14573,8 +14637,10 @@ static void filesTick(){
   if(!T.down) filesLongFired = false;
   if(!T.tap) return;
 
-  if(T.x > SCR_W - 60 && T.y < 76){ filesSelIdx = -1; fkMenuOpen(SCR_W - 40, 56); return; }
-  if(T.x < 60 && T.y < 60){ filesExit(); return; }
+  // Zonas tactiles de la cabecera: las MISMAS que dibuja uiHdrDraw. Se
+  // preguntan por funcion para que no puedan separarse del dibujo.
+  if(uiHdrMenuHit(T.x, T.y)){ filesSelIdx = -1; fkMenuOpen(SCR_W - 40, UIHDR_ZONE); return; }
+  if(uiHdrBackHit(T.x, T.y)){ filesExit(); return; }
 
   if(filesMulti){
     int by = SCR_H - 128;
@@ -16986,10 +17052,7 @@ static void paintFabRect(int &x, int &y, int &r){ r = 52; x = SCR_W - 76; y = SC
 static void paintRenderGallery(){
   setBuf(fb);
   fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
-  drawText(16, 22, "Paint", 5, TH_TXT);
-  strokeSegAA(30, 26, 18, 18, 2.4f, TH_NAV);
-  strokeSegAA(18, 18, 30, 10, 2.4f, TH_NAV);
-  for(int i = 0; i < 3; i++) fillCircle(SCR_W - 26, 32 + i * 15, 5, TH_NAV);
+  uiHdrDraw("Paint", 5, TH_TXT, TH_NAV, true);
 
   if(paintListN == 0){
     drawTextC(SCR_W / 2, 320, "No hay dibujos todav\xC3\xAD" "a", 3, TH_TXT2);
@@ -17218,8 +17281,8 @@ static void paintGalleryTick(){
   if(!T.down) paintLongFired = false;
   if(!T.tap) return;
 
-  if(T.x > SCR_W - 60 && T.y < 76){ paintSelIdx = -1; fkMenuOpen(SCR_W - 40, 56); return; }
-  if(T.x < 60 && T.y < 60){ appClose(); return; }
+  if(uiHdrMenuHit(T.x, T.y)){ paintSelIdx = -1; fkMenuOpen(SCR_W - 40, UIHDR_ZONE); return; }
+  if(uiHdrBackHit(T.x, T.y)){ appClose(); return; }
 
   if(paintMulti){
     int by = SCR_H - 128;
