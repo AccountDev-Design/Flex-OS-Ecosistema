@@ -19,12 +19,17 @@ repositorio:
 
 | | |
 |---|---|
-| Firmware (`.bin`) | **1 493 120 B** (1,42 MB) |
+| Firmware (`.bin`) | **1 493 765 B** (1,42 MB) |
 | Partición `app0` | 5 242 880 B (5,00 MB) |
 | Ocupación | **28,5 %** |
-| Libre en `app0` | **3 749 760 B** (3,58 MB) |
+| Libre en `app0` | **3 749 115 B** (3,58 MB) |
 | RAM estática (interna) | **90 652 B** de 327 680 (27,7 %) |
 | Libre para variables locales | 237 028 B |
+
+Las correcciones de render (una sola notificación a la vez, recorte por
+viewport de las listas, cabecera común, teclado dentro del panel) cuestan
+**+645 bytes de flash y 0 bytes de RAM interna** sobre la medición
+anterior: son cambios de composición, no estructuras nuevas.
 
 Coste de Flex Intelligence sobre la versión anterior, medido compilando
 las dos con el mismo core y los mismos flags: **+56,8 KB de flash** y
