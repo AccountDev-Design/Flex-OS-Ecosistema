@@ -206,6 +206,17 @@ struct Touch {
 // generador de prototipos de Arduino no puede ver un tipo definido a
 // mitad de archivo.
 struct TouchPoint { int id; int x, y; bool active; };
+
+// FlexBattery: una lectura de bateria. Vive AQUI ARRIBA por la misma
+// restriccion de ctags que Touch y TouchPoint -- el IDE de Arduino
+// inserta los prototipos de TODAS las funciones antes de la primera, y
+// flexBattRead() la recibe por puntero. Su significado y por que hoy
+// nunca es valida estan documentados con flexBattRead(), mas abajo.
+struct FlexBattery {
+  bool    valid;      // hay una lectura de verdad AHORA MISMO
+  uint8_t percent;    // 0..100 (solo si valid)
+  bool    charging;   // conectado a la corriente (solo si valid)
+};
 #define KB_MAXPOINTS 5
 static TouchPoint gKbPoints[KB_MAXPOINTS];
 
@@ -26958,6 +26969,134 @@ static void aiAnnounceJob(const CoworkJob* j){
   notifPushJob(j->id, title, sub, act, sticky);
 }
 
+
+// #############################################################
+// ##  TELEMETRIA DE BATERIA  ·  ABSTRACCION, HOY SIN FUENTE
+// ##  ------------------------------------------------------
+// ##  ESTADO REAL, dicho sin rodeos: en esta placa NO hay ninguna
+// ##  lectura de bateria. Se busco antes de escribir esto y no
+// ##  existe: cero llamadas a analogRead o al ADC en todo el
+// ##  sketch, y el icono de la barra de estado dibuja un 82% FIJO
+// ##  escrito a mano desde el Milestone 1. Ese icono es un
+// ##  marcador de sitio, no un dato.
+// ##
+// ##  POR ESO ESTO NO INVENTA NADA. No se elige un pin, no se
+// ##  asume un divisor de tension, no se convierte un voltaje a
+// ##  porcentaje con una curva copiada de otra placa. Un
+// ##  porcentaje inventado es peor que ninguno: haria que Cowork
+// ##  pausara trabajos por una bateria que nadie ha medido, y el
+// ##  usuario no tendria forma de saber que el numero es falso.
+// ##
+// ##  LO QUE SI HAY: el contrato completo, ya conectado a Cowork.
+// ##  El dia que exista una lectura de verdad -- un ADC cableado,
+// ##  un medidor por I2C, o el PMIC del C6 -- se rellena
+// ##  flexBattRead() y TODO lo de arriba empieza a funcionar sin
+// ##  tocar una linea mas. Mientras tanto flexBattAvailable()
+// ##  devuelve false y el sistema se comporta exactamente como
+// ##  hoy.
+// ##
+// ##  COMO CONECTARLA (los tres pasos, cuando toque):
+// ##    1. poner FLEXOS_BATT_SOURCE a un valor distinto de 0;
+// ##    2. rellenar flexBattRead() con la lectura real;
+// ##    3. comprobar que devuelve `valid=false` mientras la fuente
+// ##       no este lista, en vez de un 0% que pausaria todo.
+// #############################################################
+
+// Fuente de telemetria. 0 = NINGUNA (estado actual y valor de fabrica).
+// Se deja como macro y no como ajuste de usuario a proposito: esto
+// describe el HARDWARE de la placa, no una preferencia.
+#ifndef FLEXOS_BATT_SOURCE
+  #define FLEXOS_BATT_SOURCE 0     // 0 = sin fuente · 1 = ADC · 2 = medidor I2C
+#endif
+
+// Ultima lectura conocida. Se refresca desde flexAiPump, no por frame.
+static FlexBattery gBatt = { false, 0, false };
+static uint32_t    gBattMs = 0;
+
+// LA UNICA funcion que hay que rellenar el dia que exista una fuente.
+// Devuelve false si no la hay -- que es lo que pasa hoy.
+static bool flexBattRead(FlexBattery* out){
+  if(!out) return false;
+  out->valid = false; out->percent = 0; out->charging = false;
+#if FLEXOS_BATT_SOURCE == 0
+  // Sin fuente. No se lee nada y no se inventa nada.
+  return false;
+#else
+  // AQUI va la lectura real. Debe dejar valid=true SOLO cuando el dato
+  // sea de fiar: durante el arranque del medidor, o si el bus falla,
+  // tiene que seguir devolviendo false. Un 0% por un fallo de lectura
+  // pausaria todos los trabajos "por bateria baja" sin que la bateria
+  // tenga nada que ver.
+  #error "FLEXOS_BATT_SOURCE != 0 pero flexBattRead() no esta implementada"
+#endif
+}
+
+// true si el sistema tiene telemetria de bateria utilizable.
+static bool flexBattAvailable(){ return gBatt.valid; }
+// Porcentaje real, o -1 si no se sabe. Nunca devuelve un numero inventado.
+static int  flexBattPercent(){ return gBatt.valid ? (int)gBatt.percent : -1; }
+static bool flexBattCharging(){ return gBatt.valid && gBatt.charging; }
+
+// Refresco periodico. Barato y sin efectos si no hay fuente.
+static void flexBattTick(uint32_t now){
+  if(now - gBattMs < 5000) return;       // cada 5 s es de sobra para una bateria
+  gBattMs = now;
+  FlexBattery b;
+  if(flexBattRead(&b)) gBatt = b;
+  else { gBatt.valid = false; }
+}
+
+// Texto para Ajustes. Dice la verdad, incluida la verdad incomoda.
+static void flexBattStatusText(char* out, size_t n){
+  if(!out || n == 0) return;
+  if(!gBatt.valid){ snprintf(out, n, "Sin telemetr\xC3\xAD" "a en esta placa"); return; }
+  snprintf(out, n, "%u%%%s", (unsigned)gBatt.percent, gBatt.charging ? " - cargando" : "");
+}
+
+// -------------------------------------------------------------
+//  PAUSA DE COWORK POR BATERIA BAJA
+//  -------------------------------------------------------------
+//  Solo actua si hay telemetria REAL. Sin fuente no pasa
+//  absolutamente nada -- ni se pausa, ni se reanuda, ni se anuncia.
+//
+//  Y la distincion que importa: se pausa y se reanuda con el motivo
+//  CW_PAUSE_BATTERY, que es distinto de CW_PAUSE_LOAD (juego o
+//  camara delante) y de CW_PAUSE_USER (lo paro la persona).
+//  coworkResumeAll solo reanuda lo que pauso ESE motivo, asi que
+//  recuperar bateria jamas reanuda una tarea que el usuario habia
+//  parado a mano. Ese es exactamente el fallo que se busca evitar.
+// -------------------------------------------------------------
+#define AI_BATT_PAUSE_PCT   20     // por debajo de esto se pausa lo no urgente
+#define AI_BATT_RESUME_PCT  28     // y se reanuda al recuperar ESTO
+
+static bool gBattPaused = false;
+
+static void flexBattCoworkTick(){
+  if(!flexBattAvailable()){
+    // La fuente se cayo (o nunca existio). Si habiamos pausado por
+    // bateria, se reanuda: mantener trabajos parados por un dato que ya
+    // no tenemos seria dejarlos colgados para siempre.
+    if(gBattPaused){ coworkResumeAll(CW_PAUSE_BATTERY); gBattPaused = false; }
+    return;
+  }
+  int pct = flexBattPercent();
+  // Cargando NO se pausa, por bajo que este: la bateria esta subiendo.
+  if(flexBattCharging()){
+    if(gBattPaused){ coworkResumeAll(CW_PAUSE_BATTERY); gBattPaused = false; }
+    return;
+  }
+  // HISTERESIS. Pausar a 20 y reanudar a 20 haria que un porcentaje
+  // oscilando en el umbral pausara y reanudara sin parar, que es peor
+  // para la bateria que dejar el trabajo correr.
+  if(!gBattPaused && pct >= 0 && pct < AI_BATT_PAUSE_PCT){
+    coworkPauseAll(CW_PAUSE_BATTERY);
+    gBattPaused = true;
+  } else if(gBattPaused && pct >= AI_BATT_RESUME_PCT){
+    coworkResumeAll(CW_PAUSE_BATTERY);
+    gBattPaused = false;
+  }
+}
+
 // -------------------------------------------------------------
 //  6) ARRANQUE Y PASO PERIODICO
 // -------------------------------------------------------------
@@ -27032,6 +27171,14 @@ static void flexAiPump(){
   if(heavy && !wasHeavy) coworkPauseAll(CW_PAUSE_LOAD);
   if(!heavy && wasHeavy) coworkResumeAll(CW_PAUSE_LOAD);
   wasHeavy = heavy;
+
+  // BATERIA. Hoy no hace nada porque esta placa no tiene telemetria (ver
+  // el bloque de arriba); el dia que la tenga, pausa y reanuda sola. Los
+  // tres motivos de pausa -- carga, bateria y usuario -- son
+  // independientes a proposito: recuperar bateria no reanuda lo que
+  // paro el usuario, y cerrar el juego tampoco.
+  flexBattTick(now);
+  flexBattCoworkTick();
 
   if(coworkPump(now) > 0) gCwDirty = true;
 
@@ -28312,13 +28459,14 @@ static void aiDrawWork(int bx, int by, int bw, int bh){
 }
 
 // ---- Ajustes de la app ----
-#define AISET_ROWS 11
+#define AISET_ROWS 12
 static const char* AI_SET_LABEL[AISET_ROWS] = {
   "Flex Intelligence", "Servidor (HTTPS)", "Identificador", "Token",
   "Certificado ra\xC3\xADz", "Permitir texto", "Permitir im\xC3\xA1genes",
   "Permitir archivos", "Solo en el dispositivo", "Autocorregir al escribir",
-  "Al mantener pulsado"
+  "Al mantener pulsado", "Pausar con bater\xC3\xAD" "a baja"
 };
+#define AISET_ROW_BATT 11
 
 static void aiSetValue(int i, char* out, size_t n){
   AiConfig* c = aiConfig();
@@ -28337,6 +28485,9 @@ static void aiSetValue(int i, char* out, size_t n){
     case 8: snprintf(out, n, "%s", c->localOnly ? "S\xC3\xAD" : "No"); break;
     case 9: snprintf(out, n, "%s", c->autoCorrect ? "S\xC3\xAD" : "No"); break;
     case 10:snprintf(out, n, "%s", c->openMode == AI_OPEN_APP ? "Aplicaci\xC3\xB3n completa" : "Panel r\xC3\xA1pido"); break;
+    // No se ofrece un interruptor que no haria nada: mientras no exista
+    // telemetria, la fila DICE que no la hay en vez de fingir un ajuste.
+    case AISET_ROW_BATT: flexBattStatusText(out, n); break;
     default: out[0] = 0; break;
   }
 }
@@ -28348,8 +28499,10 @@ static void aiDrawSettings(int bx, int by, int bw, int bh){
       fillRoundRect(bx + 12, y, bw - 24, h, 12, thCard());
       drawTextClip(bx + 24, y + 6, AI_SET_LABEL[i], 2, TH_TXT, bx + bw - 40);
       char v[AI_URL_MAX]; aiSetValue(i, v, sizeof(v));
+      bool warn = (i == 4 && !aiHasRootCa());
+      bool off  = (i == AISET_ROW_BATT && !flexBattAvailable());
       drawTextClip(bx + 24, y + 27, v, 1,
-                   (i == 4 && !aiHasRootCa()) ? TH_DANGER : TH_TXT2, bx + bw - 30);
+                   warn ? TH_DANGER : (off ? TH_MUTE : TH_TXT2), bx + bw - 30);
     }
     y += h + 6;
   }
@@ -28750,6 +28903,12 @@ static void aiSettingsTap(int row){
       c->autoCorrect = !c->autoCorrect; aiPrefsSave();
       break;
     case 10: c->openMode = (c->openMode == AI_OPEN_APP) ? AI_OPEN_PANEL : AI_OPEN_APP; aiPrefsSave(); break;
+    case AISET_ROW_BATT:
+      // Fila informativa. Cuando exista una fuente real, aqui entra el
+      // umbral configurable; hoy tocarla solo explica el estado.
+      aiToast(flexBattAvailable() ? "Se pausar\xC3\xA1n las tareas con bater\xC3\xAD" "a baja"
+                                  : "Esta placa no informa del nivel de bater\xC3\xAD" "a");
+      break;
     case AISET_ROWS:      // Probar conexion
       aiToast(aiErrorText(aiSelfTest()));
       break;
