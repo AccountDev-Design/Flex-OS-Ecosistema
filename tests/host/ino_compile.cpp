@@ -166,6 +166,16 @@ static void testPaginasHome();
 static void testNotifCowork();
 static void testCorrectorTeclado();
 static void testPrivacidadVault();
+static void testAppId16();
+static void testAcciones();
+static void testConfirmacion();
+static void testChatFinal();
+static void testBusqueda();
+static void testBateria();
+static void testNoHorizontal();
+// Almacen de trabajos para las pruebas: la placa lo pone en PSRAM, aqui
+// basta con un array estatico.
+static CoworkJob gTestJobs[CW_MAX_JOBS];
 static int gFails = 0;
 static void chk(bool ok, const char* what){
   if(!ok){ printf("  FALLO: %s\n", what); gFails++; }
@@ -1415,6 +1425,621 @@ static void testPrivacidadVault(){
   if(!gFails) printf("  Privacidad de Flex Vault: todas las comprobaciones pasan.\n");
 }
 
+
+// #############################################################
+//  FLEX INTELLIGENCE  ·  segunda tanda
+//  ------------------------------------------------------------
+//  Lo que se anadio despues de la primera version: la app con id
+//  16 suelta por todo el sistema, la ejecucion de acciones
+//  estructuradas, el chat que se completa solo, la busqueda local
+//  de archivos, la pausa por bateria y -- lo que se dejo FUERA a
+//  proposito -- que nada de esto asome en horizontal.
+// #############################################################
+
+// El sistema de archivos de mentira vive en ino_extern_stubs.cpp.
+extern void fakeFsReset();
+extern void fakeFsAdd(const char* path, const char* body, unsigned size);
+
+static void testAppId16(){
+  printf("Flex Intelligence con id 16\n");
+  drwTestReset();
+
+  // --- FAVORITA: quitar y volver a poner ---
+  chk(appIsFav(IC_FLEXAI), "nace en el escritorio");
+  int slot0 = drwSlotOf(IC_FLEXAI);
+  chk(slot0 >= 0, "y tiene ranura");
+  drwFavToggle(IC_FLEXAI);
+  chk(!appIsFav(IC_FLEXAI),        "\"Quitar de Inicio\" SI funciona con la app 16");
+  chk(drwSlotOf(IC_FLEXAI) < 0,    "y libera su ranura");
+  drwFavToggle(IC_FLEXAI);
+  chk(appIsFav(IC_FLEXAI),         "\"Anadir a Inicio\" tambien");
+  chk(drwSlotOf(IC_FLEXAI) >= 0,   "y le devuelve una ranura");
+
+  // EL FALLO CONCRETO QUE SE ARREGLO: con la pagina 1 llena -- que es
+  // como esta un escritorio de fabrica -- el hueco tiene que buscarse
+  // en las tres paginas. Antes se miraban solo las 12 primeras y
+  // "Anadir a Inicio" no hacia nada.
+  drwTestReset();
+  drwFavToggle(IC_FLEXAI);                       // fuera
+  for(int i = 0; i < HOME_SLOTS; i++) chk(homeOrder[i] != HOME_EMPTY,
+      "la primera pagina esta llena");
+  drwFavToggle(IC_FLEXAI);                       // y dentro otra vez
+  chk(appIsFav(IC_FLEXAI), "con la pagina 1 llena, sigue pudiendo entrar");
+  chk(drwSlotOf(IC_FLEXAI) >= HOME_SLOTS, "y cae en la pagina 2 o 3");
+
+  // --- OCULTAR: y que no quede un icono fantasma ---
+  drwTestReset();
+  int sl = drwSlotOf(IC_FLEXAI);
+  chk(sl >= HOME_SLOTS, "de fabrica esta en la pagina 2");
+  drwHideToggle(IC_FLEXAI);
+  chk(appIsHidden(IC_FLEXAI),   "se puede ocultar");
+  chk(!appIsFav(IC_FLEXAI),     "ocultarla la saca de Inicio");
+  chk(!drwInList(IC_FLEXAI),    "y de la caja");
+  // Este es el fallo: la limpieza del escritorio miraba solo las 12
+  // primeras ranuras, asi que una app oculta que viviera en la pagina 2
+  // seguia dibujada ahi.
+  chk(drwSlotOf(IC_FLEXAI) < 0, "NO queda un icono fantasma en la pagina 2");
+  drwHideToggle(IC_FLEXAI);
+  chk(!appIsHidden(IC_FLEXAI),  "se puede volver a mostrar");
+  chk(drwInList(IC_FLEXAI),     "y vuelve a la caja");
+
+  // --- CANDADO Y KIOSCO: las guardas tambien llegaban solo a 15 ---
+  drwTestReset();
+  gLockType = 1;                                  // hace falta clave para el candado
+  appLockSet(IC_FLEXAI, true);
+  chk(appLockGet(IC_FLEXAI),  "se le puede poner candado");
+  appLockSet(IC_FLEXAI, false);
+  chk(!appLockGet(IC_FLEXAI), "y quitarselo");
+  gLockType = 0;
+
+  // --- LAS 36 RANURAS: colocable en cualquiera de las tres paginas ---
+  drwTestReset();
+  for(int p = 0; p < HOME_PAGES; p++){
+    // Se vacia todo y se pone SOLO en la primera ranura de esa pagina.
+    for(int i = 0; i < HOME_TOTAL; i++) homeOrder[i] = HOME_EMPTY;
+    gAppFav = (uint32_t)(1u << IC_FLEXAI);
+    gAppHidden = 0;
+    homeOrder[p * HOME_SLOTS] = IC_FLEXAI;
+    homeOrderNormalize();
+    chk(homeOrder[p * HOME_SLOTS] == IC_FLEXAI, "se queda en la ranura de su pagina");
+    gHomePage = p;
+    int id = -1;
+    chk(hitHomeIcon(HOME_GX0 + 10, HOME_GY0 + 10, id) && id == IC_FLEXAI,
+        "y su icono responde ahi");
+  }
+  gHomePage = 0;
+  drwTestReset();
+  if(!gFails) printf("  App id 16: todas las comprobaciones pasan.\n");
+}
+
+static void testAcciones(){
+  printf("Acciones estructuradas\n");
+  fakeFsReset();
+  fakeFsAdd("/Notas/a.txt", "texto original", 0);
+  coworkAttachStorage(gTestJobs, CW_MAX_JOBS);
+  aiConfigDefaults();
+
+  // --- RUTAS PROHIBIDAS: lo que la IA no puede tocar, pase lo que pase ---
+  chk(aiPathForbidden("/System/config"),     "/System esta prohibido");
+  chk(aiPathForbidden("/System/spell.txt"),  "...incluido el diccionario");
+  chk(aiPathForbidden("/.fxvault/d/1"),      "Flex Vault esta prohibido");
+  chk(aiPathForbidden("/Notas/../System/x"), "subir de directorio esta prohibido");
+  chk(aiPathForbidden("/.oculto"),           "lo oculto esta prohibido");
+  chk(aiPathForbidden("Notas/a.txt"),        "una ruta relativa se rechaza");
+  chk(aiPathForbidden(""),                   "vacio se rechaza");
+  chk(aiPathForbidden(NULL),                 "NULL se rechaza");
+  chk(!aiPathForbidden("/Notas/a.txt"),      "una nota normal si se puede");
+
+  // --- QUE SE PUEDE SOBRESCRIBIR ---
+  chk(aiPathWritableDoc("/Notas/a.txt"),       "una nota .txt");
+  chk(aiPathWritableDoc("/Documentos/b.note"), "un .note en Documentos");
+  chk(!aiPathWritableDoc("/Paint/c.fpn"),      "un dibujo NO: un resultado de texto no lo sustituye");
+  chk(!aiPathWritableDoc("/Notas/d.jpg"),      "una imagen tampoco");
+  chk(!aiPathWritableDoc("/System/e.txt"),     "ni nada en /System");
+
+  // --- EL ARGUMENTO DEL SERVIDOR SE REDUCE A UN NOMBRE ---
+  { char st[32];
+    chk(aiSafeStem("Resumen", st, sizeof(st)) && !strcmp(st, "Resumen"), "un nombre normal pasa");
+    chk(aiSafeStem("../../System/config", st, sizeof(st)), "una ruta deja algo...");
+    chk(!strchr(st, '/') && !strstr(st, ".."), "...pero sin barras ni puntos");
+    chk(aiSafeStem("a/b/c", st, sizeof(st)) && !strcmp(st, "abc"), "las barras se caen");
+    chk(!aiSafeStem("///", st, sizeof(st)), "si no queda nada, se rechaza");
+    chk(!aiSafeStem(NULL, st, sizeof(st)),  "NULL se rechaza"); }
+
+  // --- open_app: solo apps que existen y que el usuario no cerro ---
+  chk(aiResolveAppId("0") == 0,            "por numero");
+  chk(aiResolveAppId("16") == IC_FLEXAI,   "el 16 tambien");
+  chk(aiResolveAppId("99") < 0,            "un id inexistente NO");
+  chk(aiResolveAppId("-1") < 0,            "ni uno negativo");
+  chk(aiResolveAppId("") < 0,              "ni vacio");
+  chk(aiResolveAppId(NULL) < 0,            "ni NULL");
+  chk(aiResolveAppId("Calculadora") >= 0,  "por nombre");
+  chk(aiResolveAppId("NoExiste") < 0,      "un nombre inventado NO");
+  gAppHidden |= (uint32_t)(1u << IC_CALC);
+  chk(aiResolveAppId("13") < 0,            "una app OCULTA no se abre por la espalda");
+  gAppHidden = 0;
+  gLockType = 1; appLockSet(IC_CALC, true);
+  chk(aiResolveAppId("13") < 0,            "una app con CANDADO tampoco");
+  appLockSet(IC_CALC, false); gLockType = 0;
+  kioskOn = true; kioskApp = IC_RELOJ;
+  chk(aiResolveAppId("13") < 0,            "en kiosco, solo la app clavada");
+  chk(aiResolveAppId("0") == IC_RELOJ,     "y esa si");
+  kioskOn = false;
+
+  // --- EJECUCION: crear nota ---
+  { uint32_t id = coworkSubmit(CW_KIND_SUMMARY, "S", "x", 1, NULL, 0, 0, 1000);
+    coworkBeginWork(id, 1000);
+    coworkSetAction(id, AI_ACT_CREATE_NOTE, "Resumen");
+    coworkFinish(id, "contenido del resumen", 21, 0, true, 1100);
+    char msg[64];
+    chk(aiExecAction(id, msg, sizeof(msg)), "crear nota funciona");
+    chk(coworkFind(id)->applied, "queda marcada como aplicada");
+    chk(!aiExecAction(id, msg, sizeof(msg)), "y NO se aplica dos veces");
+    // El texto acabo donde debia y con el nombre reducido.
+    char body[64];
+    chk(flexFsReadText("/Notas/Resumen.txt", body, sizeof(body)) > 0, "la nota existe");
+    chk(!strcmp(body, "contenido del resumen"), "con el contenido correcto");
+    coworkDelete(id); }
+
+  // Un argumento con ruta NO saca la nota de /Notas.
+  { uint32_t id = coworkSubmit(CW_KIND_SUMMARY, "S", "x", 1, NULL, 0, 0, 2000);
+    coworkBeginWork(id, 2000);
+    coworkSetAction(id, AI_ACT_CREATE_NOTE, "../../System/config");
+    coworkFinish(id, "malo", 4, 0, true, 2100);
+    char msg[64];
+    aiExecAction(id, msg, sizeof(msg));
+    char body[64];
+    chk(flexFsReadText("/System/config", body, sizeof(body)) < 0,
+        "un argumento con ruta NO escribe en /System");
+    coworkDelete(id); }
+
+  // --- EJECUCION: reemplazar texto, sobre el src del FIRMWARE ---
+  { uint32_t h = coworkHash("texto original", 14);
+    uint32_t id = coworkSubmit(CW_KIND_CORRECT, "C", "texto original", 14, "/Notas/a.txt", h, 0, 3000);
+    coworkBeginWork(id, 3000);
+    coworkSetAction(id, AI_ACT_REPLACE_TEXT, "/System/config");   // el arg se IGNORA
+    coworkFinish(id, "texto corregido", 15, h, false, 3100);
+    char msg[64];
+    chk(aiExecAction(id, msg, sizeof(msg)), "reemplazar funciona");
+    char body[64]; flexFsReadText("/Notas/a.txt", body, sizeof(body));
+    chk(!strcmp(body, "texto corregido"), "escribio en el documento de ORIGEN");
+    chk(flexFsReadText("/System/config", body, sizeof(body)) < 0,
+        "y NO donde decia el argumento del servidor");
+    coworkDelete(id); }
+
+  // Sin documento de origen no se reemplaza nada.
+  { uint32_t id = coworkSubmit(CW_KIND_CORRECT, "C", "x", 1, NULL, 0, 0, 4000);
+    coworkBeginWork(id, 4000);
+    coworkSetAction(id, AI_ACT_REPLACE_TEXT, NULL);
+    coworkFinish(id, "y", 1, 0, false, 4100);
+    char msg[64];
+    chk(!aiExecAction(id, msg, sizeof(msg)), "sin origen no se reemplaza");
+    coworkDelete(id); }
+
+  // --- EJECUCION: anadir a la nota ---
+  { fakeFsReset(); fakeFsAdd("/Notas/b.txt", "primera linea", 0);
+    uint32_t h = coworkHash("primera linea", 13);
+    uint32_t id = coworkSubmit(CW_KIND_SUMMARY, "S", "primera linea", 13, "/Notas/b.txt", h, 0, 5000);
+    coworkBeginWork(id, 5000);
+    coworkSetAction(id, AI_ACT_APPEND_NOTE, NULL);
+    coworkFinish(id, "segunda linea", 13, h, false, 5100);
+    char msg[64];
+    chk(aiExecAction(id, msg, sizeof(msg)), "anadir funciona");
+    char body[64]; flexFsReadText("/Notas/b.txt", body, sizeof(body));
+    chk(strstr(body, "primera linea") && strstr(body, "segunda linea"),
+        "conserva lo que habia y anade lo nuevo");
+    coworkDelete(id); }
+
+  // --- una accion FUERA de la lista no llega a ejecutarse ---
+  // (FlexOS_AI ya la degrada a show_text; aqui se comprueba que
+  //  show_text no escribe nada.)
+  { fakeFsReset(); fakeFsAdd("/Notas/c.txt", "intacto", 0);
+    uint32_t h = coworkHash("intacto", 7);
+    uint32_t id = coworkSubmit(CW_KIND_ANALYZE, "A", "intacto", 7, "/Notas/c.txt", h, 0, 6000);
+    coworkBeginWork(id, 6000);
+    coworkSetAction(id, AI_ACT_SHOW_TEXT, NULL);
+    coworkFinish(id, "solo mirar", 10, h, false, 6100);
+    char msg[64];
+    aiExecAction(id, msg, sizeof(msg));
+    char body[64]; flexFsReadText("/Notas/c.txt", body, sizeof(body));
+    chk(!strcmp(body, "intacto"), "show_text NO escribe en ningun fichero");
+    coworkDelete(id); }
+
+  fakeFsReset();
+  coworkAttachStorage(gTestJobs, CW_MAX_JOBS);
+  if(!gFails) printf("  Acciones estructuradas: todas las comprobaciones pasan.\n");
+}
+
+static void testConfirmacion(){
+  printf("Confirmacion antes de tocar un fichero\n");
+  fakeFsReset();
+  fakeFsAdd("/Notas/a.txt", "original", 0);
+  coworkAttachStorage(gTestJobs, CW_MAX_JOBS);
+  gState = ST_APP; gAppId = IC_FLEXAI; gLand = false;
+
+  uint32_t h = coworkHash("original", 8);
+  uint32_t id = coworkSubmit(CW_KIND_CORRECT, "C", "original", 8, "/Notas/a.txt", h, 0, 1000);
+  coworkBeginWork(id, 1000);
+  coworkSetAction(id, AI_ACT_REPLACE_TEXT, NULL);
+  coworkFinish(id, "corregido", 9, h, false, 1100);
+
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+
+  // --- CANCELAR no toca el fichero ---
+  aiConfirmOpen(id);
+  chk(aiConfirmOpenNow(), "la confirmacion se abre");
+  { int x, y, w, hh; aiConfirmBtn(1, bx, by, bw, bh, x, y, w, hh);
+    tReset(); T.tap = true; T.x = x + w / 2; T.y = y + hh / 2;
+    chk(aiConfirmTick(bx, by, bw, bh), "el modal se queda el toque");
+    chk(!aiConfirmOpenNow(), "y se cierra"); }
+  { char body[32]; flexFsReadText("/Notas/a.txt", body, sizeof(body));
+    chk(!strcmp(body, "original"), "cancelar NO escribio nada"); }
+
+  // --- Un toque FUERA de los botones no cierra ni aplica ---
+  aiConfirmOpen(id);
+  tReset(); T.tap = true; T.x = bx + 2; T.y = by + 2;
+  aiConfirmTick(bx, by, bw, bh);
+  chk(aiConfirmOpenNow(), "tocar fuera no cierra: hay que decidir");
+  { char body[32]; flexFsReadText("/Notas/a.txt", body, sizeof(body));
+    chk(!strcmp(body, "original"), "y sigue sin escribir"); }
+
+  // --- APLICAR si escribe ---
+  { int x, y, w, hh; aiConfirmBtn(0, bx, by, bw, bh, x, y, w, hh);
+    tReset(); T.tap = true; T.x = x + w / 2; T.y = y + hh / 2;
+    aiConfirmTick(bx, by, bw, bh);
+    chk(!aiConfirmOpenNow(), "aplicar cierra el modal"); }
+  { char body[32]; flexFsReadText("/Notas/a.txt", body, sizeof(body));
+    chk(!strcmp(body, "corregido"), "y AHORA si escribio"); }
+  coworkDelete(id);
+
+  // --- DOCUMENTO CAMBIADO: confirmacion DOBLE ---
+  fakeFsReset(); fakeFsAdd("/Notas/d.txt", "lo que el usuario escribio despues", 0);
+  uint32_t h2 = coworkHash("version vieja", 13);
+  uint32_t id2 = coworkSubmit(CW_KIND_CORRECT, "C", "version vieja", 13, "/Notas/d.txt", h2, 0, 2000);
+  coworkBeginWork(id2, 2000);
+  coworkSetAction(id2, AI_ACT_REPLACE_TEXT, NULL);
+  // huella distinta = el usuario escribio encima mientras se trabajaba
+  coworkFinish(id2, "resultado del trabajo", 21, coworkHash("otra cosa", 9), false, 2100);
+  chk(coworkFind(id2)->srcChanged, "se detecto que el documento cambio");
+
+  aiConfirmOpen(id2);
+  chk(gAiConfirmDouble, "por eso la confirmacion es DOBLE");
+  chk(!gAiConfirmArmed, "y el primer boton todavia no aplica");
+  { int x, y, w, hh; aiConfirmBtn(0, bx, by, bw, bh, x, y, w, hh);
+    tReset(); T.tap = true; T.x = x + w / 2; T.y = y + hh / 2;
+    aiConfirmTick(bx, by, bw, bh);
+    chk(aiConfirmOpenNow(), "el primer toque NO cierra");
+    chk(gAiConfirmArmed,    "solo acepta el aviso"); }
+  { char body[64]; flexFsReadText("/Notas/d.txt", body, sizeof(body));
+    chk(!strcmp(body, "lo que el usuario escribio despues"),
+        "y NO ha escrito nada todavia"); }
+  { int x, y, w, hh; aiConfirmBtn(0, bx, by, bw, bh, x, y, w, hh);
+    tReset(); T.tap = true; T.x = x + w / 2; T.y = y + hh / 2;
+    aiConfirmTick(bx, by, bw, bh);
+    chk(!aiConfirmOpenNow(), "el segundo toque si aplica"); }
+  { char body[64]; flexFsReadText("/Notas/d.txt", body, sizeof(body));
+    chk(!strcmp(body, "resultado del trabajo"), "y ahora si escribio"); }
+
+  tReset(); fakeFsReset();
+  coworkAttachStorage(gTestJobs, CW_MAX_JOBS);
+  gState = ST_HOME;
+  if(!gFails) printf("  Confirmacion: todas las comprobaciones pasan.\n");
+}
+
+static void testChatFinal(){
+  printf("El chat se completa solo\n");
+  coworkAttachStorage(gTestJobs, CW_MAX_JOBS);
+  aiChatEnsure();
+  gChatN = 0;
+
+  // --- RESPUESTA ---
+  uint32_t id = coworkSubmit(CW_KIND_ANALYZE, "Consulta", "hola", 4, NULL, 0, 0, 1000);
+  aiChatPush(true, "hola");
+  aiChatPushPending("Trabajando en ello...", id);
+  chk(gChatN == 2, "dos turnos");
+  chk(gChat[1].jobId == id, "el segundo espera a su trabajo");
+  chk(!aiChatResolve(), "mientras no termina, no cambia nada");
+  coworkBeginWork(id, 1000);
+  coworkSetAction(id, AI_ACT_SHOW_TEXT, NULL);
+  coworkFinish(id, "esta es la respuesta", 20, 0, false, 1100);
+  chk(aiChatResolve(), "al terminar, se resuelve");
+  chk(!strcmp(gChat[1].text, "esta es la respuesta"), "y el turno lleva la RESPUESTA");
+  chk(gChat[1].jobId == 0, "y deja de esperar");
+  chk(coworkFind(id)->seen, "el resultado queda marcado como visto");
+  coworkDelete(id);
+
+  // --- ERROR ENTENDIBLE ---
+  gChatN = 0;
+  uint32_t id2 = coworkSubmit(CW_KIND_ANALYZE, "Consulta", "x", 1, NULL, 0, 0, 2000);
+  aiChatPushPending("Trabajando en ello...", id2);
+  coworkBeginWork(id2, 2000);
+  coworkFail(id2, CW_ERR_NOCFG, "Sin configurar", 2000);
+  chk(coworkFind(id2)->state == CW_ERROR, "el trabajo falla");
+  chk(aiChatResolve(), "el chat se entera");
+  chk(strstr(gChat[0].text, "No pude responder") != NULL, "y lo dice");
+  chk(strstr(gChat[0].text, "Sin configurar") != NULL,   "con el motivo REAL, no un codigo");
+  coworkDelete(id2);
+
+  // --- RESULTADO QUE HAY QUE CONFIRMAR ---
+  gChatN = 0;
+  uint32_t id3 = coworkSubmit(CW_KIND_SUMMARY, "S", "x", 1, NULL, 0, 0, 3000);
+  aiChatPushPending("Trabajando en ello...", id3);
+  coworkBeginWork(id3, 3000);
+  coworkSetAction(id3, AI_ACT_CREATE_NOTE, "Resumen");
+  coworkFinish(id3, "el resumen", 10, 0, true, 3100);
+  aiChatResolve();
+  chk(strstr(gChat[0].text, "Listo") != NULL,   "dice que esta listo");
+  chk(strstr(gChat[0].text, "confirma") != NULL, "y que hay que confirmarlo");
+  coworkDelete(id3);
+
+  // --- CANCELADO ---
+  gChatN = 0;
+  uint32_t id4 = coworkSubmit(CW_KIND_ANALYZE, "A", "x", 1, NULL, 0, 0, 4000);
+  aiChatPushPending("Trabajando en ello...", id4);
+  coworkCancel(id4);
+  aiChatResolve();
+  chk(!strcmp(gChat[0].text, "Cancelado."), "un trabajo cancelado se dice");
+  coworkDelete(id4);
+
+  // --- EL TRABAJO DESAPARECIO: no se deja el "estoy en ello" colgado ---
+  gChatN = 0;
+  uint32_t id5 = coworkSubmit(CW_KIND_ANALYZE, "A", "x", 1, NULL, 0, 0, 5000);
+  aiChatPushPending("Trabajando en ello...", id5);
+  coworkDelete(id5);
+  chk(aiChatResolve(), "se resuelve igual");
+  chk(strstr(gChat[0].text, "ya no est") != NULL, "diciendo que la tarea ya no esta");
+  chk(gChat[0].jobId == 0, "y sin quedarse esperando para siempre");
+
+  // --- el historial sigue acotado ---
+  gChatN = 0;
+  for(int i = 0; i < AI_CHAT_MAX + 5; i++) aiChatPush(i & 1, "linea");
+  chk(gChatN == AI_CHAT_MAX, "el historial no pasa de su tope");
+
+  gChatN = 0;
+  if(!gFails) printf("  Chat: todas las comprobaciones pasan.\n");
+}
+
+static void testBusqueda(){
+  printf("Busqueda local de archivos\n");
+  coworkAttachStorage(gTestJobs, CW_MAX_JOBS);
+  fakeFsReset();
+  fakeFsAdd("/Notas/lista de la compra.txt", "leche pan huevos", 0);
+  fakeFsAdd("/Notas/receta.txt",             "pan con tomate", 0);
+  fakeFsAdd("/Documentos/informe.txt",       "resultados del trimestre", 0);
+  fakeFsAdd("/Paint/dibujo.fpn",             "", 4096);
+  // Lo que NO debe salir NUNCA:
+  fakeFsAdd("/System/spell.txt",             "pan", 0);
+  fakeFsAdd("/System/cowork.dat",            "pan", 0);
+  fakeFsAdd("/.fxvault/d/1",                 "pan", 0);
+  fakeFsAdd("/Papelera/viejo.txt",           "pan", 0);
+
+  static char out[CW_OUT_MAX];
+  uint32_t id = coworkSubmit(CW_KIND_FIND, "Buscar", "pan", 3, NULL, 0, 0, 1000);
+  coworkBeginWork(id, 1000);
+
+  int n = aiLocalFind(id, "pan", out, sizeof(out));
+  chk(n > 0, "encuentra algo");
+  // Por NOMBRE no coincide ninguno con "pan"; los dos que salen es por
+  // CONTENIDO, que es justo lo que hay que probar.
+  chk(strstr(out, "/Notas/lista de la compra.txt") != NULL, "encuentra por contenido (1)");
+  chk(strstr(out, "/Notas/receta.txt") != NULL,             "encuentra por contenido (2)");
+  chk(strstr(out, "informe") == NULL,                       "y no trae lo que no coincide");
+
+  // LO QUE NO PUEDE SALIR, y es el punto de toda la funcion.
+  chk(strstr(out, "/System") == NULL,   "NUNCA sale nada de /System");
+  chk(strstr(out, "spell")   == NULL,   "ni el diccionario");
+  chk(strstr(out, "cowork")  == NULL,   "ni el historial");
+  chk(strstr(out, "fxvault") == NULL,   "NUNCA sale nada de Flex Vault");
+  chk(strstr(out, "Papelera")== NULL,   "ni de la papelera");
+
+  // --- por NOMBRE, y sin distinguir tildes ni mayusculas ---
+  n = aiLocalFind(id, "RECETA", out, sizeof(out));
+  chk(n == 1 && strstr(out, "receta.txt"), "busca por nombre sin distinguir mayusculas");
+
+  // --- se dice el tamano, y si se puede abrir ---
+  n = aiLocalFind(id, "dibujo", out, sizeof(out));
+  chk(n == 1, "encuentra el dibujo");
+  chk(strstr(out, "/Paint/dibujo.fpn") != NULL, "con su ruta");
+  chk(strstr(out, "KB") != NULL || strstr(out, "B)") != NULL, "y su tamano");
+
+  // Un fichero que ninguna app puede abrir se marca.
+  fakeFsAdd("/Documentos/raro.bin", "", 100);
+  n = aiLocalFind(id, "raro", out, sizeof(out));
+  chk(n == 1 && strstr(out, "no se puede abrir") != NULL,
+      "lo que ninguna app abre se lista marcado");
+
+  // --- SIN RESULTADOS: se dice, y se dice DONDE se busco ---
+  n = aiLocalFind(id, "zzzzznoexiste", out, sizeof(out));
+  chk(n == 0, "sin resultados");
+  chk(strstr(out, "Sin resultados") != NULL, "y lo dice");
+  chk(strstr(out, "/Notas") != NULL,         "diciendo tambien donde busco");
+
+  // --- CANCELACION ---
+  coworkCancel(id);
+  n = aiLocalFind(id, "pan", out, sizeof(out));
+  chk(n == -1, "cancelar la busqueda la para de verdad");
+
+  // --- LIMITE DE RESULTADOS ---
+  { coworkAttachStorage(gTestJobs, CW_MAX_JOBS);
+    fakeFsReset();
+    char p[64];
+    for(int i = 0; i < 30; i++){                   // mas que AIF_MAX_RESULTS
+      snprintf(p, sizeof(p), "/Notas/comun%02d.txt", i);
+      fakeFsAdd(p, "x", 0);
+    }
+    uint32_t id2 = coworkSubmit(CW_KIND_FIND, "B", "comun", 5, NULL, 0, 0, 2000);
+    coworkBeginWork(id2, 2000);
+    int k = aiLocalFind(id2, "comun", out, sizeof(out));
+    chk(k <= AIF_MAX_RESULTS, "no devuelve mas resultados que su tope");
+    chk(strstr(out, "acotada") != NULL, "y AVISA de que la lista esta cortada");
+    coworkDelete(id2); }
+
+  // --- ficheros grandes: no se abren para mirar dentro ---
+  { fakeFsReset();
+    fakeFsAdd("/Notas/enorme.txt", "pan", AIF_MAX_CONTENT + 1000);
+    uint32_t id3 = coworkSubmit(CW_KIND_FIND, "B", "pan", 3, NULL, 0, 0, 3000);
+    coworkBeginWork(id3, 3000);
+    int k = aiLocalFind(id3, "pan", out, sizeof(out));
+    chk(k == 0, "un fichero demasiado grande no se abre para buscar dentro");
+    coworkDelete(id3); }
+
+  // --- sin almacenamiento se dice, no se inventa ---
+  { fakeFsReset();
+    coworkAttachStorage(gTestJobs, CW_MAX_JOBS);
+    uint32_t id4 = coworkSubmit(CW_KIND_FIND, "B", "x", 1, NULL, 0, 0, 4000);
+    int k = aiLocalFind(id4, "x", out, sizeof(out));
+    chk(k == 0 && strstr(out, "Sin almacenamiento") != NULL,
+        "sin almacenamiento montado se dice"); }
+
+  fakeFsReset();
+  coworkAttachStorage(gTestJobs, CW_MAX_JOBS);
+  if(!gFails) printf("  Busqueda de archivos: todas las comprobaciones pasan.\n");
+}
+
+static void testBateria(){
+  printf("Pausa por bateria\n");
+  coworkAttachStorage(gTestJobs, CW_MAX_JOBS);
+
+  // Esta placa NO tiene telemetria: es el estado real y hay que
+  // comprobar que en ese caso no pasa NADA.
+  gBatt.valid = false; gBattPaused = false;
+  chk(!flexBattAvailable(), "de fabrica no hay telemetria");
+  chk(flexBattPercent() == -1, "y el porcentaje es 'no se sabe', no un numero");
+  uint32_t id = coworkSubmit(CW_KIND_SUMMARY, "S", "x", 1, NULL, 0, 0, 1000);
+  flexBattCoworkTick();
+  chk(coworkFind(id)->state == CW_QUEUED, "sin telemetria no se pausa nada");
+
+  // --- CON telemetria: se pausa por debajo del umbral ---
+  gBatt.valid = true; gBatt.percent = 50; gBatt.charging = false;
+  flexBattCoworkTick();
+  chk(coworkFind(id)->state == CW_QUEUED, "al 50% no se pausa");
+  gBatt.percent = AI_BATT_PAUSE_PCT - 1;
+  flexBattCoworkTick();
+  chk(coworkFind(id)->state == CW_PAUSED, "por debajo del umbral SI se pausa");
+  chk(coworkFind(id)->pauseWhy == CW_PAUSE_BATTERY, "y con el motivo correcto");
+
+  // --- HISTERESIS: no se reanuda en el mismo umbral ---
+  gBatt.percent = AI_BATT_PAUSE_PCT + 1;
+  flexBattCoworkTick();
+  chk(coworkFind(id)->state == CW_PAUSED, "justo por encima del umbral NO se reanuda");
+  gBatt.percent = AI_BATT_RESUME_PCT;
+  flexBattCoworkTick();
+  chk(coworkFind(id)->state == CW_QUEUED, "se reanuda al recuperar de verdad");
+
+  // --- CARGANDO no se pausa, por bajo que este ---
+  gBatt.percent = 5; gBatt.charging = true;
+  flexBattCoworkTick();
+  chk(coworkFind(id)->state == CW_QUEUED, "cargando no se pausa aunque este al 5%");
+  gBatt.charging = false;
+  flexBattCoworkTick();
+  chk(coworkFind(id)->state == CW_PAUSED, "al desconectar, si");
+
+  // --- LA REGLA QUE MAS IMPORTA ---
+  // Lo que paro el USUARIO no lo reanuda la bateria. Ni la carga.
+  coworkPause(id, CW_PAUSE_USER);
+  gBatt.percent = 90;
+  flexBattCoworkTick();
+  chk(coworkFind(id)->state == CW_PAUSED,
+      "recuperar bateria NO reanuda lo que paro el usuario");
+  chk(coworkFind(id)->pauseWhy == CW_PAUSE_USER, "que sigue pausado por SU motivo");
+
+  // Ni la pausa por juego/camara.
+  coworkResume(id);
+  coworkPauseAll(CW_PAUSE_LOAD);
+  gBatt.percent = 10;
+  flexBattCoworkTick();
+  gBatt.percent = 90;
+  flexBattCoworkTick();
+  chk(coworkFind(id)->state == CW_PAUSED, "ni lo que pauso una app pesada");
+
+  // --- si la fuente se cae, no se dejan trabajos colgados ---
+  coworkResumeAll(CW_PAUSE_LOAD);
+  gBatt.percent = 5; gBatt.valid = true; gBatt.charging = false;
+  flexBattCoworkTick();
+  chk(coworkFind(id)->state == CW_PAUSED, "pausado por bateria");
+  gBatt.valid = false;                       // la fuente desaparece
+  flexBattCoworkTick();
+  chk(coworkFind(id)->state == CW_QUEUED,
+      "si la telemetria se cae, no se queda pausado para siempre");
+
+  coworkDelete(id);
+  gBatt.valid = false; gBattPaused = false;
+  coworkAttachStorage(gTestJobs, CW_MAX_JOBS);
+  if(!gFails) printf("  Bateria: todas las comprobaciones pasan.\n");
+}
+
+static void testNoHorizontal(){
+  printf("Flex Intelligence NO asoma en horizontal\n");
+  coworkAttachStorage(gTestJobs, CW_MAX_JOBS);
+  aiConfigDefaults();
+  gState = ST_HOME; qsPanelY = 0; editMode = false; kioskOn = false;
+  gHosted = false; aiOvOpen = false;
+  // flexAiPump se rinde si no hay almacen conectado (en la placa lo pone
+  // flexAiBegin); aqui se apunta al array de la prueba.
+  gCwSlots = gTestJobs;
+
+  // --- vertical: todo funciona ---
+  gLand = false;
+  chk(flexAiUiAllowed(), "en vertical la interfaz esta permitida");
+  chk(flexAiCanOpen(),   "y se puede abrir");
+
+  // --- horizontal: nada ---
+  gLand = true;
+  chk(!flexAiUiAllowed(), "en horizontal NO esta permitida");
+  chk(!flexAiCanOpen(),   "y NO se puede abrir");
+
+  // La pulsacion larga tampoco activa, en ninguno de los dos modos.
+  for(int mode = 0; mode <= 1; mode++){
+    gNavMode = mode;
+    gAiLp = AIL_IDLE; gAiLpConsumed = false;
+    tDown(SCR_W / 2, SCR_H - 20, 1000);
+    flexAiLongPressTick();
+    tMove(SCR_W / 2, SCR_H - 20, 1800);
+    chk(!flexAiLongPressTick(), mode == 0 ? "horizontal + botones: no activa"
+                                          : "horizontal + gestos: no activa");
+    chk(!aiOvOpen, "y el panel sigue cerrado");
+  }
+  gNavMode = 0;
+
+  // Ni la tarjeta flotante.
+  gState = ST_APP;
+  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  notifPushJob(77, "Resumen listo", "", NACT_VIEW, false);
+  chk(!nflWanted(), "una tarjeta de Cowork NO sale encima de una app horizontal");
+  gLand = false;
+  chk(nflWanted(),  "y en vertical si");
+
+  // Embebida en una ventana de Modo PC, tampoco.
+  gHosted = true;
+  chk(!flexAiUiAllowed(), "embebida en Modo PC tampoco");
+  chk(!nflWanted(),       "ni su tarjeta");
+  gHosted = false;
+
+  // --- EL RESULTADO NO SE PIERDE: se guarda y se anuncia al volver ---
+  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  gAnnN = 0;
+  uint32_t id = coworkSubmit(CW_KIND_SUMMARY, "S", "x", 1, NULL, 0, 0, 1000);
+  coworkBeginWork(id, 1000);
+  coworkFinish(id, "resultado", 9, 0, false, 1100);
+  gLand = true;
+  gTestMs = 100000;
+  flexAiPump();
+  chk(gNotifCount == 0, "en horizontal no se anuncia nada");
+  chk(coworkFind(id)->state == CW_DONE, "pero el resultado sigue guardado");
+  gLand = false;
+  gTestMs = 200000;
+  flexAiPump();
+  chk(gNotifCount == 1, "al volver a vertical, SE ANUNCIA");
+  chk(gNotifs[0].jobId == id, "y es el trabajo que habia terminado");
+
+  // Limpieza.
+  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs)); gAnnN = 0;
+  coworkDelete(id);
+  gState = ST_HOME; gLand = false; tReset();
+  coworkAttachStorage(gTestJobs, CW_MAX_JOBS);
+  if(!gFails) printf("  Sin interferencia en horizontal: todas las comprobaciones pasan.\n");
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -1487,6 +2112,13 @@ int main(){
   testNotifCowork();
   testCorrectorTeclado();
   testPrivacidadVault();
+  testAppId16();
+  testAcciones();
+  testConfirmacion();
+  testChatFinal();
+  testBusqueda();
+  testBateria();
+  testNoHorizontal();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

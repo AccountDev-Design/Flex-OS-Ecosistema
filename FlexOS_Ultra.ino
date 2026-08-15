@@ -26513,6 +26513,53 @@ static void aiSpellSave(){
 // -------------------------------------------------------------
 //  3) ALMACEN Y PERSISTENCIA DE COWORK
 // -------------------------------------------------------------
+// #############################################################
+// ##  RASCA-RASCA COMPARTIDO EN PSRAM
+// ##  ------------------------------------------------------
+// ##  Flex Intelligence necesita varios buffers de trabajo de 1-8 KB:
+// ##  el snapshot que copia la tarea de fondo, el resultado, el
+// ##  fichero que se abre para buscar dentro, el blob de
+// ##  persistencia, el historial de chat al guardarlo...
+// ##
+// ##  Como `static` dentro de cada funcion sumaban unos 20 KB de RAM
+// ##  INTERNA reservados para siempre -- y la RAM interna es
+// ##  justamente el recurso escaso de esta placa: 320 KB en total,
+// ##  contra 16 MB o mas de PSRAM. Ninguno de esos buffers se usa a
+// ##  la vez que otro ni sobrevive a la funcion que lo pide.
+// ##
+// ##  Asi que van a PSRAM, se reservan UNA vez la primera que hacen
+// ##  falta, y se reparten. Cada llamante pide su tamano y se le da
+// ##  un trozo del mismo bloque.
+// ##
+// ##  QUIEN LO USA Y CUANDO: la tarea de fondo (AISCR_TASK) y el hilo
+// ##  de UI (AISCR_UI) tienen bloques SEPARADOS. Compartir uno solo
+// ##  entre los dos hilos seria una carrera silenciosa: la tarea
+// ##  copiando un snapshot mientras la UI serializa el historial
+// ##  encima.
+// ##
+// ##  Sin PSRAM devuelve NULL y cada llamante lo trata como lo que
+// ##  es: no se puede hacer esa operacion, y se dice.
+// #############################################################
+// Los tres tamanos que dimensionan los bloques. Se repiten aqui -- y se
+// comprueban con un static_assert junto a su definicion real, mas
+// abajo -- porque este bloque va antes que la busqueda y que el chat, y
+// el orden en un .ino de Arduino no se puede reordenar a capricho.
+#define AISCR_CONTENT  8192      // = AIF_MAX_CONTENT (busqueda: mirar dentro)
+#define AISCR_CHATBUF  1968      // = AI_CHAT_MAX * (AI_CHAT_LEN + 4)
+#define AISCR_TASK_SZ  (AISCR_CONTENT + 1 + CW_IN_MAX + CW_OUT_MAX + 16)
+#define AISCR_UI_SZ    (CW_IN_MAX + CW_OUT_MAX + AISCR_CHATBUF + 2048 + 16)
+static uint8_t* gScrTask = NULL;
+static uint8_t* gScrUi   = NULL;
+
+static uint8_t* aiScrTask(){
+  if(!gScrTask) gScrTask = (uint8_t*)heap_caps_malloc(AISCR_TASK_SZ, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  return gScrTask;
+}
+static uint8_t* aiScrUi(){
+  if(!gScrUi) gScrUi = (uint8_t*)heap_caps_malloc(AISCR_UI_SZ, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  return gScrUi;
+}
+
 #define AI_COWORK_PATH "/System/cowork.dat"
 static CoworkJob* gCwSlots = NULL;
 static bool       gCwDirty = false;
@@ -26520,15 +26567,17 @@ static bool       gCwDirty = false;
 static void aiCoworkLoad(){
   if(!gCwSlots) return;
   if(!flexFsReady()) return;
-  static uint8_t blob[2048];
-  int n = flexFsReadBin(AI_COWORK_PATH, blob, sizeof(blob));
+  uint8_t* blob = aiScrUi();
+  if(!blob) return;                       // sin PSRAM no se restaura historial
+  int n = flexFsReadBin(AI_COWORK_PATH, blob, 2048);
   if(n > 0) coworkImport(blob, (size_t)n);
   gCwDirty = false;
 }
 static void aiCoworkSave(){
   if(!gCwDirty || !gCwSlots || !flexFsReady()) return;
-  static uint8_t blob[2048];
-  size_t n = coworkExport(blob, sizeof(blob));
+  uint8_t* blob = aiScrUi();
+  if(!blob) return;
+  size_t n = coworkExport(blob, 2048);
   if(n > 0) flexFsWriteBin(AI_COWORK_PATH, blob, n);
   gCwDirty = false;
 }
@@ -26655,6 +26704,9 @@ static bool aiPathForbidden(const char* p);
 #define AIF_MAX_FILES    240      // ficheros que se llegan a mirar
 #define AIF_MAX_CONTENT 8192      // tamano maximo para mirar DENTRO
 #define AIF_BUDGET_MS   6000      // tope de tiempo de la busqueda entera
+// El bloque de PSRAM se dimensiona arriba con una copia de este numero;
+// si alguien cambia uno y no el otro, esto lo para al compilar.
+static_assert(AIF_MAX_CONTENT == AISCR_CONTENT, "AISCR_CONTENT tiene que seguir a AIF_MAX_CONTENT");
 #define AIF_YIELD_EVERY   16      // cada cuantos ficheros se cede la CPU
 
 // Carpetas donde se busca. La lista es blanca a proposito: anadir una
@@ -26708,8 +26760,9 @@ static int aiLocalFind(uint32_t jobId, const char* query, char* out, size_t cap)
   out[0] = 0;
   if(!flexFsReady()){ snprintf(out, cap, "Sin almacenamiento montado."); return 0; }
 
-  static FlexFsEntry ents[48];
-  static char body[AIF_MAX_CONTENT + 1];
+  static FlexFsEntry ents[24];          // 24 entradas por carpeta: ~1 KB, se queda
+  char* body = (char*)aiScrTask();      // el contenido que se mira dentro: 8 KB, a PSRAM
+  if(!body){ snprintf(out, cap, "Sin memoria para buscar."); return 0; }
 
   for(int d = 0; d < AIF_DIRS_N && found < AIF_MAX_RESULTS; d++){
     // La lista blanca de arriba ya excluye Vault, /System y la
@@ -26738,11 +26791,11 @@ static int aiLocalFind(uint32_t jobId, const char* query, char* out, size_t cap)
       if(!hit && aifTextExt(ents[i].name) && ents[i].size > 0 && ents[i].size <= AIF_MAX_CONTENT){
         char path[FLEXFS_PATH_MAX];
         snprintf(path, sizeof(path), "%s/%s", AIF_DIRS[d], ents[i].name);
-        int rn = flexFsReadText(path, body, sizeof(body));
+        int rn = flexFsReadText(path, body, AIF_MAX_CONTENT + 1);
         if(rn > 0){ body[rn] = 0; hit = aifMatch(body, query); }
         // El contenido se pisa SIEMPRE, coincida o no: es un documento
         // del usuario y no tiene por que quedarse en RAM despues.
-        memset(body, 0, sizeof(body));
+        memset(body, 0, AIF_MAX_CONTENT + 1);
       }
       if(!hit) continue;
 
@@ -26755,6 +26808,13 @@ static int aiLocalFind(uint32_t jobId, const char* query, char* out, size_t cap)
       found++;
     }
   }
+
+  // LLEGAR AL TOPE DE RESULTADOS TAMBIEN ES CORTAR LA LISTA. Solo se
+  // marcaba `truncated` al agotar el tiempo o el numero de ficheros
+  // mirados, asi que una busqueda con 30 coincidencias devolvia 12 sin
+  // decir que habia mas: una lista incompleta que parecia completa, que
+  // es exactamente lo que este aviso existe para evitar.
+  if(found >= AIF_MAX_RESULTS) truncated = true;
 
   if(found == 0){
     snprintf(out, cap, "Sin resultados para \"%s\".\nSe buscó en /Notas, /Documentos y /Paint.",
@@ -26783,8 +26843,16 @@ static void coworkTaskFn(void*){
       // Copia LOCAL de la entrada: en cuanto se suelte el control, el
       // hilo de UI puede cancelar el trabajo y borrar su snapshot. Leer
       // j->in mientras se hace la peticion seria una carrera.
-      static char inBuf[CW_IN_MAX];
-      size_t inLen = j->inLen < sizeof(inBuf) ? j->inLen : sizeof(inBuf) - 1;
+      // Los tres buffers de esta tarea salen del MISMO bloque de PSRAM,
+      // en trozos que no se pisan: entrada, salida y relectura del
+      // documento. Sin PSRAM el trabajo falla diciendolo, en vez de
+      // reservar 3 KB de RAM interna para toda la sesion.
+      uint8_t* scr = aiScrTask();
+      if(!scr){ coworkFail(id, CW_ERR_MEM, "Sin memoria", millis()); gCwBusy = false; continue; }
+      char* inBuf  = (char*)scr;                       // CW_IN_MAX
+      char* outBuf = (char*)scr + CW_IN_MAX;           // CW_OUT_MAX
+      char* cur    = (char*)scr + CW_IN_MAX + CW_OUT_MAX;   // CW_IN_MAX (relectura)
+      size_t inLen = j->inLen < CW_IN_MAX ? j->inLen : CW_IN_MAX - 1;
       memcpy(inBuf, j->in, inLen);
       inBuf[inLen] = 0;
       uint32_t srcHash = j->srcHash;
@@ -26804,8 +26872,7 @@ static void coworkTaskFn(void*){
       // usuario -- o su contenido -- a un servidor para buscar en ella
       // seria justo lo contrario de lo que pide una busqueda local.
       if(kind == CW_KIND_FIND){
-        static char outBuf[CW_OUT_MAX];
-        int n = aiLocalFind(id, inBuf, outBuf, sizeof(outBuf));
+        int n = aiLocalFind(id, inBuf, outBuf, CW_OUT_MAX);
         if(n < 0){
           // Cancelada: el estado ya es CW_CANCELLED, no se toca.
         } else {
@@ -26814,19 +26881,17 @@ static void coworkTaskFn(void*){
           CoworkJob* d = coworkFind(id);
           if(d) snprintf(d->err_, sizeof(d->err_), "%d", n);   // n de resultados
         }
-        memset(outBuf, 0, sizeof(outBuf));
+        memset(outBuf, 0, CW_OUT_MAX);
         localOk = true;
       }
       if(!localOk && kind == CW_KIND_CORRECT && (!aiConfigured() || aiConfig()->localOnly)){
-        static char outBuf[CW_OUT_MAX];
-        int fixed = aiLocalCorrect(inBuf, inLen, outBuf, sizeof(outBuf));
+        int fixed = aiLocalCorrect(inBuf, inLen, outBuf, CW_OUT_MAX);
         uint32_t nowHash = srcHash;
         if(srcPath[0]){
           // Se relee el documento para saber si cambio mientras tanto.
-          static char cur[CW_IN_MAX];
-          int rn = flexFsReadText(srcPath, cur, sizeof(cur));
+          int rn = flexFsReadText(srcPath, cur, CW_IN_MAX);
           nowHash = (rn > 0) ? coworkHash(cur, (size_t)rn) : srcHash;
-          memset(cur, 0, sizeof(cur));
+          memset(cur, 0, CW_IN_MAX);
         }
         // La correccion local propone SUSTITUIR el documento de origen,
         // igual que haria el servidor. Sin origen se queda en "mostrar":
@@ -26846,10 +26911,9 @@ static void coworkTaskFn(void*){
         if(rc == AI_ERR_NONE){
           uint32_t nowHash = srcHash;
           if(srcPath[0]){
-            static char cur[CW_IN_MAX];
-            int rn = flexFsReadText(srcPath, cur, sizeof(cur));
+            int rn = flexFsReadText(srcPath, cur, CW_IN_MAX);
             nowHash = (rn > 0) ? coworkHash(cur, (size_t)rn) : srcHash;
-            memset(cur, 0, sizeof(cur));
+            memset(cur, 0, CW_IN_MAX);
           }
           // La accion se anota ANTES de terminar: en cuanto el trabajo
           // pasa a CW_DONE, la UI puede leerlo y anunciarlo, y tiene que
@@ -26883,7 +26947,7 @@ static void coworkTaskFn(void*){
       }
       // La copia local llevaba texto del usuario (y puede haber venido
       // de Flex Vault): se pisa en cuanto deja de hacer falta.
-      memset(inBuf, 0, sizeof(inBuf));
+      memset(inBuf, 0, CW_IN_MAX);
       gCwBusy = false;
       vTaskDelay(pdMS_TO_TICKS(20));       // respira entre trabajos
     }
@@ -27783,6 +27847,8 @@ static const char* AI_TAB_NAME[AIT_N] = { "Asistente", "Herramientas", "Cowork",
 #define AI_CHAT_MAX   12
 #define AI_CHAT_LEN  160
 #define AI_CHAT_PATH "/System/aichat.txt"
+static_assert(AI_CHAT_MAX * (AI_CHAT_LEN + 4) == AISCR_CHATBUF,
+              "AISCR_CHATBUF tiene que seguir al tamano del historial de chat");
 // Un turno de la conversacion. `jobId` != 0 marca un turno que TODAVIA
 // espera un resultado: es el mensaje "Trabajando en ello..." que hay que
 // sustituir por la respuesta cuando llegue. Sin esta referencia, el
@@ -27875,8 +27941,10 @@ static bool aiChatResolve(){
 static void aiChatLoad(){
   aiChatEnsure();
   if(!gChat || !flexFsReady()) return;
-  static char buf[AI_CHAT_MAX * (AI_CHAT_LEN + 4)];
-  int n = flexFsReadText(AI_CHAT_PATH, buf, sizeof(buf));
+  char* buf = (char*)aiScrUi();
+  if(!buf) return;
+  const size_t bufN = AI_CHAT_MAX * (AI_CHAT_LEN + 4);
+  int n = flexFsReadText(AI_CHAT_PATH, buf, bufN);
   if(n <= 0) return;
   gChatN = 0;
   int i = 0;
@@ -27898,7 +27966,9 @@ static void aiChatLoad(){
 }
 static void aiChatSave(){
   if(!gChatDirty || !gChat || !flexFsReady()) return;
-  static char buf[AI_CHAT_MAX * (AI_CHAT_LEN + 4)];
+  char* buf = (char*)aiScrUi();
+  if(!buf) return;
+  const size_t bufN = AI_CHAT_MAX * (AI_CHAT_LEN + 4);
   size_t o = 0;
   for(int i = 0; i < gChatN; i++){
     // Un turno PENDIENTE no se guarda como pendiente: al reiniciar, el
@@ -27906,8 +27976,8 @@ static void aiChatSave(){
     // restaurar un "Trabajando en ello..." que nunca se va a resolver
     // seria dejar una mentira en el historial.
     const char* txt = gChat[i].jobId ? "(interrumpido al reiniciar)" : gChat[i].text;
-    int w = snprintf(buf + o, sizeof(buf) - o, "%c%s\n", gChat[i].mine ? '>' : '<', txt);
-    if(w < 0 || (size_t)w >= sizeof(buf) - o) break;
+    int w = snprintf(buf + o, bufN - o, "%c%s\n", gChat[i].mine ? '>' : '<', txt);
+    if(w < 0 || (size_t)w >= bufN - o) break;
     o += (size_t)w;
   }
   buf[o] = 0;
@@ -28106,21 +28176,23 @@ static bool aiExecAction(uint32_t jobId, char* msg, size_t msgN){
       // Se lee, se concatena y se escribe entero: LittleFS no da un
       // "append de texto" y montar uno a mano aqui seria repetir lo que
       // ya hace flexFsWriteText. El limite de tamano lo pone el buffer.
-      static char merged[CW_IN_MAX + CW_OUT_MAX + 4];
-      int have = flexFsReadText(j->src, merged, sizeof(merged));
+      char* merged = (char*)aiScrUi();
+      if(!merged){ snprintf(msg, msgN, "Sin memoria"); return false; }
+      const size_t mergedN = CW_IN_MAX + CW_OUT_MAX + 4;
+      int have = flexFsReadText(j->src, merged, mergedN);
       if(have < 0) have = 0;
       size_t o = (size_t)have;
-      if(o > 0 && merged[o - 1] != '\n' && o + 1 < sizeof(merged)) merged[o++] = '\n';
+      if(o > 0 && merged[o - 1] != '\n' && o + 1 < mergedN) merged[o++] = '\n';
       size_t add = strlen(j->out);
-      if(o + add + 1 >= sizeof(merged)){
+      if(o + add + 1 >= mergedN){
         snprintf(msg, msgN, "La nota quedar\xC3\xAD" "a demasiado grande");
-        memset(merged, 0, sizeof(merged));
+        memset(merged, 0, mergedN);
         return false;
       }
       memcpy(merged + o, j->out, add); o += add;
       merged[o] = 0;
       bool ok = flexFsWriteText(j->src, merged);
-      memset(merged, 0, sizeof(merged));      // el documento del usuario no se queda en RAM
+      memset(merged, 0, mergedN);             // el documento del usuario no se queda en RAM
       if(!ok){ snprintf(msg, msgN, "No se pudo escribir"); return false; }
       coworkMarkApplied(jobId);
       snprintf(msg, msgN, "A\xC3\xB1" "adido a la nota");

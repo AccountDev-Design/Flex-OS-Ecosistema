@@ -30,7 +30,34 @@ const char* flexOtaStatusText(){ return "Sin comprobar"; }
 
 // ---- Sistema de archivos ----
 bool        flexFsBegin(){ return false; }
-bool        flexFsReady(){ return false; }
+// -------------------------------------------------------------
+//  SISTEMA DE ARCHIVOS FALSO, PEQUENO Y CONTROLABLE
+//  -------------------------------------------------------------
+//  Los dobles de abajo devolvian siempre "no montado", que basta para
+//  enlazar pero no para PROBAR la busqueda de archivos: sin ficheros no
+//  hay nada que encontrar, ni limite que alcanzar, ni carpeta prohibida
+//  que evitar.
+//
+//  Esto es un sistema de archivos de mentira de veinte lineas: una lista
+//  de rutas con su contenido, que la prueba rellena a mano. No pretende
+//  parecerse a LittleFS -- de eso ya se encarga la placa --, solo dar de
+//  comer al codigo que se quiere probar.
+// -------------------------------------------------------------
+struct FakeFile { char path[64]; char body[256]; unsigned size; };
+FakeFile gFakeFs[32];
+int      gFakeFsN     = 0;
+bool     gFakeFsReady = false;
+void fakeFsReset(){ gFakeFsN = 0; gFakeFsReady = false; }
+void fakeFsAdd(const char* path, const char* body, unsigned size){
+  if(gFakeFsN >= 32) return;
+  snprintf(gFakeFs[gFakeFsN].path, sizeof(gFakeFs[0].path), "%s", path);
+  snprintf(gFakeFs[gFakeFsN].body, sizeof(gFakeFs[0].body), "%s", body ? body : "");
+  gFakeFs[gFakeFsN].size = size ? size : (unsigned)strlen(body ? body : "");
+  gFakeFsN++;
+  gFakeFsReady = true;
+}
+
+bool        flexFsReady(){ return gFakeFsReady; }
 bool        flexFsIsDir(const char*){ return false; }
 uint32_t    flexFsSize(const char*){ return 0; }
 bool        flexFsExists(const char*){ return false; }
@@ -39,10 +66,46 @@ uint32_t    flexFsUsedBytes(){ return 0; }
 uint32_t    flexFsTotalBytes(){ return 0; }
 uint32_t    flexFsDirSize(const char*){ return 0; }
 uint32_t    flexFsCatSize(int){ return 0; }
-int         flexFsList(const char*, FlexFsEntry*, int){ return 0; }
+int         flexFsList(const char* dir, FlexFsEntry* out, int maxn){
+  if(!dir || !out || maxn <= 0) return 0;
+  size_t dl = strlen(dir);
+  int n = 0;
+  for(int i = 0; i < gFakeFsN && n < maxn; i++){
+    const char* p = gFakeFs[i].path;
+    if(strncmp(p, dir, dl) != 0 || p[dl] != '/') continue;
+    if(strchr(p + dl + 1, '/')) continue;              // sin subcarpetas
+    snprintf(out[n].name, sizeof(out[n].name), "%s", p + dl + 1);
+    out[n].size  = gFakeFs[i].size;
+    out[n].dir   = false;
+    out[n].items = 0;
+    n++;
+  }
+  return n;
+}
 int         flexFsLargest(FlexFsBig*, int){ return 0; }
-int         flexFsReadText(const char*, char* out, size_t n){ if(n) out[0] = 0; return -1; }
-bool        flexFsWriteText(const char*, const char*){ return false; }
+int         flexFsReadText(const char* path, char* out, size_t n){
+  if(n) out[0] = 0;
+  if(!path || !out || n == 0) return -1;
+  for(int i = 0; i < gFakeFsN; i++){
+    if(strcmp(gFakeFs[i].path, path)) continue;
+    size_t l = strlen(gFakeFs[i].body);
+    if(l > n - 1) l = n - 1;
+    memcpy(out, gFakeFs[i].body, l); out[l] = 0;
+    return (int)l;
+  }
+  return -1;
+}
+bool        flexFsWriteText(const char* path, const char* txt){
+  if(!gFakeFsReady || !path) return false;
+  for(int i = 0; i < gFakeFsN; i++){
+    if(strcmp(gFakeFs[i].path, path)) continue;
+    snprintf(gFakeFs[i].body, sizeof(gFakeFs[0].body), "%s", txt ? txt : "");
+    gFakeFs[i].size = (unsigned)strlen(gFakeFs[i].body);
+    return true;
+  }
+  fakeFsAdd(path, txt, 0);
+  return true;
+}
 int         flexFsReadBin(const char*, void*, size_t){ return -1; }
 bool        flexFsWriteBin(const char*, const void*, size_t){ return false; }
 bool        flexFsDelete(const char*){ return false; }
@@ -53,7 +116,12 @@ bool        flexFsEmptyTrash(){ return false; }
 bool        flexFsTrashOrigin(const char*, char* out, size_t n){ if(n) out[0] = 0; return false; }
 void        flexFsFmtSize(uint32_t, char* out, size_t n){ if(n) snprintf(out, n, "0 B"); }
 void        flexFsStem(const char*, char* out, size_t n){ if(n) out[0] = 0; }
-bool        flexFsNewName(const char*, const char*, const char*, char* out, size_t n){ if(n) out[0] = 0; return false; }
+bool        flexFsNewName(const char* dir, const char* base, const char* ext, char* out, size_t n){
+  if(n) out[0] = 0;
+  if(!gFakeFsReady || !dir || !base || !ext || n < 8) return false;
+  snprintf(out, n, "%s/%s%s", dir, base, ext);
+  return true;
+}
 bool        flexPaintCreate(const char*, uint16_t, uint16_t){ return false; }
 bool        flexPaintAppend(const char*, uint16_t, uint8_t, const int16_t*, uint16_t){ return false; }
 bool        flexPaintHeader(const char*, FlexPaintHdr*){ return false; }
