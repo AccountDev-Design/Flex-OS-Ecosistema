@@ -4565,7 +4565,7 @@ static bool gBootCleanOff = false;                    // este arranque viene de 
 #define CTXMENU_ON 1                  // menu de long-press (0 = long-press va directo a Modo Edicion)
 #define APPLOCK_ON 1                  // candado por app + verificacion al abrirla
 // Una sola clave NVS con un bitmask en vez de 16 claves "applock_<i>": el
-// IDENTIFICADOR UNICO de cada FlexApp ya es su indice en APP_REG (0..15, el
+// IDENTIFICADOR UNICO de cada FlexApp ya es su indice en APP_REG (0..APP_N-1, el
 // mismo que usan homeOrder[], drawAppIcon() y enterApp()), y 16 apps caben
 // exactas en un uint16_t. Un solo getInt/putInt, cero snprintf de claves.
 static uint32_t gAppLock = 0;                         // bit i = app i bloqueada (NVS "applockm")
@@ -4786,11 +4786,11 @@ static void lockFailsSave(){
 }
 // ---- FASE 2: candado por app (bitmask indexado por indice de APP_REG) ----
 static bool appLockGet(int id){
-  if(!APPLOCK_ON || id < 0 || id > 15) return false;
+  if(!APPLOCK_ON || id < 0 || id >= APP_N) return false;
   return (gAppLock & (uint32_t)(1u << id)) != 0;
 }
 static void appLockSet(int id, bool on){
-  if(id < 0 || id > 15) return;
+  if(id < 0 || id >= APP_N) return;
   if(on) gAppLock |=  (uint32_t)(1u << id);
   else   gAppLock &= (uint32_t)~(1u << id);
   prefs.begin("flexos", false);
@@ -6006,6 +6006,10 @@ static void edSetDrag(int tx, int ty){
   edDragX = dx; edDragY = dy;
 }
 static unsigned long edHoverMs = 0, edMs = 0;
+// Modo Edicion: arrastre contra el borde para cambiar de pagina.
+// edEdgeDir es -1 (izquierda), +1 (derecha) o 0; edEdgeMs, cuando empezo.
+static int      edEdgeDir = 0;
+static uint32_t edEdgeMs  = 0;
 
 // PERSISTENCIA DEL ESCRITORIO Y DEL REGISTRO. Tres claves en la misma
 // namespace "flexos" y una sola apertura de NVS por guardado: el orden de las
@@ -6035,7 +6039,7 @@ static void drawerRegistryAdopt(int fromId);
 // Deja homeOrder[] y los bitmasks en un estado COHERENTE pase lo que pase con
 // lo que hubiera en NVS (version anterior del firmware, prefs corruptas, una
 // app retirada del registro). Reglas, en este orden:
-//   1. una ranura con un id fuera de 0..15, repetido, oculto o no favorito -> se vacia;
+//   1. una ranura con un id fuera de 0..APP_N-1, repetido, oculto o no favorito -> se vacia;
 //   2. toda app favorita que no tenga ranura -> ocupa el primer hueco;
 //   3. si ya no quedan huecos, se le quita la marca de favorita (el escritorio
 //      tiene 12 ranuras y no puede mentir sobre cuantas caben).
@@ -6198,7 +6202,7 @@ static void edEnter(){
   editMode = true;
   renderHome();                              // homeBuf sin rejilla (editMode salta el grid)
   for(int i = 0; i < HOME_SLOTS; i++){ int x, y; edSlotXY(i, x, y); edCurX[i] = x; edCurY[i] = y; }
-  edDrag = -1; edHoverSlot = -1;
+  edDrag = -1; edHoverSlot = -1; edEdgeDir = 0;
 }
 static void edExit(){
   editMode = false; edDrag = -1;
@@ -6215,6 +6219,48 @@ static void edTick(){
   }
   if(T.down && edDrag >= 0){
     edSetDrag(T.x, T.y);
+    // ---- ARRASTRAR A OTRA PAGINA ----
+    // Sostener el icono contra el borde izquierdo o derecho cambia de
+    // pagina y lo lleva consigo. Es lo que hace que las 36 ranuras sean
+    // alcanzables de verdad: sin esto, el Modo Edicion solo reordenaba
+    // DENTRO de una pagina y mover una app de la 1 a la 3 obligaba a
+    // quitarla de Inicio y volver a anadirla.
+    //
+    // La espera es mas larga que el dwell de reordenar (700 vs 400 ms) a
+    // proposito: arrastrar un icono a la ultima columna es un
+    // movimiento normal y no puede convertirse en un cambio de pagina
+    // accidental. Y se pide que el dedo este DE VERDAD en el borde
+    // (EDGE_W px), no simplemente en la mitad de esa lado.
+    const int EDGE_W = 34, EDGE_MS = 700;
+    int dir = 0;
+    if(T.x <= EDGE_W)               dir = -1;
+    else if(T.x >= SCR_W - EDGE_W)  dir =  1;
+    if(dir != 0 && gHomePage + dir >= 0 && gHomePage + dir < HOME_PAGES){
+      if(edEdgeDir != dir){ edEdgeDir = dir; edEdgeMs = millis(); }
+      else if(millis() - edEdgeMs > (uint32_t)EDGE_MS){
+        // Se busca hueco en la pagina destino. Si esta llena, no se
+        // cambia: mejor que no pase nada a soltar el icono encima de
+        // otro y perder uno de los dos.
+        int dst = -1;
+        for(int i = 0; i < HOME_SLOTS && dst < 0; i++)
+          if(homeOrder[(gHomePage + dir) * HOME_SLOTS + i] == HOME_EMPTY) dst = i;
+        if(dst >= 0){
+          uint8_t v = homeOrder[edSlot(edDrag)];
+          homeOrder[edSlot(edDrag)] = HOME_EMPTY;
+          gHomePage += dir;
+          homeOrder[edSlot(dst)] = v;
+          edDrag = dst;
+          edHoverSlot = -1;
+          edEdgeDir = 0;
+          homeOrderSave();
+          // La pagina nueva tiene que estar compuesta en homeBuf antes
+          // de que edRender la use como fondo: si no, se veria la
+          // rejilla de la pagina anterior debajo de los iconos nuevos.
+          renderHome();
+          for(int i = 0; i < HOME_SLOTS; i++){ int x, y; edSlotXY(i, x, y); edCurX[i] = x; edCurY[i] = y; }
+        } else edEdgeMs = millis();   // llena: se reintenta, no se insiste cada frame
+      }
+    } else edEdgeDir = 0;
     int over = edSlotAt((int)edDragX + 36, (int)edDragY + 36);                  // slot bajo el centro
     if(over >= 0 && over != edDrag){
       if(over != edHoverSlot){ edHoverSlot = over; edHoverMs = millis(); }
@@ -6223,6 +6269,7 @@ static void edTick(){
     edRender(); return;
   }
   if(T.released){
+    edEdgeDir = 0;
     if(edDrag >= 0){ edDrag = -1; homeOrderSave(); edRender(); }                // soltar -> fija
     else if(T.tap) edExit();                                                    // toque en vacio/Inicio -> salir
     return;
@@ -17835,7 +17882,7 @@ static void kioskShowBadge(){
 
 // ---- Entrar / salir ----------------------------------------------------
 static void kioskStart(int id, int ex, int ey, int ew, int eh){
-  if(!KIOSK_ON || gLockType == 0 || id < 0 || id > 15) return;   // sin clave no habria salida: no se activa
+  if(!KIOSK_ON || gLockType == 0 || id < 0 || id >= APP_N) return;   // sin clave no habria salida: no se activa
   kioskOn = true; kioskApp = id;
   kioskExX = ex; kioskExY = ey; kioskExW = ew; kioskExH = eh;
   kioskSave();
@@ -18304,7 +18351,7 @@ static int drwHitCell(int px, int py){
 }
 
 // ---- Filtro: el UNICO sitio donde se decide que apps entran en la caja ----
-// Sale del registro central: id 0..15, fuera las ocultas (salvo en modo "ver
+// Sale del registro central: id 0..APP_N-1, fuera las ocultas (salvo en modo "ver
 // ocultas") y fuera las que no casen con el buscador. dexMatch() ya existe y
 // hace exactamente esta comparacion sin distinguir mayusculas; se reutiliza en
 // vez de escribir una segunda.
@@ -18642,14 +18689,19 @@ static void drwInfoDraw(){
 // Cada accion que cambia el registro guarda EN EL ACTO (una sola apertura de
 // NVS, tres claves) y renumera la caja. No hay escrituras por cuadro.
 static void drwFavToggle(int id){
-  if(id < 0 || id > 15) return;
+  if(id < 0 || id >= APP_N) return;
   if(appIsFav(id)){
     gAppFav &= (uint32_t)~(1u << id);
     for(int i = 0; i < HOME_TOTAL; i++) if(homeOrder[i] == (uint8_t)id) homeOrder[i] = HOME_EMPTY;
   } else {
     if(appIsHidden(id)) return;                    // una app oculta no puede estar en Inicio
+    // EL HUECO SE BUSCA EN LAS TRES PAGINAS, no solo en la primera.
+    // Con la pagina 1 llena -- que es como esta un escritorio de
+    // fabrica -- este bucle acotado a 12 devolvia "no hay sitio" y
+    // "Anadir a Inicio" no hacia nada, aunque las paginas 2 y 3
+    // estuvieran vacias enteras.
     int slot = -1;
-    for(int i = 0; i < 12 && slot < 0; i++) if(homeOrder[i] == HOME_EMPTY) slot = i;
+    for(int i = 0; i < HOME_TOTAL && slot < 0; i++) if(homeOrder[i] == HOME_EMPTY) slot = i;
     if(slot < 0) return;                           // escritorio lleno: no se miente al usuario
     gAppFav |= (uint32_t)(1u << id);
     homeOrder[slot] = (uint8_t)id;
@@ -18659,13 +18711,17 @@ static void drwFavToggle(int id){
   gHomeDirty = true;                               // homeBuf ya no refleja el escritorio real
 }
 static void drwHideToggle(int id){
-  if(id < 0 || id > 15 || !appCanHide(id)) return;
+  if(id < 0 || id >= APP_N || !appCanHide(id)) return;
   if(appIsHidden(id)){
     gAppHidden &= (uint32_t)~(1u << id);
   } else {
     gAppHidden |= (uint32_t)(1u << id);
     gAppFav    &= (uint32_t)~(1u << id);           // fuera de la caja: tambien fuera de Inicio
-    for(int i = 0; i < 12; i++) if(homeOrder[i] == (uint8_t)id) homeOrder[i] = HOME_EMPTY;
+    // Se limpia en las TRES paginas. Acotado a 12, ocultar una app que
+    // viviera en la pagina 2 o 3 le quitaba la marca de favorita pero
+    // dejaba su icono dibujado ahi: un icono fantasma que abria una app
+    // que el usuario creia oculta.
+    for(int i = 0; i < HOME_TOTAL; i++) if(homeOrder[i] == (uint8_t)id) homeOrder[i] = HOME_EMPTY;
   }
   homeOrderNormalize();
   homeOrderSave();
