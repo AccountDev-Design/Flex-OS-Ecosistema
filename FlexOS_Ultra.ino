@@ -26645,6 +26645,10 @@ static void coworkTaskFn(void*){
           nowHash = (rn > 0) ? coworkHash(cur, (size_t)rn) : srcHash;
           memset(cur, 0, sizeof(cur));
         }
+        // La correccion local propone SUSTITUIR el documento de origen,
+        // igual que haria el servidor. Sin origen se queda en "mostrar":
+        // no hay nada sobre lo que aplicar.
+        coworkSetAction(id, srcPath[0] ? AI_ACT_REPLACE_TEXT : AI_ACT_SHOW_TEXT, NULL);
         coworkFinish(id, outBuf, strlen(outBuf), nowHash, fixed > 0, millis());
         CoworkJob* d = coworkFind(id);
         if(d) snprintf(d->err_, sizeof(d->err_), "%d", fixed);   // n de palabras corregidas
@@ -26664,6 +26668,11 @@ static void coworkTaskFn(void*){
             nowHash = (rn > 0) ? coworkHash(cur, (size_t)rn) : srcHash;
             memset(cur, 0, sizeof(cur));
           }
+          // La accion se anota ANTES de terminar: en cuanto el trabajo
+          // pasa a CW_DONE, la UI puede leerlo y anunciarlo, y tiene que
+          // encontrarse la accion ya puesta. Al reves habria una ventana
+          // en la que la tarjeta diria "Ver" en vez de "Aplicar".
+          coworkSetAction(id, res.action, res.arg);
           coworkFinish(id, res.text, res.textLen, nowHash, res.needsConfirm, millis());
           CoworkJob* d = coworkFind(id);
           if(d){ d->needsConfirm = res.needsConfirm || d->srcChanged; }
@@ -26782,6 +26791,7 @@ static void aiAnnounceJob(const CoworkJob* j){
 // -------------------------------------------------------------
 static void flexAiOpenApp(uint32_t focusJob);      // definida con la app, mas abajo
 static void aiToast(const char* m);                // aviso corto dentro de la app
+static void aiConfirmOpen(uint32_t jobId);         // tarjeta de confirmacion de una accion
 static uint32_t gAiFocusJob = 0;                   // trabajo que la app debe enseñar al abrirse
 
 // ANALIZAR IMAGEN: FUNCION FUTURA, Y SE DICE.
@@ -26896,7 +26906,6 @@ static uint32_t flexAiSubmit(uint8_t kind, const char* title,
 // -------------------------------------------------------------
 //  7) ACCIONES DE LAS TARJETAS
 // -------------------------------------------------------------
-static void flexAiApplyResult(uint32_t jobId, bool* okOut);
 
 static void flexAiNotifAction(int idx, uint8_t act){
   if(idx < 0 || idx >= gNotifCount) return;
@@ -26908,14 +26917,16 @@ static void flexAiNotifAction(int idx, uint8_t act){
       coworkMarkSeen(jobId);
       flexAiOpenApp(jobId);
       break;
-    case NACT_APPLY: {
-      bool ok = false;
-      flexAiApplyResult(jobId, &ok);
-      coworkMarkSeen(jobId);
+    case NACT_APPLY:
+      // "Aplicar" desde una tarjeta NO escribe nada: abre la app con la
+      // confirmacion delante. Escribir en un fichero del usuario desde
+      // el boton de una notificacion -- que puede estar tapando otra
+      // cosa y tocarse sin querer -- no es una opcion.
       gNotifs[idx].phase = NP_OUT;
-      if(!ok) notifPushJob(jobId, "No se pudo aplicar", "Abre Flex Intelligence", NACT_OPEN, true);
-      gCwDirty = true;
-    } break;
+      coworkMarkSeen(jobId);
+      flexAiOpenApp(jobId);
+      aiConfirmOpen(jobId);
+      break;
     case NACT_RETRY: {
       CoworkJob* j = coworkFind(jobId);
       if(j && j->state == CW_ERROR){
@@ -27517,19 +27528,325 @@ static void aiSettingsTap(int row);
 static int  gAiSetMaxScroll = 0;
 
 
-// Aplica el resultado de un trabajo a su documento de origen. Es la
-// UNICA via por la que Flex Intelligence escribe en un fichero del
-// usuario, y solo se llega aqui con una confirmacion por delante.
-static void flexAiApplyResult(uint32_t jobId, bool* okOut){
-  if(okOut) *okOut = false;
+
+// #############################################################
+// ##  EJECUCION DE ACCIONES ESTRUCTURADAS
+// ##  ------------------------------------------------------
+// ##  El servidor puede PROPONER una accion. Aqui es donde se
+// ##  ejecuta -- y donde se decide que no.
+// ##
+// ##  TRES CAPAS, y las tres hacen falta:
+// ##
+// ##   1. FlexOS_AI ya filtro por LISTA BLANCA: lo que no sea uno
+// ##      de los cinco nombres conocidos llego aqui convertido en
+// ##      "solo mostrar el texto".
+// ##   2. Aqui se valida el ARGUMENTO. Y la regla es dura: el
+// ##      servidor NO elige rutas. Nunca. Para escribir sobre un
+// ##      documento se usa el `src` que puso el propio firmware al
+// ##      encolar el trabajo; para una nota nueva, el argumento se
+// ##      reduce a un NOMBRE (se le quitan las barras, los "..",
+// ##      la extension y todo lo que no sea texto plano) y se
+// ##      fuerza dentro de /Notas. Una ruta que venga entera del
+// ##      servidor se descarta: no hay ningun caso legitimo en el
+// ##      que un servidor remoto tenga que decidir en que fichero
+// ##      del dispositivo se escribe.
+// ##   3. Y NADA se ejecuta sin que el usuario lo confirme viendo
+// ##      antes que va a pasar y sobre que (ver aiConfirm*).
+// ##
+// ##  Lo que NO existe, y no por descuido: ejecutar codigo,
+// ##  ejecutar comandos, borrar, mover, renombrar, compartir, ni
+// ##  escribir fuera de /Notas. Ninguna de esas acciones esta en la
+// ##  lista blanca, y si algun dia se anadiera una destructiva
+// ##  tendria que pasar igualmente por esta funcion.
+// #############################################################
+
+static int aiResolveAppId(const char* arg);   // definida mas abajo
+
+// Rutas que Flex Intelligence NUNCA puede tocar, ni leer ni escribir,
+// venga la peticion de donde venga. Se comprueba por PREFIJO sobre la
+// ruta ya normalizada.
+static bool aiPathForbidden(const char* p){
+  if(!p || !p[0]) return true;
+  if(p[0] != '/') return true;                      // solo rutas absolutas conocidas
+  if(strstr(p, "..")) return true;                  // subir de directorio: fuera
+  if(flexFsIsVaultPath(p)) return true;             // Flex Vault: jamas por esta via
+  // /System guarda la configuracion del propio sistema, el diccionario
+  // personal, el historial de Cowork y el chat. Que la IA pueda
+  // reescribir ahi seria darle un camino para modificarse a si misma.
+  if(!strncmp(p, "/System", 7)) return true;
+  if(!strncmp(p, "/.", 2))      return true;        // cualquier cosa oculta
+  return false;
+}
+
+// true si la ruta es un documento de texto que el usuario edita y que,
+// por tanto, un resultado puede sustituir o ampliar CON su permiso.
+static bool aiPathWritableDoc(const char* p){
+  if(aiPathForbidden(p)) return false;
+  if(strncmp(p, "/Notas/", 7) && strncmp(p, "/Documentos/", 12)) return false;
+  size_t l = strlen(p);
+  // Solo texto plano: un resultado de texto no tiene por que poder
+  // sobrescribir un dibujo ni una foto.
+  return (l > 4 && (!strcmp(p + l - 4, ".txt") || !strcmp(p + l - 4, ".TXT"))) ||
+         (l > 5 && !strcmp(p + l - 5, ".note"));
+}
+
+// Convierte el argumento del servidor en un NOMBRE de fichero seguro.
+// No es una limpieza de ruta: es una reduccion. Se queda solo con
+// letras, digitos, espacios, guion y guion bajo, y corta al primer
+// caracter raro. Todo lo demas -- barras, puntos, dos puntos -- se
+// descarta. Devuelve false si no queda nada aprovechable.
+static bool aiSafeStem(const char* arg, char* out, size_t n){
+  if(!out || n < 8) return false;
+  out[0] = 0;
+  size_t o = 0;
+  if(arg) for(const char* p = arg; *p && o + 1 < n && o < 24; p++){
+    unsigned char c = (unsigned char)*p;
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == ' ' || c == '-' || c == '_';
+    if(!ok) continue;                               // se salta, no se acepta
+    if(o == 0 && c == ' ') continue;                // sin espacio inicial
+    out[o++] = (char)c;
+  }
+  while(o > 0 && out[o - 1] == ' ') o--;            // sin espacio final
+  out[o] = 0;
+  return o > 0;
+}
+
+// Que va a pasar, en una linea, para la tarjeta de confirmacion.
+static void aiActionSummary(const CoworkJob* j, char* out, size_t n){
+  if(!j){ if(n) out[0] = 0; return; }
+  switch(j->action){
+    case AI_ACT_CREATE_NOTE: {
+      char stem[32];
+      if(!aiSafeStem(j->arg, stem, sizeof(stem))) snprintf(stem, sizeof(stem), "Nota de Flex");
+      snprintf(out, n, "Crear la nota \"%s\" en /Notas", stem);
+    } break;
+    case AI_ACT_REPLACE_TEXT:
+      snprintf(out, n, "Reemplazar el texto de %s", j->src[0] ? j->src : "(sin documento)");
+      break;
+    case AI_ACT_APPEND_NOTE:
+      snprintf(out, n, "A\xC3\xB1" "adir al final de %s", j->src[0] ? j->src : "(sin documento)");
+      break;
+    case AI_ACT_OPEN_APP: {
+      int id = aiResolveAppId(j->arg);
+      snprintf(out, n, id >= 0 ? "Abrir %s" : "Abrir una app desconocida", id >= 0 ? appName(id) : "");
+    } break;
+    default:
+      snprintf(out, n, "Ver el resultado");
+      break;
+  }
+}
+
+// Traduce el argumento de open_app a un id REAL del registro. Acepta un
+// numero o el nombre de la app en el idioma activo. Devuelve -1 si no
+// existe, esta oculta, tiene candado o el kiosco lo prohibe: la IA no
+// puede abrir algo que el usuario tiene cerrado.
+static int aiResolveAppId(const char* arg){
+  if(!arg || !arg[0]) return -1;
+  int id = -1;
+  bool numeric = true;
+  for(const char* p = arg; *p; p++) if(*p < '0' || *p > '9'){ numeric = false; break; }
+  if(numeric){
+    id = atoi(arg);
+  } else {
+    for(int i = 0; i < APP_N; i++) if(!strcasecmp(appName(i), arg)){ id = i; break; }
+  }
+  if(id < 0 || id >= APP_N) return -1;
+  if(appIsHidden(id)) return -1;                        // oculta: no se abre por la espalda
+  if(APPLOCK_ON && appLockGet(id) && gLockType > 0) return -1;  // con candado: se abre a mano, con la clave
+  if(KIOSK_ON && kioskOn && id != kioskApp) return -1;  // en kiosco solo vive la app clavada
+  return id;
+}
+
+// EJECUTA la accion. Solo se llega aqui DESPUES de la confirmacion del
+// usuario. Devuelve true si se hizo algo; deja en `msg` que paso.
+static bool aiExecAction(uint32_t jobId, char* msg, size_t msgN){
+  if(msg && msgN) msg[0] = 0;
   CoworkJob* j = coworkFind(jobId);
-  if(!j || j->state != CW_DONE || j->outLen == 0) return;
-  if(!j->src[0] || !flexFsReady()) return;
-  if(!flexFsWriteText(j->src, j->out)) return;
-  j->needsConfirm = false;
-  j->srcChanged   = false;
-  if(okOut) *okOut = true;
-  gCwDirty = true;
+  if(!j || j->state != CW_DONE){ snprintf(msg, msgN, "El resultado ya no est\xC3\xA1 disponible"); return false; }
+  if(j->applied){ snprintf(msg, msgN, "Ya se hab\xC3\xAD" "a aplicado"); return false; }
+
+  switch(j->action){
+    case AI_ACT_CREATE_NOTE: {
+      if(!flexFsReady()){ snprintf(msg, msgN, "Sin almacenamiento"); return false; }
+      char stem[32];
+      if(!aiSafeStem(j->arg, stem, sizeof(stem))) snprintf(stem, sizeof(stem), "Nota de Flex");
+      // flexFsNewName resuelve las colisiones ("Nota (2).txt"): asi
+      // crear dos veces no pisa la primera.
+      char path[64];
+      if(!flexFsNewName("/Notas", stem, ".txt", path, sizeof(path))){
+        snprintf(msg, msgN, "No se pudo crear el nombre"); return false;
+      }
+      if(aiPathForbidden(path)){ snprintf(msg, msgN, "Ruta no permitida"); return false; }
+      if(!flexFsWriteText(path, j->out)){ snprintf(msg, msgN, "No se pudo escribir"); return false; }
+      coworkMarkApplied(jobId);
+      snprintf(msg, msgN, "Nota creada");
+      return true;
+    }
+    case AI_ACT_REPLACE_TEXT: {
+      // EL DESTINO ES j->src, NO el argumento del servidor. src lo puso
+      // el firmware al encolar el trabajo, asi que es un documento que
+      // el usuario tenia abierto de verdad.
+      if(!j->src[0]){ snprintf(msg, msgN, "Este resultado no tiene documento de origen"); return false; }
+      if(!aiPathWritableDoc(j->src)){ snprintf(msg, msgN, "Ese documento no se puede modificar"); return false; }
+      if(!flexFsReady()){ snprintf(msg, msgN, "Sin almacenamiento"); return false; }
+      if(!flexFsWriteText(j->src, j->out)){ snprintf(msg, msgN, "No se pudo escribir"); return false; }
+      coworkMarkApplied(jobId);
+      snprintf(msg, msgN, "Texto reemplazado");
+      return true;
+    }
+    case AI_ACT_APPEND_NOTE: {
+      if(!j->src[0]){ snprintf(msg, msgN, "Este resultado no tiene documento de origen"); return false; }
+      if(!aiPathWritableDoc(j->src)){ snprintf(msg, msgN, "Ese documento no se puede modificar"); return false; }
+      if(!flexFsReady()){ snprintf(msg, msgN, "Sin almacenamiento"); return false; }
+      // Se lee, se concatena y se escribe entero: LittleFS no da un
+      // "append de texto" y montar uno a mano aqui seria repetir lo que
+      // ya hace flexFsWriteText. El limite de tamano lo pone el buffer.
+      static char merged[CW_IN_MAX + CW_OUT_MAX + 4];
+      int have = flexFsReadText(j->src, merged, sizeof(merged));
+      if(have < 0) have = 0;
+      size_t o = (size_t)have;
+      if(o > 0 && merged[o - 1] != '\n' && o + 1 < sizeof(merged)) merged[o++] = '\n';
+      size_t add = strlen(j->out);
+      if(o + add + 1 >= sizeof(merged)){
+        snprintf(msg, msgN, "La nota quedar\xC3\xAD" "a demasiado grande");
+        memset(merged, 0, sizeof(merged));
+        return false;
+      }
+      memcpy(merged + o, j->out, add); o += add;
+      merged[o] = 0;
+      bool ok = flexFsWriteText(j->src, merged);
+      memset(merged, 0, sizeof(merged));      // el documento del usuario no se queda en RAM
+      if(!ok){ snprintf(msg, msgN, "No se pudo escribir"); return false; }
+      coworkMarkApplied(jobId);
+      snprintf(msg, msgN, "A\xC3\xB1" "adido a la nota");
+      return true;
+    }
+    case AI_ACT_OPEN_APP: {
+      int id = aiResolveAppId(j->arg);
+      if(id < 0){ snprintf(msg, msgN, "Esa app no se puede abrir"); return false; }
+      coworkMarkApplied(jobId);
+      snprintf(msg, msgN, "Abriendo %s", appName(id));
+      enterApp(id);
+      return true;
+    }
+    default:
+      // show_text (o ninguna): no hay nada que ejecutar. Verlo YA es la
+      // accion, y por eso no pide confirmacion.
+      coworkMarkApplied(jobId);
+      return true;
+  }
+}
+
+// -------------------------------------------------------------
+//  TARJETA DE CONFIRMACION
+//  -------------------------------------------------------------
+//  Modal dentro de la app: dice QUE va a pasar, enseña una VISTA
+//  PREVIA de lo que se va a escribir, avisa si el documento cambio
+//  desde que empezo el trabajo, y tiene dos botones. No hay forma de
+//  aplicar un resultado sin pasar por aqui.
+// -------------------------------------------------------------
+static uint32_t gAiConfirmJob = 0;      // 0 = no hay confirmacion abierta
+static bool     gAiConfirmDouble = false;  // el documento cambio: se pide DOS veces
+static bool     gAiConfirmArmed  = false;  // ...y esta es la segunda
+
+static void aiConfirmOpen(uint32_t jobId){
+  CoworkJob* j = coworkFind(jobId);
+  if(!j || j->state != CW_DONE) return;
+  gAiConfirmJob    = jobId;
+  // DOCUMENTO CAMBIADO = CONFIRMACION DOBLE. La primera pantalla avisa
+  // de que lo que hay en disco ya no es lo que se analizo; solo tras
+  // aceptar eso aparece el boton de aplicar de verdad. Es deliberado
+  // que cueste dos toques: aqui se sobrescribe algo que el usuario
+  // acaba de escribir.
+  gAiConfirmDouble = j->srcChanged;
+  gAiConfirmArmed  = !j->srcChanged;
+}
+static void aiConfirmClose(){ gAiConfirmJob = 0; gAiConfirmDouble = false; gAiConfirmArmed = false; }
+static bool aiConfirmOpenNow(){ return gAiConfirmJob != 0; }
+
+// Rect de los dos botones (mismo calculo para dibujo y toque).
+static void aiConfirmBtn(int i, int bx, int by, int bw, int bh, int &x, int &y, int &w, int &h){
+  int cw = bw - 60, ch = 250;
+  int cx = bx + (bw - cw) / 2, cy = by + (bh - ch) / 2;
+  w = (cw - 36) / 2; h = 42;
+  x = cx + 12 + i * (w + 12);
+  y = cy + ch - h - 12;
+}
+
+static void aiDrawConfirm(int bx, int by, int bw, int bh){
+  CoworkJob* j = coworkFind(gAiConfirmJob);
+  if(!j){ aiConfirmClose(); return; }
+  int cw = bw - 60, ch = 250;
+  int cx = bx + (bw - cw) / 2, cy = by + (bh - ch) / 2;
+  fillRectA(bx, by, bw, bh, rgb565(0, 0, 0), 140);          // velo: el fondo no se toca
+  if(uiGlass) drawLiquidGlassPanel(cx, cy, cw, ch, 20, TH_GLASS2);
+  else        fillRoundRect(cx, cy, cw, ch, 20, TH_SURF);
+  drawRoundRect(cx, cy, cw, ch, 20, TH_BORDER);
+
+  char sum[96]; aiActionSummary(j, sum, sizeof(sum));
+  drawTextC(cx + cw / 2, cy + 14, "\xC2\xBF" "Aplicar el resultado?", 2, TH_TXT);
+  drawTextClip(cx + 14, cy + 42, sum, 1, TH_TXT2, cx + cw - 14);
+
+  int y = cy + 64;
+  if(gAiConfirmDouble && !gAiConfirmArmed){
+    fillRoundRect(cx + 12, y, cw - 24, 56, 12, TH_DANGER);
+    drawTextC(cx + cw / 2, y + 8,  "El documento cambi\xC3\xB3 despu\xC3\xA9s", 1, TH_ONACC);
+    drawTextC(cx + cw / 2, y + 24, "de empezar. Se sobrescribir\xC3\xA1", 1, TH_ONACC);
+    drawTextC(cx + cw / 2, y + 40, "lo que escribiste.", 1, TH_ONACC);
+    y += 66;
+  }
+  // VISTA PREVIA de lo que se va a escribir. Sin esto, "Aplicar" seria
+  // un boton de fe.
+  drawText(cx + 14, y, "Vista previa", 1, TH_MUTE);
+  y += 16;
+  { int per = (cw - 28) / 6; if(per < 8) per = 8;
+    int len = (int)j->outLen, lines = 0;
+    int bot = cy + ch - 62;
+    for(int off = 0; off < len && y < bot && lines < 6; off += per, lines++){
+      char part[64];
+      int take = len - off; if(take > per) take = per;
+      if(take > (int)sizeof(part) - 1) take = (int)sizeof(part) - 1;
+      memcpy(part, j->out + off, take); part[take] = 0;
+      drawTextClip(cx + 14, y, part, 1, TH_TXT, cx + cw - 14);
+      y += 14;
+    }
+    if(len > 0 && y >= bot) drawText(cx + 14, y, "...", 1, TH_MUTE);
+    if(len == 0) drawText(cx + 14, y, "(sin texto)", 1, TH_MUTE); }
+
+  const char* lb0 = (gAiConfirmDouble && !gAiConfirmArmed) ? "Entiendo" : "Aplicar";
+  for(int i = 0; i < 2; i++){
+    int x, yy, w, h; aiConfirmBtn(i, bx, by, bw, bh, x, yy, w, h);
+    fillRoundRect(x, yy, w, h, 12, i == 0 ? TH_PRIM : thCard());
+    drawTextC(x + w / 2, yy + (h - 14) / 2, i == 0 ? lb0 : "Cancelar", 2,
+              i == 0 ? TH_ONACC : TH_TXT);
+  }
+}
+
+// Devuelve true si consumio el toque.
+static bool aiConfirmTick(int bx, int by, int bw, int bh){
+  if(!aiConfirmOpenNow()) return false;
+  if(!T.tap){ T.pressed = false; return true; }     // modal: nada de debajo recibe nada
+  for(int i = 0; i < 2; i++){
+    int x, y, w, h; aiConfirmBtn(i, bx, by, bw, bh, x, y, w, h);
+    if(T.x < x || T.x > x + w || T.y < y || T.y > y + h) continue;
+    T.tap = false; T.pressed = false;
+    if(i == 1){ aiConfirmClose(); return true; }    // Cancelar
+    if(gAiConfirmDouble && !gAiConfirmArmed){       // primer paso del aviso
+      gAiConfirmArmed = true;
+      return true;
+    }
+    char msg[64];
+    uint32_t id = gAiConfirmJob;
+    bool ok = aiExecAction(id, msg, sizeof(msg));
+    coworkMarkSeen(id);
+    gCwDirty = true;
+    aiConfirmClose();
+    aiToast(msg[0] ? msg : (ok ? "Aplicado" : "No se pudo aplicar"));
+    return true;
+  }
+  T.tap = false; T.pressed = false;                 // fuera de los botones: no se cierra sin decidir
+  return true;
 }
 
 // Abre la app, opcionalmente enfocando un trabajo concreto.
@@ -27832,7 +28149,10 @@ static void flexAiRender(){
     fillRoundRectA(bx + (bw - tw) / 2, by + bh - 92, tw, 30, 15, TH_SURF, 240);
     drawTextC(bx + bw / 2, by + bh - 82, gAiToast, 1, TH_TXT);
   }
-  if(gAiKbOn) noteRenderKeyboard(0);
+  // La confirmacion va ENCIMA de todo lo demas, incluido el teclado: es
+  // un modal y mientras esta abierto no hay nada mas que tocar.
+  if(aiConfirmOpenNow()) aiDrawConfirm(bx, by, bw, bh);
+  else if(gAiKbOn)       noteRenderKeyboard(0);
   flxFlush(by, by + bh - 1);
 }
 
@@ -27840,6 +28160,10 @@ static void flexAiEnter(){
   if(!gRelayout){
     gAiScroll = 0;
     gAiKbOn   = false;
+    // OJO: aqui NO se cierra gAiConfirmJob. La tarjeta "Aplicar" abre la
+    // app y la confirmacion en la misma vuelta, y enterApp() llama a
+    // enter() por el medio: limpiarla aqui la cerraria antes de que el
+    // usuario llegara a verla.
     if(!gAiFocusJob) gAiSelJob = -1;
     gAiFocusJob = 0;
     aiChatLoad();
@@ -27868,6 +28192,12 @@ static void aiSendInput(){
 
 static void flexAiTick(){
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+
+  // Confirmacion abierta: es modal y se queda TODO el toque.
+  if(aiConfirmOpenNow()){
+    if(aiConfirmTick(bx, by, bw, bh)) flexAiRender();
+    return;
+  }
 
   // Teclado abierto: manda el teclado (misma ruta que usa Notas).
   if(gAiKbOn){
@@ -27929,10 +28259,11 @@ static void flexAiTick(){
         int i = (T.x - (bx + 12)) / (bwid + 6);
         T.tap = false;
         if(i == 0){
-          if(j->src[0] && j->state == CW_DONE){
-            bool ok = false; flexAiApplyResult(j->id, &ok);
-            aiToast(ok ? "Aplicado" : "No se pudo aplicar");
-          } else aiToast("Este resultado no tiene documento de origen");
+          if(j->state != CW_DONE)      aiToast("Este trabajo no ha terminado");
+          else if(j->applied)          aiToast("Ya se hab\xC3\xAD" "a aplicado");
+          else if(j->action == AI_ACT_NONE || j->action == AI_ACT_SHOW_TEXT)
+                                       aiToast("Este resultado solo se muestra");
+          else aiConfirmOpen(j->id);   // la confirmacion decide, no este boton
         } else if(i == 1){
           // ELIMINAR es la tercera accion, distinta de descartar la
           // tarjeta y de cancelar la tarea: aqui SI desaparece.

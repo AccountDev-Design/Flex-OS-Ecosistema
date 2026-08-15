@@ -53,6 +53,7 @@
 #define CW_OUT_MAX     1024     // resultado
 #define CW_ERR_MAX       64
 #define CW_SRC_MAX       48     // ruta/origen del documento
+#define CW_ARG_MAX       48     // argumento de la accion que propuso el servidor
 
 // Cuantos resultados terminados se conservan. Al llenarse se
 // descarta el mas viejo YA VISTO; si todos estan sin ver, el mas
@@ -114,6 +115,14 @@ struct CoworkJob {
   bool     srcChanged;          // el documento de origen cambio mientras se trabajaba
   bool     needsConfirm;        // el resultado propone una accion que exige confirmacion
   bool     usedVault;           // la entrada salio de Flex Vault (para el registro de seguridad)
+  bool     applied;             // la accion ya se ejecuto (no se puede aplicar dos veces)
+
+  // ACCION PROPUESTA POR EL SERVIDOR. Se guarda TAL CUAL llego -- ya
+  // filtrada por la lista blanca de FlexOS_AI -- y no se ejecuta aqui:
+  // este modulo no toca ficheros ni abre apps. Quien la ejecuta es el
+  // .ino, y solo despues de que el usuario la confirme viendo que hace.
+  uint8_t  action;              // AI_ACT_* (0 = ninguna)
+  char     arg[CW_ARG_MAX];
 
   uint32_t bornMs;              // cuando se encolo
   uint32_t startMs;             // cuando empezo a trabajar (0 = aun no)
@@ -244,6 +253,16 @@ void coworkBeginWork(uint32_t id, uint32_t nowMs);   // -> CW_WORKING
 void coworkWaitServer(uint32_t id, uint32_t nowMs);  // -> CW_WAITING
 void coworkProgress(uint32_t id, uint8_t pct);       // 0..100 o 0xFF
 
+// Anota la accion que propuso el servidor. Se llama ANTES de
+// coworkFinish, desde la tarea de fondo. El motor no la interpreta: la
+// guarda para que la UI pueda enseñarla y pedir confirmacion.
+void coworkSetAction(uint32_t id, uint8_t action, const char* arg);
+
+// Marca la accion como ya ejecutada. Lo hace el .ino tras aplicarla, y
+// es lo que impide aplicar dos veces el mismo resultado -- que en un
+// "anadir a la nota" significaria el texto duplicado.
+void coworkMarkApplied(uint32_t id);
+
 // Termina bien. `srcHashNow` es la huella ACTUAL del documento de
 // origen: si no coincide con la del snapshot, el trabajo queda
 // marcado con srcChanged y la UI pedira confirmacion antes de
@@ -274,6 +293,11 @@ bool   coworkImport(const uint8_t* blob, size_t n);
 // Version del formato en disco. Al subirla, un fichero viejo se
 // ignora limpiamente en vez de leerse mal.
 #define CW_BLOB_MAGIC   0x43574B31u   // "CWK1"
-#define CW_BLOB_VERSION 1
+// VERSION 2: el registro lleva ademas la accion propuesta y su
+// argumento. Un fichero de la version 1 se ignora limpiamente (lo dice
+// coworkImport), asi que al actualizar se pierde el historial UNA vez y
+// nada mas -- que es mucho mejor que leer registros de longitud
+// distinta y quedarse con basura en pantalla.
+#define CW_BLOB_VERSION 2
 
 #endif // FLEXOS_COWORK_H

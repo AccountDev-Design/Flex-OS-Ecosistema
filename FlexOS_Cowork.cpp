@@ -159,6 +159,16 @@ CoworkJob* cwI_coworkAt(int i){
   return &gCw[i];
 }
 
+// Busqueda SIN candado, para uso interno entre funciones cwI_*: el
+// candado ya lo tomo la envoltura publica que nos llamo, y volver a
+// pasar por coworkFind() lo tomaria otra vez (funciona -- es recursivo
+// -- pero es ruido gratis en cada llamada).
+static CoworkJob* coworkFindLockedInternal(uint32_t id){
+  if(!gCw || gCwCap <= 0 || id == 0) return NULL;
+  for(int i = 0; i < gCwN; i++) if(gCw[i].id == id) return &gCw[i];
+  return NULL;
+}
+
 CoworkJob* cwI_coworkFind(uint32_t id){
   if(!coworkReady() || id == 0) return NULL;
   for(int i = 0; i < gCwN; i++) if(gCw[i].id == id) return &gCw[i];
@@ -332,6 +342,20 @@ void cwI_coworkProgress(uint32_t id, uint8_t pct){
   j->progress = pct;
 }
 
+void cwI_coworkSetAction(uint32_t id, uint8_t action, const char* arg){
+  CoworkJob* j = coworkFindLockedInternal(id);
+  if(!j || j->state == CW_CANCELLED) return;
+  j->action = action;
+  cwCopy(j->arg, sizeof(j->arg), arg);
+}
+
+void cwI_coworkMarkApplied(uint32_t id){
+  CoworkJob* j = coworkFindLockedInternal(id);
+  if(!j) return;
+  j->applied      = true;
+  j->needsConfirm = false;
+}
+
 void cwI_coworkFinish(uint32_t id, const char* out, size_t outLen,
                   uint32_t srcHashNow, bool needsConfirm, uint32_t nowMs){
   CoworkJob* j = coworkFind(id);
@@ -453,19 +477,22 @@ size_t cwI_coworkExport(uint8_t* out, size_t n){
   for(int i = 0; i < gCwN; i++){
     const CoworkJob* j = &gCw[i];
     if(j->state != CW_DONE) continue;             // solo lo terminado sobrevive al reinicio
-    size_t tl = strlen(j->title), sl = strlen(j->src), ol = j->outLen;
-    size_t need = 4 + 1 + 1 + 1 + 2 + tl + 2 + sl + 2 + ol;
+    size_t tl = strlen(j->title), sl = strlen(j->src), ol = j->outLen, gl = strlen(j->arg);
+    size_t need = 4 + 1 + 1 + 1 + 1 + 2 + tl + 2 + sl + 2 + ol + 2 + gl;
     if(o + need > n) break;                       // no cabe mas: se corta en registro entero
     cwPut32(out + o, j->id); o += 4;
     out[o++] = j->kind;
     out[o++] = (uint8_t)(j->seen ? 1 : 0);
-    out[o++] = (uint8_t)((j->srcChanged ? 1 : 0) | (j->needsConfirm ? 2 : 0));
+    out[o++] = (uint8_t)((j->srcChanged ? 1 : 0) | (j->needsConfirm ? 2 : 0) | (j->applied ? 4 : 0));
+    out[o++] = j->action;
     out[o++] = (uint8_t)(tl      ); out[o++] = (uint8_t)(tl >> 8);
     memcpy(out + o, j->title, tl); o += tl;
     out[o++] = (uint8_t)(sl      ); out[o++] = (uint8_t)(sl >> 8);
     memcpy(out + o, j->src, sl);   o += sl;
     out[o++] = (uint8_t)(ol      ); out[o++] = (uint8_t)(ol >> 8);
     memcpy(out + o, j->out, ol);   o += ol;
+    out[o++] = (uint8_t)(gl      ); out[o++] = (uint8_t)(gl >> 8);
+    memcpy(out + o, j->arg, gl);   o += gl;
     cnt++;
     if(cnt >= CW_HIST_MAX) break;
   }
@@ -482,11 +509,12 @@ bool cwI_coworkImport(const uint8_t* blob, size_t n){
   uint32_t maxId = gCwSeq;
 
   for(uint32_t k = 0; k < cnt && gCwN < gCwCap; k++){
-    if(o + 7 > n) return false;
+    if(o + 8 > n) return false;
     uint32_t id = cwGet32(blob + o); o += 4;
-    uint8_t kind  = blob[o++];
-    uint8_t seen  = blob[o++];
-    uint8_t flags = blob[o++];
+    uint8_t kind   = blob[o++];
+    uint8_t seen   = blob[o++];
+    uint8_t flags  = blob[o++];
+    uint8_t action = blob[o++];
     if(kind >= CW_KIND_N) return false;
 
     // Cada longitud se valida CONTRA LO QUE QUEDA del blob antes de
@@ -509,6 +537,11 @@ bool cwI_coworkImport(const uint8_t* blob, size_t n){
     if(ol >= CW_OUT_MAX || o + ol > n) return false;
     const uint8_t* outp = blob + o; o += ol;
 
+    if(o + 2 > n) return false;
+    size_t gl = (size_t)blob[o] | ((size_t)blob[o + 1] << 8); o += 2;
+    if(gl >= CW_ARG_MAX || o + gl > n) return false;
+    const uint8_t* argp = blob + o; o += gl;
+
     CoworkJob* j = &gCw[gCwN++];
     memset(j, 0, sizeof(*j));
     j->id           = id;
@@ -518,6 +551,9 @@ bool cwI_coworkImport(const uint8_t* blob, size_t n){
     j->seen         = (seen != 0);
     j->srcChanged   = (flags & 1) != 0;
     j->needsConfirm = (flags & 2) != 0;
+    j->applied      = (flags & 4) != 0;
+    j->action       = action;
+    memcpy(j->arg, argp, gl); j->arg[gl] = 0;
     memcpy(j->title, title, tl); j->title[tl] = 0;
     memcpy(j->src,   src,   sl); j->src[sl]   = 0;
     memcpy(j->out,   outp,  ol); j->out[ol]   = 0;
@@ -632,6 +668,16 @@ void coworkProgress(uint32_t id, uint8_t pct){
   cwUnlock();
 }
 
+void coworkSetAction(uint32_t id, uint8_t action, const char* arg){
+  cwLock();
+  cwI_coworkSetAction(id, action, arg);
+  cwUnlock();
+}
+void coworkMarkApplied(uint32_t id){
+  cwLock();
+  cwI_coworkMarkApplied(id);
+  cwUnlock();
+}
 void coworkFinish(uint32_t id, const char* out, size_t outLen, uint32_t srcHashNow, bool needsConfirm, uint32_t nowMs){
   cwLock();
   cwI_coworkFinish(id, out, outLen, srcHashNow, needsConfirm, nowMs);
