@@ -1,0 +1,16 @@
+{
+  "name": "flexos-intelligence-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Backend de referencia de Flex Intelligence para Flex OS Ultra (ESP32-P4). HTTPS, token revocable y respuestas acotadas a la lista blanca de acciones del firmware.",
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "src/server.js",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js",
+    "cert": "bash tools/make-cert.sh"
+  },
+  "dependencies": {}
+}

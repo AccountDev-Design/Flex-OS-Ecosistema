@@ -2,3 +2,8 @@
 tests/host/build/
 tests/tools/node_modules/
 server/node_modules/
+
+# Backend de Flex Intelligence: certificados y token del entorno.
+# NUNCA se versionan -- son de cada instalacion, y el .env lleva el token.
+server-ai/certs/
+server-ai/.env
