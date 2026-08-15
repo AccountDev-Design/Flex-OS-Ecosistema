@@ -177,6 +177,7 @@ static void testNotifUnaSola();
 static void testDeslizarPaginas();
 static void testCabeceras();
 static void testListasConScroll();
+static void testTarjetaCronometro();
 // Almacen de trabajos para las pruebas: la placa lo pone en PSRAM, aqui
 // basta con un array estatico.
 static CoworkJob gTestJobs[CW_MAX_JOBS];
@@ -2586,6 +2587,91 @@ static void testListasConScroll(){
   if(!gFails) printf("  Listas con scroll: todas las comprobaciones pasan.\n");
 }
 
+
+// #############################################################
+//  TARJETA DEL CRONOMETRO: TEMA DEL USUARIO Y BARRA VIVA
+//  ------------------------------------------------------------
+//  Dos cosas, y NINGUNA es el tamano de la tarjeta -- que se
+//  conserva tal cual, con sus dos filas de controles.
+//
+//  1. Los colores salian de tres literales (un violeta, dos
+//     grises) en vez de la paleta, asi que el cronometro era la
+//     unica pieza que ignoraba la personalizacion: con tema claro
+//     seguia siendo una tarjeta gris oscuro con botones violetas.
+//
+//  2. La pildora de la barra superior se congelaba con la hora de
+//     cuando se abrio la tarjeta. En el video la barra dice
+//     "00:07" mientras la tarjeta dice "00:18.56".
+// #############################################################
+static void testTarjetaCronometro(){
+  printf("Tarjeta del cronometro\n");
+  cronoTestReset();
+  gLand = false; gHosted = false;
+
+  // --- 1. LA TARJETA NO SE ENCOGE ---
+  chk(CRONO_CARD_W == SCR_W - 40, "la tarjeta sigue ocupando casi todo el ancho");
+  chk(CRONO_CARD_H == 196,        "y conserva su alto: hay sitio para los dos botones");
+  chk(CRONO_CARD_Y + CRONO_CARD_H <= CRONO_BAND_B,
+      "cabe entera dentro de la banda que captura y restaura");
+  chk(CRONO_DYN_T >= CRONO_CARD_Y && CRONO_DYN_B <= CRONO_CARD_Y + CRONO_CARD_H,
+      "la sub-banda dinamica esta dentro de la tarjeta");
+
+  // --- 2. LOS COLORES SIGUEN AL TEMA ---
+  { bool prev = gDark;
+    gDark = true;
+    uint16_t accOsc = CRONO_ACCENT, bgOsc = CRONO_CARDBG, discOsc = CRONO_DISC;
+    gDark = false;
+    uint16_t accClr = CRONO_ACCENT, bgClr = CRONO_CARDBG, discClr = CRONO_DISC;
+    chk(bgOsc  != bgClr,  "la superficie de la tarjeta cambia con el tema");
+    chk(discOsc != discClr, "y el disco de la esfera tambien");
+    chk(accOsc == TH_PRIM || accClr == TH_PRIM, "el acento es el del tema, no un violeta fijo");
+    // Y no es ninguno de los tres literales que habia antes.
+    const uint16_t VIOLETA = rgb565(108, 92, 231);
+    const uint16_t GRIS_TARJETA = rgb565(46, 48, 58);
+    gDark = true;
+    chk(CRONO_CARDBG != GRIS_TARJETA, "la tarjeta ya no usa el gris fijo (tema oscuro)");
+    gDark = false;
+    chk(CRONO_CARDBG != GRIS_TARJETA, "ni con tema claro");
+    chk(CRONO_ACCENT != VIOLETA || TH_PRIM == VIOLETA,
+        "el acento solo es violeta si el usuario ha elegido ese acento");
+    gDark = prev; }
+
+  // --- 3. LA PILDORA NO SE CONGELA CON LA TARJETA ABIERTA ---
+  // La banda de la pildora y la sub-banda dinamica de la tarjeta no se
+  // solapan, que es lo que permite refrescarlas por separado.
+  chk(CRONO_CAP_Y + CRONO_CAP_H < CRONO_DYN_T,
+      "la pildora y la sub-banda dinamica de la tarjeta no se pisan");
+  chk(CRONO_CAP_Y >= CRONO_BAND_T,
+      "pero la pildora si esta dentro de la banda que la tarjeta restaura");
+  chk(CRONO_CARD_Y > CRONO_CAP_Y,
+      "la tarjeta empieza por debajo: la pildora se sigue viendo, asi que "
+      "tiene que estar al dia");
+
+  // El texto de la pildora sale de la MISMA fuente que el de la tarjeta,
+  // asi que no pueden discrepar salvo por congelacion.
+  { cronoStart();
+    gTestMs += 7000;
+    char cap[16], card[16];
+    cronoFmt(cap,  sizeof(cap),  cronoElapsed(), false);
+    cronoFmt(card, sizeof(card), cronoElapsed(), true);
+    chk(!strncmp(cap, card, 5), "pildora y tarjeta formatean el mismo tiempo");
+    uint32_t antes = cronoElapsed();
+    gTestMs += 11000;
+    chk(cronoElapsed() == antes + 11000, "y el tiempo avanza con el reloj");
+    cronoReset(); }
+
+  // --- 4. ESTADOS DE LA TARJETA ---
+  chk(CC_HIDDEN != CC_OPENING && CC_OPENING != CC_OPEN && CC_OPEN != CC_CLOSING,
+      "los cuatro estados de la tarjeta son distintos");
+  { // Totalmente visible => geometria EXACTA, sin resto de la animacion.
+    chk(cronoLerp(10, 200, 1.0f) == 200, "al terminar la animacion el offset es cero");
+    chk(cronoLerp(10, 200, 0.0f) == 10,  "y al empezar, el de partida"); }
+
+  cronoTestReset();
+  gDark = false; tReset();
+  if(!gFails) printf("  Tarjeta del cronometro: todas las comprobaciones pasan.\n");
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -2669,6 +2755,7 @@ int main(){
   testDeslizarPaginas();
   testCabeceras();
   testListasConScroll();
+  testTarjetaCronometro();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

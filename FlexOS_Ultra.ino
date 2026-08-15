@@ -23512,12 +23512,25 @@ static void newsBadgeStamp(){
 // ##  contando -- solo deja de pintarse.
 // #############################################################
 
-// Violeta de la referencia. Es un color PROPIO del cronometro (no sale de la
-// paleta semantica) porque identifica la actividad en curso igual que el rojo
-// identifica una grabacion: no debe cambiar con el tema claro/oscuro.
-#define CRONO_VIOLET   rgb565(108,  92, 231)
-#define CRONO_DISC     rgb565( 58,  60,  70)   // disco central de la esfera
-#define CRONO_CARDBG   rgb565( 46,  48,  58)   // gris de la tarjeta expandida
+// COLORES DEL CRONOMETRO: DEL TEMA, NO PROPIOS.
+//
+// Aqui habia tres literales -- un violeta, un gris de disco y un gris de
+// tarjeta -- con un comentario que defendia que el violeta identificaba
+// la actividad "igual que el rojo identifica una grabacion" y por tanto
+// no debia seguir al tema. En la practica eso significaba que el
+// cronometro era la unica pieza del sistema que ignoraba la
+// personalizacion del usuario: con tema claro y acento verde, la tarjeta
+// salia gris oscuro con botones violetas. Se ve en el video.
+//
+// Ahora salen de la paleta semantica como todo lo demas: el acento es el
+// ACENTO DEL USUARIO y las superficies son las del tema. Los estados que
+// SI tienen un significado propio -- "Detener" en rojo de peligro,
+// "Parcial" apagado cuando no se puede -- siguen usando su token
+// (TH_DANGER, TH_DIS), que es justo lo que esos tokens significan.
+#define CRONO_ACCENT   TH_PRIM     // acento del usuario (era un violeta fijo)
+#define CRONO_DISC     TH_SURF2    // disco central de la esfera
+#define CRONO_CARDBG   TH_SURF     // superficie de la tarjeta expandida
+#define CRONO_ONACC    TH_ONACC    // texto/glifo encima del acento
 
 // ---- Capsula: geometria FIJA ----
 // El ancho depende SOLO de la clase de formato (MM:SS o H:MM:SS), nunca de los
@@ -23707,12 +23720,12 @@ static int cronoCapsuleRight(){
 // Pinta la pildora en el buffer ACTIVO, en (x, CRONO_CAP_Y). Opaca a proposito.
 static void cronoCapsuleDraw(int x){
   int w = cronoCapsuleW(), h = CRONO_CAP_H, y = CRONO_CAP_Y;
-  fillRoundRect(x, y, w, h, h / 2, CRONO_VIOLET);
+  fillRoundRect(x, y, w, h, h / 2, CRONO_ACCENT);
   int ir = CRONO_CAP_ICON / 2;
-  cronoGlyph(x + CRONO_CAP_PADL + ir, y + h / 2 + 1, ir - 2, rgb565(255,255,255), 1.5f);
+  cronoGlyph(x + CRONO_CAP_PADL + ir, y + h / 2 + 1, ir - 2, CRONO_ONACC, 1.5f);
   char b[16]; cronoFmt(b, sizeof(b), cronoElapsed(), false);
   int tx = x + CRONO_CAP_PADL + CRONO_CAP_ICON + CRONO_CAP_GAP;
-  drawText(tx, y + (h - uiLineH(2)) / 2 + 1, b, 2, rgb565(255,255,255));
+  drawText(tx, y + (h - uiLineH(2)) / 2 + 1, b, 2, CRONO_ONACC);
 }
 // HORA + CAPSULA de la barra de estado. UNICO punto donde se decide esa
 // geometria: lo llaman el escritorio (renderHome, sobre homeBuf) y el marco de
@@ -23928,8 +23941,8 @@ static void cronoDrawDial(){
   strokeSegAA(gCL.cx - tail * cosf(rl), gCL.cy - tail * sinf(rl),
               gCL.cx + hLen * cosf(rl), gCL.cy + hLen * sinf(rl), 1.4f, TH_TXT2);
   strokeSegAA(gCL.cx - tail * cosf(rt), gCL.cy - tail * sinf(rt),
-              gCL.cx + hLen * cosf(rt), gCL.cy + hLen * sinf(rt), 2.3f, CRONO_VIOLET);
-  fillCircleAA((float)gCL.cx, (float)gCL.cy, gCL.rTick * 0.055f + 3.0f, CRONO_VIOLET);
+              gCL.cx + hLen * cosf(rt), gCL.cy + hLen * sinf(rt), 2.3f, CRONO_ACCENT);
+  fillCircleAA((float)gCL.cx, (float)gCL.cy, gCL.rTick * 0.055f + 3.0f, CRONO_ACCENT);
   // Tiempo central MM:SS.cc
   char b[16]; cronoFmt(b, sizeof(b), ms, true);
   int fs = cronoFitBig(b, gCL.rDisc * 2 - 18, 7);
@@ -23966,7 +23979,7 @@ static void cronoDrawLaps(){
     int i = (int)gCronoNLaps - 1 - r;
     if(i < 0) break;
     uint16_t col = TH_TXT;
-    if(i == (int)gCronoBest)  col = CRONO_VIOLET;    // mejor vuelta
+    if(i == (int)gCronoBest)  col = CRONO_ACCENT;    // mejor vuelta
     if(i == (int)gCronoWorst) col = TH_DANGER;       // peor vuelta
     char no[8];  snprintf(no, sizeof(no), "%02d", (int)(gCronoLap0 + i));
     char sp[16]; cronoFmt(sp, sizeof(sp), gCronoLaps[i].split, true);
@@ -23989,14 +24002,15 @@ static void cronoDrawButtons(){
   int fsL = uiFontFit(t(cronoLabelLeft()), 2 * r - 12, 3);
   drawTextC(gCL.btnLx, cy - uiLineH(fsL) / 2, t(cronoLabelLeft()), fsL,
             leftOn ? TH_TXT : TH_DIS);
-  // Derecho: rojo al detener, violeta al iniciar/continuar (codigo de color de
-  // la referencia, traducido a las primitivas de FlexOS).
+  // Derecho: rojo de peligro al detener, acento del usuario al
+  // iniciar/continuar. El rojo SI es propio -- significa "esto para lo que
+  // esta corriendo" --; el otro sale del tema, como el resto del sistema.
   bool stop = (gCronoSt == CRONO_RUN);
-  fillCircleA(gCL.btnRx, cy, r, stop ? TH_DANGER : CRONO_VIOLET, 70);
-  drawCircle(gCL.btnRx, cy, r, stop ? TH_DANGER : CRONO_VIOLET);
+  fillCircleA(gCL.btnRx, cy, r, stop ? TH_DANGER : CRONO_ACCENT, 70);
+  drawCircle(gCL.btnRx, cy, r, stop ? TH_DANGER : CRONO_ACCENT);
   int fsR = uiFontFit(t(cronoLabelRight()), 2 * r - 12, 3);
   drawTextC(gCL.btnRx, cy - uiLineH(fsR) / 2, t(cronoLabelRight()), fsR,
-            stop ? TH_DANGER : CRONO_VIOLET);
+            stop ? TH_DANGER : CRONO_ACCENT);
 }
 
 // Repintado COMPLETO de la pestana (lo llama el contenedor de Reloj, que ya
@@ -24108,11 +24122,11 @@ static void cronoCardDynText(uint8_t alpha){
 // Todo lo que NO cambia por frame: icono, separador y etiquetas de los botones.
 static void cronoCardStatic(uint8_t alpha){
   int ix = CRONO_CARD_X + 24, iy = CRONO_CARD_Y + 26, is = 62;
-  uiRectA(ix, iy, is, is, 20, CRONO_VIOLET, alpha);
+  uiRectA(ix, iy, is, is, 20, CRONO_ACCENT, alpha);
   // El glifo es opaco (strokeSegAA/fillRing no toman alfa): entra solo cuando
   // el cuadrado violeta ya esta casi solido, o se verian trazos blancos
   // flotando sobre un fondo aun transparente.
-  if(alpha > 200) cronoGlyph(ix + is / 2, iy + is / 2 + 2, is / 4, rgb565(255,255,255), 2.2f);
+  if(alpha > 200) cronoGlyph(ix + is / 2, iy + is / 2 + 2, is / 4, CRONO_ONACC, 2.2f);
   // Separador vertical entre los dos botones
   int by0 = CRONO_CARD_Y + 138, by1 = CRONO_CARD_Y + 178;
   uiRectA(SCR_W / 2 - 1, by0, 2, by1 - by0, 1, TH_DIV, alpha);
@@ -24120,7 +24134,7 @@ static void cronoCardStatic(uint8_t alpha){
   uiTextC(lx, CRONO_CARD_Y + 148, t(cronoLabelLeft()),  3,
           (gCronoSt == CRONO_IDLE) ? TH_DIS : TH_TXT, alpha);
   uiTextC(rx, CRONO_CARD_Y + 148, t(cronoLabelRight()), 3,
-          (gCronoSt == CRONO_RUN) ? TH_DANGER : CRONO_VIOLET, alpha);
+          (gCronoSt == CRONO_RUN) ? TH_DANGER : CRONO_ACCENT, alpha);
 }
 
 // Compone un frame COMPLETO de la tarjeta en bbuf y lo publica.
@@ -24134,6 +24148,14 @@ static void cronoCardCompose(float p, bool cacheBg){
   setBuf(bbuf);
   memcpy(bbuf + (size_t)CRONO_BAND_T * SCR_W, gCronoCardBak,
          (size_t)SCR_W * CRONO_BAND_H * 2);
+  // LA CAPSULA DE LA BARRA, VIVA. gCronoCardBak es una foto de la banda
+  // tomada al abrir la tarjeta, y en esa foto sale la pildora con la hora
+  // que marcaba ENTONCES. Como la tarjeta empieza en y=30 y la pildora
+  // vive en y=12..38, sus primeras filas se quedan a la vista: en el
+  // video se lee "00:07" en la barra mientras la tarjeta dice "00:18.56".
+  // Repintarla aqui la pone al dia -- es opaca y ocupa exactamente los
+  // mismos pixeles, asi que se tapa a si misma sin guardar nada.
+  if(gCronoCapOn) cronoCapsuleDraw(gCronoCapX);
   int capW = gCronoCapWDrawn > 0 ? gCronoCapWDrawn : cronoCapsuleW();
   int x = cronoLerp(gCronoCapX,   CRONO_CARD_X,   p);
   int y = cronoLerp(CRONO_CAP_Y,  CRONO_CARD_Y,   p);
@@ -24150,7 +24172,7 @@ static void cronoCardCompose(float p, bool cacheBg){
     // el violeta de la capsula hasta el gris de la tarjeta.
     fillRoundRectA(x, y, w, h, r, CRONO_CARDBG, 240);
     uint8_t va = (uint8_t)(255.0f * (1.0f - p));
-    if(va) fillRoundRectA(x, y, w, h, r, CRONO_VIOLET, va);
+    if(va) fillRoundRectA(x, y, w, h, r, CRONO_ACCENT, va);
   }
   // El contenido entra en la segunda mitad de la animacion.
   uint8_t ca = 0;
@@ -24251,6 +24273,29 @@ static void cronoCardTick(){
   last = now;
   if(!gCronoCardBg){ cronoCardCompose(1.0f, true); gCronoCardBg = true; return; }
   cronoCardComposeDyn();
+  // LA BARRA SUPERIOR VUELVE A SU SITIO Y SIGUE VIVA. La tarjeta empieza
+  // en y=30 y la pildora vive en y=12..38: sus primeras filas quedan a la
+  // vista siempre. Con la tarjeta abierta, loop() no llega a
+  // cronoCapsuleTick(), asi que la pildora se quedaba con la hora de
+  // cuando se abrio -- en el video la barra dice "00:07" mientras la
+  // tarjeta dice "00:18.56".
+  //
+  // Se estampa aqui, y SOLO se estampa: cronoBarRebuild() repintaria el
+  // escritorio entero y se llevaria la tarjeta por delante. La pildora es
+  // opaca y de ancho fijo, asi que dibujarla encima de si misma basta.
+  // Su banda (11..39) no se solapa con la sub-banda dinamica de la
+  // tarjeta (52..147), asi que las dos publicaciones no compiten.
+  if(gCronoCapOn && cronoActive()){
+    int surface = cronoBarSurface();
+    if(surface != 0 && cronoCapsuleW() == gCronoCapWDrawn){
+      uint32_t sec = cronoElapsed() / 1000UL;
+      if(sec != gCronoCapSec || (uint8_t)gCronoSt != gCronoCapStDrawn){
+        gCronoCapSec     = sec;
+        gCronoCapStDrawn = (uint8_t)gCronoSt;
+        cronoCapsuleStamp(surface);
+      }
+    }
+  }
 }
 
 // =============================================================
