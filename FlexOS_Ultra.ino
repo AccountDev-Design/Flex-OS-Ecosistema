@@ -5650,17 +5650,17 @@ static bool hitHomeIcon(int px, int py, int &id){
 // ##  barra de navegacion son identicos, asi que:
 // ##
 // ##    · la pagina vecina se compone UNA sola vez, al empezar el
-// ##      gesto, en un cache COMPACTO de solo la banda movil (hpBuf);
-// ##    · cada frame del arrastre son DOS memcpy por fila dentro de
-// ##      la banda de la rejilla [HOME_BAND_TOP, HOME_BAND_BOT) --
-// ##      un trozo de homeBuf y otro de hpBuf, cada uno desplazado--,
-// ##      mas los tres puntos redibujados encima;
+// ##      gesto, en un cache COMPACTO de solo la banda movil (hpBuf),
+// ##      y el wallpaper limpio se conserva aparte en hpBg;
+// ##    · cada frame restaura hpBg SIN desplazar y mueve encima solo
+// ##      los pixeles que difieren de ese fondo en homeBuf/hpBuf;
+// ##      por eso viajan iconos y etiquetas, pero nunca el wallpaper;
+// ##    · los tres puntos se redibujan fijos encima;
 // ##    · el resto de la pantalla NI SE TOCA: fuera de esa banda, fb
 // ##      ya es correcto.
 // ##
-// ##  Es el mismo criterio que ya usan drwPage en la Caja de
-// ##  aplicaciones y la banda de la isla de notificaciones: componer
-// ##  una vez, mover memoria despues.
+// ##  Todo sigue precompuesto: durante el gesto no se recalcula el
+// ##  degradado, el blur ni ningun icono vectorial.
 // ##
 // ##  SIN PSRAM PARA hpBuf no hay animacion, pero SI hay cambio de
 // ##  pagina: se salta directo a la pagina destino. Se degrada, no se
@@ -5671,6 +5671,7 @@ static bool hitHomeIcon(int px, int py, int &id){
 #define HP_FLICK_MS    320        // por debajo de esto, un gesto corto cuenta como golpe seco
 #define HP_FLICK_PX     42        // ...y con esta distancia minima
 static uint16_t* hpBuf     = NULL;     // cache compacto: HOME_BAND_H filas de la pagina vecina
+static uint16_t* hpBg      = NULL;     // wallpaper limpio de la banda: nunca se desplaza
 static int       hpBufPage = -1;       // que pagina hay compuesta ahi
 static bool      hpDragging = false;
 static int       hpDx      = 0;        // desplazamiento actual del dedo (px, + = hacia la derecha)
@@ -5685,11 +5686,15 @@ static uint32_t  hpFrameMs = 0;
 #define HP_BUF_PIXELS    ((size_t)SCR_W * HOME_BAND_H)
 
 static bool hpEnsureBuf(){
-  if(hpBuf) return true;
-  hpBuf = (uint16_t*)heap_caps_aligned_alloc(64, HP_BUF_PIXELS * 2,
-                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(hpBuf && hpBg) return true;
+  if(!hpBuf)
+    hpBuf = (uint16_t*)heap_caps_aligned_alloc(64, HP_BUF_PIXELS * 2,
+                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(!hpBg)
+    hpBg = (uint16_t*)heap_caps_aligned_alloc(64, HP_BUF_PIXELS * 2,
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   hpBufPage = -1;
-  return hpBuf != NULL;
+  return hpBuf != NULL && hpBg != NULL;
 }
 
 // Deja compuesta en hpBuf la pagina `page`. Devuelve false si no hay
@@ -5705,6 +5710,12 @@ static bool hpPrepare(int page){
   // justo al reconocer el gesto, con blur de widgets y dock incluidos; era el
   // pico que congelaba el dedo y podia dejar al TWDT sin respirar.
   drawWallpaperRows(bbuf, true, HOME_BAND_TOP, HOME_BAND_BOT - 1);
+  // El fondo vive separado de las paginas. Si se desplazara la imagen ya
+  // compuesta (wallpaper + iconos), el degradado y sus manchas viajarian con
+  // cada pagina y aparecerian costuras verticales, exactamente como en la
+  // grabacion. Esta copia se hace UNA vez al empezar el gesto; cada frame solo
+  // restaura filas mediante memcpy y mueve los pixeles que difieren del fondo.
+  memcpy(hpBg, bbuf + (size_t)HOME_BAND_TOP * SCR_W, HP_BUF_PIXELS * 2);
   uiRenderCooperate();                    // el fondo ya recorrio ~170k pixeles
   uint16_t* old = gBuf; setBuf(bbuf);
   int cx0 = gClipX0, cx1 = gClipX1, cy0 = gClipY0, cy1 = gClipY1;
@@ -5746,7 +5757,7 @@ static inline void hpViewport(int off, int &dst, int &src, int &w){
 }
 
 static void hpRenderFrame(int dx){
-  if(!homeBuf) return;
+  if(!homeBuf || !hpBg) return;
   setBuf(bbuf);
   gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
   int dir = (hpTo > hpFrom) ? 1 : -1;     // +1 = la vecina entra por la derecha
@@ -5756,32 +5767,30 @@ static void hpRenderFrame(int dx){
   if(hpBuf && hpBufPage == hpTo) hpViewport(nx, bDst, bSrc, bW);
   for(int y = HOME_BAND_TOP; y < HOME_BAND_BOT; y++){
     uint16_t* row = bbuf + (size_t)y * SCR_W;
-    // Pagina actual, recortada a su viewport.
-    if(aW > 0)
-      memcpy(row + aDst, homeBuf + (size_t)y * SCR_W + aSrc, (size_t)aW * 2);
-    // Pagina vecina, recortada al suyo.
-    if(bW > 0)
-      memcpy(row + bDst, hpBuf + (size_t)(y - HOME_BAND_TOP) * SCR_W + bSrc, (size_t)bW * 2);
-    // COLUMNAS QUE NO ESCRIBE NADIE. Solo puede pasar si el lienzo de la
-    // vecina no llego a componerse (sin PSRAM). Sin esto, esa franja
-    // conserva lo que hubiera en bbuf -- un trozo del frame anterior, o
-    // de otra pantalla entera -- y eso es exactamente el rastro que se ve
-    // arrastrado durante el gesto. Se rellena con el fondo de la pagina
-    // actual sin desplazar: no es la pagina que entra, pero es un fondo
-    // coherente y no un fotograma muerto.
-    if(bW <= 0 && aW < SCR_W){
-      int hx = (aDst > 0) ? 0 : aW;                  // hueco a la izquierda o a la derecha
-      int hw = SCR_W - aW;
-      memcpy(row + hx, homeBuf + (size_t)y * SCR_W + hx, (size_t)hw * 2);
+    const uint16_t* bg = hpBg + (size_t)(y - HOME_BAND_TOP) * SCR_W;
+    // El wallpaper se restaura SIN DESPLAZAR en todas las columnas. Encima se
+    // copian solo los pixeles de primer plano de cada pagina: un pixel forma
+    // parte de un icono/etiqueta si difiere del wallpaper limpio en SU
+    // coordenada de origen. Asi los iconos siguen al dedo y el fondo queda
+    // anclado a la pantalla.
+    memcpy(row, bg, (size_t)SCR_W * 2);
+    // La franja de puntos se recompone fija mas abajo; no debe viajar como si
+    // perteneciera a una pagina.
+    if(y < HOME_DOTS_Y - 8 || y > HOME_DOTS_Y + 10){
+      if(aW > 0){
+        const uint16_t* src = homeBuf + (size_t)y * SCR_W + aSrc;
+        for(int x = 0; x < aW; x++) if(src[x] != bg[aSrc + x]) row[aDst + x] = src[x];
+      }
+      if(bW > 0){
+        const uint16_t* src = hpBuf + (size_t)(y - HOME_BAND_TOP) * SCR_W + bSrc;
+        for(int x = 0; x < bW; x++) if(src[x] != bg[bSrc + x]) row[bDst + x] = src[x];
+      }
     }
   }
   // Los puntos NO se desplazan con las paginas: se quedan fijos y lo
   // que se mueve es cual esta encendido. Van encima de la banda ya
   // compuesta, asi que hay que repintar su fondo primero -- que es la
   // fila de la pagina de origen sin desplazar.
-  { int y0 = HOME_DOTS_Y - 8, y1 = HOME_DOTS_Y + 10;
-    for(int y = y0; y <= y1 && y < HOME_BAND_BOT; y++)
-      memcpy(bbuf + (size_t)y * SCR_W, homeBuf + (size_t)y * SCR_W, (size_t)SCR_W * 2); }
   { float frac = (float)(dx < 0 ? -dx : dx) / (float)SCR_W;
     if(frac > 1.0f) frac = 1.0f;
     homeDrawDots(hpFrom, hpTo, frac); }
@@ -21050,7 +21059,10 @@ static void notifRemove(int idx){
   if(idx < 0 || idx >= gNotifCount) return;
   for(int j = idx; j < gNotifCount - 1; j++) gNotifs[j] = gNotifs[j + 1];
   gNotifCount--;
-  gNotifs[gNotifCount].active = false;
+  // Borrar TODA la ranura, no solo active. Si era la ultima conservaba
+  // armed=true y phase=NP_OUT; cualquier lectura defensiva posterior podia
+  // confundirla con una tarjeta que aun estaba saliendo.
+  memset(&gNotifs[gNotifCount], 0, sizeof(gNotifs[gNotifCount]));
   if(notifDragIdx == idx)      notifDragIdx = -1;
   else if(notifDragIdx > idx)  notifDragIdx--;
 }
@@ -21204,13 +21216,14 @@ static void notifTick(){
   }
 
   // Avanzar fases de animacion
-  for(int i = 0; i < shown; i++){
+  for(int i = 0; i < shown; ){
     Notification* n = &gNotifs[i];
     // Al salir la de delante, la siguiente sube a esta ranura en el MISMO
     // frame, todavia sin armar. No se le avanza la fase aqui: su bornMs es
     // el de cuando se encolo, asi que la caducidad de 5 s la mataria de
     // golpe sin haberse visto nunca. Se arma en la vuelta siguiente.
-    if(!n->armed) continue;
+    if(!n->armed){ i++; continue; }
+    bool removed = false;
     switch(n->phase){
       case NP_IN:
         if(millis() - n->bornMs >= 280) n->phase = NP_IDLE;
@@ -21224,10 +21237,21 @@ static void notifTick(){
         break;
       case NP_OUT:
         n->slideX -= (NOTIF_CARD_W + NOTIF_MARGIN_X) * 0.18f + 6.0f;  // sale por la izquierda
-        if(n->slideX < -(NOTIF_CARD_W + NOTIF_MARGIN_X + 4)){ notifRemove(i); i--; continue; }
+        if(n->slideX < -(NOTIF_CARD_W + NOTIF_MARGIN_X + 4)){
+          notifRemove(i);
+          // `shown` era una instantanea tomada antes de compactar. Con la
+          // ultima tarjeta quedaba en 1 aunque gNotifCount ya fuera 0; el
+          // antiguo i-- volvia a procesar para siempre la ranura eliminada y
+          // el TASK_WDT reiniciaba todo el OS. Recalcular el limite y mantener
+          // i hace que la tarjeta siguiente (si existe) ocupe la ranura de
+          // forma segura, sin saltarla ni leer una entrada muerta.
+          shown = gNotifCount < NOTIF_VISIBLE ? gNotifCount : NOTIF_VISIBLE;
+          removed = true;
+        }
         break;
       default: break;
     }
+    if(!removed) i++;
   }
 
   // Recorte completo (por si una app lo dejo estrecho) antes de componer

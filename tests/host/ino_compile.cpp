@@ -856,7 +856,8 @@ static void testPaginasHome(){
   printf("Paginas del escritorio\n");
   drwTestReset();
   gState = ST_HOME; editMode = false; gLand = false;
-  gHomePage = 0; hpDragging = false; hpSettling = false; hpBuf = NULL; hpBufPage = -1;
+  gHomePage = 0; hpDragging = false; hpSettling = false;
+  hpBuf = NULL; hpBg = NULL; hpBufPage = -1;
 
   // La primera pagina conserva las doce apps originales y las paginas
   // siguientes empiezan vacias; el gesto no debe inventar iconos.
@@ -1047,6 +1048,33 @@ static void testNotifUnaSola(){
          (y < NOTIF_BAND_TOP || y >= NOTIF_BAND_BOT)) cambiadosFuera++;
   chk(cambiadosFuera == 0, "el aviso no escribe fuera de su banda");
 
+  // Regresion del reinicio visto en placa: dejar salir dos avisos completos.
+  // Antes, al retirar el ultimo, `shown` seguia valiendo 1 y el bucle volvia
+  // infinitamente sobre la ranura eliminada hasta que el TASK_WDT reiniciaba
+  // el P4. Esta prueba recorre entrada, espera y salida de ambas tarjetas.
+  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  notifDragIdx = -1; notifBandOn = false; notifPaused = false; notifLastMs = 0;
+  a.i2cAddr = 0x18; a.type = MOD_I2C_GENERIC;
+  snprintf(a.name, sizeof(a.name), "Dispositivo I2C A"); notifPush(&a);
+  a.i2cAddr = 0x76; a.type = MOD_BME280;
+  snprintf(a.name, sizeof(a.name), "Sensor BME280 B"); notifPush(&a);
+  bool segundaVisible = false;
+  for(int f = 0; f < 360 && gNotifCount > 0; f++){
+    gTestMs += 40; notifTick();
+    if(gNotifCount == 1 && gNotifs[0].mod.i2cAddr == 0x76 && gNotifs[0].armed)
+      segundaVisible = true;
+  }
+  chk(segundaVisible, "la segunda notificacion entra despues de la primera");
+  chk(gNotifCount == 0 && !notifBandOn,
+      "la ultima sale y limpia la banda sin congelar ni reiniciar el OS");
+
+  // Reponer dos entradas para comprobar tambien la pausa de la Caja.
+  a.i2cAddr = 0x18; a.type = MOD_I2C_GENERIC;
+  snprintf(a.name, sizeof(a.name), "Dispositivo I2C A"); notifPush(&a);
+  a.i2cAddr = 0x76; a.type = MOD_BME280;
+  snprintf(a.name, sizeof(a.name), "Sensor BME280 B"); notifPush(&a);
+  gTestMs += 40; notifTick();
+
   notifPauseForDrawer();
   chk(gNotifCount == 2 && notifPaused && !notifBandOn,
       "abrir la caja oculta la tarjeta sin perder avisos reales");
@@ -1099,44 +1127,58 @@ static void testDeslizarPaginas(){
     hpViewport(-120, d, s, w);
     chk(d == 0 && s == 120 && w == SCR_W - 120, "hacia la izquierda, por la derecha"); }
 
-  // --- 2. UN FRAME REAL NO DEJA RASTRO DEL ANTERIOR ---
-  // homeBuf y el cache COMPACTO hpBuf se rellenan con dos colores planos
-  // distintos, y
-  // bbuf con un tercero que NO debe sobrevivir en ninguna fila de la
-  // banda. Es la comprobacion de pixeles del "resto del frame anterior".
+  // --- 2. EL WALLPAPER QUEDA FIJO Y SOLO SE MUEVE EL PRIMER PLANO ---
+  // El fondo usa un color distinto en cada X para que desplazarlo siquiera un
+  // pixel sea detectable. homeBuf/hpBuf contienen ese mismo fondo mas dos
+  // rectangulos que representan iconos. Se verifica pixel a pixel el frame
+  // esperado durante todo el recorrido, incluido que no sobreviva basura del
+  // frame anterior.
   { const uint16_t COL_A = 0x1234, COL_B = 0x4321, VENENO = 0x7BEF;
     if(!hpEnsureBuf()){ chk(false, "hay lienzo para la pagina vecina"); }
     else {
-      for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++) homeBuf[i] = COL_A;
-      for(size_t i = 0; i < HP_BUF_PIXELS; i++) hpBuf[i] = COL_B;
+      memset(homeBuf, 0, (size_t)SCR_W * SCR_H * 2);
+      for(int y = HOME_BAND_TOP; y < HOME_BAND_BOT; y++) for(int x = 0; x < SCR_W; x++){
+        uint16_t bg = (uint16_t)(0x0800u + (unsigned)x);
+        homeBuf[(size_t)y * SCR_W + x] = bg;
+        hpBg[(size_t)(y - HOME_BAND_TOP) * SCR_W + x] = bg;
+        hpBuf[(size_t)(y - HOME_BAND_TOP) * SCR_W + x] = bg;
+      }
+      const int fy = HOME_GY0 + 12;
+      for(int y = fy; y < fy + 18; y++){
+        for(int x = 60; x < 92; x++) homeBuf[(size_t)y * SCR_W + x] = COL_A;
+        for(int x = 100; x < 132; x++) hpBuf[(size_t)(y - HOME_BAND_TOP) * SCR_W + x] = COL_B;
+      }
       hpBufPage = 1; hpFrom = 0; hpTo = 1;    // hacia la izquierda: la 1 entra por la derecha
-      int malos = 0, cortes = 0;
+      int malos = 0, fondoMovido = 0, primerPlanoMal = 0;
       for(int dx = -SCR_W + 1; dx <= -1; dx += 37){
         for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++) bbuf[i] = VENENO;
         hpRenderFrame(dx);
         for(int y = HOME_BAND_TOP; y < HOME_BAND_BOT; y++){
-          // Los puntos de pagina se dibujan encima de su propia franja:
-          // ahi hay pixeles legitimos que no son ni A ni B.
           if(y >= HOME_DOTS_Y - 8 && y <= HOME_DOTS_Y + 10) continue;
           const uint16_t* row = bbuf + (size_t)y * SCR_W;
-          for(int x = 0; x < SCR_W; x++) if(row[x] == VENENO) malos++;
-          // La frontera entre las dos paginas cae donde toca, y hay
-          // exactamente UNA: ni dos trozos de la pagina vieja sueltos.
-          int c = 0;
-          for(int x = 1; x < SCR_W; x++) if(row[x] != row[x - 1]) c++;
-          if(c != 1) cortes++;
+          for(int x = 0; x < SCR_W; x++){
+            uint16_t bg = (uint16_t)(0x0800u + (unsigned)x), esperado = bg;
+            int sa = x - dx;
+            if(y >= fy && y < fy + 18 && sa >= 60 && sa < 92) esperado = COL_A;
+            int nx = dx + SCR_W, sb = x - nx;
+            if(y >= fy && y < fy + 18 && sb >= 100 && sb < 132) esperado = COL_B;
+            if(row[x] == VENENO) malos++;
+            if(esperado == bg && row[x] != bg) fondoMovido++;
+            if(row[x] != esperado) primerPlanoMal++;
+          }
         }
       }
       chk(malos == 0,  "no queda ni un pixel del frame anterior en la banda");
-      chk(cortes == 0, "y hay UNA sola frontera por fila: no hay trozos sueltos");
+      chk(fondoMovido == 0, "el wallpaper queda fijo mientras se deslizan las apps");
+      chk(primerPlanoMal == 0, "solo iconos y etiquetas siguen al dedo");
 
-      // El corte esta exactamente en SCR_W+dx: la pagina vieja a la
-      // izquierda, la nueva a la derecha.
+      // En un punto concreto, el icono de la pagina nueva esta desplazado
+      // pero una muestra vecina del wallpaper conserva su coordenada.
       for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++) bbuf[i] = VENENO;
       hpRenderFrame(-200);
-      const uint16_t* row = bbuf + (size_t)(HOME_GY0 + 10) * SCR_W;
-      chk(row[SCR_W - 200 - 1] == COL_A, "justo antes del corte, la pagina que sale");
-      chk(row[SCR_W - 200]     == COL_B, "y justo despues, la que entra");
+      const uint16_t* row = bbuf + (size_t)fy * SCR_W;
+      chk(row[380] == COL_B, "el icono de la pagina entrante cambia de posicion");
+      chk(row[200] == (uint16_t)(0x0800u + 200u), "el wallpaper no cambia de posicion");
 
       // Sin lienzo vecino compuesto no se deja ni una columna sin
       // escribir: el hueco se rellena con fondo, no con lo que hubiera.
@@ -1206,6 +1248,8 @@ static void testDeslizarPaginas(){
       "la pagina vecina reserva exactamente la banda movil");
   chk(HP_BUF_PIXELS * 2 < (size_t)SCR_W * SCR_H * 2,
       "y no otro framebuffer completo de 768 KB");
+  chk(HP_BUF_PIXELS * 4 < (size_t)SCR_W * SCR_H * 2,
+      "pagina vecina mas fondo fijo siguen ocupando menos que una pantalla completa");
   gDelayCalls = 0; hpBufPage = -1;
   chk(hpPrepare(1), "la pagina vecina se puede preparar en el cache compacto");
   chk(gDelayCalls > 0,
