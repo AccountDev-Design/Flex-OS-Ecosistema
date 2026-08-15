@@ -17,7 +17,7 @@ firmware ya trae el cliente HTTPS; esto es el otro lado.
 ## 1. Arrancarlo en Ubuntu
 
 ```bash
-cd server-ai
+cd futuras-versiones-BETA/Flex-Intelligence/server-ai
 
 # 1. Un token. Sin él el servidor no arranca.
 openssl rand -hex 24            # copia el resultado

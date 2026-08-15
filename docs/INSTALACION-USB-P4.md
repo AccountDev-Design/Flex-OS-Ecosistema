@@ -26,22 +26,10 @@ repositorio:
 | RAM estática (interna) | **90 652 B** de 327 680 (27,7 %) |
 | Libre para variables locales | 237 028 B |
 
-Las correcciones de render (una sola notificación a la vez, recorte por
-viewport de las listas, cabecera común, teclado dentro del panel) cuestan
-**+645 bytes de flash y 0 bytes de RAM interna** sobre la medición
-anterior: son cambios de composición, no estructuras nuevas.
-
-Coste de Flex Intelligence sobre la versión anterior, medido compilando
-las dos con el mismo core y los mismos flags: **+56,8 KB de flash** y
-**+10,8 KB de RAM interna**. Los buffers de trabajo grandes (el fichero
-que se abre para buscar dentro, los snapshots, el historial) viven en
-**PSRAM**, no en RAM interna.
-
-PSRAM adicional, reservada bajo demanda y sólo si hace falta: ~1,7 MB en
-cachés de imagen (página vecina del escritorio, captura del panel, fondo
-de la tarjeta flotante) y ~27 KB de datos (cola de trabajos, chat,
-buffers de trabajo). Sin PSRAM el sistema arranca igual y esas funciones
-se degradan diciéndolo.
+Esta medición corresponde al último binario verificado antes de la limpieza
+actual. El firmware debe volver a medirse al compilarlo en el entorno P4;
+la versión actual retiró módulos y cachés de PSRAM, por lo que no puede ocupar
+más que aquella medición.
 
 ---
 
@@ -73,15 +61,6 @@ Con `FLEXOS_OTA_ON=0`:
   `Update.write()` no hay a dónde escribir ni por qué reservar el
   espacio.
 
-### Flex Intelligence no depende del OTA
-
-Es una comprobación deliberada, no una coincidencia. El bloque de Flex
-Intelligence del `.ino` sólo llama a `flexOta*` para **cederle la
-pantalla** cuando el OTA la tiene en exclusiva (`flexOtaOwnsScreen()`), y
-esas funciones existen igual con el módulo apagado. Compilado con
-`-DFLEXOS_OTA_ON=0`, Flex Intelligence funciona igual: la app, el panel,
-el corrector, Cowork y las notificaciones no cambian.
-
 ---
 
 ## 2. Tabla de particiones recomendada para 16 MB
@@ -101,7 +80,7 @@ coredump, data, coredump, 0xFF0000, 0x10000,
 
 | Región     | Offset       | Tamaño        | Para qué                       |
 |------------|--------------|---------------|--------------------------------|
-| `nvs`      | `0x009000`   | 20 KB         | Ajustes, Wi-Fi, Flex Vault, Flex Intelligence |
+| `nvs`      | `0x009000`   | 20 KB         | Ajustes, Wi-Fi y Flex Vault  |
 | `otadata`  | `0x00E000`   | 8 KB          | Se conserva (ver más abajo)    |
 | `app0`     | `0x010000`   | **5 MB**      | El firmware                    |
 | `spiffs`   | `0x510000`   | **~10,9 MB**  | LittleFS: archivos del usuario |
@@ -176,24 +155,7 @@ app**, no un borrado completo del chip.
 
 ---
 
-## 4. Ficheros nuevos de Flex Intelligence en LittleFS
-
-Todos viven en `/System` y son pequeños y regenerables:
-
-| Fichero               | Qué guarda                                    | Tamaño |
-|-----------------------|-----------------------------------------------|--------|
-| `/System/spell.txt`   | Diccionario personal (palabras aceptadas)     | < 1 KB |
-| `/System/cowork.dat`  | Resultados terminados de Cowork               | < 2 KB |
-| `/System/aichat.txt`  | Historial de conversación (12 turnos)         | < 2 KB |
-
-Borrar cualquiera de los tres no rompe nada: el sistema arranca con esa
-parte vacía. **El token del servidor no está aquí**: vive en NVS, en su
-propio namespace (`flexos_ai`), y se borra entero desde
-Flex Intelligence → Ajustes → *Olvidar este servidor*.
-
----
-
-## 5. Volver a activar el OTA
+## 4. Volver a activar el OTA
 
 Nada de lo anterior destruye el sistema OTA. Para recuperarlo:
 
