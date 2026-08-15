@@ -174,6 +174,7 @@ static void testBusqueda();
 static void testBateria();
 static void testNoHorizontal();
 static void testNotifUnaSola();
+static void testDeslizarPaginas();
 // Almacen de trabajos para las pruebas: la placa lo pone en PSRAM, aqui
 // basta con un array estatico.
 static CoworkJob gTestJobs[CW_MAX_JOBS];
@@ -2229,6 +2230,174 @@ static void testNotifUnaSola(){
   if(!gFails) printf("  Una notificacion a la vez: todas las comprobaciones pasan.\n");
 }
 
+// #############################################################
+//  DESLIZAMIENTO ENTRE PAGINAS: CADA PAGINA EN SU VIEWPORT
+//  ------------------------------------------------------------
+//  En el video se ve, a mitad del gesto, la columna de la pagina
+//  vieja mezclada con el icono de la nueva y las etiquetas
+//  superpuestas. La causa no era la geometria del gesto sino que
+//  MAS DE UN COMPOSITOR escribia en las mismas filas de bbuf en el
+//  mismo frame, cada uno con su propio desplazamiento.
+//
+//  Aqui se comprueba lo unico que garantiza que eso no pase:
+//    · los dos viewports son COMPLEMENTARIOS -- juntos cubren el
+//      ancho exactamente una vez, sin solape y sin hueco;
+//    · un frame compuesto de verdad no conserva NI UN PIXEL de lo
+//      que hubiera antes en el buffer de composicion;
+//    · y los demas dibujantes del escritorio callan mientras dura
+//      el gesto.
+// #############################################################
+static void testDeslizarPaginas(){
+  printf("Deslizamiento entre paginas del escritorio\n");
+  gState = ST_HOME; editMode = false; gLand = false; qsPanelY = 0;
+  gHomePage = 0; hpDragging = false; hpSettling = false;
+
+  // --- 1. LOS DOS VIEWPORTS SON COMPLEMENTARIOS ---
+  // Se barre todo el recorrido posible, no tres valores bonitos.
+  { bool okCubre = true, okSolape = true, okDentro = true;
+    for(int dx = -SCR_W; dx <= SCR_W; dx++){
+      for(int dir = -1; dir <= 1; dir += 2){
+        int nx = dx + dir * SCR_W;
+        int aD, aS, aW, bD, bS, bW;
+        hpViewport(dx, aD, aS, aW);
+        hpViewport(nx, bD, bS, bW);
+        if(aD < 0 || bD < 0 || aD + aW > SCR_W || bD + bW > SCR_W) okDentro = false;
+        // Solo el par (dx, nx) que corresponde a esta direccion tiene
+        // sentido: |dx| + |nx| = SCR_W. El otro se sale y da ancho 0.
+        if(aW + bW != SCR_W) continue;
+        if(aW > 0 && bW > 0){
+          int aFin = aD + aW, bFin = bD + bW;
+          if(aD < bFin && bD < aFin) okSolape = false;       // se pisan
+          if(aFin != bD && bFin != aD) okCubre = false;      // dejan hueco
+        }
+      }
+    }
+    chk(okDentro,  "ningun viewport se sale del ancho de la pantalla");
+    chk(okSolape,  "las dos paginas NO se pisan ni una columna");
+    chk(okCubre,   "y entre las dos no dejan ningun hueco"); }
+
+  // Los extremos: pagina quieta y pagina fuera.
+  { int d, s, w;
+    hpViewport(0, d, s, w);
+    chk(d == 0 && s == 0 && w == SCR_W, "sin desplazamiento la pagina ocupa todo");
+    hpViewport(SCR_W, d, s, w);
+    chk(w == 0, "desplazada una pantalla entera ya no se ve");
+    hpViewport(-SCR_W, d, s, w);
+    chk(w == 0, "y hacia el otro lado tampoco");
+    hpViewport(120, d, s, w);
+    chk(d == 120 && s == 0 && w == SCR_W - 120, "hacia la derecha entra por la izquierda");
+    hpViewport(-120, d, s, w);
+    chk(d == 0 && s == 120 && w == SCR_W - 120, "hacia la izquierda, por la derecha"); }
+
+  // --- 2. UN FRAME REAL NO DEJA RASTRO DEL ANTERIOR ---
+  // homeBuf y hpBuf se rellenan con dos colores planos distintos, y
+  // bbuf con un tercero que NO debe sobrevivir en ninguna fila de la
+  // banda. Es la comprobacion de pixeles del "resto del frame anterior".
+  { const uint16_t COL_A = 0x1234, COL_B = 0x4321, VENENO = 0x7BEF;
+    if(!hpEnsureBuf()){ chk(false, "hay lienzo para la pagina vecina"); }
+    else {
+      for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++){
+        homeBuf[i] = COL_A;
+        hpBuf[i]   = COL_B;
+      }
+      hpBufPage = 1; hpFrom = 0; hpTo = 1;    // hacia la izquierda: la 1 entra por la derecha
+      int malos = 0, cortes = 0;
+      for(int dx = -SCR_W + 1; dx <= -1; dx += 37){
+        for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++) bbuf[i] = VENENO;
+        hpRenderFrame(dx);
+        for(int y = HOME_BAND_TOP; y < HOME_BAND_BOT; y++){
+          // Los puntos de pagina se dibujan encima de su propia franja:
+          // ahi hay pixeles legitimos que no son ni A ni B.
+          if(y >= HOME_DOTS_Y - 8 && y <= HOME_DOTS_Y + 10) continue;
+          const uint16_t* row = bbuf + (size_t)y * SCR_W;
+          for(int x = 0; x < SCR_W; x++) if(row[x] == VENENO) malos++;
+          // La frontera entre las dos paginas cae donde toca, y hay
+          // exactamente UNA: ni dos trozos de la pagina vieja sueltos.
+          int c = 0;
+          for(int x = 1; x < SCR_W; x++) if(row[x] != row[x - 1]) c++;
+          if(c != 1) cortes++;
+        }
+      }
+      chk(malos == 0,  "no queda ni un pixel del frame anterior en la banda");
+      chk(cortes == 0, "y hay UNA sola frontera por fila: no hay trozos sueltos");
+
+      // El corte esta exactamente en SCR_W+dx: la pagina vieja a la
+      // izquierda, la nueva a la derecha.
+      for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++) bbuf[i] = VENENO;
+      hpRenderFrame(-200);
+      const uint16_t* row = bbuf + (size_t)(HOME_GY0 + 10) * SCR_W;
+      chk(row[SCR_W - 200 - 1] == COL_A, "justo antes del corte, la pagina que sale");
+      chk(row[SCR_W - 200]     == COL_B, "y justo despues, la que entra");
+
+      // Sin lienzo vecino compuesto no se deja ni una columna sin
+      // escribir: el hueco se rellena con fondo, no con lo que hubiera.
+      hpBufPage = -1;
+      for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++) bbuf[i] = VENENO;
+      hpRenderFrame(-200);
+      int huecos = 0;
+      for(int y = HOME_BAND_TOP; y < HOME_BAND_BOT; y++)
+        for(int x = 0; x < SCR_W; x++)
+          if(bbuf[(size_t)y * SCR_W + x] == VENENO) huecos++;
+      chk(huecos == 0, "sin lienzo vecino tampoco queda basura en pantalla");
+      hpBufPage = 1;
+    } }
+
+  // --- 3. FUERA DE LA BANDA NO SE TOCA NADA ---
+  // Barra de estado, widgets, dock y barra de navegacion son identicos
+  // en las tres paginas: el gesto no puede escribir ahi.
+  { const uint16_t MARCA = 0x0A0A;
+    for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++) bbuf[i] = MARCA;
+    hpBufPage = 1; hpFrom = 0; hpTo = 1;
+    hpRenderFrame(-240);
+    int tocados = 0;
+    for(int y = 0; y < SCR_H; y++){
+      if(y >= HOME_BAND_TOP && y < HOME_BAND_BOT) continue;
+      for(int x = 0; x < SCR_W; x++)
+        if(bbuf[(size_t)y * SCR_W + x] != MARCA) tocados++;
+    }
+    chk(tocados == 0, "widgets, barra superior, dock y navegacion no se tocan"); }
+
+  // --- 4. NADIE MAS DIBUJA MIENTRAS DURA EL GESTO ---
+  // La isla de notificaciones componia en bbuf las MISMAS filas y las
+  // publicaba sin desplazar: media pantalla quedaba en la pagina vieja.
+  { gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+    notifBandOn = false; notifPaused = false; notifLastMs = 0;
+    gTestMs = 400000;
+    notifPushJob(95, "Resumen listo", "", NACT_VIEW, false);
+    gState = ST_HOME; qsPanelY = 0; editMode = false;
+    hpDragging = true;
+    gTestMs += 40; notifTick();
+    chk(!gNotifs[0].armed, "con un gesto de pagina en curso, la isla no dibuja");
+    chk(notifPaused,       "y contabiliza la pausa para no comerse los 5 s");
+    hpDragging = false;
+    gTestMs += 40; notifTick();
+    chk(gNotifs[0].armed,  "al acabar el gesto, la isla vuelve");
+    gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs)); }
+
+  // --- 5. FLEX INTELLIGENCE EN UNA CASILLA NORMAL ---
+  // Nada de centrarla porque sea la unica de su pagina: mismos margenes
+  // y misma casilla que cualquier otra app.
+  { int x0, y0, x1, y1;
+    homeSlotXY(0, x0, y0);
+    homeSlotXY(1, x1, y1);
+    chk(x0 == HOME_GX0,               "la primera casilla usa el margen normal");
+    chk(y0 == HOME_GY0,               "y la fila normal");
+    chk(x1 - x0 == HOME_COLSTEP,      "y el paso entre columnas es el de siempre");
+    int id;
+    gHomePage = 1;
+    chk(hitHomeIcon(HOME_GX0 + 10, HOME_GY0 + 10, id) && id == IC_FLEXAI,
+        "Flex Intelligence responde en la primera casilla de su pagina");
+    chk(!hitHomeIcon(SCR_W / 2, HOME_GY0 + HOME_ROWSTEP, id) || id != IC_FLEXAI,
+        "y NO esta centrada artificialmente en su pagina");
+    gHomePage = 0; }
+
+  chk(HOME_PAGES == 3, "siguen siendo tres paginas");
+
+  hpDragging = false; hpSettling = false; hpBufPage = -1;
+  gHomePage = 0; tReset();
+  if(!gFails) printf("  Deslizamiento entre paginas: todas las comprobaciones pasan.\n");
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -2309,6 +2478,7 @@ int main(){
   testBateria();
   testNoHorizontal();
   testNotifUnaSola();
+  testDeslizarPaginas();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

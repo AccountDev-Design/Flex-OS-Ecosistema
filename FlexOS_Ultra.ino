@@ -5808,30 +5808,57 @@ static bool hpPrepare(int page){
 
 // Un frame del arrastre/acomodo. `dx` es lo que se ha movido la pagina
 // ACTUAL; la vecina va pegada a su lado.
+// VIEWPORT DE CADA PAGINA. Las dos paginas se mueven juntas pero cada
+// una solo puede escribir en SU tramo de columnas, y los dos tramos son
+// complementarios: juntos cubren [0, SCR_W) exactamente una vez. Esto se
+// calcula aqui, en un solo sitio, en vez de deducirlo dos veces con
+// signos distintos dentro del bucle de filas -- que es como se acaba con
+// una franja que nadie escribe y por tanto conserva el frame anterior.
+//
+//   dst   primera columna de PANTALLA que le toca
+//   src   primera columna de su LIENZO que se copia ahi
+//   w     cuantas columnas (0 = esta pagina no se ve en este frame)
+//
+// Con parametros de salida y no una estructura: un tipo propio en la
+// firma tendria que estar definido antes del bloque de prototipos que
+// autogenera el IDE de Arduino (lo vigila tests/host/check_protos.py), y
+// no vale la pena subir un detalle de tres enteros hasta alli.
+static inline void hpViewport(int off, int &dst, int &src, int &w){
+  if(off <= -SCR_W || off >= SCR_W){ dst = 0; src = 0; w = 0; return; }
+  dst = off > 0 ?  off : 0;
+  src = off < 0 ? -off : 0;
+  w   = SCR_W - (off < 0 ? -off : off);
+  if(dst + w > SCR_W) w = SCR_W - dst;              // por si acaso: nunca fuera del ancho
+}
+
 static void hpRenderFrame(int dx){
   if(!homeBuf) return;
   setBuf(bbuf);
   gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
   int dir = (hpTo > hpFrom) ? 1 : -1;     // +1 = la vecina entra por la derecha
   int nx  = dx + dir * SCR_W;             // desplazamiento de la vecina
+  int aDst, aSrc, aW; hpViewport(dx, aDst, aSrc, aW);
+  int bDst = 0, bSrc = 0, bW = 0;
+  if(hpBuf && hpBufPage == hpTo) hpViewport(nx, bDst, bSrc, bW);
   for(int y = HOME_BAND_TOP; y < HOME_BAND_BOT; y++){
     uint16_t* row = bbuf + (size_t)y * SCR_W;
-    // Pagina actual, desplazada dx.
-    const uint16_t* src = homeBuf + (size_t)y * SCR_W;
-    int s0 = dx < 0 ? -dx : 0;                       // primera columna de origen visible
-    int d0 = dx > 0 ?  dx : 0;                       // donde cae en pantalla
-    int wA = SCR_W - (dx < 0 ? -dx : dx);
-    if(wA > 0) memcpy(row + d0, src + s0, (size_t)wA * 2);
-    // Pagina vecina, desplazada nx. Solo si hay lienzo compuesto.
-    if(hpBuf && hpBufPage == hpTo){
-      const uint16_t* srcB = hpBuf + (size_t)y * SCR_W;
-      int b0 = nx < 0 ? -nx : 0;
-      int e0 = nx > 0 ?  nx : 0;
-      int wB = SCR_W - (nx < 0 ? -nx : nx);
-      if(wB > 0 && e0 < SCR_W){
-        if(e0 + wB > SCR_W) wB = SCR_W - e0;
-        memcpy(row + e0, srcB + b0, (size_t)wB * 2);
-      }
+    // Pagina actual, recortada a su viewport.
+    if(aW > 0)
+      memcpy(row + aDst, homeBuf + (size_t)y * SCR_W + aSrc, (size_t)aW * 2);
+    // Pagina vecina, recortada al suyo.
+    if(bW > 0)
+      memcpy(row + bDst, hpBuf + (size_t)y * SCR_W + bSrc, (size_t)bW * 2);
+    // COLUMNAS QUE NO ESCRIBE NADIE. Solo puede pasar si el lienzo de la
+    // vecina no llego a componerse (sin PSRAM). Sin esto, esa franja
+    // conserva lo que hubiera en bbuf -- un trozo del frame anterior, o
+    // de otra pantalla entera -- y eso es exactamente el rastro que se ve
+    // arrastrado durante el gesto. Se rellena con el fondo de la pagina
+    // actual sin desplazar: no es la pagina que entra, pero es un fondo
+    // coherente y no un fotograma muerto.
+    if(bW <= 0 && aW < SCR_W){
+      int hx = (aDst > 0) ? 0 : aW;                  // hueco a la izquierda o a la derecha
+      int hw = SCR_W - aW;
+      memcpy(row + hx, homeBuf + (size_t)y * SCR_W + hx, (size_t)hw * 2);
     }
   }
   // Los puntos NO se desplazan con las paginas: se quedan fijos y lo
@@ -29322,6 +29349,12 @@ static void uiTick(){
     return;
   }
   if(gState == ST_HOME){
+    // Con un gesto de pagina en curso, la rejilla NO esta donde cree el
+    // destello: sus coordenadas son las de la pagina quieta, asi que
+    // restauraria un trozo de escritorio sin desplazar en medio del
+    // contenido que se mueve. Mientras dura el gesto, esta animacion
+    // calla; hpTick es quien manda en esa banda.
+    if(hpDragging || hpSettling) return;
     if(editMode) edRender();                    // jiggle continuo
     else if(gRippleActive) animateIconRipple(); // destello del icono tocado (Vidrio), ~0.5s
   }
@@ -29456,9 +29489,16 @@ void loop(){
       lockTick();
       break;
     case ST_HOME:
+      // El cambio de minuto rehace homeBuf y lo vuelca ENTERO. En medio
+      // de un gesto de pagina eso borraria el frame desplazado y pondria
+      // la pagina de origen sin mover: un salto a mitad del arrastre.
+      // Se aplaza -- gHomeDirty hace que homeTick lo rehaga en cuanto el
+      // gesto termina -- porque un reloj un segundo tarde se perdona y un
+      // tiron en el deslizamiento no.
       if(minChanged && qsPanelY == 0 && !qsAnimOn && !editMode){
-        renderHome();                    // refresca el cache homeBuf (offscreen: setBuf(homeBuf)...setBuf(fb), sin tocar pantalla)
-        showHome();
+        if(hpDragging || hpSettling) gHomeDirty = true;
+        else { renderHome();             // refresca el cache homeBuf (offscreen: setBuf(homeBuf)...setBuf(fb), sin tocar pantalla)
+               showHome(); }
       }
       homeTick();     // la cortina ya se atendio arriba (qsGlobalHandle)
       break;
