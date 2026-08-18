@@ -436,6 +436,26 @@ enum CronoState { CRONO_IDLE = 0, CRONO_RUN = 1, CRONO_PAUSE = 2 };
 // Una vuelta ya cerrada: su duracion propia (parcial) y el total acumulado
 // del cronometro en el instante en que se marco.
 struct CronoLap { uint32_t split; uint32_t total; };
+
+// #############################################################
+// ##  WIDGETS DEL ESCRITORIO · tipos
+// ##  ------------------------------------------------------
+// ##  Aqui arriba por la MISMA restriccion de ctags que Touch,
+// ##  Notification, NewsItem y CronoLap: el IDE de Arduino genera
+// ##  un prototipo de cada funcion del sketch y los inserta todos
+// ##  antes de la primera funcion, asi que cualquier tipo que
+// ##  aparezca en una firma tiene que estar declarado antes.
+// ##  HomeWidget se pasa por puntero a wgDrawCell() y a wgRect().
+// ##  Lo vigila tests/host/check_protos.py.
+// #############################################################
+#define HOME_WG_MAX 3                       // widgets colocados por pagina
+// Un widget COLOCADO. col/row/w/h son CELDAS de la rejilla, no pixeles: asi
+// cambiar de rejilla o de tamano de icono no invalida ninguna posicion.
+struct HomeWidget { uint8_t type, col, row, w, h; };
+// Catalogo. Solo entran widgets con un dato REAL detras en esta placa.
+enum { WG_NONE = 0, WG_CLOCK, WG_CLOCK_A, WG_DATE, WG_WIFI, WG_MEM,
+       WG_STORAGE, WG_NEWS, WG_CRONO, WG_CAM, WG_COUNT };
+struct WgDesc { const char* name; const char* cat; uint8_t w, h; };
 // Fases de la tarjeta expandida (animacion propia, independiente de NotifPhase)
 enum CronoCardPhase { CC_HIDDEN = 0, CC_OPENING, CC_OPEN, CC_CLOSING };
 
@@ -1413,6 +1433,11 @@ static void strokeSegAA(float x0, float y0, float x1, float y1, float rad, uint1
   }
 }
 
+// Empaquetado RGB565 en tiempo de COMPILACION (mismo bit a bit que rgb565(),
+// que no es constexpr). Vive aqui y no en el bloque del tema semantico porque
+// los fondos integrados de justo debajo son su primer uso del archivo.
+#define TC(r,g,b) ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
+
 // ---------------- Fondo (wallpaper) ----------------
 // Degradado diagonal 3 paradas: verde (arriba-dcha) -> azul (centro)
 // -> violeta (abajo-izq), igual que tus imagenes. Opcional: blobs.
@@ -1442,20 +1467,150 @@ static void wallpaperEnsureLut(){
     wallLutReady = true;
   }
 }
-// Pinta [y0,y1] inclusive. Tambien fuerza su propio viewport: un scroll o una
-// app que haya dejado gClip estrecho no puede recortar el fondo y crear una
-// franja negra permanente en el siguiente escritorio.
-static void drawWallpaperRows(uint16_t* buf, bool blobs, int y0, int y1){
-  if(!buf) return;
-  if(y0 < 0) y0 = 0; if(y1 >= SCR_H) y1 = SCR_H - 1; if(y0 > y1) return;
-  wallpaperEnsureLut();
-  uint16_t* old = gBuf; setBuf(buf);
-  int cx0 = gClipX0, cx1 = gClipX1, cy0 = gClipY0, cy1 = gClipY1;
-  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = y0; gClipY1 = y1;
+
+// #############################################################
+// ##  CATALOGO DE FONDOS
+// ##  ------------------------------------------------------
+// ##  Ocho fondos INTEGRADOS (procedurales: se dibujan con las
+// ##  primitivas que ya existen, no son imagenes) mas una IMAGEN
+// ##  REAL del almacenamiento, decodificada con el mismo
+// ##  FlexOS_JPEG que usan Galeria y el visor de archivos.
+// ##
+// ##  El id 0 es el degradado de siempre y su salida es BIT A BIT
+// ##  la de antes: una placa que actualice no ve cambiar el fondo.
+// #############################################################
+#define WALL_N   8
+#define WALL_IMG 200                   // valor especial: imagen del almacenamiento
+static const char* WALL_NAME[WALL_N] = {
+  "Flex Original", "Aurora", "Nocturno", "Halo", "Onyx", "Oceano", "Violeta", "Naturaleza"
+};
+static uint8_t  gWallHome = 0;         // fondo del escritorio  (NVS "wallh")
+static uint8_t  gWallLock = 0;         // fondo del bloqueo     (NVS "walll")
+static char     gWallPath[80] = "";    // ruta de la imagen elegida (NVS "wallp")
+static uint8_t  gWallFit  = 0;         // 0 rellenar · 1 ajustar · 2 centrar (NVS "wallfit")
+static uint16_t* wallImg  = NULL;      // imagen ya decodificada a 480x800 (PSRAM, solo si se usa)
+static bool      wallImgOk = false;    // wallImg contiene la imagen de gWallPath
+
+// ---- Motor radial por LUT de distancia AL CUADRADO --------------------------
+// Evita un sqrt() por pixel: la intensidad de un halo o un anillo solo depende
+// de la distancia al centro, y d2 = dx^2+dy^2 es monotona con d. Se tabula la
+// intensidad EN FUNCION DE d2 (>> WLUT_SHIFT) y el bucle por pixel queda en un
+// incremento, un desplazamiento y una consulta.
+// d2 maximo en 480x800 = 870400; 870400 >> 11 = 425 < WLUT_N.
+#define WLUT_N     512
+#define WLUT_SHIFT 11
+static uint8_t wlut[WLUT_N];
+static void wlutDisc(int rIn, int rOut, uint8_t aIn){
+  if(rOut < 1) rOut = 1;
+  if(rIn > rOut) rIn = rOut;
+  for(int i = 0; i < WLUT_N; i++){
+    int d = isqrt32(i << WLUT_SHIFT);
+    if(d <= rIn)       wlut[i] = aIn;
+    else if(d >= rOut) wlut[i] = 0;
+    else               wlut[i] = (uint8_t)((int)aIn * (rOut - d) / (rOut - rIn));
+  }
+}
+static void wlutRing(int r, int hw, uint8_t aPk){
+  if(hw < 1) hw = 1;
+  for(int i = 0; i < WLUT_N; i++){
+    int d = isqrt32(i << WLUT_SHIFT), k = d > r ? d - r : r - d;
+    wlut[i] = (k >= hw) ? 0 : (uint8_t)((int)aPk * (hw - k) / hw);
+  }
+}
+// Aplica la LUT activa mezclando 'c' sobre lo que ya hay en gBuf, dentro del
+// recorte vigente (que drawWallpaperRows deja fijado a la banda pedida).
+static void wallRadial(int cx, int cy, uint16_t c){
+  int y0 = gClipY0, y1 = gClipY1, x0 = gClipX0, x1 = gClipX1;
+  if(y0 < 0) y0 = 0;
+  if(y1 > SCR_H - 1) y1 = SCR_H - 1;
+  if(x0 < 0) x0 = 0;
+  if(x1 > SCR_W - 1) x1 = SCR_W - 1;
+  for(int y = y0; y <= y1; y++){
+    int32_t dy = y - cy, dy2 = dy * dy;
+    uint16_t* row = gBuf + (size_t)y * SCR_W;
+    int32_t dx = x0 - cx, dx2 = dx * dx;
+    for(int x = x0; x <= x1; x++){
+      uint32_t idx = (uint32_t)((dx2 + dy2) >> WLUT_SHIFT);
+      if(idx >= WLUT_N) idx = WLUT_N - 1;
+      uint8_t a = wlut[idx];
+      if(a) row[x] = (a >= 255) ? c : mix565(row[x], c, a);
+      dx2 += 2 * dx + 1; dx++;
+    }
+  }
+}
+// Disco OPACO con degradado lineal interno. El parametro es lineal en x, asi
+// que se lleva en un acumulador de punto fijo (dos divisiones por FILA en vez
+// de una por pixel). El acumulador es de 64 bits a proposito: ((+-500)*127)<<16
+// pasa de 4.100 millones y en 32 bits desbordaria, lo que se ve como bandas
+// horizontales dentro del disco.
+static void wallDisc(int cx, int cy, int r, uint16_t c0, uint16_t c1, int dirx, int diry){
+  if(r <= 0) return;
+  int r2 = r * r;
+  int y0 = cy - r, y1 = cy + r;
+  if(y0 < gClipY0) y0 = gClipY0;
+  if(y1 > gClipY1) y1 = gClipY1;
+  if(y0 < 0) y0 = 0;
+  if(y1 > SCR_H - 1) y1 = SCR_H - 1;
+  int denom = r * (abs(dirx) + abs(diry));
+  if(denom < 1) denom = 1;
+  for(int y = y0; y <= y1; y++){
+    int dy = y - cy, hw = isqrt32(r2 - dy * dy);
+    if(hw <= 0) continue;
+    int xa = cx - hw, xb = cx + hw;
+    if(xa < gClipX0) xa = gClipX0;
+    if(xb > gClipX1) xb = gClipX1;
+    if(xa < 0) xa = 0;
+    if(xb > SCR_W - 1) xb = SCR_W - 1;
+    if(xa > xb) continue;
+    int32_t base = (int32_t)dy * diry;
+    int32_t acc  = (int32_t)(((int64_t)((int32_t)(xa - cx) * dirx + base) * 127 * 65536) / denom) + (128 << 16);
+    int32_t step = (int32_t)(((int64_t)dirx * 127 * 65536) / denom);
+    uint16_t* row = gBuf + (size_t)y * SCR_W;
+    for(int x = xa; x <= xb; x++){
+      int32_t tt = acc >> 16;
+      if(tt < 0) tt = 0;
+      if(tt > 255) tt = 255;
+      row[x] = mix565(c0, c1, (uint8_t)tt);
+      acc += step;
+    }
+  }
+}
+// Degradado diagonal de 3 paradas (el patron del fondo original), tabulado.
+static void wallDiag3(uint16_t lo, uint16_t mid, uint16_t hi){
+  uint16_t lut[256];
+  for(int t = 0; t < 256; t++)
+    lut[t] = (t < 128) ? mix565(lo, mid, (uint8_t)(t * 2)) : mix565(mid, hi, (uint8_t)((t - 128) * 2));
+  int y0 = gClipY0, y1 = gClipY1;
+  if(y0 < 0) y0 = 0;
+  if(y1 > SCR_H - 1) y1 = SCR_H - 1;
+  for(int y = y0; y <= y1; y++){
+    int ty = ((SCR_H - 1 - y) * 255) / (SCR_H - 1);
+    uint16_t* row = gBuf + (size_t)y * SCR_W;
+    for(int x = 0; x < SCR_W; x++) row[x] = lut[(wallTxLut[x] + ty) >> 1];
+  }
+}
+// Degradado bilineal de 4 esquinas (base del fondo "Aurora").
+static void wallCorners4(uint16_t tl, uint16_t tr, uint16_t bl, uint16_t br){
+  int y0 = gClipY0, y1 = gClipY1;
+  if(y0 < 0) y0 = 0;
+  if(y1 > SCR_H - 1) y1 = SCR_H - 1;
+  for(int y = y0; y <= y1; y++){
+    uint8_t ty = (uint8_t)((y * 255) / (SCR_H - 1));
+    uint16_t L = mix565(tl, bl, ty), R = mix565(tr, br, ty);
+    uint16_t* row = gBuf + (size_t)y * SCR_W;
+    for(int x = 0; x < SCR_W; x++) row[x] = mix565(L, R, wallTxLut[x]);
+  }
+}
+
+// ---- 0. FLEX ORIGINAL (el de siempre) --------------------------------------
+static void wallFlexOriginal(bool blobs){
+  int y0 = gClipY0, y1 = gClipY1;
+  if(y0 < 0) y0 = 0;
+  if(y1 > SCR_H - 1) y1 = SCR_H - 1;
   for(int y = y0; y <= y1; y++){
     // t=1 arriba-derecha, t=0 abajo-izquierda. 'ty' es invariante en x.
     int ty = ((SCR_H - 1 - y) * 255) / (SCR_H - 1);
-    uint16_t* row = buf + (size_t)y * SCR_W;
+    uint16_t* row = gBuf + (size_t)y * SCR_W;
     for(int x = 0; x < SCR_W; x++) row[x] = wallGradLut[(wallTxLut[x] + ty) >> 1];
   }
   if(blobs){
@@ -1463,10 +1618,305 @@ static void drawWallpaperRows(uint16_t* buf, bool blobs, int y0, int y1){
     fillCircleA(360, 150, 220, rgb565(150, 235, 180), 60);
     fillCircleA(90,  560, 260, rgb565(150, 160, 240), 55);
   }
+}
+// ---- 1. AURORA -- discos de cristal sobre fondo claro ----------------------
+static void wallAurora(){
+  wallCorners4(TC(205,238,236), TC(48,132,240), TC(72,208,206), TC(24,86,220));
+  wlutDisc(236, 258, 90);  wallRadial(330, 205, TC(255,255,255));   // halo del disco azul
+  wallDisc(330, 205, 246, TC(26,68,205), TC(104,176,252), -1, -1);
+  wlutDisc(244, 264, 105); wallRadial(96, 486, TC(255,255,255));    // halo del disco menta
+  wallDisc(96, 486, 250, TC(86,220,176), TC(186,248,220), 1, -1);
+  wlutDisc(150, 330, 60);  wallRadial(430, 760, TC(140,205,255));   // brillo inferior derecho
+}
+// ---- 2. NOCTURNO -- esferas indigo sobre casi-negro ------------------------
+static void wallNocturno(){
+  wallDiag3(TC(4,5,14), TC(8,9,26), TC(5,6,18));
+  wallDisc(340, 110, 300, TC(10,12,38), TC(62,70,152), -1, -1);
+  wlutRing(300, 6, 225); wallRadial(340, 110, TC(182,192,255));
+  wallDisc(92, 620, 330, TC(9,10,34), TC(70,78,160), 1, -1);
+  wlutRing(330, 7, 240); wallRadial(92, 620, TC(196,204,255));
+  wallDisc(456, 468, 186, TC(8,9,30), TC(48,54,124), -1, 1);
+  wlutRing(186, 5, 205); wallRadial(456, 468, TC(164,174,250));
+  wlutDisc(70, 260, 34); wallRadial(286, 300, TC(120,134,235));
+}
+// ---- 3. HALO -- anillos concentricos sobre negro ---------------------------
+static void wallHalo(){
+  wallDiag3(TC(2,2,7), TC(5,5,16), TC(2,2,8));
+  wlutDisc(230, 430, 70);  wallRadial(72, 430, TC(46,74,205));      // brillo lateral (asimetria)
+  wlutDisc(112, 132, 255); wallRadial(206, 402, TC(17,22,58));      // nucleo lleno
+  wlutRing(118, 26, 190);  wallRadial(206, 402, TC(74,112,236));
+  wlutRing(122, 5, 235);   wallRadial(206, 402, TC(176,198,255));
+  wlutRing(252, 34, 150);  wallRadial(206, 402, TC(58,92,224));
+  wlutRing(256, 5, 200);   wallRadial(206, 402, TC(158,182,255));
+  wlutRing(392, 44, 120);  wallRadial(206, 402, TC(44,74,206));
+  wlutRing(396, 5, 165);   wallRadial(206, 402, TC(140,168,250));
+}
+// ---- 4..7. Fondos de acompanamiento de los temas ---------------------------
+static void wallOnyx(){
+  int y0 = gClipY0 < 0 ? 0 : gClipY0, y1 = gClipY1 > SCR_H - 1 ? SCR_H - 1 : gClipY1;
+  for(int y = y0; y <= y1; y++) hLine(0, y, SCR_W, TC(0,0,0));
+  wlutDisc(60, 380, 46); wallRadial(240, 690, TC(30,64,180));
+}
+static void wallOceano(){
+  wallDiag3(TC(3,32,72), TC(10,116,168), TC(38,206,192));
+  wlutDisc(70, 300, 50); wallRadial(400, 180, TC(180,244,236));
+}
+static void wallVioleta(){
+  wallDiag3(TC(26,8,58), TC(122,40,180), TC(232,124,204));
+  wlutDisc(80, 320, 46); wallRadial(90, 250, TC(255,210,240));
+}
+static void wallNaturaleza(){
+  wallDiag3(TC(8,44,22), TC(58,138,58), TC(186,222,122));
+  wlutDisc(80, 300, 44); wallRadial(380, 640, TC(236,250,190));
+}
+
+// Pinta [y0,y1] inclusive del fondo `id`. Tambien fuerza su propio viewport: un
+// scroll o una app que haya dejado gClip estrecho no puede recortar el fondo y
+// crear una franja negra permanente en el siguiente escritorio.
+static void drawWallpaperRowsId(uint16_t* buf, int id, bool blobs, int y0, int y1){
+  if(!buf) return;
+  if(y0 < 0) y0 = 0;
+  if(y1 >= SCR_H) y1 = SCR_H - 1;
+  if(y0 > y1) return;
+  wallpaperEnsureLut();
+  uint16_t* old = gBuf; setBuf(buf);
+  bool wasLand = gLand; gLand = false;
+  int cx0 = gClipX0, cx1 = gClipX1, cy0 = gClipY0, cy1 = gClipY1;
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = y0; gClipY1 = y1;
+  // IMAGEN DEL USUARIO. Se decodifico UNA vez a 480x800 (wallImgLoad): aqui solo
+  // se copian filas. Si por lo que sea no esta disponible, se cae al fondo por
+  // defecto en vez de dejar la banda en negro.
+  if(id == WALL_IMG && wallImg && wallImgOk){
+    for(int y = y0; y <= y1; y++)
+      memcpy(buf + (size_t)y * SCR_W, wallImg + (size_t)y * SCR_W, (size_t)SCR_W * 2);
+  } else {
+    if(id == WALL_IMG || id < 0 || id >= WALL_N) id = 0;   // RUTA SEGURA
+    switch(id){
+      case 1: wallAurora();     break;
+      case 2: wallNocturno();   break;
+      case 3: wallHalo();       break;
+      case 4: wallOnyx();       break;
+      case 5: wallOceano();     break;
+      case 6: wallVioleta();    break;
+      case 7: wallNaturaleza(); break;
+      default: wallFlexOriginal(blobs); break;
+    }
+  }
   gClipX0 = cx0; gClipX1 = cx1; gClipY0 = cy0; gClipY1 = cy1;
+  gLand = wasLand;
   setBuf(old);
 }
+// Compatibilidad: todos los llamantes de siempre siguen pidiendo "el fondo del
+// escritorio" con estas dos firmas.
+static void drawWallpaperRows(uint16_t* buf, bool blobs, int y0, int y1){
+  drawWallpaperRowsId(buf, gWallHome, blobs, y0, y1);
+}
 static void drawWallpaper(uint16_t* buf, bool blobs){ drawWallpaperRows(buf, blobs, 0, SCR_H - 1); }
+
+// #############################################################
+// ##  FONDO A PARTIR DE UNA IMAGEN REAL DEL ALMACENAMIENTO
+// ##  ------------------------------------------------------
+// ##  Se reutiliza el decodificador que ya existe (FlexOS_JPEG,
+// ##  el mismo de Galeria y del visor de archivos) y LittleFS
+// ##  (FlexOS_FS). No se enlaza un segundo decodificador ni se
+// ##  duplica una sola linea de lectura de archivos.
+// ##
+// ##  POR QUE SE DECODIFICA UNA SOLA VEZ A 480x800: el fondo se
+// ##  pide POR BANDAS (drawWallpaperRows) muchas veces -- cada
+// ##  cambio de minuto, cada gesto de pagina, cada repintado de
+// ##  un widget. Decodificar el JPEG en cada banda costaria
+// ##  decimas de segundo y haria imposible seguir al dedo. Se
+// ##  decodifica al elegir la imagen (y al arrancar) y despues
+// ##  cada banda es un memcpy.
+// ##
+// ##  MEMORIA: los 768 KB de wallImg SOLO existen mientras haya
+// ##  una imagen elegida. Al volver a un fondo integrado se
+// ##  liberan (wallImgDrop).
+// ##
+// ##  RUTA SEGURA: si el archivo se borro, ya no es un JPEG, es
+// ##  progresivo, no cabe o no hay PSRAM, se vuelve al fondo por
+// ##  defecto SIN reiniciar y se avisa con un texto real.
+// #############################################################
+#define WALL_IMG_MAX_BYTES (512 * 1024)     // tope de lectura: un JPEG de fondo no pasa de ahi
+static char gWallErr[40] = "";               // ultimo error de carga (para la interfaz)
+
+static int      wiDstX, wiDstY, wiSkipX, wiCopyW, wiRows;
+static bool     wallImgRow(void* user, int y, int w, const uint16_t* rgb){
+  (void)user;
+  if(!wallImg) return false;
+  int dy = wiDstY + y;
+  if(dy < 0) return true;
+  if(dy >= SCR_H) return false;                  // ya se lleno la pantalla: se aborta y se libera solo
+  int n = wiCopyW;
+  if(wiSkipX + n > w) n = w - wiSkipX;
+  if(n > 0) memcpy(wallImg + (size_t)dy * SCR_W + wiDstX, rgb + wiSkipX, (size_t)n * 2);
+  wiRows = y + 1;
+  return true;
+}
+static void* wallImgAlloc(size_t n){
+  void* p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  return p ? p : malloc(n);
+}
+static void  wallImgFree(void* p){ heap_caps_free(p); }
+static void  wallImgDrop(){
+  if(wallImg){ heap_caps_free(wallImg); wallImg = NULL; }
+  wallImgOk = false;
+}
+// Decodifica gWallPath a wallImg con el encuadre gWallFit. Devuelve false y
+// deja gWallErr con un motivo legible si no se puede.
+static bool wallImgLoad(){
+  wallImgOk = false;
+  gWallErr[0] = 0;
+  if(!gWallPath[0]){ snprintf(gWallErr, sizeof(gWallErr), "Sin imagen elegida"); return false; }
+  if(!flexFsReady() || !flexFsExists(gWallPath)){
+    snprintf(gWallErr, sizeof(gWallErr), "La imagen ya no esta");
+    return false;
+  }
+  uint32_t sz = flexFsSize(gWallPath);
+  if(sz == 0 || sz > WALL_IMG_MAX_BYTES){
+    snprintf(gWallErr, sizeof(gWallErr), "Imagen demasiado grande");
+    return false;
+  }
+  uint8_t* blob = (uint8_t*)heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(!blob) blob = (uint8_t*)malloc(sz);
+  if(!blob){ snprintf(gWallErr, sizeof(gWallErr), "Sin memoria"); return false; }
+  int rd = flexFsReadBin(gWallPath, blob, sz);
+  if(rd <= 0){ free(blob); snprintf(gWallErr, sizeof(gWallErr), "No se pudo leer"); return false; }
+  FlexJpegInfo inf;
+  if(flexJpegProbe(blob, (size_t)rd, &inf) != FLEXJPG_OK){
+    free(blob);
+    snprintf(gWallErr, sizeof(gWallErr), "No es un JPEG valido");
+    return false;
+  }
+  if(inf.progressive){
+    free(blob);
+    snprintf(gWallErr, sizeof(gWallErr), "JPEG progresivo no admitido");
+    return false;
+  }
+  if(!wallImg){
+    wallImg = (uint16_t*)heap_caps_aligned_alloc(64, (size_t)SCR_W * SCR_H * 2,
+                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  }
+  if(!wallImg){ free(blob); snprintf(gWallErr, sizeof(gWallErr), "Sin PSRAM para el fondo"); return false; }
+  // ENCUADRE. El decodificador solo divide por 1, 2, 4 u 8, asi que el
+  // encuadre se elige con ese divisor y con el recorte/centrado de las filas:
+  //   rellenar -> el divisor mas grande que AUN cubre la pantalla (se recorta)
+  //   ajustar  -> el divisor mas pequeno que CABE entera (se centra, con fondo)
+  //   centrar  -> 1:1 y se recorta por el centro
+  int den = 1;
+  if(gWallFit == 1){                                   // ajustar
+    while(den < 8 && (inf.width / den > SCR_W || inf.height / den > SCR_H)) den *= 2;
+  } else if(gWallFit == 0){                            // rellenar
+    while(den < 8 && inf.width / (den * 2) >= SCR_W && inf.height / (den * 2) >= SCR_H) den *= 2;
+  }                                                    // centrar: den = 1
+  int ow = inf.width / den, oh = inf.height / den;
+  if(ow < 1) ow = 1;
+  if(oh < 1) oh = 1;
+  // Fondo por debajo: el color medio de la propia imagen no se conoce todavia,
+  // asi que se usa el fondo integrado por defecto. Solo se ve con "ajustar".
+  drawWallpaperRowsId(wallImg, 0, true, 0, SCR_H - 1);
+  wiDstX  = (ow >= SCR_W) ? 0 : (SCR_W - ow) / 2;
+  wiSkipX = (ow >= SCR_W) ? (ow - SCR_W) / 2 : 0;
+  wiCopyW = (ow >= SCR_W) ? SCR_W : ow;
+  wiDstY  = (oh >= SCR_H) ? -((oh - SCR_H) / 2) : (SCR_H - oh) / 2;
+  wiRows  = 0;
+  int r = flexJpegDecode(blob, (size_t)rd, ow, oh, (uint32_t)SCR_W * SCR_H * 4, NULL,
+                         wallImgRow, NULL, wallImgAlloc, wallImgFree);
+  free(blob);
+  // Un aborto por "ya se lleno la pantalla" no es un fallo: con "rellenar" y
+  // "centrar" es el caso NORMAL, porque la imagen es mas alta que el panel.
+  if(wiRows <= 0){
+    snprintf(gWallErr, sizeof(gWallErr), "%s", flexJpegErrStr(r));
+    wallImgDrop();
+    return false;
+  }
+  wallImgOk = true;
+  return true;
+}
+// Se llama al arrancar y cada vez que cambia la eleccion. Si la imagen ya no se
+// puede cargar, el escritorio vuelve al fondo integrado por defecto en vez de
+// quedarse en negro o reiniciar.
+static void wallEnsureImage(){
+  bool needed = (gWallHome == WALL_IMG || gWallLock == WALL_IMG);
+  if(!needed){ wallImgDrop(); return; }
+  if(wallImgOk) return;
+  if(wallImgLoad()) return;
+  if(gWallHome == WALL_IMG) gWallHome = 0;
+  if(gWallLock == WALL_IMG) gWallLock = 0;
+}
+
+// #############################################################
+// ##  PALETA EXTRAIDA DEL FONDO
+// ##  ------------------------------------------------------
+// ##  Muestreo REDUCIDO -- una rejilla de 20x20 = 400 muestras de
+// ##  384.000 pixeles -- y solo cuando cambia el fondo. Jamas por
+// ##  frame. El acento resultante pasa por un control de
+// ##  luminancia para que SIEMPRE tenga contraste util contra el
+// ##  texto que se le ponga encima.
+// #############################################################
+static bool     gWallPalOn  = false;       // "Aplicar paleta al sistema" (NVS "wallpal")
+static bool     gWallPalOk  = false;       // ya hay una paleta calculada
+static uint16_t gWallAcc    = 0;           // acento
+static uint16_t gWallAcc2   = 0;           // acento claro
+static uint8_t  lum565(uint16_t c){
+  int r = ((c >> 11) & 0x1F) * 255 / 31, g = ((c >> 5) & 0x3F) * 255 / 63, b = (c & 0x1F) * 255 / 31;
+  return (uint8_t)((r * 77 + g * 151 + b * 28) >> 8);
+}
+// Blanco o casi-negro segun la luminancia REAL del fondo (Rec.601): nunca se
+// dibuja texto de un color parecido al de su superficie.
+static uint16_t onColor(uint16_t bg){ return lum565(bg) > 140 ? TC(16,18,26) : TC(255,255,255); }
+static void wallPaletteBuild(const uint16_t* src){
+  if(!src) return;
+  int bestSat = -1, br = 90, bg = 150, bb = 245;
+  for(int y = 8; y < SCR_H; y += 40)
+    for(int x = 8; x < SCR_W; x += 24){
+      uint16_t c = src[(size_t)y * SCR_W + x];
+      int r = ((c >> 11) & 0x1F) * 255 / 31, g = ((c >> 5) & 0x3F) * 255 / 63, b = (c & 0x1F) * 255 / 31;
+      int mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+      int mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+      int sat = (mx - mn) * (mx > 40 ? 1 : 0);          // ignora las zonas casi negras
+      if(sat > bestSat){ bestSat = sat; br = r; bg = g; bb = b; }
+    }
+  int lr = br, lg = bg, lb = bb;
+  int lum = (lr * 77 + lg * 151 + lb * 28) >> 8;
+  if(lum < 70){ lr = lr * 2 + 40; lg = lg * 2 + 40; lb = lb * 2 + 40; }
+  if(lr > 255) lr = 255;
+  if(lg > 255) lg = 255;
+  if(lb > 255) lb = 255;
+  gWallAcc  = rgb565((uint8_t)lr, (uint8_t)lg, (uint8_t)lb);
+  gWallAcc2 = rgb565((uint8_t)((lr + 255) / 2), (uint8_t)((lg + 255) / 2), (uint8_t)((lb + 255) / 2));
+  gWallPalOk = true;
+}
+// ---- Temas integrados -------------------------------------------------------
+// Un tema NO es una paleta nueva: es una combinacion coherente de los ajustes
+// que ya existen (apariencia, material, estilo de icono, fondo y acento). Asi
+// no hay dos fuentes de verdad de color -- el tema semantico sigue mandando --
+// y aplicar uno es cambiar cinco preferencias de golpe, no reescribir la UI.
+// Los colores van como bytes RGB para que la tabla se quede en .rodata (flash).
+struct HomeLook {
+  const char* name;
+  uint8_t dark, glass, iconStyle, wall, palette;
+  uint8_t ar, ag, ab;      // acento
+  uint8_t sr, sg, sb;      // acento claro
+};
+#define LOOK_N 8
+static const HomeLook LOOKS[LOOK_N] = {
+  { "Flex Original",  1, 0, 0, 0, 0,  60,110,235,  140,180,250 },
+  { "Claro",          0, 1, 0, 1, 0,  45, 95,225,  130,180,250 },
+  { "Oscuro",         1, 1, 1, 2, 0,  96,124,235,  160,180,255 },
+  { "AMOLED",         1, 0, 0, 4, 0, 120,140,255,  180,196,255 },
+  { "Oceano",         1, 1, 1, 5, 1,  38,190,196,  150,240,236 },
+  { "Violeta",        1, 1, 1, 6, 1, 186, 96,232,  224,168,248 },
+  { "Naturaleza",     0, 1, 0, 7, 1,  72,170, 80,  168,224,150 },
+  { "Alto contraste", 1, 0, 0, 4, 0, 255,214, 10,  255,236,120 },
+};
+static uint8_t gHomeLook = 0;            // tema integrado activo (NVS "hlook")
+static uint16_t lookAcc(int i){  return rgb565(LOOKS[i].ar, LOOKS[i].ag, LOOKS[i].ab); }
+static uint16_t lookAcc2(int i){ return rgb565(LOOKS[i].sr, LOOKS[i].sg, LOOKS[i].sb); }
+
+// (wallAccent()/wallAccent2() se definen justo detras del tema semantico: su
+// respaldo cuando la paleta esta apagada es el acento del tema.)
+
 
 // #############################################################
 // ##  LIQUID GLASS (aproximacion iOS 26 en software)
@@ -1508,8 +1958,9 @@ static int  gIconStyle = 0;                // estilo de iconos: 0 = Plano, 1 = V
 // ##   · TH() es un simple select de puntero: cero asignaciones, cero
 // ##     trabajo por pixel, cero buffers nuevos.
 // #############################################################
-// Empaquetado RGB565 en tiempo de compilacion (mismo bit a bit que rgb565()).
-#define TC(r,g,b) ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
+// (TC() se define mas arriba, junto al catalogo de fondos: los fondos
+// integrados son el primer codigo del archivo que empaqueta color en tiempo de
+// compilacion, y el preprocesador exige verla antes de su primer uso.)
 
 struct FlexTheme {
   uint16_t page;       // fondo principal de pagina (pantallas a pantalla completa)
@@ -1659,6 +2110,13 @@ static const FlexTheme kThemeLight = {
 #define TH_WALLSURF TC( 44, 54, 92)   // tarjeta/tecla apoyada en el wallpaper (plano)
 #define TH_WALLSURF2 TC(48, 60,110)   // idem, tinte de Liquid Glass
 #define TH_WALLPANEL TC(36, 40, 58)   // panel grande (teclado) sobre el wallpaper
+
+// ACENTO ACTIVO DEL SISTEMA. Con "Aplicar paleta al sistema" encendido manda el
+// color extraido del fondo; si no, el acento del tema semantico. Ningun
+// componente tiene que saber cual de los dos esta mandando: pide wallAccent().
+// El contraste del texto que va encima se resuelve SIEMPRE con onColor().
+static uint16_t wallAccent(){  return (gWallPalOn && gWallPalOk) ? gWallAcc  : TH_PRIM; }
+static uint16_t wallAccent2(){ return (gWallPalOn && gWallPalOk) ? gWallAcc2 : TH_ACCS; }
 
 // Superficie que toca usar segun el MATERIAL activo. Con Liquid Glass el
 // llamante pinta el panel de vidrio con TH_GLASS/TH_GLASS2 de tinte; sin el,
@@ -5096,7 +5554,15 @@ enum { ST_SPLASH = 0, ST_OOBE_LANG, ST_OOBE_NAME, ST_LOCK, ST_HOME, ST_APP, ST_S
        // gesto, su propio scroll y su propio menu contextual, y porque asi la
        // isla de notificaciones y el panel rapido -- que se apagan solos fuera
        // de ST_HOME -- no compiten por el mismo framebuffer.
-       ST_DRAWER };
+       ST_DRAWER,
+       // MODO PERSONALIZACION DEL INICIO. Estado propio y anadido AL FINAL, por
+       // el mismo motivo que todos los anteriores: ningun valor ya existente se
+       // mueve. Es un estado y no un modo dentro de ST_HOME porque tiene su
+       // propio dibujo a pantalla completa, sus propios gestos y su propio
+       // ciclo de vida, y porque asi la isla de notificaciones y el panel
+       // rapido -- que se apagan solos fuera de ST_HOME -- no compiten por el
+       // mismo framebuffer.
+       ST_HOMECFG };
 
 static int  gState = ST_SPLASH;
 static unsigned long splashStart = 0;
@@ -5119,11 +5585,71 @@ static bool editMode = false;                                   // Modo Edicion 
 // ##  iconos en sus sitios, y las apps nuevas caen solas en la
 // ##  pagina 2. Ni un icono se mueve.
 // #############################################################
-#define HOME_PAGES 3
-#define HOME_SLOTS 12                                  // ranuras por pagina (rejilla 4x3)
-#define HOME_TOTAL (HOME_PAGES * HOME_SLOTS)
+// PAGINAS VARIABLES Y REJILLA CONFIGURABLE. Antes eran tres paginas fijas de
+// 4x3. Ahora el numero de paginas (1..5) y la rejilla (4x3, 5x3, 4x4, 5x4) los
+// elige el usuario en Personalizar inicio.
+//
+// EL PASO ENTRE PAGINAS EN homeOrder[] ES FIJO (HOME_STRIDE = 20 ranuras
+// reservadas), NO el numero de ranuras usables. Es lo que permite cambiar de
+// rejilla sin reinterpretar el array entero ni perder un icono: las ranuras
+// sobrantes de cada pagina se mantienen SIEMPRE vacias (homeOrderNormalize las
+// vacia), y al reducir la rejilla los iconos que se quedan fuera se recolocan
+// en el primer hueco util en vez de desaparecer.
+//
+// COMPATIBILIDAD: la clave "hordp" (36 B, 3 paginas x 12) se deja INTACTA, igual
+// que en su dia se dejo "hord" (12 B). Se lee para MIGRAR a la clave nueva
+// "hordq" y ya no se vuelve a escribir: si el usuario baja de version por USB,
+// se encuentra su escritorio de tres paginas tal cual estaba.
+#define HOME_PAGES_MAX 5
+#define HOME_COLS_MAX  5
+#define HOME_ROWS_MAX  4
+#define HOME_STRIDE    (HOME_COLS_MAX * HOME_ROWS_MAX)      // 20 ranuras reservadas por pagina
+#define HOME_TOTAL     (HOME_PAGES_MAX * HOME_STRIDE)       // 100 B en RAM y en NVS
+#define HOME_LEGACY_PAGES 3
+#define HOME_LEGACY_SLOTS 12
+#define HOME_LEGACY_TOTAL (HOME_LEGACY_PAGES * HOME_LEGACY_SLOTS)
 static uint8_t homeOrder[HOME_TOTAL] = { 0,1,2,3,4,5,6,7,8,9,10,11 };  // app id por ranura (reordenable)
-static int     gHomePage = 0;                          // pagina visible (0..HOME_PAGES-1)
+static int     gHomePage  = 0;                         // pagina visible (0..gHomePageN-1)
+static uint8_t gHomePageN = HOME_LEGACY_PAGES;         // paginas existentes (1..HOME_PAGES_MAX)
+static uint8_t gHomeMain  = 0;                         // pagina principal (la de la casita)
+static uint8_t gHomeCols  = 4, gHomeRows = 3;          // rejilla activa
+static uint8_t gHomeIconSz = 1;                        // 0 pequeno · 1 normal · 2 grande
+static bool    gHomeLabels = true;                     // nombres de app bajo el icono
+static bool    gHomeLocked = false;                    // diseno bloqueado (sin arrastrar ni borrar)
+static bool    gHomeDots   = true;                     // indicadores de pagina
+static bool    gHomePinch  = true;                     // gesto de pellizco de dos dedos
+static bool    gHomeReduce = false;                    // reducir animaciones del escritorio
+// Ranuras USABLES de la rejilla activa y paso FIJO dentro de homeOrder[].
+static inline int homeSlotCount(){ return (int)gHomeCols * (int)gHomeRows; }
+static inline int homeIdx(int page, int local){ return page * HOME_STRIDE + local; }
+// Primera ranura USABLE libre recorriendo las paginas en orden, o -1.
+// WIDGETS COLOCADOS. Las tablas viven AQUI, con el resto del modelo del
+// escritorio, porque la normalizacion de iconos necesita saber que celdas
+// ocupan; el dibujo y la edicion estan mas abajo, con las primitivas.
+static HomeWidget gHomeWg[HOME_PAGES_MAX][HOME_WG_MAX];
+static uint8_t    gHomeWgN[HOME_PAGES_MAX] = { 0 };
+// Blob de widgets en NVS: magic + version + por pagina (cuenta + 3 x 5 bytes).
+#define HOME_WG_BLOB (2 + HOME_PAGES_MAX * (1 + HOME_WG_MAX * 5))
+static uint32_t homeCellMask(int page, int skipWg);
+static void     homeWgNormalize();
+static void     homeWgSerialize(uint8_t* b);
+static bool     homeWgDeserialize(const uint8_t* b);
+static void     homeDrawWidgets(int page, int xoff);
+static bool     homeWgFits(int page, int c, int r, int w, int h, int skipWg);
+static void     homeWgRemove(int page, int idx);
+static void     wgRect(const HomeWidget* w, int &x, int &y, int &ww, int &hh);
+static void     wgDrawCell(const HomeWidget* wg, int x, int y, int w, int h, bool mini);
+static int      homeWgAt(int page, int px, int py);
+
+// Primera ranura USABLE y LIBRE (ni icono ni widget encima), o -1.
+static int homeFirstFree(){
+  int n = homeSlotCount();
+  for(int p = 0; p < gHomePageN; p++){
+    uint32_t m = homeCellMask(p, -1);
+    for(int i = 0; i < n; i++) if(!(m & (1u << i))) return homeIdx(p, i);
+  }
+  return -1;
+}
 static bool gMinChanged = false;   // lo pone loop(): true cuando cambia el minuto
 
 // ---- Invalidacion de caches de pantalla ----
@@ -5385,7 +5911,7 @@ static void lockWidgetCard(int y, int kind, const char* title, const char* val, 
 }
 
 static void renderLock(){
-  drawWallpaper(lockBuf, false); setBuf(lockBuf);
+  drawWallpaperRowsId(lockBuf, gWallLock, false, 0, SCR_H - 1); setBuf(lockBuf);   // el bloqueo tiene su propio fondo
   // Barra de estado y reloj van DIRECTAMENTE sobre el wallpaper -> TH_ONWALL
   // (ver la nota de la excepcion en el bloque TEMA SEMANTICO).
   drawWifi(SCR_W - 66, 40, 12, TH_ONWALL);
@@ -5524,16 +6050,58 @@ static void drawHomeWidgets(uint32_t tm){
 #define HOME_DOTS_Y   (HOME_GY0 + 2 * HOME_ROWSTEP + HOME_ICON_S + 34)   // 542
 // Franja que cambia al pasar de pagina: rejilla + etiquetas + puntos.
 // Todo lo de arriba (barra de estado, widgets) y lo de abajo (dock,
-// barra de navegacion) es identico en las tres paginas, asi que el
+// barra de navegacion) es identico en todas las paginas, asi que el
 // deslizamiento solo mueve esta banda -- ni un pixel mas.
 #define HOME_BAND_TOP (HOME_GY0 - 6)                                     // 206
-#define HOME_BAND_BOT (HOME_DOTS_Y + 18)                                 // 560
-#define HOME_BAND_H   (HOME_BAND_BOT - HOME_BAND_TOP)
+// El borde INFERIOR de la banda depende de la rejilla (con cuatro filas los
+// puntos bajan), asi que es una funcion. El cache del deslizamiento se reserva
+// para el caso MAS ALTO: asi cambiar de rejilla no obliga a reservar de nuevo.
+// 596 = banda de la rejilla MAS ALTA (5x4). Es un limite con consecuencia
+// medible: hpBuf + hpBg tienen que seguir cabiendo en menos de lo que ocupa un
+// framebuffer completo, o el cache del deslizamiento dejaria de ser una mejora.
+// Lo comprueba tests/host (testDeslizarPaginas).
+#define HOME_BAND_BOT_MAX 596
+#define HOME_BAND_H   (HOME_BAND_BOT_MAX - HOME_BAND_TOP)
 
+// GEOMETRIA DE LA REJILLA ACTIVA. Con los valores de fabrica (4x3, iconos
+// normales) devuelve EXACTAMENTE los numeros de siempre -- S=72, gx0=24,
+// gy0=212, paso 120x112 --, asi que una placa que actualice no ve moverse ni
+// un icono hasta que el usuario cambie la rejilla a mano.
+static void homeGrid(int &S, int &gx0, int &gy0, int &cstep, int &rstep, int &cols, int &rows){
+  static const int ICON_PX[3] = { 60, 72, 84 };
+  cols = gHomeCols;
+  if(cols < 4) cols = 4;
+  if(cols > HOME_COLS_MAX) cols = HOME_COLS_MAX;
+  rows = gHomeRows;
+  if(rows < 3) rows = 3;
+  if(rows > HOME_ROWS_MAX) rows = HOME_ROWS_MAX;
+  S     = ICON_PX[gHomeIconSz > 2 ? 1 : gHomeIconSz];
+  cstep = SCR_W / cols;                          // 4 columnas -> 120 · 5 -> 96
+  gy0   = HOME_GY0;
+  rstep = (rows >= 4) ? 92 : HOME_ROWSTEP;       // con cuatro filas la banda se aprieta
+  // El icono nunca invade la celda vecina ni pisa la etiqueta de la fila de abajo.
+  if(S > cstep - 20) S = cstep - 20;
+  if(S > rstep - 26) S = rstep - 26;
+  if(S < 44) S = 44;
+  gx0 = (cstep - S) / 2;
+}
+static int homeDotsY(){
+  int S, gx0, gy0, cs, rs, cols, rows; homeGrid(S, gx0, gy0, cs, rs, cols, rows);
+  // Con cuatro filas los puntos se acercan a la ultima etiqueta (24 en vez de
+  // 34): asi la banda movil no crece tanto que el cache del deslizamiento pase
+  // a costar mas que un framebuffer entero.
+  return gy0 + (rows - 1) * rs + S + (rows >= 4 ? 24 : 34);   // 4x3 normales -> 542, el de siempre
+}
+static int homeBandBot(){
+  int y = homeDotsY() + 18;
+  return y > HOME_BAND_BOT_MAX ? HOME_BAND_BOT_MAX : y;
+}
 static inline void homeSlotXY(int slot, int &x, int &y){
-  int c = slot % 4, r = slot / 4;
-  x = HOME_GX0 + c * HOME_COLSTEP;
-  y = HOME_GY0 + r * HOME_ROWSTEP;
+  int S, gx0, gy0, cs, rs, cols, rows; homeGrid(S, gx0, gy0, cs, rs, cols, rows);
+  if(cols < 1) cols = 1;
+  int c = slot % cols, r = slot / cols;
+  x = gx0 + c * cs;
+  y = gy0 + r * rs;
 }
 
 // Cede el nucleo durante composiciones largas. Ademas de alimentar loopTask,
@@ -5549,18 +6117,24 @@ static void uiRenderCooperate(){
 // preparar una pagina fuera de pantalla: doce iconos Liquid Glass seguidos no
 // pueden monopolizar loopTask hasta disparar TASK_WDT.
 static void homeDrawGridWork(int page, int xoff, bool cooperative){
-  if(page < 0 || page >= HOME_PAGES) return;
-  for(int i = 0; i < HOME_SLOTS; i++){
-    uint8_t id = homeOrder[page * HOME_SLOTS + i];
+  if(page < 0 || page >= gHomePageN) return;
+  int S, gx0, gy0, cs, rs, cols, rows; homeGrid(S, gx0, gy0, cs, rs, cols, rows);
+  // Con cinco columnas la celda mide 96 px: un nombre largo a tamano 2 invadiria
+  // la celda vecina, asi que baja a tamano 1. Con la rejilla de siempre (celda
+  // de 120) no cambia nada.
+  int lblSz = (cs >= 110) ? 2 : 1;
+  int n = homeSlotCount();
+  for(int i = 0; i < n; i++){
+    uint8_t id = homeOrder[homeIdx(page, i)];
     if(id == HOME_EMPTY) continue;
     int ix, iy; homeSlotXY(i, ix, iy);
     ix += xoff;
     // Fuera de pantalla del todo: ni se dibuja. Durante el arrastre
     // esto ahorra la mitad de los iconos en cuanto la pagina lleva
     // medio recorrido, que es justo cuando mas hay que ir rapido.
-    if(ix + HOME_ICON_S < 0 || ix > SCR_W) continue;
-    drawAppIcon(id, ix, iy, HOME_ICON_S);
-    drawTextC(ix + HOME_ICON_S / 2, iy + HOME_ICON_S + 6, appName(id), 2, TH_ONWALL);
+    if(ix + S < 0 || ix > SCR_W) continue;
+    drawAppIcon(id, ix, iy, S);
+    if(gHomeLabels) drawTextC(ix + S / 2, iy + S + 6, appName(id), lblSz, TH_ONWALL);
     if(cooperative && (i & 1)) uiRenderCooperate();
   }
 }
@@ -5571,12 +6145,22 @@ static void homeDrawGridWork(int page, int xoff, bool cooperative){
 // hace que el indicador se sienta parte del gesto y no un aviso
 // posterior.
 static void homeDrawDots(int from, int to, float frac){
-  int n = HOME_PAGES;
+  if(!gHomeDots) return;
+  int n = gHomePageN, dy = homeDotsY();
   int x0 = SCR_W / 2 - (n - 1) * 9;
-  for(int i = 0; i < n; i++) fillCircleA(x0 + i * 18, HOME_DOTS_Y, 4, TH_ONWALL, 110);
+  for(int i = 0; i < n; i++){
+    if(i == gHomeMain){
+      // La pagina PRINCIPAL se marca con una casita en vez de un punto: es la
+      // misma convencion que usa el modo de personalizacion, asi que el usuario
+      // ve en el escritorio lo mismo que eligio alli.
+      int x = x0 + i * 18;
+      fillTriangle(x, dy - 7, x - 6, dy - 1, x + 6, dy - 1, TH_ONWALL);
+      fillRect(x - 4, dy - 1, 8, 6, TH_ONWALL);
+    } else fillCircleA(x0 + i * 18, dy, 4, TH_ONWALL, 110);
+  }
   float pos = (float)from + ((float)(to - from)) * frac;
   int   cx  = (int)(x0 + pos * 18.0f + 0.5f);
-  fillCircleA(cx, HOME_DOTS_Y, 5, TH_ONWALL, 255);
+  if(from != gHomeMain || to != gHomeMain) fillCircleA(cx, dy, 5, TH_ONWALL, 255);
 }
 
 // Compone el escritorio de `page` ENTERO en `dst`. Es la funcion que
@@ -5599,7 +6183,10 @@ static void renderHomeInto(uint16_t* dst, int page){
   // rejilla de apps 4x3 de ESTA pagina. homeOrder[] puede tener ranuras
   // vacias (HOME_EMPTY) desde que existe la Caja de aplicaciones: quitar una
   // app de Inicio deja su hueco, no recoloca el resto de la rejilla.
-  if(!editMode) homeDrawGridWork(page, 0, true); // cede entre iconos: nunca monopoliza loopTask
+  if(!editMode){
+    homeDrawWidgets(page, 0);                   // widgets colocados de ESTA pagina
+    homeDrawGridWork(page, 0, true);            // cede entre iconos: nunca monopoliza loopTask
+  }
   homeDrawDots(page, page, 0.0f);
   // barra de navegacion: botones clasicos o barra de gestos (modo iOS)
   if(gNavMode == 0){
@@ -5623,11 +6210,14 @@ static void renderHome(){
 }
 static void showHome(){ blitToFb(homeBuf); flxFlushAll(); }
 static bool hitHomeIcon(int px, int py, int &id){
-  for(int i = 0; i < HOME_SLOTS; i++){
-    uint8_t a = homeOrder[gHomePage * HOME_SLOTS + i];
+  int S, gx0, gy0, cs, rs, cols, rows; homeGrid(S, gx0, gy0, cs, rs, cols, rows);
+  int n = homeSlotCount();
+  if(homeWgAt(gHomePage, px, py) >= 0) return false;   // un widget colocado gana siempre
+  for(int i = 0; i < n; i++){
+    uint8_t a = homeOrder[homeIdx(gHomePage, i)];
     if(a == HOME_EMPTY) continue;          // hueco: no hay nada que tocar ahi
     int ix, iy; homeSlotXY(i, ix, iy);
-    if(px >= ix - 6 && px <= ix + HOME_ICON_S + 6 && py >= iy && py <= iy + HOME_ICON_S + 16){ id = a; return true; }
+    if(px >= ix - 6 && px <= ix + S + 6 && py >= iy && py <= iy + S + 16){ id = a; return true; }
   }
   int dkx = 24, dky = SCR_H - 176, dkw = SCR_W - 48, dkh = 96, dS = 64, inner = dkw - 32, dgap = (inner - 4 * dS) / 3;
   for(int i = 0; i < 4; i++){
@@ -5683,7 +6273,11 @@ static int       hpSettleTo   = 0;     // dx al que llega (0 = se queda, -+SCR_W
 static uint32_t  hpFrameMs = 0;
 
 #define HP_FRAME_MS      33        // 30 fps estables: no saturar PSRAM + DMA2D
+// Reserva: la banda MAS ALTA posible (rejilla de cuatro filas). Lo que se copia
+// de verdad es solo la banda ACTIVA -- hpBandPixels() --, porque copiar de mas
+// escribiria en homeBuf filas que ya no pertenecen a la banda y borraria el dock.
 #define HP_BUF_PIXELS    ((size_t)SCR_W * HOME_BAND_H)
+static inline size_t hpBandPixels(){ return (size_t)SCR_W * (size_t)(homeBandBot() - HOME_BAND_TOP); }
 
 static bool hpEnsureBuf(){
   if(hpBuf && hpBg) return true;
@@ -5700,7 +6294,7 @@ static bool hpEnsureBuf(){
 // Deja compuesta en hpBuf la pagina `page`. Devuelve false si no hay
 // PSRAM: el llamante entonces cambia de pagina sin animar.
 static bool hpPrepare(int page){
-  if(page < 0 || page >= HOME_PAGES) return false;
+  if(page < 0 || page >= gHomePageN) return false;
   if(!hpEnsureBuf()) return false;
   if(hpBufPage == page) return true;      // ya esta: ir y volver no recompone
 
@@ -5709,24 +6303,25 @@ static bool hpPrepare(int page){
   // se guarda compacta. Antes se rehacia una pantalla completa de 768 KB aqui,
   // justo al reconocer el gesto, con blur de widgets y dock incluidos; era el
   // pico que congelaba el dedo y podia dejar al TWDT sin respirar.
-  drawWallpaperRows(bbuf, true, HOME_BAND_TOP, HOME_BAND_BOT - 1);
+  drawWallpaperRows(bbuf, true, HOME_BAND_TOP, homeBandBot() - 1);
   // El fondo vive separado de las paginas. Si se desplazara la imagen ya
   // compuesta (wallpaper + iconos), el degradado y sus manchas viajarian con
   // cada pagina y aparecerian costuras verticales, exactamente como en la
   // grabacion. Esta copia se hace UNA vez al empezar el gesto; cada frame solo
   // restaura filas mediante memcpy y mueve los pixeles que difieren del fondo.
-  memcpy(hpBg, bbuf + (size_t)HOME_BAND_TOP * SCR_W, HP_BUF_PIXELS * 2);
+  memcpy(hpBg, bbuf + (size_t)HOME_BAND_TOP * SCR_W, hpBandPixels() * 2);
   uiRenderCooperate();                    // el fondo ya recorrio ~170k pixeles
   uint16_t* old = gBuf; setBuf(bbuf);
   int cx0 = gClipX0, cx1 = gClipX1, cy0 = gClipY0, cy1 = gClipY1;
   gClipX0 = 0; gClipX1 = SCR_W - 1;
-  gClipY0 = HOME_BAND_TOP; gClipY1 = HOME_BAND_BOT - 1;
+  gClipY0 = HOME_BAND_TOP; gClipY1 = homeBandBot() - 1;
+  homeDrawWidgets(page, 0);
   homeDrawGridWork(page, 0, true);
   homeDrawDots(page, page, 0.0f);
   uiRenderCooperate();                    // tambien cede si la pagina esta vacia
   gClipX0 = cx0; gClipX1 = cx1; gClipY0 = cy0; gClipY1 = cy1;
   setBuf(old);
-  memcpy(hpBuf, bbuf + (size_t)HOME_BAND_TOP * SCR_W, HP_BUF_PIXELS * 2);
+  memcpy(hpBuf, bbuf + (size_t)HOME_BAND_TOP * SCR_W, hpBandPixels() * 2);
   hpBufPage = page;
   return true;
 }
@@ -5765,7 +6360,8 @@ static void hpRenderFrame(int dx){
   int aDst, aSrc, aW; hpViewport(dx, aDst, aSrc, aW);
   int bDst = 0, bSrc = 0, bW = 0;
   if(hpBuf && hpBufPage == hpTo) hpViewport(nx, bDst, bSrc, bW);
-  for(int y = HOME_BAND_TOP; y < HOME_BAND_BOT; y++){
+  int bandBot = homeBandBot(), dotsY = homeDotsY();
+  for(int y = HOME_BAND_TOP; y < bandBot; y++){
     uint16_t* row = bbuf + (size_t)y * SCR_W;
     const uint16_t* bg = hpBg + (size_t)(y - HOME_BAND_TOP) * SCR_W;
     // El wallpaper se restaura SIN DESPLAZAR en todas las columnas. Encima se
@@ -5776,7 +6372,7 @@ static void hpRenderFrame(int dx){
     memcpy(row, bg, (size_t)SCR_W * 2);
     // La franja de puntos se recompone fija mas abajo; no debe viajar como si
     // perteneciera a una pagina.
-    if(y < HOME_DOTS_Y - 8 || y > HOME_DOTS_Y + 10){
+    if(y < dotsY - 8 || y > dotsY + 10){
       if(aW > 0){
         const uint16_t* src = homeBuf + (size_t)y * SCR_W + aSrc;
         for(int x = 0; x < aW; x++) if(src[x] != bg[aSrc + x]) row[aDst + x] = src[x];
@@ -5794,14 +6390,14 @@ static void hpRenderFrame(int dx){
   { float frac = (float)(dx < 0 ? -dx : dx) / (float)SCR_W;
     if(frac > 1.0f) frac = 1.0f;
     homeDrawDots(hpFrom, hpTo, frac); }
-  present(HOME_BAND_TOP, HOME_BAND_BOT - 1);
+  present(HOME_BAND_TOP, bandBot - 1);
   setBuf(fb);
 }
 
 // Salta a `page` sin animar (sin PSRAM, o desde la Caja de apps).
 static void homeGoPage(int page){
   if(page < 0) page = 0;
-  if(page >= HOME_PAGES) page = HOME_PAGES - 1;
+  if(page >= gHomePageN) page = gHomePageN - 1;
   if(page == gHomePage) return;
   gHomePage = page;
   renderHome();
@@ -5822,9 +6418,9 @@ static bool hpTryStart(){
   if(adx < HP_DRAG_MIN || adx < ady * 2) return false;
   // Solo dentro de la banda de la rejilla: sobre los widgets, el dock
   // o la barra de navegacion el gesto sigue siendo de quien era.
-  if(T.startY < HOME_BAND_TOP || T.startY >= HOME_BAND_BOT) return false;
+  if(T.startY < HOME_BAND_TOP || T.startY >= homeBandBot()) return false;
   int to = gHomePage + (dx < 0 ? 1 : -1);
-  if(to < 0 || to >= HOME_PAGES){
+  if(to < 0 || to >= gHomePageN){
     // Borde: no hay pagina a ese lado. No se arrastra -- ni siquiera
     // con resistencia: el escritorio tiene tres paginas y fingir que
     // hay una cuarta a medias solo confunde.
@@ -5861,15 +6457,15 @@ static bool hpTick(){
         // permanecen intactos. Son ~340 KB una vez al terminar, frente a
         // intercambiar dos pantallas completas y conservar 768 KB de cache.
         if(hpBuf && hpBufPage == hpTo){
-          memcpy(homeBuf + (size_t)HOME_BAND_TOP * SCR_W, hpBuf, HP_BUF_PIXELS * 2);
+          memcpy(homeBuf + (size_t)HOME_BAND_TOP * SCR_W, hpBuf, hpBandPixels() * 2);
           hpBufPage = -1;
           qsDirty = true;      // la cortina se compone de homeBuf: su cache ya no vale
         } else renderHome();
       }
       // El ultimo frame puede no haber caido exactamente en +-SCR_W. Publicar
       // solo la banda deja el resultado final exacto sin otro flush de 768 KB.
-      fbCopyBand(homeBuf, HOME_BAND_TOP, HOME_BAND_BOT - 1);
-      flxFlush(HOME_BAND_TOP, HOME_BAND_BOT - 1);
+      fbCopyBand(homeBuf, HOME_BAND_TOP, homeBandBot() - 1);
+      flxFlush(HOME_BAND_TOP, homeBandBot() - 1);
       return true;
     }
     float p = (float)e / (float)HP_SETTLE_MS;
@@ -5974,18 +6570,19 @@ static void lockTick(){
 // #############################################################
 // ##  MODO EDICION del Home (long-press, jiggle, drag & drop)
 // #############################################################
-static float edCurX[12], edCurY[12];        // posiciones animadas (resorte)
+static float edCurX[HOME_STRIDE], edCurY[HOME_STRIDE];   // posiciones animadas (resorte)
 static int   edDrag = -1, edHoverSlot = -1; // icono arrastrado / slot bajo el dedo
 static float edDragX = 0, edDragY = 0;
 // Posicion del icono arrastrado, acotada al area de rejilla. Antes este limite
 // solo se aplicaba en los frames de MOVIMIENTO: en el frame del agarre se
 // escribia T.x-36 en crudo y el icono podia dibujarse hasta 36 px fuera.
 static void edSetDrag(int tx, int ty){
-  float dx = (float)(tx - 36), dy = (float)(ty - 36);
+  int S, gx0, gy0, cs, rs, cols, rows; homeGrid(S, gx0, gy0, cs, rs, cols, rows);
+  float dx = (float)(tx - S / 2), dy = (float)(ty - S / 2);
   if(dx < 8) dx = 8;
-  if(dx > SCR_W - 80) dx = SCR_W - 80;
-  if(dy < 140) dy = 140;
-  if(dy > 500) dy = 500;
+  if(dx > SCR_W - S - 8) dx = (float)(SCR_W - S - 8);
+  if(dy < HOME_GY0 - 72) dy = (float)(HOME_GY0 - 72);
+  if(dy > homeBandBot() - S - 10) dy = (float)(homeBandBot() - S - 10);
   edDragX = dx; edDragY = dy;
 }
 static unsigned long edHoverMs = 0, edMs = 0;
@@ -5993,6 +6590,7 @@ static unsigned long edHoverMs = 0, edMs = 0;
 // vecina. Es independiente del gesto normal de pasar pagina, que se desactiva
 // mientras el escritorio esta en Modo Edicion.
 static int      edEdgeDir = 0;
+static int      edWDrag   = -1;      // widget de la pagina que se esta moviendo
 static uint32_t edEdgeMs  = 0;
 
 // PERSISTENCIA DEL ESCRITORIO Y DEL REGISTRO. Tres claves en la misma
@@ -6007,12 +6605,62 @@ static void homeOrderSave(){
   // version anterior del firmware por USB, se encuentra su escritorio
   // de una pagina tal cual estaba en vez de una clave con un tamano
   // que esa version no sabe leer.
-  prefs.putBytes("hordp", homeOrder, HOME_TOTAL);
+  // Clave "hordq" (100 B, paso fijo de 20 ranuras). Ver la cabecera del modelo:
+  // "hordp" y "hord" quedan congeladas para poder bajar de version.
+  prefs.putBytes("hordq", homeOrder, HOME_TOTAL);
+  prefs.putInt("hpgn",  (int)gHomePageN);
+  prefs.putInt("hpmain",(int)gHomeMain);
+  prefs.putInt("hgrid", ((int)gHomeCols << 8) | (int)gHomeRows);
+  prefs.putInt("hicon", (int)gHomeIconSz);
+  prefs.putInt("hflag", (int)((gHomeLabels ? 1 : 0) | (gHomeLocked ? 2 : 0) |
+                              (gHomeDots   ? 4 : 0) | (gHomePinch  ? 8 : 0) |
+                              (gHomeReduce ? 16 : 0)));
+  // Widgets: un blob de tamano FIJO con magic y version, validado entero al
+  // cargar. 2 + 5 paginas x (1 + 3x5) = 82 B.
+  { uint8_t wb[HOME_WG_BLOB]; homeWgSerialize(wb); prefs.putBytes("hwg", wb, HOME_WG_BLOB); }
   prefs.putInt("appn", APP_N);          // cuantas apps conocia este firmware (ver homeOrderLoad)
   prefs.putInt("appfav",  (int)gAppFav);
   prefs.putInt("apphide", (int)gAppHidden);
   prefs.end();
 }
+// PREFERENCIAS DE ASPECTO DEL INICIO (fondo, encuadre, tema integrado y
+// paleta). Van aparte de homeOrderSave() porque se tocan en momentos muy
+// distintos -- elegir un fondo no reordena iconos -- y asi ninguna de las dos
+// reescribe claves de la otra. Una sola apertura de NVS por guardado y sin
+// String: la ruta de la imagen es un buffer fijo.
+static void homeCfgSave(){
+  prefs.begin("flexos", false);
+  prefs.putInt("wallh",  (int)gWallHome);
+  prefs.putInt("walll",  (int)gWallLock);
+  prefs.putInt("wallfit",(int)gWallFit);
+  prefs.putBool("wallpal", gWallPalOn);
+  prefs.putInt("hlook",  (int)gHomeLook);
+  prefs.putString("wallp", gWallPath);
+  prefs.end();
+}
+static void homeCfgLoad(){
+  prefs.begin("flexos", true);
+  int wh = prefs.getInt("wallh", 0), wl = prefs.getInt("walll", 0);
+  int wf = prefs.getInt("wallfit", 0), lk = prefs.getInt("hlook", 0);
+  gWallPalOn = prefs.getBool("wallpal", false);
+  String pth = prefs.getString("wallp", "");
+  prefs.end();
+  // Acotado SIEMPRE: unas prefs corruptas no pueden dejar un fondo inexistente.
+  gWallHome = (wh == WALL_IMG || (wh >= 0 && wh < WALL_N)) ? (uint8_t)wh : 0;
+  gWallLock = (wl == WALL_IMG || (wl >= 0 && wl < WALL_N)) ? (uint8_t)wl : 0;
+  gWallFit  = (wf >= 0 && wf <= 2) ? (uint8_t)wf : 0;
+  gHomeLook = (lk >= 0 && lk < LOOK_N) ? (uint8_t)lk : 0;
+  snprintf(gWallPath, sizeof(gWallPath), "%s", pth.c_str());
+  // Si la imagen ya no se puede cargar (archivo borrado, ya no es un JPEG, sin
+  // PSRAM), wallEnsureImage vuelve al fondo integrado por defecto SIN reiniciar.
+  wallEnsureImage();
+  if(gWallHome != WALL_IMG && gWallLock != WALL_IMG && !gWallPalOn){
+    gWallAcc  = lookAcc(gHomeLook);
+    gWallAcc2 = lookAcc2(gHomeLook);
+    gWallPalOk = true;
+  }
+}
+
 // Valores de fabrica: se derivan del campo 'dflt' de APP_REG, que es el unico
 // sitio donde se declara que apps nacen en el escritorio. APP_REG esta definido
 // mas abajo en el archivo, asi que esto se declara aqui y se define alli.
@@ -6028,18 +6676,52 @@ static void drawerRegistryAdopt(int fromId);
 //   3. si ya no quedan huecos, se le quita la marca de favorita (las tres
 //      paginas tienen 36 ranuras en total).
 static void homeOrderNormalize(){
+  if(gHomePageN < 1) gHomePageN = 1;
+  homeWgNormalize();          // los widgets mandan sobre las celdas: van primero
+  if(gHomePageN > HOME_PAGES_MAX) gHomePageN = HOME_PAGES_MAX;
+  if(gHomeMain >= gHomePageN) gHomeMain = 0;
+  if(gHomePage < 0) gHomePage = 0;
+  if(gHomePage >= gHomePageN) gHomePage = gHomeMain;
+  int n = homeSlotCount();
   bool seen[APP_N] = { false };
-  for(int i = 0; i < HOME_TOTAL; i++){
-    uint8_t v = homeOrder[i];
-    if(v >= APP_N || seen[v] || !appIsFav(v) || appIsHidden(v)){ homeOrder[i] = HOME_EMPTY; continue; }
-    seen[v] = true;
+  // 0. Toda ranura que no exista en la rejilla o en la pagina ACTIVAS se
+  //    vacia, y su icono se recoloca abajo (regla 2). Es lo que hace que
+  //    reducir la rejilla o borrar una pagina no pierda ni un icono.
+  uint8_t rescue[HOME_TOTAL]; int nres = 0;
+  for(int p = 0; p < HOME_PAGES_MAX; p++)
+    for(int i = 0; i < HOME_STRIDE; i++){
+      int k = homeIdx(p, i);
+      if(p < gHomePageN && i < n) continue;
+      if(homeOrder[k] != HOME_EMPTY){ rescue[nres++] = homeOrder[k]; homeOrder[k] = HOME_EMPTY; }
+    }
+  for(int p = 0; p < gHomePageN; p++){
+    for(int i = 0; i < n; i++){
+      int k = homeIdx(p, i);
+      uint8_t v = homeOrder[k];
+      if(v == HOME_EMPTY) continue;
+      // Un icono no puede quedarse DEBAJO de un widget: se rescata y se recoloca.
+      bool underWg = false;
+      { uint32_t bit = (1u << i);
+        homeOrder[k] = HOME_EMPTY;
+        underWg = (homeCellMask(p, -1) & bit) != 0;
+        homeOrder[k] = v; }
+      if(underWg){ rescue[nres++] = v; homeOrder[k] = HOME_EMPTY; continue; }
+      if(v >= APP_N || seen[v] || !appIsFav(v) || appIsHidden(v)){ homeOrder[k] = HOME_EMPTY; continue; }
+      seen[v] = true;
+    }
   }
-  // Toda app favorita sin ranura ocupa el PRIMER hueco libre, recorriendo
-  // las paginas en orden.
+  // 1. los iconos rescatados de ranuras que ya no existen vuelven a entrar
+  for(int r = 0; r < nres; r++){
+    uint8_t v = rescue[r];
+    if(v >= APP_N || seen[v] || !appIsFav(v) || appIsHidden(v)) continue;
+    int slot = homeFirstFree();
+    if(slot < 0){ gAppFav &= (uint32_t)~(1u << v); continue; }
+    homeOrder[slot] = v; seen[v] = true;
+  }
+  // 2. toda app favorita sin ranura ocupa el PRIMER hueco libre
   for(int id = 0; id < APP_N; id++){
     if(!appIsFav(id) || appIsHidden(id) || seen[id]) continue;
-    int slot = -1;
-    for(int i = 0; i < HOME_TOTAL && slot < 0; i++) if(homeOrder[i] == HOME_EMPTY) slot = i;
+    int slot = homeFirstFree();
     if(slot < 0){ gAppFav &= (uint32_t)~(1u << id); continue; }   // escritorio lleno de verdad
     homeOrder[slot] = (uint8_t)id; seen[id] = true;
   }
@@ -6050,14 +6732,31 @@ static void homeOrderLoad(){
   // vieja de 12 bytes: esos doce iconos son la pagina 0 y las otras
   // dos nacen vacias. Asi una placa que actualiza conserva su
   // escritorio exactamente como estaba.
-  size_t n = prefs.getBytes("hordp", homeOrder, HOME_TOTAL);
+  // Ajustes del escritorio. -1 hace de centinela de "la clave no existe".
+  int pgn  = prefs.getInt("hpgn",  -1);
+  int pmn  = prefs.getInt("hpmain", 0);
+  int grid = prefs.getInt("hgrid", -1);
+  int icsz = prefs.getInt("hicon", 1);
+  int hfl  = prefs.getInt("hflag", -1);
+  size_t n = prefs.getBytes("hordq", homeOrder, HOME_TOTAL);
   if(n != HOME_TOTAL){
-    uint8_t legacy[HOME_SLOTS];
-    size_t ln = prefs.getBytes("hord", legacy, HOME_SLOTS);
+    // MIGRACION en dos escalones, de la mas reciente a la mas antigua:
+    //   "hordp" = 3 paginas x 12 ranuras (paso 12)  -> paso 20, 3 paginas
+    //   "hord"  = 1 pagina  x 12 ranuras            -> pagina 0
+    uint8_t legacy[HOME_LEGACY_TOTAL];
+    size_t ln = prefs.getBytes("hordp", legacy, HOME_LEGACY_TOTAL);
     for(int i = 0; i < HOME_TOTAL; i++) homeOrder[i] = HOME_EMPTY;
-    if(ln == HOME_SLOTS){
-      for(int i = 0; i < HOME_SLOTS; i++) homeOrder[i] = legacy[i];
+    if(ln == HOME_LEGACY_TOTAL){
+      for(int p = 0; p < HOME_LEGACY_PAGES; p++)
+        for(int i = 0; i < HOME_LEGACY_SLOTS; i++)
+          homeOrder[homeIdx(p, i)] = legacy[p * HOME_LEGACY_SLOTS + i];
       n = HOME_TOTAL;                       // migrada: cuenta como valida
+    } else {
+      size_t l1 = prefs.getBytes("hord", legacy, HOME_LEGACY_SLOTS);
+      if(l1 == HOME_LEGACY_SLOTS){
+        for(int i = 0; i < HOME_LEGACY_SLOTS; i++) homeOrder[homeIdx(0, i)] = legacy[i];
+        n = HOME_TOTAL;
+      }
     }
   }
   // -1 como valor por defecto hace de centinela de "la clave no existe": un
@@ -6067,7 +6766,30 @@ static void homeOrderLoad(){
   int fav  = prefs.getInt("appfav",  -1);
   int hide = prefs.getInt("apphide", -1);
   int known = prefs.getInt("appn", 16);      // cuantas apps conocia el firmware que guardo esto
+  { uint8_t wb[HOME_WG_BLOB];
+    size_t wn = prefs.getBytes("hwg", wb, HOME_WG_BLOB);
+    if(wn != HOME_WG_BLOB || !homeWgDeserialize(wb))
+      for(int p = 0; p < HOME_PAGES_MAX; p++) gHomeWgN[p] = 0;   // sin widgets: estado valido
+  }
   prefs.end();
+  // Ajustes del escritorio, siempre acotados: unas prefs corruptas no pueden
+  // dejar una rejilla imposible ni una pagina principal fuera de rango.
+  gHomePageN = (pgn >= 1 && pgn <= HOME_PAGES_MAX) ? (uint8_t)pgn : HOME_LEGACY_PAGES;
+  gHomeMain  = (pmn >= 0 && pmn < gHomePageN) ? (uint8_t)pmn : 0;
+  if(grid >= 0){
+    int c = (grid >> 8) & 0xFF, r = grid & 0xFF;
+    gHomeCols = (c >= 4 && c <= HOME_COLS_MAX) ? (uint8_t)c : 4;
+    gHomeRows = (r >= 3 && r <= HOME_ROWS_MAX) ? (uint8_t)r : 3;
+  }
+  gHomeIconSz = (icsz >= 0 && icsz <= 2) ? (uint8_t)icsz : 1;
+  if(hfl >= 0){
+    gHomeLabels = (hfl & 1)  != 0;
+    gHomeLocked = (hfl & 2)  != 0;
+    gHomeDots   = (hfl & 4)  != 0;
+    gHomePinch  = (hfl & 8)  != 0;
+    gHomeReduce = (hfl & 16) != 0;
+  }
+  gHomePage = gHomeMain;                    // al arrancar se entra por la pagina principal
   // Primer arranque (o actualizacion desde una version sin estas claves): el
   // reparto de fabrica sale del registro, no de constantes sueltas.
   if(fav < 0){ drawerRegistryDefaults(); }
@@ -6080,7 +6802,7 @@ static void homeOrderLoad(){
   // siempre en la pagina 0, y el resto vacio.
   if(n != HOME_TOTAL){
     for(int i = 0; i < HOME_TOTAL; i++) homeOrder[i] = HOME_EMPTY;
-    for(int i = 0; i < HOME_SLOTS; i++) homeOrder[i] = (uint8_t)i;
+    for(int i = 0; i < HOME_LEGACY_SLOTS; i++) homeOrder[homeIdx(0, i)] = (uint8_t)i;
   }
   const uint32_t validApps = (1u << APP_N) - 1u;
   gAppFav &= validApps;
@@ -6098,16 +6820,19 @@ static void homeOrderLoad(){
 // gestos peleandose por el mismo dedo. Reordenar dentro de la pagina
 // funciona igual que siempre; mover una app de pagina se hace desde la
 // Caja de aplicaciones, que ya sabe hacerlo.
-static inline int edSlot(int local){ return gHomePage * HOME_SLOTS + local; }
+static inline int edSlot(int local){ return homeIdx(gHomePage, local); }
 static void edSlotXY(int slot, int &x, int &y){ homeSlotXY(slot, x, y); }
 static int  edSlotAt(int px, int py){
-  if(px < HOME_GX0 || py < HOME_GY0) return -1;
-  int c = (px - HOME_GX0) / HOME_COLSTEP, r = (py - HOME_GY0) / HOME_ROWSTEP;
-  if(c < 0 || c > 3 || r < 0 || r > 2) return -1;
-  int slot = r * 4 + c; return slot < HOME_SLOTS ? slot : -1;
+  int S, gx0, gy0, cs, rs, cols, rows; homeGrid(S, gx0, gy0, cs, rs, cols, rows);
+  if(py < gy0) return -1;
+  int c = px / cs, r = (py - gy0) / rs;
+  if(c < 0 || c >= cols || r < 0 || r >= rows) return -1;
+  int slot = r * cols + c;
+  return slot < homeSlotCount() ? slot : -1;
 }
 static void edMove(int from, int to){        // reinserta el icono (desplaza los demas)
-  if(from == to || from < 0 || to < 0 || from >= HOME_SLOTS || to >= HOME_SLOTS) return;
+  int cells = homeSlotCount();
+  if(from == to || from < 0 || to < 0 || from >= cells || to >= cells) return;
   uint8_t v = homeOrder[edSlot(from)];
   if(from < to) for(int i = from; i < to; i++) homeOrder[edSlot(i)] = homeOrder[edSlot(i + 1)];
   else          for(int i = from; i > to; i--) homeOrder[edSlot(i)] = homeOrder[edSlot(i - 1)];
@@ -6136,6 +6861,12 @@ static void widgetToggleSize(int which){
   cfgSavePrefs();
   renderHome();          // homeBuf tiene que reflejar el nuevo layout antes de que edRender() lo recomponga
 }
+// Borde inferior de la banda que recompone el Modo Edicion. Sale de la rejilla
+// activa (con cuatro filas la ultima etiqueta baja), nunca de un 580 fijo.
+static int edBandBot(){
+  int b = homeBandBot() - 1;
+  return b > SCR_H - 1 ? SCR_H - 1 : b;
+}
 static void edRender(){
   // Los iconos en Modo Edicion ahora usan el gIconStyle REAL (Vidrio si esta
   // activo en Ajustes) en vez de forzarse a Plano. Cada icono Vidrio pasa por
@@ -6153,39 +6884,54 @@ static void edRender(){
     edMs = now;
   }
   setBuf(bbuf);
-  for(int j = 120; j < 580; j++) memcpy(bbuf + (size_t)j * SCR_W, homeBuf + (size_t)j * SCR_W, SCR_W * 2);  // fondo (sin rejilla)
+  for(int j = 120; j <= edBandBot(); j++) memcpy(bbuf + (size_t)j * SCR_W, homeBuf + (size_t)j * SCR_W, SCR_W * 2);  // fondo (sin rejilla)
   uint32_t t = millis();
   { int cx, cy, cw, ch, nx, ny, nw, nh; bool cv, nv;                          // asas de resize de los widgets
     widgetLayout(cx, cy, cw, ch, cv, nx, ny, nw, nh, nv);
     if(cv) drawWidgetHandle(cx + cw - 30, cy + ch - 30);
     if(nv) drawWidgetHandle(nx + nw - 30, ny + nh - 30);
   }
-  for(int i = 0; i < HOME_SLOTS; i++){
+  int gS, ggx0, ggy0, gcs, grs, gcols, grows; homeGrid(gS, ggx0, ggy0, gcs, grs, gcols, grows);
+  // Widgets colocados: se dibujan bajo los iconos y llevan su insignia de
+  // quitar. El que se esta moviendo se resalta con el acento activo.
+  for(int k = 0; k < gHomeWgN[gHomePage] && k < HOME_WG_MAX; k++){
+    if(gHomeWg[gHomePage][k].type == WG_NONE) continue;
+    int wx, wy, ww, wh; wgRect(&gHomeWg[gHomePage][k], wx, wy, ww, wh);
+    if(k == edWDrag) fillRoundRectA(wx - 4, wy - 4, ww + 8, wh + 8, 22, wallAccent(), 120);
+    wgDrawCell(&gHomeWg[gHomePage][k], wx, wy, ww, wh, false);
+    if(!gHomeLocked){
+      fillCircle(wx + 12, wy + 12, 11, TH_DANGER);
+      strokeSegAA(wx + 8.0f, wy + 8.0f, wx + 16.0f, wy + 16.0f, 2.0f, TH_ONACC);
+      strokeSegAA(wx + 16.0f, wy + 8.0f, wx + 8.0f, wy + 16.0f, 2.0f, TH_ONACC);
+    }
+  }
+  int cells = homeSlotCount();
+  for(int i = 0; i < cells; i++){
     if(i == edDrag || homeOrder[edSlot(i)] == HOME_EMPTY) continue;   // ranura vacia: nada que temblar
     int tx, ty; edSlotXY(i, tx, ty);
     edCurX[i] += (tx - edCurX[i]) * 0.2f; edCurY[i] += (ty - edCurY[i]) * 0.2f;   // resorte
     float ph = i * 0.6f;
     int ox = (int)(2 * sinf(t * 0.02f + ph)), oy = (int)(2 * cosf(t * 0.017f + ph));  // temblor +-2px
-    int s = 64, off = (72 - s) / 2;                                              // escala ~90%
+    int s = gS * 8 / 9, off = (gS - s) / 2;                                      // escala ~90%
     drawAppIcon(homeOrder[edSlot(i)], (int)edCurX[i] + off + ox, (int)edCurY[i] + off + oy, s);
   }
   if(edDrag >= 0){                                                              // icono arrastrado (translucido)
-    int dx = (int)edDragX, dy = (int)edDragY, s = 72;
+    int dx = (int)edDragX, dy = (int)edDragY, s = gS;
     if(uiGlass) drawLiquidGlassPanel(dx - 6, dy - 6, s + 12, s + 12, 16, TH_GLASS2);
     else fillRoundRectA(dx - 6, dy - 6, s + 12, s + 12, 16, TH_SEL, 150);
     drawAppIcon(homeOrder[edSlot(edDrag)], dx, dy, s);
   }
   drawTextC(SCR_W / 2, 176, "Arrastra los iconos - Inicio para salir", 1, TH_ONWALL2);   // sobre el wallpaper
-  present(120, 580);
+  present(120, edBandBot());
 }
 static void edEnter(){
   editMode = true;
   renderHome();                              // homeBuf sin rejilla (editMode salta el grid)
-  for(int i = 0; i < HOME_SLOTS; i++){ int x, y; edSlotXY(i, x, y); edCurX[i] = x; edCurY[i] = y; }
-  edDrag = -1; edHoverSlot = -1; edEdgeDir = 0;
+  for(int i = 0; i < HOME_STRIDE; i++){ int x, y; edSlotXY(i, x, y); edCurX[i] = (float)x; edCurY[i] = (float)y; }
+  edDrag = -1; edHoverSlot = -1; edEdgeDir = 0; edWDrag = -1;
 }
 static void edExit(){
-  editMode = false; edDrag = -1;
+  editMode = false; edDrag = -1; edWDrag = -1;
   homeOrderSave();
   renderHome(); showHome();
 }
@@ -6193,9 +6939,36 @@ static void edTick(){
   if(T.pressed){
     int which;
     if(widgetHandleAt(T.x, T.y, which)){ widgetToggleSize(which); edRender(); return; }
+    // Widgets: primero su insignia de quitar, luego el agarre para moverlo.
+    int wi = homeWgAt(gHomePage, T.x, T.y);
+    if(wi >= 0){
+      int wx, wy, ww, wh; wgRect(&gHomeWg[gHomePage][wi], wx, wy, ww, wh);
+      if(!gHomeLocked && abs(T.x - (wx + 12)) <= 14 && abs(T.y - (wy + 12)) <= 14){
+        homeWgRemove(gHomePage, wi); homeOrderNormalize(); homeOrderSave();
+        renderHome(); edRender(); return;
+      }
+      if(!gHomeLocked) edWDrag = wi;
+      edDrag = -1; edRender(); return;
+    }
     edDrag = edSlotAt(T.x, T.y);
     if(edDrag >= 0 && homeOrder[edSlot(edDrag)] == HOME_EMPTY) edDrag = -1;   // no se arrastra un hueco
+    if(gHomeLocked) edDrag = -1;                                             // diseno bloqueado
     edSetDrag(T.x, T.y); edHoverSlot = -1; edRender(); return;
+  }
+  if(T.down && edWDrag >= 0){
+    // Mover el widget por celdas: solo se acepta la posicion si CABE de verdad
+    // ahi (homeWgFits ignora el propio widget, para que no choque consigo mismo).
+    int cell = edSlotAt(T.x, T.y);
+    if(cell >= 0){
+      int wS, wgx0, wgy0, wcs, wrs, wcols, wrows; homeGrid(wS, wgx0, wgy0, wcs, wrs, wcols, wrows);
+      int c = cell % wcols, r = cell / wcols;
+      HomeWidget* w = &gHomeWg[gHomePage][edWDrag];
+      if((c != w->col || r != w->row) && homeWgFits(gHomePage, c, r, w->w, w->h, edWDrag)){
+        w->col = (uint8_t)c; w->row = (uint8_t)r;
+        renderHome();
+      }
+    }
+    edRender(); return;
   }
   if(T.down && edDrag >= 0){
     edSetDrag(T.x, T.y);
@@ -6205,12 +6978,12 @@ static void edTick(){
     int dir = 0;
     if(T.x <= EDGE_W)               dir = -1;
     else if(T.x >= SCR_W - EDGE_W)  dir =  1;
-    if(dir != 0 && gHomePage + dir >= 0 && gHomePage + dir < HOME_PAGES){
+    if(dir != 0 && gHomePage + dir >= 0 && gHomePage + dir < gHomePageN){
       if(edEdgeDir != dir){ edEdgeDir = dir; edEdgeMs = millis(); }
       else if(millis() - edEdgeMs > (uint32_t)EDGE_MS){
-        int dst = -1;
-        for(int i = 0; i < HOME_SLOTS && dst < 0; i++)
-          if(homeOrder[(gHomePage + dir) * HOME_SLOTS + i] == HOME_EMPTY) dst = i;
+        int dst = -1, cells2 = homeSlotCount();
+        for(int i = 0; i < cells2 && dst < 0; i++)
+          if(homeOrder[homeIdx(gHomePage + dir, i)] == HOME_EMPTY) dst = i;
         if(dst >= 0){
           uint8_t v = homeOrder[edSlot(edDrag)];
           homeOrder[edSlot(edDrag)] = HOME_EMPTY;
@@ -6221,13 +6994,14 @@ static void edTick(){
           edEdgeDir = 0;
           homeOrderSave();
           renderHome();
-          for(int i = 0; i < HOME_SLOTS; i++){
-            int x, y; edSlotXY(i, x, y); edCurX[i] = x; edCurY[i] = y;
+          for(int i = 0; i < HOME_STRIDE; i++){
+            int x, y; edSlotXY(i, x, y); edCurX[i] = (float)x; edCurY[i] = (float)y;
           }
         } else edEdgeMs = millis();
       }
     } else edEdgeDir = 0;
-    int over = edSlotAt((int)edDragX + 36, (int)edDragY + 36);                  // slot bajo el centro
+    int dS, dgx0, dgy0, dcs, drs, dcols, drows; homeGrid(dS, dgx0, dgy0, dcs, drs, dcols, drows);
+    int over = edSlotAt((int)edDragX + dS / 2, (int)edDragY + dS / 2);          // slot bajo el centro
     if(over >= 0 && over != edDrag){
       if(over != edHoverSlot){ edHoverSlot = over; edHoverMs = millis(); }
       else if(millis() - edHoverMs > 400){ edMove(edDrag, over); edDrag = over; edHoverSlot = -1; }  // dwell 400ms
@@ -6236,11 +7010,365 @@ static void edTick(){
   }
   if(T.released){
     edEdgeDir = 0;
+    if(edWDrag >= 0){ edWDrag = -1; homeOrderNormalize(); homeOrderSave(); edRender(); return; }
     if(edDrag >= 0){ edDrag = -1; homeOrderSave(); edRender(); }                // soltar -> fija
     else if(T.tap) edExit();                                                    // toque en vacio/Inicio -> salir
     return;
   }
   // reposo: el jiggle continuo lo mueve uiTick()
+}
+
+// #############################################################
+// ##  WIDGETS DEL ESCRITORIO
+// ##  ------------------------------------------------------
+// ##  SOLO entran widgets cuyo dato es REAL en esta placa: reloj
+// ##  y fecha (NTP + reloj del sistema), Wi-Fi, memoria,
+// ##  almacenamiento (LittleFS de verdad), titular del Centro de
+// ##  noticias, cronometro y acceso a Camara. No hay widget de
+// ##  clima ni de bateria: el clima no tiene fuente configurada y
+// ##  el porcentaje de bateria todavia es un valor fijo en la
+// ##  barra de estado -- inventarlos seria relleno.
+// ##
+// ##  REGLA DE RENDIMIENTO: el widget NO calcula nada al
+// ##  dibujarse. wgDataTick() refresca las cadenas cada 2 s FUERA
+// ##  del render y marca que han cambiado; wgDrawCell() solo pinta
+// ##  lo que ya esta en el cache. Y cuando cambian, se repinta
+// ##  SOLO el rectangulo de ese widget (wgRepaint), no la pantalla.
+// #############################################################
+static void cronoFmt(char* out, size_t n, uint32_t ms, bool cent);   // definido con el cronometro
+
+static const WgDesc WG_REG[WG_COUNT] = {
+  { "",                 "",              1, 1 },   // WG_NONE (nunca se ofrece)
+  { "Reloj digital",    "Reloj",         2, 1 },
+  { "Reloj anal\xC3\xB3gico", "Reloj",   2, 2 },
+  { "Fecha",            "Reloj",         2, 1 },
+  { "Wi-Fi",            "Sistema",       1, 1 },
+  { "Memoria",          "Sistema",       2, 1 },
+  { "Almacenamiento",   "Sistema",       2, 1 },
+  { "Noticias",         "Informaci\xC3\xB3n", 2, 2 },
+  { "Cron\xC3\xB3metro","Reloj",         2, 1 },
+  { "C\xC3\xA1mara",    "Accesos",       1, 1 },
+};
+
+// ---- Cache de datos (se rellena en wgDataTick, jamas dentro del dibujo) ----
+static char     wgTime[16] = "", wgDate[48] = "", wgWifi[28] = "";
+static char     wgMem[24]  = "", wgSto[28] = "", wgCro[16] = "";
+static int      wgStoPct   = 0;
+static bool     wgNetUp    = false;
+static uint32_t wgDataMs   = 0;
+static bool     wgDirty    = false;
+
+static void wgDataTick(){
+  uint32_t now = millis();
+  if(wgDataMs && now - wgDataMs < 2000) return;
+  wgDataMs = now;
+  char t1[16], d1[48], w1[28], m1[24], s1[28], c1[16];
+  clkStrBar(t1, sizeof(t1));
+  buildShortDate(d1, sizeof(d1));
+  bool up = (WiFi.status() == WL_CONNECTED);
+  // WiFi.SSID() devuelve String: se copia AQUI, en el tick de datos, y nunca en
+  // el camino de dibujo ni en un bucle de interfaz.
+  if(up){ String ss = WiFi.SSID(); snprintf(w1, sizeof(w1), "%s", ss.length() ? ss.c_str() : "Conectado"); }
+  else   snprintf(w1, sizeof(w1), "Sin conexi\xC3\xB3n");
+  snprintf(m1, sizeof(m1), "%u KB libres", (unsigned)(esp_get_free_heap_size() / 1024));
+  uint32_t tot = flexFsTotalBytes(), usd = flexFsUsedBytes();
+  wgStoPct = (tot > 0) ? (int)((uint64_t)usd * 100 / tot) : 0;
+  { char a[16], b[16];
+    flexFsFmtSize(usd, a, sizeof(a));
+    flexFsFmtSize(tot, b, sizeof(b));
+    snprintf(s1, sizeof(s1), "%s de %s", a, b); }
+  cronoFmt(c1, sizeof(c1), cronoElapsed(), false);
+  if(strcmp(t1, wgTime) || strcmp(d1, wgDate) || strcmp(w1, wgWifi) ||
+     strcmp(m1, wgMem) || strcmp(s1, wgSto) || strcmp(c1, wgCro) || up != wgNetUp) wgDirty = true;
+  snprintf(wgTime, sizeof(wgTime), "%s", t1);
+  snprintf(wgDate, sizeof(wgDate), "%s", d1);
+  snprintf(wgWifi, sizeof(wgWifi), "%s", w1);
+  snprintf(wgMem,  sizeof(wgMem),  "%s", m1);
+  snprintf(wgSto,  sizeof(wgSto),  "%s", s1);
+  snprintf(wgCro,  sizeof(wgCro),  "%s", c1);
+  wgNetUp = up;
+}
+// Antena Wi-Fi en miniatura (arcos por puntos, sin fuentes de iconos)
+static void wgWifiGlyph(int cx, int cy, int r, uint16_t col, bool on){
+  for(int k = 0; k < 3; k++){
+    if(!on && k < 2) continue;                       // sin red: solo el punto
+    int rr = r - k * (r / 3);
+    for(int a = -50; a <= 50; a += 5){
+      float rad = (float)a * 0.0174533f;
+      pxA(cx + (int)(sinf(rad) * rr), cy - (int)(cosf(rad) * rr) + r, col, 220);
+    }
+  }
+  fillCircle(cx, cy + r, 2, col);
+}
+// Rectangulo en pixeles de un widget colocado, a partir de la rejilla ACTIVA.
+static void wgRect(const HomeWidget* w, int &x, int &y, int &ww, int &hh){
+  int S, gx0, gy0, cs, rs, cols, rows; homeGrid(S, gx0, gy0, cs, rs, cols, rows);
+  x  = w->col * cs + 8;         ww = w->w * cs - 16;
+  y  = gy0 + w->row * rs - 6;   hh = w->h * rs - 12;
+  if(ww < 24) ww = 24;
+  if(hh < 24) hh = 24;
+}
+// Dibuja un widget. 'mini' = dentro de una miniatura de pagina: se simplifica,
+// porque a esa escala un texto de 10 px seria ilegible.
+static void wgDrawCell(const HomeWidget* wg, int x, int y, int w, int h, bool mini){
+  if(!wg || wg->type <= WG_NONE || wg->type >= WG_COUNT) return;
+  uint16_t base;
+  if(uiGlass && !mini){ drawLiquidGlassPanel(x, y, w, h, mini ? 8 : 20, TH_GLASS2); base = TH_GLASS2; }
+  else { fillRoundRectA(x, y, w, h, mini ? 6 : 20, TH_SURF, mini ? 200 : 225); base = TH_SURF; }
+  uint16_t fg = onColor(base), fg2 = mix565(fg, base, 96);
+  if(mini){
+    fillRoundRect(x + 4, y + 4, (w - 8) > 8 ? (w - 8) / 2 : 4, 3, 1, fg2);
+    if(wg->type == WG_CLOCK_A) drawCircle(x + w / 2, y + h / 2, (h < w ? h : w) / 3, fg);
+    else                       fillRoundRect(x + 6, y + h / 2 - 2, w - 12, 4, 2, fg2);
+    return;
+  }
+  int pad = 12;
+  switch(wg->type){
+    case WG_CLOCK:
+      drawText(x + pad, y + 10, "Reloj", 1, fg2);
+      drawText(x + pad, y + h / 2 - 10, wgTime, 4, fg);
+      break;
+    case WG_CLOCK_A: {
+      int cx = x + w / 2, cy = y + h / 2, r = (w < h ? w : h) / 2 - 14;
+      if(r < 8) r = 8;
+      drawCircle(cx, cy, r, fg); drawCircle(cx, cy, r - 1, fg2);
+      for(int i = 0; i < 12; i++){
+        float a = i * 0.5235988f;
+        fillCircle(cx + (int)(sinf(a) * (r - 6)), cy - (int)(cosf(a) * (r - 6)), 1, fg2);
+      }
+      float ah = ((rtcH % 12) + rtcMin / 60.0f) * 0.5235988f, am = rtcMin * 0.1047198f;
+      strokeSegAA((float)cx, (float)cy, cx + sinf(ah) * (r * 0.52f), cy - cosf(ah) * (r * 0.52f), 2.4f, fg);
+      strokeSegAA((float)cx, (float)cy, cx + sinf(am) * (r * 0.78f), cy - cosf(am) * (r * 0.78f), 1.8f, fg);
+      fillCircle(cx, cy, 3, fg);
+      break;
+    }
+    case WG_DATE:
+      drawText(x + pad, y + 10, "Fecha", 1, fg2);
+      drawTextClip(x + pad, y + h / 2 - 8, wgDate, 2, fg, x + w - pad);
+      break;
+    case WG_WIFI:
+      wgWifiGlyph(x + w / 2, y + h / 2 - 14, 11, wgNetUp ? fg : fg2, wgNetUp);
+      drawTextC(x + w / 2, y + h - 22, wgNetUp ? "Wi-Fi" : "Sin red", 1, fg2);
+      break;
+    case WG_MEM:
+      drawText(x + pad, y + 10, "Memoria", 1, fg2);
+      drawTextClip(x + pad, y + h / 2 - 4, wgMem, 2, fg, x + w - pad);
+      break;
+    case WG_STORAGE: {
+      drawText(x + pad, y + 10, "Almacenamiento", 1, fg2);
+      int bw = w - 2 * pad, bx = x + pad, by = y + h - 24;
+      fillRoundRect(bx, by, bw, 8, 4, TH_TRACK);
+      int fw = bw * wgStoPct / 100;
+      if(fw < 2) fw = 2;
+      fillRoundRect(bx, by, fw, 8, 4, wallAccent2());
+      drawTextClip(bx, y + h / 2 - 12, wgSto, 1, fg, x + w - pad);
+      break;
+    }
+    case WG_NEWS: {
+      drawText(x + pad, y + 10, "Noticias", 1, fg2);
+      const char* ttl = newsTopTitle();
+      if(!ttl || !ttl[0]){ drawTextC(x + w / 2, y + h / 2 - 8, "Sin titulares", 2, fg2); break; }
+      // Se parte por palabras SIN copiar el titular entero: un buffer de linea
+      // en pila y avance por bytes.
+      int maxr = x + w - pad, ly = y + 34;
+      const char* q = ttl;
+      for(int line = 0; line < 3 && *q && ly < y + h - 16; line++){
+        char part[48]; int k = 0, lastSp = -1;
+        while(q[k] && k < (int)sizeof(part) - 1){
+          if(q[k] == ' ') lastSp = k;
+          part[k] = q[k]; part[k + 1] = 0;
+          if(textW(part, 1) > (maxr - (x + pad))){
+            if(lastSp > 0){ part[lastSp] = 0; k = lastSp; } else part[k] = 0;
+            break;
+          }
+          k++;
+        }
+        if(k <= 0) break;
+        drawTextClip(x + pad, ly, part, 1, fg, maxr);
+        ly += 16; q += k;
+        while(*q == ' ') q++;
+      }
+      break;
+    }
+    case WG_CRONO:
+      drawText(x + pad, y + 10, gCronoSt == CRONO_RUN ? "Cron\xC3\xB3metro en marcha" : "Cron\xC3\xB3metro", 1, fg2);
+      drawText(x + pad, y + h / 2 - 6, wgCro, 3, fg);
+      break;
+    case WG_CAM:
+      fillRoundRect(x + w / 2 - 15, y + h / 2 - 20, 30, 22, 6, fg);
+      fillCircle(x + w / 2, y + h / 2 - 9, 7, base);
+      drawTextC(x + w / 2, y + h - 22, "C\xC3\xA1mara", 1, fg2);
+      break;
+    default: break;
+  }
+}
+// ---- Ocupacion de celdas ---------------------------------------------------
+// Mascara de 20 bits por pagina: 1 = celda ocupada por un icono o por un widget.
+static uint32_t homeCellMask(int page, int skipWg){
+  int S, gx0, gy0, cs, rs, cols, rows; homeGrid(S, gx0, gy0, cs, rs, cols, rows);
+  int n = homeSlotCount();
+  uint32_t m = 0;
+  if(page < 0 || page >= HOME_PAGES_MAX) return 0xFFFFFFFFu;
+  for(int i = 0; i < n; i++) if(homeOrder[homeIdx(page, i)] != HOME_EMPTY) m |= (1u << i);
+  for(int k = 0; k < gHomeWgN[page] && k < HOME_WG_MAX; k++){
+    if(k == skipWg) continue;
+    const HomeWidget* w = &gHomeWg[page][k];
+    if(w->type == WG_NONE) continue;
+    for(int r = w->row; r < w->row + w->h; r++)
+      for(int c = w->col; c < w->col + w->w; c++){
+        if(r < 0 || r >= rows || c < 0 || c >= cols) continue;
+        int i = r * cols + c;
+        if(i < n) m |= (1u << i);
+      }
+  }
+  return m;
+}
+static bool homeWgFits(int page, int c, int r, int w, int h, int skipWg){
+  int S, gx0, gy0, cs, rs, cols, rows; homeGrid(S, gx0, gy0, cs, rs, cols, rows);
+  if(c < 0 || r < 0 || c + w > cols || r + h > rows) return false;
+  uint32_t m = homeCellMask(page, skipWg);
+  for(int rr = r; rr < r + h; rr++)
+    for(int cc = c; cc < c + w; cc++) if(m & (1u << (rr * cols + cc))) return false;
+  return true;
+}
+static bool homeWgSpot(int page, int w, int h, int &oc, int &orow){
+  int S, gx0, gy0, cs, rs, cols, rows; homeGrid(S, gx0, gy0, cs, rs, cols, rows);
+  for(int r = 0; r + h <= rows; r++)
+    for(int c = 0; c + w <= cols; c++)
+      if(homeWgFits(page, c, r, w, h, -1)){ oc = c; orow = r; return true; }
+  return false;
+}
+// Indice del widget de esa pagina bajo el punto, o -1.
+static int homeWgAt(int page, int px, int py){
+  if(page < 0 || page >= HOME_PAGES_MAX) return -1;
+  for(int k = 0; k < gHomeWgN[page] && k < HOME_WG_MAX; k++){
+    if(gHomeWg[page][k].type == WG_NONE) continue;
+    int x, y, w, h; wgRect(&gHomeWg[page][k], x, y, w, h);
+    if(px >= x && px < x + w && py >= y && py < y + h) return k;
+  }
+  return -1;
+}
+// Coloca un widget. 0 = ok · 1 = la pagina ya tiene el maximo · 2 = sin hueco.
+static int homeWgAdd(int page, int type){
+  if(page < 0 || page >= gHomePageN) return 2;
+  if(type <= WG_NONE || type >= WG_COUNT) return 2;
+  if(gHomeWgN[page] >= HOME_WG_MAX) return 1;
+  int w = WG_REG[type].w, h = WG_REG[type].h, c, r;
+  if(!homeWgSpot(page, w, h, c, r)) return 2;
+  HomeWidget* d = &gHomeWg[page][gHomeWgN[page]];
+  d->type = (uint8_t)type; d->col = (uint8_t)c; d->row = (uint8_t)r;
+  d->w = (uint8_t)w; d->h = (uint8_t)h;
+  gHomeWgN[page]++;
+  return 0;
+}
+static void homeWgRemove(int page, int idx){
+  if(page < 0 || page >= HOME_PAGES_MAX) return;
+  if(idx < 0 || idx >= gHomeWgN[page]) return;
+  for(int k = idx; k < gHomeWgN[page] - 1; k++) gHomeWg[page][k] = gHomeWg[page][k + 1];
+  gHomeWgN[page]--;
+  gHomeWg[page][gHomeWgN[page]].type = WG_NONE;
+}
+// Deja los widgets en un estado COHERENTE con la rejilla y el numero de paginas
+// actuales: los que ya no caben se retiran (nunca se dibujan a medias ni tapan
+// celdas que no existen).
+static void homeWgNormalize(){
+  int S, gx0, gy0, cs, rs, cols, rows; homeGrid(S, gx0, gy0, cs, rs, cols, rows);
+  for(int p = 0; p < HOME_PAGES_MAX; p++){
+    if(p >= gHomePageN){ gHomeWgN[p] = 0; }
+    if(gHomeWgN[p] > HOME_WG_MAX) gHomeWgN[p] = HOME_WG_MAX;
+    uint8_t n = 0;
+    for(int k = 0; k < gHomeWgN[p]; k++){
+      HomeWidget w = gHomeWg[p][k];
+      if(w.type <= WG_NONE || w.type >= WG_COUNT) continue;
+      if(w.w < 1 || w.h < 1 || w.w > HOME_COLS_MAX || w.h > HOME_ROWS_MAX) continue;
+      if(w.col + w.w > cols || w.row + w.h > rows) continue;
+      gHomeWg[p][n++] = w;
+    }
+    gHomeWgN[p] = n;
+    for(int k = n; k < HOME_WG_MAX; k++) gHomeWg[p][k].type = WG_NONE;
+  }
+}
+// SERIALIZACION. Tamano FIJO y validacion completa al cargar: un blob que no
+// cuadre se descarta entero (escritorio sin widgets, que es un estado valido)
+// en vez de dejar medio widget colocado en una celda que no existe.
+static void homeWgSerialize(uint8_t* b){
+  memset(b, 0, HOME_WG_BLOB);
+  b[0] = 'W'; b[1] = 1;
+  int o = 2;
+  for(int p = 0; p < HOME_PAGES_MAX; p++){
+    b[o++] = gHomeWgN[p];
+    for(int k = 0; k < HOME_WG_MAX; k++){
+      b[o++] = gHomeWg[p][k].type; b[o++] = gHomeWg[p][k].col; b[o++] = gHomeWg[p][k].row;
+      b[o++] = gHomeWg[p][k].w;    b[o++] = gHomeWg[p][k].h;
+    }
+  }
+}
+static bool homeWgDeserialize(const uint8_t* b){
+  if(b[0] != 'W' || b[1] != 1) return false;
+  HomeWidget tmp[HOME_PAGES_MAX][HOME_WG_MAX];
+  uint8_t cnt[HOME_PAGES_MAX];
+  int o = 2;
+  for(int p = 0; p < HOME_PAGES_MAX; p++){
+    cnt[p] = b[o++];
+    if(cnt[p] > HOME_WG_MAX) return false;
+    for(int k = 0; k < HOME_WG_MAX; k++){
+      uint8_t ty = b[o++], c = b[o++], r = b[o++], w = b[o++], h = b[o++];
+      if(ty >= WG_COUNT) return false;
+      if(w > HOME_COLS_MAX || h > HOME_ROWS_MAX) return false;
+      if(ty != WG_NONE && (c + w > HOME_COLS_MAX || r + h > HOME_ROWS_MAX)) return false;
+      tmp[p][k].type = ty; tmp[p][k].col = c; tmp[p][k].row = r; tmp[p][k].w = w; tmp[p][k].h = h;
+    }
+  }
+  memcpy(gHomeWg, tmp, sizeof(gHomeWg));
+  memcpy(gHomeWgN, cnt, sizeof(gHomeWgN));
+  return true;
+}
+
+// Dibuja los widgets de una pagina, desplazados igual que sus iconos.
+static void homeDrawWidgets(int page, int xoff){
+  if(page < 0 || page >= gHomePageN) return;
+  for(int k = 0; k < gHomeWgN[page] && k < HOME_WG_MAX; k++){
+    if(gHomeWg[page][k].type == WG_NONE) continue;
+    int x, y, w, h; wgRect(&gHomeWg[page][k], x, y, w, h);
+    if(x + xoff + w < 0 || x + xoff > SCR_W) continue;
+    wgDrawCell(&gHomeWg[page][k], x + xoff, y, w, h, false);
+  }
+}
+// REPINTADO PARCIAL. Solo las FILAS que ocupan los widgets de la pagina
+// visible, ni una mas -- no la pantalla entera.
+//
+// Se repintan filas COMPLETAS y no el rectangulo exacto de cada widget a
+// proposito: drawWallpaperRowsId() fuerza su propio viewport horizontal (lo
+// necesita para que un recorte olvidado por otra pantalla no deje una franja
+// negra permanente en el escritorio), asi que un recorte en X puesto desde
+// fuera no lo acota. Regenerar la banda entera y volver a poner encima widgets
+// e iconos de esas filas es correcto por construccion y sigue costando una
+// fraccion de la pantalla.
+static void wgRepaint(){
+  if(!homeBuf) return;
+  int page = gHomePage;
+  if(page < 0 || page >= gHomePageN || gHomeWgN[page] == 0) return;
+  int y0 = SCR_H, y1 = -1;
+  for(int k = 0; k < gHomeWgN[page] && k < HOME_WG_MAX; k++){
+    if(gHomeWg[page][k].type == WG_NONE) continue;
+    int x, y, w, h; wgRect(&gHomeWg[page][k], x, y, w, h);
+    if(y < y0) y0 = y;
+    if(y + h - 1 > y1) y1 = y + h - 1;
+  }
+  if(y1 < y0) return;
+  if(y0 < 0) y0 = 0;
+  if(y1 > SCR_H - 1) y1 = SCR_H - 1;
+  uint16_t* old = gBuf;
+  int c0 = gClipX0, c1 = gClipX1, r0 = gClipY0, r1 = gClipY1;
+  drawWallpaperRowsId(homeBuf, gWallHome, true, y0, y1);
+  setBuf(homeBuf);
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = y0; gClipY1 = y1;
+  homeDrawWidgets(page, 0);
+  homeDrawGridWork(page, 0, false);
+  gClipX0 = c0; gClipX1 = c1; gClipY0 = r0; gClipY1 = r1;
+  setBuf(old);
+  fbCopyBand(homeBuf, y0, y1);
+  flxFlush(y0, y1);
 }
 
 // ---- Destello de reflejo al tocar un icono (estilo "Vidrio") ----
@@ -6278,6 +7406,1195 @@ static void animateIconRipple(){
   }
   present(y0, y1);
 }
+// #############################################################
+// ##  MODO PERSONALIZACION DEL INICIO  (ST_HOMECFG)
+// ##  ------------------------------------------------------
+// ##  Se abre de DOS formas, las dos reales:
+// ##    1) pulsacion larga de 650 ms sobre un hueco VERDADERAMENTE
+// ##       vacio del escritorio, con tolerancia de 12 px;
+// ##    2) pellizco de DOS DEDOS hacia adentro, con la lectura
+// ##       multipunto real del GT911 (gtPollMulti).
+// ##
+// ##  Contiene: administrador de paginas (crear, borrar, reordenar
+// ##  y elegir principal), fondo de pantalla y estilo con paleta,
+// ##  temas integrados, selector de widgets y ajustes de inicio.
+// ##
+// ##  DIBUJO: compone en bbuf y publica con present(), como todo el
+// ##  resto del sistema. No crea tareas, no escribe al panel, no
+// ##  usa delay() y no repinta si nada ha cambiado (hcDirty). El
+// ##  fondo atenuado (blurBg) y la miniatura del fondo (hcThumb) se
+// ##  generan UNA vez al entrar; por cuadro solo hay copias de
+// ##  memoria y unos pocos iconos.
+// #############################################################
+enum { HCV_PAGES = 0, HCV_WALL, HCV_THEME, HCV_WIDGETS, HCV_SETTINGS, HCV_PICK };
+enum { HCM_NONE = 0, HCM_DELPAGE, HCM_RESET, HCM_INFO };
+
+#define HC_CARD_W   216
+#define HC_CARD_H   360
+#define HC_CARD_X   ((SCR_W - HC_CARD_W) / 2)
+#define HC_CARD_Y   150
+#define HC_STEP     (HC_CARD_W + 24)
+#define HC_DOTS_Y   (HC_CARD_Y + HC_CARD_H + 42)
+#define HC_BAR_Y    590
+#define HC_BAR_H    112
+#define HC_LIST_TOP 128
+#define HC_LIST_BOT 700
+#define HC_ANIM_MS  180
+#define HC_PV_W     100
+#define HC_PV_H     166
+#define HC_WSHEET_Y 506
+
+static bool      hcActive   = false;
+static uint8_t   hcView     = HCV_PAGES;
+static int       hcPageView = 0;         // pagina centrada (gHomePageN = tarjeta "+")
+static float     hcSlide    = 0.0f;
+static bool      hcDragging = false, hcDragMoved = false;
+static int       hcDragX0   = 0;
+static float     hcDragBase = 0.0f;
+static int       hcReorder  = -1;
+static uint8_t   hcAnim     = 0;         // 0 quieto · 1 entrando · 2 saliendo
+static uint32_t  hcAnimT0   = 0;
+static bool      hcDirty    = true;
+static bool      hcIgnore   = false;
+static uint32_t  hcFrameMs  = 0;
+static uint8_t   hcModal    = HCM_NONE;
+static char      hcMsg[72]  = "";
+static int       hcScroll   = 0, hcScrollMax = 0;
+static int       hcWallSel  = -1, hcThemeSel = -1, hcWgSel = -1;
+static uint16_t* hcThumb    = NULL;      // fondo pre-escalado de la miniatura (216x360)
+static uint16_t* hcWallPrev = NULL;      // cache de miniaturas del selector de fondos
+static bool      hcWallPrevOk = false;
+// Selector de imagen del almacenamiento
+#define HC_PICK_MAX 24
+static char      hcPickPath[HC_PICK_MAX][80];
+static int       hcPickN = 0, hcPickSel = -1;
+
+static void hcRender();
+static void hcEnter();
+static void hcBeginExit();
+static void hcClose(bool save);
+
+// ---- Utilidades de dibujo del modo -----------------------------------------
+static void hcPanel(int x, int y, int w, int h, int rad, uint8_t alpha){
+  fillRoundRectA(x, y, w, h, rad, TH_SURF, alpha);
+  drawRoundRect(x, y, w, h, rad, TH_BORDER);
+}
+static bool hcHit(int px, int py, int x, int y, int w, int h){
+  return px >= x && px < x + w && py >= y && py < y + h;
+}
+static void hcBtn(int x, int y, int w, int h, const char* label, bool primary){
+  uint16_t bg = primary ? wallAccent() : TH_SURF2;
+  fillRoundRect(x, y, w, h, h / 2, bg);
+  drawTextC(x + w / 2, y + (h - 20) / 2, label, 2, onColor(bg));
+}
+// Fila de lista. kind: 0 = valor + chevron · 1 = interruptor · 2 = accion.
+static void hcRow(int y, int h, const char* title, const char* value, int kind, bool on){
+  hcPanel(16, y, SCR_W - 32, h, 16, 235);
+  drawTextClip(32, y + (h - 20) / 2, title, 2, TH_TXT, SCR_W - 120);
+  if(kind == 1){
+    int sw = 46, sx = SCR_W - 32 - sw, sy = y + (h - 26) / 2;
+    fillRoundRect(sx, sy, sw, 26, 13, on ? wallAccent() : TH_TRACK);
+    fillCircle(on ? sx + sw - 13 : sx + 13, sy + 13, 10, TC(255,255,255));
+  } else if(value && *value){
+    drawTextR(SCR_W - 54, y + (h - 18) / 2, value, 2, TH_TXT2);
+    if(kind == 0){
+      int cx = SCR_W - 32, cy = y + h / 2;
+      strokeSegAA(cx - 6.0f, cy - 6.0f, (float)cx - 1, (float)cy, 1.8f, TH_TXT2);
+      strokeSegAA((float)cx - 1, (float)cy, cx - 6.0f, cy + 6.0f, 1.8f, TH_TXT2);
+    }
+  }
+}
+// ---- Iconos de la barra inferior (primitivas, nada importado) --------------
+static void hcIcoWall(int cx, int cy, uint16_t c){
+  drawRoundRect(cx - 15, cy - 12, 30, 24, 5, c);
+  fillCircle(cx - 7, cy - 5, 3, c);
+  fillTriangle(cx - 12, cy + 10, cx - 1, cy - 3, cx + 9, cy + 10, c);
+  fillTriangle(cx + 1, cy + 10, cx + 8, cy + 1, cx + 14, cy + 10, c);
+}
+static void hcIcoTheme(int cx, int cy, uint16_t c){
+  drawCircle(cx, cy, 13, c); drawCircle(cx, cy, 12, c);
+  fillCircle(cx - 5, cy - 5, 2, c); fillCircle(cx + 4, cy - 6, 2, c);
+  fillCircle(cx + 7, cy + 2, 2, c); fillCircle(cx - 6, cy + 4, 2, c);
+  strokeSegAA(cx + 2.0f, cy + 6.0f, cx + 10.0f, cy + 13.0f, 2.0f, c);
+}
+static void hcIcoWidgets(int cx, int cy, uint16_t c){
+  drawRoundRect(cx - 13, cy - 13, 12, 12, 3, c);
+  drawRoundRect(cx + 1, cy - 13, 12, 12, 3, c);
+  drawRoundRect(cx - 13, cy + 1, 12, 12, 3, c);
+  fillRoundRect(cx + 1, cy + 1, 12, 12, 3, c);
+}
+static void hcIcoGear(int cx, int cy, uint16_t c){
+  drawCircle(cx, cy, 12, c); drawCircle(cx, cy, 11, c); drawCircle(cx, cy, 5, c);
+  for(int i = 0; i < 8; i++){
+    float a = i * 0.7853982f;
+    strokeSegAA(cx + sinf(a) * 11.0f, cy - cosf(a) * 11.0f,
+                cx + sinf(a) * 15.0f, cy - cosf(a) * 15.0f, 2.0f, c);
+  }
+}
+// Casita: tejado + cuerpo. Rellena = pagina principal; solo el contorno =
+// pagina normal (tocarla la convierte en principal).
+static void hcIcoHome(int cx, int cy, int s, uint16_t c, bool filled){
+  int h = s / 2, mid = cy - s / 6, bh = cy + h - mid;
+  if(bh < 3) bh = 3;
+  fillTriangle(cx, cy - h, cx - h - 2, mid, cx + h + 2, mid, c);
+  if(filled) fillRect(cx - h + 2, mid, s - 4, bh, c);
+  else { drawRect(cx - h + 2, mid, s - 4, bh, c); drawRect(cx - h + 3, mid, s - 6, bh, c); }
+}
+static void hcIcoTrash(int cx, int cy, uint16_t c){
+  fillRect(cx - 8, cy - 9, 16, 2, c);
+  fillRect(cx - 3, cy - 12, 6, 2, c);
+  drawRect(cx - 6, cy - 6, 12, 15, c);
+  vLine(cx - 2, cy - 3, 9, c); vLine(cx + 2, cy - 3, 9, c);
+}
+static void hcIcoPlus(int cx, int cy, int s, uint16_t c){
+  fillRoundRect(cx - s / 2, cy - 3, s, 6, 3, c);
+  fillRoundRect(cx - 3, cy - s / 2, 6, s, 3, c);
+}
+
+// ---- Buffers transitorios y caches -----------------------------------------
+static void hcFreeBuffers(){
+  if(hcThumb){ heap_caps_free(hcThumb); hcThumb = NULL; }
+  if(hcWallPrev){ heap_caps_free(hcWallPrev); hcWallPrev = NULL; }
+  hcWallPrevOk = false;
+}
+// Regenera blurBg (fondo atenuado compartido con el desbloqueo y Recientes) con
+// el fondo ACTUAL. Sin esto, cambiar de fondo dejaria el desenfoque antiguo para
+// toda la sesion, porque ensureBlurBg() solo lo compone una vez.
+static void hcRebuildBlur(){
+  ensureBlurBg();
+  if(!blurBg) return;
+  uint16_t* old = gBuf; bool wl = gLand; gLand = false;
+  int c0 = gClipX0, c1 = gClipX1, r0 = gClipY0, r1 = gClipY1;
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
+  drawWallpaperRowsId(blurBg, gWallHome, true, 0, SCR_H - 1);
+  setBuf(blurBg);
+  fillRectA(0, 0, SCR_W, SCR_H, TH_SCRIM, 70);
+  setBuf(old); gLand = wl;
+  gClipX0 = c0; gClipX1 = c1; gClipY0 = r0; gClipY1 = r1;
+}
+// Miniatura del fondo y paleta, en UNA sola pasada. bbuf se usa de borrador (se
+// recompone entero justo despues), asi que no hace falta un buffer extra a
+// tamano completo.
+static void hcBuildThumb(){
+  if(!bbuf) return;
+  if(!hcThumb)
+    hcThumb = (uint16_t*)heap_caps_malloc((size_t)HC_CARD_W * HC_CARD_H * 2,
+                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  uint16_t* old = gBuf; bool wl = gLand; gLand = false;
+  int c0 = gClipX0, c1 = gClipX1, r0 = gClipY0, r1 = gClipY1;
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
+  drawWallpaperRowsId(bbuf, gWallHome, true, 0, SCR_H - 1);
+  wallPaletteBuild(bbuf);                        // muestreo reducido, una sola vez
+  if(hcThumb){
+    static uint16_t xm[HC_CARD_W];
+    for(int x = 0; x < HC_CARD_W; x++) xm[x] = (uint16_t)((x * SCR_W) / HC_CARD_W);
+    for(int y = 0; y < HC_CARD_H; y++){
+      const uint16_t* srow = bbuf + (size_t)((y * SCR_H) / HC_CARD_H) * SCR_W;
+      uint16_t* drow = hcThumb + (size_t)y * HC_CARD_W;
+      for(int x = 0; x < HC_CARD_W; x++) drow[x] = srow[xm[x]];
+    }
+  }
+  setBuf(old); gLand = wl;
+  gClipX0 = c0; gClipX1 = c1; gClipY0 = r0; gClipY1 = r1;
+}
+// Miniaturas del selector de fondos: se generan UNA vez al abrir esa vista.
+static void hcBuildWallPreviews(){
+  if(hcWallPrevOk || !bbuf) return;
+  if(!hcWallPrev)
+    hcWallPrev = (uint16_t*)heap_caps_malloc((size_t)WALL_N * HC_PV_W * HC_PV_H * 2,
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(!hcWallPrev) return;
+  uint16_t* old = gBuf; bool wl = gLand; gLand = false;
+  int c0 = gClipX0, c1 = gClipX1, r0 = gClipY0, r1 = gClipY1;
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
+  static uint16_t xm[HC_PV_W];
+  for(int x = 0; x < HC_PV_W; x++) xm[x] = (uint16_t)((x * SCR_W) / HC_PV_W);
+  for(int i = 0; i < WALL_N; i++){
+    drawWallpaperRowsId(bbuf, i, true, 0, SCR_H - 1);
+    uint16_t* dst = hcWallPrev + (size_t)i * HC_PV_W * HC_PV_H;
+    for(int y = 0; y < HC_PV_H; y++){
+      const uint16_t* srow = bbuf + (size_t)((y * SCR_H) / HC_PV_H) * SCR_W;
+      uint16_t* drow = dst + (size_t)y * HC_PV_W;
+      for(int x = 0; x < HC_PV_W; x++) drow[x] = srow[xm[x]];
+    }
+    uiRenderCooperate();                      // ocho fondos seguidos: se cede CPU entre ellos
+  }
+  setBuf(old); gLand = wl;
+  gClipX0 = c0; gClipX1 = c1; gClipY0 = r0; gClipY1 = r1;
+  hcWallPrevOk = true;
+}
+// Copia con esquinas redondeadas y recorte, para tarjetas y miniaturas.
+static void hcBlitRounded(int x, int y, int w, int h, int rad, const uint16_t* src){
+  if(!src) return;
+  for(int j = 0; j < h; j++){
+    int yy = y + j;
+    if(yy < 0 || yy >= SCR_H || yy < gClipY0 || yy > gClipY1) continue;
+    int inset = rrInset(j, h, rad);
+    int xs = x + inset, xe = x + w - inset - 1, sx = inset;
+    if(xs < gClipX0){ sx += gClipX0 - xs; xs = gClipX0; }
+    if(xs < 0){ sx += -xs; xs = 0; }
+    if(xe > gClipX1) xe = gClipX1;
+    if(xe > SCR_W - 1) xe = SCR_W - 1;
+    if(xs > xe) continue;
+    memcpy(gBuf + (size_t)yy * SCR_W + xs, src + (size_t)j * w + sx, (size_t)(xe - xs + 1) * 2);
+  }
+}
+// Miniatura de una pagina: se dibuja del MODELO real (iconos y widgets a
+// escala), no de una captura. Cero buffers por pagina.
+static void hcDrawThumb(int page, int x, int y, int tw, int th){
+  if(page < 0 || page >= gHomePageN) return;
+  int S, gx0, gy0, cs, rs, cols, rows; homeGrid(S, gx0, gy0, cs, rs, cols, rows);
+  int oStyle = gIconStyle;
+  gIconStyle = 0;              // en miniatura no se hace un blur Liquid Glass por icono
+  // banda superior (clima/noticias) y dock, en esquema
+  fillRoundRectA(x + 24 * tw / SCR_W, y + 72 * th / SCR_H, 432 * tw / SCR_W, 120 * th / SCR_H,
+                 6, TC(255,255,255), 46);
+  fillRoundRectA(x + 24 * tw / SCR_W, y + (SCR_H - 176) * th / SCR_H, 432 * tw / SCR_W,
+                 96 * th / SCR_H, 8, TC(255,255,255), 60);
+  for(int k = 0; k < gHomeWgN[page] && k < HOME_WG_MAX; k++){
+    if(gHomeWg[page][k].type == WG_NONE) continue;
+    int wx, wy, ww, wh; wgRect(&gHomeWg[page][k], wx, wy, ww, wh);
+    wgDrawCell(&gHomeWg[page][k], x + wx * tw / SCR_W, y + wy * th / SCR_H,
+               ww * tw / SCR_W, wh * th / SCR_H, true);
+  }
+  int n = homeSlotCount(), ms = S * tw / SCR_W;
+  for(int i = 0; i < n; i++){
+    uint8_t id = homeOrder[homeIdx(page, i)];
+    if(id == HOME_EMPTY) continue;
+    int sx, sy; homeSlotXY(i, sx, sy);
+    drawAppIcon(id, x + sx * tw / SCR_W, y + sy * th / SCR_H, ms);
+  }
+  gIconStyle = oStyle;
+}
+
+// #############################################################
+// ##  OPERACIONES REALES SOBRE EL MODELO
+// ##  Todas guardan al terminar la operacion (homeOrderSave), nunca
+// ##  por cuadro ni desde un bucle de arrastre.
+// #############################################################
+static void hcInfo(const char* m){
+  snprintf(hcMsg, sizeof(hcMsg), "%s", m);
+  hcModal = HCM_INFO; hcDirty = true;
+}
+static int homePageItems(int page){
+  if(page < 0 || page >= gHomePageN) return 0;
+  int n = homeSlotCount(), k = 0;
+  for(int i = 0; i < n; i++) if(homeOrder[homeIdx(page, i)] != HOME_EMPTY) k++;
+  for(int w = 0; w < gHomeWgN[page] && w < HOME_WG_MAX; w++)
+    if(gHomeWg[page][w].type != WG_NONE) k++;
+  return k;
+}
+static bool homePageAdd(){
+  if(gHomePageN >= HOME_PAGES_MAX){ hcInfo("Maximo de 5 paginas"); return false; }
+  for(int i = 0; i < HOME_STRIDE; i++) homeOrder[homeIdx(gHomePageN, i)] = HOME_EMPTY;
+  gHomeWgN[gHomePageN] = 0;
+  gHomePageN++;
+  homeOrderSave();
+  return true;
+}
+// Borra la pagina. Sus iconos NO se pierden: homeOrderNormalize los recoloca en
+// el primer hueco libre de las paginas que quedan (y si de verdad no cabe
+// ninguno, la app deja de ser favorita, que es lo que ya hacia el sistema).
+static bool homePageDelete(int page){
+  if(gHomePageN <= 1){ hcInfo("No puedes eliminar la ultima pagina"); return false; }
+  if(page < 0 || page >= gHomePageN) return false;
+  for(int p = page; p < gHomePageN - 1; p++){
+    for(int i = 0; i < HOME_STRIDE; i++) homeOrder[homeIdx(p, i)] = homeOrder[homeIdx(p + 1, i)];
+    memcpy(gHomeWg[p], gHomeWg[p + 1], sizeof(gHomeWg[p]));
+    gHomeWgN[p] = gHomeWgN[p + 1];
+  }
+  for(int i = 0; i < HOME_STRIDE; i++) homeOrder[homeIdx(gHomePageN - 1, i)] = HOME_EMPTY;
+  gHomeWgN[gHomePageN - 1] = 0;
+  gHomePageN--;
+  // Pagina principal: si se borro ELLA, se elige la vecina mas cercana de forma
+  // predecible (la de la izquierda si existe).
+  if(gHomeMain == page)      gHomeMain = (uint8_t)(page > 0 ? page - 1 : 0);
+  else if(gHomeMain > page)  gHomeMain--;
+  if(gHomeMain >= gHomePageN) gHomeMain = (uint8_t)(gHomePageN - 1);
+  if(gHomePage >= gHomePageN) gHomePage = gHomeMain;
+  homeOrderNormalize();
+  homeOrderSave();
+  return true;
+}
+static void homePageSwap(int a, int b){
+  if(a < 0 || b < 0 || a >= gHomePageN || b >= gHomePageN || a == b) return;
+  for(int i = 0; i < HOME_STRIDE; i++){
+    uint8_t t = homeOrder[homeIdx(a, i)];
+    homeOrder[homeIdx(a, i)] = homeOrder[homeIdx(b, i)];
+    homeOrder[homeIdx(b, i)] = t;
+  }
+  HomeWidget tw[HOME_WG_MAX]; memcpy(tw, gHomeWg[a], sizeof(tw));
+  memcpy(gHomeWg[a], gHomeWg[b], sizeof(tw)); memcpy(gHomeWg[b], tw, sizeof(tw));
+  uint8_t tn = gHomeWgN[a]; gHomeWgN[a] = gHomeWgN[b]; gHomeWgN[b] = tn;
+  if(gHomeMain == a)      gHomeMain = (uint8_t)b;
+  else if(gHomeMain == b) gHomeMain = (uint8_t)a;
+  homeOrderSave();
+}
+static void homeSetMain(int page){
+  if(page < 0 || page >= gHomePageN) return;
+  gHomeMain = (uint8_t)page;
+  homeOrderSave();
+}
+// Cambio de rejilla SIN perder elementos: homeOrderNormalize rescata los iconos
+// de las ranuras que dejan de existir y los recoloca; homeWgNormalize retira
+// los widgets que ya no caben.
+static void homeSetGrid(int cols, int rows){
+  if(cols < 4) cols = 4;
+  if(cols > HOME_COLS_MAX) cols = HOME_COLS_MAX;
+  if(rows < 3) rows = 3;
+  if(rows > HOME_ROWS_MAX) rows = HOME_ROWS_MAX;
+  gHomeCols = (uint8_t)cols; gHomeRows = (uint8_t)rows;
+  homeOrderNormalize();
+  homeOrderSave();
+  gHomeDirty = true;
+}
+static void homeResetLayout(){
+  for(int i = 0; i < HOME_TOTAL; i++) homeOrder[i] = HOME_EMPTY;
+  for(int p = 0; p < HOME_PAGES_MAX; p++) gHomeWgN[p] = 0;
+  gHomePageN = HOME_LEGACY_PAGES; gHomeMain = 0; gHomePage = 0;
+  gHomeCols = 4; gHomeRows = 3; gHomeIconSz = 1;
+  drawerRegistryDefaults();                 // el reparto de fabrica sale del registro de apps
+  homeOrderNormalize();
+  homeOrderSave();
+  gHomeDirty = true;
+}
+// ---- Aplicar fondo ----------------------------------------------------------
+// dest: bit0 = inicio · bit1 = bloqueo
+static void hcApplyWall(int id, int dest){
+  if(id != WALL_IMG && (id < 0 || id >= WALL_N)){ hcInfo("Ese fondo no esta disponible"); return; }
+  uint8_t oh = gWallHome, ol = gWallLock;
+  if(dest & 1) gWallHome = (uint8_t)id;
+  if(dest & 2) gWallLock = (uint8_t)id;
+  wallEnsureImage();
+  if(id == WALL_IMG && !wallImgOk){          // no se pudo cargar: nada cambia y se dice por que
+    gWallHome = oh; gWallLock = ol;
+    hcInfo(gWallErr[0] ? gWallErr : "No se pudo usar esa imagen");
+    return;
+  }
+  hcRebuildBlur();
+  hcBuildThumb();                            // regenera miniatura y paleta con el fondo nuevo
+  gHomeDirty = true; qsDirty = true;
+  homeCfgSave();
+  hcDirty = true;
+}
+// ---- Aplicar tema -----------------------------------------------------------
+// Operacion COHERENTE: si algo no valida, se restaura el estado anterior entero.
+static bool hcApplyLook(int i){
+  if(i < 0 || i >= LOOK_N) return false;
+  bool oDark = gDark, oGlass = uiGlass, oPal = gWallPalOn;
+  int  oIcon = gIconStyle;
+  uint8_t oWh = gWallHome, oWl = gWallLock, oLook = gHomeLook;
+  gDark = LOOKS[i].dark != 0; uiGlass = LOOKS[i].glass != 0; gIconStyle = LOOKS[i].iconStyle;
+  gWallHome = LOOKS[i].wall; gWallLock = LOOKS[i].wall;
+  gWallPalOn = LOOKS[i].palette != 0; gHomeLook = (uint8_t)i;
+  bool ok = (gWallHome < WALL_N && gWallLock < WALL_N && gIconStyle >= 0 && gIconStyle <= 1);
+  if(ok){
+    wallEnsureImage();
+    hcRebuildBlur(); hcBuildThumb();
+    if(!gWallPalOn){ gWallAcc = lookAcc(i); gWallAcc2 = lookAcc2(i); gWallPalOk = true; }
+  }
+  if(!ok){                                   // vuelta atras completa
+    gDark = oDark; uiGlass = oGlass; gIconStyle = oIcon;
+    gWallHome = oWh; gWallLock = oWl; gWallPalOn = oPal; gHomeLook = oLook;
+    wallEnsureImage(); hcRebuildBlur(); hcBuildThumb();
+    hcInfo("No se pudo aplicar el tema");
+    return false;
+  }
+  homeCfgSave();
+  themeChanged(true);                        // NVS + caches + repintado, por la via de siempre
+  hcDirty = true;
+  return true;
+}
+// ---- Selector de imagen del almacenamiento ---------------------------------
+// Recorre las carpetas donde el sistema guarda imagenes y se queda con los JPEG.
+// Acotado a HC_PICK_MAX: la lista es de tamano fijo, sin heap.
+static void hcScanImages(){
+  hcPickN = 0; hcPickSel = -1;
+  if(!flexFsReady()) return;
+  static const char* DIRS[3] = { "/Imagenes", "/Camara", "/Descargas" };
+  FlexFsEntry ents[24];
+  for(int d = 0; d < 3 && hcPickN < HC_PICK_MAX; d++){
+    int n = flexFsList(DIRS[d], ents, 24);
+    for(int i = 0; i < n && hcPickN < HC_PICK_MAX; i++){
+      if(ents[i].dir) continue;
+      const char* nm = ents[i].name;
+      int L = (int)strlen(nm);
+      if(L < 5) continue;
+      const char* ext = nm + L - 4;
+      if(strcmp(ext, ".jpg") && strcmp(ext, ".JPG") &&
+         (L < 6 || (strcmp(nm + L - 5, ".jpeg") && strcmp(nm + L - 5, ".JPEG")))) continue;
+      snprintf(hcPickPath[hcPickN], sizeof(hcPickPath[0]), "%s/%s", DIRS[d], nm);
+      hcPickN++;
+    }
+  }
+}
+
+// #############################################################
+// ##  DIBUJO DEL MODO PERSONALIZACION
+// ##  Todo compone en bbuf y publica con un unico present().
+// #############################################################
+static const char* HC_BAR_LBL[4] = { "Fondo", "Temas", "Widgets", "Ajustes" };
+
+static int hcCardX(int i){
+  int base = HC_CARD_X + (i - hcPageView) * HC_STEP;
+  // Al REORDENAR solo viaja la tarjeta agarrada (las demas se quedan quietas,
+  // que es lo que hace legible el hueco de destino); al deslizar, todas.
+  if(hcReorder >= 0) return base - (i == hcReorder ? (int)hcSlide : 0);
+  return base - (int)hcSlide;
+}
+static void hcChrome(const char* title, const char* sub){
+  cronoBarClock(16, TH_ONWALL);
+  drawWifi(SCR_W - 66, 28, 11, TH_ONWALL);
+  drawBattery(SCR_W - 46, 20, 30, 15, 82, TH_ONWALL);
+  drawTextC(SCR_W / 2, 66, title, 3, TH_ONWALL);
+  if(sub && *sub) drawTextC(SCR_W / 2, 98, sub, 2, TH_ONWALL2);
+}
+static void hcNavBar(){
+  if(gNavMode == 0){
+    int ny = SCR_H - 52; uint16_t nv = TH_ONWALL;
+    int bx = SCR_W / 6;
+    fillTriangle(bx - 10, ny + 8, bx + 8, ny - 2, bx + 8, ny + 18, nv);
+    drawCircle(SCR_W / 2, ny + 8, 12, nv); drawCircle(SCR_W / 2, ny + 8, 11, nv);
+    int rx = SCR_W * 5 / 6;
+    drawRoundRect(rx - 11, ny - 3, 22, 22, 4, nv);
+  } else drawHomeIndicator(SCR_H, 220);
+}
+static void hcBackChip(){
+  fillRoundRectA(14, 52, 96, 36, 18, TH_SCRIM, 130);
+  fillTriangle(34, 70, 46, 61, 46, 79, TH_ONWALL);
+  drawText(52, 62, "Atr\xC3\xA1s", 2, TH_ONWALL);
+}
+static bool hcBackChipHit(int x, int y){ return x >= 14 && x <= 110 && y >= 52 && y <= 88; }
+static void hcDrawBar(int active){
+  hcPanel(12, HC_BAR_Y, SCR_W - 24, HC_BAR_H, 26, 225);
+  int iw = (SCR_W - 24) / 4;
+  for(int i = 0; i < 4; i++){
+    int x = 12 + iw * i, cx = x + iw / 2, cy = HC_BAR_Y + 40;
+    uint16_t c = (i == active) ? wallAccent() : TH_TXT;
+    if(i == active) fillRoundRectA(x + 6, HC_BAR_Y + 8, iw - 12, HC_BAR_H - 16, 18, wallAccent(), 46);
+    switch(i){
+      case 0: hcIcoWall(cx, cy, c);    break;
+      case 1: hcIcoTheme(cx, cy, c);   break;
+      case 2: hcIcoWidgets(cx, cy, c); break;
+      default: hcIcoGear(cx, cy, c);   break;
+    }
+    drawTextC(cx, HC_BAR_Y + 70, HC_BAR_LBL[i], 2, c);
+  }
+}
+static int hcBarHit(int x, int y){
+  if(y < HC_BAR_Y || y > HC_BAR_Y + HC_BAR_H || x < 12 || x > SCR_W - 12) return -1;
+  int iw = (SCR_W - 24) / 4, i = (x - 12) / iw;
+  return (i >= 0 && i < 4) ? i : -1;
+}
+// ---- Vista: paginas ---------------------------------------------------------
+static void hcDrawPageCard(int page, int x, int y, bool center){
+  if(hcThumb) hcBlitRounded(x, y, HC_CARD_W, HC_CARD_H, 26, hcThumb);
+  else        fillRoundRect(x, y, HC_CARD_W, HC_CARD_H, 26, TH_SURF);
+  hcDrawThumb(page, x, y, HC_CARD_W, HC_CARD_H);
+  uint16_t bc = center ? wallAccent() : TH_BORDER;
+  drawRoundRect(x, y, HC_CARD_W, HC_CARD_H, 26, bc);
+  if(center) drawRoundRect(x + 1, y + 1, HC_CARD_W - 2, HC_CARD_H - 2, 25, bc);
+  int hx = x + HC_CARD_W - 26, hy = y + 26;
+  fillCircleA(hx, hy, 16, TH_SCRIM, 140);
+  hcIcoHome(hx, hy + 3, 15, gHomeMain == page ? TC(255,214,80) : TH_ONWALL, gHomeMain == page);
+  if(gHomePageN > 1 && !gHomeLocked){
+    int tx = x + 26;
+    fillCircleA(tx, hy, 16, TH_SCRIM, 140);
+    hcIcoTrash(tx, hy + 2, TC(252,214,214));
+  }
+  char nb[24]; snprintf(nb, sizeof(nb), "P\xC3\xA1gina %d", page + 1);
+  drawTextC(x + HC_CARD_W / 2, y + HC_CARD_H + 6, nb, 2, TH_ONWALL);
+}
+static void hcDrawAddCard(int x, int y){
+  fillRoundRectA(x, y, HC_CARD_W, HC_CARD_H, 26, TC(255,255,255), 34);
+  drawRoundRect(x, y, HC_CARD_W, HC_CARD_H, 26, TH_ONWALL2);
+  hcIcoPlus(x + HC_CARD_W / 2, y + HC_CARD_H / 2, 56, TH_ONWALL);
+  drawTextC(x + HC_CARD_W / 2, y + HC_CARD_H + 6, "Nueva p\xC3\xA1gina", 2, TH_ONWALL);
+}
+static void hcDrawPageDots(){
+  int n = gHomePageN, step = 26, x0 = SCR_W / 2 - (n - 1) * step / 2;
+  for(int i = 0; i < n; i++){
+    int x = x0 + i * step;
+    if(i == gHomeMain) hcIcoHome(x, HC_DOTS_Y, 13, i == hcPageView ? wallAccent() : TH_ONWALL, true);
+    else fillCircleA(x, HC_DOTS_Y, 5, i == hcPageView ? wallAccent() : TH_ONWALL, i == hcPageView ? 255 : 140);
+  }
+}
+static void hcDrawPagesView(){
+  int total = gHomePageN + ((gHomePageN < HOME_PAGES_MAX && !gHomeLocked) ? 1 : 0);
+  for(int i = hcPageView - 1; i <= hcPageView + 1; i++){
+    if(i < 0 || i >= total) continue;
+    int x = hcCardX(i);
+    if(x > SCR_W || x + HC_CARD_W < 0) continue;
+    if(i < gHomePageN) hcDrawPageCard(i, x, HC_CARD_Y, i == hcPageView);
+    else               hcDrawAddCard(x, HC_CARD_Y);
+  }
+  hcDrawPageDots();
+  hcDrawBar(-1);
+}
+// ---- Vista: fondo de pantalla y estilo -------------------------------------
+static void hcDrawWallView(){
+  hcChrome("Fondo de pantalla", "Integrados de Flex OS e im\xC3\xA1genes tuyas");
+  hcBackChip();
+  for(int i = 0; i < WALL_N; i++){
+    int c = i % 4, r = i / 4;
+    int x = 18 + c * 116, y = 130 + r * 186;
+    if(hcWallPrev) hcBlitRounded(x, y, HC_PV_W, HC_PV_H, 12, hcWallPrev + (size_t)i * HC_PV_W * HC_PV_H);
+    else           fillRoundRect(x, y, HC_PV_W, HC_PV_H, 12, TH_SURF);
+    bool sel = (hcWallSel == i);
+    drawRoundRect(x, y, HC_PV_W, HC_PV_H, 12, sel ? wallAccent() : TH_BORDER);
+    if(sel){
+      drawRoundRect(x + 1, y + 1, HC_PV_W - 2, HC_PV_H - 2, 11, wallAccent());
+      fillCircle(x + HC_PV_W - 14, y + 14, 9, wallAccent());
+      strokeSegAA(x + HC_PV_W - 18.0f, (float)y + 14, x + HC_PV_W - 15.0f, (float)y + 18, 1.8f, onColor(wallAccent()));
+      strokeSegAA(x + HC_PV_W - 15.0f, (float)y + 18, x + HC_PV_W - 9.0f, (float)y + 9, 1.8f, onColor(wallAccent()));
+    }
+    if(gWallHome == i) fillCircle(x + 12, y + HC_PV_H - 12, 5, wallAccent());
+    drawTextC(x + HC_PV_W / 2, y + HC_PV_H + 5, WALL_NAME[i], 1, TH_ONWALL);
+  }
+  int y = HC_WSHEET_Y;
+  hcPanel(12, y, SCR_W - 24, 148, 22, 235);
+  if(hcWallSel < 0) drawTextC(SCR_W / 2, y + 18, "Elige un fondo para ver las opciones", 2, TH_TXT2);
+  else {
+    char tb[56];
+    snprintf(tb, sizeof(tb), "Aplicar \"%s\" a:", hcWallSel == WALL_IMG ? "tu imagen" : WALL_NAME[hcWallSel]);
+    drawTextClip(28, y + 12, tb, 2, TH_TXT, SCR_W - 28);
+    int bw = (SCR_W - 24 - 4 * 12) / 3;
+    hcBtn(24, y + 38, bw, 42, "Inicio", true);
+    hcBtn(24 + bw + 12, y + 38, bw, 42, "Bloqueo", true);
+    hcBtn(24 + 2 * (bw + 12), y + 38, bw, 42, "Ambos", true);
+  }
+  hcBtn(24, y + 88, (SCR_W - 60) / 2, 42, "Mis im\xC3\xA1genes", false);
+  hcBtn(36 + (SCR_W - 60) / 2, y + 88, (SCR_W - 60) / 2, 42, "Restaurar", false);
+  hcRow(y + 158, 44, "Aplicar paleta al sistema", NULL, 1, gWallPalOn);
+  hcNavBar();
+}
+// ---- Vista: elegir imagen del almacenamiento -------------------------------
+static void hcDrawPickView(){
+  hcChrome("Mis im\xC3\xA1genes", "JPEG de /Imagenes, /Camara y /Descargas");
+  hcBackChip();
+  if(hcPickN == 0){
+    drawTextC(SCR_W / 2, 230, "No hay imagenes JPEG guardadas", 2, TH_ONWALL2);
+    drawTextC(SCR_W / 2, 256, "Guarda alguna desde Camara o Archivos", 1, TH_ONWALL2);
+    hcNavBar();
+    return;
+  }
+  int oc0 = gClipY0, oc1 = gClipY1;
+  gClipY0 = HC_LIST_TOP; gClipY1 = HC_LIST_BOT;
+  int y = HC_LIST_TOP + 4 - hcScroll;
+  for(int i = 0; i < hcPickN; i++){
+    bool sel = (hcPickSel == i);
+    hcPanel(16, y, SCR_W - 32, 52, 14, sel ? 250 : 225);
+    if(sel) drawRoundRect(16, y, SCR_W - 32, 52, 14, wallAccent());
+    drawTextClip(32, y + 16, hcPickPath[i], 2, TH_TXT, SCR_W - 150);
+    if(sel) hcBtn(SCR_W - 126, y + 8, 100, 36, "Usar", true);
+    y += 58;
+  }
+  hcScrollMax = y + hcScroll - HC_LIST_BOT + 10;
+  if(hcScrollMax < 0) hcScrollMax = 0;
+  gClipY0 = oc0; gClipY1 = oc1;
+  if(gWallErr[0]) drawTextC(SCR_W / 2, HC_LIST_BOT + 6, gWallErr, 1, TH_ERR);
+  hcNavBar();
+}
+// ---- Vista: temas ----------------------------------------------------------
+static void hcDrawThemeView(){
+  hcChrome("Temas", "Temas integrados de Flex OS");
+  hcBackChip();
+  for(int i = 0; i < LOOK_N; i++){
+    int y = 130 + i * 54;
+    bool sel = (hcThemeSel == i);
+    hcPanel(16, y, SCR_W - 32, 48, 16, sel ? 250 : 225);
+    if(sel) drawRoundRect(16, y, SCR_W - 32, 48, 16, wallAccent());
+    fillRoundRect(28, y + 10, 28, 28, 8, lookAcc(i));
+    fillRoundRect(60, y + 10, 14, 28, 6, lookAcc2(i));
+    fillRoundRect(78, y + 10, 14, 28, 6, LOOKS[i].dark ? TC(30,34,46) : TC(240,243,249));
+    drawText(104, y + 15, LOOKS[i].name, 2, TH_TXT);
+    if(gHomeLook == i) drawTextR(SCR_W - 32, y + 16, "Activo", 1, wallAccent());
+  }
+  int by = 130 + LOOK_N * 54 + 8, bw = (SCR_W - 60) / 2;
+  if(hcThemeSel >= 0){
+    hcBtn(24, by, bw, 44, "Aplicar", true);
+    hcBtn(36 + bw, by, bw, 44, "Cancelar", false);
+  } else drawTextC(SCR_W / 2, by + 12, "Elige un tema para verlo y aplicarlo", 2, TH_ONWALL2);
+  hcBtn(24, by + 54, SCR_W - 48, 42, "Restaurar tema predeterminado", false);
+  hcNavBar();
+}
+// ---- Vista: widgets --------------------------------------------------------
+static void hcDrawWidgetView(){
+  char sb[56];
+  snprintf(sb, sizeof(sb), "Se colocan en la p\xC3\xA1gina %d", (hcPageView < gHomePageN ? hcPageView : gHomeMain) + 1);
+  hcChrome("Widgets", sb);
+  hcBackChip();
+  int oc0 = gClipY0, oc1 = gClipY1;
+  gClipY0 = HC_LIST_TOP; gClipY1 = HC_LIST_BOT;
+  int y = HC_LIST_TOP + 4 - hcScroll;
+  const char* lastCat = NULL;
+  for(int i = 1; i < WG_COUNT; i++){
+    if(!lastCat || strcmp(lastCat, WG_REG[i].cat)){
+      lastCat = WG_REG[i].cat;
+      drawText(24, y + 4, lastCat, 2, TH_ONWALL2);
+      y += 26;
+    }
+    bool sel = (hcWgSel == i);
+    hcPanel(16, y, SCR_W - 32, 76, 16, sel ? 250 : 225);
+    if(sel) drawRoundRect(16, y, SCR_W - 32, 76, 16, wallAccent());
+    // vista previa REAL del widget, recortada a su caja
+    int px0 = 26, py0 = y + 8, pw = 108, ph = 60;
+    int sx0 = gClipX0, sx1 = gClipX1, sy0 = gClipY0, sy1 = gClipY1;
+    gClipX0 = px0; gClipX1 = px0 + pw - 1;
+    if(gClipY0 < py0) gClipY0 = py0;
+    if(gClipY1 > py0 + ph - 1) gClipY1 = py0 + ph - 1;
+    HomeWidget pv; pv.type = (uint8_t)i; pv.col = 0; pv.row = 0; pv.w = WG_REG[i].w; pv.h = WG_REG[i].h;
+    wgDrawCell(&pv, px0, py0, pw, ph, false);
+    gClipX0 = sx0; gClipX1 = sx1; gClipY0 = sy0; gClipY1 = sy1;
+    drawTextClip(148, y + 18, WG_REG[i].name, 2, TH_TXT, SCR_W - 130);
+    char sz[24]; snprintf(sz, sizeof(sz), "%dx%d celdas", WG_REG[i].w, WG_REG[i].h);
+    drawText(148, y + 42, sz, 1, TH_TXT2);
+    if(sel) hcBtn(SCR_W - 122, y + 20, 96, 36, "A\xC3\xB1" "adir", true);
+    y += 82;
+  }
+  hcScrollMax = y + hcScroll - HC_LIST_BOT + 10;
+  if(hcScrollMax < 0) hcScrollMax = 0;
+  gClipY0 = oc0; gClipY1 = oc1;
+  hcNavBar();
+}
+// ---- Vista: ajustes de inicio ----------------------------------------------
+// Solo se ofrecen rejillas que CABEN de verdad en 480x800 con su tamano de
+// icono: la validacion la hace homeGrid() y aqui se listan las ya comprobadas.
+#define HC_GRID_OPTS 4
+static const uint8_t HC_GRID_C[HC_GRID_OPTS] = { 4, 5, 4, 5 };
+static const uint8_t HC_GRID_R[HC_GRID_OPTS] = { 3, 3, 4, 4 };
+static int hcGridIdx(){
+  for(int i = 0; i < HC_GRID_OPTS; i++) if(HC_GRID_C[i] == gHomeCols && HC_GRID_R[i] == gHomeRows) return i;
+  return 0;
+}
+static void hcDrawSettingsView(){
+  hcChrome("Ajustes de inicio", NULL);
+  hcBackChip();
+  int oc0 = gClipY0, oc1 = gClipY1;
+  gClipY0 = HC_LIST_TOP; gClipY1 = HC_LIST_BOT;
+  int y = HC_LIST_TOP + 4 - hcScroll;
+  char v[32];
+  snprintf(v, sizeof(v), "%dx%d", gHomeCols, gHomeRows);
+  hcRow(y, 52, "Cuadr\xC3\xAD" "cula del inicio", v, 0, false); y += 58;
+  static const char* SZN[3] = { "Peque\xC3\xB1o", "Normal", "Grande" };
+  hcRow(y, 52, "Tama\xC3\xB1o de iconos", SZN[gHomeIconSz > 2 ? 1 : gHomeIconSz], 0, false); y += 58;
+  hcRow(y, 52, "Nombres de aplicaciones", NULL, 1, gHomeLabels); y += 58;
+  hcRow(y, 52, "Bloquear dise\xC3\xB1o del inicio", NULL, 1, gHomeLocked); y += 58;
+  hcRow(y, 52, "Indicadores de p\xC3\xA1gina", NULL, 1, gHomeDots); y += 58;
+  snprintf(v, sizeof(v), "P\xC3\xA1gina %d", gHomeMain + 1);
+  hcRow(y, 52, "P\xC3\xA1gina principal", v, 0, false); y += 58;
+  hcRow(y, 52, "Gesto de pellizco", NULL, 1, gHomePinch); y += 58;
+  hcRow(y, 52, "Reducir animaciones", NULL, 1, gHomeReduce); y += 58;
+  const char* fitn = gWallFit == 1 ? "Ajustar" : gWallFit == 2 ? "Centrar" : "Rellenar";
+  hcRow(y, 52, "Encuadre de la imagen", fitn, 0, false); y += 58;
+  hcRow(y, 52, "Restablecer dise\xC3\xB1o del inicio", NULL, 2, false); y += 58;
+  hcScrollMax = y + hcScroll - HC_LIST_BOT + 10;
+  if(hcScrollMax < 0) hcScrollMax = 0;
+  gClipY0 = oc0; gClipY1 = oc1;
+  hcNavBar();
+}
+// ---- Modales ---------------------------------------------------------------
+static void hcDrawModal(){
+  if(hcModal == HCM_NONE) return;
+  fillRectA(0, 0, SCR_W, SCR_H, TH_SCRIM, 150);
+  int w = SCR_W - 64, h = 200, x = 32, y = (SCR_H - h) / 2;
+  fillRoundRect(x, y, w, h, 26, TH_SURF);
+  drawRoundRect(x, y, w, h, 26, TH_BORDER);
+  const char* ttl = hcModal == HCM_DELPAGE ? "Eliminar esta p\xC3\xA1gina"
+                  : hcModal == HCM_RESET   ? "Restablecer el inicio" : "Aviso";
+  drawTextC(SCR_W / 2, y + 26, ttl, 3, TH_TXT);
+  if(hcModal == HCM_INFO) drawTextC(SCR_W / 2, y + 80, hcMsg, 2, TH_TXT2);
+  else if(hcModal == HCM_RESET){
+    drawTextC(SCR_W / 2, y + 70, "Vuelve al reparto de fabrica:", 2, TH_TXT2);
+    drawTextC(SCR_W / 2, y + 92, "tres p\xC3\xA1ginas y rejilla 4x3", 2, TH_TXT2);
+  } else {
+    drawTextC(SCR_W / 2, y + 70, "Sus iconos se recolocan solos", 2, TH_TXT2);
+    drawTextC(SCR_W / 2, y + 92, "en las paginas que queden", 2, TH_TXT2);
+  }
+  int bw = (w - 3 * 16) / 2, by = y + h - 62;
+  if(hcModal == HCM_INFO) hcBtn(x + (w - 140) / 2, by, 140, 46, "Entendido", true);
+  else {
+    hcBtn(x + 16, by, bw, 46, "Cancelar", false);
+    hcBtn(x + 32 + bw, by, bw, 46, hcModal == HCM_RESET ? "Restablecer" : "Eliminar", true);
+  }
+}
+static void hcRender(){
+  if(!bbuf || !blurBg) return;
+  setBuf(bbuf);
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
+  memcpy(bbuf, blurBg, (size_t)SCR_W * SCR_H * 2);   // fondo atenuado, generado una sola vez
+  switch(hcView){
+    case HCV_WALL:     hcDrawWallView();     break;
+    case HCV_PICK:     hcDrawPickView();     break;
+    case HCV_THEME:    hcDrawThemeView();    break;
+    case HCV_WIDGETS:  hcDrawWidgetView();   break;
+    case HCV_SETTINGS: hcDrawSettingsView(); break;
+    default: {
+      char sub[40];
+      snprintf(sub, sizeof(sub), "P\xC3\xA1gina %d de %d",
+               (hcPageView < gHomePageN ? hcPageView : gHomePageN - 1) + 1, gHomePageN);
+      hcChrome("Personalizar inicio", sub);
+      hcDrawPagesView();
+      hcNavBar();
+      break;
+    }
+  }
+  hcDrawModal();
+  present(0, SCR_H - 1);
+  setBuf(fb);
+  hcDirty = false;
+}
+
+// #############################################################
+// ##  ENTRADA, SALIDA Y TRANSICION
+// #############################################################
+static void hcEnter(){
+  if(hcActive || !bbuf || !homeBuf) return;
+  hcRebuildBlur();
+  if(!blurBg) return;              // sin PSRAM para el fondo atenuado: no se entra a medias
+  hcBuildThumb();                  // miniatura del fondo y paleta (usa bbuf de borrador)
+  hcActive   = true;
+  hcView     = HCV_PAGES;
+  hcPageView = gHomePage;
+  hcSlide    = 0.0f; hcDragging = false; hcDragMoved = false; hcReorder = -1;
+  hcModal    = HCM_NONE; hcScroll = 0;
+  hcWallSel  = -1; hcThemeSel = -1; hcWgSel = -1; hcPickSel = -1;
+  hcIgnore   = true; hcDirty = true;
+  gRippleActive = false;
+  gState     = ST_HOMECFG;
+  hcAnim     = gHomeReduce ? 0 : 1;
+  hcAnimT0   = millis();
+  if(!hcAnim) hcRender();
+}
+// Cierre SEGURO desde cualquier ruta (auto-bloqueo, OTA, suspension, vuelta al
+// escritorio). No anima ni pinta: solo deja el estado y la memoria limpios.
+static void hcClose(bool save){
+  if(!hcActive) return;
+  hcActive = false; hcAnim = 0; hcModal = HCM_NONE;
+  hcFreeBuffers();
+  if(hcPageView < gHomePageN) gHomePage = hcPageView;
+  if(save){ homeOrderNormalize(); homeOrderSave(); homeCfgSave(); }
+}
+static void hcFinishExit(){
+  hcClose(true);
+  gState = ST_HOME;
+  gHomeDirty = true;
+  renderHome(); showHome();
+}
+static void hcBeginExit(){
+  if(!hcActive) return;
+  // homeBuf tiene que reflejar YA lo que el usuario acaba de configurar (pagina
+  // centrada, fondo, tema, rejilla, widgets): la animacion de salida lo
+  // MUESTREA. renderHome() compone fuera de pantalla, asi que no dibuja nada.
+  if(hcPageView < gHomePageN) gHomePage = hcPageView; else gHomePage = gHomeMain;
+  homeOrderNormalize();
+  renderHome();
+  if(gHomeReduce){ hcFinishExit(); return; }
+  hcAnim = 2; hcAnimT0 = millis();
+}
+// Transicion: el escritorio real (homeBuf) se reduce hacia el centro sobre el
+// fondo atenuado. Se muestrea homeBuf por vecino mas cercano dentro del
+// rectangulo destino: ni un framebuffer extra por pagina, ~78 k pixeles por
+// cuadro y unos seis cuadros en total.
+static void hcAnimTick(){
+  if(!bbuf || !blurBg || !homeBuf){ if(hcAnim == 2) hcFinishExit(); else { hcAnim = 0; hcDirty = true; } return; }
+  uint32_t e = millis() - hcAnimT0;
+  if(e > HC_ANIM_MS) e = HC_ANIM_MS;
+  float p = (float)e / (float)HC_ANIM_MS;
+  p = 1.0f - (1.0f - p) * (1.0f - p);                 // ease-out
+  if(hcAnim == 2) p = 1.0f - p;                       // saliendo: al reves
+  int w = (int)(SCR_W + (HC_CARD_W - SCR_W) * p);
+  int h = (int)(SCR_H + (HC_CARD_H - SCR_H) * p);
+  if(w < 8) w = 8;
+  if(h < 8) h = 8;
+  int x = (SCR_W - w) / 2, y = (int)(HC_CARD_Y * p);
+  setBuf(bbuf);
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
+  memcpy(bbuf, blurBg, (size_t)SCR_W * SCR_H * 2);
+  int rad = (int)(26 * p);
+  for(int j = 0; j < h; j++){
+    int yy = y + j;
+    if(yy < 0 || yy >= SCR_H) continue;
+    int inset = rad > 1 ? rrInset(j, h, rad) : 0;
+    const uint16_t* srow = homeBuf + (size_t)((j * SCR_H) / h) * SCR_W;
+    uint16_t* drow = bbuf + (size_t)yy * SCR_W;
+    for(int i = inset; i < w - inset; i++){
+      int xx = x + i;
+      if(xx < 0 || xx >= SCR_W) continue;
+      drow[xx] = srow[(i * SCR_W) / w];
+    }
+  }
+  present(0, SCR_H - 1);
+  setBuf(fb);
+  if(e >= HC_ANIM_MS){
+    if(hcAnim == 2){ hcFinishExit(); return; }
+    hcAnim = 0; hcDirty = true;
+  }
+}
+static void hcOpenView(int v){
+  hcView = (uint8_t)v; hcScroll = 0; hcDirty = true;
+  if(v == HCV_WALL){ hcWallSel = -1; hcBuildWallPreviews(); }
+  if(v == HCV_THEME) hcThemeSel = -1;
+  if(v == HCV_WIDGETS) hcWgSel = -1;
+  if(v == HCV_PICK) hcScanImages();
+}
+static void hcBack(){
+  if(hcModal != HCM_NONE){ hcModal = HCM_NONE; hcDirty = true; return; }
+  if(hcView == HCV_PICK){ hcOpenView(HCV_WALL); return; }
+  if(hcView != HCV_PAGES){ hcView = HCV_PAGES; hcScroll = 0; hcDirty = true; return; }
+  hcBeginExit();
+}
+
+// #############################################################
+// ##  TOQUES DEL MODO PERSONALIZACION
+// #############################################################
+static void hcModalTouch(){
+  if(!T.tap) return;
+  int w = SCR_W - 64, h = 200, x = 32, y = (SCR_H - h) / 2;
+  int bw = (w - 3 * 16) / 2, by = y + h - 62;
+  if(hcModal == HCM_INFO){
+    if(hcHit(T.x, T.y, x + (w - 140) / 2, by, 140, 46)){ hcModal = HCM_NONE; hcDirty = true; }
+    return;
+  }
+  if(hcHit(T.x, T.y, x + 16, by, bw, 46)){ hcModal = HCM_NONE; hcDirty = true; return; }
+  if(!hcHit(T.x, T.y, x + 32 + bw, by, bw, 46)) return;
+  uint8_t m = hcModal; hcModal = HCM_NONE; hcDirty = true;
+  if(m == HCM_DELPAGE){
+    if(homePageDelete(hcPageView) && hcPageView >= gHomePageN) hcPageView = gHomePageN - 1;
+  } else if(m == HCM_RESET){
+    homeResetLayout(); hcPageView = 0; hcBuildThumb();
+  }
+}
+static void hcPagesTouch(){
+  int total = gHomePageN + ((gHomePageN < HOME_PAGES_MAX && !gHomeLocked) ? 1 : 0);
+  if(T.tap){
+    int b = hcBarHit(T.x, T.y);
+    if(b >= 0){
+      hcOpenView(b == 0 ? HCV_WALL : b == 1 ? HCV_THEME : b == 2 ? HCV_WIDGETS : HCV_SETTINGS);
+      return;
+    }
+    int n = gHomePageN, step = 26, x0 = SCR_W / 2 - (n - 1) * step / 2;
+    if(T.y >= HC_DOTS_Y - 18 && T.y <= HC_DOTS_Y + 18){
+      for(int i = 0; i < n; i++)
+        if(abs(T.x - (x0 + i * step)) <= 13){ hcPageView = i; hcSlide = 0; hcDirty = true; return; }
+    }
+  }
+  // --- reordenar: pulsacion larga sobre la tarjeta centrada ---
+  if(!gHomeLocked && hcReorder < 0 && T.down && !hcDragMoved && hcPageView < gHomePageN &&
+     (millis() - T.downMs) > 650 && abs(T.x - T.startX) <= 12 && abs(T.y - T.startY) <= 12 &&
+     hcHit(T.startX, T.startY, hcCardX(hcPageView), HC_CARD_Y, HC_CARD_W, HC_CARD_H)){
+    hcReorder = hcPageView; hcDragX0 = T.x; hcDragging = false; hcSlide = 0; hcDirty = true; return;
+  }
+  if(hcReorder >= 0){
+    if(T.down){ hcSlide = (float)(hcDragX0 - T.x); hcDirty = true; return; }
+    if(T.released){
+      int dst = hcReorder - (int)((hcSlide + (hcSlide < 0 ? -HC_STEP / 2 : HC_STEP / 2)) / HC_STEP);
+      if(dst < 0) dst = 0;
+      if(dst > gHomePageN - 1) dst = gHomePageN - 1;
+      while(dst > hcReorder){ homePageSwap(hcReorder, hcReorder + 1); hcReorder++; }
+      while(dst < hcReorder){ homePageSwap(hcReorder, hcReorder - 1); hcReorder--; }
+      hcPageView = hcReorder; hcReorder = -1; hcSlide = 0; hcDirty = true;
+      return;
+    }
+  }
+  if(T.tap && !hcDragMoved){
+    int hy = HC_CARD_Y + 26;
+    // casita de la tarjeta centrada o de una vecina visible -> pagina principal
+    for(int i = hcPageView - 1; i <= hcPageView + 1; i++){
+      if(i < 0 || i >= gHomePageN) continue;
+      if(abs(T.x - (hcCardX(i) + HC_CARD_W - 26)) <= 20 && abs(T.y - hy) <= 20){
+        homeSetMain(i); hcDirty = true; return;
+      }
+    }
+    if(hcPageView < gHomePageN && gHomePageN > 1 && !gHomeLocked &&
+       abs(T.x - (hcCardX(hcPageView) + 26)) <= 20 && abs(T.y - hy) <= 20){
+      hcModal = HCM_DELPAGE; hcDirty = true; return;
+    }
+    // tarjeta "+" -> crear pagina (solo si el toque cae DENTRO de la tarjeta)
+    if(total > gHomePageN && hcHit(T.x, T.y, hcCardX(gHomePageN), HC_CARD_Y, HC_CARD_W, HC_CARD_H)){
+      if(homePageAdd()){ hcPageView = gHomePageN - 1; hcSlide = 0; }
+      hcDirty = true; return;
+    }
+    for(int i = hcPageView - 1; i <= hcPageView + 1; i += 2){
+      if(i < 0 || i >= total) continue;
+      if(hcHit(T.x, T.y, hcCardX(i), HC_CARD_Y, HC_CARD_W, HC_CARD_H)){
+        hcPageView = i; hcSlide = 0; hcDirty = true; return;
+      }
+    }
+  }
+  // --- arrastre horizontal entre paginas ---
+  if(T.pressed && T.y >= HC_CARD_Y - 40 && T.y <= HC_CARD_Y + HC_CARD_H + 40){
+    hcDragging = true; hcDragMoved = false; hcDragX0 = T.x; hcDragBase = hcSlide; return;
+  }
+  if(hcDragging && T.down){
+    int dx = T.x - hcDragX0;
+    if(!hcDragMoved){ if(abs(dx) < 14) return; hcDragMoved = true; }
+    float sv = hcDragBase - dx, lim = (float)HC_STEP * 0.42f;
+    if(hcPageView == 0 && sv < -lim) sv = -lim;
+    if(hcPageView >= total - 1 && sv > lim) sv = lim;
+    hcSlide = sv; hcDirty = true;
+    return;
+  }
+  if(hcDragging && !T.down){
+    hcDragging = false;
+    if(hcDragMoved){
+      if(hcSlide > HC_STEP / 3 && hcPageView < total - 1) hcPageView++;
+      else if(hcSlide < -HC_STEP / 3 && hcPageView > 0)   hcPageView--;
+    }
+    hcSlide = 0; hcDirty = true;
+  }
+}
+static void hcListScroll(){
+  static bool dragging = false; static int y0 = 0, base = 0;
+  if(T.pressed && T.y > HC_LIST_TOP && T.y < HC_LIST_BOT){ dragging = true; y0 = T.y; base = hcScroll; return; }
+  if(dragging && T.down){
+    int sv = base - (T.y - y0);
+    if(sv < 0) sv = 0;
+    if(sv > hcScrollMax) sv = hcScrollMax;
+    if(sv != hcScroll){ hcScroll = sv; hcDirty = true; }
+    return;
+  }
+  if(dragging && !T.down) dragging = false;
+}
+static void hcWallTouch(){
+  if(!T.tap) return;
+  if(hcBackChipHit(T.x, T.y)){ hcBack(); return; }
+  for(int i = 0; i < WALL_N; i++){
+    int c = i % 4, r = i / 4;
+    if(hcHit(T.x, T.y, 18 + c * 116, 130 + r * 186, HC_PV_W, HC_PV_H)){ hcWallSel = i; hcDirty = true; return; }
+  }
+  int y = HC_WSHEET_Y;
+  if(hcWallSel >= 0){
+    int bw = (SCR_W - 24 - 4 * 12) / 3;
+    if(hcHit(T.x, T.y, 24, y + 38, bw, 42)){ hcApplyWall(hcWallSel, 1); return; }
+    if(hcHit(T.x, T.y, 24 + bw + 12, y + 38, bw, 42)){ hcApplyWall(hcWallSel, 2); return; }
+    if(hcHit(T.x, T.y, 24 + 2 * (bw + 12), y + 38, bw, 42)){ hcApplyWall(hcWallSel, 3); return; }
+  }
+  int hw = (SCR_W - 60) / 2;
+  if(hcHit(T.x, T.y, 24, y + 88, hw, 42)){ hcOpenView(HCV_PICK); return; }
+  if(hcHit(T.x, T.y, 36 + hw, y + 88, hw, 42)){ hcWallSel = 0; hcApplyWall(0, 3); return; }
+  if(hcHit(T.x, T.y, 16, y + 158, SCR_W - 32, 44)){
+    gWallPalOn = !gWallPalOn;
+    if(gWallPalOn) hcBuildThumb();               // recalcula la paleta una sola vez
+    else { gWallAcc = lookAcc(gHomeLook); gWallAcc2 = lookAcc2(gHomeLook); }
+    homeCfgSave(); gHomeDirty = true; qsDirty = true; hcDirty = true;
+    return;
+  }
+}
+static void hcPickTouch(){
+  hcListScroll();
+  if(!T.tap) return;
+  if(hcBackChipHit(T.x, T.y)){ hcBack(); return; }
+  int y = HC_LIST_TOP + 4 - hcScroll;
+  for(int i = 0; i < hcPickN; i++){
+    if(hcHit(T.x, T.y, 16, y, SCR_W - 32, 52)){
+      if(hcPickSel == i && hcHit(T.x, T.y, SCR_W - 126, y + 8, 100, 36)){
+        snprintf(gWallPath, sizeof(gWallPath), "%s", hcPickPath[i]);
+        wallImgDrop();
+        hcWallSel = WALL_IMG;
+        hcApplyWall(WALL_IMG, 3);
+        if(wallImgOk) hcOpenView(HCV_WALL);
+      } else hcPickSel = i;
+      hcDirty = true; return;
+    }
+    y += 58;
+  }
+}
+static void hcThemeTouch(){
+  if(!T.tap) return;
+  if(hcBackChipHit(T.x, T.y)){ hcBack(); return; }
+  for(int i = 0; i < LOOK_N; i++)
+    if(hcHit(T.x, T.y, 16, 130 + i * 54, SCR_W - 32, 48)){ hcThemeSel = i; hcDirty = true; return; }
+  int by = 130 + LOOK_N * 54 + 8, bw = (SCR_W - 60) / 2;
+  if(hcThemeSel >= 0){
+    if(hcHit(T.x, T.y, 24, by, bw, 44)){ hcApplyLook(hcThemeSel); return; }
+    if(hcHit(T.x, T.y, 36 + bw, by, bw, 44)){ hcThemeSel = -1; hcDirty = true; return; }
+  }
+  if(hcHit(T.x, T.y, 24, by + 54, SCR_W - 48, 42)){ hcThemeSel = 0; hcApplyLook(0); return; }
+}
+static void hcWidgetTouch(){
+  hcListScroll();
+  if(!T.tap) return;
+  if(hcBackChipHit(T.x, T.y)){ hcBack(); return; }
+  int y = HC_LIST_TOP + 4 - hcScroll;
+  const char* lastCat = NULL;
+  for(int i = 1; i < WG_COUNT; i++){
+    if(!lastCat || strcmp(lastCat, WG_REG[i].cat)){ lastCat = WG_REG[i].cat; y += 26; }
+    if(hcHit(T.x, T.y, 16, y, SCR_W - 32, 76)){
+      if(hcWgSel == i && hcHit(T.x, T.y, SCR_W - 122, y + 20, 96, 36)){
+        int pg = (hcPageView < gHomePageN) ? hcPageView : gHomeMain;
+        int r = homeWgAdd(pg, i);
+        if(r == 1)      hcInfo("Esta pagina ya tiene 3 widgets");
+        else if(r == 2) hcInfo("Sin espacio: elige otra pagina");
+        else { homeOrderNormalize(); homeOrderSave(); hcView = HCV_PAGES; }
+      } else hcWgSel = i;
+      hcDirty = true; return;
+    }
+    y += 82;
+  }
+}
+static void hcSettingsTouch(){
+  hcListScroll();
+  if(!T.tap) return;
+  if(hcBackChipHit(T.x, T.y)){ hcBack(); return; }
+  int rel = T.y + hcScroll - (HC_LIST_TOP + 4);
+  if(rel < 0) return;
+  int idx = rel / 58;
+  if(rel % 58 > 52) return;                     // ha caido en el hueco entre filas
+  switch(idx){
+    case 0: { int g = (hcGridIdx() + 1) % HC_GRID_OPTS; homeSetGrid(HC_GRID_C[g], HC_GRID_R[g]); hcBuildThumb(); break; }
+    case 1:  gHomeIconSz = (uint8_t)((gHomeIconSz + 1) % 3); homeOrderSave(); break;
+    case 2:  gHomeLabels = !gHomeLabels; homeOrderSave(); break;
+    case 3:  gHomeLocked = !gHomeLocked; homeOrderSave(); break;
+    case 4:  gHomeDots   = !gHomeDots;   homeOrderSave(); break;
+    case 5:  hcView = HCV_PAGES; hcPageView = gHomeMain; hcSlide = 0; break;
+    case 6:  gHomePinch  = !gHomePinch;  homeOrderSave(); break;
+    case 7:  gHomeReduce = !gHomeReduce; homeOrderSave(); break;
+    case 8:  gWallFit = (uint8_t)((gWallFit + 1) % 3);
+             homeCfgSave();
+             if(gWallHome == WALL_IMG || gWallLock == WALL_IMG){
+               wallImgDrop(); wallEnsureImage(); hcRebuildBlur(); hcBuildThumb();
+             }
+             break;
+    case 9:  hcModal = HCM_RESET; break;
+    default: return;
+  }
+  gHomeDirty = true; hcDirty = true;
+}
+static void hcTick(){
+  if(!hcActive){ gState = ST_HOME; renderHome(); showHome(); return; }
+  if(hcAnim){ hcAnimTick(); return; }
+  if(hcIgnore){ if(T.down) return; hcIgnore = false; }
+  if(hcModal != HCM_NONE){ hcModalTouch(); if(hcDirty) hcRender(); return; }
+  // Barra de navegacion: Atras vuelve una pantalla; Inicio sale del modo.
+  if(T.tap && gNavMode == 0 && T.y > SCR_H - 72){
+    if(T.x < SCR_W / 3){ hcBack(); if(hcActive && hcDirty) hcRender(); return; }
+    if(T.x < SCR_W * 2 / 3){ hcBeginExit(); return; }
+  }
+  if(T.swipeUp && gNavMode == 1 && T.startY > SCR_H - 44){ hcBeginExit(); return; }
+  switch(hcView){
+    case HCV_WALL:     hcWallTouch();     break;
+    case HCV_PICK:     hcPickTouch();     break;
+    case HCV_THEME:    hcThemeTouch();    break;
+    case HCV_WIDGETS:  hcWidgetTouch();   break;
+    case HCV_SETTINGS: hcSettingsTouch(); break;
+    default:           hcPagesTouch();    break;
+  }
+  if(!hcActive) return;                         // alguna accion pidio salir
+  if(hcDirty && millis() - hcFrameMs >= 24){ hcFrameMs = millis(); hcRender(); }
+}
+
+// #############################################################
+// ##  GESTO MULTITACTIL DE DOS DEDOS  (pellizco)
+// ##  ------------------------------------------------------
+// ##  Usa gtPollMulti(), la lectura MULTIPUNTO real del GT911
+// ##  (bloques 0x8150+i*8, con TRACK ID en el byte 7), no una
+// ##  aproximacion sobre el punto unico de struct Touch. Respeta
+// ##  GT911_SWAP_XY / FLIP_X / FLIP_Y, porque esa correccion vive
+// ##  DENTRO de gtPollMulti: aqui no se toca el driver.
+// ##
+// ##  Se pide multitouch SOLO cuando el propio chip ya ha dicho
+// ##  que hay >= 2 contactos (gtFingers, que gtPoll actualiza
+// ##  gratis en cada vuelta), asi que en uso normal a un dedo no
+// ##  se anade ni una transaccion I2C.
+// #############################################################
+#define HPZ_MIN_START_D2 (140 * 140)   // separacion inicial minima para "cerrar"
+#define HPZ_MIN_OPEN_D2  (45 * 45)     // separacion inicial minima para "abrir"
+#define HPZ_MIN_MS       120
+#define HPZ_MAX_MS       700
+#define HPZ_ABS_PX       50            // ademas del %, un recorrido absoluto real
+
+static uint8_t  hpzState = 0;          // 0 en reposo · 1 siguiendo · 2 consumido
+static int      hpzIdA = -1, hpzIdB = -1;
+static int32_t  hpzD2Ref = 0;
+static uint32_t hpzT0 = 0;
+static bool     hpzSwallow = false;
+
+static bool hpzSwallowing(){ return hpzSwallow; }
+static void hpzReset(){ hpzState = 0; hpzIdA = hpzIdB = -1; hpzD2Ref = 0; }
+static bool hpzAllowedHome(){
+  if(!gHomePinch) return false;
+  // drawerCanOpen() ya es la UNICA definicion de "el escritorio esta libre":
+  // ST_HOME, sin Modo Edicion, sin Modo PC ni app hospedada, sin kiosco, sin
+  // capa OTA y sin panel rapido. Se reutiliza tal cual en vez de repetir aqui
+  // la misma lista y arriesgarse a que las dos se separen.
+  if(!drawerCanOpen()) return false;
+  if(hpDragging || hpSettling) return false;             // hay un gesto de pagina en curso
+  if(SUSPEND_ON && gSuspOn) return false;
+  if(cronoCardVisible()) return false;                   // tarjeta del cronometro: manda ella
+  if(notifDragIdx >= 0) return false;                    // se esta arrastrando una notificacion
+  return true;
+}
+static bool hpzAllowedCfg(){
+  return gState == ST_HOMECFG && hcActive && hcView == HCV_PAGES &&
+         hcModal == HCM_NONE && !hcAnim && !hcDragging && hcReorder < 0;
+}
+static void hpzUpdate(){
+  bool inHome = hpzAllowedHome(), inCfg = hpzAllowedCfg();
+  if(!inHome && !inCfg){ if(hpzState) hpzReset(); hpzSwallow = false; return; }
+  uint8_t fingers = (millis() - gtFingersMs > 150) ? 0 : gtFingers;
+  if(hpzState == 2){                       // gesto ya resuelto: tragar hasta soltar los dos dedos
+    if(fingers == 0){ hpzReset(); hpzSwallow = false; }
+    else hpzSwallow = true;
+    return;
+  }
+  if(fingers < 2){ if(hpzState) hpzReset(); hpzSwallow = false; return; }
+  int n = gtPollMulti();
+  if(n < 2){ hpzReset(); hpzSwallow = false; return; }
+  if(n > 2){ hpzState = 2; hpzSwallow = true; return; }   // tercer contacto: cancelacion segura
+  int ax = 0, ay = 0, bx = 0, by = 0, ida = -1, idb = -1, cnt = 0;
+  for(int i = 0; i < KB_MAXPOINTS; i++){
+    if(!gKbPoints[i].active) continue;
+    if(cnt == 0){ ax = gKbPoints[i].x; ay = gKbPoints[i].y; ida = gKbPoints[i].id; }
+    else if(cnt == 1){ bx = gKbPoints[i].x; by = gKbPoints[i].y; idb = gKbPoints[i].id; }
+    cnt++;
+  }
+  if(cnt < 2){ hpzReset(); hpzSwallow = false; return; }
+  int lo = ida < idb ? ida : idb, hi = ida < idb ? idb : ida;   // orden independiente del dedo
+  int32_t dx = ax - bx, dy = ay - by, d2 = dx * dx + dy * dy;
+  if(hpzState == 0){
+    if(d2 < (inHome ? HPZ_MIN_START_D2 : HPZ_MIN_OPEN_D2)){ hpzSwallow = false; return; }
+    hpzState = 1; hpzIdA = lo; hpzIdB = hi; hpzD2Ref = d2; hpzT0 = millis();
+    hpzSwallow = true;                     // con dos contactos validos ya nadie mas ve el toque
+    return;
+  }
+  if(lo != hpzIdA || hi != hpzIdB){        // cambio de dedos: se rearma sin abrir nada
+    hpzIdA = lo; hpzIdB = hi; hpzD2Ref = d2; hpzT0 = millis(); hpzSwallow = true; return;
+  }
+  hpzSwallow = true;
+  // La referencia sigue el EXTREMO del recorrido: dos dedos que solo se apoyan
+  // y se asientan no acumulan un falso pellizco.
+  if(inHome){ if(d2 > hpzD2Ref){ hpzD2Ref = d2; hpzT0 = millis(); } }
+  else      { if(d2 < hpzD2Ref){ hpzD2Ref = d2; hpzT0 = millis(); } }
+  uint32_t el = millis() - hpzT0;
+  if(el > HPZ_MAX_MS){ hpzState = 2; return; }        // fuera de ventana: se consume, no abre
+  if(el < HPZ_MIN_MS) return;
+  if(inHome){
+    // Cierre: -28 % de distancia (0,72^2 = 0,518 -> 52/100 en cuadrados) Y >= 50 px reales.
+    if((int64_t)d2 * 100 <= (int64_t)hpzD2Ref * 52){
+      int d = isqrt32(d2), d0 = isqrt32(hpzD2Ref);
+      if(d0 - d >= HPZ_ABS_PX){ hpzState = 2; hcEnter(); }
+    }
+  } else {
+    if((int64_t)d2 * 100 >= (int64_t)hpzD2Ref * 190){
+      int d = isqrt32(d2), d0 = isqrt32(hpzD2Ref);
+      if(d - d0 >= HPZ_ABS_PX){ hpzState = 2; hcBeginExit(); }
+    }
+  }
+}
+// ---- Espacio VERDADERAMENTE vacio del escritorio ---------------------------
+// Condicion de la pulsacion larga que abre la personalizacion. Excluye iconos,
+// widgets, dock, barra de estado, barra de navegacion, la banda de los widgets
+// clima/noticias y las tarjetas de notificacion visibles.
+static bool homeEmptySpaceAt(int px, int py){
+  if(py < HOME_BAND_TOP || py >= homeBandBot()) return false;
+  int id;
+  if(hitHomeIcon(px, py, id)) return false;
+  if(homeWgAt(gHomePage, px, py) >= 0) return false;
+  if(gNotifCount > 0 && py >= NOTIF_BAND_TOP && py <= NOTIF_BAND_BOT) return false;
+  return true;
+}
+
 // ORIGEN ALTERNATIVO DE LA ANIMACION. Una app abierta desde la Caja de
 // aplicaciones puede no estar en el escritorio (no es favorita) o estar en otra
 // ranura; sin esto, winRevealAnim la haria crecer desde un sitio que no es el
@@ -6324,6 +8641,17 @@ static void homeTick(){
   //     que el dedo arranque por debajo de la barra de estado;
   //   · en modo gestos (gNavMode==1) la franja inferior es de handleiOSGestures,
   //     que se ejecuta arriba y devuelve true si se queda el gesto.
+  // PULSACION LARGA EN UN HUECO VACIO (650 ms, tolerancia 12 px) -> Personalizar
+  // inicio. Va DESPUES del long-press sobre icono y ANTES del gesto de la Caja
+  // de aplicaciones. Son mutuamente excluyentes por construccion:
+  // homeEmptySpaceAt() descarta iconos, widgets, dock, barras y tarjetas de
+  // notificacion, y se comprueba tanto el punto de INICIO como el actual, asi
+  // que un dedo que se haya ido a un icono por el camino no abre nada.
+  if(T.down && (millis() - T.downMs) > 650
+     && abs(T.x - T.startX) <= 12 && abs(T.y - T.startY) <= 12
+     && homeEmptySpaceAt(T.startX, T.startY) && homeEmptySpaceAt(T.x, T.y)){
+    hcEnter(); return;
+  }
   if(T.swipeUp && drawerCanOpen() && T.startY > 96){ drawerOpen(); return; }
   if(T.tap){
     if(T.x > SCR_W * 2 / 3 && T.y > SCR_H - 72){ activarMultitarea(); return; }   // boton Recientes
@@ -6336,7 +8664,12 @@ static void homeTick(){
       // por el camino normal (enterApp).
       if(APPLOCK_ON && appLockGet(id) && gLockType > 0){ lsuStartVerifyFor(LSU_AFTER_OPENAPP, id); return; }
       enterApp(id);
+      return;
     }
+    // Widget con accion real: el acceso a Camara abre la app. Los demas son
+    // informativos y no fingen ser botones.
+    int wi = homeWgAt(gHomePage, T.x, T.y);
+    if(wi >= 0 && gHomeWg[gHomePage][wi].type == WG_CAM){ gIconOvrApp = -1; enterApp(IC_CAMARA); return; }
   }
 }
 
@@ -6432,15 +8765,17 @@ static void getIconRect(int id, int &rx, int &ry, int &rs){
     // en Modo Edicion, la animacion de apertura crecia desde donde ESTABA la app
     // antes: mover Notas al hueco de la Calculadora hacia que Notas se abriera
     // desde el sitio de la Calculadora. Hay que buscar en que slot esta hoy.
-    int slot = (id < HOME_SLOTS) ? id : 0;   // respaldo acotado a la rejilla
+    int slot = (id < homeSlotCount()) ? id : 0;   // respaldo acotado a la rejilla
     // Y solo cuenta si esta en la PAGINA VISIBLE: si el icono vive en
     // otra pagina no esta en pantalla, y hacer crecer la ventana desde
     // sus coordenadas dibujaria la animacion partiendo de un sitio
     // donde el usuario no ve nada. En ese caso se queda la casilla que
     // le tocaria por id, que es el comportamiento de siempre.
-    for(int sl = 0; sl < HOME_SLOTS; sl++)
-      if(homeOrder[gHomePage * HOME_SLOTS + sl] == id){ slot = sl; break; }
-    homeSlotXY(slot, rx, ry); rs = HOME_ICON_S;
+    int cells = homeSlotCount();
+    for(int sl = 0; sl < cells; sl++)
+      if(homeOrder[homeIdx(gHomePage, sl)] == id){ slot = sl; break; }
+    int gS, ggx0, ggy0, gcs, grs, gcols, grows; homeGrid(gS, ggx0, ggy0, gcs, grs, gcols, grows);
+    homeSlotXY(slot, rx, ry); rs = gS;
   } else {
     int dkx = 24, dky = SCR_H - 176, dkw = SCR_W - 48, dkh = 96, dS = 64;
     int inner = dkw - 32, dgap = (inner - 4 * dS) / 3, i = id - 12;
@@ -18013,7 +20348,7 @@ static void ctxRender(float p){
 }
 static void ctxOpen(int slot){
   if(!CTXMENU_ON || slot < 0 || slot > 11) return;
-  ctxApp = homeOrder[gHomePage * HOME_SLOTS + slot];
+  ctxApp = homeOrder[homeIdx(gHomePage, slot)];
   // Geometria REAL del icono pulsado: la misma rejilla que pinta renderHome()
   // (gx0=24, gy0=212, paso de columna 120, paso de fila 112, icono de 72).
   int ix = 24 + (slot % 4) * 120;
@@ -18440,10 +20775,7 @@ static void drwCompose(int y0, int y1, bool settled){
 // Cuatro acciones, las cuatro reales: abrir, favorita si/no, visible si/no e
 // informacion. Vive DENTRO de ST_DRAWER (no es un gState nuevo) para no tocar
 // el menu contextual del escritorio, que sigue exactamente igual.
-static bool drwHomeHasSlot(){
-  for(int i = 0; i < HOME_TOTAL; i++) if(homeOrder[i] == HOME_EMPTY) return true;
-  return false;
-}
+static bool drwHomeHasSlot(){ return homeFirstFree() >= 0; }
 static const char* drwCtxLabel(int i){
   switch(i){
     case 0:  return "Abrir";
@@ -18554,9 +20886,7 @@ static void drwFavToggle(int id){
     for(int i = 0; i < HOME_TOTAL; i++) if(homeOrder[i] == (uint8_t)id) homeOrder[i] = HOME_EMPTY;
   } else {
     if(appIsHidden(id)) return;                    // una app oculta no puede estar en Inicio
-    int slot = -1;
-    for(int i = 0; i < HOME_TOTAL && slot < 0; i++)
-      if(homeOrder[i] == HOME_EMPTY) slot = i;
+    int slot = homeFirstFree();
     if(slot < 0) return;                           // escritorio lleno: no se miente al usuario
     gAppFav |= (uint32_t)(1u << id);
     homeOrder[slot] = (uint8_t)id;

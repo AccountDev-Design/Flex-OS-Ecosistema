@@ -164,6 +164,7 @@ static void testDeslizarPaginas();
 static void testCabeceras();
 static void testListasConScroll();
 static void testTarjetaCronometro();
+static void testPersonalizarInicio();
 static int gFails = 0;
 static void chk(bool ok, const char* what){
   if(!ok){ printf("  FALLO: %s\n", what); gFails++; }
@@ -549,7 +550,7 @@ static void testNoticias(){
 static void drwTestReset(){
   drawerRegistryDefaults();
   for(int i = 0; i < HOME_TOTAL; i++) homeOrder[i] = HOME_EMPTY;
-  for(int i = 0; i < HOME_SLOTS; i++) homeOrder[i] = (uint8_t)i;
+  for(int i = 0; i < homeSlotCount(); i++) homeOrder[i] = (uint8_t)i;
   homeOrderNormalize();
   drwQLen = 0; drwQuery[0] = 0; drwShowHid = false; drwKbOn = false;
   drwScroll = 0; drwVel = 0; drwSlide = 0;
@@ -588,7 +589,7 @@ static void testCajaApps(){
   int nfav = 0;
   for(int id = 0; id < APP_N; id++) if(appIsFav(id)) nfav++;
   chk(nfav == 13, "Anadir a Inicio conserva la favorita nueva");
-  chk(drwSlotOf(IC_AJUSTES) == HOME_SLOTS,
+  chk(drwSlotOf(IC_AJUSTES) == HOME_STRIDE,
       "con la pagina 1 llena, Anadir a Inicio usa la primera ranura de la pagina 2");
   for(int i = 0; i < HOME_TOTAL; i++) chk(homeOrder[i] == HOME_EMPTY || appIsFav(homeOrder[i]),
                                   "ninguna ranura apunta a una app que no sea favorita");
@@ -606,7 +607,7 @@ static void testCajaApps(){
   // --- ocultar: sale de la caja Y del escritorio, y se puede recuperar ---
   drwTestReset();
   homeOrder[7] = HOME_EMPTY;
-  homeOrder[HOME_SLOTS] = 7;                    // coloca Navegador en la pagina 2
+  homeOrder[HOME_STRIDE] = 7;                    // coloca Navegador en la pagina 2
   drwHideToggle(7);
   chk(appIsHidden(7),  "\"Ocultar\" marca la app");
   chk(!appIsFav(7),    "una app oculta no puede quedarse en Inicio");
@@ -946,7 +947,7 @@ static void testPaginasHome(){
   tDown(300, gy, 7000);
   tMove(300 + 40, gy, 7050);                       // hacia la derecha desde la pagina 0
   chk(!hpTryStart(), "desde la primera pagina no se arrastra hacia atras");
-  gHomePage = HOME_PAGES - 1;
+  gHomePage = gHomePageN - 1;
   tDown(300, gy, 7200);
   tMove(300 - 40, gy, 7250);
   chk(!hpTryStart(), "desde la ultima pagina no se arrastra hacia delante");
@@ -973,7 +974,7 @@ static void testPaginasHome(){
   tMove(SCR_W - 2, HOME_GY0 + 20, 10100); edTick();
   tMove(SCR_W - 2, HOME_GY0 + 20, 10900); edTick();
   chk(gHomePage == 1, "sostener el icono en el borde abre la pagina vecina");
-  chk(homeOrder[HOME_SLOTS] == IC_RELOJ,
+  chk(homeOrder[HOME_STRIDE] == IC_RELOJ,
       "y el icono llega a la primera ranura libre, sin perderse");
   chk(homeOrder[0] == HOME_EMPTY, "la ranura de origen queda libre");
   tUp(11000, false); edTick(); editMode = false;
@@ -1137,7 +1138,7 @@ static void testDeslizarPaginas(){
     if(!hpEnsureBuf()){ chk(false, "hay lienzo para la pagina vecina"); }
     else {
       memset(homeBuf, 0, (size_t)SCR_W * SCR_H * 2);
-      for(int y = HOME_BAND_TOP; y < HOME_BAND_BOT; y++) for(int x = 0; x < SCR_W; x++){
+      for(int y = HOME_BAND_TOP; y < homeBandBot(); y++) for(int x = 0; x < SCR_W; x++){
         uint16_t bg = (uint16_t)(0x0800u + (unsigned)x);
         homeBuf[(size_t)y * SCR_W + x] = bg;
         hpBg[(size_t)(y - HOME_BAND_TOP) * SCR_W + x] = bg;
@@ -1153,7 +1154,7 @@ static void testDeslizarPaginas(){
       for(int dx = -SCR_W + 1; dx <= -1; dx += 37){
         for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++) bbuf[i] = VENENO;
         hpRenderFrame(dx);
-        for(int y = HOME_BAND_TOP; y < HOME_BAND_BOT; y++){
+        for(int y = HOME_BAND_TOP; y < homeBandBot(); y++){
           if(y >= HOME_DOTS_Y - 8 && y <= HOME_DOTS_Y + 10) continue;
           const uint16_t* row = bbuf + (size_t)y * SCR_W;
           for(int x = 0; x < SCR_W; x++){
@@ -1186,7 +1187,7 @@ static void testDeslizarPaginas(){
       for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++) bbuf[i] = VENENO;
       hpRenderFrame(-200);
       int huecos = 0;
-      for(int y = HOME_BAND_TOP; y < HOME_BAND_BOT; y++)
+      for(int y = HOME_BAND_TOP; y < homeBandBot(); y++)
         for(int x = 0; x < SCR_W; x++)
           if(bbuf[(size_t)y * SCR_W + x] == VENENO) huecos++;
       chk(huecos == 0, "sin lienzo vecino tampoco queda basura en pantalla");
@@ -1202,7 +1203,7 @@ static void testDeslizarPaginas(){
     hpRenderFrame(-240);
     int tocados = 0;
     for(int y = 0; y < SCR_H; y++){
-      if(y >= HOME_BAND_TOP && y < HOME_BAND_BOT) continue;
+      if(y >= HOME_BAND_TOP && y < homeBandBot()) continue;
       for(int x = 0; x < SCR_W; x++)
         if(bbuf[(size_t)y * SCR_W + x] != MARCA) tocados++;
     }
@@ -1234,14 +1235,14 @@ static void testDeslizarPaginas(){
     chk(x0 == HOME_GX0 && y0 == HOME_GY0,
         "la primera casilla usa los margenes normales");
     chk(x1 - x0 == HOME_COLSTEP, "el paso entre columnas es el de siempre");
-    uint8_t old = homeOrder[HOME_SLOTS];
-    homeOrder[HOME_SLOTS] = IC_AJUSTES;
+    uint8_t old = homeOrder[HOME_STRIDE];
+    homeOrder[HOME_STRIDE] = IC_AJUSTES;
     int id; gHomePage = 1;
     chk(hitHomeIcon(HOME_GX0 + 10, HOME_GY0 + 10, id) && id == IC_AJUSTES,
         "una app responde en la primera casilla de la pagina 2");
-    homeOrder[HOME_SLOTS] = old; gHomePage = 0; }
+    homeOrder[HOME_STRIDE] = old; gHomePage = 0; }
 
-  chk(HOME_PAGES == 3, "siguen siendo tres paginas");
+  chk(gHomePageN == 3, "de fabrica siguen siendo tres paginas");
 
   // --- 6. CACHE COMPACTO Y COOPERATIVO ---
   chk(HP_BUF_PIXELS == (size_t)SCR_W * HOME_BAND_H,
@@ -1465,6 +1466,298 @@ static void testListasConScroll(){
 //     "00:07" mientras la tarjeta dice "00:18.56".
 // #############################################################
 
+
+// #############################################################
+//  PERSONALIZAR INICIO
+//  ------------------------------------------------------------
+//  Paginas variables, rejilla configurable, widgets reales,
+//  fondos y la prioridad tactil del gesto de dos dedos. Todo
+//  contra el modelo REAL del sketch, no contra una copia.
+// #############################################################
+static void hcTestReset(){
+  gHomePageN = HOME_LEGACY_PAGES; gHomeMain = 0; gHomePage = 0;
+  gHomeCols = 4; gHomeRows = 3; gHomeIconSz = 1;
+  gHomeLabels = true; gHomeLocked = false; gHomeDots = true;
+  gHomePinch = true; gHomeReduce = false;
+  gWallHome = 0; gWallLock = 0; gWallFit = 0; gWallPalOn = false; gHomeLook = 0;
+  gWallPath[0] = 0;
+  for(int p = 0; p < HOME_PAGES_MAX; p++) gHomeWgN[p] = 0;
+  memset(gHomeWg, 0, sizeof(gHomeWg));
+  for(int i = 0; i < HOME_TOTAL; i++) homeOrder[i] = HOME_EMPTY;
+  gAppFav = 0x0FFF; gAppHidden = 0;
+  for(int i = 0; i < HOME_LEGACY_SLOTS; i++) homeOrder[homeIdx(0, i)] = (uint8_t)i;
+  hcActive = false; hcModal = HCM_NONE; hcReorder = -1; hcDragging = false;
+  hpDragging = false; hpSettling = false;
+  gState = ST_HOME; editMode = false; gLand = false; gHosted = false; qsPanelY = 0;
+  tReset();
+}
+static int hcCountPlaced(){
+  int n = 0;
+  for(int p = 0; p < gHomePageN; p++)
+    for(int i = 0; i < homeSlotCount(); i++) if(homeOrder[homeIdx(p, i)] != HOME_EMPTY) n++;
+  return n;
+}
+static void testPersonalizarInicio(){
+  printf("Personalizar inicio\n");
+  hcTestReset();
+
+  // --- 1. GEOMETRIA: la rejilla de fabrica es EXACTAMENTE la de siempre ---
+  { int S, gx0, gy0, cs, rs, cols, rows;
+    homeGrid(S, gx0, gy0, cs, rs, cols, rows);
+    chk(S == HOME_ICON_S && gx0 == HOME_GX0 && gy0 == HOME_GY0,
+        "4x3 con iconos normales conserva la geometria historica");
+    chk(cs == HOME_COLSTEP && rs == HOME_ROWSTEP, "y sus pasos de columna y fila");
+    chk(homeDotsY() == HOME_DOTS_Y, "los puntos siguen en su sitio de siempre");
+    chk(homeBandBot() == HOME_DOTS_Y + 18, "y la banda movil mide lo mismo"); }
+
+  // --- 2. TODAS LAS REJILLAS CABEN Y SU BANDA ENTRA EN EL CACHE ---
+  for(int g = 0; g < HC_GRID_OPTS; g++){
+    gHomeCols = HC_GRID_C[g]; gHomeRows = HC_GRID_R[g];
+    for(int sz = 0; sz < 3; sz++){
+      gHomeIconSz = (uint8_t)sz;
+      int S, gx0, gy0, cs, rs, cols, rows;
+      homeGrid(S, gx0, gy0, cs, rs, cols, rows);
+      chk(gx0 >= 0 && gx0 + (cols - 1) * cs + S <= SCR_W, "la ultima columna cabe en pantalla");
+      chk(S + 24 <= rs, "el icono y su etiqueta no invaden la fila de abajo");
+      chk(homeBandBot() <= HOME_BAND_BOT_MAX, "la banda movil no pasa de lo reservado");
+      chk(homeBandBot() < SCR_H - 176, "y nunca se mete debajo del dock");
+      if(gFails) break;
+    }
+    if(gFails) break;
+  }
+  hcTestReset();
+
+  // --- 3. CAMBIAR DE REJILLA NO PIERDE NI UN ICONO ---
+  { int antes = hcCountPlaced();
+    homeSetGrid(5, 4);
+    chk(hcCountPlaced() == antes, "pasar a 5x4 conserva todos los iconos");
+    homeSetGrid(4, 3);
+    chk(hcCountPlaced() == antes, "y volver a 4x3 tambien");
+    // De 4x3 (12 celdas) a una rejilla mas pequena no se puede ir, pero si
+    // reducir el numero de PAGINAS: los iconos se recolocan, no desaparecen.
+    homeSetGrid(4, 3); }
+
+  // --- 4. PAGINAS: crear, principal, reordenar, borrar ---
+  chk(gHomePageN == 3, "de fabrica hay tres paginas");
+  chk(homePageAdd() && gHomePageN == 4, "se puede crear una cuarta pagina");
+  chk(homePageAdd() && gHomePageN == 5, "y una quinta");
+  chk(!homePageAdd() && gHomePageN == 5, "la sexta no: el tope son cinco");
+  chk(hcModal == HCM_INFO, "y se avisa con un mensaje real, no en silencio");
+  hcModal = HCM_NONE;
+  homeSetMain(2);
+  chk(gHomeMain == 2, "la pagina principal se puede cambiar");
+  { uint8_t a0 = homeOrder[homeIdx(0, 0)];
+    homePageSwap(0, 2);
+    chk(homeOrder[homeIdx(2, 0)] == a0, "reordenar mueve el contenido de la pagina");
+    chk(gHomeMain == 0, "y la principal viaja con ella");
+    homePageSwap(0, 2);
+    chk(gHomeMain == 2 && homeOrder[homeIdx(0, 0)] == a0, "el intercambio es reversible"); }
+
+  // --- 5. BORRAR: nunca la ultima, y los iconos se recolocan ---
+  { int antes = hcCountPlaced();
+    homeSetMain(2);
+    chk(homePageDelete(2), "se puede borrar la pagina principal");
+    chk(gHomeMain == 1, "y la principal pasa a la vecina mas cercana");
+    chk(hcCountPlaced() == antes, "sin perder ningun icono");
+    while(gHomePageN > 1) chk(homePageDelete(gHomePageN - 1), "se van borrando las demas");
+    chk(!homePageDelete(0), "la ULTIMA pagina no se puede borrar");
+    chk(gHomePageN == 1, "y sigue habiendo una");
+    chk(hcModal == HCM_INFO, "con aviso real");
+    hcModal = HCM_NONE; }
+  hcTestReset();
+
+  // --- 6. WIDGETS: colocar, no solaparse, quitar ---
+  { for(int i = 0; i < homeSlotCount(); i++) homeOrder[homeIdx(1, i)] = HOME_EMPTY;
+    chk(homeWgAdd(1, WG_CLOCK) == 0, "un reloj 2x1 entra en una pagina vacia");
+    chk(gHomeWgN[1] == 1, "y queda registrado");
+    uint32_t m = homeCellMask(1, -1);
+    chk((m & 1u) && (m & 2u), "ocupa sus dos celdas");
+    chk(!(m & 4u), "y solo esas");
+    chk(homeWgAdd(1, WG_CLOCK_A) == 0, "un reloj analogico 2x2 tambien cabe");
+    chk(homeWgAdd(1, WG_NEWS) == 0, "y un tercero");
+    chk(homeWgAdd(1, WG_WIFI) == 1, "el cuarto no: tres por pagina");
+    // Un icono no puede quedarse debajo de un widget.
+    homeOrder[homeIdx(1, 0)] = IC_RELOJ;
+    gAppFav |= (1u << IC_RELOJ);
+    homeOrderNormalize();
+    chk(homeOrder[homeIdx(1, 0)] == HOME_EMPTY, "un icono bajo un widget se recoloca");
+    int id;
+    { int wx, wy, ww, wh; wgRect(&gHomeWg[1][0], wx, wy, ww, wh);
+      gHomePage = 1;
+      chk(homeWgAt(1, wx + 4, wy + 4) == 0, "el widget responde en su rectangulo");
+      chk(!hitHomeIcon(wx + 4, wy + 4, id), "y se queda el toque: ahi no hay icono");
+      chk(!homeEmptySpaceAt(wx + 4, wy + 4), "un widget NO es espacio vacio"); }
+    homeWgRemove(1, 0);
+    chk(gHomeWgN[1] == 2, "quitar un widget lo saca de la pagina");
+    gHomePage = 0; }
+
+  // --- 7. WIDGETS: sin espacio en una pagina llena ---
+  { hcTestReset();
+    chk(homeWgAdd(0, WG_CLOCK) == 2, "en una pagina llena de iconos no hay hueco");
+    chk(homeWgAdd(0, WG_WIFI)  == 2, "ni siquiera para uno de 1x1"); }
+
+  // --- 8. WIDGETS: ida y vuelta por NVS, y blob corrupto rechazado ---
+  { hcTestReset();
+    for(int i = 0; i < homeSlotCount(); i++) homeOrder[homeIdx(2, i)] = HOME_EMPTY;
+    homeWgAdd(2, WG_STORAGE);
+    homeWgAdd(2, WG_CRONO);
+    uint8_t blob[HOME_WG_BLOB];
+    homeWgSerialize(blob);
+    uint8_t n2 = gHomeWgN[2], t0 = gHomeWg[2][0].type;
+    memset(gHomeWg, 0, sizeof(gHomeWg));
+    memset(gHomeWgN, 0, sizeof(gHomeWgN));
+    chk(homeWgDeserialize(blob), "el blob propio se vuelve a leer");
+    chk(gHomeWgN[2] == n2 && gHomeWg[2][0].type == t0, "con los mismos widgets");
+    uint8_t bad[HOME_WG_BLOB];
+    memset(bad, 0xAA, sizeof(bad));
+    chk(!homeWgDeserialize(bad), "un blob corrupto se rechaza entero"); }
+
+  // --- 9. FONDOS: id invalido -> fondo por defecto, sin colgarse ---
+  { hcTestReset();
+    chk(WALL_N == 8, "hay ocho fondos integrados");
+    // drawWallpaperRowsId con un id imposible no debe escribir fuera ni petar:
+    // se pinta en homeBuf, que es un buffer real del arnes.
+    if(homeBuf){
+      drawWallpaperRowsId(homeBuf, 999, true, 0, 3);
+      drawWallpaperRowsId(homeBuf, WALL_IMG, true, 0, 3);   // sin imagen cargada
+      chk(true, "un id de fondo invalido cae al predeterminado sin reventar");
+    }
+    // La paleta siempre da un acento con contraste util.
+    for(int i = 0; i < WALL_N; i++){
+      if(!homeBuf) break;
+      drawWallpaperRowsId(homeBuf, i, true, 0, SCR_H - 1);
+      wallPaletteBuild(homeBuf);
+      uint16_t on = onColor(gWallAcc);
+      int d = (int)lum565(gWallAcc) - (int)lum565(on);
+      if(d < 0) d = -d;
+      chk(d > 60, "el texto sobre el acento tiene contraste suficiente");
+      if(gFails) break;
+    } }
+
+  // --- 10. PRIORIDAD TACTIL DEL GESTO DE DOS DEDOS ---
+  { hcTestReset();
+    chk(hpzAllowedHome(), "en el escritorio libre el pellizco esta permitido");
+    editMode = true;  chk(!hpzAllowedHome(), "en Modo Edicion no");
+    editMode = false;
+    qsPanelY = 10;    chk(!hpzAllowedHome(), "con la cortina abierta tampoco");
+    qsPanelY = 0;
+    gState = ST_APP;  chk(!hpzAllowedHome(), "dentro de una app tampoco");
+    gState = ST_HOME;
+    hpDragging = true; chk(!hpzAllowedHome(), "ni a mitad de un gesto de pagina");
+    hpDragging = false;
+    gHomePinch = false; chk(!hpzAllowedHome(), "ni con el gesto desactivado en Ajustes");
+    gHomePinch = true;
+    chk(!hpzSwallowing(), "en reposo el detector no se traga ningun toque"); }
+
+  // --- 11. PULSACION LARGA: solo sobre un hueco DE VERDAD vacio ---
+  { hcTestReset();
+    int x0, y0; homeSlotXY(0, x0, y0);
+    chk(!homeEmptySpaceAt(x0 + 10, y0 + 10), "encima de un icono no es espacio vacio");
+    homeOrder[homeIdx(0, 11)] = HOME_EMPTY;             // se libera la ultima celda
+    int xe, ye; homeSlotXY(11, xe, ye);
+    chk(homeEmptySpaceAt(xe + 10, ye + 10), "una celda libre si lo es");
+    chk(!homeEmptySpaceAt(240, 100), "la banda de los widgets clima/noticias no");
+    chk(!homeEmptySpaceAt(240, SCR_H - 120), "el dock tampoco");
+    chk(!homeEmptySpaceAt(240, SCR_H - 30), "ni la barra de navegacion");
+    // Y el gesto completo abre el modo.
+    gTestMs = 1000; tDown(xe + 10, ye + 10, 1000);
+    homeTick();
+    chk(!hcActive, "a los 0 ms todavia no se abre");
+    tMove(xe + 10, ye + 10, 1700);
+    homeTick();
+    chk(hcActive && gState == ST_HOMECFG, "a los 700 ms se abre Personalizar inicio");
+    // Y el toque que la abrio no se propaga.
+    chk(hcIgnore, "el contacto que la abrio queda consumido");
+    hcClose(false); gState = ST_HOME; tReset(); }
+
+  // --- 12. PULSACION LARGA CANCELADA POR MOVIMIENTO ---
+  { hcTestReset();
+    homeOrder[homeIdx(0, 11)] = HOME_EMPTY;
+    int xe, ye; homeSlotXY(11, xe, ye);
+    tDown(xe + 10, ye + 10, 2000);
+    tMove(xe + 40, ye + 10, 2700);                      // 30 px: mas que la tolerancia
+    homeTick();
+    chk(!hcActive, "moverse mas de 12 px cancela la pulsacion larga");
+    tReset(); }
+
+  // --- 13. AJUSTES: se guardan y se recuperan acotados ---
+  { hcTestReset();
+    gHomeLabels = false; gHomeLocked = true; gHomeDots = false;
+    gHomePinch = false; gHomeReduce = true;
+    gHomeCols = 5; gHomeRows = 4; gHomeIconSz = 2; gHomeMain = 1;
+    homeOrderSave();
+    gHomeLabels = true; gHomeLocked = false; gHomeDots = true;
+    gHomePinch = true; gHomeReduce = false;
+    gHomeCols = 4; gHomeRows = 3; gHomeIconSz = 0; gHomeMain = 0;
+    homeOrderLoad();
+    chk(!gHomeLabels && gHomeLocked && !gHomeDots && !gHomePinch && gHomeReduce,
+        "los interruptores del inicio sobreviven a un reinicio");
+    chk(gHomeCols == 5 && gHomeRows == 4 && gHomeIconSz == 2, "la rejilla y el tamano tambien");
+    chk(gHomeMain == 1, "y la pagina principal");
+    chk(gHomePage == gHomeMain, "al arrancar se entra por la pagina principal"); }
+
+  // --- 14. MIGRACION DESDE LAS CLAVES ANTIGUAS ---
+  // Es la comprobacion que de verdad importa al actualizar una placa: el
+  // escritorio que el usuario tenia no puede perderse ni moverse.
+  { flexPrefsWipe();
+    // (a) placa con "hordp" (3 paginas x 12, paso 12): la version anterior.
+    uint8_t viejo[HOME_LEGACY_TOTAL];
+    for(int i = 0; i < HOME_LEGACY_TOTAL; i++) viejo[i] = HOME_EMPTY;
+    viejo[0] = IC_NOTAS; viejo[1] = IC_RELOJ; viejo[11] = IC_CALC;
+    viejo[HOME_LEGACY_SLOTS + 0] = IC_GALERIA;          // pagina 2, primera ranura
+    viejo[2 * HOME_LEGACY_SLOTS + 3] = IC_CAMARA;       // pagina 3, cuarta ranura
+    prefs.begin("flexos", false);
+    prefs.putBytes("hordp", viejo, HOME_LEGACY_TOTAL);
+    prefs.putInt("appfav", (int)((1u << IC_NOTAS) | (1u << IC_RELOJ) | (1u << IC_CALC) |
+                                 (1u << IC_GALERIA) | (1u << IC_CAMARA)));
+    prefs.putInt("apphide", 0);
+    prefs.putInt("appn", APP_N);
+    prefs.end();
+    hcTestReset();
+    homeOrderLoad();
+    chk(homeOrder[homeIdx(0, 0)] == IC_NOTAS,   "migracion: Notas sigue en su ranura");
+    chk(homeOrder[homeIdx(0, 1)] == IC_RELOJ,   "migracion: Reloj no se mueve");
+    chk(homeOrder[homeIdx(0, 11)] == IC_CALC,   "migracion: la ultima ranura se conserva");
+    chk(homeOrder[homeIdx(1, 0)] == IC_GALERIA, "migracion: la pagina 2 se traslada al paso nuevo");
+    chk(homeOrder[homeIdx(2, 3)] == IC_CAMARA,  "migracion: y la pagina 3 tambien");
+    chk(gHomePageN == HOME_LEGACY_PAGES,        "migracion: siguen siendo tres paginas");
+    chk(gHomeCols == 4 && gHomeRows == 3,       "migracion: y la rejilla de siempre");
+    // (b) la clave ANTIGUA no se toca: bajar de version tiene que seguir siendo posible
+    homeOrderSave();
+    uint8_t comprueba[HOME_LEGACY_TOTAL];
+    prefs.begin("flexos", true);
+    size_t hn = prefs.getBytes("hordp", comprueba, HOME_LEGACY_TOTAL);
+    prefs.end();
+    chk(hn == HOME_LEGACY_TOTAL && !memcmp(comprueba, viejo, HOME_LEGACY_TOTAL),
+        "guardar NO reescribe la clave antigua: se puede volver atras");
+    // (c) primer arranque de verdad: sin ninguna clave -> reparto de fabrica
+    flexPrefsWipe();
+    hcTestReset();
+    homeOrderLoad();
+    chk(hcCountPlaced() > 0, "primer arranque: el escritorio nace con apps");
+    chk(gHomePageN == HOME_LEGACY_PAGES, "y con tres paginas");
+    // (d) blob de paginas corrupto -> escritorio usable, no una pantalla rota
+    flexPrefsWipe();
+    { uint8_t basura[HOME_TOTAL];
+      memset(basura, 0x7E, sizeof(basura));           // ids fuera de rango, todos repetidos
+      prefs.begin("flexos", false);
+      prefs.putBytes("hordq", basura, HOME_TOTAL);
+      prefs.putInt("appfav", (int)0x0FFF);
+      prefs.putInt("appn", APP_N);
+      prefs.end();
+      hcTestReset();
+      homeOrderLoad();
+      bool sano = true;
+      for(int i = 0; i < HOME_TOTAL; i++)
+        if(homeOrder[i] != HOME_EMPTY && homeOrder[i] >= APP_N) sano = false;
+      chk(sano, "un blob corrupto no deja ni un id imposible en la rejilla");
+      chk(hcCountPlaced() > 0, "y el escritorio sigue siendo usable"); }
+    flexPrefsWipe(); }
+
+  hcTestReset();
+  if(!gFails) printf("  Personalizar inicio: todas las comprobaciones pasan.\n");
+}
+
 static void testTarjetaCronometro(){
   printf("Tarjeta del cronometro\n");
   cronoTestReset();
@@ -1607,6 +1900,7 @@ int main(){
   testCabeceras();
   testListasConScroll();
   testTarjetaCronometro();
+  testPersonalizarInicio();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }
