@@ -4612,6 +4612,12 @@ static bool kioskInExcluded(int px, int py){
 // Decide si un toque se descarta. Se define abajo del todo porque necesita
 // gState, que se declara mas adelante; flexPollTouch la llama por prototipo.
 static bool kioskTouchBlocked(int px, int py);
+// GESTO DE DOS DEDOS del escritorio. Se declara aqui por el mismo motivo que el
+// de arriba: el detector necesita gState, editMode y la cortina -- que se
+// declaran mas abajo --, pero tiene que actuar en el punto MAS ALTO del
+// pipeline tactil, antes de que ninguna capa vea el contacto.
+static void hpzUpdate();
+static bool hpzSwallowing();
 // El hitbox de salida SIEMPRE gana sobre el area excluida: si el usuario dibuja
 // un rectangulo encima del candado, el dueno del telefono seguiria pudiendo
 // salir. Sin esto, el propio modo kiosco se podria convertir en un ladrillo.
@@ -4864,6 +4870,29 @@ static void flexPollTouch(){
   // abajo, alguna capa ya habria visto el toque. Trabaja sobre gtFingers, no
   // sobre T, asi que anular los flags de T de abajo no le afecta.
   suspGestureUpdate();
+  // GESTO DE DOS DEDOS (pellizco). Va justo detras del detector de suspension y
+  // por el mismo motivo: este es el unico punto donde se puede consumir un
+  // contacto ANTES de que ninguna capa lo vea. Depende de que gtPoll() ya haya
+  // dejado gtFingers/gtFingersMs al dia en esta misma vuelta, y solo hace
+  // trabajo real (una lectura multipunto por I2C) cuando el chip ya ha
+  // reportado dos contactos: en uso normal a un dedo no cuesta nada.
+  //
+  // NO interfiere con el teclado multitactil: gtPollMulti() solo se llama con
+  // gState en ST_HOME o ST_HOMECFG (ver hpzAllowedHome/hpzAllowedCfg), y el
+  // teclado nunca esta activo ahi. Tampoco con el gesto de suspension, que
+  // trabaja sobre gtFingers y ya ha corrido en la linea anterior.
+  hpzUpdate();
+  if(hpzSwallowing()){
+    // Se anulan TODOS los eventos, incluido T.down, exactamente igual que hace
+    // gSuspSwallow justo debajo. Anular T.down es lo que impide que el mismo
+    // contacto abra una app, arrastre una pagina, active un icono, abra la
+    // Caja de aplicaciones o llegue a cualquier otro consumidor: para el resto
+    // del sistema el dedo ya no esta apoyado, y todos los temporizadores de
+    // pulsacion larga se reinician solos.
+    T.pressed = T.released = T.tap = false;
+    T.swipeUp = T.swipeDown = T.swipeLeft = T.swipeRight = false;
+    T.down = false; T.moved = false;
+  }
   if(gSuspSwallow){
     // Se anulan TODOS los eventos, incluido T.down. Anular T.down tambien mata
     // el long-press del menu contextual (ST_CTX), que es justo lo que hace que
@@ -5506,6 +5535,11 @@ static void poffAnimTick();                               // APAGADO: un paso de
 static void newsSettingsEnter();                          // Ajustes -> Red e Internet -> Noticias
 static int  newsUnreadCount();                            // no leidas en el Centro de noticias
 static const char* newsTopTitle();                        // titular mas reciente (widget del Home)
+// SSID activo como char*, SIN String. WiFi.SSID() devuelve String y el widget de
+// Wi-Fi del escritorio se refresca cada 2 s: no puede depender de una asignacion
+// dinamica. El sistema solo se conecta a la red GUARDADA, asi que wifiSavedSSID
+// -- que ya es un char[33] del bloque Wi-Fi -- es el dato correcto y real.
+static const char* wifiActiveSSID();
 static const char* newsTopSource();
 static void newsBadge(uint16_t col);                      // insignia discreta de la barra de estado
 // CRONOMETRO. El modulo entero se define abajo del todo (necesita el motor
@@ -6635,7 +6669,10 @@ static void homeCfgSave(){
   prefs.putInt("wallfit",(int)gWallFit);
   prefs.putBool("wallpal", gWallPalOn);
   prefs.putInt("hlook",  (int)gHomeLook);
-  prefs.putString("wallp", gWallPath);
+  // Ruta de la imagen: se guarda como BYTES de tamano fijo, no como String.
+  // putString/getString obligarian a un String en la ruta de carga, y esta
+  // corre en el arranque; con putBytes el buffer es siempre el mismo char[80].
+  prefs.putBytes("wallpb", gWallPath, sizeof(gWallPath));
   prefs.end();
 }
 static void homeCfgLoad(){
@@ -6643,14 +6680,21 @@ static void homeCfgLoad(){
   int wh = prefs.getInt("wallh", 0), wl = prefs.getInt("walll", 0);
   int wf = prefs.getInt("wallfit", 0), lk = prefs.getInt("hlook", 0);
   gWallPalOn = prefs.getBool("wallpal", false);
-  String pth = prefs.getString("wallp", "");
+  char pth[sizeof(gWallPath)];
+  memset(pth, 0, sizeof(pth));
+  size_t pn = prefs.getBytes("wallpb", pth, sizeof(pth));
   prefs.end();
+  // Terminador SIEMPRE, pase lo que pase con lo que hubiera en NVS: si la clave
+  // no existe (pn == 0) o trae basura sin cerrar, la ruta queda vacia y el
+  // fondo cae al integrado por defecto.
+  if(pn == 0 || pn > sizeof(pth)) pth[0] = 0;
+  pth[sizeof(pth) - 1] = 0;
   // Acotado SIEMPRE: unas prefs corruptas no pueden dejar un fondo inexistente.
   gWallHome = (wh == WALL_IMG || (wh >= 0 && wh < WALL_N)) ? (uint8_t)wh : 0;
   gWallLock = (wl == WALL_IMG || (wl >= 0 && wl < WALL_N)) ? (uint8_t)wl : 0;
   gWallFit  = (wf >= 0 && wf <= 2) ? (uint8_t)wf : 0;
   gHomeLook = (lk >= 0 && lk < LOOK_N) ? (uint8_t)lk : 0;
-  snprintf(gWallPath, sizeof(gWallPath), "%s", pth.c_str());
+  snprintf(gWallPath, sizeof(gWallPath), "%s", pth);
   // Si la imagen ya no se puede cargar (archivo borrado, ya no es un JPEG, sin
   // PSRAM), wallEnsureImage vuelve al fondo integrado por defecto SIN reiniciar.
   wallEnsureImage();
@@ -7068,7 +7112,9 @@ static void wgDataTick(){
   bool up = (WiFi.status() == WL_CONNECTED);
   // WiFi.SSID() devuelve String: se copia AQUI, en el tick de datos, y nunca en
   // el camino de dibujo ni en un bucle de interfaz.
-  if(up){ String ss = WiFi.SSID(); snprintf(w1, sizeof(w1), "%s", ss.length() ? ss.c_str() : "Conectado"); }
+  // SIN String: wifiActiveSSID() devuelve el char[33] que ya mantiene el bloque
+  // Wi-Fi. Este tick corre cada 2 s y no puede pedir memoria dinamica.
+  if(up){ const char* ss = wifiActiveSSID(); snprintf(w1, sizeof(w1), "%s", ss[0] ? ss : "Conectado"); }
   else   snprintf(w1, sizeof(w1), "Sin conexi\xC3\xB3n");
   snprintf(m1, sizeof(m1), "%u KB libres", (unsigned)(esp_get_free_heap_size() / 1024));
   uint32_t tot = flexFsTotalBytes(), usd = flexFsUsedBytes();
@@ -9361,6 +9407,7 @@ static void appTick(){
 }
 
 static void enterHome(){
+  if(hcActive) hcClose(true);      // vuelta al escritorio desde CUALQUIER ruta: sin restos ni fugas
   gIconOvrApp = -1;               // el origen prestado por la caja de apps caduca aqui (ver getIconRect)
   qsForceClose();                 // volver al escritorio nunca deja la cortina a medias
   gState = ST_HOME; lockOff = 0; lastLockOff = -1;
@@ -19954,6 +20001,7 @@ static void lockArmPendingPenalty(){
 // luego deja caer el bloqueo con animateTo()/composeUnlock(), el mismo
 // mecanismo interpolado del desbloqueo por gesto pero al reves.
 static void autoLockNow(){
+  if(hcActive) hcClose(true);                // personalizacion abierta: se guarda y se cierra en limpio
   // FLEX VAULT: si el sistema se bloquea por inactividad, la boveda se cierra
   // con el. Antes que nada, para que ni un frame de la pantalla de bloqueo se
   // componga con la boveda todavia abierta.
@@ -20003,7 +20051,7 @@ static void autoLockTick(){
   // La Caja de aplicaciones cuenta como escritorio: dejarla fuera de esta lista
   // seria un agujero -- el equipo se quedaria encendido para siempre con la
   // caja abierta y el temporizador de inactividad parado.
-  if(gState != ST_HOME && gState != ST_APP && gState != ST_DRAWER) return;
+  if(gState != ST_HOME && gState != ST_APP && gState != ST_DRAWER && gState != ST_HOMECFG) return;
   if(gLand || gHosted) return;                // Modo PC / app hospedada: no se toca
   if(qsPanelY != 0) return;                   // cortina abierta: no bloquear a media interaccion
   if(!gLastTouchMs){ gLastTouchMs = millis(); return; }
@@ -22233,6 +22281,9 @@ static volatile bool gWifiAutoBusy  = false;   // intento automatico en curso
 static volatile bool gWifiAutoDone  = false;   // ya se intento (con exito o no)
 
 static bool wifiCredsExist(){ return wifiSavedSSID[0] != 0; }
+static const char* wifiActiveSSID(){
+  return (WiFi.status() == WL_CONNECTED && wifiSavedSSID[0]) ? wifiSavedSSID : "";
+}
 
 // Carga las credenciales de NVS a RAM. Se llama una vez en el arranque.
 static bool wifiCredsLoad(){
@@ -28206,6 +28257,12 @@ void setup(){
   newsLoad();                     // NOTICIAS: configuracion, credenciales y centro (NVS, no red)
   setBacklight(gBright);          // aplica el brillo guardado
   homeOrderLoad();                // orden de iconos del Home
+  // ASPECTO DEL INICIO: fondo de inicio y de bloqueo, imagen elegida, encuadre,
+  // paleta y tema. Va DESPUES de flexFsBegin() porque si el fondo es una imagen
+  // hay que leerla y decodificarla del almacenamiento, y ANTES del primer
+  // renderHome() (que ocurre al terminar el splash). Si el JPEG ya no existe,
+  // wallEnsureImage() vuelve al fondo integrado por defecto sin reiniciar.
+  homeCfgLoad();
   // TECLADO (Fases A-D): geometria del tamano guardado, ranuras fijadas del
   // portapapeles y una comprobacion barata de que ese tamano cabe en pantalla.
   kbApplySize();
@@ -28330,6 +28387,11 @@ void loop(){
   //  corriendo arriba: aqui solo se corta el DIBUJO.
   // -----------------------------------------------------------
   if(flexOtaOwnsScreen()){
+    // La OTA manda siempre. Si el modo de personalizacion estaba abierto se
+    // cierra AQUI, guardando y liberando sus buffers (miniatura y
+    // previsualizaciones), en vez de dejarlos reservados durante toda la
+    // descarga compitiendo por la PSRAM.
+    if(hcActive){ hcClose(true); gState = ST_HOME; gHomeDirty = true; }
     flexOtaRender();
     delay(5);
     return;
@@ -28424,8 +28486,15 @@ void loop(){
     case ST_NEWS:             newsSettingsTick(); break;  // Ajustes -> Noticias (servicio configurable)
     case ST_VAULT:            vaultTick(); break;          // Flex Vault (Carpeta segura)
     case ST_DRAWER:           drawerTick(); break;         // Caja de aplicaciones (One UI)
+    case ST_HOMECFG:          hcTick(); break;             // Personalizar inicio
   }
   kioskTick();            // FASE 4: refresca el candado y escucha el gesto de salida
+  wgDataTick();           // widgets del Home: refresco de DATOS (nunca dentro del dibujo)
+  if(wgDirty && gState == ST_HOME && !editMode && qsPanelY == 0 && !qsAnimOn &&
+     !hpDragging && !hpSettling){
+    wgDirty = false;      // solo se repintan las filas de los widgets, ni una mas
+    wgRepaint();
+  }
   uiTick();               // animacion continua del vidrio
   notifTick();            // isla dinamica: anima y compone sobre la pantalla activa (Fase 1)
   cronoCapsuleTick();     // CRONOMETRO: capsula de la barra (solo repinta al cambiar el segundo)

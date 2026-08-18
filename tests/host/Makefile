@@ -108,14 +108,22 @@ INOWARN  := $(WARN) -Wno-unused-function -Wno-unused-variable \
             -Wno-misleading-indentation -Wno-format-truncation \
             -Wno-maybe-uninitialized
 
-# Dos comprobaciones, no una:
+# Tres comprobaciones, no una:
 #   1. check_protos.py reproduce la regla del AUTO-PROTOTIPADO del IDE de
 #      Arduino (todo tipo que salga en una firma tiene que estar definido antes
 #      de la primera funcion). g++ no la aplica, asi que sin esto el sketch
 #      puede compilar aqui y fallar en el IDE con "does not name a type".
-#   2. g++ compila el sketch entero.
-ino: ino_compile.cpp $(INO_SRC) check_protos.py | $(BUILD)
+#   3. g++ compila el sketch entero.
+#   2. check_wiring.py comprueba el CABLEADO: que todo estado se despache en
+#      loop() y que los ganchos obligatorios (quien llama a quien) existan de
+#      verdad. Hace falta porque una funcion nueva puede estar escrita,
+#      compilar y pasar las pruebas... y no llamarse desde ningun sitio:
+#      -Wunused-function NO avisa de una static que tenga prototipo previo, y
+#      aqui casi todas lo tienen. Ese fallo deja al sistema atrapado en un
+#      estado que nadie despacha.
+ino: ino_compile.cpp $(INO_SRC) check_protos.py check_wiring.py | $(BUILD)
 	@python3 check_protos.py $(INO_SRC)
+	@python3 check_wiring.py $(INO_SRC)
 	@$(CXX) $(CXXSTD) -fsyntax-only $(INOWARN) $(INOFLAGS) -x c++ ino_compile.cpp
 	@echo "FlexOS_Ultra.ino compila."
 

@@ -1754,6 +1754,85 @@ static void testPersonalizarInicio(){
       chk(hcCountPlaced() > 0, "y el escritorio sigue siendo usable"); }
     flexPrefsWipe(); }
 
+  // --- 15. CICLO DE VIDA COMPLETO: entrar, ANIMAR, salir ---
+  // Esta comprobacion existe por un fallo real: el modo se podia abrir y quedar
+  // ATRAPADO porque nadie llamaba a hcTick(). Aqui se ejercita el ciclo entero
+  // como lo haria loop(), incluida la animacion, y se exige que vuelva solo.
+  { hcTestReset();
+    homeOrder[homeIdx(0, 11)] = HOME_EMPTY;
+    int xe, ye; homeSlotXY(11, xe, ye);
+    gHomeReduce = false;                       // con animacion: el caso que se atascaba
+    tDown(xe + 10, ye + 10, 30000);
+    tMove(xe + 10, ye + 10, 30700);
+    homeTick();
+    chk(hcActive && gState == ST_HOMECFG, "ciclo: la pulsacion larga abre el modo");
+    chk(hcAnim == 1, "ciclo: arranca la animacion de entrada");
+    // Se suelta el dedo y se despacha como hace loop(): hcTick() por vuelta.
+    tUp(30760, false);
+    for(int i = 0; i < 40 && hcAnim; i++){ gTestMs += 20; tReset(); hcTick(); }
+    chk(hcAnim == 0, "ciclo: la animacion de entrada TERMINA sola");
+    chk(hcActive && gState == ST_HOMECFG, "ciclo: y el modo se queda abierto y vivo");
+    gTestMs += 40; tReset(); hcTick();
+    chk(!hcDirty, "ciclo: el modo se ha pintado (ya no queda nada sucio)");
+    // Salir por el boton Inicio de la barra de navegacion.
+    gNavMode = 0;
+    tDown(SCR_W / 2, SCR_H - 40, gTestMs + 10);
+    tUp(gTestMs + 60, true);
+    hcTick();
+    for(int i = 0; i < 40 && gState == ST_HOMECFG; i++){ gTestMs += 20; tReset(); hcTick(); }
+    chk(gState == ST_HOME, "ciclo: Inicio devuelve al escritorio");
+    chk(!hcActive, "ciclo: el modo queda cerrado");
+    chk(hcThumb == NULL, "ciclo: la miniatura del fondo se libera al salir");
+    chk(hcWallPrev == NULL, "ciclo: y las previsualizaciones tambien");
+    // Y el escritorio responde con normalidad justo despues.
+    int id, x0, y0; homeSlotXY(0, x0, y0);
+    chk(hitHomeIcon(x0 + 10, y0 + 10, id), "ciclo: el Home vuelve a responder al toque");
+    tReset(); }
+
+  // --- 16. ENTRAR Y SALIR MUCHAS VECES NO DEJA MEMORIA COLGANDO ---
+  { hcTestReset();
+    gHomeReduce = true;                        // sin animacion: el ciclo es inmediato
+    for(int k = 0; k < 50; k++){
+      hcEnter();
+      if(!hcActive){ chk(false, "repeticion: el modo no se abrio"); break; }
+      hcBeginExit();
+      if(gState != ST_HOME){ chk(false, "repeticion: el modo no se cerro"); break; }
+    }
+    chk(!hcActive && hcThumb == NULL && hcWallPrev == NULL,
+        "50 entradas y salidas no dejan ni un buffer reservado");
+    gHomeReduce = false; }
+
+  // --- 17. CIERRE SEGURO DESDE OTRAS RUTAS (bloqueo, OTA, vuelta al Home) ---
+  { hcTestReset();
+    hcEnter();
+    chk(hcActive, "cierre: el modo esta abierto");
+    hcClose(true);                              // la ruta que usan autoLockNow/loop-OTA/enterHome
+    chk(!hcActive, "cierre: hcClose lo cierra");
+    chk(hcThumb == NULL && hcWallPrev == NULL, "cierre: y suelta sus buffers");
+    chk(gHomePage < gHomePageN, "cierre: la pagina visible queda en rango"); }
+
+  // --- 18. NINGUN OVERLAY COMPITE CON EL MODO ---
+  { hcTestReset();
+    gState = ST_HOME;
+    chk(qsCanOpen(), "la cortina se abre en el escritorio");
+    gState = ST_HOMECFG;
+    chk(!qsCanOpen(), "pero NO encima de Personalizar inicio");
+    // Una notificacion visible no debe dibujarse encima NI robar el toque.
+    gNotifCount = 1;
+    gNotifs[0].active = true; gNotifs[0].armed = true; gNotifs[0].phase = NP_IDLE;
+    gNotifs[0].slideX = 0; gNotifs[0].bornMs = gTestMs;
+    notifDragIdx = -1;
+    tDown(NOTIF_MARGIN_X + 20, NOTIF_Y0 + 20, gTestMs + 10);
+    tUp(gTestMs + 40, true);
+    notifHandleTouch();
+    chk(T.tap, "la isla NO consume el toque en Personalizar inicio");
+    chk(notifDragIdx == -1, "ni empieza a arrastrar su tarjeta");
+    notifTick();
+    chk(notifPaused, "y sus fases quedan pausadas mientras el modo esta abierto");
+    gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+    notifPaused = false; notifBandOn = false;
+    gState = ST_HOME; tReset(); }
+
   hcTestReset();
   if(!gFails) printf("  Personalizar inicio: todas las comprobaciones pasan.\n");
 }
