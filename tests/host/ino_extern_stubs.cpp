@@ -21,12 +21,17 @@
 // ---- OTA ----
 void        flexOtaBegin(){}
 bool        flexOtaBusy(){ return false; }
-bool        flexOtaOwnsScreen(){ return false; }
+// Conmutable desde las pruebas: hace falta para comprobar que el editor del
+// Panel Rapido no se abre mientras la pantalla es del OTA.
+bool        gFlexOtaOwns = false;
+bool        flexOtaOwnsScreen(){ return gFlexOtaOwns; }
 bool        flexOtaOverlayActive(){ return false; }
 void        flexOtaRender(){}
 void        flexOtaOpenSettings(){}
 bool        flexOtaHandleTouch(FlexOtaTouch*){ return false; }
 const char* flexOtaStatusText(){ return "Sin comprobar"; }
+// Version local: la usa el subtitulo del control "Actualizaciones" del Panel Rapido.
+const char* flexOtaLocalVersion(){ return "1.0.0"; }
 
 // ---- Sistema de archivos ----
 bool        flexFsBegin(){ return false; }

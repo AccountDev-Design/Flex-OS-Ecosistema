@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include <time.h>
 #include "Arduino.h"
 #include "Wire.h"
 #include "Preferences.h"
@@ -155,6 +156,8 @@ static void geoEnterSelect();
 //  puede llamar a las funciones static del sketch sin exportarlas.
 // #############################################################
 static void testPanelRapido();
+static void testPanelOneUI();
+extern bool gFlexOtaOwns;
 static void testNoticias();
 static void testCajaApps();
 static void testCronometro();
@@ -329,6 +332,510 @@ static void testPanelRapido(){
   gState = ST_HOME;
 
   if(!gFails) printf("  Panel rapido: todas las comprobaciones pasan.\n");
+}
+
+// #############################################################
+//  PRUEBAS DEL PANEL RAPIDO ESTILO ONE UI 8.5
+//  ------------------------------------------------------------
+//  Aqui se comprueba lo que el rediseno promete y que NO se ve
+//  mirando la pantalla:
+//    · el registro no ofrece ningun control sin backend real,
+//    · una accion nunca finge un estado ON/OFF,
+//    · la configuracion sobrevive a NVS, y una corrupta o de otra
+//      version cae a fabrica en vez de dejar el panel roto,
+//    · la maquetacion no solapa, no se sale y no deja huecos,
+//    · el asa de la tarjeta asienta SIEMPRE en filas completas,
+//    · el editor trabaja sobre una copia: Cancelar no toca nada,
+//    · el catalogo no ofrece lo que ya esta puesto,
+//    · un toggle del panel mueve el estado REAL del sistema.
+// #############################################################
+static bool qpBlocksOverlap(int a, int b){
+  int ax0 = qpBlk[a].x, ax1 = ax0 + qpBlk[a].w, ay0 = qpBlk[a].y, ay1 = ay0 + qpBlk[a].h;
+  int bx0 = qpBlk[b].x, bx1 = bx0 + qpBlk[b].w, by0 = qpBlk[b].y, by1 = by0 + qpBlk[b].h;
+  return !(ax1 <= bx0 || bx1 <= ax0 || ay1 <= by0 || by1 <= ay0);
+}
+static void qpCheckLayout(const char* ctx){
+  char msg[128];
+  bool inside = true, overlap = false;
+  for(int i = 0; i < qpBlkN; i++){
+    if(qpBlk[i].x < QP_MX || qpBlk[i].x + qpBlk[i].w > QP_MX + QP_CONT_W) inside = false;
+    if(qpBlk[i].y < 0 || qpBlk[i].y + qpBlk[i].h > qpContentH + 1) inside = false;
+    for(int j = i + 1; j < qpBlkN; j++) if(qpBlocksOverlap(i, j)) overlap = true;
+  }
+  snprintf(msg, sizeof(msg), "%s: ningun bloque se sale de los margenes", ctx);
+  chk(inside, msg);
+  snprintf(msg, sizeof(msg), "%s: ningun bloque solapa con otro", ctx);
+  chk(!overlap, msg);
+}
+static bool qpCfgHas(int id){
+  for(int i = 0; i < qpN; i++) if(qpIt[i].id == id) return true;
+  return false;
+}
+
+static void testPanelOneUI(){
+  printf("Panel rapido - rediseno One UI\n");
+  gState = ST_HOME; gLand = false; gHosted = false; editMode = false;
+  gTestMs = 200000;
+
+  // ---- 1. REGISTRO: nada falso ----
+  bool idsOk = true, ptrsOk = true, accionSinEstado = true;
+  for(int i = 0; i < QSID_COUNT; i++){
+    if(QS_REG[i].id != i) idsOk = false;
+    if(!QS_REG[i].avail || !QS_REG[i].tap || !QS_REG[i].icon || !QS_REG[i].name) ptrsOk = false;
+    if(QS_REG[i].type == QT_ACTION && QS_REG[i].state != NULL) accionSinEstado = false;
+    if(QS_REG[i].type == QT_TOGGLE && QS_REG[i].state == NULL) accionSinEstado = false;
+  }
+  chk(idsOk,  "cada entrada del registro esta en el indice de su propio id");
+  chk(ptrsOk, "toda entrada declara disponibilidad, accion, icono y nombre");
+  chk(accionSinEstado, "una ACCION nunca expone estado ON/OFF y un TOGGLE siempre lo expone");
+  // El ESP32-P4 no lleva radio Bluetooth: soc_caps.h no define SOC_BLE_SUPPORTED.
+  chk(FLEXOS_BLE_HW == 0, "el perfil compilado NO declara radio Bluetooth");
+  chk(!qpCtlAvail(QSID_BLE), "sin radio real, Bluetooth NO esta disponible como control");
+  chk(qpCtlAvail(QSID_WIFI) == (FLEXOS_ENABLE_WIFI ? true : false), "Wi-Fi sigue la disponibilidad real");
+  chk(qpCtl(QSID_COUNT) == NULL && qpCtl(-1) == NULL, "un id fuera de rango no lee basura");
+
+  // ---- 2. FABRICA + NORMALIZACION ----
+  flexPrefsWipe();
+  qpLoaded = false; qpLoad();
+  chk(qpN > 0, "sin nada en NVS se arranca con la configuracion de fabrica");
+  bool sinBle = true, tamOk = true, sinDup = true;
+  for(int i = 0; i < qpN; i++){
+    if(qpIt[i].id == QSID_BLE) sinBle = false;
+    if(!qpSizeAllowed(qpIt[i].id, qpIt[i].w, qpIt[i].h)) tamOk = false;
+    for(int j = i + 1; j < qpN; j++) if(qpIt[i].id == qpIt[j].id) sinDup = false;
+  }
+  chk(sinBle, "la configuracion de fabrica no coloca Bluetooth en el P4");
+  chk(tamOk,  "todo elemento tiene un tamano que su control admite");
+  chk(sinDup, "no hay ningun control repetido");
+  chk(qpCfgHas(QSID_WIFI) && qpCfgHas(QSID_BRIGHT), "Wi-Fi y Brillo entran de fabrica");
+
+  // ---- 3. MAQUETACION ----
+  qpMode = QPM_PANEL; qpGH = (float)qpGroupH(qpGrows);
+  qpScrollF = 0; qpGScrollF = 0;
+  qpRelayout();
+  qpCheckLayout("maquetacion de fabrica");
+  chk(qpContentH > 0, "el contenido tiene alto");
+  chk(qpTileN > 0 && qpGroupBlk >= 0, "hay circulos 1x1 y por tanto tarjeta expandible");
+  chk(qpBlk[qpGroupBlk].w == QP_CONT_W, "la tarjeta ocupa las cuatro columnas");
+  chk(qpColX(0) == QP_MX && qpColX(3) + QP_CW == QP_MX + QP_CONT_W,
+      "las cuatro columnas cubren el ancho util EXACTO (480 px)");
+  chk(qpSpanW(2) == 218 && qpSpanW(4) == 448, "los tramos de 2 y 4 columnas miden lo que deben");
+
+  // Con MUCHOS controles 1x1 la tarjeta no crece sin limite: pasa a scroll interno.
+  int filas = qpTotalRows();
+  chk(qpGroupMaxPx() <= qpGroupH(QP_GROWS_MAX), "la tarjeta tiene un alto maximo acotado");
+  if(filas > QP_GROWS_MAX) chk(qpGroupCanScroll(), "con mas filas que el maximo hay scroll interno");
+
+  // ---- 4. ESTIRAMIENTO: asienta en FILAS COMPLETAS ----
+  bool snapOk = true;
+  for(int destino = qpGroupMinPx() - 30; destino <= qpGroupMaxPx() + 30; destino += 17){
+    qpGH = (float)destino;
+    qpGroupSnap();
+    int guardia = 0;
+    while(qpGAnim && guardia++ < 400){ gTestMs += 16; qpGroupAnimStep(); }
+    int h = (int)(qpGH + 0.5f);
+    bool valido = false;
+    for(int r = QP_GROWS_MIN; r <= QP_GROWS_MAX; r++) if(h == qpGroupH(r)) valido = true;
+    if(!valido) snapOk = false;
+    if(h < qpGroupMinPx() || h > qpGroupMaxPx()) snapOk = false;
+  }
+  chk(snapOk, "al soltar el asa, la tarjeta asienta en una fila COMPLETA y dentro de limites");
+
+  // ---- 4b. MUCHOS CONTROLES: estiramiento REAL y scroll interno ----
+  // Se construye a mano un panel con TODOS los controles disponibles como
+  // circulos 1x1. Asi hay mas filas que las que caben, que es justo el caso
+  // que el asa y el scroll interno tienen que resolver.
+  {
+    uint8_t sv[QP_MAX_ITEMS]; uint8_t svN = qpN, svG = qpGrows;
+    QpItem svIt[QP_MAX_ITEMS]; memcpy(svIt, qpIt, sizeof(svIt)); (void)sv;
+    qpN = 0;
+    for(int id = 0; id < QSID_COUNT && qpN < QP_MAX_ITEMS; id++){
+      if(!qpCtlAvail(id) || !qpSizeAllowed(id, 1, 1)) continue;
+      qpIt[qpN].id = (uint8_t)id; qpIt[qpN].w = 1; qpIt[qpN].h = 1;
+      qpIt[qpN].ori = QOR_H; qpIt[qpN].vis = 1; qpN++;
+    }
+    qpGrows = QP_GROWS_MAX; qpGH = (float)qpGroupH(qpGrows);
+    qpScrollF = 0; qpGScrollF = 0;
+    qpRelayout();
+    chk(qpTotalRows() >= 3, "con todos los controles como circulos hay al menos tres filas");
+    qpCheckLayout("panel lleno de circulos");
+    // Estirar de minimo a maximo y volver.
+    qpGH = (float)qpGroupMinPx(); qpRelayout();
+    int hMin = qpLayGroupPx;
+    qpGH = (float)qpGroupMaxPx(); qpRelayout();
+    int hMax = qpLayGroupPx;
+    chk(hMax > hMin, "la tarjeta puede crecer de verdad cuando hay filas de sobra");
+    chk((hMax - hMin) % QP_TROW == 0, "el recorrido del asa es un numero entero de FILAS");
+    // Contraida al minimo quedan filas fuera: ahi tiene que haber scroll
+    // interno, y con limites exactos en las dos puntas.
+    qpGH = (float)qpGroupMinPx(); qpRelayout();
+    chk(qpGroupCanScroll(), "con la tarjeta contraida y mas filas, hay scroll interno");
+    qpGScrollF = 100000; qpClampGScroll(false);
+    int innerMax = qpTotalRows() * QP_TROW - qpGroupInnerH(qpLayGroupPx);
+    chk((int)qpGScrollF == innerMax, "el scroll interno se detiene en la ultima fila");
+    qpGScrollF = -100000; qpClampGScroll(false);
+    chk((int)qpGScrollF == 0, "y en la primera");
+    // Estirada al maximo con todas las filas dentro, ya no hace falta scroll.
+    qpGH = (float)qpGroupMaxPx(); qpRelayout();
+    if(qpTotalRows() <= QP_GROWS_MAX)
+      chk(!qpGroupCanScroll(), "estirada del todo, si caben todas las filas no hay scroll interno");
+    memcpy(qpIt, svIt, sizeof(qpIt)); qpN = svN; qpGrows = svG;
+    qpGH = (float)qpGroupH(qpGrows); qpScrollF = 0; qpGScrollF = 0; qpRelayout();
+  }
+
+  // ---- 5. IDS DESCONOCIDOS, DUPLICADOS Y TAMANOS IMPOSIBLES ----
+  QpItem sucio[QP_MAX_ITEMS];
+  memset(sucio, 0, sizeof(sucio));
+  sucio[0].id = QSID_WIFI;   sucio[0].w = 2; sucio[0].h = 1; sucio[0].ori = QOR_H; sucio[0].vis = 1;
+  sucio[1].id = QSID_WIFI;   sucio[1].w = 2; sucio[1].h = 1; sucio[1].ori = QOR_H; sucio[1].vis = 1;  // duplicado
+  sucio[2].id = 200;         sucio[2].w = 1; sucio[2].h = 1; sucio[2].ori = QOR_H; sucio[2].vis = 1;  // desconocido
+  sucio[3].id = QSID_BLE;    sucio[3].w = 1; sucio[3].h = 1; sucio[3].ori = QOR_H; sucio[3].vis = 1;  // sin hardware
+  sucio[4].id = QSID_BRIGHT; sucio[4].w = 1; sucio[4].h = 1; sucio[4].ori = QOR_V; sucio[4].vis = 1;  // tamano y ori imposibles
+  uint8_t gr = 99;
+  uint8_t n = qpNormalize(sucio, 5, gr);
+  chk(n == 2, "la normalizacion deja solo los elementos validos");
+  chk(sucio[0].id == QSID_WIFI && sucio[1].id == QSID_BRIGHT, "y conserva el orden de los que sobreviven");
+  chk(sucio[1].w == 4 && sucio[1].h == 1, "un tamano incompatible se corrige al primero permitido");
+  chk(sucio[1].ori == QOR_H, "una orientacion no permitida se corrige");
+  chk(gr == QP_GROWS_MAX, "el numero de filas se acota al rango valido");
+
+  // ---- 6. NVS: ida y vuelta, version futura y blob corrupto ----
+  qpLoaded = false; qpLoad();
+  uint8_t antesN = qpN, antesGrows = qpGrows, antesId0 = qpIt[0].id;
+  qpGrows = 4; qpSave();
+  qpN = 0; qpGrows = 0; memset(qpIt, 0, sizeof(qpIt));
+  qpLoaded = false; qpLoad();
+  chk(qpN == antesN && qpIt[0].id == antesId0, "la configuracion vuelve intacta de NVS");
+  chk(qpGrows == 4, "el alto elegido para la tarjeta tambien persiste");
+  (void)antesGrows;
+
+  uint8_t blob[QP_BLOB_N];
+  qpSerialize(blob);
+  blob[1] = QP_CFG_VER + 7;                                  // "version del futuro"
+  chk(!qpDeserialize(blob), "un blob de una version mas nueva se rechaza en vez de adivinarse");
+  qpSerialize(blob); blob[0] = 'X';
+  chk(!qpDeserialize(blob), "un blob con firma equivocada se rechaza");
+  qpSerialize(blob); blob[2] = QP_MAX_ITEMS + 5;             // cuenta imposible
+  chk(!qpDeserialize(blob), "un blob con mas elementos de los que caben se rechaza");
+  // ... y un blob corrupto en NVS deja el panel utilizable, no roto.
+  memset(blob, 0xA5, sizeof(blob));
+  prefs.begin(QP_NVS_NS, false); prefs.putBytes(QP_NVS_KEY, blob, QP_BLOB_N); prefs.end();
+  qpN = 0; qpLoaded = false; qpLoad();
+  chk(qpN > 0, "una NVS corrupta cae a la configuracion de fabrica");
+  qpCheckLayout("tras recuperarse de NVS corrupta");
+
+  // ---- 7. EDITOR: copia temporal, quitar, anadir, mover, redimensionar ----
+  qpLoaded = false; flexPrefsWipe(); qpLoad();
+  uint8_t origN = qpN, origId0 = qpIt[0].id;
+  qpEditEnter();
+  chk(qpMode == QPM_EDIT && qpEdN == origN, "editar trabaja sobre una copia identica");
+  chk(qpEditRemove(0), "se puede quitar un elemento");
+  chk(qpEdN == origN - 1, "la copia pierde el elemento");
+  chk(qpN == origN && qpIt[0].id == origId0, "la configuracion VIVA no se ha tocado");
+  qpEditCancel();
+  chk(qpMode == QPM_PANEL && qpN == origN && qpIt[0].id == origId0,
+      "Cancelar descarta todos los cambios");
+
+  qpEditEnter();
+  qpEditRemove(0);
+  qpEditCommit();
+  chk(qpMode == QPM_PANEL && qpN == origN - 1, "Listo aplica los cambios");
+  qpN = 0; qpLoaded = false; qpLoad();
+  chk(qpN == origN - 1, "y los deja guardados en NVS para el proximo arranque");
+
+  // Volver a anadirlo desde el catalogo.
+  qpEditEnter();
+  qpCatBuild();
+  bool ofreceQuitado = false, ofrecePuesto = false, ofreceNoDisponible = false;
+  for(int i = 0; i < qpCatN; i++){
+    if(qpCatIds[i] == origId0) ofreceQuitado = true;
+    for(int j = 0; j < qpEdN; j++) if(qpCatIds[i] == qpEdIt[j].id) ofrecePuesto = true;
+    if(!qpCtlAvail(qpCatIds[i])) ofreceNoDisponible = true;
+  }
+  chk(ofreceQuitado, "el catalogo ofrece el control que se habia quitado");
+  chk(!ofrecePuesto, "el catalogo NO ofrece controles que ya estan en el panel");
+  chk(!ofreceNoDisponible, "el catalogo NO ofrece controles sin backend real");
+  chk(qpEditAdd(origId0), "anadir desde el catalogo coloca el control");
+  chk(!qpEditAdd(origId0), "y no lo duplica");
+  chk(!qpEditAdd(QSID_BLE), "no se puede anadir un control sin hardware real");
+  qpRelayout(); qpCheckLayout("tras anadir desde el catalogo");
+  qpEditCommit();
+  chk(qpN == origN, "el panel recupera su numero de controles");
+
+  // Redimensionar: 1x1 -> 2x1 y rechazo limpio de lo imposible.
+  qpEditEnter();
+  int idxW = -1;
+  for(int i = 0; i < qpEdN; i++) if(qpEdIt[i].id == QSID_THEME) idxW = i;
+  chk(idxW >= 0, "el tema esta en el panel para probar el redimensionado");
+  if(idxW >= 0){
+    uint8_t nw = 0, nh = 0;
+    qpEdIt[idxW].w = 1; qpEdIt[idxW].h = 1;
+    chk(qpNextSize(QSID_THEME, 1, 1, +1, nw, nh) && nw == 2 && nh == 1,
+        "un control 1x1 que admite capsula crece a 2x1");
+    qpEdIt[idxW].w = nw; qpEdIt[idxW].h = nh;
+    chk(!qpNextSize(QSID_THEME, 2, 1, +1, nw, nh), "y no crece a un tamano que no admite");
+    chk(!qpNextSize(QSID_BRIGHT, 4, 1, +1, nw, nh) && !qpNextSize(QSID_BRIGHT, 4, 1, -1, nw, nh),
+        "el slider de brillo solo existe a 4x1: cualquier otro tamano se rechaza");
+    qpRelayout(); qpCheckLayout("con una capsula redimensionada");
+  }
+  qpEditCancel();
+
+  // El asa del borde derecho de un CIRCULO lo convierte en capsula, por el
+  // camino real del toque (no llamando a qpNextSize a mano).
+  qpEditEnter();
+  qpScrollF = 0; qpGScrollF = 0; qpRelayout(); qpG = QG_NONE;
+  if(qpGroupBlk >= 0 && qpTileN > 0){
+    int idxT = qpTiles[0];
+    uint8_t idT = qpEdIt[idxT].id;
+    int gy = QP_VIEW_Y0 + qpBlk[qpGroupBlk].y;
+    int gyTop = gy + QP_GPAD - (int)(qpGScrollF + 0.5f);
+    int cx, cy; qpTileCenter(0, gyTop, cx, cy);
+    gTestMs += 200; touchDrag(cx + QP_TCOLW / 2 - 8, cy, true); T.downMs = gTestMs; qpEditTouch();
+    chk(qpG == QG_EDDRAG && qpEdResize == idxT, "el asa derecha de un circulo engancha el redimensionado");
+    gTestMs += 16; touchDrag(cx + QP_TCOLW / 2 + 50, cy, false); qpEditTouch();
+    chk(qpEdIt[idxT].w == 2 && qpEdIt[idxT].h == 1, "arrastrarla convierte el circulo 1x1 en capsula 2x1");
+    qpRelayout();
+    bool yaNoEsCirculo = true;
+    for(int k = 0; k < qpTileN; k++) if(qpEdIt[qpTiles[k]].id == idT) yaNoEsCirculo = false;
+    chk(yaNoEsCirculo, "y sale de la tarjeta de circulos para vivir en el flujo");
+    qpCheckLayout("tras convertir un circulo en capsula");
+    gTestMs += 16; touchReset(); T.released = true; qpEditTouch();
+    chk(qpG == QG_NONE && qpEdResize == -1, "al soltar termina el redimensionado");
+  }
+  qpEditCancel();
+
+  // Reordenar.
+  qpEditEnter();
+  uint8_t a0 = qpEdIt[0].id, a2 = qpEdIt[2].id;
+  qpEditMove(0, 2);
+  chk(qpEdIt[2].id == a0 && qpEdIt[1].id == a2, "mover un elemento reordena sin perder a nadie");
+  qpEditMove(2, 0);
+  chk(qpEdIt[0].id == a0, "y se puede devolver a su sitio");
+  qpEditCancel();
+
+  // Restablecer diseno solo afecta a la copia hasta "Listo".
+  qpEditEnter();
+  uint8_t vivoN = qpN;
+  qpEditRemove(0); qpEditRemove(0);
+  qpEditReset();
+  chk(qpEdN == vivoN, "Restablecer devuelve la copia al diseno de fabrica");
+  chk(qpN == vivoN, "y no toca lo vivo hasta pulsar Listo");
+  qpEditCancel();
+
+  // No se puede vaciar el panel del todo.
+  qpEditEnter();
+  int guardia2 = 0;
+  while(qpEdN > 1 && guardia2++ < 64) qpEditRemove(0);
+  chk(qpEdN == 1, "se pueden quitar todos menos uno");
+  chk(!qpEditRemove(0), "el ultimo control no se puede quitar: el panel no queda vacio");
+  qpEditCancel();
+
+  // El OTA es propietario de la pantalla: no se entra a editar.
+  gFlexOtaOwns = true;
+  qpEditEnter();
+  chk(qpMode == QPM_PANEL, "con la pantalla en manos del OTA no se abre el editor");
+  gFlexOtaOwns = false;
+
+  // ---- 8. ACCION REAL DE UN CONTROL ----
+  // Se abre el panel del todo y se toca el circulo del Modo avion: lo que se
+  // comprueba es que cambia gAirplane, el estado REAL del sistema.
+  qpLoaded = false; flexPrefsWipe(); qpLoad();
+  drawWallpaper(homeBuf, false); setBuf(fb);
+  qsPanelY = SCR_H; qsLastY = SCR_H; qsDirty = true;
+  qpMode = QPM_PANEL; qpG = QG_NONE;
+  qpGH = (float)qpGroupH(qpGrows); qpScrollF = 0; qpGScrollF = 0;
+  qpRelayout();
+  int kAvion = -1;
+  for(int k = 0; k < qpTileN; k++) if(qpIt[qpTiles[k]].id == QSID_AIRPLANE) kAvion = k;
+  if(kAvion < 0){
+    // De fabrica el Modo avion es una capsula: se busca entre los bloques.
+    int bAvion = -1;
+    for(int b = 0; b < qpBlkN; b++)
+      if(qpBlk[b].kind == QB_ITEM && qpIt[qpBlk[b].item].id == QSID_AIRPLANE) bAvion = b;
+    chk(bAvion >= 0, "el Modo avion esta en el panel");
+    if(bAvion >= 0){
+      bool antes = gAirplane;
+      int px = qpBlk[bAvion].x + 40;
+      int py = QP_VIEW_Y0 + qpBlk[bAvion].y + qpBlk[bAvion].h / 2;
+      chk(qsTapTile(px, py), "el toque cae sobre un control del panel");
+      chk(gAirplane != antes, "el toque cambia el estado REAL del modo avion");
+      qsTapTile(px, py);
+      chk(gAirplane == antes, "y lo devuelve");
+    }
+  }
+  // Brillo: el slider mueve el PWM real (gBright), no un numero decorativo.
+  int bBrillo = -1;
+  for(int b = 0; b < qpBlkN; b++)
+    if(qpBlk[b].kind == QB_ITEM && qpIt[qpBlk[b].item].id == QSID_BRIGHT) bBrillo = b;
+  chk(bBrillo >= 0, "el brillo esta en el panel");
+  if(bBrillo >= 0){
+    int x = qpBlk[bBrillo].x, w = qpBlk[bBrillo].w;
+    int py = QP_VIEW_Y0 + qpBlk[bBrillo].y + qpBlk[bBrillo].h / 2;
+    gTestMs += 100; touchDrag(x + 6, py, true); T.downMs = gTestMs;
+    qsHandle();
+    chk(qpG == QG_SLIDER, "el gesto que nace en el slider es del slider, no del scroll");
+    gTestMs += 16; touchDrag(x + w - 6, py, false); qsHandle();
+    chk(gBright >= 95, "arrastrar a la derecha sube el brillo REAL casi al maximo");
+    gTestMs += 16; touchDrag(x + 6, py, false); qsHandle();
+    chk(gBright <= 5, "y arrastrar a la izquierda lo baja");
+    gTestMs += 16; touchReset(); T.released = true; qsHandle();
+    chk(qpG == QG_NONE, "al soltar, el slider suelta el gesto");
+    setBacklight(80);
+  }
+
+  // ---- 9. PROPIEDAD DEL GESTO ----
+  // Un arrastre que nace en el ASA de la tarjeta redimensiona; uno que nace en
+  // el contenido hace scroll. Nunca los dos a la vez.
+  qpG = QG_NONE; qpScrollF = 0; qpGH = (float)qpGroupH(QP_GROWS_MIN); qpRelayout();
+  int gyAsa = QP_VIEW_Y0 + qpBlk[qpGroupBlk].y + qpBlk[qpGroupBlk].h - 4;
+  gTestMs += 100; touchDrag(SCR_W / 2, gyAsa, true); T.downMs = gTestMs; qsHandle();
+  chk(qpG == QG_RESIZE, "un gesto que nace en el asa manda el estiramiento");
+  float h0 = qpGH;
+  gTestMs += 16; touchDrag(SCR_W / 2, gyAsa + 60, false); qsHandle();
+  chk(qpGH > h0, "y el asa acompana al dedo hacia abajo");
+  gTestMs += 16; touchReset(); T.released = true; qsHandle();
+  guardia2 = 0;
+  while(qpGAnim && guardia2++ < 400){ gTestMs += 16; qpGroupAnimStep(); }
+  chk(!qpGAnim && qpG == QG_NONE, "al soltar el asa termina el asentamiento");
+
+  qpG = QG_NONE; qpScrollF = 0; qpRelayout();
+  int yVacio = QP_VIEW_Y0 + 4;
+  gTestMs += 100; touchDrag(SCR_W / 2, yVacio, true); T.downMs = gTestMs; qsHandle();
+  chk(qpG == QG_PENDING, "un gesto en el contenido empieza sin decidir: aun puede ser toque");
+  gTestMs += 16; touchDrag(SCR_W / 2, yVacio - 40, false); qsHandle();
+  chk(qpG == QG_SCROLL || qpG == QG_GSCROLL, "al pasar del umbral se convierte en scroll");
+  gTestMs += 16; touchReset(); T.released = true; qsHandle();
+
+  // La cabecera NO se mueve con el scroll y el scroll respeta sus limites.
+  qpScrollF = 100000; qpClampScroll(false);
+  chk((int)qpScrollF == qpScrollMax(), "el scroll no pasa del final del contenido");
+  qpScrollF = -100000; qpClampScroll(false);
+  chk((int)qpScrollF == 0, "ni del principio");
+
+  // ---- 10. LA CABECERA MANDA EL CIERRE, NO EL SCROLL ----
+  qsPanelY = SCR_H; qsLastY = SCR_H; qpG = QG_NONE; qpScrollF = 0; qpRelayout();
+  gTestMs += 200; touchDrag(200, 60, true); T.downMs = gTestMs; qsHandle();
+  gTestMs += 16; touchDrag(200, 20, false); qsHandle();
+  chk(qpG == QG_CURTAIN, "un arrastre nacido en la cabecera es de la cortina, no del contenido");
+  chk((int)qpScrollF == 0, "y no ha movido ni un pixel el contenido");
+  gTestMs += 16; touchReset(); T.released = true; qsHandle();
+  guardia2 = 0;
+  while(qsAnimOn && guardia2++ < 500){ gTestMs += 16; qsAnimStep(); }
+  chk(qsPanelY == 0, "arrastrar la cabecera hacia arriba cierra el panel");
+
+  // Un TOQUE en la cabecera (sin arrastrar y fuera de los botones) no cierra.
+  qsPanelY = SCR_H; qsLastY = SCR_H; qsDirty = true; qpG = QG_NONE; qpRelayout();
+  gTestMs += 200; touchDrag(200, 60, true); T.downMs = gTestMs; qsHandle();
+  gTestMs += 16; touchReset(); T.released = true; T.tap = true; qsHandle();
+  chk(qsPanelY == SCR_H && !qsAnimOn, "un toque suelto en la cabecera NO cierra el panel");
+  // ... pero el asa inferior si.
+  qpG = QG_NONE;
+  gTestMs += 200; touchDrag(SCR_W / 2, SCR_H - 12, true); T.downMs = gTestMs; qsHandle();
+  gTestMs += 16; touchReset(); T.released = true; T.tap = true; qsHandle();
+  guardia2 = 0;
+  while(qsAnimOn && guardia2++ < 500){ gTestMs += 16; qsAnimStep(); }
+  chk(qsPanelY == 0, "tocar el asa inferior cierra el panel");
+
+  // ---- 11. BOTON DEL LAPIZ Y MODO EDICION POR GESTO ----
+  qsPanelY = SCR_H; qsLastY = SCR_H; qsDirty = true; qpG = QG_NONE;
+  qpMode = QPM_PANEL; qpScrollF = 0; qpRelayout();
+  gTestMs += 200; touchDrag(QP_HBTN_CX[0], QP_HBTN_CY, true); T.downMs = gTestMs; qsHandle();
+  chk(qpG == QG_PENDING, "el lapiz de la cabecera espera a ver si es toque");
+  gTestMs += 16; touchReset(); T.released = true; T.tap = true; qsHandle();
+  chk(qpMode == QPM_EDIT, "tocar el lapiz entra en el modo de edicion");
+
+  // Mantener pulsado un elemento arranca el arrastre y reordena en vivo.
+  qpScrollF = 0; qpRelayout(); qpG = QG_NONE;
+  int bMover = -1;
+  for(int b = 0; b < qpBlkN; b++) if(qpBlk[b].kind == QB_ITEM){ bMover = b; break; }
+  chk(bMover >= 0, "hay un modulo exterior que mover");
+  if(bMover >= 0){
+    int idxAnt = qpBlk[bMover].item;
+    uint8_t idAnt = qpEdIt[idxAnt].id;
+    int px = qpBlk[bMover].x + qpBlk[bMover].w / 2;
+    int py = QP_VIEW_Y0 + qpBlk[bMover].y + qpBlk[bMover].h / 2;
+    gTestMs += 200; touchDrag(px, py, true); T.downMs = gTestMs; qpEditTouch();
+    chk(qpG == QG_PENDING, "el elemento espera a la pulsacion larga");
+    gTestMs += QP_EDLONG_MS + 20; touchDrag(px, py, false); qpEditTouch();
+    chk(qpEdDrag == idxAnt, "mantener pulsado engancha el elemento");
+    // Se lleva el dedo sobre otro bloque: el orden cambia en el acto.
+    int bOtro = -1;
+    for(int b = 0; b < qpBlkN; b++)
+      if(qpBlk[b].kind == QB_ITEM && qpBlk[b].item != qpEdDrag){ bOtro = b; break; }
+    if(bOtro >= 0){
+      int qx = qpBlk[bOtro].x + qpBlk[bOtro].w / 2;
+      int qy = QP_VIEW_Y0 + qpBlk[bOtro].y + qpBlk[bOtro].h / 2;
+      int destino = qpBlk[bOtro].item;
+      gTestMs += 16; touchDrag(qx, qy, false); qpEditTouch();
+      chk(qpEdIt[destino].id == idAnt, "el elemento se coloca en el hueco de destino");
+      chk(qpEdDrag == destino, "y el arrastre sigue enganchado a el");
+    }
+    gTestMs += 16; touchReset(); T.released = true; qpEditTouch();
+    chk(qpEdDrag == -1 && qpG == QG_NONE, "al soltar termina el arrastre");
+  }
+
+  // "Anadir un control" abre el catalogo y un toque coloca el control.
+  qpEditRemove(0);
+  qpRelayout(); qpG = QG_NONE;
+  int bAdd = -1;
+  for(int b = 0; b < qpBlkN; b++) if(qpBlk[b].kind == QB_ADD) bAdd = b;
+  chk(bAdd >= 0, "el editor ofrece 'Anadir un control' al final");
+  if(bAdd >= 0){
+    int px = qpBlk[bAdd].x + qpBlk[bAdd].w / 2;
+    int py = QP_VIEW_Y0 + qpBlk[bAdd].y + qpBlk[bAdd].h / 2;
+    gTestMs += 200; touchDrag(px, py, true); T.downMs = gTestMs; qpEditTouch();
+    gTestMs += 16; touchReset(); T.released = true; T.tap = true; qpEditTouch();
+    chk(qpMode == QPM_CAT && qpCatN > 0, "se abre el catalogo con controles que ofrecer");
+    int antesN2 = qpEdN;
+    int cx = qpColX(0) + QP_CW / 2, cy = QP_CAT_HDR + 12 + QP_TCIRC / 2;
+    qpG = QG_NONE;
+    gTestMs += 200; touchDrag(cx, cy, true); T.downMs = gTestMs; qpCatTouch();
+    gTestMs += 16; touchReset(); T.released = true; T.tap = true; qpCatTouch();
+    chk(qpMode == QPM_EDIT, "tras anadir se vuelve al editor");
+    chk(qpEdN == antesN2 + 1, "y el control queda colocado en el diseno");
+  }
+  // Volver del catalogo con "Atras" no pierde lo editado.
+  qpCatBuild(); qpMode = QPM_CAT; qpG = QG_NONE;
+  int marcaN = qpEdN;
+  gTestMs += 200; touchDrag(40, 24, true); T.downMs = gTestMs; qpCatTouch();
+  gTestMs += 16; touchReset(); T.released = true; T.tap = true; qpCatTouch();
+  chk(qpMode == QPM_EDIT && qpEdN == marcaN, "'Atras' vuelve al editor sin perder los cambios");
+  qpEditCancel();
+
+  // ---- 12. COSTE DEL CUADRO: la ruta por cuadro NO puede desenfocar ----
+  // No es una medida de la placa -- el PC es mucho mas rapido --, pero es una
+  // comparacion RELATIVA que si dice algo: componer el fondo (una vez por
+  // apertura) incluye el Liquid Glass a pantalla completa; un cuadro de
+  // contenido a pantalla completa tiene que costar una fraccion de eso. Si
+  // alguien vuelve a meter un desenfoque en el dibujo por cuadro, esta
+  // proporcion se desploma y la prueba falla.
+  {
+    bool oGlass = uiGlass; uiGlass = true;
+    qsPanelY = SCR_H; qsLastY = SCR_H; qpMode = QPM_PANEL;
+    qpScrollF = 0; qpGScrollF = 0; qpGH = (float)qpGroupH(qpGrows); qpRelayout();
+    qsDirty = true; qpMarkAll(); qsRender(true);            // deja qsBuf listo
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for(int i = 0; i < 4; i++){ qsDirty = true; qsCompose(); }
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double compose = ((t1.tv_sec - t0.tv_sec) * 1e9 + (t1.tv_nsec - t0.tv_nsec)) / 4.0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for(int i = 0; i < 40; i++){ gTestMs += 16; qpMarkAll(); qsRender(false); }
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double frame = ((t1.tv_sec - t0.tv_sec) * 1e9 + (t1.tv_nsec - t0.tv_nsec)) / 40.0;
+    chk(compose > 0 && frame > 0, "las dos rutas de dibujo se pudieron medir");
+    chk(frame * 4.0 < compose,
+        "un cuadro de contenido a pantalla completa cuesta menos de 1/4 que componer el fondo");
+    printf("  [coste] fondo %.2f ms/vez  ·  cuadro completo %.2f ms  (%.0f%% del fondo)\n",
+           compose / 1e6, frame / 1e6, 100.0 * frame / compose);
+    uiGlass = oGlass;
+  }
+
+  qsForceClose();
+  chk(qpMode == QPM_PANEL && qsBuf == NULL && qsAppSnap == NULL,
+      "qsForceClose abandona la edicion y libera TODOS los buffers temporales");
+
+  if(!gFails) printf("  Panel One UI: todas las comprobaciones pasan.\n");
 }
 
 // #############################################################
@@ -1970,6 +2477,7 @@ int main(){
   printf("  Reloj: todas las comprobaciones pasan.\n");
 
   testPanelRapido();
+  testPanelOneUI();
   testNoticias();
   testCajaApps();
   testCronometro();

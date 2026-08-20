@@ -149,6 +149,44 @@ struct Touch {
   int  x=0, y=0, startX=0, startY=0, dx=0, dy=0;
   unsigned long downMs=0, lastMs=0;
 };
+// QsCtl / QpItem: el REGISTRO y el MODELO DE DATOS del Panel Rapido. Viven
+// aqui arriba por la misma razon que PWin, DexFit y Touch: qpCtl() devuelve
+// un 'const QsCtl*' y qpNormalize() recibe un 'QpItem*', o sea que los dos
+// tipos salen en una FIRMA, y el prototipo que autogenera el IDE se inserta
+// al principio del fichero. Definirlos donde se usan haria fallar la
+// compilacion del sketch en el IDE con "does not name a type".
+//
+//   id      -> identificador ESTABLE del control (va a NVS)
+//   name    -> etiqueta corta (circulo 1x1)
+//   title   -> etiqueta larga (capsula / modulo)
+//   type    -> QT_TOGGLE / QT_ACTION / QT_SLIDER
+//   sizes   -> mascara de tamanos permitidos (QSZ_*)
+//   oris    -> mascara de orientaciones permitidas (QOR_*)
+//   cat     -> categoria del catalogo
+//   avail   -> DISPONIBILIDAD REAL (hardware/SDK/estado)
+//   state   -> lectura del estado REAL (NULL en las acciones)
+//   tap     -> ejecucion real del toque
+//   detail  -> accion secundaria (pulsacion larga)
+//   sub     -> subtitulo con dato real
+//   icon    -> glifo vectorial
+struct QsCtl {
+  uint8_t     id;
+  const char* name;
+  const char* title;
+  uint8_t     type;
+  uint8_t     sizes;
+  uint8_t     oris;
+  uint8_t     cat;
+  bool (*avail)();
+  bool (*state)();
+  void (*tap)();
+  void (*detail)();
+  void (*sub)(char*, size_t);
+  void (*icon)(int, int, int, uint16_t);
+};
+// Un elemento COLOCADO en el panel: que control, que tamano ocupa en la
+// cuadricula logica de 4 columnas, con que orientacion y si esta visible.
+struct QpItem { uint8_t id, w, h, ori, vis; };
 
 // #############################################################
 // ##  TECLADO FLEXOS  ·  FASES A-G  ·  INTERRUPTORES MAESTROS
@@ -12824,149 +12862,1242 @@ static void pcTick(){
 }
 
 // #############################################################
-// ##  PANEL RAPIDO (cortina deslizable estilo Android/iOS)
-// ##  Arrastre desde el borde superior + glassmorphism + 4 controles.
-// #############################################################
-static int  qsPanelY = 0;        // 0 = oculto, SCR_H = abierto del todo
-static bool qsDragging = false;
-static bool qsPower = false;             // Ahorro Ultra -- el UNICO bool de estado que hacia falta (Wi-Fi/BT se quitaron: no tenian radio real detras, ver resumen de cambios)
-static int  qsFlashIdx = -1;             // control con destello de toque activo (-1 = ninguno). Usa el mismo indice que qsTileIcon: 3=Modo PC, 4=Ahorro Ultra, 5=Ajustes
-static unsigned long qsFlashMs = 0;      // millis() del toque que disparo el destello
-#define QS_FLASH_DUR_MS 220              // duracion del destello de feedback al tocar
-
-// Geometria centralizada del panel rapido, estilo Control Center de iOS.
-// A PROPOSITO solo hay 4 controles -- son los UNICOS respaldados por una
-// funcion real en este archivo (ver qsApplyPower/enterApp/setBacklight
-// mas abajo). No se incluyen Wi-Fi, Bluetooth ni bateria (%) porque ese
-// codigo no controla ningun radio real ni lee ningun sensor real todavia.
-#define QS_CAP_X 24                      // capsula vertical de Brillo (PWM real)
-#define QS_CAP_Y 92
-#define QS_CAP_W 140
-#define QS_CAP_H 330
-#define QS_CAP_R (QS_CAP_W / 2)
-#define QS_CIRC_D 90                     // columna de circulos: Modo PC / Ajustes
-#define QS_CIRC_R (QS_CIRC_D / 2)
-#define QS_CIRC_CX (QS_CAP_X + QS_CAP_W + 18 + (SCR_W - 24 - (QS_CAP_X + QS_CAP_W + 18)) / 2)
-// Los dos circulos se centran VERTICALMENTE contra la capsula de Brillo (que
-// va de QS_CAP_Y a QS_CAP_Y+QS_CAP_H): con la columna de 3 de antes bastaba
-// con apilarlos desde arriba, pero con 2 eso dejaba un hueco muerto abajo.
-// Con POWEROFF_ON el tercer circulo es Apagar. La formula de QS_CIRC_CY sigue
-// centrando la columna contra la capsula sea cual sea N, asi que desactivar el
-// apagado devuelve el panel exactamente al layout de 2 que habia antes.
-#define QS_CIRC_N (POWEROFF_ON ? 3 : 2)
-#define QS_CIRC_GAP 120
-#define QS_CIRC_CY(i) (QS_CAP_Y + QS_CAP_H / 2 - ((QS_CIRC_N - 1) * QS_CIRC_GAP) / 2 + (i) * QS_CIRC_GAP)
-#define QS_PILL_X 24                     // pastilla Ahorro Ultra (cambia la frecuencia real de la CPU)
-#define QS_PILL_Y (QS_CAP_Y + QS_CAP_H + 18)
-#define QS_PILL_W (SCR_W - 48)
-#define QS_PILL_H 72
-#define QS_PILL_R (QS_PILL_H / 2)
-
-static void qsTileIcon(int idx, int cx, int cy, uint16_t col){
-  switch(idx){
-    case 3:                                                      // Modo PC (monitor)
-      drawRoundRect(cx - 14, cy - 11, 28, 20, 3, col);
-      fillRect(cx - 4, cy + 9, 8, 4, col); fillRect(cx - 10, cy + 13, 20, 3, col); break;
-    case 4:                                                      // Ahorro (bateria+rayo)
-      drawRoundRect(cx - 12, cy - 8, 22, 16, 3, col); fillRect(cx + 10, cy - 3, 3, 6, col);
-      fillTriangle(cx - 2, cy - 6, cx + 3, cy - 6, cx - 1, cy, col);
-      fillTriangle(cx - 1, cy, cx + 4, cy, cx - 2, cy + 6, col); break;
-    case 5: drawSetCatIcon(0, cx - 14, cy - 14, 28, col); break; // Ajustes (engranaje)
-    case 6: {                                                    // Apagar (simbolo IEC 5009)
-      // Arco abierto por arriba + barra vertical.
-      // OJO: arcStroke toma los angulos en GRADOS (multiplica por pi/180 por
-      // dentro), no en radianes -- igual que el resto de llamadas del archivo.
-      // 0 grados apunta a la derecha y 270 hacia ARRIBA (la Y crece hacia
-      // abajo), asi que el arco va de -68 a 248 y el hueco que queda (248..292)
-      // cae centrado justo en 270 = arriba, que es donde entra la barra.
-      arcStroke(cx, cy, 11, -68, 248, 3, col);
-      fillRect(cx - 1, cy - 14, 3, 13, col);
-      break;
-    }
-  }
-}
-// Boton circular de accion (Modo PC / Ajustes). idx usa la misma
-// numeracion que qsTileIcon. rad = d/2 en un cuadro d x d = circulo perfecto
-// (mismo truco que usan los iconos redondos en el resto del sistema).
-static void qsCircleBtn(int idx, int cx, int cy){
-  int d = QS_CIRC_D, x = cx - d / 2, y = cy - d / 2;
-  bool danger = (idx == 6);                                                // Apagar: acento rojo, como en iOS/Android
-  // El circulo "Apagar" conserva su significado destructivo en las dos
-  // apariencias: se tine con TH_DANGER en vez de con un rojo fijo.
-  uint16_t face = danger ? mix565(thCard2(), TH_DANGER, 70) : thCard2();
-  fillRoundRectA(x + 2, y + 3, d, d, d / 2, TH_SHADOW, 55);                // sombra sutil
-  if(uiGlass) drawLiquidGlassPanel(x, y, d, d, d / 2, face);
-  else fillRoundRect(x, y, d, d, d / 2, face);
-  drawRoundRect(x, y, d, d, d / 2, danger ? TH_DANGER : TH_BORDER);        // borde sutil
-  qsTileIcon(idx, cx, cy - 10, danger ? TH_DANGER : TH_TXT);
-  const char* lab = idx == 3 ? "Modo PC" : idx == 6 ? "Apagar" : "Ajustes";
-  drawTextC(cx, cy + 20, lab, 1, danger ? TH_DANGER : TH_TXT2);
-}
-// Pastilla ancha de toggle (Ahorro Ultra -- el unico toggle real que queda).
-static void qsTogglePill(int x, int y, int w, int h, bool on){
-  // Encendido = ambar de ADVERTENCIA (el ahorro limita la CPU): estado, no
-  // decoracion, asi que se toma de la paleta. Apagado = track de switch.
-  fillRoundRectA(x + 2, y + 4, w, h, h / 2, TH_SHADOW, 55);
-  if(uiGlass) drawLiquidGlassPanel(x, y, w, h, h / 2, on ? TH_WARN : thCard2());
-  else fillRoundRect(x, y, w, h, h / 2, on ? TH_WARN : TH_TRACK);
-  drawRoundRect(x, y, w, h, h / 2, on ? TH_WARN : TH_BORDER);
-  qsTileIcon(4, x + h / 2, y + h / 2, on ? TH_ONACC : TH_TXT);
-  drawText(x + h + 12, y + 14, "Ahorro Ultra", 2, on ? TH_ONACC : TH_TXT);
-  drawText(x + h + 12, y + 40, on ? "Activado - 160 MHz" : "Desactivado - 360 MHz", 1, on ? TH_ONACC : TH_TXT2);
-}
-// #############################################################
-// ##  LA CORTINA ES UNA CAPA GLOBAL, NO UNA PANTALLA DEL HOME
+// ##  PANEL RAPIDO  ·  REDISENO ESTILO ONE UI 8.5
 // ##  ------------------------------------------------------
-// ##  Antes la cortina solo existia en ST_HOME y se componia
-// ##  SIEMPRE sobre homeBuf. Por eso no se podia abrir con una app
-// ##  delante: no habia ningun fondo valido sobre el que componer,
-// ##  y qsHandle() se llamaba desde la rama ST_HOME del switch de
-// ##  estado, o sea despues de que la app ya hubiera visto el toque.
+// ##  480x800 vertical, motor grafico propio de Flex OS,
+// ##  framebuffers en PSRAM y repintado por bandas sucias.
 // ##
-// ##  Ahora:
-// ##    · el FONDO es qsBgSrc(): homeBuf en el escritorio, y una
-// ##      captura del ultimo cuadro de la app cuando hay una app
-// ##      delante. La captura se hace UNA vez, al empezar el gesto,
-// ##      y se libera en cuanto la cortina se cierra del todo.
-// ##    · el gesto se atiende en qsGlobalHandle(), que loop() llama
-// ##      ANTES del switch de estado: si el dedo entra por el borde
-// ##      superior, la cortina se queda con el toque entero y la app
-// ##      de debajo no llega a verlo.
-// ##    · mientras la cortina esta visible, la app de debajo NO
-// ##      recibe ni gestos ni botones: su tick no se ejecuta.
-// ##    · la animacion ya no bloquea. Antes qsAnimTo() giraba en un
-// ##      bucle con delay(1) durante 150-300 ms, y en ese tiempo no
-// ##      se sondeaba el tactil ni corria nada mas. Ahora es una
-// ##      maquina de estados que avanza un paso por cuadro desde
-// ##      uiTick(), con el avance sacado del reloj.
+// ##  ESTRUCTURA (la del video de referencia, adaptada):
+// ##    · Cabecera FIJA: hora grande, fecha, estado real de red,
+// ##      lapiz (editar), apagado y engranaje.
+// ##    · Contenido con SCROLL vertical:
+// ##        - capsulas de conectividad (2x1),
+// ##        - tarjeta expandible con la cuadricula de circulos
+// ##          (4 columnas) y su asa inferior,
+// ##        - modulos anchos (slider de brillo, 4x1),
+// ##        - modulos de dos columnas (2x1) para acciones.
+// ##    · Modo EDICION propio (mover, quitar, redimensionar,
+// ##      cambiar orientacion, restablecer, Cancelar / Listo).
+// ##    · Catalogo "Anadir un control" a pantalla completa.
 // ##
-// ##  MODO PC / DeX HORIZONTAL: la cortina queda DESACTIVADA a
+// ##  REGLA QUE MANDA SOBRE EL DISENO: **NADA FALSO**. El
+// ##  registro QS_REG solo contiene controles cuya accion la
+// ##  ejecuta codigo REAL de este mismo firmware (ver la columna
+// ##  'avail' de cada entrada). Por eso NO existen Bluetooth en
+// ##  el P4 (SOC_BLE_SUPPORTED = 0 -> qpAvBle() devuelve false),
+// ##  volumen (no hay ruta de audio), multimedia (no hay
+// ##  reproductor real que acepte ordenes), NFC, Dolby, Alexa,
+// ##  llamadas, datos moviles, Smart View, GPS, dispositivos
+// ##  cercanos ni Home Control. El video es la referencia de
+// ##  COMPOSICION e INTERACCION, no un permiso para inventar
+// ##  funciones.
+// ##
+// ##  MODO PC / DeX HORIZONTAL: la cortina sigue DESACTIVADA a
 // ##  proposito (ver qsCanOpen). Su geometria esta escrita para
-// ##  480x800 en vertical y ahi no encaja; hara falta una version
-// ##  propia. Es una limitacion declarada, no un olvido.
+// ##  480x800 en vertical.
 // #############################################################
+
+// ---- ESTADO BASE DE LA CORTINA (contrato con el resto del sistema) ----
+// Estos cuatro simbolos los leen o los escriben otras partes del archivo
+// (uiTick, loop, autoLockTick, suspWakeLockScreen, enterApp/enterHome...).
+// Sus nombres y su semantica NO cambian con este rediseno.
+static int  qsPanelY   = 0;      // 0 = oculto, SCR_H = abierto del todo
+static bool qsDragging = false;  // hay un gesto de cortina en curso
+static bool qsPower    = false;  // Ahorro Ultra (frecuencia REAL de la CPU)
+
 #define QS_EDGE_H        30              // franja del borde superior que captura el gesto
 #define QS_OPEN_PCT      40              // al soltar: >=40% del recorrido -> abrir; si no, cerrar
 #define QS_SHADOW_H      18              // alto de la sombra bajo el borde movil
 #define QS_HANDLE_MARGIN 22              // margen por encima del borde donde vive el asa
 
-static uint16_t* qsBuf     = NULL;   // cortina precompuesta (para arrastre fluido)
-static uint16_t* qsAppSnap = NULL;   // ultimo cuadro de la app de debajo (solo mientras haga falta)
-static bool      qsOverApp = false;  // la cortina esta encima de una app, no del escritorio
-static int  qsLastY = 0;
-static bool qsCapDirty = false;      // el relleno del brillo cambio: hay que repintar la capsula
-// qsDirty se declara arriba, junto a gHomeDirty (invalidacion de caches).
+// ---- GEOMETRIA DE LA CUADRICULA LOGICA (4 columnas) ----
+// Una sola fuente para dibujo y para hit-test: no puede desalinearse lo
+// pintado de lo pulsable. 16 + 4*103 + 3*12 + 16 = 480 EXACTOS.
+#define QP_MX      16                                   // margen lateral
+#define QP_CONT_W  (SCR_W - 2 * QP_MX)                  // 448
+#define QP_GAP     12                                   // separacion entre columnas
+#define QP_CW      ((QP_CONT_W - 3 * QP_GAP) / 4)       // 103 px por columna
+#define qpSpanW(w) ((w) * QP_CW + ((w) - 1) * QP_GAP)   // ancho de un tramo de w columnas
+#define qpColX(c)  (QP_MX + (c) * (QP_CW + QP_GAP))     // x de la columna c
 
-// Fondo sobre el que se compone la cortina. Nunca devuelve un puntero nulo
-// silencioso: si la captura de la app no existe, se cae al escritorio, que
-// siempre esta reservado.
+#define QP_HDR_H   116                  // cabecera FIJA (hora, fecha, botones)
+#define QP_FOOT_H  34                   // franja inferior: asa de cierre de la cortina
+#define QP_VIEW_Y0 QP_HDR_H
+#define QP_VIEW_Y1 (SCR_H - QP_FOOT_H - 1)
+#define QP_VIEW_H  (QP_VIEW_Y1 - QP_VIEW_Y0 + 1)
+
+#define QP_RH1     74                   // alto de un modulo de 1 fila logica
+#define QP_RH2     (QP_RH1 * 2 + QP_GAP)// alto de un modulo de 2 filas logicas
+#define QP_VGAP    12                   // separacion vertical entre bloques
+#define QP_RAD     26                   // radio de las tarjetas grandes
+#define QP_RAD_S   20                   // radio de los modulos pequenos
+
+// Tarjeta expandible de controles circulares
+#define QP_GPAD    14                   // padding interior de la tarjeta
+#define QP_TROW    98                   // alto de una fila de circulos (circulo + 2 lineas)
+#define QP_TCIRC   62                   // diametro del circulo de un control 1x1
+#define QP_HANDLE_H 22                  // franja del asa inferior de la tarjeta
+#define QP_GROWS_MIN 2
+#define QP_GROWS_MAX 5
+#define qpGroupH(rows) (QP_GPAD + (rows) * QP_TROW + QP_HANDLE_H)
+
+#define QP_TOUCH_MIN 44                 // area tactil minima de cualquier boton importante
+
+// ---- IDENTIFICADORES ESTABLES DE CONTROL ----------------------------
+// NUNCA se reordenan ni se reutilizan: van a NVS. Los controles nuevos se
+// anaden AL FINAL y suben QP_CFG_VER para que qpAdoptNew() los ofrezca sin
+// destruir la configuracion del usuario.
+enum {
+  QSID_WIFI = 0, QSID_AIRPLANE, QSID_BLE, QSID_BRIGHT, QSID_THEME, QSID_GLASS,
+  QSID_POWERSAVE, QSID_SETTINGS, QSID_CONN, QSID_DEX, QSID_VAULT, QSID_OTA,
+  QSID_FILES, QSID_NEWS, QSID_CAMERA, QSID_GALLERY, QSID_CRONO, QSID_LOCK,
+  QSID_POWEROFF, QSID_NTP,
+  QSID_COUNT
+};
+
+// Tipo de control. Decide COMO se dibuja y como responde al toque.
+enum { QT_TOGGLE = 0,   // interruptor con estado real ON/OFF
+       QT_ACTION,       // ejecuta una accion / abre una pantalla (NUNCA finge estado)
+       QT_SLIDER };     // control continuo (brillo)
+
+// Tamanos permitidos (mascara). 1x1 = circulo dentro de la tarjeta expandible;
+// 2x1 = capsula/modulo; 4x1 = modulo ancho (slider); 2x2 = tarjeta grande.
+#define QSZ_1x1 0x01
+#define QSZ_2x1 0x02
+#define QSZ_4x1 0x04
+#define QSZ_2x2 0x08
+
+// Orientaciones permitidas de un modulo 2x1 o 2x2 (mascara).
+#define QOR_H   0x01   // icono a la izquierda, texto a la derecha (por defecto)
+#define QOR_V   0x02   // icono arriba, texto debajo
+
+// Categorias del catalogo
+enum { QCAT_CONN = 0, QCAT_SCREEN, QCAT_SYSTEM, QCAT_TOOLS, QCAT_COUNT };
+static const char* const QP_CAT_NAME[QCAT_COUNT] = {
+  "Conectividad", "Pantalla", "Sistema", "Herramientas"
+};
+
+// ---- DECLARACIONES ADELANTADAS ---------------------------------------
+// Todo lo que el registro necesita llamar y que vive MAS ABAJO en el
+// archivo. Se declara aqui a mano (y no se confia en los prototipos que
+// autogenera el IDE) por la misma razon que el resto del fichero.
+static bool connWifiOn();
+static void connWifiSet(bool on);
+static void connWifiSub(char* out, size_t n);
+static void connBleSub(char* out, size_t n);
+static void connAirplaneSet(bool on);
+static void filesEnter();
+static void cronoStart();
+static void cronoPause();
+static void ntpRequestSync(bool userAsked);
+static void qsForceClose();
+static void qsRestoreBg();
+static void qsAnimTo(int target);
+static void qpInvalidateAll();
+static bool qsTapTile(int px, int py);
+static void qsTick();
+
+// ---- PUENTE DE ACCIONES ----------------------------------------------
+// Una accion del panel que CAMBIA de pantalla tiene que dejar el sistema
+// limpio antes: devolver a la pantalla lo que habia debajo, cerrar la
+// cortina (que ademas suelta la captura de la app) y cerrar la app que
+// hubiera abierta por su camino normal. Sin esto, abrir Ajustes desde
+// encima del Navegador dejaria su tarea de red y sus buffers vivos.
+static void qpLeaveToApp(int appId){
+  qsRestoreBg();
+  qsForceClose();
+  if(gState == ST_APP) appClose();
+  enterApp(appId);
+}
+// Varias pantallas del sistema (Conectividad, Noticias, Flex Vault) salen
+// con "gState = ST_APP; settingsRender();": dan por hecho que Ajustes esta
+// abierto debajo. Se entra a Ajustes ANTES para que el camino de vuelta sea
+// coherente, en vez de dejar al usuario en una app que no habia abierto.
+static void qpLeaveToSettingsSub(void (*sub)()){
+  qpLeaveToApp(IC_AJUSTES);
+  if(sub) sub();
+}
+
+// ---- DISPONIBILIDAD REAL ---------------------------------------------
+static bool qpAvTrue(){ return true; }
+static bool qpAvWifi(){ return FLEXOS_ENABLE_WIFI ? true : false; }
+// BLE: lo decide el SDK (soc_caps.h) en tiempo de COMPILACION. En el
+// ESP32-P4 SOC_BLE_SUPPORTED no existe -> el control NO aparece en el panel
+// ni en el catalogo. No hay interruptor decorativo que cambie de color sin
+// controlar radio.
+static bool qpAvBle(){ return (FLEXOS_BLE_HW && FLEXOS_ENABLE_BLE) ? true : false; }
+static bool qpAvFs(){ return flexFsReady(); }
+static bool qpAvPoweroff(){ return POWEROFF_ON ? true : false; }
+// "Bloquear" solo se ofrece si hay PIN/contrasena: sin clave configurada no
+// bloquea nada y seria un boton que promete lo que no hace.
+static bool qpAvLock(){ return (SUSPEND_ON && SUSPEND_LOCK_ON) && gLockType != 0; }
+static bool qpAvNtp(){ return FLEXOS_ENABLE_WIFI && !gAirplane; }
+static bool qpAvDex(){ return !gHosted; }
+
+// ---- LECTURA DE ESTADO REAL ------------------------------------------
+static bool qpStWifi(){ return connWifiOn(); }
+static bool qpStAirplane(){ return gAirplane; }
+static bool qpStBle(){ return gBleOn; }
+static bool qpStTheme(){ return !gDark; }          // ON = tema CLARO
+static bool qpStGlass(){ return uiGlass; }
+static bool qpStPower(){ return qsPower; }
+static bool qpStCrono(){ return gCronoSt == CRONO_RUN; }
+
+// ---- EJECUCION REAL DEL TOQUE ----------------------------------------
+static void qpApplyPower(){ setCpuFrequencyMhz(qsPower ? 160 : 360); }
+static void qpTapWifi(){
+  if(gAirplane) return;                      // bloqueo real, no visual
+  connWifiSet(!connWifiOn());
+}
+static void qpTapAirplane(){ connAirplaneSet(!gAirplane); }
+static void qpTapBle(){
+#if FLEXOS_ENABLE_BLE
+  if(gAirplane) return;
+  if(gBleOn) flexBleStop(); else flexBleStart();
+#endif
+}
+static void qpTapTheme(){ gDark = !gDark; themeChanged(); qpInvalidateAll(); }
+static void qpTapGlass(){ uiGlass = !uiGlass; themeChanged(); qpInvalidateAll(); }
+static void qpTapPower(){ qsPower = !qsPower; qpApplyPower(); }
+static void qpTapCrono(){ if(gCronoSt == CRONO_RUN) cronoPause(); else cronoStart(); }
+static void qpTapSettings(){ qpLeaveToApp(IC_AJUSTES); }
+static void qpTapConn(){ qpLeaveToSettingsSub(connEnter); }
+static void qpTapNews(){ qpLeaveToSettingsSub(newsSettingsEnter); }
+static void qpTapVault(){ qpLeaveToSettingsSub(vaultSettingsEnter); }
+static void qpTapOta(){ qsRestoreBg(); qsForceClose(); flexOtaOpenSettings(); }
+static void qpTapDex(){ qpLeaveToApp(IC_MODOPC); }
+static void qpTapCamera(){ qpLeaveToApp(IC_CAMARA); }
+static void qpTapGallery(){ qpLeaveToApp(IC_GALERIA); }
+// El explorador sale con "gState = ST_APP; ... almEnter()": se entra antes a
+// Almacenamiento para que "atras" devuelva a una pantalla coherente.
+static void qpTapFiles(){ qpLeaveToApp(IC_ALMACEN); filesEnter(); }
+static void qpTapLock(){ qsRestoreBg(); qsForceClose(); suspEnter(); }
+static void qpTapPoweroff(){ qsRestoreBg(); qsForceClose(); poffEnter(); }
+static void qpTapNtp(){ ntpRequestSync(true); }
+static void qpTapBright(){}                        // el slider se atiende aparte
+
+// ---- SUBTITULOS CON DATO REAL ----------------------------------------
+static void qpSubWifi(char* o, size_t n){ connWifiSub(o, n); }
+static void qpSubBle(char* o, size_t n){ connBleSub(o, n); }
+static void qpSubAirplane(char* o, size_t n){ snprintf(o, n, gAirplane ? "Activado" : "Desactivado"); }
+static void qpSubTheme(char* o, size_t n){ snprintf(o, n, gDark ? "Oscuro" : "Claro"); }
+static void qpSubGlass(char* o, size_t n){ snprintf(o, n, uiGlass ? "Liquid Glass" : "Plano"); }
+static void qpSubPower(char* o, size_t n){ snprintf(o, n, qsPower ? "160 MHz" : "360 MHz"); }
+static void qpSubBright(char* o, size_t n){ snprintf(o, n, "%d%%", gBright); }
+static void qpSubCrono(char* o, size_t n){
+  if(gCronoSt == CRONO_RUN)   { snprintf(o, n, "En marcha"); return; }
+  if(gCronoSt == CRONO_PAUSE) { snprintf(o, n, "En pausa");  return; }
+  snprintf(o, n, "Detenido");
+}
+static void qpSubOta(char* o, size_t n){
+  const char* lv = flexOtaLocalVersion();
+  snprintf(o, n, "Versi\xC3\xB3n %s", (lv && lv[0]) ? lv : "?");
+}
+
+// ---- ICONOS ----------------------------------------------------------
+// Se dibujan con las primitivas propias de Flex OS (no se copia ningun
+// recurso grafico ajeno). Firma comun (cx, cy, s, col) con s = lado util,
+// para que el mismo glifo sirva en el circulo 1x1, en la capsula y en el
+// catalogo sin tener tres versiones.
+//
+// qpIcoBg = color de la SUPERFICIE sobre la que se esta pintando. Los
+// glifos con hueco (luna, engranaje, camara) lo necesitan para "recortar"
+// sin inventarse un color fijo que romperia el tema claro.
+static uint16_t qpIcoBg = 0;
+
+static void qpIcoWifi(int cx, int cy, int s, uint16_t col){
+  float r = s * 0.42f;
+  arcStroke(cx, cy + s * 0.26f, r,         225, 315, 3, col);
+  arcStroke(cx, cy + s * 0.26f, r * 0.66f, 225, 315, 3, col);
+  fillCircle(cx, (int)(cy + s * 0.26f), 3, col);
+}
+static void qpIcoAirplane(int cx, int cy, int s, uint16_t col){
+  float u = s * 0.5f;
+  // Alas en delta (apex arriba), fuselaje con morro y estabilizador de cola.
+  fillTriangle((int)(cx - u), (int)(cy + u * 0.34f), (int)(cx + u), (int)(cy + u * 0.34f),
+               cx, (int)(cy - u * 0.16f), col);
+  fillRoundRect((int)(cx - u * 0.15f), (int)(cy - u * 0.62f), (int)(u * 0.30f), (int)(u * 1.44f), 2, col);
+  fillTriangle((int)(cx - u * 0.15f), (int)(cy - u * 0.56f), (int)(cx + u * 0.15f), (int)(cy - u * 0.56f),
+               cx, (int)(cy - u * 0.98f), col);                            // morro
+  fillTriangle((int)(cx - u * 0.42f), (int)(cy + u * 0.94f), (int)(cx + u * 0.42f), (int)(cy + u * 0.94f),
+               cx, (int)(cy + u * 0.56f), col);                            // cola
+}
+static void qpIcoBle(int cx, int cy, int s, uint16_t col){
+  float u = s * 0.46f;
+  strokeSegAA(cx, cy - u, cx, cy + u, 1.7f, col);
+  strokeSegAA(cx, cy - u, cx + u * 0.66f, cy - u * 0.42f, 1.7f, col);
+  strokeSegAA(cx + u * 0.66f, cy - u * 0.42f, cx - u * 0.62f, cy + u * 0.42f, 1.7f, col);
+  strokeSegAA(cx, cy + u, cx + u * 0.66f, cy + u * 0.42f, 1.7f, col);
+  strokeSegAA(cx + u * 0.66f, cy + u * 0.42f, cx - u * 0.62f, cy - u * 0.42f, 1.7f, col);
+}
+static void qpIcoSun(int cx, int cy, int s, uint16_t col){
+  fillCircleAA(cx, cy, s * 0.21f, col);
+  for(int k = 0; k < 8; k++){
+    float a = k * 0.7853982f;
+    strokeSegAA(cx + cosf(a) * s * 0.32f, cy + sinf(a) * s * 0.32f,
+                cx + cosf(a) * s * 0.46f, cy + sinf(a) * s * 0.46f, 1.6f, col);
+  }
+}
+static void qpIcoMoon(int cx, int cy, int s, uint16_t col){
+  fillCircleAA(cx, cy, s * 0.44f, col);
+  fillCircleAA(cx + s * 0.24f, cy - s * 0.22f, s * 0.40f, qpIcoBg);   // recorte de la media luna
+}
+static void qpIcoGlass(int cx, int cy, int s, uint16_t col){
+  drawRoundRect((int)(cx - s * 0.46f), (int)(cy - s * 0.30f), (int)(s * 0.66f), (int)(s * 0.66f), 6, col);
+  drawRoundRect((int)(cx - s * 0.16f), (int)(cy - s * 0.46f), (int)(s * 0.62f), (int)(s * 0.62f), 6, col);
+}
+static void qpIcoBattSave(int cx, int cy, int s, uint16_t col){
+  drawRoundRect((int)(cx - s * 0.42f), (int)(cy - s * 0.28f), (int)(s * 0.76f), (int)(s * 0.56f), 4, col);
+  fillRect((int)(cx + s * 0.36f), (int)(cy - s * 0.10f), (int)(s * 0.10f), (int)(s * 0.22f), col);
+  fillTriangle((int)(cx - s * 0.06f), (int)(cy - s * 0.20f), (int)(cx + s * 0.14f), (int)(cy - s * 0.20f),
+               (int)(cx - s * 0.02f), cy, col);
+  fillTriangle((int)(cx - s * 0.02f), cy, (int)(cx + s * 0.18f), cy,
+               (int)(cx - s * 0.04f), (int)(cy + s * 0.22f), col);
+}
+static void qpIcoGear(int cx, int cy, int s, uint16_t col){
+  fillCircleAA(cx, cy, s * 0.26f, col);
+  for(int k = 0; k < 8; k++){
+    float a = k * 0.7853982f;
+    fillCircleAA(cx + cosf(a) * s * 0.42f, cy + sinf(a) * s * 0.42f, s * 0.10f, col);
+  }
+  fillCircleAA(cx, cy, s * 0.11f, qpIcoBg);
+}
+static void qpIcoSignal(int cx, int cy, int s, uint16_t col){
+  for(int k = 0; k < 4; k++){
+    int bw = (int)(s * 0.13f), bh = (int)(s * (0.18f + k * 0.16f));
+    fillRoundRect((int)(cx - s * 0.44f + k * s * 0.24f), (int)(cy + s * 0.42f - bh), bw, bh, 2, col);
+  }
+}
+static void qpIcoMonitor(int cx, int cy, int s, uint16_t col){
+  drawRoundRect((int)(cx - s * 0.46f), (int)(cy - s * 0.40f), (int)(s * 0.92f), (int)(s * 0.62f), 4, col);
+  fillRect((int)(cx - s * 0.12f), (int)(cy + s * 0.22f), (int)(s * 0.24f), (int)(s * 0.14f), col);
+  fillRect((int)(cx - s * 0.32f), (int)(cy + s * 0.36f), (int)(s * 0.64f), (int)(s * 0.10f), col);
+}
+static void qpIcoShield(int cx, int cy, int s, uint16_t col){
+  float u = s * 0.46f;
+  fillTriangle((int)(cx - u), (int)(cy - u * 0.70f), (int)(cx + u), (int)(cy - u * 0.70f), cx, (int)(cy + u), col);
+  fillRect((int)(cx - u), (int)(cy - u * 0.80f), (int)(2 * u), (int)(u * 0.42f), col);
+  fillCircleAA(cx, cy - s * 0.06f, s * 0.11f, qpIcoBg);
+  fillRect((int)(cx - s * 0.04f), (int)(cy - s * 0.06f), (int)(s * 0.09f), (int)(s * 0.20f), qpIcoBg);
+}
+static void qpIcoUpdate(int cx, int cy, int s, uint16_t col){
+  fillRect((int)(cx - s * 0.08f), (int)(cy - s * 0.44f), (int)(s * 0.17f), (int)(s * 0.42f), col);
+  fillTriangle((int)(cx - s * 0.26f), (int)(cy - s * 0.06f), (int)(cx + s * 0.26f), (int)(cy - s * 0.06f),
+               cx, (int)(cy + s * 0.24f), col);
+  fillRoundRect((int)(cx - s * 0.34f), (int)(cy + s * 0.32f), (int)(s * 0.68f), (int)(s * 0.11f), 2, col);
+}
+static void qpIcoFolder(int cx, int cy, int s, uint16_t col){
+  fillRoundRect((int)(cx - s * 0.46f), (int)(cy - s * 0.34f), (int)(s * 0.42f), (int)(s * 0.16f), 3, col);
+  fillRoundRect((int)(cx - s * 0.46f), (int)(cy - s * 0.24f), (int)(s * 0.92f), (int)(s * 0.60f), 5, col);
+  fillRoundRect((int)(cx - s * 0.34f), (int)(cy - s * 0.10f), (int)(s * 0.68f), (int)(s * 0.32f), 3, qpIcoBg);
+}
+static void qpIcoNews(int cx, int cy, int s, uint16_t col){
+  drawRoundRect((int)(cx - s * 0.46f), (int)(cy - s * 0.38f), (int)(s * 0.92f), (int)(s * 0.76f), 4, col);
+  fillRect((int)(cx - s * 0.34f), (int)(cy - s * 0.24f), (int)(s * 0.34f), (int)(s * 0.24f), col);
+  fillRect((int)(cx + s * 0.06f), (int)(cy - s * 0.22f), (int)(s * 0.28f), (int)(s * 0.07f), col);
+  fillRect((int)(cx + s * 0.06f), (int)(cy - s * 0.08f), (int)(s * 0.28f), (int)(s * 0.07f), col);
+  fillRect((int)(cx - s * 0.34f), (int)(cy + s * 0.10f), (int)(s * 0.68f), (int)(s * 0.07f), col);
+  fillRect((int)(cx - s * 0.34f), (int)(cy + s * 0.24f), (int)(s * 0.52f), (int)(s * 0.07f), col);
+}
+static void qpIcoCamera(int cx, int cy, int s, uint16_t col){
+  fillRoundRect((int)(cx - s * 0.16f), (int)(cy - s * 0.44f), (int)(s * 0.32f), (int)(s * 0.12f), 3, col);
+  fillRoundRect((int)(cx - s * 0.48f), (int)(cy - s * 0.32f), (int)(s * 0.96f), (int)(s * 0.68f), 6, col);
+  fillCircleAA(cx, cy + s * 0.02f, s * 0.21f, qpIcoBg);
+  fillCircleAA(cx, cy + s * 0.02f, s * 0.12f, col);
+}
+static void qpIcoImage(int cx, int cy, int s, uint16_t col){
+  drawRoundRect((int)(cx - s * 0.46f), (int)(cy - s * 0.36f), (int)(s * 0.92f), (int)(s * 0.72f), 5, col);
+  fillCircleAA(cx - s * 0.20f, cy - s * 0.14f, s * 0.09f, col);
+  fillTriangle((int)(cx - s * 0.36f), (int)(cy + s * 0.30f), (int)(cx - s * 0.02f), (int)(cy + s * 0.30f),
+               (int)(cx - s * 0.19f), (int)(cy + s * 0.02f), col);
+  fillTriangle((int)(cx - s * 0.16f), (int)(cy + s * 0.30f), (int)(cx + s * 0.40f), (int)(cy + s * 0.30f),
+               (int)(cx + s * 0.12f), (int)(cy - s * 0.06f), col);
+}
+static void qpIcoStopwatch(int cx, int cy, int s, uint16_t col){
+  arcStroke(cx, cy + s * 0.06f, s * 0.38f, 0, 360, 3, col);
+  fillRect((int)(cx - s * 0.13f), (int)(cy - s * 0.48f), (int)(s * 0.26f), (int)(s * 0.10f), col);
+  strokeSegAA(cx, cy + s * 0.06f, cx + s * 0.20f, cy - s * 0.14f, 1.6f, col);
+}
+static void qpIcoLock(int cx, int cy, int s, uint16_t col){
+  arcStroke(cx, cy - s * 0.10f, s * 0.26f, 180, 360, 3, col);
+  fillRoundRect((int)(cx - s * 0.36f), (int)(cy - s * 0.10f), (int)(s * 0.72f), (int)(s * 0.52f), 5, col);
+  fillCircleAA(cx, cy + s * 0.14f, s * 0.08f, qpIcoBg);
+}
+static void qpIcoPower(int cx, int cy, int s, uint16_t col){
+  // arcStroke toma GRADOS; 270 apunta hacia ARRIBA (la Y crece hacia abajo),
+  // asi que el hueco 248..292 queda centrado justo donde entra la barra.
+  arcStroke(cx, cy + s * 0.04f, s * 0.36f, -68, 248, 3, col);
+  fillRect((int)(cx - s * 0.05f), (int)(cy - s * 0.42f), (int)(s * 0.11f), (int)(s * 0.40f), col);
+}
+static void qpIcoClock(int cx, int cy, int s, uint16_t col){
+  arcStroke(cx, cy, s * 0.42f, 0, 360, 3, col);
+  strokeSegAA(cx, cy, cx, cy - s * 0.26f, 1.6f, col);
+  strokeSegAA(cx, cy, cx + s * 0.20f, cy + s * 0.06f, 1.6f, col);
+}
+static void qpIcoPencil(int cx, int cy, int s, uint16_t col){
+  strokeSegAA(cx - s * 0.30f, cy + s * 0.30f, cx + s * 0.28f, cy - s * 0.28f, 2.4f, col);
+  fillTriangle((int)(cx - s * 0.42f), (int)(cy + s * 0.42f), (int)(cx - s * 0.34f), (int)(cy + s * 0.14f),
+               (int)(cx - s * 0.14f), (int)(cy + s * 0.34f), col);
+}
+static void qpIcoPlus(int cx, int cy, int s, uint16_t col){
+  fillRoundRect((int)(cx - s * 0.36f), (int)(cy - s * 0.07f), (int)(s * 0.72f), (int)(s * 0.14f), 2, col);
+  fillRoundRect((int)(cx - s * 0.07f), (int)(cy - s * 0.36f), (int)(s * 0.14f), (int)(s * 0.72f), 2, col);
+}
+static void qpIcoMinus(int cx, int cy, int s, uint16_t col){
+  fillRoundRect((int)(cx - s * 0.34f), (int)(cy - s * 0.07f), (int)(s * 0.68f), (int)(s * 0.14f), 2, col);
+}
+
+// ---- REGISTRO CENTRAL DE CONTROLES -----------------------------------
+// UNA sola tabla en flash. Nada de decenas de "if" repartidos por el
+// archivo: dibujo, hit-test, catalogo, editor y persistencia leen todos de
+// aqui. Sin String ni asignaciones de heap.
+//
+//   id      -> identificador ESTABLE (va a NVS)
+//   name    -> etiqueta corta (circulo 1x1)
+//   title   -> etiqueta larga (capsula / modulo)
+//   type    -> QT_TOGGLE / QT_ACTION / QT_SLIDER
+//   sizes   -> mascara de tamanos permitidos
+//   oris    -> mascara de orientaciones permitidas
+//   cat     -> categoria del catalogo
+//   avail   -> DISPONIBILIDAD REAL (hardware/SDK/estado). false = ni se
+//              dibuja ni aparece en el catalogo.
+//   state   -> lectura del estado REAL (NULL en las acciones: una accion
+//              NUNCA finge ON/OFF)
+//   tap     -> ejecucion real del toque
+//   detail  -> accion secundaria (pulsacion larga): abre la pantalla real
+//   sub     -> subtitulo con dato real
+//   icon    -> glifo vectorial
+
+static const QsCtl QS_REG[QSID_COUNT] = {
+  // id             name          title                     tipo       tamanos                    oris          cat
+  { QSID_WIFI,      "Wi-Fi",      "Wi-Fi",                  QT_TOGGLE, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_CONN,
+    qpAvWifi,   qpStWifi,     qpTapWifi,     qpTapConn,     qpSubWifi,     qpIcoWifi },
+  { QSID_AIRPLANE,  "Modo avi\xC3\xB3n", "Modo avi\xC3\xB3n", QT_TOGGLE, QSZ_1x1|QSZ_2x1,        QOR_H|QOR_V,  QCAT_CONN,
+    qpAvTrue,   qpStAirplane, qpTapAirplane, qpTapConn,     qpSubAirplane, qpIcoAirplane },
+  { QSID_BLE,       "Bluetooth",  "Bluetooth",              QT_TOGGLE, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_CONN,
+    qpAvBle,    qpStBle,      qpTapBle,      qpTapConn,     qpSubBle,      qpIcoBle },
+  { QSID_BRIGHT,    "Brillo",     "Brillo",                 QT_SLIDER, QSZ_4x1,                   QOR_H,        QCAT_SCREEN,
+    qpAvTrue,   NULL,         qpTapBright,   qpTapSettings, qpSubBright,   qpIcoSun },
+  { QSID_THEME,     "Tema",       "Modo oscuro",            QT_TOGGLE, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SCREEN,
+    qpAvTrue,   qpStTheme,    qpTapTheme,    qpTapSettings, qpSubTheme,    qpIcoMoon },
+  { QSID_GLASS,     "Vidrio",     "Liquid Glass",           QT_TOGGLE, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SCREEN,
+    qpAvTrue,   qpStGlass,    qpTapGlass,    qpTapSettings, qpSubGlass,    qpIcoGlass },
+  { QSID_POWERSAVE, "Ahorro",     "Ahorro Ultra",           QT_TOGGLE, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SYSTEM,
+    qpAvTrue,   qpStPower,    qpTapPower,    qpTapSettings, qpSubPower,    qpIcoBattSave },
+  { QSID_SETTINGS,  "Ajustes",    "Ajustes",                QT_ACTION, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SYSTEM,
+    qpAvTrue,   NULL,         qpTapSettings, NULL,          NULL,          qpIcoGear },
+  { QSID_CONN,      "Conexiones", "Conectividad",           QT_ACTION, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_CONN,
+    qpAvTrue,   NULL,         qpTapConn,     NULL,          NULL,          qpIcoSignal },
+  { QSID_DEX,       "Modo PC",    "Modo PC",                QT_ACTION, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SYSTEM,
+    qpAvDex,    NULL,         qpTapDex,      NULL,          NULL,          qpIcoMonitor },
+  { QSID_VAULT,     "Vault",      "Flex Vault",             QT_ACTION, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SYSTEM,
+    qpAvFs,     NULL,         qpTapVault,    NULL,          NULL,          qpIcoShield },
+  { QSID_OTA,       "Actualizar", "Actualizaciones",        QT_ACTION, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SYSTEM,
+    qpAvTrue,   NULL,         qpTapOta,      NULL,          qpSubOta,      qpIcoUpdate },
+  { QSID_FILES,     "Archivos",   "Archivos",               QT_ACTION, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_TOOLS,
+    qpAvFs,     NULL,         qpTapFiles,    NULL,          NULL,          qpIcoFolder },
+  { QSID_NEWS,      "Noticias",   "Noticias",               QT_ACTION, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_TOOLS,
+    qpAvTrue,   NULL,         qpTapNews,     NULL,          NULL,          qpIcoNews },
+  { QSID_CAMERA,    "C\xC3\xA1mara", "C\xC3\xA1mara",       QT_ACTION, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_TOOLS,
+    qpAvTrue,   NULL,         qpTapCamera,   NULL,          NULL,          qpIcoCamera },
+  { QSID_GALLERY,   "Galer\xC3\xAD" "a", "Galer\xC3\xAD" "a",     QT_ACTION, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_TOOLS,
+    qpAvTrue,   NULL,         qpTapGallery,  NULL,          NULL,          qpIcoImage },
+  { QSID_CRONO,     "Cron\xC3\xB3metro", "Cron\xC3\xB3metro", QT_TOGGLE, QSZ_1x1|QSZ_2x1,         QOR_H|QOR_V,  QCAT_TOOLS,
+    qpAvTrue,   qpStCrono,    qpTapCrono,    NULL,          qpSubCrono,    qpIcoStopwatch },
+  { QSID_LOCK,      "Bloquear",   "Bloquear ahora",         QT_ACTION, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SYSTEM,
+    qpAvLock,   NULL,         qpTapLock,     NULL,          NULL,          qpIcoLock },
+  { QSID_POWEROFF,  "Apagar",     "Apagar",                 QT_ACTION, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SYSTEM,
+    qpAvPoweroff, NULL,       qpTapPoweroff, NULL,          NULL,          qpIcoPower },
+  { QSID_NTP,       "Hora",       "Sincronizar hora",       QT_ACTION, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SYSTEM,
+    qpAvNtp,    NULL,         qpTapNtp,      NULL,          NULL,          qpIcoClock },
+};
+
+// Acceso seguro: un id fuera de rango devuelve NULL en vez de leer basura.
+static inline const QsCtl* qpCtl(int id){
+  if(id < 0 || id >= QSID_COUNT) return NULL;
+  return &QS_REG[id];
+}
+static inline bool qpCtlAvail(int id){
+  const QsCtl* c = qpCtl(id);
+  return c && c->avail && c->avail();
+}
+// Primer tamano permitido por la mascara, en orden 1x1 -> 2x1 -> 4x1 -> 2x2.
+static void qpFirstSize(uint8_t mask, uint8_t &w, uint8_t &h){
+  if(mask & QSZ_1x1){ w = 1; h = 1; return; }
+  if(mask & QSZ_2x1){ w = 2; h = 1; return; }
+  if(mask & QSZ_4x1){ w = 4; h = 1; return; }
+  if(mask & QSZ_2x2){ w = 2; h = 2; return; }
+  w = 1; h = 1;
+}
+static inline bool qpSizeAllowed(int id, int w, int h){
+  const QsCtl* c = qpCtl(id);
+  if(!c) return false;
+  if(w == 1 && h == 1) return (c->sizes & QSZ_1x1) != 0;
+  if(w == 2 && h == 1) return (c->sizes & QSZ_2x1) != 0;
+  if(w == 4 && h == 1) return (c->sizes & QSZ_4x1) != 0;
+  if(w == 2 && h == 2) return (c->sizes & QSZ_2x2) != 0;
+  return false;
+}
+// Siguiente tamano valido al arrastrar el asa derecha en el editor.
+// Devuelve false si el control no admite ningun otro: el editor rechaza el
+// gesto en vez de dejar un tamano incompatible.
+static bool qpNextSize(int id, int w, int h, int dir, uint8_t &nw, uint8_t &nh){
+  static const uint8_t SW[4] = { 1, 2, 4, 2 };
+  static const uint8_t SH[4] = { 1, 1, 1, 2 };
+  int cur = -1;
+  for(int i = 0; i < 4; i++) if(SW[i] == w && SH[i] == h){ cur = i; break; }
+  if(cur < 0) cur = 0;
+  for(int step = 1; step <= 4; step++){
+    int k = cur + dir * step;
+    if(k < 0 || k > 3) break;
+    if(qpSizeAllowed(id, SW[k], SH[k])){ nw = SW[k]; nh = SH[k]; return true; }
+  }
+  return false;
+}
+
+// ---- MODELO DE DATOS PERSISTIDO --------------------------------------
+// Arrays FIJOS y estructura compacta: sin String, sin heap y sin nada que
+// se asigne por cuadro. El blob tiene tamano FIJO y se valida entero al
+// cargar (igual que homeWgDeserialize).
+#define QP_CFG_VER    1
+#define QP_MAX_ITEMS  24
+#define QP_BLOB_N     (4 + QP_MAX_ITEMS * 5)      // cabecera + 5 bytes por elemento
+#define QP_NVS_NS     "flexqs"                    // namespace PROPIO: no colisiona con "flexos"
+#define QP_NVS_KEY    "qp1"
+
+
+static QpItem  qpIt[QP_MAX_ITEMS];       // configuracion VIVA
+static uint8_t qpN        = 0;
+static uint8_t qpGrows    = 3;           // filas visibles de la tarjeta expandible
+static bool    qpLoaded   = false;
+
+static QpItem  qpEdIt[QP_MAX_ITEMS];     // copia TEMPORAL del editor
+static uint8_t qpEdN      = 0;
+static uint8_t qpEdGrows  = 3;
+
+// Valores de fabrica. Orden = el del video: conectividad arriba, cuadricula
+// de circulos, brillo y modulos. Solo entran controles con backend REAL; los
+// que no esten disponibles en esta placa se filtran al normalizar.
+struct QpDef { uint8_t id, w, h; };
+static const QpDef QP_FACTORY[] = {
+  // Fila de conectividad: dos capsulas grandes, como en el video.
+  { QSID_WIFI,      2, 1 },
+  { QSID_AIRPLANE,  2, 1 },
+  // Tarjeta expandible: la cuadricula de circulos de 4 columnas.
+  { QSID_THEME,     1, 1 },
+  { QSID_POWERSAVE, 1, 1 },
+  { QSID_GLASS,     1, 1 },
+  { QSID_CRONO,     1, 1 },
+  { QSID_NTP,       1, 1 },
+  { QSID_LOCK,      1, 1 },
+  { QSID_VAULT,     1, 1 },
+  { QSID_FILES,     1, 1 },
+  { QSID_CAMERA,    1, 1 },
+  { QSID_GALLERY,   1, 1 },
+  { QSID_SETTINGS,  1, 1 },
+  // Modulo ancho: el slider de brillo (PWM real).
+  { QSID_BRIGHT,    4, 1 },
+  // Modulos inferiores de dos columnas.
+  { QSID_DEX,       2, 1 },
+  { QSID_OTA,       2, 1 },
+  { QSID_NEWS,      2, 1 },
+  { QSID_CONN,      2, 1 },
+};
+#define QP_FACTORY_N ((int)(sizeof(QP_FACTORY) / sizeof(QP_FACTORY[0])))
+
+static void qpFactory(){
+  qpN = 0;
+  for(int i = 0; i < QP_FACTORY_N && qpN < QP_MAX_ITEMS; i++){
+    if(!qpCtlAvail(QP_FACTORY[i].id)) continue;           // sin backend real: no entra
+    uint8_t w = QP_FACTORY[i].w, h = QP_FACTORY[i].h;
+    if(!qpSizeAllowed(QP_FACTORY[i].id, w, h)) qpFirstSize(QS_REG[QP_FACTORY[i].id].sizes, w, h);
+    qpIt[qpN].id = QP_FACTORY[i].id; qpIt[qpN].w = w; qpIt[qpN].h = h;
+    qpIt[qpN].ori = QOR_H; qpIt[qpN].vis = 1;
+    qpN++;
+  }
+  qpGrows = 3;
+}
+
+// NORMALIZACION. Es la unica puerta por la que pasa cualquier configuracion
+// -- de fabrica, de NVS o recien editada -- antes de usarse:
+//   · elimina ids desconocidos (blob de una version futura o corrupto),
+//   · elimina duplicados (deja la primera aparicion),
+//   · elimina controles sin disponibilidad real en esta placa,
+//   · corrige tamanos incompatibles al primero que el control admita,
+//   · corrige orientaciones no permitidas,
+//   · acota qpGrows al rango valido.
+// Devuelve el numero de elementos que sobrevivieron.
+static uint8_t qpNormalize(QpItem* it, uint8_t n, uint8_t &grows){
+  bool seen[QSID_COUNT];
+  for(int i = 0; i < QSID_COUNT; i++) seen[i] = false;
+  uint8_t out = 0;
+  for(uint8_t i = 0; i < n && i < QP_MAX_ITEMS; i++){
+    int id = it[i].id;
+    if(id < 0 || id >= QSID_COUNT) continue;              // id desconocido
+    if(seen[id]) continue;                                // duplicado
+    if(!qpCtlAvail(id)) continue;                         // sin backend/hardware real
+    uint8_t w = it[i].w, h = it[i].h;
+    if(!qpSizeAllowed(id, w, h)) qpFirstSize(QS_REG[id].sizes, w, h);
+    uint8_t ori = it[i].ori ? it[i].ori : QOR_H;
+    if(!(QS_REG[id].oris & ori)) ori = (QS_REG[id].oris & QOR_H) ? QOR_H : QOR_V;
+    seen[id] = true;
+    it[out].id = (uint8_t)id; it[out].w = w; it[out].h = h;
+    it[out].ori = ori; it[out].vis = it[i].vis ? 1 : 0;
+    out++;
+  }
+  if(grows < QP_GROWS_MIN) grows = QP_GROWS_MIN;
+  if(grows > QP_GROWS_MAX) grows = QP_GROWS_MAX;
+  return out;
+}
+
+// ADOPCION DE CONTROLES NUEVOS. Al subir QP_CFG_VER, los controles que la
+// version antigua no conocia se anaden al final SIN tocar lo que el usuario
+// ya habia colocado. Con fromVer == QP_CFG_VER no hace nada.
+static void qpAdoptNew(uint8_t fromVer){
+  if(fromVer >= QP_CFG_VER) return;
+  bool have[QSID_COUNT];
+  for(int i = 0; i < QSID_COUNT; i++) have[i] = false;
+  for(uint8_t i = 0; i < qpN; i++) have[qpIt[i].id] = true;
+  for(int i = 0; i < QP_FACTORY_N && qpN < QP_MAX_ITEMS; i++){
+    int id = QP_FACTORY[i].id;
+    if(have[id] || !qpCtlAvail(id)) continue;
+    uint8_t w = QP_FACTORY[i].w, h = QP_FACTORY[i].h;
+    if(!qpSizeAllowed(id, w, h)) qpFirstSize(QS_REG[id].sizes, w, h);
+    qpIt[qpN].id = (uint8_t)id; qpIt[qpN].w = w; qpIt[qpN].h = h;
+    qpIt[qpN].ori = QOR_H; qpIt[qpN].vis = 1; qpN++;
+    have[id] = true;
+  }
+}
+
+static void qpSerialize(uint8_t* b){
+  memset(b, 0, QP_BLOB_N);
+  b[0] = 'Q'; b[1] = QP_CFG_VER; b[2] = qpN; b[3] = qpGrows;
+  int o = 4;
+  for(int i = 0; i < QP_MAX_ITEMS; i++){
+    b[o++] = qpIt[i].id; b[o++] = qpIt[i].w; b[o++] = qpIt[i].h;
+    b[o++] = qpIt[i].ori; b[o++] = qpIt[i].vis;
+  }
+}
+// Un blob que no cuadre se DESCARTA entero y se cae a fabrica: mejor un panel
+// de fabrica que medio panel colocado en celdas que no existen.
+static bool qpDeserialize(const uint8_t* b){
+  if(b[0] != 'Q') return false;
+  uint8_t ver = b[1], n = b[2], gr = b[3];
+  if(ver == 0 || ver > QP_CFG_VER) return false;          // version futura: no se adivina
+  if(n > QP_MAX_ITEMS) return false;
+  QpItem tmp[QP_MAX_ITEMS];
+  int o = 4;
+  for(int i = 0; i < QP_MAX_ITEMS; i++){
+    tmp[i].id = b[o++]; tmp[i].w = b[o++]; tmp[i].h = b[o++];
+    tmp[i].ori = b[o++]; tmp[i].vis = b[o++];
+  }
+  memcpy(qpIt, tmp, sizeof(qpIt));
+  qpN = n; qpGrows = gr;
+  qpN = qpNormalize(qpIt, qpN, qpGrows);
+  qpAdoptNew(ver);                                        // migracion hacia adelante
+  qpN = qpNormalize(qpIt, qpN, qpGrows);
+  return qpN > 0;
+}
+
+// NVS. Namespace propio ("flexqs"), asi que ni pisa ni lo pisan las claves de
+// "flexos". Solo se escribe al confirmar con "Listo" o al restablecer: NUNCA
+// por cuadro ni por movimiento.
+static void qpSave(){
+  uint8_t b[QP_BLOB_N];
+  qpSerialize(b);
+  prefs.begin(QP_NVS_NS, false);
+  prefs.putBytes(QP_NVS_KEY, b, QP_BLOB_N);
+  prefs.end();
+}
+static void qpLoad(){
+  if(qpLoaded) return;
+  qpLoaded = true;
+  uint8_t b[QP_BLOB_N];
+  size_t rd = 0;
+  prefs.begin(QP_NVS_NS, true);
+  rd = prefs.getBytes(QP_NVS_KEY, b, QP_BLOB_N);
+  prefs.end();
+  if(rd != QP_BLOB_N || !qpDeserialize(b)){
+    Serial.println(F("[QP] configuracion ausente o invalida: valores de fabrica"));
+    qpFactory();
+    qpN = qpNormalize(qpIt, qpN, qpGrows);
+  }
+  if(qpN == 0){ qpFactory(); qpN = qpNormalize(qpIt, qpN, qpGrows); }
+}
+
+// ---- MOTOR DE MAQUETACION --------------------------------------------
+// Cuadricula LOGICA de 4 columnas con empaquetado por flujo. El flujo es lo
+// que garantiza por CONSTRUCCION las tres invariantes que pide el editor:
+// ningun solape, ningun control fuera de pantalla y ningun hueco imposible.
+//   · los elementos de 1 columna (1x1) NO viven en el flujo: se recogen en
+//     la tarjeta expandible de circulos, igual que en One UI,
+//   · la tarjeta se emite en la posicion de flujo del PRIMER 1x1 de la
+//     lista, asi que moverlo en el editor mueve la tarjeta entera,
+//   · el resto (2x1, 4x1, 2x2) se empaqueta por filas de 4 columnas.
+enum { QB_ITEM = 0, QB_GROUP, QB_ADD };
+struct QpBlock { uint8_t kind; int8_t item; int16_t x, y, w, h; };
+
+static QpBlock qpBlk[QP_MAX_ITEMS + 2];
+static int     qpBlkN     = 0;
+static uint8_t qpTiles[QP_MAX_ITEMS];      // indices (en la config) de los 1x1, en orden
+static int     qpTileN    = 0;
+static int     qpContentH = 0;             // alto total del contenido desplazable
+static int     qpGroupBlk = -1;            // indice del bloque de la tarjeta, -1 si no hay
+
+// Entrada de la maquetacion (globales, no parametros: el .ino inserta los
+// prototipos autogenerados al principio del fichero y un struct como
+// parametro obligaria a subir el tipo al encabezado del archivo).
+static QpItem* qpLaySrc   = NULL;
+static int     qpLayN     = 0;
+static int     qpLayGroupPx = 0;           // alto EN PIXELES de la tarjeta expandible
+static bool    qpLayEdit  = false;
+
+static inline int qpTotalRows(){ return (qpTileN + 3) / 4; }
+static inline int qpGroupInnerH(int groupPx){
+  int h = groupPx - QP_GPAD - QP_HANDLE_H;
+  return h > 0 ? h : 0;
+}
+static inline int qpGroupMinPx(){ return qpGroupH(QP_GROWS_MIN); }
+static inline int qpGroupMaxPx(){
+  int rows = qpTotalRows();
+  if(rows < QP_GROWS_MIN) rows = QP_GROWS_MIN;
+  if(rows > QP_GROWS_MAX) rows = QP_GROWS_MAX;
+  return qpGroupH(rows);
+}
+
+static void qpLayout(){
+  qpBlkN = 0; qpTileN = 0; qpGroupBlk = -1;
+  if(!qpLaySrc){ qpContentH = 0; return; }
+
+  for(int i = 0; i < qpLayN && i < QP_MAX_ITEMS; i++){
+    const QpItem* it = &qpLaySrc[i];
+    if(!it->vis || !qpCtlAvail(it->id)) continue;
+    if(it->w == 1 && qpTileN < QP_MAX_ITEMS) qpTiles[qpTileN++] = (uint8_t)i;
+  }
+
+  int y = 0, col = 0, rowH = 0;
+  bool groupDone = (qpTileN == 0);
+  for(int i = 0; i < qpLayN && i < QP_MAX_ITEMS && qpBlkN < QP_MAX_ITEMS + 2; i++){
+    const QpItem* it = &qpLaySrc[i];
+    if(!it->vis || !qpCtlAvail(it->id)) continue;
+    if(it->w == 1){
+      if(groupDone) continue;
+      if(col > 0){ y += rowH + QP_VGAP; col = 0; rowH = 0; }
+      qpGroupBlk = qpBlkN;
+      qpBlk[qpBlkN].kind = QB_GROUP; qpBlk[qpBlkN].item = (int8_t)i;
+      qpBlk[qpBlkN].x = QP_MX; qpBlk[qpBlkN].y = (int16_t)y;
+      qpBlk[qpBlkN].w = QP_CONT_W; qpBlk[qpBlkN].h = (int16_t)qpLayGroupPx;
+      qpBlkN++;
+      y += qpLayGroupPx + QP_VGAP;
+      groupDone = true;
+      continue;
+    }
+    int w = it->w > 4 ? 4 : it->w;
+    int bh = (it->h >= 2) ? QP_RH2 : QP_RH1;
+    if(col + w > 4){ y += rowH + QP_VGAP; col = 0; rowH = 0; }
+    qpBlk[qpBlkN].kind = QB_ITEM; qpBlk[qpBlkN].item = (int8_t)i;
+    qpBlk[qpBlkN].x = (int16_t)qpColX(col); qpBlk[qpBlkN].y = (int16_t)y;
+    qpBlk[qpBlkN].w = (int16_t)qpSpanW(w);  qpBlk[qpBlkN].h = (int16_t)bh;
+    qpBlkN++;
+    col += w; if(bh > rowH) rowH = bh;
+    if(col >= 4){ y += rowH + QP_VGAP; col = 0; rowH = 0; }
+  }
+  if(col > 0){ y += rowH + QP_VGAP; col = 0; rowH = 0; }
+  // La tarjeta no se pierde nunca: si todos los 1x1 estan detras de los
+  // modulos anchos, se emite al final.
+  if(!groupDone && qpBlkN < QP_MAX_ITEMS + 2){
+    qpGroupBlk = qpBlkN;
+    qpBlk[qpBlkN].kind = QB_GROUP; qpBlk[qpBlkN].item = -1;
+    qpBlk[qpBlkN].x = QP_MX; qpBlk[qpBlkN].y = (int16_t)y;
+    qpBlk[qpBlkN].w = QP_CONT_W; qpBlk[qpBlkN].h = (int16_t)qpLayGroupPx;
+    qpBlkN++;
+    y += qpLayGroupPx + QP_VGAP;
+  }
+  if(qpLayEdit && qpBlkN < QP_MAX_ITEMS + 2){
+    qpBlk[qpBlkN].kind = QB_ADD; qpBlk[qpBlkN].item = -1;
+    qpBlk[qpBlkN].x = QP_MX; qpBlk[qpBlkN].y = (int16_t)y;
+    qpBlk[qpBlkN].w = QP_CONT_W; qpBlk[qpBlkN].h = QP_RH1;
+    qpBlkN++;
+    y += QP_RH1 + QP_VGAP;
+  }
+  qpContentH = y > 0 ? y - QP_VGAP : 0;
+}
+
+// Rect de un circulo 1x1 DENTRO de la tarjeta. La rejilla interior de la
+// tarjeta tiene su PROPIO ancho de columna (el de la tarjeta menos su
+// padding), no el de la cuadricula exterior: asi los circulos quedan
+// centrados dentro de la tarjeta y no pegados a sus bordes.
+// gyTop = borde superior del AREA INTERIOR ya desplazada por el scroll.
+#define QP_TCOLW ((QP_CONT_W - 2 * QP_GPAD) / 4)
+static inline void qpTileCenter(int k, int gyTop, int &cx, int &cy){
+  int r = k / 4, c = k % 4;
+  cx = QP_MX + QP_GPAD + c * QP_TCOLW + QP_TCOLW / 2;
+  cy = gyTop + r * QP_TROW + QP_TCIRC / 2;
+}
+
+// ---- ESTADO DE INTERACCION DEL PANEL ---------------------------------
+enum { QPM_PANEL = 0, QPM_EDIT, QPM_CAT };
+static uint8_t qpMode = QPM_PANEL;
+
+static float qpScrollF   = 0;      // scroll del contenido (px, con rebote)
+static float qpScrollVel = 0;      // px/ms
+static float qpGH        = 0;      // alto actual de la tarjeta expandible (px)
+static float qpGScrollF  = 0;      // scroll INTERNO de la tarjeta
+static float qpGScrollVel= 0;
+static int   qpFlashKind = -1;     // 0 = circulo de la tarjeta, 1 = bloque exterior
+static int   qpFlashIdx  = -1;
+static uint32_t qpFlashMs = 0;
+#define QP_FLASH_MS 200
+
+// Animaciones por RELOJ (nunca pasos fijos por cuadro ni delay()).
+static bool     qpGAnim = false;   // "snap" de la tarjeta al soltar el asa
+static float    qpGFrom = 0, qpGTo = 0;
+static uint32_t qpGT0 = 0, qpGDur = 1;
+
+// ---- EDITOR: ESTADO --------------------------------------------------
+static int      qpEdDrag    = -1;      // indice (en qpEdIt) del elemento arrastrado
+static int      qpEdDragX   = 0, qpEdDragY = 0;    // centro del fantasma, en pantalla
+static int      qpEdResize  = -1;      // indice del elemento cuyo asa derecha se arrastra
+static int      qpEdResX0   = 0;
+static int      qpEdRejectF = -1;      // >=0: id con destello de "tamano incompatible"
+static uint32_t qpEdRejectMs = 0;
+static int      qpCatSel    = -1;      // control resaltado en el catalogo
+static float    qpCatScrollF = 0;
+static uint8_t  qpCatIds[QSID_COUNT];  // controles ofrecidos ahora mismo
+static int      qpCatN      = 0;
+
+// ---- PALETA SEMANTICA DEL PANEL --------------------------------------
+// Todo sale de la paleta activa: el panel funciona igual en claro y oscuro y
+// no introduce ni un color fijo que rompa el modo claro.
+static inline uint16_t qpCard(){    return thCard2(); }
+static inline uint16_t qpTileOff(){ return mix565(thCard2(), TH_TXT, 34); }
+static inline uint16_t qpCapOn(){   return mix565(thCard2(), TH_PRIM, 70); }
+
+// Superficie de una tarjeta o modulo.
+//
+// AQUI NO SE DESENFOCA. El vidrio del panel esta en el FONDO (qsCompose lo
+// calcula una vez), y esta funcion se ejecuta por cuadro para cada bloque que
+// toque la banda sucia: un drawLiquidGlassPanel de 448x330 por cuadro serian
+// ~150.000 pixeles desenfocados 60 veces por segundo, que es exactamente lo
+// que el rediseno no puede permitirse. Relleno OPACO (una pasada de spans por
+// fila) + borde, y la sombra reducida a tres lineas alfa bajo la tarjeta.
+static void qpSurface(int x, int y, int w, int h, int rad, uint16_t tint){
+  for(int k = 1; k <= 3; k++){
+    int yy = y + h + k - 1;
+    if(yy < SCR_H) hLineA(x + rad, yy, w - 2 * rad, TH_SHADOW, (uint8_t)(46 - k * 12));
+  }
+  fillRoundRect(x, y, w, h, rad, tint);
+  drawRoundRect(x, y, w, h, rad, TH_BORDER);
+}
+
+// Alpha del destello de toque (0 = ya no destella).
+static uint8_t qpFlashA(int kind, int idx){
+  if(qpFlashKind != kind || qpFlashIdx != idx) return 0;
+  uint32_t e = millis() - qpFlashMs;
+  if(e >= QP_FLASH_MS) return 0;
+  return (uint8_t)(110 * (1.0f - (float)e / QP_FLASH_MS));
+}
+
+// ---- CABECERA FIJA ---------------------------------------------------
+// Hora grande, fecha compacta, estado REAL de red y los tres botones
+// alineados arriba a la derecha (lapiz, apagado, engranaje), como el video.
+// No hay porcentaje de bateria: este firmware no lee ningun sensor de
+// bateria, y estamparlo seria inventarse un dato.
+#define QP_HBTN_R   22
+#define QP_HBTN_CY  50
+#define QP_HBTN_X2  (SCR_W - QP_MX - QP_HBTN_R)          // engranaje
+#define QP_HBTN_X1  (QP_HBTN_X2 - 52)                    // apagado
+#define QP_HBTN_X0  (QP_HBTN_X1 - 52)                    // lapiz
+static const int QP_HBTN_CX[3] = { QP_HBTN_X0, QP_HBTN_X1, QP_HBTN_X2 };
+
+static void qpHeaderBtn(int i, bool danger){
+  int cx = QP_HBTN_CX[i], cy = QP_HBTN_CY, r = QP_HBTN_R;
+  // Los tres botones comparten la misma cara, como en el video. El apagado se
+  // distingue por el GLIFO en color de peligro, no por un circulo rojo entero:
+  // asi la cabecera no grita y el significado destructivo sigue ahi.
+  uint16_t face = qpCard();
+  fillRoundRect(cx - r, cy - r, 2 * r, 2 * r, r, face);
+  drawRoundRect(cx - r, cy - r, 2 * r, 2 * r, r, danger ? mix565(TH_BORDER, TH_DANGER, 120) : TH_BORDER);
+  qpIcoBg = face;
+  uint16_t fg = danger ? TH_DANGER : TH_TXT;
+  if(i == 0) qpIcoPencil(cx, cy, 26, fg);
+  else if(i == 1) qpIcoPower(cx, cy, 26, fg);
+  else qpIcoGear(cx, cy, 26, fg);
+}
+
+static void qpDrawHeader(){
+  const int right = QP_HBTN_X0 - QP_HBTN_R - 12;      // hasta donde puede llegar el texto
+  char buf[40];
+  clkStrBar(buf, sizeof(buf));
+  drawText(QP_MX, 22, buf, 6, TH_TXT);                // hora GRANDE (altura de caja 48 px)
+  int tw = textW(buf, 6);
+  // Fecha compacta a la derecha de la hora y con la misma linea base, igual
+  // que en el panel de referencia ("8:23  mie, 19 ago.").
+  char d[48]; buildShortDate(d, sizeof(d));
+  drawTextClip(QP_MX + tw + 14, 54, d, 2, TH_TXT2, right);
+  // Segunda linea: estado REAL de red. Sale de connWifiSub(), la MISMA fuente
+  // que la pantalla de Conectividad -- no hay ningun dato inventado aqui, y
+  // por eso tampoco hay porcentaje de bateria: este firmware no lo mide.
+  char ns[64];
+  if(gAirplane) snprintf(ns, sizeof(ns), "Modo avi\xC3\xB3n activo");
+  else connWifiSub(ns, sizeof(ns));
+  if(ns[0]) drawTextClip(QP_MX, 84, ns, 1, TH_MUTE, right);
+  qpHeaderBtn(0, false);
+#if POWEROFF_ON
+  qpHeaderBtn(1, true);
+#endif
+  qpHeaderBtn(2, false);
+}
+
+// ---- MODULO EXTERIOR (capsula 2x1 / modulo ancho / slider 4x1) -------
+static void qpDrawSliderBody(int x, int y, int w, int h, int id){
+  const QsCtl* c = qpCtl(id);
+  int th = h - 20; if(th < 40) th = 40;
+  int ty = y + (h - th) / 2;
+  int pct = (id == QSID_BRIGHT) ? gBright : 0;
+  int fw = th + (w - th) * pct / 100;                     // nunca menor que el diametro
+  if(fw > w) fw = w;
+  fillRoundRect(x, ty, w, th, th / 2, TH_TRACK);
+  if(fw > 0) fillRoundRect(x, ty, fw, th, th / 2, TH_PRIM);
+  drawRoundRect(x, ty, w, th, th / 2, TH_BORDER);
+  int icx = x + th / 2, icy = ty + th / 2;
+  bool onFill = (fw >= th);
+  qpIcoBg = onFill ? TH_PRIM : TH_TRACK;
+  if(c && c->icon) c->icon(icx, icy, 30, onFill ? TH_ONACC : TH_TXT2);
+  char v[16]; if(c && c->sub) c->sub(v, sizeof(v)); else v[0] = 0;
+  if(v[0]) drawTextR(x + w - 20, ty + th / 2 - 8, v, 2, (fw > w - 70) ? TH_ONACC : TH_TXT2);
+}
+
+// Capsula / modulo. ori = QOR_H (icono a la izquierda) o QOR_V (icono arriba).
+static void qpDrawModule(int x, int y, int w, int h, int id, int ori){
+  const QsCtl* c = qpCtl(id);
+  if(!c) return;
+  if(c->type == QT_SLIDER){ qpDrawSliderBody(x, y, w, h, id); return; }
+  bool on = (c->type == QT_TOGGLE && c->state) ? c->state() : false;
+  uint16_t face = on ? qpCapOn() : qpCard();
+  qpSurface(x, y, w, h, QP_RAD_S, face);
+  uint16_t fg  = on ? TH_TXT : TH_TXT;
+  uint16_t fg2 = on ? TH_TXT2 : TH_MUTE;
+  int ir = 22;
+  uint16_t icoFace = on ? TH_PRIM : qpTileOff();
+  uint16_t icoCol  = on ? TH_ONACC : TH_TXT2;
+  char sub[64]; sub[0] = 0;
+  if(c->sub) c->sub(sub, sizeof(sub));
+  if(ori == QOR_V){
+    int icx = x + w / 2, icy = y + 22 + ir - 8;
+    fillRoundRect(icx - ir, icy - ir, 2 * ir, 2 * ir, ir, icoFace);
+    qpIcoBg = icoFace; if(c->icon) c->icon(icx, icy, 30, icoCol);
+    drawTextC(icx, icy + ir + 8, c->title, 1, fg);
+    if(sub[0]) drawTextC(icx, icy + ir + 22, sub, 1, fg2);
+  } else {
+    int icx = x + 14 + ir, icy = y + h / 2;
+    fillRoundRect(icx - ir, icy - ir, 2 * ir, 2 * ir, ir, icoFace);
+    qpIcoBg = icoFace; if(c->icon) c->icon(icx, icy, 30, icoCol);
+    int tx = icx + ir + 12, right = x + w - 12;
+    if(sub[0]){
+      drawTextClip(tx, icy - 17, c->title, 2, fg, right);
+      drawTextClip(tx, icy + 5, sub, 1, fg2, right);
+    } else {
+      drawTextClip(tx, icy - 8, c->title, 2, fg, right);
+    }
+  }
+  uint8_t fa = qpFlashA(1, id);
+  if(fa) fillRoundRectA(x, y, w, h, QP_RAD_S, TH_TXT, fa);
+}
+
+// ---- TARJETA EXPANDIBLE DE CIRCULOS ----------------------------------
+// Contenido recortado de verdad al area interior (gClip*): nada se sale por
+// las esquinas redondeadas ni pisa el asa.
+static void qpDrawGroup(int x, int y, int w, int h){
+  qpSurface(x, y, w, h, QP_RAD, qpCard());
+  int innerTop = y + QP_GPAD;
+  int innerBot = y + h - QP_HANDLE_H;
+  if(innerBot <= innerTop) return;
+  const int oy0 = gClipY0, oy1 = gClipY1, ox0 = gClipX0, ox1 = gClipX1;
+  if(gClipY0 < innerTop) gClipY0 = innerTop;
+  if(gClipY1 > innerBot - 1) gClipY1 = innerBot - 1;
+  if(gClipX0 < x + 2) gClipX0 = x + 2;
+  if(gClipX1 > x + w - 3) gClipX1 = x + w - 3;
+  if(gClipY1 >= gClipY0){
+    int gyTop = innerTop - (int)(qpGScrollF + 0.5f);
+    for(int k = 0; k < qpTileN; k++){
+      int cx, cy; qpTileCenter(k, gyTop, cx, cy);
+      if(cy + QP_TROW < gClipY0) continue;             // fila por encima de la banda
+      if(cy - QP_TCIRC / 2 > gClipY1) break;           // filas siguientes: ya fuera
+      const QpItem* it = &qpLaySrc[qpTiles[k]];
+      const QsCtl* c = qpCtl(it->id);
+      if(!c) continue;
+      int r = QP_TCIRC / 2;
+      // HUECO DE INSERCION: el circulo que se esta moviendo deja su sitio
+      // marcado y el reordenamiento se ve en tiempo real mientras el dedo
+      // recorre la cuadricula.
+      if(qpMode == QPM_EDIT && (int)qpTiles[k] == qpEdDrag){
+        fillRoundRectA(cx - r, cy - r, 2 * r, 2 * r, r, TH_PRIM, 60);
+        drawRoundRect(cx - r, cy - r, 2 * r, 2 * r, r, TH_PRIM);
+        continue;
+      }
+      bool on = (c->type == QT_TOGGLE && c->state) ? c->state() : false;
+      uint16_t face = on ? TH_PRIM : qpTileOff();
+      fillRoundRect(cx - r, cy - r, 2 * r, 2 * r, r, face);
+      if(!on) drawRoundRect(cx - r, cy - r, 2 * r, 2 * r, r, TH_BORDER);
+      qpIcoBg = face;
+      if(c->icon) c->icon(cx, cy, 32, on ? TH_ONACC : TH_TXT2);
+      uint8_t fa = qpFlashA(0, it->id);
+      if(fa) fillRoundRectA(cx - r, cy - r, 2 * r, 2 * r, r, TH_TXT, fa);
+      // Etiqueta: hasta dos lineas cortadas al ancho de la columna.
+      int lw = QP_TCOLW - 6;
+      const char* nm = c->name;
+      if(textW(nm, 1) <= lw) drawTextC(cx, cy + r + 8, nm, 1, on ? TH_TXT : TH_TXT2);
+      else drawTextClip(cx - lw / 2, cy + r + 8, nm, 1, on ? TH_TXT : TH_TXT2, cx + lw / 2);
+      // Subtitulo real (solo cuando cabe y aporta: estado del cronometro, SSID...)
+      if(c->sub){
+        char sb[48]; c->sub(sb, sizeof(sb));
+        if(sb[0]){
+          if(textW(sb, 1) <= lw) drawTextC(cx, cy + r + 22, sb, 1, TH_MUTE);
+          else drawTextClip(cx - lw / 2, cy + r + 22, sb, 1, TH_MUTE, cx + lw / 2);
+        }
+      }
+      // En edicion, cada circulo lleva su "-" para quitarlo y -- si el control
+      // admite otro tamano -- su asa en el borde DERECHO de la celda, igual
+      // que los modulos grandes: arrastrarla convierte el circulo en capsula.
+      if(qpMode == QPM_EDIT){
+        fillCircleAA(cx - r + 4, cy - r + 4, 12, TH_DANGER);
+        qpIcoMinus(cx - r + 4, cy - r + 4, 20, TH_ONACC);
+        uint8_t nw, nh;
+        if(qpNextSize(it->id, it->w, it->h, +1, nw, nh) ||
+           qpNextSize(it->id, it->w, it->h, -1, nw, nh)){
+          int hx = cx + QP_TCOLW / 2 - 5;
+          fillRoundRect(hx - 3, cy - 12, 6, 24, 3, TH_PRIM);
+        }
+      }
+    }
+  }
+  gClipY0 = oy0; gClipY1 = oy1; gClipX0 = ox0; gClipX1 = ox1;
+  // Asa inferior centrada, como en el video.
+  fillRoundRect(x + w / 2 - 28, y + h - QP_HANDLE_H / 2 - 3, 56, 6, 3, TH_MUTE);
+  // Indicador de scroll interno: solo si de verdad hay mas filas que ver.
+  int inner = qpGroupInnerH(h);
+  int total = qpTotalRows() * QP_TROW;
+  if(total > inner + 2){
+    int barH = inner * inner / total;
+    if(barH < 24) barH = 24;
+    if(barH > inner) barH = inner;
+    int maxS = total - inner;
+    int sc = (int)qpGScrollF;                       // puede ser negativo con el rebote
+    if(sc < 0) sc = 0; if(sc > maxS) sc = maxS;
+    int off = (maxS > 0) ? sc * (inner - barH) / maxS : 0;
+    if(off < 0) off = 0; if(off > inner - barH) off = inner - barH;
+    fillRoundRect(x + w - 8, innerTop + off, 3, barH, 2, TH_MUTE);
+  }
+}
+
+// ---- BLOQUE "ANADIR UN CONTROL" --------------------------------------
+static void qpDrawAddBlock(int x, int y, int w, int h){
+  fillRoundRect(x, y, w, h, QP_RAD_S, mix565(qpCard(), TH_PRIM, 40));
+  drawRoundRect(x, y, w, h, QP_RAD_S, TH_PRIM);
+  int icx = x + w / 2 - 92, icy = y + h / 2;
+  qpIcoBg = mix565(qpCard(), TH_PRIM, 40);
+  qpIcoPlus(icx, icy, 28, TH_TXT);
+  drawText(icx + 22, icy - 8, "A\xC3\xB1" "adir un control", 2, TH_TXT);
+}
+
+// ---- ADORNOS DEL MODO EDICION ----------------------------------------
+// "-" para quitar, asa de redimension en el borde DERECHO (One UI 8.5) y
+// boton de orientacion solo en los controles que la admiten.
+static void qpDrawEditChrome(int x, int y, int w, int h, int id, bool canResize, bool canRot){
+  fillCircleAA(x + 4, y + 4, 14, TH_DANGER);
+  qpIcoMinus(x + 4, y + 4, 22, TH_ONACC);
+  if(canResize){
+    int hx = x + w - 7, hy = y + h / 2;
+    fillRoundRect(hx - 3, hy - 16, 6, 32, 3, TH_PRIM);
+    fillRoundRect(hx - 9, hy - 8, 4, 16, 2, mix565(TH_PRIM, TH_TXT, 90));
+  }
+  if(canRot){
+    // Esquina inferior IZQUIERDA: no se pisa con el "-" (arriba a la
+    // izquierda), ni con el asa de redimension (borde derecho), ni con el "-"
+    // del modulo de al lado.
+    int rx = x + 6, ry = y + h - 6;
+    fillCircleAA(rx, ry, 13, mix565(qpCard(), TH_TXT, 70));
+    arcStroke(rx, ry, 7, 30, 300, 2, TH_TXT);
+    fillTriangle(rx + 4, ry - 10, rx + 11, ry - 5, rx + 3, ry - 1, TH_TXT);
+  }
+  if(qpEdRejectF == id && millis() - qpEdRejectMs < 350){
+    uint8_t a = (uint8_t)(120 * (1.0f - (float)(millis() - qpEdRejectMs) / 350.0f));
+    fillRoundRectA(x, y, w, h, QP_RAD_S, TH_DANGER, a);
+  }
+}
+
+// ---- DIBUJO COMPLETO DEL CUERPO (panel y editor comparten motor) -----
+// Se llama con gClip* ya acotado a la BANDA SUCIA que se va a publicar: los
+// bloques que no la cortan ni se dibujan.
+static void qpDrawBody(){
+  int top = QP_VIEW_Y0 - (int)(qpScrollF + 0.5f);
+  for(int b = 0; b < qpBlkN; b++){
+    int bx = qpBlk[b].x, by = top + qpBlk[b].y, bw = qpBlk[b].w, bh = qpBlk[b].h;
+    if(by + bh < gClipY0 || by > gClipY1) continue;               // fuera de la banda
+    if(qpBlk[b].kind == QB_GROUP){
+      qpDrawGroup(bx, by, bw, bh);
+      continue;
+    }
+    if(qpBlk[b].kind == QB_ADD){ qpDrawAddBlock(bx, by, bw, bh); continue; }
+    int i = qpBlk[b].item;
+    if(i < 0 || i >= qpLayN) continue;
+    if(qpMode == QPM_EDIT && i == qpEdDrag){                       // hueco de insercion
+      fillRoundRectA(bx, by, bw, bh, QP_RAD_S, TH_PRIM, 60);
+      drawRoundRect(bx, by, bw, bh, QP_RAD_S, TH_PRIM);
+      continue;                                                   // el elemento lo dibuja el fantasma
+    }
+    const QpItem* it = &qpLaySrc[i];
+    qpDrawModule(bx, by, bw, bh, it->id, it->ori);
+    if(qpMode == QPM_EDIT){
+      const QsCtl* c = qpCtl(it->id);
+      uint8_t nw, nh;
+      bool canR = c && (qpNextSize(it->id, it->w, it->h, +1, nw, nh) ||
+                        qpNextSize(it->id, it->w, it->h, -1, nw, nh));
+      bool canO = c && (c->oris == (QOR_H | QOR_V));
+      qpDrawEditChrome(bx, by, bw, bh, it->id, canR, canO);
+    }
+  }
+}
+
+// Fantasma del elemento que se esta moviendo: va SIEMPRE encima y sigue al
+// dedo, sin recortarse al contenido.
+static void qpDrawGhost(){
+  if(qpMode != QPM_EDIT || qpEdDrag < 0 || qpEdDrag >= qpEdN) return;
+  const QpItem* it = &qpEdIt[qpEdDrag];
+  int w = (it->w == 1) ? QP_CW : qpSpanW(it->w);
+  int h = (it->h >= 2) ? QP_RH2 : QP_RH1;
+  if(it->w == 1){ w = QP_TCIRC + 20; h = QP_TROW - 12; }
+  int x = qpEdDragX - w / 2, y = qpEdDragY - h / 2;
+  if(x < 4) x = 4; if(x + w > SCR_W - 4) x = SCR_W - 4 - w;
+  for(int k = 1; k <= 4; k++){
+    int yy = y + h + k - 1;
+    if(yy < SCR_H) hLineA(x + 8, yy, w - 16, TH_SHADOW, (uint8_t)(96 - k * 20));
+  }
+  if(it->w == 1){
+    const QsCtl* c = qpCtl(it->id);
+    int r = QP_TCIRC / 2, cx = x + w / 2, cy = y + r + 4;
+    fillRoundRect(cx - r, cy - r, 2 * r, 2 * r, r, mix565(qpCard(), TH_PRIM, 90));
+    qpIcoBg = mix565(qpCard(), TH_PRIM, 90);
+    if(c && c->icon) c->icon(cx, cy, 32, TH_TXT);
+    if(c) drawTextC(cx, cy + r + 6, c->name, 1, TH_TXT);
+  } else {
+    qpDrawModule(x, y, w, h, it->id, it->ori);
+    drawRoundRect(x, y, w, h, QP_RAD_S, TH_PRIM);
+  }
+}
+
+// ---- CABECERA DEL EDITOR ---------------------------------------------
+#define QP_EDH_H 96
+static void qpDrawEditHeader(){
+  fillRect(0, 0, SCR_W, QP_EDH_H, TH_PAGE);      // opaca: sin alfa por pixel en cada cuadro
+  drawText(QP_MX, 20, "Cancelar", 2, TH_TXT2);
+  drawTextC(SCR_W / 2, 20, "Editar panel", 2, TH_TXT);
+  drawTextR(SCR_W - QP_MX, 20, "Listo", 2, TH_PRIM);
+  // Restablecer diseno: siempre visible, nunca destructivo hasta "Listo".
+  drawTextC(SCR_W / 2, 56, "Restablecer dise\xC3\xB1o", 1, TH_MUTE);
+  fillRect(0, QP_EDH_H - 1, SCR_W, 1, TH_DIV);
+}
+// Zonas tactiles de la cabecera del editor (>= 44 px de alto).
+#define QP_EDH_BTN_Y0 6
+#define QP_EDH_BTN_Y1 50
+#define QP_EDH_RST_Y0 50
+#define QP_EDH_RST_Y1 QP_EDH_H
+
+// ---- CATALOGO "ANADIR UN CONTROL" ------------------------------------
+#define QP_CAT_HDR   96
+#define QP_CAT_ROW   112
+#define QP_CAT_VIEWH (SCR_H - QP_CAT_HDR)
+
+// Rehace la lista de controles ofrecidos: SOLO los disponibles de verdad en
+// esta placa y que no esten ya en el diseno en edicion.
+static void qpCatBuild(){
+  qpCatN = 0;
+  for(int id = 0; id < QSID_COUNT; id++){
+    if(!qpCtlAvail(id)) continue;
+    bool present = false;
+    for(int i = 0; i < qpEdN; i++) if(qpEdIt[i].id == id){ present = true; break; }
+    if(present) continue;
+    qpCatIds[qpCatN++] = (uint8_t)id;
+  }
+}
+static inline int qpCatRows(){ return (qpCatN + 3) / 4; }
+static inline int qpCatContentH(){ return qpCatRows() * QP_CAT_ROW + 24; }
+
+static void qpDrawCatalog(){
+  int top = QP_CAT_HDR - (int)(qpCatScrollF + 0.5f) + 12;
+  const int oy0 = gClipY0, oy1 = gClipY1;
+  if(gClipY0 < QP_CAT_HDR) gClipY0 = QP_CAT_HDR;
+  if(gClipY1 >= gClipY0){
+    for(int k = 0; k < qpCatN; k++){
+      int r = k / 4, c = k % 4;
+      int cx = qpColX(c) + QP_CW / 2, cy = top + r * QP_CAT_ROW + QP_TCIRC / 2;
+      if(cy + QP_CAT_ROW < gClipY0) continue;
+      if(cy - QP_TCIRC / 2 > gClipY1) break;
+      const QsCtl* ct = qpCtl(qpCatIds[k]);
+      if(!ct) continue;
+      bool sel = (qpCatSel == k);
+      int rad = QP_TCIRC / 2;
+      uint16_t face = sel ? TH_PRIM : qpTileOff();
+      fillRoundRect(cx - rad, cy - rad, 2 * rad, 2 * rad, rad, face);
+      drawRoundRect(cx - rad, cy - rad, 2 * rad, 2 * rad, rad, sel ? TH_PRIM : TH_BORDER);
+      qpIcoBg = face;
+      if(ct->icon) ct->icon(cx, cy, 32, sel ? TH_ONACC : TH_TXT);
+      int lw = QP_CW - 2;
+      if(textW(ct->name, 1) <= lw) drawTextC(cx, cy + rad + 8, ct->name, 1, TH_TXT);
+      else drawTextClip(cx - lw / 2, cy + rad + 8, ct->name, 1, TH_TXT, cx + lw / 2);
+      const char* cat = QP_CAT_NAME[ct->cat];
+      if(textW(cat, 1) <= lw) drawTextC(cx, cy + rad + 22, cat, 1, TH_MUTE);
+      else drawTextClip(cx - lw / 2, cy + rad + 22, cat, 1, TH_MUTE, cx + lw / 2);
+    }
+    if(qpCatN == 0)
+      drawTextC(SCR_W / 2, QP_CAT_HDR + 60, "No queda ning\xC3\xBAn control disponible", 2, TH_MUTE);
+  }
+  gClipY0 = oy0; gClipY1 = oy1;
+  // Cabecera FIJA del catalogo
+  if(gClipY0 < QP_CAT_HDR){
+    fillRect(0, 0, SCR_W, QP_CAT_HDR, TH_PAGE);  // opaca, por el mismo motivo
+    drawText(QP_MX, 22, "Atr\xC3\xA1s", 2, TH_TXT2);
+    drawTextC(SCR_W / 2, 22, "A\xC3\xB1" "adir un control", 2, TH_TXT);
+    drawTextC(SCR_W / 2, 56, "Solo se listan controles con funci\xC3\xB3n real", 1, TH_MUTE);
+    fillRect(0, QP_CAT_HDR - 1, SCR_W, 1, TH_DIV);
+  }
+}
+
+// ---- ASA DE CIERRE DE LA CORTINA (franja inferior fija) --------------
+static void qpDrawFooter(){
+  fillRoundRect(SCR_W / 2 - 44, SCR_H - QP_FOOT_H / 2 - 3, 88, 6, 3, TH_MUTE);
+}
+
+// #############################################################
+// ##  LA CORTINA ES UNA CAPA GLOBAL, NO UNA PANTALLA DEL HOME
+// ##  ------------------------------------------------------
+// ##  El FONDO es qsBgSrc(): homeBuf en el escritorio, y una captura
+// ##  del ultimo cuadro de la app cuando hay una app delante. La
+// ##  captura se hace UNA vez, al empezar el gesto, y se libera en
+// ##  cuanto la cortina se cierra del todo.
+// ##
+// ##  QUE HAY EN CACHE Y QUE NO:
+// ##    · qsBuf guarda SOLO el FONDO de la cortina (Liquid Glass o
+// ##      velo plano). Es la unica parte cara -- desenfoque a pantalla
+// ##      completa -- y se recompone unicamente si cambia el fondo o
+// ##      el tema, NUNCA durante un gesto.
+// ##    · el CONTENIDO (cabecera, modulos, tarjeta) se dibuja por
+// ##      cuadro, pero solo dentro de la BANDA SUCIA y solo los
+// ##      bloques que la cortan. Tiene que ser asi: con scroll,
+// ##      estiramiento y edicion el contenido ya no es una imagen
+// ##      fija que se pueda cachear entera.
+// #############################################################
+static uint16_t* qsBuf     = NULL;   // FONDO de la cortina (vidrio/velo), sin contenido
+static uint16_t* qsAppSnap = NULL;   // ultimo cuadro de la app de debajo
+static bool      qsOverApp = false;
+static int       qsLastY   = 0;
+static int       qpLastMin = -1;     // minuto con el que se pinto la cabecera
+
 static inline uint16_t* qsBgSrc(){
   if(qsOverApp && qsAppSnap) return qsAppSnap;
   return homeBuf;
 }
-// Captura el cuadro actual de la app. 768 KB de PSRAM que solo viven mientras
-// la cortina esta a la vista. fbLock() garantiza que no se copia un fb a medio
-// subir por la DMA -- el mismo candado que usa el resto del compositor.
 static bool qsCaptureApp(){
   if(!qsAppSnap)
     qsAppSnap = (uint16_t*)heap_caps_malloc((size_t)SCR_W * SCR_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -12975,52 +14106,71 @@ static bool qsCaptureApp(){
   memcpy(qsAppSnap, fb, (size_t)SCR_W * SCR_H * 2);
   fbUnlock();
   qsOverApp = true;
-  qsDirty   = true;                            // el fondo cambio: recomponer la cortina
+  qsDirty   = true;
   return true;
 }
 static void qsFreeApp(){
   if(qsAppSnap){ heap_caps_free(qsAppSnap); qsAppSnap = NULL; }
   qsOverApp = false;
 }
-
-// ---- ESTADO DEL GESTO ---------------------------------------------
-// Vive aqui arriba porque lo tocan tanto el arrastre (mas abajo) como el
-// cierre forzado, que se llama desde cualquier cambio de estado del sistema.
-#define QS_SMOOTH_TAU 26.0f      // ms: constante del suavizado de posicion
-#define QS_VEL_TAU    45.0f      // ms: constante del filtro de velocidad
-#define QS_FLICK      0.45f      // px/ms (~450 px/s) para considerarlo un lanzamiento
-static float    qsVel = 0;       // velocidad filtrada del dedo, px/ms
-static int      qsPrevY = 0;
-static uint32_t qsPrevMs = 0;
-static int      qsDragBase = 0, qsDragY0 = 0;
-static bool     qsDragMoved = false;   // el gesto ya paso de umbral: es arrastre, no toque
-// Posicion interpolada de la cortina en coma flotante. La comparten el
-// arrastre (suavizado) y la animacion, asi que soltar el dedo continua desde
-// donde estaba EXACTAMENTE, sin el micro-salto de reenganche.
-static float    qsPosF = 0;
-
-// dibuja titulo + tiles + etiqueta y pista del slider en el gBuf actual (sin relleno/perilla)
-static void qsDrawContent(){
-  drawText(24, 40, "Ajustes r\xC3\xA1pidos", 3, TH_TXT);
-  // Brillo: pista de la capsula vertical (el relleno ambar es dinamico, se
-  // pinta cada frame en qsRender porque cambia con el arrastre / PWM real)
-  fillRoundRectA(QS_CAP_X + 3, QS_CAP_Y + 5, QS_CAP_W, QS_CAP_H, QS_CAP_R, TH_SHADOW, 55);
-  if(uiGlass) drawLiquidGlassPanel(QS_CAP_X, QS_CAP_Y, QS_CAP_W, QS_CAP_H, QS_CAP_R, TH_GLASS2);
-  else fillRoundRect(QS_CAP_X, QS_CAP_Y, QS_CAP_W, QS_CAP_H, QS_CAP_R, TH_TRACK);
-  drawRoundRect(QS_CAP_X, QS_CAP_Y, QS_CAP_W, QS_CAP_H, QS_CAP_R, TH_BORDER);
-  // Modo PC / Ajustes: columna de 2 circulos (acciones reales)
-  qsCircleBtn(3, QS_CIRC_CX, QS_CIRC_CY(0));
-  qsCircleBtn(5, QS_CIRC_CX, QS_CIRC_CY(1));
-#if POWEROFF_ON
-  qsCircleBtn(6, QS_CIRC_CX, QS_CIRC_CY(2));      // Apagar -> pantalla de confirmacion
-#endif
-  // Ahorro Ultra: pastilla ancha (toggle real, cambia la frecuencia de la CPU)
-  qsTogglePill(QS_PILL_X, QS_PILL_Y, QS_PILL_W, QS_PILL_H, qsPower);
+// Libera TODO lo temporal del panel. Lo llama el cierre de la cortina, la
+// cancelacion del editor y cualquier cambio de estado del sistema: ni el OTA
+// ni una suspension pueden dejar 1,5 MB de PSRAM reservados de balde.
+static void qpFreeBuffers(){
+  if(qsBuf){ heap_caps_free(qsBuf); qsBuf = NULL; }
+  qsFreeApp();
 }
-// compone la cortina COMPLETA una sola vez en qsBuf (parte cara)
-// Esta es la UNICA funcion que desenfoca (Liquid Glass a pantalla completa).
-// Se ejecuta al empezar el gesto y solo se repite si el fondo o el tema
-// cambian: durante el arrastre no se recalcula ni un pixel de vidrio.
+
+// ---- BANDAS SUCIAS ---------------------------------------------------
+static int  qpDy0 = 0x7FFF, qpDy1 = -1;
+static inline void qpMark(int y0, int y1){
+  if(y0 < qpDy0) qpDy0 = y0;
+  if(y1 > qpDy1) qpDy1 = y1;
+}
+static inline void qpMarkAll(){ qpMark(0, SCR_H - 1); }
+static inline void qpMarkView(){ qpMark(QP_VIEW_Y0, SCR_H - 1); }
+static inline void qpMarkHeader(){ qpMark(0, QP_HDR_H - 1); }
+static int qpFlashY0 = 0, qpFlashY1 = -1;   // rect del destello, en pantalla
+
+// Invalida la cortina entera. La llaman los cambios de tema y de apariencia:
+// el fondo cacheado ya no vale.
+static void qpInvalidateAll(){
+  qsDirty = true;
+  qpMarkAll();
+}
+
+// ---- MAQUETACION VIVA ------------------------------------------------
+// Reconstruye la lista de bloques con la configuracion y el alto de tarjeta
+// actuales. Es barata (un recorrido de <= 24 elementos) y por eso puede
+// llamarse por cuadro mientras se estira la tarjeta.
+static void qpRelayout(){
+  if(qpMode == QPM_EDIT){
+    qpLaySrc = qpEdIt; qpLayN = qpEdN; qpLayEdit = true;
+    qpLayGroupPx = qpGroupH(qpEdGrows);
+  } else {
+    qpLaySrc = qpIt; qpLayN = qpN; qpLayEdit = false;
+    if(qpGH <= 0) qpGH = (float)qpGroupH(qpGrows);
+    qpLayGroupPx = (int)(qpGH + 0.5f);
+  }
+  qpLayout();
+  // El scroll interno de la tarjeta nunca puede quedar fuera de rango tras
+  // cambiar el alto o el numero de controles.
+  int inner = qpGroupInnerH(qpLayGroupPx);
+  int maxG  = qpTotalRows() * QP_TROW - inner;
+  if(maxG < 0) maxG = 0;
+  if(qpGScrollF > maxG) qpGScrollF = (float)maxG;
+  if(qpGScrollF < 0) qpGScrollF = 0;
+}
+static inline int qpScrollMax(){
+  int m = qpContentH - QP_VIEW_H;
+  return m > 0 ? m : 0;
+}
+static inline int qpCatScrollMax(){
+  int m = qpCatContentH() - QP_CAT_VIEWH;
+  return m > 0 ? m : 0;
+}
+
+// ---- COMPOSICION DEL FONDO (parte cara, UNA vez) ---------------------
 static void qsCompose(){
   uint16_t* bg = qsBgSrc();
   if(!bg) return;
@@ -13031,84 +14181,58 @@ static void qsCompose(){
   int c0 = gClipY0, c1 = gClipY1, cx0 = gClipX0, cx1 = gClipX1;
   gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
   if(uiGlass){
-    // Cortina Liquid Glass sobre lo que hubiera debajo. El tinte y el velo
-    // salen de la paleta activa, asi que en tema claro queda una cortina clara
-    // (con texto oscuro) y en oscuro la de siempre. El velo va a 140/234 justo
-    // para que la superficie quede casi al color de pagina: es lo que garantiza
-    // el contraste del texto sin depender de lo que haya debajo -- wallpaper o
-    // la propia app.
     drawLiquidGlassPanelEx(0, 0, SCR_W, SCR_H, 0, TH_GLASS2, 11);
-    fillRectA(0, 0, SCR_W, SCR_H, TH_PAGE, 140);
+    fillRectA(0, 0, SCR_W, SCR_H, TH_PAGE, 150);
   } else {
-    fillRectA(0, 0, SCR_W, SCR_H, TH_PAGE, 234);                                // glassmorphism plano
-    fillRectA(0, 0, SCR_W, 130, TH_SURF2, 46);                                  // tinte superior
+    fillRectA(0, 0, SCR_W, SCR_H, TH_PAGE, 238);
+    fillRectA(0, 0, SCR_W, 160, TH_SURF2, 40);
   }
-  qsDrawContent();
   gClipY0 = c0; gClipY1 = c1; gClipX0 = cx0; gClipX1 = cx1;
   setBuf(fb);
   qsDirty = false;
+  qpMarkAll();
 }
 
-// ---- REPINTADO POR BANDAS SUCIAS ----------------------------------
-// La version anterior recopiaba TODA la zona revelada en cada cuadro
-// (hasta 800 filas de memcpy) aunque el borde solo se hubiera movido 3 px.
-// Ahora se acumula la union de lo que puede haber cambiado -- el recorrido
-// del borde, su sombra, el asa, y los dos unicos elementos dinamicos de la
-// cortina (el relleno del brillo y el destello de un boton) -- y se compone
-// y publica SOLO esa banda.
-static int qsDy0 = 0x7FFF, qsDy1 = -1;
-static inline void qsMark(int y0, int y1){
-  if(y0 < qsDy0) qsDy0 = y0;
-  if(y1 > qsDy1) qsDy1 = y1;
-}
-// Rango vertical del control que esta destellando (misma numeracion que
-// qsTileIcon: 3 = Modo PC, 4 = Ahorro Ultra, 5 = Ajustes, 6 = Apagar).
-static void qsFlashRect(int idx, int &y0, int &y1){
-  if(idx == 4){ y0 = QS_PILL_Y; y1 = QS_PILL_Y + QS_PILL_H; return; }
-  int ci = (idx == 5) ? 1 : (idx == 6) ? 2 : 0;
-  int cy = QS_CIRC_CY(ci);
-  y0 = cy - QS_CIRC_R; y1 = cy + QS_CIRC_R;
-}
-
-// full = true fuerza el repintado de toda la zona visible (lo usa el primer
-// cuadro tras componer y cualquier cambio de tema).
+// ---- REPINTADO POR BANDAS --------------------------------------------
 static void qsRender(bool full){
   uint16_t* bg = qsBgSrc();
   if(!bg) return;
   if(qsPanelY <= 0){
-    // Cerrada del todo: se restaura el fondo entero UNA vez y se sale.
     if(qsLastY > 0 || full){ blitToFb(bg); flxFlushAll(); qsLastY = 0; }
     return;
   }
+  if(!qpLoaded) qpLoad();
   if(qsDirty || !qsBuf){ qsCompose(); full = true; }
   if(!qsBuf){ blitToFb(bg); flxFlushAll(); return; }
 
   int py = qsPanelY < SCR_H ? qsPanelY : SCR_H;
-  qsDy0 = 0x7FFF; qsDy1 = -1;
 
   // 1) recorrido del borde (con su asa por arriba y su sombra por abajo)
   int mlo = py < qsLastY ? py : qsLastY;
   int mhi = py > qsLastY ? py : qsLastY;
-  if(py != qsLastY) qsMark(mlo - QS_HANDLE_MARGIN, mhi + QS_SHADOW_H);
-  // 2) destello de un boton (se desvanece con el tiempo: hay que repintarlo)
-  if(qsFlashIdx >= 0){
-    if(millis() - qsFlashMs < QS_FLASH_DUR_MS){ int f0, f1; qsFlashRect(qsFlashIdx, f0, f1); qsMark(f0, f1); }
-    else { int f0, f1; qsFlashRect(qsFlashIdx, f0, f1); qsMark(f0, f1); qsFlashIdx = -1; }   // ultimo cuadro: limpiarlo
+  if(py != qsLastY){ qpMark(mlo - QS_HANDLE_MARGIN, mhi + QS_SHADOW_H); }
+  // 2) el reloj de la cabecera cambio de minuto
+  if(qpLastMin != rtcMin){ qpLastMin = rtcMin; qpMarkHeader(); }
+  // 3) destello de un control (se desvanece: hay que repintarlo hasta el final)
+  if(qpFlashIdx >= 0){
+    qpMark(qpFlashY0, qpFlashY1);
+    if(millis() - qpFlashMs >= QP_FLASH_MS){ qpFlashIdx = -1; qpFlashKind = -1; }
   }
-  // 3) relleno del brillo (solo cuando el usuario lo esta moviendo)
-  if(qsCapDirty){ qsMark(QS_CAP_Y, QS_CAP_Y + QS_CAP_H); qsCapDirty = false; }
-  // 4) repintado completo pedido
-  if(full) qsMark(0, mhi + QS_SHADOW_H);
+  // 4) rechazo de tamano en el editor
+  if(qpEdRejectF >= 0 && millis() - qpEdRejectMs >= 350) qpEdRejectF = -1;
+  // 5) repintado completo pedido
+  if(full) qpMark(0, mhi + QS_SHADOW_H);
 
-  if(qsDy1 < qsDy0){ qsLastY = py; return; }         // nada que hacer este cuadro
-  int cutTop = qsDy0 < 0 ? 0 : qsDy0;
-  int cutBot = qsDy1 > SCR_H - 1 ? SCR_H - 1 : qsDy1;
+  if(qpDy1 < qpDy0){ qsLastY = py; return; }
+  int cutTop = qpDy0 < 0 ? 0 : qpDy0;
+  int cutBot = qpDy1 > SCR_H - 1 ? SCR_H - 1 : qpDy1;
+  qpDy0 = 0x7FFF; qpDy1 = -1;
   if(cutBot < cutTop){ qsLastY = py; return; }
 
   setBuf(bbuf);
-  // Base de la banda: por encima del borde manda la cortina; por debajo, el
-  // fondo (escritorio o captura de la app), que es lo que "restaura" las filas
-  // que la cortina acaba de dejar libres.
+  // Base de la banda: por encima del borde manda el FONDO de la cortina; por
+  // debajo, el escritorio o la captura de la app -- que es lo que "restaura"
+  // las filas que la cortina acaba de dejar libres.
   for(int j = cutTop; j <= cutBot; j++){
     const uint16_t* src = (j < py) ? qsBuf : bg;
     memcpy(bbuf + (size_t)j * SCR_W, src + (size_t)j * SCR_W, SCR_W * 2);
@@ -13116,81 +14240,65 @@ static void qsRender(bool full){
 
   const int oCY0 = gClipY0, oCY1 = gClipY1, oCX0 = gClipX0, oCX1 = gClipX1;
   gClipX0 = 0; gClipX1 = SCR_W - 1;
-  // RECORTE AL BORDE DE LA CORTINA. Nada de la cortina puede pintarse por
-  // debajo de su propio borde: es lo que producia la barra ambar saliendose de
-  // la tarjeta y la pastilla flotando sobre los iconos con la cortina a medio
-  // abrir. Y por arriba se recorta a la banda sucia, para no tocar filas que
-  // este cuadro no va a publicar.
+  // RECORTE AL BORDE DE LA CORTINA. Nada del panel puede pintarse por debajo
+  // de su propio borde mientras esta a medio abrir.
   gClipY0 = cutTop;
   gClipY1 = (cutBot < py - 1) ? cutBot : py - 1;
   if(gClipY1 >= gClipY0){
-    if(qsFlashIdx >= 0){                       // destello de feedback al toque
-      uint32_t e = millis() - qsFlashMs;
-      if(e < QS_FLASH_DUR_MS){
-        float p = 1.0f - (float)e / QS_FLASH_DUR_MS;      // se desvanece
-        uint8_t a = (uint8_t)(120 * p);
-        if(qsFlashIdx == 4) fillRoundRectA(QS_PILL_X, QS_PILL_Y, QS_PILL_W, QS_PILL_H, QS_PILL_R, TH_TXT, a);
-        else {
-          int ci = qsFlashIdx == 5 ? 1 : qsFlashIdx == 6 ? 2 : 0;   // 3->0, 5->1, 6->2
-          int cy = QS_CIRC_CY(ci);
-          fillRoundRectA(QS_CIRC_CX - QS_CIRC_R, cy - QS_CIRC_R, QS_CIRC_D, QS_CIRC_D, QS_CIRC_R, TH_TXT, a);
-        }
-      }
+    if(qpMode == QPM_CAT){
+      qpDrawCatalog();
+    } else {
+      qpRelayout();
+      qpDrawBody();
+      if(qpMode == QPM_EDIT){ qpDrawEditHeader(); qpDrawGhost(); }
+      else                  { qpDrawHeader(); qpDrawFooter(); }
     }
-    // Brillo: relleno ambar dinamico (cambia con el arrastre / PWM real) + icono + %
-    int fillH = QS_CAP_H * gBright / 100;
-    // El relleno ambar del brillo es funcional (representa "cuanta luz hay"),
-    // como el amarillo del sol: se conserva en las dos apariencias.
-    if(fillH > 0) fillRoundRect(QS_CAP_X, QS_CAP_Y + QS_CAP_H - fillH, QS_CAP_W, fillH, QS_CAP_R, rgb565(255,190,40));
-    drawSetCatIcon(1, QS_CAP_X + QS_CAP_W / 2 - 14, QS_CAP_Y + QS_CAP_H - 44, 28, rgb565(70,50,10));   // sol: casi siempre cae sobre el relleno
-    char pb[8]; snprintf(pb, sizeof(pb), "%d%%", gBright);
-    // Con el relleno alto el % cae SOBRE el ambar (marron oscuro fijo, legible
-    // en los dos temas); con el relleno bajo cae sobre el track -> texto del tema.
-    drawTextC(QS_CAP_X + QS_CAP_W / 2, QS_CAP_Y + QS_CAP_H - 74, pb, 2, gBright >= 25 ? rgb565(70,50,10) : TH_TXT);
   }
-  // Sombra y asa: fuera del recorte a la cortina (la sombra cae por debajo del
-  // borde a proposito), pero dentro de la banda que se va a publicar.
+  // Sombra y tirador del borde: fuera del recorte al panel (la sombra cae por
+  // debajo del borde a proposito), pero dentro de la banda que se publica.
   gClipY0 = cutTop; gClipY1 = cutBot;
-  for(int yy = py; yy < py + QS_SHADOW_H; yy++){
-    uint8_t a = (uint8_t)(70 * (1.0f - (float)(yy - py) / (float)QS_SHADOW_H));
-    if(a > 0) hLineA(0, yy, SCR_W, TH_SHADOW, a);
+  if(py < SCR_H){
+    for(int yy = py; yy < py + QS_SHADOW_H; yy++){
+      uint8_t a = (uint8_t)(70 * (1.0f - (float)(yy - py) / (float)QS_SHADOW_H));
+      if(a > 0) hLineA(0, yy, SCR_W, TH_SHADOW, a);
+    }
+    fillRoundRect(SCR_W / 2 - 28, py - 14, 56, 5, 2, TH_MUTE);
   }
-  fillRoundRect(SCR_W / 2 - 28, py - 14, 56, 5, 2, TH_MUTE);          // tirador de la cortina
   gClipY0 = oCY0; gClipY1 = oCY1; gClipX0 = oCX0; gClipX1 = oCX1;
 
   present(cutTop, cutBot);
   qsLastY = py;
 }
 
-// ---- ANIMACION NO BLOQUEANTE --------------------------------------
-// Antes esto era un bucle for(;;) con delay(1) dentro: durante 150-300 ms el
-// sistema no sondeaba el tactil, no alimentaba el TWDT y no dejaba correr a
-// nadie mas. Con la cortina encima de una app eso es inaceptable, asi que
-// ahora qsAnimTo() solo PROGRAMA el movimiento y qsAnimStep() -- llamada una
-// vez por cuadro desde uiTick() -- lo avanza. El avance sale del reloj
-// (millis), no de un paso fijo por cuadro: el recorrido dura lo mismo a 30
-// que a 90 fps. Curva ease-in-out cubica, sin rebote.
+// ---- ANIMACION DE APERTURA / CIERRE (no bloqueante) -----------------
+// Solo PROGRAMA el movimiento; qsAnimStep() -- una vez por cuadro desde
+// uiTick() -- lo avanza con el reloj. Cero delay(), cero bucles.
+#define QS_SMOOTH_TAU 26.0f
+#define QS_VEL_TAU    45.0f
+#define QS_FLICK      0.45f
+static float    qsVel = 0;
+static int      qsPrevY = 0;
+static uint32_t qsPrevMs = 0;
+static int      qsDragBase = 0, qsDragY0 = 0;
+static bool     qsDragMoved = false;
+static float    qsPosF = 0;
 static bool     qsAnimOn   = false;
 static int      qsAnimFrom = 0, qsAnimDest = 0;
 static uint32_t qsAnimT0   = 0, qsAnimDur = 1;
 
-// Devuelve a la pantalla lo que habia DEBAJO de la cortina. Hace falta antes de
-// cualquier salida que vaya a LEER el framebuffer: appClose() captura de fb la
-// miniatura de multitarea y winRevealAnim() encoge desde lo que haya en
-// pantalla. Sin esto, la miniatura de la app seria una foto de la cortina.
 static void qsRestoreBg(){
   uint16_t* bg = qsBgSrc();
   if(!bg) return;
   blitToFb(bg); flxFlushAll();
   qsLastY = 0;
 }
-// Estado final de "cerrada": restaura el fondo entero y suelta la captura de
-// la app. Es el UNICO sitio donde se libera qsAppSnap.
+static void qpEditCancel();     // definida con el editor, mas abajo
+
 static void qsSettleClosed(){
   qsPanelY = 0; qsPosF = 0; qsVel = 0;
-  qsRestoreBg();                      // pone en pantalla el escritorio o la app de debajo
-  qsFreeApp();
-  qsDirty = true;                     // la proxima apertura se compone de nuevo
+  qsRestoreBg();
+  qpFreeBuffers();                    // suelta la captura de la app y el fondo cacheado
+  qsDirty = true;
 }
 static void qsAnimTo(int target){
   if(target < 0) target = 0; if(target > SCR_H) target = SCR_H;
@@ -13204,15 +14312,783 @@ static void qsAnimTo(int target){
   }
   qsAnimFrom = from; qsAnimDest = target;
   qsAnimT0   = millis();
-  qsAnimDur  = 150 + (uint32_t)((uint32_t)dist * 150u / (uint32_t)SCR_H);   // 150..300 ms segun recorrido
+  qsAnimDur  = 150 + (uint32_t)((uint32_t)dist * 150u / (uint32_t)SCR_H);
   qsAnimOn   = true;
 }
+
+// ---- MAQUINA DE GESTOS DEL PANEL -------------------------------------
+// PROPIEDAD EXPLICITA DEL GESTO: al presionar se decide QUE superficie manda
+// y ya no cambia hasta soltar. Es lo que evita los scrolls anidados
+// imposibles y que estirar el asa acabe cerrando la cortina.
+enum { QG_NONE = 0, QG_PENDING, QG_CURTAIN, QG_SCROLL, QG_GSCROLL,
+       QG_RESIZE, QG_SLIDER, QG_EDDRAG, QG_CATSCROLL };
+static uint8_t  qpG = QG_NONE;
+static int      qpGx0 = 0, qpGy0 = 0;         // punto de agarre
+static float    qpGBase = 0;                  // valor de partida (scroll o alto)
+static int      qpGTargetBlk = -1;            // bloque bajo el dedo (para el toque)
+static int      qpGTargetTile = -1;           // circulo bajo el dedo (indice en qpTiles)
+static int      qpGTargetHdr = -1;            // boton de cabecera bajo el dedo
+static bool     qpGLong = false;              // ya se disparo la accion secundaria
+static uint32_t qpGPrevMs = 0;
+static int      qpGPrevY = 0;
+#define QP_DRAG_TH   8                        // px para dejar de ser toque
+#define QP_LONG_MS   480                      // pulsacion larga -> detalles
+#define QP_RUBBER    0.42f                    // resistencia en los extremos
+
+static inline float qpRubber(float over){ return over * QP_RUBBER; }
+
+// Acota el scroll con rebote elastico en los extremos.
+static void qpClampScroll(bool elastic){
+  int mx = qpScrollMax();
+  if(qpScrollF < 0)  qpScrollF = elastic ? qpRubber(qpScrollF) : 0;
+  if(qpScrollF > mx) qpScrollF = elastic ? (mx + qpRubber(qpScrollF - mx)) : (float)mx;
+}
+static void qpClampGScroll(bool elastic){
+  int inner = qpGroupInnerH(qpLayGroupPx);
+  int mx = qpTotalRows() * QP_TROW - inner;
+  if(mx < 0) mx = 0;
+  if(qpGScrollF < 0)  qpGScrollF = elastic ? qpRubber(qpGScrollF) : 0;
+  if(qpGScrollF > mx) qpGScrollF = elastic ? (mx + qpRubber(qpGScrollF - mx)) : (float)mx;
+}
+
+// "Snap" del alto de la tarjeta al tamano valido mas cercano (filas
+// COMPLETAS), con un rebote final muy pequeno y SIN sobrepasar los limites.
+static void qpGroupSnap(){
+  int lo = qpGroupMinPx(), hi = qpGroupMaxPx();
+  int best = lo, bd = 0x7FFFFFFF;
+  int rmax = qpTotalRows(); if(rmax > QP_GROWS_MAX) rmax = QP_GROWS_MAX;
+  if(rmax < QP_GROWS_MIN) rmax = QP_GROWS_MIN;
+  for(int r = QP_GROWS_MIN; r <= rmax; r++){
+    int hpx = qpGroupH(r);
+    int d = (int)fabsf(qpGH - hpx);
+    if(d < bd){ bd = d; best = hpx; qpGrows = (uint8_t)r; }
+  }
+  if(best < lo) best = lo; if(best > hi) best = hi;
+  qpGFrom = qpGH; qpGTo = (float)best;
+  qpGT0 = millis();
+  int dist = (int)fabsf(qpGTo - qpGFrom);
+  qpGDur = 140 + (uint32_t)(dist * 2);
+  if(qpGDur > 420) qpGDur = 420;
+  qpGAnim = true;
+}
+static void qpGroupAnimStep(){
+  if(!qpGAnim) return;
+  uint32_t e = millis() - qpGT0; if(e > qpGDur) e = qpGDur;
+  float p = (float)e / (float)qpGDur;
+  // ease-out con un rebote MUY pequeno (c1 = 0.55) y acotado a los limites,
+  // asi que el asa nunca se sale del rango valido ni un cuadro.
+  float u = p - 1.0f;
+  const float c1 = 0.55f, c3 = c1 + 1.0f;
+  p = 1.0f + c3 * u * u * u + c1 * u * u;
+  qpGH = qpGFrom + (qpGTo - qpGFrom) * p;
+  float lo = (float)qpGroupMinPx(), hi = (float)qpGroupMaxPx();
+  if(qpGH < lo) qpGH = lo; if(qpGH > hi) qpGH = hi;
+  qpMarkView();
+  if(e >= qpGDur){ qpGAnim = false; qpGH = qpGTo; }
+}
+
+// Inercia y asentamiento del scroll. Todo por tiempo transcurrido: la
+// velocidad no depende de cuantos cuadros diera el sistema.
+static void qpScrollAnimStep(uint32_t dt){
+  if(dt == 0) return;
+  bool moved = false;
+  if(qpG != QG_SCROLL && fabsf(qpScrollVel) > 0.01f){
+    qpScrollF += qpScrollVel * (float)dt;
+    qpScrollVel *= expf(-(float)dt / 190.0f);
+    if(fabsf(qpScrollVel) < 0.01f) qpScrollVel = 0;
+    moved = true;
+  }
+  if(qpG != QG_SCROLL){
+    int mx = qpScrollMax();
+    if(qpScrollF < 0 || qpScrollF > mx){
+      float tgt = (qpScrollF < 0) ? 0.0f : (float)mx;
+      float a = 1.0f - expf(-(float)dt / 90.0f);
+      qpScrollF += (tgt - qpScrollF) * a;
+      if(fabsf(tgt - qpScrollF) < 0.5f){ qpScrollF = tgt; qpScrollVel = 0; }
+      moved = true;
+    }
+  }
+  if(qpG != QG_GSCROLL && fabsf(qpGScrollVel) > 0.01f){
+    qpGScrollF += qpGScrollVel * (float)dt;
+    qpGScrollVel *= expf(-(float)dt / 190.0f);
+    if(fabsf(qpGScrollVel) < 0.01f) qpGScrollVel = 0;
+    moved = true;
+  }
+  if(qpG != QG_GSCROLL){
+    int inner = qpGroupInnerH(qpLayGroupPx);
+    int mx = qpTotalRows() * QP_TROW - inner; if(mx < 0) mx = 0;
+    if(qpGScrollF < 0 || qpGScrollF > mx){
+      float tgt = (qpGScrollF < 0) ? 0.0f : (float)mx;
+      float a = 1.0f - expf(-(float)dt / 90.0f);
+      qpGScrollF += (tgt - qpGScrollF) * a;
+      if(fabsf(tgt - qpGScrollF) < 0.5f){ qpGScrollF = tgt; qpGScrollVel = 0; }
+      moved = true;
+    }
+  }
+  if(moved) qpMarkView();
+}
+
+// ---- HIT-TEST --------------------------------------------------------
+// Misma geometria que el dibujo (qpBlk/qpTileCenter): no puede desalinearse
+// lo pintado de lo pulsable. Las zonas tactiles son mas grandes que el
+// dibujo; ningun boton importante baja de QP_TOUCH_MIN.
+static int qpHdrBtnAt(int px, int py){
+  if(py < 0 || py > QP_HDR_H) return -1;
+  for(int i = 0; i < 3; i++){
+#if !POWEROFF_ON
+    if(i == 1) continue;
+#endif
+    int cx = QP_HBTN_CX[i], cy = QP_HBTN_CY, r = QP_TOUCH_MIN / 2 + 2;
+    if(px >= cx - r && px <= cx + r && py >= cy - r && py <= cy + r) return i;
+  }
+  return -1;
+}
+static int qpBlockAt(int px, int py){
+  int top = QP_VIEW_Y0 - (int)(qpScrollF + 0.5f);
+  for(int b = 0; b < qpBlkN; b++){
+    int bx = qpBlk[b].x, by = top + qpBlk[b].y, bw = qpBlk[b].w, bh = qpBlk[b].h;
+    if(px >= bx && px < bx + bw && py >= by && py < by + bh) return b;
+  }
+  return -1;
+}
+// ¿El punto cae en el ASA de la tarjeta? Se le da un margen generoso hacia
+// arriba y hacia abajo: es el gesto mas fino del panel.
+static bool qpOnGroupHandle(int px, int py){
+  if(qpGroupBlk < 0) return false;
+  int top = QP_VIEW_Y0 - (int)(qpScrollF + 0.5f);
+  int gy = top + qpBlk[qpGroupBlk].y, gh = qpBlk[qpGroupBlk].h;
+  int hy = gy + gh - QP_HANDLE_H;
+  return (px >= QP_MX && px <= QP_MX + QP_CONT_W &&
+          py >= hy - 10 && py <= gy + gh + 14);
+}
+// Indice (en qpTiles) del circulo bajo el dedo, o -1.
+static int qpTileAt(int px, int py){
+  if(qpGroupBlk < 0) return -1;
+  int top = QP_VIEW_Y0 - (int)(qpScrollF + 0.5f);
+  int gy = top + qpBlk[qpGroupBlk].y, gh = qpBlk[qpGroupBlk].h;
+  int innerTop = gy + QP_GPAD, innerBot = gy + gh - QP_HANDLE_H;
+  if(py < innerTop || py >= innerBot) return -1;
+  int gyTop = innerTop - (int)(qpGScrollF + 0.5f);
+  for(int k = 0; k < qpTileN; k++){
+    int cx, cy; qpTileCenter(k, gyTop, cx, cy);
+    int hw = QP_TCOLW / 2, hh = QP_TROW / 2;
+    if(hw < QP_TOUCH_MIN / 2) hw = QP_TOUCH_MIN / 2;
+    if(px >= cx - hw && px <= cx + hw && py >= cy - QP_TCIRC / 2 - 6 && py <= cy + hh)
+      return k;
+  }
+  return -1;
+}
+static bool qpGroupCanScroll(){
+  int inner = qpGroupInnerH(qpLayGroupPx);
+  return qpTotalRows() * QP_TROW > inner + 2;
+}
+
+// ---- EJECUCION DEL TOQUE ---------------------------------------------
+static void qpFlashTileK(int k){
+  if(k < 0 || k >= qpTileN || qpGroupBlk < 0) return;
+  int top = QP_VIEW_Y0 - (int)(qpScrollF + 0.5f);
+  int gy = top + qpBlk[qpGroupBlk].y;
+  int gyTop = gy + QP_GPAD - (int)(qpGScrollF + 0.5f);
+  int cx, cy; qpTileCenter(k, gyTop, cx, cy);
+  qpFlashKind = 0; qpFlashIdx = qpIt[qpTiles[k]].id; qpFlashMs = millis();
+  qpFlashY0 = cy - QP_TCIRC / 2 - 2; qpFlashY1 = cy + QP_TCIRC / 2 + 2;
+  qpMark(qpFlashY0, qpFlashY1);
+}
+static void qpFlashBlock(int b){
+  if(b < 0 || b >= qpBlkN) return;
+  int top = QP_VIEW_Y0 - (int)(qpScrollF + 0.5f);
+  int i = qpBlk[b].item;
+  if(i < 0 || i >= qpN) return;
+  qpFlashKind = 1; qpFlashIdx = qpIt[i].id; qpFlashMs = millis();
+  qpFlashY0 = top + qpBlk[b].y - 2; qpFlashY1 = top + qpBlk[b].y + qpBlk[b].h + 2;
+  qpMark(qpFlashY0, qpFlashY1);
+}
+// Ejecuta un control. detail = pulsacion larga (accion secundaria).
+// Devuelve true si la accion ABANDONA la cortina (cambia de pantalla): en ese
+// caso quien llama no puede seguir dibujando el panel.
+static bool qpExecCtl(int id, bool detail){
+  const QsCtl* c = qpCtl(id);
+  if(!c || !c->avail || !c->avail()) return false;
+  if(detail && c->detail){ c->detail(); return true; }
+  if(c->type == QT_ACTION){ if(c->tap) c->tap(); return true; }
+  if(c->tap) c->tap();
+  // Cambiar de tema recompone el fondo de la cortina; el resto solo cambia el
+  // estado de su control y basta con repintar su banda.
+  if(id == QSID_THEME || id == QSID_GLASS) qpInvalidateAll();
+  else qpMarkView();
+  return false;
+}
+
+// ---- ATENCION DEL TOQUE CON EL PANEL ABIERTO -------------------------
+static void qpEditEnter();      // definidas con el editor
+static bool qpEditTouch();
+static bool qpCatTouch();
+
+static bool qpPanelTouch(){
+  uint32_t now = millis();
+  uint32_t dt = now - qpGPrevMs; if(dt < 1) dt = 1; if(dt > 100) dt = 100;
+
+  if(T.pressed && qpG == QG_NONE){
+    qpGx0 = T.x; qpGy0 = T.y; qpGPrevY = T.y; qpGPrevMs = now;
+    qpGLong = false; qpGTargetBlk = -1; qpGTargetTile = -1; qpGTargetHdr = -1;
+    qpScrollVel = 0; qpGScrollVel = 0; qpGAnim = false;
+    // 0) a medio abrir no hay controles que tocar: manda la cortina entera
+    if(qsPanelY < SCR_H) qpG = QG_CURTAIN;
+    // 1) cabecera: botones o agarre para cerrar
+    else if(T.y < QP_HDR_H){
+      qpGTargetHdr = qpHdrBtnAt(T.x, T.y);
+      qpG = (qpGTargetHdr >= 0) ? QG_PENDING : QG_CURTAIN;
+    }
+    // 2) franja inferior: agarre de cierre
+    else if(T.y > SCR_H - QP_FOOT_H) qpG = QG_CURTAIN;
+    // 3) asa de la tarjeta: manda el RESIZE
+    else if(qpOnGroupHandle(T.x, T.y)){ qpG = QG_RESIZE; qpGBase = qpGH; }
+    else {
+      int b = qpBlockAt(T.x, T.y);
+      qpGTargetBlk = b;
+      if(b >= 0 && qpBlk[b].kind == QB_ITEM){
+        int i = qpBlk[b].item;
+        if(i >= 0 && i < qpN && qpCtl(qpIt[i].id) && qpCtl(qpIt[i].id)->type == QT_SLIDER){
+          qpG = QG_SLIDER;                                  // el slider actua ya
+        } else qpG = QG_PENDING;
+      } else if(b >= 0 && qpBlk[b].kind == QB_GROUP){
+        qpGTargetTile = qpTileAt(T.x, T.y);
+        qpG = QG_PENDING;
+      } else qpG = QG_PENDING;
+      qpGBase = qpScrollF;
+    }
+    if(qpG == QG_CURTAIN){
+      qsAnimOn = false; qsDragging = true; qsDragMoved = false;
+      qsDragBase = qsPanelY; qsDragY0 = T.y; qsPosF = (float)qsPanelY;
+      qsPrevY = T.y; qsPrevMs = now; qsVel = 0;
+    }
+  }
+
+  // ---- SLIDER (brillo real, actualizacion continua) ----
+  if(qpG == QG_SLIDER){
+    if(T.down){
+      int b = qpGTargetBlk;
+      if(b >= 0 && b < qpBlkN && qpBlk[b].kind == QB_ITEM){
+        int i = qpBlk[b].item;
+        int id = (i >= 0 && i < qpN) ? qpIt[i].id : -1;
+        int x = qpBlk[b].x, w = qpBlk[b].w;
+        int th = qpBlk[b].h - 20; if(th < 40) th = 40;
+        int run = w - th; if(run < 1) run = 1;               // nunca se divide por cero
+        int v = (T.x - x - th / 2) * 100 / run;
+        if(v < 0) v = 0; if(v > 100) v = 100;
+        if(id == QSID_BRIGHT && v != gBright){
+          setBacklight(v);                                  // PWM real, sin present() completo
+          int top = QP_VIEW_Y0 - (int)(qpScrollF + 0.5f);
+          qpMark(top + qpBlk[b].y, top + qpBlk[b].y + qpBlk[b].h);
+        }
+      }
+      return true;
+    }
+    cfgSavePrefs();                                         // NVS SOLO al soltar
+    qpG = QG_NONE;
+    return true;
+  }
+
+  // ---- ARRASTRE DE LA CORTINA ----
+  if(qpG == QG_CURTAIN){
+    if(T.down){
+      if(!qsDragMoved){
+        if(abs(T.y - qsDragY0) <= 6){ qsPrevY = T.y; qsPrevMs = now; return true; }
+        qsDragMoved = true;
+      }
+      float d = (float)(now - qsPrevMs); if(d < 1) d = 1; if(d > 100) d = 100;
+      int target = qsDragBase + (T.y - qsDragY0);
+      if(target < 0) target = 0; if(target > SCR_H) target = SCR_H;
+      float inst = (float)(T.y - qsPrevY) / d;
+      qsVel += (inst - qsVel) * (d / (d + QS_VEL_TAU));
+      qsPrevY = T.y; qsPrevMs = now;
+      float a = 1.0f - expf(-d / QS_SMOOTH_TAU);
+      qsPosF += ((float)target - qsPosF) * a;
+      if(fabsf((float)target - qsPosF) < 0.75f) qsPosF = (float)target;
+      if(qsPosF < 0) qsPosF = 0; if(qsPosF > (float)SCR_H) qsPosF = (float)SCR_H;
+      int ny = (int)(qsPosF + 0.5f);
+      if(ny != qsPanelY){ qsPanelY = ny; qsRender(false); }
+      return true;
+    }
+    qsDragging = false; qpG = QG_NONE;
+    if(!qsDragMoved){
+      qsPanelY = qsDragBase; qsPosF = (float)qsDragBase;
+      // Un TOQUE cierra solo desde el asa inferior -- la superficie declarada
+      // para eso. Tocar la cabecera (junto al reloj, entre los botones) no
+      // cierra nada: ahi el gesto valido es ARRASTRAR.
+      if(qsPanelY >= SCR_H && T.tap && qpGy0 > SCR_H - QP_FOOT_H) qsAnimTo(0);
+      else if(qsPanelY > 0){
+        if(qsVel > QS_FLICK) qsAnimTo(SCR_H); else if(qsVel < -QS_FLICK) qsAnimTo(0);
+        else qsAnimTo(qsPanelY >= (SCR_H * QS_OPEN_PCT) / 100 ? SCR_H : 0);
+      } else qsSettleClosed();
+      return true;
+    }
+    if(qsVel > QS_FLICK)       qsAnimTo(SCR_H);
+    else if(qsVel < -QS_FLICK) qsAnimTo(0);
+    else qsAnimTo(qsPanelY >= (SCR_H * QS_OPEN_PCT) / 100 ? SCR_H : 0);
+    return true;
+  }
+
+  // ---- ESTIRAMIENTO DE LA TARJETA (asa 1:1 con el dedo) ----
+  if(qpG == QG_RESIZE){
+    if(T.down){
+      float lo = (float)qpGroupMinPx(), hi = (float)qpGroupMaxPx();
+      float h = qpGBase + (float)(T.y - qpGy0);
+      // Resistencia fuera de rango: el asa acompana al dedo pero no deja que
+      // la tarjeta pase de sus limites validos.
+      if(h < lo) h = lo + qpRubber(h - lo);
+      if(h > hi) h = hi + qpRubber(h - hi);
+      if(h < lo - 40) h = lo - 40; if(h > hi + 40) h = hi + 40;
+      if((int)h != (int)qpGH){ qpGH = h; qpMarkView(); }
+      return true;
+    }
+    qpG = QG_NONE;
+    qpGroupSnap();
+    qpSave();                                    // el alto elegido es configuracion
+    return true;
+  }
+
+  // ---- SCROLL DEL PANEL / DE LA TARJETA ----
+  if(qpG == QG_SCROLL || qpG == QG_GSCROLL){
+    if(T.down){
+      int d = qpGPrevY - T.y;
+      float inst = (float)d / (float)dt;
+      if(qpG == QG_SCROLL){
+        qpScrollF += d; qpClampScroll(true);
+        qpScrollVel += (inst - qpScrollVel) * ((float)dt / ((float)dt + 45.0f));
+      } else {
+        qpGScrollF += d; qpClampGScroll(true);
+        qpGScrollVel += (inst - qpGScrollVel) * ((float)dt / ((float)dt + 45.0f));
+      }
+      qpGPrevY = T.y; qpGPrevMs = now;
+      qpMarkView();
+      return true;
+    }
+    qpG = QG_NONE;
+    return true;
+  }
+
+  // ---- PENDIENTE: aun puede ser toque, scroll o pulsacion larga ----
+  if(qpG == QG_PENDING){
+    if(T.down){
+      if(abs(T.y - qpGy0) > QP_DRAG_TH || abs(T.x - qpGx0) > QP_DRAG_TH * 2){
+        // Nacido en la CABECERA (aunque fuera sobre un boton): el gesto es de
+        // la cortina entera, no del contenido. Asi bajar el dedo desde el
+        // lapiz no acaba haciendo scroll de la lista.
+        if(qpGTargetHdr >= 0 || qpGy0 < QP_HDR_H){
+          qpGTargetHdr = -1;
+          qpG = QG_CURTAIN;
+          qsAnimOn = false; qsDragging = true; qsDragMoved = false;
+          qsDragBase = qsPanelY; qsDragY0 = qpGy0; qsPosF = (float)qsPanelY;
+          qsPrevY = T.y; qsPrevMs = now; qsVel = 0;
+          return true;
+        }
+        // Si el gesto nacio DENTRO de la tarjeta y la tarjeta tiene mas filas
+        // de las que ensena, manda el scroll interno. Si no, manda el panel.
+        bool inGroup = (qpGTargetBlk >= 0 && qpGTargetBlk < qpBlkN &&
+                        qpBlk[qpGTargetBlk].kind == QB_GROUP);
+        qpG = (inGroup && qpGroupCanScroll()) ? QG_GSCROLL : QG_SCROLL;
+        qpGPrevY = T.y; qpGPrevMs = now;
+        qpScrollVel = 0; qpGScrollVel = 0;
+        return true;
+      }
+      // Pulsacion larga -> accion secundaria (detalles / Ajustes del control)
+      if(!qpGLong && (now - T.downMs) > QP_LONG_MS){
+        qpGLong = true;
+        int id = -1;
+        if(qpGTargetTile >= 0 && qpGTargetTile < qpTileN) id = qpIt[qpTiles[qpGTargetTile]].id;
+        else if(qpGTargetBlk >= 0 && qpBlk[qpGTargetBlk].kind == QB_ITEM){
+          int i = qpBlk[qpGTargetBlk].item;
+          if(i >= 0 && i < qpN) id = qpIt[i].id;
+        }
+        const QsCtl* c = qpCtl(id);
+        if(c && c->detail){ if(qpExecCtl(id, true)) return true; }
+      }
+      return true;
+    }
+    // Soltado sin arrastrar: es un TOQUE.
+    uint8_t was = qpG; qpG = QG_NONE; (void)was;
+    if(qpGLong) return true;                     // la larga ya se atendio
+    if(qpGTargetHdr >= 0){
+      int h = qpGTargetHdr; qpGTargetHdr = -1;
+      if(h == 0){ qpEditEnter(); return true; }
+#if POWEROFF_ON
+      if(h == 1){ qsRestoreBg(); qsForceClose(); poffEnter(); return true; }
+#endif
+      if(h == 2){ qpTapSettings(); return true; }
+      return true;
+    }
+    // Toque de control: lo resuelve qsTapTile (circulos primero, modulos
+    // despues). Un toque en el vacio NO cierra el panel: cerrar es del asa
+    // inferior y de la cabecera, que son las superficies declaradas para eso.
+    qsTapTile(T.x, T.y);
+    return true;
+  }
+
+  if(!T.down && qpG != QG_NONE) qpG = QG_NONE;
+  return true;
+}
+
+// #############################################################
+// ##  MODO EDICION  (One UI 8.5)
+// ##  ------------------------------------------------------
+// ##  Trabaja SIEMPRE sobre una copia temporal (qpEdIt/qpEdN/
+// ##  qpEdGrows). "Cancelar" la tira; "Listo" valida, normaliza,
+// ##  guarda en NVS de UNA sola vez y sale. Nunca se guarda un
+// ##  movimiento suelto, asi que un reinicio en mitad de la
+// ##  edicion deja la configuracion anterior INTACTA.
+// #############################################################
+static void qpEditEnter(){
+  if(!qpLoaded) qpLoad();
+  if(flexOtaOwnsScreen() || flexOtaOverlayActive()) return;   // la pantalla es del OTA
+  memcpy(qpEdIt, qpIt, sizeof(qpEdIt));
+  qpEdN = qpN; qpEdGrows = qpGrows;
+  qpEdDrag = -1; qpEdResize = -1; qpEdRejectF = -1;
+  qpScrollF = 0; qpScrollVel = 0;
+  qpG = QG_NONE;
+  qpMode = QPM_EDIT;
+  qpRelayout();
+  qpMarkAll();
+}
+static void qpEditCancel(){
+  qpMode = QPM_PANEL;
+  qpEdDrag = -1; qpEdResize = -1;
+  qpG = QG_NONE;
+  qpScrollF = 0; qpScrollVel = 0;
+  qpRelayout();
+  qpMarkAll();
+}
+static void qpEditCommit(){
+  qpEdN = qpNormalize(qpEdIt, qpEdN, qpEdGrows);
+  if(qpEdN == 0){ qpFactory(); qpN = qpNormalize(qpIt, qpN, qpGrows); }
+  else { memcpy(qpIt, qpEdIt, sizeof(qpIt)); qpN = qpEdN; qpGrows = qpEdGrows; }
+  qpSave();
+  qpGH = (float)qpGroupH(qpGrows);
+  qpGScrollF = 0; qpGScrollVel = 0;
+  qpMode = QPM_PANEL;
+  qpEdDrag = -1; qpEdResize = -1;
+  qpG = QG_NONE;
+  qpScrollF = 0; qpScrollVel = 0;
+  qpRelayout();
+  qpMarkAll();
+}
+static void qpEditReset(){
+  QpItem save[QP_MAX_ITEMS]; uint8_t sn = qpN, sg = qpGrows;
+  memcpy(save, qpIt, sizeof(save));
+  qpFactory();                                  // escribe en qpIt/qpGrows
+  memcpy(qpEdIt, qpIt, sizeof(qpEdIt));
+  qpEdN = qpNormalize(qpEdIt, qpN, qpGrows);
+  qpEdGrows = qpGrows;
+  memcpy(qpIt, save, sizeof(save)); qpN = sn; qpGrows = sg;   // lo vivo no cambia hasta "Listo"
+  qpEdDrag = -1; qpEdResize = -1;
+  qpRelayout();
+  qpMarkAll();
+}
+// Quita un elemento de la copia temporal. Nunca deja el panel vacio: si es el
+// ultimo, se rechaza con el mismo destello que un tamano incompatible.
+static bool qpEditRemove(int idx){
+  if(idx < 0 || idx >= qpEdN) return false;
+  if(qpEdN <= 1){ qpEdRejectF = qpEdIt[idx].id; qpEdRejectMs = millis(); return false; }
+  for(int i = idx; i < qpEdN - 1; i++) qpEdIt[i] = qpEdIt[i + 1];
+  qpEdN--;
+  qpEdIt[qpEdN].id = 0; qpEdIt[qpEdN].vis = 0;
+  qpRelayout(); qpMarkAll();
+  return true;
+}
+// Mueve un elemento a otra posicion (reordenamiento EN TIEMPO REAL).
+static void qpEditMove(int from, int to){
+  if(from == to || from < 0 || to < 0 || from >= qpEdN || to >= qpEdN) return;
+  QpItem tmp = qpEdIt[from];
+  if(from < to) for(int i = from; i < to; i++) qpEdIt[i] = qpEdIt[i + 1];
+  else          for(int i = from; i > to; i--) qpEdIt[i] = qpEdIt[i - 1];
+  qpEdIt[to] = tmp;
+}
+// Anade un control del catalogo en el PRIMER hueco valido (el final del
+// flujo). Si no cabe, no se pierde: el contenido desplazable crece.
+static bool qpEditAdd(int id){
+  if(qpEdN >= QP_MAX_ITEMS) return false;
+  if(!qpCtlAvail(id)) return false;
+  for(int i = 0; i < qpEdN; i++) if(qpEdIt[i].id == id) return false;
+  uint8_t w, h; qpFirstSize(QS_REG[id].sizes, w, h);
+  qpEdIt[qpEdN].id = (uint8_t)id; qpEdIt[qpEdN].w = w; qpEdIt[qpEdN].h = h;
+  qpEdIt[qpEdN].ori = (QS_REG[id].oris & QOR_H) ? QOR_H : QOR_V;
+  qpEdIt[qpEdN].vis = 1;
+  qpEdN++;
+  qpRelayout(); qpMarkAll();
+  return true;
+}
+
+// ---- TOQUE DEL EDITOR ------------------------------------------------
+#define QP_EDLONG_MS 320
+static int qpEdPendIdx = -1;      // elemento bajo el dedo, aun sin decidir
+static int qpEdPendBlk = -1;
+
+// Indice (en qpEdIt) del elemento bajo el punto, o -1. Cubre tanto los
+// bloques exteriores como los circulos de la tarjeta.
+static int qpEdItemAt(int px, int py, int &blkOut){
+  blkOut = -1;
+  int b = qpBlockAt(px, py);
+  if(b < 0) return -1;
+  blkOut = b;
+  if(qpBlk[b].kind == QB_ITEM) return qpBlk[b].item;
+  if(qpBlk[b].kind == QB_GROUP){
+    int k = qpTileAt(px, py);
+    if(k >= 0 && k < qpTileN) return qpTiles[k];
+  }
+  return -1;
+}
+
+static bool qpEditTouch(){
+  uint32_t now = millis();
+  if(T.pressed && qpG == QG_NONE){
+    qpGx0 = T.x; qpGy0 = T.y; qpGPrevY = T.y; qpGPrevMs = now;
+    qpGLong = false; qpEdPendIdx = -1; qpEdPendBlk = -1;
+    qpScrollVel = 0;
+    // 1) cabecera fija del editor
+    if(T.y < QP_EDH_H){
+      qpG = QG_PENDING;
+      return true;
+    }
+    int blk = -1;
+    int idx = qpEdItemAt(T.x, T.y, blk);
+    if(blk >= 0 && qpBlk[blk].kind == QB_ADD){ qpG = QG_PENDING; qpEdPendBlk = blk; return true; }
+    if(idx >= 0 && blk >= 0){
+      int top = QP_VIEW_Y0 - (int)(qpScrollF + 0.5f);
+      int bx = qpBlk[blk].x, by = top + qpBlk[blk].y, bw = qpBlk[blk].w, bh = qpBlk[blk].h;
+      if(qpBlk[blk].kind == QB_ITEM){
+        // "-" (quitar): esquina superior izquierda, zona tactil de 44 px
+        if(T.x <= bx + 26 && T.y <= by + 26){ qpEditRemove(idx); qpG = QG_NONE; return true; }
+        // Asa de redimension: borde DERECHO
+        if(T.x >= bx + bw - 26){
+          uint8_t nw, nh;
+          if(qpNextSize(qpEdIt[idx].id, qpEdIt[idx].w, qpEdIt[idx].h, +1, nw, nh) ||
+             qpNextSize(qpEdIt[idx].id, qpEdIt[idx].w, qpEdIt[idx].h, -1, nw, nh)){
+            qpG = QG_EDDRAG; qpEdResize = idx; qpEdResX0 = T.x; qpEdDrag = -1;
+            return true;
+          }
+          qpEdRejectF = qpEdIt[idx].id; qpEdRejectMs = now; qpMarkAll(); qpG = QG_NONE; return true;
+        }
+        // Boton de orientacion: esquina inferior izquierda
+        const QsCtl* c = qpCtl(qpEdIt[idx].id);
+        if(c && c->oris == (QOR_H | QOR_V) && T.x <= bx + 30 && T.y >= by + bh - 30){
+          qpEdIt[idx].ori = (qpEdIt[idx].ori == QOR_H) ? QOR_V : QOR_H;
+          qpRelayout(); qpMarkAll(); qpG = QG_NONE; return true;
+        }
+      } else {
+        // Circulo de la tarjeta: el "-" va sobre su esquina superior izquierda
+        // y el asa de redimension en el borde derecho de su celda.
+        int k = qpTileAt(T.x, T.y);
+        if(k >= 0){
+          int gy = top + qpBlk[blk].y;
+          int gyTop = gy + QP_GPAD - (int)(qpGScrollF + 0.5f);
+          int cx, cy; qpTileCenter(k, gyTop, cx, cy);
+          if(T.x <= cx - QP_TCIRC / 2 + 20 && T.y <= cy - QP_TCIRC / 2 + 20){
+            qpEditRemove(idx); qpG = QG_NONE; return true;
+          }
+          if(T.x >= cx + QP_TCOLW / 2 - 22 && T.y >= cy - 24 && T.y <= cy + 24){
+            uint8_t nw, nh;
+            if(qpNextSize(qpEdIt[idx].id, qpEdIt[idx].w, qpEdIt[idx].h, +1, nw, nh) ||
+               qpNextSize(qpEdIt[idx].id, qpEdIt[idx].w, qpEdIt[idx].h, -1, nw, nh)){
+              qpG = QG_EDDRAG; qpEdResize = idx; qpEdResX0 = T.x; qpEdDrag = -1;
+              return true;
+            }
+            qpEdRejectF = qpEdIt[idx].id; qpEdRejectMs = now; qpMarkAll();
+            qpG = QG_NONE; return true;
+          }
+        }
+      }
+      qpEdPendIdx = idx; qpEdPendBlk = blk; qpG = QG_PENDING;
+      return true;
+    }
+    qpG = QG_PENDING;
+    return true;
+  }
+
+  // ---- REDIMENSION POR EL BORDE DERECHO ----
+  if(qpG == QG_EDDRAG){
+    if(T.down){
+      int d = T.x - qpEdResX0;
+      if(abs(d) >= 46 && qpEdResize >= 0 && qpEdResize < qpEdN){
+        uint8_t nw, nh;
+        if(qpNextSize(qpEdIt[qpEdResize].id, qpEdIt[qpEdResize].w, qpEdIt[qpEdResize].h,
+                      d > 0 ? +1 : -1, nw, nh)){
+          qpEdIt[qpEdResize].w = nw; qpEdIt[qpEdResize].h = nh;
+          qpEdResX0 = T.x;
+          qpRelayout(); qpMarkAll();                 // feedback: el bloque salta al tamano valido
+        } else {
+          qpEdRejectF = qpEdIt[qpEdResize].id; qpEdRejectMs = now;   // rechazo limpio
+          qpEdResX0 = T.x;
+          qpMarkAll();
+        }
+      }
+      return true;
+    }
+    qpG = QG_NONE; qpEdResize = -1;
+    return true;
+  }
+
+  // ---- ARRASTRE DE UN ELEMENTO (mover) ----
+  if(qpG == QG_SCROLL && qpEdDrag >= 0){
+    if(T.down){
+      qpEdDragX = T.x; qpEdDragY = T.y;
+      // Desplazamiento automatico cerca de los bordes del editor. La velocidad
+      // va en px/ms y se multiplica por el TIEMPO transcurrido: el editor se
+      // desplaza igual de rapido a 30 que a 60 fps.
+      uint32_t dt = now - qpGPrevMs; if(dt < 1) dt = 1; if(dt > 100) dt = 100;
+      qpGPrevMs = now;
+      const float AUTO = 0.45f;                       // px/ms (~450 px/s)
+      if(T.y < QP_EDH_H + 60)   { qpScrollF -= AUTO * (float)dt; qpClampScroll(false); }
+      else if(T.y > SCR_H - 70) { qpScrollF += AUTO * (float)dt; qpClampScroll(false); }
+      int blk = -1;
+      int tgt = qpEdItemAt(T.x, T.y, blk);
+      if(tgt >= 0 && tgt != qpEdDrag){
+        qpEditMove(qpEdDrag, tgt);                   // reordenamiento en TIEMPO REAL
+        qpEdDrag = tgt;
+        qpRelayout();
+      }
+      qpMarkAll();
+      return true;
+    }
+    qpEdDrag = -1; qpG = QG_NONE;
+    qpRelayout(); qpMarkAll();
+    return true;
+  }
+
+  // ---- SCROLL DEL EDITOR ----
+  if(qpG == QG_SCROLL){
+    if(T.down){
+      uint32_t dt = now - qpGPrevMs; if(dt < 1) dt = 1; if(dt > 100) dt = 100;
+      int d = qpGPrevY - T.y;
+      qpScrollF += d; qpClampScroll(true);
+      qpScrollVel += ((float)d / (float)dt - qpScrollVel) * ((float)dt / ((float)dt + 45.0f));
+      qpGPrevY = T.y; qpGPrevMs = now;
+      qpMarkAll();
+      return true;
+    }
+    qpG = QG_NONE;
+    return true;
+  }
+
+  // ---- PENDIENTE ----
+  if(qpG == QG_PENDING){
+    if(T.down){
+      if(qpEdPendIdx >= 0 && !qpGLong && (now - T.downMs) > QP_EDLONG_MS){
+        qpGLong = true;                              // mantener pulsado -> mover
+        qpEdDrag = qpEdPendIdx;
+        qpEdDragX = T.x; qpEdDragY = T.y;
+        qpG = QG_SCROLL;                             // reutiliza la rama de arrastre
+        qpMarkAll();
+        return true;
+      }
+      if(abs(T.y - qpGy0) > QP_DRAG_TH){
+        qpG = QG_SCROLL; qpEdDrag = -1;
+        qpGPrevY = T.y; qpGPrevMs = now;
+        return true;
+      }
+      return true;
+    }
+    uint8_t g = qpG; qpG = QG_NONE; (void)g;
+    if(qpGLong) return true;
+    // Cabecera: Cancelar / Listo / Restablecer
+    if(qpGy0 < QP_EDH_H){
+      if(qpGy0 >= QP_EDH_BTN_Y0 && qpGy0 <= QP_EDH_BTN_Y1){
+        if(qpGx0 < 150){ qpEditCancel(); return true; }
+        if(qpGx0 > SCR_W - 150){ qpEditCommit(); return true; }
+        return true;
+      }
+      if(qpGy0 >= QP_EDH_RST_Y0 && qpGy0 <= QP_EDH_RST_Y1 &&
+         qpGx0 > SCR_W / 2 - 110 && qpGx0 < SCR_W / 2 + 110){ qpEditReset(); return true; }
+      return true;
+    }
+    if(qpEdPendBlk >= 0 && qpEdPendBlk < qpBlkN && qpBlk[qpEdPendBlk].kind == QB_ADD){
+      qpCatBuild(); qpCatSel = -1; qpCatScrollF = 0;
+      qpMode = QPM_CAT; qpMarkAll();
+      return true;
+    }
+    return true;
+  }
+
+  if(!T.down && qpG != QG_NONE) qpG = QG_NONE;
+  return true;
+}
+
+// ---- TOQUE DEL CATALOGO ----------------------------------------------
+static int qpCatAt(int px, int py){
+  if(py < QP_CAT_HDR) return -1;
+  int top = QP_CAT_HDR - (int)(qpCatScrollF + 0.5f) + 12;
+  for(int k = 0; k < qpCatN; k++){
+    int r = k / 4, c = k % 4;
+    int cx = qpColX(c) + QP_CW / 2, cy = top + r * QP_CAT_ROW + QP_TCIRC / 2;
+    int hw = QP_CW / 2; if(hw < QP_TOUCH_MIN / 2) hw = QP_TOUCH_MIN / 2;
+    if(px >= cx - hw && px <= cx + hw && py >= cy - QP_TCIRC / 2 - 6 && py <= cy + QP_CAT_ROW / 2)
+      return k;
+  }
+  return -1;
+}
+static bool qpCatTouch(){
+  uint32_t now = millis();
+  if(T.pressed && qpG == QG_NONE){
+    qpGx0 = T.x; qpGy0 = T.y; qpGPrevY = T.y; qpGPrevMs = now; qpGLong = false;
+    qpG = QG_PENDING;
+    return true;
+  }
+  if(qpG == QG_CATSCROLL){
+    if(T.down){
+      int d = qpGPrevY - T.y;
+      qpCatScrollF += d;
+      int mx = qpCatScrollMax();
+      if(qpCatScrollF < 0) qpCatScrollF = qpRubber(qpCatScrollF);
+      if(qpCatScrollF > mx) qpCatScrollF = mx + qpRubber(qpCatScrollF - mx);
+      qpGPrevY = T.y; qpGPrevMs = now;
+      qpMarkAll();
+      return true;
+    }
+    int mx = qpCatScrollMax();
+    if(qpCatScrollF < 0) qpCatScrollF = 0;
+    if(qpCatScrollF > mx) qpCatScrollF = (float)mx;
+    qpG = QG_NONE; qpMarkAll();
+    return true;
+  }
+  if(qpG == QG_PENDING){
+    if(T.down){
+      if(abs(T.y - qpGy0) > QP_DRAG_TH){ qpG = QG_CATSCROLL; qpGPrevY = T.y; qpGPrevMs = now; }
+      return true;
+    }
+    qpG = QG_NONE;
+    if(qpGy0 < QP_CAT_HDR){
+      // "Atras": vuelve al editor SIN perder lo ya editado.
+      if(qpGx0 < 150){ qpMode = QPM_EDIT; qpRelayout(); qpMarkAll(); }
+      return true;
+    }
+    int k = qpCatAt(qpGx0, qpGy0);
+    if(k >= 0 && k < qpCatN){
+      int id = qpCatIds[k];
+      qpCatSel = k;
+      if(qpEditAdd(id)){
+        // Vuelve al editor con el control ya colocado: la animacion es la del
+        // propio repintado, que lo ensena en su nueva posicion.
+        qpCatBuild(); qpCatSel = -1;
+        qpMode = QPM_EDIT; qpScrollF = (float)qpScrollMax();
+        qpRelayout(); qpMarkAll();
+      } else qpMarkAll();
+    }
+    return true;
+  }
+  if(!T.down && qpG != QG_NONE) qpG = QG_NONE;
+  return true;
+}
+
+// ---- AVANCE POR CUADRO ------------------------------------------------
+// uiTick() llama a qsTick() una vez por cuadro mientras la cortina esta a la
+// vista. Todo lo que se mueve (apertura/cierre, "snap" de la tarjeta,
+// inercia del scroll y destellos) avanza AQUI, con el tiempo transcurrido y
+// sin un solo delay().
 static void qsAnimStep(){
   if(!qsAnimOn) return;
   uint32_t e = millis() - qsAnimT0; if(e > qsAnimDur) e = qsAnimDur;
   float p = (float)e / (float)qsAnimDur;
   float ip = 1.0f - p;
-  p = (p < 0.5f) ? (4.0f * p * p * p) : (1.0f - 4.0f * ip * ip * ip);       // ease-in-out cubica
+  p = (p < 0.5f) ? (4.0f * p * p * p) : (1.0f - 4.0f * ip * ip * ip);
   int ny = qsAnimFrom + (int)((qsAnimDest - qsAnimFrom) * p + (qsAnimDest > qsAnimFrom ? 0.5f : -0.5f));
   if(ny < 0) ny = 0; if(ny > SCR_H) ny = SCR_H;
   if(ny != qsPanelY){ qsPanelY = ny; qsPosF = (float)ny; qsRender(false); }
@@ -13222,195 +15098,111 @@ static void qsAnimStep(){
   if(qsAnimDest <= 0) qsSettleClosed();
   else                qsRender(false);
 }
+static uint32_t qpTickMs = 0;
+static void qsTick(){
+  uint32_t now = millis();
+  uint32_t dt = now - qpTickMs; if(dt < 1) dt = 1; if(dt > 100) dt = 100;
+  qpTickMs = now;
+  if(qsAnimOn){ qsAnimStep(); return; }
+  if(qsPanelY <= 0) return;
+  qpGroupAnimStep();
+  qpScrollAnimStep(dt);
+  qsRender(false);
+}
 
-// CIERRE LIMPIO Y OBLIGATORIO. Lo llama TODO cambio de estado que pueda
-// dejar la cortina a medias: abrir o cerrar una app, volver al escritorio,
-// bloquear, apagar la pantalla, apagar el equipo, entrar en Modo PC
-// (cambio de orientacion), multitarea y kiosco. Deja la cortina en 0, suelta
-// el toque para que el gesto no se propague a la pantalla nueva, y libera la
-// captura de la app. No repinta: quien cambia de estado ya pinta su pantalla.
+// ---- CIERRE LIMPIO Y OBLIGATORIO -------------------------------------
+// Lo llama TODO cambio de estado que pueda dejar la cortina a medias: abrir
+// o cerrar una app, volver al escritorio, bloquear, apagar la pantalla,
+// apagar el equipo, entrar en Modo PC, multitarea, kiosco y el OTA. Deja la
+// cortina en 0, ABANDONA el editor sin guardar nada, suelta el toque y
+// LIBERA los buffers temporales (fondo cacheado y captura de la app).
 static void qsForceClose(){
   bool wasOpen = (qsPanelY != 0) || qsDragging || qsAnimOn;
   qsAnimOn = false; qsDragging = false; qsDragMoved = false;
   qsPanelY = 0; qsPosF = 0; qsLastY = 0; qsVel = 0;
-  qsFlashIdx = -1; qsCapDirty = false;
-  qsFreeApp();
+  qpMode = QPM_PANEL;                 // una edicion a medias se descarta ENTERA
+  qpEdDrag = -1; qpEdResize = -1; qpEdRejectF = -1;
+  qpG = QG_NONE; qpGAnim = false;
+  qpScrollF = 0; qpScrollVel = 0; qpGScrollVel = 0;
+  qpFlashIdx = -1; qpFlashKind = -1;
+  qpDy0 = 0x7FFF; qpDy1 = -1;
+  qpFreeBuffers();
   if(wasOpen){
-    qsDirty = true;                                  // el fondo de la proxima vez sera otro
+    qsDirty = true;
     T.tap = false; T.pressed = false; T.released = false; T.moved = false;
     T.swipeUp = T.swipeDown = T.swipeLeft = T.swipeRight = false;
   }
 }
-
-static void qsApplyPower(){ setCpuFrequencyMhz(qsPower ? 160 : 360); }
+// Resolucion de un TOQUE sobre el panel abierto: primero los circulos de la
+// tarjeta, despues los modulos exteriores. Devuelve true si alguien lo
+// consumio. Conserva el nombre historico porque es el punto por el que pasa
+// todo toque de control del panel.
 static bool qsTapTile(int px, int py){
-#if POWEROFF_ON
-  const int idxOf[QS_CIRC_N] = { 3, 5, 6 };            // Modo PC, Ajustes, Apagar
-#else
-  const int idxOf[QS_CIRC_N] = { 3, 5 };               // Modo PC, Ajustes
-#endif
-  for(int i = 0; i < QS_CIRC_N; i++){
-    int cy = QS_CIRC_CY(i), dx = px - QS_CIRC_CX, dy = py - cy;
-    if(dx * dx + dy * dy <= QS_CIRC_R * QS_CIRC_R){     // hit-test circular real (no la caja cuadrada)
-      // Los tres circulos NO destellan: la accion cambia de pantalla en el
-      // mismo cuadro, asi que el destello no llegaria a dibujarse nunca. (La
-      // pastilla de abajo si destella: esa se queda dentro de la cortina.)
-      //
-      // Las tres ABANDONAN la cortina, y se cierra limpiamente ANTES de
-      // cambiar de pantalla -- qsForceClose suelta ademas la captura de la
-      // app. Si habia una app abierta se CIERRA por su camino normal
-      // (appClose) antes de abrir la nueva: sin eso, abrir Ajustes desde
-      // encima del Navegador dejaria su tarea de red y sus buffers vivos,
-      // porque enterApp() no cierra nada.
-      qsRestoreBg();                        // la pantalla vuelve a ser la de debajo
-      switch(idxOf[i]){
-        case 3: qsForceClose(); if(gState == ST_APP) appClose(); enterApp(IC_MODOPC);  return true;  // -> Modo PC
-        case 5: qsForceClose(); if(gState == ST_APP) appClose(); enterApp(IC_AJUSTES); return true;  // -> Ajustes
-        // Apagar NO apaga aqui: lleva a la pantalla de confirmacion (ST_POWEROFF_CONFIRM).
-        case 6: qsForceClose(); poffEnter(); return true;
-      }
-    }
-  }
-  if(px >= QS_PILL_X && px <= QS_PILL_X + QS_PILL_W && py >= QS_PILL_Y && py <= QS_PILL_Y + QS_PILL_H){
-    qsFlashIdx = 4; qsFlashMs = millis();
-    qsPower = !qsPower; qsApplyPower();
-    qsDirty = true; qsRender(true); return true;
-  }
-  return false;
-}
-// Devuelve true si la cortina consumio el toque (esta activa)
-// ARRASTRE DE LA CORTINA.
-//   · Antes: qsPanelY = T.y en crudo. Con la cortina ABIERTA (py = 800) y el
-//     dedo agarrando el borde superior, el primer cuadro del gesto la mandaba
-//     de 800 a ~20 de golpe: un salto de casi toda la pantalla en un solo
-//     cuadro, imposible de seguir para el compositor y visible como trozos de
-//     vidrio "sueltos" a media pantalla.
-//   · Ahora: se guarda la posicion al AGARRAR y el dedo mueve un DELTA (1:1).
-//     Abrir y cerrar usan la misma formula y ninguna de las dos salta.
-//   · La velocidad se mide en px/ms y el suavizado usa una constante de TIEMPO,
-//     no un factor por cuadro: la respuesta es identica a cualquier cadencia y
-//     el umbral de "flick" ya no depende de cuantos cuadros diera el sistema.
-//   · La posicion se acota a [0, SCR_H] en TODOS los caminos (arrastre,
-//     suavizado y animacion): la cortina no puede salirse de su rango ni
-//     siquiera un cuadro.
-// Zona por la que se puede agarrar la cortina ABIERTA para cerrarla: el borde
-// superior de siempre y toda el area vacia de debajo de la pastilla (donde esta
-// el asa y donde ya se podia tocar para cerrar). Los controles quedan fuera, asi
-// que arrastrar sobre un boton sigue siendo tocar ese boton.
-static inline bool qsGrabZone(int y){ return y < QS_EDGE_H || y > QS_PILL_Y + QS_PILL_H; }
-// Punto de agarre: fija el origen del delta y sincroniza el interpolador con la
-// posicion actual, para que el gesto arranque sin escalon.
-static void qsGrab(){
-  qsAnimOn = false;                        // un gesto nuevo cancela la animacion en curso
-  qsDragging = true; qsDragMoved = false;
-  qsDragBase = qsPanelY; qsDragY0 = T.y;
-  qsPosF = (float)qsPanelY;
-  qsPrevY = T.y; qsPrevMs = millis(); qsVel = 0;
-}
-// Decision al soltar: por encima del 40% del recorrido se completa la
-// apertura; por debajo se cierra del todo. Nunca queda a medias.
-static void qsRelease(){
-  if(qsVel > QS_FLICK)       qsAnimTo(SCR_H);                  // lanzamiento hacia abajo -> abrir
-  else if(qsVel < -QS_FLICK) qsAnimTo(0);                      // lanzamiento hacia arriba -> cerrar
-  else if(qsPanelY >= (SCR_H * QS_OPEN_PCT) / 100) qsAnimTo(SCR_H);
-  else                                             qsAnimTo(0);
-}
-static bool qsHandle(){
-  if(qsDragging){
-    if(T.down){
-      // Hasta que el dedo no pasa de 6 px no se mueve nada: asi un toque en el
-      // area vacia sigue siendo un toque y no un arrastre de 1 px.
-      if(!qsDragMoved){
-        if(abs(T.y - qsDragY0) <= 6){ qsPrevY = T.y; qsPrevMs = millis(); return true; }
-        qsDragMoved = true;
-      }
-      uint32_t now = millis();
-      float dt = (float)(now - qsPrevMs);
-      if(dt < 1.0f) dt = 1.0f; if(dt > 100.0f) dt = 100.0f;   // acota el dt de un cuadro perdido
-      int target = qsDragBase + (T.y - qsDragY0);             // 1:1 con el dedo, sin saltos
-      if(target < 0) target = 0; if(target > SCR_H) target = SCR_H;
-      float inst = (float)(T.y - qsPrevY) / dt;               // px/ms
-      qsVel += (inst - qsVel) * (dt / (dt + QS_VEL_TAU));
-      qsPrevY = T.y; qsPrevMs = now;
-      float a = 1.0f - expf(-dt / QS_SMOOTH_TAU);             // suavizado corregido por tiempo
-      qsPosF += ((float)target - qsPosF) * a;
-      if(fabsf((float)target - qsPosF) < 0.75f) qsPosF = (float)target;   // asienta exacto
-      if(qsPosF < 0) qsPosF = 0; if(qsPosF > (float)SCR_H) qsPosF = (float)SCR_H;
-      int ny = (int)(qsPosF + 0.5f);
-      if(ny < 0) ny = 0; if(ny > SCR_H) ny = SCR_H;
-      if(ny != qsPanelY){ qsPanelY = ny; qsRender(false); }
-    } else {
-      qsDragging = false;
-      if(!qsDragMoved){
-        // No llego a ser arrastre: se resuelve como toque, exactamente igual que
-        // antes (boton del panel, o cerrar tocando el area vacia).
-        qsPanelY = qsDragBase; qsPosF = (float)qsDragBase;
-        if(T.tap && qsPanelY >= SCR_H){
-          if(!qsTapTile(T.x, T.y) && T.y > QS_PILL_Y + QS_PILL_H) qsAnimTo(0);
-        } else if(qsPanelY > 0) qsRelease();
-        else qsSettleClosed();
-        return true;
-      }
-      qsRelease();
-    }
+  int k = qpTileAt(px, py);
+  if(k >= 0 && k < qpTileN){
+    int id = qpIt[qpTiles[k]].id;
+    qpFlashTileK(k);
+    qpExecCtl(id, false);
     return true;
   }
-  if(qsPanelY >= SCR_H){
-    if(T.down && T.x >= QS_CAP_X - 14 && T.x <= QS_CAP_X + QS_CAP_W + 14 && T.y >= QS_CAP_Y - 14 && T.y <= QS_CAP_Y + QS_CAP_H + 14){
-      int v = (QS_CAP_Y + QS_CAP_H - T.y) * 100 / QS_CAP_H; if(v < 0) v = 0; if(v > 100) v = 100;   // arriba = 100%, abajo = 0%
-      setBacklight(v); qsCapDirty = true; qsRender(false); return true;          // brillo real (PWM)
+  int b = qpBlockAt(px, py);
+  if(b >= 0 && qpBlk[b].kind == QB_ITEM){
+    int i = qpBlk[b].item;
+    if(i >= 0 && i < qpN){
+      qpFlashBlock(b);
+      qpExecCtl(qpIt[i].id, false);
+      return true;
     }
-    // Cerrar arrastrando: el asa de abajo (o el borde de arriba) mueve la
-    // cortina 1:1 con el dedo. Antes solo se podia agarrar arriba y la cortina
-    // saltaba de 800 a ~20 en un cuadro; ese salto es el que se veia como
-    // "trozos de vidrio sueltos" a mitad de pantalla.
-    if(T.pressed && qsGrabZone(T.startY)){ qsGrab(); return true; }
-    if(T.swipeUp){ qsAnimTo(0); return true; }
-    if(T.tap){ if(!qsTapTile(T.x, T.y) && T.y > QS_PILL_Y + QS_PILL_H) qsAnimTo(0); return true; }
-    return true;                                                // consume todo mientras abierto
   }
-  if(qsPanelY > 0) return true;                                 // a medio camino sin dedo: la anima uiTick
   return false;
 }
 
-// ---- PUNTO DE ENTRADA GLOBAL --------------------------------------
-// loop() lo llama ANTES del switch de estado. Devuelve true cuando la
-// cortina se ha quedado con el toque; en ese caso la pantalla de debajo
-// (escritorio o app) no ejecuta su tick en este cuadro, asi que ni sus
-// gestos ni sus botones responden mientras la cortina esta a la vista.
+// ---- PUNTO DE ENTRADA GLOBAL -----------------------------------------
 static bool qsCanOpen(){
-  if(gLand)   return false;    // Modo PC / DeX horizontal: version propia pendiente (ver cabecera)
-  if(gHosted) return false;    // app dentro de una ventana de DeX: la cortina es del sistema, no de la ventana
+  if(gLand)   return false;    // Modo PC / DeX horizontal: version propia pendiente
+  if(gHosted) return false;    // app dentro de una ventana de DeX
   if(editMode) return false;   // Modo Edicion del Home tiene su propio arrastre
   if(KIOSK_ON && kioskOn) return false;
   if(flexOtaOwnsScreen() || flexOtaOverlayActive()) return false;
   return (gState == ST_HOME || gState == ST_APP);
 }
+static bool qsHandle(){
+  // A medio abrir SOLO manda el arrastre de la cortina: los controles no
+  // existen todavia como superficie tocable.
+  if(qsPanelY < SCR_H && qpG != QG_CURTAIN && qpG != QG_NONE) qpG = QG_NONE;
+  if(qsPanelY >= SCR_H){
+    if(qpMode == QPM_EDIT) return qpEditTouch();
+    if(qpMode == QPM_CAT)  return qpCatTouch();
+  }
+  return qpPanelTouch();
+}
 static bool qsGlobalHandle(){
-  // Estados en los que la cortina no pinta nada: si quedaba abierta (p.ej. el
-  // usuario bloqueo el equipo con el gesto a medias), se cierra en seco.
   if(!qsCanOpen()){
     if(qsPanelY != 0 || qsDragging || qsAnimOn) qsForceClose();
     return false;
   }
-  if(qsAnimOn) return true;                     // animando: el toque no llega a nadie
+  if(qsAnimOn) return true;
   if(qsPanelY > 0 || qsDragging) return qsHandle();
-  // Cerrada: solo se abre desde la franja del borde superior. Con una app
-  // delante hay que capturar antes su ultimo cuadro; si no hay PSRAM para
-  // ello, la cortina simplemente no se abre y la app conserva el gesto.
   if(!(T.pressed && T.startY < QS_EDGE_H)) return false;
   if(gState == ST_APP){
-    if(!qsCaptureApp()) return false;
-  } else if(qsOverApp) {
-    qsFreeApp();                                // volvimos al escritorio: la captura sobra
+    if(!qsCaptureApp()) return false;              // sin PSRAM: la app conserva el gesto
+  } else if(qsOverApp){
+    qsFreeApp();
     qsDirty = true;
   }
-  // qsDirty deja la cortina pendiente de componerse: el PRIMER cuadro en que
-  // el dedo la mueva hara el vidrio y el repintado completo. Aqui no se vuelca
-  // nada -- el fondo que se veria es exactamente el que ya hay en pantalla, y
-  // copiar 768 KB para dejarlo igual solo anadiria latencia al inicio del gesto.
+  qpLoad();
+  qpMode = QPM_PANEL;
+  qpGH = (float)qpGroupH(qpGrows);
+  qpScrollF = 0; qpScrollVel = 0;
+  qpGScrollF = 0; qpGScrollVel = 0;
+  qpGAnim = false; qpLastMin = -1;
+  qpRelayout();
   qsDirty = true;
-  qsGrab();
+  // Agarre: el dedo mueve un DELTA 1:1 desde la posicion actual.
+  qsAnimOn = false; qsDragging = true; qsDragMoved = false;
+  qsDragBase = qsPanelY; qsDragY0 = T.y; qsPosF = (float)qsPanelY;
+  qsPrevY = T.y; qsPrevMs = millis(); qsVel = 0;
+  qpG = QG_CURTAIN;
   return true;
 }
 
@@ -21850,7 +23642,8 @@ static void poffDrawKnob(){
   // Pomo blanco con el simbolo de apagado en rojo (referencia: iOS).
   fillCircleA(kx + POFF_KNOB_R + 1, POFF_TRACK_Y + POFF_TRACK_H / 2 + 2, POFF_KNOB_R, TH_SHADOW, 70);
   fillCircle(kx + POFF_KNOB_R, POFF_TRACK_Y + POFF_TRACK_H / 2, POFF_KNOB_R, TH_ONWALL);
-  qsTileIcon(6, kx + POFF_KNOB_R, POFF_TRACK_Y + POFF_TRACK_H / 2, TH_DANGER);
+  // Mismo glifo IEC 5009 que usa el Panel Rapido: una sola fuente de dibujo.
+  qpIcoPower(kx + POFF_KNOB_R, POFF_TRACK_Y + POFF_TRACK_H / 2, 30, TH_DANGER);
 }
 // Un frame de la pantalla de confirmacion. SOLO se recompone la banda del
 // slider: el resto (titulo, vidrio, Cancelar) es estatico y ya esta en fb desde
@@ -28336,8 +30129,10 @@ static void uiTick(){
   // escritorio: puede estar encima de una app, y su animacion de apertura y
   // cierre (antes un bucle bloqueante) se avanza aqui, un paso por cuadro.
   if(qsVisible){
-    if(qsAnimOn) qsAnimStep();                  // apertura/cierre: avance por reloj, sin bloquear
-    else         qsRender(false);               // visible y quieta: solo el destello de un boton
+    // qsTick() avanza TODO lo que se mueve en la cortina con el tiempo
+    // transcurrido: apertura/cierre, "snap" del asa de la tarjeta, inercia
+    // del scroll y destellos; y publica solo la banda sucia del cuadro.
+    qsTick();
     return;
   }
   if(gState == ST_HOME){
