@@ -30,6 +30,9 @@ EXENTOS = {
 GANCHOS = [
     ("loop",           "hcTick()",        "sin esto el modo de personalizacion no anima, no pinta ni recibe toques"),
     ("loop",           "wgDataTick()",    "los widgets del escritorio no refrescarian sus datos"),
+    ("loop",           "flexWeatherTick(", "el clima no se refrescaria nunca: la app, el widget y el bloqueo se quedarian con la cache"),
+    ("setup",          "flexWeatherBegin()", "no se cargarian ni las ubicaciones ni la cache del clima, y su tarea de red no existiria"),
+    ("clkSetEpoch",    "flexWeatherSetClock(", "el clima no sabria la hora real y no podria decir cuanto hace que se actualizo"),
     ("loop",           "flexPollTouch()", "no habria tactil"),
     ("flexPollTouch",  "hpzUpdate()",     "el gesto de dos dedos no se detectaria nunca"),
     ("flexPollTouch",  "hpzSwallowing()", "el gesto no se consumiria y el mismo toque llegaria a otra capa"),

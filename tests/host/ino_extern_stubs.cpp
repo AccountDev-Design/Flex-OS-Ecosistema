@@ -1,8 +1,9 @@
 // #############################################################
 //  Dobles de los modulos hermanos, para el enlazado de la prueba
 //  ------------------------------------------------------------
-//  FlexOS_Ultra.ino llama a tres modulos que viven en sus propios
-//  .cpp: OTA, sistema de archivos y navegador. Esas unidades ya
+//  FlexOS_Ultra.ino llama a varios modulos que viven en sus propios
+//  .cpp: OTA, sistema de archivos, navegador, boveda y clima. Esas
+//  unidades ya
 //  tienen sus propias pruebas de host (test_app, test_bridge,
 //  test_net, test_browser, test_jpeg); aqui solo hace falta que el
 //  enlazador encuentre los simbolos para poder EJECUTAR las
@@ -17,6 +18,7 @@
 #include "FlexOS_FS.h"
 #include "FlexOS_Browser.h"
 #include "FlexOS_Vault.h"
+#include "FlexOS_Weather.h"
 
 // ---- OTA ----
 void        flexOtaBegin(){}
@@ -172,3 +174,35 @@ bool     flexFsIsVaultPath(const char* path){
 }
 bool     flexPaintReplayMem(const void*, size_t, float, int, int, FlexPaintSegCb, void*){ return false; }
 bool     flexPaintHeaderMem(const void*, size_t, FlexPaintHdr*){ return false; }
+
+// ---- Clima (motor meteorologico) ----
+// El doble devuelve "sin datos", que es EXACTAMENTE el camino que toma la
+// placa cuando aun no hay descarga valida: asi la prueba recorre el estado
+// vacio de la app y de los dos widgets. El motor de verdad tiene su propia
+// bateria (test_weather).
+void               flexWeatherBegin(){}
+void               flexWeatherTick(bool){}
+void               flexWeatherRefresh(bool){}
+void               flexWeatherSetClock(uint32_t){}
+const FlexWeather* flexWeatherData(){ return nullptr; }
+uint32_t           flexWeatherGen(){ return 0; }
+uint8_t            flexWeatherStatus(){ return WXS_NEVER; }
+uint8_t            flexWeatherError(){ return WXE_NONE; }
+bool               flexWeatherBusy(){ return false; }
+int32_t            flexWeatherAgeSec(){ return -1; }
+int32_t            flexWeatherNowLocal(){ return 0; }
+uint8_t            flexWeatherLocCount(){ return 0; }
+const FlexWxLoc*   flexWeatherLocAt(uint8_t){ return nullptr; }
+int8_t             flexWeatherLocSel(){ return -1; }
+void               flexWeatherLocSelect(uint8_t){}
+bool               flexWeatherLocAdd(const FlexWxLoc*){ return false; }
+void               flexWeatherLocRemove(uint8_t){}
+void               flexWeatherSearch(const char*, int){}
+uint8_t            flexWeatherSearchState(){ return WXQ_IDLE; }
+uint8_t            flexWeatherSearchCount(){ return 0; }
+const FlexWxLoc*   flexWeatherSearchAt(uint8_t){ return nullptr; }
+void               flexWeatherSearchClear(){}
+uint8_t            flexWeatherVisual(int){ return WXV_CLOUDY; }
+const char*        flexWeatherCondName(int, int){ return "Nublado"; }
+const char*        flexWeatherErrorText(uint8_t, int){ return ""; }
+void               flexWeatherDescribe(char* out, size_t n, int){ if(out && n) out[0] = 0; }

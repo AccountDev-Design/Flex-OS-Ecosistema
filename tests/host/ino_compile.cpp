@@ -1078,8 +1078,11 @@ static void testCajaApps(){
   // --- reparto de fabrica: exactamente el escritorio de siempre ---
   chk(gAppHidden == 0, "de fabrica no hay ninguna app oculta");
   for(int id = 0; id < 12; id++) chk(appIsFav(id),  "las doce de la rejilla nacen en Inicio");
-  for(int id = 12; id < 16; id++) chk(!appIsFav(id), "las cuatro del dock no ocupan rejilla");
-  chk(drwN == 16, "la caja muestra las 16 apps del registro");
+  for(int id = 12; id < APP_N; id++) chk(!appIsFav(id), "las del dock y las nuevas no ocupan rejilla");
+  // La caja ensena TODAS las del registro: se compara contra APP_N y no contra
+  // un numero escrito a mano, para que anadir una app no obligue a tocar esto
+  // (pero SI siga fallando si alguna se queda fuera de la caja).
+  chk(drwN == APP_N, "la caja muestra todas las apps del registro");
 
   // --- normalizacion: una ranura con una app no favorita se vacia ---
   gAppFav &= (uint16_t)~(1u << 5);

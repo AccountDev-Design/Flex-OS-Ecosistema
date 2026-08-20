@@ -43,7 +43,7 @@ JPEG_SRC := $(ROOT)/FlexOS_JPEG.cpp
 APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net \
-        $(BUILD)/test_vault
+        $(BUILD)/test_vault $(BUILD)/test_weather
 TOOLS := $(BUILD)/jpegcheck
 
 .PHONY: all run all-boards fixtures clean ino
@@ -66,6 +66,13 @@ $(BUILD)/test_browser: test_browser.cpp $(CORE_SRC) $(ROOT)/FlexOS_Browser.h | $
 # test. CON sanitizers: aqui se manejan longitudes, desplazamientos y
 # buffers de bloque, y un desbordamiento en esa aritmetica no puede
 # quedarse en "parece que funciona".
+# El motor meteorologico: mismo patron que la boveda -- su propia NVS en
+# memoria (wxstub), porque aqui SI hay que releer lo que se escribio (la cache
+# del pronostico son ~1,3 KB, muy por encima de lo que guarda vaultstub).
+WXFLAGS := -Iwxstub -Istub -I$(ROOT) -DARDUINO=200 -Wno-format-truncation
+$(BUILD)/test_weather: test_weather.cpp $(ROOT)/FlexOS_Weather.cpp $(ROOT)/FlexOS_Weather.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(WXFLAGS) -o $@ test_weather.cpp
+
 VAULTFLAGS := -Ivaultstub -Iinostub -I$(ROOT) -DARDUINO=200 -Wno-format-truncation
 $(BUILD)/test_vault: test_vault.cpp $(ROOT)/FlexOS_Vault.cpp $(ROOT)/FlexOS_Vault.h $(ROOT)/FlexOS_FS.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) $(VAULTFLAGS) -o $@ test_vault.cpp $(ROOT)/FlexOS_Vault.cpp -lcrypto
@@ -154,6 +161,8 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_ino
 	@echo
 	@$(BUILD)/test_vault
+	@echo
+	@$(BUILD)/test_weather
 	@echo
 	@$(BUILD)/test_jpeg ../fixtures
 	@echo
