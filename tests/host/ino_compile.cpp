@@ -48,7 +48,14 @@ static unsigned gPinnedTaskCreates = 0;
 static unsigned gSemTakeCalls = 0;
 static unsigned gPanelDrawCalls = 0;
 unsigned long millis(){ return gTestMs; }
-unsigned long micros(){ return 0; }
+// micros() SI avanza de verdad (reloj monotonico del PC). Lo usa la
+// instrumentacion del Panel Rapido para medir el coste de un cuadro; con el
+// doble de antes, que devolvia 0, esa medida no valia nada. El resto del
+// sketch no usa micros(), asi que esto no altera ninguna otra prueba.
+unsigned long micros(){
+  struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+  return (unsigned long)(t.tv_sec * 1000000UL + t.tv_nsec / 1000UL);
+}
 void delay(unsigned long){}
 void delayMicroseconds(unsigned long){}
 void pinMode(int, int){}
@@ -424,6 +431,17 @@ static void testPanelOneUI(){
   // Con MUCHOS controles 1x1 la tarjeta no crece sin limite: pasa a scroll interno.
   int filas = qpTotalRows();
   chk(qpGroupMaxPx() <= qpGroupH(QP_GROWS_MAX), "la tarjeta tiene un alto maximo acotado");
+  // Un alto guardado en NVS mayor que las filas que hay AHORA (el usuario
+  // guardo 4 filas y luego quito controles) no puede dibujar filas vacias ni
+  // empujar el resto del panel fuera de la pantalla.
+  {
+    qpGrows = QP_GROWS_MAX; qpGH = (float)qpGroupH(QP_GROWS_MAX);
+    qpRelayout();
+    chk(qpLayGroupPx == qpGroupMaxPx(),
+        "un alto guardado mayor que las filas reales se acota a las que hay");
+    chk((int)(qpGH + 0.5f) == qpLayGroupPx, "y el estado vivo se corrige, no solo el dibujo");
+    qpGrows = 3; qpGH = (float)qpGroupH(3); qpRelayout();
+  }
   if(filas > QP_GROWS_MAX) chk(qpGroupCanScroll(), "con mas filas que el maximo hay scroll interno");
 
   // ---- 4. ESTIRAMIENTO: asienta en FILAS COMPLETAS ----
@@ -680,6 +698,11 @@ static void testPanelOneUI(){
     chk(gBright <= 5, "y arrastrar a la izquierda lo baja");
     gTestMs += 16; touchReset(); T.released = true; qsHandle();
     chk(qpG == QG_NONE, "al soltar, el slider suelta el gesto");
+    // La escritura en NVS queda PENDIENTE, fuera del gesto: se hace despues de
+    // publicar el cuadro, no en el mismo en que se levanta el dedo.
+    chk(qpSavePrefs, "el slider deja el guardado pendiente en vez de escribir flash en el gesto");
+    qsTick();
+    chk(!qpSavePrefs, "y qsTick lo vacia despues de publicar");
     setBacklight(80);
   }
 
@@ -694,9 +717,12 @@ static void testPanelOneUI(){
   gTestMs += 16; touchDrag(SCR_W / 2, gyAsa + 60, false); qsHandle();
   chk(qpGH > h0, "y el asa acompana al dedo hacia abajo");
   gTestMs += 16; touchReset(); T.released = true; qsHandle();
+  chk(qpSavePanel, "el asa deja el guardado pendiente, no escribe flash en el gesto");
   guardia2 = 0;
   while(qpGAnim && guardia2++ < 400){ gTestMs += 16; qpGroupAnimStep(); }
   chk(!qpGAnim && qpG == QG_NONE, "al soltar el asa termina el asentamiento");
+  qsTick();
+  chk(!qpSavePanel, "y el alto elegido acaba en NVS una vez fuera del gesto");
 
   qpG = QG_NONE; qpScrollF = 0; qpRelayout();
   int yVacio = QP_VIEW_Y0 + 4;
@@ -802,32 +828,151 @@ static void testPanelOneUI(){
   chk(qpMode == QPM_EDIT && qpEdN == marcaN, "'Atras' vuelve al editor sin perder los cambios");
   qpEditCancel();
 
-  // ---- 12. COSTE DEL CUADRO: la ruta por cuadro NO puede desenfocar ----
-  // No es una medida de la placa -- el PC es mucho mas rapido --, pero es una
-  // comparacion RELATIVA que si dice algo: componer el fondo (una vez por
-  // apertura) incluye el Liquid Glass a pantalla completa; un cuadro de
-  // contenido a pantalla completa tiene que costar una fraccion de eso. Si
-  // alguien vuelve a meter un desenfoque en el dibujo por cuadro, esta
-  // proporcion se desploma y la prueba falla.
+  // ---- 12. COSTE DEL GESTO: arrastrar no puede COMPONER nada ----
+  // Es la prueba que protege la fluidez. El panel se compone una vez segun se
+  // revela; a partir de ahi, mover el dedo arriba y abajo tiene que ser copia
+  // de filas y nada mas. Si alguien vuelve a meter dibujo (o peor, un
+  // desenfoque) en la ruta del arrastre, estos contadores lo delatan.
   {
     bool oGlass = uiGlass; uiGlass = true;
-    qsPanelY = SCR_H; qsLastY = SCR_H; qpMode = QPM_PANEL;
-    qpScrollF = 0; qpGScrollF = 0; qpGH = (float)qpGroupH(qpGrows); qpRelayout();
-    qsDirty = true; qpMarkAll(); qsRender(true);            // deja qsBuf listo
-    struct timespec t0, t1;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    for(int i = 0; i < 4; i++){ qsDirty = true; qsCompose(); }
-    clock_gettime(CLOCK_MONOTONIC, &t1);
-    double compose = ((t1.tv_sec - t0.tv_sec) * 1e9 + (t1.tv_nsec - t0.tv_nsec)) / 4.0;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    for(int i = 0; i < 40; i++){ gTestMs += 16; qpMarkAll(); qsRender(false); }
-    clock_gettime(CLOCK_MONOTONIC, &t1);
-    double frame = ((t1.tv_sec - t0.tv_sec) * 1e9 + (t1.tv_nsec - t0.tv_nsec)) / 40.0;
-    chk(compose > 0 && frame > 0, "las dos rutas de dibujo se pudieron medir");
-    chk(frame * 4.0 < compose,
-        "un cuadro de contenido a pantalla completa cuesta menos de 1/4 que componer el fondo");
-    printf("  [coste] fondo %.2f ms/vez  ·  cuadro completo %.2f ms  (%.0f%% del fondo)\n",
-           compose / 1e6, frame / 1e6, 100.0 * frame / compose);
+    qsForceClose();
+    gState = ST_HOME; gAppId = 0;
+    gTestMs += 1000;
+    int y0 = 10;
+    touchDrag(240, y0, true); T.downMs = gTestMs;
+    chk(qsGlobalHandle(), "el borde superior captura el gesto");
+    qpProfReset();
+
+    // (a) apertura: se revela toda la pantalla
+    for(int y = y0 + 10; y <= SCR_H; y += 20){
+      gTestMs += 16; T.startY = y0; touchDrag(240, y, false); T.startY = y0;
+      qsGlobalHandle();
+      chk(qsPanelY == y - y0, "la cortina va 1:1 con el dedo, sin quedarse detras");
+      if(gFails) break;
+      qsTick();
+    }
+    chk(qpPfGlass == 1, "la capa de vidrio se construye UNA sola vez en toda la apertura");
+    chk(qpPfRowsComp <= (uint32_t)SCR_H + 8u,
+        "revelar el panel entero compone cada fila una sola vez, no una por cuadro");
+    uint32_t compApertura = qpPfRowsComp;
+
+    // (b) ya revelado: arrastrar arriba y abajo repetidas veces
+    qpProfReset();
+    for(int pasada = 0; pasada < 3; pasada++){
+      for(int y = SCR_H; y > 260; y -= 24){
+        gTestMs += 16; T.startY = y0; touchDrag(240, y, false); T.startY = y0;
+        qsGlobalHandle(); qsTick();
+      }
+      for(int y = 260; y <= SCR_H; y += 24){
+        gTestMs += 16; T.startY = y0; touchDrag(240, y, false); T.startY = y0;
+        qsGlobalHandle(); qsTick();
+      }
+    }
+    chk(qpPfFrames > 40, "se midieron cuadros de arrastre de verdad");
+    chk(qpPfRowsComp == 0,
+        "arrastrar arriba y abajo no COMPONE ni una fila: solo copia lo ya compuesto");
+    chk(qpPfGlass == 0, "y no vuelve a construir la capa de vidrio");
+    // Y publica solo la banda que se movio, no la pantalla entera.
+    uint32_t pubMedio = qpPfRowsPub / qpPfFrames;
+    chk(pubMedio < (uint32_t)SCR_H / 4,
+        "cada cuadro de arrastre publica solo su banda, no las 800 filas");
+    printf("  [gesto] apertura: %lu filas compuestas · arrastre: %lu cuadros, "
+           "%lu filas/cuadro publicadas, 0 compuestas, %lu us/cuadro\n",
+           (unsigned long)compApertura, (unsigned long)qpPfFrames, (unsigned long)pubMedio,
+           (unsigned long)(qpPfDragFrames ? qpPfDragUs / qpPfDragFrames : 0));
+
+    // (b2) La capa de vidrio contra el camino caro que se usaba antes. Es la
+    // comparacion que explica el tiron al abrir: drawLiquidGlassPanelEx a
+    // pantalla completa hace memcpy + dos pasadas de box-blur (la vertical por
+    // columnas) + composicion, con seis divisiones enteras por pixel sobre
+    // 384.000 pixeles. qpGlassBuild hace lo mismo sobre 24.000.
+    {
+      struct timespec a0, a1;
+      clock_gettime(CLOCK_MONOTONIC, &a0);
+      for(int i = 0; i < 4; i++) qpGlassBuild();
+      clock_gettime(CLOCK_MONOTONIC, &a1);
+      double nuevo = ((a1.tv_sec - a0.tv_sec) * 1e9 + (a1.tv_nsec - a0.tv_nsec)) / 4.0;
+      uint16_t* ob = gBuf; setBuf(qsBuf);
+      int c0 = gClipY0, c1 = gClipY1, x0 = gClipX0, x1 = gClipX1;
+      gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
+      clock_gettime(CLOCK_MONOTONIC, &a0);
+      for(int i = 0; i < 2; i++) drawLiquidGlassPanelEx(0, 0, SCR_W, SCR_H, 0, TH_GLASS2, 11);
+      clock_gettime(CLOCK_MONOTONIC, &a1);
+      double viejo = ((a1.tv_sec - a0.tv_sec) * 1e9 + (a1.tv_nsec - a0.tv_nsec)) / 2.0;
+      gClipY0 = c0; gClipY1 = c1; gClipX0 = x0; gClipX1 = x1; setBuf(ob);
+      chk(nuevo * 4.0 < viejo,
+          "la capa de vidrio del panel cuesta menos de 1/4 que el desenfoque a pantalla completa");
+      printf("  [vidrio] capa reducida %.2f ms  ·  desenfoque a pantalla completa %.2f ms  (%.0f%%)\n",
+             nuevo / 1e6, viejo / 1e6, 100.0 * nuevo / viejo);
+      qsDirty = true; qpMarkAll();
+    }
+
+    // (c) soltar a mitad -> snap; tocar durante el snap lo cancela y el dedo manda
+    gTestMs += 16; touchDrag(240, y0 + 300, false); T.startY = y0; qsGlobalHandle(); qsTick();
+    gTestMs += 16; touchReset(); T.released = true; qsGlobalHandle();
+    chk(qsAnimOn, "soltar a mitad de recorrido arranca el snap");
+    gTestMs += 30; qsTick();
+    int enVuelo = qsPanelY;
+    gTestMs += 16; touchDrag(240, enVuelo + 40, true); T.downMs = gTestMs;
+    qsGlobalHandle();
+    chk(!qsAnimOn, "tocar durante el snap lo cancela en el acto");
+    chk(qpG == QG_CURTAIN && qsDragging, "y el control vuelve al dedo");
+    chk(qsPanelY == enVuelo, "sin ningun salto: el panel se queda donde estaba");
+    gTestMs += 16; touchReset(); T.released = true; qsGlobalHandle();
+    int guardia3 = 0;
+    while(qsAnimOn && guardia3++ < 500){ gTestMs += 16; qsTick(); }
+    chk(qsPanelY == 0 || qsPanelY == SCR_H, "y al soltar de nuevo termina abierto o cerrado");
+    uiGlass = oGlass;
+  }
+
+  // ---- 13. SCROLL: cada superficie recompone SOLO lo suyo ----
+  // El scroll interno de la tarjeta no puede costar lo mismo que el del panel
+  // entero: si recompusiera el viewport, mover cuatro circulos costaria el
+  // doble de lo necesario en cada cuadro.
+  {
+    bool oGlass = uiGlass; uiGlass = true;
+    qsForceClose();
+    gState = ST_HOME; gTestMs += 1000;
+    qpLoaded = false; flexPrefsWipe(); qpLoad();
+    drawWallpaper(homeBuf, false);
+    qsPanelY = SCR_H; qsLastY = 0; qsDirty = true; qsComposedTo = -1;
+    qpMode = QPM_PANEL; qpG = QG_NONE;
+    qpScrollF = 0; qpGScrollF = 0; qpGH = (float)qpGroupH(qpGrows);
+    qpRelayout(); qpMarkAll(); qsRender(true);
+
+    qpProfReset();
+    qpMarkGroup(); qsRender(false);
+    uint32_t filasGrupo = qpPfRowsComp;
+    qpProfReset();
+    qpMarkView(); qsRender(false);
+    uint32_t filasPanel = qpPfRowsComp;
+    chk(filasGrupo > 0 && filasPanel > 0, "las dos rutas de recomposicion hacen trabajo");
+    chk(filasGrupo < filasPanel,
+        "el scroll de la tarjeta recompone menos filas que el scroll del panel");
+    chk(filasGrupo <= (uint32_t)(qpGroupH(QP_GROWS_MAX) + 8),
+        "y nunca mas que la propia tarjeta");
+
+    // Coste RELATIVO: un cuadro de arrastre contra una recomposicion completa
+    // del viewport. Es la comparacion que se mantiene valida en cualquier
+    // maquina, y la que se rompe si alguien vuelve a dibujar al arrastrar.
+    struct timespec a0, a1;
+    clock_gettime(CLOCK_MONOTONIC, &a0);
+    for(int i = 0; i < 20; i++) qsComposeRows(QP_VIEW_Y0, SCR_H - 1);
+    clock_gettime(CLOCK_MONOTONIC, &a1);
+    double comp = ((a1.tv_sec - a0.tv_sec) * 1e9 + (a1.tv_nsec - a0.tv_nsec)) / 20.0;
+    qpProfReset();
+    for(int i = 0; i < 40; i++){
+      gTestMs += 16;
+      qpMark(300, 360);                       // banda tipica de un cuadro de arrastre
+      qsRender(false);
+    }
+    double drag = qpPfFrames ? (double)qpPfUs * 1000.0 / (double)qpPfFrames : 0.0;
+    chk(qpPfRowsComp == 0, "publicar una banda no recompone nada");
+    chk(drag > 0 && drag * 10.0 < comp,
+        "un cuadro de arrastre cuesta menos de 1/10 que recomponer el viewport");
+    printf("  [coste] recomponer viewport %.2f ms . cuadro de arrastre %.3f ms "
+           "(tarjeta %lu filas vs panel %lu filas)\n",
+           comp / 1e6, drag / 1e6, (unsigned long)filasGrupo, (unsigned long)filasPanel);
     uiGlass = oGlass;
   }
 

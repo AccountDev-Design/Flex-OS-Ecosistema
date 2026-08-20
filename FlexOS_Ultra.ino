@@ -13206,6 +13206,14 @@ static void qpSubOta(char* o, size_t n){
 // glifos con hueco (luna, engranaje, camara) lo necesitan para "recortar"
 // sin inventarse un color fijo que romperia el tema claro.
 static uint16_t qpIcoBg = 0;
+// Toma el color de recorte del PIXEL REAL ya compuesto. Adivinarlo con una
+// mezcla teorica fallaba: sobre vidrio la superficie nunca llega al tinte
+// puro, asi que la luna y el engranaje se recortaban con un color que no
+// estaba en pantalla y quedaban como manchas oscuras.
+static inline void qpIcoBgAt(int cx, int cy){
+  if(cx < 0 || cx >= SCR_W || cy < 0 || cy >= SCR_H || !gBuf) return;
+  qpIcoBg = gBuf[(size_t)cy * SCR_W + cx];
+}
 
 static void qpIcoWifi(int cx, int cy, int s, uint16_t col){
   float r = s * 0.42f;
@@ -13775,21 +13783,120 @@ static inline uint16_t qpCard(){    return thCard2(); }
 static inline uint16_t qpTileOff(){ return mix565(thCard2(), TH_TXT, 34); }
 static inline uint16_t qpCapOn(){   return mix565(thCard2(), TH_PRIM, 70); }
 
-// Superficie de una tarjeta o modulo.
-//
-// AQUI NO SE DESENFOCA. El vidrio del panel esta en el FONDO (qsCompose lo
-// calcula una vez), y esta funcion se ejecuta por cuadro para cada bloque que
-// toque la banda sucia: un drawLiquidGlassPanel de 448x330 por cuadro serian
-// ~150.000 pixeles desenfocados 60 veces por segundo, que es exactamente lo
-// que el rediseno no puede permitirse. Relleno OPACO (una pasada de spans por
-// fila) + borde, y la sombra reducida a tres lineas alfa bajo la tarjeta.
+// #############################################################
+// ##  MATERIAL LIQUID GLASS DEL PANEL
+// ##  ------------------------------------------------------
+// ##  TODO el panel -- cabecera, capsulas, tarjeta de controles,
+// ##  sliders, modulos, editor y catalogo -- se apoya en esta
+// ##  funcion. No quedan rectangulos opacos.
+// ##
+// ##  Reutiliza EXACTAMENTE la matematica de composicion de
+// ##  drawLiquidGlassPanelEx (tinte adaptativo por luminancia,
+// ##  especular blanco arriba / sombreado abajo, y highlight
+// ##  direccional en los bordes con GLASS_CORNER_STRONG/WEAK),
+// ##  pero SIN su copia + desenfoque por llamada: el fondo sobre
+// ##  el que escribe YA esta desenfocado, porque la capa de vidrio
+// ##  del panel se calcula una sola vez y a escala reducida
+// ##  (qpGlassBuild/qpGlassRows, mas abajo).
+// ##
+// ##  Esa es toda la diferencia de coste: drawLiquidGlassPanelEx
+// ##  hace 4 pasadas sobre la region (memcpy + 2 de box-blur, la
+// ##  vertical con acceso en columna sobre PSRAM, + composicion) y
+// ##  seis divisiones enteras por pixel; esto hace UNA pasada de
+// ##  mezclas sin division. Visualmente es el mismo material.
+// #############################################################
+static void qpGlassSurface(int x, int y, int w, int h, int rad, uint16_t tint, int mixBase){
+  if(w <= 0 || h <= 0) return;
+  if(2 * rad > w) rad = w / 2;
+  if(2 * rad > h) rad = h / 2;
+  // TINTE ADAPTATIVO, igual que el resto del sistema: cuanto mas se parece la
+  // luminancia del fondo a la del tinte, menos tinte se aplica (si no, el
+  // panel se aplana en un bloque liso). Se muestrea 1 de cada 4 filas por 1 de
+  // cada 8 columnas -- 1/32 de los pixeles -- y UNA vez por superficie.
+  uint32_t lumaSum = 0; int lumaN = 0;
+  for(int j = 0; j < h; j += 4){
+    int yy = y + j;
+    if(yy < 0 || yy >= SCR_H) continue;
+    const uint16_t* row = gBuf + (size_t)yy * SCR_W;
+    for(int i = 0; i < w; i += 8){
+      int xx = x + i;
+      if(xx < 0 || xx >= SCR_W) continue;
+      lumaSum += (uint32_t)glassLuma(row[xx]); lumaN++;
+    }
+  }
+  int lo = mixBase - 12, hi = mixBase + 12;
+  if(lo < 0) lo = 0;
+  if(hi > 255) hi = 255;
+  uint8_t tintMix = (uint8_t)mixBase;
+  if(lumaN > 0){
+    int dif = (int)(lumaSum / (uint32_t)lumaN) - glassLuma(tint);
+    if(dif < 0) dif = -dif;
+    if(dif > GLASS_TINT_DIFF_MAX) dif = GLASS_TINT_DIFF_MAX;
+    tintMix = (uint8_t)(lo + (dif * (hi - lo)) / GLASS_TINT_DIFF_MAX);
+  }
+  const uint8_t GLASS_CORNER_STRONG = 156, GLASS_CORNER_WEAK = 104;
+  // El especular y el sombreado se acotan EN PIXELES (70 y 90). En un panel
+  // pequeno esto es exactamente el 45%/55% de siempre; en una tarjeta de 330
+  // px evita que el material se convierta en un degradado de arriba abajo que
+  // se come el contraste del texto de la mitad inferior.
+  int hTop = h * 45 / 100; if(hTop > 70) hTop = 70;
+  int hBot = h - (h * 45 / 100); if(hBot > 90) hBot = 90;
+  const int yBot = h - hBot;
+  for(int j = 0; j < h; j++){
+    int yy = y + j;
+    if(yy < 0 || yy >= SCR_H || yy < gClipY0 || yy > gClipY1) continue;
+    int ins = glInset(j, h, rad);
+    uint16_t* dst = gBuf + (size_t)yy * SCR_W;
+    int lx = x + ins, rx = x + w - 1 - ins;
+    // Especular y sombreado del MATERIAL: constantes por FILA, asi que el
+    // bucle interior solo hace mezclas. Es luz de cristal (blanco/negro), no
+    // un color de tema: se aplica sobre el tinte, que si viene de la paleta.
+    uint8_t sa = 0, da = 0;
+    if(hTop > 0 && j < hTop)          sa = (uint8_t)(26 - (26 * j) / hTop);
+    else if(hBot > 0 && j >= yBot)    da = (uint8_t)((30 * (j - yBot)) / hBot);
+    int i0 = lx < gClipX0 ? gClipX0 : lx;
+    int i1 = rx > gClipX1 ? gClipX1 : rx;
+    if(i0 < 0) i0 = 0;
+    if(i1 > SCR_W - 1) i1 = SCR_W - 1;
+    for(int i = i0; i <= i1; i++){
+      uint16_t out = mix565(dst[i], tint, tintMix);
+      if(sa)      out = mix565(out, rgb565(255,255,255), sa);
+      else if(da) out = mix565(out, rgb565(0,0,0), da);
+      dst[i] = out;
+    }
+    // Borde del cristal: reflejo claro arriba, sombra abajo, y peso distinto
+    // por lado para que las cuatro esquinas no queden iguales.
+    uint16_t bcol = (j < 3) ? rgb565(255,255,255)
+                            : (j < h / 2 ? rgb565(205,214,228) : rgb565(22,28,40));
+    bool topZone = (j < h / 2);
+    if(lx >= gClipX0 && lx <= gClipX1 && lx >= 0 && lx < SCR_W)
+      dst[lx] = mix565(dst[lx], bcol, topZone ? GLASS_CORNER_STRONG : GLASS_CORNER_WEAK);
+    if(rx >= gClipX0 && rx <= gClipX1 && rx >= 0 && rx < SCR_W)
+      dst[rx] = mix565(dst[rx], bcol, topZone ? GLASS_CORNER_WEAK : GLASS_CORNER_STRONG);
+  }
+}
+
+// Mezclas de tinte por tipo de superficie. Con Liquid Glass activo el vidrio
+// deja pasar mas fondo; con el estilo Plano el mismo material se "esmerila"
+// (mas tinte), pero NUNCA se vuelve un rectangulo opaco: sigue habiendo
+// translucidez, especular y borde.
+// Mezcla de tinte por tipo de superficie. Se eligieron mirando el contraste
+// del texto sobre un wallpaper CLARO, que es el caso peor: el efecto no puede
+// costar legibilidad. Con Liquid Glass activo el vidrio deja pasar mas fondo;
+// con el estilo Plano el mismo material se "esmerila" mas.
+static inline int qpMixCard(){ return uiGlass ? 128 : 176; }   // tarjetas y modulos
+static inline int qpMixTile(){ return uiGlass ? 112 : 158; }   // circulo apagado
+static inline int qpMixAcc (){ return uiGlass ? 178 : 205; }   // acento translucido (control activo)
+static inline int qpMixHdr (){ return uiGlass ? 168 : 205; }   // cabeceras fijas (editor/catalogo)
+
+// Superficie de una tarjeta o modulo: sombra muy leve (tres lineas alfa bajo
+// el borde, no un rectangulo alfa del tamano de la tarjeta) + el material.
 static void qpSurface(int x, int y, int w, int h, int rad, uint16_t tint){
   for(int k = 1; k <= 3; k++){
     int yy = y + h + k - 1;
     if(yy < SCR_H) hLineA(x + rad, yy, w - 2 * rad, TH_SHADOW, (uint8_t)(46 - k * 12));
   }
-  fillRoundRect(x, y, w, h, rad, tint);
-  drawRoundRect(x, y, w, h, rad, TH_BORDER);
+  qpGlassSurface(x, y, w, h, rad, tint, qpMixCard());
 }
 
 // Alpha del destello de toque (0 = ya no destella).
@@ -13818,9 +13925,9 @@ static void qpHeaderBtn(int i, bool danger){
   // distingue por el GLIFO en color de peligro, no por un circulo rojo entero:
   // asi la cabecera no grita y el significado destructivo sigue ahi.
   uint16_t face = qpCard();
-  fillRoundRect(cx - r, cy - r, 2 * r, 2 * r, r, face);
-  drawRoundRect(cx - r, cy - r, 2 * r, 2 * r, r, danger ? mix565(TH_BORDER, TH_DANGER, 120) : TH_BORDER);
-  qpIcoBg = face;
+  qpGlassSurface(cx - r, cy - r, 2 * r, 2 * r, r, face, qpMixCard());
+  if(danger) drawRoundRect(cx - r, cy - r, 2 * r, 2 * r, r, mix565(TH_BORDER, TH_DANGER, 140));
+  qpIcoBgAt(cx, cy);
   uint16_t fg = danger ? TH_DANGER : TH_TXT;
   if(i == 0) qpIcoPencil(cx, cy, 26, fg);
   else if(i == 1) qpIcoPower(cx, cy, 26, fg);
@@ -13843,7 +13950,7 @@ static void qpDrawHeader(){
   char ns[64];
   if(gAirplane) snprintf(ns, sizeof(ns), "Modo avi\xC3\xB3n activo");
   else connWifiSub(ns, sizeof(ns));
-  if(ns[0]) drawTextClip(QP_MX, 84, ns, 1, TH_MUTE, right);
+  if(ns[0]) drawTextClip(QP_MX, 84, ns, 1, TH_TXT2, right);
   qpHeaderBtn(0, false);
 #if POWEROFF_ON
   qpHeaderBtn(1, true);
@@ -13859,12 +13966,11 @@ static void qpDrawSliderBody(int x, int y, int w, int h, int id){
   int pct = (id == QSID_BRIGHT) ? gBright : 0;
   int fw = th + (w - th) * pct / 100;                     // nunca menor que el diametro
   if(fw > w) fw = w;
-  fillRoundRect(x, ty, w, th, th / 2, TH_TRACK);
-  if(fw > 0) fillRoundRect(x, ty, fw, th, th / 2, TH_PRIM);
-  drawRoundRect(x, ty, w, th, th / 2, TH_BORDER);
+  qpGlassSurface(x, ty, w, th, th / 2, TH_TRACK, qpMixCard());          // pista: vidrio
+  if(fw > 0) qpGlassSurface(x, ty, fw, th, th / 2, TH_PRIM, qpMixAcc()); // relleno: acento translucido
   int icx = x + th / 2, icy = ty + th / 2;
   bool onFill = (fw >= th);
-  qpIcoBg = onFill ? TH_PRIM : TH_TRACK;
+  qpIcoBgAt(icx, icy);
   if(c && c->icon) c->icon(icx, icy, 30, onFill ? TH_ONACC : TH_TXT2);
   char v[16]; if(c && c->sub) c->sub(v, sizeof(v)); else v[0] = 0;
   if(v[0]) drawTextR(x + w - 20, ty + th / 2 - 8, v, 2, (fw > w - 70) ? TH_ONACC : TH_TXT2);
@@ -13878,8 +13984,8 @@ static void qpDrawModule(int x, int y, int w, int h, int id, int ori){
   bool on = (c->type == QT_TOGGLE && c->state) ? c->state() : false;
   uint16_t face = on ? qpCapOn() : qpCard();
   qpSurface(x, y, w, h, QP_RAD_S, face);
-  uint16_t fg  = on ? TH_TXT : TH_TXT;
-  uint16_t fg2 = on ? TH_TXT2 : TH_MUTE;
+  uint16_t fg  = TH_TXT;
+  uint16_t fg2 = TH_TXT2;      // sobre vidrio, TH_MUTE se pierde
   int ir = 22;
   uint16_t icoFace = on ? TH_PRIM : qpTileOff();
   uint16_t icoCol  = on ? TH_ONACC : TH_TXT2;
@@ -13887,14 +13993,14 @@ static void qpDrawModule(int x, int y, int w, int h, int id, int ori){
   if(c->sub) c->sub(sub, sizeof(sub));
   if(ori == QOR_V){
     int icx = x + w / 2, icy = y + 22 + ir - 8;
-    fillRoundRect(icx - ir, icy - ir, 2 * ir, 2 * ir, ir, icoFace);
-    qpIcoBg = icoFace; if(c->icon) c->icon(icx, icy, 30, icoCol);
+    qpGlassSurface(icx - ir, icy - ir, 2 * ir, 2 * ir, ir, icoFace, on ? qpMixAcc() : qpMixTile());
+    qpIcoBgAt(icx, icy); if(c->icon) c->icon(icx, icy, 30, icoCol);
     drawTextC(icx, icy + ir + 8, c->title, 1, fg);
     if(sub[0]) drawTextC(icx, icy + ir + 22, sub, 1, fg2);
   } else {
     int icx = x + 14 + ir, icy = y + h / 2;
-    fillRoundRect(icx - ir, icy - ir, 2 * ir, 2 * ir, ir, icoFace);
-    qpIcoBg = icoFace; if(c->icon) c->icon(icx, icy, 30, icoCol);
+    qpGlassSurface(icx - ir, icy - ir, 2 * ir, 2 * ir, ir, icoFace, on ? qpMixAcc() : qpMixTile());
+    qpIcoBgAt(icx, icy); if(c->icon) c->icon(icx, icy, 30, icoCol);
     int tx = icx + ir + 12, right = x + w - 12;
     if(sub[0]){
       drawTextClip(tx, icy - 17, c->title, 2, fg, right);
@@ -13940,9 +14046,8 @@ static void qpDrawGroup(int x, int y, int w, int h){
       }
       bool on = (c->type == QT_TOGGLE && c->state) ? c->state() : false;
       uint16_t face = on ? TH_PRIM : qpTileOff();
-      fillRoundRect(cx - r, cy - r, 2 * r, 2 * r, r, face);
-      if(!on) drawRoundRect(cx - r, cy - r, 2 * r, 2 * r, r, TH_BORDER);
-      qpIcoBg = face;
+      qpGlassSurface(cx - r, cy - r, 2 * r, 2 * r, r, face, on ? qpMixAcc() : qpMixTile());
+      qpIcoBgAt(cx, cy);
       if(c->icon) c->icon(cx, cy, 32, on ? TH_ONACC : TH_TXT2);
       uint8_t fa = qpFlashA(0, it->id);
       if(fa) fillRoundRectA(cx - r, cy - r, 2 * r, 2 * r, r, TH_TXT, fa);
@@ -13955,8 +14060,8 @@ static void qpDrawGroup(int x, int y, int w, int h){
       if(c->sub){
         char sb[48]; c->sub(sb, sizeof(sb));
         if(sb[0]){
-          if(textW(sb, 1) <= lw) drawTextC(cx, cy + r + 22, sb, 1, TH_MUTE);
-          else drawTextClip(cx - lw / 2, cy + r + 22, sb, 1, TH_MUTE, cx + lw / 2);
+          if(textW(sb, 1) <= lw) drawTextC(cx, cy + r + 22, sb, 1, TH_TXT2);
+          else drawTextClip(cx - lw / 2, cy + r + 22, sb, 1, TH_TXT2, cx + lw / 2);
         }
       }
       // En edicion, cada circulo lleva su "-" para quitarlo y -- si el control
@@ -13995,10 +14100,11 @@ static void qpDrawGroup(int x, int y, int w, int h){
 
 // ---- BLOQUE "ANADIR UN CONTROL" --------------------------------------
 static void qpDrawAddBlock(int x, int y, int w, int h){
-  fillRoundRect(x, y, w, h, QP_RAD_S, mix565(qpCard(), TH_PRIM, 40));
-  drawRoundRect(x, y, w, h, QP_RAD_S, TH_PRIM);
+  uint16_t tint = mix565(qpCard(), TH_PRIM, 70);
+  qpGlassSurface(x, y, w, h, QP_RAD_S, tint, qpMixCard());
+  drawRoundRect(x, y, w, h, QP_RAD_S, mix565(TH_BORDER, TH_PRIM, 150));
   int icx = x + w / 2 - 92, icy = y + h / 2;
-  qpIcoBg = mix565(qpCard(), TH_PRIM, 40);
+  qpIcoBgAt(icx, icy);
   qpIcoPlus(icx, icy, 28, TH_TXT);
   drawText(icx + 22, icy - 8, "A\xC3\xB1" "adir un control", 2, TH_TXT);
 }
@@ -14092,12 +14198,14 @@ static void qpDrawGhost(){
 // ---- CABECERA DEL EDITOR ---------------------------------------------
 #define QP_EDH_H 96
 static void qpDrawEditHeader(){
-  fillRect(0, 0, SCR_W, QP_EDH_H, TH_PAGE);      // opaca: sin alfa por pixel en cada cuadro
+  // Banda de vidrio esmerilado: el contenido que pasa por debajo al desplazar
+  // se ve difuminado, como en One UI, en vez de cortarse contra un bloque liso.
+  qpGlassSurface(0, 0, SCR_W, QP_EDH_H, 0, TH_GLASS2, qpMixHdr());
   drawText(QP_MX, 20, "Cancelar", 2, TH_TXT2);
   drawTextC(SCR_W / 2, 20, "Editar panel", 2, TH_TXT);
   drawTextR(SCR_W - QP_MX, 20, "Listo", 2, TH_PRIM);
   // Restablecer diseno: siempre visible, nunca destructivo hasta "Listo".
-  drawTextC(SCR_W / 2, 56, "Restablecer dise\xC3\xB1o", 1, TH_MUTE);
+  drawTextC(SCR_W / 2, 56, "Restablecer dise\xC3\xB1o", 1, TH_TXT2);
   fillRect(0, QP_EDH_H - 1, SCR_W, 1, TH_DIV);
 }
 // Zonas tactiles de la cabecera del editor (>= 44 px de alto).
@@ -14130,6 +14238,10 @@ static void qpDrawCatalog(){
   int top = QP_CAT_HDR - (int)(qpCatScrollF + 0.5f) + 12;
   const int oy0 = gClipY0, oy1 = gClipY1;
   if(gClipY0 < QP_CAT_HDR) gClipY0 = QP_CAT_HDR;
+  // Hoja de vidrio del catalogo: el mismo material que el resto del panel, para
+  // que la pantalla no quede como wallpaper pelado con iconos encima.
+  if(gClipY1 >= gClipY0)
+    qpGlassSurface(0, QP_CAT_HDR, SCR_W, SCR_H - QP_CAT_HDR, 0, TH_GLASS2, qpMixCard());
   if(gClipY1 >= gClipY0){
     for(int k = 0; k < qpCatN; k++){
       int r = k / 4, c = k % 4;
@@ -14141,16 +14253,15 @@ static void qpDrawCatalog(){
       bool sel = (qpCatSel == k);
       int rad = QP_TCIRC / 2;
       uint16_t face = sel ? TH_PRIM : qpTileOff();
-      fillRoundRect(cx - rad, cy - rad, 2 * rad, 2 * rad, rad, face);
-      drawRoundRect(cx - rad, cy - rad, 2 * rad, 2 * rad, rad, sel ? TH_PRIM : TH_BORDER);
-      qpIcoBg = face;
+      qpGlassSurface(cx - rad, cy - rad, 2 * rad, 2 * rad, rad, face, sel ? qpMixAcc() : qpMixTile());
+      qpIcoBgAt(cx, cy);
       if(ct->icon) ct->icon(cx, cy, 32, sel ? TH_ONACC : TH_TXT);
       int lw = QP_CW - 2;
       if(textW(ct->name, 1) <= lw) drawTextC(cx, cy + rad + 8, ct->name, 1, TH_TXT);
       else drawTextClip(cx - lw / 2, cy + rad + 8, ct->name, 1, TH_TXT, cx + lw / 2);
       const char* cat = QP_CAT_NAME[ct->cat];
-      if(textW(cat, 1) <= lw) drawTextC(cx, cy + rad + 22, cat, 1, TH_MUTE);
-      else drawTextClip(cx - lw / 2, cy + rad + 22, cat, 1, TH_MUTE, cx + lw / 2);
+      if(textW(cat, 1) <= lw) drawTextC(cx, cy + rad + 22, cat, 1, TH_TXT2);
+      else drawTextClip(cx - lw / 2, cy + rad + 22, cat, 1, TH_TXT2, cx + lw / 2);
     }
     if(qpCatN == 0)
       drawTextC(SCR_W / 2, QP_CAT_HDR + 60, "No queda ning\xC3\xBAn control disponible", 2, TH_MUTE);
@@ -14158,10 +14269,10 @@ static void qpDrawCatalog(){
   gClipY0 = oy0; gClipY1 = oy1;
   // Cabecera FIJA del catalogo
   if(gClipY0 < QP_CAT_HDR){
-    fillRect(0, 0, SCR_W, QP_CAT_HDR, TH_PAGE);  // opaca, por el mismo motivo
+    qpGlassSurface(0, 0, SCR_W, QP_CAT_HDR, 0, TH_GLASS2, qpMixHdr());
     drawText(QP_MX, 22, "Atr\xC3\xA1s", 2, TH_TXT2);
     drawTextC(SCR_W / 2, 22, "A\xC3\xB1" "adir un control", 2, TH_TXT);
-    drawTextC(SCR_W / 2, 56, "Solo se listan controles con funci\xC3\xB3n real", 1, TH_MUTE);
+    drawTextC(SCR_W / 2, 56, "Solo se listan controles con funci\xC3\xB3n real", 1, TH_TXT2);
     fillRect(0, QP_CAT_HDR - 1, SCR_W, 1, TH_DIV);
   }
 }
@@ -14179,18 +14290,37 @@ static void qpDrawFooter(){
 // ##  captura se hace UNA vez, al empezar el gesto, y se libera en
 // ##  cuanto la cortina se cierra del todo.
 // ##
-// ##  QUE HAY EN CACHE Y QUE NO:
-// ##    · qsBuf guarda SOLO el FONDO de la cortina (Liquid Glass o
-// ##      velo plano). Es la unica parte cara -- desenfoque a pantalla
-// ##      completa -- y se recompone unicamente si cambia el fondo o
-// ##      el tema, NUNCA durante un gesto.
-// ##    · el CONTENIDO (cabecera, modulos, tarjeta) se dibuja por
-// ##      cuadro, pero solo dentro de la BANDA SUCIA y solo los
-// ##      bloques que la cortan. Tiene que ser asi: con scroll,
-// ##      estiramiento y edicion el contenido ya no es una imagen
-// ##      fija que se pueda cachear entera.
+// ##  POR QUE EL ARRASTRE IBA A TIRONES (y como se arregla)
+// ##  ------------------------------------------------------
+// ##  1. La capa de vidrio se calculaba con drawLiquidGlassPanelEx a
+// ##     PANTALLA COMPLETA en el primer cuadro del gesto. Esa funcion
+// ##     hace memcpy + dos pasadas de box-blur + composicion sobre
+// ##     384.000 pixeles, con SEIS divisiones enteras por pixel y una
+// ##     pasada vertical que recorre columnas (una linea de cache de
+// ##     PSRAM por pixel). Son cientos de milisegundos JUSTO cuando el
+// ##     dedo empieza a moverse.
+// ##       -> ahora el vidrio se calcula a 1/4 de escala (120x200 =
+// ##          24.000 pixeles) en qpGlassBuild(), y se expande por
+// ##          filas con qpGlassRows(). Mismo material, ~1/16 del
+// ##          trabajo, y ademas la reduccion 4x4 YA es un desenfoque.
+// ##  2. El contenido del panel se redibujaba en cada cuadro del
+// ##     arrastre.
+// ##       -> ahora qsBuf guarda el panel COMPUESTO (vidrio +
+// ##          contenido) y se compone PEREZOSAMENTE: solo las filas
+// ##          que el gesto acaba de revelar (qsEnsureComposed). Un
+// ##          cuadro de arrastre es un memcpy de la banda, cero
+// ##          dibujo.
+// ##  3. El manejador tactil llamaba a qsRender() ademas de uiTick(),
+// ##     asi que se publicaban dos bandas por vuelta de loop() y cada
+// ##     flxFlush espera al DMA2D.
+// ##       -> el tacto ya SOLO actualiza estado y marca banda sucia;
+// ##          el unico punto de render es qsTick(), una vez por cuadro.
+// ##  4. La posicion se suavizaba con una constante de tiempo, o sea
+// ##     el panel iba SIEMPRE por detras del dedo.
+// ##       -> con el dedo abajo la posicion es 1:1. El easing existe
+// ##          solo despues de soltar.
 // #############################################################
-static uint16_t* qsBuf     = NULL;   // FONDO de la cortina (vidrio/velo), sin contenido
+static uint16_t* qsBuf     = NULL;   // panel COMPUESTO (vidrio + contenido)
 static uint16_t* qsAppSnap = NULL;   // ultimo cuadro de la app de debajo
 static bool      qsOverApp = false;
 static int       qsLastY   = 0;
@@ -14215,27 +14345,208 @@ static void qsFreeApp(){
   if(qsAppSnap){ heap_caps_free(qsAppSnap); qsAppSnap = NULL; }
   qsOverApp = false;
 }
+
+// #############################################################
+// ##  CAPA DE VIDRIO DEL PANEL  ·  CACHEADA Y A ESCALA REDUCIDA
+// ##  ------------------------------------------------------
+// ##  Sobre un fondo desenfocado, reducir a 1/4 y volver a ampliar
+// ##  es indistinguible de desenfocar a resolucion completa -- el
+// ##  desenfoque ya se comio el detalle fino. Asi que:
+// ##    · se reduce el snapshot 4x4 con media de caja (16 muestras
+// ##      por pixel de salida: eso solo YA es un desenfoque),
+// ##    · se pasa un box-blur corto sobre 24.000 pixeles en vez de
+// ##      384.000, con la pasada vertical sobre filas de 240 bytes
+// ##      (cabe en cache) en vez de columnas de 960 bytes de paso,
+// ##    · se aplica el velo y el tinte del tema AHI, en pequeno,
+// ##    · y se expande por filas, solo cuando hacen falta.
+// ##
+// ##  Se recalcula unicamente cuando cambia el fondo (abrir sobre
+// ##  otra app, volver al escritorio) o el tema. NUNCA por cuadro.
+// #############################################################
+#define QP_GS_SH 2                                  // reduccion 1/4 (desplazamiento)
+#define QP_GS_W  (SCR_W >> QP_GS_SH)                // 120
+#define QP_GS_H  (SCR_H >> QP_GS_SH)                // 200
+#define QP_GS_R  2                                  // radio del blur en pequeno (~8 px reales)
+static uint16_t* qsGlassSm   = NULL;                // 120 x 200 = 48 KB
+// Version ya EXPANDIDA del vidrio, a resolucion completa. Es opcional: si no
+// hay PSRAM se sigue expandiendo por bandas (mas lento, mismo resultado). La
+// paga el scroll y el editor, que si recomponen filas ya compuestas: sin esta
+// cache tendrian que rehacer la interpolacion bilineal en cada cuadro.
+static uint16_t* qsGlassFull = NULL;                // 480 x 800 = 768 KB
+static int       qsGlassUpTo = -1;                  // ultima fila expandida en qsGlassFull
+static bool      qsGlassOk   = false;
+
+// Box-blur de suma corrediza sobre la capa pequena. Los indices se sujetan a
+// los bordes en vez de encoger la ventana: asi el divisor es CONSTANTE
+// (2R+1 = 5) y el compilador lo convierte en una multiplicacion, sin ninguna
+// division entera por pixel -- que es justo lo que hace cara a glassBlur().
+static void qpGlassBlurSm(){
+  static uint16_t line[(QP_GS_W > QP_GS_H ? QP_GS_W : QP_GS_H)];
+  const int W = 2 * QP_GS_R + 1;
+  int r, g, b;
+  for(int j = 0; j < QP_GS_H; j++){                 // horizontal
+    uint16_t* row = qsGlassSm + (size_t)j * QP_GS_W;
+    memcpy(line, row, QP_GS_W * 2);
+    for(int i = 0; i < QP_GS_W; i++){
+      int sr = 0, sg = 0, sb = 0;
+      for(int k = -QP_GS_R; k <= QP_GS_R; k++){
+        int q = i + k; if(q < 0) q = 0; if(q >= QP_GS_W) q = QP_GS_W - 1;
+        un565(line[q], r, g, b); sr += r; sg += g; sb += b;
+      }
+      row[i] = pk565(sr / W, sg / W, sb / W);
+    }
+  }
+  for(int i = 0; i < QP_GS_W; i++){                 // vertical
+    for(int j = 0; j < QP_GS_H; j++) line[j] = qsGlassSm[(size_t)j * QP_GS_W + i];
+    for(int j = 0; j < QP_GS_H; j++){
+      int sr = 0, sg = 0, sb = 0;
+      for(int k = -QP_GS_R; k <= QP_GS_R; k++){
+        int q = j + k; if(q < 0) q = 0; if(q >= QP_GS_H) q = QP_GS_H - 1;
+        un565(line[q], r, g, b); sr += r; sg += g; sb += b;
+      }
+      qsGlassSm[(size_t)j * QP_GS_W + i] = pk565(sr / W, sg / W, sb / W);
+    }
+  }
+}
+
+// Velo del panel. Con Liquid Glass activo deja pasar mas fondo; con el estilo
+// Plano el mismo material queda mas "esmerilado". En los dos casos es una capa
+// TRANSLUCIDA sobre el fondo desenfocado, nunca un relleno opaco.
+static inline uint8_t qpVeilAlpha(){ return uiGlass ? 152 : 212; }
+
+static bool qpGlassBuild(){
+  uint16_t* bg = qsBgSrc();
+  if(!bg) return false;
+  if(!qsGlassSm)
+    qsGlassSm = (uint16_t*)heap_caps_malloc((size_t)QP_GS_W * QP_GS_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(!qsGlassSm) return false;
+  // 1) reduccion 4x4 con media de caja
+  for(int j = 0; j < QP_GS_H; j++){
+    const uint16_t* s0 = bg + (size_t)(j << QP_GS_SH) * SCR_W;
+    uint16_t* d = qsGlassSm + (size_t)j * QP_GS_W;
+    for(int i = 0; i < QP_GS_W; i++){
+      int sr = 0, sg = 0, sb = 0, r, g, b;
+      int x0 = i << QP_GS_SH;
+      for(int dy = 0; dy < (1 << QP_GS_SH); dy++){
+        const uint16_t* row = s0 + (size_t)dy * SCR_W + x0;
+        for(int dx = 0; dx < (1 << QP_GS_SH); dx++){ un565(row[dx], r, g, b); sr += r; sg += g; sb += b; }
+      }
+      d[i] = pk565(sr >> (2 * QP_GS_SH), sg >> (2 * QP_GS_SH), sb >> (2 * QP_GS_SH));
+    }
+  }
+  // 2) desenfoque corto y 3) velo + tinte del tema, todo en pequeno
+  qpGlassBlurSm();
+  uint8_t a = qpVeilAlpha();
+  uint16_t veil = TH_PAGE, tint = TH_GLASS2;
+  for(int j = 0; j < QP_GS_H; j++){
+    uint16_t* d = qsGlassSm + (size_t)j * QP_GS_W;
+    // Degradado muy suave hacia arriba: da profundidad a la cabecera sin
+    // separarla con una linea dura, igual que en el panel de referencia.
+    uint8_t extra = (j < QP_GS_H / 5) ? (uint8_t)(18 - (18 * j) / (QP_GS_H / 5)) : 0;
+    for(int i = 0; i < QP_GS_W; i++){
+      uint16_t c = mix565(d[i], tint, 40);
+      c = mix565(c, veil, a);
+      if(extra) c = mix565(c, TH_SURF2, extra);
+      d[i] = c;
+    }
+  }
+  qsGlassOk = true;
+  return true;
+}
+
+// Expande la capa pequena a las filas [y0, y1] de dst (resolucion completa),
+// con interpolacion bilineal. Las dos filas de origen se interpolan en
+// HORIZONTAL una sola vez y se reutilizan para las cuatro filas de salida que
+// las comparten: 1,5 mezclas por pixel en vez de 3.
+static uint16_t qpGlRowA[SCR_W], qpGlRowB[SCR_W];
+static int      qpGlRowSy = -1;
+static void qpGlassRows(uint16_t* dst, int y0, int y1){
+  if(!qsGlassOk || !qsGlassSm) return;
+  if(y0 < 0) y0 = 0;
+  if(y1 > SCR_H - 1) y1 = SCR_H - 1;
+  for(int y = y0; y <= y1; y++){
+    int sy = y >> QP_GS_SH;
+    if(sy > QP_GS_H - 1) sy = QP_GS_H - 1;
+    if(sy != qpGlRowSy){
+      int sy1 = sy + 1 < QP_GS_H ? sy + 1 : sy;
+      const uint16_t* ra = qsGlassSm + (size_t)sy  * QP_GS_W;
+      const uint16_t* rb = qsGlassSm + (size_t)sy1 * QP_GS_W;
+      for(int x = 0; x < SCR_W; x++){
+        int sx = x >> QP_GS_SH;
+        int sx1 = sx + 1 < QP_GS_W ? sx + 1 : sx;
+        uint8_t fx = (uint8_t)((x & ((1 << QP_GS_SH) - 1)) << (8 - QP_GS_SH));
+        qpGlRowA[x] = mix565(ra[sx], ra[sx1], fx);
+        qpGlRowB[x] = mix565(rb[sx], rb[sx1], fx);
+      }
+      qpGlRowSy = sy;
+    }
+    uint8_t fy = (uint8_t)((y & ((1 << QP_GS_SH) - 1)) << (8 - QP_GS_SH));
+    uint16_t* d = dst + (size_t)y * SCR_W;
+    if(fy == 0) memcpy(d, qpGlRowA, SCR_W * 2);
+    else for(int x = 0; x < SCR_W; x++) d[x] = mix565(qpGlRowA[x], qpGlRowB[x], fy);
+  }
+}
+
 // Libera TODO lo temporal del panel. Lo llama el cierre de la cortina, la
 // cancelacion del editor y cualquier cambio de estado del sistema: ni el OTA
-// ni una suspension pueden dejar 1,5 MB de PSRAM reservados de balde.
+// ni una suspension pueden dejar PSRAM reservada de balde.
 static void qpFreeBuffers(){
   if(qsBuf){ heap_caps_free(qsBuf); qsBuf = NULL; }
+  if(qsGlassSm){ heap_caps_free(qsGlassSm); qsGlassSm = NULL; }
+  if(qsGlassFull){ heap_caps_free(qsGlassFull); qsGlassFull = NULL; }
+  qsGlassOk = false; qpGlRowSy = -1; qsGlassUpTo = -1;
   qsFreeApp();
+}
+// Deja listas en qsGlassFull las filas [0, y1] del vidrio expandido y las
+// copia sobre dst. Sin la cache, expande directamente sobre dst.
+static void qpGlassInto(uint16_t* dst, int y0, int y1){
+  if(!qsGlassFull){ qpGlassRows(dst, y0, y1); return; }
+  if(y1 > qsGlassUpTo){
+    qpGlassRows(qsGlassFull, qsGlassUpTo + 1, y1);
+    qsGlassUpTo = y1;
+  }
+  memcpy(dst + (size_t)y0 * SCR_W, qsGlassFull + (size_t)y0 * SCR_W,
+         (size_t)(y1 - y0 + 1) * SCR_W * 2);
 }
 
 // ---- BANDAS SUCIAS ---------------------------------------------------
+// Dos acumuladores distintos y a proposito:
+//   qpDy0/qpDy1  -> lo que hay que PUBLICAR en pantalla este cuadro.
+//   qpCy0/qpCy1  -> lo que hay que volver a COMPONER en qsBuf (mas caro).
+// Arrastrar solo mueve el primero; tocar un control, desplazar o editar
+// mueven los dos.
 static int  qpDy0 = 0x7FFF, qpDy1 = -1;
+static int  qpCy0 = 0x7FFF, qpCy1 = -1;
 static inline void qpMark(int y0, int y1){
   if(y0 < qpDy0) qpDy0 = y0;
   if(y1 > qpDy1) qpDy1 = y1;
 }
-static inline void qpMarkAll(){ qpMark(0, SCR_H - 1); }
-static inline void qpMarkView(){ qpMark(QP_VIEW_Y0, SCR_H - 1); }
-static inline void qpMarkHeader(){ qpMark(0, QP_HDR_H - 1); }
+// Recomponer implica publicar: nunca se compone algo que no se vaya a ver.
+static inline void qpRecompose(int y0, int y1){
+  if(y0 < qpCy0) qpCy0 = y0;
+  if(y1 > qpCy1) qpCy1 = y1;
+  qpMark(y0, y1);
+}
+// qpMarkAll RECOMPONE: lo usan las operaciones que cambian el contenido
+// (editor, catalogo, cambio de estado de un control). El ARRASTRE no lo usa
+// nunca -- marca su propia banda con qpMark y no recompone ni una fila.
+static inline void qpMarkAll(){ qpRecompose(0, SCR_H - 1); }
+static inline void qpMarkView(){ qpRecompose(QP_VIEW_Y0, SCR_H - 1); }
+// El scroll INTERNO de la tarjeta solo cambia la tarjeta: recomponer todo el
+// viewport por eso seria tirar la mitad del presupuesto del cuadro.
+static void qpMarkGroup(){
+  if(qpGroupBlk < 0 || qpGroupBlk >= qpBlkN){ qpMarkView(); return; }
+  int top = QP_VIEW_Y0 - (int)(qpScrollF + 0.5f);
+  int y0 = top + qpBlk[qpGroupBlk].y, y1 = y0 + qpBlk[qpGroupBlk].h + 4;
+  if(y0 < QP_VIEW_Y0) y0 = QP_VIEW_Y0;
+  if(y1 > QP_VIEW_Y1) y1 = QP_VIEW_Y1;
+  if(y1 >= y0) qpRecompose(y0, y1);
+}
+static inline void qpMarkHeader(){ qpRecompose(0, QP_HDR_H - 1); }
 static int qpFlashY0 = 0, qpFlashY1 = -1;   // rect del destello, en pantalla
 
-// Invalida la cortina entera. La llaman los cambios de tema y de apariencia:
-// el fondo cacheado ya no vale.
+// Invalida la cortina entera (cambios de tema y de apariencia): el vidrio
+// cacheado y el panel compuesto ya no valen.
 static void qpInvalidateAll(){
   qsDirty = true;
   qpMarkAll();
@@ -14255,6 +14566,23 @@ static void qpRelayout(){
     qpLayGroupPx = (int)(qpGH + 0.5f);
   }
   qpLayout();
+  // ALTO DE LA TARJETA ACOTADO A LAS FILAS QUE DE VERDAD HAY. qpGrows viene de
+  // NVS y puede ser mayor que las filas actuales -- por ejemplo si el usuario
+  // guardo 4 filas y luego quito controles. Sin esto la tarjeta se dibujaba con
+  // filas vacias y empujaba el resto del panel fuera de la pantalla.
+  // qpGroupMaxPx() necesita qpTileN, que lo acaba de calcular qpLayout(): por
+  // eso el ajuste va DESPUES y, si corrige algo, se rehace la maquetacion.
+  {
+    int lo = qpGroupMinPx(), hi = qpGroupMaxPx();
+    int want = qpLayGroupPx;
+    if(want < lo) want = lo;
+    if(want > hi) want = hi;
+    if(want != qpLayGroupPx){
+      qpLayGroupPx = want;
+      if(qpMode != QPM_EDIT) qpGH = (float)want;   // en edicion manda qpEdGrows
+      qpLayout();
+    }
+  }
   // El scroll interno de la tarjeta nunca puede quedar fuera de rango tras
   // cambiar el alto o el numero de controles.
   int inner = qpGroupInnerH(qpLayGroupPx);
@@ -14272,30 +14600,114 @@ static inline int qpCatScrollMax(){
   return m > 0 ? m : 0;
 }
 
-// ---- COMPOSICION DEL FONDO (parte cara, UNA vez) ---------------------
+// ---- INSTRUMENTACION (medible, y desactivable de una linea) ----------
+// Cuenta lo que de verdad importa para el tacto: cuanto tarda un cuadro,
+// cuantos se pasan del presupuesto, cuantas filas se COMPONEN (lo caro) y
+// cuantas solo se PUBLICAN (lo barato). Un arrastre sano tiene miles de
+// filas publicadas y casi ninguna compuesta.
+#define QP_PROF 1
+#define QP_BUDGET_US 16000                       // presupuesto de un cuadro a ~60 fps
+#if QP_PROF
+static uint32_t qpPfFrames = 0, qpPfUs = 0, qpPfWorst = 0, qpPfSlow = 0;
+static uint32_t qpPfRowsComp = 0, qpPfRowsPub = 0, qpPfGlass = 0, qpPfDragFrames = 0;
+static uint32_t qpPfDragUs = 0, qpPfDragWorst = 0;
+static void qpProfReset(){
+  qpPfFrames = qpPfUs = qpPfWorst = qpPfSlow = 0;
+  qpPfRowsComp = qpPfRowsPub = qpPfGlass = 0;
+  qpPfDragFrames = qpPfDragUs = qpPfDragWorst = 0;
+}
+static void qpProfReport(const char* que){
+  if(!qpPfFrames) return;
+  Serial.printf("[QP] %s: %lu cuadros, medio %lu us, peor %lu us, lentos(>%d ms) %lu\n",
+                que, (unsigned long)qpPfFrames, (unsigned long)(qpPfUs / qpPfFrames),
+                (unsigned long)qpPfWorst, QP_BUDGET_US / 1000, (unsigned long)qpPfSlow);
+  if(qpPfDragFrames)
+    Serial.printf("[QP]   arrastre: %lu cuadros, medio %lu us, peor %lu us (~%lu fps)\n",
+                  (unsigned long)qpPfDragFrames, (unsigned long)(qpPfDragUs / qpPfDragFrames),
+                  (unsigned long)qpPfDragWorst,
+                  (unsigned long)(qpPfDragUs ? 1000000UL / (qpPfDragUs / qpPfDragFrames) : 0));
+  Serial.printf("[QP]   filas compuestas %lu, publicadas %lu, capas de vidrio %lu\n",
+                (unsigned long)qpPfRowsComp, (unsigned long)qpPfRowsPub, (unsigned long)qpPfGlass);
+}
+#else
+static inline void qpProfReset(){}
+static inline void qpProfReport(const char*){}
+#endif
+
+// ---- COMPOSICION DEL PANEL EN qsBuf ----------------------------------
+// qsComposedTo = ultima fila de qsBuf que es valida. La composicion es
+// PEREZOSA: al arrastrar solo se componen las filas que el gesto acaba de
+// revelar, asi que el coste se reparte por el recorrido en vez de caer entero
+// en el primer cuadro.
+static int qsComposedTo = -1;
+
+// Compone las filas [y0, y1] de qsBuf: primero el vidrio (expandido de la capa
+// pequena) y encima el contenido, recortado a esa banda. Cada fila se compone
+// EXACTAMENTE una vez por pasada, y la pasada siempre reescribe el vidrio
+// antes de dibujar, asi que repetirla sobre las mismas filas es idempotente.
+static void qsComposeRows(int y0, int y1){
+  if(!qsBuf || !qsGlassOk) return;
+  if(y0 < 0) y0 = 0;
+  if(y1 > SCR_H - 1) y1 = SCR_H - 1;
+  if(y1 < y0) return;
+#if QP_PROF
+  qpPfRowsComp += (uint32_t)(y1 - y0 + 1);
+#endif
+  qpGlassInto(qsBuf, y0, y1);
+
+  uint16_t* oBuf = gBuf;
+  const int oy0 = gClipY0, oy1 = gClipY1, ox0 = gClipX0, ox1 = gClipX1;
+  setBuf(qsBuf);
+  gClipX0 = 0; gClipX1 = SCR_W - 1;
+  if(qpMode == QPM_CAT){
+    gClipY0 = y0; gClipY1 = y1;
+    qpDrawCatalog();
+  } else {
+    qpRelayout();
+    // EL CONTENIDO NO PUEDE INVADIR LAS BANDAS FIJAS. Al desplazar, los
+    // bloques viajan por encima de QP_VIEW_Y0 y por debajo de QP_VIEW_Y1: sin
+    // este recorte se colarian bajo la cabecera y bajo el asa de cierre.
+    int bodyTop = (qpMode == QPM_EDIT) ? QP_EDH_H : QP_VIEW_Y0;
+    int bodyBot = (qpMode == QPM_EDIT) ? (SCR_H - 1) : QP_VIEW_Y1;
+    gClipY0 = y0 > bodyTop ? y0 : bodyTop;
+    gClipY1 = y1 < bodyBot ? y1 : bodyBot;
+    if(gClipY1 >= gClipY0) qpDrawBody();
+    gClipY0 = y0; gClipY1 = y1;
+    if(qpMode == QPM_EDIT){ qpDrawEditHeader(); qpDrawGhost(); }
+    else                  { qpDrawHeader(); qpDrawFooter(); }
+  }
+  gClipY0 = oy0; gClipY1 = oy1; gClipX0 = ox0; gClipX1 = ox1;
+  setBuf(oBuf);
+}
+// Garantiza que qsBuf es valido hasta la fila y1 incluida.
+static void qsEnsureComposed(int y1){
+  if(y1 > SCR_H - 1) y1 = SCR_H - 1;
+  if(y1 <= qsComposedTo) return;
+  qsComposeRows(qsComposedTo + 1, y1);
+  qsComposedTo = y1;
+}
+// Construye (o reconstruye) el vidrio y descarta el panel compuesto.
 static void qsCompose(){
-  uint16_t* bg = qsBgSrc();
-  if(!bg) return;
   if(!qsBuf) qsBuf = (uint16_t*)heap_caps_malloc((size_t)SCR_W * SCR_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if(!qsBuf) return;
-  memcpy(qsBuf, bg, (size_t)SCR_W * SCR_H * 2);
-  setBuf(qsBuf);
-  int c0 = gClipY0, c1 = gClipY1, cx0 = gClipX0, cx1 = gClipX1;
-  gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
-  if(uiGlass){
-    drawLiquidGlassPanelEx(0, 0, SCR_W, SCR_H, 0, TH_GLASS2, 11);
-    fillRectA(0, 0, SCR_W, SCR_H, TH_PAGE, 150);
-  } else {
-    fillRectA(0, 0, SCR_W, SCR_H, TH_PAGE, 238);
-    fillRectA(0, 0, SCR_W, 160, TH_SURF2, 40);
-  }
-  gClipY0 = c0; gClipY1 = c1; gClipX0 = cx0; gClipX1 = cx1;
-  setBuf(fb);
+  // La cache del vidrio expandido es un LUJO opcional: si no hay PSRAM para
+  // ella el panel funciona igual, solo recompone mas despacio.
+  if(!qsGlassFull)
+    qsGlassFull = (uint16_t*)heap_caps_malloc((size_t)SCR_W * SCR_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  qsGlassUpTo = -1;
+  qpGlRowSy = -1;
+  if(!qpGlassBuild()) return;
+#if QP_PROF
+  qpPfGlass++;
+#endif
+  qsComposedTo = -1;
   qsDirty = false;
   qpMarkAll();
 }
 
 // ---- REPINTADO POR BANDAS --------------------------------------------
+// Esta es la UNICA funcion que dibuja en pantalla mientras la cortina esta a
+// la vista, y la llama un solo sitio (qsTick), una vez por cuadro.
 static void qsRender(bool full){
   uint16_t* bg = qsBgSrc();
   if(!bg) return;
@@ -14304,26 +14716,40 @@ static void qsRender(bool full){
     return;
   }
   if(!qpLoaded) qpLoad();
-  if(qsDirty || !qsBuf){ qsCompose(); full = true; }
-  if(!qsBuf){ blitToFb(bg); flxFlushAll(); return; }
+  if(qsDirty || !qsBuf || !qsGlassOk){ qsCompose(); full = true; }
+  if(!qsBuf || !qsGlassOk){ blitToFb(bg); flxFlushAll(); return; }
 
+#if QP_PROF
+  uint32_t t0 = micros();
+#endif
   int py = qsPanelY < SCR_H ? qsPanelY : SCR_H;
 
   // 1) recorrido del borde (con su asa por arriba y su sombra por abajo)
   int mlo = py < qsLastY ? py : qsLastY;
   int mhi = py > qsLastY ? py : qsLastY;
-  if(py != qsLastY){ qpMark(mlo - QS_HANDLE_MARGIN, mhi + QS_SHADOW_H); }
+  if(py != qsLastY) qpMark(mlo - QS_HANDLE_MARGIN, mhi + QS_SHADOW_H);
   // 2) el reloj de la cabecera cambio de minuto
   if(qpLastMin != rtcMin){ qpLastMin = rtcMin; qpMarkHeader(); }
-  // 3) destello de un control (se desvanece: hay que repintarlo hasta el final)
+  // 3) destello de un control (se desvanece: hay que recomponerlo hasta el final)
   if(qpFlashIdx >= 0){
-    qpMark(qpFlashY0, qpFlashY1);
+    qpRecompose(qpFlashY0, qpFlashY1);
     if(millis() - qpFlashMs >= QP_FLASH_MS){ qpFlashIdx = -1; qpFlashKind = -1; }
   }
   // 4) rechazo de tamano en el editor
-  if(qpEdRejectF >= 0 && millis() - qpEdRejectMs >= 350) qpEdRejectF = -1;
+  if(qpEdRejectF >= 0 && millis() - qpEdRejectMs >= 350){ qpEdRejectF = -1; qpMarkView(); }
   // 5) repintado completo pedido
   if(full) qpMark(0, mhi + QS_SHADOW_H);
+
+  // Recomposicion pendiente (contenido que cambio). Va ANTES de publicar, y
+  // solo sobre las filas ya compuestas: las que aun no lo estan las hara
+  // qsEnsureComposed con el valor nuevo.
+  if(qpCy1 >= qpCy0){
+    int c1 = qpCy1 < qsComposedTo ? qpCy1 : qsComposedTo;
+    if(c1 >= qpCy0) qsComposeRows(qpCy0, c1);
+    qpCy0 = 0x7FFF; qpCy1 = -1;
+  }
+  // Solo se compone lo que el borde de la cortina deja ver.
+  qsEnsureComposed(py - 1);
 
   if(qpDy1 < qpDy0){ qsLastY = py; return; }
   int cutTop = qpDy0 < 0 ? 0 : qpDy0;
@@ -14331,51 +14757,60 @@ static void qsRender(bool full){
   qpDy0 = 0x7FFF; qpDy1 = -1;
   if(cutBot < cutTop){ qsLastY = py; return; }
 
+  // Publicacion: por encima del borde manda el panel ya compuesto; por debajo,
+  // el escritorio o la captura de la app -- que es lo que "restaura" las filas
+  // que la cortina acaba de dejar libres. Cero dibujo, solo copia.
   setBuf(bbuf);
-  // Base de la banda: por encima del borde manda el FONDO de la cortina; por
-  // debajo, el escritorio o la captura de la app -- que es lo que "restaura"
-  // las filas que la cortina acaba de dejar libres.
   for(int j = cutTop; j <= cutBot; j++){
     const uint16_t* src = (j < py) ? qsBuf : bg;
     memcpy(bbuf + (size_t)j * SCR_W, src + (size_t)j * SCR_W, SCR_W * 2);
   }
+#if QP_PROF
+  qpPfRowsPub += (uint32_t)(cutBot - cutTop + 1);
+#endif
 
-  const int oCY0 = gClipY0, oCY1 = gClipY1, oCX0 = gClipX0, oCX1 = gClipX1;
-  gClipX0 = 0; gClipX1 = SCR_W - 1;
-  // RECORTE AL BORDE DE LA CORTINA. Nada del panel puede pintarse por debajo
-  // de su propio borde mientras esta a medio abrir.
-  gClipY0 = cutTop;
-  gClipY1 = (cutBot < py - 1) ? cutBot : py - 1;
-  if(gClipY1 >= gClipY0){
-    if(qpMode == QPM_CAT){
-      qpDrawCatalog();
-    } else {
-      qpRelayout();
-      qpDrawBody();
-      if(qpMode == QPM_EDIT){ qpDrawEditHeader(); qpDrawGhost(); }
-      else                  { qpDrawHeader(); qpDrawFooter(); }
-    }
-  }
-  // Sombra y tirador del borde: fuera del recorte al panel (la sombra cae por
-  // debajo del borde a proposito), pero dentro de la banda que se publica.
-  gClipY0 = cutTop; gClipY1 = cutBot;
+  // Sombra y tirador del borde movil: 18 filas, y solo mientras la cortina no
+  // esta abierta del todo.
   if(py < SCR_H){
+    const int oy0 = gClipY0, oy1 = gClipY1, ox0 = gClipX0, ox1 = gClipX1;
+    gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = cutTop; gClipY1 = cutBot;
     for(int yy = py; yy < py + QS_SHADOW_H; yy++){
       uint8_t a = (uint8_t)(70 * (1.0f - (float)(yy - py) / (float)QS_SHADOW_H));
       if(a > 0) hLineA(0, yy, SCR_W, TH_SHADOW, a);
     }
     fillRoundRect(SCR_W / 2 - 28, py - 14, 56, 5, 2, TH_MUTE);
+    gClipY0 = oy0; gClipY1 = oy1; gClipX0 = ox0; gClipX1 = ox1;
   }
-  gClipY0 = oCY0; gClipY1 = oCY1; gClipX0 = oCX0; gClipX1 = oCX1;
+  setBuf(fb);
 
   present(cutTop, cutBot);
   qsLastY = py;
+#if QP_PROF
+  uint32_t dt = micros() - t0;
+  qpPfFrames++; qpPfUs += dt;
+  if(dt > qpPfWorst) qpPfWorst = dt;
+  if(dt > QP_BUDGET_US) qpPfSlow++;
+  if(qsDragging){
+    qpPfDragFrames++; qpPfDragUs += dt;
+    if(dt > qpPfDragWorst) qpPfDragWorst = dt;
+  }
+#endif
 }
 
 // ---- ANIMACION DE APERTURA / CIERRE (no bloqueante) -----------------
-// Solo PROGRAMA el movimiento; qsAnimStep() -- una vez por cuadro desde
-// uiTick() -- lo avanza con el reloj. Cero delay(), cero bucles.
-#define QS_SMOOTH_TAU 26.0f
+// REPARTO DE PAPELES, que es lo que hace que el gesto se sienta pegado al
+// dedo:
+//   · con el dedo ABAJO no hay ni easing ni resorte ni suavizado: la
+//     posicion es qsDragBase + (T.y - qsDragY0), 1:1 y sin filtro. El
+//     suavizado exponencial que habia antes ponia el panel SIEMPRE por
+//     detras del dedo, y eso es exactamente lo que se percibe como lag.
+//   · al SOLTAR entra la animacion: solo PROGRAMA el movimiento y
+//     qsAnimStep() -- una vez por cuadro desde qsTick() -- lo avanza con el
+//     reloj. Cero delay(), cero bucles, cero pasos fijos por cuadro.
+//   · si el dedo vuelve a tocar durante esa animacion, se cancela en el acto
+//     y el control vuelve al dedo desde donde estuviera el panel.
+// La velocidad se sigue filtrando (solo para decidir el lanzamiento al
+// soltar), pero NO afecta a la posicion mientras se arrastra.
 #define QS_VEL_TAU    45.0f
 #define QS_FLICK      0.45f
 static float    qsVel = 0;
@@ -14399,7 +14834,9 @@ static void qpEditCancel();     // definida con el editor, mas abajo
 static void qsSettleClosed(){
   qsPanelY = 0; qsPosF = 0; qsVel = 0;
   qsRestoreBg();
-  qpFreeBuffers();                    // suelta la captura de la app y el fondo cacheado
+  qpProfReport("sesion");             // medicion real del gesto que acaba de terminar
+  qpFreeBuffers();                    // suelta la captura, el vidrio y el panel compuesto
+  qsComposedTo = -1;
   qsDirty = true;
 }
 static void qsAnimTo(int target){
@@ -14409,7 +14846,7 @@ static void qsAnimTo(int target){
   if(dist == 0){
     qsAnimOn = false;
     qsPanelY = target; qsPosF = (float)target;
-    if(target <= 0) qsSettleClosed(); else qsRender(false);
+    if(target <= 0) qsSettleClosed(); else qpMark(0, SCR_H - 1);
     return;
   }
   qsAnimFrom = from; qsAnimDest = target;
@@ -14431,6 +14868,13 @@ static int      qpGTargetBlk = -1;            // bloque bajo el dedo (para el to
 static int      qpGTargetTile = -1;           // circulo bajo el dedo (indice en qpTiles)
 static int      qpGTargetHdr = -1;            // boton de cabecera bajo el dedo
 static bool     qpGLong = false;              // ya se disparo la accion secundaria
+// GUARDADO DIFERIDO. Escribir en NVS son decenas de milisegundos de flash, y
+// el sitio donde caia -- el cuadro en que se levanta el dedo -- es justo donde
+// arranca la animacion de asentamiento: se veia como un tiron al soltar. El
+// manejador tactil solo LEVANTA la bandera; qsTick() escribe DESPUES de haber
+// publicado el cuadro.
+static bool     qpSavePanel = false;          // configuracion del panel (alto de la tarjeta)
+static bool     qpSavePrefs = false;          // preferencias del sistema (brillo)
 static uint32_t qpGPrevMs = 0;
 static int      qpGPrevY = 0;
 #define QP_DRAG_TH   8                        // px para dejar de ser toque
@@ -14493,7 +14937,9 @@ static void qpGroupAnimStep(){
 // velocidad no depende de cuantos cuadros diera el sistema.
 static void qpScrollAnimStep(uint32_t dt){
   if(dt == 0) return;
-  bool moved = false;
+  // Se distingue QUE se movio: si solo se asento el scroll interno de la
+  // tarjeta, se recompone la tarjeta y no las 684 filas del viewport.
+  bool moved = false, movedGroup = false;
   if(qpG != QG_SCROLL && fabsf(qpScrollVel) > 0.01f){
     qpScrollF += qpScrollVel * (float)dt;
     qpScrollVel *= expf(-(float)dt / 190.0f);
@@ -14514,7 +14960,7 @@ static void qpScrollAnimStep(uint32_t dt){
     qpGScrollF += qpGScrollVel * (float)dt;
     qpGScrollVel *= expf(-(float)dt / 190.0f);
     if(fabsf(qpGScrollVel) < 0.01f) qpGScrollVel = 0;
-    moved = true;
+    movedGroup = true;
   }
   if(qpG != QG_GSCROLL){
     int inner = qpGroupInnerH(qpLayGroupPx);
@@ -14524,10 +14970,11 @@ static void qpScrollAnimStep(uint32_t dt){
       float a = 1.0f - expf(-(float)dt / 90.0f);
       qpGScrollF += (tgt - qpGScrollF) * a;
       if(fabsf(tgt - qpGScrollF) < 0.5f){ qpGScrollF = tgt; qpGScrollVel = 0; }
-      moved = true;
+      movedGroup = true;
     }
   }
-  if(moved) qpMarkView();
+  if(moved)           qpMarkView();
+  else if(movedGroup) qpMarkGroup();
 }
 
 // ---- HIT-TEST --------------------------------------------------------
@@ -14686,7 +15133,7 @@ static bool qpPanelTouch(){
       }
       return true;
     }
-    cfgSavePrefs();                                         // NVS SOLO al soltar
+    qpSavePrefs = true;                                     // NVS DIFERIDA, fuera del gesto
     qpG = QG_NONE;
     return true;
   }
@@ -14698,18 +15145,26 @@ static bool qpPanelTouch(){
         if(abs(T.y - qsDragY0) <= 6){ qsPrevY = T.y; qsPrevMs = now; return true; }
         qsDragMoved = true;
       }
+      // dt acotado: si un cuadro se retrasa (una escritura de flash, la radio),
+      // la velocidad no se dispara ni el filtro pega un salto.
       float d = (float)(now - qsPrevMs); if(d < 1) d = 1; if(d > 100) d = 100;
+      // POSICION 1:1 CON EL DEDO. Sin suavizado, sin resorte, sin easing: el
+      // borde de la cortina esta exactamente donde esta el dedo.
       int target = qsDragBase + (T.y - qsDragY0);
       if(target < 0) target = 0; if(target > SCR_H) target = SCR_H;
+      // La velocidad se filtra SOLO para decidir el lanzamiento al soltar.
       float inst = (float)(T.y - qsPrevY) / d;
       qsVel += (inst - qsVel) * (d / (d + QS_VEL_TAU));
       qsPrevY = T.y; qsPrevMs = now;
-      float a = 1.0f - expf(-d / QS_SMOOTH_TAU);
-      qsPosF += ((float)target - qsPosF) * a;
-      if(fabsf((float)target - qsPosF) < 0.75f) qsPosF = (float)target;
-      if(qsPosF < 0) qsPosF = 0; if(qsPosF > (float)SCR_H) qsPosF = (float)SCR_H;
-      int ny = (int)(qsPosF + 0.5f);
-      if(ny != qsPanelY){ qsPanelY = ny; qsRender(false); }
+      qsPosF = (float)target;
+      // El tacto NO dibuja: solo mueve el estado y marca la banda. El unico
+      // punto de render es qsTick(), una vez por cuadro.
+      if(target != qsPanelY){
+        int lo = target < qsPanelY ? target : qsPanelY;
+        int hi = target > qsPanelY ? target : qsPanelY;
+        qsPanelY = target;
+        qpMark(lo - QS_HANDLE_MARGIN, hi + QS_SHADOW_H);
+      }
       return true;
     }
     qsDragging = false; qpG = QG_NONE;
@@ -14746,7 +15201,7 @@ static bool qpPanelTouch(){
     }
     qpG = QG_NONE;
     qpGroupSnap();
-    qpSave();                                    // el alto elegido es configuracion
+    qpSavePanel = true;                          // el alto elegido es configuracion (NVS diferida)
     return true;
   }
 
@@ -14763,7 +15218,10 @@ static bool qpPanelTouch(){
         qpGScrollVel += (inst - qpGScrollVel) * ((float)dt / ((float)dt + 45.0f));
       }
       qpGPrevY = T.y; qpGPrevMs = now;
-      qpMarkView();
+      // El scroll del PANEL mueve todo el contenido; el de la TARJETA solo la
+      // tarjeta. Recomponer lo segundo como si fuera lo primero costaba el
+      // doble por cuadro sin que cambiara un pixel de mas.
+      if(qpG == QG_SCROLL) qpMarkView(); else qpMarkGroup();
       return true;
     }
     qpG = QG_NONE;
@@ -15181,10 +15639,15 @@ static bool qpCatTouch(){
 }
 
 // ---- AVANCE POR CUADRO ------------------------------------------------
-// uiTick() llama a qsTick() una vez por cuadro mientras la cortina esta a la
-// vista. Todo lo que se mueve (apertura/cierre, "snap" de la tarjeta,
-// inercia del scroll y destellos) avanza AQUI, con el tiempo transcurrido y
-// sin un solo delay().
+// SEPARACION ESTRICTA DE ETAPAS. El orden de una vuelta de loop() es:
+//   1. lectura de touch      -> flexPollTouch()
+//   2. actualizacion de estado -> qsGlobalHandle() (no dibuja NADA)
+//   3. animacion posterior al gesto -> qsAnimStep / qpGroupAnimStep /
+//      qpScrollAnimStep, todas con el tiempo transcurrido acotado
+//   4. composicion Liquid Glass (perezosa) + render -> qsRender(), UNA vez
+// Antes las etapas 2 y 4 estaban mezcladas: el manejador tactil llamaba a
+// qsRender() y uiTick() llamaba a otro, o sea dos publicaciones por vuelta,
+// cada una esperando al DMA2D.
 static void qsAnimStep(){
   if(!qsAnimOn) return;
   uint32_t e = millis() - qsAnimT0; if(e > qsAnimDur) e = qsAnimDur;
@@ -15193,23 +15656,42 @@ static void qsAnimStep(){
   p = (p < 0.5f) ? (4.0f * p * p * p) : (1.0f - 4.0f * ip * ip * ip);
   int ny = qsAnimFrom + (int)((qsAnimDest - qsAnimFrom) * p + (qsAnimDest > qsAnimFrom ? 0.5f : -0.5f));
   if(ny < 0) ny = 0; if(ny > SCR_H) ny = SCR_H;
-  if(ny != qsPanelY){ qsPanelY = ny; qsPosF = (float)ny; qsRender(false); }
+  if(ny != qsPanelY){
+    int lo = ny < qsPanelY ? ny : qsPanelY;
+    int hi = ny > qsPanelY ? ny : qsPanelY;
+    qsPanelY = ny; qsPosF = (float)ny;
+    qpMark(lo - QS_HANDLE_MARGIN, hi + QS_SHADOW_H);
+  }
   if(e < qsAnimDur) return;
   qsAnimOn = false;
   qsPanelY = qsAnimDest; qsPosF = (float)qsAnimDest;
-  if(qsAnimDest <= 0) qsSettleClosed();
-  else                qsRender(false);
+  if(qsAnimDest <= 0) qsSettleClosed();     // aqui SI se vuelca el fondo entero, una vez
+  else                qpMark(0, SCR_H - 1);
+}
+// Cancela la animacion en curso y devuelve el control al dedo desde donde
+// este el panel AHORA. Sin esto, tocar durante el "snap" no hacia nada hasta
+// que la animacion terminaba.
+static void qsAnimCancel(){
+  qsAnimOn = false;
+  qsPosF = (float)qsPanelY;
 }
 static uint32_t qpTickMs = 0;
 static void qsTick(){
   uint32_t now = millis();
-  uint32_t dt = now - qpTickMs; if(dt < 1) dt = 1; if(dt > 100) dt = 100;
+  uint32_t dt = now - qpTickMs; if(dt < 1) dt = 1; if(dt > 100) dt = 100;   // dt acotado
   qpTickMs = now;
-  if(qsAnimOn){ qsAnimStep(); return; }
-  if(qsPanelY <= 0) return;
-  qpGroupAnimStep();
-  qpScrollAnimStep(dt);
-  qsRender(false);
+  // 3) animaciones (solo despues del gesto; con el dedo abajo no corren)
+  if(qsAnimOn) qsAnimStep();
+  else if(qsPanelY > 0){
+    qpGroupAnimStep();
+    qpScrollAnimStep(dt);
+  }
+  // 4) composicion + publicacion: UN solo punto de render en todo el panel
+  if(qsPanelY > 0 || qsLastY > 0) qsRender(false);
+  // 5) trabajo diferido que NO puede ocurrir dentro del gesto ni antes de
+  //    publicar: una escritura de flash son decenas de milisegundos.
+  if(qpSavePanel){ qpSavePanel = false; qpSave(); }
+  if(qpSavePrefs){ qpSavePrefs = false; cfgSavePrefs(); }
 }
 
 // ---- CIERRE LIMPIO Y OBLIGATORIO -------------------------------------
@@ -15228,6 +15710,9 @@ static void qsForceClose(){
   qpScrollF = 0; qpScrollVel = 0; qpGScrollVel = 0;
   qpFlashIdx = -1; qpFlashKind = -1;
   qpDy0 = 0x7FFF; qpDy1 = -1;
+  qpCy0 = 0x7FFF; qpCy1 = -1;
+  qsComposedTo = -1;
+  if(wasOpen) qpProfReport("cierre forzado");
   qpFreeBuffers();
   if(wasOpen){
     qsDirty = true;
@@ -15283,7 +15768,17 @@ static bool qsGlobalHandle(){
     if(qsPanelY != 0 || qsDragging || qsAnimOn) qsForceClose();
     return false;
   }
-  if(qsAnimOn) return true;
+  // Tocar durante el "snap" de apertura o de cierre CANCELA la animacion y
+  // devuelve el control al dedo en el acto, desde donde este el panel.
+  if(qsAnimOn){
+    if(!T.pressed) return true;
+    qsAnimCancel();
+    qsDragging = true; qsDragMoved = false;
+    qsDragBase = qsPanelY; qsDragY0 = T.y; qsPosF = (float)qsPanelY;
+    qsPrevY = T.y; qsPrevMs = millis(); qsVel = 0;
+    qpG = QG_CURTAIN;
+    return true;
+  }
   if(qsPanelY > 0 || qsDragging) return qsHandle();
   if(!(T.pressed && T.startY < QS_EDGE_H)) return false;
   if(gState == ST_APP){
@@ -15299,6 +15794,9 @@ static bool qsGlobalHandle(){
   qpGScrollF = 0; qpGScrollVel = 0;
   qpGAnim = false; qpLastMin = -1;
   qpRelayout();
+  qpProfReset();
+  qsComposedTo = -1;
+  qpCy0 = 0x7FFF; qpCy1 = -1;
   qsDirty = true;
   // Agarre: el dedo mueve un DELTA 1:1 desde la posicion actual.
   qsAnimOn = false; qsDragging = true; qsDragMoved = false;
