@@ -626,7 +626,10 @@ static bool runPackage(const char* packagePath, FlexPkgInfo* out, bool install,
 
 bool flexPkgBegin(){
   setError(FLEXPKG_OK, "Correcto");
-  if(!LittleFS.begin(false)){ setError(FLEXPKG_ERR_FS, "LittleFS no esta disponible"); return false; }
+  // FlexOS_FS ya monto LittleFS con la etiqueta real de la particion
+  // (spiffs/littlefs/ffat/storage). Volver a llamar begin() aqui podria
+  // intentar la etiqueta por defecto y desmontar una particion valida.
+  if(LittleFS.totalBytes() == 0){ setError(FLEXPKG_ERR_FS, "LittleFS no esta disponible"); return false; }
   if(!mkdirOne(ROOT_DIR)){ setError(FLEXPKG_ERR_FS, "No se pudo crear /FlexApps"); return false; }
   File root = LittleFS.open(ROOT_DIR, "r");
   if(!root || !root.isDirectory()){ if(root) root.close(); return false; }
