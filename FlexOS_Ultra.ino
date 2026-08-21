@@ -76,6 +76,13 @@
 // #define hecho en este .ino no llegaria hasta ella.
 #include "FlexOS_OTA.h"
 
+// FLEX PACKAGE / FLEX STORE. El instalador valida FLXP v1, hashes SHA-256 y
+// firmas ECDSA P-256 antes de activar una app. El runtime ejecuta unicamente
+// interfaces declarativas flex-ui-1, nunca codigo nativo de terceros.
+#include "FlexOS_Package.h"
+#include "FlexOS_Runtime.h"
+#include "FlexOS_Store.h"
+
 // SISTEMA DE ARCHIVOS REAL (LittleFS). Toda la logica de ficheros vive en
 // FlexOS_FS.cpp -- comun a las tres placas -- para no tener tres copias de
 // lo mismo que se desincronicen. Aqui solo se dibuja.
@@ -4459,8 +4466,8 @@ static void arcStroke(float cx, float cy, float r, float a0, float a1, int thick
 enum { IC_RELOJ, IC_GALERIA, IC_MULTIMEDIA, IC_ALMACEN, IC_MODOPC, IC_NOTAS,
        IC_EDU, IC_NAV, IC_CODE, IC_BIEN, IC_PAINT, IC_JUEGOS,
        IC_AJUSTES, IC_CALC, IC_CALEND, IC_CAMARA,
-       IC_CLIMA };   // Clima ocupa el hueco 16: ningun indice anterior se mueve
-#define APP_N 17
+       IC_CLIMA, IC_FLEXSTORE }; // Flex Store ocupa 17: ningun indice anterior se mueve
+#define APP_N 18
 
 static void iconBase(int x, int y, int S, uint16_t bg, int rf100){
   int r = S * rf100 / 100;
@@ -4628,6 +4635,18 @@ static void drawAppIcon(int id, int x, int y, int S){
         fillRect(ccx - r - r / 2, ccy, (int)(S * 0.40f), r + 1, WHITE);
         fillCircle(ccx - r - r / 2, ccy, r / 2 + 1, WHITE);
       }
+    } break;
+    case IC_FLEXSTORE: {
+      // Bolsa firmada de Flex Store: marca propia, vectorial y sin recursos externos.
+      iconBase(x, y, S, rgb565(105,91,230), 22);
+      int bx = x + (int)(S * 0.22f), by = y + (int)(S * 0.34f);
+      int bw = (int)(S * 0.56f), bh = (int)(S * 0.46f);
+      fillRoundRect(bx, by, bw, bh, (int)(S * 0.09f), WHITE);
+      strokeSeg(cx - (int)(S * 0.16f), by + 2, cx - (int)(S * 0.10f), y + (int)(S * 0.22f), 2, WHITE);
+      strokeSeg(cx - (int)(S * 0.10f), y + (int)(S * 0.22f), cx + (int)(S * 0.10f), y + (int)(S * 0.22f), 2, WHITE);
+      strokeSeg(cx + (int)(S * 0.10f), y + (int)(S * 0.22f), cx + (int)(S * 0.16f), by + 2, 2, WHITE);
+      fillRoundRect(cx - (int)(S * 0.16f), by + (int)(S * 0.13f), (int)(S * 0.32f), (int)(S * 0.09f),
+                    (int)(S * 0.04f), rgb565(105,91,230));
     } break;
     case IC_CAMARA: {
       iconBase(x, y, S, rgb565(74,74,78), 22);
@@ -5364,6 +5383,7 @@ static const char* APP[APP_N][5] = {
   {"Calendario","Calendar","Calendrier","Calend\xC3\xA1rio","Calendario"},
   {"C\xC3\xA1mara","Camera","Appareil","C\xC3\xA2mera","Fotocamera"},
   {"Clima","Weather","M\xC3\xA9t\xC3\xA9o","Clima","Meteo"},
+  {"Flex Store","Flex Store","Flex Store","Flex Store","Flex Store"},
 };
 static const char* appName(int id){ return APP[id][LI()]; }
 
@@ -8929,6 +8949,7 @@ static void connWifiSub(char* out, size_t n);              // SSID real para Aju
 static void connBleSub(char* out, size_t n);
 static void geoEnter(); static void geoTick();   // Juegos -> Geo Dash (clon de Geometry Dash)
 static void wxAppEnter(); static void wxAppTick();  // Clima (Flex Weather) -- seccion propia mas abajo
+static void storeEnter(); static void storeTick(); static void storeExit(); // Flex Store + runtime FLXP
 // Rect del icono en el escritorio (para animar la apertura desde el)
 static void getIconRect(int id, int &rx, int &ry, int &rs){
   if(id == gIconOvrApp){ rx = gIconOvrX; ry = gIconOvrY; rs = gIconOvrS; return; }
@@ -9403,6 +9424,9 @@ static FlexApp APP_REG[APP_N] = {
   // abre desde su widget (la fila de arriba) y desde la Caja de aplicaciones,
   // que es de donde el usuario puede anadirla a Inicio si quiere.
   { wxAppEnter, wxAppTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_ESENCIAL, APP_DEF_DOCK },
+  // 17 Flex Store. Gestiona su cabecera y tactil; las operaciones de red/flash
+  // corren en una tarea de fondo para no bloquear la interfaz.
+  { storeEnter, storeTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH | APP_FLEX, APP_CAT_SISTEMA, APP_DEF_DOCK },
 };
 static const char* appCatName(int id){
   int c = (id >= 0 && id < APP_N) ? APP_REG[id].cat : APP_CAT_SISTEMA;
@@ -9489,6 +9513,7 @@ static void appClose(){
   // barra iOS, cierre de la ventana de DeX). Se hace aqui, que es el
   // unico punto por el que pasan TODAS. flexBrowserExit() es idempotente.
   if(gAppId == IC_NAV) flexBrowserExit();
+  if(gAppId == IC_FLEXSTORE) storeExit();
   if(gHosted){ gHostReq = 1; return; }        // dentro de una ventana: cierra la VENTANA
   // El FRAMEWORK devuelve el motor a portrait, no la app. Antes cada app
   // landscape tenia que acordarse de hacer gLand=false por su cuenta (pcExit,
@@ -32540,6 +32565,9 @@ static void vaultStatusText(char* out, size_t n){
 // del OTA: necesita que las primitivas de dibujo Y el teclado (kb*) ya
 // esten definidos. Define navEnter()/navTick().
 #include "FlexOS_Browser_Bridge.h"
+// Puente visual de Flex Store. Se incluye aqui para reutilizar las primitivas
+// estaticas del framebuffer y el sistema tactil de FlexOS Ultra.
+#include "FlexOS_Store_Bridge.h"
 
 
 void setup(){
@@ -32599,9 +32627,14 @@ void setup(){
   // SISTEMA DE ARCHIVOS. Es flash, no radio: montarlo aqui NO viola la regla
   // de "setup() no toca la radio". Si falla, las pantallas que dependen de el
   // lo dicen en pantalla (fkNoFsScreen) en vez de ensenar datos inventados.
-  if(!flexFsBegin()) Serial.printf("[FS] no montado: %s\n", flexFsError());
-  else Serial.printf("[FS] LittleFS: %lu / %lu bytes usados\n",
-                     (unsigned long)flexFsUsedBytes(), (unsigned long)flexFsTotalBytes());
+  bool fsOk = flexFsBegin();
+  if(!fsOk) Serial.printf("[FS] no montado: %s\n", flexFsError());
+  else {
+    Serial.printf("[FS] LittleFS: %lu / %lu bytes usados\n",
+                  (unsigned long)flexFsUsedBytes(), (unsigned long)flexFsTotalBytes());
+    flexPkgBegin();       // recupera una transaccion interrumpida y limpia staging obsoleto
+  }
+  flexStoreBegin();       // crea la tarea de fondo; no abre WiFi ni descarga en setup()
 
   // FLEX VAULT. Solo carga el sobre de la clave y los contadores de NVS:
   // la boveda arranca SIEMPRE cerrada y no se descifra nada aqui. Necesita
