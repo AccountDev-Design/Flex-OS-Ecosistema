@@ -4,10 +4,20 @@
 // Puente visual para FlexOS_Ultra.ino. Se incluye al final del .ino, cuando ya
 // existen framebuffer, tactil, tema, Wi-Fi y las pantallas de Flex Store.
 
-static bool accountFirstBoot = true;
+// A DONDE SE VUELVE AL SALIR. Antes solo habia un booleano de "primer
+// arranque", y el retorno del configurador de Wi-Fi lo forzaba SIEMPRE a true:
+// entrar a Wi-Fi desde el boton Cuenta de Flex Store devolvia la pantalla en
+// modo OOBE y, al pulsar Continuar/Omitir, el equipo se iba al bloqueo y
+// reescribia la marca de primera configuracion. Con un destino explicito cada
+// via de entrada vuelve a su sitio y el retorno del Wi-Fi lo conserva.
+enum AccountReturn : uint8_t { ACC_RET_OOBE = 0, ACC_RET_STORE, ACC_RET_SETTINGS };
+static AccountReturn accountReturn = ACC_RET_OOBE;
+static bool accountFirstBoot = true;              // == (accountReturn == ACC_RET_OOBE)
 static FlexAccountState accountLastState = (FlexAccountState)255;
 static uint8_t accountLastProgress = 255;
 static char accountLastStage[72] = "";
+static bool accountLastOnline = false;            // la pantalla depende del estado real del Wi-Fi
+static uint32_t accountPollMs = 0;                // cadencia del sondeo de estado (no del tactil)
 
 static void accountButton(int x, int y, int w, int h, const char* text, bool primary){
   fillRoundRectA(x, y, w, h, h / 2, primary ? rgb565(111,82,238) : rgb565(255,255,255), primary ? 245 : 62);
@@ -21,6 +31,7 @@ static void accountBackGlyph(){
 
 static void accountRender(){
   FlexAccountSnapshot snapshot; flexAccountSnapshot(&snapshot);
+  bool online = WiFi.status() == WL_CONNECTED;
   drawWallpaper(fb, false); setBuf(fb);
 
   // Halo y marca propios de Flex Account. Todo se dibuja con primitivas del
@@ -43,7 +54,9 @@ static void accountRender(){
     if(snapshot.displayName[0]) drawTextC(SCR_W / 2, 445, snapshot.displayName, 1, rgb565(205,210,228));
     drawTextC(SCR_W / 2, 490, "Tu correo de recuperacion nunca", 1, rgb565(174,181,205));
     drawTextC(SCR_W / 2, 512, "se muestra en FlexOS ni a otros usuarios.", 1, rgb565(174,181,205));
-    accountButton(58, 548, SCR_W - 116, 58, accountFirstBoot ? "Continuar" : "Volver a Flex Store", true);
+    accountButton(58, 548, SCR_W - 116, 58,
+                  accountReturn == ACC_RET_OOBE ? "Continuar" :
+                  accountReturn == ACC_RET_SETTINGS ? "Volver a Ajustes" : "Volver a Flex Store", true);
   } else if(snapshot.state == FLEX_ACCOUNT_REQUESTING){
     drawTextC(SCR_W / 2, 300, "Creando enlace seguro", 3, rgb565(255,255,255));
     int px = 60, py = 368, pw = SCR_W - 120;
@@ -63,7 +76,6 @@ static void accountRender(){
     drawTextC(SCR_W / 2, 514, "El codigo vence en 10 minutos", 1, rgb565(174,181,205));
     accountButton(110, 552, SCR_W - 220, 54, "Cancelar", false);
   } else {
-    bool online = WiFi.status() == WL_CONNECTED;
     const char* title = snapshot.state == FLEX_ACCOUNT_ERROR ? "No se pudo vincular" :
                         snapshot.state == FLEX_ACCOUNT_EXPIRED ? "El codigo expiro" : "Una cuenta para todo FlexOS";
     drawTextC(SCR_W / 2, 278, title, 2, rgb565(255,255,255));
@@ -88,25 +100,48 @@ static void accountRender(){
 
   accountLastState = snapshot.state;
   accountLastProgress = snapshot.progress;
+  accountLastOnline = online;
   snprintf(accountLastStage, sizeof(accountLastStage), "%s", snapshot.stage);
 }
 
-static void accountEnter(bool firstBoot){
-  accountFirstBoot = firstBoot;
+static void accountEnter(AccountReturn where){
+  accountReturn = where;
+  accountFirstBoot = (where == ACC_RET_OOBE);
   accountLastState = (FlexAccountState)255;
+  accountPollMs = millis();
   gState = ST_OOBE_ACCOUNT;
   accountRender();
 }
 
-static void accountOobeEnter(){ accountEnter(true); }
-static void accountStoreEnter(){ accountEnter(false); }
+static void accountOobeEnter(){     accountEnter(ACC_RET_OOBE); }
+static void accountStoreEnter(){    accountEnter(ACC_RET_STORE); }
+static void accountSettingsEnter(){ accountEnter(ACC_RET_SETTINGS); }
+// Vuelta desde el configurador de Wi-Fi: repinta SIN cambiar el destino de
+// salida que tenia la pantalla antes de ir a configurar la red.
+static void accountResumeEnter(){   accountEnter(accountReturn); }
+
+// Texto de la fila de Ajustes -> General -> Flex Account. Dice el estado REAL:
+// nunca inventa una direccion ni afirma que hay sesion si NVS no la trajo.
+static void accountSettingsText(char* out, size_t n){
+  FlexAccountSnapshot snapshot; flexAccountSnapshot(&snapshot);
+  if(snapshot.state == FLEX_ACCOUNT_LINKED && snapshot.flexAddress[0]) snprintf(out, n, "%s", snapshot.flexAddress);
+  else if(snapshot.state == FLEX_ACCOUNT_REQUESTING || snapshot.state == FLEX_ACCOUNT_CODE_READY)
+    snprintf(out, n, "Vinculacion en curso");
+  else snprintf(out, n, "Sin cuenta vinculada");
+}
 
 static void accountFinish(){
-  flexAccountCancel();
-  if(accountFirstBoot){
+  // Cancelar solo si hay un enlace EN CURSO. Antes se llamaba siempre, y eso
+  // dejaba la peticion de cancelacion levantada despues de vincular con exito.
+  FlexAccountState state = flexAccountState();
+  if(state == FLEX_ACCOUNT_REQUESTING || state == FLEX_ACCOUNT_CODE_READY) flexAccountCancel();
+  if(accountReturn == ACC_RET_OOBE){
     cfgSaveOobe();
     renderHome(); renderLock(); showLock();
     gState = ST_LOCK; lockOff = 0; lastLockOff = -1;
+  } else if(accountReturn == ACC_RET_SETTINGS){
+    gState = ST_APP;
+    settingsRender();
   } else {
     gState = ST_APP;
     storeEnter();
@@ -114,28 +149,41 @@ static void accountFinish(){
 }
 
 static void accountOobeTick(){
-  FlexAccountSnapshot snapshot; flexAccountSnapshot(&snapshot);
-  if(snapshot.state != accountLastState || snapshot.progress != accountLastProgress || strcmp(snapshot.stage, accountLastStage)) accountRender();
+  // El estado del enlace cambia como mucho cada 3 s (cadencia del sondeo de la
+  // tarea de red): copiar el snapshot bajo mutex en CADA cuadro no aporta nada.
+  // El tactil, en cambio, se sigue atendiendo en todos los cuadros.
+  uint32_t now = millis();
+  if((uint32_t)(now - accountPollMs) >= 80){
+    accountPollMs = now;
+    FlexAccountSnapshot snapshot; flexAccountSnapshot(&snapshot);
+    bool online = WiFi.status() == WL_CONNECTED;
+    if(snapshot.state != accountLastState || snapshot.progress != accountLastProgress ||
+       online != accountLastOnline || strcmp(snapshot.stage, accountLastStage)) accountRender();
+  }
   if(!T.tap) return;
 
   // Barra inferior / flecha: omite solamente la vinculacion, nunca la
-  // configuracion basica. Flex Store seguira mostrando el acceso a Cuenta.
+  // configuracion basica. Flex Store y Ajustes siguen mostrando el acceso a
+  // Cuenta, asi que omitir aqui no deja el dispositivo sin via de vuelta.
   if(T.y >= 670 || (!accountFirstBoot && T.x < 64 && T.y < 78)){ accountFinish(); return; }
 
-  if(snapshot.state == FLEX_ACCOUNT_LINKED){
+  FlexAccountState state = accountLastState;
+  if(state == FLEX_ACCOUNT_LINKED){
     if(T.y >= 530 && T.y <= 622) accountFinish();
     return;
   }
-  if(snapshot.state == FLEX_ACCOUNT_REQUESTING || snapshot.state == FLEX_ACCOUNT_CODE_READY){
+  if(state == FLEX_ACCOUNT_REQUESTING || state == FLEX_ACCOUNT_CODE_READY){
     if(T.y >= 520 && T.y <= 622){ flexAccountCancel(); accountRender(); }
     return;
   }
-  if(T.y >= 430 && T.y <= 520){
+  // Las dos franjas siguen EXACTAMENTE a los dos botones dibujados (452..510 y
+  // 526..580), sin solaparse entre si ni con la barra inferior.
+  if(T.y >= 444 && T.y <= 518){
     if(WiFi.status() != WL_CONNECTED) wifiOobeEnter();
     else if(flexAccountRequestCode(cfgName)) accountRender();
     return;
   }
-  if(T.y >= 515 && T.y <= 610){
+  if(T.y >= 520 && T.y <= 588){
     if(WiFi.status() != WL_CONNECTED) wifiOobeEnter();
     else if(flexAccountRequestCode(cfgName)) accountRender();
   }

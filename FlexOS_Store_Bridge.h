@@ -14,12 +14,26 @@ static bool storeSelectedInstalled = false;
 static bool storeConfirmDelete = false;
 static FlexPkgInfo storeInstalled[FLEXPKG_MAX_INSTALLED];
 static int storeInstalledN = 0;
+static bool storeInstalledDirty = true;         // flexPkgList lee LittleFS: solo por evento
 static FlexRuntimeApp storeRuntime;
 static FlexStoreState storeLastState = FLEXSTORE_IDLE;
 static uint8_t storeLastProgress = 255;
 static uint32_t storeToastUntil = 0;
 static char storeToastText[128] = "";
 static char storeSearch[33] = "";
+
+// CACHE DEL FILTRO. Antes cada repintado recorria el catalogo entero UNA VEZ
+// para contar y OTRA por cada fila para traducir el indice filtrado al real:
+// hasta 4 barridos de 24 items, con una copia de FlexStoreItem (y su mutex) en
+// cada paso. Ahora el barrido se hace solo cuando cambia algo que puede alterar
+// el resultado -- la busqueda, el catalogo o la lista de instaladas -- y se
+// guarda en dos tablas de indices de tamano fijo (24 + 24 bytes, sin malloc).
+static uint8_t storeFiltCat[FLEXSTORE_MAX_CATALOG];
+static uint8_t storeFiltCatN = 0;
+static uint8_t storeFiltInst[FLEXPKG_MAX_INSTALLED];
+static uint8_t storeFiltInstN = 0;
+static bool storeFiltDirty = true;
+static int storeFiltCatalogN = -1;              // tamano del catalogo con el que se construyo
 
 static void storeRender();
 
@@ -30,7 +44,21 @@ static void storeToast(const char* text){
   storeToastUntil = millis() + 2600;
 }
 
-static void storeReloadInstalled(){ storeInstalledN = flexPkgList(storeInstalled, FLEXPKG_MAX_INSTALLED); }
+static inline void storeFilterInvalidate(){ storeFiltDirty = true; }
+
+static void storeReloadInstalled(){
+  storeInstalledN = flexPkgList(storeInstalled, FLEXPKG_MAX_INSTALLED);
+  storeInstalledDirty = false;
+  storeFilterInvalidate();
+}
+static inline void storeEnsureInstalled(){ if(storeInstalledDirty) storeReloadInstalled(); }
+
+// Busqueda en la lista YA cargada, sin volver a tocar el sistema de archivos.
+static int storeInstalledFind(const char* packageId){
+  if(!packageId || !packageId[0]) return -1;
+  for(int i = 0; i < storeInstalledN; i++) if(!strcmp(storeInstalled[i].id, packageId)) return i;
+  return -1;
+}
 
 static char storeFold(char c){ return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c; }
 
@@ -52,40 +80,44 @@ static bool storeCatalogMatch(const FlexStoreItem& item){
 
 static bool storeInstalledMatch(const FlexPkgInfo& item){
   return storeContains(item.name, storeSearch) || storeContains(item.summary, storeSearch) ||
-         storeContains(item.id, storeSearch);
+         storeContains(item.category, storeSearch) || storeContains(item.id, storeSearch);
 }
 
-static int storeCatalogFilteredCount(){
-  int found = 0, total = flexStoreCatalogCount();
-  for(int i = 0; i < total; i++){ FlexStoreItem item; if(flexStoreCatalogItem(i, &item) && storeCatalogMatch(item)) found++; }
-  return found;
+static void storeFilterRebuild(){
+  storeFiltCatN = 0;
+  int total = flexStoreCatalogCount();
+  for(int i = 0; i < total && storeFiltCatN < FLEXSTORE_MAX_CATALOG; i++){
+    FlexStoreItem item;
+    if(flexStoreCatalogItem(i, &item) && storeCatalogMatch(item)) storeFiltCat[storeFiltCatN++] = (uint8_t)i;
+  }
+  storeFiltInstN = 0;
+  for(int i = 0; i < storeInstalledN && storeFiltInstN < FLEXPKG_MAX_INSTALLED; i++)
+    if(storeInstalledMatch(storeInstalled[i])) storeFiltInst[storeFiltInstN++] = (uint8_t)i;
+  storeFiltCatalogN = total;
+  storeFiltDirty = false;
 }
+
+// Barata cuando no hay nada que rehacer: una lectura del contador del catalogo
+// (un mutex) y una comparacion. Nunca se llama por cuadro, solo al dibujar o al
+// resolver un toque sobre una tarjeta.
+static void storeFilterEnsure(){
+  if(storeFiltDirty || flexStoreCatalogCount() != storeFiltCatalogN) storeFilterRebuild();
+}
+
+static int storeCatalogFilteredCount(){ storeFilterEnsure(); return storeFiltCatN; }
 
 static int storeCatalogIndexAt(int filteredIndex){
-  int found = 0, total = flexStoreCatalogCount();
-  for(int i = 0; i < total; i++){
-    FlexStoreItem item;
-    if(flexStoreCatalogItem(i, &item) && storeCatalogMatch(item)){
-      if(found == filteredIndex) return i;
-      found++;
-    }
-  }
-  return -1;
+  storeFilterEnsure();
+  if(filteredIndex < 0 || filteredIndex >= storeFiltCatN) return -1;
+  return storeFiltCat[filteredIndex];
 }
 
-static int storeInstalledFilteredCount(){
-  int found = 0;
-  for(int i = 0; i < storeInstalledN; i++) if(storeInstalledMatch(storeInstalled[i])) found++;
-  return found;
-}
+static int storeInstalledFilteredCount(){ storeFilterEnsure(); return storeFiltInstN; }
 
 static int storeInstalledIndexAt(int filteredIndex){
-  int found = 0;
-  for(int i = 0; i < storeInstalledN; i++) if(storeInstalledMatch(storeInstalled[i])){
-    if(found == filteredIndex) return i;
-    found++;
-  }
-  return -1;
+  storeFilterEnsure();
+  if(filteredIndex < 0 || filteredIndex >= storeFiltInstN) return -1;
+  return storeFiltInst[filteredIndex];
 }
 
 static void storeBackGlyph(int x, int y, uint16_t col){
@@ -142,6 +174,19 @@ static void storeEmpty(const char* title, const char* body){
 
 static int storeRowsPerPage(){ return 3; }
 
+// Aviso breve del resultado de una operacion (instalar, desinstalar, abrir).
+// Antes solo se dibujaba dentro del runtime de una app, asi que desinstalar o
+// terminar una instalacion no daba ninguna respuesta en pantalla.
+static bool storeToastVisible(){ return storeToastUntil && (int32_t)(millis() - storeToastUntil) < 0; }
+
+static void storeToastOverlay(){
+  if(!storeToastVisible()) return;
+  int y = SCR_H - 132;
+  fillRoundRect(24, y, SCR_W - 48, 48, 18, thCard());
+  drawTextClip(44, y + 16, storeToastText, 1, TH_TXT, SCR_W - 44);
+  flxFlush(y - 2, y + 50);
+}
+
 static void storeSearchRender(){
   storeHeader("Buscar apps", true);
   fillRoundRect(24, 108, SCR_W - 48, 56, 16, thCard());
@@ -185,12 +230,39 @@ static bool storeSearchTapKey(int x, int y){
 }
 
 static void storeSearchTap(int x, int y){
-  if(storeSearchTapKey(x, y)){ storeSearchRender(); return; }
+  // Toda modificacion de la consulta invalida el filtro y devuelve la lista a
+  // la primera pagina: sin esto, borrar letras podia dejar la vista en una
+  // pagina que ya no existe.
+  if(storeSearchTapKey(x, y)){ storeFilterInvalidate(); storePage = 0; storeSearchRender(); return; }
   size_t len = strlen(storeSearch);
-  if(y >= 316 && y <= 364 && x >= 348){ if(len) storeSearch[len - 1] = 0; storeSearchRender(); return; }
-  if(y >= 382 && y <= 430 && x < 240){ if(len && len < sizeof(storeSearch) - 1){ storeSearch[len] = ' '; storeSearch[len + 1] = 0; } storeSearchRender(); return; }
-  if(y >= 382 && y <= 430 && x >= 240){ storeSearch[0] = 0; storeSearchRender(); return; }
+  if(y >= 316 && y <= 364 && x >= 348){
+    if(len) storeSearch[len - 1] = 0;
+    storeFilterInvalidate(); storePage = 0; storeSearchRender(); return;
+  }
+  if(y >= 382 && y <= 430 && x < 240){
+    if(len && len < sizeof(storeSearch) - 1){ storeSearch[len] = ' '; storeSearch[len + 1] = 0; }
+    storeFilterInvalidate(); storePage = 0; storeSearchRender(); return;
+  }
+  if(y >= 382 && y <= 430 && x >= 240){
+    storeSearch[0] = 0; storeFilterInvalidate(); storePage = 0; storeSearchRender(); return;
+  }
   if(y >= 448 && y <= 510){ storeView = storeSearchSource; storePage = 0; storeRender(); }
+}
+
+// Solo la banda del progreso. Durante una descarga el estado NO cambia -- solo
+// el porcentaje -- y repintar los 480x800 en cada paso era el unico redibujado
+// completo repetitivo que quedaba en la tienda.
+static void storeProgressBand(){
+  setBuf(fb);
+  fillRect(0, 244, SCR_W, 132, TH_PAGE);
+  drawTextC(SCR_W / 2, 260, flexStoreStage(), 2, TH_TXT);
+  int x = 42, y = 318, w = SCR_W - 84;
+  uint8_t pct = flexStoreProgress();
+  fillRoundRect(x, y, w, 18, 9, thCard());
+  fillRoundRect(x, y, w * pct / 100, 18, 9, TH_PRIM);
+  char p[16]; snprintf(p, sizeof(p), "%u%%", pct); drawTextC(SCR_W / 2, y + 36, p, 2, TH_TXT2);
+  flxFlush(244, 375);
+  storeLastState = flexStoreState(); storeLastProgress = pct;
 }
 
 static void storeDiscoverRender(){
@@ -213,9 +285,10 @@ static void storeDiscoverRender(){
     flxFlushAll(); return;
   }
   if(st == FLEXSTORE_SUCCESS && storeLastState != FLEXSTORE_SUCCESS){
-    storeReloadInstalled();
+    storeInstalledDirty = true;                  // la app nueva ya esta activa en LittleFS
     storeToast("Aplicacion instalada y verificada");
   }
+  storeEnsureInstalled();
   int catalogCount = flexStoreCatalogCount();
   if(catalogCount == 0){
     storeEmpty("Aun no hay apps publicadas", "Desliza hacia abajo para actualizar");
@@ -236,8 +309,10 @@ static void storeDiscoverRender(){
     drawText(126, y + 22, item.name, 2, TH_TXT);
     drawTextClip(126, y + 53, item.summary[0] ? item.summary : item.category, 1, TH_TXT2, SCR_W - 32);
     storeStars(126, y + 80, item.ratingX100);
-    FlexPkgInfo local; bool installed = flexPkgGet(item.packageId, &local);
-    const char* action = installed ? (item.versionCode > local.versionCode ? "Actualizar" : "Abrir") : "Instalar";
+    // La version local sale de la lista ya cargada. Antes se abria y se parseaba
+    // el manifiesto de LittleFS por FILA y por REPINTADO (flexPkgGet).
+    int local = storeInstalledFind(item.packageId);
+    const char* action = local >= 0 ? (item.versionCode > storeInstalled[local].versionCode ? "Actualizar" : "Abrir") : "Instalar";
     fillRoundRect(SCR_W - 140, y + 104, 104, 36, 18, TH_PRIM);
     drawTextC(SCR_W - 88, y + 115, action, 1, rgb565(255,255,255));
   }
@@ -250,7 +325,7 @@ static void storeDiscoverRender(){
 }
 
 static void storeInstalledRender(){
-  storeHeader("Flex Store", false); storeTabs(); storeReloadInstalled();
+  storeHeader("Flex Store", false); storeTabs(); storeEnsureInstalled();
   if(storeInstalledN == 0){ storeEmpty("No tienes apps instaladas", "Instala una desde la pestana Descubrir"); flxFlushAll(); return; }
   int count = storeInstalledFilteredCount();
   if(count == 0){ storeEmpty("No encontramos apps", "Toca la lupa para cambiar tu busqueda"); flxFlushAll(); return; }
@@ -280,6 +355,7 @@ static void storeDetailRender(){
   char packageId[FLEXPKG_ID_MAX + 1] = "";
   bool installed = storeSelectedInstalled;
   bool update = false;
+  storeEnsureInstalled();
   if(installed && storeSelected >= 0 && storeSelected < storeInstalledN){
     FlexPkgInfo& a = storeInstalled[storeSelected];
     snprintf(name, sizeof(name), "%s", a.name); snprintf(summary, sizeof(summary), "%s", a.summary);
@@ -289,8 +365,10 @@ static void storeDetailRender(){
     if(flexStoreCatalogItem(storeSelected, &a)){
       snprintf(name, sizeof(name), "%s", a.name); snprintf(summary, sizeof(summary), "%s", a.summary);
       snprintf(version, sizeof(version), "Version %s - %lu KB", a.versionName, (unsigned long)(a.packageBytes / 1024u));
-      snprintf(packageId, sizeof(packageId), "%s", a.packageId); update = flexStoreHasUpdate(&a);
-      FlexPkgInfo local; installed = flexPkgGet(a.packageId, &local);
+      snprintf(packageId, sizeof(packageId), "%s", a.packageId);
+      int local = storeInstalledFind(a.packageId);
+      installed = local >= 0;
+      update = installed && a.versionCode > storeInstalled[local].versionCode;
     }
   }
   storeAppMark(28, 116, 104, name, rgb565(105,91,230));
@@ -326,7 +404,7 @@ static void storeRuntimeRender(){
       drawTextC(c.x + c.width / 2, c.y + c.height / 2 - 8, c.text, 2, rgb565(255,255,255));
     }
   }
-  if(storeToastUntil && (int32_t)(storeToastUntil - millis()) > 0){
+  if(storeToastVisible()){
     int w = SCR_W - 48, y = SCR_H - 120;
     fillRoundRect(24, y, w, 54, 18, surface);
     drawTextC(SCR_W / 2, y + 18, storeToastText, 1, textCol);
@@ -341,6 +419,7 @@ static void storeRender(){
   else if(storeView == SV_DETAIL) storeDetailRender();
   else if(storeView == SV_RUNTIME) storeRuntimeRender();
   else storeSearchRender();
+  if(storeView != SV_RUNTIME) storeToastOverlay();   // el runtime pinta el suyo con su tema
   storeLastState = flexStoreState(); storeLastProgress = flexStoreProgress();
 }
 
@@ -353,14 +432,22 @@ static void storeOpenInstalled(int index){
 }
 
 static void storeEnter(){
-  flexRuntimeUnload(&storeRuntime); storeReloadInstalled();
+  flexRuntimeUnload(&storeRuntime);
+  storeInstalledDirty = true; storeReloadInstalled();
   storeView = SV_DISCOVER; storeSearchSource = SV_DISCOVER; storeSearch[0] = 0; storePage = 0; storeSelected = -1; storeConfirmDelete = false;
+  storeFilterInvalidate();
   if(flexStoreCatalogCount() == 0 && WiFi.status() == WL_CONNECTED && flexStoreState() != FLEXSTORE_LOADING) flexStoreRefresh();
   storeRender();
 }
 
 static void storeExit(){
-  flexStoreCancel();
+  // Una descarga ya verificada o una instalacion en curso NO se aborta por
+  // salir de la tienda: flexPkgInstall es transaccional (solo activa la version
+  // nueva cuando esta completa y verificada) y flexPkgBegin() recupera una
+  // transaccion interrumpida en el arranque siguiente. Lo que si se cancela es
+  // una consulta de catalogo: no deja nada a medias y ya no le sirve a nadie.
+  FlexStoreState state = flexStoreState();
+  if(state != FLEXSTORE_DOWNLOADING && state != FLEXSTORE_INSTALLING) flexStoreCancel();
   flexRuntimeUnload(&storeRuntime);
   storeToastUntil = 0;
 }
@@ -374,8 +461,13 @@ static void storeBack(){
 
 static void storeTick(){
   FlexStoreState state = flexStoreState(); uint8_t pct = flexStoreProgress();
-  if(storeView == SV_DISCOVER && (state != storeLastState || pct != storeLastProgress)) storeRender();
-  if(storeView == SV_RUNTIME && storeToastUntil && (int32_t)(millis() - storeToastUntil) >= 0){ storeToastUntil = 0; storeRuntimeRender(); }
+  if(storeView == SV_DISCOVER && (state != storeLastState || pct != storeLastProgress)){
+    bool busy = (state == FLEXSTORE_LOADING || state == FLEXSTORE_DOWNLOADING || state == FLEXSTORE_INSTALLING);
+    if(busy && state == storeLastState) storeProgressBand();   // mismo estado, solo el %
+    else { storeFilterInvalidate(); storeRender(); }           // el catalogo puede haber cambiado
+  }
+  // El aviso caduca en CUALQUIER vista, no solo dentro del runtime.
+  if(storeToastUntil && (int32_t)(millis() - storeToastUntil) >= 0){ storeToastUntil = 0; storeRender(); }
   if(!T.tap && !T.swipeUp && !T.swipeDown) return;
   if(T.tap && (storeView == SV_DISCOVER || storeView == SV_INSTALLED) && T.x >= SCR_W - 132 && T.y <= 76){
     accountStoreEnter(); return;
@@ -383,7 +475,10 @@ static void storeTick(){
   if(T.tap && (storeView == SV_DISCOVER || storeView == SV_INSTALLED) && T.x >= SCR_W - 190 && T.x < SCR_W - 132 && T.y <= 76){
     storeSearchSource = storeView; storeView = SV_SEARCH; storeSearchRender(); return;
   }
-  if(T.tap && ((T.x < 76 && T.y < 92) || (T.y > SCR_H - 64 && T.x < SCR_W / 3))){ storeBack(); return; }
+  // La franja de "atras" de la cabecera termina en la linea divisoria (y=76).
+  // Antes llegaba a 92 y se comia la esquina izquierda de la pestana Descubrir
+  // (88..130): un toque ahi cerraba la tienda en vez de cambiar de pestana.
+  if(T.tap && ((T.x < 76 && T.y < 76) || (T.y > SCR_H - 64 && T.x < SCR_W / 3))){ storeBack(); return; }
   if(storeView == SV_SEARCH){ if(T.tap) storeSearchTap(T.x, T.y); return; }
   if(storeView == SV_RUNTIME){
     if(T.tap){
@@ -413,11 +508,11 @@ static void storeTick(){
         int idx = storeCatalogIndexAt(storePage * storeRowsPerPage() + row); FlexStoreItem item;
         if(idx < 0) return;
         if(!flexStoreCatalogItem(idx, &item)) return;
-        FlexPkgInfo local; bool installed = flexPkgGet(item.packageId, &local);
+        storeEnsureInstalled();
+        int local = storeInstalledFind(item.packageId);
         if(T.x >= SCR_W - 156){
-          if(installed && item.versionCode <= local.versionCode){
-            storeReloadInstalled(); for(int i = 0; i < storeInstalledN; i++) if(!strcmp(storeInstalled[i].id, item.packageId)){ storeOpenInstalled(i); break; }
-          } else { flexStoreInstall(idx); storeRender(); }
+          if(local >= 0 && item.versionCode <= storeInstalled[local].versionCode) storeOpenInstalled(local);
+          else { flexStoreInstall(idx); storeRender(); }
         } else { storeSelected = idx; storeSelectedInstalled = false; storeView = SV_DETAIL; storeConfirmDelete = false; storeRender(); }
       } else {
         int idx = storeInstalledIndexAt(storePage * storeRowsPerPage() + row);
@@ -429,24 +524,37 @@ static void storeTick(){
     return;
   }
   if(storeView == SV_DETAIL && T.tap){
-    if(T.y >= 456 && T.y <= 532){
+    // Las dos franjas siguen a los botones dibujados (468..522 y 540..590) y ya
+    // no se solapan: antes 530..532 caia en las dos y ganaba la accion
+    // principal, aunque en pantalla ese punto estuviera en el hueco.
+    if(T.y >= 460 && T.y <= 528){
       if(storeSelectedInstalled) storeOpenInstalled(storeSelected);
       else {
         FlexStoreItem item; if(!flexStoreCatalogItem(storeSelected, &item)) return;
-        FlexPkgInfo local;
-        if(flexPkgGet(item.packageId, &local) && item.versionCode <= local.versionCode){
-          storeReloadInstalled(); for(int i = 0; i < storeInstalledN; i++) if(!strcmp(storeInstalled[i].id, item.packageId)){ storeOpenInstalled(i); break; }
-        } else { storeView = SV_DISCOVER; flexStoreInstall(storeSelected); storeRender(); }
+        storeEnsureInstalled();
+        int local = storeInstalledFind(item.packageId);
+        if(local >= 0 && item.versionCode <= storeInstalled[local].versionCode) storeOpenInstalled(local);
+        else { storeView = SV_DISCOVER; flexStoreInstall(storeSelected); storeRender(); }
       }
       return;
     }
-    if(T.y >= 530 && T.y <= 606){
+    if(T.y >= 534 && T.y <= 596){
       char id[FLEXPKG_ID_MAX + 1] = "";
-      if(storeSelectedInstalled && storeSelected < storeInstalledN) snprintf(id, sizeof(id), "%s", storeInstalled[storeSelected].id);
-      else { FlexStoreItem item; if(flexStoreCatalogItem(storeSelected, &item)) snprintf(id, sizeof(id), "%s", item.packageId); }
+      storeEnsureInstalled();
+      if(storeSelectedInstalled && storeSelected >= 0 && storeSelected < storeInstalledN)
+        snprintf(id, sizeof(id), "%s", storeInstalled[storeSelected].id);
+      else {
+        FlexStoreItem item;
+        if(flexStoreCatalogItem(storeSelected, &item) && storeInstalledFind(item.packageId) >= 0)
+          snprintf(id, sizeof(id), "%s", item.packageId);
+      }
+      // Si la app NO esta instalada, "Desinstalar" no se dibuja: su area no
+      // debe responder. Antes si lo hacia, y el segundo toque acababa pidiendo
+      // desinstalar un paquete que no existia.
+      if(!id[0]) return;
       if(!storeConfirmDelete){ storeConfirmDelete = true; storeRender(); }
-      else if(id[0]){
-        if(flexPkgUninstall(id)){ storeReloadInstalled(); storeView = SV_INSTALLED; storePage = 0; storeToast("Aplicacion desinstalada"); }
+      else {
+        if(flexPkgUninstall(id)){ storeInstalledDirty = true; storeView = SV_INSTALLED; storePage = 0; storeToast("Aplicacion desinstalada"); }
         else storeToast(flexPkgError());
         storeConfirmDelete = false; storeRender();
       }

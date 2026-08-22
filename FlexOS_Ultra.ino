@@ -5604,6 +5604,12 @@ static void enterOobeLang();  static void renderOobeLang();  static void oobeLan
 static void enterOobeName();  static void drawKeyboard();    static void drawNameField();
 static bool hitKey(int px, int py, int &code); static void oobeNameTick();
 static void accountOobeEnter(); static void accountOobeTick(); static void accountStoreEnter();
+// Flex Account tiene TRES vias de entrada (primer arranque, boton Cuenta de
+// Flex Store y Ajustes > General) y una de retorno desde el configurador de
+// Wi-Fi que conserva la via original. El texto de la fila de Ajustes lo da
+// accountSettingsText, con el estado REAL de la vinculacion.
+static void accountSettingsEnter(); static void accountResumeEnter();
+static void accountSettingsText(char* out, size_t n);
 static void wifiOobeEnter();
 static void buildLongDate(char* out, size_t n); static void buildShortDate(char* out, size_t n);
 static void renderLock(); static void showLock();
@@ -9889,6 +9895,14 @@ static void settingsDetailContent(int cat){
     y = setRowCard(y, RI_REFRESH, rgb565(60,160,230), "Actualizaciones", flexOtaStatusText(), true);
     y = setRowCard(y, RI_CLOUD,   rgb565(120,160,230),"Copias de seguridad", "Proximamente", true);
     y = setRowCard(y, RI_RESET,   rgb565(220,80,80),  "Restablecer", "Opciones de fabrica", true);
+    // FLEX ACCOUNT. Va AL FINAL de la categoria a proposito: setRowCard numera
+    // las filas por orden de llamada, asi que anadirla aqui deja intactos los
+    // indices que ya usa settingsRowAction (idioma=0, formato=2, NTP=6, OTA=7).
+    // Es la via de vuelta para quien omitio la vinculacion en el primer
+    // arranque; el subtitulo dice el estado real, nunca uno inventado.
+    y += 8; drawText(DP_X, y, "Cuenta", 2, SET_TXT_HI); y += 30;
+    { char av[64]; accountSettingsText(av, sizeof(av));
+      y = setRowCard(y, RI_DOT, rgb565(105,91,230), "Flex Account", av, true); }
     y += 12; y = drawDeviceInfo(y);
   } else if(cat == 11){
     y = drawDeviceInfo(y);
@@ -10189,6 +10203,9 @@ static void settingsRowAction(int cat, int idx){
     // informativas: no tienen accion. La zona de Lima es fija por diseno.
     else if(idx == 6){ ntpRequestSync(true); settingsRenderDetailOnly(); }                                    // Sincronizar ahora
     else if(idx == 7) flexOtaOpenSettings();                                                                 // Actualizaciones -> pantalla OTA
+    // idx 8 (Copias de seguridad) y 9 (Restablecer) siguen sin accion, igual
+    // que antes. 10 es la fila nueva de Flex Account.
+    else if(idx == 10) accountSettingsEnter();                                                               // General -> Flex Account
   } else if(cat == 1){
     if(idx == 0){ gBright += 25; if(gBright > 100) gBright = 25; setBacklight(gBright); cfgSavePrefs(); settingsRenderDetailOnly(); }  // brillo real
     // MATERIAL (Liquid Glass <-> plano) y APARIENCIA (oscuro <-> claro) son dos
@@ -27013,7 +27030,11 @@ static void wifiSettingsRepaint(){
 }
 static int wifiReturnState = ST_APP;
 static void wifiExit(){
-  if(wifiReturnState == ST_OOBE_ACCOUNT){ accountOobeEnter(); return; }
+  // accountResumeEnter (y no accountOobeEnter): la pantalla de Cuenta vuelve
+  // con el MISMO destino de salida que tenia antes de venir a configurar la
+  // red. Con accountOobeEnter, entrar aqui desde Flex Store o desde Ajustes
+  // convertia la pantalla en primer arranque y su boton acababa en el bloqueo.
+  if(wifiReturnState == ST_OOBE_ACCOUNT){ accountResumeEnter(); return; }
   gState = ST_APP; settingsRender();
 }
 
