@@ -82,6 +82,7 @@
 #include "FlexOS_Package.h"
 #include "FlexOS_Runtime.h"
 #include "FlexOS_Store.h"
+#include "FlexOS_Account.h"
 
 // SISTEMA DE ARCHIVOS REAL (LittleFS). Toda la logica de ficheros vive en
 // FlexOS_FS.cpp -- comun a las tres placas -- para no tener tres copias de
@@ -5602,6 +5603,8 @@ static void splashTick();
 static void enterOobeLang();  static void renderOobeLang();  static void oobeLangTick();
 static void enterOobeName();  static void drawKeyboard();    static void drawNameField();
 static bool hitKey(int px, int py, int &code); static void oobeNameTick();
+static void accountOobeEnter(); static void accountOobeTick(); static void accountStoreEnter();
+static void wifiOobeEnter();
 static void buildLongDate(char* out, size_t n); static void buildShortDate(char* out, size_t n);
 static void renderLock(); static void showLock();
 // ---- App Clima: lo que necesitan el Bloqueo y el escritorio. El resto de la
@@ -5716,7 +5719,9 @@ enum { ST_SPLASH = 0, ST_OOBE_LANG, ST_OOBE_NAME, ST_LOCK, ST_HOME, ST_APP, ST_S
        // ciclo de vida, y porque asi la isla de notificaciones y el panel
        // rapido -- que se apagan solos fuera de ST_HOME -- no compiten por el
        // mismo framebuffer.
-       ST_HOMECFG };
+       ST_HOMECFG,
+       // FLEX ACCOUNT. Se anade AL FINAL: conserva todos los IDs anteriores.
+       ST_OOBE_ACCOUNT };
 
 static int  gState = ST_SPLASH;
 static unsigned long splashStart = 0;
@@ -5996,9 +6001,13 @@ static void oobeNameTick(){
   else if(code == -2){ if(L > 0 && L < 20){ cfgName[L] = ' '; cfgName[L + 1] = 0; drawNameField(); } }
   else if(code == -3){
     if(strlen(cfgName) == 0) strcpy(cfgName, "FlexOS Ultra");
-    cfgSaveOobe();
-    renderHome(); renderLock(); showLock();
-    gState = ST_LOCK; lockOff = 0; lastLockOff = -1;
+    // Guarda idioma y nombre, pero OOBE no termina hasta vincular u omitir
+    // Flex Account en la pantalla siguiente.
+    prefs.begin("flexos", false);
+    prefs.putInt("lang", cfgLang);
+    prefs.putString("name", cfgName);
+    prefs.end();
+    accountOobeEnter();
   }
 }
 
@@ -27002,14 +27011,33 @@ static void wifiSettingsRepaint(){
   wifiRenderUnavail();
 #endif
 }
-static void wifiExit(){ gState = ST_APP; settingsRender(); }
+static int wifiReturnState = ST_APP;
+static void wifiExit(){
+  if(wifiReturnState == ST_OOBE_ACCOUNT){ accountOobeEnter(); return; }
+  gState = ST_APP; settingsRender();
+}
 
 static void wifiSettingsEnter(){
+  wifiReturnState = ST_APP;
   gState = ST_WIFI;
 #if FLEXOS_ENABLE_WIFI
   wifiSel = -1; wifiPass[0] = 0;
   mapaActivo = LAYOUT_ES; kbLangEs = true; kbShift = false;
   kbExtrasOn = false; kbApplySize(); kbMtSurfaceReset();   // el teclado de Wi-Fi solo hereda el TAMANO (Fase A)
+  wifiStartScan();
+  wifiRenderList();
+#else
+  wifiRenderUnavail();
+#endif
+}
+// Primera configuracion reutiliza el Wi-Fi real y vuelve a Flex Account.
+static void wifiOobeEnter(){
+  wifiReturnState = ST_OOBE_ACCOUNT;
+  gState = ST_WIFI;
+#if FLEXOS_ENABLE_WIFI
+  wifiSel = -1; wifiPass[0] = 0;
+  mapaActivo = LAYOUT_ES; kbLangEs = true; kbShift = false;
+  kbExtrasOn = false; kbApplySize(); kbMtSurfaceReset();
   wifiStartScan();
   wifiRenderList();
 #else
@@ -27733,6 +27761,7 @@ static bool notifSecureScreen(){
     case ST_SPLASH:            // arranque: aun no hay sesion
     case ST_OOBE_LANG:         // primera configuracion
     case ST_OOBE_NAME:
+    case ST_OOBE_ACCOUNT:
     case ST_LOCK:              // bloqueo
     case ST_LOCKSETUP:         // alta y VERIFICACION de PIN/contrasena
     case ST_VAULT:             // Flex Vault: clave y contenido privado
@@ -32568,6 +32597,9 @@ static void vaultStatusText(char* out, size_t n){
 // Puente visual de Flex Store. Se incluye aqui para reutilizar las primitivas
 // estaticas del framebuffer y el sistema tactil de FlexOS Ultra.
 #include "FlexOS_Store_Bridge.h"
+// Pantalla real de Flex Account: OOBE, enlace posterior desde Flex Store y
+// retorno al configurador de Wi-Fi.
+#include "FlexOS_Account_Bridge.h"
 
 
 void setup(){
@@ -32635,6 +32667,7 @@ void setup(){
     flexPkgBegin();       // recupera una transaccion interrumpida y limpia staging obsoleto
   }
   flexStoreBegin();       // crea la tarea de fondo; no abre WiFi ni descarga en setup()
+  flexAccountBegin();     // carga la cuenta local y crea su tarea; no toca la radio
 
   // FLEX VAULT. Solo carga el sobre de la clave y los contadores de NVS:
   // la boveda arranca SIEMPRE cerrada y no se descifra nada aqui. Necesita
@@ -32845,6 +32878,7 @@ void loop(){
     case ST_SPLASH:    splashTick(); break;
     case ST_OOBE_LANG: oobeLangTick(); break;
     case ST_OOBE_NAME: oobeNameTick(); break;
+    case ST_OOBE_ACCOUNT: accountOobeTick(); break;
     case ST_LOCK:
       if(minChanged){ renderLock(); if(lockOff == 0) showLock(); }
       lockTick();
