@@ -175,6 +175,8 @@ static void testCabeceras();
 static void testListasConScroll();
 static void testTarjetaCronometro();
 static void testPersonalizarInicio();
+static void testFlexStore();
+static void testFlexAccount();
 static int gFails = 0;
 static void chk(bool ok, const char* what){
   if(!ok){ printf("  FALLO: %s\n", what); gFails++; }
@@ -2561,6 +2563,338 @@ static void testTarjetaCronometro(){
   if(!gFails) printf("  Tarjeta del cronometro: todas las comprobaciones pasan.\n");
 }
 
+
+// #############################################################
+//  FLEX STORE + FLEX ACCOUNT
+//  ------------------------------------------------------------
+//  Se ejercita el PUENTE de verdad (FlexOS_Store_Bridge.h y
+//  FlexOS_Account_Bridge.h) contra los dobles de los cuatro modulos.
+//  Lo que se comprueba es exactamente lo que puede fallar en una
+//  lista filtrada y en una maquina de estados con varias vias de
+//  entrada:
+//
+//    · que buscar filtre por nombre, resumen, categoria e ID,
+//    · que tocar una fila FILTRADA use el indice REAL del catalogo
+//      (instalar) y el ID REAL del paquete (abrir), no la posicion
+//      de la fila tocada,
+//    · que el teclado escriba, borre, ponga espacio y limpie,
+//    · que las zonas tactiles de la cabecera y del detalle no se
+//      solapen entre si,
+//    · que repintar NO vuelva a leer la lista instalada ni a barrer
+//      el catalogo entero,
+//    · y que volver del configurador de Wi-Fi devuelva la pantalla
+//      de Cuenta a la via por la que se entro.
+//
+//  El catalogo y la lista instalada de aqui son FIXTURES de prueba
+//  (ids "com.prueba.*"): no son apps reales ni se compilan para la
+//  placa.
+// #############################################################
+extern FlexStoreItem  gStubCatalog[];
+extern int            gStubCatalogN;
+extern FlexPkgInfo    gStubInstalled[];
+extern int            gStubInstalledN;
+extern int            gStubInstallIndex;
+extern char           gStubRuntimeId[];
+extern char           gStubUninstallId[];
+extern int            gStubPkgListCalls;
+extern int            gStubCatalogItemCalls;
+extern bool           gStubRuntimeOk;
+extern bool           gStubStoreCancelled;
+extern FlexStoreState gStubStoreState;
+extern uint8_t        gStubStoreProgress;
+extern bool           gStubAccountLinked;
+extern FlexAccountSnapshot gStubAccountSnap;
+
+static void stubCatalogAdd(const char* pkg, const char* name, const char* summary,
+                           const char* cat, uint32_t code){
+  FlexStoreItem& it = gStubCatalog[gStubCatalogN++];
+  memset(&it, 0, sizeof(it));
+  snprintf(it.packageId,   sizeof(it.packageId),   "%s", pkg);
+  snprintf(it.name,        sizeof(it.name),        "%s", name);
+  snprintf(it.summary,     sizeof(it.summary),     "%s", summary);
+  snprintf(it.category,    sizeof(it.category),    "%s", cat);
+  snprintf(it.versionName, sizeof(it.versionName), "1.0.0");
+  it.versionCode = code; it.packageBytes = 4096; it.ratingX100 = 450;
+}
+static void stubInstalledAdd(const char* pkg, const char* name, uint32_t code){
+  FlexPkgInfo& it = gStubInstalled[gStubInstalledN++];
+  memset(&it, 0, sizeof(it));
+  snprintf(it.id,          sizeof(it.id),          "%s", pkg);
+  snprintf(it.name,        sizeof(it.name),        "%s", name);
+  snprintf(it.versionName, sizeof(it.versionName), "1.0.0");
+  it.versionCode = code; it.installedBytes = 4096;
+}
+static void storeTap(int x, int y){
+  T = Touch();
+  T.tap = true; T.released = true; T.x = T.startX = x; T.y = T.startY = y;
+}
+// Centro de la fila `row` de la lista (las tarjetas van en 148 + row*174).
+static int storeRowCenterY(int row){ return 148 + row * 174 + 60; }
+
+static void testFlexStore(){
+  printf("Flex Store: busqueda real, indices y zonas tactiles\n");
+
+  // --- fixtures ---
+  gStubCatalogN = 0; gStubInstalledN = 0;
+  gStubInstallIndex = -1; gStubRuntimeId[0] = 0; gStubUninstallId[0] = 0;
+  gStubRuntimeOk = true; gStubStoreState = FLEXSTORE_READY; gStubStoreProgress = 100;
+  stubCatalogAdd("com.prueba.alfa",  "Alfa",  "Cronometro de bolsillo", "Utilidades", 3);
+  stubCatalogAdd("com.prueba.beta",  "Beta",  "Libreta de apuntes",     "Trabajo",    2);
+  stubCatalogAdd("com.prueba.gamma", "Gamma", "Panel de sensores",      "Sistema",    5);
+  stubCatalogAdd("com.prueba.delta", "Delta", "Reproductor local",      "Media",      1);
+  chk(gStubCatalogN == 4, "el catalogo de prueba tiene 4 entradas");
+
+  gState = ST_APP; gAppId = IC_FLEXSTORE;
+  storeEnter();
+  chk(storeView == SV_DISCOVER, "la tienda abre en Descubrir");
+  chk(storeSearch[0] == 0,      "y sin busqueda previa");
+  chk(storeCatalogFilteredCount() == 4, "sin filtro se ven las 4 del catalogo");
+  for(int i = 0; i < 4; i++) chk(storeCatalogIndexAt(i) == i, "sin filtro el indice filtrado es el real");
+
+  // --- 1. filtrar por NOMBRE, y en minusculas ---
+  snprintf(storeSearch, sizeof(storeSearch), "gamma"); storeFilterInvalidate();
+  chk(storeCatalogFilteredCount() == 1, "buscar por nombre deja una sola app");
+  chk(storeCatalogIndexAt(0) == 2,      "y su indice es el REAL del catalogo, no 0");
+
+  // --- 2. filtrar por RESUMEN ---
+  snprintf(storeSearch, sizeof(storeSearch), "apuntes"); storeFilterInvalidate();
+  chk(storeCatalogFilteredCount() == 1 && storeCatalogIndexAt(0) == 1, "buscar por resumen");
+
+  // --- 3. filtrar por CATEGORIA ---
+  snprintf(storeSearch, sizeof(storeSearch), "media"); storeFilterInvalidate();
+  chk(storeCatalogFilteredCount() == 1 && storeCatalogIndexAt(0) == 3, "buscar por categoria");
+
+  // --- 4. filtrar por ID DE PAQUETE ---
+  snprintf(storeSearch, sizeof(storeSearch), "prueba.alfa"); storeFilterInvalidate();
+  chk(storeCatalogFilteredCount() == 1 && storeCatalogIndexAt(0) == 0, "buscar por ID de paquete");
+
+  // --- 5. cero resultados ---
+  snprintf(storeSearch, sizeof(storeSearch), "zzzz"); storeFilterInvalidate();
+  chk(storeCatalogFilteredCount() == 0, "una consulta sin coincidencias da cero");
+  chk(storeCatalogIndexAt(0) == -1,     "y no devuelve ninguna fila");
+
+  // --- 6. TOCAR UNA FILA FILTRADA INSTALA EL INDICE REAL ---
+  // Es el fallo clasico de una lista filtrada: la fila 0 de la pantalla es la
+  // entrada 2 del catalogo, y instalar la 0 instalaria otra app.
+  snprintf(storeSearch, sizeof(storeSearch), "gamma"); storeFilterInvalidate();
+  storeView = SV_DISCOVER; storePage = 0; storeRender();
+  gStubInstallIndex = -1;
+  storeTap(SCR_W - 60, storeRowCenterY(0));       // boton de accion de la fila 0
+  storeTick();
+  chk(gStubInstallIndex == 2, "instalar desde una fila filtrada usa el indice real del catalogo");
+
+  // --- 7. TOCAR "ABRIR" USA EL ID REAL DEL PAQUETE ---
+  stubInstalledAdd("com.prueba.delta", "Delta", 1);
+  stubInstalledAdd("com.prueba.gamma", "Gamma", 5);   // misma version que el catalogo -> "Abrir"
+  storeInstalledDirty = true; storeFilterInvalidate();
+  snprintf(storeSearch, sizeof(storeSearch), "gamma"); storeFilterInvalidate();
+  storeView = SV_DISCOVER; storePage = 0; storeRender();
+  gStubRuntimeId[0] = 0;
+  storeTap(SCR_W - 60, storeRowCenterY(0));
+  storeTick();
+  chk(!strcmp(gStubRuntimeId, "com.prueba.gamma"),
+      "abrir desde una fila filtrada usa el ID real, no la posicion de la fila");
+
+  // --- 8. la ficha de detalle sale de la entrada tocada ---
+  storeView = SV_DISCOVER; storePage = 0; storeSearch[0] = 0; storeFilterInvalidate(); storeRender();
+  storeTap(60, storeRowCenterY(1));               // fila 1 = catalogo 1, zona de la tarjeta
+  storeTick();
+  chk(storeView == SV_DETAIL && storeSelected == 1 && !storeSelectedInstalled,
+      "tocar la tarjeta abre el detalle de esa misma entrada");
+  storeBack();
+  chk(storeView == SV_DISCOVER, "y volver regresa a Descubrir");
+
+  // --- 9. TECLADO de la busqueda ---
+  storeView = SV_SEARCH; storeSearchSource = SV_DISCOVER; storeSearch[0] = 0;
+  storeSearchTap(12 + 42 / 2, 192 + 24);          // Q (fila 1, tecla 0)
+  storeSearchTap(34 + 42 / 2, 254 + 24);          // A (fila 2, tecla 0)
+  storeSearchTap(22 + 42 / 2, 316 + 24);          // Z (fila 3, tecla 0)
+  chk(!strcmp(storeSearch, "qaz"), "las teclas escriben en minusculas y en orden");
+  storeSearchTap(129, 397);                        // Espacio
+  chk(!strcmp(storeSearch, "qaz "), "la barra espaciadora anade un espacio");
+  storeSearchTap(403, 316 + 24);                   // Borrar
+  chk(!strcmp(storeSearch, "qaz"), "Borrar quita el ultimo caracter");
+  storeSearchTap(351, 397);                        // Limpiar
+  chk(storeSearch[0] == 0, "Limpiar vacia la consulta entera");
+  storeSearchTap(SCR_W / 2, 470);                  // Mostrar resultados
+  chk(storeView == SV_DISCOVER, "aplicar la busqueda vuelve a la vista de origen");
+
+  // La ultima tecla de cada fila y la de "Borrar" no se pisan: un toque sobre
+  // "Borrar" no puede escribir una letra.
+  storeView = SV_SEARCH; storeSearch[0] = 0;
+  chk(!storeSearchTapKey(403, 316 + 24), "el area de Borrar no es ninguna tecla");
+  chk(storeSearchTapKey(12 + 9 * 46 + 21, 192 + 24), "la ultima tecla de la fila 1 (P) si responde");
+  chk(!strcmp(storeSearch, "p"), "y escribe la letra correcta");
+
+  // --- 10. ZONAS TACTILES DE LA CABECERA ---
+  // El boton Cuenta empieza en SCR_W-132 y la lupa ocupa la franja anterior:
+  // no pueden solaparse, y ninguna de las dos puede caer sobre las pestanas.
+  chk((SCR_W - 132) > (SCR_W - 190), "la franja de la lupa queda a la izquierda de Cuenta");
+  storeView = SV_DISCOVER; storeSearch[0] = 0; storeFilterInvalidate(); storeRender();
+  storeTap(SCR_W - 60, 40); storeTick();
+  chk(gState == ST_OOBE_ACCOUNT, "tocar Cuenta abre Flex Account");
+  chk(accountReturn == ACC_RET_STORE, "y anota que hay que volver a Flex Store");
+  gState = ST_APP; storeView = SV_DISCOVER; storeRender();
+  storeTap(SCR_W - 162, 40); storeTick();
+  chk(storeView == SV_SEARCH, "tocar la lupa abre la busqueda");
+  storeBack();
+
+  // La esquina superior izquierda de la pestana "Descubrir" (y = 88..130) ya
+  // NO cierra la tienda: la franja de "atras" termina en la linea divisoria.
+  // El candado de kiosco se enciende SOLO para esta comprobacion: hace que
+  // appClose() vuelva sin animar (winRevealAnim gira sobre millis(), que aqui
+  // es un reloj virtual congelado), asi la prueba distingue las dos rutas sin
+  // depender de una animacion.
+  bool kioscoAntes = kioskOn; kioskOn = true;
+  storeView = SV_INSTALLED; storeInstalledDirty = true; storeRender();
+  storeTap(40, 90); storeTick();
+  chk(storeView == SV_DISCOVER, "un toque en la esquina de la pestana cambia de pestana, no cierra la tienda");
+  // Y la franja de atras de verdad (por encima de la linea divisoria) si sale.
+  storeView = SV_DETAIL; storeSelected = 0; storeSelectedInstalled = false; storeRender();
+  storeTap(40, 40); storeTick();
+  chk(storeView == SV_DISCOVER, "y sobre la cabecera si funciona como atras");
+  kioskOn = kioscoAntes;
+
+  // --- 11. DETALLE: accion principal y desinstalar no se solapan ---
+  storeSelected = 1; storeSelectedInstalled = false; storeView = SV_DETAIL;
+  storeConfirmDelete = false; storeRender();
+  gStubInstallIndex = -1;
+  storeTap(SCR_W / 2, 495); storeTick();          // accion principal
+  chk(gStubInstallIndex == 1, "la accion principal del detalle instala la entrada mostrada");
+
+  // El hueco entre los dos botones (522..540 dibujados) no dispara ninguno.
+  storeSelected = 1; storeSelectedInstalled = false; storeView = SV_DETAIL;
+  storeConfirmDelete = false; storeRender();
+  gStubInstallIndex = -1;
+  storeTap(SCR_W / 2, 531); storeTick();
+  chk(gStubInstallIndex == -1 && !storeConfirmDelete,
+      "el hueco entre los dos botones del detalle no dispara ninguno");
+
+  // Y con la app SIN instalar el boton de desinstalar no se dibuja: su area
+  // tampoco puede responder.
+  storeTap(SCR_W / 2, 560); storeTick();
+  chk(!storeConfirmDelete, "sin app instalada, el area de Desinstalar no responde");
+
+  // Desinstalar pide confirmacion antes de borrar nada.
+  storeInstalledDirty = true; storeEnsureInstalled();
+  int idxDelta = storeInstalledFind("com.prueba.delta");
+  chk(idxDelta >= 0, "la fixture instalada esta en la lista");
+  storeSelected = idxDelta; storeSelectedInstalled = true; storeView = SV_DETAIL;
+  storeConfirmDelete = false; storeRender();
+  gStubUninstallId[0] = 0;
+  storeTap(SCR_W / 2, 560); storeTick();
+  chk(storeConfirmDelete && gStubUninstallId[0] == 0, "el primer toque solo pide confirmacion");
+  storeTap(SCR_W / 2, 560); storeTick();
+  chk(!strcmp(gStubUninstallId, "com.prueba.delta"), "el segundo toque desinstala ESA app");
+
+  // --- 12. REPINTAR NO RELEE EL ALMACENAMIENTO NI BARRE EL CATALOGO ---
+  storeView = SV_INSTALLED; storeSearch[0] = 0; storeInstalledDirty = true;
+  storeFilterInvalidate(); storeRender();
+  int listCalls = gStubPkgListCalls;
+  storeRender(); storeRender(); storeRender();
+  chk(gStubPkgListCalls == listCalls, "repintar Instaladas no vuelve a llamar a flexPkgList");
+  storePage = 0; storeView = SV_DISCOVER; storeRender();
+  int itemCalls = gStubCatalogItemCalls;
+  storeRender();
+  chk(gStubCatalogItemCalls - itemCalls <= storeRowsPerPage(),
+      "repintar Descubrir solo copia las filas que dibuja, no todo el catalogo");
+  // Y cambiar la busqueda SI rehace el filtro.
+  snprintf(storeSearch, sizeof(storeSearch), "beta"); storeFilterInvalidate();
+  chk(storeCatalogFilteredCount() == 1, "cambiar la consulta rehace el filtro");
+
+  // --- 13. salir no aborta una instalacion ya verificada ---
+  gStubStoreCancelled = false; gStubStoreState = FLEXSTORE_INSTALLING;
+  storeExit();
+  chk(!gStubStoreCancelled, "salir durante la instalacion no la cancela");
+  gStubStoreCancelled = false; gStubStoreState = FLEXSTORE_READY;
+  storeExit();
+  chk(gStubStoreCancelled, "pero salir sin nada en curso si cancela la consulta de catalogo");
+
+  gStubCatalogN = 0; gStubInstalledN = 0; storeSearch[0] = 0; storeFilterInvalidate();
+  if(!gFails) printf("  Flex Store: todas las comprobaciones pasan.\n");
+}
+
+static void testFlexAccount(){
+  printf("Flex Account: primer arranque, omitir y vuelta desde Wi-Fi\n");
+  bool oobeAntes = cfgOobeDone;
+  int  estadoAntes = gState;
+
+  memset(&gStubAccountSnap, 0, sizeof(gStubAccountSnap));
+  gStubAccountSnap.state = FLEX_ACCOUNT_UNLINKED;
+  gStubAccountLinked = false;
+
+  // --- 1. el paso de Cuenta llega DESPUES de idioma y nombre ---
+  cfgOobeDone = false;
+  gState = ST_OOBE_NAME;
+  accountOobeEnter();
+  chk(gState == ST_OOBE_ACCOUNT, "tras el nombre se entra en Flex Account");
+  chk(accountReturn == ACC_RET_OOBE && accountFirstBoot, "en modo primer arranque");
+  chk(!cfgOobeDone, "y la primera configuracion aun no esta marcada como terminada");
+
+  // --- 2. OMITIR no deja el equipo atascado: termina el OOBE y va al bloqueo ---
+  storeTap(SCR_W / 2, 706);
+  accountOobeTick();
+  chk(cfgOobeDone, "omitir cierra la primera configuracion");
+  chk(gState == ST_LOCK, "y deja el equipo en la pantalla de bloqueo");
+
+  // --- 3. VOLVER DESDE Wi-Fi CONSERVA LA VIA DE ENTRADA ---
+  // Regresion real: entrar al Wi-Fi desde el boton Cuenta de Flex Store
+  // devolvia la pantalla en modo primer arranque, y su boton se llevaba el
+  // equipo al bloqueo reescribiendo la marca de OOBE.
+  gState = ST_APP; gAppId = IC_FLEXSTORE;
+  accountStoreEnter();
+  chk(accountReturn == ACC_RET_STORE && !accountFirstBoot, "desde Flex Store no es primer arranque");
+  wifiOobeEnter();
+  chk(gState == ST_WIFI, "el boton de Wi-Fi abre el configurador real");
+  wifiExit();
+  chk(gState == ST_OOBE_ACCOUNT, "y al salir se vuelve a Flex Account");
+  chk(accountReturn == ACC_RET_STORE && !accountFirstBoot,
+      "conservando la via de entrada (antes se convertia en primer arranque)");
+
+  // Salir ahora devuelve a Flex Store, no al bloqueo.
+  accountFinish();
+  chk(gState == ST_APP && storeView == SV_DISCOVER, "salir devuelve a Flex Store");
+
+  // --- 4. la misma pantalla desde Ajustes vuelve a Ajustes ---
+  gState = ST_APP; gAppId = IC_AJUSTES; setView = 1; setSel = 0;
+  accountSettingsEnter();
+  chk(gState == ST_OOBE_ACCOUNT && accountReturn == ACC_RET_SETTINGS, "Ajustes abre Flex Account");
+  wifiOobeEnter(); wifiExit();
+  chk(accountReturn == ACC_RET_SETTINGS, "y volver del Wi-Fi tampoco cambia ese destino");
+  accountFinish();
+  chk(gState == ST_APP && setView == 1, "salir devuelve a la pantalla de Ajustes");
+
+  // --- 5. el texto de la fila de Ajustes dice el estado REAL ---
+  char fila[64];
+  accountSettingsText(fila, sizeof(fila));
+  chk(!strcmp(fila, "Sin cuenta vinculada"), "sin cuenta, la fila lo dice");
+  gStubAccountSnap.state = FLEX_ACCOUNT_LINKED;
+  snprintf(gStubAccountSnap.flexAddress, sizeof(gStubAccountSnap.flexAddress), "usuario@flex");
+  gStubAccountLinked = true;
+  accountSettingsText(fila, sizeof(fila));
+  chk(!strcmp(fila, "usuario@flex"), "con cuenta, muestra la direccion que trajo el modulo");
+
+  // --- 6. las zonas tactiles de la pantalla no se solapan ---
+  // y = 600 queda POR DEBAJO de los dos botones dibujados (452..510 y 526..580)
+  // y por encima de la barra de omitir (>= 670): no puede disparar nada. Antes
+  // la segunda franja llegaba a 610 y ese punto abria el configurador de Wi-Fi.
+  gStubAccountSnap.state = FLEX_ACCOUNT_UNLINKED; gStubAccountLinked = false;
+  accountStoreEnter();
+  storeTap(SCR_W / 2, 600);
+  accountOobeTick();
+  chk(gState == ST_OOBE_ACCOUNT, "un toque en el hueco bajo los botones no hace nada");
+  // El boton de verdad si responde: sin Wi-Fi lleva al configurador de red.
+  storeTap(SCR_W / 2, 480);
+  accountOobeTick();
+  chk(gState == ST_WIFI, "y el boton principal sin Wi-Fi abre el configurador de red");
+  wifiExit();
+
+  gStubAccountLinked = false;
+  memset(&gStubAccountSnap, 0, sizeof(gStubAccountSnap));
+  cfgOobeDone = oobeAntes; gState = estadoAntes;
+  if(!gFails) printf("  Flex Account: todas las comprobaciones pasan.\n");
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -2636,6 +2970,8 @@ int main(){
   testListasConScroll();
   testTarjetaCronometro();
   testPersonalizarInicio();
+  testFlexStore();
+  testFlexAccount();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

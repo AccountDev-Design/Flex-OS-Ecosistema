@@ -106,6 +106,10 @@ tools: $(TOOLS)
 # ejecuta nada: sirve para que un error de tipos o de nombres en el
 # sketch salte aqui, sin arduino-cli ni el core de ESP32.
 INO_SRC  := $(ROOT)/FlexOS_Ultra.ino
+# Los PUENTES son cabeceras que el .ino incluye (Store, Account, Navegador,
+# OTA): sin listarlos como dependencia, editar uno no rehacia la prueba y
+# `make` daba por buena la version anterior.
+INO_BRIDGES := $(wildcard $(ROOT)/FlexOS_*_Bridge.h)
 INOFLAGS := -Iinostub -I$(ROOT) -DARDUINO=200
 # -Wmaybe-uninitialized: falso positivo del ARNES. Los dobles de I2C devuelven
 # siempre "sin datos", asi que al inlinear gtPollMulti el compilador ve la rama
@@ -128,7 +132,7 @@ INOWARN  := $(WARN) -Wno-unused-function -Wno-unused-variable \
 #      -Wunused-function NO avisa de una static que tenga prototipo previo, y
 #      aqui casi todas lo tienen. Ese fallo deja al sistema atrapado en un
 #      estado que nadie despacha.
-ino: ino_compile.cpp $(INO_SRC) check_protos.py check_wiring.py | $(BUILD)
+ino: ino_compile.cpp $(INO_SRC) $(INO_BRIDGES) check_protos.py check_wiring.py | $(BUILD)
 	@python3 check_protos.py $(INO_SRC)
 	@python3 check_wiring.py $(INO_SRC)
 	@$(CXX) $(CXXSTD) -fsyntax-only $(INOWARN) $(INOFLAGS) -x c++ ino_compile.cpp
@@ -143,7 +147,7 @@ ino: ino_compile.cpp $(INO_SRC) check_protos.py check_wiring.py | $(BUILD)
 # CON SANITIZERS: el lector de JSON de las noticias mastica bytes que vienen de
 # la red, asi que un desbordamiento ahi no puede quedarse en "parece que
 # funciona". Mismo criterio que el resto de pruebas del nucleo portable.
-$(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(JPEG_SRC) | $(BUILD)
+$(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_BRIDGES) $(JPEG_SRC) | $(BUILD)
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -x c++ -c ino_compile.cpp -o $(BUILD)/ino_compile.o
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -c ino_extern_stubs.cpp -o $(BUILD)/ino_extern_stubs.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(JPEG_SRC) -o $(BUILD)/ino_jpeg.o

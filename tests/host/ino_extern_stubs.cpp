@@ -206,3 +206,118 @@ uint8_t            flexWeatherVisual(int){ return WXV_CLOUDY; }
 const char*        flexWeatherCondName(int, int){ return "Nublado"; }
 const char*        flexWeatherErrorText(uint8_t, int){ return ""; }
 void               flexWeatherDescribe(char* out, size_t n, int){ if(out && n) out[0] = 0; }
+
+// ---- Flex Package / Flex Store / Flex UI Runtime / Flex Account ----
+// Los cuatro modulos que Flex Store necesita para ENLAZAR. Se anadieron al
+// sketch en da688a0 y 4741867 sin sus dobles, y desde entonces `make` no
+// llegaba a construir test_ino: solo pasaba `make ino` (sintaxis). Estos
+// dobles devuelven el camino "modulo no disponible", igual que el resto del
+// fichero, y ademas dejan que la prueba CONTROLE sus entradas y OBSERVE lo
+// que el puente les pide. Eso ultimo es lo que permite verificar de verdad
+// que un toque sobre una fila FILTRADA instala el indice REAL del catalogo y
+// abre el identificador REAL, y no el de la posicion tocada.
+//
+// La criptografia, LittleFS y TLS de verdad viven en los .cpp, que solo se
+// compilan para la placa: aqui no se simulan ni se dan por probados.
+#include "FlexOS_Package.h"
+#include "FlexOS_Runtime.h"
+#include "FlexOS_Store.h"
+#include "FlexOS_Account.h"
+
+FlexStoreItem  gStubCatalog[FLEXSTORE_MAX_CATALOG];
+int            gStubCatalogN = 0;
+FlexPkgInfo    gStubInstalled[FLEXPKG_MAX_INSTALLED];
+int            gStubInstalledN = 0;
+int            gStubInstallIndex = -1;                      // ultimo flexStoreInstall()
+char           gStubRuntimeId[FLEXPKG_ID_MAX + 1] = "";     // ultimo flexRuntimeLoad()
+char           gStubUninstallId[FLEXPKG_ID_MAX + 1] = "";   // ultimo flexPkgUninstall()
+int            gStubPkgListCalls = 0;                       // relecturas de la lista instalada
+int            gStubCatalogItemCalls = 0;                   // copias de FlexStoreItem servidas
+bool           gStubRuntimeOk = true;
+bool           gStubStoreCancelled = false;
+FlexStoreState gStubStoreState = FLEXSTORE_READY;
+uint8_t        gStubStoreProgress = 100;
+bool           gStubAccountLinked = false;
+FlexAccountSnapshot gStubAccountSnap;
+
+// -- Flex Package --
+bool flexPkgBegin(){ return false; }
+bool flexPkgInspect(const char*, FlexPkgInfo*, FlexPkgProgressFn, void*){ return false; }
+bool flexPkgInstall(const char*, FlexPkgInfo*, FlexPkgProgressFn, void*){ return false; }
+bool flexPkgUninstall(const char* packageId){
+  snprintf(gStubUninstallId, sizeof(gStubUninstallId), "%s", packageId ? packageId : "");
+  for(int i = 0; i < gStubInstalledN; i++){
+    if(strcmp(gStubInstalled[i].id, gStubUninstallId)) continue;
+    for(int j = i; j + 1 < gStubInstalledN; j++) gStubInstalled[j] = gStubInstalled[j + 1];
+    gStubInstalledN--; return true;
+  }
+  return false;
+}
+int flexPkgList(FlexPkgInfo* out, int maxItems){
+  gStubPkgListCalls++;
+  int n = 0;
+  for(int i = 0; i < gStubInstalledN && n < maxItems; i++) out[n++] = gStubInstalled[i];
+  return n;
+}
+bool flexPkgGet(const char* packageId, FlexPkgInfo* out){
+  if(!packageId || !out) return false;
+  for(int i = 0; i < gStubInstalledN; i++)
+    if(!strcmp(gStubInstalled[i].id, packageId)){ *out = gStubInstalled[i]; return true; }
+  return false;
+}
+bool flexPkgEntryPath(const char*, char* out, size_t n){ if(out && n) out[0] = 0; return false; }
+bool flexPkgActiveRoot(const char*, char* out, size_t n){ if(out && n) out[0] = 0; return false; }
+FlexPkgErrorCode flexPkgErrorCode(){ return FLEXPKG_ERR_FS; }
+const char* flexPkgError(){ return "sin almacenamiento"; }
+bool flexPkgBusy(){ return false; }
+void flexPkgCancel(){}
+
+// -- Flex Store --
+void flexStoreBegin(){}
+bool flexStoreRefresh(){ return false; }
+bool flexStoreInstall(int catalogIndex){ gStubInstallIndex = catalogIndex; return true; }
+void flexStoreCancel(){ gStubStoreCancelled = true; }
+FlexStoreState flexStoreState(){ return gStubStoreState; }
+uint8_t flexStoreProgress(){ return gStubStoreProgress; }
+const char* flexStoreStage(){ return "Listo"; }
+const char* flexStoreError(){ return "sin conexion"; }
+int flexStoreCatalogCount(){ return gStubCatalogN; }
+bool flexStoreCatalogItem(int index, FlexStoreItem* out){
+  if(!out || index < 0 || index >= gStubCatalogN) return false;
+  gStubCatalogItemCalls++; *out = gStubCatalog[index]; return true;
+}
+bool flexStoreHasUpdate(const FlexStoreItem* item, FlexPkgInfo* installed){
+  if(!item || !item->packageId[0]) return false;
+  FlexPkgInfo local;
+  if(!flexPkgGet(item->packageId, &local)) return false;
+  if(installed) *installed = local;
+  return item->versionCode > local.versionCode;
+}
+
+// -- Flex UI Runtime --
+bool flexRuntimeLoad(const char* packageId, FlexRuntimeApp* app){
+  snprintf(gStubRuntimeId, sizeof(gStubRuntimeId), "%s", packageId ? packageId : "");
+  if(app){ memset(app, 0, sizeof(*app)); app->loaded = gStubRuntimeOk; }
+  return gStubRuntimeOk;
+}
+bool flexRuntimeNavigate(FlexRuntimeApp*, const char*){ return false; }
+bool flexRuntimeHit(const FlexRuntimeApp*, int, int, FlexUiAction* action){
+  if(action){ action->type = FLEXUI_ACTION_NONE; action->value[0] = 0; }
+  return false;
+}
+void flexRuntimeUnload(FlexRuntimeApp* app){ if(app) memset(app, 0, sizeof(*app)); }
+const char* flexRuntimeError(){ return "paquete no disponible"; }
+
+// -- Flex Account --
+void flexAccountBegin(){}
+bool flexAccountRequestCode(const char*){ return false; }
+void flexAccountCancel(){}
+bool flexAccountLinked(){ return gStubAccountLinked; }
+FlexAccountState flexAccountState(){ return gStubAccountSnap.state; }
+void flexAccountSnapshot(FlexAccountSnapshot* out){
+  if(!out) return;
+  *out = gStubAccountSnap;
+  out->linked = gStubAccountLinked;
+}
+bool flexAccountCopyBearer(char* out, size_t n){ if(out && n) out[0] = 0; return false; }
+void flexAccountForgetLocal(){}
