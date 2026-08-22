@@ -37,6 +37,13 @@ static void storeHeader(const char* title, bool nested){
   fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
   if(nested) storeBackGlyph(24, 30, TH_TXT);
   drawText(nested ? 66 : 24, 28, title, 3, TH_TXT);
+  if(!nested){
+    bool linked = flexAccountLinked();
+    int ax = SCR_W - 132, ay = 21, aw = 112, ah = 40;
+    fillRoundRect(ax, ay, aw, ah, 20, linked ? rgb565(32,171,126) : thCard());
+    drawTextC(ax + aw / 2, ay + 13, linked ? "@flex" : "Cuenta", 1,
+              linked ? rgb565(255,255,255) : TH_TXT2);
+  }
   hLine(20, 76, SCR_W - 40, TH_DIV);
 }
 
@@ -245,6 +252,9 @@ static void storeTick(){
   if(storeView == SV_DISCOVER && (state != storeLastState || pct != storeLastProgress)) storeRender();
   if(storeView == SV_RUNTIME && storeToastUntil && (int32_t)(millis() - storeToastUntil) >= 0){ storeToastUntil = 0; storeRuntimeRender(); }
   if(!T.tap && !T.swipeUp && !T.swipeDown) return;
+  if(T.tap && (storeView == SV_DISCOVER || storeView == SV_INSTALLED) && T.x >= SCR_W - 148 && T.y <= 76){
+    accountStoreEnter(); return;
+  }
   if(T.tap && ((T.x < 76 && T.y < 92) || (T.y > SCR_H - 64 && T.x < SCR_W / 3))){ storeBack(); return; }
   if(storeView == SV_RUNTIME){
     if(T.tap){
