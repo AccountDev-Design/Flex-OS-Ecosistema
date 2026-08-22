@@ -5,8 +5,9 @@
 // graficas, Touch, appClose() y el tema semantico ya existen. Los modulos .cpp
 // no conocen el framebuffer: solo publican datos y estados verificables.
 
-enum StoreView : uint8_t { SV_DISCOVER = 0, SV_INSTALLED, SV_DETAIL, SV_RUNTIME };
+enum StoreView : uint8_t { SV_DISCOVER = 0, SV_INSTALLED, SV_DETAIL, SV_RUNTIME, SV_SEARCH };
 static StoreView storeView = SV_DISCOVER;
+static StoreView storeSearchSource = SV_DISCOVER;
 static int storePage = 0;
 static int storeSelected = -1;
 static bool storeSelectedInstalled = false;
@@ -18,6 +19,9 @@ static FlexStoreState storeLastState = FLEXSTORE_IDLE;
 static uint8_t storeLastProgress = 255;
 static uint32_t storeToastUntil = 0;
 static char storeToastText[128] = "";
+static char storeSearch[33] = "";
+
+static void storeRender();
 
 static uint16_t storeRgb(uint32_t c){ return rgb565((c >> 16) & 255, (c >> 8) & 255, c & 255); }
 
@@ -27,6 +31,62 @@ static void storeToast(const char* text){
 }
 
 static void storeReloadInstalled(){ storeInstalledN = flexPkgList(storeInstalled, FLEXPKG_MAX_INSTALLED); }
+
+static char storeFold(char c){ return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c; }
+
+static bool storeContains(const char* text, const char* query){
+  if(!query || !query[0]) return true;
+  if(!text) return false;
+  for(const char* start = text; *start; start++){
+    const char* a = start; const char* b = query;
+    while(*a && *b && storeFold(*a) == storeFold(*b)){ a++; b++; }
+    if(!*b) return true;
+  }
+  return false;
+}
+
+static bool storeCatalogMatch(const FlexStoreItem& item){
+  return storeContains(item.name, storeSearch) || storeContains(item.summary, storeSearch) ||
+         storeContains(item.category, storeSearch) || storeContains(item.packageId, storeSearch);
+}
+
+static bool storeInstalledMatch(const FlexPkgInfo& item){
+  return storeContains(item.name, storeSearch) || storeContains(item.summary, storeSearch) ||
+         storeContains(item.id, storeSearch);
+}
+
+static int storeCatalogFilteredCount(){
+  int found = 0, total = flexStoreCatalogCount();
+  for(int i = 0; i < total; i++){ FlexStoreItem item; if(flexStoreCatalogItem(i, &item) && storeCatalogMatch(item)) found++; }
+  return found;
+}
+
+static int storeCatalogIndexAt(int filteredIndex){
+  int found = 0, total = flexStoreCatalogCount();
+  for(int i = 0; i < total; i++){
+    FlexStoreItem item;
+    if(flexStoreCatalogItem(i, &item) && storeCatalogMatch(item)){
+      if(found == filteredIndex) return i;
+      found++;
+    }
+  }
+  return -1;
+}
+
+static int storeInstalledFilteredCount(){
+  int found = 0;
+  for(int i = 0; i < storeInstalledN; i++) if(storeInstalledMatch(storeInstalled[i])) found++;
+  return found;
+}
+
+static int storeInstalledIndexAt(int filteredIndex){
+  int found = 0;
+  for(int i = 0; i < storeInstalledN; i++) if(storeInstalledMatch(storeInstalled[i])){
+    if(found == filteredIndex) return i;
+    found++;
+  }
+  return -1;
+}
 
 static void storeBackGlyph(int x, int y, uint16_t col){
   strokeSeg(x + 14, y, x, y + 12, 2, col);
@@ -40,6 +100,11 @@ static void storeHeader(const char* title, bool nested){
   if(!nested){
     bool linked = flexAccountLinked();
     int ax = SCR_W - 132, ay = 21, aw = 112, ah = 40;
+    int sx = ax - 50;
+    fillRoundRect(sx, ay, 40, 40, 20, thCard());
+    fillCircle(sx + 18, ay + 17, 8, TH_TXT2); fillCircle(sx + 18, ay + 17, 5, thCard());
+    strokeSeg(sx + 24, ay + 23, sx + 30, ay + 29, 2, TH_TXT2);
+    if(storeSearch[0]) fillCircle(sx + 33, ay + 7, 4, TH_PRIM);
     fillRoundRect(ax, ay, aw, ah, 20, linked ? rgb565(32,171,126) : thCard());
     drawTextC(ax + aw / 2, ay + 13, linked ? "@flex" : "Cuenta", 1,
               linked ? rgb565(255,255,255) : TH_TXT2);
@@ -77,6 +142,57 @@ static void storeEmpty(const char* title, const char* body){
 
 static int storeRowsPerPage(){ return 3; }
 
+static void storeSearchRender(){
+  storeHeader("Buscar apps", true);
+  fillRoundRect(24, 108, SCR_W - 48, 56, 16, thCard());
+  drawText(42, 126, storeSearch[0] ? storeSearch : "Escribe un nombre o categoria", 2, storeSearch[0] ? TH_TXT : TH_MUTE);
+  const char* rows[3] = {"QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"};
+  const int starts[3] = {12, 34, 22}; const int widths[3] = {42, 42, 42}; const int ys[3] = {192, 254, 316};
+  for(int row = 0; row < 3; row++){
+    int n = (int)strlen(rows[row]);
+    for(int i = 0; i < n; i++){
+      int x = starts[row] + i * (widths[row] + 4);
+      fillRoundRect(x, ys[row], widths[row], 48, 10, thCard());
+      char key[2] = {rows[row][i], 0}; drawTextC(x + widths[row] / 2, ys[row] + 15, key, 2, TH_TXT);
+    }
+  }
+  fillRoundRect(348, ys[2], 110, 48, 10, thCard()); drawTextC(403, ys[2] + 15, "Borrar", 1, TH_TXT2);
+  fillRoundRect(24, 382, 210, 48, 12, thCard()); drawTextC(129, 397, "Espacio", 1, TH_TXT2);
+  fillRoundRect(246, 382, 210, 48, 12, thCard()); drawTextC(351, 397, "Limpiar", 1, TH_TXT2);
+  fillRoundRect(24, 448, SCR_W - 48, 52, 26, TH_PRIM); drawTextC(SCR_W / 2, 465, "Mostrar resultados", 2, rgb565(255,255,255));
+  int results = storeSearchSource == SV_INSTALLED ? storeInstalledFilteredCount() : storeCatalogFilteredCount();
+  char count[48]; snprintf(count, sizeof(count), "%d resultado%s", results, results == 1 ? "" : "s");
+  drawTextC(SCR_W / 2, 540, count, 2, results ? TH_TXT2 : rgb565(224,111,120));
+  drawTextC(SCR_W / 2, 580, storeSearchSource == SV_INSTALLED ? "Buscando en tus apps" : "Buscando en Flex Store", 1, TH_MUTE);
+  flxFlushAll();
+}
+
+static bool storeSearchTapKey(int x, int y){
+  const char* rows[3] = {"QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"};
+  const int starts[3] = {12, 34, 22}; const int widths[3] = {42, 42, 42}; const int ys[3] = {192, 254, 316};
+  for(int row = 0; row < 3; row++){
+    if(y < ys[row] || y > ys[row] + 48) continue;
+    int slot = (x - starts[row]) / (widths[row] + 4);
+    int keyX = starts[row] + slot * (widths[row] + 4);
+    int n = (int)strlen(rows[row]);
+    if(slot >= 0 && slot < n && x >= keyX && x <= keyX + widths[row]){
+      size_t len = strlen(storeSearch);
+      if(len < sizeof(storeSearch) - 1){ storeSearch[len] = storeFold(rows[row][slot]); storeSearch[len + 1] = 0; }
+      return true;
+    }
+  }
+  return false;
+}
+
+static void storeSearchTap(int x, int y){
+  if(storeSearchTapKey(x, y)){ storeSearchRender(); return; }
+  size_t len = strlen(storeSearch);
+  if(y >= 316 && y <= 364 && x >= 348){ if(len) storeSearch[len - 1] = 0; storeSearchRender(); return; }
+  if(y >= 382 && y <= 430 && x < 240){ if(len && len < sizeof(storeSearch) - 1){ storeSearch[len] = ' '; storeSearch[len + 1] = 0; } storeSearchRender(); return; }
+  if(y >= 382 && y <= 430 && x >= 240){ storeSearch[0] = 0; storeSearchRender(); return; }
+  if(y >= 448 && y <= 510){ storeView = storeSearchSource; storePage = 0; storeRender(); }
+}
+
 static void storeDiscoverRender(){
   storeHeader("Flex Store", false); storeTabs();
   FlexStoreState st = flexStoreState();
@@ -100,17 +216,20 @@ static void storeDiscoverRender(){
     storeReloadInstalled();
     storeToast("Aplicacion instalada y verificada");
   }
-  int count = flexStoreCatalogCount();
-  if(count == 0){
+  int catalogCount = flexStoreCatalogCount();
+  if(catalogCount == 0){
     storeEmpty("Aun no hay apps publicadas", "Desliza hacia abajo para actualizar");
     fillRoundRect(118, 474, SCR_W - 236, 50, 25, TH_PRIM);
     drawTextC(SCR_W / 2, 490, "Actualizar", 2, rgb565(255,255,255));
     flxFlushAll(); return;
   }
+  int count = storeCatalogFilteredCount();
+  if(count == 0){ storeEmpty("No encontramos apps", "Toca la lupa para cambiar tu busqueda"); flxFlushAll(); return; }
   int per = storeRowsPerPage(), start = storePage * per;
   if(start >= count){ storePage = 0; start = 0; }
   for(int row = 0; row < per && start + row < count; row++){
-    FlexStoreItem item; flexStoreCatalogItem(start + row, &item);
+    int catalogIndex = storeCatalogIndexAt(start + row); FlexStoreItem item;
+    if(catalogIndex < 0 || !flexStoreCatalogItem(catalogIndex, &item)) continue;
     int y = 148 + row * 174;
     fillRoundRect(18, y, SCR_W - 36, 154, 22, thCard());
     storeAppMark(34, y + 24, 76, item.name, rgb565(105 + row * 20, 91, 230 - row * 24));
@@ -133,10 +252,13 @@ static void storeDiscoverRender(){
 static void storeInstalledRender(){
   storeHeader("Flex Store", false); storeTabs(); storeReloadInstalled();
   if(storeInstalledN == 0){ storeEmpty("No tienes apps instaladas", "Instala una desde la pestana Descubrir"); flxFlushAll(); return; }
+  int count = storeInstalledFilteredCount();
+  if(count == 0){ storeEmpty("No encontramos apps", "Toca la lupa para cambiar tu busqueda"); flxFlushAll(); return; }
   int per = storeRowsPerPage(), start = storePage * per;
-  if(start >= storeInstalledN){ storePage = 0; start = 0; }
-  for(int row = 0; row < per && start + row < storeInstalledN; row++){
-    const FlexPkgInfo& app = storeInstalled[start + row]; int y = 148 + row * 174;
+  if(start >= count){ storePage = 0; start = 0; }
+  for(int row = 0; row < per && start + row < count; row++){
+    int installedIndex = storeInstalledIndexAt(start + row); if(installedIndex < 0) continue;
+    const FlexPkgInfo& app = storeInstalled[installedIndex]; int y = 148 + row * 174;
     fillRoundRect(18, y, SCR_W - 36, 154, 22, thCard());
     storeAppMark(34, y + 24, 76, app.name, rgb565(80,150 + row * 18,210));
     drawText(126, y + 22, app.name, 2, TH_TXT);
@@ -146,6 +268,7 @@ static void storeInstalledRender(){
     fillRoundRect(SCR_W - 132, y + 106, 96, 34, 17, TH_PRIM);
     drawTextC(SCR_W - 84, y + 116, "Abrir", 1, rgb565(255,255,255));
   }
+  if(count > per){ char pg[24]; int pages = (count + per - 1) / per; snprintf(pg, sizeof(pg), "%d / %d", storePage + 1, pages); drawTextC(SCR_W / 2, 690, pg, 1, TH_MUTE); }
   flxFlushAll();
 }
 
@@ -216,7 +339,8 @@ static void storeRender(){
   if(storeView == SV_DISCOVER) storeDiscoverRender();
   else if(storeView == SV_INSTALLED) storeInstalledRender();
   else if(storeView == SV_DETAIL) storeDetailRender();
-  else storeRuntimeRender();
+  else if(storeView == SV_RUNTIME) storeRuntimeRender();
+  else storeSearchRender();
   storeLastState = flexStoreState(); storeLastProgress = flexStoreProgress();
 }
 
@@ -230,7 +354,7 @@ static void storeOpenInstalled(int index){
 
 static void storeEnter(){
   flexRuntimeUnload(&storeRuntime); storeReloadInstalled();
-  storeView = SV_DISCOVER; storePage = 0; storeSelected = -1; storeConfirmDelete = false;
+  storeView = SV_DISCOVER; storeSearchSource = SV_DISCOVER; storeSearch[0] = 0; storePage = 0; storeSelected = -1; storeConfirmDelete = false;
   if(flexStoreCatalogCount() == 0 && WiFi.status() == WL_CONNECTED && flexStoreState() != FLEXSTORE_LOADING) flexStoreRefresh();
   storeRender();
 }
@@ -243,6 +367,7 @@ static void storeExit(){
 
 static void storeBack(){
   if(storeView == SV_RUNTIME){ flexRuntimeUnload(&storeRuntime); storeView = SV_INSTALLED; storePage = 0; storeRender(); return; }
+  if(storeView == SV_SEARCH){ storeView = storeSearchSource; storePage = 0; storeRender(); return; }
   if(storeView == SV_DETAIL){ storeView = storeSelectedInstalled ? SV_INSTALLED : SV_DISCOVER; storeConfirmDelete = false; storeRender(); return; }
   flexRuntimeUnload(&storeRuntime); appClose();
 }
@@ -252,10 +377,14 @@ static void storeTick(){
   if(storeView == SV_DISCOVER && (state != storeLastState || pct != storeLastProgress)) storeRender();
   if(storeView == SV_RUNTIME && storeToastUntil && (int32_t)(millis() - storeToastUntil) >= 0){ storeToastUntil = 0; storeRuntimeRender(); }
   if(!T.tap && !T.swipeUp && !T.swipeDown) return;
-  if(T.tap && (storeView == SV_DISCOVER || storeView == SV_INSTALLED) && T.x >= SCR_W - 148 && T.y <= 76){
+  if(T.tap && (storeView == SV_DISCOVER || storeView == SV_INSTALLED) && T.x >= SCR_W - 132 && T.y <= 76){
     accountStoreEnter(); return;
   }
+  if(T.tap && (storeView == SV_DISCOVER || storeView == SV_INSTALLED) && T.x >= SCR_W - 190 && T.x < SCR_W - 132 && T.y <= 76){
+    storeSearchSource = storeView; storeView = SV_SEARCH; storeSearchRender(); return;
+  }
   if(T.tap && ((T.x < 76 && T.y < 92) || (T.y > SCR_H - 64 && T.x < SCR_W / 3))){ storeBack(); return; }
+  if(storeView == SV_SEARCH){ if(T.tap) storeSearchTap(T.x, T.y); return; }
   if(storeView == SV_RUNTIME){
     if(T.tap){
       FlexUiAction action;
@@ -281,7 +410,8 @@ static void storeTick(){
       int row = (T.y - 148) / 174;
       if(row < 0 || row >= storeRowsPerPage()) return;
       if(storeView == SV_DISCOVER){
-        int idx = storePage * storeRowsPerPage() + row; FlexStoreItem item;
+        int idx = storeCatalogIndexAt(storePage * storeRowsPerPage() + row); FlexStoreItem item;
+        if(idx < 0) return;
         if(!flexStoreCatalogItem(idx, &item)) return;
         FlexPkgInfo local; bool installed = flexPkgGet(item.packageId, &local);
         if(T.x >= SCR_W - 156){
@@ -290,8 +420,8 @@ static void storeTick(){
           } else { flexStoreInstall(idx); storeRender(); }
         } else { storeSelected = idx; storeSelectedInstalled = false; storeView = SV_DETAIL; storeConfirmDelete = false; storeRender(); }
       } else {
-        int idx = storePage * storeRowsPerPage() + row;
-        if(idx >= storeInstalledN) return;
+        int idx = storeInstalledIndexAt(storePage * storeRowsPerPage() + row);
+        if(idx < 0 || idx >= storeInstalledN) return;
         if(T.x >= SCR_W - 156) storeOpenInstalled(idx);
         else { storeSelected = idx; storeSelectedInstalled = true; storeView = SV_DETAIL; storeConfirmDelete = false; storeRender(); }
       }
