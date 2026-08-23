@@ -256,9 +256,7 @@ static bool verifyP256(const uint8_t pub[65], const uint8_t hash[32], const uint
   mbedtls_ecp_point q; mbedtls_ecp_point_init(&q);
   mbedtls_mpi r, s; mbedtls_mpi_init(&r); mbedtls_mpi_init(&s);
   int rc = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
-  if(rc == 0) rc = mbedtls_mpi_read_binary(&q.X, pub + 1, 32);
-  if(rc == 0) rc = mbedtls_mpi_read_binary(&q.Y, pub + 33, 32);
-  if(rc == 0) rc = mbedtls_mpi_lset(&q.Z, 1);
+  if(rc == 0) rc = mbedtls_ecp_point_read_binary(&grp, &q, pub, 65);
   if(rc == 0) rc = mbedtls_ecp_check_pubkey(&grp, &q);
   if(rc == 0) rc = mbedtls_mpi_read_binary(&r, sig, 32);
   if(rc == 0) rc = mbedtls_mpi_read_binary(&s, sig + 32, 32);
