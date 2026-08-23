@@ -161,9 +161,7 @@ static bool verifySignature(const uint8_t* payload, size_t payloadLen, const uin
   mbedtls_ecp_point key; mbedtls_ecp_point_init(&key);
   mbedtls_mpi r, s; mbedtls_mpi_init(&r); mbedtls_mpi_init(&s);
   int rc = mbedtls_ecp_group_load(&group, MBEDTLS_ECP_DP_SECP256R1);
-  if(rc == 0) rc = mbedtls_mpi_read_binary(&key.X, ACCOUNT_PUBLIC_KEY + 1, 32);
-  if(rc == 0) rc = mbedtls_mpi_read_binary(&key.Y, ACCOUNT_PUBLIC_KEY + 33, 32);
-  if(rc == 0) rc = mbedtls_mpi_lset(&key.Z, 1);
+  if(rc == 0) rc = mbedtls_ecp_point_read_binary(&group, &key, ACCOUNT_PUBLIC_KEY, sizeof(ACCOUNT_PUBLIC_KEY));
   if(rc == 0) rc = mbedtls_ecp_check_pubkey(&group, &key);
   if(rc == 0) rc = mbedtls_mpi_read_binary(&r, signature, 32);
   if(rc == 0) rc = mbedtls_mpi_read_binary(&s, signature + 32, 32);
