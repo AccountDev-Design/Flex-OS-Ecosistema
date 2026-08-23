@@ -146,9 +146,7 @@ static bool verifyCatalogSignature(const uint8_t* payload, size_t payloadLen, co
   mbedtls_ecp_point q; mbedtls_ecp_point_init(&q);
   mbedtls_mpi r, s; mbedtls_mpi_init(&r); mbedtls_mpi_init(&s);
   rc = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
-  if(rc == 0) rc = mbedtls_mpi_read_binary(&q.X, CATALOG_PUBLIC_KEY + 1, 32);
-  if(rc == 0) rc = mbedtls_mpi_read_binary(&q.Y, CATALOG_PUBLIC_KEY + 33, 32);
-  if(rc == 0) rc = mbedtls_mpi_lset(&q.Z, 1);
+  if(rc == 0) rc = mbedtls_ecp_point_read_binary(&grp, &q, CATALOG_PUBLIC_KEY, sizeof(CATALOG_PUBLIC_KEY));
   if(rc == 0) rc = mbedtls_ecp_check_pubkey(&grp, &q);
   if(rc == 0) rc = mbedtls_mpi_read_binary(&r, sig, 32);
   if(rc == 0) rc = mbedtls_mpi_read_binary(&s, sig + 32, 32);
