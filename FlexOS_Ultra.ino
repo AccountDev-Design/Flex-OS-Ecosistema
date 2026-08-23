@@ -8962,7 +8962,7 @@ static void connEnter(); static void connTick();           // Conectividad (ST_C
 static void flexBleStop(); static bool flexBleStart();     // radio BLE real
 static void connWifiSub(char* out, size_t n);              // SSID real para Ajustes
 static void connBleSub(char* out, size_t n);
-static void gamesEnter(); static void gamesTick(); // Juegos: contenedor vacio para reconstruccion
+static void gamesEnter(); static void gamesTick(); // Juegos: Jumper (motor en FlexOS_Jumper.h)
 static void wxAppEnter(); static void wxAppTick();  // Clima (Flex Weather) -- seccion propia mas abajo
 static void storeEnter(); static void storeTick(); static void storeExit(); // Flex Store + runtime FLXP
 // Rect del icono en el escritorio (para animar la apertura desde el)
@@ -9424,7 +9424,7 @@ static FlexApp APP_REG[APP_N] = {
   { ideEnter, ideTick, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_FAV },                        // 8  Code IDE (REAL + Asistente de Hardware)
   { bienEnter, bienTick, APP_FLEX, APP_CAT_SISTEMA, APP_DEF_FAV },                      // 9  Bienestar (REAL, M2)
   { paintEnter, paintTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_OCIO, APP_DEF_FAV },// 10 Paint (REAL)
-  { gamesEnter, gamesTick, APP_OWN_TOUCH | APP_CUSTOM_HEADER | APP_LAND, APP_CAT_OCIO, APP_DEF_FAV }, // 11 Juegos (base vacia)
+  { gamesEnter, gamesTick, APP_OWN_TOUCH | APP_CUSTOM_HEADER | APP_LAND, APP_CAT_OCIO, APP_DEF_FAV }, // 11 Juegos (REAL: Jumper)
   { settingsEnter, settingsTick, APP_CUSTOM_HEADER, APP_CAT_SISTEMA, APP_DEF_DOCK },      // 12 Ajustes (REAL, M3) -- Wi-Fi/PIN cambian gState a pantalla completa
   { calcEnter, calcTick, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_DOCK },               // 13 Calculadora (REAL, M2) -- app de referencia del modo embebido
   { calEnter, calTick, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_DOCK },                        // 14 Calendario (REAL, M2)
@@ -19270,53 +19270,22 @@ static void simpCards(const char* title, const char* items[], int n){
 }
 static void eduEnter(){ const char* it[4] = { "Electr\xC3\xB3nica b\xC3\xA1sica", "Programaci\xC3\xB3n C++", "Redes y WiFi", "Sensores I2C" }; simpCards("Educaci\xC3\xB3n", it, 4); }
 // #############################################################
-// ##  APP: JUEGOS -- BASE VACIA
+// ##  APP: JUEGOS -- JUMPER
 // ##  ----------------------------------------------------------
-// ##  Los motores anteriores fueron retirados por completo.
-// ##  Se conserva solamente el contenedor de la app, su orientacion
-// ##  horizontal y una salida segura para poder reconstruir Juegos
-// ##  desde cero sin afectar el registro ni el resto de Flex OS.
+// ##  El contenedor de la app se queda AQUI (registro, orientacion
+// ##  horizontal y salida segura); el juego entero vive en
+// ##  FlexOS_Jumper.h, que se incluye en este punto porque es
+// ##  donde ya estan disponibles las primitivas graficas, el
+// ##  tactil (T), bbuf/fb, present()/flxFlush(), appClose() y las
+// ##  variables de orientacion.
+// ##
+// ##  Solo existe el nivel Jumper: no hay editor, ni tienda de
+// ##  niveles, ni multijugador, ni audio.
 // #############################################################
+#include "FlexOS_Jumper.h"
 
-// Touch fisico portrait -> coordenadas logicas landscape.
-static inline int gamesLX(){ return T.y; }
-static inline int gamesLY(){ return (SCR_W - 1) - T.x; }
-
-static void gamesRenderEmpty(){
-  gLand = true;
-  setBuf(bbuf);
-  gClipX0 = 0; gClipX1 = SCR_W - 1;
-  gClipY0 = 0; gClipY1 = SCR_H - 1;
-
-  // Negro directo sobre todo el back buffer; despues se dibujan solamente
-  // la cabecera y el mensaje. Esta pantalla no mantiene ningun motor activo.
-  memset(bbuf, 0, (size_t)SCR_W * SCR_H * 2);
-  fillRect(0, 0, LW, 62, rgb565(24,30,50));
-  drawTextC(LW / 2, 17, "JUEGOS", 4, rgb565(240,244,252));
-
-  // Boton de salida propio: la app conserva APP_OWN_TOUCH.
-  fillRoundRect(12, 15, 46, 30, 8, rgb565(58,64,88));
-  strokeSeg(24, 21, 44, 39, 2, rgb565(240,240,240));
-  strokeSeg(44, 21, 24, 39, 2, rgb565(240,240,240));
-
-  fillRoundRect(150, 150, 500, 190, 24, rgb565(22,27,44));
-  drawRoundRect(150, 150, 500, 190, 24, rgb565(62,72,104));
-  drawTextC(LW / 2, 205, "Sin juegos instalados", 4, rgb565(235,239,248));
-  drawTextC(LW / 2, 262, "Listo para empezar desde cero", 2, rgb565(150,162,188));
-
-  present(0, SCR_H - 1);
-}
-
-static void gamesEnter(){
-  gLand = true;
-  gamesRenderEmpty();
-}
-
-static void gamesTick(){
-  if(!T.tap) return;
-  int lx = gamesLX(), ly = gamesLY();
-  if(lx >= 12 && lx <= 58 && ly >= 15 && ly <= 45) appClose();
-}
+static void gamesEnter(){ jmpEnter(); }
+static void gamesTick(){  jmpTick();  }
 
 // NAVEGADOR
 //   La implementacion ANTIGUA de navEnter() vivia aqui: pintaba una
