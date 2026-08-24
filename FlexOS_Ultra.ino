@@ -16148,6 +16148,26 @@ static const char* LAYOUT_EMOJI[KB_ROWS][KB_COLS] = {   // emoticones de texto (
 static const char* (*mapaActivo)[KB_COLS] = LAYOUT_ES;   // <<< puntero maestro
 static bool kbShift = false, kbLangEs = true;
 
+// Resuelve lo que se muestra y lo que se escribe para UNA tecla del mapa.
+// Ademas de las mayusculas, Shift en la capa ?123 convierte los parentesis
+// en llaves: ( -> { y ) -> }. Asi las llaves quedan disponibles en TODO
+// editor que reutilice el teclado del sistema, sin quitar simbolos ni cambiar
+// la geometria 10x3. Al escribir una variante, Shift vuelve a apagarse.
+static const char* kbResolveKey(const char* base, char out[6], bool consumeShift){
+  if(!base || !kbShift) return base;
+  bool changed = false;
+  if(base[1] == 0 && base[0] >= 'a' && base[0] <= 'z'){
+    out[0] = (char)(base[0] - 32); out[1] = 0; changed = true;
+  } else if(!strcmp(base, "\xC3\xB1")){
+    out[0] = (char)0xC3; out[1] = (char)0x91; out[2] = 0; changed = true;
+  } else if(mapaActivo == LAYOUT_NUM && base[1] == 0 && (base[0] == '(' || base[0] == ')')){
+    out[0] = base[0] == '(' ? '{' : '}'; out[1] = 0; changed = true;
+  }
+  if(!changed) return base;
+  if(consumeShift) kbShift = false;
+  return out;
+}
+
 // #############################################################
 // ##  FASE A · GEOMETRIA DEL TECLADO EN VARIABLES
 // ##  ------------------------------------------------------
@@ -16480,9 +16500,8 @@ static void kbPaintCellNow(int cell, bool pressed, uint16_t bg, uint16_t txt){
   if(cell < 0) return;
   int r = cell / KB_COLS, c = cell % KB_COLS;
   int x = KB_X + c * (KB_KW + KB_GAP), y = KB_Y + r * (KB_KH + KB_GAP);
-  const char* k = mapaActivo[r][c];
   char up[6];
-  if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ up[0] = (char)(k[0] - 32); up[1] = 0; k = up; }
+  const char* k = kbResolveKey(mapaActivo[r][c], up, false);
   setBuf(fb);
   kbPaintKey(x, y, KB_KW, KB_KH, k, kbFontSize(), bg, txt, pressed);
   flxFlush(y - 1, y + KB_KH + 1);
@@ -16854,9 +16873,8 @@ static void selectWordAt(int bi){
   if(b > a){ noteSelA = a; noteSelB = b; noteCur = b; noteMenu = true; }
 }
 static void kbPressChar(const char* s){
-  if(kbShift && s[1] == 0 && s[0] >= 'a' && s[0] <= 'z'){ char u[2] = { (char)(s[0] - 32), 0 }; noteInsert(u); kbShift = false; }
-  else if(kbShift && !strcmp(s, "\xC3\xB1")){ noteInsert("\xC3\x91"); kbShift = false; }
-  else noteInsert(s);
+  char out[6];
+  noteInsert(kbResolveKey(s, out, true));
 }
 // variantes acentuadas (solo las que tiene la fuente). Devuelve el numero.
 static int kbGetVariants(char b, const char* var[4]){
@@ -17135,9 +17153,8 @@ static void noteRenderKeyboard(int yoff){
   int fs = kbFontSize();
   for(int r = 0; r < KB_ROWS; r++) for(int c = 0; c < KB_COLS; c++){
     int x = KB_X + c * (KB_KW + KB_GAP), y = KB_Y + r * (KB_KH + KB_GAP) + yoff;
-    const char* k = mapaActivo[r][c];
     char u[6];
-    if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ u[0] = (char)(k[0] - 32); u[1] = 0; k = u; }
+    const char* k = kbResolveKey(mapaActivo[r][c], u, false);
     int cell = r * KB_COLS + c;
     bool hot = kbCellHeld(cell) || kbFxLevel(cell) > 0;
     kbPaintKey(x, y, KB_KW, KB_KH, k, fs, kbColKey(), kbColKeyTxt(), hot);
@@ -17673,9 +17690,8 @@ static void fkNameDraw(){
   int fs = kbFontSize();
   for(int r = 0; r < KB_ROWS; r++) for(int c = 0; c < KB_COLS; c++){
     int x = KB_X + c * (KB_KW + KB_GAP), y = ky + r * (KB_KH + KB_GAP);
-    const char* k = mapaActivo[r][c];
     char u[6];
-    if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ u[0] = (char)(k[0] - 32); u[1] = 0; k = u; }
+    const char* k = kbResolveKey(mapaActivo[r][c], u, false);
     kbPaintKey(x, y, KB_KW, KB_KH, k, fs, kbColKey(), kbColKeyTxt(), false);
   }
   int fry = ky + 3 * (KB_KH + KB_GAP);
@@ -17724,9 +17740,8 @@ static int fkNameTick(){
   if(T.tap && T.y < 90 && T.x < 60){ fkNameOn = false; return -1; }   // esquina sup. izq. = cancelar
   int cell = kbCellAt(T.x, T.y);
   if(cell >= 0){
-    const char* k = mapaActivo[cell / KB_COLS][cell % KB_COLS];
     char u[6];
-    if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ u[0] = (char)(k[0] - 32); u[1] = 0; k = u; kbShift = false; }
+    const char* k = kbResolveKey(mapaActivo[cell / KB_COLS][cell % KB_COLS], u, true);
     fkNameAppend(k);
     fkNameDraw();
   }
@@ -18400,9 +18415,8 @@ static void kbsEditorKb(){
   int fs = kbFontSize();
   for(int r = 0; r < KB_ROWS; r++) for(int c = 0; c < KB_COLS; c++){
     int x = KB_X + c * (KB_KW + KB_GAP), y = KB_Y + r * (KB_KH + KB_GAP);
-    const char* k = mapaActivo[r][c];
     char u[6];
-    if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ u[0] = (char)(k[0] - 32); u[1] = 0; k = u; }
+    const char* k = kbResolveKey(mapaActivo[r][c], u, false);
     kbPaintKey(x, y, KB_KW, KB_KH, k, fs, kbColKey(), kbColKeyTxt(), false);
   }
   int fy = kbFuncY();
@@ -18757,9 +18771,9 @@ static void kbsTick(){
     }
     int cell = kbCellAt(T.x, T.y);
     if(cell >= 0){
-      const char* k = mapaActivo[cell / KB_COLS][cell % KB_COLS];
-      if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ char u[2] = { (char)(k[0] - 32), 0 }; kbsAppendField(u); kbShift = false; }
-      else kbsAppendField(k);
+      char u[6];
+      const char* k = kbResolveKey(mapaActivo[cell / KB_COLS][cell % KB_COLS], u, true);
+      kbsAppendField(k);
       kbsRender();
     }
     return;
@@ -21333,9 +21347,8 @@ static void wxComposeSearch(int y0, int y1){
   int fs = kbFontSize();
   for(int r = 0; r < KB_ROWS; r++) for(int c = 0; c < KB_COLS; c++){
     int x = KB_X + c * (KB_KW + KB_GAP), y = ky + r * (KB_KH + KB_GAP);
-    const char* k = mapaActivo[r][c];
     char u[6];
-    if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ u[0] = (char)(k[0] - 32); u[1] = 0; k = u; }
+    const char* k = kbResolveKey(mapaActivo[r][c], u, false);
     kbPaintKey(x, y, KB_KW, KB_KH, k, fs, kbColKey(), kbColKeyTxt(), false);
   }
   int fy = kbFuncY();
@@ -21743,9 +21756,9 @@ static void wxTouchSearch(){
   }
   int cell = kbCellAt(x, y);
   if(cell < 0) return;
-  const char* k = mapaActivo[cell / KB_COLS][cell % KB_COLS];
-  if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ char u[2] = { (char)(k[0] - 32), 0 }; wxQueryAppend(u); kbShift = false; }
-  else wxQueryAppend(k);
+  char u[6];
+  const char* k = kbResolveKey(mapaActivo[cell / KB_COLS][cell % KB_COLS], u, true);
+  wxQueryAppend(k);
   wxFull();
 }
 
@@ -23925,9 +23938,8 @@ static void lsuDrawKb(int yoff, int xoff){
   int fs = kbFontSize();
   for(int r = 0; r < KB_ROWS; r++) for(int c = 0; c < KB_COLS; c++){
     int x = KB_X + c * (KB_KW + KB_GAP) + xoff, y = ky + r * (KB_KH + KB_GAP);
-    const char* k = mapaActivo[r][c];
     char u[6];
-    if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ u[0] = (char)(k[0] - 32); u[1] = 0; k = u; }
+    const char* k = kbResolveKey(mapaActivo[r][c], u, false);
     int cell = r * KB_COLS + c;
     kbPaintKey(x, y, KB_KW, KB_KH, k, fs, lsuKeyCol(), lsuKeyTxt(), kbCellHeld(cell) || kbFxLevel(cell) > 0);
   }
@@ -24069,9 +24081,9 @@ static void lsuTick(){
     for(int e = 0; e < n; e++){
       int cell = kbEvCell[e];
       if(cell < 0) continue;
-      const char* k = mapaActivo[cell / KB_COLS][cell % KB_COLS];
-      if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ char u[2] = { (char)(k[0] - 32), 0 }; lsuPassAppend(u); kbShift = false; }
-      else lsuPassAppend(k);
+      char u[6];
+      const char* k = kbResolveKey(mapaActivo[cell / KB_COLS][cell % KB_COLS], u, true);
+      lsuPassAppend(k);
       kbFxStart(cell); wrote = true;
     }
     if(wrote) lsuRenderPass(0, 0);
@@ -24094,9 +24106,9 @@ static void lsuTick(){
     if(kbFastActive()) return;                          // ya la escribio la via rapida
     int cell = kbCellAt(T.x, T.y);
     if(cell >= 0){
-      const char* k = mapaActivo[cell / KB_COLS][cell % KB_COLS];
-      if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ char u[2] = { (char)(k[0] - 32), 0 }; lsuPassAppend(u); kbShift = false; }
-      else lsuPassAppend(k);
+      char u[6];
+      const char* k = kbResolveKey(mapaActivo[cell / KB_COLS][cell % KB_COLS], u, true);
+      lsuPassAppend(k);
       kbFxStart(cell);
       lsuRenderPass(0, 0);
     }
@@ -25022,9 +25034,8 @@ static void wifiRenderPass(int yoff){
   int fs = kbFontSize();
   for(int r = 0; r < KB_ROWS; r++) for(int c = 0; c < KB_COLS; c++){
     int x = KB_X + c * (KB_KW + KB_GAP), y = ky + r * (KB_KH + KB_GAP);
-    const char* k = mapaActivo[r][c];
     char u[6];
-    if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ u[0] = (char)(k[0] - 32); u[1] = 0; k = u; }
+    const char* k = kbResolveKey(mapaActivo[r][c], u, false);
     kbPaintKey(x, y, KB_KW, KB_KH, k, fs, kbColKey(), kbColKeyTxt(), false);
   }
   int fy = ky + 3 * (KB_KH + KB_GAP);
@@ -25186,9 +25197,9 @@ static void wifiTick(){
         }
         int cell = kbCellAt(T.x, T.y);
         if(cell >= 0){
-          const char* k = mapaActivo[cell / KB_COLS][cell % KB_COLS];
-          if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ char u[2] = { (char)(k[0] - 32), 0 }; wifiPassAppend(u); kbShift = false; }
-          else wifiPassAppend(k);
+          char u[6];
+          const char* k = kbResolveKey(mapaActivo[cell / KB_COLS][cell % KB_COLS], u, true);
+          wifiPassAppend(k);
           wifiRenderPass(0);
         }
       }
@@ -27291,9 +27302,8 @@ static void newsDrawEditor(){
   int fs = kbFontSize();
   for(int r = 0; r < KB_ROWS; r++) for(int c = 0; c < KB_COLS; c++){
     int x = KB_X + c * (KB_KW + KB_GAP), y = KB_Y + r * (KB_KH + KB_GAP);
-    const char* k = mapaActivo[r][c];
     char u[6];
-    if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ u[0] = (char)(k[0] - 32); u[1] = 0; k = u; }
+    const char* k = kbResolveKey(mapaActivo[r][c], u, false);
     kbPaintKey(x, y, KB_KW, KB_KH, k, fs, kbColKey(), kbColKeyTxt(), false);
   }
   int fy = kbFuncY();
@@ -27394,9 +27404,9 @@ static void newsSettingsTick(){
     }
     int cell = kbCellAt(T.x, T.y);
     if(cell >= 0){
-      const char* k = mapaActivo[cell / KB_COLS][cell % KB_COLS];
-      if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ char u[2] = { (char)(k[0] - 32), 0 }; newsAppendField(u); kbShift = false; }
-      else newsAppendField(k);
+      char u[6];
+      const char* k = kbResolveKey(mapaActivo[cell / KB_COLS][cell % KB_COLS], u, true);
+      newsAppendField(k);
       newsRender();
     }
     return;
@@ -29585,9 +29595,8 @@ static void vwRenderNote(){
   int fs = kbFontSize();
   for(int r = 0; r < KB_ROWS; r++) for(int c = 0; c < KB_COLS; c++){
     int x = KB_X + c * (KB_KW + KB_GAP), y = ky + r * (KB_KH + KB_GAP);
-    const char* k = mapaActivo[r][c];
     char u[6];
-    if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ u[0] = (char)(k[0] - 32); u[1] = 0; k = u; }
+    const char* k = kbResolveKey(mapaActivo[r][c], u, false);
     int cell = r * KB_COLS + c;
     kbPaintKey(x, y, KB_KW, KB_KH, k, fs, SET_CARD_BG, TH_TXT,
                kbCellHeld(cell) || kbFxLevel(cell) > 0);
@@ -29627,9 +29636,8 @@ static bool vwNoteTick(){
   }
   int cell = kbCellAt(T.x, T.y);
   if(cell >= 0){
-    const char* k = mapaActivo[cell / KB_COLS][cell % KB_COLS];
     char u[6];
-    if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ u[0] = (char)(k[0] - 32); u[1] = 0; k = u; kbShift = false; }
+    const char* k = kbResolveKey(mapaActivo[cell / KB_COLS][cell % KB_COLS], u, true);
     vwNoteInsert(k);
     kbFxStart(cell);
     vaultRender();
@@ -29950,9 +29958,8 @@ static void vwPaintKeypad(int yoff){
   int fs = kbFontSize();
   for(int r = 0; r < KB_ROWS; r++) for(int c = 0; c < KB_COLS; c++){
     int x = KB_X + c * (KB_KW + KB_GAP), y = ky + r * (KB_KH + KB_GAP);
-    const char* k = mapaActivo[r][c];
     char u[6];
-    if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ u[0] = (char)(k[0] - 32); u[1] = 0; k = u; }
+    const char* k = kbResolveKey(mapaActivo[r][c], u, false);
     int cell = r * KB_COLS + c;
     kbPaintKey(x, y, KB_KW, KB_KH, k, fs, SET_CARD_BG, TH_TXT,
                kbCellHeld(cell) || kbFxLevel(cell) > 0);
@@ -30445,9 +30452,8 @@ static void vaultTick(){
       }
       int cell = kbCellAt(T.x, T.y);
       if(cell >= 0){
-        const char* k = mapaActivo[cell / KB_COLS][cell % KB_COLS];
         char u[6];
-        if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){ u[0] = (char)(k[0] - 32); u[1] = 0; k = u; kbShift = false; }
+        const char* k = kbResolveKey(mapaActivo[cell / KB_COLS][cell % KB_COLS], u, true);
         size_t L = strlen(vwPass), kl = strlen(k);
         if(L + kl < sizeof(vwPass)){ memcpy(vwPass + L, k, kl); vwPass[L + kl] = 0; }
         kbFxStart(cell);
