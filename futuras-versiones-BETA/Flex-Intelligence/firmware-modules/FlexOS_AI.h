@@ -11,8 +11,7 @@
 // ##
 // ##  NINGUNA CLAVE VIVE EN ESTE CODIGO
 // ##  ---------------------------------
-// ##  Mismo criterio que el servicio de Noticias: el firmware
-// ##  sale de fabrica SIN servidor configurado y lo dice en
+// ##  El firmware sale de fabrica SIN servidor configurado y lo dice en
 // ##  pantalla. La URL, el identificador de dispositivo y el
 // ##  token los escribe el usuario en Ajustes y se guardan en
 // ##  NVS (namespace propio "flexos_ai"). El token es revocable
@@ -170,8 +169,7 @@ struct AiConfig {
 #define AI_OPEN_APP   1
 
 // Lee/escribe la configuracion en memoria. La persistencia en NVS la
-// hace el .ino (es quien tiene Preferences abierto con su namespace),
-// igual que el servicio de Noticias.
+// hace el .ino (es quien tiene Preferences abierto con su namespace).
 AiConfig* aiConfig();
 void      aiConfigDefaults();
 
