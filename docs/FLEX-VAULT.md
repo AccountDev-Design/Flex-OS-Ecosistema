@@ -274,12 +274,6 @@ escribir.
   anti-rollback **de verdad** necesita el contador seguro de eFuses, que es
   irreversible: esta versión se queda en la comprobación por software y no toca
   ni un eFuse.
-- **Noticias**: ese cliente también llamaba siempre a `setInsecure()`, y por ese
-  socket viaja la **clave de API** del usuario. Ahora, por defecto, una URL
-  `https` no se consulta sin verificar. Dos salidas: incrustar la CA del
-  proveedor al publicar (`FLEXOS_NEWS_ROOT_CA`) o que el usuario lo autorice a
-  mano en Ajustes → Noticias, con la advertencia delante.
-
 ---
 
 ## 7. Ficheros y pruebas
