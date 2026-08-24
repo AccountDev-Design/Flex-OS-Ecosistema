@@ -554,7 +554,23 @@ static bool otaInstall(){
       size_t want = avail > sizeof(gChunk) ? sizeof(gChunk) : avail;
       if(want > total - written) want = total - written;
       int r = st->readBytes(gChunk, want);
-      if(r <= 0){ vTaskDelay(pdMS_TO_TICKS(2)); continue; }
+      if(r <= 0){
+        // available() dijo que habia datos y la lectura no devolvio ninguno.
+        // Esta rama TAMBIEN tiene que mirar el reloj de atasco: sin esto, un
+        // extremo que deja el socket abierto y con bytes anunciados que nunca
+        // llegan mantenia este bucle girando SIN NINGUN limite -- la unica
+        // salida era que el usuario cancelase. La comprobacion es la misma que
+        // ya hace otaCheck() al leer el manifiesto y que la rama de abajo hace
+        // cuando no hay datos anunciados; era el unico camino que se la
+        // saltaba. Ante el atasco se aborta y la particion activa queda
+        // intacta, como en cualquier otro fallo.
+        if(millis() - last > FLEXOS_OTA_STALL_TIMEOUT){
+          Serial.printf("[OTA] TIMEOUT: lectura vacia con datos anunciados en %u bytes de %u\n",
+                        (unsigned)written, (unsigned)total);
+          Update.abort(); http.end(); return otaFail(OTA_ERR_TIMEOUT);
+        }
+        vTaskDelay(pdMS_TO_TICKS(2)); continue;
+      }
 
       // --- ESCRITURA EN FLASH, SERIALIZADA CON LA SUBIDA AL PANEL ---
       // Escribir en la flash SPI apaga la cache de los dos nucleos. Si el

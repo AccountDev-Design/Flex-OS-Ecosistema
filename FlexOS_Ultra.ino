@@ -2259,18 +2259,44 @@ static void drawLiquidGlassPanelEx(int x, int y, int w, int h, int rad, uint16_t
   if(x + w > SCR_W) w = SCR_W - x; if(y + h > SCR_H) h = SCR_H - y;
   if(w <= 0 || h <= 0) return;
   if(2 * rad > w) rad = w / 2; if(2 * rad > h) rad = h / 2;
-  // Sampleo del fondo para el tinte adaptativo. Se engancha al loop de memcpy
-  // que YA existe -- sin pasada extra, sin buffer nuevo, solo dos acumuladores
-  // en stack -- y lee 1 de cada 4 filas por 1 de cada 8 columnas, o sea 1/32 de
-  // los pixeles. Se mide ANTES del blur, sobre la region recien copiada. Se
-  // deja el memcpy en bloque en vez de acumular pixel a pixel porque copiar por
-  // bytes seria mas caro que el propio muestreo disperso.
+
+  // BANDA UTIL DEL PANEL.
+  //
+  // El compositor casi nunca repinta la pantalla entera: publica BANDAS
+  // (regiones sucias) y las listas desplazables dibujan sus filas dentro de un
+  // viewport recortado. Las filas del panel que caen fuera de [gClipY0,gClipY1]
+  // no llegan a escribirse -- el bucle de composicion de abajo ya las saltaba --
+  // pero se copiaban y se DESENFOCABAN igual. Una lista con veinte tarjetas de
+  // vidrio hacia veinte copias y veinte desenfoques completos para publicar dos
+  // filas.
+  //
+  // Aqui el trabajo se acota a las filas visibles mas blurR filas de margen a
+  // cada lado, y el resultado es IDENTICO pixel a pixel: glassBlur() es un
+  // desenfoque separable de caja, de radio blurR y UNA sola pasada por eje, asi
+  // que la fila j solo depende de las filas [j-blurR, j+blurR]. El margen mete
+  // exactamente esas filas; y donde el margen topa con el borde del panel, la
+  // ventana se encoge igual que se encogeria desenfocando el panel entero,
+  // porque el borde es el mismo. La pasada horizontal es fila a fila, asi que
+  // no depende de cuantas filas se copien.
+  int vy0 = y         > gClipY0 ? y         : gClipY0;
+  int vy1 = (y + h - 1) < gClipY1 ? (y + h - 1) : gClipY1;
+  if(vy0 > vy1) return;                       // ni una fila visible: no hay nada que componer
+  int j0 = (vy0 - y) - blurR; if(j0 < 0)     j0 = 0;
+  int j1 = (vy1 - y) + blurR; if(j1 > h - 1) j1 = h - 1;
+  int hc = j1 - j0 + 1;                       // filas realmente copiadas y desenfocadas
+
+  // Sampleo del fondo para el tinte adaptativo. Lee 1 de cada 4 filas por 1 de
+  // cada 8 columnas (1/32 de los pixeles) sobre el panel COMPLETO, no sobre la
+  // banda: el tinte depende de la luminancia media de todo el panel, y medirlo
+  // solo en la banda daria un color distinto en cada repintado parcial. Se lee
+  // directamente de gBuf, que es lo mismo que leia antes de la copia.
   uint32_t lumaSum = 0; int lumaN = 0;
-  for(int j = 0; j < h; j++){
-    uint16_t* row = glassBuf + (size_t)j * w;
-    memcpy(row, gBuf + (size_t)(y + j) * SCR_W + x, w * 2);
-    if((j & 3) == 0) for(int i = 0; i < w; i += 8){ lumaSum += (uint32_t)glassLuma(row[i]); lumaN++; }
+  for(int j = 0; j < h; j += 4){
+    const uint16_t* srow = gBuf + (size_t)(y + j) * SCR_W + x;
+    for(int i = 0; i < w; i += 8){ lumaSum += (uint32_t)glassLuma(srow[i]); lumaN++; }
   }
+  for(int j = j0; j <= j1; j++)
+    memcpy(glassBuf + (size_t)(j - j0) * w, gBuf + (size_t)(y + j) * SCR_W + x, w * 2);
   // Cuanto MAS se parecen en luminancia el tinte y el fondo, MENOS tinte se
   // aplica: si ya comparten tono, cargarle tinte solo lo aplana en un bloque
   // liso, y conviene dejar ver el fondo. Cuanto mas difieren, mas tinte, para
@@ -2286,11 +2312,14 @@ static void drawLiquidGlassPanelEx(int x, int y, int w, int h, int rad, uint16_t
     if(dif > GLASS_TINT_DIFF_MAX) dif = GLASS_TINT_DIFF_MAX;
     tintMix = (uint8_t)(GLASS_TINT_MIN + (dif * (GLASS_TINT_MAX - GLASS_TINT_MIN)) / GLASS_TINT_DIFF_MAX);
   }
-  glassBlur(w, h, blurR);
-  for(int j = 0; j < h; j++){
-    int yy = y + j; if(yy < gClipY0 || yy > gClipY1) continue;   // respeta la banda de recorte
+  glassBlur(w, hc, blurR);
+  // La geometria (inset redondeado, degradado, borde) sigue calculandose con j
+  // y h del panel ENTERO: la banda solo decide que filas se recorren, nunca
+  // como se ven.
+  for(int j = vy0 - y; j <= vy1 - y; j++){
+    int yy = y + j;
     int ins = glInset(j, h, rad);
-    uint16_t* src = glassBuf + (size_t)j * w;
+    uint16_t* src = glassBuf + (size_t)(j - j0) * w;
     uint16_t* dst = gBuf + (size_t)yy * SCR_W + x;
     float fj = (float)j;
     for(int i = ins; i < w - ins; i++){
@@ -4223,14 +4252,54 @@ static uint32_t nextCP(const char** ps){
   else cp = 0x3F;
   *ps = s; return cp;
 }
+// Columnas del glifo: x0 entero y su fraccion. Dependen SOLO de tx y de la
+// escala -- no de la fila --, asi que la version anterior repetia la division
+// en coma flotante tx/sc en CADA pixel del glifo. Aqui se calculan una vez por
+// glifo y se reutilizan en sus th filas: misma expresion, mismo resultado bit
+// a bit, y una division por COLUMNA en vez de una por PIXEL. La tabla es
+// scratch del hilo de UI (unico que dibuja), igual que glLine o qpGlRowA.
+#define GLYPH_COLS_MAX 128
+static int16_t gGlyphCx[GLYPH_COLS_MAX];
+static float   gGlyphFx[GLYPH_COLS_MAX];
+
 // Dibuja un glifo escalado (bilineal desde el master 4bpp)
 static void drawGlyphScaled(int px0, int py0, const FGlyph* g, float sc, uint16_t col, uint8_t alpha){
   if(g->w == 0) return;
   int tw = (int)(g->w * sc + 0.999f), th = (int)(g->h * sc + 0.999f);
+  if(tw <= 0 || th <= 0) return;
+  // RECORTE POR CAJA, ANTES DE RASTERIZAR.
+  //
+  // Casi todo el sistema repinta por BANDAS (regiones sucias) y las listas
+  // desplazables dibujan sus filas dentro de un viewport recortado. En los dos
+  // casos hay texto cuyo glifo cae ENTERO fuera de la banda: la version
+  // anterior lo rasterizaba completo -- interpolacion bilineal de ~700 pixeles,
+  // con cuatro lecturas del master y seis multiplicaciones cada uno -- para que
+  // pxA() los descartase despues uno a uno. Comprobar la caja aqui cuesta cuatro
+  // comparaciones y ahorra el glifo entero. No cambia ni un pixel: solo se salta
+  // trabajo cuyo resultado ya se estaba tirando.
+  //
+  // En landscape putPhys()/putPhysA() mapean (lx,ly) a la fila FISICA lx y solo
+  // aplican gClipY0/gClipY1 sobre ella (gClipX0/gClipX1 no intervienen), por eso
+  // los dos modos se comprueban por separado.
+  if(gLand){
+    if(px0 + tw <= 0 || px0 >= SCR_H || py0 + th <= 0 || py0 >= SCR_W) return;
+    if(px0 + tw <= gClipY0 || px0 > gClipY1) return;
+  } else {
+    if(px0 + tw <= 0 || px0 >= SCR_W || py0 + th <= 0 || py0 >= SCR_H) return;
+    if(py0 + th <= gClipY0 || py0 > gClipY1) return;
+    if(px0 + tw <= gClipX0 || px0 > gClipX1) return;
+  }
+  const bool tbl = (tw <= GLYPH_COLS_MAX);
+  if(tbl) for(int tx = 0; tx < tw; tx++){
+    float fx = tx / sc; int x0 = (int)fx;
+    gGlyphCx[tx] = (int16_t)x0; gGlyphFx[tx] = fx - x0;
+  }
   for(int ty = 0; ty < th; ty++){
     float fy = ty / sc; int y0 = (int)fy; float dyf = fy - y0;
     for(int tx = 0; tx < tw; tx++){
-      float fx = tx / sc; int x0 = (int)fx; float dxf = fx - x0;
+      int x0; float dxf;
+      if(tbl){ x0 = gGlyphCx[tx]; dxf = gGlyphFx[tx]; }
+      else   { float fx = tx / sc; x0 = (int)fx; dxf = fx - x0; }
       float a00 = fgPix(g, x0, y0),     a10 = fgPix(g, x0 + 1, y0);
       float a01 = fgPix(g, x0, y0 + 1), a11 = fgPix(g, x0 + 1, y0 + 1);
       float top = a00 * (1 - dxf) + a10 * dxf;
@@ -4447,6 +4516,25 @@ static void iconBase(int x, int y, int S, uint16_t bg, int rf100){
 }
 
 static void drawAppIcon(int id, int x, int y, int S){
+  // RECORTE POR CAJA, ANTES DE DIBUJAR NADA.
+  //
+  // Un icono son decenas de primitivas (fondo, anillos, trazos, texto) y en la
+  // Caja de aplicaciones, en la rejilla del escritorio y en Recientes se dibujan
+  // rejillas enteras dentro de un viewport recortado o de una banda sucia. Los
+  // iconos que caen fuera ejecutaban igual todas sus primitivas para que px()
+  // fuera descartando pixel a pixel. Ningun icono se sale de [x,x+S)x[y,y+S) --
+  // lo comprueba testIconosEnSuCaja() en tests/host midiendo los 18 iconos en
+  // los dos estilos --, asi que descartar por la caja no puede recortar dibujo.
+  // El margen es cortesia por si un icono futuro pinta un borde justo encima.
+  {
+    const int M = 2;
+    if(gLand){                                   // en landscape la fila FISICA es la x logica
+      if(x + S + M <= gClipY0 || x - M > gClipY1) return;
+    } else {
+      if(y + S + M <= gClipY0 || y - M > gClipY1) return;
+      if(x + S + M <= gClipX0 || x - M > gClipX1) return;
+    }
+  }
   int cx = x + S / 2, cy = y + S / 2;
   int tk = S / 12; if(tk < 2) tk = 2;               // grosor de trazo generico
   // ICONOS DE APP: son MARCA. Cada uno tiene su color y su glifo, igual que en
@@ -25111,7 +25199,8 @@ static void wifiTick(){
 // ##      internet, el sistema arranca con esa hora APROXIMADA (nunca
 // ##      salta a 1970) y lo dice en Ajustes hasta volver a sincronizar.
 // #############################################################
-#include <WiFiUdp.h>
+// (WiFiUdp.h ya se incluye arriba del todo, junto a WiFi.h: la guarda del
+//  propio encabezado hacia que este segundo #include no anadiera nada.)
 
 #define NTP_PERIOD_MS     (6UL * 3600UL * 1000UL)   // resincronizacion: 6 h
 #define NTP_FIRST_DELAY   1500                      // margen tras conectar antes del primer intento

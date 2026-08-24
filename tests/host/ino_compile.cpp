@@ -175,6 +175,8 @@ static void testTarjetaCronometro();
 static void testPersonalizarInicio();
 static void testFlexStore();
 static void testFlexAccount();
+static void testRecortePorBandas();
+static void testIconosEnSuCaja();
 static int gFails = 0;
 static void chk(bool ok, const char* what){
   if(!ok){ printf("  FALLO: %s\n", what); gFails++; }
@@ -2719,6 +2721,253 @@ static void testFlexAccount(){
   if(!gFails) printf("  Flex Account: todas las comprobaciones pasan.\n");
 }
 
+// #############################################################
+//  RECORTE POR BANDAS: MISMO PIXEL, MENOS TRABAJO
+//  ------------------------------------------------------------
+//  Dos optimizaciones del compositor tienen la MISMA obligacion:
+//  producir exactamente los mismos pixeles que antes y limitarse a
+//  no hacer el trabajo cuyo resultado ya se estaba tirando.
+//
+//   1. drawGlyphScaled() descarta de una vez el glifo que cae
+//      entero fuera de la banda de recorte. Antes lo rasterizaba
+//      completo y pxA() iba descartando pixel a pixel.
+//   2. drawLiquidGlassPanelEx() copia y desenfoca solo las filas
+//      visibles mas blurR de margen. El margen es lo que hace que
+//      el resultado sea identico: el desenfoque es separable, de
+//      radio blurR y una sola pasada, asi que una fila solo depende
+//      de las blurR de arriba y las blurR de abajo.
+//
+//  La prueba es la unica forma honesta de afirmarlo: se dibuja lo
+//  mismo con la pantalla entera y con una banda estrecha, y se
+//  comparan las filas de la banda BYTE A BYTE.
+// #############################################################
+static void testRecortePorBandas(){
+  printf("Recorte por bandas: mismo pixel, menos trabajo\n");
+  gLand = false;
+  uiClipFull();
+  const size_t PX = (size_t)SCR_W * SCR_H;
+  uint16_t* ref = (uint16_t*)malloc(PX * 2);
+  if(!ref){ printf("  FALLO: sin memoria para la referencia\n"); gFails++; return; }
+
+  // Fondo con estructura: si fuera liso, un desenfoque mal recortado
+  // seguiria dando el mismo color y la prueba no probaria nada.
+  auto pintaFondo = [&](){
+    setBuf(bbuf);
+    for(int y = 0; y < SCR_H; y++)
+      for(int x = 0; x < SCR_W; x++)
+        bbuf[(size_t)y * SCR_W + x] = rgb565((uint8_t)(x * 7 + y * 3), (uint8_t)(y * 5), (uint8_t)(x * 3 + 40));
+  };
+
+  // ---- 1. Un panel de vidrio ALTO, con una banda estrecha en medio ----
+  const int PX0 = 24, PY0 = 90, PW = SCR_W - 48, PH = 460, PRAD = 28;
+  const int B0 = 300, B1 = 340;                 // banda de 41 filas dentro del panel
+
+  pintaFondo();
+  uiClipFull();
+  drawLiquidGlassPanel(PX0, PY0, PW, PH, PRAD, TH_GLASS2);
+  memcpy(ref, bbuf, PX * 2);
+
+  pintaFondo();
+  uiClipViewport(B0, B1);
+  drawLiquidGlassPanel(PX0, PY0, PW, PH, PRAD, TH_GLASS2);
+  uiClipFull();
+
+  int dif = 0;
+  for(int y = B0; y <= B1; y++)
+    for(int x = 0; x < SCR_W; x++)
+      if(bbuf[(size_t)y * SCR_W + x] != ref[(size_t)y * SCR_W + x]) dif++;
+  chk(dif == 0, "vidrio por bandas: las filas visibles salen IDENTICAS al panel entero");
+
+  // Y fuera de la banda no escribe ni un pixel (el fondo se quedo como estaba).
+  int fuera = 0;
+  for(int y = 0; y < SCR_H; y++){
+    if(y >= B0 && y <= B1) continue;
+    for(int x = 0; x < SCR_W; x++){
+      uint16_t esperado = rgb565((uint8_t)(x * 7 + y * 3), (uint8_t)(y * 5), (uint8_t)(x * 3 + 40));
+      if(bbuf[(size_t)y * SCR_W + x] != esperado) fuera++;
+    }
+  }
+  chk(fuera == 0, "vidrio por bandas: fuera de la banda no toca ni un pixel");
+
+  // El panel tiene que haber pintado ALGO en la banda: si no, las dos
+  // comprobaciones de arriba pasarian con una funcion que no hace nada.
+  int pintados = 0;
+  for(int y = B0; y <= B1; y++)
+    for(int x = 0; x < SCR_W; x++){
+      uint16_t fondo = rgb565((uint8_t)(x * 7 + y * 3), (uint8_t)(y * 5), (uint8_t)(x * 3 + 40));
+      if(bbuf[(size_t)y * SCR_W + x] != fondo) pintados++;
+    }
+  chk(pintados > 5000, "vidrio por bandas: la banda si se pinta (la prueba no es vacia)");
+
+  // ---- 2. El coste: cuanto se ahorra de verdad ----
+  {
+    struct timespec c0, c1;
+    const int N = 30;
+    pintaFondo(); uiClipFull();
+    clock_gettime(CLOCK_MONOTONIC, &c0);
+    for(int i = 0; i < N; i++) drawLiquidGlassPanel(PX0, PY0, PW, PH, PRAD, TH_GLASS2);
+    clock_gettime(CLOCK_MONOTONIC, &c1);
+    double entero = ((c1.tv_sec - c0.tv_sec) * 1e3 + (c1.tv_nsec - c0.tv_nsec) / 1e6) / N;
+
+    pintaFondo(); uiClipViewport(B0, B1);
+    clock_gettime(CLOCK_MONOTONIC, &c0);
+    for(int i = 0; i < N; i++) drawLiquidGlassPanel(PX0, PY0, PW, PH, PRAD, TH_GLASS2);
+    clock_gettime(CLOCK_MONOTONIC, &c1);
+    double banda = ((c1.tv_sec - c0.tv_sec) * 1e3 + (c1.tv_nsec - c0.tv_nsec) / 1e6) / N;
+    uiClipFull();
+    printf("  [vidrio] panel de %d filas: entero %.2f ms  ·  banda de %d filas %.2f ms\n",
+           PH, entero, B1 - B0 + 1, banda);
+    chk(banda < entero, "el panel recortado a una banda cuesta menos que el panel entero");
+  }
+
+  // ---- 3. El texto fuera de la banda no cambia lo que si entra ----
+  const char* FRASE = "Bloqueo automatico y ultimo acceso";
+  pintaFondo();
+  uiClipFull();
+  for(int i = 0; i < 12; i++) drawText(20, 40 + i * 60, FRASE, 3, rgb565(255,255,255));
+  memcpy(ref, bbuf, PX * 2);
+
+  pintaFondo();
+  uiClipViewport(B0, B1);
+  for(int i = 0; i < 12; i++) drawText(20, 40 + i * 60, FRASE, 3, rgb565(255,255,255));
+  uiClipFull();
+  dif = 0;
+  for(int y = B0; y <= B1; y++)
+    for(int x = 0; x < SCR_W; x++)
+      if(bbuf[(size_t)y * SCR_W + x] != ref[(size_t)y * SCR_W + x]) dif++;
+  chk(dif == 0, "texto por bandas: lo que cae en la banda sale IDENTICO");
+
+  // ---- 4. textW no depende del recorte: la maqueta no se mueve ----
+  uiClipViewport(B0, B1);
+  int wBanda = textW(FRASE, 3);
+  uiClipFull();
+  int wLleno = textW(FRASE, 3);
+  chk(wBanda == wLleno, "textW no cambia con el recorte (la maqueta no se mueve)");
+
+  // Y drawText devuelve la MISMA pluma final este o no dentro de la banda:
+  // varias pantallas encadenan texto a partir de ese valor.
+  setBuf(bbuf);
+  uiClipViewport(B0, B1);
+  int penFuera = drawText(20, 10, FRASE, 3, rgb565(255,255,255));      // arriba, fuera de la banda
+  int penDentro = drawText(20, B0 + 4, FRASE, 3, rgb565(255,255,255)); // dentro
+  uiClipFull();
+  chk(penFuera == penDentro, "drawText avanza la pluma igual dentro y fuera de la banda");
+
+  // ---- 5. El coste del texto descartado ----
+  {
+    struct timespec c0, c1;
+    const int N = 40;
+    pintaFondo(); uiClipFull();
+    clock_gettime(CLOCK_MONOTONIC, &c0);
+    for(int i = 0; i < N; i++)
+      for(int k = 0; k < 12; k++) drawText(20, 40 + k * 60, FRASE, 3, rgb565(255,255,255));
+    clock_gettime(CLOCK_MONOTONIC, &c1);
+    double todo = ((c1.tv_sec - c0.tv_sec) * 1e3 + (c1.tv_nsec - c0.tv_nsec) / 1e6) / N;
+
+    pintaFondo(); uiClipViewport(B0, B1);
+    clock_gettime(CLOCK_MONOTONIC, &c0);
+    for(int i = 0; i < N; i++)
+      for(int k = 0; k < 12; k++) drawText(20, 40 + k * 60, FRASE, 3, rgb565(255,255,255));
+    clock_gettime(CLOCK_MONOTONIC, &c1);
+    double soloBanda = ((c1.tv_sec - c0.tv_sec) * 1e3 + (c1.tv_nsec - c0.tv_nsec) / 1e6) / N;
+    uiClipFull();
+    printf("  [texto] 12 lineas: todas visibles %.3f ms  ·  con solo una en la banda %.3f ms\n",
+           todo, soloBanda);
+    chk(soloBanda < todo, "las lineas fuera de la banda ya no se rasterizan");
+  }
+
+  free(ref);
+  if(gFails){ printf("  %d comprobacion(es) del recorte por bandas han fallado.\n", gFails); }
+  else printf("  Recorte por bandas: todas las comprobaciones pasan.\n");
+}
+
+// #############################################################
+//  LOS ICONOS NO SE SALEN DE SU CAJA
+//  ------------------------------------------------------------
+//  drawAppIcon() descarta de una vez el icono que cae fuera de la
+//  banda de recorte, y esa decision solo es correcta si NINGUN
+//  icono pinta fuera de [x, x+S) x [y, y+S). Aqui se mide de
+//  verdad: los 18 iconos, en los dos estilos (Plano y Vidrio) y a
+//  tres tamanos, sobre un lienzo limpio, comprobando el rectangulo
+//  real de pixeles escritos. Si algun dia un icono nuevo pinta un
+//  borde por fuera, esta prueba falla ANTES de que el recorte lo
+//  corte en pantalla.
+// #############################################################
+static void testIconosEnSuCaja(){
+  printf("Iconos de app: cada uno dentro de su caja\n");
+  gLand = false;
+  uiClipFull();
+  const int X = 120, Y = 200;
+  const int estiloPrevio = gIconStyle;
+  int peorL = 0, peorR = 0, peorT = 0, peorB = 0, vacios = 0;
+  for(int estilo = 0; estilo < 2; estilo++){
+    gIconStyle = estilo;
+    for(int S = 44; S <= 96; S += 26){
+      for(int id = 0; id < APP_N; id++){
+        memset(bbuf, 0, (size_t)SCR_W * SCR_H * 2);
+        setBuf(bbuf);
+        drawAppIcon(id, X, Y, S);
+        int minx = SCR_W, maxx = -1, miny = SCR_H, maxy = -1;
+        for(int y = 0; y < SCR_H; y++)
+          for(int x = 0; x < SCR_W; x++)
+            if(bbuf[(size_t)y * SCR_W + x] != 0){
+              if(x < minx) minx = x;
+              if(x > maxx) maxx = x;
+              if(y < miny) miny = y;
+              if(y > maxy) maxy = y;
+            }
+        if(maxx < 0){ vacios++; continue; }
+        int l = X - minx, r = maxx - (X + S - 1), t = Y - miny, b = maxy - (Y + S - 1);
+        if(l > peorL) peorL = l;
+        if(r > peorR) peorR = r;
+        if(t > peorT) peorT = t;
+        if(b > peorB) peorB = b;
+      }
+    }
+  }
+  gIconStyle = estiloPrevio;
+  printf("  %d iconos x 2 estilos x 3 tamanos: fuera de la caja L=%d R=%d T=%d B=%d\n",
+         APP_N, peorL, peorR, peorT, peorB);
+  chk(vacios == 0, "todos los iconos pintan algo");
+  chk(peorL <= 2 && peorR <= 2 && peorT <= 2 && peorB <= 2,
+      "ningun icono se sale del margen que asume el recorte de drawAppIcon");
+
+  // Y el recorte por banda hace lo prometido: dentro de la banda, el mismo
+  // pixel que sin recorte; fuera, ni uno.
+  { memset(bbuf, 0, (size_t)SCR_W * SCR_H * 2); setBuf(bbuf);
+    uiClipFull();
+    drawAppIcon(IC_AJUSTES, X, Y, 70);
+    static uint16_t ref[SCR_W * 120];
+    for(int y = 0; y < 120; y++) memcpy(ref + (size_t)y * SCR_W, bbuf + (size_t)(Y + y) * SCR_W, SCR_W * 2);
+
+    memset(bbuf, 0, (size_t)SCR_W * SCR_H * 2);
+    uiClipViewport(Y + 20, Y + 50);
+    drawAppIcon(IC_AJUSTES, X, Y, 70);
+    uiClipFull();
+    int dif = 0, fuera = 0;
+    for(int y = 0; y < 120; y++)
+      for(int x = 0; x < SCR_W; x++){
+        uint16_t got = bbuf[(size_t)(Y + y) * SCR_W + x];
+        if(y >= 20 && y <= 50){ if(got != ref[(size_t)y * SCR_W + x]) dif++; }
+        else if(got != 0) fuera++;
+      }
+    chk(dif == 0,   "icono recortado: las filas de la banda salen identicas");
+    chk(fuera == 0, "icono recortado: fuera de la banda no escribe nada");
+
+    // Y un icono ENTERO fuera de la banda no deja rastro (es el caso que el
+    // recorte se salta de una vez).
+    memset(bbuf, 0, (size_t)SCR_W * SCR_H * 2);
+    uiClipViewport(600, 700);
+    drawAppIcon(IC_AJUSTES, X, Y, 70);
+    uiClipFull();
+    int rastro = 0;
+    for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++) if(bbuf[i] != 0) rastro++;
+    chk(rastro == 0, "un icono entero fuera de la banda no pinta nada"); }
+
+  if(gFails) printf("  %d comprobacion(es) de los iconos han fallado.\n", gFails);
+  else printf("  Iconos de app: todas las comprobaciones pasan.\n");
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -2796,6 +3045,8 @@ int main(){
   testPersonalizarInicio();
   testFlexStore();
   testFlexAccount();
+  testRecortePorBandas();
+  testIconosEnSuCaja();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }
