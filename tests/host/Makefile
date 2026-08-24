@@ -139,14 +139,13 @@ ino: ino_compile.cpp $(INO_SRC) $(INO_BRIDGES) check_protos.py check_wiring.py |
 	@echo "FlexOS_Ultra.ino compila."
 
 # El mismo TU, pero ENLAZADO y EJECUTADO: main() comprueba el reloj del sistema,
-# la maquina de gestos del panel rapido y el servicio de noticias -- las tres
-# partes que son logica pura y por tanto verificables de verdad en el PC. Los
+# la maquina de gestos del panel rapido y el teclado global: partes que son
+# logica pura y por tanto verificables de verdad en el PC. Los
 # modulos hermanos (OTA, FS, navegador) entran como dobles: ya tienen sus
 # propias pruebas.
 #
-# CON SANITIZERS: el lector de JSON de las noticias mastica bytes que vienen de
-# la red, asi que un desbordamiento ahi no puede quedarse en "parece que
-# funciona". Mismo criterio que el resto de pruebas del nucleo portable.
+# CON SANITIZERS: un desbordamiento no puede quedarse en "parece que funciona".
+# Mismo criterio que el resto de pruebas del nucleo portable.
 $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_BRIDGES) $(JPEG_SRC) | $(BUILD)
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -x c++ -c ino_compile.cpp -o $(BUILD)/ino_compile.o
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -c ino_extern_stubs.cpp -o $(BUILD)/ino_extern_stubs.o
