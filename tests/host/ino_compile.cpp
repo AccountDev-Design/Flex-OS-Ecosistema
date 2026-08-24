@@ -2131,7 +2131,13 @@ static void testPersonalizarInicio(){
     homeOrder[homeIdx(0, 11)] = HOME_EMPTY;             // se libera la ultima celda
     int xe, ye; homeSlotXY(11, xe, ye);
     chk(homeEmptySpaceAt(xe + 10, ye + 10), "una celda libre si lo es");
-    chk(!homeEmptySpaceAt(240, 100), "la banda del clima no");
+    chk(!homeEmptySpaceAt(240, 100), "la banda de clima/calendario no");
+    chk(homeFixedWidgetAppAt(HOME_FW_X + 20, HOME_FW_Y + 20) == IC_CLIMA,
+        "el widget fijo izquierdo abre Clima");
+    chk(homeFixedWidgetAppAt(HOME_CAL_X + 20, HOME_FW_Y + 20) == IC_CALEND,
+        "el widget fijo derecho abre Calendario");
+    chk(homeFixedWidgetAppAt(HOME_FW_X + HOME_FW_W + 4, HOME_FW_Y + 20) == -1,
+        "el espacio entre tarjetas no abre una app por error");
     chk(!homeEmptySpaceAt(240, SCR_H - 120), "el dock tampoco");
     chk(!homeEmptySpaceAt(240, SCR_H - 30), "ni la barra de navegacion");
     // Y el gesto completo abre el modo.
