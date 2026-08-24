@@ -269,8 +269,7 @@ size_t aiBuildRequest(char* out, size_t cap, uint8_t kind,
 //  JSON: LECTURA
 //  -------------------------------------------------------------
 //  Lector acotado, no un arbol: busca las claves que conoce en el
-//  primer nivel y copia su valor. Mismo criterio que el lector de
-//  Noticias -- estos bytes vienen de la red, asi que cada copia
+//  primer nivel y copia su valor. Como estos bytes vienen de la red, cada copia
 //  esta acotada por el tamano del DESTINO, no por lo que diga el
 //  origen.
 // =============================================================
