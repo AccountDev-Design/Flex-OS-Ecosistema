@@ -998,6 +998,27 @@ static void testNoticias(){
   printf("Servicio de noticias\n");
   newsCfgDefaults();
 
+  // El editor de la URL usa el teclado global. Las llaves necesarias para
+  // {key}, {country}, {category} y {max} salen con Shift sobre ( y ), sin
+  // perder los parentesis normales ni dejar Shift enganchado al escribir.
+  {
+    const char* (*mapaAntes)[KB_COLS] = mapaActivo;
+    bool shiftAntes = kbShift;
+    char out[6];
+    mapaActivo = LAYOUT_NUM; kbShift = false;
+    chk(!strcmp(kbResolveKey("(", out, false), "("), "sin Shift se conserva el parentesis izquierdo");
+    chk(!strcmp(kbResolveKey(")", out, false), ")"), "sin Shift se conserva el parentesis derecho");
+    kbShift = true;
+    chk(!strcmp(kbResolveKey("(", out, false), "{") && kbShift,
+        "Shift muestra { sin consumirlo durante el dibujo");
+    chk(!strcmp(kbResolveKey("(", out, true), "{") && !kbShift,
+        "al escribir { se apaga Shift");
+    kbShift = true;
+    chk(!strcmp(kbResolveKey(")", out, true), "}") && !kbShift,
+        "Shift+) escribe } y se apaga");
+    mapaActivo = mapaAntes; kbShift = shiftAntes;
+  }
+
   // --- respuesta tipica de una API publica ---
   static const char* J1 =
     "{\"status\":\"ok\",\"totalResults\":42,\"articles\":["
