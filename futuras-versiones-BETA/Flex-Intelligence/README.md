@@ -28,8 +28,7 @@ inconsistente. Además, una tarjeta de finalización no debe aparecer si no exis
 un trabajo real y verificable detrás.
 
 La versión estable conserva únicamente notificaciones con una fuente real:
-hardware detectado por el bus I2C y noticias recibidas desde el servicio que haya
-configurado el usuario. No quedan disparadores de demostración.
+hardware detectado por el bus I2C. No quedan disparadores de demostración.
 
 ## Condiciones para volver a integrarlo
 
