@@ -18,9 +18,7 @@
 #include "Wire.h"
 #include "Preferences.h"
 #include "WiFi.h"
-#include "WiFiClientSecure.h"
 #include "WiFiUdp.h"
-#include "HTTPClient.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "esp_random.h"
@@ -165,7 +163,7 @@ static void geoEnterSelect();
 static void testPanelRapido();
 static void testPanelOneUI();
 extern bool gFlexOtaOwns;
-static void testNoticias();
+static void testTecladoGlobal();
 static void testCajaApps();
 static void testCronometro();
 static void testPaginasHome();
@@ -390,6 +388,7 @@ static void testPanelOneUI(){
   bool idsOk = true, ptrsOk = true, accionSinEstado = true;
   for(int i = 0; i < QSID_COUNT; i++){
     if(QS_REG[i].id != i) idsOk = false;
+    if(i == QSID_RETIRED_13) continue;  // hueco NVS reservado; nunca se ofrece ni ejecuta
     if(!QS_REG[i].avail || !QS_REG[i].tap || !QS_REG[i].icon || !QS_REG[i].name) ptrsOk = false;
     if(QS_REG[i].type == QT_ACTION && QS_REG[i].state != NULL) accionSinEstado = false;
     if(QS_REG[i].type == QT_TOGGLE && QS_REG[i].state == NULL) accionSinEstado = false;
@@ -400,6 +399,7 @@ static void testPanelOneUI(){
   // El ESP32-P4 no lleva radio Bluetooth: soc_caps.h no define SOC_BLE_SUPPORTED.
   chk(FLEXOS_BLE_HW == 0, "el perfil compilado NO declara radio Bluetooth");
   chk(!qpCtlAvail(QSID_BLE), "sin radio real, Bluetooth NO esta disponible como control");
+  chk(!qpCtlAvail(QSID_RETIRED_13), "el identificador retirado nunca aparece como control");
   chk(qpCtlAvail(QSID_WIFI) == (FLEXOS_ENABLE_WIFI ? true : false), "Wi-Fi sigue la disponibilidad real");
   chk(qpCtl(QSID_COUNT) == NULL && qpCtl(-1) == NULL, "un id fuera de rango no lee basura");
 
@@ -986,233 +986,30 @@ static void testPanelOneUI(){
 }
 
 // #############################################################
-//  PRUEBAS DEL SERVICIO DE NOTICIAS
+//  PRUEBAS DEL TECLADO GLOBAL
 //  ------------------------------------------------------------
-//  El lector de JSON, la plantilla de URL, el historial de IDs, el
-//  Centro persistente y el horario silencioso son logica pura: se
-//  comprueban aqui de verdad, con respuestas realistas y con
-//  respuestas rotas. Lo que NO se prueba aqui es el socket -- eso
-//  necesita placa.
+//  Las llaves comparten teclas con los parentesis del mapa
+//  numerico y se obtienen con Shift sin dejarlo activado.
 // #############################################################
-static void testNoticias(){
-  printf("Servicio de noticias\n");
-  newsCfgDefaults();
-
-  // El editor de la URL usa el teclado global. Las llaves necesarias para
-  // {key}, {country}, {category} y {max} salen con Shift sobre ( y ), sin
-  // perder los parentesis normales ni dejar Shift enganchado al escribir.
-  {
-    const char* (*mapaAntes)[KB_COLS] = mapaActivo;
-    bool shiftAntes = kbShift;
-    char out[6];
-    mapaActivo = LAYOUT_NUM; kbShift = false;
-    chk(!strcmp(kbResolveKey("(", out, false), "("), "sin Shift se conserva el parentesis izquierdo");
-    chk(!strcmp(kbResolveKey(")", out, false), ")"), "sin Shift se conserva el parentesis derecho");
-    kbShift = true;
-    chk(!strcmp(kbResolveKey("(", out, false), "{") && kbShift,
-        "Shift muestra { sin consumirlo durante el dibujo");
-    chk(!strcmp(kbResolveKey("(", out, true), "{") && !kbShift,
-        "al escribir { se apaga Shift");
-    kbShift = true;
-    chk(!strcmp(kbResolveKey(")", out, true), "}") && !kbShift,
-        "Shift+) escribe } y se apaga");
-    mapaActivo = mapaAntes; kbShift = shiftAntes;
-  }
-
-  // --- respuesta tipica de una API publica ---
-  static const char* J1 =
-    "{\"status\":\"ok\",\"totalResults\":42,\"articles\":["
-    "{\"id\":\"n1\",\"title\":\"Primera noticia\",\"source\":{\"name\":\"El Comercio\"},"
-     "\"category\":\"peru\",\"publishedAt\":\"2026-08-10T14:05:00Z\",\"url\":\"https://x/1\"},"
-    "{\"guid\":\"n2\",\"headline\":\"Segunda noticia\",\"fuente\":\"BBC\",\"section\":\"world\","
-     "\"date\":\"2026-08-10T13:00:00Z\",\"breaking\":true},"
-    "{\"title\":\"Tercera sin id ni fuente\"}"
-    "]}";
-  int n = newsParseBody(J1, strlen(J1));
-  chk(n == 3, "se leen los tres articulos");
-  chk(!strcmp(gNewsStage[0].title, "Primera noticia"), "titulo por \"title\"");
-  chk(!strcmp(gNewsStage[0].source, "El Comercio"), "fuente por objeto {\"name\":...}");
-  chk(gNewsStage[0].cat == 0, "categoria \"peru\"");
-  chk(gNewsStage[0].when == 1786370700u, "fecha ISO-8601 -> epoca UTC");
-  chk(!gNewsStage[0].important, "sin marca de urgente");
-  chk(!strcmp(gNewsStage[1].title, "Segunda noticia"), "titulo por sinonimo \"headline\"");
-  chk(!strcmp(gNewsStage[1].source, "BBC"), "fuente por sinonimo \"fuente\"");
-  chk(gNewsStage[1].cat == 1, "categoria \"world\" -> Mundo");
-  chk(gNewsStage[1].important, "urgente por sinonimo \"breaking\"");
-  chk(!strcmp(gNewsStage[2].source, "Noticias"), "sin fuente -> valor por defecto");
-  chk(gNewsStage[2].cat == 0xFF, "sin categoria -> sin clasificar");
-  chk(gNewsStage[2].idHash != 0 && gNewsStage[2].idHash != gNewsStage[0].idHash,
-      "sin id se deriva uno del titulo");
-  // El mismo cuerpo dos veces da los MISMOS ids: es lo que sostiene el historial.
-  uint32_t h0 = gNewsStage[0].idHash, h2 = gNewsStage[2].idHash;
-  newsParseBody(J1, strlen(J1));
-  chk(gNewsStage[0].idHash == h0 && gNewsStage[2].idHash == h2, "los ids son estables entre consultas");
-
-  // --- fechas: formatos aceptados y basura rechazada ---
-  chk(newsParseWhen("2026-08-10T14:05:00Z") == 1786370700u, "ISO-8601 completo con Z");
-  chk(newsParseWhen("2026-08-10T14:05:00+00:00") == 1786370700u, "ISO-8601 con desfase (se lee como UTC)");
-  chk(newsParseWhen("2026-08-10T14:05") == 1786370700u, "ISO-8601 sin segundos");
-  chk(newsParseWhen("2026-08-10 14:05:00") == 1786370700u, "separador de espacio en vez de T");
-  chk(newsParseWhen("2026-08-10") == 1786320000u, "solo fecha -> medianoche UTC");
-  static const char* FECHAS_MALAS[] = {
-    "", "hoy", "2026", "2026-08", "26-08-10", "2026-13-10T00:00:00Z",
-    "2026-08-32T00:00:00Z", "1999-01-01T00:00:00Z", "2026-08-10T99:00:00Z",
-    "2026-08-10TXX:05:00Z", "----------", "2026/08/10",
-  };
-  bool fechasOk = true;
-  for(size_t i = 0; i < sizeof(FECHAS_MALAS) / sizeof(FECHAS_MALAS[0]); i++)
-    if(newsParseWhen(FECHAS_MALAS[i]) != 0) fechasOk = false;
-  chk(fechasOk, "una fecha ilegible da 0, no una fecha inventada");
-
-  // --- etiquetas de categoria, sin distinguir mayusculas ---
-  chk(newsParseCat("technology") == 2, "slug \"technology\"");
-  chk(newsParseCat("TECHNOLOGY") == 2, "el slug no distingue mayusculas");
-  chk(newsParseCat("Tech") == 2, "sinonimo \"tech\"");
-  chk(newsParseCat("SPORTS") == 4, "slug \"sports\"");
-  chk(newsParseCat("deporte") == 4, "sinonimo en castellano");
-  chk(newsParseCat("cocina") == 0xFF, "una etiqueta desconocida no se fuerza a ninguna");
-  chk(newsParseCat("") == 0xFF, "etiqueta vacia -> sin clasificar");
-
-  // --- claves alternativas del array ---
-  static const char* J2 = "{\"items\":[{\"title\":\"Con items\"}]}";
-  chk(newsParseBody(J2, strlen(J2)) == 1, "array bajo \"items\"");
-  static const char* J3 = "{\"results\":[{\"title\":\"Con results\"}]}";
-  chk(newsParseBody(J3, strlen(J3)) == 1, "array bajo \"results\"");
-
-  // --- el tope de 5 se respeta aunque el servicio mande mas ---
-  {
-    char big[2048]; int o = 0;
-    o += snprintf(big + o, sizeof(big) - o, "{\"articles\":[");
-    for(int i = 0; i < 12; i++)
-      o += snprintf(big + o, sizeof(big) - o, "%s{\"id\":\"x%d\",\"title\":\"T%d\"}", i ? "," : "", i, i);
-    snprintf(big + o, sizeof(big) - o, "]}");
-    chk(newsParseBody(big, strlen(big)) == NEWS_MAX_RESULTS, "nunca se leen mas de 5 articulos");
-  }
-
-  // --- entradas hostiles: ni desbordan ni cuelgan ---
-  {
-    char largo[1024]; int o = 0;
-    o += snprintf(largo + o, sizeof(largo) - o, "{\"articles\":[{\"title\":\"");
-    for(int i = 0; i < 500; i++) largo[o++] = 'A';
-    snprintf(largo + o, sizeof(largo) - o, "\"}]}");
-    chk(newsParseBody(largo, strlen(largo)) == 1, "un titular larguisimo se acepta");
-    chk(strlen(gNewsStage[0].title) == NEWS_TITLE_MAX - 1, "y se recorta al buffer");
-    chk(gNewsStage[0].title[NEWS_TITLE_MAX - 1] == 0, "quedando terminado en cero");
-  }
-  static const char* ROTOS[] = {
-    "", "{", "[]", "{\"articles\":", "{\"articles\":[", "{\"articles\":[{",
-    "{\"articles\":[{\"title\":", "{\"articles\":[{\"title\":\"sin cerrar}]}",
-    "{\"articles\":{\"title\":\"no es un array\"}}", "no es json en absoluto",
-    "{\"articles\":[{\"source\":{\"name\":\"solo fuente\"}}]}",
-  };
-  bool rotosOk = true;
-  for(size_t i = 0; i < sizeof(ROTOS) / sizeof(ROTOS[0]); i++)
-    if(newsParseBody(ROTOS[i], strlen(ROTOS[i])) != 0) rotosOk = false;
-  chk(rotosOk, "ningun JSON roto produce articulos");
-
-  // --- plantilla de la URL ---
-  snprintf(gNews.url, sizeof(gNews.url),
-           "https://api.ej.com/v1?country={country}&category={category}&n={max}&apiKey={key}");
-  snprintf(gNews.key, sizeof(gNews.key), "SECRETO1234");
-  snprintf(gNews.country, sizeof(gNews.country), "pe");
-  {
-    char url[NEWS_URL_MAX + NEWS_KEY_MAX + 64];
-    chk(newsBuildUrl(url, sizeof(url), 2), "la plantilla se construye");
-    chk(!strcmp(url, "https://api.ej.com/v1?country=pe&category=technology&n=5&apiKey=SECRETO1234"),
-        "los cuatro marcadores se sustituyen");
-    char chico[16];
-    chk(!newsBuildUrl(chico, sizeof(chico), 0), "una URL que no cabe se rechaza en vez de truncarse");
-  }
-
-  // --- historial de IDs: anillo de 64, sin falsos negativos recientes ---
-  gNewsSeenN = 0; gNewsSeenHead = 0; memset(gNewsSeen, 0, sizeof(gNewsSeen));
-  chk(!newsSeenHas(newsHash("a")), "un id nuevo no esta visto");
-  newsSeenAdd(newsHash("a"));
-  chk(newsSeenHas(newsHash("a")), "tras anadirlo, si esta visto");
-  newsSeenAdd(newsHash("a"));
-  chk(gNewsSeenN == 1, "anadir dos veces el mismo id no ocupa dos ranuras");
-  for(int i = 0; i < NEWS_SEEN_MAX + 20; i++){ char k[8]; snprintf(k, sizeof(k), "id%d", i); newsSeenAdd(newsHash(k)); }
-  chk(gNewsSeenN == NEWS_SEEN_MAX, "el historial se queda en 64 entradas");
-  {
-    bool recientes = true;
-    for(int i = NEWS_SEEN_MAX + 20 - 60; i < NEWS_SEEN_MAX + 20; i++){
-      char k[8]; snprintf(k, sizeof(k), "id%d", i);
-      if(!newsSeenHas(newsHash(k))) recientes = false;
-    }
-    chk(recientes, "los 60 ids mas recientes siguen en el historial");
-  }
-
-  // --- Centro de noticias: 20, la mas nueva primero ---
-  gNewsCount = 0; gNewsUnread = 0;
-  for(int i = 0; i < NEWS_CENTER_MAX + 7; i++){
-    NewsItem it; memset(&it, 0, sizeof(it));
-    snprintf(it.title, sizeof(it.title), "N%d", i);
-    it.idHash = newsHash(it.title);
-    newsCenterPush(&it);
-  }
-  chk(gNewsCount == NEWS_CENTER_MAX, "el Centro se queda en 20 noticias");
-  chk(!strcmp(gNewsCenter[0].title, "N26"), "la mas reciente queda la primera");
-  chk(!strcmp(gNewsCenter[NEWS_CENTER_MAX - 1].title, "N7"), "y la mas vieja se cae del final");
-  chk(gNewsUnread == NEWS_CENTER_MAX, "todas entran como no leidas");
-  chk(!strcmp(newsTopTitle(), "N26"), "el widget lee el titular mas reciente");
-  newsMarkAllRead();
-  chk(gNewsUnread == 0 && newsUnreadCount() == 0, "marcar leidas pone el contador a cero");
-
-  // --- horario silencioso, incluido el tramo que cruza medianoche ---
-  gNews.quietOn = true;
-  gNews.quietFromIdx = 1;   // 22:00
-  gNews.quietToIdx   = 1;   // 07:00
-  rtcH = 23; rtcMin = 30; chk(newsInQuiet(),  "23:30 cae dentro de 22:00-07:00");
-  rtcH =  2; rtcMin =  0;  chk(newsInQuiet(),  "02:00 tambien (cruza medianoche)");
-  rtcH =  6; rtcMin = 59;  chk(newsInQuiet(),  "06:59 aun es silencio");
-  rtcH =  7; rtcMin =  0;  chk(!newsInQuiet(), "07:00 ya no");
-  rtcH = 15; rtcMin =  0;  chk(!newsInQuiet(), "las tres de la tarde no");
-  gNews.quietOn = false;
-  rtcH = 23; rtcMin = 30;  chk(!newsInQuiet(), "con el horario apagado nunca hay silencio");
-
-  // --- relevancia: importante > categoria activa > orden de llegada ---
-  {
-    NewsItem a, b, c;
-    memset(&a, 0, sizeof(a)); memset(&b, 0, sizeof(b)); memset(&c, 0, sizeof(c));
-    gNews.cats = 0x1F;
-    a.important = false; a.cat = 0xFF;      // ninguna ventaja
-    b.important = false; b.cat = 2;         // categoria activa
-    c.important = true;  c.cat = 0xFF;      // urgente
-    chk(newsScore(&c, 4) > newsScore(&b, 0), "una urgente gana a una de categoria activa");
-    chk(newsScore(&b, 4) > newsScore(&a, 0), "una de categoria activa gana a una sin clasificar");
-    chk(newsScore(&a, 0) > newsScore(&a, 3), "a igualdad, gana la que llego antes");
-  }
-
-  // --- credenciales: enmascaradas, borrables y fuera de todo texto ---
-  snprintf(gNews.url, sizeof(gNews.url), "https://api.ej.com/v1?apiKey={key}");
-  snprintf(gNews.key, sizeof(gNews.key), "SECRETO1234");
-  gNews.enabled = true;
-  {
-    char st[96];
-    gNewsErr = NERR_HTTP; gNewsHttp = 401; gNewsBusy = false;
-    newsStateText(st, sizeof(st));
-    chk(!strstr(st, "SECRETO"), "el estado no filtra la clave");
-    chk(!strstr(st, "api.ej.com"), "el estado no filtra la URL");
-    chk(strstr(st, "401") != NULL, "pero si dice el codigo HTTP, que es diagnostico util");
-  }
-  newsWipeCreds();
-  chk(gNews.url[0] == 0, "borrar credenciales vacia la URL");
-  chk(gNews.key[0] == 0, "borrar credenciales vacia la clave");
-  chk(!gNews.enabled, "y deja el servicio apagado");
-  chk(!newsConfigured(), "sin URL, el servicio consta como no configurado");
-  {
-    char st[96]; newsStateText(st, sizeof(st));
-    chk(strstr(st, "Falta configurar") != NULL, "y lo dice claramente en pantalla");
-  }
-  // El firmware sale de fabrica SIN servicio: es el requisito de fondo.
-  newsCfgDefaults();
-  chk(gNews.url[0] == 0 && gNews.key[0] == 0 && !gNews.enabled,
-      "de fabrica no hay ni URL ni clave ni servicio activo");
-  chk(gNews.maxNotif == 1, "de fabrica se avisa de UNA noticia por consulta");
-
-  if(!gFails) printf("  Noticias: todas las comprobaciones pasan.\n");
+static void testTecladoGlobal(){
+  printf("Teclado global\n");
+  const char* (*mapaAntes)[KB_COLS] = mapaActivo;
+  bool shiftAntes = kbShift;
+  char out[6];
+  mapaActivo = LAYOUT_NUM; kbShift = false;
+  chk(!strcmp(kbResolveKey("(", out, false), "("), "sin Shift se conserva el parentesis izquierdo");
+  chk(!strcmp(kbResolveKey(")", out, false), ")"), "sin Shift se conserva el parentesis derecho");
+  kbShift = true;
+  chk(!strcmp(kbResolveKey("(", out, false), "{") && kbShift,
+      "Shift muestra { sin consumirlo durante el dibujo");
+  chk(!strcmp(kbResolveKey("(", out, true), "{") && !kbShift,
+      "al escribir { se apaga Shift");
+  kbShift = true;
+  chk(!strcmp(kbResolveKey(")", out, true), "}") && !kbShift,
+      "Shift+) escribe } y se apaga");
+  mapaActivo = mapaAntes; kbShift = shiftAntes;
+  if(!gFails) printf("  Teclado: todas las comprobaciones pasan.\n");
 }
-
 
 // #############################################################
 //  PRUEBAS DE LA CAJA DE APLICACIONES (cajon de apps)
@@ -2252,7 +2049,7 @@ static void testPersonalizarInicio(){
     chk((m & 1u) && (m & 2u), "ocupa sus dos celdas");
     chk(!(m & 4u), "y solo esas");
     chk(homeWgAdd(1, WG_CLOCK_A) == 0, "un reloj analogico 2x2 tambien cabe");
-    chk(homeWgAdd(1, WG_NEWS) == 0, "y un tercero");
+    chk(homeWgAdd(1, WG_CLIMA) == 0, "y un tercero");
     chk(homeWgAdd(1, WG_WIFI) == 1, "el cuarto no: tres por pagina");
     // Un icono no puede quedarse debajo de un widget.
     homeOrder[homeIdx(1, 0)] = IC_RELOJ;
@@ -2334,7 +2131,7 @@ static void testPersonalizarInicio(){
     homeOrder[homeIdx(0, 11)] = HOME_EMPTY;             // se libera la ultima celda
     int xe, ye; homeSlotXY(11, xe, ye);
     chk(homeEmptySpaceAt(xe + 10, ye + 10), "una celda libre si lo es");
-    chk(!homeEmptySpaceAt(240, 100), "la banda de los widgets clima/noticias no");
+    chk(!homeEmptySpaceAt(240, 100), "la banda del clima no");
     chk(!homeEmptySpaceAt(240, SCR_H - 120), "el dock tampoco");
     chk(!homeEmptySpaceAt(240, SCR_H - 30), "ni la barra de navegacion");
     // Y el gesto completo abre el modo.
@@ -2981,7 +2778,7 @@ int main(){
 
   testPanelRapido();
   testPanelOneUI();
-  testNoticias();
+  testTecladoGlobal();
   testCajaApps();
   testCronometro();
   testPaginasHome();
