@@ -6060,11 +6060,75 @@ static void renderLock(){
 static void showLock(){ blitToFb(lockBuf); flxFlushAll(); }
 
 // ---------------- HOME ----------------
-// Widget meteorologico fijo y dock. Al ser el unico widget de la franja
-// superior, Clima ocupa todo el ancho y no necesita una preferencia de tamano.
+// Geometria unica de los dos widgets fijos. La usa tanto el dibujo como el
+// toque para que Clima y Calendario nunca tengan zonas pulsables desplazadas.
+#define HOME_FW_X       24
+#define HOME_FW_Y       72
+#define HOME_FW_W       208
+#define HOME_FW_H       120
+#define HOME_FW_GAP     16
+#define HOME_CAL_X      (HOME_FW_X + HOME_FW_W + HOME_FW_GAP)
+
+static int homeFixedWidgetAppAt(int px, int py){
+  if(py < HOME_FW_Y || py >= HOME_FW_Y + HOME_FW_H) return -1;
+  if(px >= HOME_FW_X && px < HOME_FW_X + HOME_FW_W) return IC_CLIMA;
+  if(px >= HOME_CAL_X && px < HOME_CAL_X + HOME_FW_W) return IC_CALEND;
+  return -1;
+}
+
+// Calendario real del mes actual. No mantiene una fecha paralela ni inventa
+// eventos: consume rtcY/rtcMo/rtcD/rtcWd, la misma fuente sincronizada por NTP
+// que usan la app Calendario, el bloqueo y la barra del sistema.
+static void calHomeWidget(int x, int y, int w, int h){
+  uint16_t base;
+  if(uiGlass){
+    drawLiquidGlassPanel(x, y, w, h, 20, TH_GLASS2);
+    base = TH_GLASS2;
+  } else {
+    // En modo Plano la tarjeta es gris, con una variante clara u oscura para
+    // conservar contraste al respetar la apariencia elegida por el usuario.
+    base = gDark ? rgb565(62,66,74) : rgb565(216,219,224);
+    fillRoundRect(x, y, w, h, 20, base);
+  }
+  uint16_t fg = onColor(base), muted = mix565(fg, base, 104);
+
+  char title[32];
+  snprintf(title, sizeof(title), "%s %d", MO_SHORT[LI()][rtcMo - 1], rtcY);
+  drawText(x + 12, y + 9, title, 2, fg);
+
+  // Iniciales localizadas, domingo primero, igual que rtcWd y la app completa.
+  static const char* const wd1[5][7] = {
+    {"D","L","M","M","J","V","S"},
+    {"S","M","T","W","T","F","S"},
+    {"D","L","M","M","J","V","S"},
+    {"D","S","T","Q","Q","S","S"},
+    {"D","L","M","M","G","V","S"},
+  };
+  int li = LI(), pad = 9, cw = (w - 2 * pad) / 7;
+  int weekY = y + 33;
+  for(int i = 0; i < 7; i++) drawTextC(x + pad + i * cw + cw / 2, weekY, wd1[li][i], 1, muted);
+
+  int first = ((rtcWd - (rtcD - 1)) % 7 + 7) % 7;
+  int dim = daysInMonth(rtcY, rtcMo);
+  int gridY = y + 49, rh = (h - 54) / 6;
+  if(rh < 9) rh = 9;
+  for(int d = 1; d <= dim; d++){
+    int cell = first + d - 1, row = cell / 7, col = cell % 7;
+    int cx = x + pad + col * cw + cw / 2;
+    int cy = gridY + row * rh + rh / 2;
+    bool today = (d == rtcD);
+    if(today) fillCircle(cx, cy, 8, TH_PRIM);
+    char ds[4]; snprintf(ds, sizeof(ds), "%d", d);
+    drawTextC(cx, cy - 4, ds, 1, today ? TH_ONACC : fg);
+  }
+}
+
+// Clima y Calendario comparten la franja superior; el material de ambos sigue
+// el mismo uiGlass global elegido en Personalizacion.
 static void drawHomeWidgets(uint32_t tm){
   (void)tm;
-  wxHomeWidget(24, 72, SCR_W - 48, 120, true);
+  wxHomeWidget(HOME_FW_X, HOME_FW_Y, HOME_FW_W, HOME_FW_H, false);
+  calHomeWidget(HOME_CAL_X, HOME_FW_Y, HOME_FW_W, HOME_FW_H);
   int dkx = 24, dky = SCR_H - 176, dkw = SCR_W - 48, dkh = 96;
   if(uiGlass) drawLiquidGlassPanel(dkx, dky, dkw, dkh, 28, TH_GLASS2);
   else fillRoundRectA(dkx, dky, dkw, dkh, 28, TH_SURF, 90);
@@ -6213,7 +6277,7 @@ static void renderHomeInto(uint16_t* dst, int page){
   drawText(20, 40, sd, 1, TH_ONWALL2);
   drawWifi(SCR_W - 66, 28, 11, TH_ONWALL);
   drawBattery(SCR_W - 46, 20, 30, 15, 82, TH_ONWALL);
-  // widget de clima + dock: estilo Liquid Glass o plano
+  // widgets de clima/calendario + dock: estilo Liquid Glass o plano
   drawHomeWidgets(millis());
   // rejilla de apps 4x3 de ESTA pagina. homeOrder[] puede tener ranuras
   // vacias (HOME_EMPTY) desde que existe la Caja de aplicaciones: quitar una
@@ -7661,7 +7725,7 @@ static void hcDrawThumb(int page, int x, int y, int tw, int th){
   int S, gx0, gy0, cs, rs, cols, rows; homeGrid(S, gx0, gy0, cs, rs, cols, rows);
   int oStyle = gIconStyle;
   gIconStyle = 0;              // en miniatura no se hace un blur Liquid Glass por icono
-  // banda superior de clima y dock, en esquema
+  // banda superior de clima/calendario y dock, en esquema
   fillRoundRectA(x + 24 * tw / SCR_W, y + 72 * th / SCR_H, 432 * tw / SCR_W, 120 * th / SCR_H,
                  6, TC(255,255,255), 46);
   fillRoundRectA(x + 24 * tw / SCR_W, y + (SCR_H - 176) * th / SCR_H, 432 * tw / SCR_W,
@@ -8601,8 +8665,8 @@ static void hpzUpdate(){
 }
 // ---- Espacio VERDADERAMENTE vacio del escritorio ---------------------------
 // Condicion de la pulsacion larga que abre la personalizacion. Excluye iconos,
-// widgets, dock, barra de estado, barra de navegacion, la banda del clima y
-// las tarjetas de notificacion visibles.
+// widgets, dock, barra de estado, barra de navegacion, la banda fija superior
+// y las tarjetas de notificacion visibles.
 static bool homeEmptySpaceAt(int px, int py){
   if(py < HOME_BAND_TOP || py >= homeBandBot()) return false;
   int id;
@@ -8688,10 +8752,9 @@ static void homeTick(){
     int wi = homeWgAt(gHomePage, T.x, T.y);
     if(wi >= 0 && gHomeWg[gHomePage][wi].type == WG_CAM){   gIconOvrApp = -1; enterApp(IC_CAMARA); return; }
     if(wi >= 0 && gHomeWg[gHomePage][wi].type == WG_CLIMA){ gIconOvrApp = -1; enterApp(IC_CLIMA);  return; }
-    // Widget fijo de Clima: ocupa toda la franja superior.
-    if(T.x >= 24 && T.x <= SCR_W - 24 && T.y >= 72 && T.y <= 192){
-      gIconOvrApp = -1; enterApp(IC_CLIMA); return;
-    }
+    // Widgets fijos de la franja superior: cada tarjeta abre su app real.
+    int fixedApp = homeFixedWidgetAppAt(T.x, T.y);
+    if(fixedApp >= 0){ gIconOvrApp = -1; enterApp(fixedApp); return; }
   }
 }
 
