@@ -19,6 +19,7 @@
 // -------------------------------------------------------------
 static bool        fsMounted = false;
 static const char* fsErr     = "sin montar";
+static const char* fsLabel   = "spiffs";
 
 // Profundidad maxima al recorrer el arbol. No es un capricho: las
 // funciones recursivas de aqui corren en la misma tarea que dibuja,
@@ -117,7 +118,7 @@ bool flexFsBegin(){
   // se refleja como un error real, no como "0 MB usados".
   bool ok = false;
   for(size_t i = 0; i < sizeof(FS_LABELS) / sizeof(FS_LABELS[0]); i++){
-    if(LittleFS.begin(true, "/littlefs", 10, FS_LABELS[i])){ ok = true; break; }
+    if(LittleFS.begin(true, "/littlefs", 10, FS_LABELS[i])){ fsLabel = FS_LABELS[i]; ok = true; break; }
   }
   if(!ok){
     fsMounted = false;
@@ -610,6 +611,54 @@ bool flexFsWriteBin(const char* path, const void* buf, size_t n){
   size_t w = n ? f.write((const uint8_t*)buf, n) : 0;
   f.close();
   return w == n;
+}
+
+bool flexFsWriteBinAtomic(const char* path, const void* buf, size_t n){
+  if(!fsMounted || !path || (!buf && n)) return false;
+  size_t lp = strlen(path);
+  if(lp == 0 || lp + 5 >= FLEXFS_PATH_MAX) return false;
+  char tmp[FLEXFS_PATH_MAX], bak[FLEXFS_PATH_MAX];
+  snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+  snprintf(bak, sizeof(bak), "%s.bak", path);
+  LittleFS.remove(tmp);
+  if(!flexFsWriteBin(tmp, buf, n)) return false;
+  if(flexFsSize(tmp) != n){ LittleFS.remove(tmp); return false; }
+
+  LittleFS.remove(bak);
+  bool hadOld = LittleFS.exists(path);
+  if(hadOld && !LittleFS.rename(path, bak)){
+    LittleFS.remove(tmp);
+    return false;
+  }
+  if(!LittleFS.rename(tmp, path)){
+    if(hadOld) LittleFS.rename(bak, path);
+    LittleFS.remove(tmp);
+    return false;
+  }
+  LittleFS.remove(bak);
+  return true;
+}
+
+bool flexFsFactoryErase(){
+  if(fsMounted){ LittleFS.end(); fsMounted = false; }
+  // arduino-esp32 3.2.0 conserva internamente la etiqueta usada por begin();
+  // format() no recibe parametros en esa API.
+  if(!LittleFS.format()){
+    fsErr = "No se pudo formatear LittleFS";
+    return false;
+  }
+  if(!LittleFS.begin(false, "/littlefs", 10, fsLabel)){
+    fsErr = "LittleFS no monto tras formatear";
+    return false;
+  }
+  fsMounted = true;
+  fsErr = "";
+  LittleFS.mkdir(FLEXFS_DIR_PAINT);
+  LittleFS.mkdir(FLEXFS_DIR_NOTAS);
+  LittleFS.mkdir(FLEXFS_DIR_SYS);
+  LittleFS.mkdir(FLEXFS_DIR_DOCS);
+  LittleFS.mkdir(FLEXFS_DIR_TRASH);
+  return true;
 }
 
 // -------------------------------------------------------------

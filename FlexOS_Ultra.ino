@@ -201,6 +201,51 @@ struct QsCtl {
 // cuadricula logica de 4 columnas, con que orientacion y si esta visible.
 struct QpItem { uint8_t id, w, h, ori, vis; };
 
+// -------------------------------------------------------------
+//  CICLO DE VIDA DE APPS Y SESIONES  ·  tipos
+//  -------------------------------------------------------------
+//  Viven AQUI ARRIBA por la MISMA razon que FGlyph, PWin, DexFit y
+//  Touch: el IDE de Arduino autogenera los prototipos de todas las
+//  funciones y los inserta al principio del archivo compilado. Como
+//  appHooks() devuelve un const AppHooks*, y los prototipos autogenerados
+//  necesitan conocer ese contrato antes de la primera funcion del sketch.
+//
+//  NO son clases ni objetos: el resto del sistema esta escrito con
+//  structs planos, registros y punteros a funcion (FlexApp, APP_REG),
+//  y esto sigue exactamente el mismo patron -- cero constructores,
+//  cero asignacion dinamica, todo de tamano fijo.
+// -------------------------------------------------------------
+
+// Estados posibles de una FlexApp. Son EXCLUYENTES: una app esta en
+// uno y solo uno de ellos en cada instante.
+enum AppLife : uint8_t {
+  ALIFE_CLOSED = 0,   // cerrada: no ocupa recursos, no sale en Recientes
+  ALIFE_RUNNING,      // abierta y visible (como mucho UNA a la vez)
+  ALIFE_SUSPENDED,    // en Recientes: estado logico vivo, sin dibujar ni leer toques
+  ALIFE_RESUMING      // transitorio: restaurando estado, aun sin publicar frame
+};
+
+// Contrato de ciclo de vida de una app. TODOS los campos son opcionales
+// (NULL = la app no necesita esa fase). El framework nunca llama a un
+// puntero nulo, asi que las apps que no rellenen hooks siguen
+// comportandose exactamente igual que antes de existir este sistema.
+struct AppHooks {
+  bool (*backLayer)();   // cierra teclado/menu/dialogo/overlay PROPIO. true = cerro una capa
+  bool (*backScreen)();  // retrocede UNA pantalla interna. true = habia a donde volver
+  void (*suspend)();     // congela: para animaciones, suelta buffers secundarios
+  void (*resume)();      // reanuda: repinta desde el estado logico (NO reinicia nada)
+  void (*close)();       // termina: libera TODO lo suyo y deja el estado en limpio
+  bool (*saveSess)();    // vuelca a disco el minimo indispensable. true = escribio
+  void (*loadSess)();    // lo relee al arrancar (una sola vez, antes del primer enter)
+  bool (*bgWork)();      // LISTA BLANCA: true = tiene trabajo real en segundo plano
+};
+
+// Cabecera comun de todo archivo de sesion en LittleFS. Va delante de
+// la carga util y es lo que permite (a) rechazar un archivo de otra
+// version del formato sin interpretarlo, y (b) detectar un corte de
+// corriente a mitad de escritura (crc o len que no cuadran).
+struct SessHdr { uint32_t magic; uint16_t ver; uint16_t app; uint32_t len; uint32_t crc; };
+
 // #############################################################
 // ##  TECLADO FLEXOS  ·  FASES A-G  ·  INTERRUPTORES MAESTROS
 // ##  ------------------------------------------------------
@@ -1029,6 +1074,9 @@ static inline void fbUnlock(){}
 // dibujo), pero se declara aqui porque flxFlush -el unico punto por el que TODO
 // acaba llegando al panel- tiene que llamarla antes de publicar la banda.
 static void kioskStampBadge(int y0, int y1);
+// Barra de navegacion del sistema: se estampa por el MISMO camino y por el
+// mismo motivo que el candado del kiosco (ver el bloque de navegacion).
+static void navStampBar(int y0, int y1);
 
 static void flxFlush(int y0, int y1){
   if(gRtTarget){ gRtDirty = true; return; }   // app hospedada: no toca el panel
@@ -1037,6 +1085,7 @@ static void flxFlush(int y0, int y1){
   // El candado del kiosco se estampa ANTES de transferir la banda: ninguna
   // actualizacion llega al panel sin el, aunque la app repinte esa esquina.
   kioskStampBadge(y0, y1);
+  navStampBar(y0, y1);
   if(!flxPanel || !flxDpiSem || !fb) return;
 
   // Un token viejo haria que la espera siguiente terminase ANTES que la DMA
@@ -4732,6 +4781,12 @@ static void drawBattery(int x, int y, int w, int h, int level, uint16_t col){
 // ##  TACTIL DE ALTO NIVEL (gestos)  ·  original
 // #############################################################
 static Touch T;
+// NAVEGACION: candado de "tragar el episodio tactil en curso". Lo arma
+// touchDropAll() en cada cambio de pantalla (inicio, atras, recientes,
+// reanudar una app). Mientras el dedo siga apoyado del toque ANTERIOR, la
+// pantalla nueva no ve ni pressed, ni down, ni tap: es lo que impide el toque
+// fantasma de "he pulsado inicio y se ha abierto un icono del escritorio".
+static bool gTouchSwallow = false;
 
 // ---- FASE 4: Modo Kiosco (prestamo seguro) -------------------------------
 // El estado vive AQUI ARRIBA, antes de flexPollTouch(), porque el filtro del
@@ -5015,6 +5070,19 @@ static void flexPollTouch(){
   } else {
     if(wasDown && now - T.lastMs > 90) tDoRelease(now);
   }
+  // NAVEGACION: el episodio tactil heredado de la pantalla anterior se anula
+  // aqui, en el mismo punto alto del pipeline que el filtro del kiosco, para
+  // que no lo vea NINGUNA capa. El candado se suelta solo cuando el dedo se
+  // levanta de verdad (ev != 1 y T.down ya en false).
+  if(gTouchSwallow){
+    if(T.down || ev == 1){
+      T.pressed = T.released = T.tap = false;
+      T.swipeUp = T.swipeDown = T.swipeLeft = T.swipeRight = false;
+      T.down = false; T.moved = false;
+    } else {
+      gTouchSwallow = false;
+    }
+  }
   // SUSPENSION: el detector de doble-tap va AQUI, en el mismo punto alto del
   // pipeline que el filtro del kiosco y por el mismo motivo -- si filtrara mas
   // abajo, alguna capa ya habria visto el toque. Trabaja sobre gtFingers, no
@@ -5150,6 +5218,7 @@ static inline bool appCanHide(int id){  return id != IC_AJUSTES; }
 #define LSU_AFTER_UNLOCKAPP 3         // confirmar que se quita el candado a una app
 #define LSU_AFTER_KIOSKOUT  4         // salir del Modo Kiosco
 #define LSU_AFTER_POWEROFF  5         // apagar del todo (solo si el usuario activo "Apagado seguro")
+#define LSU_AFTER_FACTORY   6         // continuar con el Restablecimiento de fabrica
 static int lsuAfter    = LSU_AFTER_UNLOCK;
 static int lsuAfterApp = -1;
 #define LW_CLOCK   0x01   // reloj grande + fecha
@@ -5360,6 +5429,275 @@ static void cfgSaveOobe(){
   prefs.putString("name", cfgName);
   prefs.end();
   cfgOobeDone = true;
+}
+
+// #############################################################
+// ##  FLEXOS FS  ·  sesiones de app y datos de usuario
+// ##  ------------------------------------------------------
+// ##  LittleFS sobre la particion de datos de fabrica (etiqueta
+// ##  "spiffs", que es la que trae cualquier esquema de particiones
+// ##  del IDE con almacenamiento). Se usa SOLO para lo que no cabe
+// ##  en NVS: sesiones de app, borradores y caches. Los valores
+// ##  sueltos (banderas, contadores, indices) siguen en NVS, que es
+// ##  donde llevan viviendo desde el Milestone 1.
+// ##
+// ##  REGLA DE ESCRITURA -- nunca se sobrescribe un archivo bueno:
+// ##    1) se escribe todo en "<ruta>.tmp",
+// ##    2) se cierra y se RELEE para comprobar longitud y CRC,
+// ##    3) solo entonces se renombra encima del definitivo.
+// ##  Si se corta la corriente a mitad, el .tmp queda huerfano (y se
+// ##  barre en el siguiente arranque) y el archivo anterior sigue
+// ##  intacto. Es lo que hace que "reiniciar mientras guardaba" no
+// ##  pueda dejar una nota o un dibujo a medias.
+// ##
+// ##  Si la particion no existe o no monta, flexFsReady() queda en false y
+// ##  TODO el sistema sigue funcionando: las sesiones se conservan en
+// ##  RAM (que es el nivel rapido) y solo se pierde la recuperacion
+// ##  tras reinicio. Nunca se bloquea nada por no tener FS.
+// #############################################################
+#define FS_DIR_SESS      "/System/Sessions"
+#define FS_DIR_CACHE     "/System/Cache"
+#define SESS_MAGIC       0x584C4631u   // '1FLX' en little endian: marca de archivo de sesion
+#define SESS_IO_MAX      1024          // estado de UI, nunca el documento completo
+
+static uint8_t gSessIo[SESS_IO_MAX];   // buffer unico: cero malloc durante las transiciones
+
+// CRC-32 (polinomio de Ethernet, forma reflejada) SIN tabla: 256 entradas de
+// tabla serian 1 KB de RAM permanente para algo que se calcula cuatro veces por
+// minuto como mucho. Es la MISMA suma que usa cualquier crc32 estandar.
+static uint32_t crc32u(const uint8_t* d, size_t n, uint32_t crc){
+  crc = ~crc;
+  while(n--){
+    crc ^= *d++;
+    for(int k = 0; k < 8; k++) crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1)));
+  }
+  return ~crc;
+}
+
+// Escritura ATOMICA con cabecera versionada + CRC. Devuelve false si no habia
+// FS, no habia sitio, o la relectura de verificacion no cuadro -- y en ese caso
+// el archivo anterior NO se ha tocado.
+static bool sessWrite(const char* path, uint16_t ver, uint16_t app, const void* data, size_t len){
+  if(!flexFsReady() || !path || !data || len + sizeof(SessHdr) > sizeof(gSessIo)) return false;
+  SessHdr h;
+  h.magic = SESS_MAGIC; h.ver = ver; h.app = app; h.len = (uint32_t)len;
+  h.crc = crc32u((const uint8_t*)data, len, 0);
+  memcpy(gSessIo, &h, sizeof(h));
+  memcpy(gSessIo + sizeof(h), data, len);
+  return flexFsWriteBinAtomic(path, gSessIo, sizeof(h) + len);
+}
+
+// Lectura verificada. Devuelve el numero de bytes utiles copiados en out, o 0
+// si el archivo no existe, es de otra version, es de otra app o esta corrupto.
+// Una sesion que no valida NO se intenta reparar: se ignora y la app abre en un
+// estado seguro, que es justo lo que pide no arrastrar datos a medias.
+static size_t sessRead(const char* path, uint16_t wantVer, uint16_t app, void* out, size_t maxLen){
+  if(!flexFsReady() || !path || !out) return 0;
+  uint32_t sz = flexFsSize(path);
+  if(sz < sizeof(SessHdr) || sz > sizeof(gSessIo)) return 0;
+  int got = flexFsReadBin(path, gSessIo, sz);
+  if(got != (int)sz) return 0;
+  SessHdr h; memcpy(&h, gSessIo, sizeof(h));
+  if(h.magic != SESS_MAGIC || h.ver != wantVer || h.app != app ||
+     h.len > maxLen || sizeof(SessHdr) + h.len != sz) return 0;
+  memcpy(out, gSessIo + sizeof(SessHdr), h.len);
+  return crc32u((const uint8_t*)out, h.len, 0) == h.crc ? h.len : 0;
+}
+
+// Borra el CONTENIDO de un directorio (no el directorio). Devuelve cuantos
+// archivos elimino. Se usa en "limpiar caches" del Modo seguro y en el
+// restablecimiento por etapas.
+static int fsWipeDir(const char* dir){
+  if(!flexFsReady() || !dir) return 0;
+  int n = flexFsCount(dir);
+  if(!flexFsDelete(dir)) return 0;
+  flexFsMkdir(dir);
+  return n;
+}
+
+// #############################################################
+// ##  MODO SEGURO  ·  deteccion de reinicios anormales
+// ##  ------------------------------------------------------
+// ##  Reutiliza la deteccion que YA existia para la banda forense
+// ##  (esp_reset_reason + showBootBanner): lo unico nuevo es un
+// ##  contador PERSISTENTE de reinicios anormales CONSECUTIVOS.
+// ##
+// ##  QUE CUENTA COMO ANORMAL: PANIC (crash), INT_WDT, TASK_WDT, WDT
+// ##  y BROWNOUT. NO cuentan: encendido normal (POWERON), reinicio
+// ##  por software -- que es por donde salen el reinicio voluntario y
+// ##  el que hace el OTA al terminar de instalar -- ni el despertar
+// ##  de deep sleep. Por eso una actualizacion correcta jamas puede
+// ##  acercar el sistema al Modo seguro.
+// ##
+// ##  El contador se limpia despues de SAFE_STABLE_MS de funcionar
+// ##  sin reiniciar: si el sistema aguanta un minuto entero, el
+// ##  problema anterior no era una cadena de crashes.
+// #############################################################
+#define SAFE_NVS_NS     "flexsafe"
+#define SAFE_FAIL_MAX   3            // reinicios anormales seguidos que activan el modo
+#define SAFE_STABLE_MS  60000UL      // arranque estable que limpia el contador
+static bool     gSafeMode   = false; // este arranque es en Modo seguro
+static uint8_t  gSafeFails  = 0;     // reinicios anormales consecutivos (NVS "fails")
+static int      gSafeCause  = 0;     // esp_reset_reason_t del arranque actual
+static bool     gSafeCleared = false;// el contador ya se limpio en este arranque
+static uint32_t gSafeBootMs = 0;     // millis del arranque, para medir la estabilidad
+
+static void safeSaveFails(){
+  Preferences p;
+  if(!p.begin(SAFE_NVS_NS, false)) return;
+  p.putInt("fails", (int)gSafeFails);
+  p.putInt("cause", gSafeCause);
+  p.end();
+}
+
+// Motivo REAL del arranque, con el texto que ve el usuario en el Modo seguro.
+// No se inventa ninguna causa: si el chip no sabe por que reinicio, se dice.
+static const char* safeCauseText(){
+  switch((esp_reset_reason_t)gSafeCause){
+    case ESP_RST_PANIC:    return "Fallo del sistema (crash)";
+    case ESP_RST_TASK_WDT: return "Watchdog de tarea (TASK_WDT)";
+    case ESP_RST_INT_WDT:  return "Watchdog de interrupcion (INT_WDT)";
+    case ESP_RST_WDT:      return "Watchdog del chip";
+    case ESP_RST_BROWNOUT: return "Caida de tension (brownout)";
+    default:               return "Reinicio inesperado";
+  }
+}
+
+// Se llama UNA vez, muy temprano en setup(). Decide si este arranque entra en
+// Modo seguro y deja el contador actualizado.
+static void safeBootEval(){
+  esp_reset_reason_t rr = esp_reset_reason();
+  gSafeCause  = (int)rr;
+  gSafeBootMs = millis();
+  bool abnormal = (rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT ||
+                   rr == ESP_RST_TASK_WDT || rr == ESP_RST_WDT || rr == ESP_RST_BROWNOUT);
+  Preferences p;
+  if(p.begin(SAFE_NVS_NS, true)){
+    int savedFails = p.getInt("fails", 0);
+    if(savedFails < 0) savedFails = 0; if(savedFails > 250) savedFails = 250;
+    gSafeFails = (uint8_t)savedFails;
+    if(!abnormal) gSafeCause = p.getInt("cause", (int)rr);   // conserva la causa que disparo la cadena
+    p.end();
+  }
+  if(abnormal){
+    if(gSafeFails < 250) gSafeFails++;
+    gSafeCause = (int)rr;
+    safeSaveFails();
+  }
+  gSafeMode = (gSafeFails >= SAFE_FAIL_MAX);
+  Serial.printf("[SAFE] motivo=%d anormal=%s fallos=%u modo_seguro=%s\n",
+                (int)rr, abnormal ? "si" : "no", (unsigned)gSafeFails, gSafeMode ? "SI" : "no");
+}
+
+// Arranque estable: a los SAFE_STABLE_MS sin reiniciar, el contador vuelve a 0.
+// UNA sola escritura en NVS por arranque (y solo si habia algo que limpiar):
+// esto corre desde loop(), asi que no puede permitirse escribir por vuelta.
+static void safeStableTick(){
+  if(gSafeCleared || gSafeMode) return;
+  if(millis() - gSafeBootMs < SAFE_STABLE_MS) return;
+  gSafeCleared = true;
+  if(gSafeFails == 0) return;
+  gSafeFails = 0;
+  safeSaveFails();
+  Serial.println(F("[SAFE] arranque estable: contador de reinicios anormales a cero"));
+}
+
+// Salir del Modo seguro a mano ("Reiniciar normalmente"): pone el contador a 0
+// ANTES de reiniciar, o el siguiente arranque volveria a entrar en Modo seguro.
+static void safeExitAndReboot(){
+  gSafeFails = 0;
+  safeSaveFails();
+  Serial.println(F("[SAFE] saliendo del Modo seguro -> reinicio normal"));
+  delay(40);
+  esp_restart();
+}
+
+// #############################################################
+// ##  RESTABLECIMIENTO DE FABRICA  ·  estado transaccional
+// ##  ------------------------------------------------------
+// ##  El borrado NO puede quedar a medias si se corta la corriente.
+// ##  Por eso antes de tocar un solo dato se escribe un marcador
+// ##  persistente en su PROPIO namespace de NVS ("flexreset"), con
+// ##  version de formato y etapa en curso. Ese namespace es el UNICO
+// ##  que el borrado no limpia: se elimina al final del todo, y solo
+// ##  cuando el arranque limpio esta confirmado.
+// ##
+// ##  Si el aparato se reinicia con el marcador puesto, el arranque
+// ##  RETOMA el borrado desde la etapa anotada, antes de montar datos
+// ##  privados o abrir ninguna app.
+// #############################################################
+#define FR_NVS_NS   "flexreset"
+#define FR_FMT_VER  1
+// Etapas. El orden IMPORTA: es el orden en que se ejecutan y el que se
+// retoma tras un corte. Se anaden siempre al final para que un marcador
+// escrito por una version anterior nunca signifique otra cosa.
+enum {
+  FR_ST_IDLE = 0,    // no hay restablecimiento en curso
+  FR_ST_ARMED,       // seguridad validada, escrituras normales detenidas
+  FR_ST_TOKENS,      // invalidar y borrar credenciales y tokens locales
+  FR_ST_REMOTE,      // intento (best-effort) de cerrar sesion remota
+  FR_ST_APPDATA,     // datos de apps: sesiones, borradores, caches
+  FR_ST_FILES,       // archivos del usuario: formateo de LittleFS
+  FR_ST_NVS,         // namespaces conocidos de NVS (menos el propio marcador)
+  FR_ST_DEFAULTS,    // valores predeterminados de fabrica
+  FR_ST_DONE,        // terminado: falta reiniciar y confirmar el arranque limpio
+  FR_ST_FAIL         // una etapa fallo: pantalla de recuperacion con reintento
+};
+static bool    gFrPending = false;   // hay un restablecimiento a medias (NVS "pending")
+static uint8_t gFrStage   = FR_ST_IDLE;
+static int     gFrErr     = 0;       // etapa que fallo (0 = ninguna)
+// El borrado ya termino y el aparato ha reiniciado, pero el arranque limpio
+// todavia no se ha confirmado: el marcador NO se borra hasta llegar al OOBE
+// como dispositivo nuevo. Vive aqui arriba porque lo consulta enterOobeLang().
+static bool    gFrConfirmPending = false;
+
+static bool frSaveState(){
+  Preferences p;
+  if(!p.begin(FR_NVS_NS, false)) return false;
+  bool wrote = p.putBool("pending", gFrPending) == sizeof(uint8_t) &&
+               p.putInt("ver", FR_FMT_VER) == sizeof(int32_t) &&
+               p.putInt("stage", gFrStage) == sizeof(int32_t) &&
+               p.putInt("err", gFrErr) == sizeof(int32_t);
+  p.end();
+  if(!wrote) return false;
+  // Antes de borrar nada se verifica el marcador leyendolo desde NVS. Si una
+  // escritura falla, el motor se detiene: nunca se confia solo en la copia RAM.
+  Preferences v;
+  if(!v.begin(FR_NVS_NS, true)) return false;
+  bool ok = v.getBool("pending", !gFrPending) == gFrPending &&
+            v.getInt("ver", 0) == FR_FMT_VER &&
+            v.getInt("stage", 0) == gFrStage &&
+            v.getInt("err", -1) == gFrErr;
+  v.end();
+  return ok;
+}
+static void frLoadState(){
+  Preferences p;
+  gFrPending = false; gFrStage = FR_ST_IDLE; gFrErr = 0;
+  if(!p.begin(FR_NVS_NS, true)) return;
+  bool pend = p.getBool("pending", false);
+  int ver = p.getInt("ver", 0);
+  int st  = p.getInt("stage", FR_ST_IDLE);
+  int err     = p.getInt("err", 0);
+  p.end();
+  // Marcador de otra version de formato: no se sabe que significan sus etapas,
+  // asi que se descarta en vez de interpretarlo mal y borrar de mas.
+  if(pend && ver == FR_FMT_VER && st == FR_ST_DONE){
+    gFrConfirmPending = true;   // el siguiente OOBE confirma y elimina el marcador
+  } else if(pend && ver == FR_FMT_VER && st > FR_ST_IDLE && st <= FR_ST_FAIL){
+    gFrPending = true; gFrStage = st; gFrErr = err;
+  } else if(pend){
+    Preferences q;
+    if(q.begin(FR_NVS_NS, false)){ q.clear(); q.end(); }
+  }
+}
+// Se llama SOLO cuando el arranque limpio esta confirmado (el sistema ya llego
+// al OOBE como dispositivo nuevo). Es el ultimo paso de la transaccion.
+static void frClearMarker(){
+  Preferences p;
+  if(p.begin(FR_NVS_NS, false)){ p.clear(); p.end(); }
+  gFrPending = false; gFrStage = FR_ST_IDLE; gFrErr = 0;
+  Serial.println(F("[RESET] arranque limpio confirmado: marcador de recuperacion borrado"));
 }
 
 // -------- Idiomas --------
@@ -5723,12 +6061,47 @@ static void kbsEnter();                                   // FASE E: Ajustes -> 
 static void kbsTick();                                    // FASE E: su tick, desde loop()
 static void noteRenderAll();                              // Notas: repintado completo (lo llaman el portapapeles y los chips)
 static void noteInsert(const char* s);                    // Notas: insercion en el cursor (la usa el portapapeles)
+// ---- Navegacion inferior, ciclo de vida y sesiones (bloque nuevo) ----
+static void sysBack();                                    // boton flecha: capa -> pantalla interna -> Home
+static void sysHome();                                    // boton circulo: al escritorio, suspendiendo la app
+static void sysRecents();                                 // boton cuadrado: gestor de apps recientes
+static bool navBarHandle();                               // reparte el toque entre los tres botones
+static int  navBarH();                                    // alto reservado abajo (0 en modo gestos)
+static bool navBarVisible();                              // el sistema esta dibujando la barra ahora mismo
+static void navStampBar(int y0, int y1);                  // la estampa en fb dentro de flxFlush (un solo propietario)
+static void touchDropAll();                               // corta el episodio tactil en curso (sin toques fantasma)
+static const AppHooks* appHooks(int id);
+static void appLoadSessionOnce(int id);                   // relee de disco la sesion de una app (una vez por arranque)
+static void sessAutosaveTick();                           // guardado diferido por inactividad
+static void sessMarkDirty(int id);                         // la app cambio: rearma el temporizador de guardado
+static void swCloseAll();                                 // "Cerrar todo" de Recientes
+static void swSyncFromLife();                             // deja las tarjetas y el ciclo de vida coherentes
+static void frEnterWizard();                              // Ajustes -> General -> Restablecer datos de fabrica
+static void frTick();                                     // asistente + motor de borrado por etapas
+static void frResumeAfterBoot();                          // retoma un borrado interrumpido
+static void frAfterVerify();                              // seguridad superada -> ultimo paso
+static void frCancelToSettings();                         // cancelar en cualquier pantalla del asistente
+static void safeToastTick();                              // retira solo el aviso de Modo seguro
+static void safeEnter();                                  // pantalla de Modo seguro
+static void safeTick();
+static bool safeAppAllowed(int id);                       // que apps se pueden abrir en Modo seguro
+static void safeDenyApp(int id);                          // aviso real al intentar abrir una app no permitida
+static void appClose();                                   // salir de la app al escritorio (suspendiendo)
+static bool appTerminate(int id, bool force);             // cerrar de verdad: libera recursos de la app
+static void appSuspend(int id, bool landscape);
+static int  swCardCount();                                // Recientes: numero de tarjetas vivas
+static int  swCardApp(int idx);                           // Recientes: app de una tarjeta
+static void swDropCard(int idx);                          // Recientes: quita la tarjeta (no toca el ciclo de vida)
+static void flexFeedWdt();                                // TWDT: se alimenta tambien en bucles largos de guardado
 
 // ---- Estado global ----
 // ST_CTX y ST_KIOSKSET son de las Fases 2 y 4. Se anaden al FINAL del enum a
 // proposito: los valores de los estados anteriores no se mueven. Lo mismo vale
 // para los dos estados del apagado, anadidos al final por el mismo motivo.
 // ST_KBSET (Fase E del teclado) se anade tambien al final, por identico motivo.
+// ST_FACTORY (asistente + borrado de Restablecer datos de fabrica) y ST_SAFE
+// (Modo seguro) se anaden tambien AL FINAL, por identico motivo: ningun valor
+// anterior se mueve, asi que nada de lo que ya funcionaba cambia de numero.
 enum { ST_SPLASH = 0, ST_OOBE_LANG, ST_OOBE_NAME, ST_LOCK, ST_HOME, ST_APP, ST_SWITCHER, ST_LOCKSETUP, ST_WIFI, ST_CTX, ST_KIOSKSET,
        ST_POWEROFF_CONFIRM, ST_POWEROFF_ANIM, ST_KBSET,
        // Anadidos AL FINAL por el mismo motivo que los anteriores: no mover
@@ -5756,7 +6129,9 @@ enum { ST_SPLASH = 0, ST_OOBE_LANG, ST_OOBE_NAME, ST_LOCK, ST_HOME, ST_APP, ST_S
        // mismo framebuffer.
        ST_HOMECFG,
        // FLEX ACCOUNT. Se anade AL FINAL: conserva todos los IDs anteriores.
-       ST_OOBE_ACCOUNT };
+       ST_OOBE_ACCOUNT,
+       // Recuperacion y restablecimiento siempre al final para conservar ABI.
+       ST_FACTORY, ST_SAFE };
 
 static int  gState = ST_SPLASH;
 static unsigned long splashStart = 0;
@@ -5918,6 +6293,9 @@ static void splashTick(){
   else if(e < 2000) a = 255;
   else if(e < 2600) a = (uint8_t)(255 - (e - 2000) * 255 / 600);
   else {
+    // MODO SEGURO: ni bloqueo ni escritorio. La pantalla de Modo seguro es la
+    // primera y unica del arranque, con la causa real y las salidas.
+    if(gSafeMode){ safeEnter(); return; }
     if(!cfgOobeDone) enterOobeLang();
     // FASE 4: si el telefono se apago con el kiosco puesto, se vuelve a entrar en
     // la misma app SIN pasar por el escritorio. La unica salida sigue siendo el
@@ -5960,7 +6338,13 @@ static void renderOobeLang(){
   drawTextC(SCR_W / 2, by + 21, t(S_CONTINUE), 3, rgb565(40,80,200));
   flxFlushAll();
 }
-static void enterOobeLang(){ cfgLang = 0; oobeSel = 0; gState = ST_OOBE_LANG; renderOobeLang(); }
+static void enterOobeLang(){
+  // ARRANQUE LIMPIO CONFIRMADO. Llegar aqui como dispositivo nuevo es la prueba
+  // de que el restablecimiento termino bien, asi que este es el momento -- y el
+  // unico -- de borrar el marcador de recuperacion.
+  if(gFrConfirmPending){ gFrConfirmPending = false; frClearMarker(); }
+  cfgLang = 0; oobeSel = 0; gState = ST_OOBE_LANG; renderOobeLang();
+}
 static void oobeLangTick(){
   if(!T.tap) return;
   int rowH = 74, gap = 14, x = 44, w = SCR_W - 88, y0 = 158;
@@ -6385,6 +6769,10 @@ static void renderHomeInto(uint16_t* dst, int page){
     drawRoundRect(rx - 11, ny - 3, 22, 22, 4, nv);                        // recientes
   } else {
     drawHomeIndicator(SCR_H, 220);                                        // barra de gestos
+  }
+  if(gSafeMode){
+    fillRoundRect(146, 56, 188, 38, 19, rgb565(186,112,48));
+    drawTextC(SCR_W / 2, 66, "Modo seguro", 2, rgb565(255,255,255));
   }
   setBuf(old);
 }
@@ -7550,7 +7938,7 @@ static uint32_t gRippleStart = 0;
 static const uint32_t RIPPLE_DUR_MS = 500;
 static const int      RIPPLE_MAX_R  = 70;
 static void animateIconRipple(){
-  if(gIconStyle != 1 || !bbuf || !homeBuf){ gRippleActive = false; return; }
+  if(gIconStyle != 1 || !bbuf || !homeBuf || gSafeMode){ gRippleActive = false; return; }
   setBuf(bbuf);
   gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;   // recorte completo
   // REPINTADO PARCIAL. El destello es un circulo de radio <= RIPPLE_MAX_R
@@ -8776,6 +9164,7 @@ static void homeTick(){
   if(gHomeDirty && !hpDragging && !hpSettling){
     renderHome(); showHome();
   }
+  if(gSafeMode && T.tap && T.x >= 136 && T.x <= 344 && T.y >= 48 && T.y <= 104){ safeEnter(); return; }
   // PAGINAS DEL ESCRITORIO. Va lo PRIMERO de todo (antes incluso que los
   // gestos iOS) porque una vez que el dedo esta arrastrando una pagina, el
   // toque es suyo hasta que se suelte: si el gesto de la barra inferior o
@@ -8823,7 +9212,7 @@ static void homeTick(){
   }
   if(T.swipeUp && drawerCanOpen() && T.startY > 96){ drawerOpen(); return; }
   if(T.tap){
-    if(T.x > SCR_W * 2 / 3 && T.y > SCR_H - 72){ activarMultitarea(); return; }   // boton Recientes
+    if(T.x > SCR_W * 2 / 3 && T.y > SCR_H - 72){ sysRecents(); return; }          // boton Recientes
     int id;
     if(hitHomeIcon(T.x, T.y, id)){
       gIconOvrApp = -1;              // se abre desde su ranura real, no desde la caja
@@ -8877,7 +9266,7 @@ static void homeTick(){
 //     'dflt' como valor de fabrica de cada app. Son bitmasks y no campos de la
 //     estructura porque cambian en caliente y hay que persistirlos: dos enteros
 //     en NVS en vez de dieciseis claves (mismo criterio que gAppLock).
-typedef struct { void (*enter)(); void (*tick)(); uint8_t flags; uint8_t cat; uint8_t dflt; } FlexApp;
+typedef struct { void (*enter)(); void (*tick)(); uint8_t flags; uint8_t cat; uint8_t dflt; const AppHooks* hooks; } FlexApp;
 #define APP_CUSTOM_HEADER 1   // la app pinta su propia cabecera (no la centrada)
 #define APP_OWN_TOUCH     2   // la app gestiona TODOS sus toques (solo swipe-derecha cierra)
 #define APP_LAND          4   // la app dibuja en LANDSCAPE (pone gLand por su cuenta)
@@ -8889,6 +9278,10 @@ static bool gRelayout = false;
 #define APP_FLEX          8   // la app maqueta contra gAppW/gAppH -> se le da un
                               // lienzo del TAMANO REAL de la ventana y se dibuja
                               // 1:1, sin escalar ni barras de letterbox.
+#define APP_BG_KEEP      16   // LISTA BLANCA de segundo plano: suspendida, la app puede
+                              // seguir teniendo trabajo REAL en curso (lo decide su
+                              // hook bgWork()). Ni "Cerrar todo" ni el desalojo por
+                              // limite de sesiones la tocan mientras ese trabajo dure.
 // Lienzo LOGICO de la app en curso. A pantalla completa es la pantalla entera;
 // dentro de una ventana de DeX, para una app APP_FLEX, es el area de cliente.
 // Las apps adaptativas maquetan contra esto en vez de contra SCR_W/SCR_H.
@@ -8911,6 +9304,7 @@ static void wifiSettingsEnter(); static void wifiTick();    // Ajustes -> Red e 
 static void calcEnter(); static void calcTick();           // Calculadora (M2), abajo
 static void pcEnter(); static void pcTick();               // Modo PC (M4), abajo
 static void galEnter(); static void galTick();              // Galeria (contenido real + Flex Vault)
+static bool galBackLayer(); static bool galBackScreen(); static void galSuspend(); static void galResume();
 static void bienEnter(); static void bienTick();           // Bienestar (M2)
 static void calEnter(); static void calTick();             // Calendario (M2)
 static void vidEnter(); static void vidTick();             // Multimedia (esqueleto)
@@ -8927,7 +9321,18 @@ static void connWifiSub(char* out, size_t n);              // SSID real para Aju
 static void connBleSub(char* out, size_t n);
 static void gamesEnter(); static void gamesTick(); // Juegos: Jumper (motor en FlexOS_Jumper.h)
 static void wxAppEnter(); static void wxAppTick();  // Clima (Flex Weather) -- seccion propia mas abajo
+static bool wxHandleBack(); static void wxSuspend(); static void wxResume();
 static void storeEnter(); static void storeTick(); static void storeExit(); // Flex Store + runtime FLXP
+// Hooks opcionales. Las implementaciones viven junto a cada app.
+static void setSuspend(); static void setResume(); static bool setSaveSess(); static void setLoadSess(); static bool setBgWork();
+static void calcResume(); static bool calcSaveSess(); static void calcLoadSess();
+static void vidSuspend(); static void vidResume(); static void vidCloseApp(); static bool vidSaveSess(); static void vidLoadSess();
+static void camSuspend(); static void camResume(); static void camCloseApp();
+static bool noteBackLayer(); static bool noteBackScreen(); static void noteSuspend(); static void noteResume(); static void noteCloseApp(); static bool noteSaveSess(); static void noteLoadSess();
+static bool paintBackScreen(); static void paintSuspend(); static void paintResume(); static void paintCloseApp(); static bool paintSaveSess(); static void paintLoadSess();
+static void gamesSuspend(); static void gamesResume(); static void gamesCloseApp();
+static void navResumeLife(); static void navCloseLife();
+static void storeResumeLife(); static void storeCloseLife();
 // Rect del icono en el escritorio (para animar la apertura desde el)
 static void getIconRect(int id, int &rx, int &ry, int &rs){
   if(id == gIconOvrApp){ rx = gIconOvrX; ry = gIconOvrY; rs = gIconOvrS; return; }
@@ -8969,14 +9374,10 @@ static void appDrawChrome(int id){
   cronoBarClock(16, W);            // hora + capsula del cronometro (misma geometria que el Home)
   drawWifi(SCR_W - 66, 28, 11, W);
   drawBattery(SCR_W - 46, 20, 30, 15, 82, W);
-  if(gNavMode == 0){
-    int ny = SCR_H - 52;
-    fillTriangle(SCR_W / 6 - 10, ny + 8, SCR_W / 6 + 8, ny - 2, SCR_W / 6 + 8, ny + 18, W);
-    drawCircle(SCR_W / 2, ny + 8, 12, W); drawCircle(SCR_W / 2, ny + 8, 11, W);
-    drawRoundRect(SCR_W * 5 / 6 - 11, ny - 3, 22, 22, 4, W);
-  } else {
-    drawHomeIndicator(SCR_H, 180);
-  }
+  // MODO BOTONES: la barra inferior ya NO la dibuja el marco de la app. La
+  // estampa el sistema dentro de flxFlush (navStampBar), asi que hay un solo
+  // propietario de esos 64 px y ninguna app puede pisarlos ni hacerlos parpadear.
+  if(gNavMode != 0) drawHomeIndicator(SCR_H, 180);
   (void)id;
 }
 // Cabecera estandar (chevron "atras" + titulo centrado). Las apps con
@@ -9371,24 +9772,35 @@ static const char* APP_CAT_NAME[APP_CAT_N][5] = {
   {"Sistema","System","Syst\xC3\xA8" "me","Sistema","Sistema"},
   {"Ocio","Fun","Loisirs","Lazer","Svago"},
 };
+static const AppHooks H_SETTINGS = { NULL, settingsHandleBack, setSuspend, setResume, NULL, setSaveSess, setLoadSess, setBgWork };
+static const AppHooks H_GALLERY  = { galBackLayer, galBackScreen, galSuspend, galResume, NULL, NULL, NULL, NULL };
+static const AppHooks H_CALC     = { NULL, NULL, NULL, calcResume, NULL, calcSaveSess, calcLoadSess, NULL };
+static const AppHooks H_MEDIA    = { NULL, NULL, vidSuspend, vidResume, vidCloseApp, vidSaveSess, vidLoadSess, NULL };
+static const AppHooks H_CAMERA   = { NULL, NULL, camSuspend, camResume, camCloseApp, NULL, NULL, NULL };
+static const AppHooks H_NOTES    = { noteBackLayer, noteBackScreen, noteSuspend, noteResume, noteCloseApp, noteSaveSess, noteLoadSess, NULL };
+static const AppHooks H_PAINT    = { NULL, paintBackScreen, paintSuspend, paintResume, paintCloseApp, paintSaveSess, paintLoadSess, NULL };
+static const AppHooks H_GAMES    = { NULL, NULL, gamesSuspend, gamesResume, gamesCloseApp, NULL, NULL, NULL };
+static const AppHooks H_BROWSER  = { NULL, NULL, NULL, navResumeLife, navCloseLife, NULL, NULL, NULL };
+static const AppHooks H_STORE    = { NULL, NULL, NULL, storeResumeLife, storeCloseLife, NULL, NULL, NULL };
+static const AppHooks H_WEATHER  = { NULL, wxHandleBack, wxSuspend, wxResume, NULL, NULL, NULL, NULL };
 // ---- Registro de apps (indices = enum IC_*) ----
 static FlexApp APP_REG[APP_N] = {
-  { appRelojEnter, appRelojTick, APP_FLEX, APP_CAT_ESENCIAL, APP_DEF_FAV },              // 0  Reloj  (REAL)
-  { galEnter, galTick, APP_FLEX, APP_CAT_MEDIA, APP_DEF_FAV },                        // 1  Galeria (REAL: JPEG de /Documentos + dibujos de /Paint)
-  { vidEnter, vidTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_MEDIA, APP_DEF_FAV },  // 2  Multimedia (esqueleto)
-  { almEnter, almTick, APP_FLEX, APP_CAT_SISTEMA, APP_DEF_FAV },                        // 3  Almacenamiento (REAL: LittleFS + PSRAM)
-  { pcEnter, pcTick, APP_CUSTOM_HEADER, APP_CAT_SISTEMA, APP_DEF_FAV },                  // 4  Modo PC (REAL, M4) -- usa render landscape (gLand)
-  { noteEnter, noteTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_TRABAJO, APP_DEF_FAV },// 5  Notas + teclado (REAL)
-  { eduEnter, NULL, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_FAV },                           // 6  Educacion (REAL)
-  { navEnter, navTick, APP_FLEX | APP_OWN_TOUCH, APP_CAT_ESENCIAL, APP_DEF_FAV },         // 7  Navegador (REAL: remoto + omnibox + pestanas)
-  { ideEnter, ideTick, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_FAV },                        // 8  Code IDE (REAL + Asistente de Hardware)
-  { bienEnter, bienTick, APP_FLEX, APP_CAT_SISTEMA, APP_DEF_FAV },                      // 9  Bienestar (REAL, M2)
-  { paintEnter, paintTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_OCIO, APP_DEF_FAV },// 10 Paint (REAL)
-  { gamesEnter, gamesTick, APP_OWN_TOUCH | APP_CUSTOM_HEADER | APP_LAND, APP_CAT_OCIO, APP_DEF_FAV }, // 11 Juegos (REAL: Jumper)
-  { settingsEnter, settingsTick, APP_CUSTOM_HEADER, APP_CAT_SISTEMA, APP_DEF_DOCK },      // 12 Ajustes (REAL, M3) -- Wi-Fi/PIN cambian gState a pantalla completa
-  { calcEnter, calcTick, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_DOCK },               // 13 Calculadora (REAL, M2) -- app de referencia del modo embebido
-  { calEnter, calTick, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_DOCK },                        // 14 Calendario (REAL, M2)
-  { camEnter, camTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_MEDIA, APP_DEF_DOCK },  // 15 Camara (esqueleto)
+  { appRelojEnter, appRelojTick, APP_FLEX, APP_CAT_ESENCIAL, APP_DEF_FAV, NULL },
+  { galEnter, galTick, APP_FLEX, APP_CAT_MEDIA, APP_DEF_FAV, &H_GALLERY },
+  { vidEnter, vidTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_MEDIA, APP_DEF_FAV, &H_MEDIA },
+  { almEnter, almTick, APP_FLEX, APP_CAT_SISTEMA, APP_DEF_FAV, NULL },
+  { pcEnter, pcTick, APP_CUSTOM_HEADER, APP_CAT_SISTEMA, APP_DEF_FAV, NULL },
+  { noteEnter, noteTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_TRABAJO, APP_DEF_FAV, &H_NOTES },
+  { eduEnter, NULL, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_FAV, NULL },
+  { navEnter, navTick, APP_FLEX | APP_OWN_TOUCH, APP_CAT_ESENCIAL, APP_DEF_FAV, &H_BROWSER },
+  { ideEnter, ideTick, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_FAV, NULL },
+  { bienEnter, bienTick, APP_FLEX, APP_CAT_SISTEMA, APP_DEF_FAV, NULL },
+  { paintEnter, paintTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_OCIO, APP_DEF_FAV, &H_PAINT },
+  { gamesEnter, gamesTick, APP_OWN_TOUCH | APP_CUSTOM_HEADER | APP_LAND, APP_CAT_OCIO, APP_DEF_FAV, &H_GAMES },
+  { settingsEnter, settingsTick, APP_CUSTOM_HEADER, APP_CAT_SISTEMA, APP_DEF_DOCK, &H_SETTINGS },
+  { calcEnter, calcTick, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_DOCK, &H_CALC },
+  { calEnter, calTick, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_DOCK, NULL },
+  { camEnter, camTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_MEDIA, APP_DEF_DOCK, &H_CAMERA },
   // 16 Clima (REAL: Open-Meteo). APP_OWN_TOUCH porque el buscador de ciudades
   // usa el teclado del sistema, que ocupa la MISMA franja que el boton "atras"
   // de la barra: si lo gestionara el framework, la barra espaciadora cerraria
@@ -9398,10 +9810,10 @@ static FlexApp APP_REG[APP_N] = {
   // vacias -- y una placa que actualiza no ve su Inicio reordenado. Clima se
   // abre desde su widget (la fila de arriba) y desde la Caja de aplicaciones,
   // que es de donde el usuario puede anadirla a Inicio si quiere.
-  { wxAppEnter, wxAppTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_ESENCIAL, APP_DEF_DOCK },
+  { wxAppEnter, wxAppTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_ESENCIAL, APP_DEF_DOCK, &H_WEATHER },
   // 17 Flex Store. Gestiona su cabecera y tactil; las operaciones de red/flash
   // corren en una tarea de fondo para no bloquear la interfaz.
-  { storeEnter, storeTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH | APP_FLEX, APP_CAT_SISTEMA, APP_DEF_DOCK },
+  { storeEnter, storeTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH | APP_FLEX, APP_CAT_SISTEMA, APP_DEF_DOCK, &H_STORE },
 };
 static const char* appCatName(int id){
   int c = (id >= 0 && id < APP_N) ? APP_REG[id].cat : APP_CAT_SISTEMA;
@@ -9473,6 +9885,335 @@ static void winRevealAnim(int id, bool opening){
   }
 }
 
+// #############################################################
+// ##  NAVEGACION INFERIOR DEL SISTEMA  ·  un solo propietario
+// ##  ------------------------------------------------------
+// ##  Los tres botones (flecha / circulo / cuadrado) los dibuja y los
+// ##  atiende EL SISTEMA, nunca la app. La banda de NAV_H pixeles de
+// ##  abajo esta reservada: WIN_BOT ya la descontaba, el teclado de
+// ##  Notas se sube por encima de ella (kbBotReserve) y Paint y Camara
+// ##  suben su fila de herramientas. Ninguna app dibuja ahi.
+// ##
+// ##  POR QUE SE ESTAMPA DENTRO DE flxFlush: es el UNICO punto por el
+// ##  que todo acaba llegando al panel. Estampando ahi (igual que hace
+// ##  el candado del Modo Kiosco) la barra no puede quedar tapada por
+// ##  el repintado de una app, no parpadea aunque la app refresque su
+// ##  banda inferior en cada cuadro, y no hace falta acordarse de
+// ##  redibujarla en ninguna ruta nueva.
+// #############################################################
+#define NAV_H       64                       // franja reservada al sistema (modo "Botones")
+#define NAV_PRESS_MS 130                     // cuanto sigue viendose el destello tras soltar
+static int      gNavPress = -1;              // boton HELD ahora mismo (0 atras · 1 inicio · 2 recientes)
+static int      gNavGlow  = -1;              // boton que muestra el destello (sobrevive al soltar)
+static uint32_t gNavGlowMs = 0;
+
+static int  navBarH(){ return (gNavMode == 0) ? NAV_H : 0; }
+// La barra existe cuando el sistema la posee: modo de botones, en una app, a
+// pantalla completa y en portrait. En Modo Kiosco NO se dibuja a proposito: ahi
+// no puede haber vias de escape (es exactamente la misma regla que ya aplican
+// handleiOSGestures y activarMultitarea).
+static bool navBarVisible(){
+  if(gNavMode != 0) return false;
+  if(gHosted || gLand) return false;
+  if(KIOSK_ON && kioskOn) return false;
+  if(gState != ST_APP) return false;
+  // Una app LANDSCAPE (Juegos) es inmersiva: dibuja con las coordenadas
+  // giradas y tiene su propia salida. Estampar aqui una barra portrait daria un
+  // destello con el cuadro de la animacion de apertura, antes de que la app
+  // ponga gLand por su cuenta.
+  if(APP_REG[gAppId].flags & APP_LAND) return false;
+  return true;
+}
+static int  navBarTop(){ return SCR_H - NAV_H; }
+static uint16_t navBgCol(){  return gDark ? rgb565(13,15,22)    : rgb565(238,241,247); }
+static uint16_t navFgCol(){  return gDark ? rgb565(232,236,245) : rgb565(44,48,60); }
+static uint16_t navLineCol(){return gDark ? rgb565(30,34,46)    : rgb565(214,219,228); }
+
+// Pinta la barra en el buffer activo. No vuelca: quien la llama decide.
+static void navBarPaint(){
+  int ny = SCR_H - 52, top = navBarTop();
+  fillRect(0, top, SCR_W, NAV_H, navBgCol());
+  fillRect(0, top, SCR_W, 1, navLineCol());
+  uint16_t fg = navFgCol();
+  // Destello de pulsacion: circulo tenue bajo el boton tocado. Se ve mientras el
+  // dedo sigue encima y NAV_PRESS_MS mas despues de soltar, para que un toque
+  // rapido tambien deje senal. Es lo unico "animado" de la barra y su tiempo
+  // sale de millis(), no de un contador de cuadros.
+  if(gNavGlow >= 0 && (gNavPress == gNavGlow || (millis() - gNavGlowMs) < NAV_PRESS_MS)){
+    int cxs[3] = { SCR_W / 6, SCR_W / 2, SCR_W * 5 / 6 };
+    fillCircleA(cxs[gNavGlow], ny + 8, 24, fg, 46);
+  }
+  int bx = SCR_W / 6;
+  fillTriangle(bx - 10, ny + 8, bx + 8, ny - 2, bx + 8, ny + 18, fg);          // atras
+  drawCircle(SCR_W / 2, ny + 8, 12, fg); drawCircle(SCR_W / 2, ny + 8, 11, fg); // inicio
+  drawRoundRect(SCR_W * 5 / 6 - 11, ny - 3, 22, 22, 4, fg);                     // recientes
+}
+
+// Estampado dentro de flxFlush (ver el bloque de arriba). Solo toca fb, solo si
+// la banda que se va a publicar cruza la franja de la barra.
+static void navStampBar(int y0, int y1){
+  if(!navBarVisible()) return;
+  if(y1 < navBarTop() || y0 > SCR_H - 1) return;
+  uint16_t* ob = gBuf; bool wl = gLand;
+  int sx0 = gClipX0, sx1 = gClipX1, sy0 = gClipY0, sy1 = gClipY1;
+  gLand = false;
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = navBarTop(); gClipY1 = SCR_H - 1;
+  setBuf(fb);
+  navBarPaint();
+  setBuf(ob); gLand = wl;
+  gClipX0 = sx0; gClipX1 = sx1; gClipY0 = sy0; gClipY1 = sy1;
+}
+
+// Corta el episodio tactil en curso. Se llama en CADA transicion de pantalla:
+// sin esto, el dedo que sigue apoyado despues de pulsar "inicio" genera un
+// pressed/tap nuevo en la pantalla que acaba de entrar -- el toque fantasma.
+static void touchDropAll(){
+  T.pressed = T.released = T.tap = false;
+  T.swipeUp = T.swipeDown = T.swipeLeft = T.swipeRight = false;
+  T.down = false; T.moved = false;
+  T.startX = T.x; T.startY = T.y;
+  T.downMs = T.lastMs = millis();
+  gTouchSwallow = true;              // ...y se ignora hasta que el dedo se levante de verdad
+  gNavPress = -1;
+  gNavGlow  = -1;
+}
+
+// #############################################################
+// ##  CICLO DE VIDA DE APLICACIONES
+// ##  ------------------------------------------------------
+// ##  Cuatro estados por app (AppLife) y un contrato opcional por app
+// ##  (AppHooks). El ESP32-P4 no simula multitarea ilimitada: solo UNA
+// ##  app corre a la vez; las demas conservan su ESTADO LOGICO y dejan
+// ##  de recibir tick() y toques, que es exactamente lo que hace que
+// ##  suspender no cueste ni CPU ni cuadros.
+// ##
+// ##  NO se guarda un framebuffer por app: lo unico grafico que
+// ##  sobrevive a la suspension es la miniatura de 150x250 de la
+// ##  tarjeta de Recientes, que ya existia.
+// #############################################################
+#define SESS_MAX_SUSPENDED  5        // + la de primer plano = 6 = SW_MAX (tope de tarjetas)
+#define SESS_IDLE_MS        1200     // inactividad breve que dispara el guardado diferido
+#define SESS_MAXWAIT_MS     30000    // tope duro: nunca mas de 30 s con cambios sin escribir
+
+static uint8_t  gAppState[APP_N];       // AppLife de cada app (indice de APP_REG)
+static uint32_t gAppSeenMs[APP_N];      // millis de la ultima vez en primer plano (para desalojar)
+static int8_t   gSessDirtyApp   = -1;
+static uint32_t gSessDirtyMs    = 0, gSessDirtyFirstMs = 0;
+
+static const AppHooks* appHooks(int id){ return (id >= 0 && id < APP_N) ? APP_REG[id].hooks : NULL; }
+
+// LISTA BLANCA de segundo plano. Una app solo cuenta como "no se puede tocar"
+// si (a) esta declarada en la lista (APP_BG_KEEP) y (b) su propio hook dice que
+// TIENE trabajo en curso ahora mismo. Sin trabajo real se cierra como las demas:
+// la lista blanca no es un salvoconducto permanente.
+static bool appBgBusy(int id){
+  if(id < 0 || id >= APP_N) return false;
+  if(!(APP_REG[id].flags & APP_BG_KEEP)) return false;
+  const AppHooks* h = appHooks(id);
+  return h && h->bgWork && h->bgWork();
+}
+
+// Marca por app de "el archivo de sesion esta desfasado". Evita reescribir en
+// flash una sesion identica cada vez que se pulsa Inicio: sin esta puerta, salir
+// y entrar de una app repetidamente escribiria en flash cada vez sin que hubiera
+// cambiado nada. Es la medida directa contra el desgaste de la flash.
+static bool gSessNeedSave[APP_N];
+static bool appSaveSession(int id){
+  if(id < 0 || id >= APP_N) return true;
+  const AppHooks* h = appHooks(id);
+  if(!h || !h->saveSess) return true;        // la app no tiene nada que guardar: exito trivial
+  if(!gSessNeedSave[id]) return true;        // nada ha cambiado desde el ultimo volcado
+  bool ok = h->saveSess();
+  if(ok) gSessNeedSave[id] = false;
+  return ok;
+}
+// RESTAURACION PEREZOSA. La sesion de disco de cada app se lee la primera vez
+// que esa app se abre, no en el arranque: asi el arranque no paga la lectura
+// (ni la reserva de buffers) de apps que quiza no se abran en toda la sesion.
+static bool gSessLoaded[APP_N];
+static void appLoadSessionOnce(int id){
+  if(id < 0 || id >= APP_N || gSessLoaded[id]) return;
+  gSessLoaded[id] = true;
+  const AppHooks* h = appHooks(id);
+  if(h && h->loadSess) h->loadSess();
+}
+// GUARDADO DIFERIDO. Las apps llaman aqui cuando cambian algo; no se escribe en
+// ese momento. El volcado real ocurre tras SESS_IDLE_MS sin actividad (o al
+// llegar al tope de SESS_MAXWAIT_MS), y nunca con el dedo apoyado. Eso es lo
+// que impide una escritura en flash por letra, por pincelada o por cuadro.
+static void sessMarkDirty(int id){
+  if(id < 0 || id >= APP_N) return;
+  if(gSessDirtyApp != id && gSessDirtyApp >= 0) appSaveSession(gSessDirtyApp);  // otra app pendiente: se cierra ya
+  if(gSessDirtyApp != id){ gSessDirtyApp = (int8_t)id; gSessDirtyFirstMs = millis(); }
+  gSessNeedSave[id] = true;
+  gSessDirtyMs = millis();
+}
+static void sessFlushNow(){
+  if(gSessDirtyApp < 0) return;
+  int id = gSessDirtyApp; gSessDirtyApp = -1;
+  appSaveSession(id);
+}
+static void sessAutosaveTick(){
+  if(gSessDirtyApp < 0) return;
+  if(gFrPending) return;                     // restablecimiento en curso: ninguna escritura normal
+  if(T.down) return;                         // con el dedo apoyado manda la latencia tactil
+  uint32_t now = millis();
+  if(now - gSessDirtyMs < SESS_IDLE_MS && now - gSessDirtyFirstMs < SESS_MAXWAIT_MS) return;
+  sessFlushNow();
+}
+
+static bool appTerminate(int id, bool force){
+  if(id < 0 || id >= APP_N) return true;
+  if(gAppState[id] == ALIFE_CLOSED) return true;
+  const AppHooks* h = appHooks(id);
+  if(gSessDirtyApp == id) gSessDirtyApp = -1;      // se guarda aqui abajo, no por el camino diferido
+  bool saved = appSaveSession(id);
+  // No se pudo guardar (p.ej. LittleFS lleno) y el cierre no es forzado: la app
+  // NO se cierra y su contenido sigue vivo en RAM. Perder el trabajo del usuario
+  // en silencio para "liberar recursos" no es una opcion.
+  if(!saved && !force) return false;
+  if(h && h->close) h->close();
+  gAppState[id] = ALIFE_CLOSED;
+  gAppSeenMs[id] = 0;
+  return true;
+}
+
+static int appSuspendedCount(){
+  int n = 0;
+  for(int i = 0; i < APP_N; i++) if(gAppState[i] == ALIFE_SUSPENDED) n++;
+  return n;
+}
+// Tope de sesiones vivas. Al pasarse, se cierra la app suspendida MAS ANTIGUA
+// que sea seguro cerrar (su sesion ya se guardo al suspenderse, asi que volver
+// a abrirla la reconstruye desde disco).
+static void appEnforceSuspendLimit(){
+  for(int guard = 0; guard < APP_N && appSuspendedCount() > SESS_MAX_SUSPENDED; guard++){
+    int victim = -1; uint32_t oldest = 0xFFFFFFFFu;
+    for(int i = 0; i < APP_N; i++){
+      if(gAppState[i] != ALIFE_SUSPENDED) continue;
+      if(appBgBusy(i)) continue;                       // trabajo real en curso: intocable
+      if(gAppSeenMs[i] <= oldest){ oldest = gAppSeenMs[i]; victim = i; }
+    }
+    if(victim < 0) break;                              // todas protegidas: no se fuerza nada
+    if(!appTerminate(victim, false)) break;            // no se pudo guardar: mejor conservar
+    for(int c = 0; c < swCardCount(); c++) if(swCardApp(c) == victim){ swDropCard(c); break; }
+    Serial.printf("[LIFE] limite de sesiones: %s cerrada\n", appName(victim));
+  }
+}
+
+// RUNNING -> SUSPENDED. Conserva TODAS las capas propias (teclado, menu,
+// dialogo, selector), toma la miniatura exacta y deja que la app pause solo
+// recursos/animaciones. Cerrar capas pertenece exclusivamente a ATRAS: Inicio
+// debe volver despues a la app tal y como estaba, igual que en un telefono.
+static void appSuspend(int id, bool landscape){
+  if(id < 0 || id >= APP_N) return;
+  if(gAppState[id] == ALIFE_SUSPENDED) return;
+  if(landscape || (APP_REG[id].flags & APP_LAND)) swPushNoThumb(id);   // miniatura girada: mejor ninguna
+  else                                            swPushAndCapture(id);
+  const AppHooks* h = appHooks(id);
+  if(h && h->suspend) h->suspend();
+  gAppState[id] = ALIFE_SUSPENDED;
+  gAppSeenMs[id] = millis();
+  // GUARDADO EN LA VUELTA SIGUIENTE, NO AQUI. Suspender es un punto seguro de
+  // guardado, pero escribir en flash ANTES de la animacion de salida mete el
+  // coste de la escritura justo dentro de la transicion (con el lienzo de Paint
+  // son mas de 100 ms de tiron). Se deja el volcado ARMADO y vencido, asi que
+  // sessAutosaveTick lo hace en la siguiente vuelta del bucle -- con el
+  // escritorio ya publicado y el dedo ya levantado. La ventana de riesgo es de
+  // una vuelta de loop; cerrar la app (appTerminate) si escribe en el acto.
+  if(gSessNeedSave[id]){
+    if(gSessDirtyApp != id) sessMarkDirty(id);
+    gSessDirtyMs = gSessDirtyFirstMs = 0;
+  }
+  appEnforceSuspendLimit();
+}
+
+// Deja las tarjetas de Recientes y el ciclo de vida coherentes: una tarjeta
+// solo puede existir para una app abierta o suspendida.
+static void swSyncFromLife(){
+  for(int i = swCardCount() - 1; i >= 0; i--)
+    if(gAppState[swCardApp(i)] == ALIFE_CLOSED) swDropCard(i);
+}
+
+// #############################################################
+// ##  LOS TRES BOTONES
+// #############################################################
+// ATRAS: 1) cierra una capa propia de la app (teclado emergente, menu,
+// dialogo, selector); 2) si no hay capa, retrocede UNA pantalla interna de la
+// app; 3) si tampoco hay, suspende y vuelve al escritorio. Nunca hace falta
+// pulsarlo muchas veces solo para salir.
+static void sysBack(){
+  if(KIOSK_ON && kioskOn) return;
+  if(gState != ST_APP) return;
+  int id = gAppId;
+  const AppHooks* h = appHooks(id);
+  if(h && h->backLayer && h->backLayer()){ touchDropAll(); return; }
+  if(h && h->backScreen && h->backScreen()){ touchDropAll(); return; }
+  appClose();
+}
+// INICIO: al escritorio desde donde sea, suspendiendo (nunca reiniciando) la
+// app. No borra su contenido y no anade ninguna entrada de historial.
+static void sysHome(){
+  if(KIOSK_ON && kioskOn) return;
+  if(gHosted){ gHostReq = 1; return; }
+  if(gState == ST_APP){ appClose(); return; }
+  if(gState != ST_HOME){ enterHome(); touchDropAll(); }
+}
+// RECIENTES: suspende la app actual (para que su tarjeta refleje lo ultimo que
+// habia en pantalla) y abre el gestor real.
+static void sysRecents(){
+  if(KIOSK_ON && kioskOn) return;
+  if(gHosted){ gHostReq = 3; return; }
+  if(gState == ST_APP){
+    bool land = gLand;
+    gLand = false;
+    gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
+    setBuf(fb);
+    appSuspend(gAppId, land);
+    if(gHomeDirty) renderHome();
+  }
+  swSyncFromLife();
+  activarMultitarea();
+  touchDropAll();
+}
+// Reparto del toque en la franja del sistema. Devuelve true si lo consumio: el
+// tick de la app no llega a verlo nunca.
+static bool navBarHandle(){
+  if(!navBarVisible()) return false;
+  int top = navBarTop();
+  bool inBar = (T.y >= top);
+  // El destello se apaga SOLO, con una unica publicacion de la banda. Va lo
+  // primero para que tambien se apague cuando el dedo ya no toca nada.
+  if(gNavGlow >= 0 && gNavPress < 0 && (millis() - gNavGlowMs) >= NAV_PRESS_MS){
+    gNavGlow = -1;
+    flxFlush(top, SCR_H - 1);
+  }
+  if(T.pressed && inBar){
+    gNavPress = gNavGlow = (T.x < SCR_W / 3) ? 0 : (T.x < SCR_W * 2 / 3 ? 1 : 2);
+    gNavGlowMs = millis();
+    flxFlush(top, SCR_H - 1);                 // el destello lo estampa navStampBar
+    return true;
+  }
+  if(T.down && gNavPress >= 0) return true;   // arrastre iniciado en la barra: no llega a la app
+  if(gNavPress >= 0 && (T.released || T.tap)){
+    int btn = gNavPress;
+    gNavPress = -1;
+    gNavGlowMs = millis();                    // a partir de aqui el destello se desvanece solo
+    flxFlush(top, SCR_H - 1);
+    if(!inBar){ gNavGlow = -1; return true; } // el dedo se fue de la barra: se cancela la accion
+    if(btn == 0)      sysBack();
+    else if(btn == 1) sysHome();
+    else              sysRecents();
+    return true;
+  }
+  if(inBar && (T.tap || T.released || T.down)) return true;   // nada se filtra a la app
+  return false;
+}
+
+// SALIR DE LA APP AL ESCRITORIO. Ya no destruye nada: SUSPENDE. La app conserva
+// su estado logico, deja de recibir tick() y toques, y su tarjeta queda en
+// Recientes con la miniatura de lo ultimo que se vio. Volver a abrirla la
+// REANUDA (ver enterApp), no la reinicia.
 static void appClose(){
   // La cortina no puede sobrevivir a un cambio de app: se cierra y suelta el
   // toque ANTES de tocar nada mas (ver qsForceClose).
@@ -9482,13 +10223,6 @@ static void appClose(){
   // llame a appClose desde su propio tick. Poniendolo aqui no hay que ir
   // parcheando cada camino por separado (y ninguno nuevo se escapa).
   if(KIOSK_ON && kioskOn) return;
-  // NAVEGADOR: mantiene un socket abierto, una tarea de red y buffers
-  // grandes en PSRAM. Soltarlo SOLO desde su propio menu dejaria fugas
-  // por las otras vias de cierre (boton atras, chevron, gesto de la
-  // barra iOS, cierre de la ventana de DeX). Se hace aqui, que es el
-  // unico punto por el que pasan TODAS. flexBrowserExit() es idempotente.
-  if(gAppId == IC_NAV) flexBrowserExit();
-  if(gAppId == IC_FLEXSTORE) storeExit();
   if(gHosted){ gHostReq = 1; return; }        // dentro de una ventana: cierra la VENTANA
   // El FRAMEWORK devuelve el motor a portrait, no la app. Antes cada app
   // landscape tenia que acordarse de hacer gLand=false por su cuenta (pcExit,
@@ -9503,45 +10237,58 @@ static void appClose(){
   gClipY0 = 0; gClipY1 = SCR_H - 1;
   gClipX0 = 0; gClipX1 = SCR_W - 1;
   setBuf(fb);
-  if(wasLand) swPushNoThumb(gAppId);   // miniatura girada: mejor ninguna (ver swPushNoThumb)
-  else        swPushAndCapture(gAppId);
+  appSuspend(gAppId, wasLand);         // conserva capas, toma miniatura y arma el guardado
   // winRevealAnim compone la animacion SOBRE homeBuf: si Ajustes lo dejo sucio,
   // hay que recomponerlo ANTES, o la animacion de cierre encoge hacia el
   // escritorio viejo y este cambia de golpe al terminar.
   if(gHomeDirty) renderHome();
   winRevealAnim(gAppId, false);
   enterHome();
+  touchDropAll();                      // ni un solo evento del gesto anterior llega al escritorio
 }
+// ABRIR O REANUDAR. Si la app estaba SUSPENDIDA y tiene hook de reanudacion, se
+// la reanuda: repinta desde su estado logico, sin pasar por enter() -- que es lo
+// que reiniciaba la nota, el lienzo o el scroll. Una app sin hook de reanudacion
+// se reconstruye con enter(), que para una pantalla realmente estatica (por
+// ejemplo Educacion) es exactamente lo correcto.
 static void enterApp(int id){
   qsForceClose();                 // ninguna app se abre con la cortina a medias
+  if(id < 0 || id >= APP_N) return;
   // FASE 4: en kiosco solo se puede estar en la app clavada. Esto bloquea que
   // una app abra otra a pantalla completa y deje kioskApp apuntando a otro sitio.
   if(KIOSK_ON && kioskOn && id != kioskApp) return;
   if(gHosted){ gHostReq = 2; gHostReqApp = id; return; }   // -> otra ventana de DeX
+  if(gFrPending) return;                          // restablecimiento en curso: nada se abre
+  if(gSafeMode && !safeAppAllowed(id)){ safeDenyApp(id); return; }
+  appLoadSessionOnce(id);
+  bool resuming = (gAppState[id] == ALIFE_SUSPENDED);
+  const AppHooks* h = appHooks(id);
+  if(resuming && !(h && h->resume)) resuming = false;   // sin hook: se reconstruye con enter()
+  gAppState[id] = resuming ? ALIFE_RESUMING : ALIFE_RUNNING;
   gAppId = id; gState = ST_APP;
+  if(gHomeDirty) renderHome();                    // winRevealAnim compone SOBRE homeBuf
   winRevealAnim(id, true);                        // crece desde el icono
   if(!(APP_REG[id].flags & APP_CUSTOM_HEADER)){   // apps normales: marco blanco
     appDrawChrome(id);
     appDrawHeader(id);
   }
-  if(APP_REG[id].enter) APP_REG[id].enter();      // la app pinta su contenido (y su marco si es custom)
+  if(resuming) h->resume();                       // reanuda: mismo contenido, misma posicion
+  else if(APP_REG[id].enter) APP_REG[id].enter(); // la app pinta su contenido (y su marco si es custom)
+  gAppState[id] = ALIFE_RUNNING;
+  gAppSeenMs[id] = millis();
+  touchDropAll();                                 // el dedo que abrio la app no escribe dentro de ella
   flxFlushAll();
 }
 static void appTick(){
-  if(gLand){ if(APP_REG[gAppId].tick) APP_REG[gAppId].tick(); return; }  // Modo PC: gestiona todo por su cuenta
+  if(gLand){ if(APP_REG[gAppId].tick) APP_REG[gAppId].tick(); return; }  // Modo PC / Juegos: gestionan todo por su cuenta
   if(gNavMode == 1 && handleiOSGestures()) return;   // gestos iOS: swipe-arriba -> Home/multitarea
-  // Cierre universal: tocar "atras" (nav; y cabecera en apps normales). Gesto swipe-to-close eliminado.
-  bool back = false;  // antes: T.swipeRight -> deshabilitado a peticion, ya no cierra la app
-  if(T.tap){
-    int ny = SCR_H - 52;
-    if(!(APP_REG[gAppId].flags & APP_OWN_TOUCH) && T.y >= ny - 10 && T.y <= ny + 22 && T.x < SCR_W / 3) back = true;               // nav atras
-    if(!(APP_REG[gAppId].flags & APP_CUSTOM_HEADER) && T.y <= WIN_TOP && T.x < 72) back = true; // chevron
-  }
-  if(back){
-    // Ajustes tiene navegacion propia (lista -> categoria): "atras" cierra
-    // primero la pantalla de categoria y solo cierra la app desde la lista.
-    if(gAppId == IC_AJUSTES && settingsHandleBack()) return;
-    appClose(); return;
+  // BARRA DE NAVEGACION DEL SISTEMA. Va lo PRIMERO y para TODAS las apps,
+  // incluidas las APP_OWN_TOUCH: la franja de abajo es del sistema, no de la
+  // app, y el toque que cae ahi no se filtra nunca hacia el tick de la app.
+  if(navBarHandle()) return;
+  // Chevron "atras" de la cabecera estandar: misma logica que el boton atras.
+  if(T.tap && !(APP_REG[gAppId].flags & APP_CUSTOM_HEADER) && T.y <= WIN_TOP && T.x < 72){
+    sysBack(); return;
   }
   if(APP_REG[gAppId].tick) APP_REG[gAppId].tick();
 }
@@ -9574,8 +10321,8 @@ static bool handleiOSGestures(){
     int dy = T.startY - T.y;                    // positivo si el dedo subio
     unsigned long dur = millis() - T.downMs;
     if(dy > 30){
-      if(dur >= 300)            activarMultitarea();  // mantener -> multitarea
-      else if(gState == ST_APP) appClose();           // rapido en app -> Home (guarda miniatura)
+      if(dur >= 300)            sysRecents();         // mantener -> Recientes (suspende la app antes)
+      else if(gState == ST_APP) sysHome();            // rapido en app -> escritorio (suspende, no cierra)
       else                      enterHome();          // rapido en Home -> refresca
       return true;
     }
@@ -10133,6 +10880,7 @@ static void settingsAnimate(int fromView, int toView, int dir){
 static void settingsOpenCat(int cat){
   if(cat < 0 || cat > 11) return;
   setSel = cat; setScroll = 0; setDragging = false;
+  sessMarkDirty(IC_AJUSTES);              // categoria abierta: estado de sesion
   settingsAnimate(0, 1, +1);
 }
 // Volver a la lista. Devuelve false si ya estabamos en la lista: asi el boton
@@ -10141,11 +10889,15 @@ static void settingsOpenCat(int cat){
 static bool settingsHandleBack(){
   if(setView != 1) return false;
   setDragging = false; setBackSwipe = false;
+  sessMarkDirty(IC_AJUSTES);
   settingsAnimate(1, 0, -1);
   return true;
 }
 static void settingsEnter(){
-  setView = 0; setSel = 0; setScroll = 0; setListScroll = 0;
+  // La sesion (categoria abierta + las dos posiciones de scroll) se recupera la
+  // primera vez que se abre Ajustes tras el arranque. Antes esto reiniciaba
+  // SIEMPRE la vista, asi que tampoco respetaba el re-maquetado de DeX.
+  appLoadSessionOnce(IC_AJUSTES);
   setDragging = false; setBackSwipe = false;
   settingsRender();
 }
@@ -10161,8 +10913,9 @@ static void settingsRowAction(int cat, int idx){
     // informativas: no tienen accion. La zona de Lima es fija por diseno.
     else if(idx == 6){ ntpRequestSync(true); settingsRenderDetailOnly(); }                                    // Sincronizar ahora
     else if(idx == 7) flexOtaOpenSettings();                                                                 // Actualizaciones -> pantalla OTA
-    // idx 8 (Copias de seguridad) y 9 (Restablecer) siguen sin accion, igual
-    // que antes. 10 es la fila nueva de Flex Account.
+    // idx 8 (Copias de seguridad) sigue informativa. Restablecer abre el
+    // asistente protegido; todavia no borra nada en este toque.
+    else if(idx == 9) frEnterWizard();
     else if(idx == 10) accountSettingsEnter();                                                               // General -> Flex Account
   } else if(cat == 1){
     if(idx == 0){ gBright += 25; if(gBright > 100) gBright = 25; setBacklight(gBright); cfgSavePrefs(); settingsRenderDetailOnly(); }  // brillo real
@@ -10260,8 +11013,51 @@ static void settingsTick(){
       return;
     }
   }
-  if(T.released && setDragging){ setDragging = false; return; }
+  if(T.released && setDragging){ setDragging = false; sessMarkDirty(IC_AJUSTES); return; }  // el scroll es estado de sesion
 }
+
+// #############################################################
+// ##  AJUSTES · CICLO DE VIDA Y SESION
+// ##  ------------------------------------------------------
+// ##  Lo que se conserva: la CATEGORIA abierta y las DOS posiciones
+// ##  de scroll (la de la lista de categorias y la de la pantalla de
+// ##  detalle). No se guarda nada mas: los valores de configuracion ya
+// ##  viven en NVS por su cuenta y duplicarlos aqui seria tener dos
+// ##  fuentes de verdad para lo mismo.
+// #############################################################
+#define SET_SESS_VER   1
+#define SET_SESS_PATH  FS_DIR_SESS "/ajustes.bin"
+struct SetSessV1 { int16_t view, sel, scroll, listScroll; };
+
+static void setSuspend(){
+  // Se corta cualquier arrastre en curso: al volver, el dedo es otro.
+  setDragging = false; setBackSwipe = false;
+}
+static void setResume(){
+  setDragging = false; setBackSwipe = false;
+  settingsRender();                       // misma categoria, mismo scroll
+}
+static bool setSaveSess(){
+  if(!flexFsReady()) return true;
+  SetSessV1 v;
+  v.view = (int16_t)setView; v.sel = (int16_t)setSel;
+  v.scroll = (int16_t)setScroll; v.listScroll = (int16_t)setListScroll;
+  return sessWrite(SET_SESS_PATH, SET_SESS_VER, IC_AJUSTES, &v, sizeof(v));
+}
+static void setLoadSess(){
+  if(!flexFsReady()) return;
+  SetSessV1 v;
+  if(sessRead(SET_SESS_PATH, SET_SESS_VER, IC_AJUSTES, &v, sizeof(v)) != sizeof(v)) return;
+  if(v.sel < 0 || v.sel > 11) return;     // sesion incoherente: se ignora entera
+  setView = (v.view == 1) ? 1 : 0;
+  setSel = v.sel;
+  setScroll = (v.scroll > 0) ? v.scroll : 0;
+  setListScroll = (v.listScroll > 0) ? v.listScroll : 0;
+}
+// LISTA BLANCA: mientras el OTA -- que se lanza desde esta app -- tiene trabajo
+// de red en curso, Ajustes no se cierra ni por "Cerrar todo" ni por el limite de
+// sesiones. Es el unico proceso de segundo plano REAL que hay hoy en el sistema.
+static bool setBgWork(){ return flexOtaBusy(); }
 
 // #############################################################
 // ##  APP CALCULADORA  (Milestone 2)  ·  app normal (marco estandar)
@@ -10505,7 +11301,11 @@ static void calcRenderDisplay(){                       // solo el display (al te
   flxFlush(y0, y1);
 }
 static void calcEnter(){
-  if(!gRelayout){ strcpy(calcDisp, "0"); calcAcc = 0; calcOp = 0; calcFresh = true; }
+  // Primera apertura tras el arranque: se recupera la operacion visible. Si no
+  // hay sesion valida, la calculadora arranca en "0" como siempre.
+  bool first = !gSessLoaded[IC_CALC];
+  if(!gRelayout && !first){ strcpy(calcDisp, "0"); calcAcc = 0; calcOp = 0; calcFresh = true; calcErr = false; }
+  appLoadSessionOnce(IC_CALC);
   calcRender();                                   // re-maquetado: conserva el display
 }
 static void calcTick(){
@@ -10514,9 +11314,41 @@ static void calcTick(){
   for(int r = 0; r < 5; r++) for(int c = 0; c < 4; c++){
     int x = gx + c * (bw + gap), y = gy + r * (bh + gap);
     if(T.x >= x && T.x <= x + bw && T.y >= y && T.y <= y + bh){
-      calcKeyFromLabel(CALC_LBL[r][c]); calcRenderDisplay(); return;
+      calcKeyFromLabel(CALC_LBL[r][c]); calcRenderDisplay();
+      sessMarkDirty(IC_CALC);                 // la operacion visible es estado de sesion
+      return;
     }
   }
+}
+
+// #############################################################
+// ##  CALCULADORA · CICLO DE VIDA Y SESION
+// ##  Se conserva la OPERACION VISIBLE: display, acumulador, operador
+// ##  pendiente y si el proximo digito empieza una entrada nueva. Sin
+// ##  eso, volver desde Recientes borraba la cuenta a medias.
+// #############################################################
+#define CALC_SESS_VER   1
+#define CALC_SESS_PATH  FS_DIR_SESS "/calc.bin"
+struct CalcSessV1 { double acc; char disp[24]; char op; uint8_t fresh; uint8_t err; uint8_t rsv; };
+
+static void calcResume(){ calcRender(); }     // NO reinicia el display (a diferencia de enter)
+static bool calcSaveSess(){
+  if(!flexFsReady()) return true;
+  CalcSessV1 v;
+  memset(&v, 0, sizeof(v));
+  v.acc = calcAcc; v.op = calcOp; v.fresh = calcFresh ? 1 : 0; v.err = calcErr ? 1 : 0;
+  snprintf(v.disp, sizeof(v.disp), "%s", calcDisp);
+  return sessWrite(CALC_SESS_PATH, CALC_SESS_VER, IC_CALC, &v, sizeof(v));
+}
+static void calcLoadSess(){
+  if(!flexFsReady()) return;
+  CalcSessV1 v;
+  if(sessRead(CALC_SESS_PATH, CALC_SESS_VER, IC_CALC, &v, sizeof(v)) != sizeof(v)) return;
+  v.disp[sizeof(v.disp) - 1] = 0;
+  if(!v.disp[0]) return;                                  // sesion incoherente: se ignora
+  if(v.op && !strchr("+-x/", v.op)) return;               // operador imposible: se ignora
+  snprintf(calcDisp, sizeof(calcDisp), "%s", v.disp);
+  calcAcc = v.acc; calcOp = v.op; calcFresh = v.fresh != 0; calcErr = v.err != 0;
 }
 
 // #############################################################
@@ -15893,7 +16725,8 @@ static void vidEnter(){
   }
   vidFront = vidBufA; vidBack = vidBufB;
   vidPlaying = false; vidFrame = 0; vidLastMs = millis();
-  if(vidFront) vidDecodeFrame(vidFront, 0);
+  appLoadSessionOnce(IC_MULTIMEDIA);       // vuelve al fotograma donde se dejo
+  if(vidFront) vidDecodeFrame(vidFront, vidFrame);
   vidRenderAll();
 }
 static void vidTick(){
@@ -15907,11 +16740,11 @@ static void vidTick(){
     vidDrawSeek();
   }
   if(!T.tap) return;
-  if(T.x < 48 && T.y < 48){ appClose(); return; }         // back
+  if(T.x < 48 && T.y < 48){ sysBack(); return; }          // back
   int pcx = SCR_W / 2, pcy = 366, scx = pcx + 92;
   int sbx = 24, sby = 434, sbw = SCR_W - 48;
   if(T.x >= pcx - 34 && T.x <= pcx + 34 && T.y >= pcy - 34 && T.y <= pcy + 34){
-    vidPlaying = !vidPlaying; vidLastMs = millis(); vidDrawControls();
+    vidPlaying = !vidPlaying; vidLastMs = millis(); vidDrawControls(); sessMarkDirty(IC_MULTIMEDIA);
   } else if(T.x >= scx - 26 && T.x <= scx + 26 && T.y >= pcy - 26 && T.y <= pcy + 26){
     vidPlaying = false; vidFrame = 0;
     if(vidFront) vidDecodeFrame(vidFront, 0);
@@ -15920,8 +16753,57 @@ static void vidTick(){
     int fr = (T.x - sbx) * VID_TOTAL / sbw; if(fr < 0) fr = 0; if(fr >= VID_TOTAL) fr = VID_TOTAL - 1;
     vidFrame = fr;                                         // seek: mueve el puntero
     if(vidFront) vidDecodeFrame(vidFront, vidFrame);
-    vidBlit(); vidDrawSeek();
+    vidBlit(); vidDrawSeek(); sessMarkDirty(IC_MULTIMEDIA);
   }
+}
+
+// #############################################################
+// ##  MULTIMEDIA · CICLO DE VIDA Y SESION
+// ##  ------------------------------------------------------
+// ##  Al suspender, la reproduccion SE PARA de verdad: una app
+// ##  suspendida no decodifica ni dibuja. Se conserva el fotograma
+// ##  actual (posicion), que es lo unico que hace falta para retomar.
+// ##  Al cerrar se liberan los DOS buffers de PSRAM del ping-pong
+// ##  (~440 KB): eso es liberar recursos de verdad, no marcar una
+// ##  bandera.
+// #############################################################
+#define VID_SESS_VER   1
+#define VID_SESS_PATH  FS_DIR_SESS "/media.bin"
+struct VidSessV1 { int32_t frame; };
+
+static void vidSuspend(){
+  vidPlaying = false;                    // en segundo plano no se decodifica nada
+}
+static void vidResume(){
+  if(!vidBufA || !vidBufB){              // los buffers se soltaron al cerrar: se rehacen
+    size_t bytes = (size_t)VID_W * VID_H * 2;
+    if(!vidBufA) vidBufA = (uint16_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(!vidBufB) vidBufB = (uint16_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    vidFront = vidBufA; vidBack = vidBufB;
+  }
+  vidPlaying = false;                    // se vuelve en pausa: reanudar solo no debe arrancar el video
+  vidLastMs = millis();
+  if(vidFront) vidDecodeFrame(vidFront, vidFrame);
+  vidRenderAll();
+}
+static void vidCloseApp(){
+  vidPlaying = false;
+  if(vidBufA){ free(vidBufA); vidBufA = NULL; }
+  if(vidBufB){ free(vidBufB); vidBufB = NULL; }
+  vidFront = vidBack = NULL;
+  gSessLoaded[IC_MULTIMEDIA] = false;
+}
+static bool vidSaveSess(){
+  if(!flexFsReady()) return true;
+  VidSessV1 v; v.frame = vidFrame;
+  return sessWrite(VID_SESS_PATH, VID_SESS_VER, IC_MULTIMEDIA, &v, sizeof(v));
+}
+static void vidLoadSess(){
+  if(!flexFsReady()) return;
+  VidSessV1 v;
+  if(sessRead(VID_SESS_PATH, VID_SESS_VER, IC_MULTIMEDIA, &v, sizeof(v)) != sizeof(v)) return;
+  if(v.frame < 0 || v.frame >= VID_TOTAL) return;
+  vidFrame = v.frame;
 }
 
 // #############################################################
@@ -15933,6 +16815,12 @@ static void vidTick(){
 // #############################################################
 #define CAM_SW SCR_W
 #define CAM_SH SCR_H
+// BASE INFERIOR de la interfaz de la Camara. La franja de la barra de
+// navegacion del sistema es intocable, asi que todo el grupo de controles de
+// abajo (niveles de zoom, regleta, disparador y modos) se mide desde aqui y no
+// desde el borde fisico. Es una sola constante: dibujo y hit-test la comparten,
+// asi que no pueden quedar descolocados uno respecto del otro.
+#define CAM_BASE (SCR_H - navBarH())
 static uint16_t* camScene = NULL;   // "sensor" simulado en PSRAM
 static float camZoom = 1.0f;        // x1..x50
 static bool  camRec = false, camNight = false, camRaw = false;
@@ -16015,16 +16903,16 @@ static void camDrawUI(){
     vLine(ex + 8, ey, eh, rgb565(120,124,140));
     int ky = ey + eh - (camExpo * eh / 100); fillCircle(ex + 8, ky, 9, W); }
   { const char* lb[5] = { "0.5x", "1x", "2x", "5x", "50x" }; float lv[5] = { 0.5f, 1, 2, 5, 50 };
-    int bw = 56, g = 8, tot = 5 * bw + 4 * g, sx = (SCR_W - tot) / 2, y = SCR_H - 192;
+    int bw = 56, g = 8, tot = 5 * bw + 4 * g, sx = (SCR_W - tot) / 2, y = CAM_BASE - 192;
     for(int i = 0; i < 5; i++){ int x = sx + i * (bw + g); bool on = fabsf(camZoom - lv[i]) < 0.05f;
       fillRoundRectA(x, y, bw, 34, 16, on ? rgb565(240,200,60) : rgb565(0,0,0), on ? 255 : 100);
       drawTextC(x + bw / 2, y + 9, lb[i], 2, on ? rgb565(30,30,30) : W); } }
-  { int zx = 40, zy = SCR_H - 150, zw = SCR_W - 80;                             // zoom manual (horizontal)
+  { int zx = 40, zy = CAM_BASE - 150, zw = SCR_W - 80;                          // zoom manual (horizontal)
     fillRoundRect(zx, zy, zw, 6, 3, rgb565(70,74,88));
     fillCircle(zx + (int)((camZoom - 1) / 49.0f * zw), zy + 3, 9, W); }
-  { const char* md[5] = { "FOTO", "VIDEO", "CINE", "ACCION", "PRORES" }; int y = SCR_H - 30, cw2 = SCR_W / 5;
+  { const char* md[5] = { "FOTO", "VIDEO", "CINE", "ACCION", "PRORES" }; int y = CAM_BASE - 30, cw2 = SCR_W / 5;
     for(int i = 0; i < 5; i++) drawTextC(cw2 * i + cw2 / 2, y, md[i], 2, i == camMode ? rgb565(255,220,60) : rgb565(170,176,190)); }
-  { int cbx = SCR_W / 2, cby = SCR_H - 84; bool vidmode = (camMode >= 1);        // boton captura
+  { int cbx = SCR_W / 2, cby = CAM_BASE - 84; bool vidmode = (camMode >= 1);     // boton captura
     drawCircle(cbx, cby, 34, W); drawCircle(cbx, cby, 33, W);
     if(camRec && vidmode) fillRoundRect(cbx - 12, cby - 12, 24, 24, 5, rgb565(230,60,60));
     else fillCircle(cbx, cby, 27, vidmode ? rgb565(230,60,60) : W); }
@@ -16049,19 +16937,37 @@ static void camTick(){
   if(T.down && T.x >= ex - 18 && T.x <= ex + 26 && T.y >= ey - 12 && T.y <= ey + eh + 12){
     int v = (ey + eh - T.y) * 100 / eh; if(v < 0) v = 0; if(v > 100) v = 100; camExpo = v; camRenderAll(); return;
   }
-  int zx = 40, zy = SCR_H - 150, zw = SCR_W - 80;
+  int zx = 40, zy = CAM_BASE - 150, zw = SCR_W - 80;
   if(T.down && T.y >= zy - 14 && T.y <= zy + 18 && T.x >= zx - 14 && T.x <= zx + zw + 14){
     float z = 1 + (float)(T.x - zx) / zw * 49.0f; if(z < 1) z = 1; if(z > 50) z = 50; camZoom = z; camRenderAll(); return;
   }
   if(!T.tap) return;
-  if(T.x < 48 && T.y < 48){ appClose(); return; }
+  if(T.x < 48 && T.y < 48){ sysBack(); return; }
   if(T.x >= 60 && T.x <= 100 && T.y >= 8 && T.y <= 44){ camNight = !camNight; camRenderAll(); return; }
   if(T.x >= 108 && T.x <= 158 && T.y >= 8 && T.y <= 44){ camRaw = !camRaw; camRenderAll(); return; }
-  { float lv[5] = { 0.5f, 1, 2, 5, 50 }; int bw = 56, g = 8, tot = 5 * bw + 4 * g, sx = (SCR_W - tot) / 2, y = SCR_H - 192;
+  { float lv[5] = { 0.5f, 1, 2, 5, 50 }; int bw = 56, g = 8, tot = 5 * bw + 4 * g, sx = (SCR_W - tot) / 2, y = CAM_BASE - 192;
     for(int i = 0; i < 5; i++){ int x = sx + i * (bw + g); if(T.x >= x && T.x <= x + bw && T.y >= y && T.y <= y + 34){ camZoom = lv[i]; camRenderAll(); return; } } }
-  { int y = SCR_H - 30, cw2 = SCR_W / 5; if(T.y >= y - 8 && T.y <= y + 22){ int m = T.x / cw2; if(m >= 0 && m < 5){ camMode = m; if(camMode == 0) camRec = false; camRenderAll(); return; } } }
-  { int cbx = SCR_W / 2, cby = SCR_H - 84; if(T.x >= cbx - 34 && T.x <= cbx + 34 && T.y >= cby - 34 && T.y <= cby + 34){
+  { int y = CAM_BASE - 30, cw2 = SCR_W / 5; if(T.y >= y - 8 && T.y <= y + 22){ int m = T.x / cw2; if(m >= 0 && m < 5){ camMode = m; if(camMode == 0) camRec = false; camRenderAll(); return; } } }
+  { int cbx = SCR_W / 2, cby = CAM_BASE - 84; if(T.x >= cbx - 34 && T.x <= cbx + 34 && T.y >= cby - 34 && T.y <= cby + 34){
       if(camMode >= 1) camRec = !camRec; camRenderAll(); return; } }
+}
+
+// #############################################################
+// ##  CAMARA · CICLO DE VIDA
+// ##  Suspender PARA la grabacion (una app en segundo plano no graba)
+// ##  y cerrar libera la escena de PSRAM: 768 KB que no tiene sentido
+// ##  mantener reservados por una app que ya no esta abierta.
+// #############################################################
+static void camSuspend(){
+  camRec = false;                        // grabar en segundo plano no es una funcion real de este OS
+}
+static void camResume(){
+  camRec = false;
+  if(camScene) camRenderAll(); else camEnter();
+}
+static void camCloseApp(){
+  camRec = false;
+  if(camScene){ free(camScene); camScene = NULL; }
 }
 
 // #############################################################
@@ -16185,9 +17091,18 @@ static bool kbChipsWant(){
 }
 static int  kbChipsH(){   return kbChipsWant() ? 32 : 0; }
 static int  kbTopH(){     return kbToolbarH() + kbChipsH(); }
+// FRANJA RESERVADA DEBAJO DEL TECLADO. La barra de navegacion del sistema vive
+// en los ultimos NAV_H pixeles y es del sistema, no de la superficie que abre el
+// teclado. Notas pone aqui NAV_H para que el teclado se apoye ENCIMA de la barra
+// (igual que en Android); las pantallas de clave, Wi-Fi y Ajustes del teclado lo
+// dejan en 0 a proposito -- ahi no hay barra de navegacion que respetar (y en la
+// de clave, ofrecer una via de escape seria un agujero de seguridad).
+// Toda la geometria del teclado -- dibujo Y hit-test -- sale de kbRowsTop(), asi
+// que cambiar esta sola variable mueve el teclado entero de forma coherente.
+static int kbBotReserve = 0;
 // Y de la PRIMERA FILA DE TECLAS. Es lo que siempre significo KB_Y, y sigue
 // significando lo mismo: los extras crecen hacia ARRIBA, no empujan las teclas.
-static int  kbRowsTop(){  return SCR_H - 4 * (KB_KH + KB_GAP) - 6; }
+static int  kbRowsTop(){  return SCR_H - kbBotReserve - 4 * (KB_KH + KB_GAP) - 6; }
 #define KB_Y kbRowsTop()
 // Y donde empieza el PANEL entero (con barra y chips incluidos). Es el limite
 // de abajo del area de texto y el borde superior de la banda a volcar.
@@ -16236,7 +17151,8 @@ static bool kbSizeCheck(){
   int gw = KB_COLS * KB_KW + (KB_COLS - 1) * KB_GAP;
   int fw = kbFKeyX(KB_FKEYS - 1) + kbFKeyW(KB_FKEYS - 1);
   int bot = kbFuncY() + KB_KH;
-  return (KB_X >= 0) && (KB_X + gw <= SCR_W) && (fw <= SCR_W) && (bot <= SCR_H - 4) && (kbPanelTop() > 120);
+  return (KB_X >= 0) && (KB_X + gw <= SCR_W) && (fw <= SCR_W) &&
+         (bot <= SCR_H - kbBotReserve - 4) && (kbPanelTop() > 120);
 }
 
 // ---- Colores del teclado (Fase E: contraste alto + opacidad + estilo) ----
@@ -16762,6 +17678,28 @@ static int  noteCur = 0;                          // cursor (indice en bytes)
 static int  noteSelA = -1, noteSelB = -1;         // seleccion A..B en bytes (-1 = ninguna)
 static bool noteMenu = false;                     // menu contextual visible
 static int  noteHandleDrag = 0;                   // 0 no, 1 manija izq, 2 der
+// ---- Continuidad de Notas ----
+// noteEditorScroll -> desplazamiento vertical del area de texto, en pixeles.
+//                     Es estado de sesion de pleno derecho: al volver desde
+//                     Recientes la nota aparece en la MISMA posicion, no arriba.
+// notePath         -> ruta del fichero activo dentro del gestor real de notas.
+//                     Viaja en la sesion sin duplicar el contenido del .txt.
+static int   noteEditorScroll = 0;
+static int   noteEditorDragY0 = 0, noteEditorDragS0 = 0;
+static bool  noteEditorScrollDrag = false;
+// El teclado es un recurso global compartido por Notas, Wi-Fi, Clima y las
+// pantallas de seguridad. Esta copia privada evita que abrir una de esas
+// pantallas mientras Notas esta suspendida cambie su idioma/capa/panel al
+// volver. Los punteros de layout no se escriben crudos: se codifican 0..3.
+static uint8_t noteKbLayout = 0;
+static uint8_t noteKbFlags = 0;
+static bool    noteKbStateValid = false;
+static void noteCaptureKbState();
+static void noteRestoreKbState();
+// El siguiente repintado debe reencuadrar la vista sobre el cursor. Lo ponen las
+// primitivas de edicion; NO se hace en todo repintado, o un arrastre de scroll
+// del usuario saltaria de vuelta al cursor en cuanto se refrescara la pantalla.
+static bool  noteEditorCursorFollow = false;
 // (el portapapeles vive ahora arriba: buffer clasico + las 12 ranuras de la Fase D)
 
 static int  utf8Prev(const char* s, int i){ if(i <= 0) return 0; i--; while(i > 0 && (s[i] & 0xC0) == 0x80) i--; return i; }
@@ -16774,6 +17712,7 @@ static void noteDeleteSel(){
   int a = noteSelA, b = noteSelB, L = strlen(noteBuffer);
   memmove(noteBuffer + a, noteBuffer + b, L - b + 1);
   noteCur = a; noteClearSel();
+  noteEditorCursorFollow = true; sessMarkDirty(IC_NOTAS);
 }
 static void noteInsert(const char* s){            // inserta en el cursor (reemplaza seleccion si hay)
   if(noteHasSel()) noteDeleteSel();
@@ -16783,6 +17722,7 @@ static void noteInsert(const char* s){            // inserta en el cursor (reemp
   memmove(noteBuffer + noteCur + sl, noteBuffer + noteCur, L - noteCur + 1);
   memcpy(noteBuffer + noteCur, s, sl);
   noteCur += sl; noteMenu = false;
+  noteEditorCursorFollow = true; sessMarkDirty(IC_NOTAS);
 }
 static void noteBackspace(){                       // borra antes del cursor (multibyte) o la seleccion
   if(noteHasSel()){ noteDeleteSel(); return; }
@@ -16790,6 +17730,7 @@ static void noteBackspace(){                       // borra antes del cursor (mu
   int p = utf8Prev(noteBuffer, noteCur), L = strlen(noteBuffer);
   memmove(noteBuffer + p, noteBuffer + noteCur, L - noteCur + 1);
   noteCur = p; noteMenu = false;
+  noteEditorCursorFollow = true; sessMarkDirty(IC_NOTAS);
 }
 // FASE G: chip flotante "Copiado". No bloquea nada -- es una marca de tiempo
 // que el tick de Notas mira y borra sola a los ~1.2 s.
@@ -16846,15 +17787,82 @@ static bool kbIsVowelCell(int cell){
 // estan la barra de la Fase C o los chips de la Fase F.
 static int noteTxtBot(){ return kbPanelTop() - 8; }
 static int curSX, curSY, hASX, hASY, hBSX, hBSY, noteMenuX, noteMenuY;
+
+// #############################################################
+// ##  NOTAS · MAQUETACION, SCROLL Y CURSOR
+// ##  ------------------------------------------------------
+// ##  Un solo recorrido del texto con EXACTAMENTE las mismas reglas
+// ##  de salto de linea que usa noteDrawText (mismo ancho util, mismo
+// ##  interlineado, mismas metricas de fuente). Devuelve el alto total
+// ##  del contenido y, si se pide, la fila (sin scroll aplicado) del
+// ##  byte que se le indique. Tenerlo en UNA funcion es lo que impide
+// ##  que el dibujo, el hit-test y el auto-scroll se desincronicen.
+// #############################################################
+#define NOTE_LH   26
+#define NOTE_TOP  60
+static int noteEditorWalk(int wantBi, int* outY){
+  int x = 18, y = NOTE_TOP, maxX = SCR_W - 18;
+  float sc = fontSc(2);
+  const char* s = noteBuffer; int bi = 0;
+  if(outY) *outY = y;
+  while(*s){
+    if(bi == wantBi && outY) *outY = y;
+    if(*s == '\n'){ s++; bi++; x = 18; y += NOTE_LH; continue; }
+    const char* save = s; uint32_t cp = nextCP(&s); int nb = s - save;
+    int w = (int)(FG[fontIdx(cp)].adv * sc + 0.5f);
+    if(x + w > maxX){ x = 18; y += NOTE_LH; }
+    if(bi == wantBi && outY) *outY = y;
+    x += w; bi += nb;
+  }
+  if(bi == wantBi && outY) *outY = y;
+  return y + NOTE_LH - NOTE_TOP;             // alto total del contenido
+}
+static int noteEditorMaxScroll(){
+  int visible = (noteTxtBot() - 22) - NOTE_TOP;
+  if(visible < NOTE_LH) visible = NOTE_LH;
+  int m = noteEditorWalk(-1, NULL) - visible;
+  return m > 0 ? m : 0;
+}
+static void noteEditorClampScroll(){
+  int m = noteEditorMaxScroll();
+  if(noteEditorScroll > m) noteEditorScroll = m;
+  if(noteEditorScroll < 0) noteEditorScroll = 0;
+}
+// Deja el cursor SIEMPRE dentro del area visible. Se llama despues de cada
+// edicion y de cada movimiento del cursor: es lo que hace que escribir al final
+// de una nota larga siga el texto en vez de escribir a ciegas fuera de pantalla.
+static void noteEditorEnsureCursor(){
+  int cy = NOTE_TOP;
+  noteEditorWalk(noteCur, &cy);
+  int top = 56, bot = noteTxtBot() - 8;
+  if(cy - noteEditorScroll < top)              noteEditorScroll = cy - top;
+  if(cy - noteEditorScroll + NOTE_LH > bot)    noteEditorScroll = cy + NOTE_LH - bot;
+  noteEditorClampScroll();
+}
+// Punto UNICO por el que Notas anuncia que su contenido cambio: rearma el
+// temporizador de guardado diferido (no escribe nada aqui: escribir por tecla
+// es justo lo que hay que evitar) y reencuadra el cursor.
+static void noteEditorTouched(){
+  noteEditorEnsureCursor();
+  sessMarkDirty(IC_NOTAS);
+}
+
 static void noteDrawText(){
+  if(noteEditorCursorFollow){ noteEditorCursorFollow = false; noteEditorEnsureCursor(); }
+  else noteEditorClampScroll();                        // el texto pudo encoger: no dejar hueco en blanco
   setBuf(fb);
   fillRect(8, 48, SCR_W - 16, noteTxtBot() - 48, TH_SURF);       // hoja de la nota
-  int x = 18, y = 60, maxX = SCR_W - 18, lh = 26, size = 2;
+  // Las lineas desplazadas por encima de la hoja no pueden invadir la
+  // cabecera. Se conserva y restaura el recorte porque Notas comparte el motor
+  // grafico con overlays y ventanas DeX.
+  int sy0 = gClipY0, sy1 = gClipY1;
+  gClipY0 = 48; gClipY1 = noteTxtBot() - 1;
+  int x = 18, y = NOTE_TOP - noteEditorScroll, maxX = SCR_W - 18, lh = NOTE_LH, size = 2;
   float sc = fontSc(size);
   const char* s = noteBuffer; int bi = 0;
   bool hasSel = noteHasSel();
   int yBreak = noteTxtBot() - 22;
-  curSX = 18; curSY = 60; hASX = hBSX = 18; hASY = hBSY = 60;
+  curSX = 18; curSY = NOTE_TOP - noteEditorScroll; hASX = hBSX = 18; hASY = hBSY = curSY;
   // FASE F - revision ortografica basica: se sigue la palabra en curso (donde
   // empezo y en que linea) y al cerrarla se subraya con puntitos si NO esta en
   // el diccionario del idioma activo. Es eso y nada mas: comparacion contra una
@@ -16886,9 +17894,14 @@ static void noteDrawText(){
       }
     }
     if(bi == noteCur){ curSX = x; curSY = y; } if(bi == noteSelA){ hASX = x; hASY = y; } if(bi == noteSelB){ hBSX = x; hBSY = y; }
-    if(hasSel && bi >= noteSelA && bi < noteSelB) fillRect(x - 1, y - 2, w + 1, lh - 4, TH_SEL);   // resaltado de seleccion
-    char one[6]; int n = nb; if(n > 5) n = 5; for(int i = 0; i < n; i++) one[i] = save[i]; one[n] = 0;
-    drawText(x, y, one, size, TH_TXT);
+    // El recorrido continua para mantener cursor/seleccion correctos, pero los
+    // glifos fuera del viewport no se rasterizan: una nota larga no anade lag
+    // al escribir ni al arrastrar el scroll.
+    if(y + lh > 48 && y <= yBreak){
+      if(hasSel && bi >= noteSelA && bi < noteSelB) fillRect(x - 1, y - 2, w + 1, lh - 4, TH_SEL);
+      char one[6]; int n = nb; if(n > 5) n = 5; for(int i = 0; i < n; i++) one[i] = save[i]; one[n] = 0;
+      drawText(x, y, one, size, TH_TXT);
+    }
     x += w; bi += nb;
   }
   // Ultima palabra del texto. Si el cursor esta justo ahi es que se esta
@@ -16925,6 +17938,7 @@ static void noteDrawText(){
       drawTextCA(SCR_W / 2, ty + 9, kbToastTxt, 2, TH_TXT, a);
     }
   }
+  gClipY0 = sy0; gClipY1 = sy1;                    // se restaura el recorte anterior
   // Se vuelca hasta el borde mismo del panel del teclado: entre el final del
   // area de texto y kbPanelTop() hay unos pixeles de fondo que si no quedarian
   // en tierra de nadie (ni esta banda ni la del teclado los publicaria).
@@ -16932,7 +17946,7 @@ static void noteDrawText(){
 }
 // mapea un toque (px,py) al indice de byte mas cercano en el texto
 static int noteLayoutHit(int px, int py){
-  int x = 18, y = 60, maxX = SCR_W - 18, lh = 26, size = 2; float sc = fontSc(size);
+  int x = 18, y = NOTE_TOP - noteEditorScroll, maxX = SCR_W - 18, lh = NOTE_LH, size = 2; float sc = fontSc(size);
   const char* s = noteBuffer; int bi = 0, best = 0; long bestd = 1L << 30;
   while(*s){
     if(*s == '\n'){ long d = (long)abs(px - x) + (long)abs(py - (y + 8)) * 2; if(d < bestd){ bestd = d; best = bi; } s++; bi++; x = 18; y += lh; continue; }
@@ -17325,12 +18339,16 @@ static void handleKeyRelease(int px, int py){
 static uint32_t noteKbAnim = 0;
 static void noteEditorEnter(){
   mapaActivo = LAYOUT_ES; kbLangEs = true; kbShift = false; kbLpKey = -1; kbPopup = false;
-  noteCur = strlen(noteBuffer); noteClearSel(); noteHandleDrag = 0;
+  noteHandleDrag = 0; noteEditorScrollDrag = false;
   kbExtrasOn = true;                     // Notas SI muestra barra y chips
+  kbBotReserve = navBarVisible() ? NAV_H : 0;   // el teclado se apoya SOBRE la barra del sistema
   kbApplySize(); kbMtSurfaceReset();
   clipPanelOn = false; kbMoreOn = false; clipAskClear = false; kbToastMs = 0;
   kbChipsBuild();
+  noteCur = (int)strlen(noteBuffer); noteClearSel();
+  noteEditorScroll = 0; noteEditorCursorFollow = true;
   noteKbAnim = KB_ANIM_POLISH_ON ? millis() : 0;
+  noteCaptureKbState();
   noteRenderAll();
 }
 static void noteEditorTick(){
@@ -17384,9 +18402,10 @@ static void noteEditorTick(){
     noteMenu = false; noteClearSel(); noteCur = noteLayoutHit(T.x, T.y); noteRenderAll(); return;
   }
 
-  // 2) Inicio de gesto: manija de seleccion o long-press de tecla
+  // 2) Inicio de gesto: manija de seleccion, arrastre de scroll o long-press
   if(T.pressed){
     noteHandleDrag = 0; kbLpKey = -1; kbPopup = false;
+    noteEditorScrollDrag = false; noteEditorDragY0 = T.y; noteEditorDragS0 = noteEditorScroll;
     if(noteHasSel() && T.y >= txTop && T.y < txBot + 30){
       if(abs(T.x - hASX) < 24 && abs(T.y - (hASY + 20)) < 28) noteHandleDrag = 1;
       else if(abs(T.x - hBSX) < 24 && abs(T.y - (hBSY + 20)) < 28) noteHandleDrag = 2;
@@ -17410,8 +18429,22 @@ static void noteEditorTick(){
     noteRenderAll(); return;
   }
 
+  // 3-bis) Arrastre vertical dentro del area de texto -> scroll de la nota.
+  // Solo se activa si de verdad hay contenido fuera de pantalla, para que en una
+  // nota corta el gesto siga sirviendo para seleccionar palabra.
+  if(!noteHandleDrag && kbLpKey < 0 && T.down && T.startY >= txTop && T.startY < txBot){
+    int dy = T.y - noteEditorDragY0;
+    if(!noteEditorScrollDrag && abs(dy) > 12 && noteEditorMaxScroll() > 0) noteEditorScrollDrag = true;
+    if(noteEditorScrollDrag){
+      noteEditorScroll = noteEditorDragS0 - dy;
+      noteEditorClampScroll();
+      noteDrawText();
+      return;
+    }
+  }
+
   // 4) Long-press en texto -> seleccionar palabra
-  if(!noteHandleDrag && kbLpKey < 0 && T.down && !noteHasSel()
+  if(!noteHandleDrag && kbLpKey < 0 && !noteEditorScrollDrag && T.down && !noteHasSel()
      && T.startY >= txTop && T.startY < txBot && (millis() - T.downMs) > 500
      && abs(T.x - T.startX) < 12 && abs(T.y - T.startY) < 12){
     selectWordAt(noteLayoutHit(T.startX, T.startY)); noteRenderAll(); return;
@@ -17422,6 +18455,7 @@ static void noteEditorTick(){
 
   // 6) Soltar
   if(T.released){
+    if(noteEditorScrollDrag){ noteEditorScrollDrag = false; sessMarkDirty(IC_NOTAS); return; }  // el scroll es estado de sesion
     if(noteHandleDrag){ noteHandleDrag = 0; noteMenu = true; noteRenderAll(); return; }
     if(kbPopup){
       int v = kbPopupHit(T.x, T.y); const char* var[4];
@@ -17439,6 +18473,9 @@ static void noteEditorTick(){
       kbPopup = false; kbLpKey = -1; noteRenderAll(); return;
     }
     if(T.tap){
+      // Chevron "atras" de la cabecera de Notas: misma logica que el boton de
+      // la barra del sistema (cierra capa -> pantalla -> suspende y sale).
+      if(T.x < 52 && T.y < 44){ sysBack(); return; }
       // FASE C - barra superior (solo si esta visible)
       if(kbMoreOn){
         int mi = kbMoreHit(T.x, T.y);
@@ -17955,6 +18992,7 @@ static bool        noteDragging = false;
 static void noteRenderList();
 static void noteEditorEnter();
 static void noteEditorTick();
+static int  noteMaxScroll();
 
 // Relee /Notas del disco. Se llama al entrar y despues de CADA
 // operacion: la lista siempre es un reflejo de lo que hay, nunca un
@@ -17968,7 +19006,9 @@ static void noteReload(){
     snprintf(p, sizeof(p), "%s/%s", FLEXFS_DIR_NOTAS, noteList[i].name);
     flexFsReadText(p, notePrev[i], NOTE_PREV_LEN);      // contenido REAL del fichero
   }
-  if(noteScroll > noteListN) noteScroll = 0;
+  int maxS = noteMaxScroll();
+  if(noteScroll < 0) noteScroll = 0;
+  if(noteScroll > maxS) noteScroll = maxS;
 }
 
 static int noteCardH(){
@@ -18073,6 +19113,7 @@ static void noteOpen(int i){
   flexFsStem(noteList[i].name, noteTitleBar, sizeof(noteTitleBar));
   noteView = 1; noteDirtyMs = 0;
   noteEditorEnter();
+  sessMarkDirty(IC_NOTAS);
 }
 
 // Guardado REAL del editor al fichero abierto.
@@ -18087,6 +19128,7 @@ static void noteBackToList(){
   noteView = 0; notePath[0] = 0;
   noteReload();
   noteRenderList();
+  sessMarkDirty(IC_NOTAS);
 }
 
 // Nueva nota: crea el FICHERO ya, vacio, con el primer numero libre de
@@ -18195,7 +19237,7 @@ static void noteListTick(){
       return;
     }
   }
-  if(T.released && noteDragging){ noteDragging = false; return; }
+  if(T.released && noteDragging){ noteDragging = false; sessMarkDirty(IC_NOTAS); return; }
 
   // --- Long-press sobre una tarjeta -> menu contextual ---
   if(T.down && !noteLongFired && (millis() - T.downMs) > 550
@@ -18253,8 +19295,16 @@ static void noteListTick(){
 static void noteEnter(){
   noteBufInit();
   if(!flexFsReady()){ fkNoFsScreen("Notas"); return; }
-  noteView = 0; noteMulti = false; noteMask = 0; noteSelIdx = -1;
+  bool restoreEditor = (noteView == 1 && notePath[0] && flexFsExists(notePath));
+  noteMulti = false; noteMask = 0; noteSelIdx = -1;
   fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
+  if(restoreEditor){
+    flexFsReadText(notePath, noteBuffer, noteBufMax);
+    flexFsStem(notePath, noteTitleBar, sizeof(noteTitleBar));
+    noteResume();
+    return;
+  }
+  noteView = 0; notePath[0] = 0;
   noteReload();
   noteRenderList();
 }
@@ -18270,8 +19320,151 @@ static void noteTick(){
   int lenBefore = strlen(noteBuffer);
   noteEditorTick();
   // Autoguardado: 2 s despues de la ultima modificacion real del texto.
-  if((int)strlen(noteBuffer) != lenBefore) noteDirtyMs = millis();
+  if((int)strlen(noteBuffer) != lenBefore){ noteDirtyMs = millis(); sessMarkDirty(IC_NOTAS); }
   if(noteDirtyMs && millis() - noteDirtyMs > NOTE_AUTOSAVE_MS) noteSave();
+}
+
+// #############################################################
+// ##  NOTAS · CICLO DE VIDA Y CONTINUIDAD
+// #############################################################
+#define NOTE_SESS_VER   3
+#define NOTE_SESS_PATH  FS_DIR_SESS "/notas.bin"
+struct NoteSessV3 {
+  uint8_t view;
+  uint8_t kbLayout;
+  uint8_t kbFlags;
+  uint8_t reserved;
+  uint16_t cursor;
+  int16_t selA, selB;
+  int32_t editorScroll;
+  int32_t listScroll;
+  char path[FLEXFS_PATH_MAX];
+};
+static NoteSessV3 gNoteSess;
+
+// Estado privado del teclado de Notas. bits de noteKbFlags:
+// 0 idioma ES · 1 mayusculas · 2 portapapeles abierto · 3 menu "mas"
+// · 4 menu contextual de seleccion.
+static void noteCaptureKbState(){
+  if(mapaActivo == LAYOUT_EN)         noteKbLayout = 1;
+  else if(mapaActivo == LAYOUT_NUM)   noteKbLayout = 2;
+  else if(mapaActivo == LAYOUT_EMOJI) noteKbLayout = 3;
+  else                                noteKbLayout = 0;
+  noteKbFlags = (kbLangEs ? 1u : 0u) | (kbShift ? 2u : 0u) |
+                (clipPanelOn ? 4u : 0u) | (kbMoreOn ? 8u : 0u) |
+                (noteMenu ? 16u : 0u);
+  noteKbStateValid = true;
+}
+static void noteRestoreKbState(){
+  if(!noteKbStateValid){ noteKbLayout = 0; noteKbFlags = 1; }
+  switch(noteKbLayout){
+    case 1: mapaActivo = LAYOUT_EN; break;
+    case 2: mapaActivo = LAYOUT_NUM; break;
+    case 3: mapaActivo = LAYOUT_EMOJI; break;
+    default: mapaActivo = LAYOUT_ES; break;
+  }
+  kbLangEs = (noteKbFlags & 1u) != 0;
+  kbShift = (noteKbFlags & 2u) != 0;
+  clipPanelOn = (noteKbFlags & 4u) != 0;
+  kbMoreOn = (noteKbFlags & 8u) != 0;
+  noteMenu = (noteKbFlags & 16u) != 0 && noteHasSel();
+  noteKbStateValid = true;
+}
+
+static bool noteSaveSess(){
+  if(!flexFsReady()) return true;
+  if(noteView == 1) noteSave();
+  noteCaptureKbState();
+  memset(&gNoteSess, 0, sizeof(gNoteSess));
+  gNoteSess.view = (noteView == 1 && notePath[0]) ? 1 : 0;
+  gNoteSess.kbLayout = noteKbLayout;
+  gNoteSess.kbFlags = noteKbFlags;
+  int L = (int)strlen(noteBuffer);
+  int c = noteCur; if(c < 0) c = 0; if(c > L) c = L;
+  gNoteSess.cursor = (uint16_t)c;
+  gNoteSess.selA = (int16_t)noteSelA;
+  gNoteSess.selB = (int16_t)noteSelB;
+  gNoteSess.editorScroll = noteEditorScroll;
+  gNoteSess.listScroll = noteScroll;
+  snprintf(gNoteSess.path, sizeof(gNoteSess.path), "%s", notePath);
+  return sessWrite(NOTE_SESS_PATH, NOTE_SESS_VER, IC_NOTAS, &gNoteSess, sizeof(gNoteSess));
+}
+
+static void noteLoadSess(){
+  memset(&gNoteSess, 0, sizeof(gNoteSess));
+  if(!flexFsReady()) return;
+  if(sessRead(NOTE_SESS_PATH, NOTE_SESS_VER, IC_NOTAS, &gNoteSess, sizeof(gNoteSess)) != sizeof(gNoteSess)) return;
+  gNoteSess.path[sizeof(gNoteSess.path) - 1] = 0;
+  noteView = (gNoteSess.view == 1 && gNoteSess.path[0] && flexFsExists(gNoteSess.path)) ? 1 : 0;
+  noteKbLayout = gNoteSess.kbLayout < 4 ? gNoteSess.kbLayout : 0;
+  noteKbFlags = gNoteSess.kbFlags;
+  noteKbStateValid = true;
+  noteEditorScroll = gNoteSess.editorScroll > 0 ? gNoteSess.editorScroll : 0;
+  noteScroll = gNoteSess.listScroll > 0 ? gNoteSess.listScroll : 0;
+  noteCur = gNoteSess.cursor;
+  noteSelA = gNoteSess.selA;
+  noteSelB = gNoteSess.selB;
+  snprintf(notePath, sizeof(notePath), "%s", noteView == 1 ? gNoteSess.path : "");
+}
+
+static bool noteBackLayer(){
+  if(kbPopup){ kbPopup = false; kbLpKey = -1; noteRenderAll(); return true; }
+  if(kbMoreOn){ kbMoreOn = false; noteRenderAll(); return true; }
+  if(clipPanelOn){ clipPanelOn = false; clipAskClear = false; noteRenderAll(); return true; }
+  if(noteMenu || noteHasSel()){ noteClearSel(); noteRenderAll(); return true; }
+  if(fkMenuOn){ fkMenuOn = false; if(noteView == 0) noteRenderList(); else noteRenderAll(); return true; }
+  return false;
+}
+
+static bool noteBackScreen(){
+  if(noteView != 1) return false;
+  noteBackToList();
+  sessMarkDirty(IC_NOTAS);
+  return true;
+}
+
+static void noteSuspend(){
+  if(noteView == 1) noteSave();
+  noteCaptureKbState();
+  noteKbAnim = 0; kbToastMs = 0; kbChipMs = 0;
+  // Los dialogos de archivo son una superficie GLOBAL compartida con Paint,
+  // Galeria y Archivos; no pueden quedar vivos mientras otra app la reutiliza.
+  // El editor, teclado, cursor, seleccion y scroll si permanecen intactos.
+  fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
+  noteDragging = false; noteHandleDrag = 0;
+  kbMtSurfaceReset();
+}
+
+static void noteResume(){
+  if(noteView == 1 && notePath[0] && flexFsExists(notePath)){
+    noteRestoreKbState();
+    kbExtrasOn = true; kbApplySize(); kbMtSurfaceReset();
+    kbBotReserve = navBarVisible() ? NAV_H : 0;
+    noteKbAnim = 0;
+    int L = (int)strlen(noteBuffer);
+    if(noteCur < 0 || noteCur > L) noteCur = L;
+    if(noteSelA < 0 || noteSelB <= noteSelA || noteSelB > L) noteClearSel();
+    noteEditorClampScroll();
+    noteRenderAll();
+  } else {
+    noteView = 0; notePath[0] = 0;
+    noteReload(); noteRenderList();
+  }
+}
+
+static void noteCloseApp(){
+  noteSuspend();
+  noteClearSel();
+  kbPopup = false; kbLpKey = -1; kbMoreOn = false; clipPanelOn = false;
+  noteKbStateValid = false; noteKbLayout = 0; noteKbFlags = 0;
+  if(noteBuffer != noteBufStatic){
+    free(noteBuffer);
+    noteBuffer = noteBufStatic;
+    noteBufMax = sizeof(noteBufStatic);
+    noteBufStatic[0] = 0;
+  }
+  noteView = 0; notePath[0] = 0; noteScroll = 0; noteEditorScroll = 0;
+  gSessLoaded[IC_NOTAS] = false;
 }
 
 // #############################################################
@@ -18602,6 +19795,7 @@ static void kbsEnter(){
   if(!KB_SETTINGS_ON) return;
   kbsRet = (gState == ST_APP && gAppId == 12) ? 1 : 0;   // 12 = app Ajustes
   kbExtrasOn = false;                                    // aqui el teclado no lleva barra ni chips
+  kbBotReserve = 0;                                      // pantalla propia: sin barra de navegacion debajo
   kbApplySize(); kbMtSurfaceReset();
   gState = ST_KBSET; kbsPage = KBS_MAIN; kbsScroll = 0;
   kbsDragging = false;
@@ -18609,7 +19803,8 @@ static void kbsEnter(){
 }
 static void kbsExit(){
   if(kbsRet == 1){ gState = ST_APP; settingsRender(); return; }
-  gState = ST_APP; kbExtrasOn = true; kbApplySize(); kbChipsBuild(); noteRenderAll();
+  gState = ST_APP; kbExtrasOn = true; kbBotReserve = navBarVisible() ? NAV_H : 0;
+  kbApplySize(); kbChipsBuild(); noteRenderAll();
 }
 static void kbsResetDefaults(){
   gKbSize = KB_SIZE_NORMAL; gKbFastType = true; gKbToolbar = true; gKbPredict = true;
@@ -19248,6 +20443,16 @@ static void eduEnter(){ const char* it[4] = { "Electr\xC3\xB3nica b\xC3\xA1sica"
 
 static void gamesEnter(){ jmpEnter(); }
 static void gamesTick(){  jmpTick();  }
+static void gamesSuspend(){
+  jmpFlushSave();
+  if(JG.screen == JS_PLAY) JG.screen = JS_PAUSE;
+  jmpClearInput();
+}
+static void gamesResume(){
+  gLand = true; JG.lastUs = micros(); JG.acc = 0; jNextFrameUs = JG.lastUs;
+  if(JG.screen == JS_PAUSE) jmpPauseFrame(); else jmpTick();
+}
+static void gamesCloseApp(){ jmpFlushSave(); jmpClearInput(); }
 
 // NAVEGADOR
 //   La implementacion ANTIGUA de navEnter() vivia aqui: pintaba una
@@ -19535,7 +20740,7 @@ static void ideTick(){
 // ##  anterior de esta app y que el resto del sistema.
 // #############################################################
 #define P_TOP           96
-#define P_BOT           (SCR_H - 66)
+#define P_BOT           (SCR_H - navBarH() - 66)
 #define PAINT_CX        8
 #define PAINT_CW        (SCR_W - 16)
 #define PAINT_CH        (P_BOT - P_TOP)
@@ -19564,9 +20769,49 @@ static int       pSizeIx = 1;
 static int16_t*  pStroke = NULL;                   // trazo en curso (PSRAM)
 static int       pStrokeN = 0;
 static int       pPrevX = -1, pPrevY = -1;
+// Transformacion documento -> pantalla. Los .fxp ya guardan su ancho/alto en
+// FlexPaintHdr; se respetan para que un dibujo creado antes de reservar la
+// barra de navegacion no pierda sus 64 px inferiores. Solo se recalcula al
+// abrir/repintar el lienzo, nunca durante un trazo.
+static int       pDocW = PAINT_CW, pDocH = PAINT_CH;
+static int       pDocX = PAINT_CX, pDocY = P_TOP;
+static int       pDocDispW = PAINT_CW, pDocDispH = PAINT_CH;
+static float     pDocScale = 1.0f;
 
 static void paintRenderGallery();
 static void paintRenderCanvas();
+static int  paintMaxScroll();
+
+static void paintDocLayout(){
+  FlexPaintHdr hd;
+  pDocW = PAINT_CW; pDocH = PAINT_CH;
+  if(paintPath[0] && flexPaintHeader(paintPath, &hd) && hd.w > 0 && hd.h > 0){
+    pDocW = hd.w; pDocH = hd.h;
+  }
+  float sx = (float)PAINT_CW / (float)pDocW;
+  float sy = (float)PAINT_CH / (float)pDocH;
+  pDocScale = sx < sy ? sx : sy;
+  if(pDocScale <= 0.0f) pDocScale = 1.0f;
+  pDocDispW = (int)(pDocW * pDocScale + 0.5f);
+  pDocDispH = (int)(pDocH * pDocScale + 0.5f);
+  if(pDocDispW < 1) pDocDispW = 1; if(pDocDispW > PAINT_CW) pDocDispW = PAINT_CW;
+  if(pDocDispH < 1) pDocDispH = 1; if(pDocDispH > PAINT_CH) pDocDispH = PAINT_CH;
+  pDocX = PAINT_CX + (PAINT_CW - pDocDispW) / 2;
+  pDocY = P_TOP + (PAINT_CH - pDocDispH) / 2;
+}
+static bool paintDocHit(int x, int y){
+  return x >= pDocX && x < pDocX + pDocDispW && y >= pDocY && y < pDocY + pDocDispH;
+}
+static int16_t paintDocCoord(int v, int org, int lim){
+  int q = (int)(((float)(v - org) / pDocScale) + 0.5f);
+  if(q < 0) q = 0; if(q >= lim) q = lim - 1;
+  return (int16_t)q;
+}
+static uint8_t paintDocRadius(){
+  int r = (int)((float)P_SIZES[pSizeIx] / pDocScale + 0.5f);
+  if(r < 1) r = 1; if(r > 255) r = 255;
+  return (uint8_t)r;
+}
 
 // Buffer de TRABAJO del trazo en curso. Va a PSRAM cuando la placa la
 // tiene (Ultra y Ultra S3): son 2 KB que no hacen falta en la RAM
@@ -19598,7 +20843,9 @@ static void paintPathOf(int i, char* out, size_t n){
 
 static void paintReload(){
   paintListN = flexFsList(FLEXFS_DIR_PAINT, paintList, PAINT_MAX_LIST);
-  if(paintScroll > paintListN) paintScroll = 0;
+  int maxS = paintMaxScroll();
+  if(paintScroll < 0) paintScroll = 0;
+  if(paintScroll > maxS) paintScroll = maxS;
 }
 
 // ---- Galeria ----------------------------------------------------------
@@ -19643,13 +20890,20 @@ static void paintRenderGallery(){
 
     // MINIATURA REAL: se reproducen los trazos del fichero a escala.
     char p[FLEXFS_PATH_MAX]; paintPathOf(i, p, sizeof(p));
-    float sc = (float)(w - 8) / (float)PAINT_CW;
+    FlexPaintHdr ph;
+    int dw = PAINT_CW, dh = PAINT_CH;
+    if(flexPaintHeader(p, &ph) && ph.w > 0 && ph.h > 0){ dw = ph.w; dh = ph.h; }
+    float scx = (float)(w - 8) / (float)dw;
+    float scy = (float)(h - 8) / (float)dh;
+    float sc = scx < scy ? scx : scy;
+    int rw = (int)(dw * sc + 0.5f), rh = (int)(dh * sc + 0.5f);
+    int rox = x + (w - rw) / 2, roy = y + (h - rh) / 2;
     int savedX0 = gClipX0, savedX1 = gClipX1, savedY0 = gClipY0, savedY1 = gClipY1;
     // INTERSECCION, no sustitucion: si la tarjeta esta a medio salir por
     // arriba, su miniatura no puede escaparse del viewport de la galeria.
     gClipX0 = max(savedX0, x + 4);     gClipX1 = min(savedX1, x + w - 4);
     gClipY0 = max(savedY0, y + 4);     gClipY1 = min(savedY1, y + h - 4);
-    flexPaintReplay(p, sc, x + 4, y + 4, paintSegCb, NULL);
+    flexPaintReplay(p, sc, rox, roy, paintSegCb, NULL);
     gClipX0 = savedX0; gClipX1 = savedX1; gClipY0 = savedY0; gClipY1 = savedY1;
 
     if(paintMulti && (paintMask & (1UL << i))){
@@ -19683,8 +20937,8 @@ static void paintRenderGallery(){
 // ---- Lienzo -----------------------------------------------------------
 static void paintTools(){
   setBuf(fb);
-  int y = SCR_H - 58, sw = 34, gap = 6, x0 = 10;
-  fillRect(0, P_BOT, SCR_W, SCR_H - P_BOT, thCard());
+  int y = P_BOT + 8, sw = 34, gap = 6, x0 = 10;
+  fillRect(0, P_BOT, SCR_W, SCR_H - navBarH() - P_BOT, thCard());
   for(int i = 0; i < 6; i++){
     int cx = x0 + i * (sw + gap) + sw / 2;
     fillCircle(cx, y + sw / 2, sw / 2 - 2, P_PAL[i]);
@@ -19701,7 +20955,7 @@ static void paintTools(){
   drawTextC(gx + 90, y + 9, "Deshacer", 1, TH_TXT);
   fillRoundRect(gx + 134, y, 66, sw, 8, TH_DANGER);
   drawTextC(gx + 167, y + 9, "Limpiar", 1, TH_ONACC);
-  flxFlush(P_BOT, SCR_H - 1);
+  flxFlush(P_BOT, SCR_H - navBarH() - 1);
 }
 
 static void paintRenderCanvas(){
@@ -19718,13 +20972,15 @@ static void paintRenderCanvas(){
     snprintf(sub, sizeof(sub), "%u trazos guardados", (unsigned)hd.strokes);
     drawTextC(SCR_W / 2, 66, sub, 1, TH_TXT2);
   }
-  fillRect(PAINT_CX, P_TOP, PAINT_CW, PAINT_CH, rgb565(250,250,252));
+  paintDocLayout();
+  fillRect(PAINT_CX, P_TOP, PAINT_CW, PAINT_CH, rgb565(218,222,230));
+  fillRect(pDocX, pDocY, pDocDispW, pDocDispH, rgb565(250,250,252));
   // El lienzo se reconstruye desde el FICHERO, no desde un buffer en RAM:
   // lo que se ve al abrir un dibujo es exactamente lo que hay guardado.
   int sx0 = gClipX0, sx1 = gClipX1, sy0 = gClipY0, sy1 = gClipY1;
-  gClipX0 = PAINT_CX; gClipX1 = PAINT_CX + PAINT_CW - 1;
-  gClipY0 = P_TOP;    gClipY1 = P_BOT - 1;
-  flexPaintReplay(paintPath, 1.0f, PAINT_CX, P_TOP, paintSegCb, NULL);
+  gClipX0 = pDocX; gClipX1 = pDocX + pDocDispW - 1;
+  gClipY0 = pDocY; gClipY1 = pDocY + pDocDispH - 1;
+  flexPaintReplay(paintPath, pDocScale, pDocX, pDocY, paintSegCb, NULL);
   gClipX0 = sx0; gClipX1 = sx1; gClipY0 = sy0; gClipY1 = sy1;
   paintTools();
   flxFlushAll();
@@ -19737,6 +20993,7 @@ static void paintOpen(int i){
   pStrokeN = 0; pPrevX = pPrevY = -1;
   paintView = 1;
   paintRenderCanvas();
+  sessMarkDirty(IC_PAINT);
 }
 
 // Nuevo dibujo: crea el FICHERO ya (cabecera .fxp con 0 trazos) con el
@@ -19757,7 +21014,7 @@ static void paintNew(){
 // Cierra el trazo en curso escribiendolo en el fichero.
 static void paintFlushStroke(){
   if(pStrokeN > 0 && pStroke && paintPath[0])
-    flexPaintAppend(paintPath, pColor, P_SIZES[pSizeIx], pStroke, (uint16_t)pStrokeN);
+    flexPaintAppend(paintPath, pColor, paintDocRadius(), pStroke, (uint16_t)pStrokeN);
   pStrokeN = 0; pPrevX = pPrevY = -1;
 }
 
@@ -19843,7 +21100,7 @@ static void paintGalleryTick(){
       return;
     }
   }
-  if(T.released && paintDragging){ paintDragging = false; return; }
+  if(T.released && paintDragging){ paintDragging = false; sessMarkDirty(IC_PAINT); return; }
 
   if(T.down && !paintLongFired && (millis() - T.downMs) > 550
      && abs(T.x - T.startX) < 14 && abs(T.y - T.startY) < 14){
@@ -19892,7 +21149,7 @@ static void paintGalleryTick(){
 
 static void paintCanvasTick(){
   // ---- Trazo: interpolacion suave y volcado SOLO de la franja tocada ----
-  if(T.down && T.y >= P_TOP && T.y < P_BOT && T.x >= PAINT_CX && T.x < PAINT_CX + PAINT_CW){
+  if(T.down && paintDocHit(T.x, T.y)){
     int rad = P_SIZES[pSizeIx];
     setBuf(fb);
     int y0, y1;
@@ -19908,14 +21165,15 @@ static void paintCanvasTick(){
       y0 = y1 = T.y;
     }
     if(pStroke && pStrokeN < PAINT_MAX_PTS){
-      pStroke[pStrokeN * 2]     = (int16_t)(T.x - PAINT_CX);   // coordenadas del LIENZO
-      pStroke[pStrokeN * 2 + 1] = (int16_t)(T.y - P_TOP);
+      pStroke[pStrokeN * 2]     = paintDocCoord(T.x, pDocX, pDocW);
+      pStroke[pStrokeN * 2 + 1] = paintDocCoord(T.y, pDocY, pDocH);
       pStrokeN++;
     } else if(pStroke && pStrokeN >= PAINT_MAX_PTS){
       // Trazo larguisimo: se cierra y se empieza otro, sin perder nada.
       int lx = pPrevX, ly = pPrevY;
       paintFlushStroke();
-      pStroke[0] = (int16_t)(lx - PAINT_CX); pStroke[1] = (int16_t)(ly - P_TOP);
+      pStroke[0] = paintDocCoord(lx, pDocX, pDocW);
+      pStroke[1] = paintDocCoord(ly, pDocY, pDocH);
       pStrokeN = 1;
     }
     pPrevX = T.x; pPrevY = T.y;
@@ -19930,16 +21188,17 @@ static void paintCanvasTick(){
   if(T.x < 48 && T.y < 48){                       // volver a la galeria
     paintFlushStroke();
     paintView = 0; paintReload(); paintRenderGallery();
+    sessMarkDirty(IC_PAINT);
     return;
   }
-  int y = SCR_H - 58, sw = 34, gap = 6, x0 = 10;
+  int y = P_BOT + 8, sw = 34, gap = 6, x0 = 10;
   if(T.y >= y - 4 && T.y <= y + sw + 4){
     for(int i = 0; i < 6; i++){
       int cx = x0 + i * (sw + gap) + sw / 2;
-      if(T.x >= cx - sw / 2 && T.x <= cx + sw / 2){ pColor = P_PAL[i]; paintTools(); return; }
+      if(T.x >= cx - sw / 2 && T.x <= cx + sw / 2){ pColor = P_PAL[i]; paintTools(); sessMarkDirty(IC_PAINT); return; }
     }
     int gx = x0 + 6 * (sw + gap) + 8;
-    if(T.x >= gx && T.x < gx + 44){ pSizeIx = (pSizeIx + 1) % 3; paintTools(); return; }
+    if(T.x >= gx && T.x < gx + 44){ pSizeIx = (pSizeIx + 1) % 3; paintTools(); sessMarkDirty(IC_PAINT); return; }
     if(T.x >= gx + 52 && T.x < gx + 128){         // DESHACER real: recorta el fichero
       if(flexPaintUndo(paintPath)) paintRenderCanvas();
       return;
@@ -19961,9 +21220,12 @@ static void paintEnter(){
     flxFlushAll();
     return;
   }
-  pColor = P_PAL[0];
-  paintView = 0; paintMulti = false; paintMask = 0; paintSelIdx = -1;
+  bool restoreCanvas = (paintView == 1 && paintPath[0] && flexFsExists(paintPath));
+  if(!restoreCanvas) pColor = P_PAL[0];
+  paintMulti = false; paintMask = 0; paintSelIdx = -1;
   fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
+  if(restoreCanvas){ paintRenderCanvas(); return; }
+  paintView = 0; paintPath[0] = 0;
   paintReload();
   paintRenderGallery();
 }
@@ -19972,6 +21234,55 @@ static void paintTick(){
   if(!flexFsReady() || !pStroke){ if(T.tap && T.x < 60 && T.y < 60) appClose(); return; }
   if(paintView == 0) paintGalleryTick();
   else               paintCanvasTick();
+}
+
+// Estado de interfaz; los trazos siguen viviendo solamente en su .fxp.
+#define PAINT_SESS_VER  1
+#define PAINT_SESS_PATH FS_DIR_SESS "/paint.bin"
+struct PaintSessV1 { uint8_t view, sizeIx; uint16_t color; int32_t scroll; char path[FLEXFS_PATH_MAX]; };
+
+static bool paintSaveSess(){
+  if(!flexFsReady()) return true;
+  paintFlushStroke();
+  PaintSessV1 v; memset(&v, 0, sizeof(v));
+  v.view = (paintView == 1 && paintPath[0]) ? 1 : 0;
+  v.sizeIx = (uint8_t)pSizeIx; v.color = pColor; v.scroll = paintScroll;
+  snprintf(v.path, sizeof(v.path), "%s", paintPath);
+  return sessWrite(PAINT_SESS_PATH, PAINT_SESS_VER, IC_PAINT, &v, sizeof(v));
+}
+static void paintLoadSess(){
+  if(!flexFsReady()) return;
+  PaintSessV1 v;
+  if(sessRead(PAINT_SESS_PATH, PAINT_SESS_VER, IC_PAINT, &v, sizeof(v)) != sizeof(v)) return;
+  v.path[sizeof(v.path) - 1] = 0;
+  paintView = (v.view == 1 && v.path[0] && flexFsExists(v.path)) ? 1 : 0;
+  pSizeIx = v.sizeIx < 3 ? v.sizeIx : 1;
+  pColor = v.color; paintScroll = v.scroll > 0 ? v.scroll : 0;
+  snprintf(paintPath, sizeof(paintPath), "%s", paintView == 1 ? v.path : "");
+}
+static bool paintBackScreen(){
+  if(paintView != 1) return false;
+  paintFlushStroke(); paintView = 0; paintPath[0] = 0;
+  paintReload(); paintRenderGallery(); sessMarkDirty(IC_PAINT);
+  return true;
+}
+static void paintSuspend(){
+  paintFlushStroke(); paintDragging = false; pPrevX = pPrevY = -1;
+  // Superficie de dialogos compartida: se cierra al suspender para que otra
+  // app no herede una confirmacion o un renombrado de Paint. El lienzo, ruta,
+  // herramientas y scroll siguen exactamente donde estaban.
+  fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
+}
+static void paintResume(){
+  if(paintView == 1 && paintPath[0] && flexFsExists(paintPath)) paintRenderCanvas();
+  else { paintView = 0; paintPath[0] = 0; paintReload(); paintRenderGallery(); }
+}
+static void paintCloseApp(){
+  paintSuspend();
+  fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
+  if(pStroke){ free(pStroke); pStroke = NULL; }
+  pStrokeN = 0; paintView = 0; paintPath[0] = 0; paintScroll = 0;
+  gSessLoaded[IC_PAINT] = false;
 }
 
 
@@ -20018,7 +21329,7 @@ static void paintTick(){
 #define WXVIEW_LOCS    1
 #define WXVIEW_SEARCH  2
 
-// ---- Estado de interfaz (TODO se reinicia en wxAppEnter) ----
+// ---- Estado de interfaz (se conserva mientras la app esta suspendida) ----
 static uint8_t  wxView       = WXVIEW_MAIN;
 static float    wxScroll     = 0;      // desplazamiento vertical (px de contenido)
 static float    wxScrollVel  = 0;      // inercia vertical
@@ -20050,6 +21361,11 @@ static uint8_t  wxSceneFrom  = 0xFF;   // escena anterior (0xFF = ninguna)
 static uint8_t  wxSceneTo    = 0xFF;
 static bool     wxSceneFromDay = true, wxSceneToDay = true;
 static uint32_t wxOkFlashMs  = 0;      // destello de "actualizado"
+// Clima comparte el teclado global con Wi-Fi, Notas y Seguridad. Al suspender
+// se guarda solo la parte que usa su buscador para que otra app pueda usar el
+// teclado sin cambiarle el idioma/capa al volver.
+static uint8_t  wxKbLayout   = 0;      // 0 ES, 1 EN, 2 numeros, 3 emoji
+static uint8_t  wxKbFlags    = 0;      // bit 0 idioma ES, bit 1 mayusculas
 
 // Tops de cada seccion en coordenadas de contenido (los calcula wxLayout).
 static int wxYHour = 0, wxYDaily = 0, wxYSun = 0, wxYDet = 0, wxYFoot = 0;
@@ -21718,6 +23034,41 @@ static bool wxHandleBack(){
   return false;
 }
 
+// Suspension real: cancela exclusivamente el gesto/inercia en curso (el dedo
+// que vuelve sera otro), pero conserva vista, consulta y posiciones de scroll.
+static void wxSuspend(){
+  if(mapaActivo == LAYOUT_EN)         wxKbLayout = 1;
+  else if(mapaActivo == LAYOUT_NUM)   wxKbLayout = 2;
+  else if(mapaActivo == LAYOUT_EMOJI) wxKbLayout = 3;
+  else                                wxKbLayout = 0;
+  wxKbFlags = (kbLangEs ? 1u : 0u) | (kbShift ? 2u : 0u);
+  wxStopMotion();
+  wxPhysMs = 0;
+}
+
+static void wxResume(){
+  switch(wxKbLayout){
+    case 1: mapaActivo = LAYOUT_EN; break;
+    case 2: mapaActivo = LAYOUT_NUM; break;
+    case 3: mapaActivo = LAYOUT_EMOJI; break;
+    default: mapaActivo = LAYOUT_ES; break;
+  }
+  kbLangEs = (wxKbFlags & 1u) != 0;
+  kbShift  = (wxKbFlags & 2u) != 0;
+  wxStopMotion();
+  wxLayout();
+  int maxS = wxScrollMax();
+  if(wxScroll < 0) wxScroll = 0;
+  if(wxScroll > maxS) wxScroll = (float)maxS;
+  if(wxHourScroll < 0) wxHourScroll = 0;
+  if(wxHourScroll > wxHourMax) wxHourScroll = (float)wxHourMax;
+  wxSeenGen = flexWeatherGen();
+  wxSeenStatus = flexWeatherStatus();
+  wxEnterMs = 0;                    // sin repetir la animacion de apertura
+  wxAnimMs = 0; wxPhysMs = 0;
+  wxFull();
+}
+
 // Boton "atras" de la barra de navegacion. Clima es APP_OWN_TOUCH (el teclado
 // del buscador ocupa esa misma franja y, si lo gestionara el framework, la
 // barra espaciadora cerraria la app), asi que la atiende la propia app y con
@@ -21965,7 +23316,14 @@ static void swPush(uint8_t id){                                   // mueve al fr
   int at = -1; for(int i = 0; i < swCount; i++) if(swTasks[i].appID == id){ at = i; break; }
   if(at >= 0){ AppTask tmp = swTasks[at]; for(int i = at; i > 0; i--) swTasks[i] = swTasks[i - 1]; swTasks[0] = tmp; return; }
   if(swCount < SW_MAX){ for(int i = swCount; i > 0; i--) swTasks[i] = swTasks[i - 1]; swCount++; }
-  else { if(swTasks[SW_MAX - 1].thumb) free(swTasks[SW_MAX - 1].thumb); for(int i = SW_MAX - 1; i > 0; i--) swTasks[i] = swTasks[i - 1]; }
+  else {
+    // Lista llena: la tarjeta que cae es la mas antigua. No basta con soltar su
+    // miniatura -- hay que CERRAR esa app de verdad (guardando su sesion), o su
+    // estado quedaria vivo en RAM para siempre sin tarjeta que lo represente.
+    appTerminate(swTasks[SW_MAX - 1].appID, true);
+    if(swTasks[SW_MAX - 1].thumb) free(swTasks[SW_MAX - 1].thumb);
+    for(int i = SW_MAX - 1; i > 0; i--) swTasks[i] = swTasks[i - 1];
+  }
   swTasks[0].appID = id; swTasks[0].used = true; swTasks[0].thumb = NULL;
 }
 static void swPushAndCapture(uint8_t id){
@@ -21983,11 +23341,48 @@ static void swPushNoThumb(uint8_t id){
   swPush(id);
   if(swTasks[0].thumb){ free(swTasks[0].thumb); swTasks[0].thumb = NULL; }
 }
-static void swCloseCard(int idx){                                 // libera PSRAM y reordena
+// ---- Accesores publicos de la lista (los usa el ciclo de vida, mucho mas
+// arriba en el archivo, sin tener que conocer AppTask ni swTasks) ----
+static int  swCardCount(){ return swCount; }
+static int  swCardApp(int idx){ return (idx >= 0 && idx < swCount) ? swTasks[idx].appID : -1; }
+// Quita la tarjeta y libera SU miniatura. NO toca el ciclo de vida de la app:
+// es la mitad grafica de un cierre, y la usa quien ya cerro la app por su cuenta.
+static void swDropCard(int idx){
   if(idx < 0 || idx >= swCount) return;
   if(swTasks[idx].thumb){ free(swTasks[idx].thumb); swTasks[idx].thumb = NULL; }
   for(int i = idx; i < swCount - 1; i++) swTasks[i] = swTasks[i + 1];
   swCount--;
+}
+// Aviso breve del selector (por que una tarjeta no se ha podido cerrar). Es un
+// mensaje REAL: solo aparece cuando una operacion se ha negado de verdad.
+static char     swMsg[40] = "";
+static uint32_t swMsgMs = 0;
+static void swToast(const char* m){ snprintf(swMsg, sizeof(swMsg), "%s", m); swMsgMs = millis(); }
+
+// Cierre COMPLETO de una tarjeta: cierra la app (guardando su sesion y
+// liberando sus buffers) y solo entonces quita la tarjeta. Devuelve false si el
+// cierre se ha negado -- trabajo esencial en curso, o una sesion que no se pudo
+// escribir -- y en ese caso no se pierde nada.
+static bool swCloseCard(int idx){
+  if(idx < 0 || idx >= swCount) return false;
+  int id = swTasks[idx].appID;
+  if(appBgBusy(id)){ swToast("Tarea en curso: no se cierra"); return false; }
+  if(!appTerminate(id, false)){ swToast("Sin espacio para guardar"); return false; }
+  swDropCard(idx);
+  return true;
+}
+// "Cerrar todo": cierra las apps normales y RESPETA la lista blanca -- una app
+// con trabajo real en segundo plano (hoy: Ajustes mientras el OTA descarga o
+// instala) se queda, con su tarjeta y su tarea intactas.
+static void swCloseAll(){
+  int kept = 0;
+  for(int i = swCount - 1; i >= 0; i--){
+    int id = swTasks[i].appID;
+    if(appBgBusy(id)){ kept++; continue; }
+    if(!appTerminate(id, false)){ kept++; continue; }
+    swDropCard(i);
+  }
+  if(kept) swToast("Tarea en curso: no se cierra");
 }
 static uint16_t swSxLUT[SW_CW], swSyLUT[SW_CH]; static bool swLUTdone = false;
 static void swBuildLUT(){
@@ -22012,6 +23407,30 @@ static void swCardFrame(int x, int y, int w, int h, int rad){
   fillRoundRect(x, y, w, h, rad, TH_SURF);
   drawRoundRect(x, y, w, h, rad, TH_BORDER);
 }
+// ---- Boton "Cerrar todo" (geometria unica: dibujo y hit-test la comparten) ----
+#define SWCA_W   186
+#define SWCA_H   46
+#define SWCA_X   ((SCR_W - SWCA_W) / 2)
+#define SWCA_Y   610
+static void swDrawCloseAll(){
+  bool on = (swCount > 0);
+  fillRoundRect(SWCA_X, SWCA_Y, SWCA_W, SWCA_H, SWCA_H / 2, on ? rgb565(38,44,62) : rgb565(26,29,40));
+  drawRoundRect(SWCA_X, SWCA_Y, SWCA_W, SWCA_H, SWCA_H / 2, on ? rgb565(96,106,140) : rgb565(56,62,80));
+  drawTextC(SCR_W / 2, SWCA_Y + (SWCA_H - 18) / 2, "Cerrar todo", 2,
+            on ? rgb565(238,242,250) : rgb565(110,118,138));
+}
+static bool swCloseAllHit(int px, int py){
+  return swCount > 0 && px >= SWCA_X && px <= SWCA_X + SWCA_W && py >= SWCA_Y && py <= SWCA_Y + SWCA_H;
+}
+// Aviso dentro de la banda de tarjetas: se borra solo con el siguiente repintado
+// de esa misma banda, igual que el chip "Copiado" de Notas.
+static void swDrawToast(){
+  if(!swMsg[0]) return;
+  if(millis() - swMsgMs > 1800){ swMsg[0] = 0; return; }
+  int tw = textW(swMsg, 2) + 34, tx = (SCR_W - tw) / 2, ty = 556;
+  fillRoundRectA(tx, ty, tw, 34, 17, rgb565(30,34,48), 235);
+  drawTextC(SCR_W / 2, ty + 9, swMsg, 2, rgb565(240,244,252));
+}
 static void swRender(float scale){                        // completo (solo animacion de entrada)
   setBuf(bbuf);
   // Fondo = wallpaper desenfocado (contenido) -> los rotulos que caen encima
@@ -22030,6 +23449,8 @@ static void swRender(float scale){                        // completo (solo anim
     else { fillRoundRect(x + 8, y + 8, cw - 16, ch - 52, 14, TH_SURF2); drawAppIcon(swTasks[i].appID, x + cw / 2 - 30, y + ch / 2 - 70, 60); }
     drawTextC(x + cw / 2, y + ch - 32, appName(swTasks[i].appID), 2, TH_TXT);
   }
+  swDrawCloseAll();
+  swDrawToast();
   drawTextC(SCR_W / 2, SCR_H - 28, "Desliza una tarjeta arriba para cerrar", 1, TH_ONWALL2);
   present(0, SCR_H - 1);
 }
@@ -22049,15 +23470,26 @@ static void swRenderCards(){
     else { fillRoundRect(x + 8, y + 8, SW_CW - 16, SW_CH - 52, 14, TH_SURF2); drawAppIcon(swTasks[i].appID, x + SW_CW / 2 - 30, y + SW_CH / 2 - 70, 60); }
     drawTextC(x + SW_CW / 2, y + SW_CH - 32, appName(swTasks[i].appID), 2, TH_TXT);
   }
+  swDrawToast();
   present(32, 604);
+}
+// Repinta la fila del boton (su aspecto depende de si queda alguna tarjeta).
+static void swRenderCloseAll(){
+  setBuf(bbuf);
+  if(blurBg){ for(int j = SWCA_Y - 6; j < SWCA_Y + SWCA_H + 6; j++) memcpy(bbuf + (size_t)j * SCR_W, blurBg + (size_t)j * SCR_W, SCR_W * 2); }
+  else fillRect(0, SWCA_Y - 6, SCR_W, SWCA_H + 12, rgb565(8,10,16));
+  swDrawCloseAll();
+  present(SWCA_Y - 6, SWCA_Y + SWCA_H + 5);
 }
 static int swCardIndexAt(int px){
   for(int i = 0; i < swCount; i++){ int cx = SCR_W / 2 + i * SW_STEP - (int)swScrollPx; if(px >= cx - SW_CW / 2 && px <= cx + SW_CW / 2) return i; }
   return -1;
 }
 static int swCenterIndex(){ int i = (int)roundf(swScrollPx / SW_STEP); if(i < 0) i = 0; if(i >= swCount) i = swCount - 1; return i; }
-static void swExitToHome(){ gState = ST_HOME; renderHome(); showHome(); }
-static void swMaximize(int idx){ if(idx >= 0 && idx < swCount) enterApp(swTasks[idx].appID); }  // restaura a pantalla completa
+static void swExitToHome(){ gState = ST_HOME; renderHome(); showHome(); touchDropAll(); }
+// Restaura la app a pantalla completa. enterApp la REANUDA si estaba suspendida:
+// vuelve exactamente donde estaba, no a su pantalla inicial.
+static void swMaximize(int idx){ if(idx >= 0 && idx < swCount) enterApp(swTasks[idx].appID); }
 
 // Congela la app activa, cambia a MODO_MULTITAREA y hace la animacion elastica de entrada.
 static void activarMultitarea(){
@@ -22077,13 +23509,27 @@ static void activarMultitarea(){
   ensureBlurBg();
   gState = ST_SWITCHER;
   swScrollPx = 0; swVel = 0; swLiftCard = -1; swLiftY = 0; swGesture = 0;
-  for(int s = 1; s <= 10; s++){                         // spring scale-in (ease-out-back)
-    float p = s / 10.0f, pm = p - 1.0f, eob = 1.0f + 2.6f * pm * pm * pm + 1.6f * pm * pm;
-    swRender(0.6f + 0.4f * eob); delay(14);
+  swMsg[0] = 0;
+  // ENTRADA POR TIEMPO, no por numero de cuadros. Antes eran 10 pasos con
+  // delay(14): en una placa lenta duraba mas y en una rapida se veia a saltos,
+  // y ademas bloqueaba el bucle 140 ms enteros (con el tactil parado). Ahora
+  // dura SW_IN_MS medidos con millis() y mete tantos cuadros como de el
+  // compositor, sin un solo delay().
+  if(gSafeMode){ swRender(1.0f); return; }        // Modo seguro: sin animacion de entrada
+  const uint32_t SW_IN_MS = 150;
+  uint32_t t0 = millis();
+  for(;;){
+    uint32_t e = millis() - t0; if(e > SW_IN_MS) e = SW_IN_MS;
+    float p = (float)e / (float)SW_IN_MS, pm = p - 1.0f;
+    float eob = 1.0f + 2.6f * pm * pm * pm + 1.6f * pm * pm;   // ease-out-back
+    swRender(0.6f + 0.4f * eob);
+    if(e >= SW_IN_MS) break;
   }
   swRender(1.0f);
 }
 static void swTick(){
+  // El aviso caduca solo: sin esto se quedaria pegado hasta el siguiente gesto.
+  if(swMsg[0] && millis() - swMsgMs > 1800){ swMsg[0] = 0; swRenderCards(); }
   if(T.pressed){
     swStartX = T.x; swStartY = T.y; swLastX2 = T.x; swLastY2 = T.y; swVel = 0; swGesture = 0;
     swLiftCard = swCardIndexAt(T.x); swLiftY = 0;
@@ -22106,15 +23552,22 @@ static void swTick(){
     return;
   }
   if(T.released){
-    if(swGesture == 2 && swLiftCard >= 0 && swLiftY > 110){   // swipe-arriba -> cerrar (free)
-      swCloseCard(swLiftCard); swLiftCard = -1; swLiftY = 0;
+    if(swGesture == 2 && swLiftCard >= 0 && swLiftY > 110){   // swipe-arriba -> cerrar de verdad
+      bool closed = swCloseCard(swLiftCard);
+      swLiftCard = -1; swLiftY = 0;
       float mx = (swCount > 0 ? (swCount - 1) * SW_STEP : 0); if(swScrollPx > mx) swScrollPx = mx; if(swScrollPx < 0) swScrollPx = 0;
-      swRenderCards(); return;
+      swRenderCards();
+      if(closed) swRenderCloseAll();                        // el boton se atenua si ya no queda nada
+      return;
     }
     if(swGesture == 0){                                  // toque
+      if(swCloseAllHit(T.x, T.y)){ swCloseAll(); swScrollPx = 0; swVel = 0; swRenderCards(); swRenderCloseAll(); return; }
       if(T.y > SCR_H - 60){ swExitToHome(); return; }
       int idx = swCardIndexAt(T.x);
-      if(idx >= 0){ if(idx == swCenterIndex()) swMaximize(idx); else { swScrollPx = idx * SW_STEP; swRenderCards(); } return; }
+      if(idx >= 0 && T.y >= SW_TOP && T.y <= SW_TOP + SW_CH){
+        if(idx == swCenterIndex()) swMaximize(idx); else { swScrollPx = idx * SW_STEP; swRenderCards(); }
+        return;
+      }
       swExitToHome(); return;
     }
     swLiftCard = -1; swLiftY = 0;
@@ -23693,6 +25146,9 @@ static void lsuFinishAfter(){
   // se repinta el escritorio de abajo a proposito: la animacion arranca haciendo
   // un fundido a negro DESDE lo que ya hay en pantalla.
   if(what == LSU_AFTER_POWEROFF){ poffBeginAnim(); return; }
+  // RESTABLECIMIENTO: la clave era correcta -> ultimo paso (el deslizador). El
+  // borrado NO empieza aqui: todavia hay una confirmacion deliberada por delante.
+  if(what == LSU_AFTER_FACTORY){ frAfterVerify(); return; }
   gState = ST_HOME;
   if(what == LSU_AFTER_LOCKAPP)        appLockSet(id, true);
   else if(what == LSU_AFTER_UNLOCKAPP) appLockSet(id, false);
@@ -23728,8 +25184,12 @@ static void lsuExit(){
   if(lsuVerify && lsuAfter != LSU_AFTER_UNLOCK){
     bool wasKiosk = (lsuAfter == LSU_AFTER_KIOSKOUT);
     bool wasPoff  = (lsuAfter == LSU_AFTER_POWEROFF);
+    bool wasReset = (lsuAfter == LSU_AFTER_FACTORY);
     lsuVerify = false; lsuAfter = LSU_AFTER_UNLOCK; lsuAfterApp = -1;
     lsuShakeMs = 0; lockWaitReset();
+    // Cancelar la verificacion del restablecimiento vuelve a Ajustes SIN haber
+    // tocado un solo dato: el asistente todavia no habia armado nada.
+    if(wasReset){ frCancelToSettings(); return; }
     // Cancelar la verificacion del apagado NO apaga y NO se va al escritorio:
     // devuelve a la pantalla de confirmacion, con el slider otra vez en reposo.
     if(wasPoff && POWEROFF_ON){ poffEnter(); return; }
@@ -23934,7 +25394,7 @@ static void lsuEnter(){
   if(KIOSK_ON && kioskOn) return;
   gState = ST_LOCKSETUP; lsuMode = LSU_SEL; lsuPin[0] = 0; lsuPass[0] = 0; lsuPress = -1; lsuKbAnim = 0;
   mapaActivo = LAYOUT_ES; kbLangEs = true; kbShift = false;
-  kbExtrasOn = false; kbApplySize(); kbMtSurfaceReset();   // sin barra ni chips en la pantalla de clave
+  kbExtrasOn = false; kbBotReserve = 0; kbApplySize(); kbMtSurfaceReset();   // sin barra ni chips en la pantalla de clave
   lsuRenderSel();
 }
 static void lsuTick(){
@@ -24089,7 +25549,7 @@ static void lsuStartVerify(){
   lsuSavedLen = flexLockLen();
   lsuVerify = true; lsuWrong = 0; lsuPin[0] = 0; lsuPass[0] = 0; lsuPress = -1;
   mapaActivo = LAYOUT_ES; kbLangEs = true; kbShift = false;
-  kbExtrasOn = false; kbApplySize(); kbMtSurfaceReset();   // sin barra ni chips en la verificacion
+  kbExtrasOn = false; kbBotReserve = 0; kbApplySize(); kbMtSurfaceReset();   // sin barra ni chips en la verificacion
   ensureBlurBg();
   gState = ST_LOCKSETUP;
   // Por defecto esta verificacion es la de la PANTALLA. lsuStartVerifyFor lo
@@ -25060,7 +26520,7 @@ static void wifiSettingsEnter(){
 #if FLEXOS_ENABLE_WIFI
   wifiSel = -1; wifiPass[0] = 0;
   mapaActivo = LAYOUT_ES; kbLangEs = true; kbShift = false;
-  kbExtrasOn = false; kbApplySize(); kbMtSurfaceReset();   // el teclado de Wi-Fi solo hereda el TAMANO (Fase A)
+  kbExtrasOn = false; kbBotReserve = 0; kbApplySize(); kbMtSurfaceReset();   // el teclado de Wi-Fi solo hereda el TAMANO (Fase A)
   wifiStartScan();
   wifiRenderList();
 #else
@@ -27197,6 +28657,7 @@ static uint32_t galMask = 0;
 static int      galDragY0 = 0, galDragS0 = 0;
 static bool     galDragging = false;
 static int      galView = 0;                     // 0 = rejilla, 1 = un elemento a pantalla completa
+static char     galResumePath[FLEXFS_PATH_MAX] = ""; // identidad estable; nunca conservar solo el indice
 static void galRender();
 
 // Extensiones que la galeria reconoce. La comparacion es propia (sin
@@ -27557,6 +29018,57 @@ static void galEnter(){
     fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
   }
   galReload();
+  galRender();
+}
+
+// ATRAS deshace primero las superficies/selecciones propias de Galeria y luego
+// la vista a pantalla completa. Asi el boton no expulsa la app desde una foto.
+static bool galBackLayer(){
+  if(fkMenuOn || fkNameOn || fkAskOn || fkTrashOn){
+    fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
+    galRender();
+    return true;
+  }
+  if(galMulti){
+    galMulti = false; galMask = 0; galSelIdx = -1;
+    galRender();
+    return true;
+  }
+  return false;
+}
+static bool galBackScreen(){
+  if(galView != 1) return false;
+  galView = 0; galSelIdx = -1;
+  galRender();
+  return true;
+}
+
+static void galSuspend(){
+  galResumePath[0] = 0;
+  if(galSelIdx >= 0 && galSelIdx < galN)
+    snprintf(galResumePath, sizeof(galResumePath), "%s", galPath[galSelIdx]);
+  galDragging = false; galLongFired = false;
+  // El kit de archivos es global y tambien lo usan Paint, Notas y Archivos.
+  // No puede quedar modal mientras otra app reutiliza esos mismos flags.
+  fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
+  // Una seleccion multiple basada en indices deja de ser segura si Paint o
+  // Archivos cambia la lista en segundo plano. Se descarta solo esa capa
+  // transitoria; la foto abierta y el scroll si se conservan.
+  galMulti = false; galMask = 0;
+}
+
+static void galResume(){
+  int oldView = galView;
+  galReload();
+  galSelIdx = -1;
+  if(galResumePath[0]){
+    for(int i = 0; i < galN; i++) if(!strcmp(galPath[i], galResumePath)){ galSelIdx = i; break; }
+  }
+  galView = (oldView == 1 && galSelIdx >= 0) ? 1 : 0;
+  int maxS = galMaxScroll();
+  if(galScroll < 0) galScroll = 0;
+  if(galScroll > maxS) galScroll = maxS;
+  galDragging = false; galLongFired = false;
   galRender();
 }
 // #############################################################
@@ -29275,6 +30787,664 @@ static void vaultStatusText(char* out, size_t n){
   snprintf(out, n, "Abierta ahora - %s en uso", sz);
 }
 
+// #############################################################
+// ##  RESTABLECER DATOS DE FABRICA
+// ##  ------------------------------------------------------
+// ##  Cuatro pantallas y un motor por ETAPAS:
+// ##    1) Aviso: que se borra, que NO se borra, Cancelar / Continuar.
+// ##    2) Seguridad: PIN o contrasena con el MISMO verificador del
+// ##       bloqueo del sistema (lsuStartVerifyFor). Si no hay clave
+// ##       configurada, hay que escribir "RESTABLECER" a mano.
+// ##    3) Confirmacion final: deslizador sostenido. Nunca dos toques.
+// ##    4) Borrado por etapas, con marcador persistente para poder
+// ##       retomarlo si se corta la corriente.
+// ##
+// ##  La clave NUNCA se lee ni se compara aqui: esta pantalla solo
+// ##  PIDE la verificacion al subsistema de bloqueo y espera su
+// ##  veredicto. Los intentos, la espera progresiva y el bloqueo por
+// ##  fallos son los mismos que en el resto del sistema, sin excepcion
+// ##  ni atajo. Si la clave es incorrecta no se toca ni un byte.
+// #############################################################
+enum { FRV_INTRO = 0, FRV_TYPE, FRV_SLIDE, FRV_RUN, FRV_FAIL };
+static int      frView = FRV_INTRO;
+static uint32_t frStageMs = 0;               // millis en que empezo la etapa en curso
+// Tiempo MINIMO que se muestra cada etapa. No es una espera artificial del
+// borrado (la etapa ya se ejecuto), es la cadencia con la que se PUBLICA su
+// nombre: sin esto, las siete etapas pasarian en dos cuadros y el usuario no
+// podria leer en cual se quedo si algo fallara. Se mide con millis() y no
+// bloquea: el bucle sigue dando vueltas y alimentando el watchdog.
+#define FR_STEP_MIN_MS 260
+static char     frTyped[20] = "";
+static const char* FR_WORD = "RESTABLECER";
+static uint32_t gSafeMsgMs = 0;              // aviso de app no disponible en Modo seguro
+
+// ---- Deslizador de confirmacion (mismo lenguaje que el del apagado) ----
+#define FRS_TRACK_X   40
+#define FRS_TRACK_Y   600
+#define FRS_TRACK_H   72
+#define FRS_TRACK_W   (SCR_W - 80)
+#define FRS_KNOB_PAD  6
+#define FRS_KNOB_D    (FRS_TRACK_H - 2 * FRS_KNOB_PAD)
+#define FRS_RUN       (FRS_TRACK_W - 2 * FRS_KNOB_PAD - FRS_KNOB_D)
+#define FRS_DONE_PCT  92
+static int  frKnob = 0, frGrab = 0;
+static bool frDrag = false;
+
+static uint16_t frBg(){   return gDark ? rgb565(16,18,26)    : rgb565(246,248,252); }
+static uint16_t frHi(){   return gDark ? rgb565(240,242,248) : rgb565(20,22,30); }
+static uint16_t frLo(){   return gDark ? rgb565(160,166,182) : rgb565(110,116,132); }
+static uint16_t frCard(){ return gDark ? rgb565(30,34,46)    : rgb565(255,255,255); }
+
+// Botones inferiores de la pantalla de aviso
+#define FR_BTN_H   58
+#define FR_BTN_Y   (SCR_H - 96)
+#define FR_CAN_X   28
+#define FR_CAN_W   ((SCR_W - 76) / 2)
+#define FR_GO_X    (FR_CAN_X + FR_CAN_W + 20)
+#define FR_GO_W    FR_CAN_W
+
+static void frDrawIntro(){
+  setBuf(bbuf);
+  fillRect(0, 0, SCR_W, SCR_H, frBg());
+  drawTextC(SCR_W / 2, 44, "Restablecer datos", 3, frHi());
+  drawTextC(SCR_W / 2, 76, "de fabrica", 3, frHi());
+  int cx = 20, cw = SCR_W - 40, cy = 124, ch = 300;
+  fillRoundRect(cx, cy, cw, ch, 16, frCard());
+  int y = cy + 16;
+  drawText(cx + 16, y, "Se eliminaran de este dispositivo:", 2, frHi()); y += 30;
+  const char* items[] = {
+    "Cuentas locales y sus tokens",
+    "Redes Wi-Fi guardadas y sus claves",
+    "PIN o contrasena de bloqueo",
+    "Ajustes, fondo y personalizacion",
+    "Notas, dibujos y archivos del usuario",
+    "Apps instaladas y sus datos",
+    "Sesiones abiertas e historial",
+    "Boveda local (Flex Vault) y sus claves"
+  };
+  for(unsigned i = 0; i < sizeof(items) / sizeof(items[0]); i++){
+    fillCircle(cx + 22, y + 8, 3, rgb565(220,80,80));
+    drawTextClip(cx + 34, y, items[i], 1, frLo(), cx + cw - 12);
+    y += 22;
+  }
+  y = cy + ch + 16;
+  fillRoundRect(cx, y, cw, 92, 16, frCard());
+  drawText(cx + 16, y + 12, "NO se elimina:", 2, frHi());
+  drawTextClip(cx + 16, y + 40, "El firmware instalado sigue siendo el mismo.", 1, frLo(), cx + cw - 12);
+  drawTextClip(cx + 16, y + 60, "No se vuelve a una version anterior por OTA.", 1, frLo(), cx + cw - 12);
+  // Botones reales
+  fillRoundRect(FR_CAN_X, FR_BTN_Y, FR_CAN_W, FR_BTN_H, FR_BTN_H / 2, frCard());
+  drawTextC(FR_CAN_X + FR_CAN_W / 2, FR_BTN_Y + (FR_BTN_H - 20) / 2, "Cancelar", 2, frHi());
+  fillRoundRect(FR_GO_X, FR_BTN_Y, FR_GO_W, FR_BTN_H, FR_BTN_H / 2, rgb565(200,60,60));
+  drawTextC(FR_GO_X + FR_GO_W / 2, FR_BTN_Y + (FR_BTN_H - 20) / 2, "Continuar", 2, rgb565(255,255,255));
+  present(0, SCR_H - 1);
+}
+
+// Pantalla de escritura de "RESTABLECER" (solo cuando NO hay bloqueo
+// configurado: sin clave que verificar, la barrera es escribir la palabra).
+static void frDrawType(){
+  setBuf(bbuf);
+  // Se limpia la PANTALLA ENTERA, no solo hasta el teclado: con Liquid Glass
+  // activo el panel del teclado muestrea lo que hay debajo, y si esa zona
+  // conservara el cuadro anterior lo arrastraria dentro del vidrio.
+  fillRect(0, 0, SCR_W, SCR_H, frBg());
+  uint16_t c = frHi();
+  strokeSegAA(30, 26, 18, 18, 2.4f, c); strokeSegAA(18, 18, 30, 10, 2.4f, c);
+  drawTextC(SCR_W / 2, 46, "Confirma el borrado", 3, frHi());
+  drawTextC(SCR_W / 2, 84, "Este equipo no tiene bloqueo configurado.", 1, frLo());
+  drawTextC(SCR_W / 2, 104, "Escribe RESTABLECER para continuar.", 1, frLo());
+  int fw = SCR_W - 64, fx = 32, fy = 150;
+  fillRoundRect(fx, fy, fw, 56, 12, frCard());
+  bool okWord = (strcmp(frTyped, FR_WORD) == 0);
+  drawTextC(SCR_W / 2, fy + 18, frTyped[0] ? frTyped : "...", 3, okWord ? rgb565(90,190,130) : frHi());
+  int by = fy + 80;
+  fillRoundRect(32, by, SCR_W - 64, FR_BTN_H, FR_BTN_H / 2, okWord ? rgb565(200,60,60) : frCard());
+  drawTextC(SCR_W / 2, by + (FR_BTN_H - 20) / 2, "Continuar", 2, okWord ? rgb565(255,255,255) : frLo());
+  lsuDrawKb(0, 0);
+  present(0, SCR_H - 1);
+}
+static int frTypeBtnY(){ return 150 + 80; }
+
+static void frDrawSlideKnob(){
+  int kx = FRS_TRACK_X + FRS_KNOB_PAD + frKnob;
+  int ky = FRS_TRACK_Y + FRS_KNOB_PAD;
+  fillRoundRect(FRS_TRACK_X, FRS_TRACK_Y, FRS_TRACK_W, FRS_TRACK_H, FRS_TRACK_H / 2, frCard());
+  drawTextC(SCR_W / 2, FRS_TRACK_Y + (FRS_TRACK_H - 20) / 2, "Desliza para restablecer", 2, frLo());
+  fillCircle(kx + FRS_KNOB_D / 2, ky + FRS_KNOB_D / 2, FRS_KNOB_D / 2, rgb565(210,66,60));
+  uint16_t w = rgb565(255,255,255);
+  int cx = kx + FRS_KNOB_D / 2, cy = ky + FRS_KNOB_D / 2;
+  strokeSegAA(cx - 6, cy - 8, cx + 4, cy, 2.6f, w);
+  strokeSegAA(cx + 4, cy, cx - 6, cy + 8, 2.6f, w);
+}
+static void frDrawSlide(){
+  setBuf(bbuf);
+  fillRect(0, 0, SCR_W, SCR_H, frBg());
+  drawTextC(SCR_W / 2, 120, "Ultimo paso", 3, frHi());
+  int cx = 24, cw = SCR_W - 48;
+  fillRoundRect(cx, 180, cw, 150, 16, frCard());
+  drawTextC(SCR_W / 2, 202, "Se borrara todo el contenido", 2, frHi());
+  drawTextC(SCR_W / 2, 230, "y la configuracion de este", 2, frHi());
+  drawTextC(SCR_W / 2, 258, "dispositivo.", 2, frHi());
+  drawTextC(SCR_W / 2, 292, "Esta accion no se puede deshacer.", 1, rgb565(220,110,90));
+  frDrawSlideKnob();
+  fillRoundRect(FR_CAN_X, FR_BTN_Y, SCR_W - 2 * FR_CAN_X, FR_BTN_H, FR_BTN_H / 2, frCard());
+  drawTextC(SCR_W / 2, FR_BTN_Y + (FR_BTN_H - 20) / 2, "Cancelar", 2, frHi());
+  present(0, SCR_H - 1);
+}
+static void frRenderSlideBand(){
+  setBuf(bbuf);
+  fillRect(0, FRS_TRACK_Y - 4, SCR_W, FRS_TRACK_H + 8, frBg());
+  frDrawSlideKnob();
+  present(FRS_TRACK_Y - 4, FRS_TRACK_Y + FRS_TRACK_H + 3);
+}
+
+// ---- Progreso del borrado: ETAPAS reales, sin porcentajes inventados ----
+#define FR_STAGES 7
+static const char* FR_STAGE_TXT[FR_STAGES] = {
+  "Preparando el dispositivo",
+  "Borrando credenciales y tokens",
+  "Cerrando la sesion remota",
+  "Borrando datos de aplicaciones",
+  "Borrando archivos del usuario",
+  "Borrando ajustes del sistema",
+  "Restaurando valores de fabrica"
+};
+static int frStageIdx(){
+  int shown = gFrErr ? gFrErr : gFrStage;
+  int i = shown - (int)FR_ST_ARMED;
+  if(i < 0) i = 0; if(i >= FR_STAGES) i = FR_STAGES - 1;
+  return i;
+}
+static void frDrawRun(){
+  setBuf(bbuf);
+  fillRect(0, 0, SCR_W, SCR_H, frBg());
+  drawTextC(SCR_W / 2, 240, "Restableciendo", 3, frHi());
+  int idx = frStageIdx();
+  char b[40]; snprintf(b, sizeof(b), "Paso %d de %d", idx + 1, FR_STAGES);
+  drawTextC(SCR_W / 2, 300, b, 2, frLo());
+  drawTextC(SCR_W / 2, 336, FR_STAGE_TXT[idx], 2, frHi());
+  // Barra por PASOS: cada segmento es una etapa terminada de verdad.
+  int bw = SCR_W - 96, bx = 48, by = 396, seg = (bw - (FR_STAGES - 1) * 6) / FR_STAGES;
+  for(int i = 0; i < FR_STAGES; i++)
+    fillRoundRect(bx + i * (seg + 6), by, seg, 10, 5, (i <= idx) ? rgb565(200,60,60) : frCard());
+  drawTextC(SCR_W / 2, 440, "No apagues el dispositivo", 1, frLo());
+  present(0, SCR_H - 1);
+}
+static void frDrawFail(){
+  setBuf(bbuf);
+  fillRect(0, 0, SCR_W, SCR_H, frBg());
+  drawTextC(SCR_W / 2, 200, "Restablecimiento", 3, frHi());
+  drawTextC(SCR_W / 2, 236, "incompleto", 3, frHi());
+  int idx = frStageIdx();
+  drawTextC(SCR_W / 2, 300, "Fallo en:", 2, frLo());
+  drawTextC(SCR_W / 2, 330, FR_STAGE_TXT[idx], 2, rgb565(230,120,90));
+  drawTextC(SCR_W / 2, 380, "El dispositivo se queda en recuperacion:", 1, frLo());
+  drawTextC(SCR_W / 2, 400, "no arranca con datos a medias.", 1, frLo());
+  fillRoundRect(FR_CAN_X, FR_BTN_Y - 76, SCR_W - 2 * FR_CAN_X, FR_BTN_H, FR_BTN_H / 2, rgb565(200,60,60));
+  drawTextC(SCR_W / 2, FR_BTN_Y - 76 + (FR_BTN_H - 20) / 2, "Reintentar", 2, rgb565(255,255,255));
+  fillRoundRect(FR_CAN_X, FR_BTN_Y, SCR_W - 2 * FR_CAN_X, FR_BTN_H, FR_BTN_H / 2, frCard());
+  drawTextC(SCR_W / 2, FR_BTN_Y + (FR_BTN_H - 20) / 2, "Reiniciar", 2, frHi());
+  present(0, SCR_H - 1);
+}
+
+// ---- Motor de borrado: UNA etapa por vuelta del bucle ----
+// Ninguna etapa bloquea mas que lo que dura su propia operacion, el TWDT se
+// alimenta a la entrada y a la salida, y el estado se persiste ANTES de pasar a
+// la siguiente. Si se va la corriente en cualquier punto, el arranque siguiente
+// retoma exactamente por la etapa anotada.
+static bool frStageRun(uint8_t st){
+  flexFeedWdt();
+  switch(st){
+    case FR_ST_ARMED: {
+      // Cerrar todo lo abierto y cortar las escrituras normales.
+      gSessDirtyApp = -1;                       // ningun guardado diferido va a dispararse ya
+      vaultLockFromSystem(FXV_LOCK_EXIT);
+      flexBrowserExit();
+      storeExit();
+      flexAccountCancel();
+      for(int i = 0; i < APP_N; i++) if(gAppState[i] != ALIFE_CLOSED){
+        const AppHooks* h = appHooks(i);
+        if(h && h->close) h->close();
+        gAppState[i] = ALIFE_CLOSED;
+      }
+      while(swCardCount() > 0) swDropCard(0);
+      return true;
+    }
+    case FR_ST_TOKENS: {
+      // Credenciales y tokens LOCALES. La red se suelta con eraseap para que el
+      // driver no conserve su propia copia del perfil.
+      wifiCredsForget();
+      flexAccountForgetLocal();
+      WiFi.disconnect(true, true);
+      WiFi.mode(WIFI_OFF);
+      flexFeedWdt();                            // apagar la radio puede tardar: el TWDT come aqui
+      Preferences p;
+      if(p.begin("flexos", false)){
+        p.remove("lockpin"); p.remove("lockpass"); p.remove("locktype"); p.remove("lockfails");
+        p.end();
+      }
+      gLockType = 0; lockFails = 0;
+      return true;
+    }
+    case FR_ST_REMOTE: {
+      // CIERRE DE SESION REMOTA. Este firmware no tiene todavia ningun servicio
+      // de cuenta con API de revocacion: no hay a quien llamar, asi que no se
+      // finge una llamada ni se inventa un resultado. Cuando exista, va aqui --
+      // y un fallo de red NO puede impedir el borrado local, por eso esta etapa
+      // devuelve true siempre.
+      Serial.println(F("[RESET] sin servicio de cuenta remota: no hay sesion que revocar"));
+      return true;
+    }
+    case FR_ST_APPDATA: {
+      if(flexFsReady()){ fsWipeDir(FS_DIR_SESS); fsWipeDir(FS_DIR_CACHE); }
+      for(int i = 0; i < APP_N; i++){ gSessLoaded[i] = false; gSessNeedSave[i] = false; }
+      return true;
+    }
+    case FR_ST_FILES: {
+      if(!flexFsReady()) return true;            // sin particion montada no hay archivos que borrar
+      flexFeedWdt();
+      bool ok = flexFsFactoryErase();
+      flexFeedWdt();
+      return ok;
+    }
+    case FR_ST_NVS: {
+      // Namespaces CONOCIDOS, uno a uno. NUNCA un borrado global de NVS: eso se
+      // llevaria por delante el propio marcador de recuperacion ("flexreset"),
+      // que es justo lo que permite retomar esto si se corta la corriente.
+      static const char* NS[] = {
+        "flexos", "flexos_wifi", "flexos_time", "flexota", "flexqs",
+        "flexacct", "fxvault", SAFE_NVS_NS
+      };
+      for(unsigned i = 0; i < sizeof(NS) / sizeof(NS[0]); i++){
+        Preferences p;
+        if(p.begin(NS[i], false)){ p.clear(); p.end(); }
+      }
+      return true;
+    }
+    case FR_ST_DEFAULTS: {
+      // Valores de fabrica en RAM, para que la pantalla siguiente ya sea la de
+      // un dispositivo nuevo aunque el reinicio tarde un instante.
+      cfgOobeDone = false; cfgLang = 0; g24h = false; uiGlass = false; gDark = true;
+      gIconStyle = 0; gBright = 80; gLockType = 0; lockFails = 0;
+      gAutoLockMs = AUTOLOCK_DEFAULT_MS; gPoffPin = false; gAppLock = 0;
+      kioskOn = false; kioskApp = -1;
+    gLockWidgets = LW_CLOCK; gNavMode = 0; gAnimStyle = 0;
+      snprintf(cfgName, sizeof(cfgName), "%s", "FlexOS Ultra");
+      kbShortcutsDefaults();
+      for(int i = 0; i < 12; i++) homeOrder[i] = (uint8_t)i;
+      noteBuffer[0] = 0; noteCur = 0; noteScroll = 0; noteEditorScroll = 0; noteClearSel();
+      noteView = 0; notePath[0] = 0;
+      paintView = 0; paintPath[0] = 0; paintScroll = 0;
+      pColor = P_PAL[0]; pSizeIx = 1; pStrokeN = 0;
+      return true;
+    }
+  }
+  return true;
+}
+static void frAdvance(){
+  if(!frStageRun(gFrStage)){
+    gFrErr = gFrStage; gFrStage = FR_ST_FAIL; frSaveState();
+    frView = FRV_FAIL; frDrawFail();
+    return;
+  }
+  if(gFrStage >= FR_ST_DEFAULTS){
+    // Ultimo paso ANTES de reiniciar: se anota que el borrado termino. El
+    // marcador NO se borra aqui -- se borra al confirmar el arranque limpio.
+    gFrStage = FR_ST_DONE;
+    if(!frSaveState()){
+      gFrErr = FR_ST_DEFAULTS; gFrStage = FR_ST_FAIL;
+      frView = FRV_FAIL; frDrawFail();
+      return;
+    }
+    Serial.println(F("[RESET] borrado completo: reiniciando como dispositivo nuevo"));
+    setBuf(bbuf);
+    fillRect(0, 0, SCR_W, SCR_H, frBg());
+    drawTextC(SCR_W / 2, SCR_H / 2 - 20, "Listo", 3, frHi());
+    drawTextC(SCR_W / 2, SCR_H / 2 + 20, "Reiniciando...", 2, frLo());
+    present(0, SCR_H - 1);
+    flexFeedWdt();
+    esp_restart();                              // API adecuada de reinicio (no un watchdog forzado)
+    return;
+  }
+  gFrStage++;
+  if(!frSaveState()){
+    gFrErr = gFrStage; gFrStage = FR_ST_FAIL;
+    frView = FRV_FAIL; frDrawFail();
+    return;
+  }
+  frStageMs = millis();
+  frDrawRun();
+}
+
+// ---- Entradas del asistente ----
+static bool frFromSafe = false;      // el asistente se abrio desde el Modo seguro
+static void frCancelToSettings(){
+  frView = FRV_INTRO; frKnob = 0; frDrag = false; frTyped[0] = 0;
+  // Se vuelve por donde se entro: al Modo seguro si de ahi se venia, y a
+  // Ajustes en cualquier otro caso. En los dos, sin haber modificado un dato.
+  if(frFromSafe){ frFromSafe = false; safeEnter(); return; }
+  gState = ST_APP; gAppId = IC_AJUSTES; gAppState[IC_AJUSTES] = ALIFE_RUNNING;
+  settingsRender();
+  touchDropAll();
+}
+static void frEnterWizard(){
+  // No se puede empezar un restablecimiento con una actualizacion en curso: el
+  // OTA esta escribiendo en la particion de firmware y cortarlo a media
+  // instalacion es exactamente lo que no puede pasar.
+  if(flexOtaBusy()){
+    setBuf(bbuf);
+    fillRect(0, 0, SCR_W, SCR_H, frBg());
+    drawTextC(SCR_W / 2, SCR_H / 2 - 20, "Actualizacion en curso", 2, frHi());
+    drawTextC(SCR_W / 2, SCR_H / 2 + 12, "Espera a que termine para restablecer", 1, frLo());
+    present(0, SCR_H - 1);
+    gSafeMsgMs = millis();                      // se retira sola (ver frTick)
+    gState = ST_FACTORY; frView = FRV_INTRO; frKnob = -1;   // -1 = solo aviso, sin asistente
+    return;
+  }
+  gLand = false;
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
+  frView = FRV_INTRO; frKnob = 0; frDrag = false; frTyped[0] = 0;
+  gState = ST_FACTORY;
+  frDrawIntro();
+  touchDropAll();
+}
+// Verificacion superada (la resuelve lsuFinishAfter): se pasa al ultimo paso.
+static void frAfterVerify(){
+  gLand = false;
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
+  gState = ST_FACTORY; frView = FRV_SLIDE; frKnob = 0; frDrag = false;
+  frDrawSlide();
+  touchDropAll();
+}
+// Arranca el borrado: a partir de aqui no hay marcha atras ni navegacion.
+static void frBeginWipe(){
+  gFrPending = true; gFrStage = FR_ST_ARMED; gFrErr = 0;
+  if(!frSaveState()){                           // MARCADOR ANTES de tocar un solo dato
+    gFrPending = false; gFrStage = FR_ST_FAIL; gFrErr = FR_ST_ARMED;
+    frView = FRV_FAIL; frDrawFail();
+    return;
+  }
+  frView = FRV_RUN;
+  gState = ST_FACTORY;
+  frStageMs = millis();
+  frDrawRun();
+}
+// Retoma un borrado interrumpido. Se llama en el arranque, ANTES de montar
+// nada privado y antes de abrir Cuenta, boveda, tienda o cualquier app.
+static void frResumeAfterBoot(){
+  gLand = false;
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
+  gState = ST_FACTORY;
+  if(gFrStage == FR_ST_FAIL){ frView = FRV_FAIL; frDrawFail(); return; }
+  frView = FRV_RUN;
+  frStageMs = millis();
+  Serial.printf("[RESET] borrado interrumpido: se retoma en la etapa %u\n", (unsigned)gFrStage);
+  frDrawRun();
+}
+
+static void frTick(){
+  // Aviso "actualizacion en curso": se retira solo y vuelve a Ajustes.
+  if(frKnob < 0){
+    if(millis() - gSafeMsgMs > 2200 || T.tap){ frKnob = 0; frCancelToSettings(); }
+    return;
+  }
+  if(frView == FRV_RUN){
+    if(millis() - frStageMs < FR_STEP_MIN_MS) return;   // la etapa en curso se deja leer
+    frAdvance();                                        // una etapa por vuelta: el TWDT respira
+    return;
+  }
+  if(frView == FRV_FAIL){
+    if(!T.tap) return;
+    if(T.y >= FR_BTN_Y - 76 && T.y <= FR_BTN_Y - 76 + FR_BTN_H){
+      // Si fallo el PRIMER marcador, todavia no se borro nada: vuelve a armar
+      // la transaccion completa. En fallos posteriores, reanuda la etapa
+      // idempotente anotada y exige de nuevo que NVS la confirme.
+      if(!gFrPending){ frBeginWipe(); return; }
+      uint8_t retry = (uint8_t)(gFrErr ? gFrErr : FR_ST_ARMED);
+      gFrStage = retry; gFrErr = 0;
+      if(!frSaveState()){
+        gFrErr = retry; gFrStage = FR_ST_FAIL; frDrawFail();
+        return;
+      }
+      frView = FRV_RUN; frStageMs = millis(); frDrawRun(); return;
+    }
+    if(T.y >= FR_BTN_Y && T.y <= FR_BTN_Y + FR_BTN_H){ flexFeedWdt(); esp_restart(); }
+    return;
+  }
+  if(frView == FRV_INTRO){
+    if(!T.tap) return;
+    if(T.y >= FR_BTN_Y && T.y <= FR_BTN_Y + FR_BTN_H){
+      if(T.x >= FR_CAN_X && T.x <= FR_CAN_X + FR_CAN_W){ frCancelToSettings(); return; }
+      if(T.x >= FR_GO_X && T.x <= FR_GO_X + FR_GO_W){
+        // SEGURIDAD: se delega enteramente en el verificador del bloqueo. Aqui
+        // no se lee ninguna clave guardada ni se compara nada.
+        if(gLockType > 0){ lsuStartVerifyFor(LSU_AFTER_FACTORY, -1); return; }
+        frView = FRV_TYPE; frTyped[0] = 0;
+        // lsuVerify a false: el teclado que se reutiliza aqui toma su paleta de
+        // esa bandera, y en modo "verificar" pinta sobre el fondo desenfocado
+        // del bloqueo, que no es el fondo de esta pantalla.
+        lsuVerify = false;
+        mapaActivo = LAYOUT_ES; kbLangEs = true; kbShift = true;
+        kbExtrasOn = false; kbBotReserve = 0; kbApplySize(); kbMtSurfaceReset();
+        frDrawType();
+        return;
+      }
+    }
+    return;
+  }
+  if(frView == FRV_TYPE){
+    if(T.pressed && !(KB_MULTITOUCH_ON && gKbFastType)) kbFxPress(kbCellAt(T.x, T.y), lsuKeyCol(), lsuKeyTxt());
+    if(!T.tap) return;
+    if(T.x < 48 && T.y < 48){ frCancelToSettings(); return; }
+    int by = frTypeBtnY();
+    if(T.y >= by && T.y <= by + FR_BTN_H){
+      if(strcmp(frTyped, FR_WORD) == 0) frAfterVerify();
+      return;
+    }
+    int fi = kbFRowHit(T.x, T.y);
+    if(fi >= 0){
+      if(fi == 0) kbShift = !kbShift;
+      else if(fi == 4){ int L = strlen(frTyped); if(L > 0) frTyped[L - 1] = 0; }
+      frDrawType(); return;
+    }
+    int cell = kbCellAt(T.x, T.y);
+    if(cell >= 0){
+      const char* k = mapaActivo[cell / KB_COLS][cell % KB_COLS];
+      // Solo letras A-Z: la palabra de confirmacion no lleva nada mas, y asi no
+      // se pueden colar acentos ni simbolos que nunca coincidirian.
+      if(k[1] == 0 && ((k[0] >= 'a' && k[0] <= 'z') || (k[0] >= 'A' && k[0] <= 'Z'))){
+        int L = strlen(frTyped);
+        if(L < (int)sizeof(frTyped) - 1){
+          frTyped[L] = (char)((k[0] >= 'a') ? (k[0] - 32) : k[0]);   // siempre mayuscula
+          frTyped[L + 1] = 0;
+        }
+        kbFxStart(cell);
+      }
+      frDrawType();
+    }
+    return;
+  }
+  // FRV_SLIDE: deslizador sostenido. Nunca se completa con un toque.
+  int kx = FRS_TRACK_X + FRS_KNOB_PAD + frKnob;
+  if(T.pressed && !frDrag){
+    if(T.y >= FRS_TRACK_Y && T.y <= FRS_TRACK_Y + FRS_TRACK_H &&
+       T.x >= kx - 24 && T.x <= kx + FRS_KNOB_D + 24){ frDrag = true; frGrab = T.x - kx; }
+  }
+  if(frDrag){
+    if(T.down){
+      int v = T.x - frGrab - (FRS_TRACK_X + FRS_KNOB_PAD);
+      if(v < 0) v = 0; if(v > FRS_RUN) v = FRS_RUN;
+      if(v != frKnob){ frKnob = v; frRenderSlideBand(); }
+    } else {
+      frDrag = false;
+      if(FRS_RUN > 0 && frKnob * 100 / FRS_RUN >= FRS_DONE_PCT){ frBeginWipe(); return; }
+      frKnob = 0; frRenderSlideBand();                    // no llego: vuelve a su sitio
+    }
+    return;
+  }
+  if(T.tap && T.y >= FR_BTN_Y && T.y <= FR_BTN_Y + FR_BTN_H){ frCancelToSettings(); return; }
+}
+
+// #############################################################
+// ##  MODO SEGURO  ·  pantalla y restricciones
+// ##  ------------------------------------------------------
+// ##  Se entra solo despues de SAFE_FAIL_MAX reinicios ANORMALES
+// ##  consecutivos (ver safeBootEval). Aqui no se borra nada por su
+// ##  cuenta: se arranca con lo minimo, se dice la causa real y se
+// ##  ofrecen las salidas.
+// ##
+// ##  Que sigue disponible: pantalla, tactil, Inicio, Ajustes,
+// ##  Explorador (Almacenamiento), Reloj, Calculadora, el diagnostico
+// ##  de esta misma pantalla y el Restablecimiento de fabrica.
+// ##  Que no: apps de terceros, el resto de apps integradas no
+// ##  esenciales, fondo y widgets del usuario, animaciones no
+// ##  esenciales y cualquier tarea de red pesada.
+// #############################################################
+// Apps permitidas en Modo seguro. Es una lista blanca: lo que no esta,
+// no se abre. Ninguna de ellas necesita red ni buffers grandes.
+static bool safeAppAllowed(int id){
+  if(!gSafeMode) return true;
+  return id == IC_AJUSTES || id == IC_ALMACEN || id == IC_RELOJ || id == IC_CALC;
+}
+// Apps de TERCEROS instaladas. Este firmware todavia no tiene instalador de
+// paquetes, asi que la mascara vale 0 y la fila correspondiente sale
+// desactivada con su motivo: es un dato real, no un boton de adorno.
+static uint16_t safeThirdPartyMask(){
+  Preferences p; uint16_t m = 0;
+  if(p.begin("flexos", true)){ m = (uint16_t)p.getInt("apps3rd", 0); p.end(); }
+  return m;
+}
+static int safeThirdPartyCount(){
+  uint16_t m = safeThirdPartyMask(); int n = 0;
+  while(m){ n += (m & 1); m >>= 1; }
+  return n;
+}
+// Aviso REAL al intentar abrir una app no permitida. Se compone sobre el
+// escritorio ya pintado y se retira sola (safeToastTick).
+static void safeDenyApp(int id){
+  if(!homeBuf || !bbuf) return;
+  int y0 = 300, h = 76;
+  setBuf(bbuf);
+  for(int j = y0; j < y0 + h; j++) memcpy(bbuf + (size_t)j * SCR_W, homeBuf + (size_t)j * SCR_W, SCR_W * 2);
+  fillRoundRectA(28, y0 + 8, SCR_W - 56, h - 16, 16, rgb565(24,26,36), 240);
+  drawTextC(SCR_W / 2, y0 + 18, "No disponible en Modo seguro", 2, rgb565(240,244,252));
+  drawTextC(SCR_W / 2, y0 + 42, appName(id), 1, rgb565(170,178,196));
+  present(y0, y0 + h - 1);
+  gSafeMsgMs = millis();
+}
+static void safeToastTick(){
+  if(!gSafeMsgMs || gState != ST_HOME) return;
+  if(millis() - gSafeMsgMs < 1800) return;
+  gSafeMsgMs = 0;
+  if(!homeBuf) return;
+  int y0 = 300, h = 76;
+  setBuf(bbuf);
+  for(int j = y0; j < y0 + h; j++) memcpy(bbuf + (size_t)j * SCR_W, homeBuf + (size_t)j * SCR_W, SCR_W * 2);
+  present(y0, y0 + h - 1);
+}
+
+// Limpieza de caches SEGURAS: solo lo que el sistema sabe reconstruir solo.
+// No toca notas, dibujos, ajustes ni credenciales.
+static void safeClearCaches(){
+  int n = fsWipeDir(FS_DIR_CACHE);
+  if(blurBg){ free(blurBg); blurBg = NULL; }
+  if(vidBufA){ free(vidBufA); vidBufA = NULL; }
+  if(vidBufB){ free(vidBufB); vidBufB = NULL; }
+  vidFront = vidBack = NULL;
+  if(camScene){ free(camScene); camScene = NULL; }
+  if(pStroke && gAppState[IC_PAINT] == ALIFE_CLOSED){ free(pStroke); pStroke = NULL; }
+  qsDirty = true; gHomeDirty = true;
+  Serial.printf("[SAFE] caches limpiadas (%d archivos)\n", n);
+}
+
+#define SAFE_ROWS   7
+#define SAFE_ROW_H  66
+#define SAFE_ROW_Y0 292
+static const char* SAFE_ROW_T[SAFE_ROWS] = {
+  "Reiniciar normalmente",
+  "Apps de terceros",
+  "Limpiar caches seguras",
+  "Ajustes",
+  "Explorador de archivos",
+  "Ir al escritorio (limitado)",
+  "Restablecer datos de fabrica"
+};
+static bool safeRowEnabled(int i){
+  if(i == 1) return safeThirdPartyCount() > 0;
+  return true;
+}
+static const char* safeRowVal(int i, char* buf, size_t n){
+  switch(i){
+    case 0: return "Sale del Modo seguro y arranca normal";
+    case 1:
+      if(safeThirdPartyCount() == 0) return "Ninguna instalada: nada que desactivar";
+      snprintf(buf, n, "Desactivar las %d instaladas", safeThirdPartyCount());
+      return buf;
+    case 2: return "Vistas previas y datos temporales";
+    case 3: return "Disponible en Modo seguro";
+    case 4: return "Disponible en Modo seguro";
+    case 5: return "Toca \"Modo seguro\" en el escritorio para volver";
+    default: return "Borra todo el contenido del dispositivo";
+  }
+}
+static void safeRender(){
+  // Respeta el tema claro/oscuro del sistema, igual que Ajustes: el Modo seguro
+  // reduce lo PESADO (fondo, widgets, animaciones), no la coherencia visual.
+  uint16_t BG = PAGE_BG, CARD = SET_CARD_BG, HI = SET_TXT_HI, LO = SET_TXT_LO, MUTE = SET_TXT_MUTE;
+  setBuf(bbuf);
+  fillRect(0, 0, SCR_W, SCR_H, BG);
+  drawTextC(SCR_W / 2, 44, "Modo seguro", 3, rgb565(226,160,70));
+  drawTextC(SCR_W / 2, 82, "FlexOS ha arrancado con lo minimo", 1, LO);
+  int cx = 20, cw = SCR_W - 40;
+  fillRoundRect(cx, 112, cw, 148, 16, CARD);
+  drawText(cx + 16, 126, "Motivo del ultimo fallo", 2, HI);
+  drawTextClip(cx + 16, 154, safeCauseText(), 2, rgb565(214,104,74), cx + cw - 12);
+  char b[56];
+  snprintf(b, sizeof(b), "Reinicios anormales seguidos: %u", (unsigned)gSafeFails);
+  drawTextClip(cx + 16, 184, b, 1, LO, cx + cw - 12);
+  drawTextClip(cx + 16, 206, "Apps no esenciales y personalizacion", 1, LO, cx + cw - 12);
+  drawTextClip(cx + 16, 226, "desactivadas mientras dure este modo.", 1, LO, cx + cw - 12);
+  for(int i = 0; i < SAFE_ROWS; i++){
+    int y = SAFE_ROW_Y0 + i * SAFE_ROW_H;
+    bool on = safeRowEnabled(i);
+    fillRoundRect(cx, y, cw, SAFE_ROW_H - 8, 14, CARD);
+    uint16_t tc = on ? ((i == SAFE_ROWS - 1) ? rgb565(214,84,74) : HI) : MUTE;
+    drawTextClip(cx + 16, y + 10, SAFE_ROW_T[i], 2, tc, cx + cw - 24);
+    char vb[48];
+    drawTextClip(cx + 16, y + 34, safeRowVal(i, vb, sizeof(vb)), 1, on ? LO : MUTE, cx + cw - 24);
+  }
+  drawTextC(SCR_W / 2, SCR_H - 40, "Un arranque estable limpia el contador solo", 1, MUTE);
+  present(0, SCR_H - 1);
+}
+static void safeEnter(){
+  gLand = false;
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
+  gState = ST_SAFE;
+  safeRender();
+  touchDropAll();
+}
+static void safeTick(){
+  if(!T.tap) return;
+  for(int i = 0; i < SAFE_ROWS; i++){
+    int y = SAFE_ROW_Y0 + i * SAFE_ROW_H;
+    if(T.y < y || T.y > y + SAFE_ROW_H - 8) continue;
+    if(!safeRowEnabled(i)) return;                 // fila inerte: ni siquiera repinta
+    switch(i){
+      case 0: safeExitAndReboot(); return;
+      case 1: {                                    // desactivar apps de terceros
+        Preferences p;
+        if(p.begin("flexos", false)){ p.putInt("apps3rd", 0); p.end(); }
+        safeRender(); return;
+      }
+      case 2: safeClearCaches(); safeRender(); return;
+      case 3: renderHome(); enterApp(IC_AJUSTES); return;
+      case 4: renderHome(); enterApp(IC_ALMACEN); return;
+      case 5: gHomeDirty = true; enterHome(); touchDropAll(); return;
+      default: frFromSafe = true; frEnterWizard(); return;
+    }
+  }
+}
+
 // Puente del modulo OTA. Va AQUI, y no arriba, a proposito: implementa
 // las funciones otaHost* llamando a las primitivas graficas del sistema
 // (fillRect, drawText, present, setBuf...), que son `static` y por tanto
@@ -29291,6 +31461,12 @@ static void vaultStatusText(char* out, size_t n){
 // retorno al configurador de Wi-Fi.
 #include "FlexOS_Account_Bridge.h"
 
+// Adaptadores de ciclo de vida para modulos cuyo estado interno ya es propio.
+// Suspender no destruye pestañas ni descargas; cerrar la tarjeta si libera todo.
+static void navResumeLife(){ navEnter(); }
+static void navCloseLife(){ flexBrowserExit(); }
+static void storeResumeLife(){ storeEnter(); }
+static void storeCloseLife(){ storeExit(); }
 
 void setup(){
   Serial.begin(115200);
@@ -29326,9 +31502,13 @@ void setup(){
   }
 
   flexTouchInit();       // GT911: fallo suave (si no aparece, se sigue sin tactil)
-  bootInitRadioSafe();   // WiFi/C6: BYPASS -> nunca bloquea el arranque
-  flexBrowserBegin();    // Navegador: carga ajustes, historial y favoritos. No abre red.
-  flexOtaBegin();        // OTA: crea la tarea de fondo (prioridad baja). No conecta ni descarga nada aqui.
+  safeBootEval();        // antes de iniciar tareas pesadas: decide el modo de recuperacion
+  frLoadState();         // marcador transaccional del restablecimiento
+  if(!gFrPending && !gSafeMode){
+    bootInitRadioSafe(); // WiFi/C6: BYPASS -> nunca bloquea el arranque
+    flexBrowserBegin();  // carga estado; no abre red
+    flexOtaBegin();      // crea la tarea de fondo; no descarga aqui
+  }
 
   // SEGURIDAD DEL BLOQUEO: migracion del PIN/contrasena guardados en
   // TEXTO LEGIBLE por las versiones anteriores a hash con sal. Va ANTES de
@@ -29339,7 +31519,7 @@ void setup(){
   // la misma clave, y solo entonces borrar el texto legible), asi que un
   // fallo a mitad deja el telefono abriendose con la clave de siempre en
   // vez de dejar al usuario fuera. Ver flexLockMigrate en FlexOS_Vault.h.
-  {
+  if(!gFrPending){
     int mg = flexLockMigrate();
     if(mg > 0)      Serial.println(F("[SEG] clave del bloqueo migrada a hash con sal"));
     else if(mg < 0) Serial.println(F("[SEG] no se pudo migrar la clave: se conserva la anterior"));
@@ -29354,17 +31534,28 @@ void setup(){
   else {
     Serial.printf("[FS] LittleFS: %lu / %lu bytes usados\n",
                   (unsigned long)flexFsUsedBytes(), (unsigned long)flexFsTotalBytes());
-    flexPkgBegin();       // recupera una transaccion interrumpida y limpia staging obsoleto
+    flexFsMkdir(FS_DIR_SESS);
+    flexFsMkdir(FS_DIR_CACHE);
+    if(!gFrPending && !gSafeMode) flexPkgBegin();
   }
-  flexStoreBegin();       // crea la tarea de fondo; no abre WiFi ni descarga en setup()
-  flexAccountBegin();     // carga la cuenta local y crea su tarea; no toca la radio
+
+  // Una recuperacion interrumpida solo necesita pantalla, tactil, NVS y FS.
+  // No se cargan cuenta, boveda, tienda, navegador ni red antes de terminar.
+  if(gFrPending){ setBacklight(gBright); frResumeAfterBoot(); return; }
+
+  if(!gSafeMode){
+    flexStoreBegin();       // crea la tarea de fondo; no abre WiFi ni descarga en setup()
+    flexAccountBegin();     // carga la cuenta local y crea su tarea; no toca la radio
+  }
 
   // FLEX VAULT. Solo carga el sobre de la clave y los contadores de NVS:
   // la boveda arranca SIEMPRE cerrada y no se descifra nada aqui. Necesita
   // el sistema de archivos montado, por eso va justo despues.
-  flexVaultBegin();
-  connBootRestore();              // modo avion guardado (solo lee NVS, no toca radio)
-  flexWeatherBegin();             // CLIMA: ubicaciones y cache de NVS + su tarea de red. NO toca la radio aqui
+  if(!gSafeMode){
+    flexVaultBegin();
+    connBootRestore();            // modo avion guardado (solo lee NVS, no toca radio)
+    flexWeatherBegin();           // ubicaciones y cache + tarea de red
+  }
   setBacklight(gBright);          // aplica el brillo guardado
   homeOrderLoad();                // orden de iconos del Home
   // ASPECTO DEL INICIO: fondo de inicio y de bloqueo, imagen elegida, encuadre,
@@ -29409,6 +31600,8 @@ void setup(){
   }
   bool abnormal = !(rr == ESP_RST_POWERON || rr == ESP_RST_SW || fromDeep);
   if(abnormal) showBootBanner();
+
+  if(gSafeMode){ safeEnter(); return; }
 
   // Fondo NEGRO ABSOLUTO para el splash (como un movil comercial)
   setBuf(fb);
@@ -29467,14 +31660,41 @@ static void uiTick(){
 void loop(){
   flexFeedWdt();          // alimenta el TWDT solo si loopTask sigue suscrito (ver arriba)
   flexPollTouch();        // (aqui dentro corre tambien el detector de doble-tap de la suspension)
+
+  // -----------------------------------------------------------
+  //  RESTABLECIMIENTO DE FABRICA EN CURSO: PANTALLA EN EXCLUSIVA
+  //  ---------------------------------------------------------
+  //  Mientras el borrado corre, NADIE mas dibuja ni recibe toques: ni
+  //  el escritorio, ni la isla de notificaciones, ni el panel rapido,
+  //  ni la capa del OTA. Un solo propietario de la pantalla, igual que
+  //  ya hacia el OTA con su overlay a pantalla completa.
+  //
+  //  El tactil, el TWDT y el reloj SIGUEN corriendo: lo unico que se
+  //  corta es todo lo demas. Y como frTick ejecuta UNA etapa por
+  //  vuelta, el watchdog se alimenta entre etapa y etapa sin ocultar
+  //  ningun bloqueo real.
+  // -----------------------------------------------------------
+  if(gFrPending || (gState == ST_FACTORY)){
+    clkUpdate();
+    frTick();
+    delay(5);
+    return;
+  }
+
+  safeStableTick();
+  sessAutosaveTick();
+  safeToastTick();
+
   suspFadeTick();         // SUSPENSION/APAGADO: un paso del fundido de backlight (no bloqueante)
   autoLockTick();         // FASE 1: bloqueo por inactividad (lee T sin filtrar, antes de que nadie consuma el toque)
   cronoOverlayTouch();    // CRONOMETRO: la capsula y su tarjeta se quedan el toque antes que la isla
   notifHandleTouch();     // la isla intercepta toques dentro de sus tarjetas (Fase 1)
   flexOtaTouchBridge();   // OTA: si hay overlay visible, se queda el toque antes que nadie
   hwDetectTick();         // deteccion I2C incremental, mismo contexto que el tactil (Fase 2)
-  wifiAutoReconnectTick();// reconexion WiFi diferida (la radio NUNCA se toca en setup(); ver bootInitRadioSafe)
-  ntpTick();              // NTP: decide CUANDO pedir hora. La red corre en su tarea, nunca aqui
+  if(!gSafeMode){
+    wifiAutoReconnectTick();// reconexion WiFi diferida
+    ntpTick();              // la red corre en su tarea, nunca aqui
+  }
   clkPersistTick();       // guarda la hora en NVS una vez por hora (arranque sin internet)
   bool minChanged = clkUpdate();
   gMinChanged = minChanged;
@@ -29509,7 +31729,7 @@ void loop(){
     return;
   }
 
-  flexWeatherTick(gNetOnline);  // CLIMA: solo DECIDE cuando refrescar; la descarga corre en su tarea
+  if(!gSafeMode) flexWeatherTick(gNetOnline);
 
   // -----------------------------------------------------------
   //  PANEL RAPIDO GLOBAL
@@ -29595,6 +31815,8 @@ void loop(){
     case ST_VAULT:            vaultTick(); break;          // Flex Vault (Carpeta segura)
     case ST_DRAWER:           drawerTick(); break;         // Caja de aplicaciones (One UI)
     case ST_HOMECFG:          hcTick(); break;             // Personalizar inicio
+    case ST_SAFE:             safeTick(); break;
+    case ST_FACTORY:          frTick(); break;
   }
   kioskTick();            // FASE 4: refresca el candado y escucha el gesto de salida
   wgDataTick();           // widgets del Home: refresco de DATOS (nunca dentro del dibujo)

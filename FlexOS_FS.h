@@ -233,6 +233,16 @@ int      flexFsReadBin(const char* path, void* buf, size_t n);
 // Escribe `n` bytes reemplazando el fichero. false si no se escribio todo.
 bool     flexFsWriteBin(const char* path, const void* buf, size_t n);
 
+// Escritura binaria recuperable. Escribe primero en un temporal, verifica el
+// tamano y solo entonces sustituye el destino. Si se corta la energia, queda
+// intacto el archivo anterior o un temporal que puede descartarse al arrancar.
+bool     flexFsWriteBinAtomic(const char* path, const void* buf, size_t n);
+
+// Formatea por completo la particion de usuario y vuelve a crear las carpetas
+// base. Se reserva para el restablecimiento de fabrica, despues de una
+// confirmacion explicita; nunca se llama durante un montaje normal.
+bool     flexFsFactoryErase();
+
 // Lee `n` bytes DESDE el desplazamiento `off`. Devuelve los leidos
 // (0 al final del fichero) o -1 si no se pudo abrir. La necesita
 // Flex Vault para cifrar un fichero grande por bloques sin cargarlo
