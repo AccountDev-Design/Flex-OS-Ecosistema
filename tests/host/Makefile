@@ -43,7 +43,7 @@ JPEG_SRC := $(ROOT)/FlexOS_JPEG.cpp
 APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net \
-        $(BUILD)/test_vault $(BUILD)/test_weather
+        $(BUILD)/test_vault $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone
 TOOLS := $(BUILD)/jpegcheck
 
 .PHONY: all run all-boards fixtures clean ino
@@ -58,6 +58,22 @@ $(BUILD)/test_jpeg: test_jpeg.cpp $(JPEG_SRC) $(ROOT)/FlexOS_JPEG.h | $(BUILD)
 
 $(BUILD)/test_browser: test_browser.cpp $(CORE_SRC) $(ROOT)/FlexOS_Browser.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_browser.cpp $(CORE_SRC)
+
+# --- Flex Link / Flex Phone: protocolo y modelo del telefono ---
+# Nucleo PURO (sin Arduino), asi que se compila igual que el del
+# navegador: con AddressSanitizer y UndefinedBehavior Sanitizer.
+# Aqui es obligatorio -- estos dos ficheros parsean bytes que llegan
+# por el aire desde un telefono, y un desbordamiento en el
+# reensamblador no puede quedarse en "parece que funciona".
+FLNKSRC := $(ROOT)/FlexOS_FlexLink.cpp
+FLPSRC  := $(ROOT)/FlexOS_FlexPhone.cpp
+
+$(BUILD)/test_flexlink: test_flexlink.cpp $(FLNKSRC) $(ROOT)/FlexOS_FlexLink.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -o $@ test_flexlink.cpp $(FLNKSRC)
+
+$(BUILD)/test_flexphone: test_flexphone.cpp $(FLPSRC) $(FLNKSRC) \
+                         $(ROOT)/FlexOS_FlexPhone.h $(ROOT)/FlexOS_FlexLink.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -o $@ test_flexphone.cpp $(FLPSRC) $(FLNKSRC)
 
 # --- Flex Vault: cripto y almacen cifrado ---
 # Se compila el modulo REAL (FlexOS_Vault.cpp) con OpenSSL como
@@ -162,6 +178,10 @@ parts:
 run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@echo
 	@$(BUILD)/test_ino
+	@echo
+	@$(BUILD)/test_flexlink
+	@echo
+	@$(BUILD)/test_flexphone
 	@echo
 	@$(BUILD)/test_vault
 	@echo
