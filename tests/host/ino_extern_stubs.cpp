@@ -321,3 +321,13 @@ void flexAccountSnapshot(FlexAccountSnapshot* out){
 }
 bool flexAccountCopyBearer(char* out, size_t n){ if(out && n) out[0] = 0; return false; }
 void flexAccountForgetLocal(){}
+
+// -- Flex FS: anadidos por "secure reset and app continuity" --
+// El .ino ya llamaba a estas cuatro; sin sus dobles, test_ino no ENLAZA
+// (el -fsyntax-only de `make ino` no lo detecta). Mismo criterio que el
+// resto del fichero: contestan "no disponible", que es lo que ve el
+// sketch cuando no hay tarjeta montada.
+int      flexFsCount(const char*){ return 0; }
+bool     flexFsMkdir(const char*){ return false; }
+bool     flexFsWriteBinAtomic(const char*, const void*, size_t){ return false; }
+bool     flexFsFactoryErase(){ return false; }
