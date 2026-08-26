@@ -1,0 +1,9 @@
+# Copia este fichero a local.properties y pon la ruta de TU SDK.
+#
+# local.properties NO se versiona (esta en .gitignore): la ruta del
+# SDK es de cada maquina.
+#
+# Sin este fichero -- o sin ANDROID_HOME -- el proyecto sigue
+# funcionando, pero solo construye el modulo :protocol. Ver
+# settings.gradle.kts.
+sdk.dir=/ruta/a/tu/Android/Sdk

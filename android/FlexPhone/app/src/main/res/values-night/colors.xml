@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Modo oscuro: mismo fondo que usa Compose, para que el
+         arranque no parpadee en claro antes de componer. -->
+    <color name="flex_window_bg">#101215</color>
+</resources>

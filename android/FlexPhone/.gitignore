@@ -1,0 +1,14 @@
+# Gradle / Android
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Claves de firma: NUNCA en el repositorio
+*.jks
+*.keystore
+keystore.properties

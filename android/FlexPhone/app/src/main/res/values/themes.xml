@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Tema de arranque. Los colores REALES los pone Compose
+      (ui/theme/Theme.kt); esto solo evita el destello blanco entre
+      que arranca el proceso y se compone la primera pantalla.
+    -->
+    <style name="Theme.FlexPhone" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/flex_window_bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>

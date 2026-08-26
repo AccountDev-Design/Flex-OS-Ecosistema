@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Flex Phone -- manifiesto.
+
+  PERMISOS: cada uno esta aqui porque una funcion CONCRETA lo
+  necesita, y cada uno se pide en el momento en que hace falta, no
+  todos de golpe al abrir la app.
+
+  Lo que NO se pide, a proposito:
+    · no se piden CONTACTOS: las conversaciones salen del titulo de
+      la notificacion, que ya lo da Android;
+    · no se pide SMS ni CALL_LOG: Flex OS no envia SMS y no se va a
+      insinuar que pueda;
+    · no se pide ubicacion. ACCESS_FINE_LOCATION solo aparece
+      limitada a Android 11 y anteriores, donde el sistema la exigia
+      para escanear BLE; a partir de Android 12 se usa
+      BLUETOOTH_SCAN con neverForLocation.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- ---- Bluetooth: dos juegos segun la version de Android ---- -->
+    <!-- Android 12 (API 31) en adelante -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <!-- neverForLocation: se declara que el escaneo NO se usa para
+         deducir la ubicacion del usuario, y asi Android no exige el
+         permiso de ubicacion. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+
+    <!-- Android 11 (API 30) y anteriores -->
+    <uses-permission android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+    <!-- Solo hasta API 30, y SOLO porque el sistema lo exigia para
+         escanear BLE. Ver el comentario de arriba. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="30" />
+
+    <!-- ---- Servicio en primer plano ---- -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- ---- Browser Relay: red local y locks ---- -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Restauracion tras reiniciar. Solo se ACTUA sobre este permiso
+         si el usuario lo habilita en Ajustes: ver BootReceiver. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- BLE es imprescindible; la app no tiene sentido sin el. -->
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+
+    <application
+        android:name=".FlexPhoneApp"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.FlexPhone"
+        tools:targetApi="35">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.FlexPhone">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          LECTOR DE NOTIFICACIONES.
+          El permiso NO se puede pedir con un dialogo: lo concede el
+          usuario en la pantalla oficial de Ajustes de Android
+          (ACTION_NOTIFICATION_LISTENER_SETTINGS), a la que lleva la
+          pantalla de bienvenida.
+        -->
+        <service
+            android:name=".notifications.FlexNotificationListener"
+            android:exported="false"
+            android:label="@string/notif_listener_label"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!--
+          Servicio del enlace. foregroundServiceType=connectedDevice
+          es el tipo que corresponde de verdad a mantener un enlace
+          BLE con un accesorio. Solo corre mientras HAY enlace: ver
+          FlexLinkService.
+        -->
+        <service
+            android:name=".link.FlexLinkService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <!--
+          Browser Relay. dataSync porque lo que hace es servir
+          contenido por Wi-Fi al P4. Se levanta SOLO con una sesion
+          activa y se para al cerrarla, junto con sus locks.
+        -->
+        <service
+            android:name=".relay.BrowserRelayService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <receiver
+            android:name=".link.BootReceiver"
+            android:exported="false"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

@@ -4,21 +4,51 @@
 //  DOS MODULOS A PROPOSITO:
 //
 //    :protocol  Kotlin/JVM PURO. Es la implementacion de Flex Link
-//               del lado Android. No depende de Android para nada,
-//               asi que se compila y se PRUEBA en cualquier maquina
-//               con un JDK -- sin SDK, sin emulador y sin placa.
-//               Ahi viven los vectores dorados que comprueban que
-//               estos bytes son EXACTAMENTE los mismos que produce
-//               FlexOS_FlexLink.cpp en el ESP32.
+//               y de FBP/1 del lado Android. No depende de Android
+//               para nada, asi que se compila y se PRUEBA en
+//               cualquier maquina con un JDK -- sin SDK, sin
+//               emulador y sin placa. Ahi viven los vectores
+//               dorados que comprueban que estos bytes son
+//               EXACTAMENTE los que produce el firmware.
 //
 //    :app       La aplicacion Android (Compose, servicios, BLE,
 //               Browser Relay). Necesita el SDK de Android.
 //
-//  La separacion no es cosmetica: el protocolo es la parte que MAS
-//  se puede equivocar en silencio (un byte movido y el P4 descarta
-//  la trama sin decir por que), y es justo la que se puede
-//  verificar de verdad sin hardware.
+//  POR QUE :app SE INCLUYE SOLO SI HAY SDK
+//  ---------------------------------------
+//  El plugin de Android (AGP) se descarga del repositorio Maven de
+//  Google. Declararlo incondicionalmente hace que Gradle intente
+//  resolverlo SIEMPRE, y en una maquina sin SDK -- o sin acceso a
+//  ese repositorio -- eso rompe hasta `gradle :protocol:test`, que
+//  no tiene nada que ver con Android.
+//
+//  Con esta guarda:
+//    · sin SDK  ->  `gradle :protocol:test` funciona y verifica el
+//                   protocolo entero;
+//    · con SDK  ->  se incluye :app y `gradle :app:assembleDebug`
+//                   construye el APK.
+//
+//  El SDK se detecta como lo hace el propio AGP: local.properties
+//  (sdk.dir) o la variable de entorno ANDROID_HOME / ANDROID_SDK_ROOT.
 // #############################################################
 rootProject.name = "FlexPhone"
+
 include(":protocol")
-include(":app")
+
+val sdkFromEnv = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
+val localProps = file("local.properties")
+val sdkFromProps = if (localProps.exists()) {
+    java.util.Properties().apply { localProps.inputStream().use { load(it) } }.getProperty("sdk.dir")
+} else null
+val androidSdk = (sdkFromProps ?: sdkFromEnv)?.takeIf { it.isNotBlank() && file(it).isDirectory }
+
+if (androidSdk != null) {
+    include(":app")
+    logger.lifecycle("Flex Phone: SDK de Android en $androidSdk -> se incluye :app")
+} else {
+    logger.lifecycle(
+        "Flex Phone: no se encontro el SDK de Android; solo se construye :protocol.\n" +
+        "            Para compilar el APK, pon sdk.dir en local.properties o exporta\n" +
+        "            ANDROID_HOME, y vuelve a ejecutar. Ver docs/FLEX-PHONE.md."
+    )
+}
