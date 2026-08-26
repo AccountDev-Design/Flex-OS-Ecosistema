@@ -1,5 +1,35 @@
 // #############################################################
 //  Flex Phone -- proyecto Android + modulo de protocolo
+// #############################################################
+//  Repositorios de plugins. `google()` hace falta para el Android
+//  Gradle Plugin; Maven Central para Kotlin. Declararlos aqui (y no
+//  en un bloque `plugins` de la raiz) hace que solo se consulten
+//  cuando un modulo pide de verdad esos plugins: `:protocol` no
+//  necesita ninguno de Android y por eso se construye sin ellos.
+pluginManagement {
+    repositories {
+        google {
+            content {
+                includeGroupByRegex("com\\.android.*")
+                includeGroupByRegex("com\\.google.*")
+                includeGroupByRegex("androidx.*")
+            }
+        }
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+// #############################################################
+//  Flex Phone -- proyecto Android + modulo de protocolo
 //  ------------------------------------------------------------
 //  DOS MODULOS A PROPOSITO:
 //

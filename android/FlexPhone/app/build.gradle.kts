@@ -1,7 +1,11 @@
+// Las VERSIONES se declaran aqui, no en la raiz: asi solo se
+// resuelven cuando este modulo se configura, y `:protocol` puede
+// construirse en una maquina sin SDK ni acceso al Maven de Google.
+//   AGP 8.5.2 · Kotlin 2.0.21 · Compose BOM 2024.09.03
 plugins {
-    id("com.android.application")
-    id("org.jetbrains.kotlin.android")
-    id("org.jetbrains.kotlin.plugin.compose")
+    id("com.android.application") version "8.5.2"
+    id("org.jetbrains.kotlin.android") version "2.0.21"
+    id("org.jetbrains.kotlin.plugin.compose") version "2.0.21"
 }
 
 android {
