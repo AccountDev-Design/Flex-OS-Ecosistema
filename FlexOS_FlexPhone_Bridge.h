@@ -42,9 +42,10 @@
 // =============================================================
 //  ESTADO UNICO
 // =============================================================
-// Dos estructuras grandes (~20 KB juntas) en BSS. Es a proposito:
-// tamano conocido en compilacion, sin reservas dinamicas y sin
-// fragmentar el heap que necesitan el navegador y la galeria.
+// Dos estructuras grandes en BSS: 22.568 B el modelo y 6.464 B el
+// enlace, 28,4 KB en total (medido con sizeof, no estimado). Es a
+// proposito: tamano conocido en COMPILACION, sin reservas dinamicas
+// y sin fragmentar el heap que necesitan el navegador y la galeria.
 static FlexPhoneModel fphModel;
 static FlexPhoneLink  fphLink;
 

@@ -439,9 +439,22 @@ Reglas que cumple el código nuevo del firmware:
 si el enlace está apagado o no disponible. El escritorio, el panel rápido, los
 juegos y el navegador no pagan nada por que esta app exista.
 
-**Memoria**: el modelo y el enlace son dos estructuras de tamaño fijo en BSS
-(~20 KB juntas), decidido en compilación. Sin reservas dinámicas repetidas y
-sin fragmentar el heap que necesitan el navegador y la galería.
+**Memoria** (medida, no estimada — `sizeof` de las estructuras reales):
+
+| Estructura | Tamaño |
+|---|---|
+| `FlexPhoneNotif` × 40 | 17 440 B |
+| `FlexPhoneConv` × 12 | 1 680 B |
+| `FlexPhoneDraft` × 8 | 3 136 B |
+| **`FlexPhoneModel`** (instancia única) | **22 568 B** |
+| **`FlexPhoneLink`** (instancia única) | **6 464 B** |
+| **Total en BSS** | **29 032 B (28,4 KB)** |
+| Blob a flash (peor caso, buffer temporal en PSRAM) | 11 914 B |
+
+Son dos estructuras de tamaño fijo decidido en compilación. Sin reservas
+dinámicas repetidas y sin fragmentar el heap que necesitan el navegador y la
+galería. El buffer de serialización se pide a PSRAM y se libera enseguida: 12
+KB en la pila del bucle principal no serían aceptables.
 
 ---
 
