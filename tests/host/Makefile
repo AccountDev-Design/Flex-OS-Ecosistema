@@ -43,7 +43,7 @@ JPEG_SRC := $(ROOT)/FlexOS_JPEG.cpp
 APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net \
-        $(BUILD)/test_vault $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexlink_transport
+        $(BUILD)/test_vault $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors
 TOOLS := $(BUILD)/jpegcheck
 
 .PHONY: all run all-boards fixtures clean ino
@@ -82,6 +82,12 @@ FLPLINK := $(ROOT)/FlexOS_FlexPhone_Link.cpp
 $(BUILD)/test_flexlink_transport: test_flexlink_transport.cpp $(FLPLINK) $(FLPSRC) $(FLNKSRC) \
                          $(ROOT)/FlexOS_FlexPhone_Link.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_flexlink_transport.cpp $(FLPLINK) $(FLPSRC) $(FLNKSRC)
+
+# VECTORES DORADOS. Fijan los bytes exactos del protocolo para que el
+# firmware y la app Android no puedan divergir en silencio: el mismo
+# vector esta en FlexLinkTest.kt. Ver la cabecera del .cpp.
+$(BUILD)/test_flexlink_vectors: test_flexlink_vectors.cpp $(FLPSRC) $(FLNKSRC) | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -o $@ test_flexlink_vectors.cpp $(FLPSRC) $(FLNKSRC)
 
 # --- Flex Vault: cripto y almacen cifrado ---
 # Se compila el modulo REAL (FlexOS_Vault.cpp) con OpenSSL como
@@ -204,6 +210,8 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_flexphone
 	@echo
 	@$(BUILD)/test_flexlink_transport
+	@echo
+	@$(BUILD)/test_flexlink_vectors
 	@echo
 	@$(BUILD)/test_vault
 	@echo
