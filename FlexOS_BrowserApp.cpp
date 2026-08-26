@@ -286,6 +286,9 @@ static void brLoadSettings(){
   gSt.saveHistory  = brHostPrefsGetInt("brhist", 1) != 0;
   gSt.telemetry    = brHostPrefsGetInt("brtel", 0) != 0;
   gSt.mediaNative  = brHostPrefsGetInt("brmed", 1) != 0;
+  gSt.source       = (uint8_t)brHostPrefsGetInt("brsrc", BRSRC_AUTO);
+  brHostPrefsGetStr("brcloud", gSt.cloudServer, sizeof(gSt.cloudServer), "");
+  if(gSt.source >= BRSRC_N) gSt.source = BRSRC_AUTO;
   if(gSt.searchEngine > 3) gSt.searchEngine = 0;
   if(gSt.profile >= BRQ_N) gSt.profile = BRQ_BALANCED;
   if(gSt.quality < 20 || gSt.quality > 90) gSt.quality = 62;
@@ -305,6 +308,8 @@ static void brSaveSettings(){
   brHostPrefsPutInt("brhist", gSt.saveHistory ? 1 : 0);
   brHostPrefsPutInt("brtel", gSt.telemetry ? 1 : 0);
   brHostPrefsPutInt("brmed", gSt.mediaNative ? 1 : 0);
+  brHostPrefsPutInt("brsrc", gSt.source);
+  brHostPrefsPutStr("brcloud", gSt.cloudServer);
 }
 
 // Cabecera de los ficheros de datos: magia + version + numero de

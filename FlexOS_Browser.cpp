@@ -82,11 +82,64 @@ void flexBrSettingsDefaults(BrSettings* st){
 #else
   st->scalePct = 100;
 #endif
+  st->source = BRSRC_AUTO;           // de fabrica: el que este disponible
+  st->cloudServer[0] = 0;            // sin nube configurada
   st->allowLocal = false;            // por seguridad, apagado
   st->allowInsecure = false;
   st->saveHistory = true;
   st->telemetry = false;
   st->mediaNative = true;
+}
+
+// =============================================================
+//  DE DONDE SALE EL NAVEGADOR
+// =============================================================
+// Funcion PURA: recibe las disponibilidades ya medidas y decide. No
+// consulta la red, no abre sockets y no adivina -- justamente para
+// que quien la llame tenga que haber comprobado /v1/health antes de
+// decir que una fuente esta disponible.
+const char* flexBrSourceName(int src){
+  switch(src){
+    case BRSRC_AUTO:   return "Automatico";
+    case BRSRC_PHONE:  return "Flex Phone";
+    case BRSRC_CLOUD:  return "Nube";
+    case BRSRC_MANUAL: return "PC/Ubuntu manual";
+    default:           return "Sin fuente";
+  }
+}
+
+int flexBrSourceResolve(const BrSettings* st, bool phoneUp, bool cloudCfg, bool manualCfg){
+  if(!st) return BRSRC_NONE;
+  switch(st->source){
+    // Modos EXCLUSIVOS: si el elegido no esta, no se cae a otro por
+    // detras. Un "Flex Phone" que en realidad tira del PC seria
+    // exactamente el tipo de mentira que este selector evita.
+    case BRSRC_PHONE:  return phoneUp   ? BRSRC_PHONE  : BRSRC_NONE;
+    case BRSRC_CLOUD:  return cloudCfg  ? BRSRC_CLOUD  : BRSRC_NONE;
+    case BRSRC_MANUAL: return manualCfg ? BRSRC_MANUAL : BRSRC_NONE;
+    default: break;
+  }
+  // Automatico: telefono, luego nube, luego manual.
+  if(phoneUp)   return BRSRC_PHONE;
+  if(cloudCfg)  return BRSRC_CLOUD;
+  if(manualCfg) return BRSRC_MANUAL;
+  return BRSRC_NONE;
+}
+
+const char* flexBrSourceWhyNone(const BrSettings* st, bool phoneUp, bool cloudCfg, bool manualCfg){
+  if(!st) return "Sin ajustes de navegador";
+  switch(st->source){
+    case BRSRC_PHONE:
+      return phoneUp ? "" : "Flex Phone no tiene el Browser Relay activo";
+    case BRSRC_CLOUD:
+      return cloudCfg ? "" : "Falta configurar el servidor en la nube";
+    case BRSRC_MANUAL:
+      return manualCfg ? "" : "Falta configurar el servidor en Ajustes";
+    default: break;
+  }
+  if(phoneUp || cloudCfg || manualCfg) return "";
+  return "Sin fuente: activa el relay del telefono, configura la nube "
+         "o pon el servidor del PC en Ajustes";
 }
 
 // Plantillas de buscador. Se guardan aqui y no en el .ino para que las

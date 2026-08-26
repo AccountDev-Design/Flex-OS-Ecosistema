@@ -110,6 +110,14 @@
 // bloqueo LEEN el mismo WeatherState, asi que no pueden contradecirse.
 #include "FlexOS_Weather.h"
 
+// FLEX PHONE. Igual que el clima o la boveda: aqui solo entra la API
+// publica. El protocolo (FlexOS_FlexLink.cpp), el modelo
+// (FlexOS_FlexPhone.cpp) y el transporte (FlexOS_FlexPhone_Link.cpp)
+// son unidades de traduccion aparte y se prueban enteros en el PC.
+// La interfaz vive en FlexOS_FlexPhone_Bridge.h, incluido abajo con
+// los demas puentes.
+#include "FlexOS_FlexPhone.h"
+
 // ---- DISPONIBILIDAD REAL DE BLE ------------------------------------------
 // No se escribe a mano "el P4 no tiene BLE": se le pregunta al SDK. soc_caps.h
 // define SOC_BLE_SUPPORTED solo en los chips que llevan radio Bluetooth, asi
@@ -4550,8 +4558,8 @@ static void arcStroke(float cx, float cy, float r, float a0, float a1, int thick
 enum { IC_RELOJ, IC_GALERIA, IC_MULTIMEDIA, IC_ALMACEN, IC_MODOPC, IC_NOTAS,
        IC_EDU, IC_NAV, IC_CODE, IC_BIEN, IC_PAINT, IC_JUEGOS,
        IC_AJUSTES, IC_CALC, IC_CALEND, IC_CAMARA,
-       IC_CLIMA, IC_FLEXSTORE }; // Flex Store ocupa 17: ningun indice anterior se mueve
-#define APP_N 18
+       IC_CLIMA, IC_FLEXSTORE, IC_FLEXPHONE }; // Flex Store 17, Flex Phone 18: ningun indice anterior se mueve
+#define APP_N 19
 
 static void iconBase(int x, int y, int S, uint16_t bg, int rf100){
   int r = S * rf100 / 100;
@@ -4750,6 +4758,22 @@ static void drawAppIcon(int id, int x, int y, int S){
       strokeSeg(cx + (int)(S * 0.10f), y + (int)(S * 0.22f), cx + (int)(S * 0.16f), by + 2, 2, WHITE);
       fillRoundRect(cx - (int)(S * 0.16f), by + (int)(S * 0.13f), (int)(S * 0.32f), (int)(S * 0.09f),
                     (int)(S * 0.04f), rgb565(105,91,230));
+    } break;
+    case IC_FLEXPHONE: {
+      // Telefono con onda de enlace: dice de un vistazo que esta app
+      // es "tu movil aqui", y se dibuja entera dentro de su caja.
+      iconBase(x, y, S, rgb565(38,132,255), 22);
+      int pw = (int)(S * 0.34f), ph = (int)(S * 0.54f);
+      int px0 = cx - pw / 2, py0 = y + (int)(S * 0.23f);
+      fillRoundRect(px0, py0, pw, ph, (int)(S * 0.07f), WHITE);
+      fillRoundRect(px0 + (int)(S * 0.04f), py0 + (int)(S * 0.07f),
+                    pw - (int)(S * 0.08f), ph - (int)(S * 0.16f),
+                    (int)(S * 0.03f), rgb565(38,132,255));
+      fillRoundRect(cx - (int)(S * 0.05f), py0 + ph - (int)(S * 0.07f),
+                    (int)(S * 0.10f), (int)(S * 0.03f), 1, WHITE);
+      // Dos arcos de enlace a la derecha del aparato.
+      arcStroke(px0 + pw, cy, (int)(S * 0.16f), 300, 60, 2, WHITE);
+      arcStroke(px0 + pw, cy, (int)(S * 0.26f), 310, 50, 2, WHITE);
     } break;
     case IC_CAMARA: {
       iconBase(x, y, S, rgb565(74,74,78), 22);
@@ -5764,6 +5788,7 @@ static const char* APP[APP_N][5] = {
   {"C\xC3\xA1mara","Camera","Appareil","C\xC3\xA2mera","Fotocamera"},
   {"Clima","Weather","M\xC3\xA9t\xC3\xA9o","Clima","Meteo"},
   {"Flex Store","Flex Store","Flex Store","Flex Store","Flex Store"},
+  {"Flex Phone","Flex Phone","Flex Phone","Flex Phone","Flex Phone"},
 };
 static const char* appName(int id){ return APP[id][LI()]; }
 
@@ -9323,6 +9348,11 @@ static void gamesEnter(); static void gamesTick(); // Juegos: Jumper (motor en F
 static void wxAppEnter(); static void wxAppTick();  // Clima (Flex Weather) -- seccion propia mas abajo
 static bool wxHandleBack(); static void wxSuspend(); static void wxResume();
 static void storeEnter(); static void storeTick(); static void storeExit(); // Flex Store + runtime FLXP
+// Flex Phone: la app vive en FlexOS_FlexPhone_Bridge.h (igual que el
+// navegador y la tienda). Aqui solo el prototipo para APP_REG.
+static void fphEnter(); static void fphTick(); static void fphExit();
+static bool fphBackScreen(); static void fphSuspend(); static void fphResume();
+static void flexPhoneBegin(); static void flexPhoneTick();
 // Hooks opcionales. Las implementaciones viven junto a cada app.
 static void setSuspend(); static void setResume(); static bool setSaveSess(); static void setLoadSess(); static bool setBgWork();
 static void calcResume(); static bool calcSaveSess(); static void calcLoadSess();
@@ -9783,6 +9813,10 @@ static const AppHooks H_GAMES    = { NULL, NULL, gamesSuspend, gamesResume, game
 static const AppHooks H_BROWSER  = { NULL, NULL, NULL, navResumeLife, navCloseLife, NULL, NULL, NULL };
 static const AppHooks H_STORE    = { NULL, NULL, NULL, storeResumeLife, storeCloseLife, NULL, NULL, NULL };
 static const AppHooks H_WEATHER  = { NULL, wxHandleBack, wxSuspend, wxResume, NULL, NULL, NULL, NULL };
+// Flex Phone. backScreen cierra primero la conversacion y luego vuelve
+// a Centro; closeApp vuelca el estado a disco (la escritura periodica
+// esta agrupada, asi que al salir SI toca guardar).
+static const AppHooks H_FLEXPHONE = { NULL, fphBackScreen, fphSuspend, fphResume, fphExit, NULL, NULL, NULL };
 // ---- Registro de apps (indices = enum IC_*) ----
 static FlexApp APP_REG[APP_N] = {
   { appRelojEnter, appRelojTick, APP_FLEX, APP_CAT_ESENCIAL, APP_DEF_FAV, NULL },
@@ -9814,6 +9848,10 @@ static FlexApp APP_REG[APP_N] = {
   // 17 Flex Store. Gestiona su cabecera y tactil; las operaciones de red/flash
   // corren en una tarea de fondo para no bloquear la interfaz.
   { storeEnter, storeTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH | APP_FLEX, APP_CAT_SISTEMA, APP_DEF_DOCK, &H_STORE },
+  // 18 Flex Phone. Gestiona su cabecera y su tactil (pestanas propias).
+  // NO nace en la rejilla (APP_DEF_DOCK): una placa que actualiza no ve
+  // su escritorio reordenado; se anade desde la Caja de aplicaciones.
+  { fphEnter, fphTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH | APP_FLEX, APP_CAT_ESENCIAL, APP_DEF_DOCK, &H_FLEXPHONE },
 };
 static const char* appCatName(int id){
   int c = (id >= 0 && id < APP_N) ? APP_REG[id].cat : APP_CAT_SISTEMA;
@@ -31461,6 +31499,11 @@ static void safeTick(){
 // retorno al configurador de Wi-Fi.
 #include "FlexOS_Account_Bridge.h"
 
+// FLEX PHONE. Va DESPUES del puente del navegador: la seccion
+// "Navegador" de Flex Phone lee flexBrowserSettings() y resuelve la
+// fuente con la misma funcion que usa el propio navegador.
+#include "FlexOS_FlexPhone_Bridge.h"
+
 // Adaptadores de ciclo de vida para modulos cuyo estado interno ya es propio.
 // Suspender no destruye pestañas ni descargas; cerrar la tarjeta si libera todo.
 static void navResumeLife(){ navEnter(); }
@@ -31555,6 +31598,10 @@ void setup(){
     flexVaultBegin();
     connBootRestore();            // modo avion guardado (solo lee NVS, no toca radio)
     flexWeatherBegin();           // ubicaciones y cache + tarea de red
+    // FLEX PHONE: solo carga el historial guardado y deja el enlace
+    // APAGADO. Misma regla que la radio -- encender BLE en setup() es
+    // lo que convertiria un fallo del C6 en un cuelgue de arranque.
+    flexPhoneBegin();
   }
   setBacklight(gBright);          // aplica el brillo guardado
   homeOrderLoad();                // orden de iconos del Home
@@ -31730,6 +31777,10 @@ void loop(){
   }
 
   if(!gSafeMode) flexWeatherTick(gNetOnline);
+  // FLEX PHONE: con el enlace apagado o no disponible sale en su
+  // primera linea, asi que una placa sin telefono emparejado no paga
+  // nada por que esta app exista.
+  if(!gSafeMode) flexPhoneTick();
 
   // -----------------------------------------------------------
   //  PANEL RAPIDO GLOBAL

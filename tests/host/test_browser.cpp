@@ -553,7 +553,66 @@ static void testDefaults(){
   CHECK(st.profile < BRQ_N, "perfil por defecto invalido");
 }
 
+// -------------------------------------------------------------
+//  Fuente del navegador: telefono / nube / PC
+// -------------------------------------------------------------
+//  Lo que se prueba es que un modo EXCLUSIVO no se cae en secreto a
+//  otra fuente. Un "Flex Phone" que en realidad tirara del PC seria
+//  justo la mentira que este selector existe para evitar.
+static void testSourceSelection(){
+  std::printf("[browser] fuente: automatico, exclusivos y sin fuente\n");
+  BrSettings st; flexBrSettingsDefaults(&st);
+  CHECK(st.source == BRSRC_AUTO, "de fabrica deberia ser Automatico");
+
+  // -- AUTOMATICO: telefono > nube > manual --
+  st.source = BRSRC_AUTO;
+  CHECK(flexBrSourceResolve(&st, true,  true,  true)  == BRSRC_PHONE,  "auto no prefirio el telefono");
+  CHECK(flexBrSourceResolve(&st, false, true,  true)  == BRSRC_CLOUD,  "auto no cayo a la nube");
+  CHECK(flexBrSourceResolve(&st, false, false, true)  == BRSRC_MANUAL, "auto no cayo al manual");
+  CHECK(flexBrSourceResolve(&st, false, false, false) == BRSRC_NONE,   "auto invento una fuente");
+
+  // -- EXCLUSIVOS: no hay respaldo silencioso --
+  st.source = BRSRC_PHONE;
+  CHECK(flexBrSourceResolve(&st, true,  true, true) == BRSRC_PHONE, "el modo telefono no uso el telefono");
+  CHECK(flexBrSourceResolve(&st, false, true, true) == BRSRC_NONE,
+        "el modo TELEFONO se cayo a otra fuente por detras");
+  st.source = BRSRC_CLOUD;
+  CHECK(flexBrSourceResolve(&st, true, false, true) == BRSRC_NONE,
+        "el modo NUBE se cayo a otra fuente por detras");
+  st.source = BRSRC_MANUAL;
+  CHECK(flexBrSourceResolve(&st, true, true, false) == BRSRC_NONE,
+        "el modo MANUAL se cayo a otra fuente por detras");
+  CHECK(flexBrSourceResolve(&st, false, false, true) == BRSRC_MANUAL,
+        "el modo manual no uso el servidor de siempre");
+
+  // -- Nunca devuelve AUTO: es una preferencia, no un destino --
+  st.source = BRSRC_AUTO;
+  for(int a = 0; a < 8; a++){
+    const int r = flexBrSourceResolve(&st, (a & 1) != 0, (a & 2) != 0, (a & 4) != 0);
+    CHECK(r != BRSRC_AUTO, "resolvio a AUTO, que no es un destino");
+  }
+
+  // -- El motivo de "sin fuente" es concreto --
+  st.source = BRSRC_PHONE;
+  CHECK(std::strstr(flexBrSourceWhyNone(&st, false, true, true), "Relay") != nullptr,
+        "el motivo no menciona el relay");
+  st.source = BRSRC_CLOUD;
+  CHECK(std::strstr(flexBrSourceWhyNone(&st, false, false, true), "nube") != nullptr,
+        "el motivo no menciona la nube");
+  st.source = BRSRC_AUTO;
+  CHECK(flexBrSourceWhyNone(&st, true, false, false)[0] == 0,
+        "dio un motivo de fallo habiendo fuente");
+
+  // -- Nombres legibles --
+  CHECK(std::strcmp(flexBrSourceName(BRSRC_PHONE), "Flex Phone") == 0, "nombre de fuente mal");
+  CHECK(std::strcmp(flexBrSourceName(BRSRC_NONE), "Sin fuente") == 0, "nombre de 'sin fuente' mal");
+
+  // -- Argumentos imposibles --
+  CHECK(flexBrSourceResolve(nullptr, true, true, true) == BRSRC_NONE, "acepto ajustes nulos");
+}
+
 int main(){
+  testSourceSelection();
   std::printf("=== FlexOS · nucleo del navegador ===\n");
   testOmnibox();
   testUrlHelpers();

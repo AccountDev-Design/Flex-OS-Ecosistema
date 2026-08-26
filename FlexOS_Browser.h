@@ -435,6 +435,24 @@ typedef struct {
 // mide de verdad esta en la telemetria (flex://about).
 enum { BRQ_LOWLAT = 0, BRQ_BALANCED = 1, BRQ_DATASAVER = 2, BRQ_N };
 
+// ---- DE DONDE SALE EL NAVEGADOR --------------------------------
+// El P4 pinta la interfaz, las pestanas, el historial y el tactil;
+// quien EJECUTA la pagina esta al otro lado del protocolo FBP/1.
+// Ese "otro lado" puede ser ahora de tres sitios distintos, y el
+// usuario elige cual:
+//
+//   BRSRC_AUTO   -> primero el telefono si esta conectado; si no,
+//                   la nube configurada; y por ultimo el servidor
+//                   manual. Es el valor de fabrica.
+//   BRSRC_PHONE  -> SOLO Flex Phone (Browser Relay por Wi-Fi).
+//   BRSRC_CLOUD  -> SOLO el servidor en la nube del usuario.
+//   BRSRC_MANUAL -> SOLO el servidor Ubuntu/PC de siempre.
+//
+// El modo manual es EXACTAMENTE el comportamiento anterior: quien
+// ya tenia su servidor no nota ningun cambio.
+enum { BRSRC_AUTO = 0, BRSRC_PHONE, BRSRC_CLOUD, BRSRC_MANUAL, BRSRC_N };
+#define BRSRC_NONE (-1)   // ninguna fuente utilizable ahora mismo
+
 typedef struct {
   char     server[FLEXBR_SERVER_MAX];   // wss://host:puerto/v1/session
   char     token[FLEXBR_TOKEN_MAX];     // credencial del dispositivo
@@ -448,6 +466,8 @@ typedef struct {
   bool     saveHistory;
   bool     telemetry;
   bool     mediaNative;                 // usar el reproductor propio al detectar video
+  uint8_t  source;                      // BRSRC_*: de donde sale el navegador
+  char     cloudServer[FLEXBR_SERVER_MAX];  // wss://... del servidor en la nube
 } BrSettings;
 
 // Una entrada de historial. `visits` y `lastMs` permiten ordenar sin
@@ -508,6 +528,19 @@ enum {
 // Deja `st` con los valores por defecto (servidor vacio, DuckDuckGo,
 // perfil equilibrado, sin permisos de desarrollo).
 void  flexBrSettingsDefaults(BrSettings* st);
+
+// Nombre legible de una fuente (para Ajustes y para la app Flex Phone).
+const char* flexBrSourceName(int src);
+// Que fuente se va a USAR de verdad, dadas las disponibilidades REALES.
+// Devuelve BRSRC_PHONE / BRSRC_CLOUD / BRSRC_MANUAL, o BRSRC_NONE si
+// nada esta disponible. NUNCA devuelve BRSRC_AUTO: "automatico" es una
+// preferencia, no un destino.
+//   phoneUp   -> hay Browser Relay ARRIBA en el telefono (ip y puerto reales)
+//   cloudCfg  -> hay servidor de nube configurado
+//   manualCfg -> hay servidor manual configurado
+int flexBrSourceResolve(const BrSettings* st, bool phoneUp, bool cloudCfg, bool manualCfg);
+// Por que no hay fuente utilizable. Cadena estatica, nunca NULL.
+const char* flexBrSourceWhyNone(const BrSettings* st, bool phoneUp, bool cloudCfg, bool manualCfg);
 
 // Resuelve lo que el usuario confirmo en el omnibox. Es la funcion mas
 // sensible del modulo -- ver el orden exacto en FlexOS_Browser.cpp.

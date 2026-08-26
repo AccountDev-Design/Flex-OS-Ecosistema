@@ -70,6 +70,21 @@ bool        flexPaintClear(const char*){ return false; }
 
 // ---- Navegador ----
 void flexBrVersionGuard_v4_copia_los_4_ficheros_del_navegador(void){}
+// flexBrSource* NO se doblan: son NUCLEO PURO de FlexOS_Browser.cpp y
+// entran de verdad en el enlace (abajo, en la regla de test_ino). Lo
+// que si necesita doble es el ACCESOR de ajustes, porque vive en
+// FlexOS_BrowserApp.cpp, que aqui no se compila.
+// Los ajustes del doble arrancan en sus valores de fabrica: fuente
+// Automatico y sin ningun servidor configurado. Es a proposito -- asi
+// la seccion Navegador de Flex Phone se ejercita en el caso "sin
+// fuente disponible", que es el que tiene que decir la verdad.
+static BrSettings gStubBrSettings;
+static bool gStubBrSettingsInit = false;
+const BrSettings* flexBrowserSettings(){
+  if(!gStubBrSettingsInit){ flexBrSettingsDefaults(&gStubBrSettings); gStubBrSettingsInit = true; }
+  return &gStubBrSettings;
+}
+
 void flexBrowserBegin(){}
 void flexBrowserEnter(){}
 void flexBrowserTick(){}

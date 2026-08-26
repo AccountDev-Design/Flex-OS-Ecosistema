@@ -170,11 +170,23 @@ ino: ino_compile.cpp $(INO_SRC) $(INO_BRIDGES) check_protos.py check_wiring.py |
 #
 # CON SANITIZERS: un desbordamiento no puede quedarse en "parece que funciona".
 # Mismo criterio que el resto de pruebas del nucleo portable.
-$(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_BRIDGES) $(JPEG_SRC) | $(BUILD)
+# Flex Phone entra en test_ino como CODIGO REAL, no como doble. Es a
+# proposito: el puente (FlexOS_FlexPhone_Bridge.h) es lo unico de esta
+# funcion que no tiene prueba propia, y enlazarlo contra los modulos de
+# verdad hace que un cambio de firma o una llamada mal cableada salte
+# aqui. Los modulos ademas no tocan Arduino, asi que no necesitan dobles.
+$(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_BRIDGES) $(JPEG_SRC) \
+                   $(FLNKSRC) $(FLPSRC) $(FLPLINK) $(CORE_SRC) | $(BUILD)
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -x c++ -c ino_compile.cpp -o $(BUILD)/ino_compile.o
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -c ino_extern_stubs.cpp -o $(BUILD)/ino_extern_stubs.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(JPEG_SRC) -o $(BUILD)/ino_jpeg.o
-	@$(CXX) $(SAN) -o $@ $(BUILD)/ino_compile.o $(BUILD)/ino_extern_stubs.o $(BUILD)/ino_jpeg.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(FLNKSRC) -o $(BUILD)/ino_flexlink.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(FLPSRC)  -o $(BUILD)/ino_flexphone.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(FLPLINK) -o $(BUILD)/ino_flexphonelink.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(CORE_SRC) -o $(BUILD)/ino_brcore.o
+	@$(CXX) $(SAN) -o $@ $(BUILD)/ino_compile.o $(BUILD)/ino_extern_stubs.o $(BUILD)/ino_jpeg.o \
+	        $(BUILD)/ino_flexlink.o $(BUILD)/ino_flexphone.o $(BUILD)/ino_flexphonelink.o \
+	        $(BUILD)/ino_brcore.o
 
 # La tabla de particiones de la version USB. No es codigo, pero una tabla
 # mal cuadrada no falla al compilar: falla al grabar, o peor, arranca y se
