@@ -43,7 +43,7 @@ JPEG_SRC := $(ROOT)/FlexOS_JPEG.cpp
 APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net \
-        $(BUILD)/test_vault $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone
+        $(BUILD)/test_vault $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexlink_transport
 TOOLS := $(BUILD)/jpegcheck
 
 .PHONY: all run all-boards fixtures clean ino
@@ -74,6 +74,14 @@ $(BUILD)/test_flexlink: test_flexlink.cpp $(FLNKSRC) $(ROOT)/FlexOS_FlexLink.h |
 $(BUILD)/test_flexphone: test_flexphone.cpp $(FLPSRC) $(FLNKSRC) \
                          $(ROOT)/FlexOS_FlexPhone.h $(ROOT)/FlexOS_FlexLink.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_flexphone.cpp $(FLPSRC) $(FLNKSRC)
+
+# El transporte: maquina de estados del enlace. En el PC la capacidad
+# es NONE (no hay radio), igual que en el P4 sin el C6 preparado, asi
+# que la prueba fuerza la capacidad para poder ejercitarla entera.
+FLPLINK := $(ROOT)/FlexOS_FlexPhone_Link.cpp
+$(BUILD)/test_flexlink_transport: test_flexlink_transport.cpp $(FLPLINK) $(FLPSRC) $(FLNKSRC) \
+                         $(ROOT)/FlexOS_FlexPhone_Link.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -o $@ test_flexlink_transport.cpp $(FLPLINK) $(FLPSRC) $(FLNKSRC)
 
 # --- Flex Vault: cripto y almacen cifrado ---
 # Se compila el modulo REAL (FlexOS_Vault.cpp) con OpenSSL como
@@ -182,6 +190,8 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_flexlink
 	@echo
 	@$(BUILD)/test_flexphone
+	@echo
+	@$(BUILD)/test_flexlink_transport
 	@echo
 	@$(BUILD)/test_vault
 	@echo
