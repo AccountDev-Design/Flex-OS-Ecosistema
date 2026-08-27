@@ -46,11 +46,18 @@ static unsigned gPinnedTaskCreates = 0;
 static unsigned gSemTakeCalls = 0;
 static unsigned gPanelDrawCalls = 0;
 unsigned long millis(){ return gTestMs; }
-// micros() SI avanza de verdad (reloj monotonico del PC). Lo usa la
-// instrumentacion del Panel Rapido para medir el coste de un cuadro; con el
-// doble de antes, que devolvia 0, esa medida no valia nada. El resto del
-// sketch no usa micros(), asi que esto no altera ninguna otra prueba.
+// micros() avanza de verdad (reloj monotonico del PC) para que la
+// instrumentacion del Panel Rapido pueda medir el coste real de un cuadro.
+//
+// PERO las transiciones de app interpolan por micros(), asi que su prueba
+// necesita mandar en el tiempo igual que las demas mandan en millis() con
+// gTestMs. gTestUs hace de anulacion: con 0 (el valor por defecto) se
+// devuelve el reloj del PC y nada cambia; con un valor distinto de 0, micros()
+// devuelve EXACTAMENTE ese valor y la prueba puede colocar la animacion en el
+// instante que quiera.
+unsigned long gTestUs = 0;
 unsigned long micros(){
+  if(gTestUs) return gTestUs;
   struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
   return (unsigned long)(t.tv_sec * 1000000UL + t.tv_nsec / 1000UL);
 }
@@ -177,6 +184,8 @@ static void testFlexStore();
 static void testFlexAccount();
 static void testRecortePorBandas();
 static void testIconosEnSuCaja();
+static void testTransicionesApps();
+static void testRejillaAutoPaginas();
 static int gFails = 0;
 static void chk(bool ok, const char* what){
   if(!ok){ printf("  FALLO: %s\n", what); gFails++; }
@@ -2968,6 +2977,205 @@ static void testIconosEnSuCaja(){
   else printf("  Iconos de app: todas las comprobaciones pasan.\n");
 }
 
+
+// #############################################################
+//  TRANSICIONES DE APP INTERRUMPIBLES  ·  el test del video
+//  ------------------------------------------------------------
+//  Reproduce la secuencia exacta del video de referencia:
+//    App A abierta -> gesto Home -> Inicio acepta el toque EN EL ACTO ->
+//    se toca App B antes de que A termine de cerrarse -> B se abre.
+//  Lo que se comprueba es lo que de verdad importa y que antes era
+//  imposible: que el estado LOGICO cambia en el instante de la
+//  intencion (no al final de la animacion), que una intencion nueva
+//  RE-DIRIGE la transicion en curso desde su progreso visual actual
+//  (sin saltos), y que la finalizacion de una transicion ya
+//  reemplazada NO puede volver a tocar el estado.
+//
+//  El tiempo lo manda la prueba: gTestUs fija micros(), que es de
+//  donde sale el progreso de la animacion.
+// #############################################################
+static void testTransicionesApps(){
+  printf("Transiciones de app interrumpibles (el test del video)\n");
+  int before = gFails;
+  // Entorno limpio y determinista.
+  appTrCancel();
+  gTestMs = 100000; gTestUs = 1000000;
+  gState = ST_HOME; gLand = false; gHosted = false;
+  kioskOn = false; gSafeMode = false; gFrPending = false;
+  editMode = false; hcActive = false; gNavMode = 1;
+  qsPanelY = 0; qsAnimOn = false; qsDragging = false;
+  gHomePage = 0; gHomeDirty = false;
+  for(int i = 0; i < APP_N; i++) gAppState[i] = ALIFE_CLOSED;
+  tReset();
+
+  // ---- 1. ABRIR: el estado logico cambia YA, la animacion solo empieza ----
+  enterApp(IC_RELOJ);
+  chk(gState == ST_APP && gAppId == IC_RELOJ, "abrir cambia el estado LOGICO en el acto");
+  chk(appTrVisible(),                          "y deja una capa visual animandose");
+  chk(gTrEnterPending,                         "el enter() de la app queda PENDIENTE, no ha corrido");
+  chk(gTrIn.on && gTrIn.app == IC_RELOJ,       "la capa entrante es la app abierta");
+  chk(!gTrOut.on,                              "y no hay capa saliente: no habia nada antes");
+  uint32_t gen1 = gTrGen;
+
+  // A mitad de la apertura el progreso es intermedio y sale del TIEMPO.
+  gTestUs += (ATR_OPEN_MS * 1000u) / 2;
+  float pMid = appTrP(&gTrIn, (uint32_t)micros());
+  chk(pMid > 0.05f && pMid < 1.0f, "a mitad de camino el progreso es intermedio (interpolado por tiempo)");
+
+  // ---- 2. INTERRUMPIR LA APERTURA: cerrar antes de que la app exista ----
+  // Es medio test del video: el usuario abandona una apertura a mitad.
+  appClose();
+  chk(gState == ST_HOME,        "cerrar devuelve el estado LOGICO a Inicio en el acto");
+  chk(!gTrEnterPending,          "la apertura pendiente se cancela: la app nunca llego a existir");
+  chk(gAppState[IC_RELOJ] == ALIFE_CLOSED, "y su ciclo de vida vuelve a donde estaba (no se suspende una app sin enter)");
+  chk(gTrGen != gen1,            "la generacion avanza: la transicion vieja queda obsoleta");
+  chk(gTrOut.on && gTrOut.app == IC_RELOJ, "la app abandonada pasa a ser la capa SALIENTE");
+  // CONTINUIDAD: la saliente arranca desde el progreso que tenia, no desde 1.
+  chk(gTrOut.p0 < 0.999f && gTrOut.p0 > 0.0f,
+      "la capa saliente continua desde su progreso visual actual (sin salto)");
+
+  // ---- 3. EL CASO CENTRAL: tocar App B mientras A todavia se cierra ----
+  uint32_t genClose = gTrGen;
+  gTestUs += (ATR_CLOSE_MS * 1000u) / 3;         // A aun no ha terminado
+  chk(appTrVisible(), "App A sigue viendose encogiendo");
+  enterApp(IC_CALC);
+  chk(gState == ST_APP && gAppId == IC_CALC,
+      "el toque en App B se acepta EN EL ACTO, con App A aun cerrandose");
+  chk(gTrIn.on && gTrIn.app == IC_CALC,  "App B entra como capa entrante");
+  chk(gTrOut.on,                          "y App A sigue como capa saliente: dos capas, no mas");
+  chk(gTrGen != genClose,                 "la generacion avanza otra vez");
+
+  // ---- 4. UNA FINALIZACION OBSOLETA NO PUEDE TOCAR EL ESTADO ----
+  // Se fuerza el remate de la transicion VIEJA (generacion caducada).
+  uint32_t genB = gTrGen;
+  gTrEnterGen = genClose;                  // simula el remate de la transicion reemplazada
+  appTrFinishOpen();
+  chk(gState == ST_APP && gAppId == IC_CALC,
+      "una finalizacion de generacion vieja NO devuelve a Inicio ni borra App B");
+  chk(!gTrEnterPending, "y se descarta sin dejar nada pendiente");
+  (void)genB;
+
+  // ---- 5. NUNCA MAS DE DOS CAPAS ----
+  appTrCancel();
+  gState = ST_HOME;
+  for(int i = 0; i < APP_N; i++) gAppState[i] = ALIFE_CLOSED;
+  enterApp(IC_RELOJ);   gTestUs += 20000;
+  enterApp(IC_CALC);    gTestUs += 20000;
+  enterApp(IC_NOTAS);   gTestUs += 20000;
+  chk(gTrIn.on && gTrIn.app == IC_NOTAS, "tras tres aperturas encadenadas, la entrante es la ULTIMA");
+  chk(gAppId == IC_NOTAS,                 "y el estado logico es el de la ultima intencion");
+  // gTrIn + gTrOut son las UNICAS capas que existen: no hay lista que crezca.
+  chk(sizeof(gTrIn) == sizeof(gTrOut), "solo existen dos capas (entrante y saliente)");
+
+  // ---- 6. EL PROGRESO SE ACABA POR TIEMPO, NO POR CUADROS ----
+  appTrCancel();
+  gState = ST_HOME;
+  for(int i = 0; i < APP_N; i++) gAppState[i] = ALIFE_CLOSED;
+  enterApp(IC_RELOJ);
+  gTestUs += ATR_OPEN_MS * 1000u + 5000u;        // se pasa de largo la duracion
+  chk(appTrP(&gTrIn, (uint32_t)micros()) >= 1.0f,
+      "pasada la duracion el progreso satura en el destino (no se acumula deuda)");
+
+  appTrCancel();
+  gTestUs = 0;                                    // devolver micros() al reloj real
+  if(gFails == before) printf("  Transiciones: todas las comprobaciones pasan.\n");
+}
+
+// #############################################################
+//  REJILLA DEL INICIO  ·  paginas automaticas y cero solapamientos
+//  ------------------------------------------------------------
+//  Antes, cuando no quedaba una sola celda libre, homeOrderNormalize()
+//  BORRABA la app de favoritos (gAppFav &= ~bit) y drwFavToggle() se
+//  negaba a anadirla: la app desaparecia del escritorio sin avisar.
+//  Ninguno de los dos creaba la pagina que faltaba. Esto comprueba que
+//  ahora se crea, que ni un icono se pierde y que dos apps no pueden
+//  compartir celda.
+// #############################################################
+static void testRejillaAutoPaginas(){
+  printf("Rejilla del Inicio: paginas automaticas sin solapar\n");
+  int before = gFails;
+  gHomeCols = 4; gHomeRows = 3;
+  gHomePageN = 1; gHomePage = 0; gHomeMain = 0;
+  for(int p = 0; p < HOME_PAGES_MAX; p++) gHomeWgN[p] = 0;
+  for(int i = 0; i < HOME_TOTAL; i++) homeOrder[i] = HOME_EMPTY;
+  gAppHidden = 0;
+
+  const int perPage = 12;                       // 4x3
+  // Llenar la unica pagina que existe.
+  gAppFav = 0;
+  for(int i = 0; i < perPage; i++){ homeOrder[homeIdx(0, i)] = (uint8_t)i; gAppFav |= (1u << i); }
+  chk(homeFirstFree() < 0, "con la unica pagina llena no queda ni una celda libre");
+
+  // Una app mas: TIENE que aparecer una pagina nueva, no perderse la app.
+  int slot = homeFirstFreeGrow();
+  chk(slot >= 0,          "homeFirstFreeGrow crea pagina cuando no queda hueco");
+  chk(gHomePageN == 2,    "y el escritorio pasa a tener dos paginas");
+  chk(slot == homeIdx(1, 0), "el hueco es la primera celda de la pagina nueva");
+
+  // La ruta REAL de "anadir a Inicio" (menu de la caja de apps).
+  gHomePageN = 1;
+  for(int i = 0; i < HOME_TOTAL; i++) homeOrder[i] = HOME_EMPTY;
+  gAppFav = 0;
+  for(int i = 0; i < perPage; i++){ homeOrder[homeIdx(0, i)] = (uint8_t)i; gAppFav |= (1u << i); }
+  int extra = perPage;                          // una app que aun no esta en Inicio
+  chk(extra < APP_N, "hay al menos una app fuera del escritorio para la prueba");
+  if(extra < APP_N){
+    drwFavToggle(extra);
+    chk(appIsFav(extra), "anadir a Inicio con el escritorio lleno SI anade la app");
+    chk(gHomePageN >= 2, "creando la pagina que hacia falta");
+    int found = -1;
+    for(int i = 0; i < HOME_TOTAL; i++) if(homeOrder[i] == (uint8_t)extra) found = i;
+    chk(found >= 0, "y la app tiene una ranura de verdad");
+  }
+
+  // NI UN ICONO EN DOS CELDAS, ni una celda con dos iconos, tras normalizar.
+  homeOrderNormalize();
+  {
+    int seen[APP_N]; for(int i = 0; i < APP_N; i++) seen[i] = 0;
+    bool dup = false;
+    for(int i = 0; i < HOME_TOTAL; i++){
+      uint8_t v = homeOrder[i];
+      if(v == HOME_EMPTY) continue;
+      if(v >= APP_N){ dup = true; break; }
+      if(seen[v]++) dup = true;
+    }
+    chk(!dup, "ninguna app aparece en dos ranuras");
+  }
+  // Ninguna app favorita se ha quedado sin sitio.
+  {
+    bool lost = false;
+    for(int id = 0; id < APP_N; id++){
+      if(!appIsFav(id) || appIsHidden(id)) continue;
+      bool here = false;
+      for(int i = 0; i < HOME_TOTAL && !here; i++) if(homeOrder[i] == (uint8_t)id) here = true;
+      if(!here) lost = true;
+    }
+    chk(!lost, "ninguna app favorita se pierde por falta de espacio");
+  }
+
+  // AUTORREPARACION: datos guardados con DUPLICADOS y ranuras fuera de rango.
+  gHomePageN = 2; gHomeCols = 4; gHomeRows = 3;
+  for(int i = 0; i < HOME_TOTAL; i++) homeOrder[i] = HOME_EMPTY;
+  gAppFav = 0x7;                                  // apps 0,1,2 en Inicio
+  homeOrder[homeIdx(0, 0)] = 0;
+  homeOrder[homeIdx(0, 1)] = 0;                   // DUPLICADO de la app 0
+  homeOrder[homeIdx(0, 2)] = 1;
+  homeOrder[homeIdx(0, 19)] = 2;                  // ranura que la rejilla 4x3 NO tiene
+  homeOrderNormalize();
+  {
+    int n0 = 0;
+    for(int i = 0; i < HOME_TOTAL; i++) if(homeOrder[i] == 0) n0++;
+    chk(n0 == 1, "un duplicado guardado se reduce a UNA sola ranura");
+    bool has2 = false;
+    for(int i = 0; i < HOME_TOTAL; i++) if(homeOrder[i] == 2) has2 = true;
+    chk(has2, "el icono que estaba en una ranura inexistente se recoloca, no se borra");
+    bool has1 = false;
+    for(int i = 0; i < HOME_TOTAL; i++) if(homeOrder[i] == 1) has1 = true;
+    chk(has1, "y el resto de la personalizacion se conserva");
+  }
+  if(gFails == before) printf("  Rejilla del Inicio: todas las comprobaciones pasan.\n");
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -3047,6 +3255,8 @@ int main(){
   testFlexAccount();
   testRecortePorBandas();
   testIconosEnSuCaja();
+  testTransicionesApps();
+  testRejillaAutoPaginas();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

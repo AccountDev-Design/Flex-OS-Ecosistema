@@ -40,7 +40,11 @@ GANCHOS = [
     ("setup",          "homeCfgLoad()",   "el fondo, el tema y la paleta no se restaurarian al arrancar"),
     ("setup",          "homeOrderLoad()", "el escritorio no se restauraria al arrancar"),
     ("homeTick",       "hcEnter()",       "la pulsacion larga en un hueco vacio no abriria la personalizacion"),
-    ("enterHome",      "hcClose(",        "volver al escritorio dejaria el modo abierto y sus buffers reservados"),
+    # La limpieza de "volver a Inicio" vive en enterHomeState(): la comparten
+    # enterHome() (que ademas vuelca el escritorio) y appClose() (que deja el
+    # dibujo a la capa de transicion interrumpible). Comprobar el sitio donde
+    # esta de verdad es lo que mantiene util la regla.
+    ("enterHomeState", "hcClose(",        "volver al escritorio dejaria el modo abierto y sus buffers reservados"),
     ("autoLockNow",    "hcClose(",        "bloquear con el modo abierto dejaria el estado a medias"),
 ]
 

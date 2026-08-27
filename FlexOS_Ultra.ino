@@ -615,6 +615,30 @@ static bool gAirplane = false;
 static bool gBleOn    = false;
 
 // #############################################################
+// ##  TRANSICIONES DE APP · tipo de capa visual
+// ##  ------------------------------------------------------
+// ##  Aqui arriba por la MISMA restriccion de ctags que Touch,
+// ##  Notification, CronoLap y HomeWidget: el IDE de Arduino
+// ##  genera los prototipos en la linea 699 y un tipo que salga
+// ##  en una firma tiene que estar definido ANTES. AppTrLayer
+// ##  aparece en appTrP(), appTrRect(), appTrAim() y appTrFill().
+// ##  El MOTOR (estado, geometria y composicion) vive junto al
+// ##  framework de ventanas, que es donde se usa.
+// ##  Lo vigila tests/host/check_protos.py.
+// #############################################################
+// Una capa visual de transicion. p = 0 es el rectangulo del icono,
+// p = 1 la pantalla entera.
+struct AppTrLayer {
+  bool     on;
+  int      app;
+  int      ix, iy, is;      // rectangulo del icono (origen al abrir, destino al cerrar)
+  uint16_t bg;              // color de la tarjeta (fondo de ventana de esa app)
+  float    p0, p1;          // progreso de partida y destino
+  uint32_t t0us, durus;     // reloj monotonico real
+  int      by0, by1;        // banda que ocupo en el cuadro anterior
+};
+
+// #############################################################
 // ##  CAPA DE HARDWARE  (reutilizada de ArduOS - datos del
 // ##  fabricante de la placa)
 // #############################################################
@@ -2483,6 +2507,185 @@ static void drawGlassCardFlat(int x, int y, int w, int h, int rad, uint16_t tint
     memcpy(gBuf + (size_t)yy * SCR_W + xs, glcCard + (size_t)j * w + sx, (size_t)(xe - xs + 1) * 2);
   }
 }
+
+// #############################################################
+// ##  SUPERFICIES DEL SISTEMA  ·  UN SOLO COMPONENTE
+// ##  ------------------------------------------------------
+// ##  QUE ARREGLA. El COLOR ya tenia fuente de verdad (FlexTheme / TH()), pero
+// ##  el MATERIAL no: cada overlay decidia por su cuenta si pintaba vidrio o
+// ##  plano, y los que se animan resolvian todos el mismo problema -- "el
+// ##  desenfoque es caro, no puedo pagarlo por cuadro" -- de una forma
+// ##  distinta cada uno. El menu contextual de pulsacion larga y la tarjeta
+// ##  desplegada del cronometro hacian literalmente esto:
+// ##
+// ##      fillRoundRectA(..., COLOR_PLANO, alpha);         // todos los cuadros
+// ##      if(uiGlass && p >= 1.0f) drawLiquidGlassPanel(...); // solo el ultimo
+// ##
+// ##  Con Liquid Glass activado se veia, durante TODA la animacion, una capa
+// ##  plana desvanecida que no era Liquid Glass -- exactamente lo que se
+// ##  reporto. No era un color mal elegido: era que no habia componente.
+// ##
+// ##  COMO SE ARREGLA SIN PAGAR EL DESENFOQUE POR CUADRO. Estos overlays se
+// ##  animan SOBRE UN FONDO QUIETO (el menu contextual sobre homeBuf; la
+// ##  tarjeta del cronometro sobre la banda capturada al abrir): la entrada del
+// ##  desenfoque es IDENTICA en todos los cuadros y lo unico que cambia es el
+// ##  rectangulo. Asi que la banda se desenfoca UNA VEZ al empezar la animacion
+// ##  y cada cuadro solo muestrea de ese resultado. Es correcto por
+// ##  construccion: glassBlur es un box-blur separable, asi que desenfocar la
+// ##  banda entera y recortar un sub-rectangulo da lo mismo que desenfocar ese
+// ##  sub-rectangulo.
+// ##
+// ##  RESULTADO: transparencia, tinte, borde y desenfoque REALES durante toda
+// ##  la animacion, al coste de un relleno redondeado por cuadro -- el mismo
+// ##  que costaba la version plana que sustituye.
+// #############################################################
+// Roles de superficie. Se pide por SIGNIFICADO, nunca por color ni por material.
+#define UIS_CARD      0    // tarjeta / panel apoyado en la pagina
+#define UIS_ELEVATED  1    // menu, dialogo, tecla, chip: por encima de una tarjeta
+#define UIS_ACCENT    2    // superficie de accion primaria (usa el acento del usuario)
+
+// Color PLANO y TINTE de vidrio de cada rol. Los dos salen del tema semantico y
+// del acento elegido por el usuario, asi que Claro/Oscuro y el color personal
+// mandan igual en los dos materiales.
+static uint16_t uiSurfFlat(int role){
+  if(role == UIS_ACCENT)   return wallAccent();
+  if(role == UIS_ELEVATED) return TH_SURF2;
+  return TH_SURF;
+}
+static uint16_t uiSurfTint(int role){
+  if(role == UIS_ACCENT)   return wallAccent();
+  if(role == UIS_ELEVATED) return TH_GLASS2;
+  return TH_GLASS;
+}
+// Color de texto/icono legible SOBRE ese rol.
+static uint16_t uiSurfOn(int role){ return (role == UIS_ACCENT) ? TH_ONACC : TH_TXT; }
+
+// ---- BANDA PRE-DESENFOCADA (vidrio durante una animacion) ----------------
+#define UIGL_BAND_MAX_H 320              // peor caso real (cronometro 236, menu ~178)
+static uint16_t* uiGlBand   = NULL;      // banda YA desenfocada (PSRAM, stride SCR_W)
+static int       uiGlBandY0 = 0, uiGlBandY1 = -1;
+static uint8_t   uiGlBandMix = GLASS_TINT_BASE;
+
+static bool uiGlassBandActive(){ return uiGlBand && uiGlBandY1 >= uiGlBandY0; }
+// Desenfoca la banda [y0,y1] del buffer ACTIVO una sola vez. El llamante debe
+// haber dejado ya en gBuf el fondo autentico de debajo (lo que se vera a traves
+// del vidrio). Devuelve false si no hay PSRAM: el llamante cae a plano y todo
+// sigue funcionando, solo sin desenfoque.
+static bool uiGlassBandBegin(int y0, int y1, uint16_t tint){
+  uiGlBandY1 = -1;
+  if(gLand) return false;                       // indexacion vertical directa: igual que el panel normal
+  if(y0 < 0) y0 = 0; if(y1 > SCR_H - 1) y1 = SCR_H - 1;
+  if(y1 < y0) return false;
+  int h = y1 - y0 + 1;
+  // Se dimensiona al PEOR CASO REAL de los overlays que la usan (la banda del
+  // cronometro, 236 filas; el menu contextual, ~178), no a pantalla completa:
+  // 480 x 320 x 2 = 300 KB en vez de 768 KB. Una banda mas alta que esto NO se
+  // cachea -- el llamante cae a la ruta plana/vidrio de siempre -- en vez de
+  // desbordar el buffer.
+  if(h > UIGL_BAND_MAX_H) return false;
+  if(!uiGlBand)
+    uiGlBand = (uint16_t*)heap_caps_malloc((size_t)SCR_W * UIGL_BAND_MAX_H * 2,
+                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(!uiGlBand) return false;                   // sin PSRAM: el llamante usa plano
+  // Tinte adaptativo: MISMO criterio que drawLiquidGlassPanelEx (cuanto mas se
+  // parecen tinte y fondo en luminancia, menos tinte), medido una sola vez sobre
+  // toda la banda para que no cambie de color a mitad de la animacion.
+  uint32_t lumaSum = 0; int lumaN = 0;
+  for(int j = 0; j < h; j += 4){
+    const uint16_t* srow = gBuf + (size_t)(y0 + j) * SCR_W;
+    for(int i = 0; i < SCR_W; i += 8){ lumaSum += (uint32_t)glassLuma(srow[i]); lumaN++; }
+  }
+  uiGlBandMix = GLASS_TINT_BASE;
+  if(lumaN > 0){
+    int dif = (int)(lumaSum / (uint32_t)lumaN) - glassLuma(tint);
+    if(dif < 0) dif = -dif;
+    if(dif > GLASS_TINT_DIFF_MAX) dif = GLASS_TINT_DIFF_MAX;
+    uiGlBandMix = (uint8_t)(GLASS_TINT_MIN + (dif * (GLASS_TINT_MAX - GLASS_TINT_MIN)) / GLASS_TINT_DIFF_MAX);
+  }
+  // Copiar la banda a glassBuf, desenfocarla ahi (glassBlur trabaja sobre
+  // glassBuf con el ancho que se le pase) y guardarla en uiGlBand.
+  if(!glassBuf) glassBuf = (uint16_t*)heap_caps_malloc((size_t)SCR_W * SCR_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(!glassBuf) return false;
+  for(int j = 0; j < h; j++)
+    memcpy(glassBuf + (size_t)j * SCR_W, gBuf + (size_t)(y0 + j) * SCR_W, (size_t)SCR_W * 2);
+  glassBlur(SCR_W, h, 6);                        // mismo radio que drawLiquidGlassPanel
+  for(int j = 0; j < h; j++)
+    memcpy(uiGlBand + (size_t)j * SCR_W, glassBuf + (size_t)j * SCR_W, (size_t)SCR_W * 2);
+  uiGlBandY0 = y0; uiGlBandY1 = y1;
+  return true;
+}
+static void uiGlassBandEnd(){ uiGlBandY1 = -1; }
+// Libera la banda (la reclama quien necesite PSRAM: ver themeChanged/gfxReclaim).
+static void uiGlassBandFree(){
+  if(uiGlBand){ heap_caps_free(uiGlBand); uiGlBand = NULL; }
+  uiGlBandY1 = -1;
+}
+
+// Panel de vidrio SOBRE la banda cacheada. Reproduce el material de
+// drawLiquidGlassPanelEx -- tinte adaptativo, especular arriba, sombreado
+// abajo, borde direccional -- pero leyendo el desenfoque YA calculado. 'a' es
+// la opacidad del MATERIAL sobre lo que hubiera debajo, para que el panel pueda
+// aparecer sin dejar de ser vidrio.
+static void uiGlassPanelCached(int x, int y, int w, int h, int rad, uint16_t tint, uint8_t a){
+  if(!uiGlassBandActive() || a == 0) return;
+  if(x < 0){ w += x; x = 0; } if(y < 0){ h += y; y = 0; }
+  if(x + w > SCR_W) w = SCR_W - x; if(y + h > SCR_H) h = SCR_H - y;
+  if(w <= 0 || h <= 0) return;
+  if(2 * rad > w) rad = w / 2; if(2 * rad > h) rad = h / 2;
+  int vy0 = y > gClipY0 ? y : gClipY0;
+  int vy1 = (y + h - 1) < gClipY1 ? (y + h - 1) : gClipY1;
+  if(vy0 < uiGlBandY0) vy0 = uiGlBandY0;
+  if(vy1 > uiGlBandY1) vy1 = uiGlBandY1;
+  if(vy0 > vy1) return;
+  const uint8_t CORNER_STRONG = 156, CORNER_WEAK = 104;
+  for(int yy = vy0; yy <= vy1; yy++){
+    int j = yy - y;
+    int ins = glInset(j, h, rad);
+    const uint16_t* src = uiGlBand + (size_t)(yy - uiGlBandY0) * SCR_W;
+    uint16_t* dst = gBuf + (size_t)yy * SCR_W;
+    float fj = (float)j;
+    int i0 = x + ins, i1 = x + w - 1 - ins;
+    if(i0 < gClipX0) i0 = gClipX0;
+    if(i1 > gClipX1) i1 = gClipX1;
+    for(int i = i0; i <= i1; i++){
+      uint16_t out = mix565(src[i], tint, uiGlBandMix);
+      if(fj < h * 0.45f) out = mix565(out, rgb565(255,255,255), (uint8_t)((1.0f - fj / (h * 0.45f)) * 26));
+      else               out = mix565(out, rgb565(0,0,0), (uint8_t)(((fj - h * 0.45f) / (h * 0.55f)) * 30));
+      dst[i] = (a == 255) ? out : mix565(dst[i], out, a);
+    }
+    // Borde del cristal (da el grosor). Solo si el lado cae dentro del recorte.
+    uint16_t bcol = (j < 3) ? rgb565(255,255,255) : (j < h / 2 ? rgb565(205,214,228) : rgb565(22,28,40));
+    bool topZone = (j < h / 2);
+    uint8_t sL = topZone ? CORNER_STRONG : CORNER_WEAK;
+    uint8_t sR = topZone ? CORNER_WEAK   : CORNER_STRONG;
+    int lx = x + ins, rx = x + w - 1 - ins;
+    if(lx >= gClipX0 && lx <= gClipX1) dst[lx] = mix565(dst[lx], bcol, (uint8_t)((int)sL * a / 255));
+    if(rx >= gClipX0 && rx <= gClipX1) dst[rx] = mix565(dst[rx], bcol, (uint8_t)((int)sR * a / 255));
+  }
+}
+
+// ---- LA SUPERFICIE QUE USA EL SISTEMA ------------------------------------
+// Un solo punto de decision Plano/Liquid Glass para todo overlay del sistema.
+// 'a' < 255 sirve para las animaciones: en Liquid Glass el panel sigue siendo
+// vidrio (banda cacheada) y solo aparece con menos opacidad; en Plano es el
+// relleno solido de la paleta, con su alpha. Ni un llamante vuelve a decidir
+// material por su cuenta.
+static void uiSurfaceA(int x, int y, int w, int h, int rad, int role, uint8_t a){
+  if(a == 0) return;
+  if(uiGlass){
+    if(uiGlassBandActive()){ uiGlassPanelCached(x, y, w, h, rad, uiSurfTint(role), a); return; }
+    if(a >= 255){ drawLiquidGlassPanel(x, y, w, h, rad, uiSurfTint(role)); return; }
+    // Sin banda cacheada y con alpha: el tinte del vidrio como relleno. Es la
+    // ruta de respaldo (sin PSRAM o fuera de una animacion preparada).
+    fillRoundRectA(x, y, w, h, rad, uiSurfTint(role), a);
+    return;
+  }
+  fillRoundRectA(x, y, w, h, rad, uiSurfFlat(role), a);   // PLANO: solido, sin vidrio ni blur
+}
+static void uiSurface(int x, int y, int w, int h, int rad, int role){
+  uiSurfaceA(x, y, w, h, rad, role, 255);
+}
+
 // Wallpaper desenfocado reutilizable (fondo del desbloqueo y de Recientes, estilo iOS)
 static uint16_t* blurBg = NULL;
 static void ensureBlurBg(){
@@ -6112,6 +6315,18 @@ static void safeTick();
 static bool safeAppAllowed(int id);                       // que apps se pueden abrir en Modo seguro
 static void safeDenyApp(int id);                          // aviso real al intentar abrir una app no permitida
 static void appClose();                                   // salir de la app al escritorio (suspendiendo)
+// TRANSICIONES INTERRUMPIBLES (ver el bloque grande mas abajo). Se declaran
+// aqui porque homeTick(), loop() y las salidas de app las llaman antes de que
+// el motor este definido -- y porque el auto-prototipado de Arduino no genera
+// prototipos para funciones que usan tipos declarados despues.
+static void enterHomeState();                             // estado logico de Inicio, SIN dibujar
+static bool appTrVisible();                               // hay capa de transicion en pantalla
+static bool appTrOwnsScreen();                            // ...y por tanto es la unica que dibuja
+static void appTrBeginOpen(int id, bool resuming, uint8_t prevLife);
+static void appTrBeginClose(int id);
+static void appTrCancel();                                // corta toda capa de transicion
+static void appTrFinishOpen();                            // ultimo cuadro: corre enter()/resume()
+static void appTrTick();                                  // un cuadro de la transicion
 static bool appTerminate(int id, bool force);             // cerrar de verdad: libera recursos de la app
 static void appSuspend(int id, bool landscape);
 static int  swCardCount();                                // Recientes: numero de tarjetas vivas
@@ -6244,6 +6459,37 @@ static int homeFirstFree(){
   }
   return -1;
 }
+// Anade una pagina VACIA al final. SIN aviso y SIN guardar: lo usan la
+// normalizacion (que corre en cada arranque) y la colocacion automatica, y
+// quien las llama ya guarda al terminar su operacion. Escribir NVS aqui seria
+// una escritura de flash por cada arranque.
+static bool homePageAppendQuiet(){
+  if(gHomePageN >= HOME_PAGES_MAX) return false;
+  for(int i = 0; i < HOME_STRIDE; i++) homeOrder[homeIdx(gHomePageN, i)] = HOME_EMPTY;
+  gHomeWgN[gHomePageN] = 0;
+  gHomePageN++;
+  return true;
+}
+// PRIMERA RANURA LIBRE, CREANDO PAGINA SI HACE FALTA.
+// ---------------------------------------------------------------------------
+// Aqui estaba el fallo de "se agrega una app y se coloca encima de otra / se
+// pierde": homeFirstFree() solo mira las paginas que YA existen, y sus dos
+// llamantes reaccionaban al -1 de la peor manera posible --
+// homeOrderNormalize() borraba la app de favoritos (gAppFav &= ~bit: la app
+// desaparecia del escritorio sin decir nada) y drwFavToggle() se negaba a
+// anadirla. Ninguno de los dos creaba la pagina que faltaba.
+//
+// Ahora, cuando no queda ni una celda util en ninguna pagina, se crea otra y el
+// icono cae en su primera celda. Solo se devuelve -1 en el unico caso en el que
+// de verdad no cabe: HOME_PAGES_MAX paginas y todas sin un hueco. El modelo
+// sigue siendo "una app por ranura", asi que dos iconos en la misma celda son
+// imposibles por construccion; lo que faltaba era el crecimiento.
+static int homeFirstFreeGrow(){
+  int slot = homeFirstFree();
+  if(slot >= 0) return slot;
+  if(!homePageAppendQuiet()) return -1;   // ya hay el maximo de paginas y todas llenas
+  return homeFirstFree();
+}
 static bool gMinChanged = false;   // lo pone loop(): true cuando cambia el minuto
 
 // ---- Invalidacion de caches de pantalla ----
@@ -6326,7 +6572,7 @@ static void splashTick(){
     // la misma app SIN pasar por el escritorio. La unica salida sigue siendo el
     // gesto del candado + PIN/contrasena.
     else if(KIOSK_ON && kioskOn && kioskApp >= 0){
-      renderHome();                      // winRevealAnim compone sobre homeBuf
+      renderHome();                      // la transicion compone sobre homeBuf
       enterApp(kioskApp);
       kioskShowBadge();
     }
@@ -7320,18 +7566,21 @@ static void homeOrderNormalize(){
       seen[v] = true;
     }
   }
-  // 1. los iconos rescatados de ranuras que ya no existen vuelven a entrar
+  // 1. los iconos rescatados de ranuras que ya no existen vuelven a entrar.
+  //    Si no queda hueco se CREA pagina (homeFirstFreeGrow): un icono no se
+  //    pierde por falta de sitio, que es justo lo que pasaba antes.
   for(int r = 0; r < nres; r++){
     uint8_t v = rescue[r];
     if(v >= APP_N || seen[v] || !appIsFav(v) || appIsHidden(v)) continue;
-    int slot = homeFirstFree();
-    if(slot < 0){ gAppFav &= (uint32_t)~(1u << v); continue; }
+    int slot = homeFirstFreeGrow();
+    if(slot < 0){ gAppFav &= (uint32_t)~(1u << v); continue; }   // maximo de paginas Y todas llenas
     homeOrder[slot] = v; seen[v] = true;
   }
-  // 2. toda app favorita sin ranura ocupa el PRIMER hueco libre
+  // 2. toda app favorita sin ranura ocupa el PRIMER hueco libre (creando
+  //    pagina si el escritorio esta lleno)
   for(int id = 0; id < APP_N; id++){
     if(!appIsFav(id) || appIsHidden(id) || seen[id]) continue;
-    int slot = homeFirstFree();
+    int slot = homeFirstFreeGrow();
     if(slot < 0){ gAppFav &= (uint32_t)~(1u << id); continue; }   // escritorio lleno de verdad
     homeOrder[slot] = (uint8_t)id; seen[id] = true;
   }
@@ -7591,7 +7840,11 @@ static void edTick(){
   if(T.released){
     edEdgeDir = 0;
     if(edWDrag >= 0){ edWDrag = -1; homeOrderNormalize(); homeOrderSave(); edRender(); return; }
-    if(edDrag >= 0){ edDrag = -1; homeOrderSave(); edRender(); }                // soltar -> fija
+    // NORMALIZAR TAMBIEN AL SOLTAR UN ICONO. El arrastre reinserta desplazando
+    // (edMove), y ese desplazamiento puede empujar un icono a una celda que
+    // ocupa un WIDGET: se veian superpuestos hasta la siguiente normalizacion.
+    // El arrastre de widgets ya lo hacia (linea de arriba); el de iconos no.
+    if(edDrag >= 0){ edDrag = -1; homeOrderNormalize(); homeOrderSave(); edRender(); }   // soltar -> fija
     else if(T.tap) edExit();                                                    // toque en vacio/Inicio -> salir
     return;
   }
@@ -8265,10 +8518,7 @@ static int homePageItems(int page){
   return k;
 }
 static bool homePageAdd(){
-  if(gHomePageN >= HOME_PAGES_MAX){ hcInfo("Maximo de 5 paginas"); return false; }
-  for(int i = 0; i < HOME_STRIDE; i++) homeOrder[homeIdx(gHomePageN, i)] = HOME_EMPTY;
-  gHomeWgN[gHomePageN] = 0;
-  gHomePageN++;
+  if(!homePageAppendQuiet()){ hcInfo("Maximo de 5 paginas"); return false; }
   homeOrderSave();
   return true;
 }
@@ -9179,14 +9429,21 @@ static bool homeEmptySpaceAt(int px, int py){
 
 // ORIGEN ALTERNATIVO DE LA ANIMACION. Una app abierta desde la Caja de
 // aplicaciones puede no estar en el escritorio (no es favorita) o estar en otra
-// ranura; sin esto, winRevealAnim la haria crecer desde un sitio que no es el
+// ranura; sin esto, la transicion la haria crecer desde un sitio que no es el
 // icono que el usuario acaba de tocar. La caja anota aqui el rectangulo REAL
 // del icono pulsado y getIconRect lo prefiere, pero SOLO para esa app: asi el
 // dato no se queda pegado y afectando a la siguiente apertura desde Inicio.
 static int gIconOvrApp = -1, gIconOvrX = 0, gIconOvrY = 0, gIconOvrS = 72;
 static void homeTick(){
   if(editMode){ edTick(); return; }
-  if(gHomeDirty && !hpDragging && !hpSettling){
+  // TRANSICION EN CURSO: Inicio SIGUE atendiendo el toque (es justo lo que hace
+  // que se acepte la app siguiente antes de que la anterior termine de cerrarse),
+  // pero NO dibuja: la capa de transicion es la unica duena de la pantalla
+  // mientras dura, igual que la cortina o el OTA. Un showHome() aqui volcaria el
+  // escritorio entero encima de la tarjeta que esta encogiendo -> parpadeo.
+  if(appTrOwnsScreen()){
+    if(gHomeDirty && !hpDragging && !hpSettling) renderHome();   // offscreen: no toca la pantalla
+  } else if(gHomeDirty && !hpDragging && !hpSettling){
     renderHome(); showHome();
   }
   if(gSafeMode && T.tap && T.x >= 136 && T.x <= 344 && T.y >= 48 && T.y <= 104){ safeEnter(); return; }
@@ -9873,54 +10130,152 @@ static void drawerRegistryAdopt(int fromId){
 }
 
 // Animacion de apertura/cierre: la ventana crece/encoge desde el icono
-#define WIN_ANIM_MS 100                              // 0.1 s exactos, basado en tiempo
-static void winRevealAnim(int id, bool opening){
-  int ix, iy, is; getIconRect(id, ix, iy, is);
-  uint16_t bg = (APP_REG[id].flags & APP_CUSTOM_HEADER) ? TH_PAGE : WIN_BG;
-  uint32_t t0 = millis(), dur = WIN_ANIM_MS;
-  // FLUIDEZ: antes cada frame recopiaba homeBuf ENTERO (768 KB de PSRAM leidos y
-  // escritos, ~10 ms) y volcaba la pantalla completa, aunque la forma solo
-  // ocupara una franja. A 0,2 s eso daba unos 20 frames; a 0,1 s habrian sido 10
-  // y se veria a saltos. Ahora se recompone y se vuelca SOLO la union de la
-  // franja del frame anterior y la de este -- lo unico que puede haber cambiado.
-  // Los primeros frames del zoom son un rectangulo pequeno junto al icono y
-  // cuestan casi nada, asi que el numero de frames sube mucho: la animacion es
-  // mas corta Y mas suave a la vez. Al no haber delay(), el bucle va al maximo
-  // que de el compositor.
-  int prevY0 = 0, prevY1 = SCR_H - 1;
-  bool first = true;
-  for(;;){
-    uint32_t e = millis() - t0; if(e > dur) e = dur;
-    float tt = (float)e / dur;
-    float p = opening ? tt : (1.0f - tt);
-    p = 1 - (1 - p) * (1 - p) * (1 - p);              // ease-out cubico (mas suave)
-    // Geometria de la forma de este frame y la franja vertical que ocupa.
-    int x0 = 0, y0 = 0, x1 = SCR_W, y1 = SCR_H, rad = 0;
-    if(gAnimStyle == 1){                               // fundido: cubre siempre toda la pantalla
-      y0 = 0; y1 = SCR_H;
-    } else if(gAnimStyle == 2){                        // deslizar: sube desde el borde inferior
-      y0 = (int)(SCR_H * (1 - p)); y1 = SCR_H;
-    } else {                                           // zoom: crece desde el icono
-      x0  = (int)(ix * (1 - p));
-      y0  = (int)(iy * (1 - p));
-      x1  = (int)((ix + is) * (1 - p) + SCR_W * p);
-      y1  = (int)((iy + is) * (1 - p) + SCR_H * p);
-      rad = (int)(18 * (1 - p));
-    }
-    int by0 = y0 < prevY0 ? y0 : prevY0;
-    int by1 = y1 > prevY1 ? y1 : prevY1;
-    if(first){ by0 = 0; by1 = SCR_H - 1; first = false; }
-    if(by0 < 0) by0 = 0; if(by1 > SCR_H - 1) by1 = SCR_H - 1;
-    setBuf(bbuf);
-    for(int j = by0; j <= by1; j++)                    // fondo: solo las filas que se tocan
-      memcpy(bbuf + (size_t)j * SCR_W, homeBuf + (size_t)j * SCR_W, SCR_W * 2);
-    if(gAnimStyle == 1)      fillRectA(0, 0, SCR_W, SCR_H, bg, (uint8_t)(255 * p));
-    else if(gAnimStyle == 2) fillRect(0, y0, SCR_W, SCR_H - y0, bg);
-    else                     fillRoundRect(x0, y0, x1 - x0, y1 - y0, rad, bg);
-    present(by0, by1);                                 // vuelca de una vez (sin parpadeo)
-    prevY0 = y0; prevY1 = y1;
-    if(e >= dur) break;
+// (WIN_ANIM_MS / winRevealAnim vivian aqui: un bucle for(;;) que no volvia
+//  hasta terminar la animacion. Los sustituye el motor de TRANSICIONES
+//  INTERRUMPIBLES de justo debajo, que hace lo mismo -- los tres estilos de
+//  gAnimStyle incluidos -- pero un cuadro por vuelta de loop(), sin bloquear
+//  el tactil ni la navegacion.)
+
+// #############################################################
+// ##  TRANSICIONES DE APP INTERRUMPIBLES  ·  navegacion != animacion
+// ##  ------------------------------------------------------
+// ##  QUE ARREGLA. winRevealAnim (justo arriba) es un bucle for(;;) que no
+// ##  vuelve hasta que la animacion termina. Mientras corre no se lee el
+// ##  tactil, no se despacha loop() y el estado logico aun no ha cambiado: el
+// ##  sistema obligaba a ESPERAR a que acabase cada apertura y cada cierre.
+// ##  Ese es el motivo real de que tocar otra app antes de que la anterior
+// ##  terminara de cerrarse no hiciera nada -- el toque no llegaba a existir.
+// ##
+// ##  EL PRINCIPIO. El estado LOGICO (que app manda, quien recibe el toque) y
+// ##  el estado VISUAL (que rectangulo se esta dibujando) son cosas distintas
+// ##  y se mueven por separado:
+// ##    · la intencion del usuario cambia el estado logico EN EL ACTO;
+// ##    · la animacion es solo una capa que sigue dibujandose despues, y no
+// ##      manda sobre nada.
+// ##  Por eso Inicio acepta un toque nuevo mientras la app anterior todavia se
+// ##  ve encogiendo, y por eso ese toque no puede perderse.
+// ##
+// ##  DOS CAPAS, UNA SOLA APP VIVA. Como mucho hay dos rectangulos en
+// ##  pantalla (la que sale encogiendo y la que entra creciendo), pero nunca
+// ##  dos apps renderizando: la saliente ya esta suspendida y la entrante aun
+// ##  no ha corrido su enter(). Las dos capas son fillRoundRect sobre homeBuf,
+// ##  asi que el coste por cuadro es el de la banda que ocupan, no el de dos
+// ##  aplicaciones.
+// ##
+// ##  GENERACION. Cada intencion nueva incrementa gTrGen. Una finalizacion
+// ##  que pertenezca a una generacion vieja se descarta: una transicion
+// ##  reemplazada no puede volver a tocar el estado logico mas tarde.
+// ##
+// ##  CONTINUIDAD. Al re-dirigir se parte del progreso VISUAL actual (p0), no
+// ##  de 0 ni de 1, y la duracion se escala con la distancia que queda. Asi no
+// ##  hay salto entre la animacion vieja y la nueva.
+// ##
+// ##  TIEMPO REAL, NO CUADROS. El progreso sale de micros() -- que en el core de
+// ##  ESP32 ES esp_timer_get_time(), y es la misma fuente monotonica que ya usa
+// ##  el pacing de Jumper --: si un
+// ##  cuadro se retrasa se SALTAN estados intermedios en vez de acumular deuda,
+// ##  que es lo que exige no arrastrar latencia.
+// #############################################################
+// Duraciones. El video de referencia (S26 Ultra, 120 Hz) mide ~100-133 ms por
+// tramo; aqui se usan las del encargo (cierre 180-220, apertura 200-240) porque
+// a 60 Hz 100 ms son ~6 cuadros y el movimiento se ve a saltos. Lo que reproduce
+// la sensacion del video no es la duracion bruta sino la RESPUESTA: el toque se
+// acepta siempre y la re-direccion ocurre en el cuadro siguiente.
+#define ATR_OPEN_MS    210                 // icono -> pantalla completa
+#define ATR_CLOSE_MS   190                 // pantalla completa -> icono
+#define ATR_MIN_MS      60                 // suelo al re-dirigir (nunca un salto instantaneo)
+#define ATR_RAD_SMALL   26                 // radio con la tarjeta en el icono
+#define ATR_RAD_FULL     4                 // radio a pantalla completa
+#define ATR_FADE_P    0.35f                // por debajo de este progreso la saliente se desvanece
+
+// (struct AppTrLayer se define en el bloque de tipos del principio del fichero:
+//  el auto-prototipado del IDE de Arduino exige ver el tipo antes de la primera
+//  funcion que lo use en su firma. Lo vigila tests/host/check_protos.py.)
+static AppTrLayer gTrIn  = { false, -1, 0, 0, 72, 0, 0, 0, 0, 0, 0, -1 };   // app que ENTRA (crece)
+static AppTrLayer gTrOut = { false, -1, 0, 0, 72, 0, 0, 0, 0, 0, 0, -1 };   // app que SALE (encoge)
+static uint32_t   gTrGen = 0;             // generacion: invalida finalizaciones obsoletas
+static bool       gTrEnterPending = false; // queda por correr el enter()/resume() de gTrIn.app
+static uint32_t   gTrEnterGen = 0;
+static uint8_t    gTrPrevLife = 0;         // ciclo de vida de gTrIn.app ANTES de abrirla
+// Velocidad REAL del gesto de la barra al resolverse, en px/ms hacia arriba
+// (>= 0; 0 = no vino de un gesto). La escribe handleiOSGestures y la lee
+// appTrBeginClose para arrancar con el impulso del dedo en vez de con una
+// duracion fija: es lo que evita el salto entre el seguimiento del gesto y la
+// animacion que lo continua.
+static float      gGbFireVel = 0;
+
+// Hay capa visual de transicion en pantalla ahora mismo.
+static bool appTrVisible(){ return gTrIn.on || gTrOut.on; }
+// La transicion posee la pantalla: nadie mas compone bandas mientras dura.
+static bool appTrOwnsScreen(){ return appTrVisible(); }
+
+// Progreso de una capa en este instante. Ease-out cubico sobre el tramo que le
+// queda: rapida al principio y frenado suave al final, en las dos direcciones.
+static float appTrP(const AppTrLayer* L, uint32_t nowus){
+  if(!L->on) return 0.0f;
+  uint32_t el = nowus - L->t0us;                  // resta sin signo: inmune al desbordamiento
+  if(L->durus == 0 || el >= L->durus) return L->p1;
+  float u = (float)el / (float)L->durus;
+  float e = 1.0f - (1.0f - u) * (1.0f - u) * (1.0f - u);
+  return L->p0 + (L->p1 - L->p0) * e;
+}
+// Rectangulo y radio de la tarjeta para un progreso dado. Respeta los TRES
+// estilos de transicion que el usuario elige en Ajustes (gAnimStyle), los
+// mismos que tenia winRevealAnim: 0 = zoom desde el icono, 1 = fundido a
+// pantalla completa, 2 = deslizar desde el borde inferior. La interrupcion y la
+// continuidad funcionan igual en los tres, porque todos son funcion de p.
+static void appTrRect(const AppTrLayer* L, float p, int &x0, int &y0, int &x1, int &y1, int &rad){
+  if(p < 0.0f) p = 0.0f; if(p > 1.0f) p = 1.0f;
+  float q = 1.0f - p;
+  if(gAnimStyle == 1){                       // FUNDIDO: siempre cubre la pantalla
+    x0 = 0; y0 = 0; x1 = SCR_W; y1 = SCR_H; rad = 0; return;
   }
+  if(gAnimStyle == 2){                       // DESLIZAR: sube desde abajo
+    x0 = 0; x1 = SCR_W; y1 = SCR_H;
+    y0 = (int)(SCR_H * q); rad = 0;
+    if(y0 > SCR_H - 1) y0 = SCR_H - 1;
+    return;
+  }
+  x0  = (int)(L->ix * q);                    // ZOOM: crece desde el icono
+  y0  = (int)(L->iy * q);
+  x1  = (int)((L->ix + L->is) * q + SCR_W * p);
+  y1  = (int)((L->iy + L->is) * q + SCR_H * p);
+  // El radio CRECE conforme la tarjeta encoge (es lo que se ve en el video:
+  // casi una pildora cuando es pequena, el radio del panel cuando esta llena).
+  rad = (int)(ATR_RAD_SMALL * q + ATR_RAD_FULL * p);
+  if(x1 <= x0) x1 = x0 + 1;
+  if(y1 <= y0) y1 = y0 + 1;
+}
+// Opacidad de una capa. En FUNDIDO la opacidad ES la animacion; en los otros dos
+// la tarjeta es opaca y solo la SALIENTE se desvanece cuando ya es pequena, para
+// que no se vea desaparecer de golpe sobre el escritorio.
+static uint8_t appTrAlpha(float p, bool outgoing){
+  if(p <= 0.0f) return 0;
+  if(gAnimStyle == 1) return (uint8_t)(255.0f * (p > 1.0f ? 1.0f : p));
+  if(!outgoing) return 255;
+  if(p >= ATR_FADE_P) return 255;
+  return (uint8_t)(255.0f * p / ATR_FADE_P);
+}
+// Arranca (o RE-DIRIGE) una capa hacia 'target', partiendo del progreso visual
+// que tenga ahora mismo. La duracion se escala con la distancia que queda para
+// que la velocidad no cambie al re-dirigir.
+static void appTrAim(AppTrLayer* L, float target, uint32_t baseMs){
+  uint32_t now = (uint32_t)micros();
+  float cur = L->on ? appTrP(L, now) : (target >= 0.5f ? 0.0f : 1.0f);
+  if(cur < 0.0f) cur = 0.0f; if(cur > 1.0f) cur = 1.0f;
+  float dist = target - cur; if(dist < 0) dist = -dist;
+  uint32_t ms = (uint32_t)(baseMs * dist);
+  if(ms < ATR_MIN_MS) ms = ATR_MIN_MS;
+  L->p0 = cur; L->p1 = target;
+  L->t0us = now; L->durus = ms * 1000u;
+  L->on = true;
+}
+// Congela una capa en su estado visual actual (deja de avanzar, sigue visible).
+static void appTrFreeze(AppTrLayer* L){
+  if(!L->on) return;
+  uint32_t now = (uint32_t)micros();
+  float cur = appTrP(L, now);
+  L->p0 = cur; L->p1 = cur; L->t0us = now; L->durus = 0;
 }
 
 // #############################################################
@@ -10275,14 +10630,25 @@ static void appClose(){
   gClipY0 = 0; gClipY1 = SCR_H - 1;
   gClipX0 = 0; gClipX1 = SCR_W - 1;
   setBuf(fb);
-  appSuspend(gAppId, wasLand);         // conserva capas, toma miniatura y arma el guardado
-  // winRevealAnim compone la animacion SOBRE homeBuf: si Ajustes lo dejo sucio,
-  // hay que recomponerlo ANTES, o la animacion de cierre encoge hacia el
-  // escritorio viejo y este cambia de golpe al terminar.
+  int outId = gAppId;
+  // APP QUE NUNCA LLEGO A EXISTIR. Si se cierra a mitad de la apertura, su
+  // enter()/resume() todavia no ha corrido: suspenderla escribiria una sesion y
+  // una miniatura de una pantalla que nadie ha pintado. Se descarta la apertura
+  // pendiente y se le devuelve el ciclo de vida que tenia antes.
+  bool neverEntered = gTrEnterPending && gTrEnterGen == gTrGen &&
+                      gTrIn.on && gTrIn.app == outId;
+  if(neverEntered){ gTrEnterPending = false; gAppState[outId] = gTrPrevLife; }
+  else appSuspend(outId, wasLand);     // conserva capas, toma miniatura y arma el guardado
+  // La transicion compone SOBRE homeBuf: si Ajustes lo dejo sucio, hay que
+  // recomponerlo ANTES, o la animacion de cierre encoge hacia el escritorio
+  // viejo y este cambia de golpe al terminar.
   if(gHomeDirty) renderHome();
-  winRevealAnim(gAppId, false);
-  enterHome();
+  // ESTADO LOGICO, EN EL ACTO: Inicio manda desde esta linea y ya acepta toques
+  // (homeTick corre en la MISMA vuelta de loop). La app saliente solo sigue
+  // existiendo como capa visual, y esa capa no gobierna la navegacion.
+  enterHomeState();
   touchDropAll();                      // ni un solo evento del gesto anterior llega al escritorio
+  appTrBeginClose(outId);              // capa visual; NO bloquea
 }
 // ABRIR O REANUDAR. Si la app estaba SUSPENDIDA y tiene hook de reanudacion, se
 // la reanuda: repinta desde su estado logico, sin pasar por enter() -- que es lo
@@ -10302,22 +10668,259 @@ static void enterApp(int id){
   bool resuming = (gAppState[id] == ALIFE_SUSPENDED);
   const AppHooks* h = appHooks(id);
   if(resuming && !(h && h->resume)) resuming = false;   // sin hook: se reconstruye con enter()
+  uint8_t prevLife = gAppState[id];
   gAppState[id] = resuming ? ALIFE_RESUMING : ALIFE_RUNNING;
+  // ESTADO LOGICO, EN EL ACTO. A partir de esta linea la app nueva es la que
+  // manda, aunque en pantalla todavia se vea encogiendo la anterior. Es lo que
+  // permite encadenar aperturas sin esperar a que termine ninguna animacion.
   gAppId = id; gState = ST_APP;
-  if(gHomeDirty) renderHome();                    // winRevealAnim compone SOBRE homeBuf
-  winRevealAnim(id, true);                        // crece desde el icono
-  if(!(APP_REG[id].flags & APP_CUSTOM_HEADER)){   // apps normales: marco blanco
+  if(gHomeDirty) renderHome();                    // la transicion compone SOBRE homeBuf
+  // EL DEDO QUE ABRIO LA APP SE TRAGA AQUI, no al terminar la animacion. Si se
+  // tragara al final, un dedo que ya se levanto y volvio a bajar (el gesto
+  // encadenado del video) perderia su toque nuevo. El candado se suelta solo
+  // cuando el contacto se levanta de verdad, asi que un "down" nuevo entra sin
+  // ningun retraso.
+  touchDropAll();
+  appTrBeginOpen(id, resuming, prevLife);         // capa visual; NO bloquea
+}
+
+
+// #############################################################
+// ##  DIAGNOSTICO DE FLUIDEZ  ·  APAGADO por defecto
+// ##  ------------------------------------------------------
+// ##  Mide lo que hace falta para saber si la navegacion va fina, sin que el
+// ##  funcionamiento normal dependa de Serial ni de esta instrumentacion:
+// ##  con FLEX_DIAG en 0 (el valor por defecto) todo lo de aqui se compila a
+// ##  NADA -- ni una variable, ni una rama, ni un byte de RAM.
+// ##
+// ##  Que mide:
+// ##   · cuadros de transicion, tiempo medio y PEOR tiempo de cuadro;
+// ##   · cuantos cuadros pasaron de 16,67 ms (el presupuesto de 60 FPS);
+// ##   · latencia del toque al CAMBIO LOGICO (lo que de verdad se percibe);
+// ##   · latencia del toque al PRIMER CUADRO visual de la transicion;
+// ##   · RAM y PSRAM libres;
+// ##   · numero de generacion, transicion activa y app logica;
+// ##   · intenciones re-dirigidas (una transicion reemplazada por otra).
+// ##
+// ##  Para encenderlo: poner FLEX_DIAG a 1 y abrir el monitor serie. El
+// ##  volcado sale al terminar cada transicion, nunca por cuadro.
+// #############################################################
+#define FLEX_DIAG 0
+
+#if FLEX_DIAG
+#define FLEX_DIAG_BUDGET_US 16667      // 1/60 s
+static uint32_t dgFrames = 0, dgUs = 0, dgWorst = 0, dgSlow = 0;
+static uint32_t dgIntentUs = 0;        // micros() del toque que origino la intencion
+static uint32_t dgLogicUs  = 0;        // latencia toque -> cambio de estado logico
+static uint32_t dgFirstUs  = 0;        // latencia toque -> primer cuadro visual
+static bool     dgAwaitFirst = false;
+static uint32_t dgRetarget = 0;        // transiciones re-dirigidas
+static const char* dgWhat = "";
+// La llama toda intencion nueva (abrir / cerrar), ANTES de tocar el estado.
+static void dgIntent(const char* what){
+  if(appTrVisible()) dgRetarget++;
+  dgIntentUs = (uint32_t)micros();
+  dgAwaitFirst = true;
+  dgWhat = what;
+  dgFrames = dgUs = dgWorst = dgSlow = 0;
+}
+// La llama el motor justo despues de cambiar el estado LOGICO.
+static void dgLogic(){ if(dgIntentUs) dgLogicUs = (uint32_t)micros() - dgIntentUs; }
+// Un cuadro de transicion.
+static void dgFrame(uint32_t us){
+  if(dgAwaitFirst){ dgFirstUs = (uint32_t)micros() - dgIntentUs; dgAwaitFirst = false; }
+  dgFrames++; dgUs += us;
+  if(us > dgWorst) dgWorst = us;
+  if(us > FLEX_DIAG_BUDGET_US) dgSlow++;
+}
+// Volcado al terminar la transicion.
+static void dgReport(){
+  if(!dgFrames) return;
+  Serial.printf("[FLUIDEZ] %-6s gen=%lu app=%d frames=%lu media=%lu us peor=%lu us "
+                ">16.67ms=%lu  toque->logico=%lu us  toque->1er cuadro=%lu us  "
+                "redirigidas=%lu  RAM=%u  PSRAM=%u\n",
+                dgWhat, (unsigned long)gTrGen, gAppId,
+                (unsigned long)dgFrames, (unsigned long)(dgUs / dgFrames),
+                (unsigned long)dgWorst, (unsigned long)dgSlow,
+                (unsigned long)dgLogicUs, (unsigned long)dgFirstUs,
+                (unsigned long)dgRetarget,
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+  dgFrames = 0;
+}
+#else
+#define dgIntent(w)  ((void)0)
+#define dgLogic()    ((void)0)
+#define dgFrame(us)  ((void)0)
+#define dgReport()   ((void)0)
+#endif
+
+// ---- MOTOR DE LA TRANSICION (necesita gAppState / APP_REG) ----------------
+// Fuerza un cuadro completo en el primer frame de cada intencion nueva: es lo
+// que repone la pantalla que ocupaba la app anterior (o la que deja una capa
+// recien creada) sin arrastrar restos. Cuesta un memcpy de homeBuf, una vez por
+// intencion -- exactamente lo que ya hacia winRevealAnim en su primer cuadro.
+static bool gTrFirst = false;
+static bool gTrEnterResume = false;
+
+// Duracion del cierre. Si venimos de un gesto de la barra, la VELOCIDAD REAL del
+// dedo manda: un flick fuerte cierra antes, uno que apenas pasa el umbral entra
+// con la duracion nominal. Sin esto se veria un escalon entre el recorrido del
+// dedo y la animacion que lo continua. Con suelo, para que un flick violento no
+// degenere en un corte de un solo cuadro.
+static uint32_t appTrCloseMs(){
+  float v = gGbFireVel;
+  if(v <= 0.35f) return ATR_CLOSE_MS;
+  float f = 0.35f / v;
+  if(f < 0.45f) f = 0.45f;
+  return (uint32_t)(ATR_CLOSE_MS * f);
+}
+// La capa que estaba ENTRANDO pasa a ser la que SALE (el usuario la abandono a
+// mitad de apertura): encoge de vuelta hacia su icono desde donde este.
+static void appTrDemoteIn(){
+  if(!gTrIn.on) return;
+  gTrOut = gTrIn;
+  appTrAim(&gTrOut, 0.0f, appTrCloseMs());
+  gTrIn.on = false;
+}
+// Rellena una capa con los datos de dibujo de una app.
+static void appTrFill(AppTrLayer* L, int id){
+  L->app = id;
+  getIconRect(id, L->ix, L->iy, L->is);
+  L->bg  = (APP_REG[id].flags & APP_CUSTOM_HEADER) ? TH_PAGE : WIN_BG;
+  L->by0 = 0; L->by1 = -1;
+}
+// APERTURA. El estado logico ya lo cambio enterApp(); aqui solo empieza la capa.
+static void appTrBeginOpen(int id, bool resuming, uint8_t prevLife){
+  dgIntent("abrir"); dgLogic();
+  gTrGen++;
+  appTrDemoteIn();
+  appTrFill(&gTrIn, id);
+  gTrIn.on = false;
+  appTrAim(&gTrIn, 1.0f, ATR_OPEN_MS);
+  gTrEnterPending = true; gTrEnterGen = gTrGen;
+  gTrEnterResume = resuming; gTrPrevLife = prevLife;
+  gTrFirst = true;
+}
+// CIERRE. La tarjeta parte de pantalla completa (o del punto donde estuviera la
+// apertura que se acaba de abandonar) y encoge hacia el icono de la app.
+static void appTrBeginClose(int id){
+  dgIntent("cerrar"); dgLogic();
+  gTrGen++;
+  gTrEnterPending = false;
+  if(gTrIn.on && gTrIn.app == id){
+    appTrDemoteIn();                       // continua desde su progreso real
+  } else {
+    appTrDemoteIn();                       // lo que hubiera entrando, que se retire
+    appTrFill(&gTrOut, id);
+    gTrOut.p0 = 1.0f; gTrOut.p1 = 1.0f; gTrOut.on = true;
+    gTrOut.t0us = (uint32_t)micros(); gTrOut.durus = 0;
+    appTrAim(&gTrOut, 0.0f, appTrCloseMs());
+  }
+  gGbFireVel = 0;                         // la velocidad se consume una sola vez
+  gTrFirst = true;
+}
+// Corta toda transicion sin dibujar nada (cambios de pantalla que no son
+// Inicio: Recientes, bloqueo, OTA, restablecimiento...). Nadie queda a medias.
+static void appTrCancel(){
+  gTrGen++;
+  gTrIn.on = gTrOut.on = false;
+  gTrEnterPending = false;
+  gTrFirst = false;
+}
+// Ultimo cuadro de una apertura: la app ya ocupa la pantalla, asi que ahora --
+// y no antes -- se construye su contenido. Si la intencion cambio por el
+// camino (generacion vieja, o el estado logico ya no apunta a esta app), no se
+// abre nada: una transicion reemplazada no puede resucitar.
+static void appTrFinishOpen(){
+  int id = gTrIn.app;
+  bool resuming = gTrEnterResume;
+  bool valid = gTrEnterPending && gTrEnterGen == gTrGen;
+  gTrIn.on = false; gTrOut.on = false; gTrEnterPending = false;
+  if(!valid || id < 0 || id >= APP_N) return;
+  if(gState != ST_APP || gAppId != id) return;
+  gLand = false;
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
+  setBuf(fb);
+  const AppHooks* h = appHooks(id);
+  if(resuming && !(h && h->resume)) resuming = false;
+  if(!(APP_REG[id].flags & APP_CUSTOM_HEADER)){   // apps normales: marco estandar
     appDrawChrome(id);
     appDrawHeader(id);
   }
   if(resuming) h->resume();                       // reanuda: mismo contenido, misma posicion
-  else if(APP_REG[id].enter) APP_REG[id].enter(); // la app pinta su contenido (y su marco si es custom)
+  else if(APP_REG[id].enter) APP_REG[id].enter(); // la app pinta su contenido
   gAppState[id] = ALIFE_RUNNING;
   gAppSeenMs[id] = millis();
-  touchDropAll();                                 // el dedo que abrio la app no escribe dentro de ella
   flxFlushAll();
 }
+// UN cuadro de la transicion. Es el UNICO sitio que dibuja mientras hay capas
+// vivas (igual que qsTick con la cortina), asi que no puede haber dos duenos de
+// la pantalla ni bandas de nadie mas colandose entre medias.
+static void appTrTick(){
+  if(!appTrVisible()) return;
+  uint32_t now = (uint32_t)micros();
+  uint32_t dgT0 = now; (void)dgT0;
+  float pi = 0, po = 0;
+  int ix0 = 0, iy0 = 0, ix1 = 0, iy1 = 0, irad = 0;
+  int ox0 = 0, oy0 = 0, ox1 = 0, oy1 = 0, orad = 0;
+  if(gTrIn.on){  pi = appTrP(&gTrIn,  now); appTrRect(&gTrIn,  pi, ix0, iy0, ix1, iy1, irad); }
+  if(gTrOut.on){ po = appTrP(&gTrOut, now); appTrRect(&gTrOut, po, ox0, oy0, ox1, oy1, orad); }
+  // Banda del cuadro: union de lo que cada capa ocupaba y de lo que ocupa ahora.
+  int b0 = 0x7FFF, b1 = -1;
+  if(gTrIn.on){
+    if(iy0 < b0) b0 = iy0; if(iy1 > b1) b1 = iy1;
+    if(gTrIn.by1 >= gTrIn.by0){ if(gTrIn.by0 < b0) b0 = gTrIn.by0; if(gTrIn.by1 > b1) b1 = gTrIn.by1; }
+  }
+  if(gTrOut.on){
+    if(oy0 < b0) b0 = oy0; if(oy1 > b1) b1 = oy1;
+    if(gTrOut.by1 >= gTrOut.by0){ if(gTrOut.by0 < b0) b0 = gTrOut.by0; if(gTrOut.by1 > b1) b1 = gTrOut.by1; }
+  }
+  if(gTrFirst){ b0 = 0; b1 = SCR_H - 1; gTrFirst = false; }
+  if(b0 < 0) b0 = 0;
+  if(b1 > SCR_H - 1) b1 = SCR_H - 1;
+  if(b1 < b0){ b0 = 0; b1 = SCR_H - 1; }
+  // Recorte completo: la transicion se dibuja encima de CUALQUIER cosa y alguna
+  // app pudo dejar una banda estrecha activa para su lista con scroll.
+  int sc0 = gClipY0, sc1 = gClipY1, sx0 = gClipX0, sx1 = gClipX1;
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = b0; gClipY1 = b1;
+  setBuf(bbuf);
+  for(int j = b0; j <= b1; j++)                   // Inicio detras: superficie estable
+    memcpy(bbuf + (size_t)j * SCR_W, homeBuf + (size_t)j * SCR_W, (size_t)SCR_W * 2);
+  // ORDEN: primero la saliente, encima la entrante. Es la prioridad que pide el
+  // encargo y la que se ve en el video (la nueva tapa a la que se va).
+  if(gTrOut.on){
+    uint8_t a = appTrAlpha(po, true);
+    if(a == 255) fillRoundRect (ox0, oy0, ox1 - ox0, oy1 - oy0, orad, gTrOut.bg);
+    else if(a)   fillRoundRectA(ox0, oy0, ox1 - ox0, oy1 - oy0, orad, gTrOut.bg, a);
+  }
+  if(gTrIn.on){
+    uint8_t a = appTrAlpha(pi, false);
+    if(a == 255) fillRoundRect (ix0, iy0, ix1 - ix0, iy1 - iy0, irad, gTrIn.bg);
+    else if(a)   fillRoundRectA(ix0, iy0, ix1 - ix0, iy1 - iy0, irad, gTrIn.bg, a);
+  }
+  present(b0, b1);
+  gClipY0 = sc0; gClipY1 = sc1; gClipX0 = sx0; gClipX1 = sx1;
+  setBuf(fb);
+  gTrIn.by0  = iy0; gTrIn.by1  = iy1;
+  gTrOut.by0 = oy0; gTrOut.by1 = oy1;
+  dgFrame((uint32_t)micros() - dgT0);
+  // Finalizaciones, SIEMPRE por tiempo (nunca por numero de cuadros).
+  if(gTrOut.on && (now - gTrOut.t0us) >= gTrOut.durus && gTrOut.p1 <= 0.0f) gTrOut.on = false;
+  if(gTrIn.on  && (now - gTrIn.t0us)  >= gTrIn.durus  && gTrIn.p1  >= 1.0f) appTrFinishOpen();
+  if(!appTrVisible()) dgReport();
+}
+
 static void appTick(){
+  // APERTURA EN VUELO: enter()/resume() todavia no ha corrido, asi que la app no
+  // tiene ni estado ni pixeles. Llamar a su tick() aqui seria usarla sin
+  // construir. Se atiende solo el gesto de salida -- el usuario puede abandonar
+  // una apertura a mitad de camino, que es medio test del video.
+  if(gTrEnterPending){
+    if(gNavMode == 1 && handleiOSGestures()) return;
+    if(navBarHandle()) return;
+    return;
+  }
   if(gLand){ if(APP_REG[gAppId].tick) APP_REG[gAppId].tick(); return; }  // Modo PC / Juegos: gestionan todo por su cuenta
   if(gNavMode == 1 && handleiOSGestures()) return;   // gestos iOS: swipe-arriba -> Home/multitarea
   // BARRA DE NAVEGACION DEL SISTEMA. Va lo PRIMERO y para TODAS las apps,
@@ -10331,7 +10934,12 @@ static void appTick(){
   if(APP_REG[gAppId].tick) APP_REG[gAppId].tick();
 }
 
-static void enterHome(){
+// ESTADO logico de "estar en Inicio", SIN dibujar. Lo comparten enterHome() (que
+// ademas vuelca el escritorio) y appClose() (que deja el dibujo a la capa de
+// transicion). Separarlos es lo que permite que Inicio sea el destino logico
+// -- y por tanto interactivo -- desde el primer instante del cierre, en vez de
+// desde el ultimo cuadro de la animacion.
+static void enterHomeState(){
   if(hcActive) hcClose(true);      // vuelta al escritorio desde CUALQUIER ruta: sin restos ni fugas
   gIconOvrApp = -1;               // el origen prestado por la caja de apps caduca aqui (ver getIconRect)
   qsForceClose();                 // volver al escritorio nunca deja la cortina a medias
@@ -10341,6 +10949,10 @@ static void enterHome(){
   // ANTERIOR y el escritorio contradecia al ajuste que acababas de tocar,
   // hasta que el reloj cambiaba de minuto y lo repintaba por su cuenta.
   if(gHomeDirty) renderHome();
+}
+static void enterHome(){
+  appTrCancel();                  // cualquier capa de transicion muere aqui: se vuelca Inicio entero
+  enterHomeState();
   blitToFb(homeBuf); flxFlushAll();
 }
 
@@ -10349,23 +10961,95 @@ static void enterHome(){
 //   · deslizamiento hacia arriba rapido (<300 ms) -> Home
 //   · deslizamiento hacia arriba mantenido (>=300 ms) -> App Switcher
 // Devuelve true si consumio el gesto (para que el tick no siga procesando).
+// BARRA DE GESTOS  ·  reconocimiento DURANTE el arrastre
+// ---------------------------------------------------------------------------
+// Antes esto solo miraba T.released: el gesto no existia hasta soltar y hasta
+// entonces el destino logico seguia siendo la app. Con la animacion ademas
+// bloqueando, el usuario tenia que esperar dos veces. Ahora:
+//
+//  · La franja inferior VIGILA desde que el dedo se apoya, pero NO reclama el
+//    toque hasta que hay recorrido vertical real (GB_CLAIM_DY). Antes de eso la
+//    app sigue recibiendo sus eventos, asi que un toque pequeno en los 44 px de
+//    abajo -- un boton, una tecla, la barra de herramientas de Paint -- sigue
+//    funcionando exactamente igual y NO cierra la app.
+//  · En cuanto se reclama, la secuencia entera es de la barra: ni un evento mas
+//    se filtra a la app.
+//  · Un FLICK hacia arriba (recorrido + velocidad, antes de GB_RECENTS_MS)
+//    resuelve Home EN EL ACTO, con el dedo todavia apoyado. Ese es el caso del
+//    video: el destino logico pasa a Inicio y la app saliente se queda solo
+//    como capa visual.
+//  · Un arrastre LENTO o mantenido conserva el comportamiento de siempre: se
+//    resuelve al soltar, y >= GB_RECENTS_MS abre Recientes.
+//  · Al resolverse, sysHome()/sysRecents() llaman a touchDropAll(): el resto de
+//    ESE contacto no puede pulsar un icono de Inicio por accidente, y el candado
+//    se suelta solo cuando el dedo se levanta de verdad -- asi que un "down"
+//    NUEVO entra sin ningun retraso. No hay bloqueo por tiempo en ningun sitio.
+#define GB_STRIP_H     44         // franja viva de la barra de gestos
+#define GB_CLAIM_DY    12         // recorrido a partir del cual la barra reclama el toque
+#define GB_HOME_DY     30         // recorrido minimo para reconocer Home
+#define GB_FLICK_VEL -0.35f       // px/ms hacia arriba: por encima de esto es un flick
+#define GB_RECENTS_MS 300         // mantenido por encima de esto -> Recientes
+#define GB_VEL_TAU    40.0f       // constante de tiempo del filtro de velocidad
+static bool     gGbWatch = false; // el dedo bajo en la franja (aun no reclamado)
+static bool     gGbOwn   = false; // la barra es la duena de esta secuencia
+static bool     gGbFired = false; // ya se resolvio (Home / Recientes)
+static int      gGbY0 = 0, gGbLastY = 0;
+static uint32_t gGbT0 = 0, gGbLastMs = 0;
+static float    gGbVel = 0;       // px/ms; negativa = hacia arriba
+
+static void gbReset(){ gGbWatch = gGbOwn = gGbFired = false; gGbVel = 0; }
+
 static bool handleiOSGestures(){
-  if(gNavMode != 1) return false;
+  if(gNavMode != 1){ gbReset(); return false; }
   // FASE 4: en kiosco los gestos de la barra (Home y switcher) se ignoran. Se
   // devuelve false, no true: asi appTick sigue llamando al tick de la app y esta
   // no se congela -- solo pierde la via de escape.
-  if(KIOSK_ON && kioskOn) return false;
-  if(T.released && T.startY > SCR_H - 44){
-    int dy = T.startY - T.y;                    // positivo si el dedo subio
-    unsigned long dur = millis() - T.downMs;
-    if(dy > 30){
-      if(dur >= 300)            sysRecents();         // mantener -> Recientes (suspende la app antes)
-      else if(gState == ST_APP) sysHome();            // rapido en app -> escritorio (suspende, no cierra)
-      else                      enterHome();          // rapido en Home -> refresca
-      return true;
+  if(KIOSK_ON && kioskOn){ gbReset(); return false; }
+
+  if(T.pressed && T.y > SCR_H - GB_STRIP_H){          // el dedo entra en la franja
+    gGbWatch = true; gGbOwn = false; gGbFired = false;
+    gGbY0 = gGbLastY = T.y; gGbT0 = gGbLastMs = millis(); gGbVel = 0;
+    return false;                                     // todavia NO se reclama nada
+  }
+  if(!gGbWatch) return false;
+
+  if(T.down){
+    uint32_t now = millis();
+    uint32_t dt = now - gGbLastMs; if(dt < 1) dt = 1; if(dt > 100) dt = 100;
+    float inst = (float)(T.y - gGbLastY) / (float)dt;         // negativa hacia arriba
+    gGbVel += (inst - gGbVel) * ((float)dt / ((float)dt + GB_VEL_TAU));
+    gGbLastY = T.y; gGbLastMs = now;
+    int dy = gGbY0 - T.y;                                     // positivo si el dedo subio
+    if(!gGbOwn){
+      if(dy < GB_CLAIM_DY) return false;                      // aun es de la app
+      gGbOwn = true;                                          // a partir de aqui, de la barra
+    }
+    if(gGbFired) return true;                                 // resuelto: se traga el resto
+    // FLICK: recorrido suficiente Y velocidad hacia arriba, dentro de la ventana
+    // rapida. Se resuelve YA, sin esperar a soltar.
+    if(dy > GB_HOME_DY && gGbVel <= GB_FLICK_VEL && (now - gGbT0) < GB_RECENTS_MS){
+      gGbFired = true;
+      gGbFireVel = -gGbVel;
+      if(gState == ST_APP) sysHome();                         // suspende, no cierra
+      else                 enterHome();
+    }
+    return true;
+  }
+
+  // Soltar. Un gesto que no llego a flick se resuelve aqui, igual que siempre.
+  if(!gGbFired && gGbOwn){
+    int dy = gGbY0 - gGbLastY;
+    unsigned long dur = millis() - gGbT0;
+    if(dy > GB_HOME_DY){
+      gGbFireVel = (gGbVel < 0) ? -gGbVel : 0.0f;
+      if(dur >= GB_RECENTS_MS)  sysRecents();   // mantener -> Recientes (suspende la app antes)
+      else if(gState == ST_APP) sysHome();      // rapido en app -> escritorio (suspende, no cierra)
+      else                      enterHome();    // rapido en Home -> refresca
     }
   }
-  return false;
+  bool owned = gGbOwn;
+  gbReset();
+  return owned;                                 // si la barra lo reclamo, no se filtra a nadie
 }
 
 // #############################################################
@@ -14753,10 +15437,16 @@ static void qpGlassSurface(int x, int y, int w, int h, int rad, uint16_t tint, i
 // del texto sobre un wallpaper CLARO, que es el caso peor: el efecto no puede
 // costar legibilidad. Con Liquid Glass activo el vidrio deja pasar mas fondo;
 // con el estilo Plano el mismo material se "esmerila" mas.
-static inline int qpMixCard(){ return uiGlass ? 128 : 176; }   // tarjetas y modulos
-static inline int qpMixTile(){ return uiGlass ? 112 : 158; }   // circulo apagado
-static inline int qpMixAcc (){ return uiGlass ? 178 : 205; }   // acento translucido (control activo)
-static inline int qpMixHdr (){ return uiGlass ? 168 : 205; }   // cabeceras fijas (editor/catalogo)
+// PLANO ES PLANO. Estos cuatro valores eran 176/158/205/205 con el estilo Plano:
+// seguian dejando pasar fondo, o sea seguian siendo vidrio "esmerilado". El
+// estilo Plano pide superficies SOLIDAS -- sin transparencia y sin brillo de
+// material --, asi que ahi la mezcla es total (255) y el color es exactamente el
+// de la paleta activa. Con Liquid Glass se conservan tal cual los valores
+// afinados de siempre.
+static inline int qpMixCard(){ return uiGlass ? 128 : 255; }   // tarjetas y modulos
+static inline int qpMixTile(){ return uiGlass ? 112 : 255; }   // circulo apagado
+static inline int qpMixAcc (){ return uiGlass ? 178 : 255; }   // acento (control activo)
+static inline int qpMixHdr (){ return uiGlass ? 168 : 255; }   // cabeceras fijas (editor/catalogo)
 
 // Superficie de una tarjeta o modulo: sombra muy leve (tres lineas alfa bajo
 // el borde, no un rectangulo alfa del tamano de la tarjeta) + el material.
@@ -14836,7 +15526,7 @@ static void qpDrawSliderBody(int x, int y, int w, int h, int id){
   int fw = th + (w - th) * pct / 100;                     // nunca menor que el diametro
   if(fw > w) fw = w;
   qpGlassSurface(x, ty, w, th, th / 2, TH_TRACK, qpMixCard());          // pista: vidrio
-  if(fw > 0) qpGlassSurface(x, ty, fw, th, th / 2, TH_PRIM, qpMixAcc()); // relleno: acento translucido
+  if(fw > 0) qpGlassSurface(x, ty, fw, th, th / 2, wallAccent(), qpMixAcc()); // relleno: acento DEL USUARIO
   int icx = x + th / 2, icy = ty + th / 2;
   bool onFill = (fw >= th);
   qpIcoBgAt(icx, icy);
@@ -15281,7 +15971,12 @@ static void qpGlassBlurSm(){
 // Velo del panel. Con Liquid Glass activo deja pasar mas fondo; con el estilo
 // Plano el mismo material queda mas "esmerilado". En los dos casos es una capa
 // TRANSLUCIDA sobre el fondo desenfocado, nunca un relleno opaco.
-static inline uint8_t qpVeilAlpha(){ return uiGlass ? 152 : 212; }
+// Velo del fondo de la cortina. En PLANO es TOTAL: la cortina es una superficie
+// solida de la paleta (TH_PAGE), sin fondo desenfocado detras ni tinte de
+// vidrio -- que es lo que pide el estilo Plano. Antes se quedaba en 212 y el
+// wallpaper seguia asomando desenfocado por debajo: vidrio con otro nombre.
+// Con Liquid Glass se conserva el 152 afinado de siempre.
+static inline uint8_t qpVeilAlpha(){ return uiGlass ? 152 : 255; }
 
 static bool qpGlassBuild(){
   uint16_t* bg = qsBgSrc();
@@ -15306,14 +16001,17 @@ static bool qpGlassBuild(){
   // 2) desenfoque corto y 3) velo + tinte del tema, todo en pequeno
   qpGlassBlurSm();
   uint8_t a = qpVeilAlpha();
+  // El TINTE de vidrio solo existe con Liquid Glass. En Plano se salta (mezcla
+  // 0) y el velo total de arriba deja la superficie exactamente en TH_PAGE.
   uint16_t veil = TH_PAGE, tint = TH_GLASS2;
+  uint8_t tintMix = uiGlass ? 40 : 0;
   for(int j = 0; j < QP_GS_H; j++){
     uint16_t* d = qsGlassSm + (size_t)j * QP_GS_W;
     // Degradado muy suave hacia arriba: da profundidad a la cabecera sin
     // separarla con una linea dura, igual que en el panel de referencia.
     uint8_t extra = (j < QP_GS_H / 5) ? (uint8_t)(18 - (18 * j) / (QP_GS_H / 5)) : 0;
     for(int i = 0; i < QP_GS_W; i++){
-      uint16_t c = mix565(d[i], tint, 40);
+      uint16_t c = tintMix ? mix565(d[i], tint, tintMix) : d[i];
       c = mix565(c, veil, a);
       if(extra) c = mix565(c, TH_SURF2, extra);
       d[i] = c;
@@ -15861,6 +16559,12 @@ static int qpHdrBtnAt(int px, int py){
   }
   return -1;
 }
+// Hit-test puro sobre la maquetacion. NO filtra por visibilidad a proposito: lo
+// usan tambien el editor y el catalogo, que ocupan la pantalla entera. Quien
+// decide que un panel a medio desplegar no tiene controles que tocar es
+// qpGlobalHandle, en su primera rama ("if(qsPanelY < SCR_H) qpG = QG_CURTAIN"):
+// con la cortina a medias el gesto entero es de la cortina, y ni el slider ni
+// ningun otro control lo ven.
 static int qpBlockAt(int px, int py){
   int top = QP_VIEW_Y0 - (int)(qpScrollF + 0.5f);
   for(int b = 0; b < qpBlkN; b++){
@@ -15996,8 +16700,21 @@ static bool qpPanelTouch(){
         if(v < 0) v = 0; if(v > 100) v = 100;
         if(id == QSID_BRIGHT && v != gBright){
           setBacklight(v);                                  // PWM real, sin present() completo
+          // RECOMPONER, NO SOLO PUBLICAR. Aqui estaba el fallo del slider: el
+          // contenido del panel vive COMPUESTO en qsBuf (ver qsComposeRows), y
+          // qpMark solo apunta filas para VOLCARLAS a pantalla desde ese cache.
+          // El brillo fisico cambiaba -- setBacklight es PWM real -- pero el
+          // relleno y el pulgar se volvian a copiar del qsBuf VIEJO, dibujado
+          // con el porcentaje anterior: el indicador se quedaba clavado mientras
+          // la pantalla si cambiaba de brillo. qpRecompose vuelve a dibujar esas
+          // filas desde gBright (la unica fuente de verdad, la misma que lee
+          // qpDrawSliderBody y qpSubBright) y luego las publica.
+          // Solo la banda del slider: el resto del panel no se recompone.
           int top = QP_VIEW_Y0 - (int)(qpScrollF + 0.5f);
-          qpMark(top + qpBlk[b].y, top + qpBlk[b].y + qpBlk[b].h);
+          int sy0 = top + qpBlk[b].y, sy1 = sy0 + qpBlk[b].h;
+          if(sy0 < QP_VIEW_Y0) sy0 = QP_VIEW_Y0;            // nunca bajo la cabecera
+          if(sy1 > QP_VIEW_Y1) sy1 = QP_VIEW_Y1;            // ni bajo el asa de cierre
+          if(sy1 >= sy0) qpRecompose(sy0, sy1);
         }
       }
       return true;
@@ -24039,7 +24756,7 @@ static void kioskStart(int id, int ex, int ey, int ew, int eh){
   kioskOn = true; kioskApp = id;
   kioskExX = ex; kioskExY = ey; kioskExW = ew; kioskExH = eh;
   kioskSave();
-  renderHome();                 // winRevealAnim compone sobre homeBuf
+  renderHome();                 // la transicion compone sobre homeBuf
   enterApp(id);                 // apertura con la animacion normal del sistema
   kioskShowBadge();
 }
@@ -24223,7 +24940,10 @@ static bool     ctxClosing = false;
 static uint32_t ctxAnimMs = 0;
 static int      ctxPx = 0, ctxPy = 0;              // esquina del panel ya recortada
 static int      ctxBandY0 = 0, ctxBandY1 = 0;      // banda que se recompone por frame
-static uint16_t ctxPanelCol(){ return uiGlass ? SET_CARD_GLASS : SET_CARD_BG; }
+// Color del "hueco" de los glifos: el MISMO rol de superficie que pinta el
+// panel (uiSurfaceA/UIS_ELEVATED), para que candado y rejilla no se recorten
+// contra un color que el panel ya no usa.
+static uint16_t ctxPanelCol(){ return uiGlass ? uiSurfTint(UIS_ELEVATED) : uiSurfFlat(UIS_ELEVATED); }
 // Fila 0 = candado de app, 1 = Modo edicion, 2 = Modo kiosco. Las dos que
 // necesitan una clave del sistema con la que verificar se dibujan atenuadas y
 // son inertes si no hay ninguna configurada: se ve por que no se pueden usar,
@@ -24283,12 +25003,15 @@ static void ctxRender(float p){
   int py = (int)(ccy + ((float)ctxPy - ccy) * sc);
   int pw = (int)(CTX_W * sc), ph = (int)(CTX_PANEL_H * sc);
   int rad = (int)(CTX_RAD * sc);
-  // UNA sola tarjeta para las tres filas. drawLiquidGlassPanel no acepta alpha,
-  // asi que mientras crece se usa su MISMO tinte como color plano y solo el
-  // frame final pasa al vidrio real: lo unico que aparece entonces es el
-  // desenfoque, no un salto de color.
-  fillRoundRectA(px, py, pw, ph, rad, ctxPanelCol(), (uint8_t)(238 * (int)a / 255));
-  if(uiGlass && p >= 1.0f) drawLiquidGlassPanel(px, py, pw, ph, rad, SET_CARD_GLASS);
+  // UNA sola tarjeta para las tres filas, con LA superficie del sistema.
+  // Antes esto pintaba un relleno plano en todos los cuadros y solo el ultimo
+  // (p >= 1) pasaba al vidrio real: con Liquid Glass activado, el menu de
+  // pulsacion larga se veia plano y desvanecido durante toda la animacion --
+  // el fallo que se reporto. Ahora es vidrio DESDE EL PRIMER CUADRO, porque
+  // ctxOpen dejo la banda pre-desenfocada (uiGlassBandBegin) y uiSurfaceA solo
+  // tiene que muestrearla. En Plano es el relleno solido de la paleta, con su
+  // alpha: solido y visible, sin resto alguno de vidrio.
+  uiSurfaceA(px, py, pw, ph, rad, UIS_ELEVATED, (uint8_t)(238 * (int)a / 255));
   int rh = ph / CTX_ROWS;
   int textMax = CTX_W - CTX_PAD_L - CTX_GLYPH_S - CTX_PAD_R - 10;
   for(int i = 0; i < CTX_ROWS; i++){
@@ -24308,21 +25031,26 @@ static void ctxRender(float p){
   setBuf(fb);
 }
 static void ctxOpen(int slot){
-  if(!CTXMENU_ON || slot < 0 || slot > 11) return;
+  // REJILLA REAL, NO UNA 4x3 FIJA. Esto daba por hecho la rejilla original
+  // (12 ranuras, columnas de 120 px, filas de 112, origen 24/212). Desde que la
+  // rejilla es configurable (4x3, 5x3, 4x4, 5x4 -> hasta 20 ranuras) eso era
+  // doblemente incorrecto: con 5 columnas el panel se abria junto a un icono
+  // que no era el pulsado, y con mas de 12 ranuras el long-press de las ultimas
+  // no hacia NADA porque slot > 11 salia por la puerta de atras. Ahora la
+  // geometria sale de homeSlotXY/homeGrid, las mismas que pintan el escritorio.
+  if(!CTXMENU_ON || slot < 0 || slot >= homeSlotCount()) return;
   ctxApp = homeOrder[homeIdx(gHomePage, slot)];
-  // Geometria REAL del icono pulsado: la misma rejilla que pinta renderHome()
-  // (gx0=24, gy0=212, paso de columna 120, paso de fila 112, icono de 72).
-  int ix = 24 + (slot % 4) * 120;
-  int iy = 212 + (slot / 4) * 112;
+  int ix, iy;   homeSlotXY(slot, ix, iy);
+  int gS, ggx0, ggy0, gcs, grs, gcols, grows; homeGrid(gS, ggx0, ggy0, gcs, grs, gcols, grows);
   // Lado: se prefiere la DERECHA del icono, pero solo si el panel cabe entero
   // ahi; si no, la izquierda. Si no cabe en ninguno de los dos (panel mas ancho
   // de la cuenta), se elige el lado con MAS sitio antes de recortar -- asi el
   // recorte de abajo nunca acaba dejando el panel encima del icono pulsado, que
   // es justo el que el usuario necesita seguir viendo.
-  int roomR = (SCR_W - CTX_MARGIN) - (ix + CTX_ICON_S + CTX_GAPX);
+  int roomR = (SCR_W - CTX_MARGIN) - (ix + gS + CTX_GAPX);
   int roomL = (ix - CTX_GAPX) - CTX_MARGIN;
   bool toRight = (roomR >= CTX_W) ? true : (roomL >= CTX_W ? false : (roomR >= roomL));
-  int px = toRight ? (ix + CTX_ICON_S + CTX_GAPX) : (ix - CTX_GAPX - CTX_W);
+  int px = toRight ? (ix + gS + CTX_GAPX) : (ix - CTX_GAPX - CTX_W);
   int py = iy;                                  // alineado con el borde superior del icono
   // RECORTE FINAL, incondicional: pase lo que pase con el lado elegido, el panel
   // entero queda dentro de pantalla. Es lo que garantiza que ningun icono de la
@@ -24335,6 +25063,21 @@ static void ctxOpen(int slot){
   ctxBandY0 = py - 2; if(ctxBandY0 < 0) ctxBandY0 = 0;
   ctxBandY1 = py + CTX_PANEL_H + 2; if(ctxBandY1 > SCR_H - 1) ctxBandY1 = SCR_H - 1;
   ctxAction = -1; ctxClosing = false;
+  // VIDRIO DESDE EL PRIMER CUADRO. El fondo del menu es homeBuf y NO cambia
+  // mientras dura la animacion, asi que su desenfoque se calcula UNA sola vez
+  // aqui y cada cuadro solo lo muestrea (ver SUPERFICIES DEL SISTEMA). Es lo
+  // que permite que el panel sea vidrio de verdad -- transparencia, tinte,
+  // borde y blur -- durante toda la apertura, en vez de una capa plana
+  // desvanecida hasta el ultimo cuadro.
+  uiGlassBandEnd();
+  if(uiGlass){
+    uint16_t* ob = gBuf;
+    setBuf(bbuf);
+    for(int j = ctxBandY0; j <= ctxBandY1; j++)
+      memcpy(bbuf + (size_t)j * SCR_W, homeBuf + (size_t)j * SCR_W, (size_t)SCR_W * 2);
+    uiGlassBandBegin(ctxBandY0, ctxBandY1, uiSurfTint(UIS_ELEVATED));
+    setBuf(ob);
+  }
   ctxAnimMs = millis(); if(!ctxAnimMs) ctxAnimMs = 1;
   gRippleActive = false;
   gState = ST_CTX;
@@ -24348,6 +25091,7 @@ static void ctxClose(int action){
 static void ctxFinish(){
   int a = ctxAction, app = ctxApp;
   ctxAction = -1; ctxClosing = false; ctxAnimMs = 0; ctxApp = -1;
+  uiGlassBandEnd();                    // la banda pre-desenfocada caduca con el menu
   gState = ST_HOME;
   showHome();                          // escritorio limpio en un solo volcado
   // a < 0 = cancelado (toque fuera del panel): no hay nada que hacer.
@@ -24847,8 +25591,10 @@ static void drwFavToggle(int id){
     for(int i = 0; i < HOME_TOTAL; i++) if(homeOrder[i] == (uint8_t)id) homeOrder[i] = HOME_EMPTY;
   } else {
     if(appIsHidden(id)) return;                    // una app oculta no puede estar en Inicio
-    int slot = homeFirstFree();
-    if(slot < 0) return;                           // escritorio lleno: no se miente al usuario
+    // Si no queda hueco se CREA otra pagina: anadir a Inicio no puede fallar
+    // por falta de espacio mientras queden paginas por crear.
+    int slot = homeFirstFreeGrow();
+    if(slot < 0) return;                           // maximo de paginas Y todas llenas: no se miente al usuario
     gAppFav |= (uint32_t)(1u << id);
     homeOrder[slot] = (uint8_t)id;
   }
@@ -25232,7 +25978,7 @@ static void lsuExit(){
     // devuelve a la pantalla de confirmacion, con el slider otra vez en reposo.
     if(wasPoff && POWEROFF_ON){ poffEnter(); return; }
     if(wasKiosk && KIOSK_ON && kioskOn && kioskApp >= 0){
-      renderHome();                       // winRevealAnim compone sobre homeBuf
+      renderHome();                       // la transicion compone sobre homeBuf
       enterApp(kioskApp);
       kioskShowBadge();
     } else {
@@ -27408,16 +28154,23 @@ static void notifDrawCard(Notification* n, int cardY){
   int x = NOTIF_MARGIN_X + (int)n->slideX;       // al deslizar a la izq, x se vuelve negativo
   int y = cardY, w = NOTIF_CARD_W, h = NOTIF_CARD_H;
   notifDrawTail(x + w / 2, y, thCard2());   // primero: la tarjeta se dibuja justo debajo, sin solaparla
-  // Vidrio base (blur). drawLiquidGlassPanel recorta x<0
-  // conservando el borde derecho -> el deslizamiento a la izquierda sale natural.
-  drawLiquidGlassPanel(x, y, w, h, NOTIF_RAD, TH_GLASS2);
-  // Degradado extra estilo burbuja (mas claro arriba, mas oscuro abajo).
-  // Fila a fila con glInset() -- igual que drawLiquidGlassPanel -- para no
-  // salirse de las esquinas redondeadas (una fillRectA plana sí se saldría).
-  for(int j = 0; j < h; j++){
-    int ins = glInset(j, h, NOTIF_RAD);
-    uint8_t a = (uint8_t)(42 - 42 * j / h);
-    if(a > 0) hLineA(x + ins, y + j, w - 2 * ins, TH_TXT, a);
+  // SUPERFICIE DEL SISTEMA. Antes esto llamaba a drawLiquidGlassPanel() SIN
+  // MIRAR uiGlass: con el estilo Plano elegido, las notificaciones seguian
+  // saliendo de vidrio -- el fallo que se reporto. uiSurface decide el material
+  // una sola vez: relleno solido de la paleta en Plano, panel de vidrio con su
+  // tinte en Liquid Glass. Recorta x<0 conservando el borde derecho, asi que el
+  // deslizamiento a la izquierda sigue saliendo natural.
+  uiSurface(x, y, w, h, NOTIF_RAD, UIS_ELEVATED);
+  // Degradado estilo burbuja (mas claro arriba). Es BRILLO DE MATERIAL, asi que
+  // solo existe con Liquid Glass: en Plano la superficie es solida y sin brillo,
+  // que es justo lo que pide ese estilo. Fila a fila con glInset() -- igual que
+  // drawLiquidGlassPanel -- para no salirse de las esquinas redondeadas.
+  if(uiGlass){
+    for(int j = 0; j < h; j++){
+      int ins = glInset(j, h, NOTIF_RAD);
+      uint8_t a = (uint8_t)(42 - 42 * j / h);
+      if(a > 0) hLineA(x + ins, y + j, w - 2 * ins, TH_TXT, a);
+    }
   }
   drawRoundRect(x, y, w, h, NOTIF_RAD, TH_BORDER);
   // Icono 40x40 (las primitivas acotan coords negativas: seguro fuera de pantalla)
@@ -27641,7 +28394,11 @@ static void notifTick(){
 // SI tienen un significado propio -- "Detener" en rojo de peligro,
 // "Parcial" apagado cuando no se puede -- siguen usando su token
 // (TH_DANGER, TH_DIS), que es justo lo que esos tokens significan.
-#define CRONO_ACCENT   TH_PRIM     // acento del usuario (era un violeta fijo)
+// ACENTO ACTIVO DEL SISTEMA, no el del tema. wallAccent() devuelve el color
+// extraido del fondo cuando "Aplicar paleta al sistema" esta encendido y el
+// acento del tema semantico cuando no: el cronometro sigue al usuario igual
+// que el resto del sistema, sin saber cual de los dos manda.
+#define CRONO_ACCENT   wallAccent()
 #define CRONO_DISC     TH_SURF2    // disco central de la esfera
 #define CRONO_CARDBG   TH_SURF     // superficie de la tarjeta expandida
 #define CRONO_ONACC    TH_ONACC    // texto/glifo encima del acento
@@ -27825,9 +28582,14 @@ static int cronoCapsuleRight(){
   return SCR_W - 66 - 12;                                      // borde izq. del Wi-Fi
 }
 // Pinta la pildora en el buffer ACTIVO, en (x, CRONO_CAP_Y). Opaca a proposito.
+// EL COLOR ES EL DEL USUARIO. Antes era CRONO_ACCENT (= TH_PRIM), o sea el
+// acento del TEMA: con "Aplicar paleta al sistema" encendido, la capsula del
+// cronometro se quedaba azul mientras el resto del sistema seguia el color
+// extraido del fondo. wallAccent() es la fuente de verdad del acento activo y
+// resuelve los dos casos sin que este dibujo tenga que saber cual manda.
 static void cronoCapsuleDraw(int x){
   int w = cronoCapsuleW(), h = CRONO_CAP_H, y = CRONO_CAP_Y;
-  fillRoundRect(x, y, w, h, h / 2, CRONO_ACCENT);
+  uiSurface(x, y, w, h, h / 2, UIS_ACCENT);
   int ir = CRONO_CAP_ICON / 2;
   cronoGlyph(x + CRONO_CAP_PADL + ir, y + h / 2 + 1, ir - 2, CRONO_ONACC, 1.5f);
   char b[16]; cronoFmt(b, sizeof(b), cronoElapsed(), false);
@@ -28269,15 +29031,17 @@ static void cronoCardCompose(float p, bool cacheBg){
   int w = cronoLerp(capW,         CRONO_CARD_W,   p);
   int h = cronoLerp(CRONO_CAP_H,  CRONO_CARD_H,   p);
   int r = cronoLerp(CRONO_CAP_H / 2, CRONO_CARD_RAD, p);
-  if(p >= 1.0f){
-    // Solo el frame en reposo paga el vidrio real (copiar + desenfocar). Lee
-    // de bbuf, que acaba de recibir el fondo autentico de debajo.
-    if(uiGlass) drawLiquidGlassPanel(x, y, w, h, r, TH_GLASS2);
-    fillRoundRectA(x, y, w, h, r, CRONO_CARDBG, uiGlass ? 170 : 240);
-  } else {
-    // Frames de animacion: rellenos planos (baratos) y morfeo de color desde
-    // el violeta de la capsula hasta el gris de la tarjeta.
-    fillRoundRectA(x, y, w, h, r, CRONO_CARDBG, 240);
+  // LA MISMA SUPERFICIE EN LOS DOS ESTADOS Y EN LA TRANSICION. Antes solo el
+  // cuadro en reposo (p >= 1) pagaba el vidrio y los de animacion eran rellenos
+  // PLANOS: con Liquid Glass activado, la barra desplegada del cronometro se
+  // veia plana y desvanecida mientras crecia -- el fallo que se reporto. Ahora
+  // uiSurfaceA resuelve material, tinte y borde una sola vez para colapsado,
+  // desplegado y la transicion entre ambos; con la banda pre-desenfocada que
+  // preparo cronoCardOpen, el vidrio cuesta lo mismo que costaba el plano.
+  uiSurfaceA(x, y, w, h, r, UIS_ELEVATED, uiGlass ? 200 : 240);
+  // Morfeo de color desde el acento de la capsula hasta la superficie de la
+  // tarjeta: sigue siendo funcion de p, y ahora el acento es el del USUARIO.
+  if(p < 1.0f){
     uint8_t va = (uint8_t)(255.0f * (1.0f - p));
     if(va) fillRoundRectA(x, y, w, h, r, CRONO_ACCENT, va);
   }
@@ -28327,6 +29091,21 @@ static void cronoCardOpen(){
          (size_t)SCR_W * CRONO_BAND_H * 2);
   fbUnlock();
   gCronoCardBg = false;
+  // VIDRIO DURANTE TODA LA TRANSICION. El fondo de la tarjeta es la banda que se
+  // acaba de capturar y NO cambia mientras dura la animacion (loop() le cede la
+  // pantalla en exclusiva, ver cronoCardVisible), asi que su desenfoque se
+  // calcula UNA sola vez aqui. A partir de ahi uiSurfaceA solo lo muestrea: el
+  // vidrio de los cuadros de animacion cuesta lo mismo que costaba el relleno
+  // plano que sustituye.
+  uiGlassBandEnd();
+  if(uiGlass){
+    uint16_t* ob = gBuf;
+    setBuf(bbuf);
+    memcpy(bbuf + (size_t)CRONO_BAND_T * SCR_W, gCronoCardBak,
+           (size_t)SCR_W * CRONO_BAND_H * 2);
+    uiGlassBandBegin(CRONO_BAND_T, CRONO_BAND_B - 1, uiSurfTint(UIS_ELEVATED));
+    setBuf(ob);
+  }
   gCronoCard   = CC_OPENING;
   gCronoCardT0 = millis();
 }
@@ -28369,7 +29148,7 @@ static void cronoCardTick(){
   }
   if(gCronoCard == CC_CLOSING){
     float p = (float)e / (float)CRONO_CARD_ANIM; if(p > 1.0f) p = 1.0f;
-    if(p >= 1.0f){ cronoCardRestore(); gCronoCard = CC_HIDDEN; gCronoCardBg = false; gCronoBarDirty = true; }
+    if(p >= 1.0f){ cronoCardRestore(); gCronoCard = CC_HIDDEN; gCronoCardBg = false; gCronoBarDirty = true; uiGlassBandEnd(); }
     else          cronoCardCompose(cronoEase(1.0f - p), false);
     return;
   }
@@ -28613,6 +29392,7 @@ static void themeChanged(bool save){
   gHomeDirty = true;                          // homeBuf: iconos, etiquetas y widgets del escritorio
   qsDirty    = true;                          // qsBuf: la cortina se compone a partir de homeBuf
   glcValid   = false;                          // tarjeta Liquid Glass cacheada (tinte y fondo cambian)
+  uiGlassBandEnd();                            // banda pre-desenfocada: lleva el tinte y el fondo VIEJOS
   dexBgWall  = 0xFF;                           // fondo de Modo PC: fuerza dexBgBuild() en el proximo frame
   // Miniaturas de Recientes: son capturas del framebuffer, o sea pixeles con el
   // tema viejo dentro. Se sueltan (y se recuperan solos la proxima vez que se
@@ -31677,6 +32457,7 @@ static void uiTick(){
   // Subir su cadencia a ~60 fps solo la hace mas suave, no mas rapida -- y a 26
   // fps un gesto rapido avanzaba tanto entre cuadro y cuadro que el movimiento
   // se veia a saltos.
+  if(appTrOwnsScreen()) return;    // la transicion posee la pantalla: nadie mas compone bandas
   bool qsVisible = (qsPanelY > 0 || qsAnimOn);
   bool fastPath = qsVisible || (gState == ST_HOME && !editMode && gRippleActive);
   unsigned long interval = fastPath ? 16 : 38;
@@ -31871,6 +32652,32 @@ void loop(){
   }
   kioskTick();            // FASE 4: refresca el candado y escucha el gesto de salida
   wgDataTick();           // widgets del Home: refresco de DATOS (nunca dentro del dibujo)
+  // -----------------------------------------------------------
+  //  TRANSICION DE APP: UN SOLO DUENO DE LA PANTALLA
+  //  ---------------------------------------------------------
+  //  Mismo patron que el OTA y la tarjeta del cronometro, y por el
+  //  mismo motivo: la transicion compone su banda sobre homeBuf y
+  //  la publica con present(). Si los widgets, la isla o la capsula
+  //  del cronometro publicaran su propia banda entre medias, se
+  //  colaria un trozo de escritorio SIN la tarjeta encima -- un
+  //  parpadeo en mitad de la animacion.
+  //
+  //  Lo que NO se corta es el TACTIL ni el estado logico: eso ya
+  //  corrio arriba (flexPollTouch y el switch de gState), que es
+  //  precisamente lo que permite aceptar la app siguiente mientras
+  //  la anterior todavia se ve encogiendo.
+  //
+  //  Sin delay(5) al final: mientras hay animacion, cada milisegundo
+  //  del presupuesto de cuadro cuenta. En reposo se conserva.
+  // -----------------------------------------------------------
+  if(appTrOwnsScreen()){
+    // La capa solo tiene sentido sobre Inicio o sobre una app. Si la navegacion
+    // se fue a otro sitio (Recientes, bloqueo, Personalizar inicio, apagado...),
+    // la transicion se ABORTA en vez de seguir pintando encima de una pantalla
+    // que no es la suya. Esa pantalla ya se dibujo entera al entrar.
+    if(gState != ST_HOME && gState != ST_APP) appTrCancel();
+    else { appTrTick(); flexOtaRender(); return; }
+  }
   if(wgDirty && gState == ST_HOME && !editMode && qsPanelY == 0 && !qsAnimOn &&
      !hpDragging && !hpSettling){
     wgDirty = false;      // solo se repintan las filas de los widgets, ni una mas
