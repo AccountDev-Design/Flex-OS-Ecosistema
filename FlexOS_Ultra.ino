@@ -2685,6 +2685,14 @@ static void uiSurfaceA(int x, int y, int w, int h, int rad, int role, uint8_t a)
 static void uiSurface(int x, int y, int w, int h, int rad, int role){
   uiSurfaceA(x, y, w, h, rad, role, 255);
 }
+// Superficie APOYADA EN EL WALLPAPER (bloqueo, apagado, verificacion de clave).
+// Conserva los colores TH_WALL* -- que son una excepcion deliberada del tema,
+// porque el wallpaper es contenido y no se retine -- pero el MATERIAL lo sigue
+// eligiendo uiGlass, igual que en el resto del sistema: en Plano es solida.
+static void uiWallSurface(int x, int y, int w, int h, int rad, uint16_t col, int blurR){
+  if(uiGlass) drawLiquidGlassPanelEx(x, y, w, h, rad, col, blurR);
+  else        fillRoundRect(x, y, w, h, rad, col);
+}
 
 // Wallpaper desenfocado reutilizable (fondo del desbloqueo y de Recientes, estilo iOS)
 static uint16_t* blurBg = NULL;
@@ -7054,7 +7062,13 @@ static void renderHome(){
   renderHomeInto(homeBuf, gHomePage);
   setBuf(fb);
 }
-static void showHome(){ blitToFb(homeBuf); flxFlushAll(); }
+// Vuelca el escritorio ENTERO. Quien llama a esto se queda la pantalla, asi que
+// ninguna capa de transicion puede sobrevivirle: se cancela aqui, en el unico
+// punto por el que pasan las trece rutas que vuelven a Inicio desde otra
+// pantalla (Recientes, Caja de apps, menu contextual, seguridad...), en vez de
+// tener que acordarse en cada una. Las rutas que SI deben conservar la capa
+// (homeTick y el cambio de minuto) ya no llaman aqui mientras dura.
+static void showHome(){ appTrCancel(); blitToFb(homeBuf); flxFlushAll(); }
 static bool hitHomeIcon(int px, int py, int &id){
   int S, gx0, gy0, cs, rs, cols, rows; homeGrid(S, gx0, gy0, cs, rs, cols, rows);
   int n = homeSlotCount();
@@ -8719,7 +8733,7 @@ static int hcBarHit(int x, int y){
 // ---- Vista: paginas ---------------------------------------------------------
 static void hcDrawPageCard(int page, int x, int y, bool center){
   if(hcThumb) hcBlitRounded(x, y, HC_CARD_W, HC_CARD_H, 26, hcThumb);
-  else        fillRoundRect(x, y, HC_CARD_W, HC_CARD_H, 26, TH_SURF);
+  else        uiSurface(x, y, HC_CARD_W, HC_CARD_H, 26, UIS_CARD);
   hcDrawThumb(page, x, y, HC_CARD_W, HC_CARD_H);
   uint16_t bc = center ? wallAccent() : TH_BORDER;
   drawRoundRect(x, y, HC_CARD_W, HC_CARD_H, 26, bc);
@@ -8769,7 +8783,7 @@ static void hcDrawWallView(){
     int c = i % 4, r = i / 4;
     int x = 18 + c * 116, y = 130 + r * 186;
     if(hcWallPrev) hcBlitRounded(x, y, HC_PV_W, HC_PV_H, 12, hcWallPrev + (size_t)i * HC_PV_W * HC_PV_H);
-    else           fillRoundRect(x, y, HC_PV_W, HC_PV_H, 12, TH_SURF);
+    else           uiSurface(x, y, HC_PV_W, HC_PV_H, 12, UIS_CARD);
     bool sel = (hcWallSel == i);
     drawRoundRect(x, y, HC_PV_W, HC_PV_H, 12, sel ? wallAccent() : TH_BORDER);
     if(sel){
@@ -8929,7 +8943,7 @@ static void hcDrawModal(){
   if(hcModal == HCM_NONE) return;
   fillRectA(0, 0, SCR_W, SCR_H, TH_SCRIM, 150);
   int w = SCR_W - 64, h = 200, x = 32, y = (SCR_H - h) / 2;
-  fillRoundRect(x, y, w, h, 26, TH_SURF);
+  uiSurface(x, y, w, h, 26, UIS_CARD);          // dialogo: material del sistema (Plano o Vidrio)
   drawRoundRect(x, y, w, h, 26, TH_BORDER);
   const char* ttl = hcModal == HCM_DELPAGE ? "Eliminar esta p\xC3\xA1gina"
                   : hcModal == HCM_RESET   ? "Restablecer el inicio" : "Aviso";
@@ -9921,7 +9935,11 @@ static void relojDrawTabs(){
   int pad = uiPad();
   int x = bx + pad, w = bw - 2 * pad, h = RELOJ_TABS_H - 10, y = by + 5;
   int seg = w / RELOJ_TAB_N;
-  fillRoundRect(x, y, w, h, h / 2, thCard());
+  // Barra de pestanas: material del sistema. Antes era un relleno PLANO con el
+  // color del vidrio (thCard() devuelve el TINTE cuando Liquid Glass esta
+  // activo), o sea que con Vidrio se veia plana -- justo lo que se reporto de
+  // los controles dentro de las apps.
+  uiSurface(x, y, w, h, h / 2, UIS_CARD);
   const int ids[RELOJ_TAB_N] = { S_CRN_HOUR, S_CRN_STOPW, S_CRN_TIMER };
   for(int i = 0; i < RELOJ_TAB_N; i++){
     int sx = x + i * seg;
@@ -10521,6 +10539,24 @@ static void appSuspend(int id, bool landscape){
   appEnforceSuspendLimit();
 }
 
+// APP QUE NUNCA LLEGO A EXISTIR.
+// ---------------------------------------------------------------------------
+// Con las transiciones interrumpibles, entre el toque en el icono y el enter()
+// de la app pasan unos milisegundos en los que la app YA es la activa
+// logicamente pero todavia no ha construido nada. Si el usuario se va en esa
+// ventana -- gesto Home, boton atras, Recientes --, suspenderla seria escribir
+// una sesion y una miniatura de una pantalla que nadie ha pintado, y al volver
+// a abrirla se llamaria a su resume() sin que su enter() haya corrido nunca.
+// Devuelve true si habia una apertura pendiente para 'id' y la ha cancelado,
+// dejando el ciclo de vida como estaba antes del toque.
+static bool appCancelPendingOpen(int id){
+  if(!gTrEnterPending || gTrEnterGen != gTrGen) return false;
+  if(!gTrIn.on || gTrIn.app != id) return false;
+  gTrEnterPending = false;
+  if(id >= 0 && id < APP_N) gAppState[id] = gTrPrevLife;
+  return true;
+}
+
 // Deja las tarjetas de Recientes y el ciclo de vida coherentes: una tarjeta
 // solo puede existir para una app abierta o suspendida.
 static void swSyncFromLife(){
@@ -10562,9 +10598,12 @@ static void sysRecents(){
     gLand = false;
     gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
     setBuf(fb);
-    appSuspend(gAppId, land);
+    // Igual que en appClose: una app que todavia no ha corrido su enter() no se
+    // suspende (no tendria ni estado ni miniatura que guardar), se cancela.
+    if(!appCancelPendingOpen(gAppId)) appSuspend(gAppId, land);
     if(gHomeDirty) renderHome();
   }
+  appTrCancel();          // Recientes dibuja la pantalla entera: ninguna capa sobrevive
   swSyncFromLife();
   activarMultitarea();
   touchDropAll();
@@ -10631,14 +10670,10 @@ static void appClose(){
   gClipX0 = 0; gClipX1 = SCR_W - 1;
   setBuf(fb);
   int outId = gAppId;
-  // APP QUE NUNCA LLEGO A EXISTIR. Si se cierra a mitad de la apertura, su
-  // enter()/resume() todavia no ha corrido: suspenderla escribiria una sesion y
-  // una miniatura de una pantalla que nadie ha pintado. Se descarta la apertura
-  // pendiente y se le devuelve el ciclo de vida que tenia antes.
-  bool neverEntered = gTrEnterPending && gTrEnterGen == gTrGen &&
-                      gTrIn.on && gTrIn.app == outId;
-  if(neverEntered){ gTrEnterPending = false; gAppState[outId] = gTrPrevLife; }
-  else appSuspend(outId, wasLand);     // conserva capas, toma miniatura y arma el guardado
+  // Si la app aun no habia corrido su enter(), no se la suspende: nunca llego a
+  // existir (ver appCancelPendingOpen).
+  if(!appCancelPendingOpen(outId))
+    appSuspend(outId, wasLand);        // conserva capas, toma miniatura y arma el guardado
   // La transicion compone SOBRE homeBuf: si Ajustes lo dejo sucio, hay que
   // recomponerlo ANTES, o la animacion de cierre encoge hacia el escritorio
   // viejo y este cambia de golpe al terminar.
@@ -11949,7 +11984,7 @@ static void calcRender(){
   int dx, dy, dw, dh; calcDispRect(dx, dy, dw, dh);
   if(dh > 0){
     int drad = dh / 5; if(drad > 14) drad = 14; if(drad < 2) drad = 2;
-    fillRoundRect(dx, dy, dw, dh, drad, TH_SURF);
+    uiSurface(dx, dy, dw, dh, drad, UIS_CARD);   // display: material del sistema
     int dfs = dh >= 90 ? 5 : dh >= 64 ? 4 : dh >= 40 ? 3 : 2;
     while(dfs > 1 && textW(calcDisp, dfs) > dw - 20) dfs--;
     drawTextR(dx + dw - 10, dy + dh / 2 - dfs * 4, calcDisp, dfs, TH_TXT);
@@ -12015,7 +12050,7 @@ static void calcRenderDisplay(){                       // solo el display (al te
   setBuf(host ? fb : lockBuf);
   fillRect(dx - 2, y0, dw + 4, y1 - y0, WIN_BG);  // borra el valor anterior
   int drad = dh / 5; if(drad > 14) drad = 14; if(drad < 2) drad = 2;
-  fillRoundRect(dx, dy, dw, dh, drad, TH_SURF);
+  uiSurface(dx, dy, dw, dh, drad, UIS_CARD);     // display: material del sistema
   int dfs = dh >= 90 ? 5 : dh >= 64 ? 4 : dh >= 40 ? 3 : 2;
   while(dfs > 1 && textW(calcDisp, dfs) > dw - 20) dfs--;
   drawTextR(dx + dw - 10, dy + dh / 2 - dfs * 4, calcDisp, dfs, TH_TXT);
@@ -18678,8 +18713,8 @@ static void noteDrawText(){
     const char* it[4] = { "Cortar", "Copiar", "Pegar", "Todo" };
     int bw = 92, gap = 4, tot = 4 * bw + 3 * gap, mx = (SCR_W - tot) / 2, my = hASY - 44; if(my < 50) my = 50;
     noteMenuX = mx; noteMenuY = my;
-    fillRoundRect(mx - 6, my - 6, tot + 12, 40, 8, thCard2());       // menu flotante de seleccion
-    for(int i = 0; i < 4; i++){ int bx = mx + i * (bw + gap); fillRoundRect(bx, my, bw, 28, 6, TH_SURF2); drawTextC(bx + bw / 2, my + 7, it[i], 2, TH_TXT); }
+    uiSurface(mx - 6, my - 6, tot + 12, 40, 8, UIS_ELEVATED);       // menu flotante de seleccion
+    for(int i = 0; i < 4; i++){ int bx = mx + i * (bw + gap); uiSurface(bx, my, bw, 28, 6, UIS_ELEVATED); drawTextC(bx + bw / 2, my + 7, it[i], 2, TH_TXT); }
   }
   // FASE G - chip flotante "Copiado": vive DENTRO del area de texto, asi que se
   // borra solo con el siguiente repintado de esta misma banda. Se desvanece en
@@ -18900,7 +18935,7 @@ static void kbRenderPopup(int cell){
   int py0 = ky - ph - 10;
   kbPopX = px0; kbPopY = py0; kbPopN = n; kbPopW = pw; kbPopG = gap;
   setBuf(fb);
-  fillRoundRect(px0 - 6, py0 - 6, totw + 12, ph + 12, 10, thCard2());     // popup de acentos
+  uiSurface(px0 - 6, py0 - 6, totw + 12, ph + 12, 10, UIS_ELEVATED);     // popup de acentos
   for(int i = 0; i < n; i++){
     int x = px0 + i * (pw + gap);
     fillRoundRect(x, py0, pw, ph, 8, kbColKey());
@@ -19058,7 +19093,7 @@ static void kbDrawMore(){
   kbMoreX = SCR_W - w - 10; kbMoreY = kbToolbarY() - h - 6;
   if(kbMoreY < 60) kbMoreY = 60;
   setBuf(fb);
-  fillRoundRect(kbMoreX, kbMoreY, w, h, 12, thCard2());          // menu "mas" del teclado
+  uiSurface(kbMoreX, kbMoreY, w, h, 12, UIS_ELEVATED);          // menu "mas" del teclado
   for(int i = 0; i < KB_MORE_N; i++)
     drawText(kbMoreX + 14, kbMoreY + 10 + i * 38 + 8, KB_MORE_LBL[i], 2, TH_TXT);
   flxFlush(kbMoreY - 2, kbMoreY + h + 2);
@@ -21380,7 +21415,7 @@ static void hwDrawWizard(){
       for(int r = 0; r < nc; r++){
         DetectedModule* m = &detectedModules[idxs[r]];
         int cy = HW_LIST_Y0 + r * HW_ROW_H;
-        drawLiquidGlassPanel(HW_CARD_X, cy, HW_CARD_W, HW_CARD_H, 12, TH_GLASS);
+        uiSurface(HW_CARD_X, cy, HW_CARD_W, HW_CARD_H, 12, UIS_CARD);
         drawModuleIcon(m->type, HW_CARD_X + 8, cy + 8, 32);
         char label[48];
         if(m->i2cAddr) snprintf(label, sizeof(label), "%s (0x%02X)", m->name, m->i2cAddr);
@@ -21389,7 +21424,7 @@ static void hwDrawWizard(){
         drawTextC(HW_CARD_X + HW_CARD_W - 46, cy + 18, "Config", 1, TH_ACCS);
       }
     }
-    fillRoundRect(HW_CLOSE_X, HW_CLOSE_Y, HW_CLOSE_W, HW_CLOSE_H, 14, TH_SURF2);
+    uiSurface(HW_CLOSE_X, HW_CLOSE_Y, HW_CLOSE_W, HW_CLOSE_H, 14, UIS_ELEVATED);
     drawTextC(SCR_W / 2, HW_CLOSE_Y + 14, "Cerrar", 2, TH_TXT);
   } else {
     // ---- Vista CODIGO (solo lectura) ----
@@ -21398,7 +21433,7 @@ static void hwDrawWizard(){
     drawTextC(SCR_W / 2, WIN_TOP + 16, t, 2, TH_TXT);
 
     int px = 16, py = WIN_TOP + 52, pw = SCR_W - 32, ph = (HW_ACT_Y - 12) - (WIN_TOP + 52);
-    drawLiquidGlassPanel(px, py, pw, ph, 12, TH_GLASS);
+    uiSurface(px, py, pw, ph, 12, UIS_CARD);
 
     // Volcar hwCode linea a linea (split por '\n')
     int ly = py + 12, lineNo = 1;
@@ -21416,7 +21451,7 @@ static void hwDrawWizard(){
       if(ly > py + ph - 16) break;
     }
 
-    fillRoundRect(HW_BACK_X, HW_ACT_Y, HW_ACT_W, HW_ACT_H, 12, TH_SURF2);
+    uiSurface(HW_BACK_X, HW_ACT_Y, HW_ACT_W, HW_ACT_H, 12, UIS_ELEVATED);
     drawTextC(HW_BACK_X + HW_ACT_W / 2, HW_ACT_Y + 14, "Volver", 2, TH_TXT);
     fillRoundRect(HW_COPY_X, HW_ACT_Y, HW_ACT_W, HW_ACT_H, 12, hwCopied ? TH_OK : TH_PRIM);   // "Copiado" = exito
     drawTextC(HW_COPY_X + HW_ACT_W / 2, HW_ACT_Y + 14, hwCopied ? "Copiado" : "Copiar", 2, TH_ONACC);
@@ -26477,19 +26512,19 @@ static void poffDrawStatic(){
   // El velo de arriba deja el fondo oscuro en las DOS apariencias (es wallpaper
   // desenfocado, contenido), asi que el panel y sus textos usan las superficies
   // "sobre wallpaper" del tema -- misma regla que la verificacion de PIN.
-  drawLiquidGlassPanelEx(28, 232, SCR_W - 56, 424, 44, TH_WALLPANEL, 9);
+  uiWallSurface(28, 232, SCR_W - 56, 424, 44, TH_WALLPANEL, 9);
 
   drawTextC(SCR_W / 2, 268, "\xC2\xBF" "Apagar FlexOS?", 3, TH_ONWALL);
   drawTextC(SCR_W / 2, 306, "El sistema entrar\xC3\xA1 en reposo profundo", 1, TH_ONWALL2);
 
   // Pista del slider (vacia). El relleno y el pomo son dinamicos.
   fillRoundRectA(POFF_TRACK_X + 2, POFF_TRACK_Y + 4, POFF_TRACK_W, POFF_TRACK_H, POFF_TRACK_R, TH_SHADOW, 60);
-  drawLiquidGlassPanelEx(POFF_TRACK_X, POFF_TRACK_Y, POFF_TRACK_W, POFF_TRACK_H, POFF_TRACK_R, TH_WALLSURF, 7);
+  uiWallSurface(POFF_TRACK_X, POFF_TRACK_Y, POFF_TRACK_W, POFF_TRACK_H, POFF_TRACK_R, TH_WALLSURF, 7);
   drawRoundRect(POFF_TRACK_X, POFF_TRACK_Y, POFF_TRACK_W, POFF_TRACK_H, POFF_TRACK_R, TH_ONWALL2);
 
   // Boton Cancelar (vuelve al estado previo sin ningun efecto secundario).
   fillRoundRectA(POFF_CAN_X + 2, POFF_CAN_Y + 4, POFF_CAN_W, POFF_CAN_H, POFF_CAN_R, TH_SHADOW, 60);
-  drawLiquidGlassPanelEx(POFF_CAN_X, POFF_CAN_Y, POFF_CAN_W, POFF_CAN_H, POFF_CAN_R, TH_WALLSURF, 7);
+  uiWallSurface(POFF_CAN_X, POFF_CAN_Y, POFF_CAN_W, POFF_CAN_H, POFF_CAN_R, TH_WALLSURF, 7);
   drawRoundRect(POFF_CAN_X, POFF_CAN_Y, POFF_CAN_W, POFF_CAN_H, POFF_CAN_R, TH_ONWALL2);
   drawTextC(SCR_W / 2, POFF_CAN_Y + POFF_CAN_H / 2 - 9, "Cancelar", 2, TH_ONWALL);
 }
@@ -32627,7 +32662,10 @@ void loop(){
       // gesto termina -- porque un reloj un segundo tarde se perdona y un
       // tiron en el deslizamiento no.
       if(minChanged && qsPanelY == 0 && !qsAnimOn && !editMode){
-        if(hpDragging || hpSettling) gHomeDirty = true;
+        // Con una transicion de app a la vista pasa lo mismo que con un gesto de
+        // pagina: volcar el escritorio entero borraria la tarjeta que esta
+        // animandose. Se aplaza -- homeTick lo rehace en cuanto termina.
+        if(hpDragging || hpSettling || appTrOwnsScreen()) gHomeDirty = true;
         else { renderHome();             // refresca el cache homeBuf (offscreen: setBuf(homeBuf)...setBuf(fb), sin tocar pantalla)
                showHome(); }
       }
