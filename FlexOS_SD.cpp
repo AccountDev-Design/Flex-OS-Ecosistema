@@ -28,9 +28,11 @@
 #define SDPIN_D2     41
 #define SDPIN_D3     42
 
-// Periodo del sondeo activo. 2 s es suficiente para que meter una
-// tarjeta se note "al momento" sin que el bus haga nada apreciable:
-// cada sondeo es UNA apertura de directorio.
+// Periodo de reintento tras retirar una tarjeta. Solo se usa mientras
+// NO hay un volumen montado: una tarjeta ya montada nunca se toca por
+// temporizador. En esta placa DATA3 ocupa el contacto CD y no existe
+// una linea de deteccion independiente; abrir la raiz cada pocos
+// segundos provoca PANIC en algunas combinaciones P4/core/tarjeta.
 #define FLEXSD_POLL_MS       2000
 // Tras un fallo de montaje se espera mas: reintentar cada 2 s un
 // montaje que tarda ~200 ms en fallar si que se notaria.
@@ -88,24 +90,6 @@ static const char* baseNameOf(const char* p){
   return s ? s + 1 : p;
 }
 
-// -------------------------------------------------------------
-//  VERIFICACION DE PRESENCIA (camino pasivo)
-//  ------------------------------------------------------------
-//  La llama cualquier operacion que falle sobre una tarjeta que
-//  creiamos montada. Hace UNA comprobacion: abrir la raiz. Si eso
-//  tampoco va, la tarjeta no esta y se desmonta de verdad, lo que
-//  sube la generacion y deja invalidos todos los descriptores
-//  abiertos. Es el mecanismo que impide seguir leyendo con un
-//  descriptor de una tarjeta ya retirada.
-// -------------------------------------------------------------
-static bool sdRootAlive(){
-  File d = SD_MMC.open("/");
-  if(!d) return false;
-  bool ok = d.isDirectory();
-  d.close();
-  return ok;
-}
-
 static void sdSetGone(){
   if(sdMounted){
     SD_MMC.end();
@@ -119,24 +103,15 @@ static void sdSetGone(){
   sdNextPoll = millis() + FLEXSD_POLL_MS;
 }
 
-// Devuelve true si sigue viva. Si no, deja el modulo desmontado.
-static bool sdVerifyAlive(){
-  if(!sdMounted) return false;
-  if(sdRootAlive()) return true;
-  sdSetGone();
-  return false;
-}
-
-// Marca un fallo de E/S sobre tarjeta montada. Si la tarjeta sigue
-// respondiendo es un error del fichero, no de la tarjeta: se dice
-// asi y NO se desmonta (desmontar por un fichero corrupto seria
-// tirar el volumen entero por un archivo).
+// Una operacion real que falla invalida el volumen sin hacer una
+// segunda operacion de "comprobacion" sobre la raiz. Esa segunda
+// apertura era precisamente la ruta que producia reinicios PANIC en
+// placa. Las ausencias normales se filtran con exists() antes de
+// llegar aqui; por tanto esto representa un fallo real de E/S.
 static void sdIoFailed(){
   if(!sdMounted) return;
-  if(sdVerifyAlive()){
-    sdState = FLEXSD_ERR_IO;
-    sdErr   = "Error de lectura en la tarjeta";
-  }
+  sdSetGone();
+  sdErr = "La tarjeta dejo de responder";
 }
 
 // -------------------------------------------------------------
@@ -266,20 +241,19 @@ void        flexSdBusySet(bool b){ sdBusy = b; }
 bool flexSdTick(){
   if(!sdHwReady) return false;
   if(sdBusy)     return false;              // fotograma de video en curso
+
+  // Sin linea CD independiente no existe una comprobacion inocua de
+  // presencia. Mientras esta montada solo las operaciones solicitadas
+  // por el usuario acceden al bus; su fallo activa sdIoFailed(). Esto
+  // elimina por completo la apertura periodica que causaba PANIC.
+  if(sdMounted) return false;
+
   unsigned long now = millis();
   if((long)(now - sdNextPoll) < 0) return false;
   sdNextPoll = now + FLEXSD_POLL_MS;
 
   int before = sdState;
-  if(sdMounted){
-    if(!sdRootAlive()) sdSetGone();         // retirada en caliente
-    else if(sdState == FLEXSD_ERR_IO){      // se recupero de un error de fichero
-      sdState = FLEXSD_READY;
-      sdErr   = "Tarjeta lista";
-    }
-  } else {
-    flexSdMount();                          // insercion en caliente
-  }
+  flexSdMount();                            // insercion/reconexion en caliente
   return sdState != before;
 }
 
@@ -363,6 +337,11 @@ const char* flexSdFsName(){
 int flexSdListFrom(const char* dir, FlexFsEntry* out, int maxn, int skip){
   if(!out || maxn <= 0) return 0;
   if(!sdPathOk(dir)) return -1;
+
+  // DCIM, Pictures, Movies, etc. son raices OPCIONALES. Una tarjeta
+  // vacia no debe convertir cada carpeta ausente en un error ni
+  // disparar verificaciones adicionales del volumen.
+  if(!SD_MMC.exists(dir)) return 0;
 
   File d = SD_MMC.open(dir);
   if(!d || !d.isDirectory()){
@@ -478,12 +457,10 @@ bool flexSdOpen(FlexSdFile* f, const char* path){
   if(!f) return false;
   flexSdClose(f);
   if(!sdPathOk(path)) return false;
+  if(!SD_MMC.exists(path)) return false;
   File h = SD_MMC.open(path, FILE_READ);
-  if(!h || h.isDirectory()){
-    if(h) h.close();
-    sdIoFailed();
-    return false;
-  }
+  if(!h){ sdIoFailed(); return false; }
+  if(h.isDirectory()){ h.close(); return false; }
   File* keep = new (std::nothrow) File(h);
   if(!keep){ h.close(); return false; }
   f->h    = (void*)keep;
@@ -515,9 +492,8 @@ int flexSdRead(FlexSdFile* f, void* buf, uint32_t n){
   // Una lectura corta ANTES del final del fichero no es un fin de
   // fichero: es que la tarjeta ha dejado de contestar. Distinguirlo
   // importa porque el core devuelve 0 (no -1) cuando se saca la
-  // tarjeta, y sin esto la retirada no se notaria hasta el siguiente
-  // sondeo -- hasta dos segundos despues, con el video parado y sin
-  // decir por que.
+  // tarjeta. Sin esto el reproductor interpretaria la retirada como
+  // fin normal del fichero y seguiria conservando un volumen invalido.
   if(rd < 0 || (rd == 0 && f->pos < f->size)){ sdIoFailed(); return -1; }
   f->pos += (uint32_t)rd;
   return rd;
@@ -542,8 +518,10 @@ uint32_t flexSdFileSize(const FlexSdFile* f){ return f ? f->size : 0; }
 // -------------------------------------------------------------
 int flexSdReadBin(const char* path, void* buf, size_t n){
   if(!sdPathOk(path) || !buf) return -1;
+  if(!SD_MMC.exists(path)) return -1;
   File h = SD_MMC.open(path, FILE_READ);
-  if(!h || h.isDirectory()){ if(h) h.close(); sdIoFailed(); return -1; }
+  if(!h){ sdIoFailed(); return -1; }
+  if(h.isDirectory()){ h.close(); return -1; }
   int rd = h.read((uint8_t*)buf, n);
   h.close();
   if(rd < 0){ sdIoFailed(); return -1; }
