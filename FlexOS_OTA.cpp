@@ -279,7 +279,7 @@ static bool otaFail(FlexOtaError e){
 // Traduce cada modo de fallo a SU codigo: sin conexion, HTTPS caido,
 // certificado invalido, 404, timeout... nunca a un generico.
 static bool otaOpen(HTTPClient& http, WiFiClientSecure& sec, const char* url){
-  if(WiFi.status() != WL_CONNECTED) return otaFail(OTA_ERR_NO_WIFI);
+  if(!otaHostNetworkReady()) return otaFail(OTA_ERR_NO_WIFI);
   if(strncmp(url, "https://", 8) != 0) return otaFail(OTA_ERR_BAD_URL);
 
   // Filtro de memoria ANTES de tocar TLS: mbedTLS reserva sus buffers
@@ -1332,7 +1332,7 @@ void flexOtaBegin(){
 
 void flexOtaRequestCheck(){
   if(flexOtaBusy()) return;
-  if(WiFi.status() != WL_CONNECTED){ gError = OTA_ERR_NO_WIFI; gState = OTA_ERROR; gOvDirty = true; return; }
+  if(!otaHostNetworkReady()){ gError = OTA_ERR_NO_WIFI; gState = OTA_ERROR; gOvDirty = true; return; }
   gError = OTA_ERR_NONE;
   gState = OTA_CHECKING;
   gCmd   = CMD_CHECK;
@@ -1341,7 +1341,7 @@ void flexOtaRequestCheck(){
 
 void flexOtaRequestInstall(){
   if(flexOtaBusy() || !gHasUpd) return;
-  if(WiFi.status() != WL_CONNECTED){ gError = OTA_ERR_NO_WIFI; gState = OTA_ERROR; gOvDirty = true; return; }
+  if(!otaHostNetworkReady()){ gError = OTA_ERR_NO_WIFI; gState = OTA_ERROR; gOvDirty = true; return; }
   gCancel = false;
   gState  = OTA_CONNECTING;
   gCmd    = CMD_INSTALL;
@@ -1478,7 +1478,7 @@ static void otaAutoCheckTick(){
   if(done) return;
   if(millis() < 20000) return;
   done = true;
-  if(WiFi.status() == WL_CONNECTED && gState == OTA_IDLE) gCmd = CMD_CHECK;
+  if(otaHostNetworkReady() && gState == OTA_IDLE) gCmd = CMD_CHECK;
 #endif
 }
 
