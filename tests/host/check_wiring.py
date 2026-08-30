@@ -34,6 +34,14 @@ GANCHOS = [
     ("setup",          "flexWeatherBegin()", "no se cargarian ni las ubicaciones ni la cache del clima, y su tarea de red no existiria"),
     ("clkSetEpoch",    "flexWeatherSetClock(", "el clima no sabria la hora real y no podria decir cuanto hace que se actualizo"),
     ("loop",           "flexPollTouch()", "no habria tactil"),
+    # Sin este tick la tarjeta no se detectaria nunca al insertarla, la
+    # retirada no cortaria la reproduccion y el indice de medios no
+    # avanzaria: Galeria y Multimedia se quedarian vacias para siempre.
+    ("loop",           "mediaStorageTick()", "sin esto la microSD no se detecta ni se suelta, y el indice de medios no avanza"),
+    ("mediaStorageTick", "flexSdTick()",   "sin el sondeo no hay deteccion de insercion ni de retirada"),
+    ("mediaStorageTick", "mediaIndexTick()", "el indice de medios nunca terminaria de construirse"),
+    ("setup",          "flexSdBegin()",   "el controlador SDMMC no se prepararia y la tarjeta no montaria nunca"),
+    ("setup",          "flexAudioBegin()","el codec no se sondearia y el audio quedaria desactivado sin motivo"),
     ("flexPollTouch",  "hpzUpdate()",     "el gesto de dos dedos no se detectaria nunca"),
     ("flexPollTouch",  "hpzSwallowing()", "el gesto no se consumiria y el mismo toque llegaria a otra capa"),
     ("flexPollTouch",  "suspGestureUpdate()", "se perderia el gesto de suspension"),

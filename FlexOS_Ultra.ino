@@ -50,6 +50,17 @@
 #include <Wire.h>
 #include <Preferences.h>
 
+// Modulos propios que el sketch usa desde el principio. Los dos son
+// unidades de traduccion aparte por el motivo de siempre en este
+// proyecto: el .ino DIBUJA, los modulos mueven los bytes.
+//   FlexOS_SD    -> la tarjeta microSD (SDMMC nativo de 4 bits).
+//   FlexOS_Media -> que es cada fichero, como se demultiplexa un AVI
+//                   MJPEG y como se construye el indice por lotes.
+//                   Es portable y tiene pruebas de host propias.
+#include "FlexOS_SD.h"
+#include "FlexOS_Media.h"
+#include "FlexOS_Audio.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -296,6 +307,68 @@ struct SessHdr { uint32_t magic; uint16_t ver; uint16_t app; uint32_t len; uint3
 // generador de prototipos de Arduino no puede ver un tipo definido a
 // mitad de archivo.
 struct TouchPoint { int id; int x, y; bool active; };
+
+// -------------------------------------------------------------
+//  TIPOS DE MEDIOS QUE SALEN EN UNA FIRMA
+//  ------------------------------------------------------------
+//  Viven aqui arriba por la MISMA restriccion que struct Touch y
+//  struct TouchPoint: el IDE de Arduino inserta el prototipo de
+//  todas las funciones del .ino antes de la primera de ellas, asi
+//  que un tipo que aparezca en la firma de cualquier funcion tiene
+//  que estar definido antes. Definirlos junto a la Galeria o al
+//  reproductor, que es donde se usan, compilaria con g++ y fallaria
+//  en el IDE con "does not name a type".
+// -------------------------------------------------------------
+
+// LECTOR UNIFICADO. Un solo tipo para leer un fichero este donde
+// este: en la particion interna o en la tarjeta. Es lo que evita
+// tener dos reproductores y dos visores, uno por memoria.
+//
+// La diferencia real entre los dos volumenes esta en el coste de
+// abrir: en la tarjeta abrir cuesta una busqueda en el directorio
+// FAT, asi que el descriptor se mantiene ABIERTO (FlexSdFile) y se
+// lee por bloques desde el. En LittleFS, que es flash mapeada, el
+// coste de reabrir es despreciable, asi que se lee por
+// desplazamiento (flexFsReadAt) y no se retiene ningun descriptor.
+#define MSTREAM_NONE 0
+#define MSTREAM_INT  1      // particion interna (LittleFS)
+#define MSTREAM_SD   2      // tarjeta microSD
+struct MediaStream {
+  uint8_t    kind;
+  FlexSdFile sd;                        // solo si kind == MSTREAM_SD
+  char       path[FLEXMED_PATH_MAX];    // solo si kind == MSTREAM_INT
+  uint32_t   pos, size;
+};
+
+// Una miniatura ya decodificada. La cache es un array fijo de estas
+// (ver la Galeria): tamano constante, sin reserva por elemento y sin
+// fragmentacion del heap por desplazarse por la rejilla.
+#define GAL_THUMB_W   112
+#define GAL_THUMB_H   112
+struct GalThumb {
+  char      path[FLEXMED_PATH_MAX];
+  uint16_t* px;         // GAL_THUMB_W * GAL_THUMB_H en PSRAM
+  uint16_t  w, h;       // area realmente util (respeta la proporcion)
+  uint32_t  useMs;      // ultimo uso: la que lleva mas tiempo sin usarse cede su sitio
+  uint8_t   state;      // GTH_*
+};
+#define GTH_EMPTY 0
+#define GTH_OK    1
+#define GTH_FAIL  2     // se intento y no se pudo: no se reintenta en cada repintado
+
+// ORIENTACION DE UN MEDIO. Los tres modos que pide el usuario, mas
+// la orientacion EFECTIVA que se deduce de ellos y de la forma del
+// archivo. Se separan a proposito: el modo es lo que el usuario
+// eligio y la efectiva es lo que se esta pintando.
+#define MORI_AUTO  0
+#define MORI_PORT  1
+#define MORI_LAND  2
+
+// Centros de los botones del reproductor, en coordenadas del lienzo
+// LOGICO (o sea, ya girados cuando toca). Dibujo y hit-test llaman a
+// la misma funcion para rellenar esto, que es lo que impide que se
+// vea horizontal y el dedo responda en vertical.
+struct VidBtns { int cx, cy, prevX, back10X, fwd10X, nextX, oriX, oriY, oriW, oriH; };
 #define KB_MAXPOINTS 5
 static TouchPoint gKbPoints[KB_MAXPOINTS];
 
@@ -403,7 +476,13 @@ enum ModuleType {
   MOD_LED,
   MOD_BUTTON,
   MOD_SERVO,
-  MOD_I2C_GENERIC
+  MOD_I2C_GENERIC,
+  // Avisos del sistema que NO son un modulo I2C pero usan la misma
+  // isla: es la unica cola de notificaciones que hay, y duplicarla
+  // para la tarjeta habria dado dos capas dibujando en la misma
+  // banda de bbuf (el fallo que ya documenta la cabecera de la isla).
+  MOD_SDCARD,       // tarjeta insertada / retirada / error / indice listo
+  MOD_MEDIA         // archivo incompatible, fin de reproduccion...
 };
 
 // Un modulo detectado por el hardware.
@@ -9599,7 +9678,8 @@ static bool settingsHandleBack();
 static void wifiSettingsEnter(); static void wifiTick();    // Ajustes -> Red e Internet -> Wi-Fi, abajo
 static void calcEnter(); static void calcTick();           // Calculadora (M2), abajo
 static void pcEnter(); static void pcTick();               // Modo PC (M4), abajo
-static void galEnter(); static void galTick();              // Galeria (contenido real + Flex Vault)
+static void galEnter(); static void galTick();              // Galeria (indice real de medios + Flex Vault)
+static void galCloseApp();                                 // ...suelta la cache de miniaturas
 static bool galBackLayer(); static bool galBackScreen(); static void galSuspend(); static void galResume();
 static void bienEnter(); static void bienTick();           // Bienestar (M2)
 static void calEnter(); static void calTick();             // Calendario (M2)
@@ -10078,7 +10158,7 @@ static const char* APP_CAT_NAME[APP_CAT_N][5] = {
   {"Ocio","Fun","Loisirs","Lazer","Svago"},
 };
 static const AppHooks H_SETTINGS = { NULL, settingsHandleBack, setSuspend, setResume, NULL, setSaveSess, setLoadSess, setBgWork };
-static const AppHooks H_GALLERY  = { galBackLayer, galBackScreen, galSuspend, galResume, NULL, NULL, NULL, NULL };
+static const AppHooks H_GALLERY  = { galBackLayer, galBackScreen, galSuspend, galResume, galCloseApp, NULL, NULL, NULL };
 static const AppHooks H_CALC     = { NULL, NULL, NULL, calcResume, NULL, calcSaveSess, calcLoadSess, NULL };
 static const AppHooks H_MEDIA    = { NULL, NULL, vidSuspend, vidResume, vidCloseApp, vidSaveSess, vidLoadSess, NULL };
 static const AppHooks H_CAMERA   = { NULL, NULL, camSuspend, camResume, camCloseApp, NULL, NULL, NULL };
@@ -17428,173 +17508,1674 @@ static bool qsGlobalHandle(){
 }
 
 // #############################################################
-// ##  APP MULTIMEDIA (ESQUELETO reproductor de video)
-// ##  Doble buffer ping-pong en PSRAM + control de FPS por millis().
-// ##  FUENTE = patron sintetico. Para video real, sustituir
-// ##  vidDecodeFrame() por: leer MJPEG/.bin de la SD + decodificar.
+// ##  NUCLEO DE MEDIOS DE FLEX OS
+// ##  ------------------------------------------------------
+// ##  Todo lo que Galeria, Multimedia, Almacenamiento y el
+// ##  Explorador comparten, en UN solo sitio:
+// ##
+// ##    · los dos volumenes (interno y tarjeta) vistos igual,
+// ##    · un lector de ficheros unico para los dos,
+// ##    · el indice de medios, que se construye por lotes desde
+// ##      el bucle principal y nunca bloquea,
+// ##    · la cache de miniaturas,
+// ##    · la orientacion Auto/Vertical/Horizontal,
+// ##    · y el puente con la isla de notificaciones.
+// ##
+// ##  POR QUE AQUI Y NO EN CADA APP. Antes de esto, la Galeria
+// ##  tenia su propio recorrido de carpetas y su propio
+// ##  decodificador de miniatura, y Multimedia una fuente
+// ##  sintetica sin relacion con ninguna de las dos. Con dos
+// ##  volumenes y una tarjeta que puede irse en cualquier
+// ##  momento, mantener eso duplicado seria garantizar que una de
+// ##  las copias se olvida de comprobar la retirada. Aqui hay UN
+// ##  indice, UN lector y UNA politica de invalidacion.
 // #############################################################
-#define VID_W     448
-#define VID_H     252
-#define VID_RX    16
-#define VID_RY    64
-#define VID_TOTAL 300           // frames simulados (10 s @ 30 fps)
-#define VID_FPS_MS 33           // 33 ms ~ 30 fps
 
-static uint16_t *vidBufA = NULL, *vidBufB = NULL, *vidFront = NULL, *vidBack = NULL;
-static bool vidPlaying = false;
-static int  vidFrame = 0;
-static unsigned long vidLastMs = 0;
+// -------------------------------------------------------------
+//  Puente con la isla de notificaciones
+//  ------------------------------------------------------------
+//  notifPush vive mucho mas abajo (necesita la geometria de la
+//  isla), asi que se declara aqui. Se reutiliza la cola que ya
+//  existe en vez de crear una segunda: dos capas escribiendo en la
+//  misma banda de bbuf es exactamente el fallo que documenta la
+//  cabecera de la isla.
+// -------------------------------------------------------------
+static void notifPush(const DetectedModule* m);
 
-// <<< PUNTO DE PORTABILIDAD >>> aqui iria: SD.open(archivo) + JPEGDEC/esp_jpeg
-// para decodificar el frame f dentro de 'buf'. Ahora: patron animado.
-static void vidDecodeFrame(uint16_t* buf, int f){
-  for(int y = 0; y < VID_H; y++){
-    uint16_t* row = buf + (size_t)y * VID_W;
-    for(int x = 0; x < VID_W; x++)
-      row[x] = rgb565((uint8_t)(x + f * 3), (uint8_t)(y * 2 + f * 2), (uint8_t)((x + y) / 2 + f * 4));
+static void mediaNotify(ModuleType t, const char* title, const char* sub){
+  DetectedModule m;
+  memset(&m, 0, sizeof(m));
+  m.type    = t;
+  m.i2cAddr = 0;                 // no es un dispositivo del bus
+  m.active  = true;
+  m.detectedAt = millis();
+  snprintf(m.name, sizeof(m.name), "%s", title ? title : "");
+  snprintf(m.sub,  sizeof(m.sub),  "%s", sub   ? sub   : "");
+  notifPush(&m);
+}
+
+// -------------------------------------------------------------
+//  VOLUMENES
+//  ------------------------------------------------------------
+//  Una ruta lleva su volumen dentro: si empieza por /sdcard es de
+//  la tarjeta y si no, de la particion interna. No hay una bandera
+//  aparte que se pueda desincronizar de la ruta.
+// -------------------------------------------------------------
+static inline bool mediaIsSd(const char* path){ return flexSdIsSdPath(path); }
+
+static bool mediaVolReady(const char* path){
+  return mediaIsSd(path) ? flexSdReady() : flexFsReady();
+}
+
+// Nombre corto del volumen, para la ficha de detalles y la Galeria.
+static const char* mediaVolName(const char* path){
+  return mediaIsSd(path) ? "Tarjeta SD" : "Memoria interna";
+}
+
+// Listado uniforme. Devuelve -1 si el volumen no esta disponible,
+// para que el llamante distinga "carpeta vacia" de "no hay tarjeta".
+static int mediaList(const char* dir, FlexFsEntry* out, int maxn){
+  if(mediaIsSd(dir)) return flexSdReady() ? flexSdList(dir, out, maxn) : -1;
+  return flexFsReady() ? flexFsList(dir, out, maxn) : -1;
+}
+
+// -------------------------------------------------------------
+//  LECTOR UNIFICADO (MediaStream + FlexMediaIO)
+// -------------------------------------------------------------
+static void mediaStreamClose(MediaStream* s){
+  if(!s) return;
+  if(s->kind == MSTREAM_SD) flexSdClose(&s->sd);
+  s->kind = MSTREAM_NONE;
+  s->path[0] = 0;
+  s->pos = s->size = 0;
+}
+
+static bool mediaStreamOpen(MediaStream* s, const char* path){
+  if(!s || !path) return false;
+  mediaStreamClose(s);
+  if(mediaIsSd(path)){
+    if(!flexSdReady()) return false;
+    if(!flexSdOpen(&s->sd, path)) return false;
+    s->kind = MSTREAM_SD;
+    s->size = flexSdFileSize(&s->sd);
+  } else {
+    if(!flexFsReady() || !flexFsExists(path)) return false;
+    s->kind = MSTREAM_INT;
+    s->size = flexFsSize(path);
+    snprintf(s->path, sizeof(s->path), "%s", path);
+  }
+  s->pos = 0;
+  return s->size > 0;
+}
+
+static inline bool mediaStreamOpenOk(const MediaStream* s){
+  if(!s || s->kind == MSTREAM_NONE) return false;
+  if(s->kind == MSTREAM_SD) return flexSdIsOpen(&s->sd);
+  return true;
+}
+
+static int mediaIoRead(void* c, void* buf, uint32_t n){
+  MediaStream* s = (MediaStream*)c;
+  if(!s || n == 0) return 0;
+  if(s->kind == MSTREAM_SD){
+    int r = flexSdRead(&s->sd, buf, n);          // -1 si la tarjeta ya no esta
+    if(r > 0) s->pos += (uint32_t)r;
+    return r;
+  }
+  if(s->kind == MSTREAM_INT){
+    int r = flexFsReadAt(s->path, s->pos, buf, n);
+    if(r > 0) s->pos += (uint32_t)r;
+    return r;
+  }
+  return -1;
+}
+static bool mediaIoSeek(void* c, uint32_t off){
+  MediaStream* s = (MediaStream*)c;
+  if(!s) return false;
+  if(s->kind == MSTREAM_SD) return flexSdSeek(&s->sd, off);
+  if(s->kind == MSTREAM_INT){
+    if(off > s->size) return false;
+    s->pos = off; return true;
+  }
+  return false;
+}
+static uint32_t mediaIoSize(void* c){
+  MediaStream* s = (MediaStream*)c;
+  return s ? s->size : 0;
+}
+static void mediaBindIO(FlexMediaIO* io, MediaStream* s){
+  io->read = mediaIoRead; io->seek = mediaIoSeek; io->size = mediaIoSize; io->ctx = s;
+}
+
+// Lee un fichero entero a un buffer que pone el llamante. Devuelve
+// los bytes leidos o -1. Es para ficheros PEQUENOS (una foto que ya
+// se comprobo que cabe); lo grande va por MediaStream.
+static int mediaReadWhole(const char* path, uint8_t* buf, uint32_t cap){
+  if(!path || !buf) return -1;
+  if(mediaIsSd(path)) return flexSdReadBin(path, buf, cap);
+  return flexFsReadBin(path, buf, cap);
+}
+
+static uint32_t mediaFileSize(const char* path){
+  if(mediaIsSd(path)) return (uint32_t)flexSdSize(path);
+  return flexFsSize(path);
+}
+
+// -------------------------------------------------------------
+//  RESERVA PARA MEDIOS
+//  ------------------------------------------------------------
+//  Todo lo grande va a PSRAM. Si no hay, se cae al heap interno,
+//  pero solo para lo pequeno: las funciones que piden cientos de KB
+//  comprueban el resultado y desactivan su funcion en vez de dejar
+//  la placa sin memoria.
+// -------------------------------------------------------------
+static void* mediaAlloc(size_t n){
+  void* p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  return p ? p : malloc(n);
+}
+static void mediaFree(void* p){ if(p) heap_caps_free(p); }
+
+// -------------------------------------------------------------
+//  INDICE DE MEDIOS
+//  ------------------------------------------------------------
+//  CAPACIDAD. 384 elementos a 120 bytes son ~46 KB de PSRAM. Es un
+//  tope real, no "infinito": una tarjeta con 5.000 fotos no cabe
+//  entera y la interfaz lo DICE (ixFull), en vez de ensenar 384 y
+//  callar que hay mas.
+//
+//  CUANDO SE CONSTRUYE. Nunca al arrancar (nadie ha pedido ver la
+//  galeria todavia) sino al abrir Galeria, Multimedia o
+//  Almacenamiento, y al cambiar la tarjeta. Se avanza en el tick
+//  del bucle principal con un presupuesto pequeno.
+// -------------------------------------------------------------
+#define MEDIA_INDEX_CAP    384
+#define MEDIA_STEP_BUDGET   12     // entradas de directorio por vuelta de loop()
+
+static FlexMediaIndex  gMedIx;
+static FlexMediaItem*  gMedStore   = NULL;
+static bool            gMedInited  = false;
+static uint32_t        gMedScanGen = 0;      // generacion de SD del indice actual
+static bool            gMedNotifyDone = false;
+
+// ---- Puente de volumen para el indexador ----
+// Traduce FlexFsEntry -> FlexMediaDirent. El indexador nunca ve las
+// estructuras del sistema de archivos.
+static int medListInt(void* ctx, const char* dir, FlexMediaDirent* out, int maxn, int skip){
+  (void)ctx;
+  if(!flexFsReady()) return -1;
+  // LittleFS no tiene "saltar N" nativo, asi que se lee el
+  // directorio y se recorta. Las carpetas internas son pequenas
+  // (decenas de elementos), asi que el coste es irrelevante; en la
+  // tarjeta, donde SI puede haber miles, el salto es nativo.
+  FlexFsEntry e[24];
+  int n = flexFsList(dir, e, 24);
+  if(n < 0) return -1;
+  int w = 0;
+  for(int i = skip; i < n && w < maxn; i++, w++){
+    snprintf(out[w].name, FLEXMED_NAME_MAX, "%s", e[i].name);
+    out[w].size = e[i].size;
+    out[w].dir  = e[i].dir;
+  }
+  return w;
+}
+static bool medAliveInt(void* ctx){ (void)ctx; return flexFsReady(); }
+
+static int medListSd(void* ctx, const char* dir, FlexMediaDirent* out, int maxn, int skip){
+  (void)ctx;
+  if(!flexSdReady()) return -1;
+  FlexFsEntry e[FLEXMED_ROOTS_MAX > 8 ? 8 : 8];
+  int want = maxn < 8 ? maxn : 8;
+  int n = flexSdListFrom(dir, e, want, skip);
+  if(n < 0) return -1;
+  for(int i = 0; i < n; i++){
+    snprintf(out[i].name, FLEXMED_NAME_MAX, "%s", e[i].name);
+    out[i].size = e[i].size;
+    out[i].dir  = e[i].dir;
+  }
+  return n;
+}
+static bool medAliveSd(void* ctx){ (void)ctx; return flexSdReady(); }
+
+// Carpetas que se recorren. Las de Flex OS van primero para que lo
+// propio aparezca antes; despues las carpetas de siempre de una
+// tarjeta, que se INDEXAN pero no se tocan: ni se crean, ni se
+// mueven ficheros, ni se escribe nada dentro.
+static void mediaIndexSetRoots(){
+  gMedIx.rootN = 0;
+  flexMediaIndexAddRoot(&gMedIx, FLEXFS_DIR_DOCS,   FLEXMED_VOL_INT);
+  flexMediaIndexAddRoot(&gMedIx, FLEXFS_DIR_PAINT,  FLEXMED_VOL_INT);
+  if(flexSdReady()){
+    flexMediaIndexAddRoot(&gMedIx, FLEXSD_DIR_PHOTOS, FLEXMED_VOL_SD);
+    flexMediaIndexAddRoot(&gMedIx, FLEXSD_DIR_VIDEOS, FLEXMED_VOL_SD);
+    flexMediaIndexAddRoot(&gMedIx, FLEXSD_DIR_AUDIO,  FLEXMED_VOL_SD);
+    flexMediaIndexAddRoot(&gMedIx, "/sdcard/DCIM",     FLEXMED_VOL_SD);
+    flexMediaIndexAddRoot(&gMedIx, "/sdcard/Download", FLEXMED_VOL_SD);
+    flexMediaIndexAddRoot(&gMedIx, "/sdcard/Pictures", FLEXMED_VOL_SD);
+    flexMediaIndexAddRoot(&gMedIx, "/sdcard/Movies",   FLEXMED_VOL_SD);
+    flexMediaIndexAddRoot(&gMedIx, "/sdcard/Music",    FLEXMED_VOL_SD);
   }
 }
-static void vidBlit(){                 // vuelca el buffer FRONT al area de render
-  const int cx0 = 0, cx1 = SCR_W - 1;
-  const int cy0 = 0, cy1 = SCR_H - 1;
-  int drawn0 = SCR_H, drawn1 = -1;
-  for(int y = 0; y < VID_H; y++){
-    const int dy = VID_RY + y;
-    if(dy < cy0 || dy > cy1) continue;
-    const uint16_t* srcRow = vidFront + (size_t)y * VID_W;
-    int x0 = VID_RX, x1 = x0 + VID_W - 1;
-    if(x0 < cx0){ srcRow += (size_t)(cx0 - x0); x0 = cx0; }   // recorta por la izquierda (avanza el origen)
-    if(x1 > cx1) x1 = cx1;                                     // recorta por la derecha
-    if(x0 > x1) continue;
-    memcpy(fb + (size_t)dy * SCR_W + x0, srcRow, (size_t)(x1 - x0 + 1) * 2);
-    if(dy < drawn0) drawn0 = dy;
-    if(dy > drawn1) drawn1 = dy;
+
+static bool mediaIndexBegin(){
+  if(!gMedInited){
+    gMedStore = (FlexMediaItem*)mediaAlloc(sizeof(FlexMediaItem) * MEDIA_INDEX_CAP);
+    if(!gMedStore){
+      // Sin memoria para el indice no se finge una galeria vacia: se
+      // deja el indice a capacidad 0 y las pantallas lo dicen.
+      flexMediaIndexInit(&gMedIx, NULL, 0);
+      gMedInited = true;
+      return false;
+    }
+    flexMediaIndexInit(&gMedIx, gMedStore, MEDIA_INDEX_CAP);
+    gMedInited = true;
   }
-  if(drawn1 >= drawn0) flxFlush(drawn0, drawn1);              // solo lo realmente escrito
+  gMedIx.volInt.list = medListInt; gMedIx.volInt.alive = medAliveInt; gMedIx.volInt.ctx = NULL;
+  gMedIx.volSd.list  = medListSd;  gMedIx.volSd.alive  = medAliveSd;  gMedIx.volSd.ctx  = NULL;
+  return gMedStore != NULL;
 }
-static void vidDrawSeek(){
-  int sbx = 24, sby = 434, sbw = SCR_W - 48;
-  setBuf(fb);
-  fillRoundRect(sbx, sby, sbw, 8, 4, TH_TRACK);
-  fillRoundRect(sbx, sby, sbw * vidFrame / VID_TOTAL, 8, 4, TH_PRIM);
-  fillCircle(sbx + sbw * vidFrame / VID_TOTAL, sby + 4, 10, TH_TXT);
-  char tc[24]; snprintf(tc, sizeof(tc), "%d / %d", vidFrame, VID_TOTAL);
-  fillRect(sbx, sby + 18, 160, 20, TH_PAGE);
-  drawText(sbx, sby + 18, tc, 2, TH_TXT2);
-  flxFlush(sby - 12, sby + 40);
+
+// Relanza el recorrido desde cero. Se llama al abrir una app de
+// medios si la tarjeta cambio, y al cambiar la tarjeta.
+static void mediaIndexRescan(){
+  if(!mediaIndexBegin()) return;
+  mediaIndexSetRoots();
+  gMedScanGen    = flexSdGeneration();
+  gMedNotifyDone = false;
+  flexMediaIndexStart(&gMedIx, gMedScanGen);
 }
-static void vidDrawControls(){
-  setBuf(fb);
-  int pcx = SCR_W / 2, pcy = 366;
-  fillCircle(pcx, pcy, 30, TH_PRIM);                      // play/pausa
-  if(vidPlaying){ fillRect(pcx - 9, pcy - 12, 6, 24, TH_ONACC); fillRect(pcx + 3, pcy - 12, 6, 24, TH_ONACC); }
-  else fillTriangle(pcx - 8, pcy - 12, pcx - 8, pcy + 12, pcx + 12, pcy, TH_ONACC);
-  int scx = pcx + 92;
-  fillCircle(scx, pcy, 22, thCard2());                    // stop
-  fillRect(scx - 8, pcy - 8, 16, 16, TH_DANGER);
-  flxFlush(pcy - 34, pcy + 34);
+
+// ¿Hace falta reindexar? Solo si nunca se hizo o si la tarjeta que
+// hay ahora no es la que se indexo.
+static void mediaIndexEnsure(){
+  if(!gMedInited || gMedScanGen != flexSdGeneration()
+     || gMedIx.state == FLEXMED_SCAN_IDLE)
+    mediaIndexRescan();
 }
-static void vidRenderAll(){
+
+static inline bool mediaIndexBusy(){ return gMedIx.state == FLEXMED_SCAN_RUNNING; }
+
+// Progreso REAL para la barra: entradas ya miradas. No se puede dar
+// un porcentaje honesto (no se sabe cuantas hay hasta terminar), asi
+// que se ensena el contador y no una barra que miente.
+static inline uint32_t mediaIndexSeen(){ return gMedIx.seen; }
+static inline int      mediaIndexN(){ return (int)gMedIx.n; }
+
+// Un paso del recorrido. Lo llama loop(). No hace NADA si no hay un
+// recorrido en curso, asi que el coste en reposo es una comparacion.
+static void mediaIndexTick(){
+  if(gMedIx.state != FLEXMED_SCAN_RUNNING) return;
+  flexMediaIndexStep(&gMedIx, MEDIA_STEP_BUDGET);
+  if(gMedIx.state == FLEXMED_SCAN_DONE && !gMedNotifyDone){
+    gMedNotifyDone = true;
+    // Solo se avisa si de verdad hay algo que contar y si la tarjeta
+    // participo: un indice de dos dibujos internos no merece un aviso.
+    int nsd = flexMediaIndexCount(&gMedIx, 0, FLEXMED_VOL_SD);
+    if(nsd > 0){
+      char sub[40];
+      snprintf(sub, sizeof(sub), "%d en la tarjeta, %d en total",
+               nsd, (int)gMedIx.n);
+      mediaNotify(MOD_SDCARD, "Galer" "\xC3\xAD" "a actualizada", sub);
+    }
+  }
+}
+
+// -------------------------------------------------------------
+//  TICK DE ALMACENAMIENTO EXTRAIBLE
+//  ------------------------------------------------------------
+//  Lo llama loop() en cada vuelta. Su coste en reposo es una
+//  comparacion de millis() dentro de flexSdTick(): no lee la tarjeta
+//  continuamente ni recorre nada.
+//
+//  Cuando el estado CAMBIA hace las tres cosas que hay que hacer y
+//  no una mas: avisar por la isla, invalidar lo que ya no vale y
+//  volver a indexar. Que este en un solo sitio es lo que garantiza
+//  que meter o sacar la tarjeta se comporte igual venga de donde
+//  venga -- Galeria, Multimedia, Almacenamiento o el escritorio.
+// -------------------------------------------------------------
+static void mediaStorageTick(){
+  if(flexSdTick()){
+    if(flexSdReady()){
+      char sub[40];
+      char tot[24];
+      flexFsFmtSize((uint32_t)(flexSdTotalBytes() / 1048576ull), tot, sizeof(tot));
+      snprintf(sub, sizeof(sub), "%s · %s", flexSdCardTypeName(), flexSdFsName());
+      mediaNotify(MOD_SDCARD, "Tarjeta SD lista", sub);
+      mediaIndexRescan();                 // hay contenido nuevo que mirar
+    } else {
+      // La tarjeta se fue: lo suyo deja de existir en el indice al
+      // instante. No se espera a que alguien abra la Galeria y se
+      // encuentre con rutas que ya no llevan a ningun sitio.
+      flexMediaIndexDropSd(&gMedIx);
+      const char* why = flexSdError();
+      mediaNotify(MOD_SDCARD, "Tarjeta SD retirada", why);
+    }
+  }
+  mediaIndexTick();
+}
+
+// -------------------------------------------------------------
+//  ORIENTACION
+//  ------------------------------------------------------------
+//  Tres modos, tal cual los pide el sistema: Auto, Vertical y
+//  Horizontal. Lo importante es que NO hay un segundo motor de
+//  rotacion: se usa el mismo gLand + putPhys que Modo PC y Juegos,
+//  con el MISMO mapeo de tactil (lx = T.y, ly = SCR_W-1-T.x). Un
+//  segundo motor seria la forma segura de acabar viendo la imagen
+//  girada y el dedo respondiendo en vertical.
+//
+//  El modo manual se aplica al archivo ACTUAL y vuelve a Auto al
+//  abrir otro, que es lo que se pidio: girar una foto concreta no
+//  debe cambiar como se abren las siguientes.
+// -------------------------------------------------------------
+static uint8_t gMediaOriMode = MORI_AUTO;   // eleccion del usuario para el archivo actual
+static bool    gMediaSquareLand = false;    // ultima orientacion usada con un archivo cuadrado
+
+// Orientacion EFECTIVA de un medio de w x h. Devuelve true = horizontal.
+static bool mediaOriLandscape(int w, int h){
+  if(gMediaOriMode == MORI_PORT) return false;
+  if(gMediaOriMode == MORI_LAND) return true;
+  if(w <= 0 || h <= 0) return false;            // sin dimensiones: vertical
+  if(w > h) return true;
+  if(h > w) return false;
+  return gMediaSquareLand;                      // cuadrado: la ultima de la sesion
+}
+
+// Coordenadas logicas del lienzo segun la orientacion en curso.
+static inline int mediaCanvasW(bool land){ return land ? LW : SCR_W; }
+static inline int mediaCanvasH(bool land){ return land ? LH : SCR_H; }
+
+// Toque en coordenadas del lienzo logico. UN solo sitio hace la
+// conversion: si el tactil y el dibujo se desalinean, es aqui y en
+// ningun otro lado.
+static inline void mediaTouchXY(bool land, int &x, int &y){
+  if(land){ x = T.y; y = (SCR_W - 1) - T.x; }
+  else    { x = T.x; y = T.y; }
+}
+
+// Ajuste PROPORCIONAL de un contenido de sw x sh dentro de una caja.
+// Nunca deforma: sobra caja por un lado, no se estira la imagen.
+static void mediaFitBox(int sw, int sh, int bw, int bh, int &ow, int &oh){
+  if(sw <= 0 || sh <= 0 || bw <= 0 || bh <= 0){ ow = bw; oh = bh; return; }
+  // Se compara sw/sh contra bw/bh con productos cruzados: sin coma
+  // flotante y sin perder precision con imagenes grandes.
+  if((int64_t)sw * bh > (int64_t)bw * sh){ ow = bw; oh = (int)((int64_t)sh * bw / sw); }
+  else                                   { oh = bh; ow = (int)((int64_t)sw * bh / sh); }
+  if(ow < 1) ow = 1;
+  if(oh < 1) oh = 1;
+}
+
+// #############################################################
+// ##  APP MULTIMEDIA  ·  REPRODUCTOR REAL DE ARCHIVOS LOCALES
+// ##  ------------------------------------------------------
+// ##  QUE REPRODUCE DE VERDAD
+// ##    · JPEG baseline (memoria interna y tarjeta).
+// ##    · Video AVI con pista MJPEG: cada fotograma es un JPEG
+// ##      completo y pasa por FlexOS_JPEG, que ya esta probado
+// ##      contra libjpeg-turbo. No hay prediccion entre cuadros,
+// ##      asi que se puede empezar a ver en cualquier punto y
+// ##      SALTAR fotogramas sin que la imagen se rompa -- que es
+// ##      justo lo que permite ir tarde sin congelar el sistema.
+// ##    · WAV PCM, solo si el codec de audio responde de verdad
+// ##      (ver FlexOS_Audio); si no, se dice por que no y no se
+// ##      pinta ningun control de sonido.
+// ##
+// ##  QUE NO, Y POR QUE. MP4/H.264 no se anuncia ni se intenta:
+// ##  esta placa no tiene decodificador de video por hardware y en
+// ##  software no da el ritmo. Un archivo asi se abre y se explica,
+// ##  no se reproduce a medias.
+// ##
+// ##  MEMORIA. No existe el fichero entero en RAM en ningun
+// ##  momento. Se mantiene:
+// ##    · un descriptor abierto sobre la tarjeta,
+// ##    · UN buffer para el fotograma comprimido (VID_FRAME_CAP),
+// ##    · y nada mas: el JPEG se decodifica DIRECTAMENTE sobre el
+// ##      framebuffer, fila a fila. Por eso no hay doble buffer de
+// ##      video (el esqueleto anterior gastaba 2 x 220 KB de PSRAM
+// ##      en un patron sintetico).
+// ##
+// ##  RITMO. Ni un delay(). El siguiente fotograma se decide
+// ##  comparando micros() contra el instante teorico; si se va
+// ##  tarde se SALTAN fotogramas leyendo solo sus cabeceras (8
+// ##  bytes), con un tope por vuelta para que la interfaz no se
+// ##  quede sin turno.
+// #############################################################
+
+// ---- Presupuestos, todos acotados y con motivo ----
+// Un fotograma MJPEG de 640x480 con calidad normal ronda los 40 KB;
+// 192 KB deja sitio de sobra para 720p y para picos de calidad, y
+// es lo unico grande que reserva el reproductor.
+#define VID_FRAME_CAP     (192 * 1024)
+// Fotogramas que se pueden saltar SEGUIDOS para recuperar ritmo.
+// Con un tope, ir tarde se nota como un video que salta; sin el, un
+// archivo mas pesado que la placa dejaria la interfaz sin turno.
+#define VID_MAX_CATCHUP   4
+// Filas de imagen que se acumulan antes de volcarlas giradas. Ver
+// vidLandFlush: convierte 800 escrituras sueltas por fila en tiras
+// contiguas de 8 pixeles.
+#define VIDT_ROWS         8
+#define VID_CTRL_HIDE_MS  3500       // los controles se ocultan solos
+#define VID_SEEK_STEP_MS  10000      // adelantar/retroceder 10 s
+
+// Pantallas de la app.
+#define VS_LIST   0
+#define VS_VIEW   1
+
+// Clase de lo que hay abierto en el visor.
+#define VK_NONE   0
+#define VK_PHOTO  1
+#define VK_VIDEO  2
+#define VK_AUDIO  3
+#define VK_ERROR  4
+
+// ---- Estado de la lista ----
+static int   vidScreen   = VS_LIST;
+static int   vidFilter   = 0;          // 0 todo reproducible, 1 videos, 2 fotos, 3 audio
+static int   vidListSel  = -1;
+static int   vidListScroll = 0;
+static int   vidListDragY0 = 0, vidListDragS0 = 0;
+static bool  vidListDragging = false;
+
+// ---- Estado del visor ----
+static char       vidPath[FLEXMED_PATH_MAX] = "";
+static char       vidName[FLEXFS_NAME_MAX]  = "";
+static uint8_t    vidKind      = VK_NONE;
+static char       vidErrMsg[72] = "";
+static bool       vidLand      = false;     // orientacion EFECTIVA en curso
+static MediaStream vidStream;
+static FlexAviCtx  vidAvi;
+static uint8_t*   vidFrameBuf  = NULL;
+static uint16_t*  vidTile      = NULL;      // tira para el volcado girado
+static bool       vidPlaying   = false;
+static bool       vidEnded     = false;
+static uint32_t   vidCurFrame  = 0;
+static unsigned long vidNextUs = 0;
+static unsigned long vidCtrlMs = 0;         // instante del ultimo toque
+static bool       vidCtrlOn    = true;
+static int        vidIdxInList = -1;        // posicion dentro de la lista actual
+static FlexWavInfo vidWav;                  // solo si vidKind == VK_AUDIO
+static uint32_t   vidAudioPos = 0;          // desplazamiento del proximo bloque PCM
+static bool       vidPanning   = false;     // arrastrando una foto ampliada
+
+// GEOMETRIA DEL CONTENIDO, en coordenadas del lienzo LOGICO.
+//   vidSrcW/H : tamano real del medio (para decidir orientacion y proporcion)
+//   vidBox*   : el hueco en pantalla donde entra AJUSTADO sin deformar
+//   vidDW/DH  : tamano al que se pide la decodificacion = caja * zoom
+//   vidPan*   : que trozo de esa imagen ampliada se esta viendo
+// Con zoom 1 y sin desplazamiento, vidD* == vidBox* y el camino es el
+// mismo de siempre: el zoom no anade ningun coste cuando no se usa.
+static int vidSrcW = 0, vidSrcH = 0;
+static int vidBoxX = 0, vidBoxY = 0, vidBoxW = 0, vidBoxH = 0;
+static int vidDW = 0, vidDH = 0;
+static int vidPanX = 0, vidPanY = 0;
+static int vidZoom = 1;                    // 1..VID_ZOOM_MAX
+#define VID_ZOOM_MAX 4
+
+// ---- Medicion REAL de rendimiento ----
+// No se anuncia ningun numero que no salga de aqui. Se acumula por
+// ventanas de un segundo y solo se imprime cuando hay algo que
+// contar, para no llenar Serial ni pagar el coste de imprimir en
+// cada cuadro.
+static uint32_t vidStatFrames = 0, vidStatSkipped = 0, vidStatErrors = 0;
+static unsigned long vidStatMs = 0;
+static uint16_t vidFpsReal = 0;             // ultimo valor medido (x10)
+static uint32_t vidDecodeUs = 0;            // coste del ultimo fotograma
+
+// Declaraciones adelantadas. El reproductor es un grafo de estados
+// con ciclos naturales (buscar repinta, repintar puede fallar y
+// volver a la lista), asi que unas cuantas funciones se llaman entre
+// si en los dos sentidos.
+static void vidRenderAll();
+static void vidListRender();
+static void vidRenderViewer();
+static void vidDrawControls(bool publish);
+static void vidDrawCurrentFrame(bool publish);
+static void vidCycleOrientation();
+static void vidOpenNeighbour(int delta);
+static void vidSyncListIndex();
+static void vidSeekToMs(uint32_t ms);
+static bool vidOpenPath(const char* path);
+static void vidReleaseMedia(bool keepPosition);
+static void vidFail(const char* why);
+static void vidLayout(int srcW, int srcH);
+static void vidClampPan();
+
+// -------------------------------------------------------------
+//  Reanudacion por archivo
+//  ------------------------------------------------------------
+//  Se guarda el fotograma por el que iba cada archivo, identificado
+//  por una huella de su ruta. Una tabla corta y fija: recordar los
+//  ocho ultimos es lo util, y no crece sin control.
+// -------------------------------------------------------------
+#define VID_RESUME_N 8
+// (el nombre lleva 'Tab' porque vidResume() ya es el gancho de
+//  ciclo de vida de la app: dos cosas distintas, dos nombres)
+struct VidResumeSlot { uint32_t key; uint32_t frame; uint32_t whenMs; };
+static VidResumeSlot vidResumeTab[VID_RESUME_N];
+
+static uint32_t vidKeyOf(const char* path){
+  uint32_t h = 2166136261u;
+  for(const char* p = path; p && *p; p++) h = (h ^ (uint8_t)*p) * 16777619u;
+  return h ? h : 1u;
+}
+static uint32_t vidResumeGet(const char* path){
+  uint32_t k = vidKeyOf(path);
+  for(int i = 0; i < VID_RESUME_N; i++) if(vidResumeTab[i].key == k) return vidResumeTab[i].frame;
+  return 0;
+}
+static void vidResumeSet(const char* path, uint32_t frame){
+  uint32_t k = vidKeyOf(path);
+  int slot = -1;
+  for(int i = 0; i < VID_RESUME_N; i++) if(vidResumeTab[i].key == k){ slot = i; break; }
+  if(slot < 0){                                  // el hueco mas viejo cede su sitio
+    slot = 0;
+    for(int i = 1; i < VID_RESUME_N; i++)
+      if(vidResumeTab[i].key == 0 || vidResumeTab[i].whenMs < vidResumeTab[slot].whenMs) slot = i;
+  }
+  vidResumeTab[slot].key    = k;
+  vidResumeTab[slot].frame  = frame;
+  vidResumeTab[slot].whenMs = millis();
+}
+
+// -------------------------------------------------------------
+//  LIBERACION
+//  ------------------------------------------------------------
+//  UN solo sitio suelta TODO lo del visor. Lo llaman: cerrar el
+//  archivo, volver a la lista, cambiar de video, suspender, cerrar
+//  la app y la retirada de la tarjeta. Tener un unico camino es lo
+//  que hace que no quede un descriptor abierto sobre una tarjeta
+//  que ya no esta.
+// -------------------------------------------------------------
+static void vidReleaseMedia(bool keepPosition){
+  if(vidKind == VK_VIDEO && keepPosition && vidPath[0] && !vidEnded)
+    vidResumeSet(vidPath, vidCurFrame);
+  vidPlaying = false;
+  flexAudioStop();
+  mediaStreamClose(&vidStream);
+  memset(&vidAvi, 0, sizeof(vidAvi));
+  if(vidFrameBuf){ mediaFree(vidFrameBuf); vidFrameBuf = NULL; }
+  if(vidTile){ heap_caps_free(vidTile); vidTile = NULL; }
+  flexSdBusySet(false);
+  vidKind    = VK_NONE;
+  vidEnded   = false;
+  vidCurFrame = 0;
+}
+
+// -------------------------------------------------------------
+//  MAQUETACION DEL LIENZO
+// -------------------------------------------------------------
+static void vidClampPan(){
+  int mx = vidDW - vidBoxW, my = vidDH - vidBoxH;
+  if(mx < 0) mx = 0;
+  if(my < 0) my = 0;
+  if(vidPanX < 0) vidPanX = 0;
+  if(vidPanY < 0) vidPanY = 0;
+  if(vidPanX > mx) vidPanX = mx;
+  if(vidPanY > my) vidPanY = my;
+}
+
+static void vidLayout(int srcW, int srcH){
+  vidSrcW = srcW; vidSrcH = srcH;
+  int cw = mediaCanvasW(vidLand), ch = mediaCanvasH(vidLand);
+  mediaFitBox(srcW, srcH, cw, ch, vidBoxW, vidBoxH);
+  vidBoxX = (cw - vidBoxW) / 2;
+  vidBoxY = (ch - vidBoxH) / 2;
+  if(vidZoom < 1) vidZoom = 1;
+  if(vidZoom > VID_ZOOM_MAX) vidZoom = VID_ZOOM_MAX;
+  vidDW = vidBoxW * vidZoom;
+  vidDH = vidBoxH * vidZoom;
+  vidClampPan();
+}
+
+// -------------------------------------------------------------
+//  VOLCADO DEL FOTOGRAMA
+//  ------------------------------------------------------------
+//  Dos caminos, y ninguno pasa por un buffer intermedio del tamano
+//  de la imagen:
+//
+//  VERTICAL. La fila de la imagen es una fila del framebuffer: un
+//  memcpy y ya esta.
+//
+//  HORIZONTAL. El panel es fisicamente vertical, asi que una fila
+//  logica cae en una COLUMNA de memoria. Escribir pixel a pixel
+//  serian ~384.000 escrituras sueltas por cuadro, cada una en una
+//  linea de cache distinta (el mismo problema que ya documenta el
+//  compositor de Modo PC). En vez de eso se acumulan VIDT_ROWS
+//  filas en una tira y se vuelcan juntas: cada escritura pasa a ser
+//  una tira CONTIGUA de 8 pixeles, y el numero de accesos
+//  dispersos baja en la misma proporcion.
+//  Si no hay RAM interna para la tira se usa el camino directo
+//  pixel a pixel: mas lento, pero correcto. No se desactiva la
+//  funcion por no tener la optimizacion.
+// -------------------------------------------------------------
+static int vidTileBase = 0, vidTileRows = 0, vidTileW = 0;
+
+// La tira guarda VIDT_ROWS filas ya RECORTADAS a la caja visible:
+// vidTileLX0 es su primera columna logica y vidTileW su anchura.
+static int vidTileLX0 = 0;
+
+static void vidLandFlushTile(){
+  if(!vidTile || vidTileRows <= 0) return;
+  for(int i = 0; i < vidTileW; i++){
+    const int lx = vidTileLX0 + i;                     // columna logica
+    const int phyY = lx;                               // en horizontal, lx ES la fila fisica
+    if((unsigned)phyY >= (unsigned)SCR_H) continue;
+    // ly crece -> x fisica decrece: la tira se escribe al reves.
+    const int lyTop = vidTileBase + vidTileRows - 1;
+    const int xStart = (SCR_W - 1) - lyTop;
+    if(xStart < 0 || xStart >= SCR_W) continue;
+    uint16_t* dst = fb + (size_t)phyY * SCR_W + xStart;
+    int k = 0, kmax = vidTileRows;
+    if(xStart + kmax > SCR_W) kmax = SCR_W - xStart;
+    for(; k < kmax; k++)
+      dst[k] = vidTile[(size_t)(vidTileRows - 1 - k) * (size_t)LW + i];
+  }
+  vidTileRows = 0;
+}
+
+// Escribe UNA fila ya decodificada en el lienzo, aplicando el
+// desplazamiento del zoom y recortando a la caja visible. Es el
+// unico sitio donde se decide donde cae cada pixel, en vertical y en
+// horizontal: por eso la imagen y el tacto no pueden discrepar.
+static bool vidJpegRow(void* user, int y, int w, const uint16_t* rgb){
+  (void)user;
+  // Fila logica de destino dentro del lienzo.
+  const int ly = vidBoxY + y - vidPanY;
+  if(ly >= vidBoxY + vidBoxH) return false;     // por debajo de la caja: se acabo
+  if(ly < vidBoxY) return true;                 // por encima: aun no entra
+
+  // Recorte horizontal a la caja.
+  int src0 = 0, lx0 = vidBoxX - vidPanX, n = w;
+  if(lx0 < vidBoxX){ src0 = vidBoxX - lx0; n -= src0; lx0 = vidBoxX; }
+  if(n > vidBoxW - (lx0 - vidBoxX)) n = vidBoxW - (lx0 - vidBoxX);
+  if(n <= 0) return true;
+  const uint16_t* src = rgb + src0;
+
+  if(!vidLand){
+    if((unsigned)ly >= (unsigned)SCR_H) return true;
+    int dx = lx0;
+    if(dx < 0){ src -= dx; n += dx; dx = 0; }
+    if(dx + n > SCR_W) n = SCR_W - dx;
+    if(n > 0) memcpy(fb + (size_t)ly * SCR_W + dx, src, (size_t)n * 2);
+    return true;
+  }
+
+  if(vidTile){
+    // Si cambia el tramo horizontal (no deberia dentro de una imagen)
+    // se vuelca lo acumulado antes de empezar otro.
+    if(vidTileRows > 0 && (lx0 != vidTileLX0 || n != vidTileW)) vidLandFlushTile();
+    if(vidTileRows == 0){ vidTileBase = ly; vidTileLX0 = lx0; vidTileW = n; }
+    if(n > LW) n = LW;
+    memcpy(vidTile + (size_t)vidTileRows * (size_t)LW, src, (size_t)n * 2);
+    vidTileRows++;
+    if(vidTileRows >= VIDT_ROWS) vidLandFlushTile();
+    return true;
+  }
+  // Camino de respaldo sin tira: correcto, solo mas lento.
+  for(int i = 0; i < n; i++){
+    int phyY = lx0 + i, phyX = (SCR_W - 1) - ly;
+    if((unsigned)phyY < (unsigned)SCR_H && (unsigned)phyX < (unsigned)SCR_W)
+      fb[(size_t)phyY * SCR_W + phyX] = src[i];
+  }
+  return true;
+}
+
+// Banda FISICA que ocupa el contenido, para volcar solo eso.
+// En horizontal la "banda" es el tramo de X logica, que es
+// justamente el rango de filas fisicas (misma regla que Modo PC).
+static void vidFrameBand(int &b0, int &b1){
+  if(vidLand){ b0 = vidBoxX; b1 = vidBoxX + vidBoxW - 1; }
+  else       { b0 = vidBoxY; b1 = vidBoxY + vidBoxH - 1; }
+  if(b0 < 0) b0 = 0;
+  if(b1 > SCR_H - 1) b1 = SCR_H - 1;
+}
+
+// Decodifica `len` bytes de JPEG sobre el lienzo. Devuelve el codigo
+// de FlexOS_JPEG. NO vuelca: quien llama decide cuando publicar.
+static int vidDrawJpeg(const uint8_t* data, uint32_t len){
+  vidTileRows = 0;
+  unsigned long t0 = micros();
+  int r = flexJpegDecode(data, len, vidDW, vidDH, 0, NULL,
+                         vidJpegRow, NULL, mediaAlloc, mediaFree);
+  if(vidLand) vidLandFlushTile();               // lo que quedo en la tira
+  vidDecodeUs = (uint32_t)(micros() - t0);
+  return r;
+}
+
+// -------------------------------------------------------------
+//  APERTURA DE UN ARCHIVO
+// -------------------------------------------------------------
+static void vidFail(const char* why){
+  vidKind = VK_ERROR;
+  snprintf(vidErrMsg, sizeof(vidErrMsg), "%s", why ? why : "No se pudo abrir");
+  vidReleaseMedia(false);
+  vidKind = VK_ERROR;                            // vidReleaseMedia lo puso a NONE
+}
+
+static bool vidOpenPath(const char* path){
+  vidReleaseMedia(true);
+  vidErrMsg[0] = 0;
+  vidEnded = false;
+  snprintf(vidPath, sizeof(vidPath), "%s", path ? path : "");
+  const char* nm = strrchr(vidPath, '/');
+  snprintf(vidName, sizeof(vidName), "%s", nm ? nm + 1 : vidPath);
+  // Cada archivo empieza en Auto y sin zoom: lo que se eligio para el
+  // anterior no debe arrastrarse al siguiente.
+  gMediaOriMode = MORI_AUTO;
+  vidZoom = 1; vidPanX = vidPanY = 0; vidPanning = false;
+
+  if(!mediaVolReady(vidPath)){
+    vidFail(mediaIsSd(vidPath) ? "La tarjeta ya no esta" : "Sin almacenamiento");
+    return false;
+  }
+  const int kind = flexMediaClassify(vidName);
+  if(kind == FLEXMED_UNSUP || kind == FLEXMED_NONE){
+    const char* why = flexMediaUnsupportedReason(vidName);
+    vidFail(why ? why : "Formato no compatible");
+    mediaNotify(MOD_MEDIA, "No se puede reproducir", vidErrMsg);
+    return false;
+  }
+
+  // ---------- FOTO ----------
+  if(kind == FLEXMED_PHOTO || kind == FLEXMED_DRAW){
+    vidKind = VK_PHOTO;
+    vidLand = false;
+    if(kind == FLEXMED_PHOTO){
+      // Se lee la CABECERA para conocer la forma real antes de
+      // decidir la orientacion; no se decide por el nombre ni se
+      // decodifica entera dos veces.
+      uint8_t head[512];
+      int rd = -1;
+      MediaStream s;
+      memset(&s, 0, sizeof(s));
+      if(mediaStreamOpen(&s, vidPath)){
+        s.pos = 0;
+        rd = mediaIoRead(&s, head, sizeof(head));
+        mediaStreamClose(&s);
+      }
+      FlexJpegInfo inf;
+      if(rd > 0 && flexJpegProbe(head, (size_t)rd, &inf) == FLEXJPG_OK){
+        vidLand = mediaOriLandscape(inf.width, inf.height);
+        vidLayout(inf.width, inf.height);
+      } else {
+        vidLayout(4, 3);
+      }
+    } else {
+      vidLayout(SCR_W, SCR_H);
+    }
+    return true;
+  }
+
+  // ---------- AUDIO ----------
+  if(kind == FLEXMED_AUDIO){
+    if(!mediaStreamOpen(&vidStream, vidPath)){ vidFail("No se pudo abrir el archivo"); return false; }
+    FlexMediaIO io; mediaBindIO(&io, &vidStream);
+    FlexWavInfo w;
+    int r = flexWavParse(&io, &w);
+    if(r != FLEXWAV_OK){
+      vidFail(r == FLEXWAV_ERR_CODEC ? "WAV comprimido: solo se admite PCM de 8 o 16 bits"
+                                     : "El archivo WAV esta danado");
+      return false;
+    }
+    if(!flexAudioAvailable()){
+      // No se pinta un reproductor de audio que no suena: se dice
+      // exactamente por que no hay sonido.
+      char msg[72];
+      snprintf(msg, sizeof(msg), "Sin salida de audio: %s", flexAudioError());
+      vidFail(msg);
+      return false;
+    }
+    vidKind = VK_AUDIO;
+    vidLand = false;
+    vidWav  = w;
+    vidAudioPos = w.dataStart;
+    return true;
+  }
+
+  // ---------- VIDEO ----------
+  if(!mediaStreamOpen(&vidStream, vidPath)){ vidFail("No se pudo abrir el archivo"); return false; }
+  FlexMediaIO io; mediaBindIO(&io, &vidStream);
+  int r = flexAviOpen(&vidAvi, &io);
+  if(r != FLEXAVI_OK){
+    vidFail(flexAviErrStr(r));
+    mediaNotify(MOD_MEDIA, "No se puede reproducir", vidErrMsg);
+    return false;
+  }
+  vidFrameBuf = (uint8_t*)mediaAlloc(VID_FRAME_CAP);
+  if(!vidFrameBuf){ vidFail("Sin memoria para el video"); return false; }
+  // La tira del volcado girado va en RAM INTERNA a proposito: se
+  // lee por columnas y en PSRAM ese patron es el mas lento posible.
+  // Si no hay, se sigue sin ella (camino de respaldo).
+  vidTile = (uint16_t*)heap_caps_malloc((size_t)LW * VIDT_ROWS * 2,
+                                        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  vidKind = VK_VIDEO;
+  vidLand = mediaOriLandscape(vidAvi.width, vidAvi.height);
+  vidLayout(vidAvi.width, vidAvi.height);
+
+  // Reanudar donde se dejo, si ese punto sigue teniendo sentido.
+  uint32_t res = vidResumeGet(vidPath);
+  vidCurFrame = 0;
+  if(res > 0 && vidAvi.frames > 0 && res < vidAvi.frames - 1){
+    int landed = flexAviSeekFrame(&vidAvi, res);
+    if(landed >= 0) vidCurFrame = (uint32_t)landed;
+  }
+  vidPlaying = false;                    // se abre en pausa, con el cuadro pintado
+  vidNextUs  = micros();
+  vidStatFrames = vidStatSkipped = vidStatErrors = 0;
+  vidStatMs = millis();
+  vidFpsReal = 0;
+  return true;
+}
+
+// -------------------------------------------------------------
+//  DIBUJO DEL VISOR
+// -------------------------------------------------------------
+static void vidDrawCurrentFrame(bool publish){
+  if(vidKind != VK_VIDEO || !vidFrameBuf) return;
+  uint32_t fn = 0;
+  int n = flexAviReadFrame(&vidAvi, vidFrameBuf, VID_FRAME_CAP, &fn);
+  if(n == FLEXAVI_ERR_EOF){ vidEnded = true; vidPlaying = false; return; }
+  if(n < 0){ vidStatErrors++; return; }
+  vidCurFrame = fn;
   setBuf(fb);
-  fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
-  strokeSegAA(30, 26, 18, 18, 2.4f, TH_NAV);              // back (esq. sup-izq)
-  strokeSegAA(18, 18, 30, 10, 2.4f, TH_NAV);
-  drawTextC(SCR_W / 2, 14, "Multimedia", 3, TH_TXT);
-  drawRoundRect(VID_RX - 2, VID_RY - 2, VID_W + 4, VID_H + 4, 6, TH_BORDER);
-  vidBlit();                                              // el VIDEO es contenido: no se retine
-  vidDrawControls();
-  vidDrawSeek();
-  drawTextC(SCR_W / 2, 476, "Fuente: patron de prueba (enchufa SD + MJPEG)", 1, TH_MUTE);
+  int r = vidDrawJpeg(vidFrameBuf, (uint32_t)n);
+  if(r != FLEXJPG_OK) vidStatErrors++;
+  else                vidStatFrames++;
+  if(publish){ int b0, b1; vidFrameBand(b0, b1); flxFlush(b0, b1); }
+}
+
+// Pinta una foto ajustada a la caja, SIN deformar (mediaFitBox
+// conserva la proporcion: sobra fondo por un lado, no se estira la
+// imagen). Se decodifica cuando cambia lo que se ve -- abrir, girar,
+// hacer zoom o desplazar --, no en cada vuelta del tick: mientras la
+// foto solo se esta mirando, aqui no entra nadie.
+//
+// El zoom no gasta memoria extra: se pide la decodificacion al
+// tamano ampliado y vidJpegRow recorta a la caja, asi que las filas
+// que no se ven no llegan a copiarse.
+static void vidDrawPhoto(){
+  setBuf(fb);
+  uint32_t sz = mediaFileSize(vidPath);
+  if(sz == 0){ vidFail("El archivo est\xC3\xA1 vac\xC3\xADo"); return; }
+  uint8_t* buf = (uint8_t*)mediaAlloc(sz);
+  if(!buf){ vidFail("La imagen no cabe en memoria"); return; }
+  int rd = mediaReadWhole(vidPath, buf, sz);
+  if(rd <= 0){ mediaFree(buf); vidFail("No se pudo leer la imagen"); return; }
+  FlexJpegInfo inf;
+  if(flexJpegProbe(buf, (size_t)rd, &inf) != FLEXJPG_OK){
+    mediaFree(buf); vidFail("No es un JPEG que se pueda abrir"); return;
+  }
+  vidLand = mediaOriLandscape(inf.width, inf.height);
+  if(inf.width == inf.height) gMediaSquareLand = vidLand;
+  vidLayout(inf.width, inf.height);
+  int r = vidDrawJpeg(buf, (uint32_t)rd);
+  mediaFree(buf);
+  if(r != FLEXJPG_OK && r != FLEXJPG_ERR_ABORTED)
+    vidFail(flexJpegErrStr(r));
+}
+
+// ---- Controles: se dibujan ENCIMA del contenido ----
+// Su geometria esta en coordenadas del lienzo logico, asi que gira
+// con la imagen: los botones, la barra y el tacto usan las MISMAS
+// coordenadas y no pueden quedar descolocados entre si.
+static void vidCtrlGeom(int &bx, int &by, int &bw, int &bh){
+  int cw = mediaCanvasW(vidLand), chh = mediaCanvasH(vidLand);
+  bw = cw - 32; bh = 118;
+  bx = 16;
+  // En vertical se respeta la franja de la barra de gestos del
+  // sistema; en horizontal esa barra no se dibuja (gLand la
+  // desactiva), asi que el panel puede bajar mas.
+  by = chh - bh - (vidLand ? 16 : navBarH() + 12);
+}
+
+// UNA sola fuente para donde estan los botones. Dibujo y hit-test
+// llaman a esta funcion, asi que no pueden descolocarse entre si --
+// que es exactamente el fallo que produce "se ve horizontal pero el
+// tacto responde en vertical".
+static void vidBtnGeom(VidBtns &b){
+  int bx, by, bw, bh; vidCtrlGeom(bx, by, bw, bh);
+  b.cx      = bx + bw / 2;
+  b.cy      = by + 78;
+  b.back10X = b.cx - 62;
+  b.fwd10X  = b.cx + 62;
+  b.prevX   = b.cx - 122;
+  b.nextX   = b.cx + 122;
+  b.oriW    = 74; b.oriH = 30;
+  b.oriX    = bx + bw - b.oriW - 12;
+  b.oriY    = by + 56;
+}
+static inline bool vidHit(int px, int py, int cx, int cy, int r){
+  return px >= cx - r && px <= cx + r && py >= cy - r && py <= cy + r;
+}
+static uint32_t vidPosMs(){
+  if(vidKind != VK_VIDEO || !vidAvi.usPerFrame) return 0;
+  return (uint32_t)(((uint64_t)vidCurFrame * vidAvi.usPerFrame) / 1000ull);
+}
+static void vidFmtTime(uint32_t ms, char* out, size_t n){
+  uint32_t s = ms / 1000u;
+  snprintf(out, n, "%u:%02u", (unsigned)(s / 60u), (unsigned)(s % 60u));
+}
+
+static void vidDrawControls(bool publish){
+  if(!vidCtrlOn) return;
+  int bx, by, bw, bh; vidCtrlGeom(bx, by, bw, bh);
+  setBuf(fb);
+  // Panel coherente con la personalizacion global: cristal en Liquid
+  // Glass, superficie solida en Plano. No se mezcla: dentro del modo
+  // Plano no aparece ni una tarjeta de cristal.
+  if(uiGlass) drawLiquidGlassPanel(bx, by, bw, bh, 18, TH_GLASS2);
+  else        fillRoundRect(bx, by, bw, bh, 18, TH_SURF2);
+
+  // ---- barra de progreso REAL ----
+  const int sx = bx + 20, sw = bw - 40, sy = by + 22;
+  uint32_t dur = (vidKind == VK_VIDEO) ? flexAviDurationMs(&vidAvi) : 0;
+  uint32_t pos = vidPosMs();
+  fillRoundRect(sx, sy, sw, 6, 3, TH_TRACK);
+  if(dur > 0){
+    int fw = (int)((uint64_t)sw * pos / dur);
+    if(fw < 0) fw = 0;
+    if(fw > sw) fw = sw;
+    fillRoundRect(sx, sy, fw, 6, 3, TH_PRIM);
+    fillCircle(sx + fw, sy + 3, 9, TH_TXT);
+  }
+  char t1[16], t2[16];
+  vidFmtTime(pos, t1, sizeof(t1));
+  if(dur > 0){ vidFmtTime(dur, t2, sizeof(t2)); }
+  else snprintf(t2, sizeof(t2), "--:--");
+  drawText (sx,      sy + 14, t1, 1, TH_TXT2);
+  drawTextR(sx + sw, sy + 14, t2, 1, TH_TXT2);
+
+  // ---- transporte ----
+  VidBtns b; vidBtnGeom(b);
+  fillCircle(b.cx, b.cy, 26, TH_PRIM);
+  if(vidPlaying){
+    fillRect(b.cx - 8, b.cy - 11, 5, 22, TH_ONACC);
+    fillRect(b.cx + 3, b.cy - 11, 5, 22, TH_ONACC);
+  } else {
+    fillTriangle(b.cx - 7, b.cy - 11, b.cx - 7, b.cy + 11, b.cx + 11, b.cy, TH_ONACC);
+  }
+  const bool seekable = (vidKind == VK_VIDEO);
+  // Adelantar/retroceder solo se pintan si de verdad se puede: no hay
+  // botones que no hagan nada.
+  if(seekable){
+    drawTextC(b.back10X, b.cy - 7, "<<10", 2, TH_TXT);
+    drawTextC(b.fwd10X,  b.cy - 7, "10>>", 2, TH_TXT);
+  }
+  drawTextC(b.prevX, b.cy - 7, "|<", 2, TH_TXT2);
+  drawTextC(b.nextX, b.cy - 7, ">|", 2, TH_TXT2);
+
+  // ---- orientacion (Auto / Vertical / Horizontal) ----
+  const char* om = (gMediaOriMode == MORI_AUTO) ? "Auto"
+                 : (gMediaOriMode == MORI_PORT) ? "Vertical" : "Horizontal";
+  if(uiGlass) drawLiquidGlassPanel(b.oriX, b.oriY, b.oriW, b.oriH, 15, TH_GLASS);
+  else        fillRoundRect(b.oriX, b.oriY, b.oriW, b.oriH, 15, TH_SURF);
+  drawTextC(b.oriX + b.oriW / 2, b.oriY + 9, om, 1, TH_ACCS);
+
+  // ---- rendimiento MEDIDO (solo video, y solo si ya hay medida) ----
+  if(vidKind == VK_VIDEO && vidFpsReal > 0){
+    char st[48];
+    snprintf(st, sizeof(st), "%u.%u fps  ·  %u saltados",
+             (unsigned)(vidFpsReal / 10), (unsigned)(vidFpsReal % 10),
+             (unsigned)vidStatSkipped);
+    drawText(bx + 20, by + 62, st, 1, TH_MUTE);
+  }
+  if(vidKind == VK_PHOTO && vidZoom > 1){
+    char zt[16]; snprintf(zt, sizeof(zt), "x%d", vidZoom);
+    drawText(bx + 20, by + 62, zt, 2, TH_ACCS);
+  }
+  if(publish) flxFlush(vidLand ? bx : by, vidLand ? bx + bw - 1 : by + bh - 1);
+}
+
+static void vidRenderViewer(){
+  setBuf(fb);
+  // Fondo negro: es el unico color honesto detras de una foto o un
+  // video, y ademas evita que se vea el escritorio por las bandas.
+  bool oldLand = gLand;
+  gLand = false;
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
+  fillRect(0, 0, SCR_W, SCR_H, rgb565(0, 0, 0));
+  gLand = oldLand;
+
+  gLand = vidLand;
+  if(vidLand){ gClipY0 = 0; gClipY1 = LW - 1; gClipX0 = 0; gClipX1 = LH - 1; }
+  else       { gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1; }
+
+  if(vidKind == VK_PHOTO)      vidDrawPhoto();
+  else if(vidKind == VK_VIDEO) vidDrawCurrentFrame(false);
+
+  if(vidKind == VK_ERROR || vidKind == VK_AUDIO || vidKind == VK_NONE){
+    int cw = mediaCanvasW(vidLand), chh = mediaCanvasH(vidLand);
+    if(vidKind == VK_ERROR){
+      drawTextC(cw / 2, chh / 2 - 40, "No se puede abrir", 3, TH_ERR);
+      drawTextC(cw / 2, chh / 2, vidName, 2, TH_TXT2);
+      drawTextC(cw / 2, chh / 2 + 30, vidErrMsg, 1, TH_MUTE);
+    } else if(vidKind == VK_AUDIO){
+      fillCircle(cw / 2, chh / 2 - 30, 46, TH_SURF2);
+      drawTextC(cw / 2, chh / 2 - 40, "WAV", 3, TH_TXT);
+      drawTextC(cw / 2, chh / 2 + 34, vidName, 2, TH_TXT2);
+    }
+  }
+  // Titulo discreto arriba (no tapa la imagen: va sobre el fondo).
+  drawTextC(mediaCanvasW(vidLand) / 2, 10, vidName, 1, TH_MUTE);
+  // Flecha de volver, en el lienzo logico -> gira con todo lo demas.
+  strokeSegAA(30, 26, 18, 18, 2.4f, TH_TXT2);
+  strokeSegAA(18, 18, 30, 10, 2.4f, TH_TXT2);
+
+  vidCtrlOn = true; vidCtrlMs = millis();
+  vidDrawControls(false);
+
+  gLand = false;
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
   flxFlushAll();
 }
-static void vidEnter(){
-  if(!vidBufA){                       // doble buffer en PSRAM (una sola vez)
-    size_t bytes = (size_t)VID_W * VID_H * 2;
-    vidBufA = (uint16_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    vidBufB = (uint16_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+// -------------------------------------------------------------
+//  PANTALLA DE LISTA
+//  ------------------------------------------------------------
+//  Sale del MISMO indice que la Galeria. No hay un segundo
+//  recorrido de carpetas: si la Galeria ve un archivo, Multimedia
+//  lo ve, y al reves.
+// -------------------------------------------------------------
+#define VID_ROW_H 64
+static const char* VID_TABS[4] = { "Todo", "V\xC3\xAD" "deos", "Fotos", "Audio" };
+static int vidFilterKind(){
+  switch(vidFilter){
+    case 1:  return FLEXMED_VIDEO;
+    case 2:  return FLEXMED_PHOTO;
+    case 3:  return FLEXMED_AUDIO;
+    default: return 0;
   }
-  vidFront = vidBufA; vidBack = vidBufB;
-  vidPlaying = false; vidFrame = 0; vidLastMs = millis();
-  appLoadSessionOnce(IC_MULTIMEDIA);       // vuelve al fotograma donde se dejo
-  if(vidFront) vidDecodeFrame(vidFront, vidFrame);
-  vidRenderAll();
 }
-static void vidTick(){
-  // Reproduccion no-bloqueante: un frame exacto cada VID_FPS_MS
-  if(vidPlaying && vidFront && (millis() - vidLastMs) >= VID_FPS_MS){
-    vidLastMs = millis();
-    vidFrame++; if(vidFrame >= VID_TOTAL) vidFrame = 0;
-    vidDecodeFrame(vidBack, vidFrame);                    // decodifica en BACK...
-    uint16_t* t = vidFront; vidFront = vidBack; vidBack = t;  // ...intercambia (ping-pong)...
-    vidBlit();                                            // ...y dibuja FRONT
-    vidDrawSeek();
+static int vidListCount(){ return flexMediaIndexCount(&gMedIx, vidFilterKind(), -1); }
+static int vidListItem(int nth){ return flexMediaIndexNth(&gMedIx, vidFilterKind(), -1, nth); }
+
+static void vidListRender(){
+  setBuf(fb);
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+  fillRect(bx, by, bw, bh, WIN_BG);
+  int pad = uiPad();
+  drawText(bx + pad, by + 12, "Multimedia", 4, TH_TXT);
+
+  // Pestanas
+  int tabY = by + 56, tw = (bw - 2 * pad) / 4;
+  for(int i = 0; i < 4; i++){
+    int tx = bx + pad + i * tw;
+    if(i == vidFilter) fillRoundRect(tx + 2, tabY, tw - 4, 30, 15, TH_PRIM);
+    drawTextC(tx + tw / 2, tabY + 8, VID_TABS[i], 2, i == vidFilter ? TH_ONACC : TH_TXT2);
+  }
+
+  const int top = tabY + 42;
+  const int n   = vidListCount();
+
+  // Estado real del almacenamiento y del indice: si no hay nada, se
+  // dice POR QUE no hay nada, que no es lo mismo que una lista vacia.
+  if(mediaIndexBusy()){
+    char pr[48];
+    snprintf(pr, sizeof(pr), "Buscando... %u revisados, %d encontrados",
+             (unsigned)mediaIndexSeen(), mediaIndexN());
+    drawTextC(bx + bw / 2, top + 8, pr, 1, TH_TXT2);
+  }
+  if(n == 0 && !mediaIndexBusy()){
+    drawTextC(bx + bw / 2, by + bh / 2 - 30, "No hay nada que reproducir", 3, TH_TXT2);
+    if(flexSdReady())
+      drawTextC(bx + bw / 2, by + bh / 2 + 8, "Copia JPEG o AVI MJPEG a la tarjeta", 1, TH_MUTE);
+    else
+      drawTextC(bx + bw / 2, by + bh / 2 + 8, flexSdError(), 1, TH_MUTE);
+  }
+
+  uiClipViewport(top, by + bh - 1);
+  for(int i = 0; i < n; i++){
+    int y = top + 26 + i * VID_ROW_H - vidListScroll;
+    if(y + VID_ROW_H < top || y > by + bh) continue;
+    int idx = vidListItem(i);
+    if(idx < 0) continue;
+    const FlexMediaItem* it = &gMedStore[idx];
+    if(uiGlass) drawGlassCardFlat(bx + pad, y, bw - 2 * pad, VID_ROW_H - 8, 12, TH_GLASS, WIN_BG);
+    else        fillRoundRect(bx + pad, y, bw - 2 * pad, VID_ROW_H - 8, 12, TH_SURF);
+    // Insignia de clase: un triangulo para video, un marco para foto,
+    // una onda para audio. Es informacion, no adorno.
+    int ix = bx + pad + 18, iy = y + 14;
+    if(it->kind == FLEXMED_VIDEO){
+      fillRoundRect(ix, iy, 30, 24, 5, rgb565(40,44,58));
+      fillTriangle(ix + 11, iy + 6, ix + 11, iy + 18, ix + 22, iy + 12, TH_ONACC);
+    } else if(it->kind == FLEXMED_AUDIO){
+      for(int k = 0; k < 5; k++) fillRect(ix + k * 6, iy + 4 + (k % 2) * 5, 3, 16 - (k % 2) * 10, TH_ACCS);
+    } else {
+      fillRoundRect(ix, iy, 30, 24, 5, rgb565(250,250,252));
+      fillTriangle(ix + 4, iy + 20, ix + 14, iy + 8, ix + 24, iy + 20, rgb565(140,170,220));
+    }
+    const char* nm = strrchr(it->path, '/');
+    drawTextClip(bx + pad + 62, y + 10, nm ? nm + 1 : it->path, 2, TH_TXT, bx + bw - pad - 70);
+    char sub[48], sz[16];
+    flexFsFmtSize(it->size, sz, sizeof(sz));
+    snprintf(sub, sizeof(sub), "%s  ·  %s", sz,
+             it->vol == FLEXMED_VOL_SD ? "Tarjeta SD" : "Interna");
+    drawText(bx + pad + 62, y + 34, sub, 1, TH_TXT2);
+  }
+  uiClipFull();
+  flxFlush(WIN_TOP, WIN_BOT);
+}
+
+static int vidListMaxScroll(){
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+  int need = 26 + vidListCount() * VID_ROW_H + 30;
+  int m = need - (bh - 100);
+  return m > 0 ? m : 0;
+}
+
+// -------------------------------------------------------------
+//  APERTURA DESDE OTRAS APPS
+//  ------------------------------------------------------------
+//  Galeria y el Explorador llaman aqui. La ruta se guarda y la app
+//  se abre por el camino normal (enterApp), asi que la animacion,
+//  el historial de recientes y el ciclo de vida son los de siempre.
+// -------------------------------------------------------------
+static char    gMediaPending[FLEXMED_PATH_MAX] = "";
+// De que app se salio para abrir el visor. La Galeria la pone antes
+// de abrir un elemento, para que "volver" desde el visor regrese a
+// la rejilla y no a la lista de Multimedia. 0xFF = se entro a
+// Multimedia por su cuenta.
+static uint8_t gMediaReturnApp = 0xFF;
+
+static void mediaOpenInPlayer(const char* path){
+  if(!path || !path[0]) return;
+  snprintf(gMediaPending, sizeof(gMediaPending), "%s", path);
+  if(gState == ST_APP && gAppId == IC_MULTIMEDIA){
+    // Ya estamos dentro: se abre en el acto.
+    vidScreen = VS_VIEW;
+    vidOpenPath(gMediaPending);
+    gMediaPending[0] = 0;
+    vidRenderViewer();
+    return;
+  }
+  if(gState == ST_APP) appClose();
+  enterApp(IC_MULTIMEDIA);
+}
+
+// Busca la posicion del archivo abierto dentro de la lista actual,
+// para que "anterior/siguiente" recorra lo que el usuario ve.
+static void vidSyncListIndex(){
+  vidIdxInList = -1;
+  int n = vidListCount();
+  for(int i = 0; i < n; i++){
+    int idx = vidListItem(i);
+    if(idx >= 0 && !strcmp(gMedStore[idx].path, vidPath)){ vidIdxInList = i; return; }
+  }
+}
+static void vidOpenNeighbour(int delta){
+  int n = vidListCount();
+  if(n <= 0) return;
+  if(vidIdxInList < 0) vidSyncListIndex();
+  int k = vidIdxInList + delta;
+  if(k < 0) k = n - 1;
+  if(k >= n) k = 0;
+  int idx = vidListItem(k);
+  if(idx < 0) return;
+  vidIdxInList = k;
+  vidOpenPath(gMedStore[idx].path);
+  vidRenderViewer();
+}
+
+// -------------------------------------------------------------
+//  BUSQUEDA (barra de progreso y botones de +-10 s)
+// -------------------------------------------------------------
+static void vidSeekToMs(uint32_t ms){
+  if(vidKind != VK_VIDEO || !vidAvi.usPerFrame) return;
+  uint32_t target = (uint32_t)(((uint64_t)ms * 1000ull) / vidAvi.usPerFrame);
+  if(vidAvi.frames && target >= vidAvi.frames) target = vidAvi.frames - 1;
+  flexSdBusySet(true);
+  int landed = flexAviSeekFrame(&vidAvi, target);
+  flexSdBusySet(false);
+  if(landed < 0){                       // la tarjeta se fue durante la busqueda
+    vidFail("Se perdio el acceso al archivo");
+    vidRenderViewer();
+    return;
+  }
+  vidCurFrame = (uint32_t)landed;
+  vidEnded = false;
+  vidNextUs = micros();
+  vidDrawCurrentFrame(true);
+  vidDrawControls(true);
+}
+
+// -------------------------------------------------------------
+//  TICK DEL REPRODUCTOR
+//  ------------------------------------------------------------
+//  Un fotograma como mucho por vuelta de loop(). Si se va tarde se
+//  saltan fotogramas (leyendo solo sus cabeceras), con tope: la
+//  interfaz nunca se queda sin turno por muy pesado que sea el
+//  archivo. Ni un delay() en todo el camino.
+// -------------------------------------------------------------
+static void vidPlaybackTick(){
+  if(!vidPlaying || vidKind != VK_VIDEO) return;
+  unsigned long now = micros();
+  if((long)(now - vidNextUs) < 0) return;
+
+  // Cuanto se ha ido tarde, en fotogramas.
+  const uint32_t spf = vidAvi.usPerFrame ? vidAvi.usPerFrame : 40000;
+  long late = (long)(now - vidNextUs);
+  int drop = (int)(late / (long)spf);
+  if(drop > VID_MAX_CATCHUP) drop = VID_MAX_CATCHUP;
+
+  flexSdBusySet(true);                 // no sondear la tarjeta dentro del cuadro
+  for(int i = 0; i < drop; i++){
+    int r = flexAviSkipFrame(&vidAvi);
+    if(r == FLEXAVI_ERR_EOF){ vidEnded = true; break; }
+    if(r < 0){ vidStatErrors++; break; }
+    vidCurFrame++;
+    vidStatSkipped++;
+  }
+  if(!vidEnded) vidDrawCurrentFrame(true);
+  flexSdBusySet(false);
+
+  // El instante teorico avanza por los fotogramas consumidos, no por
+  // "ahora + spf": asi el video no se va acumulando retraso.
+  vidNextUs += (unsigned long)spf * (unsigned long)(drop + 1);
+  // Si el retraso es tan grande que ya no se puede recuperar, se
+  // reengancha al presente en vez de intentar reproducir el pasado.
+  if((long)(micros() - vidNextUs) > (long)(spf * 8)) vidNextUs = micros() + spf;
+
+  if(vidEnded){
+    vidPlaying = false;
+    vidResumeSet(vidPath, 0);                  // terminado: la proxima vez, desde el principio
+    mediaNotify(MOD_MEDIA, "Reproducci\xC3\xB3n terminada", vidName);
+    vidCtrlOn = true; vidCtrlMs = millis();
+    vidDrawControls(true);
+  }
+
+  // ---- medicion real, por ventanas de 1 s ----
+  unsigned long ms = millis();
+  if(ms - vidStatMs >= 1000){
+    vidFpsReal = (uint16_t)(vidStatFrames * 10u);      // cuadros en 1 s, con un decimal
+    vidStatFrames = 0;
+    vidStatMs = ms;
+    if(vidCtrlOn) vidDrawControls(true);
+  }
+}
+
+// Alimenta la salida de audio sin bloquear: se entregan solo los
+// bytes que el controlador acepta ahora mismo.
+static void vidAudioTick(){
+  if(!vidPlaying || vidKind != VK_AUDIO) return;
+  if(!flexAudioAvailable()){ vidPlaying = false; return; }
+  uint8_t blk[1024];
+  uint32_t end = vidWav.dataStart + vidWav.dataBytes;
+  if(vidAudioPos >= end){
+    vidPlaying = false;
+    vidEnded = true;
+    flexAudioStop();
+    mediaNotify(MOD_MEDIA, "Reproducci\xC3\xB3n terminada", vidName);
+    vidDrawControls(true);
+    return;
+  }
+  uint32_t want = end - vidAudioPos;
+  if(want > sizeof(blk)) want = sizeof(blk);
+  if(!mediaIoSeek(&vidStream, vidAudioPos)){ vidPlaying = false; return; }
+  int rd = mediaIoRead(&vidStream, blk, want);
+  if(rd <= 0){ vidStatErrors++; vidPlaying = false; return; }
+  int wr = flexAudioWrite(blk, (size_t)rd);
+  if(wr > 0) vidAudioPos += (uint32_t)wr;
+}
+
+// -------------------------------------------------------------
+//  ENTRADA
+// -------------------------------------------------------------
+// El desplazamiento de una foto ampliada: se arrastra con el dedo y
+// se repinta solo cuando el desplazamiento cambia de verdad.
+static int  vidPanGrabX = 0, vidPanGrabY = 0, vidPanBaseX = 0, vidPanBaseY = 0;
+
+static void vidViewerTouch(){
+  int tx, ty; mediaTouchXY(vidLand, tx, ty);
+
+  // ---- desplazamiento de la foto ampliada ----
+  // Va ANTES que todo lo demas: mientras se arrastra, el toque es
+  // del desplazamiento y no llega a los botones.
+  if(vidKind == VK_PHOTO && vidZoom > 1){
+    if(T.pressed){
+      vidPanning = false;
+      vidPanGrabX = tx; vidPanGrabY = ty;
+      vidPanBaseX = vidPanX; vidPanBaseY = vidPanY;
+    }
+    if(T.down && !vidPanning
+       && (abs(tx - vidPanGrabX) > 8 || abs(ty - vidPanGrabY) > 8)) vidPanning = true;
+    if(T.down && vidPanning){
+      int px = vidPanBaseX - (tx - vidPanGrabX);
+      int py = vidPanBaseY - (ty - vidPanGrabY);
+      int ox = vidPanX, oy = vidPanY;
+      vidPanX = px; vidPanY = py;
+      vidClampPan();
+      if(vidPanX != ox || vidPanY != oy) vidRenderViewer();
+      return;
+    }
+    if(!T.down && vidPanning){ vidPanning = false; return; }
+  }
+
+  // Volver: esquina superior izquierda del lienzo LOGICO, asi que
+  // esta donde se ve la flecha tambien en horizontal.
+  if(T.tap && tx < 56 && ty < 56){
+    vidReleaseMedia(true);
+    gLand = false;
+    gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
+    vidScreen = VS_LIST;
+    vidZoom = 1; vidPanX = vidPanY = 0;
+    // Si el archivo se abrio DESDE otra app (la Galeria), se vuelve
+    // alli: salir por donde se entro es lo que espera cualquiera.
+    if(gMediaReturnApp != 0xFF){
+      uint8_t back = gMediaReturnApp;
+      gMediaReturnApp = 0xFF;
+      appClose();
+      enterApp(back);
+      return;
+    }
+    vidSyncListIndex();
+    setBuf(fb);
+    fillRect(0, 0, SCR_W, SCR_H, WIN_BG);
+    appDrawChrome(IC_MULTIMEDIA);
+    appDrawHeader(IC_MULTIMEDIA);
+    vidListRender();
+    flxFlushAll();
+    return;
+  }
+
+  if(!T.tap) return;
+
+  // Con los controles ocultos, el primer toque solo los muestra: asi
+  // tocar la imagen no pausa el video sin querer.
+  if(!vidCtrlOn){
+    vidCtrlOn = true; vidCtrlMs = millis();
+    vidDrawControls(true);
+    return;
+  }
+  vidCtrlMs = millis();
+
+  int bx, by, bw, bh; vidCtrlGeom(bx, by, bw, bh);
+  VidBtns b; vidBtnGeom(b);
+
+  // Doble uso del area de contenido: en una foto, tocar fuera del
+  // panel cambia el nivel de zoom (1 -> 2 -> 3 -> 4 -> 1). Es el
+  // "zoom sencillo": sin gestos de dos dedos, que aqui compiten con
+  // el gesto de suspension del sistema.
+  if(tx < bx || tx > bx + bw || ty < by || ty > by + bh){
+    if(vidKind == VK_PHOTO){
+      vidZoom = (vidZoom % VID_ZOOM_MAX) + 1;
+      // Al ampliar se centra sobre el punto tocado; al volver a x1 se
+      // suelta el desplazamiento.
+      if(vidZoom == 1){ vidPanX = vidPanY = 0; }
+      else {
+        vidPanX = (tx - vidBoxX) * vidZoom - vidBoxW / 2;
+        vidPanY = (ty - vidBoxY) * vidZoom - vidBoxH / 2;
+      }
+      vidRenderViewer();
+    }
+    return;
+  }
+
+  // ---- orientacion ----
+  if(tx >= b.oriX && tx <= b.oriX + b.oriW && ty >= b.oriY && ty <= b.oriY + b.oriH){
+    vidCycleOrientation();
+    return;
+  }
+
+  // ---- barra de progreso ----
+  const int sx = bx + 20, sw = bw - 40, sy = by + 22;
+  if(ty >= sy - 16 && ty <= sy + 18 && tx >= sx - 14 && tx <= sx + sw + 14){
+    uint32_t dur = (vidKind == VK_VIDEO) ? flexAviDurationMs(&vidAvi) : 0;
+    if(dur > 0){
+      int rel = tx - sx;
+      if(rel < 0) rel = 0;
+      if(rel > sw) rel = sw;
+      vidSeekToMs((uint32_t)((uint64_t)dur * (uint32_t)rel / sw));
+    }
+    return;
+  }
+
+  // ---- transporte ----
+  if(ty < b.cy - 30 || ty > b.cy + 30) return;
+
+  if(vidHit(tx, ty, b.cx, b.cy, 30)){                  // play / pausa
+    if(vidKind == VK_VIDEO){
+      if(vidEnded){ vidSeekToMs(0); vidEnded = false; }
+      vidPlaying = !vidPlaying;
+      vidNextUs = micros();
+    } else if(vidKind == VK_AUDIO){
+      if(vidPlaying){ vidPlaying = false; flexAudioStop(); }
+      else {
+        if(vidEnded){ vidAudioPos = vidWav.dataStart; vidEnded = false; }
+        vidPlaying = flexAudioStartPcm(vidWav.sampleRate, vidWav.channels, vidWav.bits);
+      }
+    }
+    vidDrawControls(true);
+    return;
+  }
+  if(vidKind == VK_VIDEO && vidHit(tx, ty, b.back10X, b.cy, 28)){
+    uint32_t p = vidPosMs();
+    vidSeekToMs(p > VID_SEEK_STEP_MS ? p - VID_SEEK_STEP_MS : 0);
+    return;
+  }
+  if(vidKind == VK_VIDEO && vidHit(tx, ty, b.fwd10X, b.cy, 28)){
+    vidSeekToMs(vidPosMs() + VID_SEEK_STEP_MS);
+    return;
+  }
+  if(vidHit(tx, ty, b.prevX, b.cy, 28)){ vidOpenNeighbour(-1); return; }
+  if(vidHit(tx, ty, b.nextX, b.cy, 28)){ vidOpenNeighbour(+1); return; }
+}
+
+// -------------------------------------------------------------
+//  ORIENTACION MANUAL: Auto -> Vertical -> Horizontal -> Auto
+//  ------------------------------------------------------------
+//  Se aplica al archivo ACTUAL. Al abrir otro se vuelve a Auto (lo
+//  hace vidOpenPath): girar un video concreto no debe cambiar como
+//  se abren los siguientes.
+//
+//  Aqui NO hay un segundo motor de rotacion. Se cambia gLand -- el
+//  mismo que usan Modo PC y Juegos -- y se vuelve a maquetar; el
+//  lienzo logico, los controles, la barra de progreso y el tacto
+//  salen todos de las mismas coordenadas (mediaCanvasW/H,
+//  vidBtnGeom y mediaTouchXY), asi que giran juntos por
+//  construccion. No puede pasar que se vea horizontal y el dedo
+//  responda en vertical.
+// -------------------------------------------------------------
+static void vidCycleOrientation(){
+  gMediaOriMode = (uint8_t)((gMediaOriMode + 1) % 3);
+  const bool want = mediaOriLandscape(vidSrcW, vidSrcH);
+  // Un archivo CUADRADO no tiene orientacion propia: se recuerda la
+  // ultima que se uso en esta sesion, que es lo que se pidio.
+  if(vidSrcW == vidSrcH) gMediaSquareLand = want;
+  vidLand = want;
+  // El zoom se reinicia al girar: el hueco visible ya no es el mismo
+  // y conservar el desplazamiento dejaria la foto mirando a un trozo
+  // que ya no existe.
+  vidZoom = 1; vidPanX = vidPanY = 0;
+  vidLayout(vidSrcW, vidSrcH);
+  if(vidKind == VK_VIDEO){
+    // Se vuelve al fotograma ACTUAL para repintarlo girado: girar no
+    // debe costar un fotograma perdido.
+    flexSdBusySet(true);
+    flexAviSeekFrame(&vidAvi, vidCurFrame);
+    flexSdBusySet(false);
+  }
+  vidRenderViewer();
+}
+
+static void vidListTouch(){
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+  int pad = uiPad();
+  const int tabY = by + 56, tw = (bw - 2 * pad) / 4;
+  const int top  = tabY + 42;
+
+  // Arrastre vertical de la lista (desplazamiento con inercia simple).
+  if(T.pressed){ vidListDragging = false; vidListDragY0 = T.y; vidListDragS0 = vidListScroll; }
+  if(T.down && !vidListDragging && abs(T.y - vidListDragY0) > 8) vidListDragging = true;
+  if(T.down && vidListDragging){
+    int ns = vidListDragS0 - (T.y - vidListDragY0);
+    int mx = vidListMaxScroll();
+    if(ns < 0) ns = 0;
+    if(ns > mx) ns = mx;
+    if(ns != vidListScroll){ vidListScroll = ns; vidListRender(); }
+    return;
   }
   if(!T.tap) return;
-  if(T.x < 48 && T.y < 48){ sysBack(); return; }          // back
-  int pcx = SCR_W / 2, pcy = 366, scx = pcx + 92;
-  int sbx = 24, sby = 434, sbw = SCR_W - 48;
-  if(T.x >= pcx - 34 && T.x <= pcx + 34 && T.y >= pcy - 34 && T.y <= pcy + 34){
-    vidPlaying = !vidPlaying; vidLastMs = millis(); vidDrawControls(); sessMarkDirty(IC_MULTIMEDIA);
-  } else if(T.x >= scx - 26 && T.x <= scx + 26 && T.y >= pcy - 26 && T.y <= pcy + 26){
-    vidPlaying = false; vidFrame = 0;
-    if(vidFront) vidDecodeFrame(vidFront, 0);
-    vidBlit(); vidDrawControls(); vidDrawSeek();           // stop: libera/rebobina
-  } else if(T.x >= sbx - 12 && T.x <= sbx + sbw + 12 && T.y >= sby - 14 && T.y <= sby + 16){
-    int fr = (T.x - sbx) * VID_TOTAL / sbw; if(fr < 0) fr = 0; if(fr >= VID_TOTAL) fr = VID_TOTAL - 1;
-    vidFrame = fr;                                         // seek: mueve el puntero
-    if(vidFront) vidDecodeFrame(vidFront, vidFrame);
-    vidBlit(); vidDrawSeek(); sessMarkDirty(IC_MULTIMEDIA);
+  if(vidListDragging){ vidListDragging = false; return; }
+
+  if(T.y >= tabY && T.y <= tabY + 30){
+    int k = (T.x - bx - pad) / (tw > 0 ? tw : 1);
+    if(k >= 0 && k < 4 && k != vidFilter){
+      vidFilter = k; vidListScroll = 0; vidListRender();
+    }
+    return;
+  }
+  int n = vidListCount();
+  for(int i = 0; i < n; i++){
+    int y = top + 26 + i * VID_ROW_H - vidListScroll;
+    if(T.y < y || T.y > y + VID_ROW_H - 8) continue;
+    int idx = vidListItem(i);
+    if(idx < 0) return;
+    vidIdxInList = i;
+    vidScreen = VS_VIEW;
+    vidOpenPath(gMedStore[idx].path);
+    vidRenderViewer();
+    return;
   }
 }
 
+// -------------------------------------------------------------
+//  CICLO DE VIDA
+// -------------------------------------------------------------
+static void vidRenderAll(){
+  if(vidScreen == VS_VIEW) vidRenderViewer();
+  else                     vidListRender();
+}
+
+static void vidEnter(){
+  memset(&vidStream, 0, sizeof(vidStream));
+  vidCtrlOn = true; vidCtrlMs = millis();
+  flexSdPoke();                         // al abrir, comprobar la tarjeta ya
+  flexSdTick();
+  mediaIndexEnsure();
+  appLoadSessionOnce(IC_MULTIMEDIA);
+  if(gMediaPending[0]){
+    vidScreen = VS_VIEW;
+    vidOpenPath(gMediaPending);
+    gMediaPending[0] = 0;
+    vidSyncListIndex();
+    vidRenderViewer();
+    return;
+  }
+  vidScreen = VS_LIST;
+  vidListRender();
+}
+
+static void vidTick(){
+  // La tarjeta se fue mientras se reproducia: se corta, se sueltan
+  // los recursos y se dice. Este es el camino que evita seguir
+  // leyendo con un descriptor de una tarjeta que ya no esta.
+  if(vidKind != VK_NONE && vidKind != VK_ERROR
+     && mediaIsSd(vidPath) && !flexSdReady()){
+    vidReleaseMedia(false);
+    vidFail("Se retir\xC3\xB3 la tarjeta");
+    mediaNotify(MOD_SDCARD, "Tarjeta retirada", "Se detuvo la reproducci\xC3\xB3n");
+    vidRenderViewer();
+    return;
+  }
+
+  if(vidScreen == VS_VIEW){
+    vidPlaybackTick();
+    vidAudioTick();
+    // Los controles se ocultan solos mientras se reproduce, y tambien
+    // sobre una foto (para poder verla entera). En PAUSA se quedan:
+    // ahi lo util es tenerlos a mano.
+    // Ocultarlos sobre una foto obliga a repintarla, y eso es UNA
+    // decodificacion, no una por cuadro: pasa una sola vez, cuando
+    // vence la cuenta atras.
+    if(vidCtrlOn && (vidPlaying || vidKind == VK_PHOTO)
+       && millis() - vidCtrlMs > VID_CTRL_HIDE_MS){
+      vidCtrlOn = false;
+      if(vidKind == VK_VIDEO) vidDrawCurrentFrame(true);
+      else                    vidRenderViewer();
+    }
+    vidViewerTouch();
+    return;
+  }
+  // En la lista, el indice sigue construyendose: se repinta cuando
+  // aparecen elementos nuevos, no en cada vuelta.
+  static int vidLastShown = -1;
+  if(mediaIndexBusy()){
+    int n = vidListCount();
+    if(n != vidLastShown){ vidLastShown = n; vidListRender(); }
+  }
+  vidListTouch();
+}
+
 // #############################################################
-// ##  MULTIMEDIA · CICLO DE VIDA Y SESION
+// ##  MULTIMEDIA · SESION Y LIBERACION
 // ##  ------------------------------------------------------
-// ##  Al suspender, la reproduccion SE PARA de verdad: una app
-// ##  suspendida no decodifica ni dibuja. Se conserva el fotograma
-// ##  actual (posicion), que es lo unico que hace falta para retomar.
-// ##  Al cerrar se liberan los DOS buffers de PSRAM del ping-pong
-// ##  (~440 KB): eso es liberar recursos de verdad, no marcar una
-// ##  bandera.
+// ##  Suspender PARA la reproduccion de verdad (una app en segundo
+// ##  plano no decodifica ni suena) y cerrar suelta TODO: el
+// ##  descriptor del archivo, el buffer del fotograma y la tira del
+// ##  volcado girado. Lo que se conserva es solo la POSICION, que
+// ##  es lo unico que hace falta para retomar.
 // #############################################################
-#define VID_SESS_VER   1
+#define VID_SESS_VER   2
 #define VID_SESS_PATH  FS_DIR_SESS "/media.bin"
-struct VidSessV1 { int32_t frame; };
+struct VidSessV2 {
+  int32_t  filter;
+  uint32_t resumeKey[VID_RESUME_N];
+  uint32_t resumeFrame[VID_RESUME_N];
+};
 
 static void vidSuspend(){
-  vidPlaying = false;                    // en segundo plano no se decodifica nada
+  if(vidKind == VK_VIDEO && vidPath[0] && !vidEnded) vidResumeSet(vidPath, vidCurFrame);
+  vidPlaying = false;
+  flexAudioStop();
+  gLand = false;                       // el framework tambien lo hace; aqui por si acaso
 }
 static void vidResume(){
-  if(!vidBufA || !vidBufB){              // los buffers se soltaron al cerrar: se rehacen
-    size_t bytes = (size_t)VID_W * VID_H * 2;
-    if(!vidBufA) vidBufA = (uint16_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if(!vidBufB) vidBufB = (uint16_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    vidFront = vidBufA; vidBack = vidBufB;
+  vidCtrlOn = true; vidCtrlMs = millis();
+  flexSdPoke();
+  if(vidScreen == VS_VIEW){
+    // Si el archivo era de la tarjeta y esta ya no esta, no se
+    // intenta reabrir: se vuelve a la lista con el motivo.
+    if(mediaIsSd(vidPath) && !flexSdReady()){
+      vidReleaseMedia(false);
+      vidScreen = VS_LIST;
+      vidListRender();
+      return;
+    }
+    if(vidKind == VK_NONE && vidPath[0]) vidOpenPath(vidPath);
+    vidRenderViewer();
+    return;
   }
-  vidPlaying = false;                    // se vuelve en pausa: reanudar solo no debe arrancar el video
-  vidLastMs = millis();
-  if(vidFront) vidDecodeFrame(vidFront, vidFrame);
-  vidRenderAll();
+  mediaIndexEnsure();
+  vidListRender();
 }
 static void vidCloseApp(){
-  vidPlaying = false;
-  if(vidBufA){ free(vidBufA); vidBufA = NULL; }
-  if(vidBufB){ free(vidBufB); vidBufB = NULL; }
-  vidFront = vidBack = NULL;
+  vidReleaseMedia(true);
+  gLand = false;
+  vidScreen = VS_LIST;
   gSessLoaded[IC_MULTIMEDIA] = false;
 }
 static bool vidSaveSess(){
   if(!flexFsReady()) return true;
-  VidSessV1 v; v.frame = vidFrame;
+  VidSessV2 v;
+  memset(&v, 0, sizeof(v));
+  v.filter = vidFilter;
+  for(int i = 0; i < VID_RESUME_N; i++){
+    v.resumeKey[i]   = vidResumeTab[i].key;
+    v.resumeFrame[i] = vidResumeTab[i].frame;
+  }
   return sessWrite(VID_SESS_PATH, VID_SESS_VER, IC_MULTIMEDIA, &v, sizeof(v));
 }
 static void vidLoadSess(){
   if(!flexFsReady()) return;
-  VidSessV1 v;
+  VidSessV2 v;
   if(sessRead(VID_SESS_PATH, VID_SESS_VER, IC_MULTIMEDIA, &v, sizeof(v)) != sizeof(v)) return;
-  if(v.frame < 0 || v.frame >= VID_TOTAL) return;
-  vidFrame = v.frame;
+  if(v.filter >= 0 && v.filter < 4) vidFilter = (int)v.filter;
+  for(int i = 0; i < VID_RESUME_N; i++){
+    vidResumeTab[i].key    = v.resumeKey[i];
+    vidResumeTab[i].frame  = v.resumeFrame[i];
+    vidResumeTab[i].whenMs = 0;
+  }
 }
+
 
 // #############################################################
 // ##  APP CAMARA (ESQUELETO estilo iPhone)
@@ -20770,6 +22351,17 @@ static int simpBar(int y, const char* label, const char* val, int pct, uint16_t 
 // ##      carpeta real (flexFsCatSize).
 // ##    · "Archivos grandes" -> recorrido completo del arbol
 // ##      quedandose con los mayores (flexFsLargest).
+// ##    · "Tarjeta SD" -> flexSd*(): capacidad, tipo de tarjeta y
+// ##      sistema de archivos leidos del volumen MONTADO. Sin
+// ##      tarjeta no se pinta una barra al 0% que parezca una
+// ##      tarjeta vacia: se dice que no hay y por que.
+// ##
+// ##  LOS DOS VOLUMENES SE PRESENTAN POR SEPARADO. "Memoria
+// ##  interna" es la particion de datos (LittleFS) y "Tarjeta SD"
+// ##  es el volumen extraible; ni se suman ni se mezclan sus
+// ##  numeros, porque son dos sitios distintos con dos
+// ##  comportamientos distintos (uno siempre esta, el otro puede
+// ##  irse a mitad de una lectura).
 // #############################################################
 #define ALM_BIG_MAX 3
 
@@ -20783,6 +22375,7 @@ static const uint16_t ALM_CAT_COL[FLEXFS_CAT_N] = {
   rgb565(245,85,85), rgb565(250,215,95), rgb565(95,225,110), rgb565(60,205,240) };
 
 static void filesEnter();                          // explorador (ST_FILES), mas abajo
+static void filesEnterAt(const char* dir);         // ...abierto en una carpeta concreta
 
 // Relee TODO lo que se muestra. Se llama al entrar a la app y al volver
 // del explorador: si el usuario borro algo alli, aqui se ve al instante.
@@ -20799,7 +22392,72 @@ static void almFolderIcon(int x, int y, int s){
   fillRoundRect(x + s / 10, y + s / 3, s - s / 10, s * 3 / 5, s / 9, body);
 }
 
+// Zona pulsable de la fila "Ver..." de la tarjeta (0 = no hay).
+static int almSdY0 = 0, almSdY1 = 0;
+
+// Icono de tarjeta SD: el contorno con la esquina cortada, que es
+// como se reconoce de un vistazo. Cambia de color con el estado
+// real, no siempre igual.
+static void almSdIcon(int x, int y, int s, uint16_t col){
+  int cut = s / 3;
+  fillRoundRect(x, y, s, s * 4 / 3, s / 8, col);
+  fillTriangle(x + s - cut, y, x + s, y, x + s, y + cut, TH_PAGE);
+  for(int i = 0; i < 4; i++)
+    fillRect(x + s / 6 + i * (s / 6), y + s / 8, s / 12, s / 3, TH_PAGE);
+}
+
+// Dibuja el bloque de la tarjeta y devuelve la Y siguiente.
+static int almSdBlock(int bx, int by, int bw, int bh, int y){
+  const int pad = uiPad(), gap = uiGap();
+  const bool ok = flexSdReady();
+  const int cardH = ok ? 96 : 74;
+  almSdY0 = almSdY1 = 0;
+  if(y + cardH > by + bh - pad) return y;
+
+  if(uiGlass) drawLiquidGlassPanel(bx + pad, y, bw - 2 * pad, cardH, 14, TH_GLASS);
+  else        fillRoundRect(bx + pad, y, bw - 2 * pad, cardH, 14, TH_SURF);
+
+  almSdIcon(bx + pad * 2, y + 14, 26, ok ? rgb565(90,190,130) : rgb565(120,124,140));
+  drawText(bx + pad * 2 + 44, y + 12, "Tarjeta SD", 2, TH_TXT);
+
+  if(!ok){
+    // Sin tarjeta (o con un fallo): se dice el motivo REAL que
+    // devuelve el modulo, no un texto generico.
+    drawTextClip(bx + pad * 2 + 44, y + 36, flexSdError(), 1,
+                 flexSdState() == FLEXSD_ABSENT ? TH_MUTE : TH_ERR, bx + bw - pad * 2);
+    drawTextClip(bx + pad * 2 + 44, y + 54, "Formato recomendado: FAT32", 1, TH_MUTE,
+                 bx + bw - pad * 2);
+    return y + cardH + gap / 2;
+  }
+
+  uint64_t tot = flexSdTotalBytes(), usd = flexSdUsedBytes();
+  int pct = tot ? (int)((usd * 100ull) / tot) : 0;
+  char su[24], st[24], sf[24], line[72];
+  flexFsFmtSize((uint32_t)(usd / 1048576ull), su, sizeof(su));
+  flexFsFmtSize((uint32_t)(tot / 1048576ull), st, sizeof(st));
+  flexFsFmtSize((uint32_t)(flexSdFreeBytes() / 1048576ull), sf, sizeof(sf));
+  // Las cifras van en MB reales; flexFsFmtSize da la unidad, asi que
+  // se compone "1234 MB" -> se ensena tal cual con su sufijo.
+  snprintf(line, sizeof(line), "%s de %s usados  ·  %s libres", su, st, sf);
+  drawTextClip(bx + pad * 2 + 44, y + 34, line, 1, TH_TXT2, bx + bw - pad * 2);
+  snprintf(line, sizeof(line), "%s  ·  %s", flexSdCardTypeName(), flexSdFsName());
+  drawTextR(bx + bw - pad * 2, y + 12, line, 1, TH_TXT2);
+
+  int barY = y + 54, barX = bx + pad * 2, barW = bw - pad * 4;
+  fillRoundRect(barX, barY, barW, 10, 5, TH_TRACK);
+  if(pct > 0) fillRoundRect(barX, barY, barW * pct / 100, 10, 5, rgb565(90,190,130));
+  drawTextR(bx + bw - pad * 2, y + 70, "Ver archivos...", 2, TH_ACCS);
+  almSdY0 = y; almSdY1 = y + cardH;
+  return y + cardH + gap / 2;
+}
+
 static void almEnter(){
+  // Al abrir Almacenamiento se comprueba la tarjeta EN EL ACTO, sin
+  // esperar al periodo de sondeo: es uno de los tres sitios donde el
+  // usuario espera ver el estado al dia.
+  flexSdPoke();
+  flexSdTick();
+  if(flexSdReady()) flexSdRefreshUsage();
   setBuf(fb);
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
   fillRect(bx, by, bw, bh, WIN_BG);
@@ -20825,7 +22483,7 @@ static void almEnter(){
   flexFsFmtSize(usd, su, sizeof(su));
   flexFsFmtSize(tot, st, sizeof(st));
   snprintf(vt, sizeof(vt), "%s / %s  (%d%%)", su, st, pctFs);
-  y = simpBar(y, "Almacenamiento interno", vt, pctFs, rgb565(90,160,240));
+  y = simpBar(y, "Memoria interna", vt, pctFs, rgb565(90,160,240));
 
   // ---- Barra 2: PSRAM ----
   size_t pt = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
@@ -20841,6 +22499,9 @@ static void almEnter(){
     // parezca una PSRAM vacia.
     y = simpBar(y, "PSRAM", "No disponible en esta placa", 0, rgb565(120,124,140));
   }
+
+  // ---- Tarjeta SD: volumen APARTE, nunca sumado al interno ----
+  y = almSdBlock(bx, by, bw, bh, y);
 
   // ---- Categorias: tamano REAL de cada conjunto de carpetas ----
   y += gap / 2;
@@ -20892,7 +22553,11 @@ static void almEnter(){
 
 static void almTick(){
   if(!T.tap) return;
-  if(almVerY1 > almVerY0 && T.y >= almVerY0 && T.y <= almVerY1) filesEnter();
+  if(almVerY1 > almVerY0 && T.y >= almVerY0 && T.y <= almVerY1){ filesEnter(); return; }
+  // La tarjeta abre el MISMO explorador, pero en su raiz: no hay un
+  // segundo explorador para la tarjeta.
+  if(almSdY1 > almSdY0 && T.y >= almSdY0 && T.y <= almSdY1 && flexSdReady())
+    filesEnterAt(FLEXSD_MOUNT);
 }
 
 // #############################################################
@@ -20906,6 +22571,27 @@ static void almTick(){
 // ##  El menu contextual es el mismo kit que usan Notas y Paint,
 // ##  asi que las cuatro acciones se comportan igual en las tres
 // ##  pantallas y operan sobre el fichero real.
+// ##
+// ##  DOS VOLUMENES, UN SOLO EXPLORADOR
+// ##  ---------------------------------
+// ##  La ruta lleva el volumen dentro: lo que empieza por /sdcard
+// ##  es de la tarjeta y el resto de la particion interna. Por eso
+// ##  no hace falta un explorador aparte ni una bandera al lado de
+// ##  cada ruta, que es como se acaba borrando en el volumen
+// ##  equivocado.
+// ##
+// ##  EN LA TARJETA SOLO SE LEE. Borrar, renombrar, mover a la
+// ##  papelera y cifrar en la boveda quedan DESACTIVADOS sobre
+// ##  /sdcard, y se dice por que. Son los archivos del usuario --
+// ##  sus fotos, sus descargas -- y esta version no se mete con
+// ##  ellos: se indexan y se abren, no se tocan. (La papelera y la
+// ##  boveda ademas viven en la particion interna, asi que "mover"
+// ##  ahi seria copiar entre volumenes, que es otra funcion.)
+// ##
+// ##  ABRIR UN ARCHIVO lo manda a la app que corresponde: una
+// ##  imagen a Galeria, un video o un audio compatible a
+// ##  Multimedia, y lo incompatible a una notificacion con el
+// ##  motivo concreto -- no se intenta abrir "a ver si suena".
 // #############################################################
 #define FILES_MAX     24
 #define FILES_TOP    128
@@ -20926,8 +22612,14 @@ static uint32_t    filesMask = 0;
 
 static void filesRender();
 
+// true si la carpeta que se esta viendo esta en la tarjeta.
+static inline bool filesOnSd(){ return flexSdIsSdPath(filesDir); }
+
 static void filesReload(){
-  filesN = flexFsList(filesDir, filesList, FILES_MAX);
+  int n = mediaList(filesDir, filesList, FILES_MAX);
+  // -1 = el volumen no esta (tarjeta retirada). Se distingue de una
+  // carpeta vacia para poder decir cosas distintas.
+  filesN = n > 0 ? n : 0;
   if(filesSelIdx >= filesN) filesSelIdx = -1;
   int maxRows = filesN;
   if(filesScroll > maxRows * FILES_RH) filesScroll = 0;
@@ -20940,7 +22632,11 @@ static void filesPathOf(int i, char* out, size_t n){
 
 // Fila 0 = ".." cuando no estamos en la raiz. Se cuenta en el layout para
 // que el indice de la lista y la fila dibujada no puedan desalinearse.
-static bool filesHasUp(){ return strcmp(filesDir, "/") != 0; }
+// La raiz de cada volumen es su tope: desde /sdcard no se "sube" a
+// la particion interna, que es un sitio distinto y no su padre.
+static bool filesHasUp(){
+  return strcmp(filesDir, "/") != 0 && strcmp(filesDir, FLEXSD_MOUNT) != 0;
+}
 static int  filesRowY(int row){ return FILES_TOP + row * FILES_RH - filesScroll; }
 static int  filesMaxScroll(){
   int rows = filesN + (filesHasUp() ? 1 : 0);
@@ -20952,7 +22648,7 @@ static int  filesMaxScroll(){
 static void filesRender(){
   setBuf(fb);
   fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
-  uiHdrDraw("Archivos:", 5, TH_TXT, TH_NAV, true);   // el nombre no cambia: solo donde empieza
+  uiHdrDraw(filesOnSd() ? "Tarjeta SD:" : "Archivos:", 5, TH_TXT, TH_NAV, true);
   drawTextClip(16, UIHDR_H + 8, filesDir, 2, TH_TXT2, SCR_W - 60);
 
   // Cabecera y ruta son FIJAS; de FILES_VP_TOP para abajo manda el
@@ -20985,11 +22681,16 @@ static void filesRender(){
     }
     drawTextClip(84, y + 10, filesList[i].name, 3, TH_TXT, SCR_W - 150);
     char sub[32];
-    if(filesList[i].dir) snprintf(sub, sizeof(sub), "%u elementos", (unsigned)filesList[i].items);
+    // 0xFFFF = "no se sabe". La tarjeta no cuenta los elementos de
+    // cada subcarpeta a proposito: hacerlo obligaria a abrirlas todas
+    // y entrar en DCIM costaria segundos. Se dice "Carpeta" en vez de
+    // dar un numero que no se ha contado.
+    if(filesList[i].dir && filesList[i].items == 0xFFFF) snprintf(sub, sizeof(sub), "Carpeta");
+    else if(filesList[i].dir) snprintf(sub, sizeof(sub), "%u elementos", (unsigned)filesList[i].items);
     else                 flexFsFmtSize(filesList[i].size, sub, sizeof(sub));
     drawTextR(SCR_W - 28, y + 40, sub, 2, TH_TXT2);
   }
-  if(filesN == 0 && !filesHasUp())
+  if(filesN == 0)
     drawTextC(SCR_W / 2, 320, "Carpeta vac\xC3\xAD" "a", 3, TH_MUTE);
   uiClipFull();                       // la barra de seleccion y el menu van encima
 
@@ -21005,15 +22706,18 @@ static void filesRender(){
   flxFlushAll();
 }
 
-static void filesEnter(){
-  if(!flexFsReady()){ fkNoFsScreen("Archivos"); gState = ST_FILES; return; }
+static void filesEnterAt(const char* dir){
+  const bool sd = flexSdIsSdPath(dir);
+  if(!sd && !flexFsReady()){ fkNoFsScreen("Archivos"); gState = ST_FILES; return; }
+  if(sd && !flexSdReady()){ fkNoFsScreen("Tarjeta SD"); gState = ST_FILES; return; }
   gState = ST_FILES;
-  snprintf(filesDir, sizeof(filesDir), "/");
+  snprintf(filesDir, sizeof(filesDir), "%s", dir && dir[0] ? dir : "/");
   filesSelIdx = -1; filesScroll = 0; filesMulti = false; filesMask = 0;
   fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
   filesReload();
   filesRender();
 }
+static void filesEnter(){ filesEnterAt("/"); }
 
 static void filesExit(){
   // Volver a Almacenamiento REPINTANDO: si desde aqui se borro o renombro
@@ -21033,8 +22737,46 @@ static void filesGoUp(){
   char* s = strrchr(filesDir, '/');
   if(!s || s == filesDir){ snprintf(filesDir, sizeof(filesDir), "/"); }
   else *s = 0;
+  // Nunca por encima de la raiz del volumen.
+  if(filesDir[0] == 0) snprintf(filesDir, sizeof(filesDir), "/");
+  if(flexSdIsSdPath(filesDir) && strlen(filesDir) < FLEXSD_MOUNT_LEN)
+    snprintf(filesDir, sizeof(filesDir), FLEXSD_MOUNT);
   filesScroll = 0; filesSelIdx = -1; filesMulti = false; filesMask = 0;
   filesReload(); filesRender();
+}
+
+// -------------------------------------------------------------
+//  ABRIR UN ARCHIVO DESDE EL EXPLORADOR
+//  ------------------------------------------------------------
+//  Cada clase va a su app. Lo que no se puede reproducir NO se
+//  intenta: se avisa con el motivo concreto (que sale de
+//  flexMediaUnsupportedReason, la misma tabla que usa el
+//  reproductor), asi que el usuario sabe si el problema es el
+//  formato o el archivo.
+// -------------------------------------------------------------
+static void galOpenPath(const char* path);          // Galeria (definida mas abajo)
+
+static void filesOpenEntry(const char* path, const char* name){
+  int kind = flexMediaClassify(name);
+  if(kind == FLEXMED_PHOTO || kind == FLEXMED_DRAW){ galOpenPath(path); return; }
+  if(kind == FLEXMED_VIDEO || kind == FLEXMED_AUDIO){ mediaOpenInPlayer(path); return; }
+  if(kind == FLEXMED_UNSUP){
+    const char* why = flexMediaUnsupportedReason(name);
+    mediaNotify(MOD_MEDIA, name, why ? why : "Formato no compatible");
+    return;
+  }
+  // Ni medio ni conocido: se ofrecen las acciones de siempre sobre
+  // el fichero, que es lo unico honesto que se puede hacer con el.
+  fkMenuOpenV(SCR_W / 2 - 60, 200, true);
+}
+
+// En la tarjeta esta version SOLO LEE. Cuando una accion no aplica
+// se dice por que, en vez de dejar un boton que no hace nada.
+static bool filesSdReadOnlyGuard(){
+  if(!filesOnSd()) return false;
+  mediaNotify(MOD_SDCARD, "Solo lectura en la tarjeta",
+              "Flex OS no borra ni mueve tus archivos");
+  return true;
 }
 
 static void filesMenuAction(int act){
@@ -21045,17 +22787,21 @@ static void filesMenuAction(int act){
     filesMulti = true; filesMask = 0;
     if(filesSelIdx >= 0) filesMask |= (1UL << filesSelIdx);
   } else if(act == FK_ACT_DEL){
+    if(filesSdReadOnlyGuard()){ filesRender(); return; }
     if(p[0]){ fkAskOpen("\xC2\xBF" "Borrar definitivamente?", filesList[filesSelIdx].name); return; }
   } else if(act == FK_ACT_REN){
+    if(filesSdReadOnlyGuard()){ filesRender(); return; }
     if(p[0]){
       char stem[FLEXFS_NAME_MAX]; flexFsStem(filesList[filesSelIdx].name, stem, sizeof(stem));
       fkNameOpen("Renombrar", stem);
       return;
     }
   } else if(act == FK_ACT_TRASH){
+    if(filesSdReadOnlyGuard()){ filesRender(); return; }
     if(p[0]){ flexFsTrash(p); filesSelIdx = -1; filesReload(); }
     else { fkTrashOpen(); return; }               // sin seleccion: abre la papelera
   } else if(act == FK_ACT_VAULT){
+    if(filesSdReadOnlyGuard()){ filesRender(); return; }
     // FLEX VAULT: el fichero se cifra dentro de la boveda y desaparece del
     // explorador. La clase se deduce de la extension, para que una foto acabe
     // en Galeria privada y un .txt en Notas privadas.
@@ -21071,7 +22817,25 @@ static void filesMenuAction(int act){
 }
 
 static void filesTick(){
-  if(!flexFsReady()){ if(T.tap && T.x < 60 && T.y < 60) filesExit(); return; }
+  // Se comprueba el volumen QUE SE ESTA VIENDO. Antes solo miraba
+  // LittleFS, asi que navegando por la tarjeta con la particion
+  // interna sana no se detectaba nada.
+  if(filesOnSd()){
+    if(!flexSdReady()){
+      // La tarjeta se fue mientras se navegaba: se cierra la ruta y
+      // se vuelve a la memoria interna, sin quedarse en una carpeta
+      // que ya no existe.
+      mediaNotify(MOD_SDCARD, "Tarjeta retirada", "Se cerro la carpeta abierta");
+      snprintf(filesDir, sizeof(filesDir), "/");
+      filesSelIdx = -1; filesScroll = 0; filesMulti = false; filesMask = 0;
+      fkMenuOn = fkNameOn = fkAskOn = fkTrashOn = false;
+      filesReload(); filesRender();
+      return;
+    }
+  } else if(!flexFsReady()){
+    if(T.tap && T.x < 60 && T.y < 60) filesExit();
+    return;
+  }
   if(fkTrashOn){ if(!fkTrashTick()){ filesReload(); filesRender(); } return; }
   if(fkAskOn){
     int r = fkAskTick();
@@ -21147,6 +22911,7 @@ static void filesTick(){
     if(T.y >= by && T.y <= by + 60){
       if(T.x > SCR_W - 100){ filesMulti = false; filesMask = 0; filesRender(); return; }
       if(T.x > SCR_W - 230){
+        if(filesSdReadOnlyGuard()){ filesMulti = false; filesMask = 0; filesRender(); return; }
         for(int i = 0; i < filesN; i++) if(filesMask & (1UL << i)){
           char p[FLEXFS_PATH_MAX]; filesPathOf(i, p, sizeof(p));
           flexFsTrash(p);
@@ -21170,7 +22935,11 @@ static void filesTick(){
         filesReload(); filesRender();
       } else {
         filesSelIdx = i;
-        fkMenuOpenV(SCR_W / 2 - 60, y + 30, true);  // un fichero suelto: acciones sobre el
+        // Un TOQUE CORTO abre; la pulsacion larga (mas arriba) sigue
+        // sacando el menu de acciones. Antes tocar un fichero solo
+        // abria el menu: no habia forma de abrir nada desde aqui.
+        char p[FLEXFS_PATH_MAX]; filesPathOf(i, p, sizeof(p));
+        filesOpenEntry(p, filesList[i].name);
       }
       return;
     }
@@ -29475,161 +31244,319 @@ static void themeChanged(bool save){
 }
 
 // #############################################################
-// ##  GALERIA  ·  contenido REAL
+// ##  GALERIA  ·  LA BIBLIOTECA VISUAL REAL DE FLEX OS
 // ##  ------------------------------------------------------
-// ##  Antes esta app dibujaba doce mini-paisajes generados: bonitos,
-// ##  pero no eran ficheros de nadie. No se podia abrir uno, ni
-// ##  borrarlo, ni -- y esto es lo que la traia aqui -- moverlo a la
-// ##  Carpeta segura, porque no habia nada que mover.
+// ##  De donde sale lo que se ve: del INDICE DE MEDIOS que
+// ##  construye el nucleo de medios recorriendo, por lotes y sin
+// ##  bloquear, las carpetas de la particion interna
+// ##  (/Documentos, /Paint) y las de la tarjeta (las de Flex OS y
+// ##  las de siempre: DCIM, Download, Pictures, Movies, Music).
+// ##  Es el MISMO indice que usa Multimedia: si aqui aparece un
+// ##  archivo, alli tambien, y al reves.
 // ##
-// ##  Ahora lista lo que hay DE VERDAD en la particion de datos:
-// ##    · imagenes JPEG de /Documentos
-// ##    · dibujos .fxp de /Paint
-// ##  Las miniaturas tampoco son adorno: el JPEG se decodifica de
-// ##  verdad (a la caja de la miniatura, no a tamano completo) y el
-// ##  dibujo se reproduce con sus trazos reales a escala.
+// ##  MINIATURAS. Se decodifican a un tamano FIJO
+// ##  (GAL_THUMB_W x GAL_THUMB_H) y se guardan en una cache
+// ##  pequena de PSRAM. Solo se generan las de las celdas
+// ##  VISIBLES, y como mucho GAL_THUMB_PER_PASS por repintado:
+// ##  desplazarse por 300 fotos no puede convertirse en 300
+// ##  decodificaciones seguidas. Antes cada repintado
+// ##  redecodificaba TODOS los JPEG de la rejilla.
 // ##
-// ##  Si no hay ninguna imagen, se dice que no hay ninguna. Ensenar
-// ##  paisajes de relleno en una galeria vacia es justo el tipo de
-// ##  dato inventado que este proyecto no se permite.
+// ##  ABRIR UN ELEMENTO no duplica el visor: se lo pasa al de
+// ##  Multimedia, que es el que sabe ajustar sin deformar, girar,
+// ##  ampliar y reproducir. Un segundo visor aqui seria un segundo
+// ##  motor de orientacion, que es justo lo que no puede haber.
+// ##
+// ##  Lo que NO hace: inventarse fotos. Si no hay ninguna, lo
+// ##  dice; y mientras la camara real no exista, no se simula ni
+// ##  un archivo de camara.
 // #############################################################
-#define GAL_MAX     24
-#define GAL_COLS     3
+#define GAL_COLS            3
+#define GAL_CACHE_N        12      // ~una pantalla y media de miniaturas
+#define GAL_THUMB_PER_PASS  2      // decodificaciones nuevas por repintado
+#define GAL_SEL_MAX        32      // tope REAL de la seleccion multiple
+#define GAL_JPEG_MAX_BYTES (768 * 1024)   // por encima, no se hace miniatura
 
-// Un elemento de la galeria: ruta REAL en la particion.
-static char     galPath[GAL_MAX][FLEXFS_PATH_MAX];
-static char     galName[GAL_MAX][FLEXFS_NAME_MAX];
-static uint32_t galSize[GAL_MAX];
-static bool     galIsDraw[GAL_MAX];              // .fxp (dibujo) o JPEG
-static int      galN = 0;
+// Pestanas. Las tres primeras filtran por CLASE y las dos ultimas
+// por VOLUMEN: son las cinco agrupaciones que se pidieron.
+#define GAL_TABS 5
+static const char* GAL_TAB_NAME[GAL_TABS] = {
+  "Todas", "Fotos", "V\xC3\xAD" "deos", "Interna", "Tarjeta SD"
+};
+static int galTab = 0;
+static int galTabKind(){
+  switch(galTab){ case 1: return FLEXMED_PHOTO; case 2: return FLEXMED_VIDEO; default: return 0; }
+}
+static int galTabVol(){
+  switch(galTab){ case 3: return FLEXMED_VOL_INT; case 4: return FLEXMED_VOL_SD; default: return -1; }
+}
+static int galCount(){ return flexMediaIndexCount(&gMedIx, galTabKind(), galTabVol()); }
+static int galItemAt(int nth){ return flexMediaIndexNth(&gMedIx, galTabKind(), galTabVol(), nth); }
+
+// ---- Estado de la rejilla ----
 static int      galScroll = 0;
-static int      galSelIdx = -1;
+static int      galSelIdx = -1;              // posicion en la LISTA filtrada
 static bool     galLongFired = false;
 static bool     galMulti = false;
-static uint32_t galMask = 0;
+static uint16_t galSel[GAL_SEL_MAX];
+static uint8_t  galSelN = 0;
 static int      galDragY0 = 0, galDragS0 = 0;
 static bool     galDragging = false;
-static int      galView = 0;                     // 0 = rejilla, 1 = un elemento a pantalla completa
-static char     galResumePath[FLEXFS_PATH_MAX] = ""; // identidad estable; nunca conservar solo el indice
+static bool     galMorePending = false;      // quedaron miniaturas por generar
+static char     galResumePath[FLEXMED_PATH_MAX] = ""; // identidad estable, no un indice
 static void galRender();
 
-// Extensiones que la galeria reconoce. La comparacion es propia (sin
-// strcasecmp, que es POSIX y no esta garantizada en todos los cores).
-static bool galExtIs(const char* name, const char* ext){
-  size_t ln = strlen(name), le = strlen(ext);
-  if(ln < le) return false;
-  const char* a = name + ln - le;
-  for(size_t k = 0; k < le; k++){
-    char ca = a[k], cb = ext[k];
-    if(ca >= 'A' && ca <= 'Z') ca = (char)(ca + 32);
-    if(cb >= 'A' && cb <= 'Z') cb = (char)(cb + 32);
-    if(ca != cb) return false;
-  }
-  return true;
+// Ruta del elemento `nth` de la lista filtrada (cadena vacia si no hay).
+static const char* galPathOf(int nth){
+  int idx = galItemAt(nth);
+  return (idx >= 0) ? gMedStore[idx].path : "";
 }
-static bool galIsImage(const char* name){
-  return galExtIs(name, ".jpg") || galExtIs(name, ".jpeg");
+static const char* galNameOf(int nth){
+  const char* p = galPathOf(nth);
+  const char* s = strrchr(p, '/');
+  return s ? s + 1 : p;
+}
+static int galKindOf(int nth){
+  int idx = galItemAt(nth);
+  return (idx >= 0) ? (int)gMedStore[idx].kind : FLEXMED_NONE;
+}
+static uint32_t galSizeOf(int nth){
+  int idx = galItemAt(nth);
+  return (idx >= 0) ? gMedStore[idx].size : 0;
 }
 
-// Recorre las dos carpetas y se queda con lo que sabe ensenar. Se llama
-// al entrar y despues de CADA operacion: la rejilla es un reflejo de lo
-// que hay en disco, no un estado en RAM que se pueda desincronizar.
-static void galReload(){
-  galN = 0;
-  if(!flexFsReady()) return;
-  const char* dirs[2] = { FLEXFS_DIR_DOCS, FLEXFS_DIR_PAINT };
-  FlexFsEntry e[GAL_MAX];
-  for(int d = 0; d < 2 && galN < GAL_MAX; d++){
-    int n = flexFsList(dirs[d], e, GAL_MAX);
-    for(int i = 0; i < n && galN < GAL_MAX; i++){
-      if(e[i].dir) continue;
-      bool draw = galExtIs(e[i].name, FLEXFS_EXT_PAINT);
-      if(!draw && !galIsImage(e[i].name)) continue;
-      snprintf(galPath[galN], FLEXFS_PATH_MAX, "%s/%s", dirs[d], e[i].name);
-      snprintf(galName[galN], FLEXFS_NAME_MAX, "%s", e[i].name);
-      galSize[galN]   = e[i].size;
-      galIsDraw[galN] = draw;
-      galN++;
+// ---- Seleccion multiple ----
+// Un array corto en vez de una mascara de bits: con el indice
+// llegando a cientos de elementos, un uint32 solo habria podido
+// seleccionar los 32 primeros SIN decirlo. Aqui el tope es explicito
+// y se puede seleccionar cualquier elemento.
+static bool galIsSel(int i){
+  for(int k = 0; k < galSelN; k++) if(galSel[k] == (uint16_t)i) return true;
+  return false;
+}
+static void galToggleSel(int i){
+  for(int k = 0; k < galSelN; k++)
+    if(galSel[k] == (uint16_t)i){
+      for(int j = k; j < galSelN - 1; j++) galSel[j] = galSel[j + 1];
+      galSelN--;
+      return;
     }
+  if(galSelN < GAL_SEL_MAX) galSel[galSelN++] = (uint16_t)i;
+}
+static void galClearSel(){ galSelN = 0; }
+
+// -------------------------------------------------------------
+//  CACHE DE MINIATURAS
+//  ------------------------------------------------------------
+//  Tamano fijo por entrada, numero fijo de entradas y sustitucion
+//  por la menos usada recientemente. Las imagenes van a PSRAM y se
+//  reservan a demanda: una galeria vacia no gasta ni un byte.
+//
+//  Una miniatura que FALLA se marca como fallida y no se reintenta
+//  en cada repintado: un JPEG progresivo o un fichero corrupto no
+//  puede costar una decodificacion por cuadro para siempre.
+// -------------------------------------------------------------
+static GalThumb galCache[GAL_CACHE_N];
+static bool     galCacheInit = false;
+
+static void galCacheReset(){
+  for(int i = 0; i < GAL_CACHE_N; i++){
+    if(galCache[i].px){ mediaFree(galCache[i].px); galCache[i].px = NULL; }
+    galCache[i].path[0] = 0;
+    galCache[i].state = GTH_EMPTY;
+    galCache[i].w = galCache[i].h = 0;
+    galCache[i].useMs = 0;
   }
-  if(galSelIdx >= galN) galSelIdx = -1;
-  if(galN == 0){ galMulti = false; galMask = 0; }
+  galCacheInit = true;
+}
+static void galCacheFree(){ galCacheReset(); galCacheInit = false; }
+
+static int galCacheFind(const char* path){
+  for(int i = 0; i < GAL_CACHE_N; i++)
+    if(galCache[i].state != GTH_EMPTY && !strcmp(galCache[i].path, path)) return i;
+  return -1;
+}
+// Ranura libre, o la que lleva mas tiempo sin usarse.
+static int galCacheSlot(){
+  int best = -1;
+  for(int i = 0; i < GAL_CACHE_N; i++){
+    if(galCache[i].state == GTH_EMPTY) return i;
+    if(best < 0 || galCache[i].useMs < galCache[best].useMs) best = i;
+  }
+  return best;
 }
 
-// ---- Miniaturas ----
-// Estado del destino de la fila que entrega el decodificador JPEG. Es
-// estatico porque el callback no puede llevar contexto de C++.
-static int galImgX, galImgY, galImgW, galImgH, galImgRows;
-
-static bool galJpegRow(void* user, int y, int w, const uint16_t* rgb){
+// Destino de la decodificacion de una miniatura.
+static GalThumb* galThumbDst = NULL;
+static bool galThumbRow(void* user, int y, int w, const uint16_t* rgb){
   (void)user;
-  int dy = galImgY + y;
-  if(dy < 0 || dy >= SCR_H) return true;
-  if(dy > galImgY + galImgH) return false;            // ya se lleno la caja
-  int n = w;
-  if(galImgX + n > SCR_W) n = SCR_W - galImgX;
-  if(n > 0) memcpy(gBuf + (size_t)dy * SCR_W + galImgX, rgb, (size_t)n * 2);
-  galImgRows = y + 1;
+  GalThumb* t = galThumbDst;
+  if(!t || !t->px) return false;
+  if(y >= GAL_THUMB_H) return false;
+  int n = w > GAL_THUMB_W ? GAL_THUMB_W : w;
+  if(n > 0) memcpy(t->px + (size_t)y * GAL_THUMB_W, rgb, (size_t)n * 2);
+  if(y + 1 > t->h) t->h = (uint16_t)(y + 1);
+  if(n > t->w)     t->w = (uint16_t)n;
   return true;
 }
-static void* galJpegAlloc(size_t n){
-  void* p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  return p ? p : malloc(n);
-}
-static void galJpegFree(void* p){ heap_caps_free(p); }
 
-static void galPaintSeg(int x0, int y0, int x1, int y1, uint16_t color, int radius, void* user){
-  (void)user;
-  strokeSegAA(galImgX + x0, galImgY + y0, galImgX + x1, galImgY + y1,
-              (float)(radius > 0 ? radius : 1), color);
+// Reproduce un dibujo de Paint dentro de la miniatura.
+static int galPaintOX = 0, galPaintOY = 0;
+static GalThumb* galPaintDst = NULL;
+static void galThumbSeg(int x0, int y0, int x1, int y1, uint16_t color, int radius, void* user){
+  (void)user; (void)radius;
+  GalThumb* t = galPaintDst;
+  if(!t || !t->px) return;
+  // Trazo de un pixel de grosor sobre el lienzo de la miniatura: es
+  // una vista previa, no el dibujo a tamano real.
+  int dx = abs(x1 - x0), dy = -abs(y1 - y0);
+  int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1, err = dx + dy;
+  for(int guard = 0; guard < 4096; guard++){
+    int px = galPaintOX + x0, py = galPaintOY + y0;
+    if((unsigned)px < GAL_THUMB_W && (unsigned)py < GAL_THUMB_H)
+      t->px[(size_t)py * GAL_THUMB_W + px] = color;
+    if(x0 == x1 && y0 == y1) break;
+    int e2 = 2 * err;
+    if(e2 >= dy){ err += dy; x0 += sx; }
+    if(e2 <= dx){ err += dx; y0 += sy; }
+  }
 }
 
-// Dibuja el contenido de un elemento dentro de la caja (x,y,w,h). Para
-// los JPEG hay un tope de tamano: por encima de el se ensena el marco
-// con su nombre en vez de gastar segundos de CPU en la rejilla.
-#define GAL_JPEG_MAX_BYTES (256 * 1024)
-static void galDrawThumb(int i, int x, int y, int w, int h){
-  if(galIsDraw[i]){
-    fillRect(x, y, w, h, rgb565(250,250,252));
+// Genera la miniatura de `path`. Devuelve la ranura, o -1.
+static int galThumbBuild(const char* path, int kind, uint32_t size){
+  int slot = galCacheSlot();
+  if(slot < 0) return -1;
+  GalThumb* t = &galCache[slot];
+  if(!t->px){
+    t->px = (uint16_t*)mediaAlloc((size_t)GAL_THUMB_W * GAL_THUMB_H * 2);
+    if(!t->px) return -1;                     // sin PSRAM: se dibuja el marco y ya
+  }
+  snprintf(t->path, sizeof(t->path), "%s", path);
+  t->useMs = millis();
+  t->w = t->h = 0;
+  t->state = GTH_FAIL;                        // hasta que se demuestre lo contrario
+  // Fondo de la miniatura: un gris neutro, para que una imagen que
+  // no llena la caja no ensene basura de la entrada anterior.
+  for(size_t i = 0; i < (size_t)GAL_THUMB_W * GAL_THUMB_H; i++) t->px[i] = rgb565(24,26,34);
+
+  if(kind == FLEXMED_DRAW){
     FlexPaintHdr hd;
-    if(flexPaintHeader(galPath[i], &hd) && hd.w && hd.h){
-      float sc = (float)w / (float)hd.w, sy = (float)h / (float)hd.h;
-      if(sy < sc) sc = sy;
-      galImgX = x + (w - (int)(hd.w * sc)) / 2;
-      galImgY = y + (h - (int)(hd.h * sc)) / 2;
-      flexPaintReplay(galPath[i], sc, 0, 0, galPaintSeg, NULL);
+    if(flexPaintHeader(path, &hd) && hd.w && hd.h){
+      for(size_t i = 0; i < (size_t)GAL_THUMB_W * GAL_THUMB_H; i++) t->px[i] = rgb565(250,250,252);
+      int ow, oh; mediaFitBox(hd.w, hd.h, GAL_THUMB_W, GAL_THUMB_H, ow, oh);
+      galPaintOX = (GAL_THUMB_W - ow) / 2;
+      galPaintOY = (GAL_THUMB_H - oh) / 2;
+      galPaintDst = t;
+      flexPaintReplay(path, (float)ow / (float)hd.w, 0, 0, galThumbSeg, NULL);
+      galPaintDst = NULL;
+      t->w = GAL_THUMB_W; t->h = GAL_THUMB_H;
+      t->state = GTH_OK;
     }
-    return;
+    return slot;
   }
-  fillRect(x, y, w, h, rgb565(28,30,38));
-  if(galSize[i] == 0 || galSize[i] > GAL_JPEG_MAX_BYTES){
-    drawTextC(x + w / 2, y + h / 2 - 8, "JPEG", 2, rgb565(150,156,170));
-    return;
+
+  // Video: la miniatura es el PRIMER fotograma REAL del archivo, no
+  // un icono generico. Cuesta una lectura y una decodificacion, la
+  // misma que una foto, porque en MJPEG un fotograma ES un JPEG.
+  if(kind == FLEXMED_VIDEO){
+    MediaStream st;
+    memset(&st, 0, sizeof(st));
+    if(!mediaStreamOpen(&st, path)) return slot;
+    FlexMediaIO io; mediaBindIO(&io, &st);
+    FlexAviCtx a;
+    if(flexAviOpen(&a, &io) == FLEXAVI_OK){
+      // Un fotograma de portada cabe de sobra en 96 KB; si no cabe,
+      // no se hace miniatura y se ensena el marco con la insignia.
+      const uint32_t cap = 96 * 1024;
+      uint8_t* fbuf = (uint8_t*)mediaAlloc(cap);
+      if(fbuf){
+        int n = flexAviReadFrame(&a, fbuf, cap, NULL);
+        if(n > 0){
+          galThumbDst = t;
+          if(flexJpegDecode(fbuf, (size_t)n, GAL_THUMB_W, GAL_THUMB_H, 0, NULL,
+                            galThumbRow, NULL, mediaAlloc, mediaFree) == FLEXJPG_OK)
+            t->state = GTH_OK;
+          galThumbDst = NULL;
+        }
+        mediaFree(fbuf);
+      }
+    }
+    mediaStreamClose(&st);
+    return slot;
   }
-  uint8_t* buf = (uint8_t*)heap_caps_malloc(galSize[i], MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if(!buf) buf = (uint8_t*)malloc(galSize[i]);
-  if(!buf){ drawTextC(x + w / 2, y + h / 2 - 8, "sin RAM", 1, rgb565(150,156,170)); return; }
-  int rd = flexFsReadBin(galPath[i], buf, galSize[i]);
+
+  if(kind != FLEXMED_PHOTO) return slot;
+  if(size == 0 || size > GAL_JPEG_MAX_BYTES) return slot;
+  uint8_t* buf = (uint8_t*)mediaAlloc(size);
+  if(!buf) return slot;
+  int rd = mediaReadWhole(path, buf, size);
   if(rd > 0){
-    FlexJpegInfo inf;
-    if(flexJpegProbe(buf, (size_t)rd, &inf) == FLEXJPG_OK){
-      int den = 1, dw = inf.width, dh = inf.height;
-      while(den < 8 && (dw / den > w || dh / den > h)) den *= 2;
-      galImgX = x + (w - dw / den) / 2;
-      galImgY = y + (h - dh / den) / 2;
-      galImgW = w; galImgH = h; galImgRows = 0;
-      int r = flexJpegDecode(buf, (size_t)rd, w, h, 0, NULL,
-                             galJpegRow, NULL, galJpegAlloc, galJpegFree);
-      if(r != FLEXJPG_OK && galImgRows == 0)
-        drawTextC(x + w / 2, y + h / 2 - 8, "no se puede abrir", 1, rgb565(150,156,170));
-    } else {
-      drawTextC(x + w / 2, y + h / 2 - 8, "no es JPEG", 1, rgb565(150,156,170));
+    galThumbDst = t;
+    // maxW/maxH = la caja: el decodificador elige el divisor y NO
+    // construye antes la version grande. Es lo que hace que una foto
+    // de 8 MP cueste una miniatura y no 8 megapixeles de trabajo.
+    if(flexJpegDecode(buf, (size_t)rd, GAL_THUMB_W, GAL_THUMB_H, 0, NULL,
+                      galThumbRow, NULL, mediaAlloc, mediaFree) == FLEXJPG_OK)
+      t->state = GTH_OK;
+    galThumbDst = NULL;
+  }
+  mediaFree(buf);
+  return slot;
+}
+
+// Vuelca una miniatura cacheada en la celda, centrada y sin estirar.
+static void galBlitThumb(const GalThumb* t, int x, int y, int w, int h){
+  if(!t || !t->px || t->w == 0 || t->h == 0) return;
+  int ox = x + (w - t->w) / 2, oy = y + (h - t->h) / 2;
+  for(int ry = 0; ry < t->h; ry++){
+    int dy = oy + ry;
+    if(dy < gClipY0 || dy > gClipY1 || dy < 0 || dy >= SCR_H) continue;
+    const uint16_t* src = t->px + (size_t)ry * GAL_THUMB_W;
+    if(gLand){                                   // hospedada en horizontal
+      for(int rx = 0; rx < t->w; rx++) px(ox + rx, dy, src[rx]);
+      continue;
+    }
+    int dx = ox, n = t->w;
+    if(dx < gClipX0){ src += (gClipX0 - dx); n -= (gClipX0 - dx); dx = gClipX0; }
+    if(dx + n > gClipX1 + 1) n = gClipX1 + 1 - dx;
+    if(dx < 0){ src -= dx; n += dx; dx = 0; }
+    if(dx + n > SCR_W) n = SCR_W - dx;
+    if(n > 0) memcpy(gBuf + (size_t)dy * SCR_W + dx, src, (size_t)n * 2);
+  }
+}
+
+// Dibuja el contenido de una celda: la miniatura si esta o se puede
+// hacer ahora, y si no un marco honesto con el nombre. `budget`
+// lleva la cuenta de las decodificaciones que quedan en este pase.
+static void galDrawCell(int nth, int x, int y, int w, int h, int &budget){
+  const char* path = galPathOf(nth);
+  if(!path[0]) return;
+  int slot = galCacheFind(path);
+  if(slot < 0){
+    if(budget <= 0){ galMorePending = true; }
+    else {
+      budget--;
+      slot = galThumbBuild(path, galKindOf(nth), galSizeOf(nth));
     }
   }
-  free(buf);
+  if(slot >= 0){
+    galCache[slot].useMs = millis();
+    if(galCache[slot].state == GTH_OK){ galBlitThumb(&galCache[slot], x, y, w, h); return; }
+  }
+  // Sin miniatura: marco con la clase y el nombre. Nunca una imagen
+  // inventada en el hueco de un archivo que no se pudo leer.
+  fillRect(x, y, w, h, rgb565(28,30,38));
+  const int k = galKindOf(nth);
+  const char* tag = (k == FLEXMED_VIDEO) ? "VIDEO"
+                  : (k == FLEXMED_AUDIO) ? "AUDIO"
+                  : (k == FLEXMED_DRAW)  ? "DIBUJO" : "JPEG";
+  drawTextC(x + w / 2, y + h / 2 - 10, tag, 2, rgb565(150,156,170));
+  if(slot >= 0 && galCache[slot].state == GTH_FAIL)
+    drawTextC(x + w / 2, y + h / 2 + 12, "sin vista previa", 1, rgb565(120,124,140));
 }
 
 // ---- Geometria de la rejilla ----
+static int galHeadH(){ return 104; }            // titulo + pestanas
 static void galCellRect(int i, int &x, int &y, int &w, int &h){
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
   int pad = uiPad(), gap = uiGap();
@@ -29637,15 +31564,29 @@ static void galCellRect(int i, int &x, int &y, int &w, int &h){
   h = w;
   int c = i % GAL_COLS, r = i / GAL_COLS;
   x = bx + pad + c * (w + gap);
-  y = by + 64 + r * (h + 26) - galScroll;
+  y = by + galHeadH() + r * (h + 26) - galScroll;
 }
 static int galMaxScroll(){
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
   int x, y, w, h; galCellRect(0, x, y, w, h);
-  int rows = (galN + GAL_COLS - 1) / GAL_COLS;
-  int need = 64 + rows * (h + 26) + 40;
+  int rows = (galCount() + GAL_COLS - 1) / GAL_COLS;
+  int need = galHeadH() + rows * (h + 26) + 40;
   int m = need - bh;
   return m > 0 ? m : 0;
+}
+
+// Insignia de video sobre la miniatura: un triangulo dentro de un
+// circulo, en la esquina. Es informacion (esto se reproduce), no
+// decoracion.
+static void galVideoBadge(int x, int y, int w, int h){
+  int cx = x + w - 20, cy = y + h - 20;
+  fillCircle(cx, cy, 13, rgb565(0,0,0));
+  fillCircle(cx, cy, 12, rgb565(255,255,255));
+  fillTriangle(cx - 4, cy - 6, cx - 4, cy + 6, cx + 6, cy, rgb565(20,22,30));
+}
+static void galSdBadge(int x, int y){
+  fillRoundRect(x + 8, y + 8, 22, 14, 4, rgb565(0,0,0));
+  drawTextC(x + 19, y + 11, "SD", 1, rgb565(230,234,244));
 }
 
 static void galRenderGrid(){
@@ -29653,46 +31594,86 @@ static void galRenderGrid(){
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
   fillRect(bx, by, bw, bh, WIN_BG);
   int pad = uiPad();
+  galMorePending = false;
+  int budget = GAL_THUMB_PER_PASS;
+
   drawText(bx + pad, by + 14, "Galer\xC3\xAD" "a", 4, TH_TXT);
   { char cnt[48];
-    snprintf(cnt, sizeof(cnt), "%d elemento%s", galN, galN == 1 ? "" : "s");
+    int n = galCount();
+    snprintf(cnt, sizeof(cnt), "%d elemento%s", n, n == 1 ? "" : "s");
     drawTextR(bx + bw - pad, by + 26, cnt, 1, TH_TXT2); }
-  // Tres puntos: menu de la app (papelera) cuando no hay nada seleccionado.
   for(int i = 0; i < 3; i++) fillCircle(bx + bw - pad - 4, by + 52 + i * 12, 4, TH_NAV);
 
-  if(!flexFsReady()){
-    drawTextC(bx + bw / 2, by + bh / 2 - 20, "Sin almacenamiento", 3, TH_TXT2);
-    drawTextC(bx + bw / 2, by + bh / 2 + 16, flexFsError(), 1, TH_MUTE);
-  } else if(galN == 0){
-    drawTextC(bx + bw / 2, by + bh / 2 - 30, "No hay im\xC3\xA1genes", 3, TH_TXT2);
-    drawTextC(bx + bw / 2, by + bh / 2 + 6, "Aqu\xC3\xAD" " apareceran las fotos de /Documentos", 1, TH_MUTE);
-    drawTextC(bx + bw / 2, by + bh / 2 + 26, "y los dibujos de Paint", 1, TH_MUTE);
+  // ---- Pestanas ----
+  const int tabY = by + 62, tw = (bw - 2 * pad) / GAL_TABS;
+  for(int i = 0; i < GAL_TABS; i++){
+    int tx = bx + pad + i * tw;
+    if(i == galTab) fillRoundRect(tx + 2, tabY, tw - 4, 28, 14, TH_PRIM);
+    drawTextC(tx + tw / 2, tabY + 8, GAL_TAB_NAME[i], 1, i == galTab ? TH_ONACC : TH_TXT2);
   }
-  for(int i = 0; i < galN; i++){
+
+  const int n = galCount();
+  // Estado REAL. Cada caso dice algo distinto porque son problemas
+  // distintos: no es lo mismo "no hay fotos" que "no hay memoria".
+  if(mediaIndexBusy()){
+    char pr[56];
+    snprintf(pr, sizeof(pr), "Indexando... %u revisados, %d encontrados",
+             (unsigned)mediaIndexSeen(), mediaIndexN());
+    drawTextC(bx + bw / 2, by + galHeadH() - 16, pr, 1, TH_TXT2);
+  } else if(gMedIx.full){
+    drawTextC(bx + bw / 2, by + galHeadH() - 16,
+              "Hay mas archivos de los que caben en el " "\xC3\xAD" "ndice", 1, TH_WARN);
+  }
+  if(n == 0 && !mediaIndexBusy()){
+    if(!flexFsReady() && !flexSdReady()){
+      drawTextC(bx + bw / 2, by + bh / 2 - 20, "Sin almacenamiento", 3, TH_TXT2);
+      drawTextC(bx + bw / 2, by + bh / 2 + 16, flexFsError(), 1, TH_MUTE);
+    } else if(galTab == 4 && !flexSdReady()){
+      drawTextC(bx + bw / 2, by + bh / 2 - 20, "Sin tarjeta SD", 3, TH_TXT2);
+      drawTextC(bx + bw / 2, by + bh / 2 + 16, flexSdError(), 1, TH_MUTE);
+    } else {
+      drawTextC(bx + bw / 2, by + bh / 2 - 30, "No hay nada aqu" "\xC3\xAD", 3, TH_TXT2);
+      drawTextC(bx + bw / 2, by + bh / 2 + 6,
+                "JPEG y AVI MJPEG de la memoria interna", 1, TH_MUTE);
+      drawTextC(bx + bw / 2, by + bh / 2 + 26, "y de la tarjeta SD", 1, TH_MUTE);
+    }
+  }
+
+  for(int i = 0; i < n; i++){
     int x, y, w, h; galCellRect(i, x, y, w, h);
-    if(y + h < by + 40 || y > by + bh) continue;
+    // SOLO LAS VISIBLES. Las celdas fuera de pantalla ni se dibujan
+    // ni piden miniatura: por eso una galeria de 300 fotos cuesta lo
+    // mismo que una de 9.
+    if(y + h < by + galHeadH() - 40 || y > by + bh) continue;
     int rad = w / 10; if(rad < 3) rad = 3;
     fillRoundRect(x, y, w, h, rad, TH_SURF2);
-    // El recorte deja la miniatura dentro de la celda: el decodificador
-    // escribe filas completas y sin esto se saldria por los bordes.
     int ox0 = gClipX0, ox1 = gClipX1, oy0 = gClipY0, oy1 = gClipY1;
     gClipX0 = x; gClipX1 = x + w - 1; gClipY0 = y; gClipY1 = y + h - 1;
-    galDrawThumb(i, x + 2, y + 2, w - 4, h - 4);
+    galDrawCell(i, x + 2, y + 2, w - 4, h - 4, budget);
     gClipX0 = ox0; gClipX1 = ox1; gClipY0 = oy0; gClipY1 = oy1;
-    if(galMulti && (galMask & (1UL << i))){
+
+    if(galKindOf(i) == FLEXMED_VIDEO) galVideoBadge(x, y, w, h);
+    { int idx = galItemAt(i);
+      if(idx >= 0 && gMedStore[idx].vol == FLEXMED_VOL_SD) galSdBadge(x, y); }
+
+    if(galMulti && galIsSel(i)){
       drawRoundRect(x, y, w, h, rad, TH_PRIM);
       drawRoundRect(x + 1, y + 1, w - 2, h - 2, rad, TH_PRIM);
       fillCircle(x + w - 16, y + 16, 10, TH_PRIM);
       strokeSegAA(x + w - 21, y + 16, x + w - 17, y + 21, 2.2f, TH_ONACC);
       strokeSegAA(x + w - 17, y + 21, x + w - 10, y + 11, 2.2f, TH_ONACC);
     }
-    drawTextClip(x, y + h + 4, galName[i], 1, TH_TXT2, x + w);
+    drawTextClip(x, y + h + 4, galNameOf(i), 1, TH_TXT2, x + w);
   }
+
   if(galMulti){
     int aby = by + bh - 68;
     if(uiGlass) drawLiquidGlassPanel(bx + 12, aby, bw - 24, 56, 16, TH_GLASS2);
     else        fillRoundRect(bx + 12, aby, bw - 24, 56, 16, TH_SURF2);
-    drawText(bx + 28, aby + 18, "Selecci\xC3\xB3n", 2, TH_TXT);
+    char sel[40];
+    snprintf(sel, sizeof(sel), "%u de %d (m\xC3\xA1x. %d)", (unsigned)galSelN, GAL_SEL_MAX, GAL_SEL_MAX);
+    drawText(bx + 28, aby + 10, "Selecci\xC3\xB3n", 2, TH_TXT);
+    drawText(bx + 28, aby + 32, sel, 1, TH_TXT2);
     drawTextR(bx + bw - 140, aby + 18, "Papelera", 2, TH_WARN);
     drawTextR(bx + bw - 28,  aby + 18, "Salir", 2, TH_TXT2);
   }
@@ -29700,59 +31681,67 @@ static void galRenderGrid(){
   flxFlush(WIN_TOP, WIN_BOT);
 }
 
-// ---- Un elemento a pantalla completa ----
-static void galRenderOne(){
-  setBuf(fb);
-  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
-  fillRect(bx, by, bw, bh, WIN_BG);
-  int pad = uiPad();
-  if(galSelIdx < 0 || galSelIdx >= galN){ galView = 0; galRenderGrid(); return; }
-  drawTextClip(bx + pad, by + 14, galName[galSelIdx], 3, TH_TXT, bx + bw - pad);
-  char sz[24]; flexFsFmtSize(galSize[galSelIdx], sz, sizeof(sz));
-  drawTextR(bx + bw - pad, by + 52, sz, 1, TH_TXT2);
-  int top = by + 74, hgt = bh - 74 - 20;
-  int ox0 = gClipX0, ox1 = gClipX1, oy0 = gClipY0, oy1 = gClipY1;
-  gClipX0 = bx + pad; gClipX1 = bx + bw - pad - 1; gClipY0 = top; gClipY1 = top + hgt - 1;
-  galDrawThumb(galSelIdx, bx + pad, top, bw - 2 * pad, hgt);
-  gClipX0 = ox0; gClipX1 = ox1; gClipY0 = oy0; gClipY1 = oy1;
-  drawTextC(bx + bw / 2, by + bh - 18, "Toca para volver", 1, TH_MUTE);
-  if(fkMenuOn) fkMenuDraw();
-  flxFlush(WIN_TOP, WIN_BOT);
+static void galRender(){ galRenderGrid(); }
+
+// -------------------------------------------------------------
+//  ABRIR UN ELEMENTO
+//  ------------------------------------------------------------
+//  Se lo lleva el visor de Multimedia, que es el unico de todo el
+//  sistema: ajuste sin deformar, orientacion Auto/Vertical/
+//  Horizontal, zoom, desplazamiento y reproduccion. Al volver del
+//  visor se regresa AQUI, porque de aqui se salio.
+// -------------------------------------------------------------
+static void galOpenPath(const char* path){
+  if(!path || !path[0]) return;
+  gMediaReturnApp = IC_GALERIA;
+  mediaOpenInPlayer(path);
 }
 
-static void galRender(){
-  if(galView == 1) galRenderOne();
-  else             galRenderGrid();
+// ---- Acciones del menu contextual (con Flex Vault) ----
+// En la tarjeta SOLO SE LEE: borrar, renombrar, mover a la papelera
+// y cifrar en la boveda quedan fuera. Son archivos del usuario y la
+// papelera y la boveda viven ademas en la particion interna.
+static bool galSdReadOnlyGuard(const char* p){
+  if(!flexSdIsSdPath(p)) return false;
+  mediaNotify(MOD_SDCARD, "Solo lectura en la tarjeta",
+              "Flex OS no borra ni mueve tus archivos");
+  return true;
 }
 
-// ---- Acciones del menu contextual ----
 static void galMenuAction(int act){
-  char p[FLEXFS_PATH_MAX];
-  if(galSelIdx >= 0 && galSelIdx < galN) snprintf(p, sizeof(p), "%s", galPath[galSelIdx]);
-  else p[0] = 0;
+  char p[FLEXMED_PATH_MAX];
+  snprintf(p, sizeof(p), "%s", (galSelIdx >= 0) ? galPathOf(galSelIdx) : "");
+
   if(act == FK_ACT_SEL){
-    galMulti = true; galMask = 0;
-    if(galSelIdx >= 0) galMask |= (1UL << galSelIdx);
+    galMulti = true; galClearSel();
+    if(galSelIdx >= 0) galToggleSel(galSelIdx);
   } else if(act == FK_ACT_DEL){
-    if(p[0]){ fkAskOpen("\xC2\xBF" "Borrar definitivamente?", galName[galSelIdx]); return; }
+    if(p[0]){
+      if(galSdReadOnlyGuard(p)){ galRender(); return; }
+      fkAskOpen("\xC2\xBF" "Borrar definitivamente?", galNameOf(galSelIdx));
+      return;
+    }
   } else if(act == FK_ACT_REN){
     if(p[0]){
-      char stem[FLEXFS_NAME_MAX]; flexFsStem(galName[galSelIdx], stem, sizeof(stem));
+      if(galSdReadOnlyGuard(p)){ galRender(); return; }
+      char stem[FLEXFS_NAME_MAX]; flexFsStem(galNameOf(galSelIdx), stem, sizeof(stem));
       fkNameOpen("Renombrar", stem);
       return;
     }
   } else if(act == FK_ACT_TRASH){
-    if(p[0]){ flexFsTrash(p); galSelIdx = -1; galView = 0; galReload(); }
-    else { fkTrashOpen(); return; }
-  } else if(act == FK_ACT_VAULT){
-    // FLEX VAULT: la imagen (o el dibujo) se cifra dentro de la boveda y
-    // desaparece de la galeria normal. A partir de ahi solo se abre desde
-    // Galeria privada.
     if(p[0]){
-      galSelIdx = -1; galView = 0;
+      if(galSdReadOnlyGuard(p)){ galRender(); return; }
+      flexFsTrash(p); galSelIdx = -1; mediaIndexRescan();
+    } else { fkTrashOpen(); return; }
+  } else if(act == FK_ACT_VAULT){
+    // FLEX VAULT: la imagen (o el dibujo) se cifra dentro de la
+    // boveda y desaparece de la galeria normal. Igual que antes.
+    if(p[0]){
+      if(galSdReadOnlyGuard(p)){ galRender(); return; }
+      galSelIdx = -1;
       if(vaultMoveRequest(p, FXV_KIND_PHOTO)){
         if(gState == ST_VAULT) return;         // se fue a pedir la clave
-        galReload();
+        mediaIndexRescan();
       }
     }
   }
@@ -29761,21 +31750,23 @@ static void galMenuAction(int act){
 
 static void galTick(){
   // --- Dialogos modales del kit de ficheros ---
-  if(fkTrashOn){ if(!fkTrashTick()){ galReload(); galRender(); } return; }
+  if(fkTrashOn){ if(!fkTrashTick()){ mediaIndexRescan(); galRender(); } return; }
   if(fkAskOn){
     int r = fkAskTick();
-    if(r == 1 && galSelIdx >= 0 && galSelIdx < galN){
-      flexFsDelete(galPath[galSelIdx]);        // borrado DEFINITIVO real
-      galSelIdx = -1; galView = 0; galReload();
+    if(r == 1 && galSelIdx >= 0){
+      const char* p = galPathOf(galSelIdx);
+      if(p[0] && !flexSdIsSdPath(p)) flexFsDelete(p);   // borrado DEFINITIVO real
+      galSelIdx = -1; mediaIndexRescan();
     }
     if(r != 0) galRender();
     return;
   }
   if(fkNameOn){
     int r = fkNameTick();
-    if(r == 1 && galSelIdx >= 0 && galSelIdx < galN){
-      flexFsRename(galPath[galSelIdx], fkNameBuf);
-      galSelIdx = -1; galReload();
+    if(r == 1 && galSelIdx >= 0){
+      const char* p = galPathOf(galSelIdx);
+      if(p[0] && !flexSdIsSdPath(p)) flexFsRename(p, fkNameBuf);
+      galSelIdx = -1; mediaIndexRescan();
     }
     if(r != 0) galRender();
     return;
@@ -29790,11 +31781,16 @@ static void galTick(){
     return;
   }
 
-  // --- Un elemento a pantalla completa: tocar vuelve a la rejilla ---
-  if(galView == 1){
-    if(T.tap){ galView = 0; galSelIdx = -1; galRender(); }
-    return;
+  // Mientras el indice crece, o mientras queden miniaturas por
+  // generar, se repinta -- pero NO en cada vuelta: solo cuando hay
+  // algo nuevo que ensenar. Asi la rejilla se rellena sola sin
+  // gastar cuadros en repintar lo mismo.
+  static int galLastN = -1;
+  if(mediaIndexBusy()){
+    int n = galCount();
+    if(n != galLastN){ galLastN = n; galRender(); return; }
   }
+  if(galMorePending && !T.down){ galRender(); return; }
 
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
   int pad = uiPad();
@@ -29814,12 +31810,10 @@ static void galTick(){
   }
 
   // --- Pulsacion larga: menu del elemento, con Flex Vault ---
-  // Los dialogos del kit dibujan en coordenadas de pantalla completa, asi
-  // que dentro de una ventana de Modo PC no se ofrecen: saldrian fuera de
-  // la ventana.
   if(!gHosted && !gLand && T.down && !galLongFired && (millis() - T.downMs) > 550
      && abs(T.x - T.startX) < 14 && abs(T.y - T.startY) < 14){
-    for(int i = 0; i < galN; i++){
+    int n = galCount();
+    for(int i = 0; i < n; i++){
       int x, y, w, h; galCellRect(i, x, y, w, h);
       if(T.startX >= x && T.startX <= x + w && T.startY >= y && T.startY <= y + h){
         galLongFired = true; galSelIdx = i;
@@ -29833,49 +31827,73 @@ static void galTick(){
   if(!T.tap) return;
   if(galDragging){ galDragging = false; return; }
 
+  // --- Pestanas ---
+  const int tabY = by + 62, tw = (bw - 2 * pad) / GAL_TABS;
+  if(T.y >= tabY && T.y <= tabY + 28){
+    int k = (T.x - bx - pad) / (tw > 0 ? tw : 1);
+    if(k >= 0 && k < GAL_TABS && k != galTab){
+      galTab = k; galScroll = 0; galSelIdx = -1;
+      galMulti = false; galClearSel();
+      if(galTab == 4){ flexSdPoke(); }         // al pedir la tarjeta, comprobarla
+      galRender();
+    }
+    return;
+  }
+
   // --- Barra del modo seleccion ---
   if(galMulti){
     int aby = by + bh - 68;
     if(T.y >= aby && T.y <= aby + 56){
-      if(T.x > bx + bw - 100){ galMulti = false; galMask = 0; galRender(); return; }
+      if(T.x > bx + bw - 100){ galMulti = false; galClearSel(); galRender(); return; }
       if(T.x > bx + bw - 230){
-        for(int i = 0; i < galN; i++) if(galMask & (1UL << i)) flexFsTrash(galPath[i]);
-        galMulti = false; galMask = 0; galSelIdx = -1; galReload(); galRender(); return;
+        for(int k = 0; k < galSelN; k++){
+          const char* p = galPathOf(galSel[k]);
+          if(p[0] && !flexSdIsSdPath(p)) flexFsTrash(p);
+        }
+        galMulti = false; galClearSel(); galSelIdx = -1;
+        mediaIndexRescan(); galRender();
+        return;
       }
       return;
     }
   }
   // --- Menu de la app (papelera) ---
-  if(!galMulti && T.x > bx + bw - pad - 26 && T.y < by + 78){
+  if(!galMulti && T.x > bx + bw - pad - 26 && T.y < by + 56){
     galSelIdx = -1;
     fkMenuOpen(bx + bw - 120, by + 70);
     return;
   }
-  // --- Toque sobre un elemento ---
-  for(int i = 0; i < galN; i++){
-    int x, y, w, h; galCellRect(i, x, y, w, h);
-    if(T.x < x || T.x > x + w || T.y < y || T.y > y + h) continue;
-    if(galMulti){ galMask ^= (1UL << i); galRender(); return; }
-    galSelIdx = i; galView = 1;
-    galRender();
-    return;
-  }
+  // --- Toque sobre un elemento: se abre en el visor ---
+  { int n = galCount();
+    for(int i = 0; i < n; i++){
+      int x, y, w, h; galCellRect(i, x, y, w, h);
+      if(T.x < x || T.x > x + w || T.y < y || T.y > y + h) continue;
+      if(galMulti){ galToggleSel(i); galRender(); return; }
+      galSelIdx = i;
+      snprintf(galResumePath, sizeof(galResumePath), "%s", galPathOf(i));
+      galOpenPath(galPathOf(i));
+      return;
+    } }
 }
 
 static void galEnter(){
+  if(!galCacheInit) galCacheReset();
   // gRelayout = true significa "re-dibuja con la geometria nueva", no
   // "empieza de cero": conserva la vista y el scroll del usuario.
   if(!gRelayout){
-    galView = 0; galSelIdx = -1; galScroll = 0;
-    galMulti = false; galMask = 0;
+    galSelIdx = -1; galScroll = 0;
+    galMulti = false; galClearSel();
     fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
   }
-  galReload();
+  // Al abrir la Galeria se comprueba la tarjeta en el acto y se
+  // reindexa si hace falta (si no, no se toca nada).
+  flexSdPoke();
+  flexSdTick();
+  mediaIndexEnsure();
   galRender();
 }
 
-// ATRAS deshace primero las superficies/selecciones propias de Galeria y luego
-// la vista a pantalla completa. Asi el boton no expulsa la app desde una foto.
+// ATRAS deshace primero las superficies/selecciones propias de Galeria.
 static bool galBackLayer(){
   if(fkMenuOn || fkNameOn || fkAskOn || fkTrashOn){
     fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
@@ -29883,47 +31901,55 @@ static bool galBackLayer(){
     return true;
   }
   if(galMulti){
-    galMulti = false; galMask = 0; galSelIdx = -1;
+    galMulti = false; galClearSel(); galSelIdx = -1;
     galRender();
     return true;
   }
   return false;
 }
-static bool galBackScreen(){
-  if(galView != 1) return false;
-  galView = 0; galSelIdx = -1;
-  galRender();
-  return true;
-}
+// La vista a pantalla completa ya no vive aqui (la tiene Multimedia),
+// asi que no hay una segunda pantalla propia que deshacer.
+static bool galBackScreen(){ return false; }
 
 static void galSuspend(){
   galResumePath[0] = 0;
-  if(galSelIdx >= 0 && galSelIdx < galN)
-    snprintf(galResumePath, sizeof(galResumePath), "%s", galPath[galSelIdx]);
+  if(galSelIdx >= 0) snprintf(galResumePath, sizeof(galResumePath), "%s", galPathOf(galSelIdx));
   galDragging = false; galLongFired = false;
-  // El kit de archivos es global y tambien lo usan Paint, Notas y Archivos.
-  // No puede quedar modal mientras otra app reutiliza esos mismos flags.
+  // El kit de archivos es global y tambien lo usan Paint, Notas y
+  // Archivos: no puede quedar modal mientras otra app lo reutiliza.
   fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
-  // Una seleccion multiple basada en indices deja de ser segura si Paint o
-  // Archivos cambia la lista en segundo plano. Se descarta solo esa capa
-  // transitoria; la foto abierta y el scroll si se conservan.
-  galMulti = false; galMask = 0;
+  // Una seleccion por indices deja de ser segura si otra app cambia
+  // la lista en segundo plano. Se descarta solo esa capa transitoria.
+  galMulti = false; galClearSel();
 }
 
 static void galResume(){
-  int oldView = galView;
-  galReload();
+  flexSdPoke();
+  flexSdTick();
+  mediaIndexEnsure();
   galSelIdx = -1;
   if(galResumePath[0]){
-    for(int i = 0; i < galN; i++) if(!strcmp(galPath[i], galResumePath)){ galSelIdx = i; break; }
+    int n = galCount();
+    for(int i = 0; i < n; i++)
+      if(!strcmp(galPathOf(i), galResumePath)){ galSelIdx = i; break; }
   }
-  galView = (oldView == 1 && galSelIdx >= 0) ? 1 : 0;
   int maxS = galMaxScroll();
   if(galScroll < 0) galScroll = 0;
   if(galScroll > maxS) galScroll = maxS;
   galDragging = false; galLongFired = false;
   galRender();
 }
+
+// Cerrar la app suelta la cache de miniaturas ENTERA. Son cientos de
+// KB de PSRAM que no tienen por que seguir reservados cuando la
+// Galeria no esta abierta.
+static void galCloseApp(){
+  galCacheFree();
+  galSelIdx = -1; galScroll = 0;
+  galMulti = false; galClearSel();
+}
+
+
 // #############################################################
 // ##  FLEX VAULT  ·  INTERFAZ (Carpeta segura)
 // ##  Ajustes -> Seguridad y privacidad -> Flex Vault
@@ -32201,9 +34227,11 @@ static void safeToastTick(){
 static void safeClearCaches(){
   int n = fsWipeDir(FS_DIR_CACHE);
   if(blurBg){ free(blurBg); blurBg = NULL; }
-  if(vidBufA){ free(vidBufA); vidBufA = NULL; }
-  if(vidBufB){ free(vidBufB); vidBufB = NULL; }
-  vidFront = vidBack = NULL;
+  // El reproductor ya no tiene doble buffer de video: lo unico
+  // grande que puede tener reservado es el fotograma comprimido y la
+  // tira del volcado girado, y los dos los suelta vidReleaseMedia
+  // por su unico camino de liberacion.
+  if(gAppState[IC_MULTIMEDIA] == ALIFE_CLOSED) vidReleaseMedia(false);
   if(camScene){ free(camScene); camScene = NULL; }
   if(pStroke && gAppState[IC_PAINT] == ALIFE_CLOSED){ free(pStroke); pStroke = NULL; }
   qsDirty = true; gHomeDirty = true;
@@ -32397,6 +34425,22 @@ void setup(){
     if(!gFrPending && !gSafeMode) flexPkgBegin();
   }
 
+  // TARJETA microSD. Solo se PREPARA el controlador (regulador
+  // interno + pines): no se monta aqui. Montar en setup() haria que
+  // arrancar sin tarjeta costara el tiempo de un intento fallido
+  // cada vez; el primer flexSdTick() de loop() ya lo intenta, y
+  // desde ahi la insercion en caliente funciona igual.
+  if(!flexSdBegin())
+    Serial.printf("[SD] controlador no disponible: %s\n", flexSdError());
+
+  // AUDIO. Va DESPUES del tactil a proposito: el ES8311 cuelga del
+  // MISMO bus I2C que el GT911 (GPIO7/8), asi que se aprovecha el
+  // Wire que ya esta inicializado en vez de reconfigurar el bus por
+  // debajo del panel. Si el codec no responde, el sistema sigue
+  // igual y ninguna pantalla ensena controles de sonido.
+  if(!flexAudioBegin())
+    Serial.printf("[AUDIO] no disponible: %s\n", flexAudioError());
+
   // Una recuperacion interrumpida solo necesita pantalla, tactil, NVS y FS.
   // No se cargan cuenta, boveda, tienda, navegador ni red antes de terminar.
   if(gFrPending){ setBacklight(gBright); frResumeAfterBoot(); return; }
@@ -32554,6 +34598,7 @@ void loop(){
   notifHandleTouch();     // la isla intercepta toques dentro de sus tarjetas (Fase 1)
   flexOtaTouchBridge();   // OTA: si hay overlay visible, se queda el toque antes que nadie
   hwDetectTick();         // deteccion I2C incremental, mismo contexto que el tactil (Fase 2)
+  mediaStorageTick();     // tarjeta microSD: sondeo barato + un lote del indice
   if(!gSafeMode){
     wifiAutoReconnectTick();// reconexion WiFi diferida
     ntpTick();              // la red corre en su tarea, nunca aqui

@@ -19,6 +19,9 @@
 #include "FlexOS_Browser.h"
 #include "FlexOS_Vault.h"
 #include "FlexOS_Weather.h"
+#include "FlexOS_SD.h"
+#include "FlexOS_Audio.h"
+#include <string.h>
 
 // ---- OTA ----
 void        flexOtaBegin(){}
@@ -346,3 +349,62 @@ int      flexFsCount(const char*){ return 0; }
 bool     flexFsMkdir(const char*){ return false; }
 bool     flexFsWriteBinAtomic(const char*, const void*, size_t){ return false; }
 bool     flexFsFactoryErase(){ return false; }
+
+// ---- Tarjeta microSD (FlexOS_SD.cpp) ----
+// El modulo real habla con SD_MMC y con el regulador interno del P4:
+// nada de eso existe en el PC, asi que aqui se devuelve el mismo
+// camino que toma la placa cuando NO hay tarjeta. Las pantallas que
+// dependen de la tarjeta ejercitan ese camino, que es justo el que
+// hay que comprobar que no rompe nada.
+bool        flexSdBegin(){ return false; }
+bool        flexSdMount(){ return false; }
+void        flexSdUnmount(){}
+bool        flexSdReady(){ return false; }
+int         flexSdState(){ return FLEXSD_ABSENT; }
+const char* flexSdError(){ return "Sin tarjeta insertada"; }
+uint32_t    flexSdGeneration(){ return 1; }
+bool        flexSdTick(){ return false; }
+void        flexSdPoke(){}
+void        flexSdBusySet(bool){}
+uint64_t    flexSdTotalBytes(){ return 0; }
+uint64_t    flexSdUsedBytes(){ return 0; }
+uint64_t    flexSdFreeBytes(){ return 0; }
+void        flexSdRefreshUsage(){}
+const char* flexSdCardTypeName(){ return "-"; }
+const char* flexSdFsName(){ return "-"; }
+bool        flexSdIsSdPath(const char* p){
+  if(!p || strncmp(p, "/sdcard", 7) != 0) return false;
+  return p[7] == 0 || p[7] == '/';
+}
+int         flexSdListFrom(const char*, FlexFsEntry*, int, int){ return -1; }
+int         flexSdList(const char*, FlexFsEntry*, int){ return -1; }
+bool        flexSdExists(const char*){ return false; }
+bool        flexSdIsDir(const char*){ return false; }
+uint64_t    flexSdSize(const char*){ return 0; }
+bool        flexSdMkdirFlexOS(const char*){ return false; }
+bool        flexSdEnsureMediaDirs(){ return false; }
+bool        flexSdOpen(FlexSdFile*, const char*){ return false; }
+void        flexSdClose(FlexSdFile* f){ if(f){ f->h = NULL; f->gen = 0; f->size = 0; f->pos = 0; } }
+bool        flexSdIsOpen(const FlexSdFile*){ return false; }
+int         flexSdRead(FlexSdFile*, void*, uint32_t){ return -1; }
+bool        flexSdSeek(FlexSdFile*, uint32_t){ return false; }
+uint32_t    flexSdTell(const FlexSdFile* f){ return f ? f->pos : 0; }
+uint32_t    flexSdFileSize(const FlexSdFile* f){ return f ? f->size : 0; }
+int         flexSdWriteBin(const char*, const void*, size_t){ return FLEXSD_W_ERR; }
+int         flexSdReadBin(const char*, void*, size_t){ return -1; }
+
+// ---- Audio (FlexOS_Audio.cpp) ----
+// Doble con el codec AUSENTE: es el estado en el que la interfaz NO
+// debe dibujar ningun control de sonido. Que las pruebas corran por
+// aqui comprueba precisamente eso.
+bool        flexAudioBegin(){ return false; }
+bool        flexAudioAvailable(){ return false; }
+const char* flexAudioError(){ return "Sin codec de audio"; }
+bool        flexAudioStartPcm(uint32_t, uint16_t, uint16_t){ return false; }
+int         flexAudioWrite(const void*, size_t){ return -1; }
+void        flexAudioStop(){}
+bool        flexAudioPlaying(){ return false; }
+void        flexAudioSetVolume(uint8_t){}
+uint8_t     flexAudioVolume(){ return FLEXAUDIO_VOL_DEF; }
+void        flexAudioSetMuted(bool){}
+bool        flexAudioMuted(){ return false; }

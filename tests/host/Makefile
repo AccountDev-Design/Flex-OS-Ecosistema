@@ -43,7 +43,8 @@ JPEG_SRC := $(ROOT)/FlexOS_JPEG.cpp
 APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net \
-        $(BUILD)/test_vault $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors
+        $(BUILD)/test_vault $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
+        $(BUILD)/test_media
 TOOLS := $(BUILD)/jpegcheck
 
 .PHONY: all run all-boards fixtures clean ino
@@ -58,6 +59,17 @@ $(BUILD)/test_jpeg: test_jpeg.cpp $(JPEG_SRC) $(ROOT)/FlexOS_JPEG.h | $(BUILD)
 
 $(BUILD)/test_browser: test_browser.cpp $(CORE_SRC) $(ROOT)/FlexOS_Browser.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_browser.cpp $(CORE_SRC)
+
+# --- Medios: clasificacion, demultiplexado de AVI/MJPEG, WAV e indice ---
+# Nucleo PURO (no toca Arduino ni el sistema de archivos): se compila
+# igual que el del navegador, CON sanitizers. Aqui es obligatorio --
+# este modulo recorre cabeceras RIFF que vienen de una tarjeta que
+# puede traer cualquier cosa, y un desplazamiento mal calculado sobre
+# un AVI corrupto no puede quedarse en "parece que funciona".
+MEDIA_SRC := $(ROOT)/FlexOS_Media.cpp
+
+$(BUILD)/test_media: test_media.cpp $(MEDIA_SRC) $(ROOT)/FlexOS_Media.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -o $@ test_media.cpp $(MEDIA_SRC)
 
 # --- Flex Link / Flex Phone: protocolo y modelo del telefono ---
 # Nucleo PURO (sin Arduino), asi que se compila igual que el del
@@ -182,7 +194,7 @@ ino: ino_compile.cpp $(INO_SRC) $(INO_BRIDGES) check_protos.py check_wiring.py |
 # verdad hace que un cambio de firma o una llamada mal cableada salte
 # aqui. Los modulos ademas no tocan Arduino, asi que no necesitan dobles.
 $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_BRIDGES) $(JPEG_SRC) \
-                   $(FLNKSRC) $(FLPSRC) $(FLPLINK) $(CORE_SRC) | $(BUILD)
+                   $(FLNKSRC) $(FLPSRC) $(FLPLINK) $(CORE_SRC) $(MEDIA_SRC) | $(BUILD)
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -x c++ -c ino_compile.cpp -o $(BUILD)/ino_compile.o
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -c ino_extern_stubs.cpp -o $(BUILD)/ino_extern_stubs.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(JPEG_SRC) -o $(BUILD)/ino_jpeg.o
@@ -190,9 +202,10 @@ $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_BRIDGES
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(FLPSRC)  -o $(BUILD)/ino_flexphone.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(FLPLINK) -o $(BUILD)/ino_flexphonelink.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(CORE_SRC) -o $(BUILD)/ino_brcore.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(MEDIA_SRC) -o $(BUILD)/ino_media.o
 	@$(CXX) $(SAN) -o $@ $(BUILD)/ino_compile.o $(BUILD)/ino_extern_stubs.o $(BUILD)/ino_jpeg.o \
 	        $(BUILD)/ino_flexlink.o $(BUILD)/ino_flexphone.o $(BUILD)/ino_flexphonelink.o \
-	        $(BUILD)/ino_brcore.o
+	        $(BUILD)/ino_brcore.o $(BUILD)/ino_media.o
 
 # La tabla de particiones de la version USB. No es codigo, pero una tabla
 # mal cuadrada no falla al compilar: falla al grabar, o peor, arranca y se
@@ -218,6 +231,8 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_weather
 	@echo
 	@$(BUILD)/test_jpeg ../fixtures
+	@echo
+	@$(BUILD)/test_media
 	@echo
 	@$(BUILD)/test_browser
 	@echo
