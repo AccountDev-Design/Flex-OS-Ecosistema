@@ -51,20 +51,22 @@ GPIO45.
 ### No hay detección física de inserción
 
 El pin CD del conector es **CD/DATA3**, y aquí se usa como DATA3. No
-existe una línea fiable que diga "hay tarjeta". La presencia se deduce
-por dos vías que se complementan (`flexSdTick`):
+existe una línea independiente y fiable que diga "hay tarjeta".
 
-* **Pasiva e inmediata** — cualquier operación que falle sobre una
-  tarjeta que creíamos montada dispara una verificación; si esa
-  verificación también falla, la tarjeta se da por retirada. Es el
-  camino que corta la reproducción **en el mismo fotograma** en que se
-  saca la tarjeta.
-* **Activa y barata** — un sondeo cada 2 s que hace **una** apertura de
-  directorio, nunca un recorrido. Además se fuerza una comprobación al
-  abrir Almacenamiento, Galería o Multimedia (`flexSdPoke()`), y se
-  silencia durante el decodificado de un fotograma (`flexSdBusySet()`).
+* **Sin volumen montado** — `flexSdTick()` intenta montar de forma
+  espaciada. `flexSdPoke()` adelanta ese intento al abrir
+  Almacenamiento, Galería o Multimedia.
+* **Con volumen montado** — no se abre la raíz ni se hace ninguna
+  lectura por temporizador. Solo las operaciones reales solicitadas
+  por el usuario acceden al bus. Si una falla, se invalida el volumen,
+  se cierran sus rutas por generación y se notifica la retirada. En
+  reproducción ocurre al fallar la lectura del fotograma.
 
-No hay ningún bucle que lea la tarjeta continuamente.
+Esta distinción es necesaria: la apertura periódica de la raíz causaba
+reinicios `PANIC` reproducibles con algunas tarjetas/controladores del
+ESP32-P4. Tampoco se consideran errores las carpetas opcionales que no
+existan (`DCIM`, `Pictures`, `Movies`, etc.); simplemente se indexan como
+vacías. No hay ningún bucle que lea la tarjeta continuamente.
 
 ### Generación de montaje
 
@@ -422,3 +424,7 @@ sin códec **no se ofrece ningún control de volumen**.
 7. **No hay captura de cámara**, así que no hay archivos de cámara. No
    se simula ninguno.
 8. **Fondos de pantalla desde fichero** siguen pendientes.
+9. **La retirada en reposo no puede notificarse instantáneamente** porque
+   esta placa no expone una línea CD independiente. Se detecta en la
+   siguiente operación real sobre la tarjeta. Volver a sondearla por
+   tiempo reintroduciría el reinicio `PANIC` que se eliminó.
