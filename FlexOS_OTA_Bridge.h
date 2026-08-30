@@ -42,6 +42,11 @@ int  otaHostScrH(){ return SCR_H; }
 // restaurar banda a banda con garantias.
 bool otaHostIsHome(){ return gState == ST_HOME && qsPanelY == 0 && !editMode; }
 
+// No usar WiFi.status() desde el autocheck: en P4 esa consulta despierta
+// esp-hosted/SDIO y puede colisionar con una microSD montada. El sketch
+// publica el enlace real cuando la tarea de conexion termina.
+bool otaHostNetworkReady(){ return gNetOnline; }
+
 // APARIENCIA y MATERIAL del sistema. Este par es el UNICO punto por el que el
 // modulo OTA (compartido por Ultra, Ultra S3 y Pro) conoce el tema: no ve la
 // paleta semantica del sketch -- que es `static` y vive dentro del .ino-- sino
