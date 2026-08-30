@@ -39,9 +39,10 @@ SPI compartido.
 MOSFET conduce, así que **la tarjeta tiene tensión siempre que el
 regulador interno 4 del P4 esté levantado**.
 
-Por eso `flexSdBegin()` toma el canal 4 con `esp_ldo_acquire_channel()`,
-igual que el sketch ya toma el canal 3 para el PHY MIPI. Sin eso la
-tarjeta no arranca.
+El ejemplo Arduino oficial de esta misma placa usa `SD_MMC.setPins()`
+seguido directamente de `SD_MMC.begin()`. Flex OS sigue esa misma ruta
+y deja que el driver del core gestione el slot 0 y su control de potencia;
+no adquiere el LDO 4 manualmente.
 
 **GPIO45 no alimenta la tarjeta.** R10, que llevaría GPIO45 a esa
 puerta, está marcada **NC** en esta revisión. El firmware no toca
