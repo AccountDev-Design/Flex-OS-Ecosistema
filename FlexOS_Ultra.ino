@@ -685,6 +685,13 @@ static uint16_t i2cSweepId    = 0;                 // id del barrido (para recon
 // vive toda junto a bootInitRadioSafe(), al final del archivo.
 #define FLEXOS_ENABLE_WIFI 1
 static volatile bool gNetOnline = false;   // true tras un WiFi.begin() exitoso; lo lee la UI (Ajustes, icono, etc.)
+// En el P4 la radio remota y la microSD usan SDIO/SDMMC. No se consulta
+// WiFi.getMode() para saber si el controlador esta vivo porque ESA consulta
+// ya puede despertar esp-hosted y reclamar el bus. Esta bandera pertenece a
+// Flex OS y permite aplicar exclusion mutua sin tocar el driver.
+static volatile bool gWifiDriverOn = false;
+static volatile bool gWifiAutoBusy = false;   // tarea de conexion manual con red guardada
+static volatile bool gWifiAutoDone = true;    // no existe reconexion automatica de arranque
 
 // Estado de las OTRAS dos radios, aqui arriba por el mismo motivo que
 // gNetOnline: la pantalla de Ajustes lee los tres para pintar la categoria
@@ -8004,7 +8011,11 @@ static void wgDataTick(){
   char t1[16], d1[48], w1[28], m1[24], s1[28], c1[16];
   clkStrBar(t1, sizeof(t1));
   buildShortDate(d1, sizeof(d1));
-  bool up = (WiFi.status() == WL_CONNECTED);
+  // No consultar WiFi.status() desde este tick periodico. En ESP32-P4 esa
+  // llamada alcanza esp-hosted/SDIO incluso sin una conexion activa y
+  // colisiona con la microSD montada. gNetOnline solo cambia tras una
+  // conexion/desconexion real y es la fuente correcta para la interfaz.
+  bool up = gNetOnline;
   // WiFi.SSID() devuelve String: se copia AQUI, en el tick de datos, y nunca en
   // el camino de dibujo ni en un bucle de interfaz.
   // SIN String: wifiActiveSSID() devuelve el char[33] que ya mantiene el bloque
@@ -17936,6 +17947,20 @@ static void mediaIndexTick(){
 //  venga -- Galeria, Multimedia, Almacenamiento o el escritorio.
 // -------------------------------------------------------------
 static void mediaStorageTick(){
+  // El P4 no puede entregar el mismo host SDIO/SDMMC a esp-hosted y a la
+  // tarjeta a la vez. Si el usuario encendio Wi-Fi primero, no intentamos
+  // montar la SD por debajo del controlador de radio: quedara disponible al
+  // apagar Wi-Fi. La situacion inversa se bloquea en wifiStart*().
+  static bool busWarned = false;
+  if(gWifiDriverOn){
+    if(!busWarned){
+      busWarned = true;
+      mediaNotify(MOD_SDCARD, "Tarjeta SD en espera", "Apaga Wi-Fi para montar la tarjeta");
+    }
+    mediaIndexTick();
+    return;
+  }
+  busWarned = false;
   if(flexSdTick()){
     if(flexSdReady()){
       char sub[40];
@@ -28848,13 +28873,6 @@ static void poffWakeGate(){
 // Definido mas abajo (necesita wifiSavedSSID y el resto del bloque Wi-Fi).
 static bool wifiCredsLoad();
 
-// Cuanto se espera desde el arranque antes del PRIMER intento de
-// reconexion automatica. No es un adorno: da tiempo a que el panel, el
-// tactil y el escritorio esten en marcha, de modo que si el enlace SDIO
-// con el C6 falla, el fallo se vea con el sistema ya vivo y no a mitad
-// del arranque.
-#define FLEXOS_WIFI_AUTOCONN_DELAY_MS 6000
-
 // -------------------------------------------------------------
 //  setup() NO TOCA LA RADIO. NI UNA SOLA VEZ.
 //  -------------------------------------------------------------
@@ -28867,12 +28885,13 @@ static bool wifiCredsLoad();
 //  vez en forma de inundacion del TWDT desde el primer boot.
 //
 //  Aqui solo se leen las credenciales de NVS -- eso es flash, no radio,
-//  y es seguro. El intento real lo dispara wifiAutoReconnectTick()
-//  desde loop(), ya con el sistema arrancado.
+//  y es seguro. Encender la radio requiere ahora una accion explicita
+//  del usuario; no existe ninguna reconexion temporizada en loop().
 // -------------------------------------------------------------
 static void bootInitRadioSafe(){
   bool saved = wifiCredsLoad();          // solo NVS: no despierta el C6
-  if(saved) Serial.println(F("[C6] hay red guardada -> se intentara reconectar tras el arranque (nunca dentro de setup)"));
+  gWifiAutoDone = true;                  // nunca reconectar por tiempo: solo accion del usuario
+  if(saved) Serial.println(F("[C6] red guardada; radio apagada hasta que el usuario active Wi-Fi"));
   else      Serial.println(F("[C6] radio en modo bajo demanda -> se activa solo desde Ajustes > Red e Internet > Wi-Fi"));
 }
 
@@ -28906,6 +28925,7 @@ static portMUX_TYPE wifiMux = portMUX_INITIALIZER_UNLOCKED;
 
 enum { WUI_LIST = 0, WUI_SCANNING, WUI_PASS, WUI_CONNECTING, WUI_OK, WUI_FAIL };
 static volatile int wifiUIState = WUI_LIST;
+static volatile bool wifiBlockedBySd = false;
 static int      wifiSel = -1;
 static char     wifiPass[64] = "";
 static uint32_t wifiKbAnim = 0;
@@ -28929,12 +28949,9 @@ static char     wifiConnIP[24]   = "";
 
 static char          wifiSavedSSID[33] = "";
 static char          wifiSavedPass[64] = "";
-static volatile bool gWifiAutoBusy  = false;   // intento automatico en curso
-static volatile bool gWifiAutoDone  = false;   // ya se intento (con exito o no)
-
 static bool wifiCredsExist(){ return wifiSavedSSID[0] != 0; }
 static const char* wifiActiveSSID(){
-  return (WiFi.status() == WL_CONNECTED && wifiSavedSSID[0]) ? wifiSavedSSID : "";
+  return (gNetOnline && wifiSavedSSID[0]) ? wifiSavedSSID : "";
 }
 
 // Carga las credenciales de NVS a RAM. Se llama una vez en el arranque.
@@ -28978,6 +28995,7 @@ static void wifiCredsForget(){
 // del C6 reinicia la interfaz sin motivo, asi que solo se cambia si hace
 // falta de verdad.
 static void wifiEnsureStaMode(){
+  gWifiDriverOn = true;                    // publicar ANTES de tocar esp-hosted
   if(WiFi.getMode() != WIFI_STA) WiFi.mode(WIFI_STA);
 }
 
@@ -29035,19 +29053,19 @@ static void wifiConnTask(void*){
   } else {
     gNetOnline = false;
     WiFi.disconnect(true, true);              // libera el intento fallido, no deja el C6 a medias
+    WiFi.mode(WIFI_OFF);
+    gWifiDriverOn = false;
     wifiUIState = WUI_FAIL;
   }
   vTaskDelete(NULL);
 }
 
-// ---- RECONEXION AUTOMATICA AL ARRANCAR ----------------------------
-// Misma forma que wifiConnTask (tarea propia en el Core 1, 8 KB de pila,
-// cesiones con vTaskDelay), pero NO toca wifiUIState: corre de fondo con
-// la pantalla de Wi-Fi cerrada, y esa variable pertenece a esa pantalla.
-// Si tocara wifiUIState, abrir Ajustes > Wi-Fi a mitad del intento
-// mostraria un "Conectando..." que el usuario no ha pedido.
+// ---- CONEXION MANUAL A LA RED GUARDADA ----------------------------
+// La llama el interruptor de Wi-Fi del panel, nunca el arranque. Corre en
+// su propia tarea y no toca wifiUIState porque esa variable pertenece a la
+// pantalla detallada de Wi-Fi.
 static void wifiAutoConnTask(void*){
-  Serial.printf("[WiFi] reconexion automatica a \"%s\"...\n", wifiSavedSSID);
+  Serial.printf("[WiFi] conexion solicitada a \"%s\"...\n", wifiSavedSSID);
   wifiEnsureStaMode();
   WiFi.begin(wifiSavedSSID, wifiSavedPass);
   uint32_t t0 = millis();
@@ -29062,7 +29080,7 @@ static void wifiAutoConnTask(void*){
     strncpy(wifiConnSSID, wifiSavedSSID, sizeof(wifiConnSSID) - 1);
     wifiConnSSID[sizeof(wifiConnSSID) - 1] = 0;
     ntpOnWifiUp();                          // hay red: la hora real ya se puede pedir
-    Serial.printf("[WiFi] reconectado. IP %s\n", wifiConnIP);
+    Serial.printf("[WiFi] conectado. IP %s\n", wifiConnIP);
   } else {
     // Fallo (router apagado, clave cambiada, fuera de alcance): se suelta
     // la radio y NO se borra nada. Las credenciales siguen guardadas para
@@ -29070,16 +29088,26 @@ static void wifiAutoConnTask(void*){
     // configurar a mano, que es el camino de siempre.
     gNetOnline = false;
     WiFi.disconnect(true, true);
-    Serial.println(F("[WiFi] reconexion automatica fallida -> queda la configuracion manual"));
+    WiFi.mode(WIFI_OFF);
+    gWifiDriverOn = false;
+    Serial.println(F("[WiFi] conexion fallida -> queda la configuracion manual"));
   }
   gWifiAutoBusy = false;
   gWifiAutoDone = true;
   vTaskDelete(NULL);
 }
 
-// Lanza el intento automatico si hay algo guardado. No bloquea el arranque.
+// Lanza la conexion pedida por el usuario si hay una red guardada.
 static void wifiTryAutoConnect(){
   if(gWifiAutoBusy || gWifiAutoDone) return;
+  if(flexSdReady()){
+    wifiBlockedBySd = true;
+    wifiUIState = WUI_FAIL;
+    gWifiAutoDone = true;
+    mediaNotify(MOD_SDCARD, "Wi-Fi no iniciado", "La microSD esta usando el bus SDIO");
+    return;
+  }
+  wifiBlockedBySd = false;
   if(!wifiCredsExist()){
     gWifiAutoDone = true;
     Serial.println(F("[WiFi] sin red guardada -> configuracion manual"));
@@ -29090,34 +29118,15 @@ static void wifiTryAutoConnect(){
 }
 #endif   // FLEXOS_ENABLE_WIFI
 
-// -------------------------------------------------------------
-//  RECONEXION AUTOMATICA DIFERIDA  (se llama desde loop())
-//  -------------------------------------------------------------
-//  Se ejecuta en cada vuelta pero solo hace algo UNA vez, y nunca
-//  antes de que el sistema este operativo: escritorio o pantalla de
-//  bloqueo, y unos segundos despues del encendido.
-//
-//  El retraso NO es cosmetico. La radio de esta placa cuelga de un
-//  co-procesador C6 por SDIO, y levantarla dentro de setup() es lo que
-//  producia el bucle de "PANIC (crash)" que documenta el bloque "EL
-//  ARRANQUE YA NUNCA TOCA LA RADIO". Disparandola desde aqui, el
-//  enlace se abre en la misma ventana contenida y observable que la
-//  ruta manual: si el C6 falla, el sistema ya esta vivo y el fallo se
-//  ve, en vez de llevarse por delante el arranque entero.
-// -------------------------------------------------------------
-static void wifiAutoReconnectTick(){
-#if FLEXOS_ENABLE_WIFI
-  if(gWifiAutoDone || gWifiAutoBusy) return;
-  if(gState != ST_HOME && gState != ST_LOCK) return;      // aun arrancando: esperar
-  if(millis() < FLEXOS_WIFI_AUTOCONN_DELAY_MS) return;
-  if(!wifiCredsExist()){ gWifiAutoDone = true; return; }
-  Serial.println(F("[WiFi] sistema listo -> lanzando reconexion automatica"));
-  wifiTryAutoConnect();
-#endif
-}
-
 static void wifiStartScan(){
 #if FLEXOS_ENABLE_WIFI
+  if(flexSdReady()){
+    wifiBlockedBySd = true;
+    wifiUIState = WUI_FAIL;
+    mediaNotify(MOD_SDCARD, "Wi-Fi no iniciado", "Expulsa la microSD para usar Wi-Fi");
+    return;
+  }
+  wifiBlockedBySd = false;
   wifiEnsureStaMode();
   wifiUIState = WUI_SCANNING;
   portENTER_CRITICAL(&wifiMux); wifiNetCount = 0; portEXIT_CRITICAL(&wifiMux);
@@ -29126,6 +29135,13 @@ static void wifiStartScan(){
 }
 static void wifiStartConnect(){
 #if FLEXOS_ENABLE_WIFI
+  if(flexSdReady()){
+    wifiBlockedBySd = true;
+    wifiUIState = WUI_FAIL;
+    mediaNotify(MOD_SDCARD, "Wi-Fi no iniciado", "Expulsa la microSD para usar Wi-Fi");
+    return;
+  }
+  wifiBlockedBySd = false;
   if(wifiSel < 0 || wifiSel >= WIFI_MAX_NETS){ wifiUIState = WUI_LIST; return; }  // indice invalido -> nunca leer wifiNets[] fuera de rango
   wifiEnsureStaMode();
   strncpy(wifiConnSSID, wifiNets[wifiSel].ssid, sizeof(wifiConnSSID) - 1); wifiConnSSID[sizeof(wifiConnSSID) - 1] = 0;
@@ -29164,7 +29180,7 @@ static void wifiRenderList(){
   // Estado de la red recordada, justo bajo el titulo.
   if(wifiCredsExist()){
     char sv[64];
-    bool on = (WiFi.status() == WL_CONNECTED);
+    bool on = gNetOnline;
     snprintf(sv, sizeof(sv), "%s %s", on ? "Conectado a" : "Red guardada:", wifiSavedSSID);
     drawTextC(SCR_W / 2, 112, sv, 1, on ? TH_OK : TH_TXT2);   // "conectado" = estado de exito (se conserva en los dos temas)
   } else if(gWifiAutoBusy){
@@ -29240,6 +29256,13 @@ static void wifiRenderStatus(){
     drawTextC(SCR_W / 2, 280, "Conectando...", 3, TH_TXT);
     char sub[48]; snprintf(sub, sizeof(sub), "a %s", wifiConnSSID);
     drawTextC(SCR_W / 2, 320, sub, 2, TH_TXT2);
+  } else if(wifiBlockedBySd){
+    drawCircle(SCR_W / 2, 280, 46, TH_WARN); drawCircle(SCR_W / 2, 280, 45, TH_WARN);
+    drawTextC(SCR_W / 2, 350, "microSD en uso", 3, TH_TXT);
+    drawTextC(SCR_W / 2, 390, "Wi-Fi y microSD comparten el bus SDIO", 1, TH_TXT2);
+    drawTextC(SCR_W / 2, 420, "Expulsa la tarjeta y vuelve a intentar", 1, TH_TXT2);
+    fillRoundRect(SCR_W / 2 - 100, SCR_H - 120, 200, 56, 16, TH_PRIM);
+    drawTextC(SCR_W / 2, SCR_H - 102, "Volver", 2, TH_ONACC);
   } else {                                     // WUI_FAIL
     drawCircle(SCR_W / 2, 280, 46, TH_ERR); drawCircle(SCR_W / 2, 280, 45, TH_ERR);
     strokeSegAA(SCR_W / 2 - 14, 264, SCR_W / 2 + 14, 296, 4.0f, TH_ERR);
@@ -29276,6 +29299,13 @@ static void wifiSettingsRepaint(){
 }
 static int wifiReturnState = ST_APP;
 static void wifiExit(){
+  // Si solo se abrio el escaner y no se establecio conexion, soltar
+  // esp-hosted permite que una microSD insertada despues pueda montar.
+  if(gWifiDriverOn && !gNetOnline){
+    WiFi.disconnect(true, true);
+    WiFi.mode(WIFI_OFF);
+    gWifiDriverOn = false;
+  }
   // accountResumeEnter (y no accountOobeEnter): la pantalla de Cuenta vuelve
   // con el MISMO destino de salida que tenia antes de venir a configurar la
   // red. Con accountOobeEnter, entrar aqui desde Flex Store o desde Ajustes
@@ -29292,7 +29322,7 @@ static void wifiSettingsEnter(){
   mapaActivo = LAYOUT_ES; kbLangEs = true; kbShift = false;
   kbExtrasOn = false; kbBotReserve = 0; kbApplySize(); kbMtSurfaceReset();   // el teclado de Wi-Fi solo hereda el TAMANO (Fase A)
   wifiStartScan();
-  wifiRenderList();
+  if(wifiUIState == WUI_FAIL) wifiRenderStatus(); else wifiRenderList();
 #else
   wifiRenderUnavail();
 #endif
@@ -29306,7 +29336,7 @@ static void wifiOobeEnter(){
   mapaActivo = LAYOUT_ES; kbLangEs = true; kbShift = false;
   kbExtrasOn = false; kbApplySize(); kbMtSurfaceReset();
   wifiStartScan();
-  wifiRenderList();
+  if(wifiUIState == WUI_FAIL) wifiRenderStatus(); else wifiRenderList();
 #else
   wifiRenderUnavail();
 #endif
@@ -29393,6 +29423,13 @@ static void wifiTick(){
     }
     case WUI_FAIL: {
       if(T.tap){
+        if(wifiBlockedBySd){
+          if((T.x < 48 && T.y < 48) ||
+             (T.y >= SCR_H - 120 && T.y <= SCR_H - 64 && T.x >= SCR_W/2 - 100 && T.x <= SCR_W/2 + 100)){
+            wifiBlockedBySd = false; wifiExit(); return;
+          }
+          return;
+        }
         if(T.x < 48 && T.y < 48){ wifiUIState = WUI_LIST; wifiRenderList(); return; }
         if(T.y >= SCR_H - 120 && T.y <= SCR_H - 64){
           if(T.x >= SCR_W/2 - 210 && T.x <= SCR_W/2 - 10){ wifiUIState = WUI_LIST; wifiRenderList(); return; }             // cancelar
@@ -29584,7 +29621,7 @@ static void ntpRequestSync(bool userAsked){
 #if FLEXOS_ENABLE_WIFI
   if(gNtpBusy) return;
   if(gAirplane) return;
-  if(WiFi.status() != WL_CONNECTED) return;
+  if(!gNetOnline) return;
   if(!userAsked && gNtpNextMs && (int32_t)(millis() - gNtpNextMs) < 0) return;
   gNtpBusy = true; gNtpState = NTPS_BUSY; gNtpUserAsked = userAsked;
   if(xTaskCreatePinnedToCore(ntpTask, "ntp", 4096, NULL, 1, NULL, 1) != pdPASS){
@@ -29613,7 +29650,7 @@ static void ntpTick(){
     }
     return;
   }
-  if(gAirplane || WiFi.status() != WL_CONNECTED) return;
+  if(gAirplane || !gNetOnline) return;
   // Primera sincronizacion de la sesion: en cuanto haya red y el sistema
   // este operativo (no a mitad del arranque).
   if(gNtpNextMs == 0){
@@ -29648,11 +29685,11 @@ static void ntpStateText(char* out, size_t n){
   switch(gNtpState){
     case NTPS_OK:   snprintf(out, n, "Sincronizado - UTC-5 (Lima)"); break;
     case NTPS_FAIL: snprintf(out, n, gAirplane ? "Modo avi\xC3\xB3n activo"
-                                    : (WiFi.status() == WL_CONNECTED ? "Sin respuesta del servidor" : "Sin conexi\xC3\xB3n Wi-Fi")); break;
+                                    : (gNetOnline ? "Sin respuesta del servidor" : "Sin conexi\xC3\xB3n Wi-Fi")); break;
     default:
       if(gNtpFromNvs)                     snprintf(out, n, "Hora aproximada (sin sincronizar)");
       else if(gAirplane)                  snprintf(out, n, "Modo avi\xC3\xB3n activo");
-      else if(WiFi.status() != WL_CONNECTED) snprintf(out, n, "Esperando Wi-Fi");
+      else if(!gNetOnline)                   snprintf(out, n, "Esperando Wi-Fi");
       else                                snprintf(out, n, "Pendiente");
       break;
   }
@@ -29724,8 +29761,7 @@ static void ntpLastSyncText(char* out, size_t n){
 // ##                  funciones reales de apagado y deja los
 // ##                  otros dos interruptores bloqueados
 // ##                  mientras este activo. Se guarda en NVS y,
-// ##                  si estaba activo, el arranque NO lanza la
-// ##                  reconexion automatica de Wi-Fi.
+// ##                  si estaba activo, Wi-Fi permanece apagado.
 // #############################################################
 #define CONN_CARD_X   14
 #define CONN_CARD_W   (SCR_W - 28)
@@ -29771,7 +29807,8 @@ static void flexBleStop(){
 // ---- Wi-Fi real -----------------------------------------------
 static bool connWifiOn(){
 #if FLEXOS_ENABLE_WIFI
-  return WiFi.getMode() != WIFI_OFF;
+  // Estado propio: WiFi.getMode() tambien toca esp-hosted en el P4.
+  return gWifiDriverOn;
 #else
   return false;
 #endif
@@ -29781,6 +29818,12 @@ static void connWifiSet(bool on){
 #if FLEXOS_ENABLE_WIFI
   if(on){
     if(gAirplane) return;                       // bloqueo real, no visual
+    if(flexSdReady()){
+      wifiBlockedBySd = true;
+      mediaNotify(MOD_SDCARD, "Wi-Fi no iniciado", "Expulsa la microSD para usar Wi-Fi");
+      return;
+    }
+    wifiBlockedBySd = false;
     wifiEnsureStaMode();                        // enciende la pila en modo estacion
     if(wifiCredsExist()){
       // Hay red guardada -> WiFi.begin() real contra ella, en su tarea
@@ -29794,6 +29837,7 @@ static void connWifiSet(bool on){
     WiFi.disconnect(true, true);                // suelta la conexion y libera la STA
     WiFi.mode(WIFI_OFF);                        // y apaga la radio
     gNetOnline = false;
+    gWifiDriverOn = false;
     gWifiAutoDone = true;                       // que no vuelva a encenderse sola
   }
 #else
@@ -29808,10 +29852,10 @@ static void connWifiSub(char* out, size_t n){
 #else
   if(gAirplane){ snprintf(out, n, "(Modo avi\xC3\xB3n)"); return; }
   if(!connWifiOn()){ snprintf(out, n, "(Desactivado)"); return; }
-  if(WiFi.status() == WL_CONNECTED){
-    String s = WiFi.SSID();
-    if(s.length() > 0) snprintf(out, n, "(%s)", s.c_str());
-    else               snprintf(out, n, "(Conectado)");
+  if(gNetOnline){
+    const char* s = wifiActiveSSID();
+    if(s[0]) snprintf(out, n, "(%s)", s);
+    else     snprintf(out, n, "(Conectado)");
     return;
   }
   if(gWifiAutoBusy)               { snprintf(out, n, "(Conectando...)"); return; }
@@ -34109,8 +34153,11 @@ static bool frStageRun(uint8_t st){
       // driver no conserve su propia copia del perfil.
       wifiCredsForget();
       flexAccountForgetLocal();
-      WiFi.disconnect(true, true);
-      WiFi.mode(WIFI_OFF);
+      if(gWifiDriverOn){
+        WiFi.disconnect(true, true);
+        WiFi.mode(WIFI_OFF);
+        gWifiDriverOn = false;
+      }
       flexFeedWdt();                            // apagar la radio puede tardar: el TWDT come aqui
       Preferences p;
       if(p.begin("flexos", false)){
@@ -34815,7 +34862,6 @@ void loop(){
   hwDetectTick();         // deteccion I2C incremental, mismo contexto que el tactil (Fase 2)
   mediaStorageTick();     // tarjeta microSD: sondeo barato + un lote del indice
   if(!gSafeMode){
-    wifiAutoReconnectTick();// reconexion WiFi diferida
     ntpTick();              // la red corre en su tarea, nunca aqui
   }
   clkPersistTick();       // guarda la hora en NVS una vez por hora (arranque sin internet)
