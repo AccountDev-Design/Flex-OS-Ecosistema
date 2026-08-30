@@ -360,6 +360,7 @@ const char*  flexOtaStatusText();
 int  otaHostScrW();          // ancho logico  (480 en las tres placas)
 int  otaHostScrH();          // alto  logico  (800 Ultra/S3 · 640 Pro)
 bool otaHostIsHome();        // el escritorio esta visible y libre
+bool otaHostNetworkReady();  // estado publicado; nunca consulta WiFi desde un tick
 bool otaHostDark();          // gDark   (modo oscuro / claro)
 bool otaHostGlass();         // uiGlass (Liquid Glass activado)
 
