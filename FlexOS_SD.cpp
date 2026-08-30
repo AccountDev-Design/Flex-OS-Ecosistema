@@ -13,7 +13,6 @@
 #include <FS.h>
 #include <SD_MMC.h>
 #include <new>
-#include "esp_ldo_regulator.h"
 
 // -------------------------------------------------------------
 //  PINES. Constantes con nombre y en un solo sitio: si algun dia
@@ -29,17 +28,6 @@
 #define SDPIN_D2     41
 #define SDPIN_D3     42
 
-// Canal del regulador interno del P4 que alimenta TF_VCC a traves
-// del MOSFET Q1. El canal 3 ya lo usa el PHY MIPI en el sketch.
-#define SDLDO_CHAN   4
-#define SDLDO_MV     3300
-
-// Frecuencias de bus, de mas rapida a mas conservadora. No es un
-// "por si acaso": una tarjeta vieja o un contacto sucio fallan a 40
-// MHz y funcionan a 20, y es mejor una tarjeta lenta que ninguna.
-#define SDFREQ_HS    40000
-#define SDFREQ_DEF   20000
-
 // Periodo del sondeo activo. 2 s es suficiente para que meter una
 // tarjeta se note "al momento" sin que el bus haga nada apreciable:
 // cada sondeo es UNA apertura de directorio.
@@ -52,7 +40,7 @@
 // -------------------------------------------------------------
 //  Estado del modulo
 // -------------------------------------------------------------
-static bool          sdHwReady   = false;   // LDO + pines configurados
+static bool          sdHwReady   = false;   // pines SDMMC configurados
 static bool          sdMounted   = false;
 static int           sdState     = FLEXSD_ABSENT;
 static const char*   sdErr       = "Sin tarjeta insertada";
@@ -63,7 +51,6 @@ static unsigned long sdNextPoll  = 0;
 static bool          sdBusy      = false;
 static uint64_t      sdTotal     = 0, sdUsed = 0;
 static bool          sdUsageOk   = false;
-static esp_ldo_channel_handle_t sdLdo = NULL;
 
 // -------------------------------------------------------------
 //  Utilidades de ruta
@@ -158,20 +145,11 @@ static void sdIoFailed(){
 bool flexSdBegin(){
   if(sdHwReady) return true;
 
-  // 1) Alimentacion. TF_VCC cuelga de ESP_LDO_VO4; sin este canal
-  //    levantado la tarjeta no tiene tension y no responde a nada.
-  //    Si el canal ya estaba tomado por otro subsistema se sigue
-  //    adelante: significa que ya hay tension.
-  esp_ldo_channel_config_t cfg;
-  memset(&cfg, 0, sizeof(cfg));
-  cfg.chan_id    = SDLDO_CHAN;
-  cfg.voltage_mv = SDLDO_MV;
-  if(esp_ldo_acquire_channel(&cfg, &sdLdo) != ESP_OK){
-    sdLdo = NULL;                       // no es fatal: puede venir dado
-    Serial.println(F("[SD] aviso: LDO canal 4 no adquirido (puede estar ya activo)"));
-  }
-
-  // 2) Pines. SDMMC nativo de 4 bits: ni SPI, ni CS, ni SD.begin().
+  // El ejemplo Arduino del fabricante de ESTA placa solo configura
+  // estos pines y deja que SD_MMC.begin() haga su secuencia nativa
+  // para el LDO 4/slot 0. No se adquiere el LDO por separado: hacerlo
+  // antes del driver puede dejarle un controlador de potencia ajeno.
+  // Pines SDMMC nativos de 4 bits: ni SPI, ni CS, ni SD.begin().
   if(!SD_MMC.setPins(SDPIN_CLK, SDPIN_CMD, SDPIN_D0, SDPIN_D1, SDPIN_D2, SDPIN_D3)){
     sdState = FLEXSD_ERR_HW;
     sdErr   = "No se pudo configurar el bus SDMMC";
@@ -194,10 +172,17 @@ bool flexSdBegin(){
 //  fallaria por eso y no por la tarjeta. Empezar limpio es lo que
 //  hace que reinsertar la tarjeta funcione sin reiniciar.
 // -------------------------------------------------------------
-static bool sdTryBegin(bool oneBit, int freq){
+static bool sdTryBegin(bool oneBit){
   SD_MMC.end();
-  return SD_MMC.begin(FLEXSD_MOUNT, oneBit, false /* NUNCA formatear */,
-                      freq, FLEXSD_MAXOPEN);
+  // La primera ruta es IDENTICA al ejemplo mp3_player del fabricante:
+  // setPins() seguido de SD_MMC.begin() sin argumentos. Su punto de
+  // montaje por defecto es /sdcard, que coincide con FLEXSD_MOUNT.
+  if(!oneBit) return SD_MMC.begin();
+
+  // Solo si la ruta oficial de 4 bits falla se intenta diagnostico a
+  // 1 bit. Conserva FAT sin formateo y el mismo punto de montaje.
+  return SD_MMC.begin(FLEXSD_MOUNT, true, false, SDMMC_FREQ_DEFAULT,
+                      FLEXSD_MAXOPEN);
 }
 
 bool flexSdMount(){
@@ -207,12 +192,10 @@ bool flexSdMount(){
   bool ok = false;
   sdOneBit = false;
 
-  // 4 bits a alta velocidad -> 4 bits a velocidad normal. Los dos
-  // intentos son en el modo que pide la placa; el de 1 bit de abajo
-  // es un diagnostico, no el modo de trabajo esperado.
-  if(sdTryBegin(false, SDFREQ_HS))       ok = true;
-  else if(sdTryBegin(false, SDFREQ_DEF)) ok = true;
-  else if(sdTryBegin(true,  SDFREQ_DEF)){ ok = true; sdOneBit = true; }
+  // Primero la secuencia Arduino oficial del fabricante en 4 bits.
+  // El intento de 1 bit es solo un diagnostico posterior.
+  if(sdTryBegin(false))                  ok = true;
+  else if(sdTryBegin(true))              { ok = true; sdOneBit = true; }
 
   if(!ok){
     SD_MMC.end();
