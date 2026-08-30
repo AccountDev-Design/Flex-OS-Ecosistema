@@ -103,6 +103,23 @@ def main(path):
         if llamada not in c:
             fallos.append("%s() no llama a %s -> %s" % (fn, llamada, motivo))
 
+    # --- 3. el reposo NO puede despertar esp-hosted -----------------
+    # En ESP32-P4, WiFi.status()/getMode() no son getters inocuos: pasan por
+    # el transporte SDIO del C6. Con la microSD montada eso reclamaba el bus
+    # cada 2 s y producia el bucle PANIC visto en placa. Los ticks globales
+    # deben leer el estado publicado gNetOnline, nunca el driver.
+    for fn in ("wgDataTick", "ntpTick"):
+        c = cuerpo(src, fn)
+        if c is None:
+            fallos.append("no encuentro la funcion %s()" % fn)
+        else:
+            codigo = re.sub(r"/\*.*?\*/|//[^\n]*", "", c, flags=re.S)
+            if "WiFi." not in codigo:
+                continue
+            fallos.append("%s() toca WiFi desde reposo -> colision SDIO con microSD" % fn)
+    if "wifiAutoReconnectTick()" in cloop:
+        fallos.append("loop() vuelve a encender Wi-Fi automaticamente -> colision SDIO con microSD")
+
     if fallos:
         print("check_wiring: CABLEADO INCOMPLETO")
         for f in fallos:
