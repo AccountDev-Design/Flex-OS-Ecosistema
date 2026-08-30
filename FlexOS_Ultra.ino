@@ -18931,7 +18931,14 @@ static void vidAudioTick(){
   }
   uint32_t want = end - vidAudioPos;
   if(want > sizeof(blk)) want = sizeof(blk);
-  if(!mediaIoSeek(&vidStream, vidAudioPos)){ vidPlaying = false; return; }
+  // Solo se reposiciona si hace falta. La lectura es secuencial, asi
+  // que normalmente el descriptor ya esta donde toca; buscar en cada
+  // bloque serian ~170 busquedas por segundo en la tarjeta para nada.
+  // (Si el controlador de audio acepto menos bytes de los leidos, el
+  // descriptor SI queda por delante y entonces si se reposiciona.)
+  if(vidStream.pos != vidAudioPos && !mediaIoSeek(&vidStream, vidAudioPos)){
+    vidPlaying = false; return;
+  }
   int rd = mediaIoRead(&vidStream, blk, want);
   if(rd <= 0){ vidStatErrors++; vidPlaying = false; return; }
   int wr = flexAudioWrite(blk, (size_t)rd);
@@ -19278,14 +19285,20 @@ static bool vidBackScreen(){
 }
 
 static void vidSuspend(){
-  if(vidKind == VK_VIDEO && vidPath[0] && !vidEnded) vidResumeSet(vidPath, vidCurFrame);
-  vidPlaying = false;
-  flexAudioStop();
+  // Una app en segundo plano no decodifica, no suena y -- sobre todo
+  // -- NO se queda con un descriptor abierto sobre un volumen
+  // extraible. Se guarda la posicion y se suelta todo; al volver,
+  // vidResume reabre por donde iba.
+  vidReleaseMedia(true);
   gLand = false;                       // el framework tambien lo hace; aqui por si acaso
 }
 static void vidResume(){
   vidCtrlOn = true; vidCtrlMs = millis();
+  // Comprobacion EN EL ACTO, no en el proximo sondeo: mientras la app
+  // estaba en segundo plano la tarjeta ha podido salir, y volver a
+  // una foto que ya no existe no puede depender de esperar 2 s.
   flexSdPoke();
+  flexSdTick();
   if(vidScreen == VS_VIEW){
     // Si el archivo era de la tarjeta y esta ya no esta, no se
     // intenta reabrir: se vuelve a la lista con el motivo.
@@ -22913,8 +22926,17 @@ static void galOpenPath(const char* path);          // Galeria (definida mas aba
 
 static void filesOpenEntry(const char* path, const char* name){
   int kind = flexMediaClassify(name);
-  if(kind == FLEXMED_PHOTO || kind == FLEXMED_DRAW){ galOpenPath(path); return; }
-  if(kind == FLEXMED_VIDEO || kind == FLEXMED_AUDIO){ mediaOpenInPlayer(path); return; }
+  if(kind == FLEXMED_PHOTO || kind == FLEXMED_DRAW
+  || kind == FLEXMED_VIDEO || kind == FLEXMED_AUDIO){
+    // ESTADO LOGICO PRIMERO. El explorador es una pantalla a
+    // pantalla completa POR ENCIMA de Almacenamiento (ST_FILES), no
+    // una app: sin volver a ST_APP, mediaOpenInPlayer no cerraria
+    // Almacenamiento y quedarian dos apps abiertas a la vez.
+    gState = ST_APP;
+    gMediaReturnApp = IC_ALMACEN;          // se salio de aqui, aqui se vuelve
+    mediaOpenInPlayer(path);
+    return;
+  }
   if(kind == FLEXMED_UNSUP){
     const char* why = flexMediaUnsupportedReason(name);
     mediaNotify(MOD_MEDIA, name, why ? why : "Formato no compatible");
@@ -29984,6 +30006,11 @@ static void drawModuleIcon(ModuleType type, int x, int y, int S){
     case MOD_BUTTON:      id = IC_NOTAS;   break;
     case MOD_SERVO:       id = IC_MODOPC;  break;
     case MOD_I2C_GENERIC: id = IC_ALMACEN; break;
+    // Avisos del sistema: llevan el icono de la app a la que
+    // pertenecen, para que un aviso de tarjeta se reconozca de un
+    // vistazo sin leerlo.
+    case MOD_SDCARD:      id = IC_ALMACEN;    break;
+    case MOD_MEDIA:       id = IC_MULTIMEDIA; break;
     default:              id = IC_AJUSTES; break;
   }
   drawAppIcon(id, x, y, S);
@@ -31259,8 +31286,18 @@ static void i2cDescribe(DetectedModule* m){
   }
 }
 
-// ¿La direccion es la del GT911 tactil? (nunca notificar el propio panel)
+// ¿La direccion pertenece a un chip SOLDADO en la placa?
+//
+// El barrido busca modulos que el usuario CONECTA; los chips que
+// vienen de fabrica no son un hallazgo y avisar de ellos en cada
+// arranque seria ruido. Hasta ahora solo se excluia el panel tactil;
+// se anade el codec de audio, que cuelga del MISMO bus (GPIO7/8) y
+// que desde que existe FlexOS_Audio ya se detecta e identifica por su
+// propio camino, leyendo su registro de identificacion.
 static inline bool i2cIsTouch(uint8_t addr){ return addr == gtAddr || addr == 0x5D || addr == 0x14; }
+static inline bool i2cIsOnboard(uint8_t addr){
+  return i2cIsTouch(addr) || addr == FLEXAUDIO_I2C_ADDR;
+}
 
 // Indice de un modulo por direccion (o -1)
 static int i2cFindByAddr(uint8_t addr){
@@ -31271,7 +31308,7 @@ static int i2cFindByAddr(uint8_t addr){
 
 // Marca presencia de una direccion; si es NUEVA la registra y avisa por la isla
 static void i2cOnDevicePresent(uint8_t addr){
-  if(i2cIsTouch(addr)) return;
+  if(i2cIsOnboard(addr)) return;
   int idx = i2cFindByAddr(addr);
   if(idx >= 0){
     modSweepId[idx] = i2cSweepId;                 // sigue presente en este barrido
@@ -31317,7 +31354,7 @@ static void hwDetectTick(){
   int probes = 0;
   while(i2cSweeping && probes < I2C_SCAN_PER_TICK){
     uint8_t addr = i2cScanCursor;
-    if(!i2cIsTouch(addr)){
+    if(!i2cIsOnboard(addr)){
       Wire.beginTransmission(addr);
       if(Wire.endTransmission() == 0) i2cOnDevicePresent(addr);   // ACK -> hay dispositivo
     }
@@ -31865,9 +31902,12 @@ static void galRender(){ galRenderGrid(); }
 //  Horizontal, zoom, desplazamiento y reproduccion. Al volver del
 //  visor se regresa AQUI, porque de aqui se salio.
 // -------------------------------------------------------------
+// OJO: aqui NO se decide a donde se vuelve. Lo decide quien abre
+// (gMediaReturnApp), porque esta misma funcion la llaman la Galeria y
+// el Explorador, y volver siempre a la Galeria dejaria al usuario en
+// una app en la que no estaba.
 static void galOpenPath(const char* path){
   if(!path || !path[0]) return;
-  gMediaReturnApp = IC_GALERIA;
   mediaOpenInPlayer(path);
 }
 
@@ -32045,6 +32085,7 @@ static void galTick(){
       if(galMulti){ galToggleSel(i); galRender(); return; }
       galSelIdx = i;
       snprintf(galResumePath, sizeof(galResumePath), "%s", galPathOf(i));
+      gMediaReturnApp = IC_GALERIA;          // al cerrar el visor, de vuelta aqui
       galOpenPath(galPathOf(i));
       return;
     } }

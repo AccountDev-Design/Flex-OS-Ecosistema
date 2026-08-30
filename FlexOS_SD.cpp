@@ -529,7 +529,13 @@ int flexSdRead(FlexSdFile* f, void* buf, uint32_t n){
   if(n == 0) return 0;
   File* h = (File*)f->h;
   int rd = h->read((uint8_t*)buf, n);
-  if(rd < 0){ sdIoFailed(); return -1; }
+  // Una lectura corta ANTES del final del fichero no es un fin de
+  // fichero: es que la tarjeta ha dejado de contestar. Distinguirlo
+  // importa porque el core devuelve 0 (no -1) cuando se saca la
+  // tarjeta, y sin esto la retirada no se notaria hasta el siguiente
+  // sondeo -- hasta dos segundos despues, con el video parado y sin
+  // decir por que.
+  if(rd < 0 || (rd == 0 && f->pos < f->size)){ sdIoFailed(); return -1; }
   f->pos += (uint32_t)rd;
   return rd;
 }
