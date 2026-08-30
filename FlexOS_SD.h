@@ -42,9 +42,10 @@
 //  tension SIEMPRE que el LDO interno 4 del P4 este levantado.
 //  R10, que llevaria GPIO45 a esa puerta, esta marcada NC en esta
 //  revision: GPIO45 NO alimenta la tarjeta y no se toca.
-//  Por eso aqui se toma el canal 4 del regulador interno
-//  (esp_ldo_acquire_channel) igual que el sketch toma el canal 3
-//  para el PHY MIPI. Sin eso la tarjeta no arranca.
+//  El ejemplo Arduino oficial de esta misma placa configura los
+//  pines y llama SD_MMC.begin() sin adquirir ese LDO manualmente;
+//  se sigue esa ruta para que el propio driver del core gestione el
+//  slot 0 y su control de potencia.
 //
 //  DETECCION DE PRESENCIA. La placa NO tiene linea util de
 //  insercion: el pin CD del conector es CD/DATA3 y aqui se usa
@@ -96,13 +97,13 @@ enum {
   FLEXSD_ERR_MOUNT,    // la tarjeta responde pero no se pudo montar
   FLEXSD_ERR_FS,       // sistema de archivos no compatible (no FAT)
   FLEXSD_ERR_IO,       // fallo de lectura/escritura sobre tarjeta montada
-  FLEXSD_ERR_HW        // el controlador SDMMC no arranco (LDO o pines)
+  FLEXSD_ERR_HW        // el controlador SDMMC no arranco (pines/driver)
 };
 
 // -------------------------------------------------------------
 //  Ciclo de vida
 // -------------------------------------------------------------
-// Prepara el controlador (LDO canal 4 + pines). NO monta ni bloquea
+// Prepara el controlador (pines SDMMC). NO monta ni bloquea
 // si no hay tarjeta: se llama una vez en setup() y deja el sistema
 // listo para que flexSdTick() haga el resto. Devuelve false si el
 // hardware no se pudo preparar (estado FLEXSD_ERR_HW), en cuyo caso
