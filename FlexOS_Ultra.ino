@@ -350,6 +350,7 @@ struct GalThumb {
   uint16_t* px;         // GAL_THUMB_W * GAL_THUMB_H en PSRAM
   uint16_t  w, h;       // area realmente util (respeta la proporcion)
   uint32_t  useMs;      // ultimo uso: la que lleva mas tiempo sin usarse cede su sitio
+  uint32_t  pass;       // repintado en el que se uso (ver galCacheSlot)
   uint8_t   state;      // GTH_*
 };
 #define GTH_EMPTY 0
@@ -9707,7 +9708,7 @@ static void flexPhoneBegin(); static void flexPhoneTick();
 // Hooks opcionales. Las implementaciones viven junto a cada app.
 static void setSuspend(); static void setResume(); static bool setSaveSess(); static void setLoadSess(); static bool setBgWork();
 static void calcResume(); static bool calcSaveSess(); static void calcLoadSess();
-static void vidSuspend(); static void vidResume(); static void vidCloseApp(); static bool vidSaveSess(); static void vidLoadSess();
+static void vidSuspend(); static void vidResume(); static void vidCloseApp(); static bool vidSaveSess(); static void vidLoadSess(); static bool vidBackScreen();
 static void camSuspend(); static void camResume(); static void camCloseApp();
 static bool noteBackLayer(); static bool noteBackScreen(); static void noteSuspend(); static void noteResume(); static void noteCloseApp(); static bool noteSaveSess(); static void noteLoadSess();
 static bool paintBackScreen(); static void paintSuspend(); static void paintResume(); static void paintCloseApp(); static bool paintSaveSess(); static void paintLoadSess();
@@ -10160,7 +10161,7 @@ static const char* APP_CAT_NAME[APP_CAT_N][5] = {
 static const AppHooks H_SETTINGS = { NULL, settingsHandleBack, setSuspend, setResume, NULL, setSaveSess, setLoadSess, setBgWork };
 static const AppHooks H_GALLERY  = { galBackLayer, galBackScreen, galSuspend, galResume, galCloseApp, NULL, NULL, NULL };
 static const AppHooks H_CALC     = { NULL, NULL, NULL, calcResume, NULL, calcSaveSess, calcLoadSess, NULL };
-static const AppHooks H_MEDIA    = { NULL, NULL, vidSuspend, vidResume, vidCloseApp, vidSaveSess, vidLoadSess, NULL };
+static const AppHooks H_MEDIA    = { NULL, vidBackScreen, vidSuspend, vidResume, vidCloseApp, vidSaveSess, vidLoadSess, NULL };
 static const AppHooks H_CAMERA   = { NULL, NULL, camSuspend, camResume, camCloseApp, NULL, NULL, NULL };
 static const AppHooks H_NOTES    = { noteBackLayer, noteBackScreen, noteSuspend, noteResume, noteCloseApp, noteSaveSess, noteLoadSess, NULL };
 static const AppHooks H_PAINT    = { NULL, paintBackScreen, paintSuspend, paintResume, paintCloseApp, paintSaveSess, paintLoadSess, NULL };
@@ -11510,7 +11511,20 @@ static void settingsDetailContent(int cat){
   } else {
     const char* rt[3] = {0,0,0}; const char* rv[3] = {0,0,0}; int rn = 0;
     switch(cat){
-      case 2: rt[0]="Volumen";rv[0]="70%"; rt[1]="Tono";rv[1]="Predeterminado"; rn=2; break;
+      case 2: {   // SONIDO: el estado REAL del codec, no un 70% de relleno
+        static char s2a[32];
+        if(flexAudioAvailable()){
+          snprintf(s2a, sizeof(s2a), "%d%%%s", (int)flexAudioVolume(),
+                   flexAudioMuted() ? " (silenciado)" : "");
+          rt[0]="Volumen"; rv[0]=s2a;
+          rt[1]="Salida";  rv[1]="Altavoz (ES8311)";
+        } else {
+          // Sin codec no se ensena un porcentaje que no controla nada:
+          // se dice que no hay salida y por que.
+          rt[0]="Volumen"; rv[0]="Sin salida de audio";
+          rt[1]="Motivo";  rv[1]=flexAudioError();
+        }
+        rn=2; } break;
       // (la categoria 3 tiene ahora su propia rama, con datos reales)
       case 4: rt[0]="GPIO";rv[0]="Configurable"; rt[1]="Perifericos";rv[1]="Ninguno"; rn=2; break;
       case 6: rt[0]="Bloqueo";rv[0]="Deslizar"; rt[1]="PIN";rv[1]="No configurado"; rn=2; break;
@@ -11522,8 +11536,17 @@ static void settingsDetailContent(int cat){
         flexFsFmtSize(flexFsTotalBytes(), t8, sizeof(t8));
         snprintf(s8a, sizeof(s8a), "%s / %s", u8, t8);
         flexFsFmtSize(flexFsCatSize(FLEXFS_CAT_TRASH), s8b, sizeof(s8b));
-        rt[0]="Interna"; rv[0]= flexFsReady() ? s8a : "No montada";
-        rt[1]="Papelera"; rv[1]=s8b; rn=2; } break;
+        rt[0]="Memoria interna"; rv[0]= flexFsReady() ? s8a : "No montada";
+        // TARJETA: mismo criterio -- capacidad real si esta montada, y
+        // el motivo del modulo si no. Nunca "0 KB / 0 KB".
+        static char s8c[40];
+        if(flexSdReady()){
+          char u9[16], t9[16];
+          flexFsFmtSize((uint32_t)(flexSdUsedBytes()  / 1048576ull), u9, sizeof(u9));
+          flexFsFmtSize((uint32_t)(flexSdTotalBytes() / 1048576ull), t9, sizeof(t9));
+          snprintf(s8c, sizeof(s8c), "%s / %s", u9, t9);
+        } else snprintf(s8c, sizeof(s8c), "%s", flexSdError());
+        rt[1]="Tarjeta SD"; rv[1]=s8c; rn=2; } break;
       case 9: rt[0]="Depuracion";rv[0]="En pantalla"; rt[1]="Banda reinicio";rv[1]="Solo crash"; rn=2; break;
       case 10: rt[0]="Version";rv[0]="FlexOS 1.0"; rt[1]="Logs";rv[1]="Puerto serie"; rn=2; break;
       default: rn=0; break;
@@ -14731,6 +14754,11 @@ enum {
   QSID_POWERSAVE, QSID_SETTINGS, QSID_CONN, QSID_DEX, QSID_VAULT, QSID_OTA,
   QSID_FILES, QSID_RETIRED_13, QSID_CAMERA, QSID_GALLERY, QSID_CRONO, QSID_LOCK,
   QSID_POWEROFF, QSID_NTP,
+  // Van al FINAL a proposito: los identificadores anteriores estan
+  // guardados en NVS y colar uno en medio reordenaria el panel del
+  // usuario. Los dos solo aparecen si el codec de audio contesta de
+  // verdad (ver qpAvAudio): sin altavoz no hay control de volumen.
+  QSID_VOLUME, QSID_MUTE,
   QSID_COUNT
 };
 
@@ -14853,6 +14881,20 @@ static void qpTapFiles(){ qpLeaveToApp(IC_ALMACEN); filesEnter(); }
 static void qpTapLock(){ qsRestoreBg(); qsForceClose(); suspEnter(); }
 static void qpTapPoweroff(){ qsRestoreBg(); qsForceClose(); poffEnter(); }
 static void qpTapNtp(){ ntpRequestSync(true); }
+// AUDIO. La disponibilidad NO es "esta placa lleva codec": es que el
+// ES8311 haya contestado su identificacion en el bus I2C y que la
+// salida I2S haya arrancado. Si no, estos dos controles no existen:
+// ni en el panel ni en el catalogo. Un deslizador de volumen que no
+// mueve nada es peor que no tener deslizador.
+static bool qpAvAudio(){ return flexAudioAvailable(); }
+static bool qpStMute(){ return flexAudioMuted(); }
+static void qpTapMute(){ flexAudioSetMuted(!flexAudioMuted()); }
+static void qpTapVolume(){}                        // el slider se atiende aparte
+static void qpSubVolume(char* o, size_t n){ snprintf(o, n, "%d%%", (int)flexAudioVolume()); }
+static void qpSubMute(char* o, size_t n){
+  snprintf(o, n, "%s", flexAudioMuted() ? "Silenciado" : "Con sonido");
+}
+
 static void qpTapBright(){}                        // el slider se atiende aparte
 
 // ---- SUBTITULOS CON DATO REAL ----------------------------------------
@@ -14917,6 +14959,25 @@ static void qpIcoBle(int cx, int cy, int s, uint16_t col){
   strokeSegAA(cx, cy + u, cx + u * 0.66f, cy + u * 0.42f, 1.7f, col);
   strokeSegAA(cx + u * 0.66f, cy + u * 0.42f, cx - u * 0.62f, cy - u * 0.42f, 1.7f, col);
 }
+// Altavoz con ondas. El numero de ondas sale del volumen REAL, asi
+// que el icono dice algo en vez de ser siempre el mismo dibujo.
+static void qpIcoSpeaker(int cx, int cy, int s, uint16_t col){
+  int r = s / 2;
+  fillRect(cx - r / 2, cy - r / 4, r / 3, r / 2, col);                 // cuerpo
+  fillTriangle(cx - r / 6, cy, cx + r / 6, cy - r / 2, cx + r / 6, cy + r / 2, col);
+  int v = flexAudioMuted() ? 0 : (int)flexAudioVolume();
+  if(v > 5)  strokeSegAA(cx + r / 3, cy - r / 5, cx + r / 3, cy + r / 5, 2.0f, col);
+  if(v > 45) strokeSegAA(cx + r / 2, cy - r / 3, cx + r / 2, cy + r / 3, 2.0f, col);
+}
+// Altavoz tachado: el estado de silencio se ve, no se deduce.
+static void qpIcoMute(int cx, int cy, int s, uint16_t col){
+  int r = s / 2;
+  fillRect(cx - r / 2, cy - r / 4, r / 3, r / 2, col);
+  fillTriangle(cx - r / 6, cy, cx + r / 6, cy - r / 2, cx + r / 6, cy + r / 2, col);
+  strokeSegAA(cx + r / 4, cy - r / 3, cx + r / 2, cy + r / 3, 2.2f, col);
+  strokeSegAA(cx + r / 2, cy - r / 3, cx + r / 4, cy + r / 3, 2.2f, col);
+}
+
 static void qpIcoSun(int cx, int cy, int s, uint16_t col){
   fillCircleAA(cx, cy, s * 0.21f, col);
   for(int k = 0; k < 8; k++){
@@ -15089,6 +15150,21 @@ static const QsCtl QS_REG[QSID_COUNT] = {
     qpAvPoweroff, NULL,       qpTapPoweroff, NULL,          NULL,          qpIcoPower },
   { QSID_NTP,       "Hora",       "Sincronizar hora",       QT_ACTION, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SYSTEM,
     qpAvNtp,    NULL,         qpTapNtp,      NULL,          NULL,          qpIcoClock },
+  // VOLUMEN Y SILENCIO. Mismo patron que el brillo: el deslizador
+  // escribe el registro de volumen del DAC del codec y el
+  // interruptor silencia de verdad; no cambian solo un icono.
+  // Los dos cuelgan de qpAvAudio, asi que si el ES8311 no contesta
+  // en el bus, sencillamente NO existen: ni en el panel ni en el
+  // catalogo de "Anadir un control".
+  //
+  // El ORDEN DE ESTE ARRAY ES EL DEL ENUM: QS_REG se indexa por id
+  // (ver qpCtl), asi que una entrada nueva va SIEMPRE al final, con
+  // su id tambien al final del enum. Colarla en medio desplazaria
+  // todos los controles guardados en NVS.
+  { QSID_VOLUME,    "Volumen",    "Volumen",                QT_SLIDER, QSZ_4x1,                   QOR_H,        QCAT_SYSTEM,
+    qpAvAudio,  NULL,         qpTapVolume,   qpTapSettings, qpSubVolume,   qpIcoSpeaker },
+  { QSID_MUTE,      "Silencio",   "Silenciar",              QT_TOGGLE, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SYSTEM,
+    qpAvAudio,  qpStMute,     qpTapMute,     qpTapSettings, qpSubMute,     qpIcoMute },
 };
 
 // Acceso seguro: un id fuera de rango devuelve NULL en vez de leer basura.
@@ -15174,8 +15250,11 @@ static const QpDef QP_FACTORY[] = {
   { QSID_CAMERA,    1, 1 },
   { QSID_GALLERY,   1, 1 },
   { QSID_SETTINGS,  1, 1 },
-  // Modulo ancho: el slider de brillo (PWM real).
+  // Modulos anchos: los dos sliders reales (PWM del backlight y
+  // registro de volumen del codec). Si no hay codec, qpFactory salta
+  // la fila de volumen -- no deja un hueco ni un control apagado.
   { QSID_BRIGHT,    4, 1 },
+  { QSID_VOLUME,    4, 1 },
   // Modulos inferiores de dos columnas.
   { QSID_DEX,       2, 1 },
   { QSID_OTA,       2, 1 },
@@ -15637,7 +15716,8 @@ static void qpDrawSliderBody(int x, int y, int w, int h, int id){
   const QsCtl* c = qpCtl(id);
   int th = h - 20; if(th < 40) th = 40;
   int ty = y + (h - th) / 2;
-  int pct = (id == QSID_BRIGHT) ? gBright : 0;
+  int pct = (id == QSID_BRIGHT) ? gBright
+          : (id == QSID_VOLUME) ? (int)flexAudioVolume() : 0;
   int fw = th + (w - th) * pct / 100;                     // nunca menor que el diametro
   if(fw > w) fw = w;
   qpGlassSurface(x, ty, w, th, th / 2, TH_TRACK, qpMixCard());          // pista: vidrio
@@ -16813,6 +16893,19 @@ static bool qpPanelTouch(){
         int run = w - th; if(run < 1) run = 1;               // nunca se divide por cero
         int v = (T.x - x - th / 2) * 100 / run;
         if(v < 0) v = 0; if(v > 100) v = 100;
+        // VOLUMEN: escribe el registro del codec en el acto, igual
+        // que el brillo escribe el PWM. Y se recompone la banda del
+        // slider por el mismo motivo que alli (ver el comentario de
+        // abajo): el panel vive compuesto en qsBuf.
+        if(id == QSID_VOLUME && v != (int)flexAudioVolume()){
+          flexAudioSetVolume((uint8_t)v);
+          int top = QP_VIEW_Y0 - (int)(qpScrollF + 0.5f);
+          int sy0 = top + qpBlk[b].y, sy1 = sy0 + qpBlk[b].h;
+          if(sy0 < QP_VIEW_Y0) sy0 = QP_VIEW_Y0;
+          if(sy1 > QP_VIEW_Y1) sy1 = QP_VIEW_Y1;
+          if(sy1 > sy0) qpRecompose(sy0, sy1 - 1);
+          return true;                                      // el gesto es del slider
+        }
         if(id == QSID_BRIGHT && v != gBright){
           setBacklight(v);                                  // PWM real, sin present() completo
           // RECOMPONER, NO SOLO PUBLICAR. Aqui estaba el fallo del slider: el
@@ -17700,31 +17793,32 @@ static bool            gMedNotifyDone = false;
 // ---- Puente de volumen para el indexador ----
 // Traduce FlexFsEntry -> FlexMediaDirent. El indexador nunca ve las
 // estructuras del sistema de archivos.
+// Los dos volumenes entregan sus entradas por el MISMO camino: en
+// orden fisico y saltando las ya vistas. Es lo que permite recorrer
+// una carpeta de miles de fotos en lotes de ocho sin releerla entera
+// en cada lote y sin un tope silencioso de elementos.
+#define MED_BATCH 8
 static int medListInt(void* ctx, const char* dir, FlexMediaDirent* out, int maxn, int skip){
   (void)ctx;
   if(!flexFsReady()) return -1;
-  // LittleFS no tiene "saltar N" nativo, asi que se lee el
-  // directorio y se recorta. Las carpetas internas son pequenas
-  // (decenas de elementos), asi que el coste es irrelevante; en la
-  // tarjeta, donde SI puede haber miles, el salto es nativo.
-  FlexFsEntry e[24];
-  int n = flexFsList(dir, e, 24);
+  FlexFsEntry e[MED_BATCH];
+  int want = maxn < MED_BATCH ? maxn : MED_BATCH;
+  int n = flexFsListFrom(dir, e, want, skip);
   if(n < 0) return -1;
-  int w = 0;
-  for(int i = skip; i < n && w < maxn; i++, w++){
-    snprintf(out[w].name, FLEXMED_NAME_MAX, "%s", e[i].name);
-    out[w].size = e[i].size;
-    out[w].dir  = e[i].dir;
+  for(int i = 0; i < n; i++){
+    snprintf(out[i].name, FLEXMED_NAME_MAX, "%s", e[i].name);
+    out[i].size = e[i].size;
+    out[i].dir  = e[i].dir;
   }
-  return w;
+  return n;
 }
 static bool medAliveInt(void* ctx){ (void)ctx; return flexFsReady(); }
 
 static int medListSd(void* ctx, const char* dir, FlexMediaDirent* out, int maxn, int skip){
   (void)ctx;
   if(!flexSdReady()) return -1;
-  FlexFsEntry e[FLEXMED_ROOTS_MAX > 8 ? 8 : 8];
-  int want = maxn < 8 ? maxn : 8;
+  FlexFsEntry e[MED_BATCH];
+  int want = maxn < MED_BATCH ? maxn : MED_BATCH;
   int n = flexSdListFrom(dir, e, want, skip);
   if(n < 0) return -1;
   for(int i = 0; i < n; i++){
@@ -17782,6 +17876,15 @@ static void mediaIndexRescan(){
   gMedScanGen    = flexSdGeneration();
   gMedNotifyDone = false;
   flexMediaIndexStart(&gMedIx, gMedScanGen);
+}
+
+// Marca el indice como caducado SIN recorrer nada: la proxima vez
+// que se abra Galeria o Multimedia se reconstruye. La llaman las apps
+// que CREAN o BORRAN archivos (Paint al guardar un dibujo, la
+// papelera al vaciarse), que es lo que hace que lo que Flex OS
+// produce aparezca en la Galeria sin que nadie tenga que refrescar.
+static void mediaIndexInvalidate(){
+  if(gMedInited) gMedIx.state = FLEXMED_SCAN_IDLE;
 }
 
 // ¿Hace falta reindexar? Solo si nunca se hizo o si la tarjeta que
@@ -17943,8 +18046,22 @@ static void mediaFitBox(int sw, int sh, int bw, int bh, int &ow, int &oh){
 // ---- Presupuestos, todos acotados y con motivo ----
 // Un fotograma MJPEG de 640x480 con calidad normal ronda los 40 KB;
 // 192 KB deja sitio de sobra para 720p y para picos de calidad, y
-// es lo unico grande que reserva el reproductor.
+// es lo unico grande que reserva el reproductor de VIDEO.
 #define VID_FRAME_CAP     (192 * 1024)
+// Tope de una FOTO. El decodificador necesita los bytes comprimidos
+// completos (decodifica por filas, pero lee de un buffer), asi que
+// una foto si se carga entera -- es la unica excepcion, y por eso
+// lleva tope y comprobacion de memoria libre. 6 MB cubre de sobra un
+// JPEG de 12 megapixeles; por encima se dice el motivo en vez de
+// intentar una reserva que dejaria al sistema sin PSRAM.
+#define VID_PHOTO_CAP     (6 * 1024 * 1024)
+// Margen de PSRAM que NUNCA se toca, para que abrir una foto grande
+// no deje sin memoria al resto del sistema.
+#define VID_PSRAM_MARGIN  (512 * 1024)
+// Repintados por segundo como mucho al desplazar una foto ampliada.
+// Cada uno es una decodificacion: sin este freno, arrastrar el dedo
+// pediria una por cada movimiento del tactil.
+#define VID_PAN_MS        90
 // Fotogramas que se pueden saltar SEGUIDOS para recuperar ritmo.
 // Con un tope, ir tarde se nota como un video que salta; sin el, un
 // archivo mas pesado que la placa dejaria la interfaz sin turno.
@@ -17984,6 +18101,8 @@ static bool       vidLand      = false;     // orientacion EFECTIVA en curso
 static MediaStream vidStream;
 static FlexAviCtx  vidAvi;
 static uint8_t*   vidFrameBuf  = NULL;
+static uint8_t*   vidPhotoBuf  = NULL;      // JPEG comprimido de la foto abierta
+static uint32_t   vidPhotoLen  = 0;
 static uint16_t*  vidTile      = NULL;      // tira para el volcado girado
 static bool       vidPlaying   = false;
 static bool       vidEnded     = false;
@@ -18093,6 +18212,7 @@ static void vidReleaseMedia(bool keepPosition){
   mediaStreamClose(&vidStream);
   memset(&vidAvi, 0, sizeof(vidAvi));
   if(vidFrameBuf){ mediaFree(vidFrameBuf); vidFrameBuf = NULL; }
+  if(vidPhotoBuf){ mediaFree(vidPhotoBuf); vidPhotoBuf = NULL; vidPhotoLen = 0; }
   if(vidTile){ heap_caps_free(vidTile); vidTile = NULL; }
   flexSdBusySet(false);
   vidKind    = VK_NONE;
@@ -18203,8 +18323,8 @@ static bool vidJpegRow(void* user, int y, int w, const uint16_t* rgb){
     // Si cambia el tramo horizontal (no deberia dentro de una imagen)
     // se vuelca lo acumulado antes de empezar otro.
     if(vidTileRows > 0 && (lx0 != vidTileLX0 || n != vidTileW)) vidLandFlushTile();
+    if(n > LW) n = LW;                          // la tira mide LW de ancho
     if(vidTileRows == 0){ vidTileBase = ly; vidTileLX0 = lx0; vidTileW = n; }
-    if(n > LW) n = LW;
     memcpy(vidTile + (size_t)vidTileRows * (size_t)LW, src, (size_t)n * 2);
     vidTileRows++;
     if(vidTileRows >= VIDT_ROWS) vidLandFlushTile();
@@ -18276,32 +18396,47 @@ static bool vidOpenPath(const char* path){
   }
 
   // ---------- FOTO ----------
+  // Los bytes comprimidos se leen UNA vez y se quedan mientras la
+  // foto este abierta. Antes de esto, cada desplazamiento del zoom
+  // volvia a leer el archivo entero de la tarjeta: girar o arrastrar
+  // costaba una lectura completa, no solo una decodificacion.
   if(kind == FLEXMED_PHOTO || kind == FLEXMED_DRAW){
     vidKind = VK_PHOTO;
     vidLand = false;
-    if(kind == FLEXMED_PHOTO){
-      // Se lee la CABECERA para conocer la forma real antes de
-      // decidir la orientacion; no se decide por el nombre ni se
-      // decodifica entera dos veces.
-      uint8_t head[512];
-      int rd = -1;
-      MediaStream s;
-      memset(&s, 0, sizeof(s));
-      if(mediaStreamOpen(&s, vidPath)){
-        s.pos = 0;
-        rd = mediaIoRead(&s, head, sizeof(head));
-        mediaStreamClose(&s);
-      }
-      FlexJpegInfo inf;
-      if(rd > 0 && flexJpegProbe(head, (size_t)rd, &inf) == FLEXJPG_OK){
-        vidLand = mediaOriLandscape(inf.width, inf.height);
-        vidLayout(inf.width, inf.height);
-      } else {
-        vidLayout(4, 3);
-      }
-    } else {
-      vidLayout(SCR_W, SCR_H);
+    if(kind == FLEXMED_DRAW){ vidLayout(SCR_W, SCR_H); return true; }
+
+    uint32_t sz = mediaFileSize(vidPath);
+    if(sz == 0){ vidFail("El archivo est\xC3\xA1 vac\xC3\xADo"); return false; }
+    if(sz > VID_PHOTO_CAP){
+      char m[72];
+      snprintf(m, sizeof(m), "Imagen de %u MB: supera el l\xC3\xADmite de %u MB",
+               (unsigned)(sz / 1048576u), (unsigned)(VID_PHOTO_CAP / 1048576u));
+      vidFail(m);
+      return false;
     }
+    // Se comprueba que quede PSRAM de sobra ANTES de pedirla: una
+    // reserva que agota la memoria deja al sistema entero tocado, no
+    // solo a esta foto.
+    size_t freePs = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    if(freePs > 0 && (size_t)sz + VID_PSRAM_MARGIN > freePs){
+      vidFail("No hay memoria libre suficiente para esta imagen");
+      return false;
+    }
+    vidPhotoBuf = (uint8_t*)mediaAlloc(sz);
+    if(!vidPhotoBuf){ vidFail("La imagen no cabe en memoria"); return false; }
+    int rd = mediaReadWhole(vidPath, vidPhotoBuf, sz);
+    if(rd <= 0){ vidFail("No se pudo leer la imagen"); return false; }
+    vidPhotoLen = (uint32_t)rd;
+
+    FlexJpegInfo inf;
+    if(flexJpegProbe(vidPhotoBuf, vidPhotoLen, &inf) != FLEXJPG_OK){
+      vidFail(inf.progressive ? "JPEG progresivo: no se puede decodificar"
+                              : "No es un JPEG que se pueda abrir");
+      return false;
+    }
+    vidLand = mediaOriLandscape(inf.width, inf.height);
+    if(inf.width == inf.height) gMediaSquareLand = vidLand;
+    vidLayout(inf.width, inf.height);
     return true;
   }
 
@@ -18393,22 +18528,9 @@ static void vidDrawCurrentFrame(bool publish){
 // tamano ampliado y vidJpegRow recorta a la caja, asi que las filas
 // que no se ven no llegan a copiarse.
 static void vidDrawPhoto(){
+  if(!vidPhotoBuf || !vidPhotoLen) return;      // ya se dijo por que al abrir
   setBuf(fb);
-  uint32_t sz = mediaFileSize(vidPath);
-  if(sz == 0){ vidFail("El archivo est\xC3\xA1 vac\xC3\xADo"); return; }
-  uint8_t* buf = (uint8_t*)mediaAlloc(sz);
-  if(!buf){ vidFail("La imagen no cabe en memoria"); return; }
-  int rd = mediaReadWhole(vidPath, buf, sz);
-  if(rd <= 0){ mediaFree(buf); vidFail("No se pudo leer la imagen"); return; }
-  FlexJpegInfo inf;
-  if(flexJpegProbe(buf, (size_t)rd, &inf) != FLEXJPG_OK){
-    mediaFree(buf); vidFail("No es un JPEG que se pueda abrir"); return;
-  }
-  vidLand = mediaOriLandscape(inf.width, inf.height);
-  if(inf.width == inf.height) gMediaSquareLand = vidLand;
-  vidLayout(inf.width, inf.height);
-  int r = vidDrawJpeg(buf, (uint32_t)rd);
-  mediaFree(buf);
+  int r = vidDrawJpeg(vidPhotoBuf, vidPhotoLen);
   if(r != FLEXJPG_OK && r != FLEXJPG_ERR_ABORTED)
     vidFail(flexJpegErrStr(r));
 }
@@ -18819,6 +18941,41 @@ static void vidAudioTick(){
 // -------------------------------------------------------------
 //  ENTRADA
 // -------------------------------------------------------------
+// -------------------------------------------------------------
+//  SALIR DEL VISOR
+//  ------------------------------------------------------------
+//  UN solo camino, y lo comparten las tres formas de salir: la
+//  flecha del lienzo, el boton ATRAS de la barra del sistema y el
+//  gesto. Tener uno solo es lo que garantiza que por cualquiera de
+//  los tres se suelten los mismos recursos y se vuelva al mismo
+//  sitio; si cada uno hiciera lo suyo, bastaria olvidarse en uno
+//  para dejar un descriptor abierto sobre la tarjeta.
+// -------------------------------------------------------------
+static void vidLeaveViewer(){
+  vidReleaseMedia(true);                 // guarda la posicion y suelta TODO
+  gLand = false;                         // el motor vuelve a vertical
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
+  vidScreen = VS_LIST;
+  vidZoom = 1; vidPanX = vidPanY = 0;
+  vidPanning = false;
+  // Si el archivo se abrio DESDE otra app (la Galeria), se vuelve
+  // alli: salir por donde se entro es lo que espera cualquiera.
+  if(gMediaReturnApp != 0xFF){
+    uint8_t back = gMediaReturnApp;
+    gMediaReturnApp = 0xFF;
+    appClose();
+    enterApp(back);
+    return;
+  }
+  vidSyncListIndex();
+  setBuf(fb);
+  fillRect(0, 0, SCR_W, SCR_H, WIN_BG);
+  appDrawChrome(IC_MULTIMEDIA);
+  appDrawHeader(IC_MULTIMEDIA);
+  vidListRender();
+  flxFlushAll();
+}
+
 // El desplazamiento de una foto ampliada: se arrastra con el dedo y
 // se repinta solo cuando el desplazamiento cambia de verdad.
 static int  vidPanGrabX = 0, vidPanGrabY = 0, vidPanBaseX = 0, vidPanBaseY = 0;
@@ -18843,38 +19000,26 @@ static void vidViewerTouch(){
       int ox = vidPanX, oy = vidPanY;
       vidPanX = px; vidPanY = py;
       vidClampPan();
-      if(vidPanX != ox || vidPanY != oy) vidRenderViewer();
+      // Cada repintado es UNA decodificacion. Se limita la cadencia
+      // para que arrastrar el dedo no pida una por cada movimiento
+      // del tactil; el ultimo repintado se hace igual al soltar, asi
+      // que la posicion final siempre acaba siendo la correcta.
+      static unsigned long vidPanMs = 0;
+      if((vidPanX != ox || vidPanY != oy) && millis() - vidPanMs >= VID_PAN_MS){
+        vidPanMs = millis();
+        vidRenderViewer();
+      }
       return;
     }
-    if(!T.down && vidPanning){ vidPanning = false; return; }
+    if(!T.down && vidPanning){ vidPanning = false; vidRenderViewer(); return; }
   }
 
   // Volver: esquina superior izquierda del lienzo LOGICO, asi que
-  // esta donde se ve la flecha tambien en horizontal.
-  if(T.tap && tx < 56 && ty < 56){
-    vidReleaseMedia(true);
-    gLand = false;
-    gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
-    vidScreen = VS_LIST;
-    vidZoom = 1; vidPanX = vidPanY = 0;
-    // Si el archivo se abrio DESDE otra app (la Galeria), se vuelve
-    // alli: salir por donde se entro es lo que espera cualquiera.
-    if(gMediaReturnApp != 0xFF){
-      uint8_t back = gMediaReturnApp;
-      gMediaReturnApp = 0xFF;
-      appClose();
-      enterApp(back);
-      return;
-    }
-    vidSyncListIndex();
-    setBuf(fb);
-    fillRect(0, 0, SCR_W, SCR_H, WIN_BG);
-    appDrawChrome(IC_MULTIMEDIA);
-    appDrawHeader(IC_MULTIMEDIA);
-    vidListRender();
-    flxFlushAll();
-    return;
-  }
+  // esta donde se ve la flecha tambien en horizontal. En horizontal
+  // la barra del sistema no se dibuja (la desactiva gLand), asi que
+  // esta flecha es la UNICA salida y por eso vive en el lienzo
+  // logico, girando con todo lo demas.
+  if(T.tap && tx < 56 && ty < 56){ vidLeaveViewer(); return; }
 
   if(!T.tap) return;
 
@@ -19121,6 +19266,16 @@ struct VidSessV2 {
   uint32_t resumeKey[VID_RESUME_N];
   uint32_t resumeFrame[VID_RESUME_N];
 };
+
+// ATRAS (barra del sistema o gesto) desde el visor vuelve a la lista,
+// no expulsa la app: es la misma regla que ya sigue la Galeria con su
+// menu, y evita que ver una foto y pulsar atras te saque al
+// escritorio perdiendo la lista donde estabas.
+static bool vidBackScreen(){
+  if(vidScreen != VS_VIEW) return false;
+  vidLeaveViewer();
+  return true;
+}
 
 static void vidSuspend(){
   if(vidKind == VK_VIDEO && vidPath[0] && !vidEnded) vidResumeSet(vidPath, vidCurFrame);
@@ -23562,6 +23717,11 @@ static void paintNew(){
   char full[FLEXFS_PATH_MAX];
   if(!flexFsNewName(FLEXFS_DIR_PAINT, "Dibujo", FLEXFS_EXT_PAINT, full, sizeof(full))) return;
   if(!flexPaintCreate(full, PAINT_CW, PAINT_CH)) return;
+  // Hay un archivo nuevo en /Paint: el indice de medios que comparten
+  // Galeria y Multimedia queda caducado y se reconstruye la proxima
+  // vez que se abra una de las dos. Es lo que hace que un dibujo
+  // recien creado aparezca en la Galeria sin refrescar a mano.
+  mediaIndexInvalidate();
   paintReload();
   for(int i = 0; i < paintListN; i++){
     char p[FLEXFS_PATH_MAX]; paintPathOf(i, p, sizeof(p));
@@ -31272,7 +31432,7 @@ static void themeChanged(bool save){
 // ##  un archivo de camara.
 // #############################################################
 #define GAL_COLS            3
-#define GAL_CACHE_N        12      // ~una pantalla y media de miniaturas
+#define GAL_CACHE_N        16      // cubre una pantalla llena de celdas y sobra
 #define GAL_THUMB_PER_PASS  2      // decodificaciones nuevas por repintado
 #define GAL_SEL_MAX        32      // tope REAL de la seleccion multiple
 #define GAL_JPEG_MAX_BYTES (768 * 1024)   // por encima, no se hace miniatura
@@ -31366,6 +31526,7 @@ static void galCacheReset(){
     galCache[i].state = GTH_EMPTY;
     galCache[i].w = galCache[i].h = 0;
     galCache[i].useMs = 0;
+    galCache[i].pass  = 0;
   }
   galCacheInit = true;
 }
@@ -31376,11 +31537,21 @@ static int galCacheFind(const char* path){
     if(galCache[i].state != GTH_EMPTY && !strcmp(galCache[i].path, path)) return i;
   return -1;
 }
-// Ranura libre, o la que lleva mas tiempo sin usarse.
+// Repintado en curso. Sirve para que una miniatura nueva no expulse a
+// otra que YA se ha dibujado en este mismo pase: si lo hiciera, con la
+// pantalla llena de celdas la cache se pisaria a si misma y cada
+// repintado volveria a decodificarlo todo -- justo lo que la cache
+// existe para evitar.
+static uint32_t galPass = 0;
+
+// Ranura libre; si no hay, la que lleva mas tiempo sin usarse de
+// entre las que NO se han usado en este repintado. Si todas se han
+// usado, devuelve -1 y la celda se dibuja con su marco.
 static int galCacheSlot(){
   int best = -1;
   for(int i = 0; i < GAL_CACHE_N; i++){
     if(galCache[i].state == GTH_EMPTY) return i;
+    if(galCache[i].pass == galPass) continue;              // en uso AHORA
     if(best < 0 || galCache[i].useMs < galCache[best].useMs) best = i;
   }
   return best;
@@ -31433,6 +31604,7 @@ static int galThumbBuild(const char* path, int kind, uint32_t size){
   }
   snprintf(t->path, sizeof(t->path), "%s", path);
   t->useMs = millis();
+  t->pass  = galPass;
   t->w = t->h = 0;
   t->state = GTH_FAIL;                        // hasta que se demuestre lo contrario
   // Fondo de la miniatura: un gris neutro, para que una imagen que
@@ -31541,6 +31713,7 @@ static void galDrawCell(int nth, int x, int y, int w, int h, int &budget){
   }
   if(slot >= 0){
     galCache[slot].useMs = millis();
+    galCache[slot].pass  = galPass;
     if(galCache[slot].state == GTH_OK){ galBlitThumb(&galCache[slot], x, y, w, h); return; }
   }
   // Sin miniatura: marco con la clase y el nombre. Nunca una imagen
@@ -31595,6 +31768,7 @@ static void galRenderGrid(){
   fillRect(bx, by, bw, bh, WIN_BG);
   int pad = uiPad();
   galMorePending = false;
+  galPass++;
   int budget = GAL_THUMB_PER_PASS;
 
   drawText(bx + pad, by + 14, "Galer\xC3\xAD" "a", 4, TH_TXT);
@@ -34812,6 +34986,21 @@ void loop(){
 //      carpetas /Paint, /Notas, /System, /Documentos y /Papelera,
 //      con Paint, Notas, Almacenamiento y el Explorador de archivos
 //      operando sobre ficheros de verdad.
-//    · Pendiente: tarjeta SD como volumen adicional y fondos de
-//      pantalla cargados desde fichero.
+//    · [HECHO] Tarjeta microSD como SEGUNDO VOLUMEN real
+//      (FlexOS_SD.h/.cpp): SDMMC nativo de 4 bits sobre
+//      CLK43/CMD44/D0=39/D1=40/D2=41/D3=42, alimentada por el canal
+//      4 del regulador interno del P4. Insercion y retirada en
+//      caliente sin linea de deteccion fisica (aqui CD/DATA3 se usa
+//      como DATA3), montaje solo lectura para los archivos del
+//      usuario y capacidad real en Almacenamiento.
+//    · [HECHO] MEDIOS REALES (FlexOS_Media.h/.cpp + Galeria +
+//      Multimedia): indice incremental de los dos volumenes, JPEG
+//      baseline, video AVI/MJPEG con reproduccion por bloques y
+//      orientacion Auto/Vertical/Horizontal sobre el motor gLand que
+//      ya existia.
+//    · [PARCIAL] AUDIO (FlexOS_Audio.h/.cpp): ES8311 por I2S, con
+//      volumen que escribe el registro del codec. Solo se activa si
+//      el chip contesta su identificacion en el bus; NO esta
+//      verificado con altavoz en placa.
+//    · Pendiente: fondos de pantalla cargados desde fichero.
 // #############################################################

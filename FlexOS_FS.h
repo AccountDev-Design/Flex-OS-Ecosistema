@@ -139,6 +139,13 @@ const char* flexFsError();
 // repintados). Devuelve cuantas entradas ha escrito en `out`.
 int      flexFsList(const char* dir, FlexFsEntry* out, int maxn);
 
+// Igual, pero SIN ordenar y saltando las `skip` primeras entradas.
+// Devuelve las escritas (0 = no quedan) o -1 si el directorio no se
+// pudo abrir. La usa el indexador de medios para recorrer una carpeta
+// grande en lotes pequenos sin leerla entera cada vez ni tener un
+// tope silencioso de elementos.
+int      flexFsListFrom(const char* dir, FlexFsEntry* out, int maxn, int skip);
+
 // Numero REAL de elementos directos de un directorio (recorre el
 // directorio y cuenta; no hay ningun contador cacheado que se
 // pueda desincronizar).

@@ -3176,6 +3176,152 @@ static void testRejillaAutoPaginas(){
   if(gFails == before) printf("  Rejilla del Inicio: todas las comprobaciones pasan.\n");
 }
 
+
+// =============================================================
+//  MEDIOS: orientacion, ajuste sin deformar y mapeo del tacto
+//  ------------------------------------------------------------
+//  Aqui se prueba la parte del reproductor que es LOGICA PURA y que
+//  ademas concentra el fallo mas caro de una app que gira: que la
+//  imagen se vea horizontal y el dedo siga respondiendo como si la
+//  pantalla estuviera vertical. La comprobacion clave es la ultima:
+//  se recorre la geometria de los botones EN LAS DOS orientaciones y
+//  se comprueba que el punto fisico que hay que tocar para pulsar un
+//  boton es el punto donde ese boton se dibuja.
+// =============================================================
+static void testMediosOrientacion(){
+  printf("Medios - orientacion, ajuste y tacto\n");
+  gLand = false;
+
+  // ---- 1. MODO AUTO: manda la forma del archivo ----
+  gMediaOriMode = MORI_AUTO;
+  chk(mediaOriLandscape(1920, 1080), "Auto: un archivo mas ancho que alto se abre en horizontal");
+  chk(!mediaOriLandscape(1080, 1920), "Auto: uno mas alto que ancho se queda en vertical");
+  chk(!mediaOriLandscape(0, 0), "Auto: sin dimensiones no se gira (no se adivina)");
+
+  // Cuadrado: la ultima orientacion de la SESION, que es lo pedido.
+  gMediaSquareLand = false;
+  chk(!mediaOriLandscape(600, 600), "Auto: un archivo cuadrado usa la ultima orientacion (vertical)");
+  gMediaSquareLand = true;
+  chk(mediaOriLandscape(600, 600), "Auto: un archivo cuadrado usa la ultima orientacion (horizontal)");
+
+  // ---- 2. MODOS MANUALES: mandan siempre, sea cual sea el archivo ----
+  gMediaOriMode = MORI_PORT;
+  chk(!mediaOriLandscape(1920, 1080), "Vertical fuerza vertical incluso en un archivo apaisado");
+  gMediaOriMode = MORI_LAND;
+  chk(mediaOriLandscape(1080, 1920), "Horizontal fuerza horizontal incluso en un archivo vertical");
+  gMediaOriMode = MORI_AUTO;
+
+  // ---- 3. AJUSTE SIN DEFORMAR ----
+  // La proporcion de salida tiene que ser la de entrada, con el error
+  // de un pixel del redondeo entero. Si esto falla, las fotos salen
+  // estiradas, que es exactamente lo que no puede pasar.
+  struct { int sw, sh, bw, bh; } casos[] = {
+    { 1920, 1080, 480, 800 }, { 1080, 1920, 480, 800 },
+    { 1920, 1080, 800, 480 }, { 640,  480,  800, 480 },
+    { 600,  600,  480, 800 }, { 4000, 3000, 480, 800 },
+    { 100,  1000, 800, 480 },
+  };
+  bool cabe = true, proporcion = true, positivos = true;
+  for(unsigned i = 0; i < sizeof(casos) / sizeof(casos[0]); i++){
+    int ow = 0, oh = 0;
+    mediaFitBox(casos[i].sw, casos[i].sh, casos[i].bw, casos[i].bh, ow, oh);
+    if(ow > casos[i].bw || oh > casos[i].bh) cabe = false;
+    if(ow < 1 || oh < 1) positivos = false;
+    // |sw*oh - sh*ow| tiene que ser pequeno frente a la escala: es la
+    // comparacion de proporciones sin coma flotante.
+    long long izq = (long long)casos[i].sw * oh, der = (long long)casos[i].sh * ow;
+    long long dif = izq > der ? izq - der : der - izq;
+    long long tol = (long long)casos[i].sw + casos[i].sh;
+    if(dif > tol) proporcion = false;
+  }
+  chk(cabe,       "el contenido ajustado nunca se sale de su caja");
+  chk(positivos,  "el ajuste nunca produce un tamano de cero");
+  chk(proporcion, "el ajuste conserva la proporcion: las imagenes no se deforman");
+  { // Y ademas TOCA un borde: si no, quedaria mas pequeno de lo que cabe.
+    int ow = 0, oh = 0;
+    mediaFitBox(1920, 1080, 800, 480, ow, oh);
+    chk(ow == 800 || oh == 480, "el ajuste llena la caja por su lado limitante");
+  }
+
+  // ---- 4. LIENZO LOGICO ----
+  chk(mediaCanvasW(false) == SCR_W && mediaCanvasH(false) == SCR_H, "vertical: el lienzo es el de la pantalla");
+  chk(mediaCanvasW(true)  == LW    && mediaCanvasH(true)  == LH,    "horizontal: el lienzo es el girado");
+
+  // ---- 5. TACTO Y DIBUJO, LA MISMA GEOMETRIA ----
+  // En horizontal, putPhys(lx,ly) escribe en el pixel fisico
+  // (SCR_W-1-ly, lx). El tacto tiene que hacer el camino INVERSO
+  // exacto: desde un toque fisico en ese pixel se debe recuperar
+  // (lx,ly). Se comprueba sobre una rejilla de puntos del lienzo.
+  bool ida = true;
+  for(int lx = 0; lx < LW; lx += 37){
+    for(int ly = 0; ly < LH; ly += 29){
+      int fx = (SCR_W - 1) - ly, fy = lx;      // donde CAE ese punto logico
+      T.x = fx; T.y = fy;
+      int gx = 0, gy = 0;
+      mediaTouchXY(true, gx, gy);              // lo que el tacto deduce
+      if(gx != lx || gy != ly) ida = false;
+    }
+  }
+  chk(ida, "horizontal: el tacto deshace EXACTAMENTE la rotacion del dibujo");
+  { // Y en vertical no toca nada.
+    T.x = 123; T.y = 456;
+    int gx = 0, gy = 0;
+    mediaTouchXY(false, gx, gy);
+    chk(gx == 123 && gy == 456, "vertical: el tacto no transforma nada");
+  }
+
+  // ---- 6. LOS BOTONES CAEN DENTRO DE SU PANEL, EN LAS DOS ORIENTACIONES ----
+  // Si el panel se maqueta con un lienzo y los botones con otro, esto
+  // los saca fuera. Es la prueba de que ambos leen la misma fuente.
+  for(int paso = 0; paso < 2; paso++){
+    vidLand = (paso == 1);
+    int bx, by, bw, bh; vidCtrlGeom(bx, by, bw, bh);
+    VidBtns b; vidBtnGeom(b);
+    char m[96];
+    snprintf(m, sizeof(m), "%s: el panel de controles cabe en el lienzo",
+             vidLand ? "horizontal" : "vertical");
+    chk(bx >= 0 && by >= 0 && bx + bw <= mediaCanvasW(vidLand)
+        && by + bh <= mediaCanvasH(vidLand), m);
+    snprintf(m, sizeof(m), "%s: todos los botones caen dentro del panel",
+             vidLand ? "horizontal" : "vertical");
+    bool dentro = true;
+    const int xs[6] = { b.cx, b.prevX, b.back10X, b.fwd10X, b.nextX, b.oriX + b.oriW / 2 };
+    const int ys[6] = { b.cy, b.cy,    b.cy,      b.cy,     b.cy,    b.oriY + b.oriH / 2 };
+    for(int i = 0; i < 6; i++)
+      if(xs[i] < bx || xs[i] > bx + bw || ys[i] < by || ys[i] > by + bh) dentro = false;
+    chk(dentro, m);
+    // Y no se pisan entre si: el orden en X tiene que ser estricto.
+    snprintf(m, sizeof(m), "%s: los botones no se solapan", vidLand ? "horizontal" : "vertical");
+    chk(b.prevX < b.back10X && b.back10X < b.cx && b.cx < b.fwd10X && b.fwd10X < b.nextX, m);
+  }
+  vidLand = false;
+
+  // ---- 7. VOLUMEN: sin codec no hay control, ni en el panel ni en el catalogo ----
+  chk(!flexAudioAvailable(), "el doble de audio reproduce el caso SIN codec");
+  chk(!qpCtlAvail(QSID_VOLUME), "sin codec no se ofrece el deslizador de volumen");
+  chk(!qpCtlAvail(QSID_MUTE),   "sin codec no se ofrece el interruptor de silencio");
+  flexPrefsWipe();
+  qpLoaded = false; qpLoad();
+  chk(!qpCfgHas(QSID_VOLUME), "la configuracion de fabrica no coloca un control de volumen sin salida real");
+
+  // ---- 8. RUTAS: de que volumen es cada una ----
+  chk(mediaIsSd("/sdcard/DCIM/a.jpg"),  "una ruta de la tarjeta se reconoce");
+  chk(!mediaIsSd("/Documentos/a.jpg"),  "una ruta interna no se confunde con la tarjeta");
+  chk(!mediaIsSd("/sdcardX/a.jpg"),     "un prefijo parecido NO es la tarjeta");
+  chk(strcmp(mediaVolName("/sdcard/x"), mediaVolName("/Documentos/x")) != 0,
+      "los dos volumenes se nombran distinto");
+
+  // ---- 9. SIN TARJETA: nada finge tenerla ----
+  chk(!flexSdReady(), "el doble de la tarjeta reproduce el caso SIN tarjeta");
+  chk(flexSdTotalBytes() == 0 && flexSdUsedBytes() == 0,
+      "sin tarjeta la capacidad es cero, no un numero inventado");
+  chk(flexSdError()[0] != 0, "sin tarjeta siempre hay un motivo legible que ensenar");
+  { FlexFsEntry e[4];
+    chk(mediaList("/sdcard", e, 4) < 0, "listar la tarjeta ausente da error, no 'carpeta vacia'"); }
+
+  printf("  Medios: todas las comprobaciones pasan.\n");
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -3257,6 +3403,7 @@ int main(){
   testIconosEnSuCaja();
   testTransicionesApps();
   testRejillaAutoPaginas();
+  testMediosOrientacion();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

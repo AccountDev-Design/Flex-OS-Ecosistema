@@ -42,6 +42,10 @@ GANCHOS = [
     ("mediaStorageTick", "mediaIndexTick()", "el indice de medios nunca terminaria de construirse"),
     ("setup",          "flexSdBegin()",   "el controlador SDMMC no se prepararia y la tarjeta no montaria nunca"),
     ("setup",          "flexAudioBegin()","el codec no se sondearia y el audio quedaria desactivado sin motivo"),
+    # Un dibujo recien creado tiene que aparecer en la Galeria sin que
+    # nadie refresque a mano: sin esta invalidacion, el indice se queda
+    # con la foto de antes hasta que cambie la tarjeta.
+    ("paintNew",       "mediaIndexInvalidate()", "un dibujo nuevo no aparecería en la Galeria hasta reindexar por otro motivo"),
     ("flexPollTouch",  "hpzUpdate()",     "el gesto de dos dedos no se detectaria nunca"),
     ("flexPollTouch",  "hpzSwallowing()", "el gesto no se consumiria y el mismo toque llegaria a otra capa"),
     ("flexPollTouch",  "suspGestureUpdate()", "se perderia el gesto de suspension"),

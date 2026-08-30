@@ -233,6 +233,39 @@ static int cmpEntry(const FlexFsEntry* a, const FlexFsEntry* b){
   return strcasecmp(a->name, b->name);
 }
 
+// Recorrido CRUDO del directorio, en el orden en que lo entrega el
+// sistema de archivos y saltando las `skip` primeras entradas. NO
+// ordena: ordenar cada lote daria un orden global incoherente.
+//
+// Existe para el indexador de medios, que recorre una carpeta grande
+// en lotes pequenos: sin esto habria que leer el directorio entero en
+// cada lote (y con un tope, lo que dejaria fuera lo que pasara de ese
+// tope sin decirlo).
+int flexFsListFrom(const char* dir, FlexFsEntry* out, int maxn, int skip){
+  if(!fsMounted || !out || maxn <= 0) return 0;
+  if(flexFsIsVaultPath(dir)) return 0;
+  File d = LittleFS.open(dir);
+  if(!d || !d.isDirectory()){ if(d) d.close(); return -1; }
+  int n = 0, seen = 0;
+  File e = d.openNextFile();
+  while(e && n < maxn){
+    const char* nm = baseName(e.name());
+    if(isVaultEntryName(nm)){ e.close(); e = d.openNextFile(); continue; }
+    if(seen++ < skip){ e.close(); e = d.openNextFile(); continue; }
+    strncpy(out[n].name, nm, FLEXFS_NAME_MAX - 1);
+    out[n].name[FLEXFS_NAME_MAX - 1] = 0;
+    out[n].dir   = e.isDirectory();
+    out[n].items = 0;
+    out[n].size  = out[n].dir ? 0 : (uint32_t)e.size();
+    e.close();
+    n++;
+    e = d.openNextFile();
+  }
+  if(e) e.close();
+  d.close();
+  return n;
+}
+
 int flexFsList(const char* dir, FlexFsEntry* out, int maxn){
   if(!fsMounted || !out || maxn <= 0) return 0;
   if(flexFsIsVaultPath(dir)) return 0;            // no se puede listar la boveda

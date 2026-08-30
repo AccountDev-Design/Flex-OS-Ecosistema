@@ -50,6 +50,7 @@ uint32_t    flexFsTotalBytes(){ return 0; }
 uint32_t    flexFsDirSize(const char*){ return 0; }
 uint32_t    flexFsCatSize(int){ return 0; }
 int         flexFsList(const char*, FlexFsEntry*, int){ return 0; }
+int         flexFsListFrom(const char*, FlexFsEntry*, int, int){ return -1; }
 int         flexFsLargest(FlexFsBig*, int){ return 0; }
 int         flexFsReadText(const char*, char* out, size_t n){ if(n) out[0] = 0; return -1; }
 bool        flexFsWriteText(const char*, const char*){ return false; }
