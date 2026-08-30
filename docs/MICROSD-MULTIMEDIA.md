@@ -68,6 +68,26 @@ ESP32-P4. Tampoco se consideran errores las carpetas opcionales que no
 existan (`DCIM`, `Pictures`, `Movies`, etc.); simplemente se indexan como
 vacías. No hay ningún bucle que lea la tarjeta continuamente.
 
+### Exclusión microSD ↔ Wi-Fi remoto del C6
+
+En el ESP32-P4, `WiFi.status()` y `WiFi.getMode()` no son consultas locales:
+atraviesan **esp-hosted por SDIO** hasta el C6. La configuración de radio del
+kit y la microSD reclaman el mismo recurso SDIO/SDMMC; intentar usarlos a la
+vez produce un `PANIC`, no un error recuperable.
+
+Flex OS aplica exclusión mutua completa:
+
+* con microSD montada, ningún tick de escritorio, NTP u OTA consulta el
+  driver Wi-Fi y la reconexión automática de arranque está desactivada;
+* si se intenta encender Wi-Fi con la microSD montada, se bloquea **antes**
+  de tocar esp-hosted y la pantalla explica que hay que expulsar la tarjeta;
+* si Wi-Fi ya posee el bus, el montaje de una tarjeta queda en espera hasta
+  apagarlo.
+
+Esto conserva ambas funciones, pero no permite utilizarlas simultáneamente.
+No es una elección de interfaz: es una restricción del transporte de esta
+placa/build. El Wi-Fi manual sigue disponible sin tarjeta insertada.
+
 ### Generación de montaje
 
 `flexSdGeneration()` sube en cada montaje y en cada desmontaje. Quien
@@ -428,3 +448,6 @@ sin códec **no se ofrece ningún control de volumen**.
    esta placa no expone una línea CD independiente. Se detecta en la
    siguiente operación real sobre la tarjeta. Volver a sondearla por
    tiempo reintroduciría el reinicio `PANIC` que se eliminó.
+10. **Wi-Fi remoto y microSD no funcionan simultáneamente en este build.**
+    Ambos reclaman SDIO/SDMMC. Flex OS bloquea el segundo que se intente
+    activar para convertir un reinicio fatal en un estado visible y seguro.
