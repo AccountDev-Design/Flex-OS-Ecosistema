@@ -49,15 +49,14 @@
 //
 //  DETECCION DE PRESENCIA. La placa NO tiene linea util de
 //  insercion: el pin CD del conector es CD/DATA3 y aqui se usa
-//  como DATA3. La presencia se deduce, por tanto, de dos vias que
-//  se complementan (ver flexSdTick):
-//    · PASIVA e inmediata: cualquier operacion que falle sobre una
-//      tarjeta montada dispara una verificacion; si esa
-//      verificacion tambien falla, la tarjeta se da por retirada.
-//      Es el camino que corta la reproduccion de un video en el
-//      mismo fotograma en que se saca la tarjeta.
-//    · ACTIVA y barata: un sondeo espaciado (FLEXSD_POLL_MS) que
-//      solo hace UNA operacion de directorio, nunca un recorrido.
+//  como DATA3. Por seguridad, una tarjeta MONTADA no se abre por
+//  temporizador: esa comprobacion periodica de la raiz provoca
+//  PANIC con algunas tarjetas/controladores del ESP32-P4.
+//    · Mientras no esta montada, flexSdTick reintenta el montaje de
+//      forma espaciada y asi detecta una insercion.
+//    · Mientras esta montada, solo una operacion real solicitada por
+//      el usuario toca el bus. Si falla, el volumen se invalida y se
+//      notifica la retirada; en video ocurre en la misma lectura.
 //  No hay ningun bucle que lea la tarjeta continuamente.
 
 #pragma once
@@ -144,15 +143,15 @@ uint32_t    flexSdGeneration();
 // -------------------------------------------------------------
 //  SONDEO
 // -------------------------------------------------------------
-// Llamar desde loop(). Coste amortizado casi nulo: la mayoria de
-// las vueltas solo compara millis(). Devuelve true si el estado
-// CAMBIO en esta llamada (para que el llamante notifique y
-// repinte). Nunca sondea mientras flexSdBusySet(true) este activo.
+// Llamar desde loop(). Con tarjeta montada no toca SDMMC. Mientras
+// no hay tarjeta compara millis() y solo intenta montar al vencer el
+// plazo. Devuelve true si el estado CAMBIO en esta llamada. Nunca
+// intenta montar mientras flexSdBusySet(true) este activo.
 bool        flexSdTick();
 
-// Fuerza que el proximo flexSdTick() compruebe de verdad, sin
-// esperar al periodo. La llaman Almacenamiento, Galeria y
-// Multimedia al abrirse.
+// Si no hay volumen, fuerza que el proximo flexSdTick() intente
+// montar sin esperar al periodo. Con una tarjeta ya montada no hace
+// ninguna lectura. La llaman Almacenamiento, Galeria y Multimedia.
 void        flexSdPoke();
 
 // Silencia el sondeo durante una operacion sensible al tiempo (un
