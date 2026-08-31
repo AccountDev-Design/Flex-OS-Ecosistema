@@ -688,10 +688,10 @@ static volatile bool gNetOnline = false;   // true tras un WiFi.begin() exitoso;
 // En el P4 la radio remota y la microSD usan SDIO/SDMMC. No se consulta
 // WiFi.getMode() para saber si el controlador esta vivo porque ESA consulta
 // ya puede despertar esp-hosted y reclamar el bus. Esta bandera pertenece a
-// Flex OS y permite aplicar exclusion mutua sin tocar el driver.
+// Flex OS sin consultar continuamente el controlador remoto del C6.
 static volatile bool gWifiDriverOn = false;
 static volatile bool gWifiAutoBusy = false;   // tarea de conexion manual con red guardada
-static volatile bool gWifiAutoDone = true;    // no existe reconexion automatica de arranque
+static volatile bool gWifiAutoDone = false;   // un intento diferido por arranque
 
 // Estado de las OTRAS dos radios, aqui arriba por el mismo motivo que
 // gNetOnline: la pantalla de Ajustes lee los tres para pintar la categoria
@@ -17947,20 +17947,9 @@ static void mediaIndexTick(){
 //  venga -- Galeria, Multimedia, Almacenamiento o el escritorio.
 // -------------------------------------------------------------
 static void mediaStorageTick(){
-  // El P4 no puede entregar el mismo host SDIO/SDMMC a esp-hosted y a la
-  // tarjeta a la vez. Si el usuario encendio Wi-Fi primero, no intentamos
-  // montar la SD por debajo del controlador de radio: quedara disponible al
-  // apagar Wi-Fi. La situacion inversa se bloquea en wifiStart*().
-  static bool busWarned = false;
-  if(gWifiDriverOn){
-    if(!busWarned){
-      busWarned = true;
-      mediaNotify(MOD_SDCARD, "Tarjeta SD en espera", "Apaga Wi-Fi para montar la tarjeta");
-    }
-    mediaIndexTick();
-    return;
-  }
-  busWarned = false;
+  // SDMMC vive en el slot dedicado 0; esp-hosted/C6 usa el slot 1. Esa
+  // separacion se fija en build_opt.h, por lo que el sondeo de la tarjeta no
+  // depende del estado del Wi-Fi ni lo bloquea.
   if(flexSdTick()){
     if(flexSdReady()){
       char sub[40];
@@ -28869,6 +28858,7 @@ static void poffWakeGate(){
 //  ofrecer "Buscar redes" sin que toques nada mas.
 // -------------------------------------------------------------
 #define FLEXOS_WIFI_TIMEOUT_MS 15000
+#define FLEXOS_WIFI_AUTOCONN_DELAY_MS 6000
 
 // Definido mas abajo (necesita wifiSavedSSID y el resto del bloque Wi-Fi).
 static bool wifiCredsLoad();
@@ -28890,8 +28880,8 @@ static bool wifiCredsLoad();
 // -------------------------------------------------------------
 static void bootInitRadioSafe(){
   bool saved = wifiCredsLoad();          // solo NVS: no despierta el C6
-  gWifiAutoDone = true;                  // nunca reconectar por tiempo: solo accion del usuario
-  if(saved) Serial.println(F("[C6] red guardada; radio apagada hasta que el usuario active Wi-Fi"));
+  gWifiAutoDone = !saved;                // con credenciales: un intento tras completar el arranque
+  if(saved) Serial.println(F("[C6] red guardada; reconexion automatica diferida"));
   else      Serial.println(F("[C6] radio en modo bajo demanda -> se activa solo desde Ajustes > Red e Internet > Wi-Fi"));
 }
 
@@ -29100,13 +29090,6 @@ static void wifiAutoConnTask(void*){
 // Lanza la conexion pedida por el usuario si hay una red guardada.
 static void wifiTryAutoConnect(){
   if(gWifiAutoBusy || gWifiAutoDone) return;
-  if(flexSdReady()){
-    wifiBlockedBySd = true;
-    wifiUIState = WUI_FAIL;
-    gWifiAutoDone = true;
-    mediaNotify(MOD_SDCARD, "Wi-Fi no iniciado", "La microSD esta usando el bus SDIO");
-    return;
-  }
   wifiBlockedBySd = false;
   if(!wifiCredsExist()){
     gWifiAutoDone = true;
@@ -29118,14 +29101,21 @@ static void wifiTryAutoConnect(){
 }
 #endif   // FLEXOS_ENABLE_WIFI
 
+// Reconecta una sola vez, ya con Home/Bloqueo operativo. SDMMC usa slot 0
+// dedicado y esp-hosted/C6 usa slot 1; build_opt.h fija esa separacion para
+// que levantar Wi-Fi no reclame el controlador de la tarjeta.
+static void wifiAutoReconnectTick(){
+#if FLEXOS_ENABLE_WIFI
+  if(gWifiAutoDone || gWifiAutoBusy) return;
+  if(gState != ST_HOME && gState != ST_LOCK) return;
+  if(millis() < FLEXOS_WIFI_AUTOCONN_DELAY_MS) return;
+  if(!wifiCredsExist()){ gWifiAutoDone = true; return; }
+  wifiTryAutoConnect();
+#endif
+}
+
 static void wifiStartScan(){
 #if FLEXOS_ENABLE_WIFI
-  if(flexSdReady()){
-    wifiBlockedBySd = true;
-    wifiUIState = WUI_FAIL;
-    mediaNotify(MOD_SDCARD, "Wi-Fi no iniciado", "Expulsa la microSD para usar Wi-Fi");
-    return;
-  }
   wifiBlockedBySd = false;
   wifiEnsureStaMode();
   wifiUIState = WUI_SCANNING;
@@ -29135,12 +29125,6 @@ static void wifiStartScan(){
 }
 static void wifiStartConnect(){
 #if FLEXOS_ENABLE_WIFI
-  if(flexSdReady()){
-    wifiBlockedBySd = true;
-    wifiUIState = WUI_FAIL;
-    mediaNotify(MOD_SDCARD, "Wi-Fi no iniciado", "Expulsa la microSD para usar Wi-Fi");
-    return;
-  }
   wifiBlockedBySd = false;
   if(wifiSel < 0 || wifiSel >= WIFI_MAX_NETS){ wifiUIState = WUI_LIST; return; }  // indice invalido -> nunca leer wifiNets[] fuera de rango
   wifiEnsureStaMode();
@@ -29818,11 +29802,6 @@ static void connWifiSet(bool on){
 #if FLEXOS_ENABLE_WIFI
   if(on){
     if(gAirplane) return;                       // bloqueo real, no visual
-    if(flexSdReady()){
-      wifiBlockedBySd = true;
-      mediaNotify(MOD_SDCARD, "Wi-Fi no iniciado", "Expulsa la microSD para usar Wi-Fi");
-      return;
-    }
     wifiBlockedBySd = false;
     wifiEnsureStaMode();                        // enciende la pila en modo estacion
     if(wifiCredsExist()){
@@ -34869,6 +34848,7 @@ void loop(){
   hwDetectTick();         // deteccion I2C incremental, mismo contexto que el tactil (Fase 2)
   mediaStorageTick();     // tarjeta microSD: sondeo barato + un lote del indice
   if(!gSafeMode){
+    wifiAutoReconnectTick();// reconexion diferida, una vez por arranque
     ntpTick();              // la red corre en su tarea, nunca aqui
   }
   clkPersistTick();       // guarda la hora en NVS una vez por hora (arranque sin internet)
