@@ -133,6 +133,18 @@ bool flexSdBegin(){
     return false;
   }
 
+#if defined(CONFIG_IDF_TARGET_ESP32P4) && defined(SOC_SDMMC_IO_POWER_EXTERNAL)
+  // La placa generica "ESP32P4 Dev Module" no conoce que TF_VCC sale de
+  // ESP_LDO_VO4. Sin seleccionar el canal, SD_MMC deja el rail como externo
+  // y la tarjeta no recibe la alimentacion/control de IO que espera.
+  if(!SD_MMC.setPowerChannel(4)){
+    sdState = FLEXSD_ERR_HW;
+    sdErr   = "No se pudo activar el LDO 4 de la microSD";
+    Serial.println(F("[SD] ERROR: LDO interno canal 4 no disponible"));
+    return false;
+  }
+#endif
+
   sdHwReady  = true;
   sdState    = FLEXSD_ABSENT;
   sdErr      = "Sin tarjeta insertada";
