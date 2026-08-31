@@ -50,10 +50,10 @@
 //  DETECCION DE PRESENCIA. La placa NO tiene linea util de
 //  insercion: el pin CD del conector es CD/DATA3 y aqui se usa
 //  como DATA3. Por seguridad, una tarjeta MONTADA no se abre por
-//  temporizador: esa comprobacion periodica de la raiz provoca
-//  PANIC con algunas tarjetas/controladores del ESP32-P4.
-//    · Mientras no esta montada, flexSdTick reintenta el montaje de
-//      forma espaciada y asi detecta una insercion.
+//  temporizador: tanto abrir la raiz como repetir SD_MMC.begin()
+//  provocan PANIC con algunas combinaciones P4/core/tarjeta.
+//    · Mientras no esta montada, solo una accion explicita de una
+//      pantalla pide a flexSdTick que intente el montaje.
 //    · Mientras esta montada, solo una operacion real solicitada por
 //      el usuario toca el bus. Si falla, el volumen se invalida y se
 //      notifica la retirada; en video ocurre en la misma lectura.
@@ -102,9 +102,8 @@ enum {
 // -------------------------------------------------------------
 //  Ciclo de vida
 // -------------------------------------------------------------
-// Prepara el controlador (pines SDMMC). NO monta ni bloquea
-// si no hay tarjeta: se llama una vez en setup() y deja el sistema
-// listo para que flexSdTick() haga el resto. Devuelve false si el
+// Prepara el controlador (pines SDMMC). Se llama una vez en setup()
+// antes del primer y unico intento automatico de montaje. Devuelve false si el
 // hardware no se pudo preparar (estado FLEXSD_ERR_HW), en cuyo caso
 // las demas funciones devuelven cero/false para siempre.
 bool        flexSdBegin();
@@ -143,18 +142,17 @@ uint32_t    flexSdGeneration();
 // -------------------------------------------------------------
 //  SONDEO
 // -------------------------------------------------------------
-// Llamar desde loop(). Con tarjeta montada no toca SDMMC. Mientras
-// no hay tarjeta compara millis() y solo intenta montar al vencer el
-// plazo. Devuelve true si el estado CAMBIO en esta llamada. Nunca
-// intenta montar mientras flexSdBusySet(true) este activo.
+// Llamar desde loop(). No toca SDMMC salvo que una pantalla haya llamado
+// antes a flexSdPoke(). Devuelve true si el estado CAMBIO en esta llamada.
+// Nunca intenta montar mientras flexSdBusySet(true) este activo.
 bool        flexSdTick();
 
-// Si no hay volumen, fuerza que el proximo flexSdTick() intente
-// montar sin esperar al periodo. Con una tarjeta ya montada no hace
+// Si no hay volumen, pide que el proximo flexSdTick() intente montar.
+// Con una tarjeta ya montada no hace
 // ninguna lectura. La llaman Almacenamiento, Galeria y Multimedia.
 void        flexSdPoke();
 
-// Silencia el sondeo durante una operacion sensible al tiempo (un
+// Aplaza una peticion durante una operacion sensible al tiempo (un
 // fotograma de video). No desactiva la deteccion PASIVA: si una
 // lectura falla, la retirada se detecta igual y al instante.
 void        flexSdBusySet(bool busy);
