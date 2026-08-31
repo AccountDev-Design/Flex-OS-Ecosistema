@@ -43,6 +43,7 @@
 //  Estado del modulo
 // -------------------------------------------------------------
 static bool          sdHwReady   = false;   // pines SDMMC configurados
+static bool          sdDriverTouched = false; // begin/end ya tocaron el host
 static bool          sdMounted   = false;
 static int           sdState     = FLEXSD_ABSENT;
 static const char*   sdErr       = "Sin tarjeta insertada";
@@ -148,10 +149,23 @@ bool flexSdBegin(){
 //  hace que reinsertar la tarjeta funcione sin reiniciar.
 // -------------------------------------------------------------
 static bool sdTryBegin(bool oneBit){
-  SD_MMC.end();
+  // IMPORTANTE: el PRIMER intento NO puede empezar con SD_MMC.end(). El
+  // ejemplo mp3_player del fabricante hace exactamente setPins() -> begin().
+  // En algunas versiones del core P4, end() antes del primer begin() limpia
+  // la configuracion de slot que setPins() acaba de instalar y hace que una
+  // tarjeta valida parezca ausente. Para reintentos si se limpia el driver,
+  // pero se vuelven a declarar los seis pines antes de tocar begin().
+  if(sdDriverTouched) SD_MMC.end();
+  if(!SD_MMC.setPins(SDPIN_CLK, SDPIN_CMD, SDPIN_D0, SDPIN_D1, SDPIN_D2, SDPIN_D3)){
+    sdState = FLEXSD_ERR_HW;
+    sdErr = "No se pudo reconfigurar el bus SDMMC";
+    return false;
+  }
+  sdDriverTouched = true;
+
   // La primera ruta es IDENTICA al ejemplo mp3_player del fabricante:
-  // setPins() seguido de SD_MMC.begin() sin argumentos. Su punto de
-  // montaje por defecto es /sdcard, que coincide con FLEXSD_MOUNT.
+  // setPins() seguido de SD_MMC.begin() sin argumentos. Su punto de montaje
+  // por defecto es /sdcard, que coincide con FLEXSD_MOUNT.
   if(!oneBit) return SD_MMC.begin();
 
   // Solo si la ruta oficial de 4 bits falla se intenta diagnostico a
