@@ -120,6 +120,27 @@ def main(path):
     if "wifiAutoReconnectTick()" in cloop:
         fallos.append("loop() vuelve a encender Wi-Fi automaticamente -> colision SDIO con microSD")
 
+    # --- 4. la SD reclama el bus antes que los servicios de red -----
+    # En esta placa no basta con preparar setPins() y montar en el primer
+    # loop: para entonces una tarea de servicio ya puede haber consultado
+    # esp-hosted. El orden dentro de setup() es parte del cableado.
+    csetup = cuerpo(src, "setup")
+    if csetup is None:
+        fallos.append("no encuentro la funcion setup()")
+    else:
+        sd_mount = csetup.find("flexSdMount()")
+        ota_begin = csetup.find("flexOtaBegin()")
+        store_begin = csetup.find("flexStoreBegin()")
+        account_begin = csetup.find("flexAccountBegin()")
+        if sd_mount < 0:
+            fallos.append("setup() no monta la microSD antes del primer loop")
+        if store_begin >= 0 and (sd_mount < 0 or sd_mount > store_begin):
+            fallos.append("flexStoreBegin() arranca antes de que la microSD reclame SDIO")
+        if account_begin >= 0 and (sd_mount < 0 or sd_mount > account_begin):
+            fallos.append("flexAccountBegin() arranca antes de que la microSD reclame SDIO")
+        if ota_begin >= 0 and (sd_mount < 0 or sd_mount > ota_begin):
+            fallos.append("flexOtaBegin() arranca antes de que la microSD reclame SDIO")
+
     if fallos:
         print("check_wiring: CABLEADO INCOMPLETO")
         for f in fallos:
