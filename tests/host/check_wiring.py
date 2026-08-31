@@ -39,7 +39,7 @@ GANCHOS = [
     # retirada no cortaria la reproduccion y el indice de medios no
     # avanzaria: Galeria y Multimedia se quedarian vacias para siempre.
     ("loop",           "mediaStorageTick()", "sin esto la microSD no se detecta ni se suelta, y el indice de medios no avanza"),
-    ("mediaStorageTick", "flexSdTick()",   "sin el sondeo no hay deteccion de insercion ni de retirada"),
+    ("mediaStorageTick", "flexSdTick()",   "sin atender la peticion explicita no hay montaje bajo demanda"),
     ("mediaStorageTick", "mediaIndexTick()", "el indice de medios nunca terminaria de construirse"),
     ("setup",          "flexSdBegin()",   "el controlador SDMMC no se prepararia y la tarjeta no montaria nunca"),
     ("loop",           "wifiAutoReconnectTick()", "la red guardada no se reconectaria tras arrancar"),
@@ -83,7 +83,7 @@ def main(path):
 
     # El perfil generico P4 no conoce la ranura de esta placa. Estas opciones
     # hacen que Arduino-ESP32 compile SD_MMC para el slot dedicado 0 y active
-    # el LDO 4, dejando el slot 1 al enlace esp-hosted del C6.
+    # el LDO 4. El enlace esp-hosted lleva sus propios pines GPIO/SDIO.
     build_opt = Path(path).resolve().parent / "build_opt.h"
     required_sd_opts = {
         "-DBOARD_HAS_SDMMC",
@@ -91,7 +91,7 @@ def main(path):
         "-DBOARD_SDMMC_POWER_CHANNEL=4",
     }
     if not build_opt.exists():
-        fallos.append("falta build_opt.h: SD y Wi-Fi competirian por SDIO slot 1")
+        fallos.append("falta build_opt.h: la microSD perderia slot 0/LDO 4")
     else:
         actual_opts = {line.strip() for line in build_opt.read_text(encoding="utf-8").splitlines()}
         for opt in sorted(required_sd_opts - actual_opts):
@@ -123,8 +123,7 @@ def main(path):
 
     # --- 3. el reposo NO puede despertar esp-hosted -----------------
     # En ESP32-P4, WiFi.status()/getMode() no son getters inocuos: pasan por
-    # el transporte SDIO del C6. Con la microSD montada eso reclamaba el bus
-    # cada 2 s y producia el bucle PANIC visto en placa. Los ticks globales
+    # el transporte SDIO del C6. Los ticks globales
     # deben leer el estado publicado gNetOnline, nunca el driver.
     for fn in ("wgDataTick", "ntpTick"):
         c = cuerpo(src, fn)
@@ -135,6 +134,31 @@ def main(path):
             if "WiFi." not in codigo:
                 continue
             fallos.append("%s() toca WiFi desde reposo -> colision SDIO con microSD" % fn)
+
+    # 3.2.0 ignora los pines hosted del variant. En 3.2.1 deben fijarse los
+    # siete antes de cualquier inicializacion, y el autoarranque debe llevar
+    # marcador persistente para que un PANIC no se repita en cada boot.
+    if "WiFi.setPins(18, 19, 14, 15, 16, 17, 54)" not in src:
+        fallos.append("faltan los pines SDIO explicitos del C6 para core 3.2.1")
+    if ("ESP_ARDUINO_VERSION < ESP_ARDUINO_VERSION_VAL(3, 2, 1)" not in src
+            or "#define FLEXOS_ENABLE_WIFI 0" not in src):
+        fallos.append("un core P4 anterior a 3.2.1 podria volver a iniciar el Wi-Fi inseguro")
+    if "WIFI_NVS_AUTOTRY" not in src or "wifiAutoGuardWrite(true, true)" not in src:
+        fallos.append("falta el fusible persistente del autoarranque Wi-Fi")
+
+    # Sin pin CD, la SD no puede reintentar begin() por tiempo: en el video
+    # ese reintento coincidia a los 6 s con esp-hosted. Solo flexSdPoke()
+    # puede armar el proximo intento de flexSdTick().
+    sd_cpp = Path(path).resolve().parent / "FlexOS_SD.cpp"
+    if not sd_cpp.exists():
+        fallos.append("falta FlexOS_SD.cpp")
+    else:
+        sd_src = sd_cpp.read_text(encoding="utf-8")
+        tick = cuerpo(sd_src, "flexSdTick") or ""
+        if "sdProbeRequested" not in tick or "millis()" in tick:
+            fallos.append("flexSdTick() vuelve a montar la SD por temporizador")
+        if "SD_MMC.begin()" not in sd_src or "SD_MMC.begin(FLEXSD_MOUNT" in sd_src:
+            fallos.append("el montaje SD ya no coincide con el unico begin() 4-bit del fabricante")
     # --- 4. la SD reclama su slot antes que los servicios de red -----
     # En esta placa no basta con preparar setPins() y montar en el primer
     # loop: para entonces una tarea de servicio ya puede haber consultado
