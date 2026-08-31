@@ -27,8 +27,8 @@
 //  gestos, arranque, OOBE, bloqueo, home, apps, ajustes...) es
 //  original de FlexOS Ultra y NO proviene de ArduOS.
 //
-//  ENTORNO (identico a tu ArduOS-P4, no lo cambies):
-//    Arduino IDE 2.3.10 · core arduino-esp32 v3.2.0 EXACTO
+//  ENTORNO (verificado contra los ejemplos del fabricante, no lo cambies):
+//    Arduino IDE 2.3.10 · core arduino-esp32 v3.2.1 EXACTO
 //    Board: ESP32P4 Dev Module · 360MHz · Flash 80MHz/QIO/16MB
 //    PSRAM: Enabled · USB Mode: USB-OTG (TinyUSB)
 //    Particion: cualquiera con zona de datos. FlexOS_FS monta
@@ -49,6 +49,14 @@
 
 #include <Wire.h>
 #include <Preferences.h>
+#if __has_include("esp_arduino_version.h")
+  #include "esp_arduino_version.h"
+#else
+  // Solo lo usa el compilador de pruebas del PC. En una compilacion Arduino
+  // real la cabecera existe y aporta la version verdadera del core.
+  #define ESP_ARDUINO_VERSION_VAL(major, minor, patch) ((major << 16) | (minor << 8) | patch)
+  #define ESP_ARDUINO_VERSION ESP_ARDUINO_VERSION_VAL(3, 2, 1)
+#endif
 
 // Modulos propios que el sketch usa desde el principio. Los dos son
 // unidades de traduccion aparte por el motivo de siempre en este
@@ -683,7 +691,18 @@ static uint16_t i2cSweepId    = 0;                 // id del barrido (para recon
 // ANTES que la seccion de radio al final) necesita leerlo para mostrar
 // el estado real de la conexion. La logica de arranque/escaneo/conexion
 // vive toda junto a bootInitRadioSafe(), al final del archivo.
-#define FLEXOS_ENABLE_WIFI 1
+// El fabricante exige 3.2.1 para esta placa. En 3.2.0 WiFi ignora los
+// pines SDIO del variant y puede abortar la tarea hosted al despertar el C6
+// (arduino-esp32 #11404/#11513). Es preferible dejar Wi-Fi no disponible a
+// volver a producir un bucle de PANIC imposible de recuperar desde la UI.
+#if defined(CONFIG_IDF_TARGET_ESP32P4) && \
+    (ESP_ARDUINO_VERSION < ESP_ARDUINO_VERSION_VAL(3, 2, 1))
+  #define FLEXOS_ENABLE_WIFI 0
+  #define FLEXOS_WIFI_CORE_UNSAFE 1
+#else
+  #define FLEXOS_ENABLE_WIFI 1
+  #define FLEXOS_WIFI_CORE_UNSAFE 0
+#endif
 static volatile bool gNetOnline = false;   // true tras un WiFi.begin() exitoso; lo lee la UI (Ajustes, icono, etc.)
 // En el P4 la radio remota y la microSD usan SDIO/SDMMC. No se consulta
 // WiFi.getMode() para saber si el controlador esta vivo porque ESA consulta
@@ -691,7 +710,11 @@ static volatile bool gNetOnline = false;   // true tras un WiFi.begin() exitoso;
 // Flex OS sin consultar continuamente el controlador remoto del C6.
 static volatile bool gWifiDriverOn = false;
 static volatile bool gWifiAutoBusy = false;   // tarea de conexion manual con red guardada
-static volatile bool gWifiAutoDone = false;   // un intento diferido por arranque
+static volatile bool gWifiAutoDone = true;    // solo se habilita tras validar el transporte a mano
+static bool gWifiHostedPinsOk = false;        // los siete pines del C6 quedaron fijados antes del driver
+static bool gWifiAutoTrusted = false;         // hubo al menos una conexion manual correcta
+static bool gWifiAutoInterrupted = false;     // el ultimo intento automatico termino en reset
+static bool gWifiBootAttempt = false;         // la tarea actual fue lanzada por el arranque
 
 // Estado de las OTRAS dos radios, aqui arriba por el mismo motivo que
 // gNetOnline: la pantalla de Ajustes lee los tres para pintar la categoria
@@ -28827,7 +28850,8 @@ static void poffWakeGate(){
 // #############################################################
 // -------------------------------------------------------------
 //  Radio (WiFi via co-procesador ESP32-C6 / esp-hosted por SDIO)
-//  EL ARRANQUE YA NUNCA TOCA LA RADIO. Antes, bootInitRadioSafe()
+//  EL ARRANQUE NO TOCA LA RADIO HASTA QUE EL TRANSPORTE HAYA SIDO
+//  VALIDADO MANUALMENTE. Antes, bootInitRadioSafe()
 //  lanzaba un intento de conexion automatico en cada boot (con SSID/
 //  PASS fijos en el codigo) en cuanto FLEXOS_ENABLE_WIFI valia 1. Eso
 //  es lo que producia el bucle de "PANIC (crash)": si el enlace SDIO
@@ -28835,16 +28859,14 @@ static void poffWakeGate(){
 //  slave desactualizado, etc.), fallaba EN CADA arranque, de forma
 //  determinista, antes de que pudieras hacer nada.
 //
-//  Ahora la radio es 100% bajo demanda: no se toca ni una sola vez
-//  durante setup()/loop() salvo que el usuario entre a Ajustes -> Red
-//  e Internet -> Wi-Fi y pulse "Buscar redes". Si el C6 falla ahi, el
-//  fallo se ve como un error EN PANTALLA dentro de esa app (o, en el
-//  peor caso, como un reinicio aislado y reproducible en ese momento
-//  exacto), nunca como un cuelgue silencioso del arranque completo.
+//  Ahora una red antigua no puede despertar la radio en bucle: primero
+//  exige una conexion manual correcta. Desde ese momento se permite una
+//  reconexion diferida y protegida por un marcador NVS; si se interrumpe
+//  por reset, el siguiente arranque abre el fusible y no vuelve a probar.
 //
-//  1) El enlace P4<->C6 de referencia es SDIO (CLK/CMD/D0-D3 + reset
-//     del esclavo), NO SPI, y en arduino-esp32 3.2.0 esos pines los
-//     fija el "variant" de la placa en tiempo de COMPILACION.
+//  1) El enlace P4<->C6 es SDIO (CLK/CMD/D0-D3 + reset), NO SPI. En
+//     arduino-esp32 3.2.1 WiFi.setPins() permite fijar los siete pines
+//     antes de inicializar esp-hosted. La 3.2.0 no sirve para esta placa.
 //  2) WiFi.begin()/WiFi.scanNetworks() disparan por debajo el
 //     transporte hosted (esp_wifi_remote); nunca se llama a
 //     esp_hosted_init() a mano.
@@ -28863,8 +28885,23 @@ static void poffWakeGate(){
 // Definido mas abajo (necesita wifiSavedSSID y el resto del bloque Wi-Fi).
 static bool wifiCredsLoad();
 
+// Se llama UNA vez desde setup(), antes de cualquier API que pueda iniciar
+// esp-hosted. No enciende la radio: solo sustituye la configuracion SDIO que
+// en 3.2.0 estaba codificada dentro del SDK y no respetaba el variant.
+static void wifiConfigureHostedTransport(){
+#if FLEXOS_ENABLE_WIFI && defined(CONFIG_IDF_TARGET_ESP32P4)
+  gWifiHostedPinsOk = WiFi.setPins(18, 19, 14, 15, 16, 17, 54);
+  Serial.printf("[C6] pines SDIO hosted: %s\n", gWifiHostedPinsOk ? "OK" : "ERROR");
+#elif FLEXOS_ENABLE_WIFI
+  gWifiHostedPinsOk = true;
+#else
+  gWifiHostedPinsOk = false;
+  Serial.println(F("[C6] Wi-Fi bloqueado: instala arduino-esp32 3.2.1"));
+#endif
+}
+
 // -------------------------------------------------------------
-//  setup() NO TOCA LA RADIO. NI UNA SOLA VEZ.
+//  setup() NO INICIALIZA LA RADIO. NI UNA SOLA VEZ.
 //  -------------------------------------------------------------
 //  Esto es una regla del sistema, no una preferencia (ver el bloque
 //  "EL ARRANQUE YA NUNCA TOCA LA RADIO" mas arriba): encender la pila
@@ -28874,15 +28911,23 @@ static bool wifiCredsLoad();
 //  a meter ahi el intento de reconexion y reprodujo el problema, esta
 //  vez en forma de inundacion del TWDT desde el primer boot.
 //
-//  Aqui solo se leen las credenciales de NVS -- eso es flash, no radio,
-//  y es seguro. Encender la radio requiere ahora una accion explicita
-//  del usuario; no existe ninguna reconexion temporizada en loop().
+//  Aqui solo se leen las credenciales y el fusible anti-bucle de NVS.
+//  La reconexion temporizada se arma unicamente despues de que una conexion
+//  manual haya demostrado que los pines, el core y el firmware del C6 sirven.
 // -------------------------------------------------------------
 static void bootInitRadioSafe(){
   bool saved = wifiCredsLoad();          // solo NVS: no despierta el C6
-  gWifiAutoDone = !saved;                // con credenciales: un intento tras completar el arranque
-  if(saved) Serial.println(F("[C6] red guardada; reconexion automatica diferida"));
-  else      Serial.println(F("[C6] radio en modo bajo demanda -> se activa solo desde Ajustes > Red e Internet > Wi-Fi"));
+  gWifiAutoDone = !(saved && gWifiAutoTrusted && gWifiHostedPinsOk);
+  if(gWifiAutoInterrupted)
+    Serial.println(F("[C6] intento automatico interrumpido por reset -> fusible abierto"));
+  else if(!gWifiHostedPinsOk)
+    Serial.println(F("[C6] transporte no configurado -> Wi-Fi deshabilitado"));
+  else if(saved && gWifiAutoTrusted)
+    Serial.println(F("[C6] red y transporte validados; reconexion automatica diferida"));
+  else if(saved)
+    Serial.println(F("[C6] red guardada; requiere una conexion manual correcta antes del autoarranque"));
+  else
+    Serial.println(F("[C6] radio en modo bajo demanda -> se activa desde Ajustes > Wi-Fi"));
 }
 
 
@@ -28936,6 +28981,8 @@ static char     wifiConnIP[24]   = "";
 #define WIFI_NVS_NS    "flexos_wifi"
 #define WIFI_NVS_SSID  "ssid"
 #define WIFI_NVS_PASS  "pass"
+#define WIFI_NVS_AUTOSAFE "autosafe"  // una conexion manual ya funciono con este transporte
+#define WIFI_NVS_AUTOTRY  "autotry"   // se pone antes del autoarranque y se limpia al terminar
 
 static char          wifiSavedSSID[33] = "";
 static char          wifiSavedPass[64] = "";
@@ -28947,13 +28994,41 @@ static const char* wifiActiveSSID(){
 // Carga las credenciales de NVS a RAM. Se llama una vez en el arranque.
 static bool wifiCredsLoad(){
   Preferences p;
-  if(!p.begin(WIFI_NVS_NS, true)){ wifiSavedSSID[0] = 0; wifiSavedPass[0] = 0; return false; }
+  if(!p.begin(WIFI_NVS_NS, true)){
+    wifiSavedSSID[0] = 0; wifiSavedPass[0] = 0;
+    gWifiAutoTrusted = false; gWifiAutoInterrupted = false;
+    return false;
+  }
   String s = p.getString(WIFI_NVS_SSID, "");
   String w = p.getString(WIFI_NVS_PASS, "");
+  bool trusted = p.getBool(WIFI_NVS_AUTOSAFE, false);
+  bool pending = p.getBool(WIFI_NVS_AUTOTRY, false);
   p.end();
   s.toCharArray(wifiSavedSSID, sizeof(wifiSavedSSID));
   w.toCharArray(wifiSavedPass, sizeof(wifiSavedPass));
+
+  // Si AUTOTRY seguia a 1, el P4 se reinicio antes de que la tarea pudiera
+  // cerrarlo. Se invalida la confianza y se limpia el marcador para permitir
+  // una prueba MANUAL, pero el arranque no vuelve a tocar Wi-Fi por si solo.
+  gWifiAutoInterrupted = pending;
+  gWifiAutoTrusted = trusted && !pending;
+  if(pending && p.begin(WIFI_NVS_NS, false)){
+    p.putBool(WIFI_NVS_AUTOTRY, false);
+    p.putBool(WIFI_NVS_AUTOSAFE, false);
+    p.end();
+  }
   return wifiCredsExist();
+}
+
+static void wifiAutoGuardWrite(bool trusted, bool pending){
+  Preferences p;
+  if(p.begin(WIFI_NVS_NS, false)){
+    p.putBool(WIFI_NVS_AUTOSAFE, trusted);
+    p.putBool(WIFI_NVS_AUTOTRY, pending);
+    p.end();
+  }
+  gWifiAutoTrusted = trusted;
+  gWifiAutoInterrupted = false;
 }
 
 // Guarda (solo si algo cambio: escribir NVS sin necesidad desgasta la flash).
@@ -28975,6 +29050,7 @@ static void wifiCredsForget(){
   Preferences p;
   if(p.begin(WIFI_NVS_NS, false)){ p.clear(); p.end(); }
   wifiSavedSSID[0] = 0; wifiSavedPass[0] = 0;
+  gWifiAutoTrusted = false; gWifiAutoInterrupted = false;
   gWifiAutoDone = true;                      // no reintentar en esta sesion
   Serial.println(F("[WiFi] red guardada borrada"));
 }
@@ -28984,14 +29060,19 @@ static void wifiCredsForget(){
 // ya se esta en el modo pedido es innecesario y en el transporte hosted
 // del C6 reinicia la interfaz sin motivo, asi que solo se cambia si hace
 // falta de verdad.
-static void wifiEnsureStaMode(){
+static bool wifiEnsureStaMode(){
+  if(!gWifiHostedPinsOk){
+    Serial.println(F("[C6] operacion rechazada: transporte SDIO sin configurar"));
+    return false;
+  }
   gWifiDriverOn = true;                    // publicar ANTES de tocar esp-hosted
   if(WiFi.getMode() != WIFI_STA) WiFi.mode(WIFI_STA);
+  return true;
 }
 
 #if FLEXOS_ENABLE_WIFI
 static void wifiScanTask(void*){
-  wifiEnsureStaMode();
+  if(!wifiEnsureStaMode()){ wifiUIState = WUI_FAIL; vTaskDelete(NULL); return; }
   int n = WiFi.scanNetworks();                // bloqueante, pero en su PROPIA tarea: loop() sigue vivo
   // ANTI-CRASH: construir la lista FUERA de toda seccion critica. La version
   // anterior copiaba dentro de portENTER_CRITICAL(&wifiMux), pero WiFi.SSID()
@@ -29023,7 +29104,7 @@ static void wifiScanTask(void*){
   vTaskDelete(NULL);
 }
 static void wifiConnTask(void*){
-  wifiEnsureStaMode();
+  if(!wifiEnsureStaMode()){ wifiUIState = WUI_FAIL; vTaskDelete(NULL); return; }
   WiFi.begin(wifiConnSSID, wifiConnPass);
   uint32_t t0 = millis();
   while(WiFi.status() != WL_CONNECTED && millis() - t0 < FLEXOS_WIFI_TIMEOUT_MS){
@@ -29038,6 +29119,7 @@ static void wifiConnTask(void*){
     // funciona. Guardar antes de confirmar dejaria una clave erronea
     // fija en NVS y el equipo reintentaria con ella en cada arranque.
     wifiCredsSave(wifiConnSSID, wifiConnPass);
+    wifiAutoGuardWrite(true, false);       // ya se comprobo manualmente este transporte
     ntpOnWifiUp();                          // hay red: la hora real ya se puede pedir
     wifiUIState = WUI_OK;
   } else {
@@ -29056,7 +29138,11 @@ static void wifiConnTask(void*){
 // pantalla detallada de Wi-Fi.
 static void wifiAutoConnTask(void*){
   Serial.printf("[WiFi] conexion solicitada a \"%s\"...\n", wifiSavedSSID);
-  wifiEnsureStaMode();
+  if(!wifiEnsureStaMode()){
+    if(gWifiBootAttempt) wifiAutoGuardWrite(false, false);
+    gWifiBootAttempt = false; gWifiAutoBusy = false; gWifiAutoDone = true;
+    vTaskDelete(NULL); return;
+  }
   WiFi.begin(wifiSavedSSID, wifiSavedPass);
   uint32_t t0 = millis();
   while(WiFi.status() != WL_CONNECTED && millis() - t0 < FLEXOS_WIFI_TIMEOUT_MS){
@@ -29070,6 +29156,7 @@ static void wifiAutoConnTask(void*){
     strncpy(wifiConnSSID, wifiSavedSSID, sizeof(wifiConnSSID) - 1);
     wifiConnSSID[sizeof(wifiConnSSID) - 1] = 0;
     ntpOnWifiUp();                          // hay red: la hora real ya se puede pedir
+    wifiAutoGuardWrite(true, false);        // manual o automatico: termino limpiamente
     Serial.printf("[WiFi] conectado. IP %s\n", wifiConnIP);
   } else {
     // Fallo (router apagado, clave cambiada, fuera de alcance): se suelta
@@ -29080,44 +29167,60 @@ static void wifiAutoConnTask(void*){
     WiFi.disconnect(true, true);
     WiFi.mode(WIFI_OFF);
     gWifiDriverOn = false;
+    // Un router apagado no invalida el hardware. Solo se limpia AUTOTRY para
+    // que el siguiente arranque no interprete este fallo normal como PANIC.
+    if(gWifiBootAttempt) wifiAutoGuardWrite(gWifiAutoTrusted, false);
     Serial.println(F("[WiFi] conexion fallida -> queda la configuracion manual"));
   }
+  gWifiBootAttempt = false;
   gWifiAutoBusy = false;
   gWifiAutoDone = true;
   vTaskDelete(NULL);
 }
 
 // Lanza la conexion pedida por el usuario si hay una red guardada.
-static void wifiTryAutoConnect(){
+static void wifiTryAutoConnect(bool bootAttempt){
   if(gWifiAutoBusy || gWifiAutoDone) return;
   wifiBlockedBySd = false;
-  if(!wifiCredsExist()){
+  if(!gWifiHostedPinsOk || !wifiCredsExist()){
     gWifiAutoDone = true;
-    Serial.println(F("[WiFi] sin red guardada -> configuracion manual"));
+    Serial.println(F("[WiFi] transporte o red no disponible -> configuracion manual"));
     return;
   }
+  if(bootAttempt && !gWifiAutoTrusted){
+    gWifiAutoDone = true;
+    Serial.println(F("[WiFi] autoarranque no validado -> se requiere conexion manual"));
+    return;
+  }
+  gWifiBootAttempt = bootAttempt;
+  if(bootAttempt) wifiAutoGuardWrite(true, true); // queda a 1 si ocurre PANIC/reset
   gWifiAutoBusy = true;
-  xTaskCreatePinnedToCore(wifiAutoConnTask, "wifiAuto", 8192, NULL, 1, NULL, 1);
+  BaseType_t made = xTaskCreatePinnedToCore(wifiAutoConnTask, "wifiAuto", 8192, NULL, 1, NULL, 1);
+  if(made != pdPASS){
+    if(bootAttempt) wifiAutoGuardWrite(gWifiAutoTrusted, false);
+    gWifiBootAttempt = false; gWifiAutoBusy = false; gWifiAutoDone = true;
+    Serial.println(F("[WiFi] no se pudo crear la tarea de conexion"));
+  }
 }
 #endif   // FLEXOS_ENABLE_WIFI
 
-// Reconecta una sola vez, ya con Home/Bloqueo operativo. SDMMC usa slot 0
-// dedicado y esp-hosted/C6 usa slot 1; build_opt.h fija esa separacion para
-// que levantar Wi-Fi no reclame el controlador de la tarjeta.
+// Reconecta una sola vez, ya con Home/Bloqueo operativo. Solo queda armada
+// despues de una conexion manual correcta; el intento lleva ademas el fusible
+// persistente definido arriba para impedir un bucle de PANIC.
 static void wifiAutoReconnectTick(){
 #if FLEXOS_ENABLE_WIFI
   if(gWifiAutoDone || gWifiAutoBusy) return;
   if(gState != ST_HOME && gState != ST_LOCK) return;
   if(millis() < FLEXOS_WIFI_AUTOCONN_DELAY_MS) return;
   if(!wifiCredsExist()){ gWifiAutoDone = true; return; }
-  wifiTryAutoConnect();
+  wifiTryAutoConnect(true);
 #endif
 }
 
 static void wifiStartScan(){
 #if FLEXOS_ENABLE_WIFI
   wifiBlockedBySd = false;
-  wifiEnsureStaMode();
+  if(!wifiEnsureStaMode()){ wifiUIState = WUI_FAIL; return; }
   wifiUIState = WUI_SCANNING;
   portENTER_CRITICAL(&wifiMux); wifiNetCount = 0; portEXIT_CRITICAL(&wifiMux);
   xTaskCreatePinnedToCore(wifiScanTask, "wifiScan", 8192, NULL, 1, NULL, 1);   // 8KB: scanNetworks() + String necesitan mas que 6KB (evita stack overflow)
@@ -29127,7 +29230,7 @@ static void wifiStartConnect(){
 #if FLEXOS_ENABLE_WIFI
   wifiBlockedBySd = false;
   if(wifiSel < 0 || wifiSel >= WIFI_MAX_NETS){ wifiUIState = WUI_LIST; return; }  // indice invalido -> nunca leer wifiNets[] fuera de rango
-  wifiEnsureStaMode();
+  if(!wifiEnsureStaMode()){ wifiUIState = WUI_FAIL; return; }
   strncpy(wifiConnSSID, wifiNets[wifiSel].ssid, sizeof(wifiConnSSID) - 1); wifiConnSSID[sizeof(wifiConnSSID) - 1] = 0;
   strncpy(wifiConnPass, wifiPass, sizeof(wifiConnPass) - 1); wifiConnPass[sizeof(wifiConnPass) - 1] = 0;
   wifiUIState = WUI_CONNECTING;
@@ -29265,8 +29368,14 @@ static void wifiRenderUnavail(){
   fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
   wifiBack();
   drawTextC(SCR_W / 2, 60, "Wi-Fi", 4, TH_TXT);
+#if FLEXOS_WIFI_CORE_UNSAFE
+  drawTextC(SCR_W / 2, 286, "Core ESP32 incompatible", 2, TH_ERR);
+  drawTextC(SCR_W / 2, 326, "Instala arduino-esp32 3.2.1", 2, TH_TXT2);
+  drawTextC(SCR_W / 2, 356, "La version 3.2.0 puede reiniciar el P4/C6", 1, TH_MUTE);
+#else
   drawTextC(SCR_W / 2, 300, "Wi-Fi desactivado en este build", 2, TH_TXT2);
   drawTextC(SCR_W / 2, 334, "(FLEXOS_ENABLE_WIFI = 0 en el .ino)", 1, TH_MUTE);
+#endif
   flxFlushAll();
 }
 // Repinta la pantalla de Wi-Fi que este a la vista. Lo usa themeChanged() para
@@ -29662,7 +29771,11 @@ static void clkPersistTick(){
 static bool ntpIsBusy(){ return gNtpBusy; }
 static void ntpStateText(char* out, size_t n){
 #if !FLEXOS_ENABLE_WIFI
-  snprintf(out, n, "Wi-Fi desactivado en este build");
+  #if FLEXOS_WIFI_CORE_UNSAFE
+    snprintf(out, n, "Requiere core ESP32 3.2.1");
+  #else
+    snprintf(out, n, "Wi-Fi desactivado en este build");
+  #endif
 #else
   if(!gTimeNvsOk){ snprintf(out, n, "Error: almacenamiento NVS no disponible"); return; }
   if(gNtpBusy){ snprintf(out, n, "Sincronizando..."); return; }
@@ -29803,12 +29916,12 @@ static void connWifiSet(bool on){
   if(on){
     if(gAirplane) return;                       // bloqueo real, no visual
     wifiBlockedBySd = false;
-    wifiEnsureStaMode();                        // enciende la pila en modo estacion
+    if(!wifiEnsureStaMode()) return;            // transporte C6 no validado/configurado
     if(wifiCredsExist()){
       // Hay red guardada -> WiFi.begin() real contra ella, en su tarea
       // (loop() no se bloquea; misma ruta que la reconexion de arranque).
       gWifiAutoDone = false; gWifiAutoBusy = false;
-      wifiTryAutoConnect();
+      wifiTryAutoConnect(false);
     } else {
       wifiStartScan();                          // sin red guardada -> escaneo real
     }
@@ -34632,14 +34745,18 @@ void setup(){
   safeBootEval();        // antes de iniciar tareas pesadas: decide el modo de recuperacion
   frLoadState();         // marcador transaccional del restablecimiento
 
-  // TARJETA microSD. Debe reclamar SDMMC antes de crear CUALQUIER tarea que
-  // pueda consultar la red/esp-hosted (incluida OTA). En el P4 ambos caminos
-  // comparten el host SDIO; aplazar el montaje al primer loop introducia una
-  // carrera y una tarjeta ya insertada podia quedar invisible.
+  // Solo configura CLK/CMD/D0-D3/RESET del enlace P4-C6. WiFi.setPins() no
+  // levanta el driver ni habla con el C6, por lo que sigue siendo seguro en
+  // setup(). Debe ocurrir antes de cualquier posible WiFi.mode()/begin().
+  wifiConfigureHostedTransport();
+
+  // TARJETA microSD. Hace UN intento con la secuencia exacta del fabricante.
+  // Si falla no existe un temporizador que repita SD_MMC.begin() a la vez que
+  // despierta Wi-Fi: el siguiente intento requiere abrir una pantalla que use
+  // la tarjeta. Asi se elimina la carrera reproducida en el video.
   //
   // Sin tarjeta el fallo es suave y flexSdTick() conserva la insercion en
-  // caliente. Con tarjeta, las rutas Wi-Fi comprueban flexSdReady() y no
-  // pueden quitarle el bus despues.
+  // bajo demanda desde Almacenamiento/Galeria/Multimedia.
   if(!flexSdBegin()){
     Serial.printf("[SD] controlador no disponible: %s\n", flexSdError());
   } else if(!flexSdMount()){
