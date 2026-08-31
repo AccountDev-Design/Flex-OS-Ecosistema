@@ -21,6 +21,7 @@
 #      quien) se cumple de verdad.
 # #############################################################
 import re, sys
+from pathlib import Path
 
 # Estados que NO se despachan en el switch de loop() y por que.
 EXENTOS = {
@@ -41,6 +42,7 @@ GANCHOS = [
     ("mediaStorageTick", "flexSdTick()",   "sin el sondeo no hay deteccion de insercion ni de retirada"),
     ("mediaStorageTick", "mediaIndexTick()", "el indice de medios nunca terminaria de construirse"),
     ("setup",          "flexSdBegin()",   "el controlador SDMMC no se prepararia y la tarjeta no montaria nunca"),
+    ("loop",           "wifiAutoReconnectTick()", "la red guardada no se reconectaria tras arrancar"),
     ("setup",          "flexAudioBegin()","el codec no se sondearia y el audio quedaria desactivado sin motivo"),
     # Un dibujo recien creado tiene que aparecer en la Galeria sin que
     # nadie refresque a mano: sin esta invalidacion, el indice se queda
@@ -78,6 +80,22 @@ def cuerpo(src, nombre):
 def main(path):
     src = open(path, encoding="utf-8").read()
     fallos = []
+
+    # El perfil generico P4 no conoce la ranura de esta placa. Estas opciones
+    # hacen que Arduino-ESP32 compile SD_MMC para el slot dedicado 0 y active
+    # el LDO 4, dejando el slot 1 al enlace esp-hosted del C6.
+    build_opt = Path(path).resolve().parent / "build_opt.h"
+    required_sd_opts = {
+        "-DBOARD_HAS_SDMMC",
+        "-DBOARD_SDMMC_SLOT=0",
+        "-DBOARD_SDMMC_POWER_CHANNEL=4",
+    }
+    if not build_opt.exists():
+        fallos.append("falta build_opt.h: SD y Wi-Fi competirian por SDIO slot 1")
+    else:
+        actual_opts = {line.strip() for line in build_opt.read_text(encoding="utf-8").splitlines()}
+        for opt in sorted(required_sd_opts - actual_opts):
+            fallos.append("build_opt.h no contiene %s" % opt)
 
     # --- 1. todo estado tiene su case en el switch de loop() ---
     menum = re.search(r"enum\s*\{\s*(ST_SPLASH\b.*?)\}\s*;", src, re.S)
@@ -117,10 +135,7 @@ def main(path):
             if "WiFi." not in codigo:
                 continue
             fallos.append("%s() toca WiFi desde reposo -> colision SDIO con microSD" % fn)
-    if "wifiAutoReconnectTick()" in cloop:
-        fallos.append("loop() vuelve a encender Wi-Fi automaticamente -> colision SDIO con microSD")
-
-    # --- 4. la SD reclama el bus antes que los servicios de red -----
+    # --- 4. la SD reclama su slot antes que los servicios de red -----
     # En esta placa no basta con preparar setPins() y montar en el primer
     # loop: para entonces una tarea de servicio ya puede haber consultado
     # esp-hosted. El orden dentro de setup() es parte del cableado.
