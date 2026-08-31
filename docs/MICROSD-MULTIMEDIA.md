@@ -68,25 +68,28 @@ ESP32-P4. Tampoco se consideran errores las carpetas opcionales que no
 existan (`DCIM`, `Pictures`, `Movies`, etc.); simplemente se indexan como
 vacías. No hay ningún bucle que lea la tarjeta continuamente.
 
-### Exclusión microSD ↔ Wi-Fi remoto del C6
+### Separación microSD ↔ Wi-Fi remoto del C6
 
 En el ESP32-P4, `WiFi.status()` y `WiFi.getMode()` no son consultas locales:
-atraviesan **esp-hosted por SDIO** hasta el C6. La configuración de radio del
-kit y la microSD reclaman el mismo recurso SDIO/SDMMC; intentar usarlos a la
-vez produce un `PANIC`, no un error recuperable.
+atraviesan **esp-hosted por SDIO** hasta el C6. El P4 dispone de dos slots y
+deben compilarse con propietarios distintos:
 
-Flex OS aplica exclusión mutua completa:
+* microSD integrada: **SDMMC slot 0**, pines IOMUX 39–44 y LDO interno 4;
+* esp-hosted/C6: **SDIO slot 1**.
 
-* con microSD montada, ningún tick de escritorio, NTP u OTA consulta el
-  driver Wi-Fi y la reconexión automática de arranque está desactivada;
-* si se intenta encender Wi-Fi con la microSD montada, se bloquea **antes**
-  de tocar esp-hosted y la pantalla explica que hay que expulsar la tarjeta;
-* si Wi-Fi ya posee el bus, el montaje de una tarjeta queda en espera hasta
-  apagarlo.
+El perfil genérico `ESP32P4 Dev Module` no conoce el cableado particular de
+esta placa. Por ello `build_opt.h` define `BOARD_HAS_SDMMC`,
+`BOARD_SDMMC_SLOT=0` y `BOARD_SDMMC_POWER_CHANNEL=4`. Sin esas opciones,
+Arduino enviaría también la tarjeta al slot 1 y encender Wi-Fi podría producir
+un `PANIC`.
 
-Esto conserva ambas funciones, pero no permite utilizarlas simultáneamente.
-No es una elección de interfaz: es una restricción del transporte de esta
-placa/build. El Wi-Fi manual sigue disponible sin tarjeta insertada.
+Flex OS mantiene además estas reglas:
+
+* los ticks de escritorio no consultan continuamente el driver Wi-Fi remoto;
+* el Wi-Fi guardado vuelve a conectarse una sola vez, seis segundos después
+  del arranque, nunca desde `setup()`;
+* la microSD se monta antes de crear tareas de red y ambos subsistemas pueden
+  permanecer activos porque ya no reclaman el mismo slot.
 
 ### Generación de montaje
 
@@ -448,9 +451,9 @@ sin códec **no se ofrece ningún control de volumen**.
    esta placa no expone una línea CD independiente. Se detecta en la
    siguiente operación real sobre la tarjeta. Volver a sondearla por
    tiempo reintroduciría el reinicio `PANIC` que se eliminó.
-10. **Wi-Fi remoto y microSD no funcionan simultáneamente en este build.**
-    Ambos reclaman SDIO/SDMMC. Flex OS bloquea el segundo que se intente
-    activar para convertir un reinicio fatal en un estado visible y seguro.
+10. **Wi-Fi remoto y microSD requieren slots distintos.** `build_opt.h` fija
+    la tarjeta en slot 0 + LDO 4 y deja esp-hosted/C6 en slot 1. El archivo es
+    obligatorio al compilar desde Arduino IDE.
 11. **La tarjeta insertada durante el arranque se monta antes de iniciar los
     servicios de red.** Así SD_MMC obtiene el bus de forma determinista, sin
     competir durante el primer `loop()` con una tarea que consulte esp-hosted.
