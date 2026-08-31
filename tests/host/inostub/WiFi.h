@@ -19,6 +19,7 @@ public:
 
 class __FlexWiFi {
 public:
+  bool setPins(int8_t, int8_t, int8_t, int8_t, int8_t, int8_t, int8_t){ return true; }
   bool mode(wifi_mode_t){ return true; }
   wifi_mode_t getMode(){ return WIFI_STA; }
   int begin(const char*, const char* = nullptr){ return 0; }
