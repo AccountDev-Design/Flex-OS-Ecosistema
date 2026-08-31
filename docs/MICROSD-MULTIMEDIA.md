@@ -451,3 +451,7 @@ sin códec **no se ofrece ningún control de volumen**.
 10. **Wi-Fi remoto y microSD no funcionan simultáneamente en este build.**
     Ambos reclaman SDIO/SDMMC. Flex OS bloquea el segundo que se intente
     activar para convertir un reinicio fatal en un estado visible y seguro.
+11. **La tarjeta insertada durante el arranque se monta antes de iniciar los
+    servicios de red.** Así SD_MMC obtiene el bus de forma determinista, sin
+    competir durante el primer `loop()` con una tarea que consulte esp-hosted.
+    La inserción posterior continúa funcionando mediante el sondeo en caliente.
