@@ -28,15 +28,10 @@
 #define SDPIN_D2     41
 #define SDPIN_D3     42
 
-// Periodo de reintento tras retirar una tarjeta. Solo se usa mientras
-// NO hay un volumen montado: una tarjeta ya montada nunca se toca por
-// temporizador. En esta placa DATA3 ocupa el contacto CD y no existe
-// una linea de deteccion independiente; abrir la raiz cada pocos
-// segundos provoca PANIC en algunas combinaciones P4/core/tarjeta.
-#define FLEXSD_POLL_MS       2000
-// Tras un fallo de montaje se espera mas: reintentar cada 2 s un
-// montaje que tarda ~200 ms en fallar si que se notaria.
-#define FLEXSD_RETRY_MS      6000
+// No hay periodo de sondeo. DATA3 ocupa el contacto CD y no existe una
+// linea independiente de presencia; por tanto repetir SD_MMC.begin() por
+// temporizador no es una deteccion inocua. En la regresion filmada coincidia
+// a los 6 s con el arranque de esp-hosted y terminaba en PANIC.
 #define FLEXSD_MAXOPEN       6
 
 // -------------------------------------------------------------
@@ -48,9 +43,8 @@ static bool          sdMounted   = false;
 static int           sdState     = FLEXSD_ABSENT;
 static const char*   sdErr       = "Sin tarjeta insertada";
 static uint32_t      sdGen       = 1;       // nunca 0: 0 = "sin generacion"
-static bool          sdOneBit    = false;   // se cayo a 1 bit para poder montar
 static bool          sdEverMounted = false; // hubo una tarjeta valida en esta sesion
-static unsigned long sdNextPoll  = 0;
+static bool          sdProbeRequested = false; // solo por accion explicita de una pantalla
 static bool          sdBusy      = false;
 static uint64_t      sdTotal     = 0, sdUsed = 0;
 static bool          sdUsageOk   = false;
@@ -101,7 +95,7 @@ static void sdSetGone(){
   sdErr     = "Tarjeta retirada";
   sdUsageOk = false;
   sdTotal = sdUsed = 0;
-  sdNextPoll = millis() + FLEXSD_POLL_MS;
+  sdProbeRequested = false;
 }
 
 // Una operacion real que falla invalida el volumen sin hacer una
@@ -133,22 +127,10 @@ bool flexSdBegin(){
     return false;
   }
 
-#if defined(CONFIG_IDF_TARGET_ESP32P4) && defined(SOC_SDMMC_IO_POWER_EXTERNAL)
-  // La placa generica "ESP32P4 Dev Module" no conoce que TF_VCC sale de
-  // ESP_LDO_VO4. Sin seleccionar el canal, SD_MMC deja el rail como externo
-  // y la tarjeta no recibe la alimentacion/control de IO que espera.
-  if(!SD_MMC.setPowerChannel(4)){
-    sdState = FLEXSD_ERR_HW;
-    sdErr   = "No se pudo activar el LDO 4 de la microSD";
-    Serial.println(F("[SD] ERROR: LDO interno canal 4 no disponible"));
-    return false;
-  }
-#endif
-
   sdHwReady  = true;
   sdState    = FLEXSD_ABSENT;
   sdErr      = "Sin tarjeta insertada";
-  sdNextPoll = 0;                       // el primer tick ya intenta montar
+  sdProbeRequested = false;             // setup() hace el primer montaje directamente
   return true;
 }
 
@@ -160,7 +142,7 @@ bool flexSdBegin(){
 //  fallaria por eso y no por la tarjeta. Empezar limpio es lo que
 //  hace que reinsertar la tarjeta funcione sin reiniciar.
 // -------------------------------------------------------------
-static bool sdTryBegin(bool oneBit){
+static bool sdTryBegin(){
   // IMPORTANTE: el PRIMER intento NO puede empezar con SD_MMC.end(). El
   // ejemplo mp3_player del fabricante hace exactamente setPins() -> begin().
   // En algunas versiones del core P4, end() antes del primer begin() limpia
@@ -175,28 +157,19 @@ static bool sdTryBegin(bool oneBit){
   }
   sdDriverTouched = true;
 
-  // La primera ruta es IDENTICA al ejemplo mp3_player del fabricante:
-  // setPins() seguido de SD_MMC.begin() sin argumentos. Su punto de montaje
-  // por defecto es /sdcard, que coincide con FLEXSD_MOUNT.
-  if(!oneBit) return SD_MMC.begin();
-
-  // Solo si la ruta oficial de 4 bits falla se intenta diagnostico a
-  // 1 bit. Conserva FAT sin formateo y el mismo punto de montaje.
-  return SD_MMC.begin(FLEXSD_MOUNT, true, false, SDMMC_FREQ_DEFAULT,
-                      FLEXSD_MAXOPEN);
+  // Ruta IDENTICA al ejemplo mp3_player del fabricante: setPins() seguido de
+  // SD_MMC.begin() sin argumentos. No se lanza inmediatamente un segundo
+  // controlador en modo 1-bit cuando falla: ese doble intento nunca fue parte
+  // del BSP y hacia mas dificil separar tarjeta ausente de bus inestable.
+  return SD_MMC.begin();
 }
 
 bool flexSdMount(){
   if(!sdHwReady && !flexSdBegin()) return false;
   if(sdMounted) return true;
 
-  bool ok = false;
-  sdOneBit = false;
-
-  // Primero la secuencia Arduino oficial del fabricante en 4 bits.
-  // El intento de 1 bit es solo un diagnostico posterior.
-  if(sdTryBegin(false))                  ok = true;
-  else if(sdTryBegin(true))              { ok = true; sdOneBit = true; }
+  // Una sola secuencia Arduino oficial del fabricante en 4 bits.
+  bool ok = sdTryBegin();
 
   if(!ok){
     SD_MMC.end();
@@ -215,7 +188,7 @@ bool flexSdMount(){
       sdState = FLEXSD_ABSENT;
       sdErr   = "Sin tarjeta, o formato no compatible (usa FAT32)";
     }
-    sdNextPoll = millis() + FLEXSD_RETRY_MS;
+    sdProbeRequested = false;
     return false;
   }
 
@@ -226,7 +199,7 @@ bool flexSdMount(){
     sdMounted = false;
     sdState   = FLEXSD_ERR_MOUNT;
     sdErr     = "Tarjeta no reconocida";
-    sdNextPoll = millis() + FLEXSD_RETRY_MS;
+    sdProbeRequested = false;
     return false;
   }
 
@@ -234,11 +207,10 @@ bool flexSdMount(){
   sdEverMounted = true;
   sdGen++;                              // tarjeta nueva: todo lo anterior caduca
   sdState  = FLEXSD_READY;
-  sdErr    = sdOneBit ? "Montada en 1 bit (revisa el bus de datos)" : "Tarjeta lista";
+  sdErr    = "Tarjeta lista";
   sdUsageOk = false;                    // se calcula a peticion, no aqui
-  sdNextPoll = millis() + FLEXSD_POLL_MS;
-  Serial.printf("[SD] montada  tipo=%u  bus=%s\n",
-                (unsigned)ct, sdOneBit ? "1bit" : "4bit");
+  sdProbeRequested = false;
+  Serial.printf("[SD] montada  tipo=%u  bus=4bit\n", (unsigned)ct);
   return true;
 }
 
@@ -257,7 +229,7 @@ bool        flexSdReady()      { return sdMounted; }
 int         flexSdState()      { return sdState; }
 const char* flexSdError()      { return sdErr ? sdErr : ""; }
 uint32_t    flexSdGeneration() { return sdGen; }
-void        flexSdPoke()       { sdNextPoll = 0; }
+void        flexSdPoke()       { if(!sdMounted) sdProbeRequested = true; }
 void        flexSdBusySet(bool b){ sdBusy = b; }
 
 // -------------------------------------------------------------
@@ -274,9 +246,11 @@ bool flexSdTick(){
   // elimina por completo la apertura periodica que causaba PANIC.
   if(sdMounted) return false;
 
-  unsigned long now = millis();
-  if((long)(now - sdNextPoll) < 0) return false;
-  sdNextPoll = now + FLEXSD_POLL_MS;
+  // Sin peticion explicita no se toca el host. La insercion se comprueba al
+  // abrir Almacenamiento, Galeria, Multimedia o el explorador; nunca por un
+  // temporizador que pueda coincidir con el arranque del C6.
+  if(!sdProbeRequested) return false;
+  sdProbeRequested = false;
 
   int before = sdState;
   flexSdMount();                            // insercion/reconexion en caliente
