@@ -34652,6 +34652,21 @@ void setup(){
   flexTouchInit();       // GT911: fallo suave (si no aparece, se sigue sin tactil)
   safeBootEval();        // antes de iniciar tareas pesadas: decide el modo de recuperacion
   frLoadState();         // marcador transaccional del restablecimiento
+
+  // TARJETA microSD. Debe reclamar SDMMC antes de crear CUALQUIER tarea que
+  // pueda consultar la red/esp-hosted (incluida OTA). En el P4 ambos caminos
+  // comparten el host SDIO; aplazar el montaje al primer loop introducia una
+  // carrera y una tarjeta ya insertada podia quedar invisible.
+  //
+  // Sin tarjeta el fallo es suave y flexSdTick() conserva la insercion en
+  // caliente. Con tarjeta, las rutas Wi-Fi comprueban flexSdReady() y no
+  // pueden quitarle el bus despues.
+  if(!flexSdBegin()){
+    Serial.printf("[SD] controlador no disponible: %s\n", flexSdError());
+  } else if(!flexSdMount()){
+    Serial.printf("[SD] sin montaje inicial: %s\n", flexSdError());
+  }
+
   if(!gFrPending && !gSafeMode){
     bootInitRadioSafe(); // WiFi/C6: BYPASS -> nunca bloquea el arranque
     flexBrowserBegin();  // carga estado; no abre red
@@ -34686,14 +34701,6 @@ void setup(){
     flexFsMkdir(FS_DIR_CACHE);
     if(!gFrPending && !gSafeMode) flexPkgBegin();
   }
-
-  // TARJETA microSD. Solo se PREPARA el controlador (regulador
-  // interno + pines): no se monta aqui. Montar en setup() haria que
-  // arrancar sin tarjeta costara el tiempo de un intento fallido
-  // cada vez; el primer flexSdTick() de loop() ya lo intenta, y
-  // desde ahi la insercion en caliente funciona igual.
-  if(!flexSdBegin())
-    Serial.printf("[SD] controlador no disponible: %s\n", flexSdError());
 
   // AUDIO. Va DESPUES del tactil a proposito: el ES8311 cuelga del
   // MISMO bus I2C que el GT911 (GPIO7/8), asi que se aprovecha el
