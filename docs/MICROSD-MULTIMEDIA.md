@@ -53,16 +53,17 @@ GPIO45.
 El pin CD del conector es **CD/DATA3**, y aquí se usa como DATA3. No
 existe una línea independiente y fiable que diga "hay tarjeta".
 
-* **Sin volumen montado** — `flexSdTick()` intenta montar de forma
-  espaciada. `flexSdPoke()` adelanta ese intento al abrir
-  Almacenamiento, Galería o Multimedia.
+* **Sin volumen montado** — hay un intento durante el arranque. Después,
+  `flexSdTick()` solo intenta montar cuando `flexSdPoke()` recibe una
+  petición explícita al abrir Almacenamiento, Galería o Multimedia.
 * **Con volumen montado** — no se abre la raíz ni se hace ninguna
   lectura por temporizador. Solo las operaciones reales solicitadas
   por el usuario acceden al bus. Si una falla, se invalida el volumen,
   se cierran sus rutas por generación y se notifica la retirada. En
   reproducción ocurre al fallar la lectura del fotograma.
 
-Esta distinción es necesaria: la apertura periódica de la raíz causaba
+Esta distinción es necesaria: la apertura periódica de la raíz y los
+reintentos temporizados de `SD_MMC.begin()` causaban
 reinicios `PANIC` reproducibles con algunas tarjetas/controladores del
 ESP32-P4. Tampoco se consideran errores las carpetas opcionales que no
 existan (`DCIM`, `Pictures`, `Movies`, etc.); simplemente se indexan como
@@ -71,25 +72,27 @@ vacías. No hay ningún bucle que lea la tarjeta continuamente.
 ### Separación microSD ↔ Wi-Fi remoto del C6
 
 En el ESP32-P4, `WiFi.status()` y `WiFi.getMode()` no son consultas locales:
-atraviesan **esp-hosted por SDIO** hasta el C6. El P4 dispone de dos slots y
-deben compilarse con propietarios distintos:
+atraviesan **esp-hosted por SDIO** hasta el C6. Los dos periféricos usan
+rutas físicas diferentes:
 
 * microSD integrada: **SDMMC slot 0**, pines IOMUX 39–44 y LDO interno 4;
-* esp-hosted/C6: **SDIO slot 1**.
+* esp-hosted/C6: GPIO 18/19/14/15/16/17 y reset GPIO54.
 
-El perfil genérico `ESP32P4 Dev Module` no conoce el cableado particular de
-esta placa. Por ello `build_opt.h` define `BOARD_HAS_SDMMC`,
-`BOARD_SDMMC_SLOT=0` y `BOARD_SDMMC_POWER_CHANNEL=4`. Sin esas opciones,
-Arduino enviaría también la tarjeta al slot 1 y encender Wi-Fi podría producir
-un `PANIC`.
+`build_opt.h` fija la microSD en slot 0 y LDO4. Para Wi-Fi se exige
+**arduino-esp32 3.2.1** y se llama a
+`WiFi.setPins(18,19,14,15,16,17,54)` antes de inicializar esp-hosted. La
+versión 3.2.0 ignoraba los pines SDIO del `variant` y podía abortar la tarea
+del C6; el propio paquete del fabricante pide 3.2.1.
 
 Flex OS mantiene además estas reglas:
 
 * los ticks de escritorio no consultan continuamente el driver Wi-Fi remoto;
-* el Wi-Fi guardado vuelve a conectarse una sola vez, seis segundos después
-  del arranque, nunca desde `setup()`;
-* la microSD se monta antes de crear tareas de red y ambos subsistemas pueden
-  permanecer activos porque ya no reclaman el mismo slot.
+* una red guardada no se autoarranca hasta que una conexión manual haya
+  funcionado con ese transporte;
+* antes del autoarranque se escribe un marcador NVS. Si ocurre un reset antes
+  de limpiarlo, el siguiente boot abre el fusible y no repite el crash;
+* la microSD se monta una vez antes de crear tareas de red; un fallo no genera
+  reintentos periódicos en segundo plano.
 
 ### Generación de montaje
 
@@ -451,10 +454,11 @@ sin códec **no se ofrece ningún control de volumen**.
    esta placa no expone una línea CD independiente. Se detecta en la
    siguiente operación real sobre la tarjeta. Volver a sondearla por
    tiempo reintroduciría el reinicio `PANIC` que se eliminó.
-10. **Wi-Fi remoto y microSD requieren slots distintos.** `build_opt.h` fija
-    la tarjeta en slot 0 + LDO 4 y deja esp-hosted/C6 en slot 1. El archivo es
-    obligatorio al compilar desde Arduino IDE.
+10. **Wi-Fi remoto requiere arduino-esp32 3.2.1.** En 3.2.0 queda desactivado
+    por compilación para evitar el aborto conocido del transporte P4/C6.
+    `build_opt.h` sigue siendo obligatorio para la microSD (slot 0 + LDO 4).
 11. **La tarjeta insertada durante el arranque se monta antes de iniciar los
     servicios de red.** Así SD_MMC obtiene el bus de forma determinista, sin
     competir durante el primer `loop()` con una tarea que consulte esp-hosted.
-    La inserción posterior continúa funcionando mediante el sondeo en caliente.
+    La inserción posterior se comprueba al abrir una pantalla que use la SD;
+    no existe sondeo automático porque la placa no tiene pin CD independiente.
