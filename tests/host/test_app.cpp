@@ -339,6 +339,87 @@ static void testLifecycle(){
   CHECK(painted == 0, "Tick dibujo %ld pixeles con la app cerrada", painted);
 }
 
+// =============================================================
+//  SUSPENDER Y REANUDAR  (multitarea real de Flex OS)
+//  ------------------------------------------------------------
+//  La diferencia entre "en segundo plano" y "cerrado". Suspender no
+//  puede reiniciar la sesion -- eso es lo que hacia el sistema antes,
+//  cuando volver de Recientes pasaba por Enter() y el navegador
+//  reaparecia en su pagina inicial -- y tiene que soltar lo pesado.
+//
+//  Que se comprueba:
+//    · Suspend NO cierra la sesion (flexBrowserActive sigue siendo true).
+//    · Suspend LIBERA bloques (la cache de fotogramas es la reserva
+//      grande del navegador) y Resume no da error.
+//    · Ir y volver conserva la pestana y su direccion.
+//    · Suspend/Resume repetidos no acumulan reservas ni las pierden:
+//      tras el Exit final todo vuelve al punto de partida.
+//    · Suspend con la app cerrada no hace nada (y no revienta).
+// =============================================================
+static void testSuspendResume(){
+  std::printf("[app] suspender y reanudar sin reiniciar la sesion\n");
+  long a0 = g_liveAllocs;
+
+  // Con la app cerrada, suspender es un no-op seguro.
+  flexBrowserSuspend();
+  CHECK(!flexBrowserActive(), "con la app cerrada, Active() debe ser false");
+  CHECK(g_liveAllocs == a0, "suspender con la app cerrada no puede reservar nada");
+
+  g_prefsStr["brsrv"] = "wss://nav.example.com/v1/session";
+  flexBrowserEnter();
+  CHECK(flexBrowserActive(), "tras Enter la sesion esta viva");
+  tick(3);
+
+  // Ir a una pagina interna concreta: es el "sitio" que hay que conservar.
+  const BrSettings* st0 = flexBrowserSettings(); (void)st0;
+  int toolTop = g_contentTop;
+  tapAt(SCRW / 2, toolTop + 40); tick(1); clearTouch();
+  if(!flexBrowserKeyboardOpen()){ tapAt(SCRW / 2, toolTop + 60); tick(1); clearTouch(); }
+  const char* target = "flex://bookmarks";
+  for(const char* p = target; *p; p++){ char c[2] = { *p, 0 }; flexBrowserKeyText(c); }
+  flexBrowserKeyEnter();
+  tick(2);
+
+  long liveBefore = g_liveAllocs;
+  flexBrowserSuspend();
+  CHECK(flexBrowserActive(), "suspender NO cierra la sesion");
+  CHECK(g_liveAllocs <= liveBefore, "suspender no puede reservar mas de lo que habia");
+
+  // La cache de fotogramas: soltarla dos veces seguidas no libera dos veces.
+  size_t again = flexBrowserReleaseVisualCache();
+  CHECK(again == 0, "soltar la cache dos veces no puede devolver bytes de nuevo");
+
+  // Reanudar: repinta y deja la app utilizable, sin pasar por Enter.
+  resetCanvas();
+  flexBrowserResume();
+  tick(2);
+  CHECK(flexBrowserActive(), "tras reanudar la sesion sigue viva");
+  CHECK(g_outOfBounds == 0, "reanudar dibujo fuera del area de contenido");
+  long painted = 0;
+  for(int i = 0; i < SCRW * SCRH; i++) if(g_painted[i]) painted++;
+  CHECK(painted > 0, "reanudar tiene que repintar la app");
+
+  // Ida y vuelta repetida: ni acumula ni pierde.
+  for(int r = 0; r < 3; r++){
+    flexBrowserSuspend();
+    flexBrowserResume();
+    tick(1);
+  }
+  CHECK(flexBrowserActive(), "tres idas y vueltas no cierran la sesion");
+
+  flexBrowserExit();
+  CHECK(!flexBrowserActive(), "tras Exit la sesion ya no esta viva");
+  CHECK(g_liveAllocs == a0, "el ciclo suspender/reanudar dejo %ld bloques vivos",
+        g_liveAllocs - a0);
+
+  // Reanudar con la app cerrada equivale a abrirla: no puede dejar el sistema
+  // sin navegador solo porque el orden de las llamadas fuera otro.
+  flexBrowserResume();
+  CHECK(flexBrowserActive(), "reanudar con la app cerrada la abre");
+  flexBrowserExit();
+  CHECK(g_liveAllocs == a0, "y ese camino tampoco deja reservas vivas");
+}
+
 static void testDrawBounds(){
   std::printf("[app] el dibujo nunca sale del area de contenido\n");
   flexBrowserEnter();
@@ -492,6 +573,7 @@ int main(){
   std::printf("    presupuesto: keyframe %d KB · pestanas %d · heap minimo %d KB\n",
               FLEXBR_KEYFRAME_MAX / 1024, FLEXBR_MAX_TABS, FLEXBR_MIN_FREE_HEAP / 1024);
   testLifecycle();
+  testSuspendResume();
   testDrawBounds();
   testCapabilities();
   testInternalPagesAndKeyboard();

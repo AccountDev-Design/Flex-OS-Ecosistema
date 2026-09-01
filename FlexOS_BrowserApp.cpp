@@ -2860,6 +2860,58 @@ void flexBrowserTick(){
   brHostClipReset();
 }
 
+bool flexBrowserActive(){ return gActive; }
+
+// SUELTA SOLO LA CACHE DE FOTOGRAMAS. Es la unica reserva grande del navegador
+// que se puede rehacer sin perder nada: son bandas JPEG del ultimo keyframe --
+// pixeles que el servicio puede volver a mandar. Ni la pestana, ni la
+// direccion, ni el desplazamiento, ni el historial se tocan.
+//
+// Es SEGURO llamarla desde el hilo grafico: gKey solo lo escribe brCacheStrip,
+// que corre dentro de flexBrowserTick (este mismo hilo), nunca en la tarea de
+// red -- esa escribe en gRx y en la ranura del frame, que no se tocan aqui.
+size_t flexBrowserReleaseVisualCache(){
+  size_t freed = 0;
+  if(gKey){ freed = gKeyCap; brHostFree(gKey); gKey = NULL; gKeyCap = 0; }
+  gKeyUsed = 0; gStripN = 0; gStripsValid = false; gStripsStale = false;
+  gNeedFullRedraw = true;             // al volver se repinta pidiendo frame
+  return freed;
+}
+
+// LA APP PASA A SEGUNDO PLANO. No se cierra: la sesion sigue viva y la tarea de
+// red se conserva (pararla y volver a levantarla en cada cambio de app costaria
+// una reconexion completa). Lo que se suelta es lo pesado y reconstruible, y lo
+// que se vuelca es lo que no debe perderse si el sistema decide cerrar la app
+// mas tarde.
+void flexBrowserSuspend(){
+  if(!gActive) return;
+  flexBrowserFlushPersist(true);      // historial y favoritos, a disco, ya
+  if(gTabs[gTab].used && gTabs[gTab].view == BRV_PAGE && gTabs[gTab].url[0])
+    brHostPrefsPutStr("brlast", gTabs[gTab].url);
+  flexBrowserReleaseVisualCache();    // cero imagenes remotas decodificadas en segundo plano
+  gEditTarget = BRE_NONE;             // el omnibox no puede quedar en edicion
+  gEdit[0] = 0;
+}
+
+// VUELVE A PRIMER PLANO. Repinta desde el estado que quedo vivo; NO pasa por
+// flexBrowserEnter(), que es lo que reiniciaba el desplazamiento y volvia a
+// navegar a la ultima direccion.
+void flexBrowserResume(){
+  if(!gActive){ flexBrowserEnter(); return; }
+  gView = gTabs[gTab].used ? gTabs[gTab].view : BRV_INTERNAL;
+#if FLEXBR_KEYFRAME_MAX > 0
+  // La cache se rehace solo si hay memoria de sobra. Si no, el navegador
+  // funciona igual: repinta pidiendo fotograma al servicio.
+  if((gCaps & FLEXBR_CAP_PSRAM) && !gKey){
+    gKeyCap = FLEXBR_KEYFRAME_MAX;
+    gKey = (uint8_t*)brHostAlloc(gKeyCap, true);
+    if(!gKey) gKeyCap = 0;
+  }
+#endif
+  gNeedFullRedraw = true;
+  brRenderAll();
+}
+
 void flexBrowserExit(){
   if(!gActive) return;
   gActive = false;
@@ -3071,6 +3123,10 @@ const BrSettings* flexBrowserSettings(){ static BrSettings s; return &s; }
 const char* flexBrowserCapReason(uint32_t){ return "Navegador desactivado en este build"; }
 void flexBrowserFlushPersist(bool){}
 void flexBrowserClearData(uint32_t){}
+void flexBrowserSuspend(){}
+void flexBrowserResume(){}
+bool flexBrowserActive(){ return false; }
+size_t flexBrowserReleaseVisualCache(){ return 0; }
 #endif
 
 #endif // FLEXBR_ON_DEVICE && FLEXBR_ON

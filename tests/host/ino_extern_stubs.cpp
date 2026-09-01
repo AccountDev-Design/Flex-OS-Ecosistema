@@ -93,6 +93,12 @@ void flexBrowserBegin(){}
 void flexBrowserEnter(){}
 void flexBrowserTick(){}
 void flexBrowserExit(){}
+// Multitarea: suspender/reanudar sin reiniciar la sesion. Aqui son dobles,
+// como el resto del navegador; su comportamiento real lo prueba test_app.
+void flexBrowserSuspend(){}
+void flexBrowserResume(){}
+bool flexBrowserActive(){ return false; }
+size_t flexBrowserReleaseVisualCache(){ return 0; }
 bool flexBrowserWantsClose(){ return false; }
 bool flexBrowserHandleSystemBack(){ return false; }
 void flexBrowserForceRepaint(){}

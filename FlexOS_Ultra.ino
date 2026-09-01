@@ -137,6 +137,14 @@
 // los demas puentes.
 #include "FlexOS_FlexPhone.h"
 
+// PRESUPUESTO DE MEMORIA Y MULTITAREA. Mismo criterio que el clima o los
+// medios: aqui solo entra la API. Las REGLAS -- cortes de 10/6/5 MB, bloque
+// contiguo minimo, fragmentacion, veredicto de "cabe o no cabe" y el
+// enfriamiento de los avisos -- viven en FlexOS_Mem.cpp, que es logica pura
+// y se ejercita entera en el PC (tests/host/test_mem.cpp). Aqui solo se MIDE
+// (heap_caps_*) y se ACTUA (soltar buffers); decidir es de alli.
+#include "FlexOS_Mem.h"
+
 // ---- DISPONIBILIDAD REAL DE BLE ------------------------------------------
 // No se escribe a mano "el P4 no tiene BLE": se le pregunta al SDK. soc_caps.h
 // define SOC_BLE_SUPPORTED solo en los chips que llevan radio Bluetooth, asi
@@ -265,6 +273,15 @@ struct AppHooks {
   bool (*saveSess)();    // vuelca a disco el minimo indispensable. true = escribio
   void (*loadSess)();    // lo relee al arrancar (una sola vez, antes del primer enter)
   bool (*bgWork)();      // LISTA BLANCA: true = tiene trabajo real en segundo plano
+  // ---- Ganchos anadidos AL FINAL, a proposito ----
+  // Van los ultimos para que ningun inicializador de los que ya existen
+  // (H_NOTES, H_PAINT, H_GALLERY...) tenga que tocarse: los campos que no
+  // se rellenan quedan a NULL, que es exactamente "esta app no lo necesita".
+  size_t (*shed)();      // suelta recursos PESADOS y RECONSTRUIBLES sin perder
+                         // estado. Solo se llama con la app SUSPENDIDA. Al
+                         // volver, resume() los rehace. Devuelve una pista de
+                         // lo soltado; quien manda es la medida real de PSRAM.
+  bool (*dirty)();       // true = la app tiene cambios del usuario sin guardar
 };
 
 // Cabecera comun de todo archivo de sesion en LittleFS. Va delante de
@@ -2546,8 +2563,35 @@ static void drawLiquidGlassPanelEx(int x, int y, int w, int h, int rad, uint16_t
     dst[w - 1 - ins] = mix565(dst[w - 1 - ins], bcol, sR);
   }
 }
+// MODO VISUAL EFICIENTE  ·  TEMPORAL, y no es una preferencia
+// ---------------------------------------------------------------------------
+// Lo enciende "Optimizar Flex OS" SOLO si, despues de soltar todo lo seguro, la
+// presion de memoria sigue alta; y lo apaga el propio sistema en cuanto la
+// presion baja (ver memTick). NO se guarda en NVS, NO aparece en Ajustes y NO
+// toca el estilo elegido por el usuario: si tiene Liquid Glass, sigue teniendo
+// Liquid Glass -- con menos radio de desenfoque -- y si tiene Plano, aqui no
+// cambia absolutamente nada porque esta ruta ni se llama.
+//
+// Que hace, y por que eso SI ahorra: drawLiquidGlassPanelEx trabaja sobre las
+// filas visibles MAS blurR filas de margen a cada lado (ver j0/j1 en su
+// cuerpo), asi que bajar el radio reduce de verdad las filas que se
+// desenfocan en cada panel. Ademas Recientes conserva una sola miniatura en
+// vez de cuatro (73 KB cada una).
+static bool gEffMode = false;
+#define GLASS_BLUR_R      6
+#define GLASS_BLUR_R_EFF  2
+// SOMBRAS. En modo eficiente pesan la mitad. Es la otra mitad del efecto
+// pedido: cada sombra es un relleno redondeado con alpha que se repinta en
+// cada cuadro de un arrastre de ventana en Modo PC, asi que bajar el alpha
+// baja de verdad el trabajo de mezcla por pixel -- y ademas se ve mas plano,
+// que es lo que se espera de un "modo eficiente".
+static inline uint8_t effShadow(int a){
+  if(a < 0)   a = 0;
+  if(a > 255) a = 255;
+  return (uint8_t)(gEffMode ? a / 2 : a);
+}
 static void drawLiquidGlassPanel(int x, int y, int w, int h, int rad, uint16_t tint){
-  drawLiquidGlassPanelEx(x, y, w, h, rad, tint, 6);   // blur original, sin cambios, para el resto del sistema
+  drawLiquidGlassPanelEx(x, y, w, h, rad, tint, gEffMode ? GLASS_BLUR_R_EFF : GLASS_BLUR_R);
 }
 
 // #############################################################
@@ -6433,6 +6477,16 @@ static void safeTick();
 static bool safeAppAllowed(int id);                       // que apps se pueden abrir en Modo seguro
 static void safeDenyApp(int id);                          // aviso real al intentar abrir una app no permitida
 static void appClose();                                   // salir de la app al escritorio (suspendiendo)
+// ---- Gestor de memoria (bloque grande, mas abajo) ----
+static void sysNotify(const char* title, const char* sub);  // aviso REAL por la isla de notificaciones
+static void appMemForget(int id);                           // olvida la huella medida de una app cerrada
+static void memTick();                                      // muestreo periodico (lo llama loop)
+static void memAlertTick();                                 // avisos de memoria con enfriamiento
+// ---- Optimizar Flex OS (motor junto a themeChanged: ve todos los buffers) ----
+enum { OPT_HOST_ALM = 0, OPT_HOST_SW = 1 };
+static void optStart(int host);                             // arranca la secuencia (no bloquea)
+static bool optActive();                                    // el panel esta a la vista
+static void optTick();                                      // una etapa por vuelta de loop
 // TRANSICIONES INTERRUMPIBLES (ver el bloque grande mas abajo). Se declaran
 // aqui porque homeTick(), loop() y las salidas de app las llaman antes de que
 // el motor este definido -- y porque el auto-prototipado de Arduino no genera
@@ -6609,6 +6663,22 @@ static int homeFirstFreeGrow(){
   return homeFirstFree();
 }
 static bool gMinChanged = false;   // lo pone loop(): true cuando cambia el minuto
+
+// RITMO DEL SISTEMA. Vueltas completas de loop() por segundo. Se cuenta con un
+// entero y una comparacion de millis(), asi que no cuesta nada medible, y es
+// una medida REAL de la capacidad de respuesta -- a diferencia de un "FPS"
+// global, que este sistema no tiene: cada pantalla publica su propia banda
+// cuando le toca y no hay un unico punto de presentacion que contar.
+static uint32_t gLoopRate  = 0;    // ultima medida (vueltas/s)
+static uint32_t gLoopCount = 0;
+static uint32_t gLoopMs    = 0;
+static void loopRateTick(){
+  gLoopCount++;
+  uint32_t now = millis();
+  if(now - gLoopMs < 1000) return;
+  gLoopRate = gLoopCount * 1000u / (now - gLoopMs);
+  gLoopCount = 0; gLoopMs = now;
+}
 
 // ---- Invalidacion de caches de pantalla ----
 // homeBuf (y la cortina qsBuf, que se compone de el) son escritorios YA
@@ -9713,8 +9783,18 @@ static bool settingsHandleBack();
 static void wifiSettingsEnter(); static void wifiTick();    // Ajustes -> Red e Internet -> Wi-Fi, abajo
 static void calcEnter(); static void calcTick();           // Calculadora (M2), abajo
 static void pcEnter(); static void pcTick();               // Modo PC (M4), abajo
+static void pcSuspend(); static void pcResume(); static void pcCloseApp();  // ...y su ciclo de vida
+static void calResume();                                   // Calendario: reanudar = repintar
 static void galEnter(); static void galTick();              // Galeria (indice real de medios + Flex Vault)
 static void galCloseApp();                                 // ...suelta la cache de miniaturas
+// ---- Ganchos de la multitarea por memoria (shed / dirty) ----
+static size_t galShed();     // Galeria: suelta la cache de miniaturas decodificadas
+static size_t vidShed();     // Multimedia: suelta fotograma, descriptor y buffers
+static size_t camShed();     // Camara: suelta el buffer del sensor
+static bool   noteDirty();   // Notas: hay texto escrito sin volcar
+static bool   paintDirty();  // Paint: hay trazo sin volcar
+static void   navSuspendLife();  // Navegador: al pasar a segundo plano
+static size_t navShedLife();     // Navegador: suelta la cache de fotogramas
 static bool galBackLayer(); static bool galBackScreen(); static void galSuspend(); static void galResume();
 static void bienEnter(); static void bienTick();           // Bienestar (M2)
 static void calEnter(); static void calTick();             // Calendario (M2)
@@ -9725,6 +9805,8 @@ static void almEnter(); static void eduEnter();                         // apps 
 static void navEnter(); static void navTick();                          // Navegador (FlexOS_Browser*)
 static void ideEnter(); static void ideTick(); static void paintEnter(); static void paintTick();
 static void almTick();                                     // Almacenamiento: tap en "Ver..."
+static bool almBackScreen(); static void almSuspend(); static void almResume(); static void almCloseApp();
+static void almDetailTick();                               // Almacenamiento: pantalla de detalle (Fase 5)
 static void filesTick();                                   // Explorador de archivos (ST_FILES)
 static void connEnter(); static void connTick();           // Conectividad (ST_CONN)
 static void flexBleStop(); static bool flexBleStart();     // radio BLE real
@@ -10192,28 +10274,51 @@ static const char* APP_CAT_NAME[APP_CAT_N][5] = {
   {"Sistema","System","Syst\xC3\xA8" "me","Sistema","Sistema"},
   {"Ocio","Fun","Loisirs","Lazer","Svago"},
 };
-static const AppHooks H_SETTINGS = { NULL, settingsHandleBack, setSuspend, setResume, NULL, setSaveSess, setLoadSess, setBgWork };
-static const AppHooks H_GALLERY  = { galBackLayer, galBackScreen, galSuspend, galResume, galCloseApp, NULL, NULL, NULL };
-static const AppHooks H_CALC     = { NULL, NULL, NULL, calcResume, NULL, calcSaveSess, calcLoadSess, NULL };
-static const AppHooks H_MEDIA    = { NULL, vidBackScreen, vidSuspend, vidResume, vidCloseApp, vidSaveSess, vidLoadSess, NULL };
-static const AppHooks H_CAMERA   = { NULL, NULL, camSuspend, camResume, camCloseApp, NULL, NULL, NULL };
-static const AppHooks H_NOTES    = { noteBackLayer, noteBackScreen, noteSuspend, noteResume, noteCloseApp, noteSaveSess, noteLoadSess, NULL };
-static const AppHooks H_PAINT    = { NULL, paintBackScreen, paintSuspend, paintResume, paintCloseApp, paintSaveSess, paintLoadSess, NULL };
-static const AppHooks H_GAMES    = { NULL, NULL, gamesSuspend, gamesResume, gamesCloseApp, NULL, NULL, NULL };
-static const AppHooks H_BROWSER  = { NULL, NULL, NULL, navResumeLife, navCloseLife, NULL, NULL, NULL };
-static const AppHooks H_STORE    = { NULL, NULL, NULL, storeResumeLife, storeCloseLife, NULL, NULL, NULL };
-static const AppHooks H_WEATHER  = { NULL, wxHandleBack, wxSuspend, wxResume, NULL, NULL, NULL, NULL };
+// Almacenamiento: pantalla interna de detalle (atras vuelve a la lista) y
+// suspension que apaga la medida cara de la flash. No guarda sesion: su estado
+// es "que pantalla se estaba viendo", y eso se reconstruye al abrirla.
+// Las dos ultimas columnas son los ganchos de la multitarea por memoria:
+//   shed  -> soltar recursos PESADOS y RECONSTRUIBLES sin perder estado
+//   dirty -> "tengo cambios del usuario sin guardar"
+// NULL en las dos = esta app no tiene nada pesado que soltar ni nada que el
+// usuario pueda perder. Se escriben explicitamente (y no se dejan implicitas)
+// para que anadir una app obligue a decidir las dos cosas.
+// Modo PC / DeX. Conserva la disposicion de ventanas al pasar a segundo plano
+// y suelta los lienzos (768 KB por ventana) y el fondo compuesto. No lleva
+// 'shed' porque su suspend ya suelta TODO lo pesado: no queda nada que soltar
+// despues, y devolver 0 bytes seria lo unico honesto que podria hacer.
+static const AppHooks H_MODOPC   = { NULL, NULL, pcSuspend, pcResume, pcCloseApp, NULL, NULL, NULL, NULL, NULL };
+// Calendario. Solo muestra el mes EN CURSO (no tiene navegacion de meses), asi
+// que su unico estado es "que dia es hoy" y lo da el reloj: reanudar es
+// repintar. Se declara el gancho igual, para que la app no dependa de que
+// enter() y resume() hagan por casualidad lo mismo.
+static const AppHooks H_CALEND   = { NULL, NULL, NULL, calResume, NULL, NULL, NULL, NULL, NULL, NULL };
+static const AppHooks H_ALM      = { NULL, almBackScreen, almSuspend, almResume, almCloseApp, NULL, NULL, NULL, NULL, NULL };
+static const AppHooks H_SETTINGS = { NULL, settingsHandleBack, setSuspend, setResume, NULL, setSaveSess, setLoadSess, setBgWork, NULL, NULL };
+static const AppHooks H_GALLERY  = { galBackLayer, galBackScreen, galSuspend, galResume, galCloseApp, NULL, NULL, NULL, galShed, NULL };
+static const AppHooks H_CALC     = { NULL, NULL, NULL, calcResume, NULL, calcSaveSess, calcLoadSess, NULL, NULL, NULL };
+static const AppHooks H_MEDIA    = { NULL, vidBackScreen, vidSuspend, vidResume, vidCloseApp, vidSaveSess, vidLoadSess, NULL, vidShed, NULL };
+static const AppHooks H_CAMERA   = { NULL, NULL, camSuspend, camResume, camCloseApp, NULL, NULL, NULL, camShed, NULL };
+// Notas y Paint no llevan 'shed': lo unico que reservan en PSRAM son 4 KB de
+// texto y 2 KB de trazo en curso. Soltarlos no cambia nada medible y si
+// arriesga el contenido del usuario, que es exactamente lo que no se hace.
+static const AppHooks H_NOTES    = { noteBackLayer, noteBackScreen, noteSuspend, noteResume, noteCloseApp, noteSaveSess, noteLoadSess, NULL, NULL, noteDirty };
+static const AppHooks H_PAINT    = { NULL, paintBackScreen, paintSuspend, paintResume, paintCloseApp, paintSaveSess, paintLoadSess, NULL, NULL, paintDirty };
+static const AppHooks H_GAMES    = { NULL, NULL, gamesSuspend, gamesResume, gamesCloseApp, NULL, NULL, NULL, NULL, NULL };
+static const AppHooks H_BROWSER  = { NULL, NULL, navSuspendLife, navResumeLife, navCloseLife, NULL, NULL, NULL, navShedLife, NULL };
+static const AppHooks H_STORE    = { NULL, NULL, NULL, storeResumeLife, storeCloseLife, NULL, NULL, NULL, NULL, NULL };
+static const AppHooks H_WEATHER  = { NULL, wxHandleBack, wxSuspend, wxResume, NULL, NULL, NULL, NULL, NULL, NULL };
 // Flex Phone. backScreen cierra primero la conversacion y luego vuelve
 // a Centro; closeApp vuelca el estado a disco (la escritura periodica
 // esta agrupada, asi que al salir SI toca guardar).
-static const AppHooks H_FLEXPHONE = { NULL, fphBackScreen, fphSuspend, fphResume, fphExit, NULL, NULL, NULL };
+static const AppHooks H_FLEXPHONE = { NULL, fphBackScreen, fphSuspend, fphResume, fphExit, NULL, NULL, NULL, NULL, NULL };
 // ---- Registro de apps (indices = enum IC_*) ----
 static FlexApp APP_REG[APP_N] = {
   { appRelojEnter, appRelojTick, APP_FLEX, APP_CAT_ESENCIAL, APP_DEF_FAV, NULL },
   { galEnter, galTick, APP_FLEX, APP_CAT_MEDIA, APP_DEF_FAV, &H_GALLERY },
   { vidEnter, vidTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_MEDIA, APP_DEF_FAV, &H_MEDIA },
-  { almEnter, almTick, APP_FLEX, APP_CAT_SISTEMA, APP_DEF_FAV, NULL },
-  { pcEnter, pcTick, APP_CUSTOM_HEADER, APP_CAT_SISTEMA, APP_DEF_FAV, NULL },
+  { almEnter, almTick, APP_FLEX, APP_CAT_SISTEMA, APP_DEF_FAV, &H_ALM },
+  { pcEnter, pcTick, APP_CUSTOM_HEADER, APP_CAT_SISTEMA, APP_DEF_FAV, &H_MODOPC },
   { noteEnter, noteTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_TRABAJO, APP_DEF_FAV, &H_NOTES },
   { eduEnter, NULL, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_FAV, NULL },
   { navEnter, navTick, APP_FLEX | APP_OWN_TOUCH, APP_CAT_ESENCIAL, APP_DEF_FAV, &H_BROWSER },
@@ -10223,7 +10328,7 @@ static FlexApp APP_REG[APP_N] = {
   { gamesEnter, gamesTick, APP_OWN_TOUCH | APP_CUSTOM_HEADER | APP_LAND, APP_CAT_OCIO, APP_DEF_FAV, &H_GAMES },
   { settingsEnter, settingsTick, APP_CUSTOM_HEADER, APP_CAT_SISTEMA, APP_DEF_DOCK, &H_SETTINGS },
   { calcEnter, calcTick, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_DOCK, &H_CALC },
-  { calEnter, calTick, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_DOCK, NULL },
+  { calEnter, calTick, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_DOCK, &H_CALEND },
   { camEnter, camTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_MEDIA, APP_DEF_DOCK, &H_CAMERA },
   // 16 Clima (REAL: Open-Meteo). APP_OWN_TOUCH porque el buscador de ciudades
   // usa el teclado del sistema, que ocupa la MISMA franja que el boton "atras"
@@ -10515,9 +10620,16 @@ static void touchDropAll(){
 // ##
 // ##  NO se guarda un framebuffer por app: lo unico grafico que
 // ##  sobrevive a la suspension es la miniatura de 150x250 de la
-// ##  tarjeta de Recientes, que ya existia.
+// ##  tarjeta de Recientes, y ni siquiera todas -- solo las
+// ##  SW_THUMB_MAX mas recientes (ver swThumbTrim). Guardar una
+// ##  captura de 480x800 por app serian 768 KB cada una.
 // #############################################################
-#define SESS_MAX_SUSPENDED  5        // + la de primer plano = 6 = SW_MAX (tope de tarjetas)
+// YA NO HAY TOPE FIJO DE APPS SUSPENDIDAS. Antes eran cinco (mas la de primer
+// plano) porque la lista de tarjetas tenia seis huecos. Ahora cabe una tarjeta
+// por app y quien decide es el PRESUPUESTO DE MEMORIA MEDIDO
+// (appEnforceMemoryBudget): el usuario puede tener abiertas tantas como quepan
+// de forma segura, y lo que se recorta primero son recursos reconstruibles, no
+// sesiones.
 #define SESS_IDLE_MS        1200     // inactividad breve que dispara el guardado diferido
 #define SESS_MAXWAIT_MS     30000    // tope duro: nunca mas de 30 s con cambios sin escribir
 
@@ -10601,6 +10713,7 @@ static bool appTerminate(int id, bool force){
   if(h && h->close) h->close();
   gAppState[id] = ALIFE_CLOSED;
   gAppSeenMs[id] = 0;
+  appMemForget(id);                 // su huella medida deja de existir con ella
   return true;
 }
 
@@ -10609,11 +10722,376 @@ static int appSuspendedCount(){
   for(int i = 0; i < APP_N; i++) if(gAppState[i] == ALIFE_SUSPENDED) n++;
   return n;
 }
-// Tope de sesiones vivas. Al pasarse, se cierra la app suspendida MAS ANTIGUA
-// que sea seguro cerrar (su sesion ya se guardo al suspenderse, asi que volver
-// a abrirla la reconstruye desde disco).
-static void appEnforceSuspendLimit(){
-  for(int guard = 0; guard < APP_N && appSuspendedCount() > SESS_MAX_SUSPENDED; guard++){
+
+// #############################################################
+// ##  GESTOR DE MEMORIA Y MULTITAREA  ·  medir, decidir, soltar
+// ##  ------------------------------------------------------
+// ##  TRES CAPAS, SEPARADAS A PROPOSITO:
+// ##
+// ##   1. MEDIR (aqui). heap_caps_* y el sistema de archivos, nada mas.
+// ##      Toda cifra que el usuario vea sale de esta medida; lo que no se
+// ##      puede medir se dice "No disponible" y no se rellena.
+// ##
+// ##   2. DECIDIR (FlexOS_Mem.cpp). Los cortes de 10/6/5 MB, el bloque
+// ##      contiguo minimo, la fragmentacion y el enfriamiento de los
+// ##      avisos. Es logica pura y se ejercita entera en el PC
+// ##      (tests/host/test_mem.cpp).
+// ##
+// ##   3. SOLTAR (memShedSystem, junto a themeChanged). Los punteros de
+// ##      los buffers grandes viven repartidos por todo el sketch, asi
+// ##      que la accion se define ALLI, donde se les ve; aqui solo se
+// ##      declara y se orquesta. NUNCA se toca un dato del usuario.
+// ##
+// ##  POR QUE SE MIDE POR TIEMPO Y NO POR CUADRO. heap_caps_get_free_size
+// ##  es barato, pero heap_caps_get_largest_free_block recorre la lista de
+// ##  huecos y flexFsUsedBytes() recorre el sistema de archivos entero (eso
+// ##  es FLASH). Por eso hay tres cadencias y ninguna cae dentro de la ruta
+// ##  de dibujo:
+// ##    · rapida  (MEM_TICK_MS)  -> libre y total de PSRAM y de SRAM;
+// ##    · lenta   (MEM_BLOCK_MS) -> mayor bloque contiguo;
+// ##    · a peticion             -> flash, y solo con la pantalla de
+// ##                                detalle a la vista.
+// ##
+// ##  CERO RESERVAS. La medida vive en una struct estatica y los textos se
+// ##  componen con snprintf en buffers del llamante: ni un malloc por
+// ##  refresco, ni un String, ni un delay.
+// #############################################################
+#define MEM_TICK_MS    1000       // libre/total (barato)
+#define MEM_BLOCK_MS   2000       // mayor bloque contiguo (recorre huecos)
+#define MEM_FLASH_MS   15000      // flash: SOLO con la pantalla de detalle a la vista
+
+static FlexMemSnap   gMem;                 // ULTIMA medida: la unica fuente de cifras
+static uint32_t      gMemTickMs = 0, gMemBlockMs = 0, gMemFlashMs = 0;
+static uint32_t      gMemPeakUsed = 0;     // pico de PSRAM usada desde el arranque
+static uint32_t      gMemInMin    = 0xFFFFFFFFu;  // minimo de SRAM interna libre desde el arranque
+static FlexMemAlerts gMemAlerts;
+static bool          gMemWantFlash = false;       // la pantalla de detalle esta a la vista
+
+// Lo unico que este bloque necesita LLAMAR y que vive mas abajo. Mismo patron
+// que el resto del sketch (ver el bloque de prototipos junto a sysBack).
+static uint32_t memShedSystem();      // caches del sistema (definida junto a themeChanged)
+static void     swThumbTrim(int keep);// Recientes: deja como mucho 'keep' miniaturas
+
+static inline uint32_t memFreePsram(){ return (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM); }
+
+// -------------------------------------------------------------
+//  1) MEDIR
+// -------------------------------------------------------------
+static void memSample(bool withBlock, bool withFlash){
+  gMem.psTotal = (uint32_t)heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+  gMem.psFree  = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+  gMem.inTotal = (uint32_t)heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
+  gMem.inFree  = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+  if(withBlock) gMem.psLargest = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+  // Pico y minimo se llevan AQUI, con exactamente la misma medida que se
+  // ensena, en vez de pedirlos al SDK: asi la cifra del historico y la del
+  // momento no pueden venir de dos contadores distintos y contradecirse.
+  uint32_t used = flexMemUsed(&gMem);
+  if(used > gMemPeakUsed) gMemPeakUsed = used;
+  if(gMem.inTotal && gMem.inFree < gMemInMin) gMemInMin = gMem.inFree;
+  gMem.psPeakUsed = gMemPeakUsed;
+  gMem.inMin      = (gMemInMin == 0xFFFFFFFFu) ? 0 : gMemInMin;
+  if(withFlash){
+    if(flexFsReady()){
+      gMem.fsTotal = flexFsTotalBytes();
+      gMem.fsUsed  = flexFsUsedBytes();
+      gMem.fsValid = 1;
+    } else {
+      gMem.fsTotal = gMem.fsUsed = 0;
+      gMem.fsValid = 0;
+    }
+  }
+}
+
+// Medida COMPLETA e inmediata (bloque contiguo incluido). La usan las
+// decisiones: antes de abrir una app pesada no vale una medida de hace 2 s.
+static void memSampleNow(){
+  memSample(true, false);
+  gMemTickMs = gMemBlockMs = millis();
+}
+// Relectura de la flash bajo demanda (al abrir la pantalla de detalle).
+static void memSampleFlashNow(){
+  memSample(false, true);
+  gMemFlashMs = millis();
+}
+
+// Un paso del muestreo periodico. Lo llama loop() y no dibuja nada.
+static void memTick(){
+  uint32_t now = millis();
+  if(now - gMemTickMs < MEM_TICK_MS) return;
+  gMemTickMs = now;
+  bool blk = (now - gMemBlockMs >= MEM_BLOCK_MS);
+  // La medida de flash recorre el sistema de archivos: nunca con el dedo
+  // apoyado. Un gesto en curso manda sobre una cifra que puede esperar.
+  bool fls = (gMemWantFlash && !T.down && now - gMemFlashMs >= MEM_FLASH_MS);
+  if(blk) gMemBlockMs = now;
+  if(fls) gMemFlashMs = now;
+  memSample(blk, fls);
+  // EL MODO VISUAL EFICIENTE SE APAGA SOLO. Lo encendio Optimizar porque la
+  // presion seguia alta; en cuanto vuelve a haber holgura de verdad (nivel
+  // OPTIMO, no solo "ya no critico") se devuelve el aspecto completo. Nunca se
+  // guarda ni se pregunta: no es una preferencia del usuario.
+  if(gEffMode && blk && flexMemLevel(&gMem) == FLEXMEM_LV_OK){
+    gEffMode = false;
+    glcValid = false; gHomeDirty = true; qsDirty = true;
+  }
+}
+
+// La medida publicada. Todo lo que se dibuja lee de aqui, jamas del SDK.
+static const FlexMemSnap* memSnap(){ return &gMem; }
+
+// -------------------------------------------------------------
+//  2) METADATOS POR APP
+//  ------------------------------------------------------------
+//  Clase de peso: tabla constante indexada por IC_*. Vive en flash, no
+//  ocupa RAM y se lee de un vistazo, que es justo lo que hace falta para
+//  poder revisar la politica sin recorrer el sketch entero.
+// -------------------------------------------------------------
+static const uint8_t APP_WEIGHT[APP_N] = {
+  FLEXMEM_W_LIGHT,    // 0  Reloj
+  FLEXMEM_W_HEAVY,    // 1  Galeria      (decodifica JPEG, cache de miniaturas)
+  FLEXMEM_W_HEAVY,    // 2  Multimedia   (video por bloques, fotograma completo)
+  FLEXMEM_W_LIGHT,    // 3  Almacenamiento
+  FLEXMEM_W_HEAVY,    // 4  Modo PC/DeX  (fondo compuesto + ventanas)
+  FLEXMEM_W_LIGHT,    // 5  Notas
+  FLEXMEM_W_MEDIUM,   // 6  Educacion
+  FLEXMEM_W_HEAVY,    // 7  Navegador    (tarea de red + cache de fotogramas)
+  FLEXMEM_W_MEDIUM,   // 8  Code IDE
+  FLEXMEM_W_MEDIUM,   // 9  Bienestar
+  FLEXMEM_W_MEDIUM,   // 10 Paint        (trazo en PSRAM)
+  FLEXMEM_W_MEDIUM,   // 11 Juegos
+  FLEXMEM_W_LIGHT,    // 12 Ajustes
+  FLEXMEM_W_LIGHT,    // 13 Calculadora
+  FLEXMEM_W_LIGHT,    // 14 Calendario
+  FLEXMEM_W_HEAVY,    // 15 Camara       (buffer de sensor)
+  FLEXMEM_W_LIGHT,    // 16 Clima
+  FLEXMEM_W_MEDIUM,   // 17 Flex Store
+  FLEXMEM_W_LIGHT     // 18 Flex Phone
+};
+static int appWeight(int id){ return (id >= 0 && id < APP_N) ? (int)APP_WEIGHT[id] : FLEXMEM_W_LIGHT; }
+static const char* appWeightName(int id){
+  switch(appWeight(id)){
+    case FLEXMEM_W_HEAVY:  return "Pesada";
+    case FLEXMEM_W_MEDIUM: return "Media";
+    default:               return "Ligera";
+  }
+}
+
+// HUELLA MEDIDA DE CADA APP, EN BYTES. No sale de una tabla: es la PSRAM que
+// desaparecio mientras corria su enter()/resume(), menos la que devolvio al
+// suspenderse o al soltar recursos. Las dos son mediciones reales tomadas
+// alrededor de una llamada durante la cual no corre nada mas.
+//
+// LIMITE HONESTO -- y por eso la interfaz dice "estimado": no captura lo que
+// la app reserve DESPUES de construirse (una foto que se abre mas tarde), y
+// otro subsistema podria reservar en la misma ventana. Sin medida se escribe
+// "--", nunca un numero inventado.
+static uint32_t gAppMem[APP_N];
+static bool     gAppMemKnown[APP_N];
+
+// PAUSADA vs. ESTADO GUARDADO. Las dos son ALIFE_SUSPENDED en el motor -- el
+// estado logico vivo es el mismo --, y lo que las separa es si a la app ya se
+// le han soltado los recursos pesados reconstruibles. Esta marca es lo que
+// permite decirlo en la tarjeta de Recientes sin mentir: "Pausada" = todavia
+// tiene lo suyo cargado; "Estado guardado" = se le solto y al volver lo rehace.
+// Se pone al soltar de verdad (memShedApp mide que se libero algo) y se quita
+// al reanudarla o al cerrarla.
+static bool     gAppShed[APP_N];
+
+// Cierra una medida abierta con memFreePsram() antes de construir la app.
+static void appMemCommit(int id, uint32_t freeBefore){
+  if(id < 0 || id >= APP_N || freeBefore == 0) return;
+  uint32_t now = memFreePsram();
+  if(freeBefore > now){ gAppMem[id] = freeBefore - now; gAppMemKnown[id] = true; }
+  else if(!gAppMemKnown[id]){ gAppMem[id] = 0; gAppMemKnown[id] = true; }  // no reservo: dato real
+}
+// La app devolvio memoria (suspend o shed): su huella baja en lo medido.
+static void appMemReleased(int id, uint32_t bytes){
+  if(id < 0 || id >= APP_N || !gAppMemKnown[id]) return;
+  gAppMem[id] = (gAppMem[id] > bytes) ? (gAppMem[id] - bytes) : 0;
+}
+static void appMemForget(int id){
+  if(id < 0 || id >= APP_N) return;
+  gAppMem[id] = 0; gAppMemKnown[id] = false; gAppShed[id] = false;
+}
+static bool     appMemHas(int id){ return id >= 0 && id < APP_N && gAppMemKnown[id]; }
+static uint32_t appMemBytes(int id){ return appMemHas(id) ? gAppMem[id] : 0u; }
+
+// CAMBIOS SIN GUARDAR. Dos fuentes, las dos reales: la marca de sesion
+// desfasada del framework y, si la app la publica, su propia respuesta.
+static bool appUnsaved(int id){
+  if(id < 0 || id >= APP_N) return false;
+  const AppHooks* h = appHooks(id);
+  if(h && h->dirty && h->dirty()) return true;
+  return gSessNeedSave[id];
+}
+
+// -------------------------------------------------------------
+//  3) SOLTAR  ·  recursos de una APP suspendida
+//  ------------------------------------------------------------
+//  Nunca la app en primer plano y nunca una con trabajo real en curso. El
+//  estado logico NO se toca: la app sigue SUSPENDIDA y al volver reconstruye
+//  lo que se le solto. Es la diferencia entre "adelgazar" y "cerrar", y por
+//  eso esto se intenta SIEMPRE antes de cerrar nada.
+// -------------------------------------------------------------
+static uint32_t memShedApp(int id){
+  if(id < 0 || id >= APP_N) return 0;
+  if(gAppState[id] != ALIFE_SUSPENDED) return 0;   // la activa, jamas
+  if(appBgBusy(id)) return 0;                      // trabajo real: intocable
+  const AppHooks* h = appHooks(id);
+  if(!(h && h->shed)) return 0;
+  uint32_t before = memFreePsram();
+  size_t hint = h->shed();               // la app dice SI solto algo...
+  uint32_t after = memFreePsram();
+  uint32_t got = after > before ? (after - before) : 0u;   // ...y aqui se MIDE cuanto
+  appMemReleased(id, got);
+  // La marca de "estado guardado" depende de que la app haya soltado de verdad,
+  // no de cuantos bytes salieron: soltar una cache que ocupaba poco sigue
+  // significando que al volver hay que reconstruirla. La CIFRA que se ensena,
+  // en cambio, es siempre la medida -- nunca la pista.
+  if(hint || got) gAppShed[id] = true;
+  return got;
+}
+
+// SOLTAR TODO LO SEGURO, en orden LRU (la menos usada primero). 'stopAt'
+// permite parar en cuanto haya bastante: no se suelta de mas por deporte.
+// El bucle esta acotado por APP_N, asi que no puede quedarse dando vueltas.
+static uint32_t memShedAll(uint32_t stopAt){
+  uint32_t got = memShedSystem();
+  if(stopAt && got >= stopAt) return got;
+  uint8_t done[APP_N];
+  memset(done, 0, sizeof(done));
+  for(int pass = 0; pass < APP_N; pass++){
+    int id = -1; uint32_t oldest = 0xFFFFFFFFu;
+    for(int i = 0; i < APP_N; i++){
+      if(done[i]) continue;
+      if(gAppState[i] != ALIFE_SUSPENDED) continue;
+      if(appBgBusy(i)) continue;
+      if(gAppSeenMs[i] <= oldest){ oldest = gAppSeenMs[i]; id = i; }
+    }
+    if(id < 0) break;
+    done[id] = 1;
+    got += memShedApp(id);
+    if(stopAt && got >= stopAt) break;
+  }
+  return got;
+}
+
+// -------------------------------------------------------------
+//  4) PRESUPUESTO AL ABRIR
+//  ------------------------------------------------------------
+//  Devuelve FLEXMEM_OK si la app se puede abrir. Si el nucleo dice "todavia
+//  no", se sueltan recursos reconstruibles, se vuelve a MEDIR y se pregunta
+//  otra vez -- UNA sola vez: si tras soltar sigue sin caber, la respuesta es
+//  no y el motivo lo da el nucleo. Desde aqui no se cierra ninguna app: eso
+//  es del desalojo, y solo con la sesion ya guardada.
+// -------------------------------------------------------------
+static int memAdmitApp(int id){
+  int w = appWeight(id);
+  memSampleNow();
+  int v = flexMemCanOpen(memSnap(), w);
+  if(v != FLEXMEM_NEED_SHED) return v;
+  memShedAll(0);
+  memSampleNow();
+  v = flexMemCanOpen(memSnap(), w);
+  return (v == FLEXMEM_NEED_SHED) ? FLEXMEM_DENY_PSRAM : v;
+}
+
+// Motivo legible de una negativa: dice el EFECTO, no el mecanismo.
+static const char* memDenyText(int verdict){
+  switch(verdict){
+    case FLEXMEM_DENY_BLOCK: return "Memoria libre en trozos peque\xC3\xB1os";
+    case FLEXMEM_DENY_SRAM:  return "Memoria interna baja: se protege el sistema";
+    default:                 return "Cierra una app o pulsa Optimizar Flex OS";
+  }
+}
+
+// La apertura se ha negado. Se dice CUAL app y POR QUE, con el mismo canal
+// que el resto de avisos del sistema. Nunca en silencio: un icono que no hace
+// nada al tocarlo es peor que un "no" explicado.
+static void appDenyMemory(int id, int verdict){
+  char t[72];
+  snprintf(t, sizeof(t), "%s no se abre ahora", appName(id));
+  sysNotify(t, memDenyText(verdict));
+  Serial.printf("[MEM] apertura denegada: %s (veredicto %d, libre %u KB, bloque %u KB)\n",
+                appName(id), verdict,
+                (unsigned)(gMem.psFree / 1024u), (unsigned)(gMem.psLargest / 1024u));
+}
+
+// -------------------------------------------------------------
+//  5) AVISOS
+//  ------------------------------------------------------------
+//  Quien decide QUE aviso toca (y si toca) es FlexOS_Mem.cpp, con su
+//  enfriamiento por clase y su separacion global. Aqui solo se le pasa la
+//  medida y se convierte la respuesta en un texto que explique el EFECTO
+//  -- "podria tardar mas en abrirse una imagen" -- y no el mecanismo.
+//
+//  NO se avisa desde cualquier pantalla: en el bloqueo, en Modo seguro, en
+//  mitad de un borrado o de una transicion, una tarjeta que aparece es una
+//  interrupcion y no una ayuda. Con la cortina abierta no hace falta filtrar
+//  aqui: la isla ya encola sin dibujar y ARMA la tarjeta cuando vuelve a
+//  verse (ver notifPush), que es exactamente el comportamiento correcto.
+// -------------------------------------------------------------
+static void memAlertTick(){
+  if(gSafeMode || gFrPending) return;
+  if(gState != ST_HOME && gState != ST_APP) return;
+  if(appTrVisible()) return;                 // en mitad de una animacion, nadie mas compone
+  int sdErr = (flexSdState() != FLEXSD_ABSENT && flexSdState() != FLEXSD_READY) ? 1 : 0;
+  int k = flexMemAlertPick(memSnap(), sdErr, millis(), &gMemAlerts);
+  switch(k){
+    case FLEXMEM_AL_PS_NOTICE:
+      sysNotify("Memoria en segundo plano aumentando",
+                "Puedes optimizar Flex OS si notas lentitud"); break;
+    case FLEXMEM_AL_PS_WARN:
+      sysNotify("Memoria casi llena",
+                "Cierra apps que no uses o pulsa Optimizar Flex OS"); break;
+    case FLEXMEM_AL_PS_CRIT:
+      sysNotify("Flex OS est\xC3\xA1 protegiendo la memoria",
+                "Cierra una app antes de abrir otra pesada"); break;
+    case FLEXMEM_AL_FRAG:
+      sysNotify("Memoria libre repartida en trozos peque\xC3\xB1os",
+                "Las im\xC3\xA1genes o apps pesadas pueden tardar m\xC3\xA1s"); break;
+    case FLEXMEM_AL_SRAM:
+      sysNotify("Memoria interna del sistema baja",
+                "Se limitan cargas pesadas para proteger Wi-Fi y t\xC3\xA1" "ctil"); break;
+    case FLEXMEM_AL_FLASH80:
+      sysNotify("Almacenamiento interno en uso elevado",
+                "Limpiar la cach\xC3\xA9 temporal puede ayudar"); break;
+    case FLEXMEM_AL_FLASH90:
+      sysNotify("Almacenamiento interno casi lleno",
+                "Las actualizaciones y los datos nuevos podr\xC3\xAD" "an fallar"); break;
+    case FLEXMEM_AL_SD_ERR:
+      sysNotify("Tarjeta SD no disponible",
+                "Flex OS evit\xC3\xB3 operaciones repetidas para no bloquearse"); break;
+    default: break;
+  }
+}
+
+// DESALOJO POR PRESUPUESTO DE MEMORIA (antes: por un numero fijo de sesiones).
+// ---------------------------------------------------------------------------
+// Ya NO hay un tope arbitrario de apps abiertas: el usuario puede tener tantas
+// como quepan de forma segura. Lo que decide es la MEMORIA MEDIDA, y el orden
+// de intentos es siempre el mismo, del menos invasivo al mas:
+//
+//   1. soltar caches del sistema y recursos reconstruibles de las apps
+//      suspendidas (LRU primero) -- nadie pierde su sitio;
+//   2. si el sistema sigue en zona critica, cerrar la app suspendida MENOS
+//      reciente, y SOLO si su sesion se pudo guardar. Si no se pudo guardar,
+//      se conserva: perder el trabajo del usuario en silencio para "liberar
+//      recursos" no es una opcion.
+//
+// La app en primer plano nunca entra en el reparto, y una con trabajo real en
+// segundo plano (lista blanca) tampoco.
+static void appEnforceMemoryBudget(){
+  memSampleNow();
+  if(flexMemLevel(memSnap()) != FLEXMEM_LV_CRITICAL) return;
+
+  memShedAll(0);                                       // 1) adelgazar, sin cerrar nada
+  memSampleNow();
+  if(flexMemLevel(memSnap()) != FLEXMEM_LV_CRITICAL) return;
+
+  // 2) ultimo recurso. Acotado por APP_N: no puede quedarse dando vueltas.
+  for(int guard = 0; guard < APP_N; guard++){
     int victim = -1; uint32_t oldest = 0xFFFFFFFFu;
     for(int i = 0; i < APP_N; i++){
       if(gAppState[i] != ALIFE_SUSPENDED) continue;
@@ -10622,8 +11100,11 @@ static void appEnforceSuspendLimit(){
     }
     if(victim < 0) break;                              // todas protegidas: no se fuerza nada
     if(!appTerminate(victim, false)) break;            // no se pudo guardar: mejor conservar
+    appMemForget(victim);
     for(int c = 0; c < swCardCount(); c++) if(swCardApp(c) == victim){ swDropCard(c); break; }
-    Serial.printf("[LIFE] limite de sesiones: %s cerrada\n", appName(victim));
+    Serial.printf("[LIFE] presupuesto de memoria: %s cerrada\n", appName(victim));
+    memSampleNow();
+    if(flexMemLevel(memSnap()) != FLEXMEM_LV_CRITICAL) break;
   }
 }
 
@@ -10651,7 +11132,7 @@ static void appSuspend(int id, bool landscape){
     if(gSessDirtyApp != id) sessMarkDirty(id);
     gSessDirtyMs = gSessDirtyFirstMs = 0;
   }
-  appEnforceSuspendLimit();
+  appEnforceMemoryBudget();
 }
 
 // APP QUE NUNCA LLEGO A EXISTIR.
@@ -10814,6 +11295,15 @@ static void enterApp(int id){
   if(gHosted){ gHostReq = 2; gHostReqApp = id; return; }   // -> otra ventana de DeX
   if(gFrPending) return;                          // restablecimiento en curso: nada se abre
   if(gSafeMode && !safeAppAllowed(id)){ safeDenyApp(id); return; }
+  // PRESUPUESTO DE MEMORIA. Solo puede NEGAR una app que no este ya abierta:
+  // volver a una app suspendida jamas se bloquea (su memoria ya esta contada,
+  // y dejar al usuario sin poder volver a su nota seria peor que el apuro que
+  // se intenta evitar). Antes de negar nada, memAdmitApp suelta recursos
+  // reconstruibles y vuelve a medir.
+  if(gAppState[id] == ALIFE_CLOSED){
+    int verdict = memAdmitApp(id);
+    if(verdict != FLEXMEM_OK){ appDenyMemory(id, verdict); return; }
+  }
   appLoadSessionOnce(id);
   bool resuming = (gAppState[id] == ALIFE_SUSPENDED);
   const AppHooks* h = appHooks(id);
@@ -10998,8 +11488,15 @@ static void appTrFinishOpen(){
     appDrawChrome(id);
     appDrawHeader(id);
   }
+  // HUELLA MEDIDA. La PSRAM libre se lee justo antes y justo despues de
+  // construir la app: en esa ventana no corre nada mas, asi que la diferencia
+  // es suya. Es la unica cifra de consumo que ensena Recientes, y por eso no
+  // hay ninguna tabla de "consumo tipico" en el sistema.
+  uint32_t psBefore = memFreePsram();
   if(resuming) h->resume();                       // reanuda: mismo contenido, misma posicion
   else if(APP_REG[id].enter) APP_REG[id].enter(); // la app pinta su contenido
+  appMemCommit(id, psBefore);
+  gAppShed[id] = false;                           // vuelve a tener lo suyo cargado
   gAppState[id] = ALIFE_RUNNING;
   gAppSeenMs[id] = millis();
   flxFlushAll();
@@ -11761,7 +12258,7 @@ static void settingsAnimate(int fromView, int toView, int dir){
       if(edge > 0 && edge <= SCR_W){
         for(int k = 1; k <= 8; k++){
           int x = edge - k; if(x < 0) break;
-          d[x] = mix565(d[x], TH_SHADOW, (uint8_t)(70 - k * 8));
+          d[x] = mix565(d[x], TH_SHADOW, effShadow(70 - k * 8));
         }
       }
     }
@@ -12311,6 +12808,10 @@ static void calRender(){
   flxFlush(WIN_TOP, WIN_BOT);
 }
 static void calEnter(){ calRender(); }
+// Reanudar es repintar: el calendario no guarda ningun estado navegable propio
+// (ver H_CALEND). Existe para que el contrato sea explicito y no dependa de que
+// enter() y resume() coincidan por casualidad.
+static void calResume(){ calRender(); }
 static void calTick(){ if(gMinChanged) calRender(); }
 
 // ---- Bienestar: tiempo encendido + uso de memoria ----
@@ -13635,7 +14136,7 @@ static void dexWinContent(int i, int app, int x, int y, int w, int h, bool activ
 static void dexDrawWindow(int i, int x, int y, int w, int h, bool active){
   if(w < 20 || h < 20 || dexCull(x, w)) return;
   int rad = 14; if(2 * rad > w) rad = w / 2; if(2 * rad > h) rad = h / 2;
-  fillRoundRectA(x + 3, y + 6, w, h, rad, TH_SHADOW, active ? 100 : 62);         // sombra
+  fillRoundRectA(x + 3, y + 6, w, h, rad, TH_SHADOW, effShadow(active ? 100 : 62));         // sombra
   dexSurface(x, y, w, h, rad, DEX_WIN_BG);                                       // cuerpo
   uint16_t tc = active ? DEX_TTL_ACT : DEX_TTL_INA;                              // barra de titulo
   int th = DEX_TTL_H; if(th > h) th = h;
@@ -13658,7 +14159,7 @@ static void dexDrawWindow(int i, int x, int y, int w, int h, bool active){
 static void dexDrawWinAnim(int x, int y, int w, int h, int app, uint8_t a){
   if(w < 6 || h < 6 || dexCull(x, w)) return;
   int rad = 14; if(2 * rad > w) rad = w / 2; if(2 * rad > h) rad = h / 2;
-  fillRoundRectA(x + 2, y + 4, w, h, rad, TH_SHADOW, (uint8_t)(a * 70 / 255));
+  fillRoundRectA(x + 2, y + 4, w, h, rad, TH_SHADOW, effShadow(a * 70 / 255));
   fillRoundRectA(x, y, w, h, rad, DEX_WIN_BG, a);
   int th = DEX_TTL_H * h / 260; if(th < 6) th = 6;
   if(th > DEX_TTL_H) th = DEX_TTL_H;
@@ -13803,7 +14304,7 @@ static bool dexPopupFrame(int &x, int &y, int w, int h, int rad){
   if(p >= 0.999f){
     x = (LW - w) / 2; y = (dexWorkBottom() - h) / 2;
     if(dexCull(x, w)) return false;
-    fillRoundRectA(x + 4, y + 8, w, h, rad, TH_SHADOW, 110);
+    fillRoundRectA(x + 4, y + 8, w, h, rad, TH_SHADOW, effShadow(110));
     dexSurface(x, y, w, h, rad, DEX_PANEL);
     return true;
   }
@@ -13813,7 +14314,7 @@ static bool dexPopupFrame(int &x, int &y, int w, int h, int rad){
   x = ax; y = ay;
   if(dexCull(ax, aw)) return false;
   uint8_t a = (uint8_t)(235 * p);
-  fillRoundRectA(ax + 4, ay + 8, aw, ah, rad, TH_SHADOW, (uint8_t)(90 * p));
+  fillRoundRectA(ax + 4, ay + 8, aw, ah, rad, TH_SHADOW, effShadow((int)(90 * p)));
   fillRoundRectA(ax, ay, aw, ah, rad, DEX_PANEL, a);
   return false;
 }
@@ -13922,7 +14423,7 @@ static void dexNotifDraw(){
   if(dexCull(nx, nw)) return;
   int visH = (int)(nh * p);                       // cortina: se despliega hacia abajo
   if(visH < 8) return;
-  fillRoundRectA(nx + 4, ny + 6, nw, visH, 18, TH_SHADOW, (uint8_t)(110 * p));
+  fillRoundRectA(nx + 4, ny + 6, nw, visH, 18, TH_SHADOW, effShadow((int)(110 * p)));
   if(p < 0.999f){                                 // aun desplegandose: solo la caja
     fillRoundRectA(nx, ny, nw, visH, 18, DEX_PANEL, (uint8_t)(255 * p));
     return;
@@ -13996,7 +14497,7 @@ static void dexRecentsDraw(){
     if(i == dexRecDrag) y += dexRecDY;
     int w = DEX_REC_W, h = DEX_REC_H;
     if(dexCull(x, w)) continue;
-    fillRoundRectA(x + 3, y + 6, w, h, 14, TH_SHADOW, (uint8_t)(120 * p));
+    fillRoundRectA(x + 3, y + 6, w, h, 14, TH_SHADOW, effShadow((int)(120 * p)));
     fillRoundRect(x, y, w, h, 14, DEX_WIN_BG);
     drawRoundRect(x, y, w, h, 14, DEX_BORDER);
     fillRoundRect(x, y, w, 24, 14, DEX_TTL_ACT);
@@ -14050,7 +14551,7 @@ static void dexMenuGeom(int &x, int &y, int &w, int &h){
 static void dexMenuDraw(){
   int x, y, w, h; dexMenuGeom(x, y, w, h);
   if(dexCull(x, w)) return;
-  fillRoundRectA(x + 3, y + 5, w, h, 12, TH_SHADOW, 120);
+  fillRoundRectA(x + 3, y + 5, w, h, 12, TH_SHADOW, effShadow(120));
   dexSurface(x, y, w, h, 12, DEX_PANEL);
   int n = dexMenuCount(dexMenuKind);
   for(int i = 0; i < n; i++){
@@ -14655,6 +15156,68 @@ static void pcEnter(){
   dexTbLayout();
   dexOpen(IC_MODOPC);                               // ventana de bienvenida
   pcRender();
+}
+
+// #############################################################
+// ##  MODO PC / DeX  ·  CICLO DE VIDA (multitarea real)
+// ##  ------------------------------------------------------
+// ##  QUE SE CONSERVA al pasar a segundo plano: la DISPOSICION -- que
+// ##  ventanas hay, donde, de que tamano, cual esta minimizada, el orden
+// ##  de apilado y cual tiene el foco. Eso son cuatro structs PWin y dos
+// ##  arrays de cuatro bytes: nada.
+// ##
+// ##  QUE SE SUELTA: todo lo que pesa y se sabe reconstruir. El lienzo de
+// ##  cada ventana es un 480x800 completo (768 KB) mas su version
+// ##  escalada, y el fondo compuesto del escritorio otros 768 KB. Con
+// ##  cuatro ventanas eso son casi 4 MB que no tienen por que seguir
+// ##  reservados mientras el usuario esta en otra app -- que es justo el
+// ##  caso que el presupuesto de memoria tiene que poder resolver.
+// ##
+// ##  AL VOLVER se rehacen los lienzos en ORDEN DE APILADO y solo
+// ##  mientras quede margen de memoria: si no cabe el cuarto, sus tres
+// ##  companeras se ven igual y esa ventana se rehara cuando el sistema
+// ##  tenga aire. Reservar 4 MB de golpe "porque tocaba" seria justo lo
+// ##  que la reserva de seguridad existe para impedir.
+// #############################################################
+static void pcSuspend(){
+  dexOv = DXO_NONE; dexOvClosing = false;
+  dexMenuOn = false; pcStartOpen = false;
+  dexGrab = DXG_NONE; dexGrabWin = -1; dexSnapGhost = SNAP_FREE;
+  dexPadOn = false; dexPadGrab = false;
+  dexAK = DXA_NONE; dexAW = -1;                  // ninguna animacion sobrevive a la suspension
+  dexDirty = false; dexBX0 = 0x7FFF; dexBX1 = -1;
+  for(int i = 0; i < 4; i++) dexHostClose(i);    // lienzos de las ventanas (768 KB cada uno)
+  dexBgFree();                                   // fondo compuesto del escritorio
+  gLand = false;
+}
+static void pcResume(){
+  dexExiting = false; dexOvDone = false;
+  pDown = false; dexLongFired = false; dexTapMs = 0;
+  dexQLen = 0; dexQuery[0] = 0;
+  dexTbOff = 0; dexTbTgt = 0; dexTbFrom = 0; dexTbIdle = millis();
+  dexCurX = LW / 2; dexCurY = LH / 2;
+  gLand = true;
+  dexBgBuild();
+  dexTbLayout();
+  // Lienzos: de la mas al frente a la mas al fondo, y solo mientras quede
+  // margen. dexOrder[3] es la ventana con el foco (ver dexRaise).
+  for(int k = 3; k >= 0; k--){
+    int i = dexOrder[k];
+    if(i < 0 || i > 3 || !pwins[i].open || pwins[i].mini) continue;
+    if(memFreePsram() < FLEXMEM_CRIT_BYTES + (size_t)SCR_W * SCR_H * 2) break;
+    dexHostOpen(i);
+  }
+  pcRender();
+}
+// Cerrar la tarjeta de Recientes SI borra la disposicion: la proxima apertura
+// empieza limpia, que es lo que espera cualquiera que cierre una app.
+static void pcCloseApp(){
+  pcSuspend();
+  for(int i = 0; i < 4; i++){
+    pwins[i].open = false; pwins[i].mini = false; pwins[i].snap = SNAP_FREE;
+    dexOrder[i] = (uint8_t)i;
+  }
+  dexFocus = -1;
 }
 
 static void pcTick(){
@@ -15681,7 +16244,7 @@ static inline int qpMixHdr (){ return uiGlass ? 168 : 255; }   // cabeceras fija
 static void qpSurface(int x, int y, int w, int h, int rad, uint16_t tint){
   for(int k = 1; k <= 3; k++){
     int yy = y + h + k - 1;
-    if(yy < SCR_H) hLineA(x + rad, yy, w - 2 * rad, TH_SHADOW, (uint8_t)(46 - k * 12));
+    if(yy < SCR_H) hLineA(x + rad, yy, w - 2 * rad, TH_SHADOW, effShadow(46 - k * 12));
   }
   qpGlassSurface(x, y, w, h, rad, tint, qpMixCard());
 }
@@ -15968,7 +16531,7 @@ static void qpDrawGhost(){
   if(x < 4) x = 4; if(x + w > SCR_W - 4) x = SCR_W - 4 - w;
   for(int k = 1; k <= 4; k++){
     int yy = y + h + k - 1;
-    if(yy < SCR_H) hLineA(x + 8, yy, w - 16, TH_SHADOW, (uint8_t)(96 - k * 20));
+    if(yy < SCR_H) hLineA(x + 8, yy, w - 16, TH_SHADOW, effShadow(96 - k * 20));
   }
   if(it->w == 1){
     const QsCtl* c = qpCtl(it->id);
@@ -16572,7 +17135,7 @@ static void qsRender(bool full){
     gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = cutTop; gClipY1 = cutBot;
     for(int yy = py; yy < py + QS_SHADOW_H; yy++){
       uint8_t a = (uint8_t)(70 * (1.0f - (float)(yy - py) / (float)QS_SHADOW_H));
-      if(a > 0) hLineA(0, yy, SCR_W, TH_SHADOW, a);
+      if(a > 0) hLineA(0, yy, SCR_W, TH_SHADOW, effShadow(a));
     }
     fillRoundRect(SCR_W / 2 - 28, py - 14, 56, 5, 2, TH_MUTE);
     gClipY0 = oy0; gClipY1 = oy1; gClipX0 = ox0; gClipX1 = ox1;
@@ -17668,6 +18231,21 @@ static bool qsGlobalHandle(){
 //  cabecera de la isla.
 // -------------------------------------------------------------
 static void notifPush(const DetectedModule* m);
+
+// AVISO DEL SISTEMA POR LA ISLA. Misma cola y misma banda que el resto: no se
+// crea una segunda capa de notificaciones (dos compositores sobre las mismas
+// filas de bbuf es el fallo que documenta la cabecera de la isla).
+static void sysNotify(const char* title, const char* sub){
+  DetectedModule m;
+  memset(&m, 0, sizeof(m));
+  m.type    = MOD_UNKNOWN;
+  m.i2cAddr = 0;
+  m.active  = true;
+  m.detectedAt = millis();
+  snprintf(m.name, sizeof(m.name), "%s", title ? title : "");
+  snprintf(m.sub,  sizeof(m.sub),  "%s", sub   ? sub   : "");
+  notifPush(&m);
+}
 
 static void mediaNotify(ModuleType t, const char* title, const char* sub){
   DetectedModule m;
@@ -19329,6 +19907,15 @@ static void vidSuspend(){
   vidReleaseMedia(true);
   gLand = false;                       // el framework tambien lo hace; aqui por si acaso
 }
+// SOLTAR SIN CERRAR. vidSuspend ya suelta el fotograma y el descriptor al pasar
+// a segundo plano, asi que aqui casi siempre no queda nada -- y entonces se
+// devuelve 0, que es lo que hace que el optimizador no se apunte bytes que no
+// libero. Existe para el caso en que la app quedara suspendida por otra via.
+static size_t vidShed(){
+  if(vidKind == VK_NONE) return 0;
+  vidReleaseMedia(true);             // conserva el segundo de reproduccion
+  return 1;
+}
 static void vidResume(){
   vidCtrlOn = true; vidCtrlMs = millis();
   // Comprobacion EN EL ACTO, no en el proximo sondeo: mientras la app
@@ -19540,6 +20127,13 @@ static void camSuspend(){
 static void camResume(){
   camRec = false;
   if(camScene) camRenderAll(); else camEnter();
+}
+// SOLTAR SIN CERRAR. El "sensor" en PSRAM se regenera al volver (camResume),
+// asi que en segundo plano no tiene por que estar reservado.
+static size_t camShed(){
+  if(!camScene) return 0;
+  free(camScene); camScene = NULL;
+  return 1;
 }
 static void camCloseApp(){
   camRec = false;
@@ -22028,6 +22622,12 @@ static void noteResume(){
   }
 }
 
+// CAMBIOS SIN GUARDAR. noteDirtyMs es el instante de la ultima tecla y se pone
+// a 0 en cuanto noteSave() escribe: mientras no sea 0 hay texto que todavia no
+// esta en disco. Es la misma marca que ya gobierna el autoguardado, no una
+// segunda contabilidad que pudiera contradecirla.
+static bool noteDirty(){ return noteView == 1 && noteDirtyMs != 0; }
+
 static void noteCloseApp(){
   noteSuspend();
   noteClearSel();
@@ -22656,13 +23256,23 @@ static int almSdBlock(int bx, int by, int bw, int bh, int y){
   return y + cardH + gap / 2;
 }
 
-static void almEnter(){
-  // Al abrir Almacenamiento se comprueba la tarjeta EN EL ACTO, sin
-  // esperar al periodo de sondeo: es uno de los tres sitios donde el
-  // usuario espera ver el estado al dia.
-  flexSdPoke();
-  flexSdTick();
-  if(flexSdReady()) flexSdRefreshUsage();
+// Pantalla interna activa de la app. La segunda (DETALLE) es la que anade la
+// Fase 5; la primera es exactamente la de siempre.
+enum { ALM_SCR_MAIN = 0, ALM_SCR_DETAIL };
+static int almScreen = ALM_SCR_MAIN;
+static int almDetY0 = 0, almDetY1 = 0;      // zona pulsable de la fila "Detalles..."
+static int almOptX0 = 0, almOptX1 = 0;      // ...y del boton "Optimizar" dentro de ella
+static void almDetailEnter();
+static void almRenderMain();
+// Repintado de la pantalla que este activa. Lo usan el optimizador (al
+// cerrarse), el explorador (al volver) y el propio ciclo de vida.
+static void almDetailRepaint();
+static void almRender(){
+  if(almScreen == ALM_SCR_DETAIL) almDetailRepaint();   // conserva el desplazamiento
+  else                            almRenderMain();
+}
+
+static void almRenderMain(){
   setBuf(fb);
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
   fillRect(bx, by, bw, bh, WIN_BG);
@@ -22703,6 +23313,40 @@ static void almEnter(){
     // Sin PSRAM (ESP32 clasico): se dice, no se pinta una barra a 0 que
     // parezca una PSRAM vacia.
     y = simpBar(y, "PSRAM", "No disponible en esta placa", 0, rgb565(120,124,140));
+  }
+
+  // ---- Panel expandible: "Detalles de memoria y sistema" ----
+  // Va justo DEBAJO de la barra de PSRAM, como se pidio. Colapsado ya dice lo
+  // esencial (el estado, con su color) para que no haya que abrirlo solo para
+  // saber si todo va bien; al tocarlo se abre la pantalla de detalle DENTRO de
+  // la app, con su propio desplazamiento y el boton atras del sistema.
+  //
+  // POR QUE UNA PANTALLA Y NO UN DESPLIEGUE EN LINEA: el detalle son mas de
+  // treinta cifras reales (PSRAM, SRAM, flash, tarjeta y estado del sistema).
+  // Desplegarlas aqui empujaria la tarjeta SD, las categorias y los archivos
+  // grandes fuera de una pantalla de 480x800 que hoy NO tiene desplazamiento:
+  // el resultado seria justo la "pantalla confusa" que habia que evitar.
+  almDetY0 = almDetY1 = 0;
+  almOptX0 = almOptX1 = 0;
+  if(y + 52 <= by + bh - pad){
+    uiSurface(bx + pad, y, bw - 2 * pad, 50, 14, UIS_ELEVATED);
+    drawText(bx + pad * 2, y + 4, "Detalles de memoria y sistema", 2, TH_TXT);
+    const FlexMemSnap* m = memSnap();
+    int hh = flexMemHealth(m);
+    const char* hn = (hh == FLEXMEM_H_CRIT) ? "Cr\xC3\xADtico" : (hh == FLEXMEM_H_WATCH ? "Atenci\xC3\xB3n" : "\xC3\x93ptimo");
+    uint16_t hc = (hh == FLEXMEM_H_CRIT) ? TH_ERR : (hh == FLEXMEM_H_WATCH ? TH_WARN : TH_OK);
+    fillCircle(bx + pad * 2 + 6, y + 32, 5, hc);
+    drawText(bx + pad * 2 + 18, y + 26, hn, 1, TH_TXT2);
+    // "Optimizar" vive AQUI, en la pantalla principal, y no solo dentro del
+    // detalle: es la accion que hace falta cuando el sistema va lento, y
+    // esconderla detras de otra pantalla la volveria inutil justo entonces.
+    // El resto de la fila abre el detalle.
+    int ow = 118, ox = bx + bw - pad * 2 - ow + 8, oy = y + 9;
+    fillRoundRect(ox, oy, ow, 32, 16, TH_PRIM);
+    drawTextC(ox + ow / 2, oy + 8, "Optimizar", 1, TH_ONACC);
+    almOptX0 = ox; almOptX1 = ox + ow;
+    almDetY0 = y; almDetY1 = y + 50;
+    y += 50 + gap / 2;
   }
 
   // ---- Tarjeta SD: volumen APARTE, nunca sumado al interno ----
@@ -22756,13 +23400,421 @@ static void almEnter(){
   flxFlush(WIN_TOP, WIN_BOT);
 }
 
+// #############################################################
+// ##  ALMACENAMIENTO · DETALLES DE MEMORIA Y SISTEMA  (Fase 5)
+// ##  ------------------------------------------------------
+// ##  DE DONDE SALE CADA CIFRA. Todas, sin excepcion, de una medida:
+// ##    · PSRAM y SRAM interna -> heap_caps_* (via memSnap(), que es la
+// ##      unica medida publicada del sistema);
+// ##    · pico de PSRAM y minimo de SRAM -> historicos que lleva el
+// ##      propio muestreo, con la MISMA medida que se ensena;
+// ##    · flash -> flexFsTotalBytes/UsedBytes y flexFsCatSize/DirSize;
+// ##    · firmware -> ESP.getSketchSize(), UNA vez por arranque;
+// ##    · tarjeta -> flexSdState()/flexSdError() y, solo si esta
+// ##      MONTADA, sus totales. Aqui NO se sondea la tarjeta: se LEE el
+// ##      estado que el modulo ya mantiene. Ese es el punto entero de
+// ##      esta pantalla respecto a la inestabilidad conocida de la SD.
+// ##  Lo que no se puede medir dice "No disponible" y punto.
+// ##
+// ##  COMO SE REFRESCA SIN REDIBUJAR LA PANTALLA. El contenido esta
+// ##  partido en SECCIONES con altura fija. Cada una lleva una FIRMA de
+// ##  sus valores; una vez por segundo se recalculan las firmas y solo
+// ##  se repinta la banda de las secciones que (a) han cambiado de
+// ##  verdad y (b) estan dentro de la ventana visible. Si no cambia
+// ##  nada -- lo normal cuando el sistema esta en reposo -- no se
+// ##  publica ni una fila. La barra de estado, la cabecera de la app y
+// ##  la barra de navegacion no se tocan nunca.
+// ##
+// ##  CERO RESERVAS POR REFRESCO: los textos se componen con snprintf
+// ##  en buffers de pila del propio dibujo.
+// #############################################################
+#define ALMD_VY0     WIN_TOP
+#define ALMD_VY1     (WIN_BOT - 1)
+#define ALMD_SEC_N   6
+// Alturas de cada seccion, en coordenadas de CONTENIDO. Estan calculadas sobre
+// el contenido REAL de cada una (titulo 26 px + 24 px por fila + 18 px por
+// nota) con holgura: si una seccion se pasara de su alto, su ultima linea
+// caeria dentro de la banda de la siguiente y el repintado parcial de esa
+// otra la borraria -- un fallo que solo se ve cuando cambia justo ese dato.
+static const int ALMD_SEC_H[ALMD_SEC_N] = { 96, 240, 168, 236, 140, 200 };
+static int      almDetScroll = 0;
+static uint32_t almDetSig[ALMD_SEC_N];
+static uint32_t almDetMs = 0;
+static uint32_t almFwSize = 0xFFFFFFFFu;      // 0xFFFFFFFF = aun sin medir
+static bool     almDetDrag = false;
+// almDetTouching: el contacto empezo DENTRO de la ventana de contenido. Sin
+// esta marca, un dedo que baja en la cabecera de la app o en la barra del
+// sistema y luego entra en la lista se tomaria como un arrastre que arranca
+// en una posicion vieja, y la lista daria un salto.
+static bool     almDetTouching = false;
+static float    almDetStartY = 0, almDetStart0 = 0;
+// Boton "Optimizar Flex OS" de la cabecera (geometria unica: dibujo y hit-test).
+#define ALMD_BW  (SCR_W - 72)
+#define ALMD_BX  36
+#define ALMD_BH  44
+
+static int almDetSecTop(int i){
+  int y = 0;
+  for(int k = 0; k < i && k < ALMD_SEC_N; k++) y += ALMD_SEC_H[k];
+  return y;
+}
+static int almDetContentH(){ return almDetSecTop(ALMD_SEC_N); }
+static int almDetMaxScroll(){
+  int m = almDetContentH() - (ALMD_VY1 - ALMD_VY0 + 1);
+  return m > 0 ? m : 0;
+}
+
+// ---- Utilidades de fila (etiqueta izquierda, valor derecha) ----
+static int almDetRow(int y, const char* label, const char* value, uint16_t vcol){
+  int pad = uiPad();
+  drawTextClip(pad * 2, y, label, 1, TH_TXT2, SCR_W / 2 + 20);
+  drawTextR(SCR_W - pad * 2, y - 3, value, 2, vcol);
+  return y + 24;
+}
+static int almDetNote(int y, const char* txt){
+  drawTextClip(uiPad() * 2, y, txt, 1, TH_MUTE, SCR_W - uiPad() * 2);
+  return y + 18;
+}
+static int almDetTitle(int y, const char* txt){
+  drawText(uiPad() * 2, y, txt, 2, TH_TXT);
+  return y + 26;
+}
+
+// Motivo REAL del ultimo arranque. Incluye los normales, no solo los fallos:
+// decir "Reinicio inesperado" tras un encendido normal seria mentir.
+static const char* almBootCause(){
+  switch(esp_reset_reason()){
+    case ESP_RST_POWERON:   return "Encendido normal";
+    case ESP_RST_SW:        return "Reinicio por software";
+    case ESP_RST_DEEPSLEEP: return "Despertar de suspensi\xC3\xB3n";
+    case ESP_RST_PANIC:     return "Fallo del sistema (crash)";
+    case ESP_RST_TASK_WDT:  return "Watchdog de tarea";
+    case ESP_RST_INT_WDT:   return "Watchdog de interrupci\xC3\xB3n";
+    case ESP_RST_WDT:       return "Watchdog del chip";
+    case ESP_RST_BROWNOUT:  return "Ca\xC3\xAD" "da de tensi\xC3\xB3n";
+    case ESP_RST_EXT:       return "Reinicio externo";
+    default:                return "No disponible";
+  }
+}
+// Estado de la tarjeta en las palabras del usuario. LECTURA PURA: no monta,
+// no reintenta y no toca el controlador.
+static const char* almSdStateText(){
+  switch(flexSdState()){
+    case FLEXSD_READY:     return "Lista";
+    case FLEXSD_ABSENT:    return "No insertada";
+    case FLEXSD_ERR_MOUNT: return "Error al montar";
+    case FLEXSD_ERR_FS:    return "Formato no compatible";
+    case FLEXSD_ERR_IO:    return "Error de lectura";
+    case FLEXSD_ERR_HW:    return "No disponible";
+    default:               return "No disponible";
+  }
+}
+
+// Las dos apps abiertas que mas PSRAM MEDIDA retienen. Sin medida no entran:
+// una lista de "mayor consumo" con numeros inventados no informa de nada.
+static void almTopApps(int* a, int* b){
+  *a = *b = -1;
+  for(int i = 0; i < APP_N; i++){
+    if(gAppState[i] == ALIFE_CLOSED || !appMemHas(i) || appMemBytes(i) == 0) continue;
+    if(*a < 0 || appMemBytes(i) > appMemBytes(*a)){ *b = *a; *a = i; }
+    else if(*b < 0 || appMemBytes(i) > appMemBytes(*b)) *b = i;
+  }
+}
+
+// ---- Firma de una seccion: si no cambia, no se repinta ----
+static uint32_t almDetSecSig(int sec){
+  const FlexMemSnap* m = memSnap();
+  switch(sec){
+    case 1: return m->psFree ^ (m->psLargest << 1) ^ (m->psPeakUsed >> 3) ^ m->psTotal;
+    case 2: return m->inFree ^ (m->inMin << 1) ^ m->inTotal;
+    case 3: return m->fsUsed ^ (m->fsTotal << 1) ^ (uint32_t)m->fsValid;
+    case 4: return (uint32_t)flexSdState() ^ (uint32_t)(flexSdUsedBytes() >> 10) ^ flexSdGeneration();
+    case 5: {
+      uint32_t up = millis() / 60000u;      // el rotulo solo cambia por minutos
+      uint32_t apps = 0;
+      for(int i = 0; i < APP_N; i++) apps = apps * 3u + gAppState[i];
+      return up ^ (apps << 3) ^ (uint32_t)(gNetOnline ? 1 : 0) ^ (gLoopRate << 16);
+    }
+    default: return 0;
+  }
+}
+
+// ---- Dibujo de UNA seccion. 'sy' es su borde superior EN PANTALLA ----
+static void almDetDrawSection(int sec, int sy){
+  const FlexMemSnap* m = memSnap();
+  char v[64];
+  int y = sy + 8;
+  switch(sec){
+    case 0: {                       // cabecera + acceso a Optimizar
+      drawText(uiPad() * 2, y, "Detalles de memoria y sistema", 2, TH_TXT);
+      y += 26;
+      uiSurface(ALMD_BX, y, ALMD_BW, ALMD_BH, ALMD_BH / 2, UIS_ELEVATED);
+      drawRoundRect(ALMD_BX, y, ALMD_BW, ALMD_BH, ALMD_BH / 2, TH_BORDER);
+      drawTextC(SCR_W / 2, y + (ALMD_BH - 18) / 2, "Optimizar Flex OS", 2, TH_ACCS);
+      break;
+    }
+    case 1: {                       // PSRAM
+      y = almDetTitle(y, "PSRAM (memoria de trabajo)");
+      if(!m->psTotal){
+        almDetNote(y, "No disponible en esta placa.");
+        break;
+      }
+      flexMemFmt(m->psTotal, v, sizeof(v));  y = almDetRow(y, "Total detectada", v, TH_TXT);
+      char u[24]; flexMemFmt(flexMemUsed(m), u, sizeof(u));
+      snprintf(v, sizeof(v), "%s (%d%%)", u, flexMemUsedPct(m));
+      y = almDetRow(y, "En uso", v, TH_TXT);
+      flexMemFmt(m->psFree, v, sizeof(v));   y = almDetRow(y, "Libre", v, TH_TXT);
+      flexMemFmt(m->psPeakUsed, v, sizeof(v));
+      y = almDetRow(y, "Pico de uso desde el arranque", v, TH_TXT2);
+      flexMemFmt(m->psLargest, v, sizeof(v));
+      y = almDetRow(y, "Bloque libre m\xC3\xA1s grande", v, TH_TXT2);
+      int fc = flexMemFragClass(m);
+      snprintf(v, sizeof(v), "%s (%d%%)",
+               fc == FLEXMEM_FRAG_HIGH ? "Alta" : (fc == FLEXMEM_FRAG_MED ? "Media" : "Baja"),
+               flexMemFragPct(m));
+      y = almDetRow(y, "Fragmentaci\xC3\xB3n", v,
+                    fc == FLEXMEM_FRAG_HIGH ? TH_WARN : TH_TXT2);
+      int hh = flexMemHealth(m);
+      y = almDetRow(y, "Estado",
+                    hh == FLEXMEM_H_CRIT ? "Cr\xC3\xADtico" : (hh == FLEXMEM_H_WATCH ? "Atenci\xC3\xB3n" : "\xC3\x93ptimo"),
+                    hh == FLEXMEM_H_CRIT ? TH_ERR : (hh == FLEXMEM_H_WATCH ? TH_WARN : TH_OK));
+      int ta, tb; almTopApps(&ta, &tb);
+      if(ta >= 0){
+        char m1[24]; flexMemFmt(appMemBytes(ta), m1, sizeof(m1));
+        if(tb >= 0){
+          char m2[24]; flexMemFmt(appMemBytes(tb), m2, sizeof(m2));
+          snprintf(v, sizeof(v), "Mayor consumo: %s %s  \xC2\xB7  %s %s",
+                   appName(ta), m1, appName(tb), m2);
+        } else snprintf(v, sizeof(v), "Mayor consumo: %s %s", appName(ta), m1);
+        y = almDetNote(y, v);
+      } else {
+        y = almDetNote(y, "Mayor consumo: sin medida todav\xC3\xAD" "a.");
+      }
+      almDetNote(y, "La usan las apps abiertas, las im\xC3\xA1genes y el doble b\xC3\xBA" "fer de pantalla.");
+      break;
+    }
+    case 2: {                       // SRAM interna
+      y = almDetTitle(y, "Memoria interna del chip (SRAM)");
+      if(!m->inTotal){ almDetNote(y, "No disponible."); break; }
+      flexMemFmt(m->inTotal, v, sizeof(v)); y = almDetRow(y, "Total utilizable", v, TH_TXT);
+      flexMemFmt(m->inTotal > m->inFree ? m->inTotal - m->inFree : 0, v, sizeof(v));
+      y = almDetRow(y, "En uso", v, TH_TXT);
+      flexMemFmt(m->inFree, v, sizeof(v));
+      y = almDetRow(y, "Libre", v, m->inFree < FLEXMEM_SRAM_LOW_BYTES ? TH_WARN : TH_TXT);
+      flexMemFmt(m->inMin, v, sizeof(v));
+      y = almDetRow(y, "M\xC3\xADnimo desde el arranque", v, TH_TXT2);
+      y = almDetNote(y, "La usan el sistema, el t\xC3\xA1" "ctil, el Wi-Fi y las tareas internas.");
+      almDetNote(y, "No conserva datos: al reiniciar se vac\xC3\xAD" "a entera.");
+      break;
+    }
+    case 3: {                       // Flash / LittleFS
+      y = almDetTitle(y, "Almacenamiento interno (flash)");
+      if(!m->fsValid){ almDetNote(y, "No disponible: la partici\xC3\xB3n de datos no est\xC3\xA1 montada."); break; }
+      flexMemFmt(m->fsTotal, v, sizeof(v)); y = almDetRow(y, "Capacidad de datos", v, TH_TXT);
+      { char u[24]; flexMemFmt(m->fsUsed, u, sizeof(u));
+        int fp = flexMemFlashPct(m);
+        snprintf(v, sizeof(v), "%s (%d%%)", u, fp < 0 ? 0 : fp);
+        y = almDetRow(y, "Usado", v, (fp >= 90) ? TH_ERR : (fp >= 80 ? TH_WARN : TH_TXT)); }
+      flexMemFmt(m->fsTotal > m->fsUsed ? m->fsTotal - m->fsUsed : 0, v, sizeof(v));
+      y = almDetRow(y, "Libre", v, TH_TXT);
+      if(almFwSize != 0xFFFFFFFFu && almFwSize > 0){ flexMemFmt(almFwSize, v, sizeof(v)); }
+      else snprintf(v, sizeof(v), "No disponible");
+      y = almDetRow(y, "Tama\xC3\xB1o del firmware", v, TH_TXT2);
+      flexMemFmt(flexFsCatSize(FLEXFS_CAT_SYS), v, sizeof(v));
+      y = almDetRow(y, "Recursos del sistema", v, TH_TXT2);
+      flexMemFmt(flexFsCatSize(FLEXFS_CAT_APPS), v, sizeof(v));
+      y = almDetRow(y, "Datos de apps", v, TH_TXT2);
+      flexMemFmt(flexFsDirSize(FS_DIR_CACHE), v, sizeof(v));
+      y = almDetRow(y, "Cach\xC3\xA9 temporal", v, TH_TXT2);
+      flexMemFmt(flexFsCatSize(FLEXFS_CAT_DOCS), v, sizeof(v));
+      almDetRow(y, "Archivos de usuario", v, TH_TXT2);
+      break;
+    }
+    case 4: {                       // microSD
+      y = almDetTitle(y, "Tarjeta microSD");
+      y = almDetRow(y, "Estado", almSdStateText(),
+                    flexSdReady() ? TH_OK : (flexSdState() == FLEXSD_ABSENT ? TH_TXT2 : TH_ERR));
+      if(flexSdReady()){
+        flexMemFmt(flexSdTotalBytes(), v, sizeof(v)); y = almDetRow(y, "Capacidad", v, TH_TXT);
+        flexMemFmt(flexSdUsedBytes(),  v, sizeof(v)); y = almDetRow(y, "Usado", v, TH_TXT);
+        flexMemFmt(flexSdFreeBytes(),  v, sizeof(v)); y = almDetRow(y, "Libre", v, TH_TXT);
+      } else {
+        y = almDetNote(y, flexSdError());
+        almDetNote(y, "Flex OS no repite el montaje por su cuenta: evita bloquearse.");
+      }
+      break;
+    }
+    case 5: {                       // Estado del sistema
+      y = almDetTitle(y, "Estado del sistema");
+      buildUptime(v, sizeof(v));               y = almDetRow(y, "Tiempo encendido", v, TH_TXT);
+      snprintf(v, sizeof(v), "%s", almBootCause());
+      y = almDetRow(y, "\xC3\x9Altimo arranque", v, TH_TXT2);
+      snprintf(v, sizeof(v), "Flex OS %s", flexOtaLocalVersion());
+      y = almDetRow(y, "Versi\xC3\xB3n", v, TH_TXT2);
+      snprintf(v, sizeof(v), "%s", gNetOnline ? "Conectado" : "Desconectado");
+      y = almDetRow(y, "Wi-Fi", v, gNetOnline ? TH_OK : TH_TXT2);
+      snprintf(v, sizeof(v), "%u vueltas/s", (unsigned)gLoopRate);
+      y = almDetRow(y, "Ritmo del sistema", v, TH_TXT2);
+      { int act = 0, pau = 0, sus = 0;
+        for(int i = 0; i < APP_N; i++){
+          if(gAppState[i] == ALIFE_CLOSED) continue;
+          if(gAppState[i] == ALIFE_SUSPENDED){ if(gAppShed[i]) sus++; else pau++; }
+          else act++;
+        }
+        snprintf(v, sizeof(v), "%d / %d / %d", act, pau, sus); }
+      y = almDetRow(y, "Apps activas / pausadas / guardadas", v, TH_TXT2);
+      almDetNote(y, "No hay medidor global de FPS: el ritmo del bucle es la medida real.");
+      break;
+    }
+    default: break;
+  }
+}
+
+// Repinta la ventana de contenido entera (entrada y desplazamiento).
+static void almDetailPaint(){
+  setBuf(fb);
+  int c0 = gClipY0, c1 = gClipY1;
+  gClipY0 = ALMD_VY0; gClipY1 = ALMD_VY1;
+  fillRect(0, ALMD_VY0, SCR_W, ALMD_VY1 - ALMD_VY0 + 1, WIN_BG);
+  for(int i = 0; i < ALMD_SEC_N; i++){
+    int sy = ALMD_VY0 + almDetSecTop(i) - almDetScroll;
+    if(sy > ALMD_VY1 || sy + ALMD_SEC_H[i] < ALMD_VY0) continue;
+    almDetDrawSection(i, sy);
+    almDetSig[i] = almDetSecSig(i);
+  }
+  gClipY0 = c0; gClipY1 = c1;
+  flxFlush(ALMD_VY0, ALMD_VY1);
+}
+
+// Repinta SOLO la banda de una seccion (refresco de cifras). Es la ruta que
+// hace que actualizar una estadistica no cueste una pantalla entera.
+static void almDetailRepaintSection(int i){
+  int sy = ALMD_VY0 + almDetSecTop(i) - almDetScroll;
+  int b0 = sy, b1 = sy + ALMD_SEC_H[i] - 1;
+  if(b0 < ALMD_VY0) b0 = ALMD_VY0;
+  if(b1 > ALMD_VY1) b1 = ALMD_VY1;
+  if(b1 < b0) return;
+  setBuf(fb);
+  int c0 = gClipY0, c1 = gClipY1;
+  gClipY0 = b0; gClipY1 = b1;
+  fillRect(0, b0, SCR_W, b1 - b0 + 1, WIN_BG);
+  almDetDrawSection(i, sy);
+  gClipY0 = c0; gClipY1 = c1;
+  flxFlush(b0, b1);
+}
+
+// Repintado de la pantalla de detalle SIN reiniciar nada. La usa el retorno del
+// optimizador: volver al mismo sitio donde estabas es la mitad del punto de
+// tener multitarea de verdad.
+static void almDetailRepaint(){
+  almDetDrag = false; almDetTouching = false;
+  almDetMs = millis();
+  almDetailPaint();
+}
+
+static void almDetailEnter(){
+  almScreen = ALM_SCR_DETAIL;
+  almDetScroll = 0;
+  almDetDrag = false; almDetTouching = false;
+  gMemWantFlash = true;             // a partir de ahora la flash SI se mide...
+  memSampleNow();
+  memSampleFlashNow();              // ...y la primera lectura es inmediata
+  // Tamano del firmware: se mide UNA vez por arranque. Es una lectura de la
+  // cabecera de la imagen, no un recorrido de la flash, pero tampoco tiene por
+  // que repetirse: no cambia hasta la siguiente actualizacion.
+  if(almFwSize == 0xFFFFFFFFu) almFwSize = (uint32_t)ESP.getSketchSize();
+  almDetMs = millis();
+  almDetailPaint();
+}
+
+static void almDetailTick(){
+  // ---- Desplazamiento ----
+  if(T.pressed){
+    almDetDrag = false;
+    almDetTouching = (T.y >= ALMD_VY0 && T.y <= ALMD_VY1);
+    almDetStartY = T.y; almDetStart0 = (float)almDetScroll;
+    return;
+  }
+  if(T.down){
+    if(!almDetTouching) return;
+    if(!almDetDrag && fabsf(T.y - almDetStartY) > 10) almDetDrag = true;
+    if(almDetDrag){
+      int ns = (int)(almDetStart0 + (almDetStartY - T.y));
+      int mx = almDetMaxScroll();
+      if(ns < 0) ns = 0; if(ns > mx) ns = mx;
+      if(ns != almDetScroll){ almDetScroll = ns; almDetailPaint(); }
+    }
+    return;
+  }
+  if(T.released || T.tap){
+    bool wasDrag = almDetDrag, was = almDetTouching;
+    almDetDrag = false; almDetTouching = false;
+    if(wasDrag || !was) return;
+    // Toque en "Optimizar Flex OS" (seccion 0). Se calcula con la MISMA
+    // geometria con la que se dibujo, asi no pueden separarse.
+    int sy = ALMD_VY0 + almDetSecTop(0) - almDetScroll;
+    int by = sy + 8 + 26;
+    if(T.y >= by && T.y <= by + ALMD_BH && T.x >= ALMD_BX && T.x <= ALMD_BX + ALMD_BW){
+      optStart(OPT_HOST_ALM);
+      return;
+    }
+    return;
+  }
+  // ---- Refresco de cifras: por firma, por seccion y con el dedo fuera ----
+  if(T.down || millis() - almDetMs < 1000) return;
+  almDetMs = millis();
+  for(int i = 1; i < ALMD_SEC_N; i++){
+    uint32_t sig = almDetSecSig(i);
+    if(sig == almDetSig[i]) continue;          // esta seccion no ha cambiado: no se toca
+    almDetSig[i] = sig;
+    almDetailRepaintSection(i);
+  }
+}
+
+static void almEnter(){
+  // Al abrir Almacenamiento se comprueba la tarjeta EN EL ACTO, UNA vez, sin
+  // esperar al periodo de sondeo: es uno de los tres sitios donde el usuario
+  // espera ver el estado al dia. Fuera de aqui NO se sondea la tarjeta desde
+  // esta app -- ni al desplazarse, ni por cuadro, ni en el refresco de cifras.
+  flexSdPoke();
+  flexSdTick();
+  if(flexSdReady()) flexSdRefreshUsage();
+  almScreen = ALM_SCR_MAIN;
+  almRenderMain();
+}
+
 static void almTick(){
+  if(almScreen == ALM_SCR_DETAIL){ almDetailTick(); return; }
   if(!T.tap) return;
+  if(almDetY1 > almDetY0 && T.y >= almDetY0 && T.y <= almDetY1){
+    if(almOptX1 > almOptX0 && T.x >= almOptX0 && T.x <= almOptX1) optStart(OPT_HOST_ALM);
+    else                                                          almDetailEnter();
+    return;
+  }
   if(almVerY1 > almVerY0 && T.y >= almVerY0 && T.y <= almVerY1){ filesEnter(); return; }
   // La tarjeta abre el MISMO explorador, pero en su raiz: no hay un
   // segundo explorador para la tarjeta.
   if(almSdY1 > almSdY0 && T.y >= almSdY0 && T.y <= almSdY1 && flexSdReady())
     filesEnterAt(FLEXSD_MOUNT);
+}
+
+// ---- Ciclo de vida de Almacenamiento ----
+// ATRAS desde el detalle vuelve a la lista, no expulsa la app: misma regla que
+// ya siguen Galeria, Notas y Multimedia.
+static bool almBackScreen(){
+  if(almScreen != ALM_SCR_DETAIL) return false;
+  almScreen = ALM_SCR_MAIN;
+  gMemWantFlash = false;
+  almRenderMain();
+  return true;
+}
+// Suspendida, la app deja de pedir la medida cara de la flash. Es la diferencia
+// entre "la pantalla esta a la vista" y "la app existe".
+static void almSuspend(){ gMemWantFlash = false; }
+static void almCloseApp(){ gMemWantFlash = false; almScreen = ALM_SCR_MAIN; almDetScroll = 0; }
+static void almResume(){
+  if(almScreen == ALM_SCR_DETAIL) almDetailEnter();
+  else                            almRenderMain();
 }
 
 // #############################################################
@@ -24055,6 +25107,10 @@ static void paintResume(){
   if(paintView == 1 && paintPath[0] && flexFsExists(paintPath)) paintRenderCanvas();
   else { paintView = 0; paintPath[0] = 0; paintReload(); paintRenderGallery(); }
 }
+// CAMBIOS SIN GUARDAR: hay un trazo en curso que todavia no se ha volcado al
+// fichero (paintFlushStroke lo escribe y pone pStrokeN a 0).
+static bool paintDirty(){ return pStrokeN > 0; }
+
 static void paintCloseApp(){
   paintSuspend();
   fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
@@ -26068,13 +27124,25 @@ static void wxLockCard(int y){
 // ##  Tarjetas con mini-captura en PSRAM. Arrastre + inercia,
 // ##  swipe-arriba para cerrar (free), toque para maximizar.
 // #############################################################
-#define SW_MAX  6
+// UNA TARJETA POR APP, MINIATURAS RACIONADAS.
+// ---------------------------------------------------------------------------
+// SW_MAX ya no es un tope de multitarea: es el limite natural (no puede haber
+// mas tarjetas que apps). Quien decide cuantas apps caben es el presupuesto de
+// memoria medido, no este numero.
+//
+// Lo que SI sigue racionado son las MINIATURAS, y a proposito: cada una son
+// 150x250x2 = 73 KB de PSRAM. Con 19 tarjetas serian 1,4 MB reservados solo en
+// capturas -- justo lo que no se puede hacer en una placa cuyo margen de
+// seguridad son 6 MB. Se conservan las SW_THUMB_MAX mas recientes y el resto
+// de tarjetas caen al respaldo que ya existia: marco + icono de la app.
+#define SW_MAX        APP_N
+#define SW_THUMB_MAX  4
 #define TH_W    150
 #define TH_H    250
 #define SW_CW   260
-#define SW_CH   430
+#define SW_CH   384
 #define SW_STEP 288
-#define SW_TOP  150
+#define SW_TOP  192       // debajo de la cabecera de estado (SWH_Y + SWH_H)
 
 struct AppTask { uint8_t appID; bool used; uint16_t* thumb; };   // estado suspendido + miniatura
 static AppTask swTasks[SW_MAX];
@@ -26082,8 +27150,28 @@ static int   swCount = 0;
 static float swScrollPx = 0, swVel = 0, swLiftY = 0;
 static int   swLiftCard = -1, swGesture = 0;                     // 0 nada, 1 horizontal, 2 vertical
 static float swStartX, swStartY, swLastX2, swLastY2;
+static uint32_t swHdrMs = 0, swHdrSig = 0;                       // ultimo refresco de la cabecera y su firma
+#define SW_HDR_MS   1000                                         // cadencia de las cifras de la cabecera
+#define SW_LONG_MS  480                                          // mantener pulsado -> ficha de la app
 
-static uint16_t* swAllocThumb(){ return (uint16_t*)heap_caps_malloc((size_t)TH_W * TH_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); }
+// PRESUPUESTO DE MINIATURAS. Se sueltan las mas antiguas ANTES de reservar
+// una nueva, no despues: asi el pico de PSRAM nunca llega a subir. 'keep' es
+// cuantas se conservan contando desde la mas reciente (la lista esta ordenada
+// por uso, indice 0 = la ultima usada). Una tarjeta sin miniatura no
+// desaparece: se dibuja con su marco y el icono de la app.
+static void swThumbTrim(int keep){
+  if(keep < 0) keep = 0;
+  for(int i = keep; i < swCount; i++)
+    if(swTasks[i].thumb){ free(swTasks[i].thumb); swTasks[i].thumb = NULL; }
+}
+static uint16_t* swAllocThumb(){
+  int keep = gEffMode ? 1 : SW_THUMB_MAX;
+  swThumbTrim(keep - 1);               // hueco para la que se va a tomar ahora
+  // Una captura son 73 KB. Si el sistema esta apurado, la miniatura es lo
+  // primero que sobra: la tarjeta sigue existiendo con el icono de la app.
+  if(memFreePsram() < FLEXMEM_CRIT_BYTES + (size_t)TH_W * TH_H * 2) return NULL;
+  return (uint16_t*)heap_caps_malloc((size_t)TH_W * TH_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
 static void captureThumb(uint16_t* dst){                          // reduce fb 480x800 -> 150x250
   for(int j = 0; j < TH_H; j++){
     int sy = j * SCR_H / TH_H; uint16_t* d = dst + (size_t)j * TH_W;
@@ -26158,19 +27246,32 @@ static void swCloseAll(){
     int id = swTasks[i].appID;
     if(appBgBusy(id)){ kept++; continue; }
     if(!appTerminate(id, false)){ kept++; continue; }
+    appMemForget(id);
     swDropCard(i);
   }
   if(kept) swToast("Tarea en curso: no se cierra");
 }
-static uint16_t swSxLUT[SW_CW], swSyLUT[SW_CH]; static bool swLUTdone = false;
+// Cuantas tarjetas llevan cambios del usuario sin guardar. Es lo que decide si
+// "Cerrar todo" pide confirmacion: cerrar sin avisar una nota a medias no es
+// "liberar recursos", es perder trabajo.
+static int swUnsavedCount(){
+  int n = 0;
+  for(int i = 0; i < swCount; i++) if(appUnsaved(swTasks[i].appID)) n++;
+  return n;
+}
+// Area de imagen de una tarjeta. Se define AQUI porque la tabla de escalado se
+// dimensiona con ella: si el alto de la tarjeta cambia y esto no, la ruta
+// rapida deja de coincidir y cada miniatura vuelve a escalarse con divisiones.
+#define SW_TH_W  (SW_CW - 16)
+#define SW_TH_H  (SW_CH - 76)
+static uint16_t swSxLUT[SW_TH_W], swSyLUT[SW_TH_H]; static bool swLUTdone = false;
 static void swBuildLUT(){
-  int dw = SW_CW - 16, dh = SW_CH - 52;
-  for(int i = 0; i < dw; i++) swSxLUT[i] = (uint16_t)(i * TH_W / dw);
-  for(int j = 0; j < dh; j++) swSyLUT[j] = (uint16_t)(j * TH_H / dh);
+  for(int i = 0; i < SW_TH_W; i++) swSxLUT[i] = (uint16_t)(i * TH_W / SW_TH_W);
+  for(int j = 0; j < SW_TH_H; j++) swSyLUT[j] = (uint16_t)(j * TH_H / SW_TH_H);
   swLUTdone = true;
 }
 static void blitThumbScaled(uint16_t* th, int dx, int dy, int dw, int dh){
-  bool lut = (dw == SW_CW - 16 && dh == SW_CH - 52);        // ruta rapida (tamano fijo)
+  bool lut = (dw == SW_TH_W && dh == SW_TH_H);              // ruta rapida (tamano fijo)
   if(lut && !swLUTdone) swBuildLUT();
   for(int j = 0; j < dh; j++){ int yy = dy + j; if((unsigned)yy >= SCR_H) continue;
     int sy = lut ? swSyLUT[j] : j * TH_H / dh;
@@ -26185,17 +27286,142 @@ static void swCardFrame(int x, int y, int w, int h, int rad){
   fillRoundRect(x, y, w, h, rad, TH_SURF);
   drawRoundRect(x, y, w, h, rad, TH_BORDER);
 }
+// #############################################################
+// ##  CABECERA DE RECIENTES  ·  estado real del sistema
+// ##  ------------------------------------------------------
+// ##  Tres cosas, y las tres medidas: cuantas apps hay y en que
+// ##  estado, cuanta PSRAM queda de la que el chip inicializo de
+// ##  verdad (no la del datasheet), y el acceso a Optimizar.
+// ##
+// ##  SE REPINTA SOLA, Y SOLO ELLA. La banda de la cabecera y la de
+// ##  las tarjetas son disjuntas: mover el carrusel no toca la
+// ##  cabecera, y refrescar las cifras (una vez por segundo como
+// ##  mucho) no toca el carrusel. Sin esto, un dato que cambia cada
+// ##  segundo obligaria a repintar 480x800 enteros durante el
+// ##  desplazamiento.
+// ##
+// ##  MATERIAL: uiWallSurface, que es el punto unico Plano/Liquid
+// ##  Glass para lo que se apoya en el wallpaper. En Plano no hay
+// ##  transparencias aqui, como en el resto del sistema.
+// #############################################################
+#define SWH_X     16
+#define SWH_Y     40
+#define SWH_W     (SCR_W - 32)
+#define SWH_H     132
+#define SWH_BAND0 (SWH_Y - 6)
+#define SWH_BAND1 (SWH_Y + SWH_H + 6)
+// Boton "Optimizar Flex OS" dentro de la cabecera (geometria unica: la
+// comparten el dibujo y el hit-test, asi no pueden separarse).
+#define SWO_X     (SWH_X + 16)
+#define SWO_Y     (SWH_Y + 78)
+#define SWO_W     (SWH_W - 32)
+#define SWO_H     42
+
+// Banda de las tarjetas. Disjunta de la de la cabecera a proposito (ver arriba).
+#define SWC_BAND0 (SW_TOP - 10)
+#define SWC_BAND1 (SW_TOP + SW_CH + 18)
+
+// Color de la barra de memoria por SALUD, no por gusto: verde optimo,
+// ambar atencion, rojo critico. Son los mismos tres del resto del sistema.
+static uint16_t swHealthCol(){
+  switch(flexMemHealth(memSnap())){
+    case FLEXMEM_H_CRIT:  return TH_ERR;
+    case FLEXMEM_H_WATCH: return TH_WARN;
+    default:              return TH_OK;
+  }
+}
+
+// Recuento de la cabecera.
+//   abiertas -> todas las que tienen tarjeta: su estado sigue vivo.
+//   pausadas -> conservan ademas sus recursos cargados.
+//   guardadas-> ya soltaron los pesados (ver gAppShed) y los rehacen al volver.
+// "Abiertas" NO es "en primer plano": desde Recientes no hay ninguna en primer
+// plano -- entrar aqui suspende la que estuviera --, asi que contar solo esas
+// diria siempre cero y seria justo lo contrario de lo que el usuario ve.
+static void swCounts(int* tot, int* pau, int* sav){
+  *tot = swCount; *pau = *sav = 0;
+  for(int i = 0; i < swCount; i++){
+    int id = swTasks[i].appID;
+    if(gAppState[id] == ALIFE_RUNNING || gAppState[id] == ALIFE_RESUMING) continue;
+    if(gAppShed[id]) (*sav)++;
+    else             (*pau)++;
+  }
+}
+
+// Estado de UNA tarjeta, en las palabras del usuario.
+static const char* swStateName(int id){
+  if(gAppState[id] == ALIFE_RUNNING || gAppState[id] == ALIFE_RESUMING) return "Activa";
+  return gAppShed[id] ? "Estado guardado" : "Pausada";
+}
+
+// Dibuja la cabecera en el lienzo activo (no publica: lo hace el llamante).
+static void swDrawHeader(){
+  const FlexMemSnap* m = memSnap();
+  uiWallSurface(SWH_X, SWH_Y, SWH_W, SWH_H, 20, uiGlass ? TH_WALLSURF2 : TH_WALLSURF, 10);
+
+  int tot, pau, sav;
+  swCounts(&tot, &pau, &sav);
+  char l1[80];
+  snprintf(l1, sizeof(l1), "%d app%s abierta%s  \xC2\xB7  %d pausada%s  \xC2\xB7  %d con estado guardado",
+           tot, tot == 1 ? "" : "s", tot == 1 ? "" : "s",
+           pau, pau == 1 ? "" : "s", sav);
+  drawTextClip(SWH_X + 16, SWH_Y + 12, l1, 1, TH_ONWALL2, SWH_X + SWH_W - 16);
+
+  char l2[72];
+  if(m->psTotal){
+    char fr[24], to[24];
+    flexMemFmt(m->psFree, fr, sizeof(fr));
+    flexMemFmt(m->psTotal, to, sizeof(to));
+    snprintf(l2, sizeof(l2), "PSRAM disponible: %s / %s", fr, to);
+  } else {
+    snprintf(l2, sizeof(l2), "PSRAM: No disponible en esta placa");
+  }
+  drawTextClip(SWH_X + 16, SWH_Y + 30, l2, 2, TH_ONWALL, SWH_X + SWH_W - 16);
+
+  // Barra de OCUPACION (lo usado), con el color de la salud.
+  int bx = SWH_X + 16, bw = SWH_W - 32, by = SWH_Y + 58, bh = 10;
+  fillRoundRect(bx, by, bw, bh, bh / 2, TH_TRACK);
+  int pct = flexMemUsedPct(m);
+  if(pct > 0) fillRoundRect(bx, by, bw * pct / 100, bh, bh / 2, swHealthCol());
+
+  // Optimizar Flex OS
+  uiWallSurface(SWO_X, SWO_Y, SWO_W, SWO_H, SWO_H / 2, uiGlass ? TH_GLASS2 : TH_SURF2, 8);
+  drawRoundRect(SWO_X, SWO_Y, SWO_W, SWO_H, SWO_H / 2, TH_BORDER);
+  drawTextC(SCR_W / 2, SWO_Y + (SWO_H - 18) / 2, "Optimizar Flex OS", 2, TH_ONWALL);
+}
+static bool swOptHit(int px, int py){
+  return px >= SWO_X && px <= SWO_X + SWO_W && py >= SWO_Y && py <= SWO_Y + SWO_H;
+}
+// Firma de lo que la cabecera ENSENA. Si no cambia, no se publica nada: una
+// banda de 139 filas por segundo sin motivo es trabajo que no hace falta.
+static uint32_t swHdrSigNow(){
+  const FlexMemSnap* m = memSnap();
+  int t, p, g; swCounts(&t, &p, &g);
+  return (m->psFree >> 12) ^ (m->psTotal >> 8) ^ (uint32_t)(t * 7 + p * 31 + g * 131) ^
+         ((uint32_t)flexMemHealth(m) << 24);
+}
+// Repinta SOLO la banda de la cabecera. La llama el refresco de cifras.
+static void swRenderHeader(){
+  swHdrSig = swHdrSigNow();
+  setBuf(bbuf);
+  if(blurBg){
+    for(int j = SWH_BAND0; j <= SWH_BAND1; j++)
+      memcpy(bbuf + (size_t)j * SCR_W, blurBg + (size_t)j * SCR_W, SCR_W * 2);
+  } else fillRect(0, SWH_BAND0, SCR_W, SWH_BAND1 - SWH_BAND0 + 1, TH_PAGE);
+  swDrawHeader();
+  present(SWH_BAND0, SWH_BAND1);
+}
+
 // ---- Boton "Cerrar todo" (geometria unica: dibujo y hit-test la comparten) ----
-#define SWCA_W   186
+#define SWCA_W   200
 #define SWCA_H   46
 #define SWCA_X   ((SCR_W - SWCA_W) / 2)
-#define SWCA_Y   610
+#define SWCA_Y   600
 static void swDrawCloseAll(){
   bool on = (swCount > 0);
-  fillRoundRect(SWCA_X, SWCA_Y, SWCA_W, SWCA_H, SWCA_H / 2, on ? rgb565(38,44,62) : rgb565(26,29,40));
-  drawRoundRect(SWCA_X, SWCA_Y, SWCA_W, SWCA_H, SWCA_H / 2, on ? rgb565(96,106,140) : rgb565(56,62,80));
-  drawTextC(SCR_W / 2, SWCA_Y + (SWCA_H - 18) / 2, "Cerrar todo", 2,
-            on ? rgb565(238,242,250) : rgb565(110,118,138));
+  fillRoundRect(SWCA_X, SWCA_Y, SWCA_W, SWCA_H, SWCA_H / 2, on ? TH_SURF2 : TH_SURF);
+  drawRoundRect(SWCA_X, SWCA_Y, SWCA_W, SWCA_H, SWCA_H / 2, on ? TH_BORDER : TH_DIV);
+  drawTextC(SCR_W / 2, SWCA_Y + (SWCA_H - 18) / 2, "Cerrar todas", 2, on ? TH_ONWALL : TH_DIS);
 }
 static bool swCloseAllHit(int px, int py){
   return swCount > 0 && px >= SWCA_X && px <= SWCA_X + SWCA_W && py >= SWCA_Y && py <= SWCA_Y + SWCA_H;
@@ -26205,27 +27431,59 @@ static bool swCloseAllHit(int px, int py){
 static void swDrawToast(){
   if(!swMsg[0]) return;
   if(millis() - swMsgMs > 1800){ swMsg[0] = 0; return; }
-  int tw = textW(swMsg, 2) + 34, tx = (SCR_W - tw) / 2, ty = 556;
-  fillRoundRectA(tx, ty, tw, 34, 17, rgb565(30,34,48), 235);
-  drawTextC(SCR_W / 2, ty + 9, swMsg, 2, rgb565(240,244,252));
+  int tw = textW(swMsg, 2) + 34, tx = (SCR_W - tw) / 2, ty = SW_TOP + SW_CH - 60;
+  fillRoundRectA(tx, ty, tw, 34, 17, TH_WALLSURF, 235);
+  drawTextC(SCR_W / 2, ty + 9, swMsg, 2, TH_ONWALL);
 }
+
+// ---- Contenido de UNA tarjeta (lo comparten la animacion de entrada y el
+// ---- repintado por cuadro, para que no puedan dibujar cosas distintas) ----
+static void swDrawCard(int i, int x, int y, int cw, int ch){
+  int id = swTasks[i].appID;
+  swCardFrame(x, y, cw, ch, 22);
+  int iw = cw - 16, ih = ch - 76;
+  if(swTasks[i].thumb) blitThumbScaled(swTasks[i].thumb, x + 8, y + 8, iw, ih);
+  else { fillRoundRect(x + 8, y + 8, iw, ih, 14, TH_SURF2);
+         drawAppIcon(id, x + cw / 2 - 30, y + ih / 2 - 22, 60); }
+  // Nombre + punto de "cambios sin guardar". El punto es DISCRETO a proposito:
+  // informa sin gritar, y solo aparece cuando la marca de sesion desfasada (o
+  // la propia app) dice que hay algo sin escribir.
+  const char* nm = appName(id);
+  bool dirty = appUnsaved(id);
+  int nw = textW(nm, 2);
+  int nx = x + (cw - nw) / 2;
+  if(dirty){
+    nx -= 8;
+    fillCircle(nx + nw + 12, y + ch - 52 + 9, 4, TH_WARN);
+  }
+  drawText(nx, y + ch - 52, nm, 2, TH_TXT);
+  // Estado + consumo MEDIDO. Sin medida se escribe "--": no se inventa.
+  char sub[56];
+  if(appMemHas(id)){
+    char mb[24]; flexMemFmt(appMemBytes(id), mb, sizeof(mb));
+    snprintf(sub, sizeof(sub), "%s \xC2\xB7 %s", swStateName(id), mb);
+  } else {
+    snprintf(sub, sizeof(sub), "%s \xC2\xB7 --", swStateName(id));
+  }
+  int sw2 = textW(sub, 1);
+  drawText(x + (cw - sw2) / 2, y + ch - 28, sub, 1, TH_TXT2);
+}
+
 static void swRender(float scale){                        // completo (solo animacion de entrada)
   setBuf(bbuf);
   // Fondo = wallpaper desenfocado (contenido) -> los rotulos que caen encima
   // usan TH_ONWALL, no el texto de pagina.
   if(blurBg) memcpy(bbuf, blurBg, (size_t)SCR_W * SCR_H * 2); else fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
   drawTextC(SCR_W / 2, 6, "Recientes", 3, TH_ONWALL);
-  if(swCount == 0) drawTextC(SCR_W / 2, SCR_H / 2, "Sin apps recientes", 2, TH_ONWALL2);
+  swDrawHeader();
+  if(swCount == 0) drawTextC(SCR_W / 2, SW_TOP + SW_CH / 2, "Sin apps recientes", 2, TH_ONWALL2);
   int cw = (int)(SW_CW * scale), ch = (int)(SW_CH * scale);
   for(int i = 0; i < swCount; i++){
     int cx = SCR_W / 2 + i * SW_STEP - (int)swScrollPx;
     if(cx < -SW_CW || cx > SCR_W + SW_CW) continue;
     int x = cx - cw / 2, y = SW_TOP + (SW_CH - ch) / 2;
     if(i == swLiftCard) y -= (int)swLiftY;
-    swCardFrame(x, y, cw, ch, 22);
-    if(swTasks[i].thumb) blitThumbScaled(swTasks[i].thumb, x + 8, y + 8, cw - 16, ch - 52);
-    else { fillRoundRect(x + 8, y + 8, cw - 16, ch - 52, 14, TH_SURF2); drawAppIcon(swTasks[i].appID, x + cw / 2 - 30, y + ch / 2 - 70, 60); }
-    drawTextC(x + cw / 2, y + ch - 32, appName(swTasks[i].appID), 2, TH_TXT);
+    swDrawCard(i, x, y, cw, ch);
   }
   swDrawCloseAll();
   swDrawToast();
@@ -26235,30 +27493,149 @@ static void swRender(float scale){                        // completo (solo anim
 // por-frame: SOLO repinta y vuelca la banda de las tarjetas (mucho mas ligero)
 static void swRenderCards(){
   setBuf(bbuf);
-  if(blurBg){ for(int j = 32; j < 604; j++) memcpy(bbuf + (size_t)j * SCR_W, blurBg + (size_t)j * SCR_W, SCR_W * 2); }
-  else fillRect(0, 32, SCR_W, 572, TH_PAGE);
-  if(swCount == 0) drawTextC(SCR_W / 2, SCR_H / 2, "Sin apps recientes", 2, TH_ONWALL2);
+  if(blurBg){ for(int j = SWC_BAND0; j <= SWC_BAND1; j++) memcpy(bbuf + (size_t)j * SCR_W, blurBg + (size_t)j * SCR_W, SCR_W * 2); }
+  else fillRect(0, SWC_BAND0, SCR_W, SWC_BAND1 - SWC_BAND0 + 1, TH_PAGE);
+  if(swCount == 0) drawTextC(SCR_W / 2, SW_TOP + SW_CH / 2, "Sin apps recientes", 2, TH_ONWALL2);
   for(int i = 0; i < swCount; i++){
     int cx = SCR_W / 2 + i * SW_STEP - (int)swScrollPx;
     if(cx < -SW_CW || cx > SCR_W + SW_CW) continue;
     int x = cx - SW_CW / 2, y = SW_TOP;
     if(i == swLiftCard) y -= (int)swLiftY;
-    swCardFrame(x, y, SW_CW, SW_CH, 22);
-    if(swTasks[i].thumb) blitThumbScaled(swTasks[i].thumb, x + 8, y + 8, SW_CW - 16, SW_CH - 52);
-    else { fillRoundRect(x + 8, y + 8, SW_CW - 16, SW_CH - 52, 14, TH_SURF2); drawAppIcon(swTasks[i].appID, x + SW_CW / 2 - 30, y + SW_CH / 2 - 70, 60); }
-    drawTextC(x + SW_CW / 2, y + SW_CH - 32, appName(swTasks[i].appID), 2, TH_TXT);
+    swDrawCard(i, x, y, SW_CW, SW_CH);
   }
   swDrawToast();
-  present(32, 604);
+  present(SWC_BAND0, SWC_BAND1);
 }
 // Repinta la fila del boton (su aspecto depende de si queda alguna tarjeta).
 static void swRenderCloseAll(){
   setBuf(bbuf);
   if(blurBg){ for(int j = SWCA_Y - 6; j < SWCA_Y + SWCA_H + 6; j++) memcpy(bbuf + (size_t)j * SCR_W, blurBg + (size_t)j * SCR_W, SCR_W * 2); }
-  else fillRect(0, SWCA_Y - 6, SCR_W, SWCA_H + 12, rgb565(8,10,16));
+  else fillRect(0, SWCA_Y - 6, SCR_W, SWCA_H + 12, TH_PAGE);
   swDrawCloseAll();
   present(SWCA_Y - 6, SWCA_Y + SWCA_H + 5);
 }
+
+// #############################################################
+// ##  HOJA MODAL DE RECIENTES  ·  detalle y confirmacion
+// ##  ------------------------------------------------------
+// ##  Dos usos, una sola superficie (dos capas dibujando en la misma
+// ##  banda es justo el fallo que documenta la isla de notificaciones):
+// ##   · MANTENER PULSADA una tarjeta -> ficha de la app: estado,
+// ##     clase de peso, consumo medido, ultima actividad, si tiene
+// ##     cambios sin guardar, y el boton Cerrar.
+// ##   · "Cerrar todas" con trabajo sin guardar -> confirmacion que
+// ##     DICE cuantas apps lo tienen. Sin cambios pendientes no
+// ##     pregunta nada: seria una pregunta de adorno.
+// #############################################################
+enum { SWS_NONE = 0, SWS_DETAIL, SWS_CONFIRM_ALL };
+static int      swSheet = SWS_NONE;
+static int      swSheetIdx = -1;
+static uint32_t swPressMs = 0;
+static bool     swLongDone = false;
+#define SWS_X   28
+#define SWS_W   (SCR_W - 56)
+#define SWS_Y   250
+#define SWS_H   300
+// Dos botones al pie de la hoja, misma geometria para dibujo y hit-test.
+#define SWS_BH  46
+#define SWS_BY  (SWS_Y + SWS_H - SWS_BH - 16)
+#define SWS_B1X (SWS_X + 16)
+#define SWS_BW  ((SWS_W - 48) / 2)
+#define SWS_B2X (SWS_B1X + SWS_BW + 16)
+
+static void swSheetRender(){
+  setBuf(bbuf);
+  if(blurBg) memcpy(bbuf, blurBg, (size_t)SCR_W * SCR_H * 2);
+  else       fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
+  fillRectA(0, 0, SCR_W, SCR_H, TH_SCRIM, 150);
+  uiWallSurface(SWS_X, SWS_Y, SWS_W, SWS_H, 24, uiGlass ? TH_WALLSURF2 : TH_WALLSURF, 12);
+
+  int y = SWS_Y + 18;
+  if(swSheet == SWS_CONFIRM_ALL){
+    int n = swUnsavedCount();
+    char t[80];
+    drawTextC(SCR_W / 2, y, "Cerrar todas las apps", 2, TH_ONWALL); y += 34;
+    snprintf(t, sizeof(t), "%d app%s tiene%s cambios sin guardar.", n, n == 1 ? "" : "s", n == 1 ? "" : "n");
+    drawTextC(SCR_W / 2, y, t, 1, TH_ONWALL2); y += 22;
+    drawTextC(SCR_W / 2, y, "Flex OS intentar\xC3\xA1 guardarlos antes de cerrar;", 1, TH_ONWALL2); y += 18;
+    drawTextC(SCR_W / 2, y, "la que no pueda guardarse se queda abierta.", 1, TH_ONWALL2);
+    fillRoundRect(SWS_B1X, SWS_BY, SWS_BW, SWS_BH, SWS_BH / 2, TH_SURF2);
+    drawTextC(SWS_B1X + SWS_BW / 2, SWS_BY + (SWS_BH - 18) / 2, "Cancelar", 2, TH_ONWALL);
+    fillRoundRect(SWS_B2X, SWS_BY, SWS_BW, SWS_BH, SWS_BH / 2, TH_DANGER);
+    drawTextC(SWS_B2X + SWS_BW / 2, SWS_BY + (SWS_BH - 18) / 2, "Cerrar todas", 2, TH_ONACC);
+    present(0, SCR_H - 1);
+    return;
+  }
+
+  int id = (swSheetIdx >= 0 && swSheetIdx < swCount) ? swTasks[swSheetIdx].appID : -1;
+  if(id < 0){ swSheet = SWS_NONE; swRender(1.0f); return; }
+  drawAppIcon(id, SWS_X + 20, y, 48);
+  drawText(SWS_X + 84, y + 2,  appName(id), 3, TH_ONWALL);
+  drawText(SWS_X + 84, y + 30, swStateName(id), 1, TH_ONWALL2);
+  y += 66;
+
+  char v[64];
+  // Consumo MEDIDO. Sin medida: "No disponible", que es la verdad.
+  if(appMemHas(id)) flexMemFmt(appMemBytes(id), v, sizeof(v));
+  else              snprintf(v, sizeof(v), "No disponible");
+  drawText(SWS_X + 20, y, "Consumo estimado", 1, TH_ONWALL2);
+  drawTextR(SWS_X + SWS_W - 20, y, v, 2, TH_ONWALL); y += 26;
+
+  drawText(SWS_X + 20, y, "Clase", 1, TH_ONWALL2);
+  drawTextR(SWS_X + SWS_W - 20, y, appWeightName(id), 2, TH_ONWALL); y += 26;
+
+  drawText(SWS_X + 20, y, "Miniatura", 1, TH_ONWALL2);
+  if(swSheetIdx >= 0 && swTasks[swSheetIdx].thumb) flexMemFmt((size_t)TH_W * TH_H * 2, v, sizeof(v));
+  else snprintf(v, sizeof(v), "Sin captura");
+  drawTextR(SWS_X + SWS_W - 20, y, v, 2, TH_ONWALL); y += 26;
+
+  drawText(SWS_X + 20, y, "\xC3\x9Altima actividad", 1, TH_ONWALL2);
+  if(gAppSeenMs[id]){
+    uint32_t s = (millis() - gAppSeenMs[id]) / 1000u;
+    if(s < 60)      snprintf(v, sizeof(v), "hace %u s", (unsigned)s);
+    else if(s < 3600) snprintf(v, sizeof(v), "hace %u min", (unsigned)(s / 60));
+    else            snprintf(v, sizeof(v), "hace %u h", (unsigned)(s / 3600));
+  } else snprintf(v, sizeof(v), "No disponible");
+  drawTextR(SWS_X + SWS_W - 20, y, v, 2, TH_ONWALL); y += 26;
+
+  drawText(SWS_X + 20, y, "Cambios sin guardar", 1, TH_ONWALL2);
+  drawTextR(SWS_X + SWS_W - 20, y, appUnsaved(id) ? "S\xC3\xAD" : "No", 2,
+            appUnsaved(id) ? TH_WARN : TH_ONWALL);
+
+  fillRoundRect(SWS_B1X, SWS_BY, SWS_BW, SWS_BH, SWS_BH / 2, TH_SURF2);
+  drawTextC(SWS_B1X + SWS_BW / 2, SWS_BY + (SWS_BH - 18) / 2, "Volver", 2, TH_ONWALL);
+  fillRoundRect(SWS_B2X, SWS_BY, SWS_BW, SWS_BH, SWS_BH / 2, TH_DANGER);
+  drawTextC(SWS_B2X + SWS_BW / 2, SWS_BY + (SWS_BH - 18) / 2, "Cerrar", 2, TH_ONACC);
+  present(0, SCR_H - 1);
+}
+static void swSheetClose(){ swSheet = SWS_NONE; swSheetIdx = -1; swRender(1.0f); }
+// Toque dentro de la hoja. Devuelve true si lo consumio (siempre que la hoja
+// este abierta: es modal, igual que el resto de modales del sistema).
+static bool swSheetTouch(){
+  if(swSheet == SWS_NONE) return false;
+  if(!T.tap) return true;
+  bool inB = (T.y >= SWS_BY && T.y <= SWS_BY + SWS_BH);
+  bool b1 = inB && T.x >= SWS_B1X && T.x <= SWS_B1X + SWS_BW;
+  bool b2 = inB && T.x >= SWS_B2X && T.x <= SWS_B2X + SWS_BW;
+  if(swSheet == SWS_CONFIRM_ALL){
+    if(b2){ swCloseAll(); swScrollPx = 0; swVel = 0; swSheetClose(); return true; }
+    if(b1 || T.y < SWS_Y || T.y > SWS_Y + SWS_H){ swSheetClose(); return true; }
+    return true;
+  }
+  if(b2){
+    int idx = swSheetIdx;
+    swSheet = SWS_NONE; swSheetIdx = -1;
+    if(idx >= 0) swCloseCard(idx);
+    float mx = (swCount > 0 ? (swCount - 1) * SW_STEP : 0);
+    if(swScrollPx > mx) swScrollPx = mx;
+    if(swScrollPx < 0) swScrollPx = 0;
+    swRender(1.0f);
+    return true;
+  }
+  if(b1 || T.y < SWS_Y || T.y > SWS_Y + SWS_H){ swSheetClose(); return true; }
+  return true;
+}
+
 static int swCardIndexAt(int px){
   for(int i = 0; i < swCount; i++){ int cx = SCR_W / 2 + i * SW_STEP - (int)swScrollPx; if(px >= cx - SW_CW / 2 && px <= cx + SW_CW / 2) return i; }
   return -1;
@@ -26288,6 +27665,9 @@ static void activarMultitarea(){
   gState = ST_SWITCHER;
   swScrollPx = 0; swVel = 0; swLiftCard = -1; swLiftY = 0; swGesture = 0;
   swMsg[0] = 0;
+  swSheet = SWS_NONE; swSheetIdx = -1; swLongDone = false; swPressMs = 0;
+  memSampleNow();                              // la cabecera ensena cifras de AHORA
+  swHdrMs = millis();
   // ENTRADA POR TIEMPO, no por numero de cuadros. Antes eran 10 pasos con
   // delay(14): en una placa lenta duraba mas y en una rapida se veia a saltos,
   // y ademas bloqueaba el bucle 140 ms enteros (con el tactil parado). Ahora
@@ -26306,11 +27686,21 @@ static void activarMultitarea(){
   swRender(1.0f);
 }
 static void swTick(){
+  // La hoja modal manda: mientras esta abierta nadie mas ve el toque.
+  if(swSheetTouch()) return;
   // El aviso caduca solo: sin esto se quedaria pegado hasta el siguiente gesto.
   if(swMsg[0] && millis() - swMsgMs > 1800){ swMsg[0] = 0; swRenderCards(); }
+  // REFRESCO DE LAS CIFRAS: una vez por segundo, y SOLO la banda de la
+  // cabecera. Nunca durante un gesto -- publicar una banda mientras el dedo
+  // arrastra el carrusel es exactamente lo que produce tirones.
+  if(swGesture == 0 && !T.down && millis() - swHdrMs >= SW_HDR_MS){
+    swHdrMs = millis();
+    if(swHdrSigNow() != swHdrSig) swRenderHeader();   // solo si de verdad cambio algo
+  }
   if(T.pressed){
     swStartX = T.x; swStartY = T.y; swLastX2 = T.x; swLastY2 = T.y; swVel = 0; swGesture = 0;
     swLiftCard = swCardIndexAt(T.x); swLiftY = 0;
+    swPressMs = millis(); swLongDone = false;
     return;
   }
   if(T.down){
@@ -26318,6 +27708,17 @@ static void swTick(){
     if(swGesture == 0){
       if(fabsf(T.x - swStartX) > 12) swGesture = 1;
       else if(fabsf(T.y - swStartY) > 14) swGesture = 2;
+    }
+    // MANTENER PULSADA: solo si el dedo NO se ha movido (sin gesto) y esta
+    // sobre una tarjeta. Se dispara una sola vez por pulsacion.
+    if(swGesture == 0 && !swLongDone && swLiftCard >= 0 &&
+       T.y >= SW_TOP && T.y <= SW_TOP + SW_CH &&
+       millis() - swPressMs >= SW_LONG_MS){
+      swLongDone = true;
+      swSheet = SWS_DETAIL; swSheetIdx = swLiftCard;
+      swLiftCard = -1; swLiftY = 0;
+      swSheetRender();
+      return;
     }
     if(swGesture == 1){                                  // scroll horizontal + velocidad
       swScrollPx -= dx; swVel = -dx;
@@ -26330,22 +27731,30 @@ static void swTick(){
     return;
   }
   if(T.released){
+    if(swLongDone){ swLongDone = false; swLiftCard = -1; swLiftY = 0; return; }
     if(swGesture == 2 && swLiftCard >= 0 && swLiftY > 110){   // swipe-arriba -> cerrar de verdad
       bool closed = swCloseCard(swLiftCard);
       swLiftCard = -1; swLiftY = 0;
       float mx = (swCount > 0 ? (swCount - 1) * SW_STEP : 0); if(swScrollPx > mx) swScrollPx = mx; if(swScrollPx < 0) swScrollPx = 0;
       swRenderCards();
-      if(closed) swRenderCloseAll();                        // el boton se atenua si ya no queda nada
+      if(closed){ swRenderCloseAll(); swRenderHeader(); }     // el boton se atenua y la memoria cambia
       return;
     }
     if(swGesture == 0){                                  // toque
-      if(swCloseAllHit(T.x, T.y)){ swCloseAll(); swScrollPx = 0; swVel = 0; swRenderCards(); swRenderCloseAll(); return; }
+      if(swOptHit(T.x, T.y)){ optStart(OPT_HOST_SW); return; }
+      if(swCloseAllHit(T.x, T.y)){
+        // Con trabajo sin guardar se pregunta ANTES. Sin el, se cierra sin
+        // molestar: una confirmacion que siempre sale deja de leerse.
+        if(swUnsavedCount() > 0){ swSheet = SWS_CONFIRM_ALL; swSheetRender(); return; }
+        swCloseAll(); swScrollPx = 0; swVel = 0; swRenderCards(); swRenderCloseAll(); swRenderHeader(); return;
+      }
       if(T.y > SCR_H - 60){ swExitToHome(); return; }
       int idx = swCardIndexAt(T.x);
       if(idx >= 0 && T.y >= SW_TOP && T.y <= SW_TOP + SW_CH){
         if(idx == swCenterIndex()) swMaximize(idx); else { swScrollPx = idx * SW_STEP; swRenderCards(); }
         return;
       }
+      if(T.y >= SWH_Y && T.y <= SWH_Y + SWH_H) return;   // toque muerto dentro de la cabecera
       swExitToHome(); return;
     }
     swLiftCard = -1; swLiftY = 0;
@@ -31501,6 +32910,259 @@ static void hwDetectTick(){
 }
 
 // #############################################################
+// ##  SOLTAR CACHES DEL SISTEMA  ·  memShedSystem()
+// ##  ------------------------------------------------------
+// ##  Vive AQUI, justo antes de themeChanged y de setup(), por el mismo
+// ##  motivo que themeChanged: es el unico punto del sketch desde el que
+// ##  se ven TODOS los buffers grandes (blurBg, glassBuf, la cortina, las
+// ##  paginas de Ajustes, la hoja de la caja de apps, el fondo de DeX...).
+// ##  El gestor de memoria, mucho mas arriba, solo la declara y la llama.
+// ##
+// ##  REGLA UNICA: aqui solo entra lo que el sistema sabe RECONSTRUIR SOLO.
+// ##  Ni una nota, ni un dibujo, ni un ajuste, ni un archivo del usuario.
+// ##  Cada bloque lleva ademas su guardia de "no mientras se este viendo":
+// ##  soltar el fondo desenfocado con Recientes en pantalla cambiaria el
+// ##  fondo delante del usuario a mitad de un gesto.
+// ##
+// ##  Devuelve los BYTES DE PSRAM realmente recuperados, medidos antes y
+// ##  despues. Si no se libero nada devuelve 0 -- y entonces la interfaz
+// ##  dice que no encontro nada, en vez de inventarse una cifra.
+// #############################################################
+static uint32_t memShedSystem(){
+  uint32_t before = memFreePsram();
+
+  // Fondo desenfocado del wallpaper (768 KB). Lo usan Recientes, el bloqueo,
+  // la caja de apps y el apagado: no se suelta con ninguno a la vista.
+  if(blurBg && gState != ST_SWITCHER && gState != ST_LOCK && gState != ST_LOCKSETUP &&
+     gState != ST_DRAWER && gState != ST_POWEROFF_CONFIRM && gState != ST_POWEROFF_ANIM){
+    free(blurBg); blurBg = NULL;
+  }
+  // Panel rapido: panel compuesto + vidrio expandido + instantanea de la app
+  // (hasta 2,3 MB). Solo con la cortina cerrada del todo.
+  if(qsPanelY == 0 && !qsAnimOn){ qpFreeBuffers(); qsDirty = true; }
+  // Scratch del desenfoque de Liquid Glass (768 KB). Se rehace en el
+  // siguiente panel que lo necesite.
+  if(glassBuf){ heap_caps_free(glassBuf); glassBuf = NULL; }
+  // Tarjeta Liquid Glass cacheada. Al soltarla hay que invalidar su firma, o el
+  // siguiente uso creeria que sigue siendo valida y leeria un puntero nulo.
+  if(glcScratch || glcCard){
+    if(glcScratch){ heap_caps_free(glcScratch); glcScratch = NULL; }
+    if(glcCard){ heap_caps_free(glcCard); glcCard = NULL; }
+    glcValid = false;
+  }
+  // Paginas de la animacion de Ajustes (768 KB x 2). Solo con Ajustes fuera de
+  // primer plano: dentro estan a punto de usarse en cada cambio de categoria.
+  if(!(gState == ST_APP && gAppId == IC_AJUSTES)){
+    if(setPgOut){ heap_caps_free(setPgOut); setPgOut = NULL; }
+    if(setPgIn){  heap_caps_free(setPgIn);  setPgIn  = NULL; }
+  }
+  // Hoja de la caja de aplicaciones (768 KB).
+  if(drwPage && gState != ST_DRAWER){
+    heap_caps_free(drwPage); drwPage = NULL; drwPageSig = -1;
+  }
+  // Fondo compuesto de Modo PC / DeX (768 KB), solo con DeX cerrado.
+  if(gAppState[IC_MODOPC] == ALIFE_CLOSED) dexBgFree();
+  // Banda estatica del deslizador de apagado.
+  if(poffBand && gState != ST_POWEROFF_CONFIRM && gState != ST_POWEROFF_ANIM){
+    heap_caps_free(poffBand); poffBand = NULL;
+  }
+  // Miniaturas de Recientes por encima del tope justo: la lista de tarjetas NO
+  // se toca, solo sus capturas (las que se sueltan caen al icono de la app).
+  swThumbTrim(gEffMode ? 1 : 2);
+
+  uint32_t after = memFreePsram();
+  return after > before ? (after - before) : 0u;
+}
+
+// #############################################################
+// ##  OPTIMIZAR FLEX OS  ·  maquina de etapas NO bloqueante
+// ##  ------------------------------------------------------
+// ##  QUE HACE DE VERDAD, etapa por etapa. Nada de esto es decorado: si
+// ##  una etapa no encuentra nada que soltar, la cifra final lo dice.
+// ##    1. Analizando memoria       -> medida completa (bloque incluido)
+// ##    2. Liberando cache temporal -> /System/Cache en flash + las caches
+// ##       reconstruibles de las apps SUSPENDIDAS (miniaturas de Galeria,
+// ##       fotogramas del Navegador, buffers de Multimedia)
+// ##    3. Suspendiendo recursos no usados -> caches del SISTEMA
+// ##       (memShedSystem) y miniaturas de Recientes sobrantes
+// ##    4. Verificando estabilidad  -> vuelve a medir; si la presion sigue
+// ##       alta, enciende el MODO VISUAL EFICIENTE (temporal)
+// ##    5. Optimizacion finalizada  -> cifras REALES: bytes recuperados
+// ##       (medidos antes/despues) y PSRAM disponible ahora
+// ##
+// ##  LO QUE NO HACE, A PROPOSITO: no borra notas, dibujos, ajustes,
+// ##  archivos ni apps; no desmonta la microSD; no reinicia; no cierra la
+// ##  app activa; y no toca ninguna app con trabajo real en segundo plano.
+// ##
+// ##  NO BLOQUEA. Una etapa por vuelta de loop, separadas por tiempo con
+// ##  millis(): cero delay(), cero while() de espera. La animacion es un
+// ##  repintado de la banda del panel, no de la pantalla entera.
+// #############################################################
+enum { OPT_IDLE = 0, OPT_ANALYZE, OPT_CACHE, OPT_SUSPEND, OPT_VERIFY, OPT_DONE };
+#define OPT_STEP_MS  420           // lo que dura cada etapa a la vista
+#define OPT_X   30
+#define OPT_Y   214
+#define OPT_W   (SCR_W - 60)
+#define OPT_H   372
+#define OPT_BW  180
+#define OPT_BH  46
+#define OPT_BX  ((SCR_W - OPT_BW) / 2)
+#define OPT_BY  (OPT_Y + OPT_H - OPT_BH - 18)
+
+static int      optStage   = OPT_IDLE;
+static uint32_t optStepMs  = 0;
+static int      optHost    = OPT_HOST_ALM;
+static uint32_t optFree0   = 0;      // PSRAM libre al empezar (para la cifra final)
+static uint32_t optGained  = 0;      // bytes REALMENTE recuperados
+static int      optCacheN  = 0;      // archivos de cache temporal borrados
+static bool     optEffOn   = false;  // esta pasada encendio el modo eficiente
+
+static const char* OPT_STEP_TXT[6] = {
+  "", "Analizando memoria", "Liberando cach\xC3\xA9 temporal",
+  "Suspendiendo recursos no usados", "Verificando estabilidad",
+  "Optimizaci\xC3\xB3n finalizada"
+};
+
+static bool optActive(){ return optStage != OPT_IDLE; }
+
+// Marca de etapa: un circulo. Relleno = hecha, contorno = en curso o pendiente.
+static void optMark(int x, int cy, bool done, bool cur){
+  if(done){ fillCircle(x, cy, 8, TH_OK); return; }
+  drawCircle(x, cy, 8, cur ? TH_PRIM : TH_DIV);
+  if(cur) fillCircle(x, cy, 4, TH_PRIM);
+}
+
+// Dibuja el panel y publica SOLO su banda. El fondo de la banda se toma de fb
+// (la pantalla que hay debajo), asi que no hace falta guardar ninguna captura:
+// al cerrar, el anfitrion se repinta entero por su propio camino.
+static void optRender(){
+  setBuf(bbuf);
+  for(int j = OPT_Y - 8; j < OPT_Y + OPT_H + 8 && j < SCR_H; j++)
+    if(j >= 0) memcpy(bbuf + (size_t)j * SCR_W, fb + (size_t)j * SCR_W, SCR_W * 2);
+  uiSurface(OPT_X, OPT_Y, OPT_W, OPT_H, 24, UIS_ELEVATED);
+  drawRoundRect(OPT_X, OPT_Y, OPT_W, OPT_H, 24, TH_BORDER);
+
+  int y = OPT_Y + 20;
+  drawTextC(SCR_W / 2, y, "Optimizar Flex OS", 3, TH_TXT);
+  y += 42;
+  for(int st = OPT_ANALYZE; st <= OPT_DONE; st++){
+    bool done = (optStage > st) || (optStage == OPT_DONE && st == OPT_DONE);
+    bool cur  = (optStage == st);
+    optMark(OPT_X + 30, y + 9, done, cur);
+    drawTextClip(OPT_X + 50, y, OPT_STEP_TXT[st], 2,
+                 cur ? TH_TXT : (done ? TH_TXT2 : TH_MUTE), OPT_X + OPT_W - 16);
+    y += 30;
+  }
+  y += 10;
+  if(optStage == OPT_DONE){
+    char l[80];
+    if(optGained > 0){
+      char g[24]; flexMemFmt(optGained, g, sizeof(g));
+      snprintf(l, sizeof(l), "Se liberaron %s de recursos temporales.", g);
+    } else {
+      snprintf(l, sizeof(l), "No se encontraron recursos temporales seguros para liberar.");
+    }
+    drawTextClip(OPT_X + 20, y, l, 1, TH_TXT, OPT_X + OPT_W - 20); y += 20;
+    if(optCacheN > 0){
+      snprintf(l, sizeof(l), "Cach\xC3\xA9 temporal en almacenamiento: %d archivo%s.",
+               optCacheN, optCacheN == 1 ? "" : "s");
+      drawTextClip(OPT_X + 20, y, l, 1, TH_TXT2, OPT_X + OPT_W - 20); y += 20;
+    }
+    const FlexMemSnap* m = memSnap();
+    if(m->psTotal){
+      char fr[24]; flexMemFmt(m->psFree, fr, sizeof(fr));
+      snprintf(l, sizeof(l), "PSRAM disponible: %s.", fr);
+    } else {
+      snprintf(l, sizeof(l), "PSRAM: No disponible en esta placa.");
+    }
+    drawTextClip(OPT_X + 20, y, l, 1, TH_TXT, OPT_X + OPT_W - 20); y += 20;
+    if(optEffOn)
+      drawTextClip(OPT_X + 20, y, "Modo visual eficiente activado temporalmente.", 1,
+                   TH_WARN, OPT_X + OPT_W - 20);
+    fillRoundRect(OPT_BX, OPT_BY, OPT_BW, OPT_BH, OPT_BH / 2, TH_PRIM);
+    drawTextC(SCR_W / 2, OPT_BY + (OPT_BH - 18) / 2, "Hecho", 2, TH_ONACC);
+  } else {
+    drawTextClip(OPT_X + 20, y, "No se borran notas, dibujos ni archivos.", 1,
+                 TH_MUTE, OPT_X + OPT_W - 20);
+  }
+  present(OPT_Y - 8, OPT_Y + OPT_H + 7 < SCR_H ? OPT_Y + OPT_H + 7 : SCR_H - 1);
+  setBuf(fb);       // el destino vuelve a la pantalla: nadie hereda bbuf
+}
+
+static void optStart(int host){
+  if(optActive()) return;
+  optHost   = host;
+  optStage  = OPT_ANALYZE;
+  optStepMs = millis();
+  optGained = 0; optCacheN = 0; optEffOn = false;
+  memSampleNow();
+  optFree0 = gMem.psFree;
+  touchDropAll();                 // el toque que abrio el panel no se filtra
+  optRender();
+}
+
+// Cierre: devuelve la pantalla al anfitrion, repintandola entera por su propio
+// camino. No hay ninguna captura que restaurar y por tanto ningun buffer extra.
+static void optFinish(){
+  optStage = OPT_IDLE;
+  touchDropAll();
+  if(optHost == OPT_HOST_SW) swRender(1.0f);
+  else                       almRender();
+}
+
+// UNA etapa por vuelta, separada por tiempo. El trabajo de cada etapa corre una
+// sola vez, al ENTRAR en ella.
+static void optTick(){
+  if(optStage == OPT_IDLE) return;
+  if(optStage == OPT_DONE){
+    if(T.tap){
+      // "Hecho", o un toque fuera del panel: las dos cierran.
+      optFinish();
+    }
+    return;
+  }
+  if(T.tap) touchDropAll();                      // el panel es modal mientras trabaja
+  if(millis() - optStepMs < OPT_STEP_MS) return;
+  optStepMs = millis();
+
+  switch(optStage){
+    case OPT_ANALYZE:
+      memSampleNow();
+      optStage = OPT_CACHE;
+      break;
+    case OPT_CACHE: {
+      // 2a) cache temporal EN ALMACENAMIENTO. Es la carpeta que el propio
+      //     sistema declara desechable; no se toca ninguna otra.
+      optCacheN = fsWipeDir(FS_DIR_CACHE);
+      // 2b) caches reconstruibles de las apps SUSPENDIDAS (miniaturas,
+      //     fotogramas, buffers de medios). La app activa no se toca.
+      for(int i = 0; i < APP_N; i++) memShedApp(i);
+      optStage = OPT_SUSPEND;
+      break;
+    }
+    case OPT_SUSPEND:
+      memShedSystem();
+      optStage = OPT_VERIFY;
+      break;
+    case OPT_VERIFY: {
+      memSampleNow();
+      // MODO VISUAL EFICIENTE: solo si la presion SIGUE alta despues de soltar.
+      // Es temporal y no toca las preferencias del usuario (ver gEffMode).
+      if(flexMemLevel(memSnap()) >= FLEXMEM_LV_WARN && !gEffMode){
+        gEffMode = true; optEffOn = true;
+        glcValid = false; gHomeDirty = true; qsDirty = true;
+      }
+      uint32_t now = gMem.psFree;
+      optGained = (now > optFree0) ? (now - optFree0) : 0u;
+      optStage = OPT_DONE;
+      break;
+    }
+    default: break;
+  }
+  optRender();
+}
+
+// #############################################################
 // ##  PROPAGACION DE UN CAMBIO DE TEMA  ·  themeChanged()
 // ##  ------------------------------------------------------
 // ##  Punto UNICO al que llaman todos los sitios que tocan gDark o uiGlass
@@ -32294,6 +33956,16 @@ static void galResume(){
 // Cerrar la app suelta la cache de miniaturas ENTERA. Son cientos de
 // KB de PSRAM que no tienen por que seguir reservados cuando la
 // Galeria no esta abierta.
+// SOLTAR SIN CERRAR. La cache de miniaturas son cientos de KB de PSRAM que la
+// Galeria sabe reconstruir sola: al volver, las celdas visibles se decodifican
+// otra vez. El estado logico -- carpeta, foto seleccionada, desplazamiento --
+// no se toca, asi que la app vuelve exactamente donde estaba.
+static size_t galShed(){
+  if(!galCacheInit) return 0;
+  galCacheFree();
+  return 1;                          // los bytes REALES los mide quien llama
+}
+
 static void galCloseApp(){
   galCacheFree();
   galSelIdx = -1; galScroll = 0;
@@ -34703,7 +36375,14 @@ static void safeTick(){
 
 // Adaptadores de ciclo de vida para modulos cuyo estado interno ya es propio.
 // Suspender no destruye pestañas ni descargas; cerrar la tarjeta si libera todo.
-static void navResumeLife(){ navEnter(); }
+// NAVEGADOR. Suspender ya no es "salir y volver a entrar": la sesion (pestana,
+// direccion, desplazamiento e historial de sesion) sigue viva, y lo unico que
+// se suelta es la CACHE DE FOTOGRAMAS -- las imagenes remotas decodificadas,
+// que es justo lo que no tiene sentido conservar con la app en segundo plano.
+// Al volver, el navegador repinta y pide un fotograma nuevo al servicio.
+static void navSuspendLife(){ navSuspend(); }
+static void navResumeLife(){  navResume(); }
+static size_t navShedLife(){  return flexBrowserReleaseVisualCache(); }
 static void navCloseLife(){ flexBrowserExit(); }
 static void storeResumeLife(){ storeEnter(); }
 static void storeCloseLife(){ storeExit(); }
@@ -34931,6 +36610,7 @@ static void uiTick(){
 
 void loop(){
   flexFeedWdt();          // alimenta el TWDT solo si loopTask sigue suscrito (ver arriba)
+  loopRateTick();         // ritmo real del sistema (vueltas/s), un entero por vuelta
   flexPollTouch();        // (aqui dentro corre tambien el detector de doble-tap de la suspension)
 
   // -----------------------------------------------------------
@@ -34956,6 +36636,8 @@ void loop(){
   safeStableTick();
   sessAutosaveTick();
   safeToastTick();
+  memTick();              // medida de memoria por TIEMPO (nunca dentro del dibujo)
+  memAlertTick();         // avisos reales, con enfriamiento (FlexOS_Mem.cpp decide)
 
   suspFadeTick();         // SUSPENSION/APAGADO: un paso del fundido de backlight (no bloqueante)
   autoLockTick();         // FASE 1: bloqueo por inactividad (lee T sin filtrar, antes de que nadie consuma el toque)
@@ -34999,6 +36681,25 @@ void loop(){
     if(hcActive){ hcClose(true); gState = ST_HOME; gHomeDirty = true; }
     flexOtaRender();
     delay(5);
+    return;
+  }
+
+  // -----------------------------------------------------------
+  //  PANTALLA EN EXCLUSIVA PARA "OPTIMIZAR FLEX OS"
+  //  ---------------------------------------------------------
+  //  Mismo patron -- y mismo motivo -- que el OTA y la tarjeta del
+  //  cronometro: mientras el panel esta a la vista, NADIE mas compone
+  //  bandas. Sin este corte, el tick de Almacenamiento o el del selector
+  //  seguirian publicando su banda entre dos etapas y se veria un trozo
+  //  de la pantalla de debajo encima del panel.
+  //
+  //  Sin delay al final, como en la transicion de apps: aqui hay una
+  //  animacion en marcha y el bucle no debe frenarse. El tactil, el TWDT
+  //  y el reloj ya corrieron arriba.
+  // -----------------------------------------------------------
+  if(optActive()){
+    optTick();
+    flexOtaRender();
     return;
   }
 

@@ -670,6 +670,18 @@ void flexBrowserBegin();     // setup(): carga ajustes, historial y favoritos
 void flexBrowserEnter();     // el usuario abrio la app
 void flexBrowserTick();      // una vez por frame mientras la app esta viva
 void flexBrowserExit();      // el usuario cerro la app: libera TODO
+// MULTITAREA: la app pasa a segundo plano y vuelve, SIN reiniciar la sesion.
+// Suspend suelta lo pesado (la cache de fotogramas: imagenes remotas ya
+// decodificadas) y vuelca los datos pendientes; la pestana, la direccion, el
+// desplazamiento y el historial de sesion siguen vivos. Resume repinta y pide
+// un fotograma nuevo. Es lo que separa "en segundo plano" de "cerrado".
+void   flexBrowserSuspend();
+void   flexBrowserResume();
+bool   flexBrowserActive();          // la sesion sigue viva (Enter sin Exit)
+// Suelta SOLO la cache de fotogramas y devuelve los bytes liberados. La usa
+// "Optimizar Flex OS"; devolver 0 significa que no habia nada que soltar, y
+// entonces no se apunta ninguna cifra.
+size_t flexBrowserReleaseVisualCache();
 bool flexBrowserWantsClose();// la app pide cerrarse (el .ino llama a appClose)
 // true (y se limpia) si el navegador acaba de repintar su area de
 // contenido. El puente lo consulta para volver a dibujar el teclado

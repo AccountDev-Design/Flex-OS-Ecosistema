@@ -640,6 +640,22 @@ static void navEnter(){
   flexBrowserEnter();
 }
 
+// SUSPENDER / REANUDAR (multitarea real). navEnter() reinicia la sesion, asi
+// que NO puede usarse para volver de Recientes: el desplazamiento y la pestana
+// se perderian. Aqui se prepara lo mismo que prepara navEnter -- el teclado del
+// sistema, que es del puente y no del navegador -- y se llama a Resume, que
+// repinta desde el estado vivo.
+static void navSuspend(){ flexBrowserSuspend(); }
+static void navResume(){
+  if(gRelayout){ flexBrowserTick(); return; }
+  brKbWasOpen = false;
+  brKbLastTop = brKbLastBottom = -1;
+  kbExtrasOn = false;
+  mapaActivo = LAYOUT_ES; kbLangEs = true; kbShift = false;
+  kbApplySize();
+  flexBrowserResume();
+}
+
 static void navTick(){
   // 0) ¿SE CERRO EL TECLADO DESDE LA VUELTA ANTERIOR?
   //    Se comprueba ANTES de nada para que el borrado y el repintado
@@ -736,6 +752,8 @@ static void navEnter(){
   flxFlush(WIN_TOP, WIN_BOT);
 }
 static void navTick(){}
+static void navSuspend(){}
+static void navResume(){ navEnter(); }
 
 #endif // FLEXBR_ON
 #endif // FLEXOS_BROWSER_BRIDGE_H

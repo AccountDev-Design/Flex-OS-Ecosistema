@@ -82,3 +82,13 @@ long     map(long, long, long, long, long);
 #undef max
 #define min(a,b) ((a)<(b)?(a):(b))
 #define max(a,b) ((a)>(b)?(a):(b))
+
+// EspClass: en arduino-esp32 es el objeto global 'ESP'. Aqui se declara lo
+// unico que usa el sketch -- el tamano de la imagen de firmware, que
+// Almacenamiento ensena en su pantalla de detalle.
+class EspClass {
+public:
+  uint32_t getSketchSize();
+  uint32_t getFreeSketchSpace();
+};
+extern EspClass ESP;

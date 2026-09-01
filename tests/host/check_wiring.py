@@ -43,6 +43,18 @@ GANCHOS = [
     ("mediaStorageTick", "mediaIndexTick()", "el indice de medios nunca terminaria de construirse"),
     ("setup",          "flexSdBegin()",   "el controlador SDMMC no se prepararia y la tarjeta no montaria nunca"),
     ("loop",           "wifiAutoReconnectTick()", "la red guardada no se reconectaria tras arrancar"),
+    # MULTITAREA POR MEMORIA. Sin memTick() la medida se quedaria congelada en la
+    # del arranque: el selector, Almacenamiento y la puerta de admision de apps
+    # decidirian con cifras viejas. Sin memAlertTick() no habria ningun aviso.
+    # Sin optTick() el panel de "Optimizar Flex OS" se abriria y no avanzaria
+    # nunca de la primera etapa -- y como es dueno exclusivo de la pantalla,
+    # dejaria el sistema mirando un panel congelado.
+    ("loop",           "memTick()",       "la medida de memoria se quedaria congelada en la del arranque"),
+    ("loop",           "memAlertTick()",  "no saldria ningun aviso de memoria, ni el de proteccion"),
+    ("loop",           "optTick()",       "el panel de Optimizar Flex OS no avanzaria de etapa"),
+    ("loop",           "loopRateTick()",  "el ritmo del sistema que ensena Almacenamiento seria siempre 0"),
+    ("enterApp",       "memAdmitApp(",    "se abriria una app pesada invadiendo la reserva de seguridad"),
+    ("appSuspend",     "appEnforceMemoryBudget()", "nada recortaria memoria al acumularse apps en segundo plano"),
     ("setup",          "flexAudioBegin()","el codec no se sondearia y el audio quedaria desactivado sin motivo"),
     # Un dibujo recien creado tiene que aparecer en la Galeria sin que
     # nadie refresque a mano: sin esta invalidacion, el indice se queda
