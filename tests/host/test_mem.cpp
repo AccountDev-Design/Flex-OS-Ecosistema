@@ -170,47 +170,27 @@ static void testCanOpen(){
 
 // =============================================================
 static void testAlerts(){
-  std::printf("-- avisos y enfriamiento --\n");
+  std::printf("-- avisos secundarios y enfriamiento --\n");
   FlexMemAlerts a;
   flexMemAlertsReset(&a);
   FlexMemSnap s = base();
-  uint32_t t = 1000;
 
-  // Sin nada que decir.
-  CHECK(flexMemAlertPick(&s, 0, t, &a) == FLEXMEM_AL_NONE, "con 12 MB no hay nada que avisar");
-
-  // 8 MB -> aviso discreto, una sola vez.
-  s.psFree = MB(8); s.psLargest = MB(7);
-  CHECK(flexMemAlertPick(&s, 0, t, &a) == FLEXMEM_AL_PS_NOTICE, "8 MB -> aviso discreto");
-  t += 1000;
-  CHECK(flexMemAlertPick(&s, 0, t, &a) == FLEXMEM_AL_NONE,
-        "el mismo aviso no puede repetirse un segundo despues");
-  t += FLEXMEM_CD_MEM;
-  CHECK(flexMemAlertPick(&s, 0, t, &a) == FLEXMEM_AL_PS_NOTICE, "tras el enfriamiento vuelve a poder darse");
-
-  // Escalada: el critico es otra clase, con su propio enfriamiento, pero la
-  // separacion global lo retiene un momento.
-  flexMemAlertsReset(&a);
-  t = 100000;
-  s.psFree = MB(8);
-  CHECK(flexMemAlertPick(&s, 0, t, &a) == FLEXMEM_AL_PS_NOTICE, "primero el discreto");
+  // Los de PSRAM YA NO salen de aqui: los gobierna la maquina de nivel, para
+  // que no puedan repetirse mientras la condicion dura.
   s.psFree = MB(4); s.psLargest = MB(3);
-  CHECK(flexMemAlertPick(&s, 0, t + 1000, &a) == FLEXMEM_AL_NONE,
-        "separacion global: no se encadenan dos tarjetas seguidas");
-  CHECK(flexMemAlertPick(&s, 0, t + FLEXMEM_CD_GLOBAL + 1, &a) == FLEXMEM_AL_PS_CRIT,
-        "pasada la separacion, el critico si sale (es otra clase)");
+  CHECK(flexMemAlertPick(&s, 0, 100000, &a) == FLEXMEM_AL_NONE,
+        "quedarse sin PSRAM ya no genera un aviso desde aqui");
 
   // Fragmentacion: solo con memoria de sobra.
   flexMemAlertsReset(&a);
   s = base();
-  s.psFree = MB(12); s.psLargest = KB(400);
-  // Con ese bloque el nivel es CRITICO, asi que gana el aviso de memoria.
-  CHECK(flexMemAlertPick(&s, 0, 500000, &a) == FLEXMEM_AL_PS_CRIT,
-        "sin bloque contiguo manda el aviso critico, no el de fragmentacion");
-  flexMemAlertsReset(&a);
-  s.psLargest = MB(2);          // hay bloque de 1 MB: ya no es critico
+  s.psFree = MB(12); s.psLargest = MB(2);
   CHECK(flexMemFragClass(&s) == FLEXMEM_FRAG_HIGH, "12 MB con mayor hueco de 2 MB: fragmentacion alta");
-  CHECK(flexMemAlertPick(&s, 0, 500000, &a) == FLEXMEM_AL_FRAG, "ahora si toca el de fragmentacion");
+  CHECK(flexMemAlertPick(&s, 0, 500000, &a) == FLEXMEM_AL_FRAG, "toca el de fragmentacion");
+  CHECK(flexMemAlertPick(&s, 0, 500000 + FLEXMEM_CD_GLOBAL + 1, &a) == FLEXMEM_AL_NONE,
+        "y no se repite mientras dure su enfriamiento");
+  CHECK(flexMemAlertPick(&s, 0, 500000 + FLEXMEM_CD_FRAG + 1, &a) == FLEXMEM_AL_FRAG,
+        "pasado su enfriamiento puede volver a decirse");
 
   // SRAM baja
   flexMemAlertsReset(&a);
@@ -240,14 +220,134 @@ static void testAlerts(){
   CHECK(flexMemAlertPick(&s, 1, 800000 + FLEXMEM_CD_SD + 1, &a) == FLEXMEM_AL_SD_ERR,
         "pasado su enfriamiento puede volver a decirse");
 
+  // Separacion global: dos condiciones distintas no encadenan dos tarjetas.
+  flexMemAlertsReset(&a);
+  s = base(); s.inFree = KB(50); s.fsUsed = MB(7);
+  CHECK(flexMemAlertPick(&s, 0, 900000, &a) == FLEXMEM_AL_SRAM, "primero el mas grave");
+  CHECK(flexMemAlertPick(&s, 0, 900001, &a) == FLEXMEM_AL_NONE, "el siguiente espera su turno");
+  CHECK(flexMemAlertPick(&s, 0, 900000 + FLEXMEM_CD_GLOBAL + 1, &a) == FLEXMEM_AL_FLASH80,
+        "pasada la separacion, sale el segundo");
+
   // El reloj da la vuelta (49,7 dias): la resta sin signo sigue siendo correcta.
   flexMemAlertsReset(&a);
-  s = base(); s.psFree = MB(8); s.psLargest = MB(7);
+  s = base(); s.inFree = KB(50);
   uint32_t near = 0xFFFFF000u;
-  CHECK(flexMemAlertPick(&s, 0, near, &a) == FLEXMEM_AL_PS_NOTICE, "aviso justo antes de la vuelta");
-  uint32_t after = near + FLEXMEM_CD_MEM;        // desborda a proposito
-  CHECK(flexMemAlertPick(&s, 0, after, &a) == FLEXMEM_AL_PS_NOTICE,
+  CHECK(flexMemAlertPick(&s, 0, near, &a) == FLEXMEM_AL_SRAM, "aviso justo antes de la vuelta");
+  CHECK(flexMemAlertPick(&s, 0, near + FLEXMEM_CD_MEM, &a) == FLEXMEM_AL_SRAM,
         "el enfriamiento sigue midiendo bien despues de que millis() de la vuelta");
+}
+
+// =============================================================
+//  HISTERESIS  ·  el estado no puede parpadear
+//  ------------------------------------------------------------
+//  Es el nucleo de "no molestar": si el nivel entra y sale del aviso con
+//  cada repintado, el usuario ve notificaciones en bucle y el modo
+//  eficiente encendiendose y apagandose. Empeorar es inmediato; mejorar
+//  exige margen.
+// =============================================================
+static void testHysteresis(){
+  std::printf("-- histeresis del nivel --\n");
+  FlexMemAlerts a;
+  flexMemAlertsReset(&a);
+  FlexMemSnap s = base();
+
+  // Primera evaluacion: nivel crudo, y NO cuenta como empeoramiento (no habia
+  // nada de lo que empeorar).
+  CHECK(flexMemLevelStep(&s, &a) == FLEXMEM_LV_OK, "12 MB: se arranca en OK");
+  CHECK(a.rose == 0, "la primera evaluacion nunca es un empeoramiento");
+
+  // Empeorar es INMEDIATO.
+  s.psFree = MB(5) + KB(512);
+  CHECK(flexMemLevelStep(&s, &a) == FLEXMEM_LV_WARN, "5,5 MB -> WARN en el acto");
+  CHECK(a.rose == 1, "y se marca como empeoramiento");
+
+  // El caso exacto del enunciado: oscilar alrededor del corte de entrada NO
+  // puede sacar del estado.
+  for(int i = 0; i < 4; i++){
+    s.psFree = MB(6) + KB(64);          // justo por ENCIMA del corte de entrada
+    CHECK(flexMemLevelStep(&s, &a) == FLEXMEM_LV_WARN,
+          "6,06 MB no saca de WARN: hace falta pasar de 7 MB");
+    CHECK(a.rose == 0, "y volver a rozar el corte no es un empeoramiento nuevo");
+    s.psFree = MB(5) + KB(960);         // justo por debajo otra vez
+    CHECK(flexMemLevelStep(&s, &a) == FLEXMEM_LV_WARN, "y sigue en WARN al bajar");
+    CHECK(a.rose == 0, "sin generar un empeoramiento por cada oscilacion");
+  }
+
+  // Solo se sale con margen de verdad.
+  s.psFree = MB(7) + KB(256);
+  CHECK(flexMemLevelStep(&s, &a) == FLEXMEM_LV_NOTICE, "por encima de 7 MB si se sale de WARN");
+
+  // NOTICE tiene su propia banda muerta.
+  s.psFree = MB(10) + KB(256);
+  CHECK(flexMemLevelStep(&s, &a) == FLEXMEM_LV_NOTICE, "10,25 MB no saca de NOTICE (hace falta 11)");
+  s.psFree = MB(11) + KB(256);
+  CHECK(flexMemLevelStep(&s, &a) == FLEXMEM_LV_OK, "por encima de 11 MB si vuelve a OK");
+
+  // CRITICO: se entra por tres puertas y se sale por las tres.
+  flexMemAlertsReset(&a);
+  s = base();
+  flexMemLevelStep(&s, &a);
+  s.psFree = MB(4); s.psLargest = MB(3);
+  CHECK(flexMemLevelStep(&s, &a) == FLEXMEM_LV_CRITICAL, "4 MB -> CRITICO");
+  s.psFree = MB(5) + KB(512);
+  CHECK(flexMemLevelStep(&s, &a) == FLEXMEM_LV_CRITICAL, "5,5 MB no basta para salir de CRITICO");
+  s.psFree = MB(8); s.psLargest = KB(900);
+  CHECK(flexMemLevelStep(&s, &a) == FLEXMEM_LV_CRITICAL,
+        "con memoria pero sin bloque contiguo se sigue en CRITICO");
+  s.psLargest = MB(2);
+  CHECK(flexMemLevelStep(&s, &a) == FLEXMEM_LV_WARN,
+        "salir de CRITICO deja en WARN, no de un salto en NOTICE");
+  CHECK(flexMemLevelStep(&s, &a) == FLEXMEM_LV_NOTICE,
+        "y en la evaluacion siguiente se sigue bajando");
+
+  // EL HUECO QUE ESTO CIERRA. El umbral de salida de CRITICO (6 MB) es el
+  // mismo que el de entrada a WARN. Sin bajar de uno en uno, recuperarse hasta
+  // 6,06 MB saltaba a NOTICE y el primer repintado que bajara a 5,94 volvia a
+  // ser un EMPEORAMIENTO -- y con el, una notificacion nueva. Aqui se
+  // reproduce ese vaiven exacto y no puede generar ni un empeoramiento.
+  flexMemAlertsReset(&a);
+  s = base(); flexMemLevelStep(&s, &a);
+  s.psFree = MB(2); s.psLargest = MB(2);
+  CHECK(flexMemLevelStep(&s, &a) == FLEXMEM_LV_CRITICAL, "2 MB -> CRITICO");
+  int subidas = 0;
+  for(int i = 0; i < 6; i++){
+    s.psFree = MB(6) + KB(64);
+    flexMemLevelStep(&s, &a); if(a.rose) subidas++;
+    s.psFree = MB(5) + KB(960);
+    flexMemLevelStep(&s, &a); if(a.rose) subidas++;
+  }
+  CHECK(subidas == 0, "oscilar sobre el corte de 6 MB no produce ni un empeoramiento");
+
+  // La SRAM interna tambien retiene el estado critico.
+  flexMemAlertsReset(&a);
+  s = base(); flexMemLevelStep(&s, &a);
+  s.inFree = KB(20);
+  CHECK(flexMemLevelStep(&s, &a) == FLEXMEM_LV_CRITICAL, "SRAM a 20 KB -> CRITICO");
+  s.inFree = KB(44);      // por encima de MIN pero por debajo del umbral de salida
+  CHECK(flexMemLevelStep(&s, &a) == FLEXMEM_LV_CRITICAL, "44 KB no basta para salir");
+  s.inFree = KB(180);
+  // Se baja de uno en uno (ver flexMemLevelHyst): tres evaluaciones para
+  // volver a OK desde CRITICO. Son tres vueltas de loop(): milisegundos.
+  CHECK(flexMemLevelStep(&s, &a) == FLEXMEM_LV_WARN,   "con la SRAM recuperada empieza a bajar");
+  CHECK(flexMemLevelStep(&s, &a) == FLEXMEM_LV_NOTICE, "...sigue bajando");
+  CHECK(flexMemLevelStep(&s, &a) == FLEXMEM_LV_OK,     "...y vuelve a OK");
+
+  // El alivio automatico: solo con el sistema apretado, y como mucho cada minuto.
+  flexMemAlertsReset(&a);
+  s = base(); flexMemLevelStep(&s, &a);
+  CHECK(!flexMemReliefDue(&a, 1000), "en OK no se alivia nada");
+  s.psFree = MB(5) + KB(512);
+  flexMemLevelStep(&s, &a);
+  CHECK(flexMemReliefDue(&a, 1000), "en WARN toca aliviar");
+  flexMemReliefDone(&a, 1000);
+  CHECK(!flexMemReliefDue(&a, 1000 + 1000), "y no se repite un segundo despues");
+  CHECK(!flexMemReliefDue(&a, 1000 + FLEXMEM_RELIEF_MS - 1), "ni justo antes del periodo");
+  CHECK(flexMemReliefDue(&a, 1000 + FLEXMEM_RELIEF_MS), "pero si al cumplirse");
+
+  // Sin PSRAM medida no se inventa una maquina de estados.
+  FlexMemAlerts z; flexMemAlertsReset(&z);
+  FlexMemSnap n; memset(&n, 0, sizeof(n));
+  CHECK(flexMemLevelStep(&n, &z) == FLEXMEM_LV_OK, "sin PSRAM el nivel es OK y no cambia");
 }
 
 // =============================================================
@@ -280,6 +380,7 @@ int main(){
   testFrag();
   testCanOpen();
   testAlerts();
+  testHysteresis();
   testFmt();
   std::printf("=== %d comprobaciones, %d fallos ===\n", g_run, g_fail);
   return g_fail ? 1 : 0;

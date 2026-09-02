@@ -137,6 +137,72 @@ int flexMemCanOpen(const FlexMemSnap* s, int weight){
 }
 
 // -------------------------------------------------------------
+//  Nivel con histeresis
+//  ------------------------------------------------------------
+//  Empeorar es inmediato. Mejorar exige rebasar el umbral de SALIDA del
+//  nivel en el que se esta AHORA -- no el de entrada del nivel de abajo --,
+//  que es lo que crea la banda muerta y mata el parpadeo.
+// -------------------------------------------------------------
+int flexMemLevelHyst(const FlexMemSnap* s, int prevLevel){
+  int raw = flexMemLevel(s);
+  if(!s || s->psTotal == 0) return raw;
+  if(prevLevel < FLEXMEM_LV_OK || prevLevel > FLEXMEM_LV_CRITICAL) return raw;
+  if(raw >= prevLevel) return raw;                 // empeora (o sigue igual): inmediato
+
+  // Mejorar: la condicion que nos metio aqui tiene que haberse despejado con
+  // margen. Se comprueban las TRES por las que se entra a CRITICO, porque
+  // cualquiera de ellas basta para quedarse.
+  switch(prevLevel){
+    case FLEXMEM_LV_CRITICAL:
+      if(s->psFree < FLEXMEM_EXIT_CRIT_BYTES)            return FLEXMEM_LV_CRITICAL;
+      if(s->psLargest < FLEXMEM_EXIT_BLOCK_BYTES)        return FLEXMEM_LV_CRITICAL;
+      if(s->inTotal && s->inFree < FLEXMEM_EXIT_SRAM_BYTES) return FLEXMEM_LV_CRITICAL;
+      break;
+    case FLEXMEM_LV_WARN:
+      if(s->psFree < FLEXMEM_EXIT_WARN_BYTES)            return FLEXMEM_LV_WARN;
+      break;
+    case FLEXMEM_LV_NOTICE:
+      if(s->psFree < FLEXMEM_EXIT_NOTICE_BYTES)          return FLEXMEM_LV_NOTICE;
+      break;
+    default: break;
+  }
+  // SE BAJA DE UNO EN UNO. Sin esto queda un hueco: el umbral de SALIDA de
+  // CRITICO (6 MB) coincide con el de ENTRADA a WARN, asi que al recuperarse
+  // hasta 6,06 MB se saltaba a NOTICE... y el primer repintado que bajara a
+  // 5,94 MB volvia a ser un EMPEORAMIENTO -- y con el, una notificacion. Es
+  // exactamente el parpadeo que la histeresis existe para evitar, solo que
+  // desplazado un nivel. Bajando un escalon por evaluacion, salir de CRITICO
+  // deja en WARN, y de WARN solo se sale por encima de 7 MB.
+  //
+  // No cuesta tiempo perceptible: cada vuelta de loop() evalua una vez, asi
+  // que recuperarse del todo son tres vueltas -- milisegundos.
+  if(raw < prevLevel - 1) return prevLevel - 1;
+  return raw;
+}
+
+int flexMemLevelStep(const FlexMemSnap* s, FlexMemAlerts* a){
+  if(!a) return flexMemLevel(s);
+  int prev = a->levelSeen ? (int)a->level : FLEXMEM_LV_OK;
+  int lv   = a->levelSeen ? flexMemLevelHyst(s, prev) : flexMemLevel(s);
+  a->rose      = (a->levelSeen && lv > prev) ? 1 : 0;
+  a->level     = (uint8_t)lv;
+  a->levelSeen = 1;
+  return lv;
+}
+
+int flexMemReliefDue(const FlexMemAlerts* a, uint32_t nowMs){
+  if(!a) return 0;
+  if(!a->levelSeen || a->level < FLEXMEM_LV_WARN) return 0;   // solo con el sistema apretado
+  if(!a->reliefSeen) return 1;                                // nunca se alivio: toca
+  return (uint32_t)(nowMs - a->reliefMs) >= FLEXMEM_RELIEF_MS;
+}
+void flexMemReliefDone(FlexMemAlerts* a, uint32_t nowMs){
+  if(!a) return;
+  a->reliefMs = nowMs;
+  a->reliefSeen = 1;
+}
+
+// -------------------------------------------------------------
 //  Avisos
 // -------------------------------------------------------------
 void flexMemAlertsReset(FlexMemAlerts* a){
@@ -175,14 +241,9 @@ int flexMemAlertPick(const FlexMemSnap* s, int sdErr, uint32_t nowMs, FlexMemAle
   int cand[FLEXMEM_AL_N];
   int n = 0;
 
-  if(s->psTotal){
-    if(s->psFree < FLEXMEM_CRIT_BYTES || s->psLargest < FLEXMEM_BLOCK_HEAVY)
-      cand[n++] = FLEXMEM_AL_PS_CRIT;
-    else if(s->psFree < FLEXMEM_WARN_BYTES)
-      cand[n++] = FLEXMEM_AL_PS_WARN;
-    else if(s->psFree < FLEXMEM_NOTICE_BYTES)
-      cand[n++] = FLEXMEM_AL_PS_NOTICE;
-  }
+  // Los de PSRAM NO se generan aqui (ver la cabecera): mientras la condicion
+  // dura, repetir el mismo aviso solo seria insistir. De eso se encarga la
+  // transicion de nivel, que ocurre UNA vez.
   if(s->inTotal && s->inFree < FLEXMEM_SRAM_LOW_BYTES) cand[n++] = FLEXMEM_AL_SRAM;
   // La fragmentacion solo se avisa si ademas hay memoria de sobra: con poca
   // memoria libre el aviso util es el de memoria, no el de reparto.

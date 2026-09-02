@@ -231,6 +231,7 @@ const char* flexSdError()      { return sdErr ? sdErr : ""; }
 uint32_t    flexSdGeneration() { return sdGen; }
 void        flexSdPoke()       { if(!sdMounted) sdProbeRequested = true; }
 void        flexSdBusySet(bool b){ sdBusy = b; }
+bool        flexSdBusyGet()      { return sdBusy; }
 
 // -------------------------------------------------------------
 //  Sondeo. La inmensa mayoria de las vueltas de loop() salen por

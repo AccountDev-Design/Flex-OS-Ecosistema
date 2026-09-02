@@ -74,6 +74,36 @@ GANCHOS = [
     ("autoLockNow",    "hcClose(",        "bloquear con el modo abierto dejaria el estado a medias"),
 ]
 
+# Llamadas PROHIBIDAS dentro de una funcion: (funcion, llamada, motivo).
+# Es la otra mitad de GANCHOS. Un gancho comprueba que algo se llame; esto
+# comprueba que algo NO se llame desde donde no debe -- y ese "donde" suele
+# ser el hilo equivocado, que es justo lo que ni el compilador ni una prueba
+# de host pueden ver.
+PROHIBIDOS = [
+    # REGLA DE ORO: esp-hosted no se toca desde loopTask. Estas tres corren en
+    # el hilo de la interfaz, que esta suscrito al Task Watchdog y solo lo
+    # alimenta una vez por vuelta: levantar ahi el enlace SDIO con el C6 puede
+    # pasarse del plazo y provocar el PANIC "se reinicia al activar el Wi-Fi".
+    # La radio la despiertan wifiScanTask/wifiConnTask/wifiAutoConnTask.
+    ("wifiStartScan",    "wifiEnsureStaMode(", "levantaria esp-hosted desde loopTask (TWDT)"),
+    ("wifiStartConnect", "wifiEnsureStaMode(", "levantaria esp-hosted desde loopTask (TWDT)"),
+    ("connWifiSet",      "wifiEnsureStaMode(", "levantaria esp-hosted desde loopTask (TWDT)"),
+    # El apagado habla con el C6 igual que el encendido: va en wifiOffTask.
+    ("connWifiSet",      "WiFi.mode(",         "apagar la radio en loopTask bloquea el bucle"),
+    ("connWifiSet",      "WiFi.disconnect(",   "apagar la radio en loopTask bloquea el bucle"),
+    ("wifiExit",         "WiFi.mode(",         "apagar la radio en loopTask bloquea el bucle"),
+    ("wifiExit",         "WiFi.disconnect(",   "apagar la radio en loopTask bloquea el bucle"),
+    # RECIENTES ES UN SELECTOR DE APPS, NO UN PANEL DE MEMORIA. Ni la tarjeta
+    # ni la pantalla completa pueden volver a ensenar cifras de PSRAM: el
+    # diagnostico vive en Almacenamiento -> Detalles de memoria y sistema.
+    ("swDrawCard",       "flexMemFmt(",        "la tarjeta volveria a ser diagnostico tecnico"),
+    ("swDrawCard",       "memSnap(",           "la tarjeta volveria a ser diagnostico tecnico"),
+    ("swRender",         "flexMemFmt(",        "Recientes volveria a ensenar cifras de memoria"),
+    ("swRender",         "memSnap(",           "Recientes volveria a ensenar cifras de memoria"),
+    ("swRender",         "optStart(",          "el boton Optimizar no vuelve a Recientes"),
+    ("swTick",           "optStart(",          "el boton Optimizar no vuelve a Recientes"),
+]
+
 def cuerpo(src, nombre):
     """Devuelve el cuerpo de la funcion de nivel superior `nombre`, por conteo de llaves."""
     m = re.search(r"^[A-Za-z_][\w \*&:]*\b" + re.escape(nombre) + r"\s*\([^;{]*\)\s*\{", src, re.M)
@@ -132,6 +162,31 @@ def main(path):
             continue
         if llamada not in c:
             fallos.append("%s() no llama a %s -> %s" % (fn, llamada, motivo))
+
+    # --- 2b. llamadas prohibidas (el hilo equivocado, o UI ya retirada) ---
+    for fn, llamada, motivo in PROHIBIDOS:
+        c = cuerpo(src, fn)
+        if c is None:
+            fallos.append("no encuentro la funcion %s()" % fn)
+            continue
+        codigo = re.sub(r"/\*.*?\*/|//[^\n]*", "", c, flags=re.S)
+        if llamada in codigo:
+            fallos.append("%s() llama a %s -> %s" % (fn, llamada, motivo))
+
+    # --- 2c. quitar la interfaz de memoria NO puede apagar el sistema ------
+    # Se retiro el panel permanente de Recientes; lo que NO puede irse con el
+    # es la proteccion automatica. Si alguien borra estas llamadas creyendo
+    # que eran "parte del panel", el sistema se queda sin medir y sin avisar.
+    for fn, llamada, motivo in [
+        ("memAlertTick", "memShedAll(",      "sin alivio automatico solo quedaria el aviso"),
+        ("memAlertTick", "flexMemLevelStep(", "sin la maquina de nivel volveria el aviso por tick"),
+        ("enterApp",     "memAdmitApp(",      "sin presupuesto se abriria cualquier app pesada"),
+    ]:
+        c = cuerpo(src, fn)
+        if c is None:
+            fallos.append("no encuentro la funcion %s()" % fn)
+        elif llamada not in c:
+            fallos.append("%s() ya no llama a %s -> %s" % (fn, llamada, motivo))
 
     # --- 3. el reposo NO puede despertar esp-hosted -----------------
     # En ESP32-P4, WiFi.status()/getMode() no son getters inocuos: pasan por

@@ -117,6 +117,26 @@ typedef struct {
 #define FLEXMEM_SRAM_LOW_BYTES (64u * 1024u)
 #define FLEXMEM_SRAM_MIN_BYTES (40u * 1024u)
 
+// -------------------------------------------------------------
+//  HISTERESIS
+//  ------------------------------------------------------------
+//  Los umbrales de ENTRADA (arriba) y los de SALIDA (aqui) NO son los
+//  mismos, y esa es toda la idea: con un unico corte en 6 MB, una app que
+//  oscila entre 5,99 y 6,01 MB haria entrar y salir del estado de aviso
+//  varias veces por segundo -- y con el se encenderia y apagaria el modo
+//  eficiente y se dispararian notificaciones en bucle.
+//
+//  EMPEORAR ES INMEDIATO (proteger tarde no protege). MEJORAR exige rebasar
+//  un margen de 1 MB sobre el corte de entrada, que es aproximadamente lo
+//  que cuesta abrir cualquier pantalla del sistema: asi el estado no puede
+//  volver atras por el ruido de un repintado.
+// -------------------------------------------------------------
+#define FLEXMEM_EXIT_NOTICE_BYTES (11u * 1024u * 1024u)
+#define FLEXMEM_EXIT_WARN_BYTES   (7u  * 1024u * 1024u)
+#define FLEXMEM_EXIT_CRIT_BYTES   (6u  * 1024u * 1024u)
+#define FLEXMEM_EXIT_SRAM_BYTES   (56u * 1024u)
+#define FLEXMEM_EXIT_BLOCK_BYTES  (1536u * 1024u)
+
 // Coste tipico que hay que poder cubrir ANTES de abrir. No es lo que la
 // app va a gastar (eso se mide despues, al abrirla): es el colchon que
 // hace falta para que su construccion no deje al sistema sin aire.
@@ -177,13 +197,40 @@ typedef struct {
   uint16_t seen;                 // bit i = el aviso i ya se dio alguna vez
   uint32_t lastAnyMs;
   uint8_t  lastAnySeen;
+  // ---- Maquina de nivel con histeresis (ver flexMemLevelStep) ----
+  uint8_t  level;                // nivel PUBLICADO (ya con histeresis)
+  uint8_t  levelSeen;            // 0 = todavia sin primera evaluacion
+  uint8_t  rose;                 // 1 = la ultima evaluacion EMPEORO el nivel
+  uint32_t reliefMs;             // millis del ultimo alivio automatico
+  uint8_t  reliefSeen;
 } FlexMemAlerts;
 
 void flexMemAlertsReset(FlexMemAlerts* a);
-// Decide QUE aviso toca ahora (el mas grave que cumpla su enfriamiento) y lo
-// anota. Devuelve FLEXMEM_AL_NONE si no toca ninguno. 'sdState' es el estado
-// del modulo de tarjeta: se le pasa tal cual y solo se mira si es de error
-// (sdErr != 0). NO consulta la tarjeta: aqui no se sondea nada.
+
+// -------------------------------------------------------------
+//  NIVEL CON HISTERESIS
+//  ------------------------------------------------------------
+//  flexMemLevel() es el nivel INSTANTANEO y sigue siendo lo que usan las
+//  decisiones puntuales ("¿cabe esta app?"). flexMemLevelStep() es el nivel
+//  SOSTENIDO: el que gobierna lo que el usuario VE, y por eso no puede
+//  cambiar con el ruido. Actualiza el estado y devuelve el nivel nuevo;
+//  a->rose queda a 1 solo si esta evaluacion lo ha EMPEORADO, que es el
+//  unico instante en el que tiene sentido actuar o avisar.
+// -------------------------------------------------------------
+int  flexMemLevelStep(const FlexMemSnap* s, FlexMemAlerts* a);
+int  flexMemLevelHyst(const FlexMemSnap* s, int prevLevel);   // sin tocar el estado
+
+// ALIVIO AUTOMATICO. No es un aviso: no se ve. Mientras el sistema siga
+// apretado se puede repetir, pero como mucho cada FLEXMEM_RELIEF_MS, para que
+// una app que reserva sin parar no convierta el alivio en un bucle.
+#define FLEXMEM_RELIEF_MS (60u * 1000u)
+int  flexMemReliefDue(const FlexMemAlerts* a, uint32_t nowMs);
+void flexMemReliefDone(FlexMemAlerts* a, uint32_t nowMs);
+// AVISOS SECUNDARIOS: fragmentacion, SRAM interna, flash y tarjeta. Los de
+// PSRAM ya NO salen de aqui -- los gobierna la maquina de nivel con histeresis
+// (flexMemLevelStep), que es lo que impide que se repitan mientras la
+// condicion dura. Devuelve FLEXMEM_AL_NONE si no toca ninguno. 'sdErr' es un
+// dato que pasa el llamante: aqui no se consulta la tarjeta ni se sondea nada.
 int  flexMemAlertPick(const FlexMemSnap* s, int sdErr, uint32_t nowMs, FlexMemAlerts* a);
 
 // -------------------------------------------------------------

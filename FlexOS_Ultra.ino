@@ -732,7 +732,6 @@ static bool gWifiHostedPinsOk = false;        // los siete pines del C6 quedaron
 static bool gWifiAutoTrusted = false;         // hubo al menos una conexion manual correcta
 static bool gWifiAutoInterrupted = false;     // el ultimo intento automatico termino en reset
 static bool gWifiBootAttempt = false;         // la tarea actual fue lanzada por el arranque
-
 // Estado de las OTRAS dos radios, aqui arriba por el mismo motivo que
 // gNetOnline: la pantalla de Ajustes lee los tres para pintar la categoria
 // "Red e Internet", y esta ANTES en el archivo que la seccion de radio.
@@ -764,6 +763,42 @@ struct AppTrLayer {
   uint32_t t0us, durus;     // reloj monotonico real
   int      by0, by1;        // banda que ocupo en el cuadro anterior
 };
+
+// #############################################################
+// ##  DIAGNOSTICO WI-FI / microSD  ·  APAGADO por defecto
+// ##  ------------------------------------------------------
+// ##  Con FLEXOS_DIAG_WIFI_SD en 0 todo esto compila a NADA: ni una
+// ##  variable, ni una rama, ni un byte. A 1 imprime por Serial la foto
+// ##  de memoria y el estado de tarjeta y radio en cada punto critico del
+// ##  arranque del enlace con el C6.
+// ##
+// ##  Para que sirve: el PANIC al encender el Wi-Fi no se puede reproducir
+// ##  en el PC (no hay C6, ni SDIO, ni watchdog de hardware). Esto es lo
+// ##  que permite sacar de la placa la traza que si lo demuestra: si el
+// ##  ultimo checkpoint impreso antes del reinicio es "antes de
+// ##  WiFi.mode(STA)", el bloqueo esta en el arranque del transporte; si
+// ##  es otro, esta donde diga.
+// ##
+// ##  Nunca imprime dentro de una ISR ni de una seccion critica.
+// #############################################################
+#define FLEXOS_DIAG_WIFI_SD 0
+
+#if FLEXOS_DIAG_WIFI_SD
+static void flexDiagWifi(const char* where){
+  Serial.printf("[DIAG %8lu] %-28s PSRAM %u KB (bloque %u KB)  SRAM %u KB (bloque %u KB)  "
+                "SD est=%d busy=%d  radio=%d pines=%d\n",
+                (unsigned long)millis(), where ? where : "",
+                (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024u),
+                (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024u),
+                (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024u),
+                (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024u),
+                flexSdState(), (int)flexSdBusyGet(),
+                (int)gWifiDriverOn, (int)gWifiHostedPinsOk);
+}
+#define FLEXDIAG_WIFI(w) flexDiagWifi(w)
+#else
+#define FLEXDIAG_WIFI(w) ((void)0)
+#endif
 
 // #############################################################
 // ##  CAPA DE HARDWARE  (reutilizada de ArduOS - datos del
@@ -2918,6 +2953,12 @@ static const uint8_t FONT5x7[95][5] = {
 // Glifos extra: ¿ (invertido) y ¡ (invertido)
 static const uint8_t GLYPH_INVQ[5]    = {0x30,0x48,0x45,0x40,0x20};
 static const uint8_t GLYPH_INVEXCL[5] = {0x00,0x00,0x7D,0x00,0x00};
+// PUNTO MEDIO (U+00B7). Faltaba: mapCP lo mandaba a '?' y por eso los
+// separadores de las etiquetas pequenas -- "Notas · Pausada · 180 KB" -- salian
+// como interrogaciones en la placa. La fuente vectorial (tamanos >= 2) SI lo
+// tenia, asi que el fallo solo se veia en el texto de tamano 1: exactamente lo
+// que mostraba la captura de Recientes.
+static const uint8_t GLYPH_MIDDOT[5] = {0x00,0x08,0x08,0x08,0x00};
 
 // Tipos de acento (se dibujan sobre/bajo el glifo base)
 enum { ACC_NONE=0, ACC_ACUTE, ACC_GRAVE, ACC_TILDE, ACC_DIAER, ACC_CIRC, ACC_CED };
@@ -2944,6 +2985,7 @@ static void mapCP(uint32_t cp, uint8_t &base, uint8_t &acc){
     case 0xE3: base='a'; acc=ACC_TILDE; return;   case 0xF5: base='o'; acc=ACC_TILDE; return;
     case 0xE7: base='c'; acc=ACC_CED; return;     case 0xC7: base='C'; acc=ACC_CED; return;
     case 0xBF: base=1; return;                    case 0xA1: base=2; return;
+    case 0xB7: base=3; return;                    // punto medio: separador de etiquetas
     default:   base='?'; return;
   }
 }
@@ -2952,6 +2994,7 @@ static void drawGlyphRaw(int x, int y, uint8_t base, int s, uint16_t col){
   const uint8_t* g;
   if(base == 1) g = GLYPH_INVQ;
   else if(base == 2) g = GLYPH_INVEXCL;
+  else if(base == 3) g = GLYPH_MIDDOT;
   else { int idx = (int)base - 0x20; if(idx < 0 || idx > 94) return; g = FONT5x7[idx]; }
   for(int c = 0; c < 5; c++){
     uint8_t bits = g[c];
@@ -2986,6 +3029,7 @@ static void drawGlyphSmooth(int x, int y, uint8_t base, int s, uint16_t col, uin
   const uint8_t* g;
   if(base == 1) g = GLYPH_INVQ;
   else if(base == 2) g = GLYPH_INVEXCL;
+  else if(base == 3) g = GLYPH_MIDDOT;
   else { int idx = (int)base - 0x20; if(idx < 0 || idx > 94) return; g = FONT5x7[idx]; }
   if(s <= 1){
     for(int c = 0; c < 5; c++){ uint8_t bits = g[c];
@@ -6482,9 +6526,12 @@ static void sysNotify(const char* title, const char* sub);  // aviso REAL por la
 static void appMemForget(int id);                           // olvida la huella medida de una app cerrada
 static void memTick();                                      // muestreo periodico (lo llama loop)
 static void memAlertTick();                                 // avisos de memoria con enfriamiento
+static bool wifiRadioBusy();                                // hay una operacion de radio en vuelo
 // ---- Optimizar Flex OS (motor junto a themeChanged: ve todos los buffers) ----
-enum { OPT_HOST_ALM = 0, OPT_HOST_SW = 1 };
-static void optStart(int host);                             // arranca la secuencia (no bloquea)
+// Se abre SOLO desde Almacenamiento -> Detalles de memoria y sistema. Ya no
+// vive en Recientes: alli era un boton permanente para un problema que casi
+// nunca existe, y el sistema ahora libera memoria por su cuenta (memAlertTick).
+static void optStart();                                     // arranca la secuencia (no bloquea)
 static bool optActive();                                    // el panel esta a la vista
 static void optTick();                                      // una etapa por vuelta de loop
 // TRANSICIONES INTERRUMPIBLES (ver el bloque grande mas abajo). Se declaran
@@ -10710,7 +10757,13 @@ static bool appTerminate(int id, bool force){
   // NO se cierra y su contenido sigue vivo en RAM. Perder el trabajo del usuario
   // en silencio para "liberar recursos" no es una opcion.
   if(!saved && !force) return false;
+  // El close() de una app puede tardar: el del navegador espera a que su tarea
+  // de red muera de verdad (hasta 3 s). loopTask esta suscrito al Task Watchdog
+  // y solo lo alimenta una vez por vuelta, asi que se le da de comer a ambos
+  // lados de la llamada.
+  flexFeedWdt();
   if(h && h->close) h->close();
+  flexFeedWdt();
   gAppState[id] = ALIFE_CLOSED;
   gAppSeenMs[id] = 0;
   appMemForget(id);                 // su huella medida deja de existir con ella
@@ -10831,7 +10884,10 @@ static void memTick(){
   // presion seguia alta; en cuanto vuelve a haber holgura de verdad (nivel
   // OPTIMO, no solo "ya no critico") se devuelve el aspecto completo. Nunca se
   // guarda ni se pregunta: no es una preferencia del usuario.
-  if(gEffMode && blk && flexMemLevel(&gMem) == FLEXMEM_LV_OK){
+  // Se lee el nivel SOSTENIDO (con histeresis), no el instantaneo: si no, un
+  // repintado que baja la memoria un instante volveria a encender el modo
+  // eficiente justo despues de apagarlo.
+  if(gEffMode && blk && gMemAlerts.levelSeen && gMemAlerts.level == FLEXMEM_LV_OK){
     gEffMode = false;
     glcValid = false; gHomeDirty = true; qsDirty = true;
   }
@@ -11019,12 +11075,25 @@ static void appDenyMemory(int id, int verdict){
 }
 
 // -------------------------------------------------------------
-//  5) AVISOS
+//  5) MEMORIA AUTOMATICA  ·  primero actuar, avisar solo si hace falta
 //  ------------------------------------------------------------
-//  Quien decide QUE aviso toca (y si toca) es FlexOS_Mem.cpp, con su
-//  enfriamiento por clase y su separacion global. Aqui solo se le pasa la
-//  medida y se convierte la respuesta en un texto que explique el EFECTO
-//  -- "podria tardar mas en abrirse una imagen" -- y no el mecanismo.
+//  EL PRINCIPIO: el usuario no tiene por que pensar en la RAM. Con memoria
+//  suficiente NO se ve absolutamente nada -- ni banner, ni barra, ni icono,
+//  ni recordatorio. Cuando el sistema se aprieta, PRIMERO se arregla solo, y
+//  unicamente si despues de arreglarlo sigue apretado se dice una vez.
+//
+//  LA SECUENCIA, en orden:
+//    1. Nivel SOSTENIDO con histeresis (flexMemLevelStep). Empeorar es
+//       inmediato; mejorar exige margen, asi que el estado no parpadea.
+//    2. OK y NOTICE (por encima de 6 MB): no se hace ni se dice nada.
+//    3. Al EMPEORAR a WARN o CRITICAL -- o cada FLEXMEM_RELIEF_MS mientras
+//       siga apretado -- se sueltan recursos reconstruibles y se vuelve a
+//       MEDIR. Esto no se ve: es el sistema haciendo su trabajo.
+//    4. Solo si tras el alivio SIGUE en WARN o CRITICAL se saca UNA tarjeta
+//       por la isla de notificaciones, que es temporal y no cambia el layout.
+//
+//  Por que esto y no un panel permanente: un aviso que esta siempre deja de
+//  leerse, y un boton que casi nunca hace falta ocupa sitio todo el rato.
 //
 //  NO se avisa desde cualquier pantalla: en el bloqueo, en Modo seguro, en
 //  mitad de un borrado o de una transicion, una tarjeta que aparece es una
@@ -11034,20 +11103,55 @@ static void appDenyMemory(int id, int verdict){
 // -------------------------------------------------------------
 static void memAlertTick(){
   if(gSafeMode || gFrPending) return;
+
+  // ---- 1) nivel sostenido ----
+  // Se actualiza SIEMPRE, en cualquier pantalla: es una comparacion de
+  // enteros sin efectos secundarios, y congelarla mientras el usuario esta en
+  // Recientes o en el explorador dejaria el estado (y con el, el modo visual
+  // eficiente) atascado en el ultimo valor que se vio desde Inicio.
+  uint32_t now = millis();
+  int lv = flexMemLevelStep(memSnap(), &gMemAlerts);
+  bool rose = gMemAlerts.rose != 0;
+
+  // Lo que SI se limita por pantalla es ACTUAR y AVISAR: soltar buffers en
+  // mitad de una animacion o sacar una tarjeta sobre el bloqueo no ayuda a
+  // nadie.
   if(gState != ST_HOME && gState != ST_APP) return;
   if(appTrVisible()) return;                 // en mitad de una animacion, nadie mas compone
+  if(optActive()) return;                    // el panel de Optimizar ya esta haciendo esto
+  // COORDINACION CON LA RADIO. Con el enlace del C6 levantandose, el alivio
+  // automatico espera: no es urgente y el handshake SDIO si es sensible al
+  // tiempo. Es una cesion no bloqueante y muy localizada -- se reintenta en la
+  // vuelta siguiente -- y no un candado global.
+  if(wifiRadioBusy()) return;
+
+  // ---- 2) con holgura, silencio absoluto ----
+  if(lv >= FLEXMEM_LV_WARN){
+    // ---- 3) ALIVIO AUTOMATICO: al empeorar, y luego a lo sumo cada minuto ----
+    if(rose || flexMemReliefDue(&gMemAlerts, now)){
+      flexMemReliefDone(&gMemAlerts, now);
+      memShedAll(0);                         // caches del sistema + apps suspendidas
+      memSampleNow();
+      lv = flexMemLevelStep(memSnap(), &gMemAlerts);
+      // ---- 4) ¿se arreglo solo? entonces ni una tarjeta ----
+      if(lv < FLEXMEM_LV_WARN) rose = false;
+      else if(rose){
+        if(lv >= FLEXMEM_LV_CRITICAL)
+          sysNotify("Memoria cr\xC3\xADtica",
+                    "Flex OS est\xC3\xA1 protegiendo el sistema. Cierra una app.");
+        else
+          sysNotify("Memoria casi llena",
+                    "Flex OS liber\xC3\xB3 recursos en segundo plano.");
+      }
+    }
+  }
+
+  // ---- Avisos SECUNDARIOS (fragmentacion, SRAM, flash, tarjeta) ----
+  // Son condiciones distintas de "queda poca PSRAM" y tienen su propio
+  // enfriamiento por clase; los de PSRAM ya no salen de aqui.
   int sdErr = (flexSdState() != FLEXSD_ABSENT && flexSdState() != FLEXSD_READY) ? 1 : 0;
-  int k = flexMemAlertPick(memSnap(), sdErr, millis(), &gMemAlerts);
+  int k = flexMemAlertPick(memSnap(), sdErr, now, &gMemAlerts);
   switch(k){
-    case FLEXMEM_AL_PS_NOTICE:
-      sysNotify("Memoria en segundo plano aumentando",
-                "Puedes optimizar Flex OS si notas lentitud"); break;
-    case FLEXMEM_AL_PS_WARN:
-      sysNotify("Memoria casi llena",
-                "Cierra apps que no uses o pulsa Optimizar Flex OS"); break;
-    case FLEXMEM_AL_PS_CRIT:
-      sysNotify("Flex OS est\xC3\xA1 protegiendo la memoria",
-                "Cierra una app antes de abrir otra pesada"); break;
     case FLEXMEM_AL_FRAG:
       sysNotify("Memoria libre repartida en trozos peque\xC3\xB1os",
                 "Las im\xC3\xA1genes o apps pesadas pueden tardar m\xC3\xA1s"); break;
@@ -11083,6 +11187,8 @@ static void memAlertTick(){
 // La app en primer plano nunca entra en el reparto, y una con trabajo real en
 // segundo plano (lista blanca) tampoco.
 static void appEnforceMemoryBudget(){
+  FLEXDIAG_WIFI("appEnforceMemoryBudget");
+  if(wifiRadioBusy()) return;              // la radio primero (ver wifiRadioBusy)
   memSampleNow();
   if(flexMemLevel(memSnap()) != FLEXMEM_LV_CRITICAL) return;
 
@@ -12884,8 +12990,6 @@ static void bienTick(){ if(gMinChanged) bienRender(); }
 // ficheros (menu de pulsacion larga, renombrar, papelera): necesita fkMenu*,
 // fkAsk*, fkName* y fkTrash*, que se definen despues de este punto. Aqui solo
 // quedaba su version antigua de miniaturas generadas, que ya no existe.
-
-
 
 // #############################################################
 // ##  MODO PC  (Milestone 4)  ·  Samsung DeX STANDALONE
@@ -19912,7 +20016,10 @@ static void vidSuspend(){
 // devuelve 0, que es lo que hace que el optimizador no se apunte bytes que no
 // libero. Existe para el caso en que la app quedara suspendida por otra via.
 static size_t vidShed(){
-  if(vidKind == VK_NONE) return 0;
+  // Igual que en la Galeria: se comprueba que haya algo pesado ANTES de decir
+  // que se solto. vidSuspend ya libera al pasar a segundo plano, asi que lo
+  // normal es que aqui no quede nada -- y entonces la respuesta honesta es 0.
+  if(vidKind == VK_NONE && !vidPhotoBuf) return 0;
   vidReleaseMedia(true);             // conserva el segundo de reproduccion
   return 1;
 }
@@ -20082,11 +20189,19 @@ static void camDrawUI(){
   if(camRec){ fillCircle(SCR_W / 2 - 42, 60, 6, rgb565(230,60,60)); drawText(SCR_W / 2 - 30, 54, "REC", 2, rgb565(230,60,60)); }
 }
 static void camRenderAll(){ gClipY0 = 0; gClipY1 = SCR_H - 1; camRenderPreview(); camDrawUI(); flxFlushAll(); }
+// El buffer del "sensor" en PSRAM, aparte del reinicio de ajustes. Los dos
+// caminos que lo necesitan -- abrir la app y volver a ella despues de que el
+// gestor de memoria lo soltara -- comparten ESTA funcion, y solo el primero
+// toca los ajustes del usuario.
+static bool camEnsureScene(){
+  if(camScene) return true;
+  camScene = (uint16_t*)heap_caps_malloc((size_t)CAM_SW * CAM_SH * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(camScene && !camCapture(camScene)) camGenScene();   // camara real si hay sensor; si no, patron
+  return camScene != NULL;
+}
 static void camEnter(){
-  if(!camScene){
-    camScene = (uint16_t*)heap_caps_malloc((size_t)CAM_SW * CAM_SH * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if(camScene && !camCapture(camScene)) camGenScene();   // camara real si hay sensor; si no, patron
-  }
+  camEnsureScene();
+  // ABRIR la app SI reinicia los ajustes: es una sesion nueva.
   camZoom = 1.0f; camRec = false; camMode = 0; camNight = false; camRaw = false; camExpo = 50; camEisX = 0; camEisY = 0;
   if(camScene) camRenderAll();
 }
@@ -20124,9 +20239,15 @@ static void camTick(){
 static void camSuspend(){
   camRec = false;                        // grabar en segundo plano no es una funcion real de este OS
 }
+// REANUDAR NO ES ABRIR. Antes, si el gestor de memoria habia soltado camScene,
+// esto caia en camEnter() y con el se iban el modo, el zoom, la exposicion, el
+// modo noche y RAW: volver de Recientes reiniciaba la camara en silencio. Ahora
+// se rehace SOLO el buffer -- que es justo lo que 'shed' declara reconstruible
+// -- y los ajustes del usuario sobreviven.
 static void camResume(){
-  camRec = false;
-  if(camScene) camRenderAll(); else camEnter();
+  camRec = false;                          // grabar no sobrevive a segundo plano
+  camEnsureScene();
+  if(camScene) camRenderAll();
 }
 // SOLTAR SIN CERRAR. El "sensor" en PSRAM se regenera al volver (camResume),
 // asi que en segundo plano no tiene por que estar reservado.
@@ -23755,7 +23876,7 @@ static void almDetailTick(){
     int sy = ALMD_VY0 + almDetSecTop(0) - almDetScroll;
     int by = sy + 8 + 26;
     if(T.y >= by && T.y <= by + ALMD_BH && T.x >= ALMD_BX && T.x <= ALMD_BX + ALMD_BW){
-      optStart(OPT_HOST_ALM);
+      optStart();
       return;
     }
     return;
@@ -23787,7 +23908,7 @@ static void almTick(){
   if(almScreen == ALM_SCR_DETAIL){ almDetailTick(); return; }
   if(!T.tap) return;
   if(almDetY1 > almDetY0 && T.y >= almDetY0 && T.y <= almDetY1){
-    if(almOptX1 > almOptX0 && T.x >= almOptX0 && T.x <= almOptX1) optStart(OPT_HOST_ALM);
+    if(almOptX1 > almOptX0 && T.x >= almOptX0 && T.x <= almOptX1) optStart();
     else                                                          almDetailEnter();
     return;
   }
@@ -27139,10 +27260,14 @@ static void wxLockCard(int y){
 #define SW_THUMB_MAX  4
 #define TH_W    150
 #define TH_H    250
+// GEOMETRIA. Al quitar la cabecera de memoria (132 px) la tarjeta sube y crece:
+// de 384 a 480 px de alto, empezando 100 px mas arriba. El area de imagen queda
+// en 244x404, que es exactamente la proporcion de la miniatura (150x250), asi
+// que se ve mas grande SIN deformarse ni un pixel.
 #define SW_CW   260
-#define SW_CH   384
+#define SW_CH   480
 #define SW_STEP 288
-#define SW_TOP  192       // debajo de la cabecera de estado (SWH_Y + SWH_H)
+#define SW_TOP  92
 
 struct AppTask { uint8_t appID; bool used; uint16_t* thumb; };   // estado suspendido + miniatura
 static AppTask swTasks[SW_MAX];
@@ -27150,8 +27275,6 @@ static int   swCount = 0;
 static float swScrollPx = 0, swVel = 0, swLiftY = 0;
 static int   swLiftCard = -1, swGesture = 0;                     // 0 nada, 1 horizontal, 2 vertical
 static float swStartX, swStartY, swLastX2, swLastY2;
-static uint32_t swHdrMs = 0, swHdrSig = 0;                       // ultimo refresco de la cabecera y su firma
-#define SW_HDR_MS   1000                                         // cadencia de las cifras de la cabecera
 #define SW_LONG_MS  480                                          // mantener pulsado -> ficha de la app
 
 // PRESUPUESTO DE MINIATURAS. Se sueltan las mas antiguas ANTES de reservar
@@ -27287,129 +27410,40 @@ static void swCardFrame(int x, int y, int w, int h, int rad){
   drawRoundRect(x, y, w, h, rad, TH_BORDER);
 }
 // #############################################################
-// ##  CABECERA DE RECIENTES  ·  estado real del sistema
+// ##  RECIENTES  ·  un SELECTOR DE APPS, no un panel de memoria
 // ##  ------------------------------------------------------
-// ##  Tres cosas, y las tres medidas: cuantas apps hay y en que
-// ##  estado, cuanta PSRAM queda de la que el chip inicializo de
-// ##  verdad (no la del datasheet), y el acceso a Optimizar.
+// ##  QUE SE QUITO Y POR QUE. Aqui vivia una cabecera permanente con el
+// ##  recuento de apps por estado, "PSRAM disponible: X / 32 MB", una
+// ##  barra de ocupacion y un boton "Optimizar Flex OS". Ocupaba 132 px
+// ##  -- una sexta parte de la pantalla -- en TODAS las aperturas, y lo
+// ##  que informaba no era accionable: quien abre Recientes quiere
+// ##  cambiar de app, no auditar la RAM.
 // ##
-// ##  SE REPINTA SOLA, Y SOLO ELLA. La banda de la cabecera y la de
-// ##  las tarjetas son disjuntas: mover el carrusel no toca la
-// ##  cabecera, y refrescar las cifras (una vez por segundo como
-// ##  mucho) no toca el carrusel. Sin esto, un dato que cambia cada
-// ##  segundo obligaria a repintar 480x800 enteros durante el
-// ##  desplazamiento.
+// ##  El sistema de medida NO se ha tocado: memTick() sigue midiendo,
+// ##  el presupuesto sigue decidiendo que se abre y memAlertTick() sigue
+// ##  avisando -- pero solo cuando de verdad hace falta, y por la isla de
+// ##  notificaciones, que es temporal y no cambia el layout. El
+// ##  diagnostico completo vive donde corresponde: Almacenamiento ->
+// ##  Detalles de memoria y sistema, junto al boton Optimizar.
 // ##
-// ##  MATERIAL: uiWallSurface, que es el punto unico Plano/Liquid
-// ##  Glass para lo que se apoya en el wallpaper. En Plano no hay
-// ##  transparencias aqui, como en el resto del sistema.
+// ##  Lo que queda: titulo, tarjetas (mas altas, porque ahora cabe),
+// ##  nombre, un estado discreto, el punto de cambios sin guardar, los
+// ##  gestos de siempre y "Cerrar todas".
 // #############################################################
-#define SWH_X     16
-#define SWH_Y     40
-#define SWH_W     (SCR_W - 32)
-#define SWH_H     132
-#define SWH_BAND0 (SWH_Y - 6)
-#define SWH_BAND1 (SWH_Y + SWH_H + 6)
-// Boton "Optimizar Flex OS" dentro de la cabecera (geometria unica: la
-// comparten el dibujo y el hit-test, asi no pueden separarse).
-#define SWO_X     (SWH_X + 16)
-#define SWO_Y     (SWH_Y + 78)
-#define SWO_W     (SWH_W - 32)
-#define SWO_H     42
 
-// Banda de las tarjetas. Disjunta de la de la cabecera a proposito (ver arriba).
+// Banda de las tarjetas: lo unico que se repinta al mover el carrusel. Antes
+// habia que dejarla disjunta de la cabecera; ahora que no hay cabecera, cubre
+// todo lo que puede moverse y ni una fila mas.
 #define SWC_BAND0 (SW_TOP - 10)
 #define SWC_BAND1 (SW_TOP + SW_CH + 18)
 
-// Color de la barra de memoria por SALUD, no por gusto: verde optimo,
-// ambar atencion, rojo critico. Son los mismos tres del resto del sistema.
-static uint16_t swHealthCol(){
-  switch(flexMemHealth(memSnap())){
-    case FLEXMEM_H_CRIT:  return TH_ERR;
-    case FLEXMEM_H_WATCH: return TH_WARN;
-    default:              return TH_OK;
-  }
-}
-
-// Recuento de la cabecera.
-//   abiertas -> todas las que tienen tarjeta: su estado sigue vivo.
-//   pausadas -> conservan ademas sus recursos cargados.
-//   guardadas-> ya soltaron los pesados (ver gAppShed) y los rehacen al volver.
-// "Abiertas" NO es "en primer plano": desde Recientes no hay ninguna en primer
-// plano -- entrar aqui suspende la que estuviera --, asi que contar solo esas
-// diria siempre cero y seria justo lo contrario de lo que el usuario ve.
-static void swCounts(int* tot, int* pau, int* sav){
-  *tot = swCount; *pau = *sav = 0;
-  for(int i = 0; i < swCount; i++){
-    int id = swTasks[i].appID;
-    if(gAppState[id] == ALIFE_RUNNING || gAppState[id] == ALIFE_RESUMING) continue;
-    if(gAppShed[id]) (*sav)++;
-    else             (*pau)++;
-  }
-}
-
-// Estado de UNA tarjeta, en las palabras del usuario.
+// Estado de UNA tarjeta, en las palabras del usuario. Es lo unico de la
+// multitarea que sigue siendo visible de forma permanente, y lo es porque
+// responde a una pregunta que el usuario SI se hace al mirar la tarjeta:
+// "¿esto sigue como lo deje?".
 static const char* swStateName(int id){
   if(gAppState[id] == ALIFE_RUNNING || gAppState[id] == ALIFE_RESUMING) return "Activa";
   return gAppShed[id] ? "Estado guardado" : "Pausada";
-}
-
-// Dibuja la cabecera en el lienzo activo (no publica: lo hace el llamante).
-static void swDrawHeader(){
-  const FlexMemSnap* m = memSnap();
-  uiWallSurface(SWH_X, SWH_Y, SWH_W, SWH_H, 20, uiGlass ? TH_WALLSURF2 : TH_WALLSURF, 10);
-
-  int tot, pau, sav;
-  swCounts(&tot, &pau, &sav);
-  char l1[80];
-  snprintf(l1, sizeof(l1), "%d app%s abierta%s  \xC2\xB7  %d pausada%s  \xC2\xB7  %d con estado guardado",
-           tot, tot == 1 ? "" : "s", tot == 1 ? "" : "s",
-           pau, pau == 1 ? "" : "s", sav);
-  drawTextClip(SWH_X + 16, SWH_Y + 12, l1, 1, TH_ONWALL2, SWH_X + SWH_W - 16);
-
-  char l2[72];
-  if(m->psTotal){
-    char fr[24], to[24];
-    flexMemFmt(m->psFree, fr, sizeof(fr));
-    flexMemFmt(m->psTotal, to, sizeof(to));
-    snprintf(l2, sizeof(l2), "PSRAM disponible: %s / %s", fr, to);
-  } else {
-    snprintf(l2, sizeof(l2), "PSRAM: No disponible en esta placa");
-  }
-  drawTextClip(SWH_X + 16, SWH_Y + 30, l2, 2, TH_ONWALL, SWH_X + SWH_W - 16);
-
-  // Barra de OCUPACION (lo usado), con el color de la salud.
-  int bx = SWH_X + 16, bw = SWH_W - 32, by = SWH_Y + 58, bh = 10;
-  fillRoundRect(bx, by, bw, bh, bh / 2, TH_TRACK);
-  int pct = flexMemUsedPct(m);
-  if(pct > 0) fillRoundRect(bx, by, bw * pct / 100, bh, bh / 2, swHealthCol());
-
-  // Optimizar Flex OS
-  uiWallSurface(SWO_X, SWO_Y, SWO_W, SWO_H, SWO_H / 2, uiGlass ? TH_GLASS2 : TH_SURF2, 8);
-  drawRoundRect(SWO_X, SWO_Y, SWO_W, SWO_H, SWO_H / 2, TH_BORDER);
-  drawTextC(SCR_W / 2, SWO_Y + (SWO_H - 18) / 2, "Optimizar Flex OS", 2, TH_ONWALL);
-}
-static bool swOptHit(int px, int py){
-  return px >= SWO_X && px <= SWO_X + SWO_W && py >= SWO_Y && py <= SWO_Y + SWO_H;
-}
-// Firma de lo que la cabecera ENSENA. Si no cambia, no se publica nada: una
-// banda de 139 filas por segundo sin motivo es trabajo que no hace falta.
-static uint32_t swHdrSigNow(){
-  const FlexMemSnap* m = memSnap();
-  int t, p, g; swCounts(&t, &p, &g);
-  return (m->psFree >> 12) ^ (m->psTotal >> 8) ^ (uint32_t)(t * 7 + p * 31 + g * 131) ^
-         ((uint32_t)flexMemHealth(m) << 24);
-}
-// Repinta SOLO la banda de la cabecera. La llama el refresco de cifras.
-static void swRenderHeader(){
-  swHdrSig = swHdrSigNow();
-  setBuf(bbuf);
-  if(blurBg){
-    for(int j = SWH_BAND0; j <= SWH_BAND1; j++)
-      memcpy(bbuf + (size_t)j * SCR_W, blurBg + (size_t)j * SCR_W, SCR_W * 2);
-  } else fillRect(0, SWH_BAND0, SCR_W, SWH_BAND1 - SWH_BAND0 + 1, TH_PAGE);
-  swDrawHeader();
-  present(SWH_BAND0, SWH_BAND1);
 }
 
 // ---- Boton "Cerrar todo" (geometria unica: dibujo y hit-test la comparten) ----
@@ -27457,16 +27491,12 @@ static void swDrawCard(int i, int x, int y, int cw, int ch){
     fillCircle(nx + nw + 12, y + ch - 52 + 9, 4, TH_WARN);
   }
   drawText(nx, y + ch - 52, nm, 2, TH_TXT);
-  // Estado + consumo MEDIDO. Sin medida se escribe "--": no se inventa.
-  char sub[56];
-  if(appMemHas(id)){
-    char mb[24]; flexMemFmt(appMemBytes(id), mb, sizeof(mb));
-    snprintf(sub, sizeof(sub), "%s \xC2\xB7 %s", swStateName(id), mb);
-  } else {
-    snprintf(sub, sizeof(sub), "%s \xC2\xB7 --", swStateName(id));
-  }
-  int sw2 = textW(sub, 1);
-  drawText(x + (cw - sw2) / 2, y + ch - 28, sub, 1, TH_TXT2);
+  // ESTADO, y nada mas. El consumo en KB era diagnostico tecnico permanente:
+  // se ha movido a la ficha que sale al mantener pulsada la tarjeta, que es
+  // donde alguien lo busca a proposito.
+  const char* st = swStateName(id);
+  int sw2 = textW(st, 1);
+  drawText(x + (cw - sw2) / 2, y + ch - 28, st, 1, TH_TXT2);
 }
 
 static void swRender(float scale){                        // completo (solo animacion de entrada)
@@ -27474,8 +27504,7 @@ static void swRender(float scale){                        // completo (solo anim
   // Fondo = wallpaper desenfocado (contenido) -> los rotulos que caen encima
   // usan TH_ONWALL, no el texto de pagina.
   if(blurBg) memcpy(bbuf, blurBg, (size_t)SCR_W * SCR_H * 2); else fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
-  drawTextC(SCR_W / 2, 6, "Recientes", 3, TH_ONWALL);
-  swDrawHeader();
+  drawTextC(SCR_W / 2, 30, "Recientes", 3, TH_ONWALL);
   if(swCount == 0) drawTextC(SCR_W / 2, SW_TOP + SW_CH / 2, "Sin apps recientes", 2, TH_ONWALL2);
   int cw = (int)(SW_CW * scale), ch = (int)(SW_CH * scale);
   for(int i = 0; i < swCount; i++){
@@ -27666,8 +27695,6 @@ static void activarMultitarea(){
   swScrollPx = 0; swVel = 0; swLiftCard = -1; swLiftY = 0; swGesture = 0;
   swMsg[0] = 0;
   swSheet = SWS_NONE; swSheetIdx = -1; swLongDone = false; swPressMs = 0;
-  memSampleNow();                              // la cabecera ensena cifras de AHORA
-  swHdrMs = millis();
   // ENTRADA POR TIEMPO, no por numero de cuadros. Antes eran 10 pasos con
   // delay(14): en una placa lenta duraba mas y en una rapida se veia a saltos,
   // y ademas bloqueaba el bucle 140 ms enteros (con el tactil parado). Ahora
@@ -27690,13 +27717,6 @@ static void swTick(){
   if(swSheetTouch()) return;
   // El aviso caduca solo: sin esto se quedaria pegado hasta el siguiente gesto.
   if(swMsg[0] && millis() - swMsgMs > 1800){ swMsg[0] = 0; swRenderCards(); }
-  // REFRESCO DE LAS CIFRAS: una vez por segundo, y SOLO la banda de la
-  // cabecera. Nunca durante un gesto -- publicar una banda mientras el dedo
-  // arrastra el carrusel es exactamente lo que produce tirones.
-  if(swGesture == 0 && !T.down && millis() - swHdrMs >= SW_HDR_MS){
-    swHdrMs = millis();
-    if(swHdrSigNow() != swHdrSig) swRenderHeader();   // solo si de verdad cambio algo
-  }
   if(T.pressed){
     swStartX = T.x; swStartY = T.y; swLastX2 = T.x; swLastY2 = T.y; swVel = 0; swGesture = 0;
     swLiftCard = swCardIndexAt(T.x); swLiftY = 0;
@@ -27737,16 +27757,15 @@ static void swTick(){
       swLiftCard = -1; swLiftY = 0;
       float mx = (swCount > 0 ? (swCount - 1) * SW_STEP : 0); if(swScrollPx > mx) swScrollPx = mx; if(swScrollPx < 0) swScrollPx = 0;
       swRenderCards();
-      if(closed){ swRenderCloseAll(); swRenderHeader(); }     // el boton se atenua y la memoria cambia
+      if(closed) swRenderCloseAll();                          // el boton se atenua si ya no queda nada
       return;
     }
     if(swGesture == 0){                                  // toque
-      if(swOptHit(T.x, T.y)){ optStart(OPT_HOST_SW); return; }
       if(swCloseAllHit(T.x, T.y)){
         // Con trabajo sin guardar se pregunta ANTES. Sin el, se cierra sin
         // molestar: una confirmacion que siempre sale deja de leerse.
         if(swUnsavedCount() > 0){ swSheet = SWS_CONFIRM_ALL; swSheetRender(); return; }
-        swCloseAll(); swScrollPx = 0; swVel = 0; swRenderCards(); swRenderCloseAll(); swRenderHeader(); return;
+        swCloseAll(); swScrollPx = 0; swVel = 0; swRenderCards(); swRenderCloseAll(); return;
       }
       if(T.y > SCR_H - 60){ swExitToHome(); return; }
       int idx = swCardIndexAt(T.x);
@@ -27754,7 +27773,6 @@ static void swTick(){
         if(idx == swCenterIndex()) swMaximize(idx); else { swScrollPx = idx * SW_STEP; swRenderCards(); }
         return;
       }
-      if(T.y >= SWH_Y && T.y <= SWH_Y + SWH_H) return;   // toque muerto dentro de la cabecera
       swExitToHome(); return;
     }
     swLiftCard = -1; swLiftY = 0;
@@ -30291,6 +30309,8 @@ static void poffWakeGate(){
 #define FLEXOS_WIFI_TIMEOUT_MS 15000
 #define FLEXOS_WIFI_AUTOCONN_DELAY_MS 6000
 
+
+
 // Definido mas abajo (necesita wifiSavedSSID y el resto del bloque Wi-Fi).
 static bool wifiCredsLoad();
 
@@ -30464,25 +30484,106 @@ static void wifiCredsForget(){
   Serial.println(F("[WiFi] red guardada borrada"));
 }
 
-// GUARD DE MODO. Todo intento de escaneo o conexion pasa por aqui: el
-// driver debe estar en STA antes de tocarlo. Llamar a WiFi.mode() cuando
-// ya se esta en el modo pedido es innecesario y en el transporte hosted
-// del C6 reinicia la interfaz sin motivo, asi que solo se cambia si hace
-// falta de verdad.
-static bool wifiEnsureStaMode(){
+// #############################################################
+// ##  REGLA DE ORO: esp-hosted NUNCA se toca desde loopTask
+// ##  ------------------------------------------------------
+// ##  loopTask esta SUSCRITO AL TASK WATCHDOG (ver flexFeedWdt) y solo lo
+// ##  alimenta una vez por vuelta. Cualquier llamada que despierte el
+// ##  transporte hosted -- WiFi.getMode(), WiFi.mode(), WiFi.begin(),
+// ##  WiFi.scanNetworks(), WiFi.disconnect() -- bloquea esa vuelta durante
+// ##  todo el arranque del enlace SDIO con el C6: reset del co-procesador,
+// ##  negociacion y handshake. Si el C6 no contesta rapido, la vuelta se
+// ##  pasa del plazo del TWDT y el chip entra en PANIC y reinicia.
+// ##
+// ##  Eso es exactamente el sintoma "se reinicia al activar el Wi-Fi", y
+// ##  el motivo por el que aqui hay DOS funciones y no una:
+// ##
+// ##    wifiTransportReady()  -> BARATA. Solo mira banderas propias y la
+// ##                             SRAM interna. NO habla con el driver.
+// ##                             Es la unica que puede llamar la interfaz.
+// ##    wifiEnsureStaMode()   -> CARA. Toca esp-hosted. SOLO puede
+// ##                             llamarse desde una tarea propia de Wi-Fi,
+// ##                             que no esta suscrita al TWDT.
+// ##
+// ##  Toda la teleria de encendido y apagado pasa ahora por una tarea.
+// #############################################################
+
+// Suelo de SRAM INTERNA para empezar una operacion de radio. esp-hosted, el
+// driver SDIO y la pila de la tarea salen de la SRAM interna, no de la PSRAM:
+// con la interna en las ultimas, WiFi.begin() falla dentro del driver en un
+// sitio donde ya no hay forma elegante de volver. Es una GUARDA -- evita
+// entrar en una operacion condenada --, no un arreglo del fallo de fondo.
+#define FLEXOS_WIFI_MIN_SRAM (48u * 1024u)
+
+// Comprobacion BARATA, apta para el hilo de la interfaz: ni una llamada al
+// driver. Devuelve false y deja dicho el motivo si no se puede intentar.
+static bool wifiTransportReady(const char** why){
   if(!gWifiHostedPinsOk){
-    Serial.println(F("[C6] operacion rechazada: transporte SDIO sin configurar"));
+    if(why) *why = "transporte SDIO sin configurar";
     return false;
   }
+  size_t inFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+  if(inFree < FLEXOS_WIFI_MIN_SRAM){
+    if(why) *why = "memoria interna insuficiente para la radio";
+    Serial.printf("[C6] radio rechazada: SRAM interna %u KB < %u KB\n",
+                  (unsigned)(inFree / 1024u), (unsigned)(FLEXOS_WIFI_MIN_SRAM / 1024u));
+    return false;
+  }
+  return true;
+}
+
+// GUARD DE MODO. SOLO DESDE UNA TAREA DE WI-FI (ver la regla de oro de arriba).
+// El driver debe estar en STA antes de tocarlo. Llamar a WiFi.mode() cuando ya
+// se esta en el modo pedido es innecesario y en el transporte hosted del C6
+// reinicia la interfaz sin motivo, asi que solo se cambia si hace falta.
+static bool wifiEnsureStaMode(){
+  if(!wifiTransportReady(NULL)){
+    Serial.println(F("[C6] operacion rechazada: transporte no disponible"));
+    return false;
+  }
+  FLEXDIAG_WIFI("antes de WiFi.getMode()");
   gWifiDriverOn = true;                    // publicar ANTES de tocar esp-hosted
   if(WiFi.getMode() != WIFI_STA) WiFi.mode(WIFI_STA);
+  FLEXDIAG_WIFI("despues de WiFi.mode(STA)");
   return true;
+}
+
+// APAGADO DE LA RADIO, TAMBIEN EN UNA TAREA. WiFi.disconnect() y
+// WiFi.mode(WIFI_OFF) hablan con el C6 igual que el encendido: en loopTask
+// tienen el mismo riesgo de watchdog.
+#if FLEXOS_ENABLE_WIFI
+static volatile bool gWifiOffBusy = false;
+static void wifiOffTask(void*){
+  FLEXDIAG_WIFI("antes de apagar la radio");
+  WiFi.disconnect(true, true);
+  WiFi.mode(WIFI_OFF);
+  gNetOnline = false;
+  gWifiDriverOn = false;
+  FLEXDIAG_WIFI("radio apagada");
+  gWifiOffBusy = false;
+  vTaskDelete(NULL);
+}
+#endif
+// Entrada BARATA para la interfaz: pide el apagado y vuelve en el acto.
+static void wifiRequestOff(){
+#if FLEXOS_ENABLE_WIFI
+  gNetOnline = false;                       // el estado logico cambia YA
+  if(!gWifiDriverOn || gWifiOffBusy) return;
+  gWifiOffBusy = true;
+  if(xTaskCreatePinnedToCore(wifiOffTask, "wifiOff", 4096, NULL, 1, NULL, 1) != pdPASS){
+    gWifiOffBusy = false;                   // sin tarea: se queda encendida, pero nadie se cuelga
+    Serial.println(F("[WiFi] no se pudo crear la tarea de apagado"));
+  }
+#endif
 }
 
 #if FLEXOS_ENABLE_WIFI
 static void wifiScanTask(void*){
+  FLEXDIAG_WIFI("wifiScanTask: entrada");
   if(!wifiEnsureStaMode()){ wifiUIState = WUI_FAIL; vTaskDelete(NULL); return; }
-  int n = WiFi.scanNetworks();                // bloqueante, pero en su PROPIA tarea: loop() sigue vivo
+  FLEXDIAG_WIFI("antes de WiFi.scanNetworks");
+  int n = WiFi.scanNetworks();
+  FLEXDIAG_WIFI("despues de WiFi.scanNetworks");                // bloqueante, pero en su PROPIA tarea: loop() sigue vivo
   // ANTI-CRASH: construir la lista FUERA de toda seccion critica. La version
   // anterior copiaba dentro de portENTER_CRITICAL(&wifiMux), pero WiFi.SSID()
   // devuelve un String (malloc) y ademas toca el driver WiFi. Hacer malloc con
@@ -30514,6 +30615,7 @@ static void wifiScanTask(void*){
 }
 static void wifiConnTask(void*){
   if(!wifiEnsureStaMode()){ wifiUIState = WUI_FAIL; vTaskDelete(NULL); return; }
+  FLEXDIAG_WIFI("antes de WiFi.begin (manual)");
   WiFi.begin(wifiConnSSID, wifiConnPass);
   uint32_t t0 = millis();
   while(WiFi.status() != WL_CONNECTED && millis() - t0 < FLEXOS_WIFI_TIMEOUT_MS){
@@ -30552,6 +30654,7 @@ static void wifiAutoConnTask(void*){
     gWifiBootAttempt = false; gWifiAutoBusy = false; gWifiAutoDone = true;
     vTaskDelete(NULL); return;
   }
+  FLEXDIAG_WIFI("antes de WiFi.begin (auto)");
   WiFi.begin(wifiSavedSSID, wifiSavedPass);
   uint32_t t0 = millis();
   while(WiFi.status() != WL_CONNECTED && millis() - t0 < FLEXOS_WIFI_TIMEOUT_MS){
@@ -30608,6 +30711,7 @@ static void wifiTryAutoConnect(bool bootAttempt){
   if(made != pdPASS){
     if(bootAttempt) wifiAutoGuardWrite(gWifiAutoTrusted, false);
     gWifiBootAttempt = false; gWifiAutoBusy = false; gWifiAutoDone = true;
+    gWifiDriverOn = false;                 // el interruptor no puede quedarse encendido en falso
     Serial.println(F("[WiFi] no se pudo crear la tarea de conexion"));
   }
 }
@@ -30626,20 +30730,56 @@ static void wifiAutoReconnectTick(){
 #endif
 }
 
+// ¿Hay una operacion de radio EN VUELO? Se compone de banderas que YA existian
+// -- no se anade estado nuevo ni un mutex global. La usa el gestor de memoria
+// para no ponerse a liberar buffers en el mismo instante en que esp-hosted
+// esta levantando el enlace SDIO con el C6: no es que una cosa corrompa a la
+// otra (la radio vive en SRAM interna y lo que se suelta es PSRAM), es que el
+// handshake es sensible al tiempo y el alivio automatico puede esperar unos
+// segundos sin que nadie lo note.
+static bool wifiRadioBusy(){
+#if FLEXOS_ENABLE_WIFI
+  return gWifiAutoBusy || gWifiOffBusy ||
+         wifiUIState == WUI_SCANNING || wifiUIState == WUI_CONNECTING;
+#else
+  return false;
+#endif
+}
+
 static void wifiStartScan(){
 #if FLEXOS_ENABLE_WIFI
   wifiBlockedBySd = false;
-  if(!wifiEnsureStaMode()){ wifiUIState = WUI_FAIL; return; }
+  // Comprobacion BARATA. Antes aqui se llamaba a wifiEnsureStaMode(), que
+  // levanta esp-hosted DESDE loopTask -- y la tarea que se crea justo debajo
+  // vuelve a hacerlo de todas formas en su primera linea. Era trabajo repetido
+  // y, sobre todo, era el que podia pasarse del Task Watchdog (ver la regla de
+  // oro). La radio la despierta la tarea, que no esta suscrita al TWDT.
+  const char* why = NULL;
+  if(!wifiTransportReady(&why)){
+    Serial.printf("[C6] escaneo rechazado: %s\n", why ? why : "");
+    wifiUIState = WUI_FAIL; return;
+  }
   wifiUIState = WUI_SCANNING;
   portENTER_CRITICAL(&wifiMux); wifiNetCount = 0; portEXIT_CRITICAL(&wifiMux);
-  xTaskCreatePinnedToCore(wifiScanTask, "wifiScan", 8192, NULL, 1, NULL, 1);   // 8KB: scanNetworks() + String necesitan mas que 6KB (evita stack overflow)
+  // 8 KB: scanNetworks() + los String de los SSID necesitan mas que 6 KB.
+  // LIMITE HONESTO: esta cifra viene de la placa, no de una prueba de host --
+  // aqui no hay radio ni pila de driver que consuman pila de verdad.
+  if(xTaskCreatePinnedToCore(wifiScanTask, "wifiScan", 8192, NULL, 1, NULL, 1) != pdPASS){
+    wifiUIState = WUI_FAIL;
+    gWifiDriverOn = false;
+    Serial.println(F("[WiFi] no se pudo crear la tarea de escaneo"));
+  }
 #endif
 }
 static void wifiStartConnect(){
 #if FLEXOS_ENABLE_WIFI
   wifiBlockedBySd = false;
   if(wifiSel < 0 || wifiSel >= WIFI_MAX_NETS){ wifiUIState = WUI_LIST; return; }  // indice invalido -> nunca leer wifiNets[] fuera de rango
-  if(!wifiEnsureStaMode()){ wifiUIState = WUI_FAIL; return; }
+  const char* why = NULL;                    // barata: la radio la despierta wifiConnTask
+  if(!wifiTransportReady(&why)){
+    Serial.printf("[C6] conexion rechazada: %s\n", why ? why : "");
+    wifiUIState = WUI_FAIL; return;
+  }
   strncpy(wifiConnSSID, wifiNets[wifiSel].ssid, sizeof(wifiConnSSID) - 1); wifiConnSSID[sizeof(wifiConnSSID) - 1] = 0;
   strncpy(wifiConnPass, wifiPass, sizeof(wifiConnPass) - 1); wifiConnPass[sizeof(wifiConnPass) - 1] = 0;
   wifiUIState = WUI_CONNECTING;
@@ -30803,11 +30943,7 @@ static int wifiReturnState = ST_APP;
 static void wifiExit(){
   // Si solo se abrio el escaner y no se establecio conexion, soltar
   // esp-hosted permite que una microSD insertada despues pueda montar.
-  if(gWifiDriverOn && !gNetOnline){
-    WiFi.disconnect(true, true);
-    WiFi.mode(WIFI_OFF);
-    gWifiDriverOn = false;
-  }
+  if(gWifiDriverOn && !gNetOnline) wifiRequestOff();   // en tarea: nunca en loopTask
   // accountResumeEnter (y no accountOobeEnter): la pantalla de Cuenta vuelve
   // con el MISMO destino de salida que tenia antes de venir a configurar la
   // red. Con accountOobeEnter, entrar aqui desde Flex Store o desde Ajustes
@@ -30867,8 +31003,7 @@ static void wifiTick(){
           if(T.x >= sx && T.x <= sx + sw){ wifiStartScan(); return; }
           if(fw > 0 && T.x >= fx && T.x <= fx + fw){       // Olvidar red guardada
             wifiCredsForget();
-            WiFi.disconnect(true, true);                   // suelta tambien la sesion en curso
-            gNetOnline = false;
+            wifiRequestOff();                              // suelta la sesion en curso, en tarea
             wifiRenderList();                              // el boton desaparece al no haber red
             return;
           }
@@ -31325,7 +31460,20 @@ static void connWifiSet(bool on){
   if(on){
     if(gAirplane) return;                       // bloqueo real, no visual
     wifiBlockedBySd = false;
-    if(!wifiEnsureStaMode()) return;            // transporte C6 no validado/configurado
+    // BARATA, y en el hilo de la interfaz eso es obligatorio: el interruptor
+    // del panel rapido corre dentro de loopTask. Quien despierta la radio es
+    // la tarea que crean wifiTryAutoConnect() o wifiStartScan().
+    const char* why = NULL;
+    if(!wifiTransportReady(&why)){
+      Serial.printf("[C6] encendido rechazado: %s\n", why ? why : "");
+      return;
+    }
+    // El interruptor refleja la INTENCION en el acto. gWifiDriverOn es una
+    // bandera de Flex OS, no una consulta al driver, asi que ponerla aqui no
+    // toca esp-hosted; quien la baja si el intento fracasa son las propias
+    // tareas. Sin esto el interruptor se quedaria "apagado" hasta que la
+    // tarea llegara a ejecutarse, y el usuario volveria a pulsarlo.
+    gWifiDriverOn = true;
     if(wifiCredsExist()){
       // Hay red guardada -> WiFi.begin() real contra ella, en su tarea
       // (loop() no se bloquea; misma ruta que la reconexion de arranque).
@@ -31335,11 +31483,10 @@ static void connWifiSet(bool on){
       wifiStartScan();                          // sin red guardada -> escaneo real
     }
   } else {
-    WiFi.disconnect(true, true);                // suelta la conexion y libera la STA
-    WiFi.mode(WIFI_OFF);                        // y apaga la radio
-    gNetOnline = false;
-    gWifiDriverOn = false;
+    // El apagado tambien habla con el C6: va a su propia tarea (wifiOffTask).
+    // Hacerlo aqui bloqueaba loopTask durante todo el cierre del enlace.
     gWifiAutoDone = true;                       // que no vuelva a encenderse sola
+    wifiRequestOff();
   }
 #else
   (void)on;
@@ -32929,6 +33076,7 @@ static void hwDetectTick(){
 // ##  dice que no encontro nada, en vez de inventarse una cifra.
 // #############################################################
 static uint32_t memShedSystem(){
+  FLEXDIAG_WIFI("memShedSystem: entrada");
   uint32_t before = memFreePsram();
 
   // Fondo desenfocado del wallpaper (768 KB). Lo usan Recientes, el bloqueo,
@@ -33011,7 +33159,6 @@ enum { OPT_IDLE = 0, OPT_ANALYZE, OPT_CACHE, OPT_SUSPEND, OPT_VERIFY, OPT_DONE }
 
 static int      optStage   = OPT_IDLE;
 static uint32_t optStepMs  = 0;
-static int      optHost    = OPT_HOST_ALM;
 static uint32_t optFree0   = 0;      // PSRAM libre al empezar (para la cifra final)
 static uint32_t optGained  = 0;      // bytes REALMENTE recuperados
 static int      optCacheN  = 0;      // archivos de cache temporal borrados
@@ -33089,9 +33236,8 @@ static void optRender(){
   setBuf(fb);       // el destino vuelve a la pantalla: nadie hereda bbuf
 }
 
-static void optStart(int host){
+static void optStart(){
   if(optActive()) return;
-  optHost   = host;
   optStage  = OPT_ANALYZE;
   optStepMs = millis();
   optGained = 0; optCacheN = 0; optEffOn = false;
@@ -33101,13 +33247,13 @@ static void optStart(int host){
   optRender();
 }
 
-// Cierre: devuelve la pantalla al anfitrion, repintandola entera por su propio
-// camino. No hay ninguna captura que restaurar y por tanto ningun buffer extra.
+// Cierre: devuelve la pantalla a Almacenamiento, repintandola entera por su
+// propio camino. No hay ninguna captura que restaurar y por tanto ningun
+// buffer extra.
 static void optFinish(){
   optStage = OPT_IDLE;
   touchDropAll();
-  if(optHost == OPT_HOST_SW) swRender(1.0f);
-  else                       almRender();
+  almRender();
 }
 
 // UNA etapa por vuelta, separada por tiempo. El trabajo de cada etapa corre una
@@ -33962,8 +34108,13 @@ static void galResume(){
 // no se toca, asi que la app vuelve exactamente donde estaba.
 static size_t galShed(){
   if(!galCacheInit) return 0;
+  // Se cuentan las miniaturas que REALMENTE estaban decodificadas. Con la
+  // cache inicializada pero vacia no se ha soltado nada, y devolver 1 marcaria
+  // la app como "Estado guardado" sin que fuera verdad.
+  size_t live = 0;
+  for(int i = 0; i < GAL_CACHE_N; i++) if(galCache[i].px) live++;
   galCacheFree();
-  return 1;                          // los bytes REALES los mide quien llama
+  return live;                       // los BYTES los mide quien llama; esto es el hecho
 }
 
 static void galCloseApp(){
@@ -36427,7 +36578,9 @@ void setup(){
   // Solo configura CLK/CMD/D0-D3/RESET del enlace P4-C6. WiFi.setPins() no
   // levanta el driver ni habla con el C6, por lo que sigue siendo seguro en
   // setup(). Debe ocurrir antes de cualquier posible WiFi.mode()/begin().
+  FLEXDIAG_WIFI("setup: antes de setPins");
   wifiConfigureHostedTransport();
+  FLEXDIAG_WIFI("setup: despues de setPins");
 
   // TARJETA microSD. Hace UN intento con la secuencia exacta del fabricante.
   // Si falla no existe un temporizador que repita SD_MMC.begin() a la vez que
@@ -36436,11 +36589,13 @@ void setup(){
   //
   // Sin tarjeta el fallo es suave y flexSdTick() conserva la insercion en
   // bajo demanda desde Almacenamiento/Galeria/Multimedia.
+  FLEXDIAG_WIFI("setup: antes de flexSdBegin");
   if(!flexSdBegin()){
     Serial.printf("[SD] controlador no disponible: %s\n", flexSdError());
   } else if(!flexSdMount()){
     Serial.printf("[SD] sin montaje inicial: %s\n", flexSdError());
   }
+  FLEXDIAG_WIFI("setup: despues del montaje inicial");
 
   if(!gFrPending && !gSafeMode){
     bootInitRadioSafe(); // WiFi/C6: BYPASS -> nunca bloquea el arranque

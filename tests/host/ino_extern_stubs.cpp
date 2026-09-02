@@ -373,6 +373,7 @@ uint32_t    flexSdGeneration(){ return 1; }
 bool        flexSdTick(){ return false; }
 void        flexSdPoke(){}
 void        flexSdBusySet(bool){}
+bool        flexSdBusyGet(){ return false; }
 uint64_t    flexSdTotalBytes(){ return 0; }
 uint64_t    flexSdUsedBytes(){ return 0; }
 uint64_t    flexSdFreeBytes(){ return 0; }

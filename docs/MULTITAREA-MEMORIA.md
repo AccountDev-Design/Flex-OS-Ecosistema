@@ -14,10 +14,11 @@ cada cifra que el usuario ve**.
 5. [Qué se suelta, y en qué orden](#5-qué-se-suelta-y-en-qué-orden)
 6. [App Switcher (Recientes)](#6-app-switcher-recientes)
 7. [Almacenamiento → Detalles de memoria y sistema](#7-almacenamiento--detalles-de-memoria-y-sistema)
-8. [Optimizar Flex OS](#8-optimizar-flex-os)
-9. [Avisos](#9-avisos)
+8. [Memoria automática](#8-memoria-automática-primero-actuar-avisar-solo-si-hace-falta)
+9. [Avisos secundarios](#9-avisos-secundarios)
 10. [Modo visual eficiente](#10-modo-visual-eficiente)
 11. [Límites conocidos](#11-límites-conocidos)
+12. [Wi‑Fi, microSD y memoria](#12-wifi-microsd-y-memoria-cómo-se-coordinan)
 
 ---
 
@@ -180,40 +181,52 @@ instaladas, y **la microSD no se desmonta jamás para «optimizar»**.
 
 ## 6. App Switcher (Recientes)
 
-**Cabecera** (banda 40–172, se repinta sola y solo cuando las cifras cambian):
+Recientes es un **selector de aplicaciones**, no un panel de memoria.
+
+Aquí vivía una cabecera permanente con el recuento de apps por estado,
+«PSRAM disponible: X / 32 MB», una barra de ocupación y un botón «Optimizar
+Flex OS». **Se ha retirado entera.** Ocupaba 132 px —una sexta parte de la
+pantalla— en todas las aperturas, y lo que informaba no era accionable: quien
+abre Recientes quiere cambiar de app, no auditar la RAM.
+
+Lo que **no** se retiró es el sistema que hay debajo: `memTick()` sigue
+midiendo, el presupuesto sigue decidiendo qué se abre y la protección
+automática sigue actuando (§8). El diagnóstico completo y el botón Optimizar
+viven donde corresponde: Almacenamiento → Detalles de memoria y sistema.
+
+Con esos 132 px la tarjeta sube y crece: de 384 a **480 px** de alto,
+empezando 100 px más arriba. El área de imagen queda en 244×404 —exactamente
+la proporción de la miniatura (150×250)—, así que además de verse más grande
+deja de estar **verticalmente comprimida**, que es como se veía antes.
 
 ```
-3 apps abiertas  ·  2 pausadas  ·  1 con estado guardado
-PSRAM disponible: 7.6 MB / 32.0 MB
-[■■■■■■■□□□]                        ← color por salud: verde / ámbar / rojo
-[      Optimizar Flex OS      ]
-```
-
-**Tarjeta** (banda 182–594, disjunta de la cabecera: mover el carrusel no
-repinta la cabecera y refrescar las cifras no repinta el carrusel):
-
-```
-┌──────────────┐
-│  miniatura   │   ← o el icono de la app si no hay captura
-│              │
-│   Notas   ●  │   ← ● ámbar = cambios sin guardar
-│ Pausada · 180 KB │  ← consumo MEDIDO; sin medida escribe "--"
-└──────────────┘
+              Recientes
+        ┌──────────────────┐
+        │                  │
+        │    miniatura     │   ← o el icono de la app si no hay captura
+        │                  │
+        │                  │
+        │     Notas   ●    │   ← ● ámbar = cambios sin guardar
+        │     Pausada      │   ← estado, y nada más
+        └──────────────────┘
+           [ Cerrar todas ]
+   Desliza una tarjeta arriba para cerrar
 ```
 
 **Interacciones**: tocar restaura (`enterApp` reanuda, no reinicia) ·
 deslizar arriba cierra de verdad · **mantener pulsada** abre la ficha de la app
-(estado, clase, consumo, tamaño de la miniatura, última actividad, cambios sin
-guardar y botón Cerrar) · «Cerrar todas» pide confirmación **solo si hay
-trabajo sin guardar**, y dice cuántas apps lo tienen.
+—estado, clase, consumo medido, tamaño de la miniatura, última actividad y
+cambios sin guardar— que es donde alguien busca esos datos a propósito ·
+«Cerrar todas» pide confirmación **solo si hay trabajo sin guardar**.
 
 **Miniaturas racionadas.** Cada captura son 150×250×2 = 73 KB. Con una tarjeta
-por app serían 1,4 MB reservados solo en capturas, así que se conservan las
-**4 más recientes** (`SW_THUMB_MAX`) y el resto de tarjetas caen al respaldo
-que ya existía: marco + icono. Las capturas se toman **al suspender**, nunca
-por cuadro.
+por app serían 1,4 MB solo en capturas, así que se conservan las **4 más
+recientes** (`SW_THUMB_MAX`) y el resto de tarjetas caen al respaldo: marco +
+icono. Se toman **al suspender**, nunca por cuadro.
 
----
+`tests/host/check_wiring.py` impide que la cabecera vuelva: `swDrawCard()` y
+`swRender()` tienen prohibido llamar a `flexMemFmt()`, `memSnap()` y
+`optStart()`.
 
 ## 7. Almacenamiento → Detalles de memoria y sistema
 
@@ -255,59 +268,101 @@ refresco**.
 
 ---
 
-## 8. Optimizar Flex OS
+## 8. Memoria automática: primero actuar, avisar solo si hace falta
 
-Máquina de etapas **no bloqueante** (una etapa por vuelta de `loop()`,
-separadas por tiempo con `millis()`: cero `delay()`, cero `while()` de espera).
-Mientras su panel está a la vista es **dueño exclusivo de la pantalla**, con el
-mismo patrón que el OTA y la tarjeta del cronómetro.
+**El principio: el usuario no tiene por qué pensar en la RAM.** Con memoria
+suficiente no se ve absolutamente nada —ni banner, ni barra, ni icono, ni
+recordatorio—. Cuando el sistema se aprieta, primero se arregla solo; y
+únicamente si después de arreglarlo sigue apretado se dice una vez.
+
+La secuencia vive en `memAlertTick()` y es, en orden:
+
+1. **Nivel sostenido** con histéresis (`flexMemLevelStep`). Se actualiza en
+   cualquier pantalla: es una comparación de enteros sin efectos secundarios.
+2. **OK y NOTICE** (por encima de 6 MB libres): no se hace ni se dice nada.
+3. Al **empeorar** a WARN o CRITICAL —o cada `FLEXMEM_RELIEF_MS` (60 s)
+   mientras siga apretado— se sueltan recursos reconstruibles (§5) y se
+   vuelve a medir. **Esto no se ve.**
+4. **Solo si tras el alivio sigue** en WARN o CRITICAL sale una tarjeta por la
+   isla de notificaciones, que es temporal y no cambia el layout.
+
+| Nivel tras aliviar | Qué ve el usuario |
+|---|---|
+| OK / NOTICE | Nada |
+| WARN | *Memoria casi llena* — Flex OS liberó recursos en segundo plano. |
+| CRITICAL | *Memoria crítica* — Flex OS está protegiendo el sistema. Cierra una app. |
+
+### Histéresis: los umbrales de entrada y de salida no son los mismos
+
+Con un único corte en 6 MB, una app que oscila entre 5,99 y 6,01 MB haría
+entrar y salir del estado de aviso varias veces por segundo. **Empeorar es
+inmediato** (proteger tarde no protege). **Mejorar exige margen.**
+
+| Nivel | Se entra por debajo de | Se sale por encima de |
+|---|---|---|
+| NOTICE | 10 MB | 11 MB |
+| WARN | 6 MB | 7 MB |
+| CRITICAL | 5 MB, o sin bloque contiguo de 1 MB, o SRAM < 40 KB | 6 MB **y** bloque de 1,5 MB **y** SRAM > 56 KB |
+
+Y **se baja de un nivel por evaluación**. Sin esa regla queda un hueco real: el
+umbral de salida de CRITICAL (6 MB) coincide con el de entrada a WARN, así que
+recuperarse hasta 6,06 MB saltaba a NOTICE y el primer repintado que bajara a
+5,94 volvía a ser un *empeoramiento* —y con él, una notificación—. Es el mismo
+parpadeo, desplazado un nivel. Bajando de uno en uno, salir de CRITICAL deja en
+WARN y de WARN solo se sale por encima de 7 MB. No cuesta tiempo perceptible:
+cada vuelta de `loop()` evalúa una vez, así que recuperarse del todo son tres
+vueltas —milisegundos—. `tests/host/test_mem.cpp` reproduce ese vaivén exacto y
+comprueba que no produce ni un empeoramiento.
+
+### Anti-spam
+
+Tres mecanismos, y hacen falta los tres:
+
+* **Transición, no estado.** Solo se avisa cuando el nivel *acaba* de empeorar.
+  Mientras la condición dura, no se repite.
+* **Histéresis**, para que «acabar de empeorar» no ocurra por ruido.
+* **Enfriamiento por clase** en los avisos secundarios (§9), más una
+  separación global de 30 s.
+
+`memAlertTick()` se llama en cada vuelta de `loop()` y en la inmensa mayoría no
+hace nada más que una comparación de enteros. La prueba
+`testMultitareaMemoria` comprueba que 40 vueltas con 20 MB libres no producen
+**ni una notificación ni un solo byte reservado**.
+
+### Optimizar Flex OS
+
+El botón permanente de Recientes **ya no existe**: el sistema gestiona la RAM
+por su cuenta. La herramienta sigue disponible, a propósito, en
+**Almacenamiento → Detalles de memoria y sistema**, donde alguien la busca
+para diagnosticar.
+
+Máquina de etapas no bloqueante (una por vuelta de `loop()`, separadas por
+tiempo con `millis()`: cero `delay()`, cero `while()` de espera). Mientras su
+panel está a la vista es dueño exclusivo de la pantalla.
 
 | Etapa | Qué hace **de verdad** |
 |---|---|
 | 1. Analizando memoria | Medida completa, bloque contiguo incluido |
-| 2. Liberando caché temporal | `/System/Cache` en flash + cachés reconstruibles de las apps **suspendidas** (miniaturas de Galería, fotogramas del Navegador, buffers de Multimedia) |
-| 3. Suspendiendo recursos no usados | Cachés del sistema (`memShedSystem`) y miniaturas de Recientes sobrantes |
-| 4. Verificando estabilidad | Vuelve a medir; si la presión sigue alta, enciende el modo visual eficiente |
-| 5. Optimización finalizada | Cifras **reales**: bytes recuperados (medidos antes/después) y PSRAM disponible |
-
-Resultado:
-
-```
-Optimización finalizada
-Se liberaron 642 KB de recursos temporales.
-Caché temporal en almacenamiento: 12 archivos.
-PSRAM disponible: 8.4 MB.
-```
-
-Si no se liberó nada:
-
-```
-No se encontraron recursos temporales seguros para liberar.
-```
-
-**No hace**: borrar datos del usuario, desmontar la microSD, reiniciar, cerrar
-la app activa, tocar una app con trabajo real en segundo plano, ni reportar
-bytes que no se liberaron.
+| 2. Liberando caché temporal | `/System/Cache` en flash + cachés reconstruibles de las apps **suspendidas** |
+| 3. Suspendiendo recursos no usados | Cachés del sistema y miniaturas sobrantes |
+| 4. Verificando estabilidad | Vuelve a medir; si sigue apretado, enciende el modo eficiente |
+| 5. Optimización finalizada | Cifras **reales**, o «No se encontraron recursos temporales seguros para liberar» |
 
 ---
 
-## 9. Avisos
+## 9. Avisos secundarios
 
-Los decide `flexMemAlertPick()` (lógica pura, con prueba propia). Enfriamiento
-**por clase** — 5 min para los de memoria, 10 min para fragmentación y tarjeta,
-15 min para flash — más una separación global de 30 s para que dos condiciones
-distintas no encadenen dos tarjetas seguidas. Se elige siempre **el más grave
-que cumpla su enfriamiento**, así un aviso crítico ya dado no deja paso a uno
-menor que solo sirve para insistir.
+Fragmentación, SRAM interna, flash y tarjeta. Son condiciones distintas de
+«queda poca PSRAM» y las decide `flexMemAlertPick()`, con enfriamiento por
+clase —5 min memoria, 10 min fragmentación y tarjeta, 15 min flash— más una
+separación global de 30 s. **Los de PSRAM ya no salen de aquí**: los gobierna
+la máquina de nivel.
 
 Solo se muestran desde Inicio o desde una app, nunca en el bloqueo, en Modo
 seguro, durante un borrado ni en mitad de una transición.
 
 | Condición | Mensaje |
 |---|---|
-| PSRAM 6–10 MB | *Memoria en segundo plano aumentando* — Puedes optimizar Flex OS si notas lentitud |
-| PSRAM 5–6 MB | *Memoria casi llena* — Cierra apps que no uses o pulsa Optimizar Flex OS |
-| < 5 MB o sin bloque contiguo | *Flex OS está protegiendo la memoria* — Cierra una app antes de abrir otra pesada |
 | Fragmentación alta (con memoria de sobra) | *Memoria libre repartida en trozos pequeños* — Las imágenes o apps pesadas pueden tardar más |
 | SRAM interna baja | *Memoria interna del sistema baja* — Se limitan cargas pesadas para proteger Wi‑Fi y táctil |
 | Flash > 80 % | *Almacenamiento interno en uso elevado* — Limpiar la caché temporal puede ayudar |
@@ -359,6 +414,22 @@ Qué hace, y por qué sí ahorra:
 * **La lectura de flash es cara** (`flexFsUsedBytes` recorre el sistema de
   archivos). Por eso solo ocurre con la pantalla de detalle a la vista, como
   mucho cada 15 s, y nunca con el dedo apoyado.
+* **El PANIC del Wi‑Fi NO está demostrado, solo su causa más probable.** El
+  arranque de esp‑hosted en `loopTask` es un defecto real y verificable
+  leyendo el código —la llamada bloqueante estaba ahí, y `loopTask` alimenta
+  el TWDT una vez por vuelta—, y está corregido. Pero **no hay un backtrace de
+  la placa** que lo confirme como la causa del reinicio que se observó. Puede
+  haber más de una. Para cerrarlo hace falta grabar con
+  `FLEXOS_DIAG_WIFI_SD 1` y mirar cuál es el último checkpoint antes del
+  reinicio.
+* **La cámara conserva sus ajustes; las Notas y Paint dependen de LittleFS.**
+  El viaje completo a disco solo se puede comprobar en la placa: el arnés de
+  host no tiene sistema de archivos. Lo que sí se comprueba aquí es que
+  suspender no toca el contenido en RAM.
+* **8192 bytes de pila para las tareas de Wi‑Fi son la cifra de la placa**, no
+  de una prueba de host: aquí no hay radio ni pila de driver que consuman pila
+  de verdad. Si en hardware apareciera un desbordamiento, es el primer número
+  que hay que revisar.
 * **Las pruebas de host no sustituyen a la placa.** Verifican las reglas, el
   cableado, el ciclo de vida del navegador y que no haya fugas de PSRAM en el
   código nuevo; el comportamiento del panel, del táctil y del controlador
@@ -370,12 +441,76 @@ Qué hace, y por qué sí ahorra:
 
 ---
 
+## 12. Wi‑Fi, microSD y memoria: cómo se coordinan
+
+### La regla de oro: esp‑hosted nunca se toca desde `loopTask`
+
+`loopTask` está **suscrito al Task Watchdog** y solo lo alimenta una vez por
+vuelta (`flexFeedWdt`). Cualquier llamada que despierte el transporte hosted
+—`WiFi.getMode()`, `WiFi.mode()`, `WiFi.begin()`, `WiFi.scanNetworks()`,
+`WiFi.disconnect()`— bloquea esa vuelta durante todo el arranque del enlace
+SDIO con el C6: reset del co‑procesador, negociación y handshake. Si el C6 no
+contesta rápido, la vuelta se pasa del plazo del TWDT y el chip entra en
+**PANIC y reinicia**.
+
+Por eso hay dos funciones y no una:
+
+| Función | Coste | Quién puede llamarla |
+|---|---|---|
+| `wifiTransportReady()` | Barata. Solo mira banderas propias y la SRAM interna. **No habla con el driver.** | La interfaz (`loopTask`) |
+| `wifiEnsureStaMode()` | Cara. Toca esp‑hosted. | **Solo** una tarea de Wi‑Fi |
+
+Encendido y apagado pasan ahora por una tarea: `wifiScanTask`, `wifiConnTask`,
+`wifiAutoConnTask` y el nuevo `wifiOffTask`. `check_wiring.py` lo impone con
+una tabla de **llamadas prohibidas**: si alguien vuelve a poner
+`wifiEnsureStaMode()` en `wifiStartScan()`, `wifiStartConnect()` o
+`connWifiSet()`, la batería falla y dice por qué.
+
+### Guarda de SRAM interna
+
+esp‑hosted, el driver SDIO y la pila de la tarea salen de la **SRAM interna**,
+no de la PSRAM. `wifiTransportReady()` exige `FLEXOS_WIFI_MIN_SRAM` (48 KB)
+libres antes de empezar: con la interna en las últimas, `WiFi.begin()` falla
+dentro del driver en un sitio donde ya no hay vuelta atrás. Es una **guarda**
+—evita entrar en una operación condenada—, no un arreglo del fallo de fondo.
+
+### Cesión, no candado
+
+El alivio automático y el desalojo por presupuesto **ceden el paso** mientras
+hay una operación de radio en vuelo (`wifiRadioBusy()`). No es que una cosa
+corrompa a la otra —la radio vive en SRAM interna y lo que se suelta es
+PSRAM—: es que el handshake SDIO es sensible al tiempo y el alivio puede
+esperar unos segundos sin que nadie lo note. La cesión es **no bloqueante y
+local** (se reintenta en la vuelta siguiente) y se compone de banderas que ya
+existían: `gWifiAutoBusy`, `gWifiOffBusy` y `wifiUIState`. No se añadió estado
+nuevo ni un mutex global.
+
+### microSD: nada cambió, y eso es lo importante
+
+`flexSdTick()` sigue sin sondear por temporizador; solo `flexSdPoke()` arma el
+siguiente intento. No hay `SD_MMC.begin()` periódico, ni `end()/begin()`
+repetidos, ni `open("/")` cíclico. La pantalla de diagnóstico solo **lee**
+estado ya cacheado. `check_wiring.py` sigue vigilándolo.
+
+### Modo de diagnóstico
+
+`#define FLEXOS_DIAG_WIFI_SD 1` imprime por Serial, en cada punto crítico, la
+PSRAM y SRAM libres con su mayor bloque, el estado y ocupación de la tarjeta y
+el de la radio. Checkpoints: `setPins`, montaje de la SD, entrada de cada tarea
+de Wi‑Fi, antes y después de `WiFi.mode(STA)`, `WiFi.scanNetworks()` y
+`WiFi.begin()`, más `memShedSystem()` y `appEnforceMemoryBudget()`. A 0 —el
+valor por defecto— compila a **nada**. Nunca imprime dentro de una ISR ni de
+una sección crítica.
+
+---
+
 ## Archivos
 
 | Archivo | Qué cambia |
 |---|---|
 | `FlexOS_Mem.h` / `.cpp` | **Nuevos.** Núcleo de decisión (puro, sin Arduino) |
-| `FlexOS_Ultra.ino` | Gestor de memoria, presupuesto, App Switcher, Almacenamiento, Optimizar, avisos, ciclo de vida de DeX y Calendario |
+| `FlexOS_Ultra.ino` | Gestor de memoria, presupuesto, App Switcher, Almacenamiento, Optimizar, avisos, ciclo de vida de DeX y Calendario, y la regla de oro de Wi‑Fi |
+| `FlexOS_SD.h` / `.cpp` | `flexSdBusyGet()`: lectura pura para el diagnóstico |
 | `FlexOS_Browser.h`, `FlexOS_BrowserApp.cpp`, `FlexOS_Browser_Bridge.h` | Suspender/reanudar sin reiniciar la sesión y liberación de la caché de fotogramas |
 | `tests/host/test_mem.cpp` | **Nuevo.** 66 comprobaciones del núcleo de decisión |
 | `tests/host/ino_compile.cpp` | Contabilidad real de PSRAM en el arnés + `testMultitareaMemoria` |

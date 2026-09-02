@@ -3402,7 +3402,14 @@ static void testMediosOrientacion(){
 extern size_t gPsUsed, gTestPsTotal, gTestPsPressure, gTestPsLargest, gTestInFree, gTestInTotal;
 
 // Deja el ciclo de vida y Recientes en blanco, sin tocar la memoria real.
+#define MB_(x) ((size_t)(x) * 1024u * 1024u)
 static void mtReset(){
+  // Sin esto, una transicion de app viva de una prueba anterior hace que
+  // memAlertTick() salga por su guarda ("en mitad de una animacion nadie mas
+  // compone") y la bateria mediria otra cosa.
+  appTrCancel();
+  gState = ST_HOME;
+  gNotifCount = 0;
   while(swCardCount() > 0) swDropCard(0);
   for(int i = 0; i < APP_N; i++){
     gAppState[i] = ALIFE_CLOSED;
@@ -3495,23 +3502,37 @@ static void testMultitareaMemoria(){
   gAppState[IC_GALERIA]    = ALIFE_SUSPENDED; gAppSeenMs[IC_GALERIA]    = 1000;
   gAppState[IC_MULTIMEDIA] = ALIFE_SUSPENDED; gAppSeenMs[IC_MULTIMEDIA] = 5000;
   gAppState[IC_NOTAS]      = ALIFE_SUSPENDED; gAppSeenMs[IC_NOTAS]      = 9000;
-  galCacheReset();                       // la Galeria tiene cache que soltar
+  galCacheReset();                       // cache inicializada... pero VACIA
   memShedAll(0);
   chk(gAppState[IC_GALERIA]    == ALIFE_SUSPENDED &&
       gAppState[IC_MULTIMEDIA] == ALIFE_SUSPENDED &&
       gAppState[IC_NOTAS]      == ALIFE_SUSPENDED,
       "soltar recursos deja las tres apps ABIERTAS: adelgazar no es cerrar");
-  chk(gAppShed[IC_GALERIA], "la Galeria queda marcada como 'estado guardado'");
-  chk(!strcmp(swStateName(IC_GALERIA), "Estado guardado"), "y la tarjeta lo dice con esas palabras");
+  // LA MARCA ES UN HECHO, NO UNA INTENCION. La cache de la Galeria estaba
+  // inicializada pero sin una sola miniatura decodificada: no se solto nada,
+  // asi que la app NO puede decir "Estado guardado".
+  chk(!gAppShed[IC_GALERIA],
+      "una cache vacia no marca la app como 'Estado guardado'");
+  chk(!strcmp(swStateName(IC_GALERIA), "Pausada"), "sigue siendo 'Pausada'");
   chk(!strcmp(swStateName(IC_NOTAS), "Pausada"), "una app que no solto nada sigue 'Pausada'");
   gAppState[IC_RELOJ] = ALIFE_RUNNING;
   chk(!strcmp(swStateName(IC_RELOJ), "Activa"), "la de primer plano es 'Activa'");
 
+  // Con algo REAL que soltar (el buffer del sensor de la Camara) si se marca.
+  camEnter();
+  gAppState[IC_CAMARA] = ALIFE_SUSPENDED; gAppShed[IC_CAMARA] = false;
+  chk(memShedApp(IC_CAMARA) > 0, "soltar el buffer del sensor SI libera bytes medibles");
+  chk(gAppShed[IC_CAMARA], "y entonces si se marca como 'Estado guardado'");
+  chk(!strcmp(swStateName(IC_CAMARA), "Estado guardado"), "y la tarjeta lo dice asi");
+  camCloseApp();
+
   // ---- 7) La app ACTIVA nunca se toca ----
-  gAppState[IC_GALERIA] = ALIFE_RUNNING; gAppShed[IC_GALERIA] = false;
-  galCacheReset();
-  chk(memShedApp(IC_GALERIA) == 0, "a la app en primer plano no se le suelta nada");
-  chk(!gAppShed[IC_GALERIA], "...ni se la marca");
+  camEnter();
+  gAppState[IC_CAMARA] = ALIFE_RUNNING; gAppShed[IC_CAMARA] = false;
+  chk(memShedApp(IC_CAMARA) == 0, "a la app en primer plano no se le suelta nada");
+  chk(!gAppShed[IC_CAMARA], "...ni se la marca");
+  chk(camScene != NULL, "...y su buffer sigue intacto");
+  camCloseApp();
 
   // ---- 8) Desalojo: el ultimo recurso, y por la menos reciente ----
   mtReset();
@@ -3579,7 +3600,7 @@ static void testMultitareaMemoria(){
   // ---- 13) El optimizador: etapas reales, cifras reales, sin bloquear ----
   mtReset();
   gState = ST_HOME;
-  optStart(OPT_HOST_ALM);
+  optStart();
   chk(optActive(), "Optimizar arranca y se queda a la vista");
   int steps = 0;
   gTestMs = 1000;
@@ -3602,10 +3623,133 @@ static void testMultitareaMemoria(){
   gEffMode = true;
   chk(uiGlass == glassBefore, "el modo eficiente no cambia el estilo elegido");
   mtSetFree(20u << 20);
-  gMemBlockMs = 0; gMemTickMs = 0;             // fuerza un muestreo completo
+  gState = ST_HOME;
+  flexMemAlertsReset(&gMemAlerts);
+  gMemBlockMs = 0; gMemTickMs = 0;
+  gTestMs += MEM_BLOCK_MS + MEM_TICK_MS + 10;
+  memTick();
+  memAlertTick();                              // publica el nivel SOSTENIDO
+  gMemBlockMs = 0; gMemTickMs = 0;
   gTestMs += MEM_BLOCK_MS + MEM_TICK_MS + 10;
   memTick();
   chk(!gEffMode, "y se apaga solo en cuanto vuelve a haber holgura");
+
+  // ---- 15) SILENCIO CON MEMORIA NORMAL, y sin reservar por vuelta ----
+  // Es el criterio central del rediseno: si hay memoria, el usuario no ve
+  // NADA. Y el propio hecho de medir y decidir no puede costar memoria.
+  mtReset();
+  gState = ST_HOME; gNotifCount = 0;
+  flexMemAlertsReset(&gMemAlerts);
+  mtSetFree(20u << 20);
+  size_t psIdle = gPsUsed;
+  for(int i = 0; i < 40; i++){
+    gTestMs += 200;
+    gMemTickMs = 0; gMemBlockMs = 0;        // fuerza el muestreo en cada vuelta
+    memTick();
+    memAlertTick();
+  }
+  chk(gNotifCount == 0, "con 20 MB libres no aparece ni una notificacion");
+  chk(gPsUsed == psIdle, "medir y decidir no reserva ni un byte por vuelta");
+
+  // ---- 16) PRIMERO ARREGLAR, DESPUES AVISAR ----
+  // Si el alivio automatico resuelve la presion, el usuario no se entera: esa
+  // es la regla. Solo cuando ni soltandolo todo se sale del apuro aparece UNA
+  // tarjeta. Se prueban los dos caminos.
+  gNotifCount = 0;
+  flexMemAlertsReset(&gMemAlerts);
+  ensureBlurBg();                            // algo real que el alivio pueda soltar
+  mtSetFree(MB_(5) + 512u * 1024u);          // 5,5 MB -> WARN, pero recuperable
+  gMemTickMs = 0; gMemBlockMs = 0; gTestMs += 200; memTick();
+  memAlertTick();
+  chk(gNotifCount == 0,
+      "si el alivio automatico resuelve la presion, no se avisa de nada");
+
+  // Ahora una presion que NO se puede resolver soltando caches.
+  gNotifCount = 0;
+  flexMemAlertsReset(&gMemAlerts);
+  mtSetFree(MB_(20));                        // se arranca en OK...
+  gMemTickMs = 0; gMemBlockMs = 0; gTestMs += 200; memTick(); memAlertTick();
+  mtSetFree(MB_(2));                         // ...y se cae a CRITICO de golpe
+  gMemTickMs = 0; gMemBlockMs = 0; gTestMs += 200; memTick();
+  memAlertTick();
+  int trasCruce = gNotifCount;
+  chk(trasCruce >= 1, "si tras aliviar SIGUE apretado, se avisa una vez");
+  for(int i = 0; i < 30; i++){
+    gTestMs += 200;
+    gMemTickMs = 0; gMemBlockMs = 0; memTick();
+    memAlertTick();
+  }
+  chk(gNotifCount == trasCruce,
+      "y NO se repite en cada vuelta mientras la condicion dura");
+
+  // ---- 17) HISTERESIS de verdad, sobre el sistema completo ----
+  // Oscilar alrededor del corte de 6 MB no puede producir una tarjeta nueva
+  // cada vez. Es el caso exacto del enunciado (5,99 -> 6,01 -> 5,99).
+  gNotifCount = 0;
+  for(int i = 0; i < 6; i++){
+    mtSetFree(MB_(6) + 64u * 1024u);
+    gMemTickMs = 0; gMemBlockMs = 0; gTestMs += 200; memTick(); memAlertTick();
+    mtSetFree(MB_(5) + 960u * 1024u);
+    gMemTickMs = 0; gMemBlockMs = 0; gTestMs += 200; memTick(); memAlertTick();
+  }
+  chk(gNotifCount == 0, "oscilar en el umbral no genera ni un aviso mas");
+  mtReset(); gNotifCount = 0;
+
+  // ---- 18) UNA APP CON CAMBIOS SIN GUARDAR NO SE CIERRA EN SILENCIO ----
+  // El desalojo automatico solo puede cerrar lo que se pudo guardar; si la
+  // app dice que tiene trabajo pendiente, "Cerrar todas" tiene que preguntar.
+  mtReset();
+  gAppState[IC_NOTAS] = ALIFE_SUSPENDED; gAppSeenMs[IC_NOTAS] = 1000;
+  gSessNeedSave[IC_NOTAS] = true;
+  swPush((uint8_t)IC_NOTAS);
+  chk(appUnsaved(IC_NOTAS), "la app se declara con cambios sin guardar");
+  chk(swUnsavedCount() == 1, "y Recientes lo cuenta para pedir confirmacion");
+  gSessNeedSave[IC_NOTAS] = false;
+  mtReset();
+
+  // ---- 19) LA CAMARA NO PIERDE SUS AJUSTES AL SOLTAR EL BUFFER ----
+  // Regresion real: camResume() caia en camEnter() cuando el gestor de memoria
+  // habia soltado camScene, y camEnter() reinicia modo, zoom y exposicion.
+  {
+    camEnter();                              // sesion nueva: ajustes de fabrica
+    camMode = 2; camNight = true; camExpo = 77; camZoom = 3.5f;
+    gAppState[IC_CAMARA] = ALIFE_SUSPENDED;
+    chk(camScene != NULL, "la camara tiene su buffer tras abrirse");
+    size_t freed = memShedApp(IC_CAMARA);
+    (void)freed;
+    chk(camScene == NULL, "soltar recursos libera el buffer del sensor");
+    chk(gAppShed[IC_CAMARA], "y la marca como 'Estado guardado'");
+    camResume();
+    chk(camScene != NULL, "al volver, el buffer se rehace");
+    if(!(camMode == 2 && camNight && camExpo == 77))
+      printf("  (camara tras reanudar: modo %d, noche %d, expo %d)\n",
+             camMode, (int)camNight, camExpo);
+    chk(camMode == 2 && camNight && camExpo == 77,
+        "los AJUSTES del usuario sobreviven a soltar el buffer");
+    // Soltar dos veces no puede volver a "liberar" nada.
+    gAppState[IC_CAMARA] = ALIFE_SUSPENDED;
+    memShedApp(IC_CAMARA);
+    gAppShed[IC_CAMARA] = false;
+    chk(memShedApp(IC_CAMARA) == 0, "sin buffer, soltar de nuevo no libera nada");
+    chk(!gAppShed[IC_CAMARA], "y no se marca 'Estado guardado' sin haber soltado");
+    camCloseApp();
+  }
+  mtReset();
+
+  // ---- 20) NOTAS: suspender NO puede tocar el contenido ----
+  // El viaje completo a disco necesita LittleFS y solo se puede comprobar en
+  // la placa; lo que SI se comprueba aqui es que la suspension no borra el
+  // texto, el cursor ni el desplazamiento, que es donde estaria el fallo.
+  {
+    noteView = 1;
+    snprintf(noteBuffer, noteBufMax, "hola mundo");
+    noteCur = 4; noteEditorScroll = 3; noteDirtyMs = 12345;
+    noteSuspend();
+    chk(!strcmp(noteBuffer, "hola mundo"), "el texto sobrevive a suspender");
+    chk(noteCur == 4, "el cursor sobrevive a suspender");
+    chk(noteEditorScroll == 3, "el desplazamiento sobrevive a suspender");
+    noteView = 0; notePath[0] = 0; noteBuffer[0] = 0; noteDirtyMs = 0;
+  }
 
   mtReset();
   if(!gFails) printf("  Multitarea: todas las comprobaciones pasan.\n");
