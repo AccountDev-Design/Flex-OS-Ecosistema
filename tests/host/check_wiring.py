@@ -19,6 +19,21 @@
 #      de loop(), salvo los que se declaran exentos con su motivo;
 #   2. una tabla de GANCHOS obligatorios (quien tiene que llamar a
 #      quien) se cumple de verdad.
+#
+#  EL SKETCH ESTA REPARTIDO EN MODULOS
+#  ------------------------------------------------------------
+#  FlexOS_Ultra.ino es solo el orquestador: el resto del sistema vive
+#  en las cabeceras FlexOS_Ultra_*.h que el .ino incluye en orden.
+#  Como el IDE de Arduino las junta todas en UNA unidad de traduccion,
+#  aqui se hace lo mismo antes de comprobar nada: se EXPANDE el .ino
+#  siguiendo sus #include de modulos y se trabaja sobre el texto
+#  completo. Sin esto, cada gancho de la tabla de abajo daria "no
+#  encuentro la funcion" por el simple hecho de haberla movido de
+#  archivo, y la comprobacion perderia todo su valor.
+#
+#  Ademas se verifica la propia estructura modular (ver estructura()):
+#  que no haya un modulo huerfano, que ninguno falte y que la cadena
+#  de inclusion siga siendo lineal.
 # #############################################################
 import re, sys
 from pathlib import Path
@@ -104,6 +119,79 @@ PROHIBIDOS = [
     ("swTick",           "optStart(",          "el boton Optimizar no vuelve a Recientes"),
 ]
 
+RE_MOD = re.compile(r'^#include\s+"(FlexOS_Ultra_(\w+)\.h)"', re.M)
+
+
+def expandir(path):
+    """Devuelve (texto completo del sketch, lista de modulos en orden)."""
+    raiz = Path(path).resolve().parent
+    ino = Path(path).read_text(encoding="utf-8")
+    orden = [m.group(1) for m in RE_MOD.finditer(ino)]
+    partes, vistos = [], set()
+
+    def meter(texto, origen):
+        pos = 0
+        for m in RE_MOD.finditer(texto):
+            partes.append(texto[pos:m.start()])
+            pos = m.end()
+            fich = m.group(1)
+            if fich in vistos:            # #pragma once
+                continue
+            vistos.add(fich)
+            hijo = raiz / fich
+            if hijo.exists():
+                meter(hijo.read_text(encoding="utf-8"), fich)
+        partes.append(texto[pos:])
+
+    meter(ino, path)
+    return "".join(partes), orden
+
+
+def estructura(path):
+    """Comprueba la modularizacion del sketch. Devuelve lista de fallos."""
+    raiz = Path(path).resolve().parent
+    ino = Path(path).read_text(encoding="utf-8")
+    orden = [m.group(1) for m in RE_MOD.finditer(ino)]
+    fallos = []
+
+    if not orden:
+        return ["FlexOS_Ultra.ino no incluye ningun modulo FlexOS_Ultra_*.h"]
+
+    # 1. cada modulo incluido existe y se incluye UNA sola vez
+    vistos = set()
+    for f in orden:
+        if not (raiz / f).exists():
+            fallos.append("el .ino incluye %s, que no existe" % f)
+        if f in vistos:
+            fallos.append("%s se incluye dos veces en el .ino" % f)
+        vistos.add(f)
+
+    # 2. ningun modulo huerfano: todo FlexOS_Ultra_*.h del proyecto se usa
+    for f in sorted(p.name for p in raiz.glob("FlexOS_Ultra_*.h")):
+        if f not in vistos:
+            fallos.append("%s existe pero el .ino no lo incluye (codigo muerto)" % f)
+
+    # 3. cadena LINEAL: cada modulo lleva #pragma once e incluye al anterior
+    prev = None
+    for f in orden:
+        ruta = raiz / f
+        if not ruta.exists():
+            continue
+        txt = ruta.read_text(encoding="utf-8")
+        if "#pragma once" not in txt:
+            fallos.append("%s no tiene #pragma once" % f)
+        propios = RE_MOD.findall(txt)
+        nombres = [n for n, _ in propios]
+        if prev is None:
+            if nombres:
+                fallos.append("%s es el primer modulo y no debe incluir a ningun otro" % f)
+        elif nombres != [prev]:
+            fallos.append("%s debe incluir exactamente a %s (incluye %s)"
+                          % (f, prev, nombres or "nada"))
+        prev = f
+    return fallos
+
+
 def cuerpo(src, nombre):
     """Devuelve el cuerpo de la funcion de nivel superior `nombre`, por conteo de llaves."""
     m = re.search(r"^[A-Za-z_][\w \*&:]*\b" + re.escape(nombre) + r"\s*\([^;{]*\)\s*\{", src, re.M)
@@ -120,8 +208,8 @@ def cuerpo(src, nombre):
     return None
 
 def main(path):
-    src = open(path, encoding="utf-8").read()
-    fallos = []
+    src, modulos = expandir(path)
+    fallos = estructura(path)
 
     # El perfil generico P4 no conoce la ranura de esta placa. Estas opciones
     # hacen que Arduino-ESP32 compile SD_MMC para el slot dedicado 0 y active
@@ -252,8 +340,8 @@ def main(path):
         for f in fallos:
             print("  - " + f)
         return 1
-    print("Cableado del sketch: %d estados despachados, %d ganchos verificados." %
-          (len(estados), len(GANCHOS)))
+    print("Cableado del sketch: %d estados despachados, %d ganchos verificados, "
+          "%d modulos encadenados." % (len(estados), len(GANCHOS), len(modulos)))
     return 0
 
 if __name__ == "__main__":
