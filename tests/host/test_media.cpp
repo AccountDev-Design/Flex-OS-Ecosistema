@@ -268,10 +268,6 @@ static void testClassify(){
   flexMediaExt("sinpunto", e, sizeof(e));
   CHECK(e[0] == 0, "sin extension -> cadena vacia");
 
-  CHECK(flexMediaPathIsSd("/sdcard/DCIM/a.jpg"), "ruta de tarjeta");
-  CHECK(flexMediaPathIsSd("/sdcard"),            "la raiz de la tarjeta tambien");
-  CHECK(!flexMediaPathIsSd("/sdcardX/a.jpg"),    "prefijo parecido NO es la tarjeta");
-  CHECK(!flexMediaPathIsSd("/Documentos/a.jpg"), "ruta interna");
 }
 
 // =============================================================
@@ -614,16 +610,16 @@ static int runToEnd(FlexMediaIndex* ix, int budget, int maxSteps = 20000){
 static void testIndexBasics(){
   std::printf("[media] indice: recorrido por lotes\n");
 
-  FakeVol intern, sd;
-  intern.tree["/Documentos"] = {
+  FakeVol volume;
+  volume.tree["/Documentos"] = {
     {"a.jpg", 100, false}, {"b.JPG", 200, false}, {"notas.txt", 10, false},
-    {"c.avi", 5000, false}, {"peli.mp4", 90000, false}
+    {"c.avi", 5000, false}, {"peli.mp4", 90000, false}, {"DCIM", 0, true}
   };
-  intern.tree["/Paint"] = { {"dibujo.fxp", 300, false} };
-  sd.tree["/sdcard/DCIM"] = {
+  volume.tree["/Paint"] = { {"dibujo.fxp", 300, false} };
+  volume.tree["/Documentos/DCIM"] = {
     {"100APPLE", 0, true}, {"x.jpg", 400, false}, {"y.wav", 800, false}
   };
-  sd.tree["/sdcard/DCIM/100APPLE"] = {
+  volume.tree["/Documentos/DCIM/100APPLE"] = {
     {"IMG_0001.JPG", 1000, false}, {"IMG_0002.JPG", 1100, false},
     {".oculto.jpg",  1200, false}
   };
@@ -636,12 +632,10 @@ static void testIndexBasics(){
     FlexMediaItem store[64];
     FlexMediaIndex ix;
     flexMediaIndexInit(&ix, store, 64);
-    ix.volInt = volOf(&intern);
-    ix.volSd  = volOf(&sd);
-    flexMediaIndexAddRoot(&ix, "/Documentos",       FLEXMED_VOL_INT);
-    flexMediaIndexAddRoot(&ix, "/Paint",            FLEXMED_VOL_INT);
-    flexMediaIndexAddRoot(&ix, "/sdcard/DCIM",      FLEXMED_VOL_SD);
-    flexMediaIndexStart(&ix, 1);
+    ix.volume = volOf(&volume);
+    flexMediaIndexAddRoot(&ix, "/Documentos");
+    flexMediaIndexAddRoot(&ix, "/Paint");
+    flexMediaIndexStart(&ix);
     int steps = runToEnd(&ix, budget);
     CHECK(ix.state == FLEXMED_SCAN_DONE, "presupuesto %d: debe terminar", budget);
 
@@ -652,13 +646,11 @@ static void testIndexBasics(){
     // Lo esperado: a.jpg, b.JPG, c.avi (mp4 y txt fuera),
     // dibujo.fxp, x.jpg, y.wav, IMG_0001, IMG_0002 (el oculto no).
     CHECK(ix.n == 8, "presupuesto %d: esperaba 8 elementos, hay %u", budget, ix.n);
-    CHECK(flexMediaIndexCount(&ix, FLEXMED_PHOTO, -1) == 5,
-          "fotos: %d", flexMediaIndexCount(&ix, FLEXMED_PHOTO, -1));
-    CHECK(flexMediaIndexCount(&ix, FLEXMED_VIDEO, -1) == 1, "videos");
-    CHECK(flexMediaIndexCount(&ix, FLEXMED_AUDIO, -1) == 1, "audios");
-    CHECK(flexMediaIndexCount(&ix, FLEXMED_DRAW,  -1) == 1, "dibujos");
-    CHECK(flexMediaIndexCount(&ix, 0, FLEXMED_VOL_SD)  == 4, "en la tarjeta");
-    CHECK(flexMediaIndexCount(&ix, 0, FLEXMED_VOL_INT) == 4, "en la interna");
+    CHECK(flexMediaIndexCount(&ix, FLEXMED_PHOTO) == 5,
+          "fotos: %d", flexMediaIndexCount(&ix, FLEXMED_PHOTO));
+    CHECK(flexMediaIndexCount(&ix, FLEXMED_VIDEO) == 1, "videos");
+    CHECK(flexMediaIndexCount(&ix, FLEXMED_AUDIO) == 1, "audios");
+    CHECK(flexMediaIndexCount(&ix, FLEXMED_DRAW)  == 1, "dibujos");
 
     // Con lotes de 1 tiene que hacer falta MAS de una vuelta: si no,
     // es que el presupuesto no se esta respetando.
@@ -672,7 +664,7 @@ static void testIndexBasics(){
     // Y la subcarpeta se recorrio de verdad.
     bool found = false;
     for(uint16_t i = 0; i < ix.n; i++)
-      if(std::strcmp(store[i].path, "/sdcard/DCIM/100APPLE/IMG_0002.JPG") == 0) found = true;
+      if(std::strcmp(store[i].path, "/Documentos/DCIM/100APPLE/IMG_0002.JPG") == 0) found = true;
     CHECK(found, "presupuesto %d: falta el fichero de la subcarpeta", budget);
   }
 }
@@ -684,28 +676,28 @@ static void testIndexSiblingsAfterSubdir(){
   // los ficheros que van DESPUES de la subcarpeta no se indexan
   // nunca. Se prueba con la subcarpeta la primera, en medio y con
   // varios presupuestos.
-  FakeVol sd;
-  sd.tree["/sdcard/M"] = {
+  FakeVol volume;
+  volume.tree["/Media"] = {
     {"sub", 0, true},
     {"a.jpg", 1, false}, {"b.jpg", 2, false}, {"c.jpg", 3, false},
     {"sub2", 0, true},
     {"d.jpg", 4, false}, {"e.jpg", 5, false}
   };
-  sd.tree["/sdcard/M/sub"]  = { {"s1.jpg", 1, false} };
-  sd.tree["/sdcard/M/sub2"] = { {"s2.jpg", 1, false} };
+  volume.tree["/Media/sub"]  = { {"s1.jpg", 1, false} };
+  volume.tree["/Media/sub2"] = { {"s2.jpg", 1, false} };
 
   for(int budget : {1, 2, 4, 8, 64}){
     FlexMediaItem store[32];
     FlexMediaIndex ix;
     flexMediaIndexInit(&ix, store, 32);
-    ix.volSd = volOf(&sd);
-    flexMediaIndexAddRoot(&ix, "/sdcard/M", FLEXMED_VOL_SD);
-    flexMediaIndexStart(&ix, 1);
+    ix.volume = volOf(&volume);
+    flexMediaIndexAddRoot(&ix, "/Media");
+    flexMediaIndexStart(&ix);
     runToEnd(&ix, budget);
     CHECK(ix.n == 7, "presupuesto %d: esperaba 7 (5 sueltos + 2 de subcarpetas), hay %u",
           budget, ix.n);
-    for(const char* want : {"/sdcard/M/a.jpg", "/sdcard/M/e.jpg",
-                            "/sdcard/M/sub/s1.jpg", "/sdcard/M/sub2/s2.jpg"}){
+    for(const char* want : {"/Media/a.jpg", "/Media/e.jpg",
+                            "/Media/sub/s1.jpg", "/Media/sub2/s2.jpg"}){
       bool ok = false;
       for(uint16_t i = 0; i < ix.n; i++) if(!std::strcmp(store[i].path, want)) ok = true;
       CHECK(ok, "presupuesto %d: falta %s", budget, want);
@@ -717,150 +709,137 @@ static void testIndexEdges(){
   std::printf("[media] indice: capacidad, profundidad, rutas largas y errores\n");
 
   { // Se llena: se marca `full`, no se desborda el array.
-    FakeVol sd;
+    FakeVol volume;
     std::vector<FakeEntry> many;
     for(int i = 0; i < 50; i++){
       char n[32]; std::snprintf(n, sizeof(n), "f%02d.jpg", i);
       many.push_back({n, 10, false});
     }
-    sd.tree["/sdcard/X"] = many;
+    volume.tree["/Media"] = many;
     FlexMediaItem store[8];
     FlexMediaIndex ix;
     flexMediaIndexInit(&ix, store, 8);
-    ix.volSd = volOf(&sd);
-    flexMediaIndexAddRoot(&ix, "/sdcard/X", FLEXMED_VOL_SD);
-    flexMediaIndexStart(&ix, 1);
+    ix.volume = volOf(&volume);
+    flexMediaIndexAddRoot(&ix, "/Media");
+    flexMediaIndexStart(&ix);
     runToEnd(&ix, 4);
     CHECK(ix.n == 8,  "no puede pasar de la capacidad (n=%u)", ix.n);
     CHECK(ix.full,    "debe quedar marcado que hay mas de lo que cabe");
     CHECK(ix.state == FLEXMED_SCAN_DONE, "aun lleno, el recorrido termina");
   }
   { // Mas hondo que FLEXMED_DEPTH_MAX: se ignora, no se cuelga.
-    FakeVol sd;
-    sd.tree["/sdcard/D"]       = { {"n1", 0, true} };
-    sd.tree["/sdcard/D/n1"]    = { {"n2", 0, true}, {"ok.jpg", 1, false} };
-    sd.tree["/sdcard/D/n1/n2"] = { {"n3", 0, true}, {"ok2.jpg", 1, false} };
-    sd.tree["/sdcard/D/n1/n2/n3"] = { {"hondo.jpg", 1, false} };
+    FakeVol volume;
+    volume.tree["/Media"]       = { {"n1", 0, true} };
+    volume.tree["/Media/n1"]    = { {"n2", 0, true}, {"ok.jpg", 1, false} };
+    volume.tree["/Media/n1/n2"] = { {"n3", 0, true}, {"ok2.jpg", 1, false} };
+    volume.tree["/Media/n1/n2/n3"] = { {"hondo.jpg", 1, false} };
     FlexMediaItem store[16];
     FlexMediaIndex ix;
     flexMediaIndexInit(&ix, store, 16);
-    ix.volSd = volOf(&sd);
-    flexMediaIndexAddRoot(&ix, "/sdcard/D", FLEXMED_VOL_SD);
-    flexMediaIndexStart(&ix, 1);
+    ix.volume = volOf(&volume);
+    flexMediaIndexAddRoot(&ix, "/Media");
+    flexMediaIndexStart(&ix);
     runToEnd(&ix, 3);
     CHECK(ix.state == FLEXMED_SCAN_DONE, "el limite de profundidad no puede colgar el recorrido");
     CHECK(ix.n == 2, "hasta el nivel permitido: esperaba 2, hay %u", ix.n);
   }
   { // Nombre tan largo que la ruta no cabe: se descarta, NO se
     //  guarda truncada (una ruta truncada abre otro fichero).
-    FakeVol sd;
+    FakeVol volume;
     std::string big(FLEXMED_NAME_MAX - 6, 'z');
-    sd.tree["/sdcard/" + std::string(60, 'q')] = { {big + ".jpg", 1, false} };
+    volume.tree["/" + std::string(60, 'q')] = { {big + ".jpg", 1, false} };
     FlexMediaItem store[8];
     FlexMediaIndex ix;
     flexMediaIndexInit(&ix, store, 8);
-    ix.volSd = volOf(&sd);
-    static std::string root = "/sdcard/" + std::string(60, 'q');
-    flexMediaIndexAddRoot(&ix, root.c_str(), FLEXMED_VOL_SD);
-    flexMediaIndexStart(&ix, 1);
+    ix.volume = volOf(&volume);
+    static std::string root = "/" + std::string(60, 'q');
+    flexMediaIndexAddRoot(&ix, root.c_str());
+    flexMediaIndexStart(&ix);
     runToEnd(&ix, 4);
     for(uint16_t i = 0; i < ix.n; i++)
       CHECK(std::strlen(store[i].path) < FLEXMED_PATH_MAX, "ruta dentro del limite");
     CHECK(ix.state == FLEXMED_SCAN_DONE, "una ruta larga no puede parar el recorrido");
   }
   { // Un directorio ilegible no puede tumbar el indice entero.
-    FakeVol sd;
-    sd.tree["/sdcard/R"]     = { {"malo", 0, true}, {"bien.jpg", 1, false} };
-    sd.tree["/sdcard/R/malo"]= { {"x.jpg", 1, false} };
-    sd.unreadable = "/sdcard/R/malo";
+    FakeVol volume;
+    volume.tree["/Media"]     = { {"malo", 0, true}, {"bien.jpg", 1, false} };
+    volume.tree["/Media/malo"]= { {"x.jpg", 1, false} };
+    volume.unreadable = "/Media/malo";
     FlexMediaItem store[8];
     FlexMediaIndex ix;
     flexMediaIndexInit(&ix, store, 8);
-    ix.volSd = volOf(&sd);
-    flexMediaIndexAddRoot(&ix, "/sdcard/R", FLEXMED_VOL_SD);
-    flexMediaIndexStart(&ix, 1);
+    ix.volume = volOf(&volume);
+    flexMediaIndexAddRoot(&ix, "/Media");
+    flexMediaIndexStart(&ix);
     runToEnd(&ix, 2);
     CHECK(ix.state == FLEXMED_SCAN_DONE, "un directorio ilegible no para el indice");
     CHECK(ix.n == 1, "lo legible si se indexa (n=%u)", ix.n);
   }
   { // Raiz que no existe: se pasa a la siguiente.
-    FakeVol sd;
-    sd.tree["/sdcard/B"] = { {"ok.jpg", 1, false} };
+    FakeVol volume;
+    volume.tree["/Media"] = { {"ok.jpg", 1, false} };
     FlexMediaItem store[8];
     FlexMediaIndex ix;
     flexMediaIndexInit(&ix, store, 8);
-    ix.volSd = volOf(&sd);
-    flexMediaIndexAddRoot(&ix, "/sdcard/NoExiste", FLEXMED_VOL_SD);
-    flexMediaIndexAddRoot(&ix, "/sdcard/B",        FLEXMED_VOL_SD);
-    flexMediaIndexStart(&ix, 1);
+    ix.volume = volOf(&volume);
+    flexMediaIndexAddRoot(&ix, "/NoExiste");
+    flexMediaIndexAddRoot(&ix, "/Media");
+    flexMediaIndexStart(&ix);
     runToEnd(&ix, 4);
     CHECK(ix.state == FLEXMED_SCAN_DONE && ix.n == 1,
           "una raiz ausente se salta (estado=%d n=%u)", ix.state, ix.n);
   }
 }
 
-static void testIndexCardRemoved(){
-  std::printf("[media] indice: la tarjeta se saca A MITAD del recorrido\n");
+static void testIndexVolumeUnavailable(){
+  std::printf("[media] indice: LittleFS deja de estar disponible a mitad del recorrido\n");
 
-  FakeVol intern, sd;
-  intern.tree["/Documentos"] = { {"i1.jpg", 1, false}, {"i2.jpg", 1, false} };
+  FakeVol volume;
   std::vector<FakeEntry> many;
   for(int i = 0; i < 60; i++){
-    char n[32]; std::snprintf(n, sizeof(n), "s%02d.jpg", i);
+    char n[32]; std::snprintf(n, sizeof(n), "f%02d.jpg", i);
     many.push_back({n, 10, false});
   }
-  sd.tree["/sdcard/DCIM"] = many;
-  sd.dieAfterCalls = 3;                  // muere tras 3 listados
+  volume.tree["/Documentos"] = many;
+  volume.dieAfterCalls = 3;
 
   FlexMediaItem store[128];
   FlexMediaIndex ix;
   flexMediaIndexInit(&ix, store, 128);
-  ix.volInt = volOf(&intern);
-  ix.volSd  = volOf(&sd);
-  flexMediaIndexAddRoot(&ix, "/Documentos",  FLEXMED_VOL_INT);
-  flexMediaIndexAddRoot(&ix, "/sdcard/DCIM", FLEXMED_VOL_SD);
-  flexMediaIndexStart(&ix, 1);
+  ix.volume = volOf(&volume);
+  flexMediaIndexAddRoot(&ix, "/Documentos");
+  flexMediaIndexStart(&ix);
   runToEnd(&ix, 2);
 
-  CHECK(ix.state == FLEXMED_SCAN_DONE, "sacar la tarjeta debe TERMINAR el recorrido, no colgarlo");
-  CHECK(flexMediaIndexCount(&ix, 0, FLEXMED_VOL_INT) == 2,
-        "lo de la memoria interna sobrevive (%d)", flexMediaIndexCount(&ix, 0, FLEXMED_VOL_INT));
-  CHECK(flexMediaIndexCount(&ix, 0, FLEXMED_VOL_SD) < 60,
-        "no puede haber indexado la tarjeta entera si murio a mitad");
-
-  // Y al soltar lo de la tarjeta, solo se va lo de la tarjeta.
-  int before = flexMediaIndexCount(&ix, 0, FLEXMED_VOL_INT);
-  flexMediaIndexDropSd(&ix);
-  CHECK(flexMediaIndexCount(&ix, 0, FLEXMED_VOL_SD) == 0, "tras soltar, cero de tarjeta");
-  CHECK(flexMediaIndexCount(&ix, 0, FLEXMED_VOL_INT) == before,
-        "tras soltar, lo interno intacto");
-  for(uint16_t i = 0; i < ix.n; i++)
-    CHECK(store[i].vol == FLEXMED_VOL_INT, "no puede quedar ningun elemento de tarjeta");
+  CHECK(ix.state == FLEXMED_SCAN_DONE,
+        "perder LittleFS debe terminar el recorrido, no colgarlo");
+  CHECK(flexMediaIndexCount(&ix, 0) < 60,
+        "no puede haber indexado el arbol entero si el volumen fallo");
 }
 
 static void testIndexNth(){
   std::printf("[media] indice: seleccion por filtro (lo que usan las pestanas)\n");
-  FakeVol sd;
-  sd.tree["/sdcard/G"] = {
+  FakeVol volume;
+  volume.tree["/Media"] = {
     {"1.jpg", 1, false}, {"2.avi", 2, false}, {"3.jpg", 3, false},
     {"4.avi", 4, false}, {"5.wav", 5, false}
   };
   FlexMediaItem store[16];
   FlexMediaIndex ix;
   flexMediaIndexInit(&ix, store, 16);
-  ix.volSd = volOf(&sd);
-  flexMediaIndexAddRoot(&ix, "/sdcard/G", FLEXMED_VOL_SD);
-  flexMediaIndexStart(&ix, 1);
+  ix.volume = volOf(&volume);
+  flexMediaIndexAddRoot(&ix, "/Media");
+  flexMediaIndexStart(&ix);
   runToEnd(&ix, 8);
 
-  CHECK(flexMediaIndexCount(&ix, FLEXMED_VIDEO, -1) == 2, "dos videos");
-  int i0 = flexMediaIndexNth(&ix, FLEXMED_VIDEO, -1, 0);
-  int i1 = flexMediaIndexNth(&ix, FLEXMED_VIDEO, -1, 1);
+  CHECK(flexMediaIndexCount(&ix, FLEXMED_VIDEO) == 2, "dos videos");
+  int i0 = flexMediaIndexNth(&ix, FLEXMED_VIDEO, 0);
+  int i1 = flexMediaIndexNth(&ix, FLEXMED_VIDEO, 1);
   CHECK(i0 >= 0 && i1 >= 0 && i0 != i1, "los dos videos son elementos distintos");
   CHECK(store[i0].kind == FLEXMED_VIDEO && store[i1].kind == FLEXMED_VIDEO, "y son videos");
-  CHECK(flexMediaIndexNth(&ix, FLEXMED_VIDEO, -1, 2) == -1, "no hay un tercero");
-  CHECK(flexMediaIndexNth(&ix, FLEXMED_PHOTO, FLEXMED_VOL_INT, 0) == -1,
-        "no hay fotos internas en este arbol");
+  CHECK(flexMediaIndexNth(&ix, FLEXMED_VIDEO, 2) == -1, "no hay un tercero");
+  CHECK(flexMediaIndexNth(&ix, FLEXMED_AUDIO, 1) == -1,
+        "no hay un segundo audio en este arbol");
 }
 
 // =============================================================
@@ -875,7 +854,7 @@ int main(){
   testIndexBasics();
   testIndexSiblingsAfterSubdir();
   testIndexEdges();
-  testIndexCardRemoved();
+  testIndexVolumeUnavailable();
   testIndexNth();
   std::printf("=== %d comprobaciones, %d fallos ===\n", g_run, g_fail);
   return g_fail ? 1 : 0;

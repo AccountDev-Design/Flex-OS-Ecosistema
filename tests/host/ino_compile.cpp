@@ -38,6 +38,11 @@
 __FlexSerial Serial;
 TwoWire      Wire;
 __FlexWiFi   WiFi;
+EspClass     ESP;
+// Valores plausibles y FIJOS: el arnes no simula la flash, solo hace que el
+// sketch compile y enlace. Lo que se comprueba aqui es el codigo, no el chip.
+uint32_t EspClass::getSketchSize(){ return 3u << 20; }
+uint32_t EspClass::getFreeSketchSpace(){ return 4u << 20; }
 
 // Reloj virtual: las pruebas de abajo lo mueven a voluntad.
 unsigned long gTestMs = 0;
@@ -73,14 +78,62 @@ uint32_t esp_random(){ return 0; }
 bool setCpuFrequencyMhz(uint32_t){ return true; }
 uint32_t getCpuFrequencyMhz(){ return 360; }
 
-void*  heap_caps_malloc(size_t n, uint32_t){ return malloc(n); }
-void*  heap_caps_calloc(size_t n, size_t s, uint32_t){ return calloc(n, s); }
-void*  heap_caps_realloc(void* p, size_t n, uint32_t){ return realloc(p, n); }
-void*  heap_caps_aligned_alloc(size_t a, size_t n, uint32_t){ return aligned_alloc(a, n); }
-void   heap_caps_free(void* p){ free(p); }
-size_t heap_caps_get_free_size(uint32_t){ return 8u << 20; }
-size_t heap_caps_get_total_size(uint32_t){ return 32u << 20; }
-size_t heap_caps_get_largest_free_block(uint32_t){ return 4u << 20; }
+// #############################################################
+//  CONTABILIDAD DE PSRAM DEL ARNES
+//  ------------------------------------------------------------
+//  El sketch MIDE la memoria libre: antes y despues de construir una
+//  app (para saber su huella), antes y despues de soltar un buffer
+//  (para saber cuanto se libero de verdad), y para decidir si una app
+//  pesada cabe. Con un valor constante todas esas medidas darian 0 y
+//  la multitarea por memoria seria imposible de comprobar aqui.
+//
+//  Asi que el arnes lleva la cuenta: cada reserva de PSRAM se apunta
+//  con su tamano y cada liberacion se descuenta. Como el sketch libera
+//  indistintamente con free() y con heap_caps_free() -- en ESP-IDF son
+//  el mismo asignador --, free() se redirige (mas abajo, justo antes de
+//  incluir el .ino) a la version que descuenta.
+//
+//  Esto ademas convierte la prueba en un DETECTOR DE FUGAS real: si
+//  cerrar todas las apps no devuelve la PSRAM al punto de partida, es
+//  que algo quedo reservado.
+// #############################################################
+#include <map>
+static std::map<void*, size_t>& psMap(){ static std::map<void*, size_t> m; return m; }
+size_t gPsUsed        = 0;
+size_t gTestPsTotal   = 32u << 20;
+size_t gTestPsPressure = 0;          // presion artificial que aplican las pruebas
+size_t gTestInTotal   = 400u << 10;
+size_t gTestInFree    = 180u << 10;
+size_t gTestPsLargest = 0;           // 0 = todo lo libre en una sola pieza
+
+static void psTrack(void* p, size_t n){ if(p){ psMap()[p] = n; gPsUsed += n; } }
+static void psUntrack(void* p){
+  auto it = psMap().find(p);
+  if(it == psMap().end()) return;
+  gPsUsed -= it->second;
+  psMap().erase(it);
+}
+// free() del sketch: descuenta y llama al de verdad. Se define ANTES de la
+// macro que redirige free(), asi que aqui dentro free() sigue siendo el real.
+void flexTestFree(void* p){ psUntrack(p); free(p); }
+
+void*  heap_caps_malloc(size_t n, uint32_t){ void* p = malloc(n); psTrack(p, n); return p; }
+void*  heap_caps_calloc(size_t n, size_t s, uint32_t){ void* p = calloc(n, s); psTrack(p, n * s); return p; }
+void*  heap_caps_realloc(void* p, size_t n, uint32_t){ psUntrack(p); void* q = realloc(p, n); psTrack(q, n); return q; }
+void*  heap_caps_aligned_alloc(size_t a, size_t n, uint32_t){ void* p = aligned_alloc(a, n); psTrack(p, n); return p; }
+void   heap_caps_free(void* p){ psUntrack(p); free(p); }
+size_t heap_caps_get_free_size(uint32_t caps){
+  if(caps & MALLOC_CAP_INTERNAL) return gTestInFree;
+  size_t used = gPsUsed + gTestPsPressure;
+  return used >= gTestPsTotal ? 0 : gTestPsTotal - used;
+}
+size_t heap_caps_get_total_size(uint32_t caps){
+  return (caps & MALLOC_CAP_INTERNAL) ? gTestInTotal : gTestPsTotal;
+}
+size_t heap_caps_get_largest_free_block(uint32_t caps){
+  size_t fr = heap_caps_get_free_size(caps);
+  return (gTestPsLargest && gTestPsLargest < fr) ? gTestPsLargest : fr;
+}
 size_t esp_get_free_heap_size(){ return 256u << 10; }
 
 esp_reset_reason_t esp_reset_reason(){ return ESP_RST_POWERON; }
@@ -156,8 +209,14 @@ static void futSaveTeam(int idx);
 static void gamesRenderMenu();
 static void geoEnterSelect();
 
+// free() del SKETCH pasa por la contabilidad de PSRAM (ver arriba). Va aqui,
+// despues de todos los includes del sistema y justo antes del .ino, para que
+// solo afecte al codigo bajo prueba.
+#define free(p) flexTestFree(p)
+
 // El sketch entero, tal cual va a la placa.
 #include "../../FlexOS_Ultra.ino"
+#undef free
 
 // #############################################################
 //  PRUEBAS DEL RELOJ DEL SISTEMA
@@ -186,6 +245,7 @@ static void testRecortePorBandas();
 static void testIconosEnSuCaja();
 static void testTransicionesApps();
 static void testRejillaAutoPaginas();
+static void testMultitareaMemoria();
 static int gFails = 0;
 static void chk(bool ok, const char* what){
   if(!ok){ printf("  FALLO: %s\n", what); gFails++; }
@@ -3304,22 +3364,384 @@ static void testMediosOrientacion(){
   qpLoaded = false; qpLoad();
   chk(!qpCfgHas(QSID_VOLUME), "la configuracion de fabrica no coloca un control de volumen sin salida real");
 
-  // ---- 8. RUTAS: de que volumen es cada una ----
-  chk(mediaIsSd("/sdcard/DCIM/a.jpg"),  "una ruta de la tarjeta se reconoce");
-  chk(!mediaIsSd("/Documentos/a.jpg"),  "una ruta interna no se confunde con la tarjeta");
-  chk(!mediaIsSd("/sdcardX/a.jpg"),     "un prefijo parecido NO es la tarjeta");
-  chk(strcmp(mediaVolName("/sdcard/x"), mediaVolName("/Documentos/x")) != 0,
-      "los dos volumenes se nombran distinto");
-
-  // ---- 9. SIN TARJETA: nada finge tenerla ----
-  chk(!flexSdReady(), "el doble de la tarjeta reproduce el caso SIN tarjeta");
-  chk(flexSdTotalBytes() == 0 && flexSdUsedBytes() == 0,
-      "sin tarjeta la capacidad es cero, no un numero inventado");
-  chk(flexSdError()[0] != 0, "sin tarjeta siempre hay un motivo legible que ensenar");
-  { FlexFsEntry e[4];
-    chk(mediaList("/sdcard", e, 4) < 0, "listar la tarjeta ausente da error, no 'carpeta vacia'"); }
+  // ---- 8. ALMACENAMIENTO: los medios activos usan LittleFS ----
+  chk(strcmp(mediaVolName("/Documentos/x"), "Memoria interna") == 0,
+      "el reproductor identifica la memoria interna");
 
   printf("  Medios: todas las comprobaciones pasan.\n");
+}
+
+
+// #############################################################
+//  MULTITAREA POR MEMORIA  ·  presupuesto, desalojo y Recientes
+//  ------------------------------------------------------------
+//  Lo que se comprueba aqui es el CABLEADO entre las reglas (que ya
+//  tienen su propia bateria en test_mem) y el sistema real: que la
+//  medida sale del SDK y no de una tabla, que la puerta de admision se
+//  aplica de verdad en enterApp, que una app ligera nunca se bloquea,
+//  que soltar recursos NO cierra nada, que el desalojo elige la menos
+//  reciente y solo como ultimo recurso, y que ni las tarjetas ni sus
+//  miniaturas se acumulan.
+//
+//  Y una comprobacion que solo es posible aqui: que TODO lo que se
+//  reserva se libera. El arnes lleva la cuenta real de la PSRAM
+//  (gPsUsed), asi que una fuga en el codigo nuevo se ve como un numero
+//  que no vuelve a su sitio.
+// #############################################################
+extern size_t gPsUsed, gTestPsTotal, gTestPsPressure, gTestPsLargest, gTestInFree, gTestInTotal;
+
+// Deja el ciclo de vida y Recientes en blanco, sin tocar la memoria real.
+#define MB_(x) ((size_t)(x) * 1024u * 1024u)
+static void mtReset(){
+  // Sin esto, una transicion de app viva de una prueba anterior hace que
+  // memAlertTick() salga por su guarda ("en mitad de una animacion nadie mas
+  // compone") y la bateria mediria otra cosa.
+  appTrCancel();
+  gState = ST_HOME;
+  gNotifCount = 0;
+  while(swCardCount() > 0) swDropCard(0);
+  for(int i = 0; i < APP_N; i++){
+    gAppState[i] = ALIFE_CLOSED;
+    gAppSeenMs[i] = 0;
+    gSessNeedSave[i] = false;
+    gAppShed[i] = false;
+    appMemForget(i);
+  }
+  gSessDirtyApp = -1;
+  gTestPsPressure = 0;
+  gTestPsLargest = 0;
+  gTestInFree = 180u << 10;
+  memSampleNow();
+}
+// Presion artificial: deja EXACTAMENTE 'freeWanted' bytes de PSRAM libre.
+static void mtSetFree(size_t freeWanted){
+  gTestPsPressure = 0;
+  size_t real = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+  gTestPsPressure = (real > freeWanted) ? (real - freeWanted) : 0;
+  memSampleNow();
+}
+
+static void testMultitareaMemoria(){
+  printf("Multitarea por memoria: presupuesto, desalojo y Recientes\n");
+  mtReset();
+
+  // ---- 1) La medida sale del SDK, no de una tabla ----
+  chk(memSnap()->psTotal == gTestPsTotal, "la PSRAM total es la que devuelve el SDK");
+  chk(memSnap()->inTotal == gTestInTotal, "la SRAM interna tambien se mide, no se supone");
+  mtSetFree(12u << 20);
+  chk(memSnap()->psFree >= (12u << 20) - 4096 && memSnap()->psFree <= (12u << 20) + 4096,
+      "la PSRAM libre publicada es la medida");
+  chk(flexMemLevel(memSnap()) == FLEXMEM_LV_OK, "12 MB libres: multitarea normal");
+
+  // ---- 2) El pico de uso solo sube ----
+  uint32_t peak0 = memSnap()->psPeakUsed;
+  mtSetFree(4u << 20);                      // mas uso -> el pico sube
+  chk(memSnap()->psPeakUsed > peak0, "el pico de uso registra la peor situacion vista");
+  uint32_t peak1 = memSnap()->psPeakUsed;
+  mtSetFree(20u << 20);                     // menos uso -> el pico NO baja
+  chk(memSnap()->psPeakUsed == peak1, "el pico no se borra cuando la memoria se recupera");
+
+  // ---- 3) Puerta de admision ----
+  mtSetFree(12u << 20);
+  chk(memAdmitApp(IC_NAV) == FLEXMEM_OK,        "con 12 MB libres el Navegador se admite");
+  chk(memAdmitApp(IC_GALERIA) == FLEXMEM_OK,    "...y la Galeria tambien");
+  mtSetFree(4u << 20);
+  chk(memAdmitApp(IC_NAV) == FLEXMEM_DENY_PSRAM,      "con 4 MB libres el Navegador se protege");
+  chk(memAdmitApp(IC_MULTIMEDIA) == FLEXMEM_DENY_PSRAM, "...y Multimedia igual");
+  chk(memAdmitApp(IC_NOTAS)   == FLEXMEM_OK, "una app LIGERA nunca se bloquea");
+  chk(memAdmitApp(IC_AJUSTES) == FLEXMEM_OK, "Ajustes tiene que poder abrirse para arreglar el apuro");
+
+  // Bloque contiguo: megas de sobra repartidos en trozos.
+  mtSetFree(6u << 20); gTestPsLargest = 600u << 10; memSampleNow();
+  chk(memAdmitApp(IC_MULTIMEDIA) == FLEXMEM_DENY_BLOCK,
+      "sin un hueco contiguo suficiente se dice que el problema es el reparto");
+  gTestPsLargest = 0;
+
+  // SRAM interna: manda sobre la PSRAM.
+  mtSetFree(20u << 20); gTestInFree = 20u << 10; memSampleNow();
+  chk(memAdmitApp(IC_NAV) == FLEXMEM_DENY_SRAM, "la SRAM interna puede negar por si sola");
+  chk(memAdmitApp(IC_RELOJ) == FLEXMEM_OK,      "...pero no a una app ligera");
+  gTestInFree = 180u << 10; memSampleNow();
+
+  // ---- 4) enterApp APLICA la puerta (no basta con que exista) ----
+  gState = ST_HOME; gAppId = IC_RELOJ; appTrCancel();
+  mtSetFree(4u << 20);
+  enterApp(IC_NAV);
+  chk(gAppState[IC_NAV] == ALIFE_CLOSED, "una app pesada denegada NO queda medio abierta");
+  chk(gState == ST_HOME, "y la navegacion se queda donde estaba");
+  // La MISMA app, con memoria: se abre.
+  mtSetFree(20u << 20);
+  enterApp(IC_NOTAS);
+  chk(gState == ST_APP && gAppId == IC_NOTAS, "con memoria, la app se abre con normalidad");
+
+  // ---- 5) Volver a una app YA abierta nunca se bloquea ----
+  // Es la regla que impide que el usuario se quede sin poder recuperar su nota
+  // justo cuando el sistema esta apurado: su memoria ya esta contada.
+  appSuspend(IC_NOTAS, false);
+  chk(gAppState[IC_NOTAS] == ALIFE_SUSPENDED, "salir de la app la suspende, no la cierra");
+  gAppState[IC_GALERIA] = ALIFE_SUSPENDED; gAppSeenMs[IC_GALERIA] = 1000;
+  mtSetFree(3u << 20);
+  gState = ST_HOME;
+  enterApp(IC_GALERIA);
+  chk(gAppState[IC_GALERIA] != ALIFE_CLOSED,
+      "una app SUSPENDIDA se puede recuperar aunque la memoria este apurada");
+
+  // ---- 6) Soltar recursos NO cierra ninguna app ----
+  mtReset();
+  gAppState[IC_GALERIA]    = ALIFE_SUSPENDED; gAppSeenMs[IC_GALERIA]    = 1000;
+  gAppState[IC_MULTIMEDIA] = ALIFE_SUSPENDED; gAppSeenMs[IC_MULTIMEDIA] = 5000;
+  gAppState[IC_NOTAS]      = ALIFE_SUSPENDED; gAppSeenMs[IC_NOTAS]      = 9000;
+  galCacheReset();                       // cache inicializada... pero VACIA
+  memShedAll(0);
+  chk(gAppState[IC_GALERIA]    == ALIFE_SUSPENDED &&
+      gAppState[IC_MULTIMEDIA] == ALIFE_SUSPENDED &&
+      gAppState[IC_NOTAS]      == ALIFE_SUSPENDED,
+      "soltar recursos deja las tres apps ABIERTAS: adelgazar no es cerrar");
+  // LA MARCA ES UN HECHO, NO UNA INTENCION. La cache de la Galeria estaba
+  // inicializada pero sin una sola miniatura decodificada: no se solto nada,
+  // asi que la app NO puede decir "Estado guardado".
+  chk(!gAppShed[IC_GALERIA],
+      "una cache vacia no marca la app como 'Estado guardado'");
+  chk(!strcmp(swStateName(IC_GALERIA), "Pausada"), "sigue siendo 'Pausada'");
+  chk(!strcmp(swStateName(IC_NOTAS), "Pausada"), "una app que no solto nada sigue 'Pausada'");
+  gAppState[IC_RELOJ] = ALIFE_RUNNING;
+  chk(!strcmp(swStateName(IC_RELOJ), "Activa"), "la de primer plano es 'Activa'");
+
+  // Con algo REAL que soltar (el buffer del sensor de la Camara) si se marca.
+  camEnter();
+  gAppState[IC_CAMARA] = ALIFE_SUSPENDED; gAppShed[IC_CAMARA] = false;
+  chk(memShedApp(IC_CAMARA) > 0, "soltar el buffer del sensor SI libera bytes medibles");
+  chk(gAppShed[IC_CAMARA], "y entonces si se marca como 'Estado guardado'");
+  chk(!strcmp(swStateName(IC_CAMARA), "Estado guardado"), "y la tarjeta lo dice asi");
+  camCloseApp();
+
+  // ---- 7) La app ACTIVA nunca se toca ----
+  camEnter();
+  gAppState[IC_CAMARA] = ALIFE_RUNNING; gAppShed[IC_CAMARA] = false;
+  chk(memShedApp(IC_CAMARA) == 0, "a la app en primer plano no se le suelta nada");
+  chk(!gAppShed[IC_CAMARA], "...ni se la marca");
+  chk(camScene != NULL, "...y su buffer sigue intacto");
+  camCloseApp();
+
+  // ---- 8) Desalojo: el ultimo recurso, y por la menos reciente ----
+  mtReset();
+  gAppState[IC_EDU]  = ALIFE_SUSPENDED; gAppSeenMs[IC_EDU]  = 1000;   // la mas antigua
+  gAppState[IC_BIEN] = ALIFE_SUSPENDED; gAppSeenMs[IC_BIEN] = 8000;
+  // Critico y sin nada que soltar: solo entonces se cierra, y la mas antigua.
+  mtSetFree(2u << 20);
+  appEnforceMemoryBudget();
+  chk(gAppState[IC_EDU] == ALIFE_CLOSED,
+      "en zona critica se cierra la app suspendida MENOS reciente");
+  mtReset();
+
+  // ---- 9) Cambios sin guardar ----
+  gAppState[IC_NOTAS] = ALIFE_SUSPENDED;
+  chk(!appUnsaved(IC_NOTAS), "sin cambios pendientes no se marca nada");
+  gSessNeedSave[IC_NOTAS] = true;
+  chk(appUnsaved(IC_NOTAS), "la marca de sesion desfasada cuenta como cambios sin guardar");
+  swPushNoThumb(IC_NOTAS);
+  chk(swUnsavedCount() == 1, "Recientes cuenta las tarjetas con trabajo sin guardar");
+  gSessNeedSave[IC_NOTAS] = false;
+  chk(swUnsavedCount() == 0, "...y deja de contarlas cuando se guardan");
+
+  // ---- 10) Presupuesto de miniaturas ----
+  mtReset();
+  for(int k = 0; k < 8; k++){
+    int id = (k % (APP_N - 1)) + 1;
+    gAppState[id] = ALIFE_SUSPENDED;
+    swPush((uint8_t)id);
+    if(!swTasks[0].thumb) swTasks[0].thumb = swAllocThumb();
+  }
+  int thumbs = 0;
+  for(int i = 0; i < swCardCount(); i++) if(swTasks[i].thumb) thumbs++;
+  chk(thumbs <= SW_THUMB_MAX, "nunca hay mas miniaturas vivas que el tope");
+  chk(swCardCount() > SW_THUMB_MAX,
+      "...aunque haya mas tarjetas que miniaturas: la lista no se recorta por eso");
+
+  // ---- 11) Una tarjeta por app, sin duplicados ----
+  mtReset();
+  swPush((uint8_t)IC_NOTAS);
+  swPush((uint8_t)IC_NOTAS);
+  swPush((uint8_t)IC_PAINT);
+  swPush((uint8_t)IC_NOTAS);
+  chk(swCardCount() == 2, "volver a empujar la misma app no crea una segunda tarjeta");
+  chk(swCardApp(0) == IC_NOTAS, "la ultima usada queda la primera de la lista");
+  int seen = 0;
+  for(int i = 0; i < swCardCount(); i++) if(swCardApp(i) == IC_NOTAS) seen++;
+  chk(seen == 1, "cada app aparece EXACTAMENTE una vez en Recientes");
+
+  // ---- 12) Sin fugas: cerrar todo devuelve la PSRAM ----
+  // Se compara contra el punto de partida de ESTA prueba, no contra cero: los
+  // framebuffers del sistema viven mientras viva el sistema.
+  mtReset();
+  size_t psBase = gPsUsed;
+  for(int k = 0; k < 6; k++){
+    int id = (k % (APP_N - 1)) + 1;
+    gAppState[id] = ALIFE_SUSPENDED;
+    swPush((uint8_t)id);
+    if(!swTasks[0].thumb) swTasks[0].thumb = swAllocThumb();
+  }
+  chk(gPsUsed > psBase, "las miniaturas ocupan PSRAM de verdad");
+  while(swCardCount() > 0) swDropCard(0);
+  if(gPsUsed != psBase) printf("  (PSRAM sin devolver: %d bytes)\n", (int)(gPsUsed - psBase));
+  chk(gPsUsed == psBase, "cerrar todas las tarjetas devuelve TODA la PSRAM");
+
+  // ---- 13) El optimizador: etapas reales, cifras reales, sin bloquear ----
+  mtReset();
+  gState = ST_HOME;
+  optStart();
+  chk(optActive(), "Optimizar arranca y se queda a la vista");
+  int steps = 0;
+  gTestMs = 1000;
+  while(optActive() && optStage != OPT_DONE && steps < 40){
+    gTestMs += OPT_STEP_MS + 1;
+    optTick();
+    steps++;
+  }
+  chk(optStage == OPT_DONE, "la secuencia termina sola, una etapa por vuelta");
+  chk(steps <= 6, "y no da mas vueltas que etapas tiene");
+  chk(optGained == 0 || optGained < gTestPsTotal, "los bytes liberados son una medida, no un invento");
+  // Cerrar devuelve la pantalla y no deja el panel activo.
+  T = Touch(); T.tap = true; T.x = SCR_W / 2; T.y = OPT_BY + 10;
+  optTick();
+  chk(!optActive(), "el boton Hecho cierra el panel");
+  T = Touch();
+
+  // ---- 14) El modo visual eficiente es temporal y no toca las preferencias ----
+  bool glassBefore = uiGlass;
+  gEffMode = true;
+  chk(uiGlass == glassBefore, "el modo eficiente no cambia el estilo elegido");
+  mtSetFree(20u << 20);
+  gState = ST_HOME;
+  flexMemAlertsReset(&gMemAlerts);
+  gMemBlockMs = 0; gMemTickMs = 0;
+  gTestMs += MEM_BLOCK_MS + MEM_TICK_MS + 10;
+  memTick();
+  memAlertTick();                              // publica el nivel SOSTENIDO
+  gMemBlockMs = 0; gMemTickMs = 0;
+  gTestMs += MEM_BLOCK_MS + MEM_TICK_MS + 10;
+  memTick();
+  chk(!gEffMode, "y se apaga solo en cuanto vuelve a haber holgura");
+
+  // ---- 15) SILENCIO CON MEMORIA NORMAL, y sin reservar por vuelta ----
+  // Es el criterio central del rediseno: si hay memoria, el usuario no ve
+  // NADA. Y el propio hecho de medir y decidir no puede costar memoria.
+  mtReset();
+  gState = ST_HOME; gNotifCount = 0;
+  flexMemAlertsReset(&gMemAlerts);
+  mtSetFree(20u << 20);
+  size_t psIdle = gPsUsed;
+  for(int i = 0; i < 40; i++){
+    gTestMs += 200;
+    gMemTickMs = 0; gMemBlockMs = 0;        // fuerza el muestreo en cada vuelta
+    memTick();
+    memAlertTick();
+  }
+  chk(gNotifCount == 0, "con 20 MB libres no aparece ni una notificacion");
+  chk(gPsUsed == psIdle, "medir y decidir no reserva ni un byte por vuelta");
+
+  // ---- 16) PRIMERO ARREGLAR, DESPUES AVISAR ----
+  // Si el alivio automatico resuelve la presion, el usuario no se entera: esa
+  // es la regla. Solo cuando ni soltandolo todo se sale del apuro aparece UNA
+  // tarjeta. Se prueban los dos caminos.
+  gNotifCount = 0;
+  flexMemAlertsReset(&gMemAlerts);
+  ensureBlurBg();                            // algo real que el alivio pueda soltar
+  mtSetFree(MB_(5) + 512u * 1024u);          // 5,5 MB -> WARN, pero recuperable
+  gMemTickMs = 0; gMemBlockMs = 0; gTestMs += 200; memTick();
+  memAlertTick();
+  chk(gNotifCount == 0,
+      "si el alivio automatico resuelve la presion, no se avisa de nada");
+
+  // Ahora una presion que NO se puede resolver soltando caches.
+  gNotifCount = 0;
+  flexMemAlertsReset(&gMemAlerts);
+  mtSetFree(MB_(20));                        // se arranca en OK...
+  gMemTickMs = 0; gMemBlockMs = 0; gTestMs += 200; memTick(); memAlertTick();
+  mtSetFree(MB_(2));                         // ...y se cae a CRITICO de golpe
+  gMemTickMs = 0; gMemBlockMs = 0; gTestMs += 200; memTick();
+  memAlertTick();
+  int trasCruce = gNotifCount;
+  chk(trasCruce >= 1, "si tras aliviar SIGUE apretado, se avisa una vez");
+  for(int i = 0; i < 30; i++){
+    gTestMs += 200;
+    gMemTickMs = 0; gMemBlockMs = 0; memTick();
+    memAlertTick();
+  }
+  chk(gNotifCount == trasCruce,
+      "y NO se repite en cada vuelta mientras la condicion dura");
+
+  // ---- 17) HISTERESIS de verdad, sobre el sistema completo ----
+  // Oscilar alrededor del corte de 6 MB no puede producir una tarjeta nueva
+  // cada vez. Es el caso exacto del enunciado (5,99 -> 6,01 -> 5,99).
+  gNotifCount = 0;
+  for(int i = 0; i < 6; i++){
+    mtSetFree(MB_(6) + 64u * 1024u);
+    gMemTickMs = 0; gMemBlockMs = 0; gTestMs += 200; memTick(); memAlertTick();
+    mtSetFree(MB_(5) + 960u * 1024u);
+    gMemTickMs = 0; gMemBlockMs = 0; gTestMs += 200; memTick(); memAlertTick();
+  }
+  chk(gNotifCount == 0, "oscilar en el umbral no genera ni un aviso mas");
+  mtReset(); gNotifCount = 0;
+
+  // ---- 18) UNA APP CON CAMBIOS SIN GUARDAR NO SE CIERRA EN SILENCIO ----
+  // El desalojo automatico solo puede cerrar lo que se pudo guardar; si la
+  // app dice que tiene trabajo pendiente, "Cerrar todas" tiene que preguntar.
+  mtReset();
+  gAppState[IC_NOTAS] = ALIFE_SUSPENDED; gAppSeenMs[IC_NOTAS] = 1000;
+  gSessNeedSave[IC_NOTAS] = true;
+  swPush((uint8_t)IC_NOTAS);
+  chk(appUnsaved(IC_NOTAS), "la app se declara con cambios sin guardar");
+  chk(swUnsavedCount() == 1, "y Recientes lo cuenta para pedir confirmacion");
+  gSessNeedSave[IC_NOTAS] = false;
+  mtReset();
+
+  // ---- 19) LA CAMARA NO PIERDE SUS AJUSTES AL SOLTAR EL BUFFER ----
+  // Regresion real: camResume() caia en camEnter() cuando el gestor de memoria
+  // habia soltado camScene, y camEnter() reinicia modo, zoom y exposicion.
+  {
+    camEnter();                              // sesion nueva: ajustes de fabrica
+    camMode = 2; camNight = true; camExpo = 77; camZoom = 3.5f;
+    gAppState[IC_CAMARA] = ALIFE_SUSPENDED;
+    chk(camScene != NULL, "la camara tiene su buffer tras abrirse");
+    size_t freed = memShedApp(IC_CAMARA);
+    (void)freed;
+    chk(camScene == NULL, "soltar recursos libera el buffer del sensor");
+    chk(gAppShed[IC_CAMARA], "y la marca como 'Estado guardado'");
+    camResume();
+    chk(camScene != NULL, "al volver, el buffer se rehace");
+    if(!(camMode == 2 && camNight && camExpo == 77))
+      printf("  (camara tras reanudar: modo %d, noche %d, expo %d)\n",
+             camMode, (int)camNight, camExpo);
+    chk(camMode == 2 && camNight && camExpo == 77,
+        "los AJUSTES del usuario sobreviven a soltar el buffer");
+    // Soltar dos veces no puede volver a "liberar" nada.
+    gAppState[IC_CAMARA] = ALIFE_SUSPENDED;
+    memShedApp(IC_CAMARA);
+    gAppShed[IC_CAMARA] = false;
+    chk(memShedApp(IC_CAMARA) == 0, "sin buffer, soltar de nuevo no libera nada");
+    chk(!gAppShed[IC_CAMARA], "y no se marca 'Estado guardado' sin haber soltado");
+    camCloseApp();
+  }
+  mtReset();
+
+  // ---- 20) NOTAS: suspender NO puede tocar el contenido ----
+  // El viaje completo a disco necesita LittleFS y solo se puede comprobar en
+  // la placa; lo que SI se comprueba aqui es que la suspension no borra el
+  // texto, el cursor ni el desplazamiento, que es donde estaria el fallo.
+  {
+    noteView = 1;
+    snprintf(noteBuffer, noteBufMax, "hola mundo");
+    noteCur = 4; noteEditorScroll = 3; noteDirtyMs = 12345;
+    noteSuspend();
+    chk(!strcmp(noteBuffer, "hola mundo"), "el texto sobrevive a suspender");
+    chk(noteCur == 4, "el cursor sobrevive a suspender");
+    chk(noteEditorScroll == 3, "el desplazamiento sobrevive a suspender");
+    noteView = 0; notePath[0] = 0; noteBuffer[0] = 0; noteDirtyMs = 0;
+  }
+
+  mtReset();
+  if(!gFails) printf("  Multitarea: todas las comprobaciones pasan.\n");
 }
 
 int main(){
@@ -3404,6 +3826,7 @@ int main(){
   testTransicionesApps();
   testRejillaAutoPaginas();
   testMediosOrientacion();
+  testMultitareaMemoria();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

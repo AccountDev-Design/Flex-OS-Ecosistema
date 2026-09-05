@@ -156,6 +156,9 @@ void        flexSdPoke();
 // fotograma de video). No desactiva la deteccion PASIVA: si una
 // lectura falla, la retirada se detecta igual y al instante.
 void        flexSdBusySet(bool busy);
+// Lectura pura del mismo indicador. La usa el diagnostico de Wi-Fi/SD para
+// poder decir si la tarjeta estaba ocupada en el instante del fallo.
+bool        flexSdBusyGet();
 
 // -------------------------------------------------------------
 //  Capacidad. Son bytes REALES leidos del volumen montado; sin

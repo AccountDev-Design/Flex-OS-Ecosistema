@@ -17,6 +17,8 @@ make clean
 tests/
   host/
     test_jpeg.cpp      decodificador JPEG contra libjpeg-turbo
+    test_mem.cpp       presupuesto de memoria: presión, fragmentación,
+                       veredicto de apertura y avisos con enfriamiento
     test_browser.cpp   omnibox, validación de URL, codec FBP/1, SHA-1/base64
     test_app.cpp       código de dispositivo: ciclo de vida, dibujo, capacidades
     test_bridge.cpp    el puente, contra un .ino simulado

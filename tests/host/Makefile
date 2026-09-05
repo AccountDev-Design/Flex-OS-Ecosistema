@@ -44,7 +44,7 @@ APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net \
         $(BUILD)/test_vault $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
-        $(BUILD)/test_media
+        $(BUILD)/test_media $(BUILD)/test_mem
 TOOLS := $(BUILD)/jpegcheck
 
 .PHONY: all run all-boards fixtures clean ino
@@ -70,6 +70,16 @@ MEDIA_SRC := $(ROOT)/FlexOS_Media.cpp
 
 $(BUILD)/test_media: test_media.cpp $(MEDIA_SRC) $(ROOT)/FlexOS_Media.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_media.cpp $(MEDIA_SRC)
+
+# --- Memoria: presupuesto, presion, fragmentacion y avisos ---
+# Nucleo PURO (no toca Arduino ni el SDK): recibe una medida ya tomada y
+# decide. CON sanitizers, como el resto del nucleo portable. Aqui es donde
+# se fijan los cortes de 10/6/5 MB y la regla del bloque contiguo: si
+# cambian sin querer, esta bateria lo dice antes que la placa.
+MEM_SRC := $(ROOT)/FlexOS_Mem.cpp
+
+$(BUILD)/test_mem: test_mem.cpp $(MEM_SRC) $(ROOT)/FlexOS_Mem.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -o $@ test_mem.cpp $(MEM_SRC)
 
 # --- Flex Link / Flex Phone: protocolo y modelo del telefono ---
 # Nucleo PURO (sin Arduino), asi que se compila igual que el del
@@ -152,6 +162,11 @@ INO_SRC  := $(ROOT)/FlexOS_Ultra.ino
 # OTA): sin listarlos como dependencia, editar uno no rehacia la prueba y
 # `make` daba por buena la version anterior.
 INO_BRIDGES := $(wildcard $(ROOT)/FlexOS_*_Bridge.h)
+# Los MODULOS del sketch. FlexOS_Ultra.ino es solo el orquestador: interfaces,
+# apps y utilidades viven en FlexOS_Ultra_*.h y el .ino las incluye en orden.
+# Van aqui por el mismo motivo que los puentes: tocar un modulo TIENE que
+# rehacer la prueba, o `make` daria por buena la version anterior del sketch.
+INO_PARTS := $(wildcard $(ROOT)/FlexOS_Ultra_*.h)
 INOFLAGS := -Iinostub -I$(ROOT) -DARDUINO=200
 # -Wmaybe-uninitialized: falso positivo del ARNES. Los dobles de I2C devuelven
 # siempre "sin datos", asi que al inlinear gtPollMulti el compilador ve la rama
@@ -174,7 +189,7 @@ INOWARN  := $(WARN) -Wno-unused-function -Wno-unused-variable \
 #      -Wunused-function NO avisa de una static que tenga prototipo previo, y
 #      aqui casi todas lo tienen. Ese fallo deja al sistema atrapado en un
 #      estado que nadie despacha.
-ino: ino_compile.cpp $(INO_SRC) $(INO_BRIDGES) check_protos.py check_wiring.py | $(BUILD)
+ino: ino_compile.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) check_protos.py check_wiring.py | $(BUILD)
 	@python3 check_protos.py $(INO_SRC)
 	@python3 check_wiring.py $(INO_SRC)
 	@$(CXX) $(CXXSTD) -fsyntax-only $(INOWARN) $(INOFLAGS) -x c++ ino_compile.cpp
@@ -193,8 +208,8 @@ ino: ino_compile.cpp $(INO_SRC) $(INO_BRIDGES) check_protos.py check_wiring.py |
 # funcion que no tiene prueba propia, y enlazarlo contra los modulos de
 # verdad hace que un cambio de firma o una llamada mal cableada salte
 # aqui. Los modulos ademas no tocan Arduino, asi que no necesitan dobles.
-$(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_BRIDGES) $(JPEG_SRC) \
-                   $(FLNKSRC) $(FLPSRC) $(FLPLINK) $(CORE_SRC) $(MEDIA_SRC) | $(BUILD)
+$(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) $(JPEG_SRC) \
+                   $(FLNKSRC) $(FLPSRC) $(FLPLINK) $(CORE_SRC) $(MEDIA_SRC) $(MEM_SRC) | $(BUILD)
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -x c++ -c ino_compile.cpp -o $(BUILD)/ino_compile.o
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -c ino_extern_stubs.cpp -o $(BUILD)/ino_extern_stubs.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(JPEG_SRC) -o $(BUILD)/ino_jpeg.o
@@ -203,9 +218,10 @@ $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_BRIDGES
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(FLPLINK) -o $(BUILD)/ino_flexphonelink.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(CORE_SRC) -o $(BUILD)/ino_brcore.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(MEDIA_SRC) -o $(BUILD)/ino_media.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(MEM_SRC)   -o $(BUILD)/ino_mem.o
 	@$(CXX) $(SAN) -o $@ $(BUILD)/ino_compile.o $(BUILD)/ino_extern_stubs.o $(BUILD)/ino_jpeg.o \
 	        $(BUILD)/ino_flexlink.o $(BUILD)/ino_flexphone.o $(BUILD)/ino_flexphonelink.o \
-	        $(BUILD)/ino_brcore.o $(BUILD)/ino_media.o
+	        $(BUILD)/ino_brcore.o $(BUILD)/ino_media.o $(BUILD)/ino_mem.o
 
 # La tabla de particiones de la version USB. No es codigo, pero una tabla
 # mal cuadrada no falla al compilar: falla al grabar, o peor, arranca y se
@@ -233,6 +249,8 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_jpeg ../fixtures
 	@echo
 	@$(BUILD)/test_media
+	@echo
+	@$(BUILD)/test_mem
 	@echo
 	@$(BUILD)/test_browser
 	@echo

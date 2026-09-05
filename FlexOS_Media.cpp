@@ -38,12 +38,6 @@ void flexMediaExt(const char* name, char* out, size_t n){
   out[k] = 0;
 }
 
-bool flexMediaPathIsSd(const char* path){
-  if(!path) return false;
-  if(strncmp(path, "/sdcard", 7) != 0) return false;
-  return path[7] == 0 || path[7] == '/';
-}
-
 // -------------------------------------------------------------
 //  CLASIFICACION
 //  ------------------------------------------------------------
@@ -54,7 +48,7 @@ bool flexMediaPathIsSd(const char* path){
 struct UnsupEntry { const char* ext; const char* why; };
 
 static const UnsupEntry UNSUP[] = {
-  // --- video que la gente tiene de verdad en la tarjeta ---
+  // --- formatos de video comunes ---
   { ".mp4",  "MP4/H.264: esta placa no tiene decodificador de video" },
   { ".m4v",  "MP4/H.264: esta placa no tiene decodificador de video" },
   { ".mov",  "MOV/H.264: esta placa no tiene decodificador de video" },
@@ -516,21 +510,19 @@ void flexMediaIndexInit(FlexMediaIndex* ix, FlexMediaItem* store, uint16_t cap){
   ix->depth = -1;
 }
 
-void flexMediaIndexAddRoot(FlexMediaIndex* ix, const char* path, uint8_t vol){
+void flexMediaIndexAddRoot(FlexMediaIndex* ix, const char* path){
   if(!ix || !path || ix->rootN >= FLEXMED_ROOTS_MAX) return;
   ix->roots[ix->rootN].path = path;
-  ix->roots[ix->rootN].vol  = vol;
   ix->rootN++;
 }
 
-void flexMediaIndexStart(FlexMediaIndex* ix, uint32_t sdGen){
+void flexMediaIndexStart(FlexMediaIndex* ix){
   if(!ix) return;
   ix->n     = 0;
   ix->full  = false;
   ix->rootI = 0;
   ix->depth = -1;
   ix->seen  = 0;
-  ix->sdGen = sdGen;
   ix->state = ix->rootN ? FLEXMED_SCAN_RUNNING : FLEXMED_SCAN_DONE;
   memset(ix->stackSkip, 0, sizeof(ix->stackSkip));
 }
@@ -539,29 +531,6 @@ void flexMediaIndexAbort(FlexMediaIndex* ix){
   if(!ix) return;
   ix->state = FLEXMED_SCAN_ABORTED;
   ix->depth = -1;
-}
-
-void flexMediaIndexDropSd(FlexMediaIndex* ix){
-  if(!ix || !ix->items) return;
-  uint16_t w = 0;
-  for(uint16_t i = 0; i < ix->n; i++){
-    if(ix->items[i].vol == FLEXMED_VOL_SD) continue;
-    if(w != i) ix->items[w] = ix->items[i];
-    w++;
-  }
-  ix->n = w;
-  ix->full = false;
-  // Si el recorrido estaba dentro de la tarjeta, se corta: seguir
-  // pidiendo directorios a un volumen que ya no esta solo produce
-  // errores.
-  if(ix->state == FLEXMED_SCAN_RUNNING && ix->rootI < ix->rootN
-     && ix->roots[ix->rootI].vol == FLEXMED_VOL_SD){
-    ix->depth = -1;
-  }
-}
-
-static const FlexMediaVolume* volOf(FlexMediaIndex* ix, uint8_t vol){
-  return (vol == FLEXMED_VOL_SD) ? &ix->volSd : &ix->volInt;
 }
 
 // Empuja un directorio en la pila. false si ya no cabe mas hondo.
@@ -574,7 +543,7 @@ static bool pushDir(FlexMediaIndex* ix, const char* path){
 }
 
 static void addItem(FlexMediaIndex* ix, const char* dir, const FlexMediaDirent* e,
-                    int kind, uint8_t vol){
+                    int kind){
   if(ix->n >= ix->cap){ ix->full = true; return; }
   FlexMediaItem* it = &ix->items[ix->n];
   // Una ruta que no cabe entera se DESCARTA en vez de guardarse
@@ -584,7 +553,6 @@ static void addItem(FlexMediaIndex* ix, const char* dir, const FlexMediaDirent* 
   if(need < 0 || need >= FLEXMED_PATH_MAX) return;
   it->size = e->size;
   it->kind = (uint8_t)kind;
-  it->vol  = vol;
   ix->n++;
 }
 
@@ -598,7 +566,7 @@ int flexMediaIndexStep(FlexMediaIndex* ix, int budget){
     if(ix->depth < 0){
       if(ix->rootI >= ix->rootN){ ix->state = FLEXMED_SCAN_DONE; return ix->state; }
       const FlexMediaRoot* r = &ix->roots[ix->rootI];
-      const FlexMediaVolume* v = volOf(ix, r->vol);
+      const FlexMediaVolume* v = &ix->volume;
       // Un volumen que no esta no es un error: sencillamente no
       // aporta nada al indice y se pasa a la siguiente raiz.
       if(!v->list || (v->alive && !v->alive(v->ctx))){ ix->rootI++; continue; }
@@ -606,12 +574,10 @@ int flexMediaIndexStep(FlexMediaIndex* ix, int budget){
       continue;
     }
 
-    const uint8_t vol = ix->roots[ix->rootI].vol;
-    const FlexMediaVolume* v = volOf(ix, vol);
+    const FlexMediaVolume* v = &ix->volume;
     if(v->alive && !v->alive(v->ctx)){
-      // El volumen desaparecio a mitad del recorrido (la tarjeta se
-      // saco). Se abandona ESA raiz, no el indice entero: lo ya
-      // encontrado en la memoria interna sigue valiendo.
+      // El almacenamiento dejo de estar disponible. Se abandona esa raiz
+      // sin bloquear el bucle principal.
       ix->depth = -1;
       ix->rootI++;
       continue;
@@ -662,30 +628,29 @@ int flexMediaIndexStep(FlexMediaIndex* ix, int budget){
       int kind = flexMediaClassify(ent[i].name);
       if(kind == FLEXMED_PHOTO || kind == FLEXMED_VIDEO
       || kind == FLEXMED_AUDIO || kind == FLEXMED_DRAW)
-        addItem(ix, dir, &ent[i], kind, vol);
+        addItem(ix, dir, &ent[i], kind);
     }
     if(!descended) ix->stackSkip[ix->depth] += (uint32_t)used;
   }
   return ix->state;
 }
 
-static bool itemMatches(const FlexMediaItem* it, int kind, int vol){
+static bool itemMatches(const FlexMediaItem* it, int kind){
   if(kind && it->kind != (uint8_t)kind) return false;
-  if(vol >= 0 && it->vol != (uint8_t)vol) return false;
   return true;
 }
 
-int flexMediaIndexCount(const FlexMediaIndex* ix, int kind, int vol){
+int flexMediaIndexCount(const FlexMediaIndex* ix, int kind){
   if(!ix || !ix->items) return 0;
   int c = 0;
-  for(uint16_t i = 0; i < ix->n; i++) if(itemMatches(&ix->items[i], kind, vol)) c++;
+  for(uint16_t i = 0; i < ix->n; i++) if(itemMatches(&ix->items[i], kind)) c++;
   return c;
 }
 
-int flexMediaIndexNth(const FlexMediaIndex* ix, int kind, int vol, int nth){
+int flexMediaIndexNth(const FlexMediaIndex* ix, int kind, int nth){
   if(!ix || !ix->items || nth < 0) return -1;
   for(uint16_t i = 0; i < ix->n; i++){
-    if(!itemMatches(&ix->items[i], kind, vol)) continue;
+    if(!itemMatches(&ix->items[i], kind)) continue;
     if(nth-- == 0) return (int)i;
   }
   return -1;
