@@ -3364,20 +3364,9 @@ static void testMediosOrientacion(){
   qpLoaded = false; qpLoad();
   chk(!qpCfgHas(QSID_VOLUME), "la configuracion de fabrica no coloca un control de volumen sin salida real");
 
-  // ---- 8. RUTAS: de que volumen es cada una ----
-  chk(mediaIsSd("/sdcard/DCIM/a.jpg"),  "una ruta de la tarjeta se reconoce");
-  chk(!mediaIsSd("/Documentos/a.jpg"),  "una ruta interna no se confunde con la tarjeta");
-  chk(!mediaIsSd("/sdcardX/a.jpg"),     "un prefijo parecido NO es la tarjeta");
-  chk(strcmp(mediaVolName("/sdcard/x"), mediaVolName("/Documentos/x")) != 0,
-      "los dos volumenes se nombran distinto");
-
-  // ---- 9. SIN TARJETA: nada finge tenerla ----
-  chk(!flexSdReady(), "el doble de la tarjeta reproduce el caso SIN tarjeta");
-  chk(flexSdTotalBytes() == 0 && flexSdUsedBytes() == 0,
-      "sin tarjeta la capacidad es cero, no un numero inventado");
-  chk(flexSdError()[0] != 0, "sin tarjeta siempre hay un motivo legible que ensenar");
-  { FlexFsEntry e[4];
-    chk(mediaList("/sdcard", e, 4) < 0, "listar la tarjeta ausente da error, no 'carpeta vacia'"); }
+  // ---- 8. ALMACENAMIENTO: los medios activos usan LittleFS ----
+  chk(strcmp(mediaVolName("/Documentos/x"), "Memoria interna") == 0,
+      "el reproductor identifica la memoria interna");
 
   printf("  Medios: todas las comprobaciones pasan.\n");
 }

@@ -33,8 +33,7 @@
 // ##  De donde sale lo que se ve: del INDICE DE MEDIOS que
 // ##  construye el nucleo de medios recorriendo, por lotes y sin
 // ##  bloquear, las carpetas de la particion interna
-// ##  (/Documentos, /Paint) y las de la tarjeta (las de Flex OS y
-// ##  las de siempre: DCIM, Download, Pictures, Movies, Music).
+// ##  (/Documentos y /Paint).
 // ##  Es el MISMO indice que usa Multimedia: si aqui aparece un
 // ##  archivo, alli tambien, y al reves.
 // ##
@@ -61,21 +60,17 @@
 #define GAL_SEL_MAX        32      // tope REAL de la seleccion multiple
 #define GAL_JPEG_MAX_BYTES (768 * 1024)   // por encima, no se hace miniatura
 
-// Pestanas. Las tres primeras filtran por CLASE y las dos ultimas
-// por VOLUMEN: son las cinco agrupaciones que se pidieron.
-#define GAL_TABS 5
+// Pestanas por clase de medio.
+#define GAL_TABS 3
 static const char* GAL_TAB_NAME[GAL_TABS] = {
-  "Todas", "Fotos", "V\xC3\xAD" "deos", "Interna", "Tarjeta SD"
+  "Todas", "Fotos", "V\xC3\xAD" "deos"
 };
 static int galTab = 0;
 static int galTabKind(){
   switch(galTab){ case 1: return FLEXMED_PHOTO; case 2: return FLEXMED_VIDEO; default: return 0; }
 }
-static int galTabVol(){
-  switch(galTab){ case 3: return FLEXMED_VOL_INT; case 4: return FLEXMED_VOL_SD; default: return -1; }
-}
-static int galCount(){ return flexMediaIndexCount(&gMedIx, galTabKind(), galTabVol()); }
-static int galItemAt(int nth){ return flexMediaIndexNth(&gMedIx, galTabKind(), galTabVol(), nth); }
+static int galCount(){ return flexMediaIndexCount(&gMedIx, galTabKind()); }
+static int galItemAt(int nth){ return flexMediaIndexNth(&gMedIx, galTabKind(), nth); }
 
 // ---- Estado de la rejilla ----
 static int      galScroll = 0;
@@ -381,11 +376,6 @@ static void galVideoBadge(int x, int y, int w, int h){
   fillCircle(cx, cy, 12, rgb565(255,255,255));
   fillTriangle(cx - 4, cy - 6, cx - 4, cy + 6, cx + 6, cy, rgb565(20,22,30));
 }
-static void galSdBadge(int x, int y){
-  fillRoundRect(x + 8, y + 8, 22, 14, 4, rgb565(0,0,0));
-  drawTextC(x + 19, y + 11, "SD", 1, rgb565(230,234,244));
-}
-
 static void galRenderGrid(){
   setBuf(fb);
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
@@ -423,17 +413,13 @@ static void galRenderGrid(){
               "Hay mas archivos de los que caben en el " "\xC3\xAD" "ndice", 1, TH_WARN);
   }
   if(n == 0 && !mediaIndexBusy()){
-    if(!flexFsReady() && !flexSdReady()){
+    if(!flexFsReady()){
       drawTextC(bx + bw / 2, by + bh / 2 - 20, "Sin almacenamiento", 3, TH_TXT2);
       drawTextC(bx + bw / 2, by + bh / 2 + 16, flexFsError(), 1, TH_MUTE);
-    } else if(galTab == 4 && !flexSdReady()){
-      drawTextC(bx + bw / 2, by + bh / 2 - 20, "Sin tarjeta SD", 3, TH_TXT2);
-      drawTextC(bx + bw / 2, by + bh / 2 + 16, flexSdError(), 1, TH_MUTE);
     } else {
       drawTextC(bx + bw / 2, by + bh / 2 - 30, "No hay nada aqu" "\xC3\xAD", 3, TH_TXT2);
       drawTextC(bx + bw / 2, by + bh / 2 + 6,
                 "JPEG y AVI MJPEG de la memoria interna", 1, TH_MUTE);
-      drawTextC(bx + bw / 2, by + bh / 2 + 26, "y de la tarjeta SD", 1, TH_MUTE);
     }
   }
 
@@ -451,9 +437,6 @@ static void galRenderGrid(){
     gClipX0 = ox0; gClipX1 = ox1; gClipY0 = oy0; gClipY1 = oy1;
 
     if(galKindOf(i) == FLEXMED_VIDEO) galVideoBadge(x, y, w, h);
-    { int idx = galItemAt(i);
-      if(idx >= 0 && gMedStore[idx].vol == FLEXMED_VOL_SD) galSdBadge(x, y); }
-
     if(galMulti && galIsSel(i)){
       drawRoundRect(x, y, w, h, rad, TH_PRIM);
       drawRoundRect(x + 1, y + 1, w - 2, h - 2, rad, TH_PRIM);
@@ -499,16 +482,6 @@ static void galOpenPath(const char* path){
 }
 
 // ---- Acciones del menu contextual (con Flex Vault) ----
-// En la tarjeta SOLO SE LEE: borrar, renombrar, mover a la papelera
-// y cifrar en la boveda quedan fuera. Son archivos del usuario y la
-// papelera y la boveda viven ademas en la particion interna.
-static bool galSdReadOnlyGuard(const char* p){
-  if(!flexSdIsSdPath(p)) return false;
-  mediaNotify(MOD_SDCARD, "Solo lectura en la tarjeta",
-              "Flex OS no borra ni mueve tus archivos");
-  return true;
-}
-
 static void galMenuAction(int act){
   char p[FLEXMED_PATH_MAX];
   snprintf(p, sizeof(p), "%s", (galSelIdx >= 0) ? galPathOf(galSelIdx) : "");
@@ -518,27 +491,23 @@ static void galMenuAction(int act){
     if(galSelIdx >= 0) galToggleSel(galSelIdx);
   } else if(act == FK_ACT_DEL){
     if(p[0]){
-      if(galSdReadOnlyGuard(p)){ galRender(); return; }
       fkAskOpen("\xC2\xBF" "Borrar definitivamente?", galNameOf(galSelIdx));
       return;
     }
   } else if(act == FK_ACT_REN){
     if(p[0]){
-      if(galSdReadOnlyGuard(p)){ galRender(); return; }
       char stem[FLEXFS_NAME_MAX]; flexFsStem(galNameOf(galSelIdx), stem, sizeof(stem));
       fkNameOpen("Renombrar", stem);
       return;
     }
   } else if(act == FK_ACT_TRASH){
     if(p[0]){
-      if(galSdReadOnlyGuard(p)){ galRender(); return; }
       flexFsTrash(p); galSelIdx = -1; mediaIndexRescan();
     } else { fkTrashOpen(); return; }
   } else if(act == FK_ACT_VAULT){
     // FLEX VAULT: la imagen (o el dibujo) se cifra dentro de la
     // boveda y desaparece de la galeria normal. Igual que antes.
     if(p[0]){
-      if(galSdReadOnlyGuard(p)){ galRender(); return; }
       galSelIdx = -1;
       if(vaultMoveRequest(p, FXV_KIND_PHOTO)){
         if(gState == ST_VAULT) return;         // se fue a pedir la clave
@@ -556,7 +525,7 @@ static void galTick(){
     int r = fkAskTick();
     if(r == 1 && galSelIdx >= 0){
       const char* p = galPathOf(galSelIdx);
-      if(p[0] && !flexSdIsSdPath(p)) flexFsDelete(p);   // borrado DEFINITIVO real
+      if(p[0]) flexFsDelete(p);   // borrado DEFINITIVO real
       galSelIdx = -1; mediaIndexRescan();
     }
     if(r != 0) galRender();
@@ -566,7 +535,7 @@ static void galTick(){
     int r = fkNameTick();
     if(r == 1 && galSelIdx >= 0){
       const char* p = galPathOf(galSelIdx);
-      if(p[0] && !flexSdIsSdPath(p)) flexFsRename(p, fkNameBuf);
+      if(p[0]) flexFsRename(p, fkNameBuf);
       galSelIdx = -1; mediaIndexRescan();
     }
     if(r != 0) galRender();
@@ -635,7 +604,6 @@ static void galTick(){
     if(k >= 0 && k < GAL_TABS && k != galTab){
       galTab = k; galScroll = 0; galSelIdx = -1;
       galMulti = false; galClearSel();
-      if(galTab == 4){ flexSdPoke(); }         // al pedir la tarjeta, comprobarla
       galRender();
     }
     return;
@@ -649,7 +617,7 @@ static void galTick(){
       if(T.x > bx + bw - 230){
         for(int k = 0; k < galSelN; k++){
           const char* p = galPathOf(galSel[k]);
-          if(p[0] && !flexSdIsSdPath(p)) flexFsTrash(p);
+          if(p[0]) flexFsTrash(p);
         }
         galMulti = false; galClearSel(); galSelIdx = -1;
         mediaIndexRescan(); galRender();
@@ -687,10 +655,6 @@ static void galEnter(){
     galMulti = false; galClearSel();
     fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
   }
-  // Al abrir la Galeria se comprueba la tarjeta en el acto y se
-  // reindexa si hace falta (si no, no se toca nada).
-  flexSdPoke();
-  flexSdTick();
   mediaIndexEnsure();
   galRender();
 }
@@ -726,8 +690,6 @@ static void galSuspend(){
 }
 
 static void galResume(){
-  flexSdPoke();
-  flexSdTick();
   mediaIndexEnsure();
   galSelIdx = -1;
   if(galResumePath[0]){
@@ -765,4 +727,3 @@ static void galCloseApp(){
   galSelIdx = -1; galScroll = 0;
   galMulti = false; galClearSel();
 }
-

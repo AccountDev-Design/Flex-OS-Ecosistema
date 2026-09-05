@@ -109,7 +109,6 @@ static void connWifiSet(bool on){
 #if FLEXOS_ENABLE_WIFI
   if(on){
     if(gAirplane) return;                       // bloqueo real, no visual
-    wifiBlockedBySd = false;
     // BARATA, y en el hilo de la interfaz eso es obligatorio: el interruptor
     // del panel rapido corre dentro de loopTask. Quien despierta la radio es
     // la tarea que crean wifiTryAutoConnect() o wifiStartScan().
@@ -348,10 +347,7 @@ static void drawModuleIcon(ModuleType type, int x, int y, int S){
     case MOD_BUTTON:      id = IC_NOTAS;   break;
     case MOD_SERVO:       id = IC_MODOPC;  break;
     case MOD_I2C_GENERIC: id = IC_ALMACEN; break;
-    // Avisos del sistema: llevan el icono de la app a la que
-    // pertenecen, para que un aviso de tarjeta se reconozca de un
-    // vistazo sin leerlo.
-    case MOD_SDCARD:      id = IC_ALMACEN;    break;
+    // Avisos del sistema llevan el icono de la app correspondiente.
     case MOD_MEDIA:       id = IC_MULTIMEDIA; break;
     default:              id = IC_AJUSTES; break;
   }

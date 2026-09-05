@@ -33,7 +33,7 @@ ajuste. Es además el patrón que el proyecto **ya usaba**
 
 Los módulos que sí son código portable y con pruebas propias siguen siendo
 `.cpp` de verdad, como hasta ahora: `FlexOS_Media`, `FlexOS_Mem`,
-`FlexOS_JPEG`, `FlexOS_Vault`, `FlexOS_Weather`, `FlexOS_FS`, `FlexOS_SD`,
+`FlexOS_JPEG`, `FlexOS_Vault`, `FlexOS_Weather`, `FlexOS_FS`,
 `FlexOS_Browser`, `FlexOS_FlexLink`... Esa frontera no se ha tocado.
 
 ## 2. Reglas de los módulos
@@ -54,7 +54,7 @@ Los módulos que sí son código portable y con pruebas propias siguen siendo
 
 * La cabecera del proyecto y el mapa del sketch.
 * Las librerías del sistema (`Wire`, `Preferences`, `WiFi`, FreeRTOS,
-  drivers del P4) y los módulos externos (`FlexOS_SD`, `FlexOS_Media`,
+  drivers del P4) y los módulos externos (`FlexOS_Media`,
   `FlexOS_OTA`, `FlexOS_FS`, `FlexOS_Vault`, ...).
 * La **lista de módulos**, en orden.
 * Los **puentes** (`FlexOS_*_Bridge.h`), que siguen yendo al final porque
@@ -93,7 +93,7 @@ Los módulos que sí son código portable y con pruebas propias siguen siendo
 | `FlexOS_Ultra_QuickPanel.h`       |   895 | panel rapido: catalogo de controles y render |
 | `FlexOS_Ultra_QuickPanelGlass.h`  |  1581 | panel rapido: material Liquid Glass cacheado |
 | `FlexOS_Ultra_QuickPanelEdit.h`   |   545 | panel rapido: modo edicion |
-| `FlexOS_Ultra_Media.h`            |   454 | nucleo de medios: microSD, clasificacion e indice |
+| `FlexOS_Ultra_Media.h`            |   454 | nucleo de medios LittleFS: clasificacion e indice |
 | `FlexOS_Ultra_AppMultimedia.h`    |  1378 | app Multimedia (reproductor real) |
 | `FlexOS_Ultra_AppCamera.h`        |   213 | app Camara |
 | `FlexOS_Ultra_Keyboard.h`         |  1564 | teclado de 4 capas y maquetacion de texto |

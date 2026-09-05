@@ -50,13 +50,7 @@ GANCHOS = [
     ("setup",          "flexWeatherBegin()", "no se cargarian ni las ubicaciones ni la cache del clima, y su tarea de red no existiria"),
     ("clkSetEpoch",    "flexWeatherSetClock(", "el clima no sabria la hora real y no podria decir cuanto hace que se actualizo"),
     ("loop",           "flexPollTouch()", "no habria tactil"),
-    # Sin este tick la tarjeta no se detectaria nunca al insertarla, la
-    # retirada no cortaria la reproduccion y el indice de medios no
-    # avanzaria: Galeria y Multimedia se quedarian vacias para siempre.
-    ("loop",           "mediaStorageTick()", "sin esto la microSD no se detecta ni se suelta, y el indice de medios no avanza"),
-    ("mediaStorageTick", "flexSdTick()",   "sin atender la peticion explicita no hay montaje bajo demanda"),
-    ("mediaStorageTick", "mediaIndexTick()", "el indice de medios nunca terminaria de construirse"),
-    ("setup",          "flexSdBegin()",   "el controlador SDMMC no se prepararia y la tarjeta no montaria nunca"),
+    ("loop",           "mediaIndexTick()", "el indice LittleFS de medios nunca terminaria de construirse"),
     ("loop",           "wifiAutoReconnectTick()", "la red guardada no se reconectaria tras arrancar"),
     # MULTITAREA POR MEMORIA. Sin memTick() la medida se quedaria congelada en la
     # del arranque: el selector, Almacenamiento y la puerta de admision de apps
@@ -73,7 +67,7 @@ GANCHOS = [
     ("setup",          "flexAudioBegin()","el codec no se sondearia y el audio quedaria desactivado sin motivo"),
     # Un dibujo recien creado tiene que aparecer en la Galeria sin que
     # nadie refresque a mano: sin esta invalidacion, el indice se queda
-    # con la foto de antes hasta que cambie la tarjeta.
+    # con la foto anterior hasta el siguiente escaneo.
     ("paintNew",       "mediaIndexInvalidate()", "un dibujo nuevo no aparecería en la Galeria hasta reindexar por otro motivo"),
     ("flexPollTouch",  "hpzUpdate()",     "el gesto de dos dedos no se detectaria nunca"),
     ("flexPollTouch",  "hpzSwallowing()", "el gesto no se consumiria y el mismo toque llegaria a otra capa"),
@@ -211,21 +205,24 @@ def main(path):
     src, modulos = expandir(path)
     fallos = estructura(path)
 
-    # El perfil generico P4 no conoce la ranura de esta placa. Estas opciones
-    # hacen que Arduino-ESP32 compile SD_MMC para el slot dedicado 0 y active
-    # el LDO 4. El enlace esp-hosted lleva sus propios pines GPIO/SDIO.
-    build_opt = Path(path).resolve().parent / "build_opt.h"
-    required_sd_opts = {
-        "-DBOARD_HAS_SDMMC",
-        "-DBOARD_SDMMC_SLOT=0",
-        "-DBOARD_SDMMC_POWER_CHANNEL=4",
-    }
-    if not build_opt.exists():
-        fallos.append("falta build_opt.h: la microSD perderia slot 0/LDO 4")
-    else:
-        actual_opts = {line.strip() for line in build_opt.read_text(encoding="utf-8").splitlines()}
-        for opt in sorted(required_sd_opts - actual_opts):
-            fallos.append("build_opt.h no contiene %s" % opt)
+    # La version activa es deliberadamente LittleFS-only. Esta auditoria evita
+    # que un archivo BETA vuelva a quedar enlazado por accidente.
+    root = Path(path).resolve().parent
+    for retired in ("FlexOS_SD.h", "FlexOS_SD.cpp"):
+        if (root / retired).exists():
+            fallos.append("%s no debe existir en la raiz activa" % retired)
+    forbidden_sd = ("SD_MMC", "flexSd", "/sdcard", "MOD_SDCARD",
+                    "MSTREAM_SD", "FLEXMED_VOL_SD", "FlexOS_SD.h")
+    active_src = "\n".join(
+        p.read_text(encoding="utf-8", errors="replace")
+        for p in root.glob("FlexOS*") if p.suffix in (".h", ".cpp", ".ino")
+    )
+    for token in forbidden_sd:
+        if token in active_src:
+            fallos.append("la integracion activa aun contiene %s" % token)
+    build_opt = root / "build_opt.h"
+    if build_opt.exists() and "BOARD_SDMMC" in build_opt.read_text(encoding="utf-8"):
+        fallos.append("build_opt.h activo aun habilita SDMMC")
 
     # --- 1. todo estado tiene su case en el switch de loop() ---
     menum = re.search(r"enum\s*\{\s*(ST_SPLASH\b.*?)\}\s*;", src, re.S)
@@ -288,7 +285,7 @@ def main(path):
             codigo = re.sub(r"/\*.*?\*/|//[^\n]*", "", c, flags=re.S)
             if "WiFi." not in codigo:
                 continue
-            fallos.append("%s() toca WiFi desde reposo -> colision SDIO con microSD" % fn)
+            fallos.append("%s() toca WiFi desde reposo -> acceso periodico a esp-hosted" % fn)
 
     # 3.2.0 ignora los pines hosted del variant. En 3.2.1 deben fijarse los
     # siete antes de cualquier inicializacion, y el autoarranque debe llevar
@@ -300,40 +297,6 @@ def main(path):
         fallos.append("un core P4 anterior a 3.2.1 podria volver a iniciar el Wi-Fi inseguro")
     if "WIFI_NVS_AUTOTRY" not in src or "wifiAutoGuardWrite(true, true)" not in src:
         fallos.append("falta el fusible persistente del autoarranque Wi-Fi")
-
-    # Sin pin CD, la SD no puede reintentar begin() por tiempo: en el video
-    # ese reintento coincidia a los 6 s con esp-hosted. Solo flexSdPoke()
-    # puede armar el proximo intento de flexSdTick().
-    sd_cpp = Path(path).resolve().parent / "FlexOS_SD.cpp"
-    if not sd_cpp.exists():
-        fallos.append("falta FlexOS_SD.cpp")
-    else:
-        sd_src = sd_cpp.read_text(encoding="utf-8")
-        tick = cuerpo(sd_src, "flexSdTick") or ""
-        if "sdProbeRequested" not in tick or "millis()" in tick:
-            fallos.append("flexSdTick() vuelve a montar la SD por temporizador")
-        if "SD_MMC.begin()" not in sd_src or "SD_MMC.begin(FLEXSD_MOUNT" in sd_src:
-            fallos.append("el montaje SD ya no coincide con el unico begin() 4-bit del fabricante")
-    # --- 4. la SD reclama su slot antes que los servicios de red -----
-    # En esta placa no basta con preparar setPins() y montar en el primer
-    # loop: para entonces una tarea de servicio ya puede haber consultado
-    # esp-hosted. El orden dentro de setup() es parte del cableado.
-    csetup = cuerpo(src, "setup")
-    if csetup is None:
-        fallos.append("no encuentro la funcion setup()")
-    else:
-        sd_mount = csetup.find("flexSdMount()")
-        ota_begin = csetup.find("flexOtaBegin()")
-        store_begin = csetup.find("flexStoreBegin()")
-        account_begin = csetup.find("flexAccountBegin()")
-        if sd_mount < 0:
-            fallos.append("setup() no monta la microSD antes del primer loop")
-        if store_begin >= 0 and (sd_mount < 0 or sd_mount > store_begin):
-            fallos.append("flexStoreBegin() arranca antes de que la microSD reclame SDIO")
-        if account_begin >= 0 and (sd_mount < 0 or sd_mount > account_begin):
-            fallos.append("flexAccountBegin() arranca antes de que la microSD reclame SDIO")
-        if ota_begin >= 0 and (sd_mount < 0 or sd_mount > ota_begin):
-            fallos.append("flexOtaBegin() arranca antes de que la microSD reclame SDIO")
 
     if fallos:
         print("check_wiring: CABLEADO INCOMPLETO")

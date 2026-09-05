@@ -18,9 +18,9 @@
 //       decodificar nada y sin cargar el fichero en memoria.
 //    3) INDICE INCREMENTAL. Recorre las carpetas por LOTES
 //       PEQUENOS, guardando su propio punto de continuacion, para
-//       que una tarjeta con miles de fotos no congele la interfaz.
+//       que una carpeta con miles de fotos no congele la interfaz.
 //
-//  Nada de este fichero toca Arduino, LittleFS, SD_MMC ni la
+//  Nada de este fichero toca Arduino, LittleFS ni la
 //  pantalla: el acceso a bytes entra por dos interfaces de
 //  funciones (FlexMediaIO y FlexMediaVolume) que el sketch rellena
 //  con el volumen real y las pruebas con uno de mentira.
@@ -60,7 +60,7 @@ extern "C" {
 //  modulo. Los buffers grandes (el del fotograma) los pone el
 //  llamante, que es quien sabe si tiene PSRAM.
 // -------------------------------------------------------------
-#define FLEXMED_PATH_MAX   112     // "/sdcard/DCIM/100APPLE/IMG_0001.JPG" cabe de sobra
+#define FLEXMED_PATH_MAX   112
 #define FLEXMED_NAME_MAX    64
 
 // Clase de un fichero.
@@ -72,11 +72,6 @@ enum {
   FLEXMED_DRAW,       // .fxp: dibujo de Paint (lo pinta la Galeria)
   FLEXMED_UNSUP       // es un medio, pero NO se puede abrir en esta placa
 };
-
-// Volumen del que sale un elemento. Se guarda junto a la ruta
-// porque la interfaz filtra por el ("Interna" / "Tarjeta SD") y
-// porque un elemento de la tarjeta caduca cuando esta se retira.
-enum { FLEXMED_VOL_INT = 0, FLEXMED_VOL_SD = 1 };
 
 // -------------------------------------------------------------
 //  CLASIFICACION
@@ -95,14 +90,11 @@ const char* flexMediaUnsupportedReason(const char* name);
 // detalles del explorador.
 void flexMediaExt(const char* name, char* out, size_t n);
 
-// true si la ruta esta dentro del volumen de la tarjeta.
-bool flexMediaPathIsSd(const char* path);
-
 // -------------------------------------------------------------
 //  ACCESO A BYTES
 //  ------------------------------------------------------------
-//  Un solo interfaz de lectura para las dos memorias. El sketch lo
-//  rellena con el descriptor de la SD o con el de LittleFS; las
+//  Un solo interfaz de lectura para el almacenamiento interno. El sketch lo
+//  rellena con LittleFS; las
 //  pruebas, con un bloque de memoria. Asi el demultiplexor de AVI
 //  es EL MISMO codigo en la placa y en el PC, que es lo que hace
 //  que probarlo en el PC signifique algo.
@@ -227,7 +219,6 @@ typedef struct {
   char     path[FLEXMED_PATH_MAX];
   uint32_t size;
   uint8_t  kind;         // FLEXMED_*
-  uint8_t  vol;          // FLEXMED_VOL_*
 } FlexMediaItem;
 
 // Una entrada de directorio, tal cual la entrega el volumen.
@@ -250,13 +241,12 @@ typedef struct {
 } FlexMediaVolume;
 
 #define FLEXMED_ROOTS_MAX   10
-#define FLEXMED_DEPTH_MAX    3     // /sdcard/DCIM/100APPLE/foto.jpg
+#define FLEXMED_DEPTH_MAX    3
 
 enum { FLEXMED_SCAN_IDLE = 0, FLEXMED_SCAN_RUNNING, FLEXMED_SCAN_DONE, FLEXMED_SCAN_ABORTED };
 
 typedef struct {
   const char* path;
-  uint8_t     vol;
 } FlexMediaRoot;
 
 typedef struct {
@@ -269,7 +259,7 @@ typedef struct {
   // ---- entrada ----
   FlexMediaRoot  roots[FLEXMED_ROOTS_MAX];
   uint8_t        rootN;
-  FlexMediaVolume volInt, volSd;
+  FlexMediaVolume volume;
 
   // ---- estado del recorrido ----
   uint8_t  state;
@@ -278,7 +268,6 @@ typedef struct {
   char     stackPath[FLEXMED_DEPTH_MAX][FLEXMED_PATH_MAX];
   uint32_t stackSkip[FLEXMED_DEPTH_MAX];       // entradas ya consumidas del nivel
   uint32_t seen;                               // entradas miradas (para el progreso)
-  uint32_t sdGen;                              // generacion de la SD al empezar
 } FlexMediaIndex;
 
 // Prepara el indice sobre el array del llamante. No recorre nada.
@@ -286,10 +275,10 @@ void flexMediaIndexInit(FlexMediaIndex* ix, FlexMediaItem* store, uint16_t cap);
 
 // Anade una raiz que se recorrera. El orden importa: las primeras
 // se indexan antes, asi que las carpetas de Flex OS van delante.
-void flexMediaIndexAddRoot(FlexMediaIndex* ix, const char* path, uint8_t vol);
+void flexMediaIndexAddRoot(FlexMediaIndex* ix, const char* path);
 
 // Empieza (o reempieza) el recorrido. Vacia lo indexado.
-void flexMediaIndexStart(FlexMediaIndex* ix, uint32_t sdGen);
+void flexMediaIndexStart(FlexMediaIndex* ix);
 
 // Avanza el recorrido consumiendo COMO MUCHO `budget` entradas de
 // directorio, y para. Devuelve el estado. Pensada para llamarse una
@@ -298,23 +287,17 @@ void flexMediaIndexStart(FlexMediaIndex* ix, uint32_t sdGen);
 // un solo cuadro.
 int  flexMediaIndexStep(FlexMediaIndex* ix, int budget);
 
-// Corta el recorrido (la tarjeta se fue, se cierra la app...).
+// Corta el recorrido (el almacenamiento fallo o se cierra la app).
 void flexMediaIndexAbort(FlexMediaIndex* ix);
 
-// Quita del indice todo lo que venga de la tarjeta. Se llama al
-// detectar la retirada: los elementos internos siguen siendo
-// validos y no hay que reindexarlos.
-void flexMediaIndexDropSd(FlexMediaIndex* ix);
-
 // Cuenta los elementos de una clase (FLEXMED_PHOTO...) o de todas
-// si `kind` es 0; y opcionalmente de un solo volumen (`vol` < 0 =
-// los dos).
-int  flexMediaIndexCount(const FlexMediaIndex* ix, int kind, int vol);
+// si `kind` es 0.
+int  flexMediaIndexCount(const FlexMediaIndex* ix, int kind);
 
 // Indice real dentro de items[] del elemento `nth` que cumple el
 // filtro, o -1. Es lo que permite a la Galeria pintar la pestana
 // "Videos" sin construir una segunda lista.
-int  flexMediaIndexNth(const FlexMediaIndex* ix, int kind, int vol, int nth);
+int  flexMediaIndexNth(const FlexMediaIndex* ix, int kind, int nth);
 
 #ifdef __cplusplus
 }

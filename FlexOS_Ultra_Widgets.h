@@ -87,9 +87,8 @@ static void wgDataTick(){
   clkStrBar(t1, sizeof(t1));
   buildShortDate(d1, sizeof(d1));
   // No consultar WiFi.status() desde este tick periodico. En ESP32-P4 esa
-  // llamada alcanza esp-hosted/SDIO incluso sin una conexion activa y
-  // colisiona con la microSD montada. gNetOnline solo cambia tras una
-  // conexion/desconexion real y es la fuente correcta para la interfaz.
+  // llamada alcanza esp-hosted/SDIO incluso sin una conexion activa.
+  // gNetOnline solo cambia tras una conexion/desconexion real.
   bool up = gNetOnline;
   // WiFi.SSID() devuelve String: se copia AQUI, en el tick de datos, y nunca en
   // el camino de dibujo ni en un bucle de interfaz.

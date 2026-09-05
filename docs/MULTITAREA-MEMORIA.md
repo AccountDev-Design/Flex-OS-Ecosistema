@@ -18,7 +18,7 @@ cada cifra que el usuario ve**.
 9. [Avisos secundarios](#9-avisos-secundarios)
 10. [Modo visual eficiente](#10-modo-visual-eficiente)
 11. [Límites conocidos](#11-límites-conocidos)
-12. [Wi‑Fi, microSD y memoria](#12-wifi-microsd-y-memoria-cómo-se-coordinan)
+12. [Wi‑Fi y memoria](#12-wifi-y-memoria-cómo-se-coordinan)
 
 ---
 
@@ -113,7 +113,6 @@ dentro de la ruta de dibujo:
 | Mínimo de SRAM libre | mínimo de `libre` desde el arranque | con cada muestreo |
 | Flash usada / total | `flexFsUsedBytes()` / `flexFsTotalBytes()` | **solo** con la pantalla de detalle a la vista, cada 15 s y nunca con el dedo apoyado (recorre el sistema de archivos: es una lectura de flash) |
 | Tamaño del firmware | `ESP.getSketchSize()` | una vez por arranque |
-| Estado de la microSD | `flexSdState()` / `flexSdError()` / totales del volumen montado | **lectura pura**: no monta, no sondea, no reintenta |
 | Ritmo del sistema | vueltas completas de `loop()` por segundo | 1 s |
 
 El pico y el mínimo se calculan con **exactamente la misma medida que se
@@ -174,8 +173,7 @@ Del menos invasivo al más:
    perder el trabajo del usuario en silencio para «liberar recursos» no es una
    opción.
 
-Nada de esto toca notas, dibujos, ajustes, archivos personales ni apps
-instaladas, y **la microSD no se desmonta jamás para «optimizar»**.
+Nada de esto toca notas, dibujos, ajustes, archivos personales ni apps instaladas.
 
 ---
 
@@ -243,7 +241,7 @@ acción que hace falta cuando el sistema va lento. El resto de la fila abre la
 pantalla de detalle.
 
 > **Por qué una pantalla y no un despliegue en línea.** El detalle son más de
-> treinta cifras. Desplegarlas en la lista empujaría la tarjeta SD, las
+> treinta cifras. Desplegarlas en la lista empujaría las
 > categorías y los archivos grandes fuera de una pantalla de 480×800 que hoy no
 > tiene desplazamiento: el resultado sería justo la «pantalla confusa» que
 > había que evitar. La pantalla de detalle vive **dentro** de la app, con su
@@ -254,8 +252,7 @@ fragmentación, estado y las dos apps de mayor consumo medido) · **SRAM
 interna** (total, en uso, libre, mínimo desde el arranque, y que no conserva
 datos al reiniciar) · **Almacenamiento interno** (capacidad, usado, libre,
 firmware, recursos del sistema, datos de apps, caché temporal, archivos de
-usuario) · **microSD** (estado real y, solo si está montada, sus totales) ·
-**Estado del sistema** (tiempo encendido, último arranque y su causa, versión,
+usuario) · **Estado del sistema** (tiempo encendido, último arranque y su causa, versión,
 Wi‑Fi, ritmo del sistema y recuento de apps por estado).
 
 **Refresco con dirty regions.** El contenido está partido en secciones de
@@ -352,9 +349,9 @@ panel está a la vista es dueño exclusivo de la pantalla.
 
 ## 9. Avisos secundarios
 
-Fragmentación, SRAM interna, flash y tarjeta. Son condiciones distintas de
+Fragmentación, SRAM interna y flash. Son condiciones distintas de
 «queda poca PSRAM» y las decide `flexMemAlertPick()`, con enfriamiento por
-clase —5 min memoria, 10 min fragmentación y tarjeta, 15 min flash— más una
+clase —5 min memoria, 10 min fragmentación, 15 min flash— más una
 separación global de 30 s. **Los de PSRAM ya no salen de aquí**: los gobierna
 la máquina de nivel.
 
@@ -367,7 +364,6 @@ seguro, durante un borrado ni en mitad de una transición.
 | SRAM interna baja | *Memoria interna del sistema baja* — Se limitan cargas pesadas para proteger Wi‑Fi y táctil |
 | Flash > 80 % | *Almacenamiento interno en uso elevado* — Limpiar la caché temporal puede ayudar |
 | Flash > 90 % | *Almacenamiento interno casi lleno* — Las actualizaciones y los datos nuevos podrían fallar |
-| microSD con error | *Tarjeta SD no disponible* — Flex OS evitó operaciones repetidas para no bloquearse |
 
 Nunca se dice que se ha «desfragmentado la RAM»: no se puede, y no se finge.
 
@@ -405,10 +401,6 @@ Qué hace, y por qué sí ahorra:
   cuando le toca; no existe un único punto de presentación que contar. En su
   lugar se enseña el **ritmo del sistema** (vueltas de `loop()` por segundo),
   que sí es una medida real de capacidad de respuesta, y la pantalla lo dice.
-* **La microSD depende del controlador real.** Esta función solo **lee** el
-  estado que el módulo ya mantiene (`flexSdState`, `flexSdError` y los totales
-  del volumen montado, que están cacheados). No sondea, no monta, no reintenta
-  y no cambia una sola línea de su lógica.
 * **El tamaño del firmware depende del SDK** (`ESP.getSketchSize()`). Si no
   devuelve un valor útil, la fila dice «No disponible».
 * **La lectura de flash es cara** (`flexFsUsedBytes` recorre el sistema de
@@ -420,7 +412,7 @@ Qué hace, y por qué sí ahorra:
   el TWDT una vez por vuelta—, y está corregido. Pero **no hay un backtrace de
   la placa** que lo confirme como la causa del reinicio que se observó. Puede
   haber más de una. Para cerrarlo hace falta grabar con
-  `FLEXOS_DIAG_WIFI_SD 1` y mirar cuál es el último checkpoint antes del
+  `FLEXOS_DIAG_WIFI 1` y mirar cuál es el último checkpoint antes del
   reinicio.
 * **La cámara conserva sus ajustes; las Notas y Paint dependen de LittleFS.**
   El viaje completo a disco solo se puede comprobar en la placa: el arnés de
@@ -433,7 +425,7 @@ Qué hace, y por qué sí ahorra:
 * **Las pruebas de host no sustituyen a la placa.** Verifican las reglas, el
   cableado, el ciclo de vida del navegador y que no haya fugas de PSRAM en el
   código nuevo; el comportamiento del panel, del táctil y del controlador
-  SDMMC reales solo se ve en el ESP32‑P4.
+  Wi-Fi real solo se ve en el ESP32‑P4.
 * **En DeX, al volver se rehacen los lienzos** de las ventanas en orden de
   apilado y **solo mientras quede margen de memoria**. Si no cabe la cuarta,
   sus tres compañeras se ven igual y esa ventana se rehace cuando el sistema
@@ -441,7 +433,7 @@ Qué hace, y por qué sí ahorra:
 
 ---
 
-## 12. Wi‑Fi, microSD y memoria: cómo se coordinan
+## 12. Wi‑Fi y memoria: cómo se coordinan
 
 ### La regla de oro: esp‑hosted nunca se toca desde `loopTask`
 
@@ -485,18 +477,11 @@ local** (se reintenta en la vuelta siguiente) y se compone de banderas que ya
 existían: `gWifiAutoBusy`, `gWifiOffBusy` y `wifiUIState`. No se añadió estado
 nuevo ni un mutex global.
 
-### microSD: nada cambió, y eso es lo importante
-
-`flexSdTick()` sigue sin sondear por temporizador; solo `flexSdPoke()` arma el
-siguiente intento. No hay `SD_MMC.begin()` periódico, ni `end()/begin()`
-repetidos, ni `open("/")` cíclico. La pantalla de diagnóstico solo **lee**
-estado ya cacheado. `check_wiring.py` sigue vigilándolo.
-
 ### Modo de diagnóstico
 
-`#define FLEXOS_DIAG_WIFI_SD 1` imprime por Serial, en cada punto crítico, la
-PSRAM y SRAM libres con su mayor bloque, el estado y ocupación de la tarjeta y
-el de la radio. Checkpoints: `setPins`, montaje de la SD, entrada de cada tarea
+`#define FLEXOS_DIAG_WIFI 1` imprime por Serial, en cada punto crítico, la
+PSRAM y SRAM libres con su mayor bloque y el estado de la radio. Checkpoints:
+`setPins`, entrada de cada tarea
 de Wi‑Fi, antes y después de `WiFi.mode(STA)`, `WiFi.scanNetworks()` y
 `WiFi.begin()`, más `memShedSystem()` y `appEnforceMemoryBudget()`. A 0 —el
 valor por defecto— compila a **nada**. Nunca imprime dentro de una ISR ni de
@@ -510,7 +495,6 @@ una sección crítica.
 |---|---|
 | `FlexOS_Mem.h` / `.cpp` | **Nuevos.** Núcleo de decisión (puro, sin Arduino) |
 | `FlexOS_Ultra.ino` | Gestor de memoria, presupuesto, App Switcher, Almacenamiento, Optimizar, avisos, ciclo de vida de DeX y Calendario, y la regla de oro de Wi‑Fi |
-| `FlexOS_SD.h` / `.cpp` | `flexSdBusyGet()`: lectura pura para el diagnóstico |
 | `FlexOS_Browser.h`, `FlexOS_BrowserApp.cpp`, `FlexOS_Browser_Bridge.h` | Suspender/reanudar sin reiniciar la sesión y liberación de la caché de fotogramas |
 | `tests/host/test_mem.cpp` | **Nuevo.** 66 comprobaciones del núcleo de decisión |
 | `tests/host/ino_compile.cpp` | Contabilidad real de PSRAM en el arnés + `testMultitareaMemoria` |

@@ -215,7 +215,6 @@ static uint32_t memAlertCooldown(int kind){
     case FLEXMEM_AL_FRAG:     return FLEXMEM_CD_FRAG;
     case FLEXMEM_AL_FLASH80:
     case FLEXMEM_AL_FLASH90:  return FLEXMEM_CD_FLASH;
-    case FLEXMEM_AL_SD_ERR:   return FLEXMEM_CD_SD;
     default:                  return FLEXMEM_CD_MEM;
   }
 }
@@ -227,7 +226,7 @@ static int memAlertReady(const FlexMemAlerts* a, int kind, uint32_t now){
   return (uint32_t)(now - a->lastMs[kind]) >= memAlertCooldown(kind);
 }
 
-int flexMemAlertPick(const FlexMemSnap* s, int sdErr, uint32_t nowMs, FlexMemAlerts* a){
+int flexMemAlertPick(const FlexMemSnap* s, uint32_t nowMs, FlexMemAlerts* a){
   if(!s || !a) return FLEXMEM_AL_NONE;
 
   // Separacion global: dos avisos seguidos son ruido, aunque sean de cosas
@@ -249,7 +248,6 @@ int flexMemAlertPick(const FlexMemSnap* s, int sdErr, uint32_t nowMs, FlexMemAle
   // memoria libre el aviso util es el de memoria, no el de reparto.
   if(s->psTotal && s->psFree >= FLEXMEM_WARN_BYTES && flexMemFragClass(s) == FLEXMEM_FRAG_HIGH)
     cand[n++] = FLEXMEM_AL_FRAG;
-  if(sdErr) cand[n++] = FLEXMEM_AL_SD_ERR;
   {
     int fp = flexMemFlashPct(s);
     if(fp >= 90)      cand[n++] = FLEXMEM_AL_FLASH90;

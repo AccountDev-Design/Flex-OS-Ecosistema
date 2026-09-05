@@ -181,7 +181,6 @@ enum {
   FLEXMEM_AL_SRAM,        // SRAM interna baja
   FLEXMEM_AL_FLASH80,
   FLEXMEM_AL_FLASH90,
-  FLEXMEM_AL_SD_ERR,
   FLEXMEM_AL_N
 };
 
@@ -189,7 +188,6 @@ enum {
 #define FLEXMEM_CD_MEM     (5u * 60u * 1000u)
 #define FLEXMEM_CD_FRAG    (10u * 60u * 1000u)
 #define FLEXMEM_CD_FLASH   (15u * 60u * 1000u)
-#define FLEXMEM_CD_SD      (10u * 60u * 1000u)
 #define FLEXMEM_CD_GLOBAL  (30u * 1000u)        // separacion minima entre avisos
 
 typedef struct {
@@ -226,12 +224,11 @@ int  flexMemLevelHyst(const FlexMemSnap* s, int prevLevel);   // sin tocar el es
 #define FLEXMEM_RELIEF_MS (60u * 1000u)
 int  flexMemReliefDue(const FlexMemAlerts* a, uint32_t nowMs);
 void flexMemReliefDone(FlexMemAlerts* a, uint32_t nowMs);
-// AVISOS SECUNDARIOS: fragmentacion, SRAM interna, flash y tarjeta. Los de
+// AVISOS SECUNDARIOS: fragmentacion, SRAM interna y flash. Los de
 // PSRAM ya NO salen de aqui -- los gobierna la maquina de nivel con histeresis
 // (flexMemLevelStep), que es lo que impide que se repitan mientras la
-// condicion dura. Devuelve FLEXMEM_AL_NONE si no toca ninguno. 'sdErr' es un
-// dato que pasa el llamante: aqui no se consulta la tarjeta ni se sondea nada.
-int  flexMemAlertPick(const FlexMemSnap* s, int sdErr, uint32_t nowMs, FlexMemAlerts* a);
+// condicion dura. Devuelve FLEXMEM_AL_NONE si no toca ninguno.
+int  flexMemAlertPick(const FlexMemSnap* s, uint32_t nowMs, FlexMemAlerts* a);
 
 // -------------------------------------------------------------
 //  8) FORMATO DE CIFRAS

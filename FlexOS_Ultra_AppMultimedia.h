@@ -31,7 +31,7 @@
 // ##  APP MULTIMEDIA  ·  REPRODUCTOR REAL DE ARCHIVOS LOCALES
 // ##  ------------------------------------------------------
 // ##  QUE REPRODUCE DE VERDAD
-// ##    · JPEG baseline (memoria interna y tarjeta).
+// ##    · JPEG baseline desde la memoria interna.
 // ##    · Video AVI con pista MJPEG: cada fotograma es un JPEG
 // ##      completo y pasa por FlexOS_JPEG, que ya esta probado
 // ##      contra libjpeg-turbo. No hay prediccion entre cuadros,
@@ -49,7 +49,7 @@
 // ##
 // ##  MEMORIA. No existe el fichero entero en RAM en ningun
 // ##  momento. Se mantiene:
-// ##    · un descriptor abierto sobre la tarjeta,
+// ##    · lectura incremental del archivo,
 // ##    · UN buffer para el fotograma comprimido (VID_FRAME_CAP),
 // ##    · y nada mas: el JPEG se decodifica DIRECTAMENTE sobre el
 // ##      framebuffer, fila a fila. Por eso no hay doble buffer de
@@ -219,10 +219,8 @@ static void vidResumeSet(const char* path, uint32_t frame){
 //  LIBERACION
 //  ------------------------------------------------------------
 //  UN solo sitio suelta TODO lo del visor. Lo llaman: cerrar el
-//  archivo, volver a la lista, cambiar de video, suspender, cerrar
-//  la app y la retirada de la tarjeta. Tener un unico camino es lo
-//  que hace que no quede un descriptor abierto sobre una tarjeta
-//  que ya no esta.
+//  archivo, volver a la lista, cambiar de video, suspender y cerrar
+//  la app. Tener un unico camino evita dejar recursos reservados.
 // -------------------------------------------------------------
 static void vidReleaseMedia(bool keepPosition){
   if(vidKind == VK_VIDEO && keepPosition && vidPath[0] && !vidEnded)
@@ -234,7 +232,6 @@ static void vidReleaseMedia(bool keepPosition){
   if(vidFrameBuf){ mediaFree(vidFrameBuf); vidFrameBuf = NULL; }
   if(vidPhotoBuf){ mediaFree(vidPhotoBuf); vidPhotoBuf = NULL; vidPhotoLen = 0; }
   if(vidTile){ heap_caps_free(vidTile); vidTile = NULL; }
-  flexSdBusySet(false);
   vidKind    = VK_NONE;
   vidEnded   = false;
   vidCurFrame = 0;
@@ -404,7 +401,7 @@ static bool vidOpenPath(const char* path){
   vidZoom = 1; vidPanX = vidPanY = 0; vidPanning = false;
 
   if(!mediaVolReady(vidPath)){
-    vidFail(mediaIsSd(vidPath) ? "La tarjeta ya no esta" : "Sin almacenamiento");
+    vidFail("Sin almacenamiento");
     return false;
   }
   const int kind = flexMediaClassify(vidName);
@@ -418,7 +415,7 @@ static bool vidOpenPath(const char* path){
   // ---------- FOTO ----------
   // Los bytes comprimidos se leen UNA vez y se quedan mientras la
   // foto este abierta. Antes de esto, cada desplazamiento del zoom
-  // volvia a leer el archivo entero de la tarjeta: girar o arrastrar
+  // volvia a leer el archivo entero: girar o arrastrar
   // costaba una lectura completa, no solo una decodificacion.
   if(kind == FLEXMED_PHOTO || kind == FLEXMED_DRAW){
     vidKind = VK_PHOTO;
@@ -727,8 +724,8 @@ static int vidFilterKind(){
     default: return 0;
   }
 }
-static int vidListCount(){ return flexMediaIndexCount(&gMedIx, vidFilterKind(), -1); }
-static int vidListItem(int nth){ return flexMediaIndexNth(&gMedIx, vidFilterKind(), -1, nth); }
+static int vidListCount(){ return flexMediaIndexCount(&gMedIx, vidFilterKind()); }
+static int vidListItem(int nth){ return flexMediaIndexNth(&gMedIx, vidFilterKind(), nth); }
 
 static void vidListRender(){
   setBuf(fb);
@@ -758,10 +755,8 @@ static void vidListRender(){
   }
   if(n == 0 && !mediaIndexBusy()){
     drawTextC(bx + bw / 2, by + bh / 2 - 30, "No hay nada que reproducir", 3, TH_TXT2);
-    if(flexSdReady())
-      drawTextC(bx + bw / 2, by + bh / 2 + 8, "Copia JPEG o AVI MJPEG a la tarjeta", 1, TH_MUTE);
-    else
-      drawTextC(bx + bw / 2, by + bh / 2 + 8, flexSdError(), 1, TH_MUTE);
+    drawTextC(bx + bw / 2, by + bh / 2 + 8,
+              "Guarda JPEG o AVI MJPEG en la memoria interna", 1, TH_MUTE);
   }
 
   uiClipViewport(top, by + bh - 1);
@@ -789,8 +784,7 @@ static void vidListRender(){
     drawTextClip(bx + pad + 62, y + 10, nm ? nm + 1 : it->path, 2, TH_TXT, bx + bw - pad - 70);
     char sub[48], sz[16];
     flexFsFmtSize(it->size, sz, sizeof(sz));
-    snprintf(sub, sizeof(sub), "%s  ·  %s", sz,
-             it->vol == FLEXMED_VOL_SD ? "Tarjeta SD" : "Interna");
+    snprintf(sub, sizeof(sub), "%s  ·  Interna", sz);
     drawText(bx + pad + 62, y + 34, sub, 1, TH_TXT2);
   }
   uiClipFull();
@@ -864,10 +858,8 @@ static void vidSeekToMs(uint32_t ms){
   if(vidKind != VK_VIDEO || !vidAvi.usPerFrame) return;
   uint32_t target = (uint32_t)(((uint64_t)ms * 1000ull) / vidAvi.usPerFrame);
   if(vidAvi.frames && target >= vidAvi.frames) target = vidAvi.frames - 1;
-  flexSdBusySet(true);
   int landed = flexAviSeekFrame(&vidAvi, target);
-  flexSdBusySet(false);
-  if(landed < 0){                       // la tarjeta se fue durante la busqueda
+  if(landed < 0){
     vidFail("Se perdio el acceso al archivo");
     vidRenderViewer();
     return;
@@ -898,7 +890,6 @@ static void vidPlaybackTick(){
   int drop = (int)(late / (long)spf);
   if(drop > VID_MAX_CATCHUP) drop = VID_MAX_CATCHUP;
 
-  flexSdBusySet(true);                 // no sondear la tarjeta dentro del cuadro
   for(int i = 0; i < drop; i++){
     int r = flexAviSkipFrame(&vidAvi);
     if(r == FLEXAVI_ERR_EOF){ vidEnded = true; break; }
@@ -907,7 +898,6 @@ static void vidPlaybackTick(){
     vidStatSkipped++;
   }
   if(!vidEnded) vidDrawCurrentFrame(true);
-  flexSdBusySet(false);
 
   // El instante teorico avanza por los fotogramas consumidos, no por
   // "ahora + spf": asi el video no se va acumulando retraso.
@@ -953,7 +943,7 @@ static void vidAudioTick(){
   if(want > sizeof(blk)) want = sizeof(blk);
   // Solo se reposiciona si hace falta. La lectura es secuencial, asi
   // que normalmente el descriptor ya esta donde toca; buscar en cada
-  // bloque serian ~170 busquedas por segundo en la tarjeta para nada.
+  // bloque serian ~170 busquedas por segundo para nada.
   // (Si el controlador de audio acepto menos bytes de los leidos, el
   // descriptor SI queda por delante y entonces si se reposiciona.)
   if(vidStream.pos != vidAudioPos && !mediaIoSeek(&vidStream, vidAudioPos)){
@@ -976,7 +966,7 @@ static void vidAudioTick(){
 //  gesto. Tener uno solo es lo que garantiza que por cualquiera de
 //  los tres se suelten los mismos recursos y se vuelva al mismo
 //  sitio; si cada uno hiciera lo suyo, bastaria olvidarse en uno
-//  para dejar un descriptor abierto sobre la tarjeta.
+//  para mantener una lectura incremental eficiente.
 // -------------------------------------------------------------
 static void vidLeaveViewer(){
   vidReleaseMedia(true);                 // guarda la posicion y suelta TODO
@@ -1161,9 +1151,7 @@ static void vidCycleOrientation(){
   if(vidKind == VK_VIDEO){
     // Se vuelve al fotograma ACTUAL para repintarlo girado: girar no
     // debe costar un fotograma perdido.
-    flexSdBusySet(true);
     flexAviSeekFrame(&vidAvi, vidCurFrame);
-    flexSdBusySet(false);
   }
   vidRenderViewer();
 }
@@ -1220,8 +1208,6 @@ static void vidRenderAll(){
 static void vidEnter(){
   memset(&vidStream, 0, sizeof(vidStream));
   vidCtrlOn = true; vidCtrlMs = millis();
-  flexSdPoke();                         // al abrir, comprobar la tarjeta ya
-  flexSdTick();
   mediaIndexEnsure();
   appLoadSessionOnce(IC_MULTIMEDIA);
   if(gMediaPending[0]){
@@ -1237,18 +1223,6 @@ static void vidEnter(){
 }
 
 static void vidTick(){
-  // La tarjeta se fue mientras se reproducia: se corta, se sueltan
-  // los recursos y se dice. Este es el camino que evita seguir
-  // leyendo con un descriptor de una tarjeta que ya no esta.
-  if(vidKind != VK_NONE && vidKind != VK_ERROR
-     && mediaIsSd(vidPath) && !flexSdReady()){
-    vidReleaseMedia(false);
-    vidFail("Se retir\xC3\xB3 la tarjeta");
-    mediaNotify(MOD_SDCARD, "Tarjeta retirada", "Se detuvo la reproducci\xC3\xB3n");
-    vidRenderViewer();
-    return;
-  }
-
   if(vidScreen == VS_VIEW){
     vidPlaybackTick();
     vidAudioTick();
@@ -1305,9 +1279,8 @@ static bool vidBackScreen(){
 }
 
 static void vidSuspend(){
-  // Una app en segundo plano no decodifica, no suena y -- sobre todo
-  // -- NO se queda con un descriptor abierto sobre un volumen
-  // extraible. Se guarda la posicion y se suelta todo; al volver,
+  // Una app en segundo plano no decodifica ni suena. Se guarda la posicion
+  // y se suelta todo; al volver,
   // vidResume reabre por donde iba.
   vidReleaseMedia(true);
   gLand = false;                       // el framework tambien lo hace; aqui por si acaso
@@ -1326,20 +1299,7 @@ static size_t vidShed(){
 }
 static void vidResume(){
   vidCtrlOn = true; vidCtrlMs = millis();
-  // Comprobacion EN EL ACTO, no en el proximo sondeo: mientras la app
-  // estaba en segundo plano la tarjeta ha podido salir, y volver a
-  // una foto que ya no existe no puede depender de esperar 2 s.
-  flexSdPoke();
-  flexSdTick();
   if(vidScreen == VS_VIEW){
-    // Si el archivo era de la tarjeta y esta ya no esta, no se
-    // intenta reabrir: se vuelve a la lista con el motivo.
-    if(mediaIsSd(vidPath) && !flexSdReady()){
-      vidReleaseMedia(false);
-      vidScreen = VS_LIST;
-      vidListRender();
-      return;
-    }
     if(vidKind == VK_NONE && vidPath[0]) vidOpenPath(vidPath);
     vidRenderViewer();
     return;
@@ -1375,4 +1335,3 @@ static void vidLoadSess(){
     vidResumeTab[i].whenMs = 0;
   }
 }
-

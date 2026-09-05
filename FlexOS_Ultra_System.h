@@ -241,7 +241,7 @@ static uint32_t memShedSystem(){
 // ##       (medidos antes/despues) y PSRAM disponible ahora
 // ##
 // ##  LO QUE NO HACE, A PROPOSITO: no borra notas, dibujos, ajustes,
-// ##  archivos ni apps; no desmonta la microSD; no reinicia; no cierra la
+// ##  archivos ni apps; no reinicia; no cierra la
 // ##  app activa; y no toca ninguna app con trabajo real en segundo plano.
 // ##
 // ##  NO BLOQUEA. Una etapa por vuelta de loop, separadas por tiempo con

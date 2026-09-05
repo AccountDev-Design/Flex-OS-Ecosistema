@@ -178,7 +178,7 @@ static void testAlerts(){
   // Los de PSRAM YA NO salen de aqui: los gobierna la maquina de nivel, para
   // que no puedan repetirse mientras la condicion dura.
   s.psFree = MB(4); s.psLargest = MB(3);
-  CHECK(flexMemAlertPick(&s, 0, 100000, &a) == FLEXMEM_AL_NONE,
+  CHECK(flexMemAlertPick(&s, 100000, &a) == FLEXMEM_AL_NONE,
         "quedarse sin PSRAM ya no genera un aviso desde aqui");
 
   // Fragmentacion: solo con memoria de sobra.
@@ -186,54 +186,45 @@ static void testAlerts(){
   s = base();
   s.psFree = MB(12); s.psLargest = MB(2);
   CHECK(flexMemFragClass(&s) == FLEXMEM_FRAG_HIGH, "12 MB con mayor hueco de 2 MB: fragmentacion alta");
-  CHECK(flexMemAlertPick(&s, 0, 500000, &a) == FLEXMEM_AL_FRAG, "toca el de fragmentacion");
-  CHECK(flexMemAlertPick(&s, 0, 500000 + FLEXMEM_CD_GLOBAL + 1, &a) == FLEXMEM_AL_NONE,
+  CHECK(flexMemAlertPick(&s, 500000, &a) == FLEXMEM_AL_FRAG, "toca el de fragmentacion");
+  CHECK(flexMemAlertPick(&s, 500000 + FLEXMEM_CD_GLOBAL + 1, &a) == FLEXMEM_AL_NONE,
         "y no se repite mientras dure su enfriamiento");
-  CHECK(flexMemAlertPick(&s, 0, 500000 + FLEXMEM_CD_FRAG + 1, &a) == FLEXMEM_AL_FRAG,
+  CHECK(flexMemAlertPick(&s, 500000 + FLEXMEM_CD_FRAG + 1, &a) == FLEXMEM_AL_FRAG,
         "pasado su enfriamiento puede volver a decirse");
 
   // SRAM baja
   flexMemAlertsReset(&a);
   s = base();
   s.inFree = KB(50);            // por debajo de LOW pero por encima de MIN
-  CHECK(flexMemAlertPick(&s, 0, 600000, &a) == FLEXMEM_AL_SRAM, "SRAM baja tiene su propio aviso");
+  CHECK(flexMemAlertPick(&s, 600000, &a) == FLEXMEM_AL_SRAM, "SRAM baja tiene su propio aviso");
 
   // Flash
   flexMemAlertsReset(&a);
   s = base();
   s.fsUsed = MB(7);             // 87%
-  CHECK(flexMemAlertPick(&s, 0, 700000, &a) == FLEXMEM_AL_FLASH80, "flash al 87%% -> aviso de 80");
+  CHECK(flexMemAlertPick(&s, 700000, &a) == FLEXMEM_AL_FLASH80, "flash al 87%% -> aviso de 80");
   flexMemAlertsReset(&a);
   s.fsUsed = MB(8) - KB(200);   // ~97%
-  CHECK(flexMemAlertPick(&s, 0, 700000, &a) == FLEXMEM_AL_FLASH90, "flash al 97%% -> aviso de 90");
+  CHECK(flexMemAlertPick(&s, 700000, &a) == FLEXMEM_AL_FLASH90, "flash al 97%% -> aviso de 90");
   flexMemAlertsReset(&a);
   s.fsValid = 0;
-  CHECK(flexMemAlertPick(&s, 0, 700000, &a) == FLEXMEM_AL_NONE,
+  CHECK(flexMemAlertPick(&s, 700000, &a) == FLEXMEM_AL_NONE,
         "sin medida de flash no se avisa de flash");
-
-  // Tarjeta con error: el estado se lo pasa el llamante, aqui no se sondea nada.
-  flexMemAlertsReset(&a);
-  s = base();
-  CHECK(flexMemAlertPick(&s, 1, 800000, &a) == FLEXMEM_AL_SD_ERR, "tarjeta en error -> su aviso");
-  CHECK(flexMemAlertPick(&s, 1, 800000 + FLEXMEM_CD_GLOBAL + 1, &a) == FLEXMEM_AL_NONE,
-        "no se repite mientras dure su enfriamiento");
-  CHECK(flexMemAlertPick(&s, 1, 800000 + FLEXMEM_CD_SD + 1, &a) == FLEXMEM_AL_SD_ERR,
-        "pasado su enfriamiento puede volver a decirse");
 
   // Separacion global: dos condiciones distintas no encadenan dos tarjetas.
   flexMemAlertsReset(&a);
   s = base(); s.inFree = KB(50); s.fsUsed = MB(7);
-  CHECK(flexMemAlertPick(&s, 0, 900000, &a) == FLEXMEM_AL_SRAM, "primero el mas grave");
-  CHECK(flexMemAlertPick(&s, 0, 900001, &a) == FLEXMEM_AL_NONE, "el siguiente espera su turno");
-  CHECK(flexMemAlertPick(&s, 0, 900000 + FLEXMEM_CD_GLOBAL + 1, &a) == FLEXMEM_AL_FLASH80,
+  CHECK(flexMemAlertPick(&s, 900000, &a) == FLEXMEM_AL_SRAM, "primero el mas grave");
+  CHECK(flexMemAlertPick(&s, 900001, &a) == FLEXMEM_AL_NONE, "el siguiente espera su turno");
+  CHECK(flexMemAlertPick(&s, 900000 + FLEXMEM_CD_GLOBAL + 1, &a) == FLEXMEM_AL_FLASH80,
         "pasada la separacion, sale el segundo");
 
   // El reloj da la vuelta (49,7 dias): la resta sin signo sigue siendo correcta.
   flexMemAlertsReset(&a);
   s = base(); s.inFree = KB(50);
   uint32_t near = 0xFFFFF000u;
-  CHECK(flexMemAlertPick(&s, 0, near, &a) == FLEXMEM_AL_SRAM, "aviso justo antes de la vuelta");
-  CHECK(flexMemAlertPick(&s, 0, near + FLEXMEM_CD_MEM, &a) == FLEXMEM_AL_SRAM,
+  CHECK(flexMemAlertPick(&s, near, &a) == FLEXMEM_AL_SRAM, "aviso justo antes de la vuelta");
+  CHECK(flexMemAlertPick(&s, near + FLEXMEM_CD_MEM, &a) == FLEXMEM_AL_SRAM,
         "el enfriamiento sigue midiendo bien despues de que millis() de la vuelta");
 }
 

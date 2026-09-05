@@ -43,8 +43,8 @@ int  otaHostScrH(){ return SCR_H; }
 bool otaHostIsHome(){ return gState == ST_HOME && qsPanelY == 0 && !editMode; }
 
 // No usar WiFi.status() desde el autocheck: en P4 esa consulta despierta
-// esp-hosted/SDIO y puede colisionar con una microSD montada. El sketch
-// publica el enlace real cuando la tarea de conexion termina.
+// esp-hosted/SDIO. El sketch publica el enlace real cuando la tarea de
+// conexion termina.
 bool otaHostNetworkReady(){ return gNetOnline; }
 
 // APARIENCIA y MATERIAL del sistema. Este par es el UNICO punto por el que el

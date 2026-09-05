@@ -146,7 +146,6 @@ static portMUX_TYPE wifiMux = portMUX_INITIALIZER_UNLOCKED;
 
 enum { WUI_LIST = 0, WUI_SCANNING, WUI_PASS, WUI_CONNECTING, WUI_OK, WUI_FAIL };
 static volatile int wifiUIState = WUI_LIST;
-static volatile bool wifiBlockedBySd = false;
 static int      wifiSel = -1;
 static char     wifiPass[64] = "";
 static uint32_t wifiKbAnim = 0;
@@ -450,7 +449,6 @@ static void wifiAutoConnTask(void*){
 // Lanza la conexion pedida por el usuario si hay una red guardada.
 static void wifiTryAutoConnect(bool bootAttempt){
   if(gWifiAutoBusy || gWifiAutoDone) return;
-  wifiBlockedBySd = false;
   if(!gWifiHostedPinsOk || !wifiCredsExist()){
     gWifiAutoDone = true;
     Serial.println(F("[WiFi] transporte o red no disponible -> configuracion manual"));
@@ -505,7 +503,6 @@ static bool wifiRadioBusy(){
 
 static void wifiStartScan(){
 #if FLEXOS_ENABLE_WIFI
-  wifiBlockedBySd = false;
   // Comprobacion BARATA. Antes aqui se llamaba a wifiEnsureStaMode(), que
   // levanta esp-hosted DESDE loopTask -- y la tarea que se crea justo debajo
   // vuelve a hacerlo de todas formas en su primera linea. Era trabajo repetido
@@ -530,7 +527,6 @@ static void wifiStartScan(){
 }
 static void wifiStartConnect(){
 #if FLEXOS_ENABLE_WIFI
-  wifiBlockedBySd = false;
   if(wifiSel < 0 || wifiSel >= WIFI_MAX_NETS){ wifiUIState = WUI_LIST; return; }  // indice invalido -> nunca leer wifiNets[] fuera de rango
   const char* why = NULL;                    // barata: la radio la despierta wifiConnTask
   if(!wifiTransportReady(&why)){
@@ -649,13 +645,6 @@ static void wifiRenderStatus(){
     drawTextC(SCR_W / 2, 280, "Conectando...", 3, TH_TXT);
     char sub[48]; snprintf(sub, sizeof(sub), "a %s", wifiConnSSID);
     drawTextC(SCR_W / 2, 320, sub, 2, TH_TXT2);
-  } else if(wifiBlockedBySd){
-    drawCircle(SCR_W / 2, 280, 46, TH_WARN); drawCircle(SCR_W / 2, 280, 45, TH_WARN);
-    drawTextC(SCR_W / 2, 350, "microSD en uso", 3, TH_TXT);
-    drawTextC(SCR_W / 2, 390, "Wi-Fi y microSD comparten el bus SDIO", 1, TH_TXT2);
-    drawTextC(SCR_W / 2, 420, "Expulsa la tarjeta y vuelve a intentar", 1, TH_TXT2);
-    fillRoundRect(SCR_W / 2 - 100, SCR_H - 120, 200, 56, 16, TH_PRIM);
-    drawTextC(SCR_W / 2, SCR_H - 102, "Volver", 2, TH_ONACC);
   } else {                                     // WUI_FAIL
     drawCircle(SCR_W / 2, 280, 46, TH_ERR); drawCircle(SCR_W / 2, 280, 45, TH_ERR);
     strokeSegAA(SCR_W / 2 - 14, 264, SCR_W / 2 + 14, 296, 4.0f, TH_ERR);
@@ -698,8 +687,8 @@ static void wifiSettingsRepaint(){
 }
 static int wifiReturnState = ST_APP;
 static void wifiExit(){
-  // Si solo se abrio el escaner y no se establecio conexion, soltar
-  // esp-hosted permite que una microSD insertada despues pueda montar.
+  // Si solo se abrio el escaner y no se establecio conexion, se suelta
+  // esp-hosted para no retener la radio innecesariamente.
   if(gWifiDriverOn && !gNetOnline) wifiRequestOff();   // en tarea: nunca en loopTask
   // accountResumeEnter (y no accountOobeEnter): la pantalla de Cuenta vuelve
   // con el MISMO destino de salida que tenia antes de venir a configurar la
@@ -817,13 +806,6 @@ static void wifiTick(){
     }
     case WUI_FAIL: {
       if(T.tap){
-        if(wifiBlockedBySd){
-          if((T.x < 48 && T.y < 48) ||
-             (T.y >= SCR_H - 120 && T.y <= SCR_H - 64 && T.x >= SCR_W/2 - 100 && T.x <= SCR_W/2 + 100)){
-            wifiBlockedBySd = false; wifiExit(); return;
-          }
-          return;
-        }
         if(T.x < 48 && T.y < 48){ wifiUIState = WUI_LIST; wifiRenderList(); return; }
         if(T.y >= SCR_H - 120 && T.y <= SCR_H - 64){
           if(T.x >= SCR_W/2 - 210 && T.x <= SCR_W/2 - 10){ wifiUIState = WUI_LIST; wifiRenderList(); return; }             // cancelar

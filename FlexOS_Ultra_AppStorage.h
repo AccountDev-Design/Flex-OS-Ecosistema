@@ -1,7 +1,7 @@
 // #############################################################
 // ##  FLEX OS ULTRA  ·  APP ALMACENAMIENTO  ·  y detalles de memoria
 // ##  ----------------------------------------------------------
-// ##  Los dos volumenes (interno y microSD) por separado, el aviso de poco
+// ##  El almacenamiento interno, el aviso de poco
 // ##  espacio y la pantalla de detalles de memoria y sistema, con el boton
 // ##  Optimizar Flex OS. Aqui vive tambien simpBar(), la fila de medidor
 // ##  que reutilizan las apps simples.
@@ -67,17 +67,9 @@ static int simpBar(int y, const char* label, const char* val, int pct, uint16_t 
 // ##      carpeta real (flexFsCatSize).
 // ##    · "Archivos grandes" -> recorrido completo del arbol
 // ##      quedandose con los mayores (flexFsLargest).
-// ##    · "Tarjeta SD" -> flexSd*(): capacidad, tipo de tarjeta y
-// ##      sistema de archivos leidos del volumen MONTADO. Sin
-// ##      tarjeta no se pinta una barra al 0% que parezca una
-// ##      tarjeta vacia: se dice que no hay y por que.
 // ##
-// ##  LOS DOS VOLUMENES SE PRESENTAN POR SEPARADO. "Memoria
-// ##  interna" es la particion de datos (LittleFS) y "Tarjeta SD"
-// ##  es el volumen extraible; ni se suman ni se mezclan sus
-// ##  numeros, porque son dos sitios distintos con dos
-// ##  comportamientos distintos (uno siempre esta, el otro puede
-// ##  irse a mitad de una lectura).
+// ##  El almacenamiento de usuario es la particion LittleFS. Sus
+// ##  cifras nunca se mezclan con el tamano del firmware.
 // #############################################################
 #define ALM_BIG_MAX 3
 
@@ -106,65 +98,6 @@ static void almFolderIcon(int x, int y, int s){
   fillRoundRect(x, y + s / 5, s, s * 3 / 4, s / 8, tab);
   fillRoundRect(x, y + s / 5, s * 5 / 9, s / 4, s / 10, tab);
   fillRoundRect(x + s / 10, y + s / 3, s - s / 10, s * 3 / 5, s / 9, body);
-}
-
-// Zona pulsable de la fila "Ver..." de la tarjeta (0 = no hay).
-static int almSdY0 = 0, almSdY1 = 0;
-
-// Icono de tarjeta SD: el contorno con la esquina cortada, que es
-// como se reconoce de un vistazo. Cambia de color con el estado
-// real, no siempre igual.
-static void almSdIcon(int x, int y, int s, uint16_t col){
-  int cut = s / 3;
-  fillRoundRect(x, y, s, s * 4 / 3, s / 8, col);
-  fillTriangle(x + s - cut, y, x + s, y, x + s, y + cut, TH_PAGE);
-  for(int i = 0; i < 4; i++)
-    fillRect(x + s / 6 + i * (s / 6), y + s / 8, s / 12, s / 3, TH_PAGE);
-}
-
-// Dibuja el bloque de la tarjeta y devuelve la Y siguiente.
-static int almSdBlock(int bx, int by, int bw, int bh, int y){
-  const int pad = uiPad(), gap = uiGap();
-  const bool ok = flexSdReady();
-  const int cardH = ok ? 96 : 74;
-  almSdY0 = almSdY1 = 0;
-  if(y + cardH > by + bh - pad) return y;
-
-  if(uiGlass) drawLiquidGlassPanel(bx + pad, y, bw - 2 * pad, cardH, 14, TH_GLASS);
-  else        fillRoundRect(bx + pad, y, bw - 2 * pad, cardH, 14, TH_SURF);
-
-  almSdIcon(bx + pad * 2, y + 14, 26, ok ? rgb565(90,190,130) : rgb565(120,124,140));
-  drawText(bx + pad * 2 + 44, y + 12, "Tarjeta SD", 2, TH_TXT);
-
-  if(!ok){
-    // Sin tarjeta (o con un fallo): se dice el motivo REAL que
-    // devuelve el modulo, no un texto generico.
-    drawTextClip(bx + pad * 2 + 44, y + 36, flexSdError(), 1,
-                 flexSdState() == FLEXSD_ABSENT ? TH_MUTE : TH_ERR, bx + bw - pad * 2);
-    drawTextClip(bx + pad * 2 + 44, y + 54, "Formato recomendado: FAT32", 1, TH_MUTE,
-                 bx + bw - pad * 2);
-    return y + cardH + gap / 2;
-  }
-
-  uint64_t tot = flexSdTotalBytes(), usd = flexSdUsedBytes();
-  int pct = tot ? (int)((usd * 100ull) / tot) : 0;
-  char su[24], st[24], sf[24], line[72];
-  flexFsFmtSize((uint32_t)(usd / 1048576ull), su, sizeof(su));
-  flexFsFmtSize((uint32_t)(tot / 1048576ull), st, sizeof(st));
-  flexFsFmtSize((uint32_t)(flexSdFreeBytes() / 1048576ull), sf, sizeof(sf));
-  // Las cifras van en MB reales; flexFsFmtSize da la unidad, asi que
-  // se compone "1234 MB" -> se ensena tal cual con su sufijo.
-  snprintf(line, sizeof(line), "%s de %s usados  ·  %s libres", su, st, sf);
-  drawTextClip(bx + pad * 2 + 44, y + 34, line, 1, TH_TXT2, bx + bw - pad * 2);
-  snprintf(line, sizeof(line), "%s  ·  %s", flexSdCardTypeName(), flexSdFsName());
-  drawTextR(bx + bw - pad * 2, y + 12, line, 1, TH_TXT2);
-
-  int barY = y + 54, barX = bx + pad * 2, barW = bw - pad * 4;
-  fillRoundRect(barX, barY, barW, 10, 5, TH_TRACK);
-  if(pct > 0) fillRoundRect(barX, barY, barW * pct / 100, 10, 5, rgb565(90,190,130));
-  drawTextR(bx + bw - pad * 2, y + 70, "Ver archivos...", 2, TH_ACCS);
-  almSdY0 = y; almSdY1 = y + cardH;
-  return y + cardH + gap / 2;
 }
 
 // Pantalla interna activa de la app. La segunda (DETALLE) es la que anade la
@@ -233,8 +166,8 @@ static void almRenderMain(){
   // la app, con su propio desplazamiento y el boton atras del sistema.
   //
   // POR QUE UNA PANTALLA Y NO UN DESPLIEGUE EN LINEA: el detalle son mas de
-  // treinta cifras reales (PSRAM, SRAM, flash, tarjeta y estado del sistema).
-  // Desplegarlas aqui empujaria la tarjeta SD, las categorias y los archivos
+  // cifras reales (PSRAM, SRAM, flash y estado del sistema).
+  // Desplegarlas aqui empujaria las categorias y los archivos
   // grandes fuera de una pantalla de 480x800 que hoy NO tiene desplazamiento:
   // el resultado seria justo la "pantalla confusa" que habia que evitar.
   almDetY0 = almDetY1 = 0;
@@ -259,9 +192,6 @@ static void almRenderMain(){
     almDetY0 = y; almDetY1 = y + 50;
     y += 50 + gap / 2;
   }
-
-  // ---- Tarjeta SD: volumen APARTE, nunca sumado al interno ----
-  y = almSdBlock(bx, by, bw, bh, y);
 
   // ---- Categorias: tamano REAL de cada conjunto de carpetas ----
   y += gap / 2;
@@ -321,10 +251,6 @@ static void almRenderMain(){
 // ##      propio muestreo, con la MISMA medida que se ensena;
 // ##    · flash -> flexFsTotalBytes/UsedBytes y flexFsCatSize/DirSize;
 // ##    · firmware -> ESP.getSketchSize(), UNA vez por arranque;
-// ##    · tarjeta -> flexSdState()/flexSdError() y, solo si esta
-// ##      MONTADA, sus totales. Aqui NO se sondea la tarjeta: se LEE el
-// ##      estado que el modulo ya mantiene. Ese es el punto entero de
-// ##      esta pantalla respecto a la inestabilidad conocida de la SD.
 // ##  Lo que no se puede medir dice "No disponible" y punto.
 // ##
 // ##  COMO SE REFRESCA SIN REDIBUJAR LA PANTALLA. El contenido esta
@@ -341,13 +267,13 @@ static void almRenderMain(){
 // #############################################################
 #define ALMD_VY0     WIN_TOP
 #define ALMD_VY1     (WIN_BOT - 1)
-#define ALMD_SEC_N   6
+#define ALMD_SEC_N   5
 // Alturas de cada seccion, en coordenadas de CONTENIDO. Estan calculadas sobre
 // el contenido REAL de cada una (titulo 26 px + 24 px por fila + 18 px por
 // nota) con holgura: si una seccion se pasara de su alto, su ultima linea
 // caeria dentro de la banda de la siguiente y el repintado parcial de esa
 // otra la borraria -- un fallo que solo se ve cuando cambia justo ese dato.
-static const int ALMD_SEC_H[ALMD_SEC_N] = { 96, 240, 168, 236, 140, 200 };
+static const int ALMD_SEC_H[ALMD_SEC_N] = { 96, 240, 168, 236, 200 };
 static int      almDetScroll = 0;
 static uint32_t almDetSig[ALMD_SEC_N];
 static uint32_t almDetMs = 0;
@@ -407,20 +333,6 @@ static const char* almBootCause(){
     default:                return "No disponible";
   }
 }
-// Estado de la tarjeta en las palabras del usuario. LECTURA PURA: no monta,
-// no reintenta y no toca el controlador.
-static const char* almSdStateText(){
-  switch(flexSdState()){
-    case FLEXSD_READY:     return "Lista";
-    case FLEXSD_ABSENT:    return "No insertada";
-    case FLEXSD_ERR_MOUNT: return "Error al montar";
-    case FLEXSD_ERR_FS:    return "Formato no compatible";
-    case FLEXSD_ERR_IO:    return "Error de lectura";
-    case FLEXSD_ERR_HW:    return "No disponible";
-    default:               return "No disponible";
-  }
-}
-
 // Las dos apps abiertas que mas PSRAM MEDIDA retienen. Sin medida no entran:
 // una lista de "mayor consumo" con numeros inventados no informa de nada.
 static void almTopApps(int* a, int* b){
@@ -439,8 +351,7 @@ static uint32_t almDetSecSig(int sec){
     case 1: return m->psFree ^ (m->psLargest << 1) ^ (m->psPeakUsed >> 3) ^ m->psTotal;
     case 2: return m->inFree ^ (m->inMin << 1) ^ m->inTotal;
     case 3: return m->fsUsed ^ (m->fsTotal << 1) ^ (uint32_t)m->fsValid;
-    case 4: return (uint32_t)flexSdState() ^ (uint32_t)(flexSdUsedBytes() >> 10) ^ flexSdGeneration();
-    case 5: {
+    case 4: {
       uint32_t up = millis() / 60000u;      // el rotulo solo cambia por minutos
       uint32_t apps = 0;
       for(int i = 0; i < APP_N; i++) apps = apps * 3u + gAppState[i];
@@ -541,21 +452,7 @@ static void almDetDrawSection(int sec, int sy){
       almDetRow(y, "Archivos de usuario", v, TH_TXT2);
       break;
     }
-    case 4: {                       // microSD
-      y = almDetTitle(y, "Tarjeta microSD");
-      y = almDetRow(y, "Estado", almSdStateText(),
-                    flexSdReady() ? TH_OK : (flexSdState() == FLEXSD_ABSENT ? TH_TXT2 : TH_ERR));
-      if(flexSdReady()){
-        flexMemFmt(flexSdTotalBytes(), v, sizeof(v)); y = almDetRow(y, "Capacidad", v, TH_TXT);
-        flexMemFmt(flexSdUsedBytes(),  v, sizeof(v)); y = almDetRow(y, "Usado", v, TH_TXT);
-        flexMemFmt(flexSdFreeBytes(),  v, sizeof(v)); y = almDetRow(y, "Libre", v, TH_TXT);
-      } else {
-        y = almDetNote(y, flexSdError());
-        almDetNote(y, "Flex OS no repite el montaje por su cuenta: evita bloquearse.");
-      }
-      break;
-    }
-    case 5: {                       // Estado del sistema
+    case 4: {                       // Estado del sistema
       y = almDetTitle(y, "Estado del sistema");
       buildUptime(v, sizeof(v));               y = almDetRow(y, "Tiempo encendido", v, TH_TXT);
       snprintf(v, sizeof(v), "%s", almBootCause());
@@ -683,13 +580,6 @@ static void almDetailTick(){
 }
 
 static void almEnter(){
-  // Al abrir Almacenamiento se comprueba la tarjeta EN EL ACTO, UNA vez, sin
-  // esperar al periodo de sondeo: es uno de los tres sitios donde el usuario
-  // espera ver el estado al dia. Fuera de aqui NO se sondea la tarjeta desde
-  // esta app -- ni al desplazarse, ni por cuadro, ni en el refresco de cifras.
-  flexSdPoke();
-  flexSdTick();
-  if(flexSdReady()) flexSdRefreshUsage();
   almScreen = ALM_SCR_MAIN;
   almRenderMain();
 }
@@ -703,10 +593,6 @@ static void almTick(){
     return;
   }
   if(almVerY1 > almVerY0 && T.y >= almVerY0 && T.y <= almVerY1){ filesEnter(); return; }
-  // La tarjeta abre el MISMO explorador, pero en su raiz: no hay un
-  // segundo explorador para la tarjeta.
-  if(almSdY1 > almSdY0 && T.y >= almSdY0 && T.y <= almSdY1 && flexSdReady())
-    filesEnterAt(FLEXSD_MOUNT);
 }
 
 // ---- Ciclo de vida de Almacenamiento ----

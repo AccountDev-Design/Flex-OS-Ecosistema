@@ -398,11 +398,10 @@ static void memAlertTick(){
     }
   }
 
-  // ---- Avisos SECUNDARIOS (fragmentacion, SRAM, flash, tarjeta) ----
+  // ---- Avisos SECUNDARIOS (fragmentacion, SRAM y flash) ----
   // Son condiciones distintas de "queda poca PSRAM" y tienen su propio
   // enfriamiento por clase; los de PSRAM ya no salen de aqui.
-  int sdErr = (flexSdState() != FLEXSD_ABSENT && flexSdState() != FLEXSD_READY) ? 1 : 0;
-  int k = flexMemAlertPick(memSnap(), sdErr, now, &gMemAlerts);
+  int k = flexMemAlertPick(memSnap(), now, &gMemAlerts);
   switch(k){
     case FLEXMEM_AL_FRAG:
       sysNotify("Memoria libre repartida en trozos peque\xC3\xB1os",
@@ -416,9 +415,6 @@ static void memAlertTick(){
     case FLEXMEM_AL_FLASH90:
       sysNotify("Almacenamiento interno casi lleno",
                 "Las actualizaciones y los datos nuevos podr\xC3\xAD" "an fallar"); break;
-    case FLEXMEM_AL_SD_ERR:
-      sysNotify("Tarjeta SD no disponible",
-                "Flex OS evit\xC3\xB3 operaciones repetidas para no bloquearse"); break;
     default: break;
   }
 }

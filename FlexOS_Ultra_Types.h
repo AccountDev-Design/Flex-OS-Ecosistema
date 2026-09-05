@@ -6,7 +6,7 @@
 // ##  interruptores maestros de cada fase (teclado, apagado de pantalla,
 // ##  Liquid Glass, kiosco, bloqueo de apps), el estado y los tipos de la
 // ##  isla dinamica, del cronometro, de los widgets del escritorio y de la
-// ##  capa de transicion de apps, y el diagnostico Wi-Fi/microSD.
+// ##  capa de transicion de apps y el diagnostico Wi-Fi.
 // ##
 // ##  COMO ENCAJA ESTE ARCHIVO
 // ##  ----------------------------------------------------------
@@ -212,23 +212,13 @@ struct TouchPoint { int id; int x, y; bool active; };
 //  en el IDE con "does not name a type".
 // -------------------------------------------------------------
 
-// LECTOR UNIFICADO. Un solo tipo para leer un fichero este donde
-// este: en la particion interna o en la tarjeta. Es lo que evita
-// tener dos reproductores y dos visores, uno por memoria.
-//
-// La diferencia real entre los dos volumenes esta en el coste de
-// abrir: en la tarjeta abrir cuesta una busqueda en el directorio
-// FAT, asi que el descriptor se mantiene ABIERTO (FlexSdFile) y se
-// lee por bloques desde el. En LittleFS, que es flash mapeada, el
-// coste de reabrir es despreciable, asi que se lee por
-// desplazamiento (flexFsReadAt) y no se retiene ningun descriptor.
+// Lector de medios sobre la particion interna LittleFS. Se lee por
+// desplazamiento (flexFsReadAt) y no se retiene un descriptor global.
 #define MSTREAM_NONE 0
 #define MSTREAM_INT  1      // particion interna (LittleFS)
-#define MSTREAM_SD   2      // tarjeta microSD
 struct MediaStream {
   uint8_t    kind;
-  FlexSdFile sd;                        // solo si kind == MSTREAM_SD
-  char       path[FLEXMED_PATH_MAX];    // solo si kind == MSTREAM_INT
+  char       path[FLEXMED_PATH_MAX];
   uint32_t   pos, size;
 };
 
@@ -370,11 +360,6 @@ enum ModuleType {
   MOD_BUTTON,
   MOD_SERVO,
   MOD_I2C_GENERIC,
-  // Avisos del sistema que NO son un modulo I2C pero usan la misma
-  // isla: es la unica cola de notificaciones que hay, y duplicarla
-  // para la tarjeta habria dado dos capas dibujando en la misma
-  // banda de bbuf (el fallo que ya documenta la cabecera de la isla).
-  MOD_SDCARD,       // tarjeta insertada / retirada / error / indice listo
   MOD_MEDIA         // archivo incompatible, fin de reproduccion...
 };
 
@@ -588,10 +573,8 @@ static uint16_t i2cSweepId    = 0;                 // id del barrido (para recon
   #define FLEXOS_WIFI_CORE_UNSAFE 0
 #endif
 static volatile bool gNetOnline = false;   // true tras un WiFi.begin() exitoso; lo lee la UI (Ajustes, icono, etc.)
-// En el P4 la radio remota y la microSD usan SDIO/SDMMC. No se consulta
-// WiFi.getMode() para saber si el controlador esta vivo porque ESA consulta
-// ya puede despertar esp-hosted y reclamar el bus. Esta bandera pertenece a
-// Flex OS sin consultar continuamente el controlador remoto del C6.
+// No se consulta WiFi.getMode() para saber si el controlador esta vivo porque
+// esa consulta puede despertar esp-hosted. Esta bandera pertenece a Flex OS.
 static volatile bool gWifiDriverOn = false;
 static volatile bool gWifiAutoBusy = false;   // tarea de conexion manual con red guardada
 static volatile bool gWifiAutoDone = true;    // solo se habilita tras validar el transporte a mano
@@ -632,11 +615,11 @@ struct AppTrLayer {
 };
 
 // #############################################################
-// ##  DIAGNOSTICO WI-FI / microSD  ·  APAGADO por defecto
+// ##  DIAGNOSTICO WI-FI  ·  APAGADO por defecto
 // ##  ------------------------------------------------------
-// ##  Con FLEXOS_DIAG_WIFI_SD en 0 todo esto compila a NADA: ni una
+// ##  Con FLEXOS_DIAG_WIFI en 0 todo esto compila a NADA: ni una
 // ##  variable, ni una rama, ni un byte. A 1 imprime por Serial la foto
-// ##  de memoria y el estado de tarjeta y radio en cada punto critico del
+// ##  de memoria y el estado de la radio en cada punto critico del
 // ##  arranque del enlace con el C6.
 // ##
 // ##  Para que sirve: el PANIC al encender el Wi-Fi no se puede reproducir
@@ -648,18 +631,17 @@ struct AppTrLayer {
 // ##
 // ##  Nunca imprime dentro de una ISR ni de una seccion critica.
 // #############################################################
-#define FLEXOS_DIAG_WIFI_SD 0
+#define FLEXOS_DIAG_WIFI 0
 
-#if FLEXOS_DIAG_WIFI_SD
+#if FLEXOS_DIAG_WIFI
 static void flexDiagWifi(const char* where){
   Serial.printf("[DIAG %8lu] %-28s PSRAM %u KB (bloque %u KB)  SRAM %u KB (bloque %u KB)  "
-                "SD est=%d busy=%d  radio=%d pines=%d\n",
+                "radio=%d pines=%d\n",
                 (unsigned long)millis(), where ? where : "",
                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024u),
                 (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024u),
                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024u),
                 (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024u),
-                flexSdState(), (int)flexSdBusyGet(),
                 (int)gWifiDriverOn, (int)gWifiHostedPinsOk);
 }
 #define FLEXDIAG_WIFI(w) flexDiagWifi(w)

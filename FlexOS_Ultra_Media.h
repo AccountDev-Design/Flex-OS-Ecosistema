@@ -1,9 +1,8 @@
 // #############################################################
 // ##  FLEX OS ULTRA  ·  NUCLEO DE MEDIOS  ·  indice compartido
 // ##  ----------------------------------------------------------
-// ##  Lo que comparten Galeria, Multimedia, Almacenamiento y el Explorador:
-// ##  montaje de la microSD, clasificacion de ficheros e indice por lotes
-// ##  (mediaStorageTick / mediaIndexTick).
+// ##  Lo que comparten Galeria, Multimedia y el Explorador:
+// ##  clasificacion de ficheros e indice LittleFS por lotes.
 // ##
 // ##  COMO ENCAJA ESTE ARCHIVO
 // ##  ----------------------------------------------------------
@@ -34,8 +33,8 @@
 // ##  Todo lo que Galeria, Multimedia, Almacenamiento y el
 // ##  Explorador comparten, en UN solo sitio:
 // ##
-// ##    · los dos volumenes (interno y tarjeta) vistos igual,
-// ##    · un lector de ficheros unico para los dos,
+// ##    · almacenamiento interno LittleFS,
+// ##    · un lector de ficheros unico,
 // ##    · el indice de medios, que se construye por lotes desde
 // ##      el bucle principal y nunca bloquea,
 // ##    · la cache de miniaturas,
@@ -45,11 +44,9 @@
 // ##  POR QUE AQUI Y NO EN CADA APP. Antes de esto, la Galeria
 // ##  tenia su propio recorrido de carpetas y su propio
 // ##  decodificador de miniatura, y Multimedia una fuente
-// ##  sintetica sin relacion con ninguna de las dos. Con dos
-// ##  volumenes y una tarjeta que puede irse en cualquier
-// ##  momento, mantener eso duplicado seria garantizar que una de
-// ##  las copias se olvida de comprobar la retirada. Aqui hay UN
-// ##  indice, UN lector y UNA politica de invalidacion.
+// ##  sintetica sin relacion con ninguna de las dos. Mantener eso
+// ##  duplicado haria divergir ambas apps. Aqui hay UN
+// ##  indice y UN lector.
 // #############################################################
 
 // -------------------------------------------------------------
@@ -91,27 +88,19 @@ static void mediaNotify(ModuleType t, const char* title, const char* sub){
 }
 
 // -------------------------------------------------------------
-//  VOLUMENES
-//  ------------------------------------------------------------
-//  Una ruta lleva su volumen dentro: si empieza por /sdcard es de
-//  la tarjeta y si no, de la particion interna. No hay una bandera
-//  aparte que se pueda desincronizar de la ruta.
+//  ALMACENAMIENTO INTERNO
 // -------------------------------------------------------------
-static inline bool mediaIsSd(const char* path){ return flexSdIsSdPath(path); }
-
 static bool mediaVolReady(const char* path){
-  return mediaIsSd(path) ? flexSdReady() : flexFsReady();
+  (void)path;
+  return flexFsReady();
 }
 
-// Nombre corto del volumen, para la ficha de detalles y la Galeria.
 static const char* mediaVolName(const char* path){
-  return mediaIsSd(path) ? "Tarjeta SD" : "Memoria interna";
+  (void)path;
+  return "Memoria interna";
 }
 
-// Listado uniforme. Devuelve -1 si el volumen no esta disponible,
-// para que el llamante distinga "carpeta vacia" de "no hay tarjeta".
 static int mediaList(const char* dir, FlexFsEntry* out, int maxn){
-  if(mediaIsSd(dir)) return flexSdReady() ? flexSdList(dir, out, maxn) : -1;
   return flexFsReady() ? flexFsList(dir, out, maxn) : -1;
 }
 
@@ -120,7 +109,6 @@ static int mediaList(const char* dir, FlexFsEntry* out, int maxn){
 // -------------------------------------------------------------
 static void mediaStreamClose(MediaStream* s){
   if(!s) return;
-  if(s->kind == MSTREAM_SD) flexSdClose(&s->sd);
   s->kind = MSTREAM_NONE;
   s->path[0] = 0;
   s->pos = s->size = 0;
@@ -129,35 +117,21 @@ static void mediaStreamClose(MediaStream* s){
 static bool mediaStreamOpen(MediaStream* s, const char* path){
   if(!s || !path) return false;
   mediaStreamClose(s);
-  if(mediaIsSd(path)){
-    if(!flexSdReady()) return false;
-    if(!flexSdOpen(&s->sd, path)) return false;
-    s->kind = MSTREAM_SD;
-    s->size = flexSdFileSize(&s->sd);
-  } else {
-    if(!flexFsReady() || !flexFsExists(path)) return false;
-    s->kind = MSTREAM_INT;
-    s->size = flexFsSize(path);
-    snprintf(s->path, sizeof(s->path), "%s", path);
-  }
+  if(!flexFsReady() || !flexFsExists(path)) return false;
+  s->kind = MSTREAM_INT;
+  s->size = flexFsSize(path);
+  snprintf(s->path, sizeof(s->path), "%s", path);
   s->pos = 0;
   return s->size > 0;
 }
 
 static inline bool mediaStreamOpenOk(const MediaStream* s){
-  if(!s || s->kind == MSTREAM_NONE) return false;
-  if(s->kind == MSTREAM_SD) return flexSdIsOpen(&s->sd);
-  return true;
+  return s && s->kind == MSTREAM_INT;
 }
 
 static int mediaIoRead(void* c, void* buf, uint32_t n){
   MediaStream* s = (MediaStream*)c;
   if(!s || n == 0) return 0;
-  if(s->kind == MSTREAM_SD){
-    int r = flexSdRead(&s->sd, buf, n);          // -1 si la tarjeta ya no esta
-    if(r > 0) s->pos += (uint32_t)r;
-    return r;
-  }
   if(s->kind == MSTREAM_INT){
     int r = flexFsReadAt(s->path, s->pos, buf, n);
     if(r > 0) s->pos += (uint32_t)r;
@@ -168,7 +142,6 @@ static int mediaIoRead(void* c, void* buf, uint32_t n){
 static bool mediaIoSeek(void* c, uint32_t off){
   MediaStream* s = (MediaStream*)c;
   if(!s) return false;
-  if(s->kind == MSTREAM_SD) return flexSdSeek(&s->sd, off);
   if(s->kind == MSTREAM_INT){
     if(off > s->size) return false;
     s->pos = off; return true;
@@ -188,12 +161,10 @@ static void mediaBindIO(FlexMediaIO* io, MediaStream* s){
 // se comprobo que cabe); lo grande va por MediaStream.
 static int mediaReadWhole(const char* path, uint8_t* buf, uint32_t cap){
   if(!path || !buf) return -1;
-  if(mediaIsSd(path)) return flexSdReadBin(path, buf, cap);
   return flexFsReadBin(path, buf, cap);
 }
 
 static uint32_t mediaFileSize(const char* path){
-  if(mediaIsSd(path)) return (uint32_t)flexSdSize(path);
   return flexFsSize(path);
 }
 
@@ -215,13 +186,13 @@ static void mediaFree(void* p){ if(p) heap_caps_free(p); }
 //  INDICE DE MEDIOS
 //  ------------------------------------------------------------
 //  CAPACIDAD. 384 elementos a 120 bytes son ~46 KB de PSRAM. Es un
-//  tope real, no "infinito": una tarjeta con 5.000 fotos no cabe
+//  tope real, no "infinito": una carpeta con 5.000 fotos no cabe
 //  entera y la interfaz lo DICE (ixFull), en vez de ensenar 384 y
 //  callar que hay mas.
 //
 //  CUANDO SE CONSTRUYE. Nunca al arrancar (nadie ha pedido ver la
 //  galeria todavia) sino al abrir Galeria, Multimedia o
-//  Almacenamiento, y al cambiar la tarjeta. Se avanza en el tick
+//  Almacenamiento. Se avanza en el tick
 //  del bucle principal con un presupuesto pequeno.
 // -------------------------------------------------------------
 #define MEDIA_INDEX_CAP    384
@@ -230,14 +201,12 @@ static void mediaFree(void* p){ if(p) heap_caps_free(p); }
 static FlexMediaIndex  gMedIx;
 static FlexMediaItem*  gMedStore   = NULL;
 static bool            gMedInited  = false;
-static uint32_t        gMedScanGen = 0;      // generacion de SD del indice actual
-static bool            gMedNotifyDone = false;
 
 // ---- Puente de volumen para el indexador ----
 // Traduce FlexFsEntry -> FlexMediaDirent. El indexador nunca ve las
 // estructuras del sistema de archivos.
-// Los dos volumenes entregan sus entradas por el MISMO camino: en
-// orden fisico y saltando las ya vistas. Es lo que permite recorrer
+// LittleFS entrega sus entradas en orden fisico y saltando las ya vistas.
+// Es lo que permite recorrer
 // una carpeta de miles de fotos en lotes de ocho sin releerla entera
 // en cada lote y sin un tope silencioso de elementos.
 #define MED_BATCH 8
@@ -257,40 +226,11 @@ static int medListInt(void* ctx, const char* dir, FlexMediaDirent* out, int maxn
 }
 static bool medAliveInt(void* ctx){ (void)ctx; return flexFsReady(); }
 
-static int medListSd(void* ctx, const char* dir, FlexMediaDirent* out, int maxn, int skip){
-  (void)ctx;
-  if(!flexSdReady()) return -1;
-  FlexFsEntry e[MED_BATCH];
-  int want = maxn < MED_BATCH ? maxn : MED_BATCH;
-  int n = flexSdListFrom(dir, e, want, skip);
-  if(n < 0) return -1;
-  for(int i = 0; i < n; i++){
-    snprintf(out[i].name, FLEXMED_NAME_MAX, "%s", e[i].name);
-    out[i].size = e[i].size;
-    out[i].dir  = e[i].dir;
-  }
-  return n;
-}
-static bool medAliveSd(void* ctx){ (void)ctx; return flexSdReady(); }
-
-// Carpetas que se recorren. Las de Flex OS van primero para que lo
-// propio aparezca antes; despues las carpetas de siempre de una
-// tarjeta, que se INDEXAN pero no se tocan: ni se crean, ni se
-// mueven ficheros, ni se escribe nada dentro.
+// Carpetas internas que se recorren.
 static void mediaIndexSetRoots(){
   gMedIx.rootN = 0;
-  flexMediaIndexAddRoot(&gMedIx, FLEXFS_DIR_DOCS,   FLEXMED_VOL_INT);
-  flexMediaIndexAddRoot(&gMedIx, FLEXFS_DIR_PAINT,  FLEXMED_VOL_INT);
-  if(flexSdReady()){
-    flexMediaIndexAddRoot(&gMedIx, FLEXSD_DIR_PHOTOS, FLEXMED_VOL_SD);
-    flexMediaIndexAddRoot(&gMedIx, FLEXSD_DIR_VIDEOS, FLEXMED_VOL_SD);
-    flexMediaIndexAddRoot(&gMedIx, FLEXSD_DIR_AUDIO,  FLEXMED_VOL_SD);
-    flexMediaIndexAddRoot(&gMedIx, "/sdcard/DCIM",     FLEXMED_VOL_SD);
-    flexMediaIndexAddRoot(&gMedIx, "/sdcard/Download", FLEXMED_VOL_SD);
-    flexMediaIndexAddRoot(&gMedIx, "/sdcard/Pictures", FLEXMED_VOL_SD);
-    flexMediaIndexAddRoot(&gMedIx, "/sdcard/Movies",   FLEXMED_VOL_SD);
-    flexMediaIndexAddRoot(&gMedIx, "/sdcard/Music",    FLEXMED_VOL_SD);
-  }
+  flexMediaIndexAddRoot(&gMedIx, FLEXFS_DIR_DOCS);
+  flexMediaIndexAddRoot(&gMedIx, FLEXFS_DIR_PAINT);
 }
 
 static bool mediaIndexBegin(){
@@ -306,19 +246,17 @@ static bool mediaIndexBegin(){
     flexMediaIndexInit(&gMedIx, gMedStore, MEDIA_INDEX_CAP);
     gMedInited = true;
   }
-  gMedIx.volInt.list = medListInt; gMedIx.volInt.alive = medAliveInt; gMedIx.volInt.ctx = NULL;
-  gMedIx.volSd.list  = medListSd;  gMedIx.volSd.alive  = medAliveSd;  gMedIx.volSd.ctx  = NULL;
+  gMedIx.volume.list = medListInt;
+  gMedIx.volume.alive = medAliveInt;
+  gMedIx.volume.ctx = NULL;
   return gMedStore != NULL;
 }
 
-// Relanza el recorrido desde cero. Se llama al abrir una app de
-// medios si la tarjeta cambio, y al cambiar la tarjeta.
+// Relanza el recorrido interno desde cero.
 static void mediaIndexRescan(){
   if(!mediaIndexBegin()) return;
   mediaIndexSetRoots();
-  gMedScanGen    = flexSdGeneration();
-  gMedNotifyDone = false;
-  flexMediaIndexStart(&gMedIx, gMedScanGen);
+  flexMediaIndexStart(&gMedIx);
 }
 
 // Marca el indice como caducado SIN recorrer nada: la proxima vez
@@ -330,11 +268,9 @@ static void mediaIndexInvalidate(){
   if(gMedInited) gMedIx.state = FLEXMED_SCAN_IDLE;
 }
 
-// ¿Hace falta reindexar? Solo si nunca se hizo o si la tarjeta que
-// hay ahora no es la que se indexo.
+// ¿Hace falta reindexar? Solo si nunca se hizo o fue invalidado.
 static void mediaIndexEnsure(){
-  if(!gMedInited || gMedScanGen != flexSdGeneration()
-     || gMedIx.state == FLEXMED_SCAN_IDLE)
+  if(!gMedInited || gMedIx.state == FLEXMED_SCAN_IDLE)
     mediaIndexRescan();
 }
 
@@ -351,55 +287,6 @@ static inline int      mediaIndexN(){ return (int)gMedIx.n; }
 static void mediaIndexTick(){
   if(gMedIx.state != FLEXMED_SCAN_RUNNING) return;
   flexMediaIndexStep(&gMedIx, MEDIA_STEP_BUDGET);
-  if(gMedIx.state == FLEXMED_SCAN_DONE && !gMedNotifyDone){
-    gMedNotifyDone = true;
-    // Solo se avisa si de verdad hay algo que contar y si la tarjeta
-    // participo: un indice de dos dibujos internos no merece un aviso.
-    int nsd = flexMediaIndexCount(&gMedIx, 0, FLEXMED_VOL_SD);
-    if(nsd > 0){
-      char sub[40];
-      snprintf(sub, sizeof(sub), "%d en la tarjeta, %d en total",
-               nsd, (int)gMedIx.n);
-      mediaNotify(MOD_SDCARD, "Galer" "\xC3\xAD" "a actualizada", sub);
-    }
-  }
-}
-
-// -------------------------------------------------------------
-//  TICK DE ALMACENAMIENTO EXTRAIBLE
-//  ------------------------------------------------------------
-//  Lo llama loop() en cada vuelta. Su coste en reposo es una
-//  comparacion de millis() dentro de flexSdTick(): no lee la tarjeta
-//  continuamente ni recorre nada.
-//
-//  Cuando el estado CAMBIA hace las tres cosas que hay que hacer y
-//  no una mas: avisar por la isla, invalidar lo que ya no vale y
-//  volver a indexar. Que este en un solo sitio es lo que garantiza
-//  que meter o sacar la tarjeta se comporte igual venga de donde
-//  venga -- Galeria, Multimedia, Almacenamiento o el escritorio.
-// -------------------------------------------------------------
-static void mediaStorageTick(){
-  // SDMMC vive en el slot dedicado 0; esp-hosted/C6 usa el slot 1. Esa
-  // separacion se fija en build_opt.h, por lo que el sondeo de la tarjeta no
-  // depende del estado del Wi-Fi ni lo bloquea.
-  if(flexSdTick()){
-    if(flexSdReady()){
-      char sub[40];
-      char tot[24];
-      flexFsFmtSize((uint32_t)(flexSdTotalBytes() / 1048576ull), tot, sizeof(tot));
-      snprintf(sub, sizeof(sub), "%s · %s", flexSdCardTypeName(), flexSdFsName());
-      mediaNotify(MOD_SDCARD, "Tarjeta SD lista", sub);
-      mediaIndexRescan();                 // hay contenido nuevo que mirar
-    } else {
-      // La tarjeta se fue: lo suyo deja de existir en el indice al
-      // instante. No se espera a que alguien abra la Galeria y se
-      // encuentre con rutas que ya no llevan a ningun sitio.
-      flexMediaIndexDropSd(&gMedIx);
-      const char* why = flexSdError();
-      mediaNotify(MOD_SDCARD, "Tarjeta SD retirada", why);
-    }
-  }
-  mediaIndexTick();
 }
 
 // -------------------------------------------------------------

@@ -96,11 +96,9 @@
 // Modulos propios que el sketch usa desde el principio. Los dos son
 // unidades de traduccion aparte por el motivo de siempre en este
 // proyecto: el .ino DIBUJA, los modulos mueven los bytes.
-//   FlexOS_SD    -> la tarjeta microSD (SDMMC nativo de 4 bits).
 //   FlexOS_Media -> que es cada fichero, como se demultiplexa un AVI
 //                   MJPEG y como se construye el indice por lotes.
 //                   Es portable y tiene pruebas de host propias.
-#include "FlexOS_SD.h"
 #include "FlexOS_Media.h"
 #include "FlexOS_Audio.h"
 
@@ -229,7 +227,7 @@
 #include "FlexOS_Ultra_QuickPanel.h"         // panel rapido: catalogo de controles y render
 #include "FlexOS_Ultra_QuickPanelGlass.h"    // panel rapido: material Liquid Glass cacheado
 #include "FlexOS_Ultra_QuickPanelEdit.h"     // panel rapido: modo edicion
-#include "FlexOS_Ultra_Media.h"              // nucleo de medios: microSD, clasificacion e indice
+#include "FlexOS_Ultra_Media.h"              // nucleo de medios: LittleFS, clasificacion e indice
 #include "FlexOS_Ultra_AppMultimedia.h"      // app Multimedia (reproductor real)
 #include "FlexOS_Ultra_AppCamera.h"          // app Camara
 #include "FlexOS_Ultra_Keyboard.h"           // teclado de 4 capas y maquetacion de texto
@@ -336,21 +334,6 @@ void setup(){
   FLEXDIAG_WIFI("setup: antes de setPins");
   wifiConfigureHostedTransport();
   FLEXDIAG_WIFI("setup: despues de setPins");
-
-  // TARJETA microSD. Hace UN intento con la secuencia exacta del fabricante.
-  // Si falla no existe un temporizador que repita SD_MMC.begin() a la vez que
-  // despierta Wi-Fi: el siguiente intento requiere abrir una pantalla que use
-  // la tarjeta. Asi se elimina la carrera reproducida en el video.
-  //
-  // Sin tarjeta el fallo es suave y flexSdTick() conserva la insercion en
-  // bajo demanda desde Almacenamiento/Galeria/Multimedia.
-  FLEXDIAG_WIFI("setup: antes de flexSdBegin");
-  if(!flexSdBegin()){
-    Serial.printf("[SD] controlador no disponible: %s\n", flexSdError());
-  } else if(!flexSdMount()){
-    Serial.printf("[SD] sin montaje inicial: %s\n", flexSdError());
-  }
-  FLEXDIAG_WIFI("setup: despues del montaje inicial");
 
   if(!gFrPending && !gSafeMode){
     bootInitRadioSafe(); // WiFi/C6: BYPASS -> nunca bloquea el arranque
@@ -555,7 +538,7 @@ void loop(){
   notifHandleTouch();     // la isla intercepta toques dentro de sus tarjetas (Fase 1)
   flexOtaTouchBridge();   // OTA: si hay overlay visible, se queda el toque antes que nadie
   hwDetectTick();         // deteccion I2C incremental, mismo contexto que el tactil (Fase 2)
-  mediaStorageTick();     // tarjeta microSD: sondeo barato + un lote del indice
+  mediaIndexTick();       // indice LittleFS: un lote corto cuando esta activo
   if(!gSafeMode){
     wifiAutoReconnectTick();// reconexion diferida, una vez por arranque
     ntpTick();              // la red corre en su tarea, nunca aqui
@@ -788,15 +771,8 @@ void loop(){
 //      carpetas /Paint, /Notas, /System, /Documentos y /Papelera,
 //      con Paint, Notas, Almacenamiento y el Explorador de archivos
 //      operando sobre ficheros de verdad.
-//    · [HECHO] Tarjeta microSD como SEGUNDO VOLUMEN real
-//      (FlexOS_SD.h/.cpp): SDMMC nativo de 4 bits sobre
-//      CLK43/CMD44/D0=39/D1=40/D2=41/D3=42, alimentada por el canal
-//      4 del regulador interno del P4. Insercion y retirada en
-//      caliente sin linea de deteccion fisica (aqui CD/DATA3 se usa
-//      como DATA3), montaje solo lectura para los archivos del
-//      usuario y capacidad real en Almacenamiento.
 //    · [HECHO] MEDIOS REALES (FlexOS_Media.h/.cpp + Galeria +
-//      Multimedia): indice incremental de los dos volumenes, JPEG
+//      Multimedia): indice incremental de LittleFS, JPEG
 //      baseline, video AVI/MJPEG con reproduccion por bloques y
 //      orientacion Auto/Vertical/Horizontal sobre el motor gLand que
 //      ya existia.

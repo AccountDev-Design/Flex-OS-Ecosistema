@@ -396,16 +396,7 @@ static void settingsDetailContent(int cat){
         snprintf(s8a, sizeof(s8a), "%s / %s", u8, t8);
         flexFsFmtSize(flexFsCatSize(FLEXFS_CAT_TRASH), s8b, sizeof(s8b));
         rt[0]="Memoria interna"; rv[0]= flexFsReady() ? s8a : "No montada";
-        // TARJETA: mismo criterio -- capacidad real si esta montada, y
-        // el motivo del modulo si no. Nunca "0 KB / 0 KB".
-        static char s8c[40];
-        if(flexSdReady()){
-          char u9[16], t9[16];
-          flexFsFmtSize((uint32_t)(flexSdUsedBytes()  / 1048576ull), u9, sizeof(u9));
-          flexFsFmtSize((uint32_t)(flexSdTotalBytes() / 1048576ull), t9, sizeof(t9));
-          snprintf(s8c, sizeof(s8c), "%s / %s", u9, t9);
-        } else snprintf(s8c, sizeof(s8c), "%s", flexSdError());
-        rt[1]="Tarjeta SD"; rv[1]=s8c; rn=2; } break;
+        rt[1]="Papelera"; rv[1]=s8b; rn=2; } break;
       case 9: rt[0]="Depuracion";rv[0]="En pantalla"; rt[1]="Banda reinicio";rv[1]="Solo crash"; rn=2; break;
       case 10: rt[0]="Version";rv[0]="FlexOS 1.0"; rt[1]="Logs";rv[1]="Puerto serie"; rn=2; break;
       default: rn=0; break;

@@ -1,7 +1,7 @@
 // #############################################################
 // ##  FLEX OS ULTRA  ·  EXPLORADOR DE ARCHIVOS  (ST_FILES)
 // ##  ----------------------------------------------------------
-// ##  Un solo explorador para los dos volumenes; en la tarjeta solo se lee.
+// ##  Explorador de la memoria interna LittleFS.
 // ##  Abrir un archivo lo manda a la app que corresponda.
 // ##
 // ##  COMO ENCAJA ESTE ARCHIVO
@@ -39,21 +39,8 @@
 // ##  asi que las cuatro acciones se comportan igual en las tres
 // ##  pantallas y operan sobre el fichero real.
 // ##
-// ##  DOS VOLUMENES, UN SOLO EXPLORADOR
-// ##  ---------------------------------
-// ##  La ruta lleva el volumen dentro: lo que empieza por /sdcard
-// ##  es de la tarjeta y el resto de la particion interna. Por eso
-// ##  no hace falta un explorador aparte ni una bandera al lado de
-// ##  cada ruta, que es como se acaba borrando en el volumen
-// ##  equivocado.
-// ##
-// ##  EN LA TARJETA SOLO SE LEE. Borrar, renombrar, mover a la
-// ##  papelera y cifrar en la boveda quedan DESACTIVADOS sobre
-// ##  /sdcard, y se dice por que. Son los archivos del usuario --
-// ##  sus fotos, sus descargas -- y esta version no se mete con
-// ##  ellos: se indexan y se abren, no se tocan. (La papelera y la
-// ##  boveda ademas viven en la particion interna, asi que "mover"
-// ##  ahi seria copiar entre volumenes, que es otra funcion.)
+// ##  El explorador trabaja exclusivamente sobre LittleFS. Borrar,
+// ##  renombrar, papelera y Flex Vault conservan su comportamiento.
 // ##
 // ##  ABRIR UN ARCHIVO lo manda a la app que corresponde: una
 // ##  imagen a Galeria, un video o un audio compatible a
@@ -79,13 +66,9 @@ static uint32_t    filesMask = 0;
 
 static void filesRender();
 
-// true si la carpeta que se esta viendo esta en la tarjeta.
-static inline bool filesOnSd(){ return flexSdIsSdPath(filesDir); }
-
 static void filesReload(){
   int n = mediaList(filesDir, filesList, FILES_MAX);
-  // -1 = el volumen no esta (tarjeta retirada). Se distingue de una
-  // carpeta vacia para poder decir cosas distintas.
+  // -1 = la particion interna no esta disponible.
   filesN = n > 0 ? n : 0;
   if(filesSelIdx >= filesN) filesSelIdx = -1;
   int maxRows = filesN;
@@ -99,10 +82,8 @@ static void filesPathOf(int i, char* out, size_t n){
 
 // Fila 0 = ".." cuando no estamos en la raiz. Se cuenta en el layout para
 // que el indice de la lista y la fila dibujada no puedan desalinearse.
-// La raiz de cada volumen es su tope: desde /sdcard no se "sube" a
-// la particion interna, que es un sitio distinto y no su padre.
 static bool filesHasUp(){
-  return strcmp(filesDir, "/") != 0 && strcmp(filesDir, FLEXSD_MOUNT) != 0;
+  return strcmp(filesDir, "/") != 0;
 }
 static int  filesRowY(int row){ return FILES_TOP + row * FILES_RH - filesScroll; }
 static int  filesMaxScroll(){
@@ -115,7 +96,7 @@ static int  filesMaxScroll(){
 static void filesRender(){
   setBuf(fb);
   fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
-  uiHdrDraw(filesOnSd() ? "Tarjeta SD:" : "Archivos:", 5, TH_TXT, TH_NAV, true);
+  uiHdrDraw("Archivos:", 5, TH_TXT, TH_NAV, true);
   drawTextClip(16, UIHDR_H + 8, filesDir, 2, TH_TXT2, SCR_W - 60);
 
   // Cabecera y ruta son FIJAS; de FILES_VP_TOP para abajo manda el
@@ -148,10 +129,7 @@ static void filesRender(){
     }
     drawTextClip(84, y + 10, filesList[i].name, 3, TH_TXT, SCR_W - 150);
     char sub[32];
-    // 0xFFFF = "no se sabe". La tarjeta no cuenta los elementos de
-    // cada subcarpeta a proposito: hacerlo obligaria a abrirlas todas
-    // y entrar en DCIM costaria segundos. Se dice "Carpeta" en vez de
-    // dar un numero que no se ha contado.
+    // 0xFFFF = "no se sabe"; se dice Carpeta en vez de inventar un conteo.
     if(filesList[i].dir && filesList[i].items == 0xFFFF) snprintf(sub, sizeof(sub), "Carpeta");
     else if(filesList[i].dir) snprintf(sub, sizeof(sub), "%u elementos", (unsigned)filesList[i].items);
     else                 flexFsFmtSize(filesList[i].size, sub, sizeof(sub));
@@ -174,9 +152,7 @@ static void filesRender(){
 }
 
 static void filesEnterAt(const char* dir){
-  const bool sd = flexSdIsSdPath(dir);
-  if(!sd && !flexFsReady()){ fkNoFsScreen("Archivos"); gState = ST_FILES; return; }
-  if(sd && !flexSdReady()){ fkNoFsScreen("Tarjeta SD"); gState = ST_FILES; return; }
+  if(!flexFsReady()){ fkNoFsScreen("Archivos"); gState = ST_FILES; return; }
   gState = ST_FILES;
   snprintf(filesDir, sizeof(filesDir), "%s", dir && dir[0] ? dir : "/");
   filesSelIdx = -1; filesScroll = 0; filesMulti = false; filesMask = 0;
@@ -204,10 +180,8 @@ static void filesGoUp(){
   char* s = strrchr(filesDir, '/');
   if(!s || s == filesDir){ snprintf(filesDir, sizeof(filesDir), "/"); }
   else *s = 0;
-  // Nunca por encima de la raiz del volumen.
+  // Nunca por encima de la raiz.
   if(filesDir[0] == 0) snprintf(filesDir, sizeof(filesDir), "/");
-  if(flexSdIsSdPath(filesDir) && strlen(filesDir) < FLEXSD_MOUNT_LEN)
-    snprintf(filesDir, sizeof(filesDir), FLEXSD_MOUNT);
   filesScroll = 0; filesSelIdx = -1; filesMulti = false; filesMask = 0;
   filesReload(); filesRender();
 }
@@ -246,15 +220,6 @@ static void filesOpenEntry(const char* path, const char* name){
   fkMenuOpenV(SCR_W / 2 - 60, 200, true);
 }
 
-// En la tarjeta esta version SOLO LEE. Cuando una accion no aplica
-// se dice por que, en vez de dejar un boton que no hace nada.
-static bool filesSdReadOnlyGuard(){
-  if(!filesOnSd()) return false;
-  mediaNotify(MOD_SDCARD, "Solo lectura en la tarjeta",
-              "Flex OS no borra ni mueve tus archivos");
-  return true;
-}
-
 static void filesMenuAction(int act){
   char p[FLEXFS_PATH_MAX];
   if(filesSelIdx >= 0 && filesSelIdx < filesN) filesPathOf(filesSelIdx, p, sizeof(p));
@@ -263,21 +228,17 @@ static void filesMenuAction(int act){
     filesMulti = true; filesMask = 0;
     if(filesSelIdx >= 0) filesMask |= (1UL << filesSelIdx);
   } else if(act == FK_ACT_DEL){
-    if(filesSdReadOnlyGuard()){ filesRender(); return; }
     if(p[0]){ fkAskOpen("\xC2\xBF" "Borrar definitivamente?", filesList[filesSelIdx].name); return; }
   } else if(act == FK_ACT_REN){
-    if(filesSdReadOnlyGuard()){ filesRender(); return; }
     if(p[0]){
       char stem[FLEXFS_NAME_MAX]; flexFsStem(filesList[filesSelIdx].name, stem, sizeof(stem));
       fkNameOpen("Renombrar", stem);
       return;
     }
   } else if(act == FK_ACT_TRASH){
-    if(filesSdReadOnlyGuard()){ filesRender(); return; }
     if(p[0]){ flexFsTrash(p); filesSelIdx = -1; filesReload(); }
     else { fkTrashOpen(); return; }               // sin seleccion: abre la papelera
   } else if(act == FK_ACT_VAULT){
-    if(filesSdReadOnlyGuard()){ filesRender(); return; }
     // FLEX VAULT: el fichero se cifra dentro de la boveda y desaparece del
     // explorador. La clase se deduce de la extension, para que una foto acabe
     // en Galeria privada y un .txt en Notas privadas.
@@ -293,22 +254,7 @@ static void filesMenuAction(int act){
 }
 
 static void filesTick(){
-  // Se comprueba el volumen QUE SE ESTA VIENDO. Antes solo miraba
-  // LittleFS, asi que navegando por la tarjeta con la particion
-  // interna sana no se detectaba nada.
-  if(filesOnSd()){
-    if(!flexSdReady()){
-      // La tarjeta se fue mientras se navegaba: se cierra la ruta y
-      // se vuelve a la memoria interna, sin quedarse en una carpeta
-      // que ya no existe.
-      mediaNotify(MOD_SDCARD, "Tarjeta retirada", "Se cerro la carpeta abierta");
-      snprintf(filesDir, sizeof(filesDir), "/");
-      filesSelIdx = -1; filesScroll = 0; filesMulti = false; filesMask = 0;
-      fkMenuOn = fkNameOn = fkAskOn = fkTrashOn = false;
-      filesReload(); filesRender();
-      return;
-    }
-  } else if(!flexFsReady()){
+  if(!flexFsReady()){
     if(T.tap && T.x < 60 && T.y < 60) filesExit();
     return;
   }
@@ -387,7 +333,6 @@ static void filesTick(){
     if(T.y >= by && T.y <= by + 60){
       if(T.x > SCR_W - 100){ filesMulti = false; filesMask = 0; filesRender(); return; }
       if(T.x > SCR_W - 230){
-        if(filesSdReadOnlyGuard()){ filesMulti = false; filesMask = 0; filesRender(); return; }
         for(int i = 0; i < filesN; i++) if(filesMask & (1UL << i)){
           char p[FLEXFS_PATH_MAX]; filesPathOf(i, p, sizeof(p));
           flexFsTrash(p);
