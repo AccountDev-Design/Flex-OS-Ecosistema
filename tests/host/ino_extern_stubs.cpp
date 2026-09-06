@@ -290,6 +290,14 @@ bool flexPkgGet(const char* packageId, FlexPkgInfo* out){
   return false;
 }
 bool flexPkgEntryPath(const char*, char* out, size_t n){ if(out && n) out[0] = 0; return false; }
+// Registro ampliado: grant firmado, carpeta privada y estado detenido/activo.
+// Los dobles devuelven "no hay nada", que es el mismo camino que toma la placa
+// cuando la app no trae permisos o el almacenamiento no esta montado.
+uint32_t flexPkgGrant(const char*, uint8_t*, uint32_t){ return 0; }
+bool flexPkgDataDir(const char*, char* out, size_t n){ if(out && n) out[0] = 0; return false; }
+bool flexPkgDataEnsure(const char*){ return false; }
+uint32_t flexPkgDataBytes(const char*){ return 0; }
+bool flexPkgSetState(const char*, FlexPkgAppState){ return false; }
 bool flexPkgActiveRoot(const char*, char* out, size_t n){ if(out && n) out[0] = 0; return false; }
 FlexPkgErrorCode flexPkgErrorCode(){ return FLEXPKG_ERR_FS; }
 const char* flexPkgError(){ return "sin almacenamiento"; }

@@ -49,6 +49,14 @@ GANCHOS = [
     ("loop",           "flexWeatherTick(", "el clima no se refrescaria nunca: la app, el widget y el bloqueo se quedarian con la cache"),
     ("setup",          "flexWeatherBegin()", "no se cargarian ni las ubicaciones ni la cache del clima, y su tarea de red no existiria"),
     ("clkSetEpoch",    "flexWeatherSetClock(", "el clima no sabria la hora real y no podria decir cuanto hace que se actualizo"),
+    # RUNTIME flex-app-v1. La app corre DENTRO del tick de Flex Store: sin esta
+    # llamada la app se abriria, se quedaria con la pantalla y no ejecutaria ni
+    # un cuadro -- ni podria cerrarse.
+    ("storeTick",        "av1Tick()",          "una app flex-app-v1 abierta no ejecutaria nada"),
+    ("storeOpenInstalled", "av1Start(",        "las apps flex-app-v1 no se abririan nunca"),
+    ("storeExit",        "av1Close(",          "salir de la tienda dejaria la app con pantalla y PSRAM tomadas"),
+    ("av1Close",         "flexAppStop(",       "cerrar no ejecutaria onStop ni soltaria los recursos de la app"),
+    ("av1Close",         "av1FreeRegions()",   "cerrar filtraria la memoria de la app en cada apertura"),
     ("loop",           "flexPollTouch()", "no habria tactil"),
     ("loop",           "mediaIndexTick()", "el indice LittleFS de medios nunca terminaria de construirse"),
     ("loop",           "wifiAutoReconnectTick()", "la red guardada no se reconectaria tras arrancar"),
@@ -114,6 +122,11 @@ PROHIBIDOS = [
 ]
 
 RE_MOD = re.compile(r'^#include\s+"(FlexOS_Ultra_(\w+)\.h)"', re.M)
+# Los PUENTES (FlexOS_*_Bridge.h) tambien forman parte de la misma unidad de
+# traduccion: ahi viven Flex Store, el navegador, el OTA y el runtime
+# flex-app-v1. Sin expandirlos, cualquier gancho que viva en un puente daria
+# "no encuentro la funcion" y la comprobacion no valdria para ellos.
+RE_BRIDGE = re.compile(r'^#include\s+"(FlexOS_\w+_Bridge\.h)"', re.M)
 
 
 def expandir(path):
@@ -122,14 +135,15 @@ def expandir(path):
     ino = Path(path).read_text(encoding="utf-8")
     orden = [m.group(1) for m in RE_MOD.finditer(ino)]
     partes, vistos = [], set()
+    RE_ANY = re.compile(RE_MOD.pattern + "|" + RE_BRIDGE.pattern, re.M)
 
     def meter(texto, origen):
         pos = 0
-        for m in RE_MOD.finditer(texto):
+        for m in RE_ANY.finditer(texto):
             partes.append(texto[pos:m.start()])
             pos = m.end()
-            fich = m.group(1)
-            if fich in vistos:            # #pragma once
+            fich = m.group(1) or m.group(3)
+            if fich in vistos:            # #pragma once / guardas
                 continue
             vistos.add(fich)
             hijo = raiz / fich

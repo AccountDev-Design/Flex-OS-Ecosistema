@@ -5,9 +5,9 @@ hace falta `arduino-cli`, ni el core de ESP32, ni la placa.
 
 ```bash
 cd tests/host
-make                # las cuatro baterías (perfil Ultra/P4)
+make                # todas las baterías (perfil Ultra/P4)
 make all-boards     # el código de dispositivo en los tres perfiles
-make tools          # jpegcheck, que usa la prueba e2e del servicio
+make tools          # jpegcheck, flexpkgcheck y flexapprun
 make clean
 ```
 
@@ -22,10 +22,26 @@ tests/
     test_browser.cpp   omnibox, validación de URL, codec FBP/1, SHA-1/base64
     test_app.cpp       código de dispositivo: ciclo de vida, dibujo, capacidades
     test_bridge.cpp    el puente, contra un .ino simulado
+    test_appvm.cpp     máquina flex-app-v1: validador, trampas, límites,
+                       presupuesto y ruido aleatorio contra el validador
+    test_appgrant.cpp  permisos firmados: cada campo del grant, por separado
+    test_apphost.cpp   gestor de apps: estados, permiso POR LLAMADA, fugas
+                       en 25 aperturas, orientación restaurada, cuotas
+    test_flexpkg.cpp   .flexpkg: validación completa + instalación
+                       transaccional sobre un LittleFS en memoria (rollback,
+                       corte de corriente, cancelación, carpeta privada,
+                       desinstalación) y una app flex-ui-1 que se ABRE de
+                       verdad con el runtime declarativo de siempre
     test_net.cpp       el transporte real: sockets TCP, hilos y un
                        servidor WebSocket que trocea el primer frame
     jpegcheck.cpp      herramienta: decodifica un JPEG con el decodificador del firmware
+    flexpkgcheck.cpp   herramienta: valida un .flexpkg con el NÚCLEO del firmware
+    flexapprun.cpp     herramienta: ejecuta un .flxb con el GESTOR del firmware
+    pkgbuild.h         fabrica paquetes y grants reales (claves efímeras)
+    vmimage.h          ensambla imágenes flex-app-v1 a mano
     stub/              entorno Arduino simulado (ver stub/README.md)
+    fsstub/            LittleFS en memoria, con fallos provocables
+    vendor/            terceros SOLO para las pruebas (cJSON, MIT)
     Makefile
   tools/
     make-fixtures.js   genera tests/fixtures (necesita Node + sharp)
@@ -56,6 +72,15 @@ tests/
 * **Los tres perfiles de placa** se compilan y ejecutan por separado
   (`make all-boards`): P4, S3 y ESP32 clásico cambian presupuestos de
   memoria, número de pestañas y capacidades.
+* **La plataforma de aplicaciones descargables** se prueba entera aquí, y con
+  sanitizers, porque ejecuta bytecode que viene de internet y decide si un
+  paquete firmado por un tercero puede tocar el sistema. Las claves de estas
+  pruebas son **efímeras**: se generan en cada ejecución y no se escriben en
+  disco. En el repositorio no hay ninguna clave privada.
+* **El SDK se cruza contra el firmware**: `sdk/test/sdk.test.js` empaqueta con
+  las herramientas de `sdk/` y valida el resultado con `flexpkgcheck`, que
+  compila el mismo `FlexOS_PkgCore.cpp` que corre en el P4. Así las dos
+  implementaciones no pueden separarse en silencio.
 
 ## Regenerar los ficheros de prueba
 

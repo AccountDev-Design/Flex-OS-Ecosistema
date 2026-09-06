@@ -44,8 +44,9 @@ APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net \
         $(BUILD)/test_vault $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
-        $(BUILD)/test_media $(BUILD)/test_mem
-TOOLS := $(BUILD)/jpegcheck
+        $(BUILD)/test_media $(BUILD)/test_mem \
+        $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg
+TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun
 
 .PHONY: all run all-boards fixtures clean ino
 all: run
@@ -80,6 +81,59 @@ MEM_SRC := $(ROOT)/FlexOS_Mem.cpp
 
 $(BUILD)/test_mem: test_mem.cpp $(MEM_SRC) $(ROOT)/FlexOS_Mem.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_mem.cpp $(MEM_SRC)
+
+# --- PLATAFORMA DE APLICACIONES flex-app-v1 ---------------------------------
+# Cuatro baterias, todas con sanitizers. Aqui es OBLIGATORIO: este codigo
+# ejecuta bytecode que viene de internet y decide si un paquete firmado por un
+# tercero puede tocar el sistema. Un desbordamiento aqui no puede quedarse en
+# "parece que funciona".
+#
+#   test_appvm     la maquina: validador, trampas, limites y presupuesto
+#   test_appgrant  permisos firmados: cada campo del grant, por separado
+#   test_apphost   el gestor: estados, permiso por llamada, fugas, orientacion
+#   test_flexpkg   el paquete: validacion + instalacion transaccional real
+#
+# cJSON se compila desde tests/host/vendor (MIT). En la placa lo trae el core
+# de ESP32; se versiona aqui para que la prueba recorra el MISMO codigo.
+VMSRC   := $(ROOT)/FlexOS_AppVM.cpp
+GRANTSRC:= $(ROOT)/FlexOS_AppGrant.cpp
+HOSTSRC := $(ROOT)/FlexOS_AppHost.cpp
+PKGCORE := $(ROOT)/FlexOS_PkgCore.cpp
+PKGSRC  := $(ROOT)/FlexOS_Package.cpp
+CJSON   := vendor/cJSON/cJSON.c
+FSSTUB  := fsstub/fsstub.cpp
+PKGFLAGS:= -Ifsstub -Ivendor/cJSON -Iinostub -I$(ROOT) -DARDUINO=200 -Wno-format-truncation
+
+$(BUILD)/test_appvm: test_appvm.cpp vmimage.h $(VMSRC) $(ROOT)/FlexOS_AppVM.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -o $@ test_appvm.cpp $(VMSRC)
+
+$(BUILD)/test_appgrant: test_appgrant.cpp pkgbuild.h $(GRANTSRC) $(ROOT)/FlexOS_AppGrant.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -o $@ test_appgrant.cpp $(GRANTSRC) -lcrypto
+
+$(BUILD)/test_apphost: test_apphost.cpp vmimage.h pkgbuild.h $(HOSTSRC) $(VMSRC) $(GRANTSRC) \
+                       $(ROOT)/FlexOS_AppHost.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -I$(ROOT) -o $@ test_apphost.cpp $(HOSTSRC) $(VMSRC) $(GRANTSRC) -lcrypto
+
+# FlexOS_Runtime.cpp (el runtime declarativo de siempre) entra tambien: es la
+# unica forma honesta de comprobar que una app flex-ui-1 ya publicada SIGUE
+# abriendose despues de todo este trabajo.
+UISRC := $(ROOT)/FlexOS_Runtime.cpp
+$(BUILD)/test_flexpkg: test_flexpkg.cpp pkgbuild.h $(PKGCORE) $(PKGSRC) $(GRANTSRC) $(UISRC) \
+                       $(ROOT)/FlexOS_PkgCore.h $(ROOT)/FlexOS_Package.h fsstub/FS.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(PKGFLAGS) -o $@ test_flexpkg.cpp $(PKGCORE) $(PKGSRC) $(GRANTSRC) \
+	       $(UISRC) $(FSSTUB) $(CJSON) -lcrypto
+
+# Herramienta: valida un .flexpkg con el NUCLEO DEL FIRMWARE. La usa
+# sdk/test/sdk.test.js para comprobar que lo que empaqueta el SDK es
+# exactamente lo que la placa acepta.
+$(BUILD)/flexpkgcheck: flexpkgcheck.cpp $(PKGCORE) $(GRANTSRC) | $(BUILD)
+	$(CXX) $(CXXSTD) -O2 $(WARN) $(PKGFLAGS) -o $@ flexpkgcheck.cpp $(PKGCORE) $(GRANTSRC) $(CJSON) -lcrypto
+
+# Herramienta: ejecuta un .flxb con el GESTOR REAL del firmware y un
+# anfitrion de mentira. Permite probar una app sin placa; la usa
+# sdk/test/sdk.test.js con la app de ejemplo.
+$(BUILD)/flexapprun: flexapprun.cpp pkgbuild.h $(HOSTSRC) $(VMSRC) $(GRANTSRC) | $(BUILD)
+	$(CXX) $(CXXSTD) -O2 $(WARN) -I$(ROOT) -o $@ flexapprun.cpp $(HOSTSRC) $(VMSRC) $(GRANTSRC) -lcrypto
 
 # --- Flex Link / Flex Phone: protocolo y modelo del telefono ---
 # Nucleo PURO (sin Arduino), asi que se compila igual que el del
@@ -208,8 +262,13 @@ ino: ino_compile.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) check_protos.py chec
 # funcion que no tiene prueba propia, y enlazarlo contra los modulos de
 # verdad hace que un cambio de firma o una llamada mal cableada salte
 # aqui. Los modulos ademas no tocan Arduino, asi que no necesitan dobles.
+# La plataforma de apps (VM, grants, gestor y nucleo del paquete) entra en
+# test_ino como CODIGO REAL, no como doble: es logica portable y asi el puente
+# del runtime se enlaza contra lo que de verdad va a la placa. Un cambio de
+# firma o una llamada mal cableada salta aqui.
 $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) $(JPEG_SRC) \
-                   $(FLNKSRC) $(FLPSRC) $(FLPLINK) $(CORE_SRC) $(MEDIA_SRC) $(MEM_SRC) | $(BUILD)
+                   $(FLNKSRC) $(FLPSRC) $(FLPLINK) $(CORE_SRC) $(MEDIA_SRC) $(MEM_SRC) \
+                   $(VMSRC) $(GRANTSRC) $(HOSTSRC) $(PKGCORE) | $(BUILD)
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -x c++ -c ino_compile.cpp -o $(BUILD)/ino_compile.o
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -c ino_extern_stubs.cpp -o $(BUILD)/ino_extern_stubs.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(JPEG_SRC) -o $(BUILD)/ino_jpeg.o
@@ -219,9 +278,16 @@ $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) 
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(CORE_SRC) -o $(BUILD)/ino_brcore.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(MEDIA_SRC) -o $(BUILD)/ino_media.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(MEM_SRC)   -o $(BUILD)/ino_mem.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(VMSRC)     -o $(BUILD)/ino_appvm.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(GRANTSRC)  -o $(BUILD)/ino_appgrant.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(HOSTSRC)   -o $(BUILD)/ino_apphost.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(PKGFLAGS) -c $(PKGCORE) -o $(BUILD)/ino_pkgcore.o
+	@$(CC) -O1 -g -w -Ivendor/cJSON -c $(CJSON) -o $(BUILD)/ino_cjson.o
 	@$(CXX) $(SAN) -o $@ $(BUILD)/ino_compile.o $(BUILD)/ino_extern_stubs.o $(BUILD)/ino_jpeg.o \
 	        $(BUILD)/ino_flexlink.o $(BUILD)/ino_flexphone.o $(BUILD)/ino_flexphonelink.o \
-	        $(BUILD)/ino_brcore.o $(BUILD)/ino_media.o $(BUILD)/ino_mem.o
+	        $(BUILD)/ino_brcore.o $(BUILD)/ino_media.o $(BUILD)/ino_mem.o \
+	        $(BUILD)/ino_appvm.o $(BUILD)/ino_appgrant.o $(BUILD)/ino_apphost.o \
+	        $(BUILD)/ino_pkgcore.o $(BUILD)/ino_cjson.o -lcrypto
 
 # La tabla de particiones de la version USB. No es codigo, pero una tabla
 # mal cuadrada no falla al compilar: falla al grabar, o peor, arranca y se
@@ -252,6 +318,14 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@echo
 	@$(BUILD)/test_mem
 	@echo
+	@$(BUILD)/test_appvm
+	@echo
+	@$(BUILD)/test_appgrant
+	@echo
+	@$(BUILD)/test_apphost
+	@echo
+	@$(BUILD)/test_flexpkg
+	@echo
 	@$(BUILD)/test_browser
 	@echo
 	@$(BUILD)/test_app
@@ -261,7 +335,8 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_net ../fixtures
 	@echo
 	@echo "Todas las pruebas de host han pasado."
-	@echo "Herramienta lista: $(BUILD)/jpegcheck (la usa server/test/e2e.test.js)."
+	@echo "Herramientas listas: $(BUILD)/jpegcheck (server/test/e2e.test.js)"
+	@echo "                    $(BUILD)/flexpkgcheck y $(BUILD)/flexapprun (sdk/test/sdk.test.js)."
 
 # El codigo de dispositivo cambia de presupuestos y de capacidades segun
 # la placa, asi que se compila y se ejecuta en los tres perfiles.
