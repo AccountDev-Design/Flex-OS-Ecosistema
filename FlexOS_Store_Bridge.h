@@ -5,7 +5,9 @@
 // graficas, Touch, appClose() y el tema semantico ya existen. Los modulos .cpp
 // no conocen el framebuffer: solo publican datos y estados verificables.
 
-enum StoreView : uint8_t { SV_DISCOVER = 0, SV_INSTALLED, SV_DETAIL, SV_RUNTIME, SV_SEARCH };
+// SV_RUNTIME  -> runtime declarativo flex-ui-1 (el de siempre)
+// SV_APPV1    -> maquina aislada flex-app-v1 (la app dibuja y ejecuta su logica)
+enum StoreView : uint8_t { SV_DISCOVER = 0, SV_INSTALLED, SV_DETAIL, SV_RUNTIME, SV_SEARCH, SV_APPV1 };
 static StoreView storeView = SV_DISCOVER;
 static StoreView storeSearchSource = SV_DISCOVER;
 static int storePage = 0;
@@ -356,8 +358,15 @@ static void storeInstalledRender(){
     char ver[64]; snprintf(ver, sizeof(ver), "Version %s - %lu KB", app.versionName, (unsigned long)(app.installedBytes / 1024u));
     drawText(126, y + 55, ver, 1, TH_TXT2);
     drawTextClip(126, y + 80, app.summary[0] ? app.summary : app.id, 1, TH_MUTE, SCR_W - 32);
-    fillRoundRect(SCR_W - 132, y + 106, 96, 34, 17, TH_PRIM);
-    drawTextC(SCR_W - 84, y + 116, "Abrir", 1, rgb565(255,255,255));
+    // Una app DETENIDA se ve que lo esta y su boton lo dice: abrirla no hace
+    // nada hasta que el usuario la reactive desde su pantalla de detalles.
+    bool stopped = app.state != FLEXPKG_APP_ENABLED;
+    if(stopped)
+      drawText(126, y + 106, app.state == FLEXPKG_APP_BLOCKED
+                               ? "Detenida por el sistema" : "Detenida", 1, rgb565(225,70,80));
+    fillRoundRect(SCR_W - 132, y + 106, 96, 34, 17, stopped ? thCard2() : TH_PRIM);
+    drawTextC(SCR_W - 84, y + 116, stopped ? "Detenida" : "Abrir", 1,
+              stopped ? TH_TXT2 : rgb565(255,255,255));
   }
   if(count > per){ char pg[24]; int pages = (count + per - 1) / per; snprintf(pg, sizeof(pg), "%d / %d", storePage + 1, pages); drawTextC(SCR_W / 2, 690, pg, 1, TH_MUTE); }
   flxFlushAll();
@@ -400,6 +409,18 @@ static void storeDetailRender(){
     fillRoundRect(28, 540, SCR_W - 56, 50, 25, storeConfirmDelete ? rgb565(190,45,55) : thCard());
     drawTextC(SCR_W / 2, 556, storeConfirmDelete ? "Confirmar desinstalacion" : "Desinstalar", 2,
               storeConfirmDelete ? rgb565(255,255,255) : rgb565(225,70,80));
+    // DETENER / ACTIVAR. Una app detenida no se abre y no ejecuta nada; el
+    // estado queda anotado en su registro y sobrevive a un reinicio.
+    int li = storeInstalledFind(packageId);
+    if(li >= 0){
+      bool stopped = storeInstalled[li].state != FLEXPKG_APP_ENABLED;
+      fillRoundRect(28, 604, SCR_W - 56, 46, 23, thCard2());
+      drawTextC(SCR_W / 2, 618, stopped ? "Activar aplicacion" : "Detener aplicacion", 2, TH_TXT);
+      if(storeInstalled[li].runtime == FLEXPKG_RT_APP1)
+        drawTextC(SCR_W / 2, 662, storeInstalled[li].grantLen ? "Runtime flex-app-v1 - con permisos firmados"
+                                                              : "Runtime flex-app-v1", 1, TH_MUTE);
+      else drawTextC(SCR_W / 2, 662, "Runtime flex-ui-1", 1, TH_MUTE);
+    }
   }
   flxFlushAll();
 }
@@ -441,7 +462,23 @@ static void storeRender(){
 
 static void storeOpenInstalled(int index){
   if(index < 0 || index >= storeInstalledN) return;
-  if(!flexRuntimeLoad(storeInstalled[index].id, &storeRuntime)){
+  const FlexPkgInfo& app = storeInstalled[index];
+  // Una app DETENIDA no se abre: el usuario (o el sistema) lo decidio.
+  if(app.state != FLEXPKG_APP_ENABLED){
+    storeToast(app.state == FLEXPKG_APP_BLOCKED
+                 ? "Detenida por el sistema. Activala para volver a abrirla."
+                 : "Aplicacion detenida. Activala para abrirla.");
+    storeRender();
+    return;
+  }
+  // BIFURCACION POR RUNTIME. flex-ui-1 sigue EXACTAMENTE por donde iba; el
+  // camino nuevo solo lo toman los paquetes que declaran flex-app-v1.
+  if(app.runtime == FLEXPKG_RT_APP1){
+    if(!av1Start(app.id)){ storeToast(av1Status); storeRender(); return; }
+    storeView = SV_APPV1;
+    return;
+  }
+  if(!flexRuntimeLoad(app.id, &storeRuntime)){
     storeToast(flexRuntimeError()); storeRender(); return;
   }
   storeView = SV_RUNTIME; storeRuntimeRender();
@@ -449,6 +486,7 @@ static void storeOpenInstalled(int index){
 
 static void storeEnter(){
   flexRuntimeUnload(&storeRuntime);
+  if(av1Active()) av1Close(FLEXAPP_STOP_SYSTEM);
   storeInstalledDirty = true; storeReloadInstalled();
   storeView = SV_DISCOVER; storeSearchSource = SV_DISCOVER; storeSearch[0] = 0; storePage = 0; storeSelected = -1; storeConfirmDelete = false;
   storeFilterInvalidate();
@@ -465,10 +503,32 @@ static void storeExit(){
   FlexStoreState state = flexStoreState();
   if(state != FLEXSTORE_DOWNLOADING && state != FLEXSTORE_INSTALLING) flexStoreCancel();
   flexRuntimeUnload(&storeRuntime);
+  // Cerrar la tienda cierra la app que corriera dentro: sus recursos
+  // (memoria, orientacion, pantalla exclusiva) se sueltan aqui y no despues.
+  if(av1Active()) av1Close(FLEXAPP_STOP_SYSTEM);
   storeToastUntil = 0;
 }
 
+// CICLO DE VIDA DE LA TIENDA. Si hay una app flex-app-v1 corriendo dentro,
+// pasar a segundo plano la SUSPENDE (suelta pantalla, orientacion y PSRAM) y
+// volver la reanuda, en vez de perderla y devolver al usuario al catalogo.
+static void storeSuspendApp(){
+  if(storeView == SV_APPV1 && av1Active()) av1Suspend();
+}
+static void storeResumeApp(){
+  if(storeView == SV_APPV1 && av1Active()){ av1Resume(); return; }
+  storeEnter();
+}
+
 static void storeBack(){
+  if(storeView == SV_APPV1){
+    // Se le ofrece el "atras" a la app; si no lo usa, se cierra.
+    if(av1Active() && av1Back() && av1Active()) return;
+    av1Close(FLEXAPP_STOP_USER);
+    storeView = SV_INSTALLED; storeInstalledDirty = true; storeReloadInstalled();
+    storeFilterInvalidate(); storePage = 0; storeRender();
+    return;
+  }
   if(storeView == SV_RUNTIME){ flexRuntimeUnload(&storeRuntime); storeView = SV_INSTALLED; storePage = 0; storeRender(); return; }
   if(storeView == SV_SEARCH){ storeView = storeSearchSource; storePage = 0; storeRender(); return; }
   if(storeView == SV_DETAIL){ storeView = storeSelectedInstalled ? SV_INSTALLED : SV_DISCOVER; storeConfirmDelete = false; storeRender(); return; }
@@ -476,6 +536,19 @@ static void storeBack(){
 }
 
 static void storeTick(){
+  // LA APP MANDA MIENTRAS ESTE ABIERTA. Su tick corre aqui, en la tarea de
+  // interfaz, con el presupuesto que le pone el gestor: nunca en una tarea
+  // propia y nunca sin volver.
+  if(storeView == SV_APPV1){
+    if(!av1Active()){
+      storeView = SV_INSTALLED; storeInstalledDirty = true; storeReloadInstalled();
+      storeFilterInvalidate(); storePage = 0; storeRender();
+      return;
+    }
+    if(T.tap && T.y > SCR_H - 64 && T.x < SCR_W / 3){ storeBack(); return; }
+    av1Tick();
+    return;
+  }
   FlexStoreState state = flexStoreState(); uint8_t pct = flexStoreProgress();
   if(storeView == SV_DISCOVER && (state != storeLastState || pct != storeLastProgress)){
     bool busy = (state == FLEXSTORE_LOADING || state == FLEXSTORE_DOWNLOADING || state == FLEXSTORE_INSTALLING);
@@ -552,6 +625,27 @@ static void storeTick(){
         if(local >= 0 && item.versionCode <= storeInstalled[local].versionCode) storeOpenInstalled(local);
         else { storeView = SV_DISCOVER; flexStoreInstall(storeSelected); storeRender(); }
       }
+      return;
+    }
+    if(T.y >= 600 && T.y <= 654){
+      char sid[FLEXPKG_ID_MAX + 1] = "";
+      storeEnsureInstalled();
+      if(storeSelectedInstalled && storeSelected >= 0 && storeSelected < storeInstalledN)
+        snprintf(sid, sizeof(sid), "%s", storeInstalled[storeSelected].id);
+      else {
+        FlexStoreItem item;
+        if(flexStoreCatalogItem(storeSelected, &item) && storeInstalledFind(item.packageId) >= 0)
+          snprintf(sid, sizeof(sid), "%s", item.packageId);
+      }
+      if(!sid[0]) return;
+      int li = storeInstalledFind(sid);
+      if(li < 0) return;
+      bool stopped = storeInstalled[li].state != FLEXPKG_APP_ENABLED;
+      if(flexPkgSetState(sid, stopped ? FLEXPKG_APP_ENABLED : FLEXPKG_APP_STOPPED)){
+        storeInstalledDirty = true; storeReloadInstalled(); storeFilterInvalidate();
+        storeToast(stopped ? "Aplicacion activada" : "Aplicacion detenida");
+      } else storeToast(flexPkgError());
+      storeRender();
       return;
     }
     if(T.y >= 534 && T.y <= 596){

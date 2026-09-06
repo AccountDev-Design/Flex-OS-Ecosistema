@@ -127,10 +127,24 @@
 #include "FlexOS_OTA.h"
 
 // FLEX PACKAGE / FLEX STORE. El instalador valida FLXP v1, hashes SHA-256 y
-// firmas ECDSA P-256 antes de activar una app. El runtime ejecuta unicamente
-// interfaces declarativas flex-ui-1, nunca codigo nativo de terceros.
+// firmas ECDSA P-256 antes de activar una app.
+//
+// HAY DOS RUNTIMES, y NINGUNO ejecuta codigo nativo de terceros:
+//   · flex-ui-1    interfaces declarativas en JSON. Sin cambios: las apps
+//                  ya publicadas se instalan y se abren igual que siempre.
+//   · flex-app-v1  maquina AISLADA con logica real. Sin punteros, sin acceso
+//                  al framebuffer, sin tareas propias y con presupuesto de
+//                  instrucciones y de tiempo por tick: el control vuelve
+//                  SIEMPRE al sistema.
+// Los permisos de sistema no salen del manifest: los concede un grant
+// firmado por la clave pinneada de Flex Store, y se comprueban por llamada.
 #include "FlexOS_Package.h"
-#include "FlexOS_Runtime.h"
+#include "FlexOS_PkgCore.h"      // validacion pura del .flexpkg (probada en el PC)
+#include "FlexOS_Runtime.h"      // runtime declarativo flex-ui-1 (sin cambios)
+#include "FlexOS_TrustedKeys.h"  // clave publica pinneada de Flex Store
+#include "FlexOS_AppVM.h"        // maquina aislada flex-app-v1
+#include "FlexOS_AppGrant.h"     // permisos de sistema firmados
+#include "FlexOS_AppHost.h"      // gestor de ciclo de vida de apps flex-app-v1
 #include "FlexOS_Store.h"
 #include "FlexOS_Account.h"
 
@@ -265,6 +279,10 @@
 // del OTA: necesita que las primitivas de dibujo Y el teclado (kb*) ya
 // esten definidos. Define navEnter()/navTick().
 #include "FlexOS_Browser_Bridge.h"
+// Puente del RUNTIME flex-app-v1. Va ANTES del de Flex Store porque es la
+// tienda quien abre una app instalada, y por la misma razon que los demas
+// puentes: necesita las primitivas graficas, el tactil y el tema ya definidos.
+#include "FlexOS_AppHost_Bridge.h"
 // Puente visual de Flex Store. Se incluye aqui para reutilizar las primitivas
 // estaticas del framebuffer y el sistema tactil de FlexOS Ultra.
 #include "FlexOS_Store_Bridge.h"
@@ -288,8 +306,9 @@ static void navSuspendLife(){ navSuspend(); }
 static void navResumeLife(){  navResume(); }
 static size_t navShedLife(){  return flexBrowserReleaseVisualCache(); }
 static void navCloseLife(){ flexBrowserExit(); }
-static void storeResumeLife(){ storeEnter(); }
-static void storeCloseLife(){ storeExit(); }
+static void storeSuspendLife(){ storeSuspendApp(); }
+static void storeResumeLife(){  storeResumeApp(); }
+static void storeCloseLife(){   storeExit(); }
 
 void setup(){
   Serial.begin(115200);

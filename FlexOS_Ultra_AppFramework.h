@@ -106,6 +106,7 @@ static size_t vidShed();     // Multimedia: suelta fotograma, descriptor y buffe
 static size_t camShed();     // Camara: suelta el buffer del sensor
 static bool   noteDirty();   // Notas: hay texto escrito sin volcar
 static bool   paintDirty();  // Paint: hay trazo sin volcar
+static void   storeSuspendLife(); // Flex Store: suspende la app flex-app-v1 que corra dentro
 static void   navSuspendLife();  // Navegador: al pasar a segundo plano
 static size_t navShedLife();     // Navegador: suelta la cache de fotogramas
 static bool galBackLayer(); static bool galBackScreen(); static void galSuspend(); static void galResume();
@@ -129,6 +130,7 @@ static void gamesEnter(); static void gamesTick(); // Juegos: Jumper (motor en F
 static void wxAppEnter(); static void wxAppTick();  // Clima (Flex Weather) -- seccion propia mas abajo
 static bool wxHandleBack(); static void wxSuspend(); static void wxResume();
 static void storeEnter(); static void storeTick(); static void storeExit(); // Flex Store + runtime FLXP
+static void storeSuspendApp(); static void storeResumeApp();               // ...y la app flex-app-v1 que corra dentro
 // Flex Phone: la app vive en FlexOS_FlexPhone_Bridge.h (igual que el
 // navegador y la tienda). Aqui solo el prototipo para APP_REG.
 static void fphEnter(); static void fphTick(); static void fphExit();
@@ -619,7 +621,11 @@ static const AppHooks H_NOTES    = { noteBackLayer, noteBackScreen, noteSuspend,
 static const AppHooks H_PAINT    = { NULL, paintBackScreen, paintSuspend, paintResume, paintCloseApp, paintSaveSess, paintLoadSess, NULL, NULL, paintDirty };
 static const AppHooks H_GAMES    = { NULL, NULL, gamesSuspend, gamesResume, gamesCloseApp, NULL, NULL, NULL, NULL, NULL };
 static const AppHooks H_BROWSER  = { NULL, NULL, navSuspendLife, navResumeLife, navCloseLife, NULL, NULL, NULL, navShedLife, NULL };
-static const AppHooks H_STORE    = { NULL, NULL, NULL, storeResumeLife, storeCloseLife, NULL, NULL, NULL, NULL, NULL };
+// Flex Store lleva ahora gancho de SUSPENSION: si dentro corre una app
+// flex-app-v1, pasar a segundo plano tiene que soltar sus recursos
+// privilegiados (pantalla exclusiva, orientacion, PSRAM reservada) en vez de
+// dejarlos tomados mientras el usuario esta en otra parte del sistema.
+static const AppHooks H_STORE    = { NULL, NULL, storeSuspendLife, storeResumeLife, storeCloseLife, NULL, NULL, NULL, NULL, NULL };
 static const AppHooks H_WEATHER  = { NULL, wxHandleBack, wxSuspend, wxResume, NULL, NULL, NULL, NULL, NULL, NULL };
 // Flex Phone. backScreen cierra primero la conversacion y luego vuelve
 // a Centro; closeApp vuelca el estado a disco (la escritura periodica
