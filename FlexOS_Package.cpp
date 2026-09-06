@@ -1,30 +1,52 @@
+// #############################################################
+//  FLEX OS · INSTALADOR DE .flexpkg SOBRE LittleFS
+//  ------------------------------------------------------------
+//  QUE HACE ESTE ARCHIVO Y QUE NO.
+//    SI: montar, recuperar transacciones a medias, crear el slot
+//        temporal, escribir, cambiar de versión con rename, revertir,
+//        registrar la app instalada y borrarla.
+//    NO: decidir si un paquete es de fiar. Eso vive en
+//        FlexOS_PkgCore.cpp, que es lógica PURA y se ejercita en el PC
+//        con sanitizers (tests/host/test_pkgcore.cpp). Antes estaba
+//        aquí dentro, atado a LittleFS, y por tanto sin pruebas.
+//
+//  TRANSACCION (igual que antes, más el registro):
+//    1. Validar y extraer a  /FlexApps/<id>/.stage
+//    2. Comprobar el entrypoint del runtime que declare el manifest
+//    3. rename(active -> .old) ; rename(.stage -> active)
+//    4. Si el paso 3 falla a mitad, se restaura .old
+//    5. Si sale bien, se borra .old: sólo queda la versión reciente
+//  flexPkgBegin() repara al arrancar cualquier corte de corriente que
+//  haya pillado la transacción por la mitad.
+//
+//  CARPETA PRIVADA. /FlexApps/<id>/data vive FUERA de "active", así que
+//  una actualización la conserva y una desinstalación se la lleva.
+// #############################################################
 #include "FlexOS_Package.h"
+#include "FlexOS_PkgCore.h"
+#include "FlexOS_AppVM.h"
+#include "FlexOS_AppGrant.h"
 
 #include <FS.h>
 #include <LittleFS.h>
 #include <cJSON.h>
-#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "FlexOS_OTA.h"
-#include "mbedtls/bignum.h"
-#include "mbedtls/ecdsa.h"
-#include "mbedtls/ecp.h"
-#include "mbedtls/sha256.h"
-#include "mbedtls/version.h"
 
 namespace {
 
-static const uint32_t HDR_SIZE = 64;
-static const uint32_t MAX_MANIFEST = 32u * 1024u;
-static const uint32_t MAX_INDEX = 128u * 1024u;
 static const char* ROOT_DIR = "/FlexApps";
 static const char* MANIFEST_FILE = "/.manifest.json";
 static const char* INDEX_FILE = "/.index.json";
+static const char* HASH_FILE = "/.pkghash";
+static const char* GRANT_FILE = "/.grant";
+static const char* STATE_FILE = "/.state";
 static const char* STAGE_NAME = "/.stage";
 static const char* ACTIVE_NAME = "/active";
 static const char* OLD_NAME = "/.old";
+static const char* DATA_NAME = "/data";
 
 static volatile bool gBusy = false;
 static volatile bool gCancel = false;
@@ -36,15 +58,6 @@ static void setError(FlexPkgErrorCode code, const char* text){
   snprintf(gErrText, sizeof(gErrText), "%s", text ? text : "Error de paquete");
 }
 
-static uint16_t rd16(const uint8_t* p){
-  return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
-}
-
-static uint32_t rd32(const uint8_t* p){
-  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-         ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
 static bool readExact(File& f, void* dst, size_t n){
   uint8_t* p = static_cast<uint8_t*>(dst);
   size_t done = 0;
@@ -52,16 +65,6 @@ static bool readExact(File& f, void* dst, size_t n){
     size_t got = f.read(p + done, n - done);
     if(got == 0) return false;
     done += got;
-  }
-  return true;
-}
-
-static bool progress(FlexPkgProgressFn cb, void* user, uint8_t pct, const char* stage){
-  if(gCancel){ setError(FLEXPKG_ERR_CANCELLED, "Instalacion cancelada"); return false; }
-  if(cb && !cb(pct, stage, user)){
-    gCancel = true;
-    setError(FLEXPKG_ERR_CANCELLED, "Instalacion cancelada");
-    return false;
   }
   return true;
 }
@@ -137,329 +140,61 @@ static uint32_t dirBytes(const char* path, uint8_t depth = 0){
   return total;
 }
 
-static bool safeId(const char* s){
-  if(!s) return false;
-  size_t n = strlen(s);
-  if(n < 5 || n > FLEXPKG_ID_MAX || s[0] < 'a' || s[0] > 'z') return false;
-  int dots = 0;
-  bool segmentStart = true;
-  for(size_t i = 0; i < n; i++){
-    char c = s[i];
-    if(c == '.'){
-      if(segmentStart || i + 1 == n) return false;
-      dots++;
-      segmentStart = true;
-      continue;
-    }
-    if(segmentStart && (c < 'a' || c > 'z')) return false;
-    if(!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_')) return false;
-    segmentStart = false;
-  }
-  return dots >= 2 && dots <= 7;
-}
-
-static bool safePath(const char* s){
-  if(!s) return false;
-  size_t n = strlen(s);
-  if(n == 0 || n > FLEXPKG_PATH_MAX || s[0] == '/' || s[0] == '.' || strchr(s, '\\')) return false;
-  bool start = true;
-  char part[4] = {0};
-  size_t pi = 0;
-  for(size_t i = 0; i <= n; i++){
-    char c = s[i];
-    if(c == '/' || c == 0){
-      if(start || !strcmp(part, ".") || !strcmp(part, "..")) return false;
-      start = true; pi = 0; memset(part, 0, sizeof(part));
-      continue;
-    }
-    bool ok = isalnum((unsigned char)c) || c == '.' || c == '_' || c == '-';
-    if(!ok) return false;
-    if(pi < sizeof(part) - 1) part[pi++] = c;
-    start = false;
-  }
+static bool appPaths(const char* id, char* root, char* active, char* stage, char* old, size_t cap){
+  if(!flexPkgCoreSafeId(id)) return false;
+  snprintf(root, cap, "%s/%s", ROOT_DIR, id);
+  snprintf(active, cap, "%s%s", root, ACTIVE_NAME);
+  snprintf(stage, cap, "%s%s", root, STAGE_NAME);
+  snprintf(old, cap, "%s%s", root, OLD_NAME);
   return true;
 }
 
-static bool semver(const char* s){
-  if(!s || !isdigit((unsigned char)*s)) return false;
-  int dots = 0;
-  bool digit = false;
-  for(const char* p = s; *p; ++p){
-    if(isdigit((unsigned char)*p)){ digit = true; continue; }
-    if(*p == '.' && dots < 2 && digit){ dots++; digit = false; continue; }
-    if(*p == '-' && dots == 2 && digit){
-      ++p;
-      if(!*p) return false;
-      for(; *p; ++p) if(!(islower((unsigned char)*p) || isdigit((unsigned char)*p) || *p == '.' || *p == '-')) return false;
-      return true;
-    }
-    return false;
-  }
-  return dots == 2 && digit;
-}
-
-static void semverParts(const char* s, uint32_t out[3]){
-  out[0] = out[1] = out[2] = 0;
-  int p = 0;
-  while(*s && p < 3){
-    if(isdigit((unsigned char)*s)) out[p] = out[p] * 10u + (uint32_t)(*s - '0');
-    else if(*s == '.') p++;
-    else break;
-    s++;
-  }
-}
-
-static int semverCompare(const char* a, const char* b){
-  uint32_t av[3], bv[3]; semverParts(a, av); semverParts(b, bv);
-  for(int i = 0; i < 3; i++) if(av[i] != bv[i]) return av[i] < bv[i] ? -1 : 1;
-  return 0;
-}
-
-static bool hexToBytes(const char* hex, uint8_t* out, size_t n){
-  if(!hex || strlen(hex) != n * 2) return false;
-  for(size_t i = 0; i < n; i++){
-    int hi = hex[i * 2], lo = hex[i * 2 + 1];
-    hi = (hi >= '0' && hi <= '9') ? hi - '0' : (hi >= 'a' && hi <= 'f') ? hi - 'a' + 10 : -1;
-    lo = (lo >= '0' && lo <= '9') ? lo - '0' : (lo >= 'a' && lo <= 'f') ? lo - 'a' + 10 : -1;
-    if(hi < 0 || lo < 0) return false;
-    out[i] = (uint8_t)((hi << 4) | lo);
-  }
-  return true;
-}
-
-static void bytesToHex(const uint8_t* in, size_t n, char* out){
-  static const char h[] = "0123456789abcdef";
-  for(size_t i = 0; i < n; i++){ out[i * 2] = h[in[i] >> 4]; out[i * 2 + 1] = h[in[i] & 15]; }
-  out[n * 2] = 0;
-}
-
-#if MBEDTLS_VERSION_NUMBER >= 0x03000000
-  #define SHA_START(ctx)  mbedtls_sha256_starts((ctx), 0)
-  #define SHA_UPDATE(ctx,p,n) mbedtls_sha256_update((ctx),(p),(n))
-  #define SHA_FINISH(ctx,o) mbedtls_sha256_finish((ctx),(o))
-#else
-  #define SHA_START(ctx)  mbedtls_sha256_starts_ret((ctx), 0)
-  #define SHA_UPDATE(ctx,p,n) mbedtls_sha256_update_ret((ctx),(p),(n))
-  #define SHA_FINISH(ctx,o) mbedtls_sha256_finish_ret((ctx),(o))
-#endif
-
-static bool shaBuffer(const uint8_t* data, size_t n, uint8_t out[32]){
-  mbedtls_sha256_context c; mbedtls_sha256_init(&c);
-  bool ok = SHA_START(&c) == 0 && SHA_UPDATE(&c, data, n) == 0 && SHA_FINISH(&c, out) == 0;
-  mbedtls_sha256_free(&c);
-  return ok;
-}
-
-static bool verifyP256(const uint8_t pub[65], const uint8_t hash[32], const uint8_t sig[64]){
-  if(pub[0] != 0x04) return false;
-  mbedtls_ecp_group grp; mbedtls_ecp_group_init(&grp);
-  mbedtls_ecp_point q; mbedtls_ecp_point_init(&q);
-  mbedtls_mpi r, s; mbedtls_mpi_init(&r); mbedtls_mpi_init(&s);
-  int rc = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
-  if(rc == 0) rc = mbedtls_ecp_point_read_binary(&grp, &q, pub, 65);
-  if(rc == 0) rc = mbedtls_ecp_check_pubkey(&grp, &q);
-  if(rc == 0) rc = mbedtls_mpi_read_binary(&r, sig, 32);
-  if(rc == 0) rc = mbedtls_mpi_read_binary(&s, sig + 32, 32);
-  if(rc == 0) rc = mbedtls_ecdsa_verify(&grp, hash, 32, &q, &r, &s);
-  mbedtls_mpi_free(&s); mbedtls_mpi_free(&r);
-  mbedtls_ecp_point_free(&q); mbedtls_ecp_group_free(&grp);
-  return rc == 0;
-}
-
-static bool jsonCanonical(const char* raw, cJSON* root){
-  char* printed = cJSON_PrintUnformatted(root);
-  if(!printed) return false;
-  bool ok = strlen(raw) == strlen(printed) && memcmp(raw, printed, strlen(raw)) == 0;
-  cJSON_free(printed);
-  return ok;
-}
-
-static bool jsonString(cJSON* obj, const char* key, char* out, size_t cap, bool required = true){
-  cJSON* v = cJSON_GetObjectItemCaseSensitive(obj, key);
-  if(!v){ if(!required){ out[0] = 0; return true; } return false; }
-  if(!cJSON_IsString(v) || !v->valuestring || strlen(v->valuestring) >= cap) return false;
-  memcpy(out, v->valuestring, strlen(v->valuestring) + 1);
-  return true;
-}
-
-static uint16_t permissionBit(const char* s){
-  if(!strcmp(s, "network")) return FLEXPERM_NETWORK;
-  if(!strcmp(s, "storage.read")) return FLEXPERM_STORAGE_READ;
-  if(!strcmp(s, "storage.write")) return FLEXPERM_STORAGE_WRITE;
-  if(!strcmp(s, "notifications")) return FLEXPERM_NOTIFICATIONS;
-  if(!strcmp(s, "camera")) return FLEXPERM_CAMERA;
-  if(!strcmp(s, "microphone")) return FLEXPERM_MICROPHONE;
-  if(!strcmp(s, "location")) return FLEXPERM_LOCATION;
-  if(!strcmp(s, "clipboard")) return FLEXPERM_CLIPBOARD;
-  return 0;
-}
-
-static bool parseManifest(cJSON* root, FlexPkgInfo* out){
-  if(!cJSON_IsObject(root) || !out) return false;
-  memset(out, 0, sizeof(*out));
-  cJSON* schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
-  cJSON* ver = cJSON_GetObjectItemCaseSensitive(root, "version");
-  cJSON* limits = cJSON_GetObjectItemCaseSensitive(root, "limits");
-  cJSON* perms = cJSON_GetObjectItemCaseSensitive(root, "permissions");
-  char runtime[24];
-  if(!cJSON_IsNumber(schema) || schema->valuedouble != 1.0 || !cJSON_IsObject(ver) ||
-     !cJSON_IsObject(limits) || !cJSON_IsArray(perms)) return false;
-  if(!jsonString(root, "id", out->id, sizeof(out->id)) || !safeId(out->id)) return false;
-  if(!jsonString(root, "name", out->name, sizeof(out->name)) || strlen(out->name) < 2) return false;
-  if(!jsonString(root, "minFlexOS", out->minFlexOS, sizeof(out->minFlexOS)) || !semver(out->minFlexOS)) return false;
-  if(!jsonString(root, "runtime", runtime, sizeof(runtime)) || strcmp(runtime, "flex-ui-1")) return false;
-  if(!jsonString(root, "entry", out->entry, sizeof(out->entry)) || !safePath(out->entry)) return false;
-  if(!jsonString(root, "developerKeySha256", out->developerKeySha256, sizeof(out->developerKeySha256)) || strlen(out->developerKeySha256) != 64) return false;
-  if(!jsonString(root, "summary", out->summary, sizeof(out->summary), false)) return false;
-  if(!jsonString(root, "category", out->category, sizeof(out->category), false)) return false;
-  if(!jsonString(ver, "name", out->versionName, sizeof(out->versionName)) || !semver(out->versionName)) return false;
-  cJSON* code = cJSON_GetObjectItemCaseSensitive(ver, "code");
-  if(!cJSON_IsNumber(code) || code->valuedouble < 1 || code->valuedouble > 4294967295.0 || code->valuedouble != (double)(uint32_t)code->valuedouble) return false;
-  out->versionCode = (uint32_t)code->valuedouble;
-  cJSON* mem = cJSON_GetObjectItemCaseSensitive(limits, "memoryKB");
-  cJSON* sto = cJSON_GetObjectItemCaseSensitive(limits, "storageKB");
-  if(!cJSON_IsNumber(mem) || !cJSON_IsNumber(sto) || mem->valuedouble < 64 || mem->valuedouble > 4096 ||
-     sto->valuedouble < 0 || sto->valuedouble > 8192) return false;
-  out->memoryKB = (uint16_t)mem->valuedouble;
-  out->storageKB = (uint16_t)sto->valuedouble;
-  int pn = cJSON_GetArraySize(perms);
-  if(pn < 0 || pn > 16) return false;
-  uint16_t mask = 0;
-  for(int i = 0; i < pn; i++){
-    cJSON* p = cJSON_GetArrayItem(perms, i);
-    if(!cJSON_IsString(p) || !p->valuestring) return false;
-    uint16_t bit = permissionBit(p->valuestring);
-    if(!bit || (mask & bit)) return false;
-    mask |= bit;
-  }
-  out->permissions = mask;
-  return true;
-}
-
-static bool writeHidden(const char* root, const char* suffix, const char* data, size_t n){
+static bool writeBlob(const char* dir, const char* suffix, const void* data, size_t n){
   char path[FLEXPKG_PATH_MAX + FLEXPKG_ID_MAX + 48];
-  snprintf(path, sizeof(path), "%s%s", root, suffix);
+  snprintf(path, sizeof(path), "%s%s", dir, suffix);
   File f = LittleFS.open(path, "w");
   if(!f) return false;
-  bool ok = f.write((const uint8_t*)data, n) == n;
+  bool ok = (n == 0) || (f.write((const uint8_t*)data, n) == n);
   f.close();
   if(!ok) LittleFS.remove(path);
   return ok;
 }
 
-static bool readManifestAt(const char* activeRoot, FlexPkgInfo* out){
+static uint32_t readBlob(const char* dir, const char* suffix, void* out, uint32_t cap){
   char path[FLEXPKG_PATH_MAX + FLEXPKG_ID_MAX + 48];
-  snprintf(path, sizeof(path), "%s%s", activeRoot, MANIFEST_FILE);
+  snprintf(path, sizeof(path), "%s%s", dir, suffix);
   File f = LittleFS.open(path, "r");
-  if(!f || f.size() < 2 || f.size() > MAX_MANIFEST){ if(f) f.close(); return false; }
-  size_t n = f.size();
-  char* raw = (char*)malloc(n + 1);
-  if(!raw){ f.close(); return false; }
-  bool ok = readExact(f, raw, n); f.close(); raw[n] = 0;
-  cJSON* root = ok ? cJSON_ParseWithLength(raw, n) : nullptr;
-  ok = root && parseManifest(root, out);
-  if(root) cJSON_Delete(root);
-  free(raw);
-  if(ok) out->installedBytes = dirBytes(activeRoot);
-  return ok;
+  if(!f) return 0;
+  uint32_t n = (uint32_t)f.size();
+  if(n == 0 || n > cap){ f.close(); return 0; }
+  bool ok = readExact(f, out, n);
+  f.close();
+  return ok ? n : 0;
 }
 
-static bool smokeEntrypoint(const char* stage, const FlexPkgInfo& info){
-  char path[FLEXPKG_PATH_MAX + FLEXPKG_ID_MAX + 48];
-  snprintf(path, sizeof(path), "%s/%s", stage, info.entry);
-  File f = LittleFS.open(path, "r");
-  if(!f || f.size() < 2 || f.size() > (size_t)info.memoryKB * 1024u){ if(f) f.close(); return false; }
-  size_t n = f.size();
-  char* raw = (char*)malloc(n + 1);
-  if(!raw){ f.close(); return false; }
-  bool ok = readExact(f, raw, n); f.close(); raw[n] = 0;
-  cJSON* root = ok ? cJSON_ParseWithLength(raw, n) : nullptr;
-  if(!root || !cJSON_IsObject(root)) ok = false;
-  if(ok){
-    cJSON* schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
-    cJSON* start = cJSON_GetObjectItemCaseSensitive(root, "startScreen");
-    cJSON* screens = cJSON_GetObjectItemCaseSensitive(root, "screens");
-    ok = cJSON_IsNumber(schema) && schema->valuedouble == 1.0 && cJSON_IsString(start) && cJSON_IsArray(screens) && cJSON_GetArraySize(screens) > 0;
-  }
-  if(root) cJSON_Delete(root);
-  free(raw);
-  return ok;
-}
-
-struct ParsedPackage {
-  File file;
-  uint8_t header[HDR_SIZE] = {0};
-  uint32_t manifestLen = 0, indexLen = 0, payloadLen = 0;
-  uint32_t payloadStart = 0, payloadEnd = 0;
-  char* manifestRaw = nullptr;
-  char* indexRaw = nullptr;
-  cJSON* manifest = nullptr;
-  cJSON* index = nullptr;
-  uint8_t publicKey[65] = {0};
-  uint8_t signature[64] = {0};
-  FlexPkgInfo info = {};
+// ---- Lector del paquete (LittleFS) -------------------------------------
+struct FileReader {
+  File f;
+  uint32_t pos = 0;
 };
 
-static void parsedClose(ParsedPackage& p){
-  if(p.file) p.file.close();
-  if(p.manifest) cJSON_Delete(p.manifest);
-  if(p.index) cJSON_Delete(p.index);
-  free(p.manifestRaw); free(p.indexRaw);
-  p.manifest = p.index = nullptr;
-  p.manifestRaw = p.indexRaw = nullptr;
-}
-
-static bool parseOpen(const char* packagePath, ParsedPackage& p){
-  p.file = LittleFS.open(packagePath, "r");
-  if(!p.file){ setError(FLEXPKG_ERR_OPEN, "No se pudo abrir el .flexpkg"); return false; }
-  uint32_t total = (uint32_t)p.file.size();
-  if(total < HDR_SIZE + 65 + 64 || total > FLEXPKG_MAX_PACKAGE_BYTES){ setError(FLEXPKG_ERR_SIZE, "Tamano de paquete no permitido"); return false; }
-  if(!readExact(p.file, p.header, HDR_SIZE)){ setError(FLEXPKG_ERR_HEADER, "Encabezado incompleto"); return false; }
-  if(memcmp(p.header, "FLXP", 4) || rd16(p.header + 4) != FLEXPKG_FORMAT_VERSION || rd16(p.header + 6) != 0){
-    setError(FLEXPKG_ERR_HEADER, "No es un Flex Package v1"); return false;
+static bool fileRead(void* user, uint32_t off, void* dst, uint32_t n){
+  FileReader* r = (FileReader*)user;
+  if(!r->f) return false;
+  if(r->pos != off){
+    if(!r->f.seek(off, SeekSet)) return false;
+    r->pos = off;
   }
-  for(int i = 56; i < 64; i++) if(p.header[i] != 0){ setError(FLEXPKG_ERR_HEADER, "Bytes reservados invalidos"); return false; }
-  p.manifestLen = rd32(p.header + 8); p.indexLen = rd32(p.header + 12); p.payloadLen = rd32(p.header + 16);
-  if(p.manifestLen < 2 || p.manifestLen > MAX_MANIFEST || p.indexLen < 2 || p.indexLen > MAX_INDEX ||
-     p.payloadLen > FLEXPKG_MAX_PACKAGE_BYTES || rd16(p.header + 20) != 65 || rd16(p.header + 22) != 64){
-    setError(FLEXPKG_ERR_HEADER, "Longitudes internas invalidas"); return false;
-  }
-  uint64_t declared = (uint64_t)HDR_SIZE + p.manifestLen + p.indexLen + p.payloadLen + 65u + 64u;
-  if(declared != total){ setError(FLEXPKG_ERR_SIZE, "El tamano declarado no coincide"); return false; }
-  p.payloadStart = HDR_SIZE + p.manifestLen + p.indexLen;
-  p.payloadEnd = p.payloadStart + p.payloadLen;
-  p.manifestRaw = (char*)malloc(p.manifestLen + 1);
-  p.indexRaw = (char*)malloc(p.indexLen + 1);
-  if(!p.manifestRaw || !p.indexRaw){ setError(FLEXPKG_ERR_MEMORY, "Sin memoria para validar el paquete"); return false; }
-  if(!readExact(p.file, p.manifestRaw, p.manifestLen) || !readExact(p.file, p.indexRaw, p.indexLen)){
-    setError(FLEXPKG_ERR_JSON, "Manifiesto o indice truncado"); return false;
-  }
-  p.manifestRaw[p.manifestLen] = 0; p.indexRaw[p.indexLen] = 0;
-  p.manifest = cJSON_ParseWithLength(p.manifestRaw, p.manifestLen);
-  p.index = cJSON_ParseWithLength(p.indexRaw, p.indexLen);
-  if(!p.manifest || !p.index || !jsonCanonical(p.manifestRaw, p.manifest) || !jsonCanonical(p.indexRaw, p.index)){
-    setError(FLEXPKG_ERR_JSON, "JSON interno invalido o no canonico"); return false;
-  }
-  if(!parseManifest(p.manifest, &p.info)){
-    setError(FLEXPKG_ERR_MANIFEST, "Manifest de la app invalido"); return false;
-  }
-  if(semverCompare(FLEXOS_FW_VERSION, p.info.minFlexOS) < 0){
-    setError(FLEXPKG_ERR_VERSION, "La app requiere una version mas reciente de FlexOS"); return false;
-  }
-  int files = cJSON_IsArray(p.index) ? cJSON_GetArraySize(p.index) : -1;
-  if(files < 1 || files > FLEXPKG_MAX_FILES){ setError(FLEXPKG_ERR_INDEX, "Cantidad de archivos invalida"); return false; }
-  p.info.fileCount = (uint16_t)files; p.info.payloadBytes = p.payloadLen;
-  if(!p.file.seek(p.payloadEnd, SeekSet) || !readExact(p.file, p.publicKey, 65) || !readExact(p.file, p.signature, 64)){
-    setError(FLEXPKG_ERR_SIGNATURE, "Firma o clave truncada"); return false;
-  }
-  uint8_t fp[32]; char fpHex[65];
-  if(!shaBuffer(p.publicKey, 65, fp)){ setError(FLEXPKG_ERR_HASH, "No se pudo calcular SHA-256"); return false; }
-  bytesToHex(fp, 32, fpHex);
-  if(strcmp(fpHex, p.info.developerKeySha256)){
-    setError(FLEXPKG_ERR_DEVELOPER, "La clave no coincide con el desarrollador"); return false;
-  }
+  if(!readExact(r->f, dst, n)) return false;
+  r->pos += n;
   return true;
 }
+
+// ---- Sumidero de extracción (LittleFS) ---------------------------------
+struct StageSink {
+  char stage[FLEXPKG_PATH_MAX + FLEXPKG_ID_MAX + 48];
+  File out;
+};
 
 static bool ensureParent(const char* path){
   char dir[FLEXPKG_PATH_MAX + FLEXPKG_ID_MAX + 48];
@@ -472,106 +207,132 @@ static bool ensureParent(const char* path){
   return mkdirs(dir);
 }
 
-static bool validateAndExtract(ParsedPackage& p, const char* stage, bool writeFiles,
-                               FlexPkgProgressFn cb, void* user){
-  if(writeFiles){ removeTree(stage); if(!mkdirs(stage)){ setError(FLEXPKG_ERR_STORAGE, "No se pudo crear el slot temporal"); return false; } }
-  mbedtls_sha256_context totalHash; mbedtls_sha256_init(&totalHash);
-  if(SHA_START(&totalHash) != 0 || SHA_UPDATE(&totalHash, (const uint8_t*)p.manifestRaw, p.manifestLen) != 0 ||
-     SHA_UPDATE(&totalHash, (const uint8_t*)p.indexRaw, p.indexLen) != 0){
-    mbedtls_sha256_free(&totalHash); setError(FLEXPKG_ERR_HASH, "No se pudo iniciar SHA-256"); return false;
-  }
-  if(!p.file.seek(p.payloadStart, SeekSet)){ mbedtls_sha256_free(&totalHash); setError(FLEXPKG_ERR_OPEN, "No se pudo leer el payload"); return false; }
-  uint32_t expectedOffset = 0;
-  bool entryFound = false;
-  uint8_t buffer[4096];
-  for(int i = 0; i < p.info.fileCount; i++){
-    cJSON* e = cJSON_GetArrayItem(p.index, i);
-    cJSON* path = e ? cJSON_GetObjectItemCaseSensitive(e, "path") : nullptr;
-    cJSON* off = e ? cJSON_GetObjectItemCaseSensitive(e, "offset") : nullptr;
-    cJSON* size = e ? cJSON_GetObjectItemCaseSensitive(e, "size") : nullptr;
-    cJSON* hash = e ? cJSON_GetObjectItemCaseSensitive(e, "sha256") : nullptr;
-    if(!cJSON_IsObject(e) || !cJSON_IsString(path) || !path->valuestring || !safePath(path->valuestring) ||
-       !cJSON_IsNumber(off) || !cJSON_IsNumber(size) || !cJSON_IsString(hash) || !hash->valuestring ||
-       off->valuedouble < 0 || off->valuedouble > 4294967295.0 ||
-       size->valuedouble < 0 || size->valuedouble > 4294967295.0 ||
-       off->valuedouble != (double)(uint32_t)off->valuedouble || size->valuedouble != (double)(uint32_t)size->valuedouble){
-      mbedtls_sha256_free(&totalHash); setError(FLEXPKG_ERR_INDEX, "Entrada del indice invalida"); return false;
-    }
-    uint32_t offset = (uint32_t)off->valuedouble, bytes = (uint32_t)size->valuedouble;
-    if(offset != expectedOffset || bytes > FLEXPKG_MAX_FILE_BYTES || offset + bytes > p.payloadLen){
-      mbedtls_sha256_free(&totalHash); setError(FLEXPKG_ERR_INDEX, "Offsets del payload invalidos"); return false;
-    }
-    for(int j = 0; j < i; j++){
-      cJSON* prev = cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(p.index, j), "path");
-      if(prev && cJSON_IsString(prev) && !strcmp(prev->valuestring, path->valuestring)){
-        mbedtls_sha256_free(&totalHash); setError(FLEXPKG_ERR_PATH, "Ruta duplicada en el paquete"); return false;
-      }
-    }
-    uint8_t expectedFileHash[32];
-    if(!hexToBytes(hash->valuestring, expectedFileHash, 32)){
-      mbedtls_sha256_free(&totalHash); setError(FLEXPKG_ERR_INDEX, "SHA-256 de archivo invalido"); return false;
-    }
-    char dst[FLEXPKG_PATH_MAX + FLEXPKG_ID_MAX + 48];
-    File out;
-    if(writeFiles){
-      snprintf(dst, sizeof(dst), "%s/%s", stage, path->valuestring);
-      if(!ensureParent(dst)){ mbedtls_sha256_free(&totalHash); setError(FLEXPKG_ERR_STORAGE, "No se pudo crear una carpeta de la app"); return false; }
-      out = LittleFS.open(dst, "w");
-      if(!out){ mbedtls_sha256_free(&totalHash); setError(FLEXPKG_ERR_STORAGE, "No se pudo escribir un archivo de la app"); return false; }
-    }
-    mbedtls_sha256_context fileHash; mbedtls_sha256_init(&fileHash); SHA_START(&fileHash);
-    uint32_t remain = bytes;
-    while(remain){
-      size_t want = remain > sizeof(buffer) ? sizeof(buffer) : remain;
-      if(!readExact(p.file, buffer, want)){
-        if(out) out.close(); mbedtls_sha256_free(&fileHash); mbedtls_sha256_free(&totalHash);
-        setError(FLEXPKG_ERR_SIZE, "Payload truncado"); return false;
-      }
-      if(SHA_UPDATE(&totalHash, buffer, want) != 0 || SHA_UPDATE(&fileHash, buffer, want) != 0 ||
-         (writeFiles && out.write(buffer, want) != want)){
-        if(out) out.close(); mbedtls_sha256_free(&fileHash); mbedtls_sha256_free(&totalHash);
-        setError(FLEXPKG_ERR_STORAGE, "Fallo al verificar o escribir el payload"); return false;
-      }
-      remain -= want;
-      uint8_t pct = (uint8_t)(10u + ((uint64_t)(offset + bytes - remain) * 75u / (p.payloadLen ? p.payloadLen : 1u)));
-      if(!progress(cb, user, pct, writeFiles ? "Verificando e instalando" : "Verificando")){
-        if(out) out.close(); mbedtls_sha256_free(&fileHash); mbedtls_sha256_free(&totalHash); return false;
-      }
-    }
-    if(out) out.close();
-    uint8_t actual[32]; SHA_FINISH(&fileHash, actual); mbedtls_sha256_free(&fileHash);
-    if(memcmp(actual, expectedFileHash, 32)){
-      mbedtls_sha256_free(&totalHash); setError(FLEXPKG_ERR_HASH, "SHA-256 de un archivo no coincide"); return false;
-    }
-    if(!strcmp(path->valuestring, p.info.entry)) entryFound = true;
-    expectedOffset = offset + bytes;
-  }
-  if(expectedOffset != p.payloadLen || !entryFound){
-    mbedtls_sha256_free(&totalHash); setError(FLEXPKG_ERR_INDEX, "Payload no declarado o entry ausente"); return false;
-  }
-  uint8_t signedHash[32]; SHA_FINISH(&totalHash, signedHash); mbedtls_sha256_free(&totalHash);
-  if(memcmp(signedHash, p.header + 24, 32)){
-    setError(FLEXPKG_ERR_HASH, "El paquete fue alterado"); return false;
-  }
-  if(!verifyP256(p.publicKey, signedHash, p.signature)){
-    setError(FLEXPKG_ERR_SIGNATURE, "Firma ECDSA P-256 invalida"); return false;
-  }
-  if(writeFiles){
-    if(!writeHidden(stage, MANIFEST_FILE, p.manifestRaw, p.manifestLen) ||
-       !writeHidden(stage, INDEX_FILE, p.indexRaw, p.indexLen) || !smokeEntrypoint(stage, p.info)){
-      setError(FLEXPKG_ERR_RUNTIME, "El entrypoint flex-ui-1 no puede iniciarse"); return false;
-    }
-    p.info.installedBytes = dirBytes(stage);
-  }
-  return progress(cb, user, 90, "Firma valida");
+static bool sinkBegin(void* user, const char* rel){
+  StageSink* s = (StageSink*)user;
+  if(s->out) s->out.close();
+  char dst[FLEXPKG_PATH_MAX + FLEXPKG_ID_MAX + 48];
+  int n = snprintf(dst, sizeof(dst), "%s/%s", s->stage, rel);
+  if(n <= 0 || (size_t)n >= sizeof(dst)) return false;
+  if(!ensureParent(dst)) return false;
+  s->out = LittleFS.open(dst, "w");
+  return (bool)s->out;
 }
 
-static bool appPaths(const char* id, char* root, char* active, char* stage, char* old, size_t cap){
-  if(!safeId(id)) return false;
-  snprintf(root, cap, "%s/%s", ROOT_DIR, id);
-  snprintf(active, cap, "%s%s", root, ACTIVE_NAME);
-  snprintf(stage, cap, "%s%s", root, STAGE_NAME);
-  snprintf(old, cap, "%s%s", root, OLD_NAME);
+static bool sinkWrite(void* user, const uint8_t* data, uint32_t n){
+  StageSink* s = (StageSink*)user;
+  return s->out && s->out.write(data, n) == n;
+}
+
+static bool sinkEnd(void* user, bool ok){
+  StageSink* s = (StageSink*)user;
+  if(s->out) s->out.close();
+  return ok;
+}
+
+// ---- Comprobación del entrypoint según el runtime -----------------------
+// No basta con que el archivo exista: se abre y se mira que sea del formato
+// que dice el manifest. Un paquete cuyo entry no arranca no se activa.
+static bool smokeEntrypoint(const char* stage, const FlexPkgInfo& info){
+  char path[FLEXPKG_PATH_MAX + FLEXPKG_ID_MAX + 48];
+  snprintf(path, sizeof(path), "%s/%s", stage, info.entry);
+  File f = LittleFS.open(path, "r");
+  if(!f) return false;
+  size_t n = f.size();
+  if(n < 2){ f.close(); return false; }
+
+  if(info.runtime == FLEXPKG_RT_APP1){
+    // flex-app-v1: cabecera FLXB v1 y tamaño coherente con lo que declara.
+    if(n < 48 || n > (size_t)FLEXVM_MAX_CODE + FLEXVM_MAX_CONST + 64u * 1024u){ f.close(); return false; }
+    uint8_t h[48];
+    bool ok = readExact(f, h, sizeof(h));
+    f.close();
+    if(!ok) return false;
+    if(memcmp(h, "FLXB", 4) != 0) return false;
+    uint16_t ver = (uint16_t)h[4] | ((uint16_t)h[5] << 8);
+    if(ver != FLEXVM_FORMAT_VERSION) return false;
+    uint32_t codeLen  = (uint32_t)h[8]  | ((uint32_t)h[9] << 8)  | ((uint32_t)h[10] << 16) | ((uint32_t)h[11] << 24);
+    uint32_t constLen = (uint32_t)h[12] | ((uint32_t)h[13] << 8) | ((uint32_t)h[14] << 16) | ((uint32_t)h[15] << 24);
+    uint32_t memBytes = (uint32_t)h[16] | ((uint32_t)h[17] << 8) | ((uint32_t)h[18] << 16) | ((uint32_t)h[19] << 24);
+    uint16_t funcN    = (uint16_t)h[28] | ((uint16_t)h[29] << 8);
+    uint64_t need = 48ull + (uint64_t)funcN * 8ull + constLen + codeLen;
+    if(need != (uint64_t)n) return false;
+    // El manifest manda sobre la memoria lineal: si el bytecode pide más de
+    // lo declarado, el paquete miente y no se instala.
+    if(memBytes > (uint32_t)info.memoryKB * 1024u) return false;
+    return true;
+  }
+
+  // flex-ui-1: exactamente la comprobación de siempre.
+  if(n > (size_t)info.memoryKB * 1024u){ f.close(); return false; }
+  char* raw = (char*)malloc(n + 1);
+  if(!raw){ f.close(); return false; }
+  bool ok = readExact(f, raw, n); f.close(); raw[n] = 0;
+  cJSON* root = ok ? cJSON_ParseWithLength(raw, n) : nullptr;
+  if(!root || !cJSON_IsObject(root)) ok = false;
+  if(ok){
+    cJSON* schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
+    cJSON* start = cJSON_GetObjectItemCaseSensitive(root, "startScreen");
+    cJSON* screens = cJSON_GetObjectItemCaseSensitive(root, "screens");
+    ok = cJSON_IsNumber(schema) && schema->valuedouble == 1.0 && cJSON_IsString(start) &&
+         cJSON_IsArray(screens) && cJSON_GetArraySize(screens) > 0;
+  }
+  if(root) cJSON_Delete(root);
+  free(raw);
+  return ok;
+}
+
+// ---- Lectura del manifest ya instalado ----------------------------------
+static bool readManifestAt(const char* activeRoot, FlexPkgInfo* out){
+  char path[FLEXPKG_PATH_MAX + FLEXPKG_ID_MAX + 48];
+  snprintf(path, sizeof(path), "%s%s", activeRoot, MANIFEST_FILE);
+  File f = LittleFS.open(path, "r");
+  if(!f) return false;
+  size_t n = f.size();
+  if(n < 2 || n > 32u * 1024u){ f.close(); return false; }
+  char* raw = (char*)malloc(n + 1);
+  if(!raw){ f.close(); return false; }
+  bool ok = readExact(f, raw, n); f.close(); raw[n] = 0;
+  ok = ok && flexPkgCoreParseManifestBuffer(raw, (uint32_t)n, out);
+  free(raw);
+  if(!ok) return false;
+  out->installedBytes = dirBytes(activeRoot);
+  // Registro: hash del paquete, grant y estado. Ausentes = app instalada por
+  // una versión anterior del firmware: sigue abriéndose, sin privilegios.
+  char hex[65] = "";
+  uint32_t hn = readBlob(activeRoot, HASH_FILE, hex, 64);
+  if(hn == 64){ hex[64] = 0; memcpy(out->packageSha256, hex, 65); }
+  else out->packageSha256[0] = 0;
+  char gpath[FLEXPKG_PATH_MAX + FLEXPKG_ID_MAX + 48];
+  snprintf(gpath, sizeof(gpath), "%s%s", activeRoot, GRANT_FILE);
+  out->grantLen = 0;
+  { File g = LittleFS.open(gpath, "r");
+    if(g){ if((uint32_t)g.size() == FLEXGRANT_BYTES) out->grantLen = FLEXGRANT_BYTES; g.close(); } }
+  return true;
+}
+
+// ---- Estado persistido de la app ---------------------------------------
+static uint8_t readState(const char* root){
+  char c = 0;
+  if(readBlob(root, STATE_FILE, &c, 1) != 1) return FLEXPKG_APP_ENABLED;
+  if(c == '1') return FLEXPKG_APP_STOPPED;
+  if(c == '2') return FLEXPKG_APP_BLOCKED;
+  return FLEXPKG_APP_ENABLED;
+}
+
+static bool writeState(const char* root, uint8_t state){
+  char c = (state == FLEXPKG_APP_STOPPED) ? '1' : (state == FLEXPKG_APP_BLOCKED ? '2' : '0');
+  return writeBlob(root, STATE_FILE, &c, 1);
+}
+
+// ---- Motor común de inspección/instalación ------------------------------
+static bool progressBridge(uint8_t pct, const char* stage, void* user);
+
+struct ProgressWrap { FlexPkgProgressFn cb; void* user; };
+
+static bool progressBridge(uint8_t pct, const char* stage, void* user){
+  if(gCancel) return false;
+  ProgressWrap* w = (ProgressWrap*)user;
+  if(w && w->cb && !w->cb(pct, stage, w->user)){ gCancel = true; return false; }
   return true;
 }
 
@@ -579,25 +340,94 @@ static bool runPackage(const char* packagePath, FlexPkgInfo* out, bool install,
                        FlexPkgProgressFn cb, void* user){
   if(gBusy){ setError(FLEXPKG_ERR_BUSY, "El instalador ya esta ocupado"); return false; }
   gBusy = true; gCancel = false; setError(FLEXPKG_OK, "Correcto");
-  ParsedPackage p;
-  bool ok = progress(cb, user, 1, "Abriendo paquete") && parseOpen(packagePath, p);
+
+  FileReader fr;
+  fr.f = LittleFS.open(packagePath, "r");
+  if(!fr.f){ gBusy = false; setError(FLEXPKG_ERR_OPEN, "No se pudo abrir el .flexpkg"); return false; }
+
+  FlexPkgReader reader{ fileRead, (uint32_t)fr.f.size(), &fr };
+  ProgressWrap wrap{ cb, user };
+
+  // Los datos grandes van al heap: FlexPkgCoreOut lleva el grant entero y no
+  // tiene por que vivir en la pila de la tarea de interfaz.
+  FlexPkgCoreOut* core = (FlexPkgCoreOut*)malloc(sizeof(FlexPkgCoreOut));
+  if(!core){ fr.f.close(); gBusy = false; setError(FLEXPKG_ERR_MEMORY, "Sin memoria para validar el paquete"); return false; }
+
   char root[360] = {0}, active[360] = {0}, stage[360] = {0}, old[360] = {0};
-  if(ok && install){
-    appPaths(p.info.id, root, active, stage, old, sizeof(root));
-    FlexPkgInfo current;
-    if(readManifestAt(active, &current)){
-      if(strcmp(current.developerKeySha256, p.info.developerKeySha256)){
-        setError(FLEXPKG_ERR_DEVELOPER, "La actualizacion usa otra clave de desarrollador"); ok = false;
-      } else if(p.info.versionCode <= current.versionCode){
-        setError(FLEXPKG_ERR_VERSION, "La version instalada es igual o mas reciente"); ok = false;
+  StageSink sink;
+  FlexPkgSink sinkApi{ sinkBegin, sinkWrite, sinkEnd, &sink };
+  bool ok = true;
+
+  // PASO 1: vistazo al manifest (cabecera + manifest, que van al principio).
+  // Sirve UNICAMENTE para saber el id de la app y poder decidir donde
+  // extraer y si la actualizacion esta permitida. Nada de esto concede
+  // confianza: el paquete entero se verifica despues, hash a hash y firma
+  // incluida, en la unica pasada que escribe.
+  if(install){
+    FlexPkgInfo peek;
+    FlexPkgErrorCode prc = flexPkgCorePeek(&reader, &peek, gErrText, sizeof(gErrText), FLEXOS_FW_VERSION);
+    if(prc != FLEXPKG_OK){ gErr = prc; ok = false; }
+    if(ok){
+      appPaths(peek.id, root, active, stage, old, sizeof(root));
+      FlexPkgInfo current;
+      if(readManifestAt(active, &current)){
+        if(strcmp(current.developerKeySha256, peek.developerKeySha256)){
+          setError(FLEXPKG_ERR_DEVELOPER, "La actualizacion usa otra clave de desarrollador"); ok = false;
+        } else if(peek.versionCode <= current.versionCode){
+          setError(FLEXPKG_ERR_VERSION, "La version instalada es igual o mas reciente"); ok = false;
+        }
       }
     }
-    uint64_t needed = (uint64_t)p.payloadLen + p.manifestLen + p.indexLen + 4096u;
-    uint64_t freeBytes = (uint64_t)LittleFS.totalBytes() - LittleFS.usedBytes();
-    if(ok && needed > freeBytes){ setError(FLEXPKG_ERR_STORAGE, "No hay espacio para validar la version nueva"); ok = false; }
+    if(ok){
+      uint64_t needed = (uint64_t)reader.size + 8192u;
+      uint64_t freeBytes = (uint64_t)LittleFS.totalBytes() - LittleFS.usedBytes();
+      if(needed > freeBytes){ setError(FLEXPKG_ERR_STORAGE, "No hay espacio para validar la version nueva"); ok = false; }
+    }
     if(ok && !mkdirs(root)){ setError(FLEXPKG_ERR_STORAGE, "No se pudo crear la carpeta de la app"); ok = false; }
+    if(ok){
+      removeTree(stage);
+      if(!mkdirs(stage)){ setError(FLEXPKG_ERR_STORAGE, "No se pudo crear el slot temporal"); ok = false; }
+      else snprintf(sink.stage, sizeof(sink.stage), "%s", stage);
+    }
   }
-  if(ok) ok = validateAndExtract(p, stage, install, cb, user);
+
+  // PASO 2: validacion COMPLETA. Es la que manda: cabecera, JSON canonico,
+  // rutas, offsets, SHA-256 por archivo, SHA-256 global, firma ECDSA y huella
+  // del desarrollador. Si escribe, escribe solo en el slot temporal.
+  if(ok){
+    fr.pos = 0xFFFFFFFFu;
+    FlexPkgErrorCode rc = flexPkgCoreRun(&reader, install ? &sinkApi : nullptr, core,
+                                         progressBridge, &wrap,
+                                         gErrText, sizeof(gErrText), FLEXOS_FW_VERSION);
+    if(rc != FLEXPKG_OK){ gErr = rc; ok = false; }
+  }
+
+  if(ok && install){
+    // Manifest, indice, hash y grant quedan junto a los archivos de la app.
+    // El grant se guarda TAL CUAL: su firma se vuelve a comprobar en cada
+    // arranque de la app, no se da por buena porque se instalara un dia.
+    char* manifestRaw = (char*)malloc(core->manifestLen + 1);
+    char* indexRaw = (char*)malloc(core->indexLen + 1);
+    bool wrote = manifestRaw && indexRaw &&
+                 fileRead(&fr, 64, manifestRaw, core->manifestLen) &&
+                 fileRead(&fr, 64 + core->manifestLen, indexRaw, core->indexLen) &&
+                 writeBlob(stage, MANIFEST_FILE, manifestRaw, core->manifestLen) &&
+                 writeBlob(stage, INDEX_FILE, indexRaw, core->indexLen) &&
+                 writeBlob(stage, HASH_FILE, core->info.packageSha256, 64);
+    if(wrote && core->grantLen) wrote = writeBlob(stage, GRANT_FILE, core->grant, core->grantLen);
+    free(manifestRaw); free(indexRaw);
+    if(!wrote){ setError(FLEXPKG_ERR_STORAGE, "No se pudo guardar el registro de la app"); ok = false; }
+    else if(!smokeEntrypoint(stage, core->info)){
+      setError(FLEXPKG_ERR_RUNTIME,
+               core->info.runtime == FLEXPKG_RT_APP1
+                 ? "El bytecode flex-app-v1 no es valido"
+                 : "El entrypoint flex-ui-1 no puede iniciarse");
+      ok = false;
+    } else {
+      core->info.installedBytes = dirBytes(stage);
+    }
+  }
+
   if(ok && install){
     removeTree(old);
     bool hadActive = LittleFS.exists(active);
@@ -605,23 +435,33 @@ static bool runPackage(const char* packagePath, FlexPkgInfo* out, bool install,
       setError(FLEXPKG_ERR_COMMIT, "No se pudo preparar la actualizacion"); ok = false;
     }
     if(ok && !LittleFS.rename(stage, active)){
-      if(hadActive) LittleFS.rename(old, active);
+      if(hadActive) LittleFS.rename(old, active);       // reversion: se conserva la anterior
       setError(FLEXPKG_ERR_COMMIT, "No se pudo activar la version nueva"); ok = false;
     }
     if(ok){
-      removeTree(old);                         // solo queda la version mas reciente
-      progress(cb, user, 100, "Aplicacion instalada");
+      removeTree(old);                                  // solo queda la version mas reciente
+      char dataDir[360];
+      snprintf(dataDir, sizeof(dataDir), "%s%s", root, DATA_NAME);
+      mkdirs(dataDir);                                  // carpeta privada, persiste entre versiones
+      // Una version nueva vuelve a estar habilitada: si el usuario la habia
+      // detenido, actualizar es una decision explicita de volver a usarla.
+      writeState(root, FLEXPKG_APP_ENABLED);
+      core->info.state = FLEXPKG_APP_ENABLED;
+      if(cb) cb(100, "Aplicacion instalada", user);
     }
   }
-  if(!ok && install) removeTree(stage);
-  if(out && ok) *out = p.info;
-  parsedClose(p);
+
+  if(!ok && install && stage[0]) removeTree(stage);      // temporales fuera SIEMPRE
+  if(out && ok) *out = core->info;
+  free(core);
+  fr.f.close();
   gBusy = false;
   return ok;
 }
 
 } // namespace
 
+// -------------------------------------------------------------------------
 bool flexPkgBegin(){
   setError(FLEXPKG_OK, "Correcto");
   // FlexOS_FS ya monto LittleFS con la etiqueta real de la particion
@@ -637,11 +477,12 @@ bool flexPkgBegin(){
       char id[FLEXPKG_ID_MAX + 1];
       snprintf(id, sizeof(id), "%s", baseName(e.name()));
       char appRoot[360], active[360], stage[360], old[360];
-      appPaths(id, appRoot, active, stage, old, sizeof(appRoot));
       e.close();
-      removeTree(stage);
-      if(!LittleFS.exists(active) && LittleFS.exists(old)) LittleFS.rename(old, active);
-      if(LittleFS.exists(active)) removeTree(old);
+      if(appPaths(id, appRoot, active, stage, old, sizeof(appRoot))){
+        removeTree(stage);
+        if(!LittleFS.exists(active) && LittleFS.exists(old)) LittleFS.rename(old, active);
+        if(LittleFS.exists(active)) removeTree(old);
+      }
     } else e.close();
     e = root.openNextFile();
   }
@@ -663,6 +504,7 @@ bool flexPkgUninstall(const char* packageId){
   if(!appPaths(packageId, root, active, stage, old, sizeof(root)) || !LittleFS.exists(root)){
     setError(FLEXPKG_ERR_NOT_FOUND, "Aplicacion no encontrada"); return false;
   }
+  // Se lleva TODO: version activa, temporales, registro y carpeta privada.
   if(!removeTree(root)){ setError(FLEXPKG_ERR_STORAGE, "No se pudo eliminar la aplicacion"); return false; }
   setError(FLEXPKG_OK, "Correcto");
   return true;
@@ -676,24 +518,34 @@ int flexPkgList(FlexPkgInfo* out, int maxItems){
   File e = root.openNextFile();
   while(e && n < maxItems){
     if(e.isDirectory()){
-      char active[360]; snprintf(active, sizeof(active), "%s/%s%s", ROOT_DIR, baseName(e.name()), ACTIVE_NAME);
+      char appRoot[360], active[360];
+      snprintf(appRoot, sizeof(appRoot), "%s/%s", ROOT_DIR, baseName(e.name()));
+      snprintf(active, sizeof(active), "%s%s", appRoot, ACTIVE_NAME);
       e.close();
-      if(readManifestAt(active, &out[n])) n++;
+      if(readManifestAt(active, &out[n])){
+        out[n].state = readState(appRoot);
+        n++;
+      }
     } else e.close();
     e = root.openNextFile();
   }
-  if(e) e.close(); root.close();
+  if(e) e.close();
+  root.close();
   return n;
 }
 
 bool flexPkgGet(const char* packageId, FlexPkgInfo* out){
-  if(!out || !safeId(packageId)) return false;
-  char active[360]; snprintf(active, sizeof(active), "%s/%s%s", ROOT_DIR, packageId, ACTIVE_NAME);
-  return readManifestAt(active, out);
+  if(!out || !flexPkgCoreSafeId(packageId)) return false;
+  char appRoot[360], active[360];
+  snprintf(appRoot, sizeof(appRoot), "%s/%s", ROOT_DIR, packageId);
+  snprintf(active, sizeof(active), "%s%s", appRoot, ACTIVE_NAME);
+  if(!readManifestAt(active, out)) return false;
+  out->state = readState(appRoot);
+  return true;
 }
 
 bool flexPkgActiveRoot(const char* packageId, char* out, size_t outSize){
-  if(!out || outSize == 0 || !safeId(packageId)) return false;
+  if(!out || outSize == 0 || !flexPkgCoreSafeId(packageId)) return false;
   int n = snprintf(out, outSize, "%s/%s%s", ROOT_DIR, packageId, ACTIVE_NAME);
   return n > 0 && (size_t)n < outSize && LittleFS.exists(out);
 }
@@ -703,6 +555,40 @@ bool flexPkgEntryPath(const char* packageId, char* out, size_t outSize){
   if(!out || !flexPkgGet(packageId, &info) || !flexPkgActiveRoot(packageId, root, sizeof(root))) return false;
   int n = snprintf(out, outSize, "%s/%s", root, info.entry);
   return n > 0 && (size_t)n < outSize && LittleFS.exists(out);
+}
+
+uint32_t flexPkgGrant(const char* packageId, uint8_t* out, uint32_t cap){
+  char active[360];
+  if(!out || cap < FLEXGRANT_BYTES || !flexPkgActiveRoot(packageId, active, sizeof(active))) return 0;
+  return readBlob(active, GRANT_FILE, out, cap);
+}
+
+bool flexPkgDataDir(const char* packageId, char* out, size_t outSize){
+  if(!out || outSize == 0 || !flexPkgCoreSafeId(packageId)) return false;
+  int n = snprintf(out, outSize, "%s/%s%s", ROOT_DIR, packageId, DATA_NAME);
+  return n > 0 && (size_t)n < outSize;
+}
+
+bool flexPkgDataEnsure(const char* packageId){
+  char dir[360];
+  if(!flexPkgDataDir(packageId, dir, sizeof(dir))) return false;
+  return mkdirs(dir);
+}
+
+uint32_t flexPkgDataBytes(const char* packageId){
+  char dir[360];
+  if(!flexPkgDataDir(packageId, dir, sizeof(dir))) return 0;
+  return dirBytes(dir);
+}
+
+bool flexPkgSetState(const char* packageId, FlexPkgAppState state){
+  char root[360];
+  if(!flexPkgCoreSafeId(packageId)) return false;
+  snprintf(root, sizeof(root), "%s/%s", ROOT_DIR, packageId);
+  if(!LittleFS.exists(root)){ setError(FLEXPKG_ERR_NOT_FOUND, "Aplicacion no encontrada"); return false; }
+  if(!writeState(root, (uint8_t)state)){ setError(FLEXPKG_ERR_STORAGE, "No se pudo guardar el estado"); return false; }
+  setError(FLEXPKG_OK, "Correcto");
+  return true;
 }
 
 FlexPkgErrorCode flexPkgErrorCode(){ return gErr; }

@@ -14,6 +14,11 @@
 #define FLEXPKG_VERSION_MAX          31
 #define FLEXPKG_SUMMARY_MAX          159
 #define FLEXPKG_CATEGORY_MAX         39
+#define FLEXPKG_RUNTIME_MAX          23
+// Trailer de permisos firmados por Flex Store. Va DESPUES de la firma del
+// paquete, asi que no entra en el hash firmado: por eso puede referirse al
+// hash del propio paquete sin morderse la cola. 0 = el paquete no trae grant.
+#define FLEXPKG_GRANT_MAX            296
 
 enum FlexPkgErrorCode : uint8_t {
   FLEXPKG_OK = 0,
@@ -36,6 +41,21 @@ enum FlexPkgErrorCode : uint8_t {
   FLEXPKG_ERR_NOT_FOUND,
   FLEXPKG_ERR_BUSY,
   FLEXPKG_ERR_CANCELLED
+};
+
+// Runtime declarado por el manifest. "flex-ui-1" es el de siempre (pantallas
+// declarativas) y sigue funcionando exactamente igual; "flex-app-v1" es el
+// nuevo, con logica real dentro de la maquina aislada.
+enum FlexPkgRuntime : uint8_t {
+  FLEXPKG_RT_UI1 = 0,
+  FLEXPKG_RT_APP1 = 1
+};
+
+// Estado de una app instalada, persistido en su registro.
+enum FlexPkgAppState : uint8_t {
+  FLEXPKG_APP_ENABLED = 0,     // se puede abrir
+  FLEXPKG_APP_STOPPED = 1,     // el usuario la detuvo desde Flex OS
+  FLEXPKG_APP_BLOCKED = 2      // el sistema la bloqueo (se paso de limites)
 };
 
 enum FlexPkgPermission : uint16_t {
@@ -65,6 +85,18 @@ struct FlexPkgInfo {
   uint16_t fileCount;
   uint32_t payloadBytes;
   uint32_t installedBytes;
+  // ---- Campos anadidos AL FINAL, a proposito ----
+  // Van los ultimos para que ninguna estructura ya inicializada por posicion
+  // (las pruebas, los dobles de host, el puente de Flex Store) tenga que
+  // tocarse, y para que un memset previo siga dejandolos en el valor neutro.
+  uint8_t  runtime;              // FlexPkgRuntime
+  uint8_t  state;                // FlexPkgAppState
+  uint32_t systemPermissions;    // lo que el manifest DECLARA pedir (no concede nada)
+  uint32_t instrPerTick;         // 0 = valor por defecto del gestor
+  uint32_t usPerTick;
+  uint32_t drawPerFrame;
+  char     packageSha256[65];    // hash firmado del paquete instalado
+  uint32_t grantLen;             // bytes del grant guardado (0 = sin permisos)
 };
 
 typedef bool (*FlexPkgProgressFn)(uint8_t percent, const char* stage, void* user);
@@ -82,6 +114,19 @@ bool flexPkgInstall(const char* packagePath, FlexPkgInfo* out,
                     FlexPkgProgressFn progress = nullptr, void* user = nullptr);
 
 bool flexPkgUninstall(const char* packageId);
+
+// Lee el grant firmado que se instalo con la app. Devuelve los bytes escritos
+// (0 = la app no trae permisos de sistema).
+uint32_t flexPkgGrant(const char* packageId, uint8_t* out, uint32_t cap);
+
+// Carpeta PRIVADA de la app: /FlexApps/<id>/data. Vive FUERA de "active", asi
+// que sobrevive a una actualizacion y desaparece con la desinstalacion.
+bool flexPkgDataDir(const char* packageId, char* out, size_t outSize);
+bool flexPkgDataEnsure(const char* packageId);
+uint32_t flexPkgDataBytes(const char* packageId);
+
+// Detener / reactivar una app instalada (queda anotado en su registro).
+bool flexPkgSetState(const char* packageId, FlexPkgAppState state);
 int  flexPkgList(FlexPkgInfo* out, int maxItems);
 bool flexPkgGet(const char* packageId, FlexPkgInfo* out);
 bool flexPkgEntryPath(const char* packageId, char* out, size_t outSize);
