@@ -207,11 +207,11 @@ static void testWindow(){
     CHECK(check(pkgb::buildGrant(sp, gStore), e2) == FLEXGRANT_ERR_WINDOW, "despues de notAfter, denegado");
     e2.nowEpoch = 500;
     CHECK(check(pkgb::buildGrant(sp, gStore), e2) == FLEXGRANT_ERR_WINDOW, "antes de notBefore, denegado");
-    // Reloj no fiable: NO se concede de mas, sólo se omite el chequeo temporal.
+    // Reloj no fiable: no se puede demostrar vigencia, asi que falla cerrado.
     e2.nowEpoch = 0;
     FlexGrantResult r2;
-    CHECK(check(pkgb::buildGrant(sp, gStore), e2, &r2) == FLEXGRANT_OK && r2.windowChecked == 0,
-          "sin hora fiable se acepta pero queda anotado que la ventana no se comprobo");
+    CHECK(check(pkgb::buildGrant(sp, gStore), e2, &r2) == FLEXGRANT_ERR_WINDOW && r2.granted == 0,
+          "sin hora fiable un grant temporal no obtiene privilegios");
   }
   { pkgb::GrantSpec sp = baseSpec(); sp.notBefore = 3000; sp.notAfter = 2000;
     CHECK(check(pkgb::buildGrant(sp, gStore), e) == FLEXGRANT_ERR_WINDOW, "una ventana imposible se rechaza"); }

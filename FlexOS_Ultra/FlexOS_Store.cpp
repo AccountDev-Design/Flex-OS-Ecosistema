@@ -1,4 +1,6 @@
 #include "FlexOS_Store.h"
+#include "FlexOS_AppGrant.h"
+#include "FlexOS_TrustedKeys.h"
 
 #include <FS.h>
 #include <HTTPClient.h>
@@ -27,18 +29,6 @@ static const char* STORE_ORIGIN = "https://flex-developer-studio.ralvarezsantos9
 static const char* TEMP_PACKAGE = "/FlexApps/.download.flexpkg";
 static const uint32_t CATALOG_MAX = 160u * 1024u;
 static const uint32_t HTTP_TIMEOUT_MS = 15000;
-
-// Clave publica estable del catalogo oficial. La clave privada vive solamente
-// como secreto del backend de Flex Developer Studio. Cada respuesta /api/catalog
-// esta firmada con ES256 antes de que el P4 confie en sus URLs o hashes.
-static const uint8_t CATALOG_PUBLIC_KEY[65] = {
-  0x04,0x70,0x9d,0xf4,0x80,0xde,0x8d,0x66,0x05,0x38,0x6b,0x01,0xb3,0xf8,0x9f,0x20,
-  0xf7,0x29,0x08,0x7f,0x76,0xff,0x76,0xfd,0x43,0x9d,0x50,0xa8,0x30,0x9e,0xac,0xc7,
-  0x60,0xf5,0x4d,0x60,0xbb,0x85,0xde,0xa2,0xd3,0x79,0x8e,0x15,0xab,0xad,0x89,0xd5,
-  0x97,0xa4,0xc0,0x7c,0xfa,0x66,0xc1,0x70,0x6d,0xe6,0x48,0xb3,0x8e,0x40,0x28,0x2c,
-  0x05
-};
-static const char* CATALOG_KEY_ID = "69b91cf7a9246cc2084dda73ccef77b2dc1a372b18fec19b49cf980efd68af69";
 
 static SemaphoreHandle_t gMutex = nullptr;
 static TaskHandle_t gTask = nullptr;
@@ -168,7 +158,7 @@ static bool verifyCatalogSignature(const uint8_t* payload, size_t payloadLen, co
   mbedtls_mpi_init(&r); mbedtls_mpi_init(&s);
   mbedtls_mpi_init(&order); mbedtls_mpi_init(&halfOrder);
   rc = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
-  if(rc == 0) rc = mbedtls_ecp_point_read_binary(&grp, &q, CATALOG_PUBLIC_KEY, sizeof(CATALOG_PUBLIC_KEY));
+  if(rc == 0) rc = mbedtls_ecp_point_read_binary(&grp, &q, FLEX_STORE_PUBLIC_KEY, sizeof(FLEX_STORE_PUBLIC_KEY));
   if(rc == 0) rc = mbedtls_ecp_check_pubkey(&grp, &q);
   if(rc == 0) rc = mbedtls_mpi_read_binary(&r, sig, 32);
   if(rc == 0) rc = mbedtls_mpi_read_binary(&s, sig + 32, 32);
@@ -187,6 +177,22 @@ static bool copyString(cJSON* obj, const char* key, char* out, size_t cap, bool 
   if(!cJSON_IsString(v) || !v->valuestring || strlen(v->valuestring) >= cap) return false;
   memcpy(out, v->valuestring, strlen(v->valuestring) + 1);
   return true;
+}
+
+static bool downloadGrant(const char* url, uint8_t out[FLEXGRANT_BYTES]){
+  if(!allowedUrl(url)) return false;
+  WiFiClientSecure sec; sec.setInsecure(); sec.setHandshakeTimeout(12);
+  HTTPClient http; http.setTimeout(HTTP_TIMEOUT_MS); http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  if(!http.begin(sec, url)) return false;
+  int code = http.GET();
+  if(code != HTTP_CODE_OK){ http.end(); return false; }
+  uint8_t* body = nullptr; size_t bodyLen = 0;
+  bool ok = readHttpBody(http, &body, &bodyLen, FLEXGRANT_BYTES);
+  http.end();
+  if(ok && bodyLen == FLEXGRANT_BYTES) memcpy(out, body, FLEXGRANT_BYTES);
+  else ok = false;
+  free(body);
+  return ok;
 }
 
 static bool parseCatalogPayload(const uint8_t* payload, size_t payloadLen){
@@ -217,6 +223,14 @@ static bool parseCatalogPayload(const uint8_t* payload, size_t payloadLen){
        !copyString(v, "sha256", next[used].packageSha256, sizeof(next[used].packageSha256)) ||
        !copyString(v, "downloadUrl", next[used].downloadUrl, sizeof(next[used].downloadUrl)) ||
        !allowedUrl(next[used].downloadUrl)) { ok = false; break; }
+    cJSON* grantUrl = cJSON_GetObjectItemCaseSensitive(v, "permissionGrantUrl");
+    next[used].permissionGrantUrl[0] = 0;
+    if(grantUrl && !cJSON_IsNull(grantUrl)){
+      if(!cJSON_IsString(grantUrl) || !grantUrl->valuestring ||
+         strlen(grantUrl->valuestring) >= sizeof(next[used].permissionGrantUrl) ||
+         !allowedUrl(grantUrl->valuestring)){ ok = false; break; }
+      snprintf(next[used].permissionGrantUrl, sizeof(next[used].permissionGrantUrl), "%s", grantUrl->valuestring);
+    }
     cJSON* code = cJSON_GetObjectItemCaseSensitive(v, "code");
     cJSON* size = cJSON_GetObjectItemCaseSensitive(v, "size");
     cJSON* rating = cJSON_GetObjectItemCaseSensitive(a, "rating");
@@ -244,7 +258,7 @@ static bool refreshCatalog(){
   if(WiFi.status() != WL_CONNECTED){ status(FLEXSTORE_ERROR, 0, "Sin conexion", "Conecta Wi-Fi para abrir Flex Store"); return false; }
   WiFiClientSecure sec;
   // La autenticidad NO depende de este canal: el envelope del catalogo esta
-  // firmado por CATALOG_PUBLIC_KEY y cada paquete vuelve a verificarse con
+  // firmado por FLEX_STORE_PUBLIC_KEY y cada paquete vuelve a verificarse con
   // SHA-256 + ECDSA. Esto permite sobrevivir a rotaciones del certificado del
   // hosting sin aceptar un catalogo o binario modificado.
   sec.setInsecure();
@@ -266,7 +280,7 @@ static bool refreshCatalog(){
   cJSON* payloadNode = cJSON_GetObjectItemCaseSensitive(root, "payload");
   cJSON* sigNode = cJSON_GetObjectItemCaseSensitive(root, "signature");
   ok = cJSON_IsNumber(schema) && schema->valuedouble == 2.0 && cJSON_IsString(alg) && !strcmp(alg->valuestring, "ES256") &&
-       cJSON_IsString(key) && !strcmp(key->valuestring, CATALOG_KEY_ID) && cJSON_IsString(payloadNode) && cJSON_IsString(sigNode);
+       cJSON_IsString(key) && !strcmp(key->valuestring, FLEX_STORE_KEY_ID) && cJSON_IsString(payloadNode) && cJSON_IsString(sigNode);
   if(!ok){
     cJSON_Delete(root);
     status(FLEXSTORE_ERROR, 0, "Catalogo incompatible", "Formato o clave del catalogo no reconocidos");
@@ -361,9 +375,26 @@ static bool downloadAndInstall(const FlexStoreItem& item){
            gCancel ? nullptr : "SHA-256 no coincide con el catalogo firmado");
     return false;
   }
+  uint8_t grant[FLEXGRANT_BYTES];
+  uint32_t grantLen = 0;
+  if(item.permissionGrantUrl[0]){
+    status(FLEXSTORE_DOWNLOADING, 56, "Descargando permisos aprobados");
+    if(!downloadGrant(item.permissionGrantUrl, grant)){
+      LittleFS.remove(TEMP_PACKAGE);
+      status(gCancel ? FLEXSTORE_CANCELLED : FLEXSTORE_ERROR, 0,
+             gCancel ? "Cancelado" : "Permiso no disponible",
+             gCancel ? nullptr : "Flex Store no entrego un permiso firmado valido");
+      return false;
+    }
+    grantLen = FLEXGRANT_BYTES;
+  }
   status(FLEXSTORE_INSTALLING, 58, "Verificando Flex Package");
   FlexPkgInfo installed;
-  ok = flexPkgInstall(TEMP_PACKAGE, &installed, pkgProgress, nullptr);
+  ok = grantLen
+       ? flexPkgInstallWithGrant(TEMP_PACKAGE, grant, grantLen,
+                                 FLEX_STORE_PUBLIC_KEY, 0,
+                                 &installed, pkgProgress, nullptr)
+       : flexPkgInstall(TEMP_PACKAGE, &installed, pkgProgress, nullptr);
   LittleFS.remove(TEMP_PACKAGE);
   if(!ok){
     status(flexPkgErrorCode() == FLEXPKG_ERR_CANCELLED ? FLEXSTORE_CANCELLED : FLEXSTORE_ERROR, 0,

@@ -241,10 +241,10 @@ FlexGrantStatus flexGrantCheck(const uint8_t* blob, uint32_t len,
   bool windowChecked = false;
   if(nb || na){
     if(expect->nowEpoch == 0){
-      // El reloj todavía no es fiable (sin NTP tras un arranque en frío).
-      // NO se concede de más por eso: sólo se OMITE la comprobación temporal
-      // y se deja constancia para que la interfaz pueda decirlo.
-      windowChecked = false;
+      // Sin una hora fiable no se puede demostrar que un grant con ventana
+      // siga vigente. Fallar cerrado evita que un grant futuro o caducado
+      // recupere privilegios durante el arranque, antes de sincronizar NTP.
+      return FLEXGRANT_ERR_WINDOW;
     } else {
       if(nb && expect->nowEpoch < nb) return FLEXGRANT_ERR_WINDOW;
       if(na && expect->nowEpoch > na) return FLEXGRANT_ERR_WINDOW;

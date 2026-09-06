@@ -337,6 +337,8 @@ static bool progressBridge(uint8_t pct, const char* stage, void* user){
 }
 
 static bool runPackage(const char* packagePath, FlexPkgInfo* out, bool install,
+                       const uint8_t* externalGrant, uint32_t externalGrantLen,
+                       const uint8_t* trustedStorePublicKey, uint64_t nowEpoch,
                        FlexPkgProgressFn cb, void* user){
   if(gBusy){ setError(FLEXPKG_ERR_BUSY, "El instalador ya esta ocupado"); return false; }
   gBusy = true; gCancel = false; setError(FLEXPKG_OK, "Correcto");
@@ -400,6 +402,52 @@ static bool runPackage(const char* packagePath, FlexPkgInfo* out, bool install,
                                          progressBridge, &wrap,
                                          gErrText, sizeof(gErrText), FLEXOS_FW_VERSION);
     if(rc != FLEXPKG_OK){ gErr = rc; ok = false; }
+  }
+
+  // Flex Store entrega el grant como recurso separado: el paquete del
+  // desarrollador permanece inmutable y conserva el SHA-256 publicado en el
+  // catalogo. Antes de escribir nada permanente se ata criptograficamente el
+  // grant al hash firmado, manifest, version y clave que acabamos de validar.
+  if(ok && externalGrantLen){
+    if(!install || !externalGrant || externalGrantLen != FLEXGRANT_BYTES ||
+       !trustedStorePublicKey){
+      setError(FLEXPKG_ERR_GRANT, "El permiso descargado tiene un formato invalido");
+      ok = false;
+    } else if(core->grantLen){
+      setError(FLEXPKG_ERR_GRANT, "El paquete ya contiene otro permiso firmado");
+      ok = false;
+    } else {
+      FlexGrantExpect expected;
+      memset(&expected, 0, sizeof(expected));
+      expected.packageId = core->info.id;
+      expected.versionName = core->info.versionName;
+      expected.versionCode = core->info.versionCode;
+      memcpy(expected.packageSha256, core->signedHash, sizeof(expected.packageSha256));
+      expected.manifestRequested = core->info.systemPermissions;
+      expected.nowEpoch = nowEpoch;
+      if(!flexPkgCoreHexToBytes(core->info.developerKeySha256,
+                               expected.developerKeySha256,
+                               sizeof(expected.developerKeySha256))){
+        setError(FLEXPKG_ERR_GRANT, "La identidad del desarrollador no se pudo comprobar");
+        ok = false;
+      } else {
+        FlexGrantResult result;
+        FlexGrantStatus grantStatus = flexGrantCheck(externalGrant, externalGrantLen,
+                                                     &expected, trustedStorePublicKey,
+                                                     &result);
+        if(grantStatus != FLEXGRANT_OK){
+          char detail[128];
+          snprintf(detail, sizeof(detail), "Permiso de sistema rechazado: %s",
+                   flexGrantStatusText((uint8_t)grantStatus));
+          setError(FLEXPKG_ERR_GRANT, detail);
+          ok = false;
+        } else {
+          memcpy(core->grant, externalGrant, FLEXGRANT_BYTES);
+          core->grantLen = FLEXGRANT_BYTES;
+          core->info.grantLen = FLEXGRANT_BYTES;
+        }
+      }
+    }
   }
 
   if(ok && install){
@@ -491,11 +539,21 @@ bool flexPkgBegin(){
 }
 
 bool flexPkgInspect(const char* packagePath, FlexPkgInfo* out, FlexPkgProgressFn cb, void* user){
-  return runPackage(packagePath, out, false, cb, user);
+  return runPackage(packagePath, out, false, nullptr, 0, nullptr, 0, cb, user);
 }
 
 bool flexPkgInstall(const char* packagePath, FlexPkgInfo* out, FlexPkgProgressFn cb, void* user){
-  return runPackage(packagePath, out, true, cb, user);
+  return runPackage(packagePath, out, true, nullptr, 0, nullptr, 0, cb, user);
+}
+
+bool flexPkgInstallWithGrant(const char* packagePath,
+                             const uint8_t* grant, uint32_t grantLen,
+                             const uint8_t trustedStorePublicKey[65],
+                             uint64_t nowEpoch,
+                             FlexPkgInfo* out,
+                             FlexPkgProgressFn cb, void* user){
+  return runPackage(packagePath, out, true, grant, grantLen,
+                    trustedStorePublicKey, nowEpoch, cb, user);
 }
 
 bool flexPkgUninstall(const char* packageId){

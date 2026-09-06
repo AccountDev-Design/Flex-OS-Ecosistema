@@ -166,17 +166,32 @@ sí.
 | `display.exclusive` | pantalla completa sin marco |
 | `storage.app` | carpeta privada de la app |
 
-El circuito es:
+El circuito de **Flex Store** es:
 
-1. `build` sin grant y `inspect` para copiar el **`packageSha256`**.
-2. Pedir el grant en **Flex Developer Studio**, que lo firma con la clave de
-   Flex Store (la privada vive sólo en su backend; la pública está incrustada
-   en el firmware).
-3. Volver a empaquetar: `build ... --grant miapp.flexgrant`.
+1. `build` sin grant y subir ese `.flexpkg` inmutable a **Flex Developer
+   Studio**. Los permisos seleccionados deben coincidir exactamente con
+   `systemPermissions` del manifest firmado.
+2. El administrador aprueba la versión y sus permisos. Developer Studio
+   vuelve a validar el paquete almacenado y emite un bloque binario `FLXG v1`
+   firmado con la clave de Flex Store (la privada vive sólo en su backend; la
+   pública está incrustada en el firmware).
+3. El catálogo firmado publica dos URLs: el `.flexpkg` original y, cuando
+   corresponde, su `.flexgrant`. Flex Store descarga ambos, comprueba el hash
+   completo del paquete y valida el grant contra el hash de contenido firmado,
+   la versión, la identidad del desarrollador y el manifest antes de activar
+   la aplicación. El paquete y el grant quedan instalados en una sola
+   transacción.
 
-El grant ata `packageId`, `versionName`, `versionCode`, el SHA-256 del
-paquete y la huella de tu clave. **Cada versión necesita su grant**: por eso
-un grant no se puede reutilizar en otro binario ni en otra app.
+Para una instalación manual por cable se puede descargar el `.flexgrant`
+aprobado y adjuntarlo con `build ... --grant miapp.flexgrant`. Ése es un flujo
+de distribución alternativo; **no** se debe volver a subir a Developer Studio
+el paquete ya modificado con un grant.
+
+El grant ata `packageId`, `versionName`, `versionCode`, el SHA-256 del contenido
+firmado (`manifest || index || payload`) y la huella de tu clave. Developer
+Studio también ata la revisión al SHA-256 completo del archivo subido. **Cada
+versión necesita su grant**: por eso un grant no se puede reutilizar en otro
+binario ni en otra app.
 
 Sin grant, tu app **se instala y funciona**; lo único que no puede es tocar
 los servicios de sistema. Es un modo perfectamente válido para la mayoría de

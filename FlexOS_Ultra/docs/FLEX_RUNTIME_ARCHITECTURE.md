@@ -252,12 +252,15 @@ Sólo dos cambios, los dos compatibles hacia atrás:
    Con `flex-app-v1` el `entry` apunta a un `.flxb` y el manifest lleva un
    bloque `limits` ampliado (memoria lineal, instrucciones/tick, µs/tick,
    comandos de dibujo/frame, cuota de almacenamiento).
-2. **Trailer de grant.** Los bytes reservados 56..59 de la cabecera pasan a ser
+2. **Grant opcional.** Los bytes reservados 56..59 de la cabecera pasan a ser
    `grantLen (u32)`, con valor `0` (paquete sin grant, comportamiento idéntico
    al de hoy) o exactamente `FLEXGRANT_BYTES`. Los bytes 60..63 siguen
    reservados a cero. El grant va **después** de la firma, así que **no entra**
    en `signedHash`: por eso puede referirse al hash del paquete sin morderse la
-   cola.
+   cola. Para instalaciones manuales puede viajar como trailer. En Flex Store,
+   Developer Studio conserva el `.flexpkg` inmutable y publica el grant como
+   recurso binario separado; `flexPkgInstallWithGrant` valida ambos y persiste
+   el grant dentro del mismo slot temporal antes del commit.
 
 Un firmware viejo que reciba un paquete con grant lo rechaza por "bytes
 reservados inválidos" — falla **cerrado**, que es lo correcto.
@@ -268,7 +271,7 @@ reservados inválidos" — falla **cerrado**, que es lo correcto.
   grant válido no existe, aunque esté escrito en el manifest.
 * El grant es un bloque binario de tamaño fijo (sin JSON, sin canonicalización
   ambigua) firmado con la **clave pinneada de Flex Store** — la misma constante
-  que ya valida el catálogo (`CATALOG_PUBLIC_KEY`).
+  central (`FLEX_STORE_PUBLIC_KEY`) que ya valida el catálogo.
 * Se comprueban, en este orden: magia y versión, propósito, `packageId`,
   `versionName` + `versionCode`, `packageSha256` **del paquete realmente
   instalado**, `developerKeySha256`, coherencia máscara↔contador de permisos,
@@ -395,7 +398,7 @@ firmador, emisor de grants, validador de manifest, plantilla y app de ejemplo.
 | Landscape rompe launcher / teclado / retorno | la orientación la pone y la restaura **el gestor**, no la app; se restaura en `stop` por cualquier vía (salir, cerrar forzado, error, cancelación), y hay prueba dedicada |
 | Fugas al abrir y cerrar apps | todo lo de una app cuelga de un único bloque de reservas contabilizado; prueba de 25 ciclos abrir/cerrar comparando contadores de reserva |
 | Un grant de otra app o de otra versión | el grant ata `packageId` + `versionCode` + `versionName` + `packageSha256` + `developerKeySha256`; hay una prueba por cada campo alterado |
-| Reloj no fiable ⇒ grants "caducados" | si el sistema aún no tiene hora de red, la ventana temporal **no se aplica** y se anota; nunca se concede de más por reloj, sólo se omite el chequeo temporal |
+| Reloj no fiable ⇒ ventana imposible de comprobar | cualquier grant con `notBefore` o `notAfter` falla cerrado hasta disponer de una hora fiable; los grants sin ventana no dependen del reloj |
 | CPU stress bloquea la interfaz | se ejecuta por *slices* con cesión entre ellos, cancelación inmediata y techo de duración; nunca un bucle infinito |
 | Reserva de PSRAM agota el sistema | techo por app + veredicto de `FlexOS_Mem` + devolución limpia de `NULL`; nunca se intenta reservar toda la PSRAM |
 | Temperatura inventada | si el SoC/SDK no expone lectura real, el servicio devuelve "No disponible". No se sintetiza un número |

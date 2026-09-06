@@ -88,15 +88,17 @@ decorativo: el bucle escribe y relee memoria a través de una variable
    los índices se calculan en enteros (o en milésimas) y se guardan en la
    carpeta privada.
 
-4. **Grant.** Publicar el paquete, obtener su `packageSha256` y pedir el
-   grant en Flex Developer Studio, que lo firma con la clave de Flex Store.
-   Volver a empaquetar con `--grant`. Sin grant la app **se instala y
-   funciona**, pero no puede medir el sistema.
+4. **Grant.** Construir y subir a Flex Developer Studio el paquete **sin
+   grant**. Tras aprobar la versión y sus permisos, Developer Studio expone un
+   `FLXG v1` binario firmado. Flex Store descarga por separado el paquete
+   inmutable y ese grant, y los instala en una sola transacción. Sin grant la
+   app **se instala y funciona**, pero no puede medir el sistema.
 
    ```bash
    node sdk/bin/flexpkg.js build  bench -k dev.pem -o bench.flexpkg
-   node sdk/bin/flexpkg.js inspect bench.flexpkg        # copia el packageSha256
-   # ... Flex Developer Studio emite bench.flexgrant ...
+   # ... subir bench.flexpkg y aprobarlo en Flex Developer Studio ...
+   # Flex Store consume automáticamente package URL + permissionGrantUrl.
+   # Sólo para instalación manual por cable:
    node sdk/bin/flexpkg.js build  bench -k dev.pem --grant bench.flexgrant -o bench.flexpkg
    ```
 
@@ -109,10 +111,11 @@ decorativo: el bucle escribe y relee memoria a través de una variable
 
 ## 4. Lo que hay que tener claro
 
-* **Un grant vale para UN paquete.** Ata `packageId`, `versionName`,
-  `versionCode`, el SHA-256 del paquete y la huella del desarrollador. Cada
-  versión nueva necesita un grant nuevo: es lo que impide reutilizar permisos
-  privilegiados en otro binario.
+* **Un grant vale para UN contenido firmado.** Ata `packageId`, `versionName`,
+  `versionCode`, SHA-256 de `manifest || index || payload` y la huella del
+  desarrollador. Developer Studio ata además la aprobación al SHA-256 completo
+  del archivo subido. Cada versión nueva necesita un grant nuevo: es lo que
+  impide reutilizar permisos privilegiados en otro binario.
 * **`benchmark.run` no abre nada por sí solo.** Marca la sesión de medición;
   cada servicio sigue exigiendo *su* permiso.
 * **Temperatura: hoy devuelve "no disponible".** Este firmware **no** tiene

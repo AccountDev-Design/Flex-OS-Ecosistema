@@ -29,6 +29,7 @@ struct FlexStoreItem {
   uint32_t packageBytes;
   char packageSha256[65];
   char downloadUrl[320];
+  char permissionGrantUrl[320];
   uint16_t ratingX100;
   uint32_t ratingCount;
 };

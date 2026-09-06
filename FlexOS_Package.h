@@ -40,7 +40,8 @@ enum FlexPkgErrorCode : uint8_t {
   FLEXPKG_ERR_COMMIT,
   FLEXPKG_ERR_NOT_FOUND,
   FLEXPKG_ERR_BUSY,
-  FLEXPKG_ERR_CANCELLED
+  FLEXPKG_ERR_CANCELLED,
+  FLEXPKG_ERR_GRANT
 };
 
 // Runtime declarado por el manifest. "flex-ui-1" es el de siempre (pantallas
@@ -112,6 +113,17 @@ bool flexPkgInspect(const char* packagePath, FlexPkgInfo* out,
 // complete new package, entrypoint and developer identity have been verified.
 bool flexPkgInstall(const char* packagePath, FlexPkgInfo* out,
                     FlexPkgProgressFn progress = nullptr, void* user = nullptr);
+
+// Instalacion desde Flex Store cuando el grant se entrega como un recurso
+// firmado separado. El grant se valida contra el contenido, desarrollador,
+// version y permisos del paquete ANTES de activar la nueva version.
+bool flexPkgInstallWithGrant(const char* packagePath,
+                             const uint8_t* grant, uint32_t grantLen,
+                             const uint8_t trustedStorePublicKey[65],
+                             uint64_t nowEpoch,
+                             FlexPkgInfo* out,
+                             FlexPkgProgressFn progress = nullptr,
+                             void* user = nullptr);
 
 bool flexPkgUninstall(const char* packageId);
 

@@ -496,6 +496,48 @@ static void testInstallApp1WithGrant(){
   CHECK(got.grantLen == FLEXGRANT_BYTES, "el registro dice que trae permisos");
   CHECK(got.systemPermissions == FLEXPERM_SYS_STORAGE_APP, "y que el manifest los declaraba");
 
+  // El flujo real de Flex Store descarga el paquete inmutable y el grant por
+  // separado. Los dos se validan y se activan en la misma transaccion.
+  fsStubReset();
+  flexPkgBegin();
+  putPackage("/plain.flexpkg", plain.bytes);
+  CHECK(flexPkgInstallWithGrant("/plain.flexpkg", grant.data(), (uint32_t)grant.size(),
+                                gStore.pub.data(), 0, &info),
+        "un grant externo valido se instala junto al paquete: %s", flexPkgError());
+  memset(back, 0, sizeof(back));
+  CHECK(flexPkgGrant("com.flexos.contador", back, sizeof(back)) == FLEXGRANT_BYTES &&
+        memcmp(back, grant.data(), FLEXGRANT_BYTES) == 0,
+        "el grant externo queda persistido exactamente una vez");
+
+  // Otra firma de Store no puede convertir una descarga valida en una app
+  // privilegiada, y el fallo no deja una instalacion parcial.
+  fsStubReset();
+  flexPkgBegin();
+  putPackage("/plain.flexpkg", plain.bytes);
+  pkgb::Bytes forged = pkgb::buildGrant(g, gDev2);
+  CHECK(!flexPkgInstallWithGrant("/plain.flexpkg", forged.data(), (uint32_t)forged.size(),
+                                 gStore.pub.data(), 0, &info),
+        "un grant externo firmado por otra clave se rechaza");
+  CHECK(flexPkgErrorCode() == FLEXPKG_ERR_GRANT,
+        "el rechazo identifica el grant y no el paquete (%s)", flexPkgError());
+  CHECK(!LittleFS.exists("/FlexApps/com.flexos.contador/active"),
+        "un grant rechazado no deja la app a medio instalar");
+
+  // Una ventana temporal necesita un reloj fiable incluso durante la
+  // instalacion: sin hora, nunca se conceden privilegios por descarte.
+  fsStubReset();
+  flexPkgBegin();
+  putPackage("/plain.flexpkg", plain.bytes);
+  pkgb::GrantSpec timedSpec = g;
+  timedSpec.notBefore = 1700000000ull;
+  timedSpec.notAfter = 1900000000ull;
+  pkgb::Bytes timed = pkgb::buildGrant(timedSpec, gStore);
+  CHECK(!flexPkgInstallWithGrant("/plain.flexpkg", timed.data(), (uint32_t)timed.size(),
+                                 gStore.pub.data(), 0, &info),
+        "sin reloj fiable un grant temporal falla cerrado");
+  CHECK(flexPkgErrorCode() == FLEXPKG_ERR_GRANT,
+        "la falta de hora no degrada silenciosamente los permisos");
+
   // Un bytecode que no es FLXB no debe llegar a activarse.
   fsStubReset();
   flexPkgBegin();

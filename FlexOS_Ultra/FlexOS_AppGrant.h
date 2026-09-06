@@ -89,7 +89,7 @@ enum FlexGrantStatus : uint8_t {
   FLEXGRANT_ERR_DEVELOPER, // SHA-256 de la clave del desarrollador distinto
   FLEXGRANT_ERR_PERMS,     // permisos desconocidos, o máscara y contador que no cuadran
   FLEXGRANT_ERR_MANIFEST,  // concede algo que el manifest ni siquiera pedía
-  FLEXGRANT_ERR_WINDOW,    // fuera de la ventana de validez (con reloj fiable)
+  FLEXGRANT_ERR_WINDOW,    // fuera de ventana o sin reloj fiable para comprobarla
   FLEXGRANT_ERR_SIGNATURE  // la firma no es de la clave pinneada de Flex Store
 };
 
@@ -109,7 +109,7 @@ struct FlexGrantResult {
   uint32_t granted;        // máscara realmente concedida (0 si status != OK)
   uint64_t notBefore;
   uint64_t notAfter;
-  uint8_t  windowChecked;  // 0 = había ventana pero el reloj no era fiable
+  uint8_t  windowChecked;  // 1 en todo grant aceptado; 0 si status != OK
 };
 
 // Comprueba un grant COMPLETO. `trustedPub` son los 65 bytes de la clave
