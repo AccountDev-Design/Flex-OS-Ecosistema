@@ -135,6 +135,18 @@ static bool base64UrlDecode(const char* text, uint8_t** out, size_t* outLen, siz
 #endif
 
 static bool verifyCatalogSignature(const uint8_t* payload, size_t payloadLen, const uint8_t sig[64]){
+  // WebCrypto puede producir firmas ECDSA con S alto. Aunque ambas formas son
+  // matematicamente validas, algunos backends criptograficos del ESP32-P4 solo
+  // aceptan la representacion canonica (low-S). Normalizar aqui no relaja la
+  // verificacion: (r, N-s) representa exactamente la misma firma ECDSA.
+  static const uint8_t P256_ORDER[32] = {
+    0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xbc,0xe6,0xfa,0xad,0xa7,0x17,0x9e,0x84,0xf3,0xb9,0xca,0xc2,0xfc,0x63,0x25,0x51
+  };
+  static const uint8_t P256_HALF_ORDER[32] = {
+    0x7f,0xff,0xff,0xff,0x80,0x00,0x00,0x00,0x7f,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xde,0x73,0x7d,0x56,0xd3,0x8b,0xcf,0x42,0x79,0xdc,0xe5,0x61,0x7e,0x31,0x92,0xa8
+  };
   uint8_t hash[32];
   mbedtls_sha256_context hc; mbedtls_sha256_init(&hc);
   int rc = SHA_START(&hc);
@@ -144,13 +156,19 @@ static bool verifyCatalogSignature(const uint8_t* payload, size_t payloadLen, co
   if(rc != 0) return false;
   mbedtls_ecp_group grp; mbedtls_ecp_group_init(&grp);
   mbedtls_ecp_point q; mbedtls_ecp_point_init(&q);
-  mbedtls_mpi r, s; mbedtls_mpi_init(&r); mbedtls_mpi_init(&s);
+  mbedtls_mpi r, s, order, halfOrder;
+  mbedtls_mpi_init(&r); mbedtls_mpi_init(&s);
+  mbedtls_mpi_init(&order); mbedtls_mpi_init(&halfOrder);
   rc = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
   if(rc == 0) rc = mbedtls_ecp_point_read_binary(&grp, &q, CATALOG_PUBLIC_KEY, sizeof(CATALOG_PUBLIC_KEY));
   if(rc == 0) rc = mbedtls_ecp_check_pubkey(&grp, &q);
   if(rc == 0) rc = mbedtls_mpi_read_binary(&r, sig, 32);
   if(rc == 0) rc = mbedtls_mpi_read_binary(&s, sig + 32, 32);
+  if(rc == 0) rc = mbedtls_mpi_read_binary(&order, P256_ORDER, sizeof(P256_ORDER));
+  if(rc == 0) rc = mbedtls_mpi_read_binary(&halfOrder, P256_HALF_ORDER, sizeof(P256_HALF_ORDER));
+  if(rc == 0 && mbedtls_mpi_cmp_mpi(&s, &halfOrder) > 0) rc = mbedtls_mpi_sub_mpi(&s, &order, &s);
   if(rc == 0) rc = mbedtls_ecdsa_verify(&grp, hash, 32, &q, &r, &s);
+  mbedtls_mpi_free(&halfOrder); mbedtls_mpi_free(&order);
   mbedtls_mpi_free(&s); mbedtls_mpi_free(&r); mbedtls_ecp_point_free(&q); mbedtls_ecp_group_free(&grp);
   return rc == 0;
 }
@@ -241,14 +259,28 @@ static bool refreshCatalog(){
   cJSON* sigNode = cJSON_GetObjectItemCaseSensitive(root, "signature");
   ok = cJSON_IsNumber(schema) && schema->valuedouble == 2.0 && cJSON_IsString(alg) && !strcmp(alg->valuestring, "ES256") &&
        cJSON_IsString(key) && !strcmp(key->valuestring, CATALOG_KEY_ID) && cJSON_IsString(payloadNode) && cJSON_IsString(sigNode);
+  if(!ok){
+    cJSON_Delete(root);
+    status(FLEXSTORE_ERROR, 0, "Catalogo incompatible", "Formato o clave del catalogo no reconocidos");
+    return false;
+  }
   uint8_t *payload = nullptr, *sig = nullptr; size_t payloadLen = 0, sigLen = 0;
-  if(ok) ok = base64UrlDecode(payloadNode->valuestring, &payload, &payloadLen, CATALOG_MAX) &&
-              base64UrlDecode(sigNode->valuestring, &sig, &sigLen, 64) && sigLen == 64;
+  ok = base64UrlDecode(payloadNode->valuestring, &payload, &payloadLen, CATALOG_MAX) &&
+       base64UrlDecode(sigNode->valuestring, &sig, &sigLen, 64) && sigLen == 64;
   cJSON_Delete(root);
-  if(ok) ok = verifyCatalogSignature(payload, payloadLen, sig);
-  if(ok) ok = parseCatalogPayload(payload, payloadLen);
+  if(!ok){
+    free(sig); free(payload);
+    status(FLEXSTORE_ERROR, 0, "Catalogo invalido", "Payload o firma mal codificados");
+    return false;
+  }
+  if(!verifyCatalogSignature(payload, payloadLen, sig)){
+    free(sig); free(payload);
+    status(FLEXSTORE_ERROR, 0, "Firma invalida", "La firma ES256 del catalogo no coincide");
+    return false;
+  }
+  ok = parseCatalogPayload(payload, payloadLen);
   free(sig); free(payload);
-  if(!ok){ status(FLEXSTORE_ERROR, 0, "Firma invalida", "Flex Store rechazo un catalogo no autentico"); return false; }
+  if(!ok){ status(FLEXSTORE_ERROR, 0, "Catalogo incompatible", "El contenido firmado no cumple el formato de Flex Store"); return false; }
   status(FLEXSTORE_READY, 100, "Catalogo actualizado");
   return true;
 }
