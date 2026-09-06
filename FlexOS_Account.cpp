@@ -50,6 +50,7 @@ static volatile bool gCancelRequested = false;
 static FlexAccountSnapshot gSnapshot;
 static char gRequestedLabel[49] = "FlexOS Ultra";
 static char gBearer[48] = "";          // 32 bytes codificados base64url = 43 caracteres
+static char gRequestError[128] = "";
 
 static void lock(){ if(gMutex) xSemaphoreTake(gMutex, portMAX_DELAY); }
 static void unlock(){ if(gMutex) xSemaphoreGive(gMutex); }
@@ -315,29 +316,45 @@ static bool persistLinked(const char* bearer, const char* address, const char* d
 }
 
 static bool requestDeviceCode(const char* label, const char* tokenHash, char code[9], char activationUrl[192]){
-  if(WiFi.status() != WL_CONNECTED) return false;
-  char escaped[104]; if(!jsonEscape(label, escaped, sizeof(escaped))) return false;
+  gRequestError[0] = 0;
+  if(WiFi.status() != WL_CONNECTED){ snprintf(gRequestError, sizeof(gRequestError), "Wi-Fi se desconecto durante el enlace"); return false; }
+  char escaped[104];
+  if(!jsonEscape(label, escaped, sizeof(escaped))){ snprintf(gRequestError, sizeof(gRequestError), "Nombre del dispositivo no valido"); return false; }
   char id[40]; hardwareId(id);
   char body[420];
   int written = snprintf(body, sizeof(body),
     "{\"hardwareId\":\"%s\",\"label\":\"%s\",\"model\":\"ESP32-P4\",\"flexVersion\":\"%s\",\"tokenHash\":\"%s\"}",
     id, escaped, FLEXOS_FW_VERSION, tokenHash);
-  if(written <= 0 || written >= (int)sizeof(body)) return false;
+  if(written <= 0 || written >= (int)sizeof(body)){ snprintf(gRequestError, sizeof(gRequestError), "Solicitud de cuenta demasiado grande"); return false; }
   WiFiClientSecure secure;
   // No secreto viaja en esta operacion: solo una huella SHA-256. La respuesta
   // se acepta unicamente despues de validar la firma P-256 anclada arriba.
   secure.setInsecure();
   secure.setHandshakeTimeout(12);
   HTTPClient http; http.setTimeout(HTTP_TIMEOUT_MS); http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  if(!http.begin(secure, FLEX_ACCOUNT_CODE_URL)) return false;
+  // Cloudflare puede responder el POST con cuerpo chunked y mantener viva la
+  // conexion. HTTP/1.0 + Connection: close da al lector un final inequÃ­voco.
+  http.useHTTP10(true);
+  http.setUserAgent("FlexOS-Ultra/1.0 ESP32-P4");
+  if(!http.begin(secure, FLEX_ACCOUNT_CODE_URL)){ snprintf(gRequestError, sizeof(gRequestError), "No se pudo abrir el servicio de Flex Account"); return false; }
   http.addHeader("Content-Type", "application/json");
+  http.addHeader("Accept", "application/json");
+  http.addHeader("Connection", "close");
   int statusCode = http.POST((uint8_t*)body, (size_t)written);
-  if(statusCode != HTTP_CODE_CREATED){ http.end(); return false; }
+  if(statusCode != HTTP_CODE_CREATED && statusCode != HTTP_CODE_OK){
+    snprintf(gRequestError, sizeof(gRequestError), statusCode > 0 ? "Flex Account respondio HTTP %d" : "Fallo HTTPS %d", statusCode);
+    http.end(); return false;
+  }
   uint8_t* envelope = nullptr; size_t envelopeLen = 0;
   bool ok = readHttpBody(http, &envelope, &envelopeLen); http.end();
+  if(!ok) snprintf(gRequestError, sizeof(gRequestError), "Respuesta de Flex Account incompleta");
   uint8_t* payload = nullptr; size_t payloadLen = 0;
-  if(ok) ok = signedPayload(envelope, envelopeLen, &payload, &payloadLen);
-  if(ok) ok = parseCodePayload(payload, payloadLen, tokenHash, code, activationUrl);
+  if(ok && !signedPayload(envelope, envelopeLen, &payload, &payloadLen)){
+    ok = false; snprintf(gRequestError, sizeof(gRequestError), "Firma ES256 de Flex Account no valida");
+  }
+  if(ok && !parseCodePayload(payload, payloadLen, tokenHash, code, activationUrl)){
+    ok = false; snprintf(gRequestError, sizeof(gRequestError), "Datos de vinculacion incompatibles");
+  }
   free(payload); free(envelope);
   return ok;
 }
@@ -349,7 +366,11 @@ static PollResult pollDeviceCode(const char* code, const char* tokenHash, char a
   if(written <= 0 || written >= (int)sizeof(url)) return POLL_INVALID;
   WiFiClientSecure secure; secure.setInsecure(); secure.setHandshakeTimeout(12);
   HTTPClient http; http.setTimeout(HTTP_TIMEOUT_MS); http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.useHTTP10(true);
+  http.setUserAgent("FlexOS-Ultra/1.0 ESP32-P4");
   if(!http.begin(secure, url)) return POLL_PENDING;
+  http.addHeader("Accept", "application/json");
+  http.addHeader("Connection", "close");
   int statusCode = http.GET();
   if(statusCode != HTTP_CODE_OK){ http.end(); return statusCode == HTTP_CODE_NOT_FOUND ? POLL_INVALID : POLL_PENDING; }
   uint8_t* envelope = nullptr; size_t envelopeLen = 0;
@@ -374,7 +395,8 @@ static void linkFlow(const char* label){
   setStatus(FLEX_ACCOUNT_REQUESTING, 28, "Contactando Flex Account");
   if(!requestDeviceCode(label, tokenHash, code, activationUrl)){
     if(gCancelRequested) setStatus(FLEX_ACCOUNT_CANCELLED, 0, "Cancelado");
-    else setStatus(FLEX_ACCOUNT_ERROR, 0, "Enlace no disponible", "No se recibio una respuesta autentica de Flex Account");
+    else setStatus(FLEX_ACCOUNT_ERROR, 0, "Enlace no disponible",
+                   gRequestError[0] ? gRequestError : "No se recibio una respuesta autentica de Flex Account");
     memset(bearer, 0, sizeof(bearer)); return;
   }
   lock();
