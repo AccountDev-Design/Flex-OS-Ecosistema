@@ -312,6 +312,15 @@ static bool downloadAndInstall(const FlexStoreItem& item){
   if(WiFi.status() != WL_CONNECTED || !allowedUrl(item.downloadUrl)){
     status(FLEXSTORE_ERROR, 0, "Sin conexion", "No se puede descargar esta app"); return false;
   }
+  // La UI mantiene una cache para no recorrer LittleFS en cada repintado, pero
+  // el sistema de archivos es la fuente de verdad. Si la app ya esta instalada
+  // (por ejemplo tras reiniciar justo despues de instalar), no descargamos ni
+  // tratamos la misma version como un fallo de toda la tienda.
+  FlexPkgInfo current;
+  if(flexPkgGet(item.packageId, &current) && current.versionCode >= item.versionCode){
+    status(FLEXSTORE_SUCCESS, 100, "Aplicacion ya instalada");
+    return true;
+  }
   WiFiClientSecure sec; sec.setInsecure(); sec.setHandshakeTimeout(12);
   HTTPClient http; http.setTimeout(HTTP_TIMEOUT_MS); http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   if(!http.begin(sec, item.downloadUrl)){ status(FLEXSTORE_ERROR, 0, "Error HTTPS", "No se pudo abrir la descarga"); return false; }
