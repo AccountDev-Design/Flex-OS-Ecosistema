@@ -1,0 +1,13 @@
+{
+  "name": "flex-sdk",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Herramientas de Flex Store: ensamblador flex-app-v1, empaquetado .flexpkg, firma y grants",
+  "bin": { "flexpkg": "bin/flexpkg.js" },
+  "scripts": {
+    "test": "node --test test/sdk.test.js"
+  },
+  "engines": { "node": ">=18" },
+  "license": "SEE LICENSE IN ../README",
+  "dependencies": {}
+}

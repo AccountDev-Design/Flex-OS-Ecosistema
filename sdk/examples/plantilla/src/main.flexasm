@@ -1,0 +1,71 @@
+; #############################################################
+;  PLANTILLA MINIMA  ·  flex-app-v1
+;  ------------------------------------------------------------
+;  Lo mas pequeno que es una app de verdad: pone su titulo, pinta
+;  una pantalla y reacciona a un toque. Copia esta carpeta para
+;  empezar una app nueva.
+; #############################################################
+.mem 256
+.stack 32
+.frames 32
+.calldepth 8
+
+.const K_TITULO "Mi app"
+.const K_HOLA   "Hola desde flex-app-v1"
+.const K_TOQUE  "Tocaste la pantalla"
+
+.global g_tocado
+
+.func onStart args=
+  pushk K_TITULO
+  sys ui.nav_title
+  drop
+  ret
+.end
+
+.func onTick args=ms locals=fondo
+  push 18
+  push 20
+  push 32
+  sys gfx.color
+  stlocal fondo
+  ldlocal fondo
+  sys gfx.clear
+  drop
+
+  pushk K_TITULO
+  push 24
+  push 20
+  sys ui.title
+  drop
+
+  ldglobal g_tocado
+  jnz ap_tocado
+  pushk K_HOLA
+  push 24
+  push 96
+  sys ui.label
+  drop
+  jmp ap_fin
+ap_tocado:
+  pushk K_TOQUE
+  push 24
+  push 96
+  sys ui.label
+  drop
+ap_fin:
+  sys gfx.present
+  drop
+  ret
+.end
+
+.func onEvent args=tipo,a,b
+  ldlocal tipo
+  push 4
+  eq
+  jz oe_fin
+  push 1
+  stglobal g_tocado
+oe_fin:
+  ret
+.end

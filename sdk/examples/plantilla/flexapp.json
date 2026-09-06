@@ -1,0 +1,22 @@
+{
+  "id": "com.ejemplo.plantilla.app",
+  "name": "Mi app",
+  "versionName": "1.0.0",
+  "versionCode": 1,
+  "minFlexOS": "1.0.0",
+  "runtime": "flex-app-v1",
+  "entry": "main.flxb",
+  "source": "src/main.flexasm",
+  "filesDir": "app",
+  "summary": "Plantilla minima para empezar una app de Flex Store",
+  "category": "Utilidades",
+  "limits": {
+    "memoryKB": 64,
+    "storageKB": 0,
+    "instrPerTick": 30000,
+    "usPerTick": 3000,
+    "drawPerFrame": 128
+  },
+  "permissions": [],
+  "systemPermissions": []
+}

@@ -1,0 +1,14 @@
+# CLAVES PRIVADAS. Nunca, bajo ningun concepto, en el repositorio.
+# Una clave de desarrollador es la identidad de tus apps: quien la tenga
+# puede publicar actualizaciones de ellas.
+*.pem
+*.key
+*.p8
+keys/
+# Un grant es un permiso firmado para UN paquete concreto: no es secreto,
+# pero tampoco es fuente, asi que no se versiona.
+*.flexgrant
+# Artefactos de compilacion de los ejemplos
+examples/*/app/*.flxb
+examples/*/*.flexpkg
+node_modules/

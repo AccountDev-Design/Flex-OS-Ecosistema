@@ -1,0 +1,22 @@
+{
+  "id": "com.flexos.ejemplo.contador",
+  "name": "Contador Flex",
+  "versionName": "1.0.0",
+  "versionCode": 1,
+  "minFlexOS": "1.0.0",
+  "runtime": "flex-app-v1",
+  "entry": "main.flxb",
+  "source": "src/main.flexasm",
+  "filesDir": "app",
+  "summary": "Contador y cronometro con guardado en la carpeta privada de la app",
+  "category": "Utilidades",
+  "limits": {
+    "memoryKB": 128,
+    "storageKB": 16,
+    "instrPerTick": 60000,
+    "usPerTick": 4000,
+    "drawPerFrame": 256
+  },
+  "permissions": [],
+  "systemPermissions": ["storage.app"]
+}

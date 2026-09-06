@@ -1,0 +1,384 @@
+; #############################################################
+;  CONTADOR FLEX  ·  app de ejemplo real para flex-app-v1
+;  ------------------------------------------------------------
+;  Hace de verdad, sin simular nada:
+;    · un contador que sube al tocar un boton (evento tactil);
+;    · un cronometro por temporizador del sistema (1 s);
+;    · pausa y reanudacion cuando la app pasa a segundo plano;
+;    · guardado y carga en su CARPETA PRIVADA (permiso storage.app);
+;    · dibujo con los componentes del tema de Flex OS.
+;
+;  Todo lo que ves aqui corre dentro de la maquina aislada: la app no
+;  tiene punteros, no toca el framebuffer y no puede pasarse de su
+;  presupuesto por tick.
+; #############################################################
+
+.mem 1024          ; memoria lineal: 0..11 buffer de digitos, 16..23 estado guardado
+.stack 96
+.frames 96
+.calldepth 12
+
+; ---- Textos (viven en el pool de constantes, de solo lectura) ----
+.const K_TITULO   "Contador Flex"
+.const K_PULSOS   "Pulsaciones"
+.const K_SEGUNDOS "Segundos en marcha"
+.const K_SUMAR    "Sumar 1"
+.const K_REINICIA "Reiniciar"
+.const K_GUARDADO "Se guarda solo en su carpeta privada"
+.const K_PAUSA    "En pausa (segundo plano)"
+.const K_FICHERO  "contador.bin"
+.const K_LOG      "contador: estado guardado"
+
+; ---- Estado ----
+.global g_cuenta      ; pulsaciones
+.global g_segundos    ; segundos con la app en primer plano
+.global g_pausa       ; 1 = en segundo plano
+.global g_numini      ; offset del primer digito que dejo numfmt
+.global g_sucio       ; hay cambios sin guardar
+
+; =============================================================
+;  numfmt(v) -> longitud.  Escribe los digitos decimales de v en el
+;  buffer 0..11, ALINEADOS A LA DERECHA, y deja en g_numini el offset
+;  del primero. Devuelve cuantos digitos son.
+; =============================================================
+.func numfmt args=v locals=p,n,d
+  push 11
+  stlocal p
+  push 0
+  stlocal n
+nf_bucle:
+  ; d = v % 10 + '0'
+  ldlocal v
+  push 10
+  mod
+  push 48
+  add
+  stlocal d
+  ldlocal p
+  ldlocal d
+  st8
+  ldlocal p
+  push 1
+  sub
+  stlocal p
+  ldlocal n
+  push 1
+  add
+  stlocal n
+  ldlocal v
+  push 10
+  div
+  stlocal v
+  ldlocal v
+  jnz nf_bucle
+  ; el primer digito esta en p+1
+  ldlocal p
+  push 1
+  add
+  stglobal g_numini
+  ldlocal n
+  retv
+.end
+
+; =============================================================
+;  dibujaNumero(v, x, y, size, color)
+; =============================================================
+.func dibujaNumero args=v,x,y,size,color locals=len
+  ldlocal v
+  call numfmt
+  stlocal len
+  ldglobal g_numini
+  ldlocal len
+  ldlocal x
+  ldlocal y
+  ldlocal size
+  ldlocal color
+  sys gfx.text_mem
+  drop
+  ret
+.end
+
+; =============================================================
+;  guarda()  ·  vuelca cuenta y segundos a la carpeta privada
+; =============================================================
+.func guarda args= locals=
+  push 16
+  ldglobal g_cuenta
+  st32
+  push 20
+  ldglobal g_segundos
+  st32
+  pushk K_FICHERO
+  push 16
+  push 8
+  sys store.write
+  drop
+  push 0
+  stglobal g_sucio
+  pushk K_LOG
+  sys sys.log
+  drop
+  ret
+.end
+
+; =============================================================
+;  carga()  ·  relee el estado guardado, si lo hay
+; =============================================================
+.func carga args= locals=n
+  pushk K_FICHERO
+  push 16
+  push 8
+  sys store.read
+  stlocal n
+  ; store.read devuelve -1 si no hay archivo y "no disponible" si no hay permiso
+  ldlocal n
+  push 8
+  lt
+  jnz cg_fin
+  push 16
+  ld32
+  stglobal g_cuenta
+  push 20
+  ld32
+  stglobal g_segundos
+cg_fin:
+  ret
+.end
+
+; =============================================================
+;  onStart()  ·  titulo, estado guardado y temporizador de 1 s
+; =============================================================
+.func onStart args= locals=
+  pushk K_TITULO
+  sys ui.nav_title
+  drop
+  call carga
+  drop
+  ; temporizador 0: cada 1000 ms, repetitivo
+  push 0
+  push 1000
+  push 1
+  sys time.timer_set
+  drop
+  ret
+.end
+
+; =============================================================
+;  pinta()  ·  un cuadro completo
+; =============================================================
+.func pinta args= locals=col,fondo
+  ; Colores del tema: se calculan con gfx.color, sin numeros magicos.
+  push 18
+  push 20
+  push 32
+  sys gfx.color
+  stlocal fondo
+  push 245
+  push 247
+  push 255
+  sys gfx.color
+  stlocal col
+
+  ldlocal fondo
+  sys gfx.clear
+  drop
+
+  pushk K_TITULO
+  push 24
+  push 20
+  sys ui.title
+  drop
+
+  pushk K_PULSOS
+  push 24
+  push 96
+  sys ui.caption
+  drop
+  ldglobal g_cuenta
+  push 24
+  push 118
+  push 3
+  ldlocal col
+  call dibujaNumero
+  drop
+
+  pushk K_SEGUNDOS
+  push 24
+  push 200
+  sys ui.caption
+  drop
+  ldglobal g_segundos
+  push 24
+  push 222
+  push 3
+  ldlocal col
+  call dibujaNumero
+  drop
+
+  ; Botones. El estado "pulsado" del primero se enseña mientras la app
+  ; esta en pausa, para que se vea que el ciclo de vida es real.
+  pushk K_SUMAR
+  push 24
+  push 320
+  push 432
+  push 64
+  push 0
+  sys ui.button
+  drop
+
+  pushk K_REINICIA
+  push 24
+  push 400
+  push 432
+  push 56
+  push 1
+  sys ui.list_row
+  drop
+
+  pushk K_GUARDADO
+  push 24
+  push 480
+  sys ui.caption
+  drop
+
+  ldglobal g_pausa
+  jz pt_fin
+  pushk K_PAUSA
+  push 24
+  push 510
+  sys ui.caption
+  drop
+pt_fin:
+  sys gfx.present
+  drop
+  ret
+.end
+
+; =============================================================
+;  onTick(ms)  ·  un cuadro por tick del sistema
+; =============================================================
+.func onTick args=ms locals=
+  call pinta
+  drop
+  ret
+.end
+
+; =============================================================
+;  onEvent(tipo, a, b)
+;    1 abajo · 2 mover · 3 arriba · 4 toque · 5 atras
+;    6 pausa · 7 reanudar · 8 temporizador · 9 cierre
+; =============================================================
+.func onEvent args=tipo,a,b locals=
+  ldlocal tipo
+  push 4
+  eq
+  jnz ev_toque
+  ldlocal tipo
+  push 8
+  eq
+  jnz ev_timer
+  ldlocal tipo
+  push 6
+  eq
+  jnz ev_pausa
+  ldlocal tipo
+  push 7
+  eq
+  jnz ev_sigue
+  ldlocal tipo
+  push 5
+  eq
+  jnz ev_atras
+  ret
+
+ev_toque:
+  ; Boton "Sumar 1": 24..456 x 320..384
+  ldlocal b
+  push 320
+  ge
+  ldlocal b
+  push 384
+  lt
+  and
+  jz ev_toque2
+  ldglobal g_cuenta
+  push 1
+  add
+  stglobal g_cuenta
+  push 1
+  stglobal g_sucio
+  call pinta
+  drop
+  ret
+ev_toque2:
+  ; Fila "Reiniciar": 400..456
+  ldlocal b
+  push 400
+  ge
+  ldlocal b
+  push 456
+  lt
+  and
+  jz ev_toque_fin
+  push 0
+  stglobal g_cuenta
+  push 0
+  stglobal g_segundos
+  push 1
+  stglobal g_sucio
+  call guarda
+  drop
+  call pinta
+  drop
+ev_toque_fin:
+  ret
+
+ev_timer:
+  ldglobal g_pausa
+  jnz ev_timer_fin
+  ldglobal g_segundos
+  push 1
+  add
+  stglobal g_segundos
+  ; Se guarda cada 10 segundos, no en cada cambio: la flash no es un
+  ; cuaderno de notas y el usuario no pierde nada real.
+  ldglobal g_segundos
+  push 10
+  mod
+  jnz ev_timer_fin
+  ldglobal g_sucio
+  jz ev_timer_fin
+  call guarda
+  drop
+ev_timer_fin:
+  ret
+
+ev_pausa:
+  push 1
+  stglobal g_pausa
+  call guarda
+  drop
+  ret
+
+ev_sigue:
+  push 0
+  stglobal g_pausa
+  call pinta
+  drop
+  ret
+
+ev_atras:
+  ; El "atras" del sistema cierra la app de forma limpia: onStop guarda.
+  sys sys.exit
+  drop
+  ret
+.end
+
+; =============================================================
+;  onStop(motivo)  ·  ultima oportunidad de guardar
+; =============================================================
+.func onStop args=motivo locals=
+  call guarda
+  drop
+  ret
+.end
