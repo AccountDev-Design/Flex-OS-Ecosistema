@@ -108,18 +108,26 @@ static int b64Value(char c){
 static bool base64UrlDecode(const char* text, uint8_t** out, size_t* outLen, size_t maxOut){
   if(!text || !out || !outLen) return false;
   size_t n = strlen(text);
-  size_t cap = (n * 3u) / 4u + 3u;
-  if(cap > maxOut) return false;
-  uint8_t* data = (uint8_t*)malloc(cap + 1);
+  size_t encoded = n;
+  while(encoded > 0 && text[encoded - 1] == '=') encoded--;
+  size_t remainder = encoded & 3u;
+  if(remainder == 1u) return false;
+  size_t expected = (encoded / 4u) * 3u + (remainder ? remainder - 1u : 0u);
+  if(expected > maxOut) return false;
+  uint8_t* data = (uint8_t*)malloc(expected + 1u);
   if(!data) return false;
   uint32_t acc = 0; int bits = 0; size_t used = 0;
   for(size_t i = 0; i < n; i++){
-    if(text[i] == '=') break;
+    if(text[i] == '='){
+      for(size_t j = i; j < n; j++) if(text[j] != '='){ free(data); return false; }
+      break;
+    }
     int v = b64Value(text[i]);
     if(v < 0){ free(data); return false; }
     acc = (acc << 6) | (uint32_t)v; bits += 6;
-    if(bits >= 8){ bits -= 8; if(used >= cap){ free(data); return false; } data[used++] = (uint8_t)(acc >> bits); }
+    if(bits >= 8){ bits -= 8; if(used >= expected){ free(data); return false; } data[used++] = (uint8_t)(acc >> bits); }
   }
+  if(used != expected){ free(data); return false; }
   data[used] = 0; *out = data; *outLen = used;
   return true;
 }
