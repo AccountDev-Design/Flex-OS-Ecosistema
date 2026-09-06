@@ -44,7 +44,11 @@ Documentos relacionados:
   vtable de dibujo, táctil, almacenamiento, orientación y servicios
   privilegiados.
 - `FlexOS_Store_Bridge.h` — interfaz de Flex Store; abre cada app por el
-  runtime que declare y permite detenerla o desinstalarla.
+  runtime que declare y permite detenerla o desinstalarla. Atiende además la
+  petición de apertura que deja la Caja de aplicaciones.
+- `FlexOS_Ultra_PkgApps.h` — el modelo de las apps **descargadas** para la Caja
+  de aplicaciones: lista cacheada del registro real, estado, icono del paquete
+  y petición de apertura. Ver «Las apps descargadas en el cajón», abajo.
 - `FlexOS_TrustedKeys.h` — clave pública pinneada de Flex Store, compartida
   por el catálogo y los grants.
 
@@ -122,6 +126,42 @@ presupuesto doble de instrucciones y microsegundos. Agotarlo cede el control y
 se continúa en el tick siguiente; insistir la detiene con un motivo y **Flex
 OS no se reinicia**. La app no ve punteros, no toca el framebuffer, no crea
 tareas y no alimenta el watchdog.
+
+## Las apps descargadas en el cajón de aplicaciones
+
+Toda app que Flex Store instale y valide correctamente aparece **sola** en la
+Caja de aplicaciones, en una sección `Descargadas` bajo las nativas. No hay
+ninguna lista de apps conocidas: la sección sale del registro de `/FlexApps`.
+
+**Cuándo se relee el registro.** `flexPkgRevision()` es un contador que sube
+**una** vez por operación que puede cambiar la lista —recuperación en el
+arranque, instalar, actualizar, desinstalar, detener y reactivar— y **nunca**
+por una lectura. Una instalación que falla revierte y no lo mueve. La caja
+compara ese entero; sólo cuando cambia recorre `/FlexApps`. Escanear el
+almacenamiento por cuadro habría costado la fluidez del cajón.
+
+**Qué aparece.** Sólo una entrada con identificador seguro, nombre, punto de
+entrada y un runtime conocido. Lo demás no se lista. Es defensa en profundidad:
+el instalador ya validó cabecera, rutas, hashes, huella del desarrollador, firma
+y grant antes de activar la versión.
+
+**Estado.** `válida`, `actualizando` (Flex Store está descargando o instalando
+ese paquete concreto) y `error` (detenida por el usuario o por el sistema, o un
+intento de apertura que falló). Se marca con un punto y **no bloquea la caja**:
+la rejilla no se reordena ni se para por una app así.
+
+**Icono.** Si el paquete trae `icon.f565` en la raíz de su versión activa
+—RGB565 little-endian, exactamente 64×64— se usa ese; sus bytes ya están
+cubiertos por el hash del archivo y la firma del paquete. Cualquier otro tamaño
+se descarta. Sin él, un icono genérico con color estable derivado del
+identificador. La caché son 4 ranuras (32 KB de PSRAM como techo) y se suelta
+con el barrido de memoria del sistema. **El formato firmado no cambia**: una app
+que no traiga el archivo funciona igual.
+
+**Apertura.** La caja no abre una segunda puerta al runtime: anota la petición y
+abre Flex Store, que arranca la app por el mismo camino de siempre (bifurcación
+por runtime, revalidación del grant en cada arranque, presupuesto por tick). Al
+salir se vuelve al **escritorio**, no al listado de la tienda.
 
 ## Compilación objetivo
 

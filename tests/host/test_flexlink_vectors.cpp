@@ -19,8 +19,8 @@
 //  Si los dos lados dejan de coincidir, una de las dos baterias
 //  falla ANTES de que nadie flashee nada.
 
-#include "../../FlexOS_FlexLink.h"
-#include "../../FlexOS_FlexPhone.h"
+#include "../../FlexOS_Ultra/FlexOS_FlexLink.h"
+#include "../../FlexOS_Ultra/FlexOS_FlexPhone.h"
 #include <cstdio>
 #include <cstring>
 

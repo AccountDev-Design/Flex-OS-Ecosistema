@@ -21,7 +21,7 @@
 
 #include "vmimage.h"
 #include "pkgbuild.h"
-#include "../../FlexOS_AppHost.h"
+#include "../../FlexOS_Ultra/FlexOS_AppHost.h"
 
 #include <cstdio>
 #include <cstring>

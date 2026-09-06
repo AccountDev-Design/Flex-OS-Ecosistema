@@ -127,6 +127,16 @@ bool flexPkgInstallWithGrant(const char* packagePath,
 
 bool flexPkgUninstall(const char* packageId);
 
+// REVISION DEL REGISTRO. Contador que sube UNA vez cada vez que el conjunto de
+// apps instaladas puede haber cambiado: al recuperar el almacenamiento en el
+// arranque, al instalar o actualizar, al desinstalar y al detener o reactivar
+// una app. No toca el sistema de archivos: leerlo cuesta lo que leer un entero.
+//
+// Es la senal de invalidacion de cache para todo el que muestre apps instaladas
+// (la Caja de aplicaciones, Flex Store). Comparar este numero por cuadro es
+// gratis; releer /FlexApps por cuadro no lo seria.
+uint32_t flexPkgRevision();
+
 // Lee el grant firmado que se instalo con la app. Devuelve los bytes escritos
 // (0 = la app no trae permisos de sistema).
 uint32_t flexPkgGrant(const char* packageId, uint8_t* out, uint32_t cap);

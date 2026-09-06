@@ -121,4 +121,4 @@ def main(path):
 
 
 if __name__ == '__main__':
-    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else '../../FlexOS_Ultra.ino'))
+    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else '../../FlexOS_Ultra/FlexOS_Ultra.ino'))

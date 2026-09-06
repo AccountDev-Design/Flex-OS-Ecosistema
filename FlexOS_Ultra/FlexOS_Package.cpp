@@ -51,6 +51,10 @@ static const char* DATA_NAME = "/data";
 static volatile bool gBusy = false;
 static volatile bool gCancel = false;
 static FlexPkgErrorCode gErr = FLEXPKG_OK;
+// Revision del registro de apps instaladas. Sube UNA vez por operacion que
+// pueda cambiar la lista; nunca por lectura. Ver flexPkgRevision().
+static uint32_t gRevision = 1;
+static inline void bumpRevision(){ gRevision++; }
 static char gErrText[128] = "Correcto";
 
 static void setError(FlexPkgErrorCode code, const char* text){
@@ -535,6 +539,10 @@ bool flexPkgBegin(){
     e = root.openNextFile();
   }
   root.close();
+  // La recuperacion pudo activar una version que estaba a medio cambiar o
+  // retirar un stage huerfano: la lista de apps de despues del arranque no
+  // tiene por que ser la de antes.
+  bumpRevision();
   return true;
 }
 
@@ -543,7 +551,12 @@ bool flexPkgInspect(const char* packagePath, FlexPkgInfo* out, FlexPkgProgressFn
 }
 
 bool flexPkgInstall(const char* packagePath, FlexPkgInfo* out, FlexPkgProgressFn cb, void* user){
-  return runPackage(packagePath, out, true, nullptr, 0, nullptr, 0, cb, user);
+  bool ok = runPackage(packagePath, out, true, nullptr, 0, nullptr, 0, cb, user);
+  // Solo cuenta la instalacion que TERMINO. Una que falla revierte y deja el
+  // registro exactamente como estaba: subir la revision ahi obligaria a releer
+  // /FlexApps para descubrir que no habia cambiado nada.
+  if(ok) bumpRevision();
+  return ok;
 }
 
 bool flexPkgInstallWithGrant(const char* packagePath,
@@ -552,8 +565,10 @@ bool flexPkgInstallWithGrant(const char* packagePath,
                              uint64_t nowEpoch,
                              FlexPkgInfo* out,
                              FlexPkgProgressFn cb, void* user){
-  return runPackage(packagePath, out, true, grant, grantLen,
-                    trustedStorePublicKey, nowEpoch, cb, user);
+  bool ok = runPackage(packagePath, out, true, grant, grantLen,
+                       trustedStorePublicKey, nowEpoch, cb, user);
+  if(ok) bumpRevision();
+  return ok;
 }
 
 bool flexPkgUninstall(const char* packageId){
@@ -565,6 +580,7 @@ bool flexPkgUninstall(const char* packageId){
   // Se lleva TODO: version activa, temporales, registro y carpeta privada.
   if(!removeTree(root)){ setError(FLEXPKG_ERR_STORAGE, "No se pudo eliminar la aplicacion"); return false; }
   setError(FLEXPKG_OK, "Correcto");
+  bumpRevision();
   return true;
 }
 
@@ -646,8 +662,13 @@ bool flexPkgSetState(const char* packageId, FlexPkgAppState state){
   if(!LittleFS.exists(root)){ setError(FLEXPKG_ERR_NOT_FOUND, "Aplicacion no encontrada"); return false; }
   if(!writeState(root, (uint8_t)state)){ setError(FLEXPKG_ERR_STORAGE, "No se pudo guardar el estado"); return false; }
   setError(FLEXPKG_OK, "Correcto");
+  // Detener o reactivar no cambia QUE apps hay, pero si cambia si se pueden
+  // abrir: quien cachee la lista tiene que volver a leer el estado.
+  bumpRevision();
   return true;
 }
+
+uint32_t flexPkgRevision(){ return gRevision; }
 
 FlexPkgErrorCode flexPkgErrorCode(){ return gErr; }
 const char* flexPkgError(){ return gErrText; }

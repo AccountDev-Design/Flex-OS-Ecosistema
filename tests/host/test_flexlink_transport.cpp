@@ -13,7 +13,7 @@
 //  maquina de estados se fuerza la capacidad a mano tras el init:
 //  es EXACTAMENTE lo que hara una placa con BLE disponible.
 
-#include "../../FlexOS_FlexPhone_Link.h"
+#include "../../FlexOS_Ultra/FlexOS_FlexPhone_Link.h"
 #include <cstdio>
 #include <cstring>
 

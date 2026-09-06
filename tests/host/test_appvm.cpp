@@ -20,7 +20,7 @@
 //    6) Ruido: miles de imagenes aleatorias no pueden colgar ni
 //       corromper el validador (con ASan/UBSan detras).
 
-#include "../../FlexOS_AppVM.h"
+#include "../../FlexOS_Ultra/FlexOS_AppVM.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>

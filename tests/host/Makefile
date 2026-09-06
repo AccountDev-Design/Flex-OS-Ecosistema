@@ -16,6 +16,15 @@
 # #############################################################
 
 ROOT     := ../..
+# CARPETA CANONICA DEL SKETCH P4. FlexOS_Ultra/ es la que se abre en el Arduino
+# IDE y la unica copia del codigo del P4 que hay en el repositorio (ver
+# docs/REPOSITORY_CONSOLIDATION_PLAN.md). En la raiz solo quedan los sketches de
+# Flex OS Ultra S3 y Flex OS Pro con los modulos que ESOS dos necesitan.
+ULTRA    := $(ROOT)/FlexOS_Ultra
+# Ruta de busqueda: primero el sketch P4, despues la raiz. Los pocos modulos que
+# existen en los dos sitios (OTA, FS, navegador, JPEG) son byte a byte
+# identicos, y check_shared.py falla la bateria si alguna vez dejan de serlo.
+INC      := -I$(ULTRA) -I$(ROOT)
 BUILD    := build
 CXX      ?= g++
 CXXSTD   := -std=c++17
@@ -67,9 +76,9 @@ $(BUILD)/test_browser: test_browser.cpp $(CORE_SRC) $(ROOT)/FlexOS_Browser.h | $
 # este modulo recorre cabeceras RIFF que vienen de una tarjeta que
 # puede traer cualquier cosa, y un desplazamiento mal calculado sobre
 # un AVI corrupto no puede quedarse en "parece que funciona".
-MEDIA_SRC := $(ROOT)/FlexOS_Media.cpp
+MEDIA_SRC := $(ULTRA)/FlexOS_Media.cpp
 
-$(BUILD)/test_media: test_media.cpp $(MEDIA_SRC) $(ROOT)/FlexOS_Media.h | $(BUILD)
+$(BUILD)/test_media: test_media.cpp $(MEDIA_SRC) $(ULTRA)/FlexOS_Media.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_media.cpp $(MEDIA_SRC)
 
 # --- Memoria: presupuesto, presion, fragmentacion y avisos ---
@@ -77,9 +86,9 @@ $(BUILD)/test_media: test_media.cpp $(MEDIA_SRC) $(ROOT)/FlexOS_Media.h | $(BUIL
 # decide. CON sanitizers, como el resto del nucleo portable. Aqui es donde
 # se fijan los cortes de 10/6/5 MB y la regla del bloque contiguo: si
 # cambian sin querer, esta bateria lo dice antes que la placa.
-MEM_SRC := $(ROOT)/FlexOS_Mem.cpp
+MEM_SRC := $(ULTRA)/FlexOS_Mem.cpp
 
-$(BUILD)/test_mem: test_mem.cpp $(MEM_SRC) $(ROOT)/FlexOS_Mem.h | $(BUILD)
+$(BUILD)/test_mem: test_mem.cpp $(MEM_SRC) $(ULTRA)/FlexOS_Mem.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_mem.cpp $(MEM_SRC)
 
 # --- PLATAFORMA DE APLICACIONES flex-app-v1 ---------------------------------
@@ -95,31 +104,31 @@ $(BUILD)/test_mem: test_mem.cpp $(MEM_SRC) $(ROOT)/FlexOS_Mem.h | $(BUILD)
 #
 # cJSON se compila desde tests/host/vendor (MIT). En la placa lo trae el core
 # de ESP32; se versiona aqui para que la prueba recorra el MISMO codigo.
-VMSRC   := $(ROOT)/FlexOS_AppVM.cpp
-GRANTSRC:= $(ROOT)/FlexOS_AppGrant.cpp
-HOSTSRC := $(ROOT)/FlexOS_AppHost.cpp
-PKGCORE := $(ROOT)/FlexOS_PkgCore.cpp
-PKGSRC  := $(ROOT)/FlexOS_Package.cpp
+VMSRC   := $(ULTRA)/FlexOS_AppVM.cpp
+GRANTSRC:= $(ULTRA)/FlexOS_AppGrant.cpp
+HOSTSRC := $(ULTRA)/FlexOS_AppHost.cpp
+PKGCORE := $(ULTRA)/FlexOS_PkgCore.cpp
+PKGSRC  := $(ULTRA)/FlexOS_Package.cpp
 CJSON   := vendor/cJSON/cJSON.c
 FSSTUB  := fsstub/fsstub.cpp
-PKGFLAGS:= -Ifsstub -Ivendor/cJSON -Iinostub -I$(ROOT) -DARDUINO=200 -Wno-format-truncation
+PKGFLAGS:= -Ifsstub -Ivendor/cJSON -Iinostub $(INC) -DARDUINO=200 -Wno-format-truncation
 
-$(BUILD)/test_appvm: test_appvm.cpp vmimage.h $(VMSRC) $(ROOT)/FlexOS_AppVM.h | $(BUILD)
+$(BUILD)/test_appvm: test_appvm.cpp vmimage.h $(VMSRC) $(ULTRA)/FlexOS_AppVM.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_appvm.cpp $(VMSRC)
 
-$(BUILD)/test_appgrant: test_appgrant.cpp pkgbuild.h $(GRANTSRC) $(ROOT)/FlexOS_AppGrant.h | $(BUILD)
+$(BUILD)/test_appgrant: test_appgrant.cpp pkgbuild.h $(GRANTSRC) $(ULTRA)/FlexOS_AppGrant.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_appgrant.cpp $(GRANTSRC) -lcrypto
 
 $(BUILD)/test_apphost: test_apphost.cpp vmimage.h pkgbuild.h $(HOSTSRC) $(VMSRC) $(GRANTSRC) \
-                       $(ROOT)/FlexOS_AppHost.h | $(BUILD)
-	$(CXX) $(COMMON) $(SAN) -I$(ROOT) -o $@ test_apphost.cpp $(HOSTSRC) $(VMSRC) $(GRANTSRC) -lcrypto
+                       $(ULTRA)/FlexOS_AppHost.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(INC) -o $@ test_apphost.cpp $(HOSTSRC) $(VMSRC) $(GRANTSRC) -lcrypto
 
 # FlexOS_Runtime.cpp (el runtime declarativo de siempre) entra tambien: es la
 # unica forma honesta de comprobar que una app flex-ui-1 ya publicada SIGUE
 # abriendose despues de todo este trabajo.
-UISRC := $(ROOT)/FlexOS_Runtime.cpp
+UISRC := $(ULTRA)/FlexOS_Runtime.cpp
 $(BUILD)/test_flexpkg: test_flexpkg.cpp pkgbuild.h $(PKGCORE) $(PKGSRC) $(GRANTSRC) $(UISRC) \
-                       $(ROOT)/FlexOS_PkgCore.h $(ROOT)/FlexOS_Package.h fsstub/FS.h | $(BUILD)
+                       $(ULTRA)/FlexOS_PkgCore.h $(ULTRA)/FlexOS_Package.h fsstub/FS.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) $(PKGFLAGS) -o $@ test_flexpkg.cpp $(PKGCORE) $(PKGSRC) $(GRANTSRC) \
 	       $(UISRC) $(FSSTUB) $(CJSON) -lcrypto
 
@@ -133,7 +142,7 @@ $(BUILD)/flexpkgcheck: flexpkgcheck.cpp $(PKGCORE) $(GRANTSRC) | $(BUILD)
 # anfitrion de mentira. Permite probar una app sin placa; la usa
 # sdk/test/sdk.test.js con la app de ejemplo.
 $(BUILD)/flexapprun: flexapprun.cpp pkgbuild.h $(HOSTSRC) $(VMSRC) $(GRANTSRC) | $(BUILD)
-	$(CXX) $(CXXSTD) -O2 $(WARN) -I$(ROOT) -o $@ flexapprun.cpp $(HOSTSRC) $(VMSRC) $(GRANTSRC) -lcrypto
+	$(CXX) $(CXXSTD) -O2 $(WARN) $(INC) -o $@ flexapprun.cpp $(HOSTSRC) $(VMSRC) $(GRANTSRC) -lcrypto
 
 # --- Flex Link / Flex Phone: protocolo y modelo del telefono ---
 # Nucleo PURO (sin Arduino), asi que se compila igual que el del
@@ -141,22 +150,22 @@ $(BUILD)/flexapprun: flexapprun.cpp pkgbuild.h $(HOSTSRC) $(VMSRC) $(GRANTSRC) |
 # Aqui es obligatorio -- estos dos ficheros parsean bytes que llegan
 # por el aire desde un telefono, y un desbordamiento en el
 # reensamblador no puede quedarse en "parece que funciona".
-FLNKSRC := $(ROOT)/FlexOS_FlexLink.cpp
-FLPSRC  := $(ROOT)/FlexOS_FlexPhone.cpp
+FLNKSRC := $(ULTRA)/FlexOS_FlexLink.cpp
+FLPSRC  := $(ULTRA)/FlexOS_FlexPhone.cpp
 
-$(BUILD)/test_flexlink: test_flexlink.cpp $(FLNKSRC) $(ROOT)/FlexOS_FlexLink.h | $(BUILD)
+$(BUILD)/test_flexlink: test_flexlink.cpp $(FLNKSRC) $(ULTRA)/FlexOS_FlexLink.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_flexlink.cpp $(FLNKSRC)
 
 $(BUILD)/test_flexphone: test_flexphone.cpp $(FLPSRC) $(FLNKSRC) \
-                         $(ROOT)/FlexOS_FlexPhone.h $(ROOT)/FlexOS_FlexLink.h | $(BUILD)
+                         $(ULTRA)/FlexOS_FlexPhone.h $(ULTRA)/FlexOS_FlexLink.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_flexphone.cpp $(FLPSRC) $(FLNKSRC)
 
 # El transporte: maquina de estados del enlace. En el PC la capacidad
 # es NONE (no hay radio), igual que en el P4 sin el C6 preparado, asi
 # que la prueba fuerza la capacidad para poder ejercitarla entera.
-FLPLINK := $(ROOT)/FlexOS_FlexPhone_Link.cpp
+FLPLINK := $(ULTRA)/FlexOS_FlexPhone_Link.cpp
 $(BUILD)/test_flexlink_transport: test_flexlink_transport.cpp $(FLPLINK) $(FLPSRC) $(FLNKSRC) \
-                         $(ROOT)/FlexOS_FlexPhone_Link.h | $(BUILD)
+                         $(ULTRA)/FlexOS_FlexPhone_Link.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_flexlink_transport.cpp $(FLPLINK) $(FLPSRC) $(FLNKSRC)
 
 # VECTORES DORADOS. Fijan los bytes exactos del protocolo para que el
@@ -175,13 +184,13 @@ $(BUILD)/test_flexlink_vectors: test_flexlink_vectors.cpp $(FLPSRC) $(FLNKSRC) |
 # El motor meteorologico: mismo patron que la boveda -- su propia NVS en
 # memoria (wxstub), porque aqui SI hay que releer lo que se escribio (la cache
 # del pronostico son ~1,3 KB, muy por encima de lo que guarda vaultstub).
-WXFLAGS := -Iwxstub -Istub -I$(ROOT) -DARDUINO=200 -Wno-format-truncation
-$(BUILD)/test_weather: test_weather.cpp $(ROOT)/FlexOS_Weather.cpp $(ROOT)/FlexOS_Weather.h | $(BUILD)
+WXFLAGS := -Iwxstub -Istub $(INC) -DARDUINO=200 -Wno-format-truncation
+$(BUILD)/test_weather: test_weather.cpp $(ULTRA)/FlexOS_Weather.cpp $(ULTRA)/FlexOS_Weather.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) $(WXFLAGS) -o $@ test_weather.cpp
 
-VAULTFLAGS := -Ivaultstub -Iinostub -I$(ROOT) -DARDUINO=200 -Wno-format-truncation
-$(BUILD)/test_vault: test_vault.cpp $(ROOT)/FlexOS_Vault.cpp $(ROOT)/FlexOS_Vault.h $(ROOT)/FlexOS_FS.h | $(BUILD)
-	$(CXX) $(COMMON) $(SAN) $(VAULTFLAGS) -o $@ test_vault.cpp $(ROOT)/FlexOS_Vault.cpp -lcrypto
+VAULTFLAGS := -Ivaultstub -Iinostub $(INC) -DARDUINO=200 -Wno-format-truncation
+$(BUILD)/test_vault: test_vault.cpp $(ULTRA)/FlexOS_Vault.cpp $(ULTRA)/FlexOS_Vault.h $(ROOT)/FlexOS_FS.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(VAULTFLAGS) -o $@ test_vault.cpp $(ULTRA)/FlexOS_Vault.cpp -lcrypto
 
 # --- codigo de dispositivo: con el entorno simulado ---
 # Sin sanitizers a proposito: el simulador define las funciones de
@@ -211,17 +220,17 @@ tools: $(TOOLS)
 # Compila FlexOS_Ultra.ino entero contra los dobles de inostub/. No
 # ejecuta nada: sirve para que un error de tipos o de nombres en el
 # sketch salte aqui, sin arduino-cli ni el core de ESP32.
-INO_SRC  := $(ROOT)/FlexOS_Ultra.ino
+INO_SRC  := $(ULTRA)/FlexOS_Ultra.ino
 # Los PUENTES son cabeceras que el .ino incluye (Store, Account, Navegador,
 # OTA): sin listarlos como dependencia, editar uno no rehacia la prueba y
 # `make` daba por buena la version anterior.
-INO_BRIDGES := $(wildcard $(ROOT)/FlexOS_*_Bridge.h)
+INO_BRIDGES := $(wildcard $(ULTRA)/FlexOS_*_Bridge.h)
 # Los MODULOS del sketch. FlexOS_Ultra.ino es solo el orquestador: interfaces,
 # apps y utilidades viven en FlexOS_Ultra_*.h y el .ino las incluye en orden.
 # Van aqui por el mismo motivo que los puentes: tocar un modulo TIENE que
 # rehacer la prueba, o `make` daria por buena la version anterior del sketch.
-INO_PARTS := $(wildcard $(ROOT)/FlexOS_Ultra_*.h)
-INOFLAGS := -Iinostub -I$(ROOT) -DARDUINO=200
+INO_PARTS := $(wildcard $(ULTRA)/FlexOS_Ultra_*.h)
+INOFLAGS := -Iinostub $(INC) -DARDUINO=200
 # -Wmaybe-uninitialized: falso positivo del ARNES. Los dobles de I2C devuelven
 # siempre "sin datos", asi que al inlinear gtPollMulti el compilador ve la rama
 # imposible en la que se usa el buffer sin rellenar -- el codigo real hace
@@ -243,7 +252,8 @@ INOWARN  := $(WARN) -Wno-unused-function -Wno-unused-variable \
 #      -Wunused-function NO avisa de una static que tenga prototipo previo, y
 #      aqui casi todas lo tienen. Ese fallo deja al sistema atrapado en un
 #      estado que nadie despacha.
-ino: ino_compile.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) check_protos.py check_wiring.py | $(BUILD)
+ino: ino_compile.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) check_protos.py check_wiring.py check_shared.py | $(BUILD)
+	@python3 check_shared.py $(ROOT)
 	@python3 check_protos.py $(INO_SRC)
 	@python3 check_wiring.py $(INO_SRC)
 	@$(CXX) $(CXXSTD) -fsyntax-only $(INOWARN) $(INOFLAGS) -x c++ ino_compile.cpp
@@ -271,16 +281,16 @@ $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) 
                    $(VMSRC) $(GRANTSRC) $(HOSTSRC) $(PKGCORE) | $(BUILD)
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -x c++ -c ino_compile.cpp -o $(BUILD)/ino_compile.o
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -c ino_extern_stubs.cpp -o $(BUILD)/ino_extern_stubs.o
-	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(JPEG_SRC) -o $(BUILD)/ino_jpeg.o
-	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(FLNKSRC) -o $(BUILD)/ino_flexlink.o
-	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(FLPSRC)  -o $(BUILD)/ino_flexphone.o
-	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(FLPLINK) -o $(BUILD)/ino_flexphonelink.o
-	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(CORE_SRC) -o $(BUILD)/ino_brcore.o
-	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(MEDIA_SRC) -o $(BUILD)/ino_media.o
-	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(MEM_SRC)   -o $(BUILD)/ino_mem.o
-	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(VMSRC)     -o $(BUILD)/ino_appvm.o
-	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(GRANTSRC)  -o $(BUILD)/ino_appgrant.o
-	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) -I$(ROOT) -c $(HOSTSRC)   -o $(BUILD)/ino_apphost.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(JPEG_SRC) -o $(BUILD)/ino_jpeg.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(FLNKSRC) -o $(BUILD)/ino_flexlink.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(FLPSRC)  -o $(BUILD)/ino_flexphone.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(FLPLINK) -o $(BUILD)/ino_flexphonelink.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(CORE_SRC) -o $(BUILD)/ino_brcore.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(MEDIA_SRC) -o $(BUILD)/ino_media.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(MEM_SRC)   -o $(BUILD)/ino_mem.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(VMSRC)     -o $(BUILD)/ino_appvm.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(GRANTSRC)  -o $(BUILD)/ino_appgrant.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(HOSTSRC)   -o $(BUILD)/ino_apphost.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(PKGFLAGS) -c $(PKGCORE) -o $(BUILD)/ino_pkgcore.o
 	@$(CC) -O1 -g -w -Ivendor/cJSON -c $(CJSON) -o $(BUILD)/ino_cjson.o
 	@$(CXX) $(SAN) -o $@ $(BUILD)/ino_compile.o $(BUILD)/ino_extern_stubs.o $(BUILD)/ino_jpeg.o \
@@ -294,7 +304,7 @@ $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) 
 # lleva por delante los archivos del usuario.
 .PHONY: parts
 parts:
-	@python3 test_parts.py $(ROOT)/flexos_ultra_usb.csv
+	@python3 test_parts.py $(ULTRA)/flexos_ultra_usb.csv
 
 run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@echo

@@ -215,7 +215,7 @@ static void geoEnterSelect();
 #define free(p) flexTestFree(p)
 
 // El sketch entero, tal cual va a la placa.
-#include "../../FlexOS_Ultra.ino"
+#include "../../FlexOS_Ultra/FlexOS_Ultra.ino"
 #undef free
 
 // #############################################################

@@ -457,6 +457,18 @@ bool flexStoreCatalogItem(int index, FlexStoreItem* out){
   return ok;
 }
 
+void flexStoreBusyPackage(char* out, size_t outSize){
+  if(!out || outSize == 0) return;
+  out[0] = 0;
+  FlexStoreState st = gState;
+  if(st != FLEXSTORE_DOWNLOADING && st != FLEXSTORE_INSTALLING) return;
+  lock();
+  // gRequest solo lo escribe flexStoreInstall() con el mutex tomado, antes de
+  // arrancar la tarea: leerlo aqui bajo el mismo mutex da el paquete real.
+  if(gTask) snprintf(out, outSize, "%s", gRequest.packageId);
+  unlock();
+}
+
 bool flexStoreHasUpdate(const FlexStoreItem* item, FlexPkgInfo* installed){
   if(!item || !item->packageId[0]) return false;
   FlexPkgInfo local;

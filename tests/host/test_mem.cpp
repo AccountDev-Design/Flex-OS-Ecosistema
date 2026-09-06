@@ -17,7 +17,7 @@
 //       global y que no se repiten en bucle.
 //    5) Formato de cifras (lo que el usuario lee).
 
-#include "../../FlexOS_Mem.h"
+#include "../../FlexOS_Ultra/FlexOS_Mem.h"
 #include <cstdio>
 #include <cstring>
 

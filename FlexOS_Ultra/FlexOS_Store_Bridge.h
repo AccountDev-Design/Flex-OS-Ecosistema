@@ -304,6 +304,7 @@ static void storeDiscoverRender(){
   }
   if(st == FLEXSTORE_SUCCESS && storeLastState != FLEXSTORE_SUCCESS){
     storeInstalledDirty = true;                  // la app nueva ya esta activa en LittleFS
+    pkgAppsInvalidate();                         // ...y la Caja de aplicaciones tiene que verla
     storeToast(flexStoreStage());
   }
   storeEnsureInstalled();
@@ -465,23 +466,56 @@ static void storeOpenInstalled(int index){
   const FlexPkgInfo& app = storeInstalled[index];
   // Una app DETENIDA no se abre: el usuario (o el sistema) lo decidio.
   if(app.state != FLEXPKG_APP_ENABLED){
-    storeToast(app.state == FLEXPKG_APP_BLOCKED
-                 ? "Detenida por el sistema. Activala para volver a abrirla."
-                 : "Aplicacion detenida. Activala para abrirla.");
+    const char* why = app.state == FLEXPKG_APP_BLOCKED
+                        ? "Detenida por el sistema. Activala para volver a abrirla."
+                        : "Aplicacion detenida. Activala para abrirla.";
+    pkgAppMarkError(app.id, why);
+    storeToast(why);
     storeRender();
     return;
   }
   // BIFURCACION POR RUNTIME. flex-ui-1 sigue EXACTAMENTE por donde iba; el
   // camino nuevo solo lo toman los paquetes que declaran flex-app-v1.
   if(app.runtime == FLEXPKG_RT_APP1){
-    if(!av1Start(app.id)){ storeToast(av1Status); storeRender(); return; }
+    // av1Start vuelve a comprobar el grant firmado, el bytecode y el estado en
+    // CADA arranque. Si dice que no, la Caja de aplicaciones se entera por
+    // pkgAppMarkError y esa app deja de ofrecerse como abrible hasta que se
+    // reinstale, se actualice o se reactive.
+    if(!av1Start(app.id)){ pkgAppMarkError(app.id, av1Status); storeToast(av1Status); storeRender(); return; }
     storeView = SV_APPV1;
     return;
   }
   if(!flexRuntimeLoad(app.id, &storeRuntime)){
+    pkgAppMarkError(app.id, flexRuntimeError());
     storeToast(flexRuntimeError()); storeRender(); return;
   }
   storeView = SV_RUNTIME; storeRuntimeRender();
+}
+
+// APERTURA POR IDENTIFICADOR. Es el punto por el que la Caja de aplicaciones
+// abre una app descargada: pasa por storeOpenInstalled(), es decir, por el MISMO
+// camino que la tienda (bifurcacion por runtime, validacion del grant en cada
+// arranque, presupuesto por tick y ciclo de vida). No hay una segunda via.
+static bool storeOpenPackage(const char* packageId){
+  if(!packageId || !packageId[0]) return false;
+  storeInstalledDirty = true; storeReloadInstalled();
+  int li = storeInstalledFind(packageId);
+  if(li < 0){
+    pkgAppMarkError(packageId, "La aplicacion ya no esta instalada");
+    return false;
+  }
+  storeOpenInstalled(li);
+  return storeView == SV_APPV1 || storeView == SV_RUNTIME;
+}
+
+// Salir de una app abierta DESDE LA CAJA vuelve al escritorio, no al listado de
+// la tienda: el usuario nunca estuvo en la tienda. Devuelve true si ya se ha
+// cerrado todo y quien llama no tiene nada mas que hacer.
+static bool storeLeaveIfFromDrawer(){
+  if(!pkgAppLaunchFromDrawer) return false;
+  pkgAppLaunchFromDrawer = false;
+  appClose();
+  return true;
 }
 
 static void storeEnter(){
@@ -490,6 +524,18 @@ static void storeEnter(){
   storeInstalledDirty = true; storeReloadInstalled();
   storeView = SV_DISCOVER; storeSearchSource = SV_DISCOVER; storeSearch[0] = 0; storePage = 0; storeSelected = -1; storeConfirmDelete = false;
   storeFilterInvalidate();
+  // PETICION DE LA CAJA DE APLICACIONES. Si el usuario toco una app descargada
+  // en el escritorio, la tienda se abre YA dentro de esa app y no llega a
+  // mostrar el catalogo. Si la apertura falla, se queda en la tienda con el
+  // motivo a la vista en vez de devolver al usuario a un escritorio mudo.
+  if(pkgAppLaunchPending()){
+    char want[FLEXPKG_ID_MAX + 1];
+    snprintf(want, sizeof(want), "%s", pkgAppLaunchId);
+    pkgAppLaunchClear();
+    if(storeOpenPackage(want)) return;
+    pkgAppLaunchFromDrawer = false;
+    storeToast(pkgAppLastError);
+  }
   if(flexStoreCatalogCount() == 0 && WiFi.status() == WL_CONNECTED && flexStoreState() != FLEXSTORE_LOADING) flexStoreRefresh();
   storeRender();
 }
@@ -507,6 +553,10 @@ static void storeExit(){
   // (memoria, orientacion, pantalla exclusiva) se sueltan aqui y no despues.
   if(av1Active()) av1Close(FLEXAPP_STOP_SYSTEM);
   storeToastUntil = 0;
+  // Ni la peticion pendiente ni la marca de "vengo de la caja" sobreviven al
+  // cierre de la tienda: si no, la proxima apertura normal abriria sola una app.
+  pkgAppLaunchClear();
+  pkgAppLaunchFromDrawer = false;
 }
 
 // CICLO DE VIDA DE LA TIENDA. Si hay una app flex-app-v1 corriendo dentro,
@@ -525,11 +575,16 @@ static void storeBack(){
     // Se le ofrece el "atras" a la app; si no lo usa, se cierra.
     if(av1Active() && av1Back() && av1Active()) return;
     av1Close(FLEXAPP_STOP_USER);
+    if(storeLeaveIfFromDrawer()) return;
     storeView = SV_INSTALLED; storeInstalledDirty = true; storeReloadInstalled();
     storeFilterInvalidate(); storePage = 0; storeRender();
     return;
   }
-  if(storeView == SV_RUNTIME){ flexRuntimeUnload(&storeRuntime); storeView = SV_INSTALLED; storePage = 0; storeRender(); return; }
+  if(storeView == SV_RUNTIME){
+    flexRuntimeUnload(&storeRuntime);
+    if(storeLeaveIfFromDrawer()) return;
+    storeView = SV_INSTALLED; storePage = 0; storeRender(); return;
+  }
   if(storeView == SV_SEARCH){ storeView = storeSearchSource; storePage = 0; storeRender(); return; }
   if(storeView == SV_DETAIL){ storeView = storeSelectedInstalled ? SV_INSTALLED : SV_DISCOVER; storeConfirmDelete = false; storeRender(); return; }
   flexRuntimeUnload(&storeRuntime); appClose();
@@ -541,6 +596,7 @@ static void storeTick(){
   // propia y nunca sin volver.
   if(storeView == SV_APPV1){
     if(!av1Active()){
+      if(storeLeaveIfFromDrawer()) return;
       storeView = SV_INSTALLED; storeInstalledDirty = true; storeReloadInstalled();
       storeFilterInvalidate(); storePage = 0; storeRender();
       return;
@@ -642,7 +698,7 @@ static void storeTick(){
       if(li < 0) return;
       bool stopped = storeInstalled[li].state != FLEXPKG_APP_ENABLED;
       if(flexPkgSetState(sid, stopped ? FLEXPKG_APP_ENABLED : FLEXPKG_APP_STOPPED)){
-        storeInstalledDirty = true; storeReloadInstalled(); storeFilterInvalidate();
+        storeInstalledDirty = true; pkgAppsInvalidate(); storeReloadInstalled(); storeFilterInvalidate();
         storeToast(stopped ? "Aplicacion activada" : "Aplicacion detenida");
       } else storeToast(flexPkgError());
       storeRender();
@@ -664,7 +720,7 @@ static void storeTick(){
       if(!id[0]) return;
       if(!storeConfirmDelete){ storeConfirmDelete = true; storeRender(); }
       else {
-        if(flexPkgUninstall(id)){ storeInstalledDirty = true; storeView = SV_INSTALLED; storePage = 0; storeToast("Aplicacion desinstalada"); }
+        if(flexPkgUninstall(id)){ storeInstalledDirty = true; pkgAppsInvalidate(); storeView = SV_INSTALLED; storePage = 0; storeToast("Aplicacion desinstalada"); }
         else storeToast(flexPkgError());
         storeConfirmDelete = false; storeRender();
       }

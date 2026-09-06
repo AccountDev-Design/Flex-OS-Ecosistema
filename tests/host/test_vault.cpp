@@ -43,7 +43,7 @@
 #include "Arduino.h"
 #include "Preferences.h"
 #include "../../FlexOS_FS.h"
-#include "../../FlexOS_Vault.h"
+#include "../../FlexOS_Ultra/FlexOS_Vault.h"
 
 // -------------------------------------------------------------
 //  Reloj virtual y utilidades del arnes

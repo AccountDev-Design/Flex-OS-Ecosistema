@@ -3,6 +3,10 @@
 Compilan y ejecutan **en el PC** el mismo código que va a la placa. No
 hace falta `arduino-cli`, ni el core de ESP32, ni la placa.
 
+El sketch del P4 vive en `FlexOS_Ultra/`, que es su única copia; en la raíz
+quedan `FlexOS_Ultra_S3.ino`, `FlexOS_Pro.ino` y los módulos que esos dos
+incluyen (ver `docs/REPOSITORY_CONSOLIDATION_PLAN.md`).
+
 ```bash
 cd tests/host
 make                # todas las baterías (perfil Ultra/P4)
@@ -39,6 +43,10 @@ tests/
     flexapprun.cpp     herramienta: ejecuta un .flxb con el GESTOR del firmware
     pkgbuild.h         fabrica paquetes y grants reales (claves efímeras)
     vmimage.h          ensambla imágenes flex-app-v1 a mano
+    check_shared.py    los 11 modulos que la raiz y FlexOS_Ultra/ comparten
+                       a la fuerza (Arduino no deja incluir de una carpeta
+                       hermana), comparados por HASH: si uno se separa, la
+                       bateria falla y dice cual
     stub/              entorno Arduino simulado (ver stub/README.md)
     fsstub/            LittleFS en memoria, con fallos provocables
     vendor/            terceros SOLO para las pruebas (cJSON, MIT)

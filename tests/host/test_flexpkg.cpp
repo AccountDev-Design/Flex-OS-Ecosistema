@@ -26,13 +26,13 @@
 #include "pkgbuild.h"
 #include "fsstub/FS.h"
 
-#include "../../FlexOS_Package.h"
-#include "../../FlexOS_PkgCore.h"
-#include "../../FlexOS_AppGrant.h"
+#include "../../FlexOS_Ultra/FlexOS_Package.h"
+#include "../../FlexOS_Ultra/FlexOS_PkgCore.h"
+#include "../../FlexOS_Ultra/FlexOS_AppGrant.h"
 // El runtime declarativo de siempre entra aqui como CODIGO REAL: la unica
 // forma honesta de comprobar que "una app flex-ui-1 existente sigue abriendo"
 // es abrirla con el mismo FlexOS_Runtime.cpp que corre en la placa.
-#include "../../FlexOS_Runtime.h"
+#include "../../FlexOS_Ultra/FlexOS_Runtime.h"
 
 #include <cstdio>
 #include <cstring>

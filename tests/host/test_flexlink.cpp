@@ -10,7 +10,7 @@
 //  una lectura fuera de rango en el parser no puede quedarse en
 //  "parece que funciona": aborta la prueba.
 
-#include "../../FlexOS_FlexLink.h"
+#include "../../FlexOS_Ultra/FlexOS_FlexLink.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>

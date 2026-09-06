@@ -47,4 +47,10 @@ int flexStoreCatalogCount();
 bool flexStoreCatalogItem(int index, FlexStoreItem* out);
 bool flexStoreHasUpdate(const FlexStoreItem* item, FlexPkgInfo* installed = nullptr);
 
+// Identificador del paquete que se esta descargando o instalando AHORA, o
+// cadena vacia si no hay ninguno. Lo usa la Caja de aplicaciones para marcar
+// esa app como "actualizando" sin tocar el sistema de archivos ni adivinarlo
+// por el estado global de la tienda.
+void flexStoreBusyPackage(char* out, size_t outSize);
+
 #endif

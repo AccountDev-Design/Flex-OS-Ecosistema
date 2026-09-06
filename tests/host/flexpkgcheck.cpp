@@ -11,8 +11,8 @@
 //
 //  Codigo de salida: 0 si el paquete es valido, 1 si no.
 // #############################################################
-#include "../../FlexOS_PkgCore.h"
-#include "../../FlexOS_AppGrant.h"
+#include "../../FlexOS_Ultra/FlexOS_PkgCore.h"
+#include "../../FlexOS_Ultra/FlexOS_AppGrant.h"
 
 #include <cstdio>
 #include <cstdlib>

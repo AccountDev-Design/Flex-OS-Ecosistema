@@ -114,7 +114,12 @@ O sea: la raíz es la **fuente que compilan las pruebas**, y `FlexOS_Ultra/` es 
 
 ---
 
-## 4. Consolidación propuesta
+## 4. Consolidación (ejecutada)
+
+> Lo que sigue se propuso antes de tocar nada y **ya está aplicado**. Resultado
+> comprobado con `make -C tests/host` y `make -C tests/host all-boards`, las dos
+> en verde: 95 archivos consolidados, 11 copias forzadas y vigiladas.
+
 
 **Un solo origen canónico por módulo, y que la duplicación que Arduino obliga a
 mantener deje de poder divergir en silencio.**
