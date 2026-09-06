@@ -257,6 +257,7 @@
 #include "FlexOS_Ultra_AppWeather.h"         // app Clima y sus dos widgets
 #include "FlexOS_Ultra_AppSwitcher.h"        // App Switcher / Recientes
 #include "FlexOS_Ultra_Lock.h"               // bloqueo de seguridad y modo kiosco
+#include "FlexOS_Ultra_PkgApps.h"            // apps descargadas: registro real, cache e iconos
 #include "FlexOS_Ultra_AppDrawer.h"          // menu contextual del escritorio y caja de aplicaciones
 #include "FlexOS_Ultra_Power.h"              // desbloqueo, suspension y apagado completo
 #include "FlexOS_Ultra_Network.h"            // arranque seguro de la radio y Wi-Fi

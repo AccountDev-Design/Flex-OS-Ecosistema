@@ -457,6 +457,59 @@ static void testStateAndData(){
   CHECK(!flexPkgUninstall("com.flexos.demo"), "desinstalar dos veces no revienta");
 }
 
+// LA SENAL DE INVALIDACION DE CACHE. La Caja de aplicaciones y Flex Store
+// deciden si releen /FlexApps mirando este contador. Si subiera de menos, una
+// app instalada no apareceria hasta reiniciar; si subiera de mas, la caja
+// recorreria el almacenamiento por cuadro. Las dos cosas se comprueban aqui,
+// contra el instalador REAL sobre un LittleFS en memoria.
+static void testRevision(){
+  std::printf("-- revision del registro: sube por evento, nunca por lectura --\n");
+  fsStubReset();
+  uint32_t r0 = flexPkgRevision();
+  CHECK(flexPkgBegin(), "arranque");
+  uint32_t rBegin = flexPkgRevision();
+  CHECK(rBegin > r0, "el arranque (que puede recuperar una transaccion) sube la revision");
+
+  // LEER NO CUENTA. Es la regla que sostiene toda la cache de la caja.
+  FlexPkgInfo list[FLEXPKG_MAX_INSTALLED], got;
+  for(int i = 0; i < 50; i++){ flexPkgList(list, FLEXPKG_MAX_INSTALLED); flexPkgGet("com.flexos.demo", &got); }
+  CHECK(flexPkgRevision() == rBegin, "50 lecturas del registro no mueven la revision");
+
+  pkgb::Built v1 = pkgb::buildPackage(uiSpec(), gDev);
+  putPackage("/rev1.flexpkg", v1.bytes);
+  FlexPkgInfo info;
+  CHECK(flexPkgInstall("/rev1.flexpkg", &info), "instalada");
+  uint32_t rInstall = flexPkgRevision();
+  CHECK(rInstall == rBegin + 1, "instalar sube la revision EXACTAMENTE una vez");
+
+  // Inspeccionar valida el paquete entero, pero no toca el registro.
+  CHECK(flexPkgInspect("/rev1.flexpkg", &info), "se puede inspeccionar");
+  CHECK(flexPkgRevision() == rInstall, "inspeccionar no cambia nada, y la revision lo refleja");
+
+  // Una instalacion que FALLA revierte: el registro queda como estaba, asi que
+  // la revision no puede subir (subir obligaria a releer para descubrir que no
+  // habia cambiado nada).
+  { pkgb::Built bad = pkgb::buildPackage(uiSpec(), gDev);
+    bad.bytes[bad.bytes.size() - 1] ^= 0x40;                 // firma rota
+    putPackage("/rev_bad.flexpkg", bad.bytes);
+    CHECK(!flexPkgInstall("/rev_bad.flexpkg", &info), "un paquete con la firma rota no se instala");
+    CHECK(flexPkgRevision() == rInstall, "y una instalacion fallida NO sube la revision"); }
+
+  CHECK(flexPkgSetState("com.flexos.demo", FLEXPKG_APP_STOPPED), "se detiene");
+  CHECK(flexPkgRevision() == rInstall + 1, "detener una app sube la revision (deja de ser abrible)");
+  CHECK(flexPkgSetState("com.flexos.demo", FLEXPKG_APP_ENABLED), "se reactiva");
+  CHECK(flexPkgRevision() == rInstall + 2, "y reactivarla tambien");
+
+  uint32_t rBefore = flexPkgRevision();
+  CHECK(!flexPkgSetState("com.no.existe", FLEXPKG_APP_STOPPED), "detener lo que no existe falla");
+  CHECK(flexPkgRevision() == rBefore, "y no mueve la revision");
+
+  CHECK(flexPkgUninstall("com.flexos.demo"), "se desinstala");
+  CHECK(flexPkgRevision() == rBefore + 1, "desinstalar sube la revision una vez");
+  CHECK(!flexPkgUninstall("com.flexos.demo"), "desinstalar dos veces falla");
+  CHECK(flexPkgRevision() == rBefore + 1, "y la segunda vez no mueve nada");
+}
+
 static void testInstallApp1WithGrant(){
   std::printf("-- instalar flex-app-v1 con permisos firmados --\n");
   fsStubReset();
@@ -667,6 +720,7 @@ int main(){
   testInstall();
   testRollback();
   testStateAndData();
+  testRevision();
   testInstallApp1WithGrant();
   testUi1StillWorks();
   testInstallCancelled();

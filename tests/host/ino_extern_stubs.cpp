@@ -256,6 +256,7 @@ int            gStubInstallIndex = -1;                      // ultimo flexStoreI
 char           gStubRuntimeId[FLEXPKG_ID_MAX + 1] = "";     // ultimo flexRuntimeLoad()
 char           gStubUninstallId[FLEXPKG_ID_MAX + 1] = "";   // ultimo flexPkgUninstall()
 int            gStubPkgListCalls = 0;                       // relecturas de la lista instalada
+uint32_t       gStubPkgRevision = 1;                        // revision del registro (ver flexPkgRevision)
 int            gStubCatalogItemCalls = 0;                   // copias de FlexStoreItem servidas
 bool           gStubRuntimeOk = true;
 bool           gStubStoreCancelled = false;
@@ -273,10 +274,12 @@ bool flexPkgUninstall(const char* packageId){
   for(int i = 0; i < gStubInstalledN; i++){
     if(strcmp(gStubInstalled[i].id, gStubUninstallId)) continue;
     for(int j = i; j + 1 < gStubInstalledN; j++) gStubInstalled[j] = gStubInstalled[j + 1];
-    gStubInstalledN--; return true;
+    gStubInstalledN--; gStubPkgRevision++; return true;
   }
   return false;
 }
+// Igual que en la placa: solo sube cuando la lista PUDO cambiar de verdad.
+uint32_t flexPkgRevision(){ return gStubPkgRevision; }
 int flexPkgList(FlexPkgInfo* out, int maxItems){
   gStubPkgListCalls++;
   int n = 0;
@@ -318,6 +321,16 @@ bool flexStoreCatalogItem(int index, FlexStoreItem* out){
   if(!out || index < 0 || index >= gStubCatalogN) return false;
   gStubCatalogItemCalls++; *out = gStubCatalog[index]; return true;
 }
+// Paquete que la tienda esta descargando o instalando ahora mismo. Las pruebas
+// lo fijan para comprobar el estado "actualizando" de la Caja de aplicaciones.
+char gStubStoreBusyId[FLEXPKG_ID_MAX + 1] = "";
+void flexStoreBusyPackage(char* out, size_t outSize){
+  if(!out || outSize == 0) return;
+  out[0] = 0;
+  if(gStubStoreState != FLEXSTORE_DOWNLOADING && gStubStoreState != FLEXSTORE_INSTALLING) return;
+  snprintf(out, outSize, "%s", gStubStoreBusyId);
+}
+
 bool flexStoreHasUpdate(const FlexStoreItem* item, FlexPkgInfo* installed){
   if(!item || !item->packageId[0]) return false;
   FlexPkgInfo local;

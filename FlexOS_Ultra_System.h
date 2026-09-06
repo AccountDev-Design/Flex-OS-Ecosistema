@@ -210,6 +210,10 @@ static uint32_t memShedSystem(){
   if(drwPage && gState != ST_DRAWER){
     heap_caps_free(drwPage); drwPage = NULL; drwPageSig = -1;
   }
+  // Iconos propios de las apps descargadas (hasta 32 KB). Se sueltan con la
+  // caja cerrada; las apps siguen apareciendo, con su icono generico, hasta que
+  // la lista se reconstruya.
+  if(gState != ST_DRAWER) pkgAppIconsFree();
   // Fondo compuesto de Modo PC / DeX (768 KB), solo con DeX cerrado.
   if(gAppState[IC_MODOPC] == ALIFE_CLOSED) dexBgFree();
   // Banda estatica del deslizador de apagado.
