@@ -48,6 +48,22 @@ static inline void storeFilterInvalidate(){ storeFiltDirty = true; }
 
 static void storeReloadInstalled(){
   storeInstalledN = flexPkgList(storeInstalled, FLEXPKG_MAX_INSTALLED);
+  // Algunas versiones de LittleFS no enumeran de forma fiable directorios
+  // anidados aunque abrirlos por su ruta exacta si funciona. Reconciliamos las
+  // apps del catalogo contra el manifiesto activo una sola vez por evento.
+  int catalogN = flexStoreCatalogCount();
+  for(int i = 0; i < catalogN && storeInstalledN < FLEXPKG_MAX_INSTALLED; i++){
+    FlexStoreItem item;
+    if(!flexStoreCatalogItem(i, &item)) continue;
+    bool known = false;
+    for(int j = 0; j < storeInstalledN; j++){
+      if(!strcmp(storeInstalled[j].id, item.packageId)){ known = true; break; }
+    }
+    if(!known){
+      FlexPkgInfo installed;
+      if(flexPkgGet(item.packageId, &installed)) storeInstalled[storeInstalledN++] = installed;
+    }
+  }
   storeInstalledDirty = false;
   storeFilterInvalidate();
 }
@@ -279,14 +295,14 @@ static void storeDiscoverRender(){
     flxFlushAll(); return;
   }
   if(st == FLEXSTORE_ERROR){
-    storeEmpty("No se pudo abrir Flex Store", flexStoreError());
+    storeEmpty(flexStoreCatalogCount() > 0 ? "No se pudo instalar la app" : "No se pudo abrir Flex Store", flexStoreError());
     fillRoundRect(118, 474, SCR_W - 236, 50, 25, TH_PRIM);
     drawTextC(SCR_W / 2, 490, "Reintentar", 2, rgb565(255,255,255));
     flxFlushAll(); return;
   }
   if(st == FLEXSTORE_SUCCESS && storeLastState != FLEXSTORE_SUCCESS){
     storeInstalledDirty = true;                  // la app nueva ya esta activa en LittleFS
-    storeToast("Aplicacion instalada y verificada");
+    storeToast(flexStoreStage());
   }
   storeEnsureInstalled();
   int catalogCount = flexStoreCatalogCount();
