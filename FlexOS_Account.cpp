@@ -138,34 +138,57 @@ static int b64Value(char c){
 
 static bool base64UrlDecode(const char* text, uint8_t** out, size_t* outLen, size_t maxOut){
   if(!text || !out || !outLen) return false;
-  size_t n = strlen(text), cap = (n * 3u) / 4u + 3u;
-  if(cap > maxOut) return false;
-  uint8_t* data = (uint8_t*)malloc(cap + 1);
+  size_t n = strlen(text);
+  size_t encoded = n;
+  while(encoded > 0 && text[encoded - 1] == '=') encoded--;
+  size_t remainder = encoded & 3u;
+  if(remainder == 1u) return false;
+  size_t expected = (encoded / 4u) * 3u + (remainder ? remainder - 1u : 0u);
+  if(expected > maxOut) return false;
+  uint8_t* data = (uint8_t*)malloc(expected + 1u);
   if(!data) return false;
   uint32_t acc = 0; int bits = 0; size_t used = 0;
   for(size_t i = 0; i < n; i++){
-    if(text[i] == '=') break;
+    if(text[i] == '='){
+      for(size_t j = i; j < n; j++) if(text[j] != '='){ free(data); return false; }
+      break;
+    }
     int value = b64Value(text[i]);
     if(value < 0){ free(data); return false; }
     acc = (acc << 6) | (uint32_t)value; bits += 6;
-    if(bits >= 8){ bits -= 8; if(used >= cap){ free(data); return false; } data[used++] = (uint8_t)(acc >> bits); }
+    if(bits >= 8){ bits -= 8; if(used >= expected){ free(data); return false; } data[used++] = (uint8_t)(acc >> bits); }
   }
+  if(used != expected){ free(data); return false; }
   data[used] = 0; *out = data; *outLen = used;
   return true;
 }
 
 static bool verifySignature(const uint8_t* payload, size_t payloadLen, const uint8_t signature[64]){
+  static const uint8_t P256_ORDER[32] = {
+    0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xbc,0xe6,0xfa,0xad,0xa7,0x17,0x9e,0x84,0xf3,0xb9,0xca,0xc2,0xfc,0x63,0x25,0x51
+  };
+  static const uint8_t P256_HALF_ORDER[32] = {
+    0x7f,0xff,0xff,0xff,0x80,0x00,0x00,0x00,0x7f,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xde,0x73,0x7d,0x56,0xd3,0x8b,0xcf,0x42,0x79,0xdc,0xe5,0x61,0x7e,0x31,0x92,0xa8
+  };
   uint8_t digest[32];
   if(!sha256(payload, payloadLen, digest)) return false;
   mbedtls_ecp_group group; mbedtls_ecp_group_init(&group);
   mbedtls_ecp_point key; mbedtls_ecp_point_init(&key);
-  mbedtls_mpi r, s; mbedtls_mpi_init(&r); mbedtls_mpi_init(&s);
+  mbedtls_mpi r, s, order, halfOrder;
+  mbedtls_mpi_init(&r); mbedtls_mpi_init(&s);
+  mbedtls_mpi_init(&order); mbedtls_mpi_init(&halfOrder);
   int rc = mbedtls_ecp_group_load(&group, MBEDTLS_ECP_DP_SECP256R1);
   if(rc == 0) rc = mbedtls_ecp_point_read_binary(&group, &key, ACCOUNT_PUBLIC_KEY, sizeof(ACCOUNT_PUBLIC_KEY));
   if(rc == 0) rc = mbedtls_ecp_check_pubkey(&group, &key);
   if(rc == 0) rc = mbedtls_mpi_read_binary(&r, signature, 32);
   if(rc == 0) rc = mbedtls_mpi_read_binary(&s, signature + 32, 32);
+  if(rc == 0) rc = mbedtls_mpi_read_binary(&order, P256_ORDER, sizeof(P256_ORDER));
+  if(rc == 0) rc = mbedtls_mpi_read_binary(&halfOrder, P256_HALF_ORDER, sizeof(P256_HALF_ORDER));
+  if(rc == 0 && mbedtls_mpi_cmp_mpi(&s, &halfOrder) > 0) rc = mbedtls_mpi_sub_mpi(&s, &order, &s);
   if(rc == 0) rc = mbedtls_ecdsa_verify(&group, digest, sizeof(digest), &key, &r, &s);
+  mbedtls_mpi_free(&halfOrder); mbedtls_mpi_free(&order);
   mbedtls_mpi_free(&s); mbedtls_mpi_free(&r); mbedtls_ecp_point_free(&key); mbedtls_ecp_group_free(&group);
   memset(digest, 0, sizeof(digest));
   return rc == 0;
