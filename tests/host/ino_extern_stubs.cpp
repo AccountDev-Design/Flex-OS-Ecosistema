@@ -324,7 +324,9 @@ bool flexStoreCatalogItem(int index, FlexStoreItem* out){
 // Paquete que la tienda esta descargando o instalando ahora mismo. Las pruebas
 // lo fijan para comprobar el estado "actualizando" de la Caja de aplicaciones.
 char gStubStoreBusyId[FLEXPKG_ID_MAX + 1] = "";
+int            gStubStoreBusyCalls = 0;   // consultas desde el pintado (ver testCajaDescargadasRegresion)
 void flexStoreBusyPackage(char* out, size_t outSize){
+  gStubStoreBusyCalls++;
   if(!out || outSize == 0) return;
   out[0] = 0;
   if(gStubStoreState != FLEXSTORE_DOWNLOADING && gStubStoreState != FLEXSTORE_INSTALLING) return;

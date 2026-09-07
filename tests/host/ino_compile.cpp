@@ -117,7 +117,11 @@ static void psUntrack(void* p){
 // macro que redirige free(), asi que aqui dentro free() sigue siendo el real.
 void flexTestFree(void* p){ psUntrack(p); free(p); }
 
-void*  heap_caps_malloc(size_t n, uint32_t){ void* p = malloc(n); psTrack(p, n); return p; }
+// Inyeccion de fallo: con esto a true, cada reserva de PSRAM devuelve NULL.
+// Sirve para comprobar que quedarse sin memoria DEGRADA con elegancia en vez
+// de dejar la caja vacia o reventar. Solo lo activa la prueba que lo usa.
+bool gTestPsFail = false;
+void*  heap_caps_malloc(size_t n, uint32_t){ if(gTestPsFail) return nullptr; void* p = malloc(n); psTrack(p, n); return p; }
 void*  heap_caps_calloc(size_t n, size_t s, uint32_t){ void* p = calloc(n, s); psTrack(p, n * s); return p; }
 void*  heap_caps_realloc(void* p, size_t n, uint32_t){ psUntrack(p); void* q = realloc(p, n); psTrack(q, n); return q; }
 void*  heap_caps_aligned_alloc(size_t a, size_t n, uint32_t){ void* p = aligned_alloc(a, n); psTrack(p, n); return p; }
@@ -232,6 +236,8 @@ extern bool gFlexOtaOwns;
 static void testTecladoGlobal();
 static void testCajaApps();
 static void testCajaDescargadas();
+static void testCajaDescargadasScroll();
+static void testCajaDescargadasRegresion();
 static void testCronometro();
 static void testPaginasHome();
 static void testNotifUnaSola();
@@ -1257,6 +1263,7 @@ extern char           gStubRuntimeId[];
 extern FlexStoreState gStubStoreState;
 extern uint32_t       gStubPkgRevision;
 extern char           gStubStoreBusyId[];
+extern int            gStubStoreBusyCalls;
 
 // Alta en el registro simulado. Rellena TODO lo que un manifiesto validado
 // tiene que traer, para que la entrada sea aceptable; cada prueba de rechazo
@@ -1429,12 +1436,18 @@ static void testCajaDescargadas(){
   // --- 8. ACTUALIZANDO: estado visible, sin bloquear la caja ---
   snprintf(gStubStoreBusyId, FLEXPKG_ID_MAX, "%s", "com.flexos.antutu");
   gStubStoreState = FLEXSTORE_INSTALLING;
-  chk(pkgAppStatus(drwPkgList[0]) == PKGAPP_ST_UPDATING, "mientras se instala se marca actualizando");
+  // pkgAppStatus lee la MUESTRA del cuadro, no la tienda: preguntarle a la
+  // tienda por icono y por cuadro toma su mutex desde el hilo grafico, que es
+  // justo lo que puede disparar el watchdog (ver pkgAppSampleBusy).
+  chk(pkgAppStatusLive(drwPkgList[0]) == PKGAPP_ST_UPDATING,
+      "mientras se instala se marca actualizando");
+  chk(pkgAppStatus(drwPkgList[0]) == PKGAPP_ST_UPDATING,
+      "y el pintado lo ve por la muestra, sin volver a preguntar");
   int llamadas = gStubPkgListCalls;
   drwFilter();
   chk(gStubPkgListCalls == llamadas, "y ese estado NO obliga a releer el registro");
   gStubStoreState = FLEXSTORE_READY; gStubStoreBusyId[0] = 0;
-  chk(pkgAppStatus(drwPkgList[0]) == PKGAPP_ST_OK, "al terminar vuelve a estar lista");
+  chk(pkgAppStatusLive(drwPkgList[0]) == PKGAPP_ST_OK, "al terminar vuelve a estar lista");
 
   // --- 9. DESINSTALAR: desaparece en el acto, sin reiniciar ---
   chk(flexPkgUninstall("com.flexos.antutu"), "desinstalar desde Flex Store");
@@ -1505,6 +1518,192 @@ static void testCajaDescargadas(){
   storeView = SV_DISCOVER;
   drwTestReset();
   if(!gFails) printf("  Apps descargadas en la caja: todas las comprobaciones pasan.\n");
+}
+
+
+// #############################################################
+//  SCROLL DE LA CAJA CON APPS DESCARGADAS  (regresion del reinicio)
+//  ------------------------------------------------------------
+//  Esta bateria existe por un fallo REAL en placa: con una app
+//  instalada, deslizar hasta la seccion "Descargadas" ponia la
+//  pantalla cian y reiniciaba el firmware.
+//
+//  Aqui se recorre TODO el rango de desplazamiento, en los dos
+//  sentidos, componiendo bandas de verdad sobre los framebuffers del
+//  arnes. Con AddressSanitizer, cualquier lectura o escritura fuera de
+//  fb/bbuf/homeBuf -- o fuera de pkgApps[], drwPkgList[] y la cache de
+//  iconos -- para la prueba en el acto y senala la linea.
+// #############################################################
+static void drwScrollBarrido(const char* que){
+  // Cuadro completo y banda de rejilla, que son los dos unicos caminos de
+  // pintado de la caja, en cada posicion del recorrido.
+  int m = drwMaxScroll();
+  for(int paso = 0; paso <= m + 8; paso += 4){
+    drwScroll = (float)paso; drwClampScroll();
+    drwCompose(0, SCR_H - 1, true);
+    drwCompose(DRW_GRID_TOP, drwGridBot() - 1, true);
+  }
+  for(int paso = m + 8; paso >= -8; paso -= 4){
+    drwScroll = (float)paso; drwClampScroll();
+    drwCompose(DRW_GRID_TOP, drwGridBot() - 1, true);
+  }
+  // Y con el teclado del buscador abierto, que encoge la ventana.
+  drwKbOn = true; drwClampScroll();
+  for(int paso = 0; paso <= drwMaxScroll(); paso += 6){
+    drwScroll = (float)paso; drwClampScroll();
+    drwCompose(DRW_GRID_TOP, drwGridBot() - 1, true);
+  }
+  drwKbOn = false; drwScroll = 0; drwClampScroll();
+  chk(true, que);
+}
+
+static void testCajaDescargadasScroll(){
+  printf("Scroll de la caja con apps descargadas\n");
+  const int CASOS[] = { 0, 1, 2, 3, 7, 13, PKGAPP_MAX };
+  for(unsigned k = 0; k < sizeof(CASOS)/sizeof(CASOS[0]); k++){
+    int n = CASOS[k];
+    pkgStubClear();
+    for(int i = 0; i < n; i++){
+      char id[64], nm[64];
+      snprintf(id, sizeof(id), "com.flexos.app%02d", i);
+      snprintf(nm, sizeof(nm), "Aplicacion %d", i);
+      pkgStubAdd(id, nm, "1.0.0", 1);
+    }
+    pkgAppsInvalidate();
+    drwTestReset();
+    gState = ST_DRAWER; drwOn = true; drwAnim = 0; drwSlide = 0;
+    chk(drwPkgN == n, "la caja lista exactamente las apps instaladas");
+
+    char msg[96];
+    snprintf(msg, sizeof(msg), "recorrido completo con %d app(s) descargada(s)", n);
+    drwScrollBarrido(msg);
+
+    // La hoja a medio subir: sy != 0 desplaza TODA la geometria.
+    drwSlide = (float)(SCR_H / 3);
+    drwCompose(0, SCR_H - 1, false);
+    drwScroll = (float)drwMaxScroll();
+    drwCompose(0, SCR_H - 1, false);
+    drwSlide = 0; drwScroll = 0; drwClampScroll();
+
+    // Abrir y cerrar repetido: la cache de iconos no puede crecer ni perderse.
+    for(int v = 0; v < 3; v++){
+      pkgAppIconsFree();
+      drwFilter();
+      drwCompose(0, SCR_H - 1, true);
+    }
+    if(gFails) break;
+  }
+
+  // La ficha de una descargada, en el limite del recorrido.
+  pkgStubClear();
+  pkgStubAdd("com.flexos.unica", "Unica", "1.0.0", 1);
+  pkgAppsInvalidate(); drwTestReset();
+  gState = ST_DRAWER; drwOn = true; drwAnim = 0; drwSlide = 0;
+  drwScroll = (float)drwMaxScroll();
+  drwInfoPkg = drwPkgList[0]; drwInfoOn = true;
+  drwCompose(0, SCR_H - 1, true); drwInfoDraw();
+  drwInfoOn = false; drwInfoPkg = -1;
+  chk(true, "la ficha de una descargada se pinta al final del recorrido");
+
+  pkgStubClear();
+  gState = ST_HOME; drwOn = false; drwAnim = 0; drwSlide = (float)SCR_H;
+  drwTestReset();
+  if(!gFails) printf("  Scroll de la caja con apps descargadas: todas las comprobaciones pasan.\n");
+}
+
+
+// #############################################################
+//  LO QUE LA REGRESION DEL REINICIO DEJO POR ESCRITO
+//  ------------------------------------------------------------
+//  Tres reglas que no se pueden volver a romper: la lista no se
+//  construye en la pila, el hilo grafico no espera a la tienda, y un
+//  registro que cambia bajo los pies no deja indices colgando.
+//
+//  El presupuesto de PILA lo vigila check_stack.py, que compila el
+//  sketch con -fstack-usage y falla si una funcion se pasa. Es la
+//  unica de las tres que no se puede comprobar desde aqui: en el PC la
+//  pila son megabytes y el fallo no se manifiesta.
+// #############################################################
+static void testCajaDescargadasRegresion(){
+  printf("Regresion del reinicio al desplazar la caja\n");
+
+  // --- 1. EL HILO GRAFICO NO PREGUNTA A LA TIENDA POR ICONO ---
+  // flexStoreBusyPackage() toma el mutex de Flex Store con espera infinita.
+  // Hacerlo por icono y por cuadro es lo que puede dejar al hilo de interfaz
+  // esperando a la tarea de descarga hasta que salte el watchdog de tarea.
+  pkgStubClear();
+  for(int i = 0; i < 8; i++){
+    char id[64], nm[64];
+    snprintf(id, sizeof(id), "com.flexos.busy%02d", i);
+    snprintf(nm, sizeof(nm), "Busy %d", i);
+    pkgStubAdd(id, nm, "1.0.0", 1);
+  }
+  pkgAppsInvalidate(); drwTestReset();
+  gState = ST_DRAWER; drwOn = true; drwAnim = 0; drwSlide = 0;
+  drwScroll = (float)drwMaxScroll();
+  chk(drwPkgN == 8, "las ocho descargadas estan en la caja");
+  gStubStoreBusyCalls = 0;
+  drwCompose(0, SCR_H - 1, true);
+  chk(gStubStoreBusyCalls <= 1,
+      "un cuadro consulta a Flex Store UNA vez como mucho, no una por icono");
+  int trasUno = gStubStoreBusyCalls;
+  drwCompose(DRW_GRID_TOP, drwGridBot() - 1, true);
+  chk(gStubStoreBusyCalls <= trasUno + 1, "y la banda de rejilla, otra vez una");
+
+  // Sin descargadas no se consulta siquiera.
+  pkgStubClear(); pkgAppsInvalidate(); drwTestReset();
+  gStubStoreBusyCalls = 0;
+  drwCompose(0, SCR_H - 1, true);
+  chk(gStubStoreBusyCalls == 0, "sin apps descargadas no se molesta a la tienda");
+
+  // --- 2. SIN PSRAM: SE DEGRADA, NO SE VACIA NI REVIENTA ---
+  pkgStubClear();
+  pkgStubAdd("com.flexos.uno", "Uno", "1.0.0", 1);
+  pkgStubAdd("com.flexos.dos", "Dos", "1.0.0", 1);
+  pkgAppsInvalidate(); drwFilter();
+  chk(drwPkgN == 2, "dos apps en la caja");
+  gTestPsFail = true;                       // toda reserva de PSRAM falla
+  pkgAppsInvalidate(); drwFilter();
+  chk(drwPkgN == 2, "si no hay PSRAM para releer, se CONSERVA la lista que habia");
+  drwCompose(0, SCR_H - 1, true);           // y se sigue pudiendo pintar
+  gTestPsFail = false;
+  pkgAppsInvalidate(); drwFilter();
+  chk(drwPkgN == 2, "y en cuanto vuelve la memoria se relee con normalidad");
+
+  // --- 3. EL REGISTRO CAMBIA CON LA CAJA ABIERTA ---
+  // Peor caso: se desinstalan apps mientras la rejilla tiene sus indices en la
+  // mano. Ni la rejilla ni la ficha pueden leer una entrada que ya no existe.
+  pkgStubClear();
+  for(int i = 0; i < 12; i++){
+    char id[64], nm[64];
+    snprintf(id, sizeof(id), "com.flexos.vol%02d", i);
+    snprintf(nm, sizeof(nm), "Volatil %d", i);
+    pkgStubAdd(id, nm, "1.0.0", 1);
+  }
+  pkgAppsInvalidate(); drwTestReset();
+  gState = ST_DRAWER; drwOn = true; drwAnim = 0; drwSlide = 0;
+  drwScroll = (float)drwMaxScroll();
+  chk(drwPkgN == 12, "doce descargadas");
+  drwInfoPkg = drwPkgList[drwPkgN - 1]; drwInfoOn = true;   // ficha de la ultima
+  // Se van casi todas SIN pasar por drwFilter: drwPkgList queda apuntando a
+  // entradas que ya no existen, que es exactamente el estado peligroso.
+  for(int i = 2; i < 12; i++){
+    char id[64]; snprintf(id, sizeof(id), "com.flexos.vol%02d", i);
+    flexPkgUninstall(id);
+  }
+  pkgAppsInvalidate(); pkgAppsEnsure();
+  chk(pkgAppsN == 2, "el registro ya solo tiene dos");
+  drwCompose(0, SCR_H - 1, true);            // la rejilla con la lista vieja
+  drwInfoDraw();                             // y la ficha, con un indice muerto
+  chk(!drwInfoOn && drwInfoPkg == -1, "la ficha de una app que ya no existe se cierra sola");
+  drwFilter();
+  chk(drwPkgN == 2, "y al refiltrar la caja queda cuadrada");
+
+  pkgStubClear();
+  gState = ST_HOME; drwOn = false; drwAnim = 0; drwSlide = (float)SCR_H;
+  drwInfoOn = false; drwInfoPkg = -1;
+  drwTestReset();
+  if(!gFails) printf("  Regresion del reinicio: todas las comprobaciones pasan.\n");
 }
 
 
@@ -4085,6 +4284,8 @@ int main(){
   testTecladoGlobal();
   testCajaApps();
   testCajaDescargadas();
+  testCajaDescargadasScroll();
+  testCajaDescargadasRegresion();
   testCronometro();
   testPaginasHome();
   testNotifUnaSola();

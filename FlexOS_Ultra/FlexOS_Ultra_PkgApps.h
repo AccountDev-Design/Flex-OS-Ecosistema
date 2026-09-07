@@ -53,6 +53,26 @@
 // completa y el consumo no crece con el catalogo.
 #define PKGAPP_ICON_SLOTS   4
 
+// ---- DIAGNOSTICO TEMPORAL DEL CAJON -------------------------------------
+// Puesto para cazar el reinicio al desplazar la caja. Es DEPURACION: se apaga
+// poniendo esto a 0, y no deja ni una linea en Serial cuando esta apagado.
+// Cuando esta encendido, nunca inunda el puerto: una linea al abrir la caja,
+// una como mucho cada 500 ms mientras se desplaza, y una por cuadro LENTO
+// (>60 ms), que es el unico que puede acercarse al watchdog de tarea.
+#define FLEXDRW_DIAG 1
+
+#if FLEXDRW_DIAG
+static uint32_t pkgDiagLastMs = 0;
+// La marca de agua de la pila del hilo de interfaz: los bytes que NUNCA se han
+// usado. Es la medida que delata un marco de pila desbocado, que fue justo la
+// causa del reinicio (ver pkgAppsRebuild).
+// En ESP-IDF esta llamada ya devuelve BYTES (no palabras, como el FreeRTOS
+// original). Es la medida que delata un marco de pila desbocado.
+static uint32_t pkgDiagStackFree(){
+  return (uint32_t)uxTaskGetStackHighWaterMark(NULL);
+}
+#endif
+
 // Estado de una app descargada, tal y como lo ve la caja.
 enum PkgAppStatus : uint8_t {
   PKGAPP_ST_OK = 0,        // valida: se puede abrir
@@ -76,6 +96,20 @@ static PkgAppEntry pkgApps[PKGAPP_MAX];
 static int         pkgAppsN   = 0;
 static uint32_t    pkgAppsRev = 0;      // revision con la que se construyo la lista
 static bool        pkgAppsBuilt = false;
+
+#if FLEXDRW_DIAG
+static void pkgDiagLine(const char* que, int scroll, int filas,
+                        int band0, int band1, uint32_t frameUs){
+  Serial.printf("[CAJON] %s pkg=%d filas=%d scroll=%d banda=%d..%d %luus "
+                "pila_libre=%lu heap=%lu int=%lu psram=%lu\n",
+                que, pkgAppsN, filas, scroll, band0, band1,
+                (unsigned long)frameUs,
+                (unsigned long)pkgDiagStackFree(),
+                (unsigned long)esp_get_free_heap_size(),
+                (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
+#endif
 
 // Cache de iconos. Se llena durante la reconstruccion (que ya es un evento
 // raro), nunca durante un cuadro.
@@ -159,12 +193,41 @@ static bool pkgAppAccept(const FlexPkgInfo& info){
   return true;
 }
 
+// EL BUFFER DE LECTURA VA EN PSRAM, NUNCA EN LA PILA.
+//
+// ESTO ES LA REGRESION QUE REINICIABA EL FIRMWARE. Aqui habia un
+// `FlexPkgInfo raw[PKGAPP_MAX]` local. sizeof(FlexPkgInfo) es 844 bytes y
+// PKGAPP_MAX es 24: 20.256 bytes de datos que, con el resto del marco, medidos
+// con -fstack-usage daban 21.360 bytes de PILA en una sola llamada. La siguiente
+// funcion mas glotona de TODO el firmware usa 4.464. El loopTask de Arduino en
+// ESP32 tiene 8.192 bytes: el marco se comia la pila entera y ~13 KB de lo que
+// hubiera debajo (pilas de otras tareas, metadatos del heap, descriptores DMA).
+//
+// Un desbordamiento asi no falla en la instruccion que lo provoca: corrompe en
+// silencio y el sistema muere despues, cuando alguien usa lo pisado -- al
+// desplazar la caja, que es cuando la DMA2D y la PSRAM trabajan a fondo. De ahi
+// la pantalla cian (el panel alimentado con basura) y el reinicio.
+//
+// La reconstruccion es un evento RARO (instalar, actualizar, desinstalar,
+// detener, arrancar), asi que una reserva temporal en PSRAM no cuesta nada y
+// deja el marco de esta funcion en unas decenas de bytes.
 static void pkgAppsRebuild(){
   pkgAppIconsFree();
-  pkgAppsN = 0;
 
-  FlexPkgInfo raw[PKGAPP_MAX];
+  FlexPkgInfo* raw = (FlexPkgInfo*)heap_caps_malloc(sizeof(FlexPkgInfo) * PKGAPP_MAX,
+                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(!raw){
+    // Sin memoria para leer el registro NO se vacia la lista: se conserva la
+    // que hubiera y se reintenta en la siguiente invalidacion. Quedarse sin
+    // PSRAM un instante no puede hacer desaparecer las apps del usuario.
+    pkgAppsBuilt = pkgAppsN > 0;
+    return;
+  }
+
+  pkgAppsN = 0;
   int n = flexPkgList(raw, PKGAPP_MAX);
+  if(n < 0) n = 0;
+  if(n > PKGAPP_MAX) n = PKGAPP_MAX;                 // el registro no puede devolver mas
   for(int i = 0; i < n && pkgAppsN < PKGAPP_MAX; i++){
     if(!pkgAppAccept(raw[i])) continue;
     PkgAppEntry& e = pkgApps[pkgAppsN];
@@ -182,6 +245,7 @@ static void pkgAppsRebuild(){
     e.icon    = (int8_t)pkgAppIconLoad(e.id);
     pkgAppsN++;
   }
+  heap_caps_free(raw);
 
   // Orden estable por nombre, sin distinguir mayusculas. flexPkgList devuelve
   // lo que enumere LittleFS, que no tiene por que ser el mismo orden entre
@@ -216,15 +280,33 @@ static int pkgAppFind(const char* packageId){
 }
 
 // ---- Estado "actualizando" ----------------------------------------------
-// No se guarda en la entrada: se consulta a la tienda, que es quien lo sabe.
-// Asi una descarga en curso no obliga a reconstruir la lista, y al terminar la
-// instalacion la revision sube y la entrada se rehace con su version nueva.
+// No se guarda en la entrada: lo sabe la tienda. Asi una descarga en curso no
+// obliga a reconstruir la lista, y al terminar la instalacion la revision sube
+// y la entrada se rehace con su version nueva.
+//
+// PERO ESO NO SE PREGUNTA POR ICONO Y POR CUADRO. flexStoreBusyPackage() toma
+// el mutex de Flex Store con portMAX_DELAY, y el hilo de interfaz no puede
+// quedarse esperando a la tarea de descarga en mitad de componer una banda: si
+// se pasa del plazo, salta el watchdog de tarea y el sistema se reinicia.
+// Se MUESTREA una vez por cuadro, antes de dibujar nada, y el dibujo lee esta
+// copia. Un cuadro de retraso en un indicador no lo nota nadie; bloquear el
+// hilo grafico, si.
+static char pkgAppBusyId[FLEXPKG_ID_MAX + 1] = "";
+static void pkgAppSampleBusy(){
+  pkgAppBusyId[0] = 0;
+  flexStoreBusyPackage(pkgAppBusyId, sizeof(pkgAppBusyId));
+}
 static uint8_t pkgAppStatus(int index){
   if(index < 0 || index >= pkgAppsN) return PKGAPP_ST_ERROR;
-  char busy[FLEXPKG_ID_MAX + 1];
-  flexStoreBusyPackage(busy, sizeof(busy));
-  if(busy[0] && !strcmp(busy, pkgApps[index].id)) return PKGAPP_ST_UPDATING;
+  if(pkgAppBusyId[0] && !strcmp(pkgAppBusyId, pkgApps[index].id)) return PKGAPP_ST_UPDATING;
   return pkgApps[index].status;
+}
+// Version que SI consulta a la tienda. Solo para fuera del camino de pintado
+// (la ficha de informacion, que se abre por un toque, no por cuadro).
+static uint8_t pkgAppStatusLive(int index){
+  if(index < 0 || index >= pkgAppsN) return PKGAPP_ST_ERROR;
+  pkgAppSampleBusy();
+  return pkgAppStatus(index);
 }
 
 static const char* pkgAppStatusText(uint8_t status){
@@ -275,7 +357,22 @@ static uint16_t pkgAppTintColor(uint8_t tint){
 // drawAppIcon() para las nativas. NO toca drawAppIcon: los iconos del sistema
 // se quedan exactamente como estan.
 static void pkgAppDrawIcon(int index, int x, int y, int S){
-  if(index < 0 || index >= pkgAppsN) return;
+  if(index < 0 || index >= pkgAppsN || S <= 0) return;
+  // RECORTE POR CAJA, ANTES DE DIBUJAR NADA. La misma guarda que drawAppIcon()
+  // tiene para los iconos nativos, y por el mismo motivo: al desplazar la caja
+  // la mayoria de los iconos caen FUERA de la banda que se esta componiendo.
+  // Sin esto, cada uno ejecutaba igual sus miles de escrituras para que px() las
+  // descartara una a una -- trabajo puro por cuadro, justo lo que no cabe en el
+  // presupuesto de un desplazamiento a 30 fps.
+  {
+    const int M = 2;
+    if(gLand){
+      if(x + S + M <= gClipY0 || x - M > gClipY1) return;
+    } else {
+      if(y + S + M <= gClipY0 || y - M > gClipY1) return;
+      if(x + S + M <= gClipX0 || x - M > gClipX1) return;
+    }
+  }
   const PkgAppEntry& e = pkgApps[index];
   int r = S * 22 / 100;                                  // mismo radio que iconBase()
   if(e.icon >= 0 && e.icon < PKGAPP_ICON_SLOTS && pkgIconBuf[e.icon]){
@@ -284,11 +381,16 @@ static void pkgAppDrawIcon(int index, int x, int y, int S){
     fillRoundRect(x, y, S, S, r, rgb565(18, 20, 26));
     const uint16_t* src = pkgIconBuf[e.icon];
     for(int j = 0; j < S; j++){
+      // Solo las filas que caen en la banda: el resto ni se recorre.
+      if(!gLand && (y + j < gClipY0 || y + j > gClipY1)) continue;
       int sy = j * PKGAPP_ICON_PX / S;
+      if(sy < 0) sy = 0; if(sy >= PKGAPP_ICON_PX) sy = PKGAPP_ICON_PX - 1;
       int ins = rrInset(j, S, r);                        // sangrado de la esquina redondeada
+      if(ins < 0) ins = 0; if(ins > S / 2) ins = S / 2;
       for(int i = ins; i < S - ins; i++){
         int sx = i * PKGAPP_ICON_PX / S;
-        px(x + i, y + j, src[sy * PKGAPP_ICON_PX + sx]);
+        if(sx < 0) sx = 0; if(sx >= PKGAPP_ICON_PX) sx = PKGAPP_ICON_PX - 1;
+        px(x + i, y + j, src[(size_t)sy * PKGAPP_ICON_PX + sx]);
       }
     }
   } else {

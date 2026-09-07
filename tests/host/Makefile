@@ -252,10 +252,11 @@ INOWARN  := $(WARN) -Wno-unused-function -Wno-unused-variable \
 #      -Wunused-function NO avisa de una static que tenga prototipo previo, y
 #      aqui casi todas lo tienen. Ese fallo deja al sistema atrapado en un
 #      estado que nadie despacha.
-ino: ino_compile.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) check_protos.py check_wiring.py check_shared.py | $(BUILD)
+ino: ino_compile.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) check_protos.py check_wiring.py check_shared.py check_stack.py | $(BUILD)
 	@python3 check_shared.py $(ROOT)
 	@python3 check_protos.py $(INO_SRC)
 	@python3 check_wiring.py $(INO_SRC)
+	@python3 check_stack.py $(ROOT)
 	@$(CXX) $(CXXSTD) -fsyntax-only $(INOWARN) $(INOFLAGS) -x c++ ino_compile.cpp
 	@echo "FlexOS_Ultra.ino compila."
 

@@ -43,6 +43,11 @@ tests/
     flexapprun.cpp     herramienta: ejecuta un .flxb con el GESTOR del firmware
     pkgbuild.h         fabrica paquetes y grants reales (claves efímeras)
     vmimage.h          ensambla imágenes flex-app-v1 a mano
+    check_stack.py     presupuesto de PILA por funcion, con -fstack-usage.
+                       Existe por un reinicio real: un vector local de 21 KB
+                       desbordaba los 8 KB del loopTask y corrompia memoria
+                       ajena. En el PC la pila son megabytes y ni ASan lo ve;
+                       el compilador si
     check_shared.py    los 11 modulos que la raiz y FlexOS_Ultra/ comparten
                        a la fuerza (Arduino no deja incluir de una carpeta
                        hermana), comparados por HASH: si uno se separa, la

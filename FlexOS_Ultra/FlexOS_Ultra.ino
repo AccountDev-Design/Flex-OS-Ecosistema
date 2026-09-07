@@ -461,6 +461,30 @@ void setup(){
     prefs.end();
     Serial.printf("[PWR] arranque desde deep sleep (apagado limpio: %s)\n", gBootCleanOff ? "si" : "no");
   }
+#if FLEXDRW_DIAG
+  // DIAGNOSTICO TEMPORAL. Motivo del ultimo reinicio en claro, para distinguir
+  // un panic o un watchdog de un arranque normal sin tener que interpretar la
+  // banda forense. Una linea por arranque.
+  {
+    const char* motivo = "desconocido";
+    switch(rr){
+      case ESP_RST_POWERON:  motivo = "encendido"; break;
+      case ESP_RST_SW:       motivo = "reinicio por software"; break;
+      case ESP_RST_DEEPSLEEP:motivo = "deep sleep"; break;
+      case ESP_RST_PANIC:    motivo = "PANIC (excepcion o desbordamiento de pila)"; break;
+      case ESP_RST_TASK_WDT: motivo = "WATCHDOG DE TAREA"; break;
+      case ESP_RST_INT_WDT:  motivo = "WATCHDOG DE INTERRUPCIONES"; break;
+      case ESP_RST_WDT:      motivo = "WATCHDOG"; break;
+      case ESP_RST_BROWNOUT: motivo = "caida de tension"; break;
+      case ESP_RST_EXT:      motivo = "reset externo"; break;
+      default: break;
+    }
+    Serial.printf("[BOOT] motivo del reinicio: %s (%d) | heap=%lu psram=%lu\n",
+                  motivo, (int)rr,
+                  (unsigned long)esp_get_free_heap_size(),
+                  (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+  }
+#endif
   bool abnormal = !(rr == ESP_RST_POWERON || rr == ESP_RST_SW || fromDeep);
   if(abnormal) showBootBanner();
 

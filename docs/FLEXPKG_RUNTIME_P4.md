@@ -163,6 +163,20 @@ abre Flex Store, que arranca la app por el mismo camino de siempre (bifurcación
 por runtime, revalidación del grant en cada arranque, presupuesto por tick). Al
 salir se vuelve al **escritorio**, no al listado de la tienda.
 
+### Dos reglas que no se pueden romper en el cajón
+
+Salieron de un reinicio real del firmware al desplazar la caja:
+
+1. **La lista no se construye en la pila.** `pkgAppsRebuild()` lee el registro
+   en un buffer de PSRAM y lo libera al terminar. Un `FlexPkgInfo[24]` local son
+   20 KB, y el `loopTask` de Arduino tiene 8 KB: desbordaba la pila entera y
+   corrompía la memoria de al lado, con el sistema muriendo después, en otro
+   sitio. Lo vigila `tests/host/check_stack.py`.
+2. **El hilo gráfico no espera a Flex Store.** `flexStoreBusyPackage()` toma el
+   mutex de la tienda con espera infinita, así que el estado «actualizando» se
+   **muestrea una vez por cuadro** (`pkgAppSampleBusy`) y el dibujo lee esa
+   copia. Fuera del pintado se usa `pkgAppStatusLive()`.
+
 ## Compilación objetivo
 
 - Arduino IDE 2.3.10

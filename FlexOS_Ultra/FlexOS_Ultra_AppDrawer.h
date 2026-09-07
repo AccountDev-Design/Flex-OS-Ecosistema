@@ -591,6 +591,10 @@ static void drwDrawGrid(int sy, int y0, int y1){
     // si es viable: buscador, menu contextual y ficha de informacion.
     int oldStyle = gIconStyle; gIconStyle = 0;
     int scroll = (int)drwScroll;
+    // UNA sola consulta a Flex Store por cuadro, aqui, fuera del bucle de
+    // iconos. Preguntarlo por icono tomaba su mutex con espera infinita desde
+    // el hilo grafico (ver pkgAppSampleBusy).
+    if(drwHasPkg()) pkgAppSampleBusy();
     // Se recorren las filas y se descartan por su Y REAL. Antes se calculaba el
     // rango dividiendo el scroll entre DRW_ROW_STEP, que ya no vale: la
     // cabecera de "Descargadas" rompe el paso uniforme. Son una docena de filas
@@ -611,8 +615,10 @@ static void drwDrawGrid(int sy, int y0, int y1){
       bool pkgRow = drwHasPkg() && r >= drwPkgRow0();
       for(int c = 0; c < 4; c++){
         if(!pkgRow){
-          int i = r * 4 + c; if(i >= drwN) break;
+          int i = r * 4 + c;
+          if(i < 0 || i >= drwN) break;
           int id = drwList[i];
+          if(id < 0 || id >= APP_N) continue;
           int cx, cy; drwCellXY(i, cx, cy);
           int ix = cx, iy = cy - scroll + sy;
           drawAppIcon(id, ix, iy, DRW_ICON_S);
@@ -625,8 +631,10 @@ static void drwDrawGrid(int sy, int y0, int y1){
                     appIsHidden(id) ? TH_ONWALL2 : TH_ONWALL);
           continue;
         }
-        int i = (r - drwPkgRow0()) * 4 + c; if(i >= drwPkgN) break;
+        int i = (r - drwPkgRow0()) * 4 + c;
+        if(i < 0 || i >= drwPkgN) break;
         int e = drwPkgList[i];
+        if(e < 0 || e >= pkgAppsN) continue;            // registro rehecho a media rejilla
         int cx, cy; drwPkgCellXY(i, cx, cy);
         int ix = cx, iy = cy - scroll + sy;
         pkgAppDrawIcon(e, ix, iy, DRW_ICON_S);
@@ -785,7 +793,7 @@ static void drwInfoDrawPkg(int x, int y, int e){
   drawText(x + 20, ty, ln, 2, TH_TXT2); ty += 26;
   snprintf(ln, sizeof(ln), "Runtime: %s", a.runtime == FLEXPKG_RT_APP1 ? "flex-app-v1" : "flex-ui-1");
   drawText(x + 20, ty, ln, 2, TH_TXT2); ty += 26;
-  uint8_t st = pkgAppStatus(e);
+  uint8_t st = pkgAppStatusLive(e);
   snprintf(ln, sizeof(ln), "Estado: %s", st == PKGAPP_ST_OK ? "lista" : pkgAppStatusText(st));
   drawText(x + 20, ty, ln, 2, st == PKGAPP_ST_OK ? TH_TXT2 : TH_DANGER); ty += 26;
   drawTextClip(x + 20, ty, a.id, 1, TH_TXT2, x + DRW_INFO_W - 20);
@@ -795,8 +803,15 @@ static void drwInfoDraw(){
   int x = (SCR_W - DRW_INFO_W) / 2, y = (SCR_H - DRW_INFO_H) / 2;
   if(uiGlass) drawLiquidGlassPanel(x, y, DRW_INFO_W, DRW_INFO_H, 24, TH_GLASS);
   else        fillRoundRectA(x, y, DRW_INFO_W, DRW_INFO_H, 24, TH_SURF, 245);
-  if(drwInfoPkg >= 0 && drwInfoPkg < pkgAppsN){ drwInfoDrawPkg(x, y, drwInfoPkg); return; }
+  if(drwInfoPkg >= 0){
+    // El registro pudo rehacerse con la ficha abierta (una instalacion que
+    // termina). Si el indice ya no existe, se cierra la ficha en vez de leer
+    // una entrada que no es la que el usuario abrio.
+    if(drwInfoPkg < pkgAppsN){ drwInfoDrawPkg(x, y, drwInfoPkg); return; }
+    drwInfoPkg = -1; drwInfoOn = false; return;
+  }
   int id = drwCtxApp;
+  if(id < 0 || id >= APP_N) return;
   { int oldStyle = gIconStyle; gIconStyle = 0;
     drawAppIcon(id, x + 20, y + 20, 56);
     gIconStyle = oldStyle; }
@@ -890,6 +905,10 @@ static void drawerOpen(){
   drwFull = true; drwDirty = true;
   gRippleActive = false;                          // el destello del icono no sobrevive al gesto
   gState = ST_DRAWER;
+#if FLEXDRW_DIAG
+  pkgDiagLine("abre", (int)drwScroll, drwRows(), 0, SCR_H - 1, 0);
+  pkgDiagLastMs = millis();
+#endif
 }
 // Empieza la bajada. La accion pendiente (abrir una app, ir a Recientes) se
 // ejecuta cuando la hoja ha terminado de salir, no al tocar: asi la caja nunca
@@ -1051,7 +1070,11 @@ static void drawerTick(){
     bool lpPkg = false;
     int lpCell = drwHitAny(T.x, T.y, lpPkg);
     drwLpApp = lpPkg ? -1 : lpCell;
-    drwLpPkg = lpPkg ? drwPkgList[lpCell] : -1;
+    drwLpPkg = -1;
+    if(lpPkg && lpCell >= 0 && lpCell < drwPkgN){
+      int e = drwPkgList[lpCell];
+      if(e >= 0 && e < pkgAppsN) drwLpPkg = e;
+    }
   }
   // El final del arrastre se cierra AQUI, antes de repartir el toque: el dedo
   // puede levantarse sobre el teclado o la cabecera, y alli drwScrollTouch() ni
@@ -1142,11 +1165,12 @@ static void drawerTick(){
         drwStartClose(id, false);
         return;
       }
-      if(cell >= 0 && isPkg){
+      if(cell >= 0 && isPkg && cell < drwPkgN){
         int e = drwPkgList[cell];
+        if(e < 0 || e >= pkgAppsN) return;              // la lista se rehizo bajo el dedo
         // Una app que no esta lista no se abre y lo dice en su ficha, en vez de
         // fallar por dentro o dejar la caja sin responder.
-        if(pkgAppStatus(e) != PKGAPP_ST_OK){
+        if(pkgAppStatusLive(e) != PKGAPP_ST_OK){
           drwInfoPkg = e; drwInfoOn = true; drwVel = 0; drwDrag = false; drwFull = true;
           return;
         }
@@ -1173,13 +1197,35 @@ static void drawerTick(){
   if(!drwFull && !drwDirty) return;
   if(now - drwFrameMs < 33) return;                 // 30 fps: presupuesto real de PSRAM/DMA2D
   drwFrameMs = now;
+#if FLEXDRW_DIAG
+  uint32_t diagT0 = micros();
+  int diagB0, diagB1;
+#endif
   if(drwFull){
     drwCompose(0, SCR_H - 1, true); present(0, SCR_H - 1);
     drwFull = false; drwDirty = false;
+#if FLEXDRW_DIAG
+    diagB0 = 0; diagB1 = SCR_H - 1;
+#endif
   } else {
     int y0 = DRW_GRID_TOP, y1 = drwGridBot() - 1;
     drwCompose(y0, y1, true); present(y0, y1);
     drwDirty = false;
+#if FLEXDRW_DIAG
+    diagB0 = y0; diagB1 = y1;
+#endif
   }
   setBuf(fb);
+#if FLEXDRW_DIAG
+  // Un cuadro de mas de 60 ms es el que puede acercarse al watchdog de tarea:
+  // ese SIEMPRE se cuenta. El resto, como mucho uno cada 500 ms.
+  uint32_t diagUs = micros() - diagT0;
+  if(diagUs > 60000u){
+    pkgDiagLine("CUADRO LENTO", (int)drwScroll, drwRows(), diagB0, diagB1, diagUs);
+    pkgDiagLastMs = now;
+  } else if(now - pkgDiagLastMs >= 500u){
+    pkgDiagLine("scroll", (int)drwScroll, drwRows(), diagB0, diagB1, diagUs);
+    pkgDiagLastMs = now;
+  }
+#endif
 }
