@@ -238,6 +238,7 @@ static void testCajaApps();
 static void testCajaDescargadas();
 static void testCajaDescargadasScroll();
 static void testCajaDescargadasRegresion();
+static void testCajaUnificada();
 static void testCronometro();
 static void testPaginasHome();
 static void testNotifUnaSola();
@@ -1111,8 +1112,32 @@ static int drwSlotOf(int id){
   return -1;
 }
 static bool drwInList(int id){
-  for(int i = 0; i < drwN; i++) if(drwList[i] == id) return true;
+  for(int i = 0; i < drwN; i++) if(drwNativeId(i) == id) return true;
   return false;
+}
+// Celdas NATIVAS de la lista unificada (las pruebas de siempre hablan de estas).
+static int drwNatCount(){
+  int n = 0;
+  for(int i = 0; i < drwN; i++) if(drwNativeId(i) >= 0) n++;
+  return n;
+}
+// Celdas DESCARGADAS.
+static int drwPkgCount(){
+  int n = 0;
+  for(int i = 0; i < drwN; i++) if(drwPkgIndex(i) >= 0) n++;
+  return n;
+}
+static int drwFirstPkgCell(){
+  for(int i = 0; i < drwN; i++) if(drwPkgIndex(i) >= 0) return i;
+  return -1;
+}
+static int drwFirstPkgIdx(){ int c = drwFirstPkgCell(); return c >= 0 ? drwPkgIndex(c) : -1; }
+static int drwCellOfPkgId(const char* id){
+  for(int i = 0; i < drwN; i++){
+    int e = drwPkgIndex(i);
+    if(e >= 0 && !strcmp(pkgApps[e].id, id)) return i;
+  }
+  return -1;
 }
 static void testCajaApps(){
   printf("Caja de aplicaciones\n");
@@ -1125,7 +1150,7 @@ static void testCajaApps(){
   // La caja ensena TODAS las del registro: se compara contra APP_N y no contra
   // un numero escrito a mano, para que anadir una app no obligue a tocar esto
   // (pero SI siga fallando si alguna se queda fuera de la caja).
-  chk(drwN == APP_N, "la caja muestra todas las apps del registro");
+  chk(drwNatCount() == APP_N, "la caja muestra todas las apps del registro");
 
   // --- normalizacion: una ranura con una app no favorita se vacia ---
   gAppFav &= (uint16_t)~(1u << 5);
@@ -1264,6 +1289,7 @@ extern FlexStoreState gStubStoreState;
 extern uint32_t       gStubPkgRevision;
 extern char           gStubStoreBusyId[];
 extern int            gStubStoreBusyCalls;
+extern char           gStubUninstallId[];
 
 // Alta en el registro simulado. Rellena TODO lo que un manifiesto validado
 // tiene que traer, para que la entrada sea aceptable; cada prueba de rechazo
@@ -1286,13 +1312,13 @@ static void pkgStubClear(){
   gStubPkgRevision++;
   pkgAppsInvalidate();
 }
-static int drwPkgSlotOf(const char* id){
-  for(int i = 0; i < drwPkgN; i++) if(!strcmp(pkgApps[drwPkgList[i]].id, id)) return i;
-  return -1;
-}
-static int drwPkgCount(const char* id){
+static int drwPkgSlotOf(const char* id){ return drwCellOfPkgId(id); }
+static int drwPkgCountId(const char* id){
   int n = 0;
-  for(int i = 0; i < drwPkgN; i++) if(!strcmp(pkgApps[drwPkgList[i]].id, id)) n++;
+  for(int i = 0; i < drwN; i++){
+    int e = drwPkgIndex(i);
+    if(e >= 0 && !strcmp(pkgApps[e].id, id)) n++;
+  }
   return n;
 }
 // Toque simple sobre el centro del icono de la celda descargada `cell`. La
@@ -1300,7 +1326,8 @@ static int drwPkgCount(const char* id){
 // desplaza la rejilla hasta ella -- exactamente lo que hace el dedo del usuario
 // -- y la coordenada del toque se calcula con el scroll YA acotado.
 static void drwTapPkgCell(int cell){
-  int cx, cy; drwPkgCellXY(cell, cx, cy);
+  if(cell < 0) return;
+  int cx, cy; drwCellXY(cell, cx, cy);
   drwScroll = (float)(cy - DRW_GRID_TOP - 8);
   drwClampScroll();
   T = Touch();
@@ -1315,26 +1342,27 @@ static void testCajaDescargadas(){
   drwTestReset();
 
   // --- 0. PLACA RECIEN GRABADA: la caja es EXACTAMENTE la de siempre ---
-  chk(drwPkgN == 0,            "sin apps descargadas la seccion no existe");
-  chk(!drwHasPkg(),            "y la caja no reserva ni una fila para ella");
-  chk(drwN == APP_N,           "las apps nativas siguen todas en la caja");
+  chk(drwPkgCount() == 0,            "sin apps descargadas la seccion no existe");
+  chk(drwNatCount() == APP_N,  "y la rejilla es exactamente la de siempre");
+  chk(drwNatCount() == APP_N,  "las apps nativas siguen todas en la caja");
   int rowsSolas = drwRows(), maxSolo = drwMaxScroll();
   chk(rowsSolas == (APP_N + 3) / 4, "el numero de filas es el de siempre");
-  chk(drwRowY(0) == DRW_GRID_TOP,   "la primera fila empieza donde empezaba");
+  { int x0, y0; drwCellXY(0, x0, y0);
+    chk(y0 == DRW_GRID_TOP,         "la primera fila empieza donde empezaba"); }
 
   // --- 1. INSTALAR: aparece UNA sola vez, con el nombre del manifiesto ---
   pkgStubAdd("com.flexos.antutu", "Antutu Benchmark", "1.2.0", 12);
   drwFilter();
-  chk(drwPkgN == 1,                              "instalar una app la anade a la caja");
-  chk(drwPkgCount("com.flexos.antutu") == 1,     "y aparece UNA sola vez");
-  chk(drwHasPkg(),                               "la seccion Descargadas ya existe");
-  chk(drwN == APP_N,                             "las nativas siguen intactas");
-  int e0 = drwPkgList[0];
+  chk(drwPkgCount() == 1,                              "instalar una app la anade a la caja");
+  chk(drwPkgCountId("com.flexos.antutu") == 1,     "y aparece UNA sola vez");
+  chk(drwN == APP_N + 1,                         "la app entra en la MISMA rejilla, sin seccion aparte");
+  chk(drwNatCount() == APP_N,                    "las nativas siguen intactas");
+  int e0 = drwFirstPkgIdx();
   chk(!strcmp(pkgApps[e0].name, "Antutu Benchmark"), "el nombre sale del manifiesto");
   chk(!strcmp(pkgApps[e0].version, "1.2.0"),         "y la version tambien");
   chk(pkgAppStatus(e0) == PKGAPP_ST_OK,              "una app recien instalada esta lista");
   chk(pkgApps[e0].icon == -1,                        "sin icon.f565 se usa el icono generico");
-  chk(drwRows() == rowsSolas + 2,                    "una fila de cabecera y una de iconos");
+  chk(drwRows() == (APP_N + 1 + 3) / 4,              "una rejilla continua, sin fila de seccion");
   chk(drwMaxScroll() >= maxSolo,                     "y el recorrido no encoge");
 
   // --- 2. NADA DE ESCANEAR POR CUADRO ---
@@ -1345,30 +1373,29 @@ static void testCajaDescargadas(){
   chk(gStubPkgListCalls == antes, "repintar la caja no vuelve a leer el registro");
 
   // --- 3. GEOMETRIA: ninguna celda descargada se sale de la pantalla ---
-  for(int i = 0; i < drwPkgN; i++){
-    int x, y; drwPkgCellXY(i, x, y);
-    chk(x >= 0 && x + DRW_ICON_S <= SCR_W, "cada icono descargado cabe a lo ancho");
-    chk(y > drwRowY(drwHdrRow()),          "y va por debajo de la cabecera de seccion");
+  for(int i = 0; i < drwN; i++){
+    int x, y; drwCellXY(i, x, y);
+    chk(x >= 0 && x + DRW_ICON_S <= SCR_W, "cada icono cabe a lo ancho");
+    chk(y >= DRW_GRID_TOP,                 "y ninguna fila empieza por encima de la rejilla");
   }
 
   // --- 4. EL TACTIL NUNCA DEVUELVE UNA CELDA QUE NO EXISTE ---
   drwSlide = 0; drwScroll = 0;
   for(int y = 0; y < SCR_H; y += 5)
     for(int x = 0; x < SCR_W; x += 7){
-      bool isPkg = false;
-      int c = drwHitAny(x, y, isPkg);
-      chk(c == -1 || (isPkg ? (c >= 0 && c < drwPkgN) : (c >= 0 && c < drwN)),
-          "drwHitAny solo devuelve celdas reales de su seccion");
+      int c = drwHitCell(x, y);
+      chk(c == -1 || (c >= 0 && c < drwN), "drwHitCell solo devuelve celdas reales");
       if(gFails) break;
     }
-  chk(drwHitCell(240, drwRowY(drwPkgRow0()) + 20) < 0,
-      "una celda descargada no se confunde con una nativa");
+  { int cp = drwFirstPkgCell();
+    chk(cp >= 0 && drwNativeId(cp) < 0, "una celda descargada NUNCA devuelve un id de APP_REG");
+    chk(cp >= 0 && drwPkgIndex(cp) >= 0, "y si devuelve un indice de pkgApps valido"); }
 
   // --- 5. ABRIR: la caja NO abre el runtime, lo PIDE ---
   pkgAppLaunchClear(); pkgAppLaunchFromDrawer = false;
   gState = ST_DRAWER; drwOn = true; drwAnim = 0; drwSlide = 0; drwScroll = 0;
   drwMoved = false; drwDrag = false; drwKbOn = false; drwCtxOn = false; drwInfoOn = false;
-  drwTapPkgCell(0);
+  drwTapPkgCell(drwFirstPkgCell());
   drawerTick();
   chk(pkgAppLaunchPending(),                          "tocar una app descargada anota la peticion");
   chk(!strcmp(pkgAppLaunchId, "com.flexos.antutu"),   "y la peticion lleva el ID REAL del paquete");
@@ -1385,7 +1412,7 @@ static void testCajaDescargadas(){
   chk(!pkgAppLaunchPending(),  "la tienda consume la peticion (no se abre dos veces)");
   chk(gState == ST_APP,        "si la app no arranca, el usuario se queda en la tienda con el motivo");
   drwFilter();
-  chk(pkgAppStatus(drwPkgList[0]) == PKGAPP_ST_ERROR, "y esa app queda marcada como no disponible");
+  chk(pkgAppStatus(drwFirstPkgIdx()) == PKGAPP_ST_ERROR, "y esa app queda marcada como no disponible");
   chk(pkgAppLastError[0],                             "con un motivo concreto, no un fallo mudo");
 
   // --- 6. ABRIR Y SALIR, IDA Y VUELTA COMPLETA ---
@@ -1395,11 +1422,11 @@ static void testCajaDescargadas(){
   pkgStubClear();
   pkgStubAdd("com.flexos.ficha", "Ficha", "1.0.0", 1, FLEXPKG_RT_UI1);
   pkgAppsInvalidate(); drwFilter();
-  chk(drwPkgN == 1, "la app flex-ui-1 tambien esta en la caja");
+  chk(drwPkgCount() == 1, "la app flex-ui-1 tambien esta en la caja");
   pkgAppLaunchClear(); pkgAppLaunchFromDrawer = false;
   gState = ST_DRAWER; drwOn = true; drwAnim = 0; drwSlide = 0; drwScroll = 0;
   drwMoved = false; drwDrag = false; drwKbOn = false; drwCtxOn = false; drwInfoOn = false;
-  drwTapPkgCell(0);
+  drwTapPkgCell(drwFirstPkgCell());
   drawerTick();
   chk(!strcmp(pkgAppLaunchId, "com.flexos.ficha"), "la peticion lleva su ID");
   gState = ST_APP; gAppId = IC_FLEXSTORE;
@@ -1411,7 +1438,7 @@ static void testCajaDescargadas(){
   chk(gState == ST_HOME,       "salir de la app descargada devuelve al ESCRITORIO, no al listado");
   chk(!pkgAppLaunchFromDrawer, "y la marca de origen no se queda pegada");
   drwFilter();
-  chk(drwPkgCount("com.flexos.ficha") == 1, "despues de salir la app SIGUE en la caja, una sola vez");
+  chk(drwPkgCountId("com.flexos.ficha") == 1, "despues de salir la app SIGUE en la caja, una sola vez");
 
   // Y abrir la tienda de forma NORMAL, sin peticion, sigue mostrando el catalogo.
   gState = ST_APP; gAppId = IC_FLEXSTORE;
@@ -1428,10 +1455,10 @@ static void testCajaDescargadas(){
   gStubInstalledN = 0;
   pkgStubAdd("com.flexos.antutu", "Antutu Benchmark", "1.3.0", 13);
   drwFilter();
-  chk(drwPkgN == 1,                          "actualizar no anade una segunda tarjeta");
-  chk(drwPkgCount("com.flexos.antutu") == 1, "sigue apareciendo UNA sola vez");
-  chk(!strcmp(pkgApps[drwPkgList[0]].version, "1.3.0"), "y muestra la version nueva");
-  chk(pkgApps[drwPkgList[0]].versionCode == 13,         "con su codigo de version nuevo");
+  chk(drwPkgCount() == 1,                          "actualizar no anade una segunda tarjeta");
+  chk(drwPkgCountId("com.flexos.antutu") == 1, "sigue apareciendo UNA sola vez");
+  chk(!strcmp(pkgApps[drwFirstPkgIdx()].version, "1.3.0"), "y muestra la version nueva");
+  chk(pkgApps[drwFirstPkgIdx()].versionCode == 13,         "con su codigo de version nuevo");
 
   // --- 8. ACTUALIZANDO: estado visible, sin bloquear la caja ---
   snprintf(gStubStoreBusyId, FLEXPKG_ID_MAX, "%s", "com.flexos.antutu");
@@ -1439,22 +1466,22 @@ static void testCajaDescargadas(){
   // pkgAppStatus lee la MUESTRA del cuadro, no la tienda: preguntarle a la
   // tienda por icono y por cuadro toma su mutex desde el hilo grafico, que es
   // justo lo que puede disparar el watchdog (ver pkgAppSampleBusy).
-  chk(pkgAppStatusLive(drwPkgList[0]) == PKGAPP_ST_UPDATING,
+  chk(pkgAppStatusLive(drwFirstPkgIdx()) == PKGAPP_ST_UPDATING,
       "mientras se instala se marca actualizando");
-  chk(pkgAppStatus(drwPkgList[0]) == PKGAPP_ST_UPDATING,
+  chk(pkgAppStatus(drwFirstPkgIdx()) == PKGAPP_ST_UPDATING,
       "y el pintado lo ve por la muestra, sin volver a preguntar");
   int llamadas = gStubPkgListCalls;
   drwFilter();
   chk(gStubPkgListCalls == llamadas, "y ese estado NO obliga a releer el registro");
   gStubStoreState = FLEXSTORE_READY; gStubStoreBusyId[0] = 0;
-  chk(pkgAppStatusLive(drwPkgList[0]) == PKGAPP_ST_OK, "al terminar vuelve a estar lista");
+  chk(pkgAppStatusLive(drwFirstPkgIdx()) == PKGAPP_ST_OK, "al terminar vuelve a estar lista");
 
   // --- 9. DESINSTALAR: desaparece en el acto, sin reiniciar ---
   chk(flexPkgUninstall("com.flexos.antutu"), "desinstalar desde Flex Store");
   drwFilter();
-  chk(drwPkgN == 0,        "la app desaparece de la caja sin reiniciar el sistema");
-  chk(!drwHasPkg(),        "y la seccion Descargadas se retira con ella");
-  chk(drwN == APP_N,       "las nativas siguen exactamente igual");
+  chk(drwPkgCount() == 0,        "la app desaparece de la caja sin reiniciar el sistema");
+  chk(drwN == APP_N,       "la rejilla vuelve a ser exactamente la de las nativas");
+  chk(drwNatCount() == APP_N, "las nativas siguen exactamente igual");
   chk(drwRows() == rowsSolas && drwMaxScroll() == maxSolo,
       "la caja recupera EXACTAMENTE la geometria que tenia sin descargadas");
 
@@ -1471,7 +1498,7 @@ static void testCajaDescargadas(){
     gStubInstalled[gStubInstalledN - 1].entry[0] = 0;
   }
   pkgAppsInvalidate(); drwFilter();
-  chk(drwPkgN == 1, "de seis entradas solo entra la unica valida");
+  chk(drwPkgCount() == 1, "de seis entradas solo entra la unica valida");
   chk(drwPkgSlotOf("com.flexos.buena") >= 0, "y es exactamente la buena");
   chk(drwPkgSlotOf("../escape") < 0,         "un id con rutas dentro no se lista jamas");
 
@@ -1479,15 +1506,15 @@ static void testCajaDescargadas(){
   pkgStubClear();
   pkgStubAdd("com.flexos.parada", "Parada", "1.0.0", 1, FLEXPKG_RT_APP1, FLEXPKG_APP_STOPPED);
   pkgAppsInvalidate(); drwFilter();
-  chk(drwPkgN == 1,                                        "una app detenida sigue siendo suya y se ve");
-  chk(pkgAppStatus(drwPkgList[0]) == PKGAPP_ST_ERROR,      "pero se marca como no disponible");
+  chk(drwPkgCount() == 1,                                        "una app detenida sigue siendo suya y se ve");
+  chk(pkgAppStatus(drwFirstPkgIdx()) == PKGAPP_ST_ERROR,      "pero se marca como no disponible");
   pkgAppLaunchClear(); pkgAppLaunchFromDrawer = false;
   gState = ST_DRAWER; drwOn = true; drwAnim = 0; drwSlide = 0; drwScroll = 0;
   drwMoved = false; drwDrag = false; drwInfoOn = false; drwCtxOn = false;
-  drwTapPkgCell(0);
+  drwTapPkgCell(drwFirstPkgCell());
   drawerTick();
   chk(!pkgAppLaunchPending(), "tocarla no intenta abrirla");
-  chk(drwInfoOn && drwInfoPkg == drwPkgList[0], "abre su ficha, que explica por que");
+  chk(drwInfoOn && drwInfoPkg == drwFirstPkgIdx(), "abre su ficha, que explica por que");
   chk(drwAnim == 0,           "y la caja sigue abierta: un paquete asi no la cierra ni la bloquea");
 
   // --- 12. BUSCADOR: filtra las dos secciones a la vez ---
@@ -1497,20 +1524,20 @@ static void testCajaDescargadas(){
   pkgAppsInvalidate();
   drwInfoOn = false; drwInfoPkg = -1;
   snprintf(drwQuery, sizeof(drwQuery), "antu"); drwQLen = 4; drwFilter();
-  chk(drwPkgN == 1 && drwPkgSlotOf("com.flexos.antutu") >= 0, "el buscador encuentra una descargada");
-  chk(drwN == 0,                                              "y descarta las nativas que no casan");
+  chk(drwPkgCount() == 1 && drwPkgSlotOf("com.flexos.antutu") >= 0, "el buscador encuentra una descargada");
+  chk(drwNatCount() == 0,                                     "y descarta las nativas que no casan");
   snprintf(drwQuery, sizeof(drwQuery), "cal"); drwQLen = 3; drwFilter();
-  chk(drwPkgN == 0 && drwN >= 2, "y al reves: solo nativas cuando solo ellas casan");
+  chk(drwPkgCount() == 0 && drwNatCount() >= 2, "y al reves: solo nativas cuando solo ellas casan");
   snprintf(drwQuery, sizeof(drwQuery), "zzzz"); drwQLen = 4; drwFilter();
-  chk(drwN == 0 && drwPkgN == 0, "sin resultados en ninguna de las dos secciones");
+  chk(drwN == 0, "sin resultados: la rejilla queda vacia");
 
   // --- 13. LOS ICONOS SE PUEDEN SOLTAR SIN PERDER LA LISTA ---
   drwQLen = 0; drwQuery[0] = 0; drwFilter();
-  int antesN = drwPkgN;
+  int antesN = drwPkgCount();
   pkgAppIconsFree();
-  chk(drwPkgN == antesN, "soltar la cache de iconos no quita ninguna app de la caja");
-  for(int i = 0; i < drwPkgN; i++)
-    chk(pkgApps[drwPkgList[i]].icon == -1, "las que tenian icono propio caen al generico");
+  chk(drwPkgCount() == antesN, "soltar la cache de iconos no quita ninguna app de la caja");
+  for(int i = 0; i < drwN; i++)
+    { int e = drwPkgIndex(i); if(e >= 0) chk(pkgApps[e].icon == -1, "las que tenian icono propio caen al generico"); }
 
   // --- limpieza: el resto de las pruebas encuentran el sistema como estaba ---
   pkgStubClear();
@@ -1531,7 +1558,7 @@ static void testCajaDescargadas(){
 //  Aqui se recorre TODO el rango de desplazamiento, en los dos
 //  sentidos, componiendo bandas de verdad sobre los framebuffers del
 //  arnes. Con AddressSanitizer, cualquier lectura o escritura fuera de
-//  fb/bbuf/homeBuf -- o fuera de pkgApps[], drwPkgList[] y la cache de
+//  fb/bbuf/homeBuf -- o fuera de pkgApps[], drwCells[] y la cache de
 //  iconos -- para la prueba en el acto y senala la linea.
 // #############################################################
 static void drwScrollBarrido(const char* que){
@@ -1572,7 +1599,7 @@ static void testCajaDescargadasScroll(){
     pkgAppsInvalidate();
     drwTestReset();
     gState = ST_DRAWER; drwOn = true; drwAnim = 0; drwSlide = 0;
-    chk(drwPkgN == n, "la caja lista exactamente las apps instaladas");
+    chk(drwPkgCount() == n, "la caja lista exactamente las apps instaladas");
 
     char msg[96];
     snprintf(msg, sizeof(msg), "recorrido completo con %d app(s) descargada(s)", n);
@@ -1600,7 +1627,7 @@ static void testCajaDescargadasScroll(){
   pkgAppsInvalidate(); drwTestReset();
   gState = ST_DRAWER; drwOn = true; drwAnim = 0; drwSlide = 0;
   drwScroll = (float)drwMaxScroll();
-  drwInfoPkg = drwPkgList[0]; drwInfoOn = true;
+  drwInfoPkg = drwFirstPkgIdx(); drwInfoOn = true;
   drwCompose(0, SCR_H - 1, true); drwInfoDraw();
   drwInfoOn = false; drwInfoPkg = -1;
   chk(true, "la ficha de una descargada se pinta al final del recorrido");
@@ -1641,7 +1668,7 @@ static void testCajaDescargadasRegresion(){
   pkgAppsInvalidate(); drwTestReset();
   gState = ST_DRAWER; drwOn = true; drwAnim = 0; drwSlide = 0;
   drwScroll = (float)drwMaxScroll();
-  chk(drwPkgN == 8, "las ocho descargadas estan en la caja");
+  chk(drwPkgCount() == 8, "las ocho descargadas estan en la caja");
   gStubStoreBusyCalls = 0;
   drwCompose(0, SCR_H - 1, true);
   chk(gStubStoreBusyCalls <= 1,
@@ -1661,14 +1688,14 @@ static void testCajaDescargadasRegresion(){
   pkgStubAdd("com.flexos.uno", "Uno", "1.0.0", 1);
   pkgStubAdd("com.flexos.dos", "Dos", "1.0.0", 1);
   pkgAppsInvalidate(); drwFilter();
-  chk(drwPkgN == 2, "dos apps en la caja");
+  chk(drwPkgCount() == 2, "dos apps en la caja");
   gTestPsFail = true;                       // toda reserva de PSRAM falla
   pkgAppsInvalidate(); drwFilter();
-  chk(drwPkgN == 2, "si no hay PSRAM para releer, se CONSERVA la lista que habia");
+  chk(drwPkgCount() == 2, "si no hay PSRAM para releer, se CONSERVA la lista que habia");
   drwCompose(0, SCR_H - 1, true);           // y se sigue pudiendo pintar
   gTestPsFail = false;
   pkgAppsInvalidate(); drwFilter();
-  chk(drwPkgN == 2, "y en cuanto vuelve la memoria se relee con normalidad");
+  chk(drwPkgCount() == 2, "y en cuanto vuelve la memoria se relee con normalidad");
 
   // --- 3. EL REGISTRO CAMBIA CON LA CAJA ABIERTA ---
   // Peor caso: se desinstalan apps mientras la rejilla tiene sus indices en la
@@ -1683,9 +1710,12 @@ static void testCajaDescargadasRegresion(){
   pkgAppsInvalidate(); drwTestReset();
   gState = ST_DRAWER; drwOn = true; drwAnim = 0; drwSlide = 0;
   drwScroll = (float)drwMaxScroll();
-  chk(drwPkgN == 12, "doce descargadas");
-  drwInfoPkg = drwPkgList[drwPkgN - 1]; drwInfoOn = true;   // ficha de la ultima
-  // Se van casi todas SIN pasar por drwFilter: drwPkgList queda apuntando a
+  chk(drwPkgCount() == 12, "doce descargadas");
+  { int ultimo = -1;
+    for(int i = 0; i < drwN; i++) if(drwPkgIndex(i) >= 0) ultimo = drwPkgIndex(i);
+    drwInfoPkg = ultimo; }
+  drwInfoOn = true;                                          // ficha de la ultima
+  // Se van casi todas SIN pasar por drwFilter: drwCells queda apuntando a
   // entradas que ya no existen, que es exactamente el estado peligroso.
   for(int i = 2; i < 12; i++){
     char id[64]; snprintf(id, sizeof(id), "com.flexos.vol%02d", i);
@@ -1697,13 +1727,183 @@ static void testCajaDescargadasRegresion(){
   drwInfoDraw();                             // y la ficha, con un indice muerto
   chk(!drwInfoOn && drwInfoPkg == -1, "la ficha de una app que ya no existe se cierra sola");
   drwFilter();
-  chk(drwPkgN == 2, "y al refiltrar la caja queda cuadrada");
+  chk(drwPkgCount() == 2, "y al refiltrar la caja queda cuadrada");
 
   pkgStubClear();
   gState = ST_HOME; drwOn = false; drwAnim = 0; drwSlide = (float)SCR_H;
   drwInfoOn = false; drwInfoPkg = -1;
   drwTestReset();
   if(!gFails) printf("  Regresion del reinicio: todas las comprobaciones pasan.\n");
+}
+
+
+// #############################################################
+//  UNA SOLA REJILLA, ETIQUETAS QUE CABEN Y MENU DE PULSACION LARGA
+//  ------------------------------------------------------------
+//  Lo que se pidio despues de ver la caja en la placa: que las apps
+//  descargadas dejen de estar en una seccion aparte, que un nombre
+//  largo no invada la columna de al lado, y que una app instalada
+//  tenga el mismo menu cuidado que una nativa.
+// #############################################################
+static int drwCellOfNative(int id){
+  for(int i = 0; i < drwN; i++) if(drwNativeId(i) == id) return i;
+  return -1;
+}
+static void testCajaUnificada(){
+  printf("Caja unificada: orden, etiquetas y menu\n");
+  pkgStubClear(); drwTestReset();
+
+  // --- 1. TRUNCADO SEGURO DE ETIQUETAS ---
+  // Los dos casos exactos de la foto de la placa.
+  { char out[40];
+    uiLabelFit("Antutu Benchmark for Flex OS", DRW_COL_STEP - 14, 2, out, sizeof(out));
+    chk(strlen(out) > 3 && !strcmp(out + strlen(out) - 3, "..."),
+        "un nombre largo se corta y termina en \"...\"");
+    chk(textW(out, 2) <= DRW_COL_STEP - 14, "y lo que queda CABE en una columna");
+    chk(strncmp(out, "Antutu", 6) == 0, "conservando el principio del nombre");
+
+    uiLabelFit("Mi primera app", DRW_COL_STEP - 14, 2, out, sizeof(out));
+    chk(textW(out, 2) <= DRW_COL_STEP - 14, "\"Mi primera app\" tambien cabe");
+
+    // Un nombre corto se deja intacto, sin puntos de mas.
+    uiLabelFit("Notas", DRW_COL_STEP - 14, 2, out, sizeof(out));
+    chk(!strcmp(out, "Notas"), "un nombre que cabe no se toca");
+
+    // NUNCA se parte un caracter UTF-8: se corta a lo bestia y se comprueba
+    // que lo que sale es una cadena UTF-8 valida.
+    const char* acent = "\xC3\x91" "and\xC3\xBA Se\xC3\xB1" "or Mu\xC3\xB1oz de la Torre Larga";
+    for(int w = 4; w <= 200; w += 3){
+      uiLabelFit(acent, w, 2, out, sizeof(out));
+      int i = 0, ok = 1;
+      while(out[i]){
+        unsigned char b = (unsigned char)out[i];
+        int len = (b < 0x80) ? 1 : ((b & 0xE0) == 0xC0) ? 2 : ((b & 0xF0) == 0xE0) ? 3 : 0;
+        if(!len){ ok = 0; break; }
+        for(int k = 1; k < len; k++)
+          if(((unsigned char)out[i + k] & 0xC0) != 0x80){ ok = 0; break; }
+        if(!ok) break;
+        i += len;
+      }
+      chk(ok, "el truncado nunca parte un caracter UTF-8");
+      chk(strlen(out) < sizeof(out), "y nunca se sale del buffer");
+      if(gFails) break;
+    }
+    // Un buffer ridiculo no puede desbordarse.
+    char mini[5];
+    uiLabelFit("Aplicacion con nombre larguisimo", 10, 2, mini, sizeof(mini));
+    chk(strlen(mini) < sizeof(mini), "con un buffer minimo tampoco se desborda");
+  }
+
+  // --- 2. UNA SOLA REJILLA, ORDENADA POR NOMBRE ---
+  pkgStubAdd("com.flexos.aaa", "Aaa primera", "1.0.0", 1);
+  pkgStubAdd("com.flexos.zzz", "Zzz ultima",  "1.0.0", 1);
+  pkgAppsInvalidate(); drwFilter();
+  chk(drwN == APP_N + 2,       "nativas y descargadas van en la MISMA lista");
+  chk(drwNatCount() == APP_N,  "estan todas las nativas");
+  chk(drwPkgCount() == 2,      "y las dos descargadas");
+  // Orden alfabetico de punta a punta, sin distinguir origen.
+  bool ordenado = true;
+  for(int i = 1; i < drwN; i++){
+    const char* a = drwCellName(i - 1);
+    const char* b = drwCellName(i);
+    if(a && b && pkgAppNameCmp(a, b) > 0){ ordenado = false; break; }
+  }
+  chk(ordenado, "toda la rejilla esta ordenada por nombre, mezclando los dos origenes");
+  chk(drwCellOfPkgId("com.flexos.aaa") < drwCellOfNative(IC_NOTAS),
+      "una descargada que empieza por A va ANTES que Notas");
+  chk(drwCellOfPkgId("com.flexos.zzz") > drwCellOfNative(IC_NOTAS),
+      "y una que empieza por Z, despues: no hay bloque de descargadas");
+  // Estable: filtrar dos veces da exactamente la misma rejilla.
+  { DrwCell antes[APP_N + PKGAPP_MAX]; int n = drwN;
+    memcpy(antes, drwCells, sizeof(DrwCell) * n);
+    drwFilter();
+    chk(n == drwN && memcmp(antes, drwCells, sizeof(DrwCell) * n) == 0,
+        "el orden es estable: dos filtrados dan la misma rejilla"); }
+
+  // --- 3. MENU DE PULSACION LARGA SOBRE UNA DESCARGADA ---
+  int cellPkg = drwCellOfPkgId("com.flexos.aaa");
+  chk(cellPkg >= 0, "la app descargada tiene su celda");
+  drwCtxOpen(cellPkg);
+  chk(drwCtxOn,                "la pulsacion larga abre el menu");
+  chk(drwCtxPkg >= 0,          "sabe que es una app descargada");
+  chk(drwCtxApp == -1,         "y NO la confunde con un id de APP_REG");
+  chk(drwCtxRows() == 5,       "cinco acciones: la quinta es Desinstalar");
+  chk(!strcmp(drwCtxLabel(DRW_CTX_UNINST), "Desinstalar"), "la fila se llama Desinstalar");
+  chk(drwCtxEnabled(DRW_CTX_UNINST), "y esta activa para una app descargada");
+  chk(!strcmp(drwCtxName(), "Aaa primera"), "el menu conoce el nombre de la app");
+
+  // Menu sobre una NATIVA: cuatro filas, sin Desinstalar por ninguna parte.
+  drwCtxOpen(drwCellOfNative(IC_FLEXSTORE));
+  chk(drwCtxApp == IC_FLEXSTORE, "el menu de una nativa lleva su id de APP_REG");
+  chk(drwCtxPkg == -1,           "y ningun indice de paquete");
+  chk(drwCtxRows() == 4,         "una app nativa NO ofrece Desinstalar");
+  chk(!drwCtxEnabled(DRW_CTX_UNINST), "ni aunque se pregunte por esa fila");
+  drwCtxOn = false;
+
+  // --- 4. INICIO: anclar y desanclar una descargada ---
+  drwFilter();
+  cellPkg = drwCellOfPkgId("com.flexos.aaa");
+  int e = drwPkgIndex(cellPkg);
+  chk(e >= 0, "indice vivo de la app descargada");
+  chk(!pkgAppInHome(e), "de fabrica no esta en Inicio");
+  drwPkgHomeToggle(e);
+  chk(pkgAppInHome(e), "\"Anadir a inicio\" la marca");
+  int slot = pkgPrefSlot("com.flexos.aaa", false);
+  chk(slot >= 0, "y le reserva una ranura estable");
+  bool enRejilla = false;
+  for(int i = 0; i < HOME_TOTAL; i++)
+    if(homeOrder[i] == (uint8_t)(HOME_PKG_BASE + slot)) enRejilla = true;
+  chk(enRejilla, "el escritorio guarda la RANURA, no un indice de pkgApps");
+  chk(homeIsPkg((uint8_t)(HOME_PKG_BASE + slot)), "y ese valor se reconoce como paquete");
+  chk(pkgAppFromSlot(slot) == e, "la ranura vuelve a la app correcta");
+  drwPkgHomeToggle(e);
+  chk(!pkgAppInHome(e), "\"Quitar de inicio\" la desmarca");
+  for(int i = 0; i < HOME_TOTAL; i++)
+    chk(!homeIsPkg(homeOrder[i]), "y no deja ni un icono fantasma en el escritorio");
+
+  // --- 5. OCULTAR una descargada ---
+  drwPkgHomeToggle(e);                                  // primero a Inicio
+  chk(pkgAppInHome(e), "anclada de nuevo");
+  drwPkgHideToggle(e);
+  chk(pkgAppHidden(e),  "\"Ocultar\" la marca");
+  chk(!pkgAppInHome(e), "y una app oculta no se queda en Inicio");
+  chk(drwCellOfPkgId("com.flexos.aaa") < 0, "ya no se lista en la caja");
+  drwShowHid = true; drwFilter();
+  chk(drwCellOfPkgId("com.flexos.aaa") >= 0, "con \"ver ocultas\" vuelve a aparecer");
+  drwShowHid = false;
+  e = -1;
+  { drwShowHid = true; drwFilter();
+    e = drwPkgIndex(drwCellOfPkgId("com.flexos.aaa"));
+    drwPkgHideToggle(e);
+    drwShowHid = false; drwFilter(); }
+  chk(drwCellOfPkgId("com.flexos.aaa") >= 0, "\"Mostrar\" la devuelve a la caja");
+
+  // --- 6. DESINSTALAR por la ruta oficial ---
+  drwFilter();
+  cellPkg = drwCellOfPkgId("com.flexos.aaa");
+  e = drwPkgIndex(cellPkg);
+  drwPkgHomeToggle(e);                                  // anclada, para ver que se suelta
+  chk(pkgAppInHome(e), "anclada antes de desinstalar");
+  gStubUninstallId[0] = 0;
+  chk(drwPkgUninstall(e), "se desinstala");
+  chk(!strcmp(gStubUninstallId, "com.flexos.aaa"),
+      "por flexPkgUninstall, la ruta transaccional del gestor de paquetes");
+  chk(drwCellOfPkgId("com.flexos.aaa") < 0, "desaparece de la caja en el acto");
+  chk(pkgPrefSlot("com.flexos.aaa", false) < 0, "y sus preferencias se olvidan");
+  for(int i = 0; i < HOME_TOTAL; i++)
+    chk(!homeIsPkg(homeOrder[i]), "sin dejar nada suyo en el escritorio");
+  chk(drwNatCount() == APP_N, "las nativas, intactas");
+  chk(drwPkgCount() == 1,     "y la otra descargada sigue ahi");
+
+  // Desinstalar algo que ya no esta no rompe la lista.
+  chk(!drwPkgUninstall(999), "un indice invalido no hace nada");
+  chk(drwPkgCount() == 1,    "y la caja sigue cuadrada");
+
+  pkgStubClear();
+  gState = ST_HOME; drwOn = false;
+  drwCtxOn = false; drwConfOn = false; drwCtxApp = -1; drwCtxPkg = -1;
+  drwTestReset();
+  if(!gFails) printf("  Caja unificada: todas las comprobaciones pasan.\n");
 }
 
 
@@ -4286,6 +4486,7 @@ int main(){
   testCajaDescargadas();
   testCajaDescargadasScroll();
   testCajaDescargadasRegresion();
+  testCajaUnificada();
   testCronometro();
   testPaginasHome();
   testNotifUnaSola();

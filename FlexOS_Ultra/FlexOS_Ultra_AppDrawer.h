@@ -295,7 +295,7 @@ static void ctxTick(){
 #define DRW_CTX_W      262
 #define DRW_CTX_RAD    20
 #define DRW_QMAX       14         // caracteres del buscador
-#define DRW_SEC_H      56         // fila de la cabecera "Descargadas" (no es una fila de iconos)
+#define DRW_LABEL_MAX  40         // bytes de la etiqueta ya truncada de un icono
 
 // ---- Estado ----
 static uint16_t* drwPage    = NULL;   // fondo de la hoja ya compuesto (PSRAM, se reutiliza)
@@ -312,49 +312,49 @@ static int       drwDragY0  = 0, drwDragLastY = 0;
 static float     drwDragS0  = 0.0f;
 static uint32_t  drwDragMs  = 0;
 static bool      drwMoved   = false;
-static int       drwList[APP_N], drwN = 0;    // ids visibles tras filtrar (del registro)
-// SEGUNDA SECCION: apps DESCARGADAS. Indices dentro de pkgApps[], no ids del
-// registro nativo: son dos espacios de nombres distintos y mezclarlos seria
-// justo el error que obligaria a tocar la caja cada vez que se publique una app.
-static int       drwPkgList[PKGAPP_MAX], drwPkgN = 0;
+// LISTA VISUAL UNIFICADA. Una sola rejilla: las apps nativas y las descargadas
+// van mezcladas y ordenadas por nombre, como aplicaciones normales. No hay
+// seccion, ni titulo, ni contador, ni separador.
+//
+// CADA CELDA DICE DE QUE TIPO ES. `idx` significa una cosa u otra segun `kind`:
+// para DRW_NATIVE es un id de APP_REG (0..APP_N-1) y para DRW_PKG es un indice
+// dentro de pkgApps[]. Son dos espacios de numeros DISTINTOS que casualmente
+// empiezan en 0, asi que nunca se guardan juntos en un mismo entero: el tipo
+// viaja siempre al lado. Todo lo que hace la caja -- dibujar, abrir, el menu de
+// pulsacion larga -- se decide por `kind`, jamas por el valor de `idx`.
+enum DrwKind : uint8_t { DRW_NATIVE = 0, DRW_PKG = 1 };
+struct DrwCell { uint8_t kind; int16_t idx; };
+static DrwCell   drwCells[APP_N + PKGAPP_MAX];
+static int       drwN = 0;                    // celdas visibles tras filtrar
+static bool      drwAnyPkg = false;           // hay alguna descargada en la lista
 static char      drwQuery[DRW_QMAX + 1] = { 0 };
 static int       drwQLen    = 0;
 static bool      drwKbOn    = false;  // teclado del buscador desplegado
 static bool      drwShowHid = false;  // "ver apps ocultas" (unica via para volver a mostrarlas)
 static bool      drwCtxOn   = false;  // menu contextual de pulsacion larga
-static int       drwCtxApp  = -1, drwCtxX = 0, drwCtxY = 0;
+static int       drwCtxApp  = -1;     // menu abierto sobre una NATIVA: id de APP_REG
+static int       drwCtxPkg  = -1;     // ...o sobre una DESCARGADA: indice en pkgApps[]
+static int       drwCtxX = 0, drwCtxY = 0;
+static bool      drwConfOn  = false;  // confirmacion de desinstalacion
+static const char* drwInfoErr = NULL; // motivo a la vista en la ficha (NULL = ninguno)
 static bool      drwInfoOn  = false;  // ficha "Informacion"
 static int       drwPendApp = -1;     // app a abrir cuando termine la bajada
 static bool      drwPendSw  = false;  // ir a Recientes cuando termine la bajada
 static bool      drwFull    = true;   // hay que recomponer la pantalla entera
 static bool      drwDirty   = true;   // hay que recomponer la banda de la rejilla
 static uint32_t  drwFrameMs = 0;
-static int       drwLpApp   = -1;     // app NATIVA bajo el dedo (para no repetir el long-press)
-static int       drwLpPkg   = -1;     // app DESCARGADA bajo el dedo (indice en pkgApps[])
+static int       drwLpCell  = -1;     // celda bajo el dedo (para no repetir el long-press)
 static int       drwInfoPkg = -1;     // la ficha abierta es de una descargada (indice), -1 = nativa
 
 // ---- Geometria derivada ----
-// La rejilla tiene ahora DOS secciones: las apps nativas (el registro APP_REG de
-// siempre, sin un solo cambio) y, debajo, las DESCARGADAS, separadas por una
-// cabecera. Cuando no hay ninguna descargada -- el caso de una placa recien
-// grabada -- todas las cuentas de abajo dan exactamente lo mismo que antes.
+// Una sola rejilla de 4 columnas y paso uniforme, como antes de que existieran
+// las apps descargadas. Al unificar la lista desaparece la fila de cabecera de
+// altura distinta, y con ella toda la aritmetica especial que hacia falta para
+// saber donde caia cada fila.
 static inline int drwGridBot(){ return drwKbOn ? (SCR_H - DRW_KB_H - 8) : (SCR_H - DRW_NAV_H); }
-static inline bool drwHasPkg(){ return drwPkgN > 0; }
-static inline int drwNatRows(){ return (drwN + 3) / 4; }
-static inline int drwPkgRowsN(){ return (drwPkgN + 3) / 4; }
-static inline int drwHdrRow(){ return drwNatRows(); }          // fila de la cabecera
-static inline int drwPkgRow0(){ return drwNatRows() + 1; }     // primera fila descargada
-static inline int drwRows(){ return drwHasPkg() ? (drwPkgRow0() + drwPkgRowsN()) : drwNatRows(); }
-// Y de una fila EN COORDENADAS DE CONTENIDO. La cabecera mide DRW_SEC_H y no
-// DRW_ROW_STEP, asi que a partir de ella las filas se desplazan por su altura
-// real: es el unico sitio donde se decide donde cae cada fila.
-static int drwRowY(int row){
-  int nat = drwNatRows();
-  if(!drwHasPkg() || row <= nat) return DRW_GRID_TOP + row * DRW_ROW_STEP;
-  return DRW_GRID_TOP + nat * DRW_ROW_STEP + DRW_SEC_H + (row - nat - 1) * DRW_ROW_STEP;
-}
+static inline int drwRows(){ return (drwN + 3) / 4; }
 static int drwMaxScroll(){
-  int content = drwRowY(drwRows()) - DRW_GRID_TOP + 16;
+  int content = drwRows() * DRW_ROW_STEP + 16;
   int view    = drwGridBot() - DRW_GRID_TOP;
   int m = content - view;
   return m > 0 ? m : 0;
@@ -367,51 +367,45 @@ static void drwClampScroll(){
 // Rectangulo de la celda i EN COORDENADAS DE CONTENIDO (sin scroll ni hoja).
 static void drwCellXY(int i, int &x, int &y){
   x = DRW_COL_X0 + (i % 4) * DRW_COL_STEP;
-  y = drwRowY(i / 4);
+  y = DRW_GRID_TOP + (i / 4) * DRW_ROW_STEP;
 }
-// Lo mismo para la celda i de la seccion DESCARGADAS.
-static void drwPkgCellXY(int i, int &x, int &y){
-  x = DRW_COL_X0 + (i % 4) * DRW_COL_STEP;
-  y = drwRowY(drwPkgRow0() + i / 4);
-}
-// Celda bajo (px,py) en coordenadas de PANTALLA, o -1. `isPkg` dice en cual de
-// las dos secciones cayo: el indice es de drwList[] o de drwPkgList[], nunca de
-// una lista mezclada. La cabecera de seccion NO es tactil.
-//
-// Recorre las filas en vez de dividir por DRW_ROW_STEP porque la cabecera rompe
-// el paso uniforme. Son como mucho una docena de filas y solo se recorren al
-// tocar, no por cuadro.
-static int drwHitAny(int px, int py, bool &isPkg){
-  isPkg = false;
+// Indice de la celda bajo (px,py) en coordenadas de PANTALLA, o -1.
+static int drwHitCell(int px, int py){
   if(py < DRW_GRID_TOP || py >= drwGridBot()) return -1;
   int cy = py + (int)drwScroll - (int)drwSlide;
+  int r = (cy - DRW_GRID_TOP) / DRW_ROW_STEP;
+  if(r < 0 || (cy - DRW_GRID_TOP) < 0) return -1;
   int c = (px - DRW_COL_X0) / DRW_COL_STEP;
   if(px < DRW_COL_X0 || c < 0 || c > 3) return -1;
   int cellX = DRW_COL_X0 + c * DRW_COL_STEP;
   if(px > cellX + DRW_ICON_S + 12) return -1;             // pasillo entre columnas
-  int rows = drwRows();
-  for(int r = 0; r < rows; r++){
-    if(drwHasPkg() && r == drwHdrRow()) continue;
-    int y0 = drwRowY(r);
-    if(cy < y0 || cy >= y0 + DRW_ROW_STEP) continue;
-    if(!drwHasPkg() || r < drwNatRows()){
-      int i = r * 4 + c;
-      return (i >= 0 && i < drwN) ? i : -1;
-    }
-    int i = (r - drwPkgRow0()) * 4 + c;
-    if(i < 0 || i >= drwPkgN) return -1;
-    isPkg = true;
-    return i;
-  }
-  return -1;
+  int i = r * 4 + c;
+  return (i >= 0 && i < drwN) ? i : -1;
 }
-// Compatibilidad: la celda NATIVA bajo (px,py), o -1 si el toque cayo en una
-// descargada o fuera. Es lo que espera todo el codigo de la caja que trabaja
-// con ids del registro (menu contextual, favoritas, ocultas).
-static int drwHitCell(int px, int py){
-  bool isPkg = false;
-  int i = drwHitAny(px, py, isPkg);
-  return isPkg ? -1 : i;
+
+// ---- Acceso a una celda, SIEMPRE por su tipo ----------------------------
+// Estas cuatro funciones son la unica puerta entre la rejilla y las dos fuentes
+// de apps. Fuera de aqui nadie vuelve a mirar `idx` a pelo.
+static inline bool drwCellOk(int i){ return i >= 0 && i < drwN; }
+static inline bool drwIsPkg(int i){ return drwCellOk(i) && drwCells[i].kind == DRW_PKG; }
+// Id de APP_REG de una celda nativa, o -1 si la celda no es nativa.
+static int drwNativeId(int i){
+  if(!drwCellOk(i) || drwCells[i].kind != DRW_NATIVE) return -1;
+  int id = drwCells[i].idx;
+  return (id >= 0 && id < APP_N) ? id : -1;
+}
+// Indice VIVO en pkgApps[] de una celda descargada, o -1. Se revalida contra
+// pkgAppsN porque el registro puede haberse rehecho desde que se filtro.
+static int drwPkgIndex(int i){
+  if(!drwCellOk(i) || drwCells[i].kind != DRW_PKG) return -1;
+  int e = drwCells[i].idx;
+  return (e >= 0 && e < pkgAppsN) ? e : -1;
+}
+// Nombre visible de una celda. NULL si la celda ya no apunta a nada real.
+static const char* drwCellName(int i){
+  int id = drwNativeId(i); if(id >= 0) return appName(id);
+  int e  = drwPkgIndex(i); if(e  >= 0) return pkgApps[e].name;
+  return NULL;
 }
 
 // ---- Filtro: el UNICO sitio donde se decide que apps entran en la caja ----
@@ -420,21 +414,43 @@ static int drwHitCell(int px, int py){
 // hace exactamente esta comparacion sin distinguir mayusculas; se reutiliza en
 // vez de escribir una segunda.
 static void drwFilter(){
-  drwN = 0;
-  for(int id = 0; id < APP_N; id++){
+  drwN = 0; drwAnyPkg = false;
+  // 1. Las nativas, del registro central de siempre.
+  for(int id = 0; id < APP_N && drwN < (int)(sizeof(drwCells) / sizeof(drwCells[0])); id++){
     if(appIsHidden(id) && !drwShowHid) continue;
     if(!dexMatch(appName(id), drwQuery, drwQLen)) continue;
-    drwList[drwN++] = id;
+    drwCells[drwN].kind = DRW_NATIVE; drwCells[drwN].idx = (int16_t)id; drwN++;
   }
-  // SEGUNDA SECCION. pkgAppsEnsure() solo recorre /FlexApps cuando la revision
-  // del registro cambio (instalar, actualizar, desinstalar, detener, arrancar);
-  // el resto de las veces compara un entero y vuelve. Filtrar despues es
-  // recorrer un vector de 24 entradas en RAM.
+  // 2. Las descargadas, del registro real de /FlexApps. pkgAppsEnsure() solo
+  //    recorre el almacenamiento cuando la revision cambio (instalar,
+  //    actualizar, desinstalar, detener, arrancar); el resto de las veces
+  //    compara un entero y vuelve. Filtrar despues es recorrer un vector de 24
+  //    entradas que ya esta en RAM.
   pkgAppsEnsure();
-  drwPkgN = 0;
-  for(int i = 0; i < pkgAppsN; i++){
+  for(int i = 0; i < pkgAppsN && drwN < (int)(sizeof(drwCells) / sizeof(drwCells[0])); i++){
+    if(pkgAppHidden(i) && !drwShowHid) continue;
     if(!dexMatch(pkgApps[i].name, drwQuery, drwQLen)) continue;
-    drwPkgList[drwPkgN++] = i;
+    drwCells[drwN].kind = DRW_PKG; drwCells[drwN].idx = (int16_t)i; drwN++;
+    drwAnyPkg = true;
+  }
+  // 3. UN SOLO ORDEN, POR NOMBRE, SIN DISTINGUIR ORIGEN. Una app descargada se
+  //    coloca entre las nativas como cualquier otra. La ordenacion es estable:
+  //    a igualdad de nombre manda el tipo y luego el indice, asi que la rejilla
+  //    no puede bailar entre dos aperturas.
+  for(int i = 1; i < drwN; i++){
+    DrwCell key = drwCells[i];
+    const char* kn = (key.kind == DRW_NATIVE) ? appName(key.idx) : pkgApps[key.idx].name;
+    int j = i - 1;
+    while(j >= 0){
+      const DrwCell& a = drwCells[j];
+      const char* an = (a.kind == DRW_NATIVE) ? appName(a.idx) : pkgApps[a.idx].name;
+      int cmp = pkgAppNameCmp(an, kn);
+      if(cmp == 0) cmp = (int)a.kind - (int)key.kind;
+      if(cmp == 0) cmp = (int)a.idx - (int)key.idx;
+      if(cmp <= 0) break;
+      drwCells[j + 1] = drwCells[j]; j--;
+    }
+    drwCells[j + 1] = key;
   }
 }
 
@@ -594,66 +610,66 @@ static void drwDrawGrid(int sy, int y0, int y1){
     // UNA sola consulta a Flex Store por cuadro, aqui, fuera del bucle de
     // iconos. Preguntarlo por icono tomaba su mutex con espera infinita desde
     // el hilo grafico (ver pkgAppSampleBusy).
-    if(drwHasPkg()) pkgAppSampleBusy();
-    // Se recorren las filas y se descartan por su Y REAL. Antes se calculaba el
-    // rango dividiendo el scroll entre DRW_ROW_STEP, que ya no vale: la
-    // cabecera de "Descargadas" rompe el paso uniforme. Son una docena de filas
-    // y el descarte es una comparacion: el coste por cuadro no cambia.
-    int rows = drwRows();
-    for(int r = 0; r < rows; r++){
-      int rowTop = drwRowY(r) - scroll + sy;
-      int rowH   = (drwHasPkg() && r == drwHdrRow()) ? DRW_SEC_H : DRW_ROW_STEP;
-      if(rowTop > gClipY1 || rowTop + rowH < gClipY0) continue;
-      // Cabecera de la seccion de descargadas.
-      if(drwHasPkg() && r == drwHdrRow()){
-        drawText(DRW_COL_X0, rowTop + DRW_SEC_H / 2 - 8, "Descargadas", 2, TH_ONWALL);
-        char cnt[8]; snprintf(cnt, sizeof(cnt), "%d", drwPkgN);
-        drawText(DRW_COL_X0 + textW("Descargadas", 2) + 10, rowTop + DRW_SEC_H / 2 - 6, cnt, 1, TH_ONWALL2);
-        fillRectA(DRW_COL_X0, rowTop + DRW_SEC_H - 10, SCR_W - DRW_COL_X0 * 2, 1, TH_ONWALL2, 90);
-        continue;
-      }
-      bool pkgRow = drwHasPkg() && r >= drwPkgRow0();
+    if(drwAnyPkg) pkgAppSampleBusy();
+    int r0 = (scroll - DRW_ROW_STEP) / DRW_ROW_STEP; if(r0 < 0) r0 = 0;
+    int r1 = (scroll + (gBot - gTop)) / DRW_ROW_STEP + 1;
+    int rows = drwRows(); if(r1 > rows - 1) r1 = rows - 1;
+    for(int r = r0; r <= r1; r++){
       for(int c = 0; c < 4; c++){
-        if(!pkgRow){
-          int i = r * 4 + c;
-          if(i < 0 || i >= drwN) break;
-          int id = drwList[i];
-          if(id < 0 || id >= APP_N) continue;
-          int cx, cy; drwCellXY(i, cx, cy);
-          int ix = cx, iy = cy - scroll + sy;
+        int i = r * 4 + c;
+        if(i < 0 || i >= drwN) break;
+        int cx, cy; drwCellXY(i, cx, cy);
+        int ix = cx, iy = cy - scroll + sy;
+        if(iy > gClipY1 || iy + DRW_ROW_STEP < gClipY0) continue;
+
+        // EL TIPO DE LA CELDA DECIDE TODO. Nunca se usa `idx` sin saber antes
+        // si es un id de APP_REG o un indice de pkgApps.
+        const char* nm = NULL;
+        bool atenuada = false;
+        int id = drwNativeId(i);
+        if(id >= 0){
           drawAppIcon(id, ix, iy, DRW_ICON_S);
-          if(appIsHidden(id)) fillRoundRectA(ix, iy, DRW_ICON_S, DRW_ICON_S, DRW_ICON_S * 22 / 100, rgb565(0,0,0), 130);
+          if(appIsHidden(id)){
+            fillRoundRectA(ix, iy, DRW_ICON_S, DRW_ICON_S, DRW_ICON_S * 22 / 100, rgb565(0,0,0), 130);
+            atenuada = true;
+          }
           if(APPLOCK_ON && appLockGet(id))
             fillRoundRectA(ix + DRW_ICON_S - 18, iy + DRW_ICON_S - 18, 16, 16, 5, TH_DANGER, 230);
-          const char* nm = appName(id);
-          int fs = uiFontFit(nm, DRW_COL_STEP - 14, 2);
-          drawTextC(ix + DRW_ICON_S / 2, iy + DRW_ICON_S + 8, nm, fs,
-                    appIsHidden(id) ? TH_ONWALL2 : TH_ONWALL);
-          continue;
+          nm = appName(id);
+        } else {
+          int e = drwPkgIndex(i);
+          if(e < 0) continue;                      // el registro se rehizo: celda muerta
+          pkgAppDrawIcon(e, ix, iy, DRW_ICON_S);
+          if(pkgAppHidden(e)){
+            fillRoundRectA(ix, iy, DRW_ICON_S, DRW_ICON_S, DRW_ICON_S * 22 / 100, rgb565(0,0,0), 130);
+            atenuada = true;
+          }
+          // ESTADO, SIN BLOQUEAR NADA. Una app que se esta actualizando o que
+          // no se puede abrir se marca con un punto y sigue en su sitio: la
+          // rejilla no se reordena ni se para por ella.
+          uint8_t st = pkgAppStatus(e);
+          if(st != PKGAPP_ST_OK){
+            uint16_t dot = (st == PKGAPP_ST_UPDATING) ? TH_PRIM : TH_DANGER;
+            fillCircleA(ix + DRW_ICON_S - 9, iy + 9, 7, dot, 235);
+            if(st == PKGAPP_ST_ERROR) atenuada = true;
+          }
+          nm = pkgApps[e].name;
         }
-        int i = (r - drwPkgRow0()) * 4 + c;
-        if(i < 0 || i >= drwPkgN) break;
-        int e = drwPkgList[i];
-        if(e < 0 || e >= pkgAppsN) continue;            // registro rehecho a media rejilla
-        int cx, cy; drwPkgCellXY(i, cx, cy);
-        int ix = cx, iy = cy - scroll + sy;
-        pkgAppDrawIcon(e, ix, iy, DRW_ICON_S);
-        // ESTADO, SIN BLOQUEAR NADA. Una app que se esta actualizando o que no
-        // se puede abrir se marca con un punto y sigue en su sitio: la rejilla
-        // no se reordena ni se para por ella.
-        uint8_t st = pkgAppStatus(e);
-        if(st != PKGAPP_ST_OK){
-          uint16_t dot = (st == PKGAPP_ST_UPDATING) ? TH_PRIM : TH_DANGER;
-          fillCircleA(ix + DRW_ICON_S - 9, iy + 9, 7, dot, 235);
-        }
-        const char* nm = pkgApps[e].name;
-        int fs = uiFontFit(nm, DRW_COL_STEP - 14, 2);
-        drawTextC(ix + DRW_ICON_S / 2, iy + DRW_ICON_S + 8, nm, fs,
-                  st == PKGAPP_ST_ERROR ? TH_ONWALL2 : TH_ONWALL);
+
+        // ETIQUETA QUE NO SE SALE DE SU COLUMNA. Primero se intenta encoger la
+        // fuente (uiFontFit, como siempre); si aun asi no cabe, uiLabelFit
+        // corta por un limite de caracter UTF-8 y termina en "...". Mismo
+        // tratamiento para nativas y descargadas.
+        const int lblW = DRW_COL_STEP - 14;
+        int fs = uiFontFit(nm, lblW, 2);
+        char lbl[DRW_LABEL_MAX];
+        uiLabelFit(nm, lblW, fs, lbl, sizeof(lbl));
+        drawTextC(ix + DRW_ICON_S / 2, iy + DRW_ICON_S + 8, lbl, fs,
+                  atenuada ? TH_ONWALL2 : TH_ONWALL);
       }
     }
     gIconStyle = oldStyle;
-    if(drwN == 0 && drwPkgN == 0)
+    if(drwN == 0)
       drawTextC(SCR_W / 2, gTop + 60, "Sin resultados", 3, TH_ONWALL2);
   }
   gClipY0 = c0; gClipY1 = c1;
@@ -699,64 +715,112 @@ static void drwCompose(int y0, int y1, bool settled){
 // informacion. Vive DENTRO de ST_DRAWER (no es un gState nuevo) para no tocar
 // el menu contextual del escritorio, que sigue exactamente igual.
 static bool drwHomeHasSlot(){ return homeFirstFree() >= 0; }
+
+// MENU DE PULSACION LARGA, PARA LOS DOS TIPOS DE APP.
+// Una app nativa tiene cuatro acciones (las de siempre). Una app descargada
+// tiene ademas Desinstalar, porque es lo unico que se puede hacer con ella y no
+// con una del sistema. Todo lo demas -- el aspecto, el vidrio, la colocacion
+// junto al icono, las filas atenuadas -- es identico: para el usuario es el
+// mismo menu.
+#define DRW_CTX_OPEN    0
+#define DRW_CTX_HOME    1
+#define DRW_CTX_HIDE    2
+#define DRW_CTX_INFO    3
+#define DRW_CTX_UNINST  4
+static inline int drwCtxRows(){ return (drwCtxPkg >= 0) ? 5 : 4; }
+
+// Nombre de la app del menu, sea del tipo que sea.
+static const char* drwCtxName(){
+  if(drwCtxPkg >= 0 && drwCtxPkg < pkgAppsN) return pkgApps[drwCtxPkg].name;
+  if(drwCtxApp >= 0 && drwCtxApp < APP_N)    return appName(drwCtxApp);
+  return "";
+}
+static bool drwCtxInHome(){
+  if(drwCtxPkg >= 0) return pkgAppInHome(drwCtxPkg);
+  return appIsFav(drwCtxApp);
+}
+static bool drwCtxIsHidden(){
+  if(drwCtxPkg >= 0) return pkgAppHidden(drwCtxPkg);
+  return appIsHidden(drwCtxApp);
+}
 static const char* drwCtxLabel(int i){
   switch(i){
-    case 0:  return "Abrir";
-    case 1:  if(appIsFav(drwCtxApp)) return "Quitar de inicio";
-             return drwHomeHasSlot() ? "A\xC3\xB1" "adir a inicio" : "Inicio completo";
-    case 2:  return appIsHidden(drwCtxApp) ? "Mostrar" : "Ocultar";
-    default: return "Informaci\xC3\xB3n";
+    case DRW_CTX_OPEN: return "Abrir";
+    case DRW_CTX_HOME: if(drwCtxInHome()) return "Quitar de inicio";
+                       return drwHomeHasSlot() ? "A\xC3\xB1" "adir a inicio" : "Inicio completo";
+    case DRW_CTX_HIDE: return drwCtxIsHidden() ? "Mostrar" : "Ocultar";
+    case DRW_CTX_INFO: return "Informaci\xC3\xB3n";
+    default:           return "Desinstalar";
   }
 }
 static bool drwCtxEnabled(int i){
   // Una fila inerte se dibuja atenuada y no responde: se VE por que no se
   // puede usar, en vez de aceptar el toque y no hacer nada.
-  if(i == 1) return appIsFav(drwCtxApp) || (drwHomeHasSlot() && !appIsHidden(drwCtxApp));
-  if(i == 2) return appCanHide(drwCtxApp);          // Ajustes no se puede ocultar
+  if(i == DRW_CTX_HOME) return drwCtxInHome() || (drwHomeHasSlot() && !drwCtxIsHidden());
+  if(i == DRW_CTX_HIDE) return (drwCtxPkg >= 0) ? true : appCanHide(drwCtxApp);   // Ajustes no se puede ocultar
+  // Desinstalar SOLO existe para una app descargada. Ni Flex Store ni ninguna
+  // otra app del sistema llega nunca a esta fila: no se dibuja siquiera.
+  if(i == DRW_CTX_UNINST) return drwCtxPkg >= 0;
   return true;
 }
 static void drwCtxGlyph(int kind, int x, int y, int s, uint16_t col){
-  if(kind == 0){                                     // flecha de abrir
+  if(kind == DRW_CTX_OPEN){                          // flecha de abrir
     strokeSegAA((float)x, (float)(y + s / 2), (float)(x + s), (float)(y + s / 2), 2.0f, col);
     strokeSegAA((float)(x + s - 9), (float)(y + s / 2 - 8), (float)(x + s), (float)(y + s / 2), 2.0f, col);
     strokeSegAA((float)(x + s - 9), (float)(y + s / 2 + 8), (float)(x + s), (float)(y + s / 2), 2.0f, col);
-  } else if(kind == 1){                              // estrella (favorita)
+  } else if(kind == DRW_CTX_HOME){                   // circulo (en inicio)
     fillCircleA(x + s / 2, y + s / 2, s / 3, col, 230);
     fillCircleA(x + s / 2, y + s / 2, s / 3 - 4, uiGlass ? TH_GLASS : TH_SURF, 200);
-  } else if(kind == 2){                              // ojo
-    drwGlyphEye(x + s / 2, y + s / 2, s - 4, !appIsHidden(drwCtxApp), col);
-  } else {                                           // "i" de informacion
+  } else if(kind == DRW_CTX_HIDE){                   // ojo
+    drwGlyphEye(x + s / 2, y + s / 2, s - 4, !drwCtxIsHidden(), col);
+  } else if(kind == DRW_CTX_INFO){                   // "i" de informacion
     drawCircle(x + s / 2, y + s / 2, s / 2 - 1, col);
     fillRect(x + s / 2 - 1, y + s / 2 - 5, 2, 10, col);
     fillRect(x + s / 2 - 1, y + s / 2 - 9, 2, 2, col);
+  } else {                                           // papelera
+    int w = s - 8, hh = s - 8, bx = x + 4, by = y + 6;
+    drawRoundRect(bx, by + 4, w, hh - 4, 3, col);
+    fillRect(bx - 2, by, w + 4, 2, col);
+    fillRect(bx + w / 2 - 4, by - 3, 8, 3, col);
+    fillRect(bx + w / 3, by + 9, 2, hh - 16, col);
+    fillRect(bx + 2 * w / 3, by + 9, 2, hh - 16, col);
   }
 }
 static void drwCtxDraw(){
-  int h = DRW_CTX_ROWS * DRW_CTX_ROW_H;
+  int rows = drwCtxRows();
+  int h = rows * DRW_CTX_ROW_H;
   if(uiGlass) drawLiquidGlassPanel(drwCtxX, drwCtxY, DRW_CTX_W, h, DRW_CTX_RAD, TH_GLASS);
   else        fillRoundRectA(drwCtxX, drwCtxY, DRW_CTX_W, h, DRW_CTX_RAD, TH_SURF, 242);
-  for(int i = 0; i < DRW_CTX_ROWS; i++){
+  for(int i = 0; i < rows; i++){
     int ry = drwCtxY + i * DRW_CTX_ROW_H;
     if(i > 0) fillRectA(drwCtxX + 14, ry, DRW_CTX_W - 28, 1, TH_TXT2, 80);
     bool en = drwCtxEnabled(i);
-    uint16_t col = en ? TH_TXT : TH_TXT2;
+    // Desinstalar se dibuja en rojo: es la unica accion del menu que borra algo.
+    uint16_t col = !en ? TH_TXT2 : (i == DRW_CTX_UNINST ? TH_DANGER : TH_TXT);
     const char* lb = drwCtxLabel(i);
     int fs = uiFontFit(lb, DRW_CTX_W - 76, 3);
-    drawText(drwCtxX + 18, ry + DRW_CTX_ROW_H / 2 - uiLineH(fs) / 2, lb, fs, col);
+    char lbl[DRW_LABEL_MAX];
+    uiLabelFit(lb, DRW_CTX_W - 76, fs, lbl, sizeof(lbl));
+    drawText(drwCtxX + 18, ry + DRW_CTX_ROW_H / 2 - uiLineH(fs) / 2, lbl, fs, col);
     drwCtxGlyph(i, drwCtxX + DRW_CTX_W - 44, ry + DRW_CTX_ROW_H / 2 - 13, 26, col);
   }
 }
 static void drwCtxBand(int &y0, int &y1){
-  y0 = drwCtxY - 4; y1 = drwCtxY + DRW_CTX_ROWS * DRW_CTX_ROW_H + 4;
+  y0 = drwCtxY - 4; y1 = drwCtxY + drwCtxRows() * DRW_CTX_ROW_H + 4;
   if(y0 < 0) y0 = 0; if(y1 > SCR_H - 1) y1 = SCR_H - 1;
 }
 static void drwCtxOpen(int cell){
-  if(cell < 0 || cell >= drwN) return;
-  drwCtxApp = drwList[cell];
+  if(!drwCellOk(cell)) return;
+  // AQUI SE FIJA EL TIPO, Y NO SE VUELVE A ADIVINAR. A partir de este punto el
+  // menu entero trabaja con drwCtxApp (id de APP_REG) o con drwCtxPkg (indice
+  // en pkgApps), y exactamente uno de los dos vale.
+  drwCtxApp = drwNativeId(cell);
+  drwCtxPkg = drwPkgIndex(cell);
+  if(drwCtxApp < 0 && drwCtxPkg < 0) return;
   int cx, cy; drwCellXY(cell, cx, cy);
   int iy = cy - (int)drwScroll;
   int px = cx + DRW_ICON_S + 12;
-  int h  = DRW_CTX_ROWS * DRW_CTX_ROW_H;
+  int h  = drwCtxRows() * DRW_CTX_ROW_H;
   if(px + DRW_CTX_W > SCR_W - 8) px = cx - 12 - DRW_CTX_W;   // no cabe a la derecha
   if(px < 8) px = 8;
   if(px > SCR_W - 8 - DRW_CTX_W) px = SCR_W - 8 - DRW_CTX_W;
@@ -766,6 +830,41 @@ static void drwCtxOpen(int cell){
   drwCtxX = px; drwCtxY = py;
   drwCtxOn = true; drwVel = 0; drwDrag = false;
   drwFull = true;
+}
+
+// ---- Confirmacion de desinstalacion -------------------------------------
+// Borrar una app es lo unico irreversible que se puede hacer desde la caja, asi
+// que se pregunta antes y se dice CUAL, con su nombre: "Desinstalar" a secas
+// sobre una rejilla de iconos es demasiado facil de tocar sin querer.
+#define DRW_CONF_W 348
+#define DRW_CONF_H 208
+static void drwConfBand(int &y0, int &y1){
+  y0 = (SCR_H - DRW_CONF_H) / 2 - 4; y1 = y0 + DRW_CONF_H + 8;
+  if(y0 < 0) y0 = 0; if(y1 > SCR_H - 1) y1 = SCR_H - 1;
+}
+static void drwConfBtnRects(int &cx0, int &cy0, int &cw, int &ch, int &ux0){
+  int x = (SCR_W - DRW_CONF_W) / 2, y = (SCR_H - DRW_CONF_H) / 2;
+  cw = (DRW_CONF_W - 48) / 2; ch = 46;
+  cy0 = y + DRW_CONF_H - 26 - ch;
+  cx0 = x + 16; ux0 = x + DRW_CONF_W - 16 - cw;
+}
+static void drwConfDraw(){
+  int x = (SCR_W - DRW_CONF_W) / 2, y = (SCR_H - DRW_CONF_H) / 2;
+  if(uiGlass) drawLiquidGlassPanel(x, y, DRW_CONF_W, DRW_CONF_H, 24, TH_GLASS);
+  else        fillRoundRectA(x, y, DRW_CONF_W, DRW_CONF_H, 24, TH_SURF, 245);
+  drawTextC(SCR_W / 2, y + 26, "\xC2\xBF" "Desinstalar?", 3, TH_TXT);
+  // El NOMBRE de la app, truncado a lo que cabe en la tarjeta.
+  const char* nm = drwCtxName();
+  char lbl[DRW_LABEL_MAX];
+  uiLabelFit(nm, DRW_CONF_W - 40, 2, lbl, sizeof(lbl));
+  drawTextC(SCR_W / 2, y + 62, lbl, 2, TH_TXT);
+  drawTextC(SCR_W / 2, y + 94,  "Se borrara la aplicacion", 1, TH_TXT2);
+  drawTextC(SCR_W / 2, y + 112, "y todos sus datos.", 1, TH_TXT2);
+  int cx0, cy0, cw, ch, ux0; drwConfBtnRects(cx0, cy0, cw, ch, ux0);
+  fillRoundRectA(cx0, cy0, cw, ch, ch / 2, TH_TXT2, 60);
+  drawTextC(cx0 + cw / 2, cy0 + ch / 2 - 8, "Cancelar", 2, TH_TXT);
+  fillRoundRect(ux0, cy0, cw, ch, ch / 2, TH_DANGER);
+  drawTextC(ux0 + cw / 2, cy0 + ch / 2 - 8, "Desinstalar", 2, rgb565(255,255,255));
 }
 
 // ---- Ficha de informacion ----------------------------------------------
@@ -803,6 +902,20 @@ static void drwInfoDraw(){
   int x = (SCR_W - DRW_INFO_W) / 2, y = (SCR_H - DRW_INFO_H) / 2;
   if(uiGlass) drawLiquidGlassPanel(x, y, DRW_INFO_W, DRW_INFO_H, 24, TH_GLASS);
   else        fillRoundRectA(x, y, DRW_INFO_W, DRW_INFO_H, 24, TH_SURF, 245);
+  // Motivo de un fallo (por ejemplo, una desinstalacion que el gestor de
+  // paquetes rechazo). Se ensena tal cual lo dio el gestor: no se traga.
+  if(drwInfoErr){
+    drawTextC(SCR_W / 2, y + 40, "No se pudo completar", 3, TH_DANGER);
+    char m[DRW_LABEL_MAX * 2];
+    snprintf(m, sizeof(m), "%s", drwInfoErr);
+    int fs = uiFontFit(m, DRW_INFO_W - 40, 2);
+    char lbl[DRW_LABEL_MAX * 2];
+    uiLabelFit(m, DRW_INFO_W - 40, fs, lbl, sizeof(lbl));
+    drawTextC(SCR_W / 2, y + 96, lbl, fs, TH_TXT);
+    drawTextC(SCR_W / 2, y + DRW_INFO_H - 30, "Toca para cerrar", 1, TH_TXT2);
+    return;
+  }
+  if(drwInfoPkg >= 0 && drwInfoPkg >= pkgAppsN){ drwInfoPkg = -1; drwInfoOn = false; return; }
   if(drwInfoPkg >= 0){
     // El registro pudo rehacerse con la ficha abierta (una instalacion que
     // termina). Si el indice ya no existe, se cierra la ficha en vez de leer
@@ -834,6 +947,89 @@ static void drwInfoDraw(){
 // ---- Acciones del menu -------------------------------------------------
 // Cada accion que cambia el registro guarda EN EL ACTO (una sola apertura de
 // NVS, tres claves) y renumera la caja. No hay escrituras por cuadro.
+// INICIO, PARA UNA APP DESCARGADA. La ranura de pkgPrefs es lo que se guarda en
+// homeOrder[] (HOME_PKG_BASE + ranura): un numero ESTABLE que sobrevive a que
+// pkgApps[] se reordene o cambie de tamano. Nunca se guarda un indice de
+// pkgApps, que es justo lo que se movería bajo los pies.
+static void drwPkgHomeToggle(int e){
+  if(e < 0 || e >= pkgAppsN) return;
+  const char* id = pkgApps[e].id;
+  if(pkgAppInHome(e)){
+    int slot = pkgPrefSlot(id, false);
+    if(slot >= 0)
+      for(int i = 0; i < HOME_TOTAL; i++)
+        if(homeOrder[i] == (uint8_t)(HOME_PKG_BASE + slot)) homeOrder[i] = HOME_EMPTY;
+    pkgPrefSet(id, PKGPREF_HOME, false);
+  } else {
+    if(pkgAppHidden(e)) return;                    // una app oculta no puede estar en Inicio
+    int slot = pkgPrefSlot(id, true);
+    if(slot < 0) return;                           // tabla de anclajes llena
+    int cell = homeFirstFreeGrow();                // respeta el limite de paginas
+    if(slot >= 0 && cell < 0){
+      // No cabe: no se deja la marca puesta ni una ranura a medias.
+      if(!(pkgPrefFlags(id) & PKGPREF_HIDDEN)) pkgPrefForget(id);
+      return;
+    }
+    pkgPrefSet(id, PKGPREF_HOME, true);
+    homeOrder[cell] = (uint8_t)(HOME_PKG_BASE + slot);
+  }
+  homeOrderNormalize();
+  homeOrderSave();
+  gHomeDirty = true;
+}
+static void drwPkgHideToggle(int e){
+  if(e < 0 || e >= pkgAppsN) return;
+  const char* id = pkgApps[e].id;
+  if(pkgAppHidden(e)){
+    pkgPrefSet(id, PKGPREF_HIDDEN, false);
+  } else {
+    // Fuera de la caja: tambien fuera de Inicio, igual que una nativa.
+    if(pkgAppInHome(e)) drwPkgHomeToggle(e);
+    pkgPrefSet(id, PKGPREF_HIDDEN, true);
+  }
+  drwFilter();
+  drwClampScroll();
+}
+// DESINSTALAR POR LA RUTA OFICIAL. flexPkgUninstall() es la transaccion del
+// gestor de paquetes: se lleva la version activa, los temporales, el registro y
+// la carpeta privada. Aqui no se borra ni una carpeta a mano.
+static bool drwPkgUninstall(int e){
+  if(e < 0 || e >= pkgAppsN) return false;
+  char id[FLEXPKG_ID_MAX + 1];
+  snprintf(id, sizeof(id), "%s", pkgApps[e].id);
+  // Si estaba anclada, primero se suelta su ranura de Inicio: si no, quedaria
+  // una referencia a una app que ya no existe.
+  if(pkgAppInHome(e)) drwPkgHomeToggle(e);
+  if(!flexPkgUninstall(id)) return false;          // el error se muestra, no se traga
+  pkgPrefForget(id);
+  pkgAppsInvalidate();
+  drwFilter();
+  drwClampScroll();
+  homeOrderNormalize();
+  homeOrderSave();
+  gHomeDirty = true;                               // Inicio se rehace en el acto
+  return true;
+}
+
+// ABRIR UNA APP DESCARGADA. Un unico camino, lo pida el toque simple o la fila
+// "Abrir" del menu. La caja NO abre una segunda puerta al runtime: anota la
+// peticion y abre Flex Store, que es quien sabe arrancar cada runtime con su
+// validacion de grant, su presupuesto por tick y su ciclo de vida. Al salir de
+// la app se vuelve al escritorio (ver pkgAppLaunchFromDrawer).
+static void drwStartClose(int pendApp, bool pendSwitcher);   // mas abajo, en el ciclo de vida
+static void drwOpenPkg(int e){
+  if(e < 0 || e >= pkgAppsN) return;
+  // Una app que no esta lista no se abre y lo dice en su ficha, en vez de
+  // fallar por dentro o dejar la caja sin responder.
+  if(pkgAppStatusLive(e) != PKGAPP_ST_OK){
+    drwInfoPkg = e; drwInfoErr = NULL; drwInfoOn = true;
+    drwVel = 0; drwDrag = false; drwFull = true;
+    return;
+  }
+  pkgAppRequestLaunch(pkgApps[e].id);
+  drwStartClose(IC_FLEXSTORE, false);
+}
+
 static void drwFavToggle(int id){
   if(id < 0 || id >= APP_N) return;
   if(appIsFav(id)){
@@ -880,8 +1076,8 @@ static bool drawerCanOpen(){
 }
 static void drwResetView(){
   drwScroll = 0; drwVel = 0; drwDrag = false; drwMoved = false;
-  drwCtxOn = false; drwInfoOn = false; drwCtxApp = -1; drwLpApp = -1;
-  drwLpPkg = -1; drwInfoPkg = -1;
+  drwCtxOn = false; drwInfoOn = false; drwCtxApp = -1; drwCtxPkg = -1;
+  drwLpCell = -1; drwInfoPkg = -1; drwConfOn = false;
   drwKbOn = false; drwQLen = 0; drwQuery[0] = 0; drwShowHid = false;
 }
 static void drawerOpen(){
@@ -1066,16 +1262,7 @@ static void drawerTick(){
   // pulsacion larga. Reevaluarlo AQUI y no dentro del scroll es lo que impide
   // que mantener el dedo sobre la cabecera abra el menu de la ultima app que
   // se toco en la rejilla.
-  if(T.pressed){
-    bool lpPkg = false;
-    int lpCell = drwHitAny(T.x, T.y, lpPkg);
-    drwLpApp = lpPkg ? -1 : lpCell;
-    drwLpPkg = -1;
-    if(lpPkg && lpCell >= 0 && lpCell < drwPkgN){
-      int e = drwPkgList[lpCell];
-      if(e >= 0 && e < pkgAppsN) drwLpPkg = e;
-    }
-  }
+  if(T.pressed) drwLpCell = drwHitCell(T.x, T.y);
   // El final del arrastre se cierra AQUI, antes de repartir el toque: el dedo
   // puede levantarse sobre el teclado o la cabecera, y alli drwScrollTouch() ni
   // siquiera se llama. Sin esto drwDrag se quedaba encallado en true y la
@@ -1085,7 +1272,7 @@ static void drawerTick(){
   // 3. FICHA DE INFORMACION: modal. Consume el toque y SALE -- si dejara pasar
   //    el gesto, cerrar la ficha hacia abajo cerraria tambien la caja.
   if(drwInfoOn){
-    if(T.tap || T.swipeDown || T.swipeUp){ drwInfoOn = false; drwInfoPkg = -1; drwFull = true; return; }
+    if(T.tap || T.swipeDown || T.swipeUp){ drwInfoOn = false; drwInfoPkg = -1; drwInfoErr = NULL; drwFull = true; return; }
     int y0, y1; drwInfoBand(y0, y1);
     drwCompose(y0, y1, true); drwInfoDraw(); present(y0, y1); setBuf(fb);
     return;
@@ -1094,20 +1281,63 @@ static void drawerTick(){
   // 4. MENU CONTEXTUAL: modal sobre la caja. Mismo criterio que la ficha --
   //    pase lo que pase con el toque, aqui se acaba el cuadro: una fila que
   //    caiga sobre la barra de navegacion no puede ademas cerrar la caja.
+  // 4bis. CONFIRMACION DE DESINSTALAR: modal sobre el menu. Va ANTES que el
+  //       menu para que el toque no se reparta entre los dos.
+  if(drwConfOn){
+    if(T.tap){
+      int cx0, cy0, cw, ch, ux0; drwConfBtnRects(cx0, cy0, cw, ch, ux0);
+      bool enFila = (T.y >= cy0 && T.y < cy0 + ch);
+      if(enFila && T.x >= ux0 && T.x < ux0 + cw){
+        int e = drwCtxPkg;
+        bool ok = drwPkgUninstall(e);
+        drwConfOn = false; drwCtxOn = false; drwCtxPkg = -1; drwCtxApp = -1;
+        drwFull = true;
+        if(!ok){
+          // El gestor de paquetes no pudo: se dice, con su motivo, y la lista
+          // se queda como estaba en vez de fingir que la app ya no esta.
+          drwInfoErr = flexPkgError();
+          drwInfoOn = true; drwInfoPkg = -1;
+        }
+        return;
+      }
+      // Cualquier otro toque cancela: no se borra nada por tocar al lado.
+      drwConfOn = false; drwFull = true;
+      return;
+    }
+    if(T.swipeDown || T.swipeUp){ drwConfOn = false; drwFull = true; return; }
+    int y0, y1; drwConfBand(y0, y1);
+    drwCompose(y0, y1, true); drwConfDraw(); present(y0, y1); setBuf(fb);
+    return;
+  }
+
   if(drwCtxOn){
     if(T.tap){
+      int rows = drwCtxRows();
       int hit = -1;
       if(T.x >= drwCtxX && T.x < drwCtxX + DRW_CTX_W && T.y >= drwCtxY){
         int r = (T.y - drwCtxY) / DRW_CTX_ROW_H;
-        if(r >= 0 && r < DRW_CTX_ROWS) hit = r;
+        if(r >= 0 && r < rows) hit = r;
       }
-      int app = drwCtxApp;
+      int app = drwCtxApp, pkg = drwCtxPkg;
       if(hit < 0){ drwCtxOn = false; drwFull = true; }            // fuera del panel: cancelar
       else if(!drwCtxEnabled(hit)){ return; }                     // fila inerte: ni siquiera cierra
-      else if(hit == 0){ drwCtxOn = false; drwStartClose(app, false); return; }
-      else if(hit == 1){ drwFavToggle(app);  drwCtxOn = false; drwFull = true; }
-      else if(hit == 2){ drwHideToggle(app); drwCtxOn = false; drwFull = true; }
-      else             { drwCtxOn = false; drwInfoOn = true;   drwFull = true; }
+      else if(hit == DRW_CTX_OPEN){
+        drwCtxOn = false;
+        if(pkg >= 0){ drwOpenPkg(pkg); return; }
+        drwStartClose(app, false); return;
+      }
+      else if(hit == DRW_CTX_HOME){
+        if(pkg >= 0) drwPkgHomeToggle(pkg); else drwFavToggle(app);
+        drwCtxOn = false; drwFull = true;
+      }
+      else if(hit == DRW_CTX_HIDE){
+        if(pkg >= 0) drwPkgHideToggle(pkg); else drwHideToggle(app);
+        drwCtxOn = false; drwFull = true;
+      }
+      else if(hit == DRW_CTX_INFO){
+        drwCtxOn = false; drwInfoOn = true; drwInfoPkg = pkg; drwInfoErr = NULL; drwFull = true;
+      }
+      else { drwConfOn = true; drwFull = true; }                  // Desinstalar -> confirmar
       return;
     }
     if(T.swipeDown || T.swipeUp){ drwCtxOn = false; drwFull = true; return; }
@@ -1136,53 +1366,36 @@ static void drawerTick(){
   if(drwKbOn && T.y >= SCR_H - DRW_KB_H){ drwKbTouch(); }
   else if(drwHeaderTouch()){ /* consumido */ }
   else {
-    // 7. PULSACION LARGA sobre un icono -> menu contextual (nativa) o ficha
-    //    (descargada: no tiene favoritas ni ocultas, ver drwInfoDrawPkg).
+    // 7. PULSACION LARGA sobre un icono -> menu contextual. El mismo gesto y el
+    //    mismo menu para los dos tipos de app; lo que cambia es lo que ofrece.
     bool lpLong = T.down && !drwMoved && (now - T.downMs) > DRW_LP_MS
                   && abs(T.x - T.startX) < 12 && abs(T.y - T.startY) < 12;
-    if(lpLong && drwLpApp >= 0){
-      int cell = drwLpApp; drwLpApp = -1; drwLpPkg = -1;
+    if(lpLong && drwLpCell >= 0){
+      int cell = drwLpCell; drwLpCell = -1;
       drwCtxOpen(cell);
-      return;
-    }
-    if(lpLong && drwLpPkg >= 0){
-      drwInfoPkg = drwLpPkg; drwLpPkg = -1; drwLpApp = -1;
-      drwInfoOn = true; drwVel = 0; drwDrag = false; drwFull = true;
       return;
     }
     // 8. SCROLL con inercia.
     drwScrollTouch();
     // 9. TOQUE SIMPLE -> abrir la app (la caja se cierra primero, ver drwStartClose).
     if(T.tap && !drwMoved){
-      bool isPkg = false;
-      int cell = drwHitAny(T.x, T.y, isPkg);
-      if(cell >= 0 && !isPkg){
-        int id = drwList[cell];
-        // Origen de la animacion de apertura: el icono REAL que se acaba de
-        // tocar, aunque la app no este en el escritorio (ver gIconOvrApp).
+      int cell = drwHitCell(T.x, T.y);
+      if(cell >= 0){
         int cx, cy; drwCellXY(cell, cx, cy);
-        gIconOvrApp = id; gIconOvrX = cx; gIconOvrY = cy - (int)drwScroll; gIconOvrS = DRW_ICON_S;
-        drwStartClose(id, false);
-        return;
-      }
-      if(cell >= 0 && isPkg && cell < drwPkgN){
-        int e = drwPkgList[cell];
-        if(e < 0 || e >= pkgAppsN) return;              // la lista se rehizo bajo el dedo
-        // Una app que no esta lista no se abre y lo dice en su ficha, en vez de
-        // fallar por dentro o dejar la caja sin responder.
-        if(pkgAppStatusLive(e) != PKGAPP_ST_OK){
-          drwInfoPkg = e; drwInfoOn = true; drwVel = 0; drwDrag = false; drwFull = true;
+        int id = drwNativeId(cell);
+        if(id >= 0){
+          // Origen de la animacion de apertura: el icono REAL que se acaba de
+          // tocar, aunque la app no este en el escritorio (ver gIconOvrApp).
+          gIconOvrApp = id; gIconOvrX = cx; gIconOvrY = cy - (int)drwScroll; gIconOvrS = DRW_ICON_S;
+          drwStartClose(id, false);
           return;
         }
-        // LA CAJA NO ABRE UNA SEGUNDA PUERTA AL RUNTIME. Anota la peticion y
-        // abre Flex Store, que es quien sabe arrancar cada runtime con su
-        // validacion de grant, su presupuesto por tick y su ciclo de vida.
-        // Al salir de la app se vuelve al escritorio (pkgAppLaunchFromDrawer).
-        pkgAppRequestLaunch(pkgApps[e].id);
-        int cx, cy; drwPkgCellXY(cell, cx, cy);
-        gIconOvrApp = IC_FLEXSTORE; gIconOvrX = cx; gIconOvrY = cy - (int)drwScroll; gIconOvrS = DRW_ICON_S;
-        drwStartClose(IC_FLEXSTORE, false);
-        return;
+        int e = drwPkgIndex(cell);
+        if(e >= 0){
+          gIconOvrApp = IC_FLEXSTORE; gIconOvrX = cx; gIconOvrY = cy - (int)drwScroll; gIconOvrS = DRW_ICON_S;
+          drwOpenPkg(e);
+          return;
+        }
       }
     }
   }

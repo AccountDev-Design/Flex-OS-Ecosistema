@@ -1257,7 +1257,11 @@ static void homeTick(){
      && abs(T.x - T.startX) < 12 && abs(T.y - T.startY) < 12){
     int slot = edSlotAt(T.startX, T.startY);
     if(homeOrder[edSlot(slot)] == HOME_EMPTY) return;   // hueco de la rejilla: no hay app sobre la que actuar
-    if(CTXMENU_ON){ ctxOpen(slot); return; }
+    // El menu contextual del escritorio habla de apps NATIVAS (favoritas,
+    // ocultas, ids de APP_REG). Sobre una app descargada se va directo a Modo
+    // Edicion, que es posicional y funciona igual para las dos: mover el icono
+    // si, ofrecer acciones que no le corresponden no.
+    if(CTXMENU_ON && !homeIsPkg(homeOrder[edSlot(slot)])){ ctxOpen(slot); return; }
     edEnter(); edDrag = slot; edSetDrag(T.x, T.y); return;
   }
   // CAJA DE APLICACIONES: deslizar hacia ARRIBA desde el escritorio. Va
@@ -1287,6 +1291,18 @@ static void homeTick(){
     int id;
     if(hitHomeIcon(T.x, T.y, id)){
       gIconOvrApp = -1;              // se abre desde su ranura real, no desde la caja
+      // APP DESCARGADA ANCLADA. Se abre por el MISMO camino que desde la caja:
+      // se anota la peticion y se entra en Flex Store, que arranca el runtime
+      // con su validacion de grant y su presupuesto. Un valor >= HOME_PKG_BASE
+      // NUNCA llega a enterApp ni a los vectores dimensionados a APP_N.
+      if(homeIsPkg((uint8_t)id)){
+        int e = pkgAppFromSlot(homePkgSlot((uint8_t)id));
+        if(e < 0) return;                                  // ya no esta instalada
+        pkgAppRequestLaunch(pkgAppIdAt(e));
+        enterApp(IC_FLEXSTORE);
+        return;
+      }
+      if(id < 0 || id >= APP_N) return;
       // FASE 3: si la app tiene candado, la verificacion va ANTES de abrirla.
       // Se reutiliza lsuStartVerify (misma UI, mismo contador de fallos, misma
       // espera progresiva de la Fase 1); al acertar, lsuFinishAfter abre la app

@@ -273,6 +273,127 @@ static inline void pkgAppsEnsure(){
 // en el mismo evento, sin esperar a la siguiente apertura de la caja.
 static inline void pkgAppsInvalidate(){ pkgAppsBuilt = false; }
 
+static int pkgAppFind(const char* packageId);   // definida justo debajo
+
+// ---- Preferencias por app descargada (Inicio / oculta) -------------------
+// LA CLAVE ES EL packageId, NO LA POSICION. pkgApps[] se reordena por nombre y
+// cambia de tamano en cada instalacion: guardar un indice suyo en NVS o en
+// homeOrder[] seria exactamente el fallo de "confundir un id nativo con un
+// indice de paquete". Esta tabla es la traduccion estable entre las dos cosas:
+//   · su RANURA (0..PKGPREF_SLOTS-1) no se mueve mientras la app siga anotada,
+//     asi que Inicio puede referirse a ella con un numero;
+//   · su contenido es el packageId, que es lo unico que de verdad identifica
+//     una app instalada.
+// Las apps nativas no la tocan: siguen con gAppFav / gAppHidden, bit a bit,
+// exactamente como estaban.
+#define PKGPREF_SLOTS   16
+#define PKGPREF_HOME    0x01      // anclada en el escritorio
+#define PKGPREF_HIDDEN  0x02      // oculta en la caja
+
+struct PkgPrefEntry {
+  char    id[FLEXPKG_ID_MAX + 1];
+  uint8_t flags;
+};
+static PkgPrefEntry pkgPrefs[PKGPREF_SLOTS];
+static bool         pkgPrefsLoaded = false;
+
+static void pkgPrefsLoad(){
+  if(pkgPrefsLoaded) return;
+  memset(pkgPrefs, 0, sizeof(pkgPrefs));
+  prefs.begin("flexos", true);
+  size_t n = prefs.getBytes("pkgpref", pkgPrefs, sizeof(pkgPrefs));
+  prefs.end();
+  if(n != sizeof(pkgPrefs)) memset(pkgPrefs, 0, sizeof(pkgPrefs));
+  // Un NVS de otra version o a medio escribir no puede dejar cadenas sin
+  // terminar: se cierran aqui, una vez, antes de que nadie las lea.
+  for(int i = 0; i < PKGPREF_SLOTS; i++) pkgPrefs[i].id[FLEXPKG_ID_MAX] = 0;
+  pkgPrefsLoaded = true;
+}
+static void pkgPrefsSave(){
+  pkgPrefsLoad();
+  prefs.begin("flexos", false);
+  prefs.putBytes("pkgpref", pkgPrefs, sizeof(pkgPrefs));
+  prefs.end();
+}
+// Ranura de un paquete, o -1. `crear` reserva una libre si no la tenia.
+static int pkgPrefSlot(const char* packageId, bool crear){
+  if(!packageId || !packageId[0]) return -1;
+  pkgPrefsLoad();
+  for(int i = 0; i < PKGPREF_SLOTS; i++)
+    if(pkgPrefs[i].id[0] && !strcmp(pkgPrefs[i].id, packageId)) return i;
+  if(!crear) return -1;
+  for(int i = 0; i < PKGPREF_SLOTS; i++){
+    if(pkgPrefs[i].id[0]) continue;
+    snprintf(pkgPrefs[i].id, sizeof(pkgPrefs[i].id), "%s", packageId);
+    pkgPrefs[i].flags = 0;
+    return i;
+  }
+  return -1;                                   // tabla llena: no se miente
+}
+static uint8_t pkgPrefFlags(const char* packageId){
+  int i = pkgPrefSlot(packageId, false);
+  return (i >= 0) ? pkgPrefs[i].flags : 0;
+}
+static bool pkgPrefSet(const char* packageId, uint8_t bit, bool on){
+  int i = pkgPrefSlot(packageId, on);          // solo se crea ranura para ACTIVAR
+  if(i < 0) return !on;                        // apagar algo que no estaba: ya esta
+  if(on) pkgPrefs[i].flags |= bit;
+  else   pkgPrefs[i].flags &= (uint8_t)~bit;
+  // Ranura sin ninguna marca = ranura libre. Asi la tabla no se llena de restos.
+  if(!pkgPrefs[i].flags) pkgPrefs[i].id[0] = 0;
+  pkgPrefsSave();
+  return true;
+}
+// Se llama al desinstalar: la app deja de existir, sus preferencias tambien.
+static void pkgPrefForget(const char* packageId){
+  int i = pkgPrefSlot(packageId, false);
+  if(i < 0) return;
+  pkgPrefs[i].id[0] = 0; pkgPrefs[i].flags = 0;
+  pkgPrefsSave();
+}
+// Definicion del prototipo que Inicio declaro antes (FlexOS_Ultra_Home.h): una
+// ranura anclada solo vale si la app SIGUE instalada, SIGUE anclada y no esta
+// oculta. Con eso, desinstalar una app la retira del escritorio sola en la
+// siguiente normalizacion, sin dejar un hueco con un icono fantasma.
+static bool homePkgSlotUsable(uint8_t v){
+  int slot = homePkgSlot(v);
+  if(slot < 0 || slot >= PKGPREF_SLOTS) return false;
+  pkgPrefsLoad();
+  if(!pkgPrefs[slot].id[0]) return false;
+  if(!(pkgPrefs[slot].flags & PKGPREF_HOME)) return false;
+  if(pkgPrefs[slot].flags & PKGPREF_HIDDEN) return false;
+  return pkgAppFind(pkgPrefs[slot].id) >= 0;      // y sigue instalada de verdad
+}
+
+static inline bool pkgAppInHome(int index){
+  if(index < 0 || index >= pkgAppsN) return false;
+  return (pkgPrefFlags(pkgApps[index].id) & PKGPREF_HOME) != 0;
+}
+static inline bool pkgAppHidden(int index){
+  if(index < 0 || index >= pkgAppsN) return false;
+  return (pkgPrefFlags(pkgApps[index].id) & PKGPREF_HIDDEN) != 0;
+}
+// Ranura -> indice vivo en pkgApps[], o -1 si esa app ya no esta instalada.
+// Es la UNICA forma de volver de un numero guardado a una app real.
+static int pkgAppFromSlot(int slot){
+  if(slot < 0 || slot >= PKGPREF_SLOTS) return -1;
+  pkgPrefsLoad();
+  if(!pkgPrefs[slot].id[0]) return -1;
+  return pkgAppFind(pkgPrefs[slot].id);
+}
+
+// Nombre de una app descargada por su indice. Existe para que Inicio pueda
+// pintar su etiqueta sin conocer la estructura PkgAppEntry (Home.h se incluye
+// antes que este modulo y solo ve estas tres funciones declaradas).
+// Identificador de una app descargada por su indice (para el prototipo que usa
+// Inicio al abrirla desde su ranura).
+static const char* pkgAppIdAt(int index){
+  return (index >= 0 && index < pkgAppsN) ? pkgApps[index].id : "";
+}
+static const char* pkgAppNameAt(int index){
+  return (index >= 0 && index < pkgAppsN) ? pkgApps[index].name : NULL;
+}
+
 static int pkgAppFind(const char* packageId){
   if(!packageId || !packageId[0]) return -1;
   for(int i = 0; i < pkgAppsN; i++) if(!strcmp(pkgApps[i].id, packageId)) return i;

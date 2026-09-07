@@ -105,6 +105,17 @@ static uint32_t gAppLock = 0;                         // bit i = app i bloqueada
 static uint32_t gAppFav    = 0x0FFF;                  // bit i = app i en el escritorio (NVS "appfav")
 static uint32_t gAppHidden = 0;                       // bit i = app i oculta        (NVS "apphide")
 #define HOME_EMPTY 0xFF                               // ranura vacia en homeOrder[]
+// APPS DESCARGADAS EN EL ESCRITORIO. homeOrder[] guarda un byte por ranura:
+//   0 .. APP_N-1        -> app NATIVA (indice de APP_REG, como siempre)
+//   HOME_PKG_BASE + n   -> app DESCARGADA, donde n es su ranura en pkgPrefs[]
+//   HOME_EMPTY (0xFF)   -> hueco
+// Se guarda la ranura de pkgPrefs y NO un indice de pkgApps[] porque pkgApps se
+// reordena por nombre y cambia de tamano en cada instalacion: un indice suyo en
+// NVS apuntaria manana a otra app. La ranura de pkgPrefs lleva el packageId
+// dentro, que es lo unico que identifica de verdad una app instalada.
+#define HOME_PKG_BASE 128
+static inline bool homeIsPkg(uint8_t v){ return v >= HOME_PKG_BASE && v != HOME_EMPTY; }
+static inline int  homePkgSlot(uint8_t v){ return homeIsPkg(v) ? (int)(v - HOME_PKG_BASE) : -1; }
 static inline bool appIsFav(int id){    return (id >= 0 && id < APP_N) && (gAppFav    & (uint32_t)(1u << id)) != 0; }
 static inline bool appIsHidden(int id){ return (id >= 0 && id < APP_N) && (gAppHidden & (uint32_t)(1u << id)) != 0; }
 // Ajustes NUNCA se puede ocultar: es la unica pantalla desde la que se

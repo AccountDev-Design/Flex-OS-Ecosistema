@@ -133,6 +133,32 @@ Toda app que Flex Store instale y valide correctamente aparece **sola** en la
 Caja de aplicaciones, en una sección `Descargadas` bajo las nativas. No hay
 ninguna lista de apps conocidas: la sección sale del registro de `/FlexApps`.
 
+**Una sola rejilla.** Las apps descargadas no tienen sección propia: van
+mezcladas con las nativas en la misma cuadrícula del cajón, ordenadas por nombre
+sin distinguir origen. Cada celda lleva su tipo explícito (`DRW_NATIVE` /
+`DRW_PKG`), porque un id de `APP_REG` y un índice de `pkgApps` son dos espacios
+de números distintos que empiezan los dos en 0; dibujar, abrir y el menú de
+pulsación larga deciden por el tipo, nunca por el valor.
+
+**Etiquetas.** `uiLabelFit()` (en `FlexOS_Ultra_Font.h`) mide con la fuente real
+y, si el nombre no cabe en su columna, corta por un límite de carácter UTF-8 y
+termina en `...`. Buffer fijo, sin `String`. El mismo trato para nativas y
+descargadas, en el cajón y en el escritorio.
+
+**Pulsación larga.** El mismo menú que una app nativa, con una acción más:
+Abrir · Añadir/Quitar de inicio · Ocultar/Mostrar · Información · **Desinstalar**.
+Desinstalar sólo existe para apps descargadas —ni Flex Store ni ninguna app del
+sistema llega a esa fila—, pide confirmación con el nombre a la vista y borra por
+`flexPkgUninstall()`, la transacción del gestor de paquetes. Si falla, se muestra
+el motivo y la lista se queda como estaba.
+
+**En el escritorio.** Una app descargada anclada se guarda en `homeOrder[]` como
+`HOME_PKG_BASE + ranura de pkgPrefs`, nunca como un índice de `pkgApps`: ese
+índice se mueve en cada instalación, y la ranura lleva el `packageId` dentro.
+Al abrirla desde su ranura se pasa por el mismo camino que desde el cajón, así
+que un valor ≥ 128 jamás llega a `enterApp()` ni a los vectores de tamaño
+`APP_N`.
+
 **Cuándo se relee el registro.** `flexPkgRevision()` es un contador que sube
 **una** vez por operación que puede cambiar la lista —recuperación en el
 arranque, instalar, actualizar, desinstalar, detener y reactivar— y **nunca**

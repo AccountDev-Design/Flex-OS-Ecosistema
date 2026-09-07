@@ -109,8 +109,8 @@ Los módulos que sí son código portable y con pruebas propias siguen siendo
 | `FlexOS_Ultra_AppWeather.h`       |  1341 | app Clima y sus dos widgets |
 | `FlexOS_Ultra_AppSwitcher.h`      |   579 | App Switcher / Recientes |
 | `FlexOS_Ultra_Lock.h`             |   604 | bloqueo de seguridad y modo kiosco |
-| `FlexOS_Ultra_PkgApps.h`          |   307 | apps descargadas: registro real, cache, estado e iconos |
-| `FlexOS_Ultra_AppDrawer.h`        |  1185 | menu contextual del escritorio y caja de aplicaciones |
+| `FlexOS_Ultra_PkgApps.h`          |  530 | apps descargadas: registro real, cache, estado e iconos |
+| `FlexOS_Ultra_AppDrawer.h`        | 1444 | menu contextual del escritorio y caja de aplicaciones |
 | `FlexOS_Ultra_Power.h`            |   934 | desbloqueo, suspension y apagado completo |
 | `FlexOS_Ultra_Network.h`          |   839 | arranque seguro de la radio y Wi-Fi |
 | `FlexOS_Ultra_NTP.h`              |   297 | cliente NTP en su propia tarea |

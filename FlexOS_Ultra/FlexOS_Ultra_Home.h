@@ -623,6 +623,34 @@ static void uiRenderCooperate(){
 // fondo: quien llama ya puso ahi el wallpaper. cooperative=true se usa al
 // preparar una pagina fuera de pantalla: doce iconos Liquid Glass seguidos no
 // pueden monopolizar loopTask hasta disparar TASK_WDT.
+// ---- Una ranura de Inicio, sea del tipo que sea -------------------------
+// Estas dos funciones son la UNICA puerta entre el escritorio y las apps
+// descargadas. Se declaran aqui las tres piezas del modulo de paquetes que
+// hacen falta (se define mucho mas abajo, en FlexOS_Ultra_PkgApps.h, que el
+// .ino incluye despues): es el mismo patron de prototipo adelantado que ya usa
+// el registro de apps para settingsEnter, galEnter y compania.
+static int uiFontFit(const char* t, int maxw, int maxSize);   // FlexOS_Ultra_AppFramework.h
+static int pkgAppFromSlot(int slot);
+static void pkgAppDrawIcon(int index, int x, int y, int S);
+static const char* pkgAppNameAt(int index);
+static const char* pkgAppIdAt(int index);
+static void pkgAppRequestLaunch(const char* packageId);
+
+static void homeDrawSlotIcon(uint8_t v, int x, int y, int S){
+  if(v == HOME_EMPTY) return;
+  if(!homeIsPkg(v)){
+    if(v < APP_N) drawAppIcon((int)v, x, y, S);
+    return;
+  }
+  int e = pkgAppFromSlot(homePkgSlot(v));
+  if(e >= 0) pkgAppDrawIcon(e, x, y, S);        // desinstalada: no se pinta nada
+}
+static const char* homeSlotName(uint8_t v){
+  if(v == HOME_EMPTY) return NULL;
+  if(!homeIsPkg(v)) return (v < APP_N) ? appName((int)v) : NULL;
+  return pkgAppNameAt(pkgAppFromSlot(homePkgSlot(v)));
+}
+
 static void homeDrawGridWork(int page, int xoff, bool cooperative){
   if(page < 0 || page >= gHomePageN) return;
   int S, gx0, gy0, cs, rs, cols, rows; homeGrid(S, gx0, gy0, cs, rs, cols, rows);
@@ -640,8 +668,19 @@ static void homeDrawGridWork(int page, int xoff, bool cooperative){
     // esto ahorra la mitad de los iconos en cuanto la pagina lleva
     // medio recorrido, que es justo cuando mas hay que ir rapido.
     if(ix + S < 0 || ix > SCR_W) continue;
-    drawAppIcon(id, ix, iy, S);
-    if(gHomeLabels) drawTextC(ix + S / 2, iy + S + 6, appName(id), lblSz, TH_ONWALL);
+    homeDrawSlotIcon(id, ix, iy, S);
+    if(gHomeLabels){
+      const char* nm = homeSlotName(id);
+      if(nm){
+        // MISMO TRUNCADO QUE LA CAJA: la etiqueta no puede invadir la columna
+        // vecina, venga el nombre del registro nativo o de un manifiesto.
+        int lblW = cs - 14;
+        int fs = uiFontFit(nm, lblW, lblSz);
+        char lbl[40];
+        uiLabelFit(nm, lblW, fs, lbl, sizeof(lbl));
+        drawTextC(ix + S / 2, iy + S + 6, lbl, fs, TH_ONWALL);
+      }
+    }
     if(cooperative && (i & 1)) uiRenderCooperate();
   }
 }
@@ -1201,7 +1240,24 @@ static void drawerRegistryAdopt(int fromId);
 //   2. toda app favorita que no tenga ranura -> ocupa el primer hueco;
 //   3. si ya no quedan huecos, se le quita la marca de favorita (las tres
 //      paginas tienen 36 ranuras en total).
+// Marcas de "ya colocada" para las ranuras de paquete. Van aparte de seen[],
+// que es un vector de APP_N booleanos indexado por id NATIVO: meter ahi un
+// valor de 128 en adelante seria escribir fuera del vector.
+static uint32_t gHomePkgSeen = 0;
+static bool homePkgSeen(uint8_t v){
+  int n = homePkgSlot(v);
+  return (n >= 0 && n < 32) && (gHomePkgSeen & (1u << n)) != 0;
+}
+static void homePkgMarkSeen(uint8_t v){
+  int n = homePkgSlot(v);
+  if(n >= 0 && n < 32) gHomePkgSeen |= (1u << n);
+}
+// Una ranura de paquete solo vale si sigue existiendo la app, sigue anclada y
+// no esta oculta. Lo comprueba contra pkgPrefs, que es donde vive esa verdad.
+static bool homePkgSlotUsable(uint8_t v);
+
 static void homeOrderNormalize(){
+  gHomePkgSeen = 0;
   if(gHomePageN < 1) gHomePageN = 1;
   homeWgNormalize();          // los widgets mandan sobre las celdas: van primero
   if(gHomePageN > HOME_PAGES_MAX) gHomePageN = HOME_PAGES_MAX;
@@ -1232,6 +1288,16 @@ static void homeOrderNormalize(){
         underWg = (homeCellMask(p, -1) & bit) != 0;
         homeOrder[k] = v; }
       if(underWg){ rescue[nres++] = v; homeOrder[k] = HOME_EMPTY; continue; }
+      // APPS DESCARGADAS: su validez no sale de gAppFav/gAppHidden (que son
+      // bitmasks de ids nativos) sino de pkgPrefs. Se comprueba ANTES de tocar
+      // seen[], que esta dimensionado a APP_N: indexarlo con un valor >= 128
+      // seria una escritura fuera de rango.
+      if(homeIsPkg(v)){
+        if(!homePkgSlotUsable(v)){ homeOrder[k] = HOME_EMPTY; continue; }
+        if(homePkgSeen(v)){ homeOrder[k] = HOME_EMPTY; continue; }
+        homePkgMarkSeen(v);
+        continue;
+      }
       if(v >= APP_N || seen[v] || !appIsFav(v) || appIsHidden(v)){ homeOrder[k] = HOME_EMPTY; continue; }
       seen[v] = true;
     }
@@ -1241,6 +1307,13 @@ static void homeOrderNormalize(){
   //    pierde por falta de sitio, que es justo lo que pasaba antes.
   for(int r = 0; r < nres; r++){
     uint8_t v = rescue[r];
+    if(homeIsPkg(v)){
+      if(!homePkgSlotUsable(v) || homePkgSeen(v)) continue;
+      int slot = homeFirstFreeGrow();
+      if(slot < 0) continue;                       // sin sitio: se queda sin anclar
+      homeOrder[slot] = v; homePkgMarkSeen(v);
+      continue;
+    }
     if(v >= APP_N || seen[v] || !appIsFav(v) || appIsHidden(v)) continue;
     int slot = homeFirstFreeGrow();
     if(slot < 0){ gAppFav &= (uint32_t)~(1u << v); continue; }   // maximo de paginas Y todas llenas
@@ -1414,13 +1487,13 @@ static void edRender(){
     float ph = i * 0.6f;
     int ox = (int)(2 * sinf(t * 0.02f + ph)), oy = (int)(2 * cosf(t * 0.017f + ph));  // temblor +-2px
     int s = gS * 8 / 9, off = (gS - s) / 2;                                      // escala ~90%
-    drawAppIcon(homeOrder[edSlot(i)], (int)edCurX[i] + off + ox, (int)edCurY[i] + off + oy, s);
+    homeDrawSlotIcon(homeOrder[edSlot(i)], (int)edCurX[i] + off + ox, (int)edCurY[i] + off + oy, s);
   }
   if(edDrag >= 0){                                                              // icono arrastrado (translucido)
     int dx = (int)edDragX, dy = (int)edDragY, s = gS;
     if(uiGlass) drawLiquidGlassPanel(dx - 6, dy - 6, s + 12, s + 12, 16, TH_GLASS2);
     else fillRoundRectA(dx - 6, dy - 6, s + 12, s + 12, 16, TH_SEL, 150);
-    drawAppIcon(homeOrder[edSlot(edDrag)], dx, dy, s);
+    homeDrawSlotIcon(homeOrder[edSlot(edDrag)], dx, dy, s);
   }
   drawTextC(SCR_W / 2, 176, "Arrastra los iconos - Inicio para salir", 1, TH_ONWALL2);   // sobre el wallpaper
   present(120, edBandBot());

@@ -1799,6 +1799,71 @@ static void drawTextC(int cx, int y, const char* s, int size, uint16_t col){ dra
 static void drawTextCA(int cx, int y, const char* s, int size, uint16_t col, uint8_t a){ drawTextA(cx - textW(s, size) / 2, y, s, size, col, a); }
 static void drawTextR(int rx, int y, const char* s, int size, uint16_t col){ drawTextA(rx - textW(s, size), y, s, size, col, 255); }
 
+// ETIQUETA QUE CABE EN SU COLUMNA, SIEMPRE.
+//
+// Mide con la fuente REAL con la que se va a dibujar (las mismas metricas que
+// textW/drawTextA: nextCP + FG[fontIdx(cp)].adv) y, si el nombre no entra en
+// `maxW`, corta y termina en "...".
+//
+//   "Antutu Benchmark for Flex OS"  ->  "Antutu..."
+//   "Mi primera app"                ->  "Mi primera..."
+//
+// Reglas que hacen que esto sea seguro con nombres que vienen del manifiesto de
+// un tercero:
+//   · escribe en un buffer de tamano FIJO que le da quien llama, y nunca pasa
+//     de `cap` (ni siquiera con el "..." al final);
+//   · NUNCA corta a mitad de un caracter UTF-8: avanza por puntos de codigo con
+//     la misma funcion que usa el rasterizador, asi que una "n" o una tilde no
+//     pueden quedar partidas en un byte suelto;
+//   · sin String ni reservas: es un bucle sobre el origen.
+static void uiLabelFit(const char* src, int maxW, int size, char* out, size_t cap){
+  if(!out || cap == 0) return;
+  out[0] = 0;
+  if(!src || !src[0] || cap < 2) return;
+
+  // Caso normal: cabe entero. Se copia acotado por `cap`, retrocediendo si el
+  // corte por capacidad cayera dentro de una secuencia UTF-8.
+  if(textW(src, size) <= maxW){
+    size_t n = strlen(src);
+    if(n >= cap) n = cap - 1;
+    while(n > 0 && ((uint8_t)src[n] & 0xC0) == 0x80) n--;
+    memcpy(out, src, n); out[n] = 0;
+    return;
+  }
+
+  static const char ELL[] = "...";
+  const size_t ELLB = sizeof(ELL) - 1;
+  int ew = textW(ELL, size);
+  // Sin sitio ni para los puntos: se devuelve lo que quepa de ellos.
+  if(cap <= ELLB){
+    size_t k = cap - 1;
+    memcpy(out, ELL, k); out[k] = 0;
+    return;
+  }
+
+  // Prefijo mas largo que cabe DEJANDO hueco para "...". Se acumula en coma
+  // flotante igual que textW, para que la decision y el dibujo coincidan.
+  float sc = (size <= 1) ? 0.0f : fontSc(size);
+  float w = 0.0f;
+  const char* p = src;
+  size_t best = 0;
+  while(*p){
+    const char* q = p;
+    uint32_t cp = nextCP(&p);
+    (void)q;
+    float adv = (size <= 1) ? 6.0f : (FG[fontIdx(cp)].adv * sc);
+    if((int)(w + adv + 0.5f) + ew > maxW) break;
+    size_t bytes = (size_t)(p - src);
+    if(bytes + ELLB + 1 > cap) break;              // no cabria en el buffer
+    w += adv;
+    best = bytes;                                   // frontera de punto de codigo
+  }
+
+  memcpy(out, src, best);
+  memcpy(out + best, ELL, ELLB);
+  out[best + ELLB] = 0;
+}
+
 // ---------------- Triangulo relleno (baricentrico) ----------------
 static void fillTriangle(int x0,int y0,int x1,int y1,int x2,int y2,uint16_t c){
   int minx = min(x0, min(x1, x2)), maxx = max(x0, max(x1, x2));
