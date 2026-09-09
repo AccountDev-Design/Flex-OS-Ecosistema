@@ -124,7 +124,7 @@ bool gTestPsFail = false;
 void*  heap_caps_malloc(size_t n, uint32_t){ if(gTestPsFail) return nullptr; void* p = malloc(n); psTrack(p, n); return p; }
 void*  heap_caps_calloc(size_t n, size_t s, uint32_t){ void* p = calloc(n, s); psTrack(p, n * s); return p; }
 void*  heap_caps_realloc(void* p, size_t n, uint32_t){ psUntrack(p); void* q = realloc(p, n); psTrack(q, n); return q; }
-void*  heap_caps_aligned_alloc(size_t a, size_t n, uint32_t){ void* p = aligned_alloc(a, n); psTrack(p, n); return p; }
+void*  heap_caps_aligned_alloc(size_t a, size_t n, uint32_t){ if(gTestPsFail) return nullptr; void* p = aligned_alloc(a, n); psTrack(p, n); return p; }
 void   heap_caps_free(void* p){ psUntrack(p); free(p); }
 size_t heap_caps_get_free_size(uint32_t caps){
   if(caps & MALLOC_CAP_INTERNAL) return gTestInFree;
@@ -3837,7 +3837,10 @@ static void testDeviceCare(){
   ev.reasons = FLEXFALL_R_FREEFALL | FLEXFALL_R_IMPACT | FLEXFALL_R_SETTLED;
   faRaise(&ev);
   chk(faVisible(), "en el escritorio el aviso SI aparece");
-  chk(faBak != NULL, "el aviso reserva su banda al abrirse");
+  // faRaise solo ARMA; la banda se prepara en la primera vuelta de
+  // dibujo, que es donde el aviso ya es dueno de la pantalla.
+  gTestMs += 20; faTick();
+  chk(faBandReady(), "el aviso prepara su banda en la fase de dibujo");
   gTestMs += FA_ANIM_MS + 20; faTick();
   chk(faState == FA_SHOWN, "la animacion de entrada termina");
 
@@ -3886,6 +3889,92 @@ static void testDeviceCare(){
   chk(dcHist[0].score == dcResFinal, "...con la puntuacion que se ensena");
   chk(dcLastScore == dcResFinal && dcLastCheck == dcHist[0].utc,
       "...y la tarjeta de inicio ya apunta a esta revision");
+
+  // --- 7. EL AVISO NUNCA SE QUEDA LA PANTALLA SIN DIBUJAR --------------
+  //  Regresion de un bloqueo real: faRaise pedia la banda con faBand() y
+  //  acto seguido llamaba a faFreeBand() para redimensionar el buffer --
+  //  y faFreeBand invalidaba la geometria recien calculada. El aviso
+  //  pasaba a ser dueno de la pantalla y faCompose salia sin pintar
+  //  NUNCA. Resultado: interfaz congelada, apps sin responder, la
+  //  notificacion sin aparecer, y solo el panel rapido vivo (loop() lo
+  //  despacha ANTES que el bloque del aviso).
+  //
+  //  Se comprueba el INVARIANTE, que es lo que lo hace imposible: si el
+  //  aviso es visible, tiene que poder dibujar; y si no puede, tiene que
+  //  soltar la pantalla en la MISMA vuelta.
+  appTrCancel();                    // la seccion anterior dejo una apertura en vuelo
+  gState = ST_HOME; gAppId = 0; gLand = false; gHosted = false;
+  qsPanelY = 0; qsAnimOn = false;
+  dcScreen = DC_HOME;
+  faState = FA_HIDDEN; faFreeBand(); faInvalidateBand(); faPending = false;
+  memset(faBtnCk, 0, sizeof(faBtnCk));
+  memset(faBtnDs, 0, sizeof(faBtnDs));
+  chk(faBakCap == 0, "se parte del caso REAL: primer aviso, sin banda reservada");
+
+  memset(&ev, 0, sizeof(ev));
+  ev.confidence = 95; ev.fall = 1; ev.peakG = 7.4f; ev.tMs = gTestMs;
+  faRaise(&ev);
+  chk(faVisible(), "el aviso se arma");
+  chk(faState == FA_ARMED, "...y solo se ARMA: la deteccion no paga el trabajo pesado");
+  chk(faBak == NULL, "faRaise no reserva memoria (corre en el tick del sensor)");
+
+  // Una vuelta de dibujo: prepara y publica el primer cuadro.
+  gTestMs += 20; faTick();
+  chk(faState == FA_IN,   "la primera vuelta de dibujo lo prepara");
+  chk(faBandReady(),      "...y la banda queda LISTA (buffer + geometria)");
+
+  // El aviso se termina de dibujar de verdad: los botones los fija el
+  // camino de composicion, nadie mas.
+  for(int i = 0; i < 6; i++){ gTestMs += 60; faTick(); }
+  chk(faState == FA_SHOWN, "la animacion de entrada termina");
+  chk(faBtnCk[2] > faBtnCk[0] && faBtnDs[2] > faBtnDs[0],
+      "los botones tienen area REAL: el aviso se dibujo, no solo se armo");
+
+  // Y la pantalla cambio de verdad donde va el aviso: la banda publicada
+  // no puede ser igual al fondo que se capturo.
+  {
+    bool pintado = false;
+    if(faBandReady()){
+      int my = (faBakY0 + faBakY1) / 2;
+      for(int x = 0; x < SCR_W && !pintado; x++)
+        if(fb[(size_t)my * SCR_W + x] != faBak[(size_t)(my - faBakY0) * SCR_W + x]) pintado = true;
+    }
+    chk(pintado, "la banda publicada difiere del fondo capturado: hay cuadro");
+  }
+
+  // Descartar: vuelve el fondo y la pantalla se suelta.
+  tReset();
+  T.tap = true; T.x = (faBtnDs[0] + faBtnDs[2]) / 2; T.y = (faBtnDs[1] + faBtnDs[3]) / 2;
+  faTick();
+  for(int i = 0; i < 6 && faVisible(); i++){ gTestMs += 60; faTick(); }
+  chk(!faVisible(), "al descartar, el aviso suelta la pantalla");
+  chk(faBak == NULL, "...y suelta su banda");
+
+  // ---- Si NO se puede preparar, no se queda la pantalla ni una vuelta -
+  faState = FA_HIDDEN; faFreeBand(); faInvalidateBand(); faPending = false;
+  gTestPsFail = true;                       // la reserva de la banda falla
+  faRaise(&ev);
+  chk(faVisible() && faState == FA_ARMED, "se arma igual");
+  gTestMs += 20; faTick();
+  chk(!faVisible(), "sin memoria para la banda, suelta la pantalla en la MISMA vuelta");
+  gTestPsFail = false;
+
+  // ---- La barra del sistema sigue viva mientras el aviso esta a la vista
+  gState = ST_APP; gAppId = IC_RELOJ; gNavMode = 0;
+  faState = FA_HIDDEN; faFreeBand(); faInvalidateBand(); faPending = false;
+  faRaise(&ev);
+  gTestMs += 20; faTick();
+  for(int i = 0; i < 6; i++){ gTestMs += 60; faTick(); }
+  chk(faState == FA_SHOWN, "aviso a la vista encima de una app");
+  chk(navBarVisible(), "la barra de navegacion del sistema esta dibujada");
+  tReset();
+  T.tap = true; T.x = SCR_W / 2; T.y = SCR_H - 32;      // boton INICIO
+  faTick();
+  chk(!faVisible(), "pulsar INICIO retira el aviso: la navegacion no se secuestra");
+  chk(faPending,    "...y el aviso queda EN ESPERA, no se pierde");
+  faPending = false;
+  faState = FA_HIDDEN; faFreeBand(); faInvalidateBand();
+  gState = ST_HOME; gAppId = 0;
 
   // --- fallo seguro del sensor ----------------------------------------
   dcFallOn = true; dcSensorOn = true;

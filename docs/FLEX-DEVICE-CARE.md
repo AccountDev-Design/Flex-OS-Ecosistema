@@ -202,8 +202,41 @@ por `notifPush`.
 * **Memoria** — la banda se pide al abrir y **se suelta al cerrar**. En reposo
   esta función no retiene nada. Si la reserva dejara la PSRAM por debajo del
   suelo de protección, no se saca: se avisa por la vía normal del sistema.
-* **Válvula de seguridad** — el aviso es modal; si nadie lo toca en 60 s se
-  retira solo, para que ningún fallo pueda dejar el sistema inaccesible.
+* **Válvula de seguridad** — el aviso es modal para la app de debajo; si nadie
+  lo toca en 20 s se retira solo.
+* **La barra de navegación del sistema sigue viva.** Esos 64 px son del sistema,
+  no del aviso: si el usuario navega, el aviso se retira sin restaurar (la
+  pantalla nueva se pinta entera por su cuenta) y queda **en espera** para
+  volver a salir allí. El usuario nunca queda atrapado.
+
+### El invariante que impide que congele la interfaz
+
+El aviso es dueño exclusivo de la pantalla mientras está a la vista: `loop()`
+devuelve antes de `switch(gState)`, así que las apps no hacen `tick`. Eso lo
+hace modal — y también significa que **si el aviso se queda la pantalla sin
+poder dibujar, la interfaz se congela**. Pasó: `faRaise` calculaba la banda con
+`faBand()` y acto seguido llamaba a `faFreeBand()` para redimensionar el
+buffer… y `faFreeBand` invalidaba la geometría recién calculada. `faCompose` y
+`faRestore` salían sin hacer nada, para siempre. Como `faBakCap` arranca en 0,
+ocurría en **el primer aviso**: interfaz congelada, apps sin responder,
+notificación que no aparecía nunca, y sólo el panel rápido vivo — porque
+`loop()` lo despacha *antes* del bloque del aviso.
+
+Tres cosas lo hacen imposible ahora:
+
+1. **Buffer y geometría son cosas distintas.** `faFreeBand()` sólo libera
+   memoria; invalidar la banda se dice aparte (`faInvalidateBand()`).
+2. **`faBandReady()` es el invariante**, y `faTick()` lo comprueba en cada
+   vuelta: si el aviso no puede dibujar, suelta la pantalla **en esa misma
+   vuelta**. Ningún fallo futuro en esta zona puede congelar el sistema más de
+   un cuadro.
+3. **La detección no paga el trabajo pesado.** `faRaise()` la llama
+   `dcSensorTick()`, en la parte temprana de `loop()` junto al táctil y al
+   barrido I²C: ahí no puede haber una reserva de medio megabyte, dos `memcpy`
+   de ese tamaño y una composición entera. Ahora `faRaise` sólo **arma**
+   (`FA_ARMED`, coste O(1)) y todo eso ocurre en `faTick()`, en la fase de
+   dibujo, donde el aviso ya es dueño de la pantalla. Si no se puede preparar,
+   no se la queda: se retira y el aviso sale por la vía normal del sistema.
 
 `[Revisar dispositivo]` abre la app y **arranca el Post‑Impact Check solo**: el
 usuario no tiene que buscar el diagnóstico.

@@ -52,7 +52,14 @@
 #include "FlexOS_Ultra_DeviceTests.h"   // eslabon anterior de la cadena
 
 // ---- Estado del overlay ----
-enum { FA_HIDDEN = 0, FA_IN, FA_SHOWN, FA_OUT };
+// FA_ARMED es el estado entre "hay que ensenar el aviso" y "la banda ya
+// esta capturada". Existe para que la DETECCION no pague el trabajo
+// pesado: faRaise() la llama dcSensorTick(), que corre en la parte
+// temprana de loop() junto al tactil y al barrido I2C, y ahi no puede
+// haber ni una reserva de medio megabyte ni dos memcpy de ese tamano ni
+// una composicion entera. Todo eso ocurre en faTick(), en la fase de
+// dibujo, que es donde el aviso ya es dueno de la pantalla.
+enum { FA_HIDDEN = 0, FA_ARMED, FA_IN, FA_SHOWN, FA_OUT };
 static int       faState  = FA_HIDDEN;
 static uint32_t  faT0     = 0;
 static bool      faLand   = false;      // maqueta con la que se dibujo
@@ -73,11 +80,22 @@ static uint16_t* faBak = NULL;
 static size_t    faBakCap = 0;
 static int       faBakY0 = 0, faBakY1 = -1;
 
+// Suelta el BUFFER. No toca la geometria a proposito: son dos cosas
+// distintas y mezclarlas costo un bloqueo de la interfaz. faRaise pedia
+// la banda con faBand(), llamaba aqui para redimensionar el buffer y se
+// llevaba por delante el faBakY1 recien calculado; a partir de ahi
+// faCompose y faRestore salian sin hacer nada -- el aviso era dueno de
+// la pantalla y no dibujaba NUNCA. Quien quiera invalidar la geometria
+// lo dice: faInvalidateBand().
 static void faFreeBand(){
   if(faBak){ heap_caps_free(faBak); faBak = NULL; }
   faBakCap = 0;
-  faBakY1  = faBakY0 - 1;
 }
+static void faInvalidateBand(){ faBakY1 = faBakY0 - 1; }
+// La banda esta lista cuando hay buffer Y geometria. Es el INVARIANTE
+// del overlay: sin esto no puede dibujar, y sin poder dibujar no puede
+// quedarse la pantalla.
+static inline bool faBandReady(){ return faBak && faBakY1 >= faBakY0; }
 
 #define FA_ANIM_MS   220
 // VALVULA DE SEGURIDAD. El aviso es modal: mientras esta a la vista es
@@ -86,7 +104,7 @@ static void faFreeBand(){
 // sin que nadie lo toque se retira solo. NO se pierde nada: el evento
 // ya esta en el historial y el Post-Impact Check sigue disponible en
 // Flex Device Care.
-#define FA_AUTO_MS   60000
+#define FA_AUTO_MS   20000
 // Zonas pulsables del aviso.
 enum { FA_HIT_NONE = 0, FA_HIT_CHECK, FA_HIT_DISMISS };
 static int16_t faBtnCk[4] = {0,0,0,0};   // x0,y0,x1,y1 en coords FISICAS
@@ -269,7 +287,7 @@ static void faDrawLandscape(float p){
 }
 
 static void faCompose(float p){
-  if(!faBak || faBakY1 < faBakY0) return;
+  if(!faBandReady()) return;
   int c0 = gClipY0, c1 = gClipY1, cx0 = gClipX0, cx1 = gClipX1;
   bool wl = gLand;
   gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
@@ -287,12 +305,13 @@ static void faCompose(float p){
 
 // Devuelve la banda a como estaba antes del aviso.
 static void faRestore(){
-  if(!faBak || faBakY1 < faBakY0) return;
+  if(!faBandReady()) return;
   fbLock();
   memcpy(fb + (size_t)faBakY0 * SCR_W, faBak,
          (size_t)SCR_W * (faBakY1 - faBakY0 + 1) * 2);
   fbUnlock();
   flxFlush(faBakY0, faBakY1);
+  faInvalidateBand();        // ya devuelta: la copia no describe nada nuevo
 }
 
 // #############################################################
@@ -318,34 +337,43 @@ static void faRaise(const FlexFallEvent* e){
   }
   faPending = false;
 
-  faLand = gLand;
+  // Solo se ARMA. La reserva, la captura y el primer cuadro los hace
+  // faTick() en la fase de dibujo (ver faArm). Aqui no se toca ni la
+  // PSRAM ni el framebuffer: esta funcion corre dentro del tick del
+  // sensor, en la misma vuelta que el tactil.
+  faLand  = gLand;
+  faState = FA_ARMED;
+  faT0    = millis();
+  touchDropAll();
+}
+
+// #############################################################
+// ##  PREPARACION  ·  reserva, captura y primer cuadro
+// ##  ------------------------------------------------------
+// ##  Corre UNA sola vez, desde faTick(), o sea con el aviso ya dueno
+// ##  de la pantalla y con fb conteniendo el ultimo cuadro publicado.
+// ##  Devuelve false si no se pudo preparar; entonces el aviso NO se
+// ##  queda la pantalla -- se retira y el usuario recibe el aviso por
+// ##  la via normal del sistema. El evento ya esta en el historial, asi
+// ##  que lo unico que se pierde es el cuadro.
+// #############################################################
+static bool faArm(){
   faBand(faLand, faBakY0, faBakY1);
+  if(faBakY1 < faBakY0) return false;                 // banda imposible
   size_t need = (size_t)SCR_W * (faBakY1 - faBakY0 + 1) * 2;
   // La reserva NO puede comerse la proteccion del sistema: si sacar
   // medio megabyte dejaria la PSRAM por debajo del suelo, no se saca.
-  if(faBakCap < need && memFreePsram() < FLEXMEM_CRIT_BYTES + need){
-    sysNotify(dct(DCS_EVFALL), dct(DCS_REVIEW));
-    return;
-  }
-  if(faBakCap < need) faFreeBand();
+  if(faBakCap < need && memFreePsram() < FLEXMEM_CRIT_BYTES + need) return false;
+  if(faBakCap < need) faFreeBand();                   // solo el buffer; la banda se conserva
   if(!faBak){
     faBak = (uint16_t*)heap_caps_aligned_alloc(64, need, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     faBakCap = faBak ? need : 0;
   }
-  if(!faBak){
-    // Sin memoria para la copia no se dibuja un cuadro que luego no se
-    // podria borrar: se avisa por la via normal del sistema y ya esta.
-    sysNotify(dct(DCS_EVFALL), dct(DCS_REVIEW));
-    faBakY1 = faBakY0 - 1;
-    return;
-  }
+  if(!faBak) return false;
   fbLock();
   memcpy(faBak, fb + (size_t)faBakY0 * SCR_W, need);
   fbUnlock();
-  faState = FA_IN;
-  faT0    = millis();
-  touchDropAll();
-  faCompose(0.0f);
+  return faBandReady();
 }
 
 // Reintento del aviso en espera. Lo llama loop() en cada vuelta, junto
@@ -361,8 +389,11 @@ static void faPendingTick(){
   faRaise(&e);
 }
 
+static void faAbandon();          // definido justo debajo; lo usa faClose
+
 static void faClose(){
   if(faState == FA_HIDDEN || faState == FA_OUT) return;
+  if(faState == FA_ARMED){ faAbandon(); return; }   // aun no hay nada que retirar
   faState = FA_OUT;
   faT0    = millis();
 }
@@ -372,6 +403,15 @@ static void faClose(){
 static void faAbandon(){
   faState = FA_HIDDEN;
   faFreeBand();
+  faInvalidateBand();
+}
+// Abandono que ademas deja el aviso EN ESPERA: se usa cuando el usuario
+// navega con la barra del sistema. La pantalla nueva se pinta entera por
+// su cuenta, asi que no hay nada que restaurar -- pero el aviso no se
+// pierde: vuelve a salir alli mismo dentro de su ventana.
+static void faAbandonToPending(){
+  if(faHaveEvt){ faPendEvt = faEvt; if(!faPending) faPendMs = millis(); faPending = true; }
+  faAbandon();
 }
 
 // #############################################################
@@ -392,6 +432,37 @@ static void faTick(){
   if(flexOtaOwnsScreen() || gFrPending || optActive()){ faAbandon(); return; }
   if(qsPanelY != 0 || qsAnimOn){ faAbandon(); return; }   // la cortina dibuja encima
 
+  // ---- PREPARACION, una sola vez ------------------------------------
+  // Aqui se paga la reserva, la captura y el primer cuadro: en la fase
+  // de dibujo, no en el tick del sensor. Si no se puede preparar, el
+  // aviso NO se queda la pantalla ni una vuelta mas.
+  if(faState == FA_ARMED){
+    if(!faArm()){
+      faAbandon();
+      sysNotify(dct(DCS_EVFALL), dct(DCS_REVIEW));   // por la via normal del sistema
+      return;
+    }
+    faState = FA_IN;
+    faT0    = millis();
+    faCompose(0.0f);
+    return;
+  }
+
+  // ---- INVARIANTE ---------------------------------------------------
+  // El aviso solo puede ser dueno de la pantalla si PUEDE dibujar. Si la
+  // banda dejara de estar lista por cualquier motivo, se suelta la
+  // pantalla en el acto en vez de quedarse con ella sin pintar: eso es
+  // exactamente lo que congelaba la interfaz (todo muerto menos el panel
+  // rapido, que loop() despacha antes que este bloque).
+  if(!faBandReady()){ faAbandon(); return; }
+
+  // ---- LA BARRA DEL SISTEMA SIGUE VIVA ------------------------------
+  // El aviso es modal para la app de debajo, pero no puede secuestrar la
+  // navegacion: esos 64 px son del sistema. Si el usuario navega, el
+  // aviso se retira sin restaurar (la pantalla nueva se pinta entera por
+  // su cuenta) y queda EN ESPERA para volver a salir alli.
+  if(navBarVisible() && navBarHandle()){ faAbandonToPending(); return; }
+
   uint32_t e = millis() - faT0;
   if(faState == FA_IN){
     float p = (e >= FA_ANIM_MS) ? 1.0f : (float)e / (float)FA_ANIM_MS;
@@ -406,6 +477,7 @@ static void faTick(){
       faRestore();
       faState = FA_HIDDEN;
       faFreeBand();
+      faInvalidateBand();
       touchDropAll();
       return;
     }
@@ -429,6 +501,7 @@ static void faTick(){
       faRestore();
       faState = FA_HIDDEN;
       faFreeBand();
+      faInvalidateBand();
       touchDropAll();
       dcPrev = DC_POST;
       dcPendingPost = true;      // lo recoge dcEnter/dcResume al abrirse la app
