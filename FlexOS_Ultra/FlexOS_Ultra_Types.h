@@ -360,7 +360,11 @@ enum ModuleType {
   MOD_BUTTON,
   MOD_SERVO,
   MOD_I2C_GENERIC,
-  MOD_MEDIA         // archivo incompatible, fin de reproduccion...
+  MOD_MEDIA,        // archivo incompatible, fin de reproduccion...
+  // Anadido AL FINAL, por el mismo motivo que todo lo demas en este
+  // sketch: ningun valor anterior se mueve. Es el IMU que usa Flex
+  // Device Care -> Deteccion de caidas (TENSTAR GY-BNO085).
+  MOD_BNO085
 };
 
 // Un modulo detectado por el hardware.

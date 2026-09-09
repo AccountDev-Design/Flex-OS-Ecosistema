@@ -174,7 +174,12 @@ static const uint8_t APP_WEIGHT[APP_N] = {
   FLEXMEM_W_HEAVY,    // 15 Camara       (buffer de sensor)
   FLEXMEM_W_LIGHT,    // 16 Clima
   FLEXMEM_W_MEDIUM,   // 17 Flex Store
-  FLEXMEM_W_LIGHT     // 18 Flex Phone
+  FLEXMEM_W_LIGHT,    // 18 Flex Phone
+  // 19 Flex Device Care. En reposo no reserva nada: el detector de
+  // caidas es aritmetica sobre una muestra y el historial son 200
+  // bytes. Lo unico grande es la banda del aviso, y se pide al abrirlo
+  // y se suelta al cerrarlo (ver FlexOS_Ultra_FallAlert.h).
+  FLEXMEM_W_LIGHT
 };
 static int appWeight(int id){ return (id >= 0 && id < APP_N) ? (int)APP_WEIGHT[id] : FLEXMEM_W_LIGHT; }
 static const char* appWeightName(int id){

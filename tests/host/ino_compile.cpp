@@ -3634,6 +3634,272 @@ static void testRecortePorBandas(){
 //  borde por fuera, esta prueba falla ANTES de que el recorte lo
 //  corte en pantalla.
 // #############################################################
+
+// #############################################################
+//  FLEX DEVICE CARE
+//  ------------------------------------------------------------
+//  Cinco cosas, y ninguna es cosmetica:
+//
+//   1. LA REGLA DEL GRAFICO. El dibujo del GY-BNO085 solo puede
+//      aparecer en la pantalla de requisito de hardware. Aqui se
+//      cuentan los pixeles del morado de la placa en cada pantalla
+//      de la app: si algun dia el grafico se cuela en el inicio, en
+//      el diagnostico o en la pantalla del modulo conectado, esta
+//      prueba falla ANTES de que se vea en el aparato. Y se
+//      comprueba tambien que NO se carga ninguna imagen: el modulo
+//      se dibuja con primitivas, asi que pintar sobre un lienzo
+//      vacio basta para producirlo entero.
+//   2. NAVEGACION. Cada acceso del inicio lleva a su pantalla y el
+//      boton atras retrocede UNA pantalla, no directo al escritorio.
+//   3. EXCEPCION DEX. Con Modo PC en primer plano el aviso global no
+//      puede dibujarse -- pero el evento ya se registro.
+//   4. LAS DOS MAQUETAS DEL AVISO. Vertical y horizontal ocupan
+//      bandas distintas del panel y ponen los botones en sitios
+//      distintos: no es la misma UI girada.
+//   5. HISTORIAL. Lo que se anota se lee de vuelta, lo mas reciente
+//      primero, y no crece por encima de su tope.
+// #############################################################
+static int dcContarColor(uint16_t col){
+  int n = 0;
+  for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++) if(bbuf[i] == col) n++;
+  return n;
+}
+// Pinta una pantalla de Device Care sobre bbuf (sin tocar el panel) y
+// devuelve cuantos pixeles del morado de la placa quedaron.
+static int dcPixelesPlaca(void (*render)()){
+  memset(bbuf, 0, (size_t)SCR_W * SCR_H * 2);
+  uint16_t* fbReal = fb;
+  fb = bbuf;                       // setBuf(fb) dentro del render escribe aqui
+  setBuf(bbuf);
+  uiClipFull();
+  render();
+  fb = fbReal;
+  setBuf(fbReal);
+  return dcContarColor(DC_PCB_COL);
+}
+
+static void testDeviceCare(){
+  printf("Flex Device Care\n");
+  gLand = false; gHosted = false; editMode = false;
+  gState = ST_APP; gAppId = IC_DEVCARE;
+  gAppW = SCR_W; gAppH = SCR_H;
+  uiClipFull();
+  gTestMs = 100000; clkSetEpoch(1783189380u); clkUpdate();
+
+  // --- 1. el grafico del GY-BNO085, SOLO donde toca -------------------
+  // El doble del driver deja el modulo AUSENTE, que es justo el estado
+  // que tiene que ensenar el requisito de hardware.
+  chk(flexBnoState() == FLEXBNO_ST_ABSENT, "el arnes corre con el IMU ausente");
+  int enRequisito = dcPixelesPlaca(dcRenderFallMissing);
+  chk(enRequisito > 2000, "la pantalla de requisito dibuja el modulo (sin imagenes)");
+  chk(dcPixelesPlaca(dcRenderHome)   == 0, "el inicio de Device Care NO dibuja el modulo");
+  chk(dcPixelesPlaca(dcRenderStatus) == 0, "Estado del dispositivo NO dibuja el modulo");
+  chk(dcPixelesPlaca(dcRenderHist)   == 0, "el historial NO dibuja el modulo");
+  chk(dcPixelesPlaca(dcHealthRender) == 0, "Salud de Flex OS NO dibuja el modulo");
+  chk(dcPixelesPlaca(dcDiagRender)   == 0, "el diagnostico NO dibuja el modulo");
+  chk(dcPixelesPlaca(dcOptimRender)  == 0, "Optimizacion NO dibuja el modulo");
+  chk(dcPixelesPlaca(dcRenderFallReady) == 0,
+      "con el modulo conectado la pantalla cambia y el grafico desaparece");
+  chk(dcPixelesPlaca(dcImuTestRender) == 0, "la prueba del modulo NO dibuja el grafico");
+  chk(dcPixelesPlaca(dcRenderFallProbing) == 0, "mientras detecta tampoco lo dibuja");
+
+  // El grafico esta ANIMADO por tiempo: dos instantes distintos dan
+  // cuadros distintos (el enlace punteado avanza), pero la placa sigue
+  // ocupando lo mismo -- o sea que lo que se mueve es el enlace, no el
+  // modulo entero parpadeando.
+  dcAnimT0 = gTestMs;
+  int a = dcPixelesPlaca(dcRenderFallMissing);
+  gTestMs += 200;
+  int b2 = dcPixelesPlaca(dcRenderFallMissing);
+  chk(a == b2, "la animacion del enlace no cambia el area de la placa (sin parpadeo)");
+
+  // --- 2. navegacion interna ------------------------------------------
+  dcScreen = DC_HOME;
+  dcRenderHome();                                  // rellena las zonas pulsables
+  int idHero = dcHitTest(SCR_W / 2, WIN_TOP + 60);
+  chk(idHero == DCH_HERO, "la tarjeta de estado es pulsable");
+  bool todas = true;
+  for(int i = 0; i < 6; i++){
+    int col = i % 2, row = i / 2;
+    int x = dcGrid.x + col * (dcGrid.cw + dcGrid.gap) + dcGrid.cw / 2;
+    int y = dcGrid.y + row * (dcGrid.ch + dcGrid.gap) + dcGrid.ch / 2;
+    if(dcHitTest(x, y) != DCH_T0 + i) todas = false;
+  }
+  chk(todas, "los seis accesos del inicio tienen su zona pulsable");
+
+  dcScreen = DC_HIST;
+  chk(dcBackScreen(), "desde el historial, atras retrocede");
+  chk(dcScreen == DC_HOME, "...y vuelve al inicio de la app");
+  chk(!dcBackScreen(), "desde el inicio de la app, atras ya no retrocede (sale al escritorio)");
+  dcScreen = DC_IMUTEST;
+  chk(dcBackScreen() && dcScreen == DC_FALL,
+      "la prueba del modulo vuelve a Deteccion de caidas, no al inicio");
+  dcPrev = DC_POST; dcScreen = DC_RESULT;
+  chk(dcBackScreen() && dcScreen == DC_POST,
+      "el resultado de un Post-Impact Check vuelve al Post-Impact Check");
+  dcScreen = DC_HOME;
+
+  // --- 3. la excepcion DeX --------------------------------------------
+  FlexFallEvent ev;
+  memset(&ev, 0, sizeof(ev));
+  ev.confidence = 88; ev.fall = 1; ev.peakG = 5.1f; ev.tMs = gTestMs;
+  int antes = dcHistN;
+  gState = ST_APP; gAppId = IC_MODOPC;
+  chk(faDexActive(), "Modo PC en primer plano se reconoce como DeX");
+  chk(!faCanShow(),  "en DeX el aviso global NO se dibuja");
+  faRaise(&ev);
+  chk(!faVisible(),  "...y efectivamente no aparece ningun cuadro");
+  gHosted = true; gAppId = IC_DEVCARE;
+  chk(faDexActive(), "una app hospedada en una ventana de DeX cuenta igual");
+  gHosted = false;
+  // El registro NO depende del aviso: lo hace dcSensorTick antes de
+  // llamar aqui. Se comprueba llamando al mismo camino de historial.
+  dcHistAdd(DC_EV_FALL, ev.confidence, ev.reasons, 51);
+  chk(dcHistN == antes + 1, "en DeX el evento SI queda registrado en el historial");
+  chk(dcHist[0].kind == DC_EV_FALL && dcHist[0].score == 88,
+      "el registro guarda el tipo y la confianza reales");
+
+  // --- 3b. aviso EN ESPERA: no se pierde, sale al despejarse ----------
+  gState = ST_HOME; gAppId = 0; gHosted = false;
+  faState = FA_HIDDEN; faFreeBand(); faPending = false;
+  qsPanelY = SCR_H;                                   // cortina abierta
+  chk(!faCanShow(), "con la cortina abierta el aviso no puede dibujarse");
+  faRaise(&ev);
+  chk(!faVisible() && faPending, "...pero queda EN ESPERA, no se pierde");
+  faPendingTick();
+  chk(!faVisible(), "mientras la cortina siga abierta no sale");
+  qsPanelY = 0;                                       // se cierra la cortina
+  faPendingTick();
+  chk(faVisible(), "al cerrarse la cortina el aviso aparece solo");
+  faAbandon(); faPending = false;
+  // Y en DeX no espera: ahi no se ensena nunca.
+  gState = ST_APP; gAppId = IC_MODOPC;
+  faRaise(&ev);
+  chk(!faVisible() && !faPending, "en DeX el aviso ni sale ni espera");
+  gState = ST_HOME; gAppId = 0;
+
+  // --- 4. dos maquetas de verdad --------------------------------------
+  int vy0, vy1, ly0, ly1;
+  faBand(false, vy0, vy1);
+  faBand(true,  ly0, ly1);
+  chk(vy0 != ly0 || vy1 != ly1, "vertical y horizontal ocupan bandas distintas del panel");
+  chk(vy1 - vy0 != ly1 - ly0,   "...y de distinto alto: no es la misma UI estirada");
+
+  gState = ST_HOME; gAppId = 0; gLand = false;
+  chk(faCanShow(), "en el escritorio el aviso SI puede dibujarse");
+  memset(bbuf, 0, (size_t)SCR_W * SCR_H * 2);
+  setBuf(bbuf);
+  faDrawVertical(1.0f);
+  int vCkX = faBtnCk[0], vCkY = faBtnCk[1], vDsY = faBtnDs[1];
+  chk(vDsY > vCkY, "en vertical los dos botones van APILADOS");
+  gLand = true;
+  memset(bbuf, 0, (size_t)SCR_W * SCR_H * 2);
+  faDrawLandscape(1.0f);
+  chk(faBtnDs[0] > faBtnCk[0] && faBtnDs[1] == faBtnCk[1],
+      "en horizontal los dos botones van EN FILA");
+  chk(faBtnCk[0] != vCkX, "los botones no estan en el mismo sitio en las dos maquetas");
+  gLand = false;
+  setBuf(fb);
+  uiClipFull();
+
+  // --- 5. historial: tope y orden --------------------------------------
+  for(int i = 0; i < DC_HIST_MAX + 6; i++) dcHistAdd(DC_EV_DIAG, (uint8_t)(50 + i), 0, 0);
+  chk(dcHistN == DC_HIST_MAX, "el historial no crece por encima de su tope");
+  chk(dcHist[0].score == (uint8_t)(50 + DC_HIST_MAX + 5),
+      "lo mas reciente queda el primero");
+  chk(dcLastScore == dcHist[0].score && dcLastCheck == dcHist[0].utc,
+      "la tarjeta de inicio lee la ultima revision real");
+
+  // --- la puntuacion SALE de las metricas, no es una constante ---------
+  uint8_t sc1 = 0, sc2 = 0;
+  gTestPsPressure = 0; gTestPsLargest = 0; gTestInFree = 180u << 10;
+  memSampleNow();
+  chk(dcHealthScore(&sc1), "con memoria holgada hay puntuacion");
+  // Misma placa, peor situacion: SRAM al limite y PSRAM casi agotada.
+  gTestInFree = 24u << 10;
+  { size_t real = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    gTestPsPressure = (real > (2u << 20)) ? (real - (2u << 20)) : 0; }
+  memSampleNow();
+  chk(dcHealthScore(&sc2), "con memoria al limite tambien hay puntuacion");
+  chk(sc2 < sc1, "la puntuacion BAJA cuando las metricas empeoran (no es fija)");
+  gTestPsPressure = 0; gTestInFree = 180u << 10;
+  memSampleNow();
+
+  // --- 6. el flujo completo del criterio de aceptacion ------------------
+  //  aviso global -> "Revisar dispositivo" -> Post-Impact Check ->
+  //  diagnostico automatico -> resultado -> historial.
+  gState = ST_HOME; gAppId = 0; gLand = false; gHosted = false;
+  dcScreen = DC_HOME;
+  faState = FA_HIDDEN; faFreeBand();
+  chk(faBak == NULL, "en reposo el aviso no retiene memoria");
+  memset(&ev, 0, sizeof(ev));
+  ev.confidence = 91; ev.fall = 1; ev.peakG = 6.2f; ev.tMs = gTestMs;
+  ev.reasons = FLEXFALL_R_FREEFALL | FLEXFALL_R_IMPACT | FLEXFALL_R_SETTLED;
+  faRaise(&ev);
+  chk(faVisible(), "en el escritorio el aviso SI aparece");
+  chk(faBak != NULL, "el aviso reserva su banda al abrirse");
+  gTestMs += FA_ANIM_MS + 20; faTick();
+  chk(faState == FA_SHOWN, "la animacion de entrada termina");
+
+  // Toque en "Revisar dispositivo".
+  tReset();
+  T.tap = true; T.x = (faBtnCk[0] + faBtnCk[2]) / 2; T.y = (faBtnCk[1] + faBtnCk[3]) / 2;
+  faTick();
+  chk(!faVisible(),        "el aviso se retira al pulsar Revisar dispositivo");
+  chk(faBak == NULL,       "...y suelta su banda: no se queda medio MB reservado");
+  chk(dcPendingPost,       "queda pedido el Post-Impact Check");
+  chk(gState == ST_APP && gAppId == IC_DEVCARE, "y la app abierta es Device Care");
+
+  // La app se construye en el ultimo cuadro de la transicion; aqui se
+  // llama a su enter() igual que hace appTrFinishOpen.
+  dcEnter();
+  chk(!dcPendingPost, "la peticion se consume una sola vez");
+  chk(dcScreen == DC_POST, "Device Care abre directamente el Post-Impact Check");
+  chk(dcDiagStage == DG_SYS, "el diagnostico arranca por la primera etapa");
+
+  // Las dos etapas automaticas corren solas, una por vuelta.
+  gTestMs += DC_DIAG_STEP_MS + 10; dcDiagTick();
+  chk(dcDiagStage == DG_IMU,  "la etapa de sistema corre sola");
+  chk(dcResSysOk,             "...y deja una medida real del sistema");
+  chk(dcSysRow[0].value[0] != 0, "el test de sistema rellena sus filas medidas");
+  gTestMs += DC_DIAG_STEP_MS + 10; dcDiagTick();
+  chk(dcDiagStage == DG_SCREEN, "la etapa del IMU corre sola");
+  chk(!dcResImuAvail,           "sin modulo, el IMU se anota como NO disponible");
+  // Y la siguiente se lanza sola: el usuario no busca la prueba.
+  gTestMs += DC_DIAG_STEP_MS + 10; dcDiagTick();
+  chk(dcScreen == DC_SCRTEST && dcScrStep == DCP_BLACK,
+      "el test de pantalla se lanza automaticamente");
+  dcScrTestDone(true);
+  chk(dcScreen == DC_POST && dcDiagStage == DG_TOUCH, "tras la pantalla toca el tactil");
+  gTestMs += DC_DIAG_STEP_MS + 10; dcDiagTick();
+  chk(dcScreen == DC_TOUCHTEST, "el test tactil tambien se lanza solo");
+  dcTtHit = DC_TT_COLS * DC_TT_ROWS;            // rejilla recorrida entera
+  dcTouchTestDone();
+  uint8_t topAntes = dcHist[0].kind;
+  gTestMs += DC_DIAG_STEP_MS + 10; dcDiagTick();
+  chk(dcScreen == DC_RESULT,  "al terminar se ensena el resultado");
+  chk(dcResFinalOk,           "hay puntuacion final");
+  chk(dcResTouch == 100,      "la cobertura tactil medida entra en el resultado");
+  chk(dcResScreen == 1,       "la respuesta del test de pantalla entra en el resultado");
+  chk(topAntes != DC_EV_POST && dcHist[0].kind == DC_EV_POST,
+      "el resultado queda el primero del historial, como revision tras impacto");
+  chk(dcHist[0].score == dcResFinal, "...con la puntuacion que se ensena");
+  chk(dcLastScore == dcResFinal && dcLastCheck == dcHist[0].utc,
+      "...y la tarjeta de inicio ya apunta a esta revision");
+
+  // --- fallo seguro del sensor ----------------------------------------
+  dcFallOn = true; dcSensorOn = true;
+  flexFallReset(&dcDet);
+  dcSensorTick();                     // el doble devuelve "no disponible"
+  chk(flexFallState(&dcDet) == FLEXFALL_IDLE,
+      "sin sensor la deteccion no avanza y el sistema sigue");
+  dcFallOn = false; dcSensorOn = false;
+
+  gState = ST_HOME; gAppId = 0;
+  if(gFails) printf("  %d comprobacion(es) de Device Care han fallado.\n", gFails);
+  else       printf("  Flex Device Care: todas las comprobaciones pasan.\n");
+}
+
 static void testIconosEnSuCaja(){
   printf("Iconos de app: cada uno dentro de su caja\n");
   gLand = false;
@@ -4503,6 +4769,7 @@ int main(){
   testRejillaAutoPaginas();
   testMediosOrientacion();
   testMultitareaMemoria();
+  testDeviceCare();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

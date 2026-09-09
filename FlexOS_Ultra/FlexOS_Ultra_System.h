@@ -58,6 +58,11 @@ static ModuleType identifyI2CDevice(uint8_t addr){
   switch(addr){
     case 0x76: case 0x77: return MOD_BME280;    // BME280 / BMP280
     case 0x68: case 0x69: return MOD_MPU6050;   // MPU6050 / MPU9250
+    // GY-BNO085 (0x4A con AD0 a masa, 0x4B con AD0 a 3V3). Reconocerlo
+    // aqui solo sirve para que el aviso de la isla diga su nombre; quien
+    // decide si de verdad ES un BNO085 es el driver, preguntandole su
+    // Product ID -- una direccion que contesta no prueba nada.
+    case FLEXBNO_ADDR_LOW: case FLEXBNO_ADDR_HIGH: return MOD_BNO085;
     default:              return MOD_I2C_GENERIC;
   }
 }
@@ -72,6 +77,10 @@ static void i2cDescribe(DetectedModule* m){
     case MOD_MPU6050:
       snprintf(m->name, sizeof(m->name), "MPU6050");
       snprintf(m->sub,  sizeof(m->sub),  "IMU - I2C 0x%02X", m->i2cAddr);
+      break;
+    case MOD_BNO085:
+      snprintf(m->name, sizeof(m->name), "GY-BNO085");
+      snprintf(m->sub,  sizeof(m->sub),  "IMU 9-DOF - I2C 0x%02X", m->i2cAddr);
       break;
     default:
       snprintf(m->name, sizeof(m->name), "Dispositivo I2C");
@@ -342,8 +351,18 @@ static void optRender(){
   setBuf(fb);       // el destino vuelve a la pantalla: nadie hereda bbuf
 }
 
-static void optStart(){
+// AVISO DE CIERRE. El panel lo abren dos sitios: Almacenamiento ->
+// Detalles de memoria y sistema (el de siempre) y Flex Device Care ->
+// Optimizacion. Al terminar hay que devolver la pantalla a QUIEN lo
+// abrio, no siempre a Almacenamiento -- si no, salir del panel desde
+// Device Care dejaria al usuario en otra app. Un puntero a funcion lo
+// resuelve sin que este modulo tenga que conocer al que llama (Device
+// Care esta mas abajo en la cadena de cabeceras).
+static void (*optDoneCb)() = NULL;
+
+static void optStartCb(void (*onDone)()){
   if(optActive()) return;
+  optDoneCb = onDone;
   optStage  = OPT_ANALYZE;
   optStepMs = millis();
   optGained = 0; optCacheN = 0; optEffOn = false;
@@ -359,8 +378,17 @@ static void optStart(){
 static void optFinish(){
   optStage = OPT_IDLE;
   touchDropAll();
+  if(optDoneCb){                       // lo abrio otra pantalla: vuelve alli
+    void (*cb)() = optDoneCb;
+    optDoneCb = NULL;
+    cb();
+    return;
+  }
   almRender();
 }
+// Punto de entrada de siempre (Almacenamiento): sin aviso de cierre, o
+// sea vuelta a Almacenamiento. Se conserva la firma exacta.
+static void optStart(){ optStartCb(NULL); }
 
 // UNA etapa por vuelta, separada por tiempo. El trabajo de cada etapa corre una
 // sola vez, al ENTRAR en ella.

@@ -349,6 +349,7 @@ static void drawModuleIcon(ModuleType type, int x, int y, int S){
     case MOD_I2C_GENERIC: id = IC_ALMACEN; break;
     // Avisos del sistema llevan el icono de la app correspondiente.
     case MOD_MEDIA:       id = IC_MULTIMEDIA; break;
+    case MOD_BNO085:      id = IC_DEVCARE;    break;   // lo gestiona Flex Device Care
     default:              id = IC_AJUSTES; break;
   }
   drawAppIcon(id, x, y, S);

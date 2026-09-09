@@ -48,8 +48,13 @@ static void arcStroke(float cx, float cy, float r, float a0, float a1, int thick
 enum { IC_RELOJ, IC_GALERIA, IC_MULTIMEDIA, IC_ALMACEN, IC_MODOPC, IC_NOTAS,
        IC_EDU, IC_NAV, IC_CODE, IC_BIEN, IC_PAINT, IC_JUEGOS,
        IC_AJUSTES, IC_CALC, IC_CALEND, IC_CAMARA,
-       IC_CLIMA, IC_FLEXSTORE, IC_FLEXPHONE }; // Flex Store 17, Flex Phone 18: ningun indice anterior se mueve
-#define APP_N 19
+       IC_CLIMA, IC_FLEXSTORE, IC_FLEXPHONE,
+       // Flex Device Care 19. Se anade AL FINAL, como Flex Store y Flex
+       // Phone antes que ella: ningun indice anterior se mueve, asi que
+       // el escritorio guardado, las apps favoritas y el candado por app
+       // de una placa que actualiza siguen apuntando a lo mismo.
+       IC_DEVCARE };
+#define APP_N 20
 
 static void iconBase(int x, int y, int S, uint16_t bg, int rf100){
   int r = S * rf100 / 100;
@@ -264,6 +269,26 @@ static void drawAppIcon(int id, int x, int y, int S){
       // Dos arcos de enlace a la derecha del aparato.
       arcStroke(px0 + pw, cy, (int)(S * 0.16f), 300, 60, 2, WHITE);
       arcStroke(px0 + pw, cy, (int)(S * 0.26f), 310, 50, 2, WHITE);
+    } break;
+    case IC_DEVCARE: {
+      // Flex Device Care: escudo con el pulso de un diagnostico dentro.
+      // El escudo dice "cuidado del aparato" y el pulso, "esto mide".
+      iconBase(x, y, S, rgb565(20, 132, 122), 22);
+      float sw = S * 0.30f, sh = S * 0.34f;
+      // Cuerpo del escudo: rectangulo redondeado + punta triangular.
+      fillRoundRect((int)(cx - sw), (int)(cy - sh), (int)(sw * 2), (int)(sh * 1.35f),
+                    (int)(S * 0.07f), WHITE);
+      fillTriangle((int)(cx - sw), (int)(cy + sh * 0.30f),
+                   (int)(cx + sw), (int)(cy + sh * 0.30f),
+                   cx,             (int)(cy + sh * 1.05f), WHITE);
+      // Pulso: cinco tramos dentro del escudo, del mismo verde del fondo.
+      uint16_t ac = rgb565(20, 132, 122);
+      float px0 = cx - sw * 0.78f, py0 = cy - sh * 0.10f, st = sw * 0.39f;
+      strokeSeg(px0,            py0, px0 + st,       py0,                    2, ac);
+      strokeSeg(px0 + st,       py0, px0 + st * 1.5f, py0 - sh * 0.44f,      2, ac);
+      strokeSeg(px0 + st * 1.5f, py0 - sh * 0.44f, px0 + st * 2.1f, py0 + sh * 0.40f, 2, ac);
+      strokeSeg(px0 + st * 2.1f, py0 + sh * 0.40f, px0 + st * 2.6f, py0,     2, ac);
+      strokeSeg(px0 + st * 2.6f, py0, px0 + st * 4.0f, py0,                  2, ac);
     } break;
     case IC_CAMARA: {
       iconBase(x, y, S, rgb565(74,74,78), 22);

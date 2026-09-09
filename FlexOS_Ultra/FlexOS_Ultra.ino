@@ -101,6 +101,15 @@
 //                   Es portable y tiene pruebas de host propias.
 #include "FlexOS_Media.h"
 #include "FlexOS_Audio.h"
+//   FlexOS_BNO085 -> el modulo IMU TENSTAR GY-BNO085 sobre el bus I2C
+//                    que ya usa el tactil. Igual que el codec: no crea
+//                    bus propio ni tarea propia, y solo se anuncia como
+//                    disponible si el sensor contesta su Product ID.
+//   FlexOS_FallDetect -> la logica de la deteccion de caidas. Es
+//                    portable (no toca Arduino ni hardware) y se
+//                    ejercita entera en el PC, como FlexOS_Mem.
+#include "FlexOS_BNO085.h"
+#include "FlexOS_FallDetect.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -268,6 +277,9 @@
 #include "FlexOS_Ultra_System.h"             // I2C, soltar caches, Optimizar Flex OS y cambio de tema
 #include "FlexOS_Ultra_AppGallery.h"         // Galeria
 #include "FlexOS_Ultra_Vault.h"              // Flex Vault: interfaz de la Carpeta segura
+#include "FlexOS_Ultra_DeviceCare.h"         // Flex Device Care: app, historial, salud y grafico del GY-BNO085
+#include "FlexOS_Ultra_DeviceTests.h"        // Device Care: pruebas, diagnostico y Post-Impact Check
+#include "FlexOS_Ultra_FallAlert.h"          // Device Care: aviso global de posible caida (vertical y horizontal)
 #include "FlexOS_Ultra_Recovery.h"           // restablecer datos de fabrica y modo seguro
 // ------------- FIN DE LOS MODULOS -------------------------
 
@@ -398,6 +410,13 @@ void setup(){
   if(!flexAudioBegin())
     Serial.printf("[AUDIO] no disponible: %s\n", flexAudioError());
 
+  // FLEX DEVICE CARE. Solo lee NVS (preferencia de deteccion de caidas y
+  // contador de reinicios inesperados) y anota el motivo de ESTE
+  // arranque. NO toca el bus I2C: el GY-BNO085 se sondea cuando el
+  // usuario abre Deteccion de caidas o cuando ya la dejo activada, no en
+  // cada encendido.
+  dcBegin();
+
   // Una recuperacion interrumpida solo necesita pantalla, tactil, NVS y FS.
   // No se cargan cuenta, boveda, tienda, navegador ni red antes de terminar.
   if(gFrPending){ setBacklight(gBright); frResumeAfterBoot(); return; }
@@ -420,6 +439,10 @@ void setup(){
     flexPhoneBegin();
   }
   setBacklight(gBright);          // aplica el brillo guardado
+  // Deteccion de caidas: si el usuario la dejo activada, el sensor
+  // arranca aqui (bus I2C ya inicializado por flexTouchInit). Si no,
+  // esto no hace nada y el bus sigue siendo solo del tactil.
+  if(!gSafeMode) dcApplyFallPref();
   homeOrderLoad();                // orden de iconos del Home
   // ASPECTO DEL INICIO: fondo de inicio y de bloqueo, imagen elegida, encuadre,
   // paleta y tema. Va DESPUES de flexFsBegin() porque si el fondo es una imagen
@@ -582,6 +605,8 @@ void loop(){
   notifHandleTouch();     // la isla intercepta toques dentro de sus tarjetas (Fase 1)
   flexOtaTouchBridge();   // OTA: si hay overlay visible, se queda el toque antes que nadie
   hwDetectTick();         // deteccion I2C incremental, mismo contexto que el tactil (Fase 2)
+  dcSensorTick();         // GY-BNO085 + deteccion de caidas: MISMO bus y MISMO hilo que el tactil
+  faPendingTick();        // aviso de caida que no cupo (cortina, OTA, bloqueo): sale al despejarse
   mediaIndexTick();       // indice LittleFS: un lote corto cuando esta activo
   if(!gSafeMode){
     wifiAutoReconnectTick();// reconexion diferida, una vez por arranque
@@ -688,6 +713,28 @@ void loop(){
   if(cronoCardVisible()){
     if(minChanged) gHomeDirty = true;   // el escritorio se rehara al cerrar la tarjeta
     cronoCardTick();
+    flexOtaRender();
+    delay(5);
+    return;
+  }
+
+  // -----------------------------------------------------------
+  //  AVISO GLOBAL DE POSIBLE CAIDA
+  //  ---------------------------------------------------------
+  //  Mismo patron -- y mismo motivo -- que la tarjeta del cronometro:
+  //  el aviso se abre capturando la banda REAL de fb (lo que hubiera
+  //  debajo, sea el escritorio o una app), asi que mientras esta a la
+  //  vista NADIE mas compone bandas. Si la pantalla de debajo siguiera
+  //  repintando, la captura se quedaria vieja y al cerrarlo volveria un
+  //  fotograma caducado.
+  //
+  //  El tactil, el TWDT, el reloj y -- lo que importa aqui -- el propio
+  //  dcSensorTick() ya corrieron arriba: la deteccion de caidas sigue
+  //  viva mientras el aviso esta a la vista.
+  // -----------------------------------------------------------
+  if(faVisible()){
+    if(minChanged) gHomeDirty = true;   // el escritorio se rehara al cerrarse
+    faTick();
     flexOtaRender();
     delay(5);
     return;

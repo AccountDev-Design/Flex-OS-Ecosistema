@@ -20,6 +20,7 @@
 #include "FlexOS_Vault.h"
 #include "FlexOS_Weather.h"
 #include "FlexOS_Audio.h"
+#include "FlexOS_BNO085.h"
 #include <string.h>
 
 // ---- OTA ----
@@ -394,3 +395,35 @@ void        flexAudioSetVolume(uint8_t){}
 uint8_t     flexAudioVolume(){ return FLEXAUDIO_VOL_DEF; }
 void        flexAudioSetMuted(bool){}
 bool        flexAudioMuted(){ return false; }
+
+// ---- IMU GY-BNO085 (FlexOS_BNO085.cpp) ----
+// Doble con el modulo AUSENTE: es el estado en el que Flex Device Care
+// TIENE que ensenar el requisito de hardware (con su grafico) y en el
+// que la deteccion de caidas no puede activarse. Que las pruebas corran
+// por aqui comprueba precisamente eso. El driver de verdad habla por el
+// mismo Wire que el tactil, asi que no tiene sentido enlazarlo contra el
+// bus simulado: su logica de protocolo se verifica en placa.
+bool        flexBnoBegin(){ return false; }
+void        flexBnoTick(uint32_t){}
+void        flexBnoRescan(){}
+void        flexBnoStop(){}
+int         flexBnoState(){ return FLEXBNO_ST_ABSENT; }
+bool        flexBnoPresent(){ return false; }
+bool        flexBnoAvailable(){ return false; }
+uint8_t     flexBnoChecks(){ return 0; }
+uint8_t     flexBnoAddr(){ return 0; }
+const char* flexBnoError(){ return "No hay ningun modulo IMU en el bus I2C"; }
+uint8_t     flexBnoSwMajor(){ return 0; }
+uint8_t     flexBnoSwMinor(){ return 0; }
+uint32_t    flexBnoSwPart(){ return 0; }
+bool        flexBnoAccel(float*){ return false; }
+bool        flexBnoGyro(float*){ return false; }
+bool        flexBnoMag(float*){ return false; }
+bool        flexBnoQuat(float*){ return false; }
+uint8_t     flexBnoAccelAcc(){ return 0xFF; }
+uint8_t     flexBnoGyroAcc(){ return 0xFF; }
+uint8_t     flexBnoMagAcc(){ return 0xFF; }
+uint8_t     flexBnoFusionAcc(){ return 0xFF; }
+uint32_t    flexBnoLastReportAge(uint32_t){ return 0xFFFFFFFFu; }
+uint32_t    flexBnoReportCount(){ return 0; }
+bool        flexBnoEuler(float*){ return false; }
