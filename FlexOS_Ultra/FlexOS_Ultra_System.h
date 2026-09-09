@@ -294,14 +294,67 @@ static void optMark(int x, int cy, bool done, bool cur){
   if(cur) fillCircle(x, cy, 4, TH_PRIM);
 }
 
-// Dibuja el panel y publica SOLO su banda. El fondo de la banda se toma de fb
-// (la pantalla que hay debajo), asi que no hace falta guardar ninguna captura:
-// al cerrar, el anfitrion se repinta entero por su propio camino.
+// #############################################################
+// ##  CAPTURA DEL FONDO DEL PANEL
+// ##  ------------------------------------------------------
+// ##  POR QUE EXISTE, y es un fallo real que se veia: este panel se
+// ##  repinta una vez por etapa (cinco etapas mas la pantalla final).
+// ##  Antes tomaba el fondo de su banda copiandolo de `fb` -- pero
+// ##  `fb` es lo que se PUBLICO en el cuadro anterior, o sea el panel
+// ##  de vidrio ya dibujado. Y drawLiquidGlassPanel LEE la region, la
+// ##  desenfoca y la escribe encima: al darle su propia salida, cada
+// ##  etapa desenfocaba lo ya desenfocado y volvia a aplicar tinte,
+// ##  especular y borde. El resultado era el apilado de capas que se
+// ##  veia en pantalla -- "Optimizar Flex OS" y sus etapas cada vez
+// ##  mas borrosas, hasta no poder leerse.
+// ##
+// ##  El arreglo es el patron que ya usan la tarjeta del cronometro y
+// ##  la isla de notificaciones: se guarda UNA captura de la banda
+// ##  ANTES de dibujar nada, y cada cuadro se compone sobre ESA copia.
+// ##  El fondo de debajo no cambia mientras el panel esta a la vista
+// ##  (loop() le cede la pantalla en exclusiva), asi que la captura
+// ##  sigue siendo valida de la primera etapa a la ultima.
+// ##
+// ##  Se pide al abrir y se suelta al cerrar: el panel es una accion
+// ##  puntual del usuario y no hay motivo para retener 380 KB entre
+// ##  optimizacion y optimizacion.
+// #############################################################
+#define OPT_BAND_T   (OPT_Y - 8 < 0 ? 0 : OPT_Y - 8)
+#define OPT_BAND_B   (OPT_Y + OPT_H + 8 > SCR_H ? SCR_H : OPT_Y + OPT_H + 8)
+#define OPT_BAND_H   (OPT_BAND_B - OPT_BAND_T)
+static uint16_t* optBak = NULL;
+
+static void optBandFree(){
+  if(optBak){ heap_caps_free(optBak); optBak = NULL; }
+}
+// Copia la banda de fb ANTES de que el panel escriba nada. false = sin
+// PSRAM; entonces optRender cae al material PLANO, que es opaco y por
+// tanto no puede apilar nada.
+static bool optBandCapture(){
+  if(!fb) return false;
+  if(!optBak)
+    optBak = (uint16_t*)heap_caps_aligned_alloc(64, (size_t)SCR_W * OPT_BAND_H * 2,
+                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(!optBak) return false;
+  memcpy(optBak, fb + (size_t)OPT_BAND_T * SCR_W, (size_t)SCR_W * OPT_BAND_H * 2);
+  return true;
+}
+
+// Dibuja el panel y publica SOLO su banda. El fondo sale SIEMPRE de la
+// captura limpia, nunca de lo publicado en el cuadro anterior.
 static void optRender(){
   setBuf(bbuf);
-  for(int j = OPT_Y - 8; j < OPT_Y + OPT_H + 8 && j < SCR_H; j++)
-    if(j >= 0) memcpy(bbuf + (size_t)j * SCR_W, fb + (size_t)j * SCR_W, SCR_W * 2);
-  uiSurface(OPT_X, OPT_Y, OPT_W, OPT_H, 24, UIS_ELEVATED);
+  if(optBak){
+    memcpy(bbuf + (size_t)OPT_BAND_T * SCR_W, optBak, (size_t)SCR_W * OPT_BAND_H * 2);
+    uiSurface(OPT_X, OPT_Y, OPT_W, OPT_H, 24, UIS_ELEVATED);
+  } else {
+    // Sin captura no se puede garantizar un fondo limpio, asi que
+    // tampoco se dibuja vidrio: relleno solido de la paleta. Se ve mas
+    // plano, pero se lee -- que es de lo que iba todo esto.
+    for(int j = OPT_BAND_T; j < OPT_BAND_B; j++)
+      memcpy(bbuf + (size_t)j * SCR_W, fb + (size_t)j * SCR_W, SCR_W * 2);
+    fillRoundRect(OPT_X, OPT_Y, OPT_W, OPT_H, 24, uiSurfFlat(UIS_ELEVATED));
+  }
   drawRoundRect(OPT_X, OPT_Y, OPT_W, OPT_H, 24, TH_BORDER);
 
   int y = OPT_Y + 20;
@@ -347,7 +400,7 @@ static void optRender(){
     drawTextClip(OPT_X + 20, y, "No se borran notas, dibujos ni archivos.", 1,
                  TH_MUTE, OPT_X + OPT_W - 20);
   }
-  present(OPT_Y - 8, OPT_Y + OPT_H + 7 < SCR_H ? OPT_Y + OPT_H + 7 : SCR_H - 1);
+  present(OPT_BAND_T, OPT_BAND_B - 1);
   setBuf(fb);       // el destino vuelve a la pantalla: nadie hereda bbuf
 }
 
@@ -369,6 +422,9 @@ static void optStartCb(void (*onDone)()){
   memSampleNow();
   optFree0 = gMem.psFree;
   touchDropAll();                 // el toque que abrio el panel no se filtra
+  // La captura del fondo va ANTES del primer optRender(): es la unica
+  // ocasion en la que fb todavia no tiene el panel encima.
+  optBandCapture();
   optRender();
 }
 
@@ -377,6 +433,7 @@ static void optStartCb(void (*onDone)()){
 // buffer extra.
 static void optFinish(){
   optStage = OPT_IDLE;
+  optBandFree();                  // el fondo capturado ya no describe nada
   touchDropAll();
   if(optDoneCb){                       // lo abrio otra pantalla: vuelve alli
     void (*cb)() = optDoneCb;

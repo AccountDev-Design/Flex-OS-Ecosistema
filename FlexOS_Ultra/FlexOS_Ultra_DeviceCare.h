@@ -981,25 +981,34 @@ static void dcDrawTile(int idx, int x, int y, int w, int h, const char* label, i
   dcHitAdd(x, y, w, h, (uint8_t)(DCH_T0 + idx));
 }
 
-static void dcRenderHome(){
-  setBuf(fb);
-  dcHitClear();
-  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
-  fillRect(bx, by, bw, bh, WIN_BG);
-  int pad = uiPad();
-
-  // ---- Tarjeta de estado ----
-  dcHomeLayout();
-  int cardH = dcGrid.y - by - pad - uiGap();
-  if(cardH < 96) cardH = 96;
-  int cx = bx + pad, cy = by + pad, cw = bw - 2 * pad;
+// #############################################################
+// ##  LA TARJETA DE ESTADO  ·  UN SOLO SITIO QUE LA DIBUJA
+// ##  ------------------------------------------------------
+// ##  REGLA DEL LIQUID GLASS, y es la que hay que respetar en TODA
+// ##  animacion del sistema: drawLiquidGlassPanel LEE la region del
+// ##  buffer, la desenfoca y la ESCRIBE encima. Volver a dibujarlo
+// ##  sobre su propia salida desenfoca lo ya desenfocado, y ademas
+// ##  vuelve a aplicar tinte, especular y borde. En una animacion eso
+// ##  se apila cuadro a cuadro: el texto se emborrona un poco mas cada
+// ##  vez hasta quedar ilegible.
+// ##
+// ##  Por eso el vidrio SIEMPRE se compone sobre un fondo LIMPIO, y
+// ##  por eso el cuadro de la animacion no puede ser "repinto solo el
+// ##  anillo": tiene que rehacer la tarjeta ENTERA desde el fondo de
+// ##  pagina. Esta funcion es ese unico sitio -- la usan el repintado
+// ##  completo y cada cuadro de la animacion --, asi que las dos rutas
+// ##  no pueden divergir, ni en el material ni en el contenido.
+// ##
+// ##  `ringP` (0..1) es lo unico que cambia entre cuadros: cuanto del
+// ##  arco esta dibujado.
+// #############################################################
+static void dcHomeCard(int cx, int cy, int cw, int cardH, float ringP){
   uiSurface(cx, cy, cw, cardH, 24, UIS_CARD);
   drawRoundRect(cx, cy, cw, cardH, 24, TH_BORDER);
 
-  dcHomeScoreOk = dcHealthScore(&dcHomeScore);
   int rr = cardH / 2 - 16; if(rr > 54) rr = 54; if(rr < 26) rr = 26;
   int rcx = cx + 24 + rr, rcy = cy + cardH / 2;
-  if(dcHomeScoreOk) dcScoreRing(rcx, rcy, rr, dcHomeScore, 1.0f, dcScoreColor(dcHomeScore));
+  if(dcHomeScoreOk) dcScoreRing(rcx, rcy, rr, dcHomeScore, ringP, dcScoreColor(dcHomeScore));
   else { fillRing(rcx, rcy, rr, rr / 6, TH_TRACK); drawTextC(rcx, rcy - 8, "--", 4, TH_MUTE); }
 
   int tx = rcx + rr + 18;
@@ -1024,6 +1033,33 @@ static void dcRenderHome(){
   uint16_t fc = dcFallOn ? (flexBnoAvailable() ? TH_OK : TH_WARN) : TH_MUTE;
   fillCircle(tx + 6, rcy + 26, 5, fc);
   drawTextClip(tx + 18, rcy + 19, fs2, 1, TH_TXT2, tx + tw);
+}
+
+// Geometria de la tarjeta. Tambien en un solo sitio, por el mismo
+// motivo: la animacion tiene que componer EXACTAMENTE el mismo
+// rectangulo que el repintado completo, o el borde de la banda se
+// notaria como una costura.
+static void dcHomeCardGeom(int &cx, int &cy, int &cw, int &cardH){
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+  (void)bh;
+  int pad = uiPad();
+  dcHomeLayout();
+  cardH = dcGrid.y - by - pad - uiGap();
+  if(cardH < 96) cardH = 96;
+  cx = bx + pad; cy = by + pad; cw = bw - 2 * pad;
+}
+
+static void dcRenderHome(){
+  setBuf(fb);
+  dcHitClear();
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+  fillRect(bx, by, bw, bh, WIN_BG);
+
+  // ---- Tarjeta de estado ----
+  int cx, cy, cw, cardH;
+  dcHomeCardGeom(cx, cy, cw, cardH);
+  dcHomeScoreOk = dcHealthScore(&dcHomeScore);
+  dcHomeCard(cx, cy, cw, cardH, 1.0f);
   dcHitAdd(cx, cy, cw, cardH, DCH_HERO);
 
   // ---- Rejilla de seis accesos ----
@@ -1038,8 +1074,35 @@ static void dcRenderHome(){
   flxFlush(WIN_TOP, WIN_BOT);
 }
 
-// Barrido del anillo al entrar: ~520 ms, y SOLO se repinta la banda de
-// la tarjeta. Cuando termina deja de publicar nada.
+// #############################################################
+// ##  BARRIDO DEL ANILLO AL ENTRAR  (~520 ms)
+// ##  ------------------------------------------------------
+// ##  CADA CUADRO PARTE DE CERO, y esa es toda la clave:
+// ##
+// ##    1. se compone en bbuf, nunca sobre lo ya publicado;
+// ##    2. la tarjeta se rellena ANTES con el fondo de pagina, asi que
+// ##       el vidrio desenfoca un fondo LIMPIO -- el mismo que ve el
+// ##       repintado completo -- y no su propia salida del cuadro
+// ##       anterior. Sin esto, el desenfoque se apila y el numero del
+// ##       centro se emborrona un poco mas en cada cuadro;
+// ##    3. se dibuja la tarjeta ENTERA con dcHomeCard(), no solo el
+// ##       anillo: el panel de vidrio escribe de borde a borde, asi
+// ##       que repintar solo el anillo borraba los textos de la
+// ##       derecha y no los devolvia;
+// ##    4. se publica SOLO la banda del anillo, que es lo unico que
+// ##       cambia entre cuadros.
+// ##
+// ##  El relleno del fondo va SIN recorte a proposito: el tinte
+// ##  adaptativo del vidrio muestrea la luminancia de la tarjeta
+// ##  COMPLETA (ver drawLiquidGlassPanelEx), asi que si las filas de
+// ##  fuera de la banda tuvieran contenido viejo el tinte cambiaria de
+// ##  un cuadro a otro y la banda se veria como una costura de otro
+// ##  color. El recorte se pone DESPUES, y solo acota lo que se
+// ##  escribe y cuantas filas desenfoca el vidrio.
+// ##
+// ##  Resultado: el cuadro N es identico al cuadro 1 para el mismo p.
+// ##  Lo comprueba testLiquidGlassSinApilar() en tests/host.
+// #############################################################
 #define DC_RING_MS 520
 static void dcHomeAnimTick(){
   if(dcScreen != DC_HOME) return;
@@ -1047,28 +1110,38 @@ static void dcHomeAnimTick(){
   if(e > DC_RING_MS) return;
   if(millis() - dcAnimMs < 33) return;
   dcAnimMs = millis();
+  if(!bbuf) return;
+
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
-  int pad = uiPad();
-  dcHomeLayout();
-  int cardH = dcGrid.y - by - pad - uiGap();
-  if(cardH < 96) cardH = 96;
-  int cx = bx + pad, cy = by + pad, cw = bw - 2 * pad;
+  (void)bx; (void)bw;
+  int cx, cy, cw, cardH;
+  dcHomeCardGeom(cx, cy, cw, cardH);
   int rr = cardH / 2 - 16; if(rr > 54) rr = 54; if(rr < 26) rr = 26;
-  int rcx = cx + 24 + rr, rcy = cy + cardH / 2;
+  int rcy = cy + cardH / 2;
   int b0 = rcy - rr - 4, b1 = rcy + rr + 4;
   if(b0 < by) b0 = by;
   if(b1 > by + bh - 1) b1 = by + bh - 1;
-  setBuf(fb);
-  int c0 = gClipY0, c1 = gClipY1;
+
+  int c0 = gClipY0, c1 = gClipY1, cxx0 = gClipX0, cxx1 = gClipX1;
+  setBuf(bbuf);
+  gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
+  // 1) Margenes de la banda. present() publica FILAS ENTERAS, asi que lo
+  //    que quede a los lados de la tarjeta tiene que ser lo que ya hay en
+  //    pantalla; si no, se publicaria contenido viejo de bbuf.
+  for(int j = b0; j <= b1; j++)
+    memcpy(bbuf + (size_t)j * SCR_W, fb + (size_t)j * SCR_W, (size_t)SCR_W * 2);
+  // 2) La tarjeta ENTERA a fondo de pagina. Sin recorte a proposito: es el
+  //    fondo que el vidrio va a desenfocar y el que muestrea su tinte
+  //    adaptativo, y los dos miran la tarjeta completa.
+  fillRect(cx, cy, cw, cardH, WIN_BG);
+  // 3) A partir de aqui solo se escribe -- y solo se desenfoca -- la banda.
   gClipY0 = b0; gClipY1 = b1;
-  // Fondo de la banda: la superficie de la tarjeta, no la pagina.
-  uiSurface(cx, cy, cw, cardH, 24, UIS_CARD);
   float p = (float)e / (float)DC_RING_MS;
-  p = 1.0f - (1.0f - p) * (1.0f - p);          // ease-out
-  if(dcHomeScoreOk) dcScoreRing(rcx, rcy, rr, dcHomeScore, p, dcScoreColor(dcHomeScore));
-  else { fillRing(rcx, rcy, rr, rr / 6, TH_TRACK); drawTextC(rcx, rcy - 8, "--", 4, TH_MUTE); }
-  gClipY0 = c0; gClipY1 = c1;
-  flxFlush(b0, b1);
+  p = 1.0f - (1.0f - p) * (1.0f - p);        // ease-out
+  dcHomeCard(cx, cy, cw, cardH, p);
+  gClipY0 = c0; gClipY1 = c1; gClipX0 = cxx0; gClipX1 = cxx1;
+  present(b0, b1);
+  setBuf(fb);
 }
 
 // #############################################################

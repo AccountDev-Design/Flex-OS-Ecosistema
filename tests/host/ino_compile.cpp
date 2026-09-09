@@ -3900,6 +3900,179 @@ static void testDeviceCare(){
   else       printf("  Flex Device Care: todas las comprobaciones pasan.\n");
 }
 
+
+// #############################################################
+//  LIQUID GLASS: NINGUNA ANIMACION APILA CAPAS DE DESENFOQUE
+//  ------------------------------------------------------------
+//  EXISTE POR UN FALLO REAL Y VISIBLE. drawLiquidGlassPanel LEE la
+//  region del buffer, la desenfoca y la ESCRIBE encima. Es decir: NO
+//  es idempotente sobre su propia salida. Si una animacion repinta el
+//  panel encima de lo que publico en el cuadro anterior, cada cuadro
+//  desenfoca lo ya desenfocado y vuelve a aplicar tinte, especular y
+//  borde: las capas se apilan y el texto se emborrona un poco mas cada
+//  vez, hasta quedar ilegible. Pasaba en dos sitios -- el barrido del
+//  anillo de Device Care y el panel de "Optimizar Flex OS" --, y el
+//  panel de optimizacion ademas lo arrastraba de antes.
+//
+//  LA REGLA, que es lo que se comprueba aqui: un cuadro de animacion
+//  tiene que ser IDEMPOTENTE. Ejecutado dos veces con el mismo estado
+//  logico debe dar EXACTAMENTE los mismos pixeles. Un cuadro que parte
+//  de un fondo limpio lo cumple por construccion; uno que se compone
+//  sobre su propia salida no lo cumple nunca.
+//
+//  La prueba no mira "si se ve bien": compara pixeles. Si manana
+//  alguien vuelve a componer vidrio sobre lo publicado, esto falla
+//  antes de que llegue a la pantalla.
+// #############################################################
+static uint16_t* lgSnap = NULL;
+static void lgGrab(uint16_t* dst, int y0, int y1){
+  memcpy(dst, fb + (size_t)y0 * SCR_W, (size_t)(y1 - y0 + 1) * SCR_W * 2);
+}
+static int lgDiff(const uint16_t* a, const uint16_t* b, int y0, int y1){
+  int n = 0;
+  size_t px = (size_t)(y1 - y0 + 1) * SCR_W;
+  for(size_t i = 0; i < px; i++) if(a[i] != b[i]) n++;
+  return n;
+}
+
+static void testLiquidGlassSinApilar(){
+  printf("Liquid Glass: las animaciones no apilan capas de blur\n");
+  bool glassPrev = uiGlass;
+  uiGlass = true;                       // el fallo solo existe con vidrio
+  gLand = false; gHosted = false;
+  uiClipFull();
+  setBuf(fb);
+
+  if(!lgSnap) lgSnap = (uint16_t*)malloc((size_t)SCR_W * SCR_H * 2);
+  static uint16_t* lgSnap2 = NULL;
+  if(!lgSnap2) lgSnap2 = (uint16_t*)malloc((size_t)SCR_W * SCR_H * 2);
+  if(!lgSnap || !lgSnap2){ printf("  FALLO: sin memoria para la prueba\n"); gFails++; return; }
+
+  // ---- 1. El contrato del primitivo, en claro --------------------------
+  // No es un fallo del vidrio: es SU CONTRATO. Dibujarlo sobre un fondo
+  // limpio siempre da lo mismo; dibujarlo sobre su propia salida, no.
+  // Todo lo demas de esta prueba existe porque esto es asi.
+  {
+    const int X = 40, Y = 120, W = 400, H = 200;
+    fillRect(0, 0, SCR_W, SCR_H, rgb565(24, 30, 48));
+    drawLiquidGlassPanel(X, Y, W, H, 24, TH_GLASS);
+    lgGrab(lgSnap, Y, Y + H - 1);
+    // (a) otra vez desde el MISMO fondo limpio -> identico
+    fillRect(0, 0, SCR_W, SCR_H, rgb565(24, 30, 48));
+    drawLiquidGlassPanel(X, Y, W, H, 24, TH_GLASS);
+    lgGrab(lgSnap2, Y, Y + H - 1);
+    chk(lgDiff(lgSnap, lgSnap2, Y, Y + H - 1) == 0,
+        "sobre un fondo limpio, el vidrio es determinista");
+    // (b) encima de si mismo -> distinto (esto es lo que se apilaba)
+    drawLiquidGlassPanel(X, Y, W, H, 24, TH_GLASS);
+    lgGrab(lgSnap2, Y, Y + H - 1);
+    chk(lgDiff(lgSnap, lgSnap2, Y, Y + H - 1) > 0,
+        "encima de su propia salida SI cambia: por eso no se puede repintar asi");
+  }
+
+  // ---- 2. El barrido del anillo de Device Care -------------------------
+  gState = ST_APP; gAppId = IC_DEVCARE;
+  gAppW = SCR_W; gAppH = SCR_H;
+  dcScreen = DC_HOME;
+  gTestMs = 500000;
+  dcAnimT0 = gTestMs;
+  dcHeader(dct(DCS_APPTITLE));
+  dcRenderHome();
+
+  int cx, cy, cw, cardH;
+  dcHomeCardGeom(cx, cy, cw, cardH);
+  int rr = cardH / 2 - 16; if(rr > 54) rr = 54; if(rr < 26) rr = 26;
+  int rcy = cy + cardH / 2;
+  int b0 = rcy - rr - 4, b1 = rcy + rr + 4;
+
+  // Cuadro intermedio del barrido, repetido veinte veces con el MISMO
+  // instante: si apilara, cada pasada emborronaria un poco mas.
+  gTestMs = 500000 + DC_RING_MS / 2;
+  dcAnimMs = 0; dcHomeAnimTick();
+  lgGrab(lgSnap, b0, b1);
+  int deriva = 0;
+  for(int i = 0; i < 20; i++){
+    dcAnimMs = 0;                       // se salta el limitador de cadencia
+    dcHomeAnimTick();
+    lgGrab(lgSnap2, b0, b1);
+    deriva += lgDiff(lgSnap, lgSnap2, b0, b1);
+  }
+  chk(deriva == 0, "20 cuadros del anillo dan EXACTAMENTE los mismos pixeles");
+
+  // Y el ultimo cuadro del barrido tiene que coincidir con el repintado
+  // completo: eso comprueba de paso que la animacion NO borra los textos
+  // de la derecha de la tarjeta (antes el panel de vidrio los pisaba y
+  // no los devolvia).
+  gTestMs = 500000;
+  dcAnimT0 = gTestMs;
+  dcRenderHome();
+  lgGrab(lgSnap, b0, b1);
+  gTestMs = 500000 + DC_RING_MS;        // p = 1: el cuadro final
+  dcAnimMs = 0; dcHomeAnimTick();
+  lgGrab(lgSnap2, b0, b1);
+  chk(lgDiff(lgSnap, lgSnap2, b0, b1) == 0,
+      "el cuadro final del barrido es identico al repintado completo");
+
+  // ---- 3. El panel de Optimizar Flex OS -------------------------------
+  // Fondo reconocible debajo, para que un desenfoque de mas se note.
+  setBuf(fb);
+  uiClipFull();
+  for(int y = 0; y < SCR_H; y++)
+    hLine(0, y, SCR_W, ((y / 8) & 1) ? rgb565(40, 60, 110) : rgb565(18, 24, 40));
+  gTestMs += 1000;
+  optStart();
+  chk(optActive(), "el panel de optimizacion se abre");
+  int o0 = OPT_BAND_T, o1 = OPT_BAND_B - 1;
+  lgGrab(lgSnap, o0, o1);
+  deriva = 0;
+  for(int i = 0; i < 12; i++){          // mas pasadas que etapas tiene
+    optRender();
+    lgGrab(lgSnap2, o0, o1);
+    deriva += lgDiff(lgSnap, lgSnap2, o0, o1);
+  }
+  chk(deriva == 0, "12 repintados del panel de optimizacion no cambian ni un pixel");
+
+  // Y el fondo capturado sigue siendo el de DEBAJO, no el panel ya
+  // dibujado: si se hubiera capturado tarde, la fila de encima del panel
+  // llevaria material de vidrio.
+  chk(optBak != NULL, "el panel guarda la captura de su fondo");
+  {
+    int filaLimpia = OPT_BAND_T + 2;    // dentro de la banda, encima del panel
+    const uint16_t* cap = optBak + (size_t)(filaLimpia - OPT_BAND_T) * SCR_W;
+    uint16_t esperado = ((filaLimpia / 8) & 1) ? rgb565(40, 60, 110) : rgb565(18, 24, 40);
+    chk(cap[SCR_W / 2] == esperado, "la captura es el fondo real, tomada antes de dibujar");
+  }
+  // ---- 4. La capsula del cronometro -----------------------------------
+  // Se estampa encima de si misma una vez por segundo (cronoCapsuleStamp),
+  // apoyandose en que es opaca. Aqui se comprueba que de verdad lo es:
+  // ocho estampados seguidos no pueden mover ni un pixel.
+  {
+    setBuf(fb);
+    uiClipFull();
+    for(int y = 0; y < SCR_H; y++)
+      hLine(0, y, SCR_W, ((y / 8) & 1) ? rgb565(40, 60, 110) : rgb565(18, 24, 40));
+    gCronoSt = CRONO_RUN; gCronoT0 = gTestMs;
+    cronoCapsuleDraw(20);
+    lgGrab(lgSnap, CRONO_CAP_Y, CRONO_CAP_Y + CRONO_CAP_H);
+    for(int i = 0; i < 8; i++) cronoCapsuleDraw(20);      // 8 segundos de cronometro
+    lgGrab(lgSnap2, CRONO_CAP_Y, CRONO_CAP_Y + CRONO_CAP_H);
+    chk(lgDiff(lgSnap, lgSnap2, CRONO_CAP_Y, CRONO_CAP_Y + CRONO_CAP_H) == 0,
+        "la capsula del cronometro se estampa encima de si misma sin apilar");
+    gCronoSt = CRONO_IDLE;
+  }
+
+  optStage = OPT_IDLE;                  // cierre sin repintar Almacenamiento
+  optBandFree();
+  chk(optBak == NULL, "al cerrar, el panel suelta su captura");
+
+  uiGlass = glassPrev;
+  gState = ST_HOME; gAppId = 0;
+  uiClipFull();
+  setBuf(fb);
+  if(gFails) printf("  %d comprobacion(es) del vidrio han fallado.\n", gFails);
+  else       printf("  Liquid Glass: todas las comprobaciones pasan.\n");
+}
+
 static void testIconosEnSuCaja(){
   printf("Iconos de app: cada uno dentro de su caja\n");
   gLand = false;
@@ -4770,6 +4943,7 @@ int main(){
   testMediosOrientacion();
   testMultitareaMemoria();
   testDeviceCare();
+  testLiquidGlassSinApilar();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

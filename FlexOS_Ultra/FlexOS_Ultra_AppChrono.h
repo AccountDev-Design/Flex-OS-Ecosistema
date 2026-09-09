@@ -261,7 +261,19 @@ static int cronoCapsuleRight(){
 // resuelve los dos casos sin que este dibujo tenga que saber cual manda.
 static void cronoCapsuleDraw(int x){
   int w = cronoCapsuleW(), h = CRONO_CAP_H, y = CRONO_CAP_Y;
-  uiSurface(x, y, w, h, h / 2, UIS_ACCENT);
+  // MATERIAL PLANO, Y NO ES UN DESCUIDO: cronoCapsuleStamp repinta esta
+  // pildora ENCIMA DE SI MISMA una vez por segundo, apoyandose en que es
+  // opaca. Con uiSurface eso solo era cierto en estilo Plano: en Liquid
+  // Glass el panel LEE la region, la desenfoca y la escribe encima, asi
+  // que cada segundo desenfocaba su propia salida -- capas apiladas y un
+  // halo creciente alrededor de los digitos hasta saturar.
+  //
+  // El relleno solido hace verdadera la suposicion en la que ya se
+  // apoyaba el estampado, y el COLOR no cambia: para UIS_ACCENT el
+  // material plano y el tinte de vidrio son el mismo wallAccent(). Lo
+  // unico que se pierde en una pildora de 26 px es el desenfoque del
+  // fondo por debajo del tinte. Se prefiere eso a una hora ilegible.
+  fillRoundRect(x, y, w, h, h / 2, uiSurfFlat(UIS_ACCENT));
   int ir = CRONO_CAP_ICON / 2;
   cronoGlyph(x + CRONO_CAP_PADL + ir, y + h / 2 + 1, ir - 2, CRONO_ONACC, 1.5f);
   char b[16]; cronoFmt(b, sizeof(b), cronoElapsed(), false);

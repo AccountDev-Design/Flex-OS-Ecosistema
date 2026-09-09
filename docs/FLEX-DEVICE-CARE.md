@@ -276,6 +276,48 @@ hay ninguna base de datos.
 
 ---
 
+## 9 bis. La regla del Liquid Glass (apilado de capas de blur)
+
+`drawLiquidGlassPanel` **lee** la región del buffer, la desenfoca y la
+**escribe encima**. No es idempotente sobre su propia salida: volver a
+dibujarlo sobre lo que publicó el cuadro anterior desenfoca lo ya
+desenfocado y vuelve a aplicar tinte, especular y borde. En una animación eso
+se apila cuadro a cuadro hasta que el texto deja de leerse.
+
+**Regla: el vidrio se compone SIEMPRE sobre un fondo limpio, y un cuadro de
+animación tiene que ser idempotente** — ejecutado dos veces con el mismo estado
+lógico debe dar exactamente los mismos píxeles. Hay tres formas válidas de
+conseguirlo, todas ya en uso en el sistema:
+
+1. **Restaurar desde una captura** tomada antes de dibujar nada (isla de
+   notificaciones desde `homeBuf`, tarjeta del cronómetro desde
+   `gCronoCardBak`, aviso de caída desde `faBak`, y ahora el panel de
+   optimización desde `optBak`).
+2. **Rehacer el fondo procedimentalmente** antes del vidrio (la tarjeta de
+   estado de Device Care rellena la tarjeta entera con el fondo de página en
+   cada cuadro).
+3. **Usar el material plano** cuando la superficie se estampa sobre sí misma y
+   el color no cambia entre los dos materiales (la cápsula del cronómetro).
+
+Un corolario que costó un cuadro mal publicado: `present()` copia **filas
+enteras**, así que un cuadro parcial tiene que dejar correctos también los
+márgenes de la banda a los lados de lo que dibuja, no solo su propio
+rectángulo.
+
+Y otro: el tinte adaptativo del vidrio muestrea la luminancia del panel
+**completo**, no solo de la banda visible. Por eso el fondo limpio se rellena
+sin recorte y el recorte se aplica después: si no, el tinte cambiaría de un
+cuadro a otro y la banda se vería como una costura de otro color.
+
+`testLiquidGlassSinApilar()` en `tests/host/ino_compile.cpp` lo comprueba por
+píxeles: documenta el contrato del primitivo, repite 20 cuadros del anillo y 12
+del panel de optimización exigiendo cero deriva, verifica que el último cuadro
+del barrido es idéntico al repintado completo (lo que además garantiza que la
+animación no borra los textos de la tarjeta) y estampa la cápsula del
+cronómetro ocho veces exigiendo cero movimiento.
+
+---
+
 ## 10. Fallo seguro
 
 Si el BNO085 se desconecta, deja de responder o devuelve datos inválidos:
