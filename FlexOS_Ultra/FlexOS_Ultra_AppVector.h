@@ -263,6 +263,15 @@ static void vecClampView(){
 }
 
 static void vecInvalidate(){ vecCacheOk = false; }
+// true mientras un gesto esta TRANSFORMANDO la seleccion (moviendo,
+// escalando o girando). Durante ese rato la seleccion ENTERA sale de la
+// cache y se compone encima en cada cuadro.
+//
+// Tiene que ser la seleccion entera y no solo el objeto que se agarro:
+// flexVecTransformSel mueve TODOS los seleccionados, asi que dejar a los
+// demas dentro de la cache los dibujaria en su sitio viejo -- y al mover
+// seis objetos se verian cinco rastros.
+static bool vecLiveEdit();
 // El motor tiene su propia comprobacion de indices, pero es interna. La
 // app necesita la suya para no preguntarle por un objeto que ya borro.
 static inline bool vecElemOk(int e){
@@ -422,19 +431,28 @@ static void vecDrawGrid(){
 
 // Pinta UN objeto con la vista dada. Lo usan la cache y tambien el
 // dibujo en caliente del objeto que se esta arrastrando.
+// ESCALA DEL RENDER EN CURSO, y no vecZoom. El lienzo dibuja con el zoom
+// de la vista, pero la exportacion PNG dibuja con la escala que lleva la
+// mesa de trabajo a la imagen, que es OTRA. Usar vecZoom aqui sacaria el
+// texto del PNG con el cuerpo del lienzo -- gigante si estabas ampliando,
+// diminuto si estabas alejado. La fija vecDrawElem al entrar, a partir de
+// la vista que le pasan.
+static float vecRenderScale = 1.0f;
+
 // El tamano de drawText es un MULTIPLO (12 px por unidad), asi que el
 // cuerpo en unidades de documento se lleva al escalon mas cercano. Con
-// esa misma funcion se mide el texto para repartirlo en lineas: medir
+// esta misma funcion se MIDE el texto para repartirlo en lineas: medir
 // con una y dibujar con otra desalinearia el ajuste.
 static int vecTextStep(float sizeDoc){
-  int st = (int)(sizeDoc * vecZoom / 12.0f + 0.5f);
+  int st = (int)(sizeDoc * vecRenderScale / 12.0f + 0.5f);
   if(st < 1) st = 1;
   if(st > 8) st = 8;
   return st;
 }
 // Medida que el motor usa para el texto de area. Mide con la fuente
-// REAL del sistema, en unidades de DOCUMENTO (por eso divide por el
-// zoom): el reparto en lineas no puede cambiar al ampliar.
+// REAL del sistema y devuelve unidades de DOCUMENTO (por eso deshace la
+// escala): el reparto en lineas no puede cambiar al ampliar, ni al
+// exportar.
 static float vecMeasure(const char* utf8, int len, float size, void* user){
   (void)user;
   if(len <= 0) return 0;
@@ -444,7 +462,7 @@ static float vecMeasure(const char* utf8, int len, float size, void* user){
   tmp[len] = 0;
   int st = vecTextStep(size);
   float px = (float)textW(tmp, st);
-  return (vecZoom > 0.0001f) ? px / vecZoom : px;
+  return (vecRenderScale > 0.0001f) ? px / vecRenderScale : px;
 }
 typedef struct { const FlexVecElem* el; const FlexVecView* v; uint16_t col; } VecTextCtx;
 static void vecTextLineCb(const char* utf8, int len, float x, float y, float w, void* user){
@@ -478,6 +496,16 @@ static void vecDrawElem(int e, const FlexVecView* v){
     flexVecMatApplyVec(cm, 0.0f, 1.0f, &vx, &vy);
     float k = sqrtf(fabsf(ux * vy - uy * vx));
     if(k > 0) sc = k;
+  }
+  // La escala de la VISTA (sin la del objeto) es la que manda para el
+  // cuerpo del texto: un texto escalado se hace grande por su matriz,
+  // no por haber cambiado de fuente.
+  {
+    float ux, uy, vx, vy;
+    flexVecMatApplyVec(v->m, 1.0f, 0.0f, &ux, &uy);
+    flexVecMatApplyVec(v->m, 0.0f, 1.0f, &vx, &vy);
+    float k = sqrtf(fabsf(ux * vy - uy * vx));
+    vecRenderScale = (k > 0.0001f) ? k : 1.0f;
   }
   // ORDEN DE PINTADO de la apariencia ampliada: relleno 2, relleno,
   // trazo 2, trazo. Es de abajo arriba, como una pila de apariencia, y
@@ -540,10 +568,10 @@ static void vecRenderDoc(){
   int16_t order[FLEXVEC_MAX_ELEMS];
   int n = flexVecPaintOrder(&vecDoc, order, FLEXVEC_MAX_ELEMS);
   for(int i = 0; i < n; i++){
-    // El objeto que se esta arrastrando NO entra en la cache: se compone
-    // encima en cada cuadro. Asi arrastrar cuesta una banda, no un
-    // documento entero.
-    if(vecGest == VG_MOVE && order[i] == vecGestElem) continue;
+    // Lo que se esta transformando NO entra en la cache: se compone
+    // encima en cada cuadro. Asi arrastrar cuesta las figuras que se
+    // mueven, no el documento entero.
+    if(vecLiveEdit() && (vecDoc.elems[order[i]].flags & FLEXVEC_EF_SEL)) continue;
     vecDrawElem(order[i], &v);
   }
   gClipX0 = sx0; gClipX1 = sx1; gClipY0 = sy0; gClipY1 = sy1;
@@ -745,11 +773,14 @@ static void vecPaintBand(int y0, int y1){
   int sx0 = gClipX0, sx1 = gClipX1, sy0 = gClipY0, sy1 = gClipY1;
   gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = y0; gClipY1 = y1;
   if(vecCache) fbCopyBand(vecCache, y0, y1);
-  // El objeto en movimiento no esta en la cache: se compone AQUI, y por
-  // eso arrastrarlo cuesta una figura por cuadro y no un documento.
-  if(vecGest == VG_MOVE && vecElemOk(vecGestElem)){
+  // Lo que se esta transformando no esta en la cache: se compone AQUI, y
+  // por eso arrastrar cuesta las figuras que se mueven y no el documento.
+  if(vecLiveEdit()){
     FlexVecView v; vecViewMat(&v);
-    vecDrawElem(vecGestElem, &v);
+    int16_t order[FLEXVEC_MAX_ELEMS];
+    int n = flexVecPaintOrder(&vecDoc, order, FLEXVEC_MAX_ELEMS);
+    for(int i = 0; i < n; i++)
+      if(vecDoc.elems[order[i]].flags & FLEXVEC_EF_SEL) vecDrawElem(order[i], &v);
   }
   vecDrawSelection();
   if(vecTool == VT_NODE) vecDrawNodes();
@@ -1381,8 +1412,14 @@ static void vecSvgName(char* out, size_t n){
 
 static bool vecExportSvg(bool selOnly){
   if(!vecReady || !vecSvg) return false;
+  // El SVG va en unidades de DOCUMENTO, asi que el texto se mide a
+  // escala 1: las lineas del archivo son las mismas que se ven, sea cual
+  // sea el zoom que hubiera en pantalla al exportar.
+  float saveScale = vecRenderScale;
+  vecRenderScale = 1.0f;
   int n = flexVecExportSVGEx(&vecDoc, vecSvg, FLEXVEC_SVG_BYTES, selOnly ? 1 : 0, 0,
                              vecMeasure, NULL);
+  vecRenderScale = saveScale;
   if(n < 0){
     vecToastErr(n);
     vecSvgLen = 0;
@@ -1628,6 +1665,8 @@ static void vecRenderGallery(){
 // ##     tocar y se cierra al levantar;
 // ##   · la pinza se lee del multitactil REAL del GT911, no se simula.
 // #############################################################
+static bool vecLiveEdit(){ return vecGest == VG_MOVE || vecGest == VG_HANDLE; }
+
 static void vecGestBegin(const char* label){
   if(!vecDoc.undoOpen) flexVecUndoBegin(&vecDoc, label);
 }
@@ -1758,6 +1797,7 @@ static void vecCanvasPress(int px, int py){
       vecGestHandle = h;
       vecGest = VG_HANDLE;
       vecGestBegin(h == 8 ? "Girar" : "Escalar");
+      vecInvalidate();                    // igual que al mover: sale de la cache
       return;
     }
     int e = flexVecHitTest(&vecDoc, dx, dy, vecTol());
@@ -1765,8 +1805,10 @@ static void vecCanvasPress(int px, int py){
       if(!(vecDoc.elems[e].flags & FLEXVEC_EF_SEL)) flexVecSelect(&vecDoc, e, 0);
       vecGestElem = e;
       vecGest = VG_MOVE;
+      // Caja de la seleccion AL EMPEZAR: es la referencia del ajuste.
+      flexVecSelBBox(&vecDoc, &vecGestBX0, &vecGestBY0, &vecGestBX1, &vecGestBY1);
       vecGestBegin("Mover");
-      vecInvalidate();                    // el objeto sale de la cache mientras se mueve
+      vecInvalidate();                    // la seleccion sale de la cache mientras se mueve
       return;
     }
     flexVecSelectNone(&vecDoc);
@@ -1843,25 +1885,24 @@ static void vecCanvasMove(int px, int py){
   float dx = vecDocX(px), dy = vecDocY(py);
   switch(vecGest){
     case VG_MOVE: {
-      float ndx = dx - vecGestX0, ndy = dy - vecGestY0;
+      // EL DESTINO SE CALCULA DESDE LA CAJA INICIAL, no desde la de
+      // ahora. Es la unica forma de que el ajuste a la rejilla no se
+      // realimente: si se ajustara el incremento de cada cuadro contra
+      // la posicion ya movida, cada cuadro volveria a saltar una celda
+      // entera y el objeto se iria de la pantalla en medio segundo.
+      float wantX = vecGestBX0 + (dx - vecGestX0);
+      float wantY = vecGestBY0 + (dy - vecGestY0);
       if(vecSnap){
-        // El AJUSTE se aplica al desplazamiento acumulado, no a cada
-        // incremento: acumular redondeos por cuadro haria que el objeto
-        // se fuera desviando mientras se arrastra.
-        float bx0, by0, bx1, by1;
-        if(flexVecSelBBox(&vecDoc, &bx0, &by0, &bx1, &by1) == FLEXVEC_OK){
-          float want = flexVecSnap(bx0 + ndx, VEC_GRID_STEP);
-          ndx = want - bx0;
-          want = flexVecSnap(by0 + ndy, VEC_GRID_STEP);
-          ndy = want - by0;
-        }
+        wantX = flexVecSnap(wantX, VEC_GRID_STEP);
+        wantY = flexVecSnap(wantY, VEC_GRID_STEP);
       }
+      float bx0, by0, bx1, by1;
+      if(flexVecSelBBox(&vecDoc, &bx0, &by0, &bx1, &by1) != FLEXVEC_OK) break;
+      float ndx = wantX - bx0, ndy = wantY - by0;
       if(ndx == 0 && ndy == 0) break;
       vecMarkDirtySel();
       float m[6] = { 1, 0, 0, 1, ndx, ndy };
       flexVecTransformSel(&vecDoc, m, 0);
-      vecGestX0 = dx - (ndx - (dx - vecGestX0));   // el resto no aplicado se conserva
-      vecGestY0 = dy - (ndy - (dy - vecGestY0));
       vecMarkDirtySel();
       break; }
     case VG_HANDLE: {
