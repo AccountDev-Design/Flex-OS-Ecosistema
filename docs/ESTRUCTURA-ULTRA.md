@@ -1,7 +1,7 @@
 # Estructura de Flex OS Ultra (ESP32-P4)
 
 `FlexOS_Ultra.ino` era un solo archivo de **37053 líneas**. Ahora es el
-**orquestador** del sistema y todo lo demás vive en 56 módulos
+**orquestador** del sistema y todo lo demás vive en 59 módulos
 `FlexOS_Ultra_*.h` en la misma carpeta del sketch, que es `FlexOS_Ultra/`.
 
 Esto es **una reorganización, no un cambio funcional**: el código que se
@@ -123,6 +123,9 @@ Los módulos que sí son código portable y con pruebas propias siguen siendo
 | `FlexOS_Ultra_System.h`           |   487 | I2C, soltar caches, Optimizar Flex OS y cambio de tema |
 | `FlexOS_Ultra_AppGallery.h`       |   768 | Galeria |
 | `FlexOS_Ultra_Vault.h`            |  1744 | Flex Vault: interfaz de la Carpeta segura |
+| `FlexOS_Ultra_DeviceCare.h`       |  1604 | Flex Device Care: app, historial, salud y grafico del GY-BNO085 |
+| `FlexOS_Ultra_DeviceTests.h`      |   906 | Device Care: pruebas, diagnostico y Post-Impact Check |
+| `FlexOS_Ultra_FallAlert.h`        |   448 | Device Care: aviso global de posible caida (vertical y horizontal) |
 | `FlexOS_Ultra_Recovery.h`         |   691 | restablecer datos de fabrica y modo seguro |
 
 ## 5. Cómo se comprueba

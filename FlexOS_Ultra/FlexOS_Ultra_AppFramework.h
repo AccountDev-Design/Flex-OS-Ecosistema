@@ -136,6 +136,16 @@ static void storeSuspendApp(); static void storeResumeApp();               // ..
 static void fphEnter(); static void fphTick(); static void fphExit();
 static bool fphBackScreen(); static void fphSuspend(); static void fphResume();
 static void flexPhoneBegin(); static void flexPhoneTick();
+// Flex Device Care. La app vive en FlexOS_Ultra_DeviceCare.h (y sus dos
+// modulos hermanos), muy por debajo en la cadena; aqui solo los
+// prototipos que necesita APP_REG, igual que el navegador o la tienda.
+static void dcEnter(); static void dcTick();
+static bool dcBackScreen(); static void dcSuspend(); static void dcResume();
+static void dcCloseApp(); static bool dcSaveSess(); static void dcLoadSess();
+static bool dcBgWork();
+static void dcBegin();                                   // lo llama setup()
+static void dcSensorTick();                              // lo llama loop()
+static void dcApplyFallPref();
 // Flex Vector Pro. La app vive en FlexOS_Ultra_AppVector.h, muy abajo en la
 // cadena (necesita la red para compartir el SVG); aqui solo los prototipos
 // que APP_REG y sus ganchos necesitan.
@@ -639,6 +649,13 @@ static const AppHooks H_WEATHER  = { NULL, wxHandleBack, wxSuspend, wxResume, NU
 // a Centro; closeApp vuelca el estado a disco (la escritura periodica
 // esta agrupada, asi que al salir SI toca guardar).
 static const AppHooks H_FLEXPHONE = { NULL, fphBackScreen, fphSuspend, fphResume, fphExit, NULL, NULL, NULL, NULL, NULL };
+// Flex Device Care. backScreen retrocede UNA pantalla interna (estado,
+// caidas, historial, pruebas...) antes de salir al escritorio; bgWork
+// declara trabajo real en segundo plano SOLO cuando la deteccion de
+// caidas esta activada, que es cuando de verdad hay algo corriendo.
+// No lleva 'shed': lo unico que reserva es la banda del aviso, y
+// soltarla dejaria al sistema sin poder ensenar el proximo aviso.
+static const AppHooks H_DEVCARE  = { NULL, dcBackScreen, dcSuspend, dcResume, dcCloseApp, dcSaveSess, dcLoadSess, dcBgWork, NULL, NULL };
 // Flex Vector Pro. Es la app con MAS ganchos del sistema, y cada uno esta por
 // un motivo concreto:
 //   backLayer  -> cierra menu, panel o el trazado de la Pluma en curso;
@@ -682,7 +699,14 @@ static FlexApp APP_REG[APP_N] = {
   // NO nace en la rejilla (APP_DEF_DOCK): una placa que actualiza no ve
   // su escritorio reordenado; se anade desde la Caja de aplicaciones.
   { fphEnter, fphTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH | APP_FLEX, APP_CAT_ESENCIAL, APP_DEF_DOCK, &H_FLEXPHONE },
-  // 19 Flex Vector Pro. Cabecera y tactil propios (herramientas, gestos de
+  // 19 Flex Device Care. Cabecera propia (el titulo cambia con la
+  // pantalla interna) y tactil propio (rejilla del test tactil, botones
+  // de las pruebas). APP_FLEX porque maqueta contra el lienzo real, asi
+  // que tambien sirve dentro de una ventana de Modo PC.
+  // NO nace en la rejilla (APP_DEF_DOCK): una placa que actualiza no ve
+  // su escritorio reordenado; se anade desde la Caja de aplicaciones.
+  { dcEnter, dcTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH | APP_FLEX, APP_CAT_SISTEMA, APP_DEF_DOCK, &H_DEVCARE },
+  // 20 Flex Vector Pro. Cabecera y tactil propios (herramientas, gestos de
   // dos dedos y edicion de nodos: no hay ni un toque que pueda tratar el
   // framework por ella). NO nace en la rejilla (APP_DEF_DOCK), igual que
   // Clima, Flex Store y Flex Phone: una placa que actualiza no ve su

@@ -53,7 +53,7 @@ APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net \
         $(BUILD)/test_vault $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
-        $(BUILD)/test_media $(BUILD)/test_mem \
+        $(BUILD)/test_media $(BUILD)/test_mem $(BUILD)/test_fall \
         $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg \
         $(BUILD)/test_vector $(BUILD)/test_qr $(BUILD)/test_httpshare
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun
@@ -92,6 +92,16 @@ MEM_SRC := $(ULTRA)/FlexOS_Mem.cpp
 $(BUILD)/test_mem: test_mem.cpp $(MEM_SRC) $(ULTRA)/FlexOS_Mem.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_mem.cpp $(MEM_SRC)
 
+# --- Deteccion de caidas: maquina de estados y Confidence Score ---
+# Nucleo PURO, igual que el de memoria: recibe una muestra ya medida del
+# BNO085 y decide. CON sanitizers, y con motivo: aqui es donde se fija que
+# caminar, dar un golpe en la mesa o dejar el aparato encima NO cuenten
+# como caida. Comprobar eso a mano obliga a tirar el aparato al suelo; el
+# PC lo hace con senales sinteticas y sin romper nada.
+FALL_SRC := $(ULTRA)/FlexOS_FallDetect.cpp
+
+$(BUILD)/test_fall: test_fall.cpp $(FALL_SRC) $(ULTRA)/FlexOS_FallDetect.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(INC) -o $@ test_fall.cpp $(FALL_SRC)
 # --- FLEX VECTOR PRO: motor vectorial, QR y servidor HTTP -------------------
 # Los tres son nucleo PURO (no tocan Arduino, ni el framebuffer, ni el sistema
 # de archivos): se compilan igual que el del navegador, CON sanitizers.
@@ -280,12 +290,19 @@ INOWARN  := $(WARN) -Wno-unused-function -Wno-unused-variable \
 #      -Wunused-function NO avisa de una static que tenga prototipo previo, y
 #      aqui casi todas lo tienen. Ese fallo deja al sistema atrapado en un
 #      estado que nadie despacha.
-ino: ino_compile.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) check_protos.py check_wiring.py check_shared.py check_stack.py | $(BUILD)
+# El driver del IMU es una unidad de traduccion aparte que SI va a la
+# placa y que ninguna otra bateria toca (habla por el Wire real). Se
+# comprueba aqui, contra los dobles de Arduino: un error de tipos o de
+# nombre en el protocolo SHTP salta en el PC y no en el aparato.
+BNO_SRC := $(ULTRA)/FlexOS_BNO085.cpp
+
+ino: ino_compile.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) $(BNO_SRC) check_protos.py check_wiring.py check_shared.py check_stack.py | $(BUILD)
 	@python3 check_shared.py $(ROOT)
 	@python3 check_protos.py $(INO_SRC)
 	@python3 check_wiring.py $(INO_SRC)
 	@python3 check_stack.py $(ROOT)
 	@$(CXX) $(CXXSTD) -fsyntax-only $(INOWARN) $(INOFLAGS) -x c++ ino_compile.cpp
+	@$(CXX) $(CXXSTD) -fsyntax-only $(WARN) $(INOFLAGS) $(BNO_SRC)
 	@echo "FlexOS_Ultra.ino compila."
 
 # El mismo TU, pero ENLAZADO y EJECUTADO: main() comprueba el reloj del sistema,
@@ -306,7 +323,7 @@ ino: ino_compile.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) check_protos.py chec
 # del runtime se enlaza contra lo que de verdad va a la placa. Un cambio de
 # firma o una llamada mal cableada salta aqui.
 $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) $(JPEG_SRC) \
-                   $(FLNKSRC) $(FLPSRC) $(FLPLINK) $(CORE_SRC) $(MEDIA_SRC) $(MEM_SRC) \
+                   $(FLNKSRC) $(FLPSRC) $(FLPLINK) $(CORE_SRC) $(MEDIA_SRC) $(MEM_SRC) $(FALL_SRC) \
                    $(VMSRC) $(GRANTSRC) $(HOSTSRC) $(PKGCORE) \
                    $(VECSRC) $(QRSRC) $(HTTPSRC) | $(BUILD)
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -x c++ -c ino_compile.cpp -o $(BUILD)/ino_compile.o
@@ -318,6 +335,7 @@ $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) 
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(CORE_SRC) -o $(BUILD)/ino_brcore.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(MEDIA_SRC) -o $(BUILD)/ino_media.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(MEM_SRC)   -o $(BUILD)/ino_mem.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(FALL_SRC)  -o $(BUILD)/ino_fall.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(VMSRC)     -o $(BUILD)/ino_appvm.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(GRANTSRC)  -o $(BUILD)/ino_appgrant.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(HOSTSRC)   -o $(BUILD)/ino_apphost.o
@@ -328,7 +346,7 @@ $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) 
 	@$(CC) -O1 -g -w -Ivendor/cJSON -c $(CJSON) -o $(BUILD)/ino_cjson.o
 	@$(CXX) $(SAN) -o $@ $(BUILD)/ino_compile.o $(BUILD)/ino_extern_stubs.o $(BUILD)/ino_jpeg.o \
 	        $(BUILD)/ino_flexlink.o $(BUILD)/ino_flexphone.o $(BUILD)/ino_flexphonelink.o \
-	        $(BUILD)/ino_brcore.o $(BUILD)/ino_media.o $(BUILD)/ino_mem.o \
+	        $(BUILD)/ino_brcore.o $(BUILD)/ino_media.o $(BUILD)/ino_mem.o $(BUILD)/ino_fall.o \
 	        $(BUILD)/ino_appvm.o $(BUILD)/ino_appgrant.o $(BUILD)/ino_apphost.o \
 	        $(BUILD)/ino_pkgcore.o $(BUILD)/ino_cjson.o \
 	        $(BUILD)/ino_vector.o $(BUILD)/ino_qr.o $(BUILD)/ino_http.o -lcrypto
@@ -361,6 +379,8 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_media
 	@echo
 	@$(BUILD)/test_mem
+	@echo
+	@$(BUILD)/test_fall
 	@echo
 	@$(BUILD)/test_appvm
 	@echo
