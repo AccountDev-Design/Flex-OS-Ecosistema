@@ -174,7 +174,13 @@ static const uint8_t APP_WEIGHT[APP_N] = {
   FLEXMEM_W_HEAVY,    // 15 Camara       (buffer de sensor)
   FLEXMEM_W_LIGHT,    // 16 Clima
   FLEXMEM_W_MEDIUM,   // 17 Flex Store
-  FLEXMEM_W_LIGHT     // 18 Flex Phone
+  FLEXMEM_W_LIGHT,    // 18 Flex Phone
+  // 19 Flex Vector Pro. MEDIA y no PESADA: su huella es de ~1,3 MB de PSRAM
+  // (cache de render, pool de nodos, diario de deshacer y buffer de SVG) y
+  // esta acotada -- no crece con el documento como la cache de miniaturas de
+  // la Galeria o el fotograma del reproductor. Ademas suelta 768 KB en cuanto
+  // el sistema se lo pide (gancho shed), sin perder ni un objeto.
+  FLEXMEM_W_MEDIUM
 };
 static int appWeight(int id){ return (id >= 0 && id < APP_N) ? (int)APP_WEIGHT[id] : FLEXMEM_W_LIGHT; }
 static const char* appWeightName(int id){

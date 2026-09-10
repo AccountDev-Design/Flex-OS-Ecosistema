@@ -38,6 +38,21 @@ tests/
                        verdad con el runtime declarativo de siempre
     test_net.cpp       el transporte real: sockets TCP, hilos y un
                        servidor WebSocket que trocea el primer frame
+    test_vector.cpp    Flex Vector Pro: el motor vectorial entero --
+                       modelo de documento, Bezier, transformaciones,
+                       rasterizador por lineas de barrido (con el area
+                       comprobada al pixel), deshacer/rehacer paso a
+                       paso, SVG, booleanas, y TODOS los limites duros
+                       alcanzados de verdad (256 objetos, 256 nodos por
+                       trazado, pool global, 8 capas, diario lleno)
+    test_qr.cpp        el codificador QR del sistema. No compara la
+                       rejilla contra una escrita a mano: la VUELVE A
+                       LEER -- formato, mascara, zigzag, desentrelazado
+                       -- en los 4 niveles de correccion. Es la unica
+                       forma honesta de saber que un movil lo leeria
+    test_httpshare.cpp el protocolo del servidor HTTP local: peticiones
+                       partidas, rutas con "..", %-escapes truncados,
+                       el testigo de sesion y 4000 entradas de ruido
     jpegcheck.cpp      herramienta: decodifica un JPEG con el decodificador del firmware
     flexpkgcheck.cpp   herramienta: valida un .flexpkg con el NÚCLEO del firmware
     flexapprun.cpp     herramienta: ejecuta un .flxb con el GESTOR del firmware
@@ -112,6 +127,8 @@ node make-fixtures.js
 === 382 comprobaciones, 0 fallos ===
 === FlexOS · app del navegador (Flex OS Ultra) ===
 === 41 comprobaciones, 0 fallos ===
+=== FlexOS · Flex Vector Pro: motor vectorial ===
+=== 300 comprobaciones, 0 fallos ===
 === FlexOS · puente del navegador ===
 === 31 comprobaciones, 0 fallos ===
 === FlexOS · transporte del navegador sobre sockets reales ===

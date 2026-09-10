@@ -24,7 +24,7 @@
 // ##      entrada del sistema es siempre FlexOS_Ultra.ino.
 // #############################################################
 #pragma once
-#include "FlexOS_Ultra_Network.h"   // eslabon anterior de la cadena
+#include "FlexOS_Ultra_AppVector.h"   // eslabon anterior de la cadena
 
 // ##  HORA REAL POR NTP  ·  Lima (UTC-5, sin horario de verano)
 // ##  ------------------------------------------------------

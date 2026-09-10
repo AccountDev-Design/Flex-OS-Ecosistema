@@ -136,6 +136,14 @@ static void storeSuspendApp(); static void storeResumeApp();               // ..
 static void fphEnter(); static void fphTick(); static void fphExit();
 static bool fphBackScreen(); static void fphSuspend(); static void fphResume();
 static void flexPhoneBegin(); static void flexPhoneTick();
+// Flex Vector Pro. La app vive en FlexOS_Ultra_AppVector.h, muy abajo en la
+// cadena (necesita la red para compartir el SVG); aqui solo los prototipos
+// que APP_REG y sus ganchos necesitan.
+static void vecEnter(); static void vecTick();
+static bool vecBackLayer(); static bool vecBackScreen();
+static void vecSuspend(); static void vecResume(); static void vecCloseApp();
+static bool vecSaveSess(); static void vecLoadSess();
+static size_t vecShed(); static bool vecDirtyHook();
 // Hooks opcionales. Las implementaciones viven junto a cada app.
 static void setSuspend(); static void setResume(); static bool setSaveSess(); static void setLoadSess(); static bool setBgWork();
 static void calcResume(); static bool calcSaveSess(); static void calcLoadSess();
@@ -631,6 +639,14 @@ static const AppHooks H_WEATHER  = { NULL, wxHandleBack, wxSuspend, wxResume, NU
 // a Centro; closeApp vuelca el estado a disco (la escritura periodica
 // esta agrupada, asi que al salir SI toca guardar).
 static const AppHooks H_FLEXPHONE = { NULL, fphBackScreen, fphSuspend, fphResume, fphExit, NULL, NULL, NULL, NULL, NULL };
+// Flex Vector Pro. Es la app con MAS ganchos del sistema, y cada uno esta por
+// un motivo concreto:
+//   backLayer  -> cierra menu, panel o el trazado de la Pluma en curso;
+//   backScreen -> del lienzo a la lista de documentos, guardando;
+//   suspend    -> corta el servidor de compartir y vuelca el documento;
+//   shed       -> suelta la cache de render (768 KB) SIN tocar el documento;
+//   dirty      -> el sistema sabe que hay trabajo sin guardar antes de apagar.
+static const AppHooks H_VECTOR   = { vecBackLayer, vecBackScreen, vecSuspend, vecResume, vecCloseApp, vecSaveSess, vecLoadSess, NULL, vecShed, vecDirtyHook };
 // ---- Registro de apps (indices = enum IC_*) ----
 static FlexApp APP_REG[APP_N] = {
   { appRelojEnter, appRelojTick, APP_FLEX, APP_CAT_ESENCIAL, APP_DEF_FAV, NULL },
@@ -666,6 +682,12 @@ static FlexApp APP_REG[APP_N] = {
   // NO nace en la rejilla (APP_DEF_DOCK): una placa que actualiza no ve
   // su escritorio reordenado; se anade desde la Caja de aplicaciones.
   { fphEnter, fphTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH | APP_FLEX, APP_CAT_ESENCIAL, APP_DEF_DOCK, &H_FLEXPHONE },
+  // 19 Flex Vector Pro. Cabecera y tactil propios (herramientas, gestos de
+  // dos dedos y edicion de nodos: no hay ni un toque que pueda tratar el
+  // framework por ella). NO nace en la rejilla (APP_DEF_DOCK), igual que
+  // Clima, Flex Store y Flex Phone: una placa que actualiza no ve su
+  // escritorio reordenado, y la app se anade desde la Caja de aplicaciones.
+  { vecEnter, vecTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH | APP_FLEX, APP_CAT_TRABAJO, APP_DEF_DOCK, &H_VECTOR },
 };
 static const char* appCatName(int id){
   int c = (id >= 0 && id < APP_N) ? APP_REG[id].cat : APP_CAT_SISTEMA;

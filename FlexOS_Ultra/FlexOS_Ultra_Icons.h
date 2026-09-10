@@ -48,8 +48,14 @@ static void arcStroke(float cx, float cy, float r, float a0, float a1, int thick
 enum { IC_RELOJ, IC_GALERIA, IC_MULTIMEDIA, IC_ALMACEN, IC_MODOPC, IC_NOTAS,
        IC_EDU, IC_NAV, IC_CODE, IC_BIEN, IC_PAINT, IC_JUEGOS,
        IC_AJUSTES, IC_CALC, IC_CALEND, IC_CAMARA,
-       IC_CLIMA, IC_FLEXSTORE, IC_FLEXPHONE }; // Flex Store 17, Flex Phone 18: ningun indice anterior se mueve
-#define APP_N 19
+       IC_CLIMA, IC_FLEXSTORE, IC_FLEXPHONE,
+       // Flex Vector Pro (19) se anade AL FINAL, por el mismo motivo que
+       // Flex Store (17) y Flex Phone (18): el indice de este enum ES el id
+       // de la app en APP_REG y ademas viaja a NVS dentro de gAppFav y
+       // gAppHidden. Mover un valor anterior reordenaria el escritorio de
+       // toda placa que actualice.
+       IC_VECTOR };
+#define APP_N 20
 
 static void iconBase(int x, int y, int S, uint16_t bg, int rf100){
   int r = S * rf100 / 100;
@@ -264,6 +270,33 @@ static void drawAppIcon(int id, int x, int y, int S){
       // Dos arcos de enlace a la derecha del aparato.
       arcStroke(px0 + pw, cy, (int)(S * 0.16f), 300, 60, 2, WHITE);
       arcStroke(px0 + pw, cy, (int)(S * 0.26f), 310, 50, 2, WHITE);
+    } break;
+    case IC_VECTOR: {
+      // MARCA: una pluma Bezier con sus dos anclas y su tirador. Es
+      // exactamente lo que la app hace, y lo distingue de Paint (que es
+      // una paleta) de un vistazo en la rejilla del escritorio.
+      iconBase(x, y, S, rgb565(28, 32, 48), 22);
+      float ax = cx - S * 0.24f, ay = cy + S * 0.22f;
+      float bx = cx + S * 0.24f, by = cy - S * 0.20f;
+      // La curva, por trozos: el mismo criterio que el resto de iconos
+      // vectoriales del sistema -- geometria, ni un bitmap.
+      float px0 = ax, py0 = ay;
+      for(int i = 1; i <= 12; i++){
+        float t = (float)i / 12.0f, u = 1.0f - t;
+        float c1x = cx - S * 0.24f, c1y = cy - S * 0.26f;
+        float c2x = cx + S * 0.24f, c2y = cy + S * 0.26f;
+        float qx = u*u*u*ax + 3*u*u*t*c1x + 3*u*t*t*c2x + t*t*t*bx;
+        float qy = u*u*u*ay + 3*u*u*t*c1y + 3*u*t*t*c2y + t*t*t*by;
+        strokeSeg(px0, py0, qx, qy, tk / 2 + 1, rgb565(120, 160, 250));
+        px0 = qx; py0 = qy;
+      }
+      // Anclas: cuadradas, como las de un vertice en el propio editor.
+      int hs = (int)(S * 0.075f); if(hs < 2) hs = 2;
+      fillRect((int)ax - hs, (int)ay - hs, hs * 2, hs * 2, WHITE);
+      fillRect((int)bx - hs, (int)by - hs, hs * 2, hs * 2, WHITE);
+      // Tirador del ancla inferior.
+      strokeSeg(ax, ay, ax + S * 0.20f, ay - S * 0.12f, 1, rgb565(120,160,250));
+      fillCircle((int)(ax + S * 0.20f), (int)(ay - S * 0.12f), hs - 1 > 1 ? hs - 1 : 2, rgb565(120,160,250));
     } break;
     case IC_CAMARA: {
       iconBase(x, y, S, rgb565(74,74,78), 22);

@@ -192,6 +192,20 @@
 // (heap_caps_*) y se ACTUA (soltar buffers); decidir es de alli.
 #include "FlexOS_Mem.h"
 
+// FLEX VECTOR PRO. Tres modulos portables, con sus pruebas de host y
+// sanitizers, por el mismo criterio que FlexOS_Mem o FlexOS_Media: el
+// .ino DIBUJA, los modulos hacen las cuentas.
+//   FlexOS_Vector    -> el motor vectorial: modelo de documento, Bezier,
+//                       rasterizador por lineas de barrido, booleanas y SVG.
+//   FlexOS_QR        -> codificador de codigos QR del SISTEMA (no habia
+//                       ninguno en el repositorio). Lo usa el compartir por
+//                       Wi-Fi, y puede usarlo cualquier otra app.
+//   FlexOS_HttpShare -> el protocolo del servidor HTTP local del SISTEMA
+//                       (tampoco habia ninguno: Flex OS solo tenia clientes).
+#include "FlexOS_Vector.h"
+#include "FlexOS_QR.h"
+#include "FlexOS_HttpShare.h"
+
 // ---- DISPONIBILIDAD REAL DE BLE ------------------------------------------
 // No se escribe a mano "el P4 no tiene BLE": se le pregunta al SDK. soc_caps.h
 // define SOC_BLE_SUPPORTED solo en los chips que llevan radio Bluetooth, asi
@@ -261,6 +275,8 @@
 #include "FlexOS_Ultra_AppDrawer.h"          // menu contextual del escritorio y caja de aplicaciones
 #include "FlexOS_Ultra_Power.h"              // desbloqueo, suspension y apagado completo
 #include "FlexOS_Ultra_Network.h"            // arranque seguro de la radio y Wi-Fi
+#include "FlexOS_Ultra_HttpShare.h"          // servidor HTTP local del sistema (tarea propia)
+#include "FlexOS_Ultra_AppVector.h"          // Flex Vector Pro: editor vectorial
 #include "FlexOS_Ultra_NTP.h"                // cliente NTP en su propia tarea
 #include "FlexOS_Ultra_Conn.h"               // conectividad: Wi-Fi / BLE / modo avion
 #include "FlexOS_Ultra_Notif.h"              // isla dinamica: notificaciones
@@ -586,6 +602,11 @@ void loop(){
   if(!gSafeMode){
     wifiAutoReconnectTick();// reconexion diferida, una vez por arranque
     ntpTick();              // la red corre en su tarea, nunca aqui
+    // SERVIDOR HTTP LOCAL: vigilancia, no trabajo. Solo LEE gNetOnline (el
+    // estado ya publicado por las tareas de red) para cortar el servidor si
+    // se cae el Wi-Fi. No toca el driver: la regla de esp-hosted que
+    // check_wiring.py vigila en wgDataTick y ntpTick vale igual aqui.
+    flexShareTick();
   }
   clkPersistTick();       // guarda la hora en NVS una vez por hora (arranque sin internet)
   bool minChanged = clkUpdate();
