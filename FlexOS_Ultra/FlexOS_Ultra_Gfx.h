@@ -169,7 +169,19 @@ static bool flxGfxInit(){
     Serial.println(F("[GFX] ERROR: sin PSRAM para framebuffers"));
     return false;
   }
-  memset(fb, 0, bytes);
+  // TODOS los buffers a cero, no solo fb. bbuf, lockBuf y homeBuf salen de
+  // heap_caps_aligned_alloc con PSRAM SIN INICIALIZAR, y los tres acaban en el
+  // panel: present() publica bbuf y las transiciones publican lockBuf/homeBuf.
+  // Cualquier camino que vuelque uno de ellos antes de terminar de componerlo
+  // -- una banda publicada a medio pintar, un overlay que se cuela entre dos
+  // fases -- manda al panel basura de PSRAM a pantalla completa, y eso se ve
+  // como un destello de un color plano y saturado durante unos milisegundos.
+  // Cuatro memset de 768 KB UNA vez en el arranque, y ese modo de fallo deja
+  // de existir.
+  memset(fb,      0, bytes);
+  memset(bbuf,    0, bytes);
+  memset(lockBuf, 0, bytes);
+  memset(homeBuf, 0, bytes);
   setBuf(fb);
   // Primer volcado en negro
   (void)xSemaphoreTake(flxDpiSem, 0);

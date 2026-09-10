@@ -54,10 +54,36 @@
 // ##  pantalla de 480 px de ancho, un panel fijo se comeria el sitio
 // ##  donde se dibuja.
 // #############################################################
-#define VEC_HEAD_H     88
-#define VEC_TOOL_H     72
+// LA MAQUETACION SALE DEL LIENZO LOGICO, NO DE SCR_W/SCR_H.
+//
+// gAppW/gAppH son el lienzo real que el framework le da a una app
+// APP_FLEX: la pantalla entera a pantalla completa, o el area de cliente
+// dentro de una ventana de Modo PC. Maquetar contra SCR_W/SCR_H hacia
+// que la app se saliera de la ventana en Modo PC y que no hubiera forma
+// de tener una disposicion horizontal. Es el mismo patron que ya usan
+// WIN_TOP/WIN_BOT en FlexOS_Ultra_AppFramework.h, y el relayout lo
+// dispara el sistema por el camino de siempre: re-ejecuta enter() con
+// gRelayout puesto (ver vecEnter).
+#define VEC_W          gAppW
+#define VEC_H          gAppH
+#define VEC_NAV        (gHosted ? 0 : navBarH())
+// HORIZONTAL cuando el lienzo es mas ancho que alto. En horizontal la
+// tira de herramientas se pone DE PIE a la izquierda y el panel se
+// acopla a la derecha -- como el Tools panel y el panel dock de
+// Illustrator -- porque tumbada abajo se comeria casi la mitad de un
+// alto que ya es corto.
+#define VEC_LAND       (gAppW > gAppH)
+#define VEC_HEAD_H     (VEC_LAND ? 64 : 88)
+// La cabecera va partida en dos como la parte de arriba de Illustrator:
+// arriba la BARRA DE DOCUMENTO (volver, nombre) y debajo el PANEL DE
+// CONTROL (muestras de relleno y trazo, herramienta activa, zoom).
+#define VEC_HEAD_R1    (VEC_LAND ? 34 : 46)
+#define VEC_TOOL_W     76
+#define VEC_TOOL_H     (VEC_LAND ? 0 : 72)
 #define VEC_TOP        VEC_HEAD_H
-#define VEC_BOT        (SCR_H - navBarH() - VEC_TOOL_H)
+#define VEC_BOT        (VEC_H - VEC_NAV - VEC_TOOL_H)
+#define VEC_LEFT       (VEC_LAND ? VEC_TOOL_W : 0)
+#define VEC_CANVAS_W   (VEC_W - VEC_LEFT)
 #define VEC_CANVAS_H   (VEC_BOT - VEC_TOP)
 
 // Herramientas. El orden es el de la tira de abajo.
@@ -72,6 +98,9 @@ enum { VP_NONE = 0, VP_STYLE, VP_LAYERS, VP_ARRANGE, VP_SHARE, VP_N };
 #define VEC_MIN_ZOOM   0.15f
 #define VEC_MAX_ZOOM   16.0f
 #define VEC_LIST_MAX   24        // documentos que lista la galeria
+// Ancho de barrido del rasterizador: el lado LARGO del panel, porque en
+// horizontal el lienzo logico es tan ancho como alto es el panel.
+#define VEC_RAS_W      (SCR_W > SCR_H ? SCR_W : SCR_H)
 
 // #############################################################
 // ##  MEMORIA  ·  presupuesto explicito, todo de una vez
@@ -137,6 +166,11 @@ static uint8_t  vecObjAlpha  = 255;
 
 // Galeria
 static FlexFsEntry vecList[VEC_LIST_MAX];
+// Nodos que declara cada .fxv. Se lee UNA vez, al recargar la lista.
+// Antes se leia la cabecera del archivo DENTRO del bucle de dibujo, con
+// lo que desplazar la lista disparaba hasta 24 lecturas de flash POR
+// CUADRO. Ver vecReload: ahi esta el motivo completo.
+static int16_t  vecListNodes[VEC_LIST_MAX];
 static int      vecListN     = 0;
 static int      vecSelIdx    = -1;
 static int      vecScroll    = 0;
@@ -174,16 +208,38 @@ static int      vecQrSize    = 0;
 
 static void vecRenderAll();
 static void vecRenderGallery();
+static void vecDrawHeader();
+static void vecDrawTools();
+static void vecDrawToast();
 static void vecToast(const char* m);
 static void vecInvalidate();
 
 // #############################################################
 // ##  RESERVA Y LIBERACION
 // #############################################################
+// La cache se pide SIEMPRE por aqui, y siempre sale a cero. PSRAM recien
+// reservada trae lo que hubiera antes, y de esta cache se copian bandas
+// enteras al framebuffer: una banda que se copie antes de haberse
+// rasterizado publicaria esa basura a pantalla completa -- el destello de
+// color plano. Poner los 768 KB a cero cuesta una vez y quita el modo de
+// fallo entero.
+static void vecCacheAlloc(){
+  if(vecCache) return;
+  vecCache = (uint16_t*)heap_caps_aligned_alloc(64, (size_t)SCR_W * SCR_H * 2,
+                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(vecCache) memset(vecCache, 0, (size_t)SCR_W * SCR_H * 2);
+}
+
 static bool vecArenaInit(){
   if(vecReady) return true;
   vecMemErr = 0;
-  size_t rasBytes = flexVecRasterBytes(SCR_W);
+  // El barrido se dimensiona al lienzo MAS ANCHO que puede darse, no al
+  // ancho del panel: en horizontal (ventana apaisada de Modo PC) el
+  // lienzo logico llega a SCR_H px de ancho, y con el barrido a SCR_W
+  // toda figura mas ancha que 480 px saldria cortada por la derecha
+  // (fvScanFill acota el tramo a covW). Son SCR_H - SCR_W bytes mas, una
+  // sola vez.
+  size_t rasBytes = flexVecRasterBytes(VEC_RAS_W);
   if(!vecNodes)   vecNodes   = (FlexVecNode*)heap_caps_malloc((size_t)FLEXVEC_MAX_NODES * sizeof(FlexVecNode), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if(!vecUndoBuf) vecUndoBuf = (uint8_t*)heap_caps_malloc(FLEXVEC_UNDO_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if(!vecTextBuf) vecTextBuf = (char*)heap_caps_malloc(FLEXVEC_TEXT_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -192,14 +248,14 @@ static bool vecArenaInit(){
   // La cache es lo unico que puede faltar sin que la app deje de
   // funcionar: sin ella se rasteriza directo al framebuffer, que es mas
   // lento pero correcto. Todo lo demas es obligatorio.
-  if(!vecCache)   vecCache   = (uint16_t*)heap_caps_aligned_alloc(64, (size_t)SCR_W * SCR_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  vecCacheAlloc();
   if(!vecNodes || !vecUndoBuf || !vecTextBuf || !vecRasBlk || !vecSvg){
     vecMemErr = 1;
     return false;
   }
   vecArena.nodes = vecNodes; vecArena.undo = vecUndoBuf; vecArena.text = vecTextBuf;
   if(flexVecAttach(&vecDoc, &vecArena) != FLEXVEC_OK){ vecMemErr = 1; return false; }
-  if(flexVecRasterInit(&vecRas, vecRasBlk, rasBytes, SCR_W) != FLEXVEC_OK){ vecMemErr = 1; return false; }
+  if(flexVecRasterInit(&vecRas, vecRasBlk, rasBytes, VEC_RAS_W) != FLEXVEC_OK){ vecMemErr = 1; return false; }
   vecReady = true;
   return true;
 }
@@ -229,24 +285,24 @@ static void vecArenaFree(){
 // #############################################################
 static void vecViewMat(FlexVecView* v){
   v->m[0] = vecZoom; v->m[1] = 0; v->m[2] = 0; v->m[3] = vecZoom;
-  v->m[4] = -vecPanX * vecZoom;
+  v->m[4] = -vecPanX * vecZoom + (float)VEC_LEFT;
   v->m[5] = -vecPanY * vecZoom + (float)VEC_TOP;
-  v->clipX0 = 0; v->clipY0 = VEC_TOP;
-  v->clipX1 = SCR_W - 1; v->clipY1 = VEC_BOT - 1;
+  v->clipX0 = VEC_LEFT; v->clipY0 = VEC_TOP;
+  v->clipX1 = VEC_W - 1; v->clipY1 = VEC_BOT - 1;
 }
-static inline float vecDocX(int px){ return vecPanX + (float)px / vecZoom; }
+static inline float vecDocX(int px){ return vecPanX + (float)(px - VEC_LEFT) / vecZoom; }
 static inline float vecDocY(int py){ return vecPanY + (float)(py - VEC_TOP) / vecZoom; }
-static inline int   vecPixX(float dx){ return (int)((dx - vecPanX) * vecZoom + 0.5f); }
+static inline int   vecPixX(float dx){ return (int)((dx - vecPanX) * vecZoom + 0.5f) + VEC_LEFT; }
 static inline int   vecPixY(float dy){ return (int)((dy - vecPanY) * vecZoom + 0.5f) + VEC_TOP; }
 static inline float vecTol(){ return (float)VEC_TOUCH_TOL / vecZoom; }
 
 static void vecFitView(){
-  float zx = (float)(SCR_W - 32) / (vecDoc.artW > 1 ? vecDoc.artW : 1);
+  float zx = (float)(VEC_CANVAS_W - 32) / (vecDoc.artW > 1 ? vecDoc.artW : 1);
   float zy = (float)(VEC_CANVAS_H - 32) / (vecDoc.artH > 1 ? vecDoc.artH : 1);
   vecZoom = zx < zy ? zx : zy;
   if(vecZoom < VEC_MIN_ZOOM) vecZoom = VEC_MIN_ZOOM;
   if(vecZoom > VEC_MAX_ZOOM) vecZoom = VEC_MAX_ZOOM;
-  vecPanX = vecDoc.artW * 0.5f - (float)SCR_W / (2.0f * vecZoom);
+  vecPanX = vecDoc.artW * 0.5f - (float)VEC_CANVAS_W / (2.0f * vecZoom);
   vecPanY = vecDoc.artH * 0.5f - (float)VEC_CANVAS_H / (2.0f * vecZoom);
   vecInvalidate();
 }
@@ -255,7 +311,7 @@ static void vecClampView(){
   if(vecZoom > VEC_MAX_ZOOM) vecZoom = VEC_MAX_ZOOM;
   // Margen de una pantalla alrededor de la mesa de trabajo: se puede
   // sacar el documento de la vista, pero no perderlo de vista.
-  float mx = (float)SCR_W / vecZoom, my = (float)VEC_CANVAS_H / vecZoom;
+  float mx = (float)VEC_CANVAS_W / vecZoom, my = (float)VEC_CANVAS_H / vecZoom;
   if(vecPanX < -mx) vecPanX = -mx;
   if(vecPanY < -my) vecPanY = -my;
   if(vecPanX > vecDoc.artW) vecPanX = vecDoc.artW;
@@ -263,6 +319,76 @@ static void vecClampView(){
 }
 
 static void vecInvalidate(){ vecCacheOk = false; }
+
+// #############################################################
+// ##  DEL LIENZO LOGICO AL PANEL  ·  las dos orientaciones
+// ##  ------------------------------------------------------
+// ##  En VERTICAL la app y el panel comparten ejes: fila logica ==
+// ##  fila fisica, y gClipX0/gClipX1 recortan de verdad en X.
+// ##
+// ##  En HORIZONTAL no. Gfx.h gira 90 grados en putPhys(): la fila
+// ##  FISICA es la COLUMNA logica, y en ese camino gClipX0/gClipX1 ni
+// ##  se miran -- el unico recorte que queda vivo es gClipY0/gClipY1,
+// ##  que ahi acota la X LOGICA. Copiar "la banda de filas y0..y1" con
+// ##  fbCopyBand() en horizontal copiaria una franja girada del sitio
+// ##  equivocado, y ademas arrasaria la tira de herramientas que va de
+// ##  pie a la izquierda, porque fbCopyBand copia filas ENTERAS de
+// ##  SCR_W.
+// ##
+// ##  Todo lo que copia o recorta pasa por estas tres funciones. Es la
+// ##  unica forma de que las dos orientaciones no se separen con el
+// ##  tiempo.
+// #############################################################
+static void vecPhysRect(int lx0, int ly0, int lx1, int ly1,
+                        int* px0, int* py0, int* px1, int* py1){
+  if(gLand){                       // panel girado: fila fisica = columna logica
+    *py0 = lx0; *py1 = lx1;
+    *px0 = SCR_W - 1 - ly1; *px1 = SCR_W - 1 - ly0;
+  } else {
+    *px0 = lx0; *px1 = lx1; *py0 = ly0; *py1 = ly1;
+  }
+}
+
+// Recorta el dibujo al rectangulo logico dado, con el recorte que
+// REALMENTE mira la primitiva en cada orientacion.
+static void vecClipRect(int lx0, int ly0, int lx1, int ly1){
+  if(gLand){ gClipY0 = lx0; gClipY1 = lx1; gClipX0 = 0; gClipX1 = SCR_W - 1; }
+  else     { gClipX0 = lx0; gClipX1 = lx1; gClipY0 = ly0; gClipY1 = ly1; }
+}
+static void vecClipCanvas(){ vecClipRect(VEC_LEFT, VEC_TOP, VEC_W - 1, VEC_BOT - 1); }
+
+// Copia de la cache al framebuffer el rectangulo LOGICO dado. En
+// vertical y a pantalla completa es exactamente el memcpy por filas que
+// hacia fbCopyBand(), solo que acotado tambien en X: en un arrastre eso
+// ya evita copiar el ancho entero cuando lo que se movio son 80 px.
+static void vecCopyRect(int lx0, int ly0, int lx1, int ly1){
+  if(!vecCache) return;
+  uint16_t* dst = gRtTarget ? gRtTarget : fb;
+  if(dst == vecCache) return;
+  int x0, y0, x1, y1;
+  vecPhysRect(lx0, ly0, lx1, ly1, &x0, &y0, &x1, &y1);
+  if(x0 < 0) x0 = 0;
+  if(y0 < 0) y0 = 0;
+  if(x1 >= SCR_W) x1 = SCR_W - 1;
+  if(y1 >= SCR_H) y1 = SCR_H - 1;
+  if(x0 > x1 || y0 > y1) return;
+  size_t run = (size_t)(x1 - x0 + 1) * 2;
+  for(int y = y0; y <= y1; y++)
+    memcpy(dst + (size_t)y * SCR_W + x0, vecCache + (size_t)y * SCR_W + x0, run);
+}
+static void vecCopyCanvas(){ vecCopyRect(VEC_LEFT, VEC_TOP, VEC_W - 1, VEC_BOT - 1); }
+
+// Vuelca al panel el rectangulo logico dado. flxFlush() trabaja en
+// FILAS FISICAS, asi que la traduccion tiene que pasar por vecPhysRect.
+static void vecFlushRect(int lx0, int ly0, int lx1, int ly1){
+  int x0, y0, x1, y1;
+  vecPhysRect(lx0, ly0, lx1, ly1, &x0, &y0, &x1, &y1);
+  (void)x0; (void)x1;
+  if(y0 < 0) y0 = 0;
+  if(y1 >= SCR_H) y1 = SCR_H - 1;
+  if(y0 > y1) return;
+  flxFlush(y0, y1);
+}
 // true mientras un gesto esta TRANSFORMANDO la seleccion (moviendo,
 // escalando o girando). Durante ese rato la seleccion ENTERA sale de la
 // cache y se compone encima en cada cuadro.
@@ -417,11 +543,11 @@ static void vecDrawGrid(){
   int sy1 = ay1 > VEC_BOT ? VEC_BOT : ay1;
   for(float gx = 0; gx <= vecDoc.artW + 0.01f; gx += step){
     int x = vecPixX(gx);
-    if(x < 0 || x >= SCR_W) continue;
+    if(x < VEC_LEFT || x >= VEC_W) continue;
     vLine(x, sy0, sy1 - sy0, c);
   }
-  int sx0 = ax0 < 0 ? 0 : ax0;
-  int sx1 = ax1 > SCR_W ? SCR_W : ax1;
+  int sx0 = ax0 < VEC_LEFT ? VEC_LEFT : ax0;
+  int sx1 = ax1 > VEC_W ? VEC_W : ax1;
   for(float gy = 0; gy <= vecDoc.artH + 0.01f; gy += step){
     int y = vecPixY(gy);
     if(y < VEC_TOP || y >= VEC_BOT) continue;
@@ -560,8 +686,8 @@ static void vecRenderDoc(){
   uint16_t* dst = vecCache ? vecCache : fb;
   setBuf(dst);
   int sx0 = gClipX0, sx1 = gClipX1, sy0 = gClipY0, sy1 = gClipY1;
-  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = VEC_TOP; gClipY1 = VEC_BOT - 1;
-  fillRect(0, VEC_TOP, SCR_W, VEC_CANVAS_H, TH_PAGE);
+  vecClipCanvas();
+  fillRect(VEC_LEFT, VEC_TOP, VEC_CANVAS_W, VEC_CANVAS_H, TH_PAGE);
   vecDrawArtboard();
   vecDrawGrid();
   FlexVecView v; vecViewMat(&v);
@@ -576,7 +702,11 @@ static void vecRenderDoc(){
   }
   gClipX0 = sx0; gClipX1 = sx1; gClipY0 = sy0; gClipY1 = sy1;
   setBuf(fb);
-  vecCacheOk = true;
+  // SIN cache no hay nada que dar por bueno: se acaba de rasterizar
+  // DIRECTAMENTE sobre el framebuffer, asi que el proximo cuadro tiene
+  // que volver a hacerlo. Marcarla valida aqui dejaria el lienzo
+  // congelado en el modo de emergencia sin PSRAM para la cache.
+  vecCacheOk = (vecCache != NULL);
 }
 
 // #############################################################
@@ -743,9 +873,13 @@ static void vecDrawMarquee(){
 // ##  ninguna falta.
 // #############################################################
 static void vecMarkDirty(int x0, int y0, int x1, int y1){
-  (void)x0; (void)x1;                    // se vuelca por BANDAS de filas
-  if(y0 > y1) return;
-  if(!vecDirtyAny){ vecDirtyY0 = y0; vecDirtyY1 = y1; vecDirtyAny = true; return; }
+  if(y0 > y1 || x0 > x1) return;
+  if(!vecDirtyAny){
+    vecDirtyX0 = x0; vecDirtyX1 = x1; vecDirtyY0 = y0; vecDirtyY1 = y1;
+    vecDirtyAny = true; return;
+  }
+  if(x0 < vecDirtyX0) vecDirtyX0 = x0;
+  if(x1 > vecDirtyX1) vecDirtyX1 = x1;
   if(y0 < vecDirtyY0) vecDirtyY0 = y0;
   if(y1 > vecDirtyY1) vecDirtyY1 = y1;
 }
@@ -754,44 +888,81 @@ static void vecMarkDirtyElem(int e){
   FlexVecView v; vecViewMat(&v);
   int x0, y0, x1, y1;
   if(flexVecElemPixBBox(&vecDoc, e, &v, &x0, &y0, &x1, &y1) == FLEXVEC_OK)
-    vecMarkDirty(x0, y0 - 40, x1, y1 + 40);   // margen: tiradores y marco de seleccion
+    vecMarkDirty(x0 - 40, y0 - 40, x1 + 40, y1 + 40);   // margen: tiradores y marco de seleccion
 }
 static void vecMarkDirtySel(){
   for(int e = 0; e < FLEXVEC_MAX_ELEMS; e++)
     if(vecElemOk(e) && (vecDoc.elems[e].flags & FLEXVEC_EF_SEL)) vecMarkDirtyElem(e);
 }
-static void vecMarkDirtyAll(){ vecMarkDirty(0, VEC_TOP, SCR_W - 1, VEC_BOT - 1); }
+static void vecMarkDirtyAll(){ vecMarkDirty(VEC_LEFT, VEC_TOP, VEC_W - 1, VEC_BOT - 1); }
 
-// Pinta la banda [y0,y1] del lienzo: cache -> framebuffer, encima las
+// Pinta el rectangulo sucio del lienzo: cache -> framebuffer, encima las
 // capas vivas, y al panel.
-static void vecPaintBand(int y0, int y1){
+//
+// EN HORIZONTAL NO HAY REPINTADO PARCIAL, y es deliberado. Con el panel
+// girado no queda ningun recorte que acote la Y LOGICA (ver vecClipRect),
+// asi que un tirador de seleccion que se salga del lienzo se pintaria
+// sobre la cabecera o sobre la tira de herramientas y ahi se quedaria.
+// Ademas la orientacion horizontal solo se da dentro de una ventana de
+// Modo PC, donde flxFlush() no vuelca nada al panel y DeX recompone la
+// ventana ENTERA en cuanto la app dibuja algo: repintar por bandas no
+// ahorraria ni un byte. Ahi se repinta el lienzo completo y se vuelve a
+// estampar el marco, que es correcto y cuesta lo mismo.
+// Lo que se esta transformando NO esta en la cache (vecRenderDoc lo
+// salta mientras dura el gesto): se compone encima en cada cuadro, y por
+// eso arrastrar cuesta las figuras que se mueven y no el documento
+// entero. Va aparte porque lo necesitan los DOS caminos de pintado -- el
+// parcial y el completo -- y si solo lo hiciera uno, publicar por el
+// otro dejaria la seleccion invisible a mitad de arrastre.
+static void vecDrawLive(){
+  if(!vecLiveEdit()) return;
+  FlexVecView v; vecViewMat(&v);
+  int16_t order[FLEXVEC_MAX_ELEMS];
+  int n = flexVecPaintOrder(&vecDoc, order, FLEXVEC_MAX_ELEMS);
+  for(int i = 0; i < n; i++)
+    if(vecDoc.elems[order[i]].flags & FLEXVEC_EF_SEL) vecDrawElem(order[i], &v);
+}
+
+static void vecPaintRect(int x0, int y0, int x1, int y1){
+  bool full = gLand;
+  if(full){ x0 = VEC_LEFT; y0 = VEC_TOP; x1 = VEC_W - 1; y1 = VEC_BOT - 1; }
+  // Estrechar en X solo vale si TODO lo que se dibuja encima cabe en el
+  // recuadro sucio. Con la herramienta de nodos o con la pluma abierta no
+  // cabe: un tirador de Bezier se va mucho mas lejos que la caja de la
+  // curva, y recortarlo dejaria medio tirador del cuadro anterior pegado
+  // en pantalla. Con esas dos herramientas se copia y se recorta el ancho
+  // ENTERO del lienzo, que es justo lo que se hacia antes; lo que se gana
+  // es el caso normal, que es arrastrar una figura.
+  if(vecTool == VT_NODE || (vecTool == VT_PEN && vecPenElem >= 0)){
+    x0 = VEC_LEFT; x1 = VEC_W - 1;
+  }
+  if(x0 < VEC_LEFT) x0 = VEC_LEFT;
+  if(x1 > VEC_W - 1) x1 = VEC_W - 1;
   if(y0 < VEC_TOP) y0 = VEC_TOP;
   if(y1 > VEC_BOT - 1) y1 = VEC_BOT - 1;
-  if(y0 > y1) return;
+  if(x0 > x1 || y0 > y1) return;
   if(!vecCacheOk) vecRenderDoc();
   setBuf(fb);
   int sx0 = gClipX0, sx1 = gClipX1, sy0 = gClipY0, sy1 = gClipY1;
-  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = y0; gClipY1 = y1;
-  if(vecCache) fbCopyBand(vecCache, y0, y1);
-  // Lo que se esta transformando no esta en la cache: se compone AQUI, y
-  // por eso arrastrar cuesta las figuras que se mueven y no el documento.
-  if(vecLiveEdit()){
-    FlexVecView v; vecViewMat(&v);
-    int16_t order[FLEXVEC_MAX_ELEMS];
-    int n = flexVecPaintOrder(&vecDoc, order, FLEXVEC_MAX_ELEMS);
-    for(int i = 0; i < n; i++)
-      if(vecDoc.elems[order[i]].flags & FLEXVEC_EF_SEL) vecDrawElem(order[i], &v);
-  }
+  vecClipRect(x0, y0, x1, y1);
+  vecCopyRect(x0, y0, x1, y1);
+  vecDrawLive();
   vecDrawSelection();
   if(vecTool == VT_NODE) vecDrawNodes();
   vecDrawPenPreview();
   vecDrawMarquee();
   gClipX0 = sx0; gClipX1 = sx1; gClipY0 = sy0; gClipY1 = sy1;
-  flxFlush(y0, y1);
+  if(full){
+    vecDrawHeader(); vecDrawTools(); vecDrawToast();
+    flxFlushAll();
+  } else {
+    vecFlushRect(x0, y0, x1, y1);
+  }
 }
+static void vecPaintBand(int y0, int y1){ vecPaintRect(VEC_LEFT, y0, VEC_W - 1, y1); }
 static void vecFlushDirty(){
   if(!vecDirtyAny) return;
-  vecPaintBand(vecDirtyY0, vecDirtyY1);
+  vecPaintRect(vecDirtyX0, vecDirtyY0, vecDirtyX1, vecDirtyY1);
   vecDirtyAny = false;
 }
 
@@ -805,6 +976,63 @@ static void vecFlushDirty(){
 // ##  del usuario, no la paleta del sistema. Una hoja blanca es blanca
 // ##  tambien en modo oscuro, porque es papel, no interfaz.
 // #############################################################
+// Nombre de cada herramienta, en el orden del enum VT_*. Lo ensena el
+// panel de control, igual que Illustrator ensena la herramienta activa.
+static const char* VEC_TOOL_NAME[VT_N] = {
+  "Seleccion", "Nodo directo", "Pluma", "Rectangulo",
+  "Elipse", "Poligono", "Linea", "Texto"
+};
+
+// LA TIRA DE HERRAMIENTAS, en DOS GRUPOS como el panel de herramientas
+// de Illustrator: SELECCION (flecha, nodo, pluma) y FORMAS (rectangulo,
+// elipse, poligono, linea, texto), con una divisoria en medio. Van
+// pegadas entre si y centradas, no repartidas por todo el ancho, para
+// que se lean como UN panel y no como ocho botones sueltos.
+//
+// En horizontal la tira se pone DE PIE a la izquierda: tumbada abajo se
+// comeria casi un sexto de un alto que ya es corto, y de pie a la
+// izquierda es exactamente donde Illustrator tiene su panel de
+// herramientas.
+#define VEC_TOOL_GROUP 3          // las 3 primeras = grupo de seleccion
+#define VEC_TOOL_GAP   14         // hueco de la divisoria entre grupos
+
+// Centro de la celda de la herramienta i y paso entre celdas. UNA sola
+// fuente para el dibujo y para el toque.
+static void vecToolCell(int i, int* cx, int* cy, int* step){
+  int n = VT_N, gap = VEC_TOOL_GAP;
+  if(VEC_LAND){
+    int s = (VEC_CANVAS_H - 20 - gap) / n;
+    if(s < 30) s = 30;
+    int y0 = VEC_TOP + (VEC_CANVAS_H - (s * n + gap)) / 2;
+    if(y0 < VEC_TOP + 2) y0 = VEC_TOP + 2;
+    *cx = VEC_TOOL_W / 2;
+    *cy = y0 + i * s + s / 2 + (i >= VEC_TOOL_GROUP ? gap : 0);
+    *step = s;
+  } else {
+    int s = (VEC_W - 20 - gap) / n;
+    if(s < 30) s = 30;
+    int x0 = (VEC_W - (s * n + gap)) / 2;
+    if(x0 < 2) x0 = 2;
+    *cx = x0 + i * s + s / 2 + (i >= VEC_TOOL_GROUP ? gap : 0);
+    *cy = VEC_BOT + VEC_TOOL_H / 2;
+    *step = s;
+  }
+}
+
+// Zonas de interfaz, en coordenadas logicas. Las usan el dibujo, el
+// toque y el reparto del tick: si cada uno se hiciera su propia cuenta,
+// en horizontal se separarian a la primera.
+static bool vecInHeader(int px, int py){
+  return px >= 0 && px < VEC_W && py >= 0 && py < VEC_HEAD_H;
+}
+static bool vecInTools(int px, int py){
+  if(VEC_LAND) return px >= 0 && px < VEC_TOOL_W && py >= VEC_TOP && py < VEC_BOT;
+  return px >= 0 && px < VEC_W && py >= VEC_BOT && py < VEC_BOT + VEC_TOOL_H;
+}
+static bool vecInCanvas(int px, int py){
+  return px >= VEC_LEFT && px < VEC_W && py >= VEC_TOP && py < VEC_BOT;
+}
+
 static void vecGlyphTool(int t, int cx, int cy, uint16_t c){
   switch(t){
     case VT_SELECT:                      // puntero
@@ -837,59 +1065,130 @@ static void vecGlyphTool(int t, int cx, int cy, uint16_t c){
   }
 }
 
+// GEOMETRIA DE LOS BOTONES DE LA CABECERA (deshacer, rehacer, menu).
+// UNA sola fuente para dibujarlos y para acertarlos: dibujo y toque
+// calculados por separado acaban separandose de verdad.
+//
+// La caja TACTIL es de 48x48 aunque la pastilla que se ve mida 40: en
+// una capacitiva de 480 px un pulgar tapa mas de lo que apunta, y la
+// guia de accesibilidad de 44x44 es el minimo, no el objetivo. El
+// tamano visible no cambia -- lo que crece es lo que responde.
+#define VEC_HBTN_N    3
+#define VEC_HBTN_STEP 52
+#define VEC_HBTN_R    20         // radio de la pastilla VISIBLE
+#define VEC_HBTN_HIT  24         // media caja TACTIL -> 49x49
+static int vecHeadBtnCX(int i){
+  return VEC_W - 12 - VEC_HBTN_R - (VEC_HBTN_N - 1 - i) * VEC_HBTN_STEP;
+}
+static int vecHeadBtnCY(){ return VEC_HEAD_H / 2; }
+static int vecHeadBtnX0(){ return vecHeadBtnCX(0) - VEC_HBTN_HIT; }
+
+// Muestras de relleno y trazo del panel de control. Devuelve la caja
+// TACTIL, que es mas ancha que el par de cuadrados que se ve.
+static void vecHeadSwatch(int* x, int* y, int* w, int* h, int* sw){
+  int r1 = VEC_HEAD_R1, strip = VEC_HEAD_H - r1;
+  *sw = strip >= 40 ? 20 : 15;
+  *x = 16; *y = r1 + 1; *w = 48; *h = strip - 2;
+}
+
 static void vecDrawHeader(){
   setBuf(fb);
-  fillRect(0, 0, SCR_W, VEC_HEAD_H, TH_WIN);
-  hLine(0, VEC_HEAD_H - 1, SCR_W, TH_DIV);
+  int r1 = VEC_HEAD_R1;
+  int bx0 = vecHeadBtnX0();
+  // Dos materiales, no uno: la barra del documento sobre TH_WIN y el
+  // panel de control sobre TH_SURF2. Es lo que hace que la cabecera se
+  // lea como una BARRA DE MANDO y no como un titulo suelto, y lo que la
+  // separa a simple vista del panel acoplado.
+  fillRect(0, 0, VEC_W, r1, TH_WIN);
+  fillRect(0, r1, VEC_W, VEC_HEAD_H - r1, TH_SURF2);
+  fillRect(bx0 - 8, r1, VEC_W - bx0 + 8, VEC_HEAD_H - r1, TH_WIN);
+  hLine(0, r1, bx0 - 8, TH_DIV);
+  hLine(0, VEC_HEAD_H - 1, VEC_W, TH_DIV);
   // Chevron de "atras" con la misma geometria que el resto del sistema.
-  strokeSegAA(30, 30, 18, 22, 2.4f, TH_NAV);
-  strokeSegAA(18, 22, 30, 14, 2.4f, TH_NAV);
+  int cy1 = r1 / 2;
+  strokeSegAA(30, cy1 + 8, 18, cy1, 2.4f, TH_NAV);
+  strokeSegAA(18, cy1, 30, cy1 - 8, 2.4f, TH_NAV);
   char title[FLEXFS_NAME_MAX];
   if(vecPath[0]) flexFsStem(vecPath, title, sizeof(title));
   else           snprintf(title, sizeof(title), "%s", vecDoc.name);
-  char fit[40]; uiLabelFit(title, 190, 3, fit, sizeof(fit));
-  drawText(48, 12, fit, 3, TH_TXT);
-  char sub[64];
-  snprintf(sub, sizeof(sub), "%d objetos \xC2\xB7 %d%%",
+  int tw = VEC_W - 48 - 20;
+  if(tw > 260) tw = 260;
+  char fit[40]; uiLabelFit(title, tw, 3, fit, sizeof(fit));
+  drawText(48, cy1 - 11, fit, 3, TH_TXT);
+
+  // --- franja de control: con que se pinta y con que se dibuja --------
+  int cy = r1 + (VEC_HEAD_H - r1) / 2;
+  int hx, hy, hw, hh, s;
+  vecHeadSwatch(&hx, &hy, &hw, &hh, &s);
+  int off = s / 2;
+  int sy = cy - (s + off) / 2;
+  // Relleno delante y trazo detras, superpuestos: la misma pareja de
+  // cuadrados que lleva Illustrator en su panel de control. Tocarlos
+  // abre el panel de Apariencia -- que ya existe -- porque es donde se
+  // cambian; no hay ninguna funcion nueva detras.
+  fillRect(hx + 4 + off, sy + off, s, s, vecRgb(vecStrokeRGB));
+  drawRect(hx + 4 + off, sy + off, s, s, TH_BORDER);
+  fillRect(hx + 4, sy, s, s, vecRgb(vecFillRGB));
+  drawRect(hx + 4, sy, s, s, TH_BORDER);
+  char ctl[64];
+  snprintf(ctl, sizeof(ctl), "%s \xC2\xB7 %.1f pt",
+           VEC_TOOL_NAME[vecTool], (double)vecStrokeW);
+  drawText(hx + hw + 10, cy - 4, ctl, 1, TH_TXT);
+  char sub[48];
+  snprintf(sub, sizeof(sub), "%d obj \xC2\xB7 %d%%",
            flexVecElemCount(&vecDoc), (int)(vecZoom * 100.0f + 0.5f));
-  drawText(48, 44, sub, 1, TH_TXT2);
+  drawTextR(bx0 - 16, cy - 4, sub, 1, TH_TXT2);
+
   // Deshacer / rehacer / menu. Un boton apagado se dibuja apagado: un
   // boton que parece activo y no hace nada es peor que no tenerlo.
-  int bx = SCR_W - 158;
-  for(int i = 0; i < 3; i++){
-    int cx = bx + i * 50 + 20, cy = 34;
+  int bcy = vecHeadBtnCY();
+  for(int i = 0; i < VEC_HBTN_N; i++){
+    int cx = vecHeadBtnCX(i);
     bool on = (i == 0) ? flexVecCanUndo(&vecDoc)
             : (i == 1) ? flexVecCanRedo(&vecDoc) : true;
     uint16_t c = on ? TH_NAV : TH_DIS;
-    uiSurface(cx - 20, cy - 20, 40, 40, 14, 0);
+    uiSurface(cx - VEC_HBTN_R, bcy - VEC_HBTN_R, VEC_HBTN_R * 2, VEC_HBTN_R * 2, 14, 0);
     if(i < 2){
       float dir = i ? 1.0f : -1.0f;
       for(int k = 0; k < 10; k++){
         float a = 3.1416f * (0.15f + 0.7f * k / 9.0f);
         float b = 3.1416f * (0.15f + 0.7f * (k + 1) / 9.0f);
-        strokeSegAA(cx - dir * (9 * cosf(a)), cy + 2 - 7 * sinf(a),
-                    cx - dir * (9 * cosf(b)), cy + 2 - 7 * sinf(b), 1.5f, c);
+        strokeSegAA(cx - dir * (9 * cosf(a)), bcy + 2 - 7 * sinf(a),
+                    cx - dir * (9 * cosf(b)), bcy + 2 - 7 * sinf(b), 1.5f, c);
       }
-      strokeSegAA(cx - dir * 9, cy + 2, cx - dir * 4, cy - 3, 1.5f, c);
-      strokeSegAA(cx - dir * 9, cy + 2, cx - dir * 4, cy + 7, 1.5f, c);
+      strokeSegAA(cx - dir * 9, bcy + 2, cx - dir * 4, bcy - 3, 1.5f, c);
+      strokeSegAA(cx - dir * 9, bcy + 2, cx - dir * 4, bcy + 7, 1.5f, c);
     } else {
-      for(int k = -1; k <= 1; k++) fillCircle(cx, cy + k * 8, 2, c);
+      for(int k = -1; k <= 1; k++) fillCircle(cx, bcy + k * 8, 2, c);
     }
   }
 }
 
 static void vecDrawTools(){
   setBuf(fb);
-  int ty = VEC_BOT;
-  fillRect(0, ty, SCR_W, VEC_TOOL_H, TH_WIN);
-  hLine(0, ty, SCR_W, TH_DIV);
-  int n = VT_N, w = SCR_W / n;
-  for(int i = 0; i < n; i++){
-    int cx = i * w + w / 2, cy = ty + VEC_TOOL_H / 2;
+  if(VEC_LAND){
+    fillRect(0, VEC_TOP, VEC_TOOL_W, VEC_CANVAS_H, TH_WIN);
+    vLine(VEC_TOOL_W - 1, VEC_TOP, VEC_CANVAS_H, TH_DIV);
+  } else {
+    fillRect(0, VEC_BOT, VEC_W, VEC_TOOL_H, TH_WIN);
+    hLine(0, VEC_BOT, VEC_W, TH_DIV);
+  }
+  int cx = 0, cy = 0, step = 0;
+  for(int i = 0; i < VT_N; i++){
+    vecToolCell(i, &cx, &cy, &step);
     bool on = (i == vecTool);
-    if(on) fillRoundRect(cx - w / 2 + 4, ty + 6, w - 8, VEC_TOOL_H - 14, 14, TH_ACCS);
+    int r = step / 2 - 3;
+    if(r > 22) r = 22;
+    if(r < 12) r = 12;
+    if(on) fillRoundRect(cx - r, cy - r, r * 2, r * 2, 14, TH_ACCS);
     vecGlyphTool(i, cx, cy, on ? TH_PRIM : TH_TXT2);
   }
+  // Divisoria entre el grupo de SELECCION y el de FORMAS.
+  int ax, ay, bx, by, s2;
+  vecToolCell(VEC_TOOL_GROUP - 1, &ax, &ay, &s2);
+  vecToolCell(VEC_TOOL_GROUP, &bx, &by, &s2);
+  if(VEC_LAND) hLine(16, (ay + by) / 2, VEC_TOOL_W - 32, TH_DIV);
+  else         vLine((ax + bx) / 2, VEC_BOT + 14, VEC_TOOL_H - 28, TH_DIV);
 }
 
 // Fila de color: los colores de trabajo. Doce bastan en una pantalla
@@ -901,9 +1200,21 @@ static const uint32_t VEC_PAL[12] = {
   0x50B478, 0x3C6EF0, 0x8A5CF0, 0xE060A8, 0x8B5E3C, 0x00A9A5
 };
 
+// EL PANEL ACOPLADO. En vertical es una hoja que sube desde abajo, que
+// es lo natural con el pulgar. En horizontal se ACOPLA a la derecha,
+// que es donde vive el panel dock de Illustrator y donde no tapa ni la
+// cabecera ni la tira de herramientas. El tamano se mantiene: los
+// cuatro paneles maquetan su contenido contra el (x,y,w,h) que reciben,
+// asi que moverlos no obliga a re-maquetar ninguno.
 static void vecPanelRect(int* x, int* y, int* w, int* h){
-  *w = SCR_W - 24; *h = VEC_PANEL_H;
-  *x = 12; *y = VEC_BOT - VEC_PANEL_H - 10;
+  int maxW = VEC_CANVAS_W - 24;
+  *w = maxW > 456 ? 456 : maxW;
+  if(*w < 240) *w = 240;
+  *h = VEC_PANEL_H;
+  int maxH = VEC_CANVAS_H - 16;
+  if(*h > maxH) *h = maxH;
+  *x = VEC_LAND ? (VEC_W - *w - 12) : (VEC_LEFT + (VEC_CANVAS_W - *w) / 2);
+  *y = VEC_BOT - *h - 10;
   if(*y < VEC_TOP + 8) *y = VEC_TOP + 8;
 }
 
@@ -1029,8 +1340,8 @@ static void vecDrawStylePanel(int x, int y, int w, int h){
 
 static void vecDrawLayersPanel(int x, int y, int w, int h){
   drawText(x + 20, y + 16, "Capas", 3, TH_TXT);
-  fillRoundRect(x + w - 116, y + 14, 96, 34, 12, TH_ACCS);
-  drawTextC(x + w - 68, y + 23, "Nueva", 1, TH_PRIM);
+  fillRoundRect(x + w - 116, y + 6, 96, 34, 12, TH_ACCS);
+  drawTextC(x + w - 68, y + 15, "Nueva", 1, TH_PRIM);
   int ry = y + 62;
   for(int l = 0; l < FLEXVEC_MAX_LAYERS; l++){
     if(!vecDoc.layers[l].used) continue;
@@ -1100,8 +1411,8 @@ static void vecDrawArrangePanel(int x, int y, int w, int h){
   char t[48];
   snprintf(t, sizeof(t), "%d seleccionado%s", nsel, nsel == 1 ? "" : "s");
   drawTextR(x + w - 116, y + 20, t, 1, TH_TXT2);
-  fillRoundRect(x + w - 104, y + 12, 84, 32, 12, TH_ACCS);
-  drawTextC(x + w - 62, y + 21, vecArrPage == 0 ? "Crear" : "Alinear", 1, TH_PRIM);
+  fillRoundRect(x + w - 104, y + 6, 84, 32, 12, TH_ACCS);
+  drawTextC(x + w - 62, y + 15, vecArrPage == 0 ? "Crear" : "Alinear", 1, TH_PRIM);
   int nb = (vecArrPage == 0) ? VEC_ARR_N : VEC_ARR2_N;
   for(int i = 0; i < nb; i++){
     int bx, by, bw, bh;
@@ -1194,13 +1505,19 @@ static void vecDrawPanel(){
   setBuf(fb);
   int x, y, w, h; vecPanelRect(&x, &y, &w, &h);
   // Velo sobre el lienzo: separa el panel del documento sin taparlo.
-  fillRectA(0, VEC_TOP, SCR_W, VEC_CANVAS_H, TH_SCRIM, 90);
+  fillRectA(VEC_LEFT, VEC_TOP, VEC_CANVAS_W, VEC_CANVAS_H, TH_SCRIM, 90);
   // Liquid Glass del sistema. Con el material plano activo, la misma
   // llamada cae en la tarjeta plana: la app no decide el material, lo
   // decide el tema -- que es justo el punto de tener un tema.
   if(uiGlass) drawLiquidGlassPanel(x, y, w, h, 26, thCard());
   else        drawGlassCardFlat(x, y, w, h, 26, thCard(), TH_WIN);
-  fillRoundRect(x + w / 2 - 22, y + 7, 44, 4, 2, TH_DIV);
+  // CABECERA DEL PANEL DOCK. La divisoria bajo el titulo, y un carril de
+  // acento en el borde por el que se acopla, son lo que separa a simple
+  // vista este panel del PANEL DE CONTROL de arriba: en Illustrator son
+  // dos zonas distintas y aqui tambien tienen que leerse como tales.
+  if(VEC_LAND) fillRoundRect(x + w - 6, y + 18, 4, h - 36, 2, TH_PRIM);
+  else         fillRoundRect(x + w / 2 - 22, y + 7, 44, 4, 2, TH_DIV);
+  hLine(x + 16, y + 42, w - 32, TH_DIV);
   switch(vecPanel){
     case VP_STYLE:   vecDrawStylePanel(x, y, w, h);   break;
     case VP_LAYERS:  vecDrawLayersPanel(x, y, w, h);  break;
@@ -1218,7 +1535,9 @@ static const char* VEC_MENU[] = { "Apariencia", "Capas", "Organizar", "Compartir
 #define VEC_MENU_N ((int)(sizeof(VEC_MENU) / sizeof(VEC_MENU[0])))
 static void vecMenuGeom(int* x, int* y, int* w, int* h){
   *w = 232; *h = VEC_MENU_N * 42 + 16;
-  *x = SCR_W - *w - 12; *y = VEC_HEAD_H - 6;
+  int maxH = VEC_H - VEC_NAV - VEC_HEAD_H - 6;   // no se sale por abajo
+  if(*h > maxH) *h = maxH;
+  *x = VEC_W - *w - 12; *y = VEC_HEAD_H - 6;
 }
 static void vecDrawMenu(){
   if(!vecMenuOn) return;
@@ -1228,6 +1547,7 @@ static void vecDrawMenu(){
   else        drawGlassCardFlat(x, y, w, h, 20, thCard2(), TH_WIN);
   for(int i = 0; i < VEC_MENU_N; i++){
     int ry = y + 8 + i * 42;
+    if(ry + 42 > y + h) break;                   // ventana corta: no se desborda
     drawText(x + 20, ry + 12, VEC_MENU[i], 2, TH_TXT);
     // Los interruptores ensenan su estado REAL, no un icono decorativo.
     if(i == 4 || i == 5){
@@ -1244,17 +1564,25 @@ static void vecDrawToast(){
   uint32_t age = millis() - vecMsgMs;
   if(age > 2600){ vecMsg[0] = 0; return; }
   setBuf(fb);
-  int w = textW(vecMsg, 2) + 48, x = (SCR_W - w) / 2, y = VEC_BOT - 74;
+  int w = textW(vecMsg, 2) + 48;
+  int x = VEC_LEFT + (VEC_CANVAS_W - w) / 2, y = VEC_BOT - 74;
   uint8_t a = (age > 2100) ? (uint8_t)(255 - (age - 2100) * 255 / 500) : 255;
   fillRoundRectA(x, y, w, 42, 21, TH_SURF2, a);
-  drawTextCA(SCR_W / 2, y + 13, vecMsg, 2, TH_TXT, a);
+  drawTextCA(x + w / 2, y + 13, vecMsg, 2, TH_TXT, a);
 }
 
 static void vecRenderAll(){
   setBuf(fb);
-  vecRenderDoc();
-  if(vecCache) fbCopyBand(vecCache, VEC_TOP, VEC_BOT - 1);
+  // La cache SOLO se reconstruye si el documento o la vista cambiaron de
+  // verdad. Antes se rasterizaba entera en CADA llamada, y a esta funcion
+  // la llama cada toque de la cabecera, de la tira de herramientas, del
+  // menu y de cualquier panel: abrir un panel volvia a rasterizar los
+  // objetos del documento sin que ninguno hubiera cambiado. Ese repintado
+  // de mas era el grueso de los cuadros perdidos.
+  if(!vecCacheOk) vecRenderDoc();
+  vecCopyCanvas();
   setBuf(fb);
+  vecDrawLive();
   vecDrawSelection();
   if(vecTool == VT_NODE) vecDrawNodes();
   vecDrawPenPreview();
@@ -1293,12 +1621,39 @@ typedef struct {
   char     path[FLEXFS_PATH_MAX];
 } VecSessV1;
 
+// Objetos que declara un .fxv, leyendo SOLO su cabecera.
+static int vecFileObjectsAt(const char* path){
+  uint8_t hdr[96];
+  int n = flexFsReadAt(path, 0, hdr, sizeof(hdr));
+  if(n < 24) return -1;
+  uint32_t magic = 0; memcpy(&magic, hdr, 4);
+  if(magic != FLEXVEC_MAGIC) return -1;
+  uint16_t nodeN = 0; memcpy(&nodeN, hdr + 22, 2);
+  return (int)nodeN;                        // nodos, que es la medida honesta que hay ahi
+}
+
 static void vecReload(){
   vecListN = 0;
   if(!flexFsReady()) return;
   vecListN = flexFsList(FLEXFS_DIR_VECTOR, vecList, VEC_LIST_MAX);
   if(vecListN < 0) vecListN = 0;
   if(vecSelIdx >= vecListN) vecSelIdx = -1;
+  // EL CONTEO DE NODOS SE LEE AQUI, UNA VEZ POR ARCHIVO, Y NO EN EL
+  // BUCLE DE DIBUJO. Escribir o leer la flash SPI obliga al IDF a
+  // desactivar la cache en LOS DOS nucleos, y mientras la cache esta
+  // apagada la DMA del presentador MIPI-DSI no puede alimentar su FIFO
+  // desde la PSRAM: el panel pinta un cuadro de basura. Eso es el
+  // destello a pantalla completa de milisegundos. Con la lectura dentro
+  // del bucle de dibujo eran hasta VEC_LIST_MAX lecturas de flash POR
+  // CUADRO mientras se desplazaba la lista, justo cuando mas cuadros se
+  // vuelcan. Aqui son N lecturas al entrar y ninguna despues.
+  for(int i = 0; i < vecListN && i < VEC_LIST_MAX; i++){
+    char p[FLEXFS_PATH_MAX];
+    snprintf(p, sizeof(p), "%s/%s", FLEXFS_DIR_VECTOR, vecList[i].name);
+    int nd = vecFileObjectsAt(p);
+    if(nd > 32767) nd = 32767;
+    vecListNodes[i] = (int16_t)nd;
+  }
 }
 static void vecPathOf(int i, char* out, size_t n){
   if(i < 0 || i >= vecListN){ if(n) out[0] = 0; return; }
@@ -1460,11 +1815,8 @@ static bool vecSaveSvgToDisk(){
 // #############################################################
 static bool vecExportPng(){
   if(!vecReady) return false;
-  if(!vecCache){
-    vecCache = (uint16_t*)heap_caps_aligned_alloc(64, (size_t)SCR_W * SCR_H * 2,
-                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if(!vecCache){ vecToast("Memoria insuficiente"); return false; }
-  }
+  vecCacheAlloc();
+  if(!vecCache){ vecToast("Memoria insuficiente"); return false; }
   float aw = vecDoc.artW, ah = vecDoc.artH;
   if(aw < 1 || ah < 1) return false;
   float sc = (float)SCR_W / aw;
@@ -1480,11 +1832,17 @@ static bool vecExportPng(){
   v.clipX0 = 0; v.clipY0 = 0; v.clipX1 = pw - 1; v.clipY1 = ph - 1;
   setBuf(vecCache);
   int sx0 = gClipX0, sx1 = gClipX1, sy0 = gClipY0, sy1 = gClipY1;
+  // El PNG se rasteriza SIN la rotacion del panel. Con gLand puesto,
+  // px()/hLine() escriben girados 90 grados (ver putPhys en Gfx.h) y la
+  // imagen saldria tumbada y recortada: aqui no se pinta una pantalla,
+  // se pinta un mapa de bits de pw x ph que luego se lee por filas.
+  bool oLand = gLand; gLand = false;
   gClipX0 = 0; gClipX1 = pw - 1; gClipY0 = 0; gClipY1 = ph - 1;
   fillRect(0, 0, pw, ph, TC(255,255,255));
   int16_t order[FLEXVEC_MAX_ELEMS];
   int n = flexVecPaintOrder(&vecDoc, order, FLEXVEC_MAX_ELEMS);
   for(int i = 0; i < n; i++) vecDrawElem(order[i], &v);
+  gLand = oLand;
   gClipX0 = sx0; gClipX1 = sx1; gClipY0 = sy0; gClipY1 = sy1;
   setBuf(fb);
   vecCacheOk = false;                     // la cache ya no es la del lienzo
@@ -1575,7 +1933,9 @@ static void vecShareStart(){
 // ##  dibujarla obligaria a rasterizar cada archivo al entrar, y en una
 // ##  lista de veinte eso son veinte rasterizados antes de ver nada.
 // ##  La ficha ensena el nombre, el tamano y los objetos, que salen de
-// ##  leer la cabecera del archivo: 64 bytes en vez de un documento.
+// ##  leer la cabecera del archivo: 64 bytes en vez de un documento, y
+// ##  UNA sola vez por archivo al recargar la lista (ver vecReload), no
+// ##  en cada cuadro.
 // #############################################################
 #define VEC_CARD_TOP  118
 #define VEC_CARD_H     92
@@ -1583,38 +1943,27 @@ static void vecShareStart(){
 static int vecMaxScroll(){
   int rows = vecListN + 1;                 // +1: la ficha de "nuevo"
   int total = VEC_CARD_TOP + rows * (VEC_CARD_H + 12) + 24;
-  int vis = SCR_H - navBarH();
+  int vis = VEC_H - VEC_NAV;
   return total > vis ? total - vis : 0;
 }
 static int vecCardY(int i){ return VEC_CARD_TOP + i * (VEC_CARD_H + 12) - vecScroll; }
 
-// Objetos que declara un .fxv, leyendo SOLO su cabecera.
-static int vecFileObjects(const char* path){
-  uint8_t hdr[96];
-  int n = flexFsReadAt(path, 0, hdr, sizeof(hdr));
-  if(n < 24) return -1;
-  uint32_t magic = 0; memcpy(&magic, hdr, 4);
-  if(magic != FLEXVEC_MAGIC) return -1;
-  uint16_t nodeN = 0; memcpy(&nodeN, hdr + 22, 2);
-  return (int)nodeN;                        // nodos, que es la medida honesta que hay ahi
-}
-
 static void vecRenderGallery(){
   setBuf(fb);
-  fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
+  fillRect(0, 0, VEC_W, VEC_H, TH_PAGE);
   strokeSegAA(30, 30, 18, 22, 2.4f, TH_NAV);
   strokeSegAA(18, 22, 30, 14, 2.4f, TH_NAV);
-  drawTextC(SCR_W / 2, 22, "Flex Vector Pro", 3, TH_TXT);
-  drawTextC(SCR_W / 2, 56, "Editor vectorial", 1, TH_TXT2);
+  drawTextC(VEC_W / 2, 22, "Flex Vector Pro", 3, TH_TXT);
+  drawTextC(VEC_W / 2, 56, "Editor vectorial", 1, TH_TXT2);
   if(!flexFsReady()){
     fkNoFsScreen("Flex Vector Pro");
     return;
   }
   // Ficha de documento nuevo, siempre la primera.
   int y = vecCardY(0);
-  if(y > -VEC_CARD_H && y < SCR_H){
-    fillRoundRect(16, y, SCR_W - 32, VEC_CARD_H, 20, TH_ACCS);
-    drawRoundRect(16, y, SCR_W - 32, VEC_CARD_H, 20, TH_PRIM);
+  if(y > -VEC_CARD_H && y < VEC_H){
+    fillRoundRect(16, y, VEC_W - 32, VEC_CARD_H, 20, TH_ACCS);
+    drawRoundRect(16, y, VEC_W - 32, VEC_CARD_H, 20, TH_PRIM);
     int cx = 62, cy = y + VEC_CARD_H / 2;
     fillRect(cx - 13, cy - 2, 26, 4, TH_PRIM);
     fillRect(cx - 2, cy - 13, 4, 26, TH_PRIM);
@@ -1623,16 +1972,15 @@ static void vecRenderGallery(){
   }
   for(int i = 0; i < vecListN; i++){
     y = vecCardY(i + 1);
-    if(y <= -VEC_CARD_H || y >= SCR_H) continue;
+    if(y <= -VEC_CARD_H || y >= VEC_H) continue;
     bool sel = (i == vecSelIdx);
-    uiSurface(16, y, SCR_W - 32, VEC_CARD_H, 20, sel ? 1 : 0);
-    if(sel) drawRoundRect(16, y, SCR_W - 32, VEC_CARD_H, 20, TH_PRIM);
+    uiSurface(16, y, VEC_W - 32, VEC_CARD_H, 20, sel ? 1 : 0);
+    if(sel) drawRoundRect(16, y, VEC_W - 32, VEC_CARD_H, 20, TH_PRIM);
     char stem[FLEXFS_NAME_MAX]; flexFsStem(vecList[i].name, stem, sizeof(stem));
-    char fit[40]; uiLabelFit(stem, SCR_W - 150, 3, fit, sizeof(fit));
+    char fit[40]; uiLabelFit(stem, VEC_W - 150, 3, fit, sizeof(fit));
     drawText(96, y + 22, fit, 3, TH_TXT);
-    char path[FLEXFS_PATH_MAX]; vecPathOf(i, path, sizeof(path));
     char sz[24]; flexFsFmtSize(vecList[i].size, sz, sizeof(sz));
-    int nodes = vecFileObjects(path);
+    int nodes = vecListNodes[i];            // leido en vecReload, no aqui
     char sub[64];
     if(nodes >= 0) snprintf(sub, sizeof(sub), "%s \xC2\xB7 %d nodos", sz, nodes);
     else           snprintf(sub, sizeof(sub), "%s", sz);
@@ -1647,7 +1995,7 @@ static void vecRenderGallery(){
     fillCircle(ix + 14, iy + 4, 4, TH_PRIM);
   }
   if(vecListN == 0)
-    drawTextC(SCR_W / 2, VEC_CARD_TOP + VEC_CARD_H + 40 - vecScroll,
+    drawTextC(VEC_W / 2, VEC_CARD_TOP + VEC_CARD_H + 40 - vecScroll,
               "Aun no hay documentos", 2, TH_MUTE);
   flxFlushAll();
 }
@@ -1698,7 +2046,7 @@ static bool vecPinchUpdate(){
   float bx = (float)gKbPoints[i1].x, by = (float)gKbPoints[i1].y;
   float dist = sqrtf((bx - ax) * (bx - ax) + (by - ay) * (by - ay));
   float cx = (ax + bx) * 0.5f, cy = (ay + by) * 0.5f;
-  if(cy < VEC_TOP || cy >= VEC_BOT) return false;      // fuera del lienzo: no es nuestro
+  if(!vecInCanvas((int)cx, (int)cy)) return false;     // fuera del lienzo: no es nuestro
   if(!vecPinch){
     vecPinch = true;
     vecPinchD0 = dist > 8 ? dist : 8;
@@ -1714,7 +2062,11 @@ static bool vecPinchUpdate(){
   if(vecZoom > VEC_MAX_ZOOM) vecZoom = VEC_MAX_ZOOM;
   // El punto del documento que estaba bajo el centro de los dos dedos se
   // queda ahi: es lo que hace que la pinza se sienta "pegada" al papel.
-  vecPanX = vecPinchCX0 - cx / vecZoom;
+  // Los dos ejes descuentan el origen del LIENZO, no el de la pantalla.
+  // En vertical VEC_LEFT es 0 y no se notaba; en horizontal, con la tira
+  // de herramientas de pie a la izquierda, sin esto el documento se
+  // desplazaba VEC_TOOL_W px en cada pellizco.
+  vecPanX = vecPinchCX0 - ((float)cx - (float)VEC_LEFT) / vecZoom;
   vecPanY = vecPinchCY0 - ((float)cy - (float)VEC_TOP) / vecZoom;
   vecClampView();
   vecInvalidate();
@@ -2238,7 +2590,7 @@ static bool vecStylePanelTouch(int px, int py, int x, int y, int w, int h){
 }
 
 static bool vecLayersPanelTouch(int px, int py, int x, int y, int w, int h){
-  if(px >= x + w - 116 && px <= x + w - 20 && py >= y + 14 && py <= y + 48){
+  if(px >= x + w - 116 && px <= x + w - 20 && py >= y + 4 && py <= y + 42){
     int l = flexVecLayerAdd(&vecDoc, NULL);
     if(l < 0) vecToastErr(l); else vecToast("Capa nueva");
     sessMarkDirty(IC_VECTOR);
@@ -2383,7 +2735,7 @@ static void vecArrangeFase2(int i){
 
 static bool vecArrangePanelTouch(int px, int py, int x, int y, int w, int h){
   // Cambio de pagina.
-  if(px >= x + w - 104 && px <= x + w - 20 && py >= y + 12 && py <= y + 44){
+  if(px >= x + w - 104 && px <= x + w - 20 && py >= y + 4 && py <= y + 40){
     vecArrPage = vecArrPage ? 0 : 1;
     return true;
   }
@@ -2484,6 +2836,7 @@ static bool vecMenuTouch(int px, int py){
   if(px < x || px > x + w || py < y || py > y + h){ vecMenuOn = false; return true; }
   int i = (py - y - 8) / 42;
   if(i < 0 || i >= VEC_MENU_N) return true;
+  if(y + 8 + (i + 1) * 42 > y + h) return true;  // fila recortada: no existe
   vecMenuOn = false;
   switch(i){
     case 0: vecPanel = VP_STYLE;   break;
@@ -2506,9 +2859,68 @@ static bool vecMenuTouch(int px, int py){
   return true;
 }
 
+// #############################################################
+// ##  TOQUE DE INTERFAZ  ·  T.tap NO SIRVE PARA UN BOTON
+// ##  ------------------------------------------------------
+// ##  tDoRelease() solo pone T.tap si el dedo se movio menos de 16 px
+// ##  Y el pulso duro menos de 550 ms. En una capacitiva de verdad un
+// ##  pulgar se desliza 2 o 3 px sin querer, y si el usuario duda un
+// ##  instante el pulso pasa de medio segundo: el toque se pierde y el
+// ##  boton "no responde". Es exactamente lo que pasaba con deshacer,
+// ##  rehacer y el menu de la cabecera.
+// ##
+// ##  Aqui, SOLO para la cabecera, la tira de herramientas, el menu y
+// ##  los paneles -- que son BOTONES, no lienzo -- basta con levantar
+// ##  el dedo dentro de un radio de holgura, sin tope de tiempo, y
+// ##  vale la coordenada de la PULSACION, que es donde el usuario creyo
+// ##  tocar y no donde acabo derivando el dedo.
+// ##
+// ##  El LIENZO no pasa por aqui a proposito: ahi un arrastre de 3 px
+// ##  es un arrastre de verdad y tiene que seguir siendolo. Y no toca
+// ##  el tactil del sistema: es un criterio LOCAL de esta app, ninguna
+// ##  otra cambia de comportamiento.
+// #############################################################
+#define VEC_UI_SLOP 10           // px de deriva que se le perdonan a un boton
+static bool vecUiTapAt(int* px, int* py){
+  if(!T.released) return false;
+  int dx = T.x - T.startX, dy = T.y - T.startY;
+  if(dx < 0) dx = -dx;
+  if(dy < 0) dy = -dy;
+  if(dx > VEC_UI_SLOP || dy > VEC_UI_SLOP) return false;
+  *px = T.startX; *py = T.startY;
+  return true;
+}
+
 static bool vecHeaderTouch(int px, int py){
-  if(py >= VEC_HEAD_H) return false;
-  if(px < 60){                     // chevron: volver a la lista de documentos
+  if(!vecInHeader(px, py)) return false;
+  // Los tres botones primero: son los que tienen caja tactil propia.
+  int bcy = vecHeadBtnCY();
+  if(py >= bcy - VEC_HBTN_HIT && py <= bcy + VEC_HBTN_HIT){
+    for(int i = 0; i < VEC_HBTN_N; i++){
+      int cx = vecHeadBtnCX(i);
+      if(px < cx - VEC_HBTN_HIT || px > cx + VEC_HBTN_HIT) continue;
+      if(i == 0){
+        vecFinishPen();
+        if(flexVecUndo(&vecDoc) == FLEXVEC_OK){ vecInvalidate(); sessMarkDirty(IC_VECTOR); }
+        else vecToast("Nada que deshacer");
+      } else if(i == 1){
+        if(flexVecRedo(&vecDoc) == FLEXVEC_OK){ vecInvalidate(); sessMarkDirty(IC_VECTOR); }
+        else vecToast("Nada que rehacer");
+      } else {
+        vecMenuOn = !vecMenuOn;
+      }
+      return true;
+    }
+  }
+  // Muestras de relleno y trazo -> panel de Apariencia. Es un ATAJO al
+  // panel que ya existe, que es donde se cambian; no hay funcion nueva.
+  int hx, hy, hw, hh, hs;
+  vecHeadSwatch(&hx, &hy, &hw, &hh, &hs);
+  if(px >= hx && px < hx + hw && py >= hy && py < hy + hh){
+    vecPanel = VP_STYLE; vecStyleTab = 0; vecMenuOn = false;
+    return true;
+  }
+  if(px < 60 && py < VEC_HEAD_R1){  // chevron: volver a la lista de documentos
     vecFinishPen();
     vecSaveDoc();
     vecShareStop();
@@ -2516,29 +2928,22 @@ static bool vecHeaderTouch(int px, int py){
     vecReload();
     return true;
   }
-  int bx = SCR_W - 158;
-  for(int i = 0; i < 3; i++){
-    int cx = bx + i * 50 + 20;
-    if(px < cx - 22 || px > cx + 22) continue;
-    if(i == 0){
-      vecFinishPen();
-      if(flexVecUndo(&vecDoc) == FLEXVEC_OK){ vecInvalidate(); sessMarkDirty(IC_VECTOR); }
-      else vecToast("Nada que deshacer");
-    } else if(i == 1){
-      if(flexVecRedo(&vecDoc) == FLEXVEC_OK){ vecInvalidate(); sessMarkDirty(IC_VECTOR); }
-      else vecToast("Nada que rehacer");
-    } else {
-      vecMenuOn = !vecMenuOn;
-    }
-    return true;
-  }
   return true;                     // el resto de la cabecera se traga el toque
 }
 
 static bool vecToolsTouch(int px, int py){
-  if(py < VEC_BOT || py >= VEC_BOT + VEC_TOOL_H) return false;
-  int w = SCR_W / VT_N;
-  int t = px / w;
+  if(!vecInTools(px, py)) return false;
+  // Celda MAS CERCANA, no division entera: asi no queda ni un pixel
+  // muerto entre dos herramientas, ni siquiera en el hueco de la
+  // divisoria entre grupos.
+  int t = -1, best = 1 << 30;
+  for(int i = 0; i < VT_N; i++){
+    int cx, cy, step;
+    vecToolCell(i, &cx, &cy, &step);
+    int d = VEC_LAND ? (py > cy ? py - cy : cy - py)
+                     : (px > cx ? px - cx : cx - px);
+    if(d < best){ best = d; t = i; }
+  }
   if(t < 0 || t >= VT_N) return true;
   if(t == VT_POLY && vecTool == VT_POLY){
     // Tocar de nuevo el poligono alterna poligono/estrella y sube los
@@ -2564,7 +2969,18 @@ static bool vecToolsTouch(int px, int py){
 // ##  TOQUES DE LA GALERIA
 // #############################################################
 static void vecGalleryTick(){
-  if(fkTrashOn){ if(fkTrashTick()) vecReload(); vecRenderGallery(); return; }
+  // fkTrashTick() devuelve TRUE MIENTRAS la papelera sigue abierta, y en
+  // ese caso el llamante no debe hacer nada mas -- es el contrato que ya
+  // cumplen Archivos, Galeria, Notas y Paint. Estaba justo al reves: con
+  // la papelera abierta se llamaba a vecReload() (listar el directorio y
+  // leer la cabecera de cada .fxv, o sea LECTURAS DE FLASH) y a
+  // vecRenderGallery() (pantalla completa + flxFlushAll) EN CADA CUADRO,
+  // encima del render que la propia papelera acababa de volcar. Dos
+  // volcados de 768 KB por cuadro con la cache de los dos nucleos
+  // apagandose entre medias por la flash: es la receta exacta del
+  // destello a pantalla completa. Y al salir no se recargaba la lista,
+  // asi que un documento restaurado no aparecia hasta reentrar.
+  if(fkTrashOn){ if(!fkTrashTick()){ vecReload(); vecRenderGallery(); } return; }
   if(fkAskOn){
     int r = fkAskTick();
     if(r != 0){
@@ -2615,7 +3031,10 @@ static void vecGalleryTick(){
     }
     return;
   }
-  if(T.tap && T.x < 60 && T.y < 60){ appClose(); return; }
+  {                                     // volver: mismo criterio tactil
+    int ux, uy;                         // que los botones de la cabecera
+    if(vecUiTapAt(&ux, &uy) && ux < 60 && uy < 60){ appClose(); return; }
+  }
   // Desplazamiento vertical de la lista.
   if(T.pressed){ vecDragY0 = T.y; vecDragS0 = vecScroll; vecDragging = false; vecPressMs = millis(); vecLongFired = false; }
   if(T.down && !vecLongFired && millis() - vecPressMs > 620 && abs(T.y - vecDragY0) < 14){
@@ -2631,11 +3050,15 @@ static void vecGalleryTick(){
   }
   if(T.down && abs(T.y - vecDragY0) > 10){
     vecDragging = true;
+    int old = vecScroll;
     vecScroll = vecDragS0 - (T.y - vecDragY0);
     if(vecScroll < 0) vecScroll = 0;
     int mx = vecMaxScroll();
     if(vecScroll > mx) vecScroll = mx;
-    vecRenderGallery();
+    // Solo se repinta si la lista SE MOVIO. Contra el tope, el dedo
+    // sigue enviando cuadros y antes cada uno costaba una pantalla
+    // entera (768 KB por el bus) para dejarla exactamente igual.
+    if(vecScroll != old) vecRenderGallery();
   }
   if(T.released && !vecDragging && !vecLongFired){
     int y0 = vecCardY(0);
@@ -2683,26 +3106,29 @@ static void vecCanvasTick(){
   }
 
   // 2) Menu y panel: mientras uno esta abierto, es el dueno del toque.
+  //    Todo esto son BOTONES, asi que van por vecUiTapAt y no por T.tap.
+  int ux = 0, uy = 0;
+  bool uiTap = vecUiTapAt(&ux, &uy);
   if(vecMenuOn){
-    if(T.tap){ vecMenuTouch(T.x, T.y); vecRenderAll(); }
+    if(uiTap){ vecMenuTouch(ux, uy); vecRenderAll(); }
     return;
   }
   if(vecPanel != VP_NONE){
-    if(T.tap){
+    if(uiTap){
       int x, y, w, h; vecPanelRect(&x, &y, &w, &h);
-      if(T.x < x || T.x > x + w || T.y < y || T.y > y + h){
+      if(ux < x || ux > x + w || uy < y || uy > y + h){
         // Fuera del panel: se cierra. Salvo en la tira de herramientas,
         // que sigue viva para poder cambiar de herramienta sin cerrar.
-        if(!vecToolsTouch(T.x, T.y)) vecPanel = VP_NONE;
+        if(!vecToolsTouch(ux, uy)) vecPanel = VP_NONE;
         vecRenderAll();
         return;
       }
       bool used = false;
       switch(vecPanel){
-        case VP_STYLE:   used = vecStylePanelTouch(T.x, T.y, x, y, w, h); break;
-        case VP_LAYERS:  used = vecLayersPanelTouch(T.x, T.y, x, y, w, h); break;
-        case VP_ARRANGE: used = vecArrangePanelTouch(T.x, T.y, x, y, w, h); break;
-        case VP_SHARE:   used = vecSharePanelTouch(T.x, T.y, x, y, w, h); break;
+        case VP_STYLE:   used = vecStylePanelTouch(ux, uy, x, y, w, h); break;
+        case VP_LAYERS:  used = vecLayersPanelTouch(ux, uy, x, y, w, h); break;
+        case VP_ARRANGE: used = vecArrangePanelTouch(ux, uy, x, y, w, h); break;
+        case VP_SHARE:   used = vecSharePanelTouch(ux, uy, x, y, w, h); break;
         default: break;
       }
       (void)used;
@@ -2711,13 +3137,22 @@ static void vecCanvasTick(){
     return;
   }
 
-  // 3) Cabecera y herramientas.
-  if(T.tap && T.y < VEC_HEAD_H){ vecHeaderTouch(T.x, T.y); vecRenderAll(); return; }
-  if(T.tap && T.y >= VEC_BOT){ vecToolsTouch(T.x, T.y); vecRenderAll(); return; }
-  if(T.pressed && (T.y < VEC_HEAD_H || T.y >= VEC_BOT)) return;
+  // 3) Cabecera y tira de herramientas. Se decide por DONDE EMPEZO el
+  //    dedo: si empezo en el marco, el lienzo no ve ese episodio ni al
+  //    pulsar ni al soltar, exactamente como antes -- lo unico que
+  //    cambia es que ahora el toque se acepta aunque el dedo derive.
+  if((T.down || T.released) &&
+     (vecInHeader(T.startX, T.startY) || vecInTools(T.startX, T.startY))){
+    if(uiTap){
+      if(vecInHeader(ux, uy)) vecHeaderTouch(ux, uy);
+      else                    vecToolsTouch(ux, uy);
+      vecRenderAll();
+    }
+    return;
+  }
 
   // 4) El lienzo.
-  if(T.pressed && T.y >= VEC_TOP && T.y < VEC_BOT) vecCanvasPress(T.x, T.y);
+  if(T.pressed && vecInCanvas(T.x, T.y)) vecCanvasPress(T.x, T.y);
   else if(T.down && vecGest != VG_NONE) vecCanvasMove(T.x, T.y);
   else if(T.down && !vecLongFired && vecGest == VG_NONE && millis() - vecPressMs > 620)
     { vecLongFired = true; vecCanvasLong(T.x, T.y); }
@@ -2736,15 +3171,20 @@ static void vecTick(){
 }
 
 static void vecEnter(){
-  gAppW = SCR_W; gAppH = SCR_H;
+  // gAppW/gAppH los pone EL FRAMEWORK: la pantalla entera a pantalla
+  // completa, o el area de cliente real cuando la app corre dentro de
+  // una ventana de Modo PC (ver dexHostRender). Pisarlos con SCR_W/SCR_H
+  // dejaba a la app maquetando siempre a 480x800 dentro de la ventana, y
+  // con ello la orientacion horizontal era imposible. El relayout llega
+  // por la via de siempre: enter() se re-ejecuta con gRelayout puesto.
   if(!vecArenaInit()){
     setBuf(fb);
-    fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
+    fillRect(0, 0, VEC_W, VEC_H, TH_PAGE);
     strokeSegAA(30, 30, 18, 22, 2.4f, TH_NAV);
     strokeSegAA(18, 22, 30, 14, 2.4f, TH_NAV);
-    drawTextC(SCR_W / 2, SCR_H / 2 - 40, "Flex Vector Pro", 3, TH_TXT);
-    drawTextC(SCR_W / 2, SCR_H / 2, "No hay memoria suficiente", 2, TH_TXT2);
-    drawTextC(SCR_W / 2, SCR_H / 2 + 28, "Cierra alguna app y vuelve a intentarlo", 1, TH_MUTE);
+    drawTextC(VEC_W / 2, VEC_H / 2 - 40, "Flex Vector Pro", 3, TH_TXT);
+    drawTextC(VEC_W / 2, VEC_H / 2, "No hay memoria suficiente", 2, TH_TXT2);
+    drawTextC(VEC_W / 2, VEC_H / 2 + 28, "Cierra alguna app y vuelve a intentarlo", 1, TH_MUTE);
     flxFlushAll();
     return;
   }
@@ -2798,12 +3238,11 @@ static void vecSuspend(){
   if(vecView == 1 && vecPath[0] && flexVecDirty(&vecDoc)) vecSaveDoc();
 }
 static void vecResume(){
-  gAppW = SCR_W; gAppH = SCR_H;
+  // gAppW/gAppH son del framework, igual que en vecEnter: aqui no se
+  // tocan.
   // La cache pudo soltarla shed(): se rehace desde el DOCUMENTO, que no
   // se toco. Reanudar repinta, no reinicia.
-  if(!vecCache)
-    vecCache = (uint16_t*)heap_caps_aligned_alloc(64, (size_t)SCR_W * SCR_H * 2,
-                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  vecCacheAlloc();
   vecInvalidate();
   if(vecView == 0){ vecReload(); vecRenderGallery(); }
   else vecRenderAll();

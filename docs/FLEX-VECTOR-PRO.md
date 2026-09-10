@@ -388,3 +388,115 @@ Lo de §9 sigue vigente, y la Fase 2 añade dos comprobaciones manuales:
 6. **Motivos y gradientes a distintos zooms**: los dos se evalúan en
    coordenadas de documento, así que ampliar debe agrandar la trama, no
    revelar píxeles.
+
+## 11. Correcciones sobre la placa
+
+Lo que sigue no son funciones nuevas: son cinco fallos reales vistos en el
+dispositivo, con su causa y lo que se hizo. Se documentan aquí porque tres de
+ellos no se deducen del código de la app —salen de cómo se comporta el panel
+MIPI‑DSI y la caché del P4— y quien toque esto después necesita saberlo.
+
+### 11.1 Los botones de la cabecera se perdían
+
+`T.tap` sólo se enciende si el dedo se movió **menos de 16 px y el pulso duró
+menos de 550 ms** (`tDoRelease`, `FlexOS_Ultra_Touch.h`). En una capacitiva real
+un pulgar deriva 2‑3 px sin querer, y si el usuario duda el pulso pasa del medio
+segundo: deshacer, rehacer y el menú «no respondían».
+
+`vecUiTapAt()` acepta el **levantar el dedo dentro de 10 px, sin tope de
+tiempo**, y devuelve la coordenada de la **pulsación**, que es donde el usuario
+creyó tocar. Lo usan sólo la cabecera, la tira de herramientas, el menú y los
+paneles. **El lienzo no pasa por ahí a propósito**: ahí un arrastre de 3 px es un
+arrastre de verdad. No se tocó el táctil del sistema: ninguna otra app cambia.
+
+Las cajas táctiles de los tres botones son de **49 × 49 px** (`VEC_HBTN_HIT`)
+aunque la pastilla que se ve mida 40; y la tira de herramientas resuelve por
+**celda más cercana**, así que no queda un píxel muerto ni en el hueco de la
+divisoria entre grupos.
+
+### 11.2 Orientación horizontal
+
+Se maqueta contra `gAppW`/`gAppH` —el lienzo lógico que da el framework— y no
+contra `SCR_W`/`SCR_H`. Es el mismo patrón de `WIN_TOP`/`WIN_BOT`, y el relayout
+llega por la vía de siempre: `enter()` se re‑ejecuta con `gRelayout` puesto. Con
+el lienzo apaisado la tira de herramientas se pone **de pie a la izquierda** y el
+panel se **acopla a la derecha**, que es donde Illustrator tiene el suyo.
+
+**El detalle que no se ve en el código de la app:** en horizontal `Gfx.h` gira 90°
+en `putPhys()`. La **fila física es la columna lógica**, y ahí `gClipX0/gClipX1`
+ni se miran —el único recorte vivo es `gClipY0/gClipY1`, que acota la **X
+lógica**—. Por eso todo lo que copia o recorta pasa por `vecPhysRect()`,
+`vecClipRect()` y `vecCopyRect()`. Y por eso **en horizontal no hay repintado
+parcial**: sin recorte en Y lógica un tirador de selección se quedaría pegado
+sobre la cabecera, y además ahí la app corre siempre hospedada en una ventana de
+Modo PC, donde `flxFlush()` no vuelca nada y DeX recompone la ventana entera —
+repintar por bandas no ahorraría ni un byte.
+
+El barrido del rasterizador se dimensiona al **lado largo** del panel
+(`VEC_RAS_W`), porque en horizontal el lienzo lógico llega a 800 px de ancho y
+`fvScanFill` acota el tramo a `covW`: con 480 toda figura más ancha saldría
+cortada por la derecha.
+
+### 11.3 Interfaz más cerca de Illustrator
+
+Sólo reorganización, ninguna función de edición nueva:
+
+* la **cabecera es un panel de control** en dos franjas —barra de documento
+  arriba, control debajo— con las muestras de relleno y trazo superpuestas, la
+  herramienta activa y el grosor. Tocar las muestras abre Apariencia, que es el
+  panel que ya existía;
+* la **tira de herramientas** va en dos grupos —selección y formas— con
+  divisoria, pegados y centrados, para que se lea como un panel y no como ocho
+  botones sueltos;
+* el **panel acoplado** lleva divisoria bajo el título y, en horizontal, carril
+  de acento en el borde por el que se acopla. Conserva su ancho de diseño
+  (456 px): los cuatro paneles maquetan su contenido contra él.
+
+### 11.4 Cuadros perdidos
+
+* `vecRenderAll()` **respeta la caché**. Antes rasterizaba el documento entero en
+  cada llamada, y la llama cada toque de cabecera, herramientas, menú y paneles:
+  abrir un panel volvía a rasterizar los objetos sin que ninguno cambiara.
+* El **conteo de objetos de la galería se lee una vez** por archivo en
+  `vecReload()`, no dentro del bucle de dibujo.
+* La galería **sólo repinta si la lista se movió de verdad**: contra el tope, el
+  dedo seguía mandando cuadros y cada uno costaba una pantalla entera.
+* La banda sucia se acota **también en X**, salvo con la herramienta de nodos o
+  la pluma abiertas, donde un tirador de Bézier se sale de la caja de la curva.
+
+No hay ni una reserva de memoria en el bucle de dibujo ni en el de toque: todo
+sale de `vecArenaInit()`.
+
+### 11.5 El destello cian a pantalla completa
+
+Tres causas, las tres reales, y ninguna se tapó con un segundo volcado:
+
+1. **La raíz.** Escribir o leer la flash SPI obliga al IDF a **desactivar la
+   caché en los dos núcleos**; mientras está apagada, la DMA del presentador
+   MIPI‑DSI no puede alimentar su FIFO desde la PSRAM y el panel pinta un cuadro
+   de basura (lo mismo que documenta `FlexOS_OTA.h` para el OTA). La galería
+   hacía **una lectura de flash por ficha dentro del bucle de dibujo**, con un
+   `flxFlushAll()` justo detrás. Ahora la lectura vive en `vecReload()`.
+2. **La papelera, invertida.** `fkTrashTick()` devuelve `true` *mientras la
+   papelera sigue abierta*, y en ese caso el llamante no debe hacer nada más.
+   Aquí estaba al revés: con la papelera abierta se llamaba a `vecReload()`
+   (lecturas de flash) y a `vecRenderGallery()` (pantalla completa +
+   `flxFlushAll`) **en cada cuadro**, encima del volcado que la propia papelera
+   acababa de hacer. Dos volcados de 768 KB por cuadro con la caché apagándose
+   entre medias. Ahora sigue el mismo contrato que Archivos, Galería, Notas y
+   Paint — y al salir la lista se recarga, que antes tampoco pasaba.
+3. **PSRAM sin inicializar.** `flxGfxInit()` sólo ponía a cero `fb`; `bbuf`,
+   `lockBuf` y `homeBuf` salían con lo que hubiera en la PSRAM, y los tres
+   acaban en el panel. La caché de Vector, igual. Cuatro `memset` en el arranque
+   y uno por reserva de caché (`vecCacheAlloc()`) quitan el modo de fallo.
+
+### 11.6 Qué comprueba la prueba de host
+
+`tests/host/ino_compile.cpp :: testVectorPro()` fija el toque con deriva (3 px y
+900 ms siguen siendo un toque; 20 px ya no), las cajas de 49 × 49 sin solaparse,
+las cuatro esquinas del botón de menú, la tira sin zonas muertas en las **dos**
+orientaciones, que panel y menú caben enteros, que el origen del documento cae en
+la esquina del **lienzo** y no de la pantalla, y la traducción `vecPhysRect()` /
+`vecClipRect()` en horizontal. El destello sólo se confirma **en la placa**: es
+un fallo de temporización entre la caché y la DMA del panel, y ningún doble de
+host lo reproduce.
