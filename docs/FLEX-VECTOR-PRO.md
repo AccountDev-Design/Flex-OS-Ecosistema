@@ -125,13 +125,12 @@ tiene sentido en este hardware).
 | Pathfinder Fase 2 (Dividir, Recortar) | mismo motor, mismos límites |
 | Gradientes lineal y radial | tabla de 256 colores precomputada por gradiente; el relleno cuesta un `lut[t]` por píxel. Máx. `FLEXVEC_MAX_STOPS` paradas |
 | Máscara de recorte | Fase 1 rectangular; Fase 2 forma arbitraria, con el mismo límite de nodos de las booleanas |
-| Máscara de opacidad | por luminosidad, una sola pasada. Sin grupos anidados |
 | Apariencia | Fase 1: 1 relleno + 1 trazo + opacidad. Fase 2: hasta `FLEXVEC_MAX_APPEAR` entradas. **No** hay pila multinivel con efectos vivos |
 | Texto puntual | una fuente (Outfit, la del sistema), sin *shaping*. **No** se convierte a curvas al exportar: el atlas 4bpp del sistema no tiene contornos que convertir, así que el SVG lleva un `<text>` con una pila de fuentes genérica |
 | Texto de área (Fase 2) | ajuste de línea por palabras dentro de un rectángulo, alineación de párrafo. Sin columnas ni flujo entre marcos |
-| Símbolos | definición maestra + instancias vinculadas. **Sin** sustituciones por instancia |
-| Motivos (patterns) | mosaico rectangular con escala y desplazamiento. Sin mosaicos hexagonales ni de ladrillo |
-| Pincel de dispersión / de motivo (Fase 2) | número de instancias acotado (`FLEXVEC_MAX_BRUSH_INST`). Se **hornea** a geometría, no se recalcula por cuadro |
+| Símbolos | definición maestra + instancias **vinculadas de verdad**: la instancia no copia geometría, apunta al maestro, así que editar el maestro cambia todas y cincuenta instancias no gastan ni un nodo. Cada instancia tiene matriz y color propios; esa es la única sustitución, y es deliberada |
+| Motivos (patterns) | **procedurales**: seis tramas (puntos, rayas, rejilla, damero, diagonales, cruzada) con celda, desplazamiento y giro. Un motivo hecho de un dibujo repetido obligaría a rasterizarlo a un bitmap y muestrearlo por píxel (~92 KB por motivo vivo, rehecho en cada cambio de zoom); una trama procedural se evalúa con aritmética pura, no gasta memoria y se exporta a SVG como un `<pattern>` con geometría de verdad |
+| Pincel de dispersión / de motivo | estampa una figura a lo largo de un trazado. Todas las copias caben en **un** objeto (una por subtrazado), así que cien estampas gastan un elemento del presupuesto y no cien. Si el trazado es tan largo que no caben, el espaciado **se abre** hasta que caben, en vez de negarse |
 | Fusión (blend) | interpolación de forma y color con pasos acotados (`FLEXVEC_MAX_BLEND_STEPS`) |
 | Repetir (repeat) | rejilla y espejo, instancias acotadas, recalculado **bajo demanda** |
 | Transformar cada uno | trivial: ya existen las afines |
@@ -140,6 +139,7 @@ tiene sentido en este hardware).
 
 | Función | Condición para revisarla |
 |---|---|
+| **Máscara de opacidad (por luminosidad)** | estaba prevista como Simplificada para la Fase 2 y se movió aquí **con medida en mano**. Componer dos coberturas por fila (la del objeto y la de la máscara) es imposible con un rasterizador que emite los tramos de una figura de una vez: haría falta un búfer de cobertura de pantalla completa —**384 KB de PSRAM retenidos durante todo el render**— o rasterizar la máscara dos veces por objeto. La máscara de **recorte** cubre el caso real (limitar un dibujo a una forma) sin ninguno de esos dos costes, así que la de opacidad no entra hasta que haya un motivo de peso |
 | Varias mesas de trabajo | requiere un modelo de vista por mesa y multiplica el coste de exportación |
 | Gradiente de malla / libre | solo si se demuestra con medidas reales que la interpolación 2D cabe en el presupuesto de CPU. Hoy no hay evidencia de que quepa |
 | Rejilla de perspectiva | necesita transformación proyectiva en el render, que hoy es afín puro |
@@ -185,8 +185,9 @@ porque son operaciones puntuales y explícitas del usuario:
 
 | Bloque temporal | Tamaño | Cuándo existe |
 |---|---|---|
-| Rejillas del Pathfinder | **~146 KB** | solo durante una operación booleana (`flexVecBoolBytes()`) |
-| Serialización del documento | hasta **~145 KB** | solo al guardar o al abrir un `.fxv` |
+| Rejillas del Pathfinder | **~210 KB** | solo durante una booleana o un recorte (`flexVecBoolBytes()`). Son tres rejillas de 256×256: la tercera la exige *Dividir*, que necesita las dos figuras a la vez además del acumulador |
+| Serialización del documento | hasta **~175 KB** | solo al guardar o al abrir un `.fxv` |
+| Exportación PNG | **512 KB** de salida + **48 KB** de compresor | solo durante la exportación. El píxel sale de la caché de render que ya existe, así que **no** hay un pico de 1,1 MB en RGB888 |
 | Servidor HTTP (petición + página) | **8 KB** | solo mientras se comparte |
 
 Todo lo residente se reserva **al abrir la app** y se libera **al cerrarla**.
@@ -313,3 +314,77 @@ antes de dar la fase por buena en hardware:
    servidor y el codificador de QR.
 4. **Corte de corriente al guardar**: la escritura es atómica
    (`flexFsWriteBinAtomic`), así que debe quedar el documento anterior entero.
+
+---
+
+## 10. Verificación de la Fase 2
+
+La Fase 2 se abordó **después** de que la Fase 1 pasara sus criterios, y no
+tocó ninguna de sus funciones: las 300 comprobaciones de la Fase 1 siguen
+pasando sin cambios, que es el primer criterio de aceptación de esta fase.
+
+| Criterio de aceptación de la Fase 2 | Dónde se verifica |
+|---|---|
+| Pathfinder ampliado: **Dividir** (tres regiones) y **Recortar** (conserva las figuras de encima) | `test_vector.cpp :: testDivideTrimClip` |
+| Gradientes lineal y radial con edición de paradas y opacidad por parada | `test_vector.cpp :: testGradients` (Fase 1) + panel de Apariencia |
+| **Máscara de recorte de forma arbitraria**, y el objeto sin solape desaparece | `test_vector.cpp :: testDivideTrimClip` |
+| **Apariencia ampliada**: dos rellenos y dos trazos, con su orden de pintado y su exportación | `test_vector.cpp :: testAppearance2` |
+| **Pincel**: estampas a lo largo de un trazado, todas en un objeto, con el espaciado que se abre solo si no caben | `test_vector.cpp :: testBlendRepeatBrush` |
+| **Motivos**: los seis tipos, con celda, desplazamiento, coordenadas negativas y `<pattern>` en el SVG | `test_vector.cpp :: testPatterns` |
+| **Símbolos**: la instancia no gasta nodos, sigue al maestro al editarlo, y borrar el maestro se lleva las instancias en un paso | `test_vector.cpp :: testSymbols` |
+| **Texto de área**: corte por palabras, tres alineaciones, la caja manda, saltos explícitos, y los mismos `<tspan>` en el SVG | `test_vector.cpp :: testAreaText` |
+| **Transformar cada uno**, reflejar e inclinar | `test_vector.cpp :: testTransforms` |
+| **Fusión**: pasos acotados, forma y color interpolados | `test_vector.cpp :: testBlendRepeatBrush` |
+| **Repetición**: rejilla y espejo, instancias acotadas, un solo paso de deshacer | `test_vector.cpp :: testBlendRepeatBrush` |
+| **SVG compacto** y exportación de selección | `test_vector.cpp :: testSVG` |
+| **Exportación PNG**: se descomprime con zlib y los píxeles vuelven **exactamente** iguales | `test_vector.cpp :: testPng` |
+| **Presupuesto de render**: el relleno emite tramos largos, alejar cuesta menos, y un repintado completo cabe en el presupuesto | `test_vector.cpp :: testRenderBudget` |
+| Nada de lo marcado **Omitido** o **Futuro** se implementó a medias | revisión de §3.3 y §3.4 contra la API de `FlexOS_Vector.h` |
+
+### 10.1 Rendimiento: qué se mide y qué no
+
+`testRenderBudget` **no mide milisegundos**, y es deliberado: un PC no dice
+nada sobre lo que tarda un ESP32-P4. Mide **trabajo** —cuántos tramos y
+cuántos píxeles emite el rasterizador—, que sí se traslada, porque el coste en
+la placa es proporcional a eso. Los números de hoy:
+
+| Caso | Tramos | Píxeles | Píxeles por tramo |
+|---|---:|---:|---:|
+| Círculo de 470 px de diámetro | 1966 | 174 108 | **89** |
+| 120 círculos con trazo (repintado completo) | 51 120 | 139 200 | 2,7 |
+| Objeto de 40×30: banda sucia | — | — | **35 filas de 800** |
+
+Lo que la prueba fija no es el número absoluto sino la **relación**: un relleno
+macizo tiene que emitir tramos largos (≈90 píxeles cada uno), no un tramo por
+píxel. Si esa cifra cayera a ~1, sería que el rasterizador ha vuelto a emitir
+píxel a píxel, y eso multiplica por cien las llamadas al motor gráfico. Esa es
+la regresión que la prueba existe para cazar.
+
+El FPS real se mide **en la placa**, poniendo `FLEX_DIAG` a 1 en
+`FlexOS_Ultra_Core.h`: el sistema vuelca por serie el tiempo por cuadro, el
+peor cuadro y cuántos pasaron de 16,67 ms.
+
+### 10.2 Las cuatro optimizaciones que sostienen la fluidez
+
+1. **La caché de render.** El documento se rasteriza una vez a un lienzo
+   RGB565 propio. Un cuadro normal copia de ahí sólo la banda que cambió.
+2. **El objeto en movimiento sale de la caché.** Mientras se arrastra, se
+   compone encima en cada cuadro; el resto viene ya hecho. Arrastrar cuesta una
+   figura, no un documento.
+3. **Ordenación por cuenta y lista de aristas activas.** Cada fila mira sólo
+   las aristas que la cruzan. Sin eso, una figura de 500 aristas se recorrería
+   entera 800 × 4 veces: 1,6 millones de pruebas para una sola forma.
+4. **Lo caro se hornea.** Fusión, repetición y pincel producen geometría una
+   sola vez. No queda un grafo que re-evaluar en cada repintado — que es lo que
+   un editor de escritorio puede permitirse con una GPU detrás y un MCU no.
+
+### 10.3 Lo que sigue necesitando la placa
+
+Lo de §9 sigue vigente, y la Fase 2 añade dos comprobaciones manuales:
+
+5. **PNG en un visor externo**: exportar y abrir el `.png` en un ordenador. La
+   prueba de host ya descomprime el flujo con zlib y compara los píxeles, así
+   que esto sólo confirma el camino completo hasta la NOR Flash.
+6. **Motivos y gradientes a distintos zooms**: los dos se evalúan en
+   coordenadas de documento, así que ampliar debe agrandar la trama, no
+   revelar píxeles.

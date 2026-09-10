@@ -120,8 +120,11 @@ VECSRC  := $(ULTRA)/FlexOS_Vector.cpp
 QRSRC   := $(ULTRA)/FlexOS_QR.cpp
 HTTPSRC := $(ULTRA)/FlexOS_HttpShare.cpp
 
+# -lz es SOLO de la prueba: descomprime con zlib el PNG que genera el
+# firmware y compara los pixeles uno a uno. El firmware NO enlaza zlib --
+# su compresor es propio y cabe en FlexOS_Vector.cpp.
 $(BUILD)/test_vector: test_vector.cpp $(VECSRC) $(ULTRA)/FlexOS_Vector.h | $(BUILD)
-	$(CXX) $(COMMON) $(SAN) -o $@ test_vector.cpp $(VECSRC)
+	$(CXX) $(COMMON) $(SAN) -o $@ test_vector.cpp $(VECSRC) -lz
 
 $(BUILD)/test_qr: test_qr.cpp $(QRSRC) $(ULTRA)/FlexOS_QR.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_qr.cpp $(QRSRC)

@@ -65,7 +65,7 @@ enum { VT_SELECT = 0, VT_NODE, VT_PEN, VT_RECT, VT_ELLIPSE, VT_POLY, VT_LINE, VT
 // Paneles deslizantes.
 enum { VP_NONE = 0, VP_STYLE, VP_LAYERS, VP_ARRANGE, VP_SHARE, VP_N };
 
-#define VEC_PANEL_H    322
+#define VEC_PANEL_H    358
 #define VEC_HANDLE_R   11        // radio del tirador de la caja delimitadora
 #define VEC_TOUCH_TOL  14        // holgura de dedo, EN PIXELES (se pasa a unidades con el zoom)
 #define VEC_GRID_STEP  20.0f     // paso de la cuadricula, en unidades de documento
@@ -125,6 +125,11 @@ static char     vecMsg[64]   = "";
 static uint32_t vecMsgMs     = 0;
 static int      vecPolySides = 5;
 static bool     vecPolyStar  = false;
+static int      vecStyleTab  = 0;      // 0 color · 1 motivo · 2 apariencia extra
+static int      vecArrPage   = 0;      // 0 organizar · 1 Fase 2
+static int      vecRepMode   = 0;      // cicla las formas de repetir
+static int      vecPatSel    = -1;     // motivo de trabajo
+static int      vecPngLen    = 0;
 static uint32_t vecFillRGB   = 0x3C6EF0;
 static uint32_t vecStrokeRGB = 0x101018;
 static float    vecStrokeW   = 2.0f;
@@ -287,8 +292,9 @@ static void vecToastErr(int rc){
 typedef struct {
   uint16_t col;
   uint8_t  alpha;              // opacidad de la pintura x la del objeto
-  const FlexVecGrad* grad;     // NULL = color solido
-  float    inv[6];             // pixel -> espacio del objeto (para el gradiente)
+  const FlexVecGrad* grad;     // NULL = ni gradiente
+  const FlexVecPattern* pat;   // NULL = ni motivo
+  float    inv[6];             // pixel -> espacio del objeto
 } VecSpanCtx;
 
 static inline uint16_t vecRgb(uint32_t rgb){
@@ -322,20 +328,54 @@ static void vecSpanGrad(int y, int x0, int x1, uint8_t cov, void* user){
   }
 }
 
+// MOTIVO. El color sale de una formula, no de una textura: cero memoria
+// y coste constante por pixel. Como se evalua en coordenadas de
+// DOCUMENTO, al ampliar se ven los mismos puntos mas grandes -- que es
+// lo que se espera de un relleno vectorial y lo que una textura
+// rasterizada no puede dar sin volver a generarse.
+static void vecSpanPattern(int y, int x0, int x1, uint8_t cov, void* user){
+  VecSpanCtx* c = (VecSpanCtx*)user;
+  const FlexVecPattern* pt = c->pat;
+  if(!pt){ vecSpanSolid(y, x0, x1, cov, user); return; }
+  float fx = (float)x0 + 0.5f, fy = (float)y + 0.5f;
+  float dx = c->inv[0] * fx + c->inv[2] * fy + c->inv[4];
+  float dy = c->inv[1] * fx + c->inv[3] * fy + c->inv[5];
+  float sx = c->inv[0], sy = c->inv[1];
+  for(int x = x0; x <= x1; x++, dx += sx, dy += sy){
+    uint8_t pa = 0;
+    uint32_t rgb = flexVecPatternAt(pt, dx, dy, &pa);
+    uint32_t a = ((uint32_t)cov * c->alpha * pa) / (255u * 255u);
+    if(!a) continue;
+    pxA(x, y, vecRgb(rgb), (uint8_t)a);
+  }
+}
+
 // Prepara el contexto de una pintura (relleno o trazo) de un objeto.
 static void vecCtxFor(VecSpanCtx* c, const FlexVecElem* el, const FlexVecPaint* p,
                       const FlexVecView* v){
   memset(c, 0, sizeof(*c));
   c->col = vecRgb(p->rgb);
   c->alpha = (uint8_t)(((uint32_t)p->alpha * el->alpha) / 255u);
-  c->grad = NULL;
+  c->grad = NULL; c->pat = NULL;
+  int wantsInv = (p->type == FLEXVEC_P_GRAD || p->type == FLEXVEC_P_PATTERN);
+  if(!wantsInv) return;
+  // La inversa lleva del pixel al espacio del OBJETO: es donde viven el
+  // eje del gradiente y la celda del motivo. Sin ella, girar el objeto
+  // dejaria el relleno quieto.
+  float cm[6];
+  flexVecMatMul(v->m, el->m, cm);
+  if(!flexVecMatInvert(cm, c->inv)) return;            // degenerada: color plano
   if(p->type == FLEXVEC_P_GRAD && p->ref >= 0 && p->ref < FLEXVEC_MAX_GRADS &&
-     vecDoc.grads[p->ref].used){
+     vecDoc.grads[p->ref].used)
     c->grad = &vecDoc.grads[p->ref];
-    float cm[6];
-    flexVecMatMul(v->m, el->m, cm);
-    if(!flexVecMatInvert(cm, c->inv)) c->grad = NULL;   // matriz degenerada: color plano
-  }
+  else if(p->type == FLEXVEC_P_PATTERN && p->ref >= 0 && p->ref < FLEXVEC_MAX_PATTERNS &&
+          vecDoc.pats[p->ref].used)
+    c->pat = &vecDoc.pats[p->ref];
+}
+static FlexVecSpanCb vecCbFor(const VecSpanCtx* c){
+  if(c->grad) return vecSpanGrad;
+  if(c->pat)  return vecSpanPattern;
+  return vecSpanSolid;
 }
 
 // #############################################################
@@ -382,41 +422,106 @@ static void vecDrawGrid(){
 
 // Pinta UN objeto con la vista dada. Lo usan la cache y tambien el
 // dibujo en caliente del objeto que se esta arrastrando.
+// El tamano de drawText es un MULTIPLO (12 px por unidad), asi que el
+// cuerpo en unidades de documento se lleva al escalon mas cercano. Con
+// esa misma funcion se mide el texto para repartirlo en lineas: medir
+// con una y dibujar con otra desalinearia el ajuste.
+static int vecTextStep(float sizeDoc){
+  int st = (int)(sizeDoc * vecZoom / 12.0f + 0.5f);
+  if(st < 1) st = 1;
+  if(st > 8) st = 8;
+  return st;
+}
+// Medida que el motor usa para el texto de area. Mide con la fuente
+// REAL del sistema, en unidades de DOCUMENTO (por eso divide por el
+// zoom): el reparto en lineas no puede cambiar al ampliar.
+static float vecMeasure(const char* utf8, int len, float size, void* user){
+  (void)user;
+  if(len <= 0) return 0;
+  char tmp[128];
+  if(len > (int)sizeof(tmp) - 1) len = (int)sizeof(tmp) - 1;
+  memcpy(tmp, utf8, (size_t)len);
+  tmp[len] = 0;
+  int st = vecTextStep(size);
+  float px = (float)textW(tmp, st);
+  return (vecZoom > 0.0001f) ? px / vecZoom : px;
+}
+typedef struct { const FlexVecElem* el; const FlexVecView* v; uint16_t col; } VecTextCtx;
+static void vecTextLineCb(const char* utf8, int len, float x, float y, float w, void* user){
+  VecTextCtx* c = (VecTextCtx*)user;
+  (void)w;
+  char tmp[128];
+  if(len > (int)sizeof(tmp) - 1) len = (int)sizeof(tmp) - 1;
+  if(len < 0) len = 0;
+  memcpy(tmp, utf8, (size_t)len);
+  tmp[len] = 0;
+  float sx, sy;
+  flexVecMatApply(c->el->m, x, y, &sx, &sy);
+  float px, py;
+  flexVecMatApply(c->v->m, sx, sy, &px, &py);
+  drawText((int)px, (int)py, tmp, vecTextStep(c->el->p0), c->col);
+}
+
 static void vecDrawElem(int e, const FlexVecView* v){
   if(e < 0 || e >= FLEXVEC_MAX_ELEMS) return;
   const FlexVecElem* el = &vecDoc.elems[e];
   if(el->layer < 0) return;
   int subN = 0;
   int np = flexVecFlatten(&vecDoc, e, v, &vecRas, &subN);
-  if(np <= 0 || subN <= 0) return;
-  if(el->fill.type != FLEXVEC_P_NONE){
-    VecSpanCtx c; vecCtxFor(&c, el, &el->fill, v);
-    flexVecFillFlat(&vecRas, subN, v, 0, c.grad ? vecSpanGrad : vecSpanSolid, &c);
-  }
-  if(el->stroke.type != FLEXVEC_P_NONE && el->strokeW > 0){
-    VecSpanCtx c; vecCtxFor(&c, el, &el->stroke, v);
-    float cm[6];
-    flexVecMatMul(v->m, el->m, cm);
+  // Escala de la vista COMPUESTA con la del objeto: un objeto al doble
+  // tiene el trazo al doble, como en Illustrator con "Escalar trazos".
+  float cm[6], sc = 1.0f;
+  flexVecMatMul(v->m, el->m, cm);
+  {
     float ux, uy, vx, vy;
     flexVecMatApplyVec(cm, 1.0f, 0.0f, &ux, &uy);
     flexVecMatApplyVec(cm, 0.0f, 1.0f, &vx, &vy);
-    float sc = sqrtf(fabsf(ux * vy - uy * vx));
-    if(!(sc > 0)) sc = 1.0f;
-    flexVecStrokeFlat(&vecRas, subN, v, el->strokeW * sc, el->cap, el->join,
-                      c.grad ? vecSpanGrad : vecSpanSolid, &c);
+    float k = sqrtf(fabsf(ux * vy - uy * vx));
+    if(k > 0) sc = k;
+  }
+  // ORDEN DE PINTADO de la apariencia ampliada: relleno 2, relleno,
+  // trazo 2, trazo. Es de abajo arriba, como una pila de apariencia, y
+  // es lo que hace que un "trazo 2" mas grueso se vea como un contorno
+  // por fuera del principal.
+  if(np > 0 && subN > 0){
+    if(el->fill2.type != FLEXVEC_P_NONE){
+      VecSpanCtx c; vecCtxFor(&c, el, &el->fill2, v);
+      flexVecFillFlat(&vecRas, subN, v, 0, vecCbFor(&c), &c);
+    }
+    if(el->fill.type != FLEXVEC_P_NONE){
+      VecSpanCtx c; vecCtxFor(&c, el, &el->fill, v);
+      flexVecFillFlat(&vecRas, subN, v, 0, vecCbFor(&c), &c);
+    }
+    if(el->stroke2.type != FLEXVEC_P_NONE && el->strokeW2 > 0){
+      VecSpanCtx c; vecCtxFor(&c, el, &el->stroke2, v);
+      flexVecStrokeFlat(&vecRas, subN, v, el->strokeW2 * sc, el->cap, el->join,
+                        vecCbFor(&c), &c);
+    }
+    if(el->stroke.type != FLEXVEC_P_NONE && el->strokeW > 0){
+      VecSpanCtx c; vecCtxFor(&c, el, &el->stroke, v);
+      flexVecStrokeFlat(&vecRas, subN, v, el->strokeW * sc, el->cap, el->join,
+                        vecCbFor(&c), &c);
+    }
   }
   // TEXTO: lo dibuja la fuente del sistema, no el rasterizador. El motor
   // guarda la cadena y la caja; la unica fuente que hay en la placa es
   // un atlas 4bpp sin contornos, asi que no existen curvas que rellenar.
   if(el->kind == FLEXVEC_K_TEXT){
     const FlexVecNode* nd = vecDoc.arena.nodes + el->first;
-    float sx, sy;
-    flexVecMatApply(v->m, nd[0].x, nd[0].y, &sx, &sy);
-    float sc = el->p0 * vecZoom;
-    int size = (int)(sc / 12.0f + 0.5f);          // el tamano de drawText es un multiplo
-    if(size < 1) size = 1;
-    if(size > 8) size = 8;
-    drawText((int)sx, (int)sy, flexVecTextStr(&vecDoc, e), size, vecRgb(el->fill.rgb));
+    uint16_t col = vecRgb(el->fill.rgb);
+    if(flexVecTextIsArea(&vecDoc, e)){
+      // TEXTO DE AREA: el reparto en lineas lo hace el motor y la medida
+      // la pone la fuente de verdad. Las mismas lineas que se ven aqui
+      // son las que salen en el SVG (ver vecExportSvg).
+      VecTextCtx tc; tc.el = el; tc.v = v; tc.col = col;
+      flexVecTextLayout(&vecDoc, e, el->p0 * 1.25f, vecMeasure, NULL, vecTextLineCb, &tc);
+    } else {
+      float sx, sy;
+      flexVecMatApply(el->m, nd[0].x, nd[0].y, &sx, &sy);
+      float px, py;
+      flexVecMatApply(v->m, sx, sy, &px, &py);
+      drawText((int)px, (int)py, flexVecTextStr(&vecDoc, e), vecTextStep(el->p0), col);
+    }
   }
 }
 
@@ -771,42 +876,123 @@ static void vecPanelRect(int* x, int* y, int* w, int* h){
   if(*y < VEC_TOP + 8) *y = VEC_TOP + 8;
 }
 
+// Tres pestanas, porque en 456 px de ancho no caben de otra forma sin
+// que todo quede por debajo del tamano de un dedo. La de COLOR es la que
+// se usa siempre y por eso es la primera.
+static const char* VEC_STYLE_TAB[3] = { "Color", "Motivo", "Extra" };
+static const char* VEC_PAT_NAME[FLEXVEC_PAT_N] = {
+  "Puntos", "Rayas", "Rejilla", "Damero", "Diagonal", "Trama" };
+
+static void vecStyleTabRect(int i, int x, int y, int w, int* bx, int* by, int* bw, int* bh){
+  int tw = (w - 40) / 3;
+  *bx = x + 20 + i * tw; *by = y + 44; *bw = tw - 6; *bh = 34;
+}
+
+// Muestra de un motivo, dibujada con el MISMO evaluador que el relleno:
+// lo que se ve en el boton es exactamente lo que se va a pintar.
+static void vecPatSwatch(int kind, int x, int y, int w, int h){
+  FlexVecPattern pt;
+  memset(&pt, 0, sizeof(pt));
+  pt.used = 1; pt.kind = (uint8_t)kind; pt.scale = 10;
+  pt.fg = 0x101018; pt.fgA = 255; pt.bg = 0xFFFFFF; pt.bgA = 255;
+  for(int j = 0; j < h; j++)
+    for(int i = 0; i < w; i++){
+      uint8_t a = 0;
+      uint32_t c = flexVecPatternAt(&pt, (float)i, (float)j, &a);
+      if(a) px(x + i, y + j, vecRgb(c));
+    }
+}
+
 static void vecDrawStylePanel(int x, int y, int w, int h){
-  drawText(x + 20, y + 16, "Apariencia", 3, TH_TXT);
-  drawText(x + 20, y + 56, "Relleno", 1, TH_TXT2);
-  for(int i = 0; i < 12; i++){
-    int cx = x + 24 + (i % 6) * 40, cy = y + 78 + (i / 6) * 40;
-    fillCircle(cx + 14, cy + 14, 14, vecRgb(VEC_PAL[i]));
-    if(VEC_PAL[i] == vecFillRGB) drawCircle(cx + 14, cy + 14, 17, TH_PRIM);
-    else drawCircle(cx + 14, cy + 14, 14, TH_BORDER);
+  drawText(x + 20, y + 14, "Apariencia", 3, TH_TXT);
+  for(int i = 0; i < 3; i++){
+    int bx, by, bw, bh;
+    vecStyleTabRect(i, x, y, w, &bx, &by, &bw, &bh);
+    bool on = (i == vecStyleTab);
+    fillRoundRect(bx, by, bw, bh, 12, on ? TH_PRIM : TH_SURF2);
+    drawTextC(bx + bw / 2, by + bh / 2 - 7, VEC_STYLE_TAB[i], 1, on ? TH_ONACC : TH_TXT2);
   }
-  drawText(x + 240, y + 56, "Trazo", 1, TH_TXT2);
-  for(int i = 0; i < 12; i++){
-    int cx = x + 244 + (i % 6) * 34, cy = y + 78 + (i / 6) * 40;
-    fillCircle(cx + 12, cy + 14, 12, vecRgb(VEC_PAL[i]));
-    if(VEC_PAL[i] == vecStrokeRGB) drawCircle(cx + 12, cy + 14, 15, TH_PRIM);
-    else drawCircle(cx + 12, cy + 14, 12, TH_BORDER);
+  int ty = y + 92;
+  if(vecStyleTab == 0){
+    drawText(x + 20, ty, "Relleno", 1, TH_TXT2);
+    for(int i = 0; i < 12; i++){
+      int cx = x + 24 + (i % 6) * 40, cy = ty + 22 + (i / 6) * 40;
+      fillCircle(cx + 14, cy + 14, 14, vecRgb(VEC_PAL[i]));
+      if(VEC_PAL[i] == vecFillRGB) drawCircle(cx + 14, cy + 14, 17, TH_PRIM);
+      else drawCircle(cx + 14, cy + 14, 14, TH_BORDER);
+    }
+    drawText(x + 240, ty, "Trazo", 1, TH_TXT2);
+    for(int i = 0; i < 12; i++){
+      int cx = x + 244 + (i % 6) * 34, cy = ty + 22 + (i / 6) * 40;
+      fillCircle(cx + 12, cy + 14, 12, vecRgb(VEC_PAL[i]));
+      if(VEC_PAL[i] == vecStrokeRGB) drawCircle(cx + 12, cy + 14, 15, TH_PRIM);
+      else drawCircle(cx + 12, cy + 14, 12, TH_BORDER);
+    }
+    char t[24];
+    drawText(x + 20, ty + 112, "Grosor", 1, TH_TXT2);
+    snprintf(t, sizeof(t), "%.1f", (double)vecStrokeW);
+    drawTextR(x + w - 20, ty + 112, t, 1, TH_TXT2);
+    fillRoundRect(x + 20, ty + 136, w - 40, 8, 4, TH_TRACK);
+    float fr = vecStrokeW / 24.0f; if(fr > 1) fr = 1;
+    fillRoundRect(x + 20, ty + 136, (int)((w - 40) * fr), 8, 4, TH_PRIM);
+    fillCircle(x + 20 + (int)((w - 40) * fr), ty + 140, 13, TH_PRIM);
+    drawText(x + 20, ty + 166, "Opacidad", 1, TH_TXT2);
+    snprintf(t, sizeof(t), "%d%%", (int)(vecObjAlpha * 100 / 255));
+    drawTextR(x + w - 20, ty + 166, t, 1, TH_TXT2);
+    fillRoundRect(x + 20, ty + 190, w - 40, 8, 4, TH_TRACK);
+    fillRoundRect(x + 20, ty + 190, (int)((w - 40) * vecObjAlpha / 255), 8, 4, TH_PRIM);
+    fillCircle(x + 20 + (int)((w - 40) * vecObjAlpha / 255), ty + 194, 13, TH_PRIM);
+    fillRoundRect(x + 20, ty + 214, 130, 34, 12, TH_SURF2);
+    drawTextC(x + 85, ty + 223, "Sin relleno", 1, TH_TXT);
+    fillRoundRect(x + 162, ty + 214, 130, 34, 12, TH_SURF2);
+    drawTextC(x + 227, ty + 223, "Sin trazo", 1, TH_TXT);
+    fillRoundRect(x + 304, ty + 214, 130, 34, 12, TH_ACCS);
+    drawTextC(x + 369, ty + 223, "Gradiente", 1, TH_PRIM);
+  } else if(vecStyleTab == 1){
+    drawText(x + 20, ty, "Motivo de relleno", 1, TH_TXT2);
+    for(int i = 0; i < FLEXVEC_PAT_N; i++){
+      int bx = x + 20 + (i % 3) * ((w - 40) / 3);
+      int by = ty + 22 + (i / 3) * 76;
+      int bw = (w - 40) / 3 - 8;
+      bool on = (vecPatSel >= 0 && vecDoc.pats[vecPatSel].used &&
+                 vecDoc.pats[vecPatSel].kind == i);
+      fillRoundRect(bx, by, bw, 68, 12, on ? TH_ACCS : TH_SURF2);
+      if(on) drawRoundRect(bx, by, bw, 68, 12, TH_PRIM);
+      vecPatSwatch(i, bx + (bw - 44) / 2, by + 6, 44, 34);
+      drawTextC(bx + bw / 2, by + 46, VEC_PAT_NAME[i], 1, on ? TH_PRIM : TH_TXT2);
+    }
+    char t[32];
+    float sc = (vecPatSel >= 0 && vecDoc.pats[vecPatSel].used) ? vecDoc.pats[vecPatSel].scale : 12.0f;
+    drawText(x + 20, ty + 180, "Tamano de la celda", 1, TH_TXT2);
+    snprintf(t, sizeof(t), "%d", (int)sc);
+    drawTextR(x + w - 20, ty + 180, t, 1, TH_TXT2);
+    fillRoundRect(x + 20, ty + 204, w - 40, 8, 4, TH_TRACK);
+    float fr = (sc - 2.0f) / 46.0f; if(fr < 0) fr = 0; if(fr > 1) fr = 1;
+    fillRoundRect(x + 20, ty + 204, (int)((w - 40) * fr), 8, 4, TH_PRIM);
+    fillCircle(x + 20 + (int)((w - 40) * fr), ty + 208, 13, TH_PRIM);
+    fillRoundRect(x + 20, ty + 226, w - 40, 34, 12, TH_SURF2);
+    drawTextC(x + w / 2, ty + 235, "Quitar el motivo", 1, TH_TXT);
+  } else {
+    drawText(x + 20, ty, "Segundo relleno", 1, TH_TXT2);
+    for(int i = 0; i < 6; i++){
+      int cx = x + 24 + i * 44, cy = ty + 22;
+      fillCircle(cx + 16, cy + 16, 16, vecRgb(VEC_PAL[i * 2]));
+      drawCircle(cx + 16, cy + 16, 16, TH_BORDER);
+    }
+    drawText(x + 20, ty + 70, "Segundo trazo", 1, TH_TXT2);
+    for(int i = 0; i < 6; i++){
+      int cx = x + 24 + i * 44, cy = ty + 92;
+      fillCircle(cx + 16, cy + 16, 16, vecRgb(VEC_PAL[i * 2 + 1]));
+      drawCircle(cx + 16, cy + 16, 16, TH_BORDER);
+    }
+    int sel = flexVecSelFirst(&vecDoc);
+    bool has = (sel >= 0) && flexVecHasExtra(&vecDoc, sel);
+    fillRoundRect(x + 20, ty + 146, w - 40, 36, 12, has ? TH_SURF2 : TH_TRACK);
+    drawTextC(x + w / 2, ty + 156, "Quitar la apariencia extra", 1, has ? TH_TXT : TH_DIS);
+    drawText(x + 20, ty + 196, "Un relleno y un trazo mas, por debajo de los", 1, TH_MUTE);
+    drawText(x + 20, ty + 214, "principales. Un contorno doble se hace asi:", 1, TH_MUTE);
+    drawText(x + 20, ty + 232, "segundo trazo mas grueso, y el principal encima.", 1, TH_MUTE);
   }
-  // Grosor de trazo
-  drawText(x + 20, y + 168, "Grosor", 1, TH_TXT2);
-  char t[24]; snprintf(t, sizeof(t), "%.1f", (double)vecStrokeW);
-  drawTextR(x + w - 20, y + 168, t, 1, TH_TXT2);
-  fillRoundRect(x + 20, y + 192, w - 40, 8, 4, TH_TRACK);
-  float fr = vecStrokeW / 24.0f; if(fr > 1) fr = 1;
-  fillRoundRect(x + 20, y + 192, (int)((w - 40) * fr), 8, 4, TH_PRIM);
-  fillCircle(x + 20 + (int)((w - 40) * fr), y + 196, 13, TH_PRIM);
-  // Opacidad
-  drawText(x + 20, y + 226, "Opacidad", 1, TH_TXT2);
-  snprintf(t, sizeof(t), "%d%%", (int)(vecObjAlpha * 100 / 255));
-  drawTextR(x + w - 20, y + 226, t, 1, TH_TXT2);
-  fillRoundRect(x + 20, y + 250, w - 40, 8, 4, TH_TRACK);
-  fillRoundRect(x + 20, y + 250, (int)((w - 40) * vecObjAlpha / 255), 8, 4, TH_PRIM);
-  fillCircle(x + 20 + (int)((w - 40) * vecObjAlpha / 255), y + 254, 13, TH_PRIM);
-  // Sin relleno / sin trazo
-  fillRoundRect(x + 20, y + 276, 130, 34, 12, TH_SURF2);
-  drawTextC(x + 85, y + 285, "Sin relleno", 1, TH_TXT);
-  fillRoundRect(x + 162, y + 276, 130, 34, 12, TH_SURF2);
-  drawTextC(x + 227, y + 285, "Sin trazo", 1, TH_TXT);
   (void)h;
 }
 
@@ -856,8 +1042,19 @@ static const VecBtn VEC_ARR_BTN[] = {
 };
 #define VEC_ARR_N ((int)(sizeof(VEC_ARR_BTN) / sizeof(VEC_ARR_BTN[0])))
 
+// Segunda pagina: lo que anade la Fase 2. Va en su propia pagina y no
+// mezclada con la primera porque son operaciones de otra naturaleza --
+// estas CREAN objetos nuevos a partir de los seleccionados, y tenerlas
+// junto a "alinear a la izquierda" invitaria a tocarlas sin querer.
+static const VecBtn VEC_ARR2_BTN[] = {
+  { "Dividir",     0, 0, 1 }, { "Recortar",   0, 1, 1 }, { "Mascara",   0, 2, 1 },
+  { "Fusion",      1, 0, 1 }, { "Repetir",    1, 1, 1 }, { "Pincel",    1, 2, 1 },
+  { "Instancia",   2, 0, 1 }, { "Texto area", 2, 1, 1 }, { "Inclinar",  2, 2, 1 },
+};
+#define VEC_ARR2_N ((int)(sizeof(VEC_ARR2_BTN) / sizeof(VEC_ARR2_BTN[0])))
+
 static void vecArrBtnRect(int i, int px, int py, int pw, int* x, int* y, int* w, int* h){
-  const VecBtn* b = &VEC_ARR_BTN[i];
+  const VecBtn* b = (vecArrPage == 0) ? &VEC_ARR_BTN[i] : &VEC_ARR2_BTN[i];
   int gap = 10, cols = 3;
   int bw = (pw - 32 - gap * (cols - 1)) / cols;
   *w = bw * b->span + gap * (b->span - 1);
@@ -867,22 +1064,44 @@ static void vecArrBtnRect(int i, int px, int py, int pw, int* x, int* y, int* w,
 }
 
 static void vecDrawArrangePanel(int x, int y, int w, int h){
-  drawText(x + 20, y + 14, "Organizar", 3, TH_TXT);
+  drawText(x + 20, y + 14, vecArrPage == 0 ? "Organizar" : "Crear", 3, TH_TXT);
   int nsel = flexVecSelCount(&vecDoc);
-  char t[48]; snprintf(t, sizeof(t), "%d seleccionado%s", nsel, nsel == 1 ? "" : "s");
-  drawTextR(x + w - 20, y + 20, t, 1, TH_TXT2);
-  for(int i = 0; i < VEC_ARR_N; i++){
+  char t[48];
+  snprintf(t, sizeof(t), "%d seleccionado%s", nsel, nsel == 1 ? "" : "s");
+  drawTextR(x + w - 116, y + 20, t, 1, TH_TXT2);
+  fillRoundRect(x + w - 104, y + 12, 84, 32, 12, TH_ACCS);
+  drawTextC(x + w - 62, y + 21, vecArrPage == 0 ? "Crear" : "Alinear", 1, TH_PRIM);
+  int nb = (vecArrPage == 0) ? VEC_ARR_N : VEC_ARR2_N;
+  for(int i = 0; i < nb; i++){
     int bx, by, bw, bh;
     vecArrBtnRect(i, x, y, w, &bx, &by, &bw, &bh);
     if(by + bh > y + h - 6) break;
-    // Las booleanas necesitan DOS objetos; alinear, uno. Un boton que no
-    // se puede usar ahora mismo se ve apagado en vez de dar un aviso
-    // despues de tocarlo.
-    bool boolOp = (i >= 9 && i <= 12);
-    bool on = boolOp ? (nsel >= 2) : (nsel >= 1);
-    if(i == 17) on = (nsel >= 3);
+    const char* label = (vecArrPage == 0) ? VEC_ARR_BTN[i].label : VEC_ARR2_BTN[i].label;
+    // Un boton que ahora mismo no se puede usar se ve APAGADO. Que
+    // parezca activo y suelte un aviso al tocarlo enseña lo mismo, pero
+    // despues de haber hecho perder el gesto.
+    bool on;
+    if(vecArrPage == 0){
+      bool boolOp = (i >= 9 && i <= 12);
+      on = boolOp ? (nsel >= 2) : (nsel >= 1);
+      if(i == 17) on = (nsel >= 3);
+    } else {
+      on = (i == 6 || i == 7 || i == 8) ? (nsel >= 1) : (nsel >= 2);
+      if(i == 4) on = (nsel >= 1);            // repetir necesita uno
+      if(i == 7) on = (nsel >= 1);            // texto de area, uno
+    }
     fillRoundRect(bx, by, bw, bh, 12, on ? TH_SURF2 : TH_TRACK);
-    drawTextC(bx + bw / 2, by + bh / 2 - 7, VEC_ARR_BTN[i].label, 1, on ? TH_TXT : TH_DIS);
+    drawTextC(bx + bw / 2, by + bh / 2 - 7, label, 1, on ? TH_TXT : TH_DIS);
+  }
+  if(vecArrPage == 1){
+    static const char* HINT[4] = {
+      "Fusion: dos objetos -> pasos intermedios",
+      "Pincel: selecciona el trazado y la figura",
+      "Mascara: recorta con el objeto de arriba",
+      "Repetir: toca varias veces para cambiar",
+    };
+    for(int i = 0; i < 4; i++)
+      drawText(x + 20, y + h - 92 + i * 20, HINT[i], 1, TH_MUTE);
   }
 }
 
@@ -895,13 +1114,20 @@ static void vecDrawSharePanel(int x, int y, int w, int h){
     drawTextC(x + w / 2, y + 118, "Exportar SVG y compartir", 2, TH_ONACC);
     fillRoundRect(x + 20, y + 162, w - 40, 42, 14, TH_SURF2);
     drawTextC(x + w / 2, y + 175, "Guardar SVG en el dispositivo", 1, TH_TXT);
+    fillRoundRect(x + 20, y + 212, w - 40, 42, 14, TH_SURF2);
+    drawTextC(x + w / 2, y + 225, "Guardar PNG (imagen)", 1, TH_TXT);
     const char* net = gNetOnline ? wifiConnIP : "sin conexion Wi-Fi";
     char t[64]; snprintf(t, sizeof(t), "Red: %s", net);
-    drawText(x + 20, y + 220, t, 1, TH_MUTE);
+    drawText(x + 20, y + 268, t, 1, TH_MUTE);
     if(vecSvgLen > 0){
       snprintf(t, sizeof(t), "Ultimo SVG: %d KB", (vecSvgLen + 512) / 1024);
-      drawText(x + 20, y + 244, t, 1, TH_MUTE);
+      drawText(x + 20, y + 290, t, 1, TH_MUTE);
     }
+    if(vecPngLen > 0){
+      snprintf(t, sizeof(t), "Ultimo PNG: %d KB", (vecPngLen + 512) / 1024);
+      drawText(x + 240, y + 290, t, 1, TH_MUTE);
+    }
+    drawText(x + 20, y + 312, "El SVG sigue siendo editable; el PNG es una foto.", 1, TH_MUTE);
     return;
   }
   // Compartiendo: el QR manda. Es lo que evita teclear una URL larga en
@@ -1155,7 +1381,8 @@ static void vecSvgName(char* out, size_t n){
 
 static bool vecExportSvg(bool selOnly){
   if(!vecReady || !vecSvg) return false;
-  int n = flexVecExportSVG(&vecDoc, vecSvg, FLEXVEC_SVG_BYTES, selOnly ? 1 : 0);
+  int n = flexVecExportSVGEx(&vecDoc, vecSvg, FLEXVEC_SVG_BYTES, selOnly ? 1 : 0, 0,
+                             vecMeasure, NULL);
   if(n < 0){
     vecToastErr(n);
     vecSvgLen = 0;
@@ -1177,6 +1404,99 @@ static bool vecSaveSvgToDisk(){
   char t[64]; snprintf(t, sizeof(t), "SVG guardado (%d KB)", (vecSvgLen + 512) / 1024);
   vecToast(t);
   vecReload();
+  return true;
+}
+
+// #############################################################
+// ##  EXPORTAR PNG
+// ##  ------------------------------------------------------
+// ##  Sin un solo megabyte de pico. El truco es que la app YA tiene el
+// ##  cuadro rasterizado en su cache RGB565 (768 KB, que estan ahi de
+// ##  todas formas): se rasteriza la mesa de trabajo ahi y se va
+// ##  convirtiendo FILA A FILA a RGB888 para el compresor. Lo unico que
+// ##  se pide prestado son el estado del compresor y el buffer de
+// ##  salida, y los dos se sueltan al terminar.
+// ##
+// ##  El PNG es un COMPLEMENTO del SVG, no su sustituto: un PNG es una
+// ##  foto y un SVG sigue siendo editable. Por eso el boton principal
+// ##  de compartir sigue siendo el de SVG.
+// #############################################################
+static bool vecExportPng(){
+  if(!vecReady) return false;
+  if(!vecCache){
+    vecCache = (uint16_t*)heap_caps_aligned_alloc(64, (size_t)SCR_W * SCR_H * 2,
+                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(!vecCache){ vecToast("Memoria insuficiente"); return false; }
+  }
+  float aw = vecDoc.artW, ah = vecDoc.artH;
+  if(aw < 1 || ah < 1) return false;
+  float sc = (float)SCR_W / aw;
+  if((float)SCR_H / ah < sc) sc = (float)SCR_H / ah;
+  int pw = (int)(aw * sc), ph = (int)(ah * sc);
+  if(pw < 1) pw = 1; if(pw > SCR_W) pw = SCR_W;
+  if(ph < 1) ph = 1; if(ph > SCR_H) ph = SCR_H;
+
+  // La mesa de trabajo, sobre blanco y SIN cuadricula ni marco: lo que
+  // se exporta es el dibujo, no la interfaz del editor.
+  FlexVecView v;
+  v.m[0] = sc; v.m[1] = 0; v.m[2] = 0; v.m[3] = sc; v.m[4] = 0; v.m[5] = 0;
+  v.clipX0 = 0; v.clipY0 = 0; v.clipX1 = pw - 1; v.clipY1 = ph - 1;
+  setBuf(vecCache);
+  int sx0 = gClipX0, sx1 = gClipX1, sy0 = gClipY0, sy1 = gClipY1;
+  gClipX0 = 0; gClipX1 = pw - 1; gClipY0 = 0; gClipY1 = ph - 1;
+  fillRect(0, 0, pw, ph, TC(255,255,255));
+  int16_t order[FLEXVEC_MAX_ELEMS];
+  int n = flexVecPaintOrder(&vecDoc, order, FLEXVEC_MAX_ELEMS);
+  for(int i = 0; i < n; i++) vecDrawElem(order[i], &v);
+  gClipX0 = sx0; gClipX1 = sx1; gClipY0 = sy0; gClipY1 = sy1;
+  setBuf(fb);
+  vecCacheOk = false;                     // la cache ya no es la del lienzo
+
+  size_t cap = 512u * 1024u;              // con compresion sobra; si no, se dice
+  uint8_t* out = (uint8_t*)heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  FlexVecPng* png = (FlexVecPng*)heap_caps_malloc(sizeof(FlexVecPng),
+                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  uint8_t* row = (uint8_t*)malloc((size_t)pw * 3);
+  if(!out || !png || !row){
+    free(out); free(png); free(row);
+    vecToast("Memoria insuficiente para el PNG");
+    return false;
+  }
+  bool ok = (flexVecPngBegin(png, pw, ph, out, cap) == FLEXVEC_OK);
+  for(int y = 0; y < ph && ok; y++){
+    const uint16_t* src = vecCache + (size_t)y * SCR_W;
+    for(int x = 0; x < pw; x++){
+      uint16_t c = src[x];
+      // RGB565 -> RGB888 replicando los bits altos: es la conversion que
+      // deja el blanco en 255 y el negro en 0 exactos.
+      uint8_t r = (uint8_t)(((c >> 11) & 0x1F) * 255 / 31);
+      uint8_t g = (uint8_t)(((c >> 5) & 0x3F) * 255 / 63);
+      uint8_t b = (uint8_t)((c & 0x1F) * 255 / 31);
+      row[x * 3] = r; row[x * 3 + 1] = g; row[x * 3 + 2] = b;
+    }
+    ok = (flexVecPngRow(png, row) == FLEXVEC_OK);
+  }
+  int total = ok ? flexVecPngEnd(png) : -1;
+  free(row); free(png);
+  if(total <= 0){
+    free(out);
+    vecToast("La imagen no cabe: exporta SVG");
+    return false;
+  }
+  char name[FLEXFS_NAME_MAX]; vecSvgName(name, sizeof(name));
+  char* dot = strrchr(name, '.');
+  if(dot) snprintf(dot, (size_t)(name + sizeof(name) - dot), ".png");
+  char path[FLEXFS_PATH_MAX];
+  snprintf(path, sizeof(path), "%s/%s", FLEXFS_DIR_VECTOR, name);
+  bool wrote = flexFsWriteBinAtomic(path, out, (size_t)total);
+  free(out);
+  vecPngLen = wrote ? total : 0;
+  if(!wrote){ vecToast("No se pudo guardar el PNG"); return false; }
+  char m[64];
+  snprintf(m, sizeof(m), "PNG guardado (%d KB)", (total + 512) / 1024);
+  vecToast(m);
+  vecReload();
+  vecInvalidate();
   return true;
 }
 
@@ -1727,36 +2047,151 @@ static void vecCanvasLong(int px, int py){
 // #############################################################
 // ##  TOQUES DE LA INTERFAZ
 // #############################################################
+static void vecApplyPattern(int kind){
+  if(vecPatSel < 0 || !vecDoc.pats[vecPatSel].used){
+    int p = flexVecPatternAdd(&vecDoc, kind);
+    if(p < 0){ vecToastErr(p); return; }
+    vecPatSel = p;
+  }
+  flexVecPatternSet(&vecDoc, vecPatSel, kind, vecDoc.pats[vecPatSel].scale, 0, 0, 0);
+  flexVecPatternColors(&vecDoc, vecPatSel, vecStrokeRGB, 255, vecFillRGB, 255);
+  int n = 0;
+  for(int e = 0; e < FLEXVEC_MAX_ELEMS; e++){
+    if(!vecElemOk(e) || !(vecDoc.elems[e].flags & FLEXVEC_EF_SEL)) continue;
+    if(n == 0) flexVecUndoBegin(&vecDoc, "Motivo");
+    flexVecSetFillPattern(&vecDoc, e, vecPatSel);
+    n++;
+  }
+  if(n){ flexVecUndoCommit(&vecDoc); vecInvalidate(); sessMarkDirty(IC_VECTOR); }
+  else vecToast("Selecciona un objeto");
+}
+
+static void vecApplyGradient(){
+  int sel = flexVecSelFirst(&vecDoc);
+  if(sel < 0){ vecToast("Selecciona un objeto"); return; }
+  int g = flexVecGradAdd(&vecDoc, FLEXVEC_G_LINEAR);
+  if(g < 0){ vecToastErr(g); return; }
+  float x0, y0, x1, y1;
+  flexVecBBox(&vecDoc, sel, &x0, &y0, &x1, &y1);
+  flexVecGradSetAxis(&vecDoc, g, x0, y0, x1, y1);
+  flexVecGradSetStop(&vecDoc, g, 0, 0.0f, vecFillRGB, 255);
+  flexVecGradSetStop(&vecDoc, g, 1, 1.0f, vecStrokeRGB, 255);
+  flexVecUndoBegin(&vecDoc, "Gradiente");
+  for(int e = 0; e < FLEXVEC_MAX_ELEMS; e++)
+    if(vecElemOk(e) && (vecDoc.elems[e].flags & FLEXVEC_EF_SEL))
+      flexVecSetFillGrad(&vecDoc, e, g);
+  flexVecUndoCommit(&vecDoc);
+  vecInvalidate(); sessMarkDirty(IC_VECTOR);
+  vecToast("Gradiente aplicado");
+}
+
 static bool vecStylePanelTouch(int px, int py, int x, int y, int w, int h){
   (void)h;
-  for(int i = 0; i < 12; i++){
-    int cx = x + 24 + (i % 6) * 40 + 14, cy = y + 78 + (i / 6) * 40 + 14;
-    if((px - cx) * (px - cx) + (py - cy) * (py - cy) <= 20 * 20){
-      vecFillRGB = VEC_PAL[i]; vecApplyStyle(0); return true;
+  for(int i = 0; i < 3; i++){
+    int bx, by, bw, bh;
+    vecStyleTabRect(i, x, y, w, &bx, &by, &bw, &bh);
+    if(px >= bx && px <= bx + bw && py >= by && py <= by + bh){ vecStyleTab = i; return true; }
+  }
+  int ty = y + 92;
+  if(vecStyleTab == 0){
+    for(int i = 0; i < 12; i++){
+      int cx = x + 24 + (i % 6) * 40 + 14, cy = ty + 22 + (i / 6) * 40 + 14;
+      if((px - cx) * (px - cx) + (py - cy) * (py - cy) <= 20 * 20){
+        vecFillRGB = VEC_PAL[i]; vecApplyStyle(0); return true;
+      }
+      cx = x + 244 + (i % 6) * 34 + 12; cy = ty + 22 + (i / 6) * 40 + 14;
+      if((px - cx) * (px - cx) + (py - cy) * (py - cy) <= 18 * 18){
+        vecStrokeRGB = VEC_PAL[i]; vecApplyStyle(1); return true;
+      }
     }
-    cx = x + 244 + (i % 6) * 34 + 12; cy = y + 78 + (i / 6) * 40 + 14;
-    if((px - cx) * (px - cx) + (py - cy) * (py - cy) <= 18 * 18){
-      vecStrokeRGB = VEC_PAL[i]; vecApplyStyle(1); return true;
+    if(py >= ty + 126 && py <= ty + 156){
+      float fr = (float)(px - (x + 20)) / (float)(w - 40);
+      vecStrokeW = fr * 24.0f;
+      if(vecStrokeW < 0) vecStrokeW = 0;
+      if(vecStrokeW > 24) vecStrokeW = 24;
+      vecApplyStyle(1);
+      return true;
+    }
+    if(py >= ty + 180 && py <= ty + 210){
+      float fr = (float)(px - (x + 20)) / (float)(w - 40);
+      int a = (int)(fr * 255.0f);
+      vecObjAlpha = (uint8_t)(a < 12 ? 12 : (a > 255 ? 255 : a));
+      vecApplyStyle(2);
+      return true;
+    }
+    if(py >= ty + 214 && py <= ty + 248){
+      if(px >= x + 20 && px <= x + 150){ vecApplyStyle(3); return true; }
+      if(px >= x + 162 && px <= x + 292){ vecApplyStyle(4); return true; }
+      if(px >= x + 304 && px <= x + 434){ vecApplyGradient(); return true; }
+    }
+    return false;
+  }
+  if(vecStyleTab == 1){
+    for(int i = 0; i < FLEXVEC_PAT_N; i++){
+      int bx = x + 20 + (i % 3) * ((w - 40) / 3);
+      int by = ty + 22 + (i / 3) * 76;
+      int bw = (w - 40) / 3 - 8;
+      if(px >= bx && px <= bx + bw && py >= by && py <= by + 68){
+        vecApplyPattern(i);
+        return true;
+      }
+    }
+    if(py >= ty + 194 && py <= ty + 222 && vecPatSel >= 0){
+      float fr = (float)(px - (x + 20)) / (float)(w - 40);
+      float sc = 2.0f + fr * 46.0f;
+      flexVecPatternSet(&vecDoc, vecPatSel, vecDoc.pats[vecPatSel].kind, sc, 0, 0, 0);
+      vecInvalidate(); sessMarkDirty(IC_VECTOR);
+      return true;
+    }
+    if(py >= ty + 226 && py <= ty + 260){
+      vecApplyStyle(0);                        // vuelve a relleno solido
+      vecToast("Motivo quitado");
+      return true;
+    }
+    return false;
+  }
+  // Pestana "Extra": segundo relleno y segundo trazo.
+  for(int i = 0; i < 6; i++){
+    int cx = x + 24 + i * 44 + 16;
+    if(px >= cx - 18 && px <= cx + 18){
+      if(py >= ty + 22 && py <= ty + 54){
+        int n = 0;
+        for(int e = 0; e < FLEXVEC_MAX_ELEMS; e++){
+          if(!vecElemOk(e) || !(vecDoc.elems[e].flags & FLEXVEC_EF_SEL)) continue;
+          if(n == 0) flexVecUndoBegin(&vecDoc, "Relleno 2");
+          flexVecSetFill2(&vecDoc, e, VEC_PAL[i * 2], 255);
+          n++;
+        }
+        if(n){ flexVecUndoCommit(&vecDoc); vecInvalidate(); sessMarkDirty(IC_VECTOR); }
+        else vecToast("Selecciona un objeto");
+        return true;
+      }
+      if(py >= ty + 92 && py <= ty + 124){
+        int n = 0;
+        for(int e = 0; e < FLEXVEC_MAX_ELEMS; e++){
+          if(!vecElemOk(e) || !(vecDoc.elems[e].flags & FLEXVEC_EF_SEL)) continue;
+          if(n == 0) flexVecUndoBegin(&vecDoc, "Trazo 2");
+          // El segundo trazo nace mas GRUESO que el principal: es lo que
+          // hace que se vea como un contorno por fuera y no tapado.
+          flexVecSetStroke2(&vecDoc, e, VEC_PAL[i * 2 + 1], 255, vecStrokeW + 6.0f);
+          n++;
+        }
+        if(n){ flexVecUndoCommit(&vecDoc); vecInvalidate(); sessMarkDirty(IC_VECTOR); }
+        else vecToast("Selecciona un objeto");
+        return true;
+      }
     }
   }
-  if(py >= y + 182 && py <= y + 212){
-    float fr = (float)(px - (x + 20)) / (float)(w - 40);
-    vecStrokeW = fr * 24.0f;
-    if(vecStrokeW < 0) vecStrokeW = 0;
-    if(vecStrokeW > 24) vecStrokeW = 24;
-    vecApplyStyle(1);
+  if(py >= ty + 146 && py <= ty + 182){
+    int n = 0;
+    for(int e = 0; e < FLEXVEC_MAX_ELEMS; e++){
+      if(!vecElemOk(e) || !(vecDoc.elems[e].flags & FLEXVEC_EF_SEL)) continue;
+      if(n == 0) flexVecUndoBegin(&vecDoc, "Quitar extra");
+      flexVecClearExtra(&vecDoc, e);
+      n++;
+    }
+    if(n){ flexVecUndoCommit(&vecDoc); vecInvalidate(); sessMarkDirty(IC_VECTOR); }
     return true;
-  }
-  if(py >= y + 240 && py <= y + 270){
-    float fr = (float)(px - (x + 20)) / (float)(w - 40);
-    int a = (int)(fr * 255.0f);
-    vecObjAlpha = (uint8_t)(a < 12 ? 12 : (a > 255 ? 255 : a));   // 0 es "invisible", no un estilo
-    vecApplyStyle(2);
-    return true;
-  }
-  if(py >= y + 276 && py <= y + 310){
-    if(px >= x + 20 && px <= x + 150){ vecApplyStyle(3); return true; }
-    if(px >= x + 162 && px <= x + 292){ vecApplyStyle(4); return true; }
   }
   return false;
 }
@@ -1807,7 +2242,121 @@ static void vecPathfinder(int op){
   else { vecToast("Hecho"); vecInvalidate(); sessMarkDirty(IC_VECTOR); }
 }
 
+// Recortar con la forma de arriba: mismos buffers y misma politica de
+// "pedir, usar y soltar" que el Pathfinder.
+static void vecClipMask(){
+  if(flexVecSelCount(&vecDoc) < 2){ vecToast("Selecciona el objeto y la mascara"); return; }
+  size_t need = flexVecBoolBytes();
+  void* blk = heap_caps_malloc(need, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(!blk) blk = malloc(need);
+  if(!blk){ vecToast("Memoria insuficiente"); return; }
+  FlexVecBoolWork w;
+  int rc = flexVecBoolInit(&w, blk, need);
+  if(rc == FLEXVEC_OK) rc = flexVecClipWithTop(&vecDoc, &vecRas, &w);
+  free(blk);
+  if(rc != FLEXVEC_OK) vecToastErr(rc);
+  else { vecToast("Recortado"); vecInvalidate(); sessMarkDirty(IC_VECTOR); }
+}
+
+// Los dos primeros seleccionados, en orden de pintado. Fusion y pincel
+// necesitan saber CUAL es cual, no solo cuantos hay.
+static int vecSelPair(int* a, int* b){
+  int16_t order[FLEXVEC_MAX_ELEMS];
+  int n = flexVecPaintOrder(&vecDoc, order, FLEXVEC_MAX_ELEMS);
+  int got = 0;
+  for(int i = 0; i < n && got < 2; i++)
+    if(vecDoc.elems[order[i]].flags & FLEXVEC_EF_SEL){
+      if(got == 0) *a = order[i]; else *b = order[i];
+      got++;
+    }
+  return got;
+}
+
+static void vecArrangeFase2(int i){
+  int nsel = flexVecSelCount(&vecDoc);
+  int sel = flexVecSelFirst(&vecDoc);
+  int rc = FLEXVEC_OK;
+  switch(i){
+    case 0: vecPathfinder(FLEXVEC_B_DIVIDE); return;
+    case 1: vecPathfinder(FLEXVEC_B_TRIM); return;
+    case 2: vecClipMask(); return;
+    case 3: {                                  // Fusion
+      int a = -1, b = -1;
+      if(vecSelPair(&a, &b) < 2){ vecToast("Selecciona dos objetos"); return; }
+      rc = flexVecBlend(&vecDoc, a, b, 4, &vecRas);
+      break; }
+    case 4: {                                  // Repetir, ciclando la forma
+      if(sel < 0){ vecToast("Selecciona un objeto"); return; }
+      float x0, y0, x1, y1;
+      flexVecBBox(&vecDoc, sel, &x0, &y0, &x1, &y1);
+      float dx = (x1 - x0) + 12.0f, dy = (y1 - y0) + 12.0f;
+      static const int REP[4][4] = { {0,3,1,0}, {0,1,3,1}, {0,2,2,2}, {1,2,1,0} };
+      const int* rp = REP[vecRepMode & 3];
+      rc = flexVecRepeat(&vecDoc, sel, rp[0], rp[1], rp[2],
+                         rp[1] > 1 ? dx : 0.0f, rp[2] > 1 ? dy : 0.0f);
+      if(rc == FLEXVEC_OK){
+        static const char* NAME[4] = { "Fila de 3", "Columna de 3", "Rejilla 2x2", "Espejo" };
+        vecToast(NAME[vecRepMode & 3]);
+        vecRepMode++;
+      }
+      break; }
+    case 5: {                                  // Pincel: trazado + figura
+      int a = -1, b = -1;
+      if(vecSelPair(&a, &b) < 2){ vecToast("Selecciona el trazado y la figura"); return; }
+      rc = flexVecBrush(&vecDoc, a, b, 18.0f, 1.0f, 1, &vecRas);
+      break; }
+    case 6: {                                  // Instancia de simbolo
+      if(sel < 0){ vecToast("Selecciona un objeto"); return; }
+      float x0, y0, x1, y1;
+      flexVecBBox(&vecDoc, sel, &x0, &y0, &x1, &y1);
+      int e = flexVecSymbolInstance(&vecDoc, sel, (x1 - x0) + 16.0f, 0);
+      if(e < 0) rc = -e;
+      else { flexVecSelect(&vecDoc, e, 0); vecToast("Instancia vinculada"); }
+      break; }
+    case 7: {                                  // Texto de area
+      if(sel < 0 || vecDoc.elems[sel].kind != FLEXVEC_K_TEXT){
+        vecToast("Selecciona un texto");
+        return;
+      }
+      float x0, y0, x1, y1;
+      flexVecBBox(&vecDoc, sel, &x0, &y0, &x1, &y1);
+      float bw = (x1 - x0) > 40 ? (x1 - x0) : 160.0f;
+      rc = flexVecTextSetArea(&vecDoc, sel, bw, vecDoc.elems[sel].p0 * 5.0f, FLEXVEC_TA_LEFT);
+      if(rc == FLEXVEC_OK) vecToast("Texto de area");
+      break; }
+    default: {                                 // Inclinar
+      if(nsel < 1){ vecToast("Selecciona un objeto"); return; }
+      float bx0, by0, bx1, by1;
+      if(flexVecSelBBox(&vecDoc, &bx0, &by0, &bx1, &by1) != FLEXVEC_OK) return;
+      float cx = (bx0 + bx1) * 0.5f, cy = (by0 + by1) * 0.5f;
+      float m[6];
+      float kx = 0.25f;
+      m[0] = 1; m[1] = 0; m[2] = kx; m[3] = 1;
+      m[4] = cx - (cx + kx * cy); m[5] = 0;
+      rc = flexVecTransformSel(&vecDoc, m, 0);
+      break; }
+  }
+  if(rc != FLEXVEC_OK) vecToastErr(rc);
+  else { vecInvalidate(); sessMarkDirty(IC_VECTOR); }
+}
+
 static bool vecArrangePanelTouch(int px, int py, int x, int y, int w, int h){
+  // Cambio de pagina.
+  if(px >= x + w - 104 && px <= x + w - 20 && py >= y + 12 && py <= y + 44){
+    vecArrPage = vecArrPage ? 0 : 1;
+    return true;
+  }
+  if(vecArrPage == 1){
+    for(int i = 0; i < VEC_ARR2_N; i++){
+      int bx, by, bw, bh;
+      vecArrBtnRect(i, x, y, w, &bx, &by, &bw, &bh);
+      if(by + bh > y + h - 6) break;
+      if(px < bx || px > bx + bw || py < by || py > by + bh) continue;
+      vecArrangeFase2(i);
+      return true;
+    }
+    return false;
+  }
   for(int i = 0; i < VEC_ARR_N; i++){
     int bx, by, bw, bh;
     vecArrBtnRect(i, x, y, w, &bx, &by, &bw, &bh);
@@ -1877,6 +2426,7 @@ static bool vecSharePanelTouch(int px, int py, int x, int y, int w, int h){
     if(px >= x + 20 && px <= x + w - 20){
       if(py >= y + 104 && py <= y + 150){ vecShareStart(); return true; }
       if(py >= y + 162 && py <= y + 204){ vecSaveSvgToDisk(); return true; }
+      if(py >= y + 212 && py <= y + 254){ vecExportPng(); return true; }
     }
     return false;
   }

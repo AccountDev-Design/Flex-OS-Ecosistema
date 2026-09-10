@@ -120,6 +120,12 @@ void flexVecMatApplyVec(const float* m, float x, float y, float* ox, float* oy){
 //  contiguo. La compactacion se dispara sola cuando una reserva no
 //  cabe, no antes: mientras haya sitio no se paga nada.
 // -------------------------------------------------------------
+// La resolucion del vinculo de un SIMBOLO vive en la seccion de Fase 2,
+// pero la necesitan la caja, el impacto y el aplanado, que estan mas
+// arriba en el archivo. Prototipo aqui: es el UNICO sitio por el que se
+// sigue el enlace, asi que ninguna ruta puede saltarselo.
+static int fvGeomSrc(const FlexVecDoc* d, int e, float* mOut);
+
 static int fvElemValid(const FlexVecDoc* d, int e){
   return d && e >= 0 && e < FLEXVEC_MAX_ELEMS && d->elems[e].layer >= 0;
 }
@@ -940,6 +946,18 @@ int flexVecDelete(FlexVecDoc* d, int elem){
   if(!fvElemValid(d, elem)) return FLEXVEC_E_BADARG;
   if(d->layers[d->elems[elem].layer].locked) return FLEXVEC_E_LOCKED;
   int owned = fvAutoBegin(d, "Borrar");
+  // BORRAR UN MAESTRO SE LLEVA SUS INSTANCIAS, y va en la MISMA
+  // transaccion. La alternativa -- dejarlas apuntando a una ranura
+  // vacia -- las convertiria en objetos invisibles que se seleccionan,
+  // se mueven y no se ven: peor que borrarlas. Y como es un solo paso
+  // de deshacer, un borrado accidental se recupera entero.
+  for(int i = 0; i < FLEXVEC_MAX_ELEMS; i++){
+    if(i == elem) continue;
+    if(flexVecSymbolMaster(d, i) != elem) continue;
+    fvUndoTouch(d, i);
+    fvNodeRelease(d, i);
+    d->elems[i].layer = -1;
+  }
   fvUndoTouch(d, elem);
   fvNodeRelease(d, elem);
   d->elems[elem].layer = -1;
@@ -1062,25 +1080,29 @@ int flexVecBBox(FlexVecDoc* d, int elem, float* x0, float* y0, float* x1, float*
   if(!fvElemValid(d, elem)) return FLEXVEC_E_BADARG;
   FlexVecElem* el = &d->elems[elem];
   if(!el->bboxOk){
-    if(el->count == 0 || !d->arena.nodes){
+    float gm[6];
+    int src = fvGeomSrc(d, elem, gm);          // sigue el vinculo del simbolo
+    const FlexVecElem* ge = &d->elems[src];
+    if(ge->count == 0 || !d->arena.nodes){
       el->bx0 = el->by0 = el->bx1 = el->by1 = 0;
     } else {
-      const FlexVecNode* nd = d->arena.nodes + el->first;
+      const FlexVecNode* nd = d->arena.nodes + ge->first;
+      int gcount = (int)ge->count;
       float mnx = 1e30f, mny = 1e30f, mxx = -1e30f, mxy = -1e30f;
       int i = 0;
-      while(i < (int)el->count){
+      while(i < gcount){
         int closed = 0;
-        int n = fvSubLen(nd, el->count, i, &closed);
+        int n = fvSubLen(nd, gcount, i, &closed);
         if(n == 1){
           float px, py;
-          flexVecMatApply(el->m, nd[i].x, nd[i].y, &px, &py);
+          flexVecMatApply(gm, nd[i].x, nd[i].y, &px, &py);
           mnx = fvMin(mnx, px); mxx = fvMax(mxx, px);
           mny = fvMin(mny, py); mxy = fvMax(mxy, py);
         }
         int segs = closed ? n : n - 1;
         for(int k = 0; k < segs; k++){
           float p[8];
-          if(!fvSegPts(nd, i, n, closed, k, el->m, p)) continue;
+          if(!fvSegPts(nd, i, n, closed, k, gm, p)) continue;
           float lo, hi;
           fvCubicRange(p[0], p[2], p[4], p[6], &lo, &hi);
           mnx = fvMin(mnx, lo); mxx = fvMax(mxx, hi);
@@ -1601,20 +1623,24 @@ static float fvDist2Seg(float px, float py, float ax, float ay, float bx, float 
 #define FV_HIT_STEPS 8
 static int fvElemHit(FlexVecDoc* d, int e, float x, float y, float tol){
   const FlexVecElem* el = &d->elems[e];
-  if(el->count < 2 || !d->arena.nodes) return 0;
-  const FlexVecNode* nd = d->arena.nodes + el->first;
+  float gm[6];
+  int src = fvGeomSrc(d, e, gm);
+  const FlexVecElem* ge = &d->elems[src];
+  if(ge->count < 2 || !d->arena.nodes) return 0;
+  const FlexVecNode* nd = d->arena.nodes + ge->first;
+  int gcount = (int)ge->count;
   int crossings = 0;
   float best = 1e30f;
   int i = 0;
-  while(i < (int)el->count){
+  while(i < gcount){
     int closed = 0;
-    int n = fvSubLen(nd, el->count, i, &closed);
+    int n = fvSubLen(nd, gcount, i, &closed);
     int segs = closed ? n : n - 1;
     float fx = 0, fy = 0, cxp = 0, cyp = 0;
     int first = 1;
     for(int k = 0; k < segs; k++){
       float p[8];
-      if(!fvSegPts(nd, i, n, closed, k, el->m, p)) continue;
+      if(!fvSegPts(nd, i, n, closed, k, gm, p)) continue;
       if(first){ fx = cxp = p[0]; fy = cyp = p[1]; first = 0; }
       for(int t = 1; t <= FV_HIT_STEPS; t++){
         float qx, qy;
@@ -1991,16 +2017,19 @@ int flexVecFlatten(FlexVecDoc* d, int elem, const FlexVecView* v,
                    FlexVecRaster* r, int* subN){
   if(subN) *subN = 0;
   if(!fvElemValid(d, elem) || !v || !r || !r->pts || !d->arena.nodes) return -FLEXVEC_E_BADARG;
-  const FlexVecElem* el = &d->elems[elem];
-  if(el->count < 2) return 0;
+  float gm[6];
+  int src = fvGeomSrc(d, elem, gm);         // sigue el vinculo del simbolo
+  const FlexVecElem* ge = &d->elems[src];
+  if(ge->count < 2) return 0;
   float cm[6];
-  flexVecMatMul(v->m, el->m, cm);           // documento -> pixel, en una sola matriz
-  const FlexVecNode* nd = d->arena.nodes + el->first;
+  flexVecMatMul(v->m, gm, cm);              // documento -> pixel, en una sola matriz
+  const FlexVecNode* nd = d->arena.nodes + ge->first;
+  int gcount = (int)ge->count;
   int np = 0, ns = 0;
   int i = 0;
-  while(i < (int)el->count){
+  while(i < gcount){
     int closed = 0;
-    int n = fvSubLen(nd, el->count, i, &closed);
+    int n = fvSubLen(nd, gcount, i, &closed);
     if(n < 2){ i += n; continue; }
     if(ns >= FLEXVEC_MAX_SUBS) break;       // se dibuja lo que cabe, sin desbordar
     int start = np;
@@ -2382,8 +2411,9 @@ int flexVecRenderElem(FlexVecDoc* d, int elem, const FlexVecView* v,
     // pixeles con la escala de la vista COMPUESTA con la del objeto: un
     // objeto escalado al doble tiene el trazo al doble, como en
     // Illustrator con "Escalar trazos y efectos".
-    float cm[6];
-    flexVecMatMul(v->m, el->m, cm);
+    float gm2[6], cm[6];
+    fvGeomSrc(d, elem, gm2);
+    flexVecMatMul(v->m, gm2, cm);
     float ux, uy, vx, vy;
     flexVecMatApplyVec(cm, 1.0f, 0.0f, &ux, &uy);
     flexVecMatApplyVec(cm, 0.0f, 1.0f, &vx, &vy);
@@ -2672,6 +2702,8 @@ static void fvWPaint(FvOut* o, const FlexVecPaint* p, const char* which, int com
   if(p->type == FLEXVEC_P_NONE) fvWs(o, "none");
   else if(p->type == FLEXVEC_P_GRAD && p->ref >= 0){
     fvWs(o, "url(#g"); fvWi(o, p->ref); fvWc(o, ')');
+  } else if(p->type == FLEXVEC_P_PATTERN && p->ref >= 0){
+    fvWs(o, "url(#p"); fvWi(o, p->ref); fvWc(o, ')');
   } else fvWhex(o, p->rgb);
   fvWc(o, '"');
   if(p->type != FLEXVEC_P_NONE && p->alpha != 255){
@@ -2685,12 +2717,18 @@ static void fvWPaint(FvOut* o, const FlexVecPaint* p, const char* which, int com
 // La geometria, en el atributo "d". Se emite 'L' cuando los dos
 // tiradores coinciden con sus anclas: una recta escrita como cubica
 // ocupa el triple y no se ve distinta.
+// El atributo "d" de un elemento. Para una INSTANCIA de simbolo se
+// escribe la geometria del MAESTRO: el visor recibe el dibujo expandido
+// y ve exactamente lo mismo que la pantalla. Un <use> seria mas corto,
+// pero obligaria a publicar el maestro en <defs> y a mantener dos
+// caminos de exportacion; expandir no puede salir mal.
 static void fvWPathData(FvOut* o, const FlexVecDoc* d, const FlexVecElem* el){
+  int gcount = (int)el->count;
   const FlexVecNode* nd = d->arena.nodes + el->first;
   int i = 0;
-  while(i < (int)el->count){
+  while(i < gcount){
     int closed = 0;
-    int n = fvSubLen(nd, el->count, i, &closed);
+    int n = fvSubLen(nd, gcount, i, &closed);
     if(n < 2){ i += n; continue; }
     fvWc(o, 'M'); fvWf(o, nd[i].x); fvWc(o, ' '); fvWf(o, nd[i].y);
     int segs = closed ? n : n - 1;
@@ -2719,7 +2757,30 @@ static void fvWTransform(FvOut* o, const float* m){
   fvWs(o, ")\"");
 }
 
-static int fvExportSVG(FlexVecDoc* d, char* out, size_t cap, int selOnly, int compact){
+// Una linea de texto de area -> un <tspan> con su x e y absolutas.
+typedef struct { FvOut* o; int first; float x0; } FvSvgText;
+static void fvSvgLineCb(const char* utf8, int len, float x, float y, float w, void* user){
+  FvSvgText* c = (FvSvgText*)user;
+  (void)w;
+  fvWs(c->o, "<tspan x=\""); fvWf(c->o, x);
+  fvWs(c->o, "\" y=\""); fvWf(c->o, y); fvWs(c->o, "\">");
+  for(int i = 0; i < len; i++){
+    char ch = utf8[i];
+    switch(ch){
+      case '&':  fvWs(c->o, "&amp;");  break;
+      case '<':  fvWs(c->o, "&lt;");   break;
+      case '>':  fvWs(c->o, "&gt;");   break;
+      case '"':  fvWs(c->o, "&quot;"); break;
+      case '\'': fvWs(c->o, "&apos;"); break;
+      default:   fvWc(c->o, ch); break;
+    }
+  }
+  fvWs(c->o, "</tspan>");
+  c->first = 0;
+}
+
+static int fvExportSVG(FlexVecDoc* d, char* out, size_t cap, int selOnly, int compact,
+                       FlexVecMeasureFn measure, void* mUser){
   if(!d || !out || cap < 64 || !d->arena.nodes) return -FLEXVEC_E_BADARG;
   FvOut o; o.buf = out; o.cap = cap; o.len = 0; o.over = 0;
   const char* NL = compact ? "" : "\n";
@@ -2742,8 +2803,20 @@ static int fvExportSVG(FlexVecDoc* d, char* out, size_t cap, int selOnly, int co
     if(el->stroke.type == FLEXVEC_P_GRAD && el->stroke.ref >= 0 && el->stroke.ref < FLEXVEC_MAX_GRADS)
       used[el->stroke.ref] = 1;
   }
+  int usedPat[FLEXVEC_MAX_PATTERNS];
+  memset(usedPat, 0, sizeof(usedPat));
+  for(int e = 0; e < FLEXVEC_MAX_ELEMS; e++){
+    if(!fvElemValid(d, e)) continue;
+    if(selOnly && !(d->elems[e].flags & FLEXVEC_EF_SEL)) continue;
+    const FlexVecElem* el = &d->elems[e];
+    const FlexVecPaint* ps[4] = { &el->fill, &el->stroke, &el->fill2, &el->stroke2 };
+    for(int k = 0; k < 4; k++)
+      if(ps[k]->type == FLEXVEC_P_PATTERN && ps[k]->ref >= 0 && ps[k]->ref < FLEXVEC_MAX_PATTERNS)
+        usedPat[ps[k]->ref] = 1;
+  }
   int anyGrad = 0;
   for(int g = 0; g < FLEXVEC_MAX_GRADS; g++) if(used[g] && d->grads[g].used) anyGrad = 1;
+  for(int g = 0; g < FLEXVEC_MAX_PATTERNS; g++) if(usedPat[g] && d->pats[g].used) anyGrad = 1;
   if(anyGrad){
     fvWs(&o, "<defs>"); fvWs(&o, NL);
     for(int g = 0; g < FLEXVEC_MAX_GRADS; g++){
@@ -2772,6 +2845,67 @@ static int fvExportSVG(FlexVecDoc* d, char* out, size_t cap, int selOnly, int co
       fvWs(&o, gr->type == FLEXVEC_G_RADIAL ? "</radialGradient>" : "</linearGradient>");
       fvWs(&o, NL);
     }
+    // MOTIVOS. Se exportan como un <pattern> de VERDAD, con geometria
+    // dentro: una celda con su figura. Asi el archivo sigue siendo
+    // vectorial y se puede escalar sin pixelarse -- que es justo lo que
+    // se perderia incrustando una imagen del mosaico.
+    for(int g = 0; g < FLEXVEC_MAX_PATTERNS; g++){
+      if(!usedPat[g] || !d->pats[g].used) continue;
+      const FlexVecPattern* pt = &d->pats[g];
+      float cell = pt->scale;
+      fvWs(&o, "<pattern id=\"p"); fvWi(&o, g);
+      fvWs(&o, "\" patternUnits=\"userSpaceOnUse\" width=\""); fvWf(&o, cell);
+      fvWs(&o, "\" height=\""); fvWf(&o, cell);
+      fvWs(&o, "\" patternTransform=\"translate("); fvWf(&o, pt->offX);
+      fvWc(&o, ','); fvWf(&o, pt->offY);
+      fvWs(&o, ") rotate("); fvWf(&o, pt->angle * 57.29578f); fvWs(&o, ")\">");
+      if(pt->bgA){
+        fvWs(&o, "<rect width=\""); fvWf(&o, cell);
+        fvWs(&o, "\" height=\""); fvWf(&o, cell);
+        fvWs(&o, "\" fill=\""); fvWhex(&o, pt->bg); fvWc(&o, '"');
+        if(pt->bgA != 255){ fvWs(&o, " fill-opacity=\""); fvWf(&o, (float)pt->bgA / 255.0f); fvWc(&o, '"'); }
+        fvWs(&o, "/>");
+      }
+      const char* fillAttr = "\" fill=\"";
+      switch(pt->kind){
+        case FLEXVEC_PAT_DOTS:
+          fvWs(&o, "<circle cx=\""); fvWf(&o, cell * 0.5f);
+          fvWs(&o, "\" cy=\""); fvWf(&o, cell * 0.5f);
+          fvWs(&o, "\" r=\""); fvWf(&o, cell * 0.25f);
+          fvWs(&o, fillAttr); fvWhex(&o, pt->fg); fvWs(&o, "\"/>");
+          break;
+        case FLEXVEC_PAT_LINES:
+          fvWs(&o, "<rect width=\""); fvWf(&o, cell);
+          fvWs(&o, "\" height=\""); fvWf(&o, cell * 0.34f);
+          fvWs(&o, fillAttr); fvWhex(&o, pt->fg); fvWs(&o, "\"/>");
+          break;
+        case FLEXVEC_PAT_GRID:
+          fvWs(&o, "<rect width=\""); fvWf(&o, cell * 0.14f);
+          fvWs(&o, "\" height=\""); fvWf(&o, cell);
+          fvWs(&o, fillAttr); fvWhex(&o, pt->fg); fvWs(&o, "\"/>");
+          fvWs(&o, "<rect width=\""); fvWf(&o, cell);
+          fvWs(&o, "\" height=\""); fvWf(&o, cell * 0.14f);
+          fvWs(&o, fillAttr); fvWhex(&o, pt->fg); fvWs(&o, "\"/>");
+          break;
+        case FLEXVEC_PAT_CHECKER:
+          fvWs(&o, "<rect width=\""); fvWf(&o, cell);
+          fvWs(&o, "\" height=\""); fvWf(&o, cell);
+          fvWs(&o, fillAttr); fvWhex(&o, pt->fg); fvWs(&o, "\"/>");
+          break;
+        case FLEXVEC_PAT_DIAGONAL:
+          fvWs(&o, "<path d=\"M0 0 L"); fvWf(&o, cell); fvWs(&o, " ");
+          fvWf(&o, cell); fvWs(&o, "\" stroke=\""); fvWhex(&o, pt->fg);
+          fvWs(&o, "\" stroke-width=\""); fvWf(&o, cell * 0.34f); fvWs(&o, "\"/>");
+          break;
+        default:
+          fvWs(&o, "<path d=\"M0 0 L"); fvWf(&o, cell); fvWs(&o, " "); fvWf(&o, cell);
+          fvWs(&o, " M0 "); fvWf(&o, cell); fvWs(&o, " L"); fvWf(&o, cell); fvWs(&o, " 0");
+          fvWs(&o, "\" stroke=\""); fvWhex(&o, pt->fg);
+          fvWs(&o, "\" stroke-width=\""); fvWf(&o, cell * 0.20f); fvWs(&o, "\"/>");
+          break;
+      }
+      fvWs(&o, "</pattern>"); fvWs(&o, NL);
+    }
     fvWs(&o, "</defs>"); fvWs(&o, NL);
   }
 
@@ -2782,7 +2916,14 @@ static int fvExportSVG(FlexVecDoc* d, char* out, size_t cap, int selOnly, int co
     int e = order[k];
     const FlexVecElem* el = &d->elems[e];
     if(selOnly && !(el->flags & FLEXVEC_EF_SEL)) continue;
-    if(el->count < 2) continue;
+    // La geometria se resuelve ANTES de decidir si el objeto se
+    // exporta: una INSTANCIA de simbolo tiene count = 0 (sus nodos son
+    // los del maestro), asi que comprobar su propio contador la
+    // descartaria y el SVG saldria sin las instancias.
+    float gm[6];
+    int src = fvGeomSrc(d, e, gm);
+    const FlexVecElem* ge = &d->elems[src];
+    if(ge->count < 2) continue;
     if(el->layer != curLayer){
       if(curLayer >= 0){ fvWs(&o, "</g>"); fvWs(&o, NL); }
       fvWs(&o, "<g id=\""); fvWxml(&o, d->layers[el->layer].name); fvWs(&o, "\">"); fvWs(&o, NL);
@@ -2798,12 +2939,43 @@ static int fvExportSVG(FlexVecDoc* d, char* out, size_t cap, int selOnly, int co
       fvWTransform(&o, el->m);
       if(el->alpha != 255){ fvWs(&o, " opacity=\""); fvWf(&o, (float)el->alpha / 255.0f); fvWc(&o, '"'); }
       fvWc(&o, '>');
-      fvWxml(&o, flexVecTextStr(d, e));
+      // TEXTO DE AREA: si el anfitrion presto su funcion de medida, el
+      // SVG lleva las MISMAS lineas que se ven en la pantalla, cada una
+      // en su <tspan>. Sin medida no se puede saber donde corta cada
+      // linea, y se exporta como una sola: SVG valido, pero no lo que el
+      // usuario compuso. Por eso existe flexVecExportSVGEx.
+      if(measure && flexVecTextIsArea(d, e)){
+        FvSvgText ctx; ctx.o = &o; ctx.first = 1; ctx.x0 = nd[0].x;
+        flexVecTextLayout(d, e, el->p0 * 1.25f, measure, mUser, fvSvgLineCb, &ctx);
+        if(ctx.first) fvWxml(&o, flexVecTextStr(d, e));   // no cupo ni una linea
+      } else {
+        fvWxml(&o, flexVecTextStr(d, e));
+      }
       fvWs(&o, "</text>"); fvWs(&o, NL);
       continue;
     }
+    // Una INSTANCIA de simbolo se exporta con la geometria del maestro y
+    // la matriz COMPUESTA (ya resueltas arriba). El visor ve lo mismo
+    // que la pantalla.
+    // APARIENCIA AMPLIADA: SVG no admite dos rellenos en un elemento, asi
+    // que el segundo par sale como un <path> IGUAL debajo. Es lo mismo
+    // que hace Illustrator al exportar una pila de apariencia, y el
+    // resultado se ve identico.
+    if(el->fill2.type != FLEXVEC_P_NONE || el->stroke2.type != FLEXVEC_P_NONE){
+      fvWs(&o, "<path d=\"");
+      fvWPathData(&o, d, ge);
+      fvWc(&o, '"');
+      fvWPaint(&o, &el->fill2, "fill", compact);
+      if(el->stroke2.type != FLEXVEC_P_NONE){
+        fvWPaint(&o, &el->stroke2, "stroke", compact);
+        fvWs(&o, " stroke-width=\""); fvWf(&o, el->strokeW2); fvWc(&o, '"');
+      }
+      if(el->alpha != 255){ fvWs(&o, " opacity=\""); fvWf(&o, (float)el->alpha / 255.0f); fvWc(&o, '"'); }
+      fvWTransform(&o, gm);
+      fvWs(&o, "/>"); fvWs(&o, NL);
+    }
     fvWs(&o, "<path d=\"");
-    fvWPathData(&o, d, el);
+    fvWPathData(&o, d, ge);
     fvWc(&o, '"');
     fvWPaint(&o, &el->fill, "fill", compact);
     if(el->stroke.type != FLEXVEC_P_NONE){
@@ -2815,7 +2987,7 @@ static int fvExportSVG(FlexVecDoc* d, char* out, size_t cap, int selOnly, int co
       if(el->join == FLEXVEC_JOIN_BEVEL) fvWs(&o, " stroke-linejoin=\"bevel\"");
     }
     if(el->alpha != 255){ fvWs(&o, " opacity=\""); fvWf(&o, (float)el->alpha / 255.0f); fvWc(&o, '"'); }
-    fvWTransform(&o, el->m);
+    fvWTransform(&o, gm);
     fvWs(&o, "/>"); fvWs(&o, NL);
   }
   if(curLayer >= 0){ fvWs(&o, "</g>"); fvWs(&o, NL); }
@@ -2826,10 +2998,14 @@ static int fvExportSVG(FlexVecDoc* d, char* out, size_t cap, int selOnly, int co
 }
 
 int flexVecExportSVG(FlexVecDoc* d, char* out, size_t cap, int selOnly){
-  return fvExportSVG(d, out, cap, selOnly, 0);
+  return fvExportSVG(d, out, cap, selOnly, 0, NULL, NULL);
 }
 int flexVecExportSVGCompact(FlexVecDoc* d, char* out, size_t cap, int selOnly){
-  return fvExportSVG(d, out, cap, selOnly, 1);
+  return fvExportSVG(d, out, cap, selOnly, 1, NULL, NULL);
+}
+int flexVecExportSVGEx(FlexVecDoc* d, char* out, size_t cap, int selOnly,
+                       int compact, FlexVecMeasureFn measure, void* mUser){
+  return fvExportSVG(d, out, cap, selOnly, compact, measure, mUser);
 }
 
 // #############################################################
@@ -2846,7 +3022,7 @@ typedef struct {
   uint32_t magic, version;
   uint16_t elemSize, nodeSize, layerSize, gradSize;
   uint16_t layerN, elemN, gradN, nodeN;
-  uint16_t textN, pad;
+  uint16_t textN, patN;
   float    artW, artH;
   char     name[FLEXVEC_NAME_MAX];
   int32_t  layerActive;
@@ -2859,6 +3035,7 @@ size_t flexVecSerializeSize(const FlexVecDoc* d){
        + (size_t)FLEXVEC_MAX_ELEMS  * sizeof(FlexVecElem)
        + (size_t)d->nodeTop * sizeof(FlexVecNode)
        + (size_t)d->gradN   * sizeof(FlexVecGrad)
+       + (size_t)d->patN    * sizeof(FlexVecPattern)
        + (size_t)d->textTop;
 }
 
@@ -2874,6 +3051,7 @@ int flexVecSerialize(const FlexVecDoc* d, uint8_t* out, size_t cap){
   h.gradSize = (uint16_t)sizeof(FlexVecGrad);
   h.layerN = FLEXVEC_MAX_LAYERS; h.elemN = FLEXVEC_MAX_ELEMS;
   h.gradN = (uint16_t)d->gradN; h.nodeN = d->nodeTop; h.textN = d->textTop;
+  h.patN = (uint16_t)d->patN;
   h.artW = d->artW; h.artH = d->artH;
   h.layerActive = d->layerActive;
   memcpy(h.name, d->name, sizeof(h.name));
@@ -2890,6 +3068,10 @@ int flexVecSerialize(const FlexVecDoc* d, uint8_t* out, size_t cap){
   if(d->gradN){
     memcpy(p, d->grads, (size_t)d->gradN * sizeof(FlexVecGrad));
     p += (size_t)d->gradN * sizeof(FlexVecGrad);
+  }
+  if(d->patN){
+    memcpy(p, d->pats, (size_t)d->patN * sizeof(FlexVecPattern));
+    p += (size_t)d->patN * sizeof(FlexVecPattern);
   }
   if(d->textTop && d->arena.text){
     memcpy(p, d->arena.text, (size_t)d->textTop);
@@ -2909,12 +3091,13 @@ int flexVecDeserialize(FlexVecDoc* d, const uint8_t* in, size_t len){
     return FLEXVEC_E_BADARG;
   if(h.layerN != FLEXVEC_MAX_LAYERS || h.elemN != FLEXVEC_MAX_ELEMS) return FLEXVEC_E_BADARG;
   if(h.nodeN > FLEXVEC_MAX_NODES || h.textN > FLEXVEC_TEXT_BYTES ||
-     h.gradN > FLEXVEC_MAX_GRADS) return FLEXVEC_E_BADARG;
+     h.gradN > FLEXVEC_MAX_GRADS || h.patN > FLEXVEC_MAX_PATTERNS) return FLEXVEC_E_BADARG;
   size_t need = sizeof(FvFileHdr)
               + (size_t)FLEXVEC_MAX_LAYERS * sizeof(FlexVecLayer)
               + (size_t)FLEXVEC_MAX_ELEMS  * sizeof(FlexVecElem)
               + (size_t)h.nodeN * sizeof(FlexVecNode)
               + (size_t)h.gradN * sizeof(FlexVecGrad)
+              + (size_t)h.patN  * sizeof(FlexVecPattern)
               + (size_t)h.textN;
   if(len < need) return FLEXVEC_E_BADARG;
   FlexVecArena a = d->arena;
@@ -2931,8 +3114,9 @@ int flexVecDeserialize(FlexVecDoc* d, const uint8_t* in, size_t len){
   p += (size_t)FLEXVEC_MAX_ELEMS * sizeof(FlexVecElem);
   if(h.nodeN){ memcpy(a.nodes, p, (size_t)h.nodeN * sizeof(FlexVecNode)); p += (size_t)h.nodeN * sizeof(FlexVecNode); }
   if(h.gradN){ memcpy(d->grads, p, (size_t)h.gradN * sizeof(FlexVecGrad)); p += (size_t)h.gradN * sizeof(FlexVecGrad); }
+  if(h.patN){ memcpy(d->pats, p, (size_t)h.patN * sizeof(FlexVecPattern)); p += (size_t)h.patN * sizeof(FlexVecPattern); }
   if(h.textN){ memcpy(a.text, p, (size_t)h.textN); p += (size_t)h.textN; }
-  d->nodeTop = h.nodeN; d->textTop = h.textN; d->gradN = h.gradN;
+  d->nodeTop = h.nodeN; d->textTop = h.textN; d->gradN = h.gradN; d->patN = h.patN;
   d->layerN = FLEXVEC_MAX_LAYERS;
   d->layerActive = (h.layerActive >= 0 && h.layerActive < FLEXVEC_MAX_LAYERS) ? h.layerActive : 0;
   // SANEADO. Un archivo puede venir de un corte de corriente o de una
@@ -2951,8 +3135,20 @@ int flexVecDeserialize(FlexVecDoc* d, const uint8_t* in, size_t len){
     if(el->join > FLEXVEC_JOIN_BEVEL) el->join = FLEXVEC_JOIN_MITER;
     if(el->fill.type > FLEXVEC_P_PATTERN) el->fill.type = FLEXVEC_P_NONE;
     if(el->stroke.type > FLEXVEC_P_PATTERN) el->stroke.type = FLEXVEC_P_NONE;
-    if(el->fill.ref >= (int)h.gradN) el->fill.type = FLEXVEC_P_SOLID;
-    if(el->stroke.ref >= (int)h.gradN) el->stroke.type = FLEXVEC_P_SOLID;
+    // Cada referencia se comprueba contra SU tabla. Un gradiente que
+    // apunte fuera, o un simbolo que apunte a una ranura vacia, seria
+    // una lectura fuera de rango en el primer repintado.
+    const FlexVecPaint* pp[4] = { &el->fill, &el->stroke, &el->fill2, &el->stroke2 };
+    FlexVecPaint* pw[4] = { &el->fill, &el->stroke, &el->fill2, &el->stroke2 };
+    for(int k = 0; k < 4; k++){
+      if(pp[k]->type == FLEXVEC_P_GRAD && (pp[k]->ref < 0 || pp[k]->ref >= (int)h.gradN))
+        pw[k]->type = FLEXVEC_P_SOLID;
+      if(pp[k]->type == FLEXVEC_P_PATTERN && (pp[k]->ref < 0 || pp[k]->ref >= (int)h.patN))
+        pw[k]->type = FLEXVEC_P_SOLID;
+    }
+    if(el->kind == FLEXVEC_K_SYMBOL &&
+       (el->ref < 0 || el->ref >= FLEXVEC_MAX_ELEMS || el->ref == i)) el->kind = FLEXVEC_K_PATH;
+    if(!fvFinite(el->strokeW2) || el->strokeW2 < 0) el->strokeW2 = 1.0f;
     if(!fvFinite(el->strokeW) || el->strokeW < 0) el->strokeW = 1.0f;
     for(int k = 0; k < 6; k++) if(!fvFinite(el->m[k])) flexVecMatIdentity(el->m);
     if(el->kind == FLEXVEC_K_TEXT && (el->n1 < 0 || el->n1 >= (int)h.textN)) el->kind = FLEXVEC_K_PATH;
@@ -2975,6 +3171,13 @@ int flexVecDeserialize(FlexVecDoc* d, const uint8_t* in, size_t len){
     if(d->grads[g].nstops > FLEXVEC_MAX_STOPS) d->grads[g].nstops = FLEXVEC_MAX_STOPS;
     if(d->grads[g].nstops < 2) d->grads[g].used = 0;
     if(d->grads[g].used) fvGradBuildLut(&d->grads[g]);
+  }
+  for(int g = 0; g < (int)h.patN; g++){
+    if(d->pats[g].kind >= FLEXVEC_PAT_N) d->pats[g].used = 0;
+    if(!fvFinite(d->pats[g].scale) || d->pats[g].scale < 1.0f) d->pats[g].scale = 12.0f;
+    if(!fvFinite(d->pats[g].offX)) d->pats[g].offX = 0;
+    if(!fvFinite(d->pats[g].offY)) d->pats[g].offY = 0;
+    if(!fvFinite(d->pats[g].angle)) d->pats[g].angle = 0;
   }
   if(h.textN) d->arena.text[h.textN - 1] = 0;    // el pool SIEMPRE acaba en cero
   d->dirty = 0;
@@ -3009,7 +3212,7 @@ int flexVecDeserialize(FlexVecDoc* d, const uint8_t* in, size_t len){
 //  SIMPLIFICADA y no como completa. Es una decision, no un descuido.
 // #############################################################
 size_t flexVecBoolBytes(void){
-  return (size_t)FLEXVEC_BOOL_GRID * FLEXVEC_BOOL_GRID * 2
+  return (size_t)FLEXVEC_BOOL_GRID * FLEXVEC_BOOL_GRID * 3
        + (size_t)2 * FLEXVEC_MAX_FLATPTS * sizeof(float)
        + (size_t)FLEXVEC_MAX_FLATPTS
        + 32;
@@ -3022,6 +3225,7 @@ int flexVecBoolInit(FlexVecBoolWork* w, void* block, size_t size){
   if(mis) p += (8u - mis);
   w->gridA = p; p += (size_t)FLEXVEC_BOOL_GRID * FLEXVEC_BOOL_GRID;
   w->gridB = p; p += (size_t)FLEXVEC_BOOL_GRID * FLEXVEC_BOOL_GRID;
+  w->gridC = p; p += (size_t)FLEXVEC_BOOL_GRID * FLEXVEC_BOOL_GRID;
   w->trace = (float*)p; p += (size_t)2 * FLEXVEC_MAX_FLATPTS * sizeof(float);
   w->mark  = p;
   return FLEXVEC_OK;
@@ -3081,102 +3285,33 @@ static int fvSimplify(float* pts, int n, uint8_t* keep, float eps){
   return w;
 }
 
-int flexVecPathfinder(FlexVecDoc* d, int op, FlexVecRaster* r, FlexVecBoolWork* w){
-  if(!d || !r || !w || !w->gridA || !w->gridB || !w->trace || !w->mark) return FLEXVEC_E_NOMEM;
-  if(op < FLEXVEC_B_UNITE || op > FLEXVEC_B_TRIM) return FLEXVEC_E_BADARG;
-  int16_t sel[FLEXVEC_MAX_ELEMS]; int ns = 0;
-  {
-    int16_t order[FLEXVEC_MAX_ELEMS];
-    int n = flexVecPaintOrder(d, order, FLEXVEC_MAX_ELEMS);
-    for(int i = 0; i < n; i++)
-      if(d->elems[order[i]].flags & FLEXVEC_EF_SEL) sel[ns++] = order[i];
-  }
-  if(ns < 2) return FLEXVEC_E_EMPTY;
-  for(int i = 0; i < ns; i++)
-    if(fvEditable(d, sel[i]) != FLEXVEC_OK) return FLEXVEC_E_LOCKED;
+// Rasteriza un elemento en una rejilla binaria (1 = dentro).
+static void fvRasterInto(FlexVecDoc* d, int elem, const FlexVecView* gv,
+                         FlexVecRaster* r, uint8_t* grid, int gw, int gh){
+  memset(grid, 0, (size_t)gw * gh);
+  FvGridCtx ctx; ctx.g = grid; ctx.gw = gw; ctx.gh = gh;
+  int subN = 0;
+  int np = flexVecFlatten(d, elem, gv, r, &subN);
+  if(np > 0 && subN > 0)
+    fvFillPolys(r, r->pts, r->subStart, r->subCount, subN, gv, 0, fvGridSpan, &ctx);
+}
 
-  // Caja comun y transformacion documento -> rejilla, con la MISMA escala
-  // en los dos ejes: una rejilla anisotropa deformaria el resultado.
-  float bx0 = 1e30f, by0 = 1e30f, bx1 = -1e30f, by1 = -1e30f;
-  for(int i = 0; i < ns; i++){
-    float a, b, c, e;
-    flexVecBBox(d, sel[i], &a, &b, &c, &e);
-    bx0 = fvMin(bx0, a); by0 = fvMin(by0, b);
-    bx1 = fvMax(bx1, c); by1 = fvMax(by1, e);
-  }
-  float bw = bx1 - bx0, bh = by1 - by0;
-  if(bw <= 1e-4f || bh <= 1e-4f) return FLEXVEC_E_TOO_COMPLEX;
-  float pad = fvMax(bw, bh) * 0.01f + 1.0f;
-  bx0 -= pad; by0 -= pad; bx1 += pad; by1 += pad;
-  bw = bx1 - bx0; bh = by1 - by0;
-  float sc = fvMin((float)(FLEXVEC_BOOL_GRID - 2) / bw, (float)(FLEXVEC_BOOL_GRID - 2) / bh);
-  int gw = (int)(bw * sc) + 1, gh = (int)(bh * sc) + 1;
-  if(gw < 2 || gh < 2) return FLEXVEC_E_TOO_COMPLEX;
-  if(gw > FLEXVEC_BOOL_GRID) gw = FLEXVEC_BOOL_GRID;
-  if(gh > FLEXVEC_BOOL_GRID) gh = FLEXVEC_BOOL_GRID;
-  FlexVecView gv;
-  gv.m[0] = sc; gv.m[1] = 0; gv.m[2] = 0; gv.m[3] = sc;
-  gv.m[4] = -bx0 * sc; gv.m[5] = -by0 * sc;
-  gv.clipX0 = 0; gv.clipY0 = 0; gv.clipX1 = gw - 1; gv.clipY1 = gh - 1;
-  if(gw > r->covW) return FLEXVEC_E_TOO_COMPLEX;
-
+// Sigue el contorno de la rejilla y crea UN elemento con el resultado.
+// Devuelve el indice del elemento, FLEXVEC_E_EMPTY en negativo si la
+// region esta vacia, u otro error negativo.
+//
+// Aqui es donde se convierte una rejilla en geometria otra vez: se
+// camina por las GRIETAS entre celdas dentro y fuera (nunca por los
+// centros), lo que da poligonos cerrados exactos y hace que las islas y
+// los huecos salgan con orientaciones opuestas -- justo lo que la regla
+// de no-cero necesita para dejar el hueco vacio.
+static int fvTraceRegion(FlexVecDoc* d, FlexVecBoolWork* w, int gw, int gh,
+                         float bx0, float by0, float sc, const FlexVecElem* proto){
   size_t cells = (size_t)gw * gh;
-  memset(w->gridB, 0, cells);
-  FvGridCtx ctx; ctx.gw = gw; ctx.gh = gh;
-  for(int i = 0; i < ns; i++){
-    memset(w->gridA, 0, cells);
-    ctx.g = w->gridA;
-    int subN = 0;
-    int np = flexVecFlatten(d, sel[i], &gv, r, &subN);
-    if(np > 0 && subN > 0)
-      fvFillPolys(r, r->pts, r->subStart, r->subCount, subN, &gv, 0, fvGridSpan, &ctx);
-    if(i == 0 && (op == FLEXVEC_B_MINUS_FRONT || op == FLEXVEC_B_INTERSECT ||
-                  op == FLEXVEC_B_TRIM)){
-      memcpy(w->gridB, w->gridA, cells);
-      continue;
-    }
-    for(size_t k = 0; k < cells; k++){
-      uint8_t a = w->gridA[k], b = w->gridB[k];
-      switch(op){
-        case FLEXVEC_B_UNITE:       w->gridB[k] = (uint8_t)(a | b); break;
-        case FLEXVEC_B_EXCLUDE:     w->gridB[k] = (uint8_t)(a ^ b); break;
-        case FLEXVEC_B_INTERSECT:   w->gridB[k] = (uint8_t)(a & b); break;
-        case FLEXVEC_B_MINUS_FRONT:
-        case FLEXVEC_B_TRIM:        w->gridB[k] = (uint8_t)(b & (uint8_t)!a); break;
-        case FLEXVEC_B_DIVIDE:      w->gridB[k] = (uint8_t)(a | b); break;   // ver nota abajo
-        default: break;
-      }
-    }
-  }
-  // DIVIDE en Illustrator parte la seleccion en TODAS las regiones que
-  // definen sus cruces. Aqui se entrega la region comun como objeto
-  // propio -- que es la parte util del gesto en una pantalla tactil, sin
-  // dejar veinte trozos que hay que separar con el dedo uno a uno.
-  if(op == FLEXVEC_B_DIVIDE){
-    memset(w->gridB, 0, cells);
-    memset(w->gridA, 0, cells);
-    ctx.g = w->gridA;
-    for(int i = 0; i < ns; i++){
-      memset(w->gridA, 0, cells);
-      int subN = 0;
-      int np = flexVecFlatten(d, sel[i], &gv, r, &subN);
-      if(np > 0 && subN > 0)
-        fvFillPolys(r, r->pts, r->subStart, r->subCount, subN, &gv, 0, fvGridSpan, &ctx);
-      if(i == 0) memcpy(w->gridB, w->gridA, cells);
-      else for(size_t k = 0; k < cells; k++) w->gridB[k] = (uint8_t)(w->gridB[k] & w->gridA[k]);
-    }
-  }
-
   int any = 0;
   for(size_t k = 0; k < cells; k++) if(w->gridB[k]){ any = 1; break; }
-  if(!any) return FLEXVEC_E_EMPTY;      // el resultado esta vacio: no se toca nada
-
-  // Seguimiento de contornos por "grietas": se camina por el borde entre
-  // celdas dentro y fuera, no por los centros. Da poligonos cerrados
-  // exactos sobre la rejilla y las islas y los huecos salen con
-  // orientaciones opuestas, que es justo lo que la regla de no-cero
-  // necesita para dejar el hueco vacio.
-  memset(w->gridA, 0, cells);           // gridA pasa a ser "inicios ya usados"
+  if(!any) return -FLEXVEC_E_EMPTY;
+  memset(w->gridA, 0, cells);            // gridA pasa a ser "inicios ya usados"
   float inv = 1.0f / sc;
   int outN = 0, outSubs = 0;
   int32_t subS[FLEXVEC_MAX_SUBS], subC[FLEXVEC_MAX_SUBS];
@@ -3193,7 +3328,6 @@ int flexVecPathfinder(FlexVecDoc* d, int op, FlexVecRaster* r, FlexVecBoolWork* 
         w->trace[outN * 2]     = bx0 + (float)px * inv;
         w->trace[outN * 2 + 1] = by0 + (float)py * inv;
         outN++;
-        // Celdas "delante-izquierda" y "delante-derecha" segun el rumbo.
         int flx, fly, frx, fry;
         switch(dir){
           case 0: flx = px;     fly = py - 1; frx = px;     fry = py;     break;
@@ -3232,21 +3366,16 @@ int flexVecPathfinder(FlexVecDoc* d, int op, FlexVecRaster* r, FlexVecBoolWork* 
       outN = start + n;
     }
   }
-  if(outSubs == 0) return FLEXVEC_E_EMPTY;
+  if(outSubs == 0) return -FLEXVEC_E_EMPTY;
   int total = 0;
   for(int i = 0; i < outSubs; i++) total += subC[i];
-  if(total > FLEXVEC_MAX_NODES_PATH) return FLEXVEC_E_TOO_COMPLEX;
+  if(total > FLEXVEC_MAX_NODES_PATH) return -FLEXVEC_E_TOO_COMPLEX;
 
-  // Se aplica: un objeto nuevo con la apariencia del de mas ABAJO (lo que
-  // hace Illustrator) y los operandos desaparecen. Todo dentro de UNA
-  // transaccion: deshacer devuelve los originales de una vez.
-  int owned = fvAutoBegin(d, "Pathfinder");
-  FlexVecElem proto = d->elems[sel[0]];
   int save = d->layerActive;
-  d->layerActive = proto.layer;
+  d->layerActive = proto->layer;
   int e = fvElemNew(d, FLEXVEC_K_PATH, total);
   d->layerActive = save;
-  if(e < 0){ fvAutoEnd(d, owned, e); return e < 0 ? -e : e; }
+  if(e < 0) return e;
   fvUndoTouch(d, e);
   FlexVecNode* nd = d->arena.nodes + d->elems[e].first;
   int at = 0;
@@ -3257,21 +3386,1105 @@ int flexVecPathfinder(FlexVecDoc* d, int op, FlexVecRaster* r, FlexVecBoolWork* 
       at++;
     }
   }
-  d->elems[e].fill = proto.fill;
-  d->elems[e].stroke = proto.stroke;
-  d->elems[e].strokeW = proto.strokeW;
-  d->elems[e].alpha = proto.alpha;
-  d->elems[e].cap = proto.cap; d->elems[e].join = proto.join;
-  d->elems[e].flags |= FLEXVEC_EF_SEL;
-  d->elems[e].bboxOk = 0;
+  FlexVecElem* el = &d->elems[e];
+  el->fill = proto->fill; el->stroke = proto->stroke;
+  el->fill2 = proto->fill2; el->stroke2 = proto->stroke2;
+  el->strokeW = proto->strokeW; el->strokeW2 = proto->strokeW2;
+  el->alpha = proto->alpha;
+  el->cap = proto->cap; el->join = proto->join;
+  el->flags |= FLEXVEC_EF_SEL;
+  el->bboxOk = 0;
   // La geometria del resultado ya esta en coordenadas de DOCUMENTO (se
   // trazo sobre la rejilla y se deshizo la escala), asi que la matriz
   // parte de la identidad: heredar la del original la aplicaria dos veces.
-  flexVecMatIdentity(d->elems[e].m);
+  flexVecMatIdentity(el->m);
+  return e;
+}
+
+int flexVecPathfinder(FlexVecDoc* d, int op, FlexVecRaster* r, FlexVecBoolWork* w){
+  if(!d || !r || !w || !w->gridA || !w->gridB || !w->gridC || !w->trace || !w->mark)
+    return FLEXVEC_E_NOMEM;
+  if(op < FLEXVEC_B_UNITE || op > FLEXVEC_B_TRIM) return FLEXVEC_E_BADARG;
+  int16_t sel[FLEXVEC_MAX_ELEMS]; int ns = 0;
+  {
+    int16_t order[FLEXVEC_MAX_ELEMS];
+    int n = flexVecPaintOrder(d, order, FLEXVEC_MAX_ELEMS);
+    for(int i = 0; i < n; i++)
+      if(d->elems[order[i]].flags & FLEXVEC_EF_SEL) sel[ns++] = order[i];
+  }
+  if(ns < 2) return FLEXVEC_E_EMPTY;
+  for(int i = 0; i < ns; i++)
+    if(fvEditable(d, sel[i]) != FLEXVEC_OK) return FLEXVEC_E_LOCKED;
+  // Dividir es una operacion de DOS figuras: con tres o mas, el numero
+  // de regiones crece como 2^n y el resultado deja de ser manejable con
+  // el dedo. Se dice, en vez de entregar veinte trozos.
+  if(op == FLEXVEC_B_DIVIDE && ns != 2) return FLEXVEC_E_TOO_COMPLEX;
+
+  // Caja comun y transformacion documento -> rejilla, con la MISMA escala
+  // en los dos ejes: una rejilla anisotropa deformaria el resultado.
+  float bx0 = 1e30f, by0 = 1e30f, bx1 = -1e30f, by1 = -1e30f;
   for(int i = 0; i < ns; i++){
+    float a, b, c, e;
+    flexVecBBox(d, sel[i], &a, &b, &c, &e);
+    bx0 = fvMin(bx0, a); by0 = fvMin(by0, b);
+    bx1 = fvMax(bx1, c); by1 = fvMax(by1, e);
+  }
+  float bw = bx1 - bx0, bh = by1 - by0;
+  if(bw <= 1e-4f || bh <= 1e-4f) return FLEXVEC_E_TOO_COMPLEX;
+  float pad = fvMax(bw, bh) * 0.01f + 1.0f;
+  bx0 -= pad; by0 -= pad; bx1 += pad; by1 += pad;
+  bw = bx1 - bx0; bh = by1 - by0;
+  float sc = fvMin((float)(FLEXVEC_BOOL_GRID - 2) / bw, (float)(FLEXVEC_BOOL_GRID - 2) / bh);
+  int gw = (int)(bw * sc) + 1, gh = (int)(bh * sc) + 1;
+  if(gw < 2 || gh < 2) return FLEXVEC_E_TOO_COMPLEX;
+  if(gw > FLEXVEC_BOOL_GRID) gw = FLEXVEC_BOOL_GRID;
+  if(gh > FLEXVEC_BOOL_GRID) gh = FLEXVEC_BOOL_GRID;
+  FlexVecView gv;
+  gv.m[0] = sc; gv.m[1] = 0; gv.m[2] = 0; gv.m[3] = sc;
+  gv.m[4] = -bx0 * sc; gv.m[5] = -by0 * sc;
+  gv.clipX0 = 0; gv.clipY0 = 0; gv.clipX1 = gw - 1; gv.clipY1 = gh - 1;
+  if(gw > r->covW) return FLEXVEC_E_TOO_COMPLEX;
+  size_t cells = (size_t)gw * gh;
+
+  const FlexVecElem proto = d->elems[sel[0]];   // apariencia del de mas ABAJO
+  int owned = fvAutoBegin(d, "Pathfinder");
+
+  if(op == FLEXVEC_B_DIVIDE){
+    // Tres regiones: lo comun, y lo que le queda a cada una por su lado.
+    // Es la version SIMPLIFICADA de "Dividir": con dos figuras son todas
+    // las regiones que sus cruces definen.
+    static const int REG[3][2] = { {1,1}, {1,0}, {0,1} };
+    int made = 0, rc = FLEXVEC_OK;
+    for(int k = 0; k < 3; k++){
+      // Las DOS figuras a la vez, cada una en su rejilla, porque gridB
+      // es el acumulador del resultado. Por eso DIVIDIR es la unica
+      // operacion que necesita la tercera rejilla.
+      fvRasterInto(d, sel[0], &gv, r, w->gridA, gw, gh);
+      fvRasterInto(d, sel[1], &gv, r, w->gridC, gw, gh);
+      for(size_t i = 0; i < cells; i++){
+        int a = w->gridA[i] ? 1 : 0, b = w->gridC[i] ? 1 : 0;
+        w->gridB[i] = (uint8_t)((a == REG[k][0] && b == REG[k][1]) ? 1 : 0);
+      }
+      int e = fvTraceRegion(d, w, gw, gh, bx0, by0, sc,
+                            (k == 2) ? &d->elems[sel[1]] : &proto);
+      if(e >= 0) made++;
+      else if(-e != FLEXVEC_E_EMPTY){ rc = -e; break; }
+    }
+    if(!made) return fvAutoFail(d, owned, rc == FLEXVEC_OK ? FLEXVEC_E_EMPTY : rc);
+    for(int i = 0; i < ns; i++){
+      fvUndoTouch(d, sel[i]);
+      fvNodeRelease(d, sel[i]);
+      d->elems[sel[i]].layer = -1;
+    }
+    fvAutoEnd(d, owned, FLEXVEC_OK);
+    return rc;
+  }
+
+  memset(w->gridB, 0, cells);
+  for(int i = 0; i < ns; i++){
+    fvRasterInto(d, sel[i], &gv, r, w->gridA, gw, gh);
+    if(i == 0 && (op == FLEXVEC_B_MINUS_FRONT || op == FLEXVEC_B_INTERSECT ||
+                  op == FLEXVEC_B_TRIM)){
+      memcpy(w->gridB, w->gridA, cells);
+      continue;
+    }
+    for(size_t k = 0; k < cells; k++){
+      uint8_t a = w->gridA[k], b = w->gridB[k];
+      switch(op){
+        case FLEXVEC_B_UNITE:       w->gridB[k] = (uint8_t)(a | b); break;
+        case FLEXVEC_B_EXCLUDE:     w->gridB[k] = (uint8_t)(a ^ b); break;
+        case FLEXVEC_B_INTERSECT:   w->gridB[k] = (uint8_t)(a & b); break;
+        default:                    w->gridB[k] = (uint8_t)(b & (uint8_t)!a); break;
+      }
+    }
+  }
+  int e = fvTraceRegion(d, w, gw, gh, bx0, by0, sc, &proto);
+  if(e < 0) return fvAutoFail(d, owned, -e);
+  // TRIM conserva las figuras de ENCIMA: recorta la de abajo por donde
+  // las otras la tapan y deja todo lo demas como estaba, que es
+  // exactamente para lo que se usa. El resto de operaciones consumen
+  // todos sus operandos.
+  int n0 = (op == FLEXVEC_B_TRIM) ? 1 : ns;
+  for(int i = 0; i < n0; i++){
     fvUndoTouch(d, sel[i]);
     fvNodeRelease(d, sel[i]);
     d->elems[sel[i]].layer = -1;
   }
   return fvAutoEnd(d, owned, FLEXVEC_OK);
+}
+
+// #############################################################
+// #############################################################
+// ##
+// ##   F A S E   2   ·   E X P A N S I O N   P R O F E S I O N A L
+// ##
+// ##  Todo lo que sigue comparte las tres reglas de la Fase 1 -- no se
+// ##  reserva memoria, todo limite es duro y todo fallo es controlado --
+// ##  y anade una cuarta que es la que lo hace viable en un MCU sin GPU:
+// ##
+// ##      LO CARO SE HORNEA, NO SE RE-EVALUA.
+// ##
+// ##  Fusion, repeticion y pincel producen GEOMETRIA una sola vez,
+// ##  cuando el usuario los aplica. No queda un grafo que recorrer en
+// ##  cada repintado. Un editor de escritorio se puede permitir efectos
+// ##  vivos porque tiene una GPU detras; aqui cada pixel lo pone la CPU,
+// ##  y un efecto vivo se pagaria sesenta veces por segundo.
+// #############################################################
+// #############################################################
+
+// -------------------------------------------------------------
+//  A) APARIENCIA AMPLIADA
+//  ------------------------------------------------------------
+//  Un relleno y un trazo MAS, por debajo de los principales. No es la
+//  pila multinivel de Illustrator, y no pretende serlo: esa necesita un
+//  grafo de apariencia con efectos vivos, que esta OMITIDO por el motivo
+//  de arriba. Dos rellenos y dos trazos cubren el contorno doble y el
+//  relleno de base, que es para lo que se usa el 95% de las veces.
+// -------------------------------------------------------------
+int flexVecSetFill2(FlexVecDoc* d, int elem, uint32_t rgb, uint8_t alpha){
+  int rc = fvEditable(d, elem);
+  if(rc != FLEXVEC_OK) return rc;
+  int owned = fvAutoBegin(d, "Relleno 2");
+  fvUndoTouch(d, elem);
+  d->elems[elem].fill2.type = FLEXVEC_P_SOLID;
+  d->elems[elem].fill2.rgb = rgb & 0xFFFFFFu;
+  d->elems[elem].fill2.alpha = alpha;
+  d->elems[elem].fill2.ref = -1;
+  d->dirty = 1;
+  return fvAutoEnd(d, owned, FLEXVEC_OK);
+}
+int flexVecSetStroke2(FlexVecDoc* d, int elem, uint32_t rgb, uint8_t alpha, float w){
+  int rc = fvEditable(d, elem);
+  if(rc != FLEXVEC_OK) return rc;
+  if(!fvFinite(w) || w < 0) return FLEXVEC_E_BADARG;
+  int owned = fvAutoBegin(d, "Trazo 2");
+  fvUndoTouch(d, elem);
+  d->elems[elem].stroke2.type = FLEXVEC_P_SOLID;
+  d->elems[elem].stroke2.rgb = rgb & 0xFFFFFFu;
+  d->elems[elem].stroke2.alpha = alpha;
+  d->elems[elem].stroke2.ref = -1;
+  d->elems[elem].strokeW2 = fvClampF(w, 0.0f, 512.0f);
+  d->dirty = 1;
+  return fvAutoEnd(d, owned, FLEXVEC_OK);
+}
+int flexVecClearExtra(FlexVecDoc* d, int elem){
+  int rc = fvEditable(d, elem);
+  if(rc != FLEXVEC_OK) return rc;
+  int owned = fvAutoBegin(d, "Quitar extra");
+  fvUndoTouch(d, elem);
+  d->elems[elem].fill2.type = FLEXVEC_P_NONE;
+  d->elems[elem].stroke2.type = FLEXVEC_P_NONE;
+  d->dirty = 1;
+  return fvAutoEnd(d, owned, FLEXVEC_OK);
+}
+int flexVecHasExtra(const FlexVecDoc* d, int elem){
+  if(!d || elem < 0 || elem >= FLEXVEC_MAX_ELEMS || d->elems[elem].layer < 0) return 0;
+  return (d->elems[elem].fill2.type != FLEXVEC_P_NONE) ||
+         (d->elems[elem].stroke2.type != FLEXVEC_P_NONE);
+}
+
+// -------------------------------------------------------------
+//  B) MOTIVOS PROCEDURALES
+//  ------------------------------------------------------------
+//  Cada tipo es una funcion del punto. Sin bitmaps, sin memoria y sin
+//  recalcular nada al hacer zoom: el motivo vive en coordenadas de
+//  DOCUMENTO, asi que al ampliar se ven los mismos puntos mas grandes,
+//  que es lo que se espera de un relleno vectorial.
+// -------------------------------------------------------------
+int flexVecPatternAdd(FlexVecDoc* d, int kind){
+  if(!d) return -FLEXVEC_E_BADARG;
+  if(kind < 0 || kind >= FLEXVEC_PAT_N) return -FLEXVEC_E_BADARG;
+  for(int i = 0; i < FLEXVEC_MAX_PATTERNS; i++){
+    if(d->pats[i].used) continue;
+    FlexVecPattern* p = &d->pats[i];
+    memset(p, 0, sizeof(*p));
+    p->used = 1; p->kind = (uint8_t)kind;
+    p->scale = 12.0f; p->offX = 0; p->offY = 0; p->angle = 0;
+    p->fg = 0x101018; p->fgA = 255;
+    p->bg = 0xFFFFFF; p->bgA = 0;         // fondo transparente por defecto
+    if(i >= d->patN) d->patN = i + 1;
+    return i;
+  }
+  return -FLEXVEC_E_FULL_GRADS;           // mismo motivo: no cabe otro recurso
+}
+static int fvPatValid(const FlexVecDoc* d, int p){
+  return d && p >= 0 && p < FLEXVEC_MAX_PATTERNS && d->pats[p].used;
+}
+int flexVecPatternSet(FlexVecDoc* d, int p, int kind, float scale,
+                      float offX, float offY, float angle){
+  if(!fvPatValid(d, p)) return FLEXVEC_E_BADARG;
+  if(kind < 0 || kind >= FLEXVEC_PAT_N) return FLEXVEC_E_BADARG;
+  if(!fvFinite(scale) || !fvFinite(offX) || !fvFinite(offY) || !fvFinite(angle))
+    return FLEXVEC_E_BADARG;
+  d->pats[p].kind = (uint8_t)kind;
+  // Una celda por debajo de 1 unidad se convierte en ruido a cualquier
+  // zoom y ademas dispara el coste por pixel: se acota aqui.
+  d->pats[p].scale = fvClampF(scale, 1.0f, 512.0f);
+  d->pats[p].offX = offX; d->pats[p].offY = offY;
+  d->pats[p].angle = angle;
+  d->dirty = 1;
+  return FLEXVEC_OK;
+}
+int flexVecPatternColors(FlexVecDoc* d, int p, uint32_t fg, uint8_t fgA,
+                         uint32_t bg, uint8_t bgA){
+  if(!fvPatValid(d, p)) return FLEXVEC_E_BADARG;
+  d->pats[p].fg = fg & 0xFFFFFFu; d->pats[p].fgA = fgA;
+  d->pats[p].bg = bg & 0xFFFFFFu; d->pats[p].bgA = bgA;
+  d->dirty = 1;
+  return FLEXVEC_OK;
+}
+int flexVecSetFillPattern(FlexVecDoc* d, int elem, int p){
+  int rc = fvEditable(d, elem);
+  if(rc != FLEXVEC_OK) return rc;
+  if(!fvPatValid(d, p)) return FLEXVEC_E_BADARG;
+  int owned = fvAutoBegin(d, "Motivo");
+  fvUndoTouch(d, elem);
+  d->elems[elem].fill.type = FLEXVEC_P_PATTERN;
+  d->elems[elem].fill.ref = (int8_t)p;
+  d->dirty = 1;
+  return fvAutoEnd(d, owned, FLEXVEC_OK);
+}
+
+uint32_t flexVecPatternAt(const FlexVecPattern* p, float x, float y, uint8_t* alphaOut){
+  if(!p || !p->used){ if(alphaOut) *alphaOut = 0; return 0; }
+  float s = p->scale > 0.5f ? p->scale : 0.5f;
+  float dx = x - p->offX, dy = y - p->offY;
+  if(p->angle != 0.0f){
+    float c = cosf(-p->angle), sn = sinf(-p->angle);
+    float rx = dx * c - dy * sn;
+    dy = dx * sn + dy * c;
+    dx = rx;
+  }
+  // Coordenada DENTRO de la celda, en 0..1. floorf y no un molde a int:
+  // con coordenadas negativas el molde trunca hacia cero y el motivo se
+  // parte justo en el eje.
+  float u = dx / s - floorf(dx / s);
+  float v = dy / s - floorf(dy / s);
+  int on = 0;
+  switch(p->kind){
+    case FLEXVEC_PAT_DOTS: {
+      float cx = u - 0.5f, cy = v - 0.5f;
+      on = (cx * cx + cy * cy) <= 0.0625f;          // radio 0,25 de la celda
+      break; }
+    case FLEXVEC_PAT_LINES:   on = (v < 0.34f); break;
+    case FLEXVEC_PAT_GRID:    on = (u < 0.14f) || (v < 0.14f); break;
+    case FLEXVEC_PAT_CHECKER: {
+      long ix = (long)floorf(dx / s), iy = (long)floorf(dy / s);
+      on = (((ix + iy) & 1L) == 0);
+      break; }
+    case FLEXVEC_PAT_DIAGONAL: {
+      float t = u + v;
+      if(t >= 1.0f) t -= 1.0f;
+      on = (t < 0.34f);
+      break; }
+    default: {                                       // CROSS: trama cruzada
+      float t1 = u + v; if(t1 >= 1.0f) t1 -= 1.0f;
+      float t2 = u - v; if(t2 < 0.0f) t2 += 1.0f;
+      on = (t1 < 0.20f) || (t2 < 0.20f);
+      break; }
+  }
+  if(alphaOut) *alphaOut = on ? p->fgA : p->bgA;
+  return on ? p->fg : p->bg;
+}
+
+// -------------------------------------------------------------
+//  C) SIMBOLOS  ·  instancias vinculadas
+//  ------------------------------------------------------------
+//  UNA INSTANCIA NO COPIA NADA. Guarda un indice al maestro y su propia
+//  matriz; la geometria se lee del maestro en el momento de dibujar. Por
+//  eso mover un nodo del maestro mueve el mismo nodo en las cincuenta
+//  instancias, que es exactamente el valor de un simbolo -- y por eso
+//  cincuenta instancias no gastan ni un nodo mas del pool.
+//
+//  fvGeomSrc es el UNICO sitio donde se resuelve ese vinculo. Todo lo
+//  que toca geometria (aplanar, caja, impacto, SVG) pasa por aqui, asi
+//  que no puede haber una ruta que se olvide de seguir el enlace.
+// -------------------------------------------------------------
+static int fvGeomSrc(const FlexVecDoc* d, int e, float* mOut){
+  const FlexVecElem* el = &d->elems[e];
+  if(el->kind == FLEXVEC_K_SYMBOL && el->ref >= 0 && el->ref < FLEXVEC_MAX_ELEMS){
+    const FlexVecElem* ms = &d->elems[el->ref];
+    // Un maestro que ya no existe, o que es a su vez una instancia, se
+    // ignora: nunca se sigue una cadena, asi que no puede haber un ciclo.
+    if(ms->layer >= 0 && ms->kind != FLEXVEC_K_SYMBOL && ms->count >= 2){
+      flexVecMatMul(el->m, ms->m, mOut);
+      return (int)el->ref;
+    }
+  }
+  memcpy(mOut, el->m, 6 * sizeof(float));
+  return e;
+}
+
+int flexVecSymbolMaster(const FlexVecDoc* d, int elem){
+  if(!d || elem < 0 || elem >= FLEXVEC_MAX_ELEMS) return -1;
+  const FlexVecElem* el = &d->elems[elem];
+  if(el->layer < 0 || el->kind != FLEXVEC_K_SYMBOL) return -1;
+  if(el->ref < 0 || el->ref >= FLEXVEC_MAX_ELEMS) return -1;
+  if(d->elems[el->ref].layer < 0) return -1;
+  return (int)el->ref;
+}
+int flexVecSymbolCount(const FlexVecDoc* d, int master){
+  if(!d || master < 0 || master >= FLEXVEC_MAX_ELEMS) return 0;
+  int n = 0;
+  for(int e = 0; e < FLEXVEC_MAX_ELEMS; e++)
+    if(flexVecSymbolMaster(d, e) == master) n++;
+  return n;
+}
+
+int flexVecSymbolInstance(FlexVecDoc* d, int master, float dx, float dy){
+  if(!fvElemValid(d, master)) return -FLEXVEC_E_BADARG;
+  if(!fvFinite(dx) || !fvFinite(dy)) return -FLEXVEC_E_BADARG;
+  // No se instancia una instancia: se instancia SU maestro. Asi la
+  // cadena nunca tiene mas de un eslabon y resolverla es O(1).
+  int m = flexVecSymbolMaster(d, master);
+  if(m >= 0) master = m;
+  if(d->elems[master].kind == FLEXVEC_K_TEXT) return -FLEXVEC_E_BADARG;
+  if(d->elems[master].count < 2) return -FLEXVEC_E_BADARG;
+  int owned = fvAutoBegin(d, "Instancia");
+  int e = fvElemNew(d, FLEXVEC_K_SYMBOL, 0);
+  if(e < 0){ fvAutoEnd(d, owned, e); return e; }
+  fvUndoTouch(d, e);
+  FlexVecElem* ie = &d->elems[e];
+  const FlexVecElem* ms = &d->elems[master];
+  ie->ref = (int16_t)master;
+  ie->fill = ms->fill; ie->stroke = ms->stroke;
+  ie->fill2 = ms->fill2; ie->stroke2 = ms->stroke2;
+  ie->strokeW = ms->strokeW; ie->strokeW2 = ms->strokeW2;
+  ie->alpha = ms->alpha; ie->cap = ms->cap; ie->join = ms->join;
+  float t[6] = { 1, 0, 0, 1, dx, dy };
+  memcpy(ie->m, t, sizeof(t));
+  ie->bboxOk = 0;
+  fvAutoEnd(d, owned, FLEXVEC_OK);
+  return e;
+}
+
+// -------------------------------------------------------------
+//  D) FUSION (blend)
+//  ------------------------------------------------------------
+//  Interpolar dos siluetas exige que las dos tengan el MISMO numero de
+//  puntos y empiecen en el mismo sitio. Si no, la fusion se retuerce:
+//  el punto 3 de una acaba tirando del punto 3 de la otra, que puede
+//  estar en la esquina opuesta. Por eso aqui se hacen tres cosas antes
+//  de interpolar nada:
+//    1. REMUESTREO por longitud de arco -> las dos con K puntos
+//       repartidos por igual a lo largo del contorno;
+//    2. ORIENTACION -> si giran en sentidos contrarios, se invierte una
+//       (si no, la fusion se pliega sobre si misma en el paso central);
+//    3. ORIGEN -> se rota la segunda para que su punto 0 sea el mas
+//       cercano al punto 0 de la primera.
+//  El resultado es poligonal, que es lo que documenta la clasificacion
+//  SIMPLIFICADA: interpolar curvas Bezier exige ademas emparejar los
+//  tiradores, y con siluetas de distinto numero de nodos eso no tiene
+//  una respuesta unica.
+// -------------------------------------------------------------
+// Remuestrea el subtrazado 's' de 'src' a K puntos equidistantes en
+// 'dst'. Devuelve 0 si el contorno no tiene longitud.
+static int fvResample(const float* src, int start, int count, float* dst, int K){
+  if(count < 3 || K < 3) return 0;
+  double total = 0;
+  for(int i = 0; i < count; i++){
+    int j = (i + 1) % count;
+    float dx = src[(start + j) * 2] - src[(start + i) * 2];
+    float dy = src[(start + j) * 2 + 1] - src[(start + i) * 2 + 1];
+    total += sqrt((double)dx * dx + (double)dy * dy);
+  }
+  if(total < 1e-6) return 0;
+  double step = total / K;
+  int seg = 0;
+  double segLen = 0, acc = 0;
+  {
+    int j = 1 % count;
+    float dx = src[(start + j) * 2] - src[start * 2];
+    float dy = src[(start + j) * 2 + 1] - src[start * 2 + 1];
+    segLen = sqrt((double)dx * dx + (double)dy * dy);
+  }
+  for(int k = 0; k < K; k++){
+    double want = step * k;
+    int guard = 0;
+    while(want > acc + segLen && guard++ <= count + 2){
+      acc += segLen;
+      seg++;
+      int a = (seg) % count, b = (seg + 1) % count;
+      float dx = src[(start + b) * 2] - src[(start + a) * 2];
+      float dy = src[(start + b) * 2 + 1] - src[(start + a) * 2 + 1];
+      segLen = sqrt((double)dx * dx + (double)dy * dy);
+    }
+    double t = (segLen > 1e-9) ? (want - acc) / segLen : 0.0;
+    if(t < 0) t = 0;
+    if(t > 1) t = 1;
+    int a = seg % count, b = (seg + 1) % count;
+    dst[k * 2]     = src[(start + a) * 2]     + (float)((src[(start + b) * 2]     - src[(start + a) * 2])     * t);
+    dst[k * 2 + 1] = src[(start + a) * 2 + 1] + (float)((src[(start + b) * 2 + 1] - src[(start + a) * 2 + 1]) * t);
+  }
+  return 1;
+}
+static double fvSignedArea(const float* p, int n){
+  double a = 0;
+  for(int i = 0; i < n; i++){
+    int j = (i + 1) % n;
+    a += (double)p[i * 2] * p[j * 2 + 1] - (double)p[j * 2] * p[i * 2 + 1];
+  }
+  return a * 0.5;
+}
+static void fvReverse(float* p, int n){
+  for(int i = 0, j = n - 1; i < j; i++, j--){
+    float tx = p[i * 2], ty = p[i * 2 + 1];
+    p[i * 2] = p[j * 2]; p[i * 2 + 1] = p[j * 2 + 1];
+    p[j * 2] = tx; p[j * 2 + 1] = ty;
+  }
+}
+static uint32_t fvLerpRGB(uint32_t a, uint32_t b, float t){
+  int ar = (int)((a >> 16) & 0xFF), ag = (int)((a >> 8) & 0xFF), ab = (int)(a & 0xFF);
+  int br = (int)((b >> 16) & 0xFF), bg = (int)((b >> 8) & 0xFF), bb = (int)(b & 0xFF);
+  int r = ar + (int)((br - ar) * t), g = ag + (int)((bg - ag) * t), c = ab + (int)((bb - ab) * t);
+  return ((uint32_t)(r & 0xFF) << 16) | ((uint32_t)(g & 0xFF) << 8) | (uint32_t)(c & 0xFF);
+}
+
+int flexVecBlend(FlexVecDoc* d, int a, int b, int steps, FlexVecRaster* r){
+  if(!fvElemValid(d, a) || !fvElemValid(d, b) || a == b) return FLEXVEC_E_BADARG;
+  if(!r || !r->pts || !r->pts2) return FLEXVEC_E_NOMEM;
+  if(steps < 1) steps = 1;
+  if(steps > FLEXVEC_MAX_BLEND_STEPS) steps = FLEXVEC_MAX_BLEND_STEPS;
+  if(fvEditable(d, a) != FLEXVEC_OK || fvEditable(d, b) != FLEXVEC_OK) return FLEXVEC_E_LOCKED;
+
+  FlexVecView v;                              // identidad: se trabaja en unidades de DOCUMENTO
+  flexVecMatIdentity(v.m);
+  v.clipX0 = -100000; v.clipY0 = -100000; v.clipX1 = 100000; v.clipY1 = 100000;
+
+  int K = (int)d->elems[a].count;
+  if((int)d->elems[b].count > K) K = (int)d->elems[b].count;
+  K *= 3;                                     // tres puntos por nodo: curva legible
+  if(K < 16) K = 16;
+  if(K > FLEXVEC_MAX_NODES_PATH) K = FLEXVEC_MAX_NODES_PATH;
+
+  int subN = 0;
+  int np = flexVecFlatten(d, a, &v, r, &subN);
+  if(np <= 0 || subN <= 0) return FLEXVEC_E_TOO_COMPLEX;
+  if(!fvResample(r->pts, r->subStart[0], r->subCount[0], r->pts2, K)) return FLEXVEC_E_TOO_COMPLEX;
+  np = flexVecFlatten(d, b, &v, r, &subN);
+  if(np <= 0 || subN <= 0) return FLEXVEC_E_TOO_COMPLEX;
+  if(!fvResample(r->pts, r->subStart[0], r->subCount[0], r->pts2 + K * 2, K)) return FLEXVEC_E_TOO_COMPLEX;
+
+  float* PA = r->pts2;
+  float* PB = r->pts2 + K * 2;
+  if((fvSignedArea(PA, K) > 0) != (fvSignedArea(PB, K) > 0)) fvReverse(PB, K);
+  // Rotar B para que empiece donde empieza A.
+  {
+    int best = 0;
+    double bd = 1e30;
+    for(int i = 0; i < K; i++){
+      double dx = PB[i * 2] - PA[0], dy = PB[i * 2 + 1] - PA[1];
+      double dd = dx * dx + dy * dy;
+      if(dd < bd){ bd = dd; best = i; }
+    }
+    if(best){
+      // Rotacion en el sitio, usando r->pts como area de paso: ya no
+      // hace falta para nada y evita reservar un buffer nuevo.
+      memcpy(r->pts, PB, (size_t)K * 2 * sizeof(float));
+      for(int i = 0; i < K; i++){
+        int j = (best + i) % K;
+        PB[i * 2] = r->pts[j * 2];
+        PB[i * 2 + 1] = r->pts[j * 2 + 1];
+      }
+    }
+  }
+
+  const FlexVecElem EA = d->elems[a], EB = d->elems[b];
+  int owned = fvAutoBegin(d, "Fusion");
+  int made = 0, rc = FLEXVEC_OK;
+  for(int i = 1; i <= steps; i++){
+    float t = (float)i / (float)(steps + 1);
+    int e = fvElemNew(d, FLEXVEC_K_PATH, K);
+    if(e < 0){ rc = -e; break; }
+    fvUndoTouch(d, e);
+    FlexVecNode* nd = d->arena.nodes + d->elems[e].first;
+    for(int k = 0; k < K; k++){
+      float x = PA[k * 2]     + (PB[k * 2]     - PA[k * 2])     * t;
+      float y = PA[k * 2 + 1] + (PB[k * 2 + 1] - PA[k * 2 + 1]) * t;
+      fvNodeSet(&nd[k], x, y, k == 0 ? (FLEXVEC_N_START | FLEXVEC_N_CLOSE) : 0);
+    }
+    FlexVecElem* el = &d->elems[e];
+    el->fill = EA.fill;
+    el->fill.rgb = fvLerpRGB(EA.fill.rgb, EB.fill.rgb, t);
+    el->fill.alpha = (uint8_t)(EA.fill.alpha + (int)((EB.fill.alpha - EA.fill.alpha) * t));
+    el->fill.type = (EA.fill.type == FLEXVEC_P_NONE && EB.fill.type == FLEXVEC_P_NONE)
+                    ? FLEXVEC_P_NONE : FLEXVEC_P_SOLID;
+    el->fill.ref = -1;
+    el->stroke = EA.stroke;
+    el->stroke.rgb = fvLerpRGB(EA.stroke.rgb, EB.stroke.rgb, t);
+    el->stroke.ref = -1;
+    if(el->stroke.type == FLEXVEC_P_GRAD || el->stroke.type == FLEXVEC_P_PATTERN)
+      el->stroke.type = FLEXVEC_P_SOLID;
+    el->strokeW = EA.strokeW + (EB.strokeW - EA.strokeW) * t;
+    el->alpha = (uint8_t)(EA.alpha + (int)((EB.alpha - EA.alpha) * t));
+    el->bboxOk = 0;
+    made++;
+  }
+  if(rc != FLEXVEC_OK && made == 0) return fvAutoFail(d, owned, rc);
+  fvAutoEnd(d, owned, FLEXVEC_OK);
+  return (rc != FLEXVEC_OK) ? rc : FLEXVEC_OK;
+}
+
+// -------------------------------------------------------------
+//  E) REPETIR
+//  ------------------------------------------------------------
+//  Rejilla o espejo, con el numero de copias ACOTADO y calculado UNA
+//  vez. La repeticion "viva" de Illustrator -- que se recalcula cuando
+//  mueves el original -- necesitaria re-generar la geometria en cada
+//  cuadro; aqui se hornea y lo que queda son objetos normales, que se
+//  pueden editar uno a uno.
+// -------------------------------------------------------------
+int flexVecRepeat(FlexVecDoc* d, int elem, int mode, int cols, int rows,
+                  float dx, float dy){
+  if(!fvElemValid(d, elem)) return FLEXVEC_E_BADARG;
+  if(fvEditable(d, elem) != FLEXVEC_OK) return FLEXVEC_E_LOCKED;
+  if(!fvFinite(dx) || !fvFinite(dy)) return FLEXVEC_E_BADARG;
+  if(cols < 1) cols = 1;
+  if(rows < 1) rows = 1;
+  if(mode != FLEXVEC_REP_GRID && mode != FLEXVEC_REP_MIRROR) return FLEXVEC_E_BADARG;
+  int total = cols * rows - 1;                     // el original ya esta
+  if(total < 1) return FLEXVEC_E_EMPTY;
+  if(total > FLEXVEC_MAX_REPEAT) return FLEXVEC_E_TOO_COMPLEX;
+  float bx0, by0, bx1, by1;
+  flexVecBBox(d, elem, &bx0, &by0, &bx1, &by1);
+  int owned = fvAutoBegin(d, "Repetir");
+  int rc = FLEXVEC_OK, made = 0;
+  for(int rIdx = 0; rIdx < rows; rIdx++){
+    for(int c = 0; c < cols; c++){
+      if(rIdx == 0 && c == 0) continue;
+      int cp = flexVecDuplicate(d, elem);
+      if(cp < 0){ rc = -cp; rIdx = rows; break; }
+      float tx = dx * (float)c, ty = dy * (float)rIdx;
+      if(mode == FLEXVEC_REP_MIRROR && (c & 1)){
+        // Espejo: la copia impar se refleja sobre el borde derecho del
+        // hueco que ocupa, para que las dos mitades se toquen.
+        float cx = bx0 + tx + (bx1 - bx0) * 0.5f;
+        float m[6];
+        fvMatAbout(m, cx, 0, -1, 0, 0, 1);
+        fvUndoTouch(d, cp);
+        flexVecMatMul(m, d->elems[cp].m, d->elems[cp].m);
+      }
+      if(mode == FLEXVEC_REP_MIRROR && (rIdx & 1)){
+        float cy = by0 + ty + (by1 - by0) * 0.5f;
+        float m[6];
+        fvMatAbout(m, 0, cy, 1, 0, 0, -1);
+        fvUndoTouch(d, cp);
+        flexVecMatMul(m, d->elems[cp].m, d->elems[cp].m);
+      }
+      flexVecTranslate(d, cp, tx, ty);
+      d->elems[cp].bboxOk = 0;
+      made++;
+    }
+  }
+  if(made == 0) return fvAutoFail(d, owned, rc == FLEXVEC_OK ? FLEXVEC_E_EMPTY : rc);
+  fvAutoEnd(d, owned, FLEXVEC_OK);
+  return rc;
+}
+
+// -------------------------------------------------------------
+//  F) PINCEL: estampar una figura a lo largo de un trazado
+//  ------------------------------------------------------------
+//  Todas las estampas caben en UN objeto, una por subtrazado. Cien
+//  estampas gastan un elemento del presupuesto, no cien -- que es la
+//  diferencia entre poder usar el pincel dos veces o veinte.
+//
+//  Si el trazado es tan largo que las estampas no caben en el limite de
+//  nodos, el ESPACIADO SE ABRE hasta que caben, en vez de negarse. Es
+//  mejor un pincel mas suelto que un mensaje de error.
+// -------------------------------------------------------------
+int flexVecBrush(FlexVecDoc* d, int path, int stamp, float spacing,
+                 float scale, int rotate, FlexVecRaster* r){
+  if(!fvElemValid(d, path) || !fvElemValid(d, stamp) || path == stamp) return FLEXVEC_E_BADARG;
+  if(!r || !r->pts) return FLEXVEC_E_NOMEM;
+  if(fvEditable(d, path) != FLEXVEC_OK) return FLEXVEC_E_LOCKED;
+  if(!fvFinite(spacing) || !fvFinite(scale) || scale <= 0) return FLEXVEC_E_BADARG;
+  int sn = (int)d->elems[stamp].count;
+  if(sn < 2) return FLEXVEC_E_BADARG;
+  int maxInst = FLEXVEC_MAX_NODES_PATH / sn;
+  if(maxInst < 2) return FLEXVEC_E_TOO_COMPLEX;   // una estampa de 128+ nodos no es un pincel
+  if(maxInst > FLEXVEC_MAX_BRUSH_INST) maxInst = FLEXVEC_MAX_BRUSH_INST;
+
+  FlexVecView v;
+  flexVecMatIdentity(v.m);
+  v.clipX0 = -100000; v.clipY0 = -100000; v.clipX1 = 100000; v.clipY1 = 100000;
+  int subN = 0;
+  int np = flexVecFlatten(d, path, &v, r, &subN);
+  if(np <= 0 || subN <= 0) return FLEXVEC_E_TOO_COMPLEX;
+  int st = r->subStart[0], cnt = r->subCount[0];
+  if(cnt < 2) return FLEXVEC_E_TOO_COMPLEX;
+  double total = 0;
+  for(int i = 0; i + 1 < cnt; i++){
+    float ddx = r->pts[(st + i + 1) * 2] - r->pts[(st + i) * 2];
+    float ddy = r->pts[(st + i + 1) * 2 + 1] - r->pts[(st + i) * 2 + 1];
+    total += sqrt((double)ddx * ddx + (double)ddy * ddy);
+  }
+  if(total < 1e-4) return FLEXVEC_E_TOO_COMPLEX;
+  if(spacing < 0.5f) spacing = 0.5f;
+  if(total / spacing + 1.0 > (double)maxInst) spacing = (float)(total / (double)(maxInst - 1));
+  int inst = (int)(total / spacing) + 1;
+  if(inst < 1) inst = 1;
+  if(inst > maxInst) inst = maxInst;
+
+  // Se copian los nodos de la estampa ANTES de reservar nada: fvElemNew
+  // puede compactar el pool y mover el rango del original.
+  const FlexVecElem SE = d->elems[stamp];
+  int owned = fvAutoBegin(d, "Pincel");
+  int e = fvElemNew(d, FLEXVEC_K_PATH, inst * sn);
+  if(e < 0){ fvAutoEnd(d, owned, e); return -e; }
+  fvUndoTouch(d, e);
+  const FlexVecNode* src = d->arena.nodes + d->elems[stamp].first;   // ya compactado
+  FlexVecNode* dst = d->arena.nodes + d->elems[e].first;
+  // Centro de la estampa: se estampa CENTRADA en el punto del trazado.
+  float sx0, sy0, sx1, sy1;
+  flexVecBBox(d, stamp, &sx0, &sy0, &sx1, &sy1);
+  float scx = (sx0 + sx1) * 0.5f, scy = (sy0 + sy1) * 0.5f;
+  int at = 0;
+  double walked = 0;
+  int seg = 0;
+  double segLen = 0;
+  {
+    float ddx = r->pts[(st + 1) * 2] - r->pts[st * 2];
+    float ddy = r->pts[(st + 1) * 2 + 1] - r->pts[st * 2 + 1];
+    segLen = sqrt((double)ddx * ddx + (double)ddy * ddy);
+  }
+  for(int k = 0; k < inst; k++){
+    double want = (double)spacing * k;
+    int guard = 0;
+    while(want > walked + segLen && seg + 2 < cnt && guard++ <= cnt + 2){
+      walked += segLen;
+      seg++;
+      float ddx = r->pts[(st + seg + 1) * 2] - r->pts[(st + seg) * 2];
+      float ddy = r->pts[(st + seg + 1) * 2 + 1] - r->pts[(st + seg) * 2 + 1];
+      segLen = sqrt((double)ddx * ddx + (double)ddy * ddy);
+    }
+    double t = (segLen > 1e-9) ? (want - walked) / segLen : 0.0;
+    if(t < 0) t = 0;
+    if(t > 1) t = 1;
+    float ax = r->pts[(st + seg) * 2], ay = r->pts[(st + seg) * 2 + 1];
+    float bx2 = r->pts[(st + seg + 1) * 2], by2 = r->pts[(st + seg + 1) * 2 + 1];
+    float px = ax + (float)((bx2 - ax) * t), py = ay + (float)((by2 - ay) * t);
+    float ang = rotate ? atan2f(by2 - ay, bx2 - ax) : 0.0f;
+    float c = cosf(ang), s2 = sinf(ang);
+    // Matriz de la estampa: centrar, escalar, girar y llevar al punto.
+    for(int i = 0; i < sn; i++){
+      float lx = (src[i].x - scx) * scale, ly = (src[i].y - scy) * scale;
+      float ix = (src[i].ix - scx) * scale, iy = (src[i].iy - scy) * scale;
+      float ox = (src[i].ox - scx) * scale, oy = (src[i].oy - scy) * scale;
+      FlexVecNode* n = &dst[at + i];
+      n->x  = px + lx * c - ly * s2;   n->y  = py + lx * s2 + ly * c;
+      n->ix = px + ix * c - iy * s2;   n->iy = py + ix * s2 + iy * c;
+      n->ox = px + ox * c - oy * s2;   n->oy = py + ox * s2 + oy * c;
+      n->flags = (uint8_t)(src[i].flags & ~(FLEXVEC_N_START | FLEXVEC_N_CLOSE | FLEXVEC_N_SEL));
+      if(i == 0) n->flags |= (uint8_t)(FLEXVEC_N_START | FLEXVEC_N_CLOSE);
+      n->pad[0] = n->pad[1] = n->pad[2] = 0;
+    }
+    at += sn;
+  }
+  FlexVecElem* el = &d->elems[e];
+  el->fill = SE.fill; el->stroke = SE.stroke;
+  el->fill2 = SE.fill2; el->stroke2 = SE.stroke2;
+  el->strokeW = SE.strokeW; el->strokeW2 = SE.strokeW2;
+  el->alpha = SE.alpha; el->cap = SE.cap; el->join = SE.join;
+  el->bboxOk = 0;
+  fvAutoEnd(d, owned, FLEXVEC_OK);
+  return FLEXVEC_OK;
+}
+
+// -------------------------------------------------------------
+//  G) MASCARA DE RECORTE, de forma arbitraria
+//  ------------------------------------------------------------
+//  Cada objeto seleccionado se INTERSECA con el de mas arriba, que hace
+//  de mascara. Se reutiliza el motor de rejilla del Pathfinder, con sus
+//  mismos limites y su misma aproximacion: un motor menos que probar y
+//  un comportamiento menos que explicar.
+//
+//  ES DESTRUCTIVA, y esa es la simplificacion. Una mascara NO
+//  destructiva obligaria a componer DOS coberturas por fila en el mismo
+//  repintado (la del objeto y la de la mascara), y el rasterizador de
+//  este motor emite tramos de una figura de una vez: para cruzarlos
+//  haria falta un buffer de cobertura de pantalla completa -- 384 KB de
+//  PSRAM retenidos durante todo el render. Con la geometria recortada
+//  el resultado se ve igual y no cuesta nada por cuadro.
+// -------------------------------------------------------------
+int flexVecClipWithTop(FlexVecDoc* d, FlexVecRaster* r, FlexVecBoolWork* w){
+  if(!d || !r || !w) return FLEXVEC_E_NOMEM;
+  int16_t order[FLEXVEC_MAX_ELEMS];
+  int n = flexVecPaintOrder(d, order, FLEXVEC_MAX_ELEMS);
+  int16_t sel[FLEXVEC_MAX_ELEMS];
+  int ns = 0;
+  for(int i = 0; i < n; i++)
+    if(d->elems[order[i]].flags & FLEXVEC_EF_SEL) sel[ns++] = order[i];
+  if(ns < 2) return FLEXVEC_E_EMPTY;
+  int mask = sel[ns - 1];                      // el de MAS ARRIBA es la mascara
+  for(int i = 0; i < ns; i++)
+    if(fvEditable(d, sel[i]) != FLEXVEC_OK) return FLEXVEC_E_LOCKED;
+
+  int owned = fvAutoBegin(d, "Recortar");
+  int done = 0, rc = FLEXVEC_OK;
+  for(int i = 0; i < ns - 1; i++){
+    int target = sel[i];
+    if(!fvElemValid(d, target)) continue;
+    // Una copia de la mascara POR OBJETO: el pathfinder consume sus dos
+    // operandos, asi que sin la copia el primer recorte se llevaria la
+    // mascara y los demas objetos se quedarian sin recortar.
+    int cp = flexVecDuplicate(d, mask);
+    if(cp < 0){ rc = -cp; break; }
+    flexVecSelectNone(d);
+    d->elems[target].flags |= FLEXVEC_EF_SEL;
+    d->elems[cp].flags |= FLEXVEC_EF_SEL;
+    int rr = flexVecPathfinder(d, FLEXVEC_B_INTERSECT, r, w);
+    if(rr != FLEXVEC_OK){
+      // Sin solape el resultado es vacio: el objeto desaparece del
+      // recorte, que es exactamente lo que hace una mascara. Se retira
+      // el objeto y su copia de la mascara, y se sigue con el resto.
+      if(rr == FLEXVEC_E_EMPTY){
+        if(fvElemValid(d, cp)) flexVecDelete(d, cp);
+        if(fvElemValid(d, target)) flexVecDelete(d, target);
+        done++;
+        continue;
+      }
+      if(fvElemValid(d, cp)) flexVecDelete(d, cp);
+      rc = rr;
+      break;
+    }
+    done++;
+  }
+  if(fvElemValid(d, mask)) flexVecDelete(d, mask);
+  if(!done) return fvAutoFail(d, owned, rc == FLEXVEC_OK ? FLEXVEC_E_EMPTY : rc);
+  fvAutoEnd(d, owned, FLEXVEC_OK);
+  return rc;
+}
+
+// -------------------------------------------------------------
+//  H) TEXTO DE AREA
+//  ------------------------------------------------------------
+//  El nucleo no tiene fuente y no la va a tener: la del sistema es un
+//  atlas 4bpp sin contornos. Asi que el anfitrion presta una funcion de
+//  MEDIDA y el nucleo hace el reparto en lineas. Las dos mitades se
+//  prueban por separado: el reparto aqui, con una medida de mentira, y
+//  la medida en la placa, con la fuente de verdad.
+//
+//  El corte es por PALABRAS. Una palabra que no cabe entera se coloca
+//  igual en su linea y se desborda: partirla por la mitad sin reglas de
+//  guionizacion produce cortes que se leen peor que el desbordamiento.
+// -------------------------------------------------------------
+int flexVecTextSetArea(FlexVecDoc* d, int elem, float w, float h, int align){
+  if(!fvElemValid(d, elem) || d->elems[elem].kind != FLEXVEC_K_TEXT) return FLEXVEC_E_BADARG;
+  if(!fvFinite(w) || !fvFinite(h) || w <= 1 || h <= 1) return FLEXVEC_E_BADARG;
+  if(align < FLEXVEC_TA_LEFT || align > FLEXVEC_TA_RIGHT) return FLEXVEC_E_BADARG;
+  int rc = fvEditable(d, elem);
+  if(rc != FLEXVEC_OK) return rc;
+  int owned = fvAutoBegin(d, "Texto de area");
+  fvUndoTouch(d, elem);
+  flexVecTextSetBox(d, elem, w, h);
+  // n0 guarda el largo de la cadena y se necesita entero; la alineacion
+  // y la marca de "es de area" van en p1, que en un texto no se usa.
+  d->elems[elem].p1 = (float)(align + 1);
+  d->elems[elem].bboxOk = 0;
+  d->dirty = 1;
+  return fvAutoEnd(d, owned, FLEXVEC_OK);
+}
+int flexVecTextIsArea(const FlexVecDoc* d, int elem){
+  if(!d || elem < 0 || elem >= FLEXVEC_MAX_ELEMS) return 0;
+  const FlexVecElem* el = &d->elems[elem];
+  return el->layer >= 0 && el->kind == FLEXVEC_K_TEXT && el->p1 >= 1.0f;
+}
+
+int flexVecTextLayout(FlexVecDoc* d, int elem, float lineH,
+                      FlexVecMeasureFn measure, void* mUser,
+                      FlexVecLineCb cb, void* cbUser){
+  if(!fvElemValid(d, elem) || d->elems[elem].kind != FLEXVEC_K_TEXT) return -FLEXVEC_E_BADARG;
+  if(!measure || !cb) return -FLEXVEC_E_BADARG;
+  const FlexVecElem* el = &d->elems[elem];
+  if(el->count < 4) return -FLEXVEC_E_BADARG;
+  const char* s = flexVecTextStr(d, elem);
+  if(!s || !s[0]) return 0;
+  const FlexVecNode* nd = d->arena.nodes + el->first;
+  float x0 = nd[0].x, y0 = nd[0].y;
+  float boxW = nd[1].x - nd[0].x;
+  float boxH = nd[3].y - nd[0].y;
+  if(boxW <= 1) return -FLEXVEC_E_BADARG;
+  if(!fvFinite(lineH) || lineH <= 0) lineH = el->p0 * 1.25f;
+  if(lineH <= 0) lineH = 1;
+  int align = flexVecTextIsArea(d, elem) ? (int)(el->p1 - 1.0f) : FLEXVEC_TA_LEFT;
+  if(align < FLEXVEC_TA_LEFT || align > FLEXVEC_TA_RIGHT) align = FLEXVEC_TA_LEFT;
+  int maxLines = (int)(boxH / lineH);
+  if(maxLines < 1) maxLines = 1;
+  if(maxLines > 512) maxLines = 512;           // cota dura: nunca un bucle abierto
+
+  int lines = 0;
+  int i = 0, lineStart = 0, lastBreak = -1;
+  int len = (int)strlen(s);
+  float y = y0 + lineH;
+  while(i <= len && lines < maxLines){
+    int hard = (i < len && s[i] == '\n');
+    if(i == len || hard || s[i] == ' '){
+      float wpx = measure(s + lineStart, i - lineStart, el->p0, mUser);
+      if(wpx > boxW && lastBreak > lineStart){
+        // No cabe: se corta en el ULTIMO espacio que si cabia.
+        int cut = lastBreak;
+        float lw = measure(s + lineStart, cut - lineStart, el->p0, mUser);
+        float lx = x0;
+        if(align == FLEXVEC_TA_CENTER) lx = x0 + (boxW - lw) * 0.5f;
+        else if(align == FLEXVEC_TA_RIGHT) lx = x0 + (boxW - lw);
+        cb(s + lineStart, cut - lineStart, lx, y, lw, cbUser);
+        lines++; y += lineH;
+        lineStart = cut + 1;
+        lastBreak = -1;
+        continue;                              // se vuelve a medir desde el corte
+      }
+      if(i == len || hard){
+        float lw = measure(s + lineStart, i - lineStart, el->p0, mUser);
+        float lx = x0;
+        if(align == FLEXVEC_TA_CENTER) lx = x0 + (boxW - lw) * 0.5f;
+        else if(align == FLEXVEC_TA_RIGHT) lx = x0 + (boxW - lw);
+        if(i > lineStart || hard){ cb(s + lineStart, i - lineStart, lx, y, lw, cbUser); lines++; y += lineH; }
+        lineStart = i + 1;
+        lastBreak = -1;
+        if(i == len) break;
+      } else {
+        lastBreak = i;
+      }
+    }
+    i++;
+  }
+  return lines;
+}
+
+// -------------------------------------------------------------
+//  I) EXPORTACION PNG
+//  ------------------------------------------------------------
+//  POR FILAS, y ese es todo el diseno. Un 480x800 en RGB888 son 1,1 MB;
+//  tenerlo entero en memoria para comprimirlo obligaria a un pico de
+//  PSRAM que no merece la pena, cuando el anfitrion YA tiene el cuadro
+//  rasterizado en su cache RGB565 y puede ir convirtiendo fila a fila.
+//
+//  DEFLATE DE VERDAD (LZ77 con ventana corta + Huffman FIJO), no
+//  bloques sin comprimir. Un dibujo vectorial son grandes zonas planas:
+//  con compresion el archivo baja de 1,1 MB a unas decenas de KB, y en
+//  16 MB de NOR Flash esa diferencia es la que decide si se pueden
+//  guardar veinte exportaciones o una.
+//
+//  Huffman FIJO y no dinamico: el dinamico gana un 5-10% mas y cuesta
+//  construir dos arboles y escribir la tabla. Para una funcion que
+//  corre en una CPU de 400 MHz sobre datos que ya comprimen muy bien,
+//  ese cambio no compensa.
+// -------------------------------------------------------------
+size_t flexVecPngMaxBytes(int w, int h){
+  if(w <= 0 || h <= 0) return 0;
+  size_t raw = (size_t)h * ((size_t)w * 3 + 1);
+  // Peor caso de deflate con Huffman fijo: cada literal ocupa como
+  // mucho 9 bits. Se redondea a 9/8 + una holgura fija para cabeceras,
+  // el checksum y los trozos del PNG.
+  return raw + raw / 8 + 4096;
+}
+
+// --- Salida cruda al buffer, con CRC del trozo en curso ---------------
+static const uint32_t FV_CRC_POLY = 0xEDB88320u;
+static uint32_t fvCrcByte(uint32_t crc, uint8_t b){
+  crc ^= b;
+  for(int i = 0; i < 8; i++) crc = (crc >> 1) ^ (FV_CRC_POLY & (uint32_t)(-(int32_t)(crc & 1)));
+  return crc;
+}
+static void fvPngRaw(FlexVecPng* p, uint8_t b){
+  if(p->len >= p->cap){ p->over = 1; return; }
+  p->out[p->len++] = b;
+  p->crc = fvCrcByte(p->crc, b);
+}
+static void fvPngRawNoCrc(FlexVecPng* p, uint8_t b){
+  if(p->len >= p->cap){ p->over = 1; return; }
+  p->out[p->len++] = b;
+}
+static void fvPngBe32(FlexVecPng* p, uint32_t v, int crc){
+  for(int i = 3; i >= 0; i--){
+    uint8_t b = (uint8_t)((v >> (i * 8)) & 0xFF);
+    if(crc) fvPngRaw(p, b); else fvPngRawNoCrc(p, b);
+  }
+}
+// Bits del deflate: se emiten de menos a mas significativo, que es el
+// orden del formato (RFC 1951) salvo en los codigos de Huffman, que van
+// al reves y por eso se invierten al escribirlos.
+static void fvPngBits(FlexVecPng* p, uint32_t v, int n){
+  p->bitBuf |= (v << p->bitCnt);
+  p->bitCnt += n;
+  while(p->bitCnt >= 8){
+    fvPngRaw(p, (uint8_t)(p->bitBuf & 0xFF));
+    p->bitBuf >>= 8;
+    p->bitCnt -= 8;
+  }
+}
+static void fvPngHuff(FlexVecPng* p, uint32_t code, int n){
+  uint32_t rev = 0;
+  for(int i = 0; i < n; i++) rev |= ((code >> i) & 1u) << (n - 1 - i);
+  fvPngBits(p, rev, n);
+}
+// Codigos del arbol FIJO de literales/longitudes (RFC 1951, 3.2.6).
+static void fvPngLit(FlexVecPng* p, int sym){
+  if(sym < 144)      fvPngHuff(p, (uint32_t)(0x30 + sym), 8);
+  else if(sym < 256) fvPngHuff(p, (uint32_t)(0x190 + sym - 144), 9);
+  else if(sym < 280) fvPngHuff(p, (uint32_t)(sym - 256), 7);
+  else               fvPngHuff(p, (uint32_t)(0xC0 + sym - 280), 8);
+}
+static const uint16_t FV_LEN_BASE[29] = {
+  3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258 };
+static const uint8_t FV_LEN_EXTRA[29] = {
+  0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0 };
+static const uint16_t FV_DIST_BASE[30] = {
+  1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577 };
+static const uint8_t FV_DIST_EXTRA[30] = {
+  0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13 };
+
+static void fvPngMatch(FlexVecPng* p, int len, int dist){
+  int li = 28;
+  while(li > 0 && FV_LEN_BASE[li] > len) li--;
+  fvPngLit(p, 257 + li);
+  if(FV_LEN_EXTRA[li]) fvPngBits(p, (uint32_t)(len - FV_LEN_BASE[li]), FV_LEN_EXTRA[li]);
+  int di = 29;
+  while(di > 0 && FV_DIST_BASE[di] > dist) di--;
+  fvPngHuff(p, (uint32_t)di, 5);               // distancias: 5 bits fijos
+  if(FV_DIST_EXTRA[di]) fvPngBits(p, (uint32_t)(dist - FV_DIST_BASE[di]), FV_DIST_EXTRA[di]);
+}
+
+static inline int fvPngHash(const uint8_t* w, int pos, int mask){
+  uint32_t h = (uint32_t)w[pos & mask];
+  h = (h << 5) ^ (uint32_t)w[(pos + 1) & mask];
+  h = (h << 5) ^ (uint32_t)w[(pos + 2) & mask];
+  return (int)(h & (FLEXVEC_PNG_HASH - 1));
+}
+
+// Mete un byte en el flujo comprimido. La ventana es circular y las
+// posiciones son absolutas: la resta de dos posiciones da la distancia
+// sin tener que deshacer el modulo.
+static void fvPngPush(FlexVecPng* p, uint8_t b){
+  p->win[p->winPos & (FLEXVEC_PNG_WINDOW - 1)] = b;
+  p->winPos++;
+}
+
+// Comprime un bloque de bytes ya presentes en la ventana, desde 'from'
+// hasta 'to' (posiciones absolutas), buscando repeticiones hacia atras.
+static void fvPngDeflate(FlexVecPng* p, int from, int to){
+  const int MASK = FLEXVEC_PNG_WINDOW - 1;
+  int pos = from;
+  while(pos < to){
+    int best = 0, bestDist = 0;
+    if(pos + 3 <= to){
+      int h = fvPngHash(p->win, pos, MASK);
+      int cand = p->head[h];
+      int chain = 0;
+      // cand tiene que estar DETRAS: la tabla de dispersion puede
+      // devolver una posicion ya reescrita por una vuelta posterior de
+      // la ventana, y una distancia negativa produciria un flujo que
+      // ningun descompresor acepta.
+      while(cand >= 0 && cand < pos && pos - cand < FLEXVEC_PNG_WINDOW - 4 && chain++ < 16){
+        int maxLen = to - pos;
+        if(maxLen > 258) maxLen = 258;
+        int l = 0;
+        while(l < maxLen && p->win[(cand + l) & MASK] == p->win[(pos + l) & MASK]) l++;
+        if(l > best && l >= 3){ best = l; bestDist = pos - cand; }
+        if(best >= 258) break;
+        cand = p->prev[cand & MASK];
+      }
+      p->prev[pos & MASK] = p->head[h];
+      p->head[h] = pos;
+    }
+    if(best >= 3){
+      fvPngMatch(p, best, bestDist);
+      // Se indexan tambien los bytes que la coincidencia se salta: sin
+      // eso, el siguiente trozo pierde la mitad de las referencias.
+      for(int k = 1; k < best && pos + k + 3 <= to; k++){
+        int h2 = fvPngHash(p->win, pos + k, MASK);
+        p->prev[(pos + k) & MASK] = p->head[h2];
+        p->head[h2] = pos + k;
+      }
+      pos += best;
+    } else {
+      fvPngLit(p, p->win[pos & MASK]);
+      pos++;
+    }
+  }
+}
+
+int flexVecPngBegin(FlexVecPng* p, int w, int h, uint8_t* out, size_t cap){
+  if(!p || !out || w <= 0 || h <= 0) return FLEXVEC_E_BADARG;
+  if(cap < 128) return FLEXVEC_E_NOMEM;
+  memset(p, 0, sizeof(*p));
+  p->out = out; p->cap = cap; p->len = 0;
+  p->w = w; p->h = h; p->rows = 0;
+  p->adler = 1;
+  for(int i = 0; i < FLEXVEC_PNG_HASH; i++) p->head[i] = -1;
+  for(int i = 0; i < FLEXVEC_PNG_WINDOW; i++) p->prev[i] = -1;
+  static const uint8_t SIG[8] = { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
+  for(int i = 0; i < 8; i++) fvPngRawNoCrc(p, SIG[i]);
+  // IHDR
+  fvPngBe32(p, 13, 0);
+  p->crc = 0xFFFFFFFFu;
+  fvPngRaw(p, 'I'); fvPngRaw(p, 'H'); fvPngRaw(p, 'D'); fvPngRaw(p, 'R');
+  fvPngBe32(p, (uint32_t)w, 1);
+  fvPngBe32(p, (uint32_t)h, 1);
+  fvPngRaw(p, 8);      // 8 bits por canal
+  fvPngRaw(p, 2);      // color RGB, sin paleta ni alfa
+  fvPngRaw(p, 0); fvPngRaw(p, 0); fvPngRaw(p, 0);
+  fvPngBe32(p, p->crc ^ 0xFFFFFFFFu, 0);
+  // IDAT: la longitud se rellena al cerrar, cuando se sabe.
+  p->idatStart = p->len;
+  fvPngBe32(p, 0, 0);
+  p->crc = 0xFFFFFFFFu;
+  fvPngRaw(p, 'I'); fvPngRaw(p, 'D'); fvPngRaw(p, 'A'); fvPngRaw(p, 'T');
+  fvPngRaw(p, 0x78); fvPngRaw(p, 0x01);        // cabecera zlib
+  fvPngBits(p, 1, 1);                          // ultimo bloque
+  fvPngBits(p, 1, 2);                          // Huffman fijo
+  return p->over ? FLEXVEC_E_OVERFLOW : FLEXVEC_OK;
+}
+
+int flexVecPngRow(FlexVecPng* p, const uint8_t* rgb){
+  if(!p || !rgb) return FLEXVEC_E_BADARG;
+  if(p->rows >= p->h) return FLEXVEC_E_BADARG;
+  if(p->over) return FLEXVEC_E_OVERFLOW;
+  int from = p->winPos;
+  // Filtro 1 (Sub): cada byte menos el de tres posiciones antes. En un
+  // dibujo vectorial las zonas planas se convierten en ceros, que es
+  // justo lo que el LZ77 comprime a casi nada.
+  //
+  // El adler se lleva en dos mitades locales y se vuelve a juntar al
+  // final de la fila: hacerlo sobre el campo empaquetado obliga a
+  // desempaquetar y volver a empaquetar por byte, y ahi es facil que
+  // una de las dos mitades se pierda -- con un checksum malo el PNG se
+  // ve bien en el visor que lo ignora y falla en el que no.
+  uint32_t a1 = p->adler & 0xFFFFu, a2 = (p->adler >> 16) & 0xFFFFu;
+  uint8_t f = 1;
+  a1 = (a1 + f) % 65521u; a2 = (a2 + a1) % 65521u;
+  fvPngPush(p, f);
+  int n = p->w * 3;
+  for(int i = 0; i < n; i++){
+    uint8_t v = (uint8_t)(rgb[i] - (i >= 3 ? rgb[i - 3] : 0));
+    a1 = (a1 + v) % 65521u;
+    a2 = (a2 + a1) % 65521u;
+    fvPngPush(p, v);
+  }
+  p->adler = (a2 << 16) | a1;
+  fvPngDeflate(p, from, p->winPos);
+  p->rows++;
+  return p->over ? FLEXVEC_E_OVERFLOW : FLEXVEC_OK;
+}
+
+int flexVecPngEnd(FlexVecPng* p){
+  if(!p) return -FLEXVEC_E_BADARG;
+  if(p->rows != p->h) return -FLEXVEC_E_BADARG;
+  fvPngLit(p, 256);                            // fin de bloque
+  if(p->bitCnt) fvPngBits(p, 0, 8 - p->bitCnt);
+  fvPngBe32(p, p->adler, 1);                   // checksum zlib
+  uint32_t idatCrc = p->crc ^ 0xFFFFFFFFu;
+  uint32_t idatLen = (uint32_t)(p->len - p->idatStart - 8);
+  fvPngBe32(p, idatCrc, 0);
+  if(p->over) return -FLEXVEC_E_OVERFLOW;
+  // Ahora si se conoce la longitud del IDAT: se escribe en su sitio.
+  for(int i = 0; i < 4; i++)
+    p->out[p->idatStart + i] = (uint8_t)((idatLen >> ((3 - i) * 8)) & 0xFF);
+  // IEND
+  fvPngBe32(p, 0, 0);
+  p->crc = 0xFFFFFFFFu;
+  fvPngRaw(p, 'I'); fvPngRaw(p, 'E'); fvPngRaw(p, 'N'); fvPngRaw(p, 'D');
+  fvPngBe32(p, p->crc ^ 0xFFFFFFFFu, 0);
+  if(p->over) return -FLEXVEC_E_OVERFLOW;
+  return (int)p->len;
 }

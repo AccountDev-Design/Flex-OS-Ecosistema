@@ -179,6 +179,32 @@ typedef struct {
   uint8_t     lutA[256];         // alpha interpolado
 } FlexVecGrad;
 
+// MOTIVOS (patterns) · Fase 2
+// -------------------------------------------------------------
+//  PROCEDURALES, y es una decision. Un motivo "de verdad" -- un trozo
+//  de dibujo repetido en mosaico -- obliga a rasterizar ese trozo a un
+//  bitmap y a muestrearlo por pixel: son ~92 KB de PSRAM por motivo
+//  vivo, y hay que rehacerlo cada vez que el motivo o el zoom cambian.
+//  Un motivo procedural se evalua con aritmetica pura: cero memoria,
+//  coste constante por pixel, y se exporta a SVG como un <pattern> con
+//  geometria de verdad, no como una imagen incrustada.
+//
+//  Los seis tipos cubren lo que se usa en un dibujo vectorial: puntos,
+//  rayas, rejilla, damero, diagonales y trama cruzada.
+// -------------------------------------------------------------
+enum { FLEXVEC_PAT_DOTS = 0, FLEXVEC_PAT_LINES, FLEXVEC_PAT_GRID,
+       FLEXVEC_PAT_CHECKER, FLEXVEC_PAT_DIAGONAL, FLEXVEC_PAT_CROSS, FLEXVEC_PAT_N };
+#define FLEXVEC_MAX_PATTERNS 6
+typedef struct {
+  uint8_t  kind;
+  uint8_t  used;
+  uint8_t  fgA, bgA;
+  float    scale;        // lado de la celda, en unidades de documento
+  float    offX, offY;
+  float    angle;        // radianes
+  uint32_t fg, bg;
+} FlexVecPattern;
+
 // -------------------------------------------------------------
 //  5) ELEMENTO, CAPA Y DOCUMENTO
 // -------------------------------------------------------------
@@ -204,6 +230,16 @@ typedef struct {
   float    strokeW;
   uint8_t  alpha;        // opacidad del objeto entero
   uint8_t  pad0[3];
+
+  // APARIENCIA AMPLIADA (Fase 2). Un relleno y un trazo MAS, debajo de
+  // los principales. No es la pila multinivel de Illustrator -- eso
+  // exigiria un grafo de apariencia y efectos vivos, que estan
+  // OMITIDOS (ver docs/FLEX-VECTOR-PRO.md) -- pero cubre lo que de
+  // verdad se usa: un contorno doble, o un relleno de base bajo un
+  // motivo. Orden de pintado: fill2, fill, stroke2, stroke.
+  FlexVecPaint fill2;
+  FlexVecPaint stroke2;
+  float    strokeW2;
 
   float    m[6];         // matriz afin 2D: [a b c d e f] -> x' = a*x + c*y + e
 
@@ -248,6 +284,8 @@ typedef struct {
   int         elemN;                    // marca de agua alta (ranuras usadas o no)
   FlexVecGrad grads[FLEXVEC_MAX_GRADS];
   int         gradN;
+  FlexVecPattern pats[FLEXVEC_MAX_PATTERNS];
+  int         patN;
 
   FlexVecArena arena;
   uint16_t    nodeTop;                  // primer nodo libre del pool (asignacion por pila)
@@ -517,9 +555,11 @@ enum { FLEXVEC_B_UNITE = 0, FLEXVEC_B_MINUS_FRONT, FLEXVEC_B_INTERSECT,
 // retenidos durante toda la sesion por si acaso.
 typedef struct {
   uint8_t* gridA;      // FLEXVEC_BOOL_GRID * FLEXVEC_BOOL_GRID
-  uint8_t* gridB;      // idem
+  uint8_t* gridB;      // idem: acumulador del resultado
+  uint8_t* gridC;      // idem: hace falta para DIVIDIR, que necesita las
+                       //   dos figuras a la vez ademas del acumulador
   float*   trace;      // 2 * FLEXVEC_MAX_FLATPTS
-  uint8_t* mark;       // FLEXVEC_MAX_FLATPTS
+  uint8_t* mark;       // FLEXVEC_MAX_FLATPTS (marcas de la simplificacion)
 } FlexVecBoolWork;
 size_t flexVecBoolBytes(void);
 int    flexVecBoolInit(FlexVecBoolWork* w, void* block, size_t size);
@@ -555,6 +595,10 @@ void flexVecSetSaved(FlexVecDoc* d);
 float flexVecSnap(float v, float grid);
 int   flexVecSnapSel(FlexVecDoc* d, float grid);
 
+// El typedef de la medida vive en la seccion H (texto de area) pero lo
+// necesita ya la exportacion: se adelanta aqui.
+typedef float (*FlexVecMeasureFn)(const char* utf8, int len, float size, void* user);
+
 // -------------------------------------------------------------
 // 20) EXPORTACION SVG
 //  ------------------------------------------------------------
@@ -568,15 +612,163 @@ int  flexVecExportSVG(FlexVecDoc* d, char* out, size_t cap, int selOnly);
 // SVG compacto (Fase 2): menos decimales, sin sangrado, atributos
 // heredados en el grupo. Mismo contrato.
 int  flexVecExportSVGCompact(FlexVecDoc* d, char* out, size_t cap, int selOnly);
+// Igual, pero con la funcion de MEDIDA del anfitrion. Solo cambia una
+// cosa, y es la que importa: el texto de area se exporta repartido en
+// las MISMAS lineas que se ven en la pantalla, en <tspan>. Sin la
+// medida, un texto de area sale como una sola linea -- SVG valido, pero
+// no lo que el usuario compuso.
+int  flexVecExportSVGEx(FlexVecDoc* d, char* out, size_t cap, int selOnly,
+                        int compact, FlexVecMeasureFn measure, void* mUser);
 
 // -------------------------------------------------------------
 // 21) SERIALIZACION NATIVA  (.fxv, para la sesion y para el disco)
 // -------------------------------------------------------------
 #define FLEXVEC_MAGIC   0x31565846u   /* "FXV1" */
-#define FLEXVEC_VERSION 1
+#define FLEXVEC_VERSION 2
 int  flexVecSerialize(const FlexVecDoc* d, uint8_t* out, size_t cap);
 int  flexVecDeserialize(FlexVecDoc* d, const uint8_t* in, size_t len);
 size_t flexVecSerializeSize(const FlexVecDoc* d);
+
+// #############################################################
+//  FASE 2  ·  EXPANSION PROFESIONAL
+//  ------------------------------------------------------------
+//  Todo lo de aqui comparte tres reglas con la Fase 1: no reserva
+//  memoria, tiene un limite duro y falla con un motivo legible.
+//
+//  Y una cuarta, que es la que hace que estas funciones no cuesten
+//  nada por cuadro: LO CARO SE HORNEA. Fusion, repeticion y pincel
+//  producen GEOMETRIA de una vez, cuando el usuario los aplica. No hay
+//  un grafo que re-evaluar en cada repintado -- que es exactamente lo
+//  que un editor de escritorio puede permitirse y un MCU sin GPU no.
+// #############################################################
+
+// -------------------------------------------------------------
+//  A) APARIENCIA AMPLIADA
+// -------------------------------------------------------------
+int flexVecSetFill2(FlexVecDoc* d, int elem, uint32_t rgb, uint8_t alpha);
+int flexVecSetStroke2(FlexVecDoc* d, int elem, uint32_t rgb, uint8_t alpha, float w);
+int flexVecClearExtra(FlexVecDoc* d, int elem);
+int flexVecHasExtra(const FlexVecDoc* d, int elem);
+
+// -------------------------------------------------------------
+//  B) MOTIVOS
+// -------------------------------------------------------------
+int flexVecPatternAdd(FlexVecDoc* d, int kind);
+int flexVecPatternSet(FlexVecDoc* d, int p, int kind, float scale,
+                      float offX, float offY, float angle);
+int flexVecPatternColors(FlexVecDoc* d, int p, uint32_t fg, uint8_t fgA,
+                         uint32_t bg, uint8_t bgA);
+int flexVecSetFillPattern(FlexVecDoc* d, int elem, int p);
+// Color del motivo en un punto de DOCUMENTO. Devuelve RGB888 y escribe
+// la opacidad. Es una funcion pura: la llama el anfitrion por pixel.
+uint32_t flexVecPatternAt(const FlexVecPattern* p, float x, float y, uint8_t* alphaOut);
+
+// -------------------------------------------------------------
+//  C) SIMBOLOS  ·  instancias VINCULADAS
+//  ------------------------------------------------------------
+//  Una instancia no copia la geometria: apunta al maestro. Editar el
+//  maestro cambia todas las instancias, que es justo el valor de un
+//  simbolo. Cada instancia tiene su propia matriz y su propia
+//  apariencia -- ese es el unico "override", y es deliberado: la pila
+//  de sustituciones por instancia de Illustrator esta OMITIDA.
+// -------------------------------------------------------------
+int flexVecSymbolInstance(FlexVecDoc* d, int master, float dx, float dy);
+// Indice del maestro si 'elem' es una instancia; -1 si no lo es o si el
+// maestro ya no existe.
+int flexVecSymbolMaster(const FlexVecDoc* d, int elem);
+// Cuantas instancias tiene un maestro.
+int flexVecSymbolCount(const FlexVecDoc* d, int master);
+
+// -------------------------------------------------------------
+//  D) FUSION (blend)
+//  ------------------------------------------------------------
+//  Interpola forma y color entre dos objetos con un numero ACOTADO de
+//  pasos. Las dos siluetas se remuestrean a un mismo numero de puntos,
+//  asi que el resultado es poligonal: es la version SIMPLIFICADA que
+//  documenta docs/FLEX-VECTOR-PRO.md.
+// -------------------------------------------------------------
+int flexVecBlend(FlexVecDoc* d, int a, int b, int steps, FlexVecRaster* r);
+
+// -------------------------------------------------------------
+//  E) REPETIR
+// -------------------------------------------------------------
+enum { FLEXVEC_REP_GRID = 0, FLEXVEC_REP_MIRROR };
+int flexVecRepeat(FlexVecDoc* d, int elem, int mode, int cols, int rows,
+                  float dx, float dy);
+
+// -------------------------------------------------------------
+//  F) PINCEL DE DISPERSION / DE MOTIVO
+//  ------------------------------------------------------------
+//  Estampa copias de 'stamp' a lo largo de 'path', cada 'spacing'
+//  unidades. Se HORNEA a un solo objeto con una copia por subtrazado:
+//  asi cien estampas cuestan un objeto, no cien.
+// -------------------------------------------------------------
+int flexVecBrush(FlexVecDoc* d, int path, int stamp, float spacing,
+                 float scale, int rotate, FlexVecRaster* r);
+
+// -------------------------------------------------------------
+//  G) MASCARA DE RECORTE, de forma arbitraria
+//  ------------------------------------------------------------
+//  Recorta la seleccion con el objeto de MAS ARRIBA. Usa el mismo
+//  motor de rejilla que el Pathfinder, con sus mismos limites, y es
+//  DESTRUCTIVA: la geometria recortada sustituye a la original. La
+//  mascara no destructiva de Illustrator necesitaria componer dos
+//  coberturas por fila en el mismo repintado; ver el apartado de
+//  mascaras en docs/FLEX-VECTOR-PRO.md.
+// -------------------------------------------------------------
+int flexVecClipWithTop(FlexVecDoc* d, FlexVecRaster* r, FlexVecBoolWork* w);
+
+// -------------------------------------------------------------
+//  H) TEXTO DE AREA
+//  ------------------------------------------------------------
+//  El nucleo NO tiene fuente: el anfitrion presta una funcion de
+//  medida. Asi el reparto en lineas se prueba en el PC con una medida
+//  de mentira, y en la placa se mide con la fuente de verdad.
+// -------------------------------------------------------------
+enum { FLEXVEC_TA_LEFT = 0, FLEXVEC_TA_CENTER, FLEXVEC_TA_RIGHT };
+typedef void  (*FlexVecLineCb)(const char* utf8, int len, float x, float y,
+                               float w, void* user);
+int flexVecTextSetArea(FlexVecDoc* d, int elem, float w, float h, int align);
+int flexVecTextIsArea(const FlexVecDoc* d, int elem);
+// Reparte el texto en lineas dentro de la caja y las entrega por
+// callback. Devuelve el numero de lineas, o un error negativo.
+int flexVecTextLayout(FlexVecDoc* d, int elem, float lineH,
+                      FlexVecMeasureFn measure, void* mUser,
+                      FlexVecLineCb cb, void* cbUser);
+
+// -------------------------------------------------------------
+//  I) EXPORTACION PNG
+//  ------------------------------------------------------------
+//  Escritor por FILAS: no hace falta tener la imagen entera en RGB888
+//  en memoria (1,1 MB para 480x800). El anfitrion ya tiene el cuadro
+//  rasterizado en su cache RGB565 y va convirtiendo fila a fila.
+//
+//  Deflate de verdad (LZ77 + Huffman fijo) con ventana corta: un
+//  dibujo vectorial son grandes zonas planas y comprime muchisimo. Con
+//  bloques sin comprimir el archivo seria de mas de un mega, que en
+//  16 MB de NOR Flash no es aceptable.
+// -------------------------------------------------------------
+#define FLEXVEC_PNG_WINDOW  8192
+#define FLEXVEC_PNG_HASH    2048
+typedef struct {
+  uint8_t* out; size_t cap, len;
+  int      w, h, rows;
+  uint32_t adler;               // checksum zlib
+  uint32_t crc;                 // CRC del trozo IDAT en curso
+  size_t   idatStart;           // donde empieza la longitud del IDAT
+  uint32_t bitBuf; int bitCnt;  // acumulador de bits del deflate
+  uint8_t  win[FLEXVEC_PNG_WINDOW];
+  int      winPos;              // bytes ya metidos en la ventana (total)
+  int32_t  head[FLEXVEC_PNG_HASH];
+  int32_t  prev[FLEXVEC_PNG_WINDOW];
+  int      over;                // se quedo sin sitio
+} FlexVecPng;
+// Cota superior del tamano de salida. Si el buffer es al menos esto,
+// el PNG cabe siempre, comprima o no.
+size_t flexVecPngMaxBytes(int w, int h);
+int flexVecPngBegin(FlexVecPng* p, int w, int h, uint8_t* out, size_t cap);
+int flexVecPngRow(FlexVecPng* p, const uint8_t* rgb);   // w * 3 bytes
+int flexVecPngEnd(FlexVecPng* p);                       // bytes totales, o error negativo
 
 #ifdef __cplusplus
 }

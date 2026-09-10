@@ -115,7 +115,7 @@ Los módulos que sí son código portable y con pruebas propias siguen siendo
 | `FlexOS_Ultra_Power.h`            |   934 | desbloqueo, suspension y apagado completo |
 | `FlexOS_Ultra_Network.h`          |   839 | arranque seguro de la radio y Wi-Fi |
 | `FlexOS_Ultra_HttpShare.h`        |   249 | servidor HTTP local del sistema: socket y tarea propia |
-| `FlexOS_Ultra_AppVector.h`        |  2275 | Flex Vector Pro: editor vectorial (interfaz, herramientas y gestos) |
+| `FlexOS_Ultra_AppVector.h`        |  2825 | Flex Vector Pro: editor vectorial (interfaz, herramientas y gestos) |
 | `FlexOS_Ultra_NTP.h`              |   297 | cliente NTP en su propia tarea |
 | `FlexOS_Ultra_Conn.h`             |   359 | conectividad: Wi-Fi / BLE / modo avion |
 | `FlexOS_Ultra_Notif.h`            |   385 | isla dinamica: notificaciones |

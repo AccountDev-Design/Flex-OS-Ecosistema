@@ -30,6 +30,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
+#include <zlib.h>   // SOLO para la prueba: descomprime el PNG que genera el firmware
 
 static int g_fail = 0, g_run = 0;
 #define CHECK(cond, ...) do { g_run++; if(!(cond)){ g_fail++; \
@@ -56,6 +57,8 @@ static void hostInit(){
   flexVecRasterInit(&R, g_ras, flexVecRasterBytes(CANVAS_W), CANVAS_W);
 }
 static void hostFree(){ free(g_nodes); free(g_undo); free(g_text); free(g_ras); }
+
+static int fvElemAlive(int e){ return e >= 0 && e < FLEXVEC_MAX_ELEMS && D.elems[e].layer >= 0; }
 
 static void viewIdentity(FlexVecView* v){
   flexVecMatIdentity(v->m);
@@ -1171,6 +1174,566 @@ static void testNoMemory(){
   CHECK(flexVecFlatten(&D, e, &v, &r2, &subN) < 0, "aplanar sin buffers se niega");
 }
 
+// =============================================================
+//  F A S E   2
+// =============================================================
+static void testAppearance2(){
+  std::printf("-- apariencia ampliada: dos rellenos y dos trazos --\n");
+  flexVecNew(&D, 480, 800, 1);
+  int e = flexVecAddRect(&D, 10, 10, 60, 40, 0);
+  CHECK(!flexVecHasExtra(&D, e), "un objeto nuevo no tiene apariencia extra");
+  CHECK(flexVecSetFill2(&D, e, 0x223344, 200) == FLEXVEC_OK, "relleno 2");
+  CHECK(flexVecSetStroke2(&D, e, 0x998877, 255, 9.0f) == FLEXVEC_OK, "trazo 2");
+  CHECK(flexVecHasExtra(&D, e), "ahora si la tiene");
+  CHECK(D.elems[e].fill2.rgb == 0x223344u && D.elems[e].strokeW2 == 9.0f, "los valores quedan");
+  static char sv[FLEXVEC_SVG_BYTES];
+  int n = flexVecExportSVG(&D, sv, sizeof(sv), 0);
+  CHECK(n > 0, "exportar");
+  // SVG no admite dos rellenos en un elemento: el segundo par sale como
+  // un <path> identico debajo.
+  CHECK(countStr(sv, "<path") == 2, "dos trazados para un objeto (%d)", countStr(sv, "<path"));
+  CHECK(strstr(sv, "fill=\"#223344\"") != NULL, "el relleno de abajo esta");
+  CHECK(strstr(sv, "stroke-width=\"9\"") != NULL, "y el trazo de abajo tambien");
+  // Serializacion: la apariencia extra viaja.
+  size_t need = flexVecSerializeSize(&D);
+  uint8_t* buf = (uint8_t*)malloc(need);
+  int sn = flexVecSerialize(&D, buf, need);
+  uint32_t h0 = fingerprint(&D);
+  flexVecNew(&D, 100, 100, 1);
+  CHECK(flexVecDeserialize(&D, buf, (size_t)sn) == FLEXVEC_OK, "reabrir");
+  CHECK(fingerprint(&D) == h0, "la apariencia extra sobrevive al archivo");
+  free(buf);
+  CHECK(flexVecClearExtra(&D, e) == FLEXVEC_OK, "quitar la extra");
+  CHECK(!flexVecHasExtra(&D, e), "queda quitada");
+  CHECK(flexVecSetStroke2(&D, e, 0, 255, strtof("nan", NULL)) == FLEXVEC_E_BADARG, "grosor NaN");
+}
+
+static void testPatterns(){
+  std::printf("-- motivos procedurales --\n");
+  flexVecNew(&D, 480, 800, 1);
+  int p = flexVecPatternAdd(&D, FLEXVEC_PAT_CHECKER);
+  CHECK(p >= 0, "motivo de damero");
+  CHECK(flexVecPatternSet(&D, p, FLEXVEC_PAT_CHECKER, 10, 0, 0, 0) == FLEXVEC_OK, "parametros");
+  CHECK(flexVecPatternColors(&D, p, 0x000000, 255, 0xFFFFFF, 255) == FLEXVEC_OK, "colores");
+  uint8_t a = 0;
+  uint32_t c1 = flexVecPatternAt(&D.pats[p], 5, 5, &a);      // celda (0,0) -> primer plano
+  uint32_t c2 = flexVecPatternAt(&D.pats[p], 15, 5, &a);     // celda (1,0) -> fondo
+  uint32_t c3 = flexVecPatternAt(&D.pats[p], 15, 15, &a);    // celda (1,1) -> primer plano
+  CHECK(c1 == 0x000000u && c2 == 0xFFFFFFu && c3 == 0x000000u,
+        "el damero alterna: %06x %06x %06x", c1, c2, c3);
+  // Coordenadas NEGATIVAS: el motivo no se puede partir en el eje. Es el
+  // fallo clasico de usar un molde a int en vez de floorf.
+  uint32_t cn = flexVecPatternAt(&D.pats[p], -5, -5, &a);
+  uint32_t cp = flexVecPatternAt(&D.pats[p], -15, -5, &a);
+  CHECK(cn != cp, "sigue alternando en el lado negativo");
+  CHECK(flexVecPatternAt(&D.pats[p], -25, -5, &a) == cn, "y con el mismo periodo");
+  // El desplazamiento mueve el mosaico entero.
+  flexVecPatternSet(&D, p, FLEXVEC_PAT_CHECKER, 10, 10, 0, 0);
+  CHECK(flexVecPatternAt(&D.pats[p], 15, 5, &a) == c1, "el desplazamiento corre el mosaico");
+  // Los seis tipos responden y ninguno se sale de sus dos colores.
+  for(int k = 0; k < FLEXVEC_PAT_N; k++){
+    flexVecPatternSet(&D, p, k, 8, 0, 0, 0);
+    int fg = 0, bg = 0;
+    for(int i = 0; i < 64; i++)
+      for(int j = 0; j < 64; j++){
+        uint32_t c = flexVecPatternAt(&D.pats[p], (float)i * 0.5f, (float)j * 0.5f, &a);
+        if(c == 0x000000u) fg++; else if(c == 0xFFFFFFu) bg++; else fg = -100000;
+      }
+    CHECK(fg > 0 && bg > 0, "el tipo %d tiene los dos colores (fg=%d bg=%d)", k, fg, bg);
+  }
+  flexVecPatternSet(&D, p, FLEXVEC_PAT_DOTS, 12, 0, 0, 0);
+  int e = flexVecAddRect(&D, 0, 0, 100, 100, 0);
+  CHECK(flexVecSetFillPattern(&D, e, p) == FLEXVEC_OK, "asignar el motivo");
+  CHECK(D.elems[e].fill.type == FLEXVEC_P_PATTERN, "el relleno es de motivo");
+  static char sv[FLEXVEC_SVG_BYTES];
+  int n = flexVecExportSVG(&D, sv, sizeof(sv), 0);
+  CHECK(n > 0 && strstr(sv, "<pattern id=\"p0\"") != NULL, "el <defs> lleva el <pattern>");
+  CHECK(strstr(sv, "patternUnits=\"userSpaceOnUse\"") != NULL, "en el espacio del documento");
+  CHECK(strstr(sv, "url(#p0)") != NULL, "y el relleno lo referencia");
+  CHECK(strstr(sv, "<circle") != NULL, "el motivo de puntos exporta geometria de verdad");
+  // Limites y argumentos.
+  int made = 1;
+  while(flexVecPatternAdd(&D, FLEXVEC_PAT_LINES) >= 0) made++;
+  CHECK(made == FLEXVEC_MAX_PATTERNS, "caben %d motivos (cupieron %d)", FLEXVEC_MAX_PATTERNS, made);
+  CHECK(flexVecPatternAdd(&D, 99) == -FLEXVEC_E_BADARG, "tipo invalido");
+  CHECK(flexVecPatternSet(&D, 99, 0, 10, 0, 0, 0) == FLEXVEC_E_BADARG, "motivo que no existe");
+  CHECK(flexVecPatternSet(&D, p, 0, strtof("nan", NULL), 0, 0, 0) == FLEXVEC_E_BADARG, "escala NaN");
+  flexVecPatternSet(&D, p, FLEXVEC_PAT_DOTS, 0.001f, 0, 0, 0);
+  CHECK(D.pats[p].scale >= 1.0f, "una celda diminuta se acota (%.3f)", (double)D.pats[p].scale);
+}
+
+static void testSymbols(){
+  std::printf("-- simbolos: instancias VINCULADAS --\n");
+  flexVecNew(&D, 480, 800, 1);
+  int m = flexVecAddRect(&D, 0, 0, 40, 20, 0);
+  int usedBefore = flexVecNodeUsed(&D);
+  int i1 = flexVecSymbolInstance(&D, m, 100, 0);
+  int i2 = flexVecSymbolInstance(&D, m, 200, 50);
+  CHECK(i1 >= 0 && i2 >= 0, "dos instancias");
+  CHECK(flexVecNodeUsed(&D) == usedBefore, "una instancia NO gasta nodos (%d)", flexVecNodeUsed(&D));
+  CHECK(flexVecSymbolMaster(&D, i1) == m, "la instancia conoce a su maestro");
+  CHECK(flexVecSymbolMaster(&D, m) == -1, "el maestro no es instancia de nadie");
+  CHECK(flexVecSymbolCount(&D, m) == 2, "el maestro tiene dos instancias");
+
+  float x0, y0, x1, y1;
+  flexVecBBox(&D, i1, &x0, &y0, &x1, &y1);
+  CHECK(fabsf(x0 - 100) < 0.01f && fabsf(x1 - 140) < 0.01f,
+        "la caja de la instancia sigue al maestro: %.1f..%.1f", (double)x0, (double)x1);
+  CHECK(flexVecHitTest(&D, 120, 10, 2) >= 0, "y se puede tocar donde se ve");
+
+  // EDITAR EL MAESTRO CAMBIA LAS INSTANCIAS. Es todo el valor de un
+  // simbolo, y lo unico que distingue una instancia de una copia.
+  flexVecNodeMove(&D, m, 1, 80, 0);            // se estira el maestro
+  D.elems[i1].bboxOk = 0;
+  flexVecBBox(&D, i1, &x0, &y0, &x1, &y1);
+  CHECK(fabsf(x1 - 180) < 0.01f, "la instancia se estiro con el maestro (%.1f)", (double)x1);
+
+  // La instancia tiene su propia matriz y su propia apariencia.
+  flexVecSetFill(&D, i1, 0xFF0000, 255);
+  CHECK(D.elems[m].fill.rgb != 0xFF0000u, "cambiar la instancia no toca al maestro");
+  flexVecRotate(&D, i1, 100, 0, 0.5f);
+  CHECK(D.elems[m].m[0] == 1.0f, "girar la instancia no gira al maestro");
+
+  // Instanciar una instancia instancia a SU maestro: la cadena nunca
+  // pasa de un eslabon, asi que resolverla es O(1) y no puede ciclar.
+  int i3 = flexVecSymbolInstance(&D, i1, 10, 10);
+  CHECK(i3 >= 0 && flexVecSymbolMaster(&D, i3) == m, "una instancia de una instancia apunta al maestro");
+
+  static char sv[FLEXVEC_SVG_BYTES];
+  int n = flexVecExportSVG(&D, sv, sizeof(sv), 0);
+  CHECK(n > 0 && countStr(sv, "<path") == 4, "las instancias se exportan expandidas (%d)",
+        countStr(sv, "<path"));
+
+  // BORRAR EL MAESTRO se lleva las instancias, en UN paso de deshacer.
+  int before = flexVecElemCount(&D);
+  CHECK(before == 4, "cuatro objetos antes de borrar (%d)", before);
+  CHECK(flexVecDelete(&D, m) == FLEXVEC_OK, "borrar el maestro");
+  CHECK(flexVecElemCount(&D) == 0, "se llevo las tres instancias (%d)", flexVecElemCount(&D));
+  CHECK(flexVecUndo(&D) == FLEXVEC_OK, "deshacer");
+  CHECK(flexVecElemCount(&D) == 4, "y vuelven las cuatro de una vez (%d)", flexVecElemCount(&D));
+
+  CHECK(flexVecSymbolInstance(&D, 999, 0, 0) == -FLEXVEC_E_BADARG, "maestro que no existe");
+  int t = flexVecAddText(&D, 0, 0, "hola", 12);
+  CHECK(flexVecSymbolInstance(&D, t, 0, 0) == -FLEXVEC_E_BADARG, "el texto no se instancia");
+}
+
+static void testBlendRepeatBrush(){
+  std::printf("-- fusion, repeticion y pincel --\n");
+  flexVecNew(&D, 480, 800, 1);
+  int a = flexVecAddRect(&D, 0, 0, 40, 40, 0);
+  int b = flexVecAddEllipse(&D, 300, 200, 20, 20);
+  flexVecSetFill(&D, a, 0xFF0000, 255);
+  flexVecSetFill(&D, b, 0x0000FF, 255);
+  int before = flexVecElemCount(&D);
+  CHECK(flexVecBlend(&D, a, b, 5, &R) == FLEXVEC_OK, "fusion de 5 pasos");
+  CHECK(flexVecElemCount(&D) == before + 5, "cinco objetos nuevos (%d)", flexVecElemCount(&D));
+  // El paso central esta A MEDIO CAMINO en sitio y en color.
+  int mid = -1;
+  for(int e = 0; e < FLEXVEC_MAX_ELEMS; e++){
+    if(D.elems[e].layer < 0 || e == a || e == b) continue;
+    float x0, y0, x1, y1;
+    flexVecBBox(&D, e, &x0, &y0, &x1, &y1);
+    float cx = (x0 + x1) * 0.5f;
+    if(cx > 130 && cx < 175) mid = e;
+  }
+  CHECK(mid >= 0, "hay un paso a medio camino");
+  if(mid >= 0){
+    uint32_t c = D.elems[mid].fill.rgb;
+    int r = (int)((c >> 16) & 0xFF), bl = (int)(c & 0xFF);
+    CHECK(r > 60 && r < 200 && bl > 60 && bl < 200,
+          "y su color esta interpolado (#%06x)", c);
+  }
+  CHECK(flexVecBlend(&D, a, a, 3, &R) == FLEXVEC_E_BADARG, "fusionar algo consigo mismo");
+  CHECK(flexVecBlend(&D, a, 999, 3, &R) == FLEXVEC_E_BADARG, "objeto que no existe");
+  // El techo de pasos se respeta aunque se pidan mil.
+  flexVecNew(&D, 480, 800, 1);
+  a = flexVecAddRect(&D, 0, 0, 20, 20, 0);
+  b = flexVecAddRect(&D, 200, 0, 20, 20, 0);
+  before = flexVecElemCount(&D);
+  flexVecBlend(&D, a, b, 1000, &R);
+  CHECK(flexVecElemCount(&D) - before <= FLEXVEC_MAX_BLEND_STEPS,
+        "no se pasa de %d pasos (creo %d)", FLEXVEC_MAX_BLEND_STEPS, flexVecElemCount(&D) - before);
+
+  std::printf("-- repetir --\n");
+  flexVecNew(&D, 480, 800, 1);
+  int e = flexVecAddRect(&D, 0, 0, 20, 20, 0);
+  CHECK(flexVecRepeat(&D, e, FLEXVEC_REP_GRID, 3, 2, 30, 30) == FLEXVEC_OK, "rejilla 3x2");
+  CHECK(flexVecElemCount(&D) == 6, "seis objetos (%d)", flexVecElemCount(&D));
+  float bx0, by0, bx1, by1;
+  flexVecSelectRect(&D, -10, -10, 500, 500, 0);
+  flexVecSelBBox(&D, &bx0, &by0, &bx1, &by1);
+  CHECK(fabsf(bx1 - 80) < 0.5f && fabsf(by1 - 50) < 0.5f,
+        "la rejilla ocupa lo que debe: %.1f x %.1f", (double)bx1, (double)by1);
+  CHECK(flexVecUndo(&D) == FLEXVEC_OK, "deshacer");
+  CHECK(flexVecElemCount(&D) == 1, "la repeticion entera es UN paso (%d)", flexVecElemCount(&D));
+  CHECK(flexVecRepeat(&D, e, FLEXVEC_REP_GRID, 40, 40, 5, 5) == FLEXVEC_E_TOO_COMPLEX,
+        "1600 copias se niegan");
+  CHECK(flexVecRepeat(&D, e, FLEXVEC_REP_GRID, 1, 1, 5, 5) == FLEXVEC_E_EMPTY, "1x1 no repite nada");
+  CHECK(flexVecRepeat(&D, e, 99, 2, 2, 5, 5) == FLEXVEC_E_BADARG, "modo inventado");
+  flexVecNew(&D, 480, 800, 1);
+  e = flexVecAddRect(&D, 0, 0, 20, 20, 0);
+  CHECK(flexVecRepeat(&D, e, FLEXVEC_REP_MIRROR, 2, 1, 20, 0) == FLEXVEC_OK, "espejo");
+  CHECK(flexVecElemCount(&D) == 2, "dos objetos");
+
+  std::printf("-- pincel: estampar a lo largo de un trazado --\n");
+  flexVecNew(&D, 480, 800, 1);
+  int path = flexVecAddLine(&D, 0, 100, 400, 100);
+  int stamp = flexVecAddRect(&D, 0, 0, 8, 8, 0);
+  before = flexVecElemCount(&D);
+  CHECK(flexVecBrush(&D, path, stamp, 20.0f, 1.0f, 0, &R) == FLEXVEC_OK, "pincel");
+  CHECK(flexVecElemCount(&D) == before + 1, "TODAS las estampas caben en UN objeto");
+  int brush = -1;
+  for(int i = 0; i < FLEXVEC_MAX_ELEMS; i++)
+    if(D.elems[i].layer >= 0 && i != path && i != stamp) brush = i;
+  CHECK(brush >= 0, "esta el objeto del pincel");
+  if(brush >= 0){
+    int subs = 0;
+    for(int i = 0; i < (int)D.elems[brush].count; i++)
+      if(D.arena.nodes[D.elems[brush].first + i].flags & FLEXVEC_N_START) subs++;
+    CHECK(subs >= 15 && subs <= 21, "una estampa por subtrazado, ~21 (%d)", subs);
+    flexVecBBox(&D, brush, &bx0, &by0, &bx1, &by1);
+    CHECK(by0 > 90 && by1 < 110, "las estampas siguen al trazado (%.1f..%.1f)", (double)by0, (double)by1);
+  }
+  // Un espaciado diminuto no puede reventar el limite de nodos: se ABRE
+  // el espaciado hasta que cabe, en vez de negarse.
+  flexVecNew(&D, 480, 800, 1);
+  path = flexVecAddLine(&D, 0, 100, 400, 100);
+  stamp = flexVecAddRect(&D, 0, 0, 8, 8, 0);
+  CHECK(flexVecBrush(&D, path, stamp, 0.01f, 1.0f, 1, &R) == FLEXVEC_OK, "espaciado diminuto");
+  for(int i = 0; i < FLEXVEC_MAX_ELEMS; i++)
+    if(D.elems[i].layer >= 0 && i != path && i != stamp)
+      CHECK(D.elems[i].count <= FLEXVEC_MAX_NODES_PATH, "y sigue dentro del limite de nodos");
+  CHECK(flexVecBrush(&D, path, path, 10, 1, 0, &R) == FLEXVEC_E_BADARG, "no se estampa consigo mismo");
+  CHECK(flexVecBrush(&D, path, stamp, 10, -1, 0, &R) == FLEXVEC_E_BADARG, "escala negativa");
+}
+
+static void testDivideTrimClip(){
+  std::printf("-- dividir, recortar y mascara de recorte --\n");
+  size_t bn = flexVecBoolBytes();
+  void* blk = calloc(bn, 1);
+  FlexVecBoolWork W;
+  CHECK(flexVecBoolInit(&W, blk, bn) == FLEXVEC_OK, "buffers");
+
+  flexVecNew(&D, 480, 800, 1);
+  int a = flexVecAddRect(&D, 50, 50, 100, 100, 0);
+  int b = flexVecAddRect(&D, 100, 100, 100, 100, 0);
+  flexVecSelect(&D, a, 0); flexVecSelect(&D, b, 1);
+  CHECK(flexVecPathfinder(&D, FLEXVEC_B_DIVIDE, &R, &W) == FLEXVEC_OK, "dividir");
+  CHECK(flexVecElemCount(&D) == 3, "tres regiones: comun y las dos propias (%d)", flexVecElemCount(&D));
+  FlexVecView v; viewIdentity(&v);
+  double tot = 0;
+  for(int e = 0; e < FLEXVEC_MAX_ELEMS; e++){
+    if(D.elems[e].layer < 0) continue;
+    Cov c = covRun(e, &v, 0);
+    tot += c.area;
+  }
+  CHECK(fabs(tot - 17500.0) / 17500.0 < 0.06, "las tres suman la union: %.0f", tot);
+  CHECK(flexVecUndo(&D) == FLEXVEC_OK, "deshacer dividir");
+  CHECK(flexVecElemCount(&D) == 2, "vuelven las dos originales");
+
+  flexVecNew(&D, 480, 800, 1);
+  a = flexVecAddRect(&D, 50, 50, 100, 100, 0);
+  b = flexVecAddRect(&D, 100, 100, 100, 100, 0);
+  flexVecSelect(&D, a, 0); flexVecSelect(&D, b, 1);
+  CHECK(flexVecPathfinder(&D, FLEXVEC_B_TRIM, &R, &W) == FLEXVEC_OK, "recortar");
+  CHECK(flexVecElemCount(&D) == 2, "el de arriba se CONSERVA (%d)", flexVecElemCount(&D));
+  CHECK(fvElemAlive(b), "y es exactamente el de arriba");
+  // Tres figuras: dividir se niega, porque el numero de regiones explota.
+  flexVecNew(&D, 480, 800, 1);
+  for(int i = 0; i < 3; i++){
+    int e = flexVecAddRect(&D, (float)(i * 30), 0, 60, 60, 0);
+    flexVecSelect(&D, e, i > 0);
+  }
+  CHECK(flexVecPathfinder(&D, FLEXVEC_B_DIVIDE, &R, &W) == FLEXVEC_E_TOO_COMPLEX,
+        "dividir tres figuras se niega con su motivo");
+
+  std::printf("-- mascara de recorte de forma arbitraria --\n");
+  flexVecNew(&D, 480, 800, 1);
+  int o1 = flexVecAddRect(&D, 0, 0, 200, 60, 0);
+  int o2 = flexVecAddRect(&D, 0, 80, 200, 60, 0);
+  int mask = flexVecAddEllipse(&D, 100, 70, 90, 90);     // la de MAS ARRIBA
+  flexVecSelect(&D, o1, 0); flexVecSelect(&D, o2, 1); flexVecSelect(&D, mask, 1);
+  CHECK(flexVecClipWithTop(&D, &R, &W) == FLEXVEC_OK, "recortar con la forma superior");
+  CHECK(flexVecElemCount(&D) == 2, "quedan los dos objetos, la mascara se consume (%d)",
+        flexVecElemCount(&D));
+  double areaAfter = 0;
+  for(int e = 0; e < FLEXVEC_MAX_ELEMS; e++){
+    if(D.elems[e].layer < 0) continue;
+    Cov c = covRun(e, &v, 0);
+    areaAfter += c.area;
+    float x0, y0, x1, y1;
+    flexVecBBox(&D, e, &x0, &y0, &x1, &y1);
+    CHECK(x0 >= 5 && x1 <= 195, "lo recortado cabe en la mascara (%.1f..%.1f)", (double)x0, (double)x1);
+  }
+  CHECK(areaAfter < 24000.0 && areaAfter > 8000.0, "el area recortada es la comun (%.0f)", areaAfter);
+  flexVecSelectNone(&D);
+  CHECK(flexVecClipWithTop(&D, &R, &W) == FLEXVEC_E_EMPTY, "sin seleccion no hay recorte");
+  CHECK(flexVecClipWithTop(&D, &R, NULL) == FLEXVEC_E_NOMEM, "sin buffers");
+  free(blk);
+}
+
+// Medida de mentira: cada caracter mide 0,6 em. Con una medida
+// PREDECIBLE se puede comprobar EXACTAMENTE donde tiene que cortar cada
+// linea; con la fuente de verdad solo se podria comprobar "mas o menos".
+static float fakeMeasure(const char* s, int len, float size, void* user){
+  (void)s; (void)user;
+  return (float)len * size * 0.6f;
+}
+typedef struct { char line[8][64]; int n; float x[8]; } LineBag;
+static void bagLine(const char* s, int len, float x, float y, float w, void* user){
+  LineBag* b = (LineBag*)user;
+  (void)y; (void)w;
+  if(b->n >= 8) return;
+  if(len > 63) len = 63;
+  memcpy(b->line[b->n], s, (size_t)len);
+  b->line[b->n][len] = 0;
+  b->x[b->n] = x;
+  b->n++;
+}
+static void testAreaText(){
+  std::printf("-- texto de area: reparto en lineas --\n");
+  flexVecNew(&D, 480, 800, 1);
+  // "uno dos tres cuatro": con 10 de cuerpo, cada caracter mide 6.
+  int t = flexVecAddText(&D, 0, 0, "uno dos tres cuatro", 10);
+  CHECK(t >= 0, "texto");
+  CHECK(!flexVecTextIsArea(&D, t), "nace como texto puntual");
+  CHECK(flexVecTextSetArea(&D, t, 60, 100, FLEXVEC_TA_LEFT) == FLEXVEC_OK, "convertir a area");
+  CHECK(flexVecTextIsArea(&D, t), "ahora es de area");
+  LineBag bag; bag.n = 0;
+  int n = flexVecTextLayout(&D, t, 12.0f, fakeMeasure, NULL, bagLine, &bag);
+  CHECK(n == bag.n && n >= 2, "se repartio en %d lineas", n);
+  // 60 px / 6 px por caracter = 10 caracteres por linea.
+  CHECK(!strcmp(bag.line[0], "uno dos"), "primera linea: \"%s\"", bag.line[0]);
+  CHECK(!strcmp(bag.line[1], "tres"), "segunda linea: \"%s\"", bag.line[1]);
+  CHECK(!strcmp(bag.line[2], "cuatro"), "tercera linea: \"%s\"", bag.line[2]);
+  // Centrado y derecha mueven la x de cada linea.
+  flexVecTextSetArea(&D, t, 60, 100, FLEXVEC_TA_CENTER);
+  LineBag c; c.n = 0;
+  flexVecTextLayout(&D, t, 12.0f, fakeMeasure, NULL, bagLine, &c);
+  CHECK(c.x[0] > bag.x[0], "centrado corre la linea a la derecha (%.1f > %.1f)",
+        (double)c.x[0], (double)bag.x[0]);
+  flexVecTextSetArea(&D, t, 60, 100, FLEXVEC_TA_RIGHT);
+  LineBag rg; rg.n = 0;
+  flexVecTextLayout(&D, t, 12.0f, fakeMeasure, NULL, bagLine, &rg);
+  CHECK(rg.x[0] > c.x[0], "alineado a la derecha, mas todavia");
+  // La caja MANDA: si solo caben dos lineas, solo se pintan dos.
+  flexVecTextSetArea(&D, t, 60, 26, FLEXVEC_TA_LEFT);
+  LineBag two; two.n = 0;
+  int n2 = flexVecTextLayout(&D, t, 12.0f, fakeMeasure, NULL, bagLine, &two);
+  CHECK(n2 == 2, "en una caja de 26 px caben dos lineas (%d)", n2);
+  // Saltos de linea explicitos.
+  flexVecNew(&D, 480, 800, 1);
+  t = flexVecAddText(&D, 0, 0, "a\nb\nc", 10);
+  flexVecTextSetArea(&D, t, 200, 100, FLEXVEC_TA_LEFT);
+  LineBag hard; hard.n = 0;
+  CHECK(flexVecTextLayout(&D, t, 12.0f, fakeMeasure, NULL, bagLine, &hard) == 3,
+        "los saltos explicitos cortan linea");
+  // Una palabra mas ancha que la caja se coloca igual: partirla sin
+  // reglas de guionizacion se lee peor que el desbordamiento.
+  flexVecNew(&D, 480, 800, 1);
+  t = flexVecAddText(&D, 0, 0, "palabralarguisima", 10);
+  flexVecTextSetArea(&D, t, 20, 100, FLEXVEC_TA_LEFT);
+  LineBag big; big.n = 0;
+  CHECK(flexVecTextLayout(&D, t, 12.0f, fakeMeasure, NULL, bagLine, &big) == 1,
+        "una palabra que no cabe se coloca entera");
+  CHECK(flexVecTextLayout(&D, t, 12.0f, NULL, NULL, bagLine, &big) < 0, "sin medida no hay reparto");
+  CHECK(flexVecTextSetArea(&D, t, 0, 0, FLEXVEC_TA_LEFT) == FLEXVEC_E_BADARG, "caja de cero");
+  CHECK(flexVecTextSetArea(&D, t, 10, 10, 99) == FLEXVEC_E_BADARG, "alineacion inventada");
+
+  // Y en el SVG: con medida salen <tspan>; sin medida, una sola linea.
+  flexVecNew(&D, 480, 800, 1);
+  t = flexVecAddText(&D, 10, 10, "uno dos tres cuatro", 10);
+  flexVecTextSetArea(&D, t, 60, 100, FLEXVEC_TA_LEFT);
+  static char sv[FLEXVEC_SVG_BYTES];
+  int len = flexVecExportSVGEx(&D, sv, sizeof(sv), 0, 0, fakeMeasure, NULL);
+  CHECK(len > 0 && countStr(sv, "<tspan") == 3, "el SVG lleva las mismas 3 lineas (%d)",
+        countStr(sv, "<tspan"));
+  len = flexVecExportSVG(&D, sv, sizeof(sv), 0);
+  CHECK(len > 0 && countStr(sv, "<tspan") == 0, "sin medida, una sola linea");
+}
+
+static void testPng(){
+  std::printf("-- exportacion PNG (deflate real) --\n");
+  const int W = 64, H = 48;
+  static uint8_t row[64 * 3];
+  size_t cap = flexVecPngMaxBytes(W, H);
+  uint8_t* out = (uint8_t*)malloc(cap);
+  FlexVecPng* png = (FlexVecPng*)malloc(sizeof(FlexVecPng));
+  CHECK(flexVecPngBegin(png, W, H, out, cap) == FLEXVEC_OK, "cabecera");
+  // Una imagen como la que produce el editor: zonas planas y un borde.
+  static uint8_t src[64 * 48 * 3];
+  for(int y = 0; y < H; y++)
+    for(int x = 0; x < W; x++){
+      int inside = (x > 8 && x < 40 && y > 6 && y < 30);
+      uint8_t* p = src + ((size_t)y * W + x) * 3;
+      p[0] = inside ? 0x3C : 0xFF;
+      p[1] = inside ? 0x6E : 0xFF;
+      p[2] = inside ? 0xF0 : 0xFF;
+    }
+  for(int y = 0; y < H; y++){
+    memcpy(row, src + (size_t)y * W * 3, (size_t)W * 3);
+    CHECK(flexVecPngRow(png, row) == FLEXVEC_OK, "fila %d", y);
+  }
+  int total = flexVecPngEnd(png);
+  CHECK(total > 0, "cerrar: %d bytes", total);
+  CHECK((size_t)total < (size_t)W * H * 3 / 2, "comprime de verdad (%d de %d crudos)",
+        total, W * H * 3);
+  // Firma y trozos obligatorios.
+  CHECK(out[0] == 0x89 && !memcmp(out + 1, "PNG", 3), "firma PNG");
+  CHECK(!memcmp(out + 12, "IHDR", 4), "IHDR");
+  CHECK(memmem(out, (size_t)total, "IDAT", 4) != NULL, "IDAT");
+  CHECK(!memcmp(out + total - 8, "IEND", 4), "IEND al final");
+
+  // LA PRUEBA DE VERDAD: se descomprime con zlib y se comparan los
+  // pixeles. Un PNG con la firma correcta y el flujo mal se ve bien en
+  // un visor tolerante y no se abre en el siguiente; esto no perdona.
+  const uint8_t* idat = (const uint8_t*)memmem(out, (size_t)total, "IDAT", 4);
+  CHECK(idat != NULL, "se localiza el IDAT");
+  if(idat){
+    uint32_t ilen = ((uint32_t)idat[-4] << 24) | ((uint32_t)idat[-3] << 16) |
+                    ((uint32_t)idat[-2] << 8) | (uint32_t)idat[-1];
+    uLongf dstLen = (uLongf)((size_t)H * ((size_t)W * 3 + 1)) + 64;
+    uint8_t* dst = (uint8_t*)malloc(dstLen);
+    int zr = uncompress(dst, &dstLen, idat + 4, (uLong)ilen);
+    CHECK(zr == Z_OK, "zlib descomprime el flujo (rc=%d)", zr);
+    CHECK(dstLen == (uLongf)((size_t)H * ((size_t)W * 3 + 1)),
+          "sale el numero exacto de bytes (%lu)", (unsigned long)dstLen);
+    if(zr == Z_OK){
+      int bad = 0;
+      for(int y = 0; y < H && !bad; y++){
+        const uint8_t* r = dst + (size_t)y * (W * 3 + 1);
+        if(r[0] != 1){ bad = 1; break; }                 // filtro Sub
+        uint8_t prev[3] = { 0, 0, 0 };
+        for(int x = 0; x < W; x++){
+          for(int c = 0; c < 3; c++){
+            uint8_t val = (uint8_t)(r[1 + x * 3 + c] + (x ? prev[c] : 0));
+            if(val != src[((size_t)y * W + x) * 3 + c]){ bad = 1; }
+            prev[c] = val;
+          }
+          if(bad) break;
+        }
+      }
+      CHECK(!bad, "los pixeles vuelven EXACTAMENTE iguales");
+    }
+    free(dst);
+  }
+  // Buffer corto: se dice, no se escribe fuera. Con menos de lo minimo
+  // ni siquiera se empieza; con sitio para la cabecera pero no para los
+  // datos, el fallo aparece al escribir y se arrastra hasta el cierre.
+  CHECK(flexVecPngBegin(png, W, H, out, 64) == FLEXVEC_E_NOMEM,
+        "un buffer por debajo del minimo se rechaza de entrada");
+  {
+    uint8_t tiny[140];
+    FlexVecPng* p2 = (FlexVecPng*)malloc(sizeof(FlexVecPng));
+    flexVecPngBegin(p2, W, H, tiny, sizeof(tiny));
+    int over = 0;
+    for(int y = 0; y < H; y++){
+      memcpy(row, src + (size_t)y * W * 3, (size_t)W * 3);
+      if(flexVecPngRow(p2, row) != FLEXVEC_OK) over = 1;
+    }
+    CHECK(over, "un buffer corto se detecta al escribir");
+    CHECK(flexVecPngEnd(p2) < 0, "y cerrar devuelve error");
+    free(p2);
+  }
+  CHECK(flexVecPngBegin(png, 0, 10, out, cap) == FLEXVEC_E_BADARG, "ancho cero");
+  CHECK(flexVecPngBegin(NULL, 10, 10, out, cap) == FLEXVEC_E_BADARG, "sin estado");
+  free(png);
+  free(out);
+}
+
+// =============================================================
+//  PRESUPUESTO DE RENDER
+//  ------------------------------------------------------------
+//  No mide milisegundos: un PC no dice nada sobre lo que tarda un
+//  ESP32-P4. Mide TRABAJO -- cuantos tramos y cuantos pixeles emite el
+//  rasterizador -- que es lo que si se traslada, porque el coste en la
+//  placa es proporcional a eso.
+//
+//  Sirve de RED DE SEGURIDAD contra regresiones: si manana alguien
+//  cambia el aplanado o el antialias y el numero de tramos se dispara,
+//  esta prueba lo dice aqui, y no un usuario notando que arrastrar va a
+//  tirones. Los topes salen del presupuesto de 60 FPS: 16,6 ms por
+//  cuadro en una CPU de 400 MHz sin GPU.
+// =============================================================
+typedef struct { long spans; double px; } Budget;
+static void budgetSpan(int y, int x0, int x1, uint8_t cov, void* user){
+  Budget* b = (Budget*)user;
+  (void)y; (void)cov;
+  b->spans++;
+  b->px += (double)(x1 - x0 + 1);
+}
+static void testRenderBudget(){
+  std::printf("-- presupuesto de render (trabajo, no milisegundos) --\n");
+  FlexVecView v; viewIdentity(&v);
+
+  // Un circulo a pantalla completa: es la figura mas cara de las
+  // simples, porque cada fila cambia de anchura.
+  flexVecNew(&D, 480, 800, 1);
+  int e = flexVecAddEllipse(&D, 240, 400, 235, 235);
+  Budget b; memset(&b, 0, sizeof(b));
+  int subN = 0;
+  flexVecFlatten(&D, e, &v, &R, &subN);
+  flexVecFillFlat(&R, subN, &v, 0, budgetSpan, &b);
+  double perSpan = b.px / (double)(b.spans ? b.spans : 1);
+  std::printf("   circulo de 470 px: %ld tramos, %.0f pixeles, %.0f px por tramo\n",
+              b.spans, b.px, perSpan);
+  // LO QUE IMPORTA ES LA RELACION, no el numero absoluto. Un relleno
+  // macizo emite por fila: el interior de una pasada y los dos pixeles
+  // del borde a su cobertura exacta (el antialias). Eso son ~4 tramos
+  // por fila y ~90 pixeles por tramo. Si alguna vez bajara a ~1 pixel
+  // por tramo, seria que el rasterizador ha vuelto a emitir pixel a
+  // pixel -- y eso multiplica por cien las llamadas a hLineA.
+  CHECK(perSpan > 40.0, "el relleno emite TRAMOS largos, no pixeles (%.0f px/tramo)", perSpan);
+  CHECK(b.spans < 470 * 6, "unos pocos tramos por fila (%ld en 470 filas)", b.spans);
+  CHECK(b.px > 160000.0, "y cubre el area del circulo (%.0f)", b.px);
+
+  // El APLANADO sigue al zoom: alejar tiene que costar MENOS, no lo
+  // mismo. Es lo que hace que ver el documento entero sea barato.
+  flexVecNew(&D, 480, 800, 1);
+  e = flexVecAddEllipse(&D, 100, 100, 90, 90);
+  FlexVecView far_ = v; far_.m[0] = far_.m[3] = 0.2f;
+  int nNear = flexVecFlatten(&D, e, &v, &R, &subN);
+  int nFar  = flexVecFlatten(&D, e, &far_, &R, &subN);
+  std::printf("   aplanado: %d puntos de cerca, %d de lejos\n", nNear, nFar);
+  CHECK(nFar < nNear, "alejar cuesta menos (%d < %d)", nFar, nNear);
+  CHECK(nNear <= FLEXVEC_MAX_FLATPTS, "y nunca se pasa del buffer");
+
+  // Un documento LLENO: el peor caso realista de un repintado completo.
+  flexVecNew(&D, 480, 800, 3);
+  for(int i = 0; i < 120; i++){
+    int q = flexVecAddEllipse(&D, (float)(20 + (i % 12) * 38), (float)(20 + (i / 12) * 60), 16, 16);
+    if(q < 0) break;
+    flexVecSetStroke(&D, q, 0, 255, 2);
+  }
+  Budget tot; memset(&tot, 0, sizeof(tot));
+  int16_t order[FLEXVEC_MAX_ELEMS];
+  int n = flexVecPaintOrder(&D, order, FLEXVEC_MAX_ELEMS);
+  for(int i = 0; i < n; i++){
+    int sn = 0;
+    if(flexVecFlatten(&D, order[i], &v, &R, &sn) <= 0) continue;
+    flexVecFillFlat(&R, sn, &v, 0, budgetSpan, &tot);
+    flexVecStrokeFlat(&R, sn, &v, 2.0f, FLEXVEC_CAP_BUTT, FLEXVEC_JOIN_MITER, budgetSpan, &tot);
+  }
+  std::printf("   120 circulos con trazo: %ld tramos, %.0f pixeles\n", tot.spans, tot.px);
+  // Este es el peor caso de un repintado COMPLETO, y solo ocurre cuando
+  // el documento cambia -- no en cada cuadro: para eso esta la cache.
+  // El tope deja mas del 50% de margen sobre lo medido hoy, para que la
+  // prueba avise de una regresion de verdad y no de un cambio menor.
+  CHECK(tot.spans < 80000, "un repintado completo cabe en el presupuesto (%ld tramos)", tot.spans);
+  CHECK(tot.px < 400000.0, "y no se pinta el mismo pixel diez veces (%.0f)", tot.px);
+
+  // LA BANDA SUCIA ES LO QUE SOSTIENE LA FLUIDEZ. Mover un objeto solo
+  // puede costar SU banda, no la pantalla. Se comprueba con la caja en
+  // pixeles, que es lo que el anfitrion usa para decidir que repinta.
+  flexVecNew(&D, 480, 800, 1);
+  e = flexVecAddRect(&D, 100, 300, 40, 30, 0);
+  int x0, y0, x1, y1;
+  flexVecElemPixBBox(&D, e, &v, &x0, &y0, &x1, &y1);
+  int band = y1 - y0 + 1;
+  CHECK(band < 60, "la banda de un objeto pequeno es pequena (%d filas de 800)", band);
+  std::printf("   objeto de 40x30: banda sucia de %d filas\n", band);
+}
+
 int main(){
   std::printf("=== FlexOS · Flex Vector Pro: motor vectorial ===\n");
   hostInit();
@@ -1188,6 +1751,14 @@ int main(){
   testGradients();
   testPathfinder();
   testNoMemory();
+  testAppearance2();
+  testPatterns();
+  testSymbols();
+  testBlendRepeatBrush();
+  testDivideTrimClip();
+  testAreaText();
+  testPng();
+  testRenderBudget();
   hostFree();
   std::printf("=== %d comprobaciones, %d fallos ===\n", g_run, g_fail);
   return g_fail ? 1 : 0;
