@@ -54,9 +54,6 @@
 
 // Carpetas reales que crea el sistema en el primer arranque.
 #define FLEXFS_DIR_PAINT  "/Paint"
-// Documentos de Flex Vector Pro (.fxv). Carpeta de datos de app, igual que
-// /Paint: entra en FLEXFS_CAT_APPS y la cuenta la app Almacenamiento.
-#define FLEXFS_DIR_VECTOR "/Vector"
 #define FLEXFS_DIR_NOTAS  "/Notas"
 #define FLEXFS_DIR_SYS    "/System"
 #define FLEXFS_DIR_DOCS   "/Documentos"
@@ -65,7 +62,6 @@
 // Extensiones propias.
 #define FLEXFS_EXT_PAINT  ".fxp"  // dibujo de Paint (trazos serializados)
 #define FLEXFS_EXT_NOTE   ".txt"  // nota de texto plano UTF-8
-#define FLEXFS_EXT_VECTOR ".fxv"  // documento vectorial de Flex Vector Pro
 
 // -------------------------------------------------------------
 //  ALMACEN DE FLEX VAULT (Carpeta segura)

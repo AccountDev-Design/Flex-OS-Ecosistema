@@ -25,7 +25,7 @@
 //  seccion lleva el criterio que verifica, con el mismo nombre que en
 //  docs/FLEX-VECTOR-PRO.md.
 // #############################################################
-#include "../../FlexOS_Ultra/FlexOS_Vector.h"
+#include "../firmware-modules/FlexOS_Vector.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>

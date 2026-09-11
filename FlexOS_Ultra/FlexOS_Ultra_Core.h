@@ -179,13 +179,7 @@ static const uint8_t APP_WEIGHT[APP_N] = {
   // caidas es aritmetica sobre una muestra y el historial son 200
   // bytes. Lo unico grande es la banda del aviso, y se pide al abrirlo
   // y se suelta al cerrarlo (ver FlexOS_Ultra_FallAlert.h).
-  FLEXMEM_W_LIGHT,
-  // 20 Flex Vector Pro. MEDIA y no PESADA: su huella es de ~1,3 MB de PSRAM
-  // (cache de render, pool de nodos, diario de deshacer y buffer de SVG) y
-  // esta acotada -- no crece con el documento como la cache de miniaturas de
-  // la Galeria o el fotograma del reproductor. Ademas suelta 768 KB en cuanto
-  // el sistema se lo pide (gancho shed), sin perder ni un objeto.
-  FLEXMEM_W_MEDIUM
+  FLEXMEM_W_LIGHT
 };
 static int appWeight(int id){ return (id >= 0 && id < APP_N) ? (int)APP_WEIGHT[id] : FLEXMEM_W_LIGHT; }
 static const char* appWeightName(int id){

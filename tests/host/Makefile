@@ -54,8 +54,7 @@ APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net \
         $(BUILD)/test_vault $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
         $(BUILD)/test_media $(BUILD)/test_mem $(BUILD)/test_fall \
-        $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg \
-        $(BUILD)/test_vector $(BUILD)/test_qr $(BUILD)/test_httpshare
+        $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun
 
 .PHONY: all run all-boards fixtures clean ino
@@ -102,36 +101,6 @@ FALL_SRC := $(ULTRA)/FlexOS_FallDetect.cpp
 
 $(BUILD)/test_fall: test_fall.cpp $(FALL_SRC) $(ULTRA)/FlexOS_FallDetect.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) $(INC) -o $@ test_fall.cpp $(FALL_SRC)
-# --- FLEX VECTOR PRO: motor vectorial, QR y servidor HTTP -------------------
-# Los tres son nucleo PURO (no tocan Arduino, ni el framebuffer, ni el sistema
-# de archivos): se compilan igual que el del navegador, CON sanitizers.
-#
-# Aqui es obligatorio, y por tres motivos distintos:
-#   test_vector   el motor maneja indices de un pool compartido, listas de
-#                 bordes y aritmetica de matrices. Un desbordamiento ahi
-#                 corrompe el documento del usuario en silencio.
-#   test_qr       el codificador hace aritmetica en GF(256), entrelazado de
-#                 bloques y colocacion en zigzag. La prueba VUELVE A LEER el
-#                 codigo generado: es la unica forma honesta de saber que un
-#                 telefono lo leeria.
-#   test_httpshare el analizador recibe bytes de cualquiera que este en la
-#                 misma Wi-Fi. Mismo criterio que el navegador.
-VECSRC  := $(ULTRA)/FlexOS_Vector.cpp
-QRSRC   := $(ULTRA)/FlexOS_QR.cpp
-HTTPSRC := $(ULTRA)/FlexOS_HttpShare.cpp
-
-# -lz es SOLO de la prueba: descomprime con zlib el PNG que genera el
-# firmware y compara los pixeles uno a uno. El firmware NO enlaza zlib --
-# su compresor es propio y cabe en FlexOS_Vector.cpp.
-$(BUILD)/test_vector: test_vector.cpp $(VECSRC) $(ULTRA)/FlexOS_Vector.h | $(BUILD)
-	$(CXX) $(COMMON) $(SAN) -o $@ test_vector.cpp $(VECSRC) -lz
-
-$(BUILD)/test_qr: test_qr.cpp $(QRSRC) $(ULTRA)/FlexOS_QR.h | $(BUILD)
-	$(CXX) $(COMMON) $(SAN) -o $@ test_qr.cpp $(QRSRC)
-
-$(BUILD)/test_httpshare: test_httpshare.cpp $(HTTPSRC) $(ULTRA)/FlexOS_HttpShare.h | $(BUILD)
-	$(CXX) $(COMMON) $(SAN) -o $@ test_httpshare.cpp $(HTTPSRC)
-
 # --- PLATAFORMA DE APLICACIONES flex-app-v1 ---------------------------------
 # Cuatro baterias, todas con sanitizers. Aqui es OBLIGATORIO: este codigo
 # ejecuta bytecode que viene de internet y decide si un paquete firmado por un
@@ -327,8 +296,7 @@ ino: ino_compile.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) $(BNO_SRC) check_pro
 # firma o una llamada mal cableada salta aqui.
 $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) $(JPEG_SRC) \
                    $(FLNKSRC) $(FLPSRC) $(FLPLINK) $(CORE_SRC) $(MEDIA_SRC) $(MEM_SRC) $(FALL_SRC) \
-                   $(VMSRC) $(GRANTSRC) $(HOSTSRC) $(PKGCORE) \
-                   $(VECSRC) $(QRSRC) $(HTTPSRC) | $(BUILD)
+                   $(VMSRC) $(GRANTSRC) $(HOSTSRC) $(PKGCORE) | $(BUILD)
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -x c++ -c ino_compile.cpp -o $(BUILD)/ino_compile.o
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -c ino_extern_stubs.cpp -o $(BUILD)/ino_extern_stubs.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(JPEG_SRC) -o $(BUILD)/ino_jpeg.o
@@ -343,16 +311,12 @@ $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) 
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(GRANTSRC)  -o $(BUILD)/ino_appgrant.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(HOSTSRC)   -o $(BUILD)/ino_apphost.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(PKGFLAGS) -c $(PKGCORE) -o $(BUILD)/ino_pkgcore.o
-	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(VECSRC)  -o $(BUILD)/ino_vector.o
-	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(QRSRC)   -o $(BUILD)/ino_qr.o
-	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(HTTPSRC) -o $(BUILD)/ino_http.o
 	@$(CC) -O1 -g -w -Ivendor/cJSON -c $(CJSON) -o $(BUILD)/ino_cjson.o
 	@$(CXX) $(SAN) -o $@ $(BUILD)/ino_compile.o $(BUILD)/ino_extern_stubs.o $(BUILD)/ino_jpeg.o \
 	        $(BUILD)/ino_flexlink.o $(BUILD)/ino_flexphone.o $(BUILD)/ino_flexphonelink.o \
 	        $(BUILD)/ino_brcore.o $(BUILD)/ino_media.o $(BUILD)/ino_mem.o $(BUILD)/ino_fall.o \
 	        $(BUILD)/ino_appvm.o $(BUILD)/ino_appgrant.o $(BUILD)/ino_apphost.o \
-	        $(BUILD)/ino_pkgcore.o $(BUILD)/ino_cjson.o \
-	        $(BUILD)/ino_vector.o $(BUILD)/ino_qr.o $(BUILD)/ino_http.o -lcrypto
+	        $(BUILD)/ino_pkgcore.o $(BUILD)/ino_cjson.o -lcrypto
 
 # La tabla de particiones de la version USB. No es codigo, pero una tabla
 # mal cuadrada no falla al compilar: falla al grabar, o peor, arranca y se
@@ -392,12 +356,6 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_apphost
 	@echo
 	@$(BUILD)/test_flexpkg
-	@echo
-	@$(BUILD)/test_vector
-	@echo
-	@$(BUILD)/test_qr
-	@echo
-	@$(BUILD)/test_httpshare
 	@echo
 	@$(BUILD)/test_browser
 	@echo

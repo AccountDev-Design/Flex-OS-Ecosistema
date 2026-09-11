@@ -15,22 +15,9 @@ public:
   virtual int read(uint8_t*, size_t){ return 0; }
   virtual size_t write(const uint8_t*, size_t n){ return n; }
   void setTimeout(uint32_t){}
-  // El servidor HTTP local (FlexOS_Ultra_HttpShare.h) comprueba el cliente
-  // con "if(!cli)" y escribe el cuerpo desde PSRAM. Los dobles reproducen
-  // solo esa superficie: aqui no hay sockets, solo tipos y firmas.
+  // Parte de la superficie real de Client en arduino-esp32 ("if(!cli)").
+  // Los dobles reproducen solo tipos y firmas: aqui no hay sockets.
   explicit operator bool() const { return false; }
-};
-
-// Socket de escucha. En arduino-esp32 3.2.1 el metodo vigente es accept();
-// available() sigue existiendo pero esta marcado obsoleto.
-class WiFiServer {
-public:
-  WiFiServer(uint16_t port = 80) : _port(port) {}
-  void begin(){}
-  void end(){}
-  WiFiClient accept(){ return WiFiClient(); }
-private:
-  uint16_t _port;
 };
 
 class __FlexWiFi {

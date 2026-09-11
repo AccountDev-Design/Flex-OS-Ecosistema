@@ -363,7 +363,6 @@ static const char* APP[APP_N][5] = {
   {"Flex Store","Flex Store","Flex Store","Flex Store","Flex Store"},
   {"Flex Phone","Flex Phone","Flex Phone","Flex Phone","Flex Phone"},
   {"Device Care","Device Care","Device Care","Device Care","Device Care"},
-  {"Flex Vector Pro","Flex Vector Pro","Flex Vector Pro","Flex Vector Pro","Flex Vector Pro"},
 };
 static const char* appName(int id){ return APP[id][LI()]; }
 

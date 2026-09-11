@@ -131,7 +131,6 @@ bool flexFsBegin(){
   // Estructura base. mkdir sobre una carpeta que ya existe devuelve
   // false y no es un error: por eso no se comprueba el retorno.
   LittleFS.mkdir(FLEXFS_DIR_PAINT);
-  LittleFS.mkdir(FLEXFS_DIR_VECTOR);
   LittleFS.mkdir(FLEXFS_DIR_NOTAS);
   LittleFS.mkdir(FLEXFS_DIR_SYS);
   LittleFS.mkdir(FLEXFS_DIR_DOCS);
@@ -315,10 +314,10 @@ uint32_t flexFsCatSize(int cat){
   switch(cat){
     case FLEXFS_CAT_DOCS:  return dirSizeRec(FLEXFS_DIR_DOCS, 0) + dirSizeRec(FLEXFS_DIR_NOTAS, 0);
     case FLEXFS_CAT_SYS:   return dirSizeRec(FLEXFS_DIR_SYS, 0);
-    // Datos de app: /Paint y /Vector. Si manana hay otra carpeta de app,
-    // se suma aqui -- este es el unico sitio del que sale la cifra que
-    // ensena Almacenamiento.
-    case FLEXFS_CAT_APPS:  return dirSizeRec(FLEXFS_DIR_PAINT, 0) + dirSizeRec(FLEXFS_DIR_VECTOR, 0);
+    // Datos de app: /Paint. Si manana hay otra carpeta de app, se suma
+    // aqui -- este es el unico sitio del que sale la cifra que ensena
+    // Almacenamiento.
+    case FLEXFS_CAT_APPS:  return dirSizeRec(FLEXFS_DIR_PAINT, 0);
     case FLEXFS_CAT_TRASH: return dirSizeRec(FLEXFS_DIR_TRASH, 0);
   }
   return 0;
@@ -691,7 +690,6 @@ bool flexFsFactoryErase(){
   fsMounted = true;
   fsErr = "";
   LittleFS.mkdir(FLEXFS_DIR_PAINT);
-  LittleFS.mkdir(FLEXFS_DIR_VECTOR);
   LittleFS.mkdir(FLEXFS_DIR_NOTAS);
   LittleFS.mkdir(FLEXFS_DIR_SYS);
   LittleFS.mkdir(FLEXFS_DIR_DOCS);

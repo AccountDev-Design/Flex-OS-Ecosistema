@@ -8,6 +8,13 @@ cuánta memoria puede gastar cada pieza.
 Se escribió **antes** que el código, y el código no puede contradecirlo sin
 actualizarlo aquí primero.
 
+> **ARCHIVADO.** Flex Vector Pro ya no forma parte de la versión activa de
+> Flex OS Ultra. Este documento describe la integración tal como estaba, y por
+> eso sigue nombrando rutas como `FlexOS_Ultra/FlexOS_Ultra_AppVector.h` o
+> `tests/host/test_vector.cpp` que hoy viven en esta misma carpeta. El
+> [`README.md`](../README.md) de al lado dice dónde está cada archivo ahora, qué
+> se tocó en el sistema al retirarlo y qué hace falta para volver a integrarlo.
+
 ---
 
 ## 0. El hardware, y solo estas cifras

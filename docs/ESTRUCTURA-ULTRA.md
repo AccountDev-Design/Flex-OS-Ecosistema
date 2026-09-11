@@ -1,7 +1,7 @@
 # Estructura de Flex OS Ultra (ESP32-P4)
 
 `FlexOS_Ultra.ino` era un solo archivo de **37053 líneas**. Ahora es el
-**orquestador** del sistema y todo lo demás vive en 59 módulos
+**orquestador** del sistema y todo lo demás vive en 57 módulos
 `FlexOS_Ultra_*.h` en la misma carpeta del sketch, que es `FlexOS_Ultra/`.
 
 Esto es **una reorganización, no un cambio funcional**: el código que se
@@ -34,8 +34,7 @@ ajuste. Es además el patrón que el proyecto **ya usaba**
 Los módulos que sí son código portable y con pruebas propias siguen siendo
 `.cpp` de verdad, como hasta ahora: `FlexOS_Media`, `FlexOS_Mem`,
 `FlexOS_JPEG`, `FlexOS_Vault`, `FlexOS_Weather`, `FlexOS_FS`,
-`FlexOS_Browser`, `FlexOS_FlexLink`, `FlexOS_Vector`, `FlexOS_QR`,
-`FlexOS_HttpShare`... Esa frontera no se ha tocado.
+`FlexOS_Browser`, `FlexOS_FlexLink`... Esa frontera no se ha tocado.
 
 ## 2. Reglas de los módulos
 
@@ -114,8 +113,6 @@ Los módulos que sí son código portable y con pruebas propias siguen siendo
 | `FlexOS_Ultra_AppDrawer.h`        | 1444 | menu contextual del escritorio y caja de aplicaciones |
 | `FlexOS_Ultra_Power.h`            |   934 | desbloqueo, suspension y apagado completo |
 | `FlexOS_Ultra_Network.h`          |   839 | arranque seguro de la radio y Wi-Fi |
-| `FlexOS_Ultra_HttpShare.h`        |   249 | servidor HTTP local del sistema: socket y tarea propia |
-| `FlexOS_Ultra_AppVector.h`        |  2825 | Flex Vector Pro: editor vectorial (interfaz, herramientas y gestos) |
 | `FlexOS_Ultra_NTP.h`              |   297 | cliente NTP en su propia tarea |
 | `FlexOS_Ultra_Conn.h`             |   359 | conectividad: Wi-Fi / BLE / modo avion |
 | `FlexOS_Ultra_Notif.h`            |   385 | isla dinamica: notificaciones |

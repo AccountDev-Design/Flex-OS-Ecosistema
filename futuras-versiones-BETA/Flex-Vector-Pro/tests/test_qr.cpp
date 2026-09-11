@@ -27,7 +27,7 @@
 //  verifica aqui es la maquinaria, no la tabla del estandar, que es un
 //  dato fijo y se revisa leyendola.
 
-#include "../../FlexOS_Ultra/FlexOS_QR.h"
+#include "../firmware-modules/FlexOS_QR.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
