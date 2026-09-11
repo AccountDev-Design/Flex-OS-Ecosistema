@@ -120,10 +120,12 @@ Los módulos que sí son código portable y con pruebas propias siguen siendo
 | `FlexOS_Ultra_System.h`           |   487 | I2C, soltar caches, Optimizar Flex OS y cambio de tema |
 | `FlexOS_Ultra_AppGallery.h`       |   768 | Galeria |
 | `FlexOS_Ultra_Vault.h`            |  1744 | Flex Vault: interfaz de la Carpeta segura |
+| `FlexOS_Ultra_IMU.h`              |   239 | Flex IMU Service: reparto del GY-BNO085 entre Device Care y Flex Compass |
 | `FlexOS_Ultra_DeviceCare.h`       |  1604 | Flex Device Care: app, historial, salud y grafico del GY-BNO085 |
 | `FlexOS_Ultra_DeviceTests.h`      |   906 | Device Care: pruebas, diagnostico y Post-Impact Check |
 | `FlexOS_Ultra_FallAlert.h`        |   448 | Device Care: aviso global de posible caida (vertical y horizontal) |
 | `FlexOS_Ultra_Recovery.h`         |   691 | restablecer datos de fabrica y modo seguro |
+| `FlexOS_Ultra_AppCompass.h`       |  1096 | Flex Compass: brujula, modulo BNO085 dibujado por codigo y datos del sensor |
 
 ## 5. Cómo se comprueba
 

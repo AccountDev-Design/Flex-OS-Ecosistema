@@ -179,6 +179,9 @@ static const uint8_t APP_WEIGHT[APP_N] = {
   // caidas es aritmetica sobre una muestra y el historial son 200
   // bytes. Lo unico grande es la banda del aviso, y se pide al abrirlo
   // y se suelta al cerrarlo (ver FlexOS_Ultra_FallAlert.h).
+  FLEXMEM_W_LIGHT,
+  // 20 Flex Compass. No reserva PSRAM: dibuja con las primitivas del sistema
+  // y lee el mismo servicio IMU que Device Care.
   FLEXMEM_W_LIGHT
 };
 static int appWeight(int id){ return (id >= 0 && id < APP_N) ? (int)APP_WEIGHT[id] : FLEXMEM_W_LIGHT; }

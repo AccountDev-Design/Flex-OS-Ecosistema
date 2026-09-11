@@ -77,6 +77,25 @@ GANCHOS = [
     # nadie refresque a mano: sin esta invalidacion, el indice se queda
     # con la foto anterior hasta el siguiente escaneo.
     ("paintNew",       "mediaIndexInvalidate()", "un dibujo nuevo no aparecería en la Galeria hasta reindexar por otro motivo"),
+    # FLEX IMU SERVICE. Un solo sensor, dos consumidores (la deteccion de
+    # caidas de Device Care y Flex Compass). El servicio es quien mueve el
+    # driver: sin su tick, el GY-BNO085 no entrega un solo informe y las DOS
+    # funciones se quedan ciegas. Y si Device Care volviera a llamar al driver
+    # por su cuenta, salir de la brujula apagaria el sensor por debajo de una
+    # funcion de seguridad -- que es justo lo que el servicio viene a impedir.
+    ("loop",           "imuServiceTick()", "el GY-BNO085 no entregaria informes: ni caidas ni brujula"),
+    ("dcSensorStart",  "imuAcquire()",    "Device Care encenderia el sensor saltandose el reparto"),
+    ("dcSensorStop",   "imuRelease()",    "Device Care apagaria el sensor por debajo de Flex Compass"),
+    ("imuAcquire",     "flexBnoBegin()",  "adquirir el servicio no arrancaria el sensor"),
+    ("imuRelease",     "flexBnoStop()",   "soltar el ultimo consumidor dejaria el sensor emitiendo"),
+    ("imuServiceTick", "flexBnoTick(",    "el servicio no sondearia el driver"),
+    # FLEX COMPASS
+    ("loop",           "compassIdleGuard()", "una ventana de DeX cerrada dejaria enganchado el sensor"),
+    ("compassEnter",   "cmpHoldImu(",     "abrir Flex Compass no adquiriria el servicio: no habria ni deteccion"),
+    ("compassClose",   "cmpHoldImu(",     "cerrar Flex Compass dejaria su enganche del sensor"),
+    ("compassSuspend", "cmpHoldImu(",     "en segundo plano la app seguiria consumiendo el sensor"),
+    ("compassTick",    "cmpSample()",     "la brujula dibujaria con la lectura de la vuelta anterior"),
+    ("compassTick",    "cmpPhysics(",     "sin fisica no habria desplazamiento ni suavizado del rumbo"),
     ("flexPollTouch",  "hpzUpdate()",     "el gesto de dos dedos no se detectaria nunca"),
     ("flexPollTouch",  "hpzSwallowing()", "el gesto no se consumiria y el mismo toque llegaria a otra capa"),
     ("flexPollTouch",  "suspGestureUpdate()", "se perderia el gesto de suspension"),
@@ -119,6 +138,18 @@ PROHIBIDOS = [
     ("swRender",         "memSnap(",           "Recientes volveria a ensenar cifras de memoria"),
     ("swRender",         "optStart(",          "el boton Optimizar no vuelve a Recientes"),
     ("swTick",           "optStart(",          "el boton Optimizar no vuelve a Recientes"),
+    # UN SOLO DRIVER DE IMU. Flex Compass LEE del Flex IMU Service; si algun dia
+    # alguien le mete una transaccion I2C propia o una llamada directa al
+    # driver, habria dos configuraciones del BNO085 peleandose y dos verdades
+    # sobre si esta conectado -- con la deteccion de caidas en medio.
+    ("compassTick",      "Wire.",              "la app no habla con el bus: el sensor es del Flex IMU Service"),
+    ("compassEnter",     "Wire.",              "la app no habla con el bus: el sensor es del Flex IMU Service"),
+    ("compassTick",      "flexBnoBegin(",      "solo el servicio enciende el sensor"),
+    ("compassTick",      "flexBnoStop(",       "solo el servicio apaga el sensor"),
+    ("compassEnter",     "flexBnoBegin(",      "solo el servicio enciende el sensor"),
+    ("compassClose",     "flexBnoStop(",       "solo el servicio apaga el sensor"),
+    ("cmpDrawCompass",   "Wire.",              "dibujar no puede tocar el bus I2C"),
+    ("cmpDrawModule",    "Wire.",              "dibujar no puede tocar el bus I2C"),
 ]
 
 RE_MOD = re.compile(r'^#include\s+"(FlexOS_Ultra_(\w+)\.h)"', re.M)

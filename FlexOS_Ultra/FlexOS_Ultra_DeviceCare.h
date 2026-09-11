@@ -42,7 +42,7 @@
 // ##  Detalles de memoria y sistema, y por el mismo motivo.
 // #############################################################
 #pragma once
-#include "FlexOS_Ultra_Vault.h"     // eslabon anterior de la cadena
+#include "FlexOS_Ultra_IMU.h"       // eslabon anterior de la cadena (y el servicio del IMU)
 #include <stdarg.h>                 // vsnprintf de dcMetricSet
 #include "FlexOS_BNO085.h"          // driver del IMU (unidad de traduccion aparte)
 #include "FlexOS_FallDetect.h"      // logica de caidas (probada en el PC)
@@ -403,17 +403,24 @@ static void dcSaveFallPref(){
 }
 
 // Enciende o apaga el sensor de verdad. Idempotente.
+// AHORA PASAN POR EL FLEX IMU SERVICE, no por el driver directamente.
+// El motivo es concreto: flexBnoBegin()/flexBnoStop() son absolutos -- el
+// ultimo que llama gana --, y desde que Flex Compass tambien lee el sensor,
+// salir de la brujula apagaria el BNO085 por debajo de la deteccion de
+// caidas. El servicio lleva la cuenta de consumidores y solo apaga de verdad
+// cuando no queda ninguno. El comportamiento de Device Care no cambia: sigue
+// encendiendo y apagando el sensor exactamente en los mismos sitios.
 static void dcSensorStart(){
   if(dcSensorOn) return;
   if(!gtOk) return;                 // sin bus I2C inicializado no hay nada que sondear
-  flexBnoBegin();
+  imuAcquire();
   dcSensorOn = true;
   flexFallReset(&dcDet);
   dcSampleMs = 0;
 }
 static void dcSensorStop(){
   if(!dcSensorOn) return;
-  flexBnoStop();
+  imuRelease();
   dcSensorOn = false;
   flexFallReset(&dcDet);
 }
@@ -438,7 +445,9 @@ static void dcSensorStop(){
 static void dcSensorTick(){
   if(!dcSensorOn) return;
   uint32_t now = millis();
-  flexBnoTick(now);
+  // El sondeo del driver ya lo hizo imuServiceTick() al principio de la vuelta
+  // -- el servicio es quien mueve el sensor ahora, porque puede haber mas de un
+  // consumidor. Aqui solo se consume la muestra.
 
   if(!flexBnoAvailable()){
     if(flexFallState(&dcDet) != FLEXFALL_IDLE) flexFallReset(&dcDet);

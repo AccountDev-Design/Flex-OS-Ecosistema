@@ -277,10 +277,12 @@
 #include "FlexOS_Ultra_System.h"             // I2C, soltar caches, Optimizar Flex OS y cambio de tema
 #include "FlexOS_Ultra_AppGallery.h"         // Galeria
 #include "FlexOS_Ultra_Vault.h"              // Flex Vault: interfaz de la Carpeta segura
+#include "FlexOS_Ultra_IMU.h"                // Flex IMU Service: reparto del GY-BNO085 y orientacion
 #include "FlexOS_Ultra_DeviceCare.h"         // Flex Device Care: app, historial, salud y grafico del GY-BNO085
 #include "FlexOS_Ultra_DeviceTests.h"        // Device Care: pruebas, diagnostico y Post-Impact Check
 #include "FlexOS_Ultra_FallAlert.h"          // Device Care: aviso global de posible caida (vertical y horizontal)
 #include "FlexOS_Ultra_Recovery.h"           // restablecer datos de fabrica y modo seguro
+#include "FlexOS_Ultra_AppCompass.h"         // Flex Compass: brujula sobre el servicio IMU
 // ------------- FIN DE LOS MODULOS -------------------------
 
 // Puente del modulo OTA. Va AQUI, y no arriba, a proposito: implementa
@@ -605,7 +607,13 @@ void loop(){
   notifHandleTouch();     // la isla intercepta toques dentro de sus tarjetas (Fase 1)
   flexOtaTouchBridge();   // OTA: si hay overlay visible, se queda el toque antes que nadie
   hwDetectTick();         // deteccion I2C incremental, mismo contexto que el tactil (Fase 2)
-  dcSensorTick();         // GY-BNO085 + deteccion de caidas: MISMO bus y MISMO hilo que el tactil
+  imuServiceTick();       // Flex IMU Service: mueve el GY-BNO085 mientras alguien lo tenga
+                          // adquirido (Device Care, Flex Compass). MISMO bus y MISMO hilo
+                          // que el tactil. Sin consumidores sale en su primera linea.
+  dcSensorTick();         // deteccion de caidas: consume la muestra que acaba de llegar
+  compassIdleGuard();     // Flex Compass: si su tick lleva segundos sin correr (ventana de
+                          // DeX cerrada, pantalla en exclusiva de otro subsistema), suelta
+                          // su enganche del sensor.
   faPendingTick();        // aviso de caida que no cupo (cortina, OTA, bloqueo): sale al despejarse
   mediaIndexTick();       // indice LittleFS: un lote corto cuando esta activo
   if(!gSafeMode){

@@ -57,8 +57,13 @@ enum { IC_RELOJ, IC_GALERIA, IC_MULTIMEDIA, IC_ALMACEN, IC_MODOPC, IC_NOTAS,
        // siguen apuntando a lo mismo. Por eso el 20 que ocupaba Flex Vector
        // Pro queda LIBRE en vez de reutilizarse: la proxima app nueva va al
        // 20 y nada de lo anterior se mueve.
-       IC_DEVCARE };
-#define APP_N 20
+       IC_DEVCARE,
+       // Flex Compass 20. Ocupa el hueco que el comentario de arriba dejaba
+       // reservado, y por el mismo motivo: ningun indice anterior se mueve, asi
+       // que el escritorio guardado, las favoritas y el candado por app de una
+       // placa que actualiza siguen apuntando a lo mismo.
+       IC_BRUJULA };
+#define APP_N 21
 
 static void iconBase(int x, int y, int S, uint16_t bg, int rf100){
   int r = S * rf100 / 100;
@@ -293,6 +298,25 @@ static void drawAppIcon(int id, int x, int y, int S){
       strokeSeg(px0 + st * 1.5f, py0 - sh * 0.44f, px0 + st * 2.1f, py0 + sh * 0.40f, 2, ac);
       strokeSeg(px0 + st * 2.1f, py0 + sh * 0.40f, px0 + st * 2.6f, py0,     2, ac);
       strokeSeg(px0 + st * 2.6f, py0, px0 + st * 4.0f, py0,                  2, ac);
+    } break;
+    case IC_BRUJULA: {
+      // FLEX COMPASS. Rosa de los vientos sobre azul profundo: anillo, cuatro
+      // marcas cardinales y la aguja bicolor, que es como se reconoce una
+      // brujula de un vistazo. Todo dentro de la caja [x,x+S)x[y,y+S).
+      iconBase(x, y, S, rgb565(16,42,96), 22);
+      fillCircle(cx, cy, (int)(S * 0.34f), rgb565(246,248,252));
+      fillRing(cx, cy, (int)(S * 0.34f), (int)(S * 0.05f) + 1, rgb565(30,66,138));
+      for(int k = 0; k < 4; k++){
+        float a = k * 90.0f * 0.0174532925f;
+        float r0 = S * 0.29f, r1 = S * 0.22f;
+        strokeSeg(cx + r0 * sinf(a), cy - r0 * cosf(a),
+                  cx + r1 * sinf(a), cy - r1 * cosf(a),
+                  (S >= 56 ? 1 : 0), rgb565(96,116,150));
+      }
+      { float L = S * 0.24f, Wd = S * 0.085f;
+        fillTriangle(cx, cy - (int)L, cx - (int)Wd, cy, cx + (int)Wd, cy, rgb565(226,62,62));
+        fillTriangle(cx, cy + (int)L, cx - (int)Wd, cy, cx + (int)Wd, cy, rgb565(108,116,132)); }
+      fillCircle(cx, cy, (int)(S * 0.055f) + 1, rgb565(30,40,58));
     } break;
     case IC_CAMARA: {
       iconBase(x, y, S, rgb565(74,74,78), 22);

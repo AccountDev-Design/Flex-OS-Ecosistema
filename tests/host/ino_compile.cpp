@@ -254,6 +254,7 @@ static void testIconosEnSuCaja();
 static void testTransicionesApps();
 static void testRejillaAutoPaginas();
 static void testMultitareaMemoria();
+static void testFlexCompass();
 static int gFails = 0;
 static void chk(bool ok, const char* what){
   if(!ok){ printf("  FALLO: %s\n", what); gFails++; }
@@ -4944,6 +4945,321 @@ static void testMultitareaMemoria(){
   if(!gFails) printf("  Multitarea: todas las comprobaciones pasan.\n");
 }
 
+// #############################################################
+//  FLEX COMPASS + FLEX IMU SERVICE
+//  ------------------------------------------------------------
+//  Se ejercita el CODIGO REAL que va a la placa. Dos cosas
+//  distintas, y las dos importan:
+//
+//   · EL REPARTO DEL SENSOR. Flex Compass y la deteccion de caidas
+//     leen el MISMO GY-BNO085 a traves del Flex IMU Service. Que
+//     cerrar la brujula NO apague el sensor por debajo de una
+//     funcion de seguridad no es una opinion: se comprueba aqui.
+//
+//   · LAS CONVERSIONES. Cuaternion -> rumbo, la rosa de 16
+//     direcciones y el salto 359 -> 0 son aritmetica pura y se
+//     verifican enteras, sin hardware.
+//
+//  LIMITE HONESTO: el doble de I2C de inostub/ NO simula un BNO085,
+//  asi que el driver corre AUSENTE. Lo que si se comprueba de ese
+//  camino es lo importante: que sin sensor la app no publica ni un
+//  rumbo y ensena el requisito de hardware.
+// #############################################################
+static void testFlexCompass(){
+  printf("Flex Compass - brujula sobre el GY-BNO085\n");
+  int fails0 = gFails;
+  gLand = false; gHosted = false;
+  uiClipFull();
+  gNavMode = 0;
+
+  // ---- 1. Rosa de 16 rumbos (los ocho principales y los ocho intermedios) ----
+  {
+    struct { float h; const char* s; } casos[] = {
+      {   0.0f, "N"  }, {  22.5f, "NNE" }, {  45.0f, "NE"  }, {  67.5f, "ENE" },
+      {  90.0f, "E"  }, { 112.5f, "ESE" }, { 135.0f, "SE"  }, { 157.5f, "SSE" },
+      { 180.0f, "S"  }, { 202.5f, "SSO" }, { 225.0f, "SO"  }, { 247.5f, "OSO" },
+      { 270.0f, "O"  }, { 292.5f, "ONO" }, { 315.0f, "NO"  }, { 337.5f, "NNO" },
+      { 347.2f, "NNO" }, { 359.9f, "N" }, { 11.2f, "N" }, { 11.3f, "NNE" },
+    };
+    bool ok = true;
+    for(unsigned i = 0; i < sizeof(casos)/sizeof(casos[0]); i++)
+      if(strcmp(imuDirShort(casos[i].h), casos[i].s) != 0){
+        printf("  FALLO: %.1f -> %s (esperado %s)\n", casos[i].h, imuDirShort(casos[i].h), casos[i].s);
+        ok = false;
+      }
+    chk(ok, "los 16 rumbos y sus fronteras se nombran bien");
+    chk(strcmp(imuDirLong(347.2f), "Norte-Noroeste") == 0, "el nombre largo acompana al corto");
+    chk(imuDirIndex(-10.0f) >= 0 && imuDirIndex(-10.0f) < 16, "un rumbo negativo se normaliza");
+    chk(imuDirIndex(725.0f) >= 0 && imuDirIndex(725.0f) < 16, "un rumbo mayor de 360 se normaliza");
+  }
+
+  // ---- 2. Rumbo a partir del cuaternion del vector de rotacion ----
+  //  Giro de `a` grados alrededor del eje vertical: q = (i,j,k,r) con
+  //  k = sin(a/2) y r = cos(a/2). El eje +X del sensor queda en
+  //  (cos a, sin a, 0) del marco ENU, asi que el rumbo debe ser 90 - a.
+  {
+    bool ok = true;
+    for(int a = 0; a < 360; a += 15){
+      float t = a * 0.0174532925f / 2.0f;
+      float h = imuHeadingFromQuat(0.0f, 0.0f, sinf(t), cosf(t));
+      float esp = imuNorm360(90.0f - a);
+      if(fabsf(imuAngleDelta(h, esp)) > 0.05f){
+        printf("  FALLO: giro %d -> %.2f (esperado %.2f)\n", a, h, esp); ok = false;
+      }
+    }
+    chk(ok, "el rumbo sale del cuaternion con el marco ENU del BNO085");
+    chk(fabsf(imuPitchFromQuat(0,0,0,1)) < 0.01f, "placa plana -> pitch 0");
+    chk(fabsf(imuRollFromQuat(0,0,0,1)) < 0.01f,  "placa plana -> roll 0");
+    { float t = 45.0f * 0.0174532925f;
+      chk(fabsf(imuRollFromQuat(sinf(t), 0, 0, cosf(t)) - 90.0f) < 0.1f, "giro sobre X -> roll 90"); }
+    { float t = -15.0f * 0.0174532925f;
+      chk(fabsf(imuPitchFromQuat(0, sinf(t), 0, cosf(t)) - 30.0f) < 0.1f, "morro arriba -> pitch positivo"); }
+  }
+
+  // ---- 3. Diferencia angular mas corta (el nucleo del 359 -> 0) ----
+  {
+    chk(fabsf(imuAngleDelta(359.0f,   0.0f) -   1.0f) < 0.001f, "359 -> 0 son +1 grados");
+    chk(fabsf(imuAngleDelta(  1.0f, 359.0f) +   2.0f) < 0.001f, "1 -> 359 son -2 grados");
+    chk(fabsf(imuAngleDelta(  0.0f, 180.0f) - 180.0f) < 0.001f, "media vuelta exacta");
+    chk(fabsf(imuAngleDelta(  0.0f, 181.0f) + 179.0f) < 0.001f, "181 se resuelve por el lado corto");
+    chk(fabsf(imuAngleDelta(350.0f,  10.0f) -  20.0f) < 0.001f, "cruzar el norte son 20 grados");
+  }
+
+  // ---- 4. Suavizado visual: NUNCA da la vuelta larga ----
+  {
+    gTestMs = 100000;
+    T = Touch();
+    cmpHave = true; cmpHead = 359.0f; cmpPitch = 0; cmpRoll = 0;
+    cmpHeadInit = false; cmpPhysMs = 0; cmpScroll = 0; cmpScrollVel = 0;
+    cmpPhysics(gTestMs);
+    chk(fabsf(cmpHeadVis - 359.0f) < 0.01f, "el rumbo visual arranca en el del sensor");
+    cmpHead = 1.0f;                             // el sensor cruza el norte
+    float peor = 0.0f;
+    for(int i = 0; i < 60; i++){
+      gTestMs += 33;
+      cmpPhysics(gTestMs);
+      // Camino corto = el visual se queda SIEMPRE dentro del arco [359 -> 1].
+      float d = fabsf(imuAngleDelta(359.0f, cmpHeadVis)) + fabsf(imuAngleDelta(cmpHeadVis, 1.0f));
+      if(d > peor) peor = d;
+    }
+    chk(peor < 3.0f, "359 -> 0 no rota 359 grados en el sentido equivocado");
+    chk(fabsf(imuAngleDelta(cmpHeadVis, 1.0f)) < 0.2f, "y el visual acaba alcanzando al sensor");
+    chk(cmpHeadVis >= 0.0f && cmpHeadVis < 360.0f, "el rumbo visual se queda normalizado");
+    cmpHead = 181.0f;
+    for(int i = 0; i < 120; i++){ gTestMs += 33; cmpPhysics(gTestMs); }
+    chk(fabsf(imuAngleDelta(cmpHeadVis, 181.0f)) < 0.5f, "un salto grande tambien converge");
+  }
+
+  // ---- 5. EL REPARTO DEL SENSOR (que Flex Compass no rompa Device Care) ----
+  {
+    gTestMs = 200000;
+    bool gtPrev = gtOk; gtOk = true;
+    while(imuHolders() > 0) imuRelease();
+    dcSensorOn = false;
+    chk(imuHolders() == 0, "de partida no hay ningun consumidor del IMU");
+
+    dcSensorStart();                                  // la deteccion de caidas enciende el sensor
+    chk(imuHolders() == 1 && dcSensorOn, "Device Care adquiere el servicio");
+
+    gState = ST_APP; gAppId = IC_BRUJULA; gRelayout = false; T = Touch();
+    compassEnter();                                   // y ahora el usuario abre la brujula
+    chk(imuHolders() == 2, "Flex Compass adquiere el MISMO servicio, no un segundo driver");
+
+    compassClose();                                   // cierra la brujula...
+    chk(imuHolders() == 1, "cerrar la brujula suelta SU enganche");
+    chk(dcSensorOn, "...y la deteccion de caidas SIGUE con el sensor encendido");
+
+    dcSensorStop();
+    chk(imuHolders() == 0, "cuando tampoco lo quiere Device Care, el servicio queda libre");
+
+    compassEnter();
+    dcSensorStart();
+    chk(imuHolders() == 2, "el orden de llegada da igual");
+    dcSensorStop();
+    chk(imuHolders() == 1 && cmpHoldsImu, "apagar la deteccion de caidas NO deja a la brujula sin sensor");
+    compassClose();
+    chk(imuHolders() == 0, "y al soltar el ultimo, el sensor se apaga");
+    gtOk = gtPrev;
+  }
+
+  // ---- 6. Ciclo de vida de la app ----
+  {
+    gTestMs = 300000;
+    bool gtPrev = gtOk; gtOk = true;
+    while(imuHolders() > 0) imuRelease();
+    dcSensorOn = false;
+    gState = ST_APP; gAppId = IC_BRUJULA; gRelayout = false; T = Touch();
+    compassEnter();
+    chk(cmpHoldsImu && imuHolders() == 1, "abrir la app adquiere el servicio");
+    compassSuspend();
+    chk(!cmpHoldsImu && imuHolders() == 0, "en segundo plano se suelta el sensor");
+    compassResume();
+    chk(cmpHoldsImu && imuHolders() == 1, "al volver se vuelve a adquirir");
+    compassClose();
+    chk(!cmpHoldsImu && imuHolders() == 0, "cerrar la app no deja NADA consumiendo el sensor");
+    compassEnter(); compassSuspend(); compassClose();
+    chk(imuHolders() == 0, "cerrar una app ya suspendida no descuadra el conteo");
+    // Red de seguridad: sin tick durante segundos (ventana de DeX cerrada).
+    compassEnter();
+    compassIdleGuard();
+    chk(cmpHoldsImu, "recien abierta, la red de seguridad no la toca");
+    gTestMs += CMP_IDLE_RELEASE_MS + 100;
+    compassIdleGuard();
+    chk(!cmpHoldsImu && imuHolders() == 0, "sin tick durante segundos se suelta el sensor");
+    compassTick();
+    chk(cmpHoldsImu, "y el primer tick siguiente lo vuelve a adquirir");
+    compassClose();
+    gtOk = gtPrev;
+  }
+
+  // ---- 7. Sin BNO085 no se publica NI UN RUMBO ----
+  {
+    chk(flexBnoState() == FLEXBNO_ST_ABSENT, "el arnes corre con el IMU ausente");
+    float h = 123.0f, pp = 1.0f, rr = 1.0f;
+    chk(!imuHeading(&h),        "sin sensor no hay rumbo");
+    chk(!imuPitchRoll(&pp,&rr), "ni cabeceo ni alabeo");
+    chk(!imuSrcLive(FLEXBNO_CHK_ACCEL) && !imuSrcLive(FLEXBNO_CHK_MAG),
+        "ni ningun sensor se marca como disponible");
+    cmpHave = true;
+    cmpSample();
+    chk(!cmpHave, "la app tampoco se queda con el ultimo valor como si fuera actual");
+    cmpSyncView(false);
+    chk(cmpView == CMPV_SEARCH, "sin orientacion se ensena 'Requiere modulo IMU'");
+    chk(imuState() == FIMU_IDLE || imuState() == FIMU_NO_IMU, "y el estado lo dice");
+  }
+
+  // ---- 8. Las vistas siguen al sensor ----
+  {
+    cmpHave = true; cmpHead = 120.0f;
+    cmpSyncView(false);
+    chk(cmpView == CMPV_COMPASS, "con orientacion real se ensena la brujula");
+    cmpHave = false;
+    cmpSyncView(false);
+    chk(cmpView == CMPV_SEARCH, "y si el sensor se pierde se vuelve al requisito");
+  }
+
+  // ---- 9. Limites del desplazamiento ----
+  {
+    gTestMs = 400000;
+    cmpHave = true; cmpHead = 0.0f;
+    cmpSyncView(false);
+    cmpLayout();
+    chk(cmpContentH > cmpVpH(), "el documento es mas alto que la pantalla (hay algo que revelar)");
+    chk(cmpScrollMax() > 0, "y por tanto hay recorrido");
+    chk(cmpYCard >= cmpVpH(), "la tarjeta de estado nace FUERA del viewport inicial");
+    T = Touch();
+    cmpScroll = (float)cmpScrollMax() + 90.0f; cmpScrollVel = 0; cmpPhysMs = 0;
+    for(int i = 0; i < 200; i++){ gTestMs += 16; cmpPhysics(gTestMs); }
+    chk(cmpScroll <= cmpScrollMax() + 0.6f, "el desplazamiento vuelve a su limite inferior");
+    cmpScroll = -120.0f; cmpScrollVel = 0; cmpPhysMs = 0;
+    for(int i = 0; i < 200; i++){ gTestMs += 16; cmpPhysics(gTestMs); }
+    chk(cmpScroll >= -0.6f, "y al limite superior");
+    cmpScroll = 0; cmpScrollVel = 4000.0f; cmpPhysMs = 0;
+    for(int i = 0; i < 400; i++){ gTestMs += 16; cmpPhysics(gTestMs); }
+    chk(fabsf(cmpScrollVel) < 7.0f, "la inercia se amortigua hasta pararse");
+    chk(cmpScroll <= cmpScrollMax() + 0.6f, "y no deja el contenido fuera de sus limites");
+  }
+
+  // ---- 10. Un gesto que empieza en la cabecera NO arrastra la lista ----
+  {
+    gTestMs = 500000;
+    cmpHave = true; cmpHead = 30.0f;
+    cmpSyncView(false); cmpLayout();
+    cmpScroll = 0; cmpScrollVel = 0; cmpResetGesture();
+    tDown(240, 20, gTestMs); cmpTouch();
+    tMove(240, -60, gTestMs + 60); cmpTouch();
+    chk(cmpScroll == 0.0f, "un arrastre nacido en la cabecera no desplaza el contenido");
+    tUp(gTestMs + 90, false); cmpTouch();
+    tDown(240, 400, gTestMs + 200); cmpTouch();
+    tMove(240, 300, gTestMs + 260); cmpTouch();
+    chk(cmpScroll > 50.0f, "y nacido en el viewport si lo desplaza");
+    tUp(gTestMs + 300, false); cmpTouch();
+    chk(!cmpDrag, "al soltar, el gesto queda cerrado");
+    tDown(240, 400, gTestMs + 400); cmpTouch();
+    tMove(240, 260, gTestMs + 460); cmpTouch();
+    tUp(gTestMs + 500, false); T.y = 10; cmpTouch();
+    chk(!cmpDrag, "soltar sobre la cabecera tampoco deja el gesto enganchado");
+    T = Touch();
+  }
+
+  // ---- 11. El contenido NUNCA pisa la cabecera ni la barra de navegacion ----
+  {
+    cmpHave = true; cmpHead = 47.0f; cmpPitch = 4.0f; cmpRoll = -3.0f;
+    cmpHeadVis = 47.0f; cmpHeadInit = true;
+    cmpSyncView(false); cmpLayout();
+    int fuera = 0;
+    for(int paso = 0; paso < 3; paso++){
+      cmpScroll = (paso == 0) ? 0.0f : (paso == 1 ? cmpScrollMax() / 2.0f : (float)cmpScrollMax());
+      memset(bbuf, 0, (size_t)SCR_W * SCR_H * 2);
+      setBuf(bbuf);
+      uiClipFull();
+      cmpDrawCompass(0, SCR_H - 1);
+      for(int y = 0; y < SCR_H; y++){
+        if(y >= cmpVpTop() && y <= cmpVpBot()) continue;
+        for(int x = 0; x < SCR_W; x++) if(bbuf[(size_t)y * SCR_W + x] != 0) fuera++;
+      }
+    }
+    setBuf(fb);
+    chk(fuera == 0, "el contenido desplazable se queda SIEMPRE dentro del viewport");
+  }
+
+  // ---- 12. El modulo BNO085 se dibuja por codigo y cabe en su caja ----
+  {
+    int fuera = 0, pintados = 0;
+    const int CX = SCR_W / 2, CY = 400, W = 300;
+    const int MX = W / 2 + 12, MY = W / 2 + 12;
+    float angs[4][3] = { {0,0,0}, {30,18,-12}, {-140,-40,55}, {179,89,-179} };
+    for(int k = 0; k < 4; k++){
+      memset(bbuf, 0, (size_t)SCR_W * SCR_H * 2);
+      setBuf(bbuf); uiClipFull();
+      cmpDrawModule(CX, CY, W, angs[k][0], angs[k][1], angs[k][2]);
+      for(int y = 0; y < SCR_H; y++)
+        for(int x = 0; x < SCR_W; x++)
+          if(bbuf[(size_t)y * SCR_W + x] != 0){
+            pintados++;
+            if(x < CX - MX || x > CX + MX || y < CY - MY || y > CY + MY) fuera++;
+          }
+    }
+    setBuf(fb);
+    chk(pintados > 4000, "el modulo dibuja geometria de verdad (no es un hueco)");
+    chk(fuera == 0, "y no se sale de su caja en ninguna orientacion");
+  }
+
+  // ---- 13. El simbolo de grado se DIBUJA (la app lo usa en cada lectura) ----
+  {
+    auto pinta = [&](const char* t, int size)->int {
+      memset(bbuf, 0, (size_t)SCR_W * SCR_H * 2);
+      setBuf(bbuf); uiClipFull();
+      drawText(40, 200, t, size, rgb565(255,255,255));
+      int n = 0;
+      for(int y = 180; y < 280; y++)
+        for(int x = 0; x < SCR_W; x++) if(bbuf[(size_t)y * SCR_W + x] != 0) n++;
+      return n;
+    };
+    int soloGrado = pinta("\xC2\xB0", 3);
+    int interrog  = pinta("?", 3);
+    setBuf(fb);
+    chk(soloGrado > 0, "el simbolo de grado pinta algo");
+    chk(soloGrado != interrog, "y no es el interrogante de 'caracter desconocido'");
+    chk(textW("347.2\xC2\xB0", 3) > textW("347.2", 3), "y mide de mas en la cadena del rumbo");
+    char b[24];
+    cmpFmtHeading(b, sizeof(b), 347.19f);
+    chk(strcmp(b, "347.2\xC2\xB0") == 0, "el rumbo se formatea con un decimal");
+    cmpFmtHeading(b, sizeof(b), 359.99f);
+    chk(strcmp(b, "0.0\xC2\xB0") == 0, "359,99 se redondea a 0,0 y no a 360,0");
+    cmpFmtDeg(b, sizeof(b), -0.84f, false);
+    chk(strcmp(b, "-0.8\xC2\xB0") == 0, "los angulos negativos llevan su signo");
+  }
+
+  // Estado del arnes: la app queda cerrada y el servicio libre.
+  while(imuHolders() > 0) imuRelease();
+  cmpHoldsImu = false; dcSensorOn = false;
+  gState = ST_HOME; gAppId = 0; T = Touch();
+
+  if(gFails > fails0) printf("  %d comprobacion(es) de Flex Compass han fallado.\n", gFails - fails0);
+  else printf("  Flex Compass: todas las comprobaciones pasan.\n");
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -5032,6 +5348,7 @@ int main(){
   testMediosOrientacion();
   testMultitareaMemoria();
   testDeviceCare();
+  testFlexCompass();
   testLiquidGlassSinApilar();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;

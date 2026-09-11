@@ -144,6 +144,12 @@ static bool dcBackScreen(); static void dcSuspend(); static void dcResume();
 static void dcCloseApp(); static bool dcSaveSess(); static void dcLoadSess();
 static bool dcBgWork();
 static void dcBegin();                                   // lo llama setup()
+// Flex Compass. Mismo patron: la app vive en FlexOS_Ultra_AppCompass.h, el
+// ultimo eslabon de la cadena, porque necesita el servicio IMU y todas las
+// primitivas de dibujo ya definidas.
+static void compassEnter(); static void compassTick();
+static bool cmpBackLayer(); static void compassSuspend(); static void compassResume(); static void compassClose();
+static void compassIdleGuard();   // red de seguridad del ciclo de vida (la despacha loop())
 static void dcSensorTick();                              // lo llama loop()
 static void dcApplyFallPref();
 // Hooks opcionales. Las implementaciones viven junto a cada app.
@@ -648,6 +654,13 @@ static const AppHooks H_FLEXPHONE = { NULL, fphBackScreen, fphSuspend, fphResume
 // No lleva 'shed': lo unico que reserva es la banda del aviso, y
 // soltarla dejaria al sistema sin poder ensenar el proximo aviso.
 static const AppHooks H_DEVCARE  = { NULL, dcBackScreen, dcSuspend, dcResume, dcCloseApp, dcSaveSess, dcLoadSess, dcBgWork, NULL, NULL };
+// Flex Compass. backLayer cierra la capa propia (menu o ficha del sensor)
+// antes de que "atras" salga de la app. suspend/resume SUELTAN y vuelven a
+// tomar el servicio IMU: en segundo plano la app no consume sensor -- y como
+// el servicio lleva cuenta de consumidores, soltarlo NO apaga el sensor si
+// Device Care lo sigue necesitando para la deteccion de caidas.
+// No lleva 'shed' ni 'dirty': no reserva nada pesado ni tiene datos del usuario.
+static const AppHooks H_COMPASS  = { cmpBackLayer, NULL, compassSuspend, compassResume, compassClose, NULL, NULL, NULL, NULL, NULL };
 // ---- Registro de apps (indices = enum IC_*) ----
 static FlexApp APP_REG[APP_N] = {
   { appRelojEnter, appRelojTick, APP_FLEX, APP_CAT_ESENCIAL, APP_DEF_FAV, NULL },
@@ -690,6 +703,11 @@ static FlexApp APP_REG[APP_N] = {
   // NO nace en la rejilla (APP_DEF_DOCK): una placa que actualiza no ve
   // su escritorio reordenado; se anade desde la Caja de aplicaciones.
   { dcEnter, dcTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH | APP_FLEX, APP_CAT_SISTEMA, APP_DEF_DOCK, &H_DEVCARE },
+  // 20 Flex Compass. Cabecera propia (uiHdrDraw, con menu de tres puntos) y
+  // tactil propio (arrastre vertical con inercia). NO nace en la rejilla
+  // (APP_DEF_DOCK): una placa que actualiza no ve su escritorio reordenado; se
+  // anade a Inicio desde la Caja de aplicaciones.
+  { compassEnter, compassTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_ESENCIAL, APP_DEF_DOCK, &H_COMPASS },
 };
 static const char* appCatName(int id){
   int c = (id >= 0 && id < APP_N) ? APP_REG[id].cat : APP_CAT_SISTEMA;
