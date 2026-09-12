@@ -89,26 +89,6 @@ GANCHOS = [
     ("imuAcquire",     "flexBnoBegin()",  "adquirir el servicio no arrancaria el sensor"),
     ("imuRelease",     "flexBnoStop()",   "soltar el ultimo consumidor dejaria el sensor emitiendo"),
     ("imuServiceTick", "flexBnoTick(",    "el servicio no sondearia el driver"),
-    # FLEX ROTATION (auto-rotacion nativa). Es una funcion que se cablea en
-    # SIETE sitios distintos -- el bucle, el arranque, el tick de app, la
-    # apertura de app, la barra de navegacion y dos puntos del Panel Rapido --
-    # y cualquiera de ellos que se caiga la deja a medias sin que el
-    # compilador diga nada: el motor seguiria midiendo la postura y la
-    # interfaz no se enteraria, o peor, se giraria sin que el tactil la siga.
-    ("loop",            "rotEngineTick()",  "la orientacion no se evaluaria nunca: el control del panel no haria nada"),
-    ("setup",           "rotBegin()",       "la auto-rotacion no sobreviviria al reinicio y el IMU no se sondearia"),
-    ("appTick",         "rotAppTick()",     "una app girada no recibiria toques traducidos ni la barra del sistema"),
-    ("appTrFinishOpen", "rotEnterSurface(", "abrir una app en horizontal la compondria con la geometria vertical"),
-    ("appTrFinishOpen", "rotLeaveSurface(", "el motor se quedaria girado despues de componer la app"),
-    ("navBarHandle",    "rotDeferNav(",     "inicio/atras/recientes repintarian el sistema con el motor girado"),
-    ("qsTick",          "rotNoticeDraw()",  "el aviso 'requiere un modulo IMU' no llegaria a verse"),
-    ("qpPanelTouch",    "rotNoticeTouch()", "el toque que descarta el aviso encenderia ademas el control de debajo"),
-    ("rotToggleRequest","rotHoldImu(",      "encender la auto-rotacion no adquiriria el servicio: no habria orientacion"),
-    ("rotDisable",      "rotHoldImu(",      "apagarla dejaria su enganche del sensor para siempre"),
-    ("rotEngineTick",   "rotWatchdogTick()","una transicion sin terminar bloquearia la rotacion para siempre"),
-    ("enterHomeState",  "rotScopeSuspendForSystem()", "una app que cierra desde su tick dibujaria el escritorio ROTADO en homeBuf"),
-    ("enterApp",        "rotScopeSuspendForSystem()", "abrir una app desde otra girada heredaria su rotacion"),
-    ("rotApplyOrientation", "rotValidate()", "una transicion invalida se daria por buena y dejaria la UI rota"),
     # FLEX COMPASS
     ("loop",           "compassIdleGuard()", "una ventana de DeX cerrada dejaria enganchado el sensor"),
     ("compassEnter",   "cmpHoldImu(",     "abrir Flex Compass no adquiriria el servicio: no habria ni deteccion"),

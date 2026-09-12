@@ -186,86 +186,6 @@ static float imuRollFromQuat(float x, float y, float z, float w){
   return atan2f(upY, upZ) * 57.2957795f;
 }
 
-// VERTICAL DEL MUNDO EXPRESADA EN EL SISTEMA DEL SENSOR.
-//
-// Es la MISMA matriz de la que ya salen el rumbo, el cabeceo y el alabeo de
-// aqui arriba, leida por su tercera FILA: con q = (x, y, z, w) del vector de
-// rotacion (mundo <- sensor), la tercera fila de R es el eje "Arriba" del
-// mundo visto desde el sensor. No es una medida nueva ni un segundo modelo:
-// imuPitchFromQuat ya usa la primera componente (up) y imuRollFromQuat las
-// otras dos. Se agrupan aqui para que un consumidor que necesite el vector
-// entero -- Flex Rotation -- no vuelva a derivarlo por su cuenta y acabe con
-// numeros distintos a los de la brujula.
-//
-// Comprobacion: con el cuaternion identidad el sensor esta plano y boca
-// arriba, y la formula da (0, 0, 1).
-static void imuUpVector(float x, float y, float z, float w, float* ux, float* uy, float* uz){
-  if(ux) *ux = 2.0f * (x * z - w * y);
-  if(uy) *uy = 2.0f * (y * z + w * x);
-  if(uz) *uz = 1.0f - 2.0f * (x * x + y * y);
-}
-
-// #############################################################
-// ##  MONTAJE DEL MODULO RESPECTO DE LA PANTALLA
-// ##  ----------------------------------------------------------
-// ##  Todo lo que relaciona los ejes del BNO085 con los bordes del
-// ##  panel vive AQUI, en tres constantes y una expresion. Si tu
-// ##  GY-BNO085 va pegado con otra orientacion, esto es lo unico que
-// ##  hay que cambiar -- ni el motor de rotacion ni la brujula
-// ##  conocen ningun eje.
-// ##
-// ##  Convenio de fabrica (modulo tumbado en la cara trasera, con la
-// ##  serigrafia del eje +X apuntando al borde SUPERIOR del panel):
-// ##
-// ##      pantalla "arriba"   = +X del sensor
-// ##      pantalla "derecha"  = -Y del sensor
-// ##      normal de pantalla  = +Z del sensor  (sale de la pantalla)
-// ##
-// ##  Es el mismo "delante" que ya usa imuHeadingFromQuat, asi que
-// ##  brujula y rotacion describen el mismo montaje.
-// #############################################################
-#define IMU_MOUNT_UP_X    1.0f
-#define IMU_MOUNT_UP_Y    0.0f
-#define IMU_MOUNT_UP_Z    0.0f
-#define IMU_MOUNT_RIGHT_X 0.0f
-#define IMU_MOUNT_RIGHT_Y (-1.0f)
-#define IMU_MOUNT_RIGHT_Z 0.0f
-
-// INCLINACION EN EL PLANO DE LA PANTALLA, en (-180,180].
-//   0   -> la gravedad tira hacia el borde INFERIOR: vertical normal
-//   +90 -> tira hacia el borde IZQUIERDO: el borde DERECHO queda arriba
-//   -90 -> tira hacia el borde DERECHO
-//   180 -> vertical invertida
-// Es una proyeccion, no una medida: cuando el aparato esta casi plano las dos
-// componentes valen casi cero y el angulo que sale de ahi es ruido. Por eso
-// quien la consume tiene que mirar TAMBIEN imuScreenUpDotNormal() y descartar
-// la lectura cuando el aparato esta tumbado.
-static float imuScreenTiltDeg(float ux, float uy, float uz){
-  float up    = ux * IMU_MOUNT_UP_X    + uy * IMU_MOUNT_UP_Y    + uz * IMU_MOUNT_UP_Z;
-  float right = ux * IMU_MOUNT_RIGHT_X + uy * IMU_MOUNT_RIGHT_Y + uz * IMU_MOUNT_RIGHT_Z;
-  float a = atan2f(right, up) * 57.2957795f;
-  if(!(a == a)) return 0.0f;
-  return a;
-}
-// Componente de la vertical del mundo sobre la NORMAL de la pantalla, en
-// [-1,1]. +-1 = completamente plano (boca arriba o boca abajo).
-static float imuScreenUpDotNormal(float ux, float uy, float uz){
-  // La normal es el eje que NO esta en el plano: se obtiene del producto
-  // vectorial de los dos de arriba, asi que no hay una cuarta constante que
-  // se pueda quedar descolgada de las otras tres.
-  float nx = IMU_MOUNT_UP_Y * IMU_MOUNT_RIGHT_Z - IMU_MOUNT_UP_Z * IMU_MOUNT_RIGHT_Y;
-  float ny = IMU_MOUNT_UP_Z * IMU_MOUNT_RIGHT_X - IMU_MOUNT_UP_X * IMU_MOUNT_RIGHT_Z;
-  float nz = IMU_MOUNT_UP_X * IMU_MOUNT_RIGHT_Y - IMU_MOUNT_UP_Y * IMU_MOUNT_RIGHT_X;
-  // El producto vectorial arriba x derecha apunta HACIA DENTRO de la pantalla
-  // con el convenio de fabrica; se invierte para que +1 signifique "boca
-  // arriba", que es como lo lee un humano.
-  float d = -(ux * nx + uy * ny + uz * nz);
-  if(!(d == d)) return 1.0f;               // NaN -> se trata como plano
-  if(d >  1.0f) d =  1.0f;
-  if(d < -1.0f) d = -1.0f;
-  return d;
-}
-
 // Normaliza a [0,360). Acepta cualquier entrada finita; un NaN no se propaga
 // a la interfaz.
 static float imuNorm360(float a){
@@ -295,19 +215,6 @@ static bool imuPitchRoll(float* pitchDeg, float* rollDeg){
   if(!flexBnoQuat(q)) return false;
   if(pitchDeg) *pitchDeg = imuPitchFromQuat(q[0], q[1], q[2], q[3]);
   if(rollDeg)  *rollDeg  = imuRollFromQuat(q[0], q[1], q[2], q[3]);
-  return true;
-}
-
-// Inclinacion y planitud en una sola lectura. false = el sensor no ha
-// entregado vector de rotacion ahora mismo, y entonces NADIE dibuja ni gira
-// nada: no se devuelve un cero que parece una medida.
-static bool imuScreenTilt(float* tiltDeg, float* upDotNormal){
-  float q[4];
-  if(!flexBnoQuat(q)) return false;
-  float ux, uy, uz;
-  imuUpVector(q[0], q[1], q[2], q[3], &ux, &uy, &uz);
-  if(tiltDeg)      *tiltDeg      = imuScreenTiltDeg(ux, uy, uz);
-  if(upDotNormal)  *upDotNormal  = imuScreenUpDotNormal(ux, uy, uz);
   return true;
 }
 

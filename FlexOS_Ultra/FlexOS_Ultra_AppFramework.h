@@ -44,11 +44,7 @@
 // debajo de donde se declaran gHosted y gAppH (justo aqui abajo, con los flags
 // de APP_REG), asi que la expansion siempre las conoce.
 #define WIN_TOP (gHosted ? 0 : 96)
-// FLEX ROTATION. Con la superficie girada el lienzo mide LH de alto, no SCR_H,
-// y la barra de navegacion vive DENTRO de el (ver rotWinBot). En vertical
-// rotApplied() sale false en su primera comparacion y esto es, byte a byte, el
-// mismo WIN_BOT de siempre.
-#define WIN_BOT (gHosted ? gAppH : (rotApplied() ? rotWinBot() : (SCR_H - 64)))
+#define WIN_BOT (gHosted ? gAppH : (SCR_H - 64))
 #define WIN_BG  TH_WIN              // fondo de ventana: lo elige la paleta activa (ver TEMA SEMANTICO)
 
 // REGISTRO CENTRAL DE APPS. Una app de Flex OS ES su entrada en APP_REG, y su
@@ -204,26 +200,13 @@ static void appDrawChrome(int id){
   // VENTANA del tema (no sobre el wallpaper), asi que usan el color de iconos
   // de navegacion de la paleta activa.
   uint16_t W = TH_NAV;
-  // Contra el LIENZO (gAppW/gAppH), no contra el panel. A pantalla completa y
-  // en vertical gAppW == SCR_W y gAppH == SCR_H, asi que esto es exactamente
-  // lo de siempre; girada, los iconos van al borde derecho REAL de la maqueta
-  // en vez de quedarse clavados a 480 px, que es donde se cortaban.
   cronoBarClock(16, W);            // hora + capsula del cronometro (misma geometria que el Home)
-  drawWifi(gAppW - 66, 28, 11, W);
-  drawBattery(gAppW - 46, 20, 30, 15, 82, W);
+  drawWifi(SCR_W - 66, 28, 11, W);
+  drawBattery(SCR_W - 46, 20, 30, 15, 82, W);
   // MODO BOTONES: la barra inferior ya NO la dibuja el marco de la app. La
   // estampa el sistema dentro de flxFlush (navStampBar), asi que hay un solo
   // propietario de esos 64 px y ninguna app puede pisarlos ni hacerlos parpadear.
-  if(gNavMode != 0){
-    // MODO GESTOS. La franja viva del gesto esta en el borde FISICO de abajo
-    // del panel (handleiOSGestures lee el tactil sin traducir, a proposito:
-    // el gesto pertenece a la placa, no a la maqueta). Con la superficie
-    // girada ese borde es el DERECHO del lienzo, asi que el indicador se
-    // dibuja alli -- donde esta el gesto -- en vez de prometer uno abajo que
-    // no existiria.
-    if(rotApplied()) fillRoundRectA(gAppW - 25, (gAppH - 130) / 2, 5, 130, 2, TH_ONWALL, 180);
-    else             drawHomeIndicator(SCR_H, 180);
-  }
+  if(gNavMode != 0) drawHomeIndicator(SCR_H, 180);
   (void)id;
 }
 // Cabecera estandar (chevron "atras" + titulo centrado). Las apps con
@@ -234,7 +217,7 @@ static void appDrawHeader(int id){
   int hy = 50;
   strokeSegAA(30, hy + 16, 18, hy + 8, 2.4f, W);
   strokeSegAA(18, hy + 8, 30, hy, 2.4f, W);
-  drawTextC(gAppW / 2, hy + 3, appName(id), 3, W);
+  drawTextC(SCR_W / 2, hy + 3, appName(id), 3, W);
 }
 
 
@@ -923,12 +906,7 @@ static int  navBarH(){ return (gNavMode == 0) ? NAV_H : 0; }
 // handleiOSGestures y activarMultitarea).
 static bool navBarVisible(){
   if(gNavMode != 0) return false;
-  if(gHosted) return false;
-  // FLEX ROTATION. Una app girada por el sistema SI lleva barra: es su unica
-  // via de vuelta, y se pinta con las coordenadas de la maqueta. Lo que sigue
-  // sin llevarla es el gLand que se pone una app por su cuenta (Modo PC,
-  // Juegos, el reproductor), que es inmersivo y tiene su propia salida.
-  if(gLand && !rotApplied()) return false;
+  if(gHosted || gLand) return false;
   if(KIOSK_ON && kioskOn) return false;
   if(gState != ST_APP) return false;
   // Una app LANDSCAPE (Juegos) es inmersiva: dibuja con las coordenadas
@@ -938,66 +916,43 @@ static bool navBarVisible(){
   if(APP_REG[gAppId].flags & APP_LAND) return false;
   return true;
 }
-// Borde superior de la franja, en coordenadas de la MAQUETA activa.
-static int  navBarTop(){ return (rotApplied() ? LH : SCR_H) - NAV_H; }
+static int  navBarTop(){ return SCR_H - NAV_H; }
 static uint16_t navBgCol(){  return gDark ? rgb565(13,15,22)    : rgb565(238,241,247); }
 static uint16_t navFgCol(){  return gDark ? rgb565(232,236,245) : rgb565(44,48,60); }
 static uint16_t navLineCol(){return gDark ? rgb565(30,34,46)    : rgb565(214,219,228); }
 
 // Pinta la barra en el buffer activo. No vuelca: quien la llama decide.
 static void navBarPaint(){
-  // Ancho y alto de la MAQUETA. En vertical son SCR_W/SCR_H y esto es
-  // identico a lo de siempre; girada, la barra ocupa los 800 px logicos de
-  // ancho en vez de quedarse a medias en 480.
-  const int cw = rotApplied() ? LW : SCR_W;
-  const int ch = rotApplied() ? LH : SCR_H;
-  int ny = ch - 52, top = navBarTop();
-  fillRect(0, top, cw, NAV_H, navBgCol());
-  fillRect(0, top, cw, 1, navLineCol());
+  int ny = SCR_H - 52, top = navBarTop();
+  fillRect(0, top, SCR_W, NAV_H, navBgCol());
+  fillRect(0, top, SCR_W, 1, navLineCol());
   uint16_t fg = navFgCol();
   // Destello de pulsacion: circulo tenue bajo el boton tocado. Se ve mientras el
   // dedo sigue encima y NAV_PRESS_MS mas despues de soltar, para que un toque
   // rapido tambien deje senal. Es lo unico "animado" de la barra y su tiempo
   // sale de millis(), no de un contador de cuadros.
   if(gNavGlow >= 0 && (gNavPress == gNavGlow || (millis() - gNavGlowMs) < NAV_PRESS_MS)){
-    int cxs[3] = { cw / 6, cw / 2, cw * 5 / 6 };
+    int cxs[3] = { SCR_W / 6, SCR_W / 2, SCR_W * 5 / 6 };
     fillCircleA(cxs[gNavGlow], ny + 8, 24, fg, 46);
   }
-  int bx = cw / 6;
+  int bx = SCR_W / 6;
   fillTriangle(bx - 10, ny + 8, bx + 8, ny - 2, bx + 8, ny + 18, fg);          // atras
-  drawCircle(cw / 2, ny + 8, 12, fg); drawCircle(cw / 2, ny + 8, 11, fg);      // inicio
-  drawRoundRect(cw * 5 / 6 - 11, ny - 3, 22, 22, 4, fg);                       // recientes
+  drawCircle(SCR_W / 2, ny + 8, 12, fg); drawCircle(SCR_W / 2, ny + 8, 11, fg); // inicio
+  drawRoundRect(SCR_W * 5 / 6 - 11, ny - 3, 22, 22, 4, fg);                     // recientes
 }
 
 // Estampado dentro de flxFlush (ver el bloque de arriba). Solo toca fb, solo si
 // la banda que se va a publicar cruza la franja de la barra.
 static void navStampBar(int y0, int y1){
   if(!navBarVisible()) return;
-  uint16_t* ob = gBuf; bool wl = gLand; bool wcl = gClipLogical;
+  if(y1 < navBarTop() || y0 > SCR_H - 1) return;
+  uint16_t* ob = gBuf; bool wl = gLand;
   int sx0 = gClipX0, sx1 = gClipX1, sy0 = gClipY0, sy1 = gClipY1;
-  if(rotApplied()){
-    // MAQUETA GIRADA. La franja ocupa la x LOGICA entera, o sea TODAS las
-    // filas fisicas del panel: cualquier banda que se publique la cruza, y por
-    // eso aqui no hay descarte por banda. gClipY0/gClipY1 acotan, en esta
-    // ruta, el tramo de x logica que se escribe -- que es exactamente la banda
-    // fisica que se va a transferir --, asi que el coste sigue siendo el de la
-    // banda y no el de la barra entera.
-    gLand = true;
-    // A PROPOSITO con el recorte FISICO: aqui la banda [y0,y1] son filas del
-    // panel (las que flxFlush va a transferir), no una franja de la maqueta.
-    gClipLogical = false;
-    gClipX0 = 0; gClipX1 = SCR_W - 1;
-    gClipY0 = y0; gClipY1 = y1;
-    setBuf(fb);
-    navBarPaint();
-  }else{
-    if(y1 < navBarTop() || y0 > SCR_H - 1) return;
-    gLand = false;
-    gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = navBarTop(); gClipY1 = SCR_H - 1;
-    setBuf(fb);
-    navBarPaint();
-  }
-  setBuf(ob); gLand = wl; gClipLogical = wcl;
+  gLand = false;
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = navBarTop(); gClipY1 = SCR_H - 1;
+  setBuf(fb);
+  navBarPaint();
+  setBuf(ob); gLand = wl;
   gClipX0 = sx0; gClipX1 = sx1; gClipY0 = sy0; gClipY1 = sy1;
 }
 

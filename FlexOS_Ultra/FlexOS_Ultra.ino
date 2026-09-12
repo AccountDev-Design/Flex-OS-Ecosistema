@@ -278,7 +278,6 @@
 #include "FlexOS_Ultra_AppGallery.h"         // Galeria
 #include "FlexOS_Ultra_Vault.h"              // Flex Vault: interfaz de la Carpeta segura
 #include "FlexOS_Ultra_IMU.h"                // Flex IMU Service: reparto del GY-BNO085 y orientacion
-#include "FlexOS_Ultra_Rotation.h"           // Flex Rotation: auto-rotacion nativa sobre el servicio IMU
 #include "FlexOS_Ultra_DeviceCare.h"         // Flex Device Care: app, historial, salud y grafico del GY-BNO085
 #include "FlexOS_Ultra_DeviceTests.h"        // Device Care: pruebas, diagnostico y Post-Impact Check
 #include "FlexOS_Ultra_FallAlert.h"          // Device Care: aviso global de posible caida (vertical y horizontal)
@@ -419,7 +418,6 @@ void setup(){
   // usuario abre Deteccion de caidas o cuando ya la dejo activada, no en
   // cada encendido.
   dcBegin();
-  rotBegin();             // Flex Rotation: carga la preferencia y sondea el IMU si estaba encendida
 
   // Una recuperacion interrumpida solo necesita pantalla, tactil, NVS y FS.
   // No se cargan cuenta, boveda, tienda, navegador ni red antes de terminar.
@@ -613,10 +611,6 @@ void loop(){
                           // adquirido (Device Care, Flex Compass). MISMO bus y MISMO hilo
                           // que el tactil. Sin consumidores sale en su primera linea.
   dcSensorTick();         // deteccion de caidas: consume la muestra que acaba de llegar
-  rotEngineTick();        // Flex Rotation: postura estable -> orientacion de la UI. Va DESPUES de
-                          // dcSensorTick a proposito: la deteccion de caidas se queda siempre con
-                          // la muestra primero. Una funcion de comodidad no se pone por delante de
-                          // una de seguridad, y este orden lo deja escrito.
   compassIdleGuard();     // Flex Compass: si su tick lleva segundos sin correr (ventana de
                           // DeX cerrada, pantalla en exclusiva de otro subsistema), suelta
                           // su enganche del sensor.

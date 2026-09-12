@@ -42,7 +42,7 @@
 // ##  Detalles de memoria y sistema, y por el mismo motivo.
 // #############################################################
 #pragma once
-#include "FlexOS_Ultra_Rotation.h"  // eslabon anterior de la cadena (y con el, el servicio del IMU)
+#include "FlexOS_Ultra_IMU.h"       // eslabon anterior de la cadena (y el servicio del IMU)
 #include <stdarg.h>                 // vsnprintf de dcMetricSet
 #include "FlexOS_BNO085.h"          // driver del IMU (unidad de traduccion aparte)
 #include "FlexOS_FallDetect.h"      // logica de caidas (probada en el PC)
@@ -1134,14 +1134,11 @@ static void dcHomeAnimTick(){
   int c0 = gClipY0, c1 = gClipY1, cxx0 = gClipX0, cxx1 = gClipX1;
   setBuf(bbuf);
   gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
-  // 1) Margenes de la banda. present() publica la banda ENTERA, asi que lo
+  // 1) Margenes de la banda. present() publica FILAS ENTERAS, asi que lo
   //    que quede a los lados de la tarjeta tiene que ser lo que ya hay en
   //    pantalla; si no, se publicaria contenido viejo de bbuf.
-  //    fbSeedBand (y no un memcpy por filas) porque con la superficie girada
-  //    -- auto-rotacion -- esta banda de la maqueta es un rango de COLUMNAS
-  //    del panel: sembrar por filas dejaria sin sembrar justo lo que se
-  //    publica, y saldria un cuadro anterior alrededor de la tarjeta.
-  fbSeedBand(bbuf, b0, b1);
+  for(int j = b0; j <= b1; j++)
+    memcpy(bbuf + (size_t)j * SCR_W, fb + (size_t)j * SCR_W, (size_t)SCR_W * 2);
   // 2) La tarjeta ENTERA a fondo de pagina. Sin recorte a proposito: es el
   //    fondo que el vidrio va a desenfocar y el que muestrea su tinte
   //    adaptativo, y los dos miran la tarjeta completa.

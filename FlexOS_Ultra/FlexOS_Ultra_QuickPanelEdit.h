@@ -426,11 +426,6 @@ static void qsTick(){
   }
   // 4) composicion + publicacion: UN solo punto de render en todo el panel
   if(qsPanelY > 0 || qsLastY > 0) qsRender(false);
-  // 4b) FLEX ROTATION: el aviso "requiere un modulo IMU" se estampa DESPUES
-  //     del render del panel, que es quien posee el cuadro. Se retira solo y
-  //     al retirarse manda recomponer la cortina entera, asi que no puede
-  //     quedar ni un pixel suyo encima de un control.
-  rotNoticeDraw();
   // 5) trabajo diferido que NO puede ocurrir dentro del gesto ni antes de
   //    publicar: una escritura de flash son decenas de milisegundos.
   if(qpSavePanel){ qpSavePanel = false; qpSave(); }

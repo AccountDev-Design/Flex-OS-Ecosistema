@@ -571,23 +571,17 @@ static void sysRecents(){
 static bool navBarHandle(){
   if(!navBarVisible()) return false;
   int top = navBarTop();
-  // Ancho de la MAQUETA y banda fisica que hay que republicar. En vertical son
-  // los de siempre; con la superficie girada la franja ocupa toda la x logica,
-  // o sea todas las filas fisicas del panel.
-  const bool rot = rotApplied();
-  const int  cw  = rot ? LW : SCR_W;
-  const int  fy0 = rot ? 0 : top;
   bool inBar = (T.y >= top);
   // El destello se apaga SOLO, con una unica publicacion de la banda. Va lo
   // primero para que tambien se apague cuando el dedo ya no toca nada.
   if(gNavGlow >= 0 && gNavPress < 0 && (millis() - gNavGlowMs) >= NAV_PRESS_MS){
     gNavGlow = -1;
-    flxFlush(fy0, SCR_H - 1);
+    flxFlush(top, SCR_H - 1);
   }
   if(T.pressed && inBar){
-    gNavPress = gNavGlow = (T.x < cw / 3) ? 0 : (T.x < cw * 2 / 3 ? 1 : 2);
+    gNavPress = gNavGlow = (T.x < SCR_W / 3) ? 0 : (T.x < SCR_W * 2 / 3 ? 1 : 2);
     gNavGlowMs = millis();
-    flxFlush(fy0, SCR_H - 1);                 // el destello lo estampa navStampBar
+    flxFlush(top, SCR_H - 1);                 // el destello lo estampa navStampBar
     return true;
   }
   if(T.down && gNavPress >= 0) return true;   // arrastre iniciado en la barra: no llega a la app
@@ -595,19 +589,11 @@ static bool navBarHandle(){
     int btn = gNavPress;
     gNavPress = -1;
     gNavGlowMs = millis();                    // a partir de aqui el destello se desvanece solo
-    flxFlush(fy0, SCR_H - 1);
+    flxFlush(top, SCR_H - 1);
     if(!inBar){ gNavGlow = -1; return true; } // el dedo se fue de la barra: se cancela la accion
-    // FLEX ROTATION. Con el motor girado la accion se APARCA: el escritorio,
-    // Recientes y las pantallas del sistema se componen siempre en vertical, y
-    // ejecutarlas aqui las dibujaria con las coordenadas de la maqueta
-    // horizontal. rotAppTick las despacha una linea despues, ya fuera del
-    // alcance rotado. Sin rotacion, rotDeferNav devuelve false y esto es
-    // exactamente el reparto de siempre.
-    if(!rotDeferNav(btn + 1)){
-      if(btn == 0)      sysBack();
-      else if(btn == 1) sysHome();
-      else              sysRecents();
-    }
+    if(btn == 0)      sysBack();
+    else if(btn == 1) sysHome();
+    else              sysRecents();
     return true;
   }
   if(inBar && (T.tap || T.released || T.down)) return true;   // nada se filtra a la app
@@ -663,10 +649,6 @@ static void appClose(){
 // se reconstruye con enter(), que para una pantalla realmente estatica (por
 // ejemplo Educacion) es exactamente lo correcto.
 static void enterApp(int id){
-  // FLEX ROTATION: misma razon que en enterHomeState. La app que se abre se
-  // compone por su camino (appTrFinishOpen), que abre su propio alcance si
-  // procede; lo que no puede es heredar el de la app que la abrio.
-  rotScopeSuspendForSystem();
   qsForceClose();                 // ninguna app se abre con la cortina a medias
   if(id < 0 || id >= APP_N) return;
   // FASE 4: en kiosco solo se puede estar en la app clavada. Esto bloquea que
@@ -864,15 +846,6 @@ static void appTrFinishOpen(){
   setBuf(fb);
   const AppHooks* h = appHooks(id);
   if(resuming && !(h && h->resume)) resuming = false;
-  // FLEX ROTATION. Si el sistema esta en horizontal y esta app puede girar, el
-  // alcance se abre AQUI: la cabecera y el enter() se componen ya con la
-  // geometria buena, sin pintar primero en vertical para corregirlo despues
-  // (un repintado completo de mas y un parpadeo garantizado). rotEnterSurface
-  // ademas veta un resume() cuya maquetacion pertenezca a la otra
-  // orientacion -- repintar un estado logico de 480x800 dentro de 800x480 es
-  // justo como se apilan los elementos unos encima de otros.
-  bool rotSaved = false;
-  bool rotOwned = rotEnterSurface(id, resuming, rotSaved);
   if(!(APP_REG[id].flags & APP_CUSTOM_HEADER)){   // apps normales: marco estandar
     appDrawChrome(id);
     appDrawHeader(id);
@@ -884,7 +857,6 @@ static void appTrFinishOpen(){
   uint32_t psBefore = memFreePsram();
   if(resuming) h->resume();                       // reanuda: mismo contenido, misma posicion
   else if(APP_REG[id].enter) APP_REG[id].enter(); // la app pinta su contenido
-  rotLeaveSurface(rotOwned, rotSaved);            // el motor vuelve a vertical pase lo que pase
   appMemCommit(id, psBefore);
   gAppShed[id] = false;                           // vuelve a tener lo suyo cargado
   gAppState[id] = ALIFE_RUNNING;
@@ -958,12 +930,6 @@ static void appTick(){
     if(navBarHandle()) return;
     return;
   }
-  // FLEX ROTATION. La app corre girada por el SISTEMA: el tactil se traduce,
-  // la franja de navegacion sigue siendo del sistema y las salidas se
-  // despachan ya en vertical. Va antes del caso gLand de abajo porque ese es
-  // el otro camino -- el de una app que se gira ELLA SOLA -- y esos dos no
-  // pueden mezclarse.
-  if(rotApplied()){ rotAppTick(); return; }
   if(gLand){ if(APP_REG[gAppId].tick) APP_REG[gAppId].tick(); return; }  // Modo PC / Juegos: gestionan todo por su cuenta
   if(gNavMode == 1 && handleiOSGestures()) return;   // gestos iOS: swipe-arriba -> Home/multitarea
   // BARRA DE NAVEGACION DEL SISTEMA. Va lo PRIMERO y para TODAS las apps,
@@ -983,11 +949,6 @@ static void appTick(){
 // -- y por tanto interactivo -- desde el primer instante del cierre, en vez de
 // desde el ultimo cuadro de la animacion.
 static void enterHomeState(){
-  // FLEX ROTATION. Si se llega aqui desde el tick de una app GIRADA, el
-  // escritorio que viene detras se compone en vertical: el motor tiene que
-  // dejar de estar girado ANTES de que nadie dibuje (ver
-  // rotScopeSuspendForSystem). Fuera de un alcance rotado no hace nada.
-  rotScopeSuspendForSystem();
   if(hcActive) hcClose(true);      // vuelta al escritorio desde CUALQUIER ruta: sin restos ni fugas
   gIconOvrApp = -1;               // el origen prestado por la caja de apps caduca aqui (ver getIconRect)
   qsForceClose();                 // volver al escritorio nunca deja la cortina a medias

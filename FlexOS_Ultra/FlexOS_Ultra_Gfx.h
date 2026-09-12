@@ -95,43 +95,8 @@ static void kioskStampBadge(int y0, int y1);
 // mismo motivo que el candado del kiosco (ver el bloque de navegacion).
 static void navStampBar(int y0, int y1);
 
-// #############################################################
-// ##  FLEX ROTATION  ·  COORDENADAS LOGICAS DE UNA SUPERFICIE GIRADA
-// ##  ----------------------------------------------------------
-// ##  Cuando el SISTEMA pinta una superficie girada (auto-rotacion),
-// ##  quien dibuja maneja coordenadas LOGICAS -- lx 0..799, ly 0..479 --
-// ##  que ya no coinciden con las filas fisicas del panel. Mientras
-// ##  esta bandera esta puesta, y SOLO mientras lo esta, cambian dos
-// ##  cosas:
-// ##
-// ##   · LOS RECORTES. gClipY0/gClipY1 son, en la ruta landscape de
-// ##     siempre, una banda de filas FISICAS: asi los usan Modo PC y
-// ##     Juegos para acotar lo sucio, y eso no se toca. Pero una app
-// ##     que escribe "recorta de y=96 a y=416" esta hablando de SU
-// ##     maqueta. Ahi ese par tiene que recortar el eje Y LOGICO, o el
-// ##     viewport de una lista acotaria el eje equivocado y las filas
-// ##     con scroll se dibujarian ENCIMA de la cabecera -- justo el
-// ##     apilado que la auto-rotacion no puede producir.
-// ##
-// ##   · LAS BANDAS QUE SE PUBLICAN. Una franja horizontal del lienzo
-// ##     girado ocupa TODAS las filas fisicas del panel: es una
-// ##     columna, no una fila. Y el volcado al panel es por filas
-// ##     contiguas, asi que no hay banda parcial posible -- se publica
-// ##     el panel entero. Cuesta ancho de banda, no correccion, que es
-// ##     exactamente el orden de prioridades de esta funcion.
-// ##
-// ##  LIMITE CONOCIDO: el recorte horizontal (gClipX0/gClipX1) NO se
-// ##  aplica en esta ruta. En el sistema ese par se usa como "ancho
-// ##  completo" escribiendo SCR_W-1, que en la maqueta girada seria
-// ##  480 de 800 y cortaria un tercio de la pantalla. Entre acotar de
-// ##  menos y cortar contenido, se acota de menos: el recorte que
-// ##  protege la cabecera es el vertical, y ese si se aplica.
-// #############################################################
-static bool gClipLogical = false;
-
 static void flxFlush(int y0, int y1){
   if(gRtTarget){ gRtDirty = true; return; }   // app hospedada: no toca el panel
-  if(gClipLogical){ y0 = 0; y1 = SCR_H - 1; } // banda LOGICA -> el panel entero (ver arriba)
   if(y0 < 0) y0 = 0; if(y1 >= SCR_H) y1 = SCR_H - 1;
   if(y0 > y1) return;
   // El candado del kiosco se estampa ANTES de transferir la banda: ninguna
@@ -167,58 +132,14 @@ static inline void flxFlushAll(){ flxFlush(0, SCR_H - 1); }
 // Vuelca la banda [y0,y1] del back buffer a fb de una sola pasada.
 // Componer en bbuf y presentar asi evita publicar cuadros a medias.
 // Copia la banda [y0,y1] de src a fb de una sola pasada por fila completa.
-// Rango de COLUMNAS del panel que ocupa una banda [y0,y1] de la maqueta
-// girada. La rotacion manda y logica -> x fisica invertida, asi que la banda
-// se da la vuelta. false = no queda nada dentro del panel.
-static inline bool landBandCols(int y0, int y1, int &x0, int &x1){
-  x0 = (SCR_W - 1) - y1;
-  x1 = (SCR_W - 1) - y0;
-  if(x0 < 0) x0 = 0;
-  if(x1 > SCR_W - 1) x1 = SCR_W - 1;
-  return x0 <= x1;
-}
 static void fbCopyBand(const uint16_t* src, int y0, int y1){
   if(!src) return;
+  if(y0 < 0) y0 = 0;
+  if(y1 >= SCR_H) y1 = SCR_H - 1;
+  if(y0 > y1) return;
   uint16_t* dst = gRtTarget ? gRtTarget : fb;      // app hospedada: a su lienzo
   if(dst == src) return;
-  if(gClipLogical){
-    // BANDA LOGICA. En el panel es un rango de COLUMNAS, no de filas, asi que
-    // se copia columna a columna en vez de ensanchar a filas enteras: fuera de
-    // la banda, el buffer de composicion puede ser de un cuadro anterior, y
-    // publicarlo entero sacaria ese contenido viejo a la pantalla.
-    int x0, x1;
-    if(!landBandCols(y0, y1, x0, x1)) return;
-    size_t n = (size_t)(x1 - x0 + 1) * 2;
-    for(int j = 0; j < SCR_H; j++)
-      memcpy(dst + (size_t)j * SCR_W + x0, src + (size_t)j * SCR_W + x0, n);
-    return;
-  }
-  if(y0 < 0) y0 = 0;
-  if(y1 >= SCR_H) y1 = SCR_H - 1;
-  if(y0 > y1) return;
   memcpy(dst + (size_t)y0 * SCR_W, src + (size_t)y0 * SCR_W, (size_t)(y1 - y0 + 1) * SCR_W * 2);
-}
-// SIEMBRA DE UNA BANDA DE COMPOSICION. Deja en `dst` la banda [y0,y1] tal y
-// como esta AHORA en el panel, para que lo que se dibuje encima se componga
-// sobre lo que el usuario ya ve y no sobre un cuadro anterior. Es la inversa
-// de fbCopyBand y comparte su geometria: con la superficie girada, una banda
-// de la maqueta es un rango de COLUMNAS del panel. Quien siembre a mano con un
-// memcpy por filas se salta esa diferencia y compone sobre la region
-// equivocada en cuanto la interfaz gira.
-static void fbSeedBand(uint16_t* dst, int y0, int y1){
-  if(!dst || !fb || dst == fb) return;
-  if(gClipLogical){
-    int x0, x1;
-    if(!landBandCols(y0, y1, x0, x1)) return;
-    size_t n = (size_t)(x1 - x0 + 1) * 2;
-    for(int j = 0; j < SCR_H; j++)
-      memcpy(dst + (size_t)j * SCR_W + x0, fb + (size_t)j * SCR_W + x0, n);
-    return;
-  }
-  if(y0 < 0) y0 = 0;
-  if(y1 >= SCR_H) y1 = SCR_H - 1;
-  if(y0 > y1) return;
-  memcpy(dst + (size_t)y0 * SCR_W, fb + (size_t)y0 * SCR_W, (size_t)(y1 - y0 + 1) * SCR_W * 2);
 }
 
 static void present(int y0, int y1){
@@ -318,15 +239,13 @@ static bool gLand = false;
 static inline void putPhys(int lx, int ly, uint16_t c){
   if((unsigned)lx >= SCR_H || (unsigned)ly >= SCR_W) return;
   int x = (SCR_W - 1) - ly, y = lx;
-  if(gClipLogical){ if(ly < gClipY0 || ly > gClipY1) return; }   // recorte de la MAQUETA
-  else            { if(y  < gClipY0 || y  > gClipY1) return; }   // banda de filas FISICAS
+  if(y < gClipY0 || y > gClipY1) return;
   gBuf[(size_t)y * SCR_W + x] = c;
 }
 static inline void putPhysA(int lx, int ly, uint16_t c, uint8_t a){
   if((unsigned)lx >= SCR_H || (unsigned)ly >= SCR_W) return;
   int x = (SCR_W - 1) - ly, y = lx;
-  if(gClipLogical){ if(ly < gClipY0 || ly > gClipY1) return; }
-  else            { if(y  < gClipY0 || y  > gClipY1) return; }
+  if(y < gClipY0 || y > gClipY1) return;
   if(a >= 255){ gBuf[(size_t)y * SCR_W + x] = c; return; }
   if(a == 0) return;
   size_t i = (size_t)y * SCR_W + x; gBuf[i] = mix565(gBuf[i], c, a);
@@ -403,11 +322,7 @@ static void vLine(int x, int y, int h, uint16_t c){
 static void fillSpanLand(int lx, int ly, int n, uint16_t c){
   if(n <= 0) return;
   if((unsigned)lx >= SCR_H) return;
-  if(gClipLogical){                                   // recorte de la MAQUETA: acota el tramo
-    if(ly < gClipY0){ n -= (gClipY0 - ly); ly = gClipY0; }
-    if(ly + n > gClipY1 + 1) n = gClipY1 + 1 - ly;
-    if(n <= 0) return;
-  }else if(lx < gClipY0 || lx > gClipY1) return;       // banda de filas FISICAS: descarta la columna
+  if(lx < gClipY0 || lx > gClipY1) return;
   if(ly < 0){ n += ly; ly = 0; }
   if(ly + n > SCR_W) n = SCR_W - ly;
   if(n <= 0) return;
@@ -418,11 +333,7 @@ static void fillSpanLandA(int lx, int ly, int n, uint16_t c, uint8_t a){
   if(a >= 255){ fillSpanLand(lx, ly, n, c); return; }
   if(a == 0 || n <= 0) return;
   if((unsigned)lx >= SCR_H) return;
-  if(gClipLogical){
-    if(ly < gClipY0){ n -= (gClipY0 - ly); ly = gClipY0; }
-    if(ly + n > gClipY1 + 1) n = gClipY1 + 1 - ly;
-    if(n <= 0) return;
-  }else if(lx < gClipY0 || lx > gClipY1) return;
+  if(lx < gClipY0 || lx > gClipY1) return;
   if(ly < 0){ n += ly; ly = 0; }
   if(ly + n > SCR_W) n = SCR_W - ly;
   if(n <= 0) return;

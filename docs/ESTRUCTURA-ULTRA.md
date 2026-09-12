@@ -36,13 +36,6 @@ Los módulos que sí son código portable y con pruebas propias siguen siendo
 `FlexOS_JPEG`, `FlexOS_Vault`, `FlexOS_Weather`, `FlexOS_FS`,
 `FlexOS_Browser`, `FlexOS_FlexLink`... Esa frontera no se ha tocado.
 
-Hay además un caso intermedio: un núcleo de **lógica pura sin estado global**
-y sin reservas puede vivir en una cabecera de funciones `static inline` y
-compilarse igual en el PC, sin `.cpp`. Es lo que hace
-`FlexOS_RotationCore.h` (decisión de postura de Flex Rotation), que
-`tests/host/test_rotation` incluye directamente. No entra en la cadena de
-módulos `FlexOS_Ultra_*.h` precisamente porque no depende de nada del sketch.
-
 ## 2. Reglas de los módulos
 
 1. Cada módulo lleva `#pragma once` e **incluye al anterior** de la lista.
@@ -127,8 +120,7 @@ módulos `FlexOS_Ultra_*.h` precisamente porque no depende de nada del sketch.
 | `FlexOS_Ultra_System.h`           |   487 | I2C, soltar caches, Optimizar Flex OS y cambio de tema |
 | `FlexOS_Ultra_AppGallery.h`       |   768 | Galeria |
 | `FlexOS_Ultra_Vault.h`            |  1744 | Flex Vault: interfaz de la Carpeta segura |
-| `FlexOS_Ultra_IMU.h`              |   332 | Flex IMU Service: reparto del GY-BNO085 y conversiones de orientacion |
-| `FlexOS_Ultra_Rotation.h`         |   750 | Flex Rotation: auto-rotacion nativa (control del Panel Rapido + transicion de la UI) |
+| `FlexOS_Ultra_IMU.h`              |   239 | Flex IMU Service: reparto del GY-BNO085 entre Device Care y Flex Compass |
 | `FlexOS_Ultra_DeviceCare.h`       |  1604 | Flex Device Care: app, historial, salud y grafico del GY-BNO085 |
 | `FlexOS_Ultra_DeviceTests.h`      |   906 | Device Care: pruebas, diagnostico y Post-Impact Check |
 | `FlexOS_Ultra_FallAlert.h`        |   448 | Device Care: aviso global de posible caida (vertical y horizontal) |
