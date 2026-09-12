@@ -1339,6 +1339,10 @@ static bool qpEditTouch();
 static bool qpCatTouch();
 
 static bool qpPanelTouch(){
+  // FLEX ROTATION: mientras el aviso "requiere un modulo IMU" esta a la vista
+  // es MODAL. Un toque lo cierra y NO llega a los controles que tiene debajo:
+  // sin esto, el dedo que lo descarta encenderia el Wi-Fi de paso.
+  if(rotNoticeTouch()) return true;
   uint32_t now = millis();
   uint32_t dt = now - qpGPrevMs; if(dt < 1) dt = 1; if(dt > 100) dt = 100;
 

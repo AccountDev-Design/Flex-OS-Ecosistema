@@ -128,6 +128,23 @@ static int  navBarH();                                    // alto reservado abaj
 static bool navBarVisible();                              // el sistema esta dibujando la barra ahora mismo
 static void navStampBar(int y0, int y1);                  // la estampa en fb dentro de flxFlush (un solo propietario)
 static void touchDropAll();                               // corta el episodio tactil en curso (sin toques fantasma)
+// ---- Flex Rotation (auto-rotacion nativa) ----------------------------------
+// Se DECLARA aqui y se DEFINE en FlexOS_Ultra_Rotation.h, mucho mas abajo en
+// la cadena: el motor necesita ver el registro de apps, el Panel Rapido y el
+// servicio IMU, pero el marco de ventanas y la barra de navegacion -- que
+// vienen antes -- necesitan preguntarle por la geometria. Es el mismo patron
+// que navStampBar, que se declara aqui y se estampa desde flxFlush.
+static bool rotApplied();                                 // la superficie de primer plano se esta pintando en horizontal
+static int  rotWinBot();                                  // fondo del area de ventana que impone la rotacion
+static bool rotDeferNav(int action);                      // aparca atras/inicio/recientes hasta salir del alcance rotado
+static void rotScopeSuspendForSystem();                   // una app que navega desde su tick: el motor vuelve a vertical YA
+static void rotAppTick();                                 // tick de una app rotada (tactil traducido)
+static bool rotEnterSurface(int id, bool &resuming, bool &relayoutSaved);
+static void rotLeaveSurface(bool owned, bool relayoutSaved);
+static void rotNoticeDraw();                              // aviso "requiere modulo IMU" sobre la cortina
+static bool rotNoticeTouch();                             // ...y su toque, que es modal
+static void rotEngineTick();                              // una vuelta del motor de orientacion
+static void rotBegin();                                   // carga la preferencia y sondea el IMU si procede
 static const AppHooks* appHooks(int id);
 static void appLoadSessionOnce(int id);                   // relee de disco la sesion de una app (una vez por arranque)
 static void sessAutosaveTick();                           // guardado diferido por inactividad

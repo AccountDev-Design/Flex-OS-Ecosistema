@@ -53,7 +53,7 @@ APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net \
         $(BUILD)/test_vault $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
-        $(BUILD)/test_media $(BUILD)/test_mem $(BUILD)/test_fall \
+        $(BUILD)/test_media $(BUILD)/test_mem $(BUILD)/test_fall $(BUILD)/test_rotation \
         $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun
 
@@ -101,6 +101,13 @@ FALL_SRC := $(ULTRA)/FlexOS_FallDetect.cpp
 
 $(BUILD)/test_fall: test_fall.cpp $(FALL_SRC) $(ULTRA)/FlexOS_FallDetect.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) $(INC) -o $@ test_fall.cpp $(FALL_SRC)
+# --- FLEX ROTATION: nucleo de decision de postura ---------------------------
+# Mismo criterio que la deteccion de caidas, y por el mismo motivo: decidir si
+# un giro pequeno tiene que mover la interfaz es logica temporal pura, y
+# comprobarla con el aparato en la mano no permite medir nada. Sin .cpp: el
+# nucleo es una cabecera de funciones puras (no reserva, no toca hardware).
+$(BUILD)/test_rotation: test_rotation.cpp $(ULTRA)/FlexOS_RotationCore.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(INC) -o $@ test_rotation.cpp
 # --- PLATAFORMA DE APLICACIONES flex-app-v1 ---------------------------------
 # Cuatro baterias, todas con sanitizers. Aqui es OBLIGATORIO: este codigo
 # ejecuta bytecode que viene de internet y decide si un paquete firmado por un
@@ -348,6 +355,8 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_mem
 	@echo
 	@$(BUILD)/test_fall
+	@echo
+	@$(BUILD)/test_rotation
 	@echo
 	@$(BUILD)/test_appvm
 	@echo

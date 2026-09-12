@@ -123,6 +123,12 @@ enum {
   // usuario. Los dos solo aparecen si el codec de audio contesta de
   // verdad (ver qpAvAudio): sin altavoz no hay control de volumen.
   QSID_VOLUME, QSID_MUTE,
+  // AUTO-ROTACION (Flex Rotation). Tambien al final, por la misma razon: los
+  // identificadores anteriores estan guardados en NVS y colar uno en medio
+  // reordenaria el panel del usuario. El control existe siempre; lo que no
+  // existe sin un TENSTAR BNO085 detras es la funcion, y eso lo dice el propio
+  // control en vez de encenderse en falso.
+  QSID_ROTATE,
   QSID_COUNT
 };
 
@@ -167,6 +173,13 @@ static void qsAnimTo(int target);
 static void qpInvalidateAll();
 static bool qsTapTile(int px, int py);
 static void qsTick();
+// AUTO-ROTACION. Se definen en FlexOS_Ultra_Rotation.h (el motor vive alli,
+// junto al servicio IMU del que depende). QS_REG solo necesita su direccion,
+// igual que con el resto de controles cuyo backend esta mas abajo.
+static bool qpAvRotate();
+static bool qpStRotate();
+static void qpTapRotate();
+static void qpSubRotate(char* o, size_t n);
 
 // ---- PUENTE DE ACCIONES ----------------------------------------------
 // Una accion del panel que CAMBIA de pantalla tiene que dejar el sistema
@@ -447,6 +460,28 @@ static void qpIcoPlus(int cx, int cy, int s, uint16_t col){
   fillRoundRect((int)(cx - s * 0.36f), (int)(cy - s * 0.07f), (int)(s * 0.72f), (int)(s * 0.14f), 2, col);
   fillRoundRect((int)(cx - s * 0.07f), (int)(cy - s * 0.36f), (int)(s * 0.14f), (int)(s * 0.72f), 2, col);
 }
+// AUTO-ROTACION: el aparato en vertical con una flecha que lo rodea. La curva
+// se traza con segmentos cortos porque el motor no tiene primitiva de arco --
+// mismo recurso que ya usan los demas glifos vectoriales del panel.
+static void qpIcoRotate(int cx, int cy, int s, uint16_t col){
+  // cuerpo del aparato
+  drawRoundRect((int)(cx - s * 0.21f), (int)(cy - s * 0.34f), (int)(s * 0.42f), (int)(s * 0.68f), 4, col);
+  fillRoundRect((int)(cx - s * 0.07f), (int)(cy + s * 0.22f), (int)(s * 0.14f), (int)(s * 0.05f), 2, col);
+  // arco de giro, de las 8 a las 4 en punto por el lado de fuera
+  const float r = s * 0.46f;
+  float pa = -2.30f;                                   // radianes
+  for(int i = 1; i <= 7; i++){
+    float a = -2.30f + (float)i * (1.15f / 7.0f * 2.0f);
+    strokeSegAA(cx + r * cosf(pa), cy + r * sinf(pa),
+                cx + r * cosf(a),  cy + r * sinf(a), 1.7f, col);
+    pa = a;
+  }
+  // punta de la flecha al final del arco
+  float ax = cx + r * cosf(pa), ay = cy + r * sinf(pa);
+  fillTriangle((int)(ax - s * 0.11f), (int)(ay - s * 0.02f),
+               (int)(ax + s * 0.04f), (int)(ay - s * 0.13f),
+               (int)(ax + s * 0.06f), (int)(ay + s * 0.08f), col);
+}
 static void qpIcoMinus(int cx, int cy, int s, uint16_t col){
   fillRoundRect((int)(cx - s * 0.34f), (int)(cy - s * 0.07f), (int)(s * 0.68f), (int)(s * 0.14f), 2, col);
 }
@@ -529,6 +564,12 @@ static const QsCtl QS_REG[QSID_COUNT] = {
     qpAvAudio,  NULL,         qpTapVolume,   qpTapSettings, qpSubVolume,   qpIcoSpeaker },
   { QSID_MUTE,      "Silencio",   "Silenciar",              QT_TOGGLE, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SYSTEM,
     qpAvAudio,  qpStMute,     qpTapMute,     qpTapSettings, qpSubMute,     qpIcoMute },
+  // AUTO-ROTACION. Interruptor de estado REAL: qpStRotate solo devuelve true
+  // cuando la funcion esta de verdad activa, asi que sin IMU el control no
+  // puede quedarse encendido. Categoria Pantalla, junto al brillo, el tema y
+  // Liquid Glass, que es donde el usuario busca lo que afecta a la pantalla.
+  { QSID_ROTATE,    "Auto-rotaci\xC3\xB3n", "Auto-rotaci\xC3\xB3n",   QT_TOGGLE, QSZ_1x1|QSZ_2x1,   QOR_H|QOR_V,  QCAT_SCREEN,
+    qpAvRotate, qpStRotate,   qpTapRotate,   qpTapSettings, qpSubRotate,   qpIcoRotate },
 };
 
 // Acceso seguro: un id fuera de rango devuelve NULL en vez de leer basura.
@@ -578,7 +619,10 @@ static bool qpNextSize(int id, int w, int h, int dir, uint8_t &nw, uint8_t &nh){
 // Arrays FIJOS y estructura compacta: sin String, sin heap y sin nada que
 // se asigne por cuadro. El blob tiene tamano FIJO y se valida entero al
 // cargar (igual que homeWgDeserialize).
-#define QP_CFG_VER    1
+// v2: entra QSID_ROTATE (Auto-rotacion). Subir esta version es lo que hace que
+// qpAdoptNew() ofrezca el control a quien ya tenia el panel configurado, SIN
+// mover ni uno de los controles que el usuario habia colocado.
+#define QP_CFG_VER    2
 #define QP_MAX_ITEMS  24
 #define QP_BLOB_N     (4 + QP_MAX_ITEMS * 5)      // cabecera + 5 bytes por elemento
 #define QP_NVS_NS     "flexqs"                    // namespace PROPIO: no colisiona con "flexos"
@@ -606,6 +650,7 @@ static const QpDef QP_FACTORY[] = {
   { QSID_THEME,     1, 1 },
   { QSID_POWERSAVE, 1, 1 },
   { QSID_GLASS,     1, 1 },
+  { QSID_ROTATE,    1, 1 },
   { QSID_CRONO,     1, 1 },
   { QSID_NTP,       1, 1 },
   { QSID_LOCK,      1, 1 },

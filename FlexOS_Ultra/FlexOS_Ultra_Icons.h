@@ -89,8 +89,13 @@ static void drawAppIcon(int id, int x, int y, int S){
   // El margen es cortesia por si un icono futuro pinta un borde justo encima.
   {
     const int M = 2;
-    if(gLand){                                   // en landscape la fila FISICA es la x logica
-      if(x + S + M <= gClipY0 || x - M > gClipY1) return;
+    if(gLand){
+      // Con recorte de la MAQUETA (auto-rotacion) el par gClipY acota el eje Y
+      // LOGICO; en la ruta landscape de siempre acota filas FISICAS, que son
+      // la x logica. Mirar el eje equivocado aqui no recorta de mas: DESCARTA
+      // el icono entero, que es peor que no optimizar.
+      if(gClipLogical){ if(y + S + M <= gClipY0 || y - M > gClipY1) return; }
+      else            { if(x + S + M <= gClipY0 || x - M > gClipY1) return; }
     } else {
       if(y + S + M <= gClipY0 || y - M > gClipY1) return;
       if(x + S + M <= gClipX0 || x - M > gClipX1) return;
