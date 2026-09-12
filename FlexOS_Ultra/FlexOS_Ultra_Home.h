@@ -462,6 +462,13 @@ static void renderLock(){
   }
   fillRoundRect(SCR_W / 2 - 70, SCR_H - 150, 140, 10, 5, TH_ONWALL);
   drawTextC(SCR_W / 2, SCR_H - 118, t(S_SWIPE), 2, TH_ONWALL);
+  // PROTECCION CONTRA ROBO. Si la proteccion esta disparada, su aviso forma
+  // parte de la PANTALLA DE BLOQUEO, no de un overlay con temporizador: asi
+  // sobrevive al cambio de minuto, al ir y volver de la pantalla de clave y a
+  // cualquier repintado, sin nada que lo pueda dejar a medias. Va al final
+  // para quedar por encima de los widgets, y ocupa la franja 84..188, que el
+  // bloqueo deja libre entre la barra de estado y el panel del reloj.
+  if(tpLockBannerOn()) tpDrawLockBanner();
   setBuf(fb);
 }
 static void showLock(){ blitToFb(lockBuf); flxFlushAll(); }
@@ -1118,7 +1125,15 @@ static void lockTick(){
     if(off != lastLockOff){ composeUnlock(off); lastLockOff = off; }
     lockOff = off;
   } else if(T.released){
-    if(lockOff > SCR_H / 3 || T.swipeUp){ animateTo(lockOff, SCR_H); enterHome(); }
+    if(lockOff > SCR_H / 3 || T.swipeUp){
+      // DESBLOQUEO EXPLICITO sin clave configurada. Es uno de los DOS unicos
+      // caminos por los que se sale del bloqueo (el otro es lockOnSuccess con
+      // PIN o contrasena), y por eso es aqui donde se levanta la proteccion
+      // contra robo. Nada mas la cancela: ni dejar de moverse, ni volver a
+      // moverse, ni una caida posterior, ni reiniciar.
+      tpLockCleared();
+      animateTo(lockOff, SCR_H); enterHome();
+    }
     else { animateTo(lockOff, 0); lockOff = 0; lastLockOff = -1; showLock(); }
   }
 }

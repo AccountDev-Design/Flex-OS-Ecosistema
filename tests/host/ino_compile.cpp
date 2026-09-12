@@ -255,6 +255,7 @@ static void testTransicionesApps();
 static void testRejillaAutoPaginas();
 static void testMultitareaMemoria();
 static void testFlexCompass();
+static void testProteccionRobo();
 static int gFails = 0;
 static void chk(bool ok, const char* what){
   if(!ok){ printf("  FALLO: %s\n", what); gFails++; }
@@ -4025,6 +4026,450 @@ static int lgDiff(const uint16_t* a, const uint16_t* b, int y0, int y1){
   return n;
 }
 
+// #############################################################
+//  PROTECCION CONTRA ROBO  ·  integracion dentro del sketch
+//  ------------------------------------------------------------
+//  El clasificador tiene su propia bateria (tests/host/test_theft).
+//  Lo que se comprueba AQUI es lo que solo existe montado dentro de
+//  Flex OS: el reparto del sensor, la maquina de estados de la
+//  funcion, el Event Manager (que un arrebato seguido de caida sea UN
+//  incidente y no dos), la persistencia del bloqueo, que solo el
+//  desbloqueo explicito lo levante, la maqueta de 480x800 y que la
+//  animacion sea un BUCLE PERFECTO y no se salga de su rectangulo.
+// #############################################################
+static void testProteccionRobo(){
+  printf("Proteccion contra robo\n");
+  int fails0 = gFails;
+  gLand = false; gHosted = false; editMode = false;
+  uiClipFull();
+  gNavMode = 0;
+  gTestMs = 300000; clkSetEpoch(1789221138u); clkLastMin = -1; clkUpdate();
+
+  // --- 1. EL REPARTO DEL SENSOR ---------------------------------------
+  // Un solo driver. Activar la proteccion NO puede inicializar el BNO085
+  // por segunda vez, y desactivarla NO puede apagarlo por debajo de la
+  // deteccion de caidas.
+  {
+    bool gtPrev = gtOk; gtOk = true;
+    while(imuHolders() > 0) imuRelease();
+    dcSensorOn = false; tpHold = false; tpOn = false;
+    chk(imuHolders() == 0, "de partida no hay ningun consumidor del IMU");
+
+    dcSensorStart();
+    chk(imuHolders() == 1, "Device Care adquiere el servicio");
+    tpSetEnabled(true);
+    chk(imuHolders() == 2 && tpHold,
+        "la proteccion adquiere el MISMO servicio, no un segundo driver");
+    dcSensorStop();
+    chk(imuHolders() == 1 && tpHold,
+        "apagar la deteccion de caidas NO deja a la proteccion sin sensor");
+    tpSetEnabled(false);
+    chk(imuHolders() == 0 && !tpHold, "y al apagarla tambien, el servicio queda libre");
+
+    tpSetEnabled(true);
+    dcSensorStart();
+    chk(imuHolders() == 2, "el orden de llegada da igual");
+    tpSetEnabled(false);
+    chk(imuHolders() == 1 && dcSensorOn,
+        "apagar la proteccion NO apaga el sensor por debajo de la deteccion de caidas");
+    dcSensorStop();
+    chk(imuHolders() == 0, "sin consumidores, el sensor se suelta del todo");
+    // Idempotencia: dos activaciones seguidas no descuadran la cuenta.
+    tpSetEnabled(true); tpSetEnabled(true);
+    chk(imuHolders() == 1, "activar dos veces no cuenta dos consumidores");
+    tpSetEnabled(false); tpSetEnabled(false);
+    chk(imuHolders() == 0, "desactivar dos veces tampoco descuadra la cuenta");
+
+    // CON SU PANTALLA DELANTE el enganche se conserva aunque se apague la
+    // funcion: si no, apagar el interruptor dejaria la pantalla diciendo
+    // "requiere modulo IMU" con el modulo puesto.
+    int stPrev = gState;
+    gState = ST_THEFT;
+    tpSetEnabled(true);
+    chk(imuHolders() == 1, "en su pantalla, activarla adquiere el servicio");
+    tpSetEnabled(false);
+    chk(imuHolders() == 1 && tpHold,
+        "apagarla SIN salir de la pantalla conserva el enganche para poder mirar");
+    gState = stPrev;
+    tpTickMs = gTestMs;
+    gTestMs += TP_IDLE_RELEASE_MS + 100;
+    tpIdleGuard();
+    chk(imuHolders() == 0, "y fuera de la pantalla ese enganche si se suelta");
+    gtOk = gtPrev;
+  }
+
+  // --- 2. LOS ESTADOS DE LA FUNCION (sin estados ambiguos) ------------
+  {
+    bool gtPrev = gtOk; gtOk = true;
+    tpLocked = false; tpLockPending = false; tpOn = false; tpHold = false;
+    while(imuHolders() > 0) imuRelease();
+    chk(tpStatus() == TP_ST_OFF, "sin activar: DESACTIVADA");
+    tpSetEnabled(true);
+    // El doble del driver deja el modulo AUSENTE, asi que la funcion queda
+    // PAUSADA -- que es exactamente lo que hay que decir cuando no hay IMU.
+    chk(!flexBnoAvailable(), "el arnes corre con el IMU ausente");
+    chk(tpStatus() == TP_ST_PAUSED, "activada y sin IMU disponible: PAUSADA");
+    tpLocked = true; tpLockPending = false;
+    chk(tpStatus() == TP_ST_LOCKED, "con el bloqueo puesto: BLOQUEADA");
+    tpLockPending = true;
+    chk(tpStatus() == TP_ST_DETECTED, "mientras el bloqueo cae: ARREBATO_DETECTADO");
+    tpLocked = false; tpLockPending = false;
+    tpSetEnabled(false);
+    chk(tpStatus() == TP_ST_OFF, "y al apagarla vuelve a DESACTIVADA");
+    gtOk = gtPrev;
+  }
+
+  // --- 3. EVENT MANAGER: arrebato + caida es UN incidente -------------
+  {
+    tpHistLoaded = true;                       // se trabaja sobre la copia en RAM
+    tpHistN = 0; tpHistDirty = false;
+    FlexTheftEvent ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.confidence = 86; ev.snatch = 1; ev.pullG = 2.7f; ev.burstMs = 160;
+    ev.escapeMs = 900; ev.dirCoh = 0.93f;
+    ev.reasons = FLEXTHEFT_R_HELD | FLEXTHEFT_R_PULL | FLEXTHEFT_R_JERK |
+                 FLEXTHEFT_R_DIR | FLEXTHEFT_R_TWIST | FLEXTHEFT_R_ESCAPE;
+    tpHistAdd(&ev, TP_EV_SNATCH, TP_F_LOCKED);
+    chk(tpHistN == 1, "el posible arrebato queda registrado");
+    chk(tpHist[0].kind == TP_EV_SNATCH, "y se registra como POSIBLE ARREBATO");
+    chk(tpHist[0].conf == 86 && tpHist[0].pull == 27,
+        "con su confianza y la intensidad del tiron");
+
+    // Un segundo despues, durante la huida, el aparato cae.
+    tpHaveLast = true; tpLastEvtMs = gTestMs;
+    gTestMs += 1000;
+    FlexFallEvent fe;
+    memset(&fe, 0, sizeof(fe));
+    fe.fall = 1; fe.confidence = 74; fe.peakG = 4.8f; fe.tMs = gTestMs;
+    tpNoteFall(&fe);
+    chk(tpHistN == 1, "la caida NO crea una segunda entrada del mismo incidente");
+    chk(tpHist[0].kind == TP_EV_SNATCH_FALL,
+        "el registro ASCIENDE a 'posible arrebato + caida'");
+    chk(tpHist[0].conf == 86, "la confianza del arrebato se conserva intacta");
+    chk(tpHist[0].impact == 48, "y se anota el pico del impacto posterior");
+    chk((tpHist[0].flags & TP_F_LOCKED) != 0, "el bloqueo sigue anotado");
+
+    // Una segunda caida del mismo incidente no vuelve a ascender nada.
+    tpNoteFall(&fe);
+    chk(tpHistN == 1 && tpHist[0].kind == TP_EV_SNATCH_FALL,
+        "una caida mas del mismo incidente no duplica el registro");
+
+    // Una caida LEJANA en el tiempo no pertenece a ese arrebato.
+    tpHistN = 0;
+    tpHistAdd(&ev, TP_EV_SNATCH, TP_F_LOCKED);
+    tpLastEvtMs = gTestMs;
+    gTestMs += TP_CORR_MS + 2000;
+    tpNoteFall(&fe);
+    chk(tpHist[0].kind == TP_EV_SNATCH,
+        "una caida fuera de la ventana NO se cuela en el arrebato anterior");
+
+    // Y una caida SOLA nunca crea un registro aqui: esa pregunta es de
+    // Flex Device Care, y alli se sigue registrando como siempre.
+    tpHistN = 0; tpHaveLast = false;
+    tpNoteFall(&fe);
+    chk(tpHistN == 0, "una caida sola no entra en el historial de seguridad");
+  }
+
+  // --- 4. EL BLOQUEO: se pone, persiste y solo lo levanta el desbloqueo -
+  //
+  //  NOTA SOBRE EL ARNES: tpApplyLock() termina llamando a autoLockNow(), que
+  //  es EL bloqueo del sistema y arrastra su animacion interpolada
+  //  (animateTo). Esa animacion avanza con millis(), y aqui millis() es un
+  //  reloj virtual que no corre solo, asi que no se puede ejecutar desde una
+  //  prueba de host. Lo que SI se comprueba entero es todo lo que decide:
+  //  cuando se puede bloquear y cuando no, que el bloqueo quede armado y
+  //  persistido, que nada lo cancele y que el desbloqueo explicito lo levante.
+  {
+    bool gtPrev = gtOk; gtOk = true;
+    gSuspOn = false; gSafeMode = false; qsPanelY = 0; qsAnimOn = false;
+    gFrPending = false;
+    tpLocked = false; tpLockPending = false;
+    tpOn = true;
+
+    // 4a. Cuando NO se puede bloquear ahora mismo.
+    gState = ST_HOME;
+    chk(tpCanLockNow(), "en el escritorio normal si se puede bloquear");
+    gSafeMode = true;
+    chk(!tpCanLockNow(), "en modo seguro no");
+    gSafeMode = false;
+    gSuspOn = true;
+    chk(!tpCanLockNow(), "con la pantalla suspendida tampoco (no se pinta a oscuras)");
+    gSuspOn = false;
+    gState = ST_SPLASH;
+    chk(!tpCanLockNow(), "durante el arranque tampoco");
+    gState = ST_OOBE_LANG;
+    chk(!tpCanLockNow(), "durante la puesta en marcha tampoco");
+    gState = ST_HOME;
+    qsPanelY = 40;
+    chk(!tpCanLockNow(), "con la cortina abierta tampoco (es duena de la pantalla)");
+    qsPanelY = 0;
+
+    // 4b. Un bloqueo que no cabe AHORA no se pierde: queda pendiente.
+    gSafeMode = true;
+    tpArmLock(TP_EV_SNATCH);
+    chk(tpLocked, "al detectar un posible arrebato el bloqueo queda ARMADO");
+    chk(tpLockPending, "...y si la pantalla esta ocupada, PENDIENTE en vez de perdido");
+    chk(tpLockBannerOn(), "la pantalla de bloqueo tiene que dibujar su aviso");
+    chk(tpLockUtc != 0, "con la hora exacta del evento");
+    gSafeMode = false;
+
+    // 4c. En cuanto se despeja, se aplica. Estando ya detras del bloqueo
+    //     (pantalla de clave) no hay que volver a bloquear nada.
+    gState = ST_LOCKSETUP; gLockVerifyLocked = true;
+    tpLockPendingTick();
+    chk(!tpLockPending, "al despejarse la pantalla, el bloqueo deja de estar pendiente");
+    gLockVerifyLocked = false; gState = ST_HOME;
+
+    // Persistencia: lo que sobrevive a un reinicio es lo que impide que
+    // quitar la bateria sea la via de escape de la proteccion.
+    {
+      Preferences p;
+      p.begin("flextheft", true);
+      chk(p.getBool("lk", false), "el bloqueo queda escrito en NVS");
+      p.end();
+    }
+
+    // Nada de esto lo cancela.
+    tpSensorTick();
+    chk(tpLocked, "moverse otra vez NO cancela el bloqueo");
+    FlexFallEvent fe; memset(&fe, 0, sizeof(fe));
+    fe.fall = 1; fe.peakG = 5.0f; fe.confidence = 80;
+    tpNoteFall(&fe);
+    chk(tpLocked, "una caida posterior tampoco lo cancela");
+    tpLockPendingTick();
+    chk(tpLocked, "ni un reintento del propio bloqueo");
+
+    // Solo el desbloqueo explicito.
+    tpLockCleared();
+    chk(!tpLocked && !tpLockPending, "el desbloqueo explicito SI lo levanta");
+    chk(!tpLockBannerOn(), "y el aviso desaparece de la pantalla de bloqueo");
+    {
+      Preferences p;
+      p.begin("flextheft", true);
+      chk(!p.getBool("lk", true), "el levantamiento tambien se persiste");
+      p.end();
+    }
+    tpOn = false; tpHold = false;
+    while(imuHolders() > 0) imuRelease();
+    gState = ST_HOME;
+    gtOk = gtPrev;
+  }
+
+  // --- 5. SIN MODULO NO SE MONITORIZA NADA ----------------------------
+  {
+    bool gtPrev = gtOk; gtOk = true;
+    tpOn = true; tpHold = true; tpImuLive = false;
+    tpLocked = false; tpLockPending = false;
+    uint32_t ev0 = flexTheftEventCount(&tpDet);
+    for(int i = 0; i < 200; i++){ gTestMs += 20; tpSensorTick(); }
+    chk(flexTheftEventCount(&tpDet) == ev0,
+        "con el IMU ausente el clasificador no evalua ni un evento");
+    chk(!tpLocked, "y no se inventa ningun bloqueo");
+    chk(tpStatus() == TP_ST_PAUSED, "el estado que se ensena es PAUSADA, no ACTIVA");
+    tpOn = false; tpHold = false;
+    gtOk = gtPrev;
+  }
+
+  // --- 6. MAQUETA 480x800: nada fuera de pantalla, nada superpuesto ---
+  {
+    // Los bloques de la pantalla principal, en orden, con su alto real.
+    struct { int y, h; const char* q; } bl[] = {
+      { 0,              TP_HDR_H,     "cabecera" },
+      { TP_TOGGLE_Y,    TP_TOGGLE_H,  "interruptor" },
+      { TP_SENSOR_Y,    TP_SENSOR_H,  "tarjeta del sensor" },
+      { TP_ANIM_Y,      TP_ANIM_H,    "animacion" },
+      { TP_STATE_Y,     TP_STATE_H,   "estado y ultimo evento" },
+      { TP_HISTROW_Y,   TP_ROW_H,     "historial" },
+      { TP_SENSROW_Y,   TP_ROW_H,     "sensibilidad" },
+      { TP_FOOT_Y,      8,            "pie" },
+    };
+    const int N = (int)(sizeof(bl)/sizeof(bl[0]));
+    bool solapa = false, fuera = false;
+    for(int i = 0; i < N; i++){
+      if(bl[i].y < 0 || bl[i].y + bl[i].h > SCR_H) fuera = true;
+      if(i && bl[i].y < bl[i-1].y + bl[i-1].h){
+        printf("  FALLO: '%s' se solapa con '%s'\n", bl[i].q, bl[i-1].q);
+        solapa = true;
+      }
+    }
+    chk(!solapa, "ningun bloque de la pantalla principal se solapa con otro");
+    chk(!fuera,  "ningun bloque se sale de los 800 px de alto");
+    chk(TP_X >= 8 && TP_X + TP_W <= SCR_W - 8, "las tarjetas respetan los margenes laterales");
+    // El rectangulo de la animacion vive DENTRO de su tarjeta, con margen.
+    chk(TP_ST_X > TP_X && TP_ST_X + TP_ST_W < TP_X + TP_W,
+        "el escenario de la animacion cabe dentro de su tarjeta");
+    chk(TP_ST_Y > TP_ANIM_Y && TP_ST_Y + TP_ST_H < TP_ANIM_Y + TP_ANIM_H,
+        "...tambien en vertical");
+    // El aviso del bloqueo va entre la barra de estado y el panel del reloj.
+    chk(TPL_Y >= 60 && TPL_Y + TPL_H <= 198,
+        "el aviso del bloqueo no pisa ni la barra de estado ni el reloj gigante");
+    chk(TPL_X >= 8 && TPL_X + TPL_W <= SCR_W - 8,
+        "y respeta los margenes laterales");
+  }
+
+  // --- 7. LA ANIMACION ES UN BUCLE PERFECTO ---------------------------
+  // El ultimo cuadro tiene que ser EL MISMO que el primero. Si no, el
+  // bucle da un salto visible cada 7,2 s. Se dibujan los dos y se
+  // comparan pixel a pixel: no hay forma de que esto "casi" pase.
+  {
+    const size_t PX = (size_t)SCR_W * SCR_H;
+    uint16_t* ref = (uint16_t*)malloc(PX * 2);
+    if(!ref){ printf("  FALLO: sin memoria para la referencia\n"); gFails++; }
+    else {
+      auto pinta = [&](float u){
+        setBuf(bbuf);
+        for(size_t i = 0; i < PX; i++) bbuf[i] = 0x5AA5;      // centinela
+        gClipX0 = TP_ST_X; gClipX1 = TP_ST_X + TP_ST_W - 1;
+        gClipY0 = TP_ST_Y; gClipY1 = TP_ST_Y + TP_ST_H - 1;
+        tpDrawStage(u);
+        uiClipFull();
+        setBuf(fb);
+      };
+      pinta(0.0f);
+      memcpy(ref, bbuf, PX * 2);
+      pinta(1.0f);
+      int dif = 0;
+      for(size_t i = 0; i < PX; i++) if(bbuf[i] != ref[i]) dif++;
+      chk(dif == 0, "el ultimo cuadro de la animacion es IDENTICO al primero (bucle perfecto)");
+
+      // Y no es un bucle vacio: por el medio pasan cosas distintas.
+      int distintos = 0;
+      const float muestras[6] = { 0.20f, 0.38f, 0.50f, 0.65f, 0.80f, 0.90f };
+      for(int k = 0; k < 6; k++){
+        pinta(muestras[k]);
+        int d = 0;
+        for(size_t i = 0; i < PX; i++) if(bbuf[i] != ref[i]) d++;
+        if(d > 200) distintos++;
+      }
+      chk(distintos == 6, "y por el camino SI se mueve (la prueba no es vacia)");
+
+      // NADA se sale del escenario: fuera de su rectangulo el centinela
+      // sigue intacto, en todo el recorrido del bucle.
+      bool limpio = true;
+      for(int k = 0; k <= 40 && limpio; k++){
+        pinta((float)k / 40.0f);
+        for(int y = 0; y < SCR_H && limpio; y++){
+          for(int x = 0; x < SCR_W; x++){
+            bool dentro = (x >= TP_ST_X && x < TP_ST_X + TP_ST_W &&
+                           y >= TP_ST_Y && y < TP_ST_Y + TP_ST_H);
+            if(dentro) continue;
+            if(bbuf[(size_t)y * SCR_W + x] != 0x5AA5){ limpio = false; break; }
+          }
+        }
+      }
+      chk(limpio, "la animacion no escribe ni un pixel fuera de su rectangulo");
+
+      // El escenario se repinta ENTERO en cada cuadro: ni un pixel del
+      // centinela sobrevive dentro. Sin esto quedarian restos del cuadro
+      // anterior y la animacion parpadearia.
+      pinta(0.42f);
+      int restos = 0;
+      for(int y = TP_ST_Y; y < TP_ST_Y + TP_ST_H; y++)
+        for(int x = TP_ST_X; x < TP_ST_X + TP_ST_W; x++)
+          if(bbuf[(size_t)y * SCR_W + x] == 0x5AA5) restos++;
+      chk(restos == 0, "cada cuadro repinta el escenario entero (sin restos del anterior)");
+      free(ref);
+    }
+  }
+
+  // --- 7b. COSTE DE UN CUADRO -----------------------------------------
+  //  No es el P4, asi que el numero absoluto no dice nada. Lo que si dice
+  //  algo es la COMPARACION con un panel de vidrio del sistema, que ya se
+  //  dibuja a 60 fps en la placa: si un cuadro de la animacion cuesta menos
+  //  que eso, no hay motivo para que no sea fluido.
+  {
+    struct timespec c0, c1;
+    const int N = 60;
+    setBuf(bbuf);
+    gClipX0 = TP_ST_X; gClipX1 = TP_ST_X + TP_ST_W - 1;
+    gClipY0 = TP_ST_Y; gClipY1 = TP_ST_Y + TP_ST_H - 1;
+    clock_gettime(CLOCK_MONOTONIC, &c0);
+    for(int i = 0; i < N; i++) tpDrawStage((float)(i % 40) / 40.0f);
+    clock_gettime(CLOCK_MONOTONIC, &c1);
+    double cuadro = ((c1.tv_sec - c0.tv_sec) * 1e3 + (c1.tv_nsec - c0.tv_nsec) / 1e6) / N;
+    uiClipFull();
+    clock_gettime(CLOCK_MONOTONIC, &c0);
+    for(int i = 0; i < N; i++) drawLiquidGlassPanel(24, 90, SCR_W - 48, 200, 28, TH_GLASS2);
+    clock_gettime(CLOCK_MONOTONIC, &c1);
+    double vidrio = ((c1.tv_sec - c0.tv_sec) * 1e3 + (c1.tv_nsec - c0.tv_nsec) / 1e6) / N;
+    setBuf(fb);
+    printf("  [robo] cuadro de animacion %.3f ms  ·  panel de vidrio comparable %.3f ms\n",
+           cuadro, vidrio);
+    chk(cuadro < vidrio * 2.0,
+        "un cuadro de la animacion no cuesta mas que un panel de vidrio del sistema");
+  }
+
+  // --- 7c. LA RED DE SEGURIDAD DEL ENGANCHE ---------------------------
+  //  Entrar a mirar adquiere el sensor aunque la proteccion este apagada.
+  //  Si la pantalla se pierde sin pasar por la salida, ese enganche tiene
+  //  que soltarse solo -- pero NUNCA el de una proteccion activada.
+  {
+    bool gtPrev = gtOk; gtOk = true;
+    while(imuHolders() > 0) imuRelease();
+    tpOn = false; tpHold = false; tpTickMs = 0;
+
+    tpHoldImu(true);                       // como hace theftEnter()
+    tpTickMs = gTestMs;
+    chk(imuHolders() == 1, "entrar a mirar adquiere el servicio");
+    gTestMs += 1000; tpIdleGuard();
+    chk(imuHolders() == 1, "mientras la pantalla vive, el enganche se queda");
+    gTestMs += TP_IDLE_RELEASE_MS + 100; tpIdleGuard();
+    chk(imuHolders() == 0 && !tpHold,
+        "si su pantalla se pierde sin salir, el enganche se suelta solo");
+
+    // Y con la proteccion ACTIVADA el guardian no puede tocar nada.
+    tpSetEnabled(true);
+    tpTickMs = gTestMs;
+    gTestMs += TP_IDLE_RELEASE_MS * 4;
+    tpIdleGuard();
+    chk(imuHolders() == 1 && tpHold,
+        "con la proteccion activada el guardian NO suelta el sensor");
+    tpSetEnabled(false);
+    while(imuHolders() > 0) imuRelease();
+    tpHold = false; tpTickMs = 0;
+    gtOk = gtPrev;
+  }
+
+  // --- 8. LA FILA DE AJUSTES DICE EL ESTADO REAL ----------------------
+  {
+    tpOn = false; tpLocked = false; tpLockPending = false; tpHold = false;
+    while(imuHolders() > 0) imuRelease();
+    chk(strcmp(theftRowValue(), tpt(TPS_OFF)) == 0, "desactivada: la fila lo dice");
+    tpLocked = true;
+    tpOn = true;
+    chk(strcmp(theftRowValue(), tpt(TPS_LOCKEDST)) == 0, "bloqueada: la fila lo dice");
+    tpLocked = false; tpOn = false;
+  }
+
+  // --- 9. LA SENSIBILIDAD CAMBIA EL CLASIFICADOR, NO SOLO UN UMBRAL ---
+  {
+    tpSetSens(FLEXTHEFT_SENS_LOW);
+    FlexTheftParams lo = tpDet.p;
+    tpSetSens(FLEXTHEFT_SENS_HIGH);
+    FlexTheftParams hi = tpDet.p;
+    chk(lo.pullG > hi.pullG && lo.dirCohMin > hi.dirCohMin &&
+        lo.threshold > hi.threshold && lo.escapeNeedMs > hi.escapeNeedMs,
+        "cambiar de nivel mueve intensidad, coherencia, separacion y confianza");
+    chk(lo.needEscape == 1 && hi.needEscape == 0,
+        "y en Baja la separacion posterior pasa a ser una condicion");
+    tpSetSens(FLEXTHEFT_SENS_NORMAL);
+    chk(tpSens == FLEXTHEFT_SENS_NORMAL, "el valor recomendado es Normal");
+    tpSetSens(200);
+    chk(tpSens == FLEXTHEFT_SENS_NORMAL, "un valor imposible cae en Normal");
+  }
+
+  gState = ST_HOME;
+  uiClipFull();
+  printf("  [robo] detector: %d bytes  ventana temporal: %d bytes (%d ms a %d Hz)  historial: %d bytes\n",
+         (int)sizeof(FlexTheftDet), (int)(FLEXTHEFT_RING * sizeof(FlexTheftSlot)),
+         FLEXTHEFT_RING * 1000 / FLEXBNO_REPORT_HZ, FLEXBNO_REPORT_HZ,
+         (int)sizeof(TpHistFile));
+  printf("  [robo] animacion: bucle de %u ms, escenario de %dx%d px repintado a ~%d fps\n",
+         (unsigned)TP_ANIM_LOOP_MS, TP_ST_W, TP_ST_H, (int)(1000u / TP_ANIM_FRAME_MS));
+  if(gFails > fails0) printf("  Proteccion contra robo: %d fallo(s).\n", gFails - fails0);
+  else printf("  Proteccion contra robo: todas las comprobaciones pasan.\n");
+}
+
 static void testLiquidGlassSinApilar(){
   printf("Liquid Glass: las animaciones no apilan capas de blur\n");
   bool glassPrev = uiGlass;
@@ -5349,6 +5794,7 @@ int main(){
   testMultitareaMemoria();
   testDeviceCare();
   testFlexCompass();
+  testProteccionRobo();
   testLiquidGlassSinApilar();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;

@@ -89,6 +89,32 @@ GANCHOS = [
     ("imuAcquire",     "flexBnoBegin()",  "adquirir el servicio no arrancaria el sensor"),
     ("imuRelease",     "flexBnoStop()",   "soltar el ultimo consumidor dejaria el sensor emitiendo"),
     ("imuServiceTick", "flexBnoTick(",    "el servicio no sondearia el driver"),
+    # FLEX MOTION ENGINE. Un sensor, dos clasificadores. Si el motor deja de
+    # publicar, o si alguno de los dos vuelve a sondear el driver por su
+    # cuenta, se acaba con dos verdades sobre el mismo instante -- y una de
+    # las dos decide si bloquear el aparato.
+    ("imuServiceTick", "motionTick(",   "el motor no publicaria ninguna muestra"),
+    ("dcSensorTick",   "motionTake(",   "la deteccion de caidas volveria a sondear el driver por su cuenta"),
+    ("tpSensorTick",   "motionTake(",   "la proteccion contra robo volveria a sondear el driver por su cuenta"),
+    # PROTECCION CONTRA ROBO
+    ("setup",          "tpBegin()",     "no se cargarian ni la preferencia ni el bloqueo persistente"),
+    ("setup",          "tpApplyPref()", "dejarla activada no encenderia el sensor al arrancar"),
+    ("loop",           "tpSensorTick()", "el clasificador no recibiria ni una muestra: no detectaria nada"),
+    ("loop",           "tpLockPendingTick()", "un bloqueo aplazado (cortina, OTA, reinicio) no llegaria a caer nunca"),
+    ("loop",           "tpIdleGuard()", "perder su pantalla sin salir por la puerta dejaria el sensor enganchado"),
+    ("theftTick",      "tpTickMs",      "sin marcar su vuelta, el guardian soltaria el sensor con la pantalla abierta"),
+    ("tpSensorTick",   "tpArmLock(",    "se detectaria el arrebato y no se bloquearia nada"),
+    ("tpSensorTick",   "tpHistAdd(",    "el incidente no quedaria registrado en el historial"),
+    ("tpArmLock",      "tpSavePrefs()", "reiniciar seria la via de escape del bloqueo"),
+    ("tpApplyLock",    "autoLockNow()", "no caeria la pantalla de bloqueo del sistema"),
+    ("tpHoldImu",      "imuAcquire()",  "la proteccion no adquiriria el servicio: no habria muestras"),
+    ("tpHoldImu",      "imuRelease()",  "apagarla dejaria el sensor enganchado para siempre"),
+    ("renderLock",     "tpDrawLockBanner()", "el bloqueo no diria por que se activo ni a que hora"),
+    ("lockOnSuccess",  "tpLockCleared()", "acertar el PIN no levantaria la proteccion contra robo"),
+    ("lockTick",       "tpLockCleared()", "desbloquear con el gesto no levantaria la proteccion contra robo"),
+    # CORRELACION DE INCIDENTES. Sin esto, un arrebato seguido de caida deja
+    # dos entradas sueltas del mismo incidente y se pierde la secuencia.
+    ("dcSensorTick",   "tpNoteFall(",   "un arrebato seguido de caida no se correlacionaria"),
     # FLEX COMPASS
     ("loop",           "compassIdleGuard()", "una ventana de DeX cerrada dejaria enganchado el sensor"),
     ("compassEnter",   "cmpHoldImu(",     "abrir Flex Compass no adquiriria el servicio: no habria ni deteccion"),
@@ -150,6 +176,27 @@ PROHIBIDOS = [
     ("compassClose",     "flexBnoStop(",       "solo el servicio apaga el sensor"),
     ("cmpDrawCompass",   "Wire.",              "dibujar no puede tocar el bus I2C"),
     ("cmpDrawModule",    "Wire.",              "dibujar no puede tocar el bus I2C"),
+    # PROTECCION CONTRA ROBO. Misma regla, y aqui importa aun mas: si esta
+    # funcion se pusiera a hablar con el bus o a encender el sensor por su
+    # cuenta, salir de ella apagaria el BNO085 por debajo de la deteccion de
+    # caidas -- y ademas habria dos configuraciones del sensor peleandose.
+    ("tpSensorTick",     "Wire.",              "la funcion no habla con el bus: el sensor es del Flex IMU Service"),
+    ("tpSensorTick",     "flexBnoBegin(",      "solo el servicio enciende el sensor"),
+    ("tpSensorTick",     "flexBnoStop(",       "solo el servicio apaga el sensor"),
+    ("tpSensorTick",     "flexBnoAccel(",      "la muestra la reparte el Flex Motion Engine, no el driver"),
+    ("theftEnter",       "flexBnoBegin(",      "solo el servicio enciende el sensor"),
+    ("theftExit",        "flexBnoStop(",       "solo el servicio apaga el sensor"),
+    ("tpDrawStage",      "Wire.",              "dibujar no puede tocar el bus I2C"),
+    ("tpAnimFrame",      "Wire.",              "dibujar no puede tocar el bus I2C"),
+    # La animacion no puede bloquear el bucle: es de tiempo, no de pasos.
+    ("tpAnimFrame",      "delay(",             "un delay en la animacion congelaria el sistema entero"),
+    ("tpDrawStage",      "delay(",             "un delay en la animacion congelaria el sistema entero"),
+    # Y el clasificador de robo NO puede leer del detector de caidas: son
+    # clasificadores independientes, y mezclarlos convertiria una caida en un
+    # arrebato (o al reves), que es justo lo que no puede pasar.
+    ("tpSensorTick",     "flexFallFeed(",      "son clasificadores independientes: una caida no es un arrebato"),
+    ("tpSensorTick",     "dcDet",              "son clasificadores independientes: no comparten estado"),
+    ("dcSensorTick",     "flexTheftFeed(",     "son clasificadores independientes: un arrebato no es una caida"),
 ]
 
 RE_MOD = re.compile(r'^#include\s+"(FlexOS_Ultra_(\w+)\.h)"', re.M)

@@ -342,7 +342,7 @@ static bool        dcFallOn     = false;       // el usuario activo la deteccion
 static bool        dcSensorOn   = false;       // el driver esta en marcha
 static FlexFallDet dcDet;
 static bool        dcDetReady   = false;
-static uint32_t    dcSampleMs   = 0;           // ultima muestra alimentada
+static uint32_t    dcMotionSeq  = 0;           // ultima muestra vista del Flex Motion Engine
 static uint32_t    dcBootAbnormal = 0;         // reinicios inesperados acumulados (NVS)
 static uint8_t     dcBootReason = 0;           // esp_reset_reason() de ESTE arranque
 static uint32_t    dcLastEvtMs  = 0;           // millis del ultimo evento evaluado
@@ -367,6 +367,7 @@ static void dcHealthRender();  static void dcHealthTick();
 static void dcOptimRender();   static void dcOptimTick();
 static bool dcHealthScore(uint8_t* out);       // puntuacion REAL 0..100
 static void faRaise(const FlexFallEvent* e);   // notificacion global (modulo FallAlert)
+static void tpNoteFall(const FlexFallEvent* e); // correlacion de incidentes (modulo Theft)
 static void faPendingTick();                   // ...y su reintento cuando la pantalla estaba ocupada
 
 // Prototipos de este mismo modulo que se usan antes de definirse.
@@ -416,7 +417,7 @@ static void dcSensorStart(){
   imuAcquire();
   dcSensorOn = true;
   flexFallReset(&dcDet);
-  dcSampleMs = 0;
+  dcMotionSeq = motionSeqNo();      // arranca desde la muestra actual, no desde una vieja
 }
 static void dcSensorStop(){
   if(!dcSensorOn) return;
@@ -444,40 +445,45 @@ static void dcSensorStop(){
 // #############################################################
 static void dcSensorTick(){
   if(!dcSensorOn) return;
-  uint32_t now = millis();
-  // El sondeo del driver ya lo hizo imuServiceTick() al principio de la vuelta
-  // -- el servicio es quien mueve el sensor ahora, porque puede haber mas de un
-  // consumidor. Aqui solo se consume la muestra.
+  // El sondeo del driver y la PUBLICACION de la muestra ya los hizo
+  // imuServiceTick() al principio de la vuelta: el Flex Motion Engine es
+  // ahora la unica fuente de muestras, porque hay mas de un clasificador
+  // leyendo el mismo sensor. Aqui solo se consume.
+  //
+  // El comportamiento es el de siempre -- una muestra por informe nuevo, a
+  // la cadencia del sensor, y nunca la misma lectura dos veces (eso
+  // inventaria una quietud que no se ha medido). Lo unico que cambia es
+  // QUIEN decide que hay muestra nueva: antes lo decidia este reloj, ahora
+  // el numero de secuencia del motor, que es el mismo para todos.
 
   if(!flexBnoAvailable()){
     if(flexFallState(&dcDet) != FLEXFALL_IDLE) flexFallReset(&dcDet);
     return;
   }
-  // Una muestra por informe nuevo, y como mucho a la cadencia del
-  // sensor: alimentar el detector con la MISMA lectura repetida
-  // inventaria quietud que no se ha medido.
-  if(now - dcSampleMs < (1000u / FLEXBNO_REPORT_HZ)) return;
-  float a[3], g[3], q[4];
-  if(!flexBnoAccel(a)) return;                 // sin acelerometro no hay deteccion posible
-  bool haveG = flexBnoGyro(g);
-  bool haveQ = flexBnoQuat(q);
-  dcSampleMs = now;
+  const FlexMotionSample* m = motionTake(&dcMotionSeq);
+  if(!m || !m->haveA) return;                  // sin acelerometro no hay deteccion posible
 
   FlexFallSample s;
   memset(&s, 0, sizeof(s));
-  s.tMs = now;
-  s.ax = a[0]; s.ay = a[1]; s.az = a[2];
-  if(haveG){ s.gx = g[0]; s.gy = g[1]; s.gz = g[2]; }
-  if(haveQ){ s.qi = q[0]; s.qj = q[1]; s.qk = q[2]; s.qr = q[3]; s.haveQuat = 1; }
+  s.tMs = m->tMs;
+  s.ax = m->a[0]; s.ay = m->a[1]; s.az = m->a[2];
+  if(m->haveG){ s.gx = m->g[0]; s.gy = m->g[1]; s.gz = m->g[2]; }
+  if(m->haveQ){ s.qi = m->q[0]; s.qj = m->q[1]; s.qk = m->q[2]; s.qr = m->q[3]; s.haveQuat = 1; }
 
   FlexFallEvent ev;
   if(!flexFallFeed(&dcDet, &s, &ev)) return;
   dcLastEvt   = ev;
   dcLastEvtOk = true;
-  dcLastEvtMs = now;
+  dcLastEvtMs = millis();
   if(!ev.fall) return;                          // evaluado y descartado: no molesta a nadie
   uint8_t pk = (uint8_t)(ev.peakG * 10.0f > 255.0f ? 255.0f : ev.peakG * 10.0f);
   dcHistAdd(DC_EV_FALL, ev.confidence, ev.reasons, pk);
+  // CORRELACION DE INCIDENTES. Proteccion contra robo se entera de que hubo
+  // una caida para poder fundirla con un posible arrebato reciente en UN
+  // solo evento ("posible arrebato + caida") en vez de dejar dos entradas
+  // sueltas del mismo incidente. NO cambia ni una decision de aqui: la
+  // caida ya esta evaluada, registrada y avisada. Ver tpNoteFall().
+  tpNoteFall(&ev);
   faRaise(&ev);                                 // la notificacion global decide si se ve
 }
 

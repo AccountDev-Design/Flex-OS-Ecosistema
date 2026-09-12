@@ -102,6 +102,11 @@ static int  setDragY0 = 0, setDragS0 = 0;      // arrastre de la lista activa
 static bool setDragging = false;
 static bool setBackSwipe = false;              // arrastre desde el borde izquierdo (volver)
 
+// PROTECCION CONTRA ROBO. Su fila vive en esta pantalla, pero la funcion vive
+// al final de la cadena de modulos: el subtitulo se pide por prototipo, igual
+// que Ajustes ya hace con vaultStatusText() y con connWifiSub().
+static const char* theftRowValue();
+
 // Texto recortado por la derecha (evita que se salga del panel)
 static int drawTextClip(int x, int y, const char* s, int size, uint16_t col, int maxRight){
   if(size <= 1){
@@ -360,6 +365,11 @@ static void settingsDetailContent(int cat){
     // dentro, con la clave delante.
     { char vv[64]; vaultStatusText(vv, sizeof(vv));
       y = setRowCard(y, RI_PIN, rgb565(150,110,220), "Flex Vault", vv, true); }
+    // PROTECCION CONTRA ROBO. El subtitulo dice el estado REAL de la funcion,
+    // y con el modulo ausente lo dice tal cual en vez de ofrecer un
+    // interruptor que no podria monitorizar nada.
+    { const char* tv = theftRowValue();
+      y = setRowCard(y, RI_DOT, rgb565(230,120,90), "Protecci\xC3\xB3n contra robo", tv, true); }
 #if POWEROFF_ON && POWEROFF_PIN_ON
     // Apagado seguro: pide el PIN/contrasena antes de apagar del todo. NO afecta
     // a la suspension (doble-tap de 2 dedos), que nunca pide clave.
@@ -665,8 +675,9 @@ static void settingsRowAction(int cat, int idx){
       settingsRenderDetailOnly();
     }
     else if(idx == 2) vaultSettingsEnter();                                              // Seguridad y privacidad -> Flex Vault
+    else if(idx == 3) theftEnter();                                                      // Seguridad -> Proteccion contra robo
 #if POWEROFF_ON && POWEROFF_PIN_ON
-    else if(idx == 3){                                                                   // Seguridad -> Apagado seguro
+    else if(idx == 4){                                                                   // Seguridad -> Apagado seguro
       // Sin PIN/contrasena configurada no hay nada que pedir: activarlo seria una
       // proteccion de mentira. Se deja tal cual y la fila ya avisa ("Configura
       // antes un PIN").

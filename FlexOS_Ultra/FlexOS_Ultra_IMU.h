@@ -10,10 +10,20 @@
 // ##               |
 // ##      Flex IMU Service    <-- este archivo
 // ##               |
-// ##      +--------+-----------------+
-// ##      |                          |
-// ##  Flex Device Care        Flex Compass
-// ##  (deteccion de caidas)   (brujula)
+// ##      +--------+-----------------+------------------+
+// ##      |                          |                  |
+// ##  Flex Motion Engine       Flex Compass       (futuros)
+// ##  (una muestra por          (brujula)
+// ##   informe, repartida)
+// ##      |
+// ##      +--------+------------------------+
+// ##      |                                 |
+// ##  Flex Device Care              Proteccion contra robo
+// ##  (deteccion de caidas)         (patron de posible arrebato)
+// ##
+// ##  El Flex Motion Engine esta al FINAL de este mismo archivo: es la
+// ##  tercera cosa que el driver no puede resolver solo -- repartir la
+// ##  MISMA muestra entre varios clasificadores.
 // ##
 // ##  1) QUIEN MANDA SOBRE EL SENSOR
 // ##  ----------------------------------------------------------
@@ -77,6 +87,12 @@ enum FlexImuState : uint8_t {
 static int      imuRefs      = 0;    // consumidores vivos
 static uint32_t imuRetryMs   = 0;    // ultimo re-sondeo pedido por un consumidor
 
+// Flex Motion Engine: se define al final del archivo (necesita
+// FLEXBNO_REPORT_HZ y las lecturas del driver ya declaradas) y lo llama
+// imuServiceTick, que esta antes. Mismo patron de prototipo previo que usa
+// el resto del sketch.
+static void motionTick(uint32_t now);
+
 // ---- Conteo de consumidores -----------------------------------------------
 static void imuAcquire(){
   if(imuRefs < 0) imuRefs = 0;
@@ -99,7 +115,13 @@ static inline int imuHolders(){ return imuRefs; }
 // placa con las dos apps cerradas no paga ni una transaccion.
 static void imuServiceTick(){
   if(imuRefs <= 0) return;
-  flexBnoTick(millis());
+  uint32_t now = millis();
+  flexBnoTick(now);
+  // Y justo despues, en la MISMA vuelta y el MISMO hilo, el Flex Motion
+  // Engine publica la muestra (ver el bloque del final del archivo). Asi
+  // Device Care y Proteccion contra robo consumen la misma lectura del
+  // mismo instante en vez de sondear el driver cada uno por su cuenta.
+  motionTick(now);
 }
 
 // RE-SONDEO A PETICION. El driver NO reintenta solo desde ABSENT/LOST, y es a
@@ -237,3 +259,104 @@ static int imuDirIndex(float heading){
 }
 static inline const char* imuDirShort(float heading){ return IMU_DIR_SHORT[imuDirIndex(heading)]; }
 static inline const char* imuDirLong(float heading){  return IMU_DIR_LONG[imuDirIndex(heading)];  }
+
+// #############################################################
+// ##  FLEX MOTION ENGINE
+// ##  ----------------------------------------------------------
+// ##  UNA sola lectura del sensor por periodo de informe, repartida a
+// ##  todos los que la necesiten.
+// ##
+// ##      FlexOS_BNO085.cpp      (SHTP / SH-2 sobre el Wire del tactil)
+// ##               |
+// ##      Flex IMU Service       (quien manda sobre el sensor: conteo
+// ##               |              de consumidores + orientacion)
+// ##      Flex Motion Engine     <-- este bloque
+// ##               |
+// ##      +--------+--------------------+
+// ##      |                             |
+// ##  Flex Device Care          Proteccion contra robo
+// ##  (¿hubo una caida?)        (¿patron de posible arrebato?)
+// ##
+// ##  POR QUE HACE FALTA
+// ##  ----------------------------------------------------------
+// ##  Con UN consumidor bastaba con que Device Care llamase a
+// ##  flexBnoAccel/Gyro/Quat y se marcase su propio ritmo. Con DOS,
+// ##  cada uno tendria su propia cadencia, su propio "¿ha llegado ya
+// ##  un informe nuevo?" y su propia idea de que muestra acaba de
+// ##  medirse. Dos verdades sobre el mismo instante es exactamente lo
+// ##  que no puede haber cuando uno de los dos decide si bloquear el
+// ##  aparato.
+// ##
+// ##  El motor publica UNA muestra por periodo del sensor, con un
+// ##  numero de secuencia. Quien consume pregunta "¿hay una nueva
+// ##  desde la que yo vi?" y recibe exactamente la misma que el otro.
+// ##
+// ##  LO QUE NO HACE
+// ##  ----------------------------------------------------------
+// ##  No habla con el bus (eso es del driver, y solo desde el hilo del
+// ##  tactil), no clasifica nada y no inventa datos: cada campo trae su
+// ##  bandera `have*` y vale false mientras ese informe no haya
+// ##  llegado. Un consumidor que necesite giroscopio y no lo tenga
+// ##  tiene que decirlo, no rellenar con ceros.
+// ##
+// ##  COSTE: una struct de 60 bytes y una comparacion por vuelta. Sin
+// ##  consumidores del servicio, motionTick() sale en su primera linea.
+// #############################################################
+typedef struct {
+  uint32_t tMs;
+  float    a[3];        // m/s^2, CON gravedad
+  float    g[3];        // rad/s
+  float    q[4];        // cuaternion (i, j, k, real)
+  uint8_t  haveA, haveG, haveQ;
+} FlexMotionSample;
+
+static FlexMotionSample gMotion;
+static uint32_t         gMotionSeq = 0;    // 0 = todavia no hay ninguna muestra
+static uint32_t         gMotionMs  = 0;    // millis de la ultima publicada
+
+// Publica como mucho una muestra por periodo del sensor. La llama
+// imuServiceTick(), justo despues del tick del driver y en el MISMO
+// hilo: aqui no hay concurrencia que proteger porque no hay dos hilos.
+static void motionTick(uint32_t now){
+  if(imuRefs <= 0) return;
+  if(!flexBnoAvailable()){
+    // Sensor perdido: se deja de publicar. NO se repite la ultima
+    // muestra -- alimentar a un clasificador con la misma lectura una y
+    // otra vez le inventaria una quietud que nadie ha medido.
+    return;
+  }
+  if(gMotionSeq && (now - gMotionMs) < (1000u / FLEXBNO_REPORT_HZ)) return;
+  float a[3], g[3], q[4];
+  bool ha = flexBnoAccel(a);
+  if(!ha) return;                    // sin acelerometro no hay muestra que publicar
+  bool hg = flexBnoGyro(g);
+  bool hq = flexBnoQuat(q);
+  gMotion.tMs   = now;
+  gMotion.a[0] = a[0]; gMotion.a[1] = a[1]; gMotion.a[2] = a[2];
+  gMotion.haveA = 1;
+  gMotion.haveG = hg ? 1 : 0;
+  gMotion.haveQ = hq ? 1 : 0;
+  if(hg){ gMotion.g[0] = g[0]; gMotion.g[1] = g[1]; gMotion.g[2] = g[2]; }
+  else  { gMotion.g[0] = gMotion.g[1] = gMotion.g[2] = 0.0f; }
+  if(hq){ gMotion.q[0] = q[0]; gMotion.q[1] = q[1]; gMotion.q[2] = q[2]; gMotion.q[3] = q[3]; }
+  else  { gMotion.q[0] = gMotion.q[1] = gMotion.q[2] = 0.0f; gMotion.q[3] = 1.0f; }
+  gMotionMs = now;
+  gMotionSeq++;
+  if(!gMotionSeq) gMotionSeq = 1;    // el desbordamiento no puede parecer "sin muestras"
+}
+
+// Toma la muestra siguiente a la que ya vio el consumidor. Devuelve NULL
+// cuando no hay ninguna nueva: quien llama no repite trabajo ni vuelve a
+// alimentar su clasificador con lo mismo.
+static const FlexMotionSample* motionTake(uint32_t* seen){
+  if(!gMotionSeq) return NULL;
+  if(seen && *seen == gMotionSeq) return NULL;
+  if(seen) *seen = gMotionSeq;
+  return &gMotion;
+}
+static inline uint32_t motionSeqNo(){ return gMotionSeq; }
+// Edad de la ultima muestra publicada. 0xFFFFFFFF si no hay ninguna: se
+// usa para decidir "el sensor dejo de entregar", nunca para dibujar.
+static inline uint32_t motionAge(uint32_t now){
+  return gMotionSeq ? (now - gMotionMs) : 0xFFFFFFFFu;
+}

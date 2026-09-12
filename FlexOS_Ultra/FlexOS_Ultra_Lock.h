@@ -297,6 +297,11 @@ static void lockOnFail(){
 static void lockOnSuccess(){
   lockWaitUntil = 0; lockWaitPainted = false; lockWaitLastSec = -1;
   lockPenaltyServed = true;
+  // PROTECCION CONTRA ROBO: clave correcta = desbloqueo explicito. Este es el
+  // UNICO punto por el que una verificacion acertada pasa, asi que levantar
+  // aqui la proteccion cubre todas sus rutas (bloqueo, despertar, apertura de
+  // app protegida) sin vigilar ninguna por separado.
+  tpLockCleared();
   if(!LOCK_FAILS_ON) return;
   if(lockFails != 0){ lockFails = 0; lockFailsSave(); }         // acierto -> contador a cero
 }

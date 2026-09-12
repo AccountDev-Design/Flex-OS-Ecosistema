@@ -70,6 +70,16 @@ enum { WT_TITLE = 0, WT_NODATA, WT_NODATA_SUB, WT_RETRY, WT_ADDLOC, WT_MYLOCS, W
 
 static void renderHome(); static void showHome(); static bool hitHomeIcon(int px, int py, int &id);
 static void enterHome();  static void enterApp(int id); static void appTick();
+// PROTECCION CONTRA ROBO. Vive al final de la cadena de modulos
+// (FlexOS_Ultra_Theft.h / _TheftUI.h), pero la pantalla de BLOQUEO -- que esta
+// mucho antes, en el modulo Home -- necesita saber si tiene que dibujar el
+// aviso, y los dos caminos de desbloqueo tienen que poder levantarlo. Se
+// declaran aqui por prototipo, igual que el resto del sketch.
+static bool tpLockBannerOn();     // ¿la proteccion esta disparada?
+static void tpDrawLockBanner();   // el aviso, dentro de la pantalla de bloqueo
+static void tpLockCleared();      // desbloqueo explicito: se levanta la proteccion
+static void theftEnter();         // Ajustes -> Seguridad -> Proteccion contra robo
+static void theftTick();
 static void swPushAndCapture(uint8_t id); static void activarMultitarea(); static void swTick();  // App Switcher
 static void swPushNoThumb(uint8_t id);   // apps landscape: sin miniatura (ver appClose)
 static void lsuEnter(); static void lsuTick();             // Seguridad -> Bloqueo (PIN/Contraseña)
@@ -214,7 +224,17 @@ enum { ST_SPLASH = 0, ST_OOBE_LANG, ST_OOBE_NAME, ST_LOCK, ST_HOME, ST_APP, ST_S
        // FLEX ACCOUNT. Se anade AL FINAL: conserva todos los IDs anteriores.
        ST_OOBE_ACCOUNT,
        // Recuperacion y restablecimiento siempre al final para conservar ABI.
-       ST_FACTORY, ST_SAFE };
+       ST_FACTORY, ST_SAFE,
+       // PROTECCION CONTRA ROBO (Ajustes -> Seguridad y privacidad). Estado
+       // propio, y AL FINAL del enum por el mismo motivo que todos los
+       // anteriores: ningun valor ya existente se mueve.
+       //
+       // Es un estado y no una app de APP_REG a proposito, igual que Flex
+       // Vault: asi no puede aparecer en Recientes ni en el buscador de Modo
+       // PC, y la isla de notificaciones y el panel rapido -- que se apagan
+       // fuera de ST_HOME -- no compiten por su framebuffer. Sus tres vistas
+       // (principal, historial y detalle) viven dentro del estado, en tpView.
+       ST_THEFT };
 
 static int  gState = ST_SPLASH;
 static unsigned long splashStart = 0;

@@ -1,7 +1,7 @@
 # Estructura de Flex OS Ultra (ESP32-P4)
 
 `FlexOS_Ultra.ino` era un solo archivo de **37053 líneas**. Ahora es el
-**orquestador** del sistema y todo lo demás vive en 57 módulos
+**orquestador** del sistema y todo lo demás vive en 61 módulos
 `FlexOS_Ultra_*.h` en la misma carpeta del sketch, que es `FlexOS_Ultra/`.
 
 Esto es **una reorganización, no un cambio funcional**: el código que se
@@ -34,7 +34,8 @@ ajuste. Es además el patrón que el proyecto **ya usaba**
 Los módulos que sí son código portable y con pruebas propias siguen siendo
 `.cpp` de verdad, como hasta ahora: `FlexOS_Media`, `FlexOS_Mem`,
 `FlexOS_JPEG`, `FlexOS_Vault`, `FlexOS_Weather`, `FlexOS_FS`,
-`FlexOS_Browser`, `FlexOS_FlexLink`... Esa frontera no se ha tocado.
+`FlexOS_Browser`, `FlexOS_FlexLink`, `FlexOS_FallDetect`, `FlexOS_Theft`...
+Esa frontera no se ha tocado.
 
 ## 2. Reglas de los módulos
 
@@ -120,12 +121,14 @@ Los módulos que sí son código portable y con pruebas propias siguen siendo
 | `FlexOS_Ultra_System.h`           |   487 | I2C, soltar caches, Optimizar Flex OS y cambio de tema |
 | `FlexOS_Ultra_AppGallery.h`       |   768 | Galeria |
 | `FlexOS_Ultra_Vault.h`            |  1744 | Flex Vault: interfaz de la Carpeta segura |
-| `FlexOS_Ultra_IMU.h`              |   239 | Flex IMU Service: reparto del GY-BNO085 entre Device Care y Flex Compass |
+| `FlexOS_Ultra_IMU.h`              |   362 | Flex IMU Service + Flex Motion Engine: reparto del GY-BNO085 y UNA muestra para todos |
 | `FlexOS_Ultra_DeviceCare.h`       |  1604 | Flex Device Care: app, historial, salud y grafico del GY-BNO085 |
 | `FlexOS_Ultra_DeviceTests.h`      |   906 | Device Care: pruebas, diagnostico y Post-Impact Check |
 | `FlexOS_Ultra_FallAlert.h`        |   448 | Device Care: aviso global de posible caida (vertical y horizontal) |
 | `FlexOS_Ultra_Recovery.h`         |   691 | restablecer datos de fabrica y modo seguro |
 | `FlexOS_Ultra_AppCompass.h`       |  1096 | Flex Compass: brujula, modulo BNO085 dibujado por codigo y datos del sensor |
+| `FlexOS_Ultra_Theft.h`            |   656 | Proteccion contra robo: estado, clasificador, Event Manager, historial y bloqueo |
+| `FlexOS_Ultra_TheftUI.h`          |  1131 | Proteccion contra robo: las tres pantallas, la animacion y el aviso del bloqueo |
 
 ## 5. Cómo se comprueba
 

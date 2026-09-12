@@ -110,6 +110,12 @@
 //                    ejercita entera en el PC, como FlexOS_Mem.
 #include "FlexOS_BNO085.h"
 #include "FlexOS_FallDetect.h"
+// PROTECCION CONTRA ROBO. Logica pura, igual que la de caidas y por el mismo
+// motivo: entra una muestra medida y sale un veredicto, asi que se compila y
+// se ejercita entera en el PC (tests/host/test_theft). Es un clasificador
+// INDEPENDIENTE del de caidas -- comparten la fuente de datos (el Flex Motion
+// Engine), nada mas.
+#include "FlexOS_Theft.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -283,6 +289,8 @@
 #include "FlexOS_Ultra_FallAlert.h"          // Device Care: aviso global de posible caida (vertical y horizontal)
 #include "FlexOS_Ultra_Recovery.h"           // restablecer datos de fabrica y modo seguro
 #include "FlexOS_Ultra_AppCompass.h"         // Flex Compass: brujula sobre el servicio IMU
+#include "FlexOS_Ultra_Theft.h"              // Proteccion contra robo: clasificador, eventos y bloqueo
+#include "FlexOS_Ultra_TheftUI.h"            // Proteccion contra robo: pantallas y animacion
 // ------------- FIN DE LOS MODULOS -------------------------
 
 // Puente del modulo OTA. Va AQUI, y no arriba, a proposito: implementa
@@ -418,6 +426,10 @@ void setup(){
   // usuario abre Deteccion de caidas o cuando ya la dejo activada, no en
   // cada encendido.
   dcBegin();
+  // PROTECCION CONTRA ROBO. Misma regla que Device Care: solo lee NVS (si el
+  // usuario la dejo activada, su sensibilidad y si el bloqueo quedo puesto).
+  // NO toca el bus I2C aqui.
+  tpBegin();
 
   // Una recuperacion interrumpida solo necesita pantalla, tactil, NVS y FS.
   // No se cargan cuenta, boveda, tienda, navegador ni red antes de terminar.
@@ -445,6 +457,11 @@ void setup(){
   // arranca aqui (bus I2C ya inicializado por flexTouchInit). Si no,
   // esto no hace nada y el bus sigue siendo solo del tactil.
   if(!gSafeMode) dcApplyFallPref();
+  // Proteccion contra robo: si el usuario la dejo activada, se adquiere aqui
+  // el MISMO servicio del IMU (que lleva la cuenta de consumidores, asi que
+  // esto no vuelve a inicializar el BNO085 aunque la deteccion de caidas ya
+  // lo haya encendido). Si no, no hace nada.
+  if(!gSafeMode) tpApplyPref();
   homeOrderLoad();                // orden de iconos del Home
   // ASPECTO DEL INICIO: fondo de inicio y de bloqueo, imagen elegida, encuadre,
   // paleta y tema. Va DESPUES de flexFsBegin() porque si el fondo es una imagen
@@ -611,6 +628,13 @@ void loop(){
                           // adquirido (Device Care, Flex Compass). MISMO bus y MISMO hilo
                           // que el tactil. Sin consumidores sale en su primera linea.
   dcSensorTick();         // deteccion de caidas: consume la muestra que acaba de llegar
+  tpSensorTick();         // proteccion contra robo: consume LA MISMA muestra del motor,
+                          // con su propio clasificador. Sin la funcion activada sale en
+                          // su primera linea.
+  tpLockPendingTick();    // bloqueo por posible arrebato que no cupo (cortina, OTA,
+                          // pantalla suspendida, reinicio): sale en cuanto se despeja
+  tpIdleGuard();          // si su pantalla se perdio sin pasar por la salida, suelta el
+                          // enganche del sensor que era solo para mirar (nunca el suyo)
   compassIdleGuard();     // Flex Compass: si su tick lleva segundos sin correr (ventana de
                           // DeX cerrada, pantalla en exclusiva de otro subsistema), suelta
                           // su enganche del sensor.
@@ -788,6 +812,7 @@ void loop(){
     case ST_VAULT:            vaultTick(); break;          // Flex Vault (Carpeta segura)
     case ST_DRAWER:           drawerTick(); break;         // Caja de aplicaciones (One UI)
     case ST_HOMECFG:          hcTick(); break;             // Personalizar inicio
+    case ST_THEFT:            theftTick(); break;          // Proteccion contra robo
     case ST_SAFE:             safeTick(); break;
     case ST_FACTORY:          frTick(); break;
   }

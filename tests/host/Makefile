@@ -53,7 +53,7 @@ APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net \
         $(BUILD)/test_vault $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
-        $(BUILD)/test_media $(BUILD)/test_mem $(BUILD)/test_fall \
+        $(BUILD)/test_media $(BUILD)/test_mem $(BUILD)/test_fall $(BUILD)/test_theft \
         $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun
 
@@ -101,6 +101,16 @@ FALL_SRC := $(ULTRA)/FlexOS_FallDetect.cpp
 
 $(BUILD)/test_fall: test_fall.cpp $(FALL_SRC) $(ULTRA)/FlexOS_FallDetect.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) $(INC) -o $@ test_fall.cpp $(FALL_SRC)
+
+# --- Proteccion contra robo: clasificador temporal de posible arrebato ---
+# Mismo criterio que el detector de caidas: es logica pura (entra una muestra
+# medida, sale un veredicto), asi que se compila y se ejercita ENTERA en el PC,
+# con sanitizers. Comprobar en la mano que correr no dispara un arrebato
+# obligaria a correr con el aparato en la mano; aqui se comprueba de verdad.
+THEFT_SRC := $(ULTRA)/FlexOS_Theft.cpp
+
+$(BUILD)/test_theft: test_theft.cpp $(THEFT_SRC) $(ULTRA)/FlexOS_Theft.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(INC) -o $@ test_theft.cpp $(THEFT_SRC)
 # --- PLATAFORMA DE APLICACIONES flex-app-v1 ---------------------------------
 # Cuatro baterias, todas con sanitizers. Aqui es OBLIGATORIO: este codigo
 # ejecuta bytecode que viene de internet y decide si un paquete firmado por un
@@ -295,7 +305,7 @@ ino: ino_compile.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) $(BNO_SRC) check_pro
 # del runtime se enlaza contra lo que de verdad va a la placa. Un cambio de
 # firma o una llamada mal cableada salta aqui.
 $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) $(JPEG_SRC) \
-                   $(FLNKSRC) $(FLPSRC) $(FLPLINK) $(CORE_SRC) $(MEDIA_SRC) $(MEM_SRC) $(FALL_SRC) \
+                   $(FLNKSRC) $(FLPSRC) $(FLPLINK) $(CORE_SRC) $(MEDIA_SRC) $(MEM_SRC) $(FALL_SRC) $(THEFT_SRC) \
                    $(VMSRC) $(GRANTSRC) $(HOSTSRC) $(PKGCORE) | $(BUILD)
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -x c++ -c ino_compile.cpp -o $(BUILD)/ino_compile.o
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -c ino_extern_stubs.cpp -o $(BUILD)/ino_extern_stubs.o
@@ -307,6 +317,7 @@ $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) 
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(MEDIA_SRC) -o $(BUILD)/ino_media.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(MEM_SRC)   -o $(BUILD)/ino_mem.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(FALL_SRC)  -o $(BUILD)/ino_fall.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(THEFT_SRC) -o $(BUILD)/ino_theft.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(VMSRC)     -o $(BUILD)/ino_appvm.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(GRANTSRC)  -o $(BUILD)/ino_appgrant.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(HOSTSRC)   -o $(BUILD)/ino_apphost.o
@@ -315,6 +326,7 @@ $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) 
 	@$(CXX) $(SAN) -o $@ $(BUILD)/ino_compile.o $(BUILD)/ino_extern_stubs.o $(BUILD)/ino_jpeg.o \
 	        $(BUILD)/ino_flexlink.o $(BUILD)/ino_flexphone.o $(BUILD)/ino_flexphonelink.o \
 	        $(BUILD)/ino_brcore.o $(BUILD)/ino_media.o $(BUILD)/ino_mem.o $(BUILD)/ino_fall.o \
+	        $(BUILD)/ino_theft.o \
 	        $(BUILD)/ino_appvm.o $(BUILD)/ino_appgrant.o $(BUILD)/ino_apphost.o \
 	        $(BUILD)/ino_pkgcore.o $(BUILD)/ino_cjson.o -lcrypto
 
@@ -348,6 +360,8 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_mem
 	@echo
 	@$(BUILD)/test_fall
+	@echo
+	@$(BUILD)/test_theft
 	@echo
 	@$(BUILD)/test_appvm
 	@echo
