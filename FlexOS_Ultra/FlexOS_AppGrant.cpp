@@ -3,7 +3,7 @@
 //  ------------------------------------------------------------
 //  Ver FlexOS_AppGrant.h para el contrato y la disposición del bloque.
 //
-//  BACKEND CRIPTOGRAFICO. Mismo patrón que FlexOS_Vault.cpp: en la
+//  BACKEND CRIPTOGRAFICO. Mismo patrón que FlexOS_Passcode.cpp: en la
 //  placa mbedTLS (con el acelerador del P4 por debajo), en el PC
 //  OpenSSL. Las dos rutas comprueban EXACTAMENTE lo mismo sobre los
 //  mismos bytes; lo único que cambia es quién hace la aritmética.

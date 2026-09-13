@@ -104,7 +104,7 @@ static bool setBackSwipe = false;              // arrastre desde el borde izquie
 
 // PROTECCION CONTRA ROBO. Su fila vive en esta pantalla, pero la funcion vive
 // al final de la cadena de modulos: el subtitulo se pide por prototipo, igual
-// que Ajustes ya hace con vaultStatusText() y con connWifiSub().
+// que Ajustes ya hace con connWifiSub() y con connBleSub().
 static const char* theftRowValue();
 
 // Texto recortado por la derecha (evita que se salga del panel)

@@ -300,9 +300,6 @@ static void filesTick(){
       int y = filesRowY(base + i);
       if(T.startY >= y && T.startY < y + FILES_RH - 8){
         filesLongFired = true; filesSelIdx = i;
-        // Solo los FICHEROS pueden ir a la boveda: mover una carpeta entera
-        // pediria cifrar su arbol, y prometerlo sin hacerlo seria peor que no
-        // ofrecerlo. Ver vaultMoveRequest.
         fkMenuOpen(T.x, T.y - 40);
         return;
       }

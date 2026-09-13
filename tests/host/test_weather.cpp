@@ -45,7 +45,7 @@
 #include "WiFi.h"
 
 // Reloj y consola del arnes (los declara stub/Arduino.h; cada prueba los
-// define, igual que test_vault o test_app).
+// define, igual que test_passcode o test_app).
 static unsigned long gMs = 1000;
 unsigned long millis(){ return gMs; }
 void delay(unsigned long ms){ gMs += ms; }
