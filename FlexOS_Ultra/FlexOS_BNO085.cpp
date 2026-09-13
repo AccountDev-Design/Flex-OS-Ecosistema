@@ -68,6 +68,36 @@
 // LOST: la deteccion de caidas se apaga y la interfaz lo dice.
 #define BNO_STALE_MS   1500
 
+// #############################################################
+//  PRESUPUESTO DE TIEMPO Y FRENO DE SONDEO
+//  ------------------------------------------------------------
+//  POR QUE EXISTEN. Este modulo comparte el bus I2C con el tactil y
+//  corre en el MISMO hilo que el bucle del sistema. Una transaccion
+//  I2C no es instantanea: contra un bus en buen estado tarda
+//  microsegundos, pero contra uno a medio conectar -- el modulo IMU
+//  enchufado a medias, sin resistencias de pull-up, con un cable
+//  suelto -- cada llamada se va hasta el TIEMPO DE ESPERA del driver.
+//  Varias de esas seguidas, en cada vuelta, es el sistema "congelado"
+//  cuando no hay IMU: no es que el firmware espere al sensor a
+//  proposito, es que paga el plazo del bus una y otra vez.
+//
+//  QUE HACE CADA UNO:
+//   · BNO_TICK_BUDGET_MS acota lo que el driver puede gastar en UNA
+//     vuelta. En cuanto se pasa, se corta y se sigue en la siguiente:
+//     el resto del sistema (tactil, animaciones, render) no se entera.
+//   · BNO_FAIL_BACKOFF_N / _MS: si el bus falla N veces seguidas, se
+//     deja de leer durante un rato en vez de insistir por frame.
+//   · BNO_PROBE_MIN_MS y el freno progresivo de flexBnoBegin evitan
+//     que un re-sondeo periodico (la brujula lo pide mientras esta a
+//     la vista) se convierta en dos transacciones lentas por segundo
+//     contra un bus que no va a contestar.
+// #############################################################
+#define BNO_TICK_BUDGET_MS   4      // tope de tiempo por vuelta del loop
+#define BNO_FAIL_BACKOFF_N   6      // fallos de bus seguidos que activan el freno
+#define BNO_FAIL_BACKOFF_MS  250    // y cuanto se deja de leer entonces
+#define BNO_PROBE_MIN_MS     1500   // suelo entre dos sondeos del bus
+#define BNO_PROBE_MAX_MS     8000   // techo del freno progresivo
+
 // -------------------------------------------------------------
 //  Estado del modulo
 // -------------------------------------------------------------
@@ -81,6 +111,10 @@ static uint32_t    bnoNRep    = 0;
 static uint8_t     bnoSeq[SHTP_CH_N];
 static uint8_t     bnoBuf[BNO_BUF];
 static uint8_t     bnoFeatIdx = 0;      // cual de los cuatro informes toca activar
+static uint8_t     bnoFails   = 0;      // fallos de bus SEGUIDOS (freno de lectura)
+static uint32_t    bnoMuteMs  = 0;      // hasta cuando no se vuelve a leer del bus
+static uint32_t    bnoProbeMs = 0;      // ultimo sondeo del bus (millis; 0 = ninguno)
+static uint8_t     bnoProbeKo = 0;      // sondeos fallidos seguidos (freno progresivo)
 
 static uint8_t     bnoSwMaj = 0, bnoSwMin = 0;
 static uint32_t    bnoSwPart = 0;
@@ -270,6 +304,8 @@ static void bnoParseControl(uint16_t len){
 // -------------------------------------------------------------
 static void bnoResetState(){
   bnoSt   = FLEXBNO_ST_ABSENT;
+  bnoFails  = 0;
+  bnoMuteMs = 0;
   bnoChk  = 0;
   bnoNRep = 0;
   bnoLastMs = 0;
@@ -281,15 +317,37 @@ static void bnoResetState(){
   for(int i = 0; i < SHTP_CH_N; i++) bnoSeq[i] = 0;
 }
 
+// Cuanto hay que esperar antes del SIGUIENTE sondeo, segun cuantos hayan
+// fallado seguidos. Duplica desde BNO_PROBE_MIN_MS hasta el techo: un modulo
+// que no esta deja de costar casi nada en cuanto queda claro que no esta, y uno
+// que se enchufa se sigue detectando solo en unos segundos.
+static uint32_t bnoProbeGap(){
+  uint32_t g = BNO_PROBE_MIN_MS;
+  for(uint8_t i = 0; i < bnoProbeKo && g < BNO_PROBE_MAX_MS; i++) g <<= 1;
+  return g > BNO_PROBE_MAX_MS ? (uint32_t)BNO_PROBE_MAX_MS : g;
+}
+
 bool flexBnoBegin(){
+  // FRENO DE SONDEO. Dos transacciones I2C contra un bus que no contesta
+  // pueden costar el plazo entero del driver CADA UNA. Sin este suelo, un
+  // re-sondeo periodico las paga en cada peticion; con el, una placa sin IMU
+  // gasta dos transacciones muy de vez en cuando y el bucle no lo nota.
+  uint32_t now = millis();
+  if(bnoProbeMs && (uint32_t)(now - bnoProbeMs) < bnoProbeGap()){
+    // Aun en el freno: no se toca el bus y se conserva el estado que haya.
+    return bnoAddr != 0;
+  }
+  bnoProbeMs = now ? now : 1;
   bnoResetState();
   bnoAddr = 0;
   if(bnoPing(FLEXBNO_ADDR_LOW))       bnoAddr = FLEXBNO_ADDR_LOW;
   else if(bnoPing(FLEXBNO_ADDR_HIGH)) bnoAddr = FLEXBNO_ADDR_HIGH;
   if(!bnoAddr){
+    if(bnoProbeKo < 8) bnoProbeKo++;          // cada fallo aleja el siguiente sondeo
     bnoErr = "No hay ningun modulo IMU en el bus I2C";
     return false;
   }
+  bnoProbeKo = 0;                             // contesto: el freno vuelve a cero
   bnoSoftReset();                       // no se comprueba: el reset corta el ACK
   bnoSt     = FLEXBNO_ST_PROBING;
   bnoStepMs = millis();
@@ -297,7 +355,14 @@ bool flexBnoBegin(){
   return true;
 }
 
-void flexBnoRescan(){ flexBnoBegin(); }
+// Re-sondeo PEDIDO por la interfaz. Se salta el freno progresivo (no el suelo)
+// porque detras hay un usuario que acaba de pulsar "reintentar": lo que no
+// puede es saltarse el limite de una transaccion por vuelta.
+void flexBnoRescan(){
+  bnoProbeKo = 0;
+  bnoProbeMs = 0;
+  flexBnoBegin();
+}
 
 void flexBnoStop(){
   if(bnoAddr && bnoSt >= FLEXBNO_ST_CONFIG){
@@ -308,22 +373,43 @@ void flexBnoStop(){
   }
   bnoResetState();
   bnoAddr = 0;
+  bnoProbeMs = 0; bnoProbeKo = 0;      // soltar el sensor no deja el freno puesto
   bnoErr  = "Sensor detenido";
 }
 
 void flexBnoTick(uint32_t nowMs){
   if(bnoSt == FLEXBNO_ST_ABSENT) return;
 
-  // Lectura acotada: como mucho BNO_PKT_PER_TICK paquetes por vuelta.
-  for(int n = 0; n < BNO_PKT_PER_TICK; n++){
-    uint16_t len = 0;
-    int ch = bnoRecv(&len);
-    if(ch < 0) break;
-    if(ch == SHTP_CH_CONTROL)      bnoParseControl(len);
-    else if(ch == SHTP_CH_REPORTS) bnoParseReports(len, nowMs);
-    else if(ch == SHTP_CH_GYRO_RV) bnoParseReports(len, nowMs);
-    // Canales 0/1/4: anuncio inicial y avisos del ejecutable. Se leen
-    // (hay que vaciarlos) y se descartan: no se usan.
+  // FRENO POR FALLOS DE BUS. Si las ultimas lecturas fallaron seguidas, el
+  // modulo esta mal conectado o se ha ido: insistir cada vuelta solo sirve para
+  // pagar el plazo del bus una y otra vez. Se calla un rato y se vuelve a
+  // intentar; el paso a LOST lo sigue decidiendo BNO_STALE_MS, mas abajo, asi
+  // que callar no oculta una desconexion.
+  if(bnoMuteMs && (uint32_t)(nowMs - bnoMuteMs) < (uint32_t)BNO_FAIL_BACKOFF_MS){
+    // Se salta SOLO la lectura; la maquina de estados de abajo sigue corriendo.
+  } else {
+    if(bnoMuteMs){ bnoMuteMs = 0; bnoFails = 0; }
+    // Lectura acotada por DOS limites: numero de paquetes y TIEMPO. El de
+    // tiempo es el que importa con un bus lento: una sola transaccion que se
+    // vaya al plazo del driver ya consume la vuelta, y la siguiente no se
+    // intenta hasta el proximo cuadro.
+    uint32_t t0 = millis();
+    for(int n = 0; n < BNO_PKT_PER_TICK; n++){
+      uint16_t len = 0;
+      int ch = bnoRecv(&len);
+      if(ch < 0){
+        if(bnoFails < 255) bnoFails++;
+        if(bnoFails >= BNO_FAIL_BACKOFF_N) bnoMuteMs = nowMs ? nowMs : 1;
+        break;
+      }
+      bnoFails = 0;
+      if(ch == SHTP_CH_CONTROL)      bnoParseControl(len);
+      else if(ch == SHTP_CH_REPORTS) bnoParseReports(len, nowMs);
+      else if(ch == SHTP_CH_GYRO_RV) bnoParseReports(len, nowMs);
+      // Canales 0/1/4: anuncio inicial y avisos del ejecutable. Se leen
+      // (hay que vaciarlos) y se descartan: no se usan.
+      if((uint32_t)(millis() - t0) >= (uint32_t)BNO_TICK_BUDGET_MS) break;
+    }
   }
 
   switch(bnoSt){

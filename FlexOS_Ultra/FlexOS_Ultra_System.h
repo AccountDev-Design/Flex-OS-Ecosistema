@@ -147,6 +147,14 @@ static void i2cEndSweep(){
 }
 
 // Tick de deteccion I2C. Llamar en loop() en el mismo contexto que flexPollTouch.
+//
+// PRESUPUESTO DE TIEMPO, ademas del de direcciones. Contra un bus sano, ocho
+// sondeos por vuelta cuestan microsegundos. Contra un bus a medio conectar --
+// un modulo enchufado a medias, sin pull-ups -- CADA transaccion se va al plazo
+// de espera del driver, y ocho seguidas son un tiron visible en cada barrido.
+// El cursor es incremental, asi que cortar a mitad no pierde nada: el barrido
+// continua por donde iba en la vuelta siguiente y solo tarda unos cuadros mas.
+#define I2C_SCAN_BUDGET_MS 3
 static void hwDetectTick(){
   if(!gtOk) return;                                          // sin I2C inicializado, nada
   if(!i2cSweeping){
@@ -155,6 +163,7 @@ static void hwDetectTick(){
     i2cScanCursor = I2C_SCAN_LO;
   }
   int probes = 0;
+  uint32_t t0 = millis();
   while(i2cSweeping && probes < I2C_SCAN_PER_TICK){
     uint8_t addr = i2cScanCursor;
     if(!i2cIsOnboard(addr)){
@@ -164,6 +173,7 @@ static void hwDetectTick(){
     probes++;
     if(i2cScanCursor >= I2C_SCAN_HI){ i2cSweeping = false; i2cEndSweep(); }
     else i2cScanCursor++;
+    if((uint32_t)(millis() - t0) >= (uint32_t)I2C_SCAN_BUDGET_MS) break;
   }
 }
 

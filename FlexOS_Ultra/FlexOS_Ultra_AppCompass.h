@@ -157,7 +157,7 @@ static const char* cmpStateText(){
     case FIMU_AHRS_ACTIVE:  return "Conectado";
     case FIMU_DISCONNECTED: return "Desconectada";
     case FIMU_ERROR:        return "Error del bus";
-    default:                return "No detectado";
+    default:                return "IMU no detectada";
   }
 }
 static uint16_t cmpStateColor(){

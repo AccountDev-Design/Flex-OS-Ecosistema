@@ -133,6 +133,16 @@ GANCHOS = [
     # dibujo a la capa de transicion interrumpible). Comprobar el sitio donde
     # esta de verdad es lo que mantiene util la regla.
     ("enterHomeState", "hcClose(",        "volver al escritorio dejaria el modo abierto y sus buffers reservados"),
+    # DESBLOQUEO SIN CONGELACION. Las tres piezas que sacan del camino del
+    # toque lo que antes lo bloqueaba: la derivacion del hash, el revelado del
+    # escritorio y la transicion de seguridad. Si alguna deja de despacharse, el
+    # sistema se queda mirando una pantalla que ya no avanza.
+    ("lsuTick",        "lsuCheckStep()",  "la clave no se verificaria nunca: la pantalla se quedaria quieta"),
+    ("lsuTick",        "lsuRevealTick()", "el revelado del escritorio se quedaria a medias y no se volveria de el"),
+    ("lsuTick",        "authFadeTick()",  "la transicion de seguridad se quedaria congelada en su primer cuadro"),
+    ("lsuCheckStart",  "flexLockVerifyBegin(", "no se arrancaria ninguna verificacion"),
+    ("lsuCheckStep",   "flexLockVerifyStep(",  "la verificacion no avanzaria ni una tanda"),
+    ("lsuUnlock",      "lsuRevealStart()", "acertar la clave no llevaria al escritorio"),
     ("autoLockNow",    "hcClose(",        "bloquear con el modo abierto dejaria el estado a medias"),
 ]
 
@@ -197,6 +207,17 @@ PROHIBIDOS = [
     ("tpSensorTick",     "flexFallFeed(",      "son clasificadores independientes: una caida no es un arrebato"),
     ("tpSensorTick",     "dcDet",              "son clasificadores independientes: no comparten estado"),
     ("dcSensorTick",     "flexTheftFeed(",     "son clasificadores independientes: un arrebato no es una caida"),
+    # EL CAMINO DEL TOQUE NO DERIVA HASHES. flexLockVerify() hace las 12.000
+    # iteraciones de una sentada: llamarla desde el tick es exactamente lo que
+    # congelaba la interfaz al meter el ultimo digito del PIN. Dentro de esta
+    # pantalla solo vale la version A PLAZOS (lsuCheckStart / lsuCheckStep).
+    ("lsuTick",          "flexLockVerify(",    "derivar el hash entero en el tick congela el ultimo digito"),
+    ("lsuUnlock",        "flexLockVerify(",    "derivar el hash entero aqui congela el desbloqueo"),
+    # Y NINGUNA DE LAS TRES ANIMACIONES DE ESTA PANTALLA PUEDE VOLVER A SER UN
+    # BUCLE. Son de tiempo, un cuadro por vuelta; un delay() aqui devuelve el
+    # sistema a donde estaba.
+    ("lsuRevealTick",    "delay(",             "un delay en el revelado congela el sistema entero"),
+    ("authFadeTick",     "delay(",             "un delay en la transicion de seguridad congela el tactil"),
 ]
 
 RE_MOD = re.compile(r'^#include\s+"(FlexOS_Ultra_(\w+)\.h)"', re.M)

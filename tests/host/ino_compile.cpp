@@ -254,6 +254,7 @@ static void testIconosEnSuCaja();
 static void testTransicionesApps();
 static void testRejillaAutoPaginas();
 static void testMultitareaMemoria();
+static void testDesbloqueoFluido();
 static void testFlexCompass();
 static void testProteccionRobo();
 static int gFails = 0;
@@ -5133,6 +5134,136 @@ static void mtSetFree(size_t freeWanted){
   memSampleNow();
 }
 
+
+// #############################################################
+//  DESBLOQUEO: EL ULTIMO DIGITO NO PUEDE CONGELAR LA INTERFAZ
+//  ------------------------------------------------------------
+//  Un fallo real y muy visible: al meter el ULTIMO digito del PIN la
+//  pantalla se quedaba quieta un momento y luego saltaba al
+//  escritorio. Eran dos cosas, las dos en el camino del toque:
+//
+//    1. flexLockVerify() derivaba el hash entero (miles de
+//       HMAC-SHA256) DENTRO del tick, antes de que el punto del
+//       ultimo digito llegara a pintarse;
+//    2. lsuUnlock() animaba el revelado del escritorio con un
+//       `for(;;)` de 400 ms que no devolvia el control.
+//
+//  Aqui se comprueba lo unico que de verdad lo impide: que despues
+//  del toque la pantalla SIGUE siendo suya, que hacen falta VARIAS
+//  vueltas del bucle para resolver (o sea, que esta troceado), y que
+//  cada vuelta vuelve de verdad. Si alguien devuelve la derivacion o
+//  la animacion al camino del toque, la primera vuelta resolveria
+//  entera y esto falla.
+// #############################################################
+static void lockTestTapPin(int key){
+  int x, y, w, h; lsuPinRect(key, x, y, w, h);
+  tDown(x + w / 2, y + h / 2, gTestMs + 40);
+  tUp(gTestMs + 60, true);
+  T.x = x + w / 2; T.y = y + h / 2;
+}
+// Abre la pantalla de clave y deja pasar la transicion de seguridad, que ahora
+// son cuadros: con un reloj virtual hay que avanzarlo a mano.
+static void lockTestOpenVerify(){
+  lsuStartVerify();
+  int cuadros = 0;
+  while(authFadeBusy() && cuadros < 5000){ gTestMs += 16; lsuTick(); cuadros++; }
+}
+static void testDesbloqueoFluido(){
+  printf("Desbloqueo: el ultimo digito no congela la interfaz\n");
+  int before = gFails;
+  flexPrefsWipe();
+  tReset();
+  gTestMs = 500000;
+  gHosted = false; gLand = false; kioskOn = false;
+  gSafeMode = false;
+  gState = ST_HOME;
+
+  chk(flexLockSet("2468", 1), "hay un PIN de 4 digitos configurado");
+  gLockType = flexLockType();
+  chk(gLockType == 1, "y el sistema lo ve como PIN");
+
+  lsuStartVerify();
+  chk(gState == ST_LOCKSETUP, "la pantalla de clave toma el mando");
+  // LA TRANSICION DE SEGURIDAD TAMPOCO BLOQUEA. Antes eran dos bucles de 190 y
+  // 230 ms que no devolvian el control; ahora son cuadros, y por eso esta
+  // prueba puede pasar por aqui sin colgarse con un reloj que no corre solo.
+  { int cuadros = 0;
+    while(authFadeBusy() && cuadros < 5000){ gTestMs += 16; lsuTick(); cuadros++; }
+    chk(cuadros > 1, "la transicion de seguridad se reparte en varios cuadros");
+    chk(!authFadeBusy(), "y termina sola"); }
+  chk(lsuMode == LSU_PIN,     "y entra por el teclado numerico");
+  chk(lsuSavedLen == 4,       "conoce la longitud para autoconfirmar");
+
+  // Los tres primeros digitos NO arrancan ninguna verificacion.
+  const int TECLA[10] = { 10, 0, 1, 2, 3, 4, 5, 6, 7, 8 };   // indice de rejilla por digito
+  lockTestTapPin(TECLA[2]); lsuTick();
+  lockTestTapPin(TECLA[4]); lsuTick();
+  lockTestTapPin(TECLA[6]); lsuTick();
+  chk(!lsuChkOn, "con el PIN incompleto no hay ninguna derivacion en curso");
+  chk(gState == ST_LOCKSETUP, "y seguimos en la pantalla de clave");
+
+  // El ULTIMO digito: arranca la verificacion y NO la resuelve.
+  lockTestTapPin(TECLA[8]); lsuTick();
+  chk(lsuChkOn, "el ultimo digito ARRANCA la verificacion, no la resuelve");
+  chk(gState == ST_LOCKSETUP, "la vuelta del toque no salta al escritorio");
+  chk(!lsuRevealMs, "ni empieza el revelado todavia");
+
+  // Vueltas sueltas del bucle hasta que resuelve. Tienen que ser VARIAS:
+  // si fuera una sola, la derivacion seguiria haciendose de golpe.
+  tReset();
+  int vueltas = 0;
+  while(lsuChkOn && vueltas < 5000){ lsuTick(); vueltas++; }
+  chk(vueltas > 1, "la derivacion se reparte en varias vueltas del bucle");
+  chk(!lsuChkOn, "y termina");
+  chk(gState == ST_LOCKSETUP, "el escritorio todavia no manda: primero el revelado");
+  chk(lsuRevealMs != 0, "acertar arranca el revelado del escritorio");
+
+  // El revelado tambien va por vueltas, y TERMINA solo.
+  int cuadros = 0;
+  while(lsuRevealMs && cuadros < 5000){ gTestMs += 16; lsuTick(); cuadros++; }
+  chk(cuadros > 1, "el revelado tambien se reparte en varios cuadros");
+  chk(gState == ST_HOME, "y al acabar el escritorio toma el mando");
+  chk(!T.down && !T.tap, "el toque del ultimo digito no sobrevive al aterrizaje");
+
+  // ---- Un PIN INCORRECTO recorre el mismo camino y no desbloquea ----
+  tReset();
+  gTestMs += 1000;
+  lockFails = 0; lockWaitReset();
+  lockTestOpenVerify();
+  lockTestTapPin(TECLA[1]); lsuTick();
+  lockTestTapPin(TECLA[1]); lsuTick();
+  lockTestTapPin(TECLA[1]); lsuTick();
+  lockTestTapPin(TECLA[1]); lsuTick();
+  chk(lsuChkOn, "un PIN equivocado tambien se verifica a plazos");
+  vueltas = 0;
+  while(lsuChkOn && vueltas < 5000){ lsuTick(); vueltas++; }
+  chk(vueltas > 1, "...con el mismo reparto en vueltas (no delata el fallo por tiempo)");
+  chk(gState == ST_LOCKSETUP, "un PIN equivocado NO desbloquea");
+  chk(!lsuRevealMs, "ni arranca el revelado");
+  chk(lsuPin[0] == 0, "y el campo se vacia para volver a intentarlo");
+
+  // ---- Salir con una verificacion a medias no la deja viva ----
+  tReset();
+  gTestMs += 1000;
+  lockFails = 0; lockWaitReset();
+  lockTestOpenVerify();
+  lockTestTapPin(TECLA[2]); lsuTick();
+  lockTestTapPin(TECLA[4]); lsuTick();
+  lockTestTapPin(TECLA[6]); lsuTick();
+  lockTestTapPin(TECLA[8]); lsuTick();
+  chk(lsuChkOn, "hay una verificacion en vuelo");
+  lsuExit();
+  chk(!lsuChkOn, "salir de la pantalla la cancela");
+  chk(!flexLockVerifyActive(), "y el modulo suelta el secreto que tenia copiado");
+
+  flexLockClear();
+  gLockType = 0;
+  flexPrefsWipe();
+  tReset();
+  gState = ST_HOME;
+  if(gFails == before) printf("  Desbloqueo: todas las comprobaciones pasan.\n");
+}
+
 static void testMultitareaMemoria(){
   printf("Multitarea por memoria: presupuesto, desalojo y Recientes\n");
   mtReset();
@@ -5858,6 +5989,7 @@ int main(){
   testRejillaAutoPaginas();
   testMediosOrientacion();
   testMultitareaMemoria();
+  testDesbloqueoFluido();
   testDeviceCare();
   testFlexCompass();
   testProteccionRobo();

@@ -56,9 +56,24 @@ static void lsuStartVerifyFor(int what, int id){
   lsuAfter = what; lsuAfterApp = id;
 }
 
+// La verificacion a plazos y el revelado del escritorio se definen mas abajo
+// (necesitan lsuFinishAfter, renderHome y el teclado). Aqui solo lo que los
+// caminos de SALIDA de esta pantalla -- que van antes en el archivo -- tienen
+// que poder cortar. Firmas sin tipos propios, como exige el auto-prototipado.
+static void lsuCheckCancel();
+// Millis de inicio del revelado del escritorio (0 = no hay ninguno). Se DEFINE
+// aqui, y no junto a su animacion, porque los caminos de salida de arriba
+// tienen que poder cortarlo.
+static uint32_t lsuRevealMs = 0;
+
 static int  utf8Count(const char* s){ int n = 0; while(*s){ if((*s & 0xC0) != 0x80) n++; s++; } return n; }
 static void lsuPassAppend(const char* s){ int L = strlen(lsuPass), sl = strlen(s); if(L + sl < (int)sizeof(lsuPass) - 1){ memcpy(lsuPass + L, s, sl); lsuPass[L + sl] = 0; } }
 static void lsuExit(){
+  // Una verificacion a medias no sobrevive a salir de la pantalla: se corta y el
+  // modulo borra el secreto que tenia copiado.
+  lsuCheckCancel();
+  lsuRevealMs = 0;
+  authFadeStop();                        // ni una transicion a medias sobrevive a la salida
   // FASES 3 y 4: cancelar una verificacion de app o de kiosco NO debe bloquear la
   // pantalla (que es lo que hacia la rama de abajo). Y sobre todo: cancelar la
   // salida del kiosco tiene que devolver A LA APP, nunca al escritorio -- si no,
@@ -100,6 +115,73 @@ static void lsuExit(){
   if(lsuVerify){ lsuVerify = false; gState = ST_LOCK; lockOff = 0; lastLockOff = -1; renderLock(); showLock(); }
   else { gState = ST_APP; settingsRender(); }
 }
+// #############################################################
+// ##  REVELADO DEL ESCRITORIO TRAS ACERTAR LA CLAVE
+// ##  ------------------------------------------------------
+// ##  QUE ARREGLA. Esto era un `for(;;)` de 400 ms que mezclaba los
+// ##  480x800 pixeles de la pantalla en cada vuelta y no devolvia el
+// ##  control hasta terminar. Mientras corria no se leia el tactil, no
+// ##  se despachaba loop() y ninguna otra animacion avanzaba: junto
+// ##  con la derivacion del PIN, es la otra mitad del "se congela un
+// ##  momento al meter el ultimo digito".
+// ##
+// ##  COMO SE ARREGLA. Es un ESTADO con marca de tiempo, igual que el
+// ##  resto de animaciones del sistema: un cuadro por vuelta del
+// ##  bucle, con el progreso sacado del reloj y no de un contador de
+// ##  pasos. Si un cuadro se retrasa, el siguiente salta a donde le
+// ##  toca en vez de acumular retraso; y el ultimo cuadro deja el
+// ##  escritorio EXACTO (a = 255, sin temblor), asi que showHome() no
+// ##  tiene que corregir nada.
+// ##
+// ##  gState se queda en ST_LOCKSETUP hasta el ultimo cuadro: si
+// ##  pasara a ST_HOME antes, homeTick() empezaria a componer bandas
+// ##  encima del revelado y se veria parpadear.
+// #############################################################
+#define LSU_REVEAL_MS 400
+
+static void lsuRevealStart(){
+  authFadeStop();                        // el revelado es el dueno de la pantalla desde ya
+  renderHome();                          // compone el home en homeBuf, UNA vez
+  lsuRevealMs = millis();
+  if(!lsuRevealMs) lsuRevealMs = 1;      // 0 es el centinela de "quieto"
+}
+// Un cuadro del revelado. Devuelve true mientras siga en curso.
+static bool lsuRevealTick(){
+  if(!lsuRevealMs) return false;
+  uint32_t e = millis() - lsuRevealMs;
+  if(e > (uint32_t)LSU_REVEAL_MS) e = LSU_REVEAL_MS;
+  float p = (float)e / (float)LSU_REVEAL_MS;
+  uint8_t a = (uint8_t)(p * 255.0f);
+  int sh = (int)((1.0f - p) * 6.0f * sinf(e * 0.05f));   // temblor que decae
+  const uint16_t* bgBuf = blurBg ? blurBg : homeBuf;
+  for(int j = 0; j < SCR_H; j++){
+    uint16_t* d  = bbuf + (size_t)j * SCR_W;
+    const uint16_t* bg = bgBuf  + (size_t)j * SCR_W;
+    const uint16_t* hm = homeBuf + (size_t)j * SCR_W;
+    // Sin temblor (que es el caso del ultimo tramo) el indice es directo: se
+    // ahorra el recorte por pixel de la rama general.
+    if(sh == 0){
+      if(a == 255) memcpy(d, hm, (size_t)SCR_W * 2);
+      else for(int i = 0; i < SCR_W; i++) d[i] = mix565(bg[i], hm[i], a);
+    } else {
+      for(int i = 0; i < SCR_W; i++){
+        int si = i - sh; if(si < 0) si = 0; if(si >= SCR_W) si = SCR_W - 1;
+        d[i] = mix565(bg[i], hm[si], a);
+      }
+    }
+  }
+  present(0, SCR_H - 1);
+  if(e < (uint32_t)LSU_REVEAL_MS) return true;
+  lsuRevealMs = 0;
+  gState = ST_HOME;
+  showHome();
+  // El dedo del ultimo digito todavia puede estar apoyado: sin esto, al
+  // aterrizar en el escritorio ese MISMO episodio tactil abriria el icono que
+  // hubiera debajo. Es la misma regla que aplica cualquier cambio de pantalla.
+  touchDropAll();
+  return false;
+}
+
 static void lsuUnlock(){
   lockOnSuccess();                       // FASE 1: acierto -> contador de fallos a cero
   lsuShakeMs = 0;
@@ -107,29 +189,67 @@ static void lsuUnlock(){
   lsuVerify = false; lsuWrong = 0; lockOff = 0; lastLockOff = -1;
   // FASES 3 y 4: si la verificacion no era para desbloquear la PANTALLA, el
   // destino lo decide lsuFinishAfter (abrir app, poner/quitar candado, salir del
-  // kiosco). La animacion de revelado del escritorio de abajo no aplica ahi.
+  // kiosco). La animacion de revelado del escritorio no aplica ahi.
   if(lsuAfter != LSU_AFTER_UNLOCK){ lsuFinishAfter(); return; }
-  gState = ST_HOME;
-  renderHome();                          // compone el home en homeBuf
-  uint32_t t0 = millis(), dur = 400;     // 0.4s: aparecer desvanecido + leve temblor
-  for(;;){
-    uint32_t e = millis() - t0; if(e > dur) e = dur;
-    float p = (float)e / dur;
-    uint8_t a = (uint8_t)(p * 255);
-    int sh = (int)((1.0f - p) * 6.0f * sinf(e * 0.05f));   // temblor que decae
-    for(int j = 0; j < SCR_H; j++){
-      uint16_t* d  = bbuf + (size_t)j * SCR_W;
-      uint16_t* bg = (blurBg ? blurBg : homeBuf) + (size_t)j * SCR_W;
-      uint16_t* hm = homeBuf + (size_t)j * SCR_W;
-      for(int i = 0; i < SCR_W; i++){
-        int si = i - sh; if(si < 0) si = 0; if(si >= SCR_W) si = SCR_W - 1;
-        d[i] = mix565(bg[i], hm[si], a);
-      }
-    }
-    present(0, SCR_H - 1);
-    if(e >= dur) break;
-  }
-  showHome();
+  lsuRevealStart();
+}
+
+// #############################################################
+// ##  VERIFICACION DE LA CLAVE  ·  fuera del camino critico
+// ##  ------------------------------------------------------
+// ##  QUE ARREGLA. Antes se llamaba a flexLockVerify() desde el mismo
+// ##  sitio que atiende el toque: el ultimo digito derivaba el hash
+// ##  entero (miles de HMAC-SHA256) ANTES de que el punto llegara a
+// ##  pintarse. El resultado era exactamente lo que se veia -- el
+// ##  ultimo digito no aparecia, la pantalla se quedaba quieta un
+// ##  momento y luego saltaba al escritorio.
+// ##
+// ##  COMO SE ARREGLA. La derivacion se parte en tandas (ver la
+// ##  VERIFICACION A PLAZOS de FlexOS_Passcode.h): el toque solo la
+// ##  ARRANCA, y cada vuelta del bucle avanza una tanda corta. Entre
+// ##  tanda y tanda el sistema sigue pintando, animando y leyendo el
+// ##  tactil. El veredicto es bit a bit el mismo.
+// ##
+// ##  Y el punto del ultimo digito se pinta ANTES de arrancar nada,
+// ##  que es lo que hace que el desbloqueo se sienta inmediato.
+// #############################################################
+static bool lsuChkOn   = false;          // hay una verificacion en curso
+static bool lsuChkPass = false;          // true = contrasena, false = PIN
+// Se define mas abajo, con el teclado alfanumerico ya disponible. Aqui solo el
+// prototipo: el fallo de una CONTRASENA tiene que repintar su pantalla.
+static void lsuRenderPass(int yoff, int xoff);
+
+static void lsuCheckFail(){
+  lsuChkOn = false;
+  lsuWrong = millis();
+  lockOnFail();
+  lsuShakeStart();
+  if(lsuChkPass){ lsuPass[0] = 0; lsuRenderPass(0, 0); }
+  else            lsuPin[0]  = 0;
+}
+// Arranca la verificacion de lo que haya escrito. No la resuelve: eso lo va
+// haciendo lsuCheckStep() vuelta a vuelta.
+static void lsuCheckStart(bool pass){
+  lsuChkPass = pass;
+  if(!flexLockVerifyBegin(pass ? lsuPass : lsuPin)){ lsuCheckFail(); return; }
+  lsuChkOn = true;
+}
+// Una tanda. Devuelve true si esta vuelta la consume la verificacion (siga o
+// haya terminado), para que el tick no atienda ademas toques del teclado.
+static bool lsuCheckStep(){
+  if(!lsuChkOn) return false;
+  int r = flexLockVerifyStep(FLEXLOCK_STEP_ITERS);
+  if(r == FLEXLOCK_BUSY) return true;
+  lsuChkOn = false;
+  if(r == FLEXLOCK_OK) lsuUnlock();
+  else                 lsuCheckFail();
+  return true;
+}
+// Cancela una verificacion a medias (salir de la pantalla, bloquear, apagar).
+// Es idempotente y borra el secreto que el modulo tenia copiado.
+static void lsuCheckCancel(){
+  lsuChkOn = false;
+  flexLockVerifyCancel();
 }
 // GUARDAR LA CLAVE DEL SISTEMA. Antes esto escribia el PIN y la
 // contrasena TAL CUAL en NVS ("lockpin"/"lockpass"), asi que cualquiera
@@ -271,12 +391,16 @@ static void lsuRenderPass(int yoff, int xoff){
 // del teclado de siempre. Asi la aparicion es fundido + deslizamiento, no un
 // salto seco.
 static void lsuShowPassFirst(){
-  if(authFadePending && authSnap){
+  // El destino del fundido se compone en lockBuf, que aqui es scratch (el mismo
+  // uso que le da lsuComposePin para el teclado numerico). NO en authSnap: esa
+  // es la instantanea de la que PARTE el fundido de salida, que ahora corre
+  // despues -- pisarla dejaria la transicion saliendo de la pantalla equivocada.
+  if(authFadeBusy() && lockBuf){
     uint16_t* old = gBuf;
-    gBuf = authSnap;                                  // lienzo fuera de pantalla (ya no hace falta la instantanea)
+    gBuf = lockBuf;
     lsuPaintPass(SCR_H - KB_Y, 0);
     gBuf = old;
-    authFadeIn(authSnap);
+    authFadeIn(lockBuf);
   }
   lsuKbAnim = millis();
 }
@@ -287,12 +411,35 @@ static void lsuEnter(){
   // pondria un PIN nuevo y saldria con el: la unica llave del kiosco es la clave
   // que ya estaba puesta antes de prestarlo.
   if(KIOSK_ON && kioskOn) return;
+  lsuCheckCancel(); lsuRevealMs = 0;
   gState = ST_LOCKSETUP; lsuMode = LSU_SEL; lsuPin[0] = 0; lsuPass[0] = 0; lsuPress = -1; lsuKbAnim = 0;
   mapaActivo = LAYOUT_ES; kbLangEs = true; kbShift = false;
   kbExtrasOn = false; kbBotReserve = 0; kbApplySize(); kbMtSurfaceReset();   // sin barra ni chips en la pantalla de clave
   lsuRenderSel();
 }
 static void lsuTick(){
+  // REVELADO DEL ESCRITORIO en curso: es el dueno de la pantalla hasta su
+  // ultimo cuadro. Nada mas se atiende (ni toques del teclado que ya no existe
+  // ni animaciones de la clave), pero el bucle sigue corriendo entero.
+  if(lsuRevealMs){ lsuRevealTick(); return; }
+  // TRANSICION DE SEGURIDAD (la pantalla anterior se va, el metodo de clave
+  // entra). Un cuadro por vuelta: mientras dura, el teclado todavia no existe
+  // como superficie tocable, pero el bucle del sistema sigue corriendo entero.
+  if(authFadeBusy()){
+    authFadeTick();
+    if(!authFadeBusy() && lsuMode == LSU_PASS) lsuKbAnim = millis();   // el teclado entra despues
+    return;
+  }
+  // VERIFICACION A PLAZOS en curso: una tanda por vuelta. Mientras dura, el
+  // teclado NO acepta toques nuevos -- seria una segunda clave a medias -- pero
+  // la pantalla se sigue animando, que es justo lo que antes no pasaba.
+  if(lsuChkOn){
+    if(lsuCheckStep()){
+      if(lsuRevealMs || gState != ST_LOCKSETUP) return;      // ya resolvio y cambio de pantalla
+      if(lsuMode == LSU_PIN && millis() - lsuAnimMs > 30){ lsuAnimMs = millis(); lsuAnimPin(); }
+      return;
+    }
+  }
   if(lsuMode == LSU_SEL){
     // El selector es ESTATICO (lo pinta lsuEnter): no hay nada que animar aqui.
     if(T.tap){
@@ -332,13 +479,18 @@ static void lsuTick(){
           lsuPress = i; lsuPressMs = millis();
           if(i == 9){ int L = strlen(lsuPin); if(L > 0) lsuPin[L - 1] = 0; }                         // borrar
           else if(i == 11){                                                                          // OK
-            if(lsuVerify){ if(flexLockVerify(lsuPin)) lsuUnlock(); else { lsuWrong = millis(); lsuPin[0] = 0; lockOnFail(); lsuShakeStart(); } return; }
+            if(lsuVerify){ lsuAnimMs = millis(); lsuAnimPin(); lsuCheckStart(false); return; }
             else if(strlen(lsuPin) >= 4){ lsuSavePin(); return; }
           }
           else if(strlen(lsuPin) < 8){                                                               // digito
             int L = strlen(lsuPin); lsuPin[L] = PIN_KEYS[i][0]; lsuPin[L + 1] = 0;
             if(lsuVerify && lsuSavedLen > 0 && (int)strlen(lsuPin) == lsuSavedLen){
-              if(flexLockVerify(lsuPin)) lsuUnlock(); else { lsuWrong = millis(); lsuPin[0] = 0; lockOnFail(); lsuShakeStart(); }
+              // EL ULTIMO PUNTO SE PINTA PRIMERO. Es una sola banda (120..700) y
+              // cuesta menos de un milisegundo; hacerlo antes de arrancar la
+              // verificacion es lo que hace que el desbloqueo se vea inmediato
+              // en vez de "clic... nada... escritorio".
+              lsuAnimMs = millis(); lsuAnimPin();
+              lsuCheckStart(false);
               return;
             }
           }
@@ -403,7 +555,7 @@ static void lsuTick(){
       else if(fi == 2){ kbLangEs = !kbLangEs; if(mapaActivo == LAYOUT_ES || mapaActivo == LAYOUT_EN) mapaActivo = kbLangEs ? LAYOUT_ES : LAYOUT_EN; }
       else if(fi == 3) lsuPassAppend(" ");
       else if(fi == 4){ int L = strlen(lsuPass); if(L > 0){ int q = L - 1; while(q > 0 && (lsuPass[q] & 0xC0) == 0x80) q--; lsuPass[q] = 0; } }
-      else { if(lsuVerify){ if(flexLockVerify(lsuPass)) lsuUnlock(); else { lsuWrong = millis(); lsuPass[0] = 0; lockOnFail(); lsuShakeStart(); lsuRenderPass(0, 0); } return; } else if(strlen(lsuPass) >= 4){ lsuSavePass(); return; } }
+      else { if(lsuVerify){ lsuCheckStart(true); return; } else if(strlen(lsuPass) >= 4){ lsuSavePass(); return; } }
       lsuRenderPass(0, 0); return;
     }
     if(kbFastActive()) return;                          // ya la escribio la via rapida
@@ -437,6 +589,7 @@ static void lsuStartVerify(){
   // solo se lee su LONGITUD (para autoconfirmar el PIN al completarlo);
   // la comprobacion la hace flexLockVerify() con el hash de NVS.
   lsuSavedLen = flexLockLen();
+  lsuCheckCancel(); lsuRevealMs = 0;      // ninguna verificacion anterior sigue viva
   lsuVerify = true; lsuWrong = 0; lsuPin[0] = 0; lsuPass[0] = 0; lsuPress = -1;
   mapaActivo = LAYOUT_ES; kbLangEs = true; kbShift = false;
   kbExtrasOn = false; kbBotReserve = 0; kbApplySize(); kbMtSurfaceReset();   // sin barra ni chips en la verificacion

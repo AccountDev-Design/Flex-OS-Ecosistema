@@ -98,75 +98,92 @@ static void lsuBg(){
 // #############################################################
 #define AUTH_FADE_OUT_MS 190
 #define AUTH_FADE_IN_MS  230
-static uint16_t* authSnap = NULL;        // instantanea de la interfaz que se va
-static bool authFadePending = false;     // el fade out ya corrio: toca el fade in
+static uint16_t* authSnap   = NULL;      // instantanea de la interfaz que se va
+static uint8_t   authPhase  = 0;         // 0 quieto · 1 fundido de salida · 2 de entrada
+static uint32_t  authPhaseMs = 0;        // millis de inicio de la fase en curso
+static const uint16_t* authTarget = NULL;// cuadro al que entra el fundido (fase 2)
+static bool      authArmed  = false;     // hay salida en marcha y falta registrar el destino
 
-// Fundido de salida hacia el fondo de la pantalla de clave. Deja preparado el
-// fade in. Si algo no esta disponible (PSRAM, landscape, app hospedada) no se
-// anima y la verificacion sigue igual que siempre: la transicion es un adorno,
-// nunca un requisito para poder introducir la clave.
+// #############################################################
+// ##  POR QUE ESTO YA NO ES UN BUCLE
+// ##  ------------------------------------------------------
+// ##  Los dos fundidos eran `for(;;)` con `delay(1)` dentro: 190 +
+// ##  230 ms en los que el bucle del sistema no volvia, el tactil no
+// ##  se leia y ninguna otra animacion avanzaba. Ahora son DOS FASES
+// ##  de una misma transicion, con marca de tiempo, que avanzan un
+// ##  cuadro por vuelta desde lsuTick(). Se ven igual -- duran lo
+// ##  mismo y meten tantos cuadros como pueda dar el compositor --
+// ##  pero el sistema sigue corriendo por debajo.
+// ##
+// ##  El destino de la fase 2 lo REGISTRA el llamante (authFadeIn) en
+// ##  la misma vuelta en que arranca la salida: componerlo cuesta un
+// ##  cuadro fuera de pantalla y no depende del tiempo, asi que no
+// ##  hace falta esperar a que la salida termine para prepararlo.
+// #############################################################
+static inline bool authFadeBusy(){ return authPhase != 0; }
+static void authFadeStop(){ authPhase = 0; authArmed = false; authTarget = NULL; }
+
+// Arranca el fundido de salida hacia el fondo de la pantalla de clave. Si algo
+// no esta disponible (PSRAM, landscape, app hospedada) no se anima y la
+// verificacion sigue igual que siempre: la transicion es un adorno, nunca un
+// requisito para poder introducir la clave.
 static void authFadeOut(){
-  authFadePending = false;
+  authFadeStop();
   if(gHosted || gLand) return;
   ensureBlurBg();
   if(!blurBg) return;
   if(!authSnap) authSnap = (uint16_t*)heap_caps_malloc((size_t)SCR_W * SCR_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if(!authSnap) return;
   memcpy(authSnap, fb, (size_t)SCR_W * SCR_H * 2);
-  uint32_t t0 = millis();
-  int last = -1;
-  for(;;){
-    uint32_t e = millis() - t0; if(e > (uint32_t)AUTH_FADE_OUT_MS) e = AUTH_FADE_OUT_MS;
-    float p = (float)e / (float)AUTH_FADE_OUT_MS;
-    p = p * p * (3.0f - 2.0f * p);                       // suavizado en las dos puntas
-    uint8_t a = (uint8_t)(p * 255.0f);
-    if((int)a == last){                                  // el reloj aun no ha movido el fundido
-      if(e < (uint32_t)AUTH_FADE_OUT_MS){ delay(1); continue; }
-      break;
-    }
-    last = a;
-    for(int j = 0; j < SCR_H; j++){
-      uint16_t* d = bbuf + (size_t)j * SCR_W;
-      const uint16_t* s0 = authSnap + (size_t)j * SCR_W;
-      const uint16_t* s1 = blurBg   + (size_t)j * SCR_W;
-      for(int i = 0; i < SCR_W; i++) d[i] = mix565(s0[i], s1[i], a);
-    }
-    present(0, SCR_H - 1);
-    if(e >= (uint32_t)AUTH_FADE_OUT_MS) break;
-  }
-  authFadePending = true;
+  authPhase   = 1;
+  authPhaseMs = millis(); if(!authPhaseMs) authPhaseMs = 1;
+  authArmed   = true;                    // falta que el llamante registre el destino
 }
-// Fundido de entrada del metodo de seguridad ya compuesto en 'target'.
-// Devuelve false si no habia transicion en curso, para que el llamante publique
-// su cuadro como siempre.
+
+// Registra el cuadro ya compuesto al que entra la transicion. Devuelve false si
+// no habia ninguna en marcha, para que el llamante publique su cuadro como
+// siempre.
 static bool authFadeIn(const uint16_t* target){
-  if(!authFadePending) return false;
-  authFadePending = false;
-  if(!target || !blurBg) return false;
-  uint32_t t0 = millis();
-  int last = -1;
-  for(;;){
-    uint32_t e = millis() - t0; if(e > (uint32_t)AUTH_FADE_IN_MS) e = AUTH_FADE_IN_MS;
-    float p = (float)e / (float)AUTH_FADE_IN_MS;
-    p = p * p * (3.0f - 2.0f * p);
-    uint8_t a = (uint8_t)(p * 255.0f);
-    if((int)a == last){
-      if(e < (uint32_t)AUTH_FADE_IN_MS){ delay(1); continue; }
-      break;
-    }
-    last = a;
-    for(int j = 0; j < SCR_H; j++){
-      uint16_t* d = bbuf + (size_t)j * SCR_W;
-      const uint16_t* s0 = blurBg + (size_t)j * SCR_W;
-      const uint16_t* s1 = target + (size_t)j * SCR_W;
-      for(int i = 0; i < SCR_W; i++) d[i] = mix565(s0[i], s1[i], a);
-    }
-    present(0, SCR_H - 1);
-    if(e >= (uint32_t)AUTH_FADE_IN_MS) break;
-  }
-  memcpy(bbuf, target, (size_t)SCR_W * SCR_H * 2);       // cuadro final exacto (sin redondeos del fundido)
-  present(0, SCR_H - 1);
+  if(!authArmed) return false;
+  authArmed = false;
+  if(!target || !blurBg){ authFadeStop(); return false; }
+  authTarget = target;
   return true;
+}
+
+// UN cuadro de la transicion. Devuelve true mientras quede transicion.
+static bool authFadeTick(){
+  if(authPhase == 0) return false;
+  if(!blurBg || (authPhase == 1 && !authSnap) || (authPhase == 2 && !authTarget)){
+    authFadeStop(); return false;
+  }
+  uint32_t dur = (authPhase == 1) ? (uint32_t)AUTH_FADE_OUT_MS : (uint32_t)AUTH_FADE_IN_MS;
+  uint32_t e = millis() - authPhaseMs; if(e > dur) e = dur;
+  float p = (float)e / (float)dur;
+  p = p * p * (3.0f - 2.0f * p);                       // suavizado en las dos puntas
+  uint8_t a = (uint8_t)(p * 255.0f);
+  const uint16_t* s0 = (authPhase == 1) ? authSnap : blurBg;
+  const uint16_t* s1 = (authPhase == 1) ? blurBg   : authTarget;
+  for(int j = 0; j < SCR_H; j++){
+    uint16_t* d = bbuf + (size_t)j * SCR_W;
+    const uint16_t* r0 = s0 + (size_t)j * SCR_W;
+    const uint16_t* r1 = s1 + (size_t)j * SCR_W;
+    for(int i = 0; i < SCR_W; i++) d[i] = mix565(r0[i], r1[i], a);
+  }
+  present(0, SCR_H - 1);
+  if(e < dur) return true;
+  if(authPhase == 1){
+    // La salida termino. Si el llamante dejo un destino, entra; si no (no habia
+    // transicion de verdad), aqui se acaba.
+    if(!authTarget){ authFadeStop(); return false; }
+    authPhase = 2; authPhaseMs = millis(); if(!authPhaseMs) authPhaseMs = 1;
+    return true;
+  }
+  // Cuadro final EXACTO (sin los redondeos del fundido).
+  memcpy(bbuf, authTarget, (size_t)SCR_W * SCR_H * 2);
+  present(0, SCR_H - 1);
+  authFadeStop();
+  return false;
 }
 
 // #############################################################
