@@ -418,6 +418,124 @@ static void cmpDrawModule(int cx, int cy, int w, float yawDeg, float pitchDeg, f
   }
 }
 
+
+// #############################################################
+// ##  TARJETA DEL MODULO, CACHEADA  ·  el objeto 3D no se redibuja
+// ##  ----------------------------------------------------------
+// ##  QUE ARREGLA. Al arrastrar la lista hacia abajo, CADA cuadro
+// ##  recomponia el viewport entero, y dentro iba la tarjeta del
+// ##  modulo: un panel Liquid Glass (box-blur de ~428x230) mas la
+// ##  caja en 3D (cinco cuadrilateros rellenos, cuatro trazos
+// ##  antialiased, once circulos y dos textos). Eso es lo que hacia
+// ##  que deslizar con el objeto en pantalla fuera a tirones.
+// ##
+// ##  LA OBSERVACION QUE LO ARREGLA. Nada de esa tarjeta depende de
+// ##  DONDE se dibuje: el fondo que tiene debajo es el color de
+// ##  pagina, uniforme, y sobre un fondo uniforme el box-blur
+// ##  devuelve ese mismo color (es la misma razon por la que existe
+// ##  drawGlassCardFlat en el motor). Asi que se compone UNA vez en
+// ##  un lienzo propio y, mientras la orientacion no cambie, cada
+// ##  cuadro es un memcpy por fila.
+// ##
+// ##  Y AL ARRASTRAR NO SE RECOMPONE. Mientras el dedo mueve la
+// ##  lista, el objeto se limita a acompanarla: la geometria no
+// ##  cambia por desplazarse. La tarjeta se rehace cuando de verdad
+// ##  cambia algo -- otra orientacion, otro tamano, otro tema -- y
+// ##  nunca mas de una vez cada CMP_MOD_MS.
+// #############################################################
+#define CMP_TILE_MAX_H 240                 // cmpHModule es 230; el resto es holgura
+static uint16_t* cmpTile  = NULL;          // lienzo propio (stride SCR_W, filas compactas)
+static int   cmpTileW = 0, cmpTileH = 0;   // geometria con la que se compuso
+static bool  cmpTileOk = false;            // hay una tarjeta valida dentro
+static float cmpTileYaw = 0, cmpTilePitch = 0, cmpTileRoll = 0;
+static bool  cmpTileHave = false;          // se compuso con orientacion real
+static uint16_t cmpTileBg = 0;             // color de pagina con el que se compuso
+static bool  cmpTileGlass = false;         // material con el que se compuso
+
+static void cmpTileFree(){
+  if(cmpTile){ heap_caps_free(cmpTile); cmpTile = NULL; }
+  cmpTileOk = false; cmpTileW = cmpTileH = 0;
+}
+// Invalida sin soltar la memoria: el siguiente tick la vuelve a componer.
+static inline void cmpTileDirty(){ cmpTileOk = false; }
+
+// Compone la tarjeta (fondo de pagina + superficie del sistema + caja 3D) en su
+// propio lienzo. Devuelve false si no se pudo: el llamante dibuja como siempre.
+static bool cmpTileBuild(int w, int h, float yaw, float pitch, float roll, bool have){
+  if(w <= 0 || h <= 0 || w > SCR_W || h > CMP_TILE_MAX_H) return false;
+  if(gLand) return false;                    // el vidrio indexa en vertical directo
+  if(uiGlassBandActive()) return false;       // hay una banda de otro overlay: no es nuestro fondo
+  if(!cmpTile)
+    cmpTile = (uint16_t*)heap_caps_malloc((size_t)SCR_W * CMP_TILE_MAX_H * 2,
+                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(!cmpTile) return false;
+
+  uint16_t* oBuf = gBuf;                     // gBuf directo, no setBuf: no debe desviarse a DeX
+  int oc0 = gClipY0, oc1 = gClipY1, ox0 = gClipX0, ox1 = gClipX1;
+  gBuf = cmpTile;
+  gClipY0 = 0; gClipY1 = h - 1; gClipX0 = 0; gClipX1 = w - 1;
+  // El fondo es el de la pagina, plano: es la premisa de todo esto.
+  fillRect(0, 0, w, h, TH_PAGE);
+  uiSurface(0, 0, w, h, 24, UIS_CARD);
+  // RECORTE A LA TARJETA, igual que en el dibujo directo: inclinada del todo la
+  // caja proyectada crece y no puede salirse de su tarjeta.
+  gClipY0 = 6; gClipY1 = h - 7; gClipX0 = 6; gClipX1 = w - 7;
+  int mw = w - 110;
+  int byH = (h - 24) * 100 / 80;
+  if(mw > byH) mw = byH;
+  cmpDrawModule(w / 2, h / 2, mw, yaw, pitch, roll);
+  gBuf = oBuf; gClipY0 = oc0; gClipY1 = oc1; gClipX0 = ox0; gClipX1 = ox1;
+
+  cmpTileW = w; cmpTileH = h;
+  cmpTileYaw = yaw; cmpTilePitch = pitch; cmpTileRoll = roll;
+  cmpTileHave = have; cmpTileBg = TH_PAGE; cmpTileGlass = uiGlass;
+  cmpTileOk = true;
+  return true;
+}
+// true si la tarjeta cacheada sirve para este tamano y este tema.
+static bool cmpTileUsable(int w, int h){
+  return cmpTileOk && cmpTile && !gLand && !uiGlassBandActive() &&
+         cmpTileW == w && cmpTileH == h &&
+         cmpTileBg == TH_PAGE && cmpTileGlass == uiGlass;
+}
+// DECISION DE REHACER. Se separa del tick a proposito: es la regla entera de
+// cuando cuesta y cuando no, en un solo sitio y sin nada de pantalla, asi que
+// se puede comprobar de verdad en el PC (donde no hay IMU y la app ni siquiera
+// llega a la vista de brujula).
+//
+//   · Otro tamano o otro tema  -> hay que rehacerla, se este arrastrando o no:
+//     lo cacheado ya no sirve para dibujar.
+//   · Arrastrando              -> NO. Desplazarse no gira la placa; la tarjeta
+//     solo tiene que acompanar a la lista, y eso es un volcado.
+//   · Quieto y con la orientacion cambiada -> si, como mucho cada CMP_MOD_MS.
+static bool cmpTileNeedsBuild(int w, int h, bool moving,
+                              float yaw, float pitch, float roll, bool have,
+                              uint32_t now, uint32_t lastMs){
+  if(!cmpTileUsable(w, h)) return true;
+  if(moving) return false;
+  if((uint32_t)(now - lastMs) < (uint32_t)CMP_MOD_MS) return false;
+  return (cmpTileHave != have ||
+          fabsf(imuAngleDelta(cmpTileYaw, yaw)) >= 0.6f ||
+          fabsf(cmpTilePitch - pitch) >= 0.4f ||
+          fabsf(cmpTileRoll  - roll)  >= 0.4f);
+}
+
+// Vuelca la tarjeta en (x,y), solo las filas que caen dentro del recorte.
+static void cmpTileBlit(int x, int y){
+  for(int j = 0; j < cmpTileH; j++){
+    int yy = y + j;
+    if(yy < 0 || yy >= SCR_H || yy < gClipY0 || yy > gClipY1) continue;
+    int xs = x, xe = x + cmpTileW - 1, sx = 0;
+    if(xs < gClipX0){ sx = gClipX0 - xs; xs = gClipX0; }
+    if(xe > gClipX1) xe = gClipX1;
+    if(xs < 0){ sx += -xs; xs = 0; }
+    if(xe > SCR_W - 1) xe = SCR_W - 1;
+    if(xs > xe) continue;
+    memcpy(gBuf + (size_t)yy * SCR_W + xs, cmpTile + (size_t)j * SCR_W + sx,
+           (size_t)(xe - xs + 1) * 2);
+  }
+}
+
 // #############################################################
 // ##  ROSA DE LOS VIENTOS
 // ##  La rosa GIRA con el rumbo (-heading) y el indice de arriba se
@@ -587,28 +705,37 @@ static void cmpDrawCompass(int y0, int y1){
 
   if(base + cmpYModule + cmpHModule >= c0 && base + cmpYModule <= c1){
     int my = base + cmpYModule;
-    uiSurface(x, my, w, cmpHModule, 24, UIS_CARD);
-    // RECORTE A SU TARJETA. Inclinada del todo, la caja proyectada crece: sin
-    // esto, una vuelta completa de la placa podria pintar por encima de la
-    // lista de sensores. El recorte lo resuelve de una vez y no cuesta nada.
-    int q0 = gClipY0, q1 = gClipY1, qx0 = gClipX0, qx1 = gClipX1;
-    if(gClipY0 < my + 6) gClipY0 = my + 6;
-    if(gClipY1 > my + cmpHModule - 7) gClipY1 = my + cmpHModule - 7;
-    if(gClipX0 < x + 6) gClipX0 = x + 6;
-    if(gClipX1 > x + w - 7) gClipX1 = x + w - 7;
-    // El ancho se acota tambien por el ALTO de la tarjeta: girada, la placa
-    // ocupa como mucho 0,71 veces su ancho en vertical.
-    int mw = w - 110;
-    int byH = (cmpHModule - 24) * 100 / 80;
-    if(mw > byH) mw = byH;
-    // Orientacion REAL si la hay; con el sensor callado, la vista plana.
-    // Yaw = el rumbo REAL (con signo cambiado: girar el aparato a la derecha
-    // gira la placa a la izquierda respecto al Norte). Nada escalado ni
-    // suavizado a ojo: es el mismo dato que mueve la rosa.
-    if(cmpHave) cmpDrawModule(SCR_W / 2, my + cmpHModule / 2, mw,
-                              -cmpHeadVis, cmpPitch, cmpRoll);
-    else        cmpDrawModule(SCR_W / 2, my + cmpHModule / 2, mw, 0.0f, 0.0f, 0.0f);
-    gClipY0 = q0; gClipY1 = q1; gClipX0 = qx0; gClipX1 = qx1;
+    // TARJETA CACHEADA. Mientras la orientacion, el tamano y el tema no
+    // cambien, esto es un memcpy por fila en vez de un box-blur mas cinco
+    // cuadrilateros rellenos: es lo que hace que deslizar con el objeto en
+    // pantalla no vaya a tirones. La compone compassTick(), fuera del camino
+    // del cuadro; aqui solo se vuelca. Ver TARJETA DEL MODULO, CACHEADA.
+    if(cmpTileUsable(w, cmpHModule)){
+      cmpTileBlit(x, my);
+    } else {
+      uiSurface(x, my, w, cmpHModule, 24, UIS_CARD);
+      // RECORTE A SU TARJETA. Inclinada del todo, la caja proyectada crece: sin
+      // esto, una vuelta completa de la placa podria pintar por encima de la
+      // lista de sensores. El recorte lo resuelve de una vez y no cuesta nada.
+      int q0 = gClipY0, q1 = gClipY1, qx0 = gClipX0, qx1 = gClipX1;
+      if(gClipY0 < my + 6) gClipY0 = my + 6;
+      if(gClipY1 > my + cmpHModule - 7) gClipY1 = my + cmpHModule - 7;
+      if(gClipX0 < x + 6) gClipX0 = x + 6;
+      if(gClipX1 > x + w - 7) gClipX1 = x + w - 7;
+      // El ancho se acota tambien por el ALTO de la tarjeta: girada, la placa
+      // ocupa como mucho 0,71 veces su ancho en vertical.
+      int mw = w - 110;
+      int byH = (cmpHModule - 24) * 100 / 80;
+      if(mw > byH) mw = byH;
+      // Orientacion REAL si la hay; con el sensor callado, la vista plana.
+      // Yaw = el rumbo REAL (con signo cambiado: girar el aparato a la derecha
+      // gira la placa a la izquierda respecto al Norte). Nada escalado ni
+      // suavizado a ojo: es el mismo dato que mueve la rosa.
+      if(cmpHave) cmpDrawModule(SCR_W / 2, my + cmpHModule / 2, mw,
+                                -cmpHeadVis, cmpPitch, cmpRoll);
+      else        cmpDrawModule(SCR_W / 2, my + cmpHModule / 2, mw, 0.0f, 0.0f, 0.0f);
+      gClipY0 = q0; gClipY1 = q1; gClipX0 = qx0; gClipX1 = qx1;
+    }
   }
   if(base + cmpYChecks + 4 * 42 >= c0 && base + cmpYChecks <= c1){
     const char* names[4] = { "Aceler\xC3\xB3metro", "Giroscopio", "Magnet\xC3\xB3metro", "AHRS" };
@@ -1056,13 +1183,33 @@ static void compassTick(){
       } else cmpDrawnHead = cmpHeadVis;       // fuera de pantalla: no cuesta nada
     }
   }
-  if(now - cmpModMs >= CMP_MOD_MS){
-    if(fabsf(cmpPitch - cmpDrawnPitch) >= 0.4f || fabsf(cmpRoll - cmpDrawnRoll) >= 0.4f){
-      if(cmpBandOf(cmpYModule, cmpYModule + cmpHModule, &s0, &s1)){
-        cmpMark(s0, s1);
+  // ---- Tarjeta del modulo: se REHACE, no se redibuja ----
+  // Lo caro de esta app es esta tarjeta, y lo caro no es moverla: es
+  // componerla. Se rehace solo cuando cambia algo que de verdad la cambia --
+  // otro tamano, otro tema, otra orientacion -- y nunca mientras el dedo
+  // arrastra: desplazarse no gira la placa, asi que ahi basta con volcar la que
+  // ya hay. Al soltar, la primera vuelta quieta la pone al dia.
+  {
+    int mw = SCR_W - 52;
+    bool moving = cmpDrag || fabsf(cmpScrollVel) > 6.0f;
+    float wantYaw   = cmpHave ? -cmpHeadVis : 0.0f;
+    float wantPitch = cmpHave ?  cmpPitch   : 0.0f;
+    float wantRoll  = cmpHave ?  cmpRoll    : 0.0f;
+    if(cmpTileNeedsBuild(mw, cmpHModule, moving, wantYaw, wantPitch, wantRoll, cmpHave,
+                         now, cmpModMs)){
+      bool visible = cmpBandOf(cmpYModule, cmpYModule + cmpHModule, &s0, &s1);
+      if(cmpTileBuild(mw, cmpHModule, wantYaw, wantPitch, wantRoll, cmpHave)){
         cmpModMs = now;
+        cmpDrawnPitch = cmpPitch; cmpDrawnRoll = cmpRoll;
+        if(visible) cmpMark(s0, s1);
+      } else if(now - cmpModMs >= CMP_MOD_MS){
+        // Sin lienzo propio (sin PSRAM): el camino de siempre, dibujando la
+        // tarjeta dentro del cuadro. Mas caro, pero nunca deja de funcionar.
+        if(fabsf(cmpPitch - cmpDrawnPitch) >= 0.4f || fabsf(cmpRoll - cmpDrawnRoll) >= 0.4f){
+          if(visible){ cmpMark(s0, s1); cmpModMs = now; }
+          cmpDrawnPitch = cmpPitch; cmpDrawnRoll = cmpRoll;
+        }
       }
-      cmpDrawnPitch = cmpPitch; cmpDrawnRoll = cmpRoll;
     }
   }
   if(now - cmpTechMs >= CMP_TECH_MS){
@@ -1071,6 +1218,15 @@ static void compassTick(){
     if(cmpBandOf(cmpYChecks, cmpYTech + 8 * 38, &s0, &s1)) cmpMark(s0, s1);
   }
   if(cmpDirtyY0 <= cmpDirtyY1) cmpPresent(cmpDirtyY0, cmpDirtyY1);
+}
+
+// Gancho de la multitarea por memoria: el lienzo de la tarjeta es puro cache,
+// asi que se suelta entero. Al volver, cmpTileBuild lo rehace en la primera
+// vuelta. Devuelve los bytes que ocupaba, como pide el contrato.
+static size_t cmpShed(){
+  if(!cmpTile) return 0;
+  cmpTileFree();
+  return (size_t)SCR_W * CMP_TILE_MAX_H * 2;
 }
 
 static void compassSuspend(){
@@ -1082,6 +1238,7 @@ static void compassSuspend(){
   cmpTickMs = 0;
 }
 static void compassResume(){
+  cmpTileDirty();                   // el lienzo pudo soltarse en segundo plano
   cmpHoldImu(true);
   cmpTickMs = millis();
   cmpStopMotion();
@@ -1090,6 +1247,7 @@ static void compassResume(){
   cmpDrawnHead = -1000.0f; cmpDrawnState = 255;
   cmpSample();
   cmpLayout();
+  cmpTileDirty();                   // otro tamano o otro tema: la tarjeta no vale
   if(cmpScroll > cmpScrollMax()) cmpScroll = (float)cmpScrollMax();
   if(cmpScroll < 0) cmpScroll = 0;
   cmpSyncView(false);
@@ -1100,4 +1258,5 @@ static void compassClose(){
   cmpStopMotion();
   cmpHoldImu(false);
   cmpTickMs = 0;
+  cmpTileFree();                    // cerrar la app devuelve su lienzo a la PSRAM
 }

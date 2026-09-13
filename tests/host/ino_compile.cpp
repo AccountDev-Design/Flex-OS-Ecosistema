@@ -5998,6 +5998,114 @@ static void testFlexCompass(){
     chk(strcmp(b, "-0.8\xC2\xB0") == 0, "los angulos negativos llevan su signo");
   }
 
+  // ---- LA TARJETA DEL MODULO 3D NO SE RECOMPONE AL DESPLAZAR ----
+  // Es lo que hacia que deslizar con el objeto en pantalla fuera a tirones:
+  // cada cuadro rehacia un box-blur de 428x230 mas cinco cuadrilateros
+  // rellenos, once circulos y dos textos. Ahora se compone UNA vez en su
+  // propio lienzo y moverla es un memcpy por fila.
+  {
+    gState = ST_APP; gAppId = IC_BRUJULA;
+    gAppW = SCR_W; gAppH = SCR_H;
+    uiClipFull(); setBuf(bbuf);
+    bool glassPrev = uiGlass; uiGlass = true;
+    cmpLayout();
+    cmpTileFree();
+
+    const int W = SCR_W - 52;
+    chk(!cmpTileUsable(W, cmpHModule), "sin lienzo compuesto la tarjeta no se puede reutilizar");
+    bool built = cmpTileBuild(W, cmpHModule, 30.0f, 12.0f, -8.0f, true);
+    chk(built, "la tarjeta del modulo se compone en su propio lienzo");
+    chk(cmpTileUsable(W, cmpHModule), "y a partir de ahi se reutiliza");
+    chk(!cmpTileUsable(W - 10, cmpHModule), "otro ancho NO reutiliza la anterior");
+    chk(!cmpTileUsable(W, cmpHModule - 10), "ni otro alto");
+
+    // El volcado es IDENTICO a componerla en su sitio: eso es lo que permite
+    // cachearla sin cambiar un pixel de lo que se ve.
+    if(built){
+      static uint16_t* refA = NULL; static uint16_t* refB = NULL;
+      if(!refA) refA = (uint16_t*)malloc((size_t)SCR_W * CMP_TILE_MAX_H * 2);
+      if(!refB) refB = (uint16_t*)malloc((size_t)SCR_W * CMP_TILE_MAX_H * 2);
+      if(refA && refB){
+        const int PX = 26, PY = 300;
+        fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
+        cmpTileBlit(PX, PY);
+        for(int j2 = 0; j2 < cmpHModule; j2++)
+          memcpy(refA + (size_t)j2 * SCR_W, bbuf + (size_t)(PY + j2) * SCR_W, (size_t)SCR_W * 2);
+        fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
+        uiSurface(PX, PY, W, cmpHModule, 24, UIS_CARD);
+        { int q0 = gClipY0, q1 = gClipY1, qx0 = gClipX0, qx1 = gClipX1;
+          gClipY0 = PY + 6; gClipY1 = PY + cmpHModule - 7;
+          gClipX0 = PX + 6; gClipX1 = PX + W - 7;
+          int mw = W - 110, byH = (cmpHModule - 24) * 100 / 80;
+          if(mw > byH) mw = byH;
+          cmpDrawModule(PX + W / 2, PY + cmpHModule / 2, mw, 30.0f, 12.0f, -8.0f);
+          gClipY0 = q0; gClipY1 = q1; gClipX0 = qx0; gClipX1 = qx1; }
+        for(int j2 = 0; j2 < cmpHModule; j2++)
+          memcpy(refB + (size_t)j2 * SCR_W, bbuf + (size_t)(PY + j2) * SCR_W, (size_t)SCR_W * 2);
+        int dif = 0;
+        for(int j2 = 0; j2 < cmpHModule; j2++)
+          for(int i2 = PX; i2 < PX + W; i2++)
+            if(refA[(size_t)j2 * SCR_W + i2] != refB[(size_t)j2 * SCR_W + i2]) dif++;
+        chk(dif == 0, "volcar la tarjeta cacheada da EXACTAMENTE lo mismo que componerla en su sitio");
+      }
+    }
+
+    // Y lo que importa: cuanto cuesta cada cosa.
+    if(built){
+      struct timespec c0, c1;
+      const int N = 40;
+      uiClipFull(); setBuf(bbuf);
+      clock_gettime(CLOCK_MONOTONIC, &c0);
+      for(int i2 = 0; i2 < N; i2++) cmpTileBlit(26, 300);
+      clock_gettime(CLOCK_MONOTONIC, &c1);
+      double volcar = ((c1.tv_sec - c0.tv_sec) * 1e3 + (c1.tv_nsec - c0.tv_nsec) / 1e6) / N;
+      clock_gettime(CLOCK_MONOTONIC, &c0);
+      for(int i2 = 0; i2 < N; i2++) cmpTileBuild(W, cmpHModule, 30.0f + i2, 12.0f, -8.0f, true);
+      clock_gettime(CLOCK_MONOTONIC, &c1);
+      double componer = ((c1.tv_sec - c0.tv_sec) * 1e3 + (c1.tv_nsec - c0.tv_nsec) / 1e6) / N;
+      printf("  [brujula] tarjeta del modulo: componer %.3f ms  ·  volcar %.3f ms\n",
+             componer, volcar);
+      chk(volcar * 4.0 < componer,
+          "volcar la tarjeta cuesta MUCHO menos que componerla (por eso deja de haber tirones)");
+    }
+
+    // ---- Al arrastrar NO se recompone; al soltar, si ----
+    // La regla vive en cmpTileNeedsBuild(), separada del tick para poder
+    // comprobarla entera aqui: en el PC no hay IMU y la app ni siquiera llega a
+    // la vista de brujula, asi que pasar por compassTick() no probaria nada.
+    cmpTileBuild(W, cmpHModule, 45.0f, 22.0f, -11.0f, true);
+    { const uint32_t NOW = 100000, VIEJO = 0;               // holgadamente > CMP_MOD_MS
+      chk(!cmpTileNeedsBuild(W, cmpHModule, true, 45.0f, 22.0f, -11.0f, true, NOW, VIEJO),
+          "quieta y sin cambios: no se rehace");
+      chk(!cmpTileNeedsBuild(W, cmpHModule, true, 120.0f, 40.0f, 20.0f, true, NOW, VIEJO),
+          "ARRASTRANDO no se rehace aunque la orientacion haya cambiado");
+      chk(cmpTileNeedsBuild(W, cmpHModule, false, 120.0f, 40.0f, 20.0f, true, NOW, VIEJO),
+          "al soltar, la orientacion nueva SI la rehace");
+      chk(!cmpTileNeedsBuild(W, cmpHModule, false, 120.0f, 40.0f, 20.0f, true, NOW, NOW),
+          "...pero nunca mas de una vez cada CMP_MOD_MS");
+      chk(cmpTileNeedsBuild(W, cmpHModule, false, 45.0f, 22.0f, -11.0f, false, NOW, VIEJO),
+          "perder la orientacion tambien la rehace (la placa vuelve a vista plana)");
+      chk(!cmpTileNeedsBuild(W, cmpHModule, false, 45.3f, 22.2f, -11.1f, true, NOW, VIEJO),
+          "un temblor por debajo del umbral no la rehace");
+      chk(cmpTileNeedsBuild(W - 8, cmpHModule, true, 45.0f, 22.0f, -11.0f, true, NOW, NOW),
+          "otro tamano SI la rehace, se este arrastrando o no");
+    }
+    // Y el tick real la rehace cuando toca (aqui, sin IMU, hacia la vista plana).
+    cmpView = CMPV_COMPASS; cmpOverlay = CMPO_NONE; cmpXfadeMs = 0; cmpScroll = 0;
+    tReset();
+    cmpDrag = false; cmpScrollVel = 0; cmpModMs = 0; gTestMs += 1000;
+    cmpTileBuild(W, cmpHModule, 45.0f, 22.0f, -11.0f, true);
+    compassTick();
+    chk(!cmpTileHave && cmpTileYaw == 0.0f,
+        "el tick rehace la tarjeta cuando la orientacion deja de estar disponible");
+
+    cmpTileFree();
+    uiGlass = glassPrev;
+    cmpStopMotion();
+    gState = ST_HOME; gAppId = IC_RELOJ;
+    uiClipFull(); setBuf(fb);
+  }
+
   // Estado del arnes: la app queda cerrada y el servicio libre.
   while(imuHolders() > 0) imuRelease();
   cmpHoldsImu = false; dcSensorOn = false;

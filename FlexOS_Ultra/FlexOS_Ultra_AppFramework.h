@@ -149,6 +149,7 @@ static void dcBegin();                                   // lo llama setup()
 static void compassEnter(); static void compassTick();
 static bool cmpBackLayer(); static void compassSuspend(); static void compassResume(); static void compassClose();
 static void compassIdleGuard();   // red de seguridad del ciclo de vida (la despacha loop())
+static size_t cmpShed();          // suelta el lienzo cacheado de la tarjeta del modulo
 static void dcSensorTick();                              // lo llama loop()
 static void dcApplyFallPref();
 // Hooks opcionales. Las implementaciones viven junto a cada app.
@@ -658,8 +659,12 @@ static const AppHooks H_DEVCARE  = { NULL, dcBackScreen, dcSuspend, dcResume, dc
 // tomar el servicio IMU: en segundo plano la app no consume sensor -- y como
 // el servicio lleva cuenta de consumidores, soltarlo NO apaga el sensor si
 // Device Care lo sigue necesitando para la deteccion de caidas.
-// No lleva 'shed' ni 'dirty': no reserva nada pesado ni tiene datos del usuario.
-static const AppHooks H_COMPASS  = { cmpBackLayer, NULL, compassSuspend, compassResume, compassClose, NULL, NULL, NULL, NULL, NULL };
+//
+// SI lleva 'shed': la tarjeta del modulo 3D se compone una vez en un lienzo
+// propio de PSRAM (~220 KB) para que desplazar la lista no la recomponga. Es
+// reconstruible al vuelo, asi que en cuanto la memoria aprieta se suelta y
+// resume() la rehace sola. No lleva 'dirty': no hay datos del usuario.
+static const AppHooks H_COMPASS  = { cmpBackLayer, NULL, compassSuspend, compassResume, compassClose, NULL, NULL, NULL, cmpShed, NULL };
 // ---- Registro de apps (indices = enum IC_*) ----
 static FlexApp APP_REG[APP_N] = {
   { appRelojEnter, appRelojTick, APP_FLEX, APP_CAT_ESENCIAL, APP_DEF_FAV, NULL },
