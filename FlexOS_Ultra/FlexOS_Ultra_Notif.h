@@ -363,7 +363,7 @@ static void notifTick(){
 
   // Componer en bbuf (nadie mas lo lee): restaurar fondo limpio y dibujar las
   // tarjetas encima. Nadie mas presenta esta banda -> sin parpadeo.
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   notifRestoreBg();
   if(gNotifCount < shown) shown = gNotifCount;         // alguna se fue en el bucle de fases
   for(int i = 0; i < shown; i++){

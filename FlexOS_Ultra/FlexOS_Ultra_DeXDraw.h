@@ -1138,7 +1138,7 @@ static void dexPaint(bool full){
   dexBX0 = 0x7FFF; dexBX1 = -1;
   if(b0 < 0) b0 = 0;
   if(b1 > LW - 1) b1 = LW - 1;
-  gLand = true; setBuf(bbuf);
+  gLand = true; bbufSys(); setBuf(bbuf);
   gClipY0 = b0; gClipY1 = b1;
   dexCompose();
   gClipY0 = 0; gClipY1 = SCR_H - 1;

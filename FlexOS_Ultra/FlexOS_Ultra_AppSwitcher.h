@@ -288,7 +288,7 @@ static void swDrawCard(int i, int x, int y, int cw, int ch){
 }
 
 static void swRender(float scale){                        // completo (solo animacion de entrada)
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   // Fondo = wallpaper desenfocado (contenido) -> los rotulos que caen encima
   // usan TH_ONWALL, no el texto de pagina.
   if(blurBg) memcpy(bbuf, blurBg, (size_t)SCR_W * SCR_H * 2); else fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
@@ -309,7 +309,7 @@ static void swRender(float scale){                        // completo (solo anim
 }
 // por-frame: SOLO repinta y vuelca la banda de las tarjetas (mucho mas ligero)
 static void swRenderCards(){
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   if(blurBg){ for(int j = SWC_BAND0; j <= SWC_BAND1; j++) memcpy(bbuf + (size_t)j * SCR_W, blurBg + (size_t)j * SCR_W, SCR_W * 2); }
   else fillRect(0, SWC_BAND0, SCR_W, SWC_BAND1 - SWC_BAND0 + 1, TH_PAGE);
   if(swCount == 0) drawTextC(SCR_W / 2, SW_TOP + SW_CH / 2, "Sin apps recientes", 2, TH_ONWALL2);
@@ -325,7 +325,7 @@ static void swRenderCards(){
 }
 // Repinta la fila del boton (su aspecto depende de si queda alguna tarjeta).
 static void swRenderCloseAll(){
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   if(blurBg){ for(int j = SWCA_Y - 6; j < SWCA_Y + SWCA_H + 6; j++) memcpy(bbuf + (size_t)j * SCR_W, blurBg + (size_t)j * SCR_W, SCR_W * 2); }
   else fillRect(0, SWCA_Y - 6, SCR_W, SWCA_H + 12, TH_PAGE);
   swDrawCloseAll();
@@ -361,7 +361,7 @@ static bool     swLongDone = false;
 #define SWS_B2X (SWS_B1X + SWS_BW + 16)
 
 static void swSheetRender(){
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   if(blurBg) memcpy(bbuf, blurBg, (size_t)SCR_W * SCR_H * 2);
   else       fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
   fillRectA(0, 0, SCR_W, SCR_H, TH_SCRIM, 150);

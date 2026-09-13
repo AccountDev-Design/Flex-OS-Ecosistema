@@ -740,7 +740,7 @@ static void hcDrawModal(){
 }
 static void hcRender(){
   if(!bbuf || !blurBg) return;
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
   memcpy(bbuf, blurBg, (size_t)SCR_W * SCR_H * 2);   // fondo atenuado, generado una sola vez
   switch(hcView){
@@ -828,7 +828,7 @@ static void hcAnimTick(){
   if(w < 8) w = 8;
   if(h < 8) h = 8;
   int x = (SCR_W - w) / 2, y = (int)(HC_CARD_Y * p);
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
   memcpy(bbuf, blurBg, (size_t)SCR_W * SCR_H * 2);
   int rad = (int)(26 * p);

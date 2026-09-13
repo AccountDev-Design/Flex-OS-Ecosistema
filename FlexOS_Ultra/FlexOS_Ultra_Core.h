@@ -891,7 +891,7 @@ static void appTrTick(){
   // app pudo dejar una banda estrecha activa para su lista con scroll.
   int sc0 = gClipY0, sc1 = gClipY1, sx0 = gClipX0, sx1 = gClipX1;
   gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = b0; gClipY1 = b1;
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   for(int j = b0; j <= b1; j++)                   // Inicio detras: superficie estable
     memcpy(bbuf + (size_t)j * SCR_W, homeBuf + (size_t)j * SCR_W, (size_t)SCR_W * 2);
   // ORDEN: primero la saliente, encima la entrante. Es la prioridad que pide el

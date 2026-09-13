@@ -4537,6 +4537,111 @@ static void testProteccionRobo(){
   else printf("  Proteccion contra robo: todas las comprobaciones pasan.\n");
 }
 
+
+// #############################################################
+//  EL BLUR NO SE QUEDA PEGADO DE LA PANTALLA ANTERIOR
+//  ------------------------------------------------------------
+//  Dos caminos distintos por los que el Liquid Glass de una app
+//  acababa compuesto con pixeles de OTRA pantalla:
+//
+//   1. LA BANDA PRE-DESENFOCADA. uiGlassBandBegin() guarda una banda
+//      ya desenfocada para que un overlay animado sea vidrio real en
+//      todos sus cuadros. Mientras esta armada la usa TODA uiSurfaceA,
+//      de cualquier pantalla. Si el dueno de esa banda perdia la
+//      pantalla por una via que no fuera su propio cierre -- bloqueo
+//      por inactividad, aviso de caida, OTA, apagado --, la banda se
+//      quedaba viva y a partir de ahi cualquier tarjeta de cualquier
+//      app se componia con el desenfoque de la pantalla anterior.
+//
+//   2. EL BACK BUFFER COMPARTIDO. Una app que compone POR BANDAS da
+//      por hecho que lo que hay fuera de la banda sucia es su propio
+//      cuadro anterior. En cuanto otro compositor escribe en bbuf eso
+//      deja de ser cierto, y el margen de blurR filas del panel de
+//      vidrio desenfoca pixeles ajenos.
+// #############################################################
+static void testBlurNoPegado(){
+  printf("Liquid Glass: el blur no se queda pegado de la pantalla anterior\n");
+  int before = gFails;
+  bool glassPrev = uiGlass;
+  uiGlass = true;
+  gLand = false; gHosted = false;
+  uiClipFull();
+  setBuf(fb);
+
+  // ---- 1. La banda pre-desenfocada caduca con su dueno ----
+  // Se arma como lo hace el menu contextual y se comprueba que el guardian
+  // del bucle la cierra en cuanto la pantalla cambia de manos.
+  {
+    gState = ST_HOME;
+    memset(bbuf, 0x11, (size_t)SCR_W * SCR_H * 2);
+    setBuf(bbuf);
+    bool armada = uiGlassBandBegin(200, 400, uiSurfTint(UIS_ELEVATED));
+    setBuf(fb);
+    chk(armada, "la banda pre-desenfocada se arma (hay PSRAM en el arnes)");
+    chk(uiGlassBandActive(), "y queda activa mientras su dueno manda");
+
+    // Su dueno es ST_CTX: mientras ese estado mande, la banda vale.
+    gState = ST_CTX;
+    if(gState != ST_CTX || cronoCardVisible()) uiGlassBandEnd();   // el guardian de loop()
+    chk(uiGlassBandActive(), "con su dueno en pantalla la banda sigue valiendo");
+
+    // La pantalla cambia de manos por una via que NO es el cierre del menu:
+    // el bloqueo por inactividad. Esto es exactamente el caso que dejaba el
+    // blur pegado.
+    gState = ST_LOCK;
+    if(gState != ST_CTX || cronoCardVisible()) uiGlassBandEnd();   // el guardian de loop()
+    chk(!uiGlassBandActive(), "al cambiar de pantalla la banda deja de valer");
+
+    // Y con la banda cerrada, una superficie del sistema vuelve a componerse
+    // contra el fondo REAL que tenga debajo, no contra la banda vieja.
+    gState = ST_APP; gAppId = IC_CLIMA;
+    setBuf(bbuf);
+    fillRect(0, 0, SCR_W, SCR_H, rgb565(20, 60, 30));
+    uint16_t antes = bbuf[(size_t)300 * SCR_W + 240];
+    uiSurface(40, 260, 400, 120, 20, UIS_CARD);
+    uint16_t ahora = bbuf[(size_t)300 * SCR_W + 240];
+    chk(antes != ahora, "la tarjeta se dibuja sobre el fondo que de verdad hay debajo");
+    setBuf(fb);
+  }
+
+  // ---- 2. El back buffer cambia de dueno -> la app compone entera ----
+  {
+    gBbufOwner = BBUF_NONE;
+    chk(!bbufClaim(BBUF_APP + IC_CLIMA), "sin dueno previo, la app compone el cuadro entero");
+    chk(bbufClaim(BBUF_APP + IC_CLIMA),  "y a partir de ahi le basta la banda sucia");
+    chk(bbufClaim(BBUF_APP + IC_CLIMA),  "...vuelta tras vuelta, sin repintar de mas");
+    // Cualquier compositor del sistema que toque bbuf la desaloja.
+    bbufSys();
+    chk(!bbufClaim(BBUF_APP + IC_CLIMA), "si el sistema escribe en bbuf, la app vuelve a componer entera");
+    // Y dos apps distintas nunca se heredan el buffer.
+    chk(bbufClaim(BBUF_APP + IC_CLIMA), "la app reclama su buffer");
+    chk(!bbufClaim(BBUF_APP + IC_BRUJULA), "otra app NO hereda el cuadro de la anterior");
+  }
+
+  // ---- 3. Y la app de verdad: primer cuadro entero, siguientes por banda ----
+  {
+    gState = ST_APP; gAppId = IC_CLIMA;
+    gAppW = SCR_W; gAppH = SCR_H;
+    gBbufOwner = BBUF_SYS;                       // como si acabara de correr una transicion
+    memset(bbuf, 0x7F, (size_t)SCR_W * SCR_H * 2);
+    wxPresent(400, 420);                         // pide una banda estrecha...
+    bool fueraLimpio = true;
+    for(int y = 0; y < 40; y++)
+      for(int x = 0; x < SCR_W; x += 16)
+        if(bbuf[(size_t)y * SCR_W + x] == 0x7F7F) fueraLimpio = false;
+    chk(fueraLimpio, "tras un cambio de dueno, la app compone TODO el cuadro, no solo la banda");
+    chk(gBbufOwner == (uint16_t)(BBUF_APP + IC_CLIMA), "y se queda con el buffer");
+  }
+
+  uiGlass = glassPrev;
+  uiGlassBandEnd();
+  gBbufOwner = BBUF_NONE;
+  gState = ST_HOME; gAppId = IC_RELOJ;
+  uiClipFull();
+  setBuf(fb);
+  if(gFails == before) printf("  Blur pegado: todas las comprobaciones pasan.\n");
+}
+
 static void testLiquidGlassSinApilar(){
   printf("Liquid Glass: las animaciones no apilan capas de blur\n");
   bool glassPrev = uiGlass;
@@ -5994,6 +6099,7 @@ int main(){
   testFlexCompass();
   testProteccionRobo();
   testLiquidGlassSinApilar();
+  testBlurNoPegado();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

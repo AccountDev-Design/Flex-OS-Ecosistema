@@ -798,6 +798,10 @@ static void wxPresent(int y0, int y1){
   if(y0 < 0) y0 = 0;
   if(y1 > SCR_H - 1) y1 = SCR_H - 1;
   if(y0 > y1) return;
+  // PROPIEDAD DEL BACK BUFFER: ver el comentario largo en el motor grafico. Si
+  // bbuf lo escribio otro compositor, esta app compone el cuadro entero UNA vez
+  // en vez de dejar a la vista el de la pantalla anterior.
+  if(!bbufClaim(BBUF_APP + IC_CLIMA)){ y0 = 0; y1 = SCR_H - 1; }
   wxCompose(y0, y1);
   present(y0, y1);
 }

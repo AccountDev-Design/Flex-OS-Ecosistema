@@ -291,7 +291,7 @@ static void faCompose(float p){
   int c0 = gClipY0, c1 = gClipY1, cx0 = gClipX0, cx1 = gClipX1;
   bool wl = gLand;
   gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   memcpy(bbuf + (size_t)faBakY0 * SCR_W, faBak,
          (size_t)SCR_W * (faBakY1 - faBakY0 + 1) * 2);
   gLand = faLand;

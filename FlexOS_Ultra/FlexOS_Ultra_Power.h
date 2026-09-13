@@ -274,7 +274,7 @@ static void lsuBack(){ uint16_t c = lsuTxtHi(); strokeSegAA(30, 26, 18, 18, 2.4f
 
 // ---- Selector PIN / Contraseña ----
 static void lsuRenderSel(){
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   fillRect(0, 0, SCR_W, SCR_H, lsuBgCol());
   lsuBack();
   drawTextC(SCR_W / 2, 74, "Bloqueo de pantalla", 3, lsuTxtHi());
@@ -307,7 +307,7 @@ static void lsuComposePin(){                          // base de vidrio en lockB
     uint16_t col = (i == 9) ? TH_WARN : (i == 11) ? TH_OK : lsuTxtHi();   // '<' borrar, 'OK' confirmar
     drawTextC(x + w / 2, y + h / 2 - 12, PIN_KEYS[i], 3, col);
   }
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
 }
 // El primer cuadro del PIN entra con el fundido de la transicion de seguridad
 // (si la hubo). authFadeIn devuelve false cuando no hay transicion pendiente
@@ -319,7 +319,7 @@ static void lsuShowPin(){
   memcpy(bbuf, lockBuf, (size_t)SCR_W * SCR_H * 2); present(0, SCR_H - 1);
 }
 static void lsuAnimPin(){                              // puntos dinamicos + destello + flash (NO re-desenfoca)
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   // FASE 1: sh != 0 solo durante los ~6 frames de la sacudida. La banda se
   // copia DESPLAZADA en horizontal, asi que puntos y teclado se mueven juntos
   // sin volver a dibujar ni un panel de vidrio; los bordes se rellenan
@@ -382,7 +382,7 @@ static void lsuPaintPass(int yoff, int xoff){
   lsuDrawKb(yoff, xoff);
 }
 static void lsuRenderPass(int yoff, int xoff){
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   lsuPaintPass(yoff, xoff);
   present(0, SCR_H - 1);
 }
@@ -785,7 +785,7 @@ static void poffRenderBand(){
   if(poffKnob == poffLastKnob) return;              // nada que hacer este frame
   poffLastKnob = poffKnob;
   memcpy(bbuf + (size_t)POFF_BAND_Y0 * SCR_W, poffBand, (size_t)POFF_BAND_H * SCR_W * 2);
-  uint16_t* old = gBuf; setBuf(bbuf);
+  uint16_t* old = gBuf; bbufSys(); setBuf(bbuf);
   int c0 = gClipY0, c1 = gClipY1;
   gClipY0 = POFF_BAND_Y0; gClipY1 = POFF_BAND_Y1;   // nada puede salirse de la banda
   poffDrawKnob();
@@ -806,7 +806,7 @@ static void poffEnter(){
   ensureBlurBg();
   poffKnob = poffTarget = 0; poffDrag = false; poffGrab = 0; poffLastKnob = -1;
 
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   poffDrawStatic();
   // Cache de la banda del slider TAL CUAL queda de fabrica (pista vacia). Se
   // reserva UNA sola vez en toda la sesion, fuera del loop de render, en PSRAM
@@ -964,7 +964,7 @@ static void poffAnimTick(){
       // negro solido en fb desde la fase 0 y no cambia.
       for(int j = POFF_TXT_BY0; j <= POFF_TXT_BY1; j++)
         memset(bbuf + (size_t)j * SCR_W, 0, SCR_W * 2);
-      uint16_t* old = gBuf; setBuf(bbuf);
+      uint16_t* old = gBuf; bbufSys(); setBuf(bbuf);
       int c0 = gClipY0, c1 = gClipY1;
       gClipY0 = POFF_TXT_BY0; gClipY1 = POFF_TXT_BY1;
       if(a) drawTextCA(SCR_W / 2, POFF_TXT_Y, "Flex OS", POFF_TXT_SZ, TH_ONWALL, a);   // sobre el fundido a negro del apagado

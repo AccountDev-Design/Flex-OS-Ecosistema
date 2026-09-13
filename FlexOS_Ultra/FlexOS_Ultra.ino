@@ -602,6 +602,30 @@ void loop(){
   flexPollTouch();        // (aqui dentro corre tambien el detector de doble-tap de la suspension)
 
   // -----------------------------------------------------------
+  //  LA BANDA PRE-DESENFOCADA CADUCA CON SU DUENO
+  //  ---------------------------------------------------------
+  //  uiGlassBandBegin() guarda una banda de la pantalla YA desenfocada para
+  //  que un overlay que se anima sobre un fondo quieto pueda ser vidrio de
+  //  verdad en todos sus cuadros sin pagar un box-blur por cuadro. Mientras
+  //  esa banda esta armada, uiSurfaceA() la usa como fuente del desenfoque
+  //  -- TODA uiSurfaceA, de cualquier pantalla.
+  //
+  //  Solo dos cosas la arman: el menu contextual del escritorio (ST_CTX) y
+  //  la tarjeta expandida del cronometro, y las dos son duenas exclusivas de
+  //  la pantalla mientras duran. El problema no era ese: era que si la
+  //  pantalla cambiaba de manos por OTRA via -- bloqueo por inactividad,
+  //  suspension, aviso de caida, bloqueo por robo, OTA, apagado -- la banda
+  //  se quedaba armada, y a partir de ahi cualquier tarjeta de cualquier app
+  //  se componia con el desenfoque de la pantalla ANTERIOR. Ese es el blur
+  //  que se quedaba "pegado" detras de la aplicacion.
+  //
+  //  Se cierra aqui, en el punto mas alto del bucle y ANTES de que nadie
+  //  componga: en cuanto su dueno deja de mandar, la banda deja de valer,
+  //  venga el cambio por donde venga. Cuesta una comparacion.
+  // -----------------------------------------------------------
+  if(gState != ST_CTX && !cronoCardVisible()) uiGlassBandEnd();
+
+  // -----------------------------------------------------------
   //  RESTABLECIMIENTO DE FABRICA EN CURSO: PANTALLA EN EXCLUSIVA
   //  ---------------------------------------------------------
   //  Mientras el borrado corre, NADIE mas dibuja ni recibe toques: ni

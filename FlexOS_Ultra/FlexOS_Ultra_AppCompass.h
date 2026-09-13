@@ -780,6 +780,13 @@ static void cmpPresent(int y0, int y1){
   if(y0 < 0) y0 = 0;
   if(y1 > SCR_H - 1) y1 = SCR_H - 1;
   if(y0 > y1) return;
+  // PROPIEDAD DEL BACK BUFFER. Si bbuf lo escribio otro compositor -- la
+  // transicion de apps, la cortina, la isla, el selector --, lo que hay fuera
+  // de la banda sucia es de OTRA pantalla: repintar solo la banda dejaria ese
+  // cuadro ajeno a la vista y, peor, el vidrio de las tarjetas lo desenfocaria
+  // por su margen. Se compone entero UNA vez (no por cuadro) y a partir de ahi
+  // la banda vuelve a bastar. Ver PROPIETARIO DEL BACK BUFFER en el motor.
+  if(!bbufClaim(BBUF_APP + IC_BRUJULA)){ y0 = 0; y1 = SCR_H - 1; }
   cmpCompose(y0, y1);
   present(y0, y1);
 }

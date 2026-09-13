@@ -1425,13 +1425,13 @@ static void jmpPresent(){
   if(gRtTarget){ present(0, SCR_H - 1); return; }     // hospedada en una ventana: ruta normal
   JP_T0(t0);
   uint16_t* tmp = fb; fb = bbuf; bbuf = tmp;
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   flxFlush(0, SCR_H - 1);
   JP_ADD(flush, t0);
 }
 static void jmpBeginFrame(){
   gLand = true;
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   gClipX0 = 0; gClipX1 = SCR_W - 1;
   gClipY0 = 0; gClipY1 = SCR_H - 1;
 }

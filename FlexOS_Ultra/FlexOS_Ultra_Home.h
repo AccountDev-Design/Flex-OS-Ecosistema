@@ -917,7 +917,7 @@ static bool hpPrepare(int page){
   // restaura filas mediante memcpy y mueve los pixeles que difieren del fondo.
   memcpy(hpBg, bbuf + (size_t)HOME_BAND_TOP * SCR_W, hpBandPixels() * 2);
   uiRenderCooperate();                    // el fondo ya recorrio ~170k pixeles
-  uint16_t* old = gBuf; setBuf(bbuf);
+  uint16_t* old = gBuf; bbufSys(); setBuf(bbuf);
   int cx0 = gClipX0, cx1 = gClipX1, cy0 = gClipY0, cy1 = gClipY1;
   gClipX0 = 0; gClipX1 = SCR_W - 1;
   gClipY0 = HOME_BAND_TOP; gClipY1 = homeBandBot() - 1;
@@ -959,7 +959,7 @@ static inline void hpViewport(int off, int &dst, int &src, int &w){
 
 static void hpRenderFrame(int dx){
   if(!homeBuf || !hpBg) return;
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
   int dir = (hpTo > hpFrom) ? 1 : -1;     // +1 = la vecina entra por la derecha
   int nx  = dx + dir * SCR_W;             // desplazamiento de la vecina
@@ -1561,7 +1561,7 @@ static void edRender(){
     if(now - edMs < 50) return;
     edMs = now;
   }
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   for(int j = 120; j <= edBandBot(); j++) memcpy(bbuf + (size_t)j * SCR_W, homeBuf + (size_t)j * SCR_W, SCR_W * 2);  // fondo (sin rejilla)
   uint32_t t = millis();
   int gS, ggx0, ggy0, gcs, grs, gcols, grows; homeGrid(gS, ggx0, ggy0, gcs, grs, gcols, grows);

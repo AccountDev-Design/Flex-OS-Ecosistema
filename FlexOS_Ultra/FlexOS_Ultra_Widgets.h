@@ -396,7 +396,7 @@ static const uint32_t RIPPLE_DUR_MS = 500;
 static const int      RIPPLE_MAX_R  = 70;
 static void animateIconRipple(){
   if(gIconStyle != 1 || !bbuf || !homeBuf || gSafeMode){ gRippleActive = false; return; }
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;   // recorte completo
   // REPINTADO PARCIAL. El destello es un circulo de radio <= RIPPLE_MAX_R
   // centrado en el punto tocado, que NO se mueve durante la animacion. Antes se

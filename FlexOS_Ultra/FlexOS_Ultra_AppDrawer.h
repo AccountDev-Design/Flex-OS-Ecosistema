@@ -102,7 +102,7 @@ static void ctxRender(float p){
   float ease = 1 - (1 - p) * (1 - p);                 // ease-out
   float sc = 0.88f + 0.12f * ease;                    // escala
   uint8_t a = (uint8_t)(255.0f * ease);               // fundido
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
   // Solo la banda que ocupa el panel, no la pantalla entera. La banda se calcula
   // en ctxOpen contra la posicion FINAL (escala 1); como la escala encoge el
@@ -184,7 +184,7 @@ static void ctxOpen(int slot){
   uiGlassBandEnd();
   if(uiGlass){
     uint16_t* ob = gBuf;
-    setBuf(bbuf);
+    bbufSys(); setBuf(bbuf);
     for(int j = ctxBandY0; j <= ctxBandY1; j++)
       memcpy(bbuf + (size_t)j * SCR_W, homeBuf + (size_t)j * SCR_W, (size_t)SCR_W * 2);
     uiGlassBandBegin(ctxBandY0, ctxBandY1, uiSurfTint(UIS_ELEVATED));
@@ -681,7 +681,7 @@ static void drwDrawGrid(int sy, int y0, int y1){
 // no hay dos maneras distintas de dibujar lo mismo.
 static void drwCompose(int y0, int y1, bool settled){
   if(y0 < 0) y0 = 0; if(y1 > SCR_H - 1) y1 = SCR_H - 1; if(y0 > y1) return;
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   int c0 = gClipY0, c1 = gClipY1, cx0 = gClipX0, cx1 = gClipX1;
   gClipY0 = y0; gClipY1 = y1; gClipX0 = 0; gClipX1 = SCR_W - 1;
   int sy = (int)drwSlide;

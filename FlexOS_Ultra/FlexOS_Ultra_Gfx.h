@@ -142,6 +142,50 @@ static void fbCopyBand(const uint16_t* src, int y0, int y1){
   memcpy(dst + (size_t)y0 * SCR_W, src + (size_t)y0 * SCR_W, (size_t)(y1 - y0 + 1) * SCR_W * 2);
 }
 
+// #############################################################
+// ##  PROPIETARIO DEL BACK BUFFER
+// ##  ----------------------------------------------------------
+// ##  QUE ARREGLA. bbuf es un lienzo COMPARTIDO: lo usan la
+// ##  transicion de apps, la cortina, la isla de notificaciones, el
+// ##  selector, el menu contextual, el bloqueo... y cada app que
+// ##  compone POR BANDAS. Componer solo la banda sucia es correcto
+// ##  mientras lo que queda fuera de ella siga siendo el cuadro
+// ##  anterior DE ESA MISMA pantalla.
+// ##
+// ##  En cuanto otro compositor escribe en bbuf, lo de fuera de la
+// ##  banda ya es de otro. Y entonces un panel Liquid Glass que se
+// ##  extienda por encima de la banda DESENFOCA esos pixeles ajenos
+// ##  (drawLiquidGlassPanelEx lee su fondo del buffer activo, con un
+// ##  margen de blurR filas a cada lado y midiendo la luminancia de
+// ##  todo el panel): eso es el blur que se queda "pegado" detras de
+// ##  la aplicacion anterior al deslizar una app sobre otra.
+// ##
+// ##  COMO SE ARREGLA SIN REPINTAR DE MAS. Cada compositor reclama
+// ##  bbuf con un identificador propio. Si el anterior no era el,
+// ##  compone el cuadro ENTERO -- una sola vez, en el primer cuadro
+// ##  despues del cambio -- y a partir de ahi le vuelve a bastar con
+// ##  la banda sucia. No hay full redraw por frame: hay UNO por
+// ##  cambio de dueno, que es exactamente lo que hace falta.
+// #############################################################
+// Identificadores de compositor. Los del sistema son constantes bajas; una app
+// usa BBUF_APP + su id, asi que dos apps distintas nunca se confunden.
+#define BBUF_NONE   0          // contenido indeterminado: el siguiente compone entero
+#define BBUF_SYS    1          // cualquier compositor del sistema (transicion, cortina, isla...)
+#define BBUF_APP    0x100      // base de las apps: BBUF_APP + gAppId
+static uint16_t gBbufOwner = BBUF_NONE;
+
+// Reclama bbuf. Devuelve true si YA era suyo (se puede componer por bandas) y
+// false si lo escribio otro (hay que componer el cuadro entero).
+static bool bbufClaim(uint16_t who){
+  bool mine = (gBbufOwner == who && who != BBUF_NONE);
+  gBbufOwner = who;
+  return mine;
+}
+// Lo escribe el sistema: la proxima app que componga por bandas compondra
+// entera. Es una asignacion, no cuesta nada, y va en la entrada de cada
+// compositor del sistema que toca bbuf.
+static inline void bbufSys(){ gBbufOwner = BBUF_SYS; }
+
 static void present(int y0, int y1){
   if(y0 < 0) y0 = 0; if(y1 >= SCR_H) y1 = SCR_H - 1; if(y0 > y1) return;
   fbCopyBand(bbuf, y0, y1);

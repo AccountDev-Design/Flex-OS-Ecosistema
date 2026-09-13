@@ -1019,7 +1019,7 @@ static void qsRender(bool full){
   // Publicacion: por encima del borde manda el panel ya compuesto; por debajo,
   // el escritorio o la captura de la app -- que es lo que "restaura" las filas
   // que la cortina acaba de dejar libres. Cero dibujo, solo copia.
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   for(int j = cutTop; j <= cutBot; j++){
     const uint16_t* src = (j < py) ? qsBuf : bg;
     memcpy(bbuf + (size_t)j * SCR_W, src + (size_t)j * SCR_W, SCR_W * 2);

@@ -698,7 +698,7 @@ static void cronoCardCompose(float p, bool cacheBg){
   // Recorte completo: la tarjeta se abre encima de CUALQUIER app, y alguna
   // pudo dejar una banda estrecha activa para su lista con scroll.
   gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   memcpy(bbuf + (size_t)CRONO_BAND_T * SCR_W, gCronoCardBak,
          (size_t)SCR_W * CRONO_BAND_H * 2);
   // LA CAPSULA DE LA BARRA, VIVA. gCronoCardBak es una foto de la banda
@@ -748,7 +748,7 @@ static void cronoCardCompose(float p, bool cacheBg){
 // Frame barato en reposo: repone la sub-banda cacheada y reescribe los textos.
 static void cronoCardComposeDyn(){
   gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   memcpy(bbuf + (size_t)CRONO_DYN_T * SCR_W, gCronoCardCache,
          (size_t)SCR_W * CRONO_DYN_H * 2);
   cronoCardDynText(255);
@@ -784,7 +784,7 @@ static void cronoCardOpen(){
   uiGlassBandEnd();
   if(uiGlass){
     uint16_t* ob = gBuf;
-    setBuf(bbuf);
+    bbufSys(); setBuf(bbuf);
     memcpy(bbuf + (size_t)CRONO_BAND_T * SCR_W, gCronoCardBak,
            (size_t)SCR_W * CRONO_BAND_H * 2);
     uiGlassBandBegin(CRONO_BAND_T, CRONO_BAND_B - 1, uiSurfTint(UIS_ELEVATED));

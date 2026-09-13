@@ -361,7 +361,7 @@ static void tpAnimFrame(){
   float u = (float)((now - tpAnimT0) % TP_ANIM_LOOP_MS) / (float)TP_ANIM_LOOP_MS;
   uint16_t* ob = gBuf;
   int cx0 = gClipX0, cx1 = gClipX1, cy0 = gClipY0, cy1 = gClipY1;
-  setBuf(bbuf);
+  bbufSys(); setBuf(bbuf);
   gClipX0 = TP_ST_X; gClipX1 = TP_ST_X + TP_ST_W - 1;
   gClipY0 = TP_ST_Y; gClipY1 = TP_ST_Y + TP_ST_H - 1;
   tpDrawStage(u);
