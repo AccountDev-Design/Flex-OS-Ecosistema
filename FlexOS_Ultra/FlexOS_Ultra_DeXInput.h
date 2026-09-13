@@ -590,7 +590,7 @@ static void pcTick(){
   // cualquier dibujo de aqui en adelante seria basura encima del launcher.
   if(dexExiting || !gLand) return;
   // Tick periodico de las apps hospedadas: es lo que mantiene vivo el reloj, el
-  // calendario, Bienestar... Solo cuando cambia el minuto, no por frame: las
+  // calendario... Solo cuando cambia el minuto, no por frame: las
   // apps interactivas ya se refrescan en dexHostTouch.
   // Re-maquetado por cambio de tamano y avance de los fundidos.
   {

@@ -80,7 +80,7 @@ coredump, data, coredump, 0xFF0000, 0x10000,
 
 | Región     | Offset       | Tamaño        | Para qué                       |
 |------------|--------------|---------------|--------------------------------|
-| `nvs`      | `0x009000`   | 20 KB         | Ajustes, Wi-Fi y Flex Vault  |
+| `nvs`      | `0x009000`   | 20 KB         | Ajustes, Wi-Fi y clave del sistema |
 | `otadata`  | `0x00E000`   | 8 KB          | Se conserva (ver más abajo)    |
 | `app0`     | `0x010000`   | **5 MB**      | El firmware                    |
 | `spiffs`   | `0x510000`   | **~10,9 MB**  | LittleFS: archivos del usuario |
@@ -143,7 +143,7 @@ Dos reglas, y las dos importan:
    nuevo por USB **no** toca la partición de datos.
 2. **Mientras la tabla de particiones no cambie, los datos siguen ahí.**
    Los archivos (`/Notas`, `/Paint`, `/Documentos`, `/System`), los
-   ajustes (NVS) y Flex Vault sobreviven a cualquier reinstalación del
+   ajustes (NVS) y la clave del sistema sobreviven a cualquier reinstalación del
    firmware.
 
 Lo que **sí** borra los datos: cambiar los offsets o los tamaños de la

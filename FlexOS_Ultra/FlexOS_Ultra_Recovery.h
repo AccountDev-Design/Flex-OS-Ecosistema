@@ -99,8 +99,7 @@ static void frDrawIntro(){
     "Ajustes, fondo y personalizacion",
     "Notas, dibujos y archivos del usuario",
     "Apps instaladas y sus datos",
-    "Sesiones abiertas e historial",
-    "Carpeta segura local y sus claves"
+    "Sesiones abiertas e historial"
   };
   for(unsigned i = 0; i < sizeof(items) / sizeof(items[0]); i++){
     fillCircle(cx + 22, y + 8, 3, rgb565(220,80,80));
@@ -238,7 +237,6 @@ static bool frStageRun(uint8_t st){
     case FR_ST_ARMED: {
       // Cerrar todo lo abierto y cortar las escrituras normales.
       gSessDirtyApp = -1;                       // ningun guardado diferido va a dispararse ya
-      vaultLockFromSystem(FXV_LOCK_EXIT);
       flexBrowserExit();
       storeExit();
       flexAccountCancel();
@@ -294,6 +292,9 @@ static bool frStageRun(uint8_t st){
       // Namespaces CONOCIDOS, uno a uno. NUNCA un borrado global de NVS: eso se
       // llevaria por delante el propio marcador de recuperacion ("flexreset"),
       // que es justo lo que permite retomar esto si se corta la corriente.
+      // "fxvault" es el namespace de una funcion RETIRADA (la boveda). Se
+      // sigue borrando aqui a proposito: un restablecimiento tiene que dejar
+      // la NVS sin restos, tambien los de versiones anteriores.
       static const char* NS[] = {
         "flexos", "flexos_wifi", "flexos_time", "flexota", "flexqs",
         "flexacct", "fxvault", SAFE_NVS_NS

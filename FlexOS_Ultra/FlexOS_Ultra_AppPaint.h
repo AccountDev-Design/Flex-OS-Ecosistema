@@ -356,17 +356,6 @@ static void paintMenuAction(int act){
   } else if(act == FK_ACT_TRASH){
     if(p[0]){ flexFsTrash(p); paintSelIdx = -1; paintReload(); }
     else { fkTrashOpen(); return; }               // sin seleccion: abre la papelera
-  } else if(act == FK_ACT_VAULT){
-    // FLEX VAULT: el dibujo se cifra y sale de /Paint. Dentro de la boveda se
-    // sigue VIENDO: la Galeria privada lo descifra a RAM y reproduce sus trazos
-    // desde ahi (flexPaintReplayMem), sin escribir ningun .fxp en claro.
-    if(p[0]){
-      paintSelIdx = -1;
-      if(vaultMoveRequest(p, FXV_KIND_PHOTO)){
-        if(gState == ST_VAULT) return;
-        paintReload();
-      }
-    }
   }
   paintRenderGallery();
 }
@@ -424,7 +413,7 @@ static void paintGalleryTick(){
       int x, y, w, h; paintCardRect(i, x, y, w, h);
       if(T.startX >= x && T.startX <= x + w && T.startY >= y && T.startY <= y + h){
         paintLongFired = true; paintSelIdx = i;
-        fkMenuOpenV(T.x, T.y - 40, true);   // con "Mover a Carpeta segura"
+        fkMenuOpen(T.x, T.y - 40);
         return;
       }
     }

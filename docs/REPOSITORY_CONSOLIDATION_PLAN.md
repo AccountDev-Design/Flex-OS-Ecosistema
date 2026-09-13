@@ -50,7 +50,7 @@ carpeta del sketch se compila).
 * **`FlexOS_Ultra.ino` (P4)** — 103 archivos: los 53 módulos `FlexOS_Ultra_*.h`,
   los puentes `FlexOS_*_Bridge.h` y los módulos `.cpp` portables
   (Package, PkgCore, Runtime, AppVM, AppGrant, AppHost, Store, Account, FS,
-  Vault, JPEG, Browser, Weather, FlexPhone, FlexLink, Media, Mem, Audio, OTA).
+  Passcode, JPEG, Browser, Weather, FlexPhone, FlexLink, Media, Mem, Audio, OTA).
 * **`FlexOS_Ultra_S3.ino`** — 4 archivos: `FlexOS_OTA.h/.cpp`,
   `FlexOS_OTA_Bridge.h` y él mismo.
 * **`FlexOS_Pro.ino`** — 9 archivos por `#include` + 2 más por pertenencia de
@@ -75,7 +75,7 @@ mira `FlexOS_Ultra/` en ningún momento.
 | **Punto de entrada Flex OS Ultra S3** | `FlexOS_Ultra_S3.ino` |
 | **Punto de entrada Flex OS Pro** | `FlexOS_Pro.ino` |
 | **Compartido S3/Pro (obligatorio en la raíz)** | `FlexOS_OTA.h/.cpp`, `FlexOS_OTA_Bridge.h`, `FlexOS_FS.h/.cpp`, `FlexOS_Browser.h/.cpp`, `FlexOS_Browser_Bridge.h`, `FlexOS_BrowserApp.cpp`, `FlexOS_JPEG.h/.cpp` |
-| **Compartido sólo P4** | Package, PkgCore, Runtime, TrustedKeys, AppVM, AppGrant, AppHost(+Bridge), Store(+Bridge), Account(+Bridge), Vault, Weather, FlexPhone(+Bridge, Link), FlexLink, Media, Mem, Audio, Jumper, Jumper_Level |
+| **Compartido sólo P4** | Package, PkgCore, Runtime, TrustedKeys, AppVM, AppGrant, AppHost(+Bridge), Store(+Bridge), Account(+Bridge), Passcode, Weather, FlexPhone(+Bridge, Link), FlexLink, Media, Mem, Audio, Jumper, Jumper_Level |
 | **SDK / pruebas / documentación / OTA / servidor / Android** | `sdk/`, `tests/`, `docs/`, `ota/`, `server/`, `android/FlexPhone/` |
 | **Fuera del firmware activo** | `futuras-versiones-BETA/Flex-Intelligence/`, `futuras-versiones-BETA/MicroSD-Multimedia/` |
 | **Duplicado idéntico comprobado** | los 106 pares raíz ↔ `FlexOS_Ultra/` de §3 |

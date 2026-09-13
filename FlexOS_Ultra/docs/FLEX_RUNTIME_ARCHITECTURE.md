@@ -38,7 +38,7 @@ supuesto.
 Gfx → … → Recovery), más los puentes (`FlexOS_*_Bridge.h`) que se incluyen
 *después* de las primitivas gráficas porque las necesitan. Los `.cpp` comunes
 (`FlexOS_Package.cpp`, `FlexOS_Store.cpp`, `FlexOS_Runtime.cpp`, `FlexOS_FS.cpp`,
-`FlexOS_Vault.cpp`, …) son unidades de traducción independientes que **no
+`FlexOS_Passcode.cpp`, …) son unidades de traducción independientes que **no
 conocen el framebuffer**.
 
 Esa separación es la regla del proyecto y este trabajo la respeta:
@@ -126,7 +126,7 @@ dato" de "cero dedos", y esa distinción se mantiene.
 
 `FlexOS_FS.cpp/.h` sobre LittleFS: listar, crear, borrar, renombrar, papelera,
 lectura por desplazamiento, escritura atómica, y una familia `flexFsPriv*`
-reservada a Flex Vault. La partición de datos es `spiffs` con **11 136 KB**
+reservada a los ajustes. La partición de datos es `spiffs` con **11 136 KB**
 (`flexos_ultra_usb.csv`), la de aplicación `app0` con 5 120 KB.
 
 ### 1.9 Ciclo de vida de apps del sistema

@@ -74,16 +74,11 @@ static bool notifSecureScreen(){
     case ST_OOBE_ACCOUNT:
     case ST_LOCK:              // bloqueo
     case ST_LOCKSETUP:         // alta y VERIFICACION de PIN/contrasena
-    case ST_VAULT:             // Flex Vault: clave y contenido privado
     case ST_POWEROFF_CONFIRM:  // apagado en curso
     case ST_POWEROFF_ANIM:
       return true;
     default:
-      // CARPETA SEGURA. Ahora es una app (ST_APP), asi que no basta con mirar
-      // el estado: mientras ella manda, la pantalla es tan sensible como lo era
-      // ST_VAULT y los avisos esperan a que el usuario vuelva a una pantalla
-      // normal, en vez de pintarse sobre el contenido privado.
-      return secfForeground();
+      return false;
   }
 }
 

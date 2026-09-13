@@ -1,7 +1,7 @@
 # Estructura de Flex OS Ultra (ESP32-P4)
 
 `FlexOS_Ultra.ino` era un solo archivo de **37053 líneas**. Ahora es el
-**orquestador** del sistema y todo lo demás vive en 61 módulos
+**orquestador** del sistema y todo lo demás vive en 60 módulos
 `FlexOS_Ultra_*.h` en la misma carpeta del sketch, que es `FlexOS_Ultra/`.
 
 Esto es **una reorganización, no un cambio funcional**: el código que se
@@ -33,7 +33,7 @@ ajuste. Es además el patrón que el proyecto **ya usaba**
 
 Los módulos que sí son código portable y con pruebas propias siguen siendo
 `.cpp` de verdad, como hasta ahora: `FlexOS_Media`, `FlexOS_Mem`,
-`FlexOS_JPEG`, `FlexOS_Vault`, `FlexOS_Weather`, `FlexOS_FS`,
+`FlexOS_JPEG`, `FlexOS_Passcode`, `FlexOS_Weather`, `FlexOS_FS`,
 `FlexOS_Browser`, `FlexOS_FlexLink`, `FlexOS_FallDetect`, `FlexOS_Theft`...
 Esa frontera no se ha tocado.
 
@@ -56,7 +56,7 @@ Esa frontera no se ha tocado.
 * La cabecera del proyecto y el mapa del sketch.
 * Las librerías del sistema (`Wire`, `Preferences`, `WiFi`, FreeRTOS,
   drivers del P4) y los módulos externos (`FlexOS_Media`,
-  `FlexOS_OTA`, `FlexOS_FS`, `FlexOS_Vault`, ...).
+  `FlexOS_OTA`, `FlexOS_FS`, `FlexOS_Passcode`, ...).
 * La **lista de módulos**, en orden.
 * Los **puentes** (`FlexOS_*_Bridge.h`), que siguen yendo al final porque
   necesitan las primitivas gráficas y el teclado ya definidos.
@@ -87,7 +87,7 @@ Esa frontera no se ha tocado.
 | `FlexOS_Ultra_AppFramework.h`     |  1043 | marco de app, transiciones, nav inferior y ciclo de vida |
 | `FlexOS_Ultra_Core.h`             |  1058 | memoria, multitarea, los tres botones y rendimiento |
 | `FlexOS_Ultra_AppSettings.h`      |   779 | app Ajustes |
-| `FlexOS_Ultra_AppsBasic.h`        |   463 | Calculadora, Calendario, Bienestar y marco de Galeria |
+| `FlexOS_Ultra_AppsBasic.h`        |   404 | Calculadora, Calendario y marco de Galeria |
 | `FlexOS_Ultra_DeX.h`              |   690 | Modo PC / DeX: modelo y estado |
 | `FlexOS_Ultra_DeXDraw.h`          |  1148 | Modo PC / DeX: dibujo |
 | `FlexOS_Ultra_DeXInput.h`         |   619 | Modo PC / DeX: entrada, APP_REG y ciclo de vida |
@@ -120,7 +120,6 @@ Esa frontera no se ha tocado.
 | `FlexOS_Ultra_AppChrono.h`        |   917 | cronometro: app, capsula y tarjeta |
 | `FlexOS_Ultra_System.h`           |   487 | I2C, soltar caches, Optimizar Flex OS y cambio de tema |
 | `FlexOS_Ultra_AppGallery.h`       |   768 | Galeria |
-| `FlexOS_Ultra_Vault.h`            |  1744 | Flex Vault: interfaz de la Carpeta segura |
 | `FlexOS_Ultra_IMU.h`              |   362 | Flex IMU Service + Flex Motion Engine: reparto del GY-BNO085 y UNA muestra para todos |
 | `FlexOS_Ultra_DeviceCare.h`       |  1604 | Flex Device Care: app, historial, salud y grafico del GY-BNO085 |
 | `FlexOS_Ultra_DeviceTests.h`      |   906 | Device Care: pruebas, diagnostico y Post-Impact Check |

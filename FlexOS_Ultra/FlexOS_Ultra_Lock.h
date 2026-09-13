@@ -1,7 +1,7 @@
 // #############################################################
 // ##  FLEX OS ULTRA  ·  BLOQUEO DE SEGURIDAD Y MODO KIOSCO
 // ##  ----------------------------------------------------------
-// ##  PIN y contrasena (verificados contra el hash con sal de FlexOS_Vault),
+// ##  PIN y contrasena (verificados contra el hash con sal de FlexOS_Passcode),
 // ##  la transicion previa en dos tiempos, el bloqueo global reforzado y el
 // ##  modo kiosco de prestamo seguro.
 // ##
@@ -42,7 +42,7 @@ static const char* PIN_KEYS[12] = { "1","2","3","4","5","6","7","8","9","<","0",
 static bool lsuVerify = false;                       // true = desbloquear (verificar), false = crear
 // LA CLAVE YA NO SE COPIA A RAM. Antes aqui vivia una copia en claro
 // del PIN/contrasena guardado (lsuSaved) para compararla con strcmp.
-// Ahora la comprobacion la hace flexLockVerify(), que deriva el hash de
+// Ahora la comprobacion la hace la verificacion a plazos, que deriva el hash de
 // lo que escribe el usuario y lo compara en tiempo constante contra el
 // hash de NVS: en ningun momento existe la clave del usuario en una
 // variable del sketch. De la clave guardada solo se lee su LONGITUD,
@@ -325,10 +325,6 @@ static void lockArmPendingPenalty(){
 // mecanismo interpolado del desbloqueo por gesto pero al reves.
 static void autoLockNow(){
   if(hcActive) hcClose(true);                // personalizacion abierta: se guarda y se cierra en limpio
-  // FLEX VAULT: si el sistema se bloquea por inactividad, la boveda se cierra
-  // con el. Antes que nada, para que ni un frame de la pantalla de bloqueo se
-  // componga con la boveda todavia abierta.
-  vaultLockFromSystem(FXV_LOCK_SCREEN);
   if(editMode) edExit();                    // guarda el orden de iconos y repinta el Home
   if(gState == ST_APP) appClose();           // -> ST_HOME, con su animacion de cierre
   gRippleActive = false;

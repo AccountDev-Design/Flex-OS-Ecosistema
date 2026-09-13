@@ -141,17 +141,6 @@ static bool gLockVerifyLocked = false;
 // Se define mucho mas abajo (necesita gState, renderLock y showLock, que aun no
 // existen aqui). Mismo patron que kioskTouchBlocked: prototipo arriba, cuerpo
 // abajo. Solo primitivos en la firma, como exige el auto-prototipado de Arduino.
-// FLEX VAULT (Carpeta segura). Se define abajo del todo (necesita el teclado,
-// los dialogos de ficheros y el teclado numerico del bloqueo), pero Ajustes y
-// los caminos de cierre del sistema -- todos ANTES en el archivo -- necesitan
-// llamarla. Firmas con tipos primitivos, como exige el auto-prototipado.
-static void vaultSettingsEnter();                         // Ajustes -> Seguridad y privacidad -> Flex Vault
-static void vaultTick();                                  // su tick, desde loop()
-static void vaultRender();                                // repintado completo
-static void vaultLockFromSystem(int reason);              // cierre desde fuera (pantalla, apagado, bloqueo...)
-static void vaultStatusText(char* out, size_t n);          // texto de la fila de Ajustes
-static bool vaultMoveRequest(const char* path, int kind);  // "Mover a Carpeta segura" desde una app
-static const char* vaultMoveError();                       // motivo si vaultMoveRequest devolvio false
 static void suspWakeLockScreen();
 // true mientras hay dedos sobre la rejilla del teclado. Se define abajo, con el
 // teclado; aqui solo el prototipo (primitivos en la firma). Lo necesita el
@@ -178,10 +167,6 @@ static void suspFadeTo(int to){
 static void suspEnter(){
   if(gSuspOn) return;
   qsForceClose();                    // apagar la pantalla no deja la cortina a medias
-  // FLEX VAULT: apagar la pantalla CIERRA la Carpeta segura, siempre. Va aqui
-  // arriba, antes del fundido, para que las claves ya no esten en RAM cuando la
-  // pantalla acabe de apagarse.
-  vaultLockFromSystem(FXV_LOCK_SCREEN);
   gSuspBright = gBright;             // brillo del usuario, intacto (blWritePct no lo toca)
   gSuspOn = true; gSuspDark = false;
   suspFadeTo(0);

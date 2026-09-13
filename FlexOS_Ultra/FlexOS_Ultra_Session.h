@@ -349,10 +349,8 @@ static const char* APP[APP_N][5] = {
   {"Almacenamiento","Storage","Stockage","Armazenamento","Archivi"},
   {"Modo PC","PC Mode","Mode PC","Modo PC","Modo PC"},
   {"Notas","Notes","Notes","Notas","Note"},
-  {"Educaci\xC3\xB3n","Education","\xC3\x89" "ducation","Educa\xC3\xA7\xC3\xA3o","Istruzione"},
   {"Navegador","Browser","Navigateur","Navegador","Browser"},
   {"Code IDE","Code IDE","Code IDE","Code IDE","Code IDE"},
-  {"Bienestar","Wellbeing","Bien-\xC3\xAatre","Bem-estar","Benessere"},
   {"Paint","Paint","Dessin","Paint","Disegno"},
   {"Juegos","Games","Jeux","Jogos","Giochi"},
   {"Ajustes","Settings","R\xC3\xA9glages","Ajustes","Impostazioni"},
@@ -364,11 +362,6 @@ static const char* APP[APP_N][5] = {
   {"Flex Phone","Flex Phone","Flex Phone","Flex Phone","Flex Phone"},
   {"Device Care","Device Care","Device Care","Device Care","Device Care"},
   {"Flex Compass","Flex Compass","Flex Compass","Flex Compass","Flex Compass"},
-  // 21 Carpeta segura. Es el nombre PUBLICO de Flex Vault: la boveda, su clave
-  // y su almacen no cambian: lo que cambia es que ahora se llama por su nombre
-  // y se abre como una app. "Flex Vault" sigue existiendo dentro del codigo
-  // (flexVault*, FlexOS_Vault.cpp) por compatibilidad, pero ya no se ensena.
-  {"Carpeta segura","Secure folder","Dossier s\xC3\xA9" "curis\xC3\xA9","Pasta segura","Cartella sicura"},
 };
 static const char* appName(int id){ return APP[id][LI()]; }
 

@@ -481,7 +481,7 @@ static void galOpenPath(const char* path){
   mediaOpenInPlayer(path);
 }
 
-// ---- Acciones del menu contextual (con Flex Vault) ----
+// ---- Acciones del menu contextual ----
 static void galMenuAction(int act){
   char p[FLEXMED_PATH_MAX];
   snprintf(p, sizeof(p), "%s", (galSelIdx >= 0) ? galPathOf(galSelIdx) : "");
@@ -504,16 +504,6 @@ static void galMenuAction(int act){
     if(p[0]){
       flexFsTrash(p); galSelIdx = -1; mediaIndexRescan();
     } else { fkTrashOpen(); return; }
-  } else if(act == FK_ACT_VAULT){
-    // FLEX VAULT: la imagen (o el dibujo) se cifra dentro de la
-    // boveda y desaparece de la galeria normal. Igual que antes.
-    if(p[0]){
-      galSelIdx = -1;
-      if(vaultMoveRequest(p, FXV_KIND_PHOTO)){
-        if(gState == ST_VAULT) return;         // se fue a pedir la clave
-        mediaIndexRescan();
-      }
-    }
   }
   galRender();
 }
@@ -579,7 +569,7 @@ static void galTick(){
     }
   }
 
-  // --- Pulsacion larga: menu del elemento, con Flex Vault ---
+  // --- Pulsacion larga: menu del elemento ---
   if(!gHosted && !gLand && T.down && !galLongFired && (millis() - T.downMs) > 550
      && abs(T.x - T.startX) < 14 && abs(T.y - T.startY) < 14){
     int n = galCount();
@@ -587,7 +577,7 @@ static void galTick(){
       int x, y, w, h; galCellRect(i, x, y, w, h);
       if(T.startX >= x && T.startX <= x + w && T.startY >= y && T.startY <= y + h){
         galLongFired = true; galSelIdx = i;
-        fkMenuOpenV(T.x, T.y - 40, true);
+        fkMenuOpen(T.x, T.y - 40);
         return;
       }
     }

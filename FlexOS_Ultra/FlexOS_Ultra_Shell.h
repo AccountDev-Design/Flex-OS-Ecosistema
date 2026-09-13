@@ -201,11 +201,6 @@ enum { ST_SPLASH = 0, ST_OOBE_LANG, ST_OOBE_NAME, ST_LOCK, ST_HOME, ST_APP, ST_S
        // el valor de ningun estado ya existente.
        ST_CONN,        // Conectividad: Wifi / BLE / Modo avion
        ST_FILES,       // Explorador de archivos real
-       // FLEX VAULT (Carpeta segura). Estado propio, y no una app de APP_REG,
-       // para que no pueda aparecer en Recientes, en el buscador de Modo PC ni
-       // debajo del panel rapido y la isla de notificaciones. Ver la cabecera
-       // del bloque FLEX VAULT - INTERFAZ.
-       ST_VAULT,
        // CAJA DE APLICACIONES. Estado propio y anadido AL FINAL, por el mismo
        // motivo que todos los anteriores: ningun valor ya existente se mueve.
        // Es un estado y no un modo dentro de ST_HOME porque tiene su propio
@@ -229,9 +224,9 @@ enum { ST_SPLASH = 0, ST_OOBE_LANG, ST_OOBE_NAME, ST_LOCK, ST_HOME, ST_APP, ST_S
        // propio, y AL FINAL del enum por el mismo motivo que todos los
        // anteriores: ningun valor ya existente se mueve.
        //
-       // Es un estado y no una app de APP_REG a proposito, igual que Flex
-       // Vault: asi no puede aparecer en Recientes ni en el buscador de Modo
-       // PC, y la isla de notificaciones y el panel rapido -- que se apagan
+       // Es un estado y no una app de APP_REG a proposito: asi no puede
+       // aparecer en Recientes ni en el buscador de Modo PC, y la isla de
+       // notificaciones y el panel rapido -- que se apagan
        // fuera de ST_HOME -- no compiten por su framebuffer. Sus tres vistas
        // (principal, historial y detalle) viven dentro del estado, en tpView.
        ST_THEFT };
@@ -243,67 +238,3 @@ static int  oobeSel = 0;
 static int  gAppId  = 0;
 static bool editMode = false;                                   // Modo Edicion del Home
 
-// #############################################################
-// ##  ESPACIO DE TRABAJO  ·  normal o Carpeta segura
-// ##  ------------------------------------------------------
-// ##  QUE ES. Un segundo CONTEXTO de ejecucion, no un segundo sistema. Flex OS
-// ##  sigue teniendo un unico gestor de tareas, un unico registro de apps y un
-// ##  unico Recientes; lo que se anade es de QUE espacio es la tarea que se
-// ##  abre. La seguridad de ese espacio es la que ya tenia Flex Vault: la
-// ##  misma clave, el mismo PBKDF2, el mismo almacen cifrado. Aqui no se
-// ##  guarda ninguna clave ni ningun dato -- solo dos enteros de contexto.
-// ##
-// ##  POR QUE UN BITMASK Y NO UN CAMPO EN CADA TAREA. El estado de una app ya
-// ##  se indexa por su id en toda la casa (gAppState, gAppShed, gAppFav,
-// ##  gAppLock...). Un tercer vector indexado igual no puede desincronizarse
-// ##  con los demas, y cabe en NADA: 22 apps son 22 bits de un uint32_t.
-// ##
-// ##  UNA TAREA, UN ESPACIO. Una app que se abre desde la Carpeta segura
-// ##  pertenece al espacio seguro hasta que se cierra; una app normal jamas se
-// ##  convierte en segura por accidente, porque el bit solo lo pone el camino
-// ##  que pasa por la clave. El bit se limpia al terminar la tarea
-// ##  (appTerminate), asi que una app cerrada nunca deja rastro de contexto.
-// #############################################################
-#define FLEXWS_NORMAL 0
-#define FLEXWS_SECURE 1
-// Espacio en el que corre lo que hay en primer plano AHORA.
-static uint8_t  gWorkspace   = FLEXWS_NORMAL;
-// Bit por id de app: su tarea viva pertenece al espacio seguro.
-static uint32_t gSecTaskMask = 0;
-static inline bool appTaskSecure(int id){
-  return id >= 0 && id < APP_N && (gSecTaskMask & (uint32_t)(1u << id)) != 0;
-}
-static inline void appTaskSetSecure(int id, bool on){
-  if(id < 0 || id >= APP_N) return;
-  if(on) gSecTaskMask |=  (uint32_t)(1u << id);
-  else   gSecTaskMask &= ~(uint32_t)(1u << id);
-}
-
-// ---- Carpeta segura (app IC_SECFOLDER). El modulo vive al final de la cadena
-// ---- (FlexOS_Ultra_SecureFolder.h): aqui solo lo que el registro de apps, el
-// ---- selector de Recientes y el ciclo de vida necesitan conocer antes.
-static void secfEnter();                 // punto de entrada de la app
-static void secfTick();
-static bool secfBackLayer();             // cierra una capa propia (teclado, menu)
-static bool secfBackScreen();            // retrocede UNA pantalla dentro del espacio
-static void secfSuspend();               // pasa a segundo plano: cierra el espacio
-static void secfResume();                // vuelve: repinta o vuelve a pedir la clave
-static void secfClose();                 // cierre real de la tarea
-// La app Carpeta segura es la que manda en pantalla AHORA. Es inline y no un
-// prototipo porque lo consultan modulos que van antes que el suyo en la cadena
-// (el cierre de la boveda, el selector de Recientes) y lo unico que necesitan
-// saber es que hay en primer plano.
-static inline bool secfForeground(){ return gState == ST_APP && gAppId == IC_SECFOLDER; }
-// La boveda se ha cerrado mientras el espacio seguro estaba en pantalla: hay
-// que volver a la pantalla de clave en vez de dejar a la vista una lista vacia.
-static void secOnVaultLocked();
-// Vuelve al Home del espacio seguro y lo repinta. Lo llama "atras" desde
-// cualquier vista de la boveda hospedada.
-static void secGoHome();
-// true mientras el espacio seguro esta ABIERTO (clave introducida y vigente).
-static bool secWorkspaceOpen();
-// Cierra el espacio seguro desde fuera (pantalla apagada, Recientes, apagado,
-// salida al escritorio). Reutiliza la politica de cierre de Flex Vault.
-static void secWorkspaceLock(int reason);
-// Hay al menos una tarea del espacio seguro viva en Recientes.
-static bool secAnyTask();

@@ -570,7 +570,6 @@ static void themeChanged(bool save){
     case ST_SWITCHER: swRenderCards(); break;
     case ST_FILES:    filesRender(); break;
     case ST_CONN:     connRender(); break;
-    case ST_VAULT:    vaultRender(); break;
     default: break;                            // splash/OOBE/apagado: se repintan solos
   }
 }

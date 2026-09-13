@@ -52,7 +52,7 @@ JPEG_SRC := $(ROOT)/FlexOS_JPEG.cpp
 APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net \
-        $(BUILD)/test_vault $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
+        $(BUILD)/test_passcode $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
         $(BUILD)/test_media $(BUILD)/test_mem $(BUILD)/test_fall $(BUILD)/test_theft \
         $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun
@@ -194,13 +194,6 @@ $(BUILD)/test_flexlink_transport: test_flexlink_transport.cpp $(FLPLINK) $(FLPSR
 $(BUILD)/test_flexlink_vectors: test_flexlink_vectors.cpp $(FLPSRC) $(FLNKSRC) | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_flexlink_vectors.cpp $(FLPSRC) $(FLNKSRC)
 
-# --- Flex Vault: cripto y almacen cifrado ---
-# Se compila el modulo REAL (FlexOS_Vault.cpp) con OpenSSL como
-# backend (en la placa es mbedTLS con el acelerador del P4) y con un
-# sistema de archivos y una NVS en memoria, que viven en el propio
-# test. CON sanitizers: aqui se manejan longitudes, desplazamientos y
-# buffers de bloque, y un desbordamiento en esa aritmetica no puede
-# quedarse en "parece que funciona".
 # El motor meteorologico: mismo patron que la boveda -- su propia NVS en
 # memoria (wxstub), porque aqui SI hay que releer lo que se escribio (la cache
 # del pronostico son ~1,3 KB, muy por encima de lo que guarda vaultstub).
@@ -208,9 +201,15 @@ WXFLAGS := -Iwxstub -Istub $(INC) -DARDUINO=200 -Wno-format-truncation
 $(BUILD)/test_weather: test_weather.cpp $(ULTRA)/FlexOS_Weather.cpp $(ULTRA)/FlexOS_Weather.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) $(WXFLAGS) -o $@ test_weather.cpp
 
-VAULTFLAGS := -Ivaultstub -Iinostub $(INC) -DARDUINO=200 -Wno-format-truncation
-$(BUILD)/test_vault: test_vault.cpp $(ULTRA)/FlexOS_Vault.cpp $(ULTRA)/FlexOS_Vault.h $(ROOT)/FlexOS_FS.h | $(BUILD)
-	$(CXX) $(COMMON) $(SAN) $(VAULTFLAGS) -o $@ test_vault.cpp $(ULTRA)/FlexOS_Vault.cpp -lcrypto
+# --- Clave del sistema: sal, PBKDF2 y verificacion a plazos ---
+# Se compila el modulo REAL (FlexOS_Passcode.cpp) con OpenSSL como backend (en
+# la placa es mbedTLS con el acelerador SHA del P4) y con una NVS en memoria
+# (lockstub). CON sanitizers: aqui se manejan longitudes y buffers de hash, y un
+# desbordamiento en esa aritmetica no puede quedarse en "parece que funciona".
+PASSSRC  := $(ULTRA)/FlexOS_Passcode.cpp
+PASSFLAGS := -Iinostub $(INC) -DARDUINO=200 -Wno-format-truncation
+$(BUILD)/test_passcode: test_passcode.cpp $(PASSSRC) $(ULTRA)/FlexOS_Passcode.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(PASSFLAGS) -o $@ test_passcode.cpp $(PASSSRC) -lcrypto
 
 # --- codigo de dispositivo: con el entorno simulado ---
 # Sin sanitizers a proposito: el simulador define las funciones de
@@ -306,7 +305,7 @@ ino: ino_compile.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) $(BNO_SRC) check_pro
 # firma o una llamada mal cableada salta aqui.
 $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) $(JPEG_SRC) \
                    $(FLNKSRC) $(FLPSRC) $(FLPLINK) $(CORE_SRC) $(MEDIA_SRC) $(MEM_SRC) $(FALL_SRC) $(THEFT_SRC) \
-                   $(VMSRC) $(GRANTSRC) $(HOSTSRC) $(PKGCORE) | $(BUILD)
+                   $(VMSRC) $(GRANTSRC) $(HOSTSRC) $(PKGCORE) $(PASSSRC) | $(BUILD)
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -x c++ -c ino_compile.cpp -o $(BUILD)/ino_compile.o
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -c ino_extern_stubs.cpp -o $(BUILD)/ino_extern_stubs.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(JPEG_SRC) -o $(BUILD)/ino_jpeg.o
@@ -318,6 +317,7 @@ $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) 
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(MEM_SRC)   -o $(BUILD)/ino_mem.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(FALL_SRC)  -o $(BUILD)/ino_fall.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(THEFT_SRC) -o $(BUILD)/ino_theft.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(PASSFLAGS) -c $(PASSSRC) -o $(BUILD)/ino_passcode.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(VMSRC)     -o $(BUILD)/ino_appvm.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(GRANTSRC)  -o $(BUILD)/ino_appgrant.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(HOSTSRC)   -o $(BUILD)/ino_apphost.o
@@ -326,7 +326,7 @@ $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) 
 	@$(CXX) $(SAN) -o $@ $(BUILD)/ino_compile.o $(BUILD)/ino_extern_stubs.o $(BUILD)/ino_jpeg.o \
 	        $(BUILD)/ino_flexlink.o $(BUILD)/ino_flexphone.o $(BUILD)/ino_flexphonelink.o \
 	        $(BUILD)/ino_brcore.o $(BUILD)/ino_media.o $(BUILD)/ino_mem.o $(BUILD)/ino_fall.o \
-	        $(BUILD)/ino_theft.o \
+	        $(BUILD)/ino_theft.o $(BUILD)/ino_passcode.o \
 	        $(BUILD)/ino_appvm.o $(BUILD)/ino_appgrant.o $(BUILD)/ino_apphost.o \
 	        $(BUILD)/ino_pkgcore.o $(BUILD)/ino_cjson.o -lcrypto
 
@@ -349,7 +349,7 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@echo
 	@$(BUILD)/test_flexlink_vectors
 	@echo
-	@$(BUILD)/test_vault
+	@$(BUILD)/test_passcode
 	@echo
 	@$(BUILD)/test_weather
 	@echo

@@ -31,7 +31,7 @@ detrás un informe real de ese sensor.
 | `FlexOS_Ultra_DeviceTests.h` | Motor de diagnóstico y las cuatro pruebas (sistema, IMU, pantalla, táctil), más Optimización y la pantalla de resultado. |
 | `FlexOS_Ultra_FallAlert.h` | Aviso global de posible caída, con maqueta vertical y maqueta horizontal propias. |
 
-La cadena queda `… → Vault → DeviceCare → DeviceTests → FallAlert → Recovery`,
+La cadena queda `… → IMU → DeviceCare → DeviceTests → FallAlert → Recovery`,
 que es lo que comprueba `tests/host/check_wiring.py`.
 
 ### Cambios en código existente (mínimos)

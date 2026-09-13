@@ -316,8 +316,7 @@ bool     flexWeatherBusy(void);       // hay descarga en curso
 // cache cargados en el arranque: sin RTC no hay forma honesta de calcularlo).
 int32_t  flexWeatherAgeSec(void);
 // Hora UTC real del sistema. La pone el .ino desde clkSetEpoch() -- el
-// UNICO punto por el que pasan la semilla, NVS y NTP -- igual que hace con
-// flexVaultSetClock(). Con ella, "actualizado hace N min" es exacto incluso
+// UNICO punto por el que pasan la semilla, NVS y NTP. Con ella, "actualizado hace N min" es exacto incluso
 // tras un reinicio (la cache de NVS trae su hora de observacion). Sin ella,
 // el motor sigue funcionando con la hora que trae la propia respuesta.
 void     flexWeatherSetClock(uint32_t utcNow);

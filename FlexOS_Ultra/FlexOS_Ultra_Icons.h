@@ -45,37 +45,26 @@ static void arcStroke(float cx, float cy, float r, float a0, float a1, int thick
   }
 }
 
+// REGISTRO DE APPS. El indice de este enum ES el id de la app en APP_REG y
+// ademas viaja a NVS dentro de gAppFav, gAppHidden y gAppLock. Mientras
+// ningun valor se mueva, el escritorio guardado, las favoritas y el candado
+// por app de una placa que actualiza siguen apuntando a lo mismo.
+//
+// CUANDO SI SE MUEVEN (y como se paga). Al retirarse Educacion, Bienestar y
+// la Carpeta segura, los ids POSTERIORES bajan. Eso no puede quedar en
+// silencio: homeOrderLoad() lleva una version de registro (APPREG_VER) y
+// traduce el escritorio, las favoritas y los candados guardados con el mapa
+// de la version anterior antes de usarlos. Ver ese bloque en
+// FlexOS_Ultra_Home.h -- es el unico sitio donde vive la traduccion.
+//
+// Una app NUEVA se anade AL FINAL y no necesita nada de eso.
 enum { IC_RELOJ, IC_GALERIA, IC_MULTIMEDIA, IC_ALMACEN, IC_MODOPC, IC_NOTAS,
-       IC_EDU, IC_NAV, IC_CODE, IC_BIEN, IC_PAINT, IC_JUEGOS,
+       IC_NAV, IC_CODE, IC_PAINT, IC_JUEGOS,
        IC_AJUSTES, IC_CALC, IC_CALEND, IC_CAMARA,
        IC_CLIMA, IC_FLEXSTORE, IC_FLEXPHONE,
-       // Flex Device Care 19. Se anade AL FINAL, como Flex Store y Flex
-       // Phone antes que ella: el indice de este enum ES el id de la app en
-       // APP_REG y ademas viaja a NVS dentro de gAppFav y gAppHidden.
-       // Mientras ningun valor anterior se mueva, el escritorio guardado,
-       // las apps favoritas y el candado por app de una placa que actualiza
-       // siguen apuntando a lo mismo. Por eso el 20 que ocupaba Flex Vector
-       // Pro queda LIBRE en vez de reutilizarse: la proxima app nueva va al
-       // 20 y nada de lo anterior se mueve.
        IC_DEVCARE,
-       // Flex Compass 20. Ocupa el hueco que el comentario de arriba dejaba
-       // reservado, y por el mismo motivo: ningun indice anterior se mueve, asi
-       // que el escritorio guardado, las favoritas y el candado por app de una
-       // placa que actualiza siguen apuntando a lo mismo.
-       IC_BRUJULA,
-       // Carpeta segura 21. Se anade AL FINAL por el mismo motivo que todas las
-       // anteriores: el indice de este enum ES el id de la app en APP_REG y
-       // ademas viaja a NVS dentro de gAppFav y gAppHidden, asi que mientras
-       // ningun valor anterior se mueva, el escritorio guardado, las favoritas y
-       // el candado por app de una placa que actualiza siguen apuntando a lo
-       // mismo.
-       //
-       // Es la CARA de Flex Vault: no trae ni una clave nueva ni un almacen
-       // nuevo. Lo unico que cambia respecto a la version anterior es que la
-       // Carpeta segura deja de vivir escondida en Ajustes y pasa a ser una app
-       // del sistema, con su tarea, su Home propio y su sitio en Recientes.
-       IC_SECFOLDER };
-#define APP_N 22
+       IC_BRUJULA };
+#define APP_N 19
 
 static void iconBase(int x, int y, int S, uint16_t bg, int rf100){
   int r = S * rf100 / 100;
@@ -172,14 +161,6 @@ static void drawAppIcon(int id, int x, int y, int S){
       strokeSeg(x + S * 0.56f, y + S * 0.66f, x + S * 0.78f, y + S * 0.40f, tk / 2 + 1, rgb565(120,90,40)); // lapiz
       fillCircle((int)(x + S * 0.78f), (int)(y + S * 0.40f), tk / 2 + 1, rgb565(245,210,90));
     } break;
-    case IC_EDU: {
-      iconBase(x, y, S, rgb565(79,179,196), 22);
-      uint16_t cap = rgb565(28,52,96);
-      fillQuad(cx, cy - (int)(S * 0.24f), cx + (int)(S * 0.28f), cy - (int)(S * 0.06f),
-               cx, cy + (int)(S * 0.12f), cx - (int)(S * 0.28f), cy - (int)(S * 0.06f), cap);
-      fillRoundRect(cx - (int)(S * 0.18f), cy + (int)(S * 0.08f), (int)(S * 0.36f), (int)(S * 0.16f), 3, WHITE);
-      strokeSeg(cx + S * 0.26f, cy - S * 0.06f, cx + S * 0.26f, cy + S * 0.14f, 1, cap);
-    } break;
     case IC_NAV: {
       iconBase(x, y, S, rgb565(46,155,230), 22);
       fillRing(cx, cy, (int)(S * 0.30f), 2, WHITE);
@@ -196,11 +177,6 @@ static void drawAppIcon(int id, int x, int y, int S){
       strokeSeg(cx + S * 0.10f, cy - S * 0.15f, cx + S * 0.26f, cy, tk / 2 + 1, dk);
       strokeSeg(cx + S * 0.26f, cy, cx + S * 0.10f, cy + S * 0.15f, tk / 2 + 1, dk);
       strokeSeg(cx + S * 0.04f, cy - S * 0.17f, cx - S * 0.04f, cy + S * 0.17f, tk / 2, dk);
-    } break;
-    case IC_BIEN: {
-      iconBase(x, y, S, rgb565(92,193,90), 30);
-      strokeSeg(cx - S * 0.16f, cy + S * 0.02f, cx - S * 0.02f, cy + S * 0.16f, tk / 2 + 1, WHITE);
-      strokeSeg(cx - S * 0.02f, cy + S * 0.16f, cx + S * 0.20f, cy - S * 0.14f, tk / 2 + 1, WHITE);
     } break;
     case IC_PAINT: {
       iconBase(x, y, S, rgb565(241,231,210), 22);
@@ -337,26 +313,6 @@ static void drawAppIcon(int id, int x, int y, int S){
       fillCircle(cx, cy, (int)(S * 0.16f), rgb565(60,72,95));
       fillCircle(cx - (int)(S * 0.06f), cy - (int)(S * 0.06f), (int)(S * 0.05f), rgb565(150,175,205));
       fillRoundRect(x + (int)(S * 0.66f), y + (int)(S * 0.18f), (int)(S * 0.10f), (int)(S * 0.06f), 2, rgb565(190,190,195));
-    } break;
-    case IC_SECFOLDER: {
-      // CARPETA SEGURA. Carpeta clara sobre violeta -- el mismo violeta que ya
-      // identificaba a Flex Vault en la fila de Ajustes (rgb565(150,110,220)),
-      // para que quien la conociera ahi la reconozca como app -- con el candado
-      // CERRADO delante. El candado no es adorno: es la senal de que lo que hay
-      // dentro esta cifrado, igual que el de la cabecera de la boveda.
-      iconBase(x, y, S, rgb565(112,86,196), 22);
-      uint16_t fol = rgb565(232,230,250);
-      // pestana + cuerpo de la carpeta
-      fillRoundRect(x + (int)(S * 0.18f), y + (int)(S * 0.24f), (int)(S * 0.30f), (int)(S * 0.11f), 3, fol);
-      fillRoundRect(x + (int)(S * 0.16f), y + (int)(S * 0.32f), (int)(S * 0.68f), (int)(S * 0.42f), 5, fol);
-      // candado centrado sobre el cuerpo: arco (arriba) + cuerpo (abajo)
-      { int bw = (int)(S * 0.30f), bh = (int)(S * 0.22f);
-        int bx = cx - bw / 2, by = cy + (int)(S * 0.02f);
-        int ar = (int)(S * 0.105f); if(ar < 3) ar = 3;
-        int at = (int)(S * 0.055f); if(at < 2) at = 2;
-        arcStroke(cx, by, ar, 180, 360, at, rgb565(78,56,150));
-        fillRoundRect(bx, by, bw, bh, 3, rgb565(78,56,150));
-        fillCircle(cx, by + bh / 2, (int)(S * 0.035f) + 1, fol); }
     } break;
   }
 }

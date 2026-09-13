@@ -341,7 +341,7 @@ static void drawModuleIcon(ModuleType type, int x, int y, int S){
   int id = IC_AJUSTES;
   switch(type){
     case MOD_ULTRASONIC:  id = IC_NAV;     break;
-    case MOD_BME280:      id = IC_BIEN;    break;
+    case MOD_BME280:      id = IC_DEVCARE; break;
     case MOD_MPU6050:     id = IC_JUEGOS;  break;
     case MOD_LED:         id = IC_CALC;    break;
     case MOD_BUTTON:      id = IC_NOTAS;   break;

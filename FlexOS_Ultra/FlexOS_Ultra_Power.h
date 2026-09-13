@@ -142,12 +142,12 @@ static void lsuUnlock(){
 // para nada y no tiene por que seguir en RAM.
 static void lsuSavePin(){
   if(flexLockSet(lsuPin, 1)) gLockType = 1;
-  flexVaultWipe(lsuPin, sizeof(lsuPin));
+  flexLockWipe(lsuPin, sizeof(lsuPin));
   lsuExit();
 }
 static void lsuSavePass(){
   if(flexLockSet(lsuPass, 2)) gLockType = 2;
-  flexVaultWipe(lsuPass, sizeof(lsuPass));
+  flexLockWipe(lsuPass, sizeof(lsuPass));
   lsuExit();
 }
 static void lsuBack(){ uint16_t c = lsuTxtHi(); strokeSegAA(30, 26, 18, 18, 2.4f, c); strokeSegAA(18, 18, 30, 10, 2.4f, c); }
@@ -431,11 +431,6 @@ static void lsuStartVerify(){
   gLand = false;
   gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
   setBuf(fb);
-  // FLEX VAULT: cualquier verificacion de la clave DEL SISTEMA (desbloquear la
-  // pantalla, abrir una app con candado, salir del kiosco, apagado seguro)
-  // cierra tambien la Carpeta segura. Son dos claves distintas a proposito, y
-  // acertar la del sistema no puede dar acceso a la boveda.
-  vaultLockFromSystem(FXV_LOCK_SCREEN);
   // AQUI YA NO SE LEE LA CLAVE. Antes se sacaba de NVS en texto legible
   // y se dejaba en lsuSaved durante toda la pantalla de verificacion --
   // o sea, la clave del usuario viva en RAM mientras la pedia. Ahora
@@ -477,10 +472,6 @@ static void lsuStartVerify(){
 // #############################################################
 static void suspWakeLockScreen(){
 #if SUSPEND_ON && SUSPEND_LOCK_ON
-  // FLEX VAULT: por si se llegara aqui sin haber pasado por suspEnter (por
-  // ejemplo, un despertar tras un corte). Es idempotente, asi que repetirlo no
-  // cuesta nada y cierra el hueco.
-  vaultLockFromSystem(FXV_LOCK_SCREEN);
   // Sin PIN/contrasena configurada NO se bloquea nada: seria pedirle al usuario
   // que "desbloquee" con una clave que no existe. Se despierta donde estaba,
   // que es el comportamiento de siempre.
@@ -651,9 +642,6 @@ static void poffRenderBand(){
 }
 
 static void poffEnter(){
-  // FLEX VAULT: apagar cierra la boveda antes de cualquier animacion, para que
-  // las claves no sigan en RAM mientras se compone el apagado.
-  vaultLockFromSystem(FXV_LOCK_SCREEN);
 #if !POWEROFF_ON
   return;
 #else

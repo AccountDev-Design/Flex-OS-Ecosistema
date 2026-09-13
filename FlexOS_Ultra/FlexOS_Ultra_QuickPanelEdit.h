@@ -489,12 +489,6 @@ static bool qsCanOpen(){
   if(editMode) return false;   // Modo Edicion del Home tiene su propio arrastre
   if(KIOSK_ON && kioskOn) return false;
   if(flexOtaOwnsScreen() || flexOtaOverlayActive()) return false;
-  // CARPETA SEGURA. La cortina se compone SOBRE lo que haya en pantalla y deja
-  // una franja del sistema encima del contenido: abrirla sobre el espacio
-  // seguro pondria capas del sistema a dibujar sobre contenido privado, que es
-  // una de las tres razones por las que la boveda no podia ser una app. Mientras
-  // su app manda, el panel rapido no existe -- igual que en ST_VAULT.
-  if(secfForeground()) return false;
   return (gState == ST_HOME || gState == ST_APP);
 }
 static bool qsHandle(){

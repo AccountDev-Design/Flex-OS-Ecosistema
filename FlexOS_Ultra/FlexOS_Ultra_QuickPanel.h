@@ -115,7 +115,7 @@ static bool qsPower    = false;  // Ahorro Ultra (frecuencia REAL de la CPU)
 // destruir la configuracion del usuario.
 enum {
   QSID_WIFI = 0, QSID_AIRPLANE, QSID_BLE, QSID_BRIGHT, QSID_THEME, QSID_GLASS,
-  QSID_POWERSAVE, QSID_SETTINGS, QSID_CONN, QSID_DEX, QSID_VAULT, QSID_OTA,
+  QSID_POWERSAVE, QSID_SETTINGS, QSID_CONN, QSID_DEX, QSID_RETIRED_10, QSID_OTA,
   QSID_FILES, QSID_RETIRED_13, QSID_CAMERA, QSID_GALLERY, QSID_CRONO, QSID_LOCK,
   QSID_POWEROFF, QSID_NTP,
   // Van al FINAL a proposito: los identificadores anteriores estan
@@ -180,7 +180,7 @@ static void qpLeaveToApp(int appId){
   if(gState == ST_APP) appClose();
   enterApp(appId);
 }
-// Varias pantallas del sistema (Conectividad y Flex Vault) salen
+// Varias pantallas del sistema (Conectividad, por ejemplo) salen
 // con "gState = ST_APP; settingsRender();": dan por hecho que Ajustes esta
 // abierto debajo. Se entra a Ajustes ANTES para que el camino de vuelta sea
 // coherente, en vez de dejar al usuario en una app que no habia abierto.
@@ -234,10 +234,6 @@ static void qpTapPower(){ qsPower = !qsPower; qpApplyPower(); }
 static void qpTapCrono(){ if(gCronoSt == CRONO_RUN) cronoPause(); else cronoStart(); }
 static void qpTapSettings(){ qpLeaveToApp(IC_AJUSTES); }
 static void qpTapConn(){ qpLeaveToSettingsSub(connEnter); }
-// CARPETA SEGURA. Ya no hace falta pasar por Ajustes para que "atras" vuelva a
-// una pantalla coherente: ahora es una app, asi que se abre como se abren la
-// Camara o la Galeria y "atras" devuelve al escritorio, como en cualquier otra.
-static void qpTapVault(){ qpLeaveToApp(IC_SECFOLDER); }
 static void qpTapOta(){ qsRestoreBg(); qsForceClose(); flexOtaOpenSettings(); }
 static void qpTapDex(){ qpLeaveToApp(IC_MODOPC); }
 static void qpTapCamera(){ qpLeaveToApp(IC_CAMARA); }
@@ -388,13 +384,6 @@ static void qpIcoMonitor(int cx, int cy, int s, uint16_t col){
   fillRect((int)(cx - s * 0.12f), (int)(cy + s * 0.22f), (int)(s * 0.24f), (int)(s * 0.14f), col);
   fillRect((int)(cx - s * 0.32f), (int)(cy + s * 0.36f), (int)(s * 0.64f), (int)(s * 0.10f), col);
 }
-static void qpIcoShield(int cx, int cy, int s, uint16_t col){
-  float u = s * 0.46f;
-  fillTriangle((int)(cx - u), (int)(cy - u * 0.70f), (int)(cx + u), (int)(cy - u * 0.70f), cx, (int)(cy + u), col);
-  fillRect((int)(cx - u), (int)(cy - u * 0.80f), (int)(2 * u), (int)(u * 0.42f), col);
-  fillCircleAA(cx, cy - s * 0.06f, s * 0.11f, qpIcoBg);
-  fillRect((int)(cx - s * 0.04f), (int)(cy - s * 0.06f), (int)(s * 0.09f), (int)(s * 0.20f), qpIcoBg);
-}
 static void qpIcoUpdate(int cx, int cy, int s, uint16_t col){
   fillRect((int)(cx - s * 0.08f), (int)(cy - s * 0.44f), (int)(s * 0.17f), (int)(s * 0.42f), col);
   fillTriangle((int)(cx - s * 0.26f), (int)(cy - s * 0.06f), (int)(cx + s * 0.26f), (int)(cy - s * 0.06f),
@@ -497,8 +486,10 @@ static const QsCtl QS_REG[QSID_COUNT] = {
     qpAvTrue,   NULL,         qpTapConn,     NULL,          NULL,          qpIcoSignal },
   { QSID_DEX,       "Modo PC",    "Modo PC",                QT_ACTION, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SYSTEM,
     qpAvDex,    NULL,         qpTapDex,      NULL,          NULL,          qpIcoMonitor },
-  { QSID_VAULT,     "Segura",     "Carpeta segura",         QT_ACTION, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SYSTEM,
-    qpAvFs,     NULL,         qpTapVault,    NULL,          NULL,          qpIcoShield },
+  // QSID_RETIRED_10: hueco de un control retirado. Se conserva la RANURA porque
+  // los identificadores viajan a NVS; nunca se ofrece ni se ejecuta.
+  { QSID_RETIRED_10, "",          "",                       QT_ACTION, QSZ_1x1,                   QOR_H,        QCAT_SYSTEM,
+    qpAvFalse,  NULL,         NULL,          NULL,          NULL,          qpIcoGear },
   { QSID_OTA,       "Actualizar", "Actualizaciones",        QT_ACTION, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SYSTEM,
     qpAvTrue,   NULL,         qpTapOta,      NULL,          qpSubOta,      qpIcoUpdate },
   { QSID_FILES,     "Archivos",   "Archivos",               QT_ACTION, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_TOOLS,
@@ -612,7 +603,6 @@ static const QpDef QP_FACTORY[] = {
   { QSID_CRONO,     1, 1 },
   { QSID_NTP,       1, 1 },
   { QSID_LOCK,      1, 1 },
-  { QSID_VAULT,     1, 1 },
   { QSID_FILES,     1, 1 },
   { QSID_CAMERA,    1, 1 },
   { QSID_GALLERY,   1, 1 },

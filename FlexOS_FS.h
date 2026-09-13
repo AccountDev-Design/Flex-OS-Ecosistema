@@ -63,30 +63,6 @@
 #define FLEXFS_EXT_PAINT  ".fxp"  // dibujo de Paint (trazos serializados)
 #define FLEXFS_EXT_NOTE   ".txt"  // nota de texto plano UTF-8
 
-// -------------------------------------------------------------
-//  ALMACEN DE FLEX VAULT (Carpeta segura)
-//  ------------------------------------------------------------
-//  Aqui viven los blobs cifrados de la boveda. NO es "una carpeta
-//  oculta": este prefijo es INVISIBLE para todas las funciones
-//  publicas de este modulo. flexFsList no lo enumera, flexFsCount y
-//  flexFsDirSize no lo suman, flexFsLargest no lo recorre,
-//  flexFsCatSize no lo cuenta y flexFsDelete/Rename/Trash se niegan
-//  a tocarlo.
-//
-//  POR QUE EL FILTRO VA AQUI Y NO EN LA INTERFAZ
-//  Si cada pantalla (Archivos, Almacenamiento, Galeria, el Finder de
-//  Modo PC...) tuviera que acordarse de saltar la boveda, bastaria
-//  que una sola no lo hiciera para ensenar los nombres privados. Con
-//  el filtro en la capa que abre los directorios, una pantalla nueva
-//  hereda la privacidad por construccion, sin tener que saber que
-//  Flex Vault existe.
-//
-//  El acceso real a estos bytes se hace con las funciones
-//  flexFsPriv* del final de este fichero, que SOLO aceptan rutas de
-//  dentro de la boveda. Las usa unicamente FlexOS_Vault.cpp.
-// -------------------------------------------------------------
-#define FLEXFS_DIR_VAULT  "/.fxvault"      // raiz del almacen cifrado
-#define FLEXFS_DIR_VAULTD "/.fxvault/d"    // un blob cifrado por elemento
 
 // Categorias de la pantalla de Almacenamiento. El reparto NO es
 // decorativo: cada categoria es un conjunto concreto de carpetas
@@ -251,14 +227,11 @@ bool     flexFsWriteBinAtomic(const char* path, const void* buf, size_t n);
 bool     flexFsFactoryErase();
 
 // Lee `n` bytes DESDE el desplazamiento `off`. Devuelve los leidos
-// (0 al final del fichero) o -1 si no se pudo abrir. La necesita
-// Flex Vault para cifrar un fichero grande por bloques sin cargarlo
-// entero en RAM, y sirve igual para cualquier lectura parcial.
+// (0 al final del fichero) o -1 si no se pudo abrir. La usa el indice
+// de medios para leer cabeceras sin cargar el fichero entero, y sirve
+// igual para cualquier lectura parcial.
 int      flexFsReadAt(const char* path, uint32_t off, void* buf, size_t n);
 
-// Anade `n` bytes al final (creando el fichero si no existe). Es la
-// pareja de flexFsReadAt para escribir por bloques.
-bool     flexFsAppendBin(const char* path, const void* buf, size_t n);
 
 // -------------------------------------------------------------
 //  PAINT (dibujo vectorial por trazos)
@@ -325,18 +298,6 @@ typedef void (*FlexPaintSegCb)(int x0, int y0, int x1, int y1,
 bool     flexPaintReplay(const char* path, float sc, int ox, int oy,
                          FlexPaintSegCb cb, void* user);
 
-// Lo MISMO, pero sobre un dibujo que ya esta en memoria. Existe por
-// Flex Vault: un dibujo privado se descifra a RAM y se pinta desde
-// ahi, para que NUNCA haya una copia en claro en la particion de
-// datos (que es justo lo que pasaria si hubiera que escribir un
-// fichero temporal para poder reutilizar flexPaintReplay).
-bool     flexPaintReplayMem(const void* data, size_t len, float sc, int ox, int oy,
-                            FlexPaintSegCb cb, void* user);
-
-// Cabecera de un dibujo que ya esta en memoria (misma razon que
-// flexPaintReplayMem).
-bool     flexPaintHeaderMem(const void* data, size_t len, FlexPaintHdr* out);
-
 // Borra el ultimo trazo (deshacer real: trunca el fichero).
 bool     flexPaintUndo(const char* path);
 
@@ -344,26 +305,19 @@ bool     flexPaintUndo(const char* path);
 bool     flexPaintClear(const char* path);
 
 // -------------------------------------------------------------
-//  ACCESO PRIVILEGIADO AL ALMACEN DE FLEX VAULT
+//  LIMPIEZA DE RESTOS DE UNA VERSION ANTERIOR
 //  ------------------------------------------------------------
-//  Estas funciones son la UNICA via para tocar los bytes de dentro
-//  de FLEXFS_DIR_VAULT, y solo las usa FlexOS_Vault.cpp. Todas
-//  comprueban que la ruta este dentro de la boveda y devuelven
-//  false/-1 si no lo esta: no son un "modo dios" del sistema de
-//  archivos, son la puerta de servicio de una sola habitacion.
+//  Hasta esta version existia una "Carpeta segura" que guardaba
+//  blobs cifrados en un directorio propio de la particion de datos.
+//  La funcion se ha retirado del sistema, asi que esos bytes ya no
+//  los puede abrir nadie: ni el usuario, porque no hay interfaz, ni
+//  el firmware, porque no queda codigo que sepa descifrarlos.
 //
-//  Trabajan con bytes cifrados, asi que no saben ni les importa que
-//  hay dentro. El cifrado y el descifrado ocurren enteros en
-//  FlexOS_Vault.cpp.
+//  Dejarlos ahi seria peor que borrarlos: ocuparian flash para
+//  siempre y apareceran en el explorador de archivos en cuanto el
+//  filtro que los escondia deje de existir -- como un directorio de
+//  basura con nombres ilegibles. Esta funcion los borra de una vez,
+//  y el sketch la llama UNA sola vez por aparato (deja su marca en
+//  NVS). Devuelve true si habia algo y se borro.
 // -------------------------------------------------------------
-bool     flexFsVaultInit();                                   // crea /.fxvault y /.fxvault/d
-bool     flexFsPrivExists(const char* path);
-uint32_t flexFsPrivSize(const char* path);
-int      flexFsPrivRead(const char* path, uint32_t off, void* buf, size_t n);
-bool     flexFsPrivAppend(const char* path, const void* buf, size_t n);
-bool     flexFsPrivWrite(const char* path, const void* buf, size_t n);   // reemplaza
-bool     flexFsPrivDelete(const char* path);
-uint32_t flexFsPrivDirSize(const char* dir);
-// true si `path` cae dentro del almacen de la boveda. Publica porque
-// el sketch la usa en su auditoria de fugas.
-bool     flexFsIsVaultPath(const char* path);
+bool     flexFsPurgeLegacyVault();

@@ -98,7 +98,7 @@ static void calcEnter(); static void calcTick();           // Calculadora (M2), 
 static void pcEnter(); static void pcTick();               // Modo PC (M4), abajo
 static void pcSuspend(); static void pcResume(); static void pcCloseApp();  // ...y su ciclo de vida
 static void calResume();                                   // Calendario: reanudar = repintar
-static void galEnter(); static void galTick();              // Galeria (indice real de medios + Flex Vault)
+static void galEnter(); static void galTick();              // Galeria (indice real de medios)
 static void galCloseApp();                                 // ...suelta la cache de miniaturas
 // ---- Ganchos de la multitarea por memoria (shed / dirty) ----
 static size_t galShed();     // Galeria: suelta la cache de miniaturas decodificadas
@@ -110,12 +110,11 @@ static void   storeSuspendLife(); // Flex Store: suspende la app flex-app-v1 que
 static void   navSuspendLife();  // Navegador: al pasar a segundo plano
 static size_t navShedLife();     // Navegador: suelta la cache de fotogramas
 static bool galBackLayer(); static bool galBackScreen(); static void galSuspend(); static void galResume();
-static void bienEnter(); static void bienTick();           // Bienestar (M2)
 static void calEnter(); static void calTick();             // Calendario (M2)
 static void vidEnter(); static void vidTick();             // Multimedia (esqueleto)
 static void camEnter(); static void camTick();             // Camara (esqueleto)
 static void noteEnter(); static void noteTick();           // Notas + teclado 4 capas
-static void almEnter(); static void eduEnter();                         // apps simples
+static void almEnter();                                                 // apps simples
 static void navEnter(); static void navTick();                          // Navegador (FlexOS_Browser*)
 static void ideEnter(); static void ideTick(); static void paintEnter(); static void paintTick();
 static void almTick();                                     // Almacenamiento: tap en "Ver..."
@@ -400,9 +399,9 @@ static void uiHdrDraw(const char* title, int fs, uint16_t txt, uint16_t nav, boo
 // ##  del tipo `if(y + alto >= 58)`. Ese if mira el borde de
 // ##  ABAJO. Con la lista subida, `y` se vuelve muy negativo, la
 // ##  condicion sigue siendo cierta y la tarjeta se dibuja
-// ##  entera... encima de la cabecera. Eso es lo que en el video
-// ##  de Flex Vault apila "Ultimo acceso", "Bloqueo automatico" e
-// ##  "Intentos fallidos" unos sobre otros en la banda de arriba.
+// ##  entera... encima de la cabecera. Eso es lo que apilaba las
+// ##  filas de una lista arrastrada unas sobre otras en la banda de
+// ##  arriba.
 // ##
 // ##  La solucion no es anadir el otro if en cada uno de los
 // ##  cincuenta sitios que dibujan una fila: es que el area con
@@ -661,25 +660,6 @@ static const AppHooks H_DEVCARE  = { NULL, dcBackScreen, dcSuspend, dcResume, dc
 // Device Care lo sigue necesitando para la deteccion de caidas.
 // No lleva 'shed' ni 'dirty': no reserva nada pesado ni tiene datos del usuario.
 static const AppHooks H_COMPASS  = { cmpBackLayer, NULL, compassSuspend, compassResume, compassClose, NULL, NULL, NULL, NULL, NULL };
-// CARPETA SEGURA. backLayer cierra una capa propia (el menu de un elemento, un
-// dialogo del kit de archivos); backScreen retrocede UNA pantalla dentro del
-// espacio seguro antes de que "atras" salga al escritorio.
-//
-// suspend CIERRA el espacio seguro y borra las claves de la memoria: es la
-// misma politica de Flex Vault de siempre (salir de la boveda la cierra), solo
-// que ahora el camino de salida es el del ciclo de vida de apps. resume vuelve
-// a pedir la clave, asi que una tarea segura en segundo plano no puede
-// reaparecer abierta.
-//
-// NO lleva saveSess/loadSess a proposito: lo unico que sobreviviria a un
-// reinicio seria en que pantalla del espacio estaba el usuario, y escribir eso
-// en LittleFS SIN cifrar diria que hubo alguien mirando las notas privadas. El
-// estado de la tarea vive en RAM mientras la tarea vive, que es exactamente lo
-// que pide la politica de la boveda (tras arrancar, siempre cerrada).
-// Tampoco lleva 'shed' ni 'dirty': lo pesado que reserva (una vista previa
-// descifrada) ya lo suelta su suspend, y una nota privada a medias se guarda
-// CIFRADA en ese mismo suspend en vez de anunciarse como pendiente.
-static const AppHooks H_SECFOLDER = { secfBackLayer, secfBackScreen, secfSuspend, secfResume, secfClose, NULL, NULL, NULL, NULL, NULL };
 // ---- Registro de apps (indices = enum IC_*) ----
 static FlexApp APP_REG[APP_N] = {
   { appRelojEnter, appRelojTick, APP_FLEX, APP_CAT_ESENCIAL, APP_DEF_FAV, NULL },
@@ -688,59 +668,45 @@ static FlexApp APP_REG[APP_N] = {
   { almEnter, almTick, APP_FLEX, APP_CAT_SISTEMA, APP_DEF_FAV, &H_ALM },
   { pcEnter, pcTick, APP_CUSTOM_HEADER, APP_CAT_SISTEMA, APP_DEF_FAV, &H_MODOPC },
   { noteEnter, noteTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_TRABAJO, APP_DEF_FAV, &H_NOTES },
-  { eduEnter, NULL, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_FAV, NULL },
   { navEnter, navTick, APP_FLEX | APP_OWN_TOUCH, APP_CAT_ESENCIAL, APP_DEF_FAV, &H_BROWSER },
   { ideEnter, ideTick, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_FAV, NULL },
-  { bienEnter, bienTick, APP_FLEX, APP_CAT_SISTEMA, APP_DEF_FAV, NULL },
   { paintEnter, paintTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_OCIO, APP_DEF_FAV, &H_PAINT },
   { gamesEnter, gamesTick, APP_OWN_TOUCH | APP_CUSTOM_HEADER | APP_LAND, APP_CAT_OCIO, APP_DEF_FAV, &H_GAMES },
   { settingsEnter, settingsTick, APP_CUSTOM_HEADER, APP_CAT_SISTEMA, APP_DEF_DOCK, &H_SETTINGS },
   { calcEnter, calcTick, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_DOCK, &H_CALC },
   { calEnter, calTick, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_DOCK, &H_CALEND },
   { camEnter, camTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_MEDIA, APP_DEF_DOCK, &H_CAMERA },
-  // 16 Clima (REAL: Open-Meteo). APP_OWN_TOUCH porque el buscador de ciudades
+  // 14 Clima (REAL: Open-Meteo). APP_OWN_TOUCH porque el buscador de ciudades
   // usa el teclado del sistema, que ocupa la MISMA franja que el boton "atras"
   // de la barra: si lo gestionara el framework, la barra espaciadora cerraria
   // la app. Ese boton lo atiende wxNavBack() con la misma geometria.
-  // NO nace en la rejilla (APP_DEF_DOCK): el escritorio de fabrica se queda
-  // EXACTAMENTE como estaba -- doce iconos en la pagina 0 y las siguientes
-  // vacias -- y una placa que actualiza no ve su Inicio reordenado. Clima se
-  // abre desde su widget (la fila de arriba) y desde la Caja de aplicaciones,
-  // que es de donde el usuario puede anadirla a Inicio si quiere.
+  // NO nace en la rejilla (APP_DEF_DOCK): Clima se abre desde su widget (la
+  // fila de arriba) y desde la Caja de aplicaciones, que es de donde el
+  // usuario puede anadirla a Inicio si quiere.
   { wxAppEnter, wxAppTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_ESENCIAL, APP_DEF_DOCK, &H_WEATHER },
-  // 17 Flex Store. Gestiona su cabecera y tactil; las operaciones de red/flash
+  // 15 Flex Store. Gestiona su cabecera y tactil; las operaciones de red/flash
   // corren en una tarea de fondo para no bloquear la interfaz.
-  { storeEnter, storeTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH | APP_FLEX, APP_CAT_SISTEMA, APP_DEF_DOCK, &H_STORE },
-  // 18 Flex Phone. Gestiona su cabecera y su tactil (pestanas propias).
+  // SI nace en la rejilla (APP_DEF_FAV): ocupa en el escritorio de fabrica el
+  // sitio que tenia Educacion, que ya no existe. La tienda es la puerta a todo
+  // lo que se puede instalar, asi que estaba fuera de Inicio sin buen motivo.
+  { storeEnter, storeTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH | APP_FLEX, APP_CAT_SISTEMA, APP_DEF_FAV, &H_STORE },
+  // 16 Flex Phone. Gestiona su cabecera y su tactil (pestanas propias).
   // NO nace en la rejilla (APP_DEF_DOCK): una placa que actualiza no ve
   // su escritorio reordenado; se anade desde la Caja de aplicaciones.
   { fphEnter, fphTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH | APP_FLEX, APP_CAT_ESENCIAL, APP_DEF_DOCK, &H_FLEXPHONE },
-  // 19 Flex Device Care. Cabecera propia (el titulo cambia con la
+  // 17 Flex Device Care. Cabecera propia (el titulo cambia con la
   // pantalla interna) y tactil propio (rejilla del test tactil, botones
   // de las pruebas). APP_FLEX porque maqueta contra el lienzo real, asi
   // que tambien sirve dentro de una ventana de Modo PC.
-  // NO nace en la rejilla (APP_DEF_DOCK): una placa que actualiza no ve
-  // su escritorio reordenado; se anade desde la Caja de aplicaciones.
-  { dcEnter, dcTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH | APP_FLEX, APP_CAT_SISTEMA, APP_DEF_DOCK, &H_DEVCARE },
-  // 20 Flex Compass. Cabecera propia (uiHdrDraw, con menu de tres puntos) y
+  // SI nace en la rejilla (APP_DEF_FAV): ocupa en el escritorio de fabrica el
+  // sitio que tenia Bienestar. Device Care ES lo que Bienestar aparentaba --
+  // salud del aparato, memoria, bateria y sensores -- pero con datos reales.
+  { dcEnter, dcTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH | APP_FLEX, APP_CAT_SISTEMA, APP_DEF_FAV, &H_DEVCARE },
+  // 18 Flex Compass. Cabecera propia (uiHdrDraw, con menu de tres puntos) y
   // tactil propio (arrastre vertical con inercia). NO nace en la rejilla
   // (APP_DEF_DOCK): una placa que actualiza no ve su escritorio reordenado; se
   // anade a Inicio desde la Caja de aplicaciones.
   { compassEnter, compassTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_ESENCIAL, APP_DEF_DOCK, &H_COMPASS },
-  // 21 Carpeta segura. Cabecera propia y tactil propio: dentro no hay una
-  // pantalla de ajustes sino un ESCRITORIO -- rejilla por paginas, gesto
-  // horizontal, indicadores -- y el marco estandar le quitaria 96 px arriba
-  // para repetir un titulo que el espacio ya pinta.
-  //
-  // NO es APP_FLEX: no se abre dentro de una ventana de Modo PC. Componer el
-  // espacio seguro en el lienzo de una ventana pondria contenido privado en el
-  // escritorio compartido de DeX, que es justo lo que esta app existe para
-  // evitar; secfEnter lo dice y se vuelve, en vez de fallar en silencio.
-  //
-  // NO nace en la rejilla (APP_DEF_DOCK): una placa que actualiza no ve su
-  // escritorio reordenado. Aparece en la Caja de aplicaciones como cualquier
-  // otra app, y de ahi el usuario la ancla a Inicio si quiere.
-  { secfEnter, secfTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_SISTEMA, APP_DEF_DOCK, &H_SECFOLDER },
 };
 static const char* appCatName(int id){
   int c = (id >= 0 && id < APP_N) ? APP_REG[id].cat : APP_CAT_SISTEMA;
@@ -1114,12 +1080,6 @@ static bool appTerminate(int id, bool force){
   gAppState[id] = ALIFE_CLOSED;
   gAppSeenMs[id] = 0;
   appMemForget(id);                 // su huella medida deja de existir con ella
-  // ESPACIO DE TRABAJO. Una tarea cerrada no pertenece ya a ningun contexto: sin
-  // esto, el bit seguro sobreviviria a la tarea y una apertura POSTERIOR de esa
-  // misma app -- desde el escritorio normal -- heredaria una marca que nadie le
-  // ha puesto. El hook close() del espacio seguro ya lo limpia; esto lo cierra
-  // tambien para cualquier camino que no pase por el.
-  appTaskSetSecure(id, false);
   return true;
 }
 

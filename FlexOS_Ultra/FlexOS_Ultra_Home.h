@@ -65,7 +65,51 @@
 #define HOME_LEGACY_PAGES 3
 #define HOME_LEGACY_SLOTS 12
 #define HOME_LEGACY_TOTAL (HOME_LEGACY_PAGES * HOME_LEGACY_SLOTS)
-static uint8_t homeOrder[HOME_TOTAL] = { 0,1,2,3,4,5,6,7,8,9,10,11 };  // app id por ranura (reordenable)
+
+// #############################################################
+// ##  ESCRITORIO DE FABRICA Y VERSION DEL REGISTRO DE APPS
+// ##  ------------------------------------------------------
+// ##  Los doce iconos de la pagina 0 en una placa virgen. Antes era
+// ##  "los ids 0..11" y bastaba con un bucle; desde que Educacion y
+// ##  Bienestar dejaron de existir eso ya no vale, porque sus dos
+// ##  sitios los ocupan Flex Store y Flex Device Care, que tienen ids
+// ##  del final del registro. La lista explicita es ademas mas
+// ##  honesta: el escritorio de fabrica se lee de un sitio.
+// ##
+// ##  APPREG_VER es la version del REGISTRO (el enum IC_*), no la del
+// ##  formato del escritorio. Sube cuando un id cambia de numero, que
+// ##  es justo lo que pasa al retirar una app del medio de la lista.
+// ##  homeOrderLoad() traduce con APPREG_MAP_V1 lo que guardo una
+// ##  version anterior -- escritorio, favoritas, ocultas y candados --
+// ##  antes de usarlo. Sin eso, tras actualizar el usuario veria en
+// ##  Inicio apps distintas de las que puso.
+// #############################################################
+#define APPREG_VER 2
+static const uint8_t HOME_FACTORY[HOME_LEGACY_SLOTS] = {
+  IC_RELOJ, IC_GALERIA, IC_MULTIMEDIA, IC_ALMACEN,
+  IC_MODOPC, IC_NOTAS, IC_FLEXSTORE, IC_NAV,
+  IC_CODE, IC_DEVCARE, IC_PAINT, IC_JUEGOS
+};
+// Traduccion de los ids de la version 1 del registro (22 apps) a los de la 2
+// (19). 0xFF = la app ya no existe y su ranura se queda vacia.
+//   v1  6 Educacion  -> Flex Store    (ocupa su sitio en Inicio)
+//   v1  9 Bienestar  -> Device Care   (ocupa su sitio en Inicio)
+//   v1 21 Carpeta segura -> retirada
+#define APPREG_V1_N 22
+static const uint8_t APPREG_MAP_V1[APPREG_V1_N] = {
+  IC_RELOJ, IC_GALERIA, IC_MULTIMEDIA, IC_ALMACEN, IC_MODOPC, IC_NOTAS,
+  IC_FLEXSTORE,                      // 6  Educacion
+  IC_NAV, IC_CODE,
+  IC_DEVCARE,                        // 9  Bienestar
+  IC_PAINT, IC_JUEGOS, IC_AJUSTES, IC_CALC, IC_CALEND, IC_CAMARA,
+  IC_CLIMA, IC_FLEXSTORE, IC_FLEXPHONE, IC_DEVCARE, IC_BRUJULA,
+  0xFF                               // 21 Carpeta segura: retirada
+};
+static uint8_t homeOrder[HOME_TOTAL] = {
+  IC_RELOJ, IC_GALERIA, IC_MULTIMEDIA, IC_ALMACEN,
+  IC_MODOPC, IC_NOTAS, IC_FLEXSTORE, IC_NAV,
+  IC_CODE, IC_DEVCARE, IC_PAINT, IC_JUEGOS
+};  // app id por ranura (reordenable)
 static int     gHomePage  = 0;                         // pagina visible (0..gHomePageN-1)
 static uint8_t gHomePageN = HOME_LEGACY_PAGES;         // paginas existentes (1..HOME_PAGES_MAX)
 static uint8_t gHomeMain  = 0;                         // pagina principal (la de la casita)
@@ -1189,6 +1233,7 @@ static void homeOrderSave(){
   // cargar. 2 + 5 paginas x (1 + 3x5) = 82 B.
   { uint8_t wb[HOME_WG_BLOB]; homeWgSerialize(wb); prefs.putBytes("hwg", wb, HOME_WG_BLOB); }
   prefs.putInt("appn", APP_N);          // cuantas apps conocia este firmware (ver homeOrderLoad)
+  prefs.putInt("appver", APPREG_VER);   // version del REGISTRO de apps (ver homeOrderLoad)
   prefs.putInt("appfav",  (int)gAppFav);
   prefs.putInt("apphide", (int)gAppHidden);
   prefs.end();
@@ -1383,6 +1428,9 @@ static void homeOrderLoad(){
   int fav  = prefs.getInt("appfav",  -1);
   int hide = prefs.getInt("apphide", -1);
   int known = prefs.getInt("appn", 16);      // cuantas apps conocia el firmware que guardo esto
+  // Version del REGISTRO de apps con la que se guardo todo esto. Ausente = 1
+  // (el registro de 22 apps, con Educacion, Bienestar y la Carpeta segura).
+  int regver = prefs.getInt("appver", 1);
   { uint8_t wb[HOME_WG_BLOB];
     size_t wn = prefs.getBytes("hwg", wb, HOME_WG_BLOB);
     if(wn != HOME_WG_BLOB || !homeWgDeserialize(wb))
@@ -1415,11 +1463,47 @@ static void homeOrderLoad(){
     // Las apps nuevas reciben su valor de fabrica una vez al actualizar.
     if(known < APP_N) drawerRegistryAdopt(known);
   }
-  // Primer arranque de verdad (ni clave nueva ni vieja): las doce de
-  // siempre en la pagina 0, y el resto vacio.
+  // Primer arranque de verdad (ni clave nueva ni vieja): el escritorio de
+  // fabrica en la pagina 0, y el resto vacio.
   if(n != HOME_TOTAL){
     for(int i = 0; i < HOME_TOTAL; i++) homeOrder[i] = HOME_EMPTY;
-    for(int i = 0; i < HOME_LEGACY_SLOTS; i++) homeOrder[homeIdx(0, i)] = (uint8_t)i;
+    for(int i = 0; i < HOME_LEGACY_SLOTS; i++) homeOrder[homeIdx(0, i)] = HOME_FACTORY[i];
+  }
+  // #########################################################
+  //  TRADUCCION DEL REGISTRO v1 -> v2
+  //  -------------------------------------------------------
+  //  Solo si lo guardado viene de un firmware con el registro de 22 apps y
+  //  aqui de verdad habia algo guardado (fav >= 0: si no, ya se aplico el
+  //  reparto de fabrica y no hay nada que traducir). Se traduce TODO lo que
+  //  viaja indexado por id -- ranuras del escritorio, favoritas, ocultas y
+  //  candados -- de una vez y en un solo sitio.
+  //
+  //  Las ranuras de APPS DESCARGADAS (homeIsPkg) no se tocan: sus valores no
+  //  son ids del registro nativo.
+  // #########################################################
+  if(regver < APPREG_VER && fav >= 0){
+    for(int i = 0; i < HOME_TOTAL; i++){
+      uint8_t v = homeOrder[i];
+      if(v == HOME_EMPTY || homeIsPkg(v)) continue;
+      homeOrder[i] = (v < APPREG_V1_N) ? APPREG_MAP_V1[v] : HOME_EMPTY;
+      if(homeOrder[i] == 0xFF) homeOrder[i] = HOME_EMPTY;
+    }
+    uint32_t nf = 0, nh = 0, nl = 0;
+    for(int v = 0; v < APPREG_V1_N; v++){
+      uint8_t d = APPREG_MAP_V1[v];
+      if(d >= APP_N) continue;                    // app retirada: su bit se pierde, que es lo correcto
+      uint32_t src = (uint32_t)(1u << v), dst = (uint32_t)(1u << d);
+      if(gAppFav    & src) nf |= dst;
+      if(gAppHidden & src) nh |= dst;
+      if(gAppLock   & src) nl |= dst;
+    }
+    gAppFav = nf; gAppHidden = nh; gAppLock = nl;
+    // Flex Store y Device Care heredan el sitio de Educacion y Bienestar, pero
+    // una placa donde el usuario habia QUITADO las dos de Inicio se quedaria
+    // sin ellas y sin saber por que. El valor de fabrica manda en ese caso: las
+    // dos son favoritas tras actualizar, y el usuario puede volver a quitarlas.
+    gAppFav |= (uint32_t)(1u << IC_FLEXSTORE) | (uint32_t)(1u << IC_DEVCARE);
+    gAppHidden &= (uint32_t)~((1u << IC_FLEXSTORE) | (1u << IC_DEVCARE));
   }
   const uint32_t validApps = (1u << APP_N) - 1u;
   gAppFav &= validApps;

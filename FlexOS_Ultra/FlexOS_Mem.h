@@ -38,7 +38,7 @@ extern "C" {
 // -------------------------------------------------------------
 enum {
   FLEXMEM_W_LIGHT  = 0,   // Reloj, Calculadora, Notas, Calendario, Ajustes
-  FLEXMEM_W_MEDIUM = 1,   // Paint, Educacion, Bienestar, Juegos
+  FLEXMEM_W_MEDIUM = 1,   // Paint, Code IDE, Flex Store, Juegos
   FLEXMEM_W_HEAVY  = 2    // Navegador, Galeria, Multimedia, Camara, DeX
 };
 

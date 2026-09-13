@@ -30,7 +30,7 @@
 #include "FlexOS_Ultra_KeyboardSettings.h"   // eslabon anterior de la cadena
 
 // #############################################################
-// ##  APPS SIMPLES: Almacenamiento, Educacion, Navegador,
+// ##  APPS SIMPLES: Almacenamiento, Navegador,
 // ##  Code IDE, Paint (funcional), Juegos
 // #############################################################
 // Barra etiqueta+valor+progreso, dimensionada al lienzo (la usan Almacenamiento

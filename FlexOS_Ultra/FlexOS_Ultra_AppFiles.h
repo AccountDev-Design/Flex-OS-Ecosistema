@@ -39,8 +39,8 @@
 // ##  asi que las cuatro acciones se comportan igual en las tres
 // ##  pantallas y operan sobre el fichero real.
 // ##
-// ##  El explorador trabaja exclusivamente sobre LittleFS. Borrar,
-// ##  renombrar, papelera y Flex Vault conservan su comportamiento.
+// ##  El explorador trabaja exclusivamente sobre LittleFS: borrar,
+// ##  renombrar y papelera operan sobre el fichero real.
 // ##
 // ##  ABRIR UN ARCHIVO lo manda a la app que corresponde: una
 // ##  imagen a Galeria, un video o un audio compatible a
@@ -217,7 +217,7 @@ static void filesOpenEntry(const char* path, const char* name){
   }
   // Ni medio ni conocido: se ofrecen las acciones de siempre sobre
   // el fichero, que es lo unico honesto que se puede hacer con el.
-  fkMenuOpenV(SCR_W / 2 - 60, 200, true);
+  fkMenuOpen(SCR_W / 2 - 60, 200);
 }
 
 static void filesMenuAction(int act){
@@ -238,17 +238,6 @@ static void filesMenuAction(int act){
   } else if(act == FK_ACT_TRASH){
     if(p[0]){ flexFsTrash(p); filesSelIdx = -1; filesReload(); }
     else { fkTrashOpen(); return; }               // sin seleccion: abre la papelera
-  } else if(act == FK_ACT_VAULT){
-    // FLEX VAULT: el fichero se cifra dentro de la boveda y desaparece del
-    // explorador. La clase se deduce de la extension, para que una foto acabe
-    // en Galeria privada y un .txt en Notas privadas.
-    if(p[0] && filesSelIdx >= 0 && !filesList[filesSelIdx].dir){
-      filesSelIdx = -1;
-      if(vaultMoveRequest(p, -1)){
-        if(gState == ST_VAULT) return;            // se fue a pedir la clave
-        filesReload();
-      }
-    }
   }
   filesRender();
 }
@@ -314,7 +303,7 @@ static void filesTick(){
         // Solo los FICHEROS pueden ir a la boveda: mover una carpeta entera
         // pediria cifrar su arbol, y prometerlo sin hacerlo seria peor que no
         // ofrecerlo. Ver vaultMoveRequest.
-        fkMenuOpenV(T.x, T.y - 40, !filesList[i].dir);
+        fkMenuOpen(T.x, T.y - 40);
         return;
       }
     }
@@ -367,42 +356,3 @@ static void filesTick(){
   }
 }
 
-// EDUCACION (y cualquier app de lista de tarjetas) · adaptativa.
-//   Esencial   : la lista de tarjetas, repartida en COLUMNAS segun el ancho
-//                (una columna necesita >= 220 px), de modo que al ensanchar la
-//                ventana no queda medio lienzo en blanco: pasa a 2 o 3 columnas.
-//   Opcional 1 : subtitulo "Proximamente" dentro de cada tarjeta -- aparece
-//                cuando la tarjeta tiene >= 56 px de alto (si no, solo el
-//                titulo, que es lo esencial).
-static void simpCards(const char* title, const char* items[], int n){
-  setBuf(fb);
-  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
-  fillRect(bx, by, bw, bh, WIN_BG);
-  int pad = uiPad(), gap = uiGap();
-  int y0 = by + pad;
-  int fsT = uiFontFit(title, bw - 2 * pad, uiFontH(bh / 12));
-  drawTextC(bx + bw / 2, y0, title, fsT, TH_TXT);
-  y0 += uiLineH(fsT) + gap;
-  int cols = (bw - 2 * pad + gap) / (220 + gap); if(cols < 1) cols = 1; if(cols > 3) cols = 3;
-  int rows = (n + cols - 1) / cols;
-  int cw = (bw - 2 * pad - (cols - 1) * gap) / cols;
-  int availH = (by + bh) - y0 - pad;
-  int chh = (availH - (rows - 1) * gap) / (rows > 0 ? rows : 1);
-  if(chh > 110) chh = 110;
-  if(chh < 26) chh = 26;
-  uint8_t aSub = uiSection(0, chh >= 56);
-  int rad = uiPad();
-  for(int i = 0; i < n; i++){
-    int c = i % cols, r = i / cols;
-    int x = bx + pad + c * (cw + gap), y = y0 + r * (chh + gap);
-    if(y + chh > by + bh) break;                     // nunca fuera del marco
-    if(uiGlass && !gLand) drawLiquidGlassPanel(x, y, cw, chh, rad, TH_GLASS);
-    else fillRoundRect(x, y, cw, chh, rad, TH_SURF);
-    int fsI = uiFontFit(items[i], cw - 2 * pad, uiFontH(chh / 2));
-    int ty = aSub ? (y + chh / 2 - uiLineH(fsI)) : (y + chh / 2 - uiLineH(fsI) / 2);
-    drawText(x + pad, ty, items[i], fsI, TH_TXT);
-    if(aSub) uiText(x + pad, ty + uiLineH(fsI) + 4, "Proximamente", 1, TH_TXT2, aSub);
-  }
-  flxFlush(WIN_TOP, WIN_BOT);
-}
-static void eduEnter(){ const char* it[4] = { "Electr\xC3\xB3nica b\xC3\xA1sica", "Programaci\xC3\xB3n C++", "Redes y WiFi", "Sensores I2C" }; simpCards("Educaci\xC3\xB3n", it, 4); }

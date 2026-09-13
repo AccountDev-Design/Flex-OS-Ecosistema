@@ -241,18 +241,6 @@ static void noteMenuAction(int act){
   } else if(act == FK_ACT_TRASH){
     if(p[0]){ flexFsTrash(p); noteSelIdx = -1; noteReload(); }  // a /Papelera de verdad
     else { fkTrashOpen(); return; }            // sin seleccion: abre la papelera
-  } else if(act == FK_ACT_VAULT){
-    // FLEX VAULT: la nota se cifra y se mueve DENTRO de la boveda. Deja de
-    // existir en /Notas, asi que desaparece de esta lista y solo se abre desde
-    // Flex Vault. Si la boveda esta cerrada, vaultMoveRequest se lleva la
-    // pantalla para pedir la clave y completa el movimiento despues.
-    if(p[0]){
-      noteSelIdx = -1;
-      if(vaultMoveRequest(p, FXV_KIND_NOTE)){
-        if(gState == ST_VAULT) return;         // se fue a pedir la clave
-        noteReload();
-      }
-    }
   }
   noteRenderList();
 }
@@ -317,7 +305,7 @@ static void noteListTick(){
       int x, y, w, h; noteCardRect(i, x, y, w, h);
       if(T.startX >= x && T.startX <= x + w && T.startY >= y && T.startY <= y + h){
         noteLongFired = true; noteSelIdx = i;
-        fkMenuOpenV(T.x, T.y - 40, true);   // con "Mover a Carpeta segura"
+        fkMenuOpen(T.x, T.y - 40);
         return;
       }
     }

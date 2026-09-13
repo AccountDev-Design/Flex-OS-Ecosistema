@@ -162,25 +162,23 @@ static const uint8_t APP_WEIGHT[APP_N] = {
   FLEXMEM_W_LIGHT,    // 3  Almacenamiento
   FLEXMEM_W_HEAVY,    // 4  Modo PC/DeX  (fondo compuesto + ventanas)
   FLEXMEM_W_LIGHT,    // 5  Notas
-  FLEXMEM_W_MEDIUM,   // 6  Educacion
-  FLEXMEM_W_HEAVY,    // 7  Navegador    (tarea de red + cache de fotogramas)
-  FLEXMEM_W_MEDIUM,   // 8  Code IDE
-  FLEXMEM_W_MEDIUM,   // 9  Bienestar
-  FLEXMEM_W_MEDIUM,   // 10 Paint        (trazo en PSRAM)
-  FLEXMEM_W_MEDIUM,   // 11 Juegos
-  FLEXMEM_W_LIGHT,    // 12 Ajustes
-  FLEXMEM_W_LIGHT,    // 13 Calculadora
-  FLEXMEM_W_LIGHT,    // 14 Calendario
-  FLEXMEM_W_HEAVY,    // 15 Camara       (buffer de sensor)
-  FLEXMEM_W_LIGHT,    // 16 Clima
-  FLEXMEM_W_MEDIUM,   // 17 Flex Store
-  FLEXMEM_W_LIGHT,    // 18 Flex Phone
-  // 19 Flex Device Care. En reposo no reserva nada: el detector de
+  FLEXMEM_W_HEAVY,    // 6  Navegador    (tarea de red + cache de fotogramas)
+  FLEXMEM_W_MEDIUM,   // 7  Code IDE
+  FLEXMEM_W_MEDIUM,   // 8  Paint        (trazo en PSRAM)
+  FLEXMEM_W_MEDIUM,   // 9  Juegos
+  FLEXMEM_W_LIGHT,    // 10 Ajustes
+  FLEXMEM_W_LIGHT,    // 11 Calculadora
+  FLEXMEM_W_LIGHT,    // 12 Calendario
+  FLEXMEM_W_HEAVY,    // 13 Camara       (buffer de sensor)
+  FLEXMEM_W_LIGHT,    // 14 Clima
+  FLEXMEM_W_MEDIUM,   // 15 Flex Store
+  FLEXMEM_W_LIGHT,    // 16 Flex Phone
+  // 17 Flex Device Care. En reposo no reserva nada: el detector de
   // caidas es aritmetica sobre una muestra y el historial son 200
   // bytes. Lo unico grande es la banda del aviso, y se pide al abrirlo
   // y se suelta al cerrarlo (ver FlexOS_Ultra_FallAlert.h).
   FLEXMEM_W_LIGHT,
-  // 20 Flex Compass. No reserva PSRAM: dibuja con las primitivas del sistema
+  // 18 Flex Compass. No reserva PSRAM: dibuja con las primitivas del sistema
   // y lee el mismo servicio IMU que Device Care.
   FLEXMEM_W_LIGHT
 };
@@ -477,14 +475,7 @@ static void appEnforceMemoryBudget(){
 static void appSuspend(int id, bool landscape){
   if(id < 0 || id >= APP_N) return;
   if(gAppState[id] == ALIFE_SUSPENDED) return;
-  // ESPACIO SEGURO: NI UNA CAPTURA. La miniatura se toma AQUI, antes de que
-  // corra el suspend() de la app, asi que lo que hubiera en pantalla -- una
-  // nota privada, una foto de la Carpeta segura -- acabaria en PSRAM en claro
-  // si se dejara pasar. swPushNoThumb ademas suelta la que hubiera de antes, de
-  // modo que una app que entra al espacio seguro pierde su captura anterior.
-  // Es la fuga exacta por la que Flex Vault no podia ser una app, cerrada aqui.
-  if(appTaskSecure(id))                           swPushNoThumb(id);
-  else if(landscape || (APP_REG[id].flags & APP_LAND)) swPushNoThumb(id);   // miniatura girada: mejor ninguna
+  if(landscape || (APP_REG[id].flags & APP_LAND)) swPushNoThumb(id);   // miniatura girada: mejor ninguna
   else                                            swPushAndCapture(id);
   const AppHooks* h = appHooks(id);
   if(h && h->suspend) h->suspend();
@@ -653,8 +644,8 @@ static void appClose(){
 // ABRIR O REANUDAR. Si la app estaba SUSPENDIDA y tiene hook de reanudacion, se
 // la reanuda: repinta desde su estado logico, sin pasar por enter() -- que es lo
 // que reiniciaba la nota, el lienzo o el scroll. Una app sin hook de reanudacion
-// se reconstruye con enter(), que para una pantalla realmente estatica (por
-// ejemplo Educacion) es exactamente lo correcto.
+// se reconstruye con enter(), que para una pantalla realmente estatica es
+// exactamente lo correcto.
 static void enterApp(int id){
   qsForceClose();                 // ninguna app se abre con la cortina a medias
   if(id < 0 || id >= APP_N) return;
@@ -673,10 +664,6 @@ static void enterApp(int id){
     int verdict = memAdmitApp(id);
     if(verdict != FLEXMEM_OK){ appDenyMemory(id, verdict); return; }
   }
-  // ESPACIO DE TRABAJO. Abrir CUALQUIER otra app devuelve el contexto a normal:
-  // el espacio seguro solo manda mientras su app esta en primer plano, y una
-  // app normal no puede heredar el contexto de la anterior por accidente.
-  if(id != IC_SECFOLDER) gWorkspace = FLEXWS_NORMAL;
   appLoadSessionOnce(id);
   bool resuming = (gAppState[id] == ALIFE_SUSPENDED);
   const AppHooks* h = appHooks(id);

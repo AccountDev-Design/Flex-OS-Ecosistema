@@ -17,7 +17,7 @@
 #include "FlexOS_OTA.h"
 #include "FlexOS_FS.h"
 #include "FlexOS_Browser.h"
-#include "FlexOS_Vault.h"
+#include "FlexOS_Passcode.h"
 #include "FlexOS_Weather.h"
 #include "FlexOS_Audio.h"
 #include "FlexOS_BNO085.h"
@@ -115,150 +115,13 @@ void flexBrowserKeyBackspace(){}
 void flexBrowserKeyEnter(){}
 void flexBrowserKeyCancel(){}
 
-// ---- Flex Vault (Carpeta segura) ----
-// Dobles del modulo real (FlexOS_Vault.cpp), que tiene su propia prueba
-// con criptografia y NVS de verdad: tests/host/test_vault. Aqui solo
-// hacen falta los simbolos para poder ENLAZAR y ejecutar las
-// comprobaciones que viven dentro del sketch.
-//
-// Cada doble devuelve el estado "boveda no configurada / sin
-// almacenamiento", que es el mismo camino que toma la placa cuando el
-// usuario todavia no ha creado su Flex Vault. Asi las pantallas del
-// sketch se ejercitan por su rama honesta y no por una inventada.
-// ---- DOBLE DE LA BOVEDA, CONTROLABLE DESDE LAS PRUEBAS --------------------
-// La criptografia de verdad tiene su propia bateria (test_vault, con mbedTLS y
-// NVS reales). Lo que hace falta AQUI es poder mover el estado de la boveda --
-// existe / esta abierta / la clave es correcta / hay espera -- para comprobar
-// el CABLEADO del espacio seguro: que la app pide la clave, que un fallo no
-// destruye la tarea, que salir cierra y que volver vuelve a pedirla.
-//
-// Los valores por defecto son EXACTAMENTE los de antes (no existe, cerrada,
-// sin clave), asi que ninguna prueba que ya existia cambia de resultado.
-bool        gTestVaultExists   = false;
-bool        gTestVaultUnlocked = false;
-int         gTestVaultLockType = FLEXVAULT_LOCK_PIN;
-int         gTestVaultSecretLen = 4;
-char        gTestVaultSecret[32] = "1234";
-uint32_t    gTestVaultWaitMs   = 0;
-uint32_t    gTestVaultAutoLock = 60000;
-uint32_t    gTestVaultAppMask  = 0;      // bit por app privada anadida
-uint32_t    gTestVaultAppLock  = 0;      // bit por app privada con candado
-int         gTestVaultUnlockOk = 0;      // aperturas correctas
-int         gTestVaultUnlockKo = 0;      // intentos fallidos
-int         gTestVaultLockCalls = 0;     // veces que se cerro
-int         gTestVaultLockReason = -1;   // ultimo motivo de cierre
 
-bool     flexVaultBegin(){ return false; }
-bool     flexVaultExists(){ return gTestVaultExists; }
-bool     flexVaultUnlocked(){ return gTestVaultUnlocked; }
-int      flexVaultLockType(){ return gTestVaultExists ? gTestVaultLockType : FLEXVAULT_LOCK_NONE; }
-int      flexVaultSecretLen(){ return gTestVaultLockType == FLEXVAULT_LOCK_PIN ? gTestVaultSecretLen : 0; }
-uint32_t flexVaultAutoLockMs(){ return gTestVaultAutoLock; }
-void     flexVaultSetAutoLockMs(uint32_t ms){ gTestVaultAutoLock = ms; }
-uint32_t flexVaultLastAccess(){ return 0; }
-int      flexVaultFails(){ return gTestVaultUnlockKo; }
-uint32_t flexVaultWaitMs(){ return gTestVaultWaitMs; }
-uint32_t flexVaultUsedBytes(){ return 0; }
-int      flexVaultCount(int){ return 0; }
-const char* flexVaultError(){ return "sin almacenamiento"; }
-int      flexVaultCreate(const char* s, int type){
-  if(!s || strlen(s) < 4) return FXV_ERR_ARG;
-  snprintf(gTestVaultSecret, sizeof(gTestVaultSecret), "%s", s);
-  gTestVaultLockType = type;
-  gTestVaultSecretLen = (int)strlen(s);
-  gTestVaultExists = true; gTestVaultUnlocked = true;
-  return FXV_OK;
-}
-int      flexVaultUnlock(const char* s){
-  if(!gTestVaultExists) return FXV_ERR_STATE;
-  if(gTestVaultWaitMs)  return FXV_ERR_WAIT;
-  if(!s || strcmp(s, gTestVaultSecret) != 0){ gTestVaultUnlockKo++; return FXV_ERR_WRONG; }
-  gTestVaultUnlocked = true; gTestVaultUnlockOk++; gTestVaultUnlockKo = 0;
-  return FXV_OK;
-}
-void     flexVaultLock(int reason){
-  gTestVaultUnlocked = false;
-  gTestVaultLockCalls++;
-  gTestVaultLockReason = reason;
-}
-int      flexVaultChangeSecret(const char*, const char*, int){ return FXV_ERR_STATE; }
-int      flexVaultList(int, FlexVaultItem*, int){ return 0; }
-int      flexVaultListFor(int, int, FlexVaultItem*, int){ return 0; }
-int      flexVaultCountFor(int, int){ return 0; }
-bool     flexVaultGet(uint16_t, FlexVaultItem*){ return false; }
-bool     flexVaultImport(const char*, int, int){ return false; }
-bool     flexVaultExport(uint16_t, char* out, size_t n){ if(out && n) out[0] = 0; return false; }
-bool     flexVaultDelete(uint16_t){ return false; }
-bool     flexVaultRename(uint16_t, const char*){ return false; }
-bool     flexVaultCreateItem(const char*, int, int, uint16_t*){ return false; }
-bool     flexVaultWrite(uint16_t, const void*, size_t){ return false; }
-int      flexVaultRead(uint16_t, void*, size_t){ return -1; }
-bool     flexVaultReadStream(uint16_t, FlexVaultChunkCb, void*){ return false; }
-bool     flexVaultAppSupported(int appId){ return appId == 1 || appId == 3 || appId == 5; }
-const char* flexVaultAppReason(int appId){ return flexVaultAppSupported(appId) ? 0 : "Esta app aun no es compatible con Carpeta segura"; }
-bool     flexVaultAppForbidden(int appId){ return appId == 12 || appId == 4; }
-bool     flexVaultAppAdded(int id){
-  return id >= 0 && id < 32 && (gTestVaultAppMask & (1u << id)) != 0;
-}
-bool     flexVaultAppAdd(int id){
-  if(id < 0 || id >= 32 || !flexVaultAppSupported(id) || !gTestVaultUnlocked) return false;
-  gTestVaultAppMask |= (1u << id);
-  return true;
-}
-bool     flexVaultAppRemove(int id, int){
-  if(id < 0 || id >= 32 || !gTestVaultUnlocked) return false;
-  gTestVaultAppMask &= ~(1u << id);
-  gTestVaultAppLock &= ~(1u << id);
-  return true;
-}
-bool     flexVaultAppLocked(int id){
-  return id >= 0 && id < 32 && (gTestVaultAppLock & (1u << id)) != 0;
-}
-void     flexVaultAppSetLocked(int id, bool on){
-  if(id < 0 || id >= 32) return;
-  if(on) gTestVaultAppLock |=  (1u << id);
-  else   gTestVaultAppLock &= ~(1u << id);
-}
-uint32_t flexVaultAppBytes(int){ return 0; }
-uint32_t flexVaultAppLast(int){ return 0; }
-void     flexVaultAppTouch(int){}
-int      flexVaultLogRead(FlexVaultLog*, int){ return 0; }
-void     flexVaultLogAdd(uint8_t, int8_t){}
-void     flexVaultSetClock(uint32_t){}
-uint32_t flexVaultNow(){ return 0; }
-void     flexVaultRandomBytes(void* out, size_t n){ if(out) memset(out, 0, n); }
-void     flexVaultKdf(const char*, const uint8_t*, size_t, uint32_t, uint8_t* out, size_t n){ if(out) memset(out, 0, n); }
-bool     flexVaultEqualCT(const void* a, const void* b, size_t n){ return memcmp(a, b, n) == 0; }
-void     flexVaultWipe(void* p, size_t n){ if(p) memset(p, 0, n); }
-
-// El bloqueo del sistema con hash y sal tambien vive en ese modulo.
-// El doble se comporta como "sin clave configurada".
-int      flexLockType(){ return 0; }
-int      flexLockLen(){ return 0; }
-bool     flexLockSet(const char*, int){ return false; }
-bool     flexLockVerify(const char*){ return false; }
-bool     flexLockClear(){ return false; }
-int      flexLockMigrate(){ return 0; }
-
-// Sistema de archivos: piezas nuevas que necesita la boveda.
+// Sistema de archivos: lectura parcial y limpieza de restos.
+// FlexOS_Passcode.cpp entra en el enlace como CODIGO REAL (ver el Makefile),
+// asi que la clave del sistema NO lleva doble: el sketch se enlaza contra el
+// mismo PBKDF2 a plazos que corre en la placa.
 int      flexFsReadAt(const char*, uint32_t, void*, size_t){ return -1; }
-bool     flexFsAppendBin(const char*, const void*, size_t){ return false; }
-bool     flexFsVaultInit(){ return false; }
-bool     flexFsPrivExists(const char*){ return false; }
-uint32_t flexFsPrivSize(const char*){ return 0; }
-int      flexFsPrivRead(const char*, uint32_t, void*, size_t){ return -1; }
-bool     flexFsPrivAppend(const char*, const void*, size_t){ return false; }
-bool     flexFsPrivWrite(const char*, const void*, size_t){ return false; }
-bool     flexFsPrivDelete(const char*){ return false; }
-uint32_t flexFsPrivDirSize(const char*){ return 0; }
-bool     flexFsIsVaultPath(const char* path){
-  if(!path || path[0] != '/') return false;
-  size_t vl = strlen(FLEXFS_DIR_VAULT);
-  if(strncmp(path, FLEXFS_DIR_VAULT, vl) != 0) return false;
-  return path[vl] == 0 || path[vl] == '/';
-}
-bool     flexPaintReplayMem(const void*, size_t, float, int, int, FlexPaintSegCb, void*){ return false; }
-bool     flexPaintHeaderMem(const void*, size_t, FlexPaintHdr*){ return false; }
+bool     flexFsPurgeLegacyVault(){ return false; }
 
 // ---- Clima (motor meteorologico) ----
 // El doble devuelve "sin datos", que es EXACTAMENTE el camino que toma la

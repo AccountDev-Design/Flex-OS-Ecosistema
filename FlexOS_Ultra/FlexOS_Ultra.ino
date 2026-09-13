@@ -167,13 +167,11 @@
 // FlexOS_FS.cpp -- comun a las tres placas -- para no tener tres copias de
 // lo mismo que se desincronicen. Aqui solo se dibuja.
 #include "FlexOS_FS.h"
-// FLEX VAULT (Carpeta segura). Trae ademas el hash con sal del bloqueo
-// del sistema: el PIN y la contrasena de la pantalla de bloqueo ya no se
-// guardan en texto legible. Ver FlexOS_Vault.h.
-#include "FlexOS_Vault.h"
-// Decodificador JPEG (ya en el proyecto, lo usa el navegador). Flex Vault lo
-// necesita para poder ENSENAR una foto privada sin escribirla en claro: se
-// decodifica desde el buffer descifrado que vive en RAM.
+// CLAVE DEL SISTEMA. El PIN y la contrasena de la pantalla de bloqueo se
+// guardan como sal + PBKDF2-HMAC-SHA256, nunca en texto legible, y su
+// verificacion corre A PLAZOS para no parar el bucle. Ver FlexOS_Passcode.h.
+#include "FlexOS_Passcode.h"
+// Decodificador JPEG (ya en el proyecto, lo usa el navegador y la Galeria).
 #include "FlexOS_JPEG.h"
 
 // NAVEGADOR REAL. La app 7 deja de ser una maqueta: la interfaz, las
@@ -249,7 +247,7 @@
 #include "FlexOS_Ultra_AppFramework.h"       // marco de app, transiciones, nav inferior y ciclo de vida
 #include "FlexOS_Ultra_Core.h"               // memoria, multitarea, los tres botones y rendimiento
 #include "FlexOS_Ultra_AppSettings.h"        // app Ajustes
-#include "FlexOS_Ultra_AppsBasic.h"          // Calculadora, Calendario, Bienestar y marco de Galeria
+#include "FlexOS_Ultra_AppsBasic.h"          // Calculadora, Calendario y marco de Galeria
 #include "FlexOS_Ultra_DeX.h"                // Modo PC / DeX: modelo y estado
 #include "FlexOS_Ultra_DeXDraw.h"            // Modo PC / DeX: dibujo
 #include "FlexOS_Ultra_DeXInput.h"           // Modo PC / DeX: entrada, APP_REG y ciclo de vida
@@ -282,7 +280,6 @@
 #include "FlexOS_Ultra_AppChrono.h"          // cronometro: app, capsula y tarjeta
 #include "FlexOS_Ultra_System.h"             // I2C, soltar caches, Optimizar Flex OS y cambio de tema
 #include "FlexOS_Ultra_AppGallery.h"         // Galeria
-#include "FlexOS_Ultra_Vault.h"              // Flex Vault: interfaz de la Carpeta segura
 #include "FlexOS_Ultra_IMU.h"                // Flex IMU Service: reparto del GY-BNO085 y orientacion
 #include "FlexOS_Ultra_DeviceCare.h"         // Flex Device Care: app, historial, salud y grafico del GY-BNO085
 #include "FlexOS_Ultra_DeviceTests.h"        // Device Care: pruebas, diagnostico y Post-Impact Check
@@ -291,7 +288,6 @@
 #include "FlexOS_Ultra_AppCompass.h"         // Flex Compass: brujula sobre el servicio IMU
 #include "FlexOS_Ultra_Theft.h"              // Proteccion contra robo: clasificador, eventos y bloqueo
 #include "FlexOS_Ultra_TheftUI.h"            // Proteccion contra robo: pantallas y animacion
-#include "FlexOS_Ultra_SecureFolder.h"      // Carpeta segura: el espacio seguro como app del sistema
 // ------------- FIN DE LOS MODULOS -------------------------
 
 // Puente del modulo OTA. Va AQUI, y no arriba, a proposito: implementa
@@ -392,7 +388,7 @@ void setup(){
   // Es una migracion en tres pasos (escribir el hash, comprobar que valida
   // la misma clave, y solo entonces borrar el texto legible), asi que un
   // fallo a mitad deja el telefono abriendose con la clave de siempre en
-  // vez de dejar al usuario fuera. Ver flexLockMigrate en FlexOS_Vault.h.
+  // vez de dejar al usuario fuera. Ver flexLockMigrate en FlexOS_Passcode.h.
   if(!gFrPending){
     int mg = flexLockMigrate();
     if(mg > 0)      Serial.println(F("[SEG] clave del bloqueo migrada a hash con sal"));
@@ -433,19 +429,31 @@ void setup(){
   tpBegin();
 
   // Una recuperacion interrumpida solo necesita pantalla, tactil, NVS y FS.
-  // No se cargan cuenta, boveda, tienda, navegador ni red antes de terminar.
+  // No se cargan cuenta, tienda, navegador ni red antes de terminar.
   if(gFrPending){ setBacklight(gBright); frResumeAfterBoot(); return; }
+
+  // RESTOS DE LA CARPETA SEGURA RETIRADA. Una sola vez por aparato: el
+  // directorio de blobs cifrados de aquella funcion ya no lo puede abrir nadie
+  // (no queda ni interfaz ni codigo que sepa descifrarlo), asi que se borra en
+  // vez de ocupar flash para siempre y aparecer en el explorador de archivos.
+  // La marca va en NVS: en el segundo arranque esto ya no toca el disco.
+  if(!gSafeMode && flexFsReady()){
+    Preferences pv;
+    pv.begin("flexos", false);
+    if(pv.getInt("fxvpurge", 0) != 1){
+      bool had = flexFsPurgeLegacyVault();
+      pv.putInt("fxvpurge", 1);
+      if(had) Serial.println(F("[FS] restos de la Carpeta segura retirada: borrados"));
+    }
+    pv.end();
+  }
 
   if(!gSafeMode){
     flexStoreBegin();       // crea la tarea de fondo; no abre WiFi ni descarga en setup()
     flexAccountBegin();     // carga la cuenta local y crea su tarea; no toca la radio
   }
 
-  // FLEX VAULT. Solo carga el sobre de la clave y los contadores de NVS:
-  // la boveda arranca SIEMPRE cerrada y no se descifra nada aqui. Necesita
-  // el sistema de archivos montado, por eso va justo despues.
   if(!gSafeMode){
-    flexVaultBegin();
     connBootRestore();            // modo avion guardado (solo lee NVS, no toca radio)
     flexWeatherBegin();           // ubicaciones y cache + tarea de red
     // FLEX PHONE: solo carga el historial guardado y deja el enlace
@@ -810,7 +818,6 @@ void loop(){
     case ST_KBSET:            kbsTick(); break;     // FASE E: Ajustes del teclado
     case ST_CONN:             connTick(); break;    // Conectividad: Wifi / BLE / Modo avion
     case ST_FILES:            filesTick(); break;   // Explorador de archivos real
-    case ST_VAULT:            vaultTick(); break;          // Flex Vault (Carpeta segura)
     case ST_DRAWER:           drawerTick(); break;         // Caja de aplicaciones (One UI)
     case ST_HOMECFG:          hcTick(); break;             // Personalizar inicio
     case ST_THEFT:            theftTick(); break;          // Proteccion contra robo
@@ -875,8 +882,8 @@ void loop(){
 //            marco estandar (estado + cabecera "atras" + nav), registro
 //            APP_REG enchufable, gestos de cierre. App de referencia: Reloj.
 //    [PENDIENTE] Rellenar el resto (reemplazar entradas de APP_REG):
-//      Galeria, Multimedia, Almacenamiento, Modo PC, Notas, Educacion,
-//      Navegador, Code IDE, Bienestar, Paint, Juegos, Calculadora,
+//      Galeria, Multimedia, Almacenamiento, Modo PC, Notas,
+//      Navegador, Code IDE, Paint, Juegos, Calculadora,
 //      Calendario, Camara.
 //
 //  Milestone 3 — Ajustes (imagen 3): [HECHO] dos paneles (barra lateral

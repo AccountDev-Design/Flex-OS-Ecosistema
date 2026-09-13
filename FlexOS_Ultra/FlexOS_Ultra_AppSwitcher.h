@@ -230,10 +230,6 @@ static void swCardFrame(int x, int y, int w, int h, int rad){
 // responde a una pregunta que el usuario SI se hace al mirar la tarjeta:
 // "¿esto sigue como lo deje?".
 static const char* swStateName(int id){
-  // Una tarea del espacio seguro no dice si esta "activa" ni si tiene "estado
-  // guardado": eso ya seria contar algo de lo que hay dentro. Dice lo unico
-  // cierto y publico -- que esta protegida y que hara falta la clave.
-  if(appTaskSecure(id)) return "Protegida";
   if(gAppState[id] == ALIFE_RUNNING || gAppState[id] == ALIFE_RESUMING) return "Activa";
   return gAppShed[id] ? "Estado guardado" : "Pausada";
 }
@@ -264,49 +260,18 @@ static void swDrawToast(){
 
 // ---- Contenido de UNA tarjeta (lo comparten la animacion de entrada y el
 // ---- repintado por cuadro, para que no puedan dibujar cosas distintas) ----
-// #############################################################
-// ##  TARJETA DEL ESPACIO SEGURO  ·  la privacidad se ve, no se adivina
-// ##  ------------------------------------------------------
-// ##  Una tarea de la Carpeta segura NUNCA tiene miniatura: appSuspend la
-// ##  manda a la lista por swPushNoThumb y ademas suelta la que hubiera, asi
-// ##  que ni un pixel de lo que habia en pantalla llega a PSRAM. No es que se
-// ##  tape una captura al dibujar -- es que la captura no existe, que es la
-// ##  unica forma de que no pueda aparecer por otro camino (la ficha de
-// ##  detalle, la animacion de entrada, un volcado de memoria).
-// ##
-// ##  Lo que se dibuja en su lugar es lo unico que se puede saber de esa tarea
-// ##  desde fuera: que es la Carpeta segura y que su contenido esta protegido.
-// ##  Ni el nombre de la seccion abierta, ni el del elemento, ni cuantos hay.
-// #############################################################
-static void swDrawSecureCard(int x, int y, int cw, int ch){
-  int iw = cw - 16, ih = ch - 76;
-  fillRoundRect(x + 8, y + 8, iw, ih, 14, TH_SURF2);
-  int cx = x + cw / 2, cy = y + 8 + ih / 2 - 26;
-  // Candado cerrado, el mismo lenguaje que la cabecera de la Carpeta segura.
-  fillRoundRect(cx - 21, cy, 42, 32, 7, TH_MUTE);
-  arcStroke(cx, cy, 13, 180, 360, 5, TH_MUTE);
-  fillCircle(cx, cy + 16, 4, TH_SURF2);
-  drawTextC(cx, cy + 56, "Carpeta segura", 2, TH_TXT2);
-  drawTextC(cx, cy + 80, "Contenido protegido", 1, TH_MUTE);
-}
-
 static void swDrawCard(int i, int x, int y, int cw, int ch){
   int id = swTasks[i].appID;
   swCardFrame(x, y, cw, ch, 22);
   int iw = cw - 16, ih = ch - 76;
-  if(appTaskSecure(id))     swDrawSecureCard(x, y, cw, ch);
-  else if(swTasks[i].thumb) blitThumbScaled(swTasks[i].thumb, x + 8, y + 8, iw, ih);
+  if(swTasks[i].thumb)      blitThumbScaled(swTasks[i].thumb, x + 8, y + 8, iw, ih);
   else { fillRoundRect(x + 8, y + 8, iw, ih, 14, TH_SURF2);
          drawAppIcon(id, x + cw / 2 - 30, y + ih / 2 - 22, 60); }
   // Nombre + punto de "cambios sin guardar". El punto es DISCRETO a proposito:
   // informa sin gritar, y solo aparece cuando la marca de sesion desfasada (o
   // la propia app) dice que hay algo sin escribir.
   const char* nm = appName(id);
-  // El punto de cambios sin guardar no se pinta en una tarea protegida: la
-  // Carpeta segura guarda CIFRADO al cerrarse (una nota privada a medias se
-  // escribe antes de tirar la clave), asi que nunca hay nada pendiente que
-  // anunciar -- y anunciarlo seria contar que alguien estaba escribiendo.
-  bool dirty = !appTaskSecure(id) && appUnsaved(id);
+  bool dirty = appUnsaved(id);
   int nw = textW(nm, 2);
   int nx = x + (cw - nw) / 2;
   if(dirty){
@@ -501,11 +466,6 @@ static void swMaximize(int idx){ if(idx >= 0 && idx < swCount) enterApp(swTasks[
 // Congela la app activa, cambia a MODO_MULTITAREA y hace la animacion elastica de entrada.
 static void activarMultitarea(){
   if(KIOSK_ON && kioskOn) return;             // FASE 4: sin selector de apps en kiosco
-  // FLEX VAULT: entrar en Recientes cierra la boveda. No es solo por politica:
-  // el selector CAPTURA el ultimo cuadro de lo que hubiera en pantalla, asi que
-  // llegar aqui con la boveda abierta es justo el camino por el que una
-  // miniatura privada acabaria en PSRAM.
-  vaultLockFromSystem(FXV_LOCK_EXIT);
   if(gHosted){ gHostReq = 3; return; }        // -> Recientes de DeX
   // Red de seguridad igual que en appClose: el selector se dibuja en portrait.
   // Si se llegara aqui con gLand=true, las tarjetas saldrian rotadas y a medias.

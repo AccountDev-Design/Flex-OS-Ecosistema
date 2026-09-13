@@ -81,13 +81,13 @@ static const char* SET_CAT[12] = {
   "Desarrollador","Sistema","Acerca de" };
 static const char* SET_SUB[12] = {
   "Idioma, fecha, hora","Brillo, fondo, tema","Volumen, tonos","WiFi, Bluetooth",
-  "GPIO, perifericos","Temas, iconos","Bloqueo, Carpeta segura, permisos","Ahorro de energia",
+  "GPIO, perifericos","Temas, iconos","Bloqueo y permisos","Ahorro de energia",
   "Interna, SD","Opciones dev","Sistema, logs","Version, creditos" };
 static const char* SET_DESC[12] = {
   "Configura las opciones basicas del sistema.","Brillo, fondo de pantalla y modo oscuro.",
   "Volumen, tonos y notificaciones.","Conexiones de red (offline por ahora).",
   "GPIO, modulos y perifericos.","Temas, iconos y estilo del sistema.",
-  "Bloqueo, Carpeta segura, permisos y privacidad.","Estado de la bateria y ahorro de energia.",
+  "Bloqueo, permisos y privacidad.","Estado de la bateria y ahorro de energia.",
   "Memoria interna y tarjeta SD.","Herramientas y diagnostico de desarrollo.",
   "Informacion del sistema y registros.","Version, hardware y creditos de FlexOS." };
 
@@ -360,14 +360,6 @@ static void settingsDetailContent(int cat){
     const char* lt = gLockType == 1 ? "PIN configurado" : gLockType == 2 ? "Contrase\xC3\xB1" "a configurada" : "Deslizar";
     y = setRowCard(y, RI_DOT, rgb565(220,120,120), "Bloqueo", lt, true);
     y = setRowCard(y, RI_CLOCK, rgb565(120,150,235), "Bloqueo de inactividad", autoLockName(), true);
-    // FLEX VAULT (Carpeta segura). El subtitulo dice el estado REAL de la
-    // boveda; nunca cuantos elementos tiene ni sus nombres -- eso solo se ve
-    // dentro, con la clave delante.
-    // CARPETA SEGURA. La fila es un ENLACE a la app, no una copia de ella: el
-    // subtitulo dice el estado REAL del espacio -- nunca cuantos elementos tiene
-    // ni sus nombres, que solo se ven dentro y con la clave delante.
-    { char vv[64]; vaultStatusText(vv, sizeof(vv));
-      y = setRowCard(y, RI_PIN, rgb565(150,110,220), "Carpeta segura", vv, true); }
     // PROTECCION CONTRA ROBO. El subtitulo dice el estado REAL de la funcion,
     // y con el modulo ausente lo dice tal cual en vez de ofrecer un
     // interruptor que no podria monitorizar nada.
@@ -677,10 +669,9 @@ static void settingsRowAction(int cat, int idx){
       cfgSavePrefs();
       settingsRenderDetailOnly();
     }
-    else if(idx == 2) vaultSettingsEnter();                                              // Seguridad y privacidad -> abre la app Carpeta segura
-    else if(idx == 3) theftEnter();                                                      // Seguridad -> Proteccion contra robo
+    else if(idx == 2) theftEnter();                                                      // Seguridad -> Proteccion contra robo
 #if POWEROFF_ON && POWEROFF_PIN_ON
-    else if(idx == 4){                                                                   // Seguridad -> Apagado seguro
+    else if(idx == 3){                                                                   // Seguridad -> Apagado seguro
       // Sin PIN/contrasena configurada no hay nada que pedir: activarlo seria una
       // proteccion de mentira. Se deja tal cual y la fila ya avisa ("Configura
       // antes un PIN").

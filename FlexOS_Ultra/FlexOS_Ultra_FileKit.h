@@ -49,19 +49,12 @@
 #define FK_ACT_DEL    1
 #define FK_ACT_REN    2
 #define FK_ACT_TRASH  3
-// FLEX VAULT: quinta accion OPCIONAL. Solo la ofrecen las pantallas que
-// manejan un elemento concreto y movible (Galeria, Notas, Archivos, Paint), y
-// solo cuando la boveda tiene sentido ahi. El menu sigue teniendo cuatro filas
-// en el resto de sitios: fkMenuN decide cuantas hay, asi que anadirla no
-// cambia ni la geometria ni el comportamiento de las pantallas que no la piden.
-#define FK_ACT_VAULT  4
 #define FK_MENU_W    272
 #define FK_MENU_RH    46
 #define FK_MENU_PAD   10
 
-static const char* FK_MENU_LBL[5] = { "Seleccionar", "Eliminar", "Renombrar", "Papelera",
-                                      "Mover a Carpeta segura" };
-static int fkMenuN = 4;                 // filas del menu abierto (4 o 5)
+static const char* FK_MENU_LBL[4] = { "Seleccionar", "Eliminar", "Renombrar", "Papelera" };
+static const int fkMenuN = 4;           // filas del menu
 
 // ---- Texto ajustado a una caja (para la vista previa REAL de una nota) ----
 // Corta por caracteres, no por palabras, a proposito: el contenido de una nota
@@ -114,11 +107,6 @@ static void fkMenuGlyph(int k, int cx, int cy){
     drawRoundRect(cx - 8, cy - 8, 16, 20, 3, w);
     fillRect(cx - 3, cy - 4, 2, 12, w);
     fillRect(cx + 1, cy - 4, 2, 12, w);
-  } else {                                              // candado cerrado (Flex Vault)
-    uint16_t v = rgb565(120,80,190);
-    fillRoundRect(cx - 10, cy - 3, 20, 16, 4, v);
-    arcStroke(cx, cy - 3, 6, 180, 360, 3, v);
-    fillCircle(cx, cy + 5, 2, rgb565(255,255,255));
   }
 }
 
@@ -141,24 +129,13 @@ static void fkMenuDraw(){
   else        fillRoundRect(x, y, w, h, 18, rgb565(206,210,218));
   for(int i = 0; i < fkMenuN; i++){
     int ry = y + FK_MENU_PAD + i * FK_MENU_RH;
-    // La fila de la boveda va con su color, para que no se confunda con
-    // "Papelera": una lleva el elemento a un sitio del que se recupera, la otra
-    // lo saca del sistema de archivos normal.
-    uint16_t tc = (i == FK_ACT_VAULT) ? rgb565(90,50,160) : rgb565(16,18,24);
-    drawTextClip(x + 16, ry + 10, FK_MENU_LBL[i], (i == FK_ACT_VAULT) ? 2 : 3, tc, x + w - 42);
+    drawTextClip(x + 16, ry + 10, FK_MENU_LBL[i], 3, rgb565(16,18,24), x + w - 42);
     fkMenuGlyph(i, x + w - 32, ry + FK_MENU_RH / 2);
   }
   flxFlush(y - 2, y + h + 2);
 }
 
-// La version de siempre: cuatro filas, sin Flex Vault. La usan las pantallas
-// que no mueven contenido (y asi no cambia nada de lo que ya funcionaba).
-static void fkMenuOpen(int px, int py){ fkMenuOn = true; fkMenuN = 4; fkMenuX = px; fkMenuY = py; fkMenuDraw(); }
-// Con la quinta fila. `withVault` lo decide quien llama: solo tiene sentido si
-// hay un elemento concreto seleccionado y es un fichero (no una carpeta).
-static void fkMenuOpenV(int px, int py, bool withVault){
-  fkMenuOn = true; fkMenuN = withVault ? 5 : 4; fkMenuX = px; fkMenuY = py; fkMenuDraw();
-}
+static void fkMenuOpen(int px, int py){ fkMenuOn = true; fkMenuX = px; fkMenuY = py; fkMenuDraw(); }
 
 // -1 = toque fuera del panel (cierra sin accion); 0..fkMenuN-1 = accion elegida.
 static int fkMenuHit(int px, int py){

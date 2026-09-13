@@ -279,13 +279,6 @@ static bool dexMatch(const char* name, const char* q, int qn){
 static int dexFilterApps(int* out, int maxn){
   int n = 0;
   for(int i = 0; i < APP_N && n < maxn; i++){
-    // CARPETA SEGURA fuera del buscador del escritorio. No es un filtro
-    // cosmetico: una ventana de DeX compone el contenido de la app dentro del
-    // escritorio COMPARTIDO -- con su barra de titulo, su miniatura y su
-    // composicion de fondo --, y ahi no puede acabar contenido privado. La app
-    // ademas se niega a abrirse hospedada (ver secfEnter), asi que ofrecerla
-    // aqui solo serviria para ensenar un error.
-    if(i == IC_SECFOLDER) continue;
     if(dexMatch(appName(i), dexQuery, dexQLen)) out[n++] = i;
   }
   return n;

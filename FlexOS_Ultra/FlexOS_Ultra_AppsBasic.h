@@ -1,5 +1,5 @@
 // #############################################################
-// ##  FLEX OS ULTRA  ·  APPS BASICAS: Calculadora, Calendario, Bienestar y Galeria
+// ##  FLEX OS ULTRA  ·  APPS BASICAS: Calculadora, Calendario y Galeria
 // ##  ----------------------------------------------------------
 // ##  Las apps que usan el marco estandar sin logica pesada propia. El
 // ##  cuerpo real de Galeria vive en FlexOS_Ultra_AppGallery.h.
@@ -320,7 +320,7 @@ static void calcLoadSess(){
 }
 
 // #############################################################
-// ##  APPS M2: Calendario, Bienestar, Galeria (marco estandar)
+// ##  APPS M2: Calendario y Galeria (marco estandar)
 // #############################################################
 
 // ---- Calendario: vista de mes con el dia de hoy resaltado ----
@@ -391,65 +391,6 @@ static void calEnter(){ calRender(); }
 static void calResume(){ calRender(); }
 static void calTick(){ if(gMinChanged) calRender(); }
 
-// ---- Bienestar: tiempo encendido + uso de memoria ----
-// BIENESTAR · adaptativo.
-//   Esencial   : tiempo encendido + barra de PSRAM.
-//   Opcional 1 : columna derecha con RAM interna y frecuencia -- aparece
-//                cuando el lienzo pasa de 400 px de ancho (dos columnas de
-//                >= 190 px, que es lo minimo para que la etiqueta y el valor
-//                no se pisen).
-//   Opcional 2 : pie de consejo -- aparece si sobran >= 20 px al fondo.
-static void bienRender(){
-  setBuf(fb);
-  int bx0, by, bw0, bh; uiBox(bx0, by, bw0, bh);
-  fillRect(bx0, by, bw0, bh, WIN_BG);
-  int pad = uiPad(), gap = uiGap();
-  int y = by + pad;
-  y = uiTitle(bx0, y, bw0, "Bienestar del equipo", TH_TXT, uiFontH(bh / 12));
-  char up[40]; buildUptime(up, sizeof(up));
-  int fsUp = uiFontFit(up, bw0 - 2 * pad, uiFontH(bh / 6));
-  drawTextC(bx0 + bw0 / 2, y, up, fsUp, TH_ACCS);
-  y += uiLineH(fsUp) + 2;
-  drawTextC(bx0 + bw0 / 2, y, "tiempo encendido", uiFontFit("tiempo encendido", bw0 - 2 * pad, 2), TH_TXT2);
-  y += uiLineH(2) + gap;
-
-  size_t pf = heap_caps_get_free_size(MALLOC_CAP_SPIRAM), pt = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
-  int usedp = pt > 0 ? (int)(100 - (uint64_t)pf * 100 / pt) : 0;
-  char v[40];
-  uint8_t aCol = uiSection(0, bw0 >= 400);
-  int colW = aCol ? (bw0 - 2 * pad - gap) / 2 : (bw0 - 2 * pad);
-  int cx1 = bx0 + pad;
-  int barH = bh / 16; if(barH < 10) barH = 10; if(barH > 20) barH = 20;
-  int fsL = uiFontFit("RAM interna libre", colW / 2, 2);
-  drawText(cx1, y, "PSRAM", fsL, TH_TXT);
-  snprintf(v, sizeof(v), "%d%% en uso", usedp);
-  drawTextR(cx1 + colW, y, v, fsL, TH_TXT2);
-  int barY = y + uiLineH(fsL) + 6;
-  fillRoundRect(cx1, barY, colW, barH, barH / 2, TH_TRACK);                        // track apagado
-  fillRoundRect(cx1, barY, colW * usedp / 100, barH, barH / 2, TH_OK);             // relleno: estado
-  if(aCol){
-    int cx2 = cx1 + colW + gap;
-    uiText(cx2, y, "RAM interna", fsL, TH_TXT, aCol);
-    snprintf(v, sizeof(v), "%u KB", (unsigned)(esp_get_free_heap_size() / 1024));
-    uiTextR(cx2 + colW, y, v, fsL, TH_TXT2, aCol);
-    int fr = (int)getCpuFrequencyMhz();
-    uiRectA(cx2, barY, colW, barH, barH / 2, TH_TRACK, aCol);
-    int pctF = fr > 360 ? 100 : fr * 100 / 360;
-    uiRectA(cx2, barY, colW * pctF / 100, barH, barH / 2, TH_PRIM, aCol);
-    snprintf(v, sizeof(v), "CPU %d MHz", fr);
-    uiText(cx2, barY + barH + 6, v, uiFontFit(v, colW, 2), TH_TXT2, aCol);
-  }
-  y = barY + barH + uiLineH(2) + gap;
-  uint8_t aFoot = uiSection(1, (by + bh) - y - pad >= 20);
-  if(aFoot){
-    const char* tip = "Recuerda descansar la vista";
-    uiTextC(bx0 + bw0 / 2, by + bh - pad - uiLineH(2), tip,
-            uiFontFit(tip, bw0 - 2 * pad, 2), TH_MUTE, aFoot);
-  }
-  flxFlush(WIN_TOP, WIN_BOT);
-}
-static void bienEnter(){ bienRender(); }
-static void bienTick(){ if(gMinChanged) bienRender(); }
 
 // ---- Galeria: cuadricula de miniaturas (mini-paisajes generados) ----
 // GALERIA · adaptativa.

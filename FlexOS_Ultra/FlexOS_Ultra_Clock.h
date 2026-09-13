@@ -120,15 +120,9 @@ static uint32_t clkNowUtc(){
 static void clkSetEpoch(uint32_t utc){
   clkEpochRef = utc; clkRefMs = millis(); clkAnchored = true;
   clkLastMin = -1;                    // fuerza el repintado del minuto
-  // FLEX VAULT: el modulo de la boveda no sabe la hora (no toca la red ni
-  // el reloj). Se la damos aqui, en el UNICO punto por el que pasan la
-  // semilla, NVS y NTP, para que el registro de seguridad y los "ultimo
-  // acceso" lleven una hora de verdad. Si el reloj nunca se ancla, la
-  // boveda ensena "sin hora" en vez de inventarse una fecha.
-  flexVaultSetClock(utc);
-  // Lo mismo para el motor del clima: con una hora real puede decir "hace 34
-  // min" incluso con una cache traida de NVS tras un reinicio, en vez de
-  // limitarse a la hora de observacion.
+  // MOTOR DEL CLIMA: con una hora real puede decir "hace 34 min" incluso con
+  // una cache traida de NVS tras un reinicio, en vez de limitarse a la hora de
+  // observacion.
   flexWeatherSetClock(utc);
 }
 // Ancla de fabrica: la misma fecha y hora que sembraba la version anterior.
