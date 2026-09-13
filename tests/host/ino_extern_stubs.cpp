@@ -132,7 +132,15 @@ void               flexWeatherBegin(){}
 void               flexWeatherTick(bool){}
 void               flexWeatherRefresh(bool){}
 void               flexWeatherSetClock(uint32_t){}
-const FlexWeather* flexWeatherData(){ return nullptr; }
+// DOBLE CONTROLABLE. Por defecto sigue siendo "sin datos" -- el camino que
+// toma la placa cuando aun no hay descarga valida, y el que recorrian todas las
+// pruebas que ya existian --, pero una prueba puede rellenar gTestWx y encender
+// gTestWxOn para ejercitar la app con un pronostico de verdad: las tarjetas, el
+// horario, los siete dias y la escena. Sin esto no se puede medir en el PC lo
+// que de verdad cuesta un cuadro de Clima.
+FlexWeather gTestWx;
+bool        gTestWxOn = false;
+const FlexWeather* flexWeatherData(){ return gTestWxOn ? &gTestWx : nullptr; }
 uint32_t           flexWeatherGen(){ return 0; }
 uint8_t            flexWeatherStatus(){ return WXS_NEVER; }
 uint8_t            flexWeatherError(){ return WXE_NONE; }

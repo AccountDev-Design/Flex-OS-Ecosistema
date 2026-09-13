@@ -61,6 +61,17 @@ static inline int wxScrollMax(){
   return m > 0 ? m : 0;
 }
 
+// CACHES POR PUBLICACION DEL MOTOR. Las dos cosas que la cabecera y el panel
+// horario necesitaban recalcular en cada cuadro -- la frase descriptiva y el
+// rango de temperaturas de las 48 horas -- solo cambian cuando el motor publica
+// datos nuevos. Se guardan con la generacion que las produjo: mientras no
+// cambie, no se vuelve a hacer el trabajo.
+static char     wxDesc[160]  = "";
+static uint32_t wxDescGen    = 0xFFFFFFFFu;
+static uint8_t  wxDescLang   = 0xFF;
+static uint32_t wxGraphGen   = 0xFFFFFFFFu;
+static int      wxGraphMin   = 32767, wxGraphMax = -32768;
+
 // Progreso de la animacion de entrada por seccion (fundido + subida).
 // Escalonado: la cabecera entra primero y las tarjetas van detras, como
 // en One UI. Cuando termina, devuelve 255 y desplazamiento 0 -- a partir
@@ -157,10 +168,15 @@ static void wxDrawHero(int y0, int y1){
     wxDrawTemp(ex + 8, ty + 34, w->feels, 2, sub, a);
   }
 
-  // Frase generada con datos reales (weather_code + viento + minima...)
-  char desc[160];
-  flexWeatherDescribe(desc, sizeof(desc), cfgLang);
-  if(desc[0]) wxWrapText(28, base + 402, SCR_W - 56, desc, 2, sub, a, 22, 2, true);
+  // Frase generada con datos reales (weather_code + viento + minima...). Se
+  // genera UNA vez por publicacion del motor y por idioma, no por cuadro:
+  // construirla es formateo de cadenas, y eso no tiene nada que hacer dentro
+  // del camino de dibujo de un arrastre.
+  if(wxDescGen != flexWeatherGen() || wxDescLang != cfgLang){
+    flexWeatherDescribe(wxDesc, sizeof(wxDesc), cfgLang);
+    wxDescGen = flexWeatherGen(); wxDescLang = (uint8_t)cfgLang;
+  }
+  if(wxDesc[0]) wxWrapText(28, base + 402, SCR_W - 56, wxDesc, 2, sub, a, 22, 2, true);
 }
 
 // #############################################################
@@ -177,15 +193,21 @@ static void wxDrawHourly(int y0, int y1){
   int ix = WX_CARD_X + WX_HOUR_PAD, iw = WX_CARD_W - 2 * WX_HOUR_PAD;
   int n  = w->hourCount;
 
-  // Rango de la grafica: minimo y maximo REALES de las 48 horas. La forma
-  // de la curva sale de los datos, no de una tabla dibujada a mano.
-  int tmin = 32767, tmax = -32768;
-  for(int i = 0; i < n; i++){
-    int16_t t = w->hours[i].temp10;
-    if(t == WX_NOVAL_I16) continue;
-    if(t < tmin) tmin = t;
-    if(t > tmax) tmax = t;
+  // Rango de la grafica: minimo y maximo REALES de las 48 horas. La forma de la
+  // curva sale de los datos, no de una tabla dibujada a mano. Se calcula UNA vez
+  // por publicacion del motor: recorrer 48 horas en cada cuadro de un arrastre
+  // es trabajo que no cambia nada.
+  if(wxGraphGen != flexWeatherGen()){
+    int lo = 32767, hi = -32768;
+    for(int i = 0; i < n; i++){
+      int16_t t = w->hours[i].temp10;
+      if(t == WX_NOVAL_I16) continue;
+      if(t < lo) lo = t;
+      if(t > hi) hi = t;
+    }
+    wxGraphMin = lo; wxGraphMax = hi; wxGraphGen = flexWeatherGen();
   }
+  int tmin = wxGraphMin, tmax = wxGraphMax;
   bool haveGraph = (tmax > -32768 && tmin < 32767);
   int range = haveGraph ? (tmax - tmin) : 1;
   if(range < 10) range = 10;                       // menos de 1 grado: linea casi plana
@@ -1092,9 +1114,19 @@ static bool wxHandleBack(){
   return false;
 }
 
+// Gancho de la multitarea por memoria: el lienzo de la escena es cache puro, se
+// suelta entero y wxDrawScene lo rehace en la primera vuelta que lo necesite.
+static size_t wxShed(){
+  if(!wxSky) return 0;
+  wxSkyFree();
+  return (size_t)SCR_W * WX_SKY_ROWS * 2;
+}
+
 // Suspension real: cancela exclusivamente el gesto/inercia en curso (el dedo
 // que vuelve sera otro), pero conserva vista, consulta y posiciones de scroll.
 static void wxSuspend(){
+  wxSceneFreeze(false);             // en segundo plano el reloj no se queda parado
+  wxSkyFree();                      // ni su lienzo reservado
   if(mapaActivo == LAYOUT_EN)         wxKbLayout = 1;
   else if(mapaActivo == LAYOUT_NUM)   wxKbLayout = 2;
   else if(mapaActivo == LAYOUT_EMOJI) wxKbLayout = 3;
@@ -1175,6 +1207,14 @@ static void wxAppTick(){
   //  convierte el gesto en inercia. Cancelar aqui mataria el impulso.)
   if(!T.down && !T.released && (wxDragging || wxAxis)) wxStopMotion();
   if(wxNavBack()) return;
+
+  // EL RELOJ DE LA ESCENA SE PARA MIENTRAS EL DEDO MANDA. Las nubes, la lluvia
+  // y el destello del astro son FONDO: congelarlos los pocos cientos de
+  // milisegundos que dura un gesto no se ve, y es lo que evita rehacer el
+  // lienzo de la escena 25 veces por segundo justo cuando menos presupuesto de
+  // cuadro hay. Al soltar, el reloj sigue desde donde estaba -- se guarda el
+  // desfase, no el instante --, asi que no hay salto.
+  wxSceneFreeze(T.down || wxDragging || fabsf(wxScrollVel) > 6.0f);
 
   // ---- 1) Datos nuevos publicados por el motor ----
   uint32_t gen = flexWeatherGen();

@@ -128,6 +128,7 @@ static void connBleSub(char* out, size_t n);
 static void gamesEnter(); static void gamesTick(); // Juegos: Jumper (motor en FlexOS_Jumper.h)
 static void wxAppEnter(); static void wxAppTick();  // Clima (Flex Weather) -- seccion propia mas abajo
 static bool wxHandleBack(); static void wxSuspend(); static void wxResume();
+static size_t wxShed();     // Clima: suelta el lienzo cacheado de la escena
 static void storeEnter(); static void storeTick(); static void storeExit(); // Flex Store + runtime FLXP
 static void storeSuspendApp(); static void storeResumeApp();               // ...y la app flex-app-v1 que corra dentro
 // Flex Phone: la app vive en FlexOS_FlexPhone_Bridge.h (igual que el
@@ -642,7 +643,11 @@ static const AppHooks H_BROWSER  = { NULL, NULL, navSuspendLife, navResumeLife, 
 // privilegiados (pantalla exclusiva, orientacion, PSRAM reservada) en vez de
 // dejarlos tomados mientras el usuario esta en otra parte del sistema.
 static const AppHooks H_STORE    = { NULL, NULL, storeSuspendLife, storeResumeLife, storeCloseLife, NULL, NULL, NULL, NULL, NULL };
-static const AppHooks H_WEATHER  = { NULL, wxHandleBack, wxSuspend, wxResume, NULL, NULL, NULL, NULL, NULL, NULL };
+// Clima lleva gancho 'shed': la escena procedural se compone una vez en un
+// lienzo propio de PSRAM (~425 KB) para que desplazar no la recomponga. Es puro
+// cache -- se rehace sola en la primera vuelta -- asi que en cuanto la memoria
+// aprieta se suelta entera.
+static const AppHooks H_WEATHER  = { NULL, wxHandleBack, wxSuspend, wxResume, NULL, NULL, NULL, NULL, wxShed, NULL };
 // Flex Phone. backScreen cierra primero la conversacion y luego vuelve
 // a Centro; closeApp vuelca el estado a disco (la escritura periodica
 // esta agrupada, asi que al salir SI toca guardar).

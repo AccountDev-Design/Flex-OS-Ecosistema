@@ -255,6 +255,7 @@ static void testTransicionesApps();
 static void testRejillaAutoPaginas();
 static void testMultitareaMemoria();
 static void testDesbloqueoFluido();
+static void testClimaFluido();
 static void testFlexCompass();
 static void testProteccionRobo();
 static int gFails = 0;
@@ -5369,6 +5370,172 @@ static void testDesbloqueoFluido(){
   if(gFails == before) printf("  Desbloqueo: todas las comprobaciones pasan.\n");
 }
 
+
+// #############################################################
+//  CLIMA: UN CUADRO DE ARRASTRE DEJA DE RECOMPONER LA ESCENA
+//  ------------------------------------------------------------
+//  La app iba a ~7 fps al desplazar. El motivo: cada cuadro
+//  recomponia la pantalla entera, y lo primero de todo era la escena
+//  procedural -- 800 filas de degradado, 42 estrellas con alpha, el
+//  astro con dos halos de radio ~90, cinco montanas, la lamina de
+//  agua con sus brillos, cinco nubes, hasta 64 gotas, la niebla y un
+//  velo de 210 filas mezcladas pixel a pixel.
+//
+//  La escena no cambia al desplazarse: se MUEVE. Aqui se fija que es
+//  asi de verdad -- que un arrastre no la recompone ni una vez -- y
+//  se mide lo que costaba cada cuadro.
+// #############################################################
+extern FlexWeather gTestWx;
+extern bool        gTestWxOn;
+
+static void wxTestFakeData(){
+  memset(&gTestWx, 0, sizeof(gTestWx));
+  gTestWx.magic = FLEXWX_MAGIC; gTestWx.ver = FLEXWX_VER;
+  gTestWx.have  = WXF_FEELS | WXF_HUMIDITY | WXF_PRECIP | WXF_WIND | WXF_GUST |
+                  WXF_PRESSURE | WXF_CLOUD | WXF_UV | WXF_VIS | WXF_POP |
+                  WXF_MINMAX | WXF_SUN | WXF_WINDDIR;
+  snprintf(gTestWx.loc.name,   sizeof(gTestWx.loc.name),   "%s", "Lima");
+  snprintf(gTestWx.loc.region, sizeof(gTestWx.loc.region), "%s", "Lima, Peru");
+  gTestWx.loc.lat = -12.05f; gTestWx.loc.lon = -77.04f;
+  gTestWx.obsTime = 1700000000; gTestWx.utcOffset = -5 * 3600;
+  gTestWx.temp = 21.4f; gTestWx.feels = 22.0f; gTestWx.humidity = 74;
+  gTestWx.precip = 0.4f; gTestWx.windSpeed = 13.0f; gTestWx.windGust = 22.0f;
+  gTestWx.pressure = 1012.0f; gTestWx.cloud = 70; gTestWx.uv = 6.2f;
+  gTestWx.visibility = 9000; gTestWx.windDir = 210; gTestWx.pop = 40;
+  gTestWx.code = 61;                       // lluvia: la escena mas cara que hay
+  gTestWx.isDay = 1;
+  gTestWx.hourCount = FLEXWX_HOURS; gTestWx.dayCount = FLEXWX_DAYS;
+  gTestWx.tmax = 24.0f; gTestWx.tmin = 17.0f;
+  gTestWx.sunrise = 1699980000; gTestWx.sunset = 1700020000;
+  for(int i = 0; i < FLEXWX_HOURS; i++){
+    gTestWx.hours[i].t = gTestWx.obsTime + i * 3600;
+    gTestWx.hours[i].temp10  = (int16_t)(180 + (i % 9) * 10);
+    gTestWx.hours[i].feels10 = (int16_t)(185 + (i % 9) * 10);
+    gTestWx.hours[i].wind10  = (int16_t)(90 + (i % 5) * 20);
+    gTestWx.hours[i].vis100  = 90; gTestWx.hours[i].precip100 = (uint16_t)((i % 4) * 30);
+    gTestWx.hours[i].code = (uint8_t)((i % 3) ? 61 : 3);
+    gTestWx.hours[i].pop = (uint8_t)((i * 7) % 100);
+    gTestWx.hours[i].rh = 70; gTestWx.hours[i].uv10 = (uint8_t)((i % 8) * 8);
+  }
+  for(int i = 0; i < FLEXWX_DAYS; i++){
+    gTestWx.days[i].date    = gTestWx.obsTime + i * 86400;
+    gTestWx.days[i].sunrise = gTestWx.sunrise + i * 86400;
+    gTestWx.days[i].sunset  = gTestWx.sunset  + i * 86400;
+    gTestWx.days[i].max10 = (int16_t)(230 + i * 5);
+    gTestWx.days[i].min10 = (int16_t)(160 + i * 4);
+    gTestWx.days[i].code = (uint8_t)((i % 2) ? 61 : 2);
+    gTestWx.days[i].pop = (uint8_t)(20 + i * 8);
+    gTestWx.days[i].uv10 = (uint8_t)(40 + i * 3);
+  }
+  gTestWxOn = true;
+}
+
+static void testClimaFluido(){
+  printf("Clima: el arrastre deja de recomponer la escena\n");
+  int before = gFails;
+  bool glassPrev = uiGlass;
+  uiGlass = true;
+  gLand = false; gHosted = false;
+  gState = ST_APP; gAppId = IC_CLIMA;
+  gAppW = SCR_W; gAppH = SCR_H;
+  gTestMs = 900000;
+  wxTestFakeData();
+  wxSkyFree();
+  wxSceneFreeze(false);
+  wxScroll = 0; wxScrollVel = 0; wxHourScroll = 0; wxDragging = false; wxAxis = 0;
+  wxView = WXVIEW_MAIN; wxEnterMs = 0; wxToastMs = 0; wxOkFlashMs = 0;
+  wxLayout();
+  uiClipFull();
+  tReset();
+
+  // ---- 1. El lienzo de la escena se compone UNA vez ----
+  gBbufOwner = BBUF_NONE;
+  wxSkyBuilds = 0;
+  wxFull();
+  chk(wxSkyBuilds == 1, "el primer cuadro compone la escena una sola vez");
+  uint32_t tras1 = wxSkyBuilds;
+  wxFull();
+  chk(wxSkyBuilds == tras1, "un segundo cuadro en el mismo instante NO la recompone");
+
+  // ---- 2. UN ARRASTRE COMPLETO no la recompone ni una vez ----
+  // Es el caso exacto que se reporto: dedo abajo, treinta cuadros de
+  // desplazamiento, dedo arriba.
+  wxSkyBuilds = 0;
+  for(int i = 0; i < 30; i++){
+    gTestMs += 16;                                  // el reloj del sistema SI corre
+    T.down = true; T.pressed = (i == 0); T.released = false; T.tap = false;
+    T.x = SCR_W / 2; T.y = 600 - i * 12;
+    if(i == 0){ T.startX = T.x; T.startY = T.y; T.downMs = gTestMs; }
+    else T.moved = true;
+    wxDragging = true;
+    wxSceneFreeze(true);
+    wxScroll = (float)(i * 12);
+    wxFull();
+  }
+  chk(wxSkyBuilds == 0, "treinta cuadros de arrastre NO recomponen la escena ni una vez");
+
+  // ---- 3. Al soltar, la animacion sigue donde estaba y vuelve a correr ----
+  T.down = false; T.released = true; T.tap = false;
+  wxDragging = false; wxScrollVel = 0;
+  wxSceneFreeze(false);
+  uint32_t c0 = wxSceneClock();
+  gTestMs += 400;
+  uint32_t c1 = wxSceneClock();
+  chk(c1 > c0, "al soltar, el reloj de la escena vuelve a correr");
+  chk(c1 - c0 <= 401, "y no da ningun salto: sigue desde donde se quedo");
+
+  // ---- 4. Lo que cuesta cada cosa ----
+  {
+    struct timespec a0, a1;
+    const int N = 20;
+    WxScene sc; wxSceneBlend(&sc);
+    uiClipFull(); setBuf(bbuf);
+    clock_gettime(CLOCK_MONOTONIC, &a0);
+    for(int i = 0; i < N; i++) wxScenePaint(sc, 0, gTestMs + i, 0, SCR_H - 1);
+    clock_gettime(CLOCK_MONOTONIC, &a1);
+    double componer = ((a1.tv_sec - a0.tv_sec) * 1e3 + (a1.tv_nsec - a0.tv_nsec) / 1e6) / N;
+
+    wxSkyBuild(sc, gTestMs);
+    clock_gettime(CLOCK_MONOTONIC, &a0);
+    for(int i = 0; i < N; i++) wxDrawScene(0, SCR_H - 1);
+    clock_gettime(CLOCK_MONOTONIC, &a1);
+    double volcar = ((a1.tv_sec - a0.tv_sec) * 1e3 + (a1.tv_nsec - a0.tv_nsec) / 1e6) / N;
+
+    gBbufOwner = BBUF_APP + IC_CLIMA;
+    clock_gettime(CLOCK_MONOTONIC, &a0);
+    for(int i = 0; i < N; i++) wxCompose(0, SCR_H - 1);
+    clock_gettime(CLOCK_MONOTONIC, &a1);
+    double cuadro = ((a1.tv_sec - a0.tv_sec) * 1e3 + (a1.tv_nsec - a0.tv_nsec) / 1e6) / N;
+
+    printf("  [clima] escena: componer %.3f ms  ·  volcar %.3f ms  ·  cuadro completo %.3f ms\n",
+           componer, volcar, cuadro);
+    // El PC no es la placa: aqui un memcpy es baratisimo y las mezclas por
+    // pixel no lo son tanto, asi que la diferencia real en el P4 es MAYOR que
+    // esta. Lo que se fija es la direccion: volcar la escena cuesta menos que
+    // componerla, y no es el cuadro entero.
+    chk(volcar < componer,
+        "volcar la escena cuesta menos que componerla (es el trabajo que se va de cada cuadro)");
+    chk(volcar < cuadro, "y es una fraccion del cuadro, no el cuadro entero");
+  }
+
+  // ---- 5. Si cambia el tiempo, el lienzo se rehace ----
+  wxSkyBuilds = 0;
+  gTestWx.code = 0; gTestWx.isDay = 0;          // de lluvia de dia a despejado de noche
+  wxSceneTo = 0xFF;                              // sin cruce a medias
+  gTestMs += 5000;
+  wxFull();
+  chk(wxSkyBuilds >= 1, "si cambia la escena de verdad, el lienzo se rehace");
+
+  wxSkyFree();
+  gTestWxOn = false;
+  uiGlass = glassPrev;
+  wxScroll = 0; wxScrollVel = 0; wxDragging = false;
+  gBbufOwner = BBUF_NONE;
+  gState = ST_HOME; gAppId = IC_RELOJ;
+  tReset(); uiClipFull(); setBuf(fb);
+  if(gFails == before) printf("  Clima: todas las comprobaciones pasan.\n");
+}
+
 static void testMultitareaMemoria(){
   printf("Multitarea por memoria: presupuesto, desalojo y Recientes\n");
   mtReset();
@@ -6203,6 +6370,7 @@ int main(){
   testMediosOrientacion();
   testMultitareaMemoria();
   testDesbloqueoFluido();
+  testClimaFluido();
   testDeviceCare();
   testFlexCompass();
   testProteccionRobo();

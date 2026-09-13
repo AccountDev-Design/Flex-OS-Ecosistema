@@ -501,6 +501,11 @@ static void wxSceneOf(uint8_t vis, bool day, WxScene* s){
 
 // Mezcla de dos escenas (transicion suave dia<->noche o de condicion).
 static void wxSceneBlend(WxScene* out){
+  // A CERO ENTERO, relleno incluido: la firma de la escena (wxSceneSig) se
+  // calcula sobre los BYTES de la estructura, y un byte de relleno sin
+  // inicializar la haria cambiar sola en cada cuadro -- o sea, rehacer el
+  // lienzo de la escena siempre.
+  memset(out, 0, sizeof(WxScene));
   const FlexWeather* w = flexWeatherData();
   uint8_t vis = w ? flexWeatherVisual(w->code) : (uint8_t)WXV_CLOUDY;
   bool day = true;
@@ -547,29 +552,31 @@ static bool wxSceneAnimated(const WxScene* s){
   return s->clouds > 30 || s->rain || s->snow || s->fog || s->stars || s->sun || s->bolt;
 }
 
-// ---- Fondo completo: degradado + escena. Solo pinta filas [y0,y1]. ----
-static void wxDrawScene(int y0, int y1){
-  WxScene s; wxSceneBlend(&s);
-  // Parallax: la escena se desplaza algo menos que el contenido.
-  int par = (int)(wxScroll * 0.80f);
-  int top = -par;                              // y de pantalla del techo de la escena
-  int heroBot = WX_HERO_H - par;
+// #############################################################
+// ##  PINTOR DE LA ESCENA  ·  en coordenadas de DOCUMENTO
+// ##  ----------------------------------------------------------
+// ##  Dibuja el cielo y todo lo que flota en el (estrellas, astro,
+// ##  montanas, agua, nubes, niebla, lluvia, nieve, relampago y el
+// ##  velo de legibilidad) con el techo de la escena en `top` y su
+// ##  suelo en `top + WX_HERO_H`. Solo toca las filas [y0,y1].
+// ##
+// ##  `ms` es el RELOJ DE LA ANIMACION, no millis(): quien llama
+// ##  decide si el tiempo corre. Es lo que permite (a) cachear la
+// ##  escena y (b) congelarla mientras el dedo arrastra, que es
+// ##  cuando el usuario no la esta mirando a ella.
+// #############################################################
+static void wxScenePaint(const WxScene& s, int top, uint32_t ms, int y0, int y1){
+  int heroBot = top + WX_HERO_H;
 
-  // Degradado de pantalla completa: cielo arriba y, por debajo del horizonte,
-  // una caida hacia un azul mas profundo. Es el "papel" sobre el que flotan
-  // las tarjetas -- y al desplazarse, el fondo se oscurece solo, que es lo que
-  // da el aire de One UI Weather (y de paso sube el contraste del pie).
-  int hb = heroBot; if(hb < 140) hb = 140; if(hb > SCR_H) hb = SCR_H;
-  int mid = hb / 2;
-  // Por debajo del horizonte el cielo cae hacia el fondo de pagina del tema:
-  // con apariencia oscura se hunde en azul profundo y con la clara se abre,
-  // sin que la escena deje de ser la misma.
-  uint16_t pageBot = mix565(s.skyBot, TH_PAGE, gDark ? 170 : 130);
-  for(int y = y0; y <= y1; y++){
+  // Degradado del cielo, del techo de la escena a su suelo. Es "papel": una
+  // fila, un color. Por debajo del suelo NO pinta nada -- esa parte la pone
+  // wxDrawScene, que es quien sabe donde acaba la pantalla.
+  int mid = top + WX_HERO_H / 2;
+  for(int y = y0; y <= y1 && y <= heroBot; y++){
     uint16_t c;
-    if(y <= mid)      c = mix565(s.skyTop, s.skyMid, (uint8_t)(y * 255 / (mid > 0 ? mid : 1)));
-    else if(y <= hb)  c = mix565(s.skyMid, s.skyBot, (uint8_t)((y - mid) * 255 / (hb - mid > 0 ? hb - mid : 1)));
-    else              c = mix565(s.skyBot, pageBot,  (uint8_t)((y - hb) * 255 / (SCR_H - hb > 0 ? SCR_H - hb : 1)));
+    int d = y - top;
+    if(y <= mid) c = mix565(s.skyTop, s.skyMid, (uint8_t)(d * 255 / (WX_HERO_H / 2 > 0 ? WX_HERO_H / 2 : 1)));
+    else         c = mix565(s.skyMid, s.skyBot, (uint8_t)((d - WX_HERO_H / 2) * 255 / (WX_HERO_H - WX_HERO_H / 2)));
     hLine(0, y, SCR_W, c);
   }
 
@@ -579,7 +586,6 @@ static void wxDrawScene(int y0, int y1){
   // media pagina.
   int oy1 = gClipY1;
   if(heroBot < gClipY1) gClipY1 = heroBot;
-  uint32_t ms = millis();
 
   // Estrellas (solo de noche). Parpadeo por funcion de millis: sin estado.
   if(s.stars){
@@ -709,9 +715,159 @@ static void wxDrawScene(int y0, int y1){
   }
   gClipY1 = oy1;
 
-  // Velo superior muy suave: la hora, el nombre de la ubicacion y la
-  // temperatura gigante siempre legibles, pase lo que pase por detras
-  // (una nube blanca sobre cielo claro se comia el texto).
-  for(int y = y0; y <= y1 && y < 210; y++)
-    hLineA(0, y, SCR_W, rgb565(6,12,30), (uint8_t)(54 - y * 54 / 210));
+  // Velo muy suave sobre la parte alta de la ESCENA: la hora, el nombre de la
+  // ubicacion y la temperatura gigante siempre legibles, pase lo que pase por
+  // detras (una nube blanca sobre cielo claro se comia el texto). Va anclado al
+  // techo de la escena -- que es donde estan esos textos -- y no al borde de la
+  // pantalla: asi acompana al contenido que protege en vez de quedarse arriba.
+  for(int y = y0; y <= y1 && y < top + 210; y++){
+    int d = y - top;
+    if(d < 0) continue;
+    hLineA(0, y, SCR_W, rgb565(6,12,30), (uint8_t)(54 - d * 54 / 210));
+  }
+}
+
+// #############################################################
+// ##  ESCENA CACHEADA  ·  desplazar deja de recomponerla
+// ##  ----------------------------------------------------------
+// ##  QUE ARREGLA. Al arrastrar, la app recomponia la pantalla
+// ##  ENTERA en cada cuadro, y lo primero que iba dentro era esta
+// ##  escena: 800 filas de degradado, 42 estrellas con alpha, el
+// ##  astro con dos halos de radio ~90, cinco montanas, la lamina de
+// ##  agua, cinco nubes, hasta 64 gotas, la niebla y un velo de 210
+// ##  filas mezcladas pixel a pixel. Eso es lo que dejaba Clima a
+// ##  ~7 fps.
+// ##
+// ##  LA OBSERVACION QUE LO ARREGLA. La escena es funcion de (a) que
+// ##  tiempo hace y (b) el reloj de su animacion. NO del scroll: al
+// ##  desplazarse no cambia, se MUEVE. Dibujada en coordenadas de
+// ##  documento cabe en un lienzo propio de 443 filas y cada cuadro
+// ##  del arrastre pasa a ser un memcpy por fila.
+// ##
+// ##  Y MIENTRAS EL DEDO ARRASTRA, EL RELOJ SE PARA. Las nubes y la
+// ##  lluvia son fondo; congelarlas los pocos cientos de ms que dura
+// ##  un gesto no se ve, y es lo que evita rehacer el lienzo 25 veces
+// ##  por segundo justo cuando menos presupuesto hay. Al soltar, el
+// ##  reloj sigue desde donde estaba: no hay salto.
+// ##
+// ##  Lo que NO se cachea es el degradado de por debajo del suelo de
+// ##  la escena: es una fila un color, se pinta con rellenos solidos
+// ##  y depende del tema, asi que sale mas barato hacerlo que
+// ##  guardarlo.
+// #############################################################
+#define WX_SKY_ROWS (WX_HERO_H + 2)
+static uint16_t* wxSky      = NULL;    // lienzo de la escena (stride SCR_W, doc rows)
+static bool      wxSkyOk    = false;
+static uint32_t  wxSkyBuilds = 0;      // cuantas veces se ha compuesto (lo mide la prueba)
+static uint32_t  wxSkyClock = 0;       // reloj de animacion con el que se compuso
+static uint32_t  wxSkySig   = 0;       // firma de la escena con la que se compuso
+
+// Cadencia de la animacion de la escena. Es la misma que ya usaba el tick para
+// repintar su banda (~25 fps): por encima de eso no se nota y por debajo se ve
+// a saltos.
+#define WX_SCENE_TICK_MS 40
+
+// Reloj de la animacion. Se congela mientras el dedo arrastra o la inercia
+// corre; al soltar, sigue desde donde se quedo (se guarda el desfase, no el
+// instante), asi que las nubes no dan un salto.
+static uint32_t wxSceneFrozen = 0;     // valor congelado (0 = el reloj corre)
+static uint32_t wxSceneSkew   = 0;     // ms que el reloj lleva parado en total
+static uint32_t wxSceneClock(){
+  if(wxSceneFrozen) return wxSceneFrozen;
+  return millis() - wxSceneSkew;
+}
+static void wxSceneFreeze(bool on){
+  if(on){
+    if(!wxSceneFrozen){ wxSceneFrozen = wxSceneClock(); if(!wxSceneFrozen) wxSceneFrozen = 1; }
+  } else if(wxSceneFrozen){
+    // Al descongelar, el desfase absorbe todo el tiempo que estuvo parado.
+    uint32_t now = millis();
+    wxSceneSkew = now - wxSceneFrozen;
+    wxSceneFrozen = 0;
+  }
+}
+
+// Firma de la escena: si cambia, el lienzo ya no vale. Son los colores y las
+// cantidades que wxSceneBlend acaba de calcular, nada mas.
+static uint32_t wxSceneSig(const WxScene& s){
+  uint32_t h = 2166136261u;
+  const uint8_t* p = (const uint8_t*)&s;
+  for(size_t i = 0; i < sizeof(WxScene); i++){ h ^= p[i]; h *= 16777619u; }
+  return h ? h : 1u;
+}
+
+static void wxSkyFree(){
+  if(wxSky){ heap_caps_free(wxSky); wxSky = NULL; }
+  wxSkyOk = false;
+}
+// Compone la escena entera en su lienzo. false si no se pudo (sin PSRAM): el
+// llamante dibuja por el camino de siempre.
+static bool wxSkyBuild(const WxScene& s, uint32_t clock){
+  if(gLand) return false;                       // el volcado indexa en vertical directo
+  if(!wxSky)
+    wxSky = (uint16_t*)heap_caps_malloc((size_t)SCR_W * WX_SKY_ROWS * 2,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(!wxSky) return false;
+  uint16_t* oBuf = gBuf;                        // gBuf directo: no debe desviarse a DeX
+  int oc0 = gClipY0, oc1 = gClipY1, ox0 = gClipX0, ox1 = gClipX1;
+  gBuf = wxSky;
+  gClipY0 = 0; gClipY1 = WX_SKY_ROWS - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
+  wxScenePaint(s, 0, clock, 0, WX_SKY_ROWS - 1);
+  gBuf = oBuf; gClipY0 = oc0; gClipY1 = oc1; gClipX0 = ox0; gClipX1 = ox1;
+  wxSkyClock = clock; wxSkySig = wxSceneSig(s); wxSkyOk = true; wxSkyBuilds++;
+  return true;
+}
+
+// ---- Fondo completo: escena cacheada + degradado de debajo. Solo [y0,y1]. ----
+static void wxDrawScene(int y0, int y1){
+  WxScene s; wxSceneBlend(&s);
+  // Parallax: la escena se desplaza algo menos que el contenido.
+  int par = (int)(wxScroll * 0.80f);
+  int top = -par;                              // y de pantalla del techo de la escena
+  int heroBot = WX_HERO_H - par;
+  uint32_t clock = wxSceneClock();
+
+  // ---- 1. Suelo de la escena hacia abajo: una fila, un color ----
+  // Por debajo del horizonte el cielo cae hacia el fondo de pagina del tema:
+  // con apariencia oscura se hunde en azul profundo y con la clara se abre,
+  // sin que la escena deje de ser la misma.
+  {
+    int hb = heroBot; if(hb < 0) hb = 0; if(hb > SCR_H) hb = SCR_H;
+    uint16_t pageBot = mix565(s.skyBot, TH_PAGE, gDark ? 170 : 130);
+    int g0 = (y0 > hb) ? y0 : hb;
+    int span = SCR_H - hb; if(span < 1) span = 1;
+    for(int y = g0; y <= y1; y++)
+      hLine(0, y, SCR_W, mix565(s.skyBot, pageBot, (uint8_t)((y - hb) * 255 / span)));
+  }
+
+  // ---- 2. La escena: volcada del lienzo si vale, compuesta si no ----
+  int e1 = (y1 < heroBot) ? y1 : heroBot;
+  if(e1 < y0) return;                          // la escena ya no se ve
+  uint32_t sig = wxSceneSig(s);
+  bool usable = wxSkyOk && wxSky && !gLand && wxSkySig == sig && wxSkyClock == clock;
+  if(!usable){
+    // Se rehace como mucho cada WX_SCENE_TICK_MS, y nunca si solo ha cambiado
+    // el reloj por debajo de esa cadencia: con el dedo arrastrando el reloj ni
+    // siquiera avanza, asi que ahi no se rehace ni una vez.
+    bool stale = !wxSkyOk || wxSkySig != sig ||
+                 (uint32_t)(clock - wxSkyClock) >= (uint32_t)WX_SCENE_TICK_MS;
+    if(stale) usable = wxSkyBuild(s, clock);
+    else      usable = wxSkyOk && wxSky && !gLand;
+  }
+  if(usable){
+    for(int y = y0; y <= e1; y++){
+      int d = y - top;                          // fila de documento
+      if(d < 0 || d >= WX_SKY_ROWS) continue;
+      if(y < gClipY0 || y > gClipY1) continue;
+      int xs = 0, xe = SCR_W - 1;
+      if(xs < gClipX0) xs = gClipX0;
+      if(xe > gClipX1) xe = gClipX1;
+      if(xs > xe) continue;
+      memcpy(gBuf + (size_t)y * SCR_W + xs, wxSky + (size_t)d * SCR_W + xs,
+             (size_t)(xe - xs + 1) * 2);
+    }
+    return;
+  }
+  // Sin lienzo propio: el camino de siempre, componiendo en el cuadro.
+  wxScenePaint(s, top, clock, y0, e1);
 }
