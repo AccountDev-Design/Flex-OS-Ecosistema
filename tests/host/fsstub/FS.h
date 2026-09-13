@@ -153,6 +153,14 @@ class File {
 
 class FlexFsStub {
  public:
+  // MONTAJE. El doble esta SIEMPRE montado -- el mapa vive en memoria --, asi
+  // que estas tres solo existen para que FlexOS_FS.cpp compile aqui tal cual va
+  // a la placa. begin() y format() dicen que si; end() no hace nada. Lo que se
+  // comprueba con ellas no es el montaje, que aqui no significa nada, sino que
+  // el modulo entero pasa por el compilador.
+  bool begin(bool = false, const char* = "/littlefs", int = 10, const char* = "spiffs") { return true; }
+  void end() {}
+  bool format() { gFs.clear(); return true; }
   File open(const char* path, const char* mode = "r") {
     return File(path, mode && mode[0] == 'w');
   }

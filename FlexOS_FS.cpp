@@ -163,8 +163,6 @@ static uint32_t dirSizeRec(const char* dir, int depth){
   uint32_t total = 0;
   File e = d.openNextFile();
   while(e){
-      e.close(); e = d.openNextFile(); continue;      // entran en ningun total
-    }
     if(e.isDirectory()){
       char sub[FLEXFS_PATH_MAX];
       joinPath(dir, baseName(e.name()), sub, sizeof(sub));
@@ -235,8 +233,6 @@ int flexFsList(const char* dir, FlexFsEntry* out, int maxn){
   File e = d.openNextFile();
   while(e && n < maxn){
     const char* nm = baseName(e.name());
-      e.close(); e = d.openNextFile(); continue;
-    }
     strncpy(out[n].name, nm, FLEXFS_NAME_MAX - 1);
     out[n].name[FLEXFS_NAME_MAX - 1] = 0;
     out[n].dir   = e.isDirectory();
@@ -291,8 +287,6 @@ static void bigWalk(const char* dir, int depth, FlexFsBig* out, int maxn, int* u
   if(!d || !d.isDirectory()){ if(d) d.close(); return; }
   File e = d.openNextFile();
   while(e){
-      e.close(); e = d.openNextFile(); continue;   // delata un fichero privado
-    }
     char full[FLEXFS_PATH_MAX];
     joinPath(dir, baseName(e.name()), full, sizeof(full));
     if(e.isDirectory()){

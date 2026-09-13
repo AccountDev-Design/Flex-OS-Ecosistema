@@ -277,13 +277,25 @@ INOWARN  := $(WARN) -Wno-unused-function -Wno-unused-variable \
 # nombre en el protocolo SHTP salta en el PC y no en el aparato.
 BNO_SRC := $(ULTRA)/FlexOS_BNO085.cpp
 
-ino: ino_compile.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) $(BNO_SRC) check_protos.py check_wiring.py check_shared.py check_stack.py | $(BUILD)
+# EL SISTEMA DE ARCHIVOS, POR EL MISMO MOTIVO Y POR UNO PEOR.
+# FlexOS_FS.cpp va a las TRES placas y no lo compilaba ninguna bateria: sus
+# funciones entraban en las pruebas por los dobles de fsstub/, nunca el fichero
+# de verdad. Un error de sintaxis ahi pasaba la bateria entera y solo aparecia
+# al abrir el Arduino IDE -- que es exactamente lo que paso al retirar los
+# filtros de la boveda. Se compila contra el doble de LittleFS, que es lo unico
+# que le falta para ser codigo portable.
+FS_SRC := $(ULTRA)/FlexOS_FS.cpp
+FSFLAGS := -Ifsstub -Iinostub $(INC) -DARDUINO=200 -Wno-format-truncation
+
+ino: ino_compile.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) $(BNO_SRC) $(FS_SRC) check_protos.py check_wiring.py check_shared.py check_stack.py | $(BUILD)
 	@python3 check_shared.py $(ROOT)
 	@python3 check_protos.py $(INO_SRC)
 	@python3 check_wiring.py $(INO_SRC)
 	@python3 check_stack.py $(ROOT)
 	@$(CXX) $(CXXSTD) -fsyntax-only $(INOWARN) $(INOFLAGS) -x c++ ino_compile.cpp
 	@$(CXX) $(CXXSTD) -fsyntax-only $(WARN) $(INOFLAGS) $(BNO_SRC)
+	@$(CXX) $(CXXSTD) -fsyntax-only $(WARN) $(FSFLAGS) $(FS_SRC)
+	@$(CXX) $(CXXSTD) -fsyntax-only $(WARN) $(FSFLAGS) $(ROOT)/FlexOS_FS.cpp
 	@echo "FlexOS_Ultra.ino compila."
 
 # El mismo TU, pero ENLAZADO y EJECUTADO: main() comprueba el reloj del sistema,
