@@ -596,6 +596,36 @@ static void uiTick(){
   }
 }
 
+
+// #############################################################
+// ##  RITMO DEL BUCLE  ·  la latencia del tactil vive aqui
+// ##  ----------------------------------------------------------
+// ##  El delay() del final de loop() NO es una pausa decorativa:
+// ##  cede el procesador al resto de tareas de FreeRTOS (red, NTP,
+// ##  tienda, navegador) y al hilo idle, que es quien alimenta el
+// ##  watchdog de sistema. Quitarlo del todo seria cambiar un
+// ##  problema de latencia por uno de estabilidad.
+// ##
+// ##  Pero eran 5 ms FIJOS, y eso son 5 ms anadidos a cada lectura
+// ##  del GT911: el tactil no puede ir mas fino que el ritmo al que
+// ##  se le pregunta, y ese retraso se nota en el dedo -- sobre todo
+// ##  al arrastrar, donde se acumula cuadro a cuadro.
+// ##
+// ##  Con el dedo en pantalla, recien levantado, o con algo
+// ##  animandose, se cede 1 ms: lo justo para que el planificador
+// ##  respire, con una quinta parte del retraso. En reposo se vuelve
+// ##  a 5 ms, que es donde el consumo importa y la latencia no.
+// #############################################################
+static uint32_t loopPaceMs(){
+  // Dedo apoyado o evento tactil en esta misma vuelta.
+  if(T.down || T.pressed || T.released) return 1;
+  // Gesto recien terminado: la inercia sigue corriendo y el dedo puede volver.
+  if(T.lastMs && (uint32_t)(millis() - T.lastMs) < 400u) return 1;
+  // Algo se esta moviendo en pantalla y su suavidad depende del ritmo.
+  if(appTrVisible() || qsPanelY > 0 || qsAnimOn || gRippleActive) return 1;
+  return 5;
+}
+
 void loop(){
   flexFeedWdt();          // alimenta el TWDT solo si loopTask sigue suscrito (ver arriba)
   loopRateTick();         // ritmo real del sistema (vueltas/s), un entero por vuelta
@@ -641,7 +671,7 @@ void loop(){
   if(gFrPending || (gState == ST_FACTORY)){
     clkUpdate();
     frTick();
-    delay(5);
+    delay(loopPaceMs());
     return;
   }
 
@@ -707,7 +737,7 @@ void loop(){
     // descarga compitiendo por la PSRAM.
     if(hcActive){ hcClose(true); gState = ST_HOME; gHomeDirty = true; }
     flexOtaRender();
-    delay(5);
+    delay(loopPaceMs());
     return;
   }
 
@@ -756,7 +786,7 @@ void loop(){
                             // contabiliza la pausa: sin esta llamada, al cerrar la
                             // cortina todas las tarjetas caducarian de golpe
     flexOtaRender();
-    delay(5);
+    delay(loopPaceMs());
     return;
   }
 
@@ -779,7 +809,7 @@ void loop(){
     if(minChanged) gHomeDirty = true;   // el escritorio se rehara al cerrar la tarjeta
     cronoCardTick();
     flexOtaRender();
-    delay(5);
+    delay(loopPaceMs());
     return;
   }
 
@@ -801,7 +831,7 @@ void loop(){
     if(minChanged) gHomeDirty = true;   // el escritorio se rehara al cerrarse
     faTick();
     flexOtaRender();
-    delay(5);
+    delay(loopPaceMs());
     return;
   }
 
@@ -865,8 +895,8 @@ void loop(){
   //  precisamente lo que permite aceptar la app siguiente mientras
   //  la anterior todavia se ve encogiendo.
   //
-  //  Sin delay(5) al final: mientras hay animacion, cada milisegundo
-  //  del presupuesto de cuadro cuenta. En reposo se conserva.
+  //  Sin pausa al final de esta rama: mientras hay animacion, cada
+  //  milisegundo del presupuesto de cuadro cuenta.
   // -----------------------------------------------------------
   if(appTrOwnsScreen()){
     // La capa solo tiene sentido sobre Inicio o sobre una app. Si la navegacion
@@ -885,7 +915,7 @@ void loop(){
   notifTick();            // isla dinamica: anima y compone sobre la pantalla activa (Fase 1)
   cronoCapsuleTick();     // CRONOMETRO: capsula de la barra (solo repinta al cambiar el segundo)
   flexOtaRender();        // OTA: ULTIMA capa del pipeline grafico (nunca toca el fb de una app)
-  delay(5);
+  delay(loopPaceMs());
 }
 
 // #############################################################

@@ -256,6 +256,7 @@ static void testRejillaAutoPaginas();
 static void testMultitareaMemoria();
 static void testDesbloqueoFluido();
 static void testClimaFluido();
+static void testCalculadora();
 static void testFlexCompass();
 static void testProteccionRobo();
 static int gFails = 0;
@@ -5536,6 +5537,130 @@ static void testClimaFluido(){
   if(gFails == before) printf("  Clima: todas las comprobaciones pasan.\n");
 }
 
+
+// #############################################################
+//  CALCULADORA: LA OPERACION SE LEE MIENTRAS SE ESCRIBE
+//  ------------------------------------------------------------
+//  Antes el display ensenaba SOLO el numero en curso: al pulsar un
+//  operador se sustituia por el acumulador y el operador no aparecia
+//  por ningun sitio. Con "25 + 10" en la cabeza lo que se veia era
+//  "25", luego "25" otra vez y luego "10": no habia forma de
+//  comprobar que se estaba sumando y no restando.
+//
+//  Aqui se fija la secuencia entera, tecla a tecla, y que el estado
+//  numerico de siempre (acumulador, operador, entrada) sigue dando
+//  los mismos resultados.
+// #############################################################
+static const char* calcTestLine(){
+  static char ln[56];
+  calcLine(ln, sizeof(ln));
+  return ln;
+}
+static void calcTestType(const char* keys){
+  for(const char* k = keys; *k; k++) calcKey(*k);
+}
+static void testCalculadora(){
+  printf("Calculadora: la operacion se lee mientras se escribe\n");
+  int before = gFails;
+  gState = ST_APP; gAppId = IC_CALC;
+  gAppW = SCR_W; gAppH = SCR_H; gHosted = false; gLand = false;
+
+  // ---- 1. La secuencia del encargo, tecla a tecla ----
+  calcKey('c');
+  chk(!strcmp(calcTestLine(), "0"), "arranca en 0");
+  calcTestType("25");
+  chk(!strcmp(calcTestLine(), "25"), "se teclea el primer operando");
+  calcKey('+');
+  chk(!strcmp(calcTestLine(), "25 +"), "al pulsar el operador SE VE el operador");
+  calcTestType("10");
+  chk(!strcmp(calcTestLine(), "25 + 10"), "y el segundo operando se anade detras");
+  calcKey('=');
+  chk(!strcmp(calcTestLine(), "35"), "el igual deja el resultado solo");
+
+  // ---- 2. Los cuatro operadores y el porcentaje ----
+  calcKey('c'); calcTestType("9"); calcKey('-');
+  chk(!strcmp(calcTestLine(), "9 -"), "la resta se ve");
+  calcTestType("4"); calcKey('=');
+  chk(!strcmp(calcTestLine(), "5"), "y resta bien");
+  calcKey('c'); calcTestType("6"); calcKey('x');
+  chk(!strcmp(calcTestLine(), "6 x"), "la multiplicacion se ve con el MISMO simbolo de la tecla");
+  calcTestType("7"); calcKey('=');
+  chk(!strcmp(calcTestLine(), "42"), "y multiplica bien");
+  calcKey('c'); calcTestType("84"); calcKey('/');
+  chk(!strcmp(calcTestLine(), "84 /"), "la division se ve");
+  calcTestType("4"); calcKey('=');
+  chk(!strcmp(calcTestLine(), "21"), "y divide bien");
+  calcKey('c'); calcTestType("50"); calcKey('%');
+  chk(!strcmp(calcTestLine(), "0.5"), "el porcentaje opera sobre la entrada en curso");
+
+  // ---- 3. Encadenar operaciones cierra la anterior ----
+  calcKey('c'); calcTestType("2"); calcKey('+'); calcTestType("3"); calcKey('+');
+  chk(!strcmp(calcTestLine(), "5 +"), "encadenar cierra la operacion anterior y lo ENSENA");
+  calcTestType("4"); calcKey('=');
+  chk(!strcmp(calcTestLine(), "9"), "2 + 3 + 4 = 9");
+
+  // ---- 4. Cambiar de idea de operador no rehace la cuenta ----
+  calcKey('c'); calcTestType("8"); calcKey('+'); calcKey('x');
+  chk(!strcmp(calcTestLine(), "8 x"), "pulsar otro operador seguido solo cambia el signo");
+  calcTestType("2"); calcKey('=');
+  chk(!strcmp(calcTestLine(), "16"), "y opera con el ultimo elegido");
+
+  // ---- 5. Borrar, signo y decimales siguen funcionando ----
+  calcKey('c'); calcTestType("12"); calcKey('+'); calcTestType("345");
+  calcKey('\b');
+  chk(!strcmp(calcTestLine(), "12 + 34"), "DEL borra del segundo operando, no de la operacion");
+  calcKey('n');
+  chk(!strcmp(calcTestLine(), "12 + -34"), "el cambio de signo tambien se ve donde toca");
+  calcKey('='); 
+  chk(!strcmp(calcTestLine(), "-22"), "12 + (-34) = -22");
+  calcKey('c'); calcTestType("1.5"); calcKey('x'); calcTestType("2"); calcKey('=');
+  chk(!strcmp(calcTestLine(), "3"), "los decimales siguen igual");
+
+  // ---- 6. El error manda sobre todo lo demas ----
+  calcKey('c'); calcTestType("5"); calcKey('/'); calcTestType("0"); calcKey('=');
+  chk(!strcmp(calcTestLine(), "Error"), "dividir por cero dice Error, no un cero falso");
+  calcKey('+');
+  chk(!strcmp(calcTestLine(), "Error"), "y un operador sobre Error no inventa una operacion");
+  calcTestType("7");
+  chk(!strcmp(calcTestLine(), "7"), "teclear un numero limpia el error y empieza de nuevo");
+
+  // ---- 7. YA NO HAY PANEL LATERAL: la rejilla ocupa el ancho entero ----
+  {
+    calcKey('c');
+    int bx, by, bw, bh; calcBox(bx, by, bw, bh);
+    chk(bw == gAppW, "la calculadora ocupa TODO el ancho del lienzo");
+    int gx, gy, kw, kh, gap; calcGrid(gx, gy, kw, kh, gap);
+    int m, g2, dh, bwv, bhv; calcLayout(m, g2, dh, bwv, bhv);
+    chk(gx + 4 * kw + 3 * gap + m <= gAppW + 1, "las cuatro columnas caben en el lienzo");
+    chk(kw >= 44, "y las teclas son mas anchas que el minimo comodo");
+    int dx, dy, dw, dh2; calcDispRect(dx, dy, dw, dh2);
+    chk(dw == gAppW - 2 * m, "el display tambien ocupa el ancho entero");
+    // Y la linea mas larga que se puede escribir cabe en el display.
+    calcTestType("12345678"); calcKey('x'); calcTestType("87654321");
+    int fs = dh2 >= 90 ? 5 : dh2 >= 64 ? 4 : dh2 >= 40 ? 3 : 2;
+    char ln[56]; calcLine(ln, sizeof(ln));
+    while(fs > 1 && textW(ln, fs) > dw - 20) fs--;
+    chk(fs >= 2, "una operacion larga sigue siendo legible en el display");
+  }
+
+  // ---- 8. La sesion conserva la operacion a medias ----
+  {
+    calcKey('c'); calcTestType("25"); calcKey('+'); calcTestType("10");
+    CalcSessV1 v; memset(&v, 0, sizeof(v));
+    v.acc = calcAcc; v.op = calcOp; v.fresh = calcFresh ? 1 : 0; v.err = calcErr ? 1 : 0;
+    snprintf(v.disp, sizeof(v.disp), "%s", calcDisp);
+    calcKey('c');
+    chk(!strcmp(calcTestLine(), "0"), "la calculadora se limpia");
+    calcAcc = v.acc; calcOp = v.op; calcFresh = v.fresh != 0; calcErr = v.err != 0;
+    snprintf(calcDisp, sizeof(calcDisp), "%s", v.disp);
+    chk(!strcmp(calcTestLine(), "25 + 10"), "y al volver de la sesion se lee la MISMA operacion");
+  }
+
+  calcKey('c');
+  gState = ST_HOME; gAppId = IC_RELOJ;
+  if(gFails == before) printf("  Calculadora: todas las comprobaciones pasan.\n");
+}
+
 static void testMultitareaMemoria(){
   printf("Multitarea por memoria: presupuesto, desalojo y Recientes\n");
   mtReset();
@@ -6371,6 +6496,7 @@ int main(){
   testMultitareaMemoria();
   testDesbloqueoFluido();
   testClimaFluido();
+  testCalculadora();
   testDeviceCare();
   testFlexCompass();
   testProteccionRobo();

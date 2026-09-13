@@ -45,11 +45,48 @@ static bool calcErr = false;       // el display muestra "Error" (division por c
 // NaN falla (v == v); los infinitos fallan el rango.
 static inline bool calcFinite(double v){ return (v == v) && (v > -1.0e308) && (v < 1.0e308); }
 
-static void calcFmt(double v){
-  if(!calcFinite(v)){ snprintf(calcDisp, sizeof(calcDisp), "Error"); calcErr = true; return; }
-  calcErr = false;
+static void calcFmtTo(char* out, size_t n, double v){
+  if(!calcFinite(v)){ snprintf(out, n, "Error"); return; }
   if(v == 0) v = 0;                 // evita "-0"
-  snprintf(calcDisp, sizeof(calcDisp), "%g", v);
+  snprintf(out, n, "%g", v);
+}
+static void calcFmt(double v){
+  calcErr = !calcFinite(v);
+  calcFmtTo(calcDisp, sizeof(calcDisp), v);
+}
+
+// #############################################################
+// ##  LA LINEA DE LA OPERACION
+// ##  ----------------------------------------------------------
+// ##  Antes el display ensenaba SOLO el numero en curso: al pulsar
+// ##  un operador se sustituia por el acumulador y el operador no
+// ##  aparecia por ningun sitio. Con "25 + 10" en la cabeza, lo que
+// ##  se veia era "25", luego "25" otra vez y luego "10": no habia
+// ##  forma de comprobar que se estaba sumando y no restando.
+// ##
+// ##  Ahora el display ensena la OPERACION tal y como se escribe:
+// ##
+// ##      25        ->  se teclea el primer operando
+// ##      25 +      ->  se pulsa el operador
+// ##      25 + 10   ->  se teclea el segundo
+// ##      35        ->  se pulsa "="
+// ##
+// ##  El estado numerico no cambia: sigue siendo acumulador +
+// ##  operador pendiente + entrada en curso. Lo que cambia es que la
+// ##  linea se COMPONE de los tres en vez de ensenar solo uno, asi
+// ##  que no hay una segunda copia del estado que pueda desincronizarse.
+// ##
+// ##  Los simbolos son los MISMOS que llevan las teclas (x, /), no
+// ##  los tipograficos: lo que se ve escrito es lo que se pulso.
+// #############################################################
+static void calcLine(char* out, size_t n){
+  if(calcErr){ snprintf(out, n, "Error"); return; }
+  if(!calcOp){ snprintf(out, n, "%s", calcDisp); return; }
+  char acc[24];
+  calcFmtTo(acc, sizeof(acc), calcAcc);
+  const char op[2] = { calcOp, 0 };
+  if(calcFresh) snprintf(out, n, "%s %s", acc, op);          // operador recien pulsado
+  else          snprintf(out, n, "%s %s %s", acc, op, calcDisp);
 }
 static double calcCompute(double a, double b, char op){
   // Antes 5/0 devolvia 0 en silencio: una respuesta falsa presentada como buena.
@@ -84,9 +121,22 @@ static void calcKey(char k){
     }
   } else if(k == '%'){ calcFmt(atof(calcDisp) / 100.0); calcFresh = true; }
   else if(k == '+' || k == '-' || k == 'x' || k == '/'){
-    double cur = atof(calcDisp);
-    calcAcc = (calcOp && !calcFresh) ? calcCompute(calcAcc, cur, calcOp) : cur;
-    calcOp = k; calcFresh = true; calcFmt(calcAcc);
+    // EL OPERADOR YA NO PISA EL DISPLAY. Antes esto hacia calcFmt(calcAcc), o
+    // sea: sustituia lo escrito por el acumulador. Ahora el acumulador se
+    // actualiza igual pero la entrada se deja como esta; quien decide que se
+    // lee es calcLine(), que compone "acumulador operador entrada".
+    if(calcOp && !calcFresh){
+      // Habia una operacion a medias: se cierra antes de encadenar la nueva,
+      // que es lo que hace que "2 + 3 + 4" de 9 y no 7.
+      double r = calcCompute(calcAcc, atof(calcDisp), calcOp);
+      if(!calcFinite(r)){ calcFmt(r); calcOp = 0; calcFresh = true; return; }
+      calcAcc = r;
+    } else if(!calcOp){
+      calcAcc = atof(calcDisp);
+    }
+    // (calcOp puesto y calcFresh: el usuario ha cambiado de idea de operador.
+    //  El acumulador se queda como esta y solo cambia el signo de la operacion.)
+    calcOp = k; calcFresh = true;
   } else if(k == '='){
     if(calcOp){ calcAcc = calcCompute(calcAcc, atof(calcDisp), calcOp); calcFmt(calcAcc); calcOp = 0; }
     calcFresh = true;
@@ -109,25 +159,16 @@ static void calcKeyFromLabel(const char* t){
 //   Esencial   : rejilla 5x4 de teclas -- tiene PRIORIDAD sobre el display.
 //   Opcional 1 : display -- cede alto a la rejilla y llega a omitirse si el
 //                lienzo no da para las 5 filas.
-//   Opcional 2 : panel lateral de memoria e historial -- aparece cuando el
-//                ancho da para la rejilla con teclas de >= 44 px MAS 150 px de
-//                panel. Por debajo de ese umbral desaparece entero, nunca
-//                encogido a medias.
-#define CALC_SIDE_MIN 150
-#define CALC_KEY_MIN   44
-// Ancho que reserva el panel lateral (0 si no toca mostrarlo).
-static int calcSideW(){
-  int w = gAppW, pad = w / 30; if(pad < 4) pad = 4; if(pad > 16) pad = 16;
-  int gap = w / 40; if(gap < 3) gap = 3; if(gap > 12) gap = 12;
-  int need = 4 * CALC_KEY_MIN + 3 * gap + 2 * pad + CALC_SIDE_MIN + gap;
-  if(w < need) return 0;
-  int sw = w / 4; if(sw < CALC_SIDE_MIN) sw = CALC_SIDE_MIN; if(sw > 260) sw = 260;
-  return sw;
-}
+//
+// EL PANEL LATERAL SE RETIRO. Ocupaba una cuarta parte del ancho con "MC / MR /
+// M+" y un eco del resultado: tres teclas de memoria que no guardaban nada (no
+// habia registro de memoria detras) y una repeticion de lo que ya se lee en el
+// display. A cambio, las teclas de verdad se quedaban con 3/4 del lienzo.
+// Ahora la calculadora ocupa el ancho ENTERO: teclas mas grandes -- mas faciles
+// de acertar -- y un display mas ancho, que es lo que la linea de la operacion
+// ("25 + 10") necesita para caber sin encoger la fuente.
 static void calcBox(int &bx, int &by, int &bw, int &bh){
   bx = 0; by = WIN_TOP; bw = gAppW; bh = WIN_BOT - WIN_TOP;
-  int sw = calcSideW();
-  if(sw > 0) bw -= sw;                          // la calculadora cede sitio al panel
   if(bw < 40) bw = 40;
   if(bh < 60) bh = 60;
 }
@@ -184,21 +225,19 @@ static void calcRender(){
   // ventana apaisada no corresponden a las filas logicas.
   bool host = gHosted;
   setBuf(host ? fb : lockBuf);                 // hospedada, fb ya apunta al lienzo
-  // Se limpia el LIENZO ENTERO, no solo la caja de la calculadora. calcBox le
-  // resta el ancho del panel lateral, asi que limpiar solo esa caja dejaba sin
-  // tocar la franja del panel: al cruzar el breakpoint quedaban ahi las
-  // tarjetas del frame anterior, y el fundido se mezclaba contra esa basura en
-  // vez de contra el fondo. Eso era el ghosting.
+  // Se limpia el LIENZO ENTERO, no solo la caja de la calculadora: asi ningun
+  // cambio de tamano puede dejar restos del cuadro anterior en una franja que
+  // ya no se dibuja.
   int fx, fy, fw, fh; uiBox(fx, fy, fw, fh);
   fillRect(fx, fy, fw, fh, WIN_BG);
-  int bx, by, bw0, bh0; calcBox(bx, by, bw0, bh0);
   int dx, dy, dw, dh; calcDispRect(dx, dy, dw, dh);
   if(dh > 0){
     int drad = dh / 5; if(drad > 14) drad = 14; if(drad < 2) drad = 2;
     uiSurface(dx, dy, dw, dh, drad, UIS_CARD);   // display: material del sistema
+    char ln[56]; calcLine(ln, sizeof(ln));
     int dfs = dh >= 90 ? 5 : dh >= 64 ? 4 : dh >= 40 ? 3 : 2;
-    while(dfs > 1 && textW(calcDisp, dfs) > dw - 20) dfs--;
-    drawTextR(dx + dw - 10, dy + dh / 2 - dfs * 4, calcDisp, dfs, TH_TXT);
+    while(dfs > 1 && textW(ln, dfs) > dw - 20) dfs--;
+    drawTextR(dx + dw - 10, dy + dh / 2 - dfs * 4, ln, dfs, TH_TXT);
   }
   int gx, gy, bw, bh, gap; calcGrid(gx, gy, bw, bh, gap);
   calcKeyY0 = gy - 4; calcKeyY1 = gy + 5 * (bh + gap) + 4;
@@ -221,29 +260,6 @@ static void calcRender(){
     bool acc = (c == 3 || (r == 4 && c == 2));
     drawTextC(x + bw / 2, y + bh / 2 - fs * 4 + 1, tl, fs, acc ? TH_ONACC : TH_TXT);
   }
-  // Panel lateral opcional: memoria e historial. Aparece/desaparece entero.
-  int sw = calcSideW();
-  uint8_t aSide = uiSection(0, sw > 0);
-  if(aSide && sw > 0){
-    int pad, gapL, dhL, bwL, bhL; calcLayout(pad, gapL, dhL, bwL, bhL);
-    (void)gapL; (void)dhL; (void)bwL; (void)bhL;
-    int sx = bx + bw0, sy = by, shh = bh0;
-    uiRectA(sx + pad / 2, sy + pad, sw - pad, shh - 2 * pad, pad, thCard(), aSide);
-    int ix = sx + pad, iw = sw - 2 * pad, iy = sy + pad * 2;
-    uiTextC(sx + sw / 2, iy, "Memoria", uiFontFit("Memoria", iw, 3), TH_TXT2, aSide);
-    iy += uiLineH(3) + pad;
-    const char* mk[3] = { "MC", "MR", "M+" };
-    int mh = (shh / 8) < 30 ? 30 : (shh / 8);
-    for(int i = 0; i < 3; i++){
-      uiRectA(ix, iy, iw, mh, mh / 4, TH_SURF2, aSide);
-      uiTextC(sx + sw / 2, iy + mh / 2 - uiLineH(2), mk[i], uiFontFit(mk[i], iw - 8, 3), TH_TXT, aSide);
-      iy += mh + pad / 2;
-    }
-    iy += pad;
-    uiTextC(sx + sw / 2, iy, "Resultado", uiFontFit("Resultado", iw, 2), TH_TXT2, aSide);
-    iy += uiLineH(2) + 4;
-    uiTextC(sx + sw / 2, iy, calcDisp, uiFontFit(calcDisp, iw, 3), TH_ACCS, aSide);
-  }
   if(!host){ setBuf(fb); fbCopyBand(lockBuf, WIN_TOP, WIN_BOT - 1); }
   flxFlush(WIN_TOP, WIN_BOT);
 }
@@ -262,9 +278,10 @@ static void calcRenderDisplay(){                       // solo el display (al te
   fillRect(dx - 2, y0, dw + 4, y1 - y0, WIN_BG);  // borra el valor anterior
   int drad = dh / 5; if(drad > 14) drad = 14; if(drad < 2) drad = 2;
   uiSurface(dx, dy, dw, dh, drad, UIS_CARD);     // display: material del sistema
+  char ln[56]; calcLine(ln, sizeof(ln));
   int dfs = dh >= 90 ? 5 : dh >= 64 ? 4 : dh >= 40 ? 3 : 2;
-  while(dfs > 1 && textW(calcDisp, dfs) > dw - 20) dfs--;
-  drawTextR(dx + dw - 10, dy + dh / 2 - dfs * 4, calcDisp, dfs, TH_TXT);
+  while(dfs > 1 && textW(ln, dfs) > dw - 20) dfs--;
+  drawTextR(dx + dw - 10, dy + dh / 2 - dfs * 4, ln, dfs, TH_TXT);
   if(!host){ fbCopyBand(lockBuf, y0, y1); setBuf(fb); }
   flxFlush(y0, y1);
 }
