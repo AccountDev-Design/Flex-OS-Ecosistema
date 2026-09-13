@@ -40,7 +40,10 @@ const char* flexOtaLocalVersion(){ return "1.0.0"; }
 
 // ---- Sistema de archivos ----
 bool        flexFsBegin(){ return false; }
-bool        flexFsReady(){ return false; }
+// El almacenamiento tambien se puede mover desde las pruebas: por defecto sigue
+// "no disponible", que es lo que esperaban las baterias que ya existian.
+bool        gTestFsReady = false;
+bool        flexFsReady(){ return gTestFsReady; }
 bool        flexFsIsDir(const char*){ return false; }
 uint32_t    flexFsSize(const char*){ return 0; }
 bool        flexFsExists(const char*){ return false; }
@@ -122,22 +125,62 @@ void flexBrowserKeyCancel(){}
 // almacenamiento", que es el mismo camino que toma la placa cuando el
 // usuario todavia no ha creado su Flex Vault. Asi las pantallas del
 // sketch se ejercitan por su rama honesta y no por una inventada.
+// ---- DOBLE DE LA BOVEDA, CONTROLABLE DESDE LAS PRUEBAS --------------------
+// La criptografia de verdad tiene su propia bateria (test_vault, con mbedTLS y
+// NVS reales). Lo que hace falta AQUI es poder mover el estado de la boveda --
+// existe / esta abierta / la clave es correcta / hay espera -- para comprobar
+// el CABLEADO del espacio seguro: que la app pide la clave, que un fallo no
+// destruye la tarea, que salir cierra y que volver vuelve a pedirla.
+//
+// Los valores por defecto son EXACTAMENTE los de antes (no existe, cerrada,
+// sin clave), asi que ninguna prueba que ya existia cambia de resultado.
+bool        gTestVaultExists   = false;
+bool        gTestVaultUnlocked = false;
+int         gTestVaultLockType = FLEXVAULT_LOCK_PIN;
+int         gTestVaultSecretLen = 4;
+char        gTestVaultSecret[32] = "1234";
+uint32_t    gTestVaultWaitMs   = 0;
+uint32_t    gTestVaultAutoLock = 60000;
+uint32_t    gTestVaultAppMask  = 0;      // bit por app privada anadida
+uint32_t    gTestVaultAppLock  = 0;      // bit por app privada con candado
+int         gTestVaultUnlockOk = 0;      // aperturas correctas
+int         gTestVaultUnlockKo = 0;      // intentos fallidos
+int         gTestVaultLockCalls = 0;     // veces que se cerro
+int         gTestVaultLockReason = -1;   // ultimo motivo de cierre
+
 bool     flexVaultBegin(){ return false; }
-bool     flexVaultExists(){ return false; }
-bool     flexVaultUnlocked(){ return false; }
-int      flexVaultLockType(){ return FLEXVAULT_LOCK_NONE; }
-int      flexVaultSecretLen(){ return 0; }
-uint32_t flexVaultAutoLockMs(){ return 60000; }
-void     flexVaultSetAutoLockMs(uint32_t){}
+bool     flexVaultExists(){ return gTestVaultExists; }
+bool     flexVaultUnlocked(){ return gTestVaultUnlocked; }
+int      flexVaultLockType(){ return gTestVaultExists ? gTestVaultLockType : FLEXVAULT_LOCK_NONE; }
+int      flexVaultSecretLen(){ return gTestVaultLockType == FLEXVAULT_LOCK_PIN ? gTestVaultSecretLen : 0; }
+uint32_t flexVaultAutoLockMs(){ return gTestVaultAutoLock; }
+void     flexVaultSetAutoLockMs(uint32_t ms){ gTestVaultAutoLock = ms; }
 uint32_t flexVaultLastAccess(){ return 0; }
-int      flexVaultFails(){ return 0; }
-uint32_t flexVaultWaitMs(){ return 0; }
+int      flexVaultFails(){ return gTestVaultUnlockKo; }
+uint32_t flexVaultWaitMs(){ return gTestVaultWaitMs; }
 uint32_t flexVaultUsedBytes(){ return 0; }
 int      flexVaultCount(int){ return 0; }
 const char* flexVaultError(){ return "sin almacenamiento"; }
-int      flexVaultCreate(const char*, int){ return FXV_ERR_IO; }
-int      flexVaultUnlock(const char*){ return FXV_ERR_STATE; }
-void     flexVaultLock(int){}
+int      flexVaultCreate(const char* s, int type){
+  if(!s || strlen(s) < 4) return FXV_ERR_ARG;
+  snprintf(gTestVaultSecret, sizeof(gTestVaultSecret), "%s", s);
+  gTestVaultLockType = type;
+  gTestVaultSecretLen = (int)strlen(s);
+  gTestVaultExists = true; gTestVaultUnlocked = true;
+  return FXV_OK;
+}
+int      flexVaultUnlock(const char* s){
+  if(!gTestVaultExists) return FXV_ERR_STATE;
+  if(gTestVaultWaitMs)  return FXV_ERR_WAIT;
+  if(!s || strcmp(s, gTestVaultSecret) != 0){ gTestVaultUnlockKo++; return FXV_ERR_WRONG; }
+  gTestVaultUnlocked = true; gTestVaultUnlockOk++; gTestVaultUnlockKo = 0;
+  return FXV_OK;
+}
+void     flexVaultLock(int reason){
+  gTestVaultUnlocked = false;
+  gTestVaultLockCalls++;
+  gTestVaultLockReason = reason;
+}
 int      flexVaultChangeSecret(const char*, const char*, int){ return FXV_ERR_STATE; }
 int      flexVaultList(int, FlexVaultItem*, int){ return 0; }
 int      flexVaultListFor(int, int, FlexVaultItem*, int){ return 0; }
@@ -154,11 +197,28 @@ bool     flexVaultReadStream(uint16_t, FlexVaultChunkCb, void*){ return false; }
 bool     flexVaultAppSupported(int appId){ return appId == 1 || appId == 3 || appId == 5; }
 const char* flexVaultAppReason(int appId){ return flexVaultAppSupported(appId) ? 0 : "Esta app aun no es compatible con Carpeta segura"; }
 bool     flexVaultAppForbidden(int appId){ return appId == 12 || appId == 4; }
-bool     flexVaultAppAdded(int){ return false; }
-bool     flexVaultAppAdd(int){ return false; }
-bool     flexVaultAppRemove(int, int){ return false; }
-bool     flexVaultAppLocked(int){ return false; }
-void     flexVaultAppSetLocked(int, bool){}
+bool     flexVaultAppAdded(int id){
+  return id >= 0 && id < 32 && (gTestVaultAppMask & (1u << id)) != 0;
+}
+bool     flexVaultAppAdd(int id){
+  if(id < 0 || id >= 32 || !flexVaultAppSupported(id) || !gTestVaultUnlocked) return false;
+  gTestVaultAppMask |= (1u << id);
+  return true;
+}
+bool     flexVaultAppRemove(int id, int){
+  if(id < 0 || id >= 32 || !gTestVaultUnlocked) return false;
+  gTestVaultAppMask &= ~(1u << id);
+  gTestVaultAppLock &= ~(1u << id);
+  return true;
+}
+bool     flexVaultAppLocked(int id){
+  return id >= 0 && id < 32 && (gTestVaultAppLock & (1u << id)) != 0;
+}
+void     flexVaultAppSetLocked(int id, bool on){
+  if(id < 0 || id >= 32) return;
+  if(on) gTestVaultAppLock |=  (1u << id);
+  else   gTestVaultAppLock &= ~(1u << id);
+}
 uint32_t flexVaultAppBytes(int){ return 0; }
 uint32_t flexVaultAppLast(int){ return 0; }
 void     flexVaultAppTouch(int){}

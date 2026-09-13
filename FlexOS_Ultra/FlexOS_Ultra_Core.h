@@ -477,7 +477,14 @@ static void appEnforceMemoryBudget(){
 static void appSuspend(int id, bool landscape){
   if(id < 0 || id >= APP_N) return;
   if(gAppState[id] == ALIFE_SUSPENDED) return;
-  if(landscape || (APP_REG[id].flags & APP_LAND)) swPushNoThumb(id);   // miniatura girada: mejor ninguna
+  // ESPACIO SEGURO: NI UNA CAPTURA. La miniatura se toma AQUI, antes de que
+  // corra el suspend() de la app, asi que lo que hubiera en pantalla -- una
+  // nota privada, una foto de la Carpeta segura -- acabaria en PSRAM en claro
+  // si se dejara pasar. swPushNoThumb ademas suelta la que hubiera de antes, de
+  // modo que una app que entra al espacio seguro pierde su captura anterior.
+  // Es la fuga exacta por la que Flex Vault no podia ser una app, cerrada aqui.
+  if(appTaskSecure(id))                           swPushNoThumb(id);
+  else if(landscape || (APP_REG[id].flags & APP_LAND)) swPushNoThumb(id);   // miniatura girada: mejor ninguna
   else                                            swPushAndCapture(id);
   const AppHooks* h = appHooks(id);
   if(h && h->suspend) h->suspend();
@@ -666,6 +673,10 @@ static void enterApp(int id){
     int verdict = memAdmitApp(id);
     if(verdict != FLEXMEM_OK){ appDenyMemory(id, verdict); return; }
   }
+  // ESPACIO DE TRABAJO. Abrir CUALQUIER otra app devuelve el contexto a normal:
+  // el espacio seguro solo manda mientras su app esta en primer plano, y una
+  // app normal no puede heredar el contexto de la anterior por accidente.
+  if(id != IC_SECFOLDER) gWorkspace = FLEXWS_NORMAL;
   appLoadSessionOnce(id);
   bool resuming = (gAppState[id] == ALIFE_SUSPENDED);
   const AppHooks* h = appHooks(id);

@@ -62,8 +62,20 @@ enum { IC_RELOJ, IC_GALERIA, IC_MULTIMEDIA, IC_ALMACEN, IC_MODOPC, IC_NOTAS,
        // reservado, y por el mismo motivo: ningun indice anterior se mueve, asi
        // que el escritorio guardado, las favoritas y el candado por app de una
        // placa que actualiza siguen apuntando a lo mismo.
-       IC_BRUJULA };
-#define APP_N 21
+       IC_BRUJULA,
+       // Carpeta segura 21. Se anade AL FINAL por el mismo motivo que todas las
+       // anteriores: el indice de este enum ES el id de la app en APP_REG y
+       // ademas viaja a NVS dentro de gAppFav y gAppHidden, asi que mientras
+       // ningun valor anterior se mueva, el escritorio guardado, las favoritas y
+       // el candado por app de una placa que actualiza siguen apuntando a lo
+       // mismo.
+       //
+       // Es la CARA de Flex Vault: no trae ni una clave nueva ni un almacen
+       // nuevo. Lo unico que cambia respecto a la version anterior es que la
+       // Carpeta segura deja de vivir escondida en Ajustes y pasa a ser una app
+       // del sistema, con su tarea, su Home propio y su sitio en Recientes.
+       IC_SECFOLDER };
+#define APP_N 22
 
 static void iconBase(int x, int y, int S, uint16_t bg, int rf100){
   int r = S * rf100 / 100;
@@ -325,6 +337,26 @@ static void drawAppIcon(int id, int x, int y, int S){
       fillCircle(cx, cy, (int)(S * 0.16f), rgb565(60,72,95));
       fillCircle(cx - (int)(S * 0.06f), cy - (int)(S * 0.06f), (int)(S * 0.05f), rgb565(150,175,205));
       fillRoundRect(x + (int)(S * 0.66f), y + (int)(S * 0.18f), (int)(S * 0.10f), (int)(S * 0.06f), 2, rgb565(190,190,195));
+    } break;
+    case IC_SECFOLDER: {
+      // CARPETA SEGURA. Carpeta clara sobre violeta -- el mismo violeta que ya
+      // identificaba a Flex Vault en la fila de Ajustes (rgb565(150,110,220)),
+      // para que quien la conociera ahi la reconozca como app -- con el candado
+      // CERRADO delante. El candado no es adorno: es la senal de que lo que hay
+      // dentro esta cifrado, igual que el de la cabecera de la boveda.
+      iconBase(x, y, S, rgb565(112,86,196), 22);
+      uint16_t fol = rgb565(232,230,250);
+      // pestana + cuerpo de la carpeta
+      fillRoundRect(x + (int)(S * 0.18f), y + (int)(S * 0.24f), (int)(S * 0.30f), (int)(S * 0.11f), 3, fol);
+      fillRoundRect(x + (int)(S * 0.16f), y + (int)(S * 0.32f), (int)(S * 0.68f), (int)(S * 0.42f), 5, fol);
+      // candado centrado sobre el cuerpo: arco (arriba) + cuerpo (abajo)
+      { int bw = (int)(S * 0.30f), bh = (int)(S * 0.22f);
+        int bx = cx - bw / 2, by = cy + (int)(S * 0.02f);
+        int ar = (int)(S * 0.105f); if(ar < 3) ar = 3;
+        int at = (int)(S * 0.055f); if(at < 2) at = 2;
+        arcStroke(cx, by, ar, 180, 360, at, rgb565(78,56,150));
+        fillRoundRect(bx, by, bw, bh, 3, rgb565(78,56,150));
+        fillCircle(cx, by + bh / 2, (int)(S * 0.035f) + 1, fol); }
     } break;
   }
 }

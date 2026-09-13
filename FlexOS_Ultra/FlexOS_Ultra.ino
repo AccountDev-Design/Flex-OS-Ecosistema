@@ -291,6 +291,7 @@
 #include "FlexOS_Ultra_AppCompass.h"         // Flex Compass: brujula sobre el servicio IMU
 #include "FlexOS_Ultra_Theft.h"              // Proteccion contra robo: clasificador, eventos y bloqueo
 #include "FlexOS_Ultra_TheftUI.h"            // Proteccion contra robo: pantallas y animacion
+#include "FlexOS_Ultra_SecureFolder.h"      // Carpeta segura: el espacio seguro como app del sistema
 // ------------- FIN DE LOS MODULOS -------------------------
 
 // Puente del modulo OTA. Va AQUI, y no arriba, a proposito: implementa

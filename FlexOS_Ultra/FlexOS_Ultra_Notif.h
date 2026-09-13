@@ -79,7 +79,11 @@ static bool notifSecureScreen(){
     case ST_POWEROFF_ANIM:
       return true;
     default:
-      return false;
+      // CARPETA SEGURA. Ahora es una app (ST_APP), asi que no basta con mirar
+      // el estado: mientras ella manda, la pantalla es tan sensible como lo era
+      // ST_VAULT y los avisos esperan a que el usuario vuelva a una pantalla
+      // normal, en vez de pintarse sobre el contenido privado.
+      return secfForeground();
   }
 }
 

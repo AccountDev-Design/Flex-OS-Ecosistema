@@ -234,7 +234,10 @@ static void qpTapPower(){ qsPower = !qsPower; qpApplyPower(); }
 static void qpTapCrono(){ if(gCronoSt == CRONO_RUN) cronoPause(); else cronoStart(); }
 static void qpTapSettings(){ qpLeaveToApp(IC_AJUSTES); }
 static void qpTapConn(){ qpLeaveToSettingsSub(connEnter); }
-static void qpTapVault(){ qpLeaveToSettingsSub(vaultSettingsEnter); }
+// CARPETA SEGURA. Ya no hace falta pasar por Ajustes para que "atras" vuelva a
+// una pantalla coherente: ahora es una app, asi que se abre como se abren la
+// Camara o la Galeria y "atras" devuelve al escritorio, como en cualquier otra.
+static void qpTapVault(){ qpLeaveToApp(IC_SECFOLDER); }
 static void qpTapOta(){ qsRestoreBg(); qsForceClose(); flexOtaOpenSettings(); }
 static void qpTapDex(){ qpLeaveToApp(IC_MODOPC); }
 static void qpTapCamera(){ qpLeaveToApp(IC_CAMARA); }
@@ -494,7 +497,7 @@ static const QsCtl QS_REG[QSID_COUNT] = {
     qpAvTrue,   NULL,         qpTapConn,     NULL,          NULL,          qpIcoSignal },
   { QSID_DEX,       "Modo PC",    "Modo PC",                QT_ACTION, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SYSTEM,
     qpAvDex,    NULL,         qpTapDex,      NULL,          NULL,          qpIcoMonitor },
-  { QSID_VAULT,     "Vault",      "Flex Vault",             QT_ACTION, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SYSTEM,
+  { QSID_VAULT,     "Segura",     "Carpeta segura",         QT_ACTION, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SYSTEM,
     qpAvFs,     NULL,         qpTapVault,    NULL,          NULL,          qpIcoShield },
   { QSID_OTA,       "Actualizar", "Actualizaciones",        QT_ACTION, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SYSTEM,
     qpAvTrue,   NULL,         qpTapOta,      NULL,          qpSubOta,      qpIcoUpdate },

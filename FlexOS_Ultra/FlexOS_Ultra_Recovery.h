@@ -100,7 +100,7 @@ static void frDrawIntro(){
     "Notas, dibujos y archivos del usuario",
     "Apps instaladas y sus datos",
     "Sesiones abiertas e historial",
-    "Boveda local (Flex Vault) y sus claves"
+    "Carpeta segura local y sus claves"
   };
   for(unsigned i = 0; i < sizeof(items) / sizeof(items[0]); i++){
     fillCircle(cx + 22, y + 8, 3, rgb565(220,80,80));

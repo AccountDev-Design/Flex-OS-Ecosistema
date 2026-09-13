@@ -254,6 +254,7 @@ static void testIconosEnSuCaja();
 static void testTransicionesApps();
 static void testRejillaAutoPaginas();
 static void testMultitareaMemoria();
+static void testCarpetaSegura();
 static void testFlexCompass();
 static void testProteccionRobo();
 static int gFails = 0;
@@ -5067,6 +5068,422 @@ static void mtSetFree(size_t freeWanted){
   memSampleNow();
 }
 
+// #############################################################
+//  CARPETA SEGURA  ·  el espacio seguro como app del sistema
+//  ------------------------------------------------------------
+//  Lo que se comprueba aqui es el CABLEADO, que es lo que ninguna otra bateria
+//  puede ver: que la app pide la clave de Flex Vault (y no una propia), que un
+//  intento fallido no destruye la tarea, que salir cierra el espacio, que
+//  volver vuelve a pedir la clave y restaura donde estaba el usuario, y --lo
+//  mas importante-- que una tarea del espacio seguro NUNCA deja una miniatura
+//  en Recientes.
+//
+//  La criptografia de verdad no se prueba aqui: tiene su propia bateria
+//  (test_vault, con mbedTLS y NVS reales). Aqui la boveda es un doble
+//  controlable, y eso es exactamente lo que hace falta para mover su estado.
+// #############################################################
+extern bool     gTestVaultExists;
+extern bool     gTestVaultUnlocked;
+extern int      gTestVaultLockType;
+extern int      gTestVaultSecretLen;
+extern char     gTestVaultSecret[];
+extern uint32_t gTestVaultWaitMs;
+extern uint32_t gTestVaultAutoLock;
+extern uint32_t gTestVaultAppMask;
+extern uint32_t gTestVaultAppLock;
+extern int      gTestVaultUnlockOk;
+extern int      gTestVaultUnlockKo;
+extern int      gTestVaultLockCalls;
+extern int      gTestVaultLockReason;
+extern bool     gTestFsReady;
+
+// Deja la boveda EXISTIENDO y CERRADA, con PIN "1234", y el sistema en Inicio.
+static void secTestReset(){
+  appTrCancel();
+  gState = ST_HOME; gAppId = IC_RELOJ;
+  gHosted = false; gLand = false;
+  gSafeMode = false;
+  while(swCardCount() > 0) swDropCard(0);
+  for(int i = 0; i < APP_N; i++){
+    gAppState[i] = ALIFE_CLOSED; gAppSeenMs[i] = 0;
+    gSessNeedSave[i] = false; gAppShed[i] = false;
+    appMemForget(i);
+  }
+  gSessDirtyApp = -1;
+  gSecTaskMask = 0; gWorkspace = FLEXWS_NORMAL;
+  gTestFsReady = true;
+  gTestVaultExists = true; gTestVaultUnlocked = false;
+  gTestVaultLockType = FLEXVAULT_LOCK_PIN; gTestVaultSecretLen = 4;
+  snprintf(gTestVaultSecret, 32, "%s", "1234");
+  gTestVaultWaitMs = 0; gTestVaultAutoLock = 60000;
+  gTestVaultAppMask = 0; gTestVaultAppLock = 0;
+  gTestVaultUnlockOk = 0; gTestVaultUnlockKo = 0;
+  gTestVaultLockCalls = 0; gTestVaultLockReason = -1;
+  secRsValid = false; secPage = 0; secView = SEC_VW_AUTH;
+  vwHosted = false;
+  memSampleNow();
+}
+// Abre la app del todo (sin quedarse en la transicion, que es asincrona).
+static void secTestOpenApp(){
+  enterApp(IC_SECFOLDER);
+  appTrFinishOpen();
+}
+// Teclea un digito del teclado numerico de la pantalla de clave.
+static void secTestPinKey(int digit){
+  // PIN_KEYS: 1 2 3 / 4 5 6 / 7 8 9 / < 0 OK  -> el indice del digito 'd'
+  int idx = (digit == 0) ? 10 : (digit - 1);
+  int x, y, w, h; lsuPinRect(idx, x, y, w, h);
+  touchReset();
+  T.tap = true; T.released = true;
+  T.x = T.startX = x + w / 2; T.y = T.startY = y + h / 2;
+  secfTick();
+}
+static void secTestType(const char* pin){
+  for(const char* p = pin; *p; p++) secTestPinKey(*p - '0');
+}
+
+static void testCarpetaSegura(){
+  printf("Carpeta segura: app, clave compartida, tareas y snapshot protegido\n");
+  int before = gFails;
+
+  // ---- 1) ES UNA APP DE VERDAD, y se llama por su nombre ----
+  chk(APP_N == 22, "el registro tiene la app nueva al final, sin mover ninguna anterior");
+  chk(IC_SECFOLDER == 21, "su id es el ultimo: ningun id anterior se movio");
+  chk(!strcmp(APP[IC_SECFOLDER][0], "Carpeta segura"), "en la interfaz se llama Carpeta segura");
+  chk(APP_REG[IC_SECFOLDER].enter == secfEnter, "tiene punto de entrada en APP_REG");
+  chk(APP_REG[IC_SECFOLDER].tick  == secfTick,  "...y tick, asi que el sistema la despacha");
+  chk(APP_REG[IC_SECFOLDER].hooks != NULL, "tiene ganchos de ciclo de vida");
+  chk(APP_REG[IC_SECFOLDER].hooks->suspend == secfSuspend, "suspender la cierra");
+  chk(APP_REG[IC_SECFOLDER].hooks->resume  == secfResume,  "reanudar vuelve a pedir la clave");
+  chk((APP_REG[IC_SECFOLDER].dflt & APP_DEF_FAV) == 0,
+      "no nace en el escritorio: una placa que actualiza no ve su Inicio reordenado");
+
+  // ---- 2) APARECE EN LA CAJA DE APLICACIONES ----
+  secTestReset();
+  drwShowHid = false; drwQuery[0] = 0; drwQLen = 0;
+  drwFilter();
+  bool enCaja = false;
+  for(int i = 0; i < drwN; i++) if(drwNativeId(i) == IC_SECFOLDER) enCaja = true;
+  chk(enCaja, "la Caja de aplicaciones la lista como una app mas");
+
+  // ...pero NO en el buscador de Modo PC: ahi el contenido iria a una ventana
+  // del escritorio compartido.
+  { int outApps[APP_N]; dexQuery[0] = 0; dexQLen = 0;
+    int n = dexFilterApps(outApps, APP_N);
+    bool enDex = false;
+    for(int i = 0; i < n; i++) if(outApps[i] == IC_SECFOLDER) enDex = true;
+    chk(!enDex, "el buscador de Modo PC no la ofrece: no se abre hospedada"); }
+
+  // ---- 3) ABRIR PIDE LA CLAVE (Test 1 y 2 del encargo) ----
+  secTestReset();
+  secTestOpenApp();
+  chk(gState == ST_APP && gAppId == IC_SECFOLDER, "se abre como app, no como pantalla de Ajustes");
+  chk(secView == SEC_VW_AUTH, "con la boveda cerrada lo primero es la clave");
+  chk(appTaskSecure(IC_SECFOLDER), "su tarea queda marcada como del espacio seguro");
+  chk(gWorkspace == FLEXWS_SECURE, "el contexto en primer plano es el seguro");
+
+  // Clave INCORRECTA: ni se pierde la tarea, ni se sale, ni se revela nada.
+  secTestType("9999");
+  chk(gTestVaultUnlockKo == 1, "el intento fallido lo cuenta la boveda, no la app");
+  chk(!flexVaultUnlocked(),    "la boveda sigue cerrada");
+  chk(secView == SEC_VW_AUTH,  "se sigue en la clave: no se vuelve al escritorio");
+  chk(gState == ST_APP && gAppId == IC_SECFOLDER, "y la tarea NO se destruye");
+
+  // Clave CORRECTA: se entra al escritorio del espacio.
+  secTestType("1234");
+  chk(gTestVaultUnlockOk == 1, "la apertura la resuelve flexVaultUnlock: no hay un segundo PIN");
+  chk(secView == SEC_VW_HOME,  "con la clave correcta se entra al Home del espacio");
+  chk(secCellN >= 3, "el escritorio seguro tiene celdas (galeria, notas y archivos)");
+
+  // ---- 4) UNA APP PRIVADA ANADIDA APARECE COMO ICONO ----
+  gTestVaultAppMask = (1u << IC_NOTAS);
+  secBuildCells();
+  bool hayNotas = false;
+  for(int i = 0; i < secCellN; i++)
+    if(secCells[i].act == SEC_ACT_PAPP && secCells[i].app == IC_NOTAS) hayNotas = true;
+  chk(hayNotas, "una app anadida a la carpeta sale en su escritorio, con su icono real");
+  gTestVaultAppMask = 0; secBuildCells();
+
+  // ---- 5) PAGINAS PROPIAS, INDEPENDIENTES DEL INICIO NORMAL ----
+  int homePageAntes = gHomePage;
+  secPage = 0;
+  secCellN = 0;
+  for(int i = 0; i < 18; i++) secAddCell(SEC_ACT_FILES, -1);   // dos paginas
+  secPageN = (secCellN + SECH_SLOTS - 1) / SECH_SLOTS;
+  chk(secPageN == 2, "el escritorio seguro pagina solo cuando hace falta");
+  secPage = 1;
+  chk(gHomePage == homePageAntes, "cambiar de pagina en el espacio NO mueve la del Inicio normal");
+  secPage = 0; secBuildCells();
+
+  // ---- 6) SALIR AL INICIO CIERRA EL ESPACIO (Test 6) ----
+  int lockAntes = gTestVaultLockCalls;
+  appClose();
+  chk(gState == ST_HOME, "Inicio vuelve a mandar en el acto");
+  chk(gTestVaultLockCalls > lockAntes, "salir CIERRA la boveda: es la politica de siempre");
+  chk(!flexVaultUnlocked(), "la clave ya no esta en memoria");
+  chk(gWorkspace == FLEXWS_NORMAL, "el contexto vuelve a normal al salir");
+  chk(gAppState[IC_SECFOLDER] == ALIFE_SUSPENDED, "la tarea sigue viva: suspendida, no cerrada");
+
+  // ---- 7) LA TAREA SIGUE EN RECIENTES, Y SIN MINIATURA (Test 5, 7 y 12) ----
+  int card = -1;
+  for(int i = 0; i < swCardCount(); i++) if(swCardApp(i) == IC_SECFOLDER) card = i;
+  chk(card >= 0, "la tarea segura sigue existiendo en Recientes tras volver a Inicio");
+  chk(appTaskSecure(IC_SECFOLDER), "y sigue marcada como segura");
+  chk(swTasks[card].thumb == NULL,
+      "NUNCA hay captura de una tarea segura: el contenido privado no llega a PSRAM");
+  chk(!strcmp(swStateName(IC_SECFOLDER), "Protegida"),
+      "la tarjeta dice solo que esta protegida, no si esta activa o pausada");
+
+  // ---- 8) VOLVER A LA TAREA PIDE LA CLAVE OTRA VEZ (Test 8, 9 y 10) ----
+  swMaximize(card);
+  appTrFinishOpen();
+  chk(gState == ST_APP && gAppId == IC_SECFOLDER, "tocar la tarjeta devuelve a la tarea");
+  chk(secView == SEC_VW_AUTH, "...y lo primero que se pide es la clave, otra vez");
+  chk(!flexVaultUnlocked(), "reanudar no reabre la boveda por su cuenta");
+
+  // ---- 9) RESTAURACION EXACTA (Test 11) ----
+  // Se deja al usuario mirando Notas privadas y se sale; al volver y acertar,
+  // se vuelve a ESA pantalla, no al Home del espacio.
+  secTestType("1234");
+  chk(secView == SEC_VW_HOME, "con la clave correcta se vuelve a entrar");
+  secOpenCell(1);                                   // celda 1 = Notas privadas
+  chk(secView == SEC_VW_VAULT && vwView == VW_LIST && vwKind == FXV_KIND_NOTE,
+      "se abre la seccion de notas privadas dentro del espacio");
+  vwScroll = 73;
+  appClose();
+  chk(secRsValid, "al salir se recuerda donde estaba el usuario (en RAM, no en disco)");
+  swMaximize(0);
+  appTrFinishOpen();
+  chk(secView == SEC_VW_AUTH, "al volver, la clave");
+  secTestType("1234");
+  chk(secView == SEC_VW_VAULT && vwView == VW_LIST && vwKind == FXV_KIND_NOTE,
+      "tras la clave se restaura EXACTAMENTE la pantalla anterior");
+  chk(vwScroll == 73, "...con su scroll incluido");
+
+  // ---- 10) CERRAR LA TAREA LA CIERRA DE VERDAD (Test 13) ----
+  appClose();
+  int idx = -1;
+  for(int i = 0; i < swCardCount(); i++) if(swCardApp(i) == IC_SECFOLDER) idx = i;
+  chk(idx >= 0, "la tarjeta esta ahi antes de cerrarla");
+  chk(swCloseCard(idx), "una tarea segura se puede cerrar como cualquier otra");
+  chk(gAppState[IC_SECFOLDER] == ALIFE_CLOSED, "la tarea queda cerrada de verdad");
+  chk(!appTaskSecure(IC_SECFOLDER), "y su marca de contexto NO sobrevive a la tarea");
+  chk(!secRsValid, "cerrarla borra tambien el punto al que se iba a volver");
+  idx = -1;
+  for(int i = 0; i < swCardCount(); i++) if(swCardApp(i) == IC_SECFOLDER) idx = i;
+  chk(idx < 0, "y su tarjeta desaparece de Recientes");
+
+  // ---- 11) "CERRAR TODAS" TAMBIEN SE LA LLEVA (Test 14) ----
+  secTestReset();
+  secTestOpenApp();
+  secTestType("1234");
+  appClose();
+  enterApp(IC_NOTAS); appTrFinishOpen();            // una app normal al lado
+  appClose();
+  chk(swCardCount() >= 2, "hay una tarea normal y una segura en Recientes");
+  swCloseAll();
+  chk(swCardCount() == 0, "Cerrar todas no deja ninguna tarea segura viva por detras");
+  chk(gAppState[IC_SECFOLDER] == ALIFE_CLOSED, "...y la segura esta cerrada de verdad");
+  chk(!flexVaultUnlocked(), "con la tarea cerrada, la boveda tambien");
+
+  // ---- 12) UNA APP NORMAL NO SE CONVIERTE EN SEGURA (Test 15 y 16) ----
+  secTestReset();
+  secTestOpenApp();
+  secTestType("1234");
+  enterApp(IC_NOTAS); appTrFinishOpen();
+  chk(!appTaskSecure(IC_NOTAS), "abrir Notas desde el espacio NO la marca como segura");
+  chk(gWorkspace == FLEXWS_NORMAL, "y el contexto vuelve a normal al abrir otra app");
+  { int c = -1; for(int i = 0; i < swCardCount(); i++) if(swCardApp(i) == IC_NOTAS) c = i;
+    (void)c; }
+  appClose();
+  { int c = -1; for(int i = 0; i < swCardCount(); i++) if(swCardApp(i) == IC_NOTAS) c = i;
+    chk(c >= 0, "la app normal conserva su tarjeta");
+    chk(!appTaskSecure(IC_NOTAS), "...y sigue sin ser una tarea segura"); }
+
+  // ---- 13) LAS CAPAS DEL SISTEMA NO PINTAN SOBRE EL ESPACIO ----
+  secTestReset();
+  secTestOpenApp();
+  chk(secfForeground(), "el espacio seguro manda en pantalla");
+  chk(!qsCanOpen(), "el panel rapido no se abre sobre el espacio seguro");
+  chk(notifSecureScreen(), "la isla de notificaciones retiene los avisos, no los pinta encima");
+  appClose();
+  chk(qsCanOpen(), "fuera del espacio, el panel rapido vuelve a funcionar como siempre");
+
+  // ---- 14) EL SISTEMA PUEDE CERRAR EL ESPACIO DESDE FUERA ----
+  // Pantalla apagada, apagado, Recientes: el camino de siempre
+  // (vaultLockFromSystem) tambien alcanza al espacio cuando es una app.
+  secTestReset();
+  secTestOpenApp();
+  secTestType("1234");
+  chk(flexVaultUnlocked(), "el espacio esta abierto");
+  vaultLockFromSystem(FXV_LOCK_SCREEN);
+  chk(!flexVaultUnlocked(), "apagar la pantalla cierra el espacio");
+  chk(gTestVaultLockReason == FXV_LOCK_SCREEN, "...y lo registra con su motivo real");
+  chk(secView == SEC_VW_AUTH, "y en pantalla queda la clave, no una lista que ya no se puede leer");
+
+  // ---- 15) MODO PC: NO SE ABRE HOSPEDADA ----
+  secTestReset();
+  gHosted = true; gHostReq = 0;
+  secfEnter();
+  chk(gHostReq == 1, "dentro de una ventana de DeX se niega y pide cerrar la ventana");
+  gHosted = false; gHostReq = 0;
+
+  // ---- 16) ESPERA POR INTENTOS FALLIDOS: LA DE LA BOVEDA ----
+  secTestReset();
+  secTestOpenApp();
+  gTestVaultWaitMs = 30000;
+  secTestType("1234");
+  chk(!flexVaultUnlocked(), "con espera en curso ni la clave correcta abre");
+  chk(secView == SEC_VW_AUTH, "se sigue en la clave");
+  gTestVaultWaitMs = 0;
+  secTestType("1234");
+  chk(flexVaultUnlocked(), "pasada la espera, la misma clave abre");
+
+  // ---- 17) SIN ALMACENAMIENTO: SE DICE, NO SE FINGE ----
+  secTestReset();
+  gTestFsReady = false;
+  secfEnter();
+  chk(secView == SEC_VW_NOFS, "sin almacenamiento se dice, en vez de ensenar un espacio vacio");
+  gTestFsReady = true;
+
+  // ---- 17b) ALTA DESDE LA APP: se crea con la clave que el usuario elige ----
+  secTestReset();
+  gTestVaultExists = false; gTestVaultUnlocked = false;
+  secTestOpenApp();
+  chk(secView == SEC_VW_VAULT && vwView == VW_SETUP_SEL,
+      "sin carpeta creada, la app lleva al asistente de alta -- el que ya existia");
+  // Cancelar el alta sale de la app en vez de dejar un escritorio de una
+  // carpeta que no existe.
+  secGoHome();
+  chk(gState == ST_HOME, "cancelar el alta devuelve al escritorio normal");
+  // El asistente de alta no puede expulsarse a si mismo: la boveda todavia no
+  // existe, asi que "cerrada" NO significa aqui "pide la clave".
+  secTestReset();
+  gTestVaultExists = false; gTestVaultUnlocked = false;
+  secTestOpenApp();
+  touchReset(); secfTick();
+  chk(secView == SEC_VW_VAULT && vwView == VW_SETUP_SEL,
+      "un tick en el alta NO salta a una pantalla de clave de una carpeta que no hay");
+  vwGoKeypad(VK_CREATE, FLEXVAULT_LOCK_PIN);
+  touchReset(); secfTick();
+  chk(vwView == VW_KEYPAD, "y el teclado de creacion tampoco se expulsa solo");
+
+  // Crear de verdad, con el mismo camino de siempre (flexVaultCreate).
+  secTestReset();
+  gTestVaultExists = false; gTestVaultUnlocked = false;
+  secTestOpenApp();
+  vwGoKeypad(VK_CREATE, FLEXVAULT_LOCK_PIN);
+  snprintf(vwPin, sizeof(vwPin), "%s", "4321");
+  vwKeyConfirm();
+  chk(flexVaultExists(),   "la carpeta se crea con flexVaultCreate, no con codigo nuevo");
+  chk(flexVaultUnlocked(), "y queda abierta: el usuario acaba de demostrar que sabe la clave");
+  chk(secView == SEC_VW_HOME, "tras crearla se entra en ELLA, no en su pantalla de ajustes");
+  chk(!strcmp(gTestVaultSecret, "4321"), "la clave guardada es la que se escribio");
+
+  // ---- 17c) "MOVER A CARPETA SEGURA" DESDE OTRA APP SIGUE FUNCIONANDO ----
+  // Es el camino que usan Galeria, Notas, Archivos y Paint. NO pasa por la app:
+  // el usuario esta guardando un archivo desde donde estaba y tiene que volver
+  // ahi, asi que usa el estado propio (ST_VAULT) como siempre.
+  secTestReset();
+  gState = ST_APP; gAppId = IC_GALERIA;
+  chk(vaultMoveRequest("/Fotos/x.jpg", FXV_KIND_PHOTO),
+      "mover un archivo a la carpeta desde otra app se acepta");
+  chk(gState == ST_VAULT, "ese camino usa el estado propio, no abre la app");
+  chk(!vwHosted, "y desactiva el hospedaje: 'atras' tiene que volver a la app de origen");
+  gState = ST_HOME; gAppId = IC_RELOJ; vwPendPath[0] = 0;
+
+  // ---- 17d) INACTIVIDAD: la MISMA politica y el MISMO valor ----
+  secTestReset();
+  secTestOpenApp();
+  secTestType("1234");
+  chk(secView == SEC_VW_HOME, "el espacio esta abierto");
+  gTestVaultAutoLock = 15000;
+  secLastTouch = gTestMs;
+  gTestMs += 16000;                               // pasa el tiempo configurado
+  touchReset();
+  secfTick();
+  chk(!flexVaultUnlocked(), "pasado el tiempo sin tocar, el espacio se cierra solo");
+  chk(secView == SEC_VW_AUTH, "...y pide la clave otra vez");
+  chk(gTestVaultLockReason == FXV_LOCK_IDLE, "el cierre se registra como 'por inactividad'");
+  chk(secRsValid, "pero no se pierde donde estaba el usuario");
+
+  // ---- 18) RESPONSIVIDAD REAL EN 480x800 ----
+  // Ni un elemento pisa a otro, ni se sale de la pantalla, ni invade la franja
+  // que el sistema estampa abajo. Se mide con las MISMAS constantes que usa el
+  // dibujo, asi que mover una y olvidar la otra hace fallar esto.
+  chk(SCR_W == 480 && SCR_H == 800, "la maqueta esta hecha para la pantalla real");
+  { const int TXT4 = 32, TXT2 = 18, TXT1 = 12;      // altos de linea por tamano
+    // Escritorio seguro, de arriba abajo.
+    chk(SECH_TITLE_Y + TXT4 < SECH_SUB_Y,          "el titulo no pisa el subtitulo");
+    chk(SECH_SUB_Y + TXT1 < SECH_CARD_Y,           "el subtitulo no pisa la tarjeta de estado");
+    chk(SECH_CARD_Y + SECH_CARD_H < SECH_BAND_TOP, "la tarjeta no invade la banda de la rejilla");
+    int lastRow = SECH_GY0 + (SECH_ROWS - 1) * SECH_ROWSTEP;
+    chk(lastRow + SECH_ICON_S + 6 + TXT2 < SECH_DOTS_Y,
+        "la etiqueta de la ultima fila no pisa los puntos de pagina");
+    chk(SECH_DOTS_Y + 16 <= SECH_BAND_BOT,         "los puntos caben dentro de la banda movil");
+    chk(SECH_BAND_BOT < SECH_DOCK_Y,               "la banda movil no invade el dock");
+    chk(SECH_DOCK_Y + SECH_DOCK_H < SCR_H - NAV_H, "el dock no invade la franja del sistema");
+    chk(SECH_GX0 + (SECH_COLS - 1) * SECH_COLSTEP + SECH_ICON_S <= SCR_W,
+        "la ultima columna de iconos cabe a lo ancho");
+    chk(SECH_DOCK_X + SECH_DOCK_W <= SCR_W,        "el dock cabe a lo ancho");
+    // Las filas no se solapan entre si (icono + etiqueta contra la siguiente).
+    chk(SECH_ICON_S + 6 + TXT2 < SECH_ROWSTEP,     "una fila de iconos no pisa la de abajo");
+    chk(SECH_ICON_S + 16 < SECH_COLSTEP,           "un icono no invade la columna vecina");
+    // Pantalla de clave.
+    chk(SECA_LOCK_Y + 34 < SECA_LOCK_Y + 54,       "el candado queda encima del titulo");
+    chk(SECA_LOCK_Y + 54 + TXT4 < SECA_DOTS_Y - 8, "el titulo no pisa los puntos de la clave");
+    chk(SECA_DOTS_Y + 8 < SECA_MSG_Y,              "los puntos no pisan el aviso de clave incorrecta");
+    { int kx, ky, kw, kh; lsuPinRect(0, kx, ky, kw, kh);
+      chk(SECA_MSG_Y + TXT2 < ky, "el aviso no pisa el teclado numerico");
+      int lx, ly, lw, lh; lsuPinRect(11, lx, ly, lw, lh);
+      chk(ly + lh <= SCR_H, "el teclado numerico cabe entero en la pantalla");
+      chk(lx + lw <= SCR_W, "...y tambien a lo ancho"); }
+    kbExtrasOn = false; kbBotReserve = NAV_H; kbApplySize();
+    chk(SECA_MSG_Y + TXT2 < KB_Y, "el aviso tampoco pisa el teclado de contrasena");
+    // El aviso breve comparte franja con "Clave incorrecta": tampoco puede
+    // acabar encima del teclado, en ninguno de los dos modos.
+    { int kx, ky, kw, kh; lsuPinRect(0, kx, ky, kw, kh);
+      chk(SECA_MSG_Y + TXT2 < ky, "el aviso breve de la clave no tapa el teclado numerico"); }
+    // ...y en el escritorio va sobre el dock, no sobre la rejilla ni los puntos.
+    { int ty = SECH_DOCK_Y + (SECH_DOCK_H - 48) / 2;
+      chk(ty > SECH_DOTS_Y,        "el aviso del escritorio no tapa los puntos de pagina");
+      chk(ty + 48 <= SCR_H - NAV_H, "...ni se mete en la franja del sistema"); } }
+
+  // ---- 18b) LA FRANJA DEL SISTEMA ES DEL SISTEMA ----
+  // Al pasar de ser un estado propio a ser una app, los ultimos NAV_H px dejan
+  // de pertenecer a la pantalla: los estampa navStampBar. Sin reservarlos, la
+  // ultima fila de una lista privada quedaria medio tapada Y respondiendo al
+  // toque de otro, y la fila de funciones del teclado seria inalcanzable.
+  secTestReset();
+  secTestOpenApp();
+  secTestType("1234");
+  secOpenCell(1);                                   // Notas privadas, hospedada
+  chk(navBarVisible(), "dentro de la app el sistema estampa su franja de navegacion");
+  chk(vwBot() == navBarTop() - 1, "las vistas de la boveda recortan por encima de esa franja");
+  { kbBotReserve = navBarVisible() ? NAV_H : 0; kbApplySize();
+    int fy = KB_Y + 3 * (KB_KH + KB_GAP);
+    chk(fy + KB_KH <= SCR_H - NAV_H,
+        "la fila de funciones del teclado (shift, espacio, OK) queda ENCIMA de la franja"); }
+  // Y en el estado propio -- "Mover a Carpeta segura" desde otra app -- no
+  // cambia nada: ahi no hay barra que respetar y la pantalla sigue entera.
+  { int save = gState; gState = ST_VAULT;
+    chk(vwBot() == SCR_H - 1, "en el estado propio la pantalla sigue siendo entera, como antes");
+    gState = save; }
+  appClose();
+
+  // ---- 19) REINICIO: NADA QUEDA ABIERTO NI GUARDADO ----
+  // El espacio no tiene saveSess/loadSess a proposito: no hay ningun archivo
+  // donde pueda quedar en que pantalla estaba el usuario.
+  chk(APP_REG[IC_SECFOLDER].hooks->saveSess == NULL,
+      "el espacio no escribe sesion: ni siquiera su ultima pantalla toca el disco");
+  chk(APP_REG[IC_SECFOLDER].hooks->loadSess == NULL, "...y por tanto no lee ninguna al arrancar");
+
+  secTestReset();
+  gTestFsReady = false; gTestVaultExists = false; gTestVaultUnlocked = false;
+  gState = ST_HOME; gAppId = IC_RELOJ;
+  if(gFails == before) printf("  Carpeta segura: todas las comprobaciones pasan.\n");
+}
+
 static void testMultitareaMemoria(){
   printf("Multitarea por memoria: presupuesto, desalojo y Recientes\n");
   mtReset();
@@ -5796,6 +6213,7 @@ int main(){
   testFlexCompass();
   testProteccionRobo();
   testLiquidGlassSinApilar();
+  testCarpetaSegura();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

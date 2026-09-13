@@ -661,6 +661,25 @@ static const AppHooks H_DEVCARE  = { NULL, dcBackScreen, dcSuspend, dcResume, dc
 // Device Care lo sigue necesitando para la deteccion de caidas.
 // No lleva 'shed' ni 'dirty': no reserva nada pesado ni tiene datos del usuario.
 static const AppHooks H_COMPASS  = { cmpBackLayer, NULL, compassSuspend, compassResume, compassClose, NULL, NULL, NULL, NULL, NULL };
+// CARPETA SEGURA. backLayer cierra una capa propia (el menu de un elemento, un
+// dialogo del kit de archivos); backScreen retrocede UNA pantalla dentro del
+// espacio seguro antes de que "atras" salga al escritorio.
+//
+// suspend CIERRA el espacio seguro y borra las claves de la memoria: es la
+// misma politica de Flex Vault de siempre (salir de la boveda la cierra), solo
+// que ahora el camino de salida es el del ciclo de vida de apps. resume vuelve
+// a pedir la clave, asi que una tarea segura en segundo plano no puede
+// reaparecer abierta.
+//
+// NO lleva saveSess/loadSess a proposito: lo unico que sobreviviria a un
+// reinicio seria en que pantalla del espacio estaba el usuario, y escribir eso
+// en LittleFS SIN cifrar diria que hubo alguien mirando las notas privadas. El
+// estado de la tarea vive en RAM mientras la tarea vive, que es exactamente lo
+// que pide la politica de la boveda (tras arrancar, siempre cerrada).
+// Tampoco lleva 'shed' ni 'dirty': lo pesado que reserva (una vista previa
+// descifrada) ya lo suelta su suspend, y una nota privada a medias se guarda
+// CIFRADA en ese mismo suspend en vez de anunciarse como pendiente.
+static const AppHooks H_SECFOLDER = { secfBackLayer, secfBackScreen, secfSuspend, secfResume, secfClose, NULL, NULL, NULL, NULL, NULL };
 // ---- Registro de apps (indices = enum IC_*) ----
 static FlexApp APP_REG[APP_N] = {
   { appRelojEnter, appRelojTick, APP_FLEX, APP_CAT_ESENCIAL, APP_DEF_FAV, NULL },
@@ -708,6 +727,20 @@ static FlexApp APP_REG[APP_N] = {
   // (APP_DEF_DOCK): una placa que actualiza no ve su escritorio reordenado; se
   // anade a Inicio desde la Caja de aplicaciones.
   { compassEnter, compassTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_ESENCIAL, APP_DEF_DOCK, &H_COMPASS },
+  // 21 Carpeta segura. Cabecera propia y tactil propio: dentro no hay una
+  // pantalla de ajustes sino un ESCRITORIO -- rejilla por paginas, gesto
+  // horizontal, indicadores -- y el marco estandar le quitaria 96 px arriba
+  // para repetir un titulo que el espacio ya pinta.
+  //
+  // NO es APP_FLEX: no se abre dentro de una ventana de Modo PC. Componer el
+  // espacio seguro en el lienzo de una ventana pondria contenido privado en el
+  // escritorio compartido de DeX, que es justo lo que esta app existe para
+  // evitar; secfEnter lo dice y se vuelve, en vez de fallar en silencio.
+  //
+  // NO nace en la rejilla (APP_DEF_DOCK): una placa que actualiza no ve su
+  // escritorio reordenado. Aparece en la Caja de aplicaciones como cualquier
+  // otra app, y de ahi el usuario la ancla a Inicio si quiere.
+  { secfEnter, secfTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_SISTEMA, APP_DEF_DOCK, &H_SECFOLDER },
 };
 static const char* appCatName(int id){
   int c = (id >= 0 && id < APP_N) ? APP_REG[id].cat : APP_CAT_SISTEMA;
@@ -1081,6 +1114,12 @@ static bool appTerminate(int id, bool force){
   gAppState[id] = ALIFE_CLOSED;
   gAppSeenMs[id] = 0;
   appMemForget(id);                 // su huella medida deja de existir con ella
+  // ESPACIO DE TRABAJO. Una tarea cerrada no pertenece ya a ningun contexto: sin
+  // esto, el bit seguro sobreviviria a la tarea y una apertura POSTERIOR de esa
+  // misma app -- desde el escritorio normal -- heredaria una marca que nadie le
+  // ha puesto. El hook close() del espacio seguro ya lo limpia; esto lo cierra
+  // tambien para cualquier camino que no pase por el.
+  appTaskSetSecure(id, false);
   return true;
 }
 

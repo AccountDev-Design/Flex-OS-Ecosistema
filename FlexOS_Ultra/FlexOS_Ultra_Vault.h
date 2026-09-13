@@ -155,9 +155,43 @@ enum { VA_NONE = 0, VA_GAL, VA_NOTES, VA_FILES, VA_APPS, VA_APPMAN, VA_LOG,
        VA_APPOPEN, VA_APPLOCK, VA_APPDEL,
        VA_ITEM_BASE = 1000, VA_APP_BASE = 2000 };
 
+// #############################################################
+// ##  MODO HOSPEDADO  ·  las vistas de la boveda dentro de la app
+// ##  ------------------------------------------------------
+// ##  Desde que la Carpeta segura es una app (IC_SECFOLDER), estas pantallas
+// ##  ya no son solo el interior de ST_VAULT: la app las HOSPEDA dentro de su
+// ##  propia tarea, para que la galeria privada, las notas privadas y los
+// ##  archivos privados sigan siendo EXACTAMENTE el mismo codigo -- y por
+// ##  tanto el mismo cifrado, el mismo indice y el mismo registro -- en vez
+// ##  de una segunda copia que mantener.
+// ##
+// ##  Lo unico que cambia cuando vwHosted esta activo es A DONDE se vuelve:
+// ##   · "atras" desde la pantalla de estado vuelve al Home del espacio
+// ##     seguro, no a Ajustes;
+// ##   · volver NO cierra la boveda, porque el usuario no ha salido del
+// ##     espacio seguro -- solo ha cambiado de pantalla dentro de el. Quien
+// ##     cierra sigue siendo la misma politica de siempre (secfSuspend,
+// ##     pantalla apagada, inactividad, Recientes, apagado).
+// ##  Todo lo demas -- que se dibuja, que se descifra, que se registra -- es
+// ##  identico en los dos modos.
+// #############################################################
+static bool vwHosted = false;
+
 static void vaultRender();
 static void vaultLockNow(int reason);
 static void vwOpenList(int kind);
+static void vwGoHome();
+
+// LIMITE INFERIOR UTIL DE ESTAS PANTALLAS.
+// ---------------------------------------------------------------------------
+// En el estado propio (ST_VAULT) la pantalla es entera: navBarVisible() es
+// false fuera de ST_APP, asi que esto devuelve SCR_H-1 y no cambia ni un pixel
+// respecto a como se dibujaba antes. HOSPEDADA dentro de la app Carpeta segura
+// la cosa es distinta: el sistema estampa su franja de navegacion en los
+// ultimos NAV_H px (navStampBar, dentro de flxFlush) y es su dueno exclusivo.
+// Sin esto, la ultima fila de una lista privada quedaria debajo de la barra --
+// visible a medias y, peor, respondiendo al toque de otro.
+static int vwBot(){ return navBarVisible() ? navBarTop() - 1 : SCR_H - 1; }
 
 // -------------------------------------------------------------
 //  Borrado de lo sensible que tiene esta pantalla en RAM
@@ -245,7 +279,7 @@ static int vwRow(int y, int act, const char* title, const char* value,
     vwRowY0[vwRowsN] = y; vwRowY1[vwRowsN] = y + VW_ROW_H; vwRowAct[vwRowsN] = act;
     vwRowsN++;
   }
-  if(y + VW_ROW_H >= 58 && y <= SCR_H - 30){          // fuera de la ventana: ni se dibuja
+  if(y + VW_ROW_H >= 58 && y <= vwBot() - 29){        // fuera de la ventana: ni se dibuja
     if(uiGlass) drawGlassCardFlat(12, y, SCR_W - 24, VW_ROW_H, 14, TH_GLASS, TH_PAGE);
     else        fillRoundRect(12, y, SCR_W - 24, VW_ROW_H, 14, thCard());
     int tx = 26;
@@ -283,7 +317,7 @@ static bool vwBackHit(){ return T.tap && T.x < 52 && T.y < 56; }
 static void vwDrawMsg(){
   if(!vwMsg[0]) return;
   if(millis() - vwMsgMs > 3200){ vwMsg[0] = 0; return; }
-  int w = SCR_W - 40, h = 52, x = 20, y = SCR_H - 96;
+  int w = SCR_W - 40, h = 52, x = 20, y = vwBot() - 95;
   if(uiGlass) drawLiquidGlassPanel(x, y, w, h, 16, TH_GLASS2);
   else        fillRoundRect(x, y, w, h, 16, TH_SURF2);
   drawTextClip(x + 14, y + 16, vwMsg, 2, TH_TXT, x + w - 12);
@@ -295,10 +329,10 @@ static void vwDrawMsg(){
 static void vwRenderHome(){
   setBuf(fb);
   fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
-  vwHeader("Flex Vault", "Carpeta segura");
+  vwHeader("Carpeta segura", "Estado y seguridad");
   vwRowsReset();
 
-  uiClipViewport(VW_VP_TOP, SCR_H - 1);   // nada del contenido puede pisar la cabecera
+  uiClipViewport(VW_VP_TOP, vwBot());   // nada del contenido puede pisar la cabecera
   int y = 78 - vwScroll;
 
   // ---- Tarjeta de estado ----
@@ -310,7 +344,7 @@ static void vwRenderHome(){
     int lx = 40, ly = y + 30;
     fillRoundRect(lx - 13, ly, 26, 20, 4, TH_OK);
     arcStroke(lx, ly, 8, 180, 360, 3, TH_OK);
-    drawText(66, y + 18, "Flex Vault protegida", 3, TH_TXT);
+    drawText(66, y + 18, "Carpeta segura protegida", 3, TH_TXT);
 
     char v[64];
     int ry = y + 62;
@@ -346,7 +380,7 @@ static void vwRenderHome(){
   y = vwRow(y, VA_FILES, "Archivos privados", sub, true, rgb565(70,140,225));
 
   y += 8;
-  if(y <= SCR_H - 30) drawText(26, y, "APPS", 1, TH_MUTE);
+  if(y <= vwBot() - 29) drawText(26, y, "APPS", 1, TH_MUTE);
   y += 22;
   y = vwRow(y, VA_APPS,   "A\xC3\xB1" "adir apps a Carpeta segura",
             "Elige que apps tienen version privada", true, rgb565(150,110,220));
@@ -354,11 +388,11 @@ static void vwRenderHome(){
             "Almacenamiento, acceso, bloquear y quitar", true, rgb565(120,120,140));
 
   y += 8;
-  if(y <= SCR_H - 30) drawText(26, y, "SEGURIDAD", 1, TH_MUTE);
+  if(y <= vwBot() - 29) drawText(26, y, "SEGURIDAD", 1, TH_MUTE);
   y += 22;
   vwAutoLockText(sub, sizeof(sub));
   y = vwRow(y, VA_AUTOLOCK, "Bloqueo autom\xC3\xA1" "tico", sub, false, rgb565(90,160,230));
-  y = vwRow(y, VA_CHGKEY, "Cambiar clave de Flex Vault",
+  y = vwRow(y, VA_CHGKEY, "Cambiar la clave",
             "No se pierde ning\xC3\xBA" "n archivo", true, rgb565(220,120,120));
   y = vwRow(y, VA_LOG, "Registro de seguridad",
             "Aperturas, cierres y fallos", true, rgb565(120,150,160));
@@ -367,7 +401,7 @@ static void vwRenderHome(){
 
   // Aviso honesto sobre el limite real de proteccion de esta version.
   y += 10;
-  if(y <= SCR_H - 60){
+  if(y <= vwBot() - 59){
     drawText(26, y, "El contenido va cifrado con AES-256-GCM.", 1, TH_MUTE); y += 18;
     drawText(26, y, "Secure Boot y Flash Encryption siguen", 1, TH_MUTE); y += 18;
     drawText(26, y, "desactivados: la fuerza de la clave importa.", 1, TH_MUTE); y += 18;
@@ -403,13 +437,13 @@ static void vwRenderList(){
              vwItemsN, vwItemsN == 1 ? "" : "s");
   } else {
     snprintf(ttl, sizeof(ttl), "%s", vwKindName(vwKind));
-    snprintf(sub, sizeof(sub), "%d elemento%s dentro de Flex Vault",
+    snprintf(sub, sizeof(sub), "%d elemento%s dentro de la Carpeta segura",
              vwItemsN, vwItemsN == 1 ? "" : "s");
   }
   vwHeader(ttl, sub);
   vwRowsReset();
 
-  uiClipViewport(VW_VP_TOP, SCR_H - 1);   // nada del contenido puede pisar la cabecera
+  uiClipViewport(VW_VP_TOP, vwBot());   // nada del contenido puede pisar la cabecera
   int y = 78 - vwScroll;
   if(vwItemsN == 0){
     drawTextC(SCR_W / 2, 300, "Todav\xC3\xAD" "a no hay nada aqu\xC3\xAD", 3, TH_TXT2);
@@ -548,7 +582,7 @@ static void vwRenderItem(){
   drawTextClip(46, 44, it.name, 1, TH_TXT2, SCR_W - 20);
   vwRowsReset();
 
-  int top = 84, bot = SCR_H - 120;
+  int top = 84, bot = vwBot() - 119;
   vwImgX0 = 12; vwImgY0 = top; vwImgW = SCR_W - 24; vwImgH = bot - top;
 
   if(vwTextN > 0 || (it.kind == FXV_KIND_NOTE && it.size == 0)){
@@ -601,7 +635,7 @@ static void vwRenderItem(){
               "S\xC3\xA1" "calo de la b\xC3\xB3veda para abrirlo fuera", 1, TH_MUTE);
   }
 
-  int y = SCR_H - 112;
+  int y = vwBot() - 111;
   y = vwRow(y, VA_ITEM_BASE, "Sacar de la b\xC3\xB3veda",
             "Vuelve a la app normal descifrado", false, rgb565(70,140,225));
   vwDrawMsg();
@@ -654,7 +688,7 @@ static void vwRenderNote(){
   fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
   FlexVaultItem it;
   const char* nm = flexVaultGet(vwOpenId, &it) ? it.name : "Nota privada";
-  vwHeader("Nota privada", "Cifrada dentro de Flex Vault");
+  vwHeader("Nota privada", "Cifrada dentro de la Carpeta segura");
   drawTextClip(46, 44, nm, 1, TH_TXT2, SCR_W - 20);
 
   int top = 78, bot = KB_Y - 10;
@@ -733,9 +767,9 @@ static const int VW_CAND[6] = { 1, 5, 3, 7, 10, 14 };   // Galeria, Notas, Archi
 static void vwRenderApps(){
   setBuf(fb);
   fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
-  vwHeader("A\xC3\xB1" "adir apps", "Apps con versi\xC3\xB3n privada dentro de Flex Vault");
+  vwHeader("A\xC3\xB1" "adir apps", "Apps con versi\xC3\xB3n privada dentro de la carpeta");
   vwRowsReset();
-  uiClipViewport(VW_VP_TOP, SCR_H - 1);   // nada del contenido puede pisar la cabecera
+  uiClipViewport(VW_VP_TOP, vwBot());   // nada del contenido puede pisar la cabecera
   int y = 78 - vwScroll;
 
   for(int i = 0; i < 6; i++){
@@ -751,7 +785,7 @@ static void vwRenderApps(){
   }
 
   y += 10;
-  if(y <= SCR_H - 40){
+  if(y <= vwBot() - 39){
     drawText(26, y, "Las apps del sistema no pueden entrar en la", 1, TH_MUTE); y += 18;
     drawText(26, y, "b\xC3\xB3veda: Ajustes, actualizaciones, seguridad,", 1, TH_MUTE); y += 18;
     drawText(26, y, "bloqueo, apagado y Modo PC quedan fuera.", 1, TH_MUTE); y += 18;
@@ -770,7 +804,7 @@ static void vwRenderAppMan(){
   fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
   vwHeader("Apps privadas", "Almacenamiento, acceso y candado de cada una");
   vwRowsReset();
-  uiClipViewport(VW_VP_TOP, SCR_H - 1);   // nada del contenido puede pisar la cabecera
+  uiClipViewport(VW_VP_TOP, vwBot());   // nada del contenido puede pisar la cabecera
   int y = 78 - vwScroll;
   int n = 0;
 
@@ -812,7 +846,7 @@ static void vwRenderAppDet(){
   setBuf(fb);
   fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
   if(vwAppSel < 0){ vwView = VW_APPMAN; vwRenderAppMan(); return; }
-  vwHeader(appName(vwAppSel), "Versi\xC3\xB3n privada dentro de Flex Vault");
+  vwHeader(appName(vwAppSel), "Versi\xC3\xB3n privada dentro de la carpeta");
   vwRowsReset();
 
   char v[64], sz[16], st[32];
@@ -828,7 +862,7 @@ static void vwRenderAppDet(){
   drawTextR(SCR_W - 26, y, v, 1, TH_TXT); y += 34;
 
   y = vwRow(y, VA_APPOPEN, "Abrir",
-            flexVaultAppLocked(vwAppSel) ? "Pedir\xC3\xA1 la clave de Flex Vault"
+            flexVaultAppLocked(vwAppSel) ? "Pedir\xC3\xA1 la clave de la carpeta"
                                          : "Sus datos privados, separados de la app normal",
             true, TH_OK);
   y = vwRow(y, VA_APPLOCK,
@@ -884,7 +918,7 @@ static void vwRenderRemove(){
 // -------------------------------------------------------------
 static const char* vwEvName(uint8_t ev, int8_t aux){
   switch(ev){
-    case FXV_EV_CREATE:    return "Flex Vault creada";
+    case FXV_EV_CREATE:    return "Carpeta segura creada";
     case FXV_EV_UNLOCK:    return "Apertura correcta";
     case FXV_EV_FAIL:      return "Intento fallido";
     case FXV_EV_LOCK:
@@ -911,7 +945,7 @@ static void vwRenderLog(){
   fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
   vwHeader("Registro de seguridad", "Sin nombres ni contenido, y cifrado");
   vwRowsReset();
-  uiClipViewport(VW_VP_TOP, SCR_H - 1);   // nada del contenido puede pisar la cabecera
+  uiClipViewport(VW_VP_TOP, vwBot());   // nada del contenido puede pisar la cabecera
   int y = 78 - vwScroll;
   if(vwLogN == 0) drawTextC(SCR_W / 2, 300, "Sin actividad registrada", 3, TH_TXT2);
   for(int i = 0; i < vwLogN; i++){
@@ -932,7 +966,7 @@ static void vwRenderLog(){
 static void vwRenderSetupSel(){
   setBuf(fb);
   fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
-  vwHeader("Flex Vault", "");
+  vwHeader("Carpeta segura", "");
   drawTextC(SCR_W / 2, 100, "Crea tu Carpeta segura", 4, TH_TXT);
   drawTextC(SCR_W / 2, 150, "Elige una clave PROPIA, distinta de la", 1, TH_TXT2);
   drawTextC(SCR_W / 2, 170, "del bloqueo de Flex OS", 1, TH_TXT2);
@@ -973,10 +1007,10 @@ static void vwRenderSetupSel(){
 //  -- son dos claves distintas a proposito.
 // -------------------------------------------------------------
 static const char* vwKeyTitle(){
-  if(vwKeyFor == VK_CREATE)  return vwKeyMode == FLEXVAULT_LOCK_PIN ? "Crea el PIN de Flex Vault" : "Crea la contrase\xC3\xB1" "a";
-  if(vwKeyFor == VK_CHG_OLD) return "Clave actual de Flex Vault";
+  if(vwKeyFor == VK_CREATE)  return vwKeyMode == FLEXVAULT_LOCK_PIN ? "Crea el PIN de la Carpeta segura" : "Crea la contrase\xC3\xB1" "a";
+  if(vwKeyFor == VK_CHG_OLD) return "Clave actual de la Carpeta segura";
   if(vwKeyFor == VK_CHG_NEW) return vwKeyMode == FLEXVAULT_LOCK_PIN ? "Nuevo PIN" : "Nueva contrase\xC3\xB1" "a";
-  return "Abre Flex Vault";
+  return "Abre la Carpeta segura";
 }
 
 static void vwPaintKeypad(int yoff){
@@ -1063,7 +1097,13 @@ static void vwGoKeypad(int what, int mode){
   // Teclado limpio: sin barra de sugerencias ni chips en una pantalla
   // de clave, igual que en el bloqueo del sistema.
   mapaActivo = LAYOUT_ES; kbLangEs = true; kbShift = false;
-  kbExtrasOn = false; kbApplySize(); kbMtSurfaceReset();
+  kbExtrasOn = false;
+  // Hospedada dentro de la app, el sistema estampa su franja abajo: sin
+  // reservarla, la fila de funciones del teclado (shift, espacio, OK) caeria
+  // justo debajo y seria inalcanzable. En ST_VAULT no hay barra y esto vale 0,
+  // que es exactamente como se dibujaba antes.
+  kbBotReserve = navBarVisible() ? NAV_H : 0;
+  kbApplySize(); kbMtSurfaceReset();
   vwKbAnim = (mode == FLEXVAULT_LOCK_PASS) ? millis() : 0;
   vwLastTouch = millis();
 }
@@ -1122,6 +1162,18 @@ static void vaultRender(){
 // boveda al salir NO es opcional (es uno de los cierres que pide la
 // funcion), asi que se hace aqui y no en la pantalla que llama.
 static void vaultExit(){
+  // HOSPEDADA: "salir" es volver al Home del espacio seguro, no abandonar el
+  // espacio. No se cierra la boveda (el usuario sigue dentro, autenticado) y no
+  // se olvida el contenido descifrado de la pantalla que se deja -- eso ya lo
+  // hace cada vista al cambiar. Quien cierra de verdad es secfSuspend.
+  if(vwHosted){
+    vwContentClear();
+    vwItemMenu = -1;
+    vwListApp  = -1;
+    vwScroll   = 0;
+    secGoHome();                 // repinta el Home seguro (o la clave si se cerro)
+    return;
+  }
   vaultLockNow(FXV_LOCK_EXIT);
   flexVaultWipe(vwPendPath, sizeof(vwPendPath));
   vwPendApp = -1;
@@ -1168,8 +1220,14 @@ static void vaultLockNow(int reason){
 static void vaultLockFromSystem(int reason){
   bool wasOpen = flexVaultUnlocked();
   bool onScreen = (gState == ST_VAULT);
-  if(!wasOpen && !onScreen) return;
+  // La app Carpeta segura hospeda estas mismas vistas dentro de ST_APP, asi que
+  // "estar en pantalla" tambien incluye ese caso: sin esto, cerrar la boveda
+  // desde fuera (pantalla apagada, Recientes, apagado) dejaria a la vista una
+  // lista privada que ya no se puede releer, en vez de la pantalla de clave.
+  bool inSecure = (vwHosted && secfForeground());
+  if(!wasOpen && !onScreen && !inSecure) return;
   vaultLockNow(reason);
+  if(inSecure) secOnVaultLocked();
   if(onScreen){
     // Se deja preparada la pantalla de clave. Quien haya provocado el
     // cierre (bloqueo, apagado...) decide que se ve ahora; al volver
@@ -1228,7 +1286,12 @@ static bool vaultMoveRequest(const char* path, int kind){
     if(!flexVaultImport(path, kind, -1)){ vwMoveErr = flexVaultError(); return false; }
     return true;
   }
-  // Hay que autenticarse (o crear la boveda) antes de mover nada.
+  // Hay que autenticarse (o crear la boveda) antes de mover nada. Este camino
+  // usa el estado propio (ST_VAULT) y NO la app: el usuario no esta entrando en
+  // el espacio seguro, esta guardando un archivo desde la app en la que estaba,
+  // y al terminar tiene que volver ahi. Por eso se desactiva el hospedaje, que
+  // si no mandaria "atras" al Home de una app que no esta abierta.
+  vwHosted = false;
   snprintf(vwPendPath, sizeof(vwPendPath), "%s", path);
   vwPendKind = kind;
   vwRetState = gState;
@@ -1245,24 +1308,27 @@ static bool vaultMoveRequest(const char* path, int kind){
   return true;                       // el movimiento se completara tras la clave
 }
 
-// Punto de entrada desde Ajustes -> Seguridad y privacidad -> Flex Vault.
+// Punto de entrada desde Ajustes -> Seguridad y privacidad -> Carpeta segura, y
+// desde el control del panel rapido.
+//
+// YA NO ABRE UNA PANTALLA DE AJUSTES: abre la APP. La Carpeta segura dejo de
+// ser una pantalla escondida dentro de Ajustes y es una aplicacion del sistema
+// (IC_SECFOLDER), asi que la fila de Ajustes es un ENLACE a ella -- que es lo
+// que pide no tener la misma funcion duplicada en dos sitios con dos
+// comportamientos que luego divergen. La configuracion del espacio (bloqueo
+// automatico, cambio de clave, registro, apps privadas) sigue existiendo, y
+// vive DENTRO de la app, en su boton "Ajustes".
+//
+// Se conserva el NOMBRE de la funcion a proposito: sus tres llamantes (la fila
+// de Ajustes, el control del panel rapido y el prototipo de Touch.h) siguen
+// funcionando sin tocarlos, y el dia que haya un cuarto camino tampoco tendra
+// que saber si por dentro esto es un estado o una app.
 static void vaultSettingsEnter(){
-  if(KIOSK_ON && kioskOn) return;          // en kiosco no se abre la boveda
-  // MODO PC: no se abre dentro de una ventana. dexHostRun restaura gState al
-  // acabar el tick de la app hospedada, asi que la boveda quedaria a medias, y
-  // ademas se compondria una pantalla completa dentro del lienzo de la ventana.
-  // La fila de Ajustes lo dice (ver vaultStatusText), no falla en silencio.
+  if(KIOSK_ON && kioskOn) return;          // en kiosco no se abre la carpeta
+  // MODO PC: no se abre dentro de una ventana (ver secfEnter). La fila de
+  // Ajustes lo dice (vaultStatusText), no falla en silencio.
   if(gHosted || gLand) return;
-  if(!flexFsReady()){ fkNoFsScreen("Flex Vault"); gState = ST_VAULT; vwView = VW_HOME; return; }
-  gState = ST_VAULT;
-  gLand = false;
-  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
-  vwScroll = 0; vwDragging = false; vwItemMenu = -1; vwMsg[0] = 0;
-  vwLastTouch = millis();
-  if(!flexVaultExists())        { vwView = VW_SETUP_SEL; }
-  else if(!flexVaultUnlocked()) { vwGoKeypad(VK_OPEN, flexVaultLockType()); }
-  else                          { vwView = VW_HOME; vwLogN = flexVaultLogRead(vwLog, FLEXVAULT_LOG_MAX); }
-  vaultRender();
+  enterApp(IC_SECFOLDER);
 }
 
 // -------------------------------------------------------------
@@ -1270,6 +1336,10 @@ static void vaultSettingsEnter(){
 // -------------------------------------------------------------
 static void vwAfterUnlock(){
   vwLogN = flexVaultLogRead(vwLog, FLEXVAULT_LOG_MAX);
+  // HOSPEDADA: quien acaba de crear su Carpeta segura (o de cambiarle la clave)
+  // espera entrar en ELLA, no en su pantalla de ajustes. La apertura normal no
+  // pasa por aqui: esa la resuelve la app con su propia pantalla de clave.
+  if(vwHosted){ secGoHome(); return; }
   vwGoHome();
   vwRunPending();            // "Mover a Carpeta segura" que esperaba la clave
   if(vwPendApp >= 0){        // app privada bloqueada que se queria abrir
@@ -1298,7 +1368,7 @@ static void vwKeyConfirm(){
     int r = flexVaultCreate(sec, vwKeyMode);
     vwKeyClear();
     if(r == FXV_OK){
-      vwToast("Flex Vault creada y protegida");
+      vwToast("Carpeta segura creada y protegida");
       vwAfterUnlock();
       return;
     }
@@ -1352,7 +1422,8 @@ static void vwItemAction(int act){
       // se abre en el visor.
       vwView = isNote ? VW_NOTE : VW_ITEM;
       vwNoteDirtyMs = 0;
-      if(isNote){ kbExtrasOn = false; kbApplySize(); kbMtSurfaceReset(); kbShift = false; }
+      if(isNote){ kbExtrasOn = false; kbBotReserve = navBarVisible() ? NAV_H : 0;
+                  kbApplySize(); kbMtSurfaceReset(); kbShift = false; }
     }
     vaultRender();
     return;
@@ -1406,7 +1477,7 @@ static void vwNewPrivateNote(){
 // -------------------------------------------------------------
 static bool vwScrollTick(){
   // Arrastre vertical compartido por todas las listas de la boveda.
-  int maxS = vwDragS0 - (SCR_H - 40);
+  int maxS = vwDragS0 - (vwBot() - 39);
   if(maxS < 0) maxS = 0;
   if(T.pressed){ vwDragY0 = T.y; vwDragging = false; return false; }
   if(T.down){
@@ -1425,13 +1496,32 @@ static bool vwScrollTick(){
 }
 
 static void vaultTick(){
+  // HOSPEDADA: la clave la pide la app (una sola pantalla de clave para todo el
+  // espacio seguro, no una por vista). Si la boveda se ha cerrado -- por
+  // inactividad, por "Bloquear ahora", por cualquier camino -- se devuelve el
+  // mando a la app, que ensena su pantalla de clave; al acertar se vuelve aqui.
+  //
+  // EL ALTA ES LA EXCEPCION, y tiene que serlo: mientras el usuario esta
+  // CREANDO su Carpeta segura la boveda todavia no existe y por tanto no puede
+  // estar abierta. Sin esta salvedad, el asistente de alta se expulsaria a si
+  // mismo a una pantalla de clave de una carpeta que aun no hay.
+  if(vwHosted && !flexVaultUnlocked()){
+    bool alta = (vwView == VW_SETUP_SEL) ||
+                (vwView == VW_KEYPAD && vwKeyFor == VK_CREATE);
+    if(!alta){ secOnVaultLocked(); return; }
+  }
+
   // ---- Inactividad: la boveda se cierra sola ----
+  // HOSPEDADA: lo lleva el espacio seguro (secfTick), con este MISMO valor
+  // (flexVaultAutoLockMs) y esta misma politica. Se hace en un solo sitio para
+  // que dos temporizadores sobre el mismo reloj no puedan disparar uno antes
+  // que el otro y dejar en pantalla la clave que no toca.
   if(T.down || T.pressed || T.released) vwLastTouch = millis();
-  uint32_t al = flexVaultAutoLockMs();
+  uint32_t al = vwHosted ? 0 : flexVaultAutoLockMs();
   if(al && flexVaultUnlocked() && vwLastTouch && millis() - vwLastTouch > al){
     vaultLockNow(FXV_LOCK_IDLE);
     vwGoKeypad(VK_OPEN, flexVaultLockType());
-    vwToast("Flex Vault se cerr\xC3\xB3 por inactividad");
+    vwToast("La Carpeta segura se cerr\xC3\xB3 por inactividad");
     vaultRender();
     return;
   }
@@ -1619,8 +1709,9 @@ static void vaultTick(){
       case VA_AUTOLOCK: vwCycleAutoLock(); vaultRender(); return;
       case VA_CHGKEY:   vwGoKeypad(VK_CHG_OLD, flexVaultLockType()); vaultRender(); return;
       case VA_LOCKNOW:  vaultLockNow(FXV_LOCK_MANUAL);
+                        if(vwHosted){ secOnVaultLocked(); return; }
                         vwGoKeypad(VK_OPEN, flexVaultLockType());
-                        vwToast("Flex Vault bloqueada");
+                        vwToast("Carpeta segura bloqueada");
                         vaultRender(); return;
       default: return;
     }
@@ -1659,7 +1750,7 @@ static void vaultTick(){
         vwView = VW_REMOVE;                   // quitar SIEMPRE pregunta por los datos
         vwScroll = 0;
       } else if(flexVaultAppAdd(id)){
-        vwToast("A\xC3\xB1" "adida. Su versi\xC3\xB3n privada ya est\xC3\xA1 en Flex Vault");
+        vwToast("A\xC3\xB1" "adida. Ya tiene versi\xC3\xB3n privada en la carpeta");
       } else {
         vwToast(flexVaultAppReason(id) ? flexVaultAppReason(id) : "No se pudo a\xC3\xB1" "adir");
       }
@@ -1729,7 +1820,7 @@ static void vaultTick(){
 // Texto de la fila de Ajustes -> Seguridad y privacidad -> Flex Vault. Dice el
 // estado REAL: si no existe, si esta cerrada, o si esta abierta y cuanto ocupa.
 static void vaultStatusText(char* out, size_t n){
-  if(gHosted || gLand){ snprintf(out, n, "Abre Flex Vault fuera de Modo PC"); return; }
+  if(gHosted || gLand){ snprintf(out, n, "Abre la Carpeta segura fuera de Modo PC"); return; }
   if(!flexFsReady()){ snprintf(out, n, "Sin almacenamiento"); return; }
   if(!flexVaultExists()){ snprintf(out, n, "Sin configurar - toca para crearla"); return; }
   if(!flexVaultUnlocked()){
