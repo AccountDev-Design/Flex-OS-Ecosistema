@@ -31,7 +31,7 @@
 
 // #############################################################
 // ##  APPS SIMPLES: Almacenamiento, Navegador,
-// ##  Code IDE, Paint (funcional), Juegos
+// ##  Flex Compass, Paint (funcional), Juegos
 // #############################################################
 // Barra etiqueta+valor+progreso, dimensionada al lienzo (la usan Almacenamiento
 // y cualquier app que quiera una fila de medidor).

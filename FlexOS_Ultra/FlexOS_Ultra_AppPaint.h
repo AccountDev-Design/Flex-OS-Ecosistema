@@ -25,7 +25,7 @@
 // ##      entrada del sistema es siempre FlexOS_Ultra.ino.
 // #############################################################
 #pragma once
-#include "FlexOS_Ultra_AppCodeIDE.h"   // eslabon anterior de la cadena
+#include "FlexOS_Ultra_AppGames.h"     // eslabon anterior de la cadena
 
 // #############################################################
 // ##  APP PAINT  ·  galeria + lienzo, sobre ficheros REALES

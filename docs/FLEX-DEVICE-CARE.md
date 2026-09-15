@@ -45,11 +45,17 @@ que es lo que comprueba `tests/host/check_wiring.py`.
   reordena**; la app se añade desde la Caja de aplicaciones.
 * `FlexOS_Ultra_Session.h` / `FlexOS_Ultra_Core.h` — nombre de la app y su clase
   de peso de memoria.
-* `FlexOS_Ultra_Types.h` — `MOD_BNO085` **al final** de `ModuleType`.
-* `FlexOS_Ultra_System.h` — el barrido I²C reconoce `0x4A`/`0x4B`, y el panel
-  «Optimizar Flex OS» acepta un aviso de cierre (`optStartCb`) para volver a
-  quien lo abrió. `optStart()` conserva su firma exacta.
-* `FlexOS_Ultra_Conn.h` — icono del módulo en la isla de notificaciones.
+* `FlexOS_Ultra_System.h` — el panel «Optimizar Flex OS» acepta un aviso de
+  cierre (`optStartCb`) para volver a quien lo abrió. `optStart()` conserva su
+  firma exacta.
+
+> **Nota de versión.** Device Care ya no depende en nada del barrido genérico
+> del bus I²C: ese barrido se ha retirado del sistema, y con él el tipo
+> `MOD_BNO085` de la isla de notificaciones. La presencia del módulo, su
+> pérdida y su reconexión salen ahora del estado **real** del driver
+> (`flexBnoState()`, a través del Flex IMU Service), que es la única fuente
+> honesta: una dirección que contesta en el bus no prueba que haya un BNO085
+> detrás.
 * `FlexOS_Ultra.ino` — tres `#include`, `dcBegin()` y `dcApplyFallPref()` en
   `setup()`, y `dcSensorTick()` + `faPendingTick()` + el bloque del aviso en
   `loop()`.

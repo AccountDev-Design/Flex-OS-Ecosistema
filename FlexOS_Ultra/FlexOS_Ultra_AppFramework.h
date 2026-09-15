@@ -116,7 +116,7 @@ static void camEnter(); static void camTick();             // Camara (esqueleto)
 static void noteEnter(); static void noteTick();           // Notas + teclado 4 capas
 static void almEnter();                                                 // apps simples
 static void navEnter(); static void navTick();                          // Navegador (FlexOS_Browser*)
-static void ideEnter(); static void ideTick(); static void paintEnter(); static void paintTick();
+static void paintEnter(); static void paintTick();
 static void almTick();                                     // Almacenamiento: tap en "Ver..."
 static bool almBackScreen(); static void almSuspend(); static void almResume(); static void almCloseApp();
 static void almDetailTick();                               // Almacenamiento: pantalla de detalle (Fase 5)
@@ -679,7 +679,14 @@ static FlexApp APP_REG[APP_N] = {
   { pcEnter, pcTick, APP_CUSTOM_HEADER, APP_CAT_SISTEMA, APP_DEF_FAV, &H_MODOPC },
   { noteEnter, noteTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_TRABAJO, APP_DEF_FAV, &H_NOTES },
   { navEnter, navTick, APP_FLEX | APP_OWN_TOUCH, APP_CAT_ESENCIAL, APP_DEF_FAV, &H_BROWSER },
-  { ideEnter, ideTick, APP_FLEX, APP_CAT_TRABAJO, APP_DEF_FAV, NULL },
+  // 7 Flex Compass. OCUPA LA RANURA QUE ERA DE CODE IDE, con todo lo que eso
+  // arrastra: este id es el que sale en Inicio, en la Caja de aplicaciones y en
+  // el escritorio de fabrica. Cabecera propia (uiHdrDraw, con menu de tres
+  // puntos) y tactil propio (arrastre vertical con inercia).
+  // SI nace en la rejilla (APP_DEF_FAV): hereda el sitio de Code IDE, asi que
+  // donde antes habia un acceso al IDE hay ahora la brujula -- ni un hueco, ni
+  // una brujula repetida en otra parte.
+  { compassEnter, compassTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_ESENCIAL, APP_DEF_FAV, &H_COMPASS },
   { paintEnter, paintTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_OCIO, APP_DEF_FAV, &H_PAINT },
   { gamesEnter, gamesTick, APP_OWN_TOUCH | APP_CUSTOM_HEADER | APP_LAND, APP_CAT_OCIO, APP_DEF_FAV, &H_GAMES },
   { settingsEnter, settingsTick, APP_CUSTOM_HEADER, APP_CAT_SISTEMA, APP_DEF_DOCK, &H_SETTINGS },
@@ -712,11 +719,6 @@ static FlexApp APP_REG[APP_N] = {
   // sitio que tenia Bienestar. Device Care ES lo que Bienestar aparentaba --
   // salud del aparato, memoria, bateria y sensores -- pero con datos reales.
   { dcEnter, dcTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH | APP_FLEX, APP_CAT_SISTEMA, APP_DEF_FAV, &H_DEVCARE },
-  // 18 Flex Compass. Cabecera propia (uiHdrDraw, con menu de tres puntos) y
-  // tactil propio (arrastre vertical con inercia). NO nace en la rejilla
-  // (APP_DEF_DOCK): una placa que actualiza no ve su escritorio reordenado; se
-  // anade a Inicio desde la Caja de aplicaciones.
-  { compassEnter, compassTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_ESENCIAL, APP_DEF_DOCK, &H_COMPASS },
 };
 static const char* appCatName(int id){
   int c = (id >= 0 && id < APP_N) ? APP_REG[id].cat : APP_CAT_SISTEMA;

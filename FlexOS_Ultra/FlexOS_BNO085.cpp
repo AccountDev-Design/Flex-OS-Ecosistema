@@ -93,10 +93,28 @@
 //     contra un bus que no va a contestar.
 // #############################################################
 #define BNO_TICK_BUDGET_MS   4      // tope de tiempo por vuelta del loop
-#define BNO_FAIL_BACKOFF_N   6      // fallos de bus seguidos que activan el freno
-#define BNO_FAIL_BACKOFF_MS  250    // y cuanto se deja de leer entonces
+#define BNO_FAIL_BACKOFF_N   3      // fallos de bus seguidos que activan el freno
+#define BNO_FAIL_BACKOFF_MS  400    // y cuanto se deja de leer entonces
 #define BNO_PROBE_MIN_MS     1500   // suelo entre dos sondeos del bus
 #define BNO_PROBE_MAX_MS     8000   // techo del freno progresivo
+
+// TOPE DE LO QUE UN PAQUETE PUEDE DECIR QUE MIDE.
+//
+// La cabecera SHTP trae la longitud en 15 bits: hasta 32767 bytes. Un bus
+// sucio -- y el de un modulo que se acaba de retirar lo es -- entrega cabeceras
+// de 0xFF, que se leen como "vienen 32763 bytes". Vaciar eso son mas de MIL
+// transacciones I2C seguidas dentro de UNA llamada, y esa llamada sale del hilo
+// del bucle: es el sistema entero parado mientras dura.
+//
+// El paquete legitimo mas grande que este sensor envia es su anuncio inicial de
+// SHTP, del orden de 300 bytes. Con 512 sobra para cualquier cosa real y una
+// cabecera inventada no puede convertirse en una parada del sistema: se corta,
+// se cuenta como fallo de bus y la maquina de estados hace su trabajo.
+#define BNO_MAX_PKT   512
+// Y ademas, un techo de TIEMPO dentro del propio vaciado. Aunque la longitud
+// sea legitima, cada trozo contra un bus a medio conectar puede irse al plazo
+// del driver; el vaciado se corta igual que se corta el bucle de paquetes.
+#define BNO_DRAIN_BUDGET_MS  4
 
 // -------------------------------------------------------------
 //  Estado del modulo
@@ -155,7 +173,14 @@ static bool bnoSend(uint8_t ch, const uint8_t* payload, uint8_t len){
 // paquete del sensor o el siguiente llegaria desalineado.
 static bool bnoGetData(uint16_t remaining, uint16_t* outLen){
   uint16_t spot = 0;
+  uint32_t t0 = millis();
   while(remaining > 0){
+    // TECHO DE TIEMPO DENTRO DEL VACIADO. Sin esto, un paquete largo contra un
+    // bus lento se lleva por delante la vuelta entera del bucle -- y el tactil
+    // con ella. Cortar aqui deja el paquete a medias, que es exactamente lo que
+    // se quiere: se devuelve fallo, el contador de fallos sube y la maquina de
+    // estados acaba en LOST en vez de dejar el sistema esperando.
+    if((uint32_t)(millis() - t0) >= (uint32_t)BNO_DRAIN_BUDGET_MS) return false;
     uint16_t want = remaining + 4;
     if(want > BNO_I2C_CHUNK) want = BNO_I2C_CHUNK;
     if((uint16_t)Wire.requestFrom((int)bnoAddr, (int)want) != want) return false;
@@ -173,21 +198,38 @@ static bool bnoGetData(uint16_t remaining, uint16_t* outLen){
   return true;
 }
 
-// Lee UN paquete. Devuelve el canal (0..5) y la longitud util en
-// *len, o -1 si no habia nada / hubo un fallo de bus.
+// "NO HAY NADA QUE LEER" NO ES UN FALLO DE BUS, y la diferencia importa.
+//
+// Antes las dos cosas devolvian -1, asi que un sensor SANO -- que entrega a
+// 50 Hz mientras el bucle corre mucho mas rapido -- sumaba "fallos" en todas
+// las vueltas en las que simplemente no tocaba informe. Con suficientes
+// vueltas seguidas sin informe se activaba el freno y se dejaba de leer 400 ms
+// a un sensor que estaba perfectamente: en la deteccion de caidas eso es un
+// retraso que no se puede permitir.
+//
+// Ahora se separan: BNORECV_EMPTY es el sensor diciendo "no tengo nada", con
+// el bus funcionando en los dos sentidos, y BNORECV_FAIL es el bus fallando.
+// Solo el segundo cuenta para el freno.
+#define BNORECV_FAIL   (-1)
+#define BNORECV_EMPTY  (-2)
+
+// Lee UN paquete. Devuelve el canal (0..5) y la longitud util en *len, o uno
+// de los dos codigos de arriba.
 static int bnoRecv(uint16_t* len){
-  if(!bnoAddr) return -1;
-  if(Wire.requestFrom((int)bnoAddr, 4) != 4) return -1;
+  if(!bnoAddr) return BNORECV_FAIL;
+  if(Wire.requestFrom((int)bnoAddr, 4) != 4) return BNORECV_FAIL;
   uint8_t h0 = (uint8_t)Wire.read();
   uint8_t h1 = (uint8_t)Wire.read();
   uint8_t ch = (uint8_t)Wire.read();
   (void)Wire.read();                                  // numero de secuencia
   uint16_t total = ((uint16_t)(h1 & 0x7F) << 8) | h0; // bit 15 = continuacion
-  if(total <= 4) return -1;                           // 0 = sin datos
-  if(ch >= SHTP_CH_N) return -1;                      // canal imposible: bus sucio
+  if(total == 0 || total == 4) return BNORECV_EMPTY;   // el sensor contesta: no hay informe
+  if(total < 4)  return BNORECV_FAIL;                  // longitud imposible: bus sucio
+  if(total > BNO_MAX_PKT) return BNORECV_FAIL;         // longitud imposible: bus sucio
+  if(ch >= SHTP_CH_N) return BNORECV_FAIL;             // canal imposible: bus sucio
   uint16_t body = total - 4;
   uint16_t got = 0;
-  if(!bnoGetData(body, &got)) return -1;
+  if(!bnoGetData(body, &got)) return BNORECV_FAIL;
   if(len) *len = got;
   return (int)ch;
 }
@@ -365,7 +407,12 @@ void flexBnoRescan(){
 }
 
 void flexBnoStop(){
-  if(bnoAddr && bnoSt >= FLEXBNO_ST_CONFIG){
+  // SOLO SE APAGAN LOS INFORMES DE UN SENSOR QUE SIGUE AHI. Antes bastaba con
+  // "bnoSt >= CONFIG", y LOST cumple esa condicion: soltar el servicio con el
+  // modulo ya desconectado mandaba cuatro escrituras de 17 bytes contra un bus
+  // muerto, cada una hasta el plazo del driver, desde el hilo del bucle. Un
+  // sensor perdido no esta escuchando: no hay nada que apagarle.
+  if(bnoAddr && (bnoSt == FLEXBNO_ST_CONFIG || bnoSt == FLEXBNO_ST_READY)){
     // Periodo 0 = informe apagado. Si el bus falla no pasa nada: el
     // sensor deja de leerse igualmente y su trafico no molesta a nadie
     // mas que a si mismo.
@@ -379,6 +426,25 @@ void flexBnoStop(){
 
 void flexBnoTick(uint32_t nowMs){
   if(bnoSt == FLEXBNO_ST_ABSENT) return;
+
+  // #############################################################
+  //  EL SENSOR PERDIDO NO SE SIGUE LEYENDO. ESTE ERA EL BLOQUEO.
+  //  ------------------------------------------------------------
+  //  El `case FLEXBNO_ST_LOST` de la maquina de estados no hace nada, y eso
+  //  parecia suficiente. No lo era: el bloque de LECTURA de aqui abajo corria
+  //  para CUALQUIER estado distinto de ABSENT, LOST incluido. O sea que un
+  //  modulo retirado en caliente dejaba al sistema leyendo un bus muerto en
+  //  CADA vuelta del bucle, para siempre, desde el mismo hilo que sondea el
+  //  tactil: cada intento pagaba el plazo de espera del driver y la interfaz
+  //  se quedaba sin vueltas utiles. Eso es lo que se veia como "se congela
+  //  todo y el tactil deja de responder".
+  //
+  //  Desde LOST no se toca el bus. Quien decide volver a intentarlo es el
+  //  Flex IMU Service (imuRetry), con su propio enfriamiento y solo mientras
+  //  alguien tenga el sensor adquirido -- que es tambien lo que permite la
+  //  reconexion en caliente sin dejar el bucle sondeando I2C sin parar.
+  // #############################################################
+  if(bnoSt == FLEXBNO_ST_LOST) return;
 
   // FRENO POR FALLOS DE BUS. Si las ultimas lecturas fallaron seguidas, el
   // modulo esta mal conectado o se ha ido: insistir cada vuelta solo sirve para
@@ -397,6 +463,10 @@ void flexBnoTick(uint32_t nowMs){
     for(int n = 0; n < BNO_PKT_PER_TICK; n++){
       uint16_t len = 0;
       int ch = bnoRecv(&len);
+      if(ch == BNORECV_EMPTY){
+        bnoFails = 0;           // el bus contesta: no hay nada pendiente, y ya esta
+        break;
+      }
       if(ch < 0){
         if(bnoFails < 255) bnoFails++;
         if(bnoFails >= BNO_FAIL_BACKOFF_N) bnoMuteMs = nowMs ? nowMs : 1;

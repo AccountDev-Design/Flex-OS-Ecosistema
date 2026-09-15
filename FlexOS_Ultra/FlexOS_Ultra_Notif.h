@@ -41,10 +41,12 @@
 // ##  gState==ST_HOME: homeBuf solo es un fondo valido ahi. El
 // ##  avance de fases sigue sin condicion (es aritmetica pura).
 // ##
-// ##  En Fase 1 NO hay deteccion I2C real: las notificaciones se
-// ##  disparan con un trigger de prueba (demo al primer Home + tap
-// ##  arriba-derecha) para validar render/animacion/descarte de
-// ##  forma AISLADA.
+// ##  QUIEN ALIMENTA LA COLA. Solo dos sitios: sysNotify() para los
+// ##  avisos del sistema y mediaNotify() para los del reproductor y
+// ##  el explorador. La isla ya NO anuncia hardware: el barrido
+// ##  generico del bus I2C que lo hacia se ha retirado, y la presencia
+// ##  del GY-BNO085 la cuentan Flex Device Care y Flex Compass con el
+// ##  estado real de su driver, no con un aviso de paso.
 // ##
 // ##  DESVIACION DELIBERADA respecto al plan original: el vidrio
 // ##  se RE-HORNEA cada frame (drawLiquidGlassPanel) en vez de
@@ -106,9 +108,9 @@ static void notifPauseForDrawer(){
   notifBandOn = false;
 }
 
-// Huella de identidad de un aviso real. FNV-1a sobre el tipo, la direccion
-// I2C y el nombre. El texto secundario NO entra: "0x18 detectado" y "0x18
-// listo" son el MISMO dispositivo y deben refrescar la tarjeta, no anadir otra.
+// Huella de identidad de un aviso. FNV-1a sobre el tipo, i2cAddr y el nombre.
+// El texto secundario NO entra a proposito: dos avisos con el mismo titulo son
+// el MISMO aviso y deben refrescar la tarjeta, no anadir otra.
 static uint32_t notifKeyOf(const DetectedModule* m){
   uint32_t h = 2166136261u;
   if(m){
@@ -170,8 +172,8 @@ static inline float notifEaseOut(float p){ float q = 1.0f - p; return 1.0f - q *
 
 // Cola de burbuja de chat: un triangulo apuntando hacia ARRIBA, porque las
 // tarjetas de notificacion caen desde el borde superior de la pantalla (no
-// hay un icono de app en el Home al que apuntar -- estas son detecciones de
-// hardware I2C via hwDetectTick(), no notificaciones que vengan de una app
+// hay un icono de app en el Home al que apuntar -- estas son avisos del
+// sistema y del reproductor, no notificaciones que vengan de una app
 // abierta). Solido, no vidrio: es demasiado pequeña para que el blur se
 // note, y agrandar el panel solo para la cola no vale la pena.
 static void notifDrawTail(int cx, int topY, uint16_t col){

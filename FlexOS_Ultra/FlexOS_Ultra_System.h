@@ -30,152 +30,28 @@
 #include "FlexOS_Ultra_AppChrono.h"   // eslabon anterior de la cadena
 
 // #############################################################
-// ##  DETECCION DE HARDWARE I2C  (FASE 2)
-// ##  ------------------------------------------------------
-// ##  CLAVE DE SEGURIDAD: el escaneo corre en el MISMO contexto
-// ##  que flexPollTouch() -el loop task, Core 1- llamando a
-// ##  hwDetectTick() en cada vuelta. El GT911 tactil vive en el
-// ##  mismo bus Wire; al no haber una segunda tarea tocando Wire,
-// ##  las transacciones NUNCA se solapan y no hace falta mutex.
-// ##  (Esto es a proposito lo contrario del plan original, que
-// ##  ponia una tarea de escaneo en Core 1: eso compartia Wire
-// ##  con el tactil sin proteccion -> corrupcion del bus/crash.)
+// ##  AQUI VIVIA LA DETECCION GENERICA DE HARDWARE I2C
+// ##  ----------------------------------------------------------
+// ##  Barria el bus de 0x08 a 0x77 cada tres segundos, listaba lo que
+// ##  contestara y lo anunciaba por la isla dinamica. SE HA RETIRADO
+// ##  ENTERA, y por dos motivos que van juntos:
 // ##
-// ##  Ademas el barrido es INCREMENTAL: sondea I2C_SCAN_PER_TICK
-// ##  direcciones por vuelta, para no anadir latencia perceptible
-// ##  al tactil ni forzar el watchdog. Los dispositivos nuevos
-// ##  avisan por la isla dinamica de la Fase 1 (notifPush).
+// ##    1) No daba utilidad suficiente. Saber que "algo" contesta en
+// ##       0x18 no dice que es: una direccion que devuelve ACK no
+// ##       prueba nada, y el unico modulo que el sistema sabe usar de
+// ##       verdad -- el GY-BNO085 -- ya se identifica por su Product
+// ##       ID desde su propio driver, que es la unica prueba honesta.
 // ##
-// ##  ALCANCE HONESTO: solo I2C, que es fiable. La deteccion de
-// ##  modulos por GPIO (pulsadores, HC-SR04, servos) NO se hace
-// ##  aqui porque no es distinguible sin falsos positivos; esos
-// ##  llegaran por asignacion manual de pines en el asistente
-// ##  (Fase 3), no por auto-deteccion.
+// ##    2) Costaba trafico permanente en el MISMO bus que el tactil.
+// ##       Contra un bus sano eran microsegundos; contra uno a medio
+// ##       conectar -- justo el caso de un modulo que se retira en
+// ##       caliente -- cada sondeo se iba al plazo de espera del
+// ##       driver, y eran 112 direcciones por barrido.
+// ##
+// ##  LO QUE NO SE HA TOCADO: el I2C del BNO085. La comunicacion con
+// ##  el IMU no pasaba por aqui -- vive en FlexOS_BNO085.cpp y la
+// ##  reparte el Flex IMU Service --, asi que sigue exactamente igual.
 // #############################################################
-
-// Mapea una direccion I2C a un tipo de modulo conocido
-static ModuleType identifyI2CDevice(uint8_t addr){
-  switch(addr){
-    case 0x76: case 0x77: return MOD_BME280;    // BME280 / BMP280
-    case 0x68: case 0x69: return MOD_MPU6050;   // MPU6050 / MPU9250
-    // GY-BNO085 (0x4A con AD0 a masa, 0x4B con AD0 a 3V3). Reconocerlo
-    // aqui solo sirve para que el aviso de la isla diga su nombre; quien
-    // decide si de verdad ES un BNO085 es el driver, preguntandole su
-    // Product ID -- una direccion que contesta no prueba nada.
-    case FLEXBNO_ADDR_LOW: case FLEXBNO_ADDR_HIGH: return MOD_BNO085;
-    default:              return MOD_I2C_GENERIC;
-  }
-}
-
-// Rellena name/sub descriptivos de un modulo I2C
-static void i2cDescribe(DetectedModule* m){
-  switch(m->type){
-    case MOD_BME280:
-      snprintf(m->name, sizeof(m->name), "Sensor BME280");
-      snprintf(m->sub,  sizeof(m->sub),  "I2C 0x%02X detectado", m->i2cAddr);
-      break;
-    case MOD_MPU6050:
-      snprintf(m->name, sizeof(m->name), "MPU6050");
-      snprintf(m->sub,  sizeof(m->sub),  "IMU - I2C 0x%02X", m->i2cAddr);
-      break;
-    case MOD_BNO085:
-      snprintf(m->name, sizeof(m->name), "GY-BNO085");
-      snprintf(m->sub,  sizeof(m->sub),  "IMU 9-DOF - I2C 0x%02X", m->i2cAddr);
-      break;
-    default:
-      snprintf(m->name, sizeof(m->name), "Dispositivo I2C");
-      snprintf(m->sub,  sizeof(m->sub),  "0x%02X detectado", m->i2cAddr);
-      break;
-  }
-}
-
-// ¿La direccion pertenece a un chip SOLDADO en la placa?
-//
-// El barrido busca modulos que el usuario CONECTA; los chips que
-// vienen de fabrica no son un hallazgo y avisar de ellos en cada
-// arranque seria ruido. Hasta ahora solo se excluia el panel tactil;
-// se anade el codec de audio, que cuelga del MISMO bus (GPIO7/8) y
-// que desde que existe FlexOS_Audio ya se detecta e identifica por su
-// propio camino, leyendo su registro de identificacion.
-static inline bool i2cIsTouch(uint8_t addr){ return addr == gtAddr || addr == 0x5D || addr == 0x14; }
-static inline bool i2cIsOnboard(uint8_t addr){
-  return i2cIsTouch(addr) || addr == FLEXAUDIO_I2C_ADDR;
-}
-
-// Indice de un modulo por direccion (o -1)
-static int i2cFindByAddr(uint8_t addr){
-  for(int i = 0; i < detectedCount; i++)
-    if(detectedModules[i].i2cAddr == addr) return i;
-  return -1;
-}
-
-// Marca presencia de una direccion; si es NUEVA la registra y avisa por la isla
-static void i2cOnDevicePresent(uint8_t addr){
-  if(i2cIsOnboard(addr)) return;
-  int idx = i2cFindByAddr(addr);
-  if(idx >= 0){
-    modSweepId[idx] = i2cSweepId;                 // sigue presente en este barrido
-    if(!detectedModules[idx].active){             // reaparecio tras haberse desconectado
-      detectedModules[idx].active = true;
-      detectedModules[idx].detectedAt = millis();
-      notifPush(&detectedModules[idx]);
-    }
-    return;
-  }
-  if(detectedCount >= MAX_MODULES_DETECTED) return;
-  DetectedModule m;
-  memset(&m, 0, sizeof(m));
-  m.i2cAddr = addr;
-  m.type    = identifyI2CDevice(addr);
-  m.active  = true;
-  m.numPins = 0;
-  m.detectedAt = millis();
-  i2cDescribe(&m);
-  int slot = detectedCount++;
-  detectedModules[slot] = m;
-  modSweepId[slot] = i2cSweepId;
-  notifPush(&detectedModules[slot]);
-}
-
-// Cierra un barrido completo: lo no visto -> inactivo (permite re-aviso al reconectar)
-static void i2cEndSweep(){
-  for(int i = 0; i < detectedCount; i++)
-    if(detectedModules[i].active && modSweepId[i] != i2cSweepId)
-      detectedModules[i].active = false;
-  i2cSweepId++;
-  i2cLastSweep = millis();
-}
-
-// Tick de deteccion I2C. Llamar en loop() en el mismo contexto que flexPollTouch.
-//
-// PRESUPUESTO DE TIEMPO, ademas del de direcciones. Contra un bus sano, ocho
-// sondeos por vuelta cuestan microsegundos. Contra un bus a medio conectar --
-// un modulo enchufado a medias, sin pull-ups -- CADA transaccion se va al plazo
-// de espera del driver, y ocho seguidas son un tiron visible en cada barrido.
-// El cursor es incremental, asi que cortar a mitad no pierde nada: el barrido
-// continua por donde iba en la vuelta siguiente y solo tarda unos cuadros mas.
-#define I2C_SCAN_BUDGET_MS 3
-static void hwDetectTick(){
-  if(!gtOk) return;                                          // sin I2C inicializado, nada
-  if(!i2cSweeping){
-    if(millis() - i2cLastSweep < I2C_SWEEP_INTERVAL) return; // espera entre barridos
-    i2cSweeping   = true;
-    i2cScanCursor = I2C_SCAN_LO;
-  }
-  int probes = 0;
-  uint32_t t0 = millis();
-  while(i2cSweeping && probes < I2C_SCAN_PER_TICK){
-    uint8_t addr = i2cScanCursor;
-    if(!i2cIsOnboard(addr)){
-      Wire.beginTransmission(addr);
-      if(Wire.endTransmission() == 0) i2cOnDevicePresent(addr);   // ACK -> hay dispositivo
-    }
-    probes++;
-    if(i2cScanCursor >= I2C_SCAN_HI){ i2cSweeping = false; i2cEndSweep(); }
-    else i2cScanCursor++;
-    if((uint32_t)(millis() - t0) >= (uint32_t)I2C_SCAN_BUDGET_MS) break;
-  }
-}
 
 // #############################################################
 // ##  SOLTAR CACHES DEL SISTEMA  ·  memShedSystem()

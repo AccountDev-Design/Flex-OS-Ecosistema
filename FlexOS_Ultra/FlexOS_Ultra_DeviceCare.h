@@ -817,6 +817,11 @@ static void dcCollect(DcMetric* m){
     if(flxFlushFault) errs++;
     if(!gTimeNvsOk)   errs++;
     if(!flexFsReady()) errs++;
+    // El bus I2C compartido ha tenido que recuperarse al menos una vez (tipico
+    // de un modulo retirado en caliente, que deja SDA a masa y se lleva por
+    // delante al tactil). El sistema siguio funcionando -- para eso esta la
+    // recuperacion -- pero paso de verdad, y aqui se cuenta como lo que es.
+    if(gtRecoverN)    errs++;
     dcMetricSet(&m[DCH_ERR], errs == 0 ? DCL_OK : (errs == 1 ? DCL_WARN : DCL_BAD), -1,
                 errs == 0 ? "0" : "%d", errs);
   }

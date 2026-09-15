@@ -38,6 +38,12 @@ tests/
                        verdad con el runtime declarativo de siempre
     test_net.cpp       el transporte real: sockets TCP, hilos y un
                        servidor WebSocket que trocea el primer frame
+    test_imu.cpp       el driver REAL del GY-BNO085 contra un bus I2C
+                       simulado que sabe estar sano, vacio, TRABADO o
+                       devolviendo basura. Existe por un fallo concreto:
+                       retirar el modulo en caliente congelaba el sistema
+                       entero, tactil incluido, porque el driver seguia
+                       leyendo un bus muerto desde el hilo del bucle
     jpegcheck.cpp      herramienta: decodifica un JPEG con el decodificador del firmware
     flexpkgcheck.cpp   herramienta: valida un .flexpkg con el NÚCLEO del firmware
     flexapprun.cpp     herramienta: ejecuta un .flxb con el GESTOR del firmware
@@ -53,6 +59,9 @@ tests/
                        hermana), comparados por HASH: si uno se separa, la
                        bateria falla y dice cual
     stub/              entorno Arduino simulado (ver stub/README.md)
+    bnostub/           bus I2C y GY-BNO085 simulados para test_imu: hablan
+                       SHTP de verdad y cobran a un reloj virtual lo que
+                       cada transaccion costaria en la placa
     fsstub/            LittleFS en memoria, con fallos provocables
     vendor/            terceros SOLO para las pruebas (cJSON, MIT)
     Makefile

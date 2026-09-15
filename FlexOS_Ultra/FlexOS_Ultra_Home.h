@@ -84,31 +84,48 @@
 // ##  antes de usarlo. Sin eso, tras actualizar el usuario veria en
 // ##  Inicio apps distintas de las que puso.
 // #############################################################
-#define APPREG_VER 2
+#define APPREG_VER 3
 static const uint8_t HOME_FACTORY[HOME_LEGACY_SLOTS] = {
   IC_RELOJ, IC_GALERIA, IC_MULTIMEDIA, IC_ALMACEN,
   IC_MODOPC, IC_NOTAS, IC_FLEXSTORE, IC_NAV,
-  IC_CODE, IC_DEVCARE, IC_PAINT, IC_JUEGOS
+  IC_BRUJULA, IC_DEVCARE, IC_PAINT, IC_JUEGOS   // la novena casilla era Code IDE
 };
-// Traduccion de los ids de la version 1 del registro (22 apps) a los de la 2
-// (19). 0xFF = la app ya no existe y su ranura se queda vacia.
+// Traduccion de los ids de la version 1 del registro (22 apps) a los ACTUALES.
+// 0xFF = la app ya no existe y su ranura se queda vacia.
 //   v1  6 Educacion  -> Flex Store    (ocupa su sitio en Inicio)
 //   v1  9 Bienestar  -> Device Care   (ocupa su sitio en Inicio)
+//   v1  8 Code IDE   -> Flex Compass  (ocupa su sitio en Inicio)
 //   v1 21 Carpeta segura -> retirada
 #define APPREG_V1_N 22
 static const uint8_t APPREG_MAP_V1[APPREG_V1_N] = {
   IC_RELOJ, IC_GALERIA, IC_MULTIMEDIA, IC_ALMACEN, IC_MODOPC, IC_NOTAS,
   IC_FLEXSTORE,                      // 6  Educacion
-  IC_NAV, IC_CODE,
+  IC_NAV,
+  IC_BRUJULA,                        // 8  Code IDE
   IC_DEVCARE,                        // 9  Bienestar
   IC_PAINT, IC_JUEGOS, IC_AJUSTES, IC_CALC, IC_CALEND, IC_CAMARA,
   IC_CLIMA, IC_FLEXSTORE, IC_FLEXPHONE, IC_DEVCARE, IC_BRUJULA,
   0xFF                               // 21 Carpeta segura: retirada
 };
+// Traduccion de la version 2 (19 apps, con Code IDE en el 7 y la brujula en el
+// 18) a la 3. Code IDE ya no existe y su ranura -- la 7 -- la ocupa Flex
+// Compass, asi que los dos ids VIEJOS apuntan al mismo id nuevo. Eso no puede
+// dar dos brujulas en el escritorio: homeOrderNormalize() lleva su vector
+// seen[] y vacia la segunda aparicion de cualquier app, que es exactamente el
+// caso de un usuario que tuviera Code IDE y la brujula a la vez.
+#define APPREG_V2_N 19
+static const uint8_t APPREG_MAP_V2[APPREG_V2_N] = {
+  IC_RELOJ, IC_GALERIA, IC_MULTIMEDIA, IC_ALMACEN, IC_MODOPC, IC_NOTAS,
+  IC_NAV,
+  IC_BRUJULA,                        // 7  Code IDE -> su sitio es de la brujula
+  IC_PAINT, IC_JUEGOS, IC_AJUSTES, IC_CALC, IC_CALEND, IC_CAMARA,
+  IC_CLIMA, IC_FLEXSTORE, IC_FLEXPHONE, IC_DEVCARE,
+  IC_BRUJULA                         // 18 Flex Compass -> se muda al 7
+};
 static uint8_t homeOrder[HOME_TOTAL] = {
   IC_RELOJ, IC_GALERIA, IC_MULTIMEDIA, IC_ALMACEN,
   IC_MODOPC, IC_NOTAS, IC_FLEXSTORE, IC_NAV,
-  IC_CODE, IC_DEVCARE, IC_PAINT, IC_JUEGOS
+  IC_BRUJULA, IC_DEVCARE, IC_PAINT, IC_JUEGOS
 };  // app id por ranura (reordenable)
 static int     gHomePage  = 0;                         // pagina visible (0..gHomePageN-1)
 static uint8_t gHomePageN = HOME_LEGACY_PAGES;         // paginas existentes (1..HOME_PAGES_MAX)
@@ -1470,40 +1487,61 @@ static void homeOrderLoad(){
     for(int i = 0; i < HOME_LEGACY_SLOTS; i++) homeOrder[homeIdx(0, i)] = HOME_FACTORY[i];
   }
   // #########################################################
-  //  TRADUCCION DEL REGISTRO v1 -> v2
+  //  TRADUCCION DEL REGISTRO GUARDADO AL ACTUAL
   //  -------------------------------------------------------
-  //  Solo si lo guardado viene de un firmware con el registro de 22 apps y
-  //  aqui de verdad habia algo guardado (fav >= 0: si no, ya se aplico el
-  //  reparto de fabrica y no hay nada que traducir). Se traduce TODO lo que
-  //  viaja indexado por id -- ranuras del escritorio, favoritas, ocultas y
-  //  candados -- de una vez y en un solo sitio.
+  //  Solo si lo guardado viene de un registro anterior y aqui de verdad habia
+  //  algo guardado (fav >= 0: si no, ya se aplico el reparto de fabrica y no
+  //  hay nada que traducir). Se traduce TODO lo que viaja indexado por id --
+  //  ranuras del escritorio, favoritas, ocultas y candados -- de una vez y en
+  //  un solo sitio.
+  //
+  //  Hay DOS mapas porque hay dos saltos posibles:
+  //    · v1 (22 apps: Educacion, Bienestar, Carpeta segura) -> actual
+  //    · v2 (19 apps: Code IDE en el 7, la brujula en el 18) -> actual
+  //  Cada uno traduce directamente al registro de HOY, asi que una placa que
+  //  se haya saltado una version se migra igual de bien en un solo paso.
   //
   //  Las ranuras de APPS DESCARGADAS (homeIsPkg) no se tocan: sus valores no
   //  son ids del registro nativo.
   // #########################################################
   if(regver < APPREG_VER && fav >= 0){
+    const uint8_t* map = (regver <= 1) ? APPREG_MAP_V1 : APPREG_MAP_V2;
+    const int      mapN = (regver <= 1) ? APPREG_V1_N  : APPREG_V2_N;
+    // Id que tenia CODE IDE en el registro de origen. Su ranura pasa a la
+    // brujula, pero su CANDADO no: un candado es una decision del usuario sobre
+    // UNA app concreta, y trasladarlo a otra seria inventarselo.
+    const int oldIde = (regver <= 1) ? 8 : 7;
     for(int i = 0; i < HOME_TOTAL; i++){
       uint8_t v = homeOrder[i];
       if(v == HOME_EMPTY || homeIsPkg(v)) continue;
-      homeOrder[i] = (v < APPREG_V1_N) ? APPREG_MAP_V1[v] : HOME_EMPTY;
+      homeOrder[i] = (v < mapN) ? map[v] : HOME_EMPTY;
       if(homeOrder[i] == 0xFF) homeOrder[i] = HOME_EMPTY;
     }
     uint32_t nf = 0, nh = 0, nl = 0;
-    for(int v = 0; v < APPREG_V1_N; v++){
-      uint8_t d = APPREG_MAP_V1[v];
+    for(int v = 0; v < mapN; v++){
+      uint8_t d = map[v];
       if(d >= APP_N) continue;                    // app retirada: su bit se pierde, que es lo correcto
       uint32_t src = (uint32_t)(1u << v), dst = (uint32_t)(1u << d);
       if(gAppFav    & src) nf |= dst;
       if(gAppHidden & src) nh |= dst;
-      if(gAppLock   & src) nl |= dst;
+      if(v != oldIde && (gAppLock & src)) nl |= dst;   // el candado de Code IDE no se hereda
     }
     gAppFav = nf; gAppHidden = nh; gAppLock = nl;
     // Flex Store y Device Care heredan el sitio de Educacion y Bienestar, pero
     // una placa donde el usuario habia QUITADO las dos de Inicio se quedaria
     // sin ellas y sin saber por que. El valor de fabrica manda en ese caso: las
     // dos son favoritas tras actualizar, y el usuario puede volver a quitarlas.
-    gAppFav |= (uint32_t)(1u << IC_FLEXSTORE) | (uint32_t)(1u << IC_DEVCARE);
-    gAppHidden &= (uint32_t)~((1u << IC_FLEXSTORE) | (1u << IC_DEVCARE));
+    if(regver <= 1){
+      gAppFav |= (uint32_t)(1u << IC_FLEXSTORE) | (uint32_t)(1u << IC_DEVCARE);
+      gAppHidden &= (uint32_t)~((1u << IC_FLEXSTORE) | (1u << IC_DEVCARE));
+    }
+    // MISMO CRITERIO PARA LA BRUJULA. Flex Compass hereda la ranura de Code
+    // IDE, y una placa donde el usuario tuviera Code IDE oculto o fuera de
+    // Inicio se quedaria con el hueco y sin brujula. El valor de fabrica manda:
+    // tras actualizar esta en Inicio y visible, y el usuario puede volver a
+    // quitarla desde la Caja de aplicaciones como cualquier otra.
+    gAppFav |= (uint32_t)(1u << IC_BRUJULA);
+    gAppHidden &= (uint32_t)~(1u << IC_BRUJULA);
   }
   const uint32_t validApps = (1u << APP_N) - 1u;
   gAppFav &= validApps;

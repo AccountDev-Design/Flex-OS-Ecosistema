@@ -1,7 +1,7 @@
 # Estructura de Flex OS Ultra (ESP32-P4)
 
 `FlexOS_Ultra.ino` era un solo archivo de **37053 líneas**. Ahora es el
-**orquestador** del sistema y todo lo demás vive en 60 módulos
+**orquestador** del sistema y todo lo demás vive en 59 módulos
 `FlexOS_Ultra_*.h` en la misma carpeta del sketch, que es `FlexOS_Ultra/`.
 
 Esto es **una reorganización, no un cambio funcional**: el código que se
@@ -104,7 +104,6 @@ Esa frontera no se ha tocado.
 | `FlexOS_Ultra_AppStorage.h`       |   729 | app Almacenamiento y detalles de memoria |
 | `FlexOS_Ultra_AppFiles.h`         |   463 | explorador de archivos |
 | `FlexOS_Ultra_AppGames.h`         |    77 | app Juegos (incluye FlexOS_Jumper.h) |
-| `FlexOS_Ultra_AppCodeIDE.h`       |   270 | Code IDE: asistente de hardware |
 | `FlexOS_Ultra_AppPaint.h`         |   607 | app Paint |
 | `FlexOS_Ultra_WeatherKit.h`       |   717 | clima: iconografia y escenas procedurales |
 | `FlexOS_Ultra_AppWeather.h`       |  1341 | app Clima y sus dos widgets |
@@ -118,14 +117,14 @@ Esa frontera no se ha tocado.
 | `FlexOS_Ultra_Conn.h`             |   359 | conectividad: Wi-Fi / BLE / modo avion |
 | `FlexOS_Ultra_Notif.h`            |   385 | isla dinamica: notificaciones |
 | `FlexOS_Ultra_AppChrono.h`        |   917 | cronometro: app, capsula y tarjeta |
-| `FlexOS_Ultra_System.h`           |   487 | I2C, soltar caches, Optimizar Flex OS y cambio de tema |
+| `FlexOS_Ultra_System.h`           |   461 | soltar caches, Optimizar Flex OS y cambio de tema |
 | `FlexOS_Ultra_AppGallery.h`       |   768 | Galeria |
 | `FlexOS_Ultra_IMU.h`              |   362 | Flex IMU Service + Flex Motion Engine: reparto del GY-BNO085 y UNA muestra para todos |
 | `FlexOS_Ultra_DeviceCare.h`       |  1604 | Flex Device Care: app, historial, salud y grafico del GY-BNO085 |
 | `FlexOS_Ultra_DeviceTests.h`      |   906 | Device Care: pruebas, diagnostico y Post-Impact Check |
 | `FlexOS_Ultra_FallAlert.h`        |   448 | Device Care: aviso global de posible caida (vertical y horizontal) |
 | `FlexOS_Ultra_Recovery.h`         |   691 | restablecer datos de fabrica y modo seguro |
-| `FlexOS_Ultra_AppCompass.h`       |  1096 | Flex Compass: brujula, modulo BNO085 dibujado por codigo y datos del sensor |
+| `FlexOS_Ultra_AppCompass.h`       |  1096 | Flex Compass: brujula, modulo BNO085 dibujado por codigo y datos del sensor. Ocupa la ranura 7 del registro, la que era de Code IDE |
 | `FlexOS_Ultra_Theft.h`            |   656 | Proteccion contra robo: estado, clasificador, Event Manager, historial y bloqueo |
 | `FlexOS_Ultra_TheftUI.h`          |  1131 | Proteccion contra robo: las tres pantallas, la animacion y el aviso del bloqueo |
 

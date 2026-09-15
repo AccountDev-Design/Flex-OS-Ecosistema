@@ -350,7 +350,7 @@ static const char* APP[APP_N][5] = {
   {"Modo PC","PC Mode","Mode PC","Modo PC","Modo PC"},
   {"Notas","Notes","Notes","Notas","Note"},
   {"Navegador","Browser","Navigateur","Navegador","Browser"},
-  {"Code IDE","Code IDE","Code IDE","Code IDE","Code IDE"},
+  {"Flex Compass","Flex Compass","Flex Compass","Flex Compass","Flex Compass"},
   {"Paint","Paint","Dessin","Paint","Disegno"},
   {"Juegos","Games","Jeux","Jogos","Giochi"},
   {"Ajustes","Settings","R\xC3\xA9glages","Ajustes","Impostazioni"},
@@ -361,7 +361,6 @@ static const char* APP[APP_N][5] = {
   {"Flex Store","Flex Store","Flex Store","Flex Store","Flex Store"},
   {"Flex Phone","Flex Phone","Flex Phone","Flex Phone","Flex Phone"},
   {"Device Care","Device Care","Device Care","Device Care","Device Care"},
-  {"Flex Compass","Flex Compass","Flex Compass","Flex Compass","Flex Compass"},
 };
 static const char* appName(int id){ return APP[id][LI()]; }
 

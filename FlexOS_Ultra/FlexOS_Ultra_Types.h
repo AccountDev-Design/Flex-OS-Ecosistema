@@ -350,31 +350,29 @@ static ClipItem gClip[CLIP_SLOTS];
 // ##  generado ya conoce ModuleType/DetectedModule/Notification.
 // #############################################################
 
-// ---- Tipos de modulo (compartidos con la futura deteccion I2C, Fase 2) ----
+// ---- Tipos de aviso de la isla ----
+//
+// ESTO YA NO ES UN CATALOGO DE HARDWARE. Lo era cuando existia el barrido
+// generico del bus I2C, que listaba cualquier modulo que contestase y avisaba
+// de el por la isla. Ese barrido se ha retirado -- no daba utilidad suficiente
+// y era trafico constante sobre el MISMO bus que el tactil --, asi que aqui
+// solo quedan los dos tipos que de verdad tienen quien los produzca:
+//   · MOD_UNKNOWN : avisos del sistema (sysNotify)
+//   · MOD_MEDIA   : avisos del reproductor y del explorador (mediaNotify)
+// El GY-BNO085 NO aparece aqui a proposito: su presencia, su estado y su
+// perdida las cuentan Flex Device Care y Flex Compass con el estado REAL del
+// driver, no un aviso de "alguien contesta en el bus".
 enum ModuleType {
   MOD_UNKNOWN,
-  MOD_ULTRASONIC,   // HC-SR04
-  MOD_BME280,       // sensor I2C
-  MOD_MPU6050,      // IMU I2C
-  MOD_LED,
-  MOD_BUTTON,
-  MOD_SERVO,
-  MOD_I2C_GENERIC,
-  MOD_MEDIA,        // archivo incompatible, fin de reproduccion...
-  // Anadido AL FINAL, por el mismo motivo que todo lo demas en este
-  // sketch: ningun valor anterior se mueve. Es el IMU que usa Flex
-  // Device Care -> Deteccion de caidas (TENSTAR GY-BNO085).
-  MOD_BNO085
+  MOD_MEDIA         // archivo incompatible, fin de reproduccion...
 };
 
-// Un modulo detectado por el hardware.
+// Contenido de un aviso de la isla.
 struct DetectedModule {
   ModuleType    type;
-  char          name[72];       // nombre descriptivo del modulo
-  char          sub[40];        // bus, direccion o detalle del modulo
-  uint8_t       i2cAddr;        // 0 si no es I2C
-  uint8_t       pins[4];        // reservado para Fase 2 (asignacion de pines)
-  uint8_t       numPins;
+  char          name[72];       // titulo del aviso
+  char          sub[40];        // texto secundario
+  uint8_t       i2cAddr;        // 0 fuera del bus; entra en la huella del aviso
   bool          active;
   unsigned long detectedAt;
 };
@@ -544,20 +542,11 @@ static uint16_t*      gCronoCardCache = NULL; // sub-banda con la tarjeta compue
 // con el valor guardado y gCronoT0 = millis(). Todo el estado necesario esta en
 // estas variables justamente para que ese paso sea un volcado y nada mas.
 
-// ---- Deteccion real de hardware I2C ----
-#define MAX_MODULES_DETECTED  8
-#define I2C_SCAN_LO           0x08     // rango 7-bit valido (evita direcciones reservadas)
-#define I2C_SCAN_HI           0x77
-#define I2C_SCAN_PER_TICK     8        // direcciones sondeadas por vuelta de loop (no bloquea)
-static const uint32_t I2C_SWEEP_INTERVAL = 3000;   // ms entre barridos completos
-
-static DetectedModule detectedModules[MAX_MODULES_DETECTED];
-static int      detectedCount = 0;
-static uint16_t modSweepId[MAX_MODULES_DETECTED];  // ultimo barrido en que se vio cada modulo
-static uint8_t  i2cScanCursor = 0;                 // direccion actual dentro del barrido
-static bool     i2cSweeping   = false;             // hay un barrido en curso
-static uint32_t i2cLastSweep  = 0;                 // fin del ultimo barrido
-static uint16_t i2cSweepId    = 0;                 // id del barrido (para reconciliar presencia)
+// (Aqui vivia el estado del BARRIDO GENERICO DEL BUS I2C: la tabla de modulos
+// detectados, el cursor de direcciones y los identificadores de barrido. Se ha
+// retirado entero. El unico dispositivo que Flex OS Ultra habla por I2C ademas
+// del tactil y del codec es el GY-BNO085, y de el se ocupa su propio driver
+// (FlexOS_BNO085.cpp) a traves del Flex IMU Service.)
 
 // Radio (WiFi por el co-procesador ESP32-C6/esp-hosted). Declarado aqui
 // ARRIBA -a proposito- porque Ajustes (mas abajo en el archivo, pero

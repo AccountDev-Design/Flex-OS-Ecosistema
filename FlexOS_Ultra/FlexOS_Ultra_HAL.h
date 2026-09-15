@@ -289,6 +289,90 @@ static bool    gtOk   = false;
 static uint8_t  gtFingers   = 0;
 static uint32_t gtFingersMs = 0;   // millis() del ultimo frame valido (para caducar la cuenta)
 
+// #############################################################
+// ##  EL BUS I2C ES COMPARTIDO, Y POR ESO SE PUEDE RECUPERAR
+// ##  ----------------------------------------------------------
+// ##  Por GPIO7/GPIO8 cuelgan el GT911 (tactil), el codec ES8311 y el
+// ##  GY-BNO085. Un esclavo que pierde la alimentacion EN MITAD de una
+// ##  transaccion -- exactamente lo que pasa al tirar del IMU en
+// ##  caliente -- se queda tirando de SDA a masa. A partir de ese
+// ##  instante el maestro no puede ni generar un START: TODAS las
+// ##  transacciones fallan, incluidas las del tactil. Ese, y no otro,
+// ##  es el motivo de que al desconectar el modulo se perdiera el
+// ##  tactil y la interfaz dejara de responder.
+// ##
+// ##  El remedio es el estandar de I2C y no depende del esclavo que se
+// ##  haya ido: soltar el periferico, mover SCL a mano hasta nueve
+// ##  pulsos (lo que dura un byte mas su ACK) hasta que SDA vuelva a
+// ##  subir, dar una condicion de STOP y volver a montar el bus. Si SDA
+// ##  sube, el bus queda utilizable otra vez y el GT911 vuelve.
+// ##
+// ##  SE HACE EN EL HILO DEL BUCLE y con enfriamiento: son ~9 pulsos de
+// ##  10 us mas el re-arranque del periferico, no un bucle de espera.
+// #############################################################
+#define I2C_BUS_TIMEOUT_MS   8      // techo de UNA transaccion (el driver espera 50 ms por defecto)
+#define GT_FAIL_RECOVER_N    8      // lecturas del tactil seguidas fallidas que piden recuperacion
+#define GT_RECOVER_GAP_MS  1000     // enfriamiento entre dos intentos de recuperacion
+
+static uint8_t  gtFails       = 0;  // lecturas del GT911 fallidas SEGUIDAS
+static uint32_t gtRecoverMs   = 0;  // millis del ultimo intento de recuperacion (0 = ninguno)
+static uint32_t gtRecoverN    = 0;  // cuantas veces se ha recuperado el bus (lo ensena Device Care)
+static bool     gtBusWedged   = false;  // el bus esta trabado ahora mismo
+
+// Monta el bus con los parametros del sistema. UN SOLO SITIO: lo llaman el
+// arranque del tactil y la recuperacion, asi que la frecuencia y el plazo de
+// espera no pueden divergir entre los dos caminos.
+static void i2cBusBegin(){
+  Wire.begin(PIN_TP_SDA, PIN_TP_SCL, 400000);
+  // TECHO DE UNA TRANSACCION. El driver de Arduino espera 50 ms por defecto.
+  // Con un modulo a medio conectar en el MISMO bus, cada transaccion fallida
+  // costaba esos 50 ms dentro del bucle -- y el tactil hace dos o tres por
+  // vuelta. Con 8 ms el peor caso baja de golpe y sigue sobrandole margen a
+  // cualquier transaccion sana, que a 400 kHz no llega ni al milisegundo.
+  Wire.setTimeOut(I2C_BUS_TIMEOUT_MS);
+}
+
+// I2C ES DRENADOR ABIERTO, TAMBIEN CUANDO LO MUEVE EL FIRMWARE.
+//
+// Una linea se pone a CERO tirando de ella y se pone a UNO **soltandola**: la
+// sube la resistencia de pull-up del bus. Forzar un 1 con la salida del GPIO
+// contra un esclavo que sigue tirando a masa serian dos salidas peleandose por
+// la misma linea, que es justo lo que no se hace en un bus I2C -- y estamos
+// aqui precisamente porque hay un esclavo tirando de SDA. De ahi estas cuatro
+// primitivas: no hay ni un digitalWrite(HIGH) sobre el bus.
+//
+// El medio periodo es de 10 us (~50 kHz). Son nueve pulsos: menos de 200 us en
+// total, y a esa velocidad la linea sube de sobra aunque el pull-up sea el
+// interno del ESP32.
+#define I2C_REC_HALF_US 10
+static inline void i2cSclLow()     { pinMode(PIN_TP_SCL, OUTPUT); digitalWrite(PIN_TP_SCL, LOW); }
+static inline void i2cSclRelease() { pinMode(PIN_TP_SCL, INPUT_PULLUP); }
+static inline void i2cSdaLow()     { pinMode(PIN_TP_SDA, OUTPUT); digitalWrite(PIN_TP_SDA, LOW); }
+static inline void i2cSdaRelease() { pinMode(PIN_TP_SDA, INPUT_PULLUP); }
+
+// Devuelve true si, al terminar, SDA esta libre (bus utilizable).
+static bool i2cBusRecover(){
+  Wire.end();
+  i2cSdaRelease();
+  i2cSclRelease();
+  delayMicroseconds(I2C_REC_HALF_US);
+  // Hasta nueve pulsos de reloj: un byte completo mas su ACK. En cuanto el
+  // esclavo atascado suelta SDA se corta; no se insiste mas.
+  for(int i = 0; i < 9 && digitalRead(PIN_TP_SDA) == LOW; i++){
+    i2cSclLow();     delayMicroseconds(I2C_REC_HALF_US);
+    i2cSclRelease(); delayMicroseconds(I2C_REC_HALF_US);
+  }
+  bool freed = (digitalRead(PIN_TP_SDA) != LOW);
+  // Condicion de STOP a mano: con SCL ya alto, SDA pasa de 0 a 1. Deja a
+  // cualquier esclavo que siguiera escuchando en un estado conocido.
+  i2cSdaLow();     delayMicroseconds(I2C_REC_HALF_US);
+  i2cSclRelease(); delayMicroseconds(I2C_REC_HALF_US);
+  i2cSdaRelease(); delayMicroseconds(I2C_REC_HALF_US);
+  i2cBusBegin();
+  gtRecoverN++;
+  return freed;
+}
+
 static bool gtWr(uint16_t reg, uint8_t val){
   Wire.beginTransmission(gtAddr);
   Wire.write((uint8_t)(reg >> 8));
@@ -311,7 +395,7 @@ void flexTouchInit(){
   digitalWrite(PIN_TP_RST, LOW);  delay(10);
   digitalWrite(PIN_TP_RST, HIGH); delay(100);
 
-  Wire.begin(PIN_TP_SDA, PIN_TP_SCL, 400000);
+  i2cBusBegin();
 
   gtAddr = 0x5D;
   Wire.beginTransmission(gtAddr);
@@ -330,12 +414,68 @@ void flexTouchInit(){
                 gtAddr, pid[0], pid[1], pid[2]);
 }
 
+// CONTABILIDAD DEL BUS, vista desde el tactil. El GT911 se lee en CADA vuelta
+// del bucle, asi que es el testigo mas fiable de que el bus sigue vivo: si sus
+// lecturas empiezan a fallar seguidas, lo que esta roto es el bus, no el chip.
+static inline void gtBusNote(bool ok){
+  if(ok){ gtFails = 0; gtBusWedged = false; return; }
+  if(gtFails < 255) gtFails++;
+}
+
+// RECUPERACION DEL BUS COMPARTIDO. Se llama desde el propio sondeo del tactil,
+// en el hilo del bucle, y solo cuando ya hay motivo (GT_FAIL_RECOVER_N lecturas
+// seguidas fallidas) y ha pasado el enfriamiento. Coste acotado y conocido:
+// nueve pulsos de reloj y el re-arranque del periferico; solo si despues de eso
+// el GT911 SIGUE sin contestar se le da ademas su pulso de reset, que son 70 ms
+// una vez por segundo como mucho -- muy lejos de un bucle de espera, y la unica
+// forma de devolver el tactil cuando el chip se quedo a medias.
+//
+// NUNCA apaga gtOk: si la recuperacion no funciona a la primera, el siguiente
+// sondeo vuelve a intentarlo pasado el enfriamiento. Rendirse dejaria el tactil
+// muerto para siempre, que es justo lo que este bloque existe para evitar.
+static void gtBusGuard(){
+  if(gtFails < GT_FAIL_RECOVER_N) return;
+  uint32_t now = millis();
+  if(gtRecoverMs && (uint32_t)(now - gtRecoverMs) < (uint32_t)GT_RECOVER_GAP_MS) return;
+  gtRecoverMs = now ? now : 1;
+  gtBusWedged = true;
+  bool freed = i2cBusRecover();
+  Wire.beginTransmission(gtAddr);
+  if(Wire.endTransmission() == 0){ gtFails = 0; gtBusWedged = false; return; }
+  // SDA SIGUE A MASA. Lo que tira de la linea no es el GT911, asi que darle un
+  // reset no arreglaria nada y costaria 70 ms para nada. Se deja para el
+  // siguiente intento: el cable puede seguir a medio quitar ahora mismo.
+  if(!freed) return;
+  // El bus ya esta libre pero el GT911 no contesta: se le da su pulso de reset,
+  // igual que en el arranque, y se vuelve a buscar en sus dos direcciones.
+  pinMode(PIN_TP_RST, OUTPUT);
+  digitalWrite(PIN_TP_RST, LOW);  delay(10);
+  digitalWrite(PIN_TP_RST, HIGH); delay(60);
+  const uint8_t addrs[2] = { 0x5D, 0x14 };
+  for(int i = 0; i < 2; i++){
+    Wire.beginTransmission(addrs[i]);
+    if(Wire.endTransmission() == 0){
+      gtAddr = addrs[i];
+      gtFails = 0; gtBusWedged = false;
+      return;
+    }
+  }
+}
+
 // Lee un frame del GT911. Devuelve 1=tocando (gx/gy validos),
 // 0=soltado, -1=sin datos nuevos. Coords NATIVAS (0..479/0..799).
 static int8_t gtPoll(uint16_t &gx, uint16_t &gy){
   if(!gtOk) return -1;
   uint8_t status = 0;
-  if(!gtRd(0x814E, &status, 1)) return -1;
+  if(!gtRd(0x814E, &status, 1)){
+    // Una lectura suelta fallida no significa nada; varias seguidas SI. El
+    // guardia decide cuando toca recuperar el bus y cuando solo hay que
+    // esperar: aqui no se bloquea ni se pierde el frame siguiente.
+    gtBusNote(false);
+    gtBusGuard();
+    return -1;
+  }
+  gtBusNote(true);
   if(!(status & 0x80)) return -1;
   uint8_t n = status & 0x0F;
   gtFingers = n; gtFingersMs = millis();   // cuenta de contactos para el gesto de suspension

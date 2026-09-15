@@ -163,7 +163,10 @@ static const uint8_t APP_WEIGHT[APP_N] = {
   FLEXMEM_W_HEAVY,    // 4  Modo PC/DeX  (fondo compuesto + ventanas)
   FLEXMEM_W_LIGHT,    // 5  Notas
   FLEXMEM_W_HEAVY,    // 6  Navegador    (tarea de red + cache de fotogramas)
-  FLEXMEM_W_MEDIUM,   // 7  Code IDE
+  // 7 Flex Compass, en la ranura que era de Code IDE. No reserva PSRAM propia
+  // mas alla del lienzo cacheado de la tarjeta del modulo, que suelta su gancho
+  // 'shed' en cuanto la memoria aprieta.
+  FLEXMEM_W_LIGHT,    // 7  Flex Compass
   FLEXMEM_W_MEDIUM,   // 8  Paint        (trazo en PSRAM)
   FLEXMEM_W_MEDIUM,   // 9  Juegos
   FLEXMEM_W_LIGHT,    // 10 Ajustes
@@ -177,9 +180,6 @@ static const uint8_t APP_WEIGHT[APP_N] = {
   // caidas es aritmetica sobre una muestra y el historial son 200
   // bytes. Lo unico grande es la banda del aviso, y se pide al abrirlo
   // y se suelta al cerrarlo (ver FlexOS_Ultra_FallAlert.h).
-  FLEXMEM_W_LIGHT,
-  // 18 Flex Compass. No reserva PSRAM: dibuja con las primitivas del sistema
-  // y lee el mismo servicio IMU que Device Care.
   FLEXMEM_W_LIGHT
 };
 static int appWeight(int id){ return (id >= 0 && id < APP_N) ? (int)APP_WEIGHT[id] : FLEXMEM_W_LIGHT; }

@@ -135,8 +135,9 @@ Wi‑Fi, las tareas de FreeRTOS y las cargas repentinas.
 
 Clases de peso (`APP_WEIGHT[]`):
 
-* **Ligeras** — Reloj, Almacenamiento, Notas, Ajustes, Calculadora, Calendario, Clima, Flex Phone
-* **Medias** — Code IDE, Paint, Juegos, Flex Store
+* **Ligeras** — Reloj, Almacenamiento, Notas, Ajustes, Calculadora, Calendario, Clima, Flex Phone,
+  Device Care, Flex Compass
+* **Medias** — Paint, Juegos, Flex Store
 * **Pesadas** — Galería, Multimedia, Modo PC/DeX, Navegador, Cámara
 
 Dos reglas que no se negocian:

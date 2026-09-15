@@ -53,7 +53,7 @@ APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net \
         $(BUILD)/test_passcode $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
-        $(BUILD)/test_media $(BUILD)/test_mem $(BUILD)/test_fall $(BUILD)/test_theft \
+        $(BUILD)/test_media $(BUILD)/test_mem $(BUILD)/test_fall $(BUILD)/test_theft $(BUILD)/test_imu \
         $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun
 
@@ -111,6 +111,27 @@ THEFT_SRC := $(ULTRA)/FlexOS_Theft.cpp
 
 $(BUILD)/test_theft: test_theft.cpp $(THEFT_SRC) $(ULTRA)/FlexOS_Theft.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) $(INC) -o $@ test_theft.cpp $(THEFT_SRC)
+
+# --- IMU GY-BNO085: el driver REAL contra un bus I2C simulado ---------------
+# Esta es la unica prueba de la bateria que compila FlexOS_BNO085.cpp de
+# verdad, y existe por un fallo concreto: retirar el modulo en caliente
+# congelaba el sistema entero, tactil incluido, porque el driver seguia
+# leyendo un bus muerto desde el hilo del bucle en CADA vuelta.
+#
+# El doble de bnostub/ no es un doble del driver: es un doble del BUS y del
+# SENSOR. Habla SHTP de verdad y sabe estar sano, vacio, trabado o devolviendo
+# basura, y cobra a un reloj virtual lo que cada transaccion costaria. Asi
+# "una vuelta del bucle no puede irse mas de X ms en el bus" deja de ser una
+# impresion y pasa a ser una comprobacion.
+#
+# Con sanitizers: este codigo recorre cabeceras de longitud variable que
+# vienen de un bus que puede entregar cualquier cosa.
+BNO_SRC_T := $(ULTRA)/FlexOS_BNO085.cpp
+
+$(BUILD)/test_imu: test_imu.cpp $(BNO_SRC_T) $(ULTRA)/FlexOS_BNO085.h \
+                   bnostub/Arduino.h bnostub/Wire.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -Ibnostub -o $@ test_imu.cpp $(BNO_SRC_T)
+
 # --- PLATAFORMA DE APLICACIONES flex-app-v1 ---------------------------------
 # Cuatro baterias, todas con sanitizers. Aqui es OBLIGATORIO: este codigo
 # ejecuta bytecode que viene de internet y decide si un paquete firmado por un
@@ -374,6 +395,8 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_fall
 	@echo
 	@$(BUILD)/test_theft
+	@echo
+	@$(BUILD)/test_imu
 	@echo
 	@$(BUILD)/test_appvm
 	@echo

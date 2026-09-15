@@ -264,7 +264,6 @@
 #include "FlexOS_Ultra_AppStorage.h"         // app Almacenamiento y detalles de memoria
 #include "FlexOS_Ultra_AppFiles.h"           // explorador de archivos
 #include "FlexOS_Ultra_AppGames.h"           // app Juegos (incluye FlexOS_Jumper.h)
-#include "FlexOS_Ultra_AppCodeIDE.h"         // Code IDE: asistente de hardware
 #include "FlexOS_Ultra_AppPaint.h"           // app Paint
 #include "FlexOS_Ultra_WeatherKit.h"         // clima: iconografia y escenas procedurales
 #include "FlexOS_Ultra_AppWeather.h"         // app Clima y sus dos widgets
@@ -686,7 +685,6 @@ void loop(){
   cronoOverlayTouch();    // CRONOMETRO: la capsula y su tarjeta se quedan el toque antes que la isla
   notifHandleTouch();     // la isla intercepta toques dentro de sus tarjetas (Fase 1)
   flexOtaTouchBridge();   // OTA: si hay overlay visible, se queda el toque antes que nadie
-  hwDetectTick();         // deteccion I2C incremental, mismo contexto que el tactil (Fase 2)
   imuServiceTick();       // Flex IMU Service: mueve el GY-BNO085 mientras alguien lo tenga
                           // adquirido (Device Care, Flex Compass). MISMO bus y MISMO hilo
                           // que el tactil. Sin consumidores sale en su primera linea.
@@ -937,7 +935,7 @@ void loop(){
 //            APP_REG enchufable, gestos de cierre. App de referencia: Reloj.
 //    [PENDIENTE] Rellenar el resto (reemplazar entradas de APP_REG):
 //      Galeria, Multimedia, Almacenamiento, Modo PC, Notas,
-//      Navegador, Code IDE, Paint, Juegos, Calculadora,
+//      Navegador, Flex Compass, Paint, Juegos, Calculadora,
 //      Calendario, Camara.
 //
 //  Milestone 3 — Ajustes (imagen 3): [HECHO] dos paneles (barra lateral

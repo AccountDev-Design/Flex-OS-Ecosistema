@@ -86,6 +86,16 @@ enum FlexImuState : uint8_t {
 
 static int      imuRefs      = 0;    // consumidores vivos
 static uint32_t imuRetryMs   = 0;    // ultimo re-sondeo pedido por un consumidor
+// ¿El sensor llego a estar LISTO durante este enganche? Es lo que separa "no
+// hay ninguna IMU en esta placa" de "habia una y se ha ido", y no se puede
+// deducir del driver: en cuanto se vuelve a sondear, un modulo retirado deja de
+// estar en LOST y pasa a ABSENT como cualquier bus vacio. Sin esta bandera, tras
+// el primer re-sondeo la interfaz diria "no hay modulo" de un modulo que el
+// usuario acaba de desconectar.
+static bool     imuHadSensor = false;
+// Enfriamiento del re-sondeo AUTOMATICO (ver el bloque de imuServiceTick).
+#define IMU_AUTOPROBE_MS 4000
+static uint32_t imuAutoMs    = 0;
 
 // Flex Motion Engine: se define al final del archivo (necesita
 // FLEXBNO_REPORT_HZ y las lecturas del driver ya declaradas) y lo llama
@@ -98,6 +108,8 @@ static void imuAcquire(){
   if(imuRefs < 0) imuRefs = 0;
   imuRefs++;
   if(imuRefs == 1){
+    imuHadSensor = false;
+    imuAutoMs    = millis();
     if(!gtOk) return;                // sin bus inicializado no hay nada que sondear
     flexBnoBegin();
     imuRetryMs = millis();
@@ -105,7 +117,10 @@ static void imuAcquire(){
 }
 static void imuRelease(){
   if(imuRefs > 0) imuRefs--;
-  if(imuRefs == 0) flexBnoStop();    // apaga los informes: nada queda emitiendo para nadie
+  if(imuRefs == 0){
+    flexBnoStop();                   // apaga los informes: nada queda emitiendo para nadie
+    imuHadSensor = false;
+  }
 }
 static inline int imuHolders(){ return imuRefs; }
 
@@ -117,6 +132,38 @@ static void imuServiceTick(){
   if(imuRefs <= 0) return;
   uint32_t now = millis();
   flexBnoTick(now);
+  // El sensor ha llegado a entregar informes en este enganche. Se recuerda para
+  // poder distinguir despues "se ha desconectado" de "nunca hubo ninguno".
+  if(flexBnoAvailable()) imuHadSensor = true;
+  // #############################################################
+  //  RECONEXION EN CALIENTE, PARA TODOS LOS CONSUMIDORES
+  //  ------------------------------------------------------------
+  //  Antes solo se re-sondeaba desde una pantalla abierta (la brujula, la
+  //  de proteccion contra robo). Con la deteccion de caidas o la proteccion
+  //  activadas y ninguna pantalla delante, un modulo que se desenchufaba y
+  //  se volvia a enchufar seguia figurando como ausente hasta que el usuario
+  //  entrase en alguna de esas apps.
+  //
+  //  Aqui el re-sondeo es AUTOMATICO pero deliberadamente barato: pasa por
+  //  flexBnoBegin(), que lleva su propio freno progresivo (1,5 s -> 8 s entre
+  //  sondeos reales), y ademas se pide como mucho cada IMU_AUTOPROBE_MS. Son
+  //  dos transacciones I2C muy de vez en cuando; el bucle no lo nota. No se
+  //  usa flexBnoRescan() a proposito: ese reinicia el freno porque detras hay
+  //  un usuario pulsando "reintentar", y esto no es un usuario.
+  //
+  //  Y NO SE SONDEA SOBRE UN BUS TRABADO: mientras gtBusWedged este puesto, el
+  //  tactil esta recuperando la linea, y anadir transacciones del IMU ahi solo
+  //  seria mas tiempo perdido dentro de la misma vuelta.
+  // #############################################################
+  int st = flexBnoState();
+  if((st == FLEXBNO_ST_ABSENT || st == FLEXBNO_ST_LOST) && gtOk && !gtBusWedged){
+    if((uint32_t)(now - imuAutoMs) >= (uint32_t)IMU_AUTOPROBE_MS){
+      imuAutoMs = now;
+      flexBnoBegin();
+    }
+  } else {
+    imuAutoMs = now;                 // con el sensor vivo el reloj no corre
+  }
   // Y justo despues, en la MISMA vuelta y el MISMO hilo, el Flex Motion
   // Engine publica la muestra (ver el bloque del final del archivo). Asi
   // Device Care y Proteccion contra robo consumen la misma lectura del
@@ -130,7 +177,7 @@ static void imuServiceTick(){
 // pedirlo, y solo se hace efectivo cuando no hay nada que romper -- con el
 // sensor listo o configurandose, esta llamada no toca nada.
 static bool imuRetry(uint32_t minGapMs){
-  if(imuRefs <= 0 || !gtOk) return false;
+  if(imuRefs <= 0 || !gtOk || gtBusWedged) return false;
   int st = flexBnoState();
   if(st != FLEXBNO_ST_ABSENT && st != FLEXBNO_ST_LOST) return false;
   uint32_t now = millis();
@@ -141,6 +188,14 @@ static bool imuRetry(uint32_t minGapMs){
 }
 
 // ---- Estado traducido -----------------------------------------------------
+// LOS CINCO ESTADOS EN LOS QUE PUEDE ESTAR EL MODULO, tal y como los ve una
+// interfaz. Ninguno bloquea nada: son solo lo que hay que dibujar.
+//   · conectado      -> FIMU_CONNECTED / FIMU_AHRS_ACTIVE
+//   · inicializando  -> FIMU_DETECTING  (sondeo, identificacion, activacion)
+//   · recuperandose  -> FIMU_DETECTING tambien, porque es literalmente lo
+//                       mismo: un re-sondeo despues de haberlo perdido
+//   · desconectado   -> FIMU_DISCONNECTED (lo hubo y se fue) / FIMU_NO_IMU
+//   · en error       -> FIMU_ERROR (ni siquiera hay bus donde sondear)
 static uint8_t imuState(){
   if(imuRefs <= 0) return FIMU_IDLE;
   if(!gtOk)        return FIMU_ERROR;
@@ -151,7 +206,9 @@ static uint8_t imuState(){
     case FLEXBNO_ST_READY:
       return (flexBnoChecks() & FLEXBNO_CHK_FUSION) ? FIMU_AHRS_ACTIVE : FIMU_CONNECTED;
     case FLEXBNO_ST_LOST:   return FIMU_DISCONNECTED;
-    default:                return FIMU_NO_IMU;
+    // ABSENT tras haber estado listo NO es "esta placa no tiene IMU": es el
+    // modulo que el usuario acaba de retirar, visto despues de un re-sondeo.
+    default:                return imuHadSensor ? FIMU_DISCONNECTED : FIMU_NO_IMU;
   }
 }
 static inline bool imuConnected(){  uint8_t s = imuState(); return s == FIMU_CONNECTED || s == FIMU_AHRS_ACTIVE; }

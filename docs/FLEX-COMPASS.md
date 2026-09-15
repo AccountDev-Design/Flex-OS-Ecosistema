@@ -1,6 +1,15 @@
 # Flex Compass · Flex OS Ultra · ESP32-P4
 
-Caja de aplicaciones → **Flex Compass**
+Inicio → **Flex Compass** (y Caja de aplicaciones)
+
+> **Cambio de ubicacion.** Flex Compass ocupa ahora la ranura del registro de
+> apps (`APP_REG`, indice 7) que era de **Code IDE**, retirado del sistema. No
+> es un icono anadido en otro sitio: es literalmente el mismo hueco — en el
+> escritorio de fabrica, en la Caja de aplicaciones y en el registro — asi que
+> donde antes habia un acceso al IDE hay ahora la brujula, sin duplicados y sin
+> dejar un hueco vacio. Ningun otro id de app se mueve: el dock sigue siendo
+> exactamente 12..15. Las placas que actualizan se traducen solas
+> (`APPREG_MAP_V2`, en `FlexOS_Ultra_Home.h`).
 
 Brujula nativa de Flex OS Ultra sobre el **GY-BNO085 (9-DOF AHRS)**, el MISMO
 modulo y el MISMO driver que ya usa la deteccion de caidas de Flex Device Care.
@@ -96,6 +105,19 @@ no puede dejar el bucle del sistema sondeando I2C para siempre. Quien tiene una
 pantalla delante del usuario si puede pedirlo, asi que Flex Compass llama a
 `imuRetry(2500)` mientras esta a la vista — y esa llamada no hace nada si el
 sensor esta listo o configurandose.
+
+Ademas, el **servicio** re-sondea por su cuenta cada `IMU_AUTOPROBE_MS` (4 s)
+mientras alguien lo tenga adquirido, pasando por `flexBnoBegin()` — que lleva su
+propio freno progresivo de 1,5 s a 8 s. Asi la reconexion en caliente tambien
+funciona para la deteccion de caidas y la proteccion contra robo, que trabajan
+sin ninguna pantalla delante, y sigue costando dos transacciones muy de vez en
+cuando.
+
+`FIMU_DISCONNECTED` significa "lo hubo y se ha ido", y lo dice de verdad: el
+servicio recuerda si el sensor llego a estar listo durante este enganche
+(`imuHadSensor`). Sin eso, en cuanto se re-sondea un modulo retirado el driver
+vuelve a ABSENT y la interfaz diria "no hay modulo IMU" de uno que el usuario
+acaba de desconectar.
 
 ---
 
@@ -225,18 +247,29 @@ que va a la placa:
 | Modulo dibujado | pinta geometria de verdad y no se sale de su caja en ninguna orientacion |
 | Simbolo de grado | se dibuja (no es el interrogante de "caracter desconocido") y el formateo del rumbo redondea bien |
 
-Ademas, `testIconosEnSuCaja()` mide los **21** iconos de app (el nuevo incluido)
-y `check_wiring.py` verifica los ganchos nuevos de `loop()` y del ciclo de vida,
-y **prohibe** que la app toque `Wire.`, `flexBnoBegin()` o `flexBnoStop()`.
+Ademas, `testIconosEnSuCaja()` mide los **18** iconos de app (uno por entrada de
+`APP_REG`) y `check_wiring.py` verifica los ganchos de `loop()` y del ciclo de
+vida, y **prohibe** que la app toque `Wire.`, `flexBnoBegin()` o `flexBnoStop()`.
+
+Y dos baterias mas, que son las que cubren la desconexion en caliente:
+
+| Prueba | Que fija |
+|---|---|
+| `tests/host/test_imu.cpp` | compila el driver **real** contra un bus I2C simulado (sano / vacio / trabado / devolviendo basura). Fija que con el sensor perdido el driver **no hace ni una transaccion**, que ninguna vuelta gasta mas que su presupuesto, que una cabecera SHTP imposible no dispara mil transacciones y que la reconexion vuelve a READY |
+| `testBusI2cCompartido()` en `ino_compile.cpp` | fija que, con SDA a masa, el tactil dispara la recuperacion del bus, los pulsos de reloj liberan la linea y **el tactil vuelve a entregar contactos** — sin que el sistema de el tactil por perdido |
 
 ---
 
 ## 10. Limitaciones reales (lo que NO esta verificado ni existe)
 
-1. **No se ha probado contra un GY-BNO085 fisico.** El doble de I2C de
-   `tests/host/inostub/` no simula el sensor, asi que en el PC el driver corre
-   AUSENTE. Lo que si esta comprobado ahi es el camino sin sensor (la app no
-   inventa nada) y **todas** las conversiones, que son aritmetica pura.
+1. **No se ha probado contra un GY-BNO085 fisico.** En `test_ino` el driver
+   corre AUSENTE (doble de `tests/host/inostub/`), asi que lo comprobado ahi es
+   el camino sin sensor — la app no inventa nada — y **todas** las conversiones,
+   que son aritmetica pura. El dialogo SHTP y el comportamiento ante una
+   desconexion si se ejercitan, contra el bus simulado de
+   `tests/host/bnostub/` (`test_imu`), que habla el protocolo de verdad; pero un
+   bus simulado no es un cable arrancado, y la comprobacion final sigue siendo
+   en placa.
 2. **El marco de referencia ENU es una premisa documentada**, no medida. Si en
    tu unidad el vector de rotacion viniera referido de otra forma, el efecto
    seria un desplazamiento constante del rumbo y se corrige en una sola

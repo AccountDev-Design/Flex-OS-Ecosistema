@@ -336,21 +336,15 @@ static void connTick(){
   }
 }
 
-// Icono del modulo: reutiliza los iconos de app existentes (mapeo simple)
+// Icono del aviso: reutiliza los iconos de app existentes (mapeo simple).
+// La lista era mucho mas larga cuando existia el barrido generico del bus I2C
+// y habia que ponerle cara a cualquier modulo que contestase. Ahora solo hay
+// dos productores de avisos, asi que solo hay dos casos.
 static void drawModuleIcon(ModuleType type, int x, int y, int S){
   int id = IC_AJUSTES;
   switch(type){
-    case MOD_ULTRASONIC:  id = IC_NAV;     break;
-    case MOD_BME280:      id = IC_DEVCARE; break;
-    case MOD_MPU6050:     id = IC_JUEGOS;  break;
-    case MOD_LED:         id = IC_CALC;    break;
-    case MOD_BUTTON:      id = IC_NOTAS;   break;
-    case MOD_SERVO:       id = IC_MODOPC;  break;
-    case MOD_I2C_GENERIC: id = IC_ALMACEN; break;
-    // Avisos del sistema llevan el icono de la app correspondiente.
-    case MOD_MEDIA:       id = IC_MULTIMEDIA; break;
-    case MOD_BNO085:      id = IC_DEVCARE;    break;   // lo gestiona Flex Device Care
-    default:              id = IC_AJUSTES; break;
+    case MOD_MEDIA:       id = IC_MULTIMEDIA; break;   // reproductor y explorador
+    default:              id = IC_AJUSTES;    break;   // aviso del sistema
   }
   drawAppIcon(id, x, y, S);
 }

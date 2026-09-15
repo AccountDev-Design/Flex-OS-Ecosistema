@@ -68,9 +68,48 @@ unsigned long micros(){
 }
 void delay(unsigned long){}
 void delayMicroseconds(unsigned long){}
-void pinMode(int, int){}
-void digitalWrite(int, int){}
-int  digitalRead(int){ return 0; }
+// #############################################################
+//  LINEAS SDA/SCL DEL BUS COMPARTIDO, MODELADAS
+//  ------------------------------------------------------------
+//  La recuperacion del bus (i2cBusRecover, en FlexOS_Ultra_HAL.h) es
+//  precisamente mover SCL a mano hasta que el esclavo atascado suelte SDA.
+//  Para poder comprobar que eso funciona de verdad hay que modelar las dos
+//  lineas: cada flanco de subida de SCL cuenta como un pulso, y al pulso
+//  numero gI2cFreeAfterPulses el esclavo suelta la linea -- que es lo que
+//  hace un chip real cuando termina de entregar el byte que tenia a medias.
+//  Con gI2cFreeAfterPulses en 0 la linea NO se suelta: es el caso de un
+//  modulo arrancado de cuajo, y tambien tiene que quedar cubierto.
+// #############################################################
+//  Los numeros de pin van en crudo porque estos dobles estan ANTES de que se
+//  incluya el sketch, que es quien define PIN_TP_SDA/PIN_TP_SCL. Justo despues
+//  del include hay un static_assert que falla la compilacion si alguna vez
+//  dejan de coincidir, asi que no pueden separarse en silencio.
+#define STUB_PIN_SDA 7
+#define STUB_PIN_SCL 8
+int gI2cFreeAfterPulses = 0;   // 0 = SDA no se suelta con los pulsos
+int gI2cPulses          = 0;   // flancos de subida de SCL contados
+static int gSclLevel    = 1;
+//  En drenador abierto la linea sube al SOLTARLA (INPUT_PULLUP) y baja al
+//  tirar de ella (OUTPUT + LOW), asi que el flanco de subida esta en pinMode,
+//  no en digitalWrite. El doble modela eso mismo: al flanco numero
+//  gI2cFreeAfterPulses el esclavo suelta SDA.
+static void sclLevel(int lvl){
+  if(lvl && !gSclLevel){
+    gI2cPulses++;
+    if(gI2cFreeAfterPulses && gI2cPulses >= gI2cFreeAfterPulses) gWireWedged = 0;
+  }
+  gSclLevel = lvl ? 1 : 0;
+}
+void pinMode(int pin, int mode){
+  if(pin == STUB_PIN_SCL) sclLevel(mode == INPUT_PULLUP);
+}
+void digitalWrite(int pin, int v){
+  if(pin == STUB_PIN_SCL) sclLevel(v);
+}
+int  digitalRead(int pin){
+  if(pin == STUB_PIN_SDA) return gWireWedged ? LOW : HIGH;
+  return LOW;
+}
 void yield(){}
 long random(long m){ return m ? 0 : 0; }
 long random(long a, long){ return a; }
@@ -220,6 +259,12 @@ static void geoEnterSelect();
 
 // El sketch entero, tal cual va a la placa.
 #include "../../FlexOS_Ultra/FlexOS_Ultra.ino"
+
+// Los dobles de SDA/SCL de arriba llevan los numeros de pin en crudo porque se
+// definen antes que el sketch. Si el cableado cambia, esto falla al compilar en
+// vez de dejar una prueba que ya no comprueba lo que dice comprobar.
+static_assert(STUB_PIN_SDA == PIN_TP_SDA, "el doble de SDA no coincide con el sketch");
+static_assert(STUB_PIN_SCL == PIN_TP_SCL, "el doble de SCL no coincide con el sketch");
 #undef free
 
 // #############################################################
@@ -2242,9 +2287,9 @@ static void testNotifUnaSola(){
     gState = ST_HOME; }
 
   DetectedModule a; memset(&a, 0, sizeof(a));
-  a.active = true; a.type = MOD_I2C_GENERIC; a.i2cAddr = 0x18;
-  snprintf(a.name, sizeof(a.name), "Dispositivo I2C");
-  snprintf(a.sub, sizeof(a.sub), "0x18 detectado");
+  a.active = true; a.type = MOD_MEDIA;
+  snprintf(a.name, sizeof(a.name), "No se puede reproducir");
+  snprintf(a.sub, sizeof(a.sub), "Formato no compatible");
 
   // La cola queda congelada durante el alta del PIN y se arma al volver.
   gTestMs = 100000; gState = ST_LOCKSETUP;
@@ -2256,17 +2301,17 @@ static void testNotifUnaSola(){
   chk(gNotifs[0].armed && gNotifs[0].bornMs == (uint32_t)gTestMs,
       "su cuenta atras empieza al regresar al escritorio");
 
-  // Repetir la misma deteccion refresca la tarjeta; no la apila.
+  // Repetir el mismo aviso refresca la tarjeta; no la apila.
   notifPush(&a); notifPush(&a);
-  chk(gNotifCount == 1, "el rescaneo I2C no duplica el mismo dispositivo");
-  snprintf(a.sub, sizeof(a.sub), "0x18 listo");
+  chk(gNotifCount == 1, "repetir el mismo aviso no duplica la tarjeta");
+  snprintf(a.sub, sizeof(a.sub), "Pista siguiente");
   notifPush(&a);
-  chk(gNotifCount == 1 && !strcmp(gNotifs[0].mod.sub, "0x18 listo"),
+  chk(gNotifCount == 1 && !strcmp(gNotifs[0].mod.sub, "Pista siguiente"),
       "un subtitulo nuevo refresca la tarjeta existente");
-  a.i2cAddr = 0x76; a.type = MOD_BME280;
-  snprintf(a.name, sizeof(a.name), "Sensor BME280");
+  a.type = MOD_UNKNOWN;
+  snprintf(a.name, sizeof(a.name), "Aviso del sistema");
   notifPush(&a);
-  chk(gNotifCount == 2, "otro dispositivo real queda esperando en la cola");
+  chk(gNotifCount == 2, "otro aviso distinto queda esperando en la cola");
 
   // Aunque haya dos avisos, el compositor arma solo el primero.
   gNotifs[0].armed = false; gNotifs[1].armed = false;
@@ -2291,14 +2336,14 @@ static void testNotifUnaSola(){
   // el P4. Esta prueba recorre entrada, espera y salida de ambas tarjetas.
   gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
   notifDragIdx = -1; notifBandOn = false; notifPaused = false; notifLastMs = 0;
-  a.i2cAddr = 0x18; a.type = MOD_I2C_GENERIC;
-  snprintf(a.name, sizeof(a.name), "Dispositivo I2C A"); notifPush(&a);
-  a.i2cAddr = 0x76; a.type = MOD_BME280;
-  snprintf(a.name, sizeof(a.name), "Sensor BME280 B"); notifPush(&a);
+  a.type = MOD_MEDIA;
+  snprintf(a.name, sizeof(a.name), "Aviso A"); notifPush(&a);
+  a.type = MOD_UNKNOWN;
+  snprintf(a.name, sizeof(a.name), "Aviso B"); notifPush(&a);
   bool segundaVisible = false;
   for(int f = 0; f < 360 && gNotifCount > 0; f++){
     gTestMs += 40; notifTick();
-    if(gNotifCount == 1 && gNotifs[0].mod.i2cAddr == 0x76 && gNotifs[0].armed)
+    if(gNotifCount == 1 && !strcmp(gNotifs[0].mod.name, "Aviso B") && gNotifs[0].armed)
       segundaVisible = true;
   }
   chk(segundaVisible, "la segunda notificacion entra despues de la primera");
@@ -2306,10 +2351,10 @@ static void testNotifUnaSola(){
       "la ultima sale y limpia la banda sin congelar ni reiniciar el OS");
 
   // Reponer dos entradas para comprobar tambien la pausa de la Caja.
-  a.i2cAddr = 0x18; a.type = MOD_I2C_GENERIC;
-  snprintf(a.name, sizeof(a.name), "Dispositivo I2C A"); notifPush(&a);
-  a.i2cAddr = 0x76; a.type = MOD_BME280;
-  snprintf(a.name, sizeof(a.name), "Sensor BME280 B"); notifPush(&a);
+  a.type = MOD_MEDIA;
+  snprintf(a.name, sizeof(a.name), "Aviso A"); notifPush(&a);
+  a.type = MOD_UNKNOWN;
+  snprintf(a.name, sizeof(a.name), "Aviso B"); notifPush(&a);
   gTestMs += 40; notifTick();
 
   notifPauseForDrawer();
@@ -2452,8 +2497,8 @@ static void testDeslizarPaginas(){
     notifBandOn = false; notifPaused = false; notifLastMs = 0;
     gTestMs = 400000;
     DetectedModule m; memset(&m, 0, sizeof(m));
-    m.active = true; m.type = MOD_I2C_GENERIC; m.i2cAddr = 0x22;
-    snprintf(m.name, sizeof(m.name), "Dispositivo I2C");
+    m.active = true; m.type = MOD_MEDIA;
+    snprintf(m.name, sizeof(m.name), "Reproduccion terminada");
     notifPush(&m);
     gState = ST_HOME; qsPanelY = 0; editMode = false;
     hpDragging = true;
@@ -5765,12 +5810,12 @@ static void testMultitareaMemoria(){
 
   // ---- 8) Desalojo: el ultimo recurso, y por la menos reciente ----
   mtReset();
-  gAppState[IC_CODE]   = ALIFE_SUSPENDED; gAppSeenMs[IC_CODE]   = 1000;   // la mas antigua
+  gAppState[IC_PAINT]  = ALIFE_SUSPENDED; gAppSeenMs[IC_PAINT]  = 1000;   // la mas antigua
   gAppState[IC_CALEND] = ALIFE_SUSPENDED; gAppSeenMs[IC_CALEND] = 8000;
   // Critico y sin nada que soltar: solo entonces se cierra, y la mas antigua.
   mtSetFree(2u << 20);
   appEnforceMemoryBudget();
-  chk(gAppState[IC_CODE] == ALIFE_CLOSED,
+  chk(gAppState[IC_PAINT] == ALIFE_CLOSED,
       "en zona critica se cierra la app suspendida MENOS reciente");
   mtReset();
 
@@ -6004,6 +6049,255 @@ static void testMultitareaMemoria(){
 //  camino es lo importante: que sin sensor la app no publica ni un
 //  rumbo y ensena el requisito de hardware.
 // #############################################################
+// #############################################################
+//  EL BUS I2C COMPARTIDO: RETIRAR EL IMU NO PUEDE LLEVARSE EL TACTIL
+//  ------------------------------------------------------------
+//  Este es el fallo grave que arregla este trabajo. El GY-BNO085 cuelga de
+//  GPIO7/GPIO8, los MISMOS pines del GT911 tactil. Un modulo que pierde la
+//  alimentacion en mitad de una transaccion se queda tirando de SDA a masa, y
+//  a partir de ese instante NINGUNA transaccion sale adelante -- tampoco las
+//  del tactil. Sin recuperacion del bus, el tactil no vuelve nunca: eso es lo
+//  que se veia como "el sistema se congela al desconectar el IMU".
+//
+//  Aqui el doble del bus modela las dos lineas de verdad: gWireWedged hace
+//  fallar toda transaccion, y los pulsos de reloj que da la recuperacion
+//  pueden liberar SDA, igual que hace un chip real al terminar el byte que
+//  tenia a medias.
+// #############################################################
+// #############################################################
+//  FLEX COMPASS OCUPA EL SITIO QUE ERA DE CODE IDE
+//  ------------------------------------------------------------
+//  Code IDE se ha retirado del sistema y su ranura del registro -- el indice 7
+//  de APP_REG, del que cuelgan el nombre, el icono, el peso y el sitio en el
+//  escritorio de fabrica -- la ocupa ahora Flex Compass. Lo que esta prueba
+//  fija son las dos cosas que podrian salir mal: que quede un HUECO donde
+//  estaba el IDE, o que aparezcan DOS brujulas en una placa que ya tenia la
+//  suya en otra pagina.
+// #############################################################
+static void testCompassEnSitioDeCodeIDE(){
+  printf("Flex Compass ocupa la ranura que era de Code IDE\n");
+
+  // ---- 1. El registro ----
+  chk(APP_N == 18, "el registro tiene 18 apps: Code IDE ya no esta");
+  chk(IC_BRUJULA == 7, "Flex Compass es el indice 7, el que tenia Code IDE");
+  chk(APP_REG[IC_BRUJULA].enter == compassEnter && APP_REG[IC_BRUJULA].tick == compassTick,
+      "y esa fila abre la brujula REAL, no una pantalla nueva");
+  chk(APP_REG[IC_BRUJULA].hooks == &H_COMPASS,
+      "con sus ganchos de siempre (atras, suspender, reanudar, shed)");
+  {
+    int n = 0;
+    for(int i = 0; i < APP_N; i++) if(APP_REG[i].enter == compassEnter) n++;
+    chk(n == 1, "no hay una segunda entrada de Compass en el registro");
+  }
+  chk(!strcmp(APP[IC_BRUJULA][0], "Flex Compass"), "el nombre de la ranura 7 es Flex Compass");
+  {
+    bool resto = false;
+    for(int i = 0; i < APP_N; i++)
+      if(strstr(APP[i][0], "Code") || strstr(APP[i][1], "Code")) resto = true;
+    chk(!resto, "ningun nombre de app menciona ya Code IDE");
+  }
+  chk(APP_REG[IC_BRUJULA].dflt & APP_DEF_FAV,
+      "y nace en la rejilla, como nacia Code IDE: el sitio no queda vacio");
+
+  // ---- 2. El escritorio de fabrica ----
+  chk(HOME_FACTORY[8] == IC_BRUJULA, "la novena casilla de fabrica es Flex Compass");
+  {
+    int huecos = 0, brujulas = 0;
+    for(int i = 0; i < HOME_LEGACY_SLOTS; i++){
+      if(HOME_FACTORY[i] == HOME_EMPTY) huecos++;
+      if(HOME_FACTORY[i] == IC_BRUJULA) brujulas++;
+    }
+    chk(huecos == 0,   "el escritorio de fabrica no tiene ni un hueco");
+    chk(brujulas == 1, "y la brujula sale exactamente una vez");
+  }
+
+  // ---- 3. MIGRACION REAL desde una placa con Code IDE **y** la brujula ----
+  // Es el caso peligroso: los dos ids viejos (7 y 18) apuntan al mismo id
+  // nuevo. Se siembra la NVS simulada como la dejaria el firmware anterior y se
+  // llama a homeOrderLoad() de verdad.
+  {
+    flexPrefsWipe();
+    uint8_t ord[HOME_TOTAL];
+    for(int i = 0; i < HOME_TOTAL; i++) ord[i] = HOME_EMPTY;
+    // Pagina 0: el escritorio de fabrica de la version 2, con Code IDE (7).
+    const uint8_t v2page0[12] = { 0, 1, 2, 3, 4, 5, 15, 6, 7, 17, 8, 9 };
+    for(int i = 0; i < 12; i++) ord[i] = v2page0[i];
+    ord[HOME_STRIDE] = 18;                    // y la brujula, anadida a la pagina 2
+    uint32_t fav = 0;
+    for(int i = 0; i < 12; i++) fav |= (uint32_t)(1u << v2page0[i]);
+    fav |= (uint32_t)(1u << 18);
+    Preferences p;
+    p.begin("flexos", false);
+    p.putBytes("hordq", ord, HOME_TOTAL);
+    p.putInt("hpgn", 3); p.putInt("hpmain", 0);
+    p.putInt("hgrid", (4 << 8) | 3);
+    p.putInt("appfav", (int)fav);
+    p.putInt("apphide", 0);
+    p.putInt("appn", 19);
+    p.putInt("appver", 2);                    // <- guardado con el registro viejo
+    p.end();
+
+    homeOrderLoad();
+
+    int brujulas = 0, huecos = 0, fuera = 0;
+    for(int i = 0; i < HOME_TOTAL; i++){
+      uint8_t v = homeOrder[i];
+      if(v == HOME_EMPTY || homeIsPkg(v)) continue;
+      if(v == IC_BRUJULA) brujulas++;
+      if(v >= APP_N) fuera++;
+    }
+    for(int i = 0; i < 12; i++) if(homeOrder[i] == HOME_EMPTY) huecos++;
+    chk(brujulas == 1, "tras migrar hay UNA sola brujula, no dos");
+    chk(fuera == 0,    "y ningun id fuera del registro actual");
+    chk(huecos == 0,   "la pagina principal no se queda con el hueco del IDE");
+    chk(homeOrder[8] == IC_BRUJULA,
+        "la brujula queda EXACTAMENTE en la casilla que ocupaba Code IDE");
+    chk((gAppFav & (1u << IC_BRUJULA)) != 0, "y marcada como favorita");
+    chk((gAppHidden & (1u << IC_BRUJULA)) == 0, "y visible");
+  }
+
+  // ---- 4. Una placa que tenia Code IDE OCULTO tampoco se queda sin brujula ----
+  {
+    flexPrefsWipe();
+    uint8_t ord[HOME_TOTAL];
+    for(int i = 0; i < HOME_TOTAL; i++) ord[i] = HOME_EMPTY;
+    const uint8_t v2page0[11] = { 0, 1, 2, 3, 4, 5, 15, 6, 17, 8, 9 };
+    for(int i = 0; i < 11; i++) ord[i] = v2page0[i];
+    uint32_t fav = 0;
+    for(int i = 0; i < 11; i++) fav |= (uint32_t)(1u << v2page0[i]);
+    Preferences p;
+    p.begin("flexos", false);
+    p.putBytes("hordq", ord, HOME_TOTAL);
+    p.putInt("hpgn", 3); p.putInt("hpmain", 0);
+    p.putInt("hgrid", (4 << 8) | 3);
+    p.putInt("appfav", (int)fav);
+    p.putInt("apphide", (int)(1u << 7));      // Code IDE oculto por el usuario
+    p.putInt("appn", 19);
+    p.putInt("appver", 2);
+    p.end();
+
+    homeOrderLoad();
+
+    int brujulas = 0;
+    for(int i = 0; i < HOME_TOTAL; i++) if(homeOrder[i] == IC_BRUJULA) brujulas++;
+    chk(brujulas == 1, "la brujula aparece igualmente, y una sola vez");
+    chk((gAppHidden & (1u << IC_BRUJULA)) == 0,
+        "ocultar Code IDE no deja oculta a la brujula que hereda su sitio");
+  }
+
+  // ---- 5. Y el candado de Code IDE NO se hereda ----
+  {
+    flexPrefsWipe();
+    uint8_t ord[HOME_TOTAL];
+    for(int i = 0; i < HOME_TOTAL; i++) ord[i] = HOME_EMPTY;
+    const uint8_t v2page0[12] = { 0, 1, 2, 3, 4, 5, 15, 6, 7, 17, 8, 9 };
+    for(int i = 0; i < 12; i++) ord[i] = v2page0[i];
+    uint32_t fav = 0;
+    for(int i = 0; i < 12; i++) fav |= (uint32_t)(1u << v2page0[i]);
+    gAppLock = (uint32_t)(1u << 7);           // el usuario tenia Code IDE con candado
+    Preferences p;
+    p.begin("flexos", false);
+    p.putBytes("hordq", ord, HOME_TOTAL);
+    p.putInt("hpgn", 3); p.putInt("hpmain", 0);
+    p.putInt("hgrid", (4 << 8) | 3);
+    p.putInt("appfav", (int)fav);
+    p.putInt("apphide", 0);
+    p.putInt("appn", 19);
+    p.putInt("appver", 2);
+    p.end();
+
+    homeOrderLoad();
+    chk((gAppLock & (1u << IC_BRUJULA)) == 0,
+        "un candado puesto sobre Code IDE no pasa a la brujula");
+  }
+
+  flexPrefsWipe();
+  gAppLock = 0;
+  homeOrderLoad();                            // deja el escritorio de fabrica cargado
+  if(!gFails) printf("  Flex Compass en el sitio de Code IDE: todas las comprobaciones pasan.\n");
+}
+
+static void testBusI2cCompartido(){
+  printf("Bus I2C compartido: retirar el IMU no se lleva por delante el tactil\n");
+  bool gtPrev = gtOk;
+  gtOk = true;
+  gtFails = 0; gtRecoverMs = 0; gtRecoverN = 0; gtBusWedged = false;
+  gWireWedged = 0; gI2cPulses = 0; gI2cFreeAfterPulses = 0;
+  gWireReadByte = 0x81;                 // frame nuevo (bit 7) con un contacto
+  gTestMs = 500000;
+
+  uint16_t px = 0, py = 0;
+
+  // ---- 1. Bus sano: el tactil entrega y no acumula nada ----
+  gWireTxN = 0;
+  chk(gtPoll(px, py) == 1, "con el bus sano el tactil entrega un contacto");
+  chk(gtFails == 0, "y no acumula ni un fallo");
+  chk(gtRecoverN == 0, "ni se recupera un bus que no esta roto");
+
+  // ---- 2. Se retira el IMU: SDA queda a masa ----
+  // Unas pocas lecturas fallidas NO pueden disparar una recuperacion: en un
+  // bus real hay fallos sueltos que no significan nada.
+  gWireWedged = 1;
+  gI2cFreeAfterPulses = 3;              // el esclavo suelta SDA al tercer pulso
+  for(int i = 0; i < GT_FAIL_RECOVER_N - 1; i++){
+    chk(gtPoll(px, py) == -1, "con el bus trabado el tactil no inventa un contacto");
+  }
+  chk(gtRecoverN == 0, "unas pocas lecturas fallidas no disparan la recuperacion");
+  chk(gtFails == GT_FAIL_RECOVER_N - 1, "pero si se cuentan");
+
+  // ---- 3. Al insistir el fallo, el bus se recupera ----
+  gtPoll(px, py);                       // la lectura que cruza el umbral
+  chk(gtRecoverN == 1, "al insistir el fallo, el bus se recupera");
+  chk(gI2cPulses > 0 && gI2cPulses <= 9,
+      "con pulsos de reloj acotados a un byte y su ACK");
+  chk(gWireWedged == 0, "y SDA queda libre otra vez");
+  chk(gtFails == 0 && !gtBusWedged, "el tactil vuelve a darse por sano");
+
+  // ---- 4. Y EL TACTIL SIGUE FUNCIONANDO: este es el criterio de exito ----
+  chk(gtPoll(px, py) == 1, "el tactil vuelve a entregar contactos");
+  chk(gtOk, "sin que el sistema haya dado el tactil por perdido");
+
+  // ---- 5. Un modulo arrancado de cuajo (SDA no se suelta) tampoco bloquea ----
+  // Ni se rinde: se reintenta pasado el enfriamiento, no una sola vez.
+  gWireWedged = 1; gI2cFreeAfterPulses = 0;
+  gtFails = 0; gtRecoverMs = 0; gtRecoverN = 0;
+  for(int i = 0; i < GT_FAIL_RECOVER_N + 4; i++) gtPoll(px, py);
+  chk(gtRecoverN == 1, "con SDA a masa se intenta recuperar una vez...");
+  chk(gtOk, "...sin apagar el tactil, que seria rendirse para siempre");
+  gTestMs += GT_RECOVER_GAP_MS + 1;     // pasa el enfriamiento
+  gtPoll(px, py);
+  chk(gtRecoverN == 2, "...y se vuelve a intentar cuando toca");
+  gI2cFreeAfterPulses = 1;              // el cable se termina de quitar y SDA sube
+  gTestMs += GT_RECOVER_GAP_MS + 1;
+  gtPoll(px, py);
+  chk(gWireWedged == 0, "en cuanto SDA se suelta, la recuperacion la aprovecha");
+  chk(gtPoll(px, py) == 1, "y el tactil vuelve");
+
+  // ---- 6. El plazo de espera del bus esta acotado ----
+  // Es la otra mitad del arreglo: sin esto, CADA transaccion fallida costaba
+  // los 50 ms que Arduino espera por defecto, y el tactil hace dos o tres por
+  // vuelta. flexTouchInit() y la recuperacion lo bajan; aqui se comprueba que
+  // el camino de recuperacion lo deja puesto.
+  chk(Wire.getTimeOut() == I2C_BUS_TIMEOUT_MS,
+      "tras recuperar el bus, el plazo de una transaccion sigue acotado");
+
+  // ---- 7. El servicio IMU no sondea sobre un bus que se esta recuperando ----
+  {
+    while(imuHolders() > 0) imuRelease();
+    gtBusWedged = true;
+    imuAcquire();
+    chk(!imuRetry(0), "con el bus trabado no se pide un re-sondeo del IMU");
+    gtBusWedged = false;
+    imuRelease();
+  }
+
+  gWireWedged = 0; gI2cFreeAfterPulses = 0; gWireReadByte = 0;
+  gtFails = 0; gtRecoverMs = 0; gtRecoverN = 0; gtBusWedged = false;
+  gtOk = gtPrev;
+  tReset();
+  if(!gFails) printf("  Bus I2C compartido: todas las comprobaciones pasan.\n");
+}
+
 static void testFlexCompass(){
   printf("Flex Compass - brujula sobre el GY-BNO085\n");
   int fails0 = gFails;
@@ -6499,6 +6793,8 @@ int main(){
   testCalculadora();
   testDeviceCare();
   testFlexCompass();
+  testCompassEnSitioDeCodeIDE();
+  testBusI2cCompartido();
   testProteccionRobo();
   testLiquidGlassSinApilar();
   testBlurNoPegado();

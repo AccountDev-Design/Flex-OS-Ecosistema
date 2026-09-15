@@ -58,13 +58,21 @@ static void arcStroke(float cx, float cy, float r, float a0, float a1, int thick
 // FlexOS_Ultra_Home.h -- es el unico sitio donde vive la traduccion.
 //
 // Una app NUEVA se anade AL FINAL y no necesita nada de eso.
+//
+// FLEX COMPASS OCUPA LA RANURA 7, QUE ERA LA DE CODE IDE. No es un hueco
+// reaprovechado por comodidad: el id de una app ES su indice aqui, y de el
+// cuelgan la fila de APP_REG, el nombre, el icono, el peso de memoria y su
+// sitio en el escritorio de fabrica. Poniendo la brujula en ese mismo indice,
+// el sitio que ocupaba Code IDE -- en Inicio, en la Caja de aplicaciones y en
+// el registro -- pasa a ser suyo sin mover NI UN id de las demas apps: el
+// dock, que es exactamente 12..15, y todo lo indexado por IC_* siguen igual.
+// La brujula ya no se repite al final, asi que no puede haber dos.
 enum { IC_RELOJ, IC_GALERIA, IC_MULTIMEDIA, IC_ALMACEN, IC_MODOPC, IC_NOTAS,
-       IC_NAV, IC_CODE, IC_PAINT, IC_JUEGOS,
+       IC_NAV, IC_BRUJULA, IC_PAINT, IC_JUEGOS,
        IC_AJUSTES, IC_CALC, IC_CALEND, IC_CAMARA,
        IC_CLIMA, IC_FLEXSTORE, IC_FLEXPHONE,
-       IC_DEVCARE,
-       IC_BRUJULA };
-#define APP_N 19
+       IC_DEVCARE };
+#define APP_N 18
 
 static void iconBase(int x, int y, int S, uint16_t bg, int rf100){
   int r = S * rf100 / 100;
@@ -168,15 +176,6 @@ static void drawAppIcon(int id, int x, int y, int S){
       hLine(cx - (int)(S * 0.30f), cy, (int)(S * 0.60f), WHITE);
       arcStroke(cx, cy, S * 0.18f, 90, 270, 2, WHITE);   // meridiano
       arcStroke(cx, cy, S * 0.18f, -90, 90, 2, WHITE);
-    } break;
-    case IC_CODE: {
-      iconBase(x, y, S, rgb565(154,160,166), 22);
-      uint16_t dk = rgb565(55,58,66);
-      strokeSeg(cx - S * 0.10f, cy - S * 0.15f, cx - S * 0.26f, cy, tk / 2 + 1, dk);
-      strokeSeg(cx - S * 0.26f, cy, cx - S * 0.10f, cy + S * 0.15f, tk / 2 + 1, dk);
-      strokeSeg(cx + S * 0.10f, cy - S * 0.15f, cx + S * 0.26f, cy, tk / 2 + 1, dk);
-      strokeSeg(cx + S * 0.26f, cy, cx + S * 0.10f, cy + S * 0.15f, tk / 2 + 1, dk);
-      strokeSeg(cx + S * 0.04f, cy - S * 0.17f, cx - S * 0.04f, cy + S * 0.17f, tk / 2, dk);
     } break;
     case IC_PAINT: {
       iconBase(x, y, S, rgb565(241,231,210), 22);
