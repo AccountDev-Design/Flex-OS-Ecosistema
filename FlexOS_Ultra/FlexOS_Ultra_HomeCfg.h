@@ -190,7 +190,7 @@ static void hcRebuildBlur(){
   gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
   drawWallpaperRowsId(blurBg, gWallHome, true, 0, SCR_H - 1);
   setBuf(blurBg);
-  fillRectA(0, 0, SCR_W, SCR_H, TH_SCRIM, 70);
+  blurBgVeil();                    // el MISMO velo que ensureBlurBg (ver blurBgVeil)
   setBuf(old); gLand = wl;
   gClipX0 = c0; gClipX1 = c1; gClipY0 = r0; gClipY1 = r1;
 }

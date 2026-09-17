@@ -691,9 +691,10 @@ static bool uiGlassBandBegin(int y0, int y1, uint16_t tint){
   int h = y1 - y0 + 1;
   // Se dimensiona al PEOR CASO REAL de los overlays que la usan (la banda del
   // cronometro, 236 filas; el menu contextual, ~178), no a pantalla completa:
-  // 480 x 320 x 2 = 300 KB en vez de 768 KB. Una banda mas alta que esto NO se
-  // cachea -- el llamante cae a la ruta plana/vidrio de siempre -- en vez de
-  // desbordar el buffer.
+  // SCR_W x UIGL_BAND_MAX_H x 2 = 300 KB en vez de los 768 KB de la pantalla
+  // entera (el 320 de aqui son FILAS DE BANDA, no una resolucion). Una banda
+  // mas alta que esto NO se cachea -- el llamante cae a la ruta plana/vidrio
+  // de siempre -- en vez de desbordar el buffer.
   if(h > UIGL_BAND_MAX_H) return false;
   if(!uiGlBand)
     uiGlBand = (uint16_t*)heap_caps_malloc((size_t)SCR_W * UIGL_BAND_MAX_H * 2,
@@ -808,6 +809,22 @@ static void uiWallSurface(int x, int y, int w, int h, int rad, uint16_t col, int
 
 // Wallpaper desenfocado reutilizable (fondo del desbloqueo y de Recientes, estilo iOS)
 static uint16_t* blurBg = NULL;
+// VELO DE ESE FONDO, EN UN SOLO SITIO.
+//
+// Lo aplican DOS constructores: ensureBlurBg() (primera vez en la sesion) y
+// hcRebuildBlur() (cada vez que el usuario cambia de fondo). Estaban escritos
+// por separado y habian divergido: uno usaba este color fijo y el otro
+// TH_SCRIM, que SI depende de la apariencia. Resultado: la misma pantalla
+// -- Recientes, verificacion de clave, apagado -- salia con un velo distinto
+// segun se hubiera llegado a ella antes o despues de tocar el fondo, y en
+// apariencia clara el velo quedaba mas claro justo debajo de un texto que se
+// dibuja con TH_ONWALL, que esta pensado para el oscuro.
+//
+// El velo es deliberadamente EL MISMO en las dos apariencias: el wallpaper es
+// contenido del usuario y no se retine con el tema -- por eso lo que se apoya
+// encima usa TH_ONWALL y por eso themeChanged() no necesita invalidar blurBg.
+// Con una sola funcion esa propiedad ya no se puede romper por un lado solo.
+static inline void blurBgVeil(){ fillRectA(0, 0, SCR_W, SCR_H, rgb565(8,10,18), 70); }
 static void ensureBlurBg(){
   if(blurBg) return;
   blurBg = (uint16_t*)heap_caps_malloc((size_t)SCR_W * SCR_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -824,11 +841,7 @@ static void ensureBlurBg(){
   gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
   drawWallpaper(blurBg, true);
   setBuf(blurBg);
-  // Velo del wallpaper DESENFOCADO. El wallpaper es contenido del usuario y no
-  // se retine con el tema; este velo solo lo oscurece para que lo que se apoye
-  // encima (Recientes, verificacion de clave, apagado) tenga contraste. Es el
-  // mismo en las dos apariencias -- por eso esas pantallas usan TH_ONWALL.
-  fillRectA(0, 0, SCR_W, SCR_H, rgb565(8,10,18), 70);
+  blurBgVeil();                      // velo unico (ver blurBgVeil)
   setBuf(old);
   gLand = wl;
   gClipX0 = sx0; gClipX1 = sx1; gClipY0 = sy0; gClipY1 = sy1;

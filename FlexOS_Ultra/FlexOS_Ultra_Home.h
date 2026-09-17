@@ -1129,32 +1129,61 @@ static bool hpTick(){
 }
 
 // ---------------- Desbloqueo con fisica (composicion) ----------------
-static void composeUnlock(int off){
+// Compone el cuadro del deslizamiento: por encima del borde, el bloqueo
+// desplazado; por debajo, el escritorio que va apareciendo.
+//
+// 'prev' es el desplazamiento que YA esta en pantalla, o -1 si no se sabe.
+// Sabiendolo se ahorra trabajo de verdad: las filas de abajo que en los DOS
+// cuadros muestran homeBuf son identicas (misma fila del mismo buffer), asi
+// que ni se copian ni se publican. Son exactamente las de y >= SCR_H - min(off,
+// prev). En un desbloqueo completo eso es, de media, la mitad de la pantalla
+// por cuadro -- en copia y en transferencia al panel.
+//
+// Con prev = -1 se rehace la pantalla entera, que es el comportamiento de
+// siempre y el unico valido cuando otro pudo dibujar en medio.
+static void composeUnlockFrom(int off, int prev){
   if(off < 0) off = 0; if(off > SCR_H) off = SCR_H;
-  for(int y = 0; y < SCR_H; y++){
+  int last = SCR_H - 1;
+  if(prev >= 0){
+    int keep = off < prev ? off : prev;         // filas de homeBuf que no se mueven
+    last = SCR_H - keep - 1;
+    if(last < 0) return;                        // el cuadro anterior ya era este
+  }
+  for(int y = 0; y <= last; y++){
     if(y < SCR_H - off)
       memcpy(fb + (size_t)y * SCR_W, lockBuf + (size_t)(y + off) * SCR_W, SCR_W * 2);
     else
       memcpy(fb + (size_t)y * SCR_W, homeBuf + (size_t)y * SCR_W, SCR_W * 2);
   }
-  flxFlushAll();
+  flxFlush(0, last);
 }
+static void composeUnlock(int off){ composeUnlockFrom(off, -1); }
 // Deslizamiento del bloqueo. Antes eran 14 pasos fijos con delay(14) en medio:
 // 14 frames en ~200 ms pasara lo que pasara, con el procesador parado la mitad
 // del tiempo. Ahora es la MISMA duracion pero basada en tiempo y sin delay, asi
 // que el bucle mete todos los frames que el compositor sea capaz de dar. Mismo
 // recorrido y mismo ease-out; solo cambia la cadencia.
 #define UNLOCK_ANIM_MS 200
+// Mientras esta animacion dura, loop() esta parado: NADIE mas dibuja. Por eso
+// aqui si se puede encadenar el cuadro anterior con el siguiente (prev) y
+// saltarse los cuadros repetidos, cosa que el arrastre con el dedo no puede
+// hacer porque entre dos de sus cuadros si corre la isla de notificaciones.
 static void animateTo(int from, int to){
   uint32_t t0 = millis();
+  int prev = -1;                                             // nada compuesto aun
   for(;;){
     uint32_t e = millis() - t0; if(e > (uint32_t)UNLOCK_ANIM_MS) e = UNLOCK_ANIM_MS;
     float p = (float)e / (float)UNLOCK_ANIM_MS;
     p = 1 - (1 - p) * (1 - p);                               // ease-out
-    composeUnlock(from + (int)((to - from) * p));
+    int off = from + (int)((to - from) * p);
+    // El reloj puede no haber movido nada desde el cuadro anterior: repetirlo
+    // seria copiar y transferir la pantalla entera para dejarla igual.
+    if(off != prev){ composeUnlockFrom(off, prev); prev = off; }
     if(e >= (uint32_t)UNLOCK_ANIM_MS) break;
   }
-  composeUnlock(to);
+  // La ultima vuelta ya compuso exactamente 'to' (p llega a 1), asi que esto
+  // solo actua si el bucle salio antes de tiempo. Antes se pagaba SIEMPRE.
+  if(prev != to) composeUnlockFrom(to, prev);
 }
 // Arranca la verificacion DESDE la pantalla de Bloqueo.
 // Si el bloqueo lo puso el despertar de una suspension y antes habia una app
