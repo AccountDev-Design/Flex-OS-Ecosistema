@@ -1730,14 +1730,45 @@ static void drawGlyphScaled(int px0, int py0, const FGlyph* g, float sc, uint16_
     if(py0 + th <= gClipY0 || py0 > gClipY1) return;
     if(px0 + tw <= gClipX0 || px0 > gClipX1) return;
   }
+  // Y AHORA EL RECORTE FINO, por filas y columnas del propio glifo.
+  //
+  // La comprobacion de caja de arriba solo descarta el glifo que cae ENTERO
+  // fuera. El que cruza el borde de la banda -- la primera y la ultima fila de
+  // cualquier lista con scroll, el texto que asoma por el borde de una tarjeta,
+  // cualquier cabecera en un repintado parcial -- se rasterizaba COMPLETO y
+  // pxA() iba tirando pixel a pixel lo que sobraba: cuatro lecturas del master,
+  // seis multiplicaciones y una interpolacion bilineal en coma flotante por
+  // cada pixel descartado. Aqui se acota el recorrido a lo que pxA() va a
+  // aceptar, que es exactamente el mismo conjunto de pixeles: no cambia ni uno.
+  //
+  // Los dos modos se calculan por separado por el mismo motivo que la caja: en
+  // landscape la coordenada que decide la fila FISICA (y por tanto el recorte
+  // vertical) es px0+tx, no py0+ty.
+  int tx0 = 0, tx1 = tw - 1, ty0 = 0, ty1 = th - 1;
+  if(gLand){
+    int lo = gClipY0 > 0 ? gClipY0 : 0, hi = gClipY1 < SCR_H - 1 ? gClipY1 : SCR_H - 1;
+    if(px0 + tx0 < lo) tx0 = lo - px0;
+    if(px0 + tx1 > hi) tx1 = hi - px0;
+    if(py0 + ty0 < 0) ty0 = -py0;
+    if(py0 + ty1 > SCR_W - 1) ty1 = SCR_W - 1 - py0;
+  } else {
+    int xlo = gClipX0 > 0 ? gClipX0 : 0, xhi = gClipX1 < SCR_W - 1 ? gClipX1 : SCR_W - 1;
+    int ylo = gClipY0 > 0 ? gClipY0 : 0, yhi = gClipY1 < SCR_H - 1 ? gClipY1 : SCR_H - 1;
+    if(px0 + tx0 < xlo) tx0 = xlo - px0;
+    if(px0 + tx1 > xhi) tx1 = xhi - px0;
+    if(py0 + ty0 < ylo) ty0 = ylo - py0;
+    if(py0 + ty1 > yhi) ty1 = yhi - py0;
+  }
+  if(tx0 > tx1 || ty0 > ty1) return;
+
   const bool tbl = (tw <= GLYPH_COLS_MAX);
-  if(tbl) for(int tx = 0; tx < tw; tx++){
+  if(tbl) for(int tx = tx0; tx <= tx1; tx++){
     float fx = tx / sc; int x0 = (int)fx;
     gGlyphCx[tx] = (int16_t)x0; gGlyphFx[tx] = fx - x0;
   }
-  for(int ty = 0; ty < th; ty++){
+  for(int ty = ty0; ty <= ty1; ty++){
     float fy = ty / sc; int y0 = (int)fy; float dyf = fy - y0;
-    for(int tx = 0; tx < tw; tx++){
+    for(int tx = tx0; tx <= tx1; tx++){
       int x0; float dxf;
       if(tbl){ x0 = gGlyphCx[tx]; dxf = gGlyphFx[tx]; }
       else   { float fx = tx / sc; x0 = (int)fx; dxf = fx - x0; }

@@ -631,6 +631,14 @@ static bool      qsGlassOk   = false;
 // los bordes en vez de encoger la ventana: asi el divisor es CONSTANTE
 // (2R+1 = 5) y el compilador lo convierte en una multiplicacion, sin ninguna
 // division entera por pixel -- que es justo lo que hace cara a glassBlur().
+// SUMA CORREDIZA, no una ventana recontada por pixel. La version anterior
+// volvia a leer y desempaquetar los 5 pixeles de la ventana en CADA pixel: 5
+// un565 por pixel y por pasada para una suma que entre un pixel y el siguiente
+// solo cambia en sus dos extremos. Ahora entra uno y sale otro (2 un565 por
+// pixel), que es lo mismo que ya hacia glassBlur. El divisor sigue siendo
+// constante porque los indices se sujetan a los bordes en vez de encoger la
+// ventana, asi que tampoco aqui hay division real. Resultado identico: la suma
+// de los mismos cinco valores no depende de en que orden se acumule.
 static void qpGlassBlurSm(){
   static uint16_t line[(QP_GS_W > QP_GS_H ? QP_GS_W : QP_GS_H)];
   const int W = 2 * QP_GS_R + 1;
@@ -638,24 +646,34 @@ static void qpGlassBlurSm(){
   for(int j = 0; j < QP_GS_H; j++){                 // horizontal
     uint16_t* row = qsGlassSm + (size_t)j * QP_GS_W;
     memcpy(line, row, QP_GS_W * 2);
+    int sr = 0, sg = 0, sb = 0;
+    for(int k = -QP_GS_R; k <= QP_GS_R; k++){       // ventana inicial en i = 0
+      int q = k < 0 ? 0 : (k >= QP_GS_W ? QP_GS_W - 1 : k);
+      un565(line[q], r, g, b); sr += r; sg += g; sb += b;
+    }
     for(int i = 0; i < QP_GS_W; i++){
-      int sr = 0, sg = 0, sb = 0;
-      for(int k = -QP_GS_R; k <= QP_GS_R; k++){
-        int q = i + k; if(q < 0) q = 0; if(q >= QP_GS_W) q = QP_GS_W - 1;
-        un565(line[q], r, g, b); sr += r; sg += g; sb += b;
-      }
       row[i] = pk565(sr / W, sg / W, sb / W);
+      int qa = i + QP_GS_R + 1, qd = i - QP_GS_R;   // entra por la derecha, sale por la izquierda
+      if(qa >= QP_GS_W) qa = QP_GS_W - 1;
+      if(qd < 0) qd = 0;
+      un565(line[qa], r, g, b); sr += r; sg += g; sb += b;
+      un565(line[qd], r, g, b); sr -= r; sg -= g; sb -= b;
     }
   }
   for(int i = 0; i < QP_GS_W; i++){                 // vertical
     for(int j = 0; j < QP_GS_H; j++) line[j] = qsGlassSm[(size_t)j * QP_GS_W + i];
+    int sr = 0, sg = 0, sb = 0;
+    for(int k = -QP_GS_R; k <= QP_GS_R; k++){
+      int q = k < 0 ? 0 : (k >= QP_GS_H ? QP_GS_H - 1 : k);
+      un565(line[q], r, g, b); sr += r; sg += g; sb += b;
+    }
     for(int j = 0; j < QP_GS_H; j++){
-      int sr = 0, sg = 0, sb = 0;
-      for(int k = -QP_GS_R; k <= QP_GS_R; k++){
-        int q = j + k; if(q < 0) q = 0; if(q >= QP_GS_H) q = QP_GS_H - 1;
-        un565(line[q], r, g, b); sr += r; sg += g; sb += b;
-      }
       qsGlassSm[(size_t)j * QP_GS_W + i] = pk565(sr / W, sg / W, sb / W);
+      int qa = j + QP_GS_R + 1, qd = j - QP_GS_R;
+      if(qa >= QP_GS_H) qa = QP_GS_H - 1;
+      if(qd < 0) qd = 0;
+      un565(line[qa], r, g, b); sr += r; sg += g; sb += b;
+      un565(line[qd], r, g, b); sr -= r; sg -= g; sb -= b;
     }
   }
 }

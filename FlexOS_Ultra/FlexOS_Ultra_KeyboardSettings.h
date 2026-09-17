@@ -304,19 +304,31 @@ static void kbsRenderAnim(){
   setBuf(bbuf);
   kbsPaint();
   setBuf(fb);
-  const int steps = 6;
-  for(int s = 1; s <= steps; s++){
-    float p = (float)s / steps;
+  // POR TIEMPO Y SIN delay(), igual que la entrada de Recientes y el
+  // deslizamiento del bloqueo. Antes eran 6 pasos fijos con delay(12) en
+  // medio: la duracion dependia de lo que tardase cada cuadro, el bucle se
+  // quedaba parado la mitad del tiempo y en una placa cargada se veia a
+  // saltos. Ahora dura KBS_ANIM_MS medidos con millis() y mete tantos cuadros
+  // como de el compositor. No hace falta pausa: flxFlushAll() ya espera al
+  // DMA2D del panel, asi que el bucle no puede girar en vacio.
+  const uint32_t KBS_ANIM_MS = 90;
+  const uint16_t bgc = kbsBg();                            // constante durante toda la transicion
+  uint32_t t0 = millis();
+  for(;;){
+    uint32_t e = millis() - t0; if(e > KBS_ANIM_MS) e = KBS_ANIM_MS;
+    float p = (float)e / (float)KBS_ANIM_MS;
     if(gAnimStyle == 2){                                   // deslizar desde la derecha
       int off = (int)((1.0f - p) * SCR_W);
       for(int y = 0; y < SCR_H; y++){
         uint16_t* d = fb + (size_t)y * SCR_W;
         const uint16_t* sp = bbuf + (size_t)y * SCR_W;
-        for(int x = 0; x < off; x++) d[x] = kbsBg();
+        for(int x = 0; x < off; x++) d[x] = bgc;
         memcpy(d + off, sp, (size_t)(SCR_W - off) * 2);
       }
     } else if(gAnimStyle == 1){                            // fundido
-      uint8_t a = (uint8_t)(p * 255);
+      // El primer cuadro cae en p=0. Con alpha 0 la mezcla no cambiaria un
+      // solo pixel y se pagaria una pasada de pantalla entera para nada.
+      uint8_t a = (uint8_t)(p * 255); if(a < 1) a = 1;
       for(int y = 0; y < SCR_H; y++){
         uint16_t* d = fb + (size_t)y * SCR_W;
         const uint16_t* sp = bbuf + (size_t)y * SCR_W;
@@ -325,20 +337,35 @@ static void kbsRenderAnim(){
     } else {                                               // zoom (del 88% al 100%)
       float k = 0.88f + 0.12f * p;
       int cw = (int)(SCR_W * k), ch = (int)(SCR_H * k);
+      if(cw < 1) cw = 1;
+      if(ch < 1) ch = 1;
       int ox = (SCR_W - cw) / 2, oy = (SCR_H - ch) / 2;
+      // La columna de origen avanza SCR_W/cw por pixel. Se lleva con cociente
+      // y resto acumulados (el mismo acumulador que usa wallDisc) en vez de
+      // una division entera por pixel: eran 384.000 divisiones por cuadro para
+      // recorrer una rampa lineal. El indice resultante es exactamente el
+      // mismo que daba (x-ox)*SCR_W/cw, no una aproximacion.
+      const int qx = SCR_W / cw, rx = SCR_W % cw;
       for(int y = 0; y < SCR_H; y++){
         uint16_t* d = fb + (size_t)y * SCR_W;
-        int sy = (y - oy) * SCR_H / (ch > 0 ? ch : 1);
-        if(y < oy || y >= oy + ch || sy < 0 || sy >= SCR_H){ for(int x = 0; x < SCR_W; x++) d[x] = kbsBg(); continue; }
+        int sy = (y - oy) * SCR_H / ch;
+        if(y < oy || y >= oy + ch || sy < 0 || sy >= SCR_H){
+          for(int x = 0; x < SCR_W; x++) d[x] = bgc;
+          continue;
+        }
         const uint16_t* sp = bbuf + (size_t)sy * SCR_W;
-        for(int x = 0; x < SCR_W; x++){
-          int sx = (x - ox) * SCR_W / (cw > 0 ? cw : 1);
-          d[x] = (x < ox || x >= ox + cw || sx < 0 || sx >= SCR_W) ? kbsBg() : sp[sx];
+        int x = 0;
+        for(; x < ox && x < SCR_W; x++) d[x] = bgc;        // franja izquierda fuera del zoom
+        int sx = 0, err = 0;
+        for(; x < SCR_W; x++){
+          d[x] = (x >= ox + cw || sx >= SCR_W) ? bgc : sp[sx];
+          sx += qx; err += rx;
+          if(err >= cw){ err -= cw; sx++; }
         }
       }
     }
     flxFlushAll();
-    delay(12);
+    if(e >= KBS_ANIM_MS) break;
   }
   // Fotograma final EXACTO (las interpolaciones dejan redondeos): se copia el
   // buffer bueno tal cual, para que la pantalla que queda no sea la aproximada.

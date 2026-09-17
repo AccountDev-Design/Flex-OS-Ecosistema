@@ -60,6 +60,12 @@ static bool      wallImgOk = false;    // wallImg contiene la imagen de gWallPat
 #define WLUT_N     512
 #define WLUT_SHIFT 11
 static uint8_t wlut[WLUT_N];
+// ALCANCE REAL DE LA LUT ACTIVA: la distancia a partir de la cual el alpha ya
+// es 0. wallRadial lo usa para no recorrer lo que no va a pintar (ver alli).
+// El indice de la LUT satura en WLUT_N-1, que corresponde a d = 1023; por
+// encima de eso el alcance deja de ser fiable y se marca como "sin limite".
+#define WLUT_DMAX 1023
+static int wlutRMax = WLUT_DMAX + 1;
 static void wlutDisc(int rIn, int rOut, uint8_t aIn){
   if(rOut < 1) rOut = 1;
   if(rIn > rOut) rIn = rOut;
@@ -69,6 +75,7 @@ static void wlutDisc(int rIn, int rOut, uint8_t aIn){
     else if(d >= rOut) wlut[i] = 0;
     else               wlut[i] = (uint8_t)((int)aIn * (rOut - d) / (rOut - rIn));
   }
+  wlutRMax = rOut;                        // d >= rOut -> alpha 0
 }
 static void wlutRing(int r, int hw, uint8_t aPk){
   if(hw < 1) hw = 1;
@@ -76,20 +83,54 @@ static void wlutRing(int r, int hw, uint8_t aPk){
     int d = isqrt32(i << WLUT_SHIFT), k = d > r ? d - r : r - d;
     wlut[i] = (k >= hw) ? 0 : (uint8_t)((int)aPk * (hw - k) / hw);
   }
+  wlutRMax = r + hw;                      // |d - r| >= hw -> alpha 0
 }
 // Aplica la LUT activa mezclando 'c' sobre lo que ya hay en gBuf, dentro del
 // recorte vigente (que drawWallpaperRows deja fijado a la banda pedida).
+// SOLO SE RECORRE EL CIRCULO DE LA LUT, no la banda entera. Antes este bucle
+// visitaba TODOS los pixeles del recorte vigente -- 384.000 en pantalla
+// completa -- calculando la distancia y consultando la LUT incluso muy lejos
+// del halo, donde el alpha ya era 0 y no se escribia nada. Los fondos que
+// apilan varias capas lo pagaban multiplicado: "Halo" hace ocho de estas
+// llamadas, y seis de ellas son anillos de menos de 130 px de radio.
+//
+// Ahora las filas se acotan a [cy-R, cy+R] y, dentro de cada fila, las
+// columnas a la cuerda del circulo de radio R, siendo R el alcance real de la
+// LUT activa (wlutRMax). Fuera de ahi el alpha es 0 por construccion, asi que
+// el resultado en pantalla es IDENTICO: lo que se salta son exactamente los
+// pixeles que antes se leian para no tocarlos.
 static void wallRadial(int cx, int cy, uint16_t c){
   int y0 = gClipY0, y1 = gClipY1, x0 = gClipX0, x1 = gClipX1;
   if(y0 < 0) y0 = 0;
   if(y1 > SCR_H - 1) y1 = SCR_H - 1;
   if(x0 < 0) x0 = 0;
   if(x1 > SCR_W - 1) x1 = SCR_W - 1;
+  // MARGEN OBLIGATORIO. El indice de la LUT es (dx^2+dy^2)>>WLUT_SHIFT, o sea
+  // la distancia REDONDEADA HACIA ABAJO a un multiplo de 2048 en el cuadrado:
+  // un pixel que esta un poco mas lejos de wlutRMax puede caer en una entrada
+  // cuya distancia tabulada es todavia menor y traer alpha > 0. Cortar justo
+  // en wlutRMax recortaria ese borde y se veria. Con +48 el corte es seguro
+  // para cualquier radio: un pixel descartado cumple d^2 > (rMax+48)^2, asi
+  // que su entrada de la LUT tiene d >= rMax y por tanto alpha 0 -- que es la
+  // condicion exacta de "no se escribe nada".
+  bool bounded = (wlutRMax <= WLUT_DMAX); // por encima del alcance de la LUT no se acota
+  int R = wlutRMax + 48;
+  if(bounded){
+    if(cy - R > y0) y0 = cy - R;
+    if(cy + R < y1) y1 = cy + R;
+  }
   for(int y = y0; y <= y1; y++){
     int32_t dy = y - cy, dy2 = dy * dy;
+    int xa = x0, xb = x1;
+    if(bounded){
+      int hw = isqrt32(R * R - (int)dy2);
+      if(cx - hw > xa) xa = cx - hw;
+      if(cx + hw < xb) xb = cx + hw;
+      if(xa > xb) continue;
+    }
     uint16_t* row = gBuf + (size_t)y * SCR_W;
-    int32_t dx = x0 - cx, dx2 = dx * dx;
-    for(int x = x0; x <= x1; x++){
+    int32_t dx = xa - cx, dx2 = dx * dx;
+    for(int x = xa; x <= xb; x++){
       uint32_t idx = (uint32_t)((dx2 + dy2) >> WLUT_SHIFT);
       if(idx >= WLUT_N) idx = WLUT_N - 1;
       uint8_t a = wlut[idx];
