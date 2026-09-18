@@ -128,6 +128,20 @@ Esa frontera no se ha tocado.
 | `FlexOS_Ultra_Theft.h`            |   656 | Proteccion contra robo: estado, clasificador, Event Manager, historial y bloqueo |
 | `FlexOS_Ultra_TheftUI.h`          |  1131 | Proteccion contra robo: las tres pantallas, la animacion y el aviso del bloqueo |
 
+### Modulos de Flex Phone
+
+Estos **no son eslabones de la cadena** `Types -> ... -> Recovery`, y por eso
+no se llaman `FlexOS_Ultra_*`. Leen el modelo de Flex Phone, que vive en
+unidades de traduccion aparte, asi que se incluyen **con los puentes**, al
+final del `.ino`.
+
+| Fichero | Lineas | Que contiene |
+|---|---:|---|
+| `FlexOS_FlexPhone_UI.h` | 388 | componentes de interfaz: tarjetas, pildoras de estado, filas, desplazamiento y zonas tactiles |
+| `FlexOS_FlexPhone_Bridge.h` | 1635 | las diez pantallas de la app, la persistencia del vinculo y `brHostResolveBackend` |
+| `FlexOS_FlexPhone_WiFi.h` | 472 | transporte Wi-Fi: tarea de red propia, descubrimiento UDP y socket TCP |
+| `FlexOS_FlexPhone_Overlay.h` | 867 | Centro de notificaciones, banner flotante y No molestar |
+
 ## 5. Cómo se comprueba
 
 Desde `tests/host`:

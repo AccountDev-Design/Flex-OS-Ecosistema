@@ -754,6 +754,39 @@ bool     brHostHosted();          // dentro de una ventana de Modo PC/DeX
 bool     brHostOnline();          // hay Wi-Fi asociada
 const char* brHostDeviceName();
 uint32_t brHostMillis();
+
+// #############################################################
+// ##  DE DONDE SALE EL BACKEND
+// ##  ------------------------------------------------------
+// ##  El navegador no dibuja la web: lo hace un backend y manda
+// ##  los fotogramas. Hay dos, y hablan el MISMO FBP/1:
+// ##
+// ##      Browser Client (este modulo)
+// ##            |
+// ##      protocolo FBP/1
+// ##            |
+// ##      +-----+------+
+// ##      |            |
+// ##   Ubuntu/PC    Flex Phone (Android)
+// ##
+// ##  La diferencia entre los dos es solo DONDE se conecta y CON
+// ##  QUE credencial, y eso no lo puede saber el navegador: el
+// ##  telefono anuncia su ip y su puerto por el enlace, y su
+// ##  credencial se DERIVA de la clave del emparejamiento.
+// ##
+// ##  Por eso el host resuelve el backend activo y el navegador
+// ##  solo pregunta. Asi no hay dos copias de la logica de
+// ##  "que fuente toca", y anadir un backend en el futuro no
+// ##  obliga a tocar el cliente.
+// ##
+// ##  Devuelve false si NO hay backend utilizable ahora mismo, y
+// ##  entonces `why` dice por que -- eso es lo que el usuario ve.
+// ##  Con true, `url` y `token` son los REALES.
+// #############################################################
+bool brHostResolveBackend(char* url, size_t urlN,
+                          char* token, size_t tokenN,
+                          const char** why);
+
 // Y del borde superior del panel del teclado, o brHostScrH() si esta
 // cerrado. El navegador maqueta contra esto para que el omnibox en
 // edicion nunca quede tapado por las teclas.

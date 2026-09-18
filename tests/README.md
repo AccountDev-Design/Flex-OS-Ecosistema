@@ -38,6 +38,23 @@ tests/
                        verdad con el runtime declarativo de siempre
     test_net.cpp       el transporte real: sockets TCP, hilos y un
                        servidor WebSocket que trocea el primer frame
+    test_flexauth.cpp  emparejamiento y sesion de Flex Phone: SHA-256 y HMAC
+                       contra los vectores del FIPS 180-4 y del RFC 4231, y
+                       la derivacion de la clave contra el MISMO vector que
+                       fija FlexAuthTest.kt. Existe porque un error en la
+                       derivacion NO se nota: los dos extremos cometen el
+                       mismo error y el emparejamiento "funciona"; lo que se
+                       rompe es la garantia, en silencio
+    test_flexlink_transport.cpp
+                       la maquina de estados del enlace, contra un TELEFONO
+                       SIMULADO que habla el protocolo de verdad (contesta
+                       WELCOME, deriva la misma clave y devuelve su prueba).
+                       Comprueba sobre todo lo que el enlace se NIEGA a
+                       hacer: declararse conectado sin autenticar, emparejar
+                       con un codigo equivocado, aceptar una notificacion sin
+                       sesion, conservar la bateria de un telefono que ya no
+                       esta, inventarse una latencia y reintentar para
+                       siempre
     test_imu.cpp       el driver REAL del GY-BNO085 contra un bus I2C
                        simulado que sabe estar sano, vacio, TRABADO o
                        devolviendo basura. Existe por un fallo concreto:

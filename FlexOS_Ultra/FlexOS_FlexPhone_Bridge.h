@@ -314,6 +314,46 @@ static bool fphCapOn(uint16_t bit){
 static uint32_t fphRandom(){ return esp_random(); }
 
 
+// #############################################################
+// ##  CREDENCIAL DEL SERVIDOR DEL TELEFONO
+// ##  ------------------------------------------------------
+// ##  El relay del telefono no deja entrar a cualquiera: exige un
+// ##  token en el HELLO. Ese token se DERIVA de la clave del
+// ##  vinculo, asi que NO VIAJA por la red -- los dos extremos lo
+// ##  calculan por su cuenta.
+// ##
+// ##  Antes salia de la direccion BLE del dispositivo emparejado,
+// ##  y una direccion MAC es publica: cualquiera que la viera
+// ##  podia calcular el token y entrar al relay. La clave del
+// ##  vinculo es un secreto compartido de verdad.
+// ##
+// ##  El MISMO calculo esta en BrowserRelayService.kt. Si se toca
+// ##  en un solo lado, el telefono rechaza al navegador con un
+// ##  "dispositivo no emparejado" que no explica nada.
+// #############################################################
+static const char FPH_RELAY_TAG[] = "flexphone-relay-v2";
+
+static bool flexPhoneRelayToken(char* out, size_t outN){
+  if(!out || outN < 33) return false;
+  out[0] = 0;
+  if(!flexPhoneLinkBonded(&fphLink)) return false;
+  uint8_t mac[FLXA_SHA256_SIZE];
+  flexHmacSha256(fphLink.bond.key, FLXA_KEY_SIZE,
+                 FPH_RELAY_TAG, sizeof(FPH_RELAY_TAG) - 1, mac);
+  // 32 caracteres hexadecimales: los mismos que toma el lado Android
+  // con .take(32). Medio HMAC son 128 bits, de sobra para un token de
+  // acceso a un servicio de la red local.
+  static const char* D = "0123456789abcdef";
+  size_t at = 0;
+  for(size_t i = 0; i < 16 && at + 2 < outN; i++){
+    out[at++] = D[(mac[i] >> 4) & 0xF];
+    out[at++] = D[mac[i] & 0xF];
+  }
+  out[at] = 0;
+  memset(mac, 0, sizeof(mac));
+  return at == 32;
+}
+
 // -------------------------------------------------------------
 //  EL NAVEGADOR, VISTO DESDE FLEX PHONE
 // -------------------------------------------------------------
@@ -341,6 +381,80 @@ static const char* fphBrSourceActiveName(){
               : "";
   }
   return flexBrSourceName(a);
+}
+
+// #############################################################
+// ##  brHostResolveBackend  ·  QUE BACKEND USA EL NAVEGADOR
+// ##  ------------------------------------------------------
+// ##  Lo llama el navegador antes de conectar. Aqui es donde se
+// ##  junta todo lo que hace falta para decidirlo y que el
+// ##  navegador no puede saber por su cuenta:
+// ##
+// ##    · la preferencia del usuario (BrSettings.source),
+// ##    · si el servidor del telefono esta ARRIBA de verdad,
+// ##    · la direccion que el telefono anuncio por el enlace,
+// ##    · y la credencial derivada de la clave del vinculo.
+// ##
+// ##  La decision de QUE fuente se usa la sigue tomando
+// ##  flexBrSourceResolve, en el nucleo probado del navegador:
+// ##  aqui solo se le dan las disponibilidades REALES y se traduce
+// ##  el resultado a una direccion.
+// ##
+// ##  Un modo exclusivo NO se cae en secreto a otra fuente. Si el
+// ##  usuario eligio "Flex Phone" y el servidor no esta activo,
+// ##  esto devuelve false con el motivo -- no tira del PC por
+// ##  detras, que seria justo la mentira que el selector evita.
+// #############################################################
+bool brHostResolveBackend(char* url, size_t urlN,
+                          char* token, size_t tokenN,
+                          const char** why){
+  if(!url || !urlN || !token || !tokenN) return false;
+  url[0] = 0; token[0] = 0;
+  if(why) *why = NULL;
+
+  const BrSettings* st = flexBrowserSettings();
+  if(!st){ if(why) *why = "Ajustes del navegador no disponibles"; return false; }
+
+  const bool phoneUp   = fphRelayUp();
+  const bool cloudCfg  = st->cloudServer[0] != 0;
+  const bool manualCfg = st->server[0] != 0;
+  const int  src = flexBrSourceResolve(st, phoneUp, cloudCfg, manualCfg);
+
+  if(src == BRSRC_NONE){
+    if(why) *why = flexBrSourceWhyNone(st, phoneUp, cloudCfg, manualCfg);
+    return false;
+  }
+
+  if(src == BRSRC_PHONE){
+    // La direccion es la que el TELEFONO anuncio, no una guardada: si
+    // el router le dio otra IP, la vieja no sirve.
+    const FlexPhoneRelay* r = &fphModel.relay;
+    if(r->state != FLP_RELAY_UP || !r->port){
+      if(why) *why = "El servidor del telefono no esta activo";
+      return false;
+    }
+    if(!flexPhoneRelayToken(token, tokenN)){
+      // Sin vinculo no hay credencial, y el relay no dejaria entrar.
+      // Se dice, en vez de intentarlo y recibir un rechazo mudo.
+      if(why) *why = "Empareja el telefono para usar su navegador";
+      return false;
+    }
+    // Sin TLS dentro de la red local, igual que el modo de desarrollo
+    // del servidor Ubuntu. La interfaz lo dice; no se anuncia como
+    // cifrado algo que no lo esta.
+    snprintf(url, urlN, "ws://%u.%u.%u.%u:%u/v1/session",
+             r->ip[0], r->ip[1], r->ip[2], r->ip[3], (unsigned)r->port);
+    return true;
+  }
+
+  const char* srv = (src == BRSRC_CLOUD) ? st->cloudServer : st->server;
+  if(!srv || !srv[0]){
+    if(why) *why = "Sin servidor configurado (flex://settings)";
+    return false;
+  }
+  snprintf(url, urlN, "%s", srv);
+  snprintf(token, tokenN, "%s", st->token);
+  return true;
 }
 
 // =============================================================

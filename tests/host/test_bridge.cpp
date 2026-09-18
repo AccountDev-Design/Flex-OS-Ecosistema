@@ -251,6 +251,27 @@ bool flexFsDelete(const char*){ return false; }
 // =============================================================
 #include "../../FlexOS_Browser_Bridge.h"
 
+// EL BACKEND ACTIVO. Lo resuelve el puente de FLEX PHONE, no el del
+// navegador: es quien sabe si el servidor del telefono esta arriba y
+// quien puede derivar su credencial de la clave del vinculo. Esta
+// bateria prueba el puente del NAVEGADOR aislado, asi que aqui va un
+// doble; el camino real se ejercita al compilar el .ino entero.
+bool brHostResolveBackend(char* url, size_t urlN, char* token, size_t tokenN,
+                          const char** why){
+  if(!url || !urlN || !token || !tokenN) return false;
+  const BrSettings* st = flexBrowserSettings();
+  if(!st || !st->server[0]){
+    url[0] = 0; token[0] = 0;
+    if(why) *why = "Falta configurar el servidor en Ajustes";
+    return false;
+  }
+  snprintf(url, urlN, "%s", st->server);
+  snprintf(token, tokenN, "%s", st->token);
+  if(why) *why = NULL;
+  return true;
+}
+
+
 // =============================================================
 //  Comprobaciones
 // =============================================================

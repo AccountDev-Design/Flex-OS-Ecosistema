@@ -1064,14 +1064,23 @@ static void brNetTask(void*){
         brNetInfo("Sin Wi-Fi: con\xC3\xA9" "ctate desde Ajustes");
         vTaskDelay(pdMS_TO_TICKS(1000)); continue;
       }
-      if(!gSt.server[0]){
+      // EL BACKEND ACTIVO lo resuelve el host: puede ser el servidor
+      // configurado o el que sirve el telefono, y el navegador no
+      // tiene por que saber cual. Ver brHostResolveBackend.
+      char srvUrl[FLEXBR_SERVER_MAX];
+      char srvTok[FLEXBR_TOKEN_MAX];
+      const char* why = NULL;
+      if(!brHostResolveBackend(srvUrl, sizeof(srvUrl), srvTok, sizeof(srvTok), &why)){
         gNetState = BRN_OFF;
-        brNetInfo("Sin servidor configurado (flex://settings)");
+        // El motivo CONCRETO, no un generico: "sin servidor" y "el
+        // servidor del telefono no esta activo" se arreglan de formas
+        // distintas.
+        brNetInfo("%s", why ? why : "Sin servidor configurado (flex://settings)");
         vTaskDelay(pdMS_TO_TICKS(1000)); continue;
       }
 
       bool tls; char host[FLEXBR_HOST_MAX]; uint16_t port; char path[128];
-      if(!flexBrParseWsUrl(gSt.server, &tls, host, sizeof(host), &port, path, sizeof(path))){
+      if(!flexBrParseWsUrl(srvUrl, &tls, host, sizeof(host), &port, path, sizeof(path))){
         brNetInfo("La direcci\xC3\xB3n del servidor no es v\xC3\xA1lida");
         brSetError("La direcci\xC3\xB3n del servidor no es v\xC3\xA1lida");
         gNetState = BRN_ERROR;
@@ -1139,17 +1148,17 @@ static void brNetTask(void*){
       }
       // HELLO con la credencial del dispositivo y el tamano real.
       int cx, cy, cw, chh; brHostContentRect(&cx, &cy, &cw, &chh);
-      int n = fbpBuildHello(tx, sizeof(tx), 0, gSt.token, brHostDeviceName(),
+      int n = fbpBuildHello(tx, sizeof(tx), 0, srvTok, brHostDeviceName(),
                             (uint16_t)cw, (uint16_t)brContentPageH(),
                             gSt.quality, gSt.profile, gCaps);
       if(n <= 0 || !wsSendFrame(0x2, tx, (size_t)n)){
         BR_NETLOG("[NET] no se pudo enviar HELLO (n=%d)\n", n);
         wsDisconnect(); gNetState = BRN_ERROR; continue;
       }
-      brNetInfo("Autenticando (%s credencial)", gSt.token[0] ? "con" : "SIN");
+      brNetInfo("Autenticando (%s credencial)", srvTok[0] ? "con" : "SIN");
       BR_NETLOG("[NET] HELLO enviado: %d B  vista=%ux%u  cred=%s\n",
                 n, (unsigned)cw, (unsigned)brContentPageH(),
-                gSt.token[0] ? "si" : "NO CONFIGURADA");
+                srvTok[0] ? "si" : "NO CONFIGURADA");
       backoff = 1000;
       helloMs = brHostMillis();
       lastPing = lastAck = brHostMillis();

@@ -1,113 +1,137 @@
 # Flex Phone
 
-Ecosistema que conecta un teléfono Android con **Flex OS Ultra** (ESP32‑P4):
-notificaciones reales, respuestas rápidas cuando Android las permite, control
-multimedia y un navegador servido por el propio teléfono.
+Ecosistema que conecta un teléfono Android con **Flex OS Ultra**
+(ESP32‑P4) por **Wi‑Fi**: notificaciones reales, respuestas rápidas cuando
+Android las permite, control multimedia y un navegador servido por el propio
+teléfono.
 
 Este documento describe **lo que hay implementado**, **lo que está pendiente de
 prueba física** y **lo que no es posible**, sin mezclar las tres cosas.
 
 ---
 
-## 1. Arquitectura P4 / C6 / Android
+## 1. Arquitectura
 
 ```
-┌─────────────────────────── ESP32-P4 ───────────────────────────┐
-│  Interfaz, apps, almacenamiento, historial, render, estado     │
-│                                                                │
-│  App Flex Phone (id 18)      FlexOS_FlexPhone_Bridge.h         │
-│         │                                                      │
-│  Modelo del teléfono         FlexOS_FlexPhone.{h,cpp}          │
-│  Transporte del enlace       FlexOS_FlexPhone_Link.{h,cpp}     │
-│  Protocolo Flex Link         FlexOS_FlexLink.{h,cpp}           │
-└───────────────┬────────────────────────────────┬───────────────┘
-                │ SDIO (esp-hosted)              │ Wi-Fi (por el C6)
-┌───────────────┴──────────────┐                 │
-│         ESP32-C6             │                 │
-│  Wi-Fi  ·  BLE (ver §2)      │                 │
-└───────────────┬──────────────┘                 │
-                │ BLE GATT                       │
-┌───────────────┴────────────────────────────────┴───────────────┐
-│                          Android                                │
-│  NotificationListenerService · RemoteInput · MediaSession       │
-│  Servidor GATT (periférico)  · Browser Relay (WebView + FBP/1)  │
-└─────────────────────────────────────────────────────────────────┘
+                        FLEX PHONE
+                             │
+          ┌──────────────────┴──────────────────┐
+          │                                     │
+   ANDROID (el teléfono)                 FLEX OS ULTRA (P4)
+   servidor del enlace                   cliente del enlace
+          │                                     │
+          └──────────────── Wi-Fi ──────────────┘
+                             │
+                      FLEX LINK v2
+                             │
+        ┌────────────────────┼────────────────────┐
+        │                    │                    │
+  Notificaciones         Navegador          Estado / caps
 ```
 
-**Reparto de responsabilidades**
+### Por qué el teléfono es el servidor
 
-| Pieza | Qué hace |
-|---|---|
-| **ESP32‑P4** | Toda la interfaz, las apps, el almacenamiento, el historial y la lógica. No tiene radio propia. |
-| **ESP32‑C6** | Wi‑Fi (ya en uso) y, si su firmware lo permite, BLE. Se comunica con el P4 por **SDIO** mediante `esp-hosted`. |
-| **Android** | Permisos del sistema, lectura de notificaciones, acciones de respuesta, control multimedia y el navegador del Browser Relay. |
+El teléfono está encendido siempre y tiene un servicio en primer plano que lo
+mantiene vivo; el reloj se suspende. Al revés, **cada suspensión del P4
+cortaría el enlace**.
 
-**BLE es solo control.** Notificaciones, estado, órdenes y negociación van por
-BLE. Los fotogramas del navegador **nunca** viajan por BLE: van por Wi‑Fi.
+### Las capas, y qué se prueba dónde
+
+| Capa | Firmware | Android | Se prueba |
+|---|---|---|---|
+| Protocolo (trama, CRC, fragmentos) | `FlexOS_FlexLink.{h,cpp}` | `protocol/FlexLink.kt` | PC y JVM |
+| Emparejamiento y sesión | `FlexOS_FlexAuth.{h,cpp}` | `protocol/FlexAuth.kt` | PC y JVM |
+| Transporte (interfaz) | `FlexOS_FlexPhone_Transport.{h,cpp}` | — | PC |
+| Transporte Wi‑Fi | `FlexOS_FlexPhone_WiFi.h` | `link/WifiLinkServer.kt` | placa / teléfono |
+| Transporte BLE (futuro) | — | `link/GattServer.kt` | ver §8 |
+| Máquina del enlace | `FlexOS_FlexPhone_Link.{h,cpp}` | — | PC |
+| Modelo | `FlexOS_FlexPhone.{h,cpp}` | `domain/FlexPhoneState.kt` | PC |
+| Adaptador de dispositivo | — | `device/DeviceAdapter.kt` | teléfono |
+| Interfaz | `FlexOS_FlexPhone_{UI,Bridge}.h` | `ui/` | placa / teléfono |
+| Overlays del sistema | `FlexOS_FlexPhone_Overlay.h` | — | placa |
+
+**La lógica no sabe por dónde viajan las tramas.** El enlace habla con un
+`FlexPhoneTransport` y nada más. Por eso se compila y se ejercita entero en el
+PC contra un transporte de lazo, con un teléfono simulado que habla el
+protocolo de verdad.
 
 ---
 
-## 2. El punto crítico: BLE en el ESP32‑P4
+## 2. Transporte
 
-> **El ESP32‑P4 no tiene radio Bluetooth.**
+### Wi‑Fi — el actual
 
-No es una suposición. El SDK sólo define `SOC_BLE_SUPPORTED` en los chips con
-radio Bluetooth propia, y para el P4 **no está definida**. Es exactamente la
-comprobación que ya hacía `FlexOS_Ultra.ino` para deshabilitar el interruptor
-de BLE en *Ajustes → Red e Internet*.
+Dos sockets, con los **mismos números en los dos lados**
+(`FlexOS_FlexPhone_WiFi.h` y `WifiLinkServer.kt`):
 
-En esta placa el **único** camino posible a BLE es el co‑procesador C6, y eso
-exige dos cosas que este repositorio no puede dar por hechas:
-
-1. **Firmware `slave` de esp‑hosted en el C6 compilado con Bluetooth**, que
-   exponga HCI por el mismo transporte SDIO que ya lleva el Wi‑Fi.
-2. **Una pila de host BLE (NimBLE) en el P4** configurada contra ese
-   controlador remoto.
-
-### Cómo lo trata el código
-
-`flexPhoneLinkCap()` devuelve:
-
-| Valor | Cuándo |
+| Puerto | Qué |
 |---|---|
-| `FLP_LINK_CAP_LOCAL` | El chip tiene radio BLE propia (S3, C3, ESP32). |
-| `FLP_LINK_CAP_HOSTED` | Hay NimBLE **y** se compiló con `-DFLEXOS_C6_BLE_HCI=1`. |
-| `FLP_LINK_CAP_NONE` | Todo lo demás — **incluido el P4 tal cual está hoy**. |
+| TCP **47820** | el enlace: tramas de Flex Link, una detrás de otra |
+| UDP **47821** | descubrimiento |
 
-Con `CAP_NONE`, la app Flex Phone muestra una tarjeta con el motivo exacto y
-**no** simula un enlace, **no** inventa un teléfono conectado y **no** da por
-buenas notificaciones que nadie ha enviado.
+**Descubrimiento.** Flex OS manda `FLEXPHONE?` + versión a la difusión de su
+subred; el teléfono contesta `FLEXPHONE!` + versión + puerto + nombre. Se usa
+la difusión **dirigida de la subred**, no `255.255.255.255`.
 
-### Qué falta para completar la prueba física
+Si el router aísla a los clientes entre sí, la difusión no llega. Entonces la
+dirección se fija a mano (`flexPhoneWifiSetHost`) y la interfaz lo ofrece, en
+vez de quedarse «buscando» para siempre sin decir por qué.
 
-Esto es lo que **no** se ha podido verificar en este entorno y hay que hacer
-sobre la placa:
+**Enmarcado.** TCP es un flujo y no respeta los límites de las tramas. Se
+reconstruyen con la propia cabecera de Flex Link, que ya lleva su longitud: no
+hace falta un segundo enmarcado. Si la marca no cuadra, el flujo está
+descolocado y **se corta y se reconecta** — buscar la siguiente marca a ciegas
+en un flujo corrupto acaba interpretando basura como si fueran mensajes.
 
-1. Confirmar el modelo exacto de placa y que el C6 está operativo (hoy el
-   Wi‑Fi funciona por él, así que el enlace SDIO existe).
-2. Flashear en el C6 un firmware `esp-hosted` **con Bluetooth habilitado**.
-   ⚠️ **No sobrescribas el firmware del C6 a ciegas**: si pierdes el `slave`
-   actual, pierdes también el Wi‑Fi. Haz copia antes.
-3. Comprobar que el core de Arduino instalado expone una pila NimBLE que
-   pueda hablar con el controlador remoto del C6.
-4. Compilar con `-DFLEXOS_C6_BLE_HCI=1` y comprobar que
-   `flexPhoneLinkCap()` pasa a `FLP_LINK_CAP_HOSTED`.
+**Dónde corre.** En su propia tarea FreeRTOS, igual que el navegador. Entre esa
+tarea y el bucle gráfico solo pasan tramas completas por dos colas de tamaño
+fijo con un mutex corto. El hilo gráfico **nunca** llama a `connect()`,
+`read()` ni `write()`.
 
-**Los pines SDIO no se tocan ni se inventan**: en arduino‑esp32 3.2.0 los fija
-el *variant* de la placa en tiempo de compilación, y este código no los
-redefine. El Wi‑Fi actual no se altera en ningún punto.
+### BLE — preparado, hoy no se usa
+
+El ESP32‑P4 **no tiene radio Bluetooth**: `soc_caps.h` del SDK no define
+`SOC_BLE_SUPPORTED` para ese chip. Mientras siga así, el otro extremo de un
+servidor GATT no existe, y anunciarse por BLE sería gastar batería del teléfono
+para que no llame nadie.
+
+`GattServer.kt` **se conserva a propósito**: es el segundo transporte de la
+arquitectura. Lo que le falta para volver a estar vivo:
+
+1. firmware `esp-hosted` en el C6 compilado **con Bluetooth**, exponiendo HCI
+   por el mismo transporte SDIO que ya lleva el Wi‑Fi;
+2. una pila de host BLE (NimBLE) en el P4 contra ese controlador remoto;
+3. actualizar ese servidor al apretón de manos de Flex Link v2 (`T_AUTH_*`),
+   que es lo que sustituyó al bonding como fuente de autenticación.
+
+⚠️ **No sobrescribas el firmware del C6 a ciegas**: si pierdes el `slave`
+actual, pierdes también el Wi‑Fi. Haz copia antes.
+
+En el manifiesto de Android, BLE está declarado con `required="false"`. Con
+`"true"` quedaban fuera de Google Play teléfonos donde la app funciona
+perfectamente. Sus permisos **no se piden en tiempo de ejecución**.
 
 ---
 
-## 3. Protocolo Flex Link (v1)
+## 3. Protocolo Flex Link v2
 
-Capa de trama versionada sobre BLE GATT. Implementaciones — **las dos cambian
-a la vez**:
+Implementaciones — **las dos cambian a la vez**:
 
 | Lado | Fichero |
 |---|---|
 | Firmware | `FlexOS_FlexLink.{h,cpp}` |
 | Android | `android/FlexPhone/protocol/.../FlexLink.kt` |
+
+### Por qué v2
+
+v1 iba sobre BLE, y el bonding de BLE autenticaba y cifraba **por debajo**. Un
+socket TCP en la red local no hace nada de eso, así que v2 añade apretón de
+manos con clave (`T_AUTH_*`) y negociación de capacidades (`T_CAPS`).
+
+Un extremo v1 no sabe demostrar que tiene la clave, y por eso v2 **no lo
+acepta**: sería abrir sesión a quien no puede probar que emparejó. Que el
+rechazo sea por versión hace que el usuario lea «actualiza la app» en vez de un
+fallo mudo.
 
 ### Cabecera (18 bytes, little‑endian)
 
@@ -125,70 +149,387 @@ offset  tamaño  campo
  16       2     CRC16-CCITT de [0..15] + carga
 ```
 
-**Límites**: trama ≤ 244 B (MTU 247 − 3 de ATT), carga ≤ 226 B, mensaje
-reensamblado ≤ 2048 B, ≤ 16 fragmentos.
+**Límites**: trama ≤ 244 B, carga ≤ 226 B, mensaje reensamblado ≤ 2048 B, ≤ 16
+fragmentos. Por Wi‑Fi cabría mucho más y **aun así se conserva el mismo tope**:
+subirlo obligaría a que los dos extremos llevaran buffers distintos según el
+transporte, y el único premio serían menos fragmentos en mensajes que ya caben
+en uno o dos.
 
 ### Tipos de mensaje
 
 | Rango | Contenido |
 |---|---|
 | `0x01–0x07` | HELLO, WELCOME, PING, PONG, BYE, ACK, ERR |
+| `0x08–0x0A` | **AUTH_CHALLENGE, AUTH_RESPONSE, AUTH_OK** (v2) |
 | `0x10–0x13` | PAIR_REQ, PAIR_CODE, PAIR_CONFIRM, UNPAIR |
 | `0x20–0x23` | NOTIF_ADD, NOTIF_UPDATE, NOTIF_REMOVE, NOTIF_CLEAR |
 | `0x30–0x33` | REPLY_REQ, REPLY_RESULT, ACTION_REQ, ACTION_RESULT |
 | `0x40–0x43` | PHONE_STATE, TIME_SYNC, FIND_START, FIND_STOP |
+| `0x44` | **CAPS** (v2) |
 | `0x50–0x51` | MEDIA_STATE, MEDIA_CMD |
 | `0x60–0x62` | RELAY_START, RELAY_STOP, RELAY_INFO |
 
-Los números **van al aire y nunca se reordenan**. Un tipo desconocido se
-ignora en silencio: es lo que permite añadir mensajes sin romper un firmware
-antiguo. Una versión **mayor** no se interpreta y se responde `E_VERSION`.
+Los números **van al aire y nunca se reordenan**. Un tipo desconocido se ignora
+en silencio: es lo que permite añadir mensajes sin romper un firmware antiguo.
 
 ### Garantías
 
 - CRC16‑CCITT sobre cabecera y carga.
-- Fragmentación y reensamblaje con un solo parcial en vuelo (un emisor no
-  puede dejar parciales colgados) y caducidad a los 5 s.
-- Contador monótono con ventana de 32: descarta repetidos y lo demasiado
-  antiguo, tolera el reordenado propio de BLE.
-- Reintentos con espera progresiva (500 ms → 30 s) y **límite**: nada se
-  reintenta para siempre.
-- Todo tamaño que viene del aire se valida **antes** de usarse como índice o
-  como longitud de copia.
+- Fragmentación con un solo parcial en vuelo y caducidad a los 5 s.
+- Contador monótono con ventana de 32.
+- Reintentos con espera progresiva (500 ms → 30 s) y **límite**.
+- Todo tamaño que viene del aire se valida **antes** de usarse.
 
 ### Vectores dorados
 
-El firmware y la app implementan el protocolo por separado. Si alguien mueve
-un campo en un solo lado no salta ningún error de compilación: el P4 empieza a
-descartar tramas por CRC y se ve como *«el teléfono no conecta»*. Para
-evitarlo, los bytes exactos están fijados en **las dos** baterías:
+El firmware y la app implementan el protocolo por separado. Si alguien mueve un
+campo en un solo lado no salta ningún error de compilación: el P4 empieza a
+descartar tramas por CRC y se ve como *«el teléfono no conecta»*. Los bytes
+exactos están fijados en **las dos** baterías:
 
-- `tests/host/test_flexlink_vectors.cpp`
-- `android/.../protocol/src/test/kotlin/.../FlexLinkTest.kt`
-
-### Seguridad
-
-- Emparejamiento **BLE con bonding**: las características GATT se declaran con
-  permisos `..._ENCRYPTED`, así que Android exige emparejar y cifra el enlace
-  antes de entregar un solo byte.
-- Código de 6 dígitos mostrado en Flex OS y **confirmado en los dos
-  extremos**. Confirmar sólo en un lado no vincula nada. El código caduca a
-  los 2 minutos.
-- Sin sesión abierta sólo se aceptan mensajes del apretón de manos: una
-  notificación de un dispositivo no emparejado se descarta aunque la trama sea
-  válida.
-- El anuncio BLE **no** lleva el nombre del teléfono, sólo el UUID del
-  servicio.
-- Desvincular borra el bonding (`removeBond`), los ajustes y las apps
-  permitidas.
-- **Nunca** se escriben textos privados, claves ni cuerpos de mensajes en los
-  registros — ni en el firmware ni en la app.
+- `tests/host/test_flexlink_vectors.cpp` y `tests/host/test_flexauth.cpp`
+- `android/.../protocol/src/test/kotlin/.../FlexLinkTest.kt` y `FlexAuthTest.kt`
 
 ---
 
-## 4. Compilar la app Android
+## 4. Emparejamiento y sesión
 
-### Requisitos
+### El flujo
+
+```
+Flex OS (cliente TCP)                   Teléfono (servidor TCP)
+   │── HELLO {ver, id} ───────────────────────────►│
+   │◄─────────────────── WELCOME {ver, id, nombre} │
+
+   ── sin vínculo: EMPAREJAMIENTO ──
+   │── PAIR_CODE {sal, reto, id} ─────────────────►│   (el código NO viaja)
+   │        el usuario lee el código en Flex OS
+   │        y lo TECLEA en el teléfono
+   │◄────────────────────── PAIR_CONFIRM {prueba}  │
+   │── AUTH_OK {prueba de Flex OS} ───────────────►│
+
+   ── con vínculo: SESIÓN ──
+   │── AUTH_CHALLENGE {reto, sesión} ─────────────►│
+   │◄───────────────────── AUTH_RESPONSE {prueba}  │
+   │── AUTH_OK {prueba de Flex OS} ───────────────►│
+
+   │◄──────────────────────────────── CAPS ────────│
+   │◄──────────────────────── PHONE_STATE ─────────│
+```
+
+### Derivación
+
+```
+clave = HMAC( código , "flexphone-pair-v2" || sal || idFlexOS || idTeléfono )
+```
+
+**El código de 6 dígitos nunca se transmite.** Por la red solo viajan la sal y
+los identificadores, que son públicos. La prueba de host recorre *todo* lo que
+Flex OS pone en el canal y falla si el código aparece.
+
+Los identificadores entran con su **longitud delante**: sin eso, `("ab","c")` y
+`("a","bc")` darían la misma clave.
+
+Seis dígitos es poca entropía, y por eso no basta con la derivación: el código
+**caduca a los dos minutos** y cada emparejamiento genera una sal nueva, así
+que no hay ventana práctica para probarlos todos contra un extremo vivo.
+
+### Reto‑respuesta MUTUO
+
+```
+pruebaTeléfono = HMAC(clave, "flexphone-peer-v2" || reto || sesión)
+pruebaFlexOS   = HMAC(clave, "flexphone-host-v2" || reto || sesión)
+```
+
+Las dos etiquetas son **distintas a propósito**: reenviar la prueba ajena no
+sirve de nada. Sin la mitad de Flex OS, un equipo cualquiera de la red podría
+hacerse pasar por el reloj y quedarse con todas las notificaciones del usuario.
+Autenticar en un solo sentido sería justo la mitad útil.
+
+### Dónde vive la clave
+
+| Lado | Dónde |
+|---|---|
+| Flex OS | NVS (`flexphone/bondkey`), no LittleFS: es material de clave |
+| Android | envuelta con AES/GCM de una clave del **Android Keystore** |
+
+En Android, lo que acaba en disco es un cifrado. Revocar borra el cifrado **y**
+la clave envolvente: dejarla viva permitiría descifrar una copia de seguridad
+antigua del fichero.
+
+Una clave que no se puede descifrar (restauración del teléfono, reinstalación)
+se limpia y se pide emparejar de nuevo, en vez de autenticar con basura.
+
+### El límite real, sin adornos
+
+**La carga viaja EN CLARO por la red local.** Esto impide que un dispositivo
+**no emparejado** abra sesión; **no** protege frente a quien ya esté escuchando
+la misma red. No es TLS y la interfaz no lo enseña como si lo fuera — hay una
+tarjeta que lo dice, en Flex OS y en el teléfono.
+
+### Lo que el servidor rechaza
+
+- más de una sesión a la vez (la segunda conexión se cierra);
+- cualquier mensaje que no sea del apretón de manos sin sesión autenticada;
+- una conexión que no autentica en 15 s;
+- una sesión sin tráfico en 40 s;
+- una trama de otra sesión, repetida, corrupta o de versión futura.
+
+---
+
+## 5. Capacidades
+
+**No todos los Android pueden lo mismo**, y del mismo teléfono no siempre está
+todo concedido. Por eso van **dos mapas** y no uno:
+
+| Mapa | Qué es |
+|---|---|
+| `supported` | lo que ese modelo de teléfono puede hacer |
+| `granted` | lo que además está permitido y activo **ahora** |
+
+La diferencia entre los dos es justo lo que se le puede explicar al usuario:
+*«tu teléfono puede, pero falta darle el acceso a notificaciones»*. Con un solo
+mapa habría que elegir entre esconder la función o enseñarla rota.
+
+**Flex OS no ofrece como funcional nada que no esté en `granted`.** Un botón
+que no hace nada es peor que no tenerlo.
+
+| Bit | Función |
+|---|---|
+| `NOTIF` | leer notificaciones |
+| `REPLY` | responder (Android dio `RemoteInput`) |
+| `MEDIA` | control multimedia |
+| `RELAY` | servidor del navegador |
+| `FIND` | encontrar mi teléfono |
+| `STATE` | estado del dispositivo |
+| `TIME` | sincronizar la hora |
+| `BLE` | el teléfono puede hablar BLE |
+
+`BLE` **no se concede** aunque el teléfono lo tenga: hoy no hay transporte BLE
+al otro lado, y anunciarlo como concedido sería ofrecer algo que no existe.
+
+---
+
+## 6. Compatibilidad Android
+
+El Galaxy A55 es el **teléfono de referencia, no la plataforma**.
+
+`device/DeviceAdapter.kt` es la **única** pieza que mira `Build.MANUFACTURER`.
+Todo lo de arriba —protocolo, enlace, notificaciones, servidor— habla con ese
+adaptador. Si el núcleo consultara Samsung directamente, cada arreglo para un
+Samsung sería un riesgo nuevo para un Pixel, un Motorola o un Xiaomi.
+
+- **Sin APIs privadas.** Nada de Knox, One UI ni reflexión sobre clases
+  ocultas: eso ata la app a un fabricante y se rompe en la siguiente versión.
+- **Las diferencias de fabricante son opcionales.** Lo que el adaptador no
+  reconoce cae al camino estándar de Android, que es el que funciona en todos.
+  Hoy lo único específico por fabricante es el **texto del consejo** sobre
+  restricciones de segundo plano — no se cambia ningún comportamiento.
+- **Solo se lee lo necesario**: no hay IMEI, ni número de serie, ni cuentas, ni
+  ubicación.
+
+`minSdk` sigue en **26** y `targetSdk` en **35**: no se ha subido nada.
+
+---
+
+## 7. Notificaciones en Flex OS
+
+```
+   Notificaciones Android        Avisos nativos de Flex OS
+             │                              │
+             └──────────────┬───────────────┘
+                            │
+                   Centro de notificaciones
+                            │
+              ┌─────────────┴─────────────┐
+              │                           │
+      Centro (borde izq.)          Banner flotante
+```
+
+### Gestos
+
+| Gesto | Abre |
+|---|---|
+| Borde **izquierdo** | Centro de notificaciones |
+| Borde **derecho** | Panel rápido (Control Center) |
+| Borde **superior** | Panel rápido (el de siempre, se conserva) |
+
+El borde superior no se retira: cambiaría un gesto ya aprendido y no hace falta
+para añadir el otro.
+
+**Los dos gestos nuevos exigen intención.** No basta con que el gesto nazca en
+la franja del borde: el del borde derecho necesita que el dedo se haya movido
+hacia dentro más de lo que se ha movido en vertical. Sin eso, un
+desplazamiento vertical que empiece cerca del borde abriría el panel por
+accidente dentro de una lista o de un juego.
+
+### El banner flotante
+
+La isla dinámica (`FlexOS_Ultra_Notif.h`) solo vive en el escritorio: compone
+sobre `homeBuf`, que solo es un fondo válido ahí. Una notificación del teléfono
+tiene que verse **estés donde estés**, así que el banner sigue el patrón del
+aviso de caída: captura su banda, dibuja encima y la devuelve pixel a pixel al
+cerrarse.
+
+Con una diferencia que es la importante: **no es modal**. No se queda la
+pantalla, no para la app de debajo y no le roba el toque salvo que el dedo
+caiga dentro de su tarjeta. Y compone **después** de que la pantalla de debajo
+haya dibujado, así que siempre queda encima sin parpadear.
+
+| | |
+|---|---|
+| Vertical | banda compacta **arriba**. Nunca en el centro |
+| Horizontal | arriba y **más estrecho**: una banda a lo ancho se comería la mitad útil de un juego |
+| A la vez | **uno**. Lo que llega detrás espera turno y se resume (`+3`), no se apila |
+| Descartar | arrastre a la izquierda; si viene del teléfono, se descarta **también allí** |
+| Tocar | abre Flex Phone en Notificaciones |
+| Solo | a los 4,2 s — y no mientras el dedo lo está tocando |
+
+**DeX es una exclusión dura.** Con el escritorio de Modo PC delante el usuario
+está trabajando con ventanas colocadas a mano, y taparlas con un aviso del
+teléfono es desproporcionado. Se registra igual y está en el Centro.
+
+### Silencio y No molestar
+
+|  | Centro | Banner | Sonido |
+|---|---|---|---|
+| Normal | ✓ | ✓ | ✓ *(ver abajo)* |
+| Silencio del sistema | ✓ | ✓ | ✗ |
+| **No molestar** | ✓ | ✗ | ✗ |
+
+En los tres casos la notificación **se registra**. Silenciar no es tirar.
+
+No molestar es un estado real y persistido, con interruptor en el panel rápido
+(`QSID_DND`) y otro en la cabecera del Centro.
+
+> **Sonido: hoy no lo hay, y no se finge.** El audio de Flex OS es una tubería
+> PCM (`flexAudioStartPcm` / `flexAudioWrite`): no existe un camino de «sonido
+> de notificación», y fabricar un tono desde el bucle gráfico es exactamente lo
+> que este módulo no puede hacer. `phoneCanSound()` ya está escrito y dice la
+> verdad sobre cuándo *se podría*; el día que exista un reproductor de avisos,
+> el único cambio es llamarlo ahí dentro.
+
+---
+
+## 8. Navegador
+
+El navegador **no dibuja la web**: lo hace un backend y manda los fotogramas.
+Hay dos, y hablan el **mismo FBP/1**:
+
+```
+              Browser Client (el P4)
+                      │
+               protocolo FBP/1
+                      │
+          ┌───────────┴───────────┐
+          │                       │
+     Ubuntu / PC          Flex Phone (Android)
+```
+
+La diferencia entre los dos es solo **dónde** se conecta y **con qué**
+credencial, y eso no lo puede saber el navegador: el teléfono anuncia su ip y
+su puerto por el enlace, y su credencial se deriva de la clave del
+emparejamiento.
+
+Por eso el host resuelve el backend y el navegador solo pregunta
+(`brHostResolveBackend`). Así no hay dos copias de la lógica de «qué fuente
+toca», y añadir un backend en el futuro no obliga a tocar el cliente.
+
+### Token del relay
+
+```
+token = HMAC(clave del vínculo, "flexphone-relay-v2")   → 32 hex
+```
+
+**No viaja por la red**: los dos extremos lo calculan por su cuenta. Antes se
+derivaba de la dirección BLE del dispositivo emparejado, y una dirección MAC es
+**pública**: cualquiera que la viera podía calcular el token y entrar al relay.
+
+### Fuente
+
+*Navegador → Ajustes → Fuente*, y también desde *Flex Phone → Navegador*:
+
+| Modo | Comportamiento |
+|---|---|
+| **Automático** | teléfono si su servidor está arriba → nube → PC/Ubuntu |
+| **Flex Phone** | solo el teléfono |
+| **Nube** | solo el servidor en la nube del usuario |
+| **PC/Ubuntu** | el comportamiento de siempre |
+
+Los modos exclusivos **no se caen en secreto a otra fuente**: un «Flex Phone»
+que en realidad tirara del PC sería justo la mentira que este selector evita.
+Si el elegido no está disponible, se dice el motivo concreto.
+
+**El servidor Ubuntu no se elimina ni se modifica.**
+
+### Límites reales, sin adornos
+
+- **No se promete que funcione indefinidamente con la pantalla apagada.**
+  Android puede matar el proceso por batería, memoria o política del
+  fabricante. Si lo hace, Flex OS lo muestra como **error visible**, no se
+  queda esperando fotogramas.
+- **No se prometen 60 FPS.** Una página renderizada en el teléfono, comprimida
+  a JPEG y enviada por Wi‑Fi a un ESP32 que además tiene que decodificarla no
+  da eso.
+- **Sin TLS en la red local.** La interfaz dice *«Sin TLS (red local)»*.
+- **Solo un Flex OS a la vez.**
+
+---
+
+## 9. Rendimiento
+
+Reglas que cumple el código del firmware:
+
+- Sin `String` de Arduino, sin `delay()`, sin recursión.
+- **Ninguna** llamada de red en el hilo gráfico. El transporte vive en su
+  propia tarea, y entre las dos solo pasan tramas completas por colas de tamaño
+  fijo.
+- Un **tope de tramas por vuelta** (`FLP_LINK_RX_PER_TICK`): si el teléfono
+  manda una ráfaga, se reparte entre cuadros en vez de comerse uno entero.
+- Buffers **fijos** con límites explícitos; `snprintf` y `memcpy` validado;
+  ningún `strcpy` ni `sprintf`.
+- Cola circular de 40 notificaciones que expulsa por *(prioridad, antigüedad)*.
+- Escritura en flash **agrupada** (cada 30 s como mucho, y al salir de la app).
+- **Repintado por cambio real, no por cuadro**: con Flex Phone abierto y sin
+  novedades no se redibuja nada.
+- El banner **reserva su banda al abrirse y la suelta al cerrarse**: retener
+  memoria permanentemente por algo que puede no ocurrir en horas no se
+  sostiene. Si no hay memoria, no se dibuja — la notificación sigue en el
+  Centro.
+
+**Coste con Flex Phone inactivo**: `flexPhoneTick()` y `fpbTick()` salen en su
+primera línea. El escritorio, el panel rápido, los juegos y el navegador no
+pagan nada por que esta app exista.
+
+**Batería del teléfono**: el servidor no sondea. Las notificaciones son eventos
+de Android, el estado se manda **cuando cambia** (con un latido de un minuto) y
+el enlace en reposo intercambia un PING cada 8 s.
+
+---
+
+## 10. Privacidad
+
+**Qué sale del teléfono**: nombre de la app, paquete, título, un resumen
+recortado del texto, la hora, la categoría, la prioridad, las etiquetas de las
+acciones y —si el usuario no lo desactiva— batería, red, almacenamiento y
+memoria.
+
+**Qué no sale**: el icono de la app, la notificación completa, contactos, SMS,
+ubicación, IMEI ni número de serie.
+
+- Con *«no enviar el cuerpo»*, el texto **ni siquiera sale del teléfono**.
+- Detección conservadora de códigos de un solo uso: ante la duda, se oculta.
+- De fábrica **no hay ninguna app permitida**: una app que reenvía todo por
+  defecto es una fuga de privacidad.
+- Borrado automático por antigüedad (48 h de fábrica).
+- El diagnóstico muestra **solo contadores**: se puede enseñar para pedir ayuda
+  sin revelar nada.
+- Las copias de seguridad de Android están **desactivadas** para toda la app.
+- Nada pasa por ningún servidor.
+
+---
+
+## 11. Compilar la app Android
 
 | Pieza | Versión |
 |---|---|
@@ -196,31 +537,19 @@ evitarlo, los bytes exactos están fijados en **las dos** baterías:
 | Android Gradle Plugin | 8.5.2 |
 | Kotlin | 2.0.21 |
 | Compose BOM | 2024.09.03 |
-| JDK | 17 o superior (el *bytecode* se emite en 17) |
+| JDK | 17 o superior |
 | `compileSdk` / `targetSdk` | 35 |
 | `minSdk` | 26 |
 
-### Pasos
-
 ```bash
 cd android/FlexPhone
-
-# 1) Indica dónde está tu SDK
 cp local.properties.example local.properties
 $EDITOR local.properties          # sdk.dir=/ruta/a/Android/Sdk
-#    (o exporta ANDROID_HOME)
-
-# 2) APK de depuración
 ./gradlew :app:assembleDebug
-
-# 3) Instalar
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-El APK sale en `app/build/outputs/apk/debug/app-debug.apk` y se firma con la
-clave de depuración que genera Gradle. **No hay ninguna credencial en el
-repositorio**; para una *release* usa tu propio *keystore* (queda fuera por
-`.gitignore`).
+**No hay ninguna credencial en el repositorio.**
 
 ### Sin SDK de Android
 
@@ -231,324 +560,102 @@ sin emulador y sin placa**:
 ./gradlew :protocol:test
 ```
 
-`settings.gradle.kts` incluye `:app` sólo si encuentra el SDK, precisamente
-para que la ausencia de SDK no rompa esta verificación.
+---
+
+## 12. Emparejar
+
+1. **En el teléfono**: concede el acceso a notificaciones y pulsa *Activar el
+   enlace*. Los dos tienen que estar en la **misma red Wi‑Fi**.
+2. **En Flex OS**: *Flex Phone → Emparejar teléfono*. Aparece un código de 6
+   dígitos.
+3. **En el teléfono**: teclea ese código.
+4. **En Flex OS**: pulsa *Confirmar aquí*.
+
+Después, elige en *Notificaciones* qué apps pueden enviar las suyas.
 
 ---
 
-## 5. Conceder permisos y emparejar
-
-### Permisos
-
-1. **Acceso a notificaciones** — Android no permite pedirlo con un diálogo. La
-   pantalla de bienvenida abre *Ajustes → Notificaciones → Acceso especial*.
-   Sin esto la app no puede hacer casi nada.
-2. **Bluetooth** — `BLUETOOTH_CONNECT`, `BLUETOOTH_ADVERTISE` y
-   `BLUETOOTH_SCAN` en Android 12+; `BLUETOOTH`/`BLUETOOTH_ADMIN` (y
-   `ACCESS_FINE_LOCATION`, que el sistema exigía) hasta Android 11. El escaneo
-   se declara `neverForLocation`: **no se pide ubicación en Android 12+**.
-3. **Mostrar notificaciones** (Android 13+) — sólo para la notificación del
-   propio servicio, la que permite pararlo.
-
-### Emparejar
-
-1. En Flex OS: **Flex Phone → Centro → Emparejar teléfono**. Aparece un código
-   de 6 dígitos.
-2. En Android: **Flex Phone → Activar enlace**.
-3. Comprueba que el código es **el mismo** en los dos. Si no coincide, no
-   confirmes: puede ser otro dispositivo.
-4. Confirma en ambos. Sólo entonces se abre la sesión.
-
-Después, elige en *Aplicaciones* cuáles pueden enviar sus notificaciones. **De
-fábrica no hay ninguna**: una app que reenvía todo por defecto es una fuga de
-privacidad.
-
----
-
-## 6. Browser Relay
-
-Permite que el teléfono sustituya al servicio Ubuntu/PC. Habla **el mismo
-FBP/1** (`server/PROTOCOL.md`), así que el navegador del P4 no necesita ni una
-línea nueva y el servidor Ubuntu **sigue funcionando igual que siempre**.
-
-### Activar
-
-- **Desde Android**: *Browser Relay → Iniciar*.
-- **Desde Flex OS**: *Flex Phone → Navegador → Iniciar* (petición autenticada
-  por el enlace BLE ya emparejado).
-
-El teléfono anuncia por BLE su **IP y puerto reales**; Flex OS comprueba
-`/v1/health` y abre la sesión WebSocket. Nunca se muestra «conectado» sin
-haber verificado las dos cosas.
-
-### Excluir del ahorro de batería
-
-Con el ahorro de batería activo, Android puede detener el relay en cuanto se
-apaga la pantalla. En *Browser Relay* hay un botón que abre
-*Ajustes → Batería → Optimización* para excluir Flex Phone.
-
-Varios fabricantes (Xiaomi, Huawei, Samsung, OPPO…) añaden restricciones
-propias además de las de Android. Suele hacer falta marcar la app como
-«sin restricciones» o «inicio automático» en sus ajustes.
-
-### Límites reales, sin adornos
-
-- **No se promete que funcione indefinidamente con la pantalla apagada.**
-  Android puede matar el proceso por batería, memoria o política del
-  fabricante. Si lo hace, Flex OS lo muestra como **error visible**, no se
-  queda esperando fotogramas.
-- **No se prometen 60 FPS.** Una página remota renderizada en el teléfono,
-  comprimida a JPEG y enviada por Wi‑Fi a un ESP32 que además tiene que
-  decodificarla no da eso. El ritmo sube mientras se toca y baja cuando la
-  página no cambia.
-- **Sin TLS en la red local.** Se sirve en claro dentro de la red, igual que
-  el modo de desarrollo del servidor Ubuntu. El enlace de control (BLE) sí va
-  cifrado por bonding. La interfaz dice *«Sin TLS (red local)»*: no se anuncia
-  como cifrado algo que no lo está.
-- **Sólo un Flex OS a la vez.** Una segunda conexión se cierra en vez de
-  repartir los fotogramas entre dos.
-
-### Seguridad del relay
-
-- El `HELLO` exige el token derivado del vínculo BLE. Quien no ha emparejado
-  no entra aunque alcance el puerto.
-- Esquemas `file:`, `content:` y `javascript:` **bloqueados**; acceso a
-  ficheros locales desactivado en el WebView. Un teléfono no puede quedar
-  expuesto a través del relay.
-- Las cookies viven en el almacenamiento privado de la app y **nunca** se
-  envían por el enlace ni se escriben en los registros.
-- Sesiones inactivas cerradas tras un tiempo configurable, con sus *locks*.
-
----
-
-## 7. Fuente del navegador en Flex OS
-
-*Navegador → Ajustes → Fuente*:
-
-| Modo | Comportamiento |
-|---|---|
-| **Automático** | Flex Phone si el relay está arriba → nube configurada → PC/Ubuntu. |
-| **Flex Phone** | Sólo el teléfono. |
-| **Nube** | Sólo el servidor en la nube del usuario. |
-| **PC/Ubuntu manual** | El comportamiento de siempre. |
-
-Los modos exclusivos **no** se caen en secreto a otra fuente: un «Flex Phone»
-que en realidad tirara del PC sería justo la mentira que este selector evita.
-Si el elegido no está disponible, se dice el motivo concreto.
-
-Nunca se muestra conexión correcta sin verificar `/v1/health` y abrir una
-sesión válida.
-
-### Servidor en la nube
-
-Prepara compatibilidad con el backend existente (`server/`) para instalarlo en
-un VPS Linux. **No se incluyen credenciales ni se contrata ningún servicio**:
-el usuario configura la URL. **El servidor Ubuntu actual no se elimina ni se
-modifica.**
-
----
-
-## 8. Límites reales de WhatsApp y otras apps
-
-**Lo que Flex Phone sí hace**
-
-- Recibe notificaciones reales de WhatsApp (y de cualquier app permitida).
-- **Responde** cuando la notificación de Android expone una acción con
-  `RemoteInput` — que es lo que WhatsApp ofrece para responder desde la barra.
-- Devuelve a Flex OS el resultado **real**: si la acción caducó o la
-  notificación desapareció, se dice, no se simula un envío.
-
-**Lo que no hace, y por qué**
-
-- **No inicia conversaciones nuevas.** WhatsApp personal no ofrece una API
-  pública que permita a un ESP32 actuar como cliente independiente.
-- **No automatiza WhatsApp Web**, no extrae cookies, tokens ni sesiones, y no
-  usa APIs privadas ni ingeniería inversa. Cualquiera de esas cosas pondría en
-  riesgo la cuenta del usuario.
-- **No muestra un botón «Enviar» que no haga nada.** Si Android no dio
-  `RemoteInput`, `canReply` va en `false` y Flex OS **no ofrece** el botón.
-- En modo independiente WhatsApp aparece como **«Requiere teléfono
-  conectado»**, no como una función autónoma.
-
-**Matiz importante sobre «enviado»**: que Android acepte la acción significa
-que la app de mensajería **recibió** el texto, no que el destinatario lo haya
-recibido o leído. Eso sólo lo sabe la propia app. La interfaz dice «entregada
-a la app».
-
-**Sin teléfono ni módem celular**, el ESP32‑P4 no puede hacer llamadas, enviar
-SMS ni ser un teléfono autónomo. La interfaz lo dice.
-
-### Qué sí funciona sin teléfono
-
-- Historial de notificaciones previamente sincronizadas (las 20 más recientes
-  se conservan en flash).
-- Borradores locales de mensajes.
-- Multimedia almacenada localmente.
-- Navegador mediante servidor en la nube configurado.
-- Servicios propios de Flex OS que ya existen.
-
----
-
-## 9. Privacidad
-
-**Qué sale del teléfono**: nombre de la app, paquete, título (el remitente),
-un resumen recortado del texto, la hora, la categoría, la prioridad y las
-etiquetas de las acciones.
-
-**Qué no sale**: el icono de la app, la notificación completa, contactos, SMS
-ni ubicación.
-
-- Con *«no enviar el cuerpo»*, el texto **ni siquiera sale del teléfono** — no
-  se manda para que el P4 lo esconda, que es lo único que no se puede filtrar
-  después.
-- Detección conservadora de códigos de un solo uso: ante la duda, se oculta.
-  Equivocarse marcando de más sólo esconde un texto; al revés enseña un OTP en
-  una pantalla que puede estar sobre una mesa.
-- En la pantalla de bloqueo de Flex OS se respeta la configuración: se puede
-  mostrar sólo app y remitente. Lo marcado como sensible **no se muestra
-  nunca**.
-- Borrado automático por antigüedad (48 h de fábrica).
-- El diagnóstico muestra **sólo contadores**: se puede enseñar para pedir
-  ayuda sin revelar nada.
-- Las copias de seguridad de Android están **desactivadas** para toda la app.
-- Nada pasa por ningún servidor: el enlace es directo entre el teléfono y el
-  Flex OS del usuario.
-
----
-
-## 10. Rendimiento y memoria en el P4
-
-Reglas que cumple el código nuevo del firmware:
-
-- Sin `String` de Arduino, sin `delay()`, sin recursión.
-- Sin peticiones de red en el bucle gráfico y sin esperar respuestas BLE
-  bloqueando la interfaz.
-- Buffers **fijos** con límites explícitos; `snprintf` y `memcpy` validado;
-  **ningún** `strcpy` ni `sprintf`.
-- UTF‑8 validado y truncado en frontera de carácter.
-- Cola circular de 40 notificaciones que expulsa por *(prioridad, antigüedad)*:
-  nunca tira una urgente teniendo algo de prioridad menor.
-- Escritura en flash **agrupada** (cada 30 s como mucho, y al salir de la app),
-  con un blob acotado a **11 914 B** en el peor caso: a flash sólo van las 20
-  más recientes, y ninguna si el usuario apagó el historial.
-- Recepción, procesado, persistencia y render separados.
-- Contadores de diagnóstico (fotogramas descartados, paquetes inválidos, cola
-  llena, reconexiones) visibles **sólo** en la pantalla de diagnóstico.
-
-**Coste con Flex Phone inactivo**: `flexPhoneTick()` sale en su primera línea
-si el enlace está apagado o no disponible. El escritorio, el panel rápido, los
-juegos y el navegador no pagan nada por que esta app exista.
-
-**Memoria** (medida, no estimada — `sizeof` de las estructuras reales):
-
-| Estructura | Tamaño |
-|---|---|
-| `FlexPhoneNotif` × 40 | 17 440 B |
-| `FlexPhoneConv` × 12 | 1 680 B |
-| `FlexPhoneDraft` × 8 | 3 136 B |
-| **`FlexPhoneModel`** (instancia única) | **22 568 B** |
-| **`FlexPhoneLink`** (instancia única) | **6 464 B** |
-| **Total en BSS** | **29 032 B (28,4 KB)** |
-| Blob a flash (peor caso, buffer temporal en PSRAM) | 11 914 B |
-
-Son dos estructuras de tamaño fijo decidido en compilación. Sin reservas
-dinámicas repetidas y sin fragmentar el heap que necesitan el navegador y la
-galería. El buffer de serialización se pide a PSRAM y se libera enseguida: 12
-KB en la pila del bucle principal no serían aceptables.
-
----
-
-## 11. Solución de problemas
+## 13. Solución de problemas
 
 | Síntoma | Causa probable | Qué hacer |
 |---|---|---|
-| «BLE no disponible» en Flex OS | El P4 no tiene radio y el C6 no está preparado | Ver §2. Es lo esperado hoy. |
-| No llega ninguna notificación | Falta el acceso a notificaciones, o la app no está permitida | Bienvenida → permisos; luego *Aplicaciones*. |
-| «Responder» no aparece | Esa notificación no trae `RemoteInput` | No es un fallo: esa app no permite responder desde la barra. |
-| «La notificación ya no existe» | Desapareció mientras escribías | Vuelve a abrir la conversación en el teléfono. |
-| El relay se detiene al apagar la pantalla | Ahorro de batería o política del fabricante | Excluir Flex Phone (§6). Puede no bastar en algunos teléfonos. |
-| Flex OS no encuentra el relay | Teléfono y reloj en redes Wi‑Fi distintas | Deben estar en la misma red local. |
-| «Dispositivo no emparejado» al conectar el navegador | El token no coincide | Vuelve a emparejar por BLE. |
-| El enlace se cae y vuelve | Distancia o interferencias | Es normal; reconecta con espera progresiva y límite. |
+| «Buscando Flex Phone» y no encuentra | el router aísla a los clientes, o el teléfono está en otra red | misma Wi‑Fi; si aun así no, fija la dirección a mano |
+| «Este teléfono no está en Wi‑Fi» | datos móviles | el enlace es de red local |
+| No llega ninguna notificación | falta el acceso a notificaciones, o la app no está permitida | Bienvenida → permisos; luego *Notificaciones* |
+| «El código tecleado no coincide» | código mal, o caducado (2 min) | vuelve a emparejar |
+| «Responder» no aparece | esa notificación no trae `RemoteInput` | no es un fallo: esa app no lo permite |
+| El enlace se cae al apagar la pantalla | ahorro de batería o política del fabricante | *Estado del dispositivo → Segundo plano* |
+| «La app del teléfono es de una versión anterior» | app v1 contra firmware v2 | actualiza la app |
+| El puerto 47820 ya está en uso | otra app lo tiene | ciérrala o reinicia el teléfono |
 
 ---
 
-## 12. Estado de verificación
+## 14. Estado de verificación
 
-Se distingue con cuidado entre las tres cosas:
+Se distingue con cuidado entre las tres cosas.
 
 ### ✅ Compilado y probado (ejecutado de verdad)
 
 | Qué | Resultado |
 |---|---|
-| `FlexOS_Ultra.ino` completo | Compila; auto‑prototipado y cableado verificados |
+| `FlexOS_Ultra.ino` completo | compila; cableado, auto‑prototipado y presupuesto de pila verificados |
+| Los tres perfiles de placa (P4, S3, Pro) | compilan y pasan |
 | Protocolo Flex Link (C++) | 85 comprobaciones, ASan + UBSan |
-| Modelo Flex Phone (C++) | 111 comprobaciones, ASan + UBSan |
-| Transporte del enlace (C++) | 89 comprobaciones, ASan + UBSan |
-| Vectores dorados (C++) | 6 vectores |
-| Núcleo del navegador (C++) | 406 comprobaciones (24 nuevas de fuente) |
-| Iconos del sistema | 19 iconos × 2 estilos × 3 tamaños, ninguno fuera de su caja |
-| Protocolo Android (Kotlin) | `:protocol:test` → 31/31 |
+| **Emparejamiento y sesión (C++)** | **26 comprobaciones**, contra FIPS 180‑4 y RFC 4231 |
+| Modelo Flex Phone (C++) | 111 comprobaciones |
+| **Máquina del enlace (C++)** | **114 comprobaciones**, con un teléfono simulado que habla el protocolo de verdad |
+| Vectores dorados (C++) | 10 vectores |
+| Núcleo del navegador (C++) | 406 comprobaciones |
+| Protocolo Android (Kotlin) | **42/42**, incluidos los vectores compartidos con el firmware |
+| Servicio de render (Node) | 35/35 |
+| SDK de apps (Node) | 10/10 |
+
+Lo que comprueban las pruebas del enlace es sobre todo **lo que se niega a
+hacer**: declararse conectado sin autenticar, emparejar con una sola parte,
+emparejar con un código equivocado, aceptar una notificación sin sesión,
+aceptar tramas repetidas o de otra sesión, conservar el estado de un teléfono
+que ya no está, dejar la clave en memoria después de olvidar, inventarse una
+latencia, y reintentar para siempre.
 
 ### ⚠️ Validado estáticamente, sin ejecutar
 
-**La app Android (`:app`) no se ha podido compilar en este entorno.** No es un
-problema de configuración del proyecto: el repositorio Maven de Google no es
-alcanzable desde aquí, así que el Android Gradle Plugin no se puede descargar.
-
-Comando intentado:
-
-```
-./gradlew :app:assembleDebug
-```
-
-Error real (resumido):
+**El módulo `:app` de Android no se ha podido compilar en este entorno.** No es
+un problema de configuración: el repositorio Maven de Google
+(`dl.google.com`) no es alcanzable desde aquí, así que el Android Gradle Plugin
+no se puede descargar.
 
 ```
-* What went wrong:
-Plugin [id: 'com.android.application', version: '8.5.2'] was not found in any
-of the following sources:
-- Plugin Repositories (could not resolve plugin artifact
-  'com.android.application:com.android.application.gradle.plugin:8.5.2')
-  Searched in the following repositories:
-    Google
-    MavenRepo
+repo1.maven.org  -> alcanzable (por eso :protocol compila y pasa sus 42 pruebas)
+dl.google.com    -> CONNECT rechazado
 ```
 
-Comprobación de red desde el propio entorno:
-
-```
-repo1.maven.org  -> 200
-dl.google.com    -> CONNECT tunnel failed, response 403
-```
-
-Es decir: Maven Central **sí** se alcanza (por eso `:protocol` compila y
-ejecuta sus 31 pruebas) y el Maven de Google **no**. En una máquina con SDK y
-salida a `dl.google.com`, `./gradlew :app:assembleDebug` debería completarse:
-las versiones de Gradle, AGP, Kotlin y Compose están fijadas y son
-compatibles entre sí.
+En una máquina con SDK y salida a `dl.google.com`,
+`./gradlew :app:assembleDebug` debería completarse: las versiones están fijadas
+y son compatibles entre sí.
 
 **Qué queda por verificar de `:app`**: que compila y que el APK se instala. El
-código de protocolo que comparte con el firmware **sí** está verificado, que
-es la parte que más silenciosamente se puede romper.
+código de protocolo que comparte con el firmware **sí** está verificado, que es
+la parte que más silenciosamente se puede romper.
 
 ### ⏳ Pendiente de prueba física
 
 Nada de esto se ha probado sobre hardware, y **no se afirma que funcione**:
 
-1. **BLE por el C6** — todo lo de §2. Hasta que eso esté, el enlace informa
-   `CAP_NONE` y la app lo dice en pantalla.
-2. **Enlace real P4 ↔ Android**: emparejamiento, MTU negociado, notificaciones
-   llegando y respuestas con `RemoteInput` sobre una app real.
-3. **Browser Relay con la pantalla apagada** — medir a **1, 5 y 15 minutos**
-   en el teléfono objetivo, con y sin exclusión del ahorro de batería, y
-   anotar el resultado por fabricante.
-4. **Consumo**: batería del teléfono con el relay activo, y del P4 con el
+1. **Enlace real P4 ↔ Android**: descubrimiento UDP, conexión TCP,
+   emparejamiento con código, reconexión, notificaciones llegando y respuestas
+   con `RemoteInput` sobre una app real.
+2. **El banner dentro de un juego apaisado**: que aparezca arriba, que el juego
+   no se pause, que no cambie la orientación, que no se note en los FPS y que
+   no deje rastro al irse.
+3. **Centro de notificaciones**: el gesto del borde izquierdo contra el scroll
+   de una app, y el del borde derecho contra el de una lista.
+4. **Pantalla apagada** — medir a **1, 5 y 15 minutos**, con y sin exclusión del
+   ahorro de batería, y anotar el resultado **por fabricante**.
+5. **Consumo**: batería del teléfono con el enlace activo, y del P4 con el
    enlace en reposo.
-5. **Fotogramas por segundo reales** del relay sobre Wi‑Fi con páginas
-   distintas.
-6. **Reconexión** tras alejarse y volver, y tras apagar y encender el
-   Bluetooth.
-7. **Multimedia con varias sesiones** activas a la vez.
-8. **«Encontrar mi teléfono»** con el modo No molestar activo (debe respetarlo
-   y quedarse en vibración).
+6. **Latencia real** de una notificación (A55 → P4) sobre Wi‑Fi doméstico.
+7. **Cambio de red**: router reiniciado, IP nueva, Wi‑Fi apagado y encendido.
+8. **BLE por el C6** — todo lo de §2.
+9. **Sin IMU**: que el sistema arranque y siga interactivo con el GY‑BNO085
+   retirado, y que Flex Phone funcione igual. Flex Phone **no toca** el servicio
+   del IMU ni ninguna de sus dependencias.

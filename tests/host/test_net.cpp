@@ -227,6 +227,26 @@ bool brHostGlass(){ return false; }
 bool brHostHosted(){ return false; }
 bool brHostOnline(){ return true; }
 const char* brHostDeviceName(){ return "prueba-transporte"; }
+
+// EL BACKEND ACTIVO. El doble reproduce la regla de verdad: sin
+// servidor configurado NO hay backend, y entonces el navegador tiene
+// que decir por que en vez de intentar conectar a la nada. Es el caso
+// que comprueba "capacidades medidas y motivos legibles".
+bool brHostResolveBackend(char* url, size_t urlN, char* token, size_t tokenN,
+                          const char** why){
+  if(!url || !urlN || !token || !tokenN) return false;
+  url[0] = 0; token[0] = 0;
+  const BrSettings* st = flexBrowserSettings();
+  if(!st || !st->server[0]){
+    if(why) *why = "Falta configurar el servidor en Ajustes";
+    return false;
+  }
+  snprintf(url, urlN, "%s", st->server);
+  snprintf(token, tokenN, "%s", st->token);
+  if(why) *why = NULL;
+  return true;
+}
+
 uint32_t brHostMillis(){ return (uint32_t)millis(); }
 int brHostKeyboardTop(){ return SCRH; }
 static BrTouch g_touch;
