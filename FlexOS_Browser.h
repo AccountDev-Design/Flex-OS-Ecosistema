@@ -718,6 +718,13 @@ const BrStats*    flexBrowserStats();
 uint32_t          flexBrowserCaps();
 int               flexBrowserNetState();
 const BrSettings* flexBrowserSettings();
+// Cambia la FUENTE del navegador y la persiste. Existe porque la app
+// Flex Phone tambien la ofrece: sin esto, elegir "Flex Phone" ahi
+// tendria que replicar el guardado de los ajustes del navegador, y
+// dos copias del mismo guardado se separan tarde o temprano.
+// Un valor fuera de rango se ignora: no se deja BrSettings en un
+// estado que despues nadie sabe interpretar.
+void flexBrowserSetSource(uint8_t src);
 // Motivo legible de una capacidad desactivada ("sin PSRAM", "heap
 // insuficiente", "sin servidor configurado"...). NULL si esta activa.
 const char*       flexBrowserCapReason(uint32_t cap);

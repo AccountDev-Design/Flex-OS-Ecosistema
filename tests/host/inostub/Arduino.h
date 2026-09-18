@@ -63,8 +63,15 @@ private:
 
 class IPAddress {
 public:
-  IPAddress(){}
+  IPAddress(){ o[0]=o[1]=o[2]=o[3]=0; }
+  IPAddress(uint8_t a, uint8_t b, uint8_t c, uint8_t d){ o[0]=a;o[1]=b;o[2]=c;o[3]=d; }
+  // El indexado existe en arduino-esp32 y el descubrimiento de Flex
+  // Phone lo usa para componer la difusion de la subred.
+  uint8_t  operator[](int i) const { return o[i & 3]; }
+  uint8_t& operator[](int i)       { return o[i & 3]; }
   String toString() const { return String("0.0.0.0"); }
+private:
+  uint8_t o[4];
 };
 
 // esp32-hal-ledc / esp32-hal-misc

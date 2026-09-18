@@ -152,6 +152,15 @@ const char* flexBrowserCapReason(uint32_t cap){
 const BrStats*    flexBrowserStats(){ return &gStats; }
 const BrSettings* flexBrowserSettings(){ return &gSt; }
 
+static void brSaveSettings();      // definido mas abajo, junto a brLoadSettings
+
+void flexBrowserSetSource(uint8_t src){
+  if(src >= BRSRC_N) return;
+  if(gSt.source == src) return;    // no se escribe NVS sin necesidad
+  gSt.source = src;
+  brSaveSettings();
+}
+
 static void brMeasure(){
   gStats.freeHeap  = (uint32_t)brHostFreeHeap();
   gStats.freePsram = (uint32_t)brHostFreePsram();
@@ -3120,6 +3129,7 @@ const BrStats* flexBrowserStats(){ static BrStats s; return &s; }
 uint32_t flexBrowserCaps(){ return 0; }
 int flexBrowserNetState(){ return BRN_OFF; }
 const BrSettings* flexBrowserSettings(){ static BrSettings s; return &s; }
+void flexBrowserSetSource(uint8_t){}
 const char* flexBrowserCapReason(uint32_t){ return "Navegador desactivado en este build"; }
 void flexBrowserFlushPersist(bool){}
 void flexBrowserClearData(uint32_t){}

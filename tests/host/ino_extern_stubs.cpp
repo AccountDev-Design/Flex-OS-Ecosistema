@@ -92,6 +92,15 @@ const BrSettings* flexBrowserSettings(){
   return &gStubBrSettings;
 }
 
+// El doble SI guarda la fuente: la seccion Navegador de Flex Phone la
+// cambia, y un doble que ignorara el cambio haria pasar la compilacion
+// de algo que en la placa no seleccionaria nada.
+void flexBrowserSetSource(uint8_t src){
+  if(src >= BRSRC_N) return;
+  if(!gStubBrSettingsInit){ flexBrSettingsDefaults(&gStubBrSettings); gStubBrSettingsInit = true; }
+  gStubBrSettings.source = src;
+}
+
 void flexBrowserBegin(){}
 void flexBrowserEnter(){}
 void flexBrowserTick(){}

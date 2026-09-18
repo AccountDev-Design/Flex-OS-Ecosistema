@@ -29,6 +29,7 @@ public:
   bool disconnect(bool a=false, bool b=false){ (void)a;(void)b; return true; }
   wl_status_t status(){ return WL_DISCONNECTED; }
   IPAddress localIP(){ return IPAddress(); }
+  IPAddress subnetMask(){ return IPAddress(); }
   String SSID(){ return String(""); }
   String SSID(int){ return String(""); }
   int RSSI(){ return -70; }
