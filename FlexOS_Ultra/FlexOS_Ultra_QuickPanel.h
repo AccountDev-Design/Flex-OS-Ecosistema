@@ -72,6 +72,13 @@ static bool qsDragging = false;  // hay un gesto de cortina en curso
 static bool qsPower    = false;  // Ahorro Ultra (frecuencia REAL de la CPU)
 
 #define QS_EDGE_H        30              // franja del borde superior que captura el gesto
+// Borde DERECHO: la otra forma de abrir el panel (izquierda ->
+// notificaciones, derecha -> controles). La franja es mas ancha que la
+// de arriba porque el pulgar entra en diagonal, y hace falta recorrer
+// QS_EDGE_SLOP hacia dentro para que el gesto cuente: asi un
+// desplazamiento vertical que nazca cerca del borde no abre nada.
+#define QS_EDGE_W        26
+#define QS_EDGE_SLOP     28
 #define QS_OPEN_PCT      40              // al soltar: >=40% del recorrido -> abrir; si no, cerrar
 #define QS_SHADOW_H      18              // alto de la sombra bajo el borde movil
 #define QS_HANDLE_MARGIN 22              // margen por encima del borde donde vive el asa
@@ -123,6 +130,11 @@ enum {
   // usuario. Los dos solo aparecen si el codec de audio contesta de
   // verdad (ver qpAvAudio): sin altavoz no hay control de volumen.
   QSID_VOLUME, QSID_MUTE,
+  // No molestar. Tambien al final, por la misma razon. Es un estado
+  // REAL del sistema (ver FlexOS_Ultra_PhoneOverlay.h): con el
+  // activado no sale el banner, no suena y no vibra -- pero la
+  // notificacion se sigue guardando en el Centro.
+  QSID_DND,
   QSID_COUNT
 };
 
@@ -250,6 +262,25 @@ static void qpTapNtp(){ ntpRequestSync(true); }
 // ni en el panel ni en el catalogo. Un deslizador de volumen que no
 // mueve nada es peor que no tener deslizador.
 static bool qpAvAudio(){ return flexAudioAvailable(); }
+
+// NO MOLESTAR. El estado vive en FlexOS_Ultra_PhoneOverlay.h, que se
+// incluye despues; estas tres son el unico puente y por eso se
+// declaran aqui y se definen alli.
+static bool qpStDnd();
+static void qpTapDnd();
+static void qpSubDnd(char* o, size_t n);
+// Siempre disponible: no depende de ningun hardware. Es una politica
+// del sistema, no un periferico.
+static bool qpAvDnd(){ return true; }
+// Campana tachada. Se dibuja, no es un glifo de fuente: asi escala
+// limpio en los dos tamanos de casilla.
+static void qpIcoDnd(int cx, int cy, int s, uint16_t col){
+  const float r = s * 0.30f;
+  fillCircleAA(cx, cy - r * 0.15f, r * 0.72f, col);
+  fillRect(cx - (int)(r * 0.95f), cy + (int)(r * 0.45f), (int)(r * 1.9f), 2, col);
+  fillCircleAA(cx, cy + r * 0.85f, r * 0.22f, col);
+  strokeSegAA(cx - r, cy - r, cx + r, cy + r, 2.4f, col);
+}
 static bool qpStMute(){ return flexAudioMuted(); }
 static void qpTapMute(){ flexAudioSetMuted(!flexAudioMuted()); }
 static void qpTapVolume(){}                        // el slider se atiende aparte
@@ -523,6 +554,8 @@ static const QsCtl QS_REG[QSID_COUNT] = {
     qpAvAudio,  NULL,         qpTapVolume,   qpTapSettings, qpSubVolume,   qpIcoSpeaker },
   { QSID_MUTE,      "Silencio",   "Silenciar",              QT_TOGGLE, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SYSTEM,
     qpAvAudio,  qpStMute,     qpTapMute,     qpTapSettings, qpSubMute,     qpIcoMute },
+  { QSID_DND,       "No molestar", "No molestar",           QT_TOGGLE, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SYSTEM,
+    qpAvDnd,    qpStDnd,      qpTapDnd,      qpTapSettings, qpSubDnd,      qpIcoDnd },
 };
 
 // Acceso seguro: un id fuera de rango devuelve NULL en vez de leer basura.
@@ -572,7 +605,10 @@ static bool qpNextSize(int id, int w, int h, int dir, uint8_t &nw, uint8_t &nh){
 // Arrays FIJOS y estructura compacta: sin String, sin heap y sin nada que
 // se asigne por cuadro. El blob tiene tamano FIJO y se valida entero al
 // cargar (igual que homeWgDeserialize).
-#define QP_CFG_VER    1
+// v2: entra QSID_DND. Subir la version es lo que hace que qpAdoptNew()
+// ofrezca el control nuevo SIN tocar la disposicion que el usuario ya
+// tenia guardada.
+#define QP_CFG_VER    2
 #define QP_MAX_ITEMS  24
 #define QP_BLOB_N     (4 + QP_MAX_ITEMS * 5)      // cabecera + 5 bytes por elemento
 #define QP_NVS_NS     "flexqs"                    // namespace PROPIO: no colisiona con "flexos"
@@ -602,6 +638,7 @@ static const QpDef QP_FACTORY[] = {
   { QSID_GLASS,     1, 1 },
   { QSID_CRONO,     1, 1 },
   { QSID_NTP,       1, 1 },
+  { QSID_DND,       1, 1 },
   { QSID_LOCK,      1, 1 },
   { QSID_FILES,     1, 1 },
   { QSID_CAMERA,    1, 1 },

@@ -114,6 +114,14 @@ enum {
 #define FPH_NVS_NAME       "bondname"
 #define FPH_NVS_SELF       "selfid"
 
+// El overlay del sistema (Centro de notificaciones y banner) vive en
+// FlexOS_Ultra_PhoneOverlay.h, que se incluye DESPUES de este puente
+// porque necesita su modelo. Estas dos son las unicas llamadas en el
+// sentido contrario, y por eso van declaradas aqui arriba: las usa
+// flexPhoneBegin/flexPhoneTick, que estan mas abajo.
+static void flexPhoneOverlayBegin();
+static void flexPhoneOverlayNotify();
+
 static void fphToastShow(const char* msg){
   flexLinkUtf8Copy(fphToast, sizeof(fphToast), msg ? msg : "");
   fphToastUntil = millis() + 2800;
@@ -240,6 +248,7 @@ static void flexPhoneBegin(){
   fphLoad();
   { Preferences p;
     if(p.begin(FPH_NVS_NS, true)){ fphAutoLink = p.getBool(FPH_NVS_AUTO, false); p.end(); } }
+  flexPhoneOverlayBegin();     // No molestar: se lee el estado guardado
   // Aunque este marcado, NO se arranca aqui: en el arranque todavia
   // no hay Wi-Fi y la tarea se pasaria el rato esperando. Lo levanta
   // flexPhoneTick en cuanto la red este de verdad arriba.
@@ -270,6 +279,10 @@ static void flexPhoneTick(){
   // usuario emparejando otra vez sin entender por que.
   if(!hadBond && flexPhoneLinkBonded(&fphLink)) fphBondSave();
   if(!wasReady && flexPhoneLinkReady(&fphLink)) fphDirtyUi = true;
+  // Una notificacion nueva levanta el banner. La notificacion se
+  // guarda SIEMPRE; lo que decide No molestar es solo si ademas se
+  // presenta. Silenciar no es tirar.
+  flexPhoneOverlayNotify();
   fphSave(false);                        // agrupada: casi siempre no hace nada
 }
 
@@ -299,6 +312,7 @@ static bool fphCapOn(uint16_t bit){
 // Aleatoriedad para el emparejamiento. El nucleo no depende de
 // Arduino: se le pasa la fuente desde aqui.
 static uint32_t fphRandom(){ return esp_random(); }
+
 
 // -------------------------------------------------------------
 //  EL NAVEGADOR, VISTO DESDE FLEX PHONE

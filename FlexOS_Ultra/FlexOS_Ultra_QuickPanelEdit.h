@@ -518,7 +518,34 @@ static bool qsGlobalHandle(){
     return true;
   }
   if(qsPanelY > 0 || qsDragging) return qsHandle();
-  if(!(T.pressed && T.startY < QS_EDGE_H)) return false;
+  // #############################################################
+  // ##  POR DONDE SE ABRE LA CORTINA
+  // ##  ------------------------------------------------------
+  // ##  Dos bordes, no uno:
+  // ##
+  // ##    · el SUPERIOR, el de siempre;
+  // ##    · el DERECHO, que es el que pide el diseno del
+  // ##      ecosistema -- izquierda notificaciones, derecha
+  // ##      controles.
+  // ##
+  // ##  El superior se conserva a proposito: retirarlo cambiaria
+  // ##  un gesto que la gente ya tiene aprendido, y no hace falta
+  // ##  para anadir el otro.
+  // ##
+  // ##  EL GESTO DEL BORDE DERECHO EXIGE INTENCION. No basta con
+  // ##  nacer en la franja: hace falta que el dedo se haya movido
+  // ##  hacia la izquierda mas de lo que se ha movido en vertical.
+  // ##  Sin esa comprobacion, un desplazamiento vertical que
+  // ##  empiece cerca del borde derecho -- dentro de una lista,
+  // ##  dentro de un juego -- abriria el panel por accidente, que
+  // ##  es exactamente lo que no puede pasar.
+  // #############################################################
+  const bool fromTop   = T.pressed && T.startY < QS_EDGE_H;
+  const bool fromRight = T.pressed && T.startX > SCR_W - QS_EDGE_W &&
+                         T.startY > QS_EDGE_H &&
+                         (T.startX - T.x) > QS_EDGE_SLOP &&
+                         (T.startX - T.x) > abs(T.y - T.startY);
+  if(!fromTop && !fromRight) return false;
   if(gState == ST_APP){
     if(!qsCaptureApp()) return false;              // sin PSRAM: la app conserva el gesto
   } else if(qsOverApp){
@@ -541,5 +568,10 @@ static bool qsGlobalHandle(){
   qsDragBase = qsPanelY; qsDragY0 = T.y; qsPosF = (float)qsPanelY;
   qsPrevY = T.y; qsPrevMs = millis(); qsVel = 0;
   qpG = QG_CURTAIN;
+  // Desde el borde DERECHO el gesto ya ha reconocido su intencion y
+  // el panel se abre solo, con la misma animacion que el remate del
+  // arrastre. Seguir el dedo 1:1 aqui no tendria sentido: el dedo se
+  // mueve en horizontal y la cortina viaja en vertical.
+  if(fromRight){ qsDragging = false; qsAnimTo(SCR_H); }
   return true;
 }

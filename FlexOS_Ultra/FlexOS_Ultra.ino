@@ -313,6 +313,11 @@
 // "Navegador" de Flex Phone lee flexBrowserSettings() y resuelve la
 // fuente con la misma funcion que usa el propio navegador.
 #include "FlexOS_FlexPhone_Bridge.h"
+// CENTRO DE NOTIFICACIONES, BANNER FLOTANTE Y NO MOLESTAR. Va DESPUES
+// del puente de Flex Phone porque lee su modelo y reutiliza sus
+// componentes de interfaz; y es un overlay del SISTEMA, no una
+// pantalla de la app: se ve estes donde estes, juegos incluidos.
+#include "FlexOS_FlexPhone_Overlay.h"
 
 // Adaptadores de ciclo de vida para modulos cuyo estado interno ya es propio.
 // Suspender no destruye pestañas ni descargas; cerrar la tarjeta si libera todo.
@@ -683,6 +688,9 @@ void loop(){
   suspFadeTick();         // SUSPENSION/APAGADO: un paso del fundido de backlight (no bloqueante)
   autoLockTick();         // FASE 1: bloqueo por inactividad (lee T sin filtrar, antes de que nadie consuma el toque)
   cronoOverlayTouch();    // CRONOMETRO: la capsula y su tarjeta se quedan el toque antes que la isla
+  fpbTouch();             // banner de Flex Phone: se queda el toque SOLO si el dedo
+                          // cae dentro de su tarjeta. Fuera de ahi, la app de debajo
+                          // sigue recibiendolo con normalidad -- el banner no es modal.
   notifHandleTouch();     // la isla intercepta toques dentro de sus tarjetas (Fase 1)
   flexOtaTouchBridge();   // OTA: si hay overlay visible, se queda el toque antes que nadie
   imuServiceTick();       // Flex IMU Service: mueve el GY-BNO085 mientras alguien lo tenga
@@ -777,6 +785,26 @@ void loop(){
   //  En Modo PC / DeX horizontal qsCanOpen() devuelve false y esto
   //  no hace nada (ver la cabecera del panel).
   // -----------------------------------------------------------
+  // -----------------------------------------------------------
+  //  CENTRO DE NOTIFICACIONES  ·  borde IZQUIERDO
+  //  ---------------------------------------------------------
+  //  Mismo patron que la cortina y por el mismo motivo: si el gesto
+  //  entra por el borde izquierdo, el Centro se queda el toque
+  //  ENTERO y la pantalla de debajo no llega a verlo.
+  //
+  //  Va ANTES de la cortina porque cada uno vive en un borde
+  //  distinto -- izquierdo aqui, superior y derecho alli -- y el
+  //  orden solo decide quien pregunta primero, no quien gana: los
+  //  dos comprueban DONDE NACIO el gesto antes de quedarselo.
+  // -----------------------------------------------------------
+  if(fpcGlobalHandle()){
+    kioskTick();
+    notifTick();            // no dibuja, pero contabiliza la pausa
+    flexOtaRender();
+    delay(loopPaceMs());
+    return;
+  }
+
   if(qsGlobalHandle()){
     kioskTick();
     uiTick();               // anima la cortina (apertura, cierre y destello)
@@ -911,6 +939,9 @@ void loop(){
   }
   uiTick();               // animacion continua del vidrio
   notifTick();            // isla dinamica: anima y compone sobre la pantalla activa (Fase 1)
+  fpbTick();              // banner de Flex Phone: compone su banda DESPUES de que la
+                          // pantalla de debajo haya dibujado, asi que siempre queda
+                          // encima y no parpadea. Sin nada en cola sale en su primera linea.
   cronoCapsuleTick();     // CRONOMETRO: capsula de la barra (solo repinta al cambiar el segundo)
   flexOtaRender();        // OTA: ULTIMA capa del pipeline grafico (nunca toca el fb de una app)
   delay(loopPaceMs());
