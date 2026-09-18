@@ -17,12 +17,14 @@
 // ##    - Validacion de TODOS los tamanos antes de copiar.
 // ##
 // ##  Lo que este modulo NO hace (a proposito):
-// ##    - No cifra. El emparejamiento y el cifrado del enlace los
-// ##      da el bonding BLE (LE Secure Connections) mas la clave
-// ##      de sesion que negocia FlexOS_FlexPhone_Link. Aqui solo
-// ##      se transporta y se valida.
-// ##    - No envia frames del navegador. BLE es control; los
-// ##      frames van por Wi-Fi (ver FLEX-PHONE.md).
+// ##    - No cifra NI autentica. Quien decide si un extremo puede
+// ##      abrir sesion es FlexOS_FlexAuth + FlexOS_FlexPhone_Link;
+// ##      aqui solo se transporta y se valida el formato. Sobre la
+// ##      red local la carga viaja EN CLARO, y la interfaz lo dice.
+// ##    - No sabe por donde viaja. Wi-Fi hoy, BLE el dia que el C6
+// ##      pueda darlo: eso lo decide FlexOS_FlexPhone_Transport.
+// ##    - No envia frames del navegador. Este enlace es CONTROL;
+// ##      los frames van por su propio socket (ver FLEX-PHONE.md).
 // #############################################################
 #pragma once
 #include <stdint.h>
@@ -34,14 +36,30 @@
 // que la suya responde FLNK_T_ERR con FLNK_E_VERSION y NO intenta
 // interpretar la carga: asi una version futura nunca hace que un
 // dispositivo viejo lea campos que no entiende.
-#define FLNK_VERSION      1
-#define FLNK_VERSION_MIN  1      // la mas antigua que este extremo acepta
+//
+// v2 (actual): el enlace pasa de BLE a Wi-Fi. BLE autenticaba y
+// cifraba por debajo con su bonding; un socket TCP en la red local
+// no hace nada de eso, asi que v2 anade un apreton de manos con
+// clave (FLNK_T_AUTH_*) y una negociacion de capacidades
+// (FLNK_T_CAPS). Un extremo v1 no sabe demostrar que tiene la
+// clave, y por eso v2 NO lo acepta: seria abrir sesion a quien no
+// puede probar que emparejo. Que el rechazo sea por version hace
+// que el usuario lea "actualiza la app" en vez de un fallo mudo.
+#define FLNK_VERSION      2
+#define FLNK_VERSION_MIN  2      // la mas antigua que este extremo acepta
 
 // ---- Limites de tamano (ESTRICTOS) ----------------------------
 // FLNK_MAX_FRAME es lo que cabe en una notificacion GATT con el MTU
 // que se negocia de verdad (247 - 3 de cabecera ATT = 244). Si el
 // MTU real es menor, flexLinkFragment() lo respeta: nunca se emite
 // una trama mayor que el MTU negociado.
+//
+// Sobre Wi-Fi cabria mucho mas, y AUN ASI se conserva el mismo
+// tope. Subirlo por Wi-Fi obligaria a que los dos extremos llevaran
+// buffers distintos segun el transporte, y el unico premio serian
+// menos fragmentos en mensajes que ya caben en uno o dos. El limite
+// que importa es el del MENSAJE reensamblado (FLNK_MAX_MESSAGE), y
+// ese no lo toca el transporte.
 #define FLNK_HDR_SIZE     18
 #define FLNK_MAX_FRAME    244
 #define FLNK_MIN_FRAME    FLNK_HDR_SIZE
@@ -68,10 +86,16 @@ enum {
   FLNK_T_BYE          = 0x05,  // desconexion limpia
   FLNK_T_ACK          = 0x06,
   FLNK_T_ERR          = 0x07,
+  // -- autenticacion de sesion (v2) --
+  // Reto-respuesta MUTUO sobre la clave del vinculo. Ver
+  // FlexOS_FlexAuth.h: la clave no viaja, solo las pruebas.
+  FLNK_T_AUTH_CHALLENGE = 0x08,  // Flex OS -> telefono: reto + sesion
+  FLNK_T_AUTH_RESPONSE  = 0x09,  // telefono -> Flex OS: su prueba
+  FLNK_T_AUTH_OK        = 0x0A,  // Flex OS -> telefono: prueba de Flex OS
   // -- emparejamiento --
-  FLNK_T_PAIR_REQ     = 0x10,  // telefono pide emparejar
-  FLNK_T_PAIR_CODE    = 0x11,  // Flex OS -> telefono: muestro este codigo
-  FLNK_T_PAIR_CONFIRM = 0x12,  // ambos confirman
+  FLNK_T_PAIR_REQ     = 0x10,  // telefono pide emparejar (lleva su id)
+  FLNK_T_PAIR_CODE    = 0x11,  // Flex OS -> telefono: sal + id (el CODIGO no)
+  FLNK_T_PAIR_CONFIRM = 0x12,  // telefono -> Flex OS: prueba de la clave
   FLNK_T_UNPAIR       = 0x13,  // olvidar y borrar claves
   // -- notificaciones --
   FLNK_T_NOTIF_ADD    = 0x20,
@@ -88,6 +112,10 @@ enum {
   FLNK_T_TIME_SYNC    = 0x41,
   FLNK_T_FIND_START   = 0x42,
   FLNK_T_FIND_STOP    = 0x43,
+  // -- capacidades (v2) --
+  // El telefono declara QUE puede hacer de verdad. Flex OS solo
+  // ensena las funciones que estan en este mapa.
+  FLNK_T_CAPS         = 0x44,
   // -- multimedia --
   FLNK_T_MEDIA_STATE  = 0x50,
   FLNK_T_MEDIA_CMD    = 0x51,
@@ -111,6 +139,7 @@ enum {
   FLNK_E_DENIED    = 9,   // permiso revocado en Android
   FLNK_E_BUSY      = 10,
   FLNK_E_INTERNAL  = 11,
+  FLNK_E_AUTH      = 12,  // la prueba de la clave no cuadra
 };
 const char* flexLinkErrName(uint8_t code);
 

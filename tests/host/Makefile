@@ -52,7 +52,7 @@ JPEG_SRC := $(ROOT)/FlexOS_JPEG.cpp
 APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net \
-        $(BUILD)/test_passcode $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
+        $(BUILD)/test_passcode $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexauth $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
         $(BUILD)/test_media $(BUILD)/test_mem $(BUILD)/test_fall $(BUILD)/test_theft $(BUILD)/test_imu \
         $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun
@@ -193,6 +193,13 @@ $(BUILD)/flexapprun: flexapprun.cpp pkgbuild.h $(HOSTSRC) $(VMSRC) $(GRANTSRC) |
 # reensamblador no puede quedarse en "parece que funciona".
 FLNKSRC := $(ULTRA)/FlexOS_FlexLink.cpp
 FLPSRC  := $(ULTRA)/FlexOS_FlexPhone.cpp
+# Emparejamiento y sesion: SHA-256 y HMAC en C puro. Estan aqui, y no
+# detras de mbedtls, para que el MISMO codigo que autentica en la placa
+# se pueda ejecutar y comprobar en el PC contra los vectores del RFC.
+FLAUTH  := $(ULTRA)/FlexOS_FlexAuth.cpp
+# La interfaz del transporte y su cola de tramas. Nucleo puro: el
+# enlace ya no sabe si debajo hay un socket o una radio.
+FLPTR   := $(ULTRA)/FlexOS_FlexPhone_Transport.cpp
 
 $(BUILD)/test_flexlink: test_flexlink.cpp $(FLNKSRC) $(ULTRA)/FlexOS_FlexLink.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_flexlink.cpp $(FLNKSRC)
@@ -201,19 +208,25 @@ $(BUILD)/test_flexphone: test_flexphone.cpp $(FLPSRC) $(FLNKSRC) \
                          $(ULTRA)/FlexOS_FlexPhone.h $(ULTRA)/FlexOS_FlexLink.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_flexphone.cpp $(FLPSRC) $(FLNKSRC)
 
+# Emparejamiento y sesion. Los vectores de SHA-256 y HMAC-SHA256 son
+# los del FIPS 180-4 y el RFC 4231: si alguien toca la derivacion, la
+# bateria falla antes de que nadie flashee nada.
+$(BUILD)/test_flexauth: test_flexauth.cpp $(FLAUTH) $(ULTRA)/FlexOS_FlexAuth.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -o $@ test_flexauth.cpp $(FLAUTH)
+
 # El transporte: maquina de estados del enlace. En el PC la capacidad
 # es NONE (no hay radio), igual que en el P4 sin el C6 preparado, asi
 # que la prueba fuerza la capacidad para poder ejercitarla entera.
 FLPLINK := $(ULTRA)/FlexOS_FlexPhone_Link.cpp
-$(BUILD)/test_flexlink_transport: test_flexlink_transport.cpp $(FLPLINK) $(FLPSRC) $(FLNKSRC) \
-                         $(ULTRA)/FlexOS_FlexPhone_Link.h | $(BUILD)
-	$(CXX) $(COMMON) $(SAN) -o $@ test_flexlink_transport.cpp $(FLPLINK) $(FLPSRC) $(FLNKSRC)
+$(BUILD)/test_flexlink_transport: test_flexlink_transport.cpp $(FLPLINK) $(FLPSRC) $(FLNKSRC) $(FLAUTH) $(FLPTR) \
+                         $(ULTRA)/FlexOS_FlexPhone_Link.h $(ULTRA)/FlexOS_FlexPhone_Transport.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -o $@ test_flexlink_transport.cpp $(FLPLINK) $(FLPSRC) $(FLNKSRC) $(FLAUTH) $(FLPTR)
 
 # VECTORES DORADOS. Fijan los bytes exactos del protocolo para que el
 # firmware y la app Android no puedan divergir en silencio: el mismo
 # vector esta en FlexLinkTest.kt. Ver la cabecera del .cpp.
-$(BUILD)/test_flexlink_vectors: test_flexlink_vectors.cpp $(FLPSRC) $(FLNKSRC) | $(BUILD)
-	$(CXX) $(COMMON) $(SAN) -o $@ test_flexlink_vectors.cpp $(FLPSRC) $(FLNKSRC)
+$(BUILD)/test_flexlink_vectors: test_flexlink_vectors.cpp $(FLPSRC) $(FLNKSRC) $(FLAUTH) | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -o $@ test_flexlink_vectors.cpp $(FLPSRC) $(FLNKSRC) $(FLAUTH)
 
 # El motor meteorologico: mismo patron que la boveda -- su propia NVS en
 # memoria (wxstub), porque aqui SI hay que releer lo que se escribio (la cache
@@ -337,7 +350,7 @@ ino: ino_compile.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) $(BNO_SRC) $(FS_SRC)
 # del runtime se enlaza contra lo que de verdad va a la placa. Un cambio de
 # firma o una llamada mal cableada salta aqui.
 $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) $(JPEG_SRC) \
-                   $(FLNKSRC) $(FLPSRC) $(FLPLINK) $(CORE_SRC) $(MEDIA_SRC) $(MEM_SRC) $(FALL_SRC) $(THEFT_SRC) \
+                   $(FLNKSRC) $(FLPSRC) $(FLPLINK) $(FLAUTH) $(FLPTR) $(CORE_SRC) $(MEDIA_SRC) $(MEM_SRC) $(FALL_SRC) $(THEFT_SRC) \
                    $(VMSRC) $(GRANTSRC) $(HOSTSRC) $(PKGCORE) $(PASSSRC) | $(BUILD)
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -x c++ -c ino_compile.cpp -o $(BUILD)/ino_compile.o
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -c ino_extern_stubs.cpp -o $(BUILD)/ino_extern_stubs.o
@@ -345,6 +358,8 @@ $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) 
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(FLNKSRC) -o $(BUILD)/ino_flexlink.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(FLPSRC)  -o $(BUILD)/ino_flexphone.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(FLPLINK) -o $(BUILD)/ino_flexphonelink.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(FLAUTH)  -o $(BUILD)/ino_flexauth.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(FLPTR)   -o $(BUILD)/ino_flexphonetr.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(CORE_SRC) -o $(BUILD)/ino_brcore.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(MEDIA_SRC) -o $(BUILD)/ino_media.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(MEM_SRC)   -o $(BUILD)/ino_mem.o
@@ -358,6 +373,7 @@ $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) 
 	@$(CC) -O1 -g -w -Ivendor/cJSON -c $(CJSON) -o $(BUILD)/ino_cjson.o
 	@$(CXX) $(SAN) -o $@ $(BUILD)/ino_compile.o $(BUILD)/ino_extern_stubs.o $(BUILD)/ino_jpeg.o \
 	        $(BUILD)/ino_flexlink.o $(BUILD)/ino_flexphone.o $(BUILD)/ino_flexphonelink.o \
+	        $(BUILD)/ino_flexauth.o $(BUILD)/ino_flexphonetr.o \
 	        $(BUILD)/ino_brcore.o $(BUILD)/ino_media.o $(BUILD)/ino_mem.o $(BUILD)/ino_fall.o \
 	        $(BUILD)/ino_theft.o $(BUILD)/ino_passcode.o \
 	        $(BUILD)/ino_appvm.o $(BUILD)/ino_appgrant.o $(BUILD)/ino_apphost.o \
@@ -377,6 +393,7 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_flexlink
 	@echo
 	@$(BUILD)/test_flexphone
+	@$(BUILD)/test_flexauth
 	@echo
 	@$(BUILD)/test_flexlink_transport
 	@echo

@@ -28,6 +28,10 @@ void flexPhoneModelClear(FlexPhoneModel* m, bool wipeDrafts){
   memset(&m->phone, 0, sizeof(m->phone));
   memset(&m->media, 0, sizeof(m->media));
   memset(&m->relay, 0, sizeof(m->relay));
+  // Las capacidades TAMBIEN dejan de ser ciertas al irse el telefono:
+  // conservarlas haria que la interfaz siguiera ofreciendo funciones
+  // de un dispositivo que ya no esta.
+  memset(&m->caps, 0, sizeof(m->caps));
   m->phone.battery = 255;
   m->notifCount = 0;
   m->lastSyncMs = 0;
@@ -411,11 +415,97 @@ bool flexPhoneDecPhoneState(const uint8_t* in, size_t n, FlexPhoneState* out){
   s.charging = (flags & 0x01) != 0;
   s.net = flexLinkRdU8(&r);
   if(!flexLinkRdOk(&r)) return false;
+  // A partir de aqui los campos son OPCIONALES. Se leen sobre una
+  // COPIA del lector: si el mensaje viene de un extremo que no los
+  // manda, el lector marca desbordamiento y se descarta el bloque
+  // entero sin perder lo que ya estaba bien leido. Asi anadir campos
+  // al final no rompe a quien todavia no los envia.
+  {
+    FlexLinkRd x = r;
+    const uint32_t sf = flexLinkRdU32(&x);
+    const uint32_t st = flexLinkRdU32(&x);
+    const uint32_t rf = flexLinkRdU32(&x);
+    const uint32_t rt = flexLinkRdU32(&x);
+    const uint8_t  fl2 = flexLinkRdU8(&x);
+    if(flexLinkRdOk(&x)){
+      // Un "libre" mayor que el "total" no puede ser cierto: se
+      // descarta el par entero en vez de pintar 300 % de disco libre.
+      if(sf <= st){ s.storageFreeMb = sf; s.storageTotalMb = st; }
+      if(rf <= rt){ s.ramFreeMb = rf; s.ramTotalMb = rt; }
+      s.powerSave = (fl2 & 0x01) != 0;
+    }
+  }
   if(s.battery > 100 && s.battery != 255) s.battery = 255;   // desconocido
   if(s.net > FLP_NET_MOBILE) s.net = FLP_NET_UNKNOWN;
   s.valid = true;
   *out = s;
   return true;
+}
+
+// =============================================================
+//  Capacidades
+// =============================================================
+const char* flexPhoneCapName(uint16_t bit){
+  switch(bit){
+    case FLP_CAP_NOTIF: return "Notificaciones";
+    case FLP_CAP_REPLY: return "Respuestas";
+    case FLP_CAP_MEDIA: return "Multimedia";
+    case FLP_CAP_RELAY: return "Servidor del navegador";
+    case FLP_CAP_FIND:  return "Encontrar mi telefono";
+    case FLP_CAP_STATE: return "Estado del dispositivo";
+    case FLP_CAP_TIME:  return "Hora";
+    case FLP_CAP_BLE:   return "Bluetooth LE";
+    default:            return "(desconocida)";
+  }
+}
+
+const char* flexPhoneCapWhyNot(uint16_t supported, uint16_t granted, uint16_t bit){
+  if(granted & bit) return NULL;              // esta disponible: no hay motivo
+  if(!(supported & bit)) return "No disponible en este telefono";
+  // El telefono PUEDE, pero ahora mismo no. El motivo concreto lo
+  // sabe Android, no Flex OS; lo util aqui es decir donde mirar.
+  switch(bit){
+    case FLP_CAP_NOTIF: return "Falta el acceso a notificaciones en el telefono";
+    case FLP_CAP_REPLY: return "Depende de cada notificacion";
+    case FLP_CAP_MEDIA: return "Sin reproductor activo en el telefono";
+    case FLP_CAP_RELAY: return "El servidor no esta activo en la app";
+    case FLP_CAP_BLE:   return "No se usa: el enlace va por Wi-Fi";
+    default:            return "Desactivado en la app del telefono";
+  }
+}
+
+// FLNK_T_CAPS: u16 supported · u16 granted · u8 protoVer ·
+//              str modelo · str fabricante · str version de Android
+bool flexPhoneDecCaps(const uint8_t* in, size_t n, FlexPhoneCaps* out){
+  if(!in || !out) return false;
+  FlexPhoneCaps c; memset(&c, 0, sizeof(c));
+  FlexLinkRd r; flexLinkRdInit(&r, in, n);
+  c.supported = flexLinkRdU16(&r);
+  c.granted   = flexLinkRdU16(&r);
+  c.protoVer  = flexLinkRdU8(&r);
+  flexLinkRdStr(&r, c.model,  FLP_DEVNAME_MAX);
+  flexLinkRdStr(&r, c.vendor, FLP_VENDOR_MAX);
+  flexLinkRdStr(&r, c.osver,  FLP_OSVER_MAX);
+  if(!flexLinkRdOk(&r)) return false;
+  // Conceder lo que no se soporta es imposible. Se recorta en vez de
+  // creerselo: un telefono (o algo que se haga pasar por uno) no
+  // puede habilitar una funcion diciendo que la tiene concedida.
+  c.granted &= c.supported;
+  c.valid = true;
+  *out = c;
+  return true;
+}
+
+int flexPhoneEncCaps(uint8_t* out, size_t outN, const FlexPhoneCaps* c){
+  if(!out || !c) return -1;
+  FlexLinkWr w; flexLinkWrInit(&w, out, outN);
+  flexLinkWrU16(&w, c->supported);
+  flexLinkWrU16(&w, (uint16_t)(c->granted & c->supported));
+  flexLinkWrU8 (&w, c->protoVer);
+  flexLinkWrStr(&w, c->model,  FLP_DEVNAME_MAX - 1);
+  flexLinkWrStr(&w, c->vendor, FLP_VENDOR_MAX - 1);
+  flexLinkWrStr(&w, c->osver,  FLP_OSVER_MAX - 1);
+  return flexLinkWrOk(&w) ? (int)w.at : -1;
 }
 
 // FLNK_T_MEDIA_STATE: str titulo · str artista · str app · u8 estado

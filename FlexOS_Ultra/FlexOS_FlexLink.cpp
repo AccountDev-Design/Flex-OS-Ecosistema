@@ -28,6 +28,7 @@ const char* flexLinkErrName(uint8_t code){
     case FLNK_E_GONE:      return "la notificacion ya no existe";
     case FLNK_E_DENIED:    return "permiso denegado en el telefono";
     case FLNK_E_BUSY:      return "ocupado";
+    case FLNK_E_AUTH:      return "la autenticacion no cuadra";
     default:               return "error interno";
   }
 }

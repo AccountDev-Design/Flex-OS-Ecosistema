@@ -21,6 +21,7 @@
 
 #include "../../FlexOS_Ultra/FlexOS_FlexLink.h"
 #include "../../FlexOS_Ultra/FlexOS_FlexPhone.h"
+#include "../../FlexOS_Ultra/FlexOS_FlexAuth.h"
 #include <cstdio>
 #include <cstring>
 
@@ -56,14 +57,14 @@ int main(){
   // -- 1) PING sin carga: solo cabecera --
   h.type = FLNK_T_PING;
   int n = flexLinkWriteFrame(f, sizeof(f), &h, NULL, 0);
-  vec("PING vacio", f, (size_t)n, "F1580103341207000001000001000000EEA7");
+  vec("PING vacio", f, (size_t)n, "F15802033412070000010000010000004D2A");
 
   // -- 2) Trama con carga ASCII --
   h.type = FLNK_T_NOTIF_ADD;
   const char* body = "hola flex";
   n = flexLinkWriteFrame(f, sizeof(f), &h, (const uint8_t*)body, std::strlen(body));
   vec("NOTIF_ADD 'hola flex'", f, (size_t)n,
-      "F15801203412070000010900010000006DFF686F6C6120666C6578");
+      "F15802203412070000010900010000007050686F6C6120666C6578");
 
   // -- 3) CRC16-CCITT: vectores clasicos --
   g_run++;
@@ -101,6 +102,43 @@ int main(){
      back.actionCount != 2 || std::strcmp(back.title, "Ana") != 0){
     g_fail++; std::printf("  FALLO  el vector de notificacion no vuelve a decodificarse\n");
   } else std::printf("   %-26s ok\n", "vector -> decodifica");
+
+  // -- 6) Capacidades --
+  //    Es el mensaje que decide QUE ensena Flex OS. Si los dos lados
+  //    lo leyeran distinto, el reloj podria ofrecer funciones que el
+  //    telefono no tiene, que es justo lo que este mapa evita.
+  FlexPhoneCaps cp; std::memset(&cp, 0, sizeof(cp));
+  cp.supported = FLP_CAP_NOTIF | FLP_CAP_REPLY | FLP_CAP_MEDIA |
+                 FLP_CAP_RELAY | FLP_CAP_STATE | FLP_CAP_TIME;
+  cp.granted   = FLP_CAP_NOTIF | FLP_CAP_STATE | FLP_CAP_TIME;
+  cp.protoVer  = FLNK_VERSION;
+  std::snprintf(cp.model,  sizeof(cp.model),  "SM-A556B");
+  std::snprintf(cp.vendor, sizeof(cp.vendor), "samsung");
+  std::snprintf(cp.osver,  sizeof(cp.osver),  "Android 14");
+  uint8_t cb[256];
+  int ck = flexPhoneEncCaps(cb, sizeof(cb), &cp);
+  vec("capacidades", cb, (size_t)ck,
+      "6F0061000208534D2D41353536420773616D73756E670A416E64726F6964203134");
+
+  // -- 7) Material del vinculo --
+  //    El mismo vector esta en FlexLinkTest.kt. Si la derivacion se
+  //    toca en un solo lado, el telefono y el reloj derivan claves
+  //    distintas y el emparejamiento falla sin explicacion posible.
+  uint8_t salt[FLXA_SALT_SIZE];
+  for(size_t i = 0; i < sizeof(salt); i++) salt[i] = (uint8_t)i;
+  uint8_t nonce[FLXA_NONCE_SIZE];
+  for(size_t i = 0; i < sizeof(nonce); i++) nonce[i] = (uint8_t)(0xA0 + i);
+  uint8_t key[FLXA_KEY_SIZE];
+  flexAuthDeriveKey("012345", salt, "flexos-1", "phone-1", key);
+  vec("clave del vinculo", key, sizeof(key),
+      "66840F7C66ABABB9F042D87C18E1F6B28D1BF08DB58316823BB99EDB38954176");
+  uint8_t pf[FLXA_PROOF_SIZE];
+  flexAuthProof(key, FLXA_ROLE_PHONE, nonce, 0x1234, pf);
+  vec("prueba del telefono", pf, sizeof(pf),
+      "A259AF02D131F300FD204569B46A9D16EA7754C2D88E62768566CE72F169786A");
+  flexAuthProof(key, FLXA_ROLE_HOST, nonce, 0x1234, pf);
+  vec("prueba de Flex OS", pf, sizeof(pf),
+      "DF2848A174C2210E9AE82E2BB5B0888AA50FBF5CC32476612844AD3359385377");
 
   std::printf("=== %d vectores, %d fallos ===\n", g_run, g_fail);
   return g_fail ? 1 : 0;

@@ -49,6 +49,9 @@
 #define FLP_REPLY_MAX       256   // tope de una respuesta rapida
 #define FLP_DEVNAME_MAX     32
 #define FLP_MEDIA_TXT_MAX   48
+#define FLP_VENDOR_MAX      24    // "samsung", "Xiaomi", "motorola"...
+#define FLP_OSVER_MAX       16    // "Android 14"
+#define FLP_PEERID_MAX      32    // identificador estable del telefono
 
 // ---- Categoria y prioridad (mapeadas desde Android) -----------
 enum {
@@ -97,6 +100,54 @@ typedef struct {
   bool     used;
 } FlexPhoneDraft;
 
+// #############################################################
+// ##  CAPACIDADES DEL TELEFONO
+// ##  ------------------------------------------------------
+// ##  NO todos los Android pueden hacer lo mismo, y del mismo
+// ##  telefono no siempre esta todo concedido. Por eso hay DOS
+// ##  mapas y no uno:
+// ##
+// ##    supported -> lo que ese modelo de telefono puede hacer.
+// ##    granted   -> lo que ademas esta permitido y activo AHORA.
+// ##
+// ##  La diferencia entre los dos es justo lo que se le puede
+// ##  explicar al usuario: "tu telefono puede, pero falta darle el
+// ##  acceso a notificaciones". Con un solo mapa habria que elegir
+// ##  entre esconder la funcion (y que el usuario no sepa que
+// ##  existe) o ensenarla rota.
+// ##
+// ##  Flex OS NO ensena como disponible nada que no este en
+// ##  `granted`. Un boton que no hace nada es peor que no tenerlo.
+// #############################################################
+enum {
+  FLP_CAP_NOTIF   = 1u << 0,   // leer notificaciones
+  FLP_CAP_REPLY   = 1u << 1,   // responder (Android dio RemoteInput)
+  FLP_CAP_MEDIA   = 1u << 2,   // control multimedia
+  FLP_CAP_RELAY   = 1u << 3,   // servidor del navegador
+  FLP_CAP_FIND    = 1u << 4,   // encontrar mi telefono
+  FLP_CAP_STATE   = 1u << 5,   // estado del dispositivo (bateria, red)
+  FLP_CAP_TIME    = 1u << 6,   // sincronizar la hora
+  FLP_CAP_BLE     = 1u << 7,   // el telefono puede hablar BLE
+  FLP_CAP_N       = 8
+};
+// Nombre corto de UNA capacidad (bit suelto). Estatico, nunca NULL.
+const char* flexPhoneCapName(uint16_t bit);
+// Por que no esta disponible, sabiendo los dos mapas. Devuelve NULL
+// si SI esta disponible: quien llama distingue asi los dos casos sin
+// comparar cadenas.
+const char* flexPhoneCapWhyNot(uint16_t supported, uint16_t granted, uint16_t bit);
+
+typedef struct {
+  uint16_t supported;
+  uint16_t granted;
+  uint8_t  protoVer;                  // version de Flex Link del telefono
+  char     model[FLP_DEVNAME_MAX];    // "SM-A556B"
+  char     vendor[FLP_VENDOR_MAX];    // "samsung"
+  char     osver[FLP_OSVER_MAX];      // "Android 14"
+  bool     valid;                     // false = nunca llego un FLNK_T_CAPS
+  uint32_t stampMs;
+} FlexPhoneCaps;
+
 // ---- Estado del telefono --------------------------------------
 enum { FLP_NET_UNKNOWN = 0, FLP_NET_NONE, FLP_NET_WIFI, FLP_NET_MOBILE };
 typedef struct {
@@ -104,6 +155,14 @@ typedef struct {
   uint8_t  battery;       // 0..100 · 255 = desconocido
   bool     charging;
   uint8_t  net;           // FLP_NET_*
+  // Espacio y memoria en MEGABYTES. 0 = el telefono no lo mando.
+  // Van en uint32 porque un movil con 512 GB no cabe en uint16 y
+  // truncar el almacenamiento a 65 GB seria un dato falso.
+  uint32_t storageFreeMb;
+  uint32_t storageTotalMb;
+  uint32_t ramFreeMb;
+  uint32_t ramTotalMb;
+  bool     powerSave;     // ahorro de bateria activo en Android
   bool     valid;         // false = nunca hemos recibido estado REAL
   uint32_t stampMs;
 } FlexPhoneState;
@@ -166,6 +225,7 @@ typedef struct {
   FlexPhoneConv   conv[FLP_CONV_MAX];
   FlexPhoneDraft  draft[FLP_DRAFT_MAX];
   FlexPhoneState  phone;
+  FlexPhoneCaps   caps;
   FlexPhoneMedia  media;
   FlexPhoneRelay  relay;
   FlexPhonePrivacy priv;
@@ -223,7 +283,7 @@ bool flexPhoneDraftRemove(FlexPhoneModel* m, int idx);
 // -------------------------------------------------------------
 //  Iconos: tabla local de paquetes conocidos
 // -------------------------------------------------------------
-// NO se envian iconos por BLE. Aqui hay una tabla de paquetes
+// NO se envian iconos por el enlace. Aqui hay una tabla de paquetes
 // conocidos -> glifo del sistema; lo desconocido usa el generico.
 enum {
   FLP_ICON_GENERIC = 0, FLP_ICON_CHAT, FLP_ICON_MAIL, FLP_ICON_CALL,
@@ -249,6 +309,8 @@ bool flexPhoneDecPhoneState(const uint8_t* in, size_t n, FlexPhoneState* out);
 bool flexPhoneDecMedia(const uint8_t* in, size_t n, FlexPhoneMedia* out);
 bool flexPhoneDecRelayInfo(const uint8_t* in, size_t n, FlexPhoneRelay* out);
 int  flexPhoneEncMediaCmd(uint8_t* out, size_t outN, uint8_t cmd);
+bool flexPhoneDecCaps(const uint8_t* in, size_t n, FlexPhoneCaps* out);
+int  flexPhoneEncCaps(uint8_t* out, size_t outN, const FlexPhoneCaps* c);
 
 // Comprueba una respuesta ANTES de enviarla. Devuelve un codigo
 // FLNK_E_* (FLNK_E_NONE = se puede enviar). Aqui es donde se
