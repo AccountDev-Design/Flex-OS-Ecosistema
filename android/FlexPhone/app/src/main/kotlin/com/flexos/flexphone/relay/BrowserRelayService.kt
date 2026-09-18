@@ -52,6 +52,18 @@ class BrowserRelayService : Service() {
         fun stop(ctx: Context) {
             ctx.startService(Intent(ctx, BrowserRelayService::class.java).setAction(ACTION_STOP))
         }
+
+        /**
+         * ¿Esta el servidor del navegador escuchando AHORA?
+         *
+         * Lo pregunta el enlace para declarar la capacidad RELAY. Es
+         * el estado real del servicio, no una preferencia: si Android
+         * lo mato por bateria, esto pasa a false y Flex OS deja de
+         * ofrecer el navegador del telefono en vez de esperar
+         * fotogramas que no van a llegar.
+         */
+        @Volatile private var alive: Boolean = false
+        fun isRunning(): Boolean = alive
     }
 
     private var server: RelayServer? = null
@@ -90,13 +102,30 @@ class BrowserRelayService : Service() {
         RelayEngine.init(this, settings.relayMaxTabs, settings.relayQuality)
 
         // El token de sesion es el que Flex OS presentara en el HELLO.
-        // Se deriva del vinculo BLE: sin haber emparejado no se tiene.
-        val token = settings.bondedDeviceAddress?.let { addr ->
-            java.security.MessageDigest.getInstance("SHA-256")
-                .digest(addr.toByteArray())
-                .joinToString("") { "%02x".format(it) }
-                .take(32)
-        }.orEmpty()
+        // TOKEN DEL RELAY.
+        //
+        // Antes se derivaba de la direccion BLE del dispositivo
+        // emparejado, y una direccion MAC es PUBLICA: cualquiera que
+        // la viera podia calcular el token. Ahora sale de la clave del
+        // vinculo, que es un secreto compartido de verdad y que solo
+        // tienen los dos extremos que emparejaron.
+        //
+        // Flex OS calcula exactamente lo mismo desde su lado (ver
+        // flexPhoneRelayToken en FlexOS_FlexPhone_Bridge.h), asi que
+        // el token nunca viaja por la red.
+        val bondKey = com.flexos.flexphone.storage.BondStore(this).key()
+        if (bondKey == null) {
+            // Sin vinculo no hay token, y sin token el relay no podria
+            // dejar entrar a nadie. Se dice y se para, en vez de abrir
+            // un puerto al que no puede conectarse nadie.
+            state.setRelay(RelayState.ERROR)
+            shutdown()
+            return
+        }
+        val token = com.flexos.flexphone.protocol.FlexAuth
+            .hmacSha256(bondKey, "flexphone-relay-v2".toByteArray(Charsets.US_ASCII))
+            .joinToString("") { "%02x".format(it) }
+            .take(32)
 
         val srv = RelayServer(this, token) { ev -> onServerEvent(ev) }
         server = srv
@@ -105,6 +134,7 @@ class BrowserRelayService : Service() {
             shutdown()
             return
         }
+        alive = true
         acquireLocks()
         watchdog()
     }
@@ -261,6 +291,7 @@ class BrowserRelayService : Service() {
     }
 
     private fun shutdown() {
+        alive = false
         scope.coroutineContext.cancelChildren()
         RelayEngine.detach()
         server?.stop(); server = null
@@ -271,7 +302,10 @@ class BrowserRelayService : Service() {
     }
 
     override fun onDestroy() {
-        // Aunque nos maten: los locks se sueltan aqui tambien.
+        // Aunque nos maten: los locks se sueltan aqui tambien, y la
+        // bandera baja para que el enlace deje de declarar la
+        // capacidad RELAY como concedida.
+        alive = false
         scope.cancel()
         RelayEngine.detach()
         server?.stop()

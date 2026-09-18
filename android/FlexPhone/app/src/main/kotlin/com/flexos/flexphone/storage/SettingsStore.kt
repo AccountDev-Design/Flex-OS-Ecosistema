@@ -11,10 +11,12 @@ import kotlinx.coroutines.flow.map
  * Persistencia de los ajustes.
  *
  * Se guarda con DataStore, en el almacenamiento PRIVADO de la app.
- * Aqui NO hay ninguna credencial: las claves del enlace BLE las
- * gestiona el bonding del sistema, y desvincular las borra con
- * `removeBond`. Lo unico que se guarda del dispositivo es su
- * direccion y su nombre, para poder reconectar.
+ *
+ * AQUI NO HAY NINGUNA CREDENCIAL. La clave del vinculo vive en
+ * [BondStore], envuelta con una clave del Android Keystore, porque es
+ * lo unico que impide que un equipo cualquiera de la red abra sesion.
+ * De el dispositivo vinculado solo se guarda aqui lo que se ensena en
+ * pantalla: su identificador y su nombre.
  */
 private val Context.dataStore by preferencesDataStore(name = "flexphone")
 
@@ -29,8 +31,9 @@ class SettingsStore(private val ctx: Context) {
         val RELAY_IDLE = intPreferencesKey("relay_idle_min")
         val RELAY_TABS = intPreferencesKey("relay_max_tabs")
         val RELAY_QUALITY = intPreferencesKey("relay_quality")
-        val BOND_ADDR = stringPreferencesKey("bond_addr")
-        val BOND_NAME = stringPreferencesKey("bond_name")
+        val FLEXOS_ID = stringPreferencesKey("flexos_id")
+        val FLEXOS_NAME = stringPreferencesKey("flexos_name")
+        val FIXED_HOST = stringPreferencesKey("fixed_host")
     }
 
     val flow: Flow<Settings> = ctx.dataStore.data.map { p ->
@@ -43,8 +46,9 @@ class SettingsStore(private val ctx: Context) {
             relayIdleTimeoutMin = p[K.RELAY_IDLE] ?: 10,
             relayMaxTabs = p[K.RELAY_TABS] ?: 3,
             relayQuality = p[K.RELAY_QUALITY] ?: 62,
-            bondedDeviceAddress = p[K.BOND_ADDR],
-            bondedDeviceName = p[K.BOND_NAME],
+            flexosId = p[K.FLEXOS_ID],
+            flexosName = p[K.FLEXOS_NAME],
+            fixedHost = p[K.FIXED_HOST] ?: "",
         )
     }
 
@@ -59,8 +63,9 @@ class SettingsStore(private val ctx: Context) {
                 relayIdleTimeoutMin = p[K.RELAY_IDLE] ?: 10,
                 relayMaxTabs = p[K.RELAY_TABS] ?: 3,
                 relayQuality = p[K.RELAY_QUALITY] ?: 62,
-                bondedDeviceAddress = p[K.BOND_ADDR],
-                bondedDeviceName = p[K.BOND_NAME],
+                flexosId = p[K.FLEXOS_ID],
+                flexosName = p[K.FLEXOS_NAME],
+                fixedHost = p[K.FIXED_HOST] ?: "",
             )
             val n = block(cur)
             p[K.ALLOWED] = n.allowedPackages
@@ -71,10 +76,9 @@ class SettingsStore(private val ctx: Context) {
             p[K.RELAY_IDLE] = n.relayIdleTimeoutMin
             p[K.RELAY_TABS] = n.relayMaxTabs
             p[K.RELAY_QUALITY] = n.relayQuality
-            if (n.bondedDeviceAddress != null) p[K.BOND_ADDR] = n.bondedDeviceAddress
-            else p.remove(K.BOND_ADDR)
-            if (n.bondedDeviceName != null) p[K.BOND_NAME] = n.bondedDeviceName
-            else p.remove(K.BOND_NAME)
+            p[K.FIXED_HOST] = n.fixedHost
+            if (n.flexosId != null) p[K.FLEXOS_ID] = n.flexosId else p.remove(K.FLEXOS_ID)
+            if (n.flexosName != null) p[K.FLEXOS_NAME] = n.flexosName else p.remove(K.FLEXOS_NAME)
         }
     }
 

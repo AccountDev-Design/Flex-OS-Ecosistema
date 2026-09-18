@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
  */
 @Composable
 fun DiagnosticsScreen(nav: NavController) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
     val state = FlexPhoneState.instance
     val diag by (state?.diag ?: MutableStateFlow(FlexPhoneState.Diag())).collectAsState()
     val link by (state?.link ?: MutableStateFlow(LinkState.OFF)).collectAsState()
@@ -34,10 +35,40 @@ fun DiagnosticsScreen(nav: NavController) {
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            SectionCard("Enlace") {
-                KeyValue("Estado", linkLabel(link).first, emphasis = true)
-                KeyValue("Lector de notificaciones",
-                    if (FlexNotificationListener.connected) "activo" else "sin permiso")
+            // Cada fila es un servicio REAL con su estado REAL. Si algo
+            // falla, se dice CUAL y por que: "no funciona" a secas no
+            // le sirve a nadie para arreglarlo.
+            SectionCard("Servicios") {
+                StatusRow("Enlace", linkStatus(link), linkText(link))
+                val listener = com.flexos.flexphone.notifications.FlexNotificationListener
+                StatusRow(
+                    "Lector de notificaciones",
+                    when {
+                        listener.connected -> FlexStatus.OK
+                        listener.hasAccess(ctx) -> FlexStatus.BUSY
+                        else -> FlexStatus.BAD
+                    },
+                    when {
+                        listener.connected -> "Conectado"
+                        // El permiso puede estar concedido y el servicio
+                        // tardar en engancharse. Son dos cosas distintas
+                        // y se dicen por separado.
+                        listener.hasAccess(ctx) -> "Permiso dado, enganchando"
+                        else -> "Falta el acceso en Ajustes de Android"
+                    },
+                )
+                val relayUp = com.flexos.flexphone.relay.BrowserRelayService.isRunning()
+                StatusRow(
+                    "Servidor del navegador",
+                    if (relayUp) FlexStatus.OK else FlexStatus.OFF,
+                    if (relayUp) "Escuchando" else "Parado",
+                )
+                val svc = com.flexos.flexphone.link.FlexLinkService.current
+                StatusRow(
+                    "Puerto del enlace",
+                    if ((svc?.linkPort() ?: 0) > 0) FlexStatus.OK else FlexStatus.OFF,
+                    svc?.linkAddress()?.let { "$it:${svc.linkPort()}" } ?: "Enlace apagado",
+                )
                 err?.let {
                     Text(it, style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.error)

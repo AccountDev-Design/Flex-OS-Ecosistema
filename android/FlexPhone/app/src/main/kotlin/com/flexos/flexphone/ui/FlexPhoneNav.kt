@@ -11,28 +11,33 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.flexos.flexphone.R
 import com.flexos.flexphone.domain.FlexPhoneState
+import com.flexos.flexphone.storage.BondStore
 import com.flexos.flexphone.storage.SettingsStore
 import com.flexos.flexphone.ui.screens.*
 import kotlinx.coroutines.flow.collectLatest
 
 /**
- * Navegacion de la app. Nueve pantallas, las que pide el diseno:
- * bienvenida, emparejamiento, estado, apps permitidas, privacidad,
- * Browser Relay, dispositivos vinculados, diagnostico y acerca de.
+ * NAVEGACION DE LA APP.
  *
- * La primera pantalla depende de si ya hay un dispositivo vinculado:
- * a quien ya emparejo no se le vuelve a ensenar la bienvenida cada
- * vez que abre la app.
+ * Una PORTADA y las secciones colgando de ella -- la misma forma que
+ * en Flex OS. Las dos mitades del ecosistema tienen que poder
+ * explicarse con el mismo mapa.
+ *
+ * La primera pantalla depende de si ya hay un Flex OS vinculado: a
+ * quien ya emparejo no se le vuelve a ensenar la bienvenida.
  */
 object Routes {
     const val WELCOME = "welcome"
+    const val HOME = "home"
     const val PAIR = "pair"
-    const val STATUS = "status"
     const val APPS = "apps"
     const val PRIVACY = "privacy"
     const val RELAY = "relay"
-    const val DEVICES = "devices"
+    const val CONNECTION = "connection"
+    const val DEVICE = "device"
+    const val SECURITY = "security"
     const val DIAGNOSTICS = "diagnostics"
+    const val SETTINGS = "settings"
     const val ABOUT = "about"
 }
 
@@ -41,30 +46,31 @@ fun FlexPhoneNav() {
     val nav = rememberNavController()
     val ctx = LocalContext.current
     val store = remember { SettingsStore(ctx) }
+    val bonds = remember { BondStore(ctx) }
     val state = FlexPhoneState.instance
 
     // Los ajustes se OBSERVAN; no se sondean.
     var settings by remember { mutableStateOf(state?.settings ?: com.flexos.flexphone.domain.Settings()) }
     LaunchedEffect(Unit) { store.flow.collectLatest { settings = it } }
 
-    val start = if (settings.isPaired) Routes.STATUS else Routes.WELCOME
+    // La verdad sobre el vinculo la tiene BondStore, que es quien
+    // guarda la clave. Preguntar a los ajustes daria "emparejado" con
+    // un vinculo cuya clave ya no se puede descifrar.
+    val start = if (bonds.isPaired()) Routes.HOME else Routes.WELCOME
 
-    Scaffold(modifier = Modifier.fillMaxSize()) { pad ->
-        NavHost(
-            navController = nav,
-            startDestination = start,
-            modifier = Modifier.padding(pad),
-        ) {
-            composable(Routes.WELCOME) { WelcomeScreen(nav) }
-            composable(Routes.PAIR) { PairScreen(nav, store) }
-            composable(Routes.STATUS) { StatusScreen(nav, store, settings) }
-            composable(Routes.APPS) { AllowedAppsScreen(nav, store, settings) }
-            composable(Routes.PRIVACY) { PrivacyScreen(nav, store, settings) }
-            composable(Routes.RELAY) { RelayScreen(nav, store, settings) }
-            composable(Routes.DEVICES) { DevicesScreen(nav, store, settings) }
-            composable(Routes.DIAGNOSTICS) { DiagnosticsScreen(nav) }
-            composable(Routes.ABOUT) { AboutScreen(nav) }
-        }
+    NavHost(navController = nav, startDestination = start, modifier = Modifier.fillMaxSize()) {
+        composable(Routes.WELCOME) { WelcomeScreen(nav) }
+        composable(Routes.HOME) { HomeScreen(nav, store, settings) }
+        composable(Routes.PAIR) { PairScreen(nav, store) }
+        composable(Routes.APPS) { AllowedAppsScreen(nav, store, settings) }
+        composable(Routes.PRIVACY) { PrivacyScreen(nav, store, settings) }
+        composable(Routes.RELAY) { RelayScreen(nav, store, settings) }
+        composable(Routes.CONNECTION) { ConnectionScreen(nav) }
+        composable(Routes.DEVICE) { DeviceScreen(nav) }
+        composable(Routes.SECURITY) { SecurityScreen(nav, store, settings) }
+        composable(Routes.DIAGNOSTICS) { DiagnosticsScreen(nav) }
+        composable(Routes.SETTINGS) { SettingsScreen(nav, store, settings) }
+        composable(Routes.ABOUT) { AboutScreen(nav) }
     }
 }
 

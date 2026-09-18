@@ -165,6 +165,29 @@ object Limits {
     const val REPLY = 256
     const val DEVNAME = 32
     const val MEDIA_TXT = 48
+    const val VENDOR = 24         // "samsung", "Xiaomi", "motorola"...
+    const val OSVER = 16          // "Android 14"
+    const val PEERID = 32
+}
+
+/**
+ * Capacidades. Mapa de bits identico al de `FlexOS_FlexPhone.h`.
+ *
+ * NO todos los Android pueden lo mismo, y del mismo telefono no
+ * siempre esta todo concedido. Por eso van DOS mapas: `supported` es
+ * lo que el modelo puede hacer y `granted` lo que ademas esta
+ * permitido y activo AHORA. La diferencia entre los dos es justo lo
+ * que se le puede explicar al usuario.
+ */
+object Caps {
+    const val NOTIF = 1 shl 0
+    const val REPLY = 1 shl 1
+    const val MEDIA = 1 shl 2
+    const val RELAY = 1 shl 3
+    const val FIND = 1 shl 4
+    const val STATE = 1 shl 5
+    const val TIME = 1 shl 6
+    const val BLE = 1 shl 7
 }
 
 object Category {
@@ -277,6 +300,11 @@ data class ReplyResult(val notifId: Long, val error: Int) {
 
 data class PhoneState(
     val name: String, val battery: Int, val charging: Boolean, val net: Int,
+    // Espacio y memoria en MEGABYTES. 0 = no se sabe, y entonces el
+    // bloque entero se omite: Flex OS no pinta lo que no ha llegado.
+    val storageFreeMb: Long = 0, val storageTotalMb: Long = 0,
+    val ramFreeMb: Long = 0, val ramTotalMb: Long = 0,
+    val powerSave: Boolean = false,
 ) {
     fun encode(): ByteArray {
         val w = PayloadWriter()
@@ -286,8 +314,33 @@ data class PhoneState(
         w.u8(if (battery in 0..100) battery else 255)
         w.u8(if (charging) 1 else 0)
         w.u8(net)
+        // Campos anadidos al FINAL a proposito: un extremo que no los
+        // lea sigue entendiendo los de arriba. Ver flexPhoneDecPhoneState.
+        w.u32(storageFreeMb); w.u32(storageTotalMb)
+        w.u32(ramFreeMb); w.u32(ramTotalMb)
+        w.u8(if (powerSave) 1 else 0)
         return w.build()
     }
+}
+
+/**
+ * Lo que este telefono puede hacer de verdad. Se manda una vez al
+ * abrir sesion y cada vez que un permiso cambia -- no en un bucle.
+ */
+data class CapsPayload(
+    val supported: Int, val granted: Int, val protoVer: Int,
+    val model: String, val vendor: String, val osVer: String,
+) {
+    fun encode(): ByteArray = PayloadWriter()
+        .u16(supported)
+        // Conceder lo que no se soporta es imposible: se recorta aqui
+        // ademas de en el P4, para que ningun camino lo deje pasar.
+        .u16(granted and supported)
+        .u8(protoVer)
+        .str(model, Limits.DEVNAME - 1)
+        .str(vendor, Limits.VENDOR - 1)
+        .str(osVer, Limits.OSVER - 1)
+        .build()
 }
 
 data class MediaState(

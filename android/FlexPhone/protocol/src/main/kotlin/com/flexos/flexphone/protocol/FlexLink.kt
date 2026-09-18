@@ -18,8 +18,15 @@ package com.flexos.flexphone.protocol
 object FlexLink {
 
     // ---- Version ------------------------------------------------
-    const val VERSION = 1
-    const val VERSION_MIN = 1
+    // v2: el enlace pasa de BLE a Wi-Fi. BLE autenticaba y cifraba
+    // por debajo con su bonding; un socket TCP en la red local no
+    // hace nada de eso, asi que v2 anade apreton de manos con clave
+    // (T_AUTH_*) y negociacion de capacidades (T_CAPS). Un extremo v1
+    // no sabe demostrar que tiene la clave, y por eso v2 no lo
+    // acepta. Que el rechazo sea por version hace que el usuario lea
+    // "actualiza" en vez de un fallo mudo.
+    const val VERSION = 2
+    const val VERSION_MIN = 2
 
     // ---- Limites (identicos a FlexOS_FlexLink.h) ----------------
     const val HDR_SIZE = 18
@@ -42,6 +49,12 @@ object FlexLink {
     const val T_ACK = 0x06
     const val T_ERR = 0x07
 
+    // Autenticacion de sesion (v2). Reto-respuesta MUTUO sobre la
+    // clave del vinculo: ver FlexAuth. La clave nunca viaja.
+    const val T_AUTH_CHALLENGE = 0x08   // Flex OS -> telefono
+    const val T_AUTH_RESPONSE = 0x09    // telefono -> Flex OS
+    const val T_AUTH_OK = 0x0A          // Flex OS -> telefono
+
     const val T_PAIR_REQ = 0x10
     const val T_PAIR_CODE = 0x11
     const val T_PAIR_CONFIRM = 0x12
@@ -61,6 +74,10 @@ object FlexLink {
     const val T_TIME_SYNC = 0x41
     const val T_FIND_START = 0x42
     const val T_FIND_STOP = 0x43
+
+    // Capacidades (v2). El telefono declara QUE puede hacer de
+    // verdad, y Flex OS solo ensena lo que esta en este mapa.
+    const val T_CAPS = 0x44
 
     const val T_MEDIA_STATE = 0x50
     const val T_MEDIA_CMD = 0x51
@@ -82,6 +99,7 @@ object FlexLink {
     const val E_DENIED = 9       // permiso revocado en Android
     const val E_BUSY = 10
     const val E_INTERNAL = 11
+    const val E_AUTH = 12        // la prueba de la clave no cuadra
 
     fun errName(code: Int): String = when (code) {
         E_NONE -> "sin error"
@@ -95,6 +113,7 @@ object FlexLink {
         E_GONE -> "la notificacion ya no existe"
         E_DENIED -> "permiso denegado en el telefono"
         E_BUSY -> "ocupado"
+        E_AUTH -> "la autenticacion no cuadra"
         else -> "error interno"
     }
 
@@ -152,6 +171,14 @@ object FlexLink {
             override fun hashCode(): Int = 31 * header.hashCode() + payload.contentHashCode()
         }
         data class Err(val reason: String) : ReadResult()
+        /**
+         * La trama era VALIDA pero de una version que este extremo no
+         * interpreta. Va aparte de [Err] porque se trata distinto: hay
+         * que contestar E_VERSION y decirselo al usuario, en vez de
+         * descartar en silencio como con una trama corrupta. Es el
+         * mismo criterio que FLNK_ERR_VERSION en el firmware.
+         */
+        data class BadVersion(val version: Int) : ReadResult()
     }
 
     /**
@@ -226,7 +253,7 @@ object FlexLink {
         if (crc != want) return ReadResult.Err("CRC no cuadra")
 
         val ver = input[2].toInt() and 0xFF
-        if (ver < VERSION_MIN || ver > VERSION) return ReadResult.Err("version $ver incompatible")
+        if (ver < VERSION_MIN || ver > VERSION) return ReadResult.BadVersion(ver)
 
         return ReadResult.Ok(
             Header(

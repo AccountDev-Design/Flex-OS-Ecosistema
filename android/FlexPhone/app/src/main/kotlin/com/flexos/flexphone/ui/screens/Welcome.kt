@@ -30,19 +30,24 @@ fun WelcomeScreen(nav: NavController) {
     val ctx = LocalContext.current
     val scroll = rememberScrollState()
 
-    var notifOk by remember { mutableStateOf(FlexNotificationListener.connected) }
-    var bleOk by remember { mutableStateOf(hasBlePermissions(ctx)) }
-
-    val blePerms = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { bleOk = hasBlePermissions(ctx) }
+    val device = remember { com.flexos.flexphone.device.DeviceAdapter(ctx) }
+    var notifOk by remember { mutableStateOf(FlexNotificationListener.hasAccess(ctx)) }
+    var onWifi by remember { mutableStateOf(device.isOnWifi()) }
 
     val postNotif = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { }
 
-    // Al volver de Ajustes se relee el estado real, sin sondear.
-    LaunchedEffect(Unit) { notifOk = FlexNotificationListener.connected }
+    // Al volver de Ajustes se relee el estado REAL. Se comprueba cada
+    // pocos segundos mientras esta pantalla esta a la vista porque el
+    // usuario sale a Ajustes y vuelve, y Android no avisa de eso.
+    LaunchedEffect(Unit) {
+        while (true) {
+            notifOk = FlexNotificationListener.hasAccess(ctx)
+            onWifi = device.isOnWifi()
+            kotlinx.coroutines.delay(1_500)
+        }
+    }
 
     Column(
         Modifier.fillMaxSize().verticalScroll(scroll).padding(24.dp),
@@ -50,8 +55,8 @@ fun WelcomeScreen(nav: NavController) {
     ) {
         Text("Flex Phone", style = MaterialTheme.typography.headlineMedium)
         Text(
-            "Conecta tu telefono con Flex OS Ultra. Las notificaciones, la " +
-            "musica y -si lo activas- un navegador que corre en el telefono " +
+            "Conecta tu telefono con Flex OS Ultra por Wi-Fi. Las notificaciones, " +
+            "la musica y -si lo activas- un navegador que corre en el telefono " +
             "aparecen en el reloj.",
             style = MaterialTheme.typography.bodyLarge,
         )
@@ -70,15 +75,22 @@ fun WelcomeScreen(nav: NavController) {
             },
         )
 
+        // NO se pide Bluetooth. El enlace va por Wi-Fi, y pedir un
+        // permiso que no se va a usar es la forma mas rapida de que
+        // alguien desinstale una app que lee notificaciones.
         PermissionCard(
-            title = "Bluetooth",
-            why = "El enlace con Flex OS va por Bluetooth de baja energia. " +
-                  "Tambien se usa para anunciarse al reloj mientras lo buscas.",
-            note = "No se pide ubicacion: el escaneo se declara con " +
-                   "\"neverForLocation\".",
-            granted = bleOk,
-            action = "Conceder",
-            onClick = { blePerms.launch(blePermissions()) },
+            title = "Red Wi-Fi",
+            why = "El enlace con Flex OS es una conexion dentro de tu red local: los " +
+                  "dos tienen que estar en el mismo Wi-Fi. No hace falta conceder " +
+                  "nada, pero si el telefono no esta en Wi-Fi el enlace no puede " +
+                  "funcionar.",
+            note = if (onWifi) null
+                   else "Ahora mismo este telefono no esta en una red Wi-Fi.",
+            granted = onWifi,
+            action = "Abrir ajustes de Wi-Fi",
+            onClick = {
+                runCatching { ctx.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) }
+            },
         )
 
         if (Build.VERSION.SDK_INT >= 33) {
@@ -115,15 +127,25 @@ fun WelcomeScreen(nav: NavController) {
 
         Button(
             onClick = { nav.navigate(Routes.PAIR) },
-            enabled = notifOk && bleOk,
+            // El acceso a notificaciones es lo unico imprescindible.
+            // El Wi-Fi hace falta para conectar, pero no para empezar
+            // a configurar, asi que no bloquea el boton.
+            enabled = notifOk,
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Continuar al emparejamiento") }
 
-        if (!notifOk || !bleOk) {
+        if (!notifOk) {
             Text(
-                "Faltan permisos por conceder.",
+                "Falta el acceso a notificaciones.",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.error,
+            )
+        } else if (!onWifi) {
+            Text(
+                "Podras configurarlo todo, pero el enlace no conectara hasta que " +
+                    "este telefono este en Wi-Fi.",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.tertiary,
             )
         }
     }
@@ -160,6 +182,12 @@ private fun PermissionCard(
 }
 
 
+/**
+ * Permisos del transporte BLE. HOY NO SE PIDEN: el enlace va por
+ * Wi-Fi. Se conservan junto a [com.flexos.flexphone.link.GattServer],
+ * que es el transporte preparado para cuando el co-procesador C6 del
+ * ESP32-P4 pueda ofrecer Bluetooth.
+ */
 internal fun blePermissions(): Array<String> =
     if (Build.VERSION.SDK_INT >= 31) arrayOf(
         android.Manifest.permission.BLUETOOTH_CONNECT,

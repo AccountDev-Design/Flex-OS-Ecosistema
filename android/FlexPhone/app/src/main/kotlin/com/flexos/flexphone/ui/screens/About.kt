@@ -30,7 +30,22 @@ fun AboutScreen(nav: NavController) {
                 KeyValue("Version de la app", version ?: "?")
                 KeyValue("Protocolo Flex Link", "v${FlexLink.VERSION}")
                 KeyValue("Protocolo del navegador", "FBP/${Fbp.VERSION}")
+                KeyValue("Transporte del enlace", "Wi-Fi (red local)")
             }
+
+            Notice(
+                "Limites reales",
+                "El contenido del enlace viaja SIN CIFRAR por tu red local: el " +
+                    "emparejamiento impide que entre quien no ha emparejado, pero no " +
+                    "protege frente a quien ya escuche tu red.\n\n" +
+                    "Android puede detener el servicio por bateria, memoria o politica " +
+                    "del fabricante. Cuando pasa, Flex OS lo ensena como error, no se " +
+                    "queda esperando.\n\n" +
+                    "No se prometen 60 fotogramas por segundo en el navegador: una " +
+                    "pagina renderizada aqui, comprimida y enviada a un ESP32 que ademas " +
+                    "tiene que descodificarla no da eso.",
+                MaterialTheme.colorScheme.tertiary,
+            )
 
             SectionCard("Que puede y que no puede hacer") {
                 Text(

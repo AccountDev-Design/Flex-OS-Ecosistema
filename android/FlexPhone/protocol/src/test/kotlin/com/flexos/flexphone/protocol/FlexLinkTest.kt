@@ -31,7 +31,7 @@ class FlexLinkTest {
         )
         assertEquals(FlexLink.HDR_SIZE, f.size, "un PING sin carga mide exactamente la cabecera")
         // magia, version, tipo, sesion, paquete, frag/total, len, contador, CRC
-        assertEquals("F1580103341207000001000001000000EEA7", hex(f))
+        assertEquals("F15802033412070000010000010000004D2A", hex(f))
     }
 
     @Test
@@ -40,7 +40,7 @@ class FlexLinkTest {
             FlexLink.Header(type = FlexLink.T_NOTIF_ADD, session = 0x1234, packet = 7, counter = 1),
             "hola flex".toByteArray(Charsets.UTF_8),
         )
-        assertEquals("F15801203412070000010900010000006DFF686F6C6120666C6578", hex(f))
+        assertEquals("F15802203412070000010900010000007050686F6C6120666C6578", hex(f))
     }
 
     @Test

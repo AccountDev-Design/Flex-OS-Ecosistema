@@ -49,6 +49,41 @@ class FlexNotificationListener : NotificationListenerService() {
          */
         @Volatile private var instance: FlexNotificationListener? = null
         fun current(): FlexNotificationListener? = instance
+
+        /**
+         * ¿Tiene la app el acceso especial a notificaciones?
+         *
+         * Se pregunta al ajuste del sistema y no a [connected]: el
+         * servicio puede tardar en engancharse despues de conceder el
+         * permiso, y en ese hueco `connected` diria false aunque el
+         * permiso este. Flex OS decide con esto que funciones ofrece,
+         * asi que un "no" temporal le haria esconder una seccion que
+         * en realidad esta disponible.
+         */
+        fun hasAccess(ctx: android.content.Context): Boolean {
+            val enabled = android.provider.Settings.Secure.getString(
+                ctx.contentResolver, "enabled_notification_listeners",
+            ) ?: return false
+            return enabled.split(':').any {
+                it.isNotBlank() &&
+                    android.content.ComponentName.unflattenFromString(it)?.packageName == ctx.packageName
+            }
+        }
+
+        /**
+         * Descarta una notificacion en el TELEFONO. La llama el
+         * enlace cuando el usuario la descarta en Flex OS: descartarla
+         * en un lado y que siga en el otro es justo lo que hace que un
+         * puente de notificaciones resulte molesto.
+         *
+         * Si Android ya la habia retirado, no pasa nada: la clave ya
+         * no esta en la tabla y no se hace nada.
+         */
+        fun dismiss(id: Long) {
+            val self = instance ?: return
+            val key = self.keyOf(id) ?: return
+            runCatching { self.cancelNotification(key) }
+        }
     }
 
     /**
@@ -62,6 +97,21 @@ class FlexNotificationListener : NotificationListenerService() {
      * silenciosamente perdido.
      */
     private val liveActions = HashMap<Long, Array<Notification.Action>>()
+
+    /**
+     * Clave de Android de cada notificacion viva, por id.
+     *
+     * Hace falta para descartar: `cancelNotification` trabaja con la
+     * clave del sistema, no con el id estable que viaja por el
+     * enlace. Se guarda en la MISMA seccion critica que las acciones
+     * y se borra a la vez, para que no pueda quedar una clave de una
+     * notificacion que ya no existe.
+     */
+    private val liveKeys = HashMap<Long, String>()
+
+    /** Clave de Android de una notificacion viva, o null si ya no esta. */
+    internal fun keyOf(notifId: Long): String? =
+        synchronized(liveActions) { liveKeys[notifId] }
 
     /**
      * Copia de las acciones vivas de una notificacion, para
@@ -86,7 +136,7 @@ class FlexNotificationListener : NotificationListenerService() {
         super.onListenerDisconnected()
         connected = false
         instance = null
-        synchronized(liveActions) { liveActions.clear() }
+        synchronized(liveActions) { liveActions.clear(); liveKeys.clear() }
         Log.i(TAG, "lector desconectado")
     }
 
@@ -106,7 +156,13 @@ class FlexNotificationListener : NotificationListenerService() {
         val payload = build(n) ?: return
 
         // 3) Solo se recuerdan las acciones si de verdad hay alguna.
-        notif.actions?.let { if (it.isNotEmpty()) synchronized(liveActions) { liveActions[payload.id] = it } }
+        //    La clave del sistema SI se guarda siempre: hace falta para
+        //    poder descartar la notificacion desde Flex OS, tenga o no
+        //    acciones.
+        synchronized(liveActions) {
+            liveKeys[payload.id] = n.key
+            notif.actions?.let { if (it.isNotEmpty()) liveActions[payload.id] = it }
+        }
 
         state.onNotificationPosted(payload)
     }
@@ -116,7 +172,7 @@ class FlexNotificationListener : NotificationListenerService() {
         val id = stableId(n)
         // La accion muere con la notificacion: no se conserva un
         // PendingIntent caducado que luego mienta.
-        synchronized(liveActions) { liveActions.remove(id) }
+        synchronized(liveActions) { liveActions.remove(id); liveKeys.remove(id) }
         FlexPhoneState.instance?.onNotificationRemoved(id)
     }
 

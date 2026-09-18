@@ -113,6 +113,14 @@ class MediaBridge(
     }
 
     /** Ejecuta una orden de transporte. Silencioso si no hay sesion. */
+    /**
+     * ¿Hay ahora mismo una sesion multimedia a la que mandar ordenes?
+     * Lo pregunta el adaptador para decidir si la capacidad MEDIA esta
+     * CONCEDIDA: sin reproductor activo, los botones de Flex OS no
+     * harian nada, y entonces no se ofrecen.
+     */
+    fun hasActiveSession(): Boolean = controller != null
+
     fun command(cmd: Int) {
         val t = controller?.transportControls ?: return
         runCatching {

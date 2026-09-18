@@ -22,10 +22,22 @@ data class Settings(
     val relayMaxTabs: Int = 3,
     /** Calidad JPEG de partida del relay (20..90). */
     val relayQuality: Int = 62,
-    /** Dispositivo Flex OS vinculado, o null. */
-    val bondedDeviceAddress: String? = null,
-    val bondedDeviceName: String? = null,
+    /**
+     * Identificador del Flex OS vinculado, o null.
+     *
+     * Es una COPIA para la interfaz. La verdad sobre si hay vinculo la
+     * tiene [com.flexos.flexphone.storage.BondStore], que es quien
+     * guarda la clave: aqui solo esta lo que se puede ensenar en
+     * pantalla sin ser material sensible.
+     */
+    val flexosId: String? = null,
+    val flexosName: String? = null,
+    /**
+     * Direccion fija de Flex OS. Normalmente vacia: Flex OS es quien
+     * llama, no al reves. Queda para redes que bloquean la difusion.
+     */
+    val fixedHost: String = "",
 ) {
     fun isPackageAllowed(pkg: String): Boolean = allowedPackages.contains(pkg)
-    val isPaired: Boolean get() = bondedDeviceAddress != null
+    val isPaired: Boolean get() = flexosId != null
 }

@@ -12,8 +12,12 @@
     <string name="link_connected">Conectado a Flex OS</string>
     <string name="link_pairing">Emparejando: confirma el codigo</string>
     <string name="link_connecting">Conectando…</string>
-    <string name="link_searching">Buscando Flex OS…</string>
-    <string name="link_unavailable">Bluetooth no disponible</string>
+    <string name="link_searching">Esperando a Flex OS…</string>
+    <!-- El enlace es una conexion de la red local: sin Wi-Fi no hay a donde
+         conectarse, y decir "Bluetooth no disponible" seria mentir sobre el
+         motivo desde que el transporte es Wi-Fi. -->
+    <string name="link_unavailable">Enlace no disponible</string>
+    <string name="link_needs_wifi">Este telefono no esta en una red Wi-Fi</string>
     <string name="link_error">Error de enlace</string>
     <string name="link_off">Enlace desactivado</string>
 

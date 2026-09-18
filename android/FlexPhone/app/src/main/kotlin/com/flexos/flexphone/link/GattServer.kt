@@ -18,6 +18,35 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicLong
 
 /**
+ * TRANSPORTE BLE -- ESCRITO Y PREPARADO, HOY NO SE USA.
+ *
+ * ===========================================================
+ *  LEE ESTO ANTES DE BORRARLO POR "CODIGO MUERTO"
+ * ===========================================================
+ * Flex OS Ultra corre sobre un ESP32-P4, que NO tiene radio
+ * Bluetooth: `soc_caps.h` del SDK no define `SOC_BLE_SUPPORTED` para
+ * ese chip. Mientras siga asi, el otro extremo de este servidor GATT
+ * no existe, y anunciarse por BLE seria gastar bateria del telefono
+ * para que no llame nadie. Por eso [FlexLinkService] arranca
+ * [WifiLinkServer] y NO esto.
+ *
+ * Se conserva a proposito, no por descuido: es el segundo transporte
+ * de la arquitectura. El dia que el co-procesador C6 exponga HCI con
+ * Bluetooth y el P4 tenga una pila NimBLE contra el, el unico cambio
+ * es elegir este servidor en lugar del de Wi-Fi -- la logica del
+ * enlace, el protocolo y el emparejamiento no se tocan, porque
+ * ninguno de los tres sabe por donde viajan las tramas.
+ *
+ * Lo que le falta para volver a estar vivo:
+ *   1. el firmware `esp-hosted` del C6 compilado CON Bluetooth,
+ *   2. una pila de host BLE en el P4 contra ese controlador remoto,
+ *   3. actualizar este servidor al apreton de manos de Flex Link v2
+ *      (T_AUTH_*), que es lo que sustituyo al bonding como fuente de
+ *      autenticacion.
+ *
+ * Ver `docs/FLEX-PHONE.md`, seccion del transporte BLE.
+ *
+ * ---------------------------------------------------------------
  * Servidor GATT: el telefono es el PERIFERICO y Flex OS el central.
  *
  * POR QUE ASI Y NO AL REVES
