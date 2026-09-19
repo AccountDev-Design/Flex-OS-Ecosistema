@@ -49,6 +49,41 @@
 // ##  seis divisiones enteras por pixel; esto hace UNA pasada de
 // ##  mezclas sin division. Visualmente es el mismo material.
 // #############################################################
+// Un tramo de borde del panel rapido. Es el gemelo EN SITIO de
+// glassEdgeSpan: misma matematica, mismo orden de operaciones y el mismo
+// resultado; lo unico que cambia es que el fondo se lee del propio buffer a
+// traves del anillo de filas (glSampleIP) en vez de un buffer aparte.
+// 'i0/i1' van en coordenadas del PANEL, 'curY' es la fila absoluta.
+static void qpEdgeSpan(GlassEdge& ge, uint16_t* dst, int x, int y, int w, int h,
+                       int curY, int i0, int i1,
+                       uint16_t tint, uint8_t tintMix, uint16_t shCol, uint8_t shA){
+  if(i0 < 0) i0 = 0;
+  if(i1 > w - 1) i1 = w - 1;
+  const int sy4 = (curY - y) << 4;
+  for(int i = i0; i <= i1; i++){
+    int ax = x + i;
+    if(ax < 0 || ax >= SCR_W) continue;
+    GlassPx o;
+    if(!glEdgePx(ge, i, o)){                 // centro puro: la mezcla de siempre
+      uint16_t c = mix565(dst[ax], tint, tintMix);
+      if(shA) c = mix565(c, shCol, shA);
+      dst[ax] = c;
+      continue;
+    }
+    if(o.cov == 0) continue;                 // fuera del redondeo: el fondo se queda
+    // Mismo atajo que en glassEdgeSpan: sin desplazamiento, el pixel de
+    // origen es el suyo y la bilineal sobra.
+    uint16_t c = (o.ox4 | o.oy4 | o.chx4 | o.chy4)
+                   ? glRefractIP(o, gBuf, SCR_W, x, y, w, h, curY, i << 4, sy4)
+                   : dst[ax];
+    c = mix565(c, tint, tintMix);
+    if(shA) c = mix565(c, shCol, shA);
+    c = glLight(o, c);
+    c = GL_DEBUG_PX(o, c);
+    dst[ax] = (o.cov == 255) ? c : mix565(dst[ax], c, o.cov);
+  }
+}
+
 static void qpGlassSurface(int x, int y, int w, int h, int rad, uint16_t tint, int mixBase){
   if(w <= 0 || h <= 0) return;
   if(2 * rad > w) rad = w / 2;
@@ -86,6 +121,24 @@ static void qpGlassSurface(int x, int y, int w, int h, int rad, uint16_t tint, i
   int hTop = h * 45 / 100; if(hTop > 70) hTop = 70;
   int hBot = h - (h * 45 / 100); if(hBot > 90) hBot = 90;
   const int yBot = h - hBot;
+  // MISMO material avanzado que el resto del sistema, con una sola diferencia
+  // tecnica: aqui el origen del muestreo y el destino son EL MISMO buffer
+  // (el panel se compone en sitio), asi que la refraccion lee por el anillo
+  // de filas -- ver glSampleIP. Sin material avanzado (perfil LOW, superficie
+  // minuscula) esta funcion hace exactamente lo que hacia antes.
+  GlassEdge ge;
+  // EL PANEL TIENE QUE CABER ENTERO EN PANTALLA para tomar la ruta avanzada.
+  // A diferencia de drawLiquidGlassPanelEx, esta funcion NO recorta x/w al
+  // borde: recorta por fila al escribir. Eso le vale al material clasico,
+  // que solo toca la columna que escribe, pero no al muestreo con
+  // refraccion, que se desplaza unos pixeles y leeria fuera de la fila. Una
+  // superficie que asome por un lado -- el bloque fantasma del editor al
+  // arrastrarlo -- se compone con el material de siempre, que es correcto y
+  // se ve bien; lo que no puede hacer es leer memoria ajena.
+  const bool adv = uiGlass && x >= 0 && w > 0 && x + w <= SCR_W
+                   && glEdgeBegin(ge, w, h, rad, x, y);
+  const uint32_t advT0 = adv ? micros() : 0u;
+  if(adv) glRingBegin();
   for(int j = 0; j < h; j++){
     int yy = y + j;
     if(yy < 0 || yy >= SCR_H || yy < gClipY0 || yy > gClipY1) continue;
@@ -102,6 +155,35 @@ static void qpGlassSurface(int x, int y, int w, int h, int rad, uint16_t tint, i
     int i1 = rx > gClipX1 ? gClipX1 : rx;
     if(i0 < 0) i0 = 0;
     if(i1 > SCR_W - 1) i1 = SCR_W - 1;
+    if(adv){
+      // La fila se guarda ENTERA (todo el ancho del panel, no solo el tramo
+      // recortado) antes de tocarla: la refraccion de las filas de abajo
+      // puede pedir columnas que este recorte deja fuera.
+      glRingPut(yy, dst, x, w);
+      glEdgeRow(ge, j);
+      uint16_t shCol = sa ? rgb565(255,255,255) : rgb565(0,0,0);
+      uint8_t  shA   = sa ? sa : da;
+      int p0 = i0 - x, p1 = i1 - x;                 // a coordenadas del panel
+      if(p0 < 0) p0 = 0;
+      if(p1 > w - 1) p1 = w - 1;
+      if(p0 > p1) continue;
+      int c0, c1;
+      if(glEdgeCenterSpan(ge, c0, c1)){
+        if(c0 - 1 >= p0)
+          qpEdgeSpan(ge, dst, x, y, w, h, yy, p0, (c0 - 1 < p1 ? c0 - 1 : p1), tint, tintMix, shCol, shA);
+        int m0 = c0 > p0 ? c0 : p0, m1 = c1 < p1 ? c1 : p1;
+        for(int i = x + m0; i <= x + m1; i++){
+          uint16_t out = mix565(dst[i], tint, tintMix);
+          if(shA) out = mix565(out, shCol, shA);
+          dst[i] = out;
+        }
+        if(c1 + 1 <= p1)
+          qpEdgeSpan(ge, dst, x, y, w, h, yy, (c1 + 1 > p0 ? c1 + 1 : p0), p1, tint, tintMix, shCol, shA);
+      } else {
+        qpEdgeSpan(ge, dst, x, y, w, h, yy, p0, p1, tint, tintMix, shCol, shA);
+      }
+      continue;                 // el borde de 2 px lo sustituye la luz del SDF
+    }
     for(int i = i0; i <= i1; i++){
       uint16_t out = mix565(dst[i], tint, tintMix);
       if(sa)      out = mix565(out, rgb565(255,255,255), sa);
@@ -118,6 +200,7 @@ static void qpGlassSurface(int x, int y, int w, int h, int rad, uint16_t tint, i
     if(rx >= gClipX0 && rx <= gClipX1 && rx >= 0 && rx < SCR_W)
       dst[rx] = mix565(dst[rx], bcol, topZone ? GLASS_CORNER_WEAK : GLASS_CORNER_STRONG);
   }
+  if(adv) glStatAdd(micros() - advT0);
 }
 
 // Mezclas de tinte por tipo de superficie. Con Liquid Glass activo el vidrio
@@ -905,6 +988,13 @@ static void qpProfReport(const char* que){
                   (unsigned long)(qpPfDragUs ? 1000000UL / (qpPfDragUs / qpPfDragFrames) : 0));
   Serial.printf("[QP]   filas compuestas %lu, publicadas %lu, capas de vidrio %lu\n",
                 (unsigned long)qpPfRowsComp, (unsigned long)qpPfRowsPub, (unsigned long)qpPfGlass);
+  // Perfil del material y lo que costo. Va en el MISMO informe de cierre que
+  // ya existia -- una vez por sesion de cortina, no por cuadro -- porque es
+  // la unica cifra con la que se puede juzgar si la calidad adaptativa esta
+  // haciendo su trabajo o si el material se esta pasando de presupuesto.
+  static const char* kQN[GLQ_N] = { "ULTRA", "ALTA", "MEDIA", "BAJA" };
+  Serial.printf("[QP]   material: calidad %s (pedida %s), %lu us de vidrio en la ventana\n",
+                kQN[gGlassQNow], kQN[gGlassQWant], (unsigned long)glStatUs);
 }
 #else
 static inline void qpProfReset(){}

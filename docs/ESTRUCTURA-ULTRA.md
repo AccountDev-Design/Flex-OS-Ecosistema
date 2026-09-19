@@ -71,12 +71,13 @@ Esa frontera no se ha tocado.
 | `FlexOS_Ultra_Types.h`            |   668 | tipos de firma, interruptores maestros y estado temprano |
 | `FlexOS_Ultra_HAL.h`              |   434 | panel MIPI-DSI (ST7701) y tactil GT911  -- capa de hardware |
 | `FlexOS_Ultra_Gfx.h`              |   568 | motor grafico 480x800: framebuffers PSRAM, DMA2D y primitivas |
+| `FlexOS_Ultra_Glass.h`            |   826 | material de vidrio: SDF, refraccion, Fresnel, toque y calidad adaptativa |
 | `FlexOS_Ultra_Wallpaper.h`        |   479 | catalogo de fondos, fondo desde imagen real y paleta |
-| `FlexOS_Ultra_Theme.h`            |   746 | tema semantico, claro/oscuro, Liquid Glass y superficies |
+| `FlexOS_Ultra_Theme.h`            |   968 | tema semantico, claro/oscuro, Liquid Glass y superficies |
 | `FlexOS_Ultra_Text.h`             |   170 | tipografia base, acentos, reloj vectorial y triangulos |
 | `FlexOS_Ultra_Font.h`             |  1922 | fuente Outfit 4bpp (tablas + rasterizador) |
 | `FlexOS_Ultra_Icons.h`            |   292 | iconos vectoriales del sistema y enum IC_* de apps |
-| `FlexOS_Ultra_Touch.h`            |   377 | gestos de alto nivel y suspension de pantalla |
+| `FlexOS_Ultra_Touch.h`            |   379 | gestos de alto nivel y suspension de pantalla |
 | `FlexOS_Ultra_Prefs.h`            |   334 | preferencias en NVS, idiomas y ajustes del teclado |
 | `FlexOS_Ultra_Session.h`          |   396 | sesiones en LittleFS, modo seguro y restablecimiento |
 | `FlexOS_Ultra_Clock.h`            |   202 | reloj del sistema (epoca UTC) y API de NTP |
@@ -92,7 +93,7 @@ Esa frontera no se ha tocado.
 | `FlexOS_Ultra_DeXDraw.h`          |  1148 | Modo PC / DeX: dibujo |
 | `FlexOS_Ultra_DeXInput.h`         |   619 | Modo PC / DeX: entrada, APP_REG y ciclo de vida |
 | `FlexOS_Ultra_QuickPanel.h`       |   895 | panel rapido: catalogo de controles y render |
-| `FlexOS_Ultra_QuickPanelGlass.h`  |  1581 | panel rapido: material Liquid Glass cacheado |
+| `FlexOS_Ultra_QuickPanelGlass.h`  |  1689 | panel rapido: material Liquid Glass cacheado |
 | `FlexOS_Ultra_QuickPanelEdit.h`   |   545 | panel rapido: modo edicion |
 | `FlexOS_Ultra_Media.h`            |   454 | nucleo de medios LittleFS: clasificacion e indice |
 | `FlexOS_Ultra_AppMultimedia.h`    |  1378 | app Multimedia (reproductor real) |

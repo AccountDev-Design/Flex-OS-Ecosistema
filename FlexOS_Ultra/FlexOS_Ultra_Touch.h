@@ -359,4 +359,21 @@ static void flexPollTouch(){
     T.swipeUp = T.swipeDown = T.swipeLeft = T.swipeRight = false;
     T.down = false; T.moved = false;
   }
+  // -----------------------------------------------------------
+  //  DEFORMACION POR TOQUE DEL VIDRIO
+  //  ---------------------------------------------------------
+  //  Va en la ULTIMA linea del pipeline, despues de todos los filtros
+  //  (kiosco, navegacion, suspension, pellizco): el vidrio se hunde donde
+  //  el sistema de verdad ve el dedo, y no donde hubo un contacto que se
+  //  descarto.
+  //
+  //  Son tres asignaciones y ninguna llamada cara. AQUI NO se captura
+  //  pantalla, no se desenfoca y no se calcula ningun SDF -- eso seria
+  //  meter el coste del efecto dentro de la ruta del tacto, que es
+  //  exactamente donde no puede estar. El compositor lee este estado en
+  //  el cuadro que ya iba a dibujar (ver glEdgeBegin).
+  // -----------------------------------------------------------
+  if(T.pressed)       glassTouchDown(T.x, T.y);
+  else if(T.released) glassTouchUp();
+  else if(T.down)     glassTouchMove(T.x, T.y);
 }

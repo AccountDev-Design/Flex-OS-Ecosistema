@@ -26,7 +26,7 @@
 // ##      entrada del sistema es siempre FlexOS_Ultra.ino.
 // #############################################################
 #pragma once
-#include "FlexOS_Ultra_Gfx.h"   // eslabon anterior de la cadena
+#include "FlexOS_Ultra_Glass.h"   // eslabon anterior de la cadena
 
 // #############################################################
 // ##  CATALOGO DE FONDOS

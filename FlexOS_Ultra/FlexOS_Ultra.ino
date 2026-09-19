@@ -231,6 +231,7 @@
 #include "FlexOS_Ultra_Types.h"              // tipos de firma, interruptores maestros y estado temprano
 #include "FlexOS_Ultra_HAL.h"                // panel MIPI-DSI (ST7701) y tactil GT911  -- capa de hardware
 #include "FlexOS_Ultra_Gfx.h"                // motor grafico 480x800: framebuffers PSRAM, DMA2D y primitivas
+#include "FlexOS_Ultra_Glass.h"              // material de vidrio: SDF, refraccion, Fresnel y calidad adaptativa
 #include "FlexOS_Ultra_Wallpaper.h"          // catalogo de fondos, fondo desde imagen real y paleta
 #include "FlexOS_Ultra_Theme.h"              // tema semantico, claro/oscuro, Liquid Glass y superficies
 #include "FlexOS_Ultra_Text.h"               // tipografia base, acentos, reloj vectorial y triangulos
@@ -633,6 +634,7 @@ static uint32_t loopPaceMs(){
 void loop(){
   flexFeedWdt();          // alimenta el TWDT solo si loopTask sigue suscrito (ver arriba)
   loopRateTick();         // ritmo real del sistema (vueltas/s), un entero por vuelta
+  glassQualityTick();     // vidrio: una ventana de un segundo, no una decision por cuadro
   flexPollTouch();        // (aqui dentro corre tambien el detector de doble-tap de la suspension)
 
   // -----------------------------------------------------------

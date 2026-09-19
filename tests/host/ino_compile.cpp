@@ -4689,6 +4689,424 @@ static void testBlurNoPegado(){
   if(gFails == before) printf("  Blur pegado: todas las comprobaciones pasan.\n");
 }
 
+// #############################################################
+//  MATERIAL DE VIDRIO AVANZADO  ·  SDF, refraccion, Fresnel, toque
+//  ------------------------------------------------------------
+//  Se ejercita el compositor DE VERDAD (drawLiquidGlassPanelEx), no
+//  una copia de su matematica. Lo que se comprueba es exactamente lo
+//  que puede romper el sistema entero, y en este orden:
+//
+//   1. el CENTRO del panel sale bit a bit igual que con el material
+//      clasico -- o sea que el efecto es de borde y no ha cambiado el
+//      interior de las ~78 superficies de vidrio que hay repartidas
+//      por Flex OS;
+//   2. la HUELLA es la misma: ni un pixel fuera del rectangulo;
+//   3. es DETERMINISTA sobre un fondo limpio (si no, cada repintado
+//      parcial dejaria costuras);
+//   4. las ESQUINAS ganan cobertura intermedia (el antialias que
+//      sustituye al escalon de glInset);
+//   5. el estilo PLANO no cambia ni un pixel;
+//   6. el perfil LOW produce EXACTAMENTE el material de siempre, que
+//      es lo que hace que la degradacion sea segura;
+//   7. el toque deforma, caduca solo y no se queda grabado en la
+//      tarjeta cacheada;
+//   8. y cuanto cuesta, medido, contra el material clasico.
+// #############################################################
+static uint16_t* vgA = NULL;
+static uint16_t* vgB = NULL;
+// Fondo de la prueba. Bloques GRANDES y de mucho contraste, a proposito: el
+// desenfoque del vidrio es una caja de 13 px, asi que un damero fino saldria
+// casi liso al otro lado y la refraccion -- que lo unico que hace es mover el
+// muestreo unos pocos pixeles -- no tendria nada que doblar. Con bloques de
+// 48 px el fondo desenfocado conserva pendiente y el desplazamiento SE VE,
+// que es lo que la prueba tiene que poder medir.
+static void vgFondo(){
+  for(int y = 0; y < SCR_H; y++)
+    for(int x = 0; x < SCR_W; x++)
+      fb[(size_t)y * SCR_W + x] = ((x / 48 + y / 48) & 1) ? rgb565(232, 240, 255)
+                                                          : rgb565(10, 14, 26);
+}
+// Pixeles distintos SOLO dentro de una ventana [x0,x1] de las filas [y0,y1].
+static int vgDiffBox(const uint16_t* a, const uint16_t* b, int y0, int y1, int x0, int x1){
+  int n = 0;
+  for(int y = y0; y <= y1; y++)
+    for(int x = x0; x <= x1; x++)
+      if(a[(size_t)(y - y0) * SCR_W + x] != b[(size_t)(y - y0) * SCR_W + x]) n++;
+  return n;
+}
+
+static void testVidrioAvanzado(){
+  printf("Liquid Glass avanzado: SDF, refraccion, Fresnel y toque\n");
+  const bool glassPrev = uiGlass;
+  const uint8_t qPrev = gGlassQWant;
+  uiGlass = true; gLand = false; gHosted = false;
+  uiClipFull(); setBuf(fb);
+  gTestMs = 900000;
+  glassTouchUp(); gTestMs += GL_TOUCH_MS + 1; (void)glTouchAmp();   // sin toque pendiente
+
+  if(!vgA) vgA = (uint16_t*)malloc((size_t)SCR_W * SCR_H * 2);
+  if(!vgB) vgB = (uint16_t*)malloc((size_t)SCR_W * SCR_H * 2);
+  if(!vgA || !vgB){ printf("  FALLO: sin memoria para la prueba\n"); gFails++; return; }
+
+  const int X = 20, Y = 200, W = 440, H = 160, R = 22;
+  const int Y0 = Y, Y1 = Y + H - 1;
+
+  // ---- 0. presupuesto de memoria del material -------------------------
+  // El material avanzado NO reserva ni un byte de PSRAM y no hace ni una
+  // asignacion dinamica: todo lo suyo son tablas en flash, dos structs de
+  // pila y UN anillo de filas en RAM interna. Se ata con numeros para que
+  // un cambio futuro que empiece a reservar salte aqui y no en la placa.
+  printf("   memoria del material: anillo %u B (RAM interna), GlassEdge %u B, GlassPx %u B,"
+         " tablas %u B (flash)\n",
+         (unsigned)sizeof(glRing), (unsigned)sizeof(GlassEdge), (unsigned)sizeof(GlassPx),
+         (unsigned)(sizeof(kGlFall) + sizeof(kGlRecip) + sizeof(kGlassQ)));
+  chk(sizeof(glRing) <= 8u * 1024u, "el anillo de filas cabe en 8 KB de RAM interna");
+  chk(sizeof(GlassEdge) <= 256u, "GlassEdge cabe en 256 B de pila");
+  chk(sizeof(GlassPx) <= 32u, "GlassPx cabe en 32 B de pila");
+
+  // ---- 1 y 6. centro identico al clasico, y LOW == clasico ------------
+  gGlassQWant = GLQ_LOW; glassQualityReset();
+  chk(!glassAdvanced(), "el perfil LOW no declara material avanzado");
+  vgFondo(); drawLiquidGlassPanel(X, Y, W, H, R, TH_GLASS);
+  lgGrab(vgA, Y0, Y1);
+
+  gGlassQWant = GLQ_ULTRA; glassQualityReset();
+  chk(glassAdvanced(), "el perfil ULTRA declara material avanzado");
+  vgFondo(); drawLiquidGlassPanel(X, Y, W, H, R, TH_GLASS);
+  lgGrab(vgB, Y0, Y1);
+
+  // El centro se mide DENTRO de la zona sin banda: banda = min(band, lado/3)
+  // mas el radio. Con ULTRA la banda son 14 px y el radio 22 -> 36 columnas
+  // y 36 filas a cada lado. Se toma un margen mas amplio (48) para que la
+  // comprobacion no dependa del valor exacto del perfil.
+  const int M = 48;
+  chk(vgDiffBox(vgA, vgB, Y0, Y1, X + M, X + W - 1 - M) > 0,
+      "hay diferencia en alguna parte del panel (si no, el efecto no hace nada)");
+  {
+    int n = 0;
+    for(int y = Y0 + M; y <= Y1 - M; y++)
+      for(int x = X + M; x <= X + W - 1 - M; x++)
+        if(vgA[(size_t)(y - Y0) * SCR_W + x] != vgB[(size_t)(y - Y0) * SCR_W + x]) n++;
+    chk(n == 0, "el CENTRO del panel es bit a bit el material clasico");
+  }
+  // ...y el borde SI cambia: el efecto existe.
+  chk(vgDiffBox(vgA, vgB, Y0, Y0 + 3, X, X + W - 1) > 0,
+      "el borde superior cambia con el material avanzado");
+  chk(vgDiffBox(vgA, vgB, Y1 - 3, Y1, X, X + W - 1) > 0,
+      "el borde inferior cambia con el material avanzado");
+
+  // ---- 2. huella: ni un pixel fuera del rectangulo --------------------
+  {
+    vgFondo(); lgGrab(vgA, 0, SCR_H - 1);
+    drawLiquidGlassPanel(X, Y, W, H, R, TH_GLASS);
+    lgGrab(vgB, 0, SCR_H - 1);
+    int fuera = 0;
+    for(int y = 0; y < SCR_H; y++)
+      for(int x = 0; x < SCR_W; x++){
+        if(y >= Y && y <= Y1 && x >= X && x < X + W) continue;
+        if(vgA[(size_t)y * SCR_W + x] != vgB[(size_t)y * SCR_W + x]) fuera++;
+      }
+    chk(fuera == 0, "el panel no escribe ni un pixel fuera de su rectangulo");
+  }
+
+  // ---- 3. determinista sobre fondo limpio -----------------------------
+  vgFondo(); drawLiquidGlassPanel(X, Y, W, H, R, TH_GLASS); lgGrab(vgA, Y0, Y1);
+  vgFondo(); drawLiquidGlassPanel(X, Y, W, H, R, TH_GLASS); lgGrab(vgB, Y0, Y1);
+  chk(lgDiff(vgA, vgB, Y0, Y1) == 0, "el material avanzado es determinista");
+
+  // ---- 4. esquinas con antialias --------------------------------------
+  // El material clasico recorta la esquina con glInset: el pixel esta o no
+  // esta. El avanzado la cubre por fraccion, asi que en la diagonal de la
+  // esquina aparecen pixeles que NO son ni el fondo puro ni el material.
+  {
+    gGlassQWant = GLQ_LOW; glassQualityReset();
+    vgFondo(); lgGrab(vgA, Y0, Y1);                       // fondo desnudo
+    drawLiquidGlassPanel(X, Y, W, H, R, TH_GLASS);
+    lgGrab(vgB, Y0, Y1);                                   // clasico
+    int clasicoIntermedio = 0, avanzadoIntermedio = 0;
+    // Cuantos pixeles de la esquina superior izquierda quedan TOCADOS. El
+    // material clasico recorta con glInset: dentro del inset escribe, fuera
+    // no, y no hay nada en medio. El avanzado cubre por fraccion, asi que
+    // toca ademas la corona de pixeles que el escalon dejaba fuera -- que es
+    // exactamente la escalera que se queria quitar.
+    auto cuenta = [&](const uint16_t* comp){
+      int n = 0;
+      for(int y = Y0; y < Y0 + R; y++)
+        for(int x = X; x < X + R; x++)
+          if(comp[(size_t)(y - Y0) * SCR_W + x] != vgA[(size_t)(y - Y0) * SCR_W + x]) n++;
+      return n;
+    };
+    clasicoIntermedio = cuenta(vgB);
+    gGlassQWant = GLQ_ULTRA; glassQualityReset();
+    vgFondo(); drawLiquidGlassPanel(X, Y, W, H, R, TH_GLASS);
+    lgGrab(vgB, Y0, Y1);
+    avanzadoIntermedio = cuenta(vgB);
+    printf("   esquina %dx%d: pixeles cubiertos  clasico %d  avanzado %d\n", R, R,
+           clasicoIntermedio, avanzadoIntermedio);
+    chk(avanzadoIntermedio > clasicoIntermedio,
+        "la esquina redondeada gana cobertura parcial (antialias) con el material avanzado");
+  }
+
+  // ---- 5. el estilo PLANO no cambia -----------------------------------
+  {
+    uiGlass = false;
+    gGlassQWant = GLQ_LOW;  glassQualityReset();
+    vgFondo(); qpGlassSurface(X, Y, W, H, R, TH_SURF, 255); lgGrab(vgA, Y0, Y1);
+    gGlassQWant = GLQ_ULTRA; glassQualityReset();
+    vgFondo(); qpGlassSurface(X, Y, W, H, R, TH_SURF, 255); lgGrab(vgB, Y0, Y1);
+    chk(lgDiff(vgA, vgB, Y0, Y1) == 0, "con el estilo Plano el material avanzado no toca nada");
+    uiGlass = true;
+  }
+
+  // ---- 5b. compositor EN SITIO (panel rapido) -------------------------
+  // Lee y escribe el mismo buffer: si el anillo de filas fallara, el tinte
+  // se aplicaria dos veces en el canto inferior y el resultado dejaria de
+  // ser determinista sobre el mismo fondo.
+  {
+    gGlassQWant = GLQ_ULTRA; glassQualityReset();
+    vgFondo(); qpGlassSurface(X, Y, W, H, R, TH_GLASS2, 128); lgGrab(vgA, Y0, Y1);
+    vgFondo(); qpGlassSurface(X, Y, W, H, R, TH_GLASS2, 128); lgGrab(vgB, Y0, Y1);
+    chk(lgDiff(vgA, vgB, Y0, Y1) == 0, "el compositor en sitio es determinista");
+    // y tampoco se sale de su rectangulo
+    vgFondo(); lgGrab(vgA, 0, SCR_H - 1);
+    qpGlassSurface(X, Y, W, H, R, TH_GLASS2, 128);
+    lgGrab(vgB, 0, SCR_H - 1);
+    int fuera = 0;
+    for(int y = 0; y < SCR_H; y++)
+      for(int x = 0; x < SCR_W; x++){
+        if(y >= Y && y <= Y1 && x >= X && x < X + W) continue;
+        if(vgA[(size_t)y * SCR_W + x] != vgB[(size_t)y * SCR_W + x]) fuera++;
+      }
+    chk(fuera == 0, "el compositor en sitio no escribe fuera de su rectangulo");
+  }
+
+  // ---- 5c. compositor de BANDA PRE-DESENFOCADA ------------------------
+  // Es la ruta de los overlays que se animan sobre un fondo quieto (menu
+  // contextual, tarjeta del cronometro). Su origen NO es compacto: es una
+  // banda de pantalla completa de la que solo interesan las columnas del
+  // panel, o sea que el paso de fila es SCR_W y no el ancho del panel.
+  // Confundirlos no se sale de ningun buffer -- por eso no lo caza ningun
+  // sanitizer -- pero hace que el vidrio muestree filas desplazadas.
+  //
+  // La prueba lo ata por construccion: la banda se desenfoca a partir del
+  // MISMO fondo, asi que el panel cacheado tiene que salir muy parecido al
+  // panel normal. Con el paso mal, sale otra cosa.
+  {
+    gGlassQWant = GLQ_ULTRA; glassQualityReset();
+    const int BY0 = Y - 20, BY1 = Y1 + 20;
+    // FONDO DE FRANJAS HORIZONTALES, y no el damero de vgFondo(): es lo que
+    // hace que esta comprobacion distinga el paso de fila. Con un fondo que
+    // NO depende de x, el desenfoque de la banda (ancho de pantalla) y el del
+    // panel (ancho del panel) dan lo mismo hasta en los bordes laterales, asi
+    // que las dos rutas tienen que coincidir en TODO el panel -- bandas de
+    // borde incluidas, que es donde vive el desplazamiento vertical. Y si el
+    // muestreo usara el paso equivocado leeria OTRA franja, que sobre este
+    // fondo es un color distinto y salta en el acto.
+    auto fondoFranjas = [](){
+      for(int y = 0; y < SCR_H; y++){
+        uint16_t c = ((y / 24) & 1) ? rgb565(236, 242, 255) : rgb565(10, 14, 26);
+        for(int x = 0; x < SCR_W; x++) fb[(size_t)y * SCR_W + x] = c;
+      }
+    };
+    fondoFranjas();
+    drawLiquidGlassPanel(X, Y, W, H, R, TH_GLASS);
+    lgGrab(vgA, Y0, Y1);                                 // referencia: panel normal
+
+    fondoFranjas();
+    chk(uiGlassBandBegin(BY0, BY1, TH_GLASS), "la banda pre-desenfocada se arma");
+    uiGlassPanelCached(X, Y, W, H, R, TH_GLASS, 255);
+    lgGrab(vgB, Y0, Y1);
+    int iguales = 0, tot = 0, peor = 0;
+    for(int y = Y0; y <= Y1; y++)
+      for(int x = X; x < X + W; x++){
+        uint16_t a = vgA[(size_t)(y - Y0) * SCR_W + x], b = vgB[(size_t)(y - Y0) * SCR_W + x];
+        int la = glassLuma(a), lb = glassLuma(b), d = la > lb ? la - lb : lb - la;
+        if(d <= 10) iguales++; else if(d > peor) peor = d;
+        tot++;
+      }
+    if(tot && iguales * 100 < tot * 98)
+      printf("   banda cacheada: solo coincide el %.1f %% (peor desvio %d)\n",
+             100.0 * iguales / tot, peor);
+    chk(tot > 0 && iguales * 100 >= tot * 98,
+        "el panel sobre banda cacheada coincide con el panel normal");
+    // determinista, y sin salirse de su rectangulo
+    vgFondo(); uiGlassBandBegin(BY0, BY1, TH_GLASS);
+    uiGlassPanelCached(X, Y, W, H, R, TH_GLASS, 255); lgGrab(vgA, 0, SCR_H - 1);
+    vgFondo(); uiGlassBandBegin(BY0, BY1, TH_GLASS);
+    uiGlassPanelCached(X, Y, W, H, R, TH_GLASS, 255); lgGrab(vgB, 0, SCR_H - 1);
+    chk(lgDiff(vgA, vgB, 0, SCR_H - 1) == 0, "el panel sobre banda cacheada es determinista");
+    vgFondo(); uiGlassBandBegin(BY0, BY1, TH_GLASS); lgGrab(vgA, 0, SCR_H - 1);
+    uiGlassPanelCached(X, Y, W, H, R, TH_GLASS, 255); lgGrab(vgB, 0, SCR_H - 1);
+    int fuera = 0;
+    for(int y = 0; y < SCR_H; y++)
+      for(int x = 0; x < SCR_W; x++){
+        if(y >= Y && y <= Y1 && x >= X && x < X + W) continue;
+        if(vgA[(size_t)y * SCR_W + x] != vgB[(size_t)y * SCR_W + x]) fuera++;
+      }
+    chk(fuera == 0, "el panel sobre banda cacheada no escribe fuera de su rectangulo");
+    // y con alpha parcial sigue siendo vidrio, no un relleno plano
+    vgFondo(); uiGlassBandBegin(BY0, BY1, TH_GLASS);
+    uiGlassPanelCached(X, Y, W, H, R, TH_GLASS, 96); lgGrab(vgA, Y0, Y1);
+    chk(lgDiff(vgA, vgB, Y0, Y1) > 0, "el alpha del material cambia el resultado");
+    uiGlassBandEnd();
+    chk(!uiGlassBandActive(), "la banda pre-desenfocada se cierra");
+  }
+
+  // ---- 7. deformacion por toque ---------------------------------------
+  {
+    gGlassQWant = GLQ_ULTRA; glassQualityReset();
+    gTestMs = 950000;
+    vgFondo(); drawLiquidGlassPanel(X, Y, W, H, R, TH_GLASS); lgGrab(vgA, Y0, Y1);
+
+    glassTouchDown(X + W / 2, Y + H / 2);       // dedo en el centro del panel
+    gTestMs += 80;                              // amplitud al tope
+    vgFondo(); drawLiquidGlassPanel(X, Y, W, H, R, TH_GLASS); lgGrab(vgB, Y0, Y1);
+    chk(lgDiff(vgA, vgB, Y0, Y1) > 0, "el dedo deforma el vidrio que toca");
+
+    // un panel LEJOS del dedo no se entera
+    const int FX = 20, FY = 40, FW = 200, FH = 90;
+    vgFondo(); drawLiquidGlassPanel(FX, FY, FW, FH, 16, TH_GLASS);
+    lgGrab(vgA, FY, FY + FH - 1);
+    vgFondo(); drawLiquidGlassPanel(FX, FY, FW, FH, 16, TH_GLASS);
+    lgGrab(vgB, FY, FY + FH - 1);
+    chk(lgDiff(vgA, vgB, FY, FY + FH - 1) == 0, "un panel lejos del dedo no paga nada");
+
+    // y caduca: al soltar y esperar, se vuelve exactamente al estado de reposo
+    glassTouchUp();
+    gTestMs += GL_TOUCH_MS + 1;
+    chk(!glassTouchLive(), "la deformacion por toque caduca sola");
+    vgFondo(); drawLiquidGlassPanel(X, Y, W, H, R, TH_GLASS); lgGrab(vgB, Y0, Y1);
+    vgFondo(); drawLiquidGlassPanel(X, Y, W, H, R, TH_GLASS); lgGrab(vgA, Y0, Y1);
+    chk(lgDiff(vgA, vgB, Y0, Y1) == 0, "tras caducar el toque, el vidrio vuelve a reposo");
+  }
+
+  // ---- 7b. el toque NO se graba en la tarjeta cacheada -----------------
+  // drawGlassCardFlat compone fuera de pantalla y reutiliza el resultado en
+  // cualquier posicion: un hundimiento grabado ahi se quedaria pegado.
+  {
+    const int CW = 400, CH = 60, CR = 16;
+    const uint16_t BG = rgb565(24, 30, 48);
+    glcValid = false;
+    fillRect(0, 0, SCR_W, SCR_H, BG);
+    drawGlassCardFlat(40, 300, CW, CH, CR, TH_GLASS, BG);
+    lgGrab(vgA, 300, 300 + CH - 1);
+    glassTouchDown(40 + CW / 2, 300 + CH / 2);
+    gTestMs += 80;
+    glcValid = false;                              // fuerza recomponer la cache
+    fillRect(0, 0, SCR_W, SCR_H, BG);
+    drawGlassCardFlat(40, 300, CW, CH, CR, TH_GLASS, BG);
+    lgGrab(vgB, 300, 300 + CH - 1);
+    chk(lgDiff(vgA, vgB, 300, 300 + CH - 1) == 0,
+        "el dedo no se graba en la tarjeta de vidrio cacheada");
+    glassTouchUp(); gTestMs += GL_TOUCH_MS + 1; (void)glTouchAmp();
+    // y un cambio de perfil SI invalida la cache
+    glcValid = false;
+    fillRect(0, 0, SCR_W, SCR_H, BG);
+    drawGlassCardFlat(40, 300, CW, CH, CR, TH_GLASS, BG);
+    uint32_t genPrev = glcGen;
+    gGlassQWant = GLQ_MEDIUM; glassQualityReset();
+    fillRect(0, 0, SCR_W, SCR_H, BG);
+    drawGlassCardFlat(40, 300, CW, CH, CR, TH_GLASS, BG);
+    chk(glcGen != genPrev, "un cambio de perfil recompone la tarjeta cacheada");
+    gGlassQWant = GLQ_ULTRA; glassQualityReset();
+  }
+
+  // ---- 7c. ruido aleatorio sobre los tres compositores -----------------
+  // Geometrias, radios, recortes, perfiles y posiciones del dedo al azar,
+  // contra el codigo de verdad y con AddressSanitizer detras. Lo que se
+  // busca aqui no es que "se vea bien": es que NINGUNA combinacion lea o
+  // escriba un pixel que no le pertenece. El muestreo con refraccion se
+  // desplaza y las esquinas hacen aritmetica con raices: es justo el tipo de
+  // codigo en el que un caso raro se sale del buffer sin que nadie lo note.
+  {
+    uint32_t rnd = 0x1234567u;
+    auto nx = [&](int lo, int hi){ rnd = rnd * 1103515245u + 12345u;
+                                   return lo + (int)((rnd >> 16) % (uint32_t)(hi - lo + 1)); };
+    for(int it = 0; it < 400; it++){
+      gGlassQWant = (uint8_t)nx(0, GLQ_N - 1); glassQualityReset();
+      int ww = nx(3, SCR_W), hh = nx(3, 360);
+      int xx = nx(0, SCR_W - 1), yy = nx(0, SCR_H - 1);
+      if(xx + ww > SCR_W) ww = SCR_W - xx;
+      if(yy + hh > SCR_H) hh = SCR_H - yy;
+      if(ww < 3 || hh < 3) continue;
+      int rr = nx(0, (ww < hh ? ww : hh) / 2);
+      // recorte vertical y horizontal arbitrarios, como los de una lista
+      gClipY0 = nx(0, SCR_H - 1); gClipY1 = nx(gClipY0, SCR_H - 1);
+      gClipX0 = nx(0, SCR_W - 1); gClipX1 = nx(gClipX0, SCR_W - 1);
+      if(nx(0, 3) == 0){ glassTouchDown(nx(-40, SCR_W + 40), nx(-40, SCR_H + 40)); gTestMs += nx(0, 260); }
+      else             { glassTouchUp(); gTestMs += nx(0, 400); }
+      switch(nx(0, 2)){
+        case 0: drawLiquidGlassPanel(xx, yy, ww, hh, rr, TH_GLASS); break;
+        case 1: qpGlassSurface(xx, yy, ww, hh, rr, TH_GLASS2, nx(96, 255)); break;
+        default:
+          uiClipFull();
+          if(uiGlassBandBegin(yy, yy + (hh < UIGL_BAND_MAX_H ? hh : UIGL_BAND_MAX_H - 1), TH_GLASS)){
+            gClipY0 = nx(0, SCR_H - 1); gClipY1 = nx(gClipY0, SCR_H - 1);
+            gClipX0 = nx(0, SCR_W - 1); gClipX1 = nx(gClipX0, SCR_W - 1);
+            uiGlassPanelCached(xx, yy, ww, hh, rr, TH_GLASS, (uint8_t)nx(1, 255));
+            uiGlassBandEnd();
+          }
+          break;
+      }
+    }
+    uiClipFull();
+    glassTouchUp(); gTestMs += GL_TOUCH_MS + 1; (void)glTouchAmp();
+    // El veredicto de este bloque lo da AddressSanitizer: si algo se sale,
+    // la bateria entera aborta ahi mismo con la pila del acceso.
+    printf("   ruido: 400 paneles al azar (geometria, radio, recorte, perfil y dedo), sin accesos fuera de rango\n");
+  }
+
+  // ---- 8. coste medido -------------------------------------------------
+  // Se cronometra el compositor COMPLETO (copia + desenfoque + material) en
+  // los cuatro perfiles, sobre la misma geometria y el mismo fondo. La cifra
+  // que importa no es el absoluto del PC, sino el SOBRECOSTE del material
+  // avanzado sobre el clasico: ese porcentaje si se traslada a la placa,
+  // porque las dos rutas hacen el mismo desenfoque y se diferencian solo en
+  // la pasada de composicion.
+  {
+    // MEJOR DE TRES, no la media: esto corre en un PC compartido y una
+    // rafaga del planificador infla una medida con facilidad. El minimo es
+    // la unica estadistica robusta cuando el ruido solo puede sumar.
+    const int REP = 30;
+    unsigned long us[GLQ_N];
+    for(int q = 0; q < GLQ_N; q++) us[q] = 0xFFFFFFFFul;
+    for(int pass = 0; pass < 3; pass++)
+      for(int q = GLQ_N - 1; q >= 0; q--){
+        gGlassQWant = (uint8_t)q; glassQualityReset();
+        vgFondo();
+        unsigned long t0 = micros();
+        for(int k = 0; k < REP; k++) drawLiquidGlassPanel(X, Y, W, H, R, TH_GLASS);
+        unsigned long m = (micros() - t0) / REP;
+        if(m < us[q]) us[q] = m;
+      }
+    printf("   coste de un panel 440x160 r22 (PC, mejor de 3 x %d repeticiones):\n", REP);
+    static const char* nom[GLQ_N] = { "ULTRA ", "HIGH  ", "MEDIUM", "LOW   " };
+    for(int q = 0; q < GLQ_N; q++)
+      printf("     %s %5lu us   %+.0f %% sobre el material clasico\n",
+             nom[q], us[q], us[GLQ_LOW] ? 100.0 * ((double)us[q] - us[GLQ_LOW]) / us[GLQ_LOW] : 0.0);
+    chk(us[GLQ_ULTRA] < us[GLQ_LOW] * 3,
+        "el material avanzado no llega a triplicar el coste del clasico");
+    chk(us[GLQ_MEDIUM] <= us[GLQ_ULTRA],
+        "bajar de perfil no puede salir mas caro");
+  }
+
+  // ---- 9. la calidad adaptativa reacciona de verdad --------------------
+  {
+    gGlassQWant = GLQ_ULTRA; glassQualityReset();
+    gTestMs += 10; glassQualityTick();                 // abre la ventana
+    for(int w = 0; w < 4; w++){ glStatAdd(600000); gTestMs += 1000; glassQualityTick(); }
+    chk(gGlassQNow == GLQ_LOW, "la calidad baja hasta el suelo con presion sostenida");
+    for(int w = 0; w < 12; w++){ glStatAdd(500); gTestMs += 1000; glassQualityTick(); }
+    chk(gGlassQNow == GLQ_ULTRA, "la calidad se recupera al aliviarse la presion");
+    gEffMode = true; glassQualityReset();
+    chk(gGlassQNow >= GLQ_MEDIUM, "el modo visual eficiente pone techo al vidrio");
+    gEffMode = false;
+  }
+
+  uiGlass = glassPrev; gGlassQWant = qPrev; glassQualityReset();
+  glcValid = false;
+}
+
 static void testLiquidGlassSinApilar(){
   printf("Liquid Glass: las animaciones no apilan capas de blur\n");
   bool glassPrev = uiGlass;
@@ -6798,6 +7216,7 @@ int main(){
   testProteccionRobo();
   testLiquidGlassSinApilar();
   testBlurNoPegado();
+  testVidrioAvanzado();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }
