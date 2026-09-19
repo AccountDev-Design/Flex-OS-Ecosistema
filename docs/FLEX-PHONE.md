@@ -1,5 +1,9 @@
 # Flex Phone
 
+> ¿Solo quieres **navegar usando el móvil como servidor**? Esa guía, paso a
+> paso y sin tecnicismos, está en
+> [`docs/NAVEGADOR-CON-EL-MOVIL.md`](NAVEGADOR-CON-EL-MOVIL.md).
+
 Ecosistema que conecta un teléfono Android con **Flex OS Ultra**
 (ESP32‑P4) por **Wi‑Fi**: notificaciones reales, respuestas rápidas cuando
 Android las permite, control multimedia y un navegador servido por el propio
