@@ -110,7 +110,15 @@ typedef struct {
   uint32_t          nConnects, nDrops, nDesync;
 } FlexPhoneWifiCtx;
 
+// Espera maxima entre reintentos de conexion, y cuanto tiene que
+// aguantar un socket abierto para que esa espera vuelva a cero.
+#define FLPW_RECONNECT_MAX_MS  15000
+#define FLPW_RECONNECT_OK_MS   10000
+
 static FlexPhoneWifiCtx fpwCtx;
+// Cuantas veces seguidas fallo la conexion. Solo lo toca la tarea de
+// red, asi que no necesita el mutex.
+static uint8_t fpwBackoff = 0;
 
 static inline void fpwLock(){ if(fpwCtx.mux) xSemaphoreTake(fpwCtx.mux, portMAX_DELAY); }
 static inline void fpwUnlock(){ if(fpwCtx.mux) xSemaphoreGive(fpwCtx.mux); }
@@ -438,6 +446,11 @@ static void fpwTask(void*){
     }
 
     fpwCtx.nConnects++;
+    // Conexion abierta: la espera progresiva se reinicia solo cuando
+    // el enlace llegue a AGUANTAR (ver mas abajo), no por el hecho de
+    // abrir el socket -- abrir y que te lo cierren en el acto es
+    // justo el caso que no puede reiniciar nada.
+    const uint32_t openedAtMs = millis();
     accN = 0;
     fpwLock();
     flexRingInit(&fpwCtx.rx);
@@ -483,6 +496,10 @@ static void fpwTask(void*){
       if(!worked) vTaskDelay(pdMS_TO_TICKS(10));
     }
 
+    // Si el socket AGUANTO un rato, el camino es bueno: la proxima
+    // caida vuelve a reintentar deprisa.
+    if(millis() - openedAtMs >= FLPW_RECONNECT_OK_MS) fpwBackoff = 0;
+
 closed:
     cli.stop();
     fpwCtx.nDrops++;
@@ -495,7 +512,26 @@ closed:
       fpwLock();
       if(!fpwCtx.fixed){ fpwCtx.port = 0; fpwCtx.peer[0] = 0; }
       fpwUnlock();
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      // #########################################################
+      // ##  ESPERA PROGRESIVA, NO UN SEGUNDO FIJO
+      // ##  --------------------------------------------------
+      // ##  Esto NO es lo que arregla el ciclo de conecta/
+      // ##  desconecta -- eso se cura en el telefono, dejando de
+      // ##  guardar el hueco de la sesion para un socket muerto.
+      // ##  Es lo que evita que, cuando de verdad no se puede
+      // ##  conectar, el reloj martillee el puerto una vez por
+      // ##  segundo para siempre: gasta bateria y radio, y llena
+      // ##  el telefono de conexiones que solo sirven para
+      // ##  cerrarse.
+      // ##
+      // ##  Una conexion que AGUANTA reinicia la cuenta, asi que
+      // ##  un corte suelto se sigue recuperando en un segundo.
+      // #########################################################
+      uint32_t wait = flexLinkRetryDelayMs(fpwBackoff);
+      if(wait == 0) wait = FLPW_RECONNECT_MAX_MS;   // ya se agoto: se reintenta despacio
+      if(wait > FLPW_RECONNECT_MAX_MS) wait = FLPW_RECONNECT_MAX_MS;
+      if(fpwBackoff < 255) fpwBackoff++;
+      vTaskDelay(pdMS_TO_TICKS(wait));
     }
   }
 

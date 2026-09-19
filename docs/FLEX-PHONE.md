@@ -404,6 +404,84 @@ Ahora:
   más viejo que los 30 s del plazo: el enlace se declaraba muerto en el cuadro
   siguiente a emparejar bien.
 
+### La sesión persistente: una conexión, un dueño
+
+Después de emparejar, el enlace entraba en un ciclo
+`CONECTADO → DESCONECTADO → CONECTADO` de aproximadamente **1 Hz**.
+
+**Quién colgaba primero: el teléfono**, y por dos motivos distintos.
+
+**1) La limpieza de una conexión cerraba la de otra.** Todo el estado vivía en
+campos compartidos del servidor (`sock`, `out`, `authed`, `txCounter`…):
+`serve()` los pisaba al entrar y `closeSession()` los borraba al salir, fuera
+de quién fuera la sesión en ese momento.
+
+```
+muere el socket A            (basta un hipo de Wi-Fi)
+  → el reloj reconecta 1 s después           → socket B
+  → el hilo de A sigue dentro de read()      → accept() cierra B: "ya hay sesión"
+  → el reloj reconecta                        → socket C
+  → el hilo de A despierta y su finally cierra "la sesión"... que ya es C
+```
+
+Los dos últimos pasos se rearman entre sí: la conexión buena moría siempre a
+manos de la limpieza de la anterior.
+
+**2) Un socket muerto guardaba el hueco.** Cuando el socket del reloj muere
+**sin aviso** — se va el Wi-Fi, el reloj se reinicia — en el teléfono no hay
+ningún FIN que leer: `read()` sigue bloqueado y esa conexión conserva la sesión
+hasta que salte el plazo de inactividad, 40 s después. Mientras tanto el reloj
+reintentaba cada segundo y se le cerraba la puerta cada segundo.
+
+Ahora:
+
+| Antes | Ahora |
+|---|---|
+| estado de la conexión en campos compartidos | cada conexión es un objeto `Conn` con su estado dentro |
+| `closeSession()` cerraba «la sesión activa» | `closeSession(c)` cierra **su** conexión, y solo si aún es la dueña |
+| `accept()` cerraba a quien llegara si había sesión | se le sirve, pero **no** se le da la sesión |
+| el hueco se soltaba al morir el socket | el hueco **cambia de dueño al autenticarse** |
+
+La regla es una sola: **el hueco de la sesión solo cambia de dueño cuando
+alguien completa la autenticación.** Un desconocido no puede autenticarse, así
+que no puede desalojar a nadie — lo fija `testUnaSolaSesion`. Y el reloj de
+verdad, que sí puede, recupera su sesión sin esperar a que se enfríe el
+cadáver.
+
+El reloj, por su parte, pasa a reintentar con **espera progresiva** en vez de
+cada segundo fijo (`FLPW_RECONNECT_MAX_MS`), y una conexión que aguanta
+`FLPW_RECONNECT_OK_MS` reinicia esa cuenta. Eso **no** es lo que cura el ciclo
+—eso se cura en el teléfono— pero evita martillear el puerto cuando de verdad
+no se puede conectar.
+
+### Cómo se comprueba: `tests/link/`
+
+El fallo era una **carrera entre hilos y sockets**, y reproducirla a mano en el
+teléfono depende de la suerte. `tests/link/run.sh` compila el
+`WifiLinkServer` **real** —el mismo fichero que va en el APK— contra sockets
+TCP de verdad, con tres dobles mínimos del SDK (`Context`, `WifiManager`,
+`Log`), y provoca la carrera a propósito:
+
+| Comprobación | Qué fija |
+|---|---|
+| una sesión sana no se cae sola | ocho latidos seguidos sin un solo cierre |
+| reconectar en el acto | la limpieza de la vieja no mata a la nueva |
+| seis reconexiones a 1 Hz | el ciclo del usuario termina en **una** sesión estable |
+| el cadáver no bloquea el hueco | el reloj vuelve a entrar sin esperar 40 s |
+| un segundo Flex OS | **no** desaloja al que ya tiene la sesión |
+
+La cuarta falla con el código anterior y pasa con el actual: ese es el cambio.
+
+### El reto de cada sesión se siembra
+
+Al pasar el emparejamiento a tener su propio reto (`pair.nonce`), el reto de
+**sesión** (`L->nonce`) se quedó sin sembrar: un vínculo ya guardado
+reconectaba siempre con el mismo (todo ceros). La sesión se abría igual —los
+dos extremos usan el que viaja— pero un reto predecible es justo lo que el
+reto‑respuesta existe para evitar. Ahora se genera en cada `AUTH_CHALLENGE`,
+con la fuente de azar que instala el puente (`flexPhoneLinkSetRandom`), y
+`testSessionNonceVaries` fija que dos reconexiones nunca comparten reto.
+
 ### Un envío que no sale no es un rechazo
 
 Si la prueba no llegó a salir (socket caído, o Flex OS sin contestar), el

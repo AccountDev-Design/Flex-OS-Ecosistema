@@ -263,6 +263,10 @@ void flexPhoneLinkInit(FlexPhoneLink* L){
   }
 }
 
+void flexPhoneLinkSetRandom(FlexPhoneLink* L, FlexAuthRandFn rnd){
+  if(L) L->rnd = rnd;
+}
+
 void flexPhoneLinkSetIdentity(FlexPhoneLink* L, const char* selfId){
   if(!L) return;
   flexLinkUtf8Copy(L->selfId, sizeof(L->selfId), selfId ? selfId : "");
@@ -491,6 +495,15 @@ static bool applyMessage(FlexPhoneLink* L, FlexPhoneModel* M,
                          strncmp(L->bond.peerId, id, FLP_PEERID_MAX) == 0;
       if(known){
         // Vinculo guardado: reto de sesion. No se vuelve a emparejar.
+        //
+        // EL RETO SE GENERA AQUI, EN CADA SESION. Antes se sembraba en
+        // flexPhoneLinkBeginPairing, y al pasar el emparejamiento a
+        // tener su propio reto (pair.nonce) este se quedo sin sembrar:
+        // un vinculo ya guardado reconectaba SIEMPRE con el mismo reto
+        // (todo ceros). La sesion se abria igual -- los dos lados usan
+        // el que viaja --, pero un reto predecible es justo lo que el
+        // reto-respuesta existe para evitar.
+        flexAuthRandomBytes(L->rnd, L->nonce, sizeof(L->nonce));
         L->session = (uint16_t)((nowMs | 1) & 0xFFFF);
         flexLinkAntiReplayInit(&L->anti);
         uint8_t body[FLXA_NONCE_SIZE + 2];

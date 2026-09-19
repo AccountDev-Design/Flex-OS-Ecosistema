@@ -255,6 +255,12 @@ static void fphLogLine(const char* line){
 }
 #endif
 
+// Aleatoriedad para el emparejamiento Y para el reto de cada sesion.
+// El nucleo no depende de Arduino: se le pasa la fuente desde aqui.
+// Va ANTES de flexPhoneBegin porque es quien la instala, y este
+// fichero es una cabecera: no hay auto-prototipado que valga.
+static uint32_t fphRandom(){ return esp_random(); }
+
 static void flexPhoneBegin(){
   flexPhoneModelInit(&fphModel);
   flexPhoneLinkInit(&fphLink);
@@ -263,6 +269,9 @@ static void flexPhoneBegin(){
 #endif
   fphSelfIdLoad();
   flexPhoneLinkSetIdentity(&fphLink, fphSelfId);
+  // El reto de cada sesion sale de aqui. Sin instalarlo, un vinculo
+  // guardado reconectaria siempre con el mismo reto.
+  flexPhoneLinkSetRandom(&fphLink, fphRandom);
   flexPhoneLinkSetTransport(&fphLink, flexPhoneWifiTransport());
   // Lo que este reloj contesta cuando un telefono pregunta quien hay
   // en la red. Sin esto la respuesta saldria sin nombre y la lista de
@@ -348,10 +357,6 @@ static bool fphCapOn(uint16_t bit){
   return flexPhoneLinkReady(&fphLink) && fphModel.caps.valid &&
          (fphModel.caps.granted & bit) != 0;
 }
-
-// Aleatoriedad para el emparejamiento. El nucleo no depende de
-// Arduino: se le pasa la fuente desde aqui.
-static uint32_t fphRandom(){ return esp_random(); }
 
 
 // #############################################################

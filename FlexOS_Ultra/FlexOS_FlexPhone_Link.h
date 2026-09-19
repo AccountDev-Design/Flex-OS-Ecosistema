@@ -197,6 +197,7 @@ typedef struct {
   // aprender del WELCOME. La sesion de emparejamiento guarda por su
   // cuenta con quien derivo la clave.
   char     chanPeerId[FLP_PEERID_MAX];
+  FlexAuthRandFn rnd;                 // azar del llamador; NUNCA NULL en la placa
   bool     hostProven;                // Flex OS ya mando su prueba
   // ¿Ya nos hemos presentado en EL CANAL QUE ESTA ABIERTO AHORA?
   //
@@ -341,6 +342,12 @@ void flexPhoneLinkPeer(FlexPhoneLink* L, char* out, size_t outN);
 // ##  para adivinarlo desde un registro. Quien depure de verdad
 // ##  tiene el codigo delante, en la pantalla del reloj.
 // #############################################################
+// Fuente de azar del llamador (esp_random en la placa). Hace falta
+// para el reto de CADA sesion, que se genera al reconectar un vinculo
+// ya guardado -- es decir, fuera de cualquier accion del usuario.
+// Sin instalarla, el reto seria constante.
+void flexPhoneLinkSetRandom(FlexPhoneLink* L, FlexAuthRandFn rnd);
+
 typedef void (*FlexPhoneLogFn)(const char* line);
 // Instala (o quita, con NULL) el destino de las lineas de
 // diagnostico. Sin gancho instalado no se formatea nada: el coste en

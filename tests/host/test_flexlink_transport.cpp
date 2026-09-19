@@ -215,6 +215,8 @@ static void bring(){
   flexPhoneLinkInit(&L);
   flexPhoneModelInit(&M);
   flexPhoneLinkSetIdentity(&L, "flexos-test");
+  // El reto de CADA sesion sale de aqui. Sin fuente, seria constante.
+  flexPhoneLinkSetRandom(&L, testRand);
   flexPhoneLinkSetTransport(&L, &gTr);
 }
 
@@ -772,6 +774,52 @@ static void testNoFakePairing(){
 }
 
 // -------------------------------------------------------------
+//  2 undecies) EL RETO DE SESION NO PUEDE SER SIEMPRE EL MISMO
+// -------------------------------------------------------------
+//  Cada reconexion de un vinculo ya guardado abre una sesion nueva
+//  con su propio reto. Si ese reto fuera constante -- y lo fue, al
+//  mover el reto del emparejamiento a su propia sesion y dejar este
+//  sin sembrar --, la sesion se abre igual (los dos extremos usan el
+//  que viaja) pero el reto-respuesta deja de servir para lo unico
+//  que existe: que una prueba grabada no valga manana.
+static void testSessionNonceVaries(){
+  std::printf("[link] el reto de sesion es distinto en cada reconexion\n");
+  uint32_t t = 60000;
+
+  // Se empareja UNA vez (aqui esta el unico bring(), que es quien
+  // reinicia la semilla) y despues se reconecta dos veces con el
+  // vinculo ya guardado: ese es el camino que genera el reto.
+  pairUp(t);
+  CHECK(L.state == FLP_LS_READY, "no emparejo");
+  const FlexPhoneBond bond = L.bond;
+
+  uint8_t seen[2][FLXA_NONCE_SIZE] = {{0}, {0}};
+  bool allZero = true;
+
+  for(int round = 0; round < 2; round++){
+    // El canal se cae y vuelve: vinculo conocido -> AUTH_CHALLENGE.
+    gLoop.st = FLP_TC_FAILED; L.reconnectAtMs = 0;
+    flexPhoneLinkTick(&L, &M, t); t += 20;
+    gLoop = Loop();
+    gTr.ctx = &gLoop;
+    gLoop.st = FLP_TC_OPEN;
+    gLoop.haveKey = true;
+    std::memcpy(gLoop.key, bond.key, FLXA_KEY_SIZE);
+    pump(t, 8);
+    CHECK(L.state == FLP_LS_READY, "vuelta %d: no volvio a abrir sesion (%s)",
+          round, flexPhoneLinkStateName(L.state));
+
+    std::memcpy(seen[round], gLoop.nonce, FLXA_NONCE_SIZE);
+    for(size_t i = 0; i < FLXA_NONCE_SIZE; i++) if(seen[round][i]) allZero = false;
+    t += 1000;
+  }
+
+  CHECK(!allZero, "EL RETO DE SESION ERA TODO CEROS: no se estaba sembrando");
+  CHECK(std::memcmp(seen[0], seen[1], FLXA_NONCE_SIZE) != 0,
+        "dos sesiones distintas usaron el MISMO reto");
+}
+
+// -------------------------------------------------------------
 //  3) Reconexion con vinculo guardado: NO se vuelve a emparejar
 // -------------------------------------------------------------
 static void testResume(){
@@ -1063,6 +1111,7 @@ int main(){
   testOnlyOneSession();
   testCancelPairing();
   testNoFakePairing();
+  testSessionNonceVaries();
   testResume();
   testAccessControl();
   testHostileFrames();
