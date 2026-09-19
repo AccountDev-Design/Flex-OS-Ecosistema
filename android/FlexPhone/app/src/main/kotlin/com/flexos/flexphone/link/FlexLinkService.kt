@@ -150,11 +150,17 @@ class FlexLinkService : Service() {
     fun submitPairingCode(code: String): Boolean {
         if (!FlexAuth.isValidCode(code)) return false
         typedCode = code
-        // Si la sal ya llego, se completa ahora mismo. Si no, el codigo
-        // queda guardado y se usa en cuanto llegue.
-        server?.submitPairingCode(code)
-        return true
+        // EL RESULTADO REAL sube hasta la pantalla. Antes se descartaba
+        // y se devolvia true siempre, asi que cuando el envio no salia
+        // la pantalla se quedaba en "Comprobando..." para siempre. Un
+        // false aqui significa "todavia no": Flex OS aun no ha mandado
+        // su sal, y el codigo queda guardado para usarlo en cuanto
+        // llegue.
+        return server?.submitPairingCode(code) ?: false
     }
+
+    /** ¿Ha llegado la sal de Flex OS? La pantalla lo usa para saber si ya se puede teclear. */
+    fun isAwaitingCode(): Boolean = server?.isAwaitingCode() ?: false
 
     /** Revoca el vinculo: clave fuera y sesion cerrada. */
     fun forgetBond() {
@@ -170,6 +176,30 @@ class FlexLinkService : Service() {
     fun linkPort(): Int = server?.port ?: 0
     fun isPaired(): Boolean = bonds.isPaired()
     fun pairedPeer(): String? = bonds.peerId()
+
+    // ---------------------------------------------------------
+    //  Buscar relojes
+    // ---------------------------------------------------------
+    /**
+     * Pregunta a la red quien es un Flex OS.
+     *
+     * Devuelve a cuantos destinos se emitio. CERO significa que este
+     * telefono no pudo mandar nada -- sin Wi-Fi o sin direccion --, y
+     * la pantalla lo dice en vez de dejar un buscador girando sobre
+     * algo que no ha llegado a empezar.
+     */
+    fun searchWatches(): Int = server?.probeForWatches() ?: 0
+
+    /**
+     * Pregunta a UNA direccion, sin difusion.
+     *
+     * El respaldo para las redes que filtran la difusion o aislan a
+     * los clientes: el usuario lee la IP en Flex OS (Flex Phone →
+     * Conexion) y la teclea. Al recibir el paquete, el reloj aprende
+     * de el la direccion y el puerto de este telefono, asi que puede
+     * conectar sin haber descubierto nada por su cuenta.
+     */
+    fun probeWatchAt(ip: String): Boolean = server?.probeHost(ip) ?: false
 
     // ---------------------------------------------------------
     //  Eventos del servidor
@@ -191,6 +221,16 @@ class FlexLinkService : Service() {
                 state.countReconnect()
             }
             is WifiLinkServer.Event.PairingRequested -> state.setLink(LinkState.PAIRING)
+            is WifiLinkServer.Event.WatchesFound -> {
+                state.setWatches(ev.watches.map {
+                    FlexPhoneState.Watch(it.id, it.name, it.address, it.pairing)
+                })
+                // La lista no cambia el estado del enlace: encontrar un
+                // reloj no es estar conectado a el, y decirlo seria
+                // exactamente la clase de mentira que hace que nadie
+                // entienda por que "conectado" no recibe nada.
+                return
+            }
             is WifiLinkServer.Event.PairingFailed -> {
                 typedCode = null
                 state.setLink(LinkState.ERROR, ev.why)
@@ -211,7 +251,25 @@ class FlexLinkService : Service() {
         var lastPush = 0L
         while (isActive) {
             delay(5_000)
-            if (server?.hasSession() != true) continue
+            if (server?.hasSession() != true) {
+                // #########################################################
+                // ##  SIN SESION SE SIGUE PREGUNTANDO
+                // ##  --------------------------------------------------
+                // ##  Y no es solo para pintar una lista. El reloj
+                // ##  aprende la direccion de este telefono DEL PROPIO
+                // ##  paquete de busqueda, asi que emitirlo es lo que
+                // ##  permite conectar en las redes donde la difusion
+                // ##  del reloj no llega hasta aqui -- que es el caso
+                // ##  en el que antes no se encontraban nunca.
+                // ##
+                // ##  Cuesta unos 40 bytes cada cinco segundos, y solo
+                // ##  mientras el usuario tiene el enlace encendido y
+                // ##  todavia no hay sesion. Con la sesion abierta se
+                // ##  deja de emitir del todo.
+                // #########################################################
+                server?.probeForWatches()
+                continue
+            }
             val caps = currentCaps()
             if (caps != lastCaps) { lastCaps = caps; server?.send(FlexLink.T_CAPS, caps.encode()) }
             val st = device.phoneState()

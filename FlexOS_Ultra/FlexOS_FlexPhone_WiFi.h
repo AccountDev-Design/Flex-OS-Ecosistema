@@ -36,23 +36,17 @@
 // #############################################################
 #pragma once
 #include "FlexOS_FlexPhone_Transport.h"
+// Los bytes del descubrimiento viven aparte, sin Arduino, para poder
+// compararlos con los de Android en una bateria de PC. Ver
+// tests/host/test_flexphone_discovery.cpp.
+#include "FlexOS_FlexPhone_Discovery.h"
 #include <WiFi.h>
 #include <WiFiUdp.h>
 
-// =============================================================
-//  CONSTANTES DEL PROTOCOLO DE RED
-//  Estos numeros van al aire: la app Android tiene los MISMOS en
-//  WifiLinkServer.kt. Cambiar uno solo aqui deja el telefono y el
-//  reloj sin encontrarse, y sin ningun error que lo explique.
-// =============================================================
-#define FLPW_TCP_PORT        47820   // Flex Link sobre TCP
-#define FLPW_UDP_PORT        47821   // descubrimiento
-#define FLPW_PROBE           "FLEXPHONE?"
-#define FLPW_REPLY           "FLEXPHONE!"
-#define FLPW_PROBE_LEN       10
 // Cada cuanto se vuelve a preguntar mientras no hay telefono. No es
-// sondeo agresivo: son 34 bytes cada dos segundos, y solo mientras
-// el usuario tiene el enlace encendido y todavia no hay nadie.
+// sondeo agresivo: son unas decenas de bytes cada dos segundos, y
+// solo mientras el usuario tiene el enlace encendido y todavia no hay
+// nadie al otro lado.
 #define FLPW_PROBE_EVERY_MS  2000
 #define FLPW_CONNECT_MS      4000    // tope para abrir el socket
 #define FLPW_TASK_STACK      4096
@@ -105,6 +99,13 @@ typedef struct {
   uint16_t          port;
   bool              fixed;       // el usuario fijo la IP a mano
   char              foundName[FLP_DEVNAME_MAX];
+  // Lo que este reloj contesta cuando el telefono pregunta. Lo pone
+  // el puente (que es quien conoce el enlace); aqui solo se copia.
+  char              selfId[FLXA_ID_MAX];
+  char              selfName[FLP_DEVNAME_MAX];
+  volatile bool     pairing;     // ¿hay un emparejamiento en curso?
+  // -- diagnostico del descubrimiento --
+  uint32_t          nAsked;      // sondas del telefono contestadas
   // -- diagnostico (nunca contenido) --
   uint32_t          nConnects, nDrops, nDesync;
 } FlexPhoneWifiCtx;
@@ -125,12 +126,159 @@ static void fpwSetStatus(const char* s){
 }
 
 // -------------------------------------------------------------
-//  Descubrimiento
+//  Lo que este reloj contesta cuando el telefono pregunta
 // -------------------------------------------------------------
-// Manda la sonda a la difusion de la subred y espera una respuesta
-// corta. Devuelve true si encontro un telefono. NO bloquea mas de
-// lo que indique `waitMs`.
-static bool fpwDiscover(WiFiUDP& udp, uint32_t waitMs){
+// Lo fija el puente, que es quien conoce el enlace. Se copia bajo el
+// mutex porque lo lee la tarea de red.
+static void flexPhoneWifiSetIdentity(const char* id, const char* name, bool pairing){
+  fpwLock();
+  if(id)   flexLinkUtf8Copy(fpwCtx.selfId,   sizeof(fpwCtx.selfId),   id);
+  if(name) flexLinkUtf8Copy(fpwCtx.selfName, sizeof(fpwCtx.selfName), name);
+  fpwCtx.pairing = pairing;
+  fpwUnlock();
+}
+
+// -------------------------------------------------------------
+//  Una sonda del TELEFONO: se contesta y se aprende su direccion
+// -------------------------------------------------------------
+// Esta es la direccion FIABLE del descubrimiento. El telefono emite
+// (emitir nunca se filtra) y aqui se aprende todo lo necesario: la IP
+// del origen del paquete y el puerto de la carga. La respuesta vuelve
+// en UNIDIFUSION, que Android tampoco filtra.
+static void fpwHandleAsk(WiFiUDP& udp, const uint8_t* buf, int got, const IPAddress& from){
+  uint8_t  ver  = 0;
+  uint16_t port = 0;
+  char     name[FLP_DEVNAME_MAX];
+  if(!fpdParseAsk(buf, got, &ver, &port, name, sizeof(name))) return;
+  if(ver < FLNK_VERSION_MIN){
+    FPW_DIAG("(b) sonda del telefono con protocolo v%u; se necesita v%u",
+             ver, (unsigned)FLNK_VERSION_MIN);
+    return;
+  }
+
+  // ---- 1) Contestar SIEMPRE ----
+  // Aunque ya tengamos telefono: el usuario puede estar mirando la
+  // lista de relojes en otro movil, y no aparecer ahi es justo el
+  // fallo que hace imposible emparejar.
+  fpwLock();
+  const bool pairing = fpwCtx.pairing;
+  char sid[FLXA_ID_MAX], sname[FLP_DEVNAME_MAX];
+  memcpy(sid,   fpwCtx.selfId,   sizeof(sid));
+  memcpy(sname, fpwCtx.selfName, sizeof(sname));
+  fpwUnlock();
+  sid[sizeof(sid) - 1] = 0;
+  sname[sizeof(sname) - 1] = 0;
+
+  uint8_t ans[FLPW_ANS_MAX];
+  const int at = fpdBuildAnswer(ans, sizeof(ans), FLNK_VERSION,
+                                pairing ? FLPW_FLAG_PAIRING : 0, sid, sname);
+  if(at > 0 && udp.beginPacket(from, FLPW_UDP_PORT)){
+    udp.write(ans, (size_t)at);
+    udp.endPacket();
+  }
+  fpwCtx.nAsked++;
+  FPW_DIAG("(b) sonda de %u.%u.%u.%u:%u (\"%s\") -> contestado%s",
+           from[0], from[1], from[2], from[3], (unsigned)port, name,
+           pairing ? " [emparejando]" : "");
+
+  // ---- 2) Aprender su direccion, si no teniamos ----
+  // No se pisa un destino que el usuario haya fijado a mano, ni uno
+  // que ya este en uso: el telefono con el que se habla lo decide el
+  // vinculo, no quien grite mas alto en la red.
+  if(!port) return;
+  fpwLock();
+  const bool takeIt = (fpwCtx.port == 0) && !fpwCtx.fixed;
+  if(takeIt){
+    fpwCtx.ip[0] = from[0]; fpwCtx.ip[1] = from[1];
+    fpwCtx.ip[2] = from[2]; fpwCtx.ip[3] = from[3];
+    fpwCtx.port  = port;
+    flexLinkUtf8Copy(fpwCtx.foundName, sizeof(fpwCtx.foundName), name);
+    snprintf(fpwCtx.peer, sizeof(fpwCtx.peer), "%u.%u.%u.%u:%u",
+             from[0], from[1], from[2], from[3], (unsigned)port);
+  }
+  fpwUnlock();
+  if(takeIt)
+    FPW_DIAG("(b) telefono aprendido de su propia sonda: %u.%u.%u.%u:%u",
+             from[0], from[1], from[2], from[3], (unsigned)port);
+}
+
+// -------------------------------------------------------------
+//  Vaciar el socket UDP
+// -------------------------------------------------------------
+// #############################################################
+// ##  SE LLAMA EN CADA VUELTA, TENGAMOS TELEFONO O NO
+// ##  ------------------------------------------------------
+// ##  Antes el socket solo se leia dentro del descubrimiento, o sea
+// ##  400 ms de cada 2 s y SOLO mientras no habia telefono. El
+// ##  resto del tiempo lo que llegaba se quedaba en el buffer de
+// ##  lwIP hasta desbordarlo.
+// ##
+// ##  Con el descubrimiento en los dos sentidos eso ya no vale: la
+// ##  sonda del telefono puede llegar en cualquier momento, y si no
+// ##  se contesta, el reloj no aparece en su lista.
+// #############################################################
+static void fpwPumpUdp(WiFiUDP& udp){
+  for(int guard = 0; guard < 8; guard++){       // tope por vuelta
+    const int n = udp.parsePacket();
+    if(n <= 0) return;
+    uint8_t buf[96];
+    const int got = udp.read(buf, sizeof(buf));
+    if(got <= 0) return;
+    const IPAddress from = udp.remoteIP();
+
+    // ¿Una sonda del telefono? Se contesta.
+    if(fpdIsAsk(buf, got)){
+      fpwHandleAsk(udp, buf, got, from);
+      continue;
+    }
+    // ¿La respuesta a NUESTRA sonda?
+    uint8_t  ver  = 0;
+    uint16_t port = 0;
+    char     name[FLP_DEVNAME_MAX];
+    if(fpdParseReply(buf, got, &ver, &port, name, sizeof(name))){
+      if(ver < FLNK_VERSION_MIN){
+        fpwSetStatus("la app del telefono es de una version anterior");
+        continue;
+      }
+      if(!port) continue;
+      // Solo se aprende un destino cuando NO hay ninguno. Si ya hay
+      // sesion -- o el usuario fijo la IP a mano --, la respuesta de
+      // otro telefono de la red no puede robar el enlace a media
+      // conversacion: eso seria exactamente la sesion duplicada que
+      // hay que evitar.
+      fpwLock();
+      const bool takeIt = (fpwCtx.port == 0) && !fpwCtx.fixed;
+      if(takeIt){
+        fpwCtx.ip[0] = from[0]; fpwCtx.ip[1] = from[1];
+        fpwCtx.ip[2] = from[2]; fpwCtx.ip[3] = from[3];
+        fpwCtx.port  = port;
+        flexLinkUtf8Copy(fpwCtx.foundName, sizeof(fpwCtx.foundName), name);
+        snprintf(fpwCtx.peer, sizeof(fpwCtx.peer), "%u.%u.%u.%u:%u",
+                 from[0], from[1], from[2], from[3], (unsigned)port);
+      }
+      fpwUnlock();
+      if(!takeIt) continue;
+      FPW_DIAG("(d) telefono encontrado en %u.%u.%u.%u:%u (protocolo v%u)",
+               from[0], from[1], from[2], from[3], (unsigned)port, ver);
+      continue;
+    }
+    // Lo normal aqui es oir la PROPIA sonda de vuelta: la difusion
+    // limitada se entrega tambien al que la emitio. No es un fallo.
+  }
+}
+
+// -------------------------------------------------------------
+//  Emitir la sonda del reloj
+// -------------------------------------------------------------
+// Solo EMITE. La respuesta la recoge fpwPumpUdp, que se llama en
+// cada vuelta de la tarea: antes la recepcion vivia aqui dentro y
+// por eso el socket solo se leia 400 ms de cada 2 s.
+//
+// Esta es la direccion FRAGIL del descubrimiento -- el telefono
+// tiene que RECIBIR una difusion --, y se mantiene porque cuando
+// funciona ahorra tener la app en primer plano. La fiable es la
+// contraria, la que atiende fpwHandleAsk.
+static bool fpwSendProbe(WiFiUDP& udp){
   if(WiFi.status() != WL_CONNECTED) return false;
   const IPAddress ip   = WiFi.localIP();
   const IPAddress mask = WiFi.subnetMask();
@@ -140,8 +288,8 @@ static bool fpwDiscover(WiFiUDP& udp, uint32_t waitMs){
                   ip[2] | (uint8_t)~mask[2], ip[3] | (uint8_t)~mask[3]);
 
   uint8_t probe[FLPW_PROBE_LEN + 1];
-  memcpy(probe, FLPW_PROBE, FLPW_PROBE_LEN);
-  probe[FLPW_PROBE_LEN] = FLNK_VERSION;
+  const int probeN = fpdBuildProbe(probe, sizeof(probe), FLNK_VERSION);
+  if(probeN <= 0) return false;
 
   FPW_DIAG("(a) sonda: yo %u.%u.%u.%u  mascara %u.%u.%u.%u  difusion %u.%u.%u.%u:%u",
            ip[0], ip[1], ip[2], ip[3], mask[0], mask[1], mask[2], mask[3],
@@ -154,71 +302,16 @@ static bool fpwDiscover(WiFiUDP& udp, uint32_t waitMs){
   // irrelevante al lado de quedarse sin encontrarlo nunca.
   bool sent = false;
   if(udp.beginPacket(bcast, FLPW_UDP_PORT)){
-    udp.write(probe, sizeof(probe));
+    udp.write(probe, (size_t)probeN);
     sent = udp.endPacket() != 0;
   }
   const IPAddress limited(255, 255, 255, 255);
   if(udp.beginPacket(limited, FLPW_UDP_PORT)){
-    udp.write(probe, sizeof(probe));
+    udp.write(probe, (size_t)probeN);
     if(udp.endPacket() != 0) sent = true;
   }
-  if(!sent){
-    FPW_DIAG("(a) FALLO: no se pudo emitir la sonda");
-    return false;
-  }
-
-  const uint32_t t0 = millis();
-  while(millis() - t0 < waitMs){
-    const int n = udp.parsePacket();
-    if(n <= 0){ vTaskDelay(pdMS_TO_TICKS(20)); continue; }
-    uint8_t buf[80];
-    const int got = udp.read(buf, sizeof(buf));
-    // Minimo: marca + version + puerto. Menos que eso no se
-    // interpreta: leer campos de un paquete corto es como se cuelan
-    // los desbordamientos.
-    if(got < FLPW_PROBE_LEN + 3){
-      FPW_DIAG("(d) paquete de %d B descartado: demasiado corto", got);
-      continue;
-    }
-    if(memcmp(buf, FLPW_REPLY, FLPW_PROBE_LEN) != 0){
-      // Lo normal aqui es oir la PROPIA sonda de vuelta: la difusion
-      // limitada se entrega tambien al que la emitio. No es un fallo.
-      FPW_DIAG("(d) paquete de %d B descartado: no es una respuesta Flex Phone", got);
-      continue;
-    }
-    const uint8_t ver = buf[FLPW_PROBE_LEN];
-    if(ver < FLNK_VERSION_MIN){
-      fpwSetStatus("la app del telefono es de una version anterior");
-      continue;
-    }
-    const uint16_t port = (uint16_t)(buf[FLPW_PROBE_LEN + 1] |
-                                     ((uint16_t)buf[FLPW_PROBE_LEN + 2] << 8));
-    if(!port) continue;
-    const IPAddress from = udp.remoteIP();
-    fpwLock();
-    fpwCtx.ip[0] = from[0]; fpwCtx.ip[1] = from[1];
-    fpwCtx.ip[2] = from[2]; fpwCtx.ip[3] = from[3];
-    fpwCtx.port  = port;
-    // Nombre opcional: se copia solo lo que de verdad venga.
-    fpwCtx.foundName[0] = 0;
-    if(got > FLPW_PROBE_LEN + 3){
-      int nl = buf[FLPW_PROBE_LEN + 3];
-      const int avail = got - (FLPW_PROBE_LEN + 4);
-      if(nl > avail) nl = avail;
-      if(nl > (int)sizeof(fpwCtx.foundName) - 1) nl = (int)sizeof(fpwCtx.foundName) - 1;
-      if(nl > 0){
-        memcpy(fpwCtx.foundName, buf + FLPW_PROBE_LEN + 4, (size_t)nl);
-        fpwCtx.foundName[nl] = 0;
-      }
-    }
-    snprintf(fpwCtx.peer, sizeof(fpwCtx.peer), "%u.%u.%u.%u:%u",
-             from[0], from[1], from[2], from[3], (unsigned)port);
-    fpwUnlock();
-    FPW_DIAG("(d) telefono encontrado en %u.%u.%u.%u:%u (protocolo v%u)",
-             from[0], from[1], from[2], from[3], (unsigned)port, ver);
-    return true;
-  }
-  return false;
+  if(!sent) FPW_DIAG("(a) FALLO: no se pudo emitir la sonda");
+  return sent;
 }
 
 // -------------------------------------------------------------
@@ -295,22 +388,30 @@ static void fpwTask(void*){
     }
     if(!udpUp){ udpUp = udp.begin(FLPW_UDP_PORT) != 0; }
 
-    // ---- 2) Buscar el telefono ----
+    // ---- 2) Atender el socket UDP, haya telefono o no ----
+    // Contestar la sonda del telefono es lo que hace que este reloj
+    // APAREZCA en su lista. Si solo se atendiera mientras buscamos,
+    // un reloj ya emparejado seria invisible para el movil que
+    // intenta encontrarlo, que es justo el caso que fallaba.
+    if(udpUp) fpwPumpUdp(udp);
+
+    // ---- 3) Buscar el telefono ----
     bool have;
     fpwLock(); have = fpwCtx.port != 0; fpwUnlock();
     if(!have){
       fpwCtx.state = FLP_TC_SEARCHING;
       fpwSetStatus("buscando Flex Phone en la red");
-      if(millis() - lastProbe >= FLPW_PROBE_EVERY_MS){
+      if(udpUp && millis() - lastProbe >= FLPW_PROBE_EVERY_MS){
         lastProbe = millis();
-        fpwDiscover(udp, 400);
-      } else {
-        vTaskDelay(pdMS_TO_TICKS(100));
+        fpwSendProbe(udp);
       }
+      // 50 ms: la sonda del telefono se contesta casi al instante sin
+      // que la tarea gire en vacio.
+      vTaskDelay(pdMS_TO_TICKS(50));
       continue;
     }
 
-    // ---- 3) Abrir el socket ----
+    // ---- 4) Abrir el socket ----
     uint8_t ip[4]; uint16_t port;
     fpwLock();
     memcpy(ip, fpwCtx.ip, 4); port = fpwCtx.port;
@@ -346,9 +447,14 @@ static void fpwTask(void*){
     fpwCtx.state = FLP_TC_OPEN;
     fpwSetStatus("enlace abierto");
 
-    // ---- 4) Bombeo mientras el socket viva ----
+    // ---- 5) Bombeo mientras el socket viva ----
     while(!fpwCtx.stop && cli.connected() && WiFi.status() == WL_CONNECTED){
       bool worked = false;
+
+      // Tambien aqui: estando conectado se sigue contestando a quien
+      // pregunte. Es lo que permite que el telefono vuelva a verlo
+      // tras reinstalar la app o cambiar de movil.
+      if(udpUp) fpwPumpUdp(udp);
 
       // Salida: lo que el enlace haya dejado en la cola.
       uint8_t frame[FLNK_MAX_FRAME];

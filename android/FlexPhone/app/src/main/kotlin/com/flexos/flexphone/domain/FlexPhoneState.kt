@@ -67,6 +67,26 @@ class FlexPhoneState(
     private val _media = MutableStateFlow<MediaState?>(null)
     val media: StateFlow<MediaState?> = _media.asStateFlow()
 
+    /**
+     * Relojes que han CONTESTADO a una busqueda en esta red.
+     *
+     * Solo entra aqui lo que ha contestado de verdad: la lista no se
+     * rellena con "lo que habia la ultima vez" ni con candidatos
+     * inventados. Si esta vacia es porque no contesto nadie, y eso es
+     * un dato -- no un fallo de la pantalla.
+     */
+    data class Watch(
+        val id: String,
+        val name: String,
+        val address: String,
+        /** El reloj esta AHORA ensenando un codigo de emparejamiento. */
+        val pairing: Boolean,
+    )
+    private val _watches = MutableStateFlow<List<Watch>>(emptyList())
+    val watches: StateFlow<List<Watch>> = _watches.asStateFlow()
+
+    fun setWatches(w: List<Watch>) { _watches.value = w }
+
     /** Contadores de diagnostico. NUNCA contenido de mensajes. */
     data class Diag(
         val sent: Long = 0, val received: Long = 0,

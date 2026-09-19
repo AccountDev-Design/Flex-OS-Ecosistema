@@ -12,3 +12,6 @@ captures/
 *.jks
 *.keystore
 keystore.properties
+# Registros del demonio de compilacion de Kotlin. Son de la maquina
+# que compila, no del proyecto.
+.kotlin/

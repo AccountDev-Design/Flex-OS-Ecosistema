@@ -69,31 +69,77 @@ Dos sockets, con los **mismos números en los dos lados**
 | TCP **47820** | el enlace: tramas de Flex Link, una detrás de otra |
 | UDP **47821** | descubrimiento |
 
-**Descubrimiento.** Flex OS manda `FLEXPHONE?` + versión; el teléfono contesta
-`FLEXPHONE!` + versión + puerto + nombre. La sonda sale a **dos** destinos: la
-difusión dirigida de la subred (la correcta, y la que menos molesta) y la
-limitada `255.255.255.255`, porque hay pilas y puntos de acceso que filtran una
-y dejan pasar la otra. Son 34 bytes cada dos segundos y solo mientras no hay
-teléfono.
+### Descubrimiento — en los dos sentidos
 
-> **El cerrojo de multidifusión no es opcional.** El controlador Wi-Fi de
-> Android descarta las tramas de difusión que no van dirigidas a la MAC del
-> teléfono **antes** de que lleguen a ningún socket, para ahorrar batería. Sin
-> un `MulticastLock` (permiso `CHANGE_WIFI_MULTICAST_STATE`), el ESP32 emite la
-> sonda perfectamente, el teléfono está escuchando en el puerto correcto y
-> `receive()` no despierta nunca — sin ningún error que lo explique.
-> `WifiLinkServer` lo toma mientras no hay sesión y lo suelta cuando la hay,
-> que es cuando el filtro del controlador sí ahorra batería.
+No por simetría: **por fiabilidad**. Preguntan los dos lados, y cualquiera de
+las dos preguntas basta para conectar.
 
-Si el router aísla a los clientes entre sí, la difusión no llega ni con el
-cerrojo. Entonces la dirección se fija a mano (`flexPhoneWifiSetHost`) y la
-interfaz lo ofrece, en vez de quedarse «buscando» para siempre sin decir por
-qué.
+| Quién emite | Paquete | Qué lleva |
+|---|---|---|
+| reloj → difusión | `FLEXPHONE?` | `u8 ver` |
+| teléfono → unidifusión | `FLEXPHONE!` | `u8 ver` · `u16 puertoTcp` · `str nombre` |
+| **teléfono → difusión** | `FLEXOS?` | `u8 ver` · `u16 puertoTcp` · `str nombre` |
+| **reloj → unidifusión** | `FLEXOS!` | `u8 ver` · `u8 flags` · `str id` · `str nombre` |
 
-**Para depurarlo.** El descubrimiento son cuatro pasos, y hay un registro para
-cada lado: pon `FLEXOS_DIAG_FLEXPHONE` a 1 en `FlexOS_FlexPhone_WiFi.h` para ver
-(a) y (d) por el puerto serie, y mira el logcat con la etiqueta
-`FlexPhone/WifiLink` para (b) y (c).
+`flags` bit 0 = el reloj está **ahora** enseñando un código de emparejamiento;
+la app lo usa para destacarlo en la lista. `str` es un byte de longitud seguido
+de esos bytes, sin cero final; `u16` va con el byte bajo primero.
+
+**Por qué hacía falta el segundo sentido.** Que el reloj emita y Android
+*reciba* una difusión es la dirección **frágil**: el controlador Wi‑Fi de
+Android descarta las tramas de difusión que no van dirigidas a la MAC del
+teléfono **antes** de que lleguen a ningún socket, para ahorrar batería. El
+`MulticastLock` (permiso `CHANGE_WIFI_MULTICAST_STATE`) desactiva ese filtro,
+pero no cubre la pantalla apagada ni la app en segundo plano en todos los
+fabricantes. Síntoma: el ESP32 emite la sonda perfectamente, el teléfono está
+escuchando en el puerto correcto y `receive()` no despierta nunca — sin ningún
+error que lo explique en ninguna de las dos puntas.
+
+Al revés es **sólido**, y por dos motivos:
+
+1. **Emitir** desde Android no lo filtra nadie, y la respuesta del reloj vuelve
+   en **unidifusión**, que tampoco.
+2. Cuando el reloj recibe `FLEXOS?` **ya sabe todo lo que necesita**: la
+   dirección viene en el origen del paquete y el puerto en la carga. O sea que
+   puede abrir la conexión aunque su propia difusión no haya llegado nunca a
+   ninguna parte.
+
+Por eso `FlexLinkService` emite `FLEXOS?` **cada cinco segundos mientras no hay
+sesión** (unos 40 bytes; con la sesión abierta deja de emitir del todo), y el
+reloj atiende el socket UDP **en cada vuelta de su tarea**, tenga teléfono o no
+— antes solo lo leía 400 ms de cada 2 s y **solo mientras buscaba**, así que un
+reloj ya emparejado era invisible para cualquier móvil que intentara
+encontrarlo.
+
+**Quién aprende a quién.** Un destino solo se aprende cuando **no hay
+ninguno**, ni en el reloj ni en el teléfono. Así la respuesta de otro
+dispositivo de la red no puede robar un enlace a media conversación, que es
+exactamente la sesión duplicada que hay que evitar.
+
+**Respaldo sin difusión.** Si la red filtra o aísla a los clientes, no hace
+falta difusión en absoluto:
+
+- En la app: **Emparejar → Buscar por dirección**. Se teclea la dirección del
+  reloj (la enseña Flex OS en *Flex Phone → Conexión → Este reloj*) y el
+  `FLEXOS?` va en unidifusión. El reloj aprende de ese paquete la dirección del
+  teléfono y conecta.
+- En el reloj: `flexPhoneWifiSetHost()` fija a mano la dirección del teléfono
+  (la enseña la app en *Emparejar → Dirección de este teléfono*).
+
+Los dos caminos siguen existiendo. Ninguno sustituye al descubrimiento
+automático: lo respaldan.
+
+**Los bytes están escritos dos veces** — `FlexOS_FlexPhone_Discovery.h` y
+`protocol/Discovery.kt` — así que los dos ficheros tienen **vectores dorados
+idénticos** en `tests/host/test_flexphone_discovery.cpp` y `DiscoveryTest.kt`.
+Si alguien mueve un campo en un lado, una de las dos baterías falla. Sin eso,
+un desajuste solo se ve como «el reloj no aparece en la lista».
+
+**Para depurarlo.** Pon `FLEXOS_DIAG_FLEXPHONE` a 1 en
+`FlexOS_FlexPhone_WiFi.h` para ver los pasos del reloj por el puerto serie, y
+mira el logcat con la etiqueta `FlexPhone/WifiLink` para los del teléfono.
+
+Sentido reloj → teléfono (el frágil):
 
 | Se ve | No se ve | Dónde está el problema |
 |---|---|---|
@@ -101,6 +147,14 @@ cada lado: pon `FLEXOS_DIAG_FLEXPHONE` a 1 en `FlexOS_FlexPhone_WiFi.h` para ver
 | (a) (b) | (c) | el teléfono descarta la sonda: mira la versión de protocolo |
 | (a) (b) (c) | (d) | la respuesta se pierde de vuelta: es la red, no el código |
 | nada | (a) | el enlace no está arrancado en el reloj |
+
+Sentido teléfono → reloj (el fiable):
+
+| Se ve | No se ve | Dónde está el problema |
+|---|---|---|
+| (1) | (b) del reloj | la difusión no sale del teléfono: prueba *Buscar por dirección* |
+| (1) y (b) | (2) | la respuesta en unidifusión se pierde: es la red |
+| nada | (1) | el enlace no está encendido en el teléfono, o no hay Wi‑Fi |
 
 **Enmarcado.** TCP es un flujo y no respeta los límites de las tramas. Se
 reconstruyen con la propia cabecera de Flex Link, que ya lleva su longitud: no
@@ -299,6 +353,47 @@ tarjeta que lo dice, en Flex OS y en el teléfono.
 - una conexión que no autentica en 15 s;
 - una sesión sin tráfico en 40 s;
 - una trama de otra sesión, repetida, corrupta o de versión futura.
+
+> Abrir un puerto en la red local significa que **cualquier** equipo de esa red
+> puede llamar. Nada de lo de arriba se relaja para que el emparejamiento sea
+> más fácil: el reloj **no** acepta una conexión de la LAN por el hecho de
+> venir de la LAN. Lo único que se mejoró fue **encontrarse**; quien se
+> encuentra sigue teniendo que demostrar que tiene la clave.
+
+### Ningún estado infinito
+
+Toda espera de este flujo termina — en éxito o en un motivo escrito. Los
+plazos, y de dónde sale cada uno:
+
+| Espera | Plazo | Quién lo aplica | Qué pasa al vencer |
+|---|---|---|---|
+| conexión sin autenticar | 15 s | teléfono | se cierra y se libera la sesión |
+| código enviado sin confirmar | 12 s | teléfono | `PairingFailed` con el motivo |
+| código en pantalla sin confirmar | 2 min | reloj | vuelve a buscar **y avisa** con `T_ERR`/`E_TIMEOUT` |
+| autenticación de sesión | `FLP_LINK_AUTH_TIMEOUT_MS` | reloj | vuelve a buscar |
+| sesión sin tráfico | 40 s | los dos | se corta y se reconecta |
+
+Tres fallos concretos que hacían que la pantalla de emparejamiento se quedara
+en «Comprobando…» para siempre, y lo que los curaba:
+
+1. **La sal se tiraba.** `onPairCode` solo la guardaba dentro de
+   `completePairing`, o sea **solo si el usuario ya había tecleado el código**.
+   En el orden normal —Flex OS manda la sal y el usuario teclea después— se
+   perdía, y `submitPairingCode` salía por `pendingSalt ?: return false` sin
+   enviar nada. Ahora la sal se guarda **siempre** al recibirla.
+2. **El resultado se descartaba.** `FlexLinkService.submitPairingCode`
+   devolvía `true` pasara lo que pasara. Ahora devuelve el resultado real y la
+   pantalla lo usa.
+3. **`T_ERR` se tiraba.** Estaba en la lista de tipos permitidos sin sesión,
+   pero **no tenía rama** en el `when`, así que caía en el `else` y, sin
+   autenticar, no hacía nada. Cuando Flex OS avisaba de que el código estaba
+   mal, en el teléfono no se enteraba nadie. Ahora hay rama, y el reloj además
+   **manda** ese aviso al fallar la prueba y al caducar la ventana.
+
+Y un cuarto que dejaba la única sesión ocupada casi un minuto: el plazo de
+autenticación se comprobaba **después** de que `read()` volviera, y `read()`
+bloqueaba los 40 s del plazo largo. Ahora el socket despierta cada 2 s solo
+para mirar los plazos.
 
 ---
 
@@ -591,12 +686,41 @@ sin emulador y sin placa**:
 
 1. **En el teléfono**: concede el acceso a notificaciones y pulsa *Activar el
    enlace*. Los dos tienen que estar en la **misma red Wi‑Fi**.
-2. **En Flex OS**: *Flex Phone → Emparejar teléfono*. Aparece un código de 6
-   dígitos.
-3. **En el teléfono**: teclea ese código.
-4. **En Flex OS**: pulsa *Confirmar aquí*.
+2. **En el teléfono**: *Emparejar*. La pantalla busca relojes durante unos
+   segundos y enseña los que **han contestado**. Ver el reloj ahí ya demuestra
+   que la ida y la vuelta funcionan.
+3. **En Flex OS**: *Flex Phone → Emparejar teléfono*. Aparece un código de 6
+   dígitos, y el reloj pasa a mostrarse como *enseñando código* en la lista del
+   teléfono.
+4. **En el teléfono**: teclea ese código.
+5. **En Flex OS**: pulsa *Confirmar aquí*.
 
 Después, elige en *Notificaciones* qué apps pueden enviar las suyas.
+
+**Si el reloj no aparece en la lista**, no hace falta rendirse a la difusión:
+
+- *Emparejar → Buscar por dirección*, con la dirección que enseña Flex OS en
+  *Flex Phone → Conexión → Este reloj*. La pregunta va en unidifusión y el
+  reloj aprende de ella la dirección del teléfono.
+- O al revés: fija en Flex OS la dirección que enseña la app en *Emparejar →
+  Dirección de este teléfono*.
+
+### Casos de prueba manuales
+
+Lo que hay que comprobar en hardware real. Ninguno de estos puede acabar en un
+indicador de progreso que no termina.
+
+| # | Caso | Resultado esperado |
+|---|---|---|
+| A | Los dos en la misma Wi‑Fi, enlace encendido en ambos | el reloj aparece en la lista en pocos segundos y conecta solo |
+| B | Emparejar con el código correcto | *Emparejado*, y el vínculo sobrevive a reiniciar los dos |
+| C | Emparejar con un código **equivocado** | el teléfono dice *el código no coincide* **en segundos**, no al caducar |
+| D | Teclear el código cuando ya **caducó** | mensaje de caducado y vuelta a buscar, en los dos lados |
+| E | Router con aislamiento de clientes | la lista sale vacía con su explicación; *Buscar por dirección* sí conecta |
+| F | Apagar el Wi‑Fi del teléfono con la sesión abierta | el reloj dice *se perdió el Wi‑Fi* y reconecta solo al volver |
+| G | El DHCP da otra IP al teléfono | el reloj olvida el destino y vuelve a encontrarlo sin tocar nada |
+| H | Dos móviles con la app en la misma red | el reloj contesta a los dos, pero **solo abre una sesión** |
+| I | Revocar el vínculo en cualquiera de los dos lados | el otro pide emparejar de nuevo; ninguna sesión queda a medias |
 
 ---
 
@@ -604,7 +728,9 @@ Después, elige en *Notificaciones* qué apps pueden enviar las suyas.
 
 | Síntoma | Causa probable | Qué hacer |
 |---|---|---|
-| «Buscando Flex Phone» y no encuentra | el router aísla a los clientes, o el teléfono está en otra red | misma Wi‑Fi; si aun así no, fija la dirección a mano |
+| «Buscando Flex Phone» y no encuentra | el router aísla a los clientes, o el teléfono está en otra red | misma Wi‑Fi; si aun así no, *Emparejar → Buscar por dirección* |
+| El reloj no sale en la lista del teléfono | el enlace no está encendido en Flex OS, o la red filtra | enciéndelo; luego *Buscar por dirección* con la IP que enseña el reloj |
+| «Flex OS no aceptó el código» a los 12 s | código equivocado, o el reloj ya no está en emparejamiento | vuelve a pulsar *Emparejar teléfono* en el reloj |
 | «Este teléfono no está en Wi‑Fi» | datos móviles | el enlace es de red local |
 | No llega ninguna notificación | falta el acceso a notificaciones, o la app no está permitida | Bienvenida → permisos; luego *Notificaciones* |
 | «El código tecleado no coincide» | código mal, o caducado (2 min) | vuelve a emparejar |
@@ -631,9 +757,10 @@ Se distingue con cuidado entre las tres cosas.
 | Modelo Flex Phone (C++) | 111 comprobaciones |
 | **Máquina del enlace (C++)** | **125 comprobaciones**, con un teléfono simulado que habla el protocolo de verdad |
 | **Desplazamiento de las listas (C++)** | **24 comprobaciones**, con una secuencia de cuadros como la del táctil real |
+| **Bytes del descubrimiento (C++)** | **108 comprobaciones**, con paquetes cortados, mentirosos e imposibles |
 | Vectores dorados (C++) | 10 vectores |
 | Núcleo del navegador (C++) | 406 comprobaciones |
-| Protocolo Android (Kotlin) | **42/42**, incluidos los vectores compartidos con el firmware |
+| Protocolo Android (Kotlin) | **55/55**, incluidos los vectores compartidos con el firmware |
 | Servicio de render (Node) | 35/35 |
 | SDK de apps (Node) | 10/10 |
 
@@ -652,7 +779,7 @@ un problema de configuración: el repositorio Maven de Google
 no se puede descargar.
 
 ```
-repo1.maven.org  -> alcanzable (por eso :protocol compila y pasa sus 42 pruebas)
+repo1.maven.org  -> alcanzable (por eso :protocol compila y pasa sus 55 pruebas)
 dl.google.com    -> CONNECT rechazado
 ```
 
@@ -668,9 +795,11 @@ la parte que más silenciosamente se puede romper.
 
 Nada de esto se ha probado sobre hardware, y **no se afirma que funcione**:
 
-1. **Enlace real P4 ↔ Android**: descubrimiento UDP, conexión TCP,
-   emparejamiento con código, reconexión, notificaciones llegando y respuestas
-   con `RemoteInput` sobre una app real.
+1. **Enlace real P4 ↔ Android**: los **casos A–I** de §12 — descubrimiento UDP
+   en los dos sentidos, respaldo por dirección, conexión TCP, emparejamiento
+   con código correcto y equivocado, caducidad, reconexión tras cambio de IP,
+   dos móviles a la vez, revocación, notificaciones llegando y respuestas con
+   `RemoteInput` sobre una app real.
 2. **El banner dentro de un juego apaisado**: que aparezca arriba, que el juego
    no se pause, que no cambie la orientación, que no se note en los FPS y que
    no deje rastro al irse.

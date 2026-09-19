@@ -52,7 +52,7 @@ JPEG_SRC := $(ROOT)/FlexOS_JPEG.cpp
 APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net \
-        $(BUILD)/test_passcode $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexauth $(BUILD)/test_flexphone_ui $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
+        $(BUILD)/test_passcode $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexauth $(BUILD)/test_flexphone_ui $(BUILD)/test_flexphone_discovery $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
         $(BUILD)/test_media $(BUILD)/test_mem $(BUILD)/test_fall $(BUILD)/test_theft $(BUILD)/test_imu \
         $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun
@@ -222,6 +222,16 @@ $(BUILD)/test_flexauth: test_flexauth.cpp $(FLAUTH) $(ULTRA)/FlexOS_FlexAuth.h |
 # el tactil, si.
 $(BUILD)/test_flexphone_ui: test_flexphone_ui.cpp $(ULTRA)/FlexOS_FlexPhone_UI_Scroll.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_flexphone_ui.cpp
+
+# Los cuatro paquetes UDP del descubrimiento. Tambien existe por un
+# fallo concreto: "el reloj no aparece en la lista", sin ningun error
+# por ninguna de las dos puntas. Cuando lo que falla es un
+# desplazamiento dentro de un paquete no hay nada que leer, asi que
+# los bytes se fijan aqui y los mismos se comprueban en
+# android/.../protocol/DiscoveryTest.kt.
+$(BUILD)/test_flexphone_discovery: test_flexphone_discovery.cpp $(ULTRA)/FlexOS_FlexPhone_Discovery.h \
+                         $(FLNKSRC) $(ULTRA)/FlexOS_FlexLink.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -o $@ test_flexphone_discovery.cpp $(FLNKSRC)
 
 # El transporte: maquina de estados del enlace. En el PC la capacidad
 # es NONE (no hay radio), igual que en el P4 sin el C6 preparado, asi
@@ -404,6 +414,7 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_flexphone
 	@$(BUILD)/test_flexauth
 	@$(BUILD)/test_flexphone_ui
+	@$(BUILD)/test_flexphone_discovery
 	@echo
 	@$(BUILD)/test_flexlink_transport
 	@echo

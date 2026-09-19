@@ -425,6 +425,13 @@ static bool applyMessage(FlexPhoneLink* L, FlexPhoneModel* M,
       if(!flexAuthVerify(L->pendKey, FLXA_ROLE_PHONE, L->nonce, 0, proof)){
         L->nAuthFail++;
         setErr(L, "el codigo tecleado en el telefono no coincide");
+        // Y SE LE DICE AL TELEFONO. Antes el fallo se anotaba solo
+        // aqui: alli la pantalla se quedaba en "Comprobando..." hasta
+        // que caducara la ventana de dos minutos, sin nada que
+        // explicara por que. Con esto el usuario ve el motivo en el
+        // acto y puede volver a teclear.
+        const uint8_t e = FLNK_E_AUTH;
+        flexPhoneLinkSend(L, FLNK_T_ERR, &e, 1, false);
         return true;
       }
       L->peerConfirmed = true;
@@ -851,6 +858,10 @@ void flexPhoneLinkTick(FlexPhoneLink* L, FlexPhoneModel* M, uint32_t nowMs){
     L->pendKeyOk = false;
     memset(L->pendKey, 0, sizeof(L->pendKey));
     setErr(L, "el emparejamiento caduco; vuelve a intentarlo");
+    // El telefono tiene que enterarse: si no, se queda esperando un
+    // codigo que ya no vale contra una sal que ya no existe.
+    { const uint8_t e = FLNK_E_TIMEOUT;
+      flexPhoneLinkSend(L, FLNK_T_ERR, &e, 1, false); }
     gotoState(L, FLP_LS_CONNECTING, nowMs);
   }
 

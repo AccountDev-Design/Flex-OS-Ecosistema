@@ -242,6 +242,10 @@ static void flexPhoneBegin(){
   fphSelfIdLoad();
   flexPhoneLinkSetIdentity(&fphLink, fphSelfId);
   flexPhoneLinkSetTransport(&fphLink, flexPhoneWifiTransport());
+  // Lo que este reloj contesta cuando un telefono pregunta quien hay
+  // en la red. Sin esto la respuesta saldria sin nombre y la lista de
+  // Android mostraria una IP suelta.
+  flexPhoneWifiSetIdentity(fphSelfId, FLEXOS_OTA_PLAT_NAME, false);
   fphBondLoad();
   fphLoad();
   { Preferences p;
@@ -257,6 +261,18 @@ static void flexPhoneBegin(){
 // FPS al escritorio, al panel rapido ni a los juegos.
 static void flexPhoneTick(){
   const uint32_t now = millis();
+  // La bandera "estoy emparejando" viaja en la respuesta al telefono,
+  // que la usa para destacar este reloj en su lista. Se toca solo
+  // cuando cambia: el mutex del transporte no tiene por que pagarse
+  // sesenta veces por segundo.
+  {
+    static bool lastPairing = false;
+    const bool pairing = (fphLink.state == FLP_LS_PAIRING);
+    if(pairing != lastPairing){
+      lastPairing = pairing;
+      flexPhoneWifiSetIdentity(NULL, NULL, pairing);
+    }
+  }
   if(fphLink.state == FLP_LS_UNAVAILABLE || fphLink.state == FLP_LS_OFF){
     // Arranque automatico: solo si el usuario lo pidio, solo con Wi-Fi
     // conectado de verdad y solo si hay un telefono vinculado. Sin
@@ -957,7 +973,7 @@ static void fphRenderConexion(){
   int y = y0;
 
   const uint8_t vs = fphLinkVisualState();
-  fgCard(FPH_MX, y, FPH_CW, 156);
+  fgCard(FPH_MX, y, FPH_CW, 178);
   drawText(FPH_MX + 18, y + 12, LI() == 1 ? "Link" : "Enlace", 2, TH_TXT);
   fgStatusChip(FPH_MX + 18, y + 42, vs, flexPhoneLinkStateName(fphLink.state));
   {
@@ -965,15 +981,25 @@ static void fphRenderConexion(){
     flexPhoneLinkPeer(&fphLink, peer, sizeof(peer));
     fgRow(FPH_MX + 18, y + 76,  FPH_CW - 36, LI() == 1 ? "Transport" : "Transporte",
           flexPhoneTransportName(fphLink.tr ? fphLink.tr->kind : (uint8_t)FLP_TR_NONE));
-    fgRow(FPH_MX + 18, y + 98,  FPH_CW - 36, LI() == 1 ? "Phone address" : "Direccion del telefono",
+    // La direccion de ESTE reloj. Es la que hay que teclear en la app
+    // del telefono cuando la red filtra la difusion: sin ensenarla, el
+    // respaldo "buscar por direccion" no serviria de nada porque nadie
+    // sabria que escribir.
+    char mine[20] = "--";
+    if(WiFi.status() == WL_CONNECTED){
+      const IPAddress ip = WiFi.localIP();
+      snprintf(mine, sizeof(mine), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+    }
+    fgRow(FPH_MX + 18, y + 98,  FPH_CW - 36, LI() == 1 ? "This watch" : "Este reloj", mine);
+    fgRow(FPH_MX + 18, y + 120, FPH_CW - 36, LI() == 1 ? "Phone address" : "Direccion del telefono",
           peer[0] ? peer : "--");
     char v[24];
     uint16_t rtt = 0;
     if(flexPhoneLinkLatency(&fphLink, &rtt)) snprintf(v, sizeof(v), "%u ms", rtt);
     else snprintf(v, sizeof(v), "--");
-    fgRow(FPH_MX + 18, y + 120, FPH_CW - 36, LI() == 1 ? "Latency" : "Latencia", v);
+    fgRow(FPH_MX + 18, y + 142, FPH_CW - 36, LI() == 1 ? "Latency" : "Latencia", v);
   }
-  y += 168;
+  y += 190;
 
   // Motivo REAL del transporte, sea bueno o malo.
   {
@@ -1012,11 +1038,15 @@ static void fphRenderConexion(){
 
   y += fgNotice(FPH_MX, y, FPH_CW, LI() == 1 ? "How it finds the phone" : "Como encuentra el telefono",
       LI() == 1
-      ? "Flex OS asks on the local network and the phone answers with its address. Some routers "
-        "isolate clients and block that; then the address has to be typed in the phone app."
-      : "Flex OS pregunta en la red local y el telefono contesta con su direccion. Algunos "
-        "routers aislan a los clientes y lo bloquean; entonces hay que fijar la direccion "
-        "desde la app del telefono.",
+      ? "Both sides ask. Flex OS broadcasts, and the phone app also asks -- and that second "
+        "direction is the one that works when a router filters broadcasts, because this watch "
+        "learns the phone's address from the question itself. If neither gets through, type "
+        "the address above into the phone app, Pair, Search by address."
+      : "Preguntan los dos. Flex OS emite, y la app del telefono tambien pregunta -- y esa "
+        "segunda direccion es la que funciona cuando el router filtra la difusion, porque este "
+        "reloj aprende la direccion del telefono de la propia pregunta. Si no pasa ninguna de "
+        "las dos, teclea la direccion de arriba en la app del telefono: Emparejar, Buscar por "
+        "direccion.",
       TH_MUTE) + 10;
 
   fphScr.content = y - y0;
