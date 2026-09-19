@@ -4,6 +4,10 @@
 // ##  sobre todo, para el limite real de la seguridad que da.
 // #############################################################
 #include "FlexOS_FlexPhone_Link.h"
+// Para las lineas de diagnostico del emparejamiento. Solo se usan
+// cuando hay un gancho instalado (ver flexPhoneLinkSetLog).
+#include <stdarg.h>
+#include <stdio.h>
 
 // =============================================================
 //  DETECCION DE CAPACIDAD -- se le pregunta al SDK, no se supone
@@ -124,6 +128,96 @@ static void gotoState(FlexPhoneLink* L, uint8_t st, uint32_t nowMs){
   L->stateSinceMs = nowMs ? nowMs : 1;   // 0 significa "sin marca"
 }
 
+// =============================================================
+//  Diagnostico
+// =============================================================
+// Ver la cabecera: el codigo NUNCA sale entero. Solo los dos
+// primeros digitos, que bastan para comparar dos extremos y no para
+// adivinar nada.
+static FlexPhoneLogFn gLog = NULL;
+
+void flexPhoneLinkSetLog(FlexPhoneLogFn fn){ gLog = fn; }
+
+static void maskCode(const char* code, char out[FLP_LINK_CODE_LEN + 1]){
+  size_t i = 0;
+  for(; i < 2 && code && code[i]; i++) out[i] = code[i];
+  for(; i < FLP_LINK_CODE_LEN; i++) out[i] = '-';
+  out[FLP_LINK_CODE_LEN] = 0;
+}
+
+// Formatea SOLO si hay alguien escuchando. Sin gancho instalado esto
+// es una comparacion contra NULL y se acabo.
+//
+// NO se llama `logf`: ese nombre es el logaritmo de <math.h>, y
+// Arduino.h arrastra math.h. Un choque asi no se ve en las pruebas de
+// host (que no incluyen math.h) y rompe la compilacion en la placa.
+static void pairLog(const char* fmt, ...){
+  if(!gLog) return;
+  char line[128];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(line, sizeof(line), fmt, ap);
+  va_end(ap);
+  gLog(line);
+}
+
+// =============================================================
+//  La sesion de emparejamiento
+// =============================================================
+// Cerrar es BORRAR: el codigo, la sal, el reto y la clave a medio
+// derivar dejan de existir a la vez. Dejar cualquiera de los cuatro
+// vivo es lo que permitia que un intento viejo se colara en el
+// siguiente.
+static void pairClear(FlexPhonePairing* P, uint8_t endState){
+  if(!P) return;
+  memset(P, 0, sizeof(*P));
+  P->state = endState;
+}
+
+// ¿Sigue viva? El plazo cuelga de `startedMs`, NO del estado del
+// enlace: un corte de canal no le quita ni le regala tiempo.
+static bool pairAlive(const FlexPhonePairing* P, uint32_t nowMs){
+  if(!P || P->state != FLP_PAIR_OPEN || !P->code[0]) return false;
+  if(!P->startedMs) return true;                 // sin marca: no caduca sola
+  return (uint32_t)(nowMs - P->startedMs) <= FLP_LINK_PAIR_WINDOW_MS;
+}
+
+// LOS DOS lados. Confirmar solo en Flex OS no empareja nada, y una
+// prueba valida sin confirmacion del usuario tampoco: hace falta que
+// alguien delante del reloj diga que si.
+static bool pairBothConfirmed(const FlexPhonePairing* P){
+  return P && P->state == FLP_PAIR_OPEN &&
+         P->userConfirmed && P->peerConfirmed && P->keyOk;
+}
+
+// Deriva la clave de ESTA sesion contra el telefono `peerId`.
+//
+// Se vuelve a llamar en cada WELCOME a proposito: el telefono puede
+// reconectar (y lo hace) y lo unico que cambia entre un canal y el
+// siguiente es quien esta al otro lado. El CODIGO y la SAL son los
+// de la sesion y no se tocan aqui -- por eso el telefono puede seguir
+// usando lo que ya tenia apuntado.
+static void pairDeriveFor(FlexPhoneLink* L, const char* peerId){
+  if(!L || !peerId || !peerId[0]) return;
+  FlexPhonePairing* P = &L->pair;
+  if(P->state != FLP_PAIR_OPEN || !P->code[0]) return;
+  flexAuthDeriveKey(P->code, P->salt, L->selfId, peerId, P->key);
+  flexLinkUtf8Copy(P->peerId, sizeof(P->peerId), peerId);
+  P->keyOk = true;
+}
+
+// Manda la sal y el reto DE LA SESION. Nunca el codigo.
+static bool pairSendSalt(FlexPhoneLink* L){
+  if(!L || L->pair.state != FLP_PAIR_OPEN) return false;
+  uint8_t body[FLXA_SALT_SIZE + FLXA_NONCE_SIZE + 1 + FLXA_ID_MAX];
+  FlexLinkWr w; flexLinkWrInit(&w, body, sizeof(body));
+  flexLinkWrBytes(&w, L->pair.salt,  FLXA_SALT_SIZE);
+  flexLinkWrBytes(&w, L->pair.nonce, FLXA_NONCE_SIZE);
+  flexLinkWrStr(&w, L->selfId, FLXA_ID_MAX - 1);
+  if(!flexLinkWrOk(&w)) return false;
+  return flexPhoneLinkSend(L, FLNK_T_PAIR_CODE, body, w.at, false);
+}
+
 // Arranca una sesion nueva: contadores, reensamblador y anti-repeticion
 // desde cero. Se llama en CADA apertura, no solo en la primera: reusar
 // la ventana anti-repeticion de la sesion anterior descartaria las
@@ -198,8 +292,13 @@ bool flexPhoneLinkStart(FlexPhoneLink* L){
     setErr(L, flexPhoneLinkCapReason());
     return false;
   }
+  // El enlace ya esta vivo: encenderlo otra vez no puede tirar lo que
+  // hay en marcha. EMPAREJANDO entra en la lista a proposito -- un
+  // segundo toque en "Activar el enlace" no puede borrar el codigo que
+  // el usuario tiene delante.
   if(L->state == FLP_LS_READY || L->state == FLP_LS_SEARCHING ||
-     L->state == FLP_LS_CONNECTING || L->state == FLP_LS_AUTH) return true;
+     L->state == FLP_LS_CONNECTING || L->state == FLP_LS_AUTH ||
+     L->state == FLP_LS_PAIRING) return true;
   L->err[0] = 0;
   L->session = 0;
   L->reconnectAttempt = 0;
@@ -227,11 +326,12 @@ void flexPhoneLinkStop(FlexPhoneLink* L){
   flexPhoneTrStop(L->tr);
   linkResetAll(L);
   L->session = 0;
-  L->userConfirmed = false;
-  L->peerConfirmed = false;
-  L->pendKeyOk = false;
-  memset(L->pendKey, 0, sizeof(L->pendKey));
-  L->code[0] = 0;
+  L->chanPeerId[0] = 0;
+  // Apagar el enlace CIERRA el emparejamiento en curso. Guardar el
+  // codigo "por si vuelve" es justo lo que hacia que un intento
+  // abandonado reapareciera despues contra una sal que ya no existia.
+  if(L->pair.state == FLP_PAIR_OPEN) pairLog("PAIR SESSION CANCELLED (link off)");
+  pairClear(&L->pair, FLP_PAIR_NONE);
   L->state = (L->cap == FLP_LINK_CAP_NONE) ? FLP_LS_UNAVAILABLE : FLP_LS_OFF;
 }
 
@@ -242,10 +342,10 @@ void flexPhoneLinkForget(FlexPhoneLink* L){
   // despues de desvincular seria material vivo de un vinculo que el
   // usuario ha pedido olvidar.
   memset(&L->bond, 0, sizeof(L->bond));
-  memset(L->pendKey, 0, sizeof(L->pendKey));
-  memset(L->salt, 0, sizeof(L->salt));
+  // pairClear ya borra codigo, sal, reto y clave a medio derivar de
+  // una vez: son los cuatro campos de la misma sesion.
+  pairClear(&L->pair, FLP_PAIR_NONE);
   memset(L->nonce, 0, sizeof(L->nonce));
-  L->pendKeyOk = false;
   memset(&L->anti, 0, sizeof(L->anti));
   L->txCounter = 0;
 }
@@ -369,8 +469,9 @@ static bool applyMessage(FlexPhoneLink* L, FlexPhoneModel* M,
         gotoState(L, FLP_LS_ERROR, nowMs);
         return true;
       }
-      flexLinkUtf8Copy(L->pendPeerId, sizeof(L->pendPeerId), id);
+      flexLinkUtf8Copy(L->chanPeerId, sizeof(L->chanPeerId), id);
       if(M) flexLinkUtf8Copy(M->phone.name, sizeof(M->phone.name), nm);
+      pairLog("WELCOME de %s", id);
 
       // ¿Es el telefono que ya conocemos? Se compara el
       // identificador, no el nombre: el nombre lo cambia el usuario.
@@ -387,24 +488,39 @@ static bool applyMessage(FlexPhoneLink* L, FlexPhoneModel* M,
         gotoState(L, FLP_LS_AUTH, nowMs);
         if(flexLinkWrOk(&w))
           flexPhoneLinkSend(L, FLNK_T_AUTH_CHALLENGE, body, w.at, false);
-      } else if(L->state == FLP_LS_PAIRING && L->code[0]){
-        // El usuario ya pidio emparejar: se manda la sal. EL CODIGO
-        // NO VIAJA: el usuario lo lee en Flex OS y lo teclea aqui.
-        uint8_t body[FLXA_SALT_SIZE + FLXA_NONCE_SIZE + 1 + FLXA_ID_MAX];
-        FlexLinkWr w; flexLinkWrInit(&w, body, sizeof(body));
-        flexLinkWrBytes(&w, L->salt,  FLXA_SALT_SIZE);
-        flexLinkWrBytes(&w, L->nonce, FLXA_NONCE_SIZE);
-        flexLinkWrStr(&w, L->selfId, FLXA_ID_MAX - 1);
-        // La clave se deriva AQUI, que es cuando ya se sabe con quien.
-        flexAuthDeriveKey(L->code, L->salt, L->selfId, id, L->pendKey);
-        L->pendKeyOk = true;
-        if(flexLinkWrOk(&w))
-          flexPhoneLinkSend(L, FLNK_T_PAIR_CODE, body, w.at, false);
-      } else {
-        // Telefono desconocido y nadie ha pedido emparejar. No se
-        // abre nada: se queda esperando a que el usuario decida.
+      } else if(pairAlive(&L->pair, nowMs)){
+        // #####################################################
+        // ##  HAY SESION DE EMPAREJAMIENTO VIVA
+        // ##  ----------------------------------------------
+        // ##  Se reenvia LA SAL DE ESA SESION, tal cual. El
+        // ##  codigo NO se regenera y NO viaja: el usuario lo lee
+        // ##  en Flex OS y lo teclea en el telefono.
+        // ##
+        // ##  Que esto se ejecute tambien al RECONECTAR es la
+        // ##  parte que faltaba. El telefono tira sus datos del
+        // ##  emparejamiento cuando se cae el socket, asi que si
+        // ##  al volver no se le reenviara la sal se quedaba con
+        // ##  el boton de emparejar apagado ("esperando a Flex
+        // ##  OS") contra un reloj que si estaba ensenando el
+        // ##  codigo.
+        // #####################################################
         gotoState(L, FLP_LS_PAIRING, nowMs);
-        setErr(L, "telefono sin emparejar: pulsa Emparejar en Flex Phone");
+        // La clave se deriva AQUI, que es cuando ya se sabe con quien.
+        pairDeriveFor(L, id);
+        const bool sent = pairSendSalt(L);
+        char mc[FLP_LINK_CODE_LEN + 1];
+        maskCode(L->pair.code, mc);
+        pairLog("PAIR SALT SENT (%s) code=%s to=%s", sent ? "ok" : "FALLO", mc, id);
+      } else {
+        // Telefono desconocido y NADIE ha pedido emparejar.
+        //
+        // Antes esto pasaba a EMPAREJANDO, y era mentira por partida
+        // doble: no habia codigo que ensenar, y el descubrimiento
+        // anunciaba a este reloj como "ensenando codigo" ante
+        // cualquier movil de la red. El canal esta abierto y no hay
+        // sesion: eso es CONECTANDO.
+        gotoState(L, FLP_LS_CONNECTING, nowMs);
+        setErr(L, "telefono sin emparejar: pulsa Emparejar telefono en Flex OS");
       }
       return true;
     }
@@ -417,31 +533,70 @@ static bool applyMessage(FlexPhoneLink* L, FlexPhoneModel* M,
       // el usuario tecleo el codigo correcto. Sin prueba valida no
       // se empareja: confirmar a ciegas es lo que permitiria que un
       // vecino se vinculara solo por estar en la red.
-      if(!L->pendKeyOk){ L->nAuthFail++; return false; }
+      // CADUCADO SE DICE COMO CADUCADO. Una prueba que llega tarde no
+      // es un codigo mal tecleado, y decirle al usuario que reviso
+      // mal los digitos cuando lo que paso es que se le acabo el
+      // tiempo es mandarle a buscar donde no hay nada.
+      if(L->pair.state == FLP_PAIR_OPEN && !pairAlive(&L->pair, nowMs)){
+        pairLog("PAIR CONFIRM RECEIVED: CODE EXPIRED");
+        setErr(L, "el emparejamiento caduco; vuelve a intentarlo");
+        pairClear(&L->pair, FLP_PAIR_NONE);
+        const uint8_t e = FLNK_E_TIMEOUT;
+        flexPhoneLinkSend(L, FLNK_T_ERR, &e, 1, false);
+        gotoState(L, FLP_LS_CONNECTING, nowMs);
+        return true;
+      }
+      if(L->pair.state != FLP_PAIR_OPEN || !L->pair.keyOk){
+        // No hay sesion abierta (o todavia no se sabe con quien se
+        // deriva). Se dice, en vez de dejar al telefono esperando.
+        L->nAuthFail++;
+        pairLog("PAIR CONFIRM RECEIVED: NO PAIRING SESSION");
+        const uint8_t e = FLNK_E_NOTPAIRED;
+        flexPhoneLinkSend(L, FLNK_T_ERR, &e, 1, false);
+        return false;
+      }
       uint8_t proof[FLXA_PROOF_SIZE];
       FlexLinkRd r; flexLinkRdInit(&r, p, n);
       flexLinkRdBytes(&r, proof, sizeof(proof));
       if(!flexLinkRdOk(&r)){ L->nBad++; return false; }
-      if(!flexAuthVerify(L->pendKey, FLXA_ROLE_PHONE, L->nonce, 0, proof)){
+      // La prueba va SIEMPRE sobre el reto de LA SESION DE
+      // EMPAREJAMIENTO y sesion 0, que es lo que el telefono recibio
+      // en PAIR_CODE. Usar aqui otro reto -- por ejemplo el de la
+      // sesion de un vinculo anterior -- hacia fallar un codigo que
+      // el usuario habia tecleado bien.
+      const bool match = flexAuthVerify(L->pair.key, FLXA_ROLE_PHONE,
+                                        L->pair.nonce, 0, proof);
+      {
+        char mc[FLP_LINK_CODE_LEN + 1];
+        maskCode(L->pair.code, mc);
+        pairLog("PAIR CONFIRM RECEIVED: expected=%s peer=%s MATCH=%s",
+             mc, L->pair.peerId, match ? "true" : "false");
+      }
+      if(!match){
         L->nAuthFail++;
+        if(L->pair.rejects < 255) L->pair.rejects++;
         setErr(L, "el codigo tecleado en el telefono no coincide");
         // Y SE LE DICE AL TELEFONO. Antes el fallo se anotaba solo
         // aqui: alli la pantalla se quedaba en "Comprobando..." hasta
         // que caducara la ventana de dos minutos, sin nada que
         // explicara por que. Con esto el usuario ve el motivo en el
         // acto y puede volver a teclear.
+        //
+        // LA SESION SIGUE VIVA a proposito: el codigo que se ensena
+        // no cambia porque alguien se equivoque al teclearlo, asi que
+        // el usuario puede corregir un digito y reintentar contra EL
+        // MISMO codigo que tiene delante.
         const uint8_t e = FLNK_E_AUTH;
         flexPhoneLinkSend(L, FLNK_T_ERR, &e, 1, false);
         return true;
       }
-      L->peerConfirmed = true;
-      if(flexPhoneLinkPairComplete(L)){
+      L->pair.peerConfirmed = true;
+      if(pairBothConfirmed(&L->pair)){
         // Vinculo cerrado. A partir de aqui no hace falta el codigo.
-        memcpy(L->bond.key, L->pendKey, FLXA_KEY_SIZE);
-        flexLinkUtf8Copy(L->bond.peerId, sizeof(L->bond.peerId), L->pendPeerId);
+        memcpy(L->bond.key, L->pair.key, FLXA_KEY_SIZE);
+        flexLinkUtf8Copy(L->bond.peerId, sizeof(L->bond.peerId), L->pair.peerId);
         if(M) flexLinkUtf8Copy(L->bond.peerName, sizeof(L->bond.peerName), M->phone.name);
         L->bond.valid = true;
-        L->code[0] = 0;
         L->session = (uint16_t)((nowMs | 1) & 0xFFFF);
         flexLinkAntiReplayInit(&L->anti);
         // Flex OS devuelve SU prueba. Sin esto el telefono no sabria
@@ -451,12 +606,21 @@ static bool applyMessage(FlexPhoneLink* L, FlexPhoneModel* M,
         // comprueba con ese mismo numero; calcularla sobre otro valor
         // haria que el telefono no reconociera a Flex OS y tirara un
         // emparejamiento que en realidad era bueno.
+        //
+        // El reto sigue siendo el de la sesion de emparejamiento: es
+        // el unico que el telefono tiene apuntado en este punto.
         uint8_t mine[FLXA_PROOF_SIZE];
-        flexAuthProof(L->bond.key, FLXA_ROLE_HOST, L->nonce, L->session, mine);
+        flexAuthProof(L->bond.key, FLXA_ROLE_HOST, L->pair.nonce, L->session, mine);
+        // El codigo deja de existir AQUI, no antes: hasta este
+        // momento seguia siendo la unica forma de reintentar.
+        pairClear(&L->pair, FLP_PAIR_DONE);
         gotoState(L, FLP_LS_READY, nowMs);
         flexPhoneLinkSend(L, FLNK_T_AUTH_OK, mine, sizeof(mine), false);
         L->hostProven = true;
         L->lastTxMs = nowMs;
+        pairLog("PAIR COMPLETE: SESSION CREATED %u", (unsigned)L->session);
+      } else {
+        pairLog("CODE MATCH ok; falta confirmar en Flex OS");
       }
       return true;
     }
@@ -672,61 +836,117 @@ bool flexPhoneLinkOnFrame(FlexPhoneLink* L, FlexPhoneModel* M,
 // =============================================================
 //  Emparejamiento
 // =============================================================
+// #############################################################
+// ##  AQUI, Y SOLO AQUI, NACE UN CODIGO
+// ##  ------------------------------------------------------
+// ##  Esta funcion se llama desde UN sitio: el boton "Emparejar
+// ##  telefono" de la interfaz. Ningun mensaje de la red llega
+// ##  hasta aqui, y esa es la regla que arregla el fallo de raiz:
+// ##  mientras la sesion viva, el codigo que ensena la pantalla es
+// ##  exactamente el que el servidor valida, pase lo que pase con
+// ##  el canal.
+// #############################################################
 void flexPhoneLinkBeginPairing(FlexPhoneLink* L, FlexAuthRandFn rnd, uint32_t nowMs){
   if(!L) return;
   if(L->state == FLP_LS_UNAVAILABLE || L->state == FLP_LS_OFF) return;
-  uint32_t seed = rnd ? rnd() : 0;
-  flexAuthFormatCode(seed, L->code);
-  flexAuthRandomBytes(rnd, L->salt,  sizeof(L->salt));
-  flexAuthRandomBytes(rnd, L->nonce, sizeof(L->nonce));
-  L->userConfirmed = false;
-  L->peerConfirmed = false;
-  L->pendKeyOk = false;
-  memset(L->pendKey, 0, sizeof(L->pendKey));
+
+  // Una sesion nueva TIRA la anterior entera. Reaprovechar la sal o
+  // la clave a medio derivar de un intento abandonado es como un
+  // codigo viejo acababa validandose contra material nuevo.
+  pairClear(&L->pair, FLP_PAIR_OPEN);
+  FlexPhonePairing* P = &L->pair;
+  flexAuthFormatCode(rnd ? rnd() : 0, P->code);
+  flexAuthRandomBytes(rnd, P->salt,  sizeof(P->salt));
+  flexAuthRandomBytes(rnd, P->nonce, sizeof(P->nonce));
+  // El plazo cuelga de AQUI. No de `stateSinceMs`, que lo reinicia
+  // cualquier vaiven del canal y dejaba el codigo sin caducar nunca.
+  P->startedMs = nowMs ? nowMs : 1;
   L->err[0] = 0;
   gotoState(L, FLP_LS_PAIRING, nowMs);
+
+  {
+    char mc[FLP_LINK_CODE_LEN + 1];
+    maskCode(P->code, mc);
+    pairLog("PAIR SESSION CREATED: code=%s ventana=%u ms",
+         mc, (unsigned)FLP_LINK_PAIR_WINDOW_MS);
+  }
 
   // Si el telefono ya se presento, la sal sale ya. Si todavia no, sale
   // en cuanto llegue su WELCOME: el orden de los dos eventos depende
   // de la red y ninguno de los dos puede quedarse esperando al otro.
-  if(L->pendPeerId[0]){
-    uint8_t body[FLXA_SALT_SIZE + FLXA_NONCE_SIZE + 1 + FLXA_ID_MAX];
-    FlexLinkWr w; flexLinkWrInit(&w, body, sizeof(body));
-    flexLinkWrBytes(&w, L->salt,  FLXA_SALT_SIZE);
-    flexLinkWrBytes(&w, L->nonce, FLXA_NONCE_SIZE);
-    flexLinkWrStr(&w, L->selfId, FLXA_ID_MAX - 1);
-    flexAuthDeriveKey(L->code, L->salt, L->selfId, L->pendPeerId, L->pendKey);
-    L->pendKeyOk = true;
-    if(flexLinkWrOk(&w))
-      flexPhoneLinkSend(L, FLNK_T_PAIR_CODE, body, w.at, false);
+  if(L->chanPeerId[0]){
+    pairDeriveFor(L, L->chanPeerId);
+    const bool sent = pairSendSalt(L);
+    pairLog("PAIR SALT SENT (%s) to=%s", sent ? "ok" : "FALLO", L->chanPeerId);
   }
 }
 
 void flexPhoneLinkConfirm(FlexPhoneLink* L, uint32_t nowMs){
-  if(!L || L->state != FLP_LS_PAIRING) return;
-  L->userConfirmed = true;
-  if(flexPhoneLinkPairComplete(L)){
+  if(!L || L->pair.state != FLP_PAIR_OPEN) return;
+  // Confirmar un codigo que ya caduco no empareja nada: se cierra la
+  // sesion y se dice, en vez de dejar al usuario pulsando un boton
+  // que no puede funcionar.
+  if(!pairAlive(&L->pair, nowMs)){
+    setErr(L, "el emparejamiento caduco; vuelve a intentarlo");
+    pairClear(&L->pair, FLP_PAIR_NONE);
+    gotoState(L, FLP_LS_CONNECTING, nowMs);
+    return;
+  }
+  L->pair.userConfirmed = true;
+  pairLog("USER CONFIRMED en Flex OS");
+  if(pairBothConfirmed(&L->pair)){
     // El telefono ya habia demostrado la clave: solo faltaba el
     // usuario. Se cierra el vinculo aqui mismo.
-    memcpy(L->bond.key, L->pendKey, FLXA_KEY_SIZE);
-    flexLinkUtf8Copy(L->bond.peerId, sizeof(L->bond.peerId), L->pendPeerId);
+    memcpy(L->bond.key, L->pair.key, FLXA_KEY_SIZE);
+    flexLinkUtf8Copy(L->bond.peerId, sizeof(L->bond.peerId), L->pair.peerId);
     L->bond.valid = true;
-    L->code[0] = 0;
     L->session = (uint16_t)((nowMs | 1) & 0xFFFF);
     flexLinkAntiReplayInit(&L->anti);
     uint8_t mine[FLXA_PROOF_SIZE];
-    flexAuthProof(L->bond.key, FLXA_ROLE_HOST, L->nonce, L->session, mine);
+    flexAuthProof(L->bond.key, FLXA_ROLE_HOST, L->pair.nonce, L->session, mine);
+    pairClear(&L->pair, FLP_PAIR_DONE);
     gotoState(L, FLP_LS_READY, nowMs);
     flexPhoneLinkSend(L, FLNK_T_AUTH_OK, mine, sizeof(mine), false);
     L->hostProven = true;
+    pairLog("PAIR COMPLETE: SESSION CREATED %u", (unsigned)L->session);
   }
 }
 
+void flexPhoneLinkCancelPairing(FlexPhoneLink* L, uint32_t nowMs){
+  if(!L || L->pair.state != FLP_PAIR_OPEN) return;
+  // El telefono tiene que enterarse: si no, se queda esperando contra
+  // una sal que ya no existe. Se manda ANTES de borrar nada.
+  const uint8_t e = FLNK_E_TIMEOUT;
+  flexPhoneLinkSend(L, FLNK_T_ERR, &e, 1, false);
+  pairClear(&L->pair, FLP_PAIR_NONE);
+  L->err[0] = 0;
+  pairLog("PAIR SESSION CANCELLED por el usuario");
+  // El canal NO se toca: cancelar el emparejamiento no es apagar el
+  // enlace. Se vuelve al estado que corresponde al canal que haya.
+  gotoState(L, flexPhoneTrState(L->tr) == FLP_TC_OPEN
+                 ? FLP_LS_CONNECTING : FLP_LS_SEARCHING, nowMs);
+}
+
 bool flexPhoneLinkPairComplete(const FlexPhoneLink* L){
-  // LOS DOS lados. Confirmar solo en Flex OS no empareja nada, y una
-  // prueba valida sin confirmacion del usuario tampoco: hace falta
-  // que alguien delante del reloj diga que si.
-  return L && L->userConfirmed && L->peerConfirmed && L->pendKeyOk;
+  // FLP_PAIR_DONE tambien cuenta. Al cerrarse el vinculo la sesion se
+  // borra entera -- codigo incluido --, y quien pregunta justo
+  // despues (la interfaz, para guardar la clave en NVS) tiene que
+  // seguir recibiendo un si. Sin esto, emparejar bien se leia desde
+  // fuera igual que no emparejar.
+  if(!L) return false;
+  if(L->pair.state == FLP_PAIR_DONE) return true;
+  return pairBothConfirmed(&L->pair);
+}
+
+const char* flexPhoneLinkCode(const FlexPhoneLink* L){
+  if(!L || L->pair.state != FLP_PAIR_OPEN) return "";
+  return L->pair.code;
+}
+
+uint32_t flexPhoneLinkPairRemainingMs(const FlexPhoneLink* L, uint32_t nowMs){
+  if(!L || L->pair.state != FLP_PAIR_OPEN || !L->pair.startedMs) return 0;
+  const uint32_t gone = (uint32_t)(nowMs - L->pair.startedMs);
+  return gone >= FLP_LINK_PAIR_WINDOW_MS ? 0u : (FLP_LINK_PAIR_WINDOW_MS - gone);
 }
 
 // =============================================================
@@ -779,12 +999,35 @@ void flexPhoneLinkTick(FlexPhoneLink* L, FlexPhoneModel* M, uint32_t nowMs){
     const uint32_t d = flexLinkRetryDelayMs(L->reconnectAttempt);
     if(d == 0){
       setErr(L, "no se pudo reconectar con el telefono");
+      // Rendirse del todo SI cierra el emparejamiento: el codigo que
+      // hay en pantalla ya no puede llegar a ninguna parte, y dejarlo
+      // ahi es pedirle al usuario que teclee algo que no sirve.
+      if(L->pair.state == FLP_PAIR_OPEN){
+        pairLog("PAIR SESSION CANCELLED: el canal se rindio");
+        pairClear(&L->pair, FLP_PAIR_NONE);
+      }
       gotoState(L, FLP_LS_ERROR, nowMs);
     } else {
       setErr(L, flexPhoneTrStatus(L->tr));
       L->reconnectAttempt++;
       L->reconnectAtMs = nowMs + d;
-      gotoState(L, FLP_LS_SEARCHING, nowMs);
+      // #####################################################
+      // ##  EL EMPAREJAMIENTO SOBREVIVE AL CANAL
+      // ##  ----------------------------------------------
+      // ##  Antes esta linea sacaba al enlace de EMPAREJANDO
+      // ##  pasara lo que pasara. Como el telefono cierra el
+      // ##  socket mientras nadie ha autenticado, el ciclo era:
+      // ##  se cae el canal -> se sale de EMPAREJANDO -> la
+      // ##  tarjeta del codigo desaparece -> al reconectar el
+      // ##  estado volvia a EMPAREJANDO con el codigo VIEJO
+      // ##  todavia en memoria. Eso es el parpadeo que se veia
+      // ##  en el reloj, y de paso reiniciaba el plazo.
+      // ##
+      // ##  El codigo es de la sesion, no del socket. Mientras
+      // ##  la sesion viva, EMPAREJANDO se queda.
+      // #####################################################
+      if(!pairAlive(&L->pair, nowMs))
+        gotoState(L, FLP_LS_SEARCHING, nowMs);
     }
   }
   if((tc == FLP_TC_DOWN || tc == FLP_TC_SEARCHING || tc == FLP_TC_OPENING) &&
@@ -822,13 +1065,17 @@ void flexPhoneLinkTick(FlexPhoneLink* L, FlexPhoneModel* M, uint32_t nowMs){
     L->session = 0;
     L->reconnectAttempt = 0;
     L->err[0] = 0;
-    L->pendPeerId[0] = 0;
+    // Quien habia al otro lado era del canal ANTERIOR. Se vuelve a
+    // aprender del WELCOME; la sesion de emparejamiento guarda por su
+    // cuenta con quien derivo su clave.
+    L->chanPeerId[0] = 0;
     // El estado de EMPAREJAMIENTO se conserva: el usuario esta
     // mirando un codigo en pantalla, y perderselo porque el Wi-Fi
     // parpadeo un segundo seria gratuito. El codigo y la sal siguen
     // siendo validos -- lo unico que cambia es el canal por el que
     // viajan --, y al llegar el WELCOME nuevo se reenvia la sal.
-    if(L->state != FLP_LS_PAIRING) gotoState(L, FLP_LS_CONNECTING, nowMs);
+    if(!pairAlive(&L->pair, nowMs)) gotoState(L, FLP_LS_CONNECTING, nowMs);
+    else                            gotoState(L, FLP_LS_PAIRING,    nowMs);
     uint8_t body[1 + FLXA_ID_MAX];
     FlexLinkWr w; flexLinkWrInit(&w, body, sizeof(body));
     flexLinkWrU8(&w, FLNK_VERSION);
@@ -851,18 +1098,21 @@ void flexPhoneLinkTick(FlexPhoneLink* L, FlexPhoneModel* M, uint32_t nowMs){
   //  2) El codigo de emparejamiento caduca. Si nadie confirma, se
   //     vuelve a buscar en vez de dejar el codigo en pantalla.
   // -----------------------------------------------------------
-  if(L->state == FLP_LS_PAIRING && L->stateSinceMs &&
-     (uint32_t)(nowMs - L->stateSinceMs) > FLP_LINK_PAIR_WINDOW_MS){
-    L->code[0] = 0;
-    L->userConfirmed = L->peerConfirmed = false;
-    L->pendKeyOk = false;
-    memset(L->pendKey, 0, sizeof(L->pendKey));
+  // EL PLAZO ES DE LA SESION, no del estado. Antes colgaba de
+  // `stateSinceMs`, que lo reinicia cualquier cambio de estado: cada
+  // vaiven del canal le regalaba al codigo otros dos minutos y el
+  // aviso de caducidad no llegaba nunca.
+  if(L->pair.state == FLP_PAIR_OPEN && !pairAlive(&L->pair, nowMs)){
+    pairClear(&L->pair, FLP_PAIR_NONE);
     setErr(L, "el emparejamiento caduco; vuelve a intentarlo");
+    pairLog("PAIR SESSION EXPIRED");
     // El telefono tiene que enterarse: si no, se queda esperando un
     // codigo que ya no vale contra una sal que ya no existe.
     { const uint8_t e = FLNK_E_TIMEOUT;
       flexPhoneLinkSend(L, FLNK_T_ERR, &e, 1, false); }
-    gotoState(L, FLP_LS_CONNECTING, nowMs);
+    if(L->state == FLP_LS_PAIRING)
+      gotoState(L, flexPhoneTrState(L->tr) == FLP_TC_OPEN
+                     ? FLP_LS_CONNECTING : FLP_LS_SEARCHING, nowMs);
   }
 
   // -----------------------------------------------------------

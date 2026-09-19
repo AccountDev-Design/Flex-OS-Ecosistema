@@ -75,8 +75,20 @@ class FlexLinkService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private lateinit var state: FlexPhoneState
 
-    /** Codigo que el usuario acaba de teclear, si lo hay. */
-    @Volatile private var typedCode: String? = null
+    // #########################################################
+    // ##  AQUI YA NO VIVE NINGUN CODIGO
+    // ##  --------------------------------------------------
+    // ##  Habia un `typedCode` suelto en este servicio que
+    // ##  sobrevivia a los intentos fallidos. Cuando el usuario
+    // ##  pulsaba "Emparejar telefono" otra vez, Flex OS abria una
+    // ##  sesion NUEVA (codigo y sal nuevos) y esta app contestaba
+    // ##  sola con el codigo del intento anterior: Flex OS lo
+    // ##  rechazaba y el usuario leia "el codigo no coincide" sin
+    // ##  que le hubieran dejado teclear el nuevo.
+    // ##
+    // ##  El codigo pertenece ahora a la PairingSession que lleva
+    // ##  WifiLinkServer, atado a la sal para la que se tecleo.
+    // #########################################################
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -101,13 +113,11 @@ class FlexLinkService : Service() {
                 phoneId = bonds.selfId(),
                 phoneName = device.displayName,
                 bondKey = { bonds.key() },
-                pairingCode = { typedCode },
                 onPaired = { key, flexosId ->
                     // El vinculo se guarda AQUI, cuando Flex OS ya ha
                     // demostrado que es quien dice ser. Guardarlo antes
                     // dejaria un vinculo con cualquiera que escuchara.
                     bonds.save(key, flexosId, null)
-                    typedCode = null
                 },
                 onEvent = { ev -> onServerEvent(ev) },
                 onMessage = { type, payload -> onMessage(type, payload) },
@@ -143,21 +153,18 @@ class FlexLinkService : Service() {
     //  Emparejamiento desde la interfaz
     // ---------------------------------------------------------
     /**
-     * El usuario tecleo el codigo que ensena Flex OS. Devuelve false
-     * si el codigo no tiene forma de codigo: asi la pantalla avisa en
-     * el acto en vez de esperar un fallo de autenticacion.
+     * El usuario tecleo el codigo que ensena Flex OS.
+     *
+     * Devuelve el motivo REAL. Antes esto era un booleano y la
+     * pantalla tenia que adivinar si un `false` era "aun no ha llegado
+     * la sal", "caduco" o "se corto la conexion" -- y acababa diciendo
+     * siempre lo mismo.
      */
-    fun submitPairingCode(code: String): Boolean {
-        if (!FlexAuth.isValidCode(code)) return false
-        typedCode = code
-        // EL RESULTADO REAL sube hasta la pantalla. Antes se descartaba
-        // y se devolvia true siempre, asi que cuando el envio no salia
-        // la pantalla se quedaba en "Comprobando..." para siempre. Un
-        // false aqui significa "todavia no": Flex OS aun no ha mandado
-        // su sal, y el codigo queda guardado para usarlo en cuanto
-        // llegue.
-        return server?.submitPairingCode(code) ?: false
-    }
+    fun submitPairingCode(code: String): WifiLinkServer.Result =
+        server?.submitPairingCode(code) ?: WifiLinkServer.Result.NO_SESSION
+
+    /** Lo que le queda al codigo del reloj, para que la pantalla no se invente el plazo. */
+    fun pairingRemainingMs(): Long = server?.pairingRemainingMs() ?: 0L
 
     /** ¿Ha llegado la sal de Flex OS? La pantalla lo usa para saber si ya se puede teclear. */
     fun isAwaitingCode(): Boolean = server?.isAwaitingCode() ?: false
@@ -165,7 +172,6 @@ class FlexLinkService : Service() {
     /** Revoca el vinculo: clave fuera y sesion cerrada. */
     fun forgetBond() {
         bonds.clear()
-        typedCode = null
         server?.stop()
         server?.start()
         state.setLink(LinkState.ADVERTISING)
@@ -220,7 +226,14 @@ class FlexLinkService : Service() {
                 state.setLink(LinkState.ADVERTISING)
                 state.countReconnect()
             }
-            is WifiLinkServer.Event.PairingRequested -> state.setLink(LinkState.PAIRING)
+            is WifiLinkServer.Event.PairingRequested -> {
+                // Una sesion NUEVA vacia lo que hubiera tecleado: ese
+                // codigo era de la sesion anterior y ya no vale para
+                // nada. Dejarlo en el campo invita a pulsar
+                // "Emparejar" contra un codigo que ya no existe.
+                if (ev.freshSession) state.clearTypedCode()
+                state.setLink(LinkState.PAIRING)
+            }
             is WifiLinkServer.Event.WatchesFound -> {
                 state.setWatches(ev.watches.map {
                     FlexPhoneState.Watch(it.id, it.name, it.address, it.pairing)
@@ -232,7 +245,10 @@ class FlexLinkService : Service() {
                 return
             }
             is WifiLinkServer.Event.PairingFailed -> {
-                typedCode = null
+                state.clearTypedCode()
+                // El TIPO de fallo sube tal cual: la pantalla dice lo
+                // que paso de verdad, no "codigo incorrecto" siempre.
+                state.setPairFailure(ev.kind)
                 state.setLink(LinkState.ERROR, ev.why)
             }
         }
@@ -418,7 +434,7 @@ class FlexLinkService : Service() {
         media?.stop(); media = null
         server?.stop(); server = null
         FindMyPhone.stop()
-        typedCode = null
+        state.clearTypedCode()
         current = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()

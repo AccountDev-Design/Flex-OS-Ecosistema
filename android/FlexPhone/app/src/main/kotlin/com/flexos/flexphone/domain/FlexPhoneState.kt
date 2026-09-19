@@ -2,6 +2,7 @@ package com.flexos.flexphone.domain
 
 import com.flexos.flexphone.protocol.MediaState
 import com.flexos.flexphone.protocol.NotifPayload
+import com.flexos.flexphone.protocol.PairFailure
 import com.flexos.flexphone.protocol.RelayInfo
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -54,9 +55,45 @@ class FlexPhoneState(
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
-    /** Codigo de emparejamiento en curso, o null. */
-    private val _pairCode = MutableStateFlow<String?>(null)
-    val pairCode: StateFlow<String?> = _pairCode.asStateFlow()
+    // #########################################################
+    // ##  AQUI NO HAY NINGUN "CODIGO DE EMPAREJAMIENTO"
+    // ##  --------------------------------------------------
+    // ##  Habia un `pairCode` que nadie escribia nunca: resto de
+    // ##  cuando el enlace iba por BLE y era el telefono quien
+    // ##  ensenaba el codigo. Hoy el codigo nace y vive en Flex OS
+    // ##  -- una sola fuente --, y este lado solo sabe lo que el
+    // ##  usuario TECLEA. Dejar aqui un campo con ese nombre
+    // ##  invitaba justo al fallo que se estaba persiguiendo: dos
+    // ##  sitios distintos con un codigo cada uno.
+    // #########################################################
+
+    /**
+     * Lo que el usuario lleva tecleado en la pantalla de
+     * emparejamiento.
+     *
+     * Vive aqui, y no dentro del `remember` de la pantalla, por un
+     * motivo concreto: cuando Flex OS abre una sesion NUEVA (porque el
+     * usuario pulso otra vez "Emparejar telefono" en el reloj), el
+     * codigo a medio teclear pertenece a la sesion anterior y hay que
+     * borrarlo. Desde el servicio no se puede tocar un `remember`.
+     */
+    private val _typedCode = MutableStateFlow("")
+    val typedCode: StateFlow<String> = _typedCode.asStateFlow()
+
+    fun setTypedCode(code: String) { _typedCode.value = code }
+    fun clearTypedCode() { _typedCode.value = "" }
+
+    /**
+     * POR QUE FALLO EL ULTIMO INTENTO, de verdad.
+     *
+     * La pantalla decia siempre "comprueba que el codigo es el mismo",
+     * tambien cuando lo que se habia caido era el socket. Con esto el
+     * mensaje corresponde al fallo real.
+     */
+    private val _pairFailure = MutableStateFlow<PairFailure?>(null)
+    val pairFailure: StateFlow<PairFailure?> = _pairFailure.asStateFlow()
+
+    fun setPairFailure(kind: PairFailure?) { _pairFailure.value = kind }
 
     private val _relay = MutableStateFlow(RelayState.OFF)
     val relay: StateFlow<RelayState> = _relay.asStateFlow()
@@ -107,7 +144,10 @@ class FlexPhoneState(
     fun setLink(s: LinkState, why: String? = null) {
         _link.value = s
         _error.value = why
-        if (s != LinkState.PAIRING) _pairCode.value = null
+        // Un fallo viejo no puede seguir explicando una pantalla que
+        // ya no esta en error.
+        if (s != LinkState.ERROR) _pairFailure.value = null
+        if (s == LinkState.READY) _typedCode.value = ""
         if (s != LinkState.READY) {
             // Al perder la sesion, lo que dependia de ella deja de ser
             // cierto: no se conserva un estado multimedia de hace un
@@ -116,11 +156,6 @@ class FlexPhoneState(
             if (_relay.value == RelayState.UP) _relay.value = RelayState.OFF
             _relayInfo.value = null
         }
-    }
-
-    fun setPairCode(code: String?) {
-        _pairCode.value = code
-        if (code != null) _link.value = LinkState.PAIRING
     }
 
     fun countReconnect() = _diag.update { it.copy(reconnects = it.reconnects + 1) }

@@ -226,7 +226,7 @@ static void pairUp(uint32_t& t){
   CHECK(L.state == FLP_LS_PAIRING || L.state == FLP_LS_CONNECTING,
         "estado tras presentarse: %s", flexPhoneLinkStateName(L.state));
   flexPhoneLinkBeginPairing(&L, testRand, t);
-  std::memcpy(gLoop.code, L.code, sizeof(gLoop.code) - 1);  // el usuario teclea el bueno
+  std::memcpy(gLoop.code, L.pair.code, sizeof(gLoop.code) - 1);  // el usuario teclea el bueno
   pump(t, 4);
   flexPhoneLinkConfirm(&L, t);
   pump(t, 4);
@@ -270,10 +270,10 @@ static void testPairing(){
   pump(t, 3);
   flexPhoneLinkBeginPairing(&L, testRand, t);
   CHECK(L.state == FLP_LS_PAIRING, "no entro en emparejamiento");
-  CHECK(std::strlen(L.code) == FLP_LINK_CODE_LEN, "codigo de %u digitos",
-        (unsigned)std::strlen(L.code));
+  CHECK(std::strlen(L.pair.code) == FLP_LINK_CODE_LEN, "codigo de %u digitos",
+        (unsigned)std::strlen(L.pair.code));
   for(int i = 0; i < FLP_LINK_CODE_LEN; i++)
-    CHECK(L.code[i] >= '0' && L.code[i] <= '9', "el codigo tiene un caracter no numerico");
+    CHECK(L.pair.code[i] >= '0' && L.pair.code[i] <= '9', "el codigo tiene un caracter no numerico");
 
   // EL CODIGO NO PUEDE VIAJAR. Se recorre todo lo que Flex OS ha
   // puesto en el canal y se comprueba que la cadena no aparece.
@@ -283,7 +283,7 @@ static void testPairing(){
     for(int k = 0; k < gLoop.sniffN; k++){
       const size_t n = gLoop.sniffLen[k];
       for(size_t i = 0; i + FLP_LINK_CODE_LEN <= n; i++)
-        if(std::memcmp(gLoop.sniff[k] + i, L.code, FLP_LINK_CODE_LEN) == 0) leaked = true;
+        if(std::memcmp(gLoop.sniff[k] + i, L.pair.code, FLP_LINK_CODE_LEN) == 0) leaked = true;
     }
     CHECK(gLoop.sniffN > 0, "no se envio nada al telefono");
     CHECK(!leaked, "EL CODIGO DE EMPAREJAMIENTO VIAJO POR EL ENLACE");
@@ -298,24 +298,24 @@ static void testPairing(){
   // Un telefono que teclea MAL el codigo no empareja, por mucho que
   // conteste a tiempo y con una trama perfecta.
   std::memcpy(gLoop.code, "999999", 7);
-  if(L.code[0] == '9' && std::strcmp(L.code, "999999") == 0) std::memcpy(gLoop.code, "111111", 7);
+  if(L.pair.code[0] == '9' && std::strcmp(L.pair.code, "999999") == 0) std::memcpy(gLoop.code, "111111", 7);
   pump(t, 4);
   CHECK(!flexPhoneLinkPairComplete(&L), "EMPAREJO CON UN CODIGO EQUIVOCADO");
   CHECK(L.nAuthFail > 0, "no conto el fallo de autenticacion");
   CHECK(!flexPhoneLinkReady(&L), "se declaro conectado con el codigo mal");
 
   // Con el codigo bueno, si.
-  std::memcpy(gLoop.code, L.code, 7);
+  std::memcpy(gLoop.code, L.pair.code, 7);
   gLoop.haveKey = false;
   flexPhoneLinkBeginPairing(&L, testRand, t);
-  std::memcpy(gLoop.code, L.code, 7);
+  std::memcpy(gLoop.code, L.pair.code, 7);
   pump(t, 4);
   flexPhoneLinkConfirm(&L, t);
   pump(t, 4);
   CHECK(flexPhoneLinkPairComplete(&L), "no completo con las dos partes");
   CHECK(L.state == FLP_LS_READY, "no quedo listo (%s)", flexPhoneLinkStateName(L.state));
   CHECK(flexPhoneLinkBonded(&L), "no marco el vinculo");
-  CHECK(L.code[0] == 0, "dejo el codigo a la vista tras emparejar");
+  CHECK(flexPhoneLinkCode(&L)[0] == 0, "dejo el codigo a la vista tras emparejar");
   CHECK(L.session != 0, "no abrio sesion");
   // Y el telefono comprobo que hablaba con Flex OS, no con un impostor.
   CHECK(gLoop.gotHostProof, "Flex OS no demostro SU identidad al telefono");
@@ -328,7 +328,7 @@ static void testPairing(){
   t += FLP_LINK_PAIR_WINDOW_MS + 1000;
   flexPhoneLinkTick(&L, &M, t);
   CHECK(L.state != FLP_LS_PAIRING, "el emparejamiento no caduco");
-  CHECK(L.code[0] == 0, "dejo el codigo caducado en pantalla");
+  CHECK(flexPhoneLinkCode(&L)[0] == 0, "dejo el codigo caducado en pantalla");
 }
 
 // -------------------------------------------------------------
@@ -358,7 +358,7 @@ static void testPairBeforeChannel(){
   // hablado todavia con nadie.
   flexPhoneLinkBeginPairing(&L, testRand, t);
   CHECK(L.state == FLP_LS_PAIRING, "no entro en emparejamiento");
-  std::memcpy(gLoop.code, L.code, sizeof(gLoop.code) - 1);
+  std::memcpy(gLoop.code, L.pair.code, sizeof(gLoop.code) - 1);
 
   // Ahora si: el transporte encuentra el telefono y abre el canal.
   gLoop.st = FLP_TC_OPEN;
@@ -392,7 +392,7 @@ static void testChannelDropMidHandshake(){
   CHECK(L.state == FLP_LS_PAIRING, "no entro en emparejamiento");
 
   char code[8];
-  std::memcpy(code, L.code, sizeof(code) - 1);
+  std::memcpy(code, L.pair.code, sizeof(code) - 1);
   code[sizeof(code) - 1] = 0;
 
   // Se cae el canal.
@@ -400,7 +400,7 @@ static void testChannelDropMidHandshake(){
   flexPhoneLinkTick(&L, &M, t); t += 20;
   // El codigo TIENE que sobrevivir: el usuario lo esta mirando, y
   // perderselo porque el Wi-Fi parpadeo un segundo seria gratuito.
-  CHECK(std::strcmp(L.code, code) == 0, "perdio el codigo al caerse el canal");
+  CHECK(std::strcmp(flexPhoneLinkCode(&L), code) == 0, "perdio el codigo al caerse el canal");
 
   // Al volver, se vuelve a presentar Y se reenvia la sal con el MISMO
   // codigo, asi que el emparejamiento sigue adelante.
@@ -416,6 +416,305 @@ static void testChannelDropMidHandshake(){
   pump(t, 6);
   CHECK(L.state == FLP_LS_READY, "no quedo listo tras el corte (%s)",
         flexPhoneLinkStateName(L.state));
+}
+
+
+// #############################################################
+// ##  2 quater) EL CODIGO NO CAMBIA MIENTRAS EL CANAL DA TUMBOS
+// ##  ---------------------------------------------------------
+// ##  ESTA ES LA PRUEBA DEL FALLO QUE SE ESTABA PERSIGUIENDO.
+// ##
+// ##  El telefono cerraba el socket a los 15 s de abrirlo si nadie
+// ##  habia autenticado -- o sea, SIEMPRE, porque el usuario esta
+// ##  leyendo seis digitos de la pantalla del reloj --, y el reloj
+// ##  reconectaba. Cada vuelta de ese ciclo sacaba al enlace de
+// ##  EMPAREJANDO y lo devolvia al reconectar: la tarjeta del
+// ##  codigo desaparecia y volvia, que es el "el codigo cambia un
+// ##  instante" que se veia en el reloj. Y de paso el plazo se
+// ##  reiniciaba solo.
+// ##
+// ##  Lo que se fija aqui: el canal puede caerse y volver las veces
+// ##  que quiera; el codigo es EL MISMO, el estado sigue siendo
+// ##  EMPAREJANDO, la sal se reenvia sola y el emparejamiento se
+// ##  cierra con el codigo que el usuario tenia delante desde el
+// ##  principio.
+// #############################################################
+static void testCodeSurvivesChurn(){
+  std::printf("[link] el codigo NO cambia aunque el canal se caiga una y otra vez\n");
+  uint32_t t = 9000;
+  bring();
+  flexPhoneLinkStart(&L);
+  pump(t, 3);
+  flexPhoneLinkBeginPairing(&L, testRand, t);
+  CHECK(flexPhoneLinkPairing(&L), "no abrio sesion de emparejamiento");
+
+  char code[8];
+  std::memcpy(code, flexPhoneLinkCode(&L), sizeof(code) - 1);
+  code[sizeof(code) - 1] = 0;
+  const uint32_t started = L.pair.startedMs;
+
+  // Cinco ciclos de "el telefono cierra el socket y el reloj vuelve".
+  for(int round = 0; round < 5; round++){
+    gLoop.st = FLP_TC_FAILED;
+    L.reconnectAtMs = 0;                       // el respaldo ya vencio
+    flexPhoneLinkTick(&L, &M, t); t += 50;
+    CHECK(L.state == FLP_LS_PAIRING,
+          "vuelta %d: salio de EMPAREJANDO al caerse el canal (%s)",
+          round, flexPhoneLinkStateName(L.state));
+    CHECK(std::strcmp(flexPhoneLinkCode(&L), code) == 0,
+          "vuelta %d: EL CODIGO CAMBIO al caerse el canal", round);
+
+    // Canal nuevo, telefono nuevo: es lo que hace un accept() en
+    // Android. El telefono tira lo que tenia de la vez anterior.
+    gLoop = Loop();
+    gTr.ctx = &gLoop;
+    std::memcpy(gLoop.code, code, sizeof(gLoop.code) - 1);
+    gLoop.st = FLP_TC_OPEN;
+    pump(t, 6);
+    CHECK(std::strcmp(flexPhoneLinkCode(&L), code) == 0,
+          "vuelta %d: EL CODIGO CAMBIO al reconectar", round);
+    CHECK(gLoop.haveKey,
+          "vuelta %d: no reenvio la sal al canal nuevo (el telefono se queda esperando)",
+          round);
+  }
+
+  // EL PLAZO NO SE REGALA. Cinco reconexiones no le dan al codigo
+  // cinco ventanas de dos minutos.
+  CHECK(L.pair.startedMs == started, "el plazo del codigo se reinicio con el canal");
+
+  // Y el emparejamiento se cierra con el codigo de siempre.
+  flexPhoneLinkConfirm(&L, t);
+  pump(t, 6);
+  CHECK(L.state == FLP_LS_READY, "no quedo listo tras los cortes (%s): %s",
+        flexPhoneLinkStateName(L.state), L.err);
+  CHECK(flexPhoneLinkBonded(&L), "no marco el vinculo");
+}
+
+// -------------------------------------------------------------
+//  2 quinquies) UN CODIGO QUE EMPIEZA POR CERO
+// -------------------------------------------------------------
+//  "012345" tiene que seguir siendo "012345" en los dos extremos. Un
+//  cero de cabeza que se pierde por pasar el codigo por un entero da
+//  exactamente el fallo que se esta persiguiendo -- "el codigo no
+//  coincide" con el codigo bien tecleado -- y solo en uno de cada
+//  diez emparejamientos, que es lo que lo hace tan dificil de ver.
+static uint32_t gForceFirst = 0;
+static bool     gForceArmed = false;
+static uint32_t forcedRand(){
+  if(gForceArmed){ gForceArmed = false; return gForceFirst; }
+  return testRand();
+}
+
+static void testLeadingZeroCode(){
+  std::printf("[link] un codigo que empieza por cero no pierde el cero\n");
+  uint32_t t = 12000;
+  bring();
+  flexPhoneLinkStart(&L);
+  pump(t, 3);
+  // 12345 % 1000000 = 12345 -> "012345"
+  gForceFirst = 12345; gForceArmed = true;
+  flexPhoneLinkBeginPairing(&L, forcedRand, t);
+  CHECK(std::strcmp(flexPhoneLinkCode(&L), "012345") == 0,
+        "el codigo salio \"%s\" en vez de \"012345\"", flexPhoneLinkCode(&L));
+
+  // El usuario teclea EXACTAMENTE lo que ve, cero incluido.
+  std::memcpy(gLoop.code, "012345", 7);
+  pump(t, 4);
+  flexPhoneLinkConfirm(&L, t);
+  pump(t, 4);
+  CHECK(L.state == FLP_LS_READY, "no emparejo con un codigo que empieza por cero (%s): %s",
+        flexPhoneLinkStateName(L.state), L.err);
+
+  // Y "12345" -- el mismo numero sin el cero -- NO vale.
+  bring();
+  flexPhoneLinkStart(&L);
+  pump(t, 3);
+  gForceFirst = 12345; gForceArmed = true;
+  flexPhoneLinkBeginPairing(&L, forcedRand, t);
+  std::memcpy(gLoop.code, "12345", 6);
+  pump(t, 4);
+  flexPhoneLinkConfirm(&L, t);
+  pump(t, 4);
+  CHECK(L.state != FLP_LS_READY, "EMPAREJO SIN EL CERO DE CABEZA");
+}
+
+// -------------------------------------------------------------
+//  2 sexies) UN DIGITO MAL NO TIRA LA SESION
+// -------------------------------------------------------------
+//  El codigo que se ensena no cambia porque alguien se equivoque al
+//  teclearlo: si cambiara, corregir el digito seria imposible -- el
+//  usuario estaria tecleando contra un codigo que ya no existe.
+static void testWrongCodeKeepsSession(){
+  std::printf("[link] un digito mal se rechaza y el codigo sigue siendo el mismo\n");
+  uint32_t t = 15000;
+  bring();
+  flexPhoneLinkStart(&L);
+  pump(t, 3);
+  flexPhoneLinkBeginPairing(&L, testRand, t);
+  char code[8];
+  std::memcpy(code, flexPhoneLinkCode(&L), sizeof(code) - 1);
+  code[sizeof(code) - 1] = 0;
+
+  // Se teclea con un digito cambiado.
+  char wrong[8];
+  std::memcpy(wrong, code, sizeof(wrong));
+  wrong[5] = (char)(wrong[5] == '9' ? '0' : wrong[5] + 1);
+  std::memcpy(gLoop.code, wrong, sizeof(gLoop.code) - 1);
+  pump(t, 4);
+  CHECK(L.nAuthFail > 0, "no conto el rechazo");
+  CHECK(L.pair.rejects > 0, "la sesion no anoto el rechazo");
+  CHECK(!flexPhoneLinkReady(&L), "emparejo con un digito mal");
+  CHECK(flexPhoneLinkPairing(&L), "tiro la sesion por un digito mal");
+  CHECK(std::strcmp(flexPhoneLinkCode(&L), code) == 0,
+        "cambio el codigo tras un intento fallido: ya no se puede corregir");
+
+  // Se corrige y, con el MISMO codigo en pantalla, empareja. El
+  // telefono vuelve a pedir la sal reconectando, que es lo que hace
+  // de verdad cuando el intento anterior cierra el socket.
+  gLoop.st = FLP_TC_FAILED; L.reconnectAtMs = 0;
+  flexPhoneLinkTick(&L, &M, t); t += 20;
+  gLoop = Loop();
+  gTr.ctx = &gLoop;
+  std::memcpy(gLoop.code, code, sizeof(gLoop.code) - 1);
+  gLoop.st = FLP_TC_OPEN;
+  pump(t, 6);
+  CHECK(gLoop.haveKey, "no reenvio la sal para el segundo intento");
+  flexPhoneLinkConfirm(&L, t);
+  pump(t, 6);
+  CHECK(L.state == FLP_LS_READY, "no dejo corregir el digito (%s): %s",
+        flexPhoneLinkStateName(L.state), L.err);
+}
+
+// -------------------------------------------------------------
+//  2 septies) CADUCADO SE DICE COMO CADUCADO
+// -------------------------------------------------------------
+//  Mandar al usuario a revisar los digitos cuando lo que paso es que
+//  se le acabo el tiempo es mandarle a buscar donde no hay nada.
+static void testExpiryIsHonest(){
+  std::printf("[link] el plazo cuelga de la sesion y caducar no se disfraza de codigo mal\n");
+  uint32_t t = 20000;
+  bring();
+  flexPhoneLinkStart(&L);
+  pump(t, 3);
+  flexPhoneLinkBeginPairing(&L, testRand, t);
+  const uint32_t started = L.pair.startedMs;
+
+  // A mitad de ventana, el canal da tumbos. Eso NO alarga el plazo.
+  for(int i = 0; i < 3; i++){
+    gLoop.st = FLP_TC_FAILED; L.reconnectAtMs = 0;
+    flexPhoneLinkTick(&L, &M, t); t += 10;
+    gLoop.st = FLP_TC_OPEN;
+    pump(t, 3);
+  }
+  CHECK(L.pair.startedMs == started, "el vaiven del canal reinicio el plazo");
+  CHECK(flexPhoneLinkPairRemainingMs(&L, t) > 0, "dijo que ya no quedaba tiempo");
+
+  // Se pasa la ventana ENTERA contada desde que nacio la sesion.
+  t = started + FLP_LINK_PAIR_WINDOW_MS + 1000;
+  flexPhoneLinkTick(&L, &M, t);
+  CHECK(!flexPhoneLinkPairing(&L), "el codigo no caduco");
+  CHECK(flexPhoneLinkCode(&L)[0] == 0, "dejo el codigo caducado a la vista");
+  CHECK(L.state != FLP_LS_PAIRING, "se quedo en EMPAREJANDO sin codigo");
+  CHECK(flexPhoneLinkPairRemainingMs(&L, t) == 0, "dijo que aun quedaba tiempo");
+  CHECK(std::strstr(L.err, "caduc") != nullptr,
+        "el motivo no dice que caduco: \"%s\"", L.err);
+}
+
+// -------------------------------------------------------------
+//  2 octies) PULSAR "EMPAREJAR" DOS VECES NO DEJA DOS SESIONES
+// -------------------------------------------------------------
+//  Y la sesion vieja deja de valer del todo: su codigo ya no empareja
+//  nada. Si valiera, habria dos codigos buenos a la vez y uno de
+//  ellos no estaria en ninguna pantalla.
+static void testOnlyOneSession(){
+  std::printf("[link] dos toques seguidos en Emparejar dejan UNA sola sesion\n");
+  uint32_t t = 26000;
+  bring();
+  flexPhoneLinkStart(&L);
+  pump(t, 3);
+  flexPhoneLinkBeginPairing(&L, testRand, t);
+  char first[8];
+  std::memcpy(first, flexPhoneLinkCode(&L), sizeof(first) - 1);
+  first[sizeof(first) - 1] = 0;
+
+  t += 100;
+  flexPhoneLinkBeginPairing(&L, testRand, t);   // segundo toque
+  char second[8];
+  std::memcpy(second, flexPhoneLinkCode(&L), sizeof(second) - 1);
+  second[sizeof(second) - 1] = 0;
+  CHECK(std::strcmp(first, second) != 0, "el segundo toque no genero un codigo nuevo");
+  CHECK(L.pair.state == FLP_PAIR_OPEN, "no dejo una sesion abierta");
+  CHECK(!L.pair.userConfirmed && !L.pair.peerConfirmed,
+        "la sesion nueva heredo confirmaciones de la anterior");
+
+  // El codigo VIEJO ya no vale.
+  std::memcpy(gLoop.code, first, sizeof(gLoop.code) - 1);
+  pump(t, 4);
+  flexPhoneLinkConfirm(&L, t);
+  pump(t, 4);
+  CHECK(!flexPhoneLinkReady(&L), "EMPAREJO CON EL CODIGO DE LA SESION ANTERIOR");
+}
+
+// -------------------------------------------------------------
+//  2 nonies) CANCELAR DEJA TODO LIMPIO
+// -------------------------------------------------------------
+static void testCancelPairing(){
+  std::printf("[link] cancelar cierra la sesion y la siguiente nace limpia\n");
+  uint32_t t = 32000;
+  bring();
+  flexPhoneLinkStart(&L);
+  pump(t, 3);
+  flexPhoneLinkBeginPairing(&L, testRand, t);
+  char code[8];
+  std::memcpy(code, flexPhoneLinkCode(&L), sizeof(code) - 1);
+  code[sizeof(code) - 1] = 0;
+
+  flexPhoneLinkCancelPairing(&L, t);
+  CHECK(!flexPhoneLinkPairing(&L), "la sesion sobrevivio a la cancelacion");
+  CHECK(flexPhoneLinkCode(&L)[0] == 0, "dejo el codigo cancelado a la vista");
+  CHECK(L.state != FLP_LS_PAIRING, "se quedo en EMPAREJANDO tras cancelar");
+  CHECK(!L.pair.keyOk, "dejo viva la clave a medio derivar");
+  // Cancelar NO apaga el enlace: el canal sigue donde estaba.
+  CHECK(L.state != FLP_LS_OFF, "cancelar apago el enlace entero");
+
+  // El codigo cancelado no empareja nada.
+  std::memcpy(gLoop.code, code, sizeof(gLoop.code) - 1);
+  pump(t, 4);
+  CHECK(!flexPhoneLinkReady(&L), "EMPAREJO CON UN CODIGO CANCELADO");
+
+  // Y la sesion siguiente es nueva de verdad.
+  flexPhoneLinkBeginPairing(&L, testRand, t);
+  CHECK(std::strcmp(flexPhoneLinkCode(&L), code) != 0,
+        "reutilizo el codigo cancelado");
+  gLoop.haveKey = false;
+  std::memcpy(gLoop.code, flexPhoneLinkCode(&L), sizeof(gLoop.code) - 1);
+  pump(t, 6);
+  flexPhoneLinkConfirm(&L, t);
+  pump(t, 6);
+  CHECK(L.state == FLP_LS_READY, "la sesion nueva no emparejo (%s): %s",
+        flexPhoneLinkStateName(L.state), L.err);
+}
+
+// -------------------------------------------------------------
+//  2 decies) SIN SESION NO SE ANUNCIA "ENSENANDO CODIGO"
+// -------------------------------------------------------------
+//  Un telefono desconocido que se presenta sin que nadie haya pulsado
+//  "Emparejar telefono" dejaba el enlace en EMPAREJANDO sin ningun
+//  codigo que ensenar. La lista de Android destacaba este reloj como
+//  "ensenando codigo" y la tarjeta del codigo no aparecia por ninguna
+//  parte.
+static void testNoFakePairing(){
+  std::printf("[link] un telefono desconocido no pone el reloj a \"ensenando codigo\"\n");
+  uint32_t t = 40000;
+  bring();
+  flexPhoneLinkStart(&L);
+  pump(t, 6);
+  CHECK(gLoop.flexosId[0] != 0, "no se presento");
+  CHECK(!flexPhoneLinkPairing(&L), "se anuncio emparejando sin sesion");
+  CHECK(flexPhoneLinkCode(&L)[0] == 0, "dijo tener codigo sin tenerlo");
+  CHECK(L.state == FLP_LS_CONNECTING, "estado con canal abierto y sin vinculo: %s",
+        flexPhoneLinkStateName(L.state));
+  CHECK(L.err[0] != 0, "no explico que falta emparejar");
 }
 
 // -------------------------------------------------------------
@@ -446,7 +745,7 @@ static void testResume(){
   pump(t, 8);
   CHECK(L.state == FLP_LS_READY, "no reconecto (%s): %s",
         flexPhoneLinkStateName(L.state), L.err);
-  CHECK(L.code[0] == 0, "pidio emparejar teniendo vinculo");
+  CHECK(flexPhoneLinkCode(&L)[0] == 0, "pidio emparejar teniendo vinculo");
 
   // Un telefono que dice tener el mismo id pero NO la clave no entra.
   gLoop = Loop();
@@ -702,6 +1001,13 @@ int main(){
   testPairing();
   testPairBeforeChannel();
   testChannelDropMidHandshake();
+  testCodeSurvivesChurn();
+  testLeadingZeroCode();
+  testWrongCodeKeepsSession();
+  testExpiryIsHonest();
+  testOnlyOneSession();
+  testCancelPairing();
+  testNoFakePairing();
   testResume();
   testAccessControl();
   testHostileFrames();

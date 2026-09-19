@@ -19,7 +19,9 @@ import androidx.navigation.NavController
 import com.flexos.flexphone.domain.FlexPhoneState
 import com.flexos.flexphone.domain.LinkState
 import com.flexos.flexphone.link.FlexLinkService
+import com.flexos.flexphone.link.WifiLinkServer
 import com.flexos.flexphone.protocol.FlexAuth
+import com.flexos.flexphone.protocol.PairFailure
 import com.flexos.flexphone.storage.SettingsStore
 import com.flexos.flexphone.ui.FlexTopBar
 import kotlinx.coroutines.delay
@@ -52,14 +54,25 @@ fun PairScreen(nav: NavController, store: SettingsStore) {
     val link by (state?.link ?: MutableStateFlow(LinkState.OFF)).collectAsState()
     val err by (state?.error ?: MutableStateFlow<String?>(null)).collectAsState()
 
-    var code by remember { mutableStateOf("") }
+    // EL CODIGO TECLEADO VIVE EN EL ESTADO, no en un `remember`.
+    // Cuando Flex OS abre una sesion nueva, el servicio tiene que
+    // poder vaciarlo: lo que hubiera escrito pertenecia al codigo
+    // anterior y ya no empareja nada.
+    val code by (state?.typedCode ?: MutableStateFlow("")).collectAsState()
+    val failure by (state?.pairFailure ?: MutableStateFlow<PairFailure?>(null))
+        .collectAsState()
     var sent by remember { mutableStateOf(false) }
+    var hint by remember { mutableStateOf<String?>(null) }
     val valid = FlexAuth.isValidCode(code)
 
     // Al abrirse la sesion, el emparejamiento termino: se sale solo.
     LaunchedEffect(link) {
         if (link == LinkState.READY && sent) nav.popBackStack()
+        if (link != LinkState.PAIRING) sent = false
     }
+    // El campo se vacia solo: es la senal de que Flex OS abrio otra
+    // sesion y de que hay que mirar OTRA VEZ la pantalla del reloj.
+    LaunchedEffect(code) { if (code.isEmpty()) { sent = false; hint = null } }
 
     Scaffold(topBar = { FlexTopBar("Emparejar", onBack = { nav.popBackStack() }) }) { pad ->
         Column(
@@ -89,12 +102,37 @@ fun PairScreen(nav: NavController, store: SettingsStore) {
                 LinkState.PAIRING -> {
                     CodeSection(
                         code = code,
-                        onCode = { code = it; sent = false },
+                        onCode = { state?.setTypedCode(it); sent = false; hint = null },
                         valid = valid,
                         sent = sent,
                         err = err,
+                        hint = hint,
                         onSubmit = {
-                            sent = FlexLinkService.current?.submitPairingCode(code) ?: false
+                            // EL MOTIVO REAL sube hasta aqui. Antes
+                            // cualquier "todavia no" se pintaba igual y
+                            // la pantalla se quedaba en "Comprobando...".
+                            when (FlexLinkService.current?.submitPairingCode(code)) {
+                                WifiLinkServer.Result.SENT -> { sent = true; hint = null }
+                                WifiLinkServer.Result.EXPIRED -> {
+                                    sent = false
+                                    hint = "El codigo caduco. Vuelve a pulsar \"Emparejar telefono\" " +
+                                        "en el reloj y teclea el codigo nuevo."
+                                }
+                                WifiLinkServer.Result.NO_SESSION -> {
+                                    sent = false
+                                    hint = "Flex OS todavia no ha mandado su parte. Comprueba que el " +
+                                        "codigo sigue en la pantalla del reloj."
+                                }
+                                WifiLinkServer.Result.LINK_DOWN -> {
+                                    sent = false
+                                    hint = "Se corto la conexion al enviar el codigo. El codigo del " +
+                                        "reloj sigue valiendo: vuelve a intentarlo."
+                                }
+                                WifiLinkServer.Result.BAD_FORMAT, null -> {
+                                    sent = false
+                                    hint = "El codigo son seis digitos."
+                                }
+                            }
                         },
                     )
                 }
@@ -117,16 +155,33 @@ fun PairScreen(nav: NavController, store: SettingsStore) {
                     Text("No se pudo emparejar", style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.error)
                     Text(err ?: "El enlace fallo.", style = MaterialTheme.typography.bodyMedium)
-                    Notice(
-                        "Comprueba",
-                        "• Que el codigo es el MISMO que ensena Flex OS\n" +
-                            "• Que los dos estan en la misma red Wi-Fi\n" +
-                            "• Que el codigo no ha caducado (dura dos minutos)",
-                        MaterialTheme.colorScheme.tertiary,
-                    )
+                    // EL CONSEJO CORRESPONDE AL FALLO REAL. Mandar a
+                    // revisar los digitos cuando lo que se cayo fue el
+                    // socket es mandar a buscar donde no hay nada.
+                    when (failure) {
+                        PairFailure.CODE_REJECTED -> Notice(
+                            "El codigo no coincidio",
+                            "Flex OS comparo el codigo y no era el suyo. Mira otra vez la pantalla " +
+                                "del reloj y teclea los seis digitos tal cual: si empieza por 0, el " +
+                                "0 cuenta.",
+                            MaterialTheme.colorScheme.tertiary,
+                        )
+                        PairFailure.CODE_EXPIRED -> Notice(
+                            "El codigo caduco",
+                            "Un codigo dura dos minutos. Pulsa \"Emparejar telefono\" en el reloj " +
+                                "para que genere uno nuevo y teclea ESE.",
+                            MaterialTheme.colorScheme.tertiary,
+                        )
+                        else -> Notice(
+                            "Fallo el enlace, no el codigo",
+                            "No se llego a comparar ningun codigo. Comprueba que los dos estan en la " +
+                                "misma red Wi-Fi y que el router no aisla a los clientes entre si.",
+                            MaterialTheme.colorScheme.tertiary,
+                        )
+                    }
                     Button(
                         onClick = {
-                            code = ""; sent = false
+                            state?.clearTypedCode(); sent = false
                             FlexLinkService.stop(ctx)
                             FlexLinkService.start(ctx)
                         },
@@ -336,30 +391,54 @@ private fun CodeSection(
     valid: Boolean,
     sent: Boolean,
     err: String?,
+    hint: String?,
     onSubmit: () -> Unit,
 ) {
-    // ¿Ha llegado ya la sal de Flex OS? Sin ella no se puede derivar
-    // nada, y pulsar "Emparejar" no mandaria nada. Se dice, en vez de
-    // aceptar el codigo y dejar la pantalla esperando.
-    val ready = FlexLinkService.current?.isAwaitingCode() ?: false
+    // ¿Ha llegado ya la sal de Flex OS, y sigue valiendo? Sin ella no
+    // se puede derivar nada, y pulsar "Emparejar" no mandaria nada. Se
+    // dice, en vez de aceptar el codigo y dejar la pantalla esperando.
+    val svc = FlexLinkService.current
+    var ready by remember { mutableStateOf(svc?.isAwaitingCode() ?: false) }
+    var leftMs by remember { mutableLongStateOf(svc?.pairingRemainingMs() ?: 0L) }
+    // Un segundo. La cuenta atras es la DEL RELOJ -- la sesion nacio
+    // alli --, no un temporizador propio que pueda ir por su cuenta.
+    LaunchedEffect(Unit) {
+        while (true) {
+            ready = FlexLinkService.current?.isAwaitingCode() ?: false
+            leftMs = FlexLinkService.current?.pairingRemainingMs() ?: 0L
+            delay(1_000)
+        }
+    }
 
     Text("Teclea el codigo que ensena Flex OS", style = MaterialTheme.typography.titleMedium)
     OutlinedTextField(
         value = code,
         onValueChange = { v ->
             // Solo digitos y como mucho seis: asi no se puede enviar
-            // algo que ya se sabe que no es un codigo.
+            // algo que ya se sabe que no es un codigo. `filter` deja
+            // fuera espacios y saltos de linea del portapapeles, y el
+            // texto NO pasa por ningun entero: un "012345" sigue
+            // siendo "012345" y no se le come el cero de cabeza.
             onCode(v.filter { it.isDigit() }.take(6))
         },
         singleLine = true,
         textStyle = TextStyle(fontSize = 34.sp, textAlign = TextAlign.Center, letterSpacing = 8.sp),
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
         modifier = Modifier.fillMaxWidth(),
-        supportingText = { Text("Seis digitos") },
+        supportingText = {
+            Text(
+                if (ready && leftMs > 0) "Seis digitos · caduca en ${leftMs / 1000} s"
+                else "Seis digitos",
+            )
+        },
         isError = code.isNotEmpty() && !valid,
     )
     err?.let {
         Text(it, color = MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.bodyMedium)
+    }
+    hint?.let {
+        Text(it, color = MaterialTheme.colorScheme.tertiary,
             style = MaterialTheme.typography.bodyMedium)
     }
     Button(

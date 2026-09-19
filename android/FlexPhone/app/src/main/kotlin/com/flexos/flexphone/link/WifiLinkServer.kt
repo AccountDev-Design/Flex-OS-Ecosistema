@@ -6,6 +6,8 @@ import android.util.Log
 import com.flexos.flexphone.protocol.Discovery
 import com.flexos.flexphone.protocol.FlexAuth
 import com.flexos.flexphone.protocol.FlexLink
+import com.flexos.flexphone.protocol.PairFailure
+import com.flexos.flexphone.protocol.PairingSession
 import com.flexos.flexphone.protocol.PayloadReader
 import com.flexos.flexphone.protocol.PayloadWriter
 import java.io.InputStream
@@ -63,8 +65,6 @@ class WifiLinkServer(
     private val phoneName: String,
     /** Clave del vinculo guardada, o null si todavia no hay ninguno. */
     private val bondKey: () -> ByteArray?,
-    /** Codigo que el usuario ha tecleado durante un emparejamiento. */
-    private val pairingCode: () -> String?,
     /** Se llama cuando un emparejamiento se cierra con exito. */
     private val onPaired: (key: ByteArray, flexosId: String) -> Unit,
     private val onEvent: (Event) -> Unit,
@@ -76,9 +76,20 @@ class WifiLinkServer(
         data class Error(val message: String) : Event()
         data class SessionOpen(val peer: String) : Event()
         object SessionClosed : Event()
-        /** El otro extremo pidio emparejar: hay que ensenar el campo del codigo. */
-        object PairingRequested : Event()
-        data class PairingFailed(val why: String) : Event()
+        /**
+         * El otro extremo pidio emparejar: hay que ensenar el campo
+         * del codigo. [freshSession] es true cuando Flex OS abrio una
+         * sesion NUEVA (sal distinta): la pantalla tiene que vaciar lo
+         * que hubiera tecleado, porque pertenecia a la sesion anterior
+         * y ya no sirve para nada.
+         */
+        data class PairingRequested(val freshSession: Boolean) : Event()
+        /**
+         * El emparejamiento no salio. [why] es para leer; [kind] es
+         * para que la pantalla diga la verdad: rechazar un codigo y
+         * perder el socket no se cuentan igual.
+         */
+        data class PairingFailed(val why: String, val kind: PairFailure) : Event()
         /** La lista de relojes que han contestado a una busqueda. */
         data class WatchesFound(val watches: List<Watch>) : Event()
     }
@@ -132,8 +143,28 @@ class WifiLinkServer(
         /** Un reloj que lleva esto sin contestar sale de la lista. */
         private const val WATCH_TTL_MS = 20_000L
 
-        /** Sin autenticar en este tiempo, la conexion se cierra. */
-        private const val AUTH_TIMEOUT_MS = 15_000
+        // #########################################################
+        // ##  DOS PLAZOS, NO UNO
+        // ##  --------------------------------------------------
+        // ##  Antes habia un solo plazo de 15 s desde que se ACEPTA
+        // ##  la conexion, y se aplicaba tambien mientras el usuario
+        // ##  leia seis digitos en la pantalla del reloj y los
+        // ##  tecleaba aqui. Ademas el reloj abre el socket en
+        // ##  cuanto descubre el telefono, que puede ser mucho ANTES
+        // ##  de que nadie pulse "Emparejar telefono".
+        // ##
+        // ##  O sea que el telefono cerraba el socket cada 15 s, el
+        // ##  reloj reconectaba, y el emparejamiento no llegaba a
+        // ##  empezar. Ese ciclo es el que hacia parpadear el codigo
+        // ##  en el reloj.
+        // ##
+        // ##  Ahora: quien no ha hecho NADA se va a los 15 s (que es
+        // ##  lo que protege el puerto de un desconocido), y en
+        // ##  cuanto hay emparejamiento en marcha manda el plazo DE
+        // ##  LA SESION -- los mismos dos minutos que el reloj.
+        // #########################################################
+        /** Un extremo que no dice nada ni empareja se va en este tiempo. */
+        private const val AUTH_TIMEOUT_MS = 15_000L
         /** Sin recibir nada en este tiempo, la sesion se da por muerta. */
         private const val IDLE_TIMEOUT_MS = 40_000
         /**
@@ -154,7 +185,7 @@ class WifiLinkServer(
          * Pasado esto se da por fallido: la pantalla NUNCA se queda en
          * "Comprobando..." para siempre.
          */
-        private const val PAIR_CONFIRM_TIMEOUT_MS = 12_000
+        private const val PAIR_CONFIRM_TIMEOUT_MS = 12_000L
         /** Tope de lo acumulado sin completar una trama. */
         private const val ACC_MAX = FlexLink.MAX_FRAME * 3
     }
@@ -258,6 +289,9 @@ class WifiLinkServer(
         // socket: se vacia en vez de quedarse mostrando dispositivos
         // que ya no se estan viendo.
         synchronized(watches) { watches.clear() }
+        // Parar el servidor SI cierra el emparejamiento: es una orden
+        // del usuario, no un parpadeo de la red.
+        pairing = null
         closeSession("servidor parado")
         runCatching { server?.close() }; server = null
         runCatching { udp?.close() }; udp = null
@@ -447,6 +481,10 @@ class WifiLinkServer(
         sessionKey = null
         nonce = null
         flexosId = ""
+        // LA SESION DE EMPAREJAMIENTO NO SE TOCA AQUI. El reloj
+        // reconecta a menudo durante un emparejamiento, y reenvia LA
+        // MISMA sal: borrarla en cada accept() era perder el codigo
+        // que el usuario ya habia tecleado y reiniciarle el plazo.
         val peer = s.inetAddress?.hostAddress ?: "?"
         try {
             s.tcpNoDelay = true             // el enlace manda mensajes cortos
@@ -464,24 +502,45 @@ class WifiLinkServer(
 
             while (running.get() && !s.isClosed) {
                 val now = System.currentTimeMillis()
-                // Sin autenticar en el plazo, fuera. Una conexion que
-                // se queda abierta sin autenticar ocupa la unica sesion
-                // y deja fuera al Flex OS de verdad.
-                if (!authed && now - opened > AUTH_TIMEOUT_MS) {
-                    onEvent(Event.PairingFailed("la otra parte no se autentico"))
+                // EL PLAZO DEPENDE DE LO QUE ESTE PASANDO.
+                //
+                // Con un emparejamiento en marcha manda el plazo de la
+                // sesion -- los mismos dos minutos que el reloj --,
+                // porque durante ese rato lo que hay al otro lado es
+                // una persona leyendo seis digitos. Sin nada en
+                // marcha, el plazo corto: un desconocido que abre el
+                // puerto y calla no puede ocupar la unica sesion.
+                val pair = pairing
+                val deadline = if (pair != null && !pair.isExpired(now)) pair.expiresAt
+                               else opened + AUTH_TIMEOUT_MS
+                if (!authed && now > deadline) {
+                    val expired = pair != null
+                    onEvent(Event.PairingFailed(
+                        if (expired)
+                            "el codigo de Flex OS caduco; vuelve a pulsar \"Emparejar telefono\" en el reloj"
+                        else "la otra parte no se autentico",
+                        if (expired) PairFailure.CODE_EXPIRED else PairFailure.LINK,
+                    ))
                     break
                 }
                 // NINGUN ESTADO INFINITO. El codigo se mando y Flex OS
                 // no lo confirmo: se dice por que en vez de dejar la
                 // pantalla en "Comprobando..." hasta que caduque la
                 // ventana de emparejamiento.
+                //
+                // Y NO SE CIERRA EL SOCKET: que una prueba se quede sin
+                // respuesta no prueba que el codigo estuviera mal, asi
+                // que la sesion sigue viva y el usuario puede volver a
+                // teclear contra el MISMO codigo que tiene delante.
                 val sentAt = pairSentAt
                 if (!authed && sentAt != 0L && now - sentAt > PAIR_CONFIRM_TIMEOUT_MS) {
                     pairSentAt = 0L
+                    pairing?.onRejected()
                     onEvent(Event.PairingFailed(
-                        "Flex OS no acepto el codigo. Comprueba que es el que ensena la pantalla del reloj."
+                        "Flex OS no contesto al codigo. Comprueba que los dos siguen en la misma red " +
+                            "y vuelve a intentarlo.",
+                        PairFailure.LINK,
                     ))
-                    break
                 }
                 if (now - lastRx > IDLE_TIMEOUT_MS) {
                     onEvent(Event.Error("sin respuesta de Flex OS"))
@@ -606,8 +665,25 @@ class WifiLinkServer(
                 "Flex OS ya tiene otro telefono conectado"
             else -> "Flex OS rechazo la conexion (codigo $code)"
         }
+        // EL TIPO DE FALLO NO SE ADIVINA POR EL TEXTO. Rechazar un
+        // codigo y quedarse sin enlace se arreglan de formas distintas,
+        // y la pantalla tiene que poder decir cual de las dos fue.
+        val kind = when (code) {
+            FlexLink.E_AUTH -> PairFailure.CODE_REJECTED
+            FlexLink.E_TIMEOUT -> PairFailure.CODE_EXPIRED
+            else -> PairFailure.LINK
+        }
         Log.w(TAG, "T_ERR de Flex OS: $code -- $why")
-        if (authed) onEvent(Event.Error(why)) else onEvent(Event.PairingFailed(why))
+        when (kind) {
+            // Un codigo rechazado NO tira la sesion: el reloj sigue
+            // ensenando EL MISMO codigo, asi que el usuario puede
+            // corregir un digito y reintentar sin tocar nada mas.
+            PairFailure.CODE_REJECTED -> pairing?.onRejected()
+            // Caducado si: ese codigo ya no existe en el reloj.
+            PairFailure.CODE_EXPIRED -> pairing = null
+            PairFailure.LINK -> { /* la sesion la decide su propio plazo */ }
+        }
+        if (authed) onEvent(Event.Error(why)) else onEvent(Event.PairingFailed(why, kind))
     }
 
     private fun onHello(body: ByteArray) {
@@ -627,9 +703,24 @@ class WifiLinkServer(
     }
 
     /**
-     * Flex OS manda la SAL. El codigo no viene en el mensaje: lo
-     * teclea el usuario en esta app. Si todavia no lo ha tecleado, se
-     * avisa a la interfaz y se espera -- no se contesta con nada.
+     * Flex OS manda la SAL de su sesion de emparejamiento. El codigo
+     * NO viene en el mensaje: lo teclea el usuario en esta app.
+     *
+     * DOS COSAS QUE ESTA FUNCION YA NO HACE
+     * -------------------------------------
+     *  · No tira la sesion cuando el reloj reenvia LA MISMA sal. El
+     *    reloj la reenvia en cada reconexion, y reiniciar aqui era
+     *    perder el codigo ya tecleado y regalarle al plazo otros dos
+     *    minutos en cada corte.
+     *
+     *  · NO CONTESTA SOLA CON UN CODIGO VIEJO. Este era el fallo: el
+     *    codigo tecleado vivia suelto en el servicio y sobrevivia a
+     *    los intentos fallidos, asi que cuando el usuario pulsaba
+     *    "Emparejar telefono" otra vez -- codigo nuevo y sal nueva en
+     *    el reloj -- esta app mandaba en el acto la prueba del intento
+     *    ANTERIOR. Flex OS la rechazaba, con razon, y el usuario leia
+     *    "el codigo no coincide" sin que le hubieran dejado teclear.
+     *    Un codigo pertenece a la sal para la que se tecleo.
      */
     private fun onPairCode(body: ByteArray) {
         val rd = PayloadReader(body)
@@ -638,67 +729,110 @@ class WifiLinkServer(
         val hostId = rd.str()
         if (!rd.ok || hostId.isEmpty()) return
 
-        // LA SAL SE GUARDA SIEMPRE, haya codigo o no.
-        //
-        // Antes solo se guardaba dentro de completePairing, o sea SOLO
-        // cuando el usuario ya habia tecleado el codigo. En el orden
-        // normal -- Flex OS manda la sal y el usuario teclea despues --
-        // la sal se tiraba, y submitPairingCode salia por
-        // `pendingSalt ?: return false` sin enviar nada. Flex OS se
-        // quedaba esperando un PAIR_CONFIRM que no iba a llegar nunca:
-        // ese era el "cargando infinito".
-        pendingSalt = salt
+        val now = System.currentTimeMillis()
+        val cur = pairing
+        // ¿La misma sesion que ya teniamos, solo que por un canal
+        // nuevo? Entonces no se toca nada de lo que hay dentro.
+        val same = cur != null && cur.hasSalt(salt) && !cur.isExpired(now)
+        if (!same) {
+            pairing = PairingSession(salt, n, hostId, phoneId, now)
+            pairSentAt = 0L
+        }
         nonce = n
         flexosId = hostId
-        Log.d(TAG, "PAIR_CODE recibido de $hostId: sal guardada")
+        val sess = pairing ?: return
+        Log.d(TAG, "PAIR_CODE de $hostId: sesion ${if (same) "en curso" else "NUEVA"}")
 
-        val code = pairingCode()
-        if (code == null || !FlexAuth.isValidCode(code)) {
-            // Se le pide el codigo al usuario. En ningun caso se deriva
-            // una clave con un codigo inventado.
-            onEvent(Event.PairingRequested)
-            return
+        // Solo se contesta solo con un codigo que se tecleo PARA ESTA
+        // sal. En cualquier otro caso se le pide al usuario: en ningun
+        // caso se deriva una clave con un codigo que el usuario no ha
+        // visto junto al que ensena el reloj ahora mismo.
+        //
+        // Cuando SI lo hay, reenviarlo es lo correcto: la prueba
+        // anterior murio con el socket anterior, y volver a pedirle al
+        // usuario que teclee lo que ya tecleo no aporta nada.
+        if (same) {
+            val again = sess.proofForTypedCode(now)
+            if (again != null) {
+                if (sendRaw(FlexLink.T_PAIR_CONFIRM, again.proof, 0)) {
+                    sessionKey = again.key
+                    pairSentAt = now
+                    Log.d(TAG, "PAIR_CONFIRM reenviado por el canal nuevo")
+                } else {
+                    sess.onRejected()
+                    onEvent(Event.PairingFailed(
+                        "se corto la conexion al enviar el codigo", PairFailure.LINK))
+                }
+                return
+            }
         }
-        completePairing(code, salt, n)
+        onEvent(Event.PairingRequested(freshSession = !same))
     }
 
     /**
      * La interfaz llama aqui cuando el usuario teclea el codigo.
      *
-     * Devuelve false si TODAVIA no se puede emparejar -- porque la sal
-     * de Flex OS no ha llegado, o porque el codigo no tiene forma de
-     * codigo. Ese false llega hasta la pantalla: el usuario tiene que
-     * ver "esperando a Flex OS" en vez de un spinner que no termina.
+     * Devuelve el motivo REAL cuando todavia no se puede emparejar, y
+     * ese motivo sube hasta la pantalla: el usuario tiene que leer
+     * "esperando a Flex OS" o "el codigo caduco", no un circulo
+     * girando que no termina.
      */
-    fun submitPairingCode(code: String): Boolean {
-        if (!FlexAuth.isValidCode(code)) return false
-        val n = nonce
-        val salt = pendingSalt
-        if (n == null || salt == null) {
-            Log.w(TAG, "codigo tecleado pero Flex OS aun no ha mandado la sal")
-            return false
+    fun submitPairingCode(code: String): Result {
+        val sess = pairing ?: run {
+            Log.w(TAG, "codigo tecleado pero Flex OS aun no ha mandado su sal")
+            return Result.NO_SESSION
         }
-        completePairing(code, salt, n)
-        return true
+        val now = System.currentTimeMillis()
+        return when (val r = sess.submit(code, now)) {
+            is PairingSession.Submit.Ready -> {
+                if (sendRaw(FlexLink.T_PAIR_CONFIRM, r.proof, 0)) {
+                    sessionKey = r.key
+                    pairSentAt = now
+                    Log.d(TAG, "PAIR_CONFIRM enviado")
+                    Result.SENT
+                } else {
+                    sess.onRejected()          // no salio: se puede volver a teclear
+                    Result.LINK_DOWN
+                }
+            }
+            PairingSession.Submit.BadFormat -> Result.BAD_FORMAT
+            PairingSession.Submit.Expired -> Result.EXPIRED
+            PairingSession.Submit.AlreadyInFlight -> Result.SENT   // ya iba; no se duplica
+            PairingSession.Submit.AlreadyDone -> Result.SENT
+        }
     }
 
-    /** ¿Ha llegado ya la sal? La pantalla lo necesita para no pedir el codigo antes de tiempo. */
-    fun isAwaitingCode(): Boolean = pendingSalt != null && nonce != null
+    /** Lo que puede pasar al teclear el codigo. Cada rama tiene un texto propio en la pantalla. */
+    enum class Result {
+        /** La prueba salio; se espera la respuesta de Flex OS. */
+        SENT,
+        /** No son seis digitos. */
+        BAD_FORMAT,
+        /** Flex OS todavia no ha mandado su sal. */
+        NO_SESSION,
+        /** El codigo de Flex OS caduco: hay que pedir otro en el reloj. */
+        EXPIRED,
+        /** Se corto la conexion al enviar. NO es un codigo mal tecleado. */
+        LINK_DOWN,
+    }
 
-    @Volatile private var pendingSalt: ByteArray? = null
+    /** ¿Ha llegado ya la sal y sigue valiendo? La pantalla lo necesita para no pedir el codigo antes de tiempo. */
+    fun isAwaitingCode(): Boolean =
+        pairing?.acceptsCode(System.currentTimeMillis()) == true
+
+    /** Cuanto le queda al codigo del reloj, para que la pantalla no se invente el plazo. */
+    fun pairingRemainingMs(): Long =
+        pairing?.remainingMs(System.currentTimeMillis()) ?: 0L
+
+    /**
+     * LA SESION DE EMPAREJAMIENTO EN CURSO -- la unica fuente de
+     * verdad de este lado. Sustituye a la pareja `pendingSalt` +
+     * `typedCode`, que podian pertenecer a emparejamientos distintos
+     * sin que nada lo impidiera.
+     */
+    @Volatile private var pairing: PairingSession? = null
     /** Cuando se mando el PAIR_CONFIRM, para no esperarlo eternamente. 0 = no hay ninguno en vuelo. */
     @Volatile private var pairSentAt: Long = 0L
-
-    private fun completePairing(code: String, salt: ByteArray, n: ByteArray) {
-        val key = FlexAuth.deriveKey(code, salt, flexosId, phoneId)
-        sessionKey = key
-        // Se manda la prueba. Si el codigo estaba mal, Flex OS lo
-        // rechaza y NO empareja: el error se ve alli, con el motivo.
-        val ok = sendRaw(FlexLink.T_PAIR_CONFIRM, FlexAuth.proof(key, FlexAuth.ROLE_PHONE, n, 0), 0)
-        Log.d(TAG, "PAIR_CONFIRM enviado: $ok")
-        if (ok) pairSentAt = System.currentTimeMillis()
-        else onEvent(Event.PairingFailed("se corto la conexion al enviar el codigo"))
-    }
 
     private fun onAuthChallenge(body: ByteArray) {
         val rd = PayloadReader(body)
@@ -711,7 +845,8 @@ class WifiLinkServer(
             // el usuario borro los datos de la app. Se dice, en vez de
             // dejar a Flex OS esperando una respuesta que no llegara.
             sendRaw(FlexLink.T_ERR, byteArrayOf(FlexLink.E_NOTPAIRED.toByte()), sess)
-            onEvent(Event.PairingFailed("este telefono ya no tiene el vinculo guardado"))
+            onEvent(Event.PairingFailed(
+                "este telefono ya no tiene el vinculo guardado", PairFailure.LINK))
             return
         }
         nonce = n
@@ -732,7 +867,8 @@ class WifiLinkServer(
         val got = rd.bytes(FlexAuth.PROOF_SIZE)
         if (!rd.ok) return
         if (!FlexAuth.verify(key, FlexAuth.ROLE_HOST, n, sess, got)) {
-            onEvent(Event.PairingFailed("quien contesta no es el Flex OS emparejado"))
+            onEvent(Event.PairingFailed(
+                "quien contesta no es el Flex OS emparejado", PairFailure.LINK))
             runCatching { sock?.close() }
             return
         }
@@ -743,6 +879,10 @@ class WifiLinkServer(
         session = sess
         authed = true
         pairSentAt = 0L
+        // El emparejamiento se cerro: la sesion (y con ella el codigo
+        // tecleado y la clave a medio derivar) deja de existir.
+        pairing?.onAccepted()
+        pairing = null
         releaseMulticast()          // con sesion abierta ya no hay que oir sondas
         onEvent(Event.SessionOpen(sock?.inetAddress?.hostAddress ?: "?"))
     }
@@ -756,8 +896,13 @@ class WifiLinkServer(
         session = 0
         sessionKey = null
         nonce = null
-        pendingSalt = null
         pairSentAt = 0L
+        // LA SESION DE EMPAREJAMIENTO SOBREVIVE AL SOCKET. El reloj
+        // reconecta solo, reenvia la MISMA sal y el usuario sigue con
+        // el mismo codigo delante. Borrarla aqui era obligar a
+        // empezar de cero cada vez que el canal parpadeaba.
+        // Quien la cierra de verdad es su propio plazo (dos minutos),
+        // un emparejamiento completado, o `stop()`.
         // Sin sesion vuelve a hacer falta oir las sondas del reloj.
         if (running.get()) acquireMulticast()
         if (had) onEvent(Event.SessionClosed)

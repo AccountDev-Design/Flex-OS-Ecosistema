@@ -350,7 +350,9 @@ tarjeta que lo dice, en Flex OS y en el teléfono.
 
 - más de una sesión a la vez (la segunda conexión se cierra);
 - cualquier mensaje que no sea del apretón de manos sin sesión autenticada;
-- una conexión que no autentica en 15 s;
+- una conexión que no autentica en 15 s **si no hay emparejamiento en
+  marcha** (con sesión de emparejamiento abierta, el plazo pasa a ser el de
+  esa sesión: los mismos 2 min que el reloj — ver *Una sola fuente de verdad*);
 - una sesión sin tráfico en 40 s;
 - una trama de otra sesión, repetida, corrupta o de versión futura.
 
@@ -367,11 +369,61 @@ plazos, y de dónde sale cada uno:
 
 | Espera | Plazo | Quién lo aplica | Qué pasa al vencer |
 |---|---|---|---|
-| conexión sin autenticar | 15 s | teléfono | se cierra y se libera la sesión |
-| código enviado sin confirmar | 12 s | teléfono | `PairingFailed` con el motivo |
-| código en pantalla sin confirmar | 2 min | reloj | vuelve a buscar **y avisa** con `T_ERR`/`E_TIMEOUT` |
+| conexión sin autenticar **y sin emparejar** | 15 s | teléfono | se cierra y se libera la sesión |
+| conexión con emparejamiento en marcha | lo que le quede a la sesión (2 min) | teléfono | `PairingFailed` con `CODE_EXPIRED` |
+| código enviado sin confirmar | 12 s | teléfono | `PairingFailed` con `LINK` — **el socket NO se cierra**: se puede reintentar |
+| código en pantalla sin confirmar | 2 min desde `pair.startedMs` | reloj | cierra la sesión **y avisa** con `T_ERR`/`E_TIMEOUT` |
 | autenticación de sesión | `FLP_LINK_AUTH_TIMEOUT_MS` | reloj | vuelve a buscar |
 | sesión sin tráfico | 40 s | los dos | se corta y se reconecta |
+
+### Una sola fuente de verdad: la sesión de emparejamiento
+
+El código, la sal, el reto, la clave a medio derivar y el plazo **pertenecen a
+una sesión**, con un solo dueño en cada lado:
+
+| Lado | Dónde vive | Nace | Muere |
+|---|---|---|---|
+| Flex OS | `FlexPhonePairing` (`FlexOS_FlexPhone_Link.h`) | `flexPhoneLinkBeginPairing`, y **solo** desde el botón *Emparejar teléfono* | caduca, se cancela, se completa, o el usuario pide otro |
+| Android | `PairingSession` (`:protocol`) | al llegar una sal **distinta** | caduca, se completa, o se para el servicio |
+
+La interfaz del reloj pinta `flexPhoneLinkCode()`; el servidor valida
+`pair.key`, derivada de **ese mismo** `pair.code` con **esa misma** `pair.salt`.
+No hay una segunda copia en ninguna capa.
+
+**El canal no manda sobre la sesión.** El socket puede caerse y volver las
+veces que quiera: el código no cambia, el estado sigue siendo *emparejando* y
+la sal se reenvía tal cual al reconectar. El plazo cuelga de `startedMs`, así
+que un vaivén de red no le regala otros dos minutos.
+
+### Cuatro fallos que hacían que el código «no coincidiera»
+
+Todos daban el mismo síntoma —*tecleo lo que veo y me dice que no coincide*— y
+ninguno estaba en la comparación:
+
+1. **El teléfono contestaba con un código viejo.** `typedCode` vivía suelto en
+   `FlexLinkService` y sobrevivía a los intentos fallidos. Al pulsar otra vez
+   *Emparejar teléfono*, el reloj abría una sesión nueva (código **y sal**
+   nuevos) y la app mandaba en el acto la prueba del intento **anterior**. El
+   reloj la rechazaba, con razón. Ahora un código pertenece a la sal para la
+   que se tecleó: una sal distinta es una sesión distinta y nace sin código.
+2. **El teléfono cerraba el socket cada 15 s.** El plazo de autenticación
+   corría desde el `accept()`, o sea **mientras el usuario leía seis dígitos**
+   de la pantalla del reloj — y el reloj abre el socket en cuanto descubre el
+   teléfono, que puede ser mucho antes de que nadie pulse nada. El reloj
+   reconectaba, y vuelta a empezar.
+3. **Ese ciclo sacaba al reloj de *emparejando*.** Un `FLP_TC_FAILED` llevaba
+   el enlace a *buscando* pasara lo que pasara, y al reconectar el `WELCOME`
+   lo devolvía a *emparejando* con el código viejo todavía en memoria: eso es
+   el **parpadeo del código** que se veía en la pantalla del reloj.
+4. **El plazo se reiniciaba solo.** La caducidad colgaba de `stateSinceMs`,
+   que lo reinicia cualquier cambio de estado. Cada corte del canal le daba al
+   código otra ventana entera, y el aviso de caducidad no llegaba nunca.
+
+Y dos cosas que ahora dice bien la interfaz: un rechazo **no** tira la sesión
+(el reloj sigue enseñando el mismo código, así que se puede corregir un dígito
+y reintentar), y el mensaje de error corresponde al fallo real —
+`CODE_REJECTED`, `CODE_EXPIRED` o `LINK` — en vez de mandar siempre a revisar
+unos dígitos que podían estar bien.
 
 Tres fallos concretos que hacían que la pantalla de emparejamiento se quedara
 en «Comprobando…» para siempre, y lo que los curaba:

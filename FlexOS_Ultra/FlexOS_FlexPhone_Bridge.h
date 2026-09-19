@@ -93,6 +93,7 @@ static FgDrag    fphDrag = { false, false, 0, 0 };
 enum {
   FPHH_NONE = 0, FPHH_BACK, FPHH_SEC_BASE = 10,          // 10..18 -> secciones
   FPHH_PAIR = 40, FPHH_CONFIRM, FPHH_FORGET, FPHH_RETRY,
+  FPHH_PAIR_CANCEL,          // cerrar el emparejamiento sin apagar el enlace
   FPHH_LINK_ON, FPHH_LINK_OFF, FPHH_FIND, FPHH_RELAY_TOGGLE,
   FPHH_SRC_AUTO, FPHH_SRC_PHONE, FPHH_SRC_PC,
   FPHH_HOST_CLEAR, FPHH_SYNC_NOW, FPHH_CLEAR_NOTIFS,
@@ -236,9 +237,30 @@ static bool fphAutoLink = false;
 // El enlace vive aunque la app este cerrada: las notificaciones
 // tienen que seguir llegando. Lo que NO ocurre con la app cerrada es
 // dibujar nada.
+// #############################################################
+// ##  LAS LINEAS DEL EMPAREJAMIENTO, AL PUERTO SERIE
+// ##  ------------------------------------------------------
+// ##  Solo con FLEXOS_DIAG_FLEXPHONE encendido (mismo interruptor
+// ##  que el diagnostico del descubrimiento, que esta a 0 en
+// ##  produccion). Sin el, ni siquiera se instala el gancho: el
+// ##  nucleo no formatea nada y no hay ninguna linea que pueda
+// ##  llevar parte del codigo a un registro.
+// ##
+// ##  Aun encendido, el codigo sale TAPADO ("12----"). Quien
+// ##  depura tiene el codigo entero delante, en la pantalla.
+// #############################################################
+#if FLEXOS_DIAG_FLEXPHONE
+static void fphLogLine(const char* line){
+  Serial.printf("[FLEXPAIR %8lu] %s\n", (unsigned long)millis(), line ? line : "");
+}
+#endif
+
 static void flexPhoneBegin(){
   flexPhoneModelInit(&fphModel);
   flexPhoneLinkInit(&fphLink);
+#if FLEXOS_DIAG_FLEXPHONE
+  flexPhoneLinkSetLog(fphLogLine);
+#endif
   fphSelfIdLoad();
   flexPhoneLinkSetIdentity(&fphLink, fphSelfId);
   flexPhoneLinkSetTransport(&fphLink, flexPhoneWifiTransport());
@@ -267,7 +289,11 @@ static void flexPhoneTick(){
   // sesenta veces por segundo.
   {
     static bool lastPairing = false;
-    const bool pairing = (fphLink.state == FLP_LS_PAIRING);
+    // LA VERDAD ES LA SESION, no el estado. Antes bastaba con estar en
+    // EMPAREJANDO para anunciarse como "ensenando codigo", y el enlace
+    // entraba en ese estado tambien cuando NO habia ningun codigo:
+    // cualquier movil de la red veia este reloj destacado para nada.
+    const bool pairing = flexPhoneLinkPairing(&fphLink);
     if(pairing != lastPairing){
       lastPairing = pairing;
       flexPhoneWifiSetIdentity(NULL, NULL, pairing);
@@ -520,8 +546,8 @@ static void fphRenderInicio(){
     else                                     nm = LI() == 1 ? "No phone linked" : "Sin telefono vinculado";
     fgTextEllipsis(FPH_MX + 18, y + 14, FPH_CW - 36, nm, 2, TH_TXT);
     fgStatusChip(FPH_MX + 18, y + 44, vs,
-                 fphLink.state == FLP_LS_PAIRING ? (LI() == 1 ? "Pairing" : "Emparejando")
-                                                 : fgStName(vs));
+                 flexPhoneLinkPairing(&fphLink) ? (LI() == 1 ? "Pairing" : "Emparejando")
+                                                : fgStName(vs));
 
     // Tres datos REALES, o un guion. Nada se estima.
     char b1[24], b2[24], b3[24];
@@ -559,14 +585,31 @@ static void fphRenderInicio(){
   y += cardH + 12;
 
   // ---- Accion principal, la que toque AHORA ----
-  if(fphLink.state == FLP_LS_PAIRING && fphLink.code[0]){
-    const int h = 128;
+  if(flexPhoneLinkPairing(&fphLink)){
+    const int h = 152;
     fgCardAccent(FPH_MX, y, FPH_CW, h, TH_PRIM);
     drawText(FPH_MX + 20, y + 12, LI() == 1 ? "Type this code on the phone"
                                             : "Teclea este codigo en el telefono", 1, TH_MUTE);
-    drawTextC(SCR_W / 2, y + 34, fphLink.code, 4, TH_TXT);
-    fgButton(FPH_MX + 20, y + 80, FPH_CW - 40, 36,
+    // UNA sola fuente: el codigo de la sesion de emparejamiento, que
+    // es el mismo que valida el servidor. No hay ninguna otra copia.
+    drawTextC(SCR_W / 2, y + 34, flexPhoneLinkCode(&fphLink), 4, TH_TXT);
+    // LO QUE ESTA PASANDO AHORA, con el plazo REAL de la sesion. Un
+    // codigo en pantalla sin decir cuanto dura es lo que hacia
+    // imposible distinguir "va lento" de "ya caduco".
+    { const uint32_t left = flexPhoneLinkPairRemainingMs(&fphLink, millis()) / 1000u;
+      char sub[72];
+      const char* phase =
+        fphLink.pair.peerConfirmed ? (LI() == 1 ? "Code accepted"   : "Codigo verificado")
+      : fphLink.pair.rejects       ? (LI() == 1 ? "Code rejected"   : "El codigo no coincidio")
+      : fphLink.pair.keyOk         ? (LI() == 1 ? "Phone connected" : "Telefono conectado")
+                                   : (LI() == 1 ? "Waiting for the phone" : "Esperando al telefono");
+      snprintf(sub, sizeof(sub), LI() == 1 ? "%s  ·  %lu s left" : "%s  ·  quedan %lu s",
+               phase, (unsigned long)left);
+      drawText(FPH_MX + 20, y + 64, sub, 1, TH_MUTE); }
+    fgButton(FPH_MX + 20, y + 84, (FPH_CW - 48) / 2, 36,
              LI() == 1 ? "Confirm here" : "Confirmar aqui", FG_BTN_PRIMARY, FPHH_CONFIRM);
+    fgButton(FPH_MX + 28 + (FPH_CW - 48) / 2, y + 84, (FPH_CW - 48) / 2, 36,
+             LI() == 1 ? "Cancel" : "Cancelar", FG_BTN_PLAIN, FPHH_PAIR_CANCEL);
     y += h + 12;
   } else if(fphLink.state == FLP_LS_OFF){
     fgButton(FPH_MX, y, FPH_CW, 44,
@@ -1501,6 +1544,11 @@ static void fphHandleHit(uint16_t id){
         fphToastShow(fphLink.err[0] ? fphLink.err : flexPhoneTrStatus(fphLink.tr));
         return;
       }
+      // UN TOQUE, UNA SESION. Si ya hay un codigo en pantalla, volver
+      // a pulsar aqui es pedir uno nuevo -- y eso es lo unico que
+      // puede cambiar el codigo mientras el usuario lo esta mirando.
+      // Repetir el toque sin querer no crea una segunda sesion: la
+      // anterior se cierra entera antes de abrir la nueva.
       flexPhoneLinkBeginPairing(&fphLink, fphRandom, now);
       fphOpenSection(FPH_INICIO);
       fphToastShow(LI() == 1 ? "Open Flex Phone on the phone"
@@ -1510,13 +1558,26 @@ static void fphHandleHit(uint16_t id){
 
     case FPHH_CONFIRM:
       flexPhoneLinkConfirm(&fphLink, now);
-      if(flexPhoneLinkPairComplete(&fphLink)){
+      if(flexPhoneLinkPairComplete(&fphLink) || flexPhoneLinkReady(&fphLink)){
         fphBondSave();
         fphToastShow(LI() == 1 ? "Phone paired" : "Telefono emparejado");
+      } else if(!flexPhoneLinkPairing(&fphLink)){
+        // La sesion ya no esta: caduco mientras el dedo iba al boton.
+        fphToastShow(fphLink.err[0] ? fphLink.err
+                                    : (LI() == 1 ? "The code expired" : "El codigo caduco"));
       } else {
         fphToastShow(LI() == 1 ? "Now type the code on the phone"
                                : "Teclea ahora el codigo en el telefono");
       }
+      fphDirtyUi = true;
+      return;
+
+    case FPHH_PAIR_CANCEL:
+      // Cancelar NO apaga el enlace: cierra la sesion, avisa al
+      // telefono y deja el canal como estaba. Sin temporizadores
+      // sueltos ni codigo a medio morir.
+      flexPhoneLinkCancelPairing(&fphLink, now);
+      fphToastShow(LI() == 1 ? "Pairing cancelled" : "Emparejamiento cancelado");
       fphDirtyUi = true;
       return;
 

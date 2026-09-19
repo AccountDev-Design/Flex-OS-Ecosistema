@@ -127,11 +127,56 @@ typedef struct {
   uint32_t pairedAtEpoch;            // cuando se emparejo (0 = desconocido)
 } FlexPhoneBond;
 
+// #############################################################
+// ##  SESION DE EMPAREJAMIENTO  --  LA UNICA FUENTE DE VERDAD
+// ##  ------------------------------------------------------
+// ##  Existe por un fallo concreto y muy caro de diagnosticar: el
+// ##  codigo, la sal, la clave a medio derivar y el plazo vivian
+// ##  sueltos en el enlace, y quien decidia si seguian valiendo era
+// ##  el ESTADO DEL CANAL. O sea que un corte de socket -- que en
+// ##  esta app ocurre cada pocos segundos mientras nadie ha
+// ##  autenticado -- sacaba al enlace de "emparejando", el codigo
+// ##  desaparecia de la pantalla y volvia a aparecer al reconectar,
+// ##  y el plazo de dos minutos se reiniciaba solo. Desde fuera se
+// ##  veia el codigo "cambiar" un instante y el telefono decia que
+// ##  no coincidia.
+// ##
+// ##  Ahora el codigo PERTENECE a esta sesion. Nace UNA vez
+// ##  (pairBegin), no se regenera por nada que llegue de la red, y
+// ##  muere por una de cuatro razones explicitas: caduco, se
+// ##  cancelo, se completo, o el usuario pidio otro. El canal puede
+// ##  caerse y volver las veces que quiera: la sesion sobrevive y
+// ##  la sal se reenvia TAL CUAL.
+// ##
+// ##  La interfaz pinta `code`. El servidor valida `key`, derivada
+// ##  de ESE `code` con ESTA `salt`. No hay un segundo sitio donde
+// ##  se genere ni se guarde ninguno de los dos.
+// #############################################################
+enum {
+  FLP_PAIR_NONE = 0,   // no hay emparejamiento en curso
+  FLP_PAIR_OPEN,       // codigo vivo, esperando a los dos extremos
+  FLP_PAIR_DONE,       // se cerro bien; el codigo ya no existe
+};
+
+typedef struct {
+  uint8_t  state;                        // FLP_PAIR_*
+  char     code[FLP_LINK_CODE_LEN + 1];  // lo que SE ENSENA y lo que SE VALIDA
+  uint8_t  salt[FLXA_SALT_SIZE];         // sal de ESTA sesion (viaja; es publica)
+  uint8_t  nonce[FLXA_NONCE_SIZE];       // reto de ESTA sesion (viaja; es publico)
+  uint8_t  key[FLXA_KEY_SIZE];           // clave derivada, aun sin confirmar
+  bool     keyOk;                        // ¿ya se pudo derivar? (hace falta el id del telefono)
+  char     peerId[FLP_PEERID_MAX];       // telefono con el que se derivo `key`
+  uint32_t startedMs;                    // cuando NACIO la sesion. El plazo cuelga de aqui
+  bool     userConfirmed;                // el usuario confirmo EN FLEX OS
+  bool     peerConfirmed;                // el telefono demostro la clave
+  // Diagnostico de la ultima validacion. NUNCA el codigo ajeno.
+  uint8_t  rejects;                      // pruebas que no cuadraron en esta sesion
+} FlexPhonePairing;
+
 typedef struct {
   uint8_t  state;
   uint8_t  cap;
   char     err[FLP_LINK_ERR_MAX];
-  char     code[FLP_LINK_CODE_LEN + 1];   // codigo visible durante el emparejamiento
   uint16_t session;
   uint16_t mtu;              // carga maxima REAL del transporte
   uint16_t txPacket;         // id del proximo mensaje saliente
@@ -141,17 +186,17 @@ typedef struct {
   uint32_t stateSinceMs;
   uint8_t  reconnectAttempt;
   uint32_t reconnectAtMs;
-  bool     userConfirmed;    // el usuario confirmo EN FLEX OS
-  bool     peerConfirmed;    // el telefono demostro la clave
 
   // -- identidad y material del vinculo --
   char     selfId[FLXA_ID_MAX];       // id de este Flex OS
   FlexPhoneBond bond;                 // vinculo guardado
-  uint8_t  salt[FLXA_SALT_SIZE];      // sal del emparejamiento en curso
-  uint8_t  nonce[FLXA_NONCE_SIZE];    // reto de la sesion en curso
-  uint8_t  pendKey[FLXA_KEY_SIZE];    // clave derivada, aun sin confirmar
-  bool     pendKeyOk;
-  char     pendPeerId[FLP_PEERID_MAX];
+  FlexPhonePairing pair;              // emparejamiento en curso (si lo hay)
+  uint8_t  nonce[FLXA_NONCE_SIZE];    // reto de la SESION en curso (vinculo ya guardado)
+  // Quien esta al otro lado del canal ABIERTO AHORA. Es del canal,
+  // no del emparejamiento: se olvida al reconectar y se vuelve a
+  // aprender del WELCOME. La sesion de emparejamiento guarda por su
+  // cuenta con quien derivo la clave.
+  char     chanPeerId[FLP_PEERID_MAX];
   bool     hostProven;                // Flex OS ya mando su prueba
   // ¿Ya nos hemos presentado en EL CANAL QUE ESTA ABIERTO AHORA?
   //
@@ -228,16 +273,39 @@ bool flexPhoneLinkOnFrame(FlexPhoneLink* L, FlexPhoneModel* M,
 // -------------------------------------------------------------
 //  Emparejamiento
 // -------------------------------------------------------------
-// Genera sal y codigo nuevos y pasa a FLP_LS_PAIRING. `rnd` es la
-// fuente de aleatoriedad del llamador (esp_random en la placa) para
-// que este modulo siga sin depender de Arduino.
+// ABRE UNA SESION DE EMPAREJAMIENTO NUEVA. Genera codigo, sal y reto
+// UNA sola vez y pasa a FLP_LS_PAIRING. `rnd` es la fuente de
+// aleatoriedad del llamador (esp_random en la placa) para que este
+// modulo siga sin depender de Arduino.
+//
+// Llamarla con una sesion ya abierta la TIRA y empieza otra: es lo
+// que el usuario pide al pulsar "Emparejar telefono" otra vez. Nada
+// que llegue por la red llama aqui -- si lo hiciera, el codigo
+// cambiaria justo mientras el telefono lo esta usando.
 void flexPhoneLinkBeginPairing(FlexPhoneLink* L, FlexAuthRandFn rnd, uint32_t nowMs);
 // El usuario pulso "Confirmar" EN FLEX OS. Deriva la clave con el
 // codigo que se esta ensenando y queda a la espera de la prueba.
 void flexPhoneLinkConfirm(FlexPhoneLink* L, uint32_t nowMs);
+// El usuario se echo atras (boton Atras, cerrar la tarjeta, apagar el
+// enlace). Cierra la sesion, borra el codigo y la clave a medio
+// derivar y deja el enlace buscando. No deja temporizadores ni
+// material vivo de un emparejamiento que ya no existe.
+void flexPhoneLinkCancelPairing(FlexPhoneLink* L, uint32_t nowMs);
 // El emparejamiento solo se cierra cuando confirma el usuario Y el
 // telefono demuestra que tiene la misma clave.
 bool flexPhoneLinkPairComplete(const FlexPhoneLink* L);
+// ¿Hay una sesion de emparejamiento viva AHORA? Es lo que decide si
+// se ensena el codigo y lo que se anuncia en el descubrimiento.
+static inline bool flexPhoneLinkPairing(const FlexPhoneLink* L){
+  return L && L->pair.state == FLP_PAIR_OPEN && L->pair.code[0];
+}
+// EL codigo que hay que ensenar, o "" si no hay sesion. La interfaz
+// lee SIEMPRE por aqui: no existe ninguna otra copia que pintar.
+const char* flexPhoneLinkCode(const FlexPhoneLink* L);
+// Cuanto le queda de vida al codigo, en milisegundos (0 = ya no
+// vale). Sirve para ensenar la cuenta atras sin que la pantalla se
+// invente el plazo por su cuenta.
+uint32_t flexPhoneLinkPairRemainingMs(const FlexPhoneLink* L, uint32_t nowMs);
 
 // -------------------------------------------------------------
 //  Consultas para la interfaz
@@ -254,6 +322,30 @@ bool flexPhoneLinkLatency(const FlexPhoneLink* L, uint16_t* outMs);
 // Direccion del telefono, tal como la ve el transporte. Puede ir
 // vacia si el transporte no la conoce.
 void flexPhoneLinkPeer(FlexPhoneLink* L, char* out, size_t outN);
+
+// -------------------------------------------------------------
+//  DIAGNOSTICO DEL EMPAREJAMIENTO
+// -------------------------------------------------------------
+// #############################################################
+// ##  POR QUE UN GANCHO Y NO UN Serial.printf
+// ##  ------------------------------------------------------
+// ##  Este fichero es nucleo puro: se compila en el PC. Un printf
+// ##  de Arduino aqui dentro lo ataria a la placa y dejaria de
+// ##  poder probarse. Con un gancho, la placa manda las lineas al
+// ##  puerto serie y las pruebas de host las CAPTURAN y comprueban
+// ##  que dicen la verdad.
+// ##
+// ##  EL CODIGO NO SALE ENTERO NUNCA. Las lineas llevan los dos
+// ##  primeros digitos y el resto tapado ("12----"), que basta para
+// ##  ver si los dos extremos hablan del mismo codigo y no sirve
+// ##  para adivinarlo desde un registro. Quien depure de verdad
+// ##  tiene el codigo delante, en la pantalla del reloj.
+// #############################################################
+typedef void (*FlexPhoneLogFn)(const char* line);
+// Instala (o quita, con NULL) el destino de las lineas de
+// diagnostico. Sin gancho instalado no se formatea nada: el coste en
+// produccion es una comparacion contra NULL.
+void flexPhoneLinkSetLog(FlexPhoneLogFn fn);
 
 // -------------------------------------------------------------
 //  Tiempos del protocolo
