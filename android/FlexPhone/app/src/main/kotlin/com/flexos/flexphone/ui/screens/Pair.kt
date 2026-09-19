@@ -124,9 +124,12 @@ fun PairScreen(nav: NavController, store: SettingsStore) {
                                         "codigo sigue en la pantalla del reloj."
                                 }
                                 WifiLinkServer.Result.LINK_DOWN -> {
-                                    sent = false
-                                    hint = "Se corto la conexion al enviar el codigo. El codigo del " +
-                                        "reloj sigue valiendo: vuelve a intentarlo."
+                                    // El codigo queda guardado para ESTA sal y se
+                                    // reenvia solo cuando el reloj reabra el canal:
+                                    // no hay que volver a teclearlo.
+                                    sent = true
+                                    hint = "El reloj no esta conectado ahora mismo. El codigo queda " +
+                                        "guardado y se envia solo en cuanto vuelva a conectarse."
                                 }
                                 WifiLinkServer.Result.BAD_FORMAT, null -> {
                                     sent = false

@@ -598,9 +598,16 @@ static void fphRenderInicio(){
     // imposible distinguir "va lento" de "ya caduco".
     { const uint32_t left = flexPhoneLinkPairRemainingMs(&fphLink, millis()) / 1000u;
       char sub[72];
+      // EL CANAL DE AHORA, no el de hace un rato. `keyOk` se pone una
+      // vez y no se quita, asi que usarlo para decir "telefono
+      // conectado" dejaba ese texto en pantalla con el socket caido:
+      // la pantalla afirmaba lo contrario de lo que pasaba, que es
+      // justo lo que impedia entender por que fallaba el envio.
+      const bool chanUp = flexPhoneTrState(fphLink.tr) == FLP_TC_OPEN;
       const char* phase =
         fphLink.pair.peerConfirmed ? (LI() == 1 ? "Code accepted"   : "Codigo verificado")
       : fphLink.pair.rejects       ? (LI() == 1 ? "Code rejected"   : "El codigo no coincidio")
+      : !chanUp                    ? (LI() == 1 ? "Reconnecting"    : "Reconectando")
       : fphLink.pair.keyOk         ? (LI() == 1 ? "Phone connected" : "Telefono conectado")
                                    : (LI() == 1 ? "Waiting for the phone" : "Esperando al telefono");
       snprintf(sub, sizeof(sub), LI() == 1 ? "%s  ·  %lu s left" : "%s  ·  quedan %lu s",

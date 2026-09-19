@@ -502,17 +502,36 @@ class WifiLinkServer(
 
             while (running.get() && !s.isClosed) {
                 val now = System.currentTimeMillis()
-                // EL PLAZO DEPENDE DE LO QUE ESTE PASANDO.
-                //
-                // Con un emparejamiento en marcha manda el plazo de la
-                // sesion -- los mismos dos minutos que el reloj --,
-                // porque durante ese rato lo que hay al otro lado es
-                // una persona leyendo seis digitos. Sin nada en
-                // marcha, el plazo corto: un desconocido que abre el
-                // puerto y calla no puede ocupar la unica sesion.
+                // #############################################
+                // ##  EL PLAZO DEPENDE DE LO QUE ESTE PASANDO
+                // ##  ---------------------------------------
+                // ##  Tres situaciones distintas, tres plazos:
+                // ##
+                // ##  1) Emparejamiento en marcha -> el plazo de la
+                // ##     sesion (los mismos 2 min que el reloj). Al
+                // ##     otro lado hay una persona leyendo seis
+                // ##     digitos de una pantalla pequena.
+                // ##
+                // ##  2) Un Flex OS que ya se presento pero todavia
+                // ##     no empareja -> la ventana de emparejamiento.
+                // ##     Es el caso de "el reloj se conecta solo en
+                // ##     cuanto me descubre y el usuario aun no ha
+                // ##     pulsado Emparejar telefono". Con el plazo
+                // ##     corto, el telefono le colgaba cada 15 s y el
+                // ##     reloj reconectaba sin parar -- ese ciclo era
+                // ##     lo que hacia parpadear el codigo.
+                // ##
+                // ##  3) Alguien que abre el puerto y NO se presenta
+                // ##     -> 15 s y fuera. Es el unico caso que hay
+                // ##     que cortar rapido, y el unico que se corta:
+                // ##     nadie ocupa la unica sesion sin identificarse.
+                // #############################################
                 val pair = pairing
-                val deadline = if (pair != null && !pair.isExpired(now)) pair.expiresAt
-                               else opened + AUTH_TIMEOUT_MS
+                val deadline = when {
+                    pair != null && !pair.isExpired(now) -> pair.expiresAt
+                    flexosId.isNotEmpty() -> opened + PairingSession.WINDOW_MS
+                    else -> opened + AUTH_TIMEOUT_MS
+                }
                 if (!authed && now > deadline) {
                     val expired = pair != null
                     onEvent(Event.PairingFailed(
@@ -535,14 +554,41 @@ class WifiLinkServer(
                 val sentAt = pairSentAt
                 if (!authed && sentAt != 0L && now - sentAt > PAIR_CONFIRM_TIMEOUT_MS) {
                     pairSentAt = 0L
-                    pairing?.onRejected()
+                    // Sin respuesta no es "codigo mal": el codigo se
+                    // conserva y se reenvia si el canal vuelve.
+                    pairing?.onSendFailed()
                     onEvent(Event.PairingFailed(
                         "Flex OS no contesto al codigo. Comprueba que los dos siguen en la misma red " +
                             "y vuelve a intentarlo.",
                         PairFailure.LINK,
                     ))
                 }
-                if (now - lastRx > IDLE_TIMEOUT_MS) {
+                // #############################################
+                // ##  EL SILENCIO DE UN EMPAREJAMIENTO NO ES UN
+                // ##  ENLACE MUERTO
+                // ##  ---------------------------------------
+                // ##  AQUI MORIA EL EMPAREJAMIENTO. Mientras hay un
+                // ##  codigo en pantalla el canal esta legitimamente
+                // ##  mudo: el reloj mando su sal y se callo, y este
+                // ##  telefono no tiene nada que decir hasta que el
+                // ##  usuario teclee. Cuarenta segundos de eso son
+                // ##  completamente normales -- leer seis digitos de
+                // ##  un reloj y teclearlos cuesta mas.
+                // ##
+                // ##  El plazo saltaba, se cerraba el socket, y
+                // ##  cuando el usuario por fin pulsaba "Emparejar"
+                // ##  leia "se corto la conexion al enviar el
+                // ##  codigo", con el codigo correcto y la ventana
+                // ##  abierta en los dos lados.
+                // ##
+                // ##  El reloj ademas late ahora durante el
+                // ##  emparejamiento, asi que el canal ya no se
+                // ##  queda mudo; esto es el cinturon ademas de los
+                // ##  tirantes, y el que cubre a un reloj con
+                // ##  firmware anterior.
+                // #############################################
+                val pairingNow = pair != null && !pair.isExpired(now)
+                if (!pairingNow && now - lastRx > IDLE_TIMEOUT_MS) {
                     onEvent(Event.Error("sin respuesta de Flex OS"))
                     break
                 }
@@ -759,7 +805,7 @@ class WifiLinkServer(
                     pairSentAt = now
                     Log.d(TAG, "PAIR_CONFIRM reenviado por el canal nuevo")
                 } else {
-                    sess.onRejected()
+                    sess.onSendFailed()
                     onEvent(Event.PairingFailed(
                         "se corto la conexion al enviar el codigo", PairFailure.LINK))
                 }
@@ -791,7 +837,11 @@ class WifiLinkServer(
                     Log.d(TAG, "PAIR_CONFIRM enviado")
                     Result.SENT
                 } else {
-                    sess.onRejected()          // no salio: se puede volver a teclear
+                    // NO es un rechazo: la prueba no llego a salir. El
+                    // codigo se conserva y se reenvia solo en cuanto el
+                    // reloj reabra el canal -- el usuario no tiene que
+                    // volver a teclear lo que ya tecleo.
+                    sess.onSendFailed()
                     Result.LINK_DOWN
                 }
             }

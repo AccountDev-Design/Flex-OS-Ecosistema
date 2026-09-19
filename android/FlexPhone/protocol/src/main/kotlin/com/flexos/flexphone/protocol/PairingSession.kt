@@ -154,6 +154,20 @@ class PairingSession(
         return Submit.Ready(FlexAuth.proof(k, FlexAuth.ROLE_PHONE, nonce, PAIR_SESSION), k)
     }
 
+    /**
+     * La prueba NO PUDO SALIR (socket caido al enviar, o Flex OS no
+     * contesto). Eso no dice nada sobre el codigo.
+     *
+     * Por eso NO es [onRejected]: el codigo tecleado se conserva, y
+     * [proofForTypedCode] lo reenvia en cuanto el reloj vuelve a
+     * abrir el canal. Tratarlo como un rechazo borraba el codigo y
+     * dejaba al usuario tecleando otra vez lo mismo, contra un reloj
+     * que seguia ensenando exactamente el mismo codigo.
+     */
+    fun onSendFailed() {
+        if (state == State.CONFIRM_SENT) state = State.AWAITING_CODE
+    }
+
     /** Flex OS rechazo el codigo. La sesion SIGUE VIVA: se puede corregir un digito. */
     fun onRejected() {
         if (state == State.DONE) return

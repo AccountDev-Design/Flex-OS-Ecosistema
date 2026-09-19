@@ -230,6 +230,30 @@ class PairingSessionTest {
         )
     }
 
+    /**
+     * UN ENVIO QUE NO SALE NO ES UN RECHAZO.
+     *
+     * Si el socket estaba caido al pulsar "Emparejar", el codigo
+     * tecleado tiene que sobrevivir: el reloj sigue ensenando
+     * exactamente el mismo codigo, y en cuanto reabra el canal se
+     * reenvia solo. Tratarlo como un rechazo borraba el codigo y
+     * obligaba al usuario a teclear otra vez lo mismo.
+     */
+    @Test
+    fun `si la prueba no sale el codigo se conserva y se reenvia`() {
+        val p = session()
+        val primera = p.submit("246813", 1_000L) as PairingSession.Submit.Ready
+        p.onSendFailed()
+        assertEquals("246813", p.code, "PERDIO EL CODIGO PORQUE NO SALIO EL ENVIO")
+        assertEquals(0, p.rejects, "conto un rechazo que no existio")
+        assertEquals(PairingSession.State.AWAITING_CODE, p.state)
+
+        // Al reabrirse el canal se reenvia lo mismo, sin teclear nada.
+        val otra = p.proofForTypedCode(2_000L)
+        assertTrue(otra != null, "no reenvio el codigo al volver el canal")
+        assertContentEquals(primera.proof, otra.proof)
+    }
+
     // =========================================================
     //  7) Rechazo y correccion sobre el MISMO codigo del reloj
     // =========================================================

@@ -490,6 +490,60 @@ static void testCodeSurvivesChurn(){
   CHECK(flexPhoneLinkBonded(&L), "no marco el vinculo");
 }
 
+// #############################################################
+// ##  2 quater bis) EL CANAL NO SE QUEDA MUDO MIENTRAS SE EMPAREJA
+// ##  ---------------------------------------------------------
+// ##  El fallo: durante el emparejamiento nadie tenia nada que
+// ##  decir -- el reloj manda su sal y se calla, el telefono espera
+// ##  a que el usuario teclee --, asi que el canal quedaba en
+// ##  silencio absoluto. Al otro lado hay un plazo de inactividad
+// ##  de 40 s que cerraba el socket, y el usuario, que estaba
+// ##  leyendo seis digitos de una pantalla pequena, terminaba de
+// ##  teclear y leia "se corto la conexion al enviar el codigo" --
+// ##  con el codigo correcto y la ventana abierta en los dos lados.
+// ##
+// ##  Se fija que el reloj LATE mientras ensena un codigo. El
+// ##  telefono no tiene que adivinar si sigue ahi.
+// #############################################################
+static void testHeartbeatWhilePairing(){
+  std::printf("[link] el reloj late mientras ensena el codigo: el canal no se queda mudo\n");
+  uint32_t t = 46000;
+  bring();
+  flexPhoneLinkStart(&L);
+  pump(t, 3);
+  flexPhoneLinkBeginPairing(&L, testRand, t);
+  std::memcpy(gLoop.code, flexPhoneLinkCode(&L), sizeof(gLoop.code) - 1);
+  pump(t, 4);
+
+  // Nadie teclea nada. Pasa MAS del plazo de inactividad del
+  // telefono (40 s) sin que el usuario toque el reloj.
+  gLoop.sniffN = 0;
+  const uint32_t quietStart = t;
+  while(t - quietStart < 45000){
+    flexPhoneLinkTick(&L, &M, t);
+    phoneStep();
+    t += 500;
+  }
+
+  // Tiene que haber salido al menos un PING por el canal.
+  int pings = 0;
+  for(int k = 0; k < gLoop.sniffN; k++){
+    FlexLinkHeader h;
+    const uint8_t* p = nullptr; size_t pn = 0;
+    if(flexLinkReadFrame(gLoop.sniff[k], gLoop.sniffLen[k], &h, &p, &pn) != FLNK_OK) continue;
+    if(h.type == FLNK_T_PING) pings++;
+  }
+  CHECK(pings > 0, "EL CANAL SE QUEDO MUDO 45 s EMPAREJANDO: el telefono lo dara por muerto");
+  CHECK(flexPhoneLinkPairing(&L), "perdio la sesion mientras nadie tecleaba");
+  CHECK(L.rttMs != 0xFFFF, "no llego a medir la latencia con el latido del emparejamiento");
+
+  // Y el emparejamiento sigue funcionando despues de todo ese rato.
+  flexPhoneLinkConfirm(&L, t);
+  pump(t, 6);
+  CHECK(L.state == FLP_LS_READY, "no emparejo tras 45 s de espera (%s): %s",
+        flexPhoneLinkStateName(L.state), L.err);
+}
+
 // -------------------------------------------------------------
 //  2 quinquies) UN CODIGO QUE EMPIEZA POR CERO
 // -------------------------------------------------------------
@@ -1002,6 +1056,7 @@ int main(){
   testPairBeforeChannel();
   testChannelDropMidHandshake();
   testCodeSurvivesChurn();
+  testHeartbeatWhilePairing();
   testLeadingZeroCode();
   testWrongCodeKeepsSession();
   testExpiryIsHonest();

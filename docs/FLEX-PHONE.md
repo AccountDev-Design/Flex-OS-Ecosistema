@@ -369,12 +369,49 @@ plazos, y de dónde sale cada uno:
 
 | Espera | Plazo | Quién lo aplica | Qué pasa al vencer |
 |---|---|---|---|
-| conexión sin autenticar **y sin emparejar** | 15 s | teléfono | se cierra y se libera la sesión |
+| alguien abre el puerto y **no se presenta** | 15 s | teléfono | se cierra y se libera la sesión |
+| un Flex OS presentado que **aún no empareja** | 2 min | teléfono | se cierra y se libera la sesión |
 | conexión con emparejamiento en marcha | lo que le quede a la sesión (2 min) | teléfono | `PairingFailed` con `CODE_EXPIRED` |
-| código enviado sin confirmar | 12 s | teléfono | `PairingFailed` con `LINK` — **el socket NO se cierra**: se puede reintentar |
+| código enviado sin confirmar | 12 s | teléfono | `PairingFailed` con `LINK` — **el socket NO se cierra** y el código **se conserva** |
 | código en pantalla sin confirmar | 2 min desde `pair.startedMs` | reloj | cierra la sesión **y avisa** con `T_ERR`/`E_TIMEOUT` |
 | autenticación de sesión | `FLP_LINK_AUTH_TIMEOUT_MS` | reloj | vuelve a buscar |
-| sesión sin tráfico | 40 s | los dos | se corta y se reconecta |
+| sesión sin tráfico | 40 s | los dos | se corta y se reconecta — **no corre mientras se empareja** |
+
+### El latido también mientras se empareja
+
+Durante un emparejamiento el canal está **legítimamente mudo**: el reloj manda
+su sal una vez y se calla, y el teléfono no tiene nada que decir hasta que el
+usuario teclee seis dígitos. Eso son cuarenta, cincuenta o setenta segundos de
+silencio perfectamente normales.
+
+El plazo de inactividad de 40 s del teléfono daba ese socket por muerto y lo
+cerraba. El usuario terminaba de teclear, pulsaba *Emparejar* y leía **«se
+cortó la conexión al enviar el código»** — con el código correcto y la ventana
+todavía abierta en los dos lados. El emparejamiento **moría de silencio**.
+
+Ahora:
+
+- el reloj **late** (`FLNK_T_PING`) también en `FLP_LS_PAIRING` y `FLP_LS_AUTH`,
+  no solo en `READY`. `PING`/`PONG` entran en `typeAllowedWithoutSession()`
+  porque el latido hace falta justo cuando todavía no hay sesión; no llevan
+  carga, no abren sesión y no tocan el modelo (el teléfono ya los aceptaba sin
+  sesión por lo mismo);
+- el plazo de inactividad del teléfono **no corre** mientras hay una sesión de
+  emparejamiento viva — el cinturón además de los tirantes, y lo que cubre a un
+  reloj con firmware anterior;
+- al abrirse la sesión, el reloj de «enlace muerto» **arranca de cero**. Un
+  emparejamiento puede durar minutos, así que `lastRxMs` podía llegar a `READY`
+  más viejo que los 30 s del plazo: el enlace se declaraba muerto en el cuadro
+  siguiente a emparejar bien.
+
+### Un envío que no sale no es un rechazo
+
+Si la prueba no llegó a salir (socket caído, o Flex OS sin contestar), el
+código tecleado **se conserva**: `PairingSession.onSendFailed()` vuelve a
+`AWAITING_CODE` sin borrarlo ni contar un rechazo, y `proofForTypedCode()` lo
+reenvía solo en cuanto el reloj reabre el canal. Tratarlo como rechazo borraba
+el código y obligaba a teclear otra vez exactamente lo mismo, contra un reloj
+que seguía enseñando exactamente el mismo código.
 
 ### Una sola fuente de verdad: la sesión de emparejamiento
 

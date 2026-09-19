@@ -368,6 +368,18 @@ static bool typeAllowedWithoutSession(uint8_t type){
     case FLNK_T_AUTH_CHALLENGE:
     case FLNK_T_AUTH_RESPONSE:
     case FLNK_T_AUTH_OK:
+    // PING/PONG entran en la lista porque son EL LATIDO, y el latido
+    // hace falta justo cuando todavia no hay sesion: mientras se
+    // empareja, el canal no tiene nada que transportar durante el
+    // minuto largo que el usuario tarda en leer y teclear seis
+    // digitos. Sin latido el telefono da el socket por muerto a los
+    // 40 s y el emparejamiento se cae solo.
+    //
+    // No conceden nada: no llevan carga, no abren sesion y no tocan
+    // el modelo. El telefono ya los aceptaba sin sesion por el mismo
+    // motivo (ver HANDSHAKE_TYPES en WifiLinkServer.kt).
+    case FLNK_T_PING:
+    case FLNK_T_PONG:
       return true;
     default:
       return false;
@@ -618,6 +630,12 @@ static bool applyMessage(FlexPhoneLink* L, FlexPhoneModel* M,
         flexPhoneLinkSend(L, FLNK_T_AUTH_OK, mine, sizeof(mine), false);
         L->hostProven = true;
         L->lastTxMs = nowMs;
+        // EL RELOJ DE "ENLACE MUERTO" ARRANCA AQUI. Un emparejamiento
+        // puede durar minutos -- el usuario esta leyendo y tecleando
+        // --, asi que al abrir la sesion `lastRxMs` puede ser mucho
+        // mas viejo que los 30 s del plazo: sin esto, el enlace se
+        // declaraba muerto en el cuadro siguiente a emparejar bien.
+        L->lastRxMs = nowMs ? nowMs : 1;
         pairLog("PAIR COMPLETE: SESSION CREATED %u", (unsigned)L->session);
       } else {
         pairLog("CODE MATCH ok; falta confirmar en Flex OS");
@@ -908,6 +926,9 @@ void flexPhoneLinkConfirm(FlexPhoneLink* L, uint32_t nowMs){
     gotoState(L, FLP_LS_READY, nowMs);
     flexPhoneLinkSend(L, FLNK_T_AUTH_OK, mine, sizeof(mine), false);
     L->hostProven = true;
+    // Ver arriba: la sesion empieza con el reloj de inactividad a cero.
+    L->lastTxMs = nowMs ? nowMs : 1;
+    L->lastRxMs = nowMs ? nowMs : 1;
     pairLog("PAIR COMPLETE: SESSION CREATED %u", (unsigned)L->session);
   }
 }
@@ -1188,11 +1209,34 @@ void flexPhoneLinkTick(FlexPhoneLink* L, FlexPhoneModel* M, uint32_t nowMs){
     m->nextTryMs = nowMs + (d ? d : FLP_LINK_ACK_TIMEOUT_MS);
   }
 
-  // -----------------------------------------------------------
-  //  8) Latido. Mantiene viva la sesion Y mide la latencia real.
-  //     No es sondeo: solo sale si hace rato que no se habla.
-  // -----------------------------------------------------------
-  if(L->state == FLP_LS_READY && !L->pingSentMs && L->lastTxMs &&
+  // #############################################################
+  // ##  8) LATIDO. Mantiene vivo el canal Y mide la latencia.
+  // ##  ------------------------------------------------------
+  // ##  TAMBIEN MIENTRAS SE EMPAREJA, y no por simetria: por un
+  // ##  fallo concreto.
+  // ##
+  // ##  Durante el emparejamiento el canal se queda MUDO de
+  // ##  verdad: Flex OS manda su sal una vez y se calla, y el
+  // ##  telefono no tiene nada que decir hasta que el usuario
+  // ##  teclea seis digitos. Eso son cuarenta, cincuenta o setenta
+  // ##  segundos de silencio perfectamente normales -- y al otro
+  // ##  lado hay un plazo de inactividad de 40 s que da el socket
+  // ##  por muerto y lo cierra.
+  // ##
+  // ##  Resultado: el usuario terminaba de teclear, pulsaba
+  // ##  "Emparejar" y leia "se corto la conexion al enviar el
+  // ##  codigo" -- con el codigo correcto y la ventana todavia
+  // ##  abierta en los dos lados. El emparejamiento moria de
+  // ##  silencio.
+  // ##
+  // ##  El latido cuesta una trama de 18 bytes cada 8 s mientras
+  // ##  hay un codigo en pantalla. El canal deja de estar mudo y
+  // ##  el plazo de inactividad deja de dispararse.
+  // #############################################################
+  const bool beats = (L->state == FLP_LS_READY) ||
+                     (L->state == FLP_LS_PAIRING) ||
+                     (L->state == FLP_LS_AUTH);
+  if(beats && !L->pingSentMs && L->lastTxMs &&
      (uint32_t)(nowMs - L->lastTxMs) > FLP_LINK_IDLE_PING_MS && !txHasType(L, FLNK_T_PING)){
     if(flexPhoneLinkSend(L, FLNK_T_PING, NULL, 0, false)) L->pingSeq++;
   }
