@@ -379,6 +379,14 @@ static void wifiConnTask(void*){
   }
   if(WiFi.status() == WL_CONNECTED){
     gNetOnline = true;
+    // El ahorro de energia (modem-sleep) esta ENCENDIDO por defecto y
+    // se reenvia al C6 por esp-hosted igual que el resto de la API de
+    // WiFi: un socket TCP persistente (Flex Phone) puede ver al otro
+    // extremo tardar en responder mientras la radio esta en el ciclo
+    // de bajo consumo, lo que se ve como cortes periodicos con el
+    // enlace perfectamente vivo. Se apaga aqui, no antes de conectar:
+    // WiFi.setSleep() exige STA ya asociado.
+    WiFi.setSleep(false);
     IPAddress ip = WiFi.localIP();
     String ips = ip.toString();
     ips.toCharArray(wifiConnIP, sizeof(wifiConnIP));
@@ -418,6 +426,9 @@ static void wifiAutoConnTask(void*){
   }
   if(WiFi.status() == WL_CONNECTED){
     gNetOnline = true;
+    // Mismo motivo que en wifiConnTask: sin esto el modem-sleep del C6
+    // queda encendido tambien en la reconexion automatica.
+    WiFi.setSleep(false);
     IPAddress ip = WiFi.localIP();
     String ips = ip.toString();
     ips.toCharArray(wifiConnIP, sizeof(wifiConnIP));

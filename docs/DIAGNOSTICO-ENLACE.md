@@ -5,7 +5,88 @@ qué. Y el registro de lo que ya se ha descartado, para no volver a mirarlo.
 
 ---
 
-## Estado: el ciclo de 10–13 s
+## Estado: el ciclo de 5–7 s (posterior al fix de escritura)
+
+Con `fpwWriteAll()` y `cli.connect(host, port, FLPW_CONNECT_MS)` ya en el
+firmware flasheado (P4) y el APK actualizado instalado, el patrón **cambió**:
+ya no son 10–13 s, son ~5–7 s, con un repunte corto de ~1 s de "conectado"
+entre caídas. Que el patrón haya cambiado de forma en vez de repetirse
+idéntico es en sí mismo la prueba de que el binario nuevo SÍ está corriendo
+en el reloj — un binario viejo habría reproducido el mismo ciclo de 10–13 s.
+Confírmalo además mirando el registro serie: solo el código nuevo imprime
+`(s) CONEXION #n ABIERTA/CERRADA ... motivo=...`; si esas líneas aparecen,
+no hay duda posible.
+
+### Por qué NO puede ser el mismo mecanismo que el de 10–13 s
+
+El latido (`FLP_LINK_IDLE_PING_MS`) sale cada **8 s** de sesión inactiva. El
+`write()` que se arregló solo se ejecuta cuando hay algo que enviar — en la
+práctica, ese latido. Si el ciclo nuevo se repite cada 5–7 s, la caída está
+ocurriendo **antes de que exista una primera oportunidad de escribir el
+latido**: es una caída de apertura/autenticación, no de una escritura en
+sesión ya abierta. El mecanismo que se corrigió (una escritura corta dando
+un socket vivo por muerto) no puede ser, por aritmética, la causa de un
+ciclo más corto que su propio disparador.
+
+### Lado de LECTURA (`fpwPumpRead` / `cli.available()` + `cli.read()`) — revisado, sin el mismo defecto
+
+`fpwPumpRead()` solo llama a `cli.read()` cuando `cli.available() > 0` ya
+confirmó que hay bytes, y corta el bucle en el primer `read() <= 0`. No hay
+ningún bucle propio de reintento con plazo — al contrario que el `write()`
+de antes, aquí no existe una comparación que pueda confundir "ocupado" con
+"muerto". Se contrastó además contra el código real de
+`NetworkClient::read()`/`available()` de arduino-esp32 (rama `master`):
+`available()` usa `ioctl(FIONREAD)`, no bloqueante, y el relleno del buffer
+de lectura no repite el mismo bucle de `select()` de 10 intentos que tenía
+`write()`. Es decir: el hallazgo de la pista 2 (defecto simétrico en
+lectura) **no se confirma en el código que hay hoy en este repositorio**.
+Dicho esto, no se pudo verificar con la misma certeza absoluta que el
+defecto de escritura (ese se citó contra el fuente exacto del core con los
+nombres de las constantes; aquí la verificación fue contra el código de
+`master`, no necesariamente la versión exacta que compilas). Si el log
+muestra un cierre con motivo `"flujo ilegible"` (el único que señala este
+camino), vuelve aquí.
+
+### Transporte P4↔C6 (pista 1) — no descartable sin el log, no tocado
+
+El Wi-Fi del P4 va por `esp_wifi_remote`/SDIO hacia el C6 (esp-hosted),
+integrado de forma nativa en arduino-esp32 3.2.1 vía `WiFi.setPins()` — no
+es un mecanismo casero de este repositorio. No hay forma de descartar o
+confirmar un ciclo propio de ese transporte (reset, resincronización) sin
+mirar el log: si el reloj imprime `motivo=el telefono cerro el socket` pero
+el teléfono **no** tiene un `CLOSE_REQUEST` a esa misma hora, la caída viene
+de más abajo que los dos extremos de la aplicación — de la radio o del
+transporte hosted, no de este código. No se ha tocado nada de esa capa.
+
+### Modem-sleep (pista 3) — hueco confirmado en el código, cambio aplicado
+
+No había ninguna llamada a `WiFi.setSleep(false)` (ni a `esp_wifi_set_ps`)
+en ningún camino real de conexión — solo el stub de pruebas la declaraba
+como no-op. El ahorro de energía de Wi-Fi está encendido por defecto en
+arduino-esp32, se reenvía al C6 por `esp_wifi_remote` igual que el resto de
+la API, y es la causa clásica de "se ve conectado pero deja de responder"
+en sockets TCP persistentes sobre ESP32. Es una sospecha razonable con
+evidencia (la ausencia está confirmada en el código; el efecto sobre ESTE
+síntoma concreto no), así que se aplicó — no es tocar ningún plazo del
+enlace, es una sola llamada tras confirmar la asociación STA, en los dos
+sitios donde `gNetOnline` pasa a `true` (`wifiConnTask` y
+`wifiAutoConnTask`, en `FlexOS_Ultra_Network.h`). Queda pendiente de
+confirmar con el log: si el ciclo de 5–7 s desaparece o cambia de forma
+tras esto, era esto. Ten en cuenta el coste: es un reloj de batería, y
+`setSleep(false)` sube el consumo de la radio mientras el enlace esté
+encendido.
+
+### Build de dos firmwares (pista 4) — no aplica a este fix
+
+Este cambio (y el de `fpwWriteAll`) vive entero en el sketch del P4
+(`FlexOS_Ultra.ino` y sus módulos). El C6 corre el firmware "slave" de
+esp-hosted, un binario aparte que no se toca para nada de esto: no hay dos
+firmwares que sincronizar para ESTE fix en concreto, solo el del P4 (más el
+APK de Android, que sí cambió en el mismo commit).
+
+---
+
+## Estado: el ciclo de 10–13 s (RESUELTO)
 
 ### CAUSA (candidata, con el mecanismo probado)
 
