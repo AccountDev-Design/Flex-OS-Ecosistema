@@ -312,6 +312,51 @@ private fun testCadaverNoBloqueaElHueco(h: Harness) {
 }
 
 // =============================================================
+//  3 ter) SESION EN REPOSO: 75 SEGUNDOS SIN TOCAR NADA
+// =============================================================
+// Emparejado y conectado, nadie toca el reloj ni el telefono. El
+// unico trafico es el LATIDO, y el reloj late cada 8 s (no cada
+// segundo, como hacia el resto de esta bateria).
+//
+// Esa diferencia importa: con un latido por segundo, cualquier plazo
+// de entre 5 y 40 s queda tapado. Aqui se reproduce el ritmo REAL.
+//
+// Se anota EN QUE SEGUNDO se cae, si se cae.
+private fun testSesionEnReposo(h: Harness) {
+    println("[enlace] la sesion en reposo aguanta 75 s con el latido real (8 s)")
+    val w = h.watch()
+    check(w.handshake(), "el apreton de manos no se completo")
+    check(waitUntil(2_000) { h.server.hasSession() }, "no quedo sesion")
+
+    val t0 = System.currentTimeMillis()
+    val cerradasAntes = h.closed.get()
+    var cayoEn = -1L
+    var pongs = 0
+
+    // El reloj late cada 8 s. Entre latido y latido no dice nada,
+    // igual que el de verdad.
+    var siguienteLatido = t0 + 8_000
+    while (System.currentTimeMillis() - t0 < 75_000) {
+        if (System.currentTimeMillis() >= siguienteLatido) {
+            if (!w.ping()) { if (cayoEn < 0) cayoEn = System.currentTimeMillis() - t0 }
+            val r = w.recv()
+            if (r != null && r.first.type == FlexLink.T_PONG) pongs++
+            siguienteLatido += 8_000
+        }
+        if (!h.server.hasSession() && cayoEn < 0) cayoEn = System.currentTimeMillis() - t0
+        Thread.sleep(100)
+    }
+
+    check(cayoEn < 0, "LA SESION SE CAYO a los $cayoEn ms; motivo: ${h.lastError}")
+    check(h.server.hasSession(), "no quedo sesion tras 75 s en reposo")
+    check(h.closed.get() == cerradasAntes,
+        "se cerro ${h.closed.get() - cerradasAntes} vez/veces sin que nadie tocara nada")
+    check(pongs >= 8, "solo volvieron $pongs latidos en 75 s (se esperaban ~9)")
+    w.close()
+    Thread.sleep(2_500)
+}
+
+// =============================================================
 //  4) Una segunda conexion NO desaloja a la que ya esta
 // =============================================================
 private fun testUnaSolaSesion(h: Harness) {
@@ -349,6 +394,7 @@ fun main() {
         testReconexionInmediata(h)
         testCicloDeUnSegundo(h)
         testCadaverNoBloqueaElHueco(h)
+        testSesionEnReposo(h)
         testUnaSolaSesion(h)
     } finally {
         h.stop()

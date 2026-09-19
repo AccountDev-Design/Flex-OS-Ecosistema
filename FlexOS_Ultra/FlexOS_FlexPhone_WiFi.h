@@ -72,7 +72,18 @@
 // ##  red no deja pasar la difusion (aislamiento de clientes). El
 // ##  logcat del telefono distingue las dos cosas.
 // #############################################################
-#define FLEXOS_DIAG_FLEXPHONE 0
+// #############################################################
+// ##  A 1 MIENTRAS SE PERSIGUE EL PROBLEMA DE ESTABILIDAD
+// ##  ------------------------------------------------------
+// ##  Con esto encendido, el puerto serie recibe la secuencia
+// ##  entera del enlace: cada conexion con su numero, cada cierre
+// ##  con su MOTIVO y cuanto duro. Es lo que hace falta para
+// ##  saber quien cuelga primero.
+// ##
+// ##  VUELVE A 0 antes de publicar: en produccion no se dejan
+// ##  lineas de enlace en el registro.
+// #############################################################
+#define FLEXOS_DIAG_FLEXPHONE 1
 
 #if FLEXOS_DIAG_FLEXPHONE
   #define FPW_DIAG(...) do { Serial.printf("[FLEXPHONE %8lu] ", (unsigned long)millis()); \
@@ -110,12 +121,44 @@ typedef struct {
   uint32_t          nConnects, nDrops, nDesync;
 } FlexPhoneWifiCtx;
 
+// #############################################################
+// ##  DIAGNOSTICO: NO RECONECTAR
+// ##  ------------------------------------------------------
+// ##  Con esto a 1, el reloj NO vuelve a conectar despues de la
+// ##  primera caida. Sirve para aislar el PRIMER cierre: mientras
+// ##  se reconecta sin parar, cada ciclo tapa al anterior y es
+// ##  imposible saber cual fue el de verdad.
+// ##
+// ##  Se enciende A MANO, para una prueba, y se vuelve a 0. En
+// ##  produccion va a 0 y el enlace se recupera solo.
+// #############################################################
+#ifndef FLEXOS_FLEXPHONE_NO_RECONNECT
+  #define FLEXOS_FLEXPHONE_NO_RECONNECT 0
+#endif
+
 // Espera maxima entre reintentos de conexion, y cuanto tiene que
 // aguantar un socket abierto para que esa espera vuelva a cero.
 #define FLPW_RECONNECT_MAX_MS  15000
 #define FLPW_RECONNECT_OK_MS   10000
+// Cuanto se insiste con una trama que no avanza ni un byte antes de
+// dar el socket por caido. Es un plazo PROPIO y explicito: no se
+// hereda del que traiga por dentro la pila de red.
+#define FLPW_WRITE_DEADLINE_MS 8000
 
 static FlexPhoneWifiCtx fpwCtx;
+// #############################################################
+// ##  DIAGNOSTICO DE CIERRES
+// ##  ------------------------------------------------------
+// ##  Cada socket lleva un numero, y CADA cierre dice por que.
+// ##  Sin esto, "se desconecta" es todo lo que se sabe; con
+// ##  esto se puede reconstruir la secuencia entera y ver quien
+// ##  cuelga primero.
+// ##
+// ##  Con FLEXOS_DIAG_FLEXPHONE a 0 (produccion) no se imprime
+// ##  nada: son dos variables y una comparacion.
+// #############################################################
+static uint32_t    fpwConnId     = 0;      // numero del socket actual
+static const char* fpwCloseReason = "";    // por que se cerro el ultimo
 // Cuantas veces seguidas fallo la conexion. Solo lo toca la tarea de
 // red, asi que no necesita el mutex.
 static uint8_t fpwBackoff = 0;
@@ -322,6 +365,58 @@ static bool fpwSendProbe(WiFiUDP& udp){
   return sent;
 }
 
+// #############################################################
+// ##  ESCRIBIR UNA TRAMA ENTERA
+// ##  ------------------------------------------------------
+// ##  AQUI ESTABA EL CICLO DE 10-13 SEGUNDOS.
+// ##
+// ##  Antes esto era una linea:
+// ##
+// ##      if(cli.write(frame, n) != n) goto closed;
+// ##
+// ##  y esa comparacion da por MUERTO un socket que solo estaba
+// ##  ocupado. NetworkClient::write() del core 3.x no promete
+// ##  escribirlo todo: su bucle interno hace select() con un
+// ##  plazo de 1 s y se rinde tras 10 intentos
+// ##  (WIFI_CLIENT_MAX_WRITE_RETRY x WIFI_CLIENT_SELECT_TIMEOUT_US),
+// ##  o sea que puede tenerse la tarea de red DIEZ SEGUNDOS
+// ##  dentro y devolver despues una escritura corta -- con la
+// ##  conexion perfectamente viva.
+// ##
+// ##  Diez segundos dentro de write(), mas el apreton de manos y
+// ##  el grano del tick, es justo la ventana de 10-13 s que se
+// ##  observaba: el enlace se veia CONECTADO todo ese rato porque
+// ##  el estado del transporte seguia en OPEN, y al volver de
+// ##  write() se cerraba y se reconectaba un segundo despues.
+// ##
+// ##  Dos cosas, y las dos importan:
+// ##
+// ##    · una escritura corta se TERMINA, no se abandona. Dejar
+// ##      media trama en el flujo descoloca al otro extremo, que
+// ##      es un fallo peor y mas dificil de leer;
+// ##    · solo se da por muerto el socket cuando de verdad lo
+// ##      esta (connected() == false) o cuando se agota un plazo
+// ##      PROPIO y explicito.
+// #############################################################
+static bool fpwWriteAll(WiFiClient& cli, const uint8_t* p, size_t n){
+  size_t at = 0;
+  const uint32_t t0 = millis();
+  while(at < n){
+    if(!cli.connected()) return false;          // muerto de verdad
+    const size_t w = cli.write(p + at, n - at);
+    if(w > 0){ at += w; continue; }
+    // Ni un byte: el socket esta ocupado, no muerto. Se cede la CPU y
+    // se reintenta hasta el plazo propio.
+    if((uint32_t)(millis() - t0) > FLPW_WRITE_DEADLINE_MS){
+      FPW_DIAG("(w) escritura sin avanzar en %u ms: se da por caida",
+               (unsigned)FLPW_WRITE_DEADLINE_MS);
+      return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+  return true;
+}
+
 // -------------------------------------------------------------
 //  Lectura de tramas del flujo TCP
 // -------------------------------------------------------------
@@ -426,12 +521,16 @@ static void fpwTask(void*){
     fpwUnlock();
 
     WiFiClient cli;
-    cli.setTimeout(FLPW_CONNECT_MS / 1000 ? FLPW_CONNECT_MS / 1000 : 1);
+    // NO se usa setTimeout(): en arduino-esp32 ese es el plazo de
+    // Stream (para readBytes y compania) y NO toca el del socket, asi
+    // que el plazo de conexion que se creia puesto aqui no se aplicaba
+    // nunca. El que si vale es el tercer argumento de connect(), que
+    // la API declara en MILISEGUNDOS.
     fpwCtx.state = FLP_TC_OPENING;
     fpwSetStatus("abriendo el enlace con el telefono");
     char host[16];
     snprintf(host, sizeof(host), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
-    if(!cli.connect(host, port)){
+    if(!cli.connect(host, port, FLPW_CONNECT_MS)){
       fpwCtx.nDrops++;
       fpwCtx.state = FLP_TC_FAILED;
       fpwSetStatus("el telefono no acepto la conexion");
@@ -458,7 +557,11 @@ static void fpwTask(void*){
     snprintf(fpwCtx.peer, sizeof(fpwCtx.peer), "%s:%u", host, (unsigned)port);
     fpwUnlock();
     fpwCtx.state = FLP_TC_OPEN;
+    fpwConnId++;
+    fpwCloseReason = "";      // lo rellena quien cierre; ver mas abajo
     fpwSetStatus("enlace abierto");
+    FPW_DIAG("(s) CONEXION #%u ABIERTA con %s:%u",
+             (unsigned)fpwConnId, host, (unsigned)port);
 
     // ---- 5) Bombeo mientras el socket viva ----
     while(!fpwCtx.stop && cli.connected() && WiFi.status() == WL_CONNECTED){
@@ -476,10 +579,11 @@ static void fpwTask(void*){
         const size_t n = flexRingPop(&fpwCtx.tx, frame, sizeof(frame));
         fpwUnlock();
         if(!n) break;
-        // Una escritura corta deja la trama a medias en el flujo, y
-        // el otro extremo ya no puede reensamblar nada: se corta.
-        if(cli.write(frame, n) != n){
+        // Se escribe la trama ENTERA. Una escritura corta es el socket
+        // ocupado, no el enlace muerto: ver fpwWriteAll.
+        if(!fpwWriteAll(cli, frame, n)){
           fpwSetStatus("se corto al enviar");
+          fpwCloseReason = "escritura fallida";
           goto closed;
         }
         worked = true;
@@ -487,7 +591,10 @@ static void fpwTask(void*){
 
       // Entrada.
       if(cli.available() > 0){
-        if(!fpwPumpRead(cli, acc, accN)) goto closed;
+        if(!fpwPumpRead(cli, acc, accN)){
+          fpwCloseReason = "flujo ilegible";
+          goto closed;
+        }
         worked = true;
       }
 
@@ -501,6 +608,21 @@ static void fpwTask(void*){
     if(millis() - openedAtMs >= FLPW_RECONNECT_OK_MS) fpwBackoff = 0;
 
 closed:
+    // Por que salio del bucle, de verdad.
+    //
+    // SOLO si nadie lo dijo ya: un `goto` desde dentro del bucle trae
+    // el motivo PRECISO (una escritura que no avanza, un flujo
+    // ilegible), y rellenarlo aqui encima lo borraria -- tras una
+    // escritura fallida el socket suele estar ya cerrado, asi que se
+    // leeria "el telefono cerro" cuando no fue eso.
+    if(!fpwCloseReason[0]){
+      if(!cli.connected())                   fpwCloseReason = "el telefono cerro el socket";
+      else if(WiFi.status() != WL_CONNECTED) fpwCloseReason = "se perdio el Wi-Fi";
+      else if(fpwCtx.stop)                   fpwCloseReason = "enlace apagado";
+      else                                   fpwCloseReason = "el bucle termino sin motivo";
+    }
+    FPW_DIAG("(s) CONEXION #%u CERRADA tras %u ms  motivo=%s",
+             (unsigned)fpwConnId, (unsigned)(millis() - openedAtMs), fpwCloseReason);
     cli.stop();
     fpwCtx.nDrops++;
     if(!fpwCtx.stop){
@@ -527,6 +649,16 @@ closed:
       // ##  Una conexion que AGUANTA reinicia la cuenta, asi que
       // ##  un corte suelto se sigue recuperando en un segundo.
       // #########################################################
+#if FLEXOS_FLEXPHONE_NO_RECONNECT
+      // Prueba de diagnostico: se para aqui, con el motivo ya impreso.
+      // La tarea SIGUE VIVA (solo duerme): matarla dejaria el estado
+      // del transporte en DOWN y se perderia lo que se queria mirar.
+      FPW_DIAG("(s) NO_RECONNECT activo: el enlace se queda parado");
+      fpwSetStatus("diagnostico: sin reconexion automatica");
+      fpwCtx.state = FLP_TC_FAILED;
+      while(!fpwCtx.stop) vTaskDelay(pdMS_TO_TICKS(1000));
+      continue;
+#endif
       uint32_t wait = flexLinkRetryDelayMs(fpwBackoff);
       if(wait == 0) wait = FLPW_RECONNECT_MAX_MS;   // ya se agoto: se reintenta despacio
       if(wait > FLPW_RECONNECT_MAX_MS) wait = FLPW_RECONNECT_MAX_MS;

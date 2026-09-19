@@ -283,6 +283,8 @@ class WifiLinkServer(
     // #############################################################
     private class Conn(val id: Long, val socket: Socket) {
         val out: OutputStream = socket.getOutputStream()
+        /** Cuando se acepto. Sirve para decir cuanto duro al cerrarse. */
+        val openedAt: Long = System.currentTimeMillis()
         @Volatile var authed = false
         @Volatile var session = 0
         @Volatile var sessionKey: ByteArray? = null
@@ -767,6 +769,7 @@ class WifiLinkServer(
             if (r is FlexLink.ReadResult.BadVersion) {
                 sendRaw(c, FlexLink.T_ERR, byteArrayOf(FlexLink.E_VERSION.toByte()), 0)
                 onEvent(Event.Error("Flex OS habla otra version del protocolo"))
+                Log.d(TAG, "CLOSE_REQUEST conn=#${c.id} reason=version incompatible")
                 runCatching { c.socket.close() }
             }
             return
@@ -793,7 +796,10 @@ class WifiLinkServer(
             }
             FlexLink.T_PONG -> { /* latido: nada que hacer */ }
             FlexLink.T_ERR -> onPeerError(c, body)
-            FlexLink.T_BYE -> { runCatching { c.socket.close() } }
+            FlexLink.T_BYE -> {
+                Log.d(TAG, "CLOSE_REQUEST conn=#${c.id} reason=BYE de Flex OS")
+                runCatching { c.socket.close() }
+            }
             else -> if (c.authed) onMessage(h.type, body)
         }
     }
@@ -1037,6 +1043,7 @@ class WifiLinkServer(
         if (!FlexAuth.verify(key, FlexAuth.ROLE_HOST, n, sess, got)) {
             onEvent(Event.PairingFailed(
                 "quien contesta no es el Flex OS emparejado", PairFailure.LINK))
+            Log.d(TAG, "CLOSE_REQUEST conn=#${c.id} reason=la prueba de Flex OS no cuadra")
             runCatching { c.socket.close() }
             return
         }
@@ -1067,7 +1074,21 @@ class WifiLinkServer(
      * cerraba "la sesion activa" fuera cual fuera, asi que el socket
      * recien aceptado moria a manos del anterior, una y otra vez.
      */
+    /**
+     * TODO cierre pasa por aqui, y TODO cierre deja constancia.
+     *
+     * Con `DEBUG_LINK` encendido se imprime, por cada cierre, quien lo
+     * pidio y en que estado estaba: sin eso, "se desconecta" es todo
+     * lo que se sabe, y no se puede distinguir un socket que murio de
+     * una limpieza que cerro lo que no era suyo.
+     */
     private fun closeSession(c: Conn, why: String?) {
+        if (DEBUG_LINK) {
+            Log.d(TAG, "CLOSE_REQUEST conn=#${c.id} reason=$why " +
+                "thread=${Thread.currentThread().name} " +
+                "authenticated=${c.authed} owner=${conn.get() === c} " +
+                "aliveConns=${liveConns.get()} upMs=${System.currentTimeMillis() - c.openedAt}")
+        }
         val owner = conn.compareAndSet(c, null)
         if (pairConn === c) pairConn = null
         runCatching { c.socket.close() }
@@ -1075,7 +1096,7 @@ class WifiLinkServer(
             // Esta conexion ya habia sido relevada -- o nunca llego a
             // tener la sesion. Se cierra su propio socket y se sale sin
             // avisar a nadie: la sesion buena es de otro y sigue viva.
-            Log.d(TAG, "SOCKET_CLOSED #${c.id} (sin sesion) reason=$why")
+            Log.d(TAG, "SOCKET_CLOSED conn=#${c.id} (sin sesion) reason=$why")
             return
         }
         pairSentAt = 0L
@@ -1087,7 +1108,8 @@ class WifiLinkServer(
         // un emparejamiento completado, o `stop()`.
         // Sin sesion vuelve a hacer falta oir las sondas del reloj.
         if (running.get()) acquireMulticast()
-        Log.d(TAG, "CLIENT_DISCONNECTED #${c.id} reason=$why")
+        Log.d(TAG, "CLIENT_DISCONNECTED conn=#${c.id} reason=$why " +
+            "upMs=${System.currentTimeMillis() - c.openedAt}")
         onEvent(Event.SessionClosed)
     }
 
@@ -1112,7 +1134,8 @@ class WifiLinkServer(
     private fun claimSession(c: Conn) {
         val old = conn.getAndSet(c)
         if (old != null && old !== c) {
-            Log.d(TAG, "SESSION_HANDOVER #${old.id} -> #${c.id}")
+            Log.d(TAG, "SESSION_HANDOVER conn=#${old.id} -> conn=#${c.id} " +
+                "(la vieja llevaba ${System.currentTimeMillis() - old.openedAt} ms)")
             runCatching { old.socket.close() }   // su hilo lo vera y se ira
         }
     }

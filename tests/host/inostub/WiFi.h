@@ -9,10 +9,20 @@ class WiFiClient {
 public:
   virtual ~WiFiClient(){}
   virtual int connect(const char*, uint16_t){ return 0; }
+  // La sobrecarga con plazo EN MILISEGUNDOS, tal como la declara
+  // NetworkClient en arduino-esp32 3.x. Es la que hay que usar: el
+  // setTimeout() de Stream no toca el plazo del socket.
+  virtual int connect(const char*, uint16_t, int32_t){ return 0; }
+  // El plazo del socket de verdad, en milisegundos.
+  void setConnectionTimeout(uint32_t){}
   virtual void stop(){}
   virtual uint8_t connected(){ return 0; }
   virtual int available(){ return 0; }
   virtual int read(uint8_t*, size_t){ return 0; }
+  // OJO: el write REAL puede devolver MENOS de lo pedido con el socket
+  // vivo (su bucle interno se rinde tras 10 select() de 1 s). El doble
+  // devuelve n porque aqui no hay socket, pero el codigo que lo usa no
+  // puede dar por muerta una escritura corta: ver fpwWriteAll.
   virtual size_t write(const uint8_t*, size_t n){ return n; }
   void setTimeout(uint32_t){}
   // Parte de la superficie real de Client en arduino-esp32 ("if(!cli)").

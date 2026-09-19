@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.flexos.flexphone.MainActivity
 import com.flexos.flexphone.R
@@ -50,6 +51,7 @@ import kotlinx.coroutines.*
 class FlexLinkService : Service() {
 
     companion object {
+        private const val TAG = "FlexPhone/LinkSvc"
         private const val CHANNEL = "flexlink"
         private const val NOTIF_ID = 1001
         const val ACTION_START = "com.flexos.flexphone.START_LINK"
@@ -94,6 +96,10 @@ class FlexLinkService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        // CICLO DE VIDA DEL SERVICIO. Si estas lineas salen justo antes
+        // de cada desconexion, el problema no esta en el socket sino en
+        // que Android esta recreando el servicio.
+        Log.i(TAG, "SERVICE_CREATED")
         state = FlexPhoneState.instance ?: FlexPhoneState().also { FlexPhoneState.instance = it }
         bonds = BondStore(this)
         device = DeviceAdapter(this)
@@ -102,6 +108,7 @@ class FlexLinkService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.i(TAG, "SERVICE_STARTED action=${intent?.action} server=${if (server == null) "nuevo" else "ya existia"}")
         when (intent?.action) {
             ACTION_STOP -> { shutdown(); return START_NOT_STICKY }
         }
@@ -426,6 +433,7 @@ class FlexLinkService : Service() {
     }
 
     private fun shutdown() {
+        Log.i(TAG, "SERVICE_STOPPED (shutdown pedido)")
         // Se libera TODO: sin sockets abiertos, sin hilos vivos y sin
         // callbacks colgando.
         scope.coroutineContext.cancelChildren()
@@ -441,6 +449,7 @@ class FlexLinkService : Service() {
     }
 
     override fun onDestroy() {
+        Log.i(TAG, "SERVICE_DESTROYED")
         scope.cancel()
         state.sender = null
         media?.stop()

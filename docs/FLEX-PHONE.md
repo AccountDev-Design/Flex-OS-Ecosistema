@@ -1,5 +1,9 @@
 # Flex Phone
 
+> ¿El enlace **se cae y vuelve** solo? El procedimiento para capturar quién
+> cuelga primero, y lo que ya está descartado, está en
+> [`docs/DIAGNOSTICO-ENLACE.md`](DIAGNOSTICO-ENLACE.md).
+
 > ¿Solo quieres **navegar usando el móvil como servidor**? Esa guía, paso a
 > paso y sin tecnicismos, está en
 > [`docs/NAVEGADOR-CON-EL-MOVIL.md`](NAVEGADOR-CON-EL-MOVIL.md).

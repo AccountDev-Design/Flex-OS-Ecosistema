@@ -822,6 +822,65 @@ static void testSessionNonceVaries(){
 // -------------------------------------------------------------
 //  3) Reconexion con vinculo guardado: NO se vuelve a emparejar
 // -------------------------------------------------------------
+// #############################################################
+// ##  SESION EN REPOSO: 90 SEGUNDOS SIN QUE NADIE TOQUE NADA
+// ##  ---------------------------------------------------------
+// ##  Emparejado y conectado, el usuario no toca el reloj ni el
+// ##  telefono. No hay notificaciones, ni media, ni navegador: el
+// ##  unico trafico es el LATIDO.
+// ##
+// ##  Eso es lo que tiene que aguantar indefinidamente, y es
+// ##  justo donde se veia caer la sesion cada 10-13 s. Aqui el
+// ##  tiempo es simulado, asi que noventa segundos se recorren en
+// ##  un instante y el resultado es exacto: si el enlace se sale
+// ##  de READY, la prueba dice EN QUE SEGUNDO y por que.
+// #############################################################
+static void testIdleSessionHolds(){
+  std::printf("[link] la sesion en reposo aguanta 90 s con solo el latido\n");
+  uint32_t t = 200000;
+  pairUp(t);
+  CHECK(L.state == FLP_LS_READY, "no llego a READY (%s)", flexPhoneLinkStateName(L.state));
+
+  const uint32_t t0 = t;
+  const uint32_t reconnects0 = L.nReconnects;
+  uint32_t leftAt = 0;
+  char leftErr[FLP_LINK_ERR_MAX] = {0};
+  uint8_t leftState = FLP_LS_READY;
+  int pings = 0, pongs = 0;
+
+  // 90 s de reloj simulado, en pasos de 100 ms.
+  while(t - t0 < 90000){
+    gLoop.sniffN = 0;
+    flexPhoneLinkTick(&L, &M, t);
+    // Cuenta los latidos que SALEN de verdad al canal.
+    for(int k = 0; k < gLoop.sniffN; k++){
+      FlexLinkHeader h; const uint8_t* p = nullptr; size_t pn = 0;
+      if(flexLinkReadFrame(gLoop.sniff[k], gLoop.sniffLen[k], &h, &p, &pn) != FLNK_OK) continue;
+      if(h.type == FLNK_T_PING) pings++;
+    }
+    phoneStep();
+    if(L.state != FLP_LS_READY && !leftAt){
+      leftAt = t - t0;
+      leftState = L.state;
+      std::memcpy(leftErr, L.err, sizeof(leftErr));
+    }
+    t += 100;
+  }
+  pongs = (L.rttMs != 0xFFFF) ? 1 : 0;   // al menos una medida completa
+
+  CHECK(leftAt == 0,
+        "LA SESION SE CAYO a los %u ms (estado %s): \"%s\"",
+        (unsigned)leftAt, flexPhoneLinkStateName(leftState), leftErr);
+  CHECK(L.state == FLP_LS_READY, "no termino en READY (%s): %s",
+        flexPhoneLinkStateName(L.state), L.err);
+  CHECK(L.nReconnects == reconnects0,
+        "conto %u reconexiones en una sesion que nadie toco",
+        (unsigned)(L.nReconnects - reconnects0));
+  // Con 90 s y un latido cada 8 s tienen que haber salido ~11.
+  CHECK(pings >= 8, "solo salieron %d latidos en 90 s: el canal se queda mudo", pings);
+  CHECK(pongs == 1, "nunca se completo una medida de latencia: no vuelven los PONG");
+}
+
 static void testResume(){
   std::printf("[link] con vinculo guardado se reconecta sin volver a emparejar\n");
   uint32_t t = 5000;
@@ -1112,6 +1171,7 @@ int main(){
   testCancelPairing();
   testNoFakePairing();
   testSessionNonceVaries();
+  testIdleSessionHolds();
   testResume();
   testAccessControl();
   testHostileFrames();
