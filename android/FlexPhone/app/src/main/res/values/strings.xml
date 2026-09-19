@@ -18,6 +18,11 @@
          motivo desde que el transporte es Wi-Fi. -->
     <string name="link_unavailable">Enlace no disponible</string>
     <string name="link_needs_wifi">Este telefono no esta en una red Wi-Fi</string>
+    <!-- Android puede parar el servicio por bateria, memoria o politica del
+         fabricante. Cuando pasa, se dice: un estado que sigue poniendo
+         "escuchando" con el socket cerrado hace imposible entender por que
+         el reloj no encuentra nada. -->
+    <string name="link_stopped_by_system">Android detuvo el enlace. Vuelve a activarlo.</string>
     <string name="link_error">Error de enlace</string>
     <string name="link_off">Enlace desactivado</string>
 

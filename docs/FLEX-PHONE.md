@@ -69,13 +69,38 @@ Dos sockets, con los **mismos números en los dos lados**
 | TCP **47820** | el enlace: tramas de Flex Link, una detrás de otra |
 | UDP **47821** | descubrimiento |
 
-**Descubrimiento.** Flex OS manda `FLEXPHONE?` + versión a la difusión de su
-subred; el teléfono contesta `FLEXPHONE!` + versión + puerto + nombre. Se usa
-la difusión **dirigida de la subred**, no `255.255.255.255`.
+**Descubrimiento.** Flex OS manda `FLEXPHONE?` + versión; el teléfono contesta
+`FLEXPHONE!` + versión + puerto + nombre. La sonda sale a **dos** destinos: la
+difusión dirigida de la subred (la correcta, y la que menos molesta) y la
+limitada `255.255.255.255`, porque hay pilas y puntos de acceso que filtran una
+y dejan pasar la otra. Son 34 bytes cada dos segundos y solo mientras no hay
+teléfono.
 
-Si el router aísla a los clientes entre sí, la difusión no llega. Entonces la
-dirección se fija a mano (`flexPhoneWifiSetHost`) y la interfaz lo ofrece, en
-vez de quedarse «buscando» para siempre sin decir por qué.
+> **El cerrojo de multidifusión no es opcional.** El controlador Wi-Fi de
+> Android descarta las tramas de difusión que no van dirigidas a la MAC del
+> teléfono **antes** de que lleguen a ningún socket, para ahorrar batería. Sin
+> un `MulticastLock` (permiso `CHANGE_WIFI_MULTICAST_STATE`), el ESP32 emite la
+> sonda perfectamente, el teléfono está escuchando en el puerto correcto y
+> `receive()` no despierta nunca — sin ningún error que lo explique.
+> `WifiLinkServer` lo toma mientras no hay sesión y lo suelta cuando la hay,
+> que es cuando el filtro del controlador sí ahorra batería.
+
+Si el router aísla a los clientes entre sí, la difusión no llega ni con el
+cerrojo. Entonces la dirección se fija a mano (`flexPhoneWifiSetHost`) y la
+interfaz lo ofrece, en vez de quedarse «buscando» para siempre sin decir por
+qué.
+
+**Para depurarlo.** El descubrimiento son cuatro pasos, y hay un registro para
+cada lado: pon `FLEXOS_DIAG_FLEXPHONE` a 1 en `FlexOS_FlexPhone_WiFi.h` para ver
+(a) y (d) por el puerto serie, y mira el logcat con la etiqueta
+`FlexPhone/WifiLink` para (b) y (c).
+
+| Se ve | No se ve | Dónde está el problema |
+|---|---|---|
+| (a) | (b) | el cerrojo de multidifusión, o aislamiento de clientes en el router |
+| (a) (b) | (c) | el teléfono descarta la sonda: mira la versión de protocolo |
+| (a) (b) (c) | (d) | la respuesta se pierde de vuelta: es la red, no el código |
+| nada | (a) | el enlace no está arrancado en el reloj |
 
 **Enmarcado.** TCP es un flujo y no respeta los límites de las tramas. Se
 reconstruyen con la propia cabecera de Flex Link, que ya lleva su longitud: no
@@ -585,6 +610,7 @@ Después, elige en *Notificaciones* qué apps pueden enviar las suyas.
 | «El código tecleado no coincide» | código mal, o caducado (2 min) | vuelve a emparejar |
 | «Responder» no aparece | esa notificación no trae `RemoteInput` | no es un fallo: esa app no lo permite |
 | El enlace se cae al apagar la pantalla | ahorro de batería o política del fabricante | *Estado del dispositivo → Segundo plano* |
+| «Android detuvo el enlace» | el sistema mató el servicio | vuelve a activarlo; si se repite, excluye la app del ahorro de batería |
 | «La app del teléfono es de una versión anterior» | app v1 contra firmware v2 | actualiza la app |
 | El puerto 47820 ya está en uso | otra app lo tiene | ciérrala o reinicia el teléfono |
 
@@ -603,7 +629,8 @@ Se distingue con cuidado entre las tres cosas.
 | Protocolo Flex Link (C++) | 85 comprobaciones, ASan + UBSan |
 | **Emparejamiento y sesión (C++)** | **26 comprobaciones**, contra FIPS 180‑4 y RFC 4231 |
 | Modelo Flex Phone (C++) | 111 comprobaciones |
-| **Máquina del enlace (C++)** | **114 comprobaciones**, con un teléfono simulado que habla el protocolo de verdad |
+| **Máquina del enlace (C++)** | **125 comprobaciones**, con un teléfono simulado que habla el protocolo de verdad |
+| **Desplazamiento de las listas (C++)** | **24 comprobaciones**, con una secuencia de cuadros como la del táctil real |
 | Vectores dorados (C++) | 10 vectores |
 | Núcleo del navegador (C++) | 406 comprobaciones |
 | Protocolo Android (Kotlin) | **42/42**, incluidos los vectores compartidos con el firmware |

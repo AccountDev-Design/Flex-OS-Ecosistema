@@ -87,9 +87,7 @@ static uint32_t  fphToastUntil = 0;
 // Arrastre para desplazar: se sigue el dedo 1:1, igual que el resto
 // del sistema. Un scroll "por gesto de pagina" se nota distinto a
 // todo lo demas y delata que esta pantalla es de otro sitio.
-static bool      fphDrag = false;
-static int       fphDragY0 = 0, fphDragOff0 = 0;
-static bool      fphDragMoved = false;
+static FgDrag    fphDrag = { false, false, 0, 0 };
 
 // Identificadores de zona tactil. Nunca 0: 0 significa "nada".
 enum {
@@ -1371,7 +1369,7 @@ static void fphEnter(){
     fphSection = FPH_INICIO;
     fgScrollReset(&fphScr, FPH_TOP, SCR_H - 6);
   }
-  fphDrag = false;
+  fgDragReset(&fphDrag);
   fphDirtyUi = true;
   fphRender();
 }
@@ -1586,22 +1584,13 @@ static void fphTouch(){
   // Se sigue el dedo 1:1. El toque solo cuenta como pulsacion si el
   // dedo NO se movio: si no, cada intento de desplazar acabaria
   // abriendo la tarjeta que hubiera debajo.
-  if(T.pressed && !fphDrag){
-    fphDrag = true; fphDragMoved = false;
-    fphDragY0 = T.y; fphDragOff0 = fphScr.off;
-  }
-  if(fphDrag && T.pressed){
-    const int dy = fphDragY0 - T.y;
-    if(!fphDragMoved && abs(dy) > 8) fphDragMoved = true;
-    if(fphDragMoved){
-      fphScr.off = fphDragOff0 + dy;
-      if(fgScrollClamp(&fphScr) || true) fphDirtyUi = true;
-    }
-    return;
-  }
-  if(fphDrag && !T.pressed){
-    fphDrag = false;
-    if(fphDragMoved){ fphDragMoved = false; return; }   // fue un desplazamiento
+  //
+  // El NIVEL es T.down y el FLANCO es T.pressed -- ver fgDragStep,
+  // que es donde esta la maquina de estados y donde se prueba.
+  switch(fgDragStep(&fphDrag, &fphScr, T.down, T.pressed, T.y)){
+    case FG_DRAG_SCROLLING: fphDirtyUi = true; return;
+    case FG_DRAG_CONSUMED:  return;            // fue un desplazamiento, no un toque
+    default: break;
   }
 
   if(!T.tap) return;

@@ -348,6 +348,18 @@ class GattServer(
                 state.countBadFrame()
                 Log.w(TAG, "trama descartada: ${r.reason}")   // el motivo, no los bytes
             }
+            // Version incompatible. Aqui SOLO se cuenta y se registra, a
+            // diferencia de WifiLinkServer, que ademas contesta E_VERSION
+            // y avisa al usuario. El motivo es que este transporte no
+            // esta conectado hoy (ver la cabecera del fichero): el
+            // ESP32-P4 no tiene radio Bluetooth, asi que no hay ningun
+            // extremo que pueda recibir esa respuesta. Cuando el C6
+            // habilite BLE, esta rama tiene que igualarse a la del
+            // servidor Wi-Fi.
+            is FlexLink.ReadResult.BadVersion -> {
+                state.countBadFrame()
+                Log.w(TAG, "trama de version no soportada: ${r.version}")
+            }
             is FlexLink.ReadResult.Ok -> {
                 // Anti-repeticion ANTES del reensamblador: una trama
                 // repetida no puede alterar un mensaje a medias.

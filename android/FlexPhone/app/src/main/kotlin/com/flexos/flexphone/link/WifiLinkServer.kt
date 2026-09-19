@@ -1,5 +1,7 @@
 package com.flexos.flexphone.link
 
+import android.content.Context
+import android.net.wifi.WifiManager
 import android.util.Log
 import com.flexos.flexphone.protocol.FlexAuth
 import com.flexos.flexphone.protocol.FlexLink
@@ -55,6 +57,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * cual, no se anuncia como cifrado.
  */
 class WifiLinkServer(
+    private val ctx: Context,
     private val phoneId: String,
     private val phoneName: String,
     /** Clave del vinculo guardada, o null si todavia no hay ninguno. */
@@ -98,6 +101,44 @@ class WifiLinkServer(
     private val running = AtomicBoolean(false)
     private var server: ServerSocket? = null
     private var udp: DatagramSocket? = null
+
+    // #############################################################
+    // ##  EL CERROJO DE MULTIDIFUSION -- sin esto no llega NADA
+    // ##  ------------------------------------------------------
+    // ##  El descubrimiento de Flex OS es una sonda a la DIFUSION de
+    // ##  la red. Y el controlador Wi-Fi de Android descarta las
+    // ##  tramas de difusion y multidifusion que no van dirigidas a
+    // ##  la MAC del propio telefono ANTES de que lleguen a ningun
+    // ##  socket, para ahorrar bateria.
+    // ##
+    // ##  O sea: sin este cerrojo, el ESP32 emite la sonda
+    // ##  perfectamente, el telefono esta escuchando en el puerto
+    // ##  correcto... y receive() no despierta nunca. No hay ningun
+    // ##  error que lo explique, que es lo que lo hacia tan dificil
+    // ##  de ver.
+    // ##
+    // ##  Se suelta mientras hay sesion abierta: con el enlace
+    // ##  establecido ya no hace falta oir sondas, y el filtro del
+    // ##  controlador es justo lo que ahorra bateria.
+    // #############################################################
+    private var multicastLock: WifiManager.MulticastLock? = null
+
+    private fun acquireMulticast() {
+        if (multicastLock?.isHeld == true) return
+        runCatching {
+            val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            multicastLock = wm?.createMulticastLock("flexphone-discovery")?.apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }.onFailure { Log.w(TAG, "no se pudo tomar el cerrojo de multidifusion") }
+        Log.d(TAG, "cerrojo de multidifusion: ${if (multicastLock?.isHeld == true) "tomado" else "NO"}")
+    }
+
+    private fun releaseMulticast() {
+        runCatching { if (multicastLock?.isHeld == true) multicastLock?.release() }
+        multicastLock = null
+    }
     private var tcpThread: Thread? = null
     private var udpThread: Thread? = null
 
@@ -132,6 +173,7 @@ class WifiLinkServer(
                 bind(InetSocketAddress(UDP_PORT))
             }
             running.set(true)
+            acquireMulticast()
             tcpThread = Thread({ acceptLoop() }, "flex-link-tcp").apply { isDaemon = true; start() }
             udpThread = Thread({ discoveryLoop() }, "flex-link-udp").apply { isDaemon = true; start() }
             onEvent(Event.Listening(server!!.localPort, localWifiAddress() ?: "?"))
@@ -150,6 +192,7 @@ class WifiLinkServer(
 
     fun stop() {
         running.set(false)
+        releaseMulticast()
         closeSession("servidor parado")
         runCatching { server?.close() }; server = null
         runCatching { udp?.close() }; udp = null
@@ -162,16 +205,25 @@ class WifiLinkServer(
     // =========================================================
     private fun discoveryLoop() {
         val buf = ByteArray(64)
+        Log.d(TAG, "descubrimiento escuchando en UDP $UDP_PORT")
         while (running.get()) {
             try {
                 val pkt = DatagramPacket(buf, buf.size)
                 udp?.receive(pkt) ?: break
+                // (b) ALGO ha llegado. Si esta linea no sale nunca y el
+                //     ESP32 si dice que emite, el controlador Wi-Fi esta
+                //     filtrando la difusion (ver el cerrojo de arriba) o
+                //     el router aisla a los clientes entre si.
+                Log.d(TAG, "(b) ${pkt.length} B de ${pkt.address?.hostAddress}:${pkt.port}")
                 if (pkt.length < PROBE.size + 1) continue
                 if (!regionEquals(buf, 0, PROBE)) continue
                 val theirVer = buf[PROBE.size].toInt() and 0xFF
                 // Una version que no entendemos NO se contesta: seria
                 // invitar a una conexion que va a fallar despues.
-                if (theirVer < FlexLink.VERSION_MIN) continue
+                if (theirVer < FlexLink.VERSION_MIN) {
+                    Log.w(TAG, "(b) sonda de protocolo v$theirVer, se necesita v${FlexLink.VERSION_MIN}")
+                    continue
+                }
 
                 val name = phoneName.toByteArray(Charsets.UTF_8).let {
                     if (it.size > 31) it.copyOf(31) else it
@@ -186,8 +238,12 @@ class WifiLinkServer(
                 reply[at++] = name.size.toByte()
                 name.copyInto(reply, at)
                 udp?.send(DatagramPacket(reply, reply.size, pkt.address, pkt.port))
+                // (c) contestado. Si se ve esto y el ESP32 no registra
+                //     su (d), la respuesta se pierde de vuelta -- ahi ya
+                //     es la red, no el codigo.
+                Log.d(TAG, "(c) respondido a ${pkt.address?.hostAddress}:${pkt.port}, puerto TCP $p")
             } catch (e: Exception) {
-                if (running.get()) Log.w(TAG, "descubrimiento detenido")
+                if (running.get()) Log.w(TAG, "descubrimiento detenido: ${e.javaClass.simpleName}")
                 break
             }
         }
@@ -453,6 +509,7 @@ class WifiLinkServer(
         if (bondKey() == null) onPaired(key, flexosId)
         session = sess
         authed = true
+        releaseMulticast()          // con sesion abierta ya no hay que oir sondas
         onEvent(Event.SessionOpen(sock?.inetAddress?.hostAddress ?: "?"))
     }
 
@@ -466,6 +523,8 @@ class WifiLinkServer(
         sessionKey = null
         nonce = null
         pendingSalt = null
+        // Sin sesion vuelve a hacer falta oir las sondas del reloj.
+        if (running.get()) acquireMulticast()
         if (had) onEvent(Event.SessionClosed)
         if (why != null) Log.d(TAG, why)
     }

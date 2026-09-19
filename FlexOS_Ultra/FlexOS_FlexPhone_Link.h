@@ -153,6 +153,16 @@ typedef struct {
   bool     pendKeyOk;
   char     pendPeerId[FLP_PEERID_MAX];
   bool     hostProven;                // Flex OS ya mando su prueba
+  // ¿Ya nos hemos presentado en EL CANAL QUE ESTA ABIERTO AHORA?
+  //
+  // No se puede deducir del estado del enlace. El usuario pulsa
+  // "Emparejar telefono" y ese boton enciende el enlace y empieza el
+  // emparejamiento en la misma vuelta, mientras el transporte todavia
+  // esta buscando el telefono por la red. Cuando el canal se abre unos
+  // segundos despues, el enlace ya esta en EMPAREJANDO, no en
+  // "buscando" -- y atar el saludo a un par de estados concretos
+  // dejaba el apreton de manos sin arrancar nunca.
+  bool     helloSent;
 
   // -- latencia REAL, medida con PING/PONG --
   uint32_t pingSentMs;       // 0 = no hay ping en vuelo

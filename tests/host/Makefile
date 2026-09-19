@@ -52,7 +52,7 @@ JPEG_SRC := $(ROOT)/FlexOS_JPEG.cpp
 APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net \
-        $(BUILD)/test_passcode $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexauth $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
+        $(BUILD)/test_passcode $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexauth $(BUILD)/test_flexphone_ui $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
         $(BUILD)/test_media $(BUILD)/test_mem $(BUILD)/test_fall $(BUILD)/test_theft $(BUILD)/test_imu \
         $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun
@@ -213,6 +213,15 @@ $(BUILD)/test_flexphone: test_flexphone.cpp $(FLPSRC) $(FLNKSRC) \
 # bateria falla antes de que nadie flashee nada.
 $(BUILD)/test_flexauth: test_flexauth.cpp $(FLAUTH) $(ULTRA)/FlexOS_FlexAuth.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_flexauth.cpp $(FLAUTH)
+
+# Desplazamiento y arrastre de las listas de Flex Phone. Existe por un
+# fallo concreto: las listas se pintaban CON barra de desplazamiento y
+# no se movian al arrastrar, porque la fase continua del arrastre
+# miraba T.pressed (un FLANCO) en vez de T.down (el NIVEL). Leyendo el
+# codigo no se veia; pasandole una secuencia de cuadros como la que da
+# el tactil, si.
+$(BUILD)/test_flexphone_ui: test_flexphone_ui.cpp $(ULTRA)/FlexOS_FlexPhone_UI_Scroll.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -o $@ test_flexphone_ui.cpp
 
 # El transporte: maquina de estados del enlace. En el PC la capacidad
 # es NONE (no hay radio), igual que en el P4 sin el C6 preparado, asi
@@ -394,6 +403,7 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@echo
 	@$(BUILD)/test_flexphone
 	@$(BUILD)/test_flexauth
+	@$(BUILD)/test_flexphone_ui
 	@echo
 	@$(BUILD)/test_flexlink_transport
 	@echo

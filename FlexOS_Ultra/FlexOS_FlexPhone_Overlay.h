@@ -758,31 +758,22 @@ static bool fpcGlobalHandle(){
   if(!fpcOpen()) return false;
 
   // ---- Abierto del todo: contenido ----
-  // Desplazamiento 1:1 y toque solo si el dedo NO se movio.
-  static bool sDrag = false, sMoved = false;
-  static int sY0 = 0, sOff0 = 0;
-  if(T.pressed && !sDrag){ sDrag = true; sMoved = false; sY0 = T.y; sOff0 = fpcScr.off; }
-  if(sDrag && T.pressed){
-    // Un arrastre hacia la derecha desde el contenido CIERRA el panel:
-    // es el gesto inverso al de apertura y es lo que se espera.
-    if(T.x - T.startX > 60 && abs(T.y - T.startY) < 40){
-      sDrag = false;
-      fpcAnimTo(-SCR_W);
-      return true;
-    }
-    const int dy = sY0 - T.y;
-    if(!sMoved && abs(dy) > 8) sMoved = true;
-    if(sMoved){
-      fpcScr.off = sOff0 + dy;
-      fgScrollClamp(&fpcScr);
-      fpcDirty = true;
-    }
-    if(fpcDirty) fpcRender();
+  // Desplazamiento 1:1 y toque solo si el dedo NO se movio. La maquina
+  // de estados es la MISMA que la de las pantallas de Flex Phone
+  // (fgDragStep): tener dos copias escritas a mano es lo que hizo que
+  // las dos arrastraran con el flanco en vez de con el nivel.
+  static FgDrag sDrag = { false, false, 0, 0 };
+  // Un arrastre hacia la derecha desde el contenido CIERRA el panel:
+  // es el gesto inverso al de apertura y es lo que se espera.
+  if(T.down && T.x - T.startX > 60 && abs(T.y - T.startY) < 40){
+    fgDragReset(&sDrag);
+    fpcAnimTo(-SCR_W);
     return true;
   }
-  if(sDrag && !T.pressed){
-    sDrag = false;
-    if(sMoved){ sMoved = false; return true; }
+  switch(fgDragStep(&sDrag, &fpcScr, T.down, T.pressed, T.y)){
+    case FG_DRAG_SCROLLING: fpcDirty = true; fpcRender(); return true;
+    case FG_DRAG_CONSUMED:  return true;     // fue un desplazamiento, no un toque
+    default: break;
   }
   if(T.tap){
     const uint16_t id = fgHitAt(T.x, T.y);

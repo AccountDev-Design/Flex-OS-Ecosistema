@@ -97,6 +97,7 @@ class FlexLinkService : Service() {
 
         if (server == null) {
             val s = WifiLinkServer(
+                ctx = this,
                 phoneId = bonds.selfId(),
                 phoneName = device.displayName,
                 bondKey = { bonds.key() },
@@ -372,6 +373,19 @@ class FlexLinkService : Service() {
         server?.stop()
         FindMyPhone.stop()
         if (current === this) current = null
+        // EL ESTADO TIENE QUE DEJAR DE MENTIR.
+        //
+        // shutdown() ya lo pone en OFF cuando para el usuario, pero
+        // este camino es el otro: Android mata el servicio por bateria,
+        // por memoria o por politica del fabricante. Sin esta linea el
+        // estado se quedaba en "Esperando a Flex OS" con el socket ya
+        // cerrado, asi que la pantalla decia que el telefono estaba
+        // escuchando cuando no habia nadie escuchando -- justo el fallo
+        // que hace imposible entender por que el reloj no encuentra
+        // nada.
+        if (state.link.value != LinkState.OFF) {
+            state.setLink(LinkState.OFF, getString(R.string.link_stopped_by_system))
+        }
         super.onDestroy()
     }
 }

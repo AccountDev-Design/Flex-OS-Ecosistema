@@ -140,6 +140,15 @@ static void sessionReset(FlexPhoneLink* L){
   L->hostProven = false;
 }
 
+// Arrancar de cero el enlace: ademas de la sesion, se olvida que nos
+// hubieramos presentado. Si no, tras un Stop/Start el canal podria
+// seguir abierto y no se volveria a saludar.
+static void linkResetAll(FlexPhoneLink* L){
+  if(!L) return;
+  sessionReset(L);
+  L->helloSent = false;
+}
+
 // =============================================================
 //  Ciclo de vida
 // =============================================================
@@ -195,7 +204,7 @@ bool flexPhoneLinkStart(FlexPhoneLink* L){
   L->session = 0;
   L->reconnectAttempt = 0;
   L->reconnectAtMs = 0;
-  sessionReset(L);
+  linkResetAll(L);
   if(!flexPhoneTrStart(L->tr)){
     setErr(L, flexPhoneTrStatus(L->tr));
     L->state = FLP_LS_ERROR;
@@ -216,7 +225,7 @@ void flexPhoneLinkStop(FlexPhoneLink* L){
     flexPhoneLinkTick(L, NULL, L->lastTxMs ? L->lastTxMs + 1 : 1);
   }
   flexPhoneTrStop(L->tr);
-  sessionReset(L);
+  linkResetAll(L);
   L->session = 0;
   L->userConfirmed = false;
   L->peerConfirmed = false;
@@ -780,9 +789,26 @@ void flexPhoneLinkTick(FlexPhoneLink* L, FlexPhoneModel* M, uint32_t nowMs){
     if(M){ M->stats.reconnects++; flexPhoneModelClear(M, false); }
     gotoState(L, FLP_LS_SEARCHING, nowMs);
   }
-  if(tc == FLP_TC_OPEN &&
-     (L->state == FLP_LS_SEARCHING || L->state == FLP_LS_ERROR)){
-    // Canal recien abierto: sesion nueva desde cero y presentacion.
+  // Canal cerrado: el saludo de este canal deja de valer. Al abrirse
+  // uno nuevo habra que volver a presentarse.
+  if(tc != FLP_TC_OPEN) L->helloSent = false;
+
+  // #############################################################
+  // ##  PRESENTARSE AL ABRIRSE EL CANAL
+  // ##  ------------------------------------------------------
+  // ##  La condicion es "hay canal y todavia no me he presentado
+  // ##  en el", NO "el enlace esta en tal o cual estado".
+  // ##
+  // ##  Atarlo a un par de estados concretos rompia el caso mas
+  // ##  normal de todos: el usuario pulsa "Emparejar telefono", el
+  // ##  enlace pasa a EMPAREJANDO en el acto y el transporte tarda
+  // ##  unos segundos en encontrar el telefono. Cuando por fin
+  // ##  abria el canal, el enlace ya no estaba en "buscando", asi
+  // ##  que el saludo no salia: Flex OS ensenaba un codigo que no
+  // ##  servia para nada y a los dos minutos decia que habia
+  // ##  caducado, sin ninguna pista de por que.
+  // #############################################################
+  if(tc == FLP_TC_OPEN && !L->helloSent && L->state != FLP_LS_READY){
     const uint16_t m = flexPhoneTrMtu(L->tr);
     L->mtu = m ? m : (uint16_t)FLNK_MIN_MTU;
     sessionReset(L);
@@ -790,12 +816,18 @@ void flexPhoneLinkTick(FlexPhoneLink* L, FlexPhoneModel* M, uint32_t nowMs){
     L->reconnectAttempt = 0;
     L->err[0] = 0;
     L->pendPeerId[0] = 0;
-    gotoState(L, FLP_LS_CONNECTING, nowMs);
+    // El estado de EMPAREJAMIENTO se conserva: el usuario esta
+    // mirando un codigo en pantalla, y perderselo porque el Wi-Fi
+    // parpadeo un segundo seria gratuito. El codigo y la sal siguen
+    // siendo validos -- lo unico que cambia es el canal por el que
+    // viajan --, y al llegar el WELCOME nuevo se reenvia la sal.
+    if(L->state != FLP_LS_PAIRING) gotoState(L, FLP_LS_CONNECTING, nowMs);
     uint8_t body[1 + FLXA_ID_MAX];
     FlexLinkWr w; flexLinkWrInit(&w, body, sizeof(body));
     flexLinkWrU8(&w, FLNK_VERSION);
     flexLinkWrStr(&w, L->selfId, FLXA_ID_MAX - 1);
     if(flexLinkWrOk(&w)) flexPhoneLinkSend(L, FLNK_T_HELLO, body, w.at, false);
+    L->helloSent = true;
     L->lastRxMs = nowMs ? nowMs : 1;   // el reloj de "enlace muerto" arranca aqui
   }
 

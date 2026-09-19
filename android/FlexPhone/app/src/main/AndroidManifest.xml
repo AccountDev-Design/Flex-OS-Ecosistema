@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Flex Phone -- manifiesto.
+  Flex Phone: manifiesto.
 
   PERMISOS: cada uno esta aqui porque una funcion CONCRETA lo
   necesita, y cada uno se pide en el momento en que hace falta, no
@@ -19,14 +19,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- ---- Bluetooth: HOY NO SE USA ----
+    <!-- ==== Bluetooth: HOY NO SE USA ====
          El enlace con Flex OS va por Wi-Fi. Estos permisos siguen
          declarados porque el transporte BLE existe escrito para
          cuando el co-procesador C6 del P4 pueda ofrecerlo; mientras
          tanto la app NO los pide en tiempo de ejecucion, porque pedir
          un permiso que no se va a usar es la forma mas rapida de que
          alguien desinstale una app. -->
-    <!-- ---- Bluetooth: dos juegos segun la version de Android ---- -->
+    <!-- ==== Bluetooth: dos juegos segun la version de Android ==== -->
     <!-- Android 12 (API 31) en adelante -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
@@ -46,14 +46,21 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
         android:maxSdkVersion="30" />
 
-    <!-- ---- Servicio en primer plano ---- -->
+    <!-- ==== Servicio en primer plano ==== -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- ---- Browser Relay: red local y locks ---- -->
+    <!-- ==== Red local y cerrojos ==== -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- SIN ESTO EL DESCUBRIMIENTO NO FUNCIONA. El controlador Wi-Fi
+         de Android descarta las tramas de difusion que no van dirigidas
+         a la MAC del telefono antes de que lleguen a ningun socket, y
+         la sonda de Flex OS es justo una difusion. El permiso es lo que
+         permite tomar el MulticastLock que desactiva ese filtro; se
+         toma solo mientras no hay sesion (ver WifiLinkServer). -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />

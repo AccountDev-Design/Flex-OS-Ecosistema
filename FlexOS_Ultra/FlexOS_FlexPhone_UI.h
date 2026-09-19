@@ -117,48 +117,13 @@ static uint16_t fgHitAt(int px, int py){
 }
 
 // =============================================================
-//  3) DESPLAZAMIENTO
+//  3) DESPLAZAMIENTO Y ARRASTRE
 // =============================================================
-// Una sola pieza de scroll para todas las pantallas. Guarda el alto
-// del contenido MIENTRAS se pinta, asi que el tope siempre
-// corresponde a lo que hay de verdad en la pantalla actual.
-typedef struct {
-  int  off;          // desplazamiento actual (px, >= 0)
-  int  content;      // alto del contenido de la ultima pasada
-  int  viewTop;      // primera fila visible del area desplazable
-  int  viewBot;      // ultima + 1
-} FgScroll;
+// La ARITMETICA vive aparte, en un fichero sin nada del sketch, para
+// poder ejercitarla en el PC con una secuencia de cuadros como la que
+// produce el tactil de verdad. Aqui se queda lo que pinta.
+#include "FlexOS_FlexPhone_UI_Scroll.h"
 
-static void fgScrollReset(FgScroll* s, int top, int bot){
-  if(!s) return;
-  s->off = 0; s->content = 0; s->viewTop = top; s->viewBot = bot;
-}
-static void fgScrollSetView(FgScroll* s, int top, int bot){
-  if(!s) return;
-  s->viewTop = top; s->viewBot = bot;
-}
-// Limita el desplazamiento a lo que hay. Devuelve true si cambio:
-// asi el llamador solo repinta cuando el scroll se movio de verdad.
-static bool fgScrollClamp(FgScroll* s){
-  if(!s) return false;
-  const int view = s->viewBot - s->viewTop;
-  int max = s->content - view;
-  if(max < 0) max = 0;
-  const int was = s->off;
-  if(s->off > max) s->off = max;
-  if(s->off < 0)   s->off = 0;
-  return s->off != was;
-}
-static bool fgScrollBy(FgScroll* s, int dy){
-  if(!s) return false;
-  const int was = s->off;
-  s->off += dy;
-  fgScrollClamp(s);
-  return s->off != was;
-}
-static bool fgScrollNeeded(const FgScroll* s){
-  return s && s->content > (s->viewBot - s->viewTop);
-}
 // Barra lateral fina. Solo aparece si de verdad hay mas contenido:
 // una barra permanente sobre una lista corta es ruido.
 static void fgScrollBar(const FgScroll* s){

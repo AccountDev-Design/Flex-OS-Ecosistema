@@ -1,6 +1,8 @@
 package com.flexos.flexphone.ui
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -84,7 +86,7 @@ fun FlexTopBar(title: String, onBack: (() -> Unit)? = null) {
             if (onBack != null) {
                 IconButton(onClick = onBack) {
                     Icon(
-                        androidx.compose.material.icons.Icons.AutoMirrored.Filled.ArrowBack,
+                        Icons.AutoMirrored.Filled.ArrowBack,
                         contentDescription = stringResource(R.string.back),
                     )
                 }

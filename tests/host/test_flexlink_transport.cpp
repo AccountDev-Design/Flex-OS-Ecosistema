@@ -332,6 +332,93 @@ static void testPairing(){
 }
 
 // -------------------------------------------------------------
+//  2 bis) EMPAREJAR ANTES DE QUE EL CANAL ESTE ABIERTO
+// -------------------------------------------------------------
+//  Es lo que pasa SIEMPRE en la placa: el usuario pulsa "Emparejar
+//  telefono" y el boton hace dos cosas seguidas -- encender el enlace
+//  y empezar el emparejamiento -- mientras el transporte todavia esta
+//  buscando el telefono por UDP. Cuando el canal se abre unos
+//  segundos despues, el enlace ya no esta en "buscando".
+//
+//  Las demas pruebas bombean hasta que el canal esta abierto ANTES de
+//  llamar a BeginPairing, asi que no tocaban este camino. En el
+//  aparato es justo al reves, y ahi es donde el emparejamiento se
+//  quedaba muerto sin decir nada.
+static void testPairBeforeChannel(){
+  std::printf("[link] emparejar mientras el transporte todavia busca\n");
+  uint32_t t = 4000;
+  bring();
+  CHECK(flexPhoneLinkStart(&L), "no arranco");
+
+  // El transporte AUN NO ha encontrado el telefono.
+  gLoop.st = FLP_TC_SEARCHING;
+  flexPhoneLinkTick(&L, &M, t); t += 20;
+
+  // El usuario pulsa Emparejar. El enlace pasa a PAIRING sin haber
+  // hablado todavia con nadie.
+  flexPhoneLinkBeginPairing(&L, testRand, t);
+  CHECK(L.state == FLP_LS_PAIRING, "no entro en emparejamiento");
+  std::memcpy(gLoop.code, L.code, sizeof(gLoop.code) - 1);
+
+  // Ahora si: el transporte encuentra el telefono y abre el canal.
+  gLoop.st = FLP_TC_OPEN;
+  pump(t, 6);
+
+  // El apreton de manos TIENE que arrancar igual. Si no, el usuario ve
+  // un codigo en pantalla que no sirve para nada y a los dos minutos
+  // "el emparejamiento caduco", sin ninguna pista de por que.
+  CHECK(gLoop.flexosId[0] != 0, "FLEX OS NUNCA SE PRESENTO AL ABRIRSE EL CANAL");
+  CHECK(gLoop.haveKey, "el telefono nunca recibio la sal del emparejamiento");
+
+  flexPhoneLinkConfirm(&L, t);
+  pump(t, 6);
+  CHECK(L.state == FLP_LS_READY, "no quedo listo (%s): %s",
+        flexPhoneLinkStateName(L.state), L.err);
+  CHECK(flexPhoneLinkBonded(&L), "no marco el vinculo");
+}
+
+// -------------------------------------------------------------
+//  2 ter) EL CANAL SE CAE A MITAD DEL APRETON DE MANOS
+// -------------------------------------------------------------
+//  Un corte de Wi-Fi mientras se empareja o se autentica no puede
+//  dejar el enlace esperando en un estado del que ya no se sale.
+static void testChannelDropMidHandshake(){
+  std::printf("[link] el canal se cae a mitad del apreton de manos\n");
+  uint32_t t = 4500;
+  bring();
+  flexPhoneLinkStart(&L);
+  pump(t, 3);
+  flexPhoneLinkBeginPairing(&L, testRand, t);
+  CHECK(L.state == FLP_LS_PAIRING, "no entro en emparejamiento");
+
+  char code[8];
+  std::memcpy(code, L.code, sizeof(code) - 1);
+  code[sizeof(code) - 1] = 0;
+
+  // Se cae el canal.
+  gLoop.st = FLP_TC_SEARCHING;
+  flexPhoneLinkTick(&L, &M, t); t += 20;
+  // El codigo TIENE que sobrevivir: el usuario lo esta mirando, y
+  // perderselo porque el Wi-Fi parpadeo un segundo seria gratuito.
+  CHECK(std::strcmp(L.code, code) == 0, "perdio el codigo al caerse el canal");
+
+  // Al volver, se vuelve a presentar Y se reenvia la sal con el MISMO
+  // codigo, asi que el emparejamiento sigue adelante.
+  gLoop = Loop();
+  gTr.ctx = &gLoop;
+  std::memcpy(gLoop.code, code, sizeof(gLoop.code) - 1);
+  gLoop.st = FLP_TC_OPEN;
+  pump(t, 6);
+  CHECK(gLoop.flexosId[0] != 0, "no se volvio a presentar al recuperarse el canal");
+  CHECK(gLoop.haveKey, "no reenvio la sal tras recuperarse el canal");
+
+  flexPhoneLinkConfirm(&L, t);
+  pump(t, 6);
+  CHECK(L.state == FLP_LS_READY, "no quedo listo tras el corte (%s)",
+        flexPhoneLinkStateName(L.state));
+}
+
+// -------------------------------------------------------------
 //  3) Reconexion con vinculo guardado: NO se vuelve a emparejar
 // -------------------------------------------------------------
 static void testResume(){
@@ -613,6 +700,8 @@ int main(){
   std::printf("\n=== FlexOS · maquina de estados del enlace de Flex Phone ===\n");
   testCapability();
   testPairing();
+  testPairBeforeChannel();
+  testChannelDropMidHandshake();
   testResume();
   testAccessControl();
   testHostileFrames();

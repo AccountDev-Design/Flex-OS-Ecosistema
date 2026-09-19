@@ -58,6 +58,35 @@
 #define FLPW_TASK_STACK      4096
 #define FLPW_RXBUF           (FLNK_MAX_FRAME * 3)
 
+// #############################################################
+// ##  DIAGNOSTICO DEL DESCUBRIMIENTO
+// ##  ------------------------------------------------------
+// ##  Mismo patron -- y mismo motivo -- que FLEXOS_DIAG_WIFI: en
+// ##  funcionamiento normal el puerto serie tiene que estar LIMPIO,
+// ##  asi que esto se compila a nada salvo que se encienda a mano.
+// ##
+// ##  Cuando el emparejamiento no encuentra nada, el problema esta
+// ##  en uno de estos cuatro pasos, y aqui se ven los dos que le
+// ##  tocan al reloj:
+// ##
+// ##      (a) el ESP32 manda la sonda        <- se ve aqui
+// ##      (b) el telefono la recibe          <- logcat de Android
+// ##      (c) el telefono contesta           <- logcat de Android
+// ##      (d) el ESP32 recibe la respuesta   <- se ve aqui
+// ##
+// ##  Si se ve (a) y no (d), o el telefono no esta escuchando o la
+// ##  red no deja pasar la difusion (aislamiento de clientes). El
+// ##  logcat del telefono distingue las dos cosas.
+// #############################################################
+#define FLEXOS_DIAG_FLEXPHONE 0
+
+#if FLEXOS_DIAG_FLEXPHONE
+  #define FPW_DIAG(...) do { Serial.printf("[FLEXPHONE %8lu] ", (unsigned long)millis()); \
+                             Serial.printf(__VA_ARGS__); Serial.println(); } while(0)
+#else
+  #define FPW_DIAG(...) ((void)0)
+#endif
+
 // =============================================================
 //  Estado del transporte
 // =============================================================
@@ -113,9 +142,30 @@ static bool fpwDiscover(WiFiUDP& udp, uint32_t waitMs){
   uint8_t probe[FLPW_PROBE_LEN + 1];
   memcpy(probe, FLPW_PROBE, FLPW_PROBE_LEN);
   probe[FLPW_PROBE_LEN] = FLNK_VERSION;
-  if(!udp.beginPacket(bcast, FLPW_UDP_PORT)) return false;
-  udp.write(probe, sizeof(probe));
-  udp.endPacket();
+
+  FPW_DIAG("(a) sonda: yo %u.%u.%u.%u  mascara %u.%u.%u.%u  difusion %u.%u.%u.%u:%u",
+           ip[0], ip[1], ip[2], ip[3], mask[0], mask[1], mask[2], mask[3],
+           bcast[0], bcast[1], bcast[2], bcast[3], (unsigned)FLPW_UDP_PORT);
+
+  // DOS destinos a proposito. La difusion DIRIGIDA de la subred es la
+  // correcta y la que menos molesta, pero hay pilas y puntos de acceso
+  // que la filtran y en cambio dejan pasar la limitada. Son 34 bytes
+  // cada dos segundos y solo mientras no hay telefono; el coste es
+  // irrelevante al lado de quedarse sin encontrarlo nunca.
+  bool sent = false;
+  if(udp.beginPacket(bcast, FLPW_UDP_PORT)){
+    udp.write(probe, sizeof(probe));
+    sent = udp.endPacket() != 0;
+  }
+  const IPAddress limited(255, 255, 255, 255);
+  if(udp.beginPacket(limited, FLPW_UDP_PORT)){
+    udp.write(probe, sizeof(probe));
+    if(udp.endPacket() != 0) sent = true;
+  }
+  if(!sent){
+    FPW_DIAG("(a) FALLO: no se pudo emitir la sonda");
+    return false;
+  }
 
   const uint32_t t0 = millis();
   while(millis() - t0 < waitMs){
@@ -126,8 +176,16 @@ static bool fpwDiscover(WiFiUDP& udp, uint32_t waitMs){
     // Minimo: marca + version + puerto. Menos que eso no se
     // interpreta: leer campos de un paquete corto es como se cuelan
     // los desbordamientos.
-    if(got < FLPW_PROBE_LEN + 3) continue;
-    if(memcmp(buf, FLPW_REPLY, FLPW_PROBE_LEN) != 0) continue;
+    if(got < FLPW_PROBE_LEN + 3){
+      FPW_DIAG("(d) paquete de %d B descartado: demasiado corto", got);
+      continue;
+    }
+    if(memcmp(buf, FLPW_REPLY, FLPW_PROBE_LEN) != 0){
+      // Lo normal aqui es oir la PROPIA sonda de vuelta: la difusion
+      // limitada se entrega tambien al que la emitio. No es un fallo.
+      FPW_DIAG("(d) paquete de %d B descartado: no es una respuesta Flex Phone", got);
+      continue;
+    }
     const uint8_t ver = buf[FLPW_PROBE_LEN];
     if(ver < FLNK_VERSION_MIN){
       fpwSetStatus("la app del telefono es de una version anterior");
@@ -156,6 +214,8 @@ static bool fpwDiscover(WiFiUDP& udp, uint32_t waitMs){
     snprintf(fpwCtx.peer, sizeof(fpwCtx.peer), "%u.%u.%u.%u:%u",
              from[0], from[1], from[2], from[3], (unsigned)port);
     fpwUnlock();
+    FPW_DIAG("(d) telefono encontrado en %u.%u.%u.%u:%u (protocolo v%u)",
+             from[0], from[1], from[2], from[3], (unsigned)port, ver);
     return true;
   }
   return false;
