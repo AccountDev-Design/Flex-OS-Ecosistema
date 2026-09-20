@@ -1023,7 +1023,7 @@ static void qpProfReport(const char* que){
   // ya existia -- una vez por sesion de cortina, no por cuadro -- porque es
   // la unica cifra con la que se puede juzgar si la calidad adaptativa esta
   // haciendo su trabajo o si el material se esta pasando de presupuesto.
-  static const char* kQN[GLQ_N] = { "ULTRA", "ALTA", "MEDIA", "BAJA" };
+  static const char* kQN[GLQ_N] = { "AGUA", "ULTRA", "ALTA", "MEDIA", "BAJA" };
   Serial.printf("[QP]   material: calidad %s (pedida %s), %lu us de vidrio en la ventana\n",
                 kQN[gGlassQNow], kQN[gGlassQWant], (unsigned long)glStatUs);
 }

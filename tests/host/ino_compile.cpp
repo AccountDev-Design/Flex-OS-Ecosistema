@@ -4885,6 +4885,82 @@ static void glassLab(){
   printf("Laboratorio optico: 20 cuadros escritos\n");
 }
 
+// #############################################################
+//  CUANTO DOBLA EL VIDRIO LO QUE HAY DETRAS  ·  medida en pixeles
+//  ------------------------------------------------------------
+//  El perfil WATER existe porque ULTRA se veia "seco": 4 px de desvio
+//  sobre una banda de 14 px no llegan a leerse como una lente. Pero
+//  "se ve mejor" no es una medida, y el plan pedia expresamente no dar
+//  esto por bueno solo porque compile o porque los numeros internos
+//  cambien.
+//
+//  Se mide sobre el framebuffer, que es lo unico que ve el LCD: detras
+//  del vidrio se pone un ESCALON de contraste maximo y se busca en que
+//  columna cruza el 50 % de luminancia. Un box-blur simetrico difumina
+//  ese escalon pero NO mueve su cruce ni un pixel, asi que todo
+//  desplazamiento que se mida es remuestreo espacial de verdad.
+static int vgCruce16(int y, int x0, int x1){
+  int lo = 9999, hi = -1;
+  for(int x = x0; x <= x1; x++){
+    int l = glassLuma(fb[(size_t)y * SCR_W + x]);
+    if(l < lo) lo = l;
+    if(l > hi) hi = l;
+  }
+  if(hi - lo < 40) return -1;
+  int mid = (lo + hi) / 2;
+  for(int x = x0; x < x1; x++){
+    int a = glassLuma(fb[(size_t)y * SCR_W + x]);
+    int b = glassLuma(fb[(size_t)y * SCR_W + x + 1]);
+    if((a < mid && b >= mid) || (a > mid && b <= mid)){
+      int d = b - a;
+      if(d == 0) return x * 16;
+      return x * 16 + (16 * (mid - a)) / d;
+    }
+  }
+  return -1;
+}
+// Desvio (en 1/16 px) que el perfil activo le saca al escalon.
+//
+// La distancia del escalon al canto se DERIVA del perfil, no se barre: cada
+// perfil tiene su propia banda y su propio pico, asi que una distancia fija
+// mediria el canto de uno contra el interior de otro. Se coloca a
+// "media banda + el pico", de forma que el escalon ya desplazado caiga cerca
+// de media banda -- dentro de la lente y lejos de los dos bordes.
+//
+// Y la ventana de busqueda deja fuera los 5 px de cada extremo del panel. Sin
+// eso la medida es basura: si el escalon se va del panel, el detector se
+// engancha al reflejo del propio canto y devuelve un numero enorme sin
+// sentido (WATER llego a "medir" 148 px en un boton de 160).
+static int vgDesvio16(int bx, int by, int bw, int bh, int rad){
+  const FlexGlassCfg& c = kGlassQ[gGlassQNow];
+  // El desvio NO es uniforme: crece hacia el canto. Asi que no hay una sola
+  // profundidad "correcta" donde medirlo -- se barre la banda y se coge el
+  // maximo desplazamiento que se llegue a ver. Y se ve poco mas alla de la
+  // banda, porque fuera de ella ya es el campo interior, mucho mas suave.
+  int best = 0;
+  int hasta = c.band + 8; if(hasta > bw / 2 - 8) hasta = bw / 2 - 8;
+  for(int d = 4; d <= hasta; d += 1){
+    int ex = bx + bw - d;
+    uiClipFull(); setBuf(fb);
+    for(int y = 0; y < SCR_H; y++)
+      for(int x = 0; x < SCR_W; x++)
+        fb[(size_t)y * SCR_W + x] = (x < ex) ? rgb565(0,0,0) : rgb565(255,255,255);
+    drawLiquidGlassPanel(bx, by, bw, bh, rad, TH_GLASS);
+    int x0 = bx + 5, x1 = bx + bw - 6;
+    int got = vgCruce16(by + bh / 2, x0, x1);
+    if(got < 0) continue;
+    // Si el cruce sale pegado a un extremo de la ventana, el escalon de
+    // verdad se ha ido del panel y lo que se ha enganchado es el reflejo del
+    // canto. Esa medida no cuenta: sin este descarte WATER "medía" 148 px en
+    // un boton de 160.
+    if(got <= (x0 + 1) * 16 || got >= (x1 - 1) * 16) continue;
+    int a = got - ex * 16; if(a < 0) a = -a;
+    if(a > (bw / 4) * 16) continue;          // un cuarto del panel no es una lente
+    if(a > best) best = a;
+  }
+  return best;
+}
+
 static void testVidrioAvanzado(){
   printf("Liquid Glass avanzado: SDF, refraccion, Fresnel y toque\n");
   const bool glassPrev = uiGlass;
@@ -5341,12 +5417,16 @@ static void testVidrioAvanzado(){
         if(m < us[q]) us[q] = m;
       }
     printf("   coste de un panel 440x160 r22 (PC, mejor de 3 x %d repeticiones):\n", REP);
-    static const char* nom[GLQ_N] = { "ULTRA ", "HIGH  ", "MEDIUM", "LOW   " };
+    static const char* nom[GLQ_N] = { "WATER ", "ULTRA ", "HIGH  ", "MEDIUM", "LOW   " };
     for(int q = 0; q < GLQ_N; q++)
       printf("     %s %5lu us   %+.0f %% sobre el material clasico\n",
              nom[q], us[q], us[GLQ_LOW] ? 100.0 * ((double)us[q] - us[GLQ_LOW]) / us[GLQ_LOW] : 0.0);
     chk(us[GLQ_ULTRA] < us[GLQ_LOW] * 3,
         "el material avanzado no llega a triplicar el coste del clasico");
+    chk(us[GLQ_WATER] < us[GLQ_LOW] * 3,
+        "WATER tampoco triplica el coste del clasico");
+    chk(us[GLQ_ULTRA] <= us[GLQ_WATER],
+        "WATER es el perfil mas caro, como corresponde a estar por encima");
     chk(us[GLQ_MEDIUM] <= us[GLQ_ULTRA],
         "bajar de perfil no puede salir mas caro");
   }
@@ -5356,12 +5436,50 @@ static void testVidrioAvanzado(){
     gGlassQWant = GLQ_ULTRA; glassQualityReset();
     gTestMs += 10; glassQualityTick();                 // abre la ventana
     for(int w = 0; w < 4; w++){ glStatAdd(600000); gTestMs += 1000; glassQualityTick(); }
-    chk(gGlassQNow == GLQ_LOW, "la calidad baja hasta el suelo con presion sostenida");
+    // EL SUELO ES MEDIUM, NO LOW, y el cambio es deliberado: en LOW el
+    // material avanzado se apaga entero (band=0 -> glassAdvanced()==false),
+    // o sea que se pierde la refraccion Y el toque. Como quien mas empuja el
+    // presupuesto es la recomposicion en vivo de un dedo apoyado, la escalera
+    // llegaba a LOW justo MIENTRAS se tocaba y el boton se quedaba congelado
+    // a mitad del gesto. MEDIUM es barato y conserva el desplazamiento real,
+    // que es lo unico que no se puede sacrificar.
+    chk(gGlassQNow == GLQ_MEDIUM, "la presion sostenida baja la calidad hasta MEDIUM");
+    chk(glassAdvanced(), "y en el suelo el material avanzado SIGUE encendido");
     for(int w = 0; w < 12; w++){ glStatAdd(500); gTestMs += 1000; glassQualityTick(); }
     chk(gGlassQNow == GLQ_ULTRA, "la calidad se recupera al aliviarse la presion");
     gEffMode = true; glassQualityReset();
     chk(gGlassQNow >= GLQ_MEDIUM, "el modo visual eficiente pone techo al vidrio");
     gEffMode = false;
+  }
+
+  // ---- 10. cuanto dobla el fondo cada perfil, EN PIXELES ---------------
+  {
+    const int BW = 160, BH = 160, BR = 80;           // boton redondo, como el "+"
+    const int BX = 240 - BW / 2, BY = 400 - BH / 2;
+    uint8_t qs[3] = { GLQ_WATER, GLQ_ULTRA, GLQ_HIGH };
+    const char* qn[3] = { "WATER", "ULTRA", "HIGH " };
+    int dv[3];
+    for(int k = 0; k < 3; k++){
+      gGlassQWant = qs[k]; glassQualityReset();
+      dv[k] = vgDesvio16(BX, BY, BW, BH, BR);
+      printf("   %s dobla el fondo %d.%02d px\n", qn[k], dv[k] / 16, (dv[k] % 16) * 100 / 16);
+    }
+    chk(dv[0] > 0 && dv[1] > 0 && dv[2] > 0, "los tres perfiles desplazan el fondo de verdad");
+    chk(dv[0] > dv[1], "WATER dobla mas que ULTRA -- que es la razon de existir del perfil");
+    chk(dv[0] >= 6 * 16, "y lo dobla al menos 6 px, que es lo que se lee como lente");
+    // El desvio tiene que ser DEL CANTO. Si diera lo mismo en el eje medio
+    // no seria una lente, seria un corrimiento global -- un fallo de indices.
+    gGlassQWant = GLQ_WATER; glassQualityReset();
+    uiClipFull(); setBuf(fb);
+    int exm = BX + BW / 2;
+    for(int y = 0; y < SCR_H; y++)
+      for(int x = 0; x < SCR_W; x++)
+        fb[(size_t)y * SCR_W + x] = (x < exm) ? rgb565(0,0,0) : rgb565(255,255,255);
+    drawLiquidGlassPanel(BX, BY, BW, BH, BR, TH_GLASS);
+    int cm = vgCruce16(BY + BH / 2, BX + 2, BX + BW - 3);
+    int am = (cm < 0) ? 0 : (cm - exm * 16 < 0 ? exm * 16 - cm : cm - exm * 16);
+    printf("   en el eje medio se queda en %d.%02d px\n", am / 16, (am % 16) * 100 / 16);
+    chk(am < dv[0], "el desvio es del canto, no un corrimiento global del panel");
   }
 
   uiGlass = glassPrev; gGlassQWant = qPrev; glassQualityReset();

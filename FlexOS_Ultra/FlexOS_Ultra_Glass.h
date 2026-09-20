@@ -149,11 +149,18 @@ struct FlexGlassCfg {
   uint8_t trail;         // NUEVO: amplitud de los impactos de estela (0 = sin estela)
 };
 
-#define GLQ_ULTRA   0
-#define GLQ_HIGH    1
-#define GLQ_MEDIUM  2
-#define GLQ_LOW     3
-#define GLQ_N       4
+// WATER va POR ENCIMA de ULTRA (indice 0 = mejor). ULTRA se quedaba en 4 px
+// de desvio a proposito -- "mas que esto ya no parece vidrio curvado sino
+// agua", decia el comentario de abajo -- y agua es exactamente lo que se
+// pide ahora: el objetivo es acercarse al Liquid Glass de la referencia, no
+// al bisel discreto. ULTRA y los demas NO se tocan, asi que quien estuviera
+// conforme con el material anterior lo tiene intacto un escalon mas abajo.
+#define GLQ_WATER   0
+#define GLQ_ULTRA   1
+#define GLQ_HIGH    2
+#define GLQ_MEDIUM  3
+#define GLQ_LOW     4
+#define GLQ_N       5
 
 // Los valores salen de la restriccion visual, no de "lo que se puede subir":
 //  · refract 64/16 = 4 px de desplazamiento en el borde mismo, cayendo a 0 en
@@ -165,8 +172,16 @@ struct FlexGlassCfg {
 //    con la cuarta potencia: a 3 px de profundidad ya no llegan al 2 %. Por
 //    eso no producen un contorno blanco permanente.
 //  · irid 14/255 = 5,5 %: dentro del 0-10 % pedido.
+//
+// WATER rompe ese techo a proposito: refract 190/16 = 11,9 px (3,4 veces
+// ULTRA) sobre una banda de 24 px (1,7 veces). Es la magnitud que hace falta
+// para que el fondo se vea DOBLADO y no solo mordido en el canto, que es la
+// diferencia que se nota al lado de la referencia. El resto de sus valores
+// suben en la misma proporcion para que el material siga siendo coherente:
+// un canto que desvia 12 px con el Fresnel de ULTRA se veria despegado.
 static const FlexGlassCfg kGlassQ[GLQ_N] = {
   //              band blur  int refr chr fres pow  hi irid tAmp  tR wAmp wSpd vAmp trail
+  /* WATER  */ {   24,   6, 110, 190, 18,  65,  4,  55,  14, 140,  80,  85,   6,  55,  35 },
   /* ULTRA  */ {   14,   3,  48,  64, 12,  52,  4,  46,  14,  72,  60,  40,   6,  26,  22 },
   /* HIGH   */ {   11,   3,  40,  56,  8,  46,  4,  42,  10,  62,  54,  32,   6,  20,  18 },
   /* MEDIUM */ {    8,   4,  28,  44,  0,  38,  3,  34,   0,  46,  46,  20,   5,  14,   0 },
@@ -176,8 +191,8 @@ static const FlexGlassCfg kGlassQ[GLQ_N] = {
 // Perfil elegido por el usuario (techo) y perfil EFECTIVO (lo que se dibuja).
 // El efectivo nunca sube por encima del techo; solo puede bajar, y lo baja la
 // calidad adaptativa o el modo visual eficiente.
-static uint8_t gGlassQWant = GLQ_HIGH;
-static uint8_t gGlassQNow  = GLQ_HIGH;
+static uint8_t gGlassQWant = GLQ_WATER;
+static uint8_t gGlassQNow  = GLQ_WATER;
 // GENERACION DEL MATERIAL. Sube cada vez que el perfil efectivo cambia. Quien
 // CACHEA vidrio ya compuesto (la tarjeta de fondo plano, drawGlassCardFlat)
 // mete este numero en su firma: sin el, un cambio de calidad dejaria en
@@ -216,6 +231,26 @@ static const uint16_t kGlRecip[81] = {
     85,   84,   82,   80,   79,   77,   76,   74,   73,   72,   71,   69,   68,   67,   66,   65,
     64,   63,   62,   61,   60,   59,   59,   58,   57,   56,   55,   55,   54,   53,   53,   52,
     51
+};
+
+// CURVA DEL CANTO CON HOMBRO. Convierte edgeFactor (0 en el centro, 255 en
+// el canto) en la fraccion de desplazamiento que toca aplicar.
+//
+// Antes esto era ef^2, que concentra TODA la curvatura en el ultimo tercio:
+// a media banda queda el 25 % del desvio, asi que por mucho que se suba
+// 'refract' la deformacion se lee como una linea fina pegada al borde y no
+// como una lente. Subir refract con ef^2 no ensancha nada -- solo hace la
+// misma linea mas violenta.
+//
+// El hombro mantiene el desvio alto durante un tramo ANCHO y luego lo suelta
+// poco a poco hacia dentro. A media banda da el 62 % en vez del 25 %. Es lo
+// que hace que se vea un volumen de vidrio y no un bisel.
+//
+// 17 entradas para que el indice sea ef8>>4 (0..15) mas la centinela del
+// redondeo: un desplazamiento, ni una division. 17 bytes en FLASH.
+static const uint8_t kGlShoulder[17] = {
+    0,  14,  34,  60,  90, 120, 148, 172,
+  192, 208, 221, 231, 239, 245, 250, 253, 255
 };
 
 // Perfil de UN frente de onda. Indice 0..64 = el lobulo completo, con el
@@ -952,9 +987,16 @@ static inline bool glEdgePx(const GlassEdge& e, int i, GlassPx& o){
     ef8 = (int)(((uint32_t)num * e.recipBand) >> 12);
     if(ef8 > 255) ef8 = 255;
   }
-  // Perfil de la superficie. El vidrio no es un bisel plano: la curvatura se
-  // concentra en el ultimo tercio. ef^2 es justo eso, y cuesta un producto.
-  int curve = (ef8 * ef8) >> 8;
+  // Perfil de la superficie, por la curva con hombro (ver kGlShoulder). Se
+  // interpola entre las dos entradas vecinas para que no queden escalones de
+  // 1/16 de banda visibles en un canto ancho: dos lecturas de tabla, un
+  // producto y un desplazamiento, sin division.
+  int curve;
+  {
+    int kk = ef8 >> 4, fr = ef8 & 15;
+    int a = kGlShoulder[kk], b = kGlShoulder[kk + 1];
+    curve = a + (((b - a) * fr) >> 4);
+  }
 
   // ---- 4. refraccion = CAMPO INTERIOR + termino de borde ----
   // Los dos empalman sin costura: el interior alcanza su maximo justo donde
@@ -1224,7 +1266,23 @@ static void glassQualityTick(){
   uint32_t pct = (glStatUs / 10u) / dt;        // us/1000 sobre ms -> %
   const uint8_t before = gGlassQNow;
   if(pct > GL_BUDGET_PCT){
-    if(gGlassQNow < GLQ_LOW) gGlassQNow++;
+    // EL SUELO DE LA ESCALERA ES MEDIUM, NO LOW -- y esto arregla un fallo
+    // real, no es una preferencia.
+    //
+    // LOW tiene band=0, o sea glassAdvanced()==false: ahi el material
+    // AVANZADO se apaga ENTERO. Sin refraccion, sin Fresnel y, sobre todo,
+    // sin toque -- glassTouchDown() se va por su primera linea. Y quien
+    // empuja el presupuesto por encima del 22 % es justamente la
+    // recomposicion en vivo de un dedo apoyado, asi que la escalera bajaba
+    // HIGH -> MEDIUM -> LOW MIENTRAS SE TOCABA y el boton se quedaba
+    // congelado en mitad del gesto, con el estado interno avanzando y nada
+    // moviendose en pantalla. Era exactamente el sintoma reportado.
+    //
+    // MEDIUM sigue siendo barato (banda de 8 px, sin cromatica y sin estela)
+    // y conserva lo unico que no se puede perder: el desplazamiento real del
+    // fondo. LOW se queda para la emergencia de MEMORIA (modo eficiente), que
+    // es otra cosa y la decide gEffMode.
+    if(gGlassQNow < GLQ_MEDIUM) gGlassQNow++;
     glGoodWins = 0;
   } else if(pct < GL_RELAX_PCT){
     if(++glGoodWins >= 3){ glGoodWins = 0; if(gGlassQNow > cap) gGlassQNow--; }
