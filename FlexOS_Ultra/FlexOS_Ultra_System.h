@@ -119,11 +119,6 @@ static uint32_t memShedSystem(){
   // se toca, solo sus capturas (las que se sueltan caen al icono de la app).
   swThumbTrim(gEffMode ? 1 : 2);
 
-  // El vidrio acaba de perder su scratch y su tarjeta cacheada: la ventana de
-  // medida en curso ya no representa el coste del material, solo el de
-  // rehacer lo que se acaba de soltar. Se reabre limpia.
-  glassQualityReset();
-
   uint32_t after = memFreePsram();
   return after > before ? (after - before) : 0u;
 }
@@ -379,7 +374,6 @@ static void optTick(){
       if(flexMemLevel(memSnap()) >= FLEXMEM_LV_WARN && !gEffMode){
         gEffMode = true; optEffOn = true;
         glcValid = false; gHomeDirty = true; qsDirty = true;
-        glassQualityReset();   // el modo eficiente pone techo al perfil del vidrio
       }
       uint32_t now = gMem.psFree;
       optGained = (now > optFree0) ? (now - optFree0) : 0u;
@@ -421,8 +415,6 @@ static void themeChanged(bool save){
   qsDirty    = true;                          // qsBuf: la cortina se compone a partir de homeBuf
   glcValid   = false;                          // tarjeta Liquid Glass cacheada (tinte y fondo cambian)
   uiGlassBandEnd();                            // banda pre-desenfocada: lleva el tinte y el fondo VIEJOS
-  glassQualityReset();                         // el vidrio vuelve al perfil pedido: la medida anterior
-                                               // era de OTRO material y no vale para decidir nada
   dexBgWall  = 0xFF;                           // fondo de Modo PC: fuerza dexBgBuild() en el proximo frame
   // Miniaturas de Recientes: son capturas del framebuffer, o sea pixeles con el
   // tema viejo dentro. Se sueltan (y se recuperan solos la proxima vez que se

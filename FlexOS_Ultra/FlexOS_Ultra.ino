@@ -231,7 +231,6 @@
 #include "FlexOS_Ultra_Types.h"              // tipos de firma, interruptores maestros y estado temprano
 #include "FlexOS_Ultra_HAL.h"                // panel MIPI-DSI (ST7701) y tactil GT911  -- capa de hardware
 #include "FlexOS_Ultra_Gfx.h"                // motor grafico 480x800: framebuffers PSRAM, DMA2D y primitivas
-#include "FlexOS_Ultra_Glass.h"              // material de vidrio: SDF, refraccion, Fresnel y calidad adaptativa
 #include "FlexOS_Ultra_Wallpaper.h"          // catalogo de fondos, fondo desde imagen real y paleta
 #include "FlexOS_Ultra_Theme.h"              // tema semantico, claro/oscuro, Liquid Glass y superficies
 #include "FlexOS_Ultra_Text.h"               // tipografia base, acentos, reloj vectorial y triangulos
@@ -575,10 +574,7 @@ static void uiTick(){
   // se veia a saltos.
   if(appTrOwnsScreen()) return;    // la transicion posee la pantalla: nadie mas compone bandas
   bool qsVisible = (qsPanelY > 0 || qsAnimOn);
-  // Con el vidrio deformandose la cadencia sube a ~60 fps: la onda avanza
-  // por tiempo, asi que a 26 fps se veria a saltos sin ir mas despacio.
-  bool fastPath = qsVisible || glassTouchLive()
-                  || (gState == ST_HOME && !editMode && gRippleActive);
+  bool fastPath = qsVisible || (gState == ST_HOME && !editMode && gRippleActive);
   unsigned long interval = fastPath ? 16 : 38;
   if(millis() - uiAnimMs < interval) return;
   uiAnimMs = millis();
@@ -630,17 +626,13 @@ static uint32_t loopPaceMs(){
   // Gesto recien terminado: la inercia sigue corriendo y el dedo puede volver.
   if(T.lastMs && (uint32_t)(millis() - T.lastMs) < 400u) return 1;
   // Algo se esta moviendo en pantalla y su suavidad depende del ritmo.
-  // La deformacion del vidrio dura hasta ~780 ms desde el ultimo contacto
-  // (onda + recuperacion), o sea mas que los 400 ms de gracia de T.lastMs.
-  // Sin esto, la cola de la onda se veria a 5 ms por vuelta: a saltos.
-  if(appTrVisible() || qsPanelY > 0 || qsAnimOn || gRippleActive || glassTouchLive()) return 1;
+  if(appTrVisible() || qsPanelY > 0 || qsAnimOn || gRippleActive) return 1;
   return 5;
 }
 
 void loop(){
   flexFeedWdt();          // alimenta el TWDT solo si loopTask sigue suscrito (ver arriba)
   loopRateTick();         // ritmo real del sistema (vueltas/s), un entero por vuelta
-  glassQualityTick();     // vidrio: una ventana de un segundo, no una decision por cuadro
   flexPollTouch();        // (aqui dentro corre tambien el detector de doble-tap de la suspension)
 
   // -----------------------------------------------------------

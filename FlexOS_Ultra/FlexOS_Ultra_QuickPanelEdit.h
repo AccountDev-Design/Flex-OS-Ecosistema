@@ -424,20 +424,6 @@ static void qsTick(){
     qpGroupAnimStep();
     qpScrollAnimStep(dt);
   }
-  // 3.5) LA INTERACCION DEL VIDRIO TAMBIEN ENSUCIA.
-  //  Es lo que hace que el material se anime SOLO -- hundimiento, onda,
-  //  estela, recuperacion -- sin que nada mas haya cambiado en el panel.
-  //  Se pide recomponer UNICAMENTE la banda que la deformacion alcanza este
-  //  cuadro unida con la del anterior (para borrar la cola de la onda), que
-  //  es de lo que se encarga glassDirtyRect. No es un repintado de pantalla
-  //  completa: un impacto recien nacido son unas decenas de filas.
-  //
-  //  glassDirtyRect avanza el historial de cuadro, asi que se llama AQUI y
-  //  solo aqui dentro del panel: los compositores usan la consulta pura.
-  if(qsPanelY > 0 && glassTouchLive()){
-    int gx0, gy0, gx1, gy1;
-    if(glassDirtyRect(gx0, gy0, gx1, gy1)) qpRecompose(gy0, gy1);
-  }
   // 4) composicion + publicacion: UN solo punto de render en todo el panel
   if(qsPanelY > 0 || qsLastY > 0) qsRender(false);
   // 5) trabajo diferido que NO puede ocurrir dentro del gesto ni antes de

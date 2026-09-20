@@ -142,7 +142,6 @@ static void memTick(){
   if(gEffMode && blk && gMemAlerts.levelSeen && gMemAlerts.level == FLEXMEM_LV_OK){
     gEffMode = false;
     glcValid = false; gHomeDirty = true; qsDirty = true;
-    glassQualityReset();   // el modo eficiente ponia techo al vidrio: se levanta con el
   }
 }
 

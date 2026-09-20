@@ -57,7 +57,7 @@ BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test
         $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun
 
-.PHONY: all run all-boards fixtures clean ino lab
+.PHONY: all run all-boards fixtures clean ino
 all: run
 
 $(BUILD):
@@ -350,23 +350,6 @@ ino: ino_compile.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) $(BNO_SRC) $(FS_SRC)
 	@$(CXX) $(CXXSTD) -fsyntax-only $(WARN) $(FSFLAGS) $(FS_SRC)
 	@$(CXX) $(CXXSTD) -fsyntax-only $(WARN) $(FSFLAGS) $(ROOT)/FlexOS_FS.cpp
 	@echo "FlexOS_Ultra.ino compila."
-
-# #############################################################
-#  LABORATORIO OPTICO  ·  ver el vidrio, no solo comprobarlo
-#  ------------------------------------------------------------
-#  Vuelca a build/lab/ una serie de cuadros del compositor DE VERDAD:
-#  el material en reposo, el toque, la onda propagandose, el arrastre,
-#  el retorno, los botones, varias superficies y el scroll. Sirve para
-#  comparar a ojo antes y despues de tocar el material, que es lo unico
-#  que de verdad dice si "se deforma" o no.
-#
-#  Los PPM se convierten a PNG si hay Python (sin dependencias).
-# #############################################################
-lab: $(BUILD)/test_ino
-	@rm -rf $(BUILD)/lab && mkdir -p $(BUILD)/lab
-	@FLEXGLASS_LAB=$(BUILD)/lab $(BUILD)/test_ino > /dev/null
-	@python3 ppm2png.py $(BUILD)/lab 2>/dev/null || echo "  (sin Python: quedan los .ppm)"
-	@echo "Laboratorio optico en $(BUILD)/lab"
 
 # El mismo TU, pero ENLAZADO y EJECUTADO: main() comprueba el reloj del sistema,
 # la maquina de gestos del panel rapido y el teclado global: partes que son
