@@ -4735,6 +4735,156 @@ static int vgDiffBox(const uint16_t* a, const uint16_t* b, int y0, int y1, int x
   return n;
 }
 
+// #############################################################
+//  LABORATORIO OPTICO  ·  demostracion visual REPRODUCIBLE
+//  ------------------------------------------------------------
+//  Vuelca cuadros del compositor DE VERDAD a ficheros PPM para poder
+//  mirarlos. No es una maqueta ni una reimplementacion: cada cuadro
+//  sale de drawLiquidGlassPanel / qpGlassSurface / uiGlassPanelCached
+//  sobre el framebuffer real, con el mismo estado tactil que produce
+//  un dedo en la placa.
+//
+//      make lab                 -> escribe build/lab/*.ppm y, si hay
+//                                  Python, tambien los PNG
+//      FLEXGLASS_LAB=<dir> ./build/test_ino
+//
+//  Esta APAGADO salvo que la variable de entorno este puesta, asi que
+//  no cuesta nada en la bateria normal. Existe porque "el vidrio se
+//  deforma" no es algo que se pueda comprobar solo con asserts: hay
+//  que verlo, y hay que poder volver a verlo despues de cada cambio.
+// #############################################################
+static const char* glDir = NULL;
+static void glShot(const char* nom, int y0, int y1){
+  if(!glDir) return;
+  char ruta[320]; snprintf(ruta, sizeof(ruta), "%s/%s.ppm", glDir, nom);
+  FILE* f = fopen(ruta, "wb");
+  if(!f){ printf("  lab: no puedo escribir %s\n", ruta); return; }
+  fprintf(f, "P6\n%d %d\n255\n", SCR_W, y1 - y0 + 1);
+  for(int y = y0; y <= y1; y++)
+    for(int x = 0; x < SCR_W; x++){
+      uint16_t c = fb[(size_t)y * SCR_W + x];
+      unsigned char p3[3] = { (unsigned char)(((c >> 11) & 0x1F) * 255 / 31),
+                              (unsigned char)(((c >> 5)  & 0x3F) * 255 / 63),
+                              (unsigned char)(( c        & 0x1F) * 255 / 31) };
+      fwrite(p3, 1, 3, f);
+    }
+  fclose(f);
+}
+// El contenido que tiene que deformarse: patron de lineas (imagen), texto,
+// iconos y botones. Se repinta entero antes de cada cuadro para que el
+// vidrio siempre lea el MISMO fondo y la unica variable sea la interaccion.
+static void glScene(){
+  setBuf(fb); uiClipFull(); gLand = false;
+  for(int y = 0; y < SCR_H; y++){
+    uint16_t c = mix565(rgb565(250, 250, 252), rgb565(206, 220, 240), (uint8_t)(y * 255 / SCR_H));
+    for(int x = 0; x < SCR_W; x++) fb[(size_t)y * SCR_W + x] = c;
+  }
+  for(int x = 0; x < SCR_W; x += 26) fillRect(x, 0, 3, SCR_H, rgb565(24, 32, 56));
+  for(int y = 0; y < SCR_H; y += 26) fillRect(0, y, SCR_W, 3, rgb565(24, 32, 56));
+  for(int k = -16; k < 26; k++)
+    strokeSegAA((float)(k * 44), 0.0f, (float)(k * 44 + 380), (float)SCR_H, 2.0f, rgb565(214, 64, 42));
+  drawText(24,  96, "LIQUID GLASS", 3, rgb565(0, 0, 0));
+  drawText(24, 148, "ABCDEFGHIJKLM", 2, rgb565(0, 0, 0));
+  drawText(24, 182, "1234567890", 2, rgb565(0, 0, 0));
+  for(int k = 0; k < 5; k++) fillCircleA(52 + k * 94, 300, 28, rgb565(236, 122, 28), 255);
+  for(int k = 0; k < 5; k++) fillRoundRect(28 + k * 94, 372, 48, 48, 14, rgb565(28, 118, 224));
+  drawText(24, 470, "SCROLL + GLASS", 2, rgb565(0, 0, 0));
+  for(int k = 0; k < 6; k++)
+    fillRoundRect(24, 506 + k * 46, SCR_W - 48, 38, 12, (k & 1) ? rgb565(232,236,246) : rgb565(210,218,236));
+}
+static void glassLab(){
+  glDir = getenv("FLEXGLASS_LAB");
+  if(!glDir) return;
+  printf("Laboratorio optico -> %s\n", glDir);
+  const bool gp = uiGlass; const uint8_t qp = gGlassQWant;
+  uiGlass = true; gLand = false; gHosted = false; uiClipFull(); setBuf(fb);
+  gTestMs = 400000; glassTouchReset(); glcValid = false;
+
+  const int PX = 20, PY = 60, PW = 440, PH = 380;     // panel grande de ensayo
+  const int B0 = 40, B1 = 460;                        // banda que se vuelca
+
+  // ---- 1. el material, con y sin refraccion interior -------------------
+  gGlassQWant = GLQ_LOW;   glassQualityReset();
+  glScene(); drawLiquidGlassPanel(PX, PY, PW, PH, 30, TH_GLASS); glShot("01_material_clasico", B0, B1);
+  gGlassQWant = GLQ_ULTRA; glassQualityReset();
+  glScene(); drawLiquidGlassPanel(PX, PY, PW, PH, 30, TH_GLASS); glShot("02_material_refractando", B0, B1);
+  // el fondo desnudo, para poder comparar que se ha doblado
+  glScene(); glShot("00_fondo_sin_vidrio", B0, B1);
+
+  // ---- 2. toque, onda y propagacion ------------------------------------
+  gTestMs = 410000;
+  glassTouchDown(PX + PW / 2, PY + PH / 2);
+  gTestMs += 40;  glScene(); drawLiquidGlassPanel(PX, PY, PW, PH, 30, TH_GLASS); glShot("03_toque", B0, B1);
+  gTestMs += 90;  glScene(); drawLiquidGlassPanel(PX, PY, PW, PH, 30, TH_GLASS); glShot("04_onda_t1", B0, B1);
+  gTestMs += 110; glScene(); drawLiquidGlassPanel(PX, PY, PW, PH, 30, TH_GLASS); glShot("05_onda_t2", B0, B1);
+  gTestMs += 140; glScene(); drawLiquidGlassPanel(PX, PY, PW, PH, 30, TH_GLASS); glShot("06_onda_t3", B0, B1);
+
+  // ---- 3. el dedo se mueve: seguimiento y estela ------------------------
+  for(int k = 1; k <= 10; k++){ glassTouchMove(PX + 60 + k * 30, PY + PH / 2 + (k & 1 ? 10 : -10)); gTestMs += 16; }
+  glScene(); drawLiquidGlassPanel(PX, PY, PW, PH, 30, TH_GLASS); glShot("07_arrastre", B0, B1);
+
+  // ---- 4. soltar y recuperar -------------------------------------------
+  glassTouchUp();
+  gTestMs += 80;  glScene(); drawLiquidGlassPanel(PX, PY, PW, PH, 30, TH_GLASS); glShot("08_suelta", B0, B1);
+  gTestMs += 200; glScene(); drawLiquidGlassPanel(PX, PY, PW, PH, 30, TH_GLASS); glShot("09_recuperando", B0, B1);
+  gTestMs += GL_WAVE_MS + GL_DECAY_MS;
+  glScene(); drawLiquidGlassPanel(PX, PY, PW, PH, 30, TH_GLASS); glShot("10_reposo", B0, B1);
+
+  // ---- 5. botones: un toque local deforma su propia superficie ----------
+  auto botones = [&](const char* nom){
+    glScene();
+    for(int k = 0; k < 3; k++){
+      int bx = 26 + k * 148, by = 150;
+      drawLiquidGlassPanel(bx, by, 132, 64, 22, TH_GLASS2);
+      drawText(bx + 22, by + 24, k == 0 ? "UNO" : (k == 1 ? "DOS" : "TRES"), 2, TH_TXT);
+    }
+    glShot(nom, 120, 250);
+  };
+  glassTouchReset(); gTestMs += 100; botones("11_botones_reposo");
+  gTestMs += 20; glassTouchDown(26 + 148 + 66, 182); gTestMs += 70; botones("12_boton_pulsado");
+  glassTouchUp(); gTestMs += GL_WAVE_MS + GL_DECAY_MS + 50; botones("13_boton_recuperado");
+
+  // ---- 6. varias superficies y el dedo cruzandolas ----------------------
+  auto multi = [&](const char* nom){
+    glScene();
+    for(int k = 0; k < 4; k++) drawLiquidGlassPanel(18, 90 + k * 96, 444, 82, 26, TH_GLASS);
+    glShot(nom, 80, 470);
+  };
+  glassTouchReset(); gTestMs += 100; multi("14_multi_reposo");
+  glassTouchDown(90, 130);
+  for(int k = 1; k <= 14; k++){ glassTouchMove(90 + k * 22, 130 + k * 22); gTestMs += 16; }
+  multi("15_multi_cruzando");
+  glassTouchUp(); gTestMs += GL_WAVE_MS + GL_DECAY_MS + 50; multi("16_multi_recuperado");
+
+  // ---- 7. scroll: el contenido se mueve Y el vidrio se deforma ----------
+  // El desplazamiento del contenido es REAL (la escena se dibuja corrida),
+  // y la deformacion optica va encima: las dos cosas a la vez, que es justo
+  // lo que se pedia.
+  auto scroll = [&](int off, const char* nom){
+    glScene();
+    setBuf(fb);
+    fillRect(0, 300, SCR_W, 240, rgb565(246, 247, 250));
+    for(int k = 0; k < 8; k++){
+      int y = 310 + k * 44 - off;
+      if(y < 296 || y > 530) continue;
+      fillRoundRect(22, y, SCR_W - 44, 36, 12, (k & 1) ? rgb565(224,230,244) : rgb565(198,208,230));
+      char t[24]; snprintf(t, sizeof(t), "FILA %d", k);
+      drawText(38, y + 10, t, 2, rgb565(20, 28, 48));
+    }
+    drawLiquidGlassPanel(16, 306, 448, 224, 26, TH_GLASS);
+    glShot(nom, 290, 545);
+  };
+  glassTouchReset(); gTestMs += 100; scroll(0, "17_scroll_quieto");
+  glassTouchDown(240, 500);
+  for(int k = 1; k <= 8; k++){ glassTouchMove(240, 500 - k * 14); gTestMs += 16; }
+  scroll(112, "18_scroll_arrastrando");
+  glassTouchUp(); gTestMs += GL_WAVE_MS + GL_DECAY_MS + 50; scroll(112, "19_scroll_soltado");
+
+  glassTouchReset(); glcValid = false;
+  uiGlass = gp; gGlassQWant = qp; glassQualityReset();
+  printf("Laboratorio optico: 20 cuadros escritos\n");
+}
+
 static void testVidrioAvanzado(){
   printf("Liquid Glass avanzado: SDF, refraccion, Fresnel y toque\n");
   const bool glassPrev = uiGlass;
@@ -4742,7 +4892,7 @@ static void testVidrioAvanzado(){
   uiGlass = true; gLand = false; gHosted = false;
   uiClipFull(); setBuf(fb);
   gTestMs = 900000;
-  glassTouchUp(); gTestMs += GL_TOUCH_MS + 1; (void)glTouchAmp();   // sin toque pendiente
+  glassTouchReset();                                    // sin interaccion pendiente
 
   if(!vgA) vgA = (uint16_t*)malloc((size_t)SCR_W * SCR_H * 2);
   if(!vgB) vgB = (uint16_t*)malloc((size_t)SCR_W * SCR_H * 2);
@@ -4761,7 +4911,7 @@ static void testVidrioAvanzado(){
          (unsigned)sizeof(glRing), (unsigned)sizeof(GlassEdge), (unsigned)sizeof(GlassPx),
          (unsigned)(sizeof(kGlFall) + sizeof(kGlRecip) + sizeof(kGlassQ)));
   chk(sizeof(glRing) <= 8u * 1024u, "el anillo de filas cabe en 8 KB de RAM interna");
-  chk(sizeof(GlassEdge) <= 256u, "GlassEdge cabe en 256 B de pila");
+  chk(sizeof(GlassEdge) <= 320u, "GlassEdge cabe en 320 B de pila");
   chk(sizeof(GlassPx) <= 32u, "GlassPx cabe en 32 B de pila");
 
   // ---- 1 y 6. centro identico al clasico, y LOW == clasico ------------
@@ -4779,15 +4929,23 @@ static void testVidrioAvanzado(){
   // mas el radio. Con ULTRA la banda son 14 px y el radio 22 -> 36 columnas
   // y 36 filas a cada lado. Se toma un margen mas amplio (48) para que la
   // comprobacion no dependa del valor exacto del perfil.
+  // EL CENTRO TAMBIEN REFRACTA, y esa es justo la diferencia con la version
+  // anterior del material: antes el 87 % de los pixeles de un panel salian
+  // con desplazamiento exactamente cero y lo que hubiera detras -- una
+  // imagen, un texto, un icono -- aparecia intacto. La comprobacion es por
+  // tanto la CONTRARIA que antes: el centro TIENE que moverse.
   const int M = 48;
-  chk(vgDiffBox(vgA, vgB, Y0, Y1, X + M, X + W - 1 - M) > 0,
-      "hay diferencia en alguna parte del panel (si no, el efecto no hace nada)");
   {
-    int n = 0;
+    int n = 0, tot = 0;
     for(int y = Y0 + M; y <= Y1 - M; y++)
-      for(int x = X + M; x <= X + W - 1 - M; x++)
+      for(int x = X + M; x <= X + W - 1 - M; x++){
+        tot++;
         if(vgA[(size_t)(y - Y0) * SCR_W + x] != vgB[(size_t)(y - Y0) * SCR_W + x]) n++;
-    chk(n == 0, "el CENTRO del panel es bit a bit el material clasico");
+      }
+    printf("   centro del panel: %d/%d px cambian frente al material clasico (%.0f %%)\n",
+           n, tot, tot ? 100.0 * n / tot : 0.0);
+    chk(tot > 0 && n * 100 >= tot * 25,
+        "el CENTRO del panel refracta (no se queda en el material clasico)");
   }
   // ...y el borde SI cambia: el efecto existe.
   chk(vgDiffBox(vgA, vgB, Y0, Y0 + 3, X, X + W - 1) > 0,
@@ -4973,11 +5131,108 @@ static void testVidrioAvanzado(){
 
     // y caduca: al soltar y esperar, se vuelve exactamente al estado de reposo
     glassTouchUp();
-    gTestMs += GL_TOUCH_MS + 1;
+    gTestMs += GL_WAVE_MS + GL_DECAY_MS + 1;
     chk(!glassTouchLive(), "la deformacion por toque caduca sola");
     vgFondo(); drawLiquidGlassPanel(X, Y, W, H, R, TH_GLASS); lgGrab(vgB, Y0, Y1);
     vgFondo(); drawLiquidGlassPanel(X, Y, W, H, R, TH_GLASS); lgGrab(vgA, Y0, Y1);
     chk(lgDiff(vgA, vgB, Y0, Y1) == 0, "tras caducar el toque, el vidrio vuelve a reposo");
+  }
+
+  // ---- 7a. FISICA DE LA INTERACCION -----------------------------------
+  // El ciclo completo, medido sobre el compositor de verdad. Lo que se
+  // comprueba es que cada pieza haga lo suyo Y que ninguna deje residuo.
+  {
+    gGlassQWant = GLQ_ULTRA; glassQualityReset();
+    gTestMs = 970000; glassTouchReset();
+    chk(!glassTouchLive(), "en reposo no hay interaccion viva");
+
+    // (a) LA ONDA SE PROPAGA: el radio alcanzado crece con el tiempo.
+    glassTouchDown(240, 400);
+    int r0 = 0, r1 = 0, r2 = 0, bx0, by0, bx1, by1;
+    gTestMs += 30;  if(glassIaBox(bx0, by0, bx1, by1)) r0 = bx1 - bx0;
+    gTestMs += 150; if(glassIaBox(bx0, by0, bx1, by1)) r1 = bx1 - bx0;
+    gTestMs += 150; if(glassIaBox(bx0, by0, bx1, by1)) r2 = bx1 - bx0;
+    printf("   onda: alcance %d -> %d -> %d px\n", r0, r1, r2);
+    chk(r0 > 0 && r1 > r0 && r2 > r1, "el frente de onda se expande con el tiempo");
+
+    // (b) EL FRENTE ES UN ANILLO, no un disco que crece de brillo: a media
+    //     vida, el epicentro ya se ha quedado quieto y el borde no.
+    {
+      gTestMs = 980000; glassTouchReset(); glassTouchDown(240, 400); glassTouchUp();
+      gTestMs += 260;                                  // el frente ya viajo
+      GlassEdge e;
+      chk(glEdgeBegin(e, 440, 200, 24, 20, 300), "glEdgeBegin con onda viva");
+      chk(e.nImp > 0, "el panel ve la onda");
+      int j = 100;                                     // fila del epicentro
+      glEdgeRow(e, j);
+      int centro = 0, frente = 0;
+      for(int i = 0; i < 440; i++){
+        int ox = 0, oy = 0;
+        glInteract(e, i, j, ox, oy);
+        int m = ox < 0 ? -ox : ox;
+        int d = i - (240 - 20);                        // distancia al epicentro
+        if(d < 0) d = -d;
+        if(d < 10){ if(m > centro) centro = m; }
+        else if(d > 30 && d < 120){ if(m > frente) frente = m; }
+      }
+      printf("   anillo: |desplazamiento| epicentro %d, frente %d (1/16 px)\n", centro, frente);
+      chk(frente > centro, "la onda es un frente que viaja, no un disco en el epicentro");
+    }
+
+    // (c) IMPACTOS ACOTADOS: un arrastre largo no puede hacer crecer nada.
+    gTestMs = 990000; glassTouchReset();
+    glassTouchDown(40, 400);
+    for(int k = 1; k <= 200; k++){ glassTouchMove(40 + (k * 7) % 400, 400 + (k * 3) % 60); gTestMs += 8; }
+    int vivos = 0;
+    for(int k = 0; k < GLI_MAX; k++) if(glImp[k].amp) vivos++;
+    printf("   tras 200 muestras de arrastre: %d impactos vivos (tope %d)\n", vivos, GLI_MAX);
+    chk(vivos <= GLI_MAX, "los impactos nunca pasan del tope fijo");
+    chk(vivos > 0, "un arrastre largo si siembra estela");
+
+    // (d) VELOCIDAD ACOTADA: una muestra absurda no puede dar un tiron.
+    {
+      gTestMs = 995000; glassTouchReset();
+      glassTouchDown(10, 400);
+      for(int k = 0; k < 8; k++){ glassTouchMove(10 + k * 400, 400); gTestMs += 8; }   // salto brutal
+      GlassEdge e; glEdgeBegin(e, 440, 200, 24, 20, 300);
+      int m = glOctLen(e.vdx4, e.vdy4);
+      printf("   velocidad: desplazamiento uniforme %d/16 px con un salto de 400 px/muestra\n", m);
+      chk(m <= (int)GLC().velAmp + 4, "el estiramiento por velocidad esta acotado");
+    }
+
+    // (e) EL CICLO DE VIDA TERMINA. Siempre, y sin residuo.
+    gTestMs = 1000000; glassTouchReset();
+    glassTouchDown(200, 300);
+    for(int k = 0; k < 6; k++){ glassTouchMove(200 + k * 12, 300); gTestMs += 16; }
+    glassTouchUp();
+    gTestMs += GL_WAVE_MS + GL_DECAY_MS + 1;
+    chk(!glassTouchLive(), "la interaccion caduca entera por si sola");
+    chk(glPressure() == 0, "la presion vuelve a cero");
+    for(int k = 0; k < GLI_MAX; k++) chk(glImp[k].amp == 0, "no queda ningun impacto vivo");
+    int q0, q1, q2, q3;
+    chk(!glassIaBox(q0, q1, q2, q3), "en reposo la caja interactiva esta vacia");
+
+    // (f) glassIaBox NO tiene efectos secundarios: la llaman todas las
+    //     tarjetas cacheadas de una pantalla, una detras de otra.
+    gTestMs = 1010000; glassTouchReset(); glassTouchDown(240, 400); gTestMs += 50;
+    int a0, b0, a1, b1, c0b, d0b, c1b, d1b;
+    chk(glassIaBox(a0, b0, a1, b1), "la caja existe con el dedo apoyado");
+    for(int k = 0; k < 20; k++) glassIaBox(c0b, d0b, c1b, d1b);
+    chk(a0 == c0b && b0 == d0b && a1 == c1b && b1 == d1b,
+        "glassIaBox es una consulta pura (20 llamadas dan lo mismo)");
+    glassTouchReset();
+
+    // (g) LA REGION SUCIA CUBRE LA COLA: union con el cuadro anterior.
+    gTestMs = 1020000; glassTouchReset();
+    glassTouchDown(240, 400); gTestMs += 40;
+    int p0x, p0y, p1x, p1y;
+    chk(glassDirtyRect(p0x, p0y, p1x, p1y), "hay region sucia con la onda viva");
+    int ancho1 = p1x - p0x;
+    gTestMs += 200;
+    chk(glassDirtyRect(p0x, p0y, p1x, p1y), "sigue habiendo region sucia");
+    chk(p1x - p0x >= ancho1, "la region sucia incluye la del cuadro anterior");
+    chk(p0x >= 0 && p0y >= 0 && p1x < SCR_W && p1y < SCR_H, "la region sucia cabe en la pantalla");
+    glassTouchReset();
   }
 
   // ---- 7b. el toque NO se graba en la tarjeta cacheada -----------------
@@ -4998,7 +5253,7 @@ static void testVidrioAvanzado(){
     lgGrab(vgB, 300, 300 + CH - 1);
     chk(lgDiff(vgA, vgB, 300, 300 + CH - 1) == 0,
         "el dedo no se graba en la tarjeta de vidrio cacheada");
-    glassTouchUp(); gTestMs += GL_TOUCH_MS + 1; (void)glTouchAmp();
+    glassTouchUp(); gTestMs += GL_WAVE_MS + GL_DECAY_MS + 1; (void)glassTouchLive();
     // y un cambio de perfil SI invalida la cache
     glcValid = false;
     fillRect(0, 0, SCR_W, SCR_H, BG);
@@ -5033,8 +5288,14 @@ static void testVidrioAvanzado(){
       // recorte vertical y horizontal arbitrarios, como los de una lista
       gClipY0 = nx(0, SCR_H - 1); gClipY1 = nx(gClipY0, SCR_H - 1);
       gClipX0 = nx(0, SCR_W - 1); gClipX1 = nx(gClipX0, SCR_W - 1);
-      if(nx(0, 3) == 0){ glassTouchDown(nx(-40, SCR_W + 40), nx(-40, SCR_H + 40)); gTestMs += nx(0, 260); }
-      else             { glassTouchUp(); gTestMs += nx(0, 400); }
+      switch(nx(0, 4)){
+        case 0: glassTouchDown(nx(-40, SCR_W + 40), nx(-40, SCR_H + 40)); break;
+        case 1: glassTouchMove(nx(-40, SCR_W + 40), nx(-40, SCR_H + 40)); break;
+        case 2: glassTouchUp(); break;
+        case 3: glassTouchReset(); break;
+        default: break;
+      }
+      gTestMs += nx(0, 300);
       switch(nx(0, 2)){
         case 0: drawLiquidGlassPanel(xx, yy, ww, hh, rr, TH_GLASS); break;
         case 1: qpGlassSurface(xx, yy, ww, hh, rr, TH_GLASS2, nx(96, 255)); break;
@@ -5050,7 +5311,7 @@ static void testVidrioAvanzado(){
       }
     }
     uiClipFull();
-    glassTouchUp(); gTestMs += GL_TOUCH_MS + 1; (void)glTouchAmp();
+    glassTouchUp(); gTestMs += GL_WAVE_MS + GL_DECAY_MS + 1; (void)glassTouchLive();
     // El veredicto de este bloque lo da AddressSanitizer: si algo se sale,
     // la bateria entera aborta ahi mismo con la pila del acceso.
     printf("   ruido: 400 paneles al azar (geometria, radio, recorte, perfil y dedo), sin accesos fuera de rango\n");
@@ -7217,6 +7478,7 @@ int main(){
   testLiquidGlassSinApilar();
   testBlurNoPegado();
   testVidrioAvanzado();
+  glassLab();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

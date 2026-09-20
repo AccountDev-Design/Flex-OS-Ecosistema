@@ -54,6 +54,37 @@
 // resultado; lo unico que cambia es que el fondo se lee del propio buffer a
 // traves del anillo de filas (glSampleIP) en vez de un buffer aparte.
 // 'i0/i1' van en coordenadas del PANEL, 'curY' es la fila absoluta.
+// Gemelo EN SITIO de glassIntSpan: el tramo interior del panel rapido. Lee
+// por el anillo de filas, igual que qpEdgeSpan, pero con la fila de origen
+// resuelta UNA vez fuera del bucle -- en el interior el desplazamiento
+// vertical es constante para toda la fila.
+static void qpIntSpan(const GlassEdge& ge, uint16_t* dst, int x, int y, int w, int h,
+                      int curY, int i0, int i1,
+                      uint16_t tint, uint8_t tintMix, uint16_t shCol, uint8_t shA){
+  // Igual que glassIntSpan, pero las dos filas de origen salen del anillo
+  // (origen y destino son el mismo buffer) y estan indexadas por columna
+  // absoluta, asi que la mezcla se hace con el desplazamiento de x.
+  int fy4 = ((curY - y) << 4) + ge.rowOy4;
+  int iy = fy4 >> 4, ty = (fy4 & 15) << 4;
+  if(iy < 0){ iy = 0; ty = 0; }
+  if(iy > h - 1){ iy = h - 1; ty = 0; }
+  const uint16_t* r0 = glRingRow(gBuf, SCR_W, y + iy, curY) + x;
+  int n = w < SCR_W - x ? w : SCR_W - x;
+  if(n < 0) n = 0;
+  if(ty == 0) memcpy(glIntRowBuf, r0, (size_t)n * 2);
+  else {
+    const uint16_t* r1 = glRingRow(gBuf, SCR_W, y + ((iy + 1 < h) ? iy + 1 : iy), curY) + x;
+    for(int i = 0; i < n; i++) glIntRowBuf[i] = mix565(r0[i], r1[i], (uint8_t)ty);
+  }
+  for(int i = i0; i <= i1; i++){
+    int ax = x + i;
+    if(ax < 0 || ax >= SCR_W) continue;
+    uint16_t c = mix565(glSampleRow(n, glIntSx(i)), tint, tintMix);
+    if(shA) c = mix565(c, shCol, shA);
+    dst[ax] = c;
+  }
+}
+
 static void qpEdgeSpan(GlassEdge& ge, uint16_t* dst, int x, int y, int w, int h,
                        int curY, int i0, int i1,
                        uint16_t tint, uint8_t tintMix, uint16_t shCol, uint8_t shA){
@@ -64,8 +95,12 @@ static void qpEdgeSpan(GlassEdge& ge, uint16_t* dst, int x, int y, int w, int h,
     int ax = x + i;
     if(ax < 0 || ax >= SCR_W) continue;
     GlassPx o;
-    if(!glEdgePx(ge, i, o)){                 // centro puro: la mezcla de siempre
-      uint16_t c = mix565(dst[ax], tint, tintMix);
+    if(!glEdgePx(ge, i, o)){
+      // Mismo caso que en glassEdgeSpan: interior que cayo en este tramo
+      // porque la interaccion partio la fila. Le toca el campo interior.
+      uint16_t c = glSampleIP(gBuf, SCR_W, x, y, w, h, curY,
+                              glIntSx(i), sy4 + ge.rowOy4);
+      c = mix565(c, tint, tintMix);
       if(shA) c = mix565(c, shCol, shA);
       dst[ax] = c;
       continue;
@@ -75,7 +110,7 @@ static void qpEdgeSpan(GlassEdge& ge, uint16_t* dst, int x, int y, int w, int h,
     // origen es el suyo y la bilineal sobra.
     uint16_t c = (o.ox4 | o.oy4 | o.chx4 | o.chy4)
                    ? glRefractIP(o, gBuf, SCR_W, x, y, w, h, curY, i << 4, sy4)
-                   : dst[ax];
+                   : glSampleIP(gBuf, SCR_W, x, y, w, h, curY, i << 4, sy4);
     c = mix565(c, tint, tintMix);
     if(shA) c = mix565(c, shCol, shA);
     c = glLight(o, c);
@@ -172,11 +207,7 @@ static void qpGlassSurface(int x, int y, int w, int h, int rad, uint16_t tint, i
         if(c0 - 1 >= p0)
           qpEdgeSpan(ge, dst, x, y, w, h, yy, p0, (c0 - 1 < p1 ? c0 - 1 : p1), tint, tintMix, shCol, shA);
         int m0 = c0 > p0 ? c0 : p0, m1 = c1 < p1 ? c1 : p1;
-        for(int i = x + m0; i <= x + m1; i++){
-          uint16_t out = mix565(dst[i], tint, tintMix);
-          if(shA) out = mix565(out, shCol, shA);
-          dst[i] = out;
-        }
+        if(m0 <= m1) qpIntSpan(ge, dst, x, y, w, h, yy, m0, m1, tint, tintMix, shCol, shA);
         if(c1 + 1 <= p1)
           qpEdgeSpan(ge, dst, x, y, w, h, yy, (c1 + 1 > p0 ? c1 + 1 : p0), p1, tint, tintMix, shCol, shA);
       } else {

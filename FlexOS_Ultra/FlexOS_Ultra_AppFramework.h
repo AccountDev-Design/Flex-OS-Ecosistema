@@ -979,6 +979,11 @@ static void touchDropAll(){
   gTouchSwallow = true;              // ...y se ignora hasta que el dedo se levante de verdad
   gNavPress = -1;
   gNavGlow  = -1;
+  // La deformacion del vidrio pertenece al episodio tactil que acaba de
+  // morir: una onda de la pantalla anterior no puede seguir propagandose
+  // sobre la siguiente. Se corta aqui, en el mismo sitio y por el mismo
+  // motivo que el resto del estado del toque.
+  glassTouchReset();
 }
 
 // #############################################################

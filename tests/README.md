@@ -12,6 +12,7 @@ cd tests/host
 make                # todas las baterías (perfil Ultra/P4)
 make all-boards     # el código de dispositivo en los tres perfiles
 make tools          # jpegcheck, flexpkgcheck y flexapprun
+make lab            # laboratorio óptico del Liquid Glass -> build/lab/*.png
 make clean
 ```
 

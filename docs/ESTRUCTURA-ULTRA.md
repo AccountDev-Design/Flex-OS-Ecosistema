@@ -71,9 +71,9 @@ Esa frontera no se ha tocado.
 | `FlexOS_Ultra_Types.h`            |   668 | tipos de firma, interruptores maestros y estado temprano |
 | `FlexOS_Ultra_HAL.h`              |   434 | panel MIPI-DSI (ST7701) y tactil GT911  -- capa de hardware |
 | `FlexOS_Ultra_Gfx.h`              |   568 | motor grafico 480x800: framebuffers PSRAM, DMA2D y primitivas |
-| `FlexOS_Ultra_Glass.h`            |   826 | material de vidrio: SDF, refraccion, Fresnel, toque y calidad adaptativa |
+| `FlexOS_Ultra_Glass.h`            |  1288 | material de vidrio: SDF, refraccion, Fresnel, toque y calidad adaptativa |
 | `FlexOS_Ultra_Wallpaper.h`        |   479 | catalogo de fondos, fondo desde imagen real y paleta |
-| `FlexOS_Ultra_Theme.h`            |   968 | tema semantico, claro/oscuro, Liquid Glass y superficies |
+| `FlexOS_Ultra_Theme.h`            |  1012 | tema semantico, claro/oscuro, Liquid Glass y superficies |
 | `FlexOS_Ultra_Text.h`             |   170 | tipografia base, acentos, reloj vectorial y triangulos |
 | `FlexOS_Ultra_Font.h`             |  1922 | fuente Outfit 4bpp (tablas + rasterizador) |
 | `FlexOS_Ultra_Icons.h`            |   292 | iconos vectoriales del sistema y enum IC_* de apps |
@@ -85,7 +85,7 @@ Esa frontera no se ha tocado.
 | `FlexOS_Ultra_Home.h`             |  1522 | escritorio por paginas, deslizamiento y modo edicion |
 | `FlexOS_Ultra_Widgets.h`          |   421 | widgets del escritorio y su refresco de datos |
 | `FlexOS_Ultra_HomeCfg.h`          |  1307 | modo personalizacion del inicio y gesto de pellizco |
-| `FlexOS_Ultra_AppFramework.h`     |  1043 | marco de app, transiciones, nav inferior y ciclo de vida |
+| `FlexOS_Ultra_AppFramework.h`     |  1107 | marco de app, transiciones, nav inferior y ciclo de vida |
 | `FlexOS_Ultra_Core.h`             |  1058 | memoria, multitarea, los tres botones y rendimiento |
 | `FlexOS_Ultra_AppSettings.h`      |   779 | app Ajustes |
 | `FlexOS_Ultra_AppsBasic.h`        |   404 | Calculadora, Calendario y marco de Galeria |
@@ -93,8 +93,8 @@ Esa frontera no se ha tocado.
 | `FlexOS_Ultra_DeXDraw.h`          |  1148 | Modo PC / DeX: dibujo |
 | `FlexOS_Ultra_DeXInput.h`         |   619 | Modo PC / DeX: entrada, APP_REG y ciclo de vida |
 | `FlexOS_Ultra_QuickPanel.h`       |   895 | panel rapido: catalogo de controles y render |
-| `FlexOS_Ultra_QuickPanelGlass.h`  |  1689 | panel rapido: material Liquid Glass cacheado |
-| `FlexOS_Ultra_QuickPanelEdit.h`   |   545 | panel rapido: modo edicion |
+| `FlexOS_Ultra_QuickPanelGlass.h`  |  1720 | panel rapido: material Liquid Glass cacheado |
+| `FlexOS_Ultra_QuickPanelEdit.h`   |   591 | panel rapido: modo edicion |
 | `FlexOS_Ultra_Media.h`            |   454 | nucleo de medios LittleFS: clasificacion e indice |
 | `FlexOS_Ultra_AppMultimedia.h`    |  1378 | app Multimedia (reproductor real) |
 | `FlexOS_Ultra_AppCamera.h`        |   213 | app Camara |

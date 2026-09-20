@@ -112,9 +112,29 @@ static inline uint8_t effShadow(int a){
 // ##    irid      cuanto tine la luz segun la normal (0-255 = 0-100%).
 // ##    touchAmp  amplitud de la deformacion por toque, en 1/16 de pixel.
 // ##    touchR    radio del hundimiento del dedo, en pixeles.
+// ##    blur      radio del box-blur del fondo, en pixeles. BAJO A PROPOSITO
+// ##              con material avanzado: el desenfoque de radio 6 que tenia
+// ##              el material clasico borra el detalle fino ANTES de poder
+// ##              doblarlo, y entonces la refraccion no se ve porque no hay
+// ##              nada que refractar. Un radio 3 deja estructura -- lineas,
+// ##              texto grande, iconos -- que SI se puede doblar, y el
+// ##              material sigue leyendose como vidrio y no como una
+// ##              ventana. El perfil BAJA conserva el 6 de siempre.
+// ##    interior  refraccion del INTERIOR, en 1/16 de pixel MEDIDA EN EL BORDE
+// ##              del panel. Es el campo que hace que el material sea una
+// ##              lente y no un bisel: sin el, el 87 % de los pixeles de un
+// ##              panel tenian desplazamiento exactamente cero y lo que
+// ##              habia detras salia intacto.
+// ##    waveAmp   amplitud del frente de onda de un impacto (1/16 px).
+// ##    waveSpd   velocidad del frente, en pixeles por cada 16 ms.
+// ##    velAmp    cuanto suma la velocidad del dedo, al tope (1/16 px).
+// ##    trail     amplitud de los impactos que siembra el arrastre; 0 = sin
+// ##              estela.
 // #############################################################
 struct FlexGlassCfg {
   uint8_t band;
+  uint8_t blur;          // NUEVO: radio del box-blur del fondo
+  uint8_t interior;      // NUEVO: refraccion del INTERIOR del panel (1/16 px en su borde)
   uint8_t refract;
   uint8_t chroma;
   uint8_t fresnel;
@@ -123,6 +143,10 @@ struct FlexGlassCfg {
   uint8_t irid;
   uint8_t touchAmp;
   uint8_t touchR;
+  uint8_t waveAmp;       // NUEVO: amplitud de la onda que se propaga (1/16 px)
+  uint8_t waveSpd;       // NUEVO: velocidad del frente (px por 16 ms)
+  uint8_t velAmp;        // NUEVO: cuanto suma la velocidad del dedo (1/16 px al tope)
+  uint8_t trail;         // NUEVO: amplitud de los impactos de estela (0 = sin estela)
 };
 
 #define GLQ_ULTRA   0
@@ -142,10 +166,11 @@ struct FlexGlassCfg {
 //    eso no producen un contorno blanco permanente.
 //  · irid 14/255 = 5,5 %: dentro del 0-10 % pedido.
 static const FlexGlassCfg kGlassQ[GLQ_N] = {
-  /* ULTRA  */ { 14, 64, 12, 52, 4, 46, 14, 56, 44 },
-  /* HIGH   */ { 11, 56,  8, 46, 4, 42, 10, 48, 40 },
-  /* MEDIUM */ {  8, 44,  0, 38, 3, 34,  0, 38, 34 },
-  /* LOW    */ {  0,  0,  0,  0, 0,  0,  0,  0,  0 },
+  //              band blur  int refr chr fres pow  hi irid tAmp  tR wAmp wSpd vAmp trail
+  /* ULTRA  */ {   14,   3,  48,  64, 12,  52,  4,  46,  14,  72,  60,  40,   6,  26,  22 },
+  /* HIGH   */ {   11,   3,  40,  56,  8,  46,  4,  42,  10,  62,  54,  32,   6,  20,  18 },
+  /* MEDIUM */ {    8,   4,  28,  44,  0,  38,  3,  34,   0,  46,  46,  20,   5,  14,   0 },
+  /* LOW    */ {    0,   6,   0,   0,  0,   0,  0,   0,   0,   0,   0,   0,   0,   0,   0 },
 };
 
 // Perfil elegido por el usuario (techo) y perfil EFECTIVO (lo que se dibuja).
@@ -167,63 +192,6 @@ static uint32_t gGlassGen = 0;
 static bool gGlassNoTouch = false;
 static inline const FlexGlassCfg& GLC(){ return kGlassQ[gGlassQNow]; }
 static inline bool glassAdvanced(){ return kGlassQ[gGlassQNow].band != 0; }
-
-// #############################################################
-// ##  DEFORMACION POR TOQUE  ·  estado, no animacion
-// ##  ----------------------------------------------------------
-// ##  El manejador tactil SOLO escribe aqui (tres enteros). No captura
-// ##  pantalla, no desenfoca, no calcula SDF y no lanza ningun hilo: eso
-// ##  volveria a meter latencia justo donde no puede haberla.
-// ##
-// ##  Quien interpola es el compositor, en el cuadro que ya iba a
-// ##  dibujar. En reposo glTouchAmp() devuelve 0 y todo el bloque de
-// ##  toque se salta con una comparacion: CERO coste cuando no hay dedo.
-// ##
-// ##  LIMITACION HONESTA, y es deliberada: esto NO fuerza a repintar
-// ##  ningun panel. La deformacion se ve en las superficies que el
-// ##  sistema ya estaba repintando durante esos ~190 ms -- que son
-// ##  justo las que el dedo esta tocando (destello del control del panel
-// ##  rapido, fila resaltada de una lista, boton pulsado, icono del
-// ##  escritorio). Forzar un repintado global por cada toque seria
-// ##  exactamente el "full-screen redraw por cada touch" prohibido.
-// #############################################################
-#define GL_TOUCH_MS 190                 // duracion del hundimiento + retorno
-static int      glTouchX  = 0, glTouchY = 0;
-static uint32_t glTouchT0 = 0;
-static bool     glTouchDn = false;      // dedo todavia apoyado
-
-// Hay deformacion en curso. CADUCA AQUI, y no en quien pregunte por la
-// amplitud: si la caducidad viviera en glTouchAmp(), el estado seguiria
-// "vivo" para todo el que solo preguntase si hay dedo -- y eso es justo lo
-// que hace el compositor en su primera linea, antes de pedir nada mas.
-static inline bool glassTouchLive(){
-  if(!glTouchT0) return false;
-  if(glTouchDn)  return true;
-  if((uint32_t)(millis() - glTouchT0) >= GL_TOUCH_MS){ glTouchT0 = 0; return false; }
-  return true;
-}
-// Curva del gesto: sube deprisa (hundimiento) y vuelve despacio (elastico).
-// Con el dedo APOYADO se queda en el tope; al soltar decae. Devuelve 0..255.
-static uint8_t glTouchAmp(){
-  if(!glassTouchLive()) return 0;
-  uint32_t e = millis() - glTouchT0;
-  if(glTouchDn) return (e < 60u) ? (uint8_t)(255u * e / 60u) : 255;
-  uint32_t k = 255u - (255u * e) / GL_TOUCH_MS;
-  return (uint8_t)((k * k) >> 8);        // retorno suave, no lineal
-}
-// Los llama el tactil de alto nivel. Son tres asignaciones: nada mas.
-static inline void glassTouchDown(int x, int y){
-  if(!glassAdvanced() || GLC().touchAmp == 0) return;
-  glTouchX = x; glTouchY = y; glTouchT0 = millis(); glTouchDn = true;
-}
-static inline void glassTouchMove(int x, int y){
-  if(!glTouchDn) return;
-  glTouchX = x; glTouchY = y;
-}
-static inline void glassTouchUp(){
-  if(!glTouchDn) return;
-  glTouchDn = false; glTouchT0 = millis();   // reinicia el reloj para el retorno
-}
 
 // #############################################################
 // ##  TABLAS PRECALCULADAS  ·  ni una division ni un pow por pixel
@@ -250,6 +218,19 @@ static const uint16_t kGlRecip[81] = {
     51
 };
 
+// Perfil de UN frente de onda. Indice 0..64 = el lobulo completo, con el
+// frente justo en el centro (k=32). Es un solo ciclo -- compresion y despues
+// rarefaccion -- y no un tren de senos: un tren se lee como agua, y esto
+// tiene que leerse como un impacto en un material solido. Generado con
+// sin(pi*t)*exp(-2.2*t^2) y normalizado a +-127.
+static const int8_t kGlWave[65] = {
+     0,   -3,   -6,   -9,  -13,  -19,  -25,  -31,  -38,  -47,  -55,  -64,  -74,
+   -83,  -92, -100, -108, -115, -121, -126, -127, -127, -126, -121, -115, -108,
+   -96,  -84,  -69,  -53,  -37,  -18,    0,   18,   37,   53,   69,   84,   96,
+   108,  115,  121,  126,  127,  127,  126,  121,  115,  108,  100,   92,   83,
+    74,   64,   55,   47,   38,   31,   25,   19,   13,    9,    6,    3,    0
+};
+
 // Longitud euclidea aproximada por la regla del octogono: max + min/2. El
 // error es de +-6 % y ahi no se nota nada, porque la MAGNITUD del efecto la
 // fija edgeFactor y no esta normalizacion. A cambio se ahorra una raiz por
@@ -258,6 +239,245 @@ static inline int glOctLen(int a, int b){
   if(a < 0) a = -a;
   if(b < 0) b = -b;
   return (a > b) ? (a + (b >> 1)) : (b + (a >> 1));
+}
+
+// #############################################################
+// ##  INTERACCION  ·  una maquina de estados, no tres variables
+// ##  ----------------------------------------------------------
+// ##  Ciclo completo, y ninguno de sus estados se queda atascado:
+// ##
+// ##      IDLE -> DOWN -> ACTIVE -> MOVING -> RELEASE -> DECAY -> IDLE
+// ##
+// ##  El manejador tactil SOLO escribe aqui. No captura pantalla, no
+// ##  desenfoca, no calcula SDF y no lanza ningun hilo: eso volveria a
+// ##  meter el coste del efecto dentro de la ruta del tacto, que es
+// ##  exactamente donde no puede estar. Quien interpola es el
+// ##  compositor, en el cuadro que ya iba a dibujar.
+// ##
+// ##  Cuatro cosas deforman, y las cuatro salen de este estado:
+// ##    1. PRESION    -- hundimiento bajo el dedo mientras esta apoyado.
+// ##    2. ONDA       -- frentes que se expanden desde cada impacto.
+// ##    3. VELOCIDAD  -- el arrastre estira el material en su direccion.
+// ##    4. ESTELA     -- impactos pequenos sembrados por el recorrido.
+// ##
+// ##  Los impactos viven en un array FIJO de GLI_MAX. No hay lista
+// ##  dinamica, no hay malloc por toque y un gesto rapido no puede
+// ##  hacer crecer nada: el hueco mas viejo se reutiliza.
+// #############################################################
+#define GLI_MAX        3        // impactos simultaneos (el mas viejo se recicla)
+#define GL_PRESS_MS    90       // subida de la presion al apoyar
+#define GL_DECAY_MS    260      // recuperacion despues de soltar
+#define GL_WAVE_MS     520      // vida de un frente de onda
+#define GL_TRAIL_STEP  22       // pixeles de recorrido entre dos impactos de estela
+#define GL_VEL_MAX     64       // tope de px por muestra que se acepta como velocidad
+
+struct GlassImpact {
+  int16_t  x, y;
+  uint32_t t0;
+  uint8_t  amp;                 // 0..255; los de estela nacen mas flojos
+};
+static GlassImpact glImp[GLI_MAX];
+static uint8_t     glImpNext = 0;
+
+static int      glTx = 0, glTy = 0;          // dedo, en coordenadas de pantalla
+static int      glVx = 0, glVy = 0;          // velocidad suavizada (px por muestra)
+static int      glSeedX = 0, glSeedY = 0;    // ultimo punto donde se sembro estela
+static bool     glDown = false;              // dedo apoyado
+static uint32_t glDownMs = 0;                // millis del contacto
+static uint32_t glUpMs = 0;                  // millis del release (0 = no hubo)
+
+// Rectangulo que la interaccion puede estar tocando ESTE cuadro, y el del
+// cuadro anterior: quien fuerce un repintado necesita los dos, porque la cola
+// de la onda tiene que borrarse de donde estaba.
+static int glDirty0X = 0, glDirty0Y = 0, glDirty1X = -1, glDirty1Y = -1;
+static int glPrevDX0 = 0, glPrevDY0 = 0, glPrevDX1 = -1, glPrevDY1 = -1;
+
+// ---- ciclo de vida -------------------------------------------------------
+// Alcance de un impacto AHORA: el frente ha viajado waveSpd px cada 16 ms y
+// el lobulo de la onda ocupa otro tanto por delante.
+static inline int glImpReach(const FlexGlassCfg& c, uint32_t age){
+  return (int)((age * c.waveSpd) >> 4) + 2 * c.touchR;
+}
+// Amplitud de un impacto AHORA. Cae con el cuadrado del tiempo: rapido al
+// principio y con una cola suave, que es como muere una onda real.
+static inline int glImpAmp(const GlassImpact& im, uint32_t now){
+  if(!im.amp) return 0;
+  uint32_t age = now - im.t0;
+  if(age >= GL_WAVE_MS) return 0;
+  uint32_t k = 255u - (255u * age) / GL_WAVE_MS;
+  return (int)(((k * k) >> 8) * im.amp) >> 8;
+}
+// Presion bajo el dedo: sube al apoyar, se mantiene, y decae al soltar.
+// Es la unica parte que distingue DOWN de RELEASE.
+static uint8_t glPressure(){
+  uint32_t now = millis();
+  if(glDown){
+    uint32_t e = now - glDownMs;
+    return (e < GL_PRESS_MS) ? (uint8_t)(255u * e / GL_PRESS_MS) : 255;
+  }
+  if(!glUpMs) return 0;
+  uint32_t e = now - glUpMs;
+  if(e >= GL_DECAY_MS){ glUpMs = 0; return 0; }
+  uint32_t k = 255u - (255u * e) / GL_DECAY_MS;
+  return (uint8_t)((k * k) >> 8);            // retorno suave, no lineal
+}
+// Hay algo vivo. Es la primera pregunta de todo compositor, asi que ademas
+// CADUCA lo que ya no vale: sin esto, el estado seguiria "vivo" para quien
+// solo preguntase, y la interaccion nunca volveria a cero.
+static bool glassTouchLive(){
+  uint32_t now = millis();
+  bool live = glDown || glPressure() != 0;
+  for(int k = 0; k < GLI_MAX; k++){
+    if(!glImp[k].amp) continue;
+    if(now - glImp[k].t0 >= GL_WAVE_MS) glImp[k].amp = 0;
+    else live = true;
+  }
+  if(!live){ glVx = glVy = 0; }
+  return live;
+}
+
+// Siembra un impacto. Reutiliza el hueco mas viejo: el array es fijo y un
+// gesto rapido no puede hacer crecer nada.
+static void glImpAdd(int x, int y, uint8_t amp){
+  if(!amp) return;
+  uint32_t now = millis();
+  int slot = -1, oldest = 0;
+  for(int k = 0; k < GLI_MAX; k++){
+    if(!glImp[k].amp || now - glImp[k].t0 >= GL_WAVE_MS){ slot = k; break; }
+    uint32_t age = now - glImp[k].t0;
+    if((int)age > oldest){ oldest = (int)age; slot = k; }
+  }
+  if(slot < 0) slot = glImpNext;
+  glImpNext = (uint8_t)((slot + 1) % GLI_MAX);
+  glImp[slot].x = (int16_t)x; glImp[slot].y = (int16_t)y;
+  glImp[slot].t0 = now; glImp[slot].amp = amp;
+}
+
+// ---- lo que llama el tactil: tres funciones, ninguna cara ----------------
+static void glassTouchDown(int x, int y){
+  if(!glassAdvanced()) return;
+  const FlexGlassCfg& c = GLC();
+  glTx = glSeedX = x; glTy = glSeedY = y;
+  glVx = glVy = 0;
+  glDown = true; glDownMs = millis(); glUpMs = 0;
+  glImpAdd(x, y, c.waveAmp ? 255 : 0);        // el impacto del contacto, a tope
+}
+static void glassTouchMove(int x, int y){
+  if(!glDown) return;
+  const FlexGlassCfg& c = GLC();
+  int dx = x - glTx, dy = y - glTy;
+  // ACOTADO EN LA ENTRADA, no mas tarde. Un salto de cientos de pixeles
+  // entre dos muestras no es un gesto: es el dedo reapareciendo en otro
+  // sitio, o una lectura suelta del GT911. Dejarlo entrar obligaba a
+  // "arreglarlo" luego al normalizar, y ahi el reciproco tabulado se queda
+  // corto y el vector sale mas largo que la unidad -- o sea un tiron, justo
+  // lo que se queria evitar. 64 px por muestra ya son ~3.800 px/s.
+  if(dx >  GL_VEL_MAX) dx =  GL_VEL_MAX;
+  if(dx < -GL_VEL_MAX) dx = -GL_VEL_MAX;
+  if(dy >  GL_VEL_MAX) dy =  GL_VEL_MAX;
+  if(dy < -GL_VEL_MAX) dy = -GL_VEL_MAX;
+  // Velocidad suavizada: media movil de 1/4. Sin suavizar, una sola muestra
+  // ruidosa del GT911 daria un tiron en la deformacion.
+  glVx += (dx - glVx) >> 2;
+  glVy += (dy - glVy) >> 2;
+  glTx = x; glTy = y;
+  // ESTELA. Se siembra por DISTANCIA RECORRIDA, no por tiempo ni por muestra:
+  // asi un arrastre lento no siembra nada y uno rapido siembra a intervalos
+  // regulares en el espacio, que es lo que se ve como una estela y no como
+  // una racha de impactos amontonados.
+  if(c.trail){
+    int sx = x - glSeedX, sy = y - glSeedY;
+    if(glOctLen(sx, sy) >= GL_TRAIL_STEP){
+      int sp = glOctLen(glVx, glVy);           // px por muestra
+      if(sp > 24) sp = 24;
+      glImpAdd(x, y, (uint8_t)((c.trail * sp) / 24));
+      glSeedX = x; glSeedY = y;
+    }
+  }
+}
+static void glassTouchUp(){
+  if(!glDown) return;
+  glDown = false; glUpMs = millis();
+  // Al soltar, el material rebota: un impacto suave en el punto de salida.
+  // Es lo que hace que soltar se vea como soltar y no como un corte.
+  const FlexGlassCfg& c = GLC();
+  if(c.waveAmp) glImpAdd(glTx, glTy, 150);
+}
+// Corta la interaccion en seco y sin residuos. La llama todo cambio de
+// pantalla: una onda de la pantalla anterior no puede seguir viva en la
+// siguiente.
+static void glassTouchReset(){
+  glDown = false; glUpMs = 0; glVx = glVy = 0;
+  for(int k = 0; k < GLI_MAX; k++) glImp[k].amp = 0;
+  glDirty1X = -1; glDirty1Y = -1;
+  glPrevDX1 = -1; glPrevDY1 = -1;
+}
+
+// #############################################################
+// ##  REGION SUCIA DE LA INTERACCION
+// ##  ----------------------------------------------------------
+// ##  La union de lo que la interaccion puede estar tocando este
+// ##  cuadro y lo que tocaba el anterior. Los dos hacen falta: sin el
+// ##  anterior, la cola de la onda se quedaria pintada donde estuvo.
+// ##
+// ##  Esto es lo que permite animar SIN repintar 480x800. Un impacto
+// ##  recien nacido ocupa unos 120 px de lado; uno a punto de morir
+// ##  puede llegar a la pantalla entera, pero para entonces su
+// ##  amplitud ya es casi cero y glassDirtyRect deja de contarlo.
+// #############################################################
+// CONSULTA PURA: la caja que la interaccion toca AHORA. Sin efectos
+// secundarios, asi que puede llamarse tantas veces por cuadro como haga
+// falta -- y se llama una vez por tarjeta de vidrio cacheada, para saber si
+// esa tarjeta necesita componerse en vivo.
+static bool glassIaBox(int& x0, int& y0, int& x1, int& y1){
+  const FlexGlassCfg& c = GLC();
+  uint32_t now = millis();
+  int a0 = 0x7FFF, b0 = 0x7FFF, a1 = -1, b1 = -1;
+  auto add = [&](int cx, int cy, int r){
+    if(cx - r < a0) a0 = cx - r;
+    if(cy - r < b0) b0 = cy - r;
+    if(cx + r > a1) a1 = cx + r;
+    if(cy + r > b1) b1 = cy + r;
+  };
+  if(glDown || glPressure()) add(glTx, glTy, c.touchR + (glOctLen(glVx, glVy) << 1));
+  for(int k = 0; k < GLI_MAX; k++){
+    if(!glImp[k].amp) continue;
+    uint32_t age = now - glImp[k].t0;
+    if(age >= GL_WAVE_MS) continue;
+    if(glImpAmp(glImp[k], now) < 4) continue;   // ya no mueve un pixel: no ensucia
+    add(glImp[k].x, glImp[k].y, glImpReach(c, age));
+  }
+  if(a1 < a0 || b1 < b0) return false;
+  x0 = a0; y0 = b0; x1 = a1; y1 = b1;
+  return true;
+}
+
+// LA DE CADA CUADRO: la caja de arriba UNIDA con la del cuadro anterior, y
+// recortada a la pantalla. Tiene efecto secundario -- hace avanzar el
+// historial -- asi que la llama UNA sola vez por cuadro quien dirige el
+// repintado, nunca un compositor.
+static bool glassDirtyRect(int& x0, int& y0, int& x1, int& y1){
+  int a0, b0, a1, b1;
+  bool any = glassIaBox(a0, b0, a1, b1);
+  if(!any){ a0 = 0x7FFF; b0 = 0x7FFF; a1 = -1; b1 = -1; }
+  glPrevDX0 = glDirty0X; glPrevDY0 = glDirty0Y;
+  glPrevDX1 = glDirty1X; glPrevDY1 = glDirty1Y;
+  glDirty0X = a0; glDirty0Y = b0; glDirty1X = a1; glDirty1Y = b1;
+  // Union con el cuadro anterior, para que la cola de la onda se borre de
+  // donde estuvo en vez de quedarse pintada.
+  if(glPrevDX1 >= glPrevDX0){
+    if(glPrevDX0 < a0) a0 = glPrevDX0;
+    if(glPrevDY0 < b0) b0 = glPrevDY0;
+    if(glPrevDX1 > a1) a1 = glPrevDX1;
+    if(glPrevDY1 > b1) b1 = glPrevDY1;
+  }
+  if(a1 < a0 || b1 < b0) return false;
+  if(a0 < 0) a0 = 0;
+  if(b0 < 0) b0 = 0;
+  if(a1 > SCR_W - 1) a1 = SCR_W - 1;
+  if(b1 > SCR_H - 1) b1 = SCR_H - 1;
+  x0 = a0; y0 = b0; x1 = a1; y1 = b1;
+  return true;
 }
 
 // #############################################################
@@ -295,6 +515,12 @@ struct GlassEdge {
   int bandPx;            // grosor de la banda, en pixeles
   int capPx;             // alcance horizontal de la banda en las filas del arco
   int w, h;
+  // --- campo interior: la parte que convierte el bisel en una LENTE ---
+  // kxIn/kyIn son el desplazamiento por unidad normalizada, ya en Q4 y ya
+  // divididos por el semieje: el pixel solo hace un producto y un
+  // desplazamiento, sin division y sin tocar el SDF.
+  int kxIn, kyIn;
+  int halfW, halfH;
   // --- material, copiado del perfil una sola vez por panel ---
   int refract, chroma, fresnel, fresPow, highlight, irid;
   // COLOR DEL REALCE, TABULADO POR DIRECCION DE LA NORMAL.
@@ -303,15 +529,28 @@ struct GlassEdge {
   // una vez por panel. 17 entradas son un paso de 1/8 de la normal: por
   // debajo del escalon de color de RGB565, o sea invisible.
   uint16_t hiLut[17];
+  // --- interaccion, resuelta a coordenadas del PANEL una vez por panel ---
+  // Es una copia local a proposito: el bucle de pixeles no vuelve a mirar el
+  // estado global ni a llamar a millis(), asi que un panel se compone entero
+  // con UN instante de tiempo y no puede salir con la onda a medio avanzar
+  // entre su primera fila y la ultima.
+  bool iaOn;                     // hay algo interactivo que afecte a ESTE panel
+  int  prX, prY, prAmp, prR;     // presion: centro, amplitud (Q4) y radio
+  int  vdx4, vdy4;               // estiramiento por velocidad (Q4, constante)
+  int  nImp;
+  int  impX[GLI_MAX], impY[GLI_MAX];
+  int  impFront[GLI_MAX];        // radio del frente AHORA, en pixeles
+  int  impAmp[GLI_MAX];          // amplitud AHORA (Q4)
+  int  impLobe[GLI_MAX];         // medio ancho del lobulo, en pixeles
+  int  impRecip[GLI_MAX];        // 2^16 / lobe, para no dividir por pixel
+  int  iaX0, iaY0, iaX1, iaY1;   // caja de todo lo interactivo, en el panel
   // --- fila actual (lo pone glEdgeRow) ---
   int qy4, sgnY, row;
   bool rowAll;           // esta fila es banda de lado a lado (canto recto)
   bool rowCap;           // esta fila cruza un arco de esquina
-  bool tRow;             // el dedo alcanza esta fila
-  int  tx0, tx1;         // columnas que alcanza el dedo en esta fila
-  // --- toque, ya resuelto a coordenadas RELATIVAS al panel ---
-  bool tOn;
-  int  tx, ty, tAmp, tR;
+  bool iaRow;            // algo interactivo alcanza esta fila
+  int  ix0, ix1;         // columnas que alcanza lo interactivo en esta fila
+  int  rowOy4;           // desplazamiento interior VERTICAL de la fila (Q4)
 };
 
 // Resultado por pixel del bloque geometrico. Lo rellena glEdgePx() y lo
@@ -323,6 +562,52 @@ struct GlassPx {
   uint8_t  hiA, loA;     // alpha del realce y de su sombra opuesta
   uint16_t hiCol;        // color del realce (iridiscencia ya aplicada)
 };
+
+// #############################################################
+// ##  EL CAMPO INTERIOR, TABULADO POR COLUMNA
+// ##  ----------------------------------------------------------
+// ##  El desplazamiento horizontal interior depende SOLO de la columna,
+// ##  no de la fila. Resolverlo por pixel costaba una division entera
+// ##  -- lo mas caro que hay en el RISC-V del P4, y justo lo que el
+// ##  resto del motor evita con reciprocos tabulados --, repetida en
+// ##  los ~400 pixeles de cada una de las ~200 filas para obtener 400
+// ##  valores distintos que se repiten fila tras fila.
+// ##
+// ##  Se calcula UNA vez por panel, en glEdgeBegin -- despues de
+// ##  resolver la interaccion, porque el estiramiento por velocidad del
+// ##  dedo tambien se hornea aqui -- y el pixel se queda en una lectura
+// ##  de tabla. Cuesta 960 B de RAM interna.
+// ##  Se guarda la coordenada de origen ABSOLUTA ya en Q4, no el
+// ##  desplazamiento, para ahorrar tambien la suma.
+// #############################################################
+// INVARIANTE: las dos tablas de abajo son de UN SOLO panel a la vez. Se
+// llenan en glEdgeBegin y se leen hasta que termina la composicion de ese
+// panel. Eso vale porque ningun compositor de vidrio se llama a si mismo ni
+// llama a otro a mitad de una fila: drawGlassCardFlat decide ANTES si va por
+// la cache o por el panel en vivo, y glcBuild compone su tarjeta entera
+// antes de que nadie la use. Si alguna vez hiciera falta anidar, estas dos
+// tendrian que pasar a ser locales del panel.
+static int16_t glIntSx4[SCR_W];                  // (i<<4) + ox4(i), por columna
+// Fila de origen con las dos filas vecinas YA mezcladas. Convierte el
+// muestreo bilineal del tramo interior en uno lineal: 2 lecturas y 1 mezcla
+// por pixel en vez de 4 y 3. Otros 960 B de RAM interna.
+static uint16_t glIntRowBuf[SCR_W];
+
+static void glIntBuildLut(GlassEdge& e){
+  const int n = e.w < SCR_W ? e.w : SCR_W;
+  // Reciproco de 16 bits en vez de la division: t = dx*256/halfW exacto
+  // salvo el redondeo, que aqui no se ve porque alimenta un perfil suave.
+  const int recip = 65536 / e.halfW;
+  for(int i = 0; i < n; i++){
+    int t = ((i - e.halfW) * recip) >> 8;
+    if(t > 256) t = 256;
+    if(t < -256) t = -256;
+    int shape = (t * (t < 0 ? -t : t)) >> 8;     // -256..256
+    glIntSx4[i] = (int16_t)((i << 4) - ((e.kxIn * shape) >> 8) + e.vdx4);
+  }
+}
+// Coordenada de origen (Q4) de la columna i en el tramo interior.
+static inline int glIntSx(int i){ return glIntSx4[i]; }
 
 // Prepara el panel. Devuelve false si el material avanzado no toca aqui
 // (perfil LOW, panel degenerado): el llamante sigue con su ruta clasica.
@@ -352,11 +637,6 @@ static bool glEdgeBegin(GlassEdge& e, int w, int h, int rad,
   // en el canto recto solo entra 'band' pixeles hacia dentro -- no 'rad +
   // band'. El radio solo cuenta en las filas que cruzan un arco de esquina,
   // porque ahi la tira se tumba y llega mas lejos en horizontal.
-  //
-  // Distinguir los dos casos es lo que baja los pixeles con efecto del 50 %
-  // al 21 % en una tarjeta de 440x160 con radio 22: 2,4 veces menos trabajo,
-  // con el mismo resultado pixel a pixel (glEdgePx sigue descartando por su
-  // cuenta cualquier pixel cuyo edgeFactor sea 0).
   e.bandPx = band;
   e.capPx  = rad + band;
   if(e.bandPx > w / 2) e.bandPx = (w + 1) / 2;
@@ -364,6 +644,101 @@ static bool glEdgeBegin(GlassEdge& e, int w, int h, int rad,
   e.refract = c.refract; e.chroma = c.chroma;
   e.fresnel = c.fresnel; e.fresPow = c.fresPow;
   e.highlight = c.highlight; e.irid = c.irid;
+
+  // ---- CAMPO INTERIOR: lo que hace que esto sea una lente ----------------
+  // El material clasico solo deformaba la banda de borde, asi que el 87 % de
+  // los pixeles de un panel salian con desplazamiento EXACTAMENTE cero y lo
+  // que hubiera detras -- una imagen, un texto, un icono -- aparecia intacto.
+  //
+  // Ahora todo el panel refracta. El campo es radial desde el centro y crece
+  // con el CUADRADO de la distancia normalizada: casi nada en el centro,
+  // visible a media altura, y su maximo justo donde empieza la banda, que es
+  // donde el termino del SDF toma el relevo. Por eso las dos partes empalman
+  // sin costura: en el centro vale 0 y en el borde vale 'interior'.
+  e.halfW = w / 2; if(e.halfW < 1) e.halfW = 1;
+  e.halfH = h / 2; if(e.halfH < 1) e.halfH = 1;
+  // La normalizacion a Q8 ya la hace la propia columna/fila (ver glIntOx4),
+  // asi que aqui la constante es directamente la amplitud del perfil.
+  e.kxIn = c.interior;
+  e.kyIn = c.interior;
+
+  // ---- INTERACCION: se resuelve UNA vez por panel -------------------------
+  e.iaOn = false; e.nImp = 0; e.prAmp = 0; e.vdx4 = e.vdy4 = 0;
+  e.prX = e.prY = 0; e.prR = c.touchR;
+  e.iaX0 = 0x7FFF; e.iaY0 = 0x7FFF; e.iaX1 = -1; e.iaY1 = -1;
+  if(!gGlassNoTouch && glassTouchLive()){
+    const uint32_t now = millis();
+    auto box = [&](int cx, int cy, int r){
+      if(cx - r < e.iaX0) e.iaX0 = cx - r;
+      if(cy - r < e.iaY0) e.iaY0 = cy - r;
+      if(cx + r > e.iaX1) e.iaX1 = cx + r;
+      if(cy + r > e.iaY1) e.iaY1 = cy + r;
+    };
+    // 1. PRESION bajo el dedo.
+    int pr = glPressure();
+    if(pr && c.touchAmp){
+      int lx = glTx - panelX, ly = glTy - panelY;
+      if(lx > -c.touchR && lx < w + c.touchR && ly > -c.touchR && ly < h + c.touchR){
+        e.prX = lx; e.prY = ly;
+        e.prAmp = (pr * (int)c.touchAmp) >> 8;
+        box(lx, ly, c.touchR);
+      }
+    }
+    // 2. VELOCIDAD del arrastre. Estira el material en la direccion del
+    //    movimiento, con tope: una muestra rapida no puede dar un tiron.
+    if(pr && c.velAmp){
+      int sp = glOctLen(glVx, glVy);               // <= 96 por el tope de entrada
+      if(sp > 0){
+        int spc = sp > 24 ? 24 : sp;               // saturado: mas rapido no deforma mas
+        int mag = ((int)c.velAmp * spc) / 24;      // Q4, tope exacto = velAmp
+        int inv = kGlRecip[sp > 80 ? 80 : sp];     // ~ 4096/sp
+        int ux8 = (glVx * inv) >> 4;               // componente unitaria en Q8
+        int uy8 = (glVy * inv) >> 4;
+        if(ux8 >  256) ux8 =  256;                 // el octogono se pasa hasta un 6 %
+        if(ux8 < -256) ux8 = -256;
+        if(uy8 >  256) uy8 =  256;
+        if(uy8 < -256) uy8 = -256;
+        e.vdx4 = -((ux8 * mag) >> 8);              // en contra del movimiento
+        e.vdy4 = -((uy8 * mag) >> 8);
+      }
+    }
+    // 3. ONDAS. Cada impacto vivo aporta un frente que se expande.
+    for(int k = 0; k < GLI_MAX && e.nImp < GLI_MAX; k++){
+      if(!glImp[k].amp) continue;
+      uint32_t age = now - glImp[k].t0;
+      if(age >= GL_WAVE_MS) continue;
+      int amp = glImpAmp(glImp[k], now);
+      if(amp < 4) continue;                        // no llega ni a un pixel
+      int lx = glImp[k].x - panelX, ly = glImp[k].y - panelY;
+      int front = (int)((age * c.waveSpd) >> 4);
+      int lobe  = c.touchR;                        // medio ancho del lobulo
+      if(lobe < 4) lobe = 4;
+      int reach = front + lobe;
+      if(lx + reach < 0 || lx - reach > w || ly + reach < 0 || ly - reach > h) continue;
+      int q = e.nImp++;
+      e.impX[q] = lx; e.impY[q] = ly;
+      e.impFront[q] = front;
+      e.impAmp[q] = (amp * (int)c.waveAmp) >> 8;   // Q4
+      e.impLobe[q] = lobe;
+      e.impRecip[q] = 65536 / lobe;                // 2^16/lobe: sin division por pixel
+      box(lx, ly, reach);
+    }
+    // OJO: la velocidad NO entra en esta caja. Es un campo UNIFORME -- el
+    // mismo desplazamiento en todo el panel -- asi que se hornea en la tabla
+    // del campo interior (ver glIntBuildLut) y en el desplazamiento vertical
+    // de la fila. Contarla aqui obligaria a tratar el panel ENTERO por la
+    // ruta lenta durante todo un arrastre, que es justo el momento en el que
+    // menos se puede pagar: un scroll con seis tarjetas de vidrio pasaria de
+    // ~20 % de pixeles caros al 100 %. Horneada en la tabla cuesta cero.
+    if(e.prAmp || e.nImp){
+      e.iaOn = true;
+      if(e.iaX0 < 0) e.iaX0 = 0;
+      if(e.iaY0 < 0) e.iaY0 = 0;
+      if(e.iaX1 > w - 1) e.iaX1 = w - 1;
+      if(e.iaY1 > h - 1) e.iaY1 = h - 1;
+      if(e.iaX1 < e.iaX0 || e.iaY1 < e.iaY0) e.iaOn = false;
+    }
+  }
   // Sin iridiscencia el realce es blanco puro y la tabla es constante: se
   // rellena igual, y asi el bucle de pixeles no necesita ni una rama.
   {
@@ -376,19 +751,7 @@ static bool glEdgeBegin(GlassEdge& e, int w, int h, int rad,
       for(int k = 0; k <= 16; k++) e.hiLut[k] = white;
     }
   }
-  // Toque: se pasa a coordenadas del panel UNA vez y se descarta aqui mismo
-  // si cae lejos. Un panel que el dedo no toca no paga absolutamente nada.
-  e.tOn = false; e.tAmp = 0; e.tR = c.touchR; e.tx = 0; e.ty = 0;
-  if(c.touchAmp && !gGlassNoTouch && glassTouchLive()){
-    int amp = glTouchAmp();
-    if(amp){
-      int lx = glTouchX - panelX, ly = glTouchY - panelY;
-      if(lx > -c.touchR && lx < w + c.touchR && ly > -c.touchR && ly < h + c.touchR){
-        e.tOn = true; e.tx = lx; e.ty = ly;
-        e.tAmp = (amp * (int)c.touchAmp) >> 8;     // 1/16 px de hundimiento
-      }
-    }
-  }
+  glIntBuildLut(e);
   return true;
 }
 
@@ -399,44 +762,83 @@ static inline void glEdgeRow(GlassEdge& e, int j){
   e.sgnY  = (d >= 0) ? 1 : -1;
   e.qy4   = (d >= 0 ? d : -d) - e.by4;
   e.rowAll = (j < e.bandPx) || (j >= e.h - e.bandPx);        // canto recto de arriba/abajo
-  e.rowCap = (j < e.capPx)  || (j >= e.h - e.capPx);        // la fila cruza un arco
-  // Franja del dedo DENTRO de esta fila. Sin dedo, o con el dedo lejos de la
-  // fila, queda vacia y el tramo central de la fila se salta entero.
-  e.tRow = false;
-  if(e.tOn){
-    int dy = j - e.ty; if(dy < 0) dy = -dy;
-    if(dy < e.tR){ e.tRow = true; e.tx0 = e.tx - e.tR; e.tx1 = e.tx + e.tR; }
-  }
+  e.rowCap = (j < e.capPx)  || (j >= e.h - e.capPx);         // la fila cruza un arco
   e.row = j;
+  // CAMPO INTERIOR, componente vertical: solo depende de la fila, asi que se
+  // resuelve aqui una vez. v es la separacion normalizada al centro; el
+  // desplazamiento crece con su cuadrado (suave en el centro, maximo en el
+  // borde) y apunta HACIA DENTRO, igual que el termino del SDF.
+  {
+    int dy = j - e.halfH;                        // pixeles desde el centro
+    int t  = (dy * 256) / e.halfH;               // Q8 normalizado, -256..256
+    if(t > 256) t = 256;
+    if(t < -256) t = -256;
+    // perfil v*|v| normalizado a Q8, escalado por la amplitud: 0 en el
+    // centro y exactamente 'interior' en el borde del panel.
+    int shape = (t * (t < 0 ? -t : t)) >> 8;     // -256..256
+    // El estiramiento por velocidad del dedo se suma AQUI, no por pixel:
+    // es el mismo valor en toda la fila y en todas las filas.
+    e.rowOy4 = -((e.kyIn * shape) >> 8) + e.vdy4;
+  }
+  // Franja interactiva DENTRO de esta fila. Sin interaccion, o con ella lejos
+  // de la fila, queda vacia y el tramo central se resuelve por la via rapida.
+  e.iaRow = false;
+  if(e.iaOn && j >= e.iaY0 && j <= e.iaY1){
+    e.iaRow = true; e.ix0 = e.iaX0; e.ix1 = e.iaX1;
+  }
 }
 
+
 // #############################################################
-// ##  EL TRAMO CENTRAL DE LA FILA  ·  lo que NO se toca
+// ##  LO QUE APORTA LA INTERACCION EN UN PIXEL
 // ##  ----------------------------------------------------------
-// ##  Aqui es donde este efecto deja de costar el AREA del panel y pasa
-// ##  a costar su PERIMETRO. Devuelve el intervalo [c0,c1] de columnas
-// ##  en el que edgeFactor vale exactamente 0 y no hay dedo encima: el
-// ##  llamante lo resuelve con su mezcla de siempre, sin SDF, sin
-// ##  muestreo y sin luz. En una tarjeta de 440x160 con radio 22 y banda
-// ##  de 11 px eso es el 79 % de los pixeles.
+// ##  Presion + onda + velocidad, sumadas al desplazamiento que el
+// ##  material ya iba a aplicar. No es una capa nueva ni una pasada
+// ##  nueva: son dos enteros mas en el mismo muestreo.
 // ##
-// ##  Devuelve false si la fila no tiene centro (filas de las tapas,
-// ##  paneles estrechos, o una fila cruzada por el dedo).
+// ##  La onda es lo que la hace PROPAGARSE: el frente esta a
+// ##  impFront pixeles del impacto y avanza con el tiempo, asi que un
+// ##  pixel fijo ve pasar el lobulo -- primero compresion, despues
+// ##  rarefaccion -- y vuelve a quedarse quieto. Eso es una onda que
+// ##  viaja, no un circulo que crece de brillo.
 // #############################################################
-static inline bool glEdgeCenterSpan(const GlassEdge& e, int& c0, int& c1){
-  if(e.rowAll) return false;
-  const int ext = e.rowCap ? e.capPx : e.bandPx;
-  c0 = ext; c1 = e.w - 1 - ext;
-  if(c0 > c1) return false;
-  if(!e.tRow) return true;
-  // Con el dedo en la fila el centro se parte en dos. Se devuelve el trozo
-  // mas grande de los dos, que es el que de verdad ahorra; el otro cae en la
-  // ruta lenta y no pasa nada: son como mucho 44 columnas.
-  int la = e.tx0 - c0, lb = c1 - e.tx1;
-  if(la <= 0 && lb <= 0) return false;
-  if(la >= lb) c1 = e.tx0 - 1;
-  else         c0 = e.tx1 + 1;
-  return c0 <= c1;
+static inline void glInteract(const GlassEdge& e, int i, int j, int& ox4, int& oy4){
+  // La VELOCIDAD no esta aqui: es un campo uniforme y va horneada en la
+  // tabla del campo interior, asi que no cuesta ni una suma por pixel.
+  // 1. PRESION: hundimiento radial bajo el dedo.
+  if(e.prAmp){
+    int dx = i - e.prX, dy = j - e.prY;
+    int len = glOctLen(dx, dy);
+    if(len < e.prR){
+      int k = (len << 5) / e.prR;                 // 0..31
+      if(k > 31) k = 31;
+      int amp = (e.prAmp * kGlFall[k]) >> 8;
+      if(amp){
+        int inv = kGlRecip[len > 80 ? 80 : len];
+        ox4 += (dx * inv * amp) >> 12;
+        oy4 += (dy * inv * amp) >> 12;
+      }
+    }
+  }
+  // 2. ONDAS.
+  for(int q = 0; q < e.nImp; q++){
+    int dx = i - e.impX[q], dy = j - e.impY[q];
+    int len = glOctLen(dx, dy);
+    int rel = len - e.impFront[q];                // distancia AL FRENTE
+    if(rel <= -e.impLobe[q] || rel >= e.impLobe[q]) continue;   // fuera del lobulo
+    // rel en [-lobe, lobe] -> indice 0..64 de kGlWave
+    int idx = 32 + ((rel * e.impRecip[q]) >> 11);
+    if(idx < 0) idx = 0;
+    if(idx > 64) idx = 64;
+    int wv = kGlWave[idx];
+    if(!wv) continue;
+    int amp = (e.impAmp[q] * wv) >> 7;            // Q4, con signo
+    if(!amp) continue;
+    if(len == 0) continue;                        // en el epicentro no hay direccion
+    int inv = kGlRecip[len > 80 ? 80 : len];
+    ox4 += (dx * inv * amp) >> 12;
+    oy4 += (dy * inv * amp) >> 12;
+  }
 }
 
 // Direccion de la luz: arriba-izquierda, la misma que el sistema ya usaba en
@@ -444,20 +846,53 @@ static inline bool glEdgeCenterSpan(const GlassEdge& e, int& c0, int& c1){
 #define GL_LX  (-181)
 #define GL_LY  (-181)
 
-// Esta esta columna dentro del alcance del dedo EN ESTA FILA. Es la guarda
-// que impide que un toque convierta el panel entero en ruta lenta: sin ella,
-// tocar una tarjeta grande haria trabajo de borde en sus 50.000 pixeles.
-static inline bool glEdgeInTouch(const GlassEdge& e, int i){
-  return e.tRow && i >= e.tx0 && i <= e.tx1;
+// #############################################################
+// ##  EL TRAMO CENTRAL DE LA FILA  ·  la via rapida
+// ##  ----------------------------------------------------------
+// ##  Aqui es donde este efecto deja de costar el AREA del panel y
+// ##  pasa a costar su PERIMETRO. Devuelve el intervalo [c0,c1] en el
+// ##  que no hay banda de borde ni interaccion.
+// ##
+// ##  OJO: "centro" ya NO significa "sin efecto". El campo interior SI
+// ##  se aplica ahi -- es lo que hace que una imagen o un texto detras
+// ##  del panel se doblen en vez de salir intactos --, pero se resuelve
+// ##  con un producto por pixel y sin SDF, sin normal, sin Fresnel, sin
+// ##  aberracion y sin cobertura. Es el tramo barato, no el tramo
+// ##  muerto.
+// ##
+// ##  Devuelve false si la fila no tiene centro: filas de las tapas,
+// ##  paneles estrechos, o una fila que la interaccion cruza entera.
+// #############################################################
+static inline bool glEdgeCenterSpan(const GlassEdge& e, int& c0, int& c1){
+  if(e.rowAll) return false;
+  const int ext = e.rowCap ? e.capPx : e.bandPx;
+  c0 = ext; c1 = e.w - 1 - ext;
+  if(c0 > c1) return false;
+  if(!e.iaRow) return true;
+  // Con la interaccion cruzando la fila el centro se parte en dos. Se
+  // devuelve el trozo mas grande, que es el que de verdad ahorra; el otro
+  // cae en la ruta lenta y no pasa nada.
+  int la = e.ix0 - c0, lb = c1 - e.ix1;
+  if(la <= 0 && lb <= 0) return false;
+  if(la >= lb) c1 = e.ix0 - 1;
+  else         c0 = e.ix1 + 1;
+  return c0 <= c1;
+}
+
+// Esta esta columna dentro del alcance de la INTERACCION en esta fila. Es la
+// guarda que impide que un toque convierta el panel entero en ruta lenta.
+static inline bool glEdgeInIa(const GlassEdge& e, int i){
+  return e.iaRow && i >= e.ix0 && i <= e.ix1;
 }
 
 // #############################################################
 // ##  EL PIXEL  ·  SDF -> normal -> refraccion -> Fresnel -> luz
 // ##  ----------------------------------------------------------
-// ##  Una sola funcion y una sola pasada. Devuelve false cuando el pixel
-// ##  esta en el CENTRO del panel (edgeFactor = 0): ahi no hay nada que
-// ##  hacer y el llamante toma su camino rapido de siempre. Ese "false"
-// ##  es lo que hace que todo esto cueste el perimetro y no el area.
+// ##  Una sola funcion y una sola pasada. Devuelve false cuando al pixel
+// ##  solo le toca el CAMPO INTERIOR: ni banda de borde, ni interaccion.
+// ##  El llamante lo resuelve entonces por su via rapida -- que tambien
+// ##  refracta, con un producto por pixel. Ese "false" es lo que hace que
+// ##  la parte CARA cueste el perimetro y no el area.
 // #############################################################
 static inline bool glEdgePx(const GlassEdge& e, int i, GlassPx& o){
   int px4 = (i << 4) + 8;
@@ -470,7 +905,7 @@ static inline bool glEdgePx(const GlassEdge& e, int i, GlassPx& o){
   if(qx4 > 0 && e.qy4 > 0){
     int len4 = isqrt32(qx4 * qx4 + e.qy4 * e.qy4);
     d4 = len4 - e.r4;
-    if(d4 <= -e.band4 && !glEdgeInTouch(e, i)) return false;
+    if(d4 <= -e.band4 && !glEdgeInIa(e, i)) return false;
     // Normal EXACTA en la esquina: el gradiente del SDF es el radio
     // unitario. Una sola division por pixel de esquina, y las esquinas son
     // unos pocos cientos de pixeles por panel.
@@ -481,7 +916,7 @@ static inline bool glEdgePx(const GlassEdge& e, int i, GlassPx& o){
     } else { nx8 = 0; ny8 = 0; }
   } else {
     d4 = (qx4 > e.qy4 ? qx4 : e.qy4) - e.r4;
-    if(d4 <= -e.band4 && !glEdgeInTouch(e, i)) return false;
+    if(d4 <= -e.band4 && !glEdgeInIa(e, i)) return false;
     // Normal en el lado recto. El gradiente del max() es un escalon en la
     // diagonal, y un escalon ahi se ve como un pliegue de 45 grados saliendo
     // de cada esquina -- el "halo cuadrado" que hay que evitar. Se reparte el
@@ -521,35 +956,20 @@ static inline bool glEdgePx(const GlassEdge& e, int i, GlassPx& o){
   // concentra en el ultimo tercio. ef^2 es justo eso, y cuesta un producto.
   int curve = (ef8 * ef8) >> 8;
 
-  // ---- 4. refraccion: se muestrea HACIA DENTRO del panel ----
-  // Muestrear hacia dentro (y no hacia fuera) es lo que hace que el canto
-  // ESTIRE lo que hay detras, que es como se comporta el borde de una lente
-  // real. Hacia fuera daria el efecto contrario y se leeria como un glitch.
+  // ---- 4. refraccion = CAMPO INTERIOR + termino de borde ----
+  // Los dos empalman sin costura: el interior alcanza su maximo justo donde
+  // el del borde arranca desde cero, asi que no hay escalon entre el tramo
+  // barato y el caro. Muestrear hacia dentro (y no hacia fuera) es lo que
+  // hace que el canto ESTIRE lo que hay detras, como el borde de una lente
+  // real; hacia fuera daria el efecto contrario y se leeria como un glitch.
+  o.ox4 = glIntSx(i) - (i << 4);        // el campo interior, de la tabla
+  o.oy4 = e.rowOy4;
   int mag = (e.refract * curve) >> 8;          // 1/16 px
-  o.ox4 = -((nx8 * mag) >> 8);
-  o.oy4 = -((ny8 * mag) >> 8);
+  o.ox4 -= (nx8 * mag) >> 8;
+  o.oy4 -= (ny8 * mag) >> 8;
 
-  // ---- 5. hundimiento bajo el dedo ----
-  // Se SUMA al desplazamiento que ya se iba a aplicar: no es una capa nueva
-  // ni una pasada nueva, son dos enteros mas. El empuje es radial desde el
-  // punto de contacto y se apaga con la distancia segun kGlFall, que es la
-  // exponencial pedida resuelta en tiempo de compilacion.
-  if(glEdgeInTouch(e, i)){
-    int dx = i - e.tx, dy = e.row - e.ty;
-    int len = glOctLen(dx, dy);
-    if(len < e.tR){
-      int k = (len << 5) / e.tR;                  // 0..31 (tR > 0 por construccion)
-      if(k > 31) k = 31;
-      int amp = (e.tAmp * kGlFall[k]) >> 8;       // 1/16 px
-      if(amp){
-        // (dx/len) * amp. inv es Q12 y amp ya viene en Q4, asi que el
-        // desplazamiento sale en Q4 quitando SOLO los 12 bits del reciproco.
-        int inv = kGlRecip[len > 80 ? 80 : len];
-        o.ox4 += (dx * inv * amp) >> 12;
-        o.oy4 += (dy * inv * amp) >> 12;
-      }
-    }
-  }
+  // ---- 5. interaccion: presion + onda + velocidad ----
+  if(glEdgeInIa(e, i)) glInteract(e, i, e.row, o.ox4, o.oy4);
 
   // ---- 6. dispersion cromatica, solo en el tercio exterior ----
   // Si se aplicase en toda la banda se leeria como "RGB" y no como cristal.
@@ -622,6 +1042,22 @@ static inline uint16_t glSample(const uint16_t* base, int stride, int w, int h,
   if(tx == 0) return mix565(r0[ix], r1[ix], (uint8_t)ty);
   return mix565(mix565(r0[ix], r0[ix1], (uint8_t)tx),
                 mix565(r1[ix], r1[ix1], (uint8_t)tx), (uint8_t)ty);
+}
+
+// Prepara glIntRowBuf para la fila 'srow' de un origen COMPACTO: mezcla las
+// dos filas vecinas con el peso que pide el desplazamiento interior vertical.
+// Una pasada por fila que ahorra la mitad del muestreo en cada pixel.
+static void glIntRowFrom(const GlassEdge& e, const uint16_t* sbase, int sstride,
+                         int sw, int shc, int srow){
+  int fy4 = (srow << 4) + e.rowOy4;
+  int iy = fy4 >> 4, ty = (fy4 & 15) << 4;
+  if(iy < 0){ iy = 0; ty = 0; }
+  if(iy > shc - 1){ iy = shc - 1; ty = 0; }
+  const uint16_t* r0 = sbase + (size_t)iy * sstride;
+  int n = sw < SCR_W ? sw : SCR_W;
+  if(ty == 0){ memcpy(glIntRowBuf, r0, (size_t)n * 2); return; }
+  const uint16_t* r1 = sbase + (size_t)((iy + 1 < shc) ? iy + 1 : iy) * sstride;
+  for(int i = 0; i < n; i++) glIntRowBuf[i] = mix565(r0[i], r1[i], (uint8_t)ty);
 }
 
 // #############################################################
@@ -709,6 +1145,28 @@ static inline uint16_t glRefractIP(const GlassPx& o, const uint16_t* buf, int st
   uint16_t cg = glSampleIP(buf, stride, x0, y0, w, h, curY, fx,         fy);
   uint16_t cb = glSampleIP(buf, stride, x0, y0, w, h, curY, fx - o.chx4, fy - o.chy4);
   return (uint16_t)((cr & 0xF800) | (cg & 0x07E0) | (cb & 0x001F));
+}
+
+// #############################################################
+// ##  MUESTREO DEL TRAMO INTERIOR  ·  la fila de origen, ya resuelta
+// ##  ----------------------------------------------------------
+// ##  En el interior del panel el desplazamiento VERTICAL es constante
+// ##  para toda la fila (solo depende de j, ver glEdgeRow). Asi que las
+// ##  dos filas de origen y el peso entre ellas se resuelven UNA vez y
+// ##  salen del bucle: el pixel se queda en un producto para el
+// ##  desplazamiento horizontal, dos lecturas y una mezcla.
+// ##
+// ##  Esto es lo que hace asequible que TODO el panel refracte. La ruta
+// ##  general (glSample) tendria que recalcular la fila en cada pixel
+// ##  para un valor que no cambia en los 400 de la fila.
+// #############################################################
+static inline uint16_t glSampleRow(int w, int fx4){
+  int ix = fx4 >> 4, tx = (fx4 & 15) << 4;
+  if(ix < 0){ ix = 0; tx = 0; }
+  if(ix > w - 1){ ix = w - 1; tx = 0; }
+  if(tx == 0) return glIntRowBuf[ix];
+  int ix1 = (ix + 1 < w) ? ix + 1 : ix;
+  return mix565(glIntRowBuf[ix], glIntRowBuf[ix1], (uint8_t)tx);
 }
 
 // Fondo refractado CON dispersion cromatica. Tres muestras a lo largo de la

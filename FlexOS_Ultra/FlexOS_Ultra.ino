@@ -575,7 +575,10 @@ static void uiTick(){
   // se veia a saltos.
   if(appTrOwnsScreen()) return;    // la transicion posee la pantalla: nadie mas compone bandas
   bool qsVisible = (qsPanelY > 0 || qsAnimOn);
-  bool fastPath = qsVisible || (gState == ST_HOME && !editMode && gRippleActive);
+  // Con el vidrio deformandose la cadencia sube a ~60 fps: la onda avanza
+  // por tiempo, asi que a 26 fps se veria a saltos sin ir mas despacio.
+  bool fastPath = qsVisible || glassTouchLive()
+                  || (gState == ST_HOME && !editMode && gRippleActive);
   unsigned long interval = fastPath ? 16 : 38;
   if(millis() - uiAnimMs < interval) return;
   uiAnimMs = millis();
@@ -627,7 +630,10 @@ static uint32_t loopPaceMs(){
   // Gesto recien terminado: la inercia sigue corriendo y el dedo puede volver.
   if(T.lastMs && (uint32_t)(millis() - T.lastMs) < 400u) return 1;
   // Algo se esta moviendo en pantalla y su suavidad depende del ritmo.
-  if(appTrVisible() || qsPanelY > 0 || qsAnimOn || gRippleActive) return 1;
+  // La deformacion del vidrio dura hasta ~780 ms desde el ultimo contacto
+  // (onda + recuperacion), o sea mas que los 400 ms de gracia de T.lastMs.
+  // Sin esto, la cola de la onda se veria a 5 ms por vuelta: a saltos.
+  if(appTrVisible() || qsPanelY > 0 || qsAnimOn || gRippleActive || glassTouchLive()) return 1;
   return 5;
 }
 

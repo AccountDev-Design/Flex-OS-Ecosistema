@@ -404,10 +404,9 @@ static const int     GLASS_TINT_DIFF_MAX = 128;
 // ##  (lee de uiGlBand) --, asi que el material no puede divergir entre
 // ##  un panel normal y el mismo panel durante una animacion.
 // ##
-// ##  'row' es la fila de origen y 'srow' la fila ya resuelta dentro del
-// ##  buffer de origen; van por separado porque el muestreo con
-// ##  refraccion necesita moverse a OTRAS filas del origen, no solo a la
-// ##  suya, y ahi es donde importa el numero de filas disponibles (shc).
+// ##  'srow' es la fila ya resuelta dentro del buffer de origen. El
+// ##  muestreo con refraccion necesita moverse a OTRAS filas del origen,
+// ##  no solo a la suya, y ahi es donde importa cuantas hay (shc).
 // ##
 // ##  'sstride' va aparte de 'sw' A PROPOSITO y no es una redundancia: los
 // ##  dos compositores que llaman aqui tienen origenes de paso distinto.
@@ -417,7 +416,24 @@ static const int     GLASS_TINT_DIFF_MAX = 128;
 // ##  desplazadas -- sin salirse de ningun buffer, o sea sin que ningun
 // ##  sanitizer lo note, y con el vidrio pintando pixeles de otro sitio.
 // #############################################################
-static void glassEdgeSpan(GlassEdge& ge, const uint16_t* row, const uint16_t* sbase,
+// El tramo INTERIOR del panel. Tambien refracta -- es lo que hace que una
+// imagen, un texto o un icono que esten detras se doblen en vez de salir
+// intactos -- pero por la via barata: la columna sale de una tabla, las dos
+// filas de origen se mezclan UNA vez para toda la fila, y no hay SDF, ni
+// normal, ni Fresnel, ni aberracion, ni cobertura.
+static void glassIntSpan(const GlassEdge& ge, const uint16_t* sbase, int sstride,
+                         int sw, int shc, int srow, uint16_t* dst, int i0, int i1,
+                         uint16_t tint, uint8_t tintMix, uint16_t shCol, uint8_t shA,
+                         uint8_t alpha){
+  glIntRowFrom(ge, sbase, sstride, sw, shc, srow);     // una pasada por fila
+  for(int i = i0; i <= i1; i++){
+    uint16_t c = mix565(glSampleRow(sw, glIntSx(i)), tint, tintMix);
+    if(shA) c = mix565(c, shCol, shA);
+    dst[i] = (alpha == 255) ? c : mix565(dst[i], c, alpha);
+  }
+}
+
+static void glassEdgeSpan(GlassEdge& ge, const uint16_t* sbase,
                           int sstride, int sw, int shc, int srow, uint16_t* dst, int i0, int i1,
                           uint16_t tint, uint8_t tintMix, uint16_t shCol, uint8_t shA,
                           uint8_t alpha){
@@ -426,8 +442,14 @@ static void glassEdgeSpan(GlassEdge& ge, const uint16_t* row, const uint16_t* sb
   const int sy4 = srow << 4;
   for(int i = i0; i <= i1; i++){
     GlassPx o;
-    if(!glEdgePx(ge, i, o)){                 // centro puro: la mezcla de siempre
-      uint16_t c = mix565(row[i], tint, tintMix);
+    if(!glEdgePx(ge, i, o)){
+      // Pixel de interior que ha caido en este tramo. Pasa cuando la
+      // interaccion parte la fila en dos y el resto se resuelve aqui: sigue
+      // siendo interior, asi que le toca el CAMPO INTERIOR y no la mezcla
+      // pelada. Sin esto quedaba una costura vertical donde el tramo rapido
+      // cedia el paso a este, porque un lado refractaba y el otro no.
+      uint16_t c = glSample(sbase, sstride, sw, shc, glIntSx(i), sy4 + ge.rowOy4);
+      c = mix565(c, tint, tintMix);
       if(shA) c = mix565(c, shCol, shA);
       dst[i] = (alpha == 255) ? c : mix565(dst[i], c, alpha);
       continue;
@@ -438,7 +460,7 @@ static void glassEdgeSpan(GlassEdge& ge, const uint16_t* row, const uint16_t* sb
     // pixel de origen es el suyo. Se ahorra la bilineal entera.
     uint16_t c = (o.ox4 | o.oy4 | o.chx4 | o.chy4)
                    ? glRefract(o, sbase, sstride, sw, shc, i << 4, sy4)
-                   : row[i];
+                   : glSample(sbase, sstride, sw, shc, i << 4, sy4);
     c = mix565(c, tint, tintMix);
     if(shA) c = mix565(c, shCol, shA);
     c = glLight(o, c);
@@ -567,12 +589,11 @@ static void drawLiquidGlassPanelEx(int x, int y, int w, int h, int rad, uint16_t
       glEdgeRow(ge, j);
       int c0, c1;
       if(glEdgeCenterSpan(ge, c0, c1)){
-        glassEdgeSpan(ge, src, glassBuf, w, w, hc, j - j0, dst, 0, c0 - 1, tint, tintMix, shCol, shA, 255);
-        if(shA) for(int i = c0; i <= c1; i++) dst[i] = mix565(mix565(src[i], tint, tintMix), shCol, shA);
-        else    for(int i = c0; i <= c1; i++) dst[i] = mix565(src[i], tint, tintMix);
-        glassEdgeSpan(ge, src, glassBuf, w, w, hc, j - j0, dst, c1 + 1, w - 1, tint, tintMix, shCol, shA, 255);
+        glassEdgeSpan(ge, glassBuf, w, w, hc, j - j0, dst, 0, c0 - 1, tint, tintMix, shCol, shA, 255);
+        glassIntSpan(ge, glassBuf, w, w, hc, j - j0, dst, c0, c1, tint, tintMix, shCol, shA, 255);
+        glassEdgeSpan(ge, glassBuf, w, w, hc, j - j0, dst, c1 + 1, w - 1, tint, tintMix, shCol, shA, 255);
       } else {
-        glassEdgeSpan(ge, src, glassBuf, w, w, hc, j - j0, dst, 0, w - 1, tint, tintMix, shCol, shA, 255);
+        glassEdgeSpan(ge, glassBuf, w, w, hc, j - j0, dst, 0, w - 1, tint, tintMix, shCol, shA, 255);
       }
       continue;                 // el borde de 2 px de abajo lo sustituye la luz del SDF
     }
@@ -614,7 +635,11 @@ static void drawLiquidGlassPanelEx(int x, int y, int w, int h, int rad, uint16_t
 // trabaja sobre las filas visibles MAS blurR filas de margen a cada lado (ver
 // j0/j1 en su cuerpo), asi que un radio menor desenfoca menos filas por panel.
 static void drawLiquidGlassPanel(int x, int y, int w, int h, int rad, uint16_t tint){
-  drawLiquidGlassPanelEx(x, y, w, h, rad, tint, gEffMode ? GLASS_BLUR_R_EFF : GLASS_BLUR_R);
+  // El radio sale del PERFIL DE CALIDAD, no de una constante suelta: con
+  // material avanzado el desenfoque baja para que quede detalle que doblar
+  // (ver 'blur' en kGlassQ). El modo eficiente sigue mandando por encima.
+  drawLiquidGlassPanelEx(x, y, w, h, rad, tint,
+                         gEffMode ? GLASS_BLUR_R_EFF : (uiGlass ? GLC().blur : GLASS_BLUR_R));
 }
 
 // #############################################################
@@ -677,6 +702,24 @@ static bool glcBuild(int w, int h, int rad, uint16_t tint, uint16_t bg){
 static void drawGlassCardFlat(int x, int y, int w, int h, int rad, uint16_t tint, uint16_t bg){
   if(gLand || w <= 0 || h <= 0 || w > SCR_W || h > GLC_MAX_H){
     drawLiquidGlassPanel(x, y, w, h, rad, tint); return;
+  }
+  // LA TARJETA QUE EL DEDO ESTA TOCANDO NO PUEDE SALIR DE LA CACHE.
+  // La cache existe porque sobre un fondo plano el resultado no depende de
+  // DONDE se dibuje, y eso deja de ser cierto en cuanto hay una interaccion:
+  // el hundimiento y la onda SI dependen de donde esta el dedo respecto a
+  // esta tarjeta. Sin esta salida, tocar una fila de Ajustes o un boton de
+  // una lista no deformaba nada -- el sistema devolvia la misma tarjeta
+  // pregrabada de siempre.
+  //
+  // Solo se sale de la cache la tarjeta que la interaccion alcanza de
+  // verdad: en una lista es una, como mucho dos. Las demas siguen siendo un
+  // memcpy por fila.
+  if(glassTouchLive()){
+    int ix0, iy0, ix1, iy1;
+    if(glassIaBox(ix0, iy0, ix1, iy1) &&
+       ix1 >= x && ix0 <= x + w - 1 && iy1 >= y && iy0 <= y + h - 1){
+      drawLiquidGlassPanel(x, y, w, h, rad, tint); return;
+    }
   }
   if(!glcValid || glcW != w || glcH != h || glcRad != rad || glcTint != tint || glcBg != bg
      || glcGen != gGlassGen){
@@ -796,7 +839,10 @@ static bool uiGlassBandBegin(int y0, int y1, uint16_t tint){
   if(!glassBuf) return false;
   for(int j = 0; j < h; j++)
     memcpy(glassBuf + (size_t)j * SCR_W, gBuf + (size_t)(y0 + j) * SCR_W, (size_t)SCR_W * 2);
-  glassBlur(SCR_W, h, 6);                        // mismo radio que drawLiquidGlassPanel
+  // MISMO radio que drawLiquidGlassPanel, y por eso sale del perfil y no de
+  // un 6 escrito a mano: si los dos caminos desenfocan distinto, el mismo
+  // panel se ve de una manera quieto y de otra durante su animacion.
+  glassBlur(SCR_W, h, gEffMode ? GLASS_BLUR_R_EFF : (uiGlass ? GLC().blur : GLASS_BLUR_R));
   for(int j = 0; j < h; j++)
     memcpy(uiGlBand + (size_t)j * SCR_W, glassBuf + (size_t)j * SCR_W, (size_t)SCR_W * 2);
   uiGlBandY0 = y0; uiGlBandY1 = y1;
@@ -861,18 +907,16 @@ static void uiGlassPanelCached(int x, int y, int w, int h, int rad, uint16_t tin
       const uint16_t* prow = src + x;
       int c0, c1;
       if(glEdgeCenterSpan(ge, c0, c1)){
-        if(c0 - 1 >= p0) glassEdgeSpan(ge, prow, sbase, SCR_W, w, shc, yy - uiGlBandY0, pdst,
+        if(c0 - 1 >= p0) glassEdgeSpan(ge, sbase, SCR_W, w, shc, yy - uiGlBandY0, pdst,
                                        p0, (c0 - 1 < p1 ? c0 - 1 : p1), tint, uiGlBandMix, shCol, shA, a);
         int m0 = c0 > p0 ? c0 : p0, m1 = c1 < p1 ? c1 : p1;
-        for(int i = m0; i <= m1; i++){
-          uint16_t out = mix565(prow[i], tint, uiGlBandMix);
-          if(shA) out = mix565(out, shCol, shA);
-          pdst[i] = (a == 255) ? out : mix565(pdst[i], out, a);
-        }
-        if(c1 + 1 <= p1) glassEdgeSpan(ge, prow, sbase, SCR_W, w, shc, yy - uiGlBandY0, pdst,
+        if(m0 <= m1)
+          glassIntSpan(ge, sbase, SCR_W, w, shc, yy - uiGlBandY0, pdst, m0, m1,
+                       tint, uiGlBandMix, shCol, shA, a);
+        if(c1 + 1 <= p1) glassEdgeSpan(ge, sbase, SCR_W, w, shc, yy - uiGlBandY0, pdst,
                                        (c1 + 1 > p0 ? c1 + 1 : p0), p1, tint, uiGlBandMix, shCol, shA, a);
       } else {
-        glassEdgeSpan(ge, prow, sbase, SCR_W, w, shc, yy - uiGlBandY0, pdst,
+        glassEdgeSpan(ge, sbase, SCR_W, w, shc, yy - uiGlBandY0, pdst,
                       p0, p1, tint, uiGlBandMix, shCol, shA, a);
       }
       continue;                 // el borde de 2 px lo sustituye la luz del SDF
