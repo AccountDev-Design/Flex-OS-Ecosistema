@@ -384,9 +384,31 @@ static void fillSpanLandA(int lx, int ly, int n, uint16_t c, uint8_t a){
   uint16_t* p = gBuf + (size_t)lx * SCR_W + (SCR_W - (ly + n));
   for(int i = 0; i < n; i++) p[i] = mix565(p[i], c, a);
 }
+// FILAS QUE DE VERDAD SE VAN A ESCRIBIR.
+// hLine/hLineA descartan una fila entera si cae fuera del panel o fuera de
+// [gClipY0..gClipY1]. Las primitivas de abajo recorrian TODAS sus filas y
+// dejaban que ese descarte ocurriera dentro, una llamada por fila: con el
+// sistema componiendo por BANDAS, un disco de 150 px de radio daba 301
+// vueltas (y 301 raices enteras) para escribir las tres filas que estaban en
+// la banda. Aqui se acota el recorrido antes de empezar. El dibujo es el
+// mismo: son exactamente las filas que hLine ya dejaba pasar.
+// Solo vale para las rutas VERTICALES: con gLand una "fila" logica es una
+// columna del panel y el recorte va por otro sitio (putPhys).
+static inline bool rowsInClip(int y, int h, int* j0, int* j1){
+  int a = 0, b = h;                                // intervalo [a, b)
+  if(y + a < gClipY0)     a = gClipY0 - y;
+  if(y + a < 0)           a = -y;
+  if(y + b > gClipY1 + 1) b = gClipY1 + 1 - y;
+  if(y + b > SCR_H)       b = SCR_H - y;
+  if(a >= b) return false;
+  *j0 = a; *j1 = b;
+  return true;
+}
 static void fillRect(int x, int y, int w, int h, uint16_t c){
   if(gLand){ for(int i = 0; i < w; i++) fillSpanLand(x + i, y, h, c); return; }
-  for(int j = 0; j < h; j++) hLine(x, y + j, w, c);
+  int j0, j1;
+  if(!rowsInClip(y, h, &j0, &j1)) return;
+  for(int j = j0; j < j1; j++) hLine(x, y + j, w, c);
 }
 static void fillRectA(int x, int y, int w, int h, uint16_t c, uint8_t a){
   if(gLand){ for(int i = 0; i < w; i++) fillSpanLandA(x + i, y, h, c, a); return; }
@@ -451,7 +473,9 @@ static void fillRoundRect(int x, int y, int w, int h, int r, uint16_t c){
     }
     return;
   }
-  for(int j = 0; j < h; j++){
+  int j0, j1;
+  if(!rowsInClip(y, h, &j0, &j1)) return;
+  for(int j = j0; j < j1; j++){
     int inset = rrInset(j, h, r);
     hLine(x + inset, y + j, w - 2 * inset, c);
   }
@@ -468,7 +492,9 @@ static void fillRoundRectA(int x, int y, int w, int h, int r, uint16_t c, uint8_
     }
     return;
   }
-  for(int j = 0; j < h; j++){
+  int j0, j1;
+  if(!rowsInClip(y, h, &j0, &j1)) return;
+  for(int j = j0; j < j1; j++){
     int inset = rrInset(j, h, r);
     hLineA(x + inset, y + j, w - 2 * inset, c, a);
   }
@@ -495,14 +521,22 @@ static void drawRoundRect(int x, int y, int w, int h, int r, uint16_t c){
 
 static void fillCircle(int cx, int cy, int r, uint16_t c){
   if(r <= 0){ px(cx, cy, c); return; }
-  for(int dy = -r; dy <= r; dy++){
+  int j0, j1;
+  if(gLand){ j0 = 0; j1 = 2 * r + 1; }
+  else if(!rowsInClip(cy - r, 2 * r + 1, &j0, &j1)) return;
+  for(int j = j0; j < j1; j++){
+    int dy = j - r;
     int dx = isqrt32(r * r - dy * dy);
     hLine(cx - dx, cy + dy, 2 * dx + 1, c);
   }
 }
 static void fillCircleA(int cx, int cy, int r, uint16_t c, uint8_t a){
   if(r <= 0){ pxA(cx, cy, c, a); return; }
-  for(int dy = -r; dy <= r; dy++){
+  int j0, j1;
+  if(gLand){ j0 = 0; j1 = 2 * r + 1; }
+  else if(!rowsInClip(cy - r, 2 * r + 1, &j0, &j1)) return;
+  for(int j = j0; j < j1; j++){
+    int dy = j - r;
     int dx = isqrt32(r * r - dy * dy);
     hLineA(cx - dx, cy + dy, 2 * dx + 1, c, a);
   }
@@ -522,7 +556,11 @@ static void drawCircle(int cx, int cy, int r, uint16_t c){
 // anillo de grosor t
 static void fillRing(int cx, int cy, int rOut, int t, uint16_t c){
   int rin = rOut - t; if(rin < 0) rin = 0;
-  for(int dy = -rOut; dy <= rOut; dy++){
+  int j0, j1;
+  if(gLand){ j0 = 0; j1 = 2 * rOut + 1; }
+  else if(!rowsInClip(cy - rOut, 2 * rOut + 1, &j0, &j1)) return;
+  for(int j = j0; j < j1; j++){
+    int dy = j - rOut;
     int dxo = isqrt32(rOut * rOut - dy * dy);
     int inr2 = rin * rin - dy * dy;
     if(inr2 > 0){
