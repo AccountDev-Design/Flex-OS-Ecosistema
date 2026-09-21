@@ -168,7 +168,6 @@ static int cmpYCard = 0, cmpHCard = 0;
 static int cmpYImuTitle = 0, cmpYModule = 0, cmpHModule = 0, cmpYChecks = 0;
 static int cmpYTechTitle = 0, cmpYTech = 0;
 static int cmpContentH = 0;
-static int cmpAnimTop = 0, cmpAnimBot = 0;      // hero completo (coords de documento)
 static int cmpRoseTop = 0, cmpRoseBot = 0;      // SOLO el disco y su indice: lo unico que gira
 
 // #############################################################
@@ -269,10 +268,10 @@ static void cmpLayout(){
   cmpYAcc     = y;              y += 30;
   cmpYHint    = H - 40;
   if(cmpYHint < y + 8) cmpYHint = y + 8;
-  cmpAnimTop  = cmpRoseCY - r - 16;
-  cmpAnimBot  = cmpYAcc + 34;
-  // El indice fijo sobresale 12 px por encima del anillo; el anillo baja 2
-  // por debajo del radio. Cuatro de holgura a cada lado y ni una fila mas.
+  // BANDA DE LA ROSA. El indice fijo sobresale 12 px por encima del anillo; el
+  // anillo baja 2 por debajo del radio. Cuatro de holgura a cada lado y ni una
+  // fila mas. Ya no hay una banda del "hero completo": cada pieza de debajo de
+  // la rosa tiene la suya y entra en la banda sucia por su cuenta.
   cmpRoseTop  = cmpRoseCY - r - 16;
   cmpRoseBot  = cmpRoseCY + r + 4;
 
