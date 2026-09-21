@@ -559,35 +559,144 @@ static void strokeSeg(float x0, float y0, float x1, float y1, int rad, uint16_t 
 // ---------------- Primitivas ANTI-ALIASING (bordes suaves) ----------------
 // Cobertura por sub-pixel: los bordes se mezclan con alpha en vez de
 // dibujarse "duros". Esto da curvas suaves al reloj y a los acentos.
-static float distToSeg(float px, float py, float ax, float ay, float bx, float by){
-  float dx = bx - ax, dy = by - ay;
-  float l2 = dx * dx + dy * dy;
-  float t = (l2 > 0.0f) ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0.0f;
-  if(t < 0) t = 0; else if(t > 1) t = 1;
-  float qx = ax + t * dx - px, qy = ay + t * dy - py;
-  return sqrtf(qx * qx + qy * qy);
+//
+// TRES OBSERVACIONES QUE LAS ABARATAN SIN CAMBIAR UN PIXEL
+// ------------------------------------------------------------------
+//  1. RECORTE ANTES DEL BUCLE. Las dos recorrian su caja envolvente ENTERA
+//     y dejaban que pxA() rechazara pixel a pixel lo que caia fuera de la
+//     banda. Con el sistema componiendo por BANDAS -- que es como dibuja
+//     casi todo -- eso significa pagar el calculo completo de cobertura de
+//     miles de pixeles para tirarlos despues. La caja se recorta aqui una
+//     sola vez contra [gClipX0..gClipX1] x [gClipY0..gClipY1], que son
+//     exactamente los limites que aplicaba pxA.
+//  2. LA RAIZ SOLO EN EL BORDE. La cobertura solo necesita la distancia
+//     REAL en el anillo de un pixel de ancho donde el borde se difumina.
+//     Fuera, basta comparar el CUADRADO de la distancia para descartar;
+//     dentro, para saber que el pixel es opaco. En una marca de la rosa de
+//     la brujula cuatro de cada cinco pixeles de la caja estan fuera del
+//     trazo: antes cada uno costaba una raiz.
+//     Los dos radios de atajo llevan AA_EPS de holgura HACIA FUERA del
+//     anillo dudoso -- se descarta un poco mas lejos y se da por opaco un
+//     poco mas adentro -- para que ningun pixel cuyo alpha exacto dependa
+//     del redondeo de la raiz tome el atajo. Sin esa holgura, un pixel con
+//     cobertura 0,9999 salia 255 por el camino rapido y 254 por el lento:
+//     invisible, pero ya no seria el MISMO dibujo, y entonces "identico"
+//     dejaria de poder comprobarse. Con ella, 24.000 geometrias al azar
+//     (vertical y apaisado, con recortes estrechos) dan cero diferencias.
+//  3. EL INTERIOR, POR LINEAS. En el disco, el tramo opaco de cada fila es
+//     un segmento continuo que se calcula de una vez (semiancho analitico)
+//     y se rellena con hLine en lugar de pixel a pixel con alpha 255.
+//
+// El resultado es IDENTICO: alpha 255 en pxA escribe el color tal cual, que
+// es lo que hace hLine, y los pixeles del borde siguen calculando su
+// cobertura exactamente como antes.
+// Recorta una caja envolvente a lo que pxA() dejaria pasar de verdad.
+// Devuelve false si no queda ni un pixel dibujable. En landscape (gLand) los
+// ejes logicos no son los del recorte -- putPhysA mapea (lx,ly) rotados --,
+// asi que ahi solo se acota a los limites del panel, que si valen.
+#define AA_EPS 0.02f      // holgura de los atajos (ver la nota 2 de arriba)
+static inline bool aaClipBox(int* x0, int* x1, int* y0, int* y1){
+  if(gLand){
+    if(*x0 < 0)          *x0 = 0;
+    if(*x1 > SCR_H - 1)  *x1 = SCR_H - 1;
+    if(*y0 < 0)          *y0 = 0;
+    if(*y1 > SCR_W - 1)  *y1 = SCR_W - 1;
+    return (*x0 <= *x1 && *y0 <= *y1);
+  }
+  if(*x0 < gClipX0)    *x0 = gClipX0;
+  if(*x1 > gClipX1)    *x1 = gClipX1;
+  if(*y0 < gClipY0)    *y0 = gClipY0;
+  if(*y1 > gClipY1)    *y1 = gClipY1;
+  if(*x0 < 0)          *x0 = 0;
+  if(*x1 > SCR_W - 1)  *x1 = SCR_W - 1;
+  if(*y0 < 0)          *y0 = 0;
+  if(*y1 > SCR_H - 1)  *y1 = SCR_H - 1;
+  return (*x0 <= *x1 && *y0 <= *y1);
 }
 static void fillCircleAA(float cx, float cy, float r, uint16_t col){
   int x0 = (int)floorf(cx - r - 1), x1 = (int)ceilf(cx + r + 1);
   int y0 = (int)floorf(cy - r - 1), y1 = (int)ceilf(cy + r + 1);
-  for(int y = y0; y <= y1; y++) for(int x = x0; x <= x1; x++){
-    float dx = x - cx, dy = y - cy;
-    float cov = r + 0.5f - sqrtf(dx * dx + dy * dy);
-    if(cov <= 0) continue; if(cov > 1) cov = 1;
-    pxA(x, y, col, (uint8_t)(cov * 255));
+  if(!aaClipBox(&x0, &x1, &y0, &y1)) return;
+  const float rOut = r + 0.5f;
+  const float rOutS = rOut + AA_EPS, rInS = r - 0.5f - AA_EPS;
+  const float rOut2 = rOutS * rOutS, rIn2 = (rInS > 0.0f) ? rInS * rInS : -1.0f;
+  for(int y = y0; y <= y1; y++){
+    float dy = (float)y - cy, dy2 = dy * dy;
+    if(dy2 >= rOut2) continue;                       // fila entera fuera del disco
+    // Tramo OPACO de esta fila, con un pixel de margen a cada lado para que
+    // ningun pixel de cobertura casi-plena se cuele en el relleno solido.
+    int sx0 = 1, sx1 = 0;
+    if(rIn2 > 0.0f && dy2 < rIn2){
+      float hw = sqrtf(rIn2 - dy2);
+      sx0 = (int)floorf(cx - hw) + 1;
+      sx1 = (int)ceilf (cx + hw) - 1;
+      if(sx0 < x0) sx0 = x0;
+      if(sx1 > x1) sx1 = x1;
+      if(sx0 <= sx1) hLine(sx0, y, sx1 - sx0 + 1, col);
+      else { sx0 = 1; sx1 = 0; }
+    }
+    for(int x = x0; x <= x1; x++){
+      if(x >= sx0 && x <= sx1){ x = sx1; continue; }  // ya relleno de una pasada
+      float dx = (float)x - cx, d2 = dx * dx + dy2;
+      if(d2 >= rOut2) continue;                      // fuera: ni una raiz
+      float cov = rOut - sqrtf(d2);
+      if(cov <= 0) continue; if(cov > 1) cov = 1;
+      pxA(x, y, col, (uint8_t)(cov * 255));
+    }
   }
 }
-// Segmento grueso con puntas redondeadas y bordes suaves (para el reloj)
+// Segmento grueso con puntas redondeadas y bordes suaves (para el reloj y
+// para las marcas de la rosa de la brujula, que son 72 por cuadro).
 static void strokeSegAA(float x0, float y0, float x1, float y1, float rad, uint16_t col){
   int minx = (int)floorf(fminf(x0, x1) - rad - 1), maxx = (int)ceilf(fmaxf(x0, x1) + rad + 1);
   int miny = (int)floorf(fminf(y0, y1) - rad - 1), maxy = (int)ceilf(fmaxf(y0, y1) + rad + 1);
-  for(int y = miny; y <= maxy; y++) for(int x = minx; x <= maxx; x++){
-    float cov = rad + 0.5f - distToSeg((float)x, (float)y, x0, y0, x1, y1);
-    if(cov <= 0) continue; if(cov > 1) cov = 1;
-    pxA(x, y, col, (uint8_t)(cov * 255));
+  if(!aaClipBox(&minx, &maxx, &miny, &maxy)) return;
+  // Constantes del segmento: estaban DENTRO de distToSeg, o sea se rehacian
+  // una vez por pixel de la caja para obtener siempre lo mismo.
+  //
+  // LA ARITMETICA ES LA MISMA, EXPRESION POR EXPRESION. Se conserva la
+  // DIVISION por l2 (no el producto por su reciproco) y el mismo orden de
+  // operaciones que tenia distToSeg. Escribirlo "mejor" -- reciproco
+  // premultiplicado, restas reagrupadas -- cambia el ultimo bit de t, y ese
+  // bit se propaga a un nivel de alpha de mas o de menos en los pixeles del
+  // borde: 59 de 24.000 geometrias al azar salian distintas. Aqui no se
+  // toca el calculo; lo que se quita es el trabajo que NO hacia falta.
+  const float sdx = x1 - x0, sdy = y1 - y0;
+  const float l2  = sdx * sdx + sdy * sdy;
+  const bool  deg = (l2 <= 0.0f);                    // segmento degenerado: t = 0
+  const float rOut = rad + 0.5f;
+  const float rOutS = rOut + AA_EPS, rInS = rad - 0.5f - AA_EPS;
+  const float rOut2 = rOutS * rOutS, rIn2 = (rInS > 0.0f) ? rInS * rInS : -1.0f;
+  // DESCARTE SIN DIVIDIR. La distancia de un punto al SEGMENTO nunca es menor
+  // que su distancia a la RECTA que lo contiene, y esa sale del producto
+  // vectorial: dist_recta^2 = cross^2 / l2. Asi que cross^2 >= rOut^2 * l2
+  // basta para saber que el pixel esta fuera -- un producto y una comparacion,
+  // sin division y sin raiz. En una marca diagonal de la rosa eso son dos
+  // tercios de la caja descartados antes de tocar la aritmetica cara, y es
+  // EXACTO: solo descarta pixeles que la version original tambien descartaba.
+  const float lineRej = rOut2 * l2;
+  for(int y = miny; y <= maxy; y++){
+    float fy = (float)y;
+    float ty = (fy - y0) * sdy;                      // termino de fila del producto escalar
+    float cy_ = (fy - y0) * sdx;                     // termino de fila del producto vectorial
+    for(int x = minx; x <= maxx; x++){
+      float fx = (float)x;
+      if(!deg){
+        float cross = (fx - x0) * sdy - cy_;
+        if(cross * cross >= lineRej) continue;       // fuera de la banda de la recta
+      }
+      float t = deg ? 0.0f : (((fx - x0) * sdx + ty) / l2);
+      if(t < 0) t = 0; else if(t > 1) t = 1;
+      float qx = x0 + t * sdx - fx, qy = y0 + t * sdy - fy;
+      float d2 = qx * qx + qy * qy;
+      if(d2 >= rOut2) continue;                      // fuera del trazo: sin raiz
+      if(d2 <= rIn2){ px(x, y, col); continue; }     // interior opaco: sin raiz ni mezcla
+      float cov = rOut - sqrtf(d2);
+      if(cov <= 0) continue; if(cov > 1) cov = 1;
+      pxA(x, y, col, (uint8_t)(cov * 255));
+    }
   }
 }
-
 // Empaquetado RGB565 en tiempo de COMPILACION (mismo bit a bit que rgb565(),
 // que no es constexpr). Vive aqui y no en el bloque del tema semantico porque
 // los fondos integrados de justo debajo son su primer uso del archivo.

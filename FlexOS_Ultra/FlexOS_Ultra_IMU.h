@@ -97,6 +97,34 @@ static bool     imuHadSensor = false;
 #define IMU_AUTOPROBE_MS 4000
 static uint32_t imuAutoMs    = 0;
 
+// #############################################################
+// ##  ORIENTACION CONVERTIDA UNA VEZ POR INFORME
+// ##  ----------------------------------------------------------
+// ##  imuHeading() e imuPitchRoll() son independientes a proposito:
+// ##  quien solo quiere el rumbo no paga el cabeceo. Pero quien quiere
+// ##  los tres -- Flex Compass, en cada vuelta -- pagaba DOS lecturas
+// ##  del cuaternion y TRES funciones trigonometricas inversas
+// ##  (atan2f, asinf, atan2f), y las pagaba por VUELTA DEL BUCLE, no
+// ##  por informe del sensor. El BNO085 publica a FLEXBNO_REPORT_HZ;
+// ##  el bucle da bastantes mas vueltas que eso, asi que la mayor
+// ##  parte de esas conversiones volvia a calcular el numero anterior.
+// ##
+// ##  imuOrientation() convierte cuando el contador de informes del
+// ##  driver avanza, y no antes. NO es un filtro ni un retraso: es
+// ##  exactamente el mismo numero que habria salido de recalcularlo.
+// ##
+// ##  EL SELLO SE INVALIDA A MANO. flexBnoBegin/Stop/Rescan ponen a
+// ##  cero el contador de informes del driver, asi que un sello
+// ##  guardado podria volver a coincidir con otro cuaternion detras.
+// ##  Los cuatro sitios que llegan a esas llamadas pasan por aqui, y
+// ##  todos avisan.
+// #############################################################
+static uint32_t imuOriStamp = 0;
+static bool     imuOriFresh = false;   // false = hay que convertir, pase lo que pase
+static bool     imuOriOk    = false;
+static float    imuOriHead = 0.0f, imuOriPitch = 0.0f, imuOriRoll = 0.0f;
+static inline void imuOriInvalidate(){ imuOriFresh = false; }
+
 // Flex Motion Engine: se define al final del archivo (necesita
 // FLEXBNO_REPORT_HZ y las lecturas del driver ya declaradas) y lo llama
 // imuServiceTick, que esta antes. Mismo patron de prototipo previo que usa
@@ -110,6 +138,7 @@ static void imuAcquire(){
   if(imuRefs == 1){
     imuHadSensor = false;
     imuAutoMs    = millis();
+    imuOriInvalidate();
     if(!gtOk) return;                // sin bus inicializado no hay nada que sondear
     flexBnoBegin();
     imuRetryMs = millis();
@@ -120,6 +149,7 @@ static void imuRelease(){
   if(imuRefs == 0){
     flexBnoStop();                   // apaga los informes: nada queda emitiendo para nadie
     imuHadSensor = false;
+    imuOriInvalidate();
   }
 }
 static inline int imuHolders(){ return imuRefs; }
@@ -159,6 +189,7 @@ static void imuServiceTick(){
   if((st == FLEXBNO_ST_ABSENT || st == FLEXBNO_ST_LOST) && gtOk && !gtBusWedged){
     if((uint32_t)(now - imuAutoMs) >= (uint32_t)IMU_AUTOPROBE_MS){
       imuAutoMs = now;
+      imuOriInvalidate();
       flexBnoBegin();
     }
   } else {
@@ -183,6 +214,7 @@ static bool imuRetry(uint32_t minGapMs){
   uint32_t now = millis();
   if(imuRetryMs && (now - imuRetryMs) < minGapMs) return false;
   imuRetryMs = now;
+  imuOriInvalidate();
   flexBnoRescan();
   return true;
 }
@@ -283,6 +315,31 @@ static float imuAngleDelta(float from, float to){
 }
 
 // ---- Lecturas de alto nivel (false = ese dato NO existe ahora mismo) ----
+
+// RUMBO, CABECEO Y ALABEO DE UNA VEZ, del MISMO informe. Ver el bloque
+// ORIENTACION CONVERTIDA UNA VEZ POR INFORME, arriba. Cualquiera de los tres
+// punteros puede ser NULL. Devuelve false si ahora mismo no hay orientacion,
+// igual que las lecturas sueltas: aqui tampoco se inventa un cero.
+static bool imuOrientation(float* headDeg, float* pitchDeg, float* rollDeg){
+  uint32_t n = flexBnoReportCount();
+  if(!imuOriFresh || n != imuOriStamp){
+    imuOriStamp = n;
+    imuOriFresh = true;
+    float q[4];
+    imuOriOk = flexBnoQuat(q);
+    if(imuOriOk){
+      imuOriHead  = imuHeadingFromQuat(q[0], q[1], q[2], q[3]);
+      imuOriPitch = imuPitchFromQuat  (q[0], q[1], q[2], q[3]);
+      imuOriRoll  = imuRollFromQuat   (q[0], q[1], q[2], q[3]);
+    }
+  }
+  if(!imuOriOk) return false;
+  if(headDeg)  *headDeg  = imuOriHead;
+  if(pitchDeg) *pitchDeg = imuOriPitch;
+  if(rollDeg)  *rollDeg  = imuOriRoll;
+  return true;
+}
+
 static bool imuHeading(float* outDeg){
   float q[4];
   if(!flexBnoQuat(q)) return false;

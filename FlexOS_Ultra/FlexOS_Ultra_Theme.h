@@ -553,6 +553,75 @@ static void drawLiquidGlassPanel(int x, int y, int w, int h, int rad, uint16_t t
 }
 
 // #############################################################
+// ##  VIDRIO SOBRE FONDO PLANO, RESUELTO POR FILAS
+// ##  ----------------------------------------------------------
+// ##  Sobre un fondo de color UNIFORME el box-blur devuelve ese mismo
+// ##  color -- exactamente, no aproximadamente: glassBlur promedia n
+// ##  copias del mismo valor con una division entera exacta. Y el
+// ##  tinte adaptativo sale de la luminancia MEDIA del panel, que
+// ##  sobre un fondo uniforme es la luminancia de ese color.
+// ##
+// ##  Con esas dos cosas, cada fila interior del panel acaba siendo UN
+// ##  SOLO COLOR: el fondo mezclado con el tinte y con el especular o
+// ##  el sombreado, que solo dependen de la fila. No hay nada que
+// ##  copiar, nada que desenfocar y nada que mezclar pixel a pixel.
+// ##
+// ##  QUE ARREGLA. drawGlassCardFlat ya explotaba esta observacion,
+// ##  pero guardando la tarjeta en PIXELES, con un limite de GLC_MAX_H
+// ##  filas. Una tarjeta mas alta que eso -- la del modulo BNO085 de
+// ##  Flex Compass mide 230 -- se caia al panel caro y pagaba el
+// ##  desenfoque entero CADA vez que se recomponia: mientras el
+// ##  aparato gira, veinte veces por segundo, y el 82% de ese coste
+// ##  era el vidrio, que ni siquiera cambia al girar.
+// ##
+// ##  Ademas esta ruta no necesita glassBuf, asi que una placa sin
+// ##  PSRAM deja de caer al relleno liso: ve el material de verdad.
+// #############################################################
+static void drawGlassPanelFlatRows(int x, int y, int w, int h, int rad,
+                                   uint16_t tint, uint16_t bg){
+  if(gLand){ fillRoundRectA(x, y, w, h, rad, tint, 210); return; }
+  if(x < 0){ w += x; x = 0; }
+  if(y < 0){ h += y; y = 0; }
+  if(x + w > SCR_W) w = SCR_W - x;
+  if(y + h > SCR_H) h = SCR_H - y;
+  if(w <= 0 || h <= 0) return;
+  if(2 * rad > w) rad = w / 2;
+  if(2 * rad > h) rad = h / 2;
+  int vy0 = y > gClipY0 ? y : gClipY0;
+  int vy1 = (y + h - 1) < gClipY1 ? (y + h - 1) : gClipY1;
+  if(vy0 > vy1) return;
+  // Tinte adaptativo: la media de un color repetido es ese color.
+  uint8_t tintMix = GLASS_TINT_BASE;
+  {
+    int dif = (int)glassLuma(bg) - (int)glassLuma(tint);
+    if(dif < 0) dif = -dif;
+    if(dif > GLASS_TINT_DIFF_MAX) dif = GLASS_TINT_DIFF_MAX;
+    tintMix = (uint8_t)(GLASS_TINT_MIN + (dif * (GLASS_TINT_MAX - GLASS_TINT_MIN)) / GLASS_TINT_DIFF_MAX);
+  }
+  const uint8_t GLASS_CORNER_STRONG = 156, GLASS_CORNER_WEAK = 104;
+  for(int j = vy0 - y; j <= vy1 - y; j++){
+    int yy = y + j;
+    int ins = glInset(j, h, rad);
+    uint16_t* dst = gBuf + (size_t)yy * SCR_W + x;
+    float fj = (float)j;
+    uint16_t shCol; uint8_t shA;
+    if(fj < h * 0.45f){ shCol = rgb565(255,255,255); shA = (uint8_t)((1.0f - fj / (h * 0.45f)) * 26); }
+    else              { shCol = rgb565(0,0,0);       shA = (uint8_t)(((fj - h * 0.45f) / (h * 0.55f)) * 30); }
+    uint16_t row = mix565(bg, tint, tintMix);
+    if(shA) row = mix565(row, shCol, shA);
+    for(int i = ins; i < w - ins; i++) dst[i] = row;
+    // Borde del cristal, sobre lo que acaba de quedar en la fila: es el
+    // mismo orden que en drawLiquidGlassPanelEx.
+    uint16_t bcol = (j < 3) ? rgb565(255,255,255) : (j < h / 2 ? rgb565(205,214,228) : rgb565(22,28,40));
+    bool topZone = (j < h / 2);
+    uint8_t sL = topZone ? GLASS_CORNER_STRONG : GLASS_CORNER_WEAK;
+    uint8_t sR = topZone ? GLASS_CORNER_WEAK   : GLASS_CORNER_STRONG;
+    dst[ins] = mix565(dst[ins], bcol, sL);
+    dst[w - 1 - ins] = mix565(dst[w - 1 - ins], bcol, sR);
+  }
+}
+
+// #############################################################
 // ##  TARJETA LIQUID GLASS CACHEADA (fondos PLANOS)
 // ##  ------------------------------------------------------
 // ##  Por que existe: drawLiquidGlassPanel copia la region, la desenfoca y la
@@ -601,11 +670,12 @@ static bool glcBuild(int w, int h, int rad, uint16_t tint, uint16_t bg){
 // solo mas caro) si el tamano no cabe en la cache o si estamos en landscape,
 // donde la indexacion directa no vale.
 static void drawGlassCardFlat(int x, int y, int w, int h, int rad, uint16_t tint, uint16_t bg){
-  if(gLand || w <= 0 || h <= 0 || w > SCR_W || h > GLC_MAX_H){
-    drawLiquidGlassPanel(x, y, w, h, rad, tint); return;
-  }
+  if(gLand || w <= 0 || h <= 0 || w > SCR_W) { drawLiquidGlassPanel(x, y, w, h, rad, tint); return; }
+  // Mas alta de lo que cabe en la cache de pixeles: se resuelve por FILAS, que
+  // da el mismo dibujo sin desenfocar nada. Antes se caia al panel caro.
+  if(h > GLC_MAX_H){ drawGlassPanelFlatRows(x, y, w, h, rad, tint, bg); return; }
   if(!glcValid || glcW != w || glcH != h || glcRad != rad || glcTint != tint || glcBg != bg){
-    if(!glcBuild(w, h, rad, tint, bg)){ drawLiquidGlassPanel(x, y, w, h, rad, tint); return; }
+    if(!glcBuild(w, h, rad, tint, bg)){ drawGlassPanelFlatRows(x, y, w, h, rad, tint, bg); return; }
   }
   for(int j = 0; j < h; j++){
     int yy = y + j;
@@ -796,6 +866,19 @@ static void uiSurfaceA(int x, int y, int w, int h, int rad, int role, uint8_t a)
   fillRoundRectA(x, y, w, h, rad, uiSurfFlat(role), a);   // PLANO: solido, sin vidrio ni blur
 }
 static void uiSurface(int x, int y, int w, int h, int rad, int role){
+  uiSurfaceA(x, y, w, h, rad, role, 255);
+}
+// LA MISMA SUPERFICIE, PARA QUIEN SABE QUE DEBAJO HAY UN COLOR PLANO.
+// El material y el tinte son los del sistema -- mismo rol, mismo aspecto --,
+// pero el vidrio se resuelve sin copiar ni desenfocar la region (ver VIDRIO
+// SOBRE FONDO PLANO, RESUELTO POR FILAS). Solo debe usarla quien acaba de
+// rellenar ese fondo el mismo: si debajo hay contenido, el desenfoque de
+// verdad es lo que toca y esta funcion mentiria.
+static void uiSurfaceFlat(int x, int y, int w, int h, int rad, int role, uint16_t bg){
+  if(uiGlass && !uiGlassBandActive()){
+    drawGlassCardFlat(x, y, w, h, rad, uiSurfTint(role), bg);
+    return;
+  }
   uiSurfaceA(x, y, w, h, rad, role, 255);
 }
 // Superficie APOYADA EN EL WALLPAPER (bloqueo, apagado, verificacion de clave).

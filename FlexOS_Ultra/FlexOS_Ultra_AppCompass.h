@@ -90,6 +90,22 @@ static float    cmpHeadVis   = 0.0f;
 static bool     cmpHeadInit  = false;
 static float    cmpDrawnHead = -1000.0f;
 static float    cmpDrawnPitch = -1000.0f, cmpDrawnRoll = -1000.0f;
+// LO ULTIMO DIBUJADO DE CADA PIEZA DEL HERO, por separado.
+//
+// QUE ARREGLA. Al girar el aparato se marcaba sucia la franja entera del
+// hero -- rosa, rumbo en numeros, rumbo de 16 puntos corto y largo, y barra
+// de precision --: 504 de las 800 filas, o sea 484 KB que se copian de bbuf
+// a fb y se transfieren al panel TREINTA veces por segundo. Pero de esas
+// cinco piezas solo la rosa cambia en cada cuadro: el rumbo de 16 puntos
+// cambia cada 22,5 grados y la precision casi nunca.
+//
+// Cada pieza guarda aqui lo que hay pintado de ella, y solo entra en la
+// banda sucia si eso cambia. La banda sigue siendo UNA (una transferencia
+// por cuadro, como antes), pero se queda en las filas que de verdad hay que
+// volver a publicar.
+static char        cmpDrawnNum[16] = { 0 };   // el rumbo tal cual esta escrito
+static const char* cmpDrawnDir  = NULL;       // rumbo de 16 puntos (corto); tabla estatica
+static int         cmpDrawnAcc  = -1;         // escalones encendidos de la barra
 static uint32_t cmpAnimMs    = 0, cmpModMs = 0, cmpTechMs = 0;
 static uint8_t  cmpDrawnState = 255;
 // Fundido corto del renglon de estado de la pantalla de requisito. Es lo que
@@ -109,7 +125,8 @@ static int cmpYCard = 0, cmpHCard = 0;
 static int cmpYImuTitle = 0, cmpYModule = 0, cmpHModule = 0, cmpYChecks = 0;
 static int cmpYTechTitle = 0, cmpYTech = 0;
 static int cmpContentH = 0;
-static int cmpAnimTop = 0, cmpAnimBot = 0;      // banda animada de la brujula (coords de documento)
+static int cmpAnimTop = 0, cmpAnimBot = 0;      // hero completo (coords de documento)
+static int cmpRoseTop = 0, cmpRoseBot = 0;      // SOLO el disco y su indice: lo unico que gira
 
 // #############################################################
 // ##  CAJA UTIL
@@ -138,11 +155,16 @@ static void cmpFmtHeading(char* out, size_t n, float v){
   snprintf(out, n, "%ld.%ld\xC2\xB0", t / 10, t % 10);
 }
 
-// Toma la orientacion del servicio. Devuelve true si cambio algo que importe.
+// Toma la orientacion del servicio, UNA vez por vuelta y de un solo informe.
+//
+// Antes eran dos llamadas -- imuHeading() e imuPitchRoll() -- y cada una
+// releia el cuaternion y rehacia su conversion: dos lecturas y tres funciones
+// trigonometricas inversas por VUELTA DEL BUCLE, no por informe del sensor.
+// imuOrientation() las da las tres del mismo informe y solo convierte cuando
+// el driver publica uno nuevo (ver el servicio). El numero es el mismo.
 static void cmpSample(){
   float h, p, r;
-  bool ok = imuHeading(&h) && imuPitchRoll(&p, &r);
-  if(!ok){ cmpHave = false; return; }
+  if(!imuOrientation(&h, &p, &r)){ cmpHave = false; return; }
   cmpHave = true;
   cmpHead = h; cmpPitch = p; cmpRoll = r;
   uint8_t a = flexBnoFusionAcc();
@@ -206,6 +228,10 @@ static void cmpLayout(){
   if(cmpYHint < y + 8) cmpYHint = y + 8;
   cmpAnimTop  = cmpRoseCY - r - 16;
   cmpAnimBot  = cmpYAcc + 34;
+  // El indice fijo sobresale 12 px por encima del anillo; el anillo baja 2
+  // por debajo del radio. Cuatro de holgura a cada lado y ni una fila mas.
+  cmpRoseTop  = cmpRoseCY - r - 16;
+  cmpRoseBot  = cmpRoseCY + r + 4;
 
   // --- Secundario: empieza justo DESPUES de la primera pantalla.
   y = H + 18;
@@ -474,9 +500,12 @@ static bool cmpTileBuild(int w, int h, float yaw, float pitch, float roll, bool 
   int oc0 = gClipY0, oc1 = gClipY1, ox0 = gClipX0, ox1 = gClipX1;
   gBuf = cmpTile;
   gClipY0 = 0; gClipY1 = h - 1; gClipX0 = 0; gClipX1 = w - 1;
-  // El fondo es el de la pagina, plano: es la premisa de todo esto.
+  // El fondo es el de la pagina, plano: es la premisa de todo esto. Y como lo
+  // acabamos de rellenar nosotros, el vidrio de la tarjeta se resuelve por
+  // filas en vez de copiar y desenfocar la region: el dibujo es el mismo y era
+  // el 82% de lo que costaba recomponer esta tarjeta al girar el aparato.
   fillRect(0, 0, w, h, TH_PAGE);
-  uiSurface(0, 0, w, h, 24, UIS_CARD);
+  uiSurfaceFlat(0, 0, w, h, 24, UIS_CARD, TH_PAGE);
   // RECORTE A LA TARJETA, igual que en el dibujo directo: inclinada del todo la
   // caja proyectada crece y no puede salirse de su tarjeta.
   gClipY0 = 6; gClipY1 = h - 7; gClipX0 = 6; gClipX1 = w - 7;
@@ -663,14 +692,24 @@ static void cmpDrawCompass(int y0, int y1){
   char buf[48];
 
   // ---- Hero: rosa + lectura ----
-  if(base + cmpAnimBot >= c0 && base + cmpAnimTop <= c1){
+  // CADA PIEZA SE PREGUNTA SI LE TOCA. Antes bastaba con que la franja del
+  // hero rozara la banda para dibujarlas las cinco, y las que caian fuera del
+  // recorte se descartaban pixel a pixel dentro de cada primitiva. Con la
+  // banda ya acotada a lo que cambio (ver LO ULTIMO DIBUJADO), publicar solo
+  // la rosa tenia que seguir costando solo la rosa.
+  if(base + cmpRoseBot >= c0 && base + cmpRoseTop <= c1)
     cmpDrawRose(SCR_W / 2, base + cmpRoseCY, cmpRoseR, cmpHeadVis);
+  if(base + cmpYNum + uiLineH(5) >= c0 && base + cmpYNum <= c1){
     cmpFmtHeading(buf, sizeof(buf), cmpHeadVis);
     drawTextC(SCR_W / 2, base + cmpYNum, buf, 5, TH_TXT);
+  }
+  if(base + cmpYDir + uiLineH(4) >= c0 && base + cmpYDir <= c1)
     drawTextC(SCR_W / 2, base + cmpYDir, imuDirShort(cmpHeadVis), 4, wallAccent());
+  if(base + cmpYDirLong + uiLineH(2) >= c0 && base + cmpYDirLong <= c1)
     drawTextC(SCR_W / 2, base + cmpYDirLong, imuDirLong(cmpHeadVis), 2, TH_TXT2);
-    // PRECISION: no es una barra decorativa. Los cuatro escalones son el valor
-    // que publica el propio BNO085 en cada vector de rotacion.
+  // PRECISION: no es una barra decorativa. Los cuatro escalones son el valor
+  // que publica el propio BNO085 en cada vector de rotacion.
+  if(base + cmpYAcc + 30 >= c0 && base + cmpYAcc <= c1){
     const int segW = 22, gap = 5, n = 4;
     const char* alab = cmpAccText(cmpAcc);
     int barW = n * segW + (n - 1) * gap;
@@ -869,6 +908,51 @@ static bool cmpInfoCloseHit(int px, int py){
 }
 
 // #############################################################
+// ##  FONDO DE LA BANDA  ·  sin pintar debajo del disco
+// ##  ----------------------------------------------------------
+// ##  El fondo de pagina se rellenaba de lado a lado y, acto seguido,
+// ##  cmpDrawRose tapaba el centro con el disco: 70.000 pixeles por
+// ##  cuadro escritos dos veces para que solo se viera el segundo. En
+// ##  la PSRAM del P4 eso son 141 KB de escrituras que no se ven,
+// ##  treinta veces por segundo.
+// ##
+// ##  Aqui se rellena ALREDEDOR. El tramo que se salta en cada fila es
+// ##  exactamente el que fillCircle va a escribir -- mismo centro,
+// ##  mismo radio y el MISMO isqrt32 --, asi que no queda ni un pixel
+// ##  sin fondo ni uno de mas. Las filas donde la rosa no llega (fuera
+// ##  del recorte del viewport, o fuera del disco) se rellenan enteras
+// ##  como siempre.
+// #############################################################
+static void cmpPageBand(int y0, int y1){
+  int h = y1 - y0 + 1;
+  if(h <= 0) return;
+  int vt = cmpVpTop(), vb = cmpVpBot();
+  int c0 = (vt > y0) ? vt : y0;
+  int c1 = (vb < y1) ? vb : y1;
+  int base = vt - (int)cmpScroll;
+  // La MISMA condicion con la que cmpDrawCompass decide dibujar la rosa. Si
+  // no se va a dibujar, el fondo tiene que estar entero.
+  bool rose = (cmpView == CMPV_COMPASS) && (c0 <= c1) &&
+              (base + cmpRoseBot >= c0) && (base + cmpRoseTop <= c1);
+  if(!rose || cmpRoseR <= 0){
+    fillRect(0, y0, SCR_W, h, TH_PAGE);
+    return;
+  }
+  const int cx = SCR_W / 2, cy = base + cmpRoseCY, R = cmpRoseR;
+  for(int y = y0; y <= y1; y++){
+    int dy = y - cy;
+    if(y < c0 || y > c1 || dy < -R || dy > R){
+      hLine(0, y, SCR_W, TH_PAGE);
+      continue;
+    }
+    int dx = isqrt32(R * R - dy * dy);       // identico al de fillCircle
+    int l = cx - dx, r = cx + dx;
+    if(l > 0)         hLine(0, y, l, TH_PAGE);
+    if(r < SCR_W - 1) hLine(r + 1, y, SCR_W - 1 - r, TH_PAGE);
+  }
+}
+
+// #############################################################
 // ##  COMPOSICION  ·  siempre en bbuf, siempre por bandas
 // #############################################################
 static void cmpCompose(int y0, int y1){
@@ -879,7 +963,7 @@ static void cmpCompose(int y0, int y1){
   int ox0 = gClipX0, ox1 = gClipX1, oy0 = gClipY0, oy1 = gClipY1;
   gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = y0; gClipY1 = y1;
 
-  fillRect(0, y0, SCR_W, y1 - y0 + 1, TH_PAGE);
+  cmpPageBand(y0, y1);
   if(y0 < UIHDR_H) uiHdrDraw("Flex Compass", 4, TH_TXT, TH_NAV, true);
 
   if(cmpView == CMPV_COMPASS) cmpDrawCompass(y0, y1);
@@ -1104,6 +1188,7 @@ static void compassEnter(){
     cmpHeadInit  = false; cmpHeadVis = 0;
     cmpPhysMs    = 0; cmpAnimMs = 0; cmpModMs = 0; cmpTechMs = 0;
     cmpDrawnHead = -1000.0f; cmpDrawnPitch = -1000.0f; cmpDrawnRoll = -1000.0f;
+    cmpDrawnNum[0] = 0; cmpDrawnDir = NULL; cmpDrawnAcc = -1;
     cmpDrawnState = 255; cmpStateFadeMs = 0;
     cmpHoldImu(true);
     cmpTickMs = millis();
@@ -1173,15 +1258,41 @@ static void compassTick(){
   }
 
   // ---- Brujula: solo se repinta lo que de verdad cambia ----
+  //
+  // LAS CINCO PIEZAS DEL HERO NO CAMBIAN AL MISMO RITMO. La rosa gira en
+  // cada cuadro; el rumbo escrito cambia cuando cambia su decima; el rumbo
+  // de 16 puntos, cada 22,5 grados; la precision, casi nunca. Marcar la
+  // franja entera por girar obligaba a copiar y transferir 504 filas cuando
+  // hacian falta 321. Cada pieza entra en la banda por su cuenta.
   int s0, s1;
   if(now - cmpAnimMs >= CMP_ANIM_MS){
     if(fabsf(imuAngleDelta(cmpDrawnHead, cmpHeadVis)) >= 0.05f || cmpDrawnHead < -900.0f){
-      if(cmpBandOf(cmpAnimTop, cmpAnimBot, &s0, &s1)){
-        cmpMark(s0, s1);
-        cmpDrawnHead = cmpHeadVis;
-        cmpAnimMs = now;
-      } else cmpDrawnHead = cmpHeadVis;       // fuera de pantalla: no cuesta nada
+      bool any = false;
+      if(cmpBandOf(cmpRoseTop, cmpRoseBot, &s0, &s1)){ cmpMark(s0, s1); any = true; }
+
+      char nb[16];
+      cmpFmtHeading(nb, sizeof(nb), cmpHeadVis);
+      if(strcmp(nb, cmpDrawnNum) != 0){
+        snprintf(cmpDrawnNum, sizeof(cmpDrawnNum), "%s", nb);
+        if(cmpBandOf(cmpYNum, cmpYNum + uiLineH(5), &s0, &s1)){ cmpMark(s0, s1); any = true; }
+      }
+      const char* dir = imuDirShort(cmpHeadVis);
+      if(dir != cmpDrawnDir){                 // punteros de una tabla estatica
+        cmpDrawnDir = dir;
+        if(cmpBandOf(cmpYDir, cmpYDirLong + uiLineH(2), &s0, &s1)){ cmpMark(s0, s1); any = true; }
+      }
+      // Fuera de pantalla no hay nada que publicar, pero el rumbo dibujado
+      // SI se da por puesto al dia: si no, al volver a subir la lista la app
+      // creeria que lleva un cuadro atrasado de hace medio minuto.
+      cmpDrawnHead = cmpHeadVis;
+      if(any) cmpAnimMs = now;
     }
+  }
+  // La precision la publica el propio sensor y cambia muy de tarde en tarde:
+  // tiene su propio renglon y no arrastra a la rosa.
+  if((int)cmpAcc != cmpDrawnAcc){
+    cmpDrawnAcc = (int)cmpAcc;
+    if(cmpBandOf(cmpYAcc, cmpYAcc + 30, &s0, &s1)) cmpMark(s0, s1);
   }
   // ---- Tarjeta del modulo: se REHACE, no se redibuja ----
   // Lo caro de esta app es esta tarjeta, y lo caro no es moverla: es
@@ -1245,6 +1356,7 @@ static void compassResume(){
   cmpPhysMs = 0;
   cmpHeadInit = false;
   cmpDrawnHead = -1000.0f; cmpDrawnState = 255;
+  cmpDrawnNum[0] = 0; cmpDrawnDir = NULL; cmpDrawnAcc = -1;
   cmpSample();
   cmpLayout();
   cmpTileDirty();                   // otro tamano o otro tema: la tarjeta no vale
