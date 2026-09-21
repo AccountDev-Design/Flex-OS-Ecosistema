@@ -627,6 +627,10 @@ static uint32_t loopPaceMs(){
   if(T.lastMs && (uint32_t)(millis() - T.lastMs) < 400u) return 1;
   // Algo se esta moviendo en pantalla y su suavidad depende del ritmo.
   if(appTrVisible() || qsPanelY > 0 || qsAnimOn || gRippleActive) return 1;
+  // Y una app con movimiento propio, sin nadie tocando la pantalla: la
+  // brujula girando con el aparato en la mano (ver LATIDO DE ACTIVIDAD DE LA
+  // INTERFAZ). El sello caduca solo, asi que en reposo se vuelve a los 5 ms.
+  if(uiBusyNow()) return 1;
   return 5;
 }
 

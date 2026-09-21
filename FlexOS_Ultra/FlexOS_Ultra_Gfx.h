@@ -186,6 +186,36 @@ static bool bbufClaim(uint16_t who){
 // compositor del sistema que toca bbuf.
 static inline void bbufSys(){ gBbufOwner = BBUF_SYS; }
 
+// #############################################################
+// ##  LATIDO DE ACTIVIDAD DE LA INTERFAZ
+// ##  ----------------------------------------------------------
+// ##  loopPaceMs() cede 5 ms al planificador cuando no hay dedo en
+// ##  pantalla ni ninguna de las animaciones del SISTEMA en marcha
+// ##  (transicion de apps, cortina, destello del icono). Con dedo o
+// ##  con una de esas, cede 1 ms.
+// ##
+// ##  Falta un caso: una APP con movimiento propio y nadie tocando la
+// ##  pantalla. Flex Compass girando con el aparato en la mano es
+// ##  justo ese -- la rosa se mueve, el BNO085 sigue publicando y el
+// ##  driver drena unos pocos paquetes por vuelta --, y ahi los 5 ms
+// ##  de cesion se suman a la latencia de cada lectura del sensor.
+// ##
+// ##  Esto NO es una animacion nueva ni un hilo nuevo: es el mismo
+// ##  criterio que ya usa loopPaceMs, abierto a que una app lo pida.
+// ##  Y es un SELLO DE TIEMPO, no una bandera: caduca solo. Si la app
+// ##  se cierra, se suspende o simplemente se queda quieta, el bucle
+// ##  vuelve por su cuenta a los 5 ms de reposo y nadie tiene que
+// ##  acordarse de apagarlo.
+// #############################################################
+static uint32_t gUiBusyMs = 0;
+static inline void uiBusyFor(uint32_t ms){
+  uint32_t until = millis() + ms;
+  if(!gUiBusyMs || (int32_t)(until - gUiBusyMs) > 0) gUiBusyMs = until;
+}
+static inline bool uiBusyNow(){
+  return gUiBusyMs != 0 && (int32_t)(gUiBusyMs - millis()) > 0;
+}
+
 static void present(int y0, int y1){
   if(y0 < 0) y0 = 0; if(y1 >= SCR_H) y1 = SCR_H - 1; if(y0 > y1) return;
   fbCopyBand(bbuf, y0, y1);

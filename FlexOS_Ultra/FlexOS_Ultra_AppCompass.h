@@ -88,6 +88,49 @@ static uint8_t  cmpAcc       = 0;       // 0..3 tal cual lo publica el BNO085
 // Rumbo visual (ver la cabecera) y ultimos valores dibujados.
 static float    cmpHeadVis   = 0.0f;
 static bool     cmpHeadInit  = false;
+// #############################################################
+// ##  EL SUAVIZADO SE ADAPTA A LA VELOCIDAD DEL GIRO
+// ##  ----------------------------------------------------------
+// ##  QUE ARREGLA. El seguimiento era de primer orden con constante
+// ##  de tiempo FIJA (~110 ms). Un filtro asi converge a cero cuando
+// ##  el objetivo se para, pero mientras el objetivo se MUEVE a
+// ##  velocidad constante no converge: se queda a un angulo fijo por
+// ##  detras, y ese angulo es la velocidad por la constante de tiempo.
+// ##  Medido sobre este mismo codigo, en giro sostenido:
+// ##
+// ##      30 grados/s  ->   3,2 grados de retardo
+// ##      90 grados/s  ->   9,6 grados
+// ##     180 grados/s  ->  19,1 grados
+// ##     360 grados/s  ->  38,2 grados
+// ##
+// ##  Eso es exactamente lo que se siente como "la brujula va detras
+// ##  al girar y se pone al dia cuando paro". No es falta de cuadros:
+// ##  aunque el dibujo fuera instantaneo, la aguja seguiria ahi.
+// ##
+// ##  POR QUE NO SE ARREGLA SUBIENDO EL CORTE A SECAS. Bajar la
+// ##  constante de tiempo quita el retardo y devuelve el temblor: con
+// ##  el aparato quieto, el ruido del magnetometro llega crudo a la
+// ##  aguja. Son dos exigencias opuestas en el MISMO filtro.
+// ##
+// ##  COMO SE ARREGLA. El corte deja de ser fijo y sube con la
+// ##  velocidad angular medida: quieto filtra como antes (el temblor
+// ##  no cambia), girando se destensa y la aguja va pegada al sensor.
+// ##  Es el filtro de "un euro", que es de los mas baratos que hay:
+// ##  dos suavizados exponenciales y una suma. Ademas quita el expf()
+// ##  por cuadro que tenia la version anterior.
+// #############################################################
+#define CMP_FC_MIN    1.4f     // Hz en reposo: el mismo aplomo de siempre
+#define CMP_FC_BETA   0.08f    // Hz por grado/s: cuanto se destensa al girar
+#define CMP_RATE_FC   1.0f     // Hz del suavizado de la propia velocidad
+#define CMP_RATE_IDLE 120      // ms sin dato nuevo -> el giro se da por parado
+static float    cmpRate      = 0.0f;    // velocidad angular suavizada (grados/s)
+static float    cmpRatePrev  = 0.0f;    // ultimo rumbo de SENSOR con el que se midio
+static uint32_t cmpRateMs    = 0;
+// Peso de un suavizado exponencial de primer orden con corte fcHz.
+static inline float cmpAlpha(float dt, float fcHz){
+  float tau = 1.0f / (6.2831853f * fcHz);
+  return dt / (dt + tau);
+}
 static float    cmpDrawnHead = -1000.0f;
 static float    cmpDrawnPitch = -1000.0f, cmpDrawnRoll = -1000.0f;
 // LO ULTIMO DIBUJADO DE CADA PIEZA DEL HERO, por separado.
@@ -1034,17 +1077,47 @@ static bool cmpPhysics(uint32_t now){
 
   // RUMBO VISUAL. Persigue al del sensor por el camino angular corto: la
   // diferencia se toma con imuAngleDelta, que es lo que hace que 359 -> 0
-  // recorra un grado. La constante de tiempo es ~110 ms: suficiente para que
-  // no tiemble y poco para que no se note retraso al girar.
+  // recorra un grado. El corte del filtro NO es fijo: sube con la velocidad
+  // del giro (ver EL SUAVIZADO SE ADAPTA A LA VELOCIDAD DEL GIRO).
   if(cmpHave){
-    if(!cmpHeadInit){ cmpHeadVis = cmpHead; cmpHeadInit = true; }
-    else {
+    if(!cmpHeadInit){
+      cmpHeadVis = cmpHead; cmpHeadInit = true;
+      cmpRatePrev = cmpHead; cmpRateMs = now; cmpRate = 0.0f;
+    } else {
+      // 1. VELOCIDAD ANGULAR. Se mide SOLO cuando el sensor entrega un rumbo
+      //    distinto. Medirla en cada vuelta la diluiria: el bucle da bastantes
+      //    mas vueltas que informes publica el BNO085, y las vueltas sin dato
+      //    nuevo darian velocidad cero.
+      if(cmpHead != cmpRatePrev){
+        float rdt = (float)(uint32_t)(now - cmpRateMs) / 1000.0f;
+        if(rdt > 0.0008f && rdt < 0.5f){
+          // CON SIGNO, no en valor absoluto. El ruido del magnetometro va y
+          // viene alrededor del rumbo real, asi que en valor absoluto suma
+          // siempre y levanta una velocidad que no existe: el filtro se
+          // destensaria con el aparato quieto y el temblor llegaria a la
+          // aguja. Con signo, el ruido se cancela solo y un giro de verdad
+          // -- que siempre va en el mismo sentido -- se acumula entero.
+          float raw = imuAngleDelta(cmpRatePrev, cmpHead) / rdt;
+          cmpRate += (raw - cmpRate) * cmpAlpha(rdt, CMP_RATE_FC);
+        }
+        cmpRatePrev = cmpHead;
+        cmpRateMs   = now;
+      } else if((uint32_t)(now - cmpRateMs) > (uint32_t)CMP_RATE_IDLE){
+        cmpRate = 0.0f;              // el rumbo lleva rato sin moverse: no hay giro
+      }
+      // 2. SEGUIMIENTO. Quieto, el corte es CMP_FC_MIN y el aplomo es el de
+      //    siempre; girando, sube y la aguja deja de arrastrarse por detras.
       float d = imuAngleDelta(cmpHeadVis, cmpHead);
-      float k = 1.0f - expf(-dt * 9.0f);
       if(fabsf(d) < 0.05f) cmpHeadVis = cmpHead;
-      else                 cmpHeadVis = imuNorm360(cmpHeadVis + d * k);
+      else {
+        float fc = CMP_FC_MIN + CMP_FC_BETA * fabsf(cmpRate);
+        cmpHeadVis = imuNorm360(cmpHeadVis + d * cmpAlpha(dt, fc));
+      }
     }
-  } else cmpHeadInit = false;
+  } else {
+    cmpHeadInit = false;
+    cmpRate = 0.0f;
+  }
   return ch;
 }
 
@@ -1186,6 +1259,7 @@ static void compassEnter(){
     cmpScroll    = 0; cmpScrollVel = 0;
     cmpResetGesture();
     cmpHeadInit  = false; cmpHeadVis = 0;
+    cmpRate = 0.0f; cmpRatePrev = 0.0f; cmpRateMs = 0;
     cmpPhysMs    = 0; cmpAnimMs = 0; cmpModMs = 0; cmpTechMs = 0;
     cmpDrawnHead = -1000.0f; cmpDrawnPitch = -1000.0f; cmpDrawnRoll = -1000.0f;
     cmpDrawnNum[0] = 0; cmpDrawnDir = NULL; cmpDrawnAcc = -1;
@@ -1269,6 +1343,10 @@ static void compassTick(){
     if(fabsf(imuAngleDelta(cmpDrawnHead, cmpHeadVis)) >= 0.05f || cmpDrawnHead < -900.0f){
       bool any = false;
       if(cmpBandOf(cmpRoseTop, cmpRoseBot, &s0, &s1)){ cmpMark(s0, s1); any = true; }
+      // La rosa se esta moviendo: el bucle no debe cederle 5 ms al planificador
+      // entre vuelta y vuelta, porque esos 5 ms se los come la latencia de la
+      // siguiente lectura del BNO085. Caduca solo en cuanto deje de girar.
+      uiBusyFor(200);
 
       char nb[16];
       cmpFmtHeading(nb, sizeof(nb), cmpHeadVis);
@@ -1355,6 +1433,7 @@ static void compassResume(){
   cmpStopMotion();
   cmpPhysMs = 0;
   cmpHeadInit = false;
+  cmpRate = 0.0f; cmpRatePrev = 0.0f; cmpRateMs = 0;
   cmpDrawnHead = -1000.0f; cmpDrawnState = 255;
   cmpDrawnNum[0] = 0; cmpDrawnDir = NULL; cmpDrawnAcc = -1;
   cmpSample();

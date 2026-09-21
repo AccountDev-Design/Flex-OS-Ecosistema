@@ -6383,6 +6383,69 @@ static void testFlexCompass(){
     chk(fabsf(imuAngleDelta(cmpHeadVis, 181.0f)) < 0.5f, "un salto grande tambien converge");
   }
 
+  // ---- 4b. LA AGUJA NO SE QUEDA ATRAS EN UN GIRO SOSTENIDO ----
+  //
+  // Un seguimiento de primer orden con constante de tiempo FIJA converge
+  // cuando el objetivo se para, pero mientras el objetivo se MUEVE a
+  // velocidad constante se queda a un angulo fijo por detras: velocidad por
+  // constante de tiempo. Con los ~110 ms de antes eso eran 9,6 grados a 90
+  // grados/s y 38 a 360 -- exactamente lo que se siente como "la brujula va
+  // detras al girar". Esta prueba existe para que no vuelva: fija que el
+  // retardo se mantiene acotado A CUALQUIER velocidad, que es lo que
+  // distingue un corte adaptativo de uno fijo.
+  //
+  // Y la otra mitad, que es la que se pierde si uno se limita a subir el
+  // corte: con el aparato QUIETO y ruido en el sensor, la aguja tiene que
+  // seguir sin temblar.
+  {
+    const float velocidades[4] = { 30.0f, 90.0f, 180.0f, 360.0f };
+    for(int k = 0; k < 4; k++){
+      float w = velocidades[k];
+      T = Touch();
+      cmpHave = true; cmpPitch = 0; cmpRoll = 0;
+      cmpHeadInit = false; cmpPhysMs = 0; cmpScroll = 0; cmpScrollVel = 0;
+      cmpRate = 0.0f; cmpRatePrev = 0.0f; cmpRateMs = 0;
+      cmpHead = 0.0f;
+      gTestMs = 700000;
+      cmpPhysics(gTestMs);
+      float peor = 0.0f;
+      bool norm = true;
+      for(int i = 0; i < 300; i++){
+        gTestMs += 10;
+        cmpHead = imuNorm360(cmpHead + w * 0.010f);
+        cmpPhysics(gTestMs);
+        if(i > 100){                                  // ya en regimen
+          float e = fabsf(imuAngleDelta(cmpHeadVis, cmpHead));
+          if(e > peor) peor = e;
+        }
+        if(!(cmpHeadVis >= 0.0f && cmpHeadVis < 360.0f)) norm = false;
+      }
+      chk(peor < 3.0f, "girando sostenido, la aguja no se queda atras");
+      chk(norm, "el visual sigue normalizado durante todo el giro");
+    }
+    // Quieto, con ruido: el temblor por cuadro tiene que ser despreciable.
+    T = Touch();
+    cmpHave = true; cmpHeadInit = false; cmpPhysMs = 0;
+    cmpRate = 0.0f; cmpRatePrev = 0.0f; cmpRateMs = 0;
+    cmpHead = 45.0f; gTestMs = 800000;
+    cmpPhysics(gTestMs);
+    unsigned semilla = 7u;
+    float peorTemblor = 0.0f, prev = cmpHeadVis;
+    for(int i = 0; i < 400; i++){
+      gTestMs += 10;
+      semilla = semilla * 1103515245u + 12345u;             // ruido de +-0,4 grados
+      cmpHead = 45.0f + ((float)((semilla >> 16) & 0x7FFF) / 32767.0f - 0.5f) * 0.8f;
+      cmpPhysics(gTestMs);
+      if(i > 100){
+        float d = fabsf(imuAngleDelta(prev, cmpHeadVis));
+        if(d > peorTemblor) peorTemblor = d;
+      }
+      prev = cmpHeadVis;
+    }
+    chk(peorTemblor < 0.15f, "quieto y con ruido, la aguja no tiembla");
+    chk(fabsf(imuAngleDelta(cmpHeadVis, 45.0f)) < 0.5f, "y se queda donde apunta el sensor");
+  }
+
   // ---- 5. EL REPARTO DEL SENSOR (que Flex Compass no rompa Device Care) ----
   {
     gTestMs = 200000;
