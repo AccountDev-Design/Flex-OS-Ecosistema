@@ -37,7 +37,7 @@
 // ##  Reutiliza EXACTAMENTE la matematica de composicion de
 // ##  drawLiquidGlassPanelEx (tinte adaptativo por luminancia,
 // ##  especular blanco arriba / sombreado abajo, y highlight
-// ##  direccional en los bordes con GLASS_CORNER_STRONG/WEAK),
+// ##  direccional en los bordes con gGlCornS/gGlCornW),
 // ##  pero SIN su copia + desenfoque por llamada: el fondo sobre
 // ##  el que escribe YA esta desenfocado, porque la capa de vidrio
 // ##  del panel se calcula una sola vez y a escala reducida
@@ -78,7 +78,11 @@ static void qpGlassSurface(int x, int y, int w, int h, int rad, uint16_t tint, i
     if(dif > GLASS_TINT_DIFF_MAX) dif = GLASS_TINT_DIFF_MAX;
     tintMix = (uint8_t)(lo + (dif * (hi - lo)) / GLASS_TINT_DIFF_MAX);
   }
-  const uint8_t GLASS_CORNER_STRONG = 156, GLASS_CORNER_WEAK = 104;
+  // Luz del material. Con el estilo Plano esta misma funcion pinta superficies
+  // solidas (mezcla 255) y conserva la luz de siempre: la intensidad de Liquid
+  // Glass solo existe con Liquid Glass, y en Plano no puede cambiar nada.
+  const uint8_t spec  = uiGlass ? gGlSpec  : 26,  shade = uiGlass ? gGlShade : 30;
+  const uint8_t cornS = uiGlass ? gGlCornS : 156, cornW = uiGlass ? gGlCornW : 104;
   // El especular y el sombreado se acotan EN PIXELES (70 y 90). En un panel
   // pequeno esto es exactamente el 45%/55% de siempre; en una tarjeta de 330
   // px evita que el material se convierta en un degradado de arriba abajo que
@@ -96,8 +100,8 @@ static void qpGlassSurface(int x, int y, int w, int h, int rad, uint16_t tint, i
     // bucle interior solo hace mezclas. Es luz de cristal (blanco/negro), no
     // un color de tema: se aplica sobre el tinte, que si viene de la paleta.
     uint8_t sa = 0, da = 0;
-    if(hTop > 0 && j < hTop)          sa = (uint8_t)(26 - (26 * j) / hTop);
-    else if(hBot > 0 && j >= yBot)    da = (uint8_t)((30 * (j - yBot)) / hBot);
+    if(hTop > 0 && j < hTop)          sa = (uint8_t)(spec - (spec * j) / hTop);
+    else if(hBot > 0 && j >= yBot)    da = (uint8_t)((shade * (j - yBot)) / hBot);
     int i0 = lx < gClipX0 ? gClipX0 : lx;
     int i1 = rx > gClipX1 ? gClipX1 : rx;
     if(i0 < 0) i0 = 0;
@@ -114,9 +118,9 @@ static void qpGlassSurface(int x, int y, int w, int h, int rad, uint16_t tint, i
                             : (j < h / 2 ? rgb565(205,214,228) : rgb565(22,28,40));
     bool topZone = (j < h / 2);
     if(lx >= gClipX0 && lx <= gClipX1 && lx >= 0 && lx < SCR_W)
-      dst[lx] = mix565(dst[lx], bcol, topZone ? GLASS_CORNER_STRONG : GLASS_CORNER_WEAK);
+      dst[lx] = mix565(dst[lx], bcol, topZone ? cornS : cornW);
     if(rx >= gClipX0 && rx <= gClipX1 && rx >= 0 && rx < SCR_W)
-      dst[rx] = mix565(dst[rx], bcol, topZone ? GLASS_CORNER_WEAK : GLASS_CORNER_STRONG);
+      dst[rx] = mix565(dst[rx], bcol, topZone ? cornW : cornS);
   }
 }
 
@@ -134,10 +138,21 @@ static void qpGlassSurface(int x, int y, int w, int h, int rad, uint16_t tint, i
 // material --, asi que ahi la mezcla es total (255) y el color es exactamente el
 // de la paleta activa. Con Liquid Glass se conservan tal cual los valores
 // afinados de siempre.
-static inline int qpMixCard(){ return uiGlass ? 128 : 255; }   // tarjetas y modulos
-static inline int qpMixTile(){ return uiGlass ? 112 : 255; }   // circulo apagado
-static inline int qpMixAcc (){ return uiGlass ? 178 : 255; }   // acento (control activo)
-static inline int qpMixHdr (){ return uiGlass ? 168 : 255; }   // cabeceras fijas (editor/catalogo)
+// INTENSIDAD. Con Liquid Glass, el nivel del usuario (gGlassLvl) desplaza estas
+// mezclas: hacia sutil deja pasar algo mas de fondo y hacia intenso esmerila
+// mas. El lado sutil se recorta a la mitad a proposito: son los valores que
+// fijan el contraste del texto sobre un wallpaper claro, y el efecto no puede
+// costar legibilidad. Con el nivel por defecto son exactamente los de siempre.
+static inline int qpMixAdj(int base){
+  if(!uiGlass) return 255;
+  int d = (int)gGlassLvl - GLASS_LVL_DEF;
+  int v = base + (d < 0 ? (d * 12) / 50 : (d * 24) / 50);
+  return v < 0 ? 0 : (v > 255 ? 255 : v);
+}
+static inline int qpMixCard(){ return qpMixAdj(128); }   // tarjetas y modulos
+static inline int qpMixTile(){ return qpMixAdj(112); }   // circulo apagado
+static inline int qpMixAcc (){ return qpMixAdj(178); }   // acento (control activo)
+static inline int qpMixHdr (){ return qpMixAdj(168); }   // cabeceras fijas (editor/catalogo)
 
 // Superficie de una tarjeta o modulo: sombra muy leve (tres lineas alfa bajo
 // el borde, no un rectangulo alfa del tamano de la tarjeta) + el material.
@@ -209,12 +224,32 @@ static void qpDrawHeader(){
 }
 
 // ---- MODULO EXTERIOR (capsula 2x1 / modulo ancho / slider 4x1) -------
+// Ancho de la PISTA de un deslizador. El de intensidad del vidrio reserva a su
+// derecha un boton cuadrado de "restablecer" del alto de la pista: dibujo y
+// toque salen de aqui, asi que no pueden desalinearse.
+static inline int qpSliderTrackW(int id, int w, int th){
+  return (id == QSID_GLASSFX) ? w - th - 8 : w;
+}
+static inline bool qpGlassFxResetHit(int bx, int bw, int bh, int px){
+  int th = bh - 20; if(th < 40) th = 40;
+  return px >= bx + qpSliderTrackW(QSID_GLASSFX, bw, th) + 4;
+}
 static void qpDrawSliderBody(int x, int y, int w, int h, int id){
   const QsCtl* c = qpCtl(id);
   int th = h - 20; if(th < 40) th = 40;
   int ty = y + (h - th) / 2;
   int pct = (id == QSID_BRIGHT) ? gBright
-          : (id == QSID_VOLUME) ? (int)flexAudioVolume() : 0;
+          : (id == QSID_VOLUME) ? (int)flexAudioVolume()
+          : (id == QSID_GLASSFX) ? (qpGlassFxDrag >= 0 ? qpGlassFxDrag : (int)gGlassLvl) : 0;
+  int fullW = w;
+  w = qpSliderTrackW(id, fullW, th);
+  if(id == QSID_GLASSFX){
+    // Boton de restablecer: vuelve al material de siempre (nivel 50).
+    int rx = x + fullW - th;
+    qpGlassSurface(rx, ty, th, th, th / 2, TH_TRACK, qpMixCard());
+    qpIcoBgAt(rx + th / 2, ty + th / 2);
+    qpIcoReset(rx + th / 2, ty + th / 2, 26, (pct == GLASS_LVL_DEF) ? TH_MUTE : TH_TXT);
+  }
   int fw = th + (w - th) * pct / 100;                     // nunca menor que el diametro
   if(fw > w) fw = w;
   qpGlassSurface(x, ty, w, th, th / 2, TH_TRACK, qpMixCard());          // pista: vidrio
@@ -475,7 +510,7 @@ static void qpDrawEditHeader(){
 static void qpCatBuild(){
   qpCatN = 0;
   for(int id = 0; id < QSID_COUNT; id++){
-    if(!qpCtlAvail(id)) continue;
+    if(!qpCtlShown(id)) continue;                 // sin sentido ahora (vidrio apagado): no se ofrece
     bool present = false;
     for(int i = 0; i < qpEdN; i++) if(qpEdIt[i].id == id){ present = true; break; }
     if(present) continue;
@@ -617,7 +652,13 @@ static void qsFreeApp(){
 #define QP_GS_SH 2                                  // reduccion 1/4 (desplazamiento)
 #define QP_GS_W  (SCR_W >> QP_GS_SH)                // 120
 #define QP_GS_H  (SCR_H >> QP_GS_SH)                // 200
-#define QP_GS_R  2                                  // radio del blur en pequeno (~8 px reales)
+#define QP_GS_R  2                                  // radio en pequeno del nivel por defecto (~8 px reales)
+// Radio de la capa pequena: sigue al del resto del vidrio (6 -> 2, que es el de
+// siempre; sutil 2 -> 1; intenso 10 -> 3). Acotado: la capa mide 120x200.
+static inline int qpGlassSmR(){
+  int r = (glassBlurR() + 2) / 4;
+  return r < 1 ? 1 : (r > 3 ? 3 : r);
+}
 static uint16_t* qsGlassSm   = NULL;                // 120 x 200 = 48 KB
 // Version ya EXPANDIDA del vidrio, a resolucion completa. Es opcional: si no
 // hay PSRAM se sigue expandiendo por bandas (mas lento, mismo resultado). La
@@ -641,19 +682,24 @@ static bool      qsGlassOk   = false;
 // de los mismos cinco valores no depende de en que orden se acumule.
 static void qpGlassBlurSm(){
   static uint16_t line[(QP_GS_W > QP_GS_H ? QP_GS_W : QP_GS_H)];
-  const int W = 2 * QP_GS_R + 1;
+  const int R = qpGlassSmR();
+  const int W = 2 * R + 1;
+  // El divisor ya no es una constante de compilacion (sigue a la intensidad),
+  // asi que se cambia por su reciproco de 16 bits: con sumas de como mucho
+  // 63*7 = 441 y W <= 7, (s * rc) >> 16 es la division entera EXACTA.
+  const uint32_t rc = 65536u / (uint32_t)W + 1u;
   int r, g, b;
   for(int j = 0; j < QP_GS_H; j++){                 // horizontal
     uint16_t* row = qsGlassSm + (size_t)j * QP_GS_W;
     memcpy(line, row, QP_GS_W * 2);
     int sr = 0, sg = 0, sb = 0;
-    for(int k = -QP_GS_R; k <= QP_GS_R; k++){       // ventana inicial en i = 0
+    for(int k = -R; k <= R; k++){                   // ventana inicial en i = 0
       int q = k < 0 ? 0 : (k >= QP_GS_W ? QP_GS_W - 1 : k);
       un565(line[q], r, g, b); sr += r; sg += g; sb += b;
     }
     for(int i = 0; i < QP_GS_W; i++){
-      row[i] = pk565(sr / W, sg / W, sb / W);
-      int qa = i + QP_GS_R + 1, qd = i - QP_GS_R;   // entra por la derecha, sale por la izquierda
+      row[i] = pk565((int)(((uint32_t)sr * rc) >> 16), (int)(((uint32_t)sg * rc) >> 16), (int)(((uint32_t)sb * rc) >> 16));
+      int qa = i + R + 1, qd = i - R;               // entra por la derecha, sale por la izquierda
       if(qa >= QP_GS_W) qa = QP_GS_W - 1;
       if(qd < 0) qd = 0;
       un565(line[qa], r, g, b); sr += r; sg += g; sb += b;
@@ -663,13 +709,13 @@ static void qpGlassBlurSm(){
   for(int i = 0; i < QP_GS_W; i++){                 // vertical
     for(int j = 0; j < QP_GS_H; j++) line[j] = qsGlassSm[(size_t)j * QP_GS_W + i];
     int sr = 0, sg = 0, sb = 0;
-    for(int k = -QP_GS_R; k <= QP_GS_R; k++){
+    for(int k = -R; k <= R; k++){
       int q = k < 0 ? 0 : (k >= QP_GS_H ? QP_GS_H - 1 : k);
       un565(line[q], r, g, b); sr += r; sg += g; sb += b;
     }
     for(int j = 0; j < QP_GS_H; j++){
-      qsGlassSm[(size_t)j * QP_GS_W + i] = pk565(sr / W, sg / W, sb / W);
-      int qa = j + QP_GS_R + 1, qd = j - QP_GS_R;
+      qsGlassSm[(size_t)j * QP_GS_W + i] = pk565((int)(((uint32_t)sr * rc) >> 16), (int)(((uint32_t)sg * rc) >> 16), (int)(((uint32_t)sb * rc) >> 16));
+      int qa = j + R + 1, qd = j - R;
       if(qa >= QP_GS_H) qa = QP_GS_H - 1;
       if(qd < 0) qd = 0;
       un565(line[qa], r, g, b); sr += r; sg += g; sb += b;
@@ -686,7 +732,11 @@ static void qpGlassBlurSm(){
 // vidrio -- que es lo que pide el estilo Plano. Antes se quedaba en 212 y el
 // wallpaper seguia asomando desenfocado por debajo: vidrio con otro nombre.
 // Con Liquid Glass se conserva el 152 afinado de siempre.
-static inline uint8_t qpVeilAlpha(){ return uiGlass ? 152 : 255; }
+static inline uint8_t qpVeilAlpha(){
+  if(!uiGlass) return 255;
+  int d = (int)gGlassLvl - GLASS_LVL_DEF;                // mismo criterio que qpMixAdj
+  return (uint8_t)(152 + (d < 0 ? (d * 16) / 50 : (d * 32) / 50));   // 136 .. 184
+}
 
 static bool qpGlassBuild(){
   uint16_t* bg = qsBgSrc();
@@ -1108,6 +1158,40 @@ static void qsRestoreBg(){
 }
 static void qpEditCancel();     // definida con el editor, mas abajo
 
+// ---- INTENSIDAD DE LIQUID GLASS: APLICAR -----------------------------
+// Se llama UNA vez por cambio (al soltar el deslizador o al restablecer).
+// Rehace de forma controlada solo lo que lleva el material dentro:
+//   · la tarjeta de vidrio cacheada y la banda pre-desenfocada,
+//   · el escritorio (fuera de pantalla: la cortina lo tiene debajo), cuyo
+//     backdrop se desenfoca de nuevo si cambio el radio,
+//   · la capa de vidrio de la propia cortina (qsDirty), para que el usuario
+//     vea el resultado sin cerrarla.
+// La pantalla de una APP debajo de la cortina se repinta al cerrarla
+// (qpGlassFxPending), por la misma via que un cambio de tema. NVS diferida.
+// GUARDADO DIFERIDO. Escribir en NVS son decenas de milisegundos de flash, y
+// el sitio donde caia -- el cuadro en que se levanta el dedo -- es justo donde
+// arranca la animacion de asentamiento: se veia como un tiron al soltar. El
+// manejador tactil solo LEVANTA la bandera; qsTick() escribe DESPUES de haber
+// publicado el cuadro.
+static bool     qpSavePanel = false;          // configuracion del panel (alto de la tarjeta)
+static bool     qpSavePrefs = false;          // preferencias del sistema (brillo, intensidad del vidrio)
+static bool qpGlassFxPending = false;
+static void qpGlassFxCommit(int lv){
+  if(lv < 0) lv = 0;
+  if(lv > 100) lv = 100;
+  int old = gGlassLvl;
+  gGlassLvl = (uint8_t)lv;
+  glassLevelApply();
+  if(gGlassLvl == old){ qpMarkView(); return; }
+  glcValid = false;
+  uiGlassBandEnd();
+  gHomeDirty = true;
+  if(gState == ST_HOME && homeBuf && !editMode) renderHome();
+  qpInvalidateAll();
+  qpSavePrefs = true;
+  qpGlassFxPending = true;
+}
+
 static void qsSettleClosed(){
   qsPanelY = 0; qsPosF = 0; qsVel = 0;
   qsRestoreBg();
@@ -1115,6 +1199,14 @@ static void qsSettleClosed(){
   qpFreeBuffers();                    // suelta la captura, el vidrio y el panel compuesto
   qsComposedTo = -1;
   qsDirty = true;
+  // Si la intensidad cambio con una APP debajo, lo que se acaba de volcar es su
+  // ultimo cuadro, con el material viejo: se repinta por la via de un cambio de
+  // tema (sin volver a guardar). En el escritorio no hace falta: homeBuf ya se
+  // rehizo al aplicar y es lo que se ha volcado.
+  if(qpGlassFxPending){
+    qpGlassFxPending = false;
+    if(gState != ST_HOME) themeChanged(false);
+  }
 }
 static void qsAnimTo(int target){
   if(target < 0) target = 0; if(target > SCR_H) target = SCR_H;
@@ -1145,13 +1237,8 @@ static int      qpGTargetBlk = -1;            // bloque bajo el dedo (para el to
 static int      qpGTargetTile = -1;           // circulo bajo el dedo (indice en qpTiles)
 static int      qpGTargetHdr = -1;            // boton de cabecera bajo el dedo
 static bool     qpGLong = false;              // ya se disparo la accion secundaria
-// GUARDADO DIFERIDO. Escribir en NVS son decenas de milisegundos de flash, y
-// el sitio donde caia -- el cuadro en que se levanta el dedo -- es justo donde
-// arranca la animacion de asentamiento: se veia como un tiron al soltar. El
-// manejador tactil solo LEVANTA la bandera; qsTick() escribe DESPUES de haber
-// publicado el cuadro.
-static bool     qpSavePanel = false;          // configuracion del panel (alto de la tarjeta)
-static bool     qpSavePrefs = false;          // preferencias del sistema (brillo)
+// (qpSavePanel / qpSavePrefs: guardado diferido, declarados junto a
+// qpGlassFxCommit, que tambien los usa.)
 static uint32_t qpGPrevMs = 0;
 static int      qpGPrevY = 0;
 #define QP_DRAG_TH   8                        // px para dejar de ser toque
@@ -1340,14 +1427,14 @@ static void qpFlashBlock(int b){
 // caso quien llama no puede seguir dibujando el panel.
 static bool qpExecCtl(int id, bool detail){
   const QsCtl* c = qpCtl(id);
-  if(!c || !c->avail || !c->avail()) return false;
+  if(!c || !qpCtlShown(id)) return false;
   if(detail && c->detail){ c->detail(); return true; }
   if(c->type == QT_ACTION){ if(c->tap) c->tap(); return true; }
   if(c->tap) c->tap();
   // Cambiar de tema recompone el fondo de la cortina; el resto solo cambia el
   // estado de su control y basta con repintar su banda.
   if(id == QSID_THEME || id == QSID_GLASS) qpInvalidateAll();
-  else qpMarkView();
+  else if(id != QSID_GLASSFX) qpMarkView();       // la intensidad ya invalido lo suyo (qpGlassFxCommit)
   return false;
 }
 
@@ -1381,7 +1468,12 @@ static bool qpPanelTouch(){
       if(b >= 0 && qpBlk[b].kind == QB_ITEM){
         int i = qpBlk[b].item;
         if(i >= 0 && i < qpN && qpCtl(qpIt[i].id) && qpCtl(qpIt[i].id)->type == QT_SLIDER){
-          qpG = QG_SLIDER;                                  // el slider actua ya
+          // El boton de restablecer del deslizador de intensidad es un TOQUE
+          // normal (se resuelve al soltar, via qsTapTile -> su tap), no un
+          // arrastre del deslizador.
+          if(qpIt[i].id == QSID_GLASSFX && qpGlassFxResetHit(qpBlk[b].x, qpBlk[b].w, qpBlk[b].h, T.x))
+            qpG = QG_PENDING;
+          else qpG = QG_SLIDER;                             // el slider actua ya
         } else qpG = QG_PENDING;
       } else if(b >= 0 && qpBlk[b].kind == QB_GROUP){
         qpGTargetTile = qpTileAt(T.x, T.y);
@@ -1405,9 +1497,27 @@ static bool qpPanelTouch(){
         int id = (i >= 0 && i < qpN) ? qpIt[i].id : -1;
         int x = qpBlk[b].x, w = qpBlk[b].w;
         int th = qpBlk[b].h - 20; if(th < 40) th = 40;
+        w = qpSliderTrackW(id, w, th);
         int run = w - th; if(run < 1) run = 1;               // nunca se divide por cero
         int v = (T.x - x - th / 2) * 100 / run;
         if(v < 0) v = 0; if(v > 100) v = 100;
+        // INTENSIDAD DEL VIDRIO: mientras el dedo esta abajo solo se mueve el
+        // indicador (en pasos de GLASS_LVL_STEP). El material se aplica al
+        // soltar, una vez: cada nivel rehace el desenfoque del fondo.
+        if(id == QSID_GLASSFX){
+          int q = ((v + GLASS_LVL_STEP / 2) / GLASS_LVL_STEP) * GLASS_LVL_STEP;
+          if(q > 100) q = 100;
+          int cur = qpGlassFxDrag >= 0 ? qpGlassFxDrag : (int)gGlassLvl;
+          if(q != cur){
+            qpGlassFxDrag = q;
+            int top = QP_VIEW_Y0 - (int)(qpScrollF + 0.5f);
+            int sy0 = top + qpBlk[b].y, sy1 = sy0 + qpBlk[b].h;
+            if(sy0 < QP_VIEW_Y0) sy0 = QP_VIEW_Y0;
+            if(sy1 > QP_VIEW_Y1) sy1 = QP_VIEW_Y1;
+            if(sy1 >= sy0) qpRecompose(sy0, sy1);
+          }
+          return true;
+        }
         // VOLUMEN: escribe el registro del codec en el acto, igual
         // que el brillo escribe el PWM. Y se recompone la banda del
         // slider por el mismo motivo que alli (ver el comentario de
@@ -1442,8 +1552,13 @@ static bool qpPanelTouch(){
       }
       return true;
     }
-    qpSavePrefs = true;                                     // NVS DIFERIDA, fuera del gesto
     qpG = QG_NONE;
+    if(qpGlassFxDrag >= 0){                                 // intensidad: se aplica AHORA, una vez
+      int v = qpGlassFxDrag; qpGlassFxDrag = -1;
+      qpGlassFxCommit(v);                                   // (deja qpSavePrefs puesto si cambio)
+      return true;
+    }
+    qpSavePrefs = true;                                     // NVS DIFERIDA, fuera del gesto
     return true;
   }
 

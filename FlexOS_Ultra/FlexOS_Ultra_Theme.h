@@ -391,17 +391,180 @@ static int glInset(int j, int h, int rad){
 // "esmerilado" que el resto del sistema.
 //
 // TINTE ADAPTATIVO: el porcentaje de mezcla del tinte ya no es el 58 fijo de
-// antes; se mueve dentro de [GLASS_TINT_MIN..GLASS_TINT_MAX] segun cuanto
+// antes; se mueve dentro de [gGlTintMin..gGlTintMax] segun cuanto
 // difiera la luminancia del tinte respecto a la del fondo que quedo debajo del
 // panel. Esto SI cambia el aspecto de los ~19 sitios existentes (cambio pedido
 // y aprobado a proposito, no un efecto colateral): el blur y la geometria son
-// los de siempre, solo respira el tinte. GLASS_TINT_BASE es el valor historico
-// y queda como respaldo defensivo por si no se pudo tomar ninguna muestra.
+// los de siempre, solo respira el tinte. gGlTintBase (58 con el nivel por
+// defecto, el valor historico) queda como respaldo por si no hubo muestra.
 // GLASS_TINT_DIFF_MAX es potencia de dos a proposito: convierte la division
 // del mapeo en un desplazamiento.
-static const uint8_t GLASS_TINT_BASE = 58, GLASS_TINT_MIN = 46, GLASS_TINT_MAX = 70;
 static const int     GLASS_TINT_DIFF_MAX = 128;
+
+// #############################################################
+// ##  INTENSIDAD DE LIQUID GLASS  ·  parametros REALES del material
+// ##  ------------------------------------------------------
+// ##  Un solo nivel (0..100, NVS "glasslv") mueve a la vez los cuatro
+// ##  parametros que este renderer tiene de verdad -- no hay refraccion
+// ##  ni distorsion desde que se retiro el material avanzado, asi que
+// ##  no se ofrecen:
+// ##    · radio del desenfoque (box-blur; su coste NO depende del
+// ##      radio, solo cambia el margen de filas que se copian),
+// ##    · cuanto tinte lleva el vidrio (translucidez),
+// ##    · fuerza del especular y del sombreado,
+// ##    · peso del borde (el reflejo direccional de las esquinas).
+// ##  EL NIVEL 50 ES EXACTAMENTE EL MATERIAL DE SIEMPRE (R=6, tinte
+// ##  46..70, especular 26/30, borde 156/104): quien nunca toque el
+// ##  control no ve cambiar ni un pixel. Se recalcula UNA vez al cambiar
+// ##  el nivel (glassLevelApply), nunca por pixel ni por cuadro.
+// #############################################################
+#define GLASS_LVL_DEF  50
+#define GLASS_LVL_STEP 5
+static uint8_t gGlassLvl = GLASS_LVL_DEF;
+static uint8_t gGlR = 6, gGlTintMin = 46, gGlTintMax = 70, gGlTintBase = 58;
+static uint8_t gGlSpec = 26, gGlShade = 30, gGlCornS = 156, gGlCornW = 104;
+static void glassLevelApply(){
+  int lv = gGlassLvl > 100 ? 100 : gGlassLvl;
+  lv = (lv / GLASS_LVL_STEP) * GLASS_LVL_STEP;       // pasos de 5: menos estados que reconstruir
+  gGlassLvl = (uint8_t)lv;
+  int d = lv - GLASS_LVL_DEF;                        // -50 (sutil) .. +50 (intenso)
+  gGlR        = (uint8_t)(6   + (d * 4)  / 50);      //   2 .. 10
+  gGlTintMin  = (uint8_t)(46  + (d * 16) / 50);      //  30 .. 62
+  gGlTintMax  = (uint8_t)(70  + (d * 20) / 50);      //  50 .. 90
+  gGlTintBase = (uint8_t)((gGlTintMin + gGlTintMax) / 2);
+  gGlSpec     = (uint8_t)(26  + (d * 12) / 50);      //  14 .. 38
+  gGlShade    = (uint8_t)(30  + (d * 14) / 50);      //  16 .. 44
+  gGlCornS    = (uint8_t)(156 + (d * 40) / 50);      // 116 .. 196
+  gGlCornW    = (uint8_t)(104 + (d * 30) / 50);      //  74 .. 134
+}
+// Mezcla de tinte adaptativa: la MISMA regla en todas las rutas del vidrio.
+static inline uint8_t glassTintMix(uint32_t lumaSum, int lumaN, uint16_t tint){
+  if(lumaN <= 0) return gGlTintBase;
+  int dif = (int)(lumaSum / (uint32_t)lumaN) - glassLuma(tint);
+  if(dif < 0) dif = -dif;
+  if(dif > GLASS_TINT_DIFF_MAX) dif = GLASS_TINT_DIFF_MAX;
+  return (uint8_t)(gGlTintMin + (dif * (gGlTintMax - gGlTintMin)) / GLASS_TINT_DIFF_MAX);
+}
+// Especular (blanco, mitad superior) y sombreado (negro, inferior) de la fila
+// j de un panel de alto h. Solo depende de la fila.
+static inline void glassShadeRow(int j, int h, uint16_t &shCol, uint8_t &shA){
+  float fj = (float)j;
+  if(fj < h * 0.45f){ shCol = rgb565(255,255,255); shA = (uint8_t)((1.0f - fj / (h * 0.45f)) * gGlSpec); }
+  else              { shCol = rgb565(0,0,0);       shA = (uint8_t)(((fj - h * 0.45f) / (h * 0.55f)) * gGlShade); }
+}
+
+// #############################################################
+// ##  VIDRIO SOBRE UN FONDO PRE-DESENFOCADO (backdrop)
+// ##  ------------------------------------------------------
+// ##  POR QUE EXISTE. El escritorio desliza sus paginas sobre un
+// ##  wallpaper FIJO. Un panel de vidrio que se desenfoca una vez y
+// ##  luego se desplaza lleva pegada la imagen del fondo de DONDE se
+// ##  compuso: al mover la pagina, el cristal arrastraba una copia del
+// ##  wallpaper en vez de dejar ver lo que tiene detras AHORA.
+// ##
+// ##  COMO SE ARREGLA. Quien compone sobre un fondo conocido (el
+// ##  escritorio) deja activo un backdrop: ese fondo YA desenfocado, en
+// ##  coordenadas de PANTALLA. Mientras lo este, drawLiquidGlassPanelEx
+// ##  no copia ni desenfoca nada: lee el backdrop en la posicion ACTUAL
+// ##  del panel y aplica el material. Mover el panel es volver a leer en
+// ##  otro sitio -- una pasada de mezclas, sin blur --, asi que el
+// ##  deslizamiento puede recomponer el vidrio en cada cuadro.
+// ##
+// ##  Cada panel que sale por esta ruta se puede ANOTAR (gGlRecSlot):
+// ##  el deslizamiento reproduce luego esos mismos paneles desplazados.
+// #############################################################
+static const uint16_t* gGlBd = NULL;      // backdrop activo (stride SCR_W), NULL = ninguno
+static int gGlBdY0 = 0, gGlBdY1 = -1;     // filas de pantalla que cubre
+static int gGlBdR  = -1;                  // radio con el que se desenfoco
+#define GL_REC_MAX 48
+struct GlRec { int16_t x, y, w, h, rad; uint16_t tint; };
+static GlRec   gGlRec[2][GL_REC_MAX];     // 0 = pagina de homeBuf, 1 = pagina vecina (hpBuf)
+static uint8_t gGlRecN[2]   = { 0, 0 };
+static bool    gGlRecOvf[2] = { false, false };
+static int     gGlRecSlot   = -1;         // -1 = no se anota
+
+// Compone el material en las filas [vy0,vy1] del panel (x,y,w,h) leyendo el
+// fondo YA desenfocado. La columna i del panel (0..w-1) se lee en
+// src(j)[sX + i], con src(j) = src0 + (j - jOff) * sStride, y se escribe en la
+// columna x + i de la pantalla. La geometria (esquinas, degradado, borde) sale
+// SIEMPRE del panel entero; las columnas se recortan a [cx0,cx1] sin cambiarla.
+// Todo se indexa desde el principio de la fila: un panel que asoma por el borde
+// izquierdo (x < 0) nunca forma un puntero fuera de ella.
+static void glassComposeRows(int x, int y, int w, int h, int rad, uint16_t tint, uint8_t tintMix,
+                             int vy0, int vy1, int cx0, int cx1,
+                             const uint16_t* src0, int jOff, size_t sStride, int sX){
+  for(int j = vy0 - y; j <= vy1 - y; j++){
+    int ins = glInset(j, h, rad);
+    const uint16_t* src = src0 + (size_t)(j - jOff) * sStride;
+    uint16_t* dst = gBuf + (size_t)(y + j) * SCR_W;
+    // Especular y sombreado solo dependen de la fila: se calculan aqui, una
+    // vez, y el bucle interior se queda en mezclas enteras.
+    uint16_t shCol; uint8_t shA;
+    glassShadeRow(j, h, shCol, shA);
+    int i0 = ins, i1 = w - 1 - ins;
+    if(x + i0 < cx0) i0 = cx0 - x;
+    if(x + i1 > cx1) i1 = cx1 - x;
+    // Con alpha 0 la segunda mezcla devuelve su propia entrada: la fila se
+    // ahorra una pasada entera de mix565.
+    if(shA) for(int i = i0; i <= i1; i++) dst[x + i] = mix565(mix565(src[sX + i], tint, tintMix), shCol, shA);
+    else    for(int i = i0; i <= i1; i++) dst[x + i] = mix565(src[sX + i], tint, tintMix);
+    // Borde del cristal: reflejo claro arriba y sombra abajo, con peso
+    // distinto por lado (luz desde arriba a la izquierda). Requisito GRAFICO
+    // del material, no una superficie del tema.
+    bool topZone = (j < h / 2);
+    uint8_t sL = topZone ? gGlCornS : gGlCornW;
+    uint8_t sR = topZone ? gGlCornW : gGlCornS;
+    uint16_t bcol = (j < 3) ? rgb565(255,255,255) : (j < h / 2 ? rgb565(205,214,228) : rgb565(22,28,40));
+    int lx = x + ins, rx = x + w - 1 - ins;
+    if(lx >= cx0 && lx <= cx1) dst[lx] = mix565(dst[lx], bcol, sL);
+    if(rx >= cx0 && rx <= cx1) dst[rx] = mix565(dst[rx], bcol, sR);
+  }
+}
+
+// Ruta del backdrop. Devuelve false si no aplica (sin backdrop, otro radio,
+// landscape o el panel se sale de las filas cubiertas): entonces el llamante
+// sigue por la ruta de siempre. A diferencia de esa ruta, aqui el panel NO se
+// encoge al salirse por un lado de la pantalla: se RECORTA, que es lo que
+// tiene que pasar con un panel que se esta deslizando fuera.
+static bool glassFromBackdrop(int x, int y, int w, int h, int rad, uint16_t tint, int blurR){
+  if(!gGlBd || gLand || blurR != gGlBdR) return false;
+  if(w <= 0 || h <= 0) return true;
+  if(y < gGlBdY0 || y + h - 1 > gGlBdY1) return false;
+  if(2 * rad > w) rad = w / 2;
+  if(2 * rad > h) rad = h / 2;
+  int cx0 = gClipX0 > 0 ? gClipX0 : 0;
+  int cx1 = gClipX1 < SCR_W - 1 ? gClipX1 : SCR_W - 1;
+  if(cx0 < x) cx0 = x;
+  if(cx1 > x + w - 1) cx1 = x + w - 1;
+  int vy0 = y         > gClipY0 ? y         : gClipY0;
+  int vy1 = (y + h - 1) < gClipY1 ? (y + h - 1) : gClipY1;
+  if(gGlRecSlot >= 0 && gGlRecSlot < 2){
+    int s = gGlRecSlot;
+    if(gGlRecN[s] < GL_REC_MAX){
+      GlRec* r = &gGlRec[s][gGlRecN[s]++];
+      r->x = (int16_t)x; r->y = (int16_t)y; r->w = (int16_t)w; r->h = (int16_t)h;
+      r->rad = (int16_t)rad; r->tint = tint;
+    } else gGlRecOvf[s] = true;
+  }
+  if(cx0 > cx1 || vy0 > vy1) return true;               // anotado, pero nada visible
+  // Tinte adaptativo sobre la parte VISIBLE del panel, leida del backdrop: con
+  // el panel entero en pantalla es la misma muestra en cada composicion, asi
+  // que la pagina quieta y el ultimo cuadro del deslizamiento coinciden.
+  uint32_t lumaSum = 0; int lumaN = 0;
+  for(int j = 0; j < h; j += 4){
+    const uint16_t* srow = gGlBd + (size_t)(y + j - gGlBdY0) * SCR_W;
+    for(int i = cx0 - x; i <= cx1 - x; i += 8){ lumaSum += (uint32_t)glassLuma(srow[x + i]); lumaN++; }
+  }
+  uint8_t tintMix = glassTintMix(lumaSum, lumaN, tint);
+  // El backdrop esta en coordenadas de pantalla: la columna i del panel es la
+  // columna x + i de la fila, justo la que tiene detras AHORA.
+  const uint16_t* rowY = gGlBd + (size_t)(y - gGlBdY0) * SCR_W;
+  glassComposeRows(x, y, w, h, rad, tint, tintMix, vy0, vy1, cx0, cx1, rowY, 0, SCR_W, x);
+  return true;
+}
+
 static void drawLiquidGlassPanelEx(int x, int y, int w, int h, int rad, uint16_t tint, int blurR){
+  if(glassFromBackdrop(x, y, w, h, rad, tint, blurR)) return;
   // GUARDA DE LANDSCAPE (Modo PC). Esta funcion lee y escribe el buffer con
   // indexacion VERTICAL directa (gBuf + (y+j)*SCR_W + x), asi que ignora por
   // completo la rotacion de gLand. En Modo PC cada drawAppIcon() de estilo
@@ -464,62 +627,17 @@ static void drawLiquidGlassPanelEx(int x, int y, int w, int h, int rad, uint16_t
   // fondo oscuro y tinte claro sobre fondo claro dan diferencia chica (poco
   // tinte); los dos cruzados dan diferencia grande (mas tinte). Todo esto se
   // calcula UNA vez por panel, no por pixel.
-  uint8_t tintMix = GLASS_TINT_BASE;
-  if(lumaN > 0){
-    int dif = (int)(lumaSum / (uint32_t)lumaN) - glassLuma(tint);
-    if(dif < 0) dif = -dif;
-    if(dif > GLASS_TINT_DIFF_MAX) dif = GLASS_TINT_DIFF_MAX;
-    tintMix = (uint8_t)(GLASS_TINT_MIN + (dif * (GLASS_TINT_MAX - GLASS_TINT_MIN)) / GLASS_TINT_DIFF_MAX);
-  }
+  uint8_t tintMix = glassTintMix(lumaSum, lumaN, tint);
   glassBlur(w, hc, blurR);
   // La geometria (inset redondeado, degradado, borde) sigue calculandose con j
   // y h del panel ENTERO: la banda solo decide que filas se recorren, nunca
-  // como se ven.
-  for(int j = vy0 - y; j <= vy1 - y; j++){
-    int yy = y + j;
-    int ins = glInset(j, h, rad);
-    uint16_t* src = glassBuf + (size_t)(j - j0) * w;
-    uint16_t* dst = gBuf + (size_t)yy * SCR_W + x;
-    // Especular y sombreado del MATERIAL: es un blanco y un negro de luz
-    // (como el brillo de un cristal real), no un color de tema. Se aplican
-    // SOBRE el tinte, que si viene del tema, asi que el vidrio se aclara u
-    // oscurece solo con la paleta activa.
-    //
-    // Y SOLO DEPENDEN DE LA FILA. Estaban dentro del bucle de pixeles, asi que
-    // cada fila resolvia la misma comparacion, la misma division y la misma
-    // conversion en coma flotante una vez POR PIXEL -- hasta 480 veces para
-    // obtener 480 veces el mismo valor. Se calculan aqui, una vez por fila, y
-    // el bucle interior se queda en mezclas enteras. Mismo resultado exacto.
-    float fj = (float)j;
-    uint16_t shCol; uint8_t shA;
-    if(fj < h * 0.45f){ shCol = rgb565(255,255,255); shA = (uint8_t)((1.0f - fj / (h * 0.45f)) * 26); }
-    else              { shCol = rgb565(0,0,0);       shA = (uint8_t)(((fj - h * 0.45f) / (h * 0.55f)) * 30); }
-    // Con alpha 0 la segunda mezcla devuelve su propia entrada: la fila se
-    // ahorra entera una pasada de mix565 en vez de pagarla para no cambiar nada.
-    if(shA) for(int i = ins; i < w - ins; i++) dst[i] = mix565(mix565(src[i], tint, tintMix), shCol, shA);
-    else    for(int i = ins; i < w - ins; i++) dst[i] = mix565(src[i], tint, tintMix);
-    // Highlight direccional (luz simulada desde la esquina superior-izquierda):
-    // mismo bcol de siempre por fila (blanco arriba, negro abajo), pero la
-    // FUERZA de la mezcla se pondera distinto por lado en vez de usar 130 fijo
-    // en los dos bordes. Asi las 4 esquinas quedan con peso propio (arriba-
-    // izq. blanco fuerte, arriba-der. blanco tenue, abajo-izq. sombra tenue,
-    // abajo-der. sombra fuerte) en vez de una franja horizontal identica en
-    // ambos bordes. GLASS_CORNER_STRONG/WEAK promedian 130 (el valor de antes)
-    // para no cambiar el "peso" total del borde, solo redistribuirlo: el delta
-    // es de +-20% sobre ese 130. Sigue siendo funcion de j nada mas: mismos 2
-    // pixeles por fila de siempre. Si hay que retocar la intensidad, mover los
-    // dos valores de forma simetrica alrededor de 130 (STRONG = 130 + d,
-    // WEAK = 130 - d) para que el borde no gane ni pierda peso total.
-    const uint8_t GLASS_CORNER_STRONG = 156, GLASS_CORNER_WEAK = 104;
-    bool topZone = (j < h / 2);
-    uint8_t sL = topZone ? GLASS_CORNER_STRONG : GLASS_CORNER_WEAK;   // izquierda: blanco fuerte / sombra tenue
-    uint8_t sR = topZone ? GLASS_CORNER_WEAK   : GLASS_CORNER_STRONG; // derecha: blanco tenue / sombra fuerte
-    // Borde del cristal: reflejo claro arriba y sombra abajo. Requisito
-    // GRAFICO del material (da el grosor), no una superficie del tema.
-    uint16_t bcol = (j < 3) ? rgb565(255,255,255) : (j < h / 2 ? rgb565(205,214,228) : rgb565(22,28,40));
-    dst[ins] = mix565(dst[ins], bcol, sL);
-    dst[w - 1 - ins] = mix565(dst[w - 1 - ins], bcol, sR);
-  }
+  // como se ven. Especular y sombreado son luz de cristal (blanco y negro), no
+  // color de tema: se aplican SOBRE el tinte, que si sale de la paleta. El
+  // borde pondera distinto cada lado (luz desde arriba a la izquierda); con el
+  // nivel por defecto sus pesos son los 156/104 de siempre. Esta ruta no
+  // recorta columnas (nunca lo hizo): el panel ya se acoto a la pantalla.
+  glassComposeRows(x, y, w, h, rad, tint, tintMix, vy0, vy1, x, x + w - 1,
+                   glassBuf, j0, (size_t)w, 0);
 }
 // MODO VISUAL EFICIENTE  ·  TEMPORAL, y no es una preferencia
 // ---------------------------------------------------------------------------
@@ -536,8 +654,14 @@ static void drawLiquidGlassPanelEx(int x, int y, int w, int h, int rad, uint16_t
 // desenfocan en cada panel. Ademas Recientes conserva una sola miniatura en
 // vez de cuatro (73 KB cada una).
 static bool gEffMode = false;
-#define GLASS_BLUR_R      6
 #define GLASS_BLUR_R_EFF  2
+// Radio de desenfoque vigente: el del nivel de intensidad (6 por defecto) y,
+// en modo eficiente, nunca mas de GLASS_BLUR_R_EFF.
+static inline int glassBlurR(){
+  int r = gGlR;
+  if(gEffMode && r > GLASS_BLUR_R_EFF) r = GLASS_BLUR_R_EFF;
+  return r;
+}
 // SOMBRAS. En modo eficiente pesan la mitad. Es la otra mitad del efecto
 // pedido: cada sombra es un relleno redondeado con alpha que se repinta en
 // cada cuadro de un arrastre de ventana en Modo PC, asi que bajar el alpha
@@ -549,7 +673,7 @@ static inline uint8_t effShadow(int a){
   return (uint8_t)(gEffMode ? a / 2 : a);
 }
 static void drawLiquidGlassPanel(int x, int y, int w, int h, int rad, uint16_t tint){
-  drawLiquidGlassPanelEx(x, y, w, h, rad, tint, gEffMode ? GLASS_BLUR_R_EFF : GLASS_BLUR_R);
+  drawLiquidGlassPanelEx(x, y, w, h, rad, tint, glassBlurR());
 }
 
 // #############################################################
@@ -591,22 +715,13 @@ static void drawGlassPanelFlatRows(int x, int y, int w, int h, int rad,
   int vy1 = (y + h - 1) < gClipY1 ? (y + h - 1) : gClipY1;
   if(vy0 > vy1) return;
   // Tinte adaptativo: la media de un color repetido es ese color.
-  uint8_t tintMix = GLASS_TINT_BASE;
-  {
-    int dif = (int)glassLuma(bg) - (int)glassLuma(tint);
-    if(dif < 0) dif = -dif;
-    if(dif > GLASS_TINT_DIFF_MAX) dif = GLASS_TINT_DIFF_MAX;
-    tintMix = (uint8_t)(GLASS_TINT_MIN + (dif * (GLASS_TINT_MAX - GLASS_TINT_MIN)) / GLASS_TINT_DIFF_MAX);
-  }
-  const uint8_t GLASS_CORNER_STRONG = 156, GLASS_CORNER_WEAK = 104;
+  uint8_t tintMix = glassTintMix((uint32_t)glassLuma(bg), 1, tint);
   for(int j = vy0 - y; j <= vy1 - y; j++){
     int yy = y + j;
     int ins = glInset(j, h, rad);
     uint16_t* dst = gBuf + (size_t)yy * SCR_W + x;
-    float fj = (float)j;
     uint16_t shCol; uint8_t shA;
-    if(fj < h * 0.45f){ shCol = rgb565(255,255,255); shA = (uint8_t)((1.0f - fj / (h * 0.45f)) * 26); }
-    else              { shCol = rgb565(0,0,0);       shA = (uint8_t)(((fj - h * 0.45f) / (h * 0.55f)) * 30); }
+    glassShadeRow(j, h, shCol, shA);
     uint16_t row = mix565(bg, tint, tintMix);
     if(shA) row = mix565(row, shCol, shA);
     for(int i = ins; i < w - ins; i++) dst[i] = row;
@@ -614,8 +729,8 @@ static void drawGlassPanelFlatRows(int x, int y, int w, int h, int rad,
     // mismo orden que en drawLiquidGlassPanelEx.
     uint16_t bcol = (j < 3) ? rgb565(255,255,255) : (j < h / 2 ? rgb565(205,214,228) : rgb565(22,28,40));
     bool topZone = (j < h / 2);
-    uint8_t sL = topZone ? GLASS_CORNER_STRONG : GLASS_CORNER_WEAK;
-    uint8_t sR = topZone ? GLASS_CORNER_WEAK   : GLASS_CORNER_STRONG;
+    uint8_t sL = topZone ? gGlCornS : gGlCornW;
+    uint8_t sR = topZone ? gGlCornW : gGlCornS;
     dst[ins] = mix565(dst[ins], bcol, sL);
     dst[w - 1 - ins] = mix565(dst[w - 1 - ins], bcol, sR);
   }
@@ -657,10 +772,15 @@ static bool glcBuild(int w, int h, int rad, uint16_t tint, uint16_t bg){
   }
   uint16_t* oBuf = gBuf;                            // gBuf directo, no setBuf: no debe desviarse a un lienzo de DeX
   int oc0 = gClipY0, oc1 = gClipY1, ox0 = gClipX0, ox1 = gClipX1;
+  // El lienzo de trabajo NO esta en coordenadas de pantalla: un backdrop
+  // activo (el del escritorio) no describe lo que hay debajo de esta tarjeta.
+  const uint16_t* oBd = gGlBd; int oRec = gGlRecSlot;
+  gGlBd = NULL; gGlRecSlot = -1;
   gBuf = glcScratch;
   gClipY0 = 0; gClipY1 = h - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
   drawLiquidGlassPanel(0, 0, w, h, rad, tint);
   gBuf = oBuf; gClipY0 = oc0; gClipY1 = oc1; gClipX0 = ox0; gClipX1 = ox1;
+  gGlBd = oBd; gGlRecSlot = oRec;
   for(int j = 0; j < h; j++)
     memcpy(glcCard + (size_t)j * w, glcScratch + (size_t)j * SCR_W, (size_t)w * 2);
   glcW = w; glcH = h; glcRad = rad; glcTint = tint; glcBg = bg; glcValid = true;
@@ -746,7 +866,7 @@ static uint16_t uiSurfOn(int role){ return (role == UIS_ACCENT) ? TH_ONACC : TH_
 #define UIGL_BAND_MAX_H 320              // peor caso real (cronometro 236, menu ~178)
 static uint16_t* uiGlBand   = NULL;      // banda YA desenfocada (PSRAM, stride SCR_W)
 static int       uiGlBandY0 = 0, uiGlBandY1 = -1;
-static uint8_t   uiGlBandMix = GLASS_TINT_BASE;
+static uint8_t   uiGlBandMix = 58;       // se recalcula en cada uiGlassBandBegin
 
 static bool uiGlassBandActive(){ return uiGlBand && uiGlBandY1 >= uiGlBandY0; }
 // Desenfoca la banda [y0,y1] del buffer ACTIVO una sola vez. El llamante debe
@@ -778,20 +898,14 @@ static bool uiGlassBandBegin(int y0, int y1, uint16_t tint){
     const uint16_t* srow = gBuf + (size_t)(y0 + j) * SCR_W;
     for(int i = 0; i < SCR_W; i += 8){ lumaSum += (uint32_t)glassLuma(srow[i]); lumaN++; }
   }
-  uiGlBandMix = GLASS_TINT_BASE;
-  if(lumaN > 0){
-    int dif = (int)(lumaSum / (uint32_t)lumaN) - glassLuma(tint);
-    if(dif < 0) dif = -dif;
-    if(dif > GLASS_TINT_DIFF_MAX) dif = GLASS_TINT_DIFF_MAX;
-    uiGlBandMix = (uint8_t)(GLASS_TINT_MIN + (dif * (GLASS_TINT_MAX - GLASS_TINT_MIN)) / GLASS_TINT_DIFF_MAX);
-  }
+  uiGlBandMix = glassTintMix(lumaSum, lumaN, tint);
   // Copiar la banda a glassBuf, desenfocarla ahi (glassBlur trabaja sobre
   // glassBuf con el ancho que se le pase) y guardarla en uiGlBand.
   if(!glassBuf) glassBuf = (uint16_t*)heap_caps_malloc((size_t)SCR_W * SCR_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if(!glassBuf) return false;
   for(int j = 0; j < h; j++)
     memcpy(glassBuf + (size_t)j * SCR_W, gBuf + (size_t)(y0 + j) * SCR_W, (size_t)SCR_W * 2);
-  glassBlur(SCR_W, h, 6);                        // mismo radio que drawLiquidGlassPanel
+  glassBlur(SCR_W, h, glassBlurR());             // mismo radio que drawLiquidGlassPanel
   for(int j = 0; j < h; j++)
     memcpy(uiGlBand + (size_t)j * SCR_W, glassBuf + (size_t)j * SCR_W, (size_t)SCR_W * 2);
   uiGlBandY0 = y0; uiGlBandY1 = y1;
@@ -820,7 +934,6 @@ static void uiGlassPanelCached(int x, int y, int w, int h, int rad, uint16_t tin
   if(vy0 < uiGlBandY0) vy0 = uiGlBandY0;
   if(vy1 > uiGlBandY1) vy1 = uiGlBandY1;
   if(vy0 > vy1) return;
-  const uint8_t CORNER_STRONG = 156, CORNER_WEAK = 104;
   for(int yy = vy0; yy <= vy1; yy++){
     int j = yy - y;
     int ins = glInset(j, h, rad);
@@ -832,15 +945,15 @@ static void uiGlassPanelCached(int x, int y, int w, int h, int rad, uint16_t tin
     if(i1 > gClipX1) i1 = gClipX1;
     for(int i = i0; i <= i1; i++){
       uint16_t out = mix565(src[i], tint, uiGlBandMix);
-      if(fj < h * 0.45f) out = mix565(out, rgb565(255,255,255), (uint8_t)((1.0f - fj / (h * 0.45f)) * 26));
-      else               out = mix565(out, rgb565(0,0,0), (uint8_t)(((fj - h * 0.45f) / (h * 0.55f)) * 30));
+      if(fj < h * 0.45f) out = mix565(out, rgb565(255,255,255), (uint8_t)((1.0f - fj / (h * 0.45f)) * gGlSpec));
+      else               out = mix565(out, rgb565(0,0,0), (uint8_t)(((fj - h * 0.45f) / (h * 0.55f)) * gGlShade));
       dst[i] = (a == 255) ? out : mix565(dst[i], out, a);
     }
     // Borde del cristal (da el grosor). Solo si el lado cae dentro del recorte.
     uint16_t bcol = (j < 3) ? rgb565(255,255,255) : (j < h / 2 ? rgb565(205,214,228) : rgb565(22,28,40));
     bool topZone = (j < h / 2);
-    uint8_t sL = topZone ? CORNER_STRONG : CORNER_WEAK;
-    uint8_t sR = topZone ? CORNER_WEAK   : CORNER_STRONG;
+    uint8_t sL = topZone ? gGlCornS : gGlCornW;
+    uint8_t sR = topZone ? gGlCornW : gGlCornS;
     int lx = x + ins, rx = x + w - 1 - ins;
     if(lx >= gClipX0 && lx <= gClipX1) dst[lx] = mix565(dst[lx], bcol, (uint8_t)((int)sL * a / 255));
     if(rx >= gClipX0 && rx <= gClipX1) dst[rx] = mix565(dst[rx], bcol, (uint8_t)((int)sR * a / 255));

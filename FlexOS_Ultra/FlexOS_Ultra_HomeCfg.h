@@ -268,9 +268,9 @@ static void hcDrawThumb(int page, int x, int y, int tw, int th){
   int S, gx0, gy0, cs, rs, cols, rows; homeGrid(S, gx0, gy0, cs, rs, cols, rows);
   int oStyle = gIconStyle;
   gIconStyle = 0;              // en miniatura no se hace un blur Liquid Glass por icono
-  // banda superior de clima/calendario y dock, en esquema
-  fillRoundRectA(x + 24 * tw / SCR_W, y + 72 * th / SCR_H, 432 * tw / SCR_W, 120 * th / SCR_H,
-                 6, TC(255,255,255), 46);
+  // Dock, en esquema (es igual en todas las paginas). La franja de arriba ya no
+  // se dibuja fija: Clima y Calendario son widgets de su pagina y salen abajo,
+  // con los demas, solo en la miniatura de la pagina que los tiene.
   fillRoundRectA(x + 24 * tw / SCR_W, y + (SCR_H - 176) * th / SCR_H, 432 * tw / SCR_W,
                  96 * th / SCR_H, 8, TC(255,255,255), 60);
   for(int k = 0; k < gHomeWgN[page] && k < HOME_WG_MAX; k++){
@@ -372,6 +372,7 @@ static void homeResetLayout(){
   for(int p = 0; p < HOME_PAGES_MAX; p++) gHomeWgN[p] = 0;
   gHomePageN = HOME_LEGACY_PAGES; gHomeMain = 0; gHomePage = 0;
   gHomeCols = 4; gHomeRows = 3; gHomeIconSz = 1;
+  homeWgFactory();                          // Clima y Calendario en la cabecera de la principal
   drawerRegistryDefaults();                 // el reparto de fabrica sale del registro de apps
   homeOrderNormalize();
   homeOrderSave();
@@ -1045,7 +1046,7 @@ static void hcWidgetTouch(){
       if(hcWgSel == i && hcHit(T.x, T.y, SCR_W - 122, y + 20, 96, 36)){
         int pg = (hcPageView < gHomePageN) ? hcPageView : gHomeMain;
         int r = homeWgAdd(pg, i);
-        if(r == 1)      hcInfo("Esta pagina ya tiene 3 widgets");
+        if(r == 1){ char m[48]; snprintf(m, sizeof(m), "Esta pagina ya tiene %d widgets", HOME_WG_MAX); hcInfo(m); }
         else if(r == 2) hcInfo("Sin espacio: elige otra pagina");
         else { homeOrderNormalize(); homeOrderSave(); hcView = HCV_PAGES; }
       } else hcWgSel = i;
@@ -1205,10 +1206,11 @@ static void hpzUpdate(){
 }
 // ---- Espacio VERDADERAMENTE vacio del escritorio ---------------------------
 // Condicion de la pulsacion larga que abre la personalizacion. Excluye iconos,
-// widgets, dock, barra de estado, barra de navegacion, la banda fija superior
-// y las tarjetas de notificacion visibles.
+// widgets, dock, barra de estado, barra de navegacion y las tarjetas de
+// notificacion visibles. La fila de cabecera SI es pagina: un hueco suyo sin
+// widget es espacio vacio como cualquier celda libre.
 static bool homeEmptySpaceAt(int px, int py){
-  if(py < HOME_BAND_TOP || py >= homeBandBot()) return false;
+  if(py < HOME_PAGE_TOP || py >= homeBandBot()) return false;
   int id;
   if(hitHomeIcon(px, py, id)) return false;
   if(homeWgAt(gHomePage, px, py) >= 0) return false;
@@ -1311,13 +1313,13 @@ static void homeTick(){
       enterApp(id);
       return;
     }
-    // Widget con accion real: el acceso a Camara abre la app, y el de Clima
-    // abre Clima. Los demas son informativos y no fingen ser botones.
+    // Widget con accion real: el acceso a Camara abre la app, el de Clima
+    // abre Clima y el Calendario abre Calendario (los dos que antes eran fijos
+    // arriba conservan su accion). Los demas son informativos y no fingen ser
+    // botones.
     int wi = homeWgAt(gHomePage, T.x, T.y);
-    if(wi >= 0 && gHomeWg[gHomePage][wi].type == WG_CAM){   gIconOvrApp = -1; enterApp(IC_CAMARA); return; }
-    if(wi >= 0 && gHomeWg[gHomePage][wi].type == WG_CLIMA){ gIconOvrApp = -1; enterApp(IC_CLIMA);  return; }
-    // Widgets fijos de la franja superior: cada tarjeta abre su app real.
-    int fixedApp = homeFixedWidgetAppAt(T.x, T.y);
-    if(fixedApp >= 0){ gIconOvrApp = -1; enterApp(fixedApp); return; }
+    if(wi >= 0 && gHomeWg[gHomePage][wi].type == WG_CAM){    gIconOvrApp = -1; enterApp(IC_CAMARA); return; }
+    if(wi >= 0 && gHomeWg[gHomePage][wi].type == WG_CLIMA){  gIconOvrApp = -1; enterApp(IC_CLIMA);  return; }
+    if(wi >= 0 && gHomeWg[gHomePage][wi].type == WG_CALEND){ gIconOvrApp = -1; enterApp(IC_CALEND); return; }
   }
 }

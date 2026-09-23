@@ -478,16 +478,29 @@ struct CronoLap { uint32_t split; uint32_t total; };
 // ##  HomeWidget se pasa por puntero a wgDrawCell() y a wgRect().
 // ##  Lo vigila tests/host/check_protos.py.
 // #############################################################
-#define HOME_WG_MAX 3                       // widgets colocados por pagina
-// Un widget COLOCADO. col/row/w/h son CELDAS de la rejilla, no pixeles: asi
-// cambiar de rejilla o de tamano de icono no invalida ninguna posicion.
+// 6 por pagina: los dos widgets que antes eran FIJOS (Clima y Calendario) ahora
+// son de una pagina concreta y ocupan sitio como cualquier otro, asi que el
+// tope de 3 se quedaba corto en la pagina principal.
+#define HOME_WG_MAX 6                       // widgets colocados por pagina
+#define HOME_WG_MAX_V1 3                    // tope del formato v1 guardado en NVS ("hwg")
+// Un widget COLOCADO. col/row/w/h son CELDAS, no pixeles: asi cambiar de
+// rejilla o de tamano de icono no invalida ninguna posicion. Las FILAS son las
+// de la rejilla de la pagina: la 0 es la fila de CABECERA (solo widgets, donde
+// antes vivian Clima y Calendario fijos) y de la 1 en adelante las filas de
+// iconos. El formato v1 no tenia cabecera y se migra sumando 1 a la fila.
 struct HomeWidget { uint8_t type, col, row, w, h; };
 // Catalogo. Solo entran widgets con un dato REAL detras en esta placa.
 // El valor 7 queda retirado para que los widgets posteriores conserven su ID
 // en NVS. homeWgNormalize() descarta automaticamente ese tipo sin mostrarlo.
+// WG_CALEND va AL FINAL por la misma razon: los ids viajan a NVS.
 enum { WG_NONE = 0, WG_CLOCK, WG_CLOCK_A, WG_DATE, WG_WIFI, WG_MEM,
-       WG_STORAGE, WG_RETIRED_7, WG_CRONO, WG_CAM, WG_CLIMA, WG_COUNT };
-struct WgDesc { const char* name; const char* cat; uint8_t w, h; };
+       WG_STORAGE, WG_RETIRED_7, WG_CRONO, WG_CAM, WG_CLIMA, WG_CALEND, WG_COUNT };
+// w/h = tamano al anadirlo. minW..maxW / minH..maxH = tamanos que admite al
+// redimensionarlo, en celdas. minPxH = alto minimo en pixeles para que su
+// contenido quepa sin salirse (0 = sin minimo): la misma fila mide 120 px en la
+// cabecera y 80-100 en la rejilla de iconos, asi que no basta con contar celdas.
+struct WgDesc { const char* name; const char* cat; uint8_t w, h;
+                uint8_t minW, maxW, minH, maxH, minPxH; };
 // WxScene: paleta e intensidades de una escena meteorologica de la app Clima.
 // Vive AQUI ARRIBA por la misma restriccion de ctags que HomeWidget o Touch:
 // wxSceneOf() y wxSceneBlend() la reciben por puntero, y el prototipo que

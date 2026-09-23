@@ -253,6 +253,12 @@ static void cfgLoad(){
   cfgLang     = prefs.getInt("lang", 0);
   g24h        = prefs.getBool("h24", false);
   uiGlass     = prefs.getBool("glass", false);
+  // Intensidad de Liquid Glass (Panel rapido). Clave NUEVA: una placa que
+  // actualiza no la tiene y recibe el nivel por defecto, que es exactamente el
+  // material de siempre. Acotada: unas prefs corruptas no dan un material raro.
+  { int lv = prefs.getInt("glasslv", GLASS_LVL_DEF);
+    gGlassLvl = (uint8_t)((lv >= 0 && lv <= 100) ? lv : GLASS_LVL_DEF);
+    glassLevelApply(); }
   gDark       = prefs.getBool("dark", true);
   gIconStyle  = prefs.getInt("iconstyle", 0);
   gBright     = prefs.getInt("bright", 80);
@@ -292,6 +298,7 @@ static void cfgSavePrefs(){
   prefs.putInt("lang", cfgLang);
   prefs.putBool("h24", g24h);
   prefs.putBool("glass", uiGlass);
+  prefs.putInt("glasslv", (int)gGlassLvl);
   prefs.putBool("dark", gDark);
   prefs.putInt("iconstyle", gIconStyle);
   prefs.putInt("bright", gBright);

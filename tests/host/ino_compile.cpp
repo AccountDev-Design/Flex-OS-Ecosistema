@@ -2139,7 +2139,7 @@ static void testPaginasHome(){
   drwTestReset();
   gState = ST_HOME; editMode = false; gLand = false;
   gHomePage = 0; hpDragging = false; hpSettling = false;
-  hpBuf = NULL; hpBg = NULL; hpBufPage = -1;
+  hpFreeBuffers(); homeBackdropFree();       // sin caches previas: se reservan de nuevo
 
   // La primera pagina conserva las doce apps originales y las paginas
   // siguientes empiezan vacias; el gesto no debe inventar iconos.
@@ -2233,11 +2233,18 @@ static void testPaginasHome(){
   tMove(300 - 40, gy, 7250);
   chk(!hpTryStart(), "desde la ultima pagina no se arrastra hacia delante");
 
-  // --- fuera de la banda de la rejilla el gesto es de otro ---
+  // --- la cabecera de widgets ES pagina: arrastrar ahi tambien pasa pagina ---
+  // Antes esa franja era de dos widgets fijos que no se movian; ahora sus
+  // widgets son de la pagina y viajan con ella, asi que el gesto es el mismo.
   gHomePage = 0;
-  tDown(300, 100, 8000);                           // sobre los widgets
+  tDown(300, 100, 8000);                           // sobre la cabecera de widgets
   tMove(260, 100, 8050);
-  chk(!hpTryStart(), "sobre los widgets no se arrastran paginas");
+  chk(hpTryStart(), "sobre la cabecera de widgets tambien se pasa de pagina");
+  hpDragging = false; hpSettling = false; tReset();
+  // --- fuera de la franja de pagina el gesto es de otro ---
+  tDown(300, 40, 8100);                            // sobre la barra de estado
+  tMove(260, 40, 8150);
+  chk(!hpTryStart(), "sobre la barra de estado no se arrastran paginas");
   tDown(300, SCR_H - 30, 8200);                    // sobre la barra de navegacion
   tMove(260, SCR_H - 30, 8250);
   chk(!hpTryStart(), "sobre la barra de navegacion tampoco");
@@ -2415,22 +2422,28 @@ static void testDeslizarPaginas(){
   // rectangulos que representan iconos. Se verifica pixel a pixel el frame
   // esperado durante todo el recorrido, incluido que no sobreviva basura del
   // frame anterior.
+  // Con la mascara de contenido: aqui las dos paginas no tienen vidrio anotado,
+  // asi que su base es el wallpaper limpio y la mascara marca justo los dos
+  // rectangulos -- el mismo criterio de siempre, ahora precalculado.
   { const uint16_t COL_A = 0x1234, COL_B = 0x4321, VENENO = 0x7BEF;
     if(!hpEnsureBuf()){ chk(false, "hay lienzo para la pagina vecina"); }
     else {
       memset(homeBuf, 0, (size_t)SCR_W * SCR_H * 2);
-      for(int y = HOME_BAND_TOP; y < homeBandBot(); y++) for(int x = 0; x < SCR_W; x++){
+      for(int y = HOME_PAGE_TOP; y < homeBandBot(); y++) for(int x = 0; x < SCR_W; x++){
         uint16_t bg = (uint16_t)(0x0800u + (unsigned)x);
         homeBuf[(size_t)y * SCR_W + x] = bg;
-        hpBg[(size_t)(y - HOME_BAND_TOP) * SCR_W + x] = bg;
-        hpBuf[(size_t)(y - HOME_BAND_TOP) * SCR_W + x] = bg;
+        hpBg[(size_t)(y - HOME_PAGE_TOP) * SCR_W + x] = bg;
+        hpBuf[(size_t)(y - HOME_PAGE_TOP) * SCR_W + x] = bg;
       }
       const int fy = HOME_GY0 + 12;
       for(int y = fy; y < fy + 18; y++){
         for(int x = 60; x < 92; x++) homeBuf[(size_t)y * SCR_W + x] = COL_A;
-        for(int x = 100; x < 132; x++) hpBuf[(size_t)(y - HOME_BAND_TOP) * SCR_W + x] = COL_B;
+        for(int x = 100; x < 132; x++) hpBuf[(size_t)(y - HOME_PAGE_TOP) * SCR_W + x] = COL_B;
       }
       hpBufPage = 1; hpFrom = 0; hpTo = 1;    // hacia la izquierda: la 1 entra por la derecha
+      hpTop = HOME_BAND_TOP;                  // ninguna de las dos tiene cabecera
+      gGlRecN[0] = 0; gGlRecN[1] = 0;
+      hpMaskBuild(0); hpMaskBuild(1);
       int malos = 0, fondoMovido = 0, primerPlanoMal = 0;
       for(int dx = -SCR_W + 1; dx <= -1; dx += 37){
         for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++) bbuf[i] = VENENO;
@@ -2475,20 +2488,27 @@ static void testDeslizarPaginas(){
       hpBufPage = 1;
     } }
 
-  // --- 3. FUERA DE LA BANDA NO SE TOCA NADA ---
-  // Barra de estado, widgets, dock y barra de navegacion son identicos
-  // en las tres paginas: el gesto no puede escribir ahi.
+  // --- 3. FUERA DE LA FRANJA NO SE TOCA NADA ---
+  // Barra de estado, dock y barra de navegacion son identicos en todas las
+  // paginas: el gesto no puede escribir ahi. Sin cabecera en ninguna de las dos
+  // paginas el gesto recorre exactamente la banda de la rejilla de siempre; con
+  // ella, empieza en la cabecera y ni una fila mas arriba.
   { const uint16_t MARCA = 0x0A0A;
-    for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++) bbuf[i] = MARCA;
-    hpBufPage = 1; hpFrom = 0; hpTo = 1;
-    hpRenderFrame(-240);
-    int tocados = 0;
-    for(int y = 0; y < SCR_H; y++){
-      if(y >= HOME_BAND_TOP && y < homeBandBot()) continue;
-      for(int x = 0; x < SCR_W; x++)
-        if(bbuf[(size_t)y * SCR_W + x] != MARCA) tocados++;
+    for(int caso = 0; caso < 2; caso++){
+      int top = caso ? HOME_PAGE_TOP : HOME_BAND_TOP;
+      for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++) bbuf[i] = MARCA;
+      hpBufPage = 1; hpFrom = 0; hpTo = 1; hpTop = top;
+      hpRenderFrame(-240);
+      int tocados = 0;
+      for(int y = 0; y < SCR_H; y++){
+        if(y >= top && y < homeBandBot()) continue;
+        for(int x = 0; x < SCR_W; x++)
+          if(bbuf[(size_t)y * SCR_W + x] != MARCA) tocados++;
+      }
+      chk(tocados == 0, caso ? "con cabecera: la barra de estado, el dock y la navegacion no se tocan"
+                             : "sin cabecera: solo se toca la banda de la rejilla, como siempre");
     }
-    chk(tocados == 0, "widgets, barra superior, dock y navegacion no se tocan"); }
+    hpTop = HOME_BAND_TOP; }
 
   // --- 4. NADIE MAS DIBUJA MIENTRAS DURA EL GESTO ---
   // La isla de notificaciones componia en bbuf las MISMAS filas y las
@@ -2526,12 +2546,19 @@ static void testDeslizarPaginas(){
   chk(gHomePageN == 3, "de fabrica siguen siendo tres paginas");
 
   // --- 6. CACHE COMPACTO Y COOPERATIVO ---
-  chk(HP_BUF_PIXELS == (size_t)SCR_W * HOME_BAND_H,
-      "la pagina vecina reserva exactamente la banda movil");
+  // PRESUPUESTO. La franja de pagina (cabecera + rejilla, 524 filas) se guarda
+  // tres veces -- pagina vecina, fondo limpio y fondo desenfocado -- mas dos
+  // mascaras de 1 bit. Es lo que compra que el vidrio no arrastre el fondo y
+  // que componer el escritorio no desenfoque un panel por icono. Queda por
+  // debajo de 1,6 MB (un 5% de los 32 MB de PSRAM) y todo es reconstruible:
+  // memShedSystem lo suelta bajo presion.
+  chk(HP_BUF_PIXELS == (size_t)SCR_W * HOME_PAGE_H,
+      "la pagina vecina reserva exactamente la franja de pagina");
   chk(HP_BUF_PIXELS * 2 < (size_t)SCR_W * SCR_H * 2,
       "y no otro framebuffer completo de 768 KB");
-  chk(HP_BUF_PIXELS * 4 < (size_t)SCR_W * SCR_H * 2,
-      "pagina vecina mas fondo fijo siguen ocupando menos que una pantalla completa");
+  chk(HP_PSRAM_BYTES <= (size_t)1600 * 1024,
+      "vecina + fondo limpio + fondo desenfocado + mascaras caben en 1,6 MB de PSRAM");
+  chk(HP_MASK_BYTES * 8 == HP_BUF_PIXELS, "la mascara es de un bit por pixel de la franja");
   gDelayCalls = 0; hpBufPage = -1;
   chk(hpPrepare(1), "la pagina vecina se puede preparar en el cache compacto");
   chk(gDelayCalls > 0,
@@ -2850,15 +2877,28 @@ static void testPersonalizarInicio(){
   hcTestReset();
 
   // --- 6. WIDGETS: colocar, no solaparse, quitar ---
+  // La fila 0 es la CABECERA de la pagina (donde antes vivian Clima y
+  // Calendario fijos): el primer hueco de una pagina vacia esta ahi, y no quita
+  // ninguna celda a los iconos.
   { for(int i = 0; i < homeSlotCount(); i++) homeOrder[homeIdx(1, i)] = HOME_EMPTY;
     chk(homeWgAdd(1, WG_CLOCK) == 0, "un reloj 2x1 entra en una pagina vacia");
     chk(gHomeWgN[1] == 1, "y queda registrado");
-    uint32_t m = homeCellMask(1, -1);
-    chk((m & 1u) && (m & 2u), "ocupa sus dos celdas");
-    chk(!(m & 4u), "y solo esas");
+    chk(gHomeWg[1][0].row == 0, "en la fila de cabecera");
+    uint32_t hm = homeHdrMask(1, -1);
+    chk((hm & 1u) && (hm & 2u), "ocupa sus dos celdas de cabecera");
+    chk(!(hm & 4u), "y solo esas");
+    chk(homeCellMask(1, -1) == 0, "sin quitar ni una celda a los iconos");
     chk(homeWgAdd(1, WG_CLOCK_A) == 0, "un reloj analogico 2x2 tambien cabe");
+    { const HomeWidget* a = &gHomeWg[1][1];
+      chk(a->row == 0 && a->col == 2 && a->h == 2, "junto al reloj, bajando de la cabecera a la rejilla");
+      uint32_t m = homeCellMask(1, -1);
+      chk((m & 4u) && (m & 8u) && !(m & 3u), "y ocupa exactamente sus dos celdas de icono"); }
     chk(homeWgAdd(1, WG_CLIMA) == 0, "y un tercero");
-    chk(homeWgAdd(1, WG_WIFI) == 1, "el cuarto no: tres por pagina");
+    int n = gHomeWgN[1];
+    while(n < HOME_WG_MAX && homeWgAdd(1, WG_WIFI) == 0) n = gHomeWgN[1];
+    chk(gHomeWgN[1] == HOME_WG_MAX, "se llena hasta el tope de widgets por pagina");
+    chk(homeWgAdd(1, WG_WIFI) == 1, "y el siguiente no: hay un maximo por pagina");
+    while(gHomeWgN[1] > 3) homeWgRemove(1, gHomeWgN[1] - 1);
     // Un icono no puede quedarse debajo de un widget.
     homeOrder[homeIdx(1, 0)] = IC_RELOJ;
     gAppFav |= (1u << IC_RELOJ);
@@ -2875,9 +2915,14 @@ static void testPersonalizarInicio(){
     gHomePage = 0; }
 
   // --- 7. WIDGETS: sin espacio en una pagina llena ---
+  // Con la rejilla llena de iconos solo queda la cabecera, que no tiene iconos:
+  // un widget de una fila cabe ahi; uno de dos filas no cabe en ningun sitio.
   { hcTestReset();
-    chk(homeWgAdd(0, WG_CLOCK) == 2, "en una pagina llena de iconos no hay hueco");
-    chk(homeWgAdd(0, WG_WIFI)  == 2, "ni siquiera para uno de 1x1"); }
+    chk(homeWgAdd(0, WG_CLOCK_A) == 2, "en una pagina llena de iconos no cabe uno de dos filas");
+    chk(homeWgAdd(0, WG_CLIMA) == 2, "tampoco el clima de 2x2");
+    chk(homeWgAdd(0, WG_CLOCK) == 0 && gHomeWg[0][0].row == 0,
+        "pero la cabecera, que no quita celdas a los iconos, acepta uno de una fila");
+    chk(hcCountPlaced() == HOME_LEGACY_SLOTS, "sin mover ni un icono"); }
 
   // --- 8. WIDGETS: ida y vuelta por NVS, y blob corrupto rechazado ---
   { hcTestReset();
@@ -2893,7 +2938,17 @@ static void testPersonalizarInicio(){
     chk(gHomeWgN[2] == n2 && gHomeWg[2][0].type == t0, "con los mismos widgets");
     uint8_t bad[HOME_WG_BLOB];
     memset(bad, 0xAA, sizeof(bad));
-    chk(!homeWgDeserialize(bad), "un blob corrupto se rechaza entero"); }
+    chk(!homeWgDeserialize(bad), "un blob corrupto se rechaza entero");
+    // Formato v1 (sin cabecera, 3 por pagina): cada widget baja una fila.
+    uint8_t v1[HOME_WG_BLOB_V1]; memset(v1, 0, sizeof(v1));
+    v1[0] = 'W'; v1[1] = 1;
+    { int o = 2 + (1 + HOME_WG_MAX_V1 * 5) * 1;       // pagina 1
+      v1[o] = 1;
+      v1[o + 1] = WG_STORAGE; v1[o + 2] = 2; v1[o + 3] = 1; v1[o + 4] = 2; v1[o + 5] = 1; }
+    chk(homeWgDeserializeV1(v1), "el blob v1 se sigue leyendo");
+    chk(gHomeWgN[1] == 1 && gHomeWg[1][0].type == WG_STORAGE && gHomeWg[1][0].col == 2 &&
+        gHomeWg[1][0].row == 2 && gHomeWg[1][0].w == 2, "y baja una fila: la cabecera es nueva");
+    chk(!homeWgDeserialize(v1), "un blob v1 no se confunde con uno v2"); }
 
   // --- 9. FONDOS: id invalido -> fondo por defecto, sin colgarse ---
   { hcTestReset();
@@ -2939,13 +2994,19 @@ static void testPersonalizarInicio(){
     homeOrder[homeIdx(0, 11)] = HOME_EMPTY;             // se libera la ultima celda
     int xe, ye; homeSlotXY(11, xe, ye);
     chk(homeEmptySpaceAt(xe + 10, ye + 10), "una celda libre si lo es");
-    chk(!homeEmptySpaceAt(240, 100), "la banda de clima/calendario no");
-    chk(homeFixedWidgetAppAt(HOME_FW_X + 20, HOME_FW_Y + 20) == IC_CLIMA,
-        "el widget fijo izquierdo abre Clima");
-    chk(homeFixedWidgetAppAt(HOME_CAL_X + 20, HOME_FW_Y + 20) == IC_CALEND,
-        "el widget fijo derecho abre Calendario");
-    chk(homeFixedWidgetAppAt(HOME_FW_X + HOME_FW_W + 4, HOME_FW_Y + 20) == -1,
-        "el espacio entre tarjetas no abre una app por error");
+    // Clima y Calendario, antes fijos, ahora son widgets de la pagina principal.
+    homeWgFactory();
+    chk(gHomeWgN[0] == 2 && gHomeWg[0][0].type == WG_CLIMA && gHomeWg[0][1].type == WG_CALEND,
+        "Clima y Calendario son widgets de la pagina principal");
+    chk(gHomeWg[0][0].row == 0 && gHomeWg[0][1].row == 0, "en su cabecera, donde se veian");
+    { int wx, wy, ww, wh; wgRect(&gHomeWg[0][0], wx, wy, ww, wh);
+      chk(wy == HOME_HDR_Y && wh == HOME_HDR_H, "con el mismo alto y la misma altura que los fijos");
+      chk(homeWgAt(0, wx + 20, wy + 20) == 0, "el izquierdo responde como Clima");
+      chk(!homeEmptySpaceAt(wx + 20, wy + 20), "y no cuenta como espacio vacio"); }
+    { int wx, wy, ww, wh; wgRect(&gHomeWg[0][1], wx, wy, ww, wh);
+      chk(homeWgAt(0, wx + 20, wy + 20) == 1, "el derecho responde como Calendario"); }
+    chk(homeWgAt(1, 60, HOME_HDR_Y + 20) == -1 && gHomeWgN[1] == 0,
+        "y ya no aparecen en las demas paginas");
     chk(!homeEmptySpaceAt(240, SCR_H - 120), "el dock tampoco");
     chk(!homeEmptySpaceAt(240, SCR_H - 30), "ni la barra de navegacion");
     // Y el gesto completo abre el modo.
@@ -3026,6 +3087,9 @@ static void testPersonalizarInicio(){
     homeOrderLoad();
     chk(hcCountPlaced() > 0, "primer arranque: el escritorio nace con apps");
     chk(gHomePageN == HOME_LEGACY_PAGES, "y con tres paginas");
+    chk(gHomeWgN[gHomeMain] == 2 && gHomeWg[gHomeMain][0].type == WG_CLIMA &&
+        gHomeWg[gHomeMain][1].type == WG_CALEND,
+        "y con Clima y Calendario en la cabecera de la pagina principal");
     // (d) blob de paginas corrupto -> escritorio usable, no una pantalla rota
     flexPrefsWipe();
     { uint8_t basura[HOME_TOTAL];
@@ -6764,6 +6828,585 @@ static void testFlexCompass(){
   else printf("  Flex Compass: todas las comprobaciones pasan.\n");
 }
 
+
+// #############################################################
+//  LIQUID GLASS SOBRE PAGINAS QUE SE DESLIZAN
+//  ------------------------------------------------------------
+//  El fallo: al pasar de pagina, el cristal de los widgets y de los
+//  iconos Vidrio llevaba PEGADA la imagen del fondo de donde se habia
+//  compuesto. El deslizamiento movia como primer plano todo pixel que
+//  difiere del wallpaper, y un panel de vidrio difiere entero.
+//
+//  Se prueba con un fondo sintetico de rayas verticales sobre un
+//  degradado horizontal: desplazar el desenfoque cambia su valor, asi
+//  que "arrastrar el fondo" es medible pixel a pixel. Se exige:
+//    1. el vidrio desplazado es EXACTAMENTE el que se compondria en
+//       su posicion nueva (y no la copia de su posicion original);
+//    2. el contenido (texto, glifos) viaja exacto con la pagina;
+//    3. el primer y el ultimo cuadro del gesto son la pagina quieta:
+//       al terminar no hay salto.
+// #############################################################
+static void vsnWallStripes(){
+  if(!wallImg) wallImg = (uint16_t*)heap_caps_malloc((size_t)SCR_W * SCR_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  for(int y = 0; y < SCR_H; y++)
+    for(int x = 0; x < SCR_W; x++){
+      bool raya = ((x / 14) & 1) != 0;
+      int r = (x * 31) / (SCR_W - 1);
+      wallImg[(size_t)y * SCR_W + x] = raya ? pk565(r, 50 - (y >> 5), 8) : pk565(31 - r, 12 + (y >> 5), 26);
+    }
+  wallImgOk = true; gWallHome = WALL_IMG;
+}
+static void testVidrioSinArrastre(){
+  printf("Liquid Glass: el vidrio de una pagina no arrastra el fondo al deslizar\n");
+  int before = gFails;
+  bool glassPrev = uiGlass; int iconPrev = gIconStyle;
+  uint16_t* wallPrevBuf = wallImg; bool wallOkPrev = wallImgOk;
+  static uint16_t* ref = NULL;
+  if(!ref) ref = (uint16_t*)malloc((size_t)SCR_W * SCR_H * 2);
+  hcTestReset();
+  uiGlass = true; gIconStyle = 1; gEffMode = false;
+  gGlassLvl = GLASS_LVL_DEF; glassLevelApply();
+  vsnWallStripes();
+  // Pagina 0: Clima y Calendario en su cabecera + doce iconos Vidrio.
+  // Pagina 1: un reloj en la cabecera y un icono.
+  homeWgFactory();
+  gAppFav |= (1u << IC_CAMARA);
+  homeOrder[homeIdx(1, 0)] = IC_CAMARA;
+  gHomeWg[1][0].type = WG_CLOCK; gHomeWg[1][0].col = 1; gHomeWg[1][0].row = 0;
+  gHomeWg[1][0].w = 2; gHomeWg[1][0].h = 1; gHomeWgN[1] = 1;
+  homeOrderNormalize();
+  hpFreeBuffers(); homeBackdropFree();
+  renderHome();
+  chk(hgBdOk && hgBd && hpBg, "el escritorio construye su fondo limpio y desenfocado una vez");
+  chk(gGlRecN[0] == 14 && !gGlRecOvf[0],
+      "los 14 paneles de vidrio de la pagina (2 widgets + 12 iconos) quedan anotados");
+
+  hpFrom = 0; hpTo = 1;
+  chk(hpPrepare(1), "la pagina vecina se compone sin desenfocar nada");
+  chk(gGlRecN[1] == 2, "y anota los suyos (reloj + icono)");
+  hpMaskBuild(0);
+  hpTop = (homePageHasHdr(hpFrom) || homePageHasHdr(hpTo)) ? HOME_PAGE_TOP : HOME_BAND_TOP;
+  chk(hpTop == HOME_PAGE_TOP, "con widgets en la cabecera el gesto recorre tambien la cabecera");
+  int bandBot = homeBandBot(), dotsY = homeDotsY();
+
+  // ---- 1. A mitad de gesto el cristal muestra el fondo de donde ESTA ----
+  const int DX = -120;
+  hpRenderFrame(DX);
+  int wx, wy, ww, wh; wgRect(&gHomeWg[0][0], wx, wy, ww, wh);     // Clima
+  // Referencia independiente: fondo limpio + el MISMO panel compuesto
+  // directamente en la posicion desplazada.
+  memcpy(ref, bbuf, (size_t)SCR_W * SCR_H * 2);
+  for(int y = HOME_PAGE_TOP; y < bandBot; y++)
+    memcpy(ref + (size_t)y * SCR_W, hpBg + (size_t)(y - HOME_PAGE_TOP) * SCR_W, (size_t)SCR_W * 2);
+  setBuf(ref);
+  uiClipFull();
+  homeGlassBegin(-1);
+  drawLiquidGlassPanel(wx + DX, wy, ww, wh, 20, rgb565(30,72,150));
+  homeGlassEnd();
+  setBuf(fb);
+  int vidrio = 0, malos = 0, pegados = 0;
+  for(int y = wy + 12; y < wy + wh - 12; y++){
+    const uint8_t* mr = hpMask[0] + (size_t)(y - HOME_PAGE_TOP) * HP_MASK_STRIDE;
+    for(int x = wx + 12; x < wx + ww - 12; x++){
+      int sx = x + DX;
+      if(sx < 0) continue;
+      if(mr[x >> 3] & (1u << (x & 7))) continue;          // contenido: se mira aparte
+      vidrio++;
+      uint16_t v = bbuf[(size_t)y * SCR_W + sx];
+      if(v != ref[(size_t)y * SCR_W + sx]) malos++;
+      if(v == homeBuf[(size_t)y * SCR_W + x]) pegados++;
+    }
+  }
+  chk(vidrio > 2000, "el widget tiene material de vidrio de sobra para medir");
+  chk(malos == 0, "el vidrio desplazado es EXACTAMENTE el de su posicion nueva");
+  chk(pegados * 10 < vidrio, "y no la copia del fondo de su posicion original (lo que se veia pegado)");
+  // CONTROL: con el mecanismo anterior -- el vidrio viajando como un pixel mas
+  // de la pagina -- esta misma medida SI ve el fondo pegado. Asi se sabe que la
+  // prueba de arriba detecta el fallo y no pasa por casualidad.
+  { uint8_t n0 = gGlRecN[0], n1 = gGlRecN[1];
+    gGlRecN[0] = 0; gGlRecN[1] = 0;
+    hpMaskBuild(0); hpMaskBuild(1);
+    hpRenderFrame(DX);
+    int peg = 0, tot = 0;
+    for(int y = wy + 12; y < wy + wh - 12; y++)
+      for(int x = wx + 12; x < wx + ww - 12; x++){
+        int sx = x + DX; if(sx < 0) continue;
+        tot++;
+        if(bbuf[(size_t)y * SCR_W + sx] == homeBuf[(size_t)y * SCR_W + x]) peg++;
+      }
+    chk(peg * 10 > tot * 9, "control: con el vidrio como contenido (lo de antes) el fondo SI va pegado");
+    gGlRecN[0] = n0; gGlRecN[1] = n1;
+    hpMaskBuild(0); hpMaskBuild(1);       // (usa bbuf de lienzo: se vuelve a pintar el cuadro)
+    hpRenderFrame(DX); }
+
+  // ---- 2. El contenido viaja exacto con su pagina ----
+  { int cont = 0, mal = 0;
+    int aDst, aSrc, aW; hpViewport(DX, aDst, aSrc, aW);
+    for(int y = hpTop; y < bandBot; y++){
+      if(y >= dotsY - 8 && y <= dotsY + 10) continue;
+      const uint8_t* mr = hpMask[0] + (size_t)(y - HOME_PAGE_TOP) * HP_MASK_STRIDE;
+      for(int x = 0; x < aW; x++){
+        int sx = aSrc + x;
+        if(!(mr[sx >> 3] & (1u << (sx & 7)))) continue;
+        cont++;
+        if(bbuf[(size_t)y * SCR_W + aDst + x] != homeBuf[(size_t)y * SCR_W + sx]) mal++;
+      }
+    }
+    chk(cont > 1000, "la pagina tiene contenido (texto e iconos) que viaja");
+    chk(mal == 0, "y viaja pixel a pixel con la pagina"); }
+
+  // ---- 3. Sin salto al empezar ni al terminar ----
+  { hpRenderFrame(0);
+    int d = 0;
+    for(int y = hpTop; y < bandBot; y++){
+      if(y >= dotsY - 8 && y <= dotsY + 10) continue;     // los puntos ya anuncian el destino
+      for(int x = 0; x < SCR_W; x++) if(bbuf[(size_t)y * SCR_W + x] != homeBuf[(size_t)y * SCR_W + x]) d++;
+    }
+    chk(d == 0, "el primer cuadro del gesto es la pagina quieta, pixel a pixel");
+    renderHomeInto(ref, 1); setBuf(fb);
+    hpRenderFrame(-SCR_W);
+    d = 0;
+    for(int y = hpTop; y < bandBot; y++)
+      for(int x = 0; x < SCR_W; x++) if(bbuf[(size_t)y * SCR_W + x] != ref[(size_t)y * SCR_W + x]) d++;
+    chk(d == 0, "y el ultimo es la pagina destino compuesta en reposo: no hay salto al soltar"); }
+
+  // ---- 4. El acomodo deja homeBuf exactamente como la pagina destino ----
+  { hpDragging = false; hpSettling = true; hpSettleFrom = DX; hpSettleTo = -SCR_W;
+    gTestMs += 1000; hpSettleT0 = gTestMs - HP_SETTLE_MS - 1;
+    hpTick();
+    chk(gHomePage == 1 && !hpSettling, "el gesto termina en la pagina 1");
+    int d = 0;
+    for(int y = HOME_PAGE_TOP; y < bandBot; y++)
+      for(int x = 0; x < SCR_W; x++) if(homeBuf[(size_t)y * SCR_W + x] != ref[(size_t)y * SCR_W + x]) d++;
+    chk(d == 0, "homeBuf queda identico a la pagina 1 compuesta desde cero");
+    chk(gGlRecN[0] == 2, "y los paneles anotados viajan con su pagina"); }
+
+  // ---- 5. El Modo Edicion tambien lee el fondo de su posicion ----
+  { gHomePage = 0; renderHome();
+    edEnter();
+    chk(gGlRecN[0] == 0, "en Modo Edicion homeBuf no lleva la pagina (se dibuja cada cuadro)");
+    gIconStyle = 0; edMs = 0;                   // sin el limitador de 20 fps de los iconos Vidrio
+    edRender();
+    int ex, ey, ew, eh; wgRect(&gHomeWg[0][1], ex, ey, ew, eh);   // Calendario
+    memcpy(ref, homeBuf, (size_t)SCR_W * SCR_H * 2);
+    setBuf(ref); uiClipFull();
+    homeGlassBegin(-1); drawLiquidGlassPanel(ex, ey, ew, eh, 20, TH_GLASS2); homeGlassEnd();
+    setBuf(fb);
+    // un pixel de vidrio sin contenido: esquina inferior derecha, lejos del texto
+    int px = ex + ew - 20, py = ey + eh - 6;
+    chk(bbuf[(size_t)py * SCR_W + px] == ref[(size_t)py * SCR_W + px],
+        "el widget en Modo Edicion muestra el fondo de su posicion, del mismo backdrop");
+    edExit(); gIconStyle = 1; }
+
+  // ---- 6. Sin vidrio en el escritorio no se paga el desenfoque ----
+  { uiGlass = false; gIconStyle = 0;
+    renderHome();
+    chk(hpBgOk && hgBd == NULL && !hgBdOk,
+        "con estilo Plano e iconos Planos no se reserva ni se desenfoca el backdrop");
+    uiGlass = true; gIconStyle = 1;
+    renderHome();
+    chk(hgBdOk && hgBd != NULL, "y al volver a Liquid Glass se reconstruye solo"); }
+
+  // Limpieza: el fondo sintetico no puede quedarse para las pruebas siguientes.
+  if(!wallPrevBuf && wallImg){ heap_caps_free(wallImg); wallImg = NULL; }
+  wallImgOk = wallOkPrev;
+  hcTestReset();
+  hpFreeBuffers(); homeBackdropFree();
+  uiGlass = glassPrev; gIconStyle = iconPrev;
+  uiClipFull(); setBuf(fb);
+  if(gFails == before) printf("  Vidrio al deslizar: todas las comprobaciones pasan.\n");
+}
+
+// #############################################################
+//  WIDGETS DE PAGINA: validacion espacial, tamano, paginas y NVS
+// #############################################################
+static void testWidgetsDePagina(){
+  printf("Widgets integrados en las paginas del escritorio\n");
+  int before = gFails;
+  hcTestReset();
+  int S, gx0, gy0, cs, rs, cols, rows; homeGrid(S, gx0, gy0, cs, rs, cols, rows);
+
+  // ---- 1. GEOMETRIA ----
+  { HomeWidget w; w.type = WG_CLOCK; w.col = 0; w.row = 1; w.w = 2; w.h = 1;
+    int x, y, ww, hh; wgRect(&w, x, y, ww, hh);
+    chk(y == gy0 - 6 && hh == rs - 12 && x == 8 && ww == 2 * cs - 16,
+        "una fila de iconos da exactamente el rectangulo de siempre");
+    w.row = 0; wgRect(&w, x, y, ww, hh);
+    chk(y == HOME_HDR_Y && hh == HOME_HDR_H, "la cabecera mide lo que median los widgets fijos");
+    w.h = 2; wgRect(&w, x, y, ww, hh);
+    chk(y == HOME_HDR_Y && y + hh == gy0 + rs - 18, "un widget de cabecera + fila es continuo"); }
+
+  // ---- 2. VALIDACION ESPACIAL ----
+  { for(int i = 0; i < homeSlotCount(); i++) homeOrder[homeIdx(1, i)] = HOME_EMPTY;
+    homeOrder[homeIdx(1, 5)] = IC_NOTAS;                   // fila 2 (icono), columna 1
+    chk(!homeWgPlaceOk(1, WG_CLOCK, 3, 0, 2, 1, -1), "no se sale de la rejilla por la derecha");
+    chk(!homeWgPlaceOk(1, WG_CLOCK, 0, rows, 2, 2, -1), "ni por abajo");
+    chk(!homeWgPlaceOk(1, WG_CLOCK, 0, 2, 2, 1, -1), "ni pisa un icono");
+    chk(!homeWgPlaceOk(1, WG_DATE, 0, 0, 2, 2, -1), "ni acepta un tamano que su tipo no admite");
+    chk(!homeWgPlaceOk(1, WG_CALEND, 0, 1, 2, 1, -1), "el calendario no cabe en una fila de iconos (6 semanas)");
+    chk(homeWgPlaceOk(1, WG_CALEND, 0, 0, 2, 1, -1), "pero si en la cabecera, que es mas alta");
+    chk(!homeWgPlaceOk(1, WG_CLIMA, 2, 3, 2, 1, -1), "el clima compacto tampoco cabe en una fila de iconos");
+    chk(homeWgPlaceOk(1, WG_CLIMA, 2, 2, 2, 2, -1), "con dos filas si");
+    gHomeWg[1][0].type = WG_CLOCK; gHomeWg[1][0].col = 0; gHomeWg[1][0].row = 0;
+    gHomeWg[1][0].w = 2; gHomeWg[1][0].h = 1; gHomeWgN[1] = 1;
+    chk(!homeWgPlaceOk(1, WG_WIFI, 1, 0, 1, 1, -1), "ni pisa otro widget");
+    chk(homeWgPlaceOk(1, WG_CLOCK, 0, 0, 2, 1, 0), "y un widget no choca consigo mismo"); }
+
+  // ---- 3. REDIMENSIONAR ----
+  { chk(homeWgResize(1, 0, 3, 1), "el reloj crece a 3 columnas si hay hueco");
+    chk(gHomeWg[1][0].w == 3, "y se queda con ese tamano");
+    chk(!homeWgResize(1, 0, 5, 1), "no pasa del maximo de su tipo ni de la rejilla");
+    chk(homeWgResize(1, 0, 3, 2), "baja a la primera fila de iconos si esta libre");
+    chk(!homeWgResize(1, 0, 3, 3), "pero no encima del icono de la fila de abajo");
+    chk(gHomeWg[1][0].w == 3 && gHomeWg[1][0].h == 2, "y un intento rechazado no cambia nada");
+    chk(wgCanResize(WG_CLOCK) && !wgCanResize(WG_NONE), "el asa solo se ofrece a quien admite otros tamanos");
+    homeWgResize(1, 0, 2, 1); }
+
+  // ---- 4. LLEVAR A OTRA PAGINA: regla determinista ----
+  { for(int i = 0; i < homeSlotCount(); i++) homeOrder[homeIdx(2, i)] = HOME_EMPTY;
+    gHomeWgN[2] = 0;
+    int ni = homeWgToPage(1, 0, 2);
+    chk(ni == 0 && gHomeWgN[2] == 1 && gHomeWgN[1] == 0, "el widget pasa de la pagina 2 a la 3");
+    chk(gHomeWg[2][0].col == 0 && gHomeWg[2][0].row == 0 && gHomeWg[2][0].w == 2,
+        "con su mismo sitio y tamano si alli estan libres");
+    // Sitio ocupado en el destino -> primer hueco con su tamano.
+    gHomeWg[1][0].type = WG_MEM; gHomeWg[1][0].col = 0; gHomeWg[1][0].row = 0;
+    gHomeWg[1][0].w = 2; gHomeWg[1][0].h = 1; gHomeWgN[1] = 1;
+    ni = homeWgToPage(1, 0, 2);
+    chk(ni == 1 && gHomeWg[2][1].col == 2 && gHomeWg[2][1].row == 0,
+        "si su sitio esta ocupado va al primer hueco (por filas) con su tamano");
+    // Sin hueco para su tamano -> el minimo de su tipo.
+    for(int i = 0; i < homeSlotCount(); i++) homeOrder[homeIdx(2, i)] = (uint8_t)i;   // rejilla llena
+    gHomeWg[1][0].type = WG_CLOCK; gHomeWg[1][0].col = 0; gHomeWg[1][0].row = 0;
+    gHomeWg[1][0].w = 4; gHomeWg[1][0].h = 1; gHomeWgN[1] = 1;
+    homeWgRemove(2, 1);                                    // queda libre la mitad derecha de la cabecera
+    ni = homeWgToPage(1, 0, 2);
+    chk(ni >= 0 && gHomeWg[2][ni].w == 2 && gHomeWg[2][ni].col == 2,
+        "sin sitio para su tamano, entra con el minimo de su tipo");
+    // Sin hueco ninguno -> no se mueve y no pisa nada.
+    gHomeWg[1][0].type = WG_WIFI; gHomeWg[1][0].col = 0; gHomeWg[1][0].row = 0;
+    gHomeWg[1][0].w = 1; gHomeWg[1][0].h = 1; gHomeWgN[1] = 1;
+    int n2 = gHomeWgN[2];
+    chk(homeWgToPage(1, 0, 2) == -1, "sin hueco en el destino, el widget no se mueve");
+    chk(gHomeWgN[1] == 1 && gHomeWgN[2] == n2, "ni se pierde ni pisa lo que habia");
+    // Destino con el maximo de widgets.
+    hcTestReset();
+    for(int i = 0; i < homeSlotCount(); i++){ homeOrder[homeIdx(1, i)] = HOME_EMPTY; homeOrder[homeIdx(2, i)] = HOME_EMPTY; }
+    while(gHomeWgN[2] < HOME_WG_MAX && homeWgAdd(2, WG_WIFI) == 0) {}
+    homeWgAdd(1, WG_WIFI);
+    chk(gHomeWgN[2] == HOME_WG_MAX && homeWgToPage(1, 0, 2) == -1,
+        "una pagina con el maximo de widgets no admite otro"); }
+
+  // ---- 5. NORMALIZACION: recolocar antes que perder ----
+  { hcTestReset();
+    for(int i = 0; i < homeSlotCount(); i++) homeOrder[homeIdx(1, i)] = HOME_EMPTY;
+    // Dos widgets solapados (NVS corrupta o de otra version) -> el segundo se recoloca.
+    gHomeWg[1][0].type = WG_CLOCK; gHomeWg[1][0].col = 0; gHomeWg[1][0].row = 0; gHomeWg[1][0].w = 2; gHomeWg[1][0].h = 1;
+    gHomeWg[1][1].type = WG_DATE;  gHomeWg[1][1].col = 1; gHomeWg[1][1].row = 0; gHomeWg[1][1].w = 2; gHomeWg[1][1].h = 1;
+    gHomeWgN[1] = 2;
+    homeOrderNormalize();
+    chk(gHomeWgN[1] == 2, "dos widgets solapados: ninguno se pierde");
+    chk(gHomeWg[1][1].col == 2 && gHomeWg[1][1].row == 0, "el segundo se recoloca en el primer hueco");
+    // Rejilla que encoge (4 filas -> 3): el widget de la ultima fila se recoloca.
+    homeSetGrid(4, 4);
+    gHomeWg[1][0].type = WG_MEM; gHomeWg[1][0].col = 0; gHomeWg[1][0].row = 4; gHomeWg[1][0].w = 2; gHomeWg[1][0].h = 1;
+    gHomeWgN[1] = 1;
+    homeOrderNormalize();
+    homeSetGrid(4, 3);
+    chk(gHomeWgN[1] == 1 && gHomeWg[1][0].row <= 3, "al quitar una fila, el widget se recoloca en vez de perderse"); }
+
+  // ---- 6. PERSISTENCIA COMPLETA ----
+  { hcTestReset();
+    flexPrefsWipe();
+    for(int i = 0; i < homeSlotCount(); i++) homeOrder[homeIdx(2, i)] = HOME_EMPTY;
+    gHomeWg[2][0].type = WG_CLIMA;   gHomeWg[2][0].col = 1; gHomeWg[2][0].row = 1; gHomeWg[2][0].w = 3; gHomeWg[2][0].h = 2;
+    gHomeWg[2][1].type = WG_CALEND;  gHomeWg[2][1].col = 0; gHomeWg[2][1].row = 0; gHomeWg[2][1].w = 4; gHomeWg[2][1].h = 1;
+    gHomeWgN[2] = 2;
+    homeOrderNormalize();
+    homeOrderSave();
+    memset(gHomeWg, 0, sizeof(gHomeWg)); memset(gHomeWgN, 0, sizeof(gHomeWgN));
+    homeOrderLoad();
+    bool ok = gHomeWgN[2] == 2 &&
+              gHomeWg[2][0].type == WG_CLIMA && gHomeWg[2][0].col == 1 && gHomeWg[2][0].row == 1 &&
+              gHomeWg[2][0].w == 3 && gHomeWg[2][0].h == 2 &&
+              gHomeWg[2][1].type == WG_CALEND && gHomeWg[2][1].w == 4 && gHomeWg[2][1].row == 0;
+    chk(ok, "pagina, posicion, tamano y tipo de cada widget sobreviven a un reinicio");
+    chk(gHomeWgN[0] == 0, "y no se anaden widgets de fabrica encima de lo guardado");
+    // Migracion: solo la clave v1, con la principal en la pagina 2.
+    flexPrefsWipe();
+    uint8_t v1[HOME_WG_BLOB_V1]; memset(v1, 0, sizeof(v1)); v1[0] = 'W'; v1[1] = 1;
+    { int o = 2; v1[o] = 1; v1[o + 1] = WG_CRONO; v1[o + 2] = 0; v1[o + 3] = 0; v1[o + 4] = 2; v1[o + 5] = 1; }
+    uint8_t ord[HOME_TOTAL]; for(int i = 0; i < HOME_TOTAL; i++) ord[i] = HOME_EMPTY;
+    prefs.begin("flexos", false);
+    prefs.putBytes("hwg", v1, HOME_WG_BLOB_V1);
+    prefs.putBytes("hordq", ord, HOME_TOTAL);
+    prefs.putInt("hpgn", 3); prefs.putInt("hpmain", 1);
+    prefs.putInt("appfav", 0); prefs.putInt("appn", APP_N); prefs.putInt("appver", APPREG_VER);
+    prefs.end();
+    hcTestReset();
+    homeOrderLoad();
+    chk(gHomeWgN[0] == 1 && gHomeWg[0][0].type == WG_CRONO && gHomeWg[0][0].row == 1,
+        "migracion v1: el widget guardado baja a la primera fila de iconos");
+    chk(gHomeWgN[1] == 2 && gHomeWg[1][0].type == WG_CLIMA && gHomeWg[1][1].type == WG_CALEND,
+        "migracion: Clima y Calendario pasan a la cabecera de la pagina PRINCIPAL");
+    uint8_t chkb[HOME_WG_BLOB]; size_t n2;
+    prefs.begin("flexos", true); n2 = prefs.getBytes("hwg2", chkb, HOME_WG_BLOB); prefs.end();
+    chk(n2 == HOME_WG_BLOB, "la migracion queda escrita una vez en la clave nueva");
+    uint8_t v1b[HOME_WG_BLOB_V1];
+    prefs.begin("flexos", true); size_t n1 = prefs.getBytes("hwg", v1b, HOME_WG_BLOB_V1); prefs.end();
+    chk(n1 == HOME_WG_BLOB_V1 && !memcmp(v1b, v1, HOME_WG_BLOB_V1), "y la clave v1 queda intacta para volver atras");
+    flexPrefsWipe(); }
+
+  // ---- 7. MODO EDICION CON EL DEDO: redimensionar y cambiar de pagina ----
+  { hcTestReset();
+    for(int p = 1; p < 3; p++) for(int i = 0; i < homeSlotCount(); i++) homeOrder[homeIdx(p, i)] = HOME_EMPTY;
+    gHomeWg[1][0].type = WG_CLOCK; gHomeWg[1][0].col = 0; gHomeWg[1][0].row = 0;
+    gHomeWg[1][0].w = 2; gHomeWg[1][0].h = 1; gHomeWgN[1] = 1;
+    gHomePage = 1; gIconStyle = 0;
+    edEnter();
+    int wx, wy, ww, wh; wgRect(&gHomeWg[1][0], wx, wy, ww, wh);
+    tDown(wx + ww / 2, wy + wh / 2, 50000); edTick();
+    chk(edWSel == 0, "tocar un widget en Modo Edicion lo selecciona");
+    tUp(50050, true); edTick();
+    // Asa de tamano: arrastrar hasta la celda (col 3, fila de iconos 1).
+    int hx, hy; edResizeHandleXY(0, hx, hy);
+    tDown(hx, hy, 50100); edTick();
+    chk(edWResize == 0, "el asa de la esquina empieza a cambiar el tamano");
+    tMove(3 * cs + cs / 2, gy0 + rs / 2, 50200); edTick();
+    chk(gHomeWg[1][0].w == 4 && gHomeWg[1][0].h == 2, "arrastrarla estira el widget por celdas");
+    tUp(50300, false); edTick();
+    chk(edWResize == -1, "al soltar se fija");
+    // Llevarlo contra el borde derecho: pasa a la pagina 3 con la regla.
+    wgRect(&gHomeWg[1][0], wx, wy, ww, wh);
+    tDown(wx + 30, wy + 30, 51000); edTick();
+    tMove(SCR_W - 4, wy + 30, 51100); edTick();
+    tMove(SCR_W - 4, wy + 30, 51900); edTick();
+    chk(gHomePage == 2 && gHomeWgN[2] == 1 && gHomeWgN[1] == 0,
+        "sostenerlo en el borde lo lleva a la pagina vecina");
+    chk(gHomeWg[2][0].type == WG_CLOCK && gHomeWg[2][0].w == 4 && gHomeWg[2][0].h == 2,
+        "conservando su tipo y su tamano");
+    tUp(52000, false); edTick();
+    edExit();
+    tReset(); gHomePage = 0; }
+
+  hcTestReset();
+  if(gFails == before) printf("  Widgets de pagina: todas las comprobaciones pasan.\n");
+}
+
+// #############################################################
+//  INTENSIDAD DE LIQUID GLASS
+// #############################################################
+// Copia LITERAL del panel de vidrio ANTES de existir la intensidad (commit
+// f7a7f60): el nivel por defecto tiene que dar EXACTAMENTE estos pixeles.
+static void refGlassPanelV0(int x, int y, int w, int h, int rad, uint16_t tint, int blurR){
+  if(x < 0){ w += x; x = 0; } if(y < 0){ h += y; y = 0; }
+  if(x + w > SCR_W) w = SCR_W - x; if(y + h > SCR_H) h = SCR_H - y;
+  if(w <= 0 || h <= 0) return;
+  if(2 * rad > w) rad = w / 2; if(2 * rad > h) rad = h / 2;
+  int vy0 = y         > gClipY0 ? y         : gClipY0;
+  int vy1 = (y + h - 1) < gClipY1 ? (y + h - 1) : gClipY1;
+  if(vy0 > vy1) return;
+  int j0 = (vy0 - y) - blurR; if(j0 < 0)     j0 = 0;
+  int j1 = (vy1 - y) + blurR; if(j1 > h - 1) j1 = h - 1;
+  int hc = j1 - j0 + 1;
+  uint32_t lumaSum = 0; int lumaN = 0;
+  for(int j = 0; j < h; j += 4){
+    const uint16_t* srow = gBuf + (size_t)(y + j) * SCR_W + x;
+    for(int i = 0; i < w; i += 8){ lumaSum += (uint32_t)glassLuma(srow[i]); lumaN++; }
+  }
+  for(int j = j0; j <= j1; j++)
+    memcpy(glassBuf + (size_t)(j - j0) * w, gBuf + (size_t)(y + j) * SCR_W + x, w * 2);
+  uint8_t tintMix = 58;
+  if(lumaN > 0){
+    int dif = (int)(lumaSum / (uint32_t)lumaN) - glassLuma(tint);
+    if(dif < 0) dif = -dif;
+    if(dif > 128) dif = 128;
+    tintMix = (uint8_t)(46 + (dif * (70 - 46)) / 128);
+  }
+  glassBlur(w, hc, blurR);
+  for(int j = vy0 - y; j <= vy1 - y; j++){
+    int yy = y + j;
+    int ins = glInset(j, h, rad);
+    uint16_t* src = glassBuf + (size_t)(j - j0) * w;
+    uint16_t* dst = gBuf + (size_t)yy * SCR_W + x;
+    float fj = (float)j;
+    uint16_t shCol; uint8_t shA;
+    if(fj < h * 0.45f){ shCol = rgb565(255,255,255); shA = (uint8_t)((1.0f - fj / (h * 0.45f)) * 26); }
+    else              { shCol = rgb565(0,0,0);       shA = (uint8_t)(((fj - h * 0.45f) / (h * 0.55f)) * 30); }
+    if(shA) for(int i = ins; i < w - ins; i++) dst[i] = mix565(mix565(src[i], tint, tintMix), shCol, shA);
+    else    for(int i = ins; i < w - ins; i++) dst[i] = mix565(src[i], tint, tintMix);
+    bool topZone = (j < h / 2);
+    uint8_t sL = topZone ? 156 : 104, sR = topZone ? 104 : 156;
+    uint16_t bcol = (j < 3) ? rgb565(255,255,255) : (j < h / 2 ? rgb565(205,214,228) : rgb565(22,28,40));
+    dst[ins] = mix565(dst[ins], bcol, sL);
+    dst[w - 1 - ins] = mix565(dst[w - 1 - ins], bcol, sR);
+  }
+}
+static void igBackground(uint16_t* b){
+  for(int y = 0; y < SCR_H; y++)
+    for(int x = 0; x < SCR_W; x++)
+      b[(size_t)y * SCR_W + x] = ((x / 10 + y / 10) & 1) ? rgb565(240, 190, 60) : rgb565(20, 60, 150);
+}
+static void testIntensidadVidrio(){
+  printf("Liquid Glass: intensidad desde el Panel rapido\n");
+  int before = gFails;
+  bool glassPrev = uiGlass;
+  static uint16_t* A = NULL; static uint16_t* B = NULL;
+  if(!A) A = (uint16_t*)malloc((size_t)SCR_W * SCR_H * 2);
+  if(!B) B = (uint16_t*)malloc((size_t)SCR_W * SCR_H * 2);
+  gLand = false; gHosted = false; gEffMode = false;
+  if(!glassBuf) glassBuf = (uint16_t*)heap_caps_malloc((size_t)SCR_W * SCR_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+  // ---- 1. NIVEL POR DEFECTO == MATERIAL DE SIEMPRE, BIT A BIT ----
+  gGlassLvl = GLASS_LVL_DEF; glassLevelApply();
+  chk(gGlR == 6 && gGlTintMin == 46 && gGlTintMax == 70 && gGlTintBase == 58 &&
+      gGlSpec == 26 && gGlShade == 30 && gGlCornS == 156 && gGlCornW == 104,
+      "el nivel por defecto son exactamente los parametros historicos");
+  { static const int G[6][5] = { {40,120,400,200,24}, {0,0,480,90,20}, {-30,300,200,160,28},
+                                 {300,700,240,140,16}, {100,64,72,72,14}, {10,500,460,280,26} };
+    const uint16_t tints[3] = { TH_GLASS, TH_GLASS2, rgb565(30,72,150) };
+    int dif = 0;
+    for(int g = 0; g < 6; g++)
+      for(int t = 0; t < 3; t++)
+        for(int clip = 0; clip < 2; clip++){
+          igBackground(A); memcpy(B, A, (size_t)SCR_W * SCR_H * 2);
+          gClipX0 = 0; gClipX1 = SCR_W - 1;
+          gClipY0 = clip ? G[g][1] + 20 : 0; gClipY1 = clip ? G[g][1] + 60 : SCR_H - 1;
+          setBuf(A); drawLiquidGlassPanel(G[g][0], G[g][1], G[g][2], G[g][3], G[g][4], tints[t]);
+          setBuf(B); refGlassPanelV0(G[g][0], G[g][1], G[g][2], G[g][3], G[g][4], tints[t], 6);
+          for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++) if(A[i] != B[i]) dif++;
+        }
+    uiClipFull(); setBuf(fb);
+    chk(dif == 0, "36 paneles (con y sin recorte) identicos al material anterior: cero regresion visual"); }
+
+  // ---- 2. EL NIVEL MUEVE PARAMETROS REALES, ACOTADOS ----
+  gGlassLvl = 0;   glassLevelApply(); int r0 = gGlR, t0 = gGlTintMax, s0 = gGlSpec;
+  gGlassLvl = 100; glassLevelApply(); int r1 = gGlR, t1 = gGlTintMax, s1 = gGlSpec;
+  chk(r0 == 2 && r1 == 10 && r1 <= GLB_RMAX, "el desenfoque va de radio 2 (sutil) a 10 (intenso)");
+  chk(t0 < 70 && t1 > 70 && s0 < 26 && s1 > 26, "y el tinte y los brillos crecen con el nivel");
+  gGlassLvl = 53;  glassLevelApply(); chk(gGlassLvl == 50, "el nivel va en pasos de 5");
+  gGlassLvl = 250; glassLevelApply(); chk(gGlassLvl == 100, "y nunca pasa de 100");
+  // Efecto visible: cuanto mas intenso, mas se separa el panel del fondo sin vidrio.
+  { long dev[3] = { 0, 0, 0 }; const int L[3] = { 0, 50, 100 };
+    for(int k = 0; k < 3; k++){
+      gGlassLvl = (uint8_t)L[k]; glassLevelApply();
+      igBackground(A); memcpy(B, A, (size_t)SCR_W * SCR_H * 2);
+      setBuf(A); uiClipFull(); drawLiquidGlassPanel(60, 200, 360, 200, 24, TH_GLASS);
+      for(int y = 230; y < 370; y++) for(int x = 90; x < 390; x++){
+        int ra, ga, ba, rb, gb, bb; un565(A[(size_t)y * SCR_W + x], ra, ga, ba); un565(B[(size_t)y * SCR_W + x], rb, gb, bb);
+        dev[k] += abs(ra - rb) + abs(ga - gb) + abs(ba - bb);
+      }
+    }
+    setBuf(fb);
+    chk(dev[0] < dev[1] && dev[1] < dev[2], "sutil < normal < intenso: el control tiene efecto real y ordenado"); }
+  // Con el estilo Plano el nivel no cambia nada: el panel rapido pinta sus
+  // superficies solidas con la luz de siempre, sea cual sea la intensidad.
+  { bool g = uiGlass; uiGlass = false;
+    igBackground(A); igBackground(B);
+    gGlassLvl = 0;   glassLevelApply(); setBuf(A); uiClipFull(); qpGlassSurface(40, 300, 400, 120, 26, TH_SURF2, qpMixCard());
+    gGlassLvl = 100; glassLevelApply(); setBuf(B); uiClipFull(); qpGlassSurface(40, 300, 400, 120, 26, TH_SURF2, qpMixCard());
+    setBuf(fb);
+    int d = 0; for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++) if(A[i] != B[i]) d++;
+    chk(d == 0, "con el estilo Plano la intensidad no altera ni un pixel");
+    uiGlass = g; }
+  gGlassLvl = GLASS_LVL_DEF; glassLevelApply();
+
+  // ---- 3. PERSISTENCIA ----
+  { flexPrefsWipe();
+    gGlassLvl = 80; cfgSavePrefs();
+    gGlassLvl = 0;  cfgLoad();
+    chk(gGlassLvl == 80 && gGlR == 6 + (30 * 4) / 50, "el nivel sobrevive a un reinicio y se aplica al cargar");
+    prefs.begin("flexos", false); prefs.putInt("glasslv", 999); prefs.end();
+    cfgLoad();
+    chk(gGlassLvl == GLASS_LVL_DEF, "un valor corrupto cae al nivel por defecto");
+    flexPrefsWipe(); cfgLoad();
+    chk(gGlassLvl == GLASS_LVL_DEF && gGlR == 6, "sin clave (placa que actualiza) el material es el de siempre"); }
+
+  // ---- 4. EL CONTROL DEL PANEL: opcional y solo con vidrio ----
+  gState = ST_HOME; editMode = false;
+  qpLoaded = false; flexPrefsWipe(); qpLoad();
+  chk(!qpCfgHas(QSID_GLASSFX), "no esta en la configuracion de fabrica: solo si el usuario lo anade");
+  chk(QS_REG[QSID_GLASSFX].type == QT_SLIDER && QS_REG[QSID_GLASSFX].sizes == QSZ_4x1,
+      "es un deslizador de ancho completo, como el brillo");
+  uiGlass = false;
+  qpEdN = qpN; memcpy(qpEdIt, qpIt, sizeof(qpIt)); qpCatBuild();
+  { bool ofrecido = false; for(int i = 0; i < qpCatN; i++) if(qpCatIds[i] == QSID_GLASSFX) ofrecido = true;
+    chk(!ofrecido, "con el estilo Plano el catalogo no lo ofrece"); }
+  chk(!qpEditAdd(QSID_GLASSFX), "ni se puede anadir");
+  uiGlass = true;
+  qpCatBuild();
+  { bool ofrecido = false; for(int i = 0; i < qpCatN; i++) if(qpCatIds[i] == QSID_GLASSFX) ofrecido = true;
+    chk(ofrecido, "con Liquid Glass el catalogo lo ofrece"); }
+  chk(qpEditAdd(QSID_GLASSFX), "y se anade por el editor de siempre");
+  memcpy(qpIt, qpEdIt, sizeof(qpIt)); qpN = qpEdN;
+  qpN = qpNormalize(qpIt, qpN, qpGrows); qpSave();
+  chk(qpCfgHas(QSID_GLASSFX), "queda en la configuracion guardada");
+  // Apagar el vidrio lo OCULTA, no lo borra.
+  uiGlass = false;
+  qpN = qpNormalize(qpIt, qpN, qpGrows);
+  chk(qpCfgHas(QSID_GLASSFX), "con el vidrio apagado sigue en la configuracion");
+  qpMode = QPM_PANEL; qpGH = (float)qpGroupH(qpGrows); qpScrollF = 0; qpGScrollF = 0; qpRelayout();
+  { bool visto = false;
+    for(int b = 0; b < qpBlkN; b++) if(qpBlk[b].kind == QB_ITEM && qpIt[qpBlk[b].item].id == QSID_GLASSFX) visto = true;
+    chk(!visto, "pero no se dibuja: no aparenta mover un efecto apagado"); }
+  chk(!qpExecCtl(QSID_GLASSFX, false), "ni responde a un toque");
+  qpLoaded = false; qpLoad();
+  chk(qpCfgHas(QSID_GLASSFX), "y tampoco se pierde al recargar la configuracion con el vidrio apagado");
+
+  // ---- 5. DESLIZAR: el material se aplica al SOLTAR, una vez ----
+  uiGlass = true;
+  hcTestReset(); uiGlass = true;
+  hpFreeBuffers(); homeBackdropFree();
+  renderHome();
+  gGlassLvl = GLASS_LVL_DEF; glassLevelApply();
+  qsPanelY = SCR_H; qsLastY = SCR_H; qsDirty = true;
+  qpMode = QPM_PANEL; qpG = QG_NONE; qpGH = (float)qpGroupH(qpGrows); qpScrollF = 0; qpGScrollF = 0;
+  qpRelayout();
+  int bFx = -1;
+  for(int b = 0; b < qpBlkN; b++) if(qpBlk[b].kind == QB_ITEM && qpIt[qpBlk[b].item].id == QSID_GLASSFX) bFx = b;
+  chk(bFx >= 0, "con Liquid Glass el control aparece en el panel");
+  if(bFx >= 0){
+    // Que el bloque este a la vista (esta al final del contenido).
+    qpScrollF = (float)qpScrollMax(); qpRelayout();
+    qsRender(true);
+    int top = QP_VIEW_Y0 - (int)(qpScrollF + 0.5f);
+    int bx = qpBlk[bFx].x, bw = qpBlk[bFx].w, bh = qpBlk[bFx].h;
+    int py = top + qpBlk[bFx].y + bh / 2;
+    int th = bh - 20; if(th < 40) th = 40;
+    int tw = qpSliderTrackW(QSID_GLASSFX, bw, th);
+    gTestMs += 100; touchDrag(bx + 6, py, true); T.downMs = gTestMs; qsHandle();
+    chk(qpG == QG_SLIDER, "el gesto que nace en la pista es del deslizador");
+    qsDirty = false;
+    gTestMs += 16; touchDrag(bx + th / 2 + (tw - th) * 8 / 10, py, false); qsHandle();
+    chk(qpGlassFxDrag == 80, "arrastrar mueve el indicador (80%)");
+    chk(gGlassLvl == GLASS_LVL_DEF && !qsDirty, "pero no rehace el vidrio en cada cuadro del arrastre");
+    gTestMs += 16; touchReset(); T.released = true; qsHandle();
+    chk(gGlassLvl == 80 && qpGlassFxDrag == -1, "al soltar se aplica el nivel elegido");
+    chk(qsDirty && qpSavePrefs, "una vez: la cortina recompone su vidrio y el guardado queda diferido");
+    chk(hgBdOk && hgBdR == gGlR, "el fondo desenfocado del escritorio se rehace con el radio nuevo");
+    qsTick();
+    chk(!qpSavePrefs, "y qsTick lo escribe en NVS despues de publicar");
+    // Restablecer: el boton de la derecha del deslizador.
+    qpRelayout(); top = QP_VIEW_Y0 - (int)(qpScrollF + 0.5f);
+    py = top + qpBlk[bFx].y + bh / 2;
+    int rx = bx + bw - th / 2;
+    chk(qpGlassFxResetHit(bx, bw, bh, rx), "el boton de restablecer tiene su propia zona");
+    gTestMs += 100; touchDrag(rx, py, true); T.downMs = gTestMs; qsHandle();
+    chk(qpG == QG_PENDING, "tocarlo no arrastra el deslizador");
+    // Al soltar, T conserva el ultimo punto del dedo (como en la placa).
+    gTestMs += 16; touchReset(); T.released = true; T.tap = true; T.x = rx; T.y = py; qsHandle();
+    chk(gGlassLvl == GLASS_LVL_DEF && gGlR == 6, "y restablece el material de siempre");
+    qsTick();
+  }
+  qsForceClose();
+  qpLoaded = false; flexPrefsWipe(); qpLoad();
+  gGlassLvl = GLASS_LVL_DEF; glassLevelApply();
+  hcTestReset(); hpFreeBuffers(); homeBackdropFree();
+  uiGlass = glassPrev;
+  uiClipFull(); setBuf(fb); touchReset();
+  if(gFails == before) printf("  Intensidad del vidrio: todas las comprobaciones pasan.\n");
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -6861,6 +7504,9 @@ int main(){
   testProteccionRobo();
   testLiquidGlassSinApilar();
   testBlurNoPegado();
+  testVidrioSinArrastre();
+  testWidgetsDePagina();
+  testIntensidadVidrio();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

@@ -105,7 +105,7 @@ static void qpEditMove(int from, int to){
 // flujo). Si no cabe, no se pierde: el contenido desplazable crece.
 static bool qpEditAdd(int id){
   if(qpEdN >= QP_MAX_ITEMS) return false;
-  if(!qpCtlAvail(id)) return false;
+  if(!qpCtlShown(id)) return false;
   for(int i = 0; i < qpEdN; i++) if(qpEdIt[i].id == id) return false;
   uint8_t w, h; qpFirstSize(QS_REG[id].sizes, w, h);
   qpEdIt[qpEdN].id = (uint8_t)id; qpEdIt[qpEdN].w = w; qpEdIt[qpEdN].h = h;
@@ -447,6 +447,8 @@ static void qsForceClose(){
   qpG = QG_NONE; qpGAnim = false;
   qpScrollF = 0; qpScrollVel = 0; qpGScrollVel = 0;
   qpFlashIdx = -1; qpFlashKind = -1;
+  qpGlassFxDrag = -1;                 // un arrastre de intensidad a medias no se aplica
+  qpGlassFxPending = false;           // la pantalla que venga se dibuja entera, ya con el material nuevo
   qpDy0 = 0x7FFF; qpDy1 = -1;
   qpCy0 = 0x7FFF; qpCy1 = -1;
   qsComposedTo = -1;

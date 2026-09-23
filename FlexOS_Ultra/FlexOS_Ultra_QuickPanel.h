@@ -135,6 +135,12 @@ enum {
   // activado no sale el banner, no suena y no vibra -- pero la
   // notificacion se sigue guardando en el Centro.
   QSID_DND,
+  // Intensidad de Liquid Glass. Tambien al final (ids en NVS). NO esta en la
+  // configuracion de fabrica: solo aparece si el usuario lo anade desde
+  // "Anadir un control", y solo se ve y responde con Liquid Glass activo (ver
+  // qpCtlShown). Por eso no hace falta subir QP_CFG_VER: qpAdoptNew solo
+  // adopta controles de fabrica.
+  QSID_GLASSFX,
   QSID_COUNT
 };
 
@@ -256,6 +262,19 @@ static void qpTapFiles(){ qpLeaveToApp(IC_ALMACEN); filesEnter(); }
 static void qpTapLock(){ qsRestoreBg(); qsForceClose(); suspEnter(); }
 static void qpTapPoweroff(){ qsRestoreBg(); qsForceClose(); poffEnter(); }
 static void qpTapNtp(){ ntpRequestSync(true); }
+// INTENSIDAD DE LIQUID GLASS. El deslizador cambia el valor al SOLTAR (ver
+// qpPanelTouch): cada nivel exige rehacer el desenfoque del fondo y recomponer
+// la cortina, y hacerlo por cuadro mientras se arrastra seria justo el lag que
+// este panel evita. Mientras el dedo esta abajo solo se mueve el indicador.
+// El TOQUE del control es su boton de restablecer (ver qpGlassFxResetHit).
+static int  qpGlassFxDrag = -1;          // valor en arrastre (-1 = ninguno)
+static void qpGlassFxCommit(int lv);     // definida con la cortina (necesita qsBuf/renderHome)
+static void qpTapGlassFx(){ qpGlassFxCommit(GLASS_LVL_DEF); }
+static void qpSubGlassFx(char* o, size_t n){
+  int v = qpGlassFxDrag >= 0 ? qpGlassFxDrag : (int)gGlassLvl;
+  const char* k = (v < 35) ? "Sutil" : (v > 65) ? "Intenso" : "Normal";
+  snprintf(o, n, "%s %d%%", k, v);
+}
 // AUDIO. La disponibilidad NO es "esta placa lleva codec": es que el
 // ES8311 haya contestado su identificacion en el bus I2C y que la
 // salida I2S haya arrancado. Si no, estos dos controles no existen:
@@ -387,6 +406,22 @@ static void qpIcoMoon(int cx, int cy, int s, uint16_t col){
 static void qpIcoGlass(int cx, int cy, int s, uint16_t col){
   drawRoundRect((int)(cx - s * 0.46f), (int)(cy - s * 0.30f), (int)(s * 0.66f), (int)(s * 0.66f), 6, col);
   drawRoundRect((int)(cx - s * 0.16f), (int)(cy - s * 0.46f), (int)(s * 0.62f), (int)(s * 0.62f), 6, col);
+}
+// Dos laminas de vidrio con un reflejo: intensidad del material.
+static void qpIcoGlassFx(int cx, int cy, int s, uint16_t col){
+  qpIcoGlass(cx, cy, s, col);
+  strokeSegAA(cx - s * 0.30f, cy + s * 0.18f, cx - s * 0.10f, cy - s * 0.10f, 2.0f, col);
+}
+// Flecha circular de "restablecer".
+static void qpIcoReset(int cx, int cy, int s, uint16_t col){
+  float r = s * 0.34f;
+  for(int a = 40; a <= 320; a += 20){
+    float t0 = a * 0.0174533f, t1 = (a + 20) * 0.0174533f;
+    strokeSegAA(cx + cosf(t0) * r, cy - sinf(t0) * r, cx + cosf(t1) * r, cy - sinf(t1) * r, 2.0f, col);
+  }
+  float ex = cx + cosf(40 * 0.0174533f) * r, ey = cy - sinf(40 * 0.0174533f) * r;
+  fillTriangle((int)(ex - s * 0.14f), (int)(ey - s * 0.02f), (int)(ex + s * 0.10f), (int)(ey - s * 0.12f),
+               (int)(ex + s * 0.04f), (int)(ey + s * 0.14f), col);
 }
 static void qpIcoBattSave(int cx, int cy, int s, uint16_t col){
   drawRoundRect((int)(cx - s * 0.42f), (int)(cy - s * 0.28f), (int)(s * 0.76f), (int)(s * 0.56f), 4, col);
@@ -556,6 +591,13 @@ static const QsCtl QS_REG[QSID_COUNT] = {
     qpAvAudio,  qpStMute,     qpTapMute,     qpTapSettings, qpSubMute,     qpIcoMute },
   { QSID_DND,       "No molestar", "No molestar",           QT_TOGGLE, QSZ_1x1|QSZ_2x1,           QOR_H|QOR_V,  QCAT_SYSTEM,
     qpAvDnd,    qpStDnd,      qpTapDnd,      qpTapSettings, qpSubDnd,      qpIcoDnd },
+  // Deslizador 4x1 como el brillo. 'avail' es la disponibilidad PERMANENTE (el
+  // renderer siempre tiene estos parametros): asi el control anadido no se
+  // pierde de la configuracion al apagar el vidrio. Que se VEA depende ademas
+  // de uiGlass (qpCtlShown). Sin accion secundaria: no hay pantalla de Ajustes
+  // propia a la que llevar, y un atajo a ninguna parte seria un control falso.
+  { QSID_GLASSFX,   "Vidrio",     "Intensidad del vidrio",  QT_SLIDER, QSZ_4x1,                   QOR_H,        QCAT_SCREEN,
+    qpAvTrue,   NULL,         qpTapGlassFx,  NULL,          qpSubGlassFx,  qpIcoGlassFx },
 };
 
 // Acceso seguro: un id fuera de rango devuelve NULL en vez de leer basura.
@@ -566,6 +608,16 @@ static inline const QsCtl* qpCtl(int id){
 static inline bool qpCtlAvail(int id){
   const QsCtl* c = qpCtl(id);
   return c && c->avail && c->avail();
+}
+// ¿Se ve (y responde) AHORA? Disponible y, ademas, con sentido en el estado
+// actual: la intensidad del vidrio no existe con el estilo Plano -- moverla no
+// cambiaria nada en pantalla, y el control no puede aparentar lo contrario.
+// Oculto no es borrado: la configuracion lo conserva y vuelve al activar el
+// vidrio.
+static inline bool qpCtlShown(int id){
+  if(!qpCtlAvail(id)) return false;
+  if(id == QSID_GLASSFX && !uiGlass) return false;
+  return true;
 }
 // Primer tamano permitido por la mascara, en orden 1x1 -> 2x1 -> 4x1 -> 2x2.
 static void qpFirstSize(uint8_t mask, uint8_t &w, uint8_t &h){
@@ -822,7 +874,7 @@ static void qpLayout(){
 
   for(int i = 0; i < qpLayN && i < QP_MAX_ITEMS; i++){
     const QpItem* it = &qpLaySrc[i];
-    if(!it->vis || !qpCtlAvail(it->id)) continue;
+    if(!it->vis || !qpCtlShown(it->id)) continue;
     if(it->w == 1 && qpTileN < QP_MAX_ITEMS) qpTiles[qpTileN++] = (uint8_t)i;
   }
 
@@ -830,7 +882,7 @@ static void qpLayout(){
   bool groupDone = (qpTileN == 0);
   for(int i = 0; i < qpLayN && i < QP_MAX_ITEMS && qpBlkN < QP_MAX_ITEMS + 2; i++){
     const QpItem* it = &qpLaySrc[i];
-    if(!it->vis || !qpCtlAvail(it->id)) continue;
+    if(!it->vis || !qpCtlShown(it->id)) continue;
     if(it->w == 1){
       if(groupDone) continue;
       if(col > 0){ y += rowH + QP_VGAP; col = 0; rowH = 0; }

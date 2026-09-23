@@ -88,6 +88,13 @@ static uint32_t memShedSystem(){
   // Scratch del desenfoque de Liquid Glass (768 KB). Se rehace en el
   // siguiente panel que lo necesite.
   if(glassBuf){ heap_caps_free(glassBuf); glassBuf = NULL; }
+  // Deslizamiento del escritorio: pagina vecina y mascaras (~560 KB). Se
+  // rehacen en el siguiente gesto. Nunca a mitad de uno.
+  if(!hpDragging && !hpSettling) hpFreeBuffers();
+  // Fondo limpio + desenfocado de la franja de pagina (~1 MB). Solo fuera del
+  // escritorio: el proximo renderHome lo reconstruye (gHomeDirty), y mientras
+  // tanto el vidrio de las paginas vuelve a la ruta de siempre sin romperse.
+  if(gState != ST_HOME && (hgBd || hpBg)){ homeBackdropFree(); gHomeDirty = true; }
   // Tarjeta Liquid Glass cacheada. Al soltarla hay que invalidar su firma, o el
   // siguiente uso creeria que sigue siendo valida y leeria un puntero nulo.
   if(glcScratch || glcCard){
