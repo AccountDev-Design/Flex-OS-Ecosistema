@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b1020">
+<meta name="referrer" content="no-referrer">
+<title>Flex OS · Biblioteca</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="bg" aria-hidden="true"></div>
+
+<header class="top glass" id="top">
+  <div class="brand">
+    <span class="logo" aria-hidden="true"></span>
+    <div>
+      <strong>Flex OS</strong>
+      <span class="sub" id="devSub">Biblioteca</span>
+    </div>
+  </div>
+  <div class="meter" id="meter" title="Memoria de Flex OS">
+    <div class="meter-bar"><i id="meterFill"></i></div>
+    <span id="meterTxt"></span>
+  </div>
+  <button class="icon-btn" id="menuBtn" aria-label="Opciones" aria-haspopup="true">
+    <span class="dots"></span>
+  </button>
+</header>
+
+<div class="menu glass" id="menu" role="menu" hidden>
+  <button role="menuitem" id="mOwner">Ver contenido protegido</button>
+  <button role="menuitem" id="mLock" hidden>Ocultar contenido protegido</button>
+  <button role="menuitem" id="mRefresh">Actualizar</button>
+  <button role="menuitem" id="mUnpair" class="danger">Desconectar este móvil</button>
+</div>
+
+<main id="main">
+  <section id="pairView" class="pair" hidden>
+    <div class="pair-card glass">
+      <div class="pair-ico" aria-hidden="true"></div>
+      <h1>Conecta con Flex OS</h1>
+      <p>Escribe el código de 6 cifras que aparece en la pantalla de tu Flex OS, en <b>Galería › Conectar con el móvil</b>.</p>
+      <form id="pairForm" autocomplete="off">
+        <input id="pairCode" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="••••••" aria-label="Código de acceso" autocomplete="one-time-code">
+        <button class="btn primary" type="submit" id="pairBtn">Conectar</button>
+      </form>
+      <p class="err" id="pairErr" role="alert"></p>
+    </div>
+  </section>
+
+  <section id="libView" hidden>
+    <nav class="tabs glass" id="tabs" role="tablist">
+      <button role="tab" data-tab="all" class="on">Todo</button>
+      <button role="tab" data-tab="photo">Fotos</button>
+      <button role="tab" data-tab="video">Vídeos</button>
+      <button role="tab" data-tab="audio">Música</button>
+    </nav>
+
+    <div class="selbar glass" id="selbar" hidden>
+      <button class="icon-btn" id="selClose" aria-label="Salir de la selección"><span class="x"></span></button>
+      <span id="selCount">0 seleccionados</span>
+      <button class="chip" id="selAll">Seleccionar todo</button>
+    </div>
+
+    <div class="owner-chip" id="ownerChip" hidden>
+      <span class="lock-ico open" aria-hidden="true"></span> Contenido protegido visible
+      <button class="chip" id="ownerOff">Ocultar</button>
+    </div>
+
+    <div id="grid" class="grid" aria-live="polite"></div>
+
+    <div class="empty" id="empty" hidden>
+      <div class="empty-ico" aria-hidden="true"></div>
+      <h2 id="emptyTitle">Aún no hay nada aquí</h2>
+      <p id="emptyText">Sube fotos, vídeos o música desde este móvil con el botón <b>Subir</b>.</p>
+    </div>
+  </section>
+</main>
+
+<button class="fab" id="fab" hidden aria-label="Subir archivos"><span class="plus" aria-hidden="true"></span><span>Subir</span></button>
+<div class="selactions glass" id="selActions" hidden>
+  <button class="btn primary" id="selDl"><span class="dl-ico" aria-hidden="true"></span>Descargar</button>
+</div>
+<input type="file" id="picker" multiple accept="image/*,video/*,audio/*,.heic,.heif,.avi,.wav,.mp3,.m4a" hidden>
+
+<div class="scrim" id="scrim" hidden></div>
+
+<section class="sheet glass" id="planSheet" hidden aria-labelledby="planTitle">
+  <div class="grab" aria-hidden="true"></div>
+  <h2 id="planTitle">Preparar para Flex OS</h2>
+  <p class="hint" id="planHint">Flex OS reproduce JPEG, vídeo AVI‑MJPEG y audio WAV. Lo demás se convierte aquí, en tu móvil, antes de enviarlo.</p>
+  <div class="profiles" id="profiles" role="radiogroup" aria-label="Calidad">
+    <button role="radio" data-p="light">Ligero</button>
+    <button role="radio" data-p="rec" class="on">Recomendado</button>
+    <button role="radio" data-p="high">Alta calidad</button>
+    <button role="radio" data-p="orig">Original</button>
+  </div>
+  <p class="hint small" id="profileHint"></p>
+  <ul class="plan" id="planList"></ul>
+  <div class="sheet-actions">
+    <button class="btn" id="planCancel">Cancelar</button>
+    <button class="btn primary" id="planGo">Subir</button>
+  </div>
+</section>
+
+<section class="xfers" id="xfers" aria-live="polite"></section>
+
+<section class="viewer" id="viewer" hidden>
+  <button class="icon-btn viewer-close" id="viewerClose" aria-label="Cerrar"><span class="x"></span></button>
+  <div class="viewer-body" id="viewerBody"></div>
+  <div class="viewer-bar glass">
+    <div class="viewer-meta"><strong id="viewerName"></strong><span id="viewerInfo"></span></div>
+    <a class="btn primary sm" id="viewerDl" href="#">Descargar</a>
+  </div>
+</section>
+
+<section class="dialog glass" id="loginDlg" hidden role="dialog" aria-modal="true" aria-labelledby="loginTitle">
+  <div class="lock-ico big" aria-hidden="true"></div>
+  <h2 id="loginTitle">Contenido protegido</h2>
+  <p id="loginText">Introduce el PIN de Flex OS para verlo durante unos minutos.</p>
+  <form id="loginForm" autocomplete="off">
+    <input id="loginSecret" type="password" aria-label="PIN o contraseña" autocomplete="off">
+    <p class="err" id="loginErr" role="alert"></p>
+    <div class="sheet-actions">
+      <button class="btn" type="button" id="loginCancel">Cancelar</button>
+      <button class="btn primary" type="submit" id="loginGo">Desbloquear</button>
+    </div>
+  </form>
+</section>
+
+<div class="toast glass" id="toast" role="status" hidden></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

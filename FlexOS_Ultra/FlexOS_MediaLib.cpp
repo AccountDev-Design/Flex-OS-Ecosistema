@@ -127,7 +127,7 @@ static const FmtInfo kFmt[FML_F_COUNT] = {
   /* HEIC      */ { "HEIC", ".heic", FML_K_PHOTO, false, "HEIC: esta placa solo decodifica JPEG" },
   /* AVIF      */ { "AVIF", ".avif", FML_K_PHOTO, false, "AVIF: esta placa solo decodifica JPEG" },
   /* AVI_MJPEG */ { "AVI MJPEG", ".avi", FML_K_VIDEO, true, NULL },
-  /* AVI_OTHER */ { "AVI", ".avi",  FML_K_VIDEO, false, "AVI sin video MJPEG: no se puede reproducir" },
+  /* AVI_OTHER */ { "AVI", ".avi",  FML_K_VIDEO, false, "AVI sin v\xC3\xAD" "deo MJPEG: no se puede reproducir" },
   /* MP4       */ { "MP4", ".mp4",  FML_K_VIDEO, false,
                     "MP4: esta placa no tiene decodificador H.264/H.265" },
   /* MOV       */ { "MOV", ".mov",  FML_K_VIDEO, false,

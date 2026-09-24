@@ -55,11 +55,11 @@ BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test
         $(BUILD)/test_passcode $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexauth $(BUILD)/test_flexphone_ui $(BUILD)/test_flexphone_discovery $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
         $(BUILD)/test_media $(BUILD)/test_mem $(BUILD)/test_fall $(BUILD)/test_theft $(BUILD)/test_imu \
         $(BUILD)/test_medialib $(BUILD)/test_jpegenc $(BUILD)/test_httpshare $(BUILD)/test_qr \
-        $(BUILD)/test_mediathumb \
+        $(BUILD)/test_mediathumb $(BUILD)/test_mediaweb \
         $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg
-TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun
+TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun $(BUILD)/mediacheck $(BUILD)/flexweb_host
 
-.PHONY: all run all-boards fixtures clean ino
+.PHONY: all run all-boards fixtures clean ino web
 all: run
 
 $(BUILD):
@@ -78,6 +78,43 @@ THUMB_SRC := $(ULTRA)/FlexOS_MediaThumb.cpp
 $(BUILD)/test_mediathumb: test_mediathumb.cpp $(THUMB_SRC) $(ULTRA)/FlexOS_MediaThumb.h $(ULTRA)/FlexOS_JPEG.cpp \
                           $(ULTRA)/FlexOS_JPEGEnc.cpp $(MEDIA_SRC) | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_mediathumb.cpp $(THUMB_SRC) $(ULTRA)/FlexOS_JPEG.cpp $(ULTRA)/FlexOS_JPEGEnc.cpp $(MEDIA_SRC)
+
+# --- Flex Web Server: la aplicacion del servidor, de extremo a extremo ---
+# Subida, descarga, ZIP, sesiones, bloqueo y reparto del hilo entre
+# conexiones, contra un sistema de archivos en memoria con fallos provocados
+# (desconexion, disco lleno, CRC). El ZIP lo abre el zipfile de Python.
+WEB_SRC  := $(ULTRA)/FlexOS_MediaWeb.cpp $(ULTRA)/FlexOS_MediaLib.cpp $(ULTRA)/FlexOS_HttpShare.cpp \
+            $(ULTRA)/FlexOS_MediaThumb.cpp $(ULTRA)/FlexOS_JPEG.cpp $(ULTRA)/FlexOS_JPEGEnc.cpp $(ULTRA)/FlexOS_Media.cpp
+WEB_HDRS := $(ULTRA)/FlexOS_MediaWeb.h $(ULTRA)/FlexOS_WebUI.h $(ULTRA)/FlexOS_MediaLib.h $(ULTRA)/FlexOS_HttpShare.h
+WEBFLAGS := -Wno-missing-field-initializers
+
+# La web del movil se edita en FlexOS_Ultra/webui/ y el P4 la sirve desde
+# FlexOS_WebUI.h. Si webui/ cambia, se regenera (y hay que versionarla: la
+# regla `ino` comprueba con --check que no se haya quedado atras).
+WEBUI    := $(ULTRA)/webui
+$(ULTRA)/FlexOS_WebUI.h: $(WEBUI)/index.html $(WEBUI)/app.css $(WEBUI)/app.js $(WEBUI)/gen_header.py
+	python3 $(WEBUI)/gen_header.py
+
+$(BUILD)/test_mediaweb: test_mediaweb.cpp $(WEB_SRC) $(WEB_HDRS) | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(WEBFLAGS) -o $@ test_mediaweb.cpp $(WEB_SRC) vendor/cJSON/cJSON.c
+
+# Herramientas de la prueba de la web (tests/web/):
+#   mediacheck    juzga con los analizadores DEL FIRMWARE lo que genera la web
+#   flexweb_host  el mismo servidor detras de un socket TCP real, para Chromium
+$(BUILD)/mediacheck: mediacheck.cpp $(ULTRA)/FlexOS_MediaLib.cpp $(ULTRA)/FlexOS_Media.cpp $(ULTRA)/FlexOS_JPEG.cpp \
+                     $(ULTRA)/FlexOS_JPEGEnc.cpp $(ULTRA)/FlexOS_MediaThumb.cpp | $(BUILD)
+	$(CXX) $(CXXSTD) -O2 $(WARN) -o $@ mediacheck.cpp $(ULTRA)/FlexOS_MediaLib.cpp $(ULTRA)/FlexOS_Media.cpp \
+	       $(ULTRA)/FlexOS_JPEG.cpp $(ULTRA)/FlexOS_JPEGEnc.cpp $(ULTRA)/FlexOS_MediaThumb.cpp
+$(BUILD)/flexweb_host: flexweb_host.cpp $(WEB_SRC) $(WEB_HDRS) | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(WEBFLAGS) -o $@ flexweb_host.cpp $(WEB_SRC)
+
+# Pruebas de la web: funciones puras en Node (contra el firmware, via
+# mediacheck) y, si hay Playwright, Chromium de verdad contra flexweb_host.
+# Sin Node, se dice que se omiten; no se dan por pasadas.
+web: $(BUILD)/mediacheck $(BUILD)/flexweb_host
+	@if command -v node >/dev/null 2>&1; then \
+	  node ../web/webui.test.js && node ../web/e2e.test.js; \
+	else echo "=== pruebas de la web OMITIDAS: no hay Node en esta maquina ==="; fi
 
 # --- Flex Web Server: protocolo HTTP y codigo QR ---
 # Los dos se escribieron para Flex Vector Pro y quedaron archivados en la BETA
@@ -394,6 +431,7 @@ FSFLAGS := -Ifsstub -Iinostub $(INC) -DARDUINO=200 -Wno-format-truncation
 
 ino: ino_compile.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) $(BNO_SRC) $(FS_SRC) check_protos.py check_wiring.py check_shared.py check_stack.py | $(BUILD)
 	@python3 check_shared.py $(ROOT)
+	@python3 $(ULTRA)/webui/gen_header.py --check
 	@python3 check_protos.py $(INO_SRC)
 	@python3 check_wiring.py $(INO_SRC)
 	@python3 check_stack.py $(ROOT)
@@ -485,6 +523,8 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_qr
 	@echo
 	@$(BUILD)/test_mediathumb
+	@echo
+	@$(BUILD)/test_mediaweb
 	@echo
 	@$(BUILD)/test_media
 	@echo
