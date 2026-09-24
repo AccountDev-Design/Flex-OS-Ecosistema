@@ -55,6 +55,7 @@ BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test
         $(BUILD)/test_passcode $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexauth $(BUILD)/test_flexphone_ui $(BUILD)/test_flexphone_discovery $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
         $(BUILD)/test_media $(BUILD)/test_mem $(BUILD)/test_fall $(BUILD)/test_theft $(BUILD)/test_imu \
         $(BUILD)/test_medialib $(BUILD)/test_jpegenc $(BUILD)/test_httpshare $(BUILD)/test_qr \
+        $(BUILD)/test_mediathumb \
         $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun
 
@@ -67,6 +68,16 @@ $(BUILD):
 # --- nucleo portable: con sanitizers ---
 $(BUILD)/test_jpeg: test_jpeg.cpp $(JPEG_SRC) $(ROOT)/FlexOS_JPEG.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -pthread -o $@ test_jpeg.cpp $(JPEG_SRC)
+
+# --- Miniaturas de la biblioteca: recorte centrado y VALIDACION de lo recibido ---
+# Generar la miniatura de un JPEG obliga a decodificarlo entero: si la foto que
+# llega del movil esta danada, se sabe aqui y no la primera vez que alguien la
+# abre. La referencia del parecido se calcula en la prueba por otro camino.
+THUMB_SRC := $(ULTRA)/FlexOS_MediaThumb.cpp
+
+$(BUILD)/test_mediathumb: test_mediathumb.cpp $(THUMB_SRC) $(ULTRA)/FlexOS_MediaThumb.h $(ULTRA)/FlexOS_JPEG.cpp \
+                          $(ULTRA)/FlexOS_JPEGEnc.cpp $(MEDIA_SRC) | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -o $@ test_mediathumb.cpp $(THUMB_SRC) $(ULTRA)/FlexOS_JPEG.cpp $(ULTRA)/FlexOS_JPEGEnc.cpp $(MEDIA_SRC)
 
 # --- Flex Web Server: protocolo HTTP y codigo QR ---
 # Los dos se escribieron para Flex Vector Pro y quedaron archivados en la BETA
@@ -472,6 +483,8 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_httpshare
 	@echo
 	@$(BUILD)/test_qr
+	@echo
+	@$(BUILD)/test_mediathumb
 	@echo
 	@$(BUILD)/test_media
 	@echo
