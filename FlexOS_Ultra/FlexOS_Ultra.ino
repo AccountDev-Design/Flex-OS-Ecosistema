@@ -255,6 +255,7 @@
 #include "FlexOS_Ultra_QuickPanelGlass.h"    // panel rapido: material Liquid Glass cacheado
 #include "FlexOS_Ultra_QuickPanelEdit.h"     // panel rapido: modo edicion
 #include "FlexOS_Ultra_Media.h"              // nucleo de medios: LittleFS, clasificacion e indice
+#include "FlexOS_Ultra_MediaLib.h"           // biblioteca de medios: catalogo, miniaturas persistentes, tarea de fondo
 #include "FlexOS_Ultra_AppMultimedia.h"      // app Multimedia (reproductor real)
 #include "FlexOS_Ultra_AppCamera.h"          // app Camara
 #include "FlexOS_Ultra_Keyboard.h"           // teclado de 4 capas y maquetacion de texto
@@ -411,6 +412,11 @@ void setup(){
     flexFsMkdir(FS_DIR_SESS);
     flexFsMkdir(FS_DIR_CACHE);
     if(!gFrPending && !gSafeMode) flexPkgBegin();
+    // BIBLIOTECA DE MEDIOS. Carga el catalogo (flash, no radio) y crea su
+    // tarea de fondo, que reconcilia con el disco y hace las miniaturas sin
+    // tocar este bucle. En modo seguro no arranca: nada que abra archivos
+    // del usuario en segundo plano mientras el sistema se recupera.
+    if(!gFrPending && !gSafeMode) mlBegin();
   }
 
   // AUDIO. Va DESPUES del tactil a proposito: el ES8311 cuelga del
@@ -713,6 +719,7 @@ void loop(){
                           // su enganche del sensor.
   faPendingTick();        // aviso de caida que no cupo (cortina, OTA, bloqueo): sale al despejarse
   mediaIndexTick();       // indice LittleFS: un lote corto cuando esta activo
+  mlTick();               // biblioteca de medios: avisos de su tarea de fondo para la isla
   if(!gSafeMode){
     wifiAutoReconnectTick();// reconexion diferida, una vez por arranque
     ntpTick();              // la red corre en su tarea, nunca aqui

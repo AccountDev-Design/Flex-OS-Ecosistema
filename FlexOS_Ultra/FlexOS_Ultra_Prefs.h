@@ -132,6 +132,7 @@ static inline bool appCanHide(int id){  return id != IC_AJUSTES; }
 #define LSU_AFTER_KIOSKOUT  4         // salir del Modo Kiosco
 #define LSU_AFTER_POWEROFF  5         // apagar del todo (solo si el usuario activo "Apagado seguro")
 #define LSU_AFTER_FACTORY   6         // continuar con el Restablecimiento de fabrica
+#define LSU_AFTER_MEDIA     7         // accion sobre medios protegidos (Galeria, Multimedia, Musica)
 static int lsuAfter    = LSU_AFTER_UNLOCK;
 static int lsuAfterApp = -1;
 #define LW_CLOCK   0x01   // reloj grande + fecha

@@ -66,10 +66,32 @@ static uint32_t    filesMask = 0;
 
 static void filesRender();
 
+// /System/Media es la biblioteca por dentro: su catalogo, sus miniaturas y
+// la carpeta PROTEGIDA. El explorador no la ensena ni deja entrar: un
+// elemento bloqueado no puede asomar por aqui, y borrar o mover a mano algo
+// que el catalogo da por suyo lo desincronizaria.
+static bool filesIsLibraryDir(const char* dir){
+  size_t n = strlen(FML_DIR_ROOT);
+  return !strncmp(dir, FML_DIR_ROOT, n) && (dir[n] == 0 || dir[n] == '/');
+}
+
 static void filesReload(){
+  if(filesIsLibraryDir(filesDir)) snprintf(filesDir, sizeof(filesDir), "%s", FLEXFS_DIR_SYS);
   int n = mediaList(filesDir, filesList, FILES_MAX);
   // -1 = la particion interna no esta disponible.
   filesN = n > 0 ? n : 0;
+  if(!strcmp(filesDir, FLEXFS_DIR_SYS)){
+    for(int i = 0; i < filesN; ){
+      char p[FLEXFS_PATH_MAX];
+      snprintf(p, sizeof(p), "%s/%s", filesDir, filesList[i].name);
+      if(filesIsLibraryDir(p)){                    // se quita conservando el orden
+        memmove(&filesList[i], &filesList[i + 1], sizeof(filesList[0]) * (size_t)(filesN - 1 - i));
+        filesN--;
+        continue;
+      }
+      i++;
+    }
+  }
   if(filesSelIdx >= filesN) filesSelIdx = -1;
   int maxRows = filesN;
   if(filesScroll > maxRows * FILES_RH) filesScroll = 0;

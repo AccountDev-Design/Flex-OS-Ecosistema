@@ -130,6 +130,16 @@ void flexBrowserKeyCancel(){}
 // asi que la clave del sistema NO lleva doble: el sketch se enlaza contra el
 // mismo PBKDF2 a plazos que corre en la placa.
 int      flexFsReadAt(const char*, uint32_t, void*, size_t){ return -1; }
+// Flujos y movimientos (subidas del movil, biblioteca de medios). Sin
+// sistema de archivos de verdad aqui: todo falla limpio, como sin montar.
+FlexFsStream* flexFsOpenRead(const char*){ return nullptr; }
+FlexFsStream* flexFsOpenWrite(const char*){ return nullptr; }
+int      flexFsStreamRead(FlexFsStream*, void*, size_t){ return -1; }
+bool     flexFsStreamWrite(FlexFsStream*, const void*, size_t){ return false; }
+bool     flexFsStreamSeek(FlexFsStream*, uint32_t){ return false; }
+uint32_t flexFsStreamSize(FlexFsStream*){ return 0; }
+void     flexFsStreamClose(FlexFsStream*){}
+bool     flexFsMove(const char*, const char*){ return false; }
 bool     flexFsPurgeLegacyVault(){ return false; }
 
 // ---- Clima (motor meteorologico) ----

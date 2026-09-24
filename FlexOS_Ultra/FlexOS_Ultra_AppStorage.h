@@ -89,7 +89,13 @@ static void filesEnterAt(const char* dir);         // ...abierto en una carpeta 
 // del explorador: si el usuario borro algo alli, aqui se ve al instante.
 static void almScan(){
   for(int i = 0; i < FLEXFS_CAT_N; i++) almCat[i] = flexFsCatSize(i);
-  almBigN = flexFsLargest(almBig, ALM_BIG_MAX);
+  // Lo de dentro de la biblioteca (miniaturas, carpeta protegida) no se
+  // lista: un elemento bloqueado no puede asomar ni por su tamano.
+  FlexFsBig all[ALM_BIG_MAX + 9];
+  int n = flexFsLargest(all, ALM_BIG_MAX + 9);
+  almBigN = 0;
+  for(int i = 0; i < n && almBigN < ALM_BIG_MAX; i++)
+    if(strncmp(all[i].path, FML_DIR_ROOT "/", sizeof(FML_DIR_ROOT)) != 0) almBig[almBigN++] = all[i];
 }
 
 // Icono de carpeta (el mismo que usa el explorador).

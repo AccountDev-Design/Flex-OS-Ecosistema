@@ -44,6 +44,9 @@ static void lsuFinishAfter(){
   // RESTABLECIMIENTO: la clave era correcta -> ultimo paso (el deslizador). El
   // borrado NO empieza aqui: todavia hay una confirmacion deliberada por delante.
   if(what == LSU_AFTER_FACTORY){ frAfterVerify(); return; }
+  // MEDIOS PROTEGIDOS: se vuelve a la app que pidio la clave (no al
+  // escritorio) y ella hace la accion que dejo apartada.
+  if(what == LSU_AFTER_MEDIA){ mediaAfterVerify(true); return; }
   gState = ST_HOME;
   if(what == LSU_AFTER_LOCKAPP)        appLockSet(id, true);
   else if(what == LSU_AFTER_UNLOCKAPP) appLockSet(id, false);
@@ -95,8 +98,12 @@ static void lsuExit(){
     bool wasKiosk = (lsuAfter == LSU_AFTER_KIOSKOUT);
     bool wasPoff  = (lsuAfter == LSU_AFTER_POWEROFF);
     bool wasReset = (lsuAfter == LSU_AFTER_FACTORY);
+    bool wasMedia = (lsuAfter == LSU_AFTER_MEDIA);
     lsuVerify = false; lsuAfter = LSU_AFTER_UNLOCK; lsuAfterApp = -1;
     lsuShakeMs = 0; lockWaitReset();
+    // Cancelar la clave de un medio protegido vuelve a la app, con todo
+    // igual que estaba y sin haber hecho nada.
+    if(wasMedia){ mediaAfterVerify(false); return; }
     // Cancelar la verificacion del restablecimiento vuelve a Ajustes SIN haber
     // tocado un solo dato: el asistente todavia no habia armado nada.
     if(wasReset){ frCancelToSettings(); return; }

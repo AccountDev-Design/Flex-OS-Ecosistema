@@ -592,6 +592,14 @@ static void settingsAnimate(int fromView, int toView, int dir){
   setView = toView;
   settingsRender();                                   // estado final limpio, sin restos del paralaje
 }
+// Abre Ajustes directamente en "Seguridad y privacidad". La usan las apps que
+// necesitan que el usuario configure antes un PIN o una contrasena (bloquear
+// fotos en la Galeria, por ejemplo): el usuario llega a la pantalla exacta.
+static void settingsJumpSecurity(){
+  setView = 1; setSel = 6; setScroll = 0; setDragging = false;
+  if(gState == ST_APP) appClose();
+  enterApp(IC_AJUSTES);
+}
 static void settingsOpenCat(int cat){
   if(cat < 0 || cat > 11) return;
   setSel = cat; setScroll = 0; setDragging = false;
