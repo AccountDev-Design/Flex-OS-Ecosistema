@@ -582,6 +582,156 @@ int flexImaDecodeBlock(const uint8_t* blk, size_t n, int ch, int16_t* out, int m
 }
 
 // -------------------------------------------------------------
+//  REPRODUCCION POR BLOQUES
+// -------------------------------------------------------------
+#define FLEXAS_PCM_CHUNK 4096u         // lectura de PCM por vuelta (bytes de archivo)
+
+size_t flexAsWorkBytes(const FlexWavInfo* w){
+  if(!w || !w->channels || w->channels > 2) return 0;
+  if(w->format == FLEXWAV_FMT_IMA){
+    if(!w->blockAlign || !w->samplesPerBlock) return 0;
+    return (size_t)w->blockAlign + (size_t)w->samplesPerBlock * w->channels * 2u;
+  }
+  if(w->bits == 16) return FLEXAS_PCM_CHUNK;                 // se entrega tal cual
+  if(w->bits == 8)  return FLEXAS_PCM_CHUNK + FLEXAS_PCM_CHUNK * 2u;
+  return 0;
+}
+
+bool flexAsOpen(FlexAudioStream* s, const FlexMediaIO* io, const FlexWavInfo* w, uint8_t* work, size_t cap){
+  if(!s || !io || !w || !work) return false;
+  size_t need = flexAsWorkBytes(w);
+  if(!need || cap < need) return false;
+  memset(s, 0, sizeof(*s));
+  s->io = *io;
+  s->wav = *w;
+  s->pos = w->dataStart;
+  s->end = w->dataStart + w->dataBytes;
+  s->ioPos = 0xFFFFFFFFu;
+  s->outFrame = (uint16_t)(w->channels * 2u);
+  s->limit = ~(uint64_t)0;
+  if(w->format == FLEXWAV_FMT_IMA){
+    s->blk = work;             s->blkCap = w->blockAlign;
+    s->buf = work + w->blockAlign; s->bufCap = (uint32_t)w->samplesPerBlock * w->channels * 2u;
+    // El ultimo bloque se rellena: 'fact' dice cuantas muestras son de verdad.
+    if(w->frames) s->limit = (uint64_t)w->frames * s->outFrame;
+  } else if(w->bits == 16){
+    s->buf = work; s->bufCap = FLEXAS_PCM_CHUNK;
+  } else {
+    s->blk = work; s->blkCap = FLEXAS_PCM_CHUNK;
+    s->buf = work + FLEXAS_PCM_CHUNK; s->bufCap = FLEXAS_PCM_CHUNK * 2u;
+  }
+  s->ended = s->pos >= s->end;
+  return true;
+}
+
+static bool asRead(FlexAudioStream* s, uint8_t* dst, uint32_t n){
+  if(s->ioPos != s->pos){
+    if(!s->io.seek(s->io.ctx, s->pos)) return false;
+    s->ioPos = s->pos;
+  }
+  uint32_t got = 0;
+  while(got < n){
+    int r = s->io.read(s->io.ctx, dst + got, n - got);
+    if(r <= 0) return false;
+    got += (uint32_t)r;
+  }
+  s->pos += n; s->ioPos = s->pos;
+  return true;
+}
+
+// Prepara el siguiente trozo de salida. 0 = no queda nada, -1 = error.
+static int asFill(FlexAudioStream* s){
+  s->bufOff = s->bufLen = 0;
+  if(s->pos >= s->end || s->produced >= s->limit) return 0;
+  const FlexWavInfo* w = &s->wav;
+  uint32_t n;
+  if(w->format == FLEXWAV_FMT_IMA){
+    n = s->end - s->pos;
+    if(n > w->blockAlign) n = w->blockAlign;
+    if(n <= 4u * w->channels){ s->pos = s->end; return 0; }   // resto sin muestras
+    if(!asRead(s, s->blk, n)) return -1;
+    int fr = flexImaDecodeBlock(s->blk, n, w->channels, (int16_t*)s->buf, w->samplesPerBlock);
+    if(fr < 0) return -1;
+    s->bufLen = (uint32_t)fr * s->outFrame;
+  } else {
+    uint32_t inFrame = (uint32_t)w->channels * (w->bits / 8u);
+    n = s->end - s->pos;
+    uint32_t cap = w->bits == 16 ? s->bufCap : s->blkCap;
+    if(n > cap) n = cap;
+    n -= n % inFrame;
+    if(!n){ s->pos = s->end; return 0; }
+    if(w->bits == 16){
+      if(!asRead(s, s->buf, n)) return -1;
+      s->bufLen = n;
+    } else {
+      // WAV de 8 bits es SIN signo (128 = silencio): a 16 bits con signo.
+      if(!asRead(s, s->blk, n)) return -1;
+      int16_t* o = (int16_t*)s->buf;
+      for(uint32_t i = 0; i < n; i++) o[i] = (int16_t)(((int)s->blk[i] - 128) * 256);
+      s->bufLen = n * 2u;
+    }
+  }
+  if(s->produced + s->bufLen > s->limit) s->bufLen = (uint32_t)(s->limit - s->produced);
+  s->produced += s->bufLen;
+  return s->bufLen ? 1 : 0;
+}
+
+int flexAsPump(FlexAudioStream* s, FlexAsSink sink, void* ctx, uint32_t budget){
+  if(!s || !sink || !s->buf) return -1;
+  uint32_t total = 0;
+  while(total < budget){
+    if(s->bufOff >= s->bufLen){
+      int f = asFill(s);
+      if(f < 0) return -1;
+      if(f == 0){ s->ended = true; break; }
+    }
+    uint32_t want = s->bufLen - s->bufOff;
+    if(want > budget - total) want = budget - total;
+    int k = sink(ctx, s->buf + s->bufOff, want);
+    if(k < 0) return -1;
+    if(k == 0) break;                           // el destino esta lleno ahora
+    if((uint32_t)k > want) k = (int)want;
+    s->bufOff += (uint32_t)k;
+    s->delivered += (uint32_t)k;
+    total += (uint32_t)k;
+  }
+  return (int)total;
+}
+
+uint32_t flexAsPosMs(const FlexAudioStream* s){
+  if(!s || !s->outFrame || !s->wav.sampleRate) return 0;
+  return (uint32_t)((s->delivered / s->outFrame) * 1000ull / s->wav.sampleRate);
+}
+uint32_t flexAsDurMs(const FlexAudioStream* s){ return s ? flexWavDurationMs(&s->wav) : 0; }
+
+bool flexAsSeekMs(FlexAudioStream* s, uint32_t ms){
+  if(!s || !s->buf || !s->wav.sampleRate) return false;
+  const FlexWavInfo* w = &s->wav;
+  uint64_t frame = (uint64_t)ms * w->sampleRate / 1000u;
+  uint64_t outStart;
+  uint32_t off;
+  if(w->format == FLEXWAV_FMT_IMA){
+    uint32_t blocks = w->dataBytes / w->blockAlign + (w->dataBytes % w->blockAlign ? 1u : 0u);
+    uint64_t b = frame / w->samplesPerBlock;
+    if(b >= blocks) b = blocks ? blocks - 1u : 0u;
+    off = (uint32_t)(b * w->blockAlign);
+    outStart = b * w->samplesPerBlock * s->outFrame;
+  } else {
+    uint32_t inFrame = (uint32_t)w->channels * (w->bits / 8u);
+    uint64_t frames = w->dataBytes / inFrame;
+    if(frame > frames) frame = frames;
+    off = (uint32_t)(frame * inFrame);
+    outStart = frame * s->outFrame;
+  }
+  if(outStart > s->limit) outStart = s->limit;
+  s->pos = w->dataStart + off;
+  s->bufLen = s->bufOff = 0;
+  s->produced = s->delivered = outStart;
+  s->ended = s->pos >= s->end;
+  return true;
+}
+
+// -------------------------------------------------------------
 //  INDICE INCREMENTAL
 //  ------------------------------------------------------------
 //  El recorrido es una pila de como mucho FLEXMED_DEPTH_MAX

@@ -56,6 +56,7 @@ static const char*   auErr      = "Sin inicializar";
 static uint8_t       auVol      = FLEXAUDIO_VOL_DEF;
 static bool          auMuted    = false;
 static uint32_t      auRate     = 0;
+static uint32_t      auBufFrames = 0;      // muestras que caben en el DMA (para la posicion audible)
 static uint16_t      auCh       = 0, auBits = 0;
 static i2s_chan_handle_t auTx   = NULL;
 static Preferences    auPrefs;
@@ -239,6 +240,10 @@ static void auI2sRelease(){
 }
 
 bool flexAudioStartPcm(uint32_t rate, uint16_t ch, uint16_t bits){
+  return flexAudioStartPcmBuffered(rate, ch, bits, 0);
+}
+
+bool flexAudioStartPcmBuffered(uint32_t rate, uint16_t ch, uint16_t bits, uint16_t bufferMs){
   if(!auCodecOk){ auErr = "Sin codec de audio"; return false; }
   if(ch < 1 || ch > 2) return false;
   if(bits != 8 && bits != 16) return false;
@@ -249,6 +254,19 @@ bool flexAudioStartPcm(uint32_t rate, uint16_t ch, uint16_t bits){
   i2s_chan_config_t cc = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
   cc.dma_desc_num  = 6;
   cc.dma_frame_num = 240;          // ~5 ms por descriptor a 48 kHz
+  if(bufferMs){
+    // Descriptores del tamano maximo del DMA (1023 muestras) hasta cubrir
+    // bufferMs, sin pasar de FLEXAUDIO_DMA_MAX_BYTES de RAM interna.
+    uint32_t frameBytes = (uint32_t)ch * (bits / 8u);
+    uint32_t frames = rate * bufferMs / 1000u;
+    uint32_t cap = FLEXAUDIO_DMA_MAX_BYTES / frameBytes;
+    if(frames > cap) frames = cap;
+    uint32_t desc = frames / 1023u;              // hacia abajo: nunca por encima del tope
+    if(desc < 2) desc = 2;
+    cc.dma_desc_num  = desc;
+    cc.dma_frame_num = 1023;
+  }
+  auBufFrames = cc.dma_desc_num * cc.dma_frame_num;
   cc.auto_clear    = true;         // al vaciarse, silencio y no la ultima muestra repetida
   if(i2s_new_channel(&cc, &auTx, NULL) != ESP_OK){
     auErr = "No se pudo crear el canal I2S";
@@ -285,6 +303,10 @@ bool flexAudioStartPcm(uint32_t rate, uint16_t ch, uint16_t bits){
   auAmp(true);
   auErr = "Listo";
   return true;
+}
+
+uint32_t flexAudioBufferMs(){
+  return (auPlaying && auRate) ? (uint32_t)((uint64_t)auBufFrames * 1000u / auRate) : 0;
 }
 
 int flexAudioWrite(const void* data, size_t n){

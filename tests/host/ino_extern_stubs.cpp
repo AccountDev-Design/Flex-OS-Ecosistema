@@ -338,6 +338,8 @@ bool        flexAudioBegin(){ return false; }
 bool        flexAudioAvailable(){ return false; }
 const char* flexAudioError(){ return "Sin codec de audio"; }
 bool        flexAudioStartPcm(uint32_t, uint16_t, uint16_t){ return false; }
+bool        flexAudioStartPcmBuffered(uint32_t, uint16_t, uint16_t, uint16_t){ return false; }
+uint32_t    flexAudioBufferMs(){ return 0; }
 int         flexAudioWrite(const void*, size_t){ return -1; }
 void        flexAudioStop(){}
 bool        flexAudioPlaying(){ return false; }

@@ -437,6 +437,10 @@ INOWARN  := $(WARN) -Wno-unused-function -Wno-unused-variable \
 # comprueba aqui, contra los dobles de Arduino: un error de tipos o de
 # nombre en el protocolo SHTP salta en el PC y no en el aparato.
 BNO_SRC := $(ULTRA)/FlexOS_BNO085.cpp
+# El driver de AUDIO (ES8311 por I2C + I2S), por el mismo motivo: va a la placa
+# y ninguna bateria lo compilaba. inostub/driver/i2s_std.h trae solo los tipos
+# y firmas de la API I2S de ESP-IDF; aqui nada suena.
+AUDIO_SRC := $(ULTRA)/FlexOS_Audio.cpp
 
 # EL SISTEMA DE ARCHIVOS, POR EL MISMO MOTIVO Y POR UNO PEOR.
 # FlexOS_FS.cpp va a las TRES placas y no lo compilaba ninguna bateria: sus
@@ -448,7 +452,7 @@ BNO_SRC := $(ULTRA)/FlexOS_BNO085.cpp
 FS_SRC := $(ULTRA)/FlexOS_FS.cpp
 FSFLAGS := -Ifsstub -Iinostub $(INC) -DARDUINO=200 -Wno-format-truncation
 
-ino: ino_compile.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) $(BNO_SRC) $(FS_SRC) check_protos.py check_wiring.py check_shared.py check_stack.py | $(BUILD)
+ino: ino_compile.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) $(BNO_SRC) $(AUDIO_SRC) $(FS_SRC) check_protos.py check_wiring.py check_shared.py check_stack.py | $(BUILD)
 	@python3 check_shared.py $(ROOT)
 	@python3 $(ULTRA)/webui/gen_header.py --check
 	@python3 check_protos.py $(INO_SRC)
@@ -456,6 +460,7 @@ ino: ino_compile.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) $(BNO_SRC) $(FS_SRC)
 	@python3 check_stack.py $(ROOT)
 	@$(CXX) $(CXXSTD) -fsyntax-only $(INOWARN) $(INOFLAGS) -x c++ ino_compile.cpp
 	@$(CXX) $(CXXSTD) -fsyntax-only $(WARN) $(INOFLAGS) $(BNO_SRC)
+	@$(CXX) $(CXXSTD) -fsyntax-only $(WARN) $(INOFLAGS) $(AUDIO_SRC)
 	@$(CXX) $(CXXSTD) -fsyntax-only $(WARN) $(FSFLAGS) $(FS_SRC)
 	@$(CXX) $(CXXSTD) -fsyntax-only $(WARN) $(FSFLAGS) $(ROOT)/FlexOS_FS.cpp
 	@echo "FlexOS_Ultra.ino compila."

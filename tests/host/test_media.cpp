@@ -36,6 +36,7 @@
 #include <cmath>
 #include <string>
 #include <vector>
+#include <algorithm>
 #include <map>
 
 // ---- mini framework (mismo estilo que el resto de la bateria) ----
@@ -709,6 +710,173 @@ static void testIma(){
 }
 
 // =============================================================
+//  5c) REPRODUCCION POR BLOQUES
+//  ------------------------------------------------------------
+//  Lo que sale del motor tiene que ser EXACTAMENTE lo que hay en el
+//  archivo (PCM de 16 bits), su conversion (PCM de 8 bits) o lo que da
+//  el decodificador de bloques (IMA), aunque el destino acepte cada vez
+//  una cantidad distinta -- a veces nada --, que es lo que hace el DMA.
+// =============================================================
+struct Sink {
+  std::vector<uint8_t> out;
+  uint32_t seed = 777;
+  int  zeros = 0;
+  bool fail = false;
+};
+static int sinkAccept(void* c, const void* p, size_t n){
+  Sink* k = (Sink*)c;
+  if(k->fail) return -1;
+  k->seed = k->seed * 1103515245u + 12345u;
+  uint32_t r = (k->seed >> 16) % 8;
+  if(r == 0){ k->zeros++; return 0; }                // lleno por ahora
+  size_t take = r == 1 ? 1 : (size_t)((k->seed >> 8) % 900) + 1;   // a veces 1 byte: parte una muestra
+  if(take > n) take = n;
+  k->out.insert(k->out.end(), (const uint8_t*)p, (const uint8_t*)p + take);
+  return (int)take;
+}
+// Bombea hasta el final como el reproductor (varias vueltas, presupuesto por vuelta).
+static bool pumpAll(FlexAudioStream* st, Sink* k, int maxRounds = 200000){
+  for(int i = 0; i < maxRounds && !st->ended; i++){
+    int r = flexAsPump(st, sinkAccept, k, 1500);
+    if(r < 0) return false;
+  }
+  return st->ended;
+}
+static std::vector<uint8_t> pcmWav(uint16_t ch, uint32_t rate, uint16_t bits, const std::vector<uint8_t>& data){
+  std::vector<uint8_t> fmt;
+  pushU16(fmt, 1); pushU16(fmt, ch); pushU32(fmt, rate);
+  pushU32(fmt, rate * ch * (bits / 8)); pushU16(fmt, (uint16_t)(ch * (bits / 8))); pushU16(fmt, bits);
+  std::vector<uint8_t> body;
+  pushCC(body, "fmt "); pushU32(body, (uint32_t)fmt.size()); body.insert(body.end(), fmt.begin(), fmt.end());
+  pushCC(body, "data"); pushU32(body, (uint32_t)data.size()); body.insert(body.end(), data.begin(), data.end());
+  if(data.size() & 1) body.push_back(0);
+  std::vector<uint8_t> out;
+  pushCC(out, "RIFF"); pushU32(out, (uint32_t)body.size() + 4); pushCC(out, "WAVE");
+  out.insert(out.end(), body.begin(), body.end());
+  return out;
+}
+
+static void testAudioStream(){
+  std::printf("[media] reproduccion por bloques (WAV PCM e IMA ADPCM)\n");
+  // ---- PCM de 16 bits estereo: sale tal cual, byte a byte ----
+  {
+    const uint32_t rate = 8000;
+    std::vector<uint8_t> data(rate * 4);                 // 1 s estereo
+    for(size_t i = 0; i < data.size(); i++) data[i] = (uint8_t)(i * 7 + (i >> 9));
+    MemIO m; m.data = pcmWav(2, rate, 16, data);
+    FlexMediaIO io = ioOf(&m);
+    FlexWavInfo w; CHECK(flexWavParse(&io, &w) == FLEXWAV_OK, "PCM16: abre");
+    std::vector<uint8_t> work(flexAsWorkBytes(&w));
+    FlexAudioStream st;
+    CHECK(!work.empty() && flexAsOpen(&st, &io, &w, work.data(), work.size()), "PCM16: prepara");
+    CHECK(flexAsDurMs(&st) == 1000 && flexAsPosMs(&st) == 0, "PCM16: 1 s, en 0");
+    Sink k;
+    CHECK(pumpAll(&st, &k), "PCM16: llega al final");
+    CHECK(k.out == data, "PCM16: la salida es EXACTAMENTE el archivo (%zu de %zu bytes)", k.out.size(), data.size());
+    CHECK(k.zeros > 0, "el destino dijo 'lleno' alguna vez (%d) y no se perdio nada", k.zeros);
+    CHECK(flexAsPosMs(&st) == 1000, "PCM16: posicion al final %u ms", flexAsPosMs(&st));
+    CHECK(flexAsPump(&st, sinkAccept, &k, 1000) == 0, "terminado: no entrega nada mas");
+    // Buscar: 250 ms = muestra 2000.
+    CHECK(flexAsSeekMs(&st, 250) && !st.ended && flexAsPosMs(&st) == 250, "PCM16: busca 250 ms");
+    Sink k2;
+    CHECK(pumpAll(&st, &k2) && k2.out.size() == data.size() - 2000u * 4u &&
+          std::equal(k2.out.begin(), k2.out.end(), data.begin() + 2000 * 4), "PCM16: desde 250 ms, lo que toca");
+    // Presupuesto por vuelta.
+    flexAsSeekMs(&st, 0);
+    Sink k3; k3.seed = 1;
+    int got = flexAsPump(&st, sinkAccept, &k3, 100);
+    CHECK(got >= 0 && got <= 100, "el presupuesto por vuelta se respeta (%d)", got);
+  }
+  // ---- PCM de 8 bits mono: sin signo -> 16 bits con signo ----
+  {
+    std::vector<uint8_t> data(5001);                     // impar: y ademas relleno RIFF
+    for(size_t i = 0; i < data.size(); i++) data[i] = (uint8_t)(i * 13);
+    MemIO m; m.data = pcmWav(1, 11025, 8, data);
+    FlexMediaIO io = ioOf(&m);
+    FlexWavInfo w; flexWavParse(&io, &w);
+    std::vector<uint8_t> work(flexAsWorkBytes(&w));
+    FlexAudioStream st;
+    CHECK(flexAsOpen(&st, &io, &w, work.data(), work.size()), "PCM8: prepara");
+    Sink k;
+    CHECK(pumpAll(&st, &k), "PCM8: llega al final");
+    bool same = k.out.size() == data.size() * 2;
+    for(size_t i = 0; same && i < data.size(); i++){
+      int16_t v; std::memcpy(&v, &k.out[i * 2], 2);
+      if(v != (int16_t)(((int)data[i] - 128) * 256)) same = false;
+    }
+    CHECK(same, "PCM8: 128 es silencio, 0 es el minimo y 255 casi el maximo (%zu bytes)", k.out.size());
+  }
+  // ---- IMA ADPCM, mono y estereo, con el ultimo bloque corto ----
+  for(int ch = 1; ch <= 2; ch++){
+    const uint32_t rate = 22050;
+    const int blockAlign = 512 * ch;
+    const size_t frames = rate + 333;                    // no cae en frontera de bloque
+    std::vector<int16_t> pcm(frames * (size_t)ch);
+    for(size_t f = 0; f < frames; f++)
+      for(int c = 0; c < ch; c++)
+        pcm[f * ch + c] = (int16_t)(8000.0 * std::sin(2.0 * 3.14159265358979 * (300.0 + 150.0 * c) * (double)f / rate));
+    int spb = 0;
+    auto enc = imaEncode(pcm, ch, blockAlign, &spb);
+    MemIO m; m.data = imaWav(enc, ch, rate, blockAlign, spb, (uint32_t)frames);
+    FlexMediaIO io = ioOf(&m);
+    FlexWavInfo w; flexWavParse(&io, &w);
+    // La referencia: bloque a bloque con el decodificador ya probado, y
+    // recortada a las muestras que dice 'fact'.
+    std::vector<uint8_t> ref;
+    std::vector<int16_t> tmp((size_t)spb * ch);
+    for(uint32_t off = 0; off < w.dataBytes; off += w.blockAlign){
+      uint32_t n = w.dataBytes - off < w.blockAlign ? w.dataBytes - off : w.blockAlign;
+      int got = flexImaDecodeBlock(&m.data[w.dataStart + off], n, ch, tmp.data(), spb);
+      if(got <= 0) break;
+      ref.insert(ref.end(), (uint8_t*)tmp.data(), (uint8_t*)(tmp.data() + (size_t)got * ch));
+    }
+    ref.resize(frames * (size_t)ch * 2);
+    std::vector<uint8_t> work(flexAsWorkBytes(&w));
+    CHECK(work.size() == (size_t)blockAlign + (size_t)spb * ch * 2, "IMA %d: memoria = un bloque + su PCM (%zu)", ch, work.size());
+    FlexAudioStream st;
+    CHECK(flexAsOpen(&st, &io, &w, work.data(), work.size()), "IMA %d: prepara", ch);
+    Sink k;
+    CHECK(pumpAll(&st, &k), "IMA %d: llega al final", ch);
+    CHECK(k.out == ref, "IMA %d: la salida es la del decodificador, sin el relleno del ultimo bloque (%zu de %zu)",
+          ch, k.out.size(), ref.size());
+    uint32_t dur = flexAsDurMs(&st), pos = flexAsPosMs(&st);
+    CHECK(dur == pos && dur >= 1014 && dur <= 1016, "IMA %d: posicion final = duracion (%u / %u ms)", ch, pos, dur);
+    // Buscar cae al principio del bloque que contiene ese instante.
+    CHECK(flexAsSeekMs(&st, 500), "IMA %d: busca", ch);
+    uint32_t b = (uint32_t)((uint64_t)500 * rate / 1000 / (uint32_t)spb);
+    uint32_t startMs = (uint32_t)((uint64_t)b * spb * 1000 / rate);
+    CHECK(flexAsPosMs(&st) == startMs, "IMA %d: al bloque %u (%u ms)", ch, b, flexAsPosMs(&st));
+    Sink k2;
+    CHECK(pumpAll(&st, &k2) && k2.out.size() == ref.size() - (size_t)b * spb * ch * 2 &&
+          std::equal(k2.out.begin(), k2.out.end(), ref.begin() + (size_t)b * spb * ch * 2), "IMA %d: desde ahi, identico", ch);
+    CHECK(flexAsSeekMs(&st, 999999) && flexAsPosMs(&st) <= dur, "IMA %d: buscar mas alla del final no se sale", ch);
+  }
+  // ---- Fallos: el archivo desaparece, el destino falla, memoria corta ----
+  {
+    std::vector<uint8_t> data(16000);
+    MemIO m; m.data = pcmWav(1, 8000, 16, data);
+    FlexMediaIO io = ioOf(&m);
+    FlexWavInfo w; flexWavParse(&io, &w);
+    std::vector<uint8_t> work(flexAsWorkBytes(&w));
+    FlexAudioStream st;
+    CHECK(!flexAsOpen(&st, &io, &w, work.data(), work.size() - 1), "memoria de trabajo corta: no se abre");
+    CHECK(flexAsOpen(&st, &io, &w, work.data(), work.size()), "prepara");
+    Sink k;
+    flexAsPump(&st, sinkAccept, &k, 3000);
+    m.dead = true;
+    int r = 0;
+    for(int i = 0; i < 100 && r >= 0 && !st.ended; i++) r = flexAsPump(&st, sinkAccept, &k, 3000);
+    CHECK(r == -1, "el archivo se va a mitad: -1, no silencio infinito");
+    m.dead = false;
+    flexAsSeekMs(&st, 0);
+    Sink bad; bad.fail = true;
+    CHECK(flexAsPump(&st, sinkAccept, &bad, 3000) == -1, "el destino falla: -1");
+    FlexWavInfo z; std::memset(&z, 0, sizeof(z));
+    CHECK(flexAsWorkBytes(&z) == 0, "formato vacio: no se reproduce");
+  }
+}
+
+// =============================================================
 //  6) INDICE INCREMENTAL
 //  ------------------------------------------------------------
 //  Volumen de mentira: un mapa de "ruta -> entradas". Cuenta las
@@ -999,6 +1167,7 @@ int main(){
   testAviRejects();
   testWav();
   testIma();
+  testAudioStream();
   testIndexBasics();
   testIndexSiblingsAfterSubdir();
   testIndexEdges();

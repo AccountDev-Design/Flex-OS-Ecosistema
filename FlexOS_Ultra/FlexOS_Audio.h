@@ -100,6 +100,17 @@ const char* flexAudioError();
 // Prepara la salida para ese formato (8 o 16 bits, 1 o 2 canales).
 // false si el formato no se admite o no hay codec.
 bool        flexAudioStartPcm(uint32_t sampleRate, uint16_t channels, uint16_t bits);
+// Igual, con un buffer de DMA de unos `bufferMs` milisegundos (acotado a
+// FLEXAUDIO_DMA_MAX_BYTES de RAM interna). Es para MUSICA: el reproductor
+// se alimenta desde loop(), y un repintado pesado (una miniatura, una foto)
+// no puede dejar el altavoz en silencio. A cambio, pausar tarda lo que
+// quede en el buffer... salvo que se pare (flexAudioStop), que es inmediato.
+#define FLEXAUDIO_DMA_MAX_BYTES  (32u * 1024u)
+bool        flexAudioStartPcmBuffered(uint32_t sampleRate, uint16_t channels, uint16_t bits, uint16_t bufferMs);
+// Milisegundos de audio que caben en el DMA de la reproduccion en curso (0
+// si no hay). Lo entregado y aun no sonado es, como mucho, esto: el
+// reproductor lo resta para ensenar (y retomar) lo que de verdad se oyo.
+uint32_t    flexAudioBufferMs();
 
 // Entrega bytes. Devuelve cuantos se aceptaron (0 si el buffer del
 // DMA esta lleno ahora mismo), o -1 si no hay reproduccion activa.

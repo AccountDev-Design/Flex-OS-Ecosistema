@@ -91,6 +91,8 @@ public:
     return sz;
   }
   int    getInt(const char* k, int d = 0){ return (int)getNum(k, d); }
+  uint8_t getUChar(const char* k, uint8_t d = 0){ return (uint8_t)getNum(k, d); }
+  size_t putUChar(const char* k, uint8_t v){ return putNum(k, v, 1); }
   size_t putInt(const char* k, int v){ return putNum(k, v, 4); }
   unsigned int getUInt(const char* k, unsigned int d = 0){ return (unsigned int)getNum(k, (long long)d); }
   size_t putUInt(const char* k, unsigned int v){ return putNum(k, (long long)v, 4); }

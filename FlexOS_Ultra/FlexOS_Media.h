@@ -228,6 +228,52 @@ int      flexImaDecodeBlock(const uint8_t* blk, size_t n, int channels,
                             int16_t* out, int maxFrames);
 
 // -------------------------------------------------------------
+//  REPRODUCCION POR BLOQUES (WAV PCM de 8/16 bits e IMA ADPCM)
+//  ------------------------------------------------------------
+//  Lo que suena sale SIEMPRE como PCM de 16 bits con signo,
+//  intercalado: el PCM de 8 bits (sin signo en WAV) se convierte y el
+//  IMA ADPCM se decodifica bloque a bloque. Asi el destino (el DMA de
+//  I2S en la placa) tiene un solo formato que atender.
+//
+//  El destino acepta lo que pueda AHORA (una escritura que no espera):
+//  lo que no acepta se queda pendiente y sale en la siguiente llamada,
+//  sin perder ni repetir una muestra. Memoria: la pone el llamante
+//  (flexAsWorkBytes) y no se reserva nada aqui.
+// -------------------------------------------------------------
+// Bytes aceptados (0 = lleno ahora mismo), o -1 si el destino fallo.
+typedef int (*FlexAsSink)(void* ctx, const void* pcm, size_t n);
+typedef struct {
+  FlexMediaIO io;
+  FlexWavInfo wav;
+  uint32_t    pos, end;          // proximo byte del archivo y fin de los datos
+  uint32_t    ioPos;             // donde esta el descriptor (evita buscar por nada)
+  uint8_t*    blk; uint32_t blkCap;   // lectura cruda (bloque IMA o PCM de 8 bits)
+  uint8_t*    buf; uint32_t bufCap;   // PCM de 16 bits listo para salir
+  uint32_t    bufLen, bufOff;
+  uint64_t    produced;          // bytes de PCM de salida ya preparados
+  uint64_t    delivered;         // ...y ya aceptados por el destino (la posicion)
+  uint64_t    limit;             // tope de salida ('fact' del IMA), o ~0
+  uint16_t    outFrame;          // bytes por muestra de salida (canales x 2)
+  bool        ended;
+} FlexAudioStream;
+
+// Memoria de trabajo que necesita ese WAV (0 = formato que no se reproduce).
+size_t   flexAsWorkBytes(const FlexWavInfo* w);
+// Prepara la reproduccion de un WAV ya analizado (flexWavParse) desde el
+// principio. `work` debe tener al menos flexAsWorkBytes(w) bytes.
+bool     flexAsOpen(FlexAudioStream* s, const FlexMediaIO* io, const FlexWavInfo* w,
+                    uint8_t* work, size_t cap);
+// Entrega al destino lo que acepte ahora, como mucho `budget` bytes.
+// Devuelve los entregados (>= 0), o -1 si el archivo o el destino fallaron.
+// s->ended = ya no queda nada que entregar.
+int      flexAsPump(FlexAudioStream* s, FlexAsSink sink, void* ctx, uint32_t budget);
+uint32_t flexAsPosMs(const FlexAudioStream* s);
+uint32_t flexAsDurMs(const FlexAudioStream* s);
+// Salta a `ms` (al principio del bloque que lo contiene, en IMA). Lo
+// pendiente se descarta. false si no hay nada abierto.
+bool     flexAsSeekMs(FlexAudioStream* s, uint32_t ms);
+
+// -------------------------------------------------------------
 //  INDICE DE MEDIOS
 //  ------------------------------------------------------------
 //  El indice es un array que pone el LLAMANTE (en PSRAM, en el
