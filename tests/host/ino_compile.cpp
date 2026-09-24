@@ -5840,14 +5840,14 @@ static void testMultitareaMemoria(){
   gAppState[IC_GALERIA]    = ALIFE_SUSPENDED; gAppSeenMs[IC_GALERIA]    = 1000;
   gAppState[IC_MULTIMEDIA] = ALIFE_SUSPENDED; gAppSeenMs[IC_MULTIMEDIA] = 5000;
   gAppState[IC_NOTAS]      = ALIFE_SUSPENDED; gAppSeenMs[IC_NOTAS]      = 9000;
-  galCacheReset();                       // cache inicializada... pero VACIA
+  mlThumbDropAll();                      // cache de miniaturas compartida... VACIA
   memShedAll(0);
   chk(gAppState[IC_GALERIA]    == ALIFE_SUSPENDED &&
       gAppState[IC_MULTIMEDIA] == ALIFE_SUSPENDED &&
       gAppState[IC_NOTAS]      == ALIFE_SUSPENDED,
       "soltar recursos deja las tres apps ABIERTAS: adelgazar no es cerrar");
-  // LA MARCA ES UN HECHO, NO UNA INTENCION. La cache de la Galeria estaba
-  // inicializada pero sin una sola miniatura decodificada: no se solto nada,
+  // LA MARCA ES UN HECHO, NO UNA INTENCION. La cache de miniaturas de la
+  // biblioteca no tenia una sola miniatura decodificada: no se solto nada,
   // asi que la app NO puede decir "Estado guardado".
   chk(!gAppShed[IC_GALERIA],
       "una cache vacia no marca la app como 'Estado guardado'");
