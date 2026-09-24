@@ -68,65 +68,70 @@ Esa frontera no se ha tocado.
 
 | Archivo | Líneas | Responsabilidad |
 |---|---:|---|
-| `FlexOS_Ultra_Types.h`            |   668 | tipos de firma, interruptores maestros y estado temprano |
-| `FlexOS_Ultra_HAL.h`              |   434 | panel MIPI-DSI (ST7701) y tactil GT911  -- capa de hardware |
-| `FlexOS_Ultra_Gfx.h`              |   568 | motor grafico 480x800: framebuffers PSRAM, DMA2D y primitivas |
-| `FlexOS_Ultra_Wallpaper.h`        |   479 | catalogo de fondos, fondo desde imagen real y paleta |
-| `FlexOS_Ultra_Theme.h`            |   746 | tema semantico, claro/oscuro, Liquid Glass y superficies |
-| `FlexOS_Ultra_Text.h`             |   170 | tipografia base, acentos, reloj vectorial y triangulos |
-| `FlexOS_Ultra_Font.h`             |  1922 | fuente Outfit 4bpp (tablas + rasterizador) |
-| `FlexOS_Ultra_Icons.h`            |   292 | iconos vectoriales del sistema y enum IC_* de apps |
-| `FlexOS_Ultra_Touch.h`            |   377 | gestos de alto nivel y suspension de pantalla |
-| `FlexOS_Ultra_Prefs.h`            |   334 | preferencias en NVS, idiomas y ajustes del teclado |
-| `FlexOS_Ultra_Session.h`          |   396 | sesiones en LittleFS, modo seguro y restablecimiento |
-| `FlexOS_Ultra_Clock.h`            |   202 | reloj del sistema (epoca UTC) y API de NTP |
-| `FlexOS_Ultra_Shell.h`            |   224 | enum ST_*, cadenas, splash y OOBE  -- maquina de estados |
-| `FlexOS_Ultra_Home.h`             |  1522 | escritorio por paginas, deslizamiento y modo edicion |
-| `FlexOS_Ultra_Widgets.h`          |   421 | widgets del escritorio y su refresco de datos |
-| `FlexOS_Ultra_HomeCfg.h`          |  1307 | modo personalizacion del inicio y gesto de pellizco |
-| `FlexOS_Ultra_AppFramework.h`     |  1043 | marco de app, transiciones, nav inferior y ciclo de vida |
-| `FlexOS_Ultra_Core.h`             |  1058 | memoria, multitarea, los tres botones y rendimiento |
-| `FlexOS_Ultra_AppSettings.h`      |   779 | app Ajustes |
-| `FlexOS_Ultra_AppsBasic.h`        |   404 | Calculadora, Calendario y marco de Galeria |
-| `FlexOS_Ultra_DeX.h`              |   690 | Modo PC / DeX: modelo y estado |
-| `FlexOS_Ultra_DeXDraw.h`          |  1148 | Modo PC / DeX: dibujo |
-| `FlexOS_Ultra_DeXInput.h`         |   619 | Modo PC / DeX: entrada, APP_REG y ciclo de vida |
-| `FlexOS_Ultra_QuickPanel.h`       |   895 | panel rapido: catalogo de controles y render |
-| `FlexOS_Ultra_QuickPanelGlass.h`  |  1581 | panel rapido: material Liquid Glass cacheado |
-| `FlexOS_Ultra_QuickPanelEdit.h`   |   545 | panel rapido: modo edicion |
-| `FlexOS_Ultra_Media.h`            |   454 | nucleo de medios LittleFS: clasificacion e indice |
-| `FlexOS_Ultra_AppMultimedia.h`    |  1378 | app Multimedia (reproductor real) |
-| `FlexOS_Ultra_AppCamera.h`        |   213 | app Camara |
-| `FlexOS_Ultra_Keyboard.h`         |  1564 | teclado de 4 capas y maquetacion de texto |
-| `FlexOS_Ultra_FileKit.h`          |   479 | kit de archivos: menu, nombre, confirmacion y papelera |
-| `FlexOS_Ultra_AppNotes.h`         |   545 | app Notas |
-| `FlexOS_Ultra_KeyboardSettings.h` |   502 | ajustes del teclado (pantalla propia) |
-| `FlexOS_Ultra_AppStorage.h`       |   729 | app Almacenamiento y detalles de memoria |
-| `FlexOS_Ultra_AppFiles.h`         |   463 | explorador de archivos |
-| `FlexOS_Ultra_AppGames.h`         |    77 | app Juegos (incluye FlexOS_Jumper.h) |
-| `FlexOS_Ultra_AppPaint.h`         |   607 | app Paint |
-| `FlexOS_Ultra_WeatherKit.h`       |   717 | clima: iconografia y escenas procedurales |
-| `FlexOS_Ultra_AppWeather.h`       |  1341 | app Clima y sus dos widgets |
-| `FlexOS_Ultra_AppSwitcher.h`      |   579 | App Switcher / Recientes |
-| `FlexOS_Ultra_Lock.h`             |   604 | bloqueo de seguridad y modo kiosco |
-| `FlexOS_Ultra_PkgApps.h`          |  530 | apps descargadas: registro real, cache, estado e iconos |
-| `FlexOS_Ultra_AppDrawer.h`        | 1444 | menu contextual del escritorio y caja de aplicaciones |
-| `FlexOS_Ultra_Power.h`            |   934 | desbloqueo, suspension y apagado completo |
-| `FlexOS_Ultra_Network.h`          |   839 | arranque seguro de la radio y Wi-Fi |
-| `FlexOS_Ultra_NTP.h`              |   297 | cliente NTP en su propia tarea |
-| `FlexOS_Ultra_Conn.h`             |   359 | conectividad: Wi-Fi / BLE / modo avion |
-| `FlexOS_Ultra_Notif.h`            |   385 | isla dinamica: notificaciones |
-| `FlexOS_Ultra_AppChrono.h`        |   917 | cronometro: app, capsula y tarjeta |
-| `FlexOS_Ultra_System.h`           |   461 | soltar caches, Optimizar Flex OS y cambio de tema |
-| `FlexOS_Ultra_AppGallery.h`       |   768 | Galeria |
-| `FlexOS_Ultra_IMU.h`              |   362 | Flex IMU Service + Flex Motion Engine: reparto del GY-BNO085 y UNA muestra para todos |
-| `FlexOS_Ultra_DeviceCare.h`       |  1604 | Flex Device Care: app, historial, salud y grafico del GY-BNO085 |
-| `FlexOS_Ultra_DeviceTests.h`      |   906 | Device Care: pruebas, diagnostico y Post-Impact Check |
-| `FlexOS_Ultra_FallAlert.h`        |   448 | Device Care: aviso global de posible caida (vertical y horizontal) |
-| `FlexOS_Ultra_Recovery.h`         |   691 | restablecer datos de fabrica y modo seguro |
-| `FlexOS_Ultra_AppCompass.h`       |  1096 | Flex Compass: brujula, modulo BNO085 dibujado por codigo y datos del sensor. Ocupa la ranura 7 del registro, la que era de Code IDE |
-| `FlexOS_Ultra_Theft.h`            |   656 | Proteccion contra robo: estado, clasificador, Event Manager, historial y bloqueo |
-| `FlexOS_Ultra_TheftUI.h`          |  1131 | Proteccion contra robo: las tres pantallas, la animacion y el aviso del bloqueo |
+| `FlexOS_Ultra_Types.h`             |   656 | tipos de firma, interruptores maestros y estado temprano |
+| `FlexOS_Ultra_HAL.h`               |   574 | panel MIPI-DSI (ST7701) y tactil GT911  -- capa de hardware |
+| `FlexOS_Ultra_Gfx.h`               |   801 | motor grafico 480x800: framebuffers PSRAM, DMA2D y primitivas |
+| `FlexOS_Ultra_Wallpaper.h`         |   520 | catalogo de fondos, fondo desde imagen real y paleta |
+| `FlexOS_Ultra_Theme.h`             |  1044 | tema semantico, claro/oscuro, Liquid Glass y superficies |
+| `FlexOS_Ultra_Text.h`              |   170 | tipografia base, acentos, reloj vectorial y triangulos |
+| `FlexOS_Ultra_Font.h`              |  2081 | fuente Outfit 4bpp (tablas + rasterizador) |
+| `FlexOS_Ultra_Icons.h`             |   348 | iconos vectoriales del sistema y enum IC_* de apps |
+| `FlexOS_Ultra_Touch.h`             |   362 | gestos de alto nivel y suspension de pantalla |
+| `FlexOS_Ultra_Prefs.h`             |   353 | preferencias en NVS, idiomas y ajustes del teclado |
+| `FlexOS_Ultra_Session.h`           |   396 | sesiones en LittleFS, modo seguro y restablecimiento |
+| `FlexOS_Ultra_Clock.h`             |   196 | reloj del sistema (epoca UTC) y API de NTP |
+| `FlexOS_Ultra_Shell.h`             |   240 | enum ST_*, cadenas, splash y OOBE  -- maquina de estados |
+| `FlexOS_Ultra_Home.h`              |  2139 | escritorio por paginas, deslizamiento y modo edicion |
+| `FlexOS_Ultra_Widgets.h`           |   599 | widgets del escritorio y su refresco de datos |
+| `FlexOS_Ultra_HomeCfg.h`           |  1325 | modo personalizacion del inicio y gesto de pellizco |
+| `FlexOS_Ultra_AppFramework.h`      |  1126 | marco de app, transiciones, nav inferior y ciclo de vida |
+| `FlexOS_Ultra_Core.h`              |  1063 | memoria, multitarea, los tres botones y rendimiento |
+| `FlexOS_Ultra_AppSettings.h`       |   783 | app Ajustes |
+| `FlexOS_Ultra_AppsBasic.h`         |   421 | Calculadora, Calendario y marco de Galeria |
+| `FlexOS_Ultra_DeX.h`               |   692 | Modo PC / DeX: modelo y estado |
+| `FlexOS_Ultra_DeXDraw.h`           |  1148 | Modo PC / DeX: dibujo |
+| `FlexOS_Ultra_DeXInput.h`          |   619 | Modo PC / DeX: entrada, APP_REG y ciclo de vida |
+| `FlexOS_Ultra_QuickPanel.h`        |   977 | panel rapido: catalogo de controles y render |
+| `FlexOS_Ultra_QuickPanelGlass.h`   |  1714 | panel rapido: material Liquid Glass cacheado |
+| `FlexOS_Ultra_QuickPanelEdit.h`    |   579 | panel rapido: modo edicion |
+| `FlexOS_Ultra_Media.h`             |   238 | nucleo de medios LittleFS: lectura y clasificacion |
+| `FlexOS_Ultra_MediaLib.h`          |   784 | biblioteca de medios: catalogo, miniaturas persistentes, tarea de fondo |
+| `FlexOS_Ultra_AppCamera.h`         |   213 | app Camara |
+| `FlexOS_Ultra_Keyboard.h`          |  1564 | teclado de 4 capas y maquetacion de texto |
+| `FlexOS_Ultra_FileKit.h`           |   461 | kit de archivos: menu, nombre, confirmacion y papelera |
+| `FlexOS_Ultra_MediaKit.h`          |   450 | kit de listas de medios: seleccion, menus y acciones comunes |
+| `FlexOS_Ultra_AppMultimedia.h`     |  1410 | app Multimedia (reproductor real) |
+| `FlexOS_Ultra_AppNotes.h`          |   533 | app Notas |
+| `FlexOS_Ultra_KeyboardSettings.h`  |   529 | ajustes del teclado (pantalla propia) |
+| `FlexOS_Ultra_AppStorage.h`        |   621 | app Almacenamiento y detalles de memoria |
+| `FlexOS_Ultra_AppFiles.h`          |   377 | explorador de archivos |
+| `FlexOS_Ultra_AppGames.h`          |    77 | app Juegos (incluye FlexOS_Jumper.h) |
+| `FlexOS_Ultra_AppPaint.h`          |   595 | app Paint |
+| `FlexOS_Ultra_WeatherKit.h`        |   873 | clima: iconografia y escenas procedurales |
+| `FlexOS_Ultra_AppWeather.h`        |  1385 | app Clima y sus dos widgets |
+| `FlexOS_Ultra_AppSwitcher.h`       |   574 | App Switcher / Recientes |
+| `FlexOS_Ultra_Lock.h`              |   622 | bloqueo de seguridad y modo kiosco |
+| `FlexOS_Ultra_PkgApps.h`           |   530 | apps descargadas: registro real, cache, estado e iconos |
+| `FlexOS_Ultra_AppDrawer.h`         |  1444 | menu contextual del escritorio y caja de aplicaciones |
+| `FlexOS_Ultra_Power.h`             |  1082 | desbloqueo, suspension y apagado completo |
+| `FlexOS_Ultra_Network.h`           |   832 | arranque seguro de la radio y Wi-Fi |
+| `FlexOS_Ultra_NTP.h`               |   297 | cliente NTP en su propia tarea |
+| `FlexOS_Ultra_Conn.h`              |   350 | conectividad: Wi-Fi / BLE / modo avion |
+| `FlexOS_Ultra_Notif.h`             |   386 | isla dinamica: notificaciones |
+| `FlexOS_Ultra_AppChrono.h`         |   929 | cronometro: app, capsula y tarjeta |
+| `FlexOS_Ultra_System.h`            |   468 | soltar caches, Optimizar Flex OS y cambio de tema |
+| `FlexOS_Ultra_WebServer.h`         |   449 | Flex Web Server: tarea del servidor y hoja "Conectar con el movil" |
+| `FlexOS_Ultra_GalleryEdit.h`       |  1783 | Galeria: editor de imagenes (trabajador de abrir/guardar) |
+| `FlexOS_Ultra_AppGallery.h`        |   444 | Galeria |
+| `FlexOS_Ultra_AppMusic.h`          |   773 | Musica: biblioteca de audio y reproductor en segundo plano |
+| `FlexOS_Ultra_IMU.h`               |   476 | Flex IMU Service + Flex Motion Engine: reparto del GY-BNO085 y UNA muestra para todos |
+| `FlexOS_Ultra_DeviceCare.h`        |  1697 | Flex Device Care: app, historial, salud y grafico del GY-BNO085 |
+| `FlexOS_Ultra_DeviceTests.h`       |   906 | Device Care: pruebas, diagnostico y Post-Impact Check |
+| `FlexOS_Ultra_FallAlert.h`         |   521 | Device Care: aviso global de posible caida (vertical y horizontal) |
+| `FlexOS_Ultra_Recovery.h`          |   692 | restablecer datos de fabrica y modo seguro |
+| `FlexOS_Ultra_AppCompass.h`        |  1452 | Flex Compass: brujula, modulo BNO085 dibujado por codigo y datos del sensor. Ocupa la ranura 7 del registro, la que era de Code IDE |
+| `FlexOS_Ultra_Theft.h`             |   656 | Proteccion contra robo: estado, clasificador, Event Manager, historial y bloqueo |
+| `FlexOS_Ultra_TheftUI.h`           |  1138 | Proteccion contra robo: las tres pantallas, la animacion y el aviso del bloqueo |
 
 ### Modulos de Flex Phone
 
