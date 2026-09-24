@@ -54,6 +54,7 @@ APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net \
         $(BUILD)/test_passcode $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexauth $(BUILD)/test_flexphone_ui $(BUILD)/test_flexphone_discovery $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
         $(BUILD)/test_media $(BUILD)/test_mem $(BUILD)/test_fall $(BUILD)/test_theft $(BUILD)/test_imu \
+        $(BUILD)/test_medialib \
         $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun
 
@@ -80,6 +81,17 @@ MEDIA_SRC := $(ULTRA)/FlexOS_Media.cpp
 
 $(BUILD)/test_media: test_media.cpp $(MEDIA_SRC) $(ULTRA)/FlexOS_Media.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_media.cpp $(MEDIA_SRC)
+
+# --- Biblioteca de medios: el catalogo compartido ---
+# Galeria, Multimedia, Musica y Flex Web Server leen de aqui. Nucleo PURO y
+# con sanitizers: decide el formato real de un fichero que llega por la red,
+# el nombre que recibe en el disco, si un catalogo leido de la flash esta sano
+# y que se ensena de un elemento bloqueado. El CRC se compara contra zlib y el
+# JSON se valida con cJSON: referencias independientes del codigo bajo prueba.
+MLIB_SRC := $(ULTRA)/FlexOS_MediaLib.cpp
+
+$(BUILD)/test_medialib: test_medialib.cpp $(MLIB_SRC) $(ULTRA)/FlexOS_MediaLib.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -o $@ test_medialib.cpp $(MLIB_SRC) vendor/cJSON/cJSON.c -lz
 
 # --- Memoria: presupuesto, presion, fragmentacion y avisos ---
 # Nucleo PURO (no toca Arduino ni el SDK): recibe una medida ya tomada y
@@ -427,6 +439,8 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_jpeg ../fixtures
 	@echo
 	@$(BUILD)/test_media
+	@echo
+	@$(BUILD)/test_medialib
 	@echo
 	@$(BUILD)/test_mem
 	@echo
