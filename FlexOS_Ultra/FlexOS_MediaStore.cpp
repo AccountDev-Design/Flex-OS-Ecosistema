@@ -553,7 +553,7 @@ bool flexMsRename(FlexMediaStore* ms, uint32_t id, const char* newName, char* wh
 }
 
 uint32_t flexMsAddFile(FlexMediaStore* ms, const char* tmp, int kind, const char* shownName,
-                       uint8_t origin, char* why, size_t whyCap){
+                       uint8_t origin, uint32_t parent, char* why, size_t whyCap){
   if(why && whyCap) why[0] = 0;
   char stem[FML_STEM_MAX + 1], dst[FML_PATH_MAX];
   flexMlSafeStem(shownName, stem, sizeof(stem));
@@ -566,7 +566,7 @@ uint32_t flexMsAddFile(FlexMediaStore* ms, const char* tmp, int kind, const char
   copyz(p.path, sizeof(p.path), dst);
   flexMlCleanName(shownName, p.name, sizeof(p.name));
   uint32_t now = msNow(ms);
-  p.kind = (uint8_t)kind; p.size = ms->fs.size(ms->fs.ctx, dst); p.origin = origin;
+  p.kind = (uint8_t)kind; p.size = ms->fs.size(ms->fs.ctx, dst); p.origin = origin; p.parent = parent;
   p.created = now; p.state = FML_S_READY; p.flags = FML_R_NEED_THUMB;
   int at = flexMlAdd(&ms->lib, &p, now);
   uint32_t id = at >= 0 ? ms->lib.recs[at].id : 0;

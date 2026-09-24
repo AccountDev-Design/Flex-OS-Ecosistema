@@ -119,8 +119,9 @@ bool     flexMsDelete(FlexMediaStore* ms, uint32_t id);
 bool     flexMsTrash(FlexMediaStore* ms, uint32_t id);                // nunca un protegido
 bool     flexMsSetLock(FlexMediaStore* ms, uint32_t id, bool lock, char* why, size_t whyCap);
 bool     flexMsRename(FlexMediaStore* ms, uint32_t id, const char* newName, char* why, size_t whyCap);
+// `parent` = el elemento del que sale (copia editada) o 0.
 uint32_t flexMsAddFile(FlexMediaStore* ms, const char* tmp, int kind, const char* shownName,
-                       uint8_t origin, char* why, size_t whyCap);
+                       uint8_t origin, uint32_t parent, char* why, size_t whyCap);
 bool     flexMsReplace(FlexMediaStore* ms, uint32_t id, const char* tmp, char* why, size_t whyCap);
 
 // ---- Lo que sube el movil (Flex Web Server) ----

@@ -398,8 +398,9 @@ static bool mlRename(uint32_t id, const char* newName, char* why, size_t whyCap)
 // Registra un archivo NUEVO que ya esta completo en `tmp` (el editor,
 // "guardar como copia"). Lo mueve a la carpeta de su clase y devuelve el
 // id, o 0 con el motivo (y `tmp` sigue donde estaba).
-static uint32_t mlAddFile(const char* tmp, int kind, const char* shownName, uint8_t origin, char* why, size_t whyCap){
-  uint32_t id = flexMsAddFile(&gMs, tmp, kind, shownName, origin, why, whyCap);
+static uint32_t mlAddFile(const char* tmp, int kind, const char* shownName, uint8_t origin, uint32_t parent,
+                          char* why, size_t whyCap){
+  uint32_t id = flexMsAddFile(&gMs, tmp, kind, shownName, origin, parent, why, whyCap);
   mlWake();
   return id;
 }

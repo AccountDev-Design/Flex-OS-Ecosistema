@@ -659,11 +659,12 @@ static void testAddReplace(){
   // Copia: nombre seguro y libre, id nueva, miniatura pendiente.
   auto edited = makeJpeg(120, 90, 7);
   put(FML_DIR_TMP "/ed-1.jpg", edited);
-  uint32_t cp = flexMsAddFile(&g_ms, FML_DIR_TMP "/ed-1.jpg", FML_K_PHOTO, "foto.jpg", FML_O_EDIT, why, sizeof(why));
+  uint32_t cp = flexMsAddFile(&g_ms, FML_DIR_TMP "/ed-1.jpg", FML_K_PHOTO, "foto.jpg", FML_O_EDIT, id, why, sizeof(why));
   CHECK(cp && cp != id && !strcmp(rec(cp)->path, FML_DIR_PHOTO "/foto (2).jpg") && get(rec(cp)->path) == edited,
         "copia: id nueva y nombre libre (%s)", cp ? rec(cp)->path : why);
   CHECK((rec(cp)->flags & FML_R_NEED_THUMB) && rec(cp)->origin == FML_O_EDIT && get(FML_DIR_PHOTO "/foto.jpg") == orig,
         "el original ni se toca");
+  CHECK(rec(cp)->parent == id && rec(id)->parent == 0, "la copia sabe de quien sale (parent)");
   runAll();
   CHECK(has(thumbOf(cp)), "y su miniatura se hace");
 
@@ -720,7 +721,7 @@ static void testAddReplace(){
   put(FML_DIR_PHOTO "/uno.jpg", makeJpeg(20, 20));
   flexMsScan(&g_ms, nullptr, nullptr);
   put(FML_DIR_TMP "/ed-9.jpg", makeJpeg(20, 20, 5));
-  CHECK(!flexMsAddFile(&g_ms, FML_DIR_TMP "/ed-9.jpg", FML_K_PHOTO, "dos.jpg", FML_O_EDIT, why, sizeof(why)) && why[0] &&
+  CHECK(!flexMsAddFile(&g_ms, FML_DIR_TMP "/ed-9.jpg", FML_K_PHOTO, "dos.jpg", FML_O_EDIT, 0, why, sizeof(why)) && why[0] &&
         has(FML_DIR_TMP "/ed-9.jpg") && !has(FML_DIR_PHOTO "/dos.jpg"), "catalogo lleno: no se publica (%s)", why);
   lockRules("copias/reemplazo");
 }
