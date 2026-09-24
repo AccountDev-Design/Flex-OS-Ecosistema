@@ -128,3 +128,17 @@ bool     flexLockVerifyBegin(const char* secret);
 int      flexLockVerifyStep(uint32_t budgetIters);
 void     flexLockVerifyCancel();
 bool     flexLockVerifyActive();
+
+// -------------------------------------------------------------
+//  VERIFICACION DESDE OTRA TAREA
+//  ------------------------------------------------------------
+//  La de a plazos guarda su estado en el modulo (hay UNA en vuelo:
+//  la de la pantalla). Flex Web Server comprueba la clave del sistema
+//  desde su propia tarea, y usar esa misma cadena cancelaria -- o
+//  peor, mezclaria -- la verificacion que la pantalla tuviera a
+//  medias. Esta hace todo con variables LOCALES: mismo hash, misma
+//  comparacion en tiempo constante, y ni lee ni toca el estado de la
+//  de plazos. Tarda lo mismo que flexLockVerify(), asi que no se
+//  llama desde el bucle de dibujo.
+// -------------------------------------------------------------
+bool     flexLockVerifyAlone(const char* secret);

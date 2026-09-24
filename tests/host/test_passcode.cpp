@@ -243,11 +243,45 @@ static void testVerificacionAPlazos(){
   flexLockClear();
 }
 
+// -------------------------------------------------------------
+//  La de otra tarea (Flex Web Server) no puede tocar la de la
+//  pantalla: se intercala una en medio de la otra y las dos tienen
+//  que dar su veredicto correcto.
+// -------------------------------------------------------------
+static void testVerificacionSola(){
+  printf("Verificacion desde otra tarea (Flex Web Server)\n");
+  prefsTestClear();
+  chk(!flexLockVerifyAlone("1234"), "sin clave guardada: no");
+  chk(flexLockSet("Rio-2024!", 2), "se configura una contrasena");
+  chk(flexLockVerifyAlone("Rio-2024!"), "la correcta: si");
+  chk(!flexLockVerifyAlone("rio-2024!") && !flexLockVerifyAlone(""), "incorrecta o vacia: no");
+  chk(!flexLockVerifyAlone(NULL), "nula: no");
+  chk(flexLockVerifyBegin("Rio-2024!"), "la pantalla empieza a comprobar a plazos");
+  int r = flexLockVerifyStep(100);
+  chk(r == FLEXLOCK_BUSY, "y va por la mitad");
+  chk(!flexLockVerifyAlone("mala") && flexLockVerifyAlone("Rio-2024!"), "entretanto, el servidor comprueba dos claves");
+  chk(flexLockVerifyActive(), "la de la pantalla sigue viva");
+  while(r == FLEXLOCK_BUSY) r = flexLockVerifyStep(FLEXLOCK_STEP_ITERS);
+  chk(r == FLEXLOCK_OK, "y termina con SU veredicto, sin mezclas");
+  chk(flexLockVerifyBegin("otra"), "otra vez, ahora con la clave mala en pantalla");
+  chk(flexLockVerifyAlone("Rio-2024!"), "el servidor acierta en medio");
+  r = FLEXLOCK_BUSY;
+  while(r == FLEXLOCK_BUSY) r = flexLockVerifyStep(FLEXLOCK_STEP_ITERS);
+  chk(r == FLEXLOCK_FAIL, "y la pantalla sigue fallando la suya");
+  char largo[FLEXLOCK_SECRET_MAX + 8];
+  memset(largo, 'a', sizeof(largo) - 1);
+  largo[sizeof(largo) - 1] = 0;
+  chk(!flexLockVerifyAlone(largo), "una clave imposiblemente larga se rechaza");
+  flexLockClear();
+  chk(!flexLockVerifyAlone("Rio-2024!"), "tras quitar la clave: no");
+}
+
 int main(){
   printf("\n=== FlexOS \xc2\xb7 clave del sistema ===\n");
   testKdf();
   testBloqueoSistema();
   testVerificacionAPlazos();
+  testVerificacionSola();
   printf("=== %d comprobaciones, %d fallos ===\n", gChecks, gFails);
   return gFails ? 1 : 0;
 }

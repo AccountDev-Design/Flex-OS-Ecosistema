@@ -283,6 +283,26 @@ int flexLockVerifyStep(uint32_t budgetIters){
   return ok ? FLEXLOCK_OK : FLEXLOCK_FAIL;
 }
 
+bool flexLockVerifyAlone(const char* secret){
+  if(!secret || strlen(secret) >= FLEXLOCK_SECRET_MAX) return false;
+  uint8_t salt[FLEXLOCK_SALT_LEN], want[FLEXLOCK_KEY_LEN], got[FLEXLOCK_KEY_LEN];
+  Preferences p;
+  p.begin(FLEXLOCK_NS, true);
+  size_t gs = p.getBytes("lockslt", salt, sizeof(salt));
+  size_t gh = p.getBytes("lockhsh", want, sizeof(want));
+  uint32_t iters = p.getUInt("lockitr", FLEXLOCK_ITERS);
+  p.end();
+  bool ok = false;
+  if(gs == sizeof(salt) && gh == sizeof(want) && iters != 0 && iters <= 1000000u){
+    flexLockKdf(secret, salt, sizeof(salt), iters, got, sizeof(got));
+    ok = flexLockEqualCT(got, want, sizeof(want));
+  }
+  flexLockWipe(salt, sizeof(salt));
+  flexLockWipe(want, sizeof(want));
+  flexLockWipe(got, sizeof(got));
+  return ok;
+}
+
 bool flexLockVerify(const char* secret){
   // La de una sentada ES la de plazos con un presupuesto infinito: asi
   // no hay dos implementaciones del mismo hash que puedan divergir.
