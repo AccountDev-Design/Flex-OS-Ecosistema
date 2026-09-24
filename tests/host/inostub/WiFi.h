@@ -30,6 +30,19 @@ public:
   explicit operator bool() const { return false; }
 };
 
+// Servidor TCP (NetworkServer en arduino-esp32 3.x; WiFiServer es su alias).
+// Solo la superficie que usa Flex Web Server. Sin sockets: nunca hay cliente.
+class WiFiServer {
+public:
+  explicit WiFiServer(uint16_t port = 80){ (void)port; }
+  void begin(){}
+  void end(){}
+  void stop(){}
+  bool hasClient(){ return false; }
+  WiFiClient accept(){ return WiFiClient(); }
+  void setNoDelay(bool){}
+};
+
 class __FlexWiFi {
 public:
   bool setPins(int8_t, int8_t, int8_t, int8_t, int8_t, int8_t, int8_t){ return true; }

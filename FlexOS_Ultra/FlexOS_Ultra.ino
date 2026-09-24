@@ -279,6 +279,7 @@
 #include "FlexOS_Ultra_Notif.h"              // isla dinamica: notificaciones
 #include "FlexOS_Ultra_AppChrono.h"          // cronometro: app, capsula y tarjeta
 #include "FlexOS_Ultra_System.h"             // I2C, soltar caches, Optimizar Flex OS y cambio de tema
+#include "FlexOS_Ultra_WebServer.h"          // Flex Web Server: tarea del servidor y hoja "Conectar con el movil"
 #include "FlexOS_Ultra_AppGallery.h"         // Galeria
 #include "FlexOS_Ultra_IMU.h"                // Flex IMU Service: reparto del GY-BNO085 y orientacion
 #include "FlexOS_Ultra_DeviceCare.h"         // Flex Device Care: app, historial, salud y grafico del GY-BNO085
@@ -720,6 +721,7 @@ void loop(){
   faPendingTick();        // aviso de caida que no cupo (cortina, OTA, bloqueo): sale al despejarse
   mediaIndexTick();       // indice LittleFS: un lote corto cuando esta activo
   mlTick();               // biblioteca de medios: avisos de su tarea de fondo para la isla
+  webTick();              // Flex Web Server: avisos, tarjetas, Wi-Fi y bloqueo (la red va en su tarea)
   if(!gSafeMode){
     wifiAutoReconnectTick();// reconexion diferida, una vez por arranque
     ntpTick();              // la red corre en su tarea, nunca aqui

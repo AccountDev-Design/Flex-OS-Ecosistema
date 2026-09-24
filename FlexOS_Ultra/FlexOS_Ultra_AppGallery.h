@@ -25,7 +25,7 @@
 // ##      entrada del sistema es siempre FlexOS_Ultra.ino.
 // #############################################################
 #pragma once
-#include "FlexOS_Ultra_System.h"   // eslabon anterior de la cadena
+#include "FlexOS_Ultra_WebServer.h"   // eslabon anterior de la cadena
 
 // #############################################################
 // ##  GALERIA  ·  LA BIBLIOTECA VISUAL REAL DE FLEX OS
