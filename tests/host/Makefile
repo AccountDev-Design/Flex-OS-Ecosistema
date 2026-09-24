@@ -54,7 +54,7 @@ APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net \
         $(BUILD)/test_passcode $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexauth $(BUILD)/test_flexphone_ui $(BUILD)/test_flexphone_discovery $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
         $(BUILD)/test_media $(BUILD)/test_mem $(BUILD)/test_fall $(BUILD)/test_theft $(BUILD)/test_imu \
-        $(BUILD)/test_medialib $(BUILD)/test_jpegenc \
+        $(BUILD)/test_medialib $(BUILD)/test_jpegenc $(BUILD)/test_httpshare $(BUILD)/test_qr \
         $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun
 
@@ -67,6 +67,22 @@ $(BUILD):
 # --- nucleo portable: con sanitizers ---
 $(BUILD)/test_jpeg: test_jpeg.cpp $(JPEG_SRC) $(ROOT)/FlexOS_JPEG.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -pthread -o $@ test_jpeg.cpp $(JPEG_SRC)
+
+# --- Flex Web Server: protocolo HTTP y codigo QR ---
+# Los dos se escribieron para Flex Vector Pro y quedaron archivados en la BETA
+# sin consumidor. Flex Web Server los promueve al firmware activo en vez de
+# escribir un segundo analizador. CON sanitizers: el protocolo analiza bytes de
+# cualquiera que este en la misma Wi-Fi, y el QR es aritmetica en GF(256) donde
+# un indice mal calculado da un codigo que ningun telefono lee (la prueba lo
+# VUELVE A LEER).
+HTTP_SRC := $(ULTRA)/FlexOS_HttpShare.cpp
+QR_SRC   := $(ULTRA)/FlexOS_QR.cpp
+
+$(BUILD)/test_httpshare: test_httpshare.cpp $(HTTP_SRC) $(ULTRA)/FlexOS_HttpShare.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -o $@ test_httpshare.cpp $(HTTP_SRC)
+
+$(BUILD)/test_qr: test_qr.cpp $(QR_SRC) $(ULTRA)/FlexOS_QR.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -o $@ test_qr.cpp $(QR_SRC)
 
 # --- Codificador JPEG y salida RGB888 del decodificador ---
 # Cada imagen que se codifica se vuelve a leer con el decodificador DEL
@@ -452,6 +468,10 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_jpeg ../fixtures
 	@echo
 	@$(BUILD)/test_jpegenc
+	@echo
+	@$(BUILD)/test_httpshare
+	@echo
+	@$(BUILD)/test_qr
 	@echo
 	@$(BUILD)/test_media
 	@echo

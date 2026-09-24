@@ -24,7 +24,7 @@
 //    5) Escapado. El nombre del archivo lo escribe el usuario en el
 //       teclado del dispositivo: puede llevar comillas y '<'.
 
-#include "../firmware-modules/FlexOS_HttpShare.h"
+#include "../../FlexOS_Ultra/FlexOS_HttpShare.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -202,6 +202,123 @@ static void testFuzz(){
   CHECK(ok, "4000 entradas de ruido: siempre un codigo valido y una ruta cerrada");
 }
 
+
+// #############################################################
+//  API AMPLIADA (Flex Web Server)
+// #############################################################
+static int parseEx(const char* req, FlexHttpReqEx* out){ return flexHttpParseEx(req, strlen(req), out); }
+
+static void testParseEx(){
+  std::printf("-- ampliado: POST, consulta, cookie, Range, Host --\n");
+  FlexHttpReqEx r;
+  const char* up =
+    "POST /api/upload?kind=photo&name=Playa%20%C3%B1.jpg&size=12 HTTP/1.1\r\n"
+    "Host: 192.168.1.50:8080\r\n"
+    "Content-Length: 12\r\n"
+    "Content-Type: image/jpeg\r\n"
+    "Cookie: tema=oscuro; fxs=0a1b2c3d4e5f; otra=1\r\n"
+    "X-Flex: 1\r\n"
+    "\r\nHOLA-CUERPO!";
+  CHECK(parseEx(up, &r) == 1, "POST completo");
+  CHECK(r.method == FLEXHTTP_M_POST && !strcmp(r.path, "/api/upload"), "metodo y ruta");
+  CHECK(!strcmp(r.query, "kind=photo&name=Playa%20%C3%B1.jpg&size=12"), "consulta cruda: %s", r.query);
+  CHECK(r.contentLength == 12 && !strcmp(r.ctype, "image/jpeg") && r.xflex == 1, "longitud, tipo y X-Flex");
+  CHECK(!strcmp(r.session, "0a1b2c3d4e5f"), "cookie de sesion entre otras: %s", r.session);
+  CHECK(!strcmp(r.host, "192.168.1.50:8080"), "host");
+  CHECK(!strcmp(up + r.headerLen, "HOLA-CUERPO!"), "el cuerpo empieza justo tras la cabecera");
+  char v[64];
+  CHECK(flexHttpQueryGet(r.query, "name", v, sizeof(v)) && !strcmp(v, "Playa \xC3\xB1.jpg"), "valor des-escapado: %s", v);
+  CHECK(flexHttpQueryGet(r.query, "kind", v, sizeof(v)) && !strcmp(v, "photo"), "otro valor");
+  CHECK(!flexHttpQueryGet(r.query, "nam", v, sizeof(v)) && !flexHttpQueryGet(r.query, "ame", v, sizeof(v)), "ni prefijo ni sufijo");
+  CHECK(flexHttpQueryGet("a&b=2", "a", v, sizeof(v)) && v[0] == 0, "clave sin valor");
+  char tiny[4];
+  CHECK(flexHttpQueryGet("x=abcdef", "x", tiny, sizeof(tiny)) && !strcmp(tiny, "abc"), "valor recortado al buffer");
+
+  CHECK(parseEx("GET /a HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\n", &r) == -1,
+        "dos Content-Length distintos: rechazo (request smuggling)");
+  CHECK(parseEx("GET /a HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\n", &r) == 1, "repetido igual: vale");
+  CHECK(parseEx("GET /a HTTP/1.1\r\nContent-Length: -5\r\n\r\n", &r) == -1, "longitud negativa");
+  CHECK(parseEx("GET /a HTTP/1.1\r\nContent-Length: 99999999999\r\n\r\n", &r) == -1, "longitud absurda");
+  CHECK(parseEx("POST /a HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n", &r) == 1 && r.chunked, "chunked se ve");
+  CHECK(parseEx("POST /a HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n", &r) == -1, "otras codificaciones: rechazo");
+  CHECK(parseEx("GET /a HTTP/1.1\r\nCookie: fxs=<script>\r\n\r\n", &r) == 1 && r.session[0] == 0, "cookie no hex: sin sesion");
+  CHECK(parseEx("GET /a HTTP/1.1\r\nsin-dos-puntos\r\n\r\n", &r) == -1, "linea que no es cabecera");
+  CHECK(parseEx("GET /a HTTP/9.9\r\n\r\n", &r) == -1, "version rara");
+  CHECK(parseEx("BREW /a HTTP/1.1\r\n\r\n", &r) == 1 && r.method == FLEXHTTP_M_UNKNOWN, "metodo desconocido: 405, no cierre");
+  CHECK(parseEx("GET /a HTTP/1.1\r\nHost: x", &r) == 0, "a medias: seguir leyendo");
+  { std::string nul = std::string("GET /a HTTP/1.1\r\nX: a") + '\0' + "b\r\n\r\n";
+    CHECK(flexHttpParseEx(nul.data(), nul.size(), &r) == -1, "NUL en la cabecera"); }
+  CHECK(parseEx("GET /../etc HTTP/1.1\r\n\r\n", &r) == -1, "ruta peligrosa");
+  CHECK(parseEx("GET /a HTTP/1.0\r\n\r\n", &r) == 1 && r.keepAlive == 0, "1.0 cierra por defecto");
+
+  CHECK(parseEx("GET /f HTTP/1.1\r\nRange: bytes=100-199\r\n\r\n", &r) == 1 && r.hasRange && r.rangeStart == 100 && r.rangeEnd == 199, "rango cerrado");
+  CHECK(parseEx("GET /f HTTP/1.1\r\nRange: bytes=100-\r\n\r\n", &r) == 1 && r.hasRange && r.rangeStart == 100 && r.rangeEnd == -1, "rango abierto");
+  CHECK(parseEx("GET /f HTTP/1.1\r\nRange: bytes=-500\r\n\r\n", &r) == 1 && r.hasRange && r.rangeStart == -1 && r.rangeEnd == 500, "sufijo");
+  CHECK(parseEx("GET /f HTTP/1.1\r\nRange: bytes=0-1,5-9\r\n\r\n", &r) == 1 && !r.hasRange, "varios rangos: se sirve entero");
+  CHECK(parseEx("GET /f HTTP/1.1\r\nRange: bytes=9-1\r\n\r\n", &r) == 1 && !r.hasRange, "rango al reves: ignorado");
+  CHECK(parseEx("GET /f HTTP/1.1\r\nRange: items=0-1\r\n\r\n", &r) == 1 && !r.hasRange, "otra unidad: ignorado");
+
+  uint32_t u;
+  CHECK(flexHttpParseU32("4294967295", &u) && u == 4294967295u, "u32 maximo");
+  CHECK(!flexHttpParseU32("4294967296", &u) && !flexHttpParseU32("-1", &u) && !flexHttpParseU32("1a", &u) &&
+        !flexHttpParseU32("", &u), "u32 invalidos");
+
+  CHECK(flexHttpHostOk("", "10.0.0.2", 8080) && flexHttpHostOk("10.0.0.2", "10.0.0.2", 8080) &&
+        flexHttpHostOk("10.0.0.2:8080", "10.0.0.2", 8080), "host propio");
+  CHECK(!flexHttpHostOk("evil.example", "10.0.0.2", 8080) && !flexHttpHostOk("10.0.0.2:81", "10.0.0.2", 8080) &&
+        !flexHttpHostOk("10.0.0.23", "10.0.0.2", 8080), "host ajeno (DNS rebinding)");
+}
+
+static void testResponsesEx(){
+  std::printf("-- ampliado: cabeceras, nombres UTF-8 y trozos --\n");
+  char h[512];
+  size_t n = flexHttpHeaderEx(h, sizeof(h), 206, "video/x-msvideo", 100, "Accept-Ranges: bytes\r\n", 1);
+  CHECK(n && strstr(h, "HTTP/1.1 206 Partial Content\r\n") && strstr(h, "Content-Length: 100\r\n") &&
+        strstr(h, "Cache-Control: no-store") && strstr(h, "Accept-Ranges: bytes\r\n") &&
+        !strcmp(h + n - 4, "\r\n\r\n"), "206 con cabecera extra");
+  n = flexHttpHeaderEx(h, sizeof(h), 200, "application/json", -1, "Cache-Control: private, max-age=60\r\n", 0);
+  CHECK(n && strstr(h, "Transfer-Encoding: chunked") && !strstr(h, "no-store") && strstr(h, "Connection: close"),
+        "por trozos y con su propia cache");
+  CHECK(flexHttpHeaderEx(h, 40, 200, "text/plain", 5, NULL, 0) == 0, "no cabe: 0");
+  CHECK(!strcmp(flexHttpStatusText(507), "Insufficient Storage") && !strcmp(flexHttpStatusText(413), "Payload Too Large"),
+        "textos de estado");
+  n = flexHttpDisposition(h, sizeof(h), "Canci\xC3\xB3n \"1\".wav", 0);
+  CHECK(n && strstr(h, "attachment; filename=\"Canci_n _1_.wav\"") &&
+        strstr(h, "filename*=UTF-8''Canci%C3%B3n%20%221%22.wav\r\n"), "nombre UTF-8 bien escapado: %s", h);
+  n = flexHttpDisposition(h, sizeof(h), "a\r\nSet-Cookie: x=1", 1);
+  CHECK(n && !strstr(h, "\r\nSet-Cookie") && strstr(h, "inline;"), "sin inyeccion de cabeceras: %s", h);
+  char c[16];
+  CHECK(flexHttpChunkHead(c, sizeof(c), 4096) && !strcmp(c, "1000\r\n"), "cabecera de trozo");
+}
+
+static void testFuzzEx(){
+  std::printf("-- ampliado: ruido --\n");
+  uint32_t seed = 0x9E3779B9u;
+  char buf[900];
+  FlexHttpReqEx r;
+  int ok = 1;
+  const char* heads[] = { "GET / HTTP/1.1\r\n", "POST /api/upload?x=1 HTTP/1.1\r\n", "" };
+  for(int it = 0; it < 6000; it++){
+    size_t hl = strlen(heads[it % 3]);
+    memcpy(buf, heads[it % 3], hl);
+    seed = seed * 1103515245u + 12345u;
+    size_t len = hl + (size_t)(seed % (sizeof(buf) - hl - 1));
+    for(size_t i = hl; i < len; i++){
+      seed = seed * 1103515245u + 12345u;
+      char c = (char)((seed >> 16) & 0xFF);
+      if((seed >> 8) % 7 == 0) c = "\r\n:;=-,"[(seed >> 3) % 7];
+      buf[i] = c;
+    }
+    int rc = flexHttpParseEx(buf, len, &r);
+    if(rc != -1 && rc != 0 && rc != 1) ok = 0;
+    if(rc == 1 && (r.path[FLEXHTTP_PATH_MAX - 1] != 0 || r.query[FLEXHTTP_QUERY_MAX - 1] != 0 ||
+                   r.session[FLEXHTTP_SESS_MAX - 1] != 0 || r.headerLen > len)) ok = 0;
+    char v[32];
+    flexHttpQueryGet(buf + hl, "x", v, sizeof(v));
+  }
+  CHECK(ok, "6000 entradas: codigo valido, cadenas cerradas y cuerpo dentro del buffer");
+}
+
 int main(){
   std::printf("=== FlexOS · servidor HTTP local (protocolo) ===\n");
   testParse();
@@ -209,6 +326,9 @@ int main(){
   testShareMatch();
   testResponses();
   testFuzz();
+  testParseEx();
+  testResponsesEx();
+  testFuzzEx();
   std::printf("=== %d comprobaciones, %d fallos ===\n", g_run, g_fail);
   return g_fail ? 1 : 0;
 }
