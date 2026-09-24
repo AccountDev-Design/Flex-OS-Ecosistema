@@ -265,7 +265,7 @@ static void webSheetRender(){
   else        fillRoundRect(x + pad, sy, w - 2 * pad, 58, 16, TH_SURF);
   drawText(x + pad + 16, sy + 10, "Flex Web Server", 2, TH_TXT);
   const char* sub = gWebState == WEBS_ON ? "Activo en esta red Wi-Fi"
-                  : gWebState == WEBS_STARTING ? "Arrancando\xE2\x80\xA6"
+                  : gWebState == WEBS_STARTING ? "Arrancando..."
                   : gWebState == WEBS_NOWIFI ? "Sin Wi-Fi: con\xC3\xA9" "ctate primero a una red"
                   : gWebState == WEBS_FAIL ? "No se pudo arrancar (memoria)" : "Apagado";
   drawText(x + pad + 16, sy + 34, sub, 1, gWebState == WEBS_NOWIFI || gWebState == WEBS_FAIL ? TH_WARN : TH_TXT2);
@@ -323,7 +323,7 @@ static void webSheetRender(){
     if(c->state == WCS_RUN && c->total){
       char a[16], b[16]; flexFsFmtSize(c->done, a, sizeof(a)); flexFsFmtSize(c->total, b, sizeof(b));
       snprintf(line, sizeof(line), "%s %s de %s", c->up ? "Recibiendo" : "Enviando", a, b);
-    } else if(c->state == WCS_CHECK) snprintf(line, sizeof(line), "Comprobando el archivo\xE2\x80\xA6");
+    } else if(c->state == WCS_CHECK) snprintf(line, sizeof(line), "Comprobando el archivo...");
     else snprintf(line, sizeof(line), "%s", c->msg);
     drawTextClip(x + pad + 14, cy + 30, line, 1, c->state == WCS_FAIL ? TH_ERR : TH_TXT2, x + w - pad - 20);
     int pw = w - 2 * pad - 28, pct = c->total ? (int)((uint64_t)c->done * 100 / c->total) : 0;

@@ -160,7 +160,7 @@ static void galDrawCell(const FlexMlRec* r, int x, int y, int w, int h, int &bud
     // una imagen inventada.
     const char* tag = r->kind == FML_K_VIDEO ? "V\xC3\xAD" "DEO" : r->kind == FML_K_DRAW ? "DIBUJO" : flexMlFmtName(r->fmt);
     drawTextC(x + w / 2, y + h / 2 - 12, tag, 2, rgb565(150, 156, 170));
-    const char* why = (r->flags & FML_R_NEED_THUMB) ? "Preparando\xE2\x80\xA6"
+    const char* why = (r->flags & FML_R_NEED_THUMB) ? "Preparando..."
                     : (r->state == FML_S_ERROR) ? "Archivo da\xC3\xB1" "ado" : "sin vista previa";
     drawTextC(x + w / 2, y + h / 2 + 12, why, 1, rgb565(120, 124, 140));
   }
@@ -219,15 +219,15 @@ static void galRenderGrid(){
 
   // ---- Estado REAL del catalogo ----
   const char* st = NULL; char stb[64];
-  if(gMs.scanning) st = "Buscando archivos\xE2\x80\xA6";
-  else if(gMs.pending){ snprintf(stb, sizeof(stb), "Preparando miniaturas (%u)\xE2\x80\xA6", (unsigned)gMs.pending); st = stb; }
+  if(gMs.scanning) st = "Buscando archivos...";
+  else if(gMs.pending){ snprintf(stb, sizeof(stb), "Preparando miniaturas (%u)...", (unsigned)gMs.pending); st = stb; }
   else if(gMs.lib.n >= FML_CAP) st = "La biblioteca est\xC3\xA1 llena: hay archivos que no caben";
   if(st) drawTextR(bx + bw - pad - 22, by + 12, st, 1, gMs.lib.n >= FML_CAP ? TH_WARN : TH_TXT2);
 
   if(n == 0){
     drawTextC(bx + bw / 2, by + bh / 2 - 30, "No hay nada aqu\xC3\xAD", 3, TH_TXT2);
     drawTextC(bx + bw / 2, by + bh / 2 + 6, "Sube fotos y v\xC3\xAD" "deos desde el m\xC3\xB3vil:", 1, TH_MUTE);
-    drawTextC(bx + bw / 2, by + bh / 2 + 24, "men\xC3\xBA \xE2\x8B\xAE \xE2\x80\xBA Conectar con el m\xC3\xB3vil", 1, TH_MUTE);
+    drawTextC(bx + bw / 2, by + bh / 2 + 24, "men\xC3\xBA > Conectar con el m\xC3\xB3vil", 1, TH_MUTE);
   }
 
   for(int i = 0; i < n; i++){

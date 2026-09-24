@@ -807,8 +807,8 @@ static void vidListRender(){
     else snprintf(cnt, sizeof(cnt), "%d elemento%s", n, n == 1 ? "" : "s");
     drawText(bx + pad, by + 52, cnt, 1, mkMulti ? TH_PRIM : TH_TXT2); }
   const char* st = NULL; char stb[64];
-  if(gMs.scanning) st = "Buscando archivos\xE2\x80\xA6";
-  else if(gMs.pending){ snprintf(stb, sizeof(stb), "Preparando miniaturas (%u)\xE2\x80\xA6", (unsigned)gMs.pending); st = stb; }
+  if(gMs.scanning) st = "Buscando archivos...";
+  else if(gMs.pending){ snprintf(stb, sizeof(stb), "Preparando miniaturas (%u)...", (unsigned)gMs.pending); st = stb; }
   if(st) drawTextR(bx + bw - pad - 18, by + 52, st, 1, TH_TXT2);
 
   // Pestanas
@@ -822,7 +822,7 @@ static void vidListRender(){
   if(n == 0){
     drawTextC(bx + bw / 2, by + bh / 2 - 30, "No hay fotos ni v\xC3\xAD" "deos", 3, TH_TXT2);
     drawTextC(bx + bw / 2, by + bh / 2 + 6, "S\xC3\xBA" "belos desde el m\xC3\xB3vil:", 1, TH_MUTE);
-    drawTextC(bx + bw / 2, by + bh / 2 + 24, "men\xC3\xBA \xE2\x8B\xAE \xE2\x80\xBA Conectar con el m\xC3\xB3vil", 1, TH_MUTE);
+    drawTextC(bx + bw / 2, by + bh / 2 + 24, "men\xC3\xBA > Conectar con el m\xC3\xB3vil", 1, TH_MUTE);
   }
 
   uiClipViewport(by + VID_HEAD_H - 6, by + bh - 1);

@@ -425,12 +425,12 @@ static void musRenderList(){
     else if(n == 1) snprintf(cnt, sizeof(cnt), "1 canci\xC3\xB3n");
     else snprintf(cnt, sizeof(cnt), "%d canciones", n);
     drawText(bx + pad, by + 12, cnt, 1, mkMulti ? TH_PRIM : TH_TXT2); }
-  if(gMs.scanning) drawTextR(bx + bw - pad - 22, by + 12, "Buscando archivos\xE2\x80\xA6", 1, TH_TXT2);
+  if(gMs.scanning) drawTextR(bx + bw - pad - 22, by + 12, "Buscando archivos...", 1, TH_TXT2);
 
   if(n == 0){
     drawTextC(bx + bw / 2, by + bh / 2 - 40, "No hay m\xC3\xBAsica", 3, TH_TXT2);
     drawTextC(bx + bw / 2, by + bh / 2 - 4, "S\xC3\xBA" "bela desde el m\xC3\xB3vil:", 1, TH_MUTE);
-    drawTextC(bx + bw / 2, by + bh / 2 + 14, "men\xC3\xBA \xE2\x8B\xAE \xE2\x80\xBA Conectar con el m\xC3\xB3vil", 1, TH_MUTE);
+    drawTextC(bx + bw / 2, by + bh / 2 + 14, "men\xC3\xBA > Conectar con el m\xC3\xB3vil", 1, TH_MUTE);
     drawTextC(bx + bw / 2, by + bh / 2 + 40, "Un MP3 se convierte en el m\xC3\xB3vil a WAV, que Flex OS s\xC3\xAD reproduce", 1, TH_MUTE);
   }
 

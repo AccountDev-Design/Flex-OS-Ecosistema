@@ -155,6 +155,7 @@ static int fkMenuHit(int px, int py){
 static bool fkNameOn = false;
 static char fkNameBuf[FLEXFS_NAME_MAX] = "";
 static char fkNameTitle[40] = "";
+static const char* fkNameHint = NULL;   // NULL = la linea de siempre (un nombre)
 
 static void fkNameDraw(){
   setBuf(fb);
@@ -167,7 +168,7 @@ static void fkNameDraw(){
   drawTextClip(38, fy + 16, fkNameBuf, 2, rgb565(240,242,248), SCR_W - 40);
   int cw = textW(fkNameBuf, 2);
   fillRect(38 + cw + 2, fy + 14, 2, 28, rgb565(120,170,250));       // cursor
-  drawTextC(SCR_W / 2, fy + 76, "Escribe el nombre y pulsa Guardar", 1, rgb565(140,148,168));
+  drawTextC(SCR_W / 2, fy + 76, fkNameHint ? fkNameHint : "Escribe el nombre y pulsa Guardar", 1, rgb565(140,148,168));
 
   int ky = KB_Y;
   if(uiGlass) drawLiquidGlassPanel(0, ky - 4, SCR_W, SCR_H - (ky - 4), 0, rgb565(36,40,58));
@@ -185,7 +186,10 @@ static void fkNameDraw(){
   flxFlushAll();
 }
 
-static void fkNameOpen(const char* title, const char* initial){
+// El mismo dialogo para escribir otra cosa que un nombre (el texto que se
+// pone sobre una foto en el editor de la Galeria): cambia la linea de ayuda.
+static void fkNameOpenHint(const char* title, const char* initial, const char* hint){
+  fkNameHint = hint;
   fkNameOn = true;
   strncpy(fkNameTitle, title, sizeof(fkNameTitle) - 1); fkNameTitle[sizeof(fkNameTitle) - 1] = 0;
   strncpy(fkNameBuf, initial ? initial : "", sizeof(fkNameBuf) - 1); fkNameBuf[sizeof(fkNameBuf) - 1] = 0;
@@ -193,6 +197,7 @@ static void fkNameOpen(const char* title, const char* initial){
   kbExtrasOn = false; kbApplySize(); kbMtSurfaceReset();
   fkNameDraw();
 }
+static void fkNameOpen(const char* title, const char* initial){ fkNameOpenHint(title, initial, NULL); }
 
 static void fkNameAppend(const char* s){
   int L = strlen(fkNameBuf), sl = strlen(s);

@@ -169,6 +169,17 @@ static int mkTargets(uint32_t* out, bool* anyLocked, bool* anyOpen){
 }
 
 static void mkRedraw(){ if(mkApp && mkApp->redraw) mkApp->redraw(); }
+// Tras una capa A PANTALLA COMPLETA (el dialogo de nombre, la papelera) no
+// basta con repintar la lista: esa capa tapo tambien la barra de estado y la
+// cabecera. Se rehace el marco entero, como al volver de la clave.
+static void mkRedrawAll(){
+  setBuf(fb);
+  fillRect(0, 0, SCR_W, SCR_H, WIN_BG);
+  appDrawChrome(gAppId);
+  if(!(APP_REG[gAppId].flags & APP_CUSTOM_HEADER)) appDrawHeader(gAppId);
+  mkRedraw();
+  flxFlushAll();
+}
 static const char* mkName(){ return mkApp && mkApp->name ? mkApp->name : "Medios"; }
 
 // -------------------------------------------------------------
@@ -327,14 +338,14 @@ static void mkDoAction(int act){
 // -------------------------------------------------------------
 static bool mkTick(){
   if(webSheetTick()) return true;                   // "Conectar con el movil" abierta
-  if(fkTrashOn){ if(!fkTrashTick()){ mlRequestScan(); mkRedraw(); } return true; }
+  if(fkTrashOn){ if(!fkTrashTick()){ mlRequestScan(); mkRedrawAll(); } return true; }
   if(fkNameOn){
     int r = fkNameTick();
     if(r == 1 && mkRenameId){
       char why[64];
       if(!mlRename(mkRenameId, fkNameBuf, why, sizeof(why))) sysNotify(mkName(), why);
     }
-    if(r != 0){ mkRenameId = 0; mkRedraw(); }
+    if(r != 0){ mkRenameId = 0; mkRedrawAll(); }
     return true;
   }
   if(fkAskOn){
