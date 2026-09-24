@@ -452,20 +452,43 @@ int flexWavParse(const FlexMediaIO* io, FlexWavInfo* w){
     if(!ioReadAt(io, p, c, 8)) break;
     uint32_t len = rd32(c + 4);
     if(fourcc(c, "fmt ") && len >= 16){
-      uint8_t v[16];
-      if(!ioReadAt(io, p + 8, v, 16)) return FLEXWAV_ERR_IO;
+      uint8_t v[20];
+      if(!ioReadAt(io, p + 8, v, len >= 20 ? 20 : 16)) return FLEXWAV_ERR_IO;
       uint16_t tag = rd16(v);
       w->channels   = rd16(v + 2);
       w->sampleRate = rd32(v + 4);
+      w->blockAlign = rd16(v + 12);
       w->bits       = rd16(v + 14);
-      // 1 = PCM entero. 0xFFFE (extensible) se acepta solo si los
-      // bits y canales son los de un PCM normal; cualquier otro tag
-      // es audio comprimido y aqui no hay decodificador.
-      if(tag != 1 && tag != 0xFFFE) return FLEXWAV_ERR_CODEC;
-      if(w->bits != 8 && w->bits != 16) return FLEXWAV_ERR_CODEC;
       if(w->channels == 0 || w->channels > 2) return FLEXWAV_ERR_CODEC;
+      if(tag == FLEXWAV_FMT_IMA){
+        // IMA ADPCM de Microsoft: cabecera de 4 bytes por canal y el resto
+        // en nibbles. Solo se acepta la disposicion estandar -- con otro
+        // numero de muestras por bloque los nibbles no caerian donde se
+        // decodifican, y eso suena a ruido, no a un error legible.
+        const uint32_t hdr = 4u * w->channels;
+        if(w->bits != 4 || w->blockAlign <= hdr || w->blockAlign > 8192 ||
+           (w->blockAlign % hdr) != 0) return FLEXWAV_ERR_CODEC;
+        uint16_t expect = (uint16_t)((w->blockAlign - hdr) * 8u / hdr + 1u);
+        uint16_t spb = (len >= 20 && rd16(v + 16) >= 2) ? rd16(v + 18) : 0;
+        if(spb == 0) spb = expect;
+        if(spb != expect) return FLEXWAV_ERR_CODEC;
+        w->samplesPerBlock = spb;
+        w->format = FLEXWAV_FMT_IMA;
+      } else {
+        // 1 = PCM entero. 0xFFFE (extensible) se acepta solo si los
+        // bits y canales son los de un PCM normal; cualquier otro tag
+        // es audio comprimido y aqui no hay decodificador.
+        if(tag != 1 && tag != 0xFFFE) return FLEXWAV_ERR_CODEC;
+        if(w->bits != 8 && w->bits != 16) return FLEXWAV_ERR_CODEC;
+        w->format = FLEXWAV_FMT_PCM;
+        w->blockAlign = (uint16_t)(w->channels * (w->bits / 8u));
+        w->samplesPerBlock = 0;
+      }
       if(w->sampleRate < 4000 || w->sampleRate > 192000) return FLEXWAV_ERR_FORMAT;
       haveFmt = true;
+    } else if(fourcc(c, "fact") && len >= 4){
+      uint8_t v[4];
+      if(ioReadAt(io, p + 8, v, 4)) w->frames = rd32(v);
     } else if(fourcc(c, "data")){
       if(!haveFmt) return FLEXWAV_ERR_FORMAT;
       w->dataStart = p + 8;
@@ -481,9 +504,81 @@ int flexWavParse(const FlexMediaIO* io, FlexWavInfo* w){
 
 uint32_t flexWavDurationMs(const FlexWavInfo* w){
   if(!w || !w->sampleRate || !w->channels || !w->bits) return 0;
-  uint32_t frameBytes = (uint32_t)w->channels * (w->bits / 8u);
-  if(!frameBytes) return 0;
-  return (uint32_t)(((uint64_t)(w->dataBytes / frameBytes) * 1000ull) / w->sampleRate);
+  uint64_t frames;
+  if(w->format == FLEXWAV_FMT_IMA){
+    if(!w->blockAlign || !w->samplesPerBlock) return 0;
+    // Por bloques: los completos llevan samplesPerBlock; uno final corto
+    // lleva su cabecera y dos muestras por byte (mono) o una (estereo).
+    uint32_t full = w->dataBytes / w->blockAlign, rem = w->dataBytes % w->blockAlign;
+    frames = (uint64_t)full * w->samplesPerBlock;
+    uint32_t hdr = 4u * w->channels;
+    if(rem > hdr) frames += (uint64_t)(rem - hdr) * 2u / w->channels + 1u;
+    // El chunk 'fact' dice cuantas muestras son de verdad (el ultimo bloque
+    // se rellena): si viene y es coherente, manda el.
+    if(w->frames && w->frames <= frames) frames = w->frames;
+  } else {
+    uint32_t frameBytes = (uint32_t)w->channels * (w->bits / 8u);
+    if(!frameBytes) return 0;
+    frames = w->dataBytes / frameBytes;
+  }
+  return (uint32_t)((frames * 1000ull) / w->sampleRate);
+}
+
+// ---- IMA ADPCM --------------------------------------------------
+static const int16_t kImaStep[89] = {
+  7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+  50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230,
+  253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963,
+  1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327,
+  3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487,
+  12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
+};
+static const int8_t kImaIdx[16] = { -1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8 };
+
+static inline int16_t imaNib(int* pred, int* idx, int nib){
+  int step = kImaStep[*idx];
+  int diff = step >> 3;
+  if(nib & 4) diff += step;
+  if(nib & 2) diff += step >> 1;
+  if(nib & 1) diff += step >> 2;
+  if(nib & 8) *pred -= diff; else *pred += diff;
+  if(*pred > 32767) *pred = 32767; else if(*pred < -32768) *pred = -32768;
+  *idx += kImaIdx[nib];
+  if(*idx < 0) *idx = 0; else if(*idx > 88) *idx = 88;
+  return (int16_t)*pred;
+}
+
+int flexImaDecodeBlock(const uint8_t* blk, size_t n, int ch, int16_t* out, int maxFrames){
+  if(!blk || !out || ch < 1 || ch > 2 || maxFrames < 1 || n < (size_t)(4 * ch)) return -1;
+  int pred[2] = { 0, 0 }, idx[2] = { 0, 0 };
+  for(int c = 0; c < ch; c++){
+    pred[c] = (int16_t)rd16(blk + 4 * c);
+    idx[c]  = blk[4 * c + 2];
+    if(idx[c] > 88) return -1;                  // cabecera imposible: bloque danado
+    out[c] = (int16_t)pred[c];                  // la primera muestra va en la cabecera
+  }
+  int frames = 1;
+  const uint8_t* p = blk + 4 * ch;
+  size_t rem = n - (size_t)(4 * ch);
+  if(ch == 1){
+    for(size_t i = 0; i < rem && frames + 2 <= maxFrames; i++){
+      out[frames++] = imaNib(&pred[0], &idx[0], p[i] & 15);
+      out[frames++] = imaNib(&pred[0], &idx[0], p[i] >> 4);
+    }
+    return frames;
+  }
+  // Estereo: grupos de 8 bytes, 4 del canal izquierdo (8 muestras) y 4 del
+  // derecho.
+  while(rem >= 8 && frames + 8 <= maxFrames){
+    for(int c = 0; c < 2; c++)
+      for(int k = 0; k < 4; k++){
+        uint8_t b = p[c * 4 + k];
+        out[(size_t)(frames + 2 * k) * 2 + (size_t)c]     = imaNib(&pred[c], &idx[c], b & 15);
+        out[(size_t)(frames + 2 * k + 1) * 2 + (size_t)c] = imaNib(&pred[c], &idx[c], b >> 4);
+      }
+    frames += 8; p += 8; rem -= 8;
+  }
+  return frames;
 }
 
 // -------------------------------------------------------------

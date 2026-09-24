@@ -33,6 +33,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <string>
 #include <vector>
 #include <map>
@@ -541,11 +542,18 @@ static void testWav(){
     CHECK(flexWavParse(&io, &w) == FLEXWAV_OK, "WAV con data truncado debe abrir");
     CHECK(w.dataBytes <= 8000, "dataBytes se recorta a lo real (%u)", w.dataBytes);
   }
-  { // comprimido -> se dice que no, no se intenta
-    MemIO m; m.data = makeWav(0x0011, 1, 8000, 4, 4000);   // IMA ADPCM
+  { // IMA ADPCM con la cabecera mal formada (blockAlign 0): se dice que
+    // no, no se intenta. El ADPCM BIEN formado se prueba en testIma().
+    MemIO m; m.data = makeWav(0x0011, 1, 8000, 4, 4000);
     FlexMediaIO io = ioOf(&m);
     FlexWavInfo w;
-    CHECK(flexWavParse(&io, &w) == FLEXWAV_ERR_CODEC, "ADPCM -> ERR_CODEC");
+    CHECK(flexWavParse(&io, &w) == FLEXWAV_ERR_CODEC, "ADPCM mal formado -> ERR_CODEC");
+  }
+  { // mu-law: otro codec, se dice que no
+    MemIO m; m.data = makeWav(0x0007, 1, 8000, 8, 8000);
+    FlexMediaIO io = ioOf(&m);
+    FlexWavInfo w;
+    CHECK(flexWavParse(&io, &w) == FLEXWAV_ERR_CODEC, "mu-law -> ERR_CODEC");
   }
   { // 24 bits: PCM pero no soportado
     MemIO m; m.data = makeWav(1, 2, 48000, 24, 4800);
@@ -558,6 +566,145 @@ static void testWav(){
     FlexMediaIO io = ioOf(&m);
     FlexWavInfo w;
     CHECK(flexWavParse(&io, &w) == FLEXWAV_ERR_FORMAT, "basura -> ERR_FORMAT");
+  }
+}
+
+
+// =============================================================
+//  5b) WAV IMA ADPCM
+//  ------------------------------------------------------------
+//  El codificador de referencia esta escrito AQUI, a partir del
+//  algoritmo publicado (tablas de paso e indice de IMA), y no se
+//  comparte con el firmware: si el decodificador del firmware y este
+//  codificador no coincidieran en una sola regla, el tono no volveria.
+// =============================================================
+static const int kRefStep[89] = {
+  7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+  50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230,
+  253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963,
+  1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327,
+  3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487,
+  12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767 };
+static const int kRefIdx[16] = { -1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8 };
+struct ImaSt { int pred = 0, idx = 0; };
+static int imaEnc(ImaSt& s, int x){
+  int step = kRefStep[s.idx], diff = x - s.pred, nib = 0;
+  if(diff < 0){ nib = 8; diff = -diff; }
+  int vp = step >> 3;
+  if(diff >= step){ nib |= 4; diff -= step; vp += step; }
+  if(diff >= (step >> 1)){ nib |= 2; diff -= step >> 1; vp += step >> 1; }
+  if(diff >= (step >> 2)){ nib |= 1; vp += step >> 2; }
+  s.pred += (nib & 8) ? -vp : vp;
+  if(s.pred > 32767) s.pred = 32767;
+  if(s.pred < -32768) s.pred = -32768;
+  s.idx += kRefIdx[nib];
+  if(s.idx < 0) s.idx = 0;
+  if(s.idx > 88) s.idx = 88;
+  return nib;
+}
+// Codifica PCM16 intercalado en bloques de la disposicion de Microsoft.
+static std::vector<uint8_t> imaEncode(const std::vector<int16_t>& pcm, int ch, int blockAlign, int* spbOut){
+  int spb = (blockAlign - 4 * ch) * 8 / (4 * ch) + 1;
+  *spbOut = spb;
+  size_t frames = pcm.size() / (size_t)ch;
+  std::vector<uint8_t> out;
+  ImaSt st[2];
+  for(size_t f0 = 0; f0 < frames; f0 += (size_t)spb){
+    size_t blockStart = out.size();
+    for(int c = 0; c < ch; c++){
+      int s0 = pcm[f0 * ch + c];
+      st[c].pred = s0;                       // la primera muestra va en claro
+      out.push_back((uint8_t)(s0 & 0xFF)); out.push_back((uint8_t)((s0 >> 8) & 0xFF));
+      out.push_back((uint8_t)st[c].idx); out.push_back(0);
+    }
+    auto sample = [&](size_t f, int c)->int{ return f < frames ? pcm[f * ch + c] : 0; };
+    if(ch == 1){
+      for(int k = 1; k < spb; k += 2){
+        int a = imaEnc(st[0], sample(f0 + k, 0)), b = imaEnc(st[0], sample(f0 + k + 1, 0));
+        out.push_back((uint8_t)(a | (b << 4)));
+      }
+    } else {
+      for(int k = 1; k < spb; k += 8)
+        for(int c = 0; c < 2; c++)
+          for(int j = 0; j < 4; j++){
+            int a = imaEnc(st[c], sample(f0 + k + 2 * j, c)), b = imaEnc(st[c], sample(f0 + k + 2 * j + 1, c));
+            out.push_back((uint8_t)(a | (b << 4)));
+          }
+    }
+    (void)blockStart;
+  }
+  return out;
+}
+static std::vector<uint8_t> imaWav(const std::vector<uint8_t>& data, int ch, uint32_t rate, int blockAlign,
+                                   int spb, uint32_t frames){
+  std::vector<uint8_t> fmt;
+  pushU16(fmt, 0x0011); pushU16(fmt, (uint16_t)ch); pushU32(fmt, rate);
+  pushU32(fmt, rate * (uint32_t)blockAlign / (uint32_t)spb);
+  pushU16(fmt, (uint16_t)blockAlign); pushU16(fmt, 4); pushU16(fmt, 2); pushU16(fmt, (uint16_t)spb);
+  std::vector<uint8_t> body;
+  pushCC(body, "fmt "); pushU32(body, (uint32_t)fmt.size()); body.insert(body.end(), fmt.begin(), fmt.end());
+  pushCC(body, "fact"); pushU32(body, 4); pushU32(body, frames);
+  pushCC(body, "data"); pushU32(body, (uint32_t)data.size()); body.insert(body.end(), data.begin(), data.end());
+  if(data.size() & 1) body.push_back(0);
+  std::vector<uint8_t> out;
+  pushCC(out, "RIFF"); pushU32(out, (uint32_t)body.size() + 4); pushCC(out, "WAVE");
+  out.insert(out.end(), body.begin(), body.end());
+  return out;
+}
+
+static void testIma(){
+  std::printf("[media] WAV IMA ADPCM\n");
+  for(int ch = 1; ch <= 2; ch++){
+    const uint32_t rate = 22050;
+    const int blockAlign = 512 * ch;
+    const size_t frames = rate;                          // 1 s
+    std::vector<int16_t> pcm(frames * (size_t)ch);
+    for(size_t f = 0; f < frames; f++)
+      for(int c = 0; c < ch; c++)
+        pcm[f * ch + c] = (int16_t)(9000.0 * std::sin(2.0 * 3.14159265358979 * (440.0 + 220.0 * c) * (double)f / rate));
+    int spb = 0;
+    auto enc = imaEncode(pcm, ch, blockAlign, &spb);
+    MemIO m; m.data = imaWav(enc, ch, rate, blockAlign, spb, (uint32_t)frames);
+    FlexMediaIO io = ioOf(&m);
+    FlexWavInfo w;
+    int r = flexWavParse(&io, &w);
+    CHECK(r == FLEXWAV_OK && w.format == FLEXWAV_FMT_IMA && w.bits == 4 && w.channels == ch, "IMA %d canal(es): abre (%d)", ch, r);
+    CHECK(w.blockAlign == blockAlign && w.samplesPerBlock == spb && w.frames == frames, "bloque %u, %u muestras por bloque", w.blockAlign, w.samplesPerBlock);
+    uint32_t ms = flexWavDurationMs(&w);
+    CHECK(ms >= 998 && ms <= 1001, "duracion %u ms (1 s)", ms);
+    // Decodifica todo, bloque a bloque, como hara el reproductor.
+    std::vector<int16_t> dec;
+    std::vector<int16_t> tmp((size_t)spb * ch);
+    for(uint32_t off = 0; off < w.dataBytes; off += w.blockAlign){
+      uint32_t n = w.dataBytes - off < w.blockAlign ? w.dataBytes - off : w.blockAlign;
+      int got = flexImaDecodeBlock(&m.data[w.dataStart + off], n, ch, tmp.data(), spb);
+      CHECK(got > 0, "bloque en %u decodificado", off);
+      if(got <= 0) break;
+      dec.insert(dec.end(), tmp.begin(), tmp.begin() + (size_t)got * ch);
+    }
+    CHECK(dec.size() >= pcm.size(), "todas las muestras (%zu de %zu)", dec.size(), pcm.size());
+    double sig = 0, err = 0;
+    for(size_t i = 0; i < pcm.size() && i < dec.size(); i++){ double d = (double)pcm[i] - dec[i]; sig += (double)pcm[i] * pcm[i]; err += d * d; }
+    double snr = err > 0 ? 10.0 * std::log10(sig / err) : 99.0;
+    CHECK(snr >= 24.0, "IMA %d canal(es): SNR %.1f dB", ch, snr);
+    std::printf("   IMA ADPCM %s 22050 Hz: %zu bytes/s (PCM16: %zu)  SNR %.1f dB\n", ch == 1 ? "mono  " : "estereo",
+                enc.size(), frames * 2 * ch, snr);
+  }
+  int16_t o[16];
+  uint8_t bad[8] = { 0, 0, 99, 0, 1, 2, 3, 4 };             // indice de paso 99: imposible
+  CHECK(flexImaDecodeBlock(bad, sizeof(bad), 1, o, 16) == -1, "bloque con indice imposible: -1");
+  CHECK(flexImaDecodeBlock(bad, 3, 1, o, 16) == -1, "bloque sin cabecera completa: -1");
+  uint8_t ok[8] = { 0x10, 0x00, 5, 0, 0x77, 0x88, 0x01, 0xF0 };
+  CHECK(flexImaDecodeBlock(ok, sizeof(ok), 1, o, 4) <= 4, "nunca escribe mas de maxFrames");
+  // Ruido: nunca se sale del buffer de salida.
+  uint32_t sd = 12345;
+  for(int it = 0; it < 2000; it++){
+    uint8_t b[64]; size_t n = 1 + (sd % 63);
+    for(size_t i = 0; i < n; i++){ sd = sd * 1103515245u + 12345u; b[i] = (uint8_t)(sd >> 16); }
+    int16_t out[256];
+    int c = 1 + (int)(sd % 2);
+    int got = flexImaDecodeBlock(b, n, c, out, 256 / c);
+    CHECK(got == -1 || (got >= 1 && got <= 256 / c), "ruido IMA: dentro de rango");
   }
 }
 
@@ -851,6 +998,7 @@ int main(){
   testAviSeek();
   testAviRejects();
   testWav();
+  testIma();
   testIndexBasics();
   testIndexSiblingsAfterSubdir();
   testIndexEdges();

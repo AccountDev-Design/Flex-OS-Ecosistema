@@ -34,6 +34,11 @@
 //         mismo decodificador JPEG, sin prediccion entre cuadros y
 //         sin memoria de referencia.
 //       · WAV PCM entero de 8 o 16 bits.
+//       · WAV IMA ADPCM de 4 bits (disposicion de Microsoft, mono o
+//         estereo). Es lo que produce la web de Flex Web Server al
+//         convertir un MP3: ocupa la CUARTA parte que el PCM de 16 bits,
+//         que en 10,9 MB de flash es la diferencia entre dos canciones y
+//         ocho. Se decodifica por bloques con flexImaDecodeBlock.
 //    NO · MP4/H.264/HEVC, MKV, WebM, AVI con otros codecs, MP3,
 //         AAC, FLAC, OGG, PNG, GIF, BMP, HEIC, WEBP.
 //         Para todos ellos flexMediaClassify devuelve
@@ -188,25 +193,39 @@ int  flexAviSkipFrame(FlexAviCtx* a);
 const char* flexAviErrStr(int err);
 
 // -------------------------------------------------------------
-//  WAV (PCM entero)
+//  WAV (PCM entero e IMA ADPCM)
 // -------------------------------------------------------------
 enum {
   FLEXWAV_OK = 0,
   FLEXWAV_ERR_IO     = -1,
   FLEXWAV_ERR_FORMAT = -2,
-  FLEXWAV_ERR_CODEC  = -3    // comprimido (ADPCM, mu-law, MP3 dentro de WAV)
+  FLEXWAV_ERR_CODEC  = -3    // otro codec (mu-law, MP3 dentro de WAV, 24 bits, ADPCM mal formado)
 };
+
+#define FLEXWAV_FMT_PCM  0x0001
+#define FLEXWAV_FMT_IMA  0x0011
 
 typedef struct {
   uint32_t sampleRate;
   uint16_t channels;
-  uint16_t bits;          // 8 o 16
-  uint32_t dataStart;     // desplazamiento del primer byte de muestra
-  uint32_t dataBytes;     // bytes de muestras
+  uint16_t bits;            // 8 o 16 (PCM) · 4 (IMA ADPCM)
+  uint32_t dataStart;       // desplazamiento del primer byte de muestra
+  uint32_t dataBytes;       // bytes de muestras
+  uint16_t format;          // FLEXWAV_FMT_*
+  uint16_t blockAlign;      // IMA: bytes por bloque · PCM: bytes por muestra (todos los canales)
+  uint16_t samplesPerBlock; // IMA: muestras por canal en cada bloque (0 en PCM)
+  uint32_t frames;          // muestras por canal (chunk 'fact' o calculado); 0 = no se sabe
 } FlexWavInfo;
 
 int      flexWavParse(const FlexMediaIO* io, FlexWavInfo* w);
 uint32_t flexWavDurationMs(const FlexWavInfo* w);
+
+// Decodifica UN bloque IMA ADPCM (disposicion de Microsoft) a PCM de 16
+// bits intercalado. `n` son los bytes del bloque (el ultimo del fichero
+// puede venir corto). Devuelve las muestras por canal escritas (como
+// mucho `maxFrames`) o -1 si el bloque no es valido.
+int      flexImaDecodeBlock(const uint8_t* blk, size_t n, int channels,
+                            int16_t* out, int maxFrames);
 
 // -------------------------------------------------------------
 //  INDICE DE MEDIOS
