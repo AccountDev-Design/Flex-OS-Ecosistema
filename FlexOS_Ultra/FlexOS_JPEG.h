@@ -130,6 +130,20 @@ int flexJpegDecode(const uint8_t* data, size_t len,
                    FlexJpegRowCb cb, void* user,
                    FlexJpegAlloc af, FlexJpegFree ff);
 
+// -------------------------------------------------------------
+//  La misma decodificacion, entregando cada fila en RGB888 (3 bytes
+//  por pixel: R, G, B). Existe para el editor de la Galeria: editar
+//  sobre RGB565 y volver a codificar dejaria bandas en los degradados
+//  (5 bits de rojo y azul son 32 niveles). Mismo contrato que la de
+//  arriba en todo lo demas.
+// -------------------------------------------------------------
+typedef bool (*FlexJpegRow888Cb)(void* user, int y, int w, const uint8_t* rgb);
+int flexJpegDecode888(const uint8_t* data, size_t len,
+                      int maxW, int maxH, uint32_t maxPixels,
+                      FlexJpegInfo* info,
+                      FlexJpegRow888Cb cb, void* user,
+                      FlexJpegAlloc af, FlexJpegFree ff);
+
 // Texto corto y estable para un codigo de error (para la interfaz).
 const char* flexJpegErrStr(int err);
 

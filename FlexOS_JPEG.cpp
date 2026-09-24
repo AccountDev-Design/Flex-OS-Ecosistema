@@ -502,13 +502,26 @@ int flexJpegProbe(const uint8_t* data, size_t len, FlexJpegInfo* info){
 
 // -------------------------------------------------------------
 //  API: decodificacion completa
+//  ------------------------------------------------------------
+//  UN solo cuerpo para las dos salidas. La plantilla decide en tiempo
+//  de COMPILACION si cada pixel se empaqueta en RGB565 (pantalla) o se
+//  entrega en RGB888 (editor, que no puede perder precision antes de
+//  volver a codificar): ni una comparacion por pixel en el camino de
+//  siempre, y ni una linea de la decodificacion duplicada.
 // -------------------------------------------------------------
-int flexJpegDecode(const uint8_t* data, size_t len,
-                   int maxW, int maxH, uint32_t maxPixels,
-                   FlexJpegInfo* infoOut,
-                   FlexJpegRowCb cb, void* user,
-                   FlexJpegAlloc af, FlexJpegFree ff){
-  if(!data || len < 4 || !cb) return FLEXJPG_ERR_ARG;
+template <bool RGB888>
+static inline void jput(uint16_t* o565, uint8_t* o888, int ox, int r, int g, int b){
+  if(RGB888){ uint8_t* p = o888 + (size_t)ox * 3; p[0] = (uint8_t)r; p[1] = (uint8_t)g; p[2] = (uint8_t)b; }
+  else o565[ox] = jrgb565(r, g, b);
+}
+
+template <bool RGB888>
+static int jpegDecodeT(const uint8_t* data, size_t len,
+                       int maxW, int maxH, uint32_t maxPixels,
+                       FlexJpegInfo* infoOut,
+                       FlexJpegRowCb cb, FlexJpegRow888Cb cb888, void* user,
+                       FlexJpegAlloc af, FlexJpegFree ff){
+  if(!data || len < 4 || (RGB888 ? !cb888 : !cb)) return FLEXJPG_ERR_ARG;
   if(!af) af = jdefAlloc;
   if(!ff) ff = jdefFree;
 
@@ -555,6 +568,7 @@ int flexJpegDecode(const uint8_t* data, size_t len,
   // ningun momento la imagen entera descomprimida.
   uint8_t*  planes[FLEXJPG_MAX_COMPONENTS] = { 0, 0, 0 };
   uint16_t* outRow = NULL;
+  uint8_t*  out888 = NULL;
   int rc = FLEXJPG_OK;
 
   for(int c = 0; c < d.ncomp; c++){
@@ -568,8 +582,13 @@ int flexJpegDecode(const uint8_t* data, size_t len,
     d.comp[c].pix = planes[c];
     d.comp[c].dcPred = 0;
   }
-  outRow = (uint16_t*)af((size_t)outW * sizeof(uint16_t));
-  if(!outRow){ rc = FLEXJPG_ERR_MEMORY; goto done; }
+  if(RGB888){
+    out888 = (uint8_t*)af((size_t)outW * 3u);
+    if(!out888){ rc = FLEXJPG_ERR_MEMORY; goto done; }
+  } else {
+    outRow = (uint16_t*)af((size_t)outW * sizeof(uint16_t));
+    if(!outRow){ rc = FLEXJPG_ERR_MEMORY; goto done; }
+  }
 
   {
     BitRdr br; brInit(&br, data + sosEnd, data + len);
@@ -643,7 +662,7 @@ int flexJpegDecode(const uint8_t* data, size_t len,
           if(d.ncomp == 1){
             for(int ox = 0; ox < outW; ox++){
               int Y = rowY[ox];
-              outRow[ox] = jrgb565(Y, Y, Y);
+              jput<RGB888>(outRow, out888, ox, Y, Y, Y);
             }
           } else {
             const JComp* cb1 = &d.comp[1];
@@ -659,7 +678,7 @@ int flexJpegDecode(const uint8_t* data, size_t len,
               int r = Y + ((91881 * Cr) >> 16);
               int g = Y - ((22554 * Cb + 46802 * Cr) >> 16);
               int b = Y + ((116130 * Cb) >> 16);
-              outRow[ox] = jrgb565(jclamp255(r), jclamp255(g), jclamp255(b));
+              jput<RGB888>(outRow, out888, ox, jclamp255(r), jclamp255(g), jclamp255(b));
             }
           }
         } else {
@@ -691,25 +710,43 @@ int flexJpegDecode(const uint8_t* data, size_t len,
             }
             if(n == 0) n = 1;
             int Y = sumY / n;
-            if(d.ncomp == 1){ outRow[ox] = jrgb565(Y, Y, Y); continue; }
+            if(d.ncomp == 1){ jput<RGB888>(outRow, out888, ox, Y, Y, Y); continue; }
             int Cb = sumCb / n - 128, Cr = sumCr / n - 128;
             int r = Y + ((91881 * Cr) >> 16);
             int g = Y - ((22554 * Cb + 46802 * Cr) >> 16);
             int b = Y + ((116130 * Cb) >> 16);
-            outRow[ox] = jrgb565(jclamp255(r), jclamp255(g), jclamp255(b));
+            jput<RGB888>(outRow, out888, ox, jclamp255(r), jclamp255(g), jclamp255(b));
           }
         }
 
-        if(!cb(user, oy, outW, outRow)){ rc = FLEXJPG_ERR_ABORTED; goto done; }
+        bool more = RGB888 ? cb888(user, oy, outW, out888) : cb(user, oy, outW, outRow);
+        if(!more){ rc = FLEXJPG_ERR_ABORTED; goto done; }
       }
     }
   }
 
 done:
   if(outRow) ff(outRow);
+  if(out888) ff(out888);
   for(int c = 0; c < FLEXJPG_MAX_COMPONENTS; c++) if(planes[c]) ff(planes[c]);
   ff(dp);
   return rc;
+}
+
+int flexJpegDecode(const uint8_t* data, size_t len,
+                   int maxW, int maxH, uint32_t maxPixels,
+                   FlexJpegInfo* infoOut,
+                   FlexJpegRowCb cb, void* user,
+                   FlexJpegAlloc af, FlexJpegFree ff){
+  return jpegDecodeT<false>(data, len, maxW, maxH, maxPixels, infoOut, cb, NULL, user, af, ff);
+}
+
+int flexJpegDecode888(const uint8_t* data, size_t len,
+                      int maxW, int maxH, uint32_t maxPixels,
+                      FlexJpegInfo* infoOut,
+                      FlexJpegRow888Cb cb, void* user,
+                      FlexJpegAlloc af, FlexJpegFree ff){
+  return jpegDecodeT<true>(data, len, maxW, maxH, maxPixels, infoOut, NULL, cb, user, af, ff);
 }
 
 const char* flexJpegErrStr(int err){

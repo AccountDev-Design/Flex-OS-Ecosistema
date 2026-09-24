@@ -54,7 +54,7 @@ APP_SRC  := $(ROOT)/FlexOS_BrowserApp.cpp
 BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test_bridge $(BUILD)/test_net \
         $(BUILD)/test_passcode $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexauth $(BUILD)/test_flexphone_ui $(BUILD)/test_flexphone_discovery $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
         $(BUILD)/test_media $(BUILD)/test_mem $(BUILD)/test_fall $(BUILD)/test_theft $(BUILD)/test_imu \
-        $(BUILD)/test_medialib \
+        $(BUILD)/test_medialib $(BUILD)/test_jpegenc \
         $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun
 
@@ -67,6 +67,19 @@ $(BUILD):
 # --- nucleo portable: con sanitizers ---
 $(BUILD)/test_jpeg: test_jpeg.cpp $(JPEG_SRC) $(ROOT)/FlexOS_JPEG.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -pthread -o $@ test_jpeg.cpp $(JPEG_SRC)
+
+# --- Codificador JPEG y salida RGB888 del decodificador ---
+# Cada imagen que se codifica se vuelve a leer con el decodificador DEL
+# FIRMWARE, que es el unico juez que importa en la placa. La salida RGB888
+# del decodificador se compara con las mismas referencias de libjpeg-turbo
+# que usa test_jpeg. (Durante el desarrollo se comprobo ademas con
+# libjpeg-turbo, via Pillow, que decodifica cada salida del codificador y
+# que su PSNR coincide con el del propio libjpeg; no es dependencia de la
+# bateria.)
+JENC_SRC := $(ULTRA)/FlexOS_JPEGEnc.cpp
+
+$(BUILD)/test_jpegenc: test_jpegenc.cpp $(JENC_SRC) $(ULTRA)/FlexOS_JPEGEnc.h $(ULTRA)/FlexOS_JPEG.cpp $(ULTRA)/FlexOS_JPEG.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -o $@ test_jpegenc.cpp $(ULTRA)/FlexOS_JPEG.cpp $(JENC_SRC)
 
 $(BUILD)/test_browser: test_browser.cpp $(CORE_SRC) $(ROOT)/FlexOS_Browser.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_browser.cpp $(CORE_SRC)
@@ -437,6 +450,8 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_weather
 	@echo
 	@$(BUILD)/test_jpeg ../fixtures
+	@echo
+	@$(BUILD)/test_jpegenc
 	@echo
 	@$(BUILD)/test_media
 	@echo
