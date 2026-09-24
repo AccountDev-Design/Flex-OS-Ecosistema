@@ -71,8 +71,8 @@ enum { IC_RELOJ, IC_GALERIA, IC_MULTIMEDIA, IC_ALMACEN, IC_MODOPC, IC_NOTAS,
        IC_NAV, IC_BRUJULA, IC_PAINT, IC_JUEGOS,
        IC_AJUSTES, IC_CALC, IC_CALEND, IC_CAMARA,
        IC_CLIMA, IC_FLEXSTORE, IC_FLEXPHONE,
-       IC_DEVCARE };
-#define APP_N 18
+       IC_DEVCARE, IC_MUSICA };
+#define APP_N 19
 
 static void iconBase(int x, int y, int S, uint16_t bg, int rf100){
   int r = S * rf100 / 100;
@@ -285,6 +285,22 @@ static void drawAppIcon(int id, int x, int y, int S){
       strokeSeg(px0 + st * 1.5f, py0 - sh * 0.44f, px0 + st * 2.1f, py0 + sh * 0.40f, 2, ac);
       strokeSeg(px0 + st * 2.1f, py0 + sh * 0.40f, px0 + st * 2.6f, py0,     2, ac);
       strokeSeg(px0 + st * 2.6f, py0, px0 + st * 4.0f, py0,                  2, ac);
+    } break;
+    case IC_MUSICA: {
+      // MUSICA: dos corcheas unidas por su barra, en blanco sobre coral.
+      iconBase(x, y, S, rgb565(236, 76, 108), 22);
+      int hr = (int)(S * 0.085f); if(hr < 2) hr = 2;
+      int st = S / 16 + 1;
+      int x1 = x + (int)(S * 0.36f), x2 = x + (int)(S * 0.66f);
+      int yb1 = y + (int)(S * 0.70f), yb2 = y + (int)(S * 0.64f);
+      int yt1 = y + (int)(S * 0.28f), yt2 = y + (int)(S * 0.22f);
+      int bh = (int)(S * 0.09f) + 1;
+      fillCircle(x1 - hr + st, yb1, hr, WHITE);
+      fillCircle(x2 - hr + st, yb2, hr, WHITE);
+      fillRect(x1, yt1, st, yb1 - yt1, WHITE);
+      fillRect(x2, yt2, st, yb2 - yt2, WHITE);
+      fillTriangle(x1, yt1, x2 + st, yt2, x2 + st, yt2 + bh, WHITE);
+      fillTriangle(x1, yt1, x2 + st, yt2 + bh, x1, yt1 + bh, WHITE);
     } break;
     case IC_BRUJULA: {
       // FLEX COMPASS. Rosa de los vientos sobre azul profundo: anillo, cuatro

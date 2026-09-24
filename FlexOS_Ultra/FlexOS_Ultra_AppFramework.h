@@ -157,6 +157,12 @@ static void dcApplyFallPref();
 static void setSuspend(); static void setResume(); static bool setSaveSess(); static void setLoadSess(); static bool setBgWork();
 static void calcResume(); static bool calcSaveSess(); static void calcLoadSess();
 static void vidSuspend(); static void vidResume(); static void vidCloseApp(); static bool vidSaveSess(); static void vidLoadSess(); static bool vidBackScreen();
+static bool vidBackLayer();                                // Multimedia: menu, dialogos y seleccion de la lista
+// Musica. La app vive en FlexOS_Ultra_AppMusic.h, mucho mas abajo en la
+// cadena; aqui solo los prototipos para APP_REG.
+static void musEnter(); static void musTick();
+static bool musBackLayer(); static bool musBackScreen(); static void musSuspend(); static void musResume();
+static void musCloseApp(); static bool musBgWork(); static size_t musShed();
 static void camSuspend(); static void camResume(); static void camCloseApp();
 static bool noteBackLayer(); static bool noteBackScreen(); static void noteSuspend(); static void noteResume(); static void noteCloseApp(); static bool noteSaveSess(); static void noteLoadSess();
 static bool paintBackScreen(); static void paintSuspend(); static void paintResume(); static void paintCloseApp(); static bool paintSaveSess(); static void paintLoadSess();
@@ -629,7 +635,7 @@ static const AppHooks H_ALM      = { NULL, almBackScreen, almSuspend, almResume,
 static const AppHooks H_SETTINGS = { NULL, settingsHandleBack, setSuspend, setResume, NULL, setSaveSess, setLoadSess, setBgWork, NULL, NULL };
 static const AppHooks H_GALLERY  = { galBackLayer, galBackScreen, galSuspend, galResume, galCloseApp, NULL, NULL, NULL, galShed, NULL };
 static const AppHooks H_CALC     = { NULL, NULL, NULL, calcResume, NULL, calcSaveSess, calcLoadSess, NULL, NULL, NULL };
-static const AppHooks H_MEDIA    = { NULL, vidBackScreen, vidSuspend, vidResume, vidCloseApp, vidSaveSess, vidLoadSess, NULL, vidShed, NULL };
+static const AppHooks H_MEDIA    = { vidBackLayer, vidBackScreen, vidSuspend, vidResume, vidCloseApp, vidSaveSess, vidLoadSess, NULL, vidShed, NULL };
 static const AppHooks H_CAMERA   = { NULL, NULL, camSuspend, camResume, camCloseApp, NULL, NULL, NULL, camShed, NULL };
 // Notas y Paint no llevan 'shed': lo unico que reservan en PSRAM son 4 KB de
 // texto y 2 KB de trazo en curso. Soltarlos no cambia nada medible y si
@@ -670,6 +676,13 @@ static const AppHooks H_DEVCARE  = { NULL, dcBackScreen, dcSuspend, dcResume, dc
 // reconstruible al vuelo, asi que en cuanto la memoria aprieta se suelta y
 // resume() la rehace sola. No lleva 'dirty': no hay datos del usuario.
 static const AppHooks H_COMPASS  = { cmpBackLayer, NULL, compassSuspend, compassResume, compassClose, NULL, NULL, NULL, cmpShed, NULL };
+// Musica. backLayer cierra menu, dialogos y seleccion; backScreen vuelve de
+// "Reproduciendo" a la lista. La musica SIGUE al salir de la app (la
+// alimenta loop()), asi que suspend no la para; bgWork dice "esta sonando"
+// y, con APP_BG_KEEP, ni "Cerrar todo" ni el desalojo la cortan mientras
+// suene. close SI la para. shed suelta miniaturas (y el bloque de audio si
+// no hay nada cargado). Sin sesion: lo que suena no se reanuda al arrancar.
+static const AppHooks H_MUSIC    = { musBackLayer, musBackScreen, musSuspend, musResume, musCloseApp, NULL, NULL, musBgWork, musShed, NULL };
 // ---- Registro de apps (indices = enum IC_*) ----
 static FlexApp APP_REG[APP_N] = {
   { appRelojEnter, appRelojTick, APP_FLEX, APP_CAT_ESENCIAL, APP_DEF_FAV, NULL },
@@ -719,6 +732,13 @@ static FlexApp APP_REG[APP_N] = {
   // sitio que tenia Bienestar. Device Care ES lo que Bienestar aparentaba --
   // salud del aparato, memoria, bateria y sensores -- pero con datos reales.
   { dcEnter, dcTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH | APP_FLEX, APP_CAT_SISTEMA, APP_DEF_FAV, &H_DEVCARE },
+  // 18 Musica. La biblioteca de AUDIO (la Galeria y Multimedia ensenan lo
+  // visual) con un reproductor que sigue sonando en segundo plano. Maqueta
+  // como la Galeria (APP_FLEX). NO nace en la rejilla (APP_DEF_DOCK), igual
+  // que Flex Phone: el escritorio de fabrica son las doce de siempre y una
+  // placa que actualiza no ve el suyo reordenado; se anade desde la Caja de
+  // aplicaciones.
+  { musEnter, musTick, APP_FLEX | APP_BG_KEEP, APP_CAT_MEDIA, APP_DEF_DOCK, &H_MUSIC },
 };
 static const char* appCatName(int id){
   int c = (id >= 0 && id < APP_N) ? APP_REG[id].cat : APP_CAT_SISTEMA;

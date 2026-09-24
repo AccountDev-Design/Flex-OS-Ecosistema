@@ -38,9 +38,14 @@
 // ##      asi que se puede empezar a ver en cualquier punto y
 // ##      SALTAR fotogramas sin que la imagen se rompa -- que es
 // ##      justo lo que permite ir tarde sin congelar el sistema.
-// ##    · WAV PCM, solo si el codec de audio responde de verdad
-// ##      (ver FlexOS_Audio); si no, se dice por que no y no se
-// ##      pinta ningun control de sonido.
+// ##    · El AUDIO no: se escucha en Musica, que sigue sonando
+// ##      aunque se salga de ella. Un archivo de audio que llegue
+// ##      aqui (desde el Explorador) se pasa a Musica.
+// ##
+// ##  DE DONDE SALE LA LISTA. Del catalogo de la biblioteca (el
+// ##  mismo de la Galeria y de Flex Web Server): fotos, videos y
+// ##  dibujos. Lo protegido sale con un candado y pide la clave del
+// ##  sistema; anterior/siguiente en el visor no pasa por ello.
 // ##
 // ##  QUE NO, Y POR QUE. MP4/H.264 no se anuncia ni se intenta:
 // ##  esta placa no tiene decodificador de video por hardware y en
@@ -101,13 +106,11 @@
 #define VK_NONE   0
 #define VK_PHOTO  1
 #define VK_VIDEO  2
-#define VK_AUDIO  3
 #define VK_ERROR  4
 
 // ---- Estado de la lista ----
 static int   vidScreen   = VS_LIST;
-static int   vidFilter   = 0;          // 0 todo reproducible, 1 videos, 2 fotos, 3 audio
-static int   vidListSel  = -1;
+static int   vidFilter   = 0;          // 0 todo, 1 videos, 2 fotos (el audio va a Musica)
 static int   vidListScroll = 0;
 static int   vidListDragY0 = 0, vidListDragS0 = 0;
 static bool  vidListDragging = false;
@@ -130,9 +133,7 @@ static uint32_t   vidCurFrame  = 0;
 static unsigned long vidNextUs = 0;
 static unsigned long vidCtrlMs = 0;         // instante del ultimo toque
 static bool       vidCtrlOn    = true;
-static int        vidIdxInList = -1;        // posicion dentro de la lista actual
-static FlexWavInfo vidWav;                  // solo si vidKind == VK_AUDIO
-static uint32_t   vidAudioPos = 0;          // desplazamiento del proximo bloque PCM
+static uint32_t   vidCurId     = 0;         // id del catalogo de lo abierto (0 = abierto por ruta, sin registro)
 static bool       vidPanning   = false;     // arrastrando una foto ampliada
 
 // GEOMETRIA DEL CONTENIDO, en coordenadas del lienzo LOGICO.
@@ -170,7 +171,6 @@ static void vidDrawControls(bool publish);
 static void vidDrawCurrentFrame(bool publish);
 static void vidCycleOrientation();
 static void vidOpenNeighbour(int delta);
-static void vidSyncListIndex();
 static void vidSeekToMs(uint32_t ms);
 static bool vidOpenPath(const char* path);
 static void vidReleaseMedia(bool keepPosition);
@@ -226,7 +226,6 @@ static void vidReleaseMedia(bool keepPosition){
   if(vidKind == VK_VIDEO && keepPosition && vidPath[0] && !vidEnded)
     vidResumeSet(vidPath, vidCurFrame);
   vidPlaying = false;
-  flexAudioStop();
   mediaStreamClose(&vidStream);
   memset(&vidAvi, 0, sizeof(vidAvi));
   if(vidFrameBuf){ mediaFree(vidFrameBuf); vidFrameBuf = NULL; }
@@ -458,30 +457,9 @@ static bool vidOpenPath(const char* path){
   }
 
   // ---------- AUDIO ----------
-  if(kind == FLEXMED_AUDIO){
-    if(!mediaStreamOpen(&vidStream, vidPath)){ vidFail("No se pudo abrir el archivo"); return false; }
-    FlexMediaIO io; mediaBindIO(&io, &vidStream);
-    FlexWavInfo w;
-    int r = flexWavParse(&io, &w);
-    if(r != FLEXWAV_OK){
-      vidFail(r == FLEXWAV_ERR_CODEC ? "WAV comprimido: solo se admite PCM de 8 o 16 bits"
-                                     : "El archivo WAV esta danado");
-      return false;
-    }
-    if(!flexAudioAvailable()){
-      // No se pinta un reproductor de audio que no suena: se dice
-      // exactamente por que no hay sonido.
-      char msg[72];
-      snprintf(msg, sizeof(msg), "Sin salida de audio: %s", flexAudioError());
-      vidFail(msg);
-      return false;
-    }
-    vidKind = VK_AUDIO;
-    vidLand = false;
-    vidWav  = w;
-    vidAudioPos = w.dataStart;
-    return true;
-  }
+  // Se escucha en Musica (mediaOpenInPlayer ya lo manda alli); si llega
+  // aqui por otro camino, se dice donde, sin abrir un segundo reproductor.
+  if(kind == FLEXMED_AUDIO){ vidFail("El audio se escucha en M\xC3\xBAsica"); return false; }
 
   // ---------- VIDEO ----------
   if(!mediaStreamOpen(&vidStream, vidPath)){ vidFail("No se pudo abrir el archivo"); return false; }
@@ -681,17 +659,11 @@ static void vidRenderViewer(){
   if(vidKind == VK_PHOTO)      vidDrawPhoto();
   else if(vidKind == VK_VIDEO) vidDrawCurrentFrame(false);
 
-  if(vidKind == VK_ERROR || vidKind == VK_AUDIO || vidKind == VK_NONE){
+  if(vidKind == VK_ERROR){
     int cw = mediaCanvasW(vidLand), chh = mediaCanvasH(vidLand);
-    if(vidKind == VK_ERROR){
-      drawTextC(cw / 2, chh / 2 - 40, "No se puede abrir", 3, TH_ERR);
-      drawTextC(cw / 2, chh / 2, vidName, 2, TH_TXT2);
-      drawTextC(cw / 2, chh / 2 + 30, vidErrMsg, 1, TH_MUTE);
-    } else if(vidKind == VK_AUDIO){
-      fillCircle(cw / 2, chh / 2 - 30, 46, TH_SURF2);
-      drawTextC(cw / 2, chh / 2 - 40, "WAV", 3, TH_TXT);
-      drawTextC(cw / 2, chh / 2 + 34, vidName, 2, TH_TXT2);
-    }
+    drawTextC(cw / 2, chh / 2 - 40, "No se puede abrir", 3, TH_ERR);
+    drawTextC(cw / 2, chh / 2, vidName, 2, TH_TXT2);
+    drawTextC(cw / 2, chh / 2 + 30, vidErrMsg, 1, TH_MUTE);
   }
   // Titulo discreto arriba (no tapa la imagen: va sobre el fondo).
   drawTextC(mediaCanvasW(vidLand) / 2, 10, vidName, 1, TH_MUTE);
@@ -710,92 +682,193 @@ static void vidRenderViewer(){
 // -------------------------------------------------------------
 //  PANTALLA DE LISTA
 //  ------------------------------------------------------------
-//  Sale del MISMO indice que la Galeria. No hay un segundo
-//  recorrido de carpetas: si la Galeria ve un archivo, Multimedia
-//  lo ve, y al reves.
+//  Sale del catalogo de la biblioteca, el MISMO de la Galeria y de
+//  Flex Web Server: si la Galeria ve una foto, Multimedia la ve, y al
+//  reves. Seleccion, menus y acciones son los del kit comun (mk*).
 // -------------------------------------------------------------
-#define VID_ROW_H 64
-static const char* VID_TABS[4] = { "Todo", "V\xC3\xAD" "deos", "Fotos", "Audio" };
-static int vidFilterKind(){
+#define VID_ROW_H   64
+#define VID_HEAD_H  104
+#define VID_TABS_N  3
+#define VID_THUMB_BUDGET 6            // miniaturas nuevas por repintado
+static const char* VID_TABS[VID_TABS_N] = { "Todo", "V\xC3\xAD" "deos", "Fotos" };
+static uint32_t vidTabMask(){
   switch(vidFilter){
-    case 1:  return FLEXMED_VIDEO;
-    case 2:  return FLEXMED_PHOTO;
-    case 3:  return FLEXMED_AUDIO;
-    default: return 0;
+    case 1: return FML_MASK(FML_K_VIDEO);
+    case 2: return FML_MASK(FML_K_PHOTO) | FML_MASK(FML_K_DRAW);
+  }
+  return FML_MASK_VISUAL;
+}
+
+// Vista del catalogo (indices dentro de gMs.lib.recs): solo vale con el
+// cerrojo tomado, como en la Galeria.
+static uint16_t   vidViewStore[FML_CAP];
+static FlexMlView vidView;
+static uint32_t   vidViewMask = 0;
+static bool       vidViewReady = false;
+static int        vidCountCache = 0;
+static bool       vidMorePending = false;
+static uint32_t   vidSeenRev = 0, vidSeenMs = 0;
+
+static void vidSyncLocked(){
+  uint32_t m = vidTabMask();
+  if(!vidViewReady || vidViewMask != m){
+    flexMlViewInit(&vidView, vidViewStore, FML_CAP, m, FML_SORT_NEWEST);
+    vidViewMask = m; vidViewReady = true;
+    flexMlViewSync(&vidView, &gMs.lib, true);
+  } else flexMlViewSync(&vidView, &gMs.lib, false);
+}
+
+static void vidOpenId(uint32_t id);
+static const MediaListApp VID_APP = { "Multimedia", vidRenderAll, vidOpenId, NULL };
+
+static int vidRowY(int i){ int bx, by, bw, bh; uiBox(bx, by, bw, bh); return by + VID_HEAD_H + i * VID_ROW_H - vidListScroll; }
+
+static void vidDrawRow(const FlexMlRec* r, int x, int y, int w, int &budget){
+  int h = VID_ROW_H - 8;
+  bool sel = mkMulti && mkIsSel(r->id);
+  if(sel) fillRoundRect(x, y, w, h, 12, TH_SEL);
+  else if(uiGlass) drawGlassCardFlat(x, y, w, h, 12, TH_GLASS, WIN_BG);
+  else        fillRoundRect(x, y, w, h, 12, TH_SURF);
+  int tx = x + 8, ty = y + (h - ML_SMALL) / 2;
+  if(r->flags & FML_R_LOCKED){
+    // Solo el candado: ni miniatura, ni nombre, ni tamano.
+    fillRoundRect(tx, ty, ML_SMALL, ML_SMALL, 8, TH_SURF2);
+    mlPadlock(tx + ML_SMALL / 2, ty + ML_SMALL / 2 - 2, 8, TH_TXT2, false);
+    drawText(x + 64, y + (h - uiLineH(2)) / 2, "Protegido", 2, TH_TXT2);
+  } else {
+    bool more = false;
+    const uint16_t* th = mlThumbGetLocked(r, &budget, &more);
+    if(more) vidMorePending = true;
+    if(th) mlBlitThumbSmall(th, tx, ty, 8);
+    else {
+      fillRoundRect(tx, ty, ML_SMALL, ML_SMALL, 8, TH_SURF2);
+      if(r->kind == FML_K_VIDEO) fillTriangle(tx + 16, ty + 12, tx + 16, ty + 32, tx + 32, ty + 22, TH_TXT2);
+      else { fillTriangle(tx + 7, ty + 34, tx + 18, ty + 18, tx + 29, ty + 34, TH_TXT2); fillCircle(tx + 32, ty + 13, 4, TH_TXT2); }
+    }
+    if(r->kind == FML_K_VIDEO && th){
+      fillCircle(tx + 11, ty + 11, 8, rgb565(0, 0, 0));
+      fillTriangle(tx + 8, ty + 6, tx + 8, ty + 16, tx + 16, ty + 11, rgb565(255, 255, 255));
+    }
+    char nm[FML_NAME_MAX]; flexMlDisplayName(r, nm, sizeof(nm));
+    drawTextClip(x + 64, y + 8, nm, 2, TH_TXT, x + w - (mkMulti ? 44 : 12));
+    // Lo que es de verdad: clase, duracion o medidas, tamano, y si esta
+    // placa no lo abre, por que.
+    char sub[72], sz[16], extra[24] = "";
+    flexFsFmtSize(r->size, sz, sizeof(sz));
+    if(r->kind == FML_K_VIDEO && r->durMs){ mlFmtDur(r->durMs, extra, sizeof(extra)); }
+    else if(r->w && r->h) snprintf(extra, sizeof(extra), "%ux%u", (unsigned)r->w, (unsigned)r->h);
+    const char* cls = r->kind == FML_K_VIDEO ? "V\xC3\xAD" "deo" : r->kind == FML_K_DRAW ? "Dibujo" : "Foto";
+    if(r->state == FML_S_ERROR) snprintf(sub, sizeof(sub), "%s  \xC2\xB7  Archivo da\xC3\xB1" "ado", cls);
+    else if(!(r->flags & FML_R_PLAYABLE) && !(r->flags & FML_R_NEED_THUMB))
+      snprintf(sub, sizeof(sub), "%s  \xC2\xB7  %s  \xC2\xB7  Solo guardar", flexMlFmtName(r->fmt), sz);
+    else snprintf(sub, sizeof(sub), "%s%s%s  \xC2\xB7  %s", cls, extra[0] ? "  \xC2\xB7  " : "", extra, sz);
+    drawTextClip(x + 64, y + 34, sub, 1, r->state == FML_S_ERROR ? TH_WARN : TH_TXT2, x + w - (mkMulti ? 44 : 12));
+  }
+  if(mkMulti){
+    int cx = x + w - 22, cy = y + h / 2;
+    fillCircle(cx, cy, 11, sel ? TH_PRIM : rgb565(0, 0, 0));
+    drawCircle(cx, cy, 11, rgb565(255, 255, 255));
+    if(sel){
+      strokeSegAA(cx - 5, cy, cx - 1, cy + 5, 2.0f, TH_ONACC);
+      strokeSegAA(cx - 1, cy + 5, cx + 6, cy - 5, 2.0f, TH_ONACC);
+    }
   }
 }
-static int vidListCount(){ return flexMediaIndexCount(&gMedIx, vidFilterKind()); }
-static int vidListItem(int nth){ return flexMediaIndexNth(&gMedIx, vidFilterKind(), nth); }
 
 static void vidListRender(){
+  if(webSheetIsOpen()){ webSheetRender(); return; }  // la hoja del servidor manda mientras esta abierta
   setBuf(fb);
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
   fillRect(bx, by, bw, bh, WIN_BG);
   int pad = uiPad();
-  drawText(bx + pad, by + 12, "Multimedia", 4, TH_TXT);
+  vidMorePending = false;
+  mlThumbNewPass();
+  int budget = VID_THUMB_BUDGET;
+  drawText(bx + pad, by + 14, "Multimedia", 4, TH_TXT);
+  for(int i = 0; i < 3; i++) fillCircle(bx + bw - pad - 4, by + 22 + i * 12, 4, TH_NAV);
+
+  if(!gMlOk){
+    const char* t = !flexFsReady() ? "Sin almacenamiento" : gSafeMode ? "Modo seguro" : "Biblioteca no disponible";
+    drawTextC(bx + bw / 2, by + bh / 2 - 20, t, 3, TH_TXT2);
+    drawTextC(bx + bw / 2, by + bh / 2 + 16, !flexFsReady() ? flexFsError() : "La biblioteca no se abre ahora", 1, TH_MUTE);
+    vidCountCache = 0;
+    flxFlush(WIN_TOP, WIN_BOT);
+    return;
+  }
+
+  mlLock();
+  vidSyncLocked();
+  const int n = vidView.n;
+  vidCountCache = n;
+  vidSeenRev = gMs.lib.rev; vidSeenMs = millis();
+  mkPruneLocked(&vidView);
+  { char cnt[48];
+    if(mkMulti) snprintf(cnt, sizeof(cnt), "%u seleccionado%s", (unsigned)mkSelN, mkSelN == 1 ? "" : "s");
+    else snprintf(cnt, sizeof(cnt), "%d elemento%s", n, n == 1 ? "" : "s");
+    drawText(bx + pad, by + 52, cnt, 1, mkMulti ? TH_PRIM : TH_TXT2); }
+  const char* st = NULL; char stb[64];
+  if(gMs.scanning) st = "Buscando archivos\xE2\x80\xA6";
+  else if(gMs.pending){ snprintf(stb, sizeof(stb), "Preparando miniaturas (%u)\xE2\x80\xA6", (unsigned)gMs.pending); st = stb; }
+  if(st) drawTextR(bx + bw - pad - 18, by + 52, st, 1, TH_TXT2);
 
   // Pestanas
-  int tabY = by + 56, tw = (bw - 2 * pad) / 4;
-  for(int i = 0; i < 4; i++){
+  const int tabY = by + 68, tw = (bw - 2 * pad) / VID_TABS_N;
+  for(int i = 0; i < VID_TABS_N; i++){
     int tx = bx + pad + i * tw;
-    if(i == vidFilter) fillRoundRect(tx + 2, tabY, tw - 4, 30, 15, TH_PRIM);
-    drawTextC(tx + tw / 2, tabY + 8, VID_TABS[i], 2, i == vidFilter ? TH_ONACC : TH_TXT2);
+    if(i == vidFilter) fillRoundRect(tx + 2, tabY, tw - 4, 28, 14, TH_PRIM);
+    drawTextC(tx + tw / 2, tabY + 8, VID_TABS[i], 1, i == vidFilter ? TH_ONACC : TH_TXT2);
   }
 
-  const int top = tabY + 42;
-  const int n   = vidListCount();
-
-  // Estado real del almacenamiento y del indice: si no hay nada, se
-  // dice POR QUE no hay nada, que no es lo mismo que una lista vacia.
-  if(mediaIndexBusy()){
-    char pr[48];
-    snprintf(pr, sizeof(pr), "Buscando... %u revisados, %d encontrados",
-             (unsigned)mediaIndexSeen(), mediaIndexN());
-    drawTextC(bx + bw / 2, top + 8, pr, 1, TH_TXT2);
-  }
-  if(n == 0 && !mediaIndexBusy()){
-    drawTextC(bx + bw / 2, by + bh / 2 - 30, "No hay nada que reproducir", 3, TH_TXT2);
-    drawTextC(bx + bw / 2, by + bh / 2 + 8,
-              "Guarda JPEG o AVI MJPEG en la memoria interna", 1, TH_MUTE);
+  if(n == 0){
+    drawTextC(bx + bw / 2, by + bh / 2 - 30, "No hay fotos ni v\xC3\xAD" "deos", 3, TH_TXT2);
+    drawTextC(bx + bw / 2, by + bh / 2 + 6, "S\xC3\xBA" "belos desde el m\xC3\xB3vil:", 1, TH_MUTE);
+    drawTextC(bx + bw / 2, by + bh / 2 + 24, "men\xC3\xBA \xE2\x8B\xAE \xE2\x80\xBA Conectar con el m\xC3\xB3vil", 1, TH_MUTE);
   }
 
-  uiClipViewport(top, by + bh - 1);
+  uiClipViewport(by + VID_HEAD_H - 6, by + bh - 1);
   for(int i = 0; i < n; i++){
-    int y = top + 26 + i * VID_ROW_H - vidListScroll;
-    if(y + VID_ROW_H < top || y > by + bh) continue;
-    int idx = vidListItem(i);
-    if(idx < 0) continue;
-    const FlexMediaItem* it = &gMedStore[idx];
-    if(uiGlass) drawGlassCardFlat(bx + pad, y, bw - 2 * pad, VID_ROW_H - 8, 12, TH_GLASS, WIN_BG);
-    else        fillRoundRect(bx + pad, y, bw - 2 * pad, VID_ROW_H - 8, 12, TH_SURF);
-    // Insignia de clase: un triangulo para video, un marco para foto,
-    // una onda para audio. Es informacion, no adorno.
-    int ix = bx + pad + 18, iy = y + 14;
-    if(it->kind == FLEXMED_VIDEO){
-      fillRoundRect(ix, iy, 30, 24, 5, rgb565(40,44,58));
-      fillTriangle(ix + 11, iy + 6, ix + 11, iy + 18, ix + 22, iy + 12, TH_ONACC);
-    } else if(it->kind == FLEXMED_AUDIO){
-      for(int k = 0; k < 5; k++) fillRect(ix + k * 6, iy + 4 + (k % 2) * 5, 3, 16 - (k % 2) * 10, TH_ACCS);
-    } else {
-      fillRoundRect(ix, iy, 30, 24, 5, rgb565(250,250,252));
-      fillTriangle(ix + 4, iy + 20, ix + 14, iy + 8, ix + 24, iy + 20, rgb565(140,170,220));
-    }
-    const char* nm = strrchr(it->path, '/');
-    drawTextClip(bx + pad + 62, y + 10, nm ? nm + 1 : it->path, 2, TH_TXT, bx + bw - pad - 70);
-    char sub[48], sz[16];
-    flexFsFmtSize(it->size, sz, sizeof(sz));
-    snprintf(sub, sizeof(sub), "%s  ·  Interna", sz);
-    drawText(bx + pad + 62, y + 34, sub, 1, TH_TXT2);
+    int y = vidRowY(i);
+    if(y + VID_ROW_H < by + VID_HEAD_H - 6 || y > by + bh) continue;   // solo las visibles
+    vidDrawRow(&gMs.lib.recs[vidView.idx[i]], bx + pad, y, bw - 2 * pad, budget);
   }
   uiClipFull();
+  int selLocked = 0, selOpen = 0, selectable = 0;
+  if(mkMulti) mkCountLocked(&vidView, &selLocked, &selOpen, &selectable);
+  mlUnlock();
+
+  if(mkMulti) mkDrawBar(selLocked, selOpen, selectable);
+  mkDrawOverlays();
   flxFlush(WIN_TOP, WIN_BOT);
 }
 
 static int vidListMaxScroll(){
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
-  int need = 26 + vidListCount() * VID_ROW_H + 30;
-  int m = need - (bh - 100);
+  int need = VID_HEAD_H + vidCountCache * VID_ROW_H + (mkMulti ? MKB_H + 26 : 30);
+  int m = need - bh;
   return m > 0 ? m : 0;
+}
+
+// Toque sobre la lista -> elemento (o 0).
+static uint32_t vidHitId(int tx, int ty){
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+  if(ty < by + VID_HEAD_H - 6) return 0;
+  uint32_t id = 0;
+  mlLock();
+  vidSyncLocked();
+  for(int i = 0; i < vidView.n && !id; i++){
+    int y = vidRowY(i);
+    if(ty >= y && ty <= y + VID_ROW_H - 8 && tx >= bx && tx <= bx + bw) id = gMs.lib.recs[vidView.idx[i]].id;
+  }
+  mlUnlock();
+  return id;
+}
+
+static void vidSelectAll(){
+  mlLock();
+  vidSyncLocked();
+  mkSelectAllLocked(&vidView);
+  mlUnlock();
+  vidListRender();
 }
 
 // -------------------------------------------------------------
@@ -811,13 +884,28 @@ static char    gMediaPending[FLEXMED_PATH_MAX] = "";
 // la rejilla y no a la lista de Multimedia. 0xFF = se entro a
 // Multimedia por su cuenta.
 static uint8_t gMediaReturnApp = 0xFF;
+static void musOpenPath(const char* path);        // Musica, mas abajo en la cadena
+
+// Id del catalogo de una ruta (0 si no esta registrada).
+static uint32_t vidIdOfPath(const char* path){
+  mlLock();
+  int i = flexMlFindPath(&gMs.lib, path);
+  uint32_t id = i >= 0 ? gMs.lib.recs[i].id : 0;
+  mlUnlock();
+  return id;
+}
 
 static void mediaOpenInPlayer(const char* path){
   if(!path || !path[0]) return;
+  // El audio se escucha en Musica: un solo reproductor, que ademas sigue
+  // sonando en segundo plano.
+  const char* nm = strrchr(path, '/');
+  if(flexMediaClassify(nm ? nm + 1 : path) == FLEXMED_AUDIO){ musOpenPath(path); return; }
   snprintf(gMediaPending, sizeof(gMediaPending), "%s", path);
   if(gState == ST_APP && gAppId == IC_MULTIMEDIA){
     // Ya estamos dentro: se abre en el acto.
     vidScreen = VS_VIEW;
+    vidCurId = vidIdOfPath(gMediaPending);
     vidOpenPath(gMediaPending);
     gMediaPending[0] = 0;
     vidRenderViewer();
@@ -827,27 +915,39 @@ static void mediaOpenInPlayer(const char* path){
   enterApp(IC_MULTIMEDIA);
 }
 
-// Busca la posicion del archivo abierto dentro de la lista actual,
-// para que "anterior/siguiente" recorra lo que el usuario ve.
-static void vidSyncListIndex(){
-  vidIdxInList = -1;
-  int n = vidListCount();
-  for(int i = 0; i < n; i++){
-    int idx = vidListItem(i);
-    if(idx >= 0 && !strcmp(gMedStore[idx].path, vidPath)){ vidIdxInList = i; return; }
-  }
+// Abrir desde la lista (ya autorizado si estaba protegido).
+static void vidOpenId(uint32_t id){
+  FlexMlRec r;
+  if(!mlGet(id, &r)) return;
+  vidCurId = id;
+  vidScreen = VS_VIEW;
+  vidOpenPath(r.path);
+  vidRenderViewer();
 }
+
+// Anterior/siguiente recorre la lista que el usuario ve, SALTANDO lo
+// protegido: pasar de una foto a la siguiente no puede ensenar algo que
+// pide clave.
 static void vidOpenNeighbour(int delta){
-  int n = vidListCount();
-  if(n <= 0) return;
-  if(vidIdxInList < 0) vidSyncListIndex();
-  int k = vidIdxInList + delta;
-  if(k < 0) k = n - 1;
-  if(k >= n) k = 0;
-  int idx = vidListItem(k);
-  if(idx < 0) return;
-  vidIdxInList = k;
-  vidOpenPath(gMedStore[idx].path);
+  char path[FML_PATH_MAX] = "";
+  uint32_t id = 0;
+  mlLock();
+  vidSyncLocked();
+  int n = vidView.n;
+  int cur = vidCurId ? flexMlViewFindId(&vidView, &gMs.lib, vidCurId) : -1;
+  int base = cur >= 0 ? cur : (delta > 0 ? -1 : n);
+  for(int step = 1; step <= n && !id; step++){
+    int k = ((base + delta * step) % n + n) % n;
+    const FlexMlRec* r = &gMs.lib.recs[vidView.idx[k]];
+    if(r->flags & FML_R_LOCKED) continue;
+    if(r->id == vidCurId) break;                  // dio la vuelta: no hay otro
+    id = r->id;
+    snprintf(path, sizeof(path), "%s", r->path);
+  }
+  mlUnlock();
+  if(!id) return;
+  vidCurId = id;
+  vidOpenPath(path);
   vidRenderViewer();
 }
 
@@ -924,37 +1024,6 @@ static void vidPlaybackTick(){
   }
 }
 
-// Alimenta la salida de audio sin bloquear: se entregan solo los
-// bytes que el controlador acepta ahora mismo.
-static void vidAudioTick(){
-  if(!vidPlaying || vidKind != VK_AUDIO) return;
-  if(!flexAudioAvailable()){ vidPlaying = false; return; }
-  uint8_t blk[1024];
-  uint32_t end = vidWav.dataStart + vidWav.dataBytes;
-  if(vidAudioPos >= end){
-    vidPlaying = false;
-    vidEnded = true;
-    flexAudioStop();
-    mediaNotify(MOD_MEDIA, "Reproducci\xC3\xB3n terminada", vidName);
-    vidDrawControls(true);
-    return;
-  }
-  uint32_t want = end - vidAudioPos;
-  if(want > sizeof(blk)) want = sizeof(blk);
-  // Solo se reposiciona si hace falta. La lectura es secuencial, asi
-  // que normalmente el descriptor ya esta donde toca; buscar en cada
-  // bloque serian ~170 busquedas por segundo para nada.
-  // (Si el controlador de audio acepto menos bytes de los leidos, el
-  // descriptor SI queda por delante y entonces si se reposiciona.)
-  if(vidStream.pos != vidAudioPos && !mediaIoSeek(&vidStream, vidAudioPos)){
-    vidPlaying = false; return;
-  }
-  int rd = mediaIoRead(&vidStream, blk, want);
-  if(rd <= 0){ vidStatErrors++; vidPlaying = false; return; }
-  int wr = flexAudioWrite(blk, (size_t)rd);
-  if(wr > 0) vidAudioPos += (uint32_t)wr;
-}
-
 // -------------------------------------------------------------
 //  ENTRADA
 // -------------------------------------------------------------
@@ -984,7 +1053,6 @@ static void vidLeaveViewer(){
     enterApp(back);
     return;
   }
-  vidSyncListIndex();
   setBuf(fb);
   fillRect(0, 0, SCR_W, SCR_H, WIN_BG);
   appDrawChrome(IC_MULTIMEDIA);
@@ -1098,12 +1166,6 @@ static void vidViewerTouch(){
       if(vidEnded){ vidSeekToMs(0); vidEnded = false; }
       vidPlaying = !vidPlaying;
       vidNextUs = micros();
-    } else if(vidKind == VK_AUDIO){
-      if(vidPlaying){ vidPlaying = false; flexAudioStop(); }
-      else {
-        if(vidEnded){ vidAudioPos = vidWav.dataStart; vidEnded = false; }
-        vidPlaying = flexAudioStartPcm(vidWav.sampleRate, vidWav.channels, vidWav.bits);
-      }
     }
     vidDrawControls(true);
     return;
@@ -1159,10 +1221,9 @@ static void vidCycleOrientation(){
 static void vidListTouch(){
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
   int pad = uiPad();
-  const int tabY = by + 56, tw = (bw - 2 * pad) / 4;
-  const int top  = tabY + 42;
+  const int tabY = by + 68, tw = (bw - 2 * pad) / VID_TABS_N;
 
-  // Arrastre vertical de la lista (desplazamiento con inercia simple).
+  // Arrastre vertical de la lista.
   if(T.pressed){ vidListDragging = false; vidListDragY0 = T.y; vidListDragS0 = vidListScroll; }
   if(T.down && !vidListDragging && abs(T.y - vidListDragY0) > 8) vidListDragging = true;
   if(T.down && vidListDragging){
@@ -1173,28 +1234,37 @@ static void vidListTouch(){
     if(ns != vidListScroll){ vidListScroll = ns; vidListRender(); }
     return;
   }
+  // Pulsacion larga: el menu del elemento (no activa la seleccion sola).
+  static bool longFired = false;
+  if(!gHosted && T.down && !longFired && (millis() - T.downMs) > 550
+     && abs(T.x - T.startX) < 14 && abs(T.y - T.startY) < 14){
+    longFired = true;
+    uint32_t id = vidHitId(T.startX, T.startY);
+    if(id && !mkMulti){ mkOpenItemMenu(id, T.x, T.y + 10, NULL, 0); return; }
+    if(id && mkMulti){ mkToggle(id); vidListRender(); return; }
+  }
+  if(!T.down) longFired = false;
   if(!T.tap) return;
   if(vidListDragging){ vidListDragging = false; return; }
 
-  if(T.y >= tabY && T.y <= tabY + 30){
+  if(mkMulti && mkBarTouch(vidSelectAll)) return;
+  // Menu de la app (los tres puntos).
+  if(T.x > bx + bw - pad - 30 && T.y < by + 60){
+    static const uint8_t acts[3] = { MA_CONNECT, MA_SELECT, MA_TRASHBIN };
+    mkOpenAppMenu(bx + bw - MM_W / 2 - 16, by + 50, acts, 3);
+    return;
+  }
+  if(T.y >= tabY && T.y <= tabY + 28){
     int k = (T.x - bx - pad) / (tw > 0 ? tw : 1);
-    if(k >= 0 && k < 4 && k != vidFilter){
+    if(k >= 0 && k < VID_TABS_N && k != vidFilter){
       vidFilter = k; vidListScroll = 0; vidListRender();
     }
     return;
   }
-  int n = vidListCount();
-  for(int i = 0; i < n; i++){
-    int y = top + 26 + i * VID_ROW_H - vidListScroll;
-    if(T.y < y || T.y > y + VID_ROW_H - 8) continue;
-    int idx = vidListItem(i);
-    if(idx < 0) return;
-    vidIdxInList = i;
-    vidScreen = VS_VIEW;
-    vidOpenPath(gMedStore[idx].path);
-    vidRenderViewer();
-    return;
-  }
+  uint32_t id = vidHitId(T.x, T.y);
+  if(!id) return;
+  if(mkMulti){ mkToggle(id); vidListRender(); return; }
+  mkRequestOpen(id);                              // lo protegido pide antes la clave
 }
 
 // -------------------------------------------------------------
@@ -1206,18 +1276,20 @@ static void vidRenderAll(){
 }
 
 static void vidEnter(){
+  mkBind(&VID_APP);
   memset(&vidStream, 0, sizeof(vidStream));
   vidCtrlOn = true; vidCtrlMs = millis();
-  mediaIndexEnsure();
   appLoadSessionOnce(IC_MULTIMEDIA);
+  if(!gRelayout) mkReset();
   if(gMediaPending[0]){
     vidScreen = VS_VIEW;
+    vidCurId = vidIdOfPath(gMediaPending);
     vidOpenPath(gMediaPending);
     gMediaPending[0] = 0;
-    vidSyncListIndex();
     vidRenderViewer();
     return;
   }
+  if(gMlOk && !gRelayout) mlRequestScan();      // lo copiado por otras vias aparece al entrar
   vidScreen = VS_LIST;
   vidListRender();
 }
@@ -1225,7 +1297,6 @@ static void vidEnter(){
 static void vidTick(){
   if(vidScreen == VS_VIEW){
     vidPlaybackTick();
-    vidAudioTick();
     // Los controles se ocultan solos mientras se reproduce, y tambien
     // sobre una foto (para poder verla entera). En PAUSA se quedan:
     // ahi lo util es tenerlos a mano.
@@ -1241,13 +1312,11 @@ static void vidTick(){
     vidViewerTouch();
     return;
   }
-  // En la lista, el indice sigue construyendose: se repinta cuando
-  // aparecen elementos nuevos, no en cada vuelta.
-  static int vidLastShown = -1;
-  if(mediaIndexBusy()){
-    int n = vidListCount();
-    if(n != vidLastShown){ vidLastShown = n; vidListRender(); }
-  }
+  if(mkTick()) return;                            // menu, dialogos, papelera, hoja del servidor
+  // El catalogo cambio (subida del movil, miniatura lista, reconciliacion):
+  // como mucho un repintado cada 300 ms, y nunca a mitad de un arrastre.
+  if(gMlOk && !vidListDragging && millis() - vidSeenMs >= 300 && mlRev() != vidSeenRev){ vidListRender(); return; }
+  if(vidMorePending && !T.down){ vidListRender(); return; }
   vidListTouch();
 }
 
@@ -1277,11 +1346,13 @@ static bool vidBackScreen(){
   vidLeaveViewer();
   return true;
 }
+// En la lista, ATRAS cierra primero el menu, los dialogos y la seleccion.
+static bool vidBackLayer(){ return vidScreen == VS_LIST && mkBackLayer(); }
 
 static void vidSuspend(){
-  // Una app en segundo plano no decodifica ni suena. Se guarda la posicion
-  // y se suelta todo; al volver,
-  // vidResume reabre por donde iba.
+  // Una app en segundo plano no decodifica. Se guarda la posicion y se
+  // suelta todo; al volver, vidResume reabre por donde iba.
+  mkSuspend();
   vidReleaseMedia(true);
   gLand = false;                       // el framework tambien lo hace; aqui por si acaso
 }
@@ -1298,17 +1369,18 @@ static size_t vidShed(){
   return 1;
 }
 static void vidResume(){
+  mkBind(&VID_APP);
   vidCtrlOn = true; vidCtrlMs = millis();
   if(vidScreen == VS_VIEW){
     if(vidKind == VK_NONE && vidPath[0]) vidOpenPath(vidPath);
     vidRenderViewer();
     return;
   }
-  mediaIndexEnsure();
   vidListRender();
 }
 static void vidCloseApp(){
   vidReleaseMedia(true);
+  if(mkApp == &VID_APP) mkReset();
   gLand = false;
   vidScreen = VS_LIST;
   gSessLoaded[IC_MULTIMEDIA] = false;
@@ -1328,7 +1400,8 @@ static void vidLoadSess(){
   if(!flexFsReady()) return;
   VidSessV2 v;
   if(sessRead(VID_SESS_PATH, VID_SESS_VER, IC_MULTIMEDIA, &v, sizeof(v)) != sizeof(v)) return;
-  if(v.filter >= 0 && v.filter < 4) vidFilter = (int)v.filter;
+  // (La pestana 3 era "Audio", que ahora vive en Musica: se vuelve a "Todo".)
+  vidFilter = (v.filter >= 0 && v.filter < VID_TABS_N) ? (int)v.filter : 0;
   for(int i = 0; i < VID_RESUME_N; i++){
     vidResumeTab[i].key    = v.resumeKey[i];
     vidResumeTab[i].frame  = v.resumeFrame[i];

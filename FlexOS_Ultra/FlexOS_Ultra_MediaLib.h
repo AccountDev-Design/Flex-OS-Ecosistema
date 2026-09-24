@@ -347,9 +347,16 @@ static const uint16_t* mlThumbGetLocked(const FlexMlRec* r, int* budget, bool* m
 // -------------------------------------------------------------
 static bool mlGet(uint32_t id, FlexMlRec* out){ return flexMsGet(&gMs, id, out); }
 
+// Quien tiene ABIERTO un archivo de la biblioteca durante mucho rato (Musica
+// mientras suena) lo suelta ANTES de que se mueva, se borre o se sustituya.
+// Un solo oyente: solo Musica reproduce de continuo.
+static void (*gMlBeforeChange)(uint32_t id) = NULL;
+static inline void mlBeforeChange(uint32_t id){ if(gMlBeforeChange) gMlBeforeChange(id); }
+
 // Borrado DEFINITIVO (con su miniatura). Lo protegido tambien: pero solo
 // despues de que la interfaz haya pedido la clave del sistema.
 static bool mlDelete(uint32_t id){
+  mlBeforeChange(id);
   bool ok = flexMsDelete(&gMs, id);
   mlThumbDrop(id);
   mlWake();
@@ -359,6 +366,7 @@ static bool mlDelete(uint32_t id){
 // A la papelera (recuperable desde el Explorador). NUNCA un protegido: la
 // papelera es publica y se veria su nombre y su contenido.
 static bool mlTrash(uint32_t id){
+  mlBeforeChange(id);
   bool ok = flexMsTrash(&gMs, id);
   mlThumbDrop(id);
   mlWake();
@@ -371,6 +379,7 @@ static bool mlTrash(uint32_t id){
 // el ni ver como se llamaba). Desbloquear lo devuelve a su carpeta con su
 // nombre, sin pisar nada. Solo se llama DESPUES de verificar la clave.
 static bool mlSetLock(uint32_t id, bool lock, char* why, size_t whyCap){
+  mlBeforeChange(id);
   bool ok = flexMsSetLock(&gMs, id, lock, why, whyCap);
   mlThumbDrop(id);                                 // ni un pixel suyo se queda en RAM
   mlWake();
@@ -380,6 +389,7 @@ static bool mlSetLock(uint32_t id, bool lock, char* why, size_t whyCap){
 // Renombra (nombre que se ENSENA y nombre en el disco). Un protegido solo
 // cambia el nombre del catalogo: su archivo sigue llamandose por su id.
 static bool mlRename(uint32_t id, const char* newName, char* why, size_t whyCap){
+  mlBeforeChange(id);
   bool ok = flexMsRename(&gMs, id, newName, why, whyCap);
   mlWake();
   return ok;
@@ -399,6 +409,7 @@ static uint32_t mlAddFile(const char* tmp, int kind, const char* shownName, uint
 // sitio y solo entonces se borra el apartado; si algo falla, el original
 // vuelve, y si se va la luz a mitad lo resuelve el recorrido del arranque.
 static bool mlReplaceFile(uint32_t id, const char* tmp, char* why, size_t whyCap){
+  mlBeforeChange(id);
   bool ok = flexMsReplace(&gMs, id, tmp, why, whyCap);
   mlThumbDrop(id);
   mlWake();
@@ -737,6 +748,30 @@ static void mlBlitThumb(const uint16_t* src, int x, int y, int w, int h, int rad
     if(ddx * ddx + ddy * ddy <= rad * rad) continue;
     px(x + i, y + j, bg); px(x + w - 1 - i, y + j, bg);
     px(x + i, y + h - 1 - j, bg); px(x + w - 1 - i, y + h - 1 - j, bg);
+  }
+}
+
+// Miniatura a un TERCIO (132 -> 44 px, media de cada 3x3) para las filas de
+// Multimedia y Musica. Se escribe directa al lienzo, sin reservar nada; las
+// esquinas redondeadas no se pintan (se ve la tarjeta de debajo).
+#define ML_SMALL (ML_SIDE / 3)
+static void mlBlitThumbSmall(const uint16_t* src, int x, int y, int rad){
+  if(!src) return;
+  for(int ry = 0; ry < ML_SMALL; ry++){
+    int dy = y + ry;
+    if(dy < gClipY0 || dy > gClipY1) continue;
+    for(int rx = 0; rx < ML_SMALL; rx++){
+      int dx = x + rx;
+      if(dx < gClipX0 || dx > gClipX1) continue;
+      int cx = rx < rad ? rad - rx : (rx >= ML_SMALL - rad ? rx - (ML_SMALL - 1 - rad) : 0);
+      int cy = ry < rad ? rad - ry : (ry >= ML_SMALL - rad ? ry - (ML_SMALL - 1 - rad) : 0);
+      if(cx && cy && cx * cx + cy * cy > rad * rad) continue;
+      const uint16_t* p = src + (size_t)(ry * 3) * ML_SIDE + (size_t)rx * 3;
+      uint32_t r = 0, g = 0, b = 0;
+      for(int k = 0; k < 3; k++, p += ML_SIDE)
+        for(int j = 0; j < 3; j++){ uint16_t c = p[j]; r += c >> 11; g += (c >> 5) & 63u; b += c & 31u; }
+      px(dx, dy, (uint16_t)(((r / 9) << 11) | ((g / 9) << 5) | (b / 9)));
+    }
   }
 }
 

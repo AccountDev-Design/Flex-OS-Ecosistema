@@ -180,7 +180,10 @@ static const uint8_t APP_WEIGHT[APP_N] = {
   // caidas es aritmetica sobre una muestra y el historial son 200
   // bytes. Lo unico grande es la banda del aviso, y se pide al abrirlo
   // y se suelta al cerrarlo (ver FlexOS_Ultra_FallAlert.h).
-  FLEXMEM_W_LIGHT
+  FLEXMEM_W_LIGHT,
+  // 18 Musica. Un bloque de audio (unos KB) y miniaturas de 44 px de la
+  // cache compartida; el DMA del I2S va en RAM interna, no en PSRAM.
+  FLEXMEM_W_MEDIUM
 };
 static int appWeight(int id){ return (id >= 0 && id < APP_N) ? (int)APP_WEIGHT[id] : FLEXMEM_W_LIGHT; }
 static const char* appWeightName(int id){

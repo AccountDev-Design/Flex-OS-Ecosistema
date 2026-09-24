@@ -254,7 +254,7 @@
 #include "FlexOS_Ultra_QuickPanel.h"         // panel rapido: catalogo de controles y render
 #include "FlexOS_Ultra_QuickPanelGlass.h"    // panel rapido: material Liquid Glass cacheado
 #include "FlexOS_Ultra_QuickPanelEdit.h"     // panel rapido: modo edicion
-#include "FlexOS_Ultra_Media.h"              // nucleo de medios: LittleFS, clasificacion e indice
+#include "FlexOS_Ultra_Media.h"              // nucleo de medios: LittleFS, lectura y clasificacion
 #include "FlexOS_Ultra_MediaLib.h"           // biblioteca de medios: catalogo, miniaturas persistentes, tarea de fondo
 #include "FlexOS_Ultra_AppCamera.h"          // app Camara
 #include "FlexOS_Ultra_Keyboard.h"           // teclado de 4 capas y maquetacion de texto
@@ -282,6 +282,7 @@
 #include "FlexOS_Ultra_System.h"             // I2C, soltar caches, Optimizar Flex OS y cambio de tema
 #include "FlexOS_Ultra_WebServer.h"          // Flex Web Server: tarea del servidor y hoja "Conectar con el movil"
 #include "FlexOS_Ultra_AppGallery.h"         // Galeria
+#include "FlexOS_Ultra_AppMusic.h"           // Musica: biblioteca de audio y reproductor en segundo plano
 #include "FlexOS_Ultra_IMU.h"                // Flex IMU Service: reparto del GY-BNO085 y orientacion
 #include "FlexOS_Ultra_DeviceCare.h"         // Flex Device Care: app, historial, salud y grafico del GY-BNO085
 #include "FlexOS_Ultra_DeviceTests.h"        // Device Care: pruebas, diagnostico y Post-Impact Check
@@ -720,9 +721,9 @@ void loop(){
                           // DeX cerrada, pantalla en exclusiva de otro subsistema), suelta
                           // su enganche del sensor.
   faPendingTick();        // aviso de caida que no cupo (cortina, OTA, bloqueo): sale al despejarse
-  mediaIndexTick();       // indice LittleFS: un lote corto cuando esta activo
   mlTick();               // biblioteca de medios: avisos de su tarea de fondo para la isla
   webTick();              // Flex Web Server: avisos, tarjetas, Wi-Fi y bloqueo (la red va en su tarea)
+  musAudioTick();         // Musica: alimenta el DMA aunque la app no este delante (no bloquea)
   if(!gSafeMode){
     wifiAutoReconnectTick();// reconexion diferida, una vez por arranque
     ntpTick();              // la red corre en su tarea, nunca aqui

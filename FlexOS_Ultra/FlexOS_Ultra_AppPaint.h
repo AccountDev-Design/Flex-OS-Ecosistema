@@ -314,10 +314,9 @@ static void paintNew(){
   char full[FLEXFS_PATH_MAX];
   if(!flexFsNewName(FLEXFS_DIR_PAINT, "Dibujo", FLEXFS_EXT_PAINT, full, sizeof(full))) return;
   if(!flexPaintCreate(full, PAINT_CW, PAINT_CH)) return;
-  // Hay un archivo nuevo en /Paint: el indice de medios queda caducado y
-  // la biblioteca reconcilia en segundo plano. Es lo que hace que un dibujo
-  // recien creado aparezca en la Galeria sin refrescar a mano.
-  mediaIndexInvalidate();
+  // Hay un archivo nuevo en /Paint: la biblioteca reconcilia en segundo
+  // plano. Es lo que hace que un dibujo recien creado aparezca en la
+  // Galeria sin refrescar a mano.
   mlRequestScan();
   paintReload();
   for(int i = 0; i < paintListN; i++){

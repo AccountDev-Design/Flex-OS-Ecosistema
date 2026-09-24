@@ -335,7 +335,10 @@ bool     flexFsFactoryErase(){ return false; }
 // debe dibujar ningun control de sonido. Que las pruebas corran por
 // aqui comprueba precisamente eso.
 bool        flexAudioBegin(){ return false; }
-bool        flexAudioAvailable(){ return false; }
+// Las capturas de Musica (INO_SHOTS) lo encienden para ver el reproductor
+// completo; ninguna prueba reproduce nada.
+bool        gStubAudioOk = false;
+bool        flexAudioAvailable(){ return gStubAudioOk; }
 const char* flexAudioError(){ return "Sin codec de audio"; }
 bool        flexAudioStartPcm(uint32_t, uint16_t, uint16_t){ return false; }
 bool        flexAudioStartPcmBuffered(uint32_t, uint16_t, uint16_t, uint16_t){ return false; }

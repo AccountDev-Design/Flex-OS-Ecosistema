@@ -58,7 +58,6 @@ GANCHOS = [
     ("av1Close",         "flexAppStop(",       "cerrar no ejecutaria onStop ni soltaria los recursos de la app"),
     ("av1Close",         "av1FreeRegions()",   "cerrar filtraria la memoria de la app en cada apertura"),
     ("loop",           "flexPollTouch()", "no habria tactil"),
-    ("loop",           "mediaIndexTick()", "el indice LittleFS de medios nunca terminaria de construirse"),
     ("loop",           "wifiAutoReconnectTick()", "la red guardada no se reconectaria tras arrancar"),
     # MULTITAREA POR MEMORIA. Sin memTick() la medida se quedaria congelada en la
     # del arranque: el selector, Almacenamiento y la puerta de admision de apps
@@ -73,10 +72,6 @@ GANCHOS = [
     ("enterApp",       "memAdmitApp(",    "se abriria una app pesada invadiendo la reserva de seguridad"),
     ("appSuspend",     "appEnforceMemoryBudget()", "nada recortaria memoria al acumularse apps en segundo plano"),
     ("setup",          "flexAudioBegin()","el codec no se sondearia y el audio quedaria desactivado sin motivo"),
-    # Un dibujo recien creado tiene que aparecer en la Galeria sin que
-    # nadie refresque a mano: sin esta invalidacion, el indice se queda
-    # con la foto anterior hasta el siguiente escaneo.
-    ("paintNew",       "mediaIndexInvalidate()", "un dibujo nuevo no aparecería en la Galeria hasta reindexar por otro motivo"),
     # FLEX IMU SERVICE. Un solo sensor, dos consumidores (la deteccion de
     # caidas de Device Care y Flex Compass). El servicio es quien mueve el
     # driver: sin su tick, el GY-BNO085 no entrega un solo informe y las DOS
@@ -161,6 +156,14 @@ GANCHOS = [
     ("filesReload",    "filesIsLibraryDir(", "el Explorador ensenaria la carpeta protegida"),
     ("almScan",        "FML_DIR_ROOT",    "Archivos grandes ensenaria lo protegido por su ruta y su tamano"),
     ("paintNew",       "mlRequestScan()", "un dibujo nuevo no apareceria en la Galeria hasta reconciliar por otro motivo"),
+    # MUSICA. El reproductor vive en loop(), no en el tick de la app: sin esto
+    # la musica se cortaria al salir de ella. Y la pista que suena se suelta
+    # ANTES de que su archivo se mueva o se borre.
+    ("loop",           "musAudioTick()",  "la musica se cortaria al salir de la app (nadie alimentaria el DMA)"),
+    ("musAudioTick",   "ST_LOCK",         "una pista protegida seguiria sonando (y a la vista) con el P4 bloqueado"),
+    ("mediaOpenInPlayer", "musOpenPath(", "un audio abierto desde el Explorador no llegaria al reproductor de Musica"),
+    ("mlSetLock",      "mlBeforeChange(", "bloquear la pista que suena la moveria con el archivo abierto"),
+    ("mlDelete",       "mlBeforeChange(", "borrar la pista que suena la quitaria con el archivo abierto"),
 ]
 
 # Llamadas PROHIBIDAS dentro de una funcion: (funcion, llamada, motivo).
@@ -244,6 +247,10 @@ PROHIBIDOS = [
     ("webTask",          "flxFlush",           "la tarea del servidor no pinta"),
     ("whVerify",         "flexLockVerifyBegin(", "mezclaria la verificacion que la pantalla tuviera a medias"),
     ("whEvent",          "gWebEvR =",          "solo loopTask mueve el indice de lectura de la cola de eventos"),
+    # El audio es de Musica: Multimedia no puede pararlo al soltar su visor
+    # (abrir una foto cortaria la musica que suena de fondo).
+    ("vidReleaseMedia",  "flexAudioStop(",     "abrir o cerrar una foto cortaria la musica de fondo"),
+    ("musAudioTick",     "delay(",             "el reproductor va en loop(): un delay congelaria el sistema entero"),
 ]
 
 RE_MOD = re.compile(r'^#include\s+"(FlexOS_Ultra_(\w+)\.h)"', re.M)

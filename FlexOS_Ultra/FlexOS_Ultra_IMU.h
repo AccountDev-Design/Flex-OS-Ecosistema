@@ -63,7 +63,7 @@
 // ##  su sitio; no lo incluyas por tu cuenta desde otro lado.
 // #############################################################
 #pragma once
-#include "FlexOS_Ultra_AppGallery.h" // eslabon anterior de la cadena
+#include "FlexOS_Ultra_AppMusic.h" // eslabon anterior de la cadena
 #include "FlexOS_BNO085.h"          // EL driver del IMU (unidad de traduccion aparte)
 
 // #############################################################

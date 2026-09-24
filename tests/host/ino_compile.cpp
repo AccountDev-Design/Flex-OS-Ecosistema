@@ -6142,7 +6142,11 @@ static void testCompassEnSitioDeCodeIDE(){
   printf("Flex Compass ocupa la ranura que era de Code IDE\n");
 
   // ---- 1. El registro ----
-  chk(APP_N == 18, "el registro tiene 18 apps: Code IDE ya no esta");
+  // Musica se anadio DESPUES, al final (id 18), sin mover ningun id.
+  chk(APP_N == 19 && IC_MUSICA == 18, "el registro tiene 19 apps: Code IDE ya no esta y Musica va al final");
+  { bool noIde = true;
+    for(int i = 0; i < APP_N; i++) if(strstr(APP[i][0], "Code") || strstr(APP[i][0], "IDE")) noIde = false;
+    chk(noIde, "ningun nombre del registro es Code IDE"); }
   chk(IC_BRUJULA == 7, "Flex Compass es el indice 7, el que tenia Code IDE");
   chk(APP_REG[IC_BRUJULA].enter == compassEnter && APP_REG[IC_BRUJULA].tick == compassTick,
       "y esa fila abre la brujula REAL, no una pantalla nueva");
@@ -7514,6 +7518,134 @@ static void testKitMedios(){
   memset(&gMs, 0, sizeof(gMs));
 }
 
+// #############################################################
+//  MUSICA · anterior/siguiente, lo protegido y los archivos que cambian
+// #############################################################
+static void testMusica(){
+  printf("Musica: pistas sin protegidos, sin lo que no suena, y que se sueltan a tiempo\n");
+  tkReset();
+  uint32_t a = tkAdd(FML_K_AUDIO, FML_F_WAV_PCM, "/Musica/a.wav", "A primera", false, true);
+  uint32_t b = tkAdd(FML_K_AUDIO, FML_F_WAV_ADPCM, "/System/Media/Protegido/2.wav", "B protegida", true, true);
+  tkAdd(FML_K_AUDIO, FML_F_MP3, "/Musica/c.mp3", "C mp3", false, false);
+  uint32_t d = tkAdd(FML_K_AUDIO, FML_F_WAV_ADPCM, "/Musica/d.wav", "D ultima", false, true);
+  tkAdd(FML_K_PHOTO, FML_F_JPEG, "/Imagenes/x.jpg", NULL, false, true);
+  musViewReady = false;
+  mlLock(); musSyncLocked(); mlUnlock();
+  chk(musView.n == 4, "Musica ensena solo el audio (4 de 5)");
+  chk(musView.n == 4 && gMs.lib.recs[musView.idx[0]].id == a && gMs.lib.recs[musView.idx[3]].id == d,
+      "ordenadas por titulo: A, B, C, D");
+  musId = a;
+  musNext(+1, false);
+  chk(musId == d, "siguiente desde A salta la protegida y el MP3: D");
+  chk(!musLoaded && strstr(musErr, "Sin salida de audio") != NULL, "sin codec (en el PC) no suena, y lo dice");
+  musNext(+1, false);
+  chk(musId == a, "siguiente desde la ultima vuelve a A");
+  musNext(-1, false);
+  chk(musId == d, "anterior desde A: D, sin pasar por la protegida");
+  musId = d;
+  musNext(+1, true);
+  chk(!musLoaded && musId == d, "al acabar la ultima, la lista no vuelve a empezar sola");
+  // La pista que suena se suelta ANTES de que su archivo cambie.
+  musId = a; snprintf(musPath, sizeof(musPath), "/Musica/a.wav");
+  gMlBeforeChange = musBeforeChange;
+  mlBeforeChange(a);
+  chk(musId == 0 && !musPath[0], "bloquear o borrar la pista que suena la suelta antes");
+  // Protegida y P4 bloqueado: se olvida, titulo incluido.
+  musId = b; musProtected = true;
+  snprintf(musPath, sizeof(musPath), "%s", "/System/Media/Protegido/2.wav");
+  snprintf(musTitle, sizeof(musTitle), "B protegida");
+  auto st0 = gState; gState = ST_LOCK;
+  musAudioTick();
+  chk(!musTitle[0] && !musPath[0] && !musProtected, "con el P4 bloqueado, una pista protegida se olvida");
+  gState = st0;
+  chk(!musBgWork(), "sin sonar, Musica no reclama trabajo en segundo plano");
+  musCloseApp();
+  memset(&gMs, 0, sizeof(gMs));
+}
+
+// #############################################################
+//  CAPTURAS de Galeria, Multimedia y Musica (solo con INO_SHOTS=1)
+//  ------------------------------------------------------------
+//  El codigo REAL de las tres apps pinta sobre un catalogo en memoria y
+//  el framebuffer se vuelca a build/shot_*.ppm, para REVISAR el aspecto
+//  (no es una comprobacion). Sin sistema de archivos no hay miniaturas:
+//  se ven los marcadores honestos ("sin vista previa", el icono).
+// #############################################################
+extern bool gStubAudioOk;
+static void shotSave(const char* name){
+  char p[96]; snprintf(p, sizeof(p), "build/shot_%s.ppm", name);
+  FILE* f = fopen(p, "wb");
+  if(!f) return;
+  fprintf(f, "P6\n%d %d\n255\n", SCR_W, SCR_H);
+  for(int i = 0; i < SCR_W * SCR_H; i++){
+    uint16_t c = fb[i];
+    uint8_t rgb[3] = { (uint8_t)(((c >> 11) & 31) * 255 / 31), (uint8_t)(((c >> 5) & 63) * 255 / 63), (uint8_t)((c & 31) * 255 / 31) };
+    fwrite(rgb, 1, 3, f);
+  }
+  fclose(f);
+  printf("  captura: tests/host/%s\n", p);
+}
+static void shotApp(int app){
+  gState = ST_APP; gAppId = app; gLand = false; gHosted = false;
+  gAppW = SCR_W; gAppH = SCR_H;
+  uiClipFull();
+  setBuf(fb);
+  fillRect(0, 0, SCR_W, SCR_H, WIN_BG);
+  appDrawChrome(app);
+  if(!(APP_REG[app].flags & APP_CUSTOM_HEADER)) appDrawHeader(app);
+}
+static void testCapturasMedios(){
+  if(!getenv("INO_SHOTS")) return;
+  printf("Capturas de Galeria, Multimedia y Musica\n");
+  tkReset();
+  bool ok0 = gMlOk; gMlOk = true;
+  gLockType = 1;
+  tkAdd(FML_K_PHOTO, FML_F_JPEG, "/Imagenes/Playa 2024.jpg", NULL, false, true);
+  uint32_t lk = tkAdd(FML_K_PHOTO, FML_F_JPEG, "/System/Media/Protegido/2.jpg", NULL, true, true);
+  uint32_t vd = tkAdd(FML_K_VIDEO, FML_F_AVI_MJPEG, "/Videos/Cumple.avi", NULL, false, true);
+  tkAdd(FML_K_PHOTO, FML_F_HEIC, "/Imagenes/IMG_0412.heic", NULL, false, false);
+  tkAdd(FML_K_DRAW, FML_F_FXP, "/Paint/Dibujo 1.fxp", NULL, false, true);
+  gMs.lib.recs[flexMlFindId(&gMs.lib, vd)].durMs = 83000;
+  uint32_t s1 = tkAdd(FML_K_AUDIO, FML_F_WAV_ADPCM, "/Musica/Tema.wav", "Tema de verano", false, true);
+  tkAdd(FML_K_AUDIO, FML_F_MP3, "/Musica/Directo.mp3", "En directo", false, false);
+  tkAdd(FML_K_AUDIO, FML_F_WAV_PCM, "/System/Media/Protegido/8.wav", "Privada", true, true);
+  { int i = flexMlFindId(&gMs.lib, s1); snprintf(gMs.lib.recs[i].artist, sizeof(gMs.lib.recs[i].artist), "Grupo"); gMs.lib.recs[i].durMs = 205000; }
+
+  // Galeria: seleccion multiple con la barra.
+  shotApp(IC_GALERIA); mkBind(&GAL_APP); galViewReady = false;
+  mkEnterMulti(0); mkToggle(vd);
+  galRender(); shotSave("galeria_seleccion");
+  mkReset();
+  // Galeria: menu contextual de una foto.
+  shotApp(IC_GALERIA); galRender();
+  { int bx, by, bw, bh; uiBox(bx, by, bw, bh); mkOpenItemMenu(vd, bx + bw / 2, by + 260, NULL, 0); mmDraw(1.0f); }
+  shotSave("galeria_menu"); mkReset();
+  // Galeria: sin PIN.
+  gLockType = 0; shotApp(IC_GALERIA); galRender(); mkMenuId = vd; mkDoAction(MA_LOCK); shotSave("galeria_sin_pin");
+  mkReset(); gLockType = 1;
+  // Multimedia: lista con un protegido.
+  shotApp(IC_MULTIMEDIA); mkBind(&VID_APP); vidViewReady = false; vidScreen = VS_LIST; vidListRender(); shotSave("multimedia_lista");
+  mkReset();
+  // Musica: lista y reproductor.
+  gStubAudioOk = true;
+  shotApp(IC_MUSICA); mkBind(&MUS_APP); musViewReady = false;
+  musId = s1; musLoaded = true; musPlaying = true;
+  snprintf(musPath, sizeof(musPath), "/Musica/Tema.wav"); snprintf(musTitle, sizeof(musTitle), "Tema de verano");
+  snprintf(musSub, sizeof(musSub), "Grupo");
+  memset(&musAs, 0, sizeof(musAs));
+  musAs.wav.sampleRate = 22050; musAs.wav.channels = 1; musAs.wav.bits = 16; musAs.wav.format = FLEXWAV_FMT_PCM;
+  musAs.wav.dataBytes = 205u * 44100u; musAs.outFrame = 2; musAs.delivered = 72ull * 44100ull;
+  musScreen = MUS_LIST; musRender(); shotSave("musica_lista");
+  shotApp(IC_MUSICA); musScreen = MUS_NOW; musRender(); shotSave("musica_reproduciendo");
+  musPlaying = false; musLoaded = false; musForget(); musScreen = MUS_LIST;
+  gStubAudioOk = false;
+  (void)lk;
+  mkReset();
+  gMlOk = ok0;
+  memset(&gMs, 0, sizeof(gMs));
+  gState = ST_HOME; gAppId = 0;
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -7615,6 +7747,8 @@ int main(){
   testWidgetsDePagina();
   testIntensidadVidrio();
   testKitMedios();
+  testMusica();
+  testCapturasMedios();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }
