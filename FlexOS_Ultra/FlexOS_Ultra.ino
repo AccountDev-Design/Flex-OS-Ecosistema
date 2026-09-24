@@ -256,10 +256,11 @@
 #include "FlexOS_Ultra_QuickPanelEdit.h"     // panel rapido: modo edicion
 #include "FlexOS_Ultra_Media.h"              // nucleo de medios: LittleFS, clasificacion e indice
 #include "FlexOS_Ultra_MediaLib.h"           // biblioteca de medios: catalogo, miniaturas persistentes, tarea de fondo
-#include "FlexOS_Ultra_AppMultimedia.h"      // app Multimedia (reproductor real)
 #include "FlexOS_Ultra_AppCamera.h"          // app Camara
 #include "FlexOS_Ultra_Keyboard.h"           // teclado de 4 capas y maquetacion de texto
 #include "FlexOS_Ultra_FileKit.h"            // kit de archivos: menu, nombre, confirmacion y papelera
+#include "FlexOS_Ultra_MediaKit.h"           // kit de listas de medios: seleccion, menus y acciones comunes
+#include "FlexOS_Ultra_AppMultimedia.h"      // app Multimedia (reproductor real)
 #include "FlexOS_Ultra_AppNotes.h"           // app Notas
 #include "FlexOS_Ultra_KeyboardSettings.h"   // ajustes del teclado (pantalla propia)
 #include "FlexOS_Ultra_AppStorage.h"         // app Almacenamiento y detalles de memoria

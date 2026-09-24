@@ -24,7 +24,7 @@
 // ##      entrada del sistema es siempre FlexOS_Ultra.ino.
 // #############################################################
 #pragma once
-#include "FlexOS_Ultra_FileKit.h"   // eslabon anterior de la cadena
+#include "FlexOS_Ultra_AppMultimedia.h"   // eslabon anterior de la cadena
 
 // #############################################################
 // ##  APP NOTAS  ·  lista de notas REALES en /Notas

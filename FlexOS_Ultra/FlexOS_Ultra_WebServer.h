@@ -341,11 +341,20 @@ static void webSheetOpen(){
   if(gWebState == WEBS_NOWIFI && gNetOnline) gWebState = WEBS_OFF;
   webSheetRender();
 }
-static void webSheetClose(){
+// Cierra la hoja SIN repintar a nadie (la app pasa a segundo plano). El
+// servidor sigue como estaba: la hoja solo es la ventana para verlo.
+static void webSheetDismiss(){
   webSheetOn = false;
   if(gWebQr){ mediaFree(gWebQr); gWebQr = NULL; gWebQrFor[0] = 0; }
+}
+static void webSheetClose(){
+  webSheetDismiss();
   if(webSheetBack) webSheetBack();
 }
+// Para el kit de listas de medios (Galeria, Multimedia, Musica): abre la
+// hoja y, al cerrarla, repinta la app que la abrio.
+static void webSheetOpenFor(void (*back)()){ webSheetBack = back; webSheetOpen(); }
+static bool webSheetIsOpen(){ return webSheetOn; }
 
 // La hoja se lleva los toques mientras esta abierta. true = la hoja esta
 // abierta (la app no debe procesar nada mas este cuadro).

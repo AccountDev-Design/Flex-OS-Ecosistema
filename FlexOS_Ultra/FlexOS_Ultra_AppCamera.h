@@ -25,7 +25,7 @@
 // ##      entrada del sistema es siempre FlexOS_Ultra.ino.
 // #############################################################
 #pragma once
-#include "FlexOS_Ultra_AppMultimedia.h"   // eslabon anterior de la cadena
+#include "FlexOS_Ultra_MediaLib.h"   // eslabon anterior de la cadena
 
 // #############################################################
 // ##  APP CAMARA (ESQUELETO estilo iPhone)

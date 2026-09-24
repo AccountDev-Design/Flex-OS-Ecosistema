@@ -89,32 +89,19 @@ static int      galDragY0 = 0, galDragS0 = 0;
 static bool     galDragging = false, galLongFired = false;
 static bool     galMorePending = false;
 static uint32_t galSeenRev = 0, galSeenMs = 0;
-static uint32_t galMenuId = 0;          // elemento sobre el que se abrio el menu (0 = menu de la app)
 static uint32_t galResumeId = 0;
 static int      galCountCache = 0;      // para la geometria del desplazamiento (sin cerrojo)
 static void galRender();
 
-// ---- Seleccion multiple: por ID (no por posicion) ----
-// Un id sigue siendo el mismo aunque la lista se reordene porque llego
-// una foto nueva del movil. Una posicion no.
-static bool     galMulti = false;
-static uint32_t galSel[FML_CAP];
-static uint16_t galSelN = 0;
-static bool galIsSel(uint32_t id){ for(int k = 0; k < galSelN; k++) if(galSel[k] == id) return true; return false; }
-static void galToggleSel(uint32_t id){
-  for(int k = 0; k < galSelN; k++) if(galSel[k] == id){ galSel[k] = galSel[--galSelN]; return; }
-  if(galSelN < FML_CAP) galSel[galSelN++] = id;
-}
-static void galClearSel(){ galSelN = 0; }
-
-// Dialogos propios (el menu y el aviso son los del kit de medios).
-enum { GDLG_NONE = 0, GDLG_NOLOCK, GDLG_INFO };
-static int galDlgKind = GDLG_NONE;
-static int galAskAct = MA_NONE;          // que confirma fkAsk
-static uint32_t galRenameId = 0;
+// Seleccion, menus y acciones: los del kit de listas de medios (mk*), los
+// MISMOS que Multimedia y Musica.
+static void galOpenId(uint32_t id);
+static const MediaListApp GAL_APP = { "Galer\xC3\xAD" "a", galRender, galOpenId, NULL };
 
 // ---- Geometria ----
-static int galHeadH(){ return 104; }
+// La cabecera del sistema ya dice "Galeria" (con su flecha de volver): aqui
+// solo el recuento con el menu, y las pestanas.
+static int galHeadH(){ return 76; }
 static void galCellRect(int i, int &x, int &y, int &w, int &h){
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
   int pad = uiPad(), gap = uiGap();
@@ -128,11 +115,10 @@ static int galMaxScroll(){
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
   int x, y, w, h; galCellRect(0, x, y, w, h);
   int rows = (galCountCache + GAL_COLS - 1) / GAL_COLS;
-  int need = galHeadH() + rows * (h + 26) + (galMulti ? 110 : 40);
+  int need = galHeadH() + rows * (h + 26) + (mkMulti ? MKB_H + 26 : 40);
   int m = need - bh;
   return m > 0 ? m : 0;
 }
-static int galMultiBarY(){ int bx, by, bw, bh; uiBox(bx, by, bw, bh); return by + bh - 96; }
 
 // ---- Dibujo de una celda ----
 static void galVideoBadge(int x, int y, int w, int h, uint32_t durMs){
@@ -197,8 +183,7 @@ static void galRenderGrid(){
   mlThumbNewPass();
   int budget = GAL_THUMB_BUDGET;
 
-  drawText(bx + pad, by + 14, "Galer\xC3\xAD" "a", 4, TH_TXT);
-  for(int i = 0; i < 3; i++) fillCircle(bx + bw - pad - 4, by + 22 + i * 12, 4, TH_NAV);
+  for(int i = 0; i < 3; i++) fillCircle(bx + bw - pad - 4, by + 8 + i * 10, 3, TH_NAV);
 
   if(!gMlOk){
     const char* t = !flexFsReady() ? "Sin almacenamiento" : gSafeMode ? "Modo seguro" : "Biblioteca no disponible";
@@ -217,17 +202,15 @@ static void galRenderGrid(){
   galCountCache = n;
   galSeenRev = gMs.lib.rev; galSeenMs = millis();
   // Quita de la seleccion lo que ya no existe (lo borro el movil o la web).
-  for(int k = 0; k < galSelN; ){
-    if(flexMlViewFindId(&galView, &gMs.lib, galSel[k]) < 0) galSel[k] = galSel[--galSelN]; else k++;
-  }
+  mkPruneLocked(&galView);
 
   { char cnt[48];
-    if(galMulti) snprintf(cnt, sizeof(cnt), "%u seleccionado%s", (unsigned)galSelN, galSelN == 1 ? "" : "s");
+    if(mkMulti) snprintf(cnt, sizeof(cnt), "%u seleccionado%s", (unsigned)mkSelN, mkSelN == 1 ? "" : "s");
     else snprintf(cnt, sizeof(cnt), "%d elemento%s", n, n == 1 ? "" : "s");
-    drawText(bx + pad, by + 52, cnt, 1, galMulti ? TH_PRIM : TH_TXT2); }
+    drawText(bx + pad, by + 12, cnt, 1, mkMulti ? TH_PRIM : TH_TXT2); }
 
   // ---- Pestanas ----
-  const int tabY = by + 68, tw = (bw - 2 * pad) / GAL_TABS;
+  const int tabY = by + 38, tw = (bw - 2 * pad) / GAL_TABS;
   for(int i = 0; i < GAL_TABS; i++){
     int tx = bx + pad + i * tw;
     if(i == galTab) fillRoundRect(tx + 2, tabY, tw - 4, 28, 14, TH_PRIM);
@@ -239,7 +222,7 @@ static void galRenderGrid(){
   if(gMs.scanning) st = "Buscando archivos\xE2\x80\xA6";
   else if(gMs.pending){ snprintf(stb, sizeof(stb), "Preparando miniaturas (%u)\xE2\x80\xA6", (unsigned)gMs.pending); st = stb; }
   else if(gMs.lib.n >= FML_CAP) st = "La biblioteca est\xC3\xA1 llena: hay archivos que no caben";
-  if(st) drawTextR(bx + bw - pad - 18, by + 52, st, 1, gMs.lib.n >= FML_CAP ? TH_WARN : TH_TXT2);
+  if(st) drawTextR(bx + bw - pad - 22, by + 12, st, 1, gMs.lib.n >= FML_CAP ? TH_WARN : TH_TXT2);
 
   if(n == 0){
     drawTextC(bx + bw / 2, by + bh / 2 - 30, "No hay nada aqu\xC3\xAD", 3, TH_TXT2);
@@ -256,8 +239,8 @@ static void galRenderGrid(){
     gClipY0 = by + galHeadH() - 6 > oy0 ? by + galHeadH() - 6 : oy0;
     galDrawCell(r, x, y, w, h, budget);
     gClipX0 = ox0; gClipX1 = ox1; gClipY0 = oy0; gClipY1 = oy1;
-    if(galMulti){
-      bool sel = galIsSel(r->id);
+    if(mkMulti){
+      bool sel = mkIsSel(r->id);
       int rad = w / 10; if(rad < 3) rad = 3;
       if(sel){ drawRoundRect(x, y, w, h, rad, TH_PRIM); drawRoundRect(x + 1, y + 1, w - 2, h - 2, rad, TH_PRIM); }
       int cx = x + w - 16, cy = y + h - 16;
@@ -275,40 +258,16 @@ static void galRenderGrid(){
   }
   // Recuento de la barra de seleccion, dentro del cerrojo (necesita la vista).
   int selLocked = 0, selOpen = 0, selectable = 0;
-  if(galMulti){
-    for(int k = 0; k < galSelN; k++){
-      int i = flexMlFindId(&gMs.lib, galSel[k]);
-      if(i >= 0 && (gMs.lib.recs[i].flags & FML_R_LOCKED)) selLocked++; else selOpen++;
-    }
-    for(int i = 0; i < n; i++) if(!(galRecLocked(i)->flags & FML_R_LOCKED)) selectable++;
-  }
+  if(mkMulti) mkCountLocked(&galView, &selLocked, &selOpen, &selectable);
   mlUnlock();
 
-  if(galMulti){
-    // Barra de acciones: lo que se puede hacer con LO SELECCIONADO.
-    int aby = galMultiBarY();
-    if(uiGlass) drawLiquidGlassPanel(bx + 10, aby, bw - 20, 84, 20, TH_GLASS2);
-    else        fillRoundRect(bx + 10, aby, bw - 20, 84, 20, TH_SURF2);
-    bool all = selectable > 0 && selOpen == selectable && !selLocked;
-    fillRoundRect(bx + 24, aby + 10, 150, 28, 14, TH_SURF);
-    drawTextC(bx + 24 + 75, aby + 17, all ? "Quitar selecci\xC3\xB3n" : "Seleccionar todo", 1, TH_TXT);
-    drawTextR(bx + bw - 28, aby + 17, "Salir", 2, TH_TXT2);
-    int ay = aby + 46, slots = 3, sw = (bw - 40) / slots;
-    const char* lb[3] = { selLocked && !selOpen ? "Desbloquear" : "Bloquear", "Papelera", "Borrar" };
-    uint16_t col[3] = { TH_TXT, selLocked ? TH_MUTE : TH_TXT, rgb565(228, 70, 70) };
-    for(int k = 0; k < slots; k++){
-      bool on = galSelN > 0 && !(k == 1 && selLocked);
-      drawTextC(bx + 20 + k * sw + sw / 2, ay + 6, lb[k], 2, on ? col[k] : TH_MUTE);
-    }
-  }
-  if(mmOn){ mmDraw(1.0f); mmAnimDone = true; }
-  if(mmDlgOn) mmDlgDraw();
-  if(fkAskOn) fkAskDraw();
+  if(mkMulti) mkDrawBar(selLocked, selOpen, selectable);
+  mkDrawOverlays();
   flxFlush(WIN_TOP, WIN_BOT);
 }
 
 static void galRender(){
-  if(webSheetOn){ webSheetRender(); return; }     // la hoja del servidor manda mientras esta abierta
+  if(webSheetIsOpen()){ webSheetRender(); return; }   // la hoja del servidor manda mientras esta abierta
   galRenderGrid();
 }
 
@@ -331,126 +290,6 @@ static void galOpenId(uint32_t id){
   galOpenPath(r.path);
 }
 
-// ---- Acciones con la clave ya comprobada ----
-static void galAuthDone(bool ok, int act, const uint32_t* ids, int n){
-  if(!ok){ galRender(); return; }
-  int done = 0;
-  char why[64] = "";
-  if(act == MA_OPEN && n == 1){ galOpenId(ids[0]); return; }
-  for(int k = 0; k < n; k++){
-    if(act == MA_LOCK)        done += mlSetLock(ids[k], true, why, sizeof(why)) ? 1 : 0;
-    else if(act == MA_UNLOCK) done += mlSetLock(ids[k], false, why, sizeof(why)) ? 1 : 0;
-    else if(act == MA_DELETE) done += mlDelete(ids[k]) ? 1 : 0;
-  }
-  galMulti = false; galClearSel();
-  char msg[64];
-  const char* verb = act == MA_LOCK ? "bloqueado" : act == MA_UNLOCK ? "desbloqueado" : "borrado";
-  snprintf(msg, sizeof(msg), "%d elemento%s %s%s", done, done == 1 ? "" : "s", verb, done == 1 ? "" : "s");
-  sysNotify("Galer\xC3\xAD" "a", done < n && why[0] ? why : msg);
-  galRender();
-}
-
-// Ids (de la seleccion o del elemento del menu) sobre los que actuar.
-static int galTargets(uint32_t* out, bool* anyLocked, bool* anyOpen){
-  int n = 0;
-  *anyLocked = *anyOpen = false;
-  mlLock();
-  if(galMulti){
-    for(int k = 0; k < galSelN; k++){
-      int i = flexMlFindId(&gMs.lib, galSel[k]);
-      if(i < 0) continue;
-      out[n++] = galSel[k];
-      if(gMs.lib.recs[i].flags & FML_R_LOCKED) *anyLocked = true; else *anyOpen = true;
-    }
-  } else if(galMenuId){
-    int i = flexMlFindId(&gMs.lib, galMenuId);
-    if(i >= 0){ out[n++] = galMenuId; if(gMs.lib.recs[i].flags & FML_R_LOCKED) *anyLocked = true; else *anyOpen = true; }
-  }
-  mlUnlock();
-  return n;
-}
-
-static uint32_t galTmpIds[FML_CAP];
-
-static void galDoAction(int act){
-  bool anyLocked = false, anyOpen = false;
-  if(act == MA_CONNECT){ webSheetBack = galRender; webSheetOpen(); return; }
-  if(act == MA_TRASHBIN){ fkTrashOpen(); return; }
-  if(act == MA_SELECT){
-    galMulti = true; galClearSel();
-    if(galMenuId) galToggleSel(galMenuId);
-    galRender(); return;
-  }
-  int n = galTargets(galTmpIds, &anyLocked, &anyOpen);
-  if(n == 0){ galRender(); return; }
-  switch(act){
-    case MA_LOCK: {
-      if(gLockType == 0){ galDlgKind = GDLG_NOLOCK; galRender(); mediaNoLockDialog(); return; }
-      // Solo lo que no estaba bloqueado.
-      int m = 0;
-      for(int k = 0; k < n; k++){ FlexMlRec r; if(mlGet(galTmpIds[k], &r) && !(r.flags & FML_R_LOCKED)) galTmpIds[m++] = galTmpIds[k]; }
-      mediaAuthRequest(MA_LOCK, galTmpIds, m, galAuthDone);
-      return;
-    }
-    case MA_UNLOCK: {
-      int m = 0;
-      for(int k = 0; k < n; k++){ FlexMlRec r; if(mlGet(galTmpIds[k], &r) && (r.flags & FML_R_LOCKED)) galTmpIds[m++] = galTmpIds[k]; }
-      mediaAuthRequest(MA_UNLOCK, galTmpIds, m, galAuthDone);
-      return;
-    }
-    case MA_TRASH: {
-      if(anyLocked){ sysNotify("Galer\xC3\xAD" "a", "Lo protegido no va a la papelera: usa Borrar"); galRender(); return; }
-      int done = 0;
-      for(int k = 0; k < n; k++) done += mlTrash(galTmpIds[k]) ? 1 : 0;
-      galMulti = false; galClearSel();
-      char msg[48]; snprintf(msg, sizeof(msg), "%d a la papelera", done);
-      sysNotify("Galer\xC3\xAD" "a", msg);
-      galRender();
-      return;
-    }
-    case MA_DELETE: {
-      char sub[64];
-      if(n == 1 && !anyLocked){
-        FlexMlRec r; mlGet(galTmpIds[0], &r);
-        flexMlDisplayName(&r, sub, sizeof(sub));
-      } else snprintf(sub, sizeof(sub), "%d elemento%s", n, n == 1 ? "" : "s");
-      galAskAct = MA_DELETE;
-      galRender();
-      fkAskOpen("\xC2\xBF" "Borrar definitivamente?", sub);
-      return;
-    }
-    case MA_RENAME: {
-      if(anyLocked || n != 1){ galRender(); return; }
-      FlexMlRec r; mlGet(galTmpIds[0], &r);
-      char stem[FLEXFS_NAME_MAX]; flexFsStem(r.name[0] ? r.name : r.path, stem, sizeof(stem));
-      galRenameId = galTmpIds[0];
-      fkNameOpen("Renombrar", stem);
-      return;
-    }
-  }
-  galRender();
-}
-
-// Menu de un elemento: SOLO las acciones que se pueden hacer con el.
-static void galOpenItemMenu(uint32_t id, int ax, int ay){
-  FlexMlRec r;
-  if(!mlGet(id, &r)) return;
-  galMenuId = id;
-  uint8_t a[MM_MAX]; int n = 0;
-  bool locked = (r.flags & FML_R_LOCKED) != 0;
-  a[n++] = MA_SELECT;
-  a[n++] = locked ? MA_UNLOCK : MA_LOCK;
-  if(!locked){ a[n++] = MA_RENAME; a[n++] = MA_TRASH; }
-  a[n++] = MA_DELETE;
-  mmOpen(ax, ay, a, n);
-}
-static void galOpenAppMenu(){
-  galMenuId = 0;
-  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
-  uint8_t a[3] = { MA_CONNECT, MA_SELECT, MA_TRASHBIN };
-  mmOpen(bx + bw - MM_W / 2 - 16, by + 50, a, 3);
-}
-
 // Toque sobre la rejilla -> elemento (o 0).
 static uint32_t galHitId(int tx, int ty){
   uint32_t id = 0;
@@ -464,72 +303,16 @@ static uint32_t galHitId(int tx, int ty){
   return id;
 }
 
-static void galSelectAllToggle(){
+static void galSelectAll(){
   mlLock();
   galSyncLocked();
-  int selectable = 0, have = 0;
-  for(int i = 0; i < galView.n; i++){
-    const FlexMlRec* r = galRecLocked(i);
-    if(r->flags & FML_R_LOCKED) continue;             // lo protegido nunca entra en "todo"
-    selectable++;
-    if(galIsSel(r->id)) have++;
-  }
-  bool all = selectable > 0 && have == selectable;
-  galClearSel();
-  if(!all) for(int i = 0; i < galView.n; i++){
-    const FlexMlRec* r = galRecLocked(i);
-    if(!(r->flags & FML_R_LOCKED)) galSel[galSelN++] = r->id;
-  }
+  mkSelectAllLocked(&galView);
   mlUnlock();
   galRender();
 }
 
 static void galTick(){
-  if(webSheetTick()) return;                      // "Conectar con el movil" abierta
-  // --- Capas modales, de arriba abajo ---
-  if(fkTrashOn){ if(!fkTrashTick()){ mlRequestScan(); galRender(); } return; }
-  if(fkNameOn){
-    int r = fkNameTick();
-    if(r == 1 && galRenameId){
-      char why[64];
-      if(!mlRename(galRenameId, fkNameBuf, why, sizeof(why))) sysNotify("Galer\xC3\xAD" "a", why);
-    }
-    if(r != 0){ galRenameId = 0; galRender(); }
-    return;
-  }
-  if(fkAskOn){
-    int r = fkAskTick();
-    if(r == 1 && galAskAct == MA_DELETE){
-      bool anyLocked = false, anyOpen = false;
-      int n = galTargets(galTmpIds, &anyLocked, &anyOpen);
-      galAskAct = MA_NONE;
-      // Borrar algo protegido pide la clave; lo demas se borra ya.
-      if(anyLocked){ mediaAuthRequest(MA_DELETE, galTmpIds, n, galAuthDone); return; }
-      galAuthDone(true, MA_DELETE, galTmpIds, n);
-      return;
-    }
-    if(r != 0){ galAskAct = MA_NONE; galRender(); }
-    return;
-  }
-  if(mmDlgOn){
-    int r = mmDlgTick();
-    if(r != 0){
-      int kind = galDlgKind; galDlgKind = GDLG_NONE;
-      if(r == 1 && kind == GDLG_NOLOCK){ settingsJumpSecurity(); return; }
-      galRender();
-    }
-    return;
-  }
-  if(mmOn){
-    mmAnimTick();
-    if(T.tap){
-      int a = mmHit(T.x, T.y);
-      if(a == 0) return;                                 // dentro, entre filas
-      mmOn = false;
-      if(a > 0) galDoAction(a); else galRender();
-    }
-    return;
-  }
+  if(mkTick()) return;                            // menu, dialogos, papelera, hoja del servidor
 
   // --- El catalogo cambio (subida del movil, miniatura lista, recorrido) ---
   if(gMlOk && !galDragging && millis() - galSeenMs >= GAL_REFRESH_MS && mlRev() != galSeenRev){ galRender(); return; }
@@ -557,38 +340,23 @@ static void galTick(){
      && abs(T.x - T.startX) < 14 && abs(T.y - T.startY) < 14 && T.startY > by + galHeadH() - 6){
     galLongFired = true;
     uint32_t id = galHitId(T.startX, T.startY);
-    if(id && !galMulti){ galOpenItemMenu(id, T.x, T.y + 10); return; }
-    if(id && galMulti){ galToggleSel(id); galRender(); return; }
+    if(id && !mkMulti){ mkOpenItemMenu(id, T.x, T.y + 10, NULL, 0); return; }
+    if(id && mkMulti){ mkToggle(id); galRender(); return; }
   }
   if(!T.down) galLongFired = false;
   if(!T.tap) return;
   if(galDragging){ galDragging = false; return; }
 
   // --- Barra de seleccion ---
-  if(galMulti){
-    int aby = galMultiBarY();
-    if(T.y >= aby && T.y <= aby + 84){
-      if(T.y < aby + 42){
-        if(T.x < bx + 180){ galSelectAllToggle(); return; }
-        if(T.x > bx + bw - 100){ galMulti = false; galClearSel(); galRender(); return; }
-        return;
-      }
-      int sw = (bw - 40) / 3, k = (T.x - bx - 20) / (sw > 0 ? sw : 1);
-      if(galSelN == 0 || k < 0 || k > 2) return;
-      galMenuId = 0;
-      if(k == 0){
-        bool anyLocked = false, anyOpen = false;
-        galTargets(galTmpIds, &anyLocked, &anyOpen);
-        galDoAction(anyOpen ? MA_LOCK : MA_UNLOCK);
-      } else if(k == 1) galDoAction(MA_TRASH);
-      else galDoAction(MA_DELETE);
-      return;
-    }
-  }
+  if(mkMulti && mkBarTouch(galSelectAll)) return;
   // --- Menu de la app ---
-  if(T.x > bx + bw - pad - 30 && T.y < by + 60){ galOpenAppMenu(); return; }
+  if(T.x > bx + bw - pad - 40 && T.y < by + 34){
+    static const uint8_t acts[3] = { MA_CONNECT, MA_SELECT, MA_TRASHBIN };
+    mkOpenAppMenu(bx + bw - MM_W / 2 - 16, by + 34, acts, 3);
+    return;
+  }
   // --- Pestanas ---
-  const int tabY = by + 68, tw = (bw - 2 * pad) / GAL_TABS;
+  const int tabY = by + 38, tw = (bw - 2 * pad) / GAL_TABS;
   if(T.y >= tabY && T.y <= tabY + 28){
     int k = (T.x - bx - pad) / (tw > 0 ? tw : 1);
     if(k >= 0 && k < GAL_TABS && k != galTab){ galTab = k; galScroll = 0; galRender(); }
@@ -597,49 +365,32 @@ static void galTick(){
   // --- Toque sobre un elemento ---
   uint32_t id = galHitId(T.x, T.y);
   if(!id) return;
-  if(galMulti){ galToggleSel(id); galRender(); return; }
-  FlexMlRec r;
-  if(!mlGet(id, &r)) return;
-  if(r.flags & FML_R_LOCKED){ mediaAuthRequest(MA_OPEN, &id, 1, galAuthDone); return; }
-  galOpenId(id);
+  if(mkMulti){ mkToggle(id); galRender(); return; }
+  mkRequestOpen(id);                              // lo protegido pide antes la clave
 }
 
 static void galEnter(){
+  mkBind(&GAL_APP);
   // gRelayout = "re-dibuja con la geometria nueva", no "empieza de cero".
   if(!gRelayout){
-    galScroll = 0; galMulti = false; galClearSel();
-    mmOn = false; mmDlgOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false; fkMenuOn = false;
-    galDlgKind = GDLG_NONE; galAskAct = MA_NONE;
+    galScroll = 0;
+    mkReset();
     if(gMlOk) mlRequestScan();            // lo copiado por otras vias aparece al entrar
   }
   galRender();
 }
 
-// ATRAS deshace primero las capas propias de la Galeria.
-static bool galBackLayer(){
-  if(webSheetOn){ webSheetClose(); return true; }
-  if(mmOn || mmDlgOn || fkNameOn || fkAskOn || fkTrashOn){
-    mmOn = false; mmDlgOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
-    galDlgKind = GDLG_NONE; galAskAct = MA_NONE;
-    galRender();
-    return true;
-  }
-  if(galMulti){ galMulti = false; galClearSel(); galRender(); return true; }
-  return false;
-}
+// ATRAS deshace primero las capas (menu, dialogos, hoja) y la seleccion.
+static bool galBackLayer(){ return mkBackLayer(); }
 static bool galBackScreen(){ return false; }
 
 static void galSuspend(){
   galDragging = false; galLongFired = false;
-  webSheetOn = false;                             // la hoja es una capa; el servidor sigue
-  // El kit de archivos y el de medios son globales: no pueden quedar
-  // modales mientras otra app los usa.
-  mmOn = false; mmDlgOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false; fkMenuOn = false;
-  galDlgKind = GDLG_NONE; galAskAct = MA_NONE;
-  galMulti = false; galClearSel();
+  mkSuspend();                                    // capas y seleccion fuera; el servidor sigue
 }
 
 static void galResume(){
+  mkBind(&GAL_APP);
   int maxS = galMaxScroll();
   if(galScroll < 0) galScroll = 0;
   if(galScroll > maxS) galScroll = maxS;
@@ -652,5 +403,6 @@ static size_t galShed(){ return mlThumbDropAll(); }
 
 static void galCloseApp(){
   mlThumbDropAll();
-  galScroll = 0; galMulti = false; galClearSel();
+  galScroll = 0;
+  if(mkApp == &GAL_APP) mkReset();
 }

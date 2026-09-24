@@ -7407,6 +7407,113 @@ static void testIntensidadVidrio(){
   if(gFails == before) printf("  Intensidad del vidrio: todas las comprobaciones pasan.\n");
 }
 
+// #############################################################
+//  KIT DE LISTAS DE MEDIOS · Galeria, Multimedia y Musica deciden LO MISMO
+//  ------------------------------------------------------------
+//  Sobre un catalogo en memoria (aqui no hay LittleFS): que entra en
+//  "Seleccionar todo", que ofrece el menu de un elemento, que pasa sin PIN,
+//  que nunca va a la papelera y por donde pasa abrir algo protegido.
+// #############################################################
+static FlexMlRec tkStore[12];
+static uint32_t tkAdd(int kind, int fmt, const char* path, const char* title, bool locked, bool playable){
+  FlexMlRec r; memset(&r, 0, sizeof(r));
+  snprintf(r.path, sizeof(r.path), "%s", path);
+  const char* b = strrchr(path, '/');
+  snprintf(r.name, sizeof(r.name), "%s", b ? b + 1 : path);
+  if(title) snprintf(r.title, sizeof(r.title), "%s", title);
+  r.kind = (uint8_t)kind; r.fmt = (uint8_t)fmt; r.state = FML_S_READY;
+  r.flags = (uint16_t)((locked ? FML_R_LOCKED : 0) | (playable ? FML_R_PLAYABLE : 0));
+  int at = flexMlAdd(&gMs.lib, &r, 1760000000u);
+  return at >= 0 ? gMs.lib.recs[at].id : 0;
+}
+static void tkReset(){
+  memset(&gMs, 0, sizeof(gMs));                 // sin cerrojo ni disco: solo el catalogo
+  flexMsInit(&gMs, tkStore, 12);
+}
+static void testKitMedios(){
+  printf("Kit de listas de medios: seleccion, menus, protegidos y clave del sistema\n");
+  tkReset();
+  uint32_t a = tkAdd(FML_K_PHOTO, FML_F_JPEG, "/Imagenes/a.jpg", NULL, false, true);
+  uint32_t b = tkAdd(FML_K_PHOTO, FML_F_JPEG, "/System/Media/Protegido/2.jpg", NULL, true, true);
+  uint32_t c = tkAdd(FML_K_VIDEO, FML_F_AVI_MJPEG, "/Videos/c.avi", NULL, false, true);
+  tkAdd(FML_K_AUDIO, FML_F_WAV_PCM, "/Musica/d.wav", NULL, false, true);
+  uint16_t vs[12]; FlexMlView v;
+  flexMlViewInit(&v, vs, 12, FML_MASK_VISUAL, FML_SORT_NEWEST);
+  flexMlViewSync(&v, &gMs.lib, true);
+  chk(v.n == 3, "lo visual: foto, protegida y video; el audio va a Musica");
+  mkBind(&GAL_APP);
+  mkEnterMulti(0);
+  mkSelectAllLocked(&v);
+  chk(mkSelN == 2 && mkIsSel(a) && mkIsSel(c) && !mkIsSel(b), "Seleccionar todo NO incluye lo protegido");
+  int sl = 0, so = 0, sa = 0; mkCountLocked(&v, &sl, &so, &sa);
+  chk(sl == 0 && so == 2 && sa == 2, "la barra cuenta 2 abiertos de 2 seleccionables");
+  mkSelectAllLocked(&v);
+  chk(mkSelN == 0, "pulsarlo con todo elegido quita la seleccion");
+  mkToggle(b); mkCountLocked(&v, &sl, &so, &sa);
+  chk(mkSelN == 1 && sl == 1 && so == 0, "un protegido si se puede elegir a mano");
+  flexMlRemoveAt(&gMs.lib, flexMlFindId(&gMs.lib, b));
+  flexMlViewSync(&v, &gMs.lib, true);
+  mkPruneLocked(&v);
+  chk(mkSelN == 0, "lo que desaparece del catalogo sale de la seleccion");
+  b = tkAdd(FML_K_PHOTO, FML_F_JPEG, "/System/Media/Protegido/9.jpg", NULL, true, true);
+  mkExitMulti();
+
+  // ---- Menu contextual: solo lo que se puede hacer con ESE elemento ----
+  gLockType = 1;
+  mkOpenItemMenu(a, 100, 300, NULL, 0);
+  bool hSel = false, hLock = false, hRen = false, hInfo = false, hTrash = false, hDel = false;
+  for(int i = 0; i < mmN; i++) switch(mmAct[i]){
+    case MA_SELECT: hSel = true; break; case MA_LOCK: hLock = true; break; case MA_RENAME: hRen = true; break;
+    case MA_INFO: hInfo = true; break; case MA_TRASH: hTrash = true; break; case MA_DELETE: hDel = true; break;
+  }
+  chk(mmOn && hSel && hLock && hRen && hInfo && hTrash && hDel,
+      "abierto: Seleccionar, Bloquear, Renombrar, Detalles, Papelera y Borrar");
+  chk(!mkMulti, "la pulsacion larga abre el menu; no activa la seleccion multiple sola");
+  chk(!strcmp(mmLabel(MA_LOCK), "Bloquear con PIN"), "con PIN en el sistema: 'Bloquear con PIN'");
+  gLockType = 2;
+  chk(!strcmp(mmLabel(MA_LOCK), "Bloquear con contrase\xC3\xB1" "a"), "con contrasena: 'Bloquear con contrasena'");
+  mmOn = false;
+  mkOpenItemMenu(b, 100, 300, NULL, 0);
+  bool unl = false, leak = false;
+  for(int i = 0; i < mmN; i++){
+    if(mmAct[i] == MA_UNLOCK) unl = true;
+    if(mmAct[i] == MA_TRASH || mmAct[i] == MA_RENAME || mmAct[i] == MA_INFO || mmAct[i] == MA_LOCK) leak = true;
+  }
+  chk(unl && !leak, "protegido: Desbloquear y Borrar; ni papelera, ni renombrar, ni detalles");
+  { int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+    int mx, my, mw, mh; mmAx = bx + bw - 3; mmAy = by + bh - 3; mmGeom(mx, my, mw, mh);
+    chk(mx >= bx && my >= by && mx + mw <= bx + bw && my + mh <= by + bh, "el menu nunca se sale del area de la app"); }
+  mmOn = false;
+
+  // ---- Sin PIN ni contrasena: no se bloquea nada, se explica ----
+  gLockType = 0;
+  mkMenuId = a;
+  mkDoAction(MA_LOCK);
+  chk(mmDlgOn && mkNoLockDlg && strstr(mmDlgText, "configura primero un PIN o una contrase\xC3\xB1" "a en Seguridad") != NULL,
+      "sin clave: 'Para bloquear archivos, configura primero un PIN o una contrasena en Seguridad.'");
+  { FlexMlRec ra; mlGet(a, &ra); chk(!(ra.flags & FML_R_LOCKED), "y no se bloquea nada"); }
+  mmDlgOn = false; mkNoLockDlg = false;
+
+  // ---- La papelera es publica: nunca un protegido ----
+  gLockType = 1;
+  mkEnterMulti(0); mkToggle(a); mkToggle(b);
+  mkDoAction(MA_TRASH);
+  chk(flexMlFindId(&gMs.lib, a) >= 0 && flexMlFindId(&gMs.lib, b) >= 0,
+      "con algo protegido en la seleccion, nada va a la papelera");
+  mkExitMulti();
+
+  // ---- Abrir lo protegido pasa por la clave DEL SISTEMA (no hay PIN propio) ----
+  auto st0 = gState;
+  mkRequestOpen(b);
+  chk(gMediaAuth.act == MA_OPEN && gMediaAuth.n == 1 && gMediaAuth.ids[0] == b && gMediaAuth.done == mkAuthDone &&
+      lsuAfter == LSU_AFTER_MEDIA, "abrir un protegido pasa por la verificacion del sistema (LSU_AFTER_MEDIA)");
+  mediaAfterVerify(false);                        // cancelar: vuelve a la app sin abrir nada
+  chk(gState == ST_APP && gMediaAuth.done == NULL, "cancelar la clave devuelve a la app, sin abrir nada");
+  gState = st0;
+  mkReset();
+  memset(&gMs, 0, sizeof(gMs));
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -7507,6 +7614,7 @@ int main(){
   testVidrioSinArrastre();
   testWidgetsDePagina();
   testIntensidadVidrio();
+  testKitMedios();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

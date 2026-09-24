@@ -580,25 +580,29 @@ static int mmHit(int px, int py){
 
 // ---- Dialogo (aviso o confirmacion) ----
 static bool mmDlgOn = false;
-static char mmDlgTitle[64], mmDlgText[160], mmDlgA[32], mmDlgB[24];
+static char mmDlgTitle[64], mmDlgText[320], mmDlgA[32], mmDlgB[24];
 static bool mmDlgDanger = false;
 
 static int mmWrap(int x, int y, int w, const char* s, int size, uint16_t col, bool draw){
-  // Ajuste por palabras; devuelve la altura usada.
+  // Ajuste por palabras, con '\n' como salto forzado; devuelve la altura usada.
   int lh = uiLineH(size) + 6, cy = y;
   char line[96]; int li = 0;
   const char* p = s;
   while(*p){
     const char* q = p;
-    while(*q && *q != ' ') q++;
+    while(*q && *q != ' ' && *q != '\n') q++;
     int wl = (int)(q - p);
     char cand[96];
-    if(li + (li ? 1 : 0) + wl < (int)sizeof(cand)){
+    if(wl && li + (li ? 1 : 0) + wl < (int)sizeof(cand)){
       snprintf(cand, sizeof(cand), "%.*s%s%.*s", li, line, li ? " " : "", wl, p);
       if(li && textW(cand, size) > w){
         line[li] = 0; if(draw) drawTextC(x + w / 2, cy, line, size, col); cy += lh;
         li = snprintf(line, sizeof(line), "%.*s", wl, p);
       } else { li = snprintf(line, sizeof(line), "%s", cand); }
+    }
+    if(*q == '\n'){                                  // salto forzado
+      line[li] = 0; if(draw && li) drawTextC(x + w / 2, cy, line, size, col); cy += lh;
+      li = 0;
     }
     p = *q ? q + 1 : q;
   }
