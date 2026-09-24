@@ -12,11 +12,18 @@
 //     -> imprime {"port":N,"code":"123456"} y atiende hasta que se cierra stdin
 //   Ordenes por stdin (una por linea):
 //     dump         el catalogo en JSON (como lo ve el propietario), una linea
-//     lock <id>    bloquea un elemento como lo haria el P4 (miniatura a Protegido)
-//     unlock <id>
+//     lock <id>    bloquea un elemento CON EL CODIGO DEL P4 (FlexOS_MediaStore:
+//     unlock <id>  el archivo y su miniatura se mueven a/desde Protegido)
+//     scan         reconcilia el catalogo con la carpeta, como al arrancar
+//     jobs         hace las miniaturas pendientes, como la tarea de fondo
 //   Los eventos del servidor (tarjetas de transferencia del P4) salen por
 //   stderr, uno por linea, en JSON.
+//
+//   El catalogo es el MISMO almacen que usa la placa (FlexOS_MediaStore):
+//   publicar una subida, poner una miniatura o bloquear no tiene aqui una
+//   copia propia que pudiera portarse distinto.
 #include "../../FlexOS_Ultra/FlexOS_MediaWeb.h"
+#include "../../FlexOS_Ultra/FlexOS_MediaStore.h"
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -29,11 +36,14 @@
 #include <cstring>
 #include <ctime>
 #include <string>
+#include <vector>
+#include <algorithm>
+#include <dirent.h>
 
 static std::string g_root;
 static uint32_t g_total = 10u * 1024u * 1024u;
 static FlexMlRec g_store[FML_CAP];
-static FlexMlLib g_lib;
+static FlexMediaStore g_ms;
 static int g_listen = -1;
 
 static std::string real(const char* p){ return g_root + p; }
@@ -58,7 +68,6 @@ static bool fsSeek(void*, void* h, uint32_t off){ return std::fseek((FILE*)h, (l
 static void fsClose(void*, void* h){ std::fclose((FILE*)h); }
 static uint32_t fsSize(void*, const char* p){ struct stat st; return stat(real(p).c_str(), &st) == 0 && S_ISREG(st.st_mode) ? (uint32_t)st.st_size : 0; }
 static bool fsRemove(void*, const char* p){ return unlink(real(p).c_str()) == 0; }
-#include <dirent.h>
 static uint64_t duUsed(const std::string& dir){
   uint64_t n = 0;
   DIR* d = opendir(dir.c_str());
@@ -76,60 +85,61 @@ static uint64_t duUsed(const std::string& dir){
 static uint32_t fsFree(void*){ uint64_t u = duUsed(g_root); return u >= g_total ? 0 : (uint32_t)(g_total - u); }
 static uint32_t fsTotal(void*){ return g_total; }
 
-// ---------------- anfitrion: catalogo, clave, tiempo, azar ----------------
-static bool existsCb(void*, const char* p){ struct stat st; return stat(real(p).c_str(), &st) == 0; }
-static void thumbPathOf(const FlexMlRec* r, char* out, size_t cap){
-  if(r->flags & FML_R_LOCKED) std::snprintf(out, cap, FML_DIR_LOCKED "/%lu.t.jpg", (unsigned long)r->id);
-  else std::snprintf(out, cap, FML_DIR_THUMB "/%lu.jpg", (unsigned long)r->id);
+// ---------------- lo que el almacen necesita ademas ----------------
+static bool fsExists(void*, const char* p){ struct stat st; return stat(real(p).c_str(), &st) == 0; }
+static bool fsMove(void*, const char* a, const char* b){
+  std::string ra = real(a), rb = real(b);
+  struct stat st;
+  if(stat(ra.c_str(), &st) || !stat(rb.c_str(), &st)) return false;       // no existe / no se pisa
+  size_t sl = rb.rfind('/'); if(sl != std::string::npos) mkdirs(rb.substr(0, sl));
+  return std::rename(ra.c_str(), rb.c_str()) == 0;
 }
-static int hSnapshot(void*, FlexMlRec* d, int cap, uint32_t* rev){
-  int n = g_lib.n < cap ? g_lib.n : cap;
-  std::memcpy(d, g_lib.recs, sizeof(FlexMlRec) * (size_t)n);
-  *rev = g_lib.rev;
+static bool fsMkdir(void*, const char* p){ mkdirs(real(p)); return true; }
+static int fsList(void*, const char* dir, FlexMsEntry* out, int maxn, int skip){
+  DIR* d = opendir(real(dir).c_str());
+  if(!d) return -1;
+  std::vector<std::string> names;
+  while(dirent* e = readdir(d)) if(std::strcmp(e->d_name, ".") && std::strcmp(e->d_name, "..")) names.push_back(e->d_name);
+  closedir(d);
+  std::sort(names.begin(), names.end());                                // orden estable, como LittleFS
+  int n = 0;
+  for(size_t i = (size_t)skip; i < names.size() && n < maxn; i++){
+    struct stat st;
+    std::string rp = real(dir) + "/" + names[i];
+    if(stat(rp.c_str(), &st)) continue;
+    std::memset(&out[n], 0, sizeof(out[n]));
+    std::snprintf(out[n].name, sizeof(out[n].name), "%s", names[i].c_str());
+    out[n].dir = S_ISDIR(st.st_mode);
+    out[n].size = out[n].dir ? 0 : (uint32_t)st.st_size;
+    n++;
+  }
   return n;
 }
-static bool hGet(void*, uint32_t id, FlexMlRec* o){ int i = flexMlFindId(&g_lib, id); if(i < 0) return false; *o = g_lib.recs[i]; return true; }
-static uint32_t hRev(void*){ return g_lib.rev; }
-static uint32_t hDup(void*, uint32_t size, uint32_t crc){ int i = flexMlFindDup(&g_lib, size, crc); return i < 0 ? 0 : g_lib.recs[i].id; }
+static bool fsAtomic(void*, const char* p, const void* b, size_t n){
+  std::string t = real(p) + ".tmp";
+  FILE* f = std::fopen(t.c_str(), "wb");
+  if(!f) return false;
+  bool ok = std::fwrite(b, 1, n, f) == n;
+  ok = (std::fclose(f) == 0) && ok;
+  return ok && std::rename(t.c_str(), real(p).c_str()) == 0;
+}
+static uint32_t nowEpoch(void*){ return (uint32_t)std::time(nullptr); }
+
+// ---------------- anfitrion: el catalogo es el almacen ----------------
+static int hSnapshot(void*, FlexMlRec* d, int cap, uint32_t* rev){ return flexMsSnapshot(&g_ms, d, cap, rev); }
+static bool hGet(void*, uint32_t id, FlexMlRec* o){ return flexMsGet(&g_ms, id, o); }
+static uint32_t hRev(void*){ return flexMsRev(&g_ms); }
+static uint32_t hDup(void*, uint32_t size, uint32_t crc){ return flexMsFindDup(&g_ms, size, crc); }
 static uint32_t hCommit(void*, const FlexWebUpload* up, char* why, size_t cap){
-  char stem[FML_STEM_MAX + 1], dest[FML_PATH_MAX];
-  flexMlSafeStem(up->name, stem, sizeof(stem));
-  const char* ext = flexMlFmtExt(up->fmt);
-  if(!flexMlUniquePath(flexMlDestDir(up->kind), stem, ext, existsCb, nullptr, dest, sizeof(dest))){
-    std::snprintf(why, cap, "Sin nombre libre"); return 0;
-  }
-  mkdirs(real(flexMlDestDir(up->kind)));
-  if(std::rename(real(up->tmpPath).c_str(), real(dest).c_str())){ std::snprintf(why, cap, "No se pudo mover"); return 0; }
-  FlexMlRec r; std::memset(&r, 0, sizeof(r));
-  r.kind = (uint8_t)up->kind; r.fmt = (uint8_t)up->fmt; r.size = up->size; r.crc = up->crc;
-  r.created = up->created; r.w = up->w; r.h = up->h; r.durMs = up->durMs; r.origin = FML_O_WEB;
-  r.flags = (uint16_t)((up->playable ? FML_R_PLAYABLE : 0) | (up->thumbTmp[0] ? FML_R_THUMB : 0));
-  std::snprintf(r.path, sizeof(r.path), "%s", dest);
-  std::snprintf(r.name, sizeof(r.name), "%s", up->name);
-  std::snprintf(r.title, sizeof(r.title), "%s", up->title);
-  std::snprintf(r.artist, sizeof(r.artist), "%s", up->artist);
-  std::snprintf(r.album, sizeof(r.album), "%s", up->album);
-  int i = flexMlAdd(&g_lib, &r, (uint32_t)std::time(nullptr));
-  if(i < 0){ std::rename(real(dest).c_str(), real(up->tmpPath).c_str()); std::snprintf(why, cap, "Catalogo lleno"); return 0; }
-  if(up->thumbTmp[0]){
-    char tp[FML_PATH_MAX]; thumbPathOf(&g_lib.recs[i], tp, sizeof(tp));
-    mkdirs(real(FML_DIR_THUMB));
-    std::rename(real(up->thumbTmp).c_str(), real(tp).c_str());
-  }
-  return g_lib.recs[i].id;
+  FlexMsUpload u;
+  u.tmpPath = up->tmpPath; u.thumbTmp = up->thumbTmp;
+  u.name = up->name; u.title = up->title; u.artist = up->artist; u.album = up->album;
+  u.kind = up->kind; u.fmt = up->fmt; u.playable = up->playable;
+  u.size = up->size; u.crc = up->crc; u.created = up->created; u.durMs = up->durMs; u.w = up->w; u.h = up->h;
+  return flexMsCommitUpload(&g_ms, &u, why, cap);
 }
-static bool hSetThumb(void*, uint32_t id, const char* tmp){
-  int i = flexMlFindId(&g_lib, id);
-  if(i < 0) return false;
-  char tp[FML_PATH_MAX]; thumbPathOf(&g_lib.recs[i], tp, sizeof(tp));
-  mkdirs(real(FML_DIR_THUMB));
-  if(std::rename(real(tmp).c_str(), real(tp).c_str())) return false;
-  g_lib.recs[i].flags |= FML_R_THUMB | FML_R_EXT_THUMB;
-  g_lib.recs[i].thumbVer++;
-  g_lib.rev++;
-  return true;
-}
-static void hThumbPath(void*, const FlexMlRec* r, char* out, size_t cap){ thumbPathOf(r, out, cap); }
+static bool hSetThumb(void*, uint32_t id, const char* tmp){ return flexMsSetExtThumb(&g_ms, id, tmp); }
+static void hThumbPath(void*, const FlexMlRec* r, char* out, size_t cap){ flexMsThumbPath(r, out, cap); }
 static bool hVerify(void*, const char* s){ return !std::strcmp(s, "2468"); }
 static int hLockType(void*){ return 1; }
 static uint32_t hNow(void*){
@@ -179,26 +189,34 @@ static void command(char* line){
     size_t w = 0;
     struct S { char* b; size_t* w; };
     S s = { buf, &w };
-    flexMlJsonLibrary(&g_lib, true, FML_MASK_ALL, nullptr, [](void* c, const char* t, size_t n) -> bool {
+    flexMlJsonLibrary(&g_ms.lib, true, FML_MASK_ALL, nullptr, [](void* c, const char* t, size_t n) -> bool {
       S* s = (S*)c; if(*s->w + n >= sizeof(buf)) return false; std::memcpy(s->b + *s->w, t, n); *s->w += n; return true; }, &s);
     buf[w] = 0;
     std::printf("%s\n", buf);
     std::fflush(stdout);
     return;
   }
+  if(!std::strcmp(line, "scan")){
+    bool ok = flexMsScan(&g_ms, nullptr, nullptr);
+    std::printf("{\"ok\":%d,\"n\":%d}\n", ok ? 1 : 0, (int)g_ms.lib.n);
+    std::fflush(stdout);
+    return;
+  }
+  if(!std::strcmp(line, "jobs")){
+    FlexMsJob j; uint32_t after = 0; int n = 0;
+    while(flexMsNextJob(&g_ms, after, &j)){ after = j.id; flexMsRunJob(&g_ms, &j, 64u << 20, 1u << 20); n++; }
+    std::printf("{\"ok\":1,\"jobs\":%d}\n", n);
+    std::fflush(stdout);
+    return;
+  }
   unsigned long id = 0;
   bool lock = std::sscanf(line, "lock %lu", &id) == 1;
   if(lock || std::sscanf(line, "unlock %lu", &id) == 1){
-    int i = flexMlFindId(&g_lib, (uint32_t)id);
-    if(i >= 0){
-      char a[FML_PATH_MAX], b[FML_PATH_MAX];
-      thumbPathOf(&g_lib.recs[i], a, sizeof(a));
-      flexMlSetLocked(&g_lib, i, lock);
-      thumbPathOf(&g_lib.recs[i], b, sizeof(b));
-      mkdirs(real(lock ? FML_DIR_LOCKED : FML_DIR_THUMB));
-      std::rename(real(a).c_str(), real(b).c_str());
-    }
-    std::printf("{\"ok\":%d}\n", i >= 0 ? 1 : 0);
+    char why[96] = "";
+    bool ok = flexMsSetLock(&g_ms, (uint32_t)id, lock, why, sizeof(why));
+    FlexMlRec r;
+    bool have = flexMsGet(&g_ms, (uint32_t)id, &r);
+    std::printf("{\"ok\":%d,\"path\":\"%s\"}\n", ok ? 1 : 0, have ? r.path : "");
     std::fflush(stdout);
   }
 }
@@ -208,8 +226,12 @@ int main(int argc, char** argv){
   g_root = argv[1];
   if(argc >= 3) g_total = (uint32_t)std::strtoul(argv[2], nullptr, 10);
   mkdirs(g_root);
-  for(const char* d : { FML_DIR_PHOTO, FML_DIR_VIDEO, FML_DIR_AUDIO, FML_DIR_THUMB, FML_DIR_TMP, FML_DIR_LOCKED }) mkdirs(real(d));
-  flexMlInit(&g_lib, g_store, FML_CAP);
+  std::memset(&g_ms, 0, sizeof(g_ms));
+  g_ms.fs = { fsOpen, fsRead, fsWrite, fsSeek, fsClose, fsSize, fsExists, fsRemove, fsMove, nullptr, fsMkdir, fsList, fsAtomic, nullptr };
+  g_ms.now = nowEpoch;                          // un solo hilo: sin cerrojo
+  flexMsInit(&g_ms, g_store, FML_CAP);
+  flexMsMakeDirs(&g_ms);
+  flexMsLoad(&g_ms);
 
   g_listen = socket(AF_INET, SOCK_STREAM, 0);
   int one = 1; setsockopt(g_listen, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));

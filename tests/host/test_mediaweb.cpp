@@ -22,6 +22,7 @@
 //  comparte ni una linea con el codigo bajo prueba.
 
 #include "../../FlexOS_Ultra/FlexOS_MediaWeb.h"
+#include "../../FlexOS_Ultra/FlexOS_MediaStore.h"
 #include "../../FlexOS_Ultra/FlexOS_MediaThumb.h"
 #include "../../FlexOS_Ultra/FlexOS_JPEGEnc.h"
 #include "../../FlexOS_Ultra/FlexOS_WebUI.h"
@@ -81,61 +82,44 @@ static bool fsRename(const char* a, const char* b){
 }
 
 // =============================================================
-//  Anfitrion: catalogo real y la MISMA publicacion que hara la placa
+//  Anfitrion: el MISMO almacen que usa la placa (FlexOS_MediaStore)
+//  publica las subidas, pone las miniaturas y bloquea.
 // =============================================================
 static FlexMlRec g_store[FML_CAP];
-static FlexMlLib g_lib;
+static FlexMediaStore g_mst;
+static FlexMlLib& g_lib = g_mst.lib;
 static uint32_t g_ms = 1000;
 static int g_lockType = 1;
 static int g_verifyCalls = 0;
 static uint32_t g_rng = 0xA5A5A5A5u;
 static std::vector<FlexWebXfer> g_ev;
 
-static bool existsCb(void*, const char* p){ return g_fs.files.count(p) != 0; }
-static void thumbPathOf(const FlexMlRec* r, char* out, size_t cap){
-  if(r->flags & FML_R_LOCKED) snprintf(out, cap, FML_DIR_LOCKED "/%lu.t.jpg", (unsigned long)r->id);
-  else snprintf(out, cap, FML_DIR_THUMB "/%lu.jpg", (unsigned long)r->id);
+static bool fsExists(void*, const char* p){
+  if(g_fs.files.count(p)) return true;
+  std::string pre = std::string(p) + "/";
+  auto it = g_fs.files.lower_bound(pre);
+  return it != g_fs.files.end() && it->first.compare(0, pre.size(), pre) == 0;
 }
-static int hSnapshot(void*, FlexMlRec* d, int cap, uint32_t* rev){
-  int n = g_lib.n < cap ? g_lib.n : cap; std::memcpy(d, g_lib.recs, sizeof(FlexMlRec) * (size_t)n); *rev = g_lib.rev; return n;
-}
-static bool hGet(void*, uint32_t id, FlexMlRec* o){ int i = flexMlFindId(&g_lib, id); if(i < 0) return false; *o = g_lib.recs[i]; return true; }
-static uint32_t hRev(void*){ return g_lib.rev; }
-static uint32_t hDup(void*, uint32_t size, uint32_t crc){ int i = flexMlFindDup(&g_lib, size, crc); return i < 0 ? 0 : g_lib.recs[i].id; }
+static bool fsMove(void*, const char* a, const char* b){ return fsRename(a, b); }
+static bool fsMkdir(void*, const char*){ return true; }
+static int fsList(void*, const char*, FlexMsEntry*, int, int){ return -1; }   // aqui no se reconcilia
+static bool fsAtomic(void*, const char* p, const void* b, size_t n){ g_fs.files[p].assign((const uint8_t*)b, (const uint8_t*)b + n); return true; }
+static uint32_t msNowCb(void*){ return 1700000000u; }
+static void thumbPathOf(const FlexMlRec* r, char* out, size_t cap){ flexMsThumbPath(r, out, cap); }
+static int hSnapshot(void*, FlexMlRec* d, int cap, uint32_t* rev){ return flexMsSnapshot(&g_mst, d, cap, rev); }
+static bool hGet(void*, uint32_t id, FlexMlRec* o){ return flexMsGet(&g_mst, id, o); }
+static uint32_t hRev(void*){ return flexMsRev(&g_mst); }
+static uint32_t hDup(void*, uint32_t size, uint32_t crc){ return flexMsFindDup(&g_mst, size, crc); }
 static uint32_t hCommit(void*, const FlexWebUpload* up, char* why, size_t cap){
-  char stem[FML_STEM_MAX + 1], dst[FML_PATH_MAX];
-  flexMlSafeStem(up->name, stem, sizeof(stem));
-  if(!flexMlUniquePath(flexMlDestDir(up->kind), stem, flexMlFmtExt(up->fmt), existsCb, nullptr, dst, sizeof(dst))){
-    snprintf(why, cap, "Sin nombre libre"); return 0;
-  }
-  if(!fsRename(up->tmpPath, dst)){ snprintf(why, cap, "No se pudo mover"); return 0; }
-  FlexMlRec r; std::memset(&r, 0, sizeof(r));
-  snprintf(r.path, sizeof(r.path), "%s", dst);
-  snprintf(r.name, sizeof(r.name), "%s", up->name);
-  snprintf(r.title, sizeof(r.title), "%s", up->title);
-  snprintf(r.artist, sizeof(r.artist), "%s", up->artist);
-  snprintf(r.album, sizeof(r.album), "%s", up->album);
-  r.kind = (uint8_t)up->kind; r.fmt = (uint8_t)up->fmt; r.size = up->size; r.crc = up->crc;
-  r.created = up->created; r.w = up->w; r.h = up->h; r.durMs = up->durMs; r.origin = FML_O_WEB;
-  r.flags = up->playable ? FML_R_PLAYABLE : 0;
-  if(!up->playable) r.err = FML_E_UNSUPPORTED;
-  int i = flexMlAdd(&g_lib, &r, 1700000000u);
-  if(i < 0){ fsRename(dst, up->tmpPath); snprintf(why, cap, "Catalogo lleno"); return 0; }
-  if(up->thumbTmp[0]){
-    char tp[FML_PATH_MAX]; thumbPathOf(&g_lib.recs[i], tp, sizeof(tp));
-    if(fsRename(up->thumbTmp, tp)) g_lib.recs[i].flags |= FML_R_THUMB; else fsRemove(nullptr, up->thumbTmp);
-  }
-  return g_lib.recs[i].id;
+  FlexMsUpload u;
+  u.tmpPath = up->tmpPath; u.thumbTmp = up->thumbTmp;
+  u.name = up->name; u.title = up->title; u.artist = up->artist; u.album = up->album;
+  u.kind = up->kind; u.fmt = up->fmt; u.playable = up->playable;
+  u.size = up->size; u.crc = up->crc; u.created = up->created; u.durMs = up->durMs; u.w = up->w; u.h = up->h;
+  return flexMsCommitUpload(&g_mst, &u, why, cap);
 }
-static bool hSetThumb(void*, uint32_t id, const char* tmp){
-  int i = flexMlFindId(&g_lib, id); if(i < 0) return false;
-  char tp[FML_PATH_MAX]; thumbPathOf(&g_lib.recs[i], tp, sizeof(tp));
-  g_fs.files.erase(tp);
-  if(!fsRename(tmp, tp)) return false;
-  g_lib.recs[i].flags |= FML_R_THUMB | FML_R_EXT_THUMB; g_lib.recs[i].thumbVer++; flexMlTouch(&g_lib);
-  return true;
-}
-static void hThumbPath(void*, const FlexMlRec* r, char* out, size_t cap){ thumbPathOf(r, out, cap); }
+static bool hSetThumb(void*, uint32_t id, const char* tmp){ return flexMsSetExtThumb(&g_mst, id, tmp); }
+static void hThumbPath(void*, const FlexMlRec* r, char* out, size_t cap){ flexMsThumbPath(r, out, cap); }
 static bool hVerify(void*, const char* s){ g_verifyCalls++; return !strcmp(s, "2468"); }
 static int hLockType(void*){ return g_lockType; }
 static uint32_t hNow(void*){ return g_ms; }
@@ -156,7 +140,10 @@ static void setup(){
   g_fs = MemFs();
   g_fs.files[FML_DIR_TMP "/.keep"];       // solo para que existan las carpetas en el listado
   g_fs.files.erase(FML_DIR_TMP "/.keep");
-  flexMlInit(&g_lib, g_store, FML_CAP);
+  std::memset(&g_mst, 0, sizeof(g_mst));
+  g_mst.fs = { fsOpen, fsRead, fsWrite, fsSeek, fsClose, fsSize, fsExists, fsRemove, fsMove, nullptr, fsMkdir, fsList, fsAtomic, nullptr };
+  g_mst.now = msNowCb;
+  flexMsInit(&g_mst, g_store, FML_CAP);
   g_ms = 1000; g_lockType = 1; g_verifyCalls = 0; g_ev.clear();
   std::memset(&g_w, 0, sizeof(g_w));
   g_w.fs = { fsOpen, fsRead, fsWrite, fsSeek, fsClose, fsSize, fsRemove, fsFree, fsTotal, nullptr };
@@ -601,12 +588,16 @@ static void testLocked(){
   run(req("POST", upPath("photo", "Secreta.jpg", jpg, flexMlCrc32(0, jpg.data(), jpg.size())), S(jpg)));
   auto jpg2 = makeJpeg(320, 240, 8);
   run(req("POST", upPath("photo", "Normal.jpg", jpg2, flexMlCrc32(0, jpg2.data(), jpg2.size())), S(jpg2)));
-  // El P4 la bloquea: marca en el catalogo y la miniatura se muda a Protegido.
+  // El P4 la bloquea con su almacen: el archivo y la miniatura se mudan a
+  // Protegido (nombre neutro) y el catalogo lo marca.
   FlexMlRec& sec = g_lib.recs[0];
   char oldTp[FML_PATH_MAX]; thumbPathOf(&sec, oldTp, sizeof(oldTp));
-  flexMlSetLocked(&g_lib, 0, true);
+  std::string oldPath = sec.path;
+  char why[96];
+  CHECK(flexMsSetLock(&g_mst, sec.id, true, why, sizeof(why)), "el P4 la bloquea (%s)", why);
   char newTp[FML_PATH_MAX]; thumbPathOf(&sec, newTp, sizeof(newTp));
-  fsRename(oldTp, newTp);
+  CHECK(!g_fs.files.count(oldPath) && !g_fs.files.count(oldTp) && g_fs.files.count(sec.path) && g_fs.files.count(newTp) &&
+        std::string(sec.path) == FML_DIR_LOCKED "/1.jpg", "archivo y miniatura en la carpeta protegida (%s)", sec.path);
   Resp r = run(req("GET", "/api/library"));
   cJSON* j = js(r);
   cJSON* it0 = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(j, "items"), 0);

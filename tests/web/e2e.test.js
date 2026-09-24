@@ -315,7 +315,16 @@ function wavStereo(sec, rate) {
 
     // =========================================================
     section('bloqueado desde el P4, desbloqueado con el PIN del sistema');
-    check(JSON.parse(await cmd('lock ' + iPhoto.id)).ok === 1, 'el P4 bloquea la foto');
+    const pubFile = find('Imagenes', /^foto.*\.jpg$/);
+    const lockRes = JSON.parse(await cmd('lock ' + iPhoto.id));
+    const lockedFile = path.join(disk, 'System', 'Media', 'Protegido', iPhoto.id + '.jpg');
+    check(lockRes.ok === 1 && lockRes.path === '/System/Media/Protegido/' + iPhoto.id + '.jpg', 'el P4 bloquea la foto: ' + JSON.stringify(lockRes));
+    check(pubFile && !fs.existsSync(pubFile) && fs.existsSync(lockedFile) && fs.readFileSync(lockedFile).equals(photo),
+      'en disco: el original, intacto, sale de /Imagenes a la carpeta protegida con nombre neutro');
+    check(!fs.existsSync(path.join(disk, 'System', 'Media', 'th', iPhoto.id + '.jpg')) &&
+      fs.existsSync(path.join(disk, 'System', 'Media', 'Protegido', iPhoto.id + '.t.jpg')), 'y su miniatura sale de la carpeta publica');
+    const nBefore = (await dump()).length;
+    check(JSON.parse(await cmd('scan')).n === nBefore, 'la reconciliacion no lo duplica ni lo pierde');
     await page.click('#menuBtn');
     await page.click('#mRefresh');
     await page.waitForSelector(cardOf(iPhoto.id) + '.locked');
@@ -338,10 +347,18 @@ function wavStereo(sec, rate) {
     await page.waitForSelector('#ownerChip:not([hidden])');
     await page.waitForSelector(cardOf(iPhoto.id) + ' img.ok');
     check(await page.$(cardOf(iPhoto.id) + ' .lockb') !== null, 'con el PIN: se ve, con la marca de protegido');
+    const got = await page.evaluate(async (id) => { const r = await fetch('/api/file/' + id + '?dl=1'); return { s: r.status, b: Array.from(new Uint8Array(await r.arrayBuffer())) }; }, iPhoto.id);
+    check(got.s === 200 && Buffer.from(got.b).equals(photo), 'con el PIN: se descarga el original exacto desde la carpeta protegida');
     await shot('8_propietario');
     await page.click('#ownerOff');
     await page.waitForSelector(cardOf(iPhoto.id) + '.locked');
     check(await page.isHidden('#ownerChip'), '"Ocultar": vuelve a quedar solo el candado');
+    const noOwner = await page.evaluate(async (id) => (await fetch('/api/file/' + id + '?dl=1')).status, iPhoto.id);
+    check(noOwner === 403, 'sin el PIN, su contenido: 403');
+    const unl = JSON.parse(await cmd('unlock ' + iPhoto.id));
+    check(unl.ok === 1 && unl.path === '/Imagenes/foto.jpg' && fs.readFileSync(path.join(disk, 'Imagenes', 'foto.jpg')).equals(photo) &&
+      !fs.existsSync(lockedFile), 'desbloquear desde el P4: vuelve a /Imagenes con su nombre: ' + JSON.stringify(unl));
+    check(fs.existsSync(path.join(disk, 'System', 'Media', 'th', iPhoto.id + '.jpg')), 'con su miniatura otra vez en la carpeta publica');
 
     // =========================================================
     section('olvidar este movil');

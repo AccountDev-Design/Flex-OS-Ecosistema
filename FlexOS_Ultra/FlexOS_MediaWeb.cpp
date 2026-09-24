@@ -344,7 +344,9 @@ static void handleLogin(FlexWebCtx* w, const FlexWebConn* c, Req* q){
   int lt = w->host.lockType ? w->host.lockType(w->host.ctx) : 0;
   if(lt == 0){
     wipe(body, sizeof(body));
-    q->keep = sendErr(c, 409, "Flex OS no tiene PIN ni contrase\xC3\xB1" "a: no hay contenido protegido", q->keep) && q->keep;
+    // Sin clave en el sistema no hay con que comprobar al propietario: lo
+    // protegido sigue oculto aqui (en el P4 lo abre quien tiene el aparato).
+    q->keep = sendErr(c, 409, "Flex OS no tiene PIN ni contrase\xC3\xB1" "a: configura uno en Seguridad para ver lo protegido", q->keep) && q->keep;
     return;
   }
   uint32_t wait = limWait(w, &w->loginLim);

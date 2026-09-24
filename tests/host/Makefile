@@ -114,8 +114,8 @@ STORE_SRC := $(ULTRA)/FlexOS_MediaStore.cpp $(ULTRA)/FlexOS_MediaLib.cpp $(ULTRA
 $(BUILD)/test_mediastore: test_mediastore.cpp $(STORE_SRC) $(ULTRA)/FlexOS_MediaStore.h $(ULTRA)/FlexOS_MediaLib.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -pthread -o $@ test_mediastore.cpp $(STORE_SRC)
 
-$(BUILD)/test_mediaweb: test_mediaweb.cpp $(WEB_SRC) $(WEB_HDRS) | $(BUILD)
-	$(CXX) $(COMMON) $(SAN) $(WEBFLAGS) -o $@ test_mediaweb.cpp $(WEB_SRC) vendor/cJSON/cJSON.c
+$(BUILD)/test_mediaweb: test_mediaweb.cpp $(WEB_SRC) $(WEB_HDRS) $(ULTRA)/FlexOS_MediaStore.cpp $(ULTRA)/FlexOS_MediaStore.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(WEBFLAGS) -o $@ test_mediaweb.cpp $(WEB_SRC) $(ULTRA)/FlexOS_MediaStore.cpp vendor/cJSON/cJSON.c
 
 # Herramientas de la prueba de la web (tests/web/):
 #   mediacheck    juzga con los analizadores DEL FIRMWARE lo que genera la web
@@ -124,8 +124,8 @@ $(BUILD)/mediacheck: mediacheck.cpp $(ULTRA)/FlexOS_MediaLib.cpp $(ULTRA)/FlexOS
                      $(ULTRA)/FlexOS_JPEGEnc.cpp $(ULTRA)/FlexOS_MediaThumb.cpp | $(BUILD)
 	$(CXX) $(CXXSTD) -O2 $(WARN) -o $@ mediacheck.cpp $(ULTRA)/FlexOS_MediaLib.cpp $(ULTRA)/FlexOS_Media.cpp \
 	       $(ULTRA)/FlexOS_JPEG.cpp $(ULTRA)/FlexOS_JPEGEnc.cpp $(ULTRA)/FlexOS_MediaThumb.cpp
-$(BUILD)/flexweb_host: flexweb_host.cpp $(WEB_SRC) $(WEB_HDRS) | $(BUILD)
-	$(CXX) $(COMMON) $(SAN) $(WEBFLAGS) -o $@ flexweb_host.cpp $(WEB_SRC)
+$(BUILD)/flexweb_host: flexweb_host.cpp $(WEB_SRC) $(WEB_HDRS) $(ULTRA)/FlexOS_MediaStore.cpp $(ULTRA)/FlexOS_MediaStore.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(WEBFLAGS) -o $@ flexweb_host.cpp $(WEB_SRC) $(ULTRA)/FlexOS_MediaStore.cpp
 
 # Pruebas de la web: funciones puras en Node (contra el firmware, via
 # mediacheck) y, si hay Playwright, Chromium de verdad contra flexweb_host.
