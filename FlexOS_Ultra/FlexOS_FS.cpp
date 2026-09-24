@@ -13,6 +13,7 @@
 #include "FlexOS_FS.h"
 #include <LittleFS.h>
 #include <FS.h>
+#include <new>
 
 // -------------------------------------------------------------
 //  Estado del modulo
@@ -787,6 +788,86 @@ int flexFsReadAt(const char* path, uint32_t off, void* buf, size_t n){
   size_t r = f.read((uint8_t*)buf, n);
   f.close();
   return (int)r;
+}
+
+// -------------------------------------------------------------
+//  Flujos
+// -------------------------------------------------------------
+struct FlexFsStream { File f; };
+
+// Crea las carpetas que falten en el camino hasta `dir` ("/a/b/c").
+static bool mkdirsTo(const char* dir){
+  if(!dir || !dir[0] || !strcmp(dir, "/")) return true;
+  char part[FLEXFS_PATH_MAX];
+  size_t n = strlen(dir);
+  if(n >= sizeof(part)) return false;
+  for(size_t i = 1; i <= n; i++){
+    if(dir[i] == '/' || dir[i] == 0){
+      memcpy(part, dir, i);
+      part[i] = 0;
+      if(!LittleFS.exists(part) && !LittleFS.mkdir(part)) return false;
+    }
+  }
+  return true;
+}
+
+FlexFsStream* flexFsOpenRead(const char* path){
+  if(!fsMounted || !path) return nullptr;
+  File f = LittleFS.open(path, "r");
+  if(!f) return nullptr;
+  if(f.isDirectory()){ f.close(); return nullptr; }
+  FlexFsStream* s = new (std::nothrow) FlexFsStream();
+  if(!s){ f.close(); return nullptr; }
+  s->f = f;
+  return s;
+}
+
+FlexFsStream* flexFsOpenWrite(const char* path){
+  if(!fsMounted || !path || path[0] != '/') return nullptr;
+  char dir[FLEXFS_PATH_MAX];
+  parentDir(path, dir, sizeof(dir));
+  if(!mkdirsTo(dir)) return nullptr;
+  File f = LittleFS.open(path, "w");
+  if(!f) return nullptr;
+  FlexFsStream* s = new (std::nothrow) FlexFsStream();
+  if(!s){ f.close(); LittleFS.remove(path); return nullptr; }
+  s->f = f;
+  return s;
+}
+
+int flexFsStreamRead(FlexFsStream* s, void* buf, size_t n){
+  if(!s || !s->f || (!buf && n)) return -1;
+  if(n == 0) return 0;
+  return (int)s->f.read((uint8_t*)buf, n);
+}
+
+bool flexFsStreamWrite(FlexFsStream* s, const void* buf, size_t n){
+  if(!s || !s->f || (!buf && n)) return false;
+  return n == 0 || s->f.write((const uint8_t*)buf, n) == n;
+}
+
+bool flexFsStreamSeek(FlexFsStream* s, uint32_t off){
+  return s && s->f && s->f.seek(off);
+}
+
+uint32_t flexFsStreamSize(FlexFsStream* s){
+  return (s && s->f) ? (uint32_t)s->f.size() : 0;
+}
+
+void flexFsStreamClose(FlexFsStream* s){
+  if(!s) return;
+  if(s->f) s->f.close();
+  delete s;
+}
+
+bool flexFsMove(const char* from, const char* to){
+  if(!fsMounted || !from || !to || to[0] != '/') return false;
+  if(!strcmp(from, to)) return true;
+  if(!LittleFS.exists(from) || LittleFS.exists(to)) return false;   // no se pisa nada
+  char dir[FLEXFS_PATH_MAX];
+  parentDir(to, dir, sizeof(dir));
+  if(!mkdirsTo(dir)) return false;
+  return LittleFS.rename(from, to);
 }
 
 //  LIMPIEZA DE RESTOS DE UNA VERSION ANTERIOR

@@ -232,6 +232,33 @@ bool     flexFsFactoryErase();
 // igual para cualquier lectura parcial.
 int      flexFsReadAt(const char* path, uint32_t off, void* buf, size_t n);
 
+// -------------------------------------------------------------
+//  FLUJOS (archivos que no caben en RAM)
+//  ------------------------------------------------------------
+//  Para lo que entra o sale por trozos: una subida del movil que se
+//  escribe a medida que llega, una descarga que se lee por bloques,
+//  un video que se recorre fotograma a fotograma. Nunca existe el
+//  archivo entero en memoria.
+//  Un flujo es de UNA sola tarea (quien lo abre lo cierra). Varias
+//  tareas pueden tener flujos a la vez: LittleFS serializa cada
+//  operacion por dentro.
+// -------------------------------------------------------------
+struct FlexFsStream;
+FlexFsStream* flexFsOpenRead(const char* path);            // NULL si no existe o es carpeta
+FlexFsStream* flexFsOpenWrite(const char* path);           // crea (y su carpeta) o vacia; NULL si no
+// Bytes leidos, 0 al final, -1 si el flujo no vale.
+int      flexFsStreamRead(FlexFsStream* s, void* buf, size_t n);
+// Escribe TODO o devuelve false (sin espacio, flujo cerrado...).
+bool     flexFsStreamWrite(FlexFsStream* s, const void* buf, size_t n);
+bool     flexFsStreamSeek(FlexFsStream* s, uint32_t off);
+uint32_t flexFsStreamSize(FlexFsStream* s);
+void     flexFsStreamClose(FlexFsStream* s);               // acepta NULL
+
+// Mueve un archivo a OTRA ruta completa (otra carpeta incluida) sin
+// copiar sus bytes: es un rename de LittleFS. Crea la carpeta de
+// destino si falta y NO pisa nada: false si el destino ya existe.
+bool     flexFsMove(const char* from, const char* to);
+
 
 // -------------------------------------------------------------
 //  PAINT (dibujo vectorial por trazos)

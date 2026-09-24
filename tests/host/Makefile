@@ -55,7 +55,7 @@ BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test
         $(BUILD)/test_passcode $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexauth $(BUILD)/test_flexphone_ui $(BUILD)/test_flexphone_discovery $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
         $(BUILD)/test_media $(BUILD)/test_mem $(BUILD)/test_fall $(BUILD)/test_theft $(BUILD)/test_imu \
         $(BUILD)/test_medialib $(BUILD)/test_jpegenc $(BUILD)/test_httpshare $(BUILD)/test_qr \
-        $(BUILD)/test_mediathumb $(BUILD)/test_mediaweb \
+        $(BUILD)/test_mediathumb $(BUILD)/test_mediaweb $(BUILD)/test_fs \
         $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun $(BUILD)/mediacheck $(BUILD)/flexweb_host
 
@@ -94,6 +94,14 @@ WEBFLAGS := -Wno-missing-field-initializers
 WEBUI    := $(ULTRA)/webui
 $(ULTRA)/FlexOS_WebUI.h: $(WEBUI)/index.html $(WEBUI)/app.css $(WEBUI)/app.js $(WEBUI)/gen_header.py
 	python3 $(WEBUI)/gen_header.py
+
+# --- FlexOS_FS: flujos y movimientos, el codigo REAL contra el doble de LittleFS ---
+# Una subida del movil se escribe por trozos y se mueve de la carpeta
+# temporal a la suya: aqui se comprueba sin placa, con una escritura que
+# falla a mitad.
+$(BUILD)/test_fs: test_fs.cpp $(ULTRA)/FlexOS_FS.cpp $(ULTRA)/FlexOS_FS.h fsstub/FS.h fsstub/fsstub.cpp | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -Ifsstub -Iinostub $(INC) -DARDUINO=200 -Wno-format-truncation -o $@ test_fs.cpp \
+	       $(ULTRA)/FlexOS_FS.cpp fsstub/fsstub.cpp
 
 $(BUILD)/test_mediaweb: test_mediaweb.cpp $(WEB_SRC) $(WEB_HDRS) | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) $(WEBFLAGS) -o $@ test_mediaweb.cpp $(WEB_SRC) vendor/cJSON/cJSON.c
@@ -525,6 +533,8 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_mediathumb
 	@echo
 	@$(BUILD)/test_mediaweb
+	@echo
+	@$(BUILD)/test_fs
 	@echo
 	@$(BUILD)/test_media
 	@echo
