@@ -251,9 +251,10 @@ int  flexMlAdd(FlexMlLib* lib, const FlexMlRec* proto, uint32_t now);
 bool flexMlRemoveAt(FlexMlLib* lib, int idx);
 // Cambia la ruta (renombrar, mover a Protegido y de vuelta).
 bool flexMlSetPath(FlexMlLib* lib, int idx, const char* path);
-// Pone/quita el candado. Al PONERLO se descarta la miniatura persistente
-// (el llamante borra el archivo) y se sube thumbVer: ninguna cache puede
-// seguir sirviendo la imagen vieja con la misma version.
+// Pone/quita el candado DEL REGISTRO y sube thumbVer: ninguna cache puede
+// seguir sirviendo la imagen con la misma version. Mover el archivo y su
+// miniatura a la carpeta protegida (y de vuelta) lo hace quien llama, con el
+// cerrojo tomado: FlexOS_MediaStore (flexMsSetLock).
 bool flexMlSetLocked(FlexMlLib* lib, int idx, bool on);
 // Marca un cambio que la UI y la web tienen que ver.
 void flexMlTouch(FlexMlLib* lib);

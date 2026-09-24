@@ -55,7 +55,7 @@ BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test
         $(BUILD)/test_passcode $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexauth $(BUILD)/test_flexphone_ui $(BUILD)/test_flexphone_discovery $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
         $(BUILD)/test_media $(BUILD)/test_mem $(BUILD)/test_fall $(BUILD)/test_theft $(BUILD)/test_imu \
         $(BUILD)/test_medialib $(BUILD)/test_jpegenc $(BUILD)/test_httpshare $(BUILD)/test_qr \
-        $(BUILD)/test_mediathumb $(BUILD)/test_mediaweb $(BUILD)/test_fs \
+        $(BUILD)/test_mediathumb $(BUILD)/test_mediaweb $(BUILD)/test_fs $(BUILD)/test_mediastore \
         $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun $(BUILD)/mediacheck $(BUILD)/flexweb_host
 
@@ -102,6 +102,17 @@ $(ULTRA)/FlexOS_WebUI.h: $(WEBUI)/index.html $(WEBUI)/app.css $(WEBUI)/app.js $(
 $(BUILD)/test_fs: test_fs.cpp $(ULTRA)/FlexOS_FS.cpp $(ULTRA)/FlexOS_FS.h fsstub/FS.h fsstub/fsstub.cpp | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -Ifsstub -Iinostub $(INC) -DARDUINO=200 -Wno-format-truncation -o $@ test_fs.cpp \
 	       $(ULTRA)/FlexOS_FS.cpp fsstub/fsstub.cpp
+
+# --- El almacen de la biblioteca: lo que la placa hace con el disco ---
+# Bloquear (mover a la carpeta protegida), borrar, renombrar, reemplazar un
+# original, publicar una subida y reconciliar, contra un sistema de archivos
+# en memoria que falla a la carta, y con hilos de verdad: interfaz, tarea de
+# fondo y servidor a la vez. El cerrojo de la prueba detecta anidamientos (en
+# la placa es un mutex no recursivo) y cambios de disco hechos sin el.
+STORE_SRC := $(ULTRA)/FlexOS_MediaStore.cpp $(ULTRA)/FlexOS_MediaLib.cpp $(ULTRA)/FlexOS_MediaThumb.cpp \
+             $(ULTRA)/FlexOS_JPEG.cpp $(ULTRA)/FlexOS_JPEGEnc.cpp $(ULTRA)/FlexOS_Media.cpp
+$(BUILD)/test_mediastore: test_mediastore.cpp $(STORE_SRC) $(ULTRA)/FlexOS_MediaStore.h $(ULTRA)/FlexOS_MediaLib.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -pthread -o $@ test_mediastore.cpp $(STORE_SRC)
 
 $(BUILD)/test_mediaweb: test_mediaweb.cpp $(WEB_SRC) $(WEB_HDRS) | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) $(WEBFLAGS) -o $@ test_mediaweb.cpp $(WEB_SRC) vendor/cJSON/cJSON.c
@@ -535,6 +546,8 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_mediaweb
 	@echo
 	@$(BUILD)/test_fs
+	@echo
+	@$(BUILD)/test_mediastore
 	@echo
 	@$(BUILD)/test_media
 	@echo
