@@ -144,6 +144,20 @@ GANCHOS = [
     ("lsuCheckStep",   "flexLockVerifyStep(",  "la verificacion no avanzaria ni una tanda"),
     ("lsuUnlock",      "lsuRevealStart()", "acertar la clave no llevaria al escritorio"),
     ("autoLockNow",    "hcClose(",        "bloquear con el modo abierto dejaria el estado a medias"),
+    # FLEX MEDIA. La biblioteca y el servidor viven en sus tareas; la isla, la
+    # pantalla y el bloqueo, en loopTask. Estos ganchos son los que los unen.
+    ("setup",          "mlBegin()",       "no habria catalogo ni tarea de fondo: Galeria vacia y la web sin donde publicar"),
+    ("loop",           "mlTick()",        "los avisos de la tarea de la biblioteca no llegarian nunca a la isla"),
+    ("loop",           "webTick()",       "Flex Web Server no pararia sin Wi-Fi ni soltaria a los propietarios al bloquearse el P4"),
+    ("webTick",        "flexWebDropOwners(", "bloquear el P4 dejaria abierto lo protegido en el movil"),
+    ("whVerify",       "flexLockVerifyAlone(", "el servidor no comprobaria la clave del sistema"),
+    ("lsuFinishAfter", "mediaAfterVerify(true)", "acertar la clave no abriria lo protegido que se pidio"),
+    ("lsuExit",        "mediaAfterVerify(false)", "cancelar la clave dejaria la app de medios sin repintar"),
+    ("mlSetLock",      "mlThumbDrop(",    "los pixeles de un protegido se quedarian en la cache de la RAM"),
+    ("galDoAction",    "mediaNoLockDialog()", "sin PIN, bloquear no explicaria que hay que configurarlo en Seguridad"),
+    ("filesReload",    "filesIsLibraryDir(", "el Explorador ensenaria la carpeta protegida"),
+    ("almScan",        "FML_DIR_ROOT",    "Archivos grandes ensenaria lo protegido por su ruta y su tamano"),
+    ("paintNew",       "mlRequestScan()", "un dibujo nuevo no apareceria en la Galeria hasta reconciliar por otro motivo"),
 ]
 
 # Llamadas PROHIBIDAS dentro de una funcion: (funcion, llamada, motivo).
@@ -218,6 +232,15 @@ PROHIBIDOS = [
     # sistema a donde estaba.
     ("lsuRevealTick",    "delay(",             "un delay en el revelado congela el sistema entero"),
     ("authFadeTick",     "delay(",             "un delay en la transicion de seguridad congela el tactil"),
+    # FLEX MEDIA. Las tareas de la biblioteca y del servidor NO pintan ni
+    # tocan la isla (eso es de loopTask: dejan su aviso en una cola), y el
+    # servidor NO usa la verificacion a plazos de la pantalla de bloqueo.
+    ("mlTask",           "sysNotify(",         "la isla solo se toca desde loopTask: la tarea deja el aviso en su cola"),
+    ("mlTask",           "flxFlush",           "la tarea de fondo de la biblioteca no pinta"),
+    ("webTask",          "sysNotify(",         "la isla solo se toca desde loopTask: el servidor deja eventos en su cola"),
+    ("webTask",          "flxFlush",           "la tarea del servidor no pinta"),
+    ("whVerify",         "flexLockVerifyBegin(", "mezclaria la verificacion que la pantalla tuviera a medias"),
+    ("whEvent",          "gWebEvR =",          "solo loopTask mueve el indice de lectura de la cola de eventos"),
 ]
 
 RE_MOD = re.compile(r'^#include\s+"(FlexOS_Ultra_(\w+)\.h)"', re.M)
