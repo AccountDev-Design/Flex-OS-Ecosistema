@@ -281,6 +281,7 @@
 #include "FlexOS_Ultra_AppChrono.h"          // cronometro: app, capsula y tarjeta
 #include "FlexOS_Ultra_System.h"             // I2C, soltar caches, Optimizar Flex OS y cambio de tema
 #include "FlexOS_Ultra_WebServer.h"          // Flex Web Server: tarea del servidor y hoja "Conectar con el movil"
+#include "FlexOS_Ultra_GalleryEdit.h"        // Galeria: editor de imagenes (trabajador de abrir/guardar)
 #include "FlexOS_Ultra_AppGallery.h"         // Galeria
 #include "FlexOS_Ultra_AppMusic.h"           // Musica: biblioteca de audio y reproductor en segundo plano
 #include "FlexOS_Ultra_IMU.h"                // Flex IMU Service: reparto del GY-BNO085 y orientacion
@@ -724,6 +725,7 @@ void loop(){
   mlTick();               // biblioteca de medios: avisos de su tarea de fondo para la isla
   webTick();              // Flex Web Server: avisos, tarjetas, Wi-Fi y bloqueo (la red va en su tarea)
   musAudioTick();         // Musica: alimenta el DMA aunque la app no este delante (no bloquea)
+  gedBgTick();            // Galeria: publica un guardado del editor terminado en segundo plano
   if(!gSafeMode){
     wifiAutoReconnectTick();// reconexion diferida, una vez por arranque
     ntpTick();              // la red corre en su tarea, nunca aqui

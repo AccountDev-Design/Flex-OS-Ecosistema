@@ -164,6 +164,18 @@ GANCHOS = [
     ("mediaOpenInPlayer", "musOpenPath(", "un audio abierto desde el Explorador no llegaria al reproductor de Musica"),
     ("mlSetLock",      "mlBeforeChange(", "bloquear la pista que suena la moveria con el archivo abierto"),
     ("mlDelete",       "mlBeforeChange(", "borrar la pista que suena la quitaria con el archivo abierto"),
+    # EDITOR DE LA GALERIA. Abrir y guardar corren en su trabajador; publicar,
+    # en loopTask (tambien con la Galeria en segundo plano). Y lo protegido
+    # no puede salir por aqui: ni una copia sin proteger ni la foto a la vista.
+    ("loop",           "gedBgTick()",     "un guardado terminado con la Galeria en segundo plano no se publicaria nunca"),
+    ("galTick",        "gedTick()",       "el editor abierto no recibiria toques"),
+    ("galRender",      "gedRender()",     "la Galeria pintaria la rejilla encima del editor abierto"),
+    ("galBackLayer",   "gedBack()",       "ATRAS saldria de la Galeria sin cerrar el editor ni preguntar por los cambios"),
+    ("galCloseApp",    "gedCloseNow()",   "cerrar la Galeria dejaria el editor con la foto en PSRAM"),
+    ("gedCloseNow",    "gedJobStopWait()", "cerrar soltaria memoria que el trabajador aun esta usando"),
+    ("gedDoSave",      "gedVerify(",      "se publicaria un JPEG sin comprobar que se escribio entero"),
+    ("gedCommit",      "FML_R_LOCKED",    "una foto protegida mientras se guardaba saldria como copia SIN proteger"),
+    ("gedValidate",    "FML_R_LOCKED",    "el editor seguiria ensenando una foto recien protegida"),
 ]
 
 # Llamadas PROHIBIDAS dentro de una funcion: (funcion, llamada, motivo).
@@ -251,6 +263,17 @@ PROHIBIDOS = [
     # (abrir una foto cortaria la musica que suena de fondo).
     ("vidReleaseMedia",  "flexAudioStop(",     "abrir o cerrar una foto cortaria la musica de fondo"),
     ("musAudioTick",     "delay(",             "el reproductor va en loop(): un delay congelaria el sistema entero"),
+    # El trabajador del editor ni pinta, ni avisa por la isla, ni toca el
+    # catalogo: deja el resultado y loopTask lo publica (gedCollect).
+    ("gedWorker",        "sysNotify(",         "la isla solo se toca desde loopTask"),
+    ("gedDoOpen",        "sysNotify(",         "la isla solo se toca desde loopTask"),
+    ("gedDoSave",        "sysNotify(",         "la isla solo se toca desde loopTask"),
+    ("gedDoOpen",        "flxFlush",           "el trabajador del editor no pinta"),
+    ("gedDoSave",        "flxFlush",           "el trabajador del editor no pinta"),
+    ("gedDoSave",        "mlReplaceFile(",     "el catalogo solo se cambia desde loopTask (gedCommit)"),
+    ("gedDoSave",        "mlAddFile(",         "el catalogo solo se cambia desde loopTask (gedCommit)"),
+    ("gedDoOpen",        "mlThumb",            "la cache de miniaturas es de loopTask"),
+    ("gedDoSave",        "delay(",             "el trabajador cede con vTaskDelay entre bandas, no con delay()"),
 ]
 
 RE_MOD = re.compile(r'^#include\s+"(FlexOS_Ultra_(\w+)\.h)"', re.M)

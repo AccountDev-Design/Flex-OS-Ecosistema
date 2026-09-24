@@ -26,7 +26,7 @@
 // ##      entrada del sistema es siempre FlexOS_Ultra.ino.
 // #############################################################
 #pragma once
-#include "FlexOS_Ultra_WebServer.h"   // eslabon anterior de la cadena
+#include "FlexOS_Ultra_GalleryEdit.h"   // eslabon anterior de la cadena
 
 // #############################################################
 // ##  GALERIA  ·  QUE ENSENA Y DE DONDE LO SACA
@@ -47,6 +47,11 @@
 // ##  PROTEGIDOS. Solo un candado: ni miniatura, ni nombre, ni la
 // ##  primera imagen de un video. Abrirlos, desbloquearlos o borrarlos
 // ##  pide la clave del sistema (la misma de la pantalla de bloqueo).
+// ##
+// ##  EDITAR. "Editar" en el menu de una foto JPEG abierta lleva al
+// ##  editor (FlexOS_Ultra_GalleryEdit.h), que es una capa de esta app:
+// ##  mientras esta abierto, el render, el tick, ATRAS y el ciclo de
+// ##  vida de la Galeria pasan primero por el.
 // #############################################################
 #define GAL_COLS          3
 #define GAL_THUMB_BUDGET  6        // miniaturas persistentes nuevas por repintado
@@ -96,7 +101,13 @@ static void galRender();
 // Seleccion, menus y acciones: los del kit de listas de medios (mk*), los
 // MISMOS que Multimedia y Musica.
 static void galOpenId(uint32_t id);
-static const MediaListApp GAL_APP = { "Galer\xC3\xAD" "a", galRender, galOpenId, NULL };
+// Acciones propias de la Galeria en el menu de un elemento: Editar.
+static bool galExtra(int act, uint32_t id){
+  if(act != MA_EDIT) return false;
+  gedOpen(id);
+  return true;
+}
+static const MediaListApp GAL_APP = { "Galer\xC3\xAD" "a", galRender, galOpenId, galExtra };
 
 // ---- Geometria ----
 // La cabecera del sistema ya dice "Galeria" (con su flecha de volver): aqui
@@ -267,6 +278,7 @@ static void galRenderGrid(){
 }
 
 static void galRender(){
+  if(gedActive()){ gedRender(); return; }             // el editor es una capa de la Galeria
   if(webSheetIsOpen()){ webSheetRender(); return; }   // la hoja del servidor manda mientras esta abierta
   galRenderGrid();
 }
@@ -312,6 +324,7 @@ static void galSelectAll(){
 }
 
 static void galTick(){
+  if(gedActive()){ gedTick(); return; }            // editor abierto: todo es suyo
   if(mkTick()) return;                            // menu, dialogos, papelera, hoja del servidor
 
   // --- El catalogo cambio (subida del movil, miniatura lista, recorrido) ---
@@ -340,7 +353,14 @@ static void galTick(){
      && abs(T.x - T.startX) < 14 && abs(T.y - T.startY) < 14 && T.startY > by + galHeadH() - 6){
     galLongFired = true;
     uint32_t id = galHitId(T.startX, T.startY);
-    if(id && !mkMulti){ mkOpenItemMenu(id, T.x, T.y + 10, NULL, 0); return; }
+    if(id && !mkMulti){
+      // "Editar" solo donde el editor puede de verdad (foto JPEG abierta).
+      FlexMlRec r;
+      static const uint8_t edit[1] = { MA_EDIT };
+      bool canEdit = mlGet(id, &r) && gedEditable(&r);
+      mkOpenItemMenu(id, T.x, T.y + 10, canEdit ? edit : NULL, canEdit ? 1 : 0);
+      return;
+    }
     if(id && mkMulti){ mkToggle(id); galRender(); return; }
   }
   if(!T.down) galLongFired = false;
@@ -380,17 +400,26 @@ static void galEnter(){
   galRender();
 }
 
-// ATRAS deshace primero las capas (menu, dialogos, hoja) y la seleccion.
-static bool galBackLayer(){ return mkBackLayer(); }
+// ATRAS deshace primero las capas (editor, menu, dialogos, hoja) y la seleccion.
+static bool galBackLayer(){
+  if(gedActive()){
+    if(fkNameOn && gedTextAsk){ fkNameOn = false; gedTextAsk = false; mkRedrawAll(); return true; }
+    if(mmDlgOn){ mmDlgOn = false; gedDlgResult(-1); return true; }
+    return gedBack();
+  }
+  return mkBackLayer();
+}
 static bool galBackScreen(){ return false; }
 
 static void galSuspend(){
   galDragging = false; galLongFired = false;
+  gedSuspend();                                   // el editor conserva su estado (y su trabajo sigue)
   mkSuspend();                                    // capas y seleccion fuera; el servidor sigue
 }
 
 static void galResume(){
   mkBind(&GAL_APP);
+  if(gedActive()){ gedResume(); if(gedActive()) return; }
   int maxS = galMaxScroll();
   if(galScroll < 0) galScroll = 0;
   if(galScroll > maxS) galScroll = maxS;
@@ -398,10 +427,17 @@ static void galResume(){
   galRender();
 }
 
-// SOLTAR SIN CERRAR: las miniaturas decodificadas se rehacen solas.
-static size_t galShed(){ return mlThumbDropAll(); }
+// SOLTAR SIN CERRAR: las miniaturas decodificadas se rehacen solas, y la
+// foto del editor se vuelve a leer al volver (sus ediciones se quedan).
+static size_t galShed(){ return mlThumbDropAll() + gedShed(); }
+
+// Trabajo REAL en segundo plano: el editor guardando (APP_BG_KEEP).
+static bool galBgWork(){ return gedBusy(); }
+// Cambios del usuario sin guardar: los del editor.
+static bool galDirty(){ return gedDirty(); }
 
 static void galCloseApp(){
+  gedCloseNow();
   mlThumbDropAll();
   galScroll = 0;
   if(mkApp == &GAL_APP) mkReset();

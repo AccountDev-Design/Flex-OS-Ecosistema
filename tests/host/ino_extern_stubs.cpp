@@ -13,6 +13,10 @@
 //  que es el mismo camino que toma la placa si el subsistema no
 //  arranca. Nada de esto se compila para la placa.
 // #############################################################
+// Antes que Arduino.h: sus macros min/max rompen las cabeceras de la STL.
+#include <map>
+#include <string>
+#include <vector>
 #include "Arduino.h"
 #include "FlexOS_OTA.h"
 #include "FlexOS_FS.h"
@@ -39,27 +43,62 @@ const char* flexOtaStatusText(){ return "Sin comprobar"; }
 const char* flexOtaLocalVersion(){ return "1.0.0"; }
 
 // ---- Sistema de archivos ----
+// DISCO EN MEMORIA, APAGADO POR DEFECTO. Las baterias que ya existian
+// esperan "sin almacenamiento" y con gTestMemFs = false todo sigue fallando
+// limpio, igual que antes. Una prueba que necesita archivos de verdad (el
+// editor de la Galeria: abrir un JPEG, guardar una copia, reemplazar el
+// original) lo enciende y mete ella misma los archivos. Mismas reglas que
+// FlexOS_FS en la placa: mover no pisa un destino que ya existe, abrir para
+// escribir crea o vacia, y escribir falla si no cabe (disco lleno).
+bool gTestMemFs = false;
+std::map<std::string, std::vector<uint8_t>> gTestFiles;
+uint32_t gTestFsCap = 16u << 20;               // capacidad de la particion en memoria
+long     gTestFsFailWriteAt = -1;              // >= 0: una escritura que pase de aqui falla
+long     gTestFsWritten = 0;
+struct FlexFsStream { std::string path; uint32_t pos; };
+static uint32_t memFsUsed(){ uint32_t u = 0; for(auto& kv : gTestFiles) u += (uint32_t)kv.second.size(); return u; }
+static bool memFsHas(const char* p){ return gTestMemFs && p && gTestFiles.count(p); }
 bool        flexFsBegin(){ return false; }
 // El almacenamiento tambien se puede mover desde las pruebas: por defecto sigue
 // "no disponible", que es lo que esperaban las baterias que ya existian.
 bool        gTestFsReady = false;
 bool        flexFsReady(){ return gTestFsReady; }
 bool        flexFsIsDir(const char*){ return false; }
-uint32_t    flexFsSize(const char*){ return 0; }
-bool        flexFsExists(const char*){ return false; }
+uint32_t    flexFsSize(const char* p){ return memFsHas(p) ? (uint32_t)gTestFiles[p].size() : 0; }
+bool        flexFsExists(const char* p){ return memFsHas(p); }
 const char* flexFsError(){ return "no montado"; }
-uint32_t    flexFsUsedBytes(){ return 0; }
-uint32_t    flexFsTotalBytes(){ return 0; }
+uint32_t    flexFsUsedBytes(){ return gTestMemFs ? memFsUsed() : 0; }
+uint32_t    flexFsTotalBytes(){ return gTestMemFs ? gTestFsCap : 0; }
 uint32_t    flexFsDirSize(const char*){ return 0; }
 uint32_t    flexFsCatSize(int){ return 0; }
 int         flexFsList(const char*, FlexFsEntry*, int){ return 0; }
-int         flexFsListFrom(const char*, FlexFsEntry*, int, int){ return -1; }
+int         flexFsListFrom(const char* dir, FlexFsEntry* out, int maxn, int skip){
+  if(!gTestMemFs || !dir) return -1;
+  std::string d = dir; if(d.empty() || d.back() != '/') d += '/';
+  int n = 0, seen = 0;
+  for(auto& kv : gTestFiles){
+    if(kv.first.compare(0, d.size(), d) || kv.first.find('/', d.size()) != std::string::npos) continue;
+    if(seen++ < skip) continue;
+    if(n >= maxn) break;
+    memset(&out[n], 0, sizeof(out[n]));
+    snprintf(out[n].name, sizeof(out[n].name), "%s", kv.first.c_str() + d.size());
+    out[n].size = (uint32_t)kv.second.size();
+    n++;
+  }
+  return n;
+}
 int         flexFsLargest(FlexFsBig*, int){ return 0; }
 int         flexFsReadText(const char*, char* out, size_t n){ if(n) out[0] = 0; return -1; }
 bool        flexFsWriteText(const char*, const char*){ return false; }
-int         flexFsReadBin(const char*, void*, size_t){ return -1; }
+int         flexFsReadBin(const char* p, void* b, size_t n){
+  if(!memFsHas(p)) return -1;
+  auto& f = gTestFiles[p];
+  size_t k = f.size() < n ? f.size() : n;
+  if(k) memcpy(b, f.data(), k);
+  return (int)k;
+}
 bool        flexFsWriteBin(const char*, const void*, size_t){ return false; }
-bool        flexFsDelete(const char*){ return false; }
+bool        flexFsDelete(const char* p){ return memFsHas(p) && gTestFiles.erase(p) == 1; }
 bool        flexFsRename(const char*, const char*){ return false; }
 bool        flexFsTrash(const char*){ return false; }
 bool        flexFsRestore(const char*){ return false; }
@@ -132,14 +171,44 @@ void flexBrowserKeyCancel(){}
 int      flexFsReadAt(const char*, uint32_t, void*, size_t){ return -1; }
 // Flujos y movimientos (subidas del movil, biblioteca de medios). Sin
 // sistema de archivos de verdad aqui: todo falla limpio, como sin montar.
-FlexFsStream* flexFsOpenRead(const char*){ return nullptr; }
-FlexFsStream* flexFsOpenWrite(const char*){ return nullptr; }
-int      flexFsStreamRead(FlexFsStream*, void*, size_t){ return -1; }
-bool     flexFsStreamWrite(FlexFsStream*, const void*, size_t){ return false; }
-bool     flexFsStreamSeek(FlexFsStream*, uint32_t){ return false; }
-uint32_t flexFsStreamSize(FlexFsStream*){ return 0; }
-void     flexFsStreamClose(FlexFsStream*){}
-bool     flexFsMove(const char*, const char*){ return false; }
+FlexFsStream* flexFsOpenRead(const char* p){ return memFsHas(p) ? new FlexFsStream{ p, 0 } : nullptr; }
+FlexFsStream* flexFsOpenWrite(const char* p){
+  if(!gTestMemFs || !p || p[0] != '/') return nullptr;
+  gTestFiles[p].clear();                        // crea o vacia, como LittleFS con "w"
+  return new FlexFsStream{ p, 0 };
+}
+int      flexFsStreamRead(FlexFsStream* s, void* b, size_t n){
+  if(!s || !gTestFiles.count(s->path)) return -1;
+  auto& f = gTestFiles[s->path];
+  size_t k = s->pos >= f.size() ? 0 : (f.size() - s->pos < n ? f.size() - s->pos : n);
+  if(k) memcpy(b, f.data() + s->pos, k);
+  s->pos += (uint32_t)k;
+  return (int)k;
+}
+bool     flexFsStreamWrite(FlexFsStream* s, const void* b, size_t n){
+  if(!s || !gTestFiles.count(s->path)) return false;
+  if(memFsUsed() + n > gTestFsCap) return false;                          // disco lleno
+  if(gTestFsFailWriteAt >= 0 && gTestFsWritten + (long)n > gTestFsFailWriteAt) return false;
+  auto& f = gTestFiles[s->path];
+  if(s->pos + n > f.size()) f.resize(s->pos + n);
+  memcpy(f.data() + s->pos, b, n);
+  s->pos += (uint32_t)n; gTestFsWritten += (long)n;
+  return true;
+}
+bool     flexFsStreamSeek(FlexFsStream* s, uint32_t off){
+  if(!s || !gTestFiles.count(s->path) || off > gTestFiles[s->path].size()) return false;
+  s->pos = off; return true;
+}
+uint32_t flexFsStreamSize(FlexFsStream* s){ return (s && gTestFiles.count(s->path)) ? (uint32_t)gTestFiles[s->path].size() : 0; }
+void     flexFsStreamClose(FlexFsStream* s){ delete s; }
+bool     flexFsMove(const char* a, const char* b){
+  if(!gTestMemFs || !a || !b || b[0] != '/') return false;
+  if(!strcmp(a, b)) return true;
+  if(!gTestFiles.count(a) || gTestFiles.count(b)) return false;          // no se pisa nada
+  gTestFiles[b] = std::move(gTestFiles[a]);
+  gTestFiles.erase(a);
+  return true;
+}
 bool     flexFsPurgeLegacyVault(){ return false; }
 
 // ---- Clima (motor meteorologico) ----
@@ -326,7 +395,7 @@ void flexAccountForgetLocal(){}
 // resto del fichero: contestan "no disponible", que es lo que ve el
 // sketch cuando la particion interna no esta montada.
 int      flexFsCount(const char*){ return 0; }
-bool     flexFsMkdir(const char*){ return false; }
+bool     flexFsMkdir(const char*){ return gTestMemFs; }   // en memoria no hay carpetas: siempre "existen"
 bool     flexFsWriteBinAtomic(const char*, const void*, size_t){ return false; }
 bool     flexFsFactoryErase(){ return false; }
 

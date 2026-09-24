@@ -110,6 +110,7 @@ static void   storeSuspendLife(); // Flex Store: suspende la app flex-app-v1 que
 static void   navSuspendLife();  // Navegador: al pasar a segundo plano
 static size_t navShedLife();     // Navegador: suelta la cache de fotogramas
 static bool galBackLayer(); static bool galBackScreen(); static void galSuspend(); static void galResume();
+static bool galBgWork(); static bool galDirty();           // Galeria: el editor guardando / con cambios
 static void calEnter(); static void calTick();             // Calendario (M2)
 static void vidEnter(); static void vidTick();             // Multimedia (esqueleto)
 static void camEnter(); static void camTick();             // Camara (esqueleto)
@@ -633,7 +634,10 @@ static const AppHooks H_MODOPC   = { NULL, NULL, pcSuspend, pcResume, pcCloseApp
 static const AppHooks H_CALEND   = { NULL, NULL, NULL, calResume, NULL, NULL, NULL, NULL, NULL, NULL };
 static const AppHooks H_ALM      = { NULL, almBackScreen, almSuspend, almResume, almCloseApp, NULL, NULL, NULL, NULL, NULL };
 static const AppHooks H_SETTINGS = { NULL, settingsHandleBack, setSuspend, setResume, NULL, setSaveSess, setLoadSess, setBgWork, NULL, NULL };
-static const AppHooks H_GALLERY  = { galBackLayer, galBackScreen, galSuspend, galResume, galCloseApp, NULL, NULL, NULL, galShed, NULL };
+// Galeria. bgWork = el editor esta guardando (con APP_BG_KEEP no se desaloja
+// a mitad); dirty = el editor tiene cambios sin guardar; shed suelta las
+// miniaturas y la foto del editor (sus ediciones se quedan: se relee al volver).
+static const AppHooks H_GALLERY  = { galBackLayer, galBackScreen, galSuspend, galResume, galCloseApp, NULL, NULL, galBgWork, galShed, galDirty };
 static const AppHooks H_CALC     = { NULL, NULL, NULL, calcResume, NULL, calcSaveSess, calcLoadSess, NULL, NULL, NULL };
 static const AppHooks H_MEDIA    = { vidBackLayer, vidBackScreen, vidSuspend, vidResume, vidCloseApp, vidSaveSess, vidLoadSess, NULL, vidShed, NULL };
 static const AppHooks H_CAMERA   = { NULL, NULL, camSuspend, camResume, camCloseApp, NULL, NULL, NULL, camShed, NULL };
@@ -686,7 +690,7 @@ static const AppHooks H_MUSIC    = { musBackLayer, musBackScreen, musSuspend, mu
 // ---- Registro de apps (indices = enum IC_*) ----
 static FlexApp APP_REG[APP_N] = {
   { appRelojEnter, appRelojTick, APP_FLEX, APP_CAT_ESENCIAL, APP_DEF_FAV, NULL },
-  { galEnter, galTick, APP_FLEX, APP_CAT_MEDIA, APP_DEF_FAV, &H_GALLERY },
+  { galEnter, galTick, APP_FLEX | APP_BG_KEEP, APP_CAT_MEDIA, APP_DEF_FAV, &H_GALLERY },
   { vidEnter, vidTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_MEDIA, APP_DEF_FAV, &H_MEDIA },
   { almEnter, almTick, APP_FLEX, APP_CAT_SISTEMA, APP_DEF_FAV, &H_ALM },
   { pcEnter, pcTick, APP_CUSTOM_HEADER, APP_CAT_SISTEMA, APP_DEF_FAV, &H_MODOPC },

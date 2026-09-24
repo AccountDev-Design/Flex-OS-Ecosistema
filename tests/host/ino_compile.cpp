@@ -14,6 +14,9 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <time.h>
+#include <map>
+#include <string>
+#include <vector>
 #include "Arduino.h"
 #include "Wire.h"
 #include "Preferences.h"
@@ -7646,6 +7649,375 @@ static void testCapturasMedios(){
   gState = ST_HOME; gAppId = 0;
 }
 
+// #############################################################
+//  EDITOR DE LA GALERIA · de punta a punta, con archivos de verdad
+//  ------------------------------------------------------------
+//  Sobre el disco en memoria (ino_extern_stubs.cpp) y el almacen REAL
+//  de la biblioteca: se abre un JPEG, se edita con toques sinteticos
+//  sobre la geometria de la pantalla, se guarda como copia y se
+//  reemplaza el original, y se comprueba lo que queda en el disco.
+//  El trabajador no corre solo (xTaskCreatePinnedToCore es un doble):
+//  la prueba lo ejecuta en su sitio con gedWorker(), que es justo el
+//  cuerpo de la tarea.
+// #############################################################
+extern bool gTestMemFs;
+extern bool gTestFsReady;
+extern std::map<std::string, std::vector<uint8_t>> gTestFiles;
+extern uint32_t gTestFsCap;
+extern long gTestFsFailWriteAt, gTestFsWritten;
+static FlexMlRec geStore[16];
+static void chkf(bool c, const char* fmt, ...){
+  char b[256]; va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof(b), fmt, ap); va_end(ap);
+  chk(c, b);
+}
+static bool geOut(void* c, const uint8_t* d, size_t n){ auto* v = (std::vector<uint8_t>*)c; v->insert(v->end(), d, d + n); return true; }
+// Foto de prueba: degradado con una marca ROJA arriba a la izquierda.
+static std::vector<uint8_t> geJpeg(int W, int H){
+  std::vector<uint8_t> px((size_t)W * H * 3), out;
+  for(int y = 0; y < H; y++) for(int x = 0; x < W; x++){
+    uint8_t* p = &px[((size_t)y * W + x) * 3];
+    bool mark = x < W / 8 && y < H / 8;
+    p[0] = mark ? 235 : (uint8_t)(40 + x * 150 / W); p[1] = mark ? 20 : (uint8_t)(60 + y * 150 / H); p[2] = mark ? 20 : 140;
+  }
+  FlexJeCfg c; c.width = W; c.height = H; c.quality = 90; c.subsampling = FLEXJE_SUB_420; c.input = FLEXJE_IN_RGB888;
+  flexJpegEncodeMem(&c, px.data(), (size_t)W * 3, geOut, &out, nullptr, nullptr);
+  return out;
+}
+static void geFsReset(){
+  gTestMemFs = true; gTestFiles.clear(); gTestFsCap = 16u << 20; gTestFsFailWriteAt = -1; gTestFsWritten = 0;
+  memset(&gMs, 0, sizeof(gMs));
+  gMs.fs = { msfOpen, msfRead, msfWrite, msfSeek, msfClose, msfSize, msfExists, msfRemove, msfMove, msfTrash,
+             msfMkdir, msfList, msfAtomic, NULL };
+  gMs.lock = mlLockCb; gMs.unlock = mlUnlockCb; gMs.alloc = mediaAlloc; gMs.free = mediaFree; gMs.now = mlNowCb;
+  flexMsInit(&gMs, geStore, 16);
+  gMlOk = true;
+}
+static uint32_t geAddPhoto(const char* path, const std::vector<uint8_t>& jpg, bool locked){
+  gTestFiles[path] = jpg;
+  FlexMlRec r; memset(&r, 0, sizeof(r));
+  snprintf(r.path, sizeof(r.path), "%s", path);
+  const char* b = strrchr(path, '/');
+  snprintf(r.name, sizeof(r.name), "%s", b ? b + 1 : path);
+  r.kind = FML_K_PHOTO; r.fmt = FML_F_JPEG; r.state = FML_S_READY; r.size = (uint32_t)jpg.size();
+  r.flags = (uint16_t)(FML_R_PLAYABLE | (locked ? FML_R_LOCKED : 0));
+  int at = flexMlAdd(&gMs.lib, &r, 1760000000u);
+  return at >= 0 ? gMs.lib.recs[at].id : 0;
+}
+static unsigned long geMs = 5000000;
+static void geTap(int x, int y){
+  tDown(x, y, geMs); gedTick();
+  tUp(geMs + 60, true); gedTick();
+  geMs += 400; touchReset();
+}
+static void geDrag(int x0, int y0, int x1, int y1){
+  tDown(x0, y0, geMs); gedTick();
+  for(int k = 1; k <= 8; k++){ tMove(x0 + (x1 - x0) * k / 8, y0 + (y1 - y0) * k / 8, geMs + 50 * k); gedTick(); }
+  tUp(geMs + 500, false); gedTick();
+  geMs += 900; touchReset(); gedTick();
+}
+static void geRun(){ gedWorker(nullptr); gedTick(); }     // el trabajador, en su sitio, y la interfaz lo recoge
+static const FlexMlRec* geRec(uint32_t id){ int i = flexMlFindId(&gMs.lib, id); return i >= 0 ? &gMs.lib.recs[i] : nullptr; }
+static bool geDims(const std::vector<uint8_t>& f, int* w, int* h){
+  FlexJpegInfo inf; memset(&inf, 0, sizeof(inf));
+  if(f.empty() || flexJpegProbe(f.data(), f.size(), &inf) != FLEXJPG_OK) return false;
+  *w = inf.width; *h = inf.height; return true;
+}
+static bool geTopLeftRed(const std::vector<uint8_t>& f, bool* rightInstead){
+  // Decodifica y mira donde quedo la marca roja: arriba a la izquierda o arriba a la derecha.
+  struct D { std::vector<uint8_t> px; int w; } d; d.w = 0;
+  FlexJpegInfo inf; memset(&inf, 0, sizeof(inf));
+  if(flexJpegProbe(f.data(), f.size(), &inf) != FLEXJPG_OK) return false;
+  d.px.resize((size_t)inf.width * inf.height * 3); d.w = inf.width;
+  flexJpegDecode888(f.data(), f.size(), 0, 0, 0, &inf,
+    [](void* u, int y, int w, const uint8_t* rgb) -> bool { D* q = (D*)u; memcpy(&q->px[(size_t)y * q->w * 3], rgb, (size_t)w * 3); return true; },
+    &d, nullptr, nullptr);
+  auto red = [&](int x, int y){ const uint8_t* p = &d.px[((size_t)y * d.w + x) * 3]; return p[0] > 180 && p[1] < 90 && p[2] < 90; };
+  *rightInstead = red(inf.width - 4, 4);
+  return red(4, 4);
+}
+
+static void testEditorGaleria(){
+  printf("Editor de la Galeria: abrir, editar, guardar copia, reemplazar, protegidos y memoria\n");
+  bool ok0 = gMlOk; bool fs0 = gTestFsReady; gTestFsReady = true;
+  geFsReset();
+  auto orig = geJpeg(320, 240);
+  uint32_t id = geAddPhoto(FML_DIR_PHOTO "/playa.jpg", orig, false);
+  uint32_t lk = geAddPhoto(FML_DIR_LOCKED "/9.jpg", geJpeg(64, 48), true);
+  FlexMlRec rv; memset(&rv, 0, sizeof(rv)); rv.kind = FML_K_VIDEO; snprintf(rv.path, sizeof(rv.path), "/Videos/v.avi");
+  FlexMlRec rp = *geRec(id); snprintf(rp.path, sizeof(rp.path), FML_DIR_PHOTO "/dibujo.png");
+  chk(gedEditable(geRec(id)) && !gedEditable(geRec(lk)) && !gedEditable(&rv) && !gedEditable(&rp),
+      "editable: una foto JPEG abierta; ni lo protegido, ni un video, ni un PNG");
+
+  gState = ST_APP; gAppId = IC_GALERIA; gAppState[IC_GALERIA] = ALIFE_RUNNING; gLand = false; gHosted = false;
+  gAppW = SCR_W; gAppH = SCR_H; uiClipFull(); setBuf(fb);
+  mkBind(&GAL_APP);
+  // ---- El menu de la foto ofrece Editar (y lo protegido no) ----
+  gLockType = 1;
+  { static const uint8_t ed[1] = { MA_EDIT };
+    mkOpenItemMenu(id, 100, 300, ed, 1);
+    bool has = false; for(int i = 0; i < mmN; i++) if(mmAct[i] == MA_EDIT) has = true;
+    mmOn = false;
+    mkOpenItemMenu(lk, 100, 300, ed, 1);
+    bool leak = false; for(int i = 0; i < mmN; i++) if(mmAct[i] == MA_EDIT) leak = true;
+    mmOn = false;
+    chk(has && !leak, "el menu de una foto ofrece Editar; el de una protegida, no"); }
+
+  // ---- Abrir: el trabajador lee y decodifica; la interfaz lo recoge ----
+  uint32_t tasks0 = gPinnedTaskCreates;
+  mkMenuId = id; mkDoAction(MA_EDIT);
+  chk(gedPhase == GED_OPENING && gPinnedTaskCreates == tasks0 + 1 && gedJobOn,
+      "Editar lanza la apertura en su trabajador (sin bloquear la interfaz)");
+  geRun();
+  chk(gedPhase == GED_EDIT && gedBase && gedW == 320 && gedH == 240 && gedSrcW == 320 && !gedJobOn,
+      "la foto se abre entera (320x240) y el editor queda listo");
+  chk(!flexIeCanUndo(gedE) && flexIeIsIdentity(gedE) && !gedDirty(), "recien abierta: nada que deshacer ni que guardar");
+
+  // ---- Toques reales sobre la geometria de la pantalla ----
+  GedGeom g = gedGeom();
+  int x, w; gedRowCell(g, 4, 1, x, w);
+  geTap(x + w / 2, g.panelY + 30);                          // Girar a la derecha
+  chk(gedE->st.rot == 1 && flexIeCanUndo(gedE), "Recortar > Girar: un cuarto de vuelta, y se puede deshacer");
+  int tw = g.bw / GT_N;
+  geTap(g.bx + GT_ADJ * tw + tw / 2, g.tabsY + 30);
+  chk(gedTool == GT_ADJ, "pestana Ajustes");
+  int s0, s1; gedSliderGeom(g, GED_SLIDER_Y(g), s0, s1);
+  int cur0 = gedE->cur;
+  geDrag((s0 + s1) / 2, GED_SLIDER_Y(g), s0 + (s1 - s0) * 3 / 4, GED_SLIDER_Y(g));
+  chkf(gedE->st.adj[FLEXIE_ADJ_BRIGHT] >= 45 && gedE->st.adj[FLEXIE_ADJ_BRIGHT] <= 55 && gedE->cur == cur0 + 1,
+      "arrastrar Brillo hasta 3/4: ~+50 y UN solo paso en el historial (%d)", gedE->st.adj[FLEXIE_ADJ_BRIGHT]);
+  geTap(g.bx + GT_DRAW * tw + tw / 2, g.tabsY + 30);
+  geDrag(gedVX + gedVW / 4, gedVY + gedVH / 2, gedVX + gedVW * 3 / 4, gedVY + gedVH / 2);
+  chk(gedE->st.nOv == 1 && gedE->ov[0].kind == FLEXIE_OV_STROKE && gedE->ov[0].pn >= 2, "Dibujo: un trazo sobre la foto");
+  geTap(g.bx + g.pad + 18, g.topY + GED_TOP_H / 2);          // deshacer
+  chk(gedE->st.nOv == 0, "deshacer quita el trazo");
+  geTap(g.bx + g.pad + 66, g.topY + GED_TOP_H / 2);          // rehacer
+  chk(gedE->st.nOv == 1 && gedDirty(), "rehacer lo devuelve; hay cambios sin guardar");
+
+  // ---- Guardar como copia ----
+  int bx, by, bw, bh; gedSaveBtnGeom(g, bx, by, bw, bh);
+  geTap(bx + bw / 2, by + bh / 2);
+  chk(gedSheet, "Guardar abre la hoja con las dos opciones");
+  gedSheetBtn(g, 0, bx, by, bw, bh);
+  geTap(bx + bw / 2, by + bh / 2);
+  chk(gedPhase == GED_SAVING && gedJobOn && !strcmp(gedJob.path, FML_DIR_TMP "/ed-1.jpg") && gedJob.outW == 240 && gedJob.outH == 320,
+      "Guardar como copia: se codifica en un temporal (240x320, girada)");
+  int n0 = gMs.lib.n;
+  geRun();
+  uint32_t cp = gMs.lib.n == n0 + 1 ? gMs.lib.recs[gMs.lib.n - 1].id : 0;
+  const FlexMlRec* rc = cp ? geRec(cp) : nullptr;
+  chk(rc && rc->parent == id && rc->origin == FML_O_EDIT && !strcmp(rc->name, "playa (editada).jpg") && (rc->flags & FML_R_NEED_THUMB),
+      "copia publicada: id nueva, 'playa (editada).jpg', sabe de donde sale y espera su miniatura");
+  int cw = 0, ch = 0; bool right = false;
+  chkf(rc && gTestFiles.count(rc->path) && geDims(gTestFiles[rc->path], &cw, &ch) && cw == 240 && ch == 320,
+      "el archivo de la copia es un JPEG de 240x320 que el firmware abre (%dx%d)", cw, ch);
+  chk(rc && !geTopLeftRed(gTestFiles[rc->path], &right) && right, "y va girada: la marca roja arriba a la DERECHA");
+  chk(gTestFiles[FML_DIR_PHOTO "/playa.jpg"] == orig && !gTestFiles.count(FML_DIR_TMP "/ed-1.jpg"),
+      "el original, intacto; el temporal, fuera");
+  chk(gedPhase == GED_OFF && !gedE && !gedBase && !gedJobOn, "guardado: el editor se cierra y suelta toda su memoria");
+
+  // ---- Segunda copia: otro nombre libre ----
+  gedOpen(id); geRun();
+  flexIeFlip(gedE, true);
+  gedStartSave(GS_COPY); geRun();
+  chk(gMs.lib.n == n0 + 2 && !strcmp(gMs.lib.recs[gMs.lib.n - 1].name, "playa (editada 2).jpg"),
+      "la segunda copia no repite nombre: 'playa (editada 2).jpg'");
+
+  // ---- Reemplazar el original (con confirmacion) ----
+  gedOpen(id); geRun();
+  flexIeSetCrop(gedE, 0.0f, 0.0f, 0.5f, 0.5f);
+  gedAfterChange();
+  gedSaveBtnGeom(g, bx, by, bw, bh); geTap(bx + bw / 2, by + bh / 2);
+  gedSheetBtn(g, 1, bx, by, bw, bh); geTap(bx + bw / 2, by + bh / 2);
+  chk(mmDlgOn && gedAsk == GA_REPLACE && gedPhase == GED_EDIT, "Reemplazar pide confirmacion antes de tocar nada");
+  { int dx, dy, dw, dh; mmDlgGeom(dx, dy, dw, dh); int bw2 = (dw - 48) / 2;
+    geTap(dx + 32 + bw2 + bw2 / 2, dy + dh - 76 + 28); }                 // boton principal: Reemplazar
+  chk(gedPhase == GED_SAVING, "confirmado: se guarda");
+  geRun();
+  const FlexMlRec* ro = geRec(id);
+  int rw = 0, rh = 0;
+  chkf(ro && !strcmp(ro->path, FML_DIR_PHOTO "/playa.jpg") && (ro->flags & FML_R_EDITED) && geDims(gTestFiles[ro->path], &rw, &rh) &&
+      rw == 160 && rh == 120 && !gTestFiles.count(FML_DIR_PHOTO "/playa.jpg.fxorig") && !gTestFiles.count(FML_DIR_TMP "/ed-1.jpg"),
+      "reemplazada: misma id y ruta, contenido nuevo (160x120), nada apartado ni temporal (%dx%d)", rw, rh);
+  chk(ro && ro->size == gTestFiles[ro->path].size(), "el catalogo sabe el tamano nuevo");
+
+  // ---- Protegidos: si la foto se bloquea con el editor abierto, se cierra ----
+  gedOpen(id); geRun();
+  char why[96];
+  chk(mlSetLock(id, true, why, sizeof(why)), "bloquear la foto (con el editor abierto)");
+  gedTick();
+  chk(gedPhase == GED_OFF && !gedBase && !gedE && mmDlgOn, "el editor se cierra, suelta los pixeles y lo dice");
+  mmDlgOn = false; gedAsk = GA_NONE;
+  chk(mlSetLock(id, false, why, sizeof(why)), "desbloquear");
+  // ...y si se protege mientras se GUARDA, no sale nada (ni copia sin proteger).
+  gedOpen(id); geRun();
+  flexIeRotate(gedE, 1);
+  gedStartSave(GS_COPY);
+  gedWorker(nullptr);                                        // el trabajador acaba...
+  { int nb = gMs.lib.n;
+    mlSetLock(id, true, why, sizeof(why));                   // ...y la foto se bloquea antes de publicar
+    gedTick();
+    chk(gMs.lib.n == nb && !gTestFiles.count(FML_DIR_TMP "/ed-1.jpg") && gedPhase == GED_OFF,
+        "protegida a mitad de guardar: no se publica ninguna copia y el temporal se borra"); }
+  mmDlgOn = false; gedAsk = GA_NONE;
+  mlSetLock(id, false, why, sizeof(why));
+
+  // ---- Cancelar y fallos: el original no cambia nunca ----
+  auto before = gTestFiles[geRec(id)->path];
+  gedOpen(id); geRun();
+  flexIeRotate(gedE, 1);
+  gedStartSave(GS_REPLACE);
+  gedJob.cancel = 1; geRun();
+  chk(gedPhase == GED_EDIT && gedE->st.rot == 1 && !gTestFiles.count(FML_DIR_TMP "/ed-1.jpg") && gTestFiles[geRec(id)->path] == before,
+      "cancelar: nada cambia, el temporal no queda y se sigue editando");
+  mmDlgOn = false; gedAsk = GA_NONE;
+  gTestFsFailWriteAt = gTestFsWritten + 300;                // el disco falla a mitad (tras la cabecera)
+  gedStartSave(GS_REPLACE); geRun();
+  chk(gedPhase == GED_EDIT && mmDlgOn && gTestFiles[geRec(id)->path] == before && !gTestFiles.count(FML_DIR_TMP "/ed-1.jpg"),
+      "escritura que falla a mitad: el original intacto, sin restos, y se avisa");
+  mmDlgOn = false; gedAsk = GA_NONE; gTestFsFailWriteAt = -1;
+  uint32_t cap0 = gTestFsCap; gTestFsCap = flexFsUsedBytes() + 1000;
+  gedStartSave(GS_COPY);
+  chk(gedPhase == GED_EDIT && !gedJobOn && mmDlgOn && strstr(mmDlgText, "Libera espacio") != NULL,
+      "sin espacio: no se empieza a escribir y se dice cuanto falta");
+  mmDlgOn = false; gedAsk = GA_NONE; gTestFsCap = cap0;
+
+  // ---- Memoria: soltar la foto en segundo plano y releerla al volver ----
+  flexIeAdjustLive(gedE, FLEXIE_ADJ_CONTRAST, 40); flexIeCommit(gedE);
+  int curBefore = gedE->cur;
+  gAppState[IC_GALERIA] = ALIFE_SUSPENDED;
+  size_t shed = gedShed();
+  chk(shed > 0 && !gedBase && gedReopen && gedE, "suspendida: la foto se suelta (el estado se queda)");
+  gAppState[IC_GALERIA] = ALIFE_RUNNING;
+  gedResume();
+  chk(gedPhase == GED_OPENING, "al volver se relee");
+  geRun();
+  chk(gedPhase == GED_EDIT && gedBase && gedE->st.rot == 1 && gedE->st.adj[FLEXIE_ADJ_CONTRAST] == 40 && gedE->cur == curBefore,
+      "releida: mismas ediciones y mismo historial");
+
+  // ---- Guardar con la Galeria en segundo plano: lo publica loop() ----
+  gedStartSave(GS_COPY);
+  gAppState[IC_GALERIA] = ALIFE_SUSPENDED;
+  chk(galBgWork(), "guardando: trabajo real en segundo plano (no se desaloja)");
+  gedWorker(nullptr);
+  int nb = gMs.lib.n;
+  gTestMs += 1000; geMs = gTestMs;                          // la Galeria lleva un rato sin pintarse
+  gedBgTick();
+  chk(gMs.lib.n == nb + 1 && gedPhase == GED_OFF && !galBgWork(), "loop() publica la copia aunque la Galeria no este delante");
+  gAppState[IC_GALERIA] = ALIFE_RUNNING;
+
+  // ---- Texto ----
+  gedOpen(id); geRun();
+  gedSetTool(GT_TEXT);
+  snprintf(gedText, sizeof(gedText), "Hola"); gedTextOn = true; gedTextU = 0.1f; gedTextV = 0.4f;
+  gedRowCell(g, 2, 1, x, w);
+  geTap(x + w / 2, g.panelY + 25);                          // Listo
+  chk(gedE->st.nOv == 1 && gedE->ov[0].kind == FLEXIE_OV_TEXT && !strcmp(gedE->ov[0].text, "Hola") && !gedTextOn,
+      "Texto > Listo: el texto queda en la foto");
+  // ATRAS con cambios pregunta; descartar cierra sin tocar nada.
+  auto before2 = gTestFiles[geRec(id)->path];
+  chk(galBackLayer() && mmDlgOn && gedAsk == GA_DISCARD, "atras con cambios: pregunta si descartar");
+  { int dx, dy, dw, dh; mmDlgGeom(dx, dy, dw, dh); int bw2 = (dw - 48) / 2;
+    geTap(dx + 32 + bw2 + bw2 / 2, dy + dh - 76 + 28); }
+  chk(gedPhase == GED_OFF && gTestFiles[geRec(id)->path] == before2, "Descartar: fuera, sin guardar nada");
+
+  // ---- Un trabajador que tarda en terminar: nada se suelta antes de tiempo ----
+  gedOpen(id); geRun();
+  flexIeRotate(gedE, 1);
+  gedStartSave(GS_COPY);                                    // el trabajador "no llega" a correr
+  FlexImgEdit* stuck = gedE;
+  gedCloseNow();
+  chk(gedPhase == GED_OFF && gedLeak && gedE == stuck, "cerrar con el trabajador colgado: no se suelta lo que usa");
+  chk(!gedOpen(id) && mmDlgOn, "y el editor no se reabre encima: 'Editor ocupado'");
+  mmDlgOn = false; gedAsk = GA_NONE;
+  gedWorker(nullptr);                                       // por fin termina (vio la cancelacion)
+  gTestMs += 1000; geMs = gTestMs;
+  gedBgTick();
+  chk(!gedLeak && !gedE && !gedJobOn && !gTestFiles.count(FML_DIR_TMP "/ed-1.jpg"),
+      "cuando acaba, loop() recoge su memoria y su temporal");
+  chk(gedOpen(id) && gedPhase == GED_OPENING, "y el editor vuelve a abrir");
+  geRun(); gedCloseNow();
+
+  // ---- La comprobacion del temporal: lo que no cuadra no se publica ----
+  { GedJob j; memset(&j, 0, sizeof(j));
+    auto jpg = geJpeg(64, 48);
+    snprintf(j.path, sizeof(j.path), FML_DIR_TMP "/v.jpg");
+    gTestFiles[j.path] = jpg; j.bytes = (uint32_t)jpg.size(); j.outW = 64; j.outH = 48;
+    bool good = gedVerify(&j);
+    j.outW = 65; bool dims = gedVerify(&j); j.outW = 64;
+    gTestFiles[j.path].resize(jpg.size() - 10); bool shortF = gedVerify(&j);
+    j.bytes = (uint32_t)jpg.size() - 10; bool noEoi = gedVerify(&j);
+    chk(good && !dims && !shortF && !noEoi, "el temporal se comprueba: medidas, tamano en disco y marca de fin");
+    gTestFiles.erase(j.path); }
+
+  mkReset();
+  gMlOk = ok0; gTestFsReady = fs0; gTestMemFs = false; gTestFiles.clear();
+  memset(&gMs, 0, sizeof(gMs));
+  gState = ST_HOME; gAppId = 0; gAppState[IC_GALERIA] = ALIFE_CLOSED;
+  touchReset();
+}
+
+// Capturas del editor (solo con INO_SHOTS=1): una "foto" sintetica de playa.
+static std::vector<uint8_t> geBeach(int W, int H){
+  std::vector<uint8_t> px((size_t)W * H * 3), out;
+  for(int y = 0; y < H; y++) for(int x = 0; x < W; x++){
+    uint8_t* p = &px[((size_t)y * W + x) * 3];
+    float fy = (float)y / H, fx = (float)x / W;
+    int r, g, b;
+    if(fy < 0.55f){ r = (int)(90 + 120 * fy); g = (int)(150 + 80 * fy); b = 235; }
+    else if(fy < 0.75f){ float k = (fy - 0.55f) / 0.2f; r = 20; g = (int)(90 + 40 * k + 10 * sinf(x * 0.2f + y)); b = (int)(160 - 30 * k); }
+    else { r = 225; g = 196; b = (int)(140 - 30 * fx); }
+    float dx = fx - 0.72f, dy = fy - 0.22f;
+    if(dx * dx + dy * dy < 0.006f){ r = 255; g = 236; b = 150; }
+    p[0] = (uint8_t)r; p[1] = (uint8_t)g; p[2] = (uint8_t)b;
+  }
+  FlexJeCfg c; c.width = W; c.height = H; c.quality = 92; c.subsampling = FLEXJE_SUB_420; c.input = FLEXJE_IN_RGB888;
+  flexJpegEncodeMem(&c, px.data(), (size_t)W * 3, geOut, &out, nullptr, nullptr);
+  return out;
+}
+static void testCapturasEditor(){
+  if(!getenv("INO_SHOTS")) return;
+  printf("Capturas del editor de la Galeria\n");
+  bool ok0 = gMlOk; bool fs0 = gTestFsReady; gTestFsReady = true;
+  geFsReset();
+  uint32_t id = geAddPhoto(FML_DIR_PHOTO "/Playa.jpg", geBeach(640, 480), false);
+  gLockType = 1;
+  shotApp(IC_GALERIA); gAppState[IC_GALERIA] = ALIFE_RUNNING; mkBind(&GAL_APP);
+  gedOpen(id); geRun();
+  flexIeSetCrop(gedE, 0.08f, 0.1f, 0.92f, 0.9f);
+  shotApp(IC_GALERIA); gedRender(); shotSave("editor_recortar");
+  gedSetTool(GT_ADJ);
+  flexIeAdjustLive(gedE, FLEXIE_ADJ_BRIGHT, 30); flexIeAdjustLive(gedE, FLEXIE_ADJ_CONTRAST, 20); flexIeCommit(gedE);
+  gedChanged(); shotApp(IC_GALERIA); gedRender(); shotSave("editor_ajustes");
+  gedSetTool(GT_FILTER);
+  flexIeFilterLive(gedE, FLEXIE_FILTER_VINTAGE, 80); flexIeCommit(gedE);
+  gedChanged(); shotApp(IC_GALERIA); gedRender(); shotSave("editor_filtros");
+  flexIeFilterLive(gedE, FLEXIE_FILTER_NONE, 100); flexIeCommit(gedE);
+  gedSetTool(GT_DRAW);
+  int s = flexIeStrokeBegin(gedE, 0xE53935, 0.012f, 0.15f, 0.7f);
+  for(int k = 1; k <= 20; k++) flexIeStrokeAdd(gedE, s, 0.15f + k * 0.02f, 0.7f - 0.1f * sinf(k * 0.4f));
+  flexIeStrokeEnd(gedE, s);
+  flexIeAddShape(gedE, FLEXIE_OV_ARROW, 0xFDD835, 0.012f, false, 0.5f, 0.55f, 0.68f, 0.3f);
+  flexIeAddShape(gedE, FLEXIE_OV_ELLIPSE, 0xFFFFFF, 0.008f, false, 0.62f, 0.12f, 0.84f, 0.36f);
+  gedKind = 2; gedColor = 4;
+  gedChanged(); shotApp(IC_GALERIA); gedRender(); shotSave("editor_dibujo");
+  gedSetTool(GT_TEXT);
+  snprintf(gedText, sizeof(gedText), "Verano 2026"); gedTextOn = true; gedTextU = 0.08f; gedTextV = 0.06f; gedColor = 0; gedTextSz = 2;
+  shotApp(IC_GALERIA); gedRender(); shotSave("editor_texto");
+  flexIeAddText(gedE, gedText, GED_RGB[gedColor], GED_TEXT_H[gedTextSz], gedTextU, gedTextV); gedTextOn = false;
+  gedSetTool(GT_SIZE); gedSrcW = 4000; gedSrcH = 3000;               // como una foto de 12 MP abierta reducida
+  flexIeSetLongSide(gedE, 400);
+  gedChanged(); shotApp(IC_GALERIA); gedRender(); shotSave("editor_tamano");
+  gedSheet = true; shotApp(IC_GALERIA); gedRender(); shotSave("editor_guardar");
+  gedSheet = false; gedSrcW = gedW; gedSrcH = gedH;
+  gedStartSave(GS_COPY); gedJob.pct = 62;
+  shotApp(IC_GALERIA); gedRender(); shotSave("editor_guardando");
+  geRun();
+  gedCloseNow(); mkReset();
+  gMlOk = ok0; gTestFsReady = fs0; gTestMemFs = false; gTestFiles.clear();
+  memset(&gMs, 0, sizeof(gMs));
+  gState = ST_HOME; gAppId = 0; gAppState[IC_GALERIA] = ALIFE_CLOSED;
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -7749,6 +8121,8 @@ int main(){
   testKitMedios();
   testMusica();
   testCapturasMedios();
+  testEditorGaleria();
+  testCapturasEditor();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }
