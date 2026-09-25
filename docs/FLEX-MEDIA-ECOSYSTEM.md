@@ -225,7 +225,13 @@ la del temporal...): cada mutación hace fallar al menos una comprobación.
 | Vídeo | solo AVI MJPEG |
 | Audio | WAV PCM 8/16 bits y WAV IMA ADPCM |
 
-**No medido aún en el ESP32-P4 real** (no hay placa en este entorno): los
+**Compilado de verdad para `esp32p4`** con el core 3.1.3 (tamaños y RAM en
+`INSTALACION-USB-P4.md` §0): el firmware entero compila y enlaza, y las
+tablas grandes de los medios (selección, vistas, cola de eventos del
+servidor) se reservan en PSRAM para no gastar la RAM interna, que es la
+justa.
+
+**No ejecutado aún en el ESP32-P4 real** (no hay placa en este entorno): los
 tiempos de apertura y guardado del editor, la fluidez de la vista previa en
 vivo y el consumo real de PSRAM en cada paso. Todo lo anterior está
 comprobado en el PC con el mismo código; las cifras de rendimiento hay que

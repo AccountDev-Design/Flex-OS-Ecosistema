@@ -13,23 +13,39 @@ repositorio aunque esta compilación no lo use.
 
 ## 0. Tamaños reales (compilación verificada)
 
-Compilado de verdad para `esp32:esp32:esp32p4` con **core ESP32 3.1.3**,
-PSRAM activada, flash de 16 MB y la tabla de particiones de este
-repositorio:
+Compilado de verdad (25-09-2026) para `esp32:esp32:esp32p4` con **core
+ESP32 3.1.3** (`arduino-cli` 1.1.1), PSRAM activada, flash de 16 MB,
+`FLEXOS_OTA_ON=0` y la tabla de particiones de este repositorio (comprobada
+en el `.partitions.bin` generado: `app0` 5120 KB, `spiffs` 11 136 KB):
 
 | | |
 |---|---|
-| Firmware (`.bin`) | **1 493 765 B** (1,42 MB) |
+| Firmware (`.bin`) | **2 136 208 B** (2,04 MB) |
 | Partición `app0` | 5 242 880 B (5,00 MB) |
-| Ocupación | **28,5 %** |
-| Libre en `app0` | **3 749 115 B** (3,58 MB) |
-| RAM estática (interna) | **90 652 B** de 327 680 (27,7 %) |
-| Libre para variables locales | 237 028 B |
+| Ocupación | **40,7 %** |
+| Libre en `app0` | **3 106 672 B** (2,96 MB) |
+| RAM estática (interna) | **243 060 B** de 327 680 (74,2 %) |
+| Libre para pilas y montón internos | 84 620 B |
 
-Esta medición corresponde al último binario verificado antes de la limpieza
-actual. El firmware debe volver a medirse al compilarlo en el entorno P4;
-la versión actual retiró módulos y cachés de PSRAM, por lo que no puede ocupar
-más que aquella medición.
+Con el mismo toolchain, la rama OTA anterior al Flex Media Ecosystem
+(`f7a7f60`) mide 1 853 507 B de firmware y 239 412 B de RAM estática. Lo
+añadido desde entonces (el Flex Media Ecosystem —biblioteca, Flex Web Server,
+Galería/Multimedia/Música y el editor— y el commit de vidrio y widgets
+`467feff`) suma unos 281 KB de firmware y 3,6 KB de RAM interna: las tablas
+grandes de los medios van a PSRAM.
+
+**La RAM interna es el recurso justo del P4.** De ella salen Wi-Fi
+(esp-hosted), lwIP, TLS y las pilas de las tareas, y en este SDK el `.bss`
+no puede ir a PSRAM (`CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY` está
+apagado). Una tabla grande nueva se reserva en PSRAM
+(`heap_caps_malloc(..., MALLOC_CAP_SPIRAM)`), no como `static`.
+
+**I2S y C++.** `I2S_STD_CLK_DEFAULT_CONFIG` no compila en C++ con el ESP-IDF
+5.3 del P4: el macro de Espressif nombra `mclk_multiple` antes que
+`ext_clk_freq_hz`, al revés que la estructura. `FlexOS_Audio.cpp` rellena el
+reloj campo a campo con los mismos valores, y el doble de host
+(`tests/host/inostub/driver/i2s_std.h`) copia la estructura y el macro reales
+para que `make ino` lo detecte si alguien vuelve a usarlo.
 
 ---
 
@@ -89,7 +105,7 @@ coredump, data, coredump, 0xFF0000, 0x10000,
 Notas de por qué es así:
 
 * **5 MB para la app** es holgado a propósito. Flex OS Ultra mide
-  1,42 MB medidos (28,5 % de la partición); dejar 5 evita tener que
+  2,04 MB medidos (40,7 % de la partición); dejar 5 evita tener que
   cambiar la tabla de particiones —
   y por tanto borrar LittleFS — durante mucho tiempo. Cambiar la tabla
   **es** lo que hace perder los archivos del usuario.
@@ -128,8 +144,8 @@ de la carpeta del sketch. Se puede comprobar que se aplicó mirando el
 > **Nota sobre el aviso de tamaño.** Con `PartitionScheme=custom`,
 > `arduino-cli` imprime «Maximum is 16777216 bytes» — el tamaño de la
 > flash entera, no el de `app0`. El límite real es la partición: 5 MB.
-> Con 1,42 MB de firmware sobra de largo, pero el porcentaje que imprime
-> la herramienta (8 %) no es el que cuenta; el real es 28,5 %.
+> Con 2,04 MB de firmware sobra de largo, pero el porcentaje que imprime
+> la herramienta (12 %) no es el que cuenta; el real es 40,7 %.
 
 ---
 
