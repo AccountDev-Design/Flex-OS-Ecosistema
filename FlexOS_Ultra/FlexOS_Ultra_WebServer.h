@@ -64,7 +64,7 @@ static char              gWebUrl[64] = "";
 static bool              gWebLockSeen = false;   // ya se soltaron los propietarios en este bloqueo
 
 // ---- Cola de eventos: la escribe la tarea del servidor, la lee loopTask ----
-static FlexWebXfer       gWebEv[WEB_EV_N];
+static FlexWebXfer*      gWebEv = NULL;          // WEB_EV_N plazas en PSRAM (4 KB que la RAM interna no necesita)
 static volatile uint8_t  gWebEvW = 0, gWebEvR = 0;
 
 // ---- Sistema de archivos: los mismos adaptadores que el almacen ----
@@ -108,6 +108,7 @@ static void whRandom(void*, uint8_t* out, size_t n){ flexLockRandomBytes(out, n)
 // otro); por eso deja libres las ultimas plazas para los inicios y finales.
 #define WEB_EV_KEEP 6
 static void whEvent(void*, const FlexWebXfer* x){
+  if(!gWebEv) return;                             // webStart no deja arrancar sin ella
   uint8_t w = gWebEvW, used = (uint8_t)(w - gWebEvR);
   bool progress = x->ev == FLEXWEB_EV_UP_PROGRESS || x->ev == FLEXWEB_EV_DL_PROGRESS;
   if(used >= WEB_EV_N || (progress && used >= WEB_EV_N - WEB_EV_KEEP)) return;
@@ -185,7 +186,8 @@ static bool webStart(){
   if(!gNetOnline || !wifiConnIP[0]){ gWebState = WEBS_NOWIFI; return false; }
   if(!gWebHdr) gWebHdr = (uint8_t*)mediaAlloc(FLEXWEB_HDR_BUF);
   if(!gWebIo)  gWebIo  = (uint8_t*)mediaAlloc(FLEXWEB_IO_BUF);
-  if(!gWebHdr || !gWebIo){ gWebState = WEBS_FAIL; return false; }
+  if(!gWebEv)  gWebEv  = (FlexWebXfer*)mediaAlloc(sizeof(FlexWebXfer) * WEB_EV_N);
+  if(!gWebHdr || !gWebIo || !gWebEv){ gWebState = WEBS_FAIL; return false; }
   memset(&gWebCtx, 0, sizeof(gWebCtx));
   gWebCtx.fs = { msfOpen, msfRead, msfWrite, msfSeek, msfClose, msfSize, msfRemove, wfsFree, wfsTotal, NULL };
   gWebCtx.host = { whSnapshot, whGet, whRev, whDup, whCommit, whSetThumb, whThumbPath, whVerify, whLockType,
@@ -407,7 +409,7 @@ static void webTick(){
   if(!gWebTask && !gWebWant && gWebState == WEBS_ON) gWebState = WEBS_OFF;
   // Eventos de la tarea del servidor.
   bool changed = false;
-  while(gWebEvR != gWebEvW){
+  while(gWebEv && gWebEvR != gWebEvW){
     FlexWebXfer x = gWebEv[gWebEvR % WEB_EV_N];
     gWebEvR = (uint8_t)(gWebEvR + 1);
     changed = true;
@@ -421,14 +423,14 @@ static void webTick(){
       case FLEXWEB_EV_UP_DONE: {
         WebCard* c = webCardFor(x.name, true);
         c->state = WCS_OK; c->done = c->total = x.total ? x.total : c->total;
-        snprintf(c->msg, sizeof(c->msg), "%s", x.msg[0] ? x.msg : x.kind == FML_K_AUDIO ? "Guardado en M\xC3\xBAsica" : "Guardado en Galer\xC3\xAD" "a y Multimedia");
+        mlCopyText(c->msg, sizeof(c->msg), x.msg[0] ? x.msg : x.kind == FML_K_AUDIO ? "Guardado en M\xC3\xBAsica" : "Guardado en Galer\xC3\xAD" "a y Multimedia");
         char t[64]; snprintf(t, sizeof(t), "Recibido: %.40s", x.name);
         if(!webSheetOn) sysNotify("Flex Web Server", t);
         break;
       }
       case FLEXWEB_EV_UP_FAIL: {
         WebCard* c = webCardFor(x.name, true);
-        c->state = WCS_FAIL; snprintf(c->msg, sizeof(c->msg), "%s", x.msg);
+        c->state = WCS_FAIL; mlCopyText(c->msg, sizeof(c->msg), x.msg);
         char t[64]; snprintf(t, sizeof(t), "No se recibi\xC3\xB3 %.36s", x.name);
         sysNotify(t, x.msg);
         break;
@@ -439,7 +441,7 @@ static void webTick(){
         break;
       }
       case FLEXWEB_EV_DL_DONE: { WebCard* c = webCardFor(x.name, false); c->state = WCS_OK; c->done = c->total; snprintf(c->msg, sizeof(c->msg), "Enviado al m\xC3\xB3vil"); break; }
-      case FLEXWEB_EV_DL_FAIL: { WebCard* c = webCardFor(x.name, false); c->state = WCS_FAIL; snprintf(c->msg, sizeof(c->msg), "%s", x.msg); break; }
+      case FLEXWEB_EV_DL_FAIL: { WebCard* c = webCardFor(x.name, false); c->state = WCS_FAIL; mlCopyText(c->msg, sizeof(c->msg), x.msg); break; }
       case FLEXWEB_EV_PAIRED:     sysNotify("Flex Web Server", "Un m\xC3\xB3vil se ha conectado"); break;
       case FLEXWEB_EV_OWNER:      sysNotify("Contenido protegido", "Se ha abierto desde un m\xC3\xB3vil con tu clave"); break;
       case FLEXWEB_EV_OWNER_FAIL: sysNotify("Contenido protegido", "Intento fallido desde un m\xC3\xB3vil"); break;

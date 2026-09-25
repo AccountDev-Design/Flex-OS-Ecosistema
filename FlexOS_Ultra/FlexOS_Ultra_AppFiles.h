@@ -83,7 +83,7 @@ static void filesReload(){
   if(!strcmp(filesDir, FLEXFS_DIR_SYS)){
     for(int i = 0; i < filesN; ){
       char p[FLEXFS_PATH_MAX];
-      snprintf(p, sizeof(p), "%s/%s", filesDir, filesList[i].name);
+      if(snprintf(p, sizeof(p), "%s/%s", filesDir, filesList[i].name) >= (int)sizeof(p)){ i++; continue; }
       if(filesIsLibraryDir(p)){                    // se quita conservando el orden
         memmove(&filesList[i], &filesList[i + 1], sizeof(filesList[0]) * (size_t)(filesN - 1 - i));
         filesN--;

@@ -71,15 +71,15 @@ static uint32_t galTabMask(){
 // ---- Vista del catalogo (indices dentro de gMs.lib.recs) ----
 // Solo vale con el cerrojo del catalogo tomado: la tarea de fondo o el
 // servidor pueden quitar registros y mover los de detras.
-static uint16_t   galViewStore[FML_CAP];
-static FlexMlView galView;
+static FlexMlView galView;                       // indices en mlTables()->galView (PSRAM)
 static uint32_t   galViewMask = 0;
 static bool       galViewReady = false;
 
 static void galSyncLocked(){
   uint32_t m = galTabMask();
-  if(!galViewReady || galViewMask != m){
-    flexMlViewInit(&galView, galViewStore, FML_CAP, m, FML_SORT_NEWEST);
+  if(!galViewReady || galViewMask != m || !galView.idx){
+    MlTables* t = mlTables();
+    flexMlViewInit(&galView, t ? t->galView : NULL, FML_CAP, m, FML_SORT_NEWEST);
     galViewMask = m; galViewReady = true;
     flexMlViewSync(&galView, &gMs.lib, true);
   } else flexMlViewSync(&galView, &gMs.lib, false);

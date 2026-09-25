@@ -68,13 +68,20 @@ enum { MKB_NONE = 0, MKB_ALL = 100, MKB_EXIT, MKB_LOCKTOGGLE };
 
 static const MediaListApp* mkApp = NULL;
 static bool     mkMulti  = false;
-static uint32_t mkSel[FML_CAP];
+static uint32_t* mkSel   = NULL;             // seleccion (PSRAM: mlTables)
 static uint16_t mkSelN   = 0;
 static uint32_t mkMenuId = 0;                // elemento del menu contextual (0 = menu de la app)
 static int      mkAskAct = MA_NONE;          // que confirma el dialogo de borrar
 static uint32_t mkRenameId = 0;
 static bool     mkNoLockDlg = false;         // el dialogo abierto es "configura un PIN"
-static uint32_t mkIds[FML_CAP];              // lista de trabajo de una accion
+static uint32_t* mkIds   = NULL;             // lista de trabajo de una accion (PSRAM: mlTables)
+// Las dos listas viven en mlTables (PSRAM). false = no hay memoria para
+// ellas: la seleccion no crece y las acciones no tienen sobre que actuar.
+static bool mkTablesReady(){
+  MlTables* t = mlTables();
+  if(t){ mkSel = t->sel; mkIds = t->ids; }
+  return t != NULL;
+}
 
 // -------------------------------------------------------------
 //  ESTADO
@@ -91,6 +98,7 @@ static void mkReset(){
 // La app que manda ahora. Cambiar de app empieza de cero: una seleccion
 // hecha en la Galeria no puede aparecer marcada en Musica.
 static void mkBind(const MediaListApp* a){
+  mkTablesReady();
   if(mkApp != a){ mkApp = a; mkReset(); }
 }
 // Al pasar a segundo plano: ni capas modales ni seleccion a medias. La hoja
@@ -99,10 +107,10 @@ static void mkSuspend(){
   if(webSheetIsOpen()) webSheetDismiss();
   mkReset();
 }
-static bool mkOverlayOpen(){ return mmOn || mmDlgOn || fkNameOn || fkAskOn || fkTrashOn || webSheetIsOpen(); }
 
 static bool mkIsSel(uint32_t id){ for(int k = 0; k < mkSelN; k++) if(mkSel[k] == id) return true; return false; }
 static void mkToggle(uint32_t id){
+  if(!mkTablesReady()) return;
   for(int k = 0; k < mkSelN; k++) if(mkSel[k] == id){ mkSel[k] = mkSel[--mkSelN]; return; }
   if(mkSelN < FML_CAP) mkSel[mkSelN++] = id;
 }
@@ -140,6 +148,7 @@ static void mkSelectAllLocked(const FlexMlView* v){
   }
   bool all = selectable > 0 && have == selectable;
   mkSelN = 0;
+  if(!mkTablesReady()) return;
   if(!all) for(int i = 0; i < v->n && mkSelN < FML_CAP; i++){
     const FlexMlRec* r = &gMs.lib.recs[v->idx[i]];
     if(!(r->flags & FML_R_LOCKED)) mkSel[mkSelN++] = r->id;
@@ -150,6 +159,9 @@ static void mkSelectAllLocked(const FlexMlView* v){
 static int mkTargets(uint32_t* out, bool* anyLocked, bool* anyOpen){
   int n = 0;
   bool L = false, O = false;
+  if(anyLocked) *anyLocked = false;
+  if(anyOpen) *anyOpen = false;
+  if(!out) return 0;                             // sin tablas (PSRAM): nada sobre que actuar
   mlLock();
   if(mkMulti){
     for(int k = 0; k < mkSelN; k++){
@@ -260,7 +272,10 @@ static void mkAuthDone(bool ok, int act, const uint32_t* ids, int n){
 static void mkRequestOpen(uint32_t id){
   FlexMlRec r;
   if(!mlGet(id, &r)) return;
-  if(r.flags & FML_R_LOCKED){ mkIds[0] = id; mediaAuthRequest(MA_OPEN, mkIds, 1, mkAuthDone); return; }
+  if(r.flags & FML_R_LOCKED){
+    if(!mkTablesReady()){ sysNotify(mkName(), "Sin memoria para pedir la clave"); return; }
+    mkIds[0] = id; mediaAuthRequest(MA_OPEN, mkIds, 1, mkAuthDone); return;
+  }
   if(mkApp && mkApp->open) mkApp->open(id);
 }
 

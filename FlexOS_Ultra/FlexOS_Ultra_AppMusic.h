@@ -59,8 +59,7 @@ enum { MUS_LIST = 0, MUS_NOW = 1 };
 static int      musScreen = MUS_LIST;
 static int      musScroll = 0, musDragY0 = 0, musDragS0 = 0;
 static bool     musDragging = false, musLongFired = false;
-static uint16_t musViewStore[FML_CAP];
-static FlexMlView musView;
+static FlexMlView musView;                      // indices en mlTables()->musView (PSRAM)
 static bool     musViewReady = false;
 static int      musCountCache = 0;
 static bool     musMorePending = false;
@@ -88,8 +87,9 @@ static bool            musVolDrag = false;
 static void musRender();
 
 static void musSyncLocked(){
-  if(!musViewReady){
-    flexMlViewInit(&musView, musViewStore, FML_CAP, FML_MASK_AUDIO, FML_SORT_TITLE);
+  if(!musViewReady || !musView.idx){
+    MlTables* t = mlTables();
+    flexMlViewInit(&musView, t ? t->musView : NULL, FML_CAP, FML_MASK_AUDIO, FML_SORT_TITLE);
     musViewReady = true;
     flexMlViewSync(&musView, &gMs.lib, true);
   } else flexMlViewSync(&musView, &gMs.lib, false);
@@ -142,7 +142,7 @@ static bool musLoad(uint32_t id, const char* path){
   musId = id;
   snprintf(musPath, sizeof(musPath), "%s", p);
   const char* nm = strrchr(musPath, '/');
-  snprintf(musTitle, sizeof(musTitle), "%s", nm ? nm + 1 : musPath);
+  mlCopyText(musTitle, sizeof(musTitle), nm ? nm + 1 : musPath);
   musSub[0] = 0;
   FlexMlRec r;
   bool have = id && mlGet(id, &r);

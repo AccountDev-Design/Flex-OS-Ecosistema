@@ -7937,6 +7937,15 @@ static void testEditorGaleria(){
   chk(gedOpen(id) && gedPhase == GED_OPENING, "y el editor vuelve a abrir");
   geRun(); gedCloseNow();
 
+  // ---- Un nombre largo se acorta; el sufijo de la copia nunca se pierde ----
+  { char keep[FML_NAME_MAX]; snprintf(keep, sizeof(keep), "%s", gedName);
+    snprintf(gedName, sizeof(gedName), "%s", "Atardecer en la playa con toda la familia, verano de 2026.jpg");
+    char nm[FML_NAME_MAX]; gedCopyName(nm, sizeof(nm));
+    size_t L = strlen(nm);
+    chkf(L < sizeof(nm) && L > 14 && !strcmp(nm + L - 14, " (editada).jpg") && !strncmp(nm, "Atardecer en la playa", 21),
+         "nombre largo: se acorta el nombre, no el sufijo (%s)", nm);
+    snprintf(gedName, sizeof(gedName), "%s", keep); }
+
   // ---- La comprobacion del temporal: lo que no cuadra no se publica ----
   { GedJob j; memset(&j, 0, sizeof(j));
     auto jpg = geJpeg(64, 48);

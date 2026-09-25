@@ -701,8 +701,7 @@ static uint32_t vidTabMask(){
 
 // Vista del catalogo (indices dentro de gMs.lib.recs): solo vale con el
 // cerrojo tomado, como en la Galeria.
-static uint16_t   vidViewStore[FML_CAP];
-static FlexMlView vidView;
+static FlexMlView vidView;                       // indices en mlTables()->vidView (PSRAM)
 static uint32_t   vidViewMask = 0;
 static bool       vidViewReady = false;
 static int        vidCountCache = 0;
@@ -711,8 +710,9 @@ static uint32_t   vidSeenRev = 0, vidSeenMs = 0;
 
 static void vidSyncLocked(){
   uint32_t m = vidTabMask();
-  if(!vidViewReady || vidViewMask != m){
-    flexMlViewInit(&vidView, vidViewStore, FML_CAP, m, FML_SORT_NEWEST);
+  if(!vidViewReady || vidViewMask != m || !vidView.idx){
+    MlTables* t = mlTables();
+    flexMlViewInit(&vidView, t ? t->vidView : NULL, FML_CAP, m, FML_SORT_NEWEST);
     vidViewMask = m; vidViewReady = true;
     flexMlViewSync(&vidView, &gMs.lib, true);
   } else flexMlViewSync(&vidView, &gMs.lib, false);

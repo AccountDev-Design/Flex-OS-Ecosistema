@@ -1182,9 +1182,13 @@ static void gedCopyName(char* out, size_t cap){
   if(dot && dot != stem) *dot = 0;
   char* ed = strstr(stem, " (editada");
   if(ed && ed != stem) *ed = 0;
+  // Sitio para " (editada NNN).jpg" (18 bytes): el nombre se acorta en un
+  // limite de caracter UTF-8, nunca el sufijo (sin el, no seria unico).
+  size_t maxStem = cap > 19 ? cap - 19 : 0, L = strlen(stem);
+  if(L > maxStem){ L = maxStem; while(L > 0 && (stem[L] & 0xC0) == 0x80) L--; stem[L] = 0; }
   for(int n = 1; n < 1000; n++){
-    if(n == 1) snprintf(out, cap, "%s (editada).jpg", stem);
-    else snprintf(out, cap, "%s (editada %d).jpg", stem, n);
+    int k = n == 1 ? snprintf(out, cap, "%s (editada).jpg", stem) : snprintf(out, cap, "%s (editada %d).jpg", stem, n);
+    if(k < 0 || (size_t)k >= cap) break;
     if(!gedNameTaken(out)) return;
   }
 }
@@ -1247,7 +1251,7 @@ static bool gedCollect(){
       gedCloseNow();
       if(gedForeground()) galRender();
     } else {
-      char why[128]; snprintf(why, sizeof(why), "%s", j->why);
+      char why[sizeof(j->why)]; memcpy(why, j->why, sizeof(why)); why[sizeof(why) - 1] = 0;
       gedCloseNow();
       if(gedForeground()){ galRender(); mmDlgOpen("No se puede editar", why, "Aceptar", "", false); gedAsk = GA_INFO; }
       else sysNotify("Galer\xC3\xAD" "a", why);
@@ -1270,7 +1274,7 @@ static bool gedCollect(){
       if(!mlGet(gedId, &r) || (r.flags & FML_R_LOCKED)){ gedSeenRev = mlRev(); gedAbort(msg); return true; }
     }
     else if(j->rc == 1) snprintf(msg, sizeof(msg), "Guardado cancelado: la foto no ha cambiado");
-    else if(j->rc < 0) snprintf(msg, sizeof(msg), "%s", j->why);
+    else if(j->rc < 0){ memcpy(msg, j->why, sizeof(j->why)); msg[sizeof(j->why) - 1] = 0; }
     Serial.printf("[editor] no guardada: %s\n", msg);
     if(gedForeground()){ gedRender(); mmDlgOpen("No se ha guardado", msg, "Aceptar", "", false); gedAsk = GA_INFO; }
     else sysNotify("Galer\xC3\xAD" "a", msg);

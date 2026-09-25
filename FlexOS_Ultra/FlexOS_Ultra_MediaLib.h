@@ -76,7 +76,7 @@ static volatile uint32_t gMlLoadedFrom = 0;         // 1 = archivo, 2 = .bak, 3 
 
 // Avisos de la tarea de fondo para la isla. La isla solo se toca desde
 // loopTask, asi que la tarea deja el texto aqui y mlTick() lo entrega.
-static char              gMlMsg[ML_MSG_N][2][40];
+static char              gMlMsg[ML_MSG_N][2][56];     // el aviso mas largo mide 50 bytes
 static volatile uint8_t  gMlMsgW = 0, gMlMsgR = 0;
 
 static inline void mlLock(){ if(gMlMux) xSemaphoreTake(gMlMux, portMAX_DELAY); }
@@ -85,6 +85,16 @@ static inline void mlWake(){ if(gMlTask) xTaskNotifyGive(gMlTask); }
 
 // Revision del catalogo: cambia con CUALQUIER cambio que se vea.
 static uint32_t mlRev(){ return flexMsRev(&gMs); }
+
+// Copia un texto que se ENSENA en `dst` (cap bytes), recortado en un limite
+// de caracter UTF-8: cortar a mitad de una "o" con tilde la pintaria como "?".
+static void mlCopyText(char* dst, size_t cap, const char* src){
+  if(!dst || !cap) return;
+  size_t n = src ? strlen(src) : 0;
+  if(n >= cap){ n = cap - 1; while(n > 0 && ((uint8_t)src[n] & 0xC0) == 0x80) n--; }
+  if(n) memcpy(dst, src, n);
+  dst[n] = 0;
+}
 
 static void mlPostMsg(const char* title, const char* sub){
   uint8_t w = gMlMsgW;
@@ -118,7 +128,9 @@ static int msfList(void*, const char* dir, FlexMsEntry* out, int maxn, int skip)
   FlexFsEntry e[8];
   int n = flexFsListFrom(dir, e, maxn < 8 ? maxn : 8, skip);
   for(int i = 0; i < n; i++){
-    snprintf(out[i].name, sizeof(out[i].name), "%s", e[i].name);
+    // FLEXFS_NAME_MAX (48) < 64: el nombre siempre cabe; la copia se acota al
+    // campo de origen para que el limite quede escrito (y el compilador lo vea).
+    snprintf(out[i].name, sizeof(out[i].name), "%.*s", (int)sizeof(e[i].name) - 1, e[i].name);
     out[i].size = e[i].size; out[i].dir = e[i].dir;
   }
   return n;
@@ -687,10 +699,37 @@ static void mediaNoLockDialog(){
 //  limitador de intentos. Al acertar (o cancelar) se vuelve a la app que
 //  lo pidio y ella hace la accion con la lista que dejo apartada.
 // -------------------------------------------------------------
+// -------------------------------------------------------------
+//  TABLAS DE TRABAJO DE LAS APPS DE MEDIOS, EN PSRAM
+//  ------------------------------------------------------------
+//  Listas de ids (seleccion, destino de una accion, lo que espera a la clave)
+//  y las vistas del catalogo de Galeria, Multimedia y Musica: ~7 KB que NO
+//  necesitan RAM interna. La interna del P4 va justa (de ella salen Wi-Fi,
+//  lwIP, TLS y las pilas de las tareas; la compilacion real para esp32p4 la
+//  deja por debajo de 90 KB libres) y su .bss no puede ir a PSRAM en este
+//  SDK (CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY esta apagado). Se
+//  reservan UNA vez, la primera vez que hacen falta. Sin PSRAM la capacidad
+//  es 0: las listas salen vacias y nada escribe fuera.
+// -------------------------------------------------------------
+struct MlTables {
+  uint32_t sel[FML_CAP];          // seleccion multiple del kit
+  uint32_t ids[FML_CAP];          // ids sobre los que actua una accion
+  uint32_t authIds[FML_CAP];      // los que esperan a la clave del sistema
+  uint16_t galView[FML_CAP], vidView[FML_CAP], musView[FML_CAP];
+};
+static MlTables* gMlT = NULL;
+static MlTables* mlTables(){
+  if(!gMlT){
+    gMlT = (MlTables*)mediaAlloc(sizeof(MlTables));
+    if(gMlT) memset(gMlT, 0, sizeof(*gMlT));
+  }
+  return gMlT;
+}
+
 typedef void (*MediaAuthDone)(bool ok, int act, const uint32_t* ids, int n);
 static struct {
   uint8_t act; int8_t app; uint16_t n;
-  uint32_t ids[FML_CAP];
+  uint32_t* ids;                  // mlTables()->authIds (NULL sin PSRAM: n = 0)
   MediaAuthDone done;
 } gMediaAuth;
 
@@ -711,8 +750,11 @@ static void mediaAfterVerify(bool ok){
 // Pide la clave y luego llama a `done`. Sin clave configurada en el
 // sistema no hay nada que comprobar (el dueno la quito): se sigue.
 static void mediaAuthRequest(int act, const uint32_t* ids, int n, MediaAuthDone done){
+  MlTables* t = mlTables();
+  int cap = t ? FML_CAP : 0;
   if(n < 0) n = 0;
-  if(n > FML_CAP) n = FML_CAP;
+  if(n > cap) n = cap;
+  gMediaAuth.ids = t ? t->authIds : NULL;
   gMediaAuth.act = (uint8_t)act; gMediaAuth.app = (int8_t)gAppId; gMediaAuth.n = (uint16_t)n;
   if(n) memcpy(gMediaAuth.ids, ids, sizeof(uint32_t) * (size_t)n);
   gMediaAuth.done = done;
