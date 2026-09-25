@@ -171,14 +171,22 @@ static uint32_t mediaFileSize(const char* path){
 // -------------------------------------------------------------
 //  RESERVA PARA MEDIOS
 //  ------------------------------------------------------------
-//  Todo lo grande va a PSRAM. Si no hay, se cae al heap interno,
-//  pero solo para lo pequeno: las funciones que piden cientos de KB
-//  comprueban el resultado y desactivan su funcion en vez de dejar
-//  la placa sin memoria.
+//  Todo va a PSRAM. Si la PSRAM no da (llena o troceada), SOLO lo
+//  pequeno puede caer a la RAM interna, y nunca dejandola por debajo
+//  de un suelo: de ella viven la Wi-Fi (esp-hosted), lwIP y las pilas
+//  de las tareas, y el P4 arranca con ~84 KB libres. Antes caia
+//  CUALQUIER tamano -- un buffer de decodificacion de 60 KB en mitad de
+//  una transferencia podia comerse la RAM de la red y tumbar el
+//  sistema lejos de aqui. Quien pide algo grande recibe NULL y lo
+//  gestiona (todos los llamantes ya lo comprueban).
 // -------------------------------------------------------------
+#define MEDIA_INTERNAL_MAX    (4u * 1024u)      // lo mas grande que puede caer a la RAM interna
+#define MEDIA_INTERNAL_FLOOR  (48u * 1024u)     // RAM interna que nunca se toca
 static void* mediaAlloc(size_t n){
   void* p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  return p ? p : malloc(n);
+  if(p || n == 0 || n > MEDIA_INTERNAL_MAX) return p;
+  if(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < n + MEDIA_INTERNAL_FLOOR) return NULL;
+  return heap_caps_malloc(n, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 }
 static void mediaFree(void* p){ if(p) heap_caps_free(p); }
 

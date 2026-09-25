@@ -250,6 +250,18 @@ static int msioRead(void* c, void* buf, uint32_t n){
 }
 static bool msioSeek(void* c, uint32_t off){ MsIo* f = (MsIo*)c; if(off > f->size) return false; f->pos = off; return true; }
 static uint32_t msioSize(void* c){ return ((MsIo*)c)->size; }
+// Lectura secuencial para el decodificador en modo flujo.
+struct MsSeq { FlexMediaStore* ms; void* h; };
+static int msSeqRead(void* c, uint8_t* buf, size_t n){
+  MsSeq* f = (MsSeq*)c;
+  if(f->ms->yield) f->ms->yield(f->ms->yieldCtx);
+  return f->ms->fs.read(f->ms->fs.ctx, f->h, buf, n);
+}
+// Lo que puede llegar a pedir una miniatura por flujo (ventana, estado del
+// decodificador, filas de MCU de una foto de 4096 px, recorte a 1/8 y
+// codificador), redondeado hacia arriba. NO depende del tamano del archivo.
+#define MS_THUMB_WORK_BYTES (1024u * 1024u)
+
 struct MsOut { FlexMediaStore* ms; void* h; bool ok; };
 static bool msOutWrite(void* c, const uint8_t* d, size_t n){
   MsOut* o = (MsOut*)c;
@@ -289,22 +301,27 @@ static MsProbe probeFile(FlexMediaStore* ms, const FlexMsJob* job, const char* t
   pr.playable = flexMlFmtPlayable(pr.fmt);
   int ow = 0, oh = 0;
   if(pr.fmt == FML_F_JPEG || pr.fmt == FML_F_JPEG_PROG){
-    // Una foto se decodifica ENTERA: es lo que la valida. Solo si sobra
-    // memoria; si no, se deja para luego en vez de apretar al sistema.
-    if(job->size > FML_LIMIT_PHOTO){ pr.rc = FLEXTH_ERR_ARG; pr.playable = false; return pr; }
-    if(memFree < job->size || memFree - job->size < memReserve){ pr.retry = true; return pr; }
-    uint8_t* buf = (uint8_t*)msAlloc(ms, job->size);
-    if(!buf){ pr.retry = true; return pr; }
-    MsOut o = { ms, NULL, true };
-    if(readWhole(ms, job->path, buf, job->size) && (o.h = ms->fs.open(ms->fs.ctx, tmp, true)) != NULL){
-      pr.rc = flexThumbFromJpeg(buf, job->size, FLEXTH_SIDE, FLEXTH_QUALITY, msOutWrite, &o, &ow, &oh, ms->alloc, ms->free);
-      ms->fs.close(ms->fs.ctx, o.h);
+    // Una foto se decodifica ENTERA: es lo que la valida. Pero se LEE POR
+    // TROZOS: el trabajo cuesta lo mismo con una foto de 200 KB que con una
+    // de 6 MB. Antes se reservaba el archivo entero, y por eso una foto
+    // grande se aplazaba -- o apretaba al sistema -- cuando coincidia con
+    // una subida o con el visor.
+    if(memFree < MS_THUMB_WORK_BYTES || memFree - MS_THUMB_WORK_BYTES < memReserve){ pr.retry = true; return pr; }
+    if(ms->heavyBegin && !ms->heavyBegin(ms->heavyCtx)){ pr.retry = true; return pr; }
+    MsSeq f = { ms, ms->fs.open(ms->fs.ctx, job->path, false) };
+    MsOut o = { ms, f.h ? ms->fs.open(ms->fs.ctx, tmp, true) : NULL, true };
+    if(f.h && o.h){
+      pr.rc = flexThumbFromJpegStream(msSeqRead, &f, FLEXTH_SIDE, FLEXTH_QUALITY, msOutWrite, &o, &ow, &oh,
+                                      ms->alloc, ms->free);
       if(pr.rc == FLEXTH_OK && !o.ok) pr.rc = FLEXTH_ERR_WRITE;
     } else pr.rc = FLEXTH_ERR_IO;
-    msFree(ms, buf);
+    if(o.h) ms->fs.close(ms->fs.ctx, o.h);
+    if(f.h) ms->fs.close(ms->fs.ctx, f.h);
+    if(ms->heavyEnd) ms->heavyEnd(ms->heavyCtx);
     if(pr.rc == FLEXTH_ERR_UNSUP){ pr.fmt = FML_F_JPEG_PROG; pr.playable = false; }
     if(pr.rc == FLEXTH_ERR_MEMORY) pr.retry = true;
   } else if(pr.fmt == FML_F_AVI_MJPEG || pr.fmt == FML_F_AVI_OTHER){
+    if(ms->heavyBegin && !ms->heavyBegin(ms->heavyCtx)){ pr.retry = true; return pr; }
     MsIo f = { ms, ms->fs.open(ms->fs.ctx, job->path, false), 0, job->size };
     MsOut o = { ms, f.h ? ms->fs.open(ms->fs.ctx, tmp, true) : NULL, true };
     if(f.h && o.h){
@@ -314,6 +331,7 @@ static MsProbe probeFile(FlexMediaStore* ms, const FlexMsJob* job, const char* t
     } else pr.rc = FLEXTH_ERR_IO;
     if(o.h) ms->fs.close(ms->fs.ctx, o.h);
     if(f.h) ms->fs.close(ms->fs.ctx, f.h);
+    if(ms->heavyEnd) ms->heavyEnd(ms->heavyCtx);
     if(pr.rc == FLEXTH_ERR_UNSUP){ pr.fmt = FML_F_AVI_OTHER; pr.playable = false; }
     if(pr.rc == FLEXTH_ERR_MEMORY) pr.retry = true;
   } else if(pr.fmt == FML_F_WAV_PCM || pr.fmt == FML_F_WAV_ADPCM || pr.fmt == FML_F_WAV_OTHER){

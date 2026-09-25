@@ -54,11 +54,79 @@ static inline uint16_t jrgb565(int r, int g, int b){
 }
 
 // -------------------------------------------------------------
+//  0) De donde salen los bytes
+//  ------------------------------------------------------------
+//  Dos modos y UN solo decodificador:
+//    · MEMORIA: los bytes estan enteros en un buffer (win == NULL). Es el
+//      camino de siempre y se comporta exactamente igual que antes: la
+//      "ventana" es el buffer entero y nunca se recarga.
+//    · FLUJO: los bytes se piden a una funcion de lectura (un archivo de
+//      LittleFS, un socket...) y viven en una ventana pequena que se va
+//      rellenando. Asi se puede decodificar una foto de varios MB sin
+//      tenerla entera en RAM: el pico de memoria es la ventana mas los
+//      buffers de trabajo de siempre, no el tamano del archivo.
+//  El lector de cabecera y el de bits solo miran [p, end) y piden mas con
+//  jsNeed(); lo que hay debajo les da igual.
+// -------------------------------------------------------------
+#define JPG_STREAM_WIN  8192u      // ventana del modo flujo (cabe cualquier DHT/DQT/SOF/SOS real)
+
+typedef struct {
+  const uint8_t* p;          // proximo byte sin consumir
+  const uint8_t* end;        // fin de lo disponible
+  uint8_t*       win;        // ventana del modo flujo (NULL = modo memoria)
+  size_t         winCap;
+  FlexJpegReadFn rd;
+  void*          rdCtx;
+  bool           eof;        // el flujo ya no da mas (o fallo)
+  bool           ioErr;      // el flujo devolvio un error de lectura
+} JSrc;
+
+static void jsInitMem(JSrc* s, const uint8_t* data, size_t len){
+  s->p = data; s->end = data + len;
+  s->win = NULL; s->winCap = 0; s->rd = NULL; s->rdCtx = NULL;
+  s->eof = true; s->ioErr = false;
+}
+static void jsInitStream(JSrc* s, uint8_t* win, size_t cap, FlexJpegReadFn rd, void* ctx){
+  s->p = win; s->end = win;
+  s->win = win; s->winCap = cap; s->rd = rd; s->rdCtx = ctx;
+  s->eof = false; s->ioErr = false;
+}
+
+// Deja al menos `n` bytes sin consumir en [p, end) si el origen los tiene.
+// Devuelve cuantos hay de verdad (menos que n solo al final). En modo
+// memoria no hay nada que recargar: devuelve lo que queda.
+static size_t jsNeed(JSrc* s, size_t n){
+  size_t have = (size_t)(s->end - s->p);
+  if(have >= n || !s->win || s->eof) return have;
+  if(n > s->winCap) n = s->winCap;
+  // Lo pendiente se corre al principio de la ventana y el resto se llena.
+  if(have && s->p != s->win) memmove(s->win, s->p, have);
+  s->p = s->win;
+  size_t used = have;
+  while(used < n && !s->eof){
+    int r = s->rd(s->rdCtx, s->win + used, s->winCap - used);
+    if(r <= 0 || (size_t)r > s->winCap - used){ s->eof = true; if(r != 0) s->ioErr = true; break; }
+    used += (size_t)r;
+  }
+  s->end = s->win + used;
+  return used;
+}
+// Consume `n` bytes aunque no quepan en la ventana (segmentos que se ignoran).
+static bool jsSkip(JSrc* s, size_t n){
+  while(n){
+    size_t have = jsNeed(s, 1);
+    if(!have) return false;
+    size_t k = have < n ? have : n;
+    s->p += k; n -= k;
+  }
+  return true;
+}
+
+// -------------------------------------------------------------
 //  1) Lector de bits
 // -------------------------------------------------------------
 typedef struct {
-  const uint8_t* p;
-  const uint8_t* end;
+  JSrc*    s;
   uint32_t bitBuf;
   int      bitCnt;
   bool     marker;      // se topo con un marcador: a partir de aqui se rellena con ceros
@@ -66,28 +134,35 @@ typedef struct {
   bool     truncated;   // se acabo el buffer sin EOI
 } BitRdr;
 
-static void brInit(BitRdr* br, const uint8_t* p, const uint8_t* end){
-  br->p = p; br->end = end;
+static void brInit(BitRdr* br, JSrc* s){
+  br->s = s;
   br->bitBuf = 0; br->bitCnt = 0;
   br->marker = false; br->markerVal = 0; br->truncated = false;
 }
 
+// Mismo comportamiento que el lector de siempre, byte a byte: un 0xFF
+// seguido de 0x00 es un 0xFF de datos; seguido de otra cosa es un
+// marcador y el cursor se queda SOBRE el 0xFF. Se miran los dos bytes
+// antes de consumir, asi que en modo flujo el 0xFF nunca se pierde en
+// una recarga de la ventana.
 static void brFill(BitRdr* br){
   while(br->bitCnt <= 24){
     uint8_t b = 0;
     if(!br->marker){
-      if(br->p >= br->end){ br->truncated = true; br->marker = true; br->markerVal = 0xD9; }
+      JSrc* s = br->s;
+      size_t have = (size_t)(s->end - s->p);
+      if(have < 2 && s->win) have = jsNeed(s, 2);
+      if(have == 0){ br->truncated = true; br->marker = true; br->markerVal = 0xD9; }
       else {
-        b = *br->p++;
+        b = s->p[0];
         if(b == 0xFF){
-          uint8_t b2 = (br->p < br->end) ? *br->p : 0xD9;
+          uint8_t b2 = (have >= 2) ? s->p[1] : 0xD9;
           if(b2 == 0x00){
-            br->p++;                       // relleno de byte: el 0xFF es dato
+            s->p += 2;                     // relleno de byte: el 0xFF es dato
           } else {
-            br->p--;                       // deja p sobre el 0xFF del marcador
-            br->marker = true; br->markerVal = b2; b = 0;
+            br->marker = true; br->markerVal = b2; b = 0;   // p se queda sobre el 0xFF del marcador
           }
-        }
+        } else s->p++;
       }
     }
     br->bitBuf = (br->bitBuf << 8) | b;
@@ -113,12 +188,16 @@ static inline int brPeek8(BitRdr* br){
 // que los bits que quedaran en el buffer son basura y hay que tirarlos.
 static bool brRestart(BitRdr* br){
   br->bitBuf = 0; br->bitCnt = 0;
+  JSrc* s = br->s;
   int guard = 0;
-  while(br->p + 1 < br->end && guard < 256){
-    if(br->p[0] == 0xFF && br->p[1] >= 0xD0 && br->p[1] <= 0xD7){
-      br->p += 2; br->marker = false; br->markerVal = 0; return true;
+  for(;;){
+    size_t have = (size_t)(s->end - s->p);
+    if(have < 2 && s->win) have = jsNeed(s, 2);
+    if(have < 2 || guard >= 256) break;
+    if(s->p[0] == 0xFF && s->p[1] >= 0xD0 && s->p[1] <= 0xD7){
+      s->p += 2; br->marker = false; br->markerVal = 0; return true;
     }
-    br->p++; guard++;
+    s->p++; guard++;
   }
   return false;
 }
@@ -332,25 +411,40 @@ typedef struct {
 // -------------------------------------------------------------
 static inline int rd16(const uint8_t* p){ return (p[0] << 8) | p[1]; }
 
-// Recorre los segmentos hasta SOS. Devuelve el offset del primer byte
-// de datos entropicos, o un codigo de error negativo.
-static int jpegParseHeaders(JDec* d, const uint8_t* data, size_t len, bool headerOnly){
-  size_t i = 0;
-  if(len < 4 || data[0] != 0xFF || data[1] != 0xD8) return FLEXJPG_ERR_BADMARKER;
-  i = 2;
+// Segmentos cuyo contenido se lee (el resto -- APPn, COM... -- se salta sin
+// guardarlo, asi que en modo flujo un EXIF de 64 KB no ocupa ventana).
+static inline bool jpegSegNeeded(uint8_t m){
+  return m == 0xC0 || m == 0xC1 || m == 0xC2 || m == 0xC4 || m == 0xDB || m == 0xDD || m == 0xDA;
+}
+// Recorre los segmentos hasta SOS. Devuelve >= 0 con el origen colocado en
+// el primer byte de datos entropicos (o justo tras el SOF si headerOnly), o
+// un codigo de error negativo.
+static int jpegParseHeaders(JDec* d, JSrc* src, bool headerOnly){
+  if(jsNeed(src, 4) < 4 || src->p[0] != 0xFF || src->p[1] != 0xD8) return FLEXJPG_ERR_BADMARKER;
+  src->p += 2;
   bool haveSOF = false;
 
-  while(i + 1 < len){
-    if(data[i] != 0xFF){ i++; continue; }                 // resincroniza sobre relleno
-    uint8_t m = data[i + 1];
-    i += 2;
-    if(m == 0xFF){ i--; continue; }                        // 0xFF de relleno
+  for(;;){
+    if(jsNeed(src, 2) < 2) return FLEXJPG_ERR_TRUNCATED;
+    if(src->p[0] != 0xFF){ src->p++; continue; }           // resincroniza sobre relleno
+    uint8_t m = src->p[1];
+    src->p += 2;
+    if(m == 0xFF){ src->p--; continue; }                   // 0xFF de relleno
     if(m == 0x01 || (m >= 0xD0 && m <= 0xD7)) continue;    // sin payload
     if(m == 0xD9) return FLEXJPG_ERR_TRUNCATED;            // EOI antes de SOS
-    if(i + 2 > len) return FLEXJPG_ERR_TRUNCATED;
-    int seglen = rd16(data + i);
-    if(seglen < 2 || i + (size_t)seglen > len) return FLEXJPG_ERR_TRUNCATED;
-    const uint8_t* seg = data + i + 2;
+    if(jsNeed(src, 2) < 2) return FLEXJPG_ERR_TRUNCATED;
+    int seglen = rd16(src->p);
+    if(seglen < 2) return FLEXJPG_ERR_TRUNCATED;
+    const bool need = jpegSegNeeded(m);
+    if(need && jsNeed(src, (size_t)seglen) < (size_t)seglen){
+      // En modo flujo un segmento util mas grande que la ventana no es un
+      // JPEG real (el mayor posible, un DHT con 8 tablas, son 2.186 B).
+      return (src->win && (size_t)seglen > src->winCap) ? FLEXJPG_ERR_UNSUPPORTED : FLEXJPG_ERR_TRUNCATED;
+    }
+    // En memoria se comprueba que el segmento este entero ANTES de mirarlo,
+    // como siempre: un archivo cortado a mitad de segmento es "truncado".
+    if(!src->win && (size_t)(src->end - src->p) < (size_t)seglen) return FLEXJPG_ERR_TRUNCATED;
+    const uint8_t* seg = need ? src->p + 2 : NULL;
     int segn = seglen - 2;
 
     switch(m){
@@ -378,7 +472,7 @@ static int jpegParseHeaders(JDec* d, const uint8_t* data, size_t len, bool heade
           if(d->comp[c].v > d->vmax) d->vmax = d->comp[c].v;
         }
         haveSOF = true;
-        if(headerOnly) return (int)(i + seglen);
+        if(headerOnly){ src->p += seglen; return 0; }
         break;
       }
       case 0xC2:                                           // SOF2 = progresivo
@@ -442,14 +536,15 @@ static int jpegParseHeaders(JDec* d, const uint8_t* data, size_t len, bool heade
           d->comp[ci].ta = (uint8_t)(tt & 0x0F);
           if(d->comp[ci].td > 3 || d->comp[ci].ta > 3) return FLEXJPG_ERR_BADMARKER;
         }
-        return (int)(i + seglen);
+        src->p += seglen;                                  // el origen queda en el primer byte de datos
+        return 0;
       }
       default:
         break;                                             // APPn, COM, etc: se ignoran
     }
-    i += seglen;
+    if(need) src->p += seglen;
+    else if(!jsSkip(src, (size_t)seglen)) return FLEXJPG_ERR_TRUNCATED;
   }
-  return FLEXJPG_ERR_TRUNCATED;
 }
 
 // -------------------------------------------------------------
@@ -485,19 +580,37 @@ static int jpegParseHeaders(JDec* d, const uint8_t* data, size_t len, bool heade
 static void* jdefAlloc(size_t n){ return malloc(n); }
 static void  jdefFree(void* p){ free(p); }
 
-int flexJpegProbe(const uint8_t* data, size_t len, FlexJpegInfo* info){
-  if(!data || len < 4 || !info) return FLEXJPG_ERR_ARG;
-  JDec* d = (JDec*)jdefAlloc(sizeof(JDec));
+static int jpegProbeSrc(JSrc* src, FlexJpegInfo* info, FlexJpegAlloc af, FlexJpegFree ff){
+  JDec* d = (JDec*)af(sizeof(JDec));
   if(!d) return FLEXJPG_ERR_MEMORY;
   memset(d, 0, sizeof(*d));
-  int r = jpegParseHeaders(d, data, len, true);
+  int r = jpegParseHeaders(d, src, true);
   memset(info, 0, sizeof(*info));
   info->progressive = d->progressive;
   info->width = d->width; info->height = d->height;
   info->outWidth = d->width; info->outHeight = d->height;
   info->components = d->ncomp; info->scaleDenom = 1;
-  jdefFree(d);
+  ff(d);
   return r < 0 ? r : FLEXJPG_OK;
+}
+
+int flexJpegProbe(const uint8_t* data, size_t len, FlexJpegInfo* info){
+  if(!data || len < 4 || !info) return FLEXJPG_ERR_ARG;
+  JSrc src; jsInitMem(&src, data, len);
+  return jpegProbeSrc(&src, info, jdefAlloc, jdefFree);
+}
+
+int flexJpegProbeStream(FlexJpegReadFn rd, void* rdCtx, FlexJpegInfo* info,
+                        FlexJpegAlloc af, FlexJpegFree ff){
+  if(!rd || !info) return FLEXJPG_ERR_ARG;
+  if(!af) af = jdefAlloc;
+  if(!ff) ff = jdefFree;
+  uint8_t* win = (uint8_t*)af(JPG_STREAM_WIN);
+  if(!win){ memset(info, 0, sizeof(*info)); return FLEXJPG_ERR_MEMORY; }
+  JSrc src; jsInitStream(&src, win, JPG_STREAM_WIN, rd, rdCtx);
+  int r = jpegProbeSrc(&src, info, af, ff);
+  ff(win);
+  return r;
 }
 
 // -------------------------------------------------------------
@@ -516,26 +629,28 @@ static inline void jput(uint16_t* o565, uint8_t* o888, int ox, int r, int g, int
 }
 
 template <bool RGB888>
-static int jpegDecodeT(const uint8_t* data, size_t len,
-                       int maxW, int maxH, uint32_t maxPixels,
+static int jpegDecodeT(JSrc* src,
+                       int maxW, int maxH, uint32_t maxPixels, FlexJpegScaleFn pick,
                        FlexJpegInfo* infoOut,
                        FlexJpegRowCb cb, FlexJpegRow888Cb cb888, void* user,
                        FlexJpegAlloc af, FlexJpegFree ff){
-  if(!data || len < 4 || (RGB888 ? !cb888 : !cb)) return FLEXJPG_ERR_ARG;
-  if(!af) af = jdefAlloc;
-  if(!ff) ff = jdefFree;
-
   // Ver el bloque de arriba: 8240 bytes al monton, jamas a la pila.
   JDec* dp = (JDec*)af(sizeof(JDec));
   if(!dp) return FLEXJPG_ERR_MEMORY;
   memset(dp, 0, sizeof(*dp));
   JDec& d = *dp;
-  int sosEnd = jpegParseHeaders(&d, data, len, false);
+  int sosEnd = jpegParseHeaders(&d, src, false);
   if(sosEnd < 0){ ff(dp); return sosEnd; }
 
-  // ---- Divisor de escala: el menor que hace que quepa ----
+  // ---- Divisor de escala ----
+  // Lo decide el llamante si ha dado `pick` (ya conoce las medidas reales);
+  // si no, el menor que hace que la salida quepa en maxW x maxH / maxPixels.
   int S = 1;
-  for(;;){
+  if(pick){
+    S = pick(user, d.width, d.height);
+    if(S <= 0){ ff(dp); return FLEXJPG_ERR_ABORTED; }
+    if(S != 1 && S != 2 && S != 4 && S != 8){ ff(dp); return FLEXJPG_ERR_ARG; }
+  } else for(;;){
     int ow = (d.width + S - 1) / S, oh = (d.height + S - 1) / S;
     bool fits = true;
     if(maxW > 0 && ow > maxW) fits = false;
@@ -591,7 +706,7 @@ static int jpegDecodeT(const uint8_t* data, size_t len,
   }
 
   {
-    BitRdr br; brInit(&br, data + sosEnd, data + len);
+    BitRdr br; brInit(&br, src);
     int16_t coef[64];
     int mcuSinceRestart = 0;
     const long totalMcus = (long)d.mcusX * (long)d.mcusY;
@@ -738,7 +853,11 @@ int flexJpegDecode(const uint8_t* data, size_t len,
                    FlexJpegInfo* infoOut,
                    FlexJpegRowCb cb, void* user,
                    FlexJpegAlloc af, FlexJpegFree ff){
-  return jpegDecodeT<false>(data, len, maxW, maxH, maxPixels, infoOut, cb, NULL, user, af, ff);
+  if(!data || len < 4 || !cb) return FLEXJPG_ERR_ARG;
+  if(!af) af = jdefAlloc;
+  if(!ff) ff = jdefFree;
+  JSrc src; jsInitMem(&src, data, len);
+  return jpegDecodeT<false>(&src, maxW, maxH, maxPixels, NULL, infoOut, cb, NULL, user, af, ff);
 }
 
 int flexJpegDecode888(const uint8_t* data, size_t len,
@@ -746,7 +865,49 @@ int flexJpegDecode888(const uint8_t* data, size_t len,
                       FlexJpegInfo* infoOut,
                       FlexJpegRow888Cb cb, void* user,
                       FlexJpegAlloc af, FlexJpegFree ff){
-  return jpegDecodeT<true>(data, len, maxW, maxH, maxPixels, infoOut, NULL, cb, user, af, ff);
+  if(!data || len < 4 || !cb) return FLEXJPG_ERR_ARG;
+  if(!af) af = jdefAlloc;
+  if(!ff) ff = jdefFree;
+  JSrc src; jsInitMem(&src, data, len);
+  return jpegDecodeT<true>(&src, maxW, maxH, maxPixels, NULL, infoOut, NULL, cb, user, af, ff);
+}
+
+// ---- Modo flujo: la ventana se reserva aqui y se suelta SIEMPRE ----
+template <bool RGB888>
+static int jpegDecodeStreamT(FlexJpegReadFn rd, void* rdCtx,
+                             int maxW, int maxH, uint32_t maxPixels, FlexJpegScaleFn pick,
+                             FlexJpegInfo* infoOut,
+                             FlexJpegRowCb cb, FlexJpegRow888Cb cb888, void* user,
+                             FlexJpegAlloc af, FlexJpegFree ff){
+  if(!rd || (RGB888 ? !cb888 : !cb)) return FLEXJPG_ERR_ARG;
+  if(!af) af = jdefAlloc;
+  if(!ff) ff = jdefFree;
+  uint8_t* win = (uint8_t*)af(JPG_STREAM_WIN);
+  if(!win) return FLEXJPG_ERR_MEMORY;
+  JSrc src; jsInitStream(&src, win, JPG_STREAM_WIN, rd, rdCtx);
+  int rc = jpegDecodeT<RGB888>(&src, maxW, maxH, maxPixels, pick, infoOut, cb, cb888, user, af, ff);
+  // Un error de LECTURA no es un JPEG danado: se dice como truncado para
+  // que nadie lo confunda con datos corruptos... salvo que el propio
+  // decodificador ya hubiera dicho algo mas concreto.
+  if(src.ioErr && rc == FLEXJPG_ERR_TRUNCATED) rc = FLEXJPG_ERR_IO;
+  ff(win);
+  return rc;
+}
+
+int flexJpegDecodeStream(FlexJpegReadFn rd, void* rdCtx,
+                         int maxW, int maxH, uint32_t maxPixels, FlexJpegScaleFn pick,
+                         FlexJpegInfo* infoOut,
+                         FlexJpegRowCb cb, void* user,
+                         FlexJpegAlloc af, FlexJpegFree ff){
+  return jpegDecodeStreamT<false>(rd, rdCtx, maxW, maxH, maxPixels, pick, infoOut, cb, NULL, user, af, ff);
+}
+
+int flexJpegDecode888Stream(FlexJpegReadFn rd, void* rdCtx,
+                            int maxW, int maxH, uint32_t maxPixels, FlexJpegScaleFn pick,
+                            FlexJpegInfo* infoOut,
+                            FlexJpegRow888Cb cb, void* user,
+                            FlexJpegAlloc af, FlexJpegFree ff){
+  return jpegDecodeStreamT<true>(rd, rdCtx, maxW, maxH, maxPixels, pick, infoOut, NULL, cb, user, af, ff);
 }
 
 const char* flexJpegErrStr(int err){
@@ -760,6 +921,7 @@ const char* flexJpegErrStr(int err){
     case FLEXJPG_ERR_TOOBIG:      return "imagen demasiado grande";
     case FLEXJPG_ERR_HUFFMAN:     return "datos de imagen corruptos";
     case FLEXJPG_ERR_ABORTED:     return "decodificacion cancelada";
+    case FLEXJPG_ERR_IO:          return "no se pudo leer la imagen";
     default:                      return "error desconocido";
   }
 }

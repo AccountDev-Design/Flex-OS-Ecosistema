@@ -71,7 +71,8 @@ enum {
   FLEXJPG_ERR_MEMORY = -5,       // no hay RAM para los buffers de trabajo
   FLEXJPG_ERR_TOOBIG = -6,       // supera los limites de dimensiones pedidos
   FLEXJPG_ERR_HUFFMAN = -7,      // codigo Huffman invalido (datos corruptos)
-  FLEXJPG_ERR_ABORTED = -8       // el callback pidio parar
+  FLEXJPG_ERR_ABORTED = -8,      // el callback pidio parar
+  FLEXJPG_ERR_IO = -9            // modo flujo: la funcion de lectura fallo
 };
 
 // Limite duro de seguridad: una cabecera manipulada no puede hacer
@@ -143,6 +144,43 @@ int flexJpegDecode888(const uint8_t* data, size_t len,
                       FlexJpegInfo* info,
                       FlexJpegRow888Cb cb, void* user,
                       FlexJpegAlloc af, FlexJpegFree ff);
+
+// -------------------------------------------------------------
+//  MODO FLUJO: decodificar SIN tener el archivo entero en RAM
+//  ------------------------------------------------------------
+//  Las funciones de arriba necesitan los bytes comprimidos en un buffer
+//  contiguo: para una foto de 5 MB son 5 MB de RAM solo para leerla. Estas
+//  piden los bytes a una funcion de lectura y los van guardando en una
+//  ventana de 8 KB, asi que el pico de memoria ya no depende del tamano
+//  del archivo. El decodificador es el MISMO (mismas tablas, misma IDCT,
+//  mismas filas): la salida es identica bit a bit a la del modo memoria.
+//
+//  Los segmentos que no hacen falta (EXIF, miniaturas incrustadas, COM...)
+//  se saltan leyendolos, sin guardarlos.
+// -------------------------------------------------------------
+// Lee hasta `n` bytes a partir de la posicion actual del flujo. Devuelve
+// los leidos (> 0), 0 al final del archivo o < 0 si hubo un error.
+typedef int (*FlexJpegReadFn)(void* ctx, uint8_t* buf, size_t n);
+
+// Elige el divisor de escala (1, 2, 4 u 8) una vez leida la cabecera, con
+// las dimensiones REALES de la imagen. Recibe el mismo `user` que el
+// callback de filas. Devolver <= 0 cancela (FLEXJPG_ERR_ABORTED) sin
+// decodificar nada. Si se pasa NULL se aplica la regla de maxW/maxH/
+// maxPixels de siempre.
+typedef int (*FlexJpegScaleFn)(void* user, int width, int height);
+
+int flexJpegProbeStream(FlexJpegReadFn rd, void* rdCtx, FlexJpegInfo* info,
+                        FlexJpegAlloc af, FlexJpegFree ff);
+int flexJpegDecodeStream(FlexJpegReadFn rd, void* rdCtx,
+                         int maxW, int maxH, uint32_t maxPixels, FlexJpegScaleFn pick,
+                         FlexJpegInfo* info,
+                         FlexJpegRowCb cb, void* user,
+                         FlexJpegAlloc af, FlexJpegFree ff);
+int flexJpegDecode888Stream(FlexJpegReadFn rd, void* rdCtx,
+                            int maxW, int maxH, uint32_t maxPixels, FlexJpegScaleFn pick,
+                            FlexJpegInfo* info,
+                            FlexJpegRow888Cb cb, void* user,
+                            FlexJpegAlloc af, FlexJpegFree ff);
 
 // Texto corto y estable para un codigo de error (para la interfaz).
 const char* flexJpegErrStr(int err);

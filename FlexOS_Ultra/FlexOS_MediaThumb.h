@@ -56,6 +56,14 @@ int  flexThumbFromJpeg(const uint8_t* jpg, size_t len, int side, int quality,
                        FlexJeOutFn out, void* outCtx, int* srcW, int* srcH,
                        FlexJpegAlloc af, FlexJpegFree ff);
 
+// La misma miniatura LEYENDO el JPEG por trozos (un archivo de LittleFS): la
+// foto nunca esta entera en RAM. Es lo que usan el servidor web al recibir
+// y la tarea de fondo con lo que ya estaba en el disco. Tambien VALIDA: el
+// flujo entropico se recorre entero. Un fallo de lectura da FLEXTH_ERR_IO.
+int  flexThumbFromJpegStream(FlexJpegReadFn rd, void* rdCtx, int side, int quality,
+                             FlexJeOutFn out, void* outCtx, int* srcW, int* srcH,
+                             FlexJpegAlloc af, FlexJpegFree ff);
+
 // Miniatura desde pixeles ya en memoria (RGB888 o RGB565, stride en bytes).
 int  flexThumbFromPixels(const void* px, int w, int h, size_t stride, int input,
                          int side, int quality, FlexJeOutFn out, void* outCtx,

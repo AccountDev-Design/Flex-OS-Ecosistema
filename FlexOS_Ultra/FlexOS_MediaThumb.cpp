@@ -112,7 +112,19 @@ int flexThumbFromPixels(const void* px, int w, int h, size_t stride, int input,
 }
 
 // ---- JPEG: se decodifica SOLO el recorte, a la escala justa ----
+// Todo sale del MISMO camino: el de flujo. Una foto que ya esta en memoria
+// (la miniatura que aporta el navegador, el fotograma de un AVI) se lee con
+// un lector de memoria; una que esta en el disco se lee por trozos y nunca
+// entera en RAM (una foto de 5 MB ya no son 5 MB de PSRAM solo para hacer
+// su miniatura de 132 px).
 struct CropSink { uint8_t* buf; int x0, y0, s, w; };
+struct ThJob {
+  CropSink cs;                 // PRIMER campo: cropRow recibe este puntero
+  int side;
+  FlexJpegAlloc af;
+  int srcW, srcH;
+  bool noMem;
+};
 static bool cropRow(void* u, int y, int w, const uint8_t* rgb){
   CropSink* c = (CropSink*)u;
   c->w = w;
@@ -123,47 +135,69 @@ static bool cropRow(void* u, int y, int w, const uint8_t* rgb){
   if(n > 0) memcpy(c->buf + (size_t)(y - c->y0) * c->s * 3, rgb + (size_t)c->x0 * 3, (size_t)n * 3);
   return true;
 }
+// Con las medidas REALES ya leidas de la cabecera: la mayor division (8, 4,
+// 2) que aun deja los DOS lados >= side. La miniatura se promedia desde una
+// imagen algo mayor que ella, nunca desde la foto entera (una de 12 MP
+// costaria 12 MP de trabajo) ni desde una mas pequena (saldria borrosa).
+static int thPick(void* u, int width, int height){
+  ThJob* t = (ThJob*)u;
+  t->srcW = width; t->srcH = height;
+  int d = 1;
+  for(int k = 8; k >= 2; k >>= 1)
+    if((width + k - 1) / k >= t->side && (height + k - 1) / k >= t->side){ d = k; break; }
+  int dw = (width + d - 1) / d, dh = (height + d - 1) / d;
+  flexThumbCoverRect(dw, dh, &t->cs.x0, &t->cs.y0, &t->cs.s, NULL);
+  t->cs.w = 0;
+  t->cs.buf = (uint8_t*)t->af((size_t)t->cs.s * t->cs.s * 3);
+  if(!t->cs.buf){ t->noMem = true; return 0; }     // cancela sin decodificar nada
+  memset(t->cs.buf, 0, (size_t)t->cs.s * t->cs.s * 3);
+  return d;
+}
+
+int flexThumbFromJpegStream(FlexJpegReadFn rd, void* rdCtx, int side, int quality,
+                            FlexJeOutFn out, void* outCtx, int* srcW, int* srcH,
+                            FlexJpegAlloc af, FlexJpegFree ff){
+  if(!rd || side <= 0 || side > 1024 || !out) return FLEXTH_ERR_ARG;
+  if(!af) af = malloc;
+  if(!ff) ff = free;
+  ThJob t;
+  memset(&t, 0, sizeof(t));
+  t.side = side; t.af = af;
+  int rc = flexJpegDecode888Stream(rd, rdCtx, 0, 0, 0, thPick, NULL, cropRow, &t, af, ff);
+  if(srcW && t.srcW) *srcW = t.srcW;
+  if(srcH && t.srcH) *srcH = t.srcH;
+  if(rc != FLEXJPG_OK){
+    if(t.cs.buf) ff(t.cs.buf);
+    if(t.noMem || rc == FLEXJPG_ERR_MEMORY) return FLEXTH_ERR_MEMORY;
+    if(rc == FLEXJPG_ERR_UNSUPPORTED) return FLEXTH_ERR_UNSUP;
+    if(rc == FLEXJPG_ERR_IO) return FLEXTH_ERR_IO;
+    return FLEXTH_ERR_DECODE;
+  }
+  uint8_t* sq = (uint8_t*)af((size_t)side * side * 3);
+  if(!sq){ ff(t.cs.buf); return FLEXTH_ERR_MEMORY; }
+  resampleSquare(t.cs.buf, (size_t)t.cs.s * 3, FLEXJE_IN_RGB888, 0, 0, t.cs.s, sq, side);
+  ff(t.cs.buf);
+  rc = encodeSquare(sq, side, quality, out, outCtx, af, ff);
+  ff(sq);
+  return rc;
+}
+
+struct ThMem { const uint8_t* p; size_t n, pos; };
+static int thMemRead(void* c, uint8_t* buf, size_t n){
+  ThMem* m = (ThMem*)c;
+  size_t left = m->n - m->pos;
+  if(n > left) n = left;
+  memcpy(buf, m->p + m->pos, n);
+  m->pos += n;
+  return (int)n;
+}
 
 int flexThumbFromJpeg(const uint8_t* jpg, size_t len, int side, int quality,
                       FlexJeOutFn out, void* outCtx, int* srcW, int* srcH,
                       FlexJpegAlloc af, FlexJpegFree ff){
   if(!jpg || len < 4 || side <= 0 || side > 1024 || !out) return FLEXTH_ERR_ARG;
-  if(!af) af = malloc;
-  if(!ff) ff = free;
-  FlexJpegInfo inf;
-  int pr = flexJpegProbe(jpg, len, &inf);
-  if(pr != FLEXJPG_OK) return pr == FLEXJPG_ERR_UNSUPPORTED ? FLEXTH_ERR_UNSUP : FLEXTH_ERR_DECODE;
-  if(inf.progressive) return FLEXTH_ERR_UNSUP;
-  if(srcW) *srcW = inf.width;
-  if(srcH) *srcH = inf.height;
-  // La mayor division (8, 4, 2) que aun deja los DOS lados >= side: la
-  // miniatura se promedia desde una imagen algo mayor que ella, nunca desde
-  // la foto entera (una de 12 MP costaria 12 MP de trabajo) ni desde una
-  // mas pequena (saldria borrosa).
-  int d = 1;
-  for(int k = 8; k >= 2; k >>= 1)
-    if((inf.width + k - 1) / k >= side && (inf.height + k - 1) / k >= side){ d = k; break; }
-  int dw = (inf.width + d - 1) / d, dh = (inf.height + d - 1) / d;
-  CropSink cs;
-  flexThumbCoverRect(dw, dh, &cs.x0, &cs.y0, &cs.s, NULL);
-  cs.w = 0;
-  cs.buf = (uint8_t*)af((size_t)cs.s * cs.s * 3);
-  if(!cs.buf) return FLEXTH_ERR_MEMORY;
-  memset(cs.buf, 0, (size_t)cs.s * cs.s * 3);
-  int rc = flexJpegDecode888(jpg, len, dw, dh, 0, NULL, cropRow, &cs, af, ff);
-  if(rc != FLEXJPG_OK){
-    ff(cs.buf);
-    if(rc == FLEXJPG_ERR_MEMORY) return FLEXTH_ERR_MEMORY;
-    if(rc == FLEXJPG_ERR_UNSUPPORTED) return FLEXTH_ERR_UNSUP;
-    return FLEXTH_ERR_DECODE;
-  }
-  uint8_t* sq = (uint8_t*)af((size_t)side * side * 3);
-  if(!sq){ ff(cs.buf); return FLEXTH_ERR_MEMORY; }
-  resampleSquare(cs.buf, (size_t)cs.s * 3, FLEXJE_IN_RGB888, 0, 0, cs.s, sq, side);
-  ff(cs.buf);
-  rc = encodeSquare(sq, side, quality, out, outCtx, af, ff);
-  ff(sq);
-  return rc;
+  ThMem m = { jpg, len, 0 };
+  return flexThumbFromJpegStream(thMemRead, &m, side, quality, out, outCtx, srcW, srcH, af, ff);
 }
 
 int flexThumbFromAvi(const FlexMediaIO* io, int side, int quality,

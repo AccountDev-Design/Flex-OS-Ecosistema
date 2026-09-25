@@ -169,7 +169,8 @@ static bool fsAtomic(void*, const char* p, const void* b, size_t n){
 
 // ---- memoria contada: ninguna reserva puede quedarse viva ----
 static std::atomic<long> g_live{0};
-static void* tA(size_t n){ void* p = std::malloc(n); if(p) g_live++; return p; }
+static std::atomic<size_t> g_bigAlloc{0};       // la mayor reserva vista (para medir picos)
+static void* tA(size_t n){ void* p = std::malloc(n); if(p) g_live++; if(n > g_bigAlloc) g_bigAlloc = n; return p; }
 static void tF(void* p){ if(p){ g_live--; std::free(p); } }
 
 // ---- dibujos de Paint: el formato real vive en FlexOS_FS ----
@@ -480,14 +481,19 @@ static void testJobs(){
   const FlexMlRec* rt = recAt("/Paint/roto.fxp");
   CHECK(rt && rt->state == FML_S_ERROR && rt->err == FML_E_CORRUPT && !(rt->flags & FML_R_PLAYABLE), "dibujo ilegible: danado");
 
-  // Foto por encima del tope del visor: no se decodifica.
+  // Foto de mas de 6 MB en el disco. Antes no se decodificaba porque habia
+  // que cargarla ENTERA en RAM; ahora se lee por trozos, asi que se valida y
+  // tiene miniatura como cualquier otra -- y ninguna reserva se acerca al
+  // tamano del archivo (esa era la presion de memoria de las transferencias).
   fresh();
   std::vector<uint8_t> huge = makeJpeg(64, 64); huge.resize(FML_LIMIT_PHOTO + 10, 0);
   put(FML_DIR_PHOTO "/enorme.jpg", huge);
+  g_bigAlloc = 0;
   flexMsScan(&g_ms, nullptr, nullptr); runAll();
   const FlexMlRec* e = recAt(FML_DIR_PHOTO "/enorme.jpg");
-  CHECK(e && !(e->flags & FML_R_PLAYABLE) && (e->flags & FML_R_THUMB_FAIL) && e->state == FML_S_READY,
-        "foto mayor que el tope: guardada, sin abrir");
+  CHECK(e && (e->flags & FML_R_PLAYABLE) && (e->flags & FML_R_THUMB) && e->state == FML_S_READY && e->w == 64,
+        "foto de mas de 6 MB: validada y con miniatura, leyendola por trozos");
+  CHECK(g_bigAlloc < 256u * 1024u, "ninguna reserva del tamano del archivo al hacer su miniatura (la mayor: %zu B)", (size_t)g_bigAlloc);
 
   // El resultado ya no es de ese registro: se descarta.
   fresh();

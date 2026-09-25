@@ -147,6 +147,14 @@ typedef struct {
   // reutilice. Puede ser NULL (entonces nunca se cede).
   bool     (*othersWaiting)(void* ctx);
   void* ctx;
+  // TRABAJO PESADO, DE UNO EN UNO (opcionales; van detras de ctx para no
+  // mover los campos de siempre). Validar una foto recien subida es
+  // decodificarla entera: la placa lo serializa con la tarea de miniaturas y
+  // el visor para que dos decodificaciones grandes nunca coincidan. Si
+  // heavyBegin devuelve false (sistema ocupado demasiado rato), la subida
+  // se rechaza con 503 y el movil la reintenta; nunca se valida a la vez.
+  bool     (*heavyBegin)(void* ctx);
+  void     (*heavyEnd)(void* ctx);
 } FlexWebHost;
 
 typedef struct { uint8_t fails; uint32_t untilMs; } FlexWebLimiter;

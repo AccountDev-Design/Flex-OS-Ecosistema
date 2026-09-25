@@ -72,6 +72,17 @@ typedef struct {
   // miniatura de dibujos. w/h reciben el tamano del lienzo original.
   bool        (*paintThumb)(void* ctx, const char* path, uint16_t* px, int* w, int* h);
   void*         paintCtx;
+  // Trabajo pesado de uno en uno en TODO el sistema (opcionales). Hacer la
+  // miniatura de una foto es decodificarla entera: la placa lo serializa con
+  // la validacion de las subidas y con el visor. heavyBegin false = ahora no
+  // (el trabajo se aplaza y se reintenta, no se pierde).
+  bool        (*heavyBegin)(void* ctx);
+  void        (*heavyEnd)(void* ctx);
+  void*         heavyCtx;
+  // Se llama a menudo durante una decodificacion larga (en cada lectura); la
+  // placa decide si cede la CPU. NULL = nunca.
+  void        (*yield)(void* ctx);
+  void*         yieldCtx;
   // ---- estado (lo leen la interfaz y la tarea de fondo) ----
   volatile bool     dirty;                 // hay cambios sin guardar
   volatile bool     scanning;
@@ -102,8 +113,10 @@ typedef struct { uint32_t id, size; int kind; char path[FML_PATH_MAX]; } FlexMsJ
 bool     flexMsNextJob(FlexMediaStore* ms, uint32_t afterId, FlexMsJob* job);
 enum { FLEXMS_JOB_DONE = 0, FLEXMS_JOB_RETRY = 1, FLEXMS_JOB_GONE = 2 };
 // Hace el trabajo: formato real, miniatura, dimensiones, duracion. Una
-// foto se decodifica ENTERA solo si memFree - size >= memReserve; si no,
-// FLEXMS_JOB_RETRY (se deja para luego).
+// foto se decodifica ENTERA, pero LEYENDOLA POR TROZOS (nunca entera en
+// RAM): hace falta como mucho ~1 MB de trabajo sea cual sea su tamano. Si
+// ni eso sobra por encima de memReserve, o el trabajo pesado del sistema
+// esta ocupado, FLEXMS_JOB_RETRY (se deja para luego).
 int      flexMsRunJob(FlexMediaStore* ms, const FlexMsJob* job, uint32_t memFree, uint32_t memReserve);
 
 // ---- Rutas ----

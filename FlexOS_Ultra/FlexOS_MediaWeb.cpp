@@ -691,6 +691,18 @@ static int fsioRead(void* c, void* buf, uint32_t n){
 static bool fsioSeek(void* c, uint32_t off){ FsIo* f = (FsIo*)c; if(off > f->size) return false; f->pos = off; return true; }
 static uint32_t fsioSize(void* c){ return ((FsIo*)c)->size; }
 
+// Lectura SECUENCIAL para el decodificador en modo flujo. Cede la CPU cada
+// ~20 ms: validar una foto de 12 MP son segundos de trabajo, y la interfaz
+// (que comparte nucleo y prioridad con esta tarea) no puede quedarse sin
+// turno mientras tanto.
+struct FsSeq { FlexWebCtx* w; void* h; uint32_t lastYield; };
+static int fsSeqRead(void* c, uint8_t* buf, size_t n){
+  FsSeq* f = (FsSeq*)c;
+  uint32_t now = nowMs(f->w);
+  if(now - f->lastYield >= 20u){ yieldHost(f->w); f->lastYield = nowMs(f->w); }
+  return f->w->fs.read(f->w->fs.ctx, f->h, buf, n);
+}
+
 struct FsOut { FlexWebCtx* w; void* h; bool ok; };
 static bool fsOutWrite(void* c, const uint8_t* d, size_t n){
   FsOut* o = (FsOut*)c;
@@ -713,22 +725,18 @@ static int thumbToTmp(FlexWebCtx* w, char* thumbTmp, size_t cap, int kind, int f
   if(!o.h){ thumbTmp[0] = 0; return FLEXTH_ERR_WRITE; }
   int rc = FLEXTH_ERR_ARG;
   if(fmt == FML_F_JPEG || fmt == FML_F_JPEG_PROG){
-    uint8_t* buf = (uint8_t*)wAlloc(w, size);
-    if(!buf) rc = FLEXTH_ERR_MEMORY;
+    // La foto se lee POR TROZOS desde el temporal: nunca entera en RAM. Antes
+    // se reservaba el archivo completo (hasta 6 MB de PSRAM) en esta tarea,
+    // a la vez que la tarea de miniaturas y la interfaz podian estar haciendo
+    // lo mismo con otra foto.
+    FsSeq f = { w, w->fs.open(w->fs.ctx, dataPath, false), nowMs(w) };
+    if(!f.h) rc = FLEXTH_ERR_IO;
     else {
-      void* h = w->fs.open(w->fs.ctx, dataPath, false);
-      uint32_t got = 0;
-      while(h && got < size){
-        int r = w->fs.read(w->fs.ctx, h, buf + got, size - got);
-        if(r <= 0) break;
-        got += (uint32_t)r;
-      }
-      if(h) w->fs.close(w->fs.ctx, h);
-      rc = (got == size) ? flexThumbFromJpeg(buf, size, FLEXTH_SIDE, FLEXTH_QUALITY, fsOutWrite, &o, ow, oh,
-                                             w->alloc, w->free)
-                         : FLEXTH_ERR_IO;
-      wFree(w, buf);
+      rc = flexThumbFromJpegStream(fsSeqRead, &f, FLEXTH_SIDE, FLEXTH_QUALITY, fsOutWrite, &o, ow, oh,
+                                   w->alloc, w->free);
+      w->fs.close(w->fs.ctx, f.h);
     }
+    (void)size;
   } else if(fmt == FML_F_AVI_MJPEG || fmt == FML_F_AVI_OTHER){
     FsIo f = { w, w->fs.open(w->fs.ctx, dataPath, false), 0, size };
     if(!f.h) rc = FLEXTH_ERR_IO;
@@ -757,15 +765,34 @@ static void upFail(FlexWebCtx* w, const FlexWebConn* c, Req* q, int status, cons
   q->keep = false;
 }
 
+// Lo que una subida necesita mientras dura. Va al MONTON (PSRAM en la
+// placa), no a la pila: son ~1,4 KB que se sumaban a lo mas hondo de la
+// tarea del servidor -- validar la foto (decodificador + codificador) y
+// escribir en LittleFS --, justo donde la pila de 12 KB iba mas justa.
+struct UpWork {
+  char          v[FML_NAME_MAX * 3];
+  FlexWebUpload up;
+  uint8_t       head[512];
+  char          why[128];
+  char          m[128];
+  char          b[320];
+  char          wesc[160];
+};
+static void handleUploadCore(FlexWebCtx* w, const FlexWebConn* c, Req* q, uint8_t* io, UpWork* k);
 static void handleUpload(FlexWebCtx* w, const FlexWebConn* c, Req* q, uint8_t* io){
   q->keep = false;          // tras una subida, se cierra siempre: ningun camino de error deja bytes a medias
   if(!w->allowUpload){ sendErr(c, 403, "Las subidas est\xC3\xA1n desactivadas en Flex OS", false); return; }
   if(w->uploading){ sendErr(c, 503, "Ya hay una subida en curso", false); return; }
   if(q->r.chunked || q->r.contentLength < 0){ sendErr(c, 411, "Falta la longitud del archivo", false); return; }
-
-  char v[FML_NAME_MAX * 3];
-  FlexWebUpload up;
-  memset(&up, 0, sizeof(up));
+  UpWork* k = (UpWork*)wAlloc(w, sizeof(UpWork));
+  if(!k){ sendErr(c, 503, "Memoria insuficiente en Flex OS; vuelve a intentarlo", false); return; }
+  memset(k, 0, sizeof(*k));
+  handleUploadCore(w, c, q, io, k);
+  wFree(w, k);
+}
+static void handleUploadCore(FlexWebCtx* w, const FlexWebConn* c, Req* q, uint8_t* io, UpWork* k){
+  char (&v)[FML_NAME_MAX * 3] = k->v;
+  FlexWebUpload& up = k->up;
   up.kind = flexHttpQueryGet(q->r.query, "kind", v, sizeof(v)) ? flexMlKindParse(v) : FML_K_NONE;
   if(up.kind == FML_K_NONE){ sendErr(c, 400, "Tipo de archivo no indicado", false); return; }
   if(!flexHttpQueryGet(q->r.query, "name", v, sizeof(v)) || !v[0]){ sendErr(c, 400, "Falta el nombre del archivo", false); return; }
@@ -786,7 +813,7 @@ static void handleUpload(FlexWebCtx* w, const FlexWebConn* c, Req* q, uint8_t* i
   if(flexHttpQueryGet(q->r.query, "artist", v, sizeof(v))) flexMlCleanName(v, up.artist, sizeof(up.artist));
   if(flexHttpQueryGet(q->r.query, "album", v, sizeof(v))) flexMlCleanName(v, up.album, sizeof(up.album));
 
-  char why[128];
+  char (&why)[128] = k->why;
   uint32_t fr = w->fs.freeBytes ? w->fs.freeBytes(w->fs.ctx) : 0;
   int chk = flexMlCheckUpload(up.kind, up.size, fr, why, sizeof(why));
   if(chk != FML_OK){ sendErr(c, chk == FML_ERR_NOSPACE ? 507 : 413, why, false); return; }
@@ -800,7 +827,7 @@ static void handleUpload(FlexWebCtx* w, const FlexWebConn* c, Req* q, uint8_t* i
     w->uploading = false; return;
   }
   // ---- recepcion, con el progreso en bytes REALES escritos ----
-  uint8_t head[512];
+  uint8_t (&head)[512] = k->head;
   size_t headN = 0;
   uint32_t got = 0, crc = 0, lastEv = 0, lastEvMs = nowMs(w);
   bool wok = true;
@@ -858,7 +885,7 @@ static void handleUpload(FlexWebCtx* w, const FlexWebConn* c, Req* q, uint8_t* i
     w->uploading = false; return;
   }
   if(skind != up.kind){
-    char m[128];
+    char (&m)[128] = k->m;
     snprintf(m, sizeof(m), "El contenido no es %s: es %s",
              up.kind == FML_K_PHOTO ? "una foto" : up.kind == FML_K_VIDEO ? "un v\xC3\xAD" "deo" : "audio",
              flexMlFmtName(up.fmt));
@@ -879,7 +906,14 @@ static void handleUpload(FlexWebCtx* w, const FlexWebConn* c, Req* q, uint8_t* i
   up.playable = flexMlFmtPlayable(up.fmt);
   int ow = 0, oh = 0; uint32_t dur = 0;
   if(up.fmt == FML_F_JPEG || up.fmt == FML_F_JPEG_PROG || up.fmt == FML_F_AVI_MJPEG || up.fmt == FML_F_AVI_OTHER){
+    // Una decodificacion pesada a la vez en todo el sistema (ver heavyBegin).
+    if(w->host.heavyBegin && !w->host.heavyBegin(w->host.ctx)){
+      upFail(w, c, q, 503, "Hay otra comprobaci\xC3\xB3n en curso en Flex OS; se volver\xC3\xA1 a intentar",
+             up.tmpPath, NULL, up.name, up.kind, true);
+      w->uploading = false; return;
+    }
     int tr = thumbToTmp(w, up.thumbTmp, sizeof(up.thumbTmp), up.kind, up.fmt, up.tmpPath, up.size, &ow, &oh, &dur);
+    if(w->host.heavyEnd) w->host.heavyEnd(w->host.ctx);
     if(tr == FLEXTH_ERR_DECODE || tr == FLEXTH_ERR_IO){
       upFail(w, c, q, 422, up.kind == FML_K_PHOTO ? "La imagen est\xC3\xA1 da\xC3\xB1" "ada o incompleta" : "El v\xC3\xAD" "deo est\xC3\xA1 da\xC3\xB1" "ado o incompleto",
              up.tmpPath, up.thumbTmp, up.name, up.kind, true);
@@ -922,7 +956,9 @@ static void handleUpload(FlexWebCtx* w, const FlexWebConn* c, Req* q, uint8_t* i
     w->uploading = false; return;
   }
   w->uploads++;
-  char b[320], wesc[160] = "";
+  char (&b)[320] = k->b;
+  char (&wesc)[160] = k->wesc;
+  wesc[0] = 0;
   const char* whyNot = up.playable ? NULL : flexMlWhyUnplayable(up.fmt);
   if(whyNot){ char e[140]; if(flexMlJsonStr(whyNot, e, sizeof(e))) snprintf(wesc, sizeof(wesc), ",\"why\":%s", e); }
   snprintf(b, sizeof(b), "{\"id\":%lu,\"p\":%d,\"thumb\":%d%s}", (unsigned long)id, up.playable ? 1 : 0,

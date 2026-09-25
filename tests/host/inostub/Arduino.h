@@ -44,6 +44,7 @@ extern __FlexSerial Serial;
 
 #define F(x) (x)
 #define PROGMEM
+#define IRAM_ATTR
 #define pgm_read_byte(a) (*(const uint8_t*)(a))
 
 class String {

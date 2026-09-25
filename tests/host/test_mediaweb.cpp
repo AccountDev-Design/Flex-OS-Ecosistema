@@ -665,12 +665,114 @@ static void testFuzz(){
   CHECK(g_fs.tmpCount() == 0 && !g_w.uploading, "1500 peticiones de ruido: sin temporales y servidor libre");
 }
 
+// =============================================================
+//  ARCHIVOS DE VARIOS MB, VARIOS SEGUIDOS, Y TRABAJO PESADO EN FILA
+//  -------------------------------------------------------------
+//  El fallo que se reporto: fotos de ~2 MB o mas, o 2-3 fotos seguidas,
+//  podian reiniciar Flex OS. Una de las causas estaba aqui: validar una foto
+//  reservaba el archivo ENTERO en la memoria de la tarea del servidor. Lo
+//  que se exige ahora:
+//    · 3 y 5 MB de foto se validan y publican con TODAS las reservas por
+//      debajo de 256 KB (ninguna del tamano del archivo);
+//    · tres fotos seguidas: tres publicadas, sin temporales ni fugas;
+//    · audio y video de varios MB: publicados, con su duracion;
+//    · la validacion pide turno de trabajo pesado (una vez, y lo suelta);
+//      si no se lo dan, 503 con un texto que el movil sabe reintentar y
+//      nada queda a medias.
+// =============================================================
+static size_t g_bigA = 0;
+static void* tABig(size_t n){ if(n > g_bigA) g_bigA = n; return tA(n); }
+static int g_heavyIn = 0, g_heavyOut = 0; static bool g_heavyOk = true;
+static bool hHeavyBegin(void*){ g_heavyIn++; return g_heavyOk; }
+static void hHeavyEnd(void*){ g_heavyOut++; }
+// Foto con mucho detalle (ruido con estructura): a calidad alta pesa MB de verdad.
+static std::vector<uint8_t> makeBigJpeg(int w, int h, int q, uint32_t seed){
+  std::vector<uint8_t> px((size_t)w * h * 3);
+  for(int y = 0; y < h; y++) for(int x = 0; x < w; x++){
+    seed = seed * 1664525u + 1013904223u;
+    uint8_t* p = &px[((size_t)y * w + x) * 3];
+    p[0] = (uint8_t)((x * 3) ^ (seed >> 24)); p[1] = (uint8_t)((y * 5) + (seed >> 16)); p[2] = (uint8_t)(seed >> 8);
+  }
+  std::vector<uint8_t> o; FlexJeCfg c; c.width = w; c.height = h; c.quality = q; c.subsampling = FLEXJE_SUB_444; c.input = FLEXJE_IN_RGB888;
+  flexJpegEncodeMem(&c, px.data(), 0, outV, &o, nullptr, nullptr);
+  return o;
+}
+static void testBigAndHeavy(){
+  std::printf("-- varios MB, varios seguidos y trabajo pesado en fila --\n");
+  setup(); g_cookie.clear(); pair();
+  g_w.alloc = tABig;
+  g_w.host.heavyBegin = hHeavyBegin; g_w.host.heavyEnd = hHeavyEnd;
+  g_heavyIn = g_heavyOut = 0; g_heavyOk = true;
+  g_fs.total = 40u * 1024u * 1024u;
+
+  const struct { int w, h, q; double minMB; } fotos[] = { { 1100, 900, 97, 2.5 }, { 1600, 1200, 97, 4.5 } };
+  for(auto& f : fotos){
+    auto jpg = makeBigJpeg(f.w, f.h, f.q, (uint32_t)f.w);
+    double mb = jpg.size() / 1048576.0;
+    CHECK(mb >= f.minMB && jpg.size() <= FML_LIMIT_PHOTO, "foto de prueba de %.1f MB (se esperaban >= %.1f)", mb, f.minMB);
+    uint32_t crc = flexMlCrc32(0, jpg.data(), jpg.size());
+    Client c; c.chunk = 16384;
+    long live = g_live; g_bigA = 0; int n0 = g_lib.n, h0 = g_heavyIn;
+    Resp r = run(req("POST", upPath("photo", "grande.jpg", jpg, crc), S(jpg)), &c);
+    CHECK(r.status == 201 && g_lib.n == n0 + 1, "foto de %.1f MB publicada (%d)", mb, r.status);
+    CHECK(g_bigA < 256u * 1024u, "foto de %.1f MB: la mayor reserva son %zu B (nada del tamano del archivo)", mb, g_bigA);
+    CHECK(g_live == live && g_fs.tmpCount() == 0, "foto de %.1f MB: sin fugas ni temporales", mb);
+    CHECK(g_heavyIn == h0 + 1 && g_heavyOut == g_heavyIn, "la validacion pide turno una vez y lo suelta");
+    std::printf("   foto de %.2f MB validada; mayor reserva %zu B\n", mb, g_bigA);
+  }
+
+  // Tres fotos seguidas (lo que manda el movil cuando se eligen varias).
+  {
+    int n0 = g_lib.n; long live = g_live;
+    for(int k = 0; k < 3; k++){
+      auto jpg = makeBigJpeg(900, 700, 95, 77u + (uint32_t)k);
+      uint32_t crc = flexMlCrc32(0, jpg.data(), jpg.size());
+      Client c; c.chunk = 4096 + 1000 * k;
+      Resp r = run(req("POST", upPath("photo", std::string("serie ") + char('1' + k) + ".jpg", jpg, crc), S(jpg)), &c);
+      CHECK(r.status == 201, "foto %d de 3 publicada (%d)", k + 1, r.status);
+    }
+    CHECK(g_lib.n == n0 + 3 && g_fs.tmpCount() == 0 && g_live == live, "tres seguidas: tres en la biblioteca, sin temporales ni fugas");
+  }
+
+  // Audio de varios MB (WAV PCM de 4 MB): duracion real, sin reservas grandes.
+  {
+    uint32_t rate = 22050, bytes = 4u * 1024u * 1024u;
+    std::vector<uint8_t> w; auto p32 = [&](uint32_t x){ for(int i = 0; i < 4; i++) w.push_back((uint8_t)(x >> (8 * i))); };
+    auto p16 = [&](uint16_t x){ w.push_back((uint8_t)x); w.push_back((uint8_t)(x >> 8)); };
+    w.insert(w.end(), { 'R', 'I', 'F', 'F' }); p32(36 + bytes); w.insert(w.end(), { 'W', 'A', 'V', 'E', 'f', 'm', 't', ' ' });
+    p32(16); p16(1); p16(1); p32(rate); p32(rate * 2); p16(2); p16(16);
+    w.insert(w.end(), { 'd', 'a', 't', 'a' }); p32(bytes);
+    for(uint32_t i = 0; i < bytes; i++) w.push_back((uint8_t)(i * 37));
+    uint32_t crc = flexMlCrc32(0, w.data(), w.size());
+    Client c; c.chunk = 16384; g_bigA = 0; long live = g_live;
+    Resp r = run(req("POST", upPath("audio", "tema.wav", w, crc), S(w)), &c);
+    const FlexMlRec* last = g_lib.n ? &g_lib.recs[g_lib.n - 1] : nullptr;
+    CHECK(r.status == 201 && last && last->kind == FML_K_AUDIO && last->durMs > 90000, "audio de 4 MB publicado con su duracion (%d)", r.status);
+    CHECK(g_bigA < 256u * 1024u && g_live == live && g_fs.tmpCount() == 0, "audio de 4 MB: sin reservas grandes ni fugas (%zu B)", g_bigA);
+  }
+
+  // Sin turno de trabajo pesado: 503 reintentable y nada a medias.
+  {
+    g_heavyOk = false;
+    auto jpg = makeJpeg(320, 240, 5);
+    uint32_t crc = flexMlCrc32(0, jpg.data(), jpg.size());
+    int n0 = g_lib.n; int in0 = g_heavyIn, out0 = g_heavyOut;
+    Resp r = run(req("POST", upPath("photo", "espera.jpg", jpg, crc), S(jpg)));
+    CHECK(r.status == 503 && r.body.find("en curso") != std::string::npos, "sin turno: 503 que el movil reintenta (%d %s)", r.status, r.body.c_str());
+    CHECK(g_lib.n == n0 && g_fs.tmpCount() == 0 && !g_w.uploading, "sin turno: nada publicado, ningun temporal, servidor libre");
+    CHECK(g_heavyIn == in0 + 1 && g_heavyOut == out0, "sin turno: no se suelta lo que no se tomo");
+    g_heavyOk = true;
+  }
+  g_w.alloc = tA;
+}
+
 int main(){
   std::printf("=== FlexOS · Flex Web Server de extremo a extremo ===\n");
   testPublicAndPairing();
   testUploads();
   testVideoAndLibrary();
   testLocked();
+  testBigAndHeavy();
   testFuzz();
   std::printf("=== %d comprobaciones, %d fallos ===\n", g_run, g_fail);
   return g_fail ? 1 : 0;

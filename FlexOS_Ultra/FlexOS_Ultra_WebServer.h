@@ -48,7 +48,13 @@
 // ##  codigo nuevo. Al bloquearse el P4, ninguna sesion conserva el
 // ##  acceso al contenido protegido (flexWebDropOwners).
 // #############################################################
-#define WEB_TASK_STACK   12288
+// 14 KB: lo mas hondo de esta tarea es validar una foto recien subida
+// (decodificador + codificador de la miniatura) con LittleFS o el socket por
+// debajo. Medido en el PC (-fstack-usage, sin inline) esa cadena ronda los
+// 6-7 KB; con 12 KB el margen para LittleFS, lwIP y newlib era justo. La
+// tarea solo existe con el servidor encendido, y mlStackCheck avisa por
+// Serie si alguna vez el margen baja de 2 KB.
+#define WEB_TASK_STACK   14336
 #define WEB_EV_N         24
 
 enum { WEBS_OFF = 0, WEBS_NOWIFI, WEBS_STARTING, WEBS_ON, WEBS_FAIL };
@@ -107,15 +113,23 @@ static void whRandom(void*, uint8_t* out, size_t n){ flexLockRandomBytes(out, n)
 // gWebEvW y loopTask SOLO mueve gWebEvR. Un PROGRESO se puede perder (llega
 // otro); por eso deja libres las ultimas plazas para los inicios y finales.
 #define WEB_EV_KEEP 6
+// El evento se copia ANTES de publicar el indice (release) y loopTask lo lee
+// DESPUES de ver el indice (acquire): sin eso, el otro nucleo podia leer una
+// plaza a medio copiar.
 static void whEvent(void*, const FlexWebXfer* x){
   if(!gWebEv) return;                             // webStart no deja arrancar sin ella
-  uint8_t w = gWebEvW, used = (uint8_t)(w - gWebEvR);
+  uint8_t w = gWebEvW, used = (uint8_t)(w - __atomic_load_n(&gWebEvR, __ATOMIC_ACQUIRE));
   bool progress = x->ev == FLEXWEB_EV_UP_PROGRESS || x->ev == FLEXWEB_EV_DL_PROGRESS;
   if(used >= WEB_EV_N || (progress && used >= WEB_EV_N - WEB_EV_KEEP)) return;
   gWebEv[w % WEB_EV_N] = *x;
-  gWebEvW = (uint8_t)(w + 1);
+  __atomic_store_n(&gWebEvW, (uint8_t)(w + 1), __ATOMIC_RELEASE);
 }
 static void whYield(void*){ vTaskDelay(1); }
+// Validar una subida es trabajo pesado: se espera su turno (la tarea de
+// miniaturas o el visor lo sueltan en segundos). Solo si en un minuto no
+// llega, la subida se rechaza con 503 y el movil la reintenta sola.
+static bool whHeavyBegin(void*){ return mediaHeavyBegin(60000); }
+static void whHeavyEnd(void*){ mediaHeavyEnd(); }
 
 // ---- Conexion (WiFiClient) ----
 static WiFiServer* gWebSrv = NULL;
@@ -160,7 +174,9 @@ static void webTask(void*){
   gWebSrv->setNoDelay(true);
   gWebState = WEBS_ON;
   Serial.printf("[web] Flex Web Server en %s\n", gWebUrl);
+  uint32_t stackLow = 0xFFFFFFFFu;
   while(!gWebStop){
+    mlStackCheck("web", &stackLow);
     if(!gNetOnline) break;
     if(gWebSrv->hasClient()){
       WiFiClient c = gWebSrv->accept();
@@ -191,7 +207,7 @@ static bool webStart(){
   memset(&gWebCtx, 0, sizeof(gWebCtx));
   gWebCtx.fs = { msfOpen, msfRead, msfWrite, msfSeek, msfClose, msfSize, msfRemove, wfsFree, wfsTotal, NULL };
   gWebCtx.host = { whSnapshot, whGet, whRev, whDup, whCommit, whSetThumb, whThumbPath, whVerify, whLockType,
-                   whNow, whEpoch, whRandom, whEvent, whYield, whOthers, NULL };
+                   whNow, whEpoch, whRandom, whEvent, whYield, whOthers, NULL, whHeavyBegin, whHeavyEnd };
   gWebCtx.alloc = mediaAlloc; gWebCtx.free = mediaFree;
   snprintf(gWebCtx.ip, sizeof(gWebCtx.ip), "%s", wifiConnIP);
   gWebCtx.port = FLEXWEB_PORT;
@@ -409,9 +425,9 @@ static void webTick(){
   if(!gWebTask && !gWebWant && gWebState == WEBS_ON) gWebState = WEBS_OFF;
   // Eventos de la tarea del servidor.
   bool changed = false;
-  while(gWebEv && gWebEvR != gWebEvW){
+  while(gWebEv && gWebEvR != __atomic_load_n(&gWebEvW, __ATOMIC_ACQUIRE)){
     FlexWebXfer x = gWebEv[gWebEvR % WEB_EV_N];
-    gWebEvR = (uint8_t)(gWebEvR + 1);
+    __atomic_store_n(&gWebEvR, (uint8_t)(gWebEvR + 1), __ATOMIC_RELEASE);
     changed = true;
     switch(x.ev){
       case FLEXWEB_EV_UP_START: case FLEXWEB_EV_UP_PROGRESS: {

@@ -424,6 +424,162 @@ static void testSmallStack(const std::string& dir){
   std::printf("   480x800 decodificada en una pila de 16 KB: %ld filas\n", p.rows);
 }
 
+// -------------------------------------------------------------
+//  6) MODO FLUJO: la foto no tiene que estar entera en RAM
+//  ------------------------------------------------------------
+//  El mismo decodificador leyendo de una funcion (un archivo de LittleFS
+//  en la placa). Lo que se exige:
+//    · salida IDENTICA bit a bit a la del modo memoria, con cualquier
+//      tamano de lectura -- incluidas lecturas de 1 byte, que obligan a
+//      recargar la ventana en mitad de un 0xFF, de un marcador RST o de
+//      un segmento de cabecera;
+//    · el mismo codigo de error ante un archivo cortado;
+//    · un error de lectura se dice como error de lectura (no como JPEG
+//      danado) y no deja nada reservado;
+//    · un segmento que se ignora (EXIF de 60 KB) no necesita caber en la
+//      ventana de 8 KB;
+//    · el divisor lo puede elegir quien llama, con las medidas reales.
+// -------------------------------------------------------------
+struct MemRd { const uint8_t* p; size_t n, pos, chunk; long failAt; int calls; };
+static int memRead(void* c, uint8_t* buf, size_t n){
+  MemRd* m = (MemRd*)c;
+  m->calls++;
+  if(m->failAt >= 0 && (long)m->pos >= m->failAt) return -1;
+  size_t left = m->n - m->pos;
+  if(!left) return 0;
+  size_t k = n < left ? n : left;
+  if(m->chunk && k > m->chunk) k = m->chunk;
+  std::memcpy(buf, m->p + m->pos, k);
+  m->pos += k;
+  return (int)k;
+}
+struct Sink888 { int w = 0, h = 0; std::vector<uint8_t> px; };
+static bool sink888(void* u, int y, int w, const uint8_t* rgb){
+  Sink888* s = (Sink888*)u;
+  s->w = w; s->h = y + 1;
+  if(s->px.size() < (size_t)(y + 1) * w * 3) s->px.resize((size_t)(y + 1) * w * 3);
+  std::memcpy(&s->px[(size_t)y * w * 3], rgb, (size_t)w * 3);
+  return true;
+}
+static size_t g_peakBig = 0;
+static void* peakAlloc(size_t n){ if(n > g_peakBig) g_peakBig = n; return std::malloc(n); }
+static void  peakFree(void* p){ std::free(p); }
+static int pickQuarter(void* u, int w, int h){ (void)u; (void)w; (void)h; return 4; }
+static int pickCancel(void* u, int w, int h){ (void)u; (void)w; (void)h; return 0; }
+
+static void testStream(const std::string& dir, const std::vector<Fixture>& fx){
+  std::printf("[jpeg] modo flujo: sin el archivo entero en RAM\n");
+  static const size_t chunks[] = { 1, 2, 3, 7, 64, 4096, 0 };   // 0 = lo que pida la ventana
+  int casos = 0;
+  std::vector<std::string> names;
+  for(const Fixture& f : fx) names.push_back(f.name);
+  names.push_back("progressive");
+  for(const std::string& nm : names){
+    std::vector<uint8_t> jpg;
+    if(!readFile(dir + "/" + nm + ".jpg", jpg)){ CHECK(false, "falta %s.jpg", nm.c_str()); continue; }
+    Sink ref; FlexJpegInfo ri; std::memset(&ri, 0, sizeof(ri));
+    int rrc = flexJpegDecode(jpg.data(), jpg.size(), 0, 0, 0, &ri, sinkRow, &ref, tAlloc, tFree);
+    for(size_t ch : chunks){
+      MemRd m = { jpg.data(), jpg.size(), 0, ch, -1, 0 };
+      Sink s; FlexJpegInfo si; std::memset(&si, 0, sizeof(si));
+      long before = g_allocs;
+      int rc = flexJpegDecodeStream(memRead, &m, 0, 0, 0, nullptr, &si, sinkRow, &s, tAlloc, tFree);
+      CHECK(g_allocs == before, "%s (lecturas de %zu): fuga de %ld reservas", nm.c_str(), ch, g_allocs - before);
+      CHECK(rc == rrc, "%s (lecturas de %zu): rc=%d y en memoria %d", nm.c_str(), ch, rc, rrc);
+      if(rc != FLEXJPG_OK || rrc != FLEXJPG_OK) continue;
+      CHECK(si.width == ri.width && si.height == ri.height && si.outWidth == ri.outWidth,
+            "%s (lecturas de %zu): informacion distinta", nm.c_str(), ch);
+      CHECK(s.w == ref.w && s.h == ref.h && s.px == ref.px && s.orderOk,
+            "%s (lecturas de %zu): la salida NO es identica a la del modo memoria", nm.c_str(), ch);
+      casos++;
+    }
+    // Sonda por flujo: mismas medidas, y el progresivo se sigue diciendo.
+    MemRd m = { jpg.data(), jpg.size(), 0, 5, -1, 0 };
+    FlexJpegInfo pi, bi;
+    int prc = flexJpegProbeStream(memRead, &m, &pi, tAlloc, tFree);
+    int brc = flexJpegProbe(jpg.data(), jpg.size(), &bi);
+    CHECK(prc == brc && pi.width == bi.width && pi.height == bi.height && pi.progressive == bi.progressive,
+          "%s: la sonda por flujo no coincide con la de memoria", nm.c_str());
+  }
+  std::printf("   %d decodificaciones por flujo identicas bit a bit a las de memoria\n", casos);
+
+  std::vector<uint8_t> jpg;
+  if(!readFile(dir + "/page480.jpg", jpg)){ CHECK(false, "falta page480.jpg"); return; }
+
+  // RGB888 por flujo = RGB888 en memoria.
+  {
+    Sink888 a, b;
+    int r1 = flexJpegDecode888(jpg.data(), jpg.size(), 0, 0, 0, nullptr, sink888, &a, tAlloc, tFree);
+    MemRd m = { jpg.data(), jpg.size(), 0, 13, -1, 0 };
+    int r2 = flexJpegDecode888Stream(memRead, &m, 0, 0, 0, nullptr, nullptr, sink888, &b, tAlloc, tFree);
+    CHECK(r1 == FLEXJPG_OK && r2 == FLEXJPG_OK && a.px == b.px && a.w == b.w && a.h == b.h,
+          "RGB888 por flujo distinto del de memoria (rc %d/%d)", r1, r2);
+  }
+  // Escala elegida por quien llama, con las medidas reales.
+  {
+    Sink s; FlexJpegInfo si;
+    MemRd m = { jpg.data(), jpg.size(), 0, 0, -1, 0 };
+    int rc = flexJpegDecodeStream(memRead, &m, 0, 0, 0, pickQuarter, &si, sinkRow, &s, tAlloc, tFree);
+    CHECK(rc == FLEXJPG_OK && si.scaleDenom == 4 && s.w == 120 && s.h == 200,
+          "el divisor elegido por el llamante no se aplico (rc %d, %dx%d)", rc, s.w, s.h);
+    Sink t; long before = g_allocs;
+    MemRd m2 = { jpg.data(), jpg.size(), 0, 0, -1, 0 };
+    rc = flexJpegDecodeStream(memRead, &m2, 0, 0, 0, pickCancel, nullptr, sinkRow, &t, tAlloc, tFree);
+    CHECK(rc == FLEXJPG_ERR_ABORTED && t.rowsSeen == 0 && g_allocs == before,
+          "cancelar desde la eleccion de escala: rc %d, %d filas", rc, t.rowsSeen);
+  }
+  // Archivo cortado: el mismo veredicto que en memoria, en cada punto.
+  {
+    int distintos = 0, probados = 0;
+    for(size_t cut = 4; cut < jpg.size(); cut += 97){
+      Sink a, b;
+      int r1 = flexJpegDecode(jpg.data(), cut, 0, 0, 0, nullptr, sinkRow, &a, tAlloc, tFree);
+      MemRd m = { jpg.data(), cut, 0, 1 + (cut % 5), -1, 0 };
+      long before = g_allocs;
+      int r2 = flexJpegDecodeStream(memRead, &m, 0, 0, 0, nullptr, nullptr, sinkRow, &b, tAlloc, tFree);
+      CHECK(g_allocs == before, "cortado en %zu (flujo): fuga", cut);
+      if(r1 != r2) distintos++;
+      probados++;
+    }
+    CHECK(distintos == 0, "%d de %d cortes dan otro veredicto por flujo", distintos, probados);
+  }
+  // Error de LECTURA a mitad: se dice como tal y no queda nada reservado.
+  {
+    Sink s; long before = g_allocs;
+    MemRd m = { jpg.data(), jpg.size(), 0, 512, (long)(jpg.size() / 2), 0 };
+    int rc = flexJpegDecodeStream(memRead, &m, 0, 0, 0, nullptr, nullptr, sinkRow, &s, tAlloc, tFree);
+    CHECK(rc == FLEXJPG_ERR_IO, "fallo de lectura a mitad: rc=%d, esperado FLEXJPG_ERR_IO", rc);
+    CHECK(g_allocs == before, "fallo de lectura: fuga de %ld reservas", g_allocs - before);
+  }
+  // Un EXIF de 60 KB (mas que la ventana) se salta sin guardarlo.
+  {
+    std::vector<uint8_t> big;
+    big.push_back(0xFF); big.push_back(0xD8);
+    const size_t appLen = 60000;
+    big.push_back(0xFF); big.push_back(0xE1);
+    big.push_back((uint8_t)(appLen >> 8)); big.push_back((uint8_t)(appLen & 0xFF));
+    for(size_t i = 0; i < appLen - 2; i++) big.push_back((uint8_t)(i * 7 + 1));
+    big.insert(big.end(), jpg.begin() + 2, jpg.end());
+    Sink a, b;
+    int r1 = flexJpegDecode(big.data(), big.size(), 0, 0, 0, nullptr, sinkRow, &a, tAlloc, tFree);
+    MemRd m = { big.data(), big.size(), 0, 0, -1, 0 };
+    int r2 = flexJpegDecodeStream(memRead, &m, 0, 0, 0, nullptr, nullptr, sinkRow, &b, tAlloc, tFree);
+    CHECK(r1 == FLEXJPG_OK && r2 == FLEXJPG_OK && a.px == b.px,
+          "JPEG con EXIF de 60 KB: memoria %d, flujo %d", r1, r2);
+  }
+  // El pico de memoria del modo flujo NO depende del tamano del archivo:
+  // ninguna reserva se acerca a lo que pesa la foto.
+  {
+    g_peakBig = 0;
+    Sink s;
+    MemRd m = { jpg.data(), jpg.size(), 0, 0, -1, 0 };
+    int rc = flexJpegDecodeStream(memRead, &m, 0, 0, 0, nullptr, nullptr, sinkRow, &s, peakAlloc, peakFree);
+    CHECK(rc == FLEXJPG_OK, "decodificacion por flujo con contador de pico: rc %d", rc);
+    CHECK(g_peakBig <= 12u * 1024u, "la mayor reserva del modo flujo son %zu B (limite 12 KB)", g_peakBig);
+    std::printf("   mayor reserva del modo flujo: %zu B (archivo: %zu B)\n", g_peakBig, jpg.size());
+  }
+}
+
 int main(int argc, char** argv){
   std::string dir = argc > 1 ? argv[1] : fixtureDir();
   std::printf("=== FlexOS · decodificador JPEG · ficheros en %s ===\n", dir.c_str());
@@ -436,6 +592,7 @@ int main(int argc, char** argv){
   testScaling(dir);
   testRejects(dir);
   testSmallStack(dir);
+  testStream(dir, fx);
   std::printf("=== %d comprobaciones, %d fallos ===\n", g_run, g_fail);
   return g_fail ? 1 : 0;
 }

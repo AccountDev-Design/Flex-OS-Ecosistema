@@ -83,6 +83,44 @@ static inline void mlLock(){ if(gMlMux) xSemaphoreTake(gMlMux, portMAX_DELAY); }
 static inline void mlUnlock(){ if(gMlMux) xSemaphoreGive(gMlMux); }
 static inline void mlWake(){ if(gMlTask) xTaskNotifyGive(gMlTask); }
 
+// -------------------------------------------------------------
+//  TRABAJO PESADO, DE UNO EN UNO EN TODO EL SISTEMA
+//  ------------------------------------------------------------
+//  Decodificar una foto entera (validar una subida, hacer su miniatura,
+//  abrirla en el visor) cuesta CPU y un buffer de trabajo. Lo pueden pedir
+//  a la vez tres tareas: el servidor web al recibir, la tarea de fondo con
+//  lo que hay en el disco y el visor. Sin coordinacion, tres fotos subidas
+//  seguidas coincidian con sus miniaturas y con la Galeria abriendo otra:
+//  tres decodificaciones grandes en el mismo nucleo y la PSRAM apretada.
+//  Este cerrojo las pone en fila. No se toma NUNCA desde loopTask (la
+//  interfaz no espera a nadie) ni con el cerrojo del catalogo tomado.
+// -------------------------------------------------------------
+static SemaphoreHandle_t gMlHeavyMux = NULL;
+static bool mediaHeavyBegin(uint32_t waitMs){
+  if(!gMlHeavyMux) return true;                       // sin cerrojo (arranque degradado): no se bloquea nada
+  return xSemaphoreTake(gMlHeavyMux, pdMS_TO_TICKS(waitMs)) == pdTRUE;
+}
+static void mediaHeavyEnd(){ if(gMlHeavyMux) xSemaphoreGive(gMlHeavyMux); }
+// La tarea de fondo no espera: si esta ocupado, su trabajo se aplaza.
+static bool mlHeavyBeginCb(void*){ return mediaHeavyBegin(50); }
+static void mlHeavyEndCb(void*){ mediaHeavyEnd(); }
+// Durante una decodificacion larga la tarea de fondo cede la CPU cada ~20 ms:
+// comparte nucleo y prioridad con la interfaz.
+static void mlHeavyYield(void*){
+  static uint32_t last = 0;
+  uint32_t now = millis();
+  if(now - last >= 20u){ vTaskDelay(1); last = millis(); }
+}
+
+// Pila minima que ha tenido una tarea de medios (diagnostico real, sin
+// ruido): solo se escribe en Serie cuando baja de 2 KB y es un minimo nuevo.
+static void mlStackCheck(const char* who, uint32_t* low){
+  uint32_t hw = (uint32_t)uxTaskGetStackHighWaterMark(NULL);
+  if(hw >= *low) return;
+  *low = hw;
+  if(hw < 2048u) Serial.printf("[%s] pila: quedan %u B libres como minimo\n", who, (unsigned)hw);
+}
+
 // Revision del catalogo: cambia con CUALQUIER cambio que se vea.
 static uint32_t mlRev(){ return flexMsRev(&gMs); }
 
@@ -96,12 +134,17 @@ static void mlCopyText(char* dst, size_t cap, const char* src){
   dst[n] = 0;
 }
 
+// Cola de UN productor (esta tarea) y UN consumidor (loopTask), en dos
+// nucleos distintos si hace falta: el texto se escribe ANTES de publicar el
+// indice (release) y se lee DESPUES de verlo (acquire). Sin esas barreras el
+// otro nucleo podia ver el indice nuevo con el texto a medio escribir.
 static void mlPostMsg(const char* title, const char* sub){
   uint8_t w = gMlMsgW;
-  if((uint8_t)(w - gMlMsgR) >= ML_MSG_N) return;           // cola llena: se pierde el aviso, no el sistema
+  uint8_t r = __atomic_load_n(&gMlMsgR, __ATOMIC_ACQUIRE);
+  if((uint8_t)(w - r) >= ML_MSG_N) return;                 // cola llena: se pierde el aviso, no el sistema
   snprintf(gMlMsg[w % ML_MSG_N][0], sizeof(gMlMsg[0][0]), "%s", title ? title : "");
   snprintf(gMlMsg[w % ML_MSG_N][1], sizeof(gMlMsg[0][1]), "%s", sub ? sub : "");
-  gMlMsgW = (uint8_t)(w + 1);
+  __atomic_store_n(&gMlMsgW, (uint8_t)(w + 1), __ATOMIC_RELEASE);
 }
 
 // -------------------------------------------------------------
@@ -174,9 +217,10 @@ static void mlYield(void*){ vTaskDelay(1); }       // el recorrido nunca acapara
 
 static void mlTask(void*){
   flexMsCleanTmp(&gMs);                            // subidas y guardados que no terminaron
-  uint32_t lastId = 0, dirtySince = 0, saveFails = 0, lastWarn = 0;
+  uint32_t lastId = 0, dirtySince = 0, saveFails = 0, lastWarn = 0, stackLow = 0xFFFFFFFFu;
   bool deferred = false;
   for(;;){
+    mlStackCheck("medios", &stackLow);
     if(gMlScanReq){
       gMlScanReq = false;
       if(!flexMsScan(&gMs, mlYield, NULL))
@@ -225,6 +269,7 @@ static void mlBegin(){
   if(gMlOk) return;
   if(!flexFsReady()){ Serial.println(F("[medios] sin almacenamiento: biblioteca desactivada")); return; }
   if(!gMlMux) gMlMux = xSemaphoreCreateMutex();
+  if(!gMlHeavyMux) gMlHeavyMux = xSemaphoreCreateMutex();
   if(!gMlStore) gMlStore = (FlexMlRec*)mediaAlloc(sizeof(FlexMlRec) * FML_CAP);
   if(!gMlMux || !gMlStore){
     Serial.println(F("[medios] sin memoria para el catalogo"));
@@ -238,6 +283,8 @@ static void mlBegin(){
   gMs.alloc = mediaAlloc; gMs.free = mediaFree;
   gMs.now = mlNowCb;
   gMs.paintThumb = mlPaintThumb;
+  gMs.heavyBegin = mlHeavyBeginCb; gMs.heavyEnd = mlHeavyEndCb;
+  gMs.yield = mlHeavyYield;
   flexMsInit(&gMs, gMlStore, FML_CAP);
   flexMsMakeDirs(&gMs);
   gMlLoadedFrom = (uint32_t)flexMsLoad(&gMs);      // el bueno, su .bak o su .tmp
@@ -258,10 +305,11 @@ static void mlRequestScan(){ gMlScanReq = true; mlWake(); }
 // Entrega en la isla los avisos que dejo la tarea de fondo. Va en loop():
 // la isla solo se toca desde loopTask.
 static void mlTick(){
-  while(gMlMsgR != gMlMsgW){
+  for(;;){
     uint8_t r = gMlMsgR;
+    if(r == __atomic_load_n(&gMlMsgW, __ATOMIC_ACQUIRE)) break;
     sysNotify(gMlMsg[r % ML_MSG_N][0], gMlMsg[r % ML_MSG_N][1]);
-    gMlMsgR = (uint8_t)(r + 1);
+    __atomic_store_n(&gMlMsgR, (uint8_t)(r + 1), __ATOMIC_RELEASE);
   }
 }
 
