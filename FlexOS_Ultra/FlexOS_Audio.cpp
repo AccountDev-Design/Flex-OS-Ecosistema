@@ -275,7 +275,14 @@ bool flexAudioStartPcmBuffered(uint32_t rate, uint16_t ch, uint16_t bits, uint16
   }
 
   i2s_std_config_t sc = {};
-  sc.clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(rate);
+  // Reloj campo a campo, con los valores de I2S_STD_CLK_DEFAULT_CONFIG: ese
+  // macro NO compila en C++ con el ESP-IDF 5.3 del P4 (nombra mclk_multiple
+  // antes que ext_clk_freq_hz, al reves que la estructura, y C++ exige el
+  // orden de la declaracion). sc empieza a cero: ext_clk_freq_hz = 0, igual
+  // que en el macro.
+  sc.clk_cfg.sample_rate_hz = rate;
+  sc.clk_cfg.clk_src        = I2S_CLK_SRC_DEFAULT;
+  sc.clk_cfg.mclk_multiple  = I2S_MCLK_MULTIPLE_256;
   sc.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
                   bits == 8 ? I2S_DATA_BIT_WIDTH_8BIT : I2S_DATA_BIT_WIDTH_16BIT,
                   ch == 1 ? I2S_SLOT_MODE_MONO : I2S_SLOT_MODE_STEREO);
