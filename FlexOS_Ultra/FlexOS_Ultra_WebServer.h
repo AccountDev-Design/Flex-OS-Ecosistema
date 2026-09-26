@@ -267,6 +267,99 @@ static void webQrEnsure(){
 
 static void webSheetGeom(int &x, int &y, int &w, int &h){ uiBox(x, y, w, h); }
 
+// -------------------------------------------------------------
+//  REPINTADO LOCALIZADO DE LA HOJA
+//  ------------------------------------------------------------
+//  Antes la hoja entera (con el QR) se repintaba y se publicaba cada
+//  400 ms mientras estaba abierta, cambiara algo o no: una subida DMA de
+//  toda la ventana dos veces y media por segundo, tambien en reposo y
+//  durante las transferencias. Ahora la hoja tiene dos zonas:
+//    · FIJA: cabecera, interruptor, QR, direccion y codigo. Solo se
+//      repinta si cambia lo que la decide (estado del servidor, codigo,
+//      tema).
+//    · VIVA: moviles conectados, contadores y tarjetas de progreso. Se
+//      repinta ELLA SOLA, y solo cuando su contenido cambio de verdad.
+//  Cada zona tiene una huella (FNV-1a) de lo que pinta; comparar huellas
+//  cuesta unos pocos cientos de bytes de lectura, no un repintado.
+// -------------------------------------------------------------
+static int      gWebLiveY = -1;                    // arriba de la zona viva (-1 = pintar entera)
+static uint32_t gWebStaticSig = 0, gWebLiveSig = 0;
+
+static uint32_t webFnv(uint32_t h, const void* p, size_t n){
+  const uint8_t* b = (const uint8_t*)p;
+  while(n--) h = (h ^ *b++) * 16777619u;
+  return h;
+}
+static uint32_t webStaticSig(){
+  uint32_t h = 2166136261u;
+  uint8_t k[3] = { gWebState, (uint8_t)uiGlass, (uint8_t)gDark };
+  h = webFnv(h, k, sizeof(k));
+  if(gWebState == WEBS_ON){ h = webFnv(h, gWebCtx.code, strlen(gWebCtx.code)); h = webFnv(h, gWebUrl, strlen(gWebUrl)); }
+  return h;
+}
+static uint32_t webLiveSig(){
+  uint32_t h = 2166136261u;
+  if(gWebState == WEBS_ON){
+    uint32_t v[3] = { (uint32_t)flexWebSessionCount(&gWebCtx), gWebCtx.uploads, gWebCtx.downloads };
+    h = webFnv(h, v, sizeof(v));
+  }
+  for(int i = 0; i < WEB_CARDS; i++){
+    const WebCard* c = &gWebCards[i];
+    if(!c->on) continue;
+    uint32_t v[4] = { (uint32_t)i | ((uint32_t)c->state << 8) | ((uint32_t)c->up << 16), c->done, c->total, 0 };
+    h = webFnv(h, v, sizeof(v));
+    h = webFnv(h, c->name, strlen(c->name));
+    h = webFnv(h, c->msg, strlen(c->msg));
+  }
+  return h;
+}
+
+// Zona VIVA, desde `cy` hasta abajo de la hoja. No vuelca.
+static void webSheetDrawLive(int x, int y, int w, int h, int cy){
+  int pad = uiPad();
+  if(gWebState == WEBS_ON){
+    int ns = flexWebSessionCount(&gWebCtx);
+    char st[80];
+    snprintf(st, sizeof(st), "%d m\xC3\xB3vil%s conectado%s  \xC2\xB7  %lu recibidos  \xC2\xB7  %lu enviados",
+             ns, ns == 1 ? "" : "es", ns == 1 ? "" : "s", (unsigned long)gWebCtx.uploads, (unsigned long)gWebCtx.downloads);
+    drawTextC(x + w / 2, cy, st, 1, TH_TXT2);
+    cy += 22;
+    // Acciones
+    int bw = (w - 2 * pad - 12) / 2;
+    fillRoundRect(x + pad, cy, bw, 44, 14, TH_SURF2);
+    drawTextC(x + pad + bw / 2, cy + 14, "C\xC3\xB3" "digo nuevo", 2, TH_TXT);
+    fillRoundRect(x + pad + bw + 12, cy, bw, 44, 14, TH_SURF2);
+    drawTextC(x + pad + bw + 12 + bw / 2, cy + 14, "Desconectar m\xC3\xB3viles", 1, TH_TXT);
+    cy += 58;
+  } else {
+    drawTextC(x + w / 2, cy + 10, "Sube fotos, v\xC3\xAD" "deos y m\xC3\xBAsica desde el navegador", 1, TH_TXT2);
+    drawTextC(x + w / 2, cy + 28, "del m\xC3\xB3vil, en la misma red Wi-Fi. Lo que Flex OS no", 1, TH_TXT2);
+    drawTextC(x + w / 2, cy + 46, "puede abrir se convierte en el propio m\xC3\xB3vil.", 1, TH_TXT2);
+    cy += 80;
+  }
+  // Tarjetas de transferencia (progreso REAL, en bytes)
+  for(int i = 0; i < WEB_CARDS; i++){
+    WebCard* c = &gWebCards[i];
+    if(!c->on || cy + 64 > y + h) continue;
+    if(uiGlass) drawGlassCardFlat(x + pad, cy, w - 2 * pad, 58, 14, TH_GLASS, WIN_BG);
+    else        fillRoundRect(x + pad, cy, w - 2 * pad, 58, 14, TH_SURF);
+    drawTextClip(x + pad + 14, cy + 8, c->name, 2, TH_TXT, x + w - pad - 70);
+    char line[80];
+    if(c->state == WCS_RUN && c->total){
+      char a[16], b[16]; flexFsFmtSize(c->done, a, sizeof(a)); flexFsFmtSize(c->total, b, sizeof(b));
+      snprintf(line, sizeof(line), "%s %s de %s", c->up ? "Recibiendo" : "Enviando", a, b);
+    } else if(c->state == WCS_CHECK) snprintf(line, sizeof(line), "Comprobando el archivo...");
+    else snprintf(line, sizeof(line), "%s", c->msg);
+    drawTextClip(x + pad + 14, cy + 30, line, 1, c->state == WCS_FAIL ? TH_ERR : TH_TXT2, x + w - pad - 20);
+    int pw = w - 2 * pad - 28, pct = c->total ? (int)((uint64_t)c->done * 100 / c->total) : 0;
+    if(c->state >= WCS_CHECK) pct = 100;
+    fillRoundRect(x + pad + 14, cy + 46, pw, 5, 2, TH_SURF2);
+    fillRoundRect(x + pad + 14, cy + 46, pw * pct / 100, 5, 2, c->state == WCS_FAIL ? TH_ERR : c->state == WCS_OK ? TH_OK : TH_PRIM);
+    cy += 66;
+  }
+}
+
+// Hoja ENTERA (al abrirla, al tocarla y cuando cambia su parte fija).
 static void webSheetRender(){
   int x, y, w, h; webSheetGeom(x, y, w, h);
   setBuf(fb);
@@ -311,47 +404,34 @@ static void webSheetRender(){
              gWebCtx.code[3], gWebCtx.code[4], gWebCtx.code[5]);
     drawTextC(x + w / 2, cy + 16, code, 5, TH_TXT);
     cy += 70;
-    int ns = flexWebSessionCount(&gWebCtx);
-    char st[80];
-    snprintf(st, sizeof(st), "%d m\xC3\xB3vil%s conectado%s  \xC2\xB7  %lu recibidos  \xC2\xB7  %lu enviados",
-             ns, ns == 1 ? "" : "es", ns == 1 ? "" : "s", (unsigned long)gWebCtx.uploads, (unsigned long)gWebCtx.downloads);
-    drawTextC(x + w / 2, cy, st, 1, TH_TXT2);
-    cy += 22;
-    // Acciones
-    int bw = (w - 2 * pad - 12) / 2;
-    fillRoundRect(x + pad, cy, bw, 44, 14, TH_SURF2);
-    drawTextC(x + pad + bw / 2, cy + 14, "C\xC3\xB3" "digo nuevo", 2, TH_TXT);
-    fillRoundRect(x + pad + bw + 12, cy, bw, 44, 14, TH_SURF2);
-    drawTextC(x + pad + bw + 12 + bw / 2, cy + 14, "Desconectar m\xC3\xB3viles", 1, TH_TXT);
-    cy += 58;
-  } else {
-    drawTextC(x + w / 2, cy + 10, "Sube fotos, v\xC3\xAD" "deos y m\xC3\xBAsica desde el navegador", 1, TH_TXT2);
-    drawTextC(x + w / 2, cy + 28, "del m\xC3\xB3vil, en la misma red Wi-Fi. Lo que Flex OS no", 1, TH_TXT2);
-    drawTextC(x + w / 2, cy + 46, "puede abrir se convierte en el propio m\xC3\xB3vil.", 1, TH_TXT2);
-    cy += 80;
   }
-  // Tarjetas de transferencia (progreso REAL, en bytes)
-  for(int i = 0; i < WEB_CARDS; i++){
-    WebCard* c = &gWebCards[i];
-    if(!c->on || cy + 64 > y + h) continue;
-    if(uiGlass) drawGlassCardFlat(x + pad, cy, w - 2 * pad, 58, 14, TH_GLASS, WIN_BG);
-    else        fillRoundRect(x + pad, cy, w - 2 * pad, 58, 14, TH_SURF);
-    drawTextClip(x + pad + 14, cy + 8, c->name, 2, TH_TXT, x + w - pad - 70);
-    char line[80];
-    if(c->state == WCS_RUN && c->total){
-      char a[16], b[16]; flexFsFmtSize(c->done, a, sizeof(a)); flexFsFmtSize(c->total, b, sizeof(b));
-      snprintf(line, sizeof(line), "%s %s de %s", c->up ? "Recibiendo" : "Enviando", a, b);
-    } else if(c->state == WCS_CHECK) snprintf(line, sizeof(line), "Comprobando el archivo...");
-    else snprintf(line, sizeof(line), "%s", c->msg);
-    drawTextClip(x + pad + 14, cy + 30, line, 1, c->state == WCS_FAIL ? TH_ERR : TH_TXT2, x + w - pad - 20);
-    int pw = w - 2 * pad - 28, pct = c->total ? (int)((uint64_t)c->done * 100 / c->total) : 0;
-    if(c->state >= WCS_CHECK) pct = 100;
-    fillRoundRect(x + pad + 14, cy + 46, pw, 5, 2, TH_SURF2);
-    fillRoundRect(x + pad + 14, cy + 46, pw * pct / 100, 5, 2, c->state == WCS_FAIL ? TH_ERR : c->state == WCS_OK ? TH_OK : TH_PRIM);
-    cy += 66;
-  }
+  gWebLiveY = cy;
+  webSheetDrawLive(x, y, w, h, cy);
   flxFlush(WIN_TOP, WIN_BOT);
   gWebSheetMs = millis();
+  gWebStaticSig = webStaticSig();
+  gWebLiveSig = webLiveSig();
+}
+
+// Solo la zona VIVA: se borra su fondo liso, se repinta y se publica ESA
+// banda. Las tarjetas son vidrio sobre fondo plano (drawGlassCardFlat), asi
+// que repintarlas sobre WIN_BG da siempre los mismos pixeles: nada se apila.
+static void webSheetRenderLive(){
+  int x, y, w, h; webSheetGeom(x, y, w, h);
+  if(gWebLiveY < y || gWebLiveY >= y + h){ webSheetRender(); return; }
+  setBuf(fb);
+  fillRect(x, gWebLiveY, w, y + h - gWebLiveY, WIN_BG);
+  webSheetDrawLive(x, y, w, h, gWebLiveY);
+  flxFlush(gWebLiveY, y + h - 1);
+  gWebSheetMs = millis();
+  gWebLiveSig = webLiveSig();
+}
+
+// Repinta SOLO si algo cambio, y solo la zona que cambio.
+static void webSheetRefresh(){
+  if(!webSheetOn) return;
+  if(gWebLiveY < 0 || webStaticSig() != gWebStaticSig){ webSheetRender(); return; }
+  if(webLiveSig() != gWebLiveSig) webSheetRenderLive();
 }
 
 static void webSheetOpen(){
@@ -363,6 +443,7 @@ static void webSheetOpen(){
 // servidor sigue como estaba: la hoja solo es la ventana para verlo.
 static void webSheetDismiss(){
   webSheetOn = false;
+  gWebLiveY = -1;                                  // la proxima vez se pinta entera
   if(gWebQr){ mediaFree(gWebQr); gWebQr = NULL; gWebQrFor[0] = 0; }
 }
 static void webSheetClose(){
@@ -378,7 +459,9 @@ static bool webSheetIsOpen(){ return webSheetOn; }
 // abierta (la app no debe procesar nada mas este cuadro).
 static bool webSheetTick(){
   if(!webSheetOn) return false;
-  if(millis() - gWebSheetMs > 400) webSheetRender();    // estado y progreso vivos
+  // Estado y progreso vivos: se MIRA cada 250 ms y solo se repinta lo que
+  // cambio (ver REPINTADO LOCALIZADO DE LA HOJA).
+  if(millis() - gWebSheetMs >= 250){ gWebSheetMs = millis(); webSheetRefresh(); }
   if(!T.tap) return true;
   int x, y, w, h; webSheetGeom(x, y, w, h);
   int pad = uiPad();

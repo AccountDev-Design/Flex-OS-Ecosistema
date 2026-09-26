@@ -162,6 +162,16 @@ GANCHOS = [
     ("loop",           "musAudioTick()",  "la musica se cortaria al salir de la app (nadie alimentaria el DMA)"),
     ("musAudioTick",   "ST_LOCK",         "una pista protegida seguiria sonando (y a la vista) con el P4 bloqueado"),
     ("mediaOpenInPlayer", "musOpenPath(", "un audio abierto desde el Explorador no llegaria al reproductor de Musica"),
+    # VISOR DE MEDIOS (Galeria y Multimedia).
+    ("loop",           "vwLockTick()",    "con el P4 bloqueado seguiria en memoria (y a la vista al volver) una foto protegida"),
+    ("vwLockTick",     "ST_LOCK",         "el visor no se enteraria de que el sistema se bloqueo"),
+    ("mlTask",         "vwJobRunIfAny()", "el visor esperaria para siempre la foto que pidio"),
+    ("vwSuspend",      "vwLocked",        "lo protegido se reabriria al volver sin pedir la clave"),
+    ("vwPinchStep",    "gTouchPinchUsed", "dos pellizcos rapidos apagarian la pantalla (gesto de suspension)"),
+    ("suspGestureUpdate", "gTouchPinchUsed", "el pellizco del visor contaria como toque de suspension"),
+    ("galTick",        "vwTick()",        "la Galeria no atenderia su visor"),
+    ("galOpenId",      "vwOpen(",         "tocar una foto en la Galeria no la abriria en su propio visor"),
+    ("vidTick",        "vwTick()",        "Multimedia no atenderia su visor"),
     ("mlSetLock",      "mlBeforeChange(", "bloquear la pista que suena la moveria con el archivo abierto"),
     ("mlDelete",       "mlBeforeChange(", "borrar la pista que suena la quitaria con el archivo abierto"),
     # EDITOR DE LA GALERIA. Abrir y guardar corren en su trabajador; publicar,
@@ -261,7 +271,14 @@ PROHIBIDOS = [
     ("whEvent",          "gWebEvR =",          "solo loopTask mueve el indice de lectura de la cola de eventos"),
     # El audio es de Musica: Multimedia no puede pararlo al soltar su visor
     # (abrir una foto cortaria la musica que suena de fondo).
-    ("vidReleaseMedia",  "flexAudioStop(",     "abrir o cerrar una foto cortaria la musica de fondo"),
+    ("vwRelease",        "flexAudioStop(",     "abrir o cerrar una foto cortaria la musica de fondo"),
+    # El trabajo del visor corre en la tarea de medios: ni pinta ni avisa.
+    ("vwJobRunIfAny",    "flxFlush",           "la tarea de medios no pinta"),
+    ("vwJobRunIfAny",    "sysNotify(",         "la isla solo se toca desde loopTask"),
+    ("vwJobJpeg",        "flxFlush",           "la tarea de medios no pinta"),
+    ("vwJobJpeg",        "mlThumb",            "la cache de miniaturas es de loopTask"),
+    # El visor nunca lee el archivo ENTERO de una foto a la RAM.
+    ("vwJobJpeg",        "flexFsReadBin(",     "una foto de varios MB volveria a leerse entera en memoria"),
     ("musAudioTick",     "delay(",             "el reproductor va en loop(): un delay congelaria el sistema entero"),
     # El trabajador del editor ni pinta, ni avisa por la isla, ni toca el
     # catalogo: deja el resultado y loopTask lo publica (gedCollect).

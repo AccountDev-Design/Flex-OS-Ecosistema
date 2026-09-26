@@ -215,12 +215,17 @@ static bool mlPaintThumb(void*, const char* path, uint16_t* px, int* w, int* h){
 // -------------------------------------------------------------
 static void mlYield(void*){ vTaskDelay(1); }       // el recorrido nunca acapara la CPU
 
+// El visor de medios (mas abajo en la cadena) deja aqui la foto que hay que
+// decodificar: va antes que las miniaturas, porque alguien la esta mirando.
+static bool vwJobRunIfAny();
+
 static void mlTask(void*){
   flexMsCleanTmp(&gMs);                            // subidas y guardados que no terminaron
   uint32_t lastId = 0, dirtySince = 0, saveFails = 0, lastWarn = 0, stackLow = 0xFFFFFFFFu;
   bool deferred = false;
   for(;;){
     mlStackCheck("medios", &stackLow);
+    if(vwJobRunIfAny()) continue;
     if(gMlScanReq){
       gMlScanReq = false;
       if(!flexMsScan(&gMs, mlYield, NULL))
@@ -487,7 +492,7 @@ static bool mlReplaceFile(uint32_t id, const char* tmp, char* why, size_t whyCap
 // ##  "casi", que es peor que distintos.
 // #############################################################
 enum { MA_NONE = 0, MA_OPEN, MA_SELECT, MA_LOCK, MA_UNLOCK, MA_RENAME, MA_EDIT, MA_TRASH, MA_DELETE,
-       MA_CONNECT, MA_TRASHBIN, MA_INFO };
+       MA_CONNECT, MA_TRASHBIN, MA_INFO, MA_OPENMM };
 #define MM_MAX    8
 #define MM_W      300
 #define MM_RH     50
@@ -546,6 +551,10 @@ static void mmGlyph(int act, int cx, int cy, uint16_t col){
       fillRoundRect(cx - 8, cy - 8, 16, 20, 3, red);
       fillRect(cx - 3, cy - 4, 2, 12, 0xFFFF); fillRect(cx + 1, cy - 4, 2, 12, 0xFFFF);
       break;
+    case MA_OPENMM:                                        // pantalla con "reproducir"
+      drawRoundRect(cx - 13, cy - 10, 26, 20, 4, col);
+      fillTriangle(cx - 4, cy - 6, cx - 4, cy + 6, cx + 6, cy, col);
+      break;
     case MA_CONNECT:                                       // movil con ondas
       drawRoundRect(cx - 12, cy - 12, 14, 24, 3, col);
       fillRect(cx - 8, cy + 7, 6, 2, col);
@@ -571,8 +580,9 @@ static const char* mmLabel(int act){
     case MA_UNLOCK:   return "Desbloquear";
     case MA_RENAME:   return "Renombrar";
     case MA_EDIT:     return "Editar";
-    case MA_TRASH:    return "Mover a la papelera";
-    case MA_DELETE:   return "Borrar";
+    case MA_TRASH:    return "Eliminar";                  // a la Papelera: se puede restaurar
+    case MA_DELETE:   return "Borrar para siempre";
+    case MA_OPENMM:   return "Abrir en Multimedia";
     case MA_CONNECT:  return "Conectar con el m\xC3\xB3vil";
     case MA_TRASHBIN: return "Papelera";
   }
@@ -599,8 +609,14 @@ static void mmGeom(int &x, int &y, int &w, int &h){
 }
 
 // Dibuja el menu con `frac` (0..1) de su altura: se DESPLIEGA desde arriba.
-// Cada cuadro cubre al anterior (mismo ancho, misma parte de arriba), asi
-// que no hace falta restaurar lo de debajo.
+// Cada cuadro cubre al anterior (mismo ancho, misma parte de arriba).
+//
+// VIDRIO SIN APILAR. Antes cada cuadro del despliegue volvia a desenfocar lo
+// que tenia debajo -- que ya era el menu del cuadro anterior --: el vidrio se
+// desenfocaba a si mismo y se oscurecia cuadro a cuadro. Ahora mmOpen
+// desenfoca UNA vez el fondo real (la app) y cada cuadro lee de esa banda
+// (uiSurface con la banda activa), asi que el material es identico en todos
+// los cuadros. Colores y material: los del tema (rol UIS_ELEVATED).
 static void mmDraw(float frac){
   int x, y, w, h; mmGeom(x, y, w, h);
   int hh = (int)(h * frac);
@@ -608,15 +624,15 @@ static void mmDraw(float frac){
   if(hh > h) hh = h;
   int ox0 = gClipY0, ox1 = gClipY1;
   gClipY0 = y; gClipY1 = y + hh - 1;
-  if(uiGlass) drawLiquidGlassPanel(x, y, w, hh, 18, rgb565(210, 214, 222));
-  else        fillRoundRect(x, y, w, hh, 18, rgb565(206, 210, 218));
+  uiSurface(x, y, w, hh, 18, UIS_ELEVATED);
+  const uint16_t fg = uiSurfOn(UIS_ELEVATED);
   for(int i = 0; i < mmN; i++){
     int ry = y + MM_PAD + i * MM_RH;
     if(ry + MM_RH / 2 > y + hh) break;
-    uint16_t tc = mmAct[i] == MA_DELETE ? rgb565(200, 40, 40) : rgb565(16, 18, 24);
+    uint16_t tc = mmAct[i] == MA_DELETE ? TH_DANGER : fg;
     drawTextClip(x + 18, ry + (MM_RH - uiLineH(2)) / 2, mmLabel(mmAct[i]), 2, tc, x + w - 50);
-    mmGlyph(mmAct[i], x + w - 30, ry + MM_RH / 2, mmAct[i] == MA_DELETE ? rgb565(200, 40, 40) : rgb565(40, 44, 56));
-    if(i + 1 < mmN) fillRect(x + 16, ry + MM_RH - 1, w - 32, 1, rgb565(176, 180, 192));
+    mmGlyph(mmAct[i], x + w - 30, ry + MM_RH / 2, mmAct[i] == MA_DELETE ? TH_DANGER : TH_TXT2);
+    if(i + 1 < mmN) fillRect(x + 16, ry + MM_RH - 1, w - 32, 1, TH_DIV);
   }
   gClipY0 = ox0; gClipY1 = ox1;
   flxFlush(y - 2, y + hh + 2);
@@ -628,7 +644,16 @@ static void mmOpen(int ax, int ay, const uint8_t* acts, int n){
   if(!mmN) return;
   mmAx = ax; mmAy = ay; mmOn = true; mmT0 = millis(); mmAnimDone = false;
   setBuf(fb);
+  int x, y, w, h; mmGeom(x, y, w, h);
+  if(uiGlass) uiGlassBandBegin(y, y + h - 1, uiSurfTint(UIS_ELEVATED));   // el fondo real, UNA vez
   mmDraw(0.15f);
+}
+// Cierra el menu (sin repintar a nadie) y suelta la banda del despliegue:
+// otra superficie no debe leer nunca un fondo que ya no esta.
+static void mmClose(){
+  mmOn = false;
+  mmAnimDone = true;
+  uiGlassBandEnd();
 }
 // Avanza la animacion de apertura. La llama el tick de la app mientras
 // el menu esta abierto.
@@ -639,7 +664,7 @@ static void mmAnimTick(){
   float k = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);       // salida suave
   setBuf(fb);
   mmDraw(0.15f + 0.85f * k);
-  if(t >= 1.0f) mmAnimDone = true;
+  if(t >= 1.0f){ mmAnimDone = true; uiGlassBandEnd(); }
 }
 // MA_* elegida, 0 si el toque cayo dentro sin elegir nada, -1 si fuera.
 static int mmHit(int px, int py){
@@ -686,23 +711,25 @@ static void mmDlgGeom(int &x, int &y, int &w, int &h){
   h = 118 + mmWrap(0, 0, w - 48, mmDlgText, 1, 0, false) + 70;
   y = (SCR_H - h) / 2;
 }
+// Dialogo con el material y los colores del tema: superficie elevada
+// (vidrio o plano segun el ajuste), boton secundario en superficie y el
+// principal en el acento (o en el color destructivo si borra).
 static void mmDlgDraw(){
   int x, y, w, h; mmDlgGeom(x, y, w, h);
   setBuf(fb);
-  if(uiGlass) drawLiquidGlassPanel(x, y, w, h, 24, rgb565(60, 64, 88));
-  else        fillRoundRect(x, y, w, h, 24, rgb565(34, 38, 50));
-  drawTextC(SCR_W / 2, y + 24, mmDlgTitle, 2, rgb565(255, 255, 255));
-  mmWrap(x + 24, y + 66, w - 48, mmDlgText, 1, rgb565(190, 196, 212), true);
+  uiSurface(x, y, w, h, 24, UIS_ELEVATED);
+  drawTextC(SCR_W / 2, y + 24, mmDlgTitle, 2, uiSurfOn(UIS_ELEVATED));
+  mmWrap(x + 24, y + 66, w - 48, mmDlgText, 1, TH_TXT2, true);
   int by = y + h - 76;
   if(mmDlgB[0]){
     int bw = (w - 48) / 2;
-    fillRoundRect(x + 16, by, bw, 56, 16, rgb565(70, 74, 90));
-    drawTextC(x + 16 + bw / 2, by + 18, mmDlgB, 2, rgb565(240, 242, 248));
-    fillRoundRect(x + 32 + bw, by, bw, 56, 16, mmDlgDanger ? rgb565(220, 70, 70) : TH_PRIM);
-    drawTextC(x + 32 + bw + bw / 2, by + 18, mmDlgA, 2, rgb565(255, 255, 255));
+    fillRoundRect(x + 16, by, bw, 56, 16, TH_SURF);
+    drawTextC(x + 16 + bw / 2, by + 18, mmDlgB, 2, TH_TXT);
+    fillRoundRect(x + 32 + bw, by, bw, 56, 16, mmDlgDanger ? TH_DANGER : wallAccent());
+    drawTextC(x + 32 + bw + bw / 2, by + 18, mmDlgA, 2, TH_ONACC);
   } else {
-    fillRoundRect(x + 16, by, w - 32, 56, 16, TH_PRIM);
-    drawTextC(SCR_W / 2, by + 18, mmDlgA, 2, rgb565(255, 255, 255));
+    fillRoundRect(x + 16, by, w - 32, 56, 16, wallAccent());
+    drawTextC(SCR_W / 2, by + 18, mmDlgA, 2, TH_ONACC);
   }
   flxFlush(y - 2, y + h + 2);
 }

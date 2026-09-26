@@ -53,6 +53,7 @@ static unsigned gDelayCalls = 0;
 static unsigned gPinnedTaskCreates = 0;
 static unsigned gSemTakeCalls = 0;
 static unsigned gPanelDrawCalls = 0;
+static int gPanelLastY0 = -1, gPanelLastY1 = -1;   // filas del ultimo volcado al panel
 unsigned long millis(){ return gTestMs; }
 // micros() avanza de verdad (reloj monotonico del PC) para que la
 // instrumentacion del Panel Rapido pueda medir el coste real de un cuadro.
@@ -233,7 +234,9 @@ esp_err_t esp_lcd_panel_io_del(esp_lcd_panel_io_handle_t){ return ESP_OK; }
 esp_err_t esp_lcd_panel_init(esp_lcd_panel_handle_t){ return ESP_OK; }
 esp_err_t esp_lcd_panel_reset(esp_lcd_panel_handle_t){ return ESP_OK; }
 esp_err_t esp_lcd_panel_del(esp_lcd_panel_handle_t){ return ESP_OK; }
-esp_err_t esp_lcd_panel_draw_bitmap(esp_lcd_panel_handle_t, int, int, int, int, const void*){ gPanelDrawCalls++; return ESP_OK; }
+esp_err_t esp_lcd_panel_draw_bitmap(esp_lcd_panel_handle_t, int, int y0, int, int y1, const void*){
+  gPanelDrawCalls++; gPanelLastY0 = y0; gPanelLastY1 = y1 - 1; return ESP_OK;
+}
 esp_err_t esp_lcd_panel_disp_on_off(esp_lcd_panel_handle_t, bool){ return ESP_OK; }
 esp_err_t esp_lcd_panel_disp_sleep(esp_lcd_panel_handle_t, bool){ return ESP_OK; }
 
@@ -5262,31 +5265,57 @@ static void testMediosOrientacion(){
     chk(gx == 123 && gy == 456, "vertical: el tacto no transforma nada");
   }
 
-  // ---- 6. LOS BOTONES CAEN DENTRO DE SU PANEL, EN LAS DOS ORIENTACIONES ----
-  // Si el panel se maqueta con un lienzo y los botones con otro, esto
-  // los saca fuera. Es la prueba de que ambos leen la misma fuente.
+  // ---- 6. LAS BARRAS DEL VISOR, EN LAS DOS ORIENTACIONES ----
+  // Barras y botones se maquetan en el lienzo LOGICO y el tacto lee la
+  // MISMA geometria. Se comprueba: que caben en el lienzo, que los botones
+  // caen dentro de su barra y no se pisan, y que tocar el centro de cada
+  // boton, pasando por la conversion del tacto fisico, da ESE boton.
   for(int paso = 0; paso < 2; paso++){
-    vidLand = (paso == 1);
-    int bx, by, bw, bh; vidCtrlGeom(bx, by, bw, bh);
-    VidBtns b; vidBtnGeom(b);
-    char m[96];
-    snprintf(m, sizeof(m), "%s: el panel de controles cabe en el lienzo",
-             vidLand ? "horizontal" : "vertical");
-    chk(bx >= 0 && by >= 0 && bx + bw <= mediaCanvasW(vidLand)
-        && by + bh <= mediaCanvasH(vidLand), m);
-    snprintf(m, sizeof(m), "%s: todos los botones caen dentro del panel",
-             vidLand ? "horizontal" : "vertical");
-    bool dentro = true;
-    const int xs[6] = { b.cx, b.prevX, b.back10X, b.fwd10X, b.nextX, b.oriX + b.oriW / 2 };
-    const int ys[6] = { b.cy, b.cy,    b.cy,      b.cy,     b.cy,    b.oriY + b.oriH / 2 };
-    for(int i = 0; i < 6; i++)
-      if(xs[i] < bx || xs[i] > bx + bw || ys[i] < by || ys[i] > by + bh) dentro = false;
-    chk(dentro, m);
-    // Y no se pisan entre si: el orden en X tiene que ser estricto.
-    snprintf(m, sizeof(m), "%s: los botones no se solapan", vidLand ? "horizontal" : "vertical");
-    chk(b.prevX < b.back10X && b.back10X < b.cx && b.cx < b.fwd10X && b.fwd10X < b.nextX, m);
+    vwLand = (paso == 1);
+    gLand = vwLand;
+    const char* ori = vwLand ? "horizontal" : "vertical";
+    char m[112];
+    vwMediaW = 1600; vwMediaH = 1200; vwScale = 1.0f; vwBarsA = 1.0f;
+    vwCanTrash = true; vwCanEdit = true;
+    for(int k = 0; k < 2; k++){
+      vwKind = k == 0 ? VWK_PHOTO : VWK_VIDEO;
+      vwLayout();
+      int tx, ty, tw, th, bx, by, bw, bh;
+      vwTopGeom(tx, ty, tw, th); vwBotGeom(bx, by, bw, bh);
+      snprintf(m, sizeof(m), "%s, %s: las dos barras caben en el hueco visible", ori, k ? "video" : "foto");
+      chk(tx >= 0 && ty >= 0 && tx + tw <= vwCW() && ty + th <= vwVY + vwVH &&
+          bx >= 0 && by >= 0 && bx + bw <= vwCW() && by + bh <= vwVY + vwVH && by > ty + th, m);
+      int want[5], cxs[5], cys[5], n = 0;
+      if(k == 0){
+        uint8_t b[2]; int nb = vwPhotoBtns(b);
+        for(int i = 0; i < nb; i++){ want[n] = b[i]; cxs[n] = bx + 8 + i * VW_BTN_W + VW_BTN_W / 2; cys[n] = by + 24; n++; }
+      } else {
+        VwVidBtns vb; vwVidBtns(vb);
+        snprintf(m, sizeof(m), "%s: los botones del video no se solapan", ori);
+        chk(vb.backX + 30 < vb.playX - 30 + 1 && vb.playX + 30 < vb.fwdX - 30 + 1 && vb.fwdX + 30 <= vb.trashX - 30 + 1, m);
+        want[n] = VWB_BACK10; cxs[n] = vb.backX; cys[n] = vb.cy; n++;
+        want[n] = VWB_PLAY;   cxs[n] = vb.playX; cys[n] = vb.cy; n++;
+        want[n] = VWB_FWD10;  cxs[n] = vb.fwdX;  cys[n] = vb.cy; n++;
+        want[n] = VWB_TRASH;  cxs[n] = vb.trashX; cys[n] = vb.cy; n++;
+      }
+      want[n] = VWB_BACK; cxs[n] = tx + 28; cys[n] = ty + th / 2; n++;
+      bool dentro = true, tacto = true;
+      for(int i = 0; i < n; i++){
+        bool enBarra = (want[i] == VWB_BACK) ? (cxs[i] >= tx && cxs[i] <= tx + tw && cys[i] >= ty && cys[i] <= ty + th)
+                                              : (cxs[i] >= bx && cxs[i] <= bx + bw && cys[i] >= by && cys[i] <= by + bh);
+        if(!enBarra) dentro = false;
+        // Punto FISICO donde se dibuja ese centro logico, y vuelta por el tacto.
+        int fx = vwLand ? (SCR_W - 1) - cys[i] : cxs[i], fy = vwLand ? cxs[i] : cys[i];
+        int lx, ly; vwTouchXY(fx, fy, lx, ly);
+        if(vwHitBtn(lx, ly) != want[i]) tacto = false;
+      }
+      snprintf(m, sizeof(m), "%s, %s: cada boton cae dentro de su barra", ori, k ? "video" : "foto");
+      chk(dentro, m);
+      snprintf(m, sizeof(m), "%s, %s: tocar donde se dibuja un boton pulsa ESE boton", ori, k ? "video" : "foto");
+      chk(tacto, m);
+    }
   }
-  vidLand = false;
+  vwLand = false; gLand = false; vwKind = VWK_NONE;
 
   // ---- 7. VOLUMEN: sin codec no hay control, ni en el panel ni en el catalogo ----
   chk(!flexAudioAvailable(), "el doble de audio reproduce el caso SIN codec");
@@ -8027,6 +8056,405 @@ static void testCapturasEditor(){
   gState = ST_HOME; gAppId = 0; gAppState[IC_GALERIA] = ALIFE_CLOSED;
 }
 
+
+// #############################################################
+//  VISOR DE MEDIOS (Galeria y Multimedia) · con archivos de verdad
+//  ------------------------------------------------------------
+//  Sobre el disco en memoria y el almacen REAL de la biblioteca. Se mira
+//  el FRAMEBUFFER: donde cae la foto (ajustada y centrada, en las dos
+//  orientaciones), que las barras no se apilan, que se ocultan solas, el
+//  pellizco, deslizar, la papelera, lo protegido, el video y la memoria.
+//  La tarea de medios no corre sola aqui: sin gMlTask el visor hace el
+//  trabajo en el acto, y la prueba 12 la simula para el camino asincrono.
+// #############################################################
+// Foto de prueba: mitad izquierda ROJA, mitad derecha AZUL.
+static std::vector<uint8_t> vwTestJpeg(int W, int H){
+  std::vector<uint8_t> px((size_t)W * H * 3), out;
+  for(int y = 0; y < H; y++) for(int x = 0; x < W; x++){
+    uint8_t* p = &px[((size_t)y * W + x) * 3];
+    bool left = x < W / 2;
+    p[0] = left ? 230 : 30; p[1] = 30; p[2] = left ? 30 : 230;
+  }
+  FlexJeCfg c; c.width = W; c.height = H; c.quality = 90; c.subsampling = FLEXJE_SUB_420; c.input = FLEXJE_IN_RGB888;
+  flexJpegEncodeMem(&c, px.data(), (size_t)W * 3, geOut, &out, nullptr, nullptr);
+  return out;
+}
+static bool vwIsRed(uint16_t c){ int r = c >> 11, g = (c >> 5) & 63, b = c & 31; return r > 22 && b < 10 && g < 20; }
+static bool vwIsBlue(uint16_t c){ int r = c >> 11, g = (c >> 5) & 63, b = c & 31; return b > 22 && r < 10 && g < 20; }
+// Lo que se VE en el pixel logico (lx,ly) del visor, sea cual sea la orientacion.
+static uint16_t vwSeen(int lx, int ly){ return fb[vwIdx(lx, ly)]; }
+static void vwSetDims(uint32_t id, int w, int h){ int i = flexMlFindId(&gMs.lib, id); if(i >= 0){ gMs.lib.recs[i].w = (uint16_t)w; gMs.lib.recs[i].h = (uint16_t)h; } }
+// AVI/MJPEG minimo (solo video, con idx1) a partir de fotogramas JPEG.
+static std::vector<uint8_t> vwTestAvi(const std::vector<std::vector<uint8_t>>& frames, int w, int h, uint32_t usPerFrame){
+  auto u32 = [](std::vector<uint8_t>& v, uint32_t x){ for(int i = 0; i < 4; i++) v.push_back((uint8_t)(x >> (8 * i))); };
+  auto u16 = [](std::vector<uint8_t>& v, uint16_t x){ v.push_back((uint8_t)x); v.push_back((uint8_t)(x >> 8)); };
+  auto cc  = [](std::vector<uint8_t>& v, const char* t){ for(int i = 0; i < 4; i++) v.push_back((uint8_t)t[i]); };
+  auto chunk = [&](const char* id, const std::vector<uint8_t>& p){
+    std::vector<uint8_t> v; cc(v, id); u32(v, (uint32_t)p.size()); v.insert(v.end(), p.begin(), p.end());
+    if(p.size() & 1) v.push_back(0);
+    return v;
+  };
+  auto list = [&](const char* type, const std::vector<uint8_t>& p){
+    std::vector<uint8_t> v; cc(v, "LIST"); u32(v, (uint32_t)p.size() + 4); cc(v, type); v.insert(v.end(), p.begin(), p.end());
+    return v;
+  };
+  uint32_t n = (uint32_t)frames.size();
+  std::vector<uint8_t> avih; u32(avih, usPerFrame); u32(avih, 0); u32(avih, 0); u32(avih, 0x10); u32(avih, n); u32(avih, 0);
+  u32(avih, 1); u32(avih, 0); u32(avih, (uint32_t)w); u32(avih, (uint32_t)h); for(int i = 0; i < 4; i++) u32(avih, 0);
+  std::vector<uint8_t> strh; cc(strh, "vids"); cc(strh, "MJPG"); u32(strh, 0); u16(strh, 0); u16(strh, 0); u32(strh, 0);
+  u32(strh, 1); u32(strh, 1000000u / usPerFrame); u32(strh, 0); u32(strh, n); u32(strh, 65536); u32(strh, 0); u32(strh, 0); u32(strh, 0); u32(strh, 0);
+  std::vector<uint8_t> strf; u32(strf, 40); u32(strf, (uint32_t)w); u32(strf, (uint32_t)h); u16(strf, 1); u16(strf, 24); cc(strf, "MJPG");
+  for(int i = 0; i < 5; i++) u32(strf, 0);
+  std::vector<uint8_t> strl = chunk("strh", strh); { auto t = chunk("strf", strf); strl.insert(strl.end(), t.begin(), t.end()); }
+  std::vector<uint8_t> hdrl = chunk("avih", avih); { auto t = list("strl", strl); hdrl.insert(hdrl.end(), t.begin(), t.end()); }
+  std::vector<uint8_t> movi, idx1;
+  for(uint32_t i = 0; i < n; i++){
+    uint32_t off = 4u + (uint32_t)movi.size();
+    auto c = chunk("00dc", frames[i]); movi.insert(movi.end(), c.begin(), c.end());
+    cc(idx1, "00dc"); u32(idx1, 0x10); u32(idx1, off); u32(idx1, (uint32_t)frames[i].size());
+  }
+  std::vector<uint8_t> body = list("hdrl", hdrl);
+  { auto t = list("movi", movi); body.insert(body.end(), t.begin(), t.end()); }
+  { auto t = chunk("idx1", idx1); body.insert(body.end(), t.begin(), t.end()); }
+  std::vector<uint8_t> out; cc(out, "RIFF"); u32(out, (uint32_t)body.size() + 4); cc(out, "AVI ");
+  out.insert(out.end(), body.begin(), body.end());
+  return out;
+}
+
+static void testVisorMedios(){
+  printf("Visor de medios: ajuste, orientacion, barras, gestos, papelera, video y protegidos\n");
+  bool ok0 = gMlOk; bool fs0 = gTestFsReady; gTestFsReady = true;
+  bool glass0 = uiGlass; int nav0 = gNavMode;
+  geFsReset();
+  gLockType = 1; gNavMode = 0; uiGlass = false;
+  uint32_t a = geAddPhoto(FML_DIR_PHOTO "/Alta.jpg", vwTestJpeg(900, 1600), false);
+  uint32_t b = geAddPhoto(FML_DIR_PHOTO "/Otra.jpg", vwTestJpeg(900, 1600), false);
+  vwSetDims(a, 900, 1600); vwSetDims(b, 900, 1600);
+  shotApp(IC_GALERIA); gAppState[IC_GALERIA] = ALIFE_RUNNING; mkBind(&GAL_APP); galViewReady = false;
+  // Lo que el sistema reserva una sola vez y nunca suelta (tablas de la
+  // biblioteca, lienzo del vidrio) se reserva ANTES de medir la PSRAM.
+  mlTables();
+  if(!glassBuf) glassBuf = (uint16_t*)heap_caps_malloc((size_t)SCR_W * SCR_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  size_t ps0 = gPsUsed;
+  gTestMs = 9000000; touchReset();
+
+  // ---- 1. ABRIR: dentro de la Galeria, ajustada y centrada ----
+  galOpenId(a);
+  chk(gState == ST_APP && gAppId == IC_GALERIA, "abrir una foto NO sale de la Galeria (visor propio)");
+  chk(vwActiveFor(&GAL_VW) && vwKind == VWK_PHOTO && vwSrc != nullptr, "la foto se decodifica y queda en el visor");
+  chk(!vwLand && !gLand, "Auto: una foto alta se ve en vertical");
+  const int vh = SCR_H - NAV_H;
+  chk(vwVH == vh && vwFitH == vh && abs(vwFitW - 900 * vh / 1600) <= 1, "llena el alto visible (sin la barra del sistema) sin deformar");
+  int x0 = (int)(vwOffX + 0.5f);
+  chk(abs(x0 - (SCR_W - vwFitW) / 2) <= 1 && (int)vwOffY == 0, "y queda CENTRADA, no pegada a la esquina");
+  chk(vwIsRed(vwSeen(x0 + vwFitW / 4, vh / 2)) && vwIsBlue(vwSeen(x0 + vwFitW * 3 / 4, vh / 2)),
+      "se ve la foto entera: la mitad roja y la azul donde les toca");
+  chk(vwSeen(x0 / 2, vh / 2) == 0 && vwSeen(SCR_W - 1 - x0 / 2, vh / 2) == 0, "a los lados, fondo negro: nada estirado");
+  chk((uint32_t)vwSrcW * vwSrcH <= VW_SRC_MAX_PX, "la foto decodificada respeta su tope de memoria");
+
+  // ---- 2. EL VIDRIO NO SE APILA ----
+  uiGlass = true; vwGlassPrep(); vwPresentAll();
+  std::vector<uint16_t> ref(fb, fb + (size_t)SCR_W * SCR_H);
+  for(int k = 0; k < 12; k++){ vwPresentBars(); vwPresentAll(); }
+  chk(memcmp(ref.data(), fb, ref.size() * 2) == 0, "pintar las barras 24 veces da EXACTAMENTE los mismos pixeles (el vidrio no se apila)");
+  vwBarsShow(false); gTestMs += VW_FADE_MS + 20; vwBarsTick();
+  chk(vwBarsA == 0.0f && memcmp(fb, vwClean, (size_t)SCR_W * vh * 2) == 0, "ocultas, no queda ni un pixel de las barras");
+  vwBarsShow(true); gTestMs += VW_FADE_MS + 20; vwBarsTick();
+  chk(vwBarsA == 1.0f && memcmp(ref.data(), fb, ref.size() * 2) == 0, "ocultarlas y volver a ensenarlas da el mismo cuadro");
+
+  // ---- 3. SE OCULTAN SOLAS A LOS 3 s ----
+  touchReset(); vwTouchMs = gTestMs;
+  gTestMs += VW_BARS_HIDE_MS + 10; vwTick();
+  chk(vwBarsWant == 0, "sin tocar nada, las barras se van a los 3 s");
+  gTestMs += VW_FADE_MS + 10; vwTick();
+  chk(vwBarsA == 0.0f, "con un fundido, no de golpe");
+
+  // ---- 4. TOCAR LA IMAGEN LAS TRAE ----
+  tDown(240, 400, gTestMs + 100); vwTick();
+  tUp(gTestMs + 60, true); vwTick();
+  touchReset(); gTestMs += VW_TAP2_MS + 10; vwTick();
+  chk(vwBarsWant == 1, "un toque en la imagen trae las barras");
+  gTestMs += VW_FADE_MS + 10; vwTick();
+
+  // ---- 5. PELLIZCO: amplia sobre el punto de los dedos ----
+  float ax = vwOffX + vwFitW * 0.25f, ay = vh * 0.5f;       // un punto ROJO
+  vwPinchBegin(ax, ay, 100.0f);
+  chk(vwPinchApply(ax, ay, 250.0f) && fabsf(vwScale - 2.5f) < 0.01f, "separar los dedos al 250 % amplia x2,5");
+  vwLiveDirty = true; vwLiveEnd();
+  chk(vwIsRed(vwSeen((int)ax, (int)ay)), "el punto que estaba bajo los dedos sigue bajo los dedos");
+  chk(vwOffX <= vwVX + 0.5f && vwOffX + vwFitW * vwScale >= vwVX + vwVW - 0.5f, "ampliada cubre todo el ancho: sin bandas negras");
+  vwPinchApply(ax, ay, 100000.0f);
+  chk(fabsf(vwScale - VW_ZOOM_MAX) < 0.01f, "el zoom tiene tope");
+  vwPinchApply(ax, ay, 1.0f);
+  chk(vwScale == 1.0f && abs((int)(vwOffX + 0.5f) - x0) <= 1, "juntar los dedos vuelve al ajuste, centrada");
+  vwPinchOn = false;
+
+  // ---- 6. DESPLAZAR con un dedo (ampliada) ----
+  vwZoomAt(2.0f, ax, ay); vwRenderContent(true); vwPresentAll();
+  float ox = vwOffX;
+  tDown(300, 400, gTestMs + 500); vwTick();
+  tMove(240, 400, gTestMs + 50); vwTick();
+  chk(vwOffX < ox - 30.0f, "arrastrar mueve la foto ampliada");
+  tUp(gTestMs + 50, false); vwTick(); touchReset();
+  vwScale = 1.0f; vwClamp(); vwRenderContent(true); vwPresentAll();
+
+  // ---- 7. DESLIZAR (sin zoom): la de al lado en la rejilla ----
+  uint32_t first = vwId, nxt = galVwNeighbour(first, +1), prv = galVwNeighbour(first, -1);
+  int toX = nxt ? 180 : 420;                                     // hacia la izquierda = siguiente
+  tDown(300, 400, gTestMs + 500); vwTick();
+  tMove((300 + toX) / 2, 400, gTestMs + 40); vwTick();
+  tMove(toX, 400, gTestMs + 40); vwTick();
+  tUp(gTestMs + 40, false); vwTick(); touchReset();
+  chk(vwId != first && vwId == (nxt ? nxt : prv), "deslizar abre la de al lado, en el orden de la rejilla");
+  chk(galVwSess.open && galVwSess.id == vwId, "la sesion del visor sigue a lo que se ve");
+
+  // ---- 8. HORIZONTAL: relayout de verdad (800 x 480) ----
+  vwCycleOrientation();                                          // Auto -> Vertical
+  vwCycleOrientation();                                          // Vertical -> Horizontal
+  chk(vwLand && gLand, "Horizontal: el visor pasa a 800x480 y el motor gira con el");
+  chk(vwVW == LW && vwVH == LH && vwFitH == LH && abs(vwFitW - 900 * LH / 1600) <= 1, "se ajusta al alto de 480, sin deformar");
+  int lx0 = (int)(vwOffX + 0.5f);
+  chk(abs(lx0 - (LW - vwFitW) / 2) <= 1, "y centrada en el ancho de 800");
+  chk(vwIsRed(vwSeen(lx0 + vwFitW / 4, LH / 2)) && vwIsBlue(vwSeen(lx0 + vwFitW * 3 / 4, LH / 2)) && vwSeen(lx0 / 2, LH / 2) == 0,
+      "en horizontal la imagen cae girada donde se ve (mitad roja, mitad azul, bandas negras)");
+  chk(!navBarVisible(), "en horizontal no se estampa la barra vertical del sistema (sin barra doble)");
+  vwCycleOrientation();                                          // Horizontal -> Auto
+  chk(!vwLand && !gLand, "Auto vuelve a vertical para una foto alta");
+
+  // ---- 9. PAPELERA desde el visor ----
+  uint32_t cur = vwId, other = (cur == a) ? b : a;
+  vwDoTrash();
+  chk(!geRec(cur), "Papelera: el elemento sale de la biblioteca");
+  chk(vwActiveFor(&GAL_VW) && vwId == other, "y el visor pasa al que queda");
+  vwDoTrash();
+  chk(!vwOn && !galVwSess.open && !gLand, "sin mas elementos, el visor se cierra y vuelve a la rejilla");
+
+  // ---- 10. PROTEGIDO ----
+  uint32_t lk = geAddPhoto(FML_DIR_LOCKED "/7.jpg", vwTestJpeg(900, 1600), true);
+  vwSetDims(lk, 900, 1600);
+  vwOpen(&GAL_VW, lk, NULL, NULL);                               // como tras acertar la clave
+  chk(vwActiveFor(&GAL_VW) && vwLocked && !vwCanTrash && !vwCanEdit && !vwHasBot(), "protegido: ni Papelera ni Editar en el visor");
+  chk(vwThumb == nullptr, "protegido: el visor no copia ninguna miniatura");
+  galSuspend();
+  chk(!galVwSess.open && !vwClean && !vwSrc, "a segundo plano: lo protegido ni se recuerda ni queda en memoria");
+  vwOpen(&GAL_VW, lk, NULL, NULL);
+  { auto st0 = gState; gState = ST_LOCK; vwLockTick(); gState = st0; }
+  chk(!vwOn && !galVwSess.open && !vwSrc && !vwClean && !gLand, "con el P4 bloqueado se suelta todo lo protegido");
+
+  // ---- 11. SE PROTEGE DESDE FUERA MIENTRAS SE VE ----
+  uint32_t c3 = geAddPhoto(FML_DIR_PHOTO "/Tres.jpg", vwTestJpeg(640, 480), false);
+  vwSetDims(c3, 640, 480);
+  vwOpen(&GAL_VW, c3, NULL, NULL);
+  chk(vwActiveFor(&GAL_VW) && vwLand, "Auto: una foto apaisada se abre en horizontal");
+  { char why[64]; flexMsSetLock(&gMs, c3, true, why, sizeof(why)); }
+  gTestMs += VW_CHECK_MS + 10; touchReset(); vwTick();
+  chk(!vwOn && !gLand, "si se protege mientras se ve, el visor se cierra (fuera los pixeles)");
+
+  // ---- 12. LA TAREA DE MEDIOS: pedir, cancelar y recoger ----
+  uint32_t d4 = geAddPhoto(FML_DIR_PHOTO "/Cuatro.jpg", vwTestJpeg(640, 480), false);
+  TaskHandle_t t0 = gMlTask; gMlTask = (TaskHandle_t)1;          // hay tarea: la peticion espera
+  vwOpen(&GAL_VW, d4, NULL, NULL);
+  chk(vwLoading && __atomic_load_n(&gVwJob.state, __ATOMIC_ACQUIRE) == VWJ_REQ, "con la tarea de medios, la foto se pide y la interfaz no espera");
+  vwClose();
+  chk(__atomic_load_n(&gVwJob.state, __ATOMIC_ACQUIRE) == VWJ_IDLE && !vwJobRunIfAny(), "cerrar retira la peticion sin decodificar nada");
+  vwOpen(&GAL_VW, d4, NULL, NULL);
+  chk(vwJobRunIfAny() && __atomic_load_n(&gVwJob.state, __ATOMIC_ACQUIRE) == VWJ_DONE, "la tarea la decodifica");
+  vwTick();
+  chk(vwSrc != nullptr && !vwLoading && vwKind == VWK_PHOTO, "y la interfaz la recoge en su vuelta");
+  vwOpen(&GAL_VW, d4, NULL, NULL);                               // pedida otra vez...
+  vwClose();                                                     // ...y cerrada antes de que la tarea la vea
+  chk(!vwJobRunIfAny(), "nada queda en cola al cerrar");
+  gMlTask = t0;
+
+  // ---- 13. VIDEO: fotograma ajustado y centrado, barras sin apilar ----
+  std::vector<std::vector<uint8_t>> fr;
+  for(int k = 0; k < 6; k++) fr.push_back(vwTestJpeg(320, 240));
+  gTestFiles[FML_DIR_VIDEO "/Clip.avi"] = vwTestAvi(fr, 320, 240, 40000);
+  FlexMlRec vr; memset(&vr, 0, sizeof(vr));
+  snprintf(vr.path, sizeof(vr.path), "%s", FML_DIR_VIDEO "/Clip.avi"); snprintf(vr.name, sizeof(vr.name), "Clip.avi");
+  vr.kind = FML_K_VIDEO; vr.fmt = FML_F_AVI_MJPEG; vr.state = FML_S_READY; vr.flags = FML_R_PLAYABLE;
+  vr.size = (uint32_t)gTestFiles[FML_DIR_VIDEO "/Clip.avi"].size(); vr.w = 320; vr.h = 240;
+  int vat = flexMlAdd(&gMs.lib, &vr, 1760000000u);
+  uint32_t vid = vat >= 0 ? gMs.lib.recs[vat].id : 0;
+  vwOpen(&GAL_VW, vid, NULL, NULL);
+  chk(vwActiveFor(&GAL_VW) && vwKind == VWK_VIDEO && vwLand, "un video apaisado se abre en horizontal, en pausa");
+  int vx0 = (int)(vwOffX + 0.5f);
+  chk(vwFitW == 640 && vwFitH == LH && abs(vx0 - (LW - 640) / 2) <= 1, "320x240 se ajusta a 640x480 y se centra");
+  chk(vwIsRed(vwSeen(vx0 + 160, LH / 2)) && vwIsBlue(vwSeen(vx0 + 480, LH / 2)) && vwSeen(vx0 / 2, LH / 2) == 0,
+      "el fotograma llena su hueco (no sale pequeno en una esquina)");
+  vwGlassPrep(); vwPresentAll();
+  std::vector<uint16_t> vref(fb, fb + (size_t)SCR_W * SCR_H);
+  for(int k = 0; k < 10; k++){ vwTogglePlay(); vwTogglePlay(); }
+  vwPresentAll();
+  chk(!vwPlaying && memcmp(vref.data(), fb, vref.size() * 2) == 0, "Play/Pausa diez veces: el vidrio de los controles no se acumula");
+  uint32_t f0 = vwCurFrame;
+  vwTogglePlay();
+  gTestUs = vwNextUs + 1000; vwTick();
+  gTestUs = vwNextUs + 1000; vwTick();
+  gTestUs = 0;
+  chk(vwPlaying && vwCurFrame > f0, "reproduciendo, avanza de fotograma");
+  vwTogglePlay();
+  vwClose();
+
+  // ---- 14. MEMORIA ----
+  galRender();
+  if(gPsUsed != ps0) printf("  (PSRAM sin devolver: %d bytes)\n", (int)(gPsUsed - ps0));
+  chk(gPsUsed == ps0, "abrir, ampliar, girar, video y cerrar devuelve TODA la PSRAM");
+
+  uiGlass = glass0; gNavMode = nav0;
+  mkReset();
+  gMlOk = ok0; gTestFsReady = fs0; gTestMemFs = false; gTestFiles.clear();
+  memset(&gMs, 0, sizeof(gMs));
+  gState = ST_HOME; gAppId = 0; gAppState[IC_GALERIA] = ALIFE_CLOSED; gLand = false; uiClipFull();
+}
+
+// La hoja de Flex Web Server solo repinta lo que cambia.
+static void testHojaWebLocalizada(){
+  printf("Flex Web Server: la hoja solo repinta la zona que cambia\n");
+  shotApp(IC_GALERIA);
+  gWebState = WEBS_OFF;
+  memset(gWebCards, 0, sizeof(gWebCards));
+  webSheetOn = false;
+  webSheetOpen();
+  touchReset();
+  unsigned d0 = gPanelDrawCalls;
+  for(int k = 0; k < 20; k++){ gTestMs += 300; webSheetTick(); }
+  chk(gPanelDrawCalls == d0, "en reposo la hoja no se vuelve a publicar (antes: entera cada 400 ms)");
+  WebCard* c = webCardFor("foto.jpg", true);
+  c->state = WCS_RUN; c->total = 3000000; c->done = 100000;
+  gTestMs += 300; webSheetTick();
+  int bx, by, bw, bh; webSheetGeom(bx, by, bw, bh);
+  chk(gPanelDrawCalls == d0 + 1 && gPanelLastY0 == gWebLiveY && gPanelLastY1 == by + bh - 1,
+      "el progreso publica SOLO la zona de las tarjetas");
+  gTestMs += 300; webSheetTick();
+  chk(gPanelDrawCalls == d0 + 1, "si el progreso no cambia, no se publica nada");
+  c->done = 2000000;
+  gTestMs += 300; webSheetTick();
+  chk(gPanelDrawCalls == d0 + 2 && gPanelLastY0 == gWebLiveY, "cada avance real vuelve a ser solo esa zona");
+  gTestMs += 300; gDark = !gDark; webSheetTick(); gDark = !gDark;
+  chk(gPanelDrawCalls == d0 + 3 && gPanelLastY0 == WIN_TOP, "un cambio de tema si repinta la hoja entera");
+  webSheetDismiss();
+  memset(gWebCards, 0, sizeof(gWebCards));
+  gState = ST_HOME; gAppId = 0;
+}
+
+
+// Capturas del visor (solo con INO_SHOTS=1): para REVISAR el aspecto.
+static void testCapturasVisor(){
+  if(!getenv("INO_SHOTS")) return;
+  printf("Capturas del visor de medios\n");
+  bool ok0 = gMlOk; bool fs0 = gTestFsReady; gTestFsReady = true;
+  bool glass0 = uiGlass;
+  geFsReset();
+  gLockType = 1; gNavMode = 0;
+  uint32_t p = geAddPhoto(FML_DIR_PHOTO "/Playa.jpg", geBeach(1600, 1200), false);
+  vwSetDims(p, 1600, 1200);
+  shotApp(IC_GALERIA); gAppState[IC_GALERIA] = ALIFE_RUNNING; mkBind(&GAL_APP); galViewReady = false;
+  gTestMs = 12000000; touchReset();
+  uiGlass = true;
+  galOpenId(p);                                   // Auto: apaisada -> horizontal
+  vwGlassPrep(); vwPresentAll(); shotSave("visor_foto_horizontal");
+  gMediaOriMode = MORI_AUTO; vwCycleOrientation();   // Vertical
+  shotSave("visor_foto_vertical");
+  vwZoomAt(2.2f, vwOffX + vwFitW * 0.3f, vwVY + vwVH * 0.5f); vwRenderContent(true); vwGlassPrep(); vwPresentAll();
+  shotSave("visor_foto_zoom");
+  uiGlass = false; vwScale = 1.0f; vwClamp(); vwRenderContent(true); vwPresentAll();
+  shotSave("visor_foto_plano");
+  vwClose();
+  uiGlass = true;
+  std::vector<std::vector<uint8_t>> fr;
+  for(int k = 0; k < 4; k++) fr.push_back(geBeach(320, 240));
+  gTestFiles[FML_DIR_VIDEO "/Clip.avi"] = vwTestAvi(fr, 320, 240, 40000);
+  FlexMlRec vr; memset(&vr, 0, sizeof(vr));
+  snprintf(vr.path, sizeof(vr.path), "%s", FML_DIR_VIDEO "/Clip.avi"); snprintf(vr.name, sizeof(vr.name), "Clip.avi");
+  vr.kind = FML_K_VIDEO; vr.fmt = FML_F_AVI_MJPEG; vr.state = FML_S_READY; vr.flags = FML_R_PLAYABLE; vr.w = 320; vr.h = 240;
+  vr.size = (uint32_t)gTestFiles[FML_DIR_VIDEO "/Clip.avi"].size();
+  int vat = flexMlAdd(&gMs.lib, &vr, 1760000000u);
+  vwOpen(&GAL_VW, gMs.lib.recs[vat].id, NULL, NULL);
+  vwGlassPrep(); vwPresentAll(); shotSave("visor_video_horizontal");
+  gMediaOriMode = MORI_AUTO; vwCycleOrientation();
+  shotSave("visor_video_vertical");
+  vwClose();
+  uiGlass = glass0;
+  mkReset();
+  gMlOk = ok0; gTestFsReady = fs0; gTestMemFs = false; gTestFiles.clear();
+  memset(&gMs, 0, sizeof(gMs));
+  gState = ST_HOME; gAppId = 0; gAppState[IC_GALERIA] = ALIFE_CLOSED; gLand = false; uiClipFull();
+}
+
+
+// Menus, dialogos y Papelera con el tema; el menu contextual sin apilar.
+static void testKitTemaYPapelera(){
+  printf("Kit de medios: menu sin apilar vidrio, tema, Papelera de mas de 16 y menu de la Galeria\n");
+  bool ok0 = gMlOk; bool fs0 = gTestFsReady; gTestFsReady = true;
+  bool glass0 = uiGlass;
+  geFsReset();
+  gLockType = 1;
+  uint32_t a = geAddPhoto(FML_DIR_PHOTO "/Uno.jpg", vwTestJpeg(320, 240), false);
+  uint32_t lk = geAddPhoto(FML_DIR_LOCKED "/9.jpg", vwTestJpeg(320, 240), true);
+  shotApp(IC_GALERIA); gAppState[IC_GALERIA] = ALIFE_RUNNING; mkBind(&GAL_APP); galViewReady = false;
+  uiGlass = true;
+  galRender();
+  std::vector<uint16_t> bg(fb, fb + (size_t)SCR_W * SCR_H);
+  static const uint8_t acts[4] = { MA_SELECT, MA_LOCK, MA_TRASH, MA_DELETE };
+  // A) el despliegue en muchos cuadros...
+  gTestMs = 20000000;
+  mmOpen(240, 300, acts, 4);
+  for(int k = 1; k <= 12; k++){ gTestMs += 15; mmAnimTick(); }
+  gTestMs += MM_ANIM_MS; mmAnimTick();
+  std::vector<uint16_t> many(fb, fb + (size_t)SCR_W * SCR_H);
+  chk(mmAnimDone && !uiGlassBandActive(), "al terminar el despliegue se suelta la banda desenfocada");
+  mmClose();
+  // B) ...y en UNO solo, desde el mismo fondo.
+  memcpy(fb, bg.data(), bg.size() * 2);
+  mmOpen(240, 300, acts, 4);
+  gTestMs += MM_ANIM_MS + 1; mmAnimTick();
+  chk(memcmp(many.data(), fb, many.size() * 2) == 0, "desplegar el menu en 13 cuadros deja lo mismo que en 1: el vidrio no se apila");
+  mmClose();
+  chk(!uiGlassBandActive(), "cerrar el menu nunca deja la banda activa para otra superficie");
+  { int x, y, w, h; mmGeom(x, y, w, h);
+    // Etiqueta destructiva en el color del tema.
+    memcpy(fb, bg.data(), bg.size() * 2); mmOpen(240, 300, acts, 4); gTestMs += MM_ANIM_MS + 1; mmAnimTick();
+    bool danger = false;
+    for(int yy = y + MM_PAD + 3 * MM_RH; yy < y + MM_PAD + 4 * MM_RH && !danger; yy++)
+      for(int xx = x + 18; xx < x + 120 && !danger; xx++) if(fb[(size_t)yy * SCR_W + xx] == TH_DANGER) danger = true;
+    chk(danger, "'Borrar para siempre' sale en el color destructivo del tema");
+    mmClose(); }
+  // Menu de la Galeria: Editar y Abrir en Multimedia para una foto abierta...
+  mkReset(); galRender();
+  { int cell = 0;                                      // la celda de la foto abierta (no la protegida)
+    mlLock(); galSyncLocked();
+    for(int i = 0; i < galView.n; i++) if(galRecLocked(i)->id == a) cell = i;
+    mlUnlock();
+    int x, y, w, h; galCellRect(cell, x, y, w, h);
+    unsigned long t0 = gTestMs + 100;
+    tDown(x + w / 2, y + h / 2, t0); galTick();
+    tMove(x + w / 2, y + h / 2, t0 + 700); galTick(); }
+  bool hasEdit = false, hasMM = false, hasTrash = false;
+  for(int i = 0; i < mmN; i++){ if(mmAct[i] == MA_EDIT) hasEdit = true; if(mmAct[i] == MA_OPENMM) hasMM = true; if(mmAct[i] == MA_TRASH) hasTrash = true; }
+  chk(mmOn && hasEdit && hasMM && hasTrash, "pulsacion larga en una foto: Editar, Abrir en Multimedia y Eliminar (a la Papelera)");
+  mmClose(); touchReset(); mkReset();
+  // ...y nada de eso en un protegido.
+  mkOpenItemMenu(lk, 240, 300, NULL, 0);
+  bool leak = false;
+  for(int i = 0; i < mmN; i++) if(mmAct[i] == MA_EDIT || mmAct[i] == MA_OPENMM || mmAct[i] == MA_TRASH) leak = true;
+  chk(!leak, "protegido: ni Editar, ni Abrir en Multimedia, ni Papelera");
+  mmClose(); mkReset();
+  // Papelera con 40 elementos: se ven TODOS (antes 16) y la lista se suelta al salir.
+  for(int k = 0; k < 40; k++){ char p[48]; snprintf(p, sizeof(p), "/Papelera/nota%02d.txt", k); gTestFiles[p] = std::vector<uint8_t>(10, 'x'); }
+  fkTrashOpen(); fkCloseAll();            // la primera vez el vidrio reserva su cache de tarjetas (permanente)
+  size_t ps0 = gPsUsed;
+  fkTrashOpen();
+  chk(fkTrashOn && fkTrashN == 40 && fkTrashTotal == 40, "la Papelera ensena sus 40 elementos, no solo 16");
+  fkCloseAll();
+  chk(!fkTrashOn && !fkTrashList && gPsUsed == ps0, "al cerrarla se suelta su lista (PSRAM devuelta)");
+  uiGlass = glass0;
+  mkReset();
+  gMlOk = ok0; gTestFsReady = fs0; gTestMemFs = false; gTestFiles.clear();
+  memset(&gMs, 0, sizeof(gMs));
+  gState = ST_HOME; gAppId = 0; gAppState[IC_GALERIA] = ALIFE_CLOSED; touchReset();
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -8132,6 +8560,10 @@ int main(){
   testCapturasMedios();
   testEditorGaleria();
   testCapturasEditor();
+  testVisorMedios();
+  testKitTemaYPapelera();
+  testHojaWebLocalizada();
+  testCapturasVisor();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

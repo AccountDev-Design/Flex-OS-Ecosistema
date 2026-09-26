@@ -527,7 +527,7 @@ static void paintEnter(){
   bool restoreCanvas = (paintView == 1 && paintPath[0] && flexFsExists(paintPath));
   if(!restoreCanvas) pColor = P_PAL[0];
   paintMulti = false; paintMask = 0; paintSelIdx = -1;
-  fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
+  fkCloseAll();
   if(restoreCanvas){ paintRenderCanvas(); return; }
   paintView = 0; paintPath[0] = 0;
   paintReload();
@@ -575,7 +575,7 @@ static void paintSuspend(){
   // Superficie de dialogos compartida: se cierra al suspender para que otra
   // app no herede una confirmacion o un renombrado de Paint. El lienzo, ruta,
   // herramientas y scroll siguen exactamente donde estaban.
-  fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
+  fkCloseAll();
 }
 static void paintResume(){
   if(paintView == 1 && paintPath[0] && flexFsExists(paintPath)) paintRenderCanvas();
@@ -587,7 +587,7 @@ static bool paintDirty(){ return pStrokeN > 0; }
 
 static void paintCloseApp(){
   paintSuspend();
-  fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
+  fkCloseAll();
   if(pStroke){ free(pStroke); pStroke = NULL; }
   pStrokeN = 0; paintView = 0; paintPath[0] = 0; paintScroll = 0;
   gSessLoaded[IC_PAINT] = false;

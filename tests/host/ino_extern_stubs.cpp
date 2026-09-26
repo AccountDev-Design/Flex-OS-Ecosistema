@@ -71,7 +71,13 @@ uint32_t    flexFsUsedBytes(){ return gTestMemFs ? memFsUsed() : 0; }
 uint32_t    flexFsTotalBytes(){ return gTestMemFs ? gTestFsCap : 0; }
 uint32_t    flexFsDirSize(const char*){ return 0; }
 uint32_t    flexFsCatSize(int){ return 0; }
-int         flexFsList(const char*, FlexFsEntry*, int){ return 0; }
+int         flexFsListFrom(const char* dir, FlexFsEntry* out, int maxn, int skip);
+// Con el disco en memoria, lista de verdad (la Papelera del kit la usa).
+int         flexFsList(const char* d, FlexFsEntry* o, int m){
+  if(!gTestMemFs) return 0;
+  int n = flexFsListFrom(d, o, m, 0);
+  return n < 0 ? 0 : n;
+}
 int         flexFsListFrom(const char* dir, FlexFsEntry* out, int maxn, int skip){
   if(!gTestMemFs || !dir) return -1;
   std::string d = dir; if(d.empty() || d.back() != '/') d += '/';
@@ -100,7 +106,17 @@ int         flexFsReadBin(const char* p, void* b, size_t n){
 bool        flexFsWriteBin(const char*, const void*, size_t){ return false; }
 bool        flexFsDelete(const char* p){ return memFsHas(p) && gTestFiles.erase(p) == 1; }
 bool        flexFsRename(const char*, const char*){ return false; }
-bool        flexFsTrash(const char*){ return false; }
+// Con el disco en memoria, a "/Papelera" con la ruta de origen en el nombre
+// (como el de verdad, sin su codificacion exacta). Sin el, falla limpio.
+bool        flexFsTrash(const char* p){
+  if(!memFsHas(p) || !strncmp(p, "/Papelera", 9)) return false;
+  std::string dst = "/Papelera/";
+  for(const char* c = p + 1; *c; c++) dst += (*c == '/') ? '!' : *c;
+  while(gTestFiles.count(dst)) dst += "~";
+  gTestFiles[dst] = std::move(gTestFiles[p]);
+  gTestFiles.erase(p);
+  return true;
+}
 bool        flexFsRestore(const char*){ return false; }
 bool        flexFsEmptyTrash(){ return false; }
 bool        flexFsTrashOrigin(const char*, char* out, size_t n){ if(n) out[0] = 0; return false; }
@@ -168,7 +184,16 @@ void flexBrowserKeyCancel(){}
 // FlexOS_Passcode.cpp entra en el enlace como CODIGO REAL (ver el Makefile),
 // asi que la clave del sistema NO lleva doble: el sketch se enlaza contra el
 // mismo PBKDF2 a plazos que corre en la placa.
-int      flexFsReadAt(const char*, uint32_t, void*, size_t){ return -1; }
+// Con el disco en memoria (gTestMemFs) lee de verdad: es lo que usa el lector
+// de video del visor (MediaStream). Sin el, falla limpio como sin montar.
+int      flexFsReadAt(const char* p, uint32_t off, void* b, size_t n){
+  if(!memFsHas(p)) return -1;
+  auto& f = gTestFiles[p];
+  if(off >= f.size()) return 0;
+  size_t k = f.size() - off < n ? f.size() - off : n;
+  memcpy(b, f.data() + off, k);
+  return (int)k;
+}
 // Flujos y movimientos (subidas del movil, biblioteca de medios). Sin
 // sistema de archivos de verdad aqui: todo falla limpio, como sin montar.
 FlexFsStream* flexFsOpenRead(const char* p){ return memFsHas(p) ? new FlexFsStream{ p, 0 } : nullptr; }
@@ -394,7 +419,14 @@ void flexAccountForgetLocal(){}
 // (el -fsyntax-only de `make ino` no lo detecta). Mismo criterio que el
 // resto del fichero: contestan "no disponible", que es lo que ve el
 // sketch cuando la particion interna no esta montada.
-int      flexFsCount(const char*){ return 0; }
+int      flexFsCount(const char* dir){
+  if(!gTestMemFs || !dir) return 0;
+  std::string d = dir; if(d.empty() || d.back() != '/') d += '/';
+  int n = 0;
+  for(auto& kv : gTestFiles)
+    if(!kv.first.compare(0, d.size(), d) && kv.first.find('/', d.size()) == std::string::npos) n++;
+  return n;
+}
 bool     flexFsMkdir(const char*){ return gTestMemFs; }   // en memoria no hay carpetas: siempre "existen"
 bool     flexFsWriteBinAtomic(const char*, const void*, size_t){ return false; }
 bool     flexFsFactoryErase(){ return false; }

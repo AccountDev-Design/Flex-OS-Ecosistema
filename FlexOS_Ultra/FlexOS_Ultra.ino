@@ -260,6 +260,7 @@
 #include "FlexOS_Ultra_Keyboard.h"           // teclado de 4 capas y maquetacion de texto
 #include "FlexOS_Ultra_FileKit.h"            // kit de archivos: menu, nombre, confirmacion y papelera
 #include "FlexOS_Ultra_MediaKit.h"           // kit de listas de medios: seleccion, menus y acciones comunes
+#include "FlexOS_Ultra_MediaViewer.h"        // visor de fotos, dibujos y videos (Galeria y Multimedia)
 #include "FlexOS_Ultra_AppMultimedia.h"      // app Multimedia (reproductor real)
 #include "FlexOS_Ultra_AppNotes.h"           // app Notas
 #include "FlexOS_Ultra_KeyboardSettings.h"   // ajustes del teclado (pantalla propia)
@@ -725,6 +726,7 @@ void loop(){
   mlTick();               // biblioteca de medios: avisos de su tarea de fondo para la isla
   webTick();              // Flex Web Server: avisos, tarjetas, Wi-Fi y bloqueo (la red va en su tarea)
   musAudioTick();         // Musica: alimenta el DMA aunque la app no este delante (no bloquea)
+  vwLockTick();           // visor de medios: con el sistema bloqueado no se queda nada protegido en RAM
   gedBgTick();            // Galeria: publica un guardado del editor terminado en segundo plano
   if(!gSafeMode){
     wifiAutoReconnectTick();// reconexion diferida, una vez por arranque

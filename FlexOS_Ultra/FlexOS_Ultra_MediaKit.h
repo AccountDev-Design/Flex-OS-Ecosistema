@@ -87,8 +87,9 @@ static bool mkTablesReady(){
 //  ESTADO
 // -------------------------------------------------------------
 static void mkCloseLayers(){
-  mmOn = false; mmDlgOn = false; mkNoLockDlg = false;
-  fkNameOn = false; fkAskOn = false; fkTrashOn = false; fkMenuOn = false;
+  if(mmOn) mmClose();
+  mmDlgOn = false; mkNoLockDlg = false;
+  fkCloseAll();
   mkAskAct = MA_NONE; mkRenameId = 0;
 }
 static void mkReset(){
@@ -392,7 +393,7 @@ static bool mkTick(){
     if(T.tap){
       int a = mmHit(T.x, T.y);
       if(a == 0) return true;                        // dentro, entre filas
-      mmOn = false;
+      mmClose();
       if(a > 0) mkDoAction(a); else mkRedraw();
     }
     return true;
@@ -410,7 +411,7 @@ static bool mkBackLayer(){
 
 // Encima de lo que la app acaba de pintar (antes de su flxFlush).
 static void mkDrawOverlays(){
-  if(mmOn){ mmDraw(1.0f); mmAnimDone = true; }
+  if(mmOn){ mmDraw(1.0f); mmAnimDone = true; uiGlassBandEnd(); }
   if(mmDlgOn) mmDlgDraw();
   if(fkAskOn) fkAskDraw();
 }
@@ -428,11 +429,11 @@ static void mkDrawBar(int selLocked, int selOpen, int selectable){
   else        fillRoundRect(bx + 10, y, bw - 20, MKB_H, 20, TH_SURF2);
   bool all = selectable > 0 && selOpen == selectable && !selLocked;
   fillRoundRect(bx + 24, y + 10, 150, 28, 14, TH_SURF);
-  drawTextC(bx + 24 + 75, y + 17, all ? "Quitar selecci\xC3\xB3n" : "Seleccionar todo", 1, TH_TXT);
+  drawTextC(bx + 24 + 75, y + 17, all ? "Deseleccionar todo" : "Seleccionar todo", 1, TH_TXT);
   drawTextR(bx + bw - 28, y + 17, "Salir", 2, TH_TXT2);
   int ay = y + 46, sw = (bw - 40) / 3;
-  const char* lb[3] = { selLocked && !selOpen ? "Desbloquear" : "Bloquear", "Papelera", "Borrar" };
-  uint16_t col[3] = { TH_TXT, selLocked ? TH_MUTE : TH_TXT, rgb565(228, 70, 70) };
+  const char* lb[3] = { selLocked && !selOpen ? "Desbloquear" : "Bloquear", "Eliminar", "Borrar" };
+  uint16_t col[3] = { TH_TXT, selLocked ? TH_MUTE : TH_TXT, TH_DANGER };
   for(int k = 0; k < 3; k++){
     bool on = mkSelN > 0 && !(k == 1 && selLocked);
     drawTextC(bx + 20 + k * sw + sw / 2, ay + 6, lb[k], 2, on ? col[k] : TH_MUTE);

@@ -178,7 +178,7 @@ static void filesEnterAt(const char* dir){
   gState = ST_FILES;
   snprintf(filesDir, sizeof(filesDir), "%s", dir && dir[0] ? dir : "/");
   filesSelIdx = -1; filesScroll = 0; filesMulti = false; filesMask = 0;
-  fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
+  fkCloseAll();
   filesReload();
   filesRender();
 }

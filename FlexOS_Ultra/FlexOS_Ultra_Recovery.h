@@ -592,11 +592,9 @@ static void safeToastTick(){
 static void safeClearCaches(){
   int n = fsWipeDir(FS_DIR_CACHE);
   if(blurBg){ free(blurBg); blurBg = NULL; }
-  // El reproductor ya no tiene doble buffer de video: lo unico
-  // grande que puede tener reservado es el fotograma comprimido y la
-  // tira del volcado girado, y los dos los suelta vidReleaseMedia
-  // por su unico camino de liberacion.
-  if(gAppState[IC_MULTIMEDIA] == ALIFE_CLOSED) vidReleaseMedia(false);
+  // El visor de medios suelta todo lo suyo por su unico camino de
+  // liberacion. Solo si ninguna app lo esta usando delante.
+  if(!vwOn) vwRelease(false);
   if(camScene){ free(camScene); camScene = NULL; }
   if(pStroke && gAppState[IC_PAINT] == ALIFE_CLOSED){ free(pStroke); pStroke = NULL; }
   qsDirty = true; gHomeDirty = true;

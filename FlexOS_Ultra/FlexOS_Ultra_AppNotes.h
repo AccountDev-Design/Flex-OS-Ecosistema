@@ -356,7 +356,7 @@ static void noteEnter(){
   if(!flexFsReady()){ fkNoFsScreen("Notas"); return; }
   bool restoreEditor = (noteView == 1 && notePath[0] && flexFsExists(notePath));
   noteMulti = false; noteMask = 0; noteSelIdx = -1;
-  fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
+  fkCloseAll();
   if(restoreEditor){
     flexFsReadText(notePath, noteBuffer, noteBufMax);
     flexFsStem(notePath, noteTitleBar, sizeof(noteTitleBar));
@@ -489,7 +489,7 @@ static void noteSuspend(){
   // Los dialogos de archivo son una superficie GLOBAL compartida con Paint,
   // Galeria y Archivos; no pueden quedar vivos mientras otra app la reutiliza.
   // El editor, teclado, cursor, seleccion y scroll si permanecen intactos.
-  fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
+  fkCloseAll();
   noteDragging = false; noteHandleDrag = 0;
   kbMtSurfaceReset();
 }

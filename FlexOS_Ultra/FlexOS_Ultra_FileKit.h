@@ -83,7 +83,9 @@ static void fkTextBox(int x, int y, int w, int h, const char* s, int size, uint1
 
 // ---- Iconos del menu contextual (vectoriales, como el resto del sistema) ----
 static void fkMenuGlyph(int k, int cx, int cy){
-  uint16_t w = rgb565(255,255,255), red = rgb565(228,60,60), gr = rgb565(90,96,110);
+  // Colores del TEMA: el icono blanco de "Papelera" era invisible sobre el
+  // menu claro de siempre, y el menu no cambiaba con el tema oscuro.
+  uint16_t w = TH_TXT, red = TH_DANGER, gr = TH_TXT2;
   if(k == FK_ACT_SEL){                                  // mano que pulsa
     fillRoundRect(cx - 5, cy - 10, 10, 14, 4, gr);
     strokeSegAA(cx - 11, cy - 12, cx - 14, cy - 16, 1.8f, gr);
@@ -94,13 +96,13 @@ static void fkMenuGlyph(int k, int cx, int cy){
     fillRect(cx - 10, cy - 12, 20, 3, red);
     fillRect(cx - 4,  cy - 16, 8,  3, red);
     fillRoundRect(cx - 8, cy - 8, 16, 20, 3, red);
-    fillRect(cx - 3, cy - 4, 2, 12, rgb565(255,255,255));
-    fillRect(cx + 1, cy - 4, 2, 12, rgb565(255,255,255));
+    fillRect(cx - 3, cy - 4, 2, 12, TH_ONACC);
+    fillRect(cx + 1, cy - 4, 2, 12, TH_ONACC);
   } else if(k == FK_ACT_REN){                           // campo de texto con cursor
-    fillRoundRect(cx - 14, cy - 7, 20, 14, 3, rgb565(40,44,56));
-    fillRect(cx + 8, cy - 10, 2, 20, rgb565(40,44,56));
-    fillRect(cx + 5, cy - 10, 8, 2,  rgb565(40,44,56));
-    fillRect(cx + 5, cy + 8,  8, 2,  rgb565(40,44,56));
+    fillRoundRect(cx - 14, cy - 7, 20, 14, 3, gr);
+    fillRect(cx + 8, cy - 10, 2, 20, gr);
+    fillRect(cx + 5, cy - 10, 8, 2,  gr);
+    fillRect(cx + 5, cy + 8,  8, 2,  gr);
   } else if(k == FK_ACT_TRASH){                         // papelera blanca (mover a Papelera)
     fillRect(cx - 10, cy - 12, 20, 3, w);
     fillRect(cx - 4,  cy - 16, 8,  3, w);
@@ -125,11 +127,10 @@ static void fkMenuGeom(int &x, int &y, int &w, int &h){
 
 static void fkMenuDraw(){
   int x, y, w, h; fkMenuGeom(x, y, w, h);
-  if(uiGlass) drawLiquidGlassPanel(x, y, w, h, 18, rgb565(210,214,222));
-  else        fillRoundRect(x, y, w, h, 18, rgb565(206,210,218));
+  uiSurface(x, y, w, h, 18, UIS_ELEVATED);             // material y color del tema
   for(int i = 0; i < fkMenuN; i++){
     int ry = y + FK_MENU_PAD + i * FK_MENU_RH;
-    drawTextClip(x + 16, ry + 10, FK_MENU_LBL[i], 3, rgb565(16,18,24), x + w - 42);
+    drawTextClip(x + 16, ry + 10, FK_MENU_LBL[i], 3, i == FK_ACT_DEL ? TH_DANGER : uiSurfOn(UIS_ELEVATED), x + w - 42);
     fkMenuGlyph(i, x + w - 32, ry + FK_MENU_RH / 2);
   }
   flxFlush(y - 2, y + h + 2);
@@ -159,20 +160,23 @@ static const char* fkNameHint = NULL;   // NULL = la linea de siempre (un nombre
 
 static void fkNameDraw(){
   setBuf(fb);
-  fillRect(0, 0, SCR_W, kbPanelTop(), rgb565(14,16,24));
-  drawTextC(SCR_W / 2, 40, fkNameTitle, 3, rgb565(255,255,255));
-  strokeSegAA(30, 46, 18, 38, 2.4f, rgb565(255,255,255));      // chevron: cancelar
-  strokeSegAA(18, 38, 30, 30, 2.4f, rgb565(255,255,255));
+  fillRect(0, 0, SCR_W, kbPanelTop(), TH_PAGE);
+  drawTextC(SCR_W / 2, 40, fkNameTitle, 3, TH_TXT);
+  strokeSegAA(30, 46, 18, 38, 2.4f, TH_TXT);      // chevron: cancelar
+  strokeSegAA(18, 38, 30, 30, 2.4f, TH_TXT);
   int fy = 130;
-  fillRoundRect(24, fy, SCR_W - 48, 56, 14, rgb565(30,34,48));
-  drawTextClip(38, fy + 16, fkNameBuf, 2, rgb565(240,242,248), SCR_W - 40);
+  uiSurfaceFlat(24, fy, SCR_W - 48, 56, 14, UIS_CARD, TH_PAGE);
+  drawTextClip(38, fy + 16, fkNameBuf, 2, TH_TXT, SCR_W - 40);
   int cw = textW(fkNameBuf, 2);
-  fillRect(38 + cw + 2, fy + 14, 2, 28, rgb565(120,170,250));       // cursor
-  drawTextC(SCR_W / 2, fy + 76, fkNameHint ? fkNameHint : "Escribe el nombre y pulsa Guardar", 1, rgb565(140,148,168));
+  fillRect(38 + cw + 2, fy + 14, 2, 28, wallAccent());       // cursor
+  drawTextC(SCR_W / 2, fy + 76, fkNameHint ? fkNameHint : "Escribe el nombre y pulsa Guardar", 1, TH_TXT2);
 
   int ky = KB_Y;
-  if(uiGlass) drawLiquidGlassPanel(0, ky - 4, SCR_W, SCR_H - (ky - 4), 0, rgb565(36,40,58));
-  else        fillRect(0, ky - 4, SCR_W, SCR_H - (ky - 4), rgb565(18,20,28));
+  // El panel del teclado se pinta sobre el fondo plano de la pagina: vidrio
+  // resuelto por filas (sin copiar ni desenfocar) o plano, con el tema.
+  fillRect(0, ky - 4, SCR_W, SCR_H - (ky - 4), TH_PAGE);
+  if(uiGlass) drawGlassPanelFlatRows(0, ky - 4, SCR_W, SCR_H - (ky - 4), 0, TH_KEYPANEL, TH_PAGE);
+  else        fillRect(0, ky - 4, SCR_W, SCR_H - (ky - 4), TH_KEYPANEL);
   int fs = kbFontSize();
   for(int r = 0; r < KB_ROWS; r++) for(int c = 0; c < KB_COLS; c++){
     int x = KB_X + c * (KB_KW + KB_GAP), y = ky + r * (KB_KH + KB_GAP);
@@ -253,15 +257,14 @@ static void fkAskGeom(int &x, int &y, int &w, int &h){ w = SCR_W - 72; h = 220; 
 static void fkAskDraw(){
   int x, y, w, h; fkAskGeom(x, y, w, h);
   setBuf(fb);
-  if(uiGlass) drawLiquidGlassPanel(x, y, w, h, 24, rgb565(60,64,88));
-  else        fillRoundRect(x, y, w, h, 24, rgb565(34,38,50));
-  drawTextC(SCR_W / 2, y + 26, fkAskMsg, 2, rgb565(255,255,255));
-  if(fkAskSub[0]) drawTextC(SCR_W / 2, y + 62, fkAskSub, 1, rgb565(170,178,196));
+  uiSurface(x, y, w, h, 24, UIS_ELEVATED);
+  drawTextC(SCR_W / 2, y + 26, fkAskMsg, 2, uiSurfOn(UIS_ELEVATED));
+  if(fkAskSub[0]) drawTextC(SCR_W / 2, y + 62, fkAskSub, 1, TH_TXT2);
   int by = y + h - 76, bw = (w - 48) / 2;
-  fillRoundRect(x + 16, by, bw, 56, 16, rgb565(70,74,90));
-  drawTextC(x + 16 + bw / 2, by + 18, "Cancelar", 2, rgb565(240,242,248));
-  fillRoundRect(x + 32 + bw, by, bw, 56, 16, rgb565(220,70,70));
-  drawTextC(x + 32 + bw + bw / 2, by + 18, "Borrar", 2, rgb565(255,255,255));
+  fillRoundRect(x + 16, by, bw, 56, 16, TH_SURF);
+  drawTextC(x + 16 + bw / 2, by + 18, "Cancelar", 2, TH_TXT);
+  fillRoundRect(x + 32 + bw, by, bw, 56, 16, TH_DANGER);
+  drawTextC(x + 32 + bw + bw / 2, by + 18, "Borrar", 2, TH_ONACC);
   flxFlush(y - 2, y + h + 2);
 }
 
@@ -291,13 +294,13 @@ static int fkAskTick(){
 // motivo exacto y como arreglarlo.
 static void fkNoFsScreen(const char* titulo){
   setBuf(fb);
-  fillRect(0, 0, SCR_W, SCR_H, rgb565(14,16,24));
-  strokeSegAA(30, 26, 18, 18, 2.4f, rgb565(255,255,255));
-  strokeSegAA(18, 18, 30, 10, 2.4f, rgb565(255,255,255));
-  drawTextC(SCR_W / 2, 40, titulo, 3, rgb565(255,255,255));
-  drawTextC(SCR_W / 2, 300, "Sin almacenamiento", 3, rgb565(240,140,140));
-  drawTextC(SCR_W / 2, 344, flexFsError(), 1, rgb565(170,178,196));
-  drawTextC(SCR_W / 2, 380, "Arduino IDE > Herramientas > Partition Scheme", 1, rgb565(140,148,168));
+  fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
+  strokeSegAA(30, 26, 18, 18, 2.4f, TH_TXT);
+  strokeSegAA(18, 18, 30, 10, 2.4f, TH_TXT);
+  drawTextC(SCR_W / 2, 40, titulo, 3, TH_TXT);
+  drawTextC(SCR_W / 2, 300, "Sin almacenamiento", 3, TH_ERR);
+  drawTextC(SCR_W / 2, 344, flexFsError(), 1, TH_TXT2);
+  drawTextC(SCR_W / 2, 380, "Arduino IDE > Herramientas > Partition Scheme", 1, TH_MUTE);
   flxFlushAll();
 }
 
@@ -314,21 +317,36 @@ static void fkNoFsScreen(const char* titulo){
 // ##  asi que restaurar es exacto aunque el sistema se apague a
 // ##  media operacion. Ver flexFsTrash() en FlexOS_FS.cpp.
 // #############################################################
-#define FK_TRASH_MAX  16
+// Antes cabian 16: con mas elementos, el resto ni se veia ni se podia
+// restaurar (y "Vaciar" los borraba sin haberlos ensenado). La lista vive en
+// PSRAM mientras la papelera esta abierta y se suelta al cerrarla.
+#define FK_TRASH_MAX  256
 #define FK_TRASH_TOP  120
 #define FK_TRASH_RH    66
 
 static bool        fkTrashOn = false;
-static FlexFsEntry fkTrashList[FK_TRASH_MAX];
+static FlexFsEntry* fkTrashList = NULL;
 static int         fkTrashN = 0;
+static int         fkTrashTotal = 0;              // lo que hay de verdad (puede pasar del tope)
 static int         fkTrashSel = -1;
 static int         fkTrashScroll = 0;
 static int         fkTrashDragY0 = 0, fkTrashDragS0 = 0;
 static bool        fkTrashDragging = false;
 
 static void fkTrashReload(){
-  fkTrashN = flexFsList(FLEXFS_DIR_TRASH, fkTrashList, FK_TRASH_MAX);
+  if(!fkTrashList) fkTrashList = (FlexFsEntry*)mediaAlloc(sizeof(FlexFsEntry) * FK_TRASH_MAX);
+  fkTrashN = fkTrashList ? flexFsList(FLEXFS_DIR_TRASH, fkTrashList, FK_TRASH_MAX) : 0;
+  if(fkTrashN < 0) fkTrashN = 0;
+  fkTrashTotal = flexFsCount(FLEXFS_DIR_TRASH);
+  if(fkTrashTotal < fkTrashN) fkTrashTotal = fkTrashN;
   if(fkTrashSel >= fkTrashN) fkTrashSel = -1;
+}
+// Cierra TODAS las capas del kit y suelta la lista de la papelera. Lo usan
+// las apps al salir o suspenderse (antes cada una apagaba las banderas a mano).
+static void fkCloseAll(){
+  fkMenuOn = false; fkNameOn = false; fkAskOn = false; fkTrashOn = false;
+  if(fkTrashList){ mediaFree(fkTrashList); fkTrashList = NULL; }
+  fkTrashN = 0; fkTrashTotal = 0; fkTrashSel = -1;
 }
 
 static int fkTrashRowY(int i){ return FK_TRASH_TOP + i * FK_TRASH_RH - fkTrashScroll; }
@@ -341,25 +359,27 @@ static int fkTrashMaxScroll(){
 
 static void fkTrashRender(){
   setBuf(fb);
-  fillRect(0, 0, SCR_W, SCR_H, rgb565(14,16,24));
-  strokeSegAA(30, 26, 18, 18, 2.4f, rgb565(255,255,255));
-  strokeSegAA(18, 18, 30, 10, 2.4f, rgb565(255,255,255));
-  drawTextC(SCR_W / 2, 34, "Papelera", 4, rgb565(255,255,255));
+  fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
+  strokeSegAA(30, 26, 18, 18, 2.4f, TH_TXT);
+  strokeSegAA(18, 18, 30, 10, 2.4f, TH_TXT);
+  drawTextC(SCR_W / 2, 34, "Papelera", 4, TH_TXT);
 
-  char hdr[64];
+  char hdr[80];
   uint32_t used = flexFsDirSize(FLEXFS_DIR_TRASH);
   char sz[24]; flexFsFmtSize(used, sz, sizeof(sz));
-  snprintf(hdr, sizeof(hdr), "%d elementos  ·  %s", fkTrashN, sz);
-  drawTextC(SCR_W / 2, 86, hdr, 1, rgb565(150,158,178));
+  if(fkTrashTotal > fkTrashN) snprintf(hdr, sizeof(hdr), "%d elementos (se ven %d)  \xC2\xB7  %s", fkTrashTotal, fkTrashN, sz);
+  else snprintf(hdr, sizeof(hdr), "%d elementos  \xC2\xB7  %s", fkTrashN, sz);
+  drawTextC(SCR_W / 2, 86, hdr, 1, TH_TXT2);
 
   if(fkTrashN == 0){
-    drawTextC(SCR_W / 2, 320, "La papelera est\xC3\xA1 vac\xC3\xAD" "a", 2, rgb565(150,158,178));
+    drawTextC(SCR_W / 2, 320, "La papelera est\xC3\xA1 vac\xC3\xAD" "a", 2, TH_TXT2);
   }
   for(int i = 0; i < fkTrashN; i++){
     int y = fkTrashRowY(i);
     if(y + FK_TRASH_RH < FK_TRASH_TOP - 40 || y > SCR_H - 130) continue;
     bool sel = (i == fkTrashSel);
-    fillRoundRect(16, y, SCR_W - 32, FK_TRASH_RH - 8, 14, sel ? rgb565(46,56,84) : rgb565(30,34,48));
+    if(sel) fillRoundRect(16, y, SCR_W - 32, FK_TRASH_RH - 8, 14, TH_SEL);
+    else    uiSurfaceFlat(16, y, SCR_W - 32, FK_TRASH_RH - 8, 14, UIS_CARD, TH_PAGE);
     // Se muestra la ruta ORIGINAL decodificada: es lo unico que le dice al
     // usuario de donde salio ese fichero.
     char origen[FLEXFS_PATH_MAX];
@@ -367,23 +387,23 @@ static void fkTrashRender(){
       snprintf(origen, sizeof(origen), "%s", fkTrashList[i].name);
     const char* nm = strrchr(origen, '/');
     nm = nm ? nm + 1 : origen;
-    drawTextClip(30, y + 8, nm, 2, rgb565(240,242,248), SCR_W - 40);
+    drawTextClip(30, y + 8, nm, 2, TH_TXT, SCR_W - 40);
     char sub[FLEXFS_PATH_MAX + 24], s2[24];
     flexFsFmtSize(fkTrashList[i].size, s2, sizeof(s2));
     snprintf(sub, sizeof(sub), "%s  ·  %s", origen, s2);
-    drawTextClip(30, y + 34, sub, 1, rgb565(140,148,168), SCR_W - 40);
+    drawTextClip(30, y + 34, sub, 1, TH_TXT2, SCR_W - 40);
   }
 
   int by = SCR_H - 122;
   if(fkTrashSel >= 0){
     int bw = (SCR_W - 48) / 2;
-    fillRoundRect(16, by, bw, 56, 16, rgb565(60,150,110));
-    drawTextC(16 + bw / 2, by + 18, "Restaurar", 2, rgb565(255,255,255));
-    fillRoundRect(32 + bw, by, bw, 56, 16, rgb565(200,60,60));
-    drawTextC(32 + bw + bw / 2, by + 18, "Borrar", 2, rgb565(255,255,255));
+    fillRoundRect(16, by, bw, 56, 16, TH_OK);
+    drawTextC(16 + bw / 2, by + 18, "Restaurar", 2, TH_ONACC);
+    fillRoundRect(32 + bw, by, bw, 56, 16, TH_DANGER);
+    drawTextC(32 + bw + bw / 2, by + 18, "Borrar", 2, TH_ONACC);
   } else if(fkTrashN > 0){
-    fillRoundRect(SCR_W / 2 - 120, by, 240, 56, 16, rgb565(70,74,90));
-    drawTextC(SCR_W / 2, by + 18, "Vaciar papelera", 2, rgb565(250,190,190));
+    fillRoundRect(SCR_W / 2 - 120, by, 240, 56, 16, TH_SURF2);
+    drawTextC(SCR_W / 2, by + 18, "Vaciar papelera", 2, TH_DANGER);
   }
   if(fkAskOn) fkAskDraw();
   flxFlushAll();
@@ -431,7 +451,7 @@ static bool fkTrashTick(){
   if(T.released && fkTrashDragging){ fkTrashDragging = false; return true; }
   if(!T.tap) return true;
 
-  if(T.x < 60 && T.y < 60){ fkTrashOn = false; return false; }      // volver
+  if(T.x < 60 && T.y < 60){ fkCloseAll(); return false; }           // volver (y suelta la lista)
 
   int by = SCR_H - 122;
   if(T.y >= by && T.y <= by + 56){

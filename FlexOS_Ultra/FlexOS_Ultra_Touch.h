@@ -115,6 +115,10 @@ static int  gSuspFade    = -1;      // -1 = sin fundido en curso; si no, brillo 
 static int  gSuspFadeTo  = 0;       // destino del fundido
 static uint32_t gSuspFadeMs = 0;    // millis() del ultimo paso del fundido
 static bool gSuspSwallow = false;   // este poll pertenece al gesto -> no lo ve nadie mas
+// Un PELLIZCO de una app (el visor de medios) uso este episodio de dos dedos:
+// no es un toque de suspension. Lo pone quien consume el gesto; se borra al
+// empezar cada episodio. Sin esto, dos pellizcos rapidos apagaban la pantalla.
+static bool gTouchPinchUsed = false;
 
 // ---- Estado del detector de doble-tap ----------------------------------
 // Un "toque" (episodio) va desde que baja el primer dedo hasta que se levantan
@@ -215,7 +219,7 @@ static void suspGestureUpdate(){
   if(gTap1Ms && now - gTap1Ms > SUSP_TAP_WINDOW_MS) gTap1Ms = 0;
 
   if(n > 0){
-    if(!gEpAct){ gEpAct = true; gEpT0 = now; gEpRun2 = 0; gEpHad2 = false; gEpHad3 = false; }
+    if(!gEpAct){ gEpAct = true; gEpT0 = now; gEpRun2 = 0; gEpHad2 = false; gEpHad3 = false; gTouchPinchUsed = false; }
     if(n >= 3) gEpHad3 = true;
     // ANTI FALSO-POSITIVO: n>=2 tiene que sostenerse SUSP_TAP_FRAMES polls
     // consecutivos. El instante en que el segundo dedo esta aterrizando es
@@ -246,7 +250,7 @@ static void suspGestureUpdate(){
       // dos dedos, asi que el teclado se quedaba mudo justo cuando se escribia
       // rapido. El gesto de suspender sigue existiendo igual en todas partes;
       // solo se calla mientras hay dedos sobre las teclas.
-      bool veto = (KIOSK_ON && kioskOn) || kbTypingNow();
+      bool veto = (KIOSK_ON && kioskOn) || kbTypingNow() || gTouchPinchUsed;
       if(gTap2Ms && (now - gTap2Ms) >= SUSP_TAP_GAP_MS){ gTap2Ms = 0; if(!gSuspOn && !veto) suspEnter(); }
       else gTap2Ms = now;
       gTap1Ms = 0;                                    // las dos cadenas son excluyentes
