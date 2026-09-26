@@ -526,6 +526,10 @@ enum { MA_NONE = 0, MA_OPEN, MA_SELECT, MA_LOCK, MA_UNLOCK, MA_RENAME, MA_EDIT, 
 #define MM_RH     50
 #define MM_PAD    10
 #define MM_ANIM_MS 140
+// El menu mas alto tiene que caber en la banda de vidrio pre-desenfocada: si
+// no, su despliegue desenfoca cada cuadro sobre el anterior (vidrio apilado).
+static_assert(MM_MAX * MM_RH + 2 * MM_PAD <= UIGL_BAND_MAX_H,
+              "el menu de medios mas alto no cabe en la banda de vidrio (UIGL_BAND_MAX_H)");
 
 // ---- Candado dibujado (no hay imagen: vectorial, como el resto) ----
 static void mlPadlock(int cx, int cy, int s, uint16_t col, bool open){
@@ -673,7 +677,13 @@ static void mmOpen(int ax, int ay, const uint8_t* acts, int n){
   mmAx = ax; mmAy = ay; mmOn = true; mmT0 = millis(); mmAnimDone = false;
   setBuf(fb);
   int x, y, w, h; mmGeom(x, y, w, h);
-  if(uiGlass) uiGlassBandBegin(y, y + h - 1, uiSurfTint(UIS_ELEVATED));   // el fondo real, UNA vez
+  // El fondo real, desenfocado UNA vez. Sin banda (sin PSRAM para ella) el
+  // menu se pinta de una sola vez: animarlo seria desenfocar cada cuadro sobre
+  // el anterior, que es justo el vidrio apilado.
+  if(uiGlass && !uiGlassBandBegin(y, y + h - 1, uiSurfTint(UIS_ELEVATED))){
+    mmDraw(1.0f); mmAnimDone = true;
+    return;
+  }
   mmDraw(0.15f);
 }
 // Cierra el menu (sin repintar a nadie) y suelta la banda del despliegue:

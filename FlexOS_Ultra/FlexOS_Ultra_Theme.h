@@ -863,8 +863,16 @@ static uint16_t uiSurfTint(int role){
 static uint16_t uiSurfOn(int role){ return (role == UIS_ACCENT) ? TH_ONACC : TH_TXT; }
 
 // ---- BANDA PRE-DESENFOCADA (vidrio durante una animacion) ----------------
-#define UIGL_BAND_MAX_H 320              // peor caso real (cronometro 236, menu ~178)
+// PEOR CASO REAL: el menu de medios con sus 8 opciones (Editar, Abrir en
+// Multimedia, Seleccionar, Bloquear, Renombrar, Detalles, Eliminar y Borrar:
+// 8 x 50 + 20 = 420 filas; ver el static_assert junto a MM_MAX). Con el tope
+// anterior (320, "menu ~178") ese menu NO cabia: uiGlassBandBegin devolvia
+// false y cada cuadro del despliegue volvia a desenfocar y tenir el menu del
+// cuadro anterior -- vidrio sobre vidrio, cada vez mas claro, y un desenfoque
+// de 300x420 por cuadro -- justo al mantener pulsada una foto en la Galeria.
+#define UIGL_BAND_MAX_H 440
 static uint16_t* uiGlBand   = NULL;      // banda YA desenfocada (PSRAM, stride SCR_W)
+static int       uiGlBandCap = 0;        // filas reservadas: las del overlay mas alto usado
 static int       uiGlBandY0 = 0, uiGlBandY1 = -1;
 static uint8_t   uiGlBandMix = 58;       // se recalcula en cada uiGlassBandBegin
 
@@ -879,17 +887,21 @@ static bool uiGlassBandBegin(int y0, int y1, uint16_t tint){
   if(y0 < 0) y0 = 0; if(y1 > SCR_H - 1) y1 = SCR_H - 1;
   if(y1 < y0) return false;
   int h = y1 - y0 + 1;
-  // Se dimensiona al PEOR CASO REAL de los overlays que la usan (la banda del
-  // cronometro, 236 filas; el menu contextual, ~178), no a pantalla completa:
-  // SCR_W x UIGL_BAND_MAX_H x 2 = 300 KB en vez de los 768 KB de la pantalla
-  // entera (el 320 de aqui son FILAS DE BANDA, no una resolucion). Una banda
-  // mas alta que esto NO se cachea -- el llamante cae a la ruta plana/vidrio
-  // de siempre -- en vez de desbordar el buffer.
+  // Se dimensiona a lo que PIDEN los overlays que la usan (cronometro 236
+  // filas, menus de medios hasta 420), no a pantalla completa, y crece solo
+  // hasta el mas alto que se haya abierto (de 32 en 32 filas): 480 x 420 x 2 =
+  // 394 KB en el peor caso, en vez de los 768 KB de la pantalla entera. Una
+  // banda mas alta que UIGL_BAND_MAX_H NO se cachea -- el llamante debe pintar
+  // su panel de una vez, sin animar vidrio sobre vidrio -- en vez de desbordar.
   if(h > UIGL_BAND_MAX_H) return false;
-  if(!uiGlBand)
-    uiGlBand = (uint16_t*)heap_caps_malloc((size_t)SCR_W * UIGL_BAND_MAX_H * 2,
-                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if(!uiGlBand) return false;                   // sin PSRAM: el llamante usa plano
+  if(uiGlBand && uiGlBandCap < h){ heap_caps_free(uiGlBand); uiGlBand = NULL; uiGlBandCap = 0; }
+  if(!uiGlBand){
+    int cap = (h + 31) & ~31;
+    if(cap > UIGL_BAND_MAX_H) cap = UIGL_BAND_MAX_H;
+    uiGlBand = (uint16_t*)heap_caps_malloc((size_t)SCR_W * cap * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(!uiGlBand) return false;                 // sin PSRAM: el llamante usa plano
+    uiGlBandCap = cap;
+  }
   // Tinte adaptativo: MISMO criterio que drawLiquidGlassPanelEx (cuanto mas se
   // parecen tinte y fondo en luminancia, menos tinte), medido una sola vez sobre
   // toda la banda para que no cambie de color a mitad de la animacion.
@@ -915,6 +927,7 @@ static void uiGlassBandEnd(){ uiGlBandY1 = -1; }
 // Libera la banda (la reclama quien necesite PSRAM: ver themeChanged/gfxReclaim).
 static void uiGlassBandFree(){
   if(uiGlBand){ heap_caps_free(uiGlBand); uiGlBand = NULL; }
+  uiGlBandCap = 0;
   uiGlBandY1 = -1;
 }
 

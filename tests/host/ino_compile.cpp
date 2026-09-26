@@ -299,6 +299,7 @@ static_assert(SCR_W == 480 && SCR_H == 800, "la sombra del panel asume 480x800")
 // #############################################################
 static void testPanelRapido();
 static void testPanelOneUI();
+static void testPulsacionLargaVidrio();
 static void testVariasFotos();
 static void testGuardadoRafaga();
 static void testVideoRobusto();
@@ -8807,6 +8808,134 @@ static void testVariasFotos(){
   if(gFails == before) printf("  Varias fotos: todas las comprobaciones pasan.\n");
 }
 
+// #############################################################
+//  LIQUID GLASS AL MANTENER PULSADA UNA FOTO O UN VIDEO
+//  ------------------------------------------------------------
+//  El sintoma: con el dedo apoyado sobre una foto o un video, el vidrio del
+//  menu se volvia a dibujar y se acumulaba (cada cuadro del despliegue
+//  desenfocaba lo que tenia debajo, que ya era el menu del cuadro anterior).
+//  Se exige, en las TRES apps de medios y con el temblor real de un dedo
+//  (+-2 px): nada se repinta antes de que salte la pulsacion larga; el menu
+//  se despliega y, en cuanto termina, CERO volcados y CERO cambios en el
+//  panel mientras el dedo sigue ahi; y veinte ciclos de mantener y cerrar no
+//  dejan ni un byte de PSRAM ni la banda de vidrio activa.
+// #############################################################
+#include <time.h>
+static uint64_t lpHash(const uint16_t* b){ uint64_t h = 1469598103934665603ull; for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++){ h ^= b[i]; h *= 1099511628211ull; } return h; }
+struct LpRes { int menuAt; unsigned drawsBefore, drawsAfter; int changesAfter; double animUs; int animFrames; };
+static double lpNowUs(){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec * 1e6 + ts.tv_nsec / 1e3; }
+static LpRes lpHold(void (*tick)(), int cx, int cy, int frames, const uint16_t* shadow){
+  LpRes r = { -1, 0, 0, 0, 0.0, 0 };
+  touchReset();
+  T.down = true; T.pressed = true; T.x = T.startX = cx; T.y = T.startY = cy; T.downMs = gTestMs;
+  uint64_t last = 0; bool settled = false;
+  for(int f = 0; f < frames; f++){
+    unsigned d0 = gPanelDrawCalls;
+    double t0 = lpNowUs();
+    tick();
+    double us = lpNowUs() - t0;
+    unsigned d = gPanelDrawCalls - d0;
+    if(r.menuAt >= 0 && !settled){ r.animUs += us; r.animFrames++; }
+    if(r.menuAt < 0){
+      if(mmOn) r.menuAt = f; else r.drawsBefore += d;
+    } else if(!settled){
+      if(mmAnimDone){ settled = true; last = lpHash(shadow); }
+    } else {
+      r.drawsAfter += d;
+      uint64_t h = lpHash(shadow); if(h != last){ r.changesAfter++; last = h; }
+    }
+    // Temblor de un dedo de verdad: dentro de la tolerancia de la pulsacion larga.
+    T.pressed = false; gTestMs += 16;
+    T.x = cx + (f % 5) - 2; T.y = cy + ((f / 5) % 5) - 2;
+  }
+  return r;
+}
+static void lpCloseByTap(void (*tick)()){
+  // Soltar (una pulsacion larga no es un toque) y tocar fuera del menu.
+  touchReset(); T.released = true; tick();
+  touchReset(); gTestMs += 40;
+  T.pressed = true; T.down = true; T.x = T.startX = 20; T.y = T.startY = 150; T.downMs = gTestMs; tick();
+  touchReset(); gTestMs += 60; T.released = true; T.tap = true; T.x = 20; T.y = 150; tick();
+  // Vueltas con el dedo levantado: como en la placa, es aqui donde cada app
+  // rearma su deteccion de pulsacion larga.
+  for(int k = 0; k < 2; k++){ touchReset(); gTestMs += 16; tick(); }
+}
+static void testPulsacionLargaVidrio(){
+  printf("Liquid Glass al mantener pulsada una foto o un video: ni se acumula ni se recalcula con el dedo quieto\n");
+  int before = gFails;
+  std::vector<uint16_t> shadow((size_t)SCR_W * SCR_H, 0);
+  uint16_t* sh0 = gPanelShadow; gPanelShadow = shadow.data();
+  bool glass0 = uiGlass; int nav0 = gNavMode; bool ok0 = gMlOk;
+  uiGlass = true; gNavMode = 0;
+  gTestMs = 20000000;
+  for(int app = 0; app < 3; app++){
+    const char* an = app == 0 ? "Galeria" : app == 1 ? "Multimedia" : "Musica";
+    tkReset();
+    for(int i = 0; i < 12; i++){
+      char p[40];
+      if(app == 0){ snprintf(p, sizeof(p), "/Imagenes/lp%02d.jpg", i); tkAdd(FML_K_PHOTO, FML_F_JPEG, p, NULL, false, true); }
+      else if(app == 1){ snprintf(p, sizeof(p), "/Videos/lp%02d.avi", i); tkAdd(FML_K_VIDEO, FML_F_AVI_MJPEG, p, NULL, false, true); }
+      else { snprintf(p, sizeof(p), "/Musica/lp%02d.wav", i); tkAdd(FML_K_AUDIO, FML_F_WAV_PCM, p, NULL, false, true); }
+    }
+    gMlOk = true;
+    void (*tick)() = NULL;
+    int cx = 0, cy = 0;
+    int bx, by, bw, bh;
+    if(app == 0){
+      shotApp(IC_GALERIA); mkBind(&GAL_APP); mkReset(); galViewReady = false; galScroll = 0; galRender();
+      int x, y, w, h; galCellRect(4, x, y, w, h); cx = x + w / 2; cy = y + h / 2; tick = galTick;
+    } else if(app == 1){
+      shotApp(IC_MULTIMEDIA); mkBind(&VID_APP); mkReset(); vidScreen = VS_LIST; vidListScroll = 0; vidListRender();
+      uiBox(bx, by, bw, bh); cx = bx + bw / 2; cy = vidRowY(2) + VID_ROW_H / 2 - 4; tick = vidTick;
+    } else {
+      shotApp(IC_MUSICA); mkBind(&MUS_APP); mkReset(); musScreen = MUS_LIST; musScroll = 0; musRender();
+      uiBox(bx, by, bw, bh); cx = bx + bw / 2; cy = musRowY(2) + MUS_ROW_H / 2 - 4; tick = musTick;
+    }
+    LpRes r = lpHold(tick, cx, cy, 160, shadow.data());
+    printf("  [vidrio] %s: despliegue del menu %.0f us/cuadro (%d cuadros, en el PC)\n", an,
+           r.animFrames ? r.animUs / r.animFrames : 0.0, r.animFrames);
+    chkf(r.menuAt >= 33 && r.menuAt <= 37, "[%s] el menu salta a los ~550 ms (cuadro %d)", an, r.menuAt);
+    chkf(r.drawsBefore == 0, "[%s] antes de saltar, el dedo apoyado no repinta nada (%u volcados)", an, r.drawsBefore);
+    chkf(r.drawsAfter == 0 && r.changesAfter == 0,
+         "[%s] desplegado el menu, con el dedo ahi: 0 volcados y 0 cambios (%u, %d)", an, r.drawsAfter, r.changesAfter);
+    chkf(!uiGlassBandActive(), "[%s] la banda de vidrio del despliegue ya esta suelta", an);
+    // Lo que se ve tras desplegarse bajo el dedo == el mismo menu pintado de
+    // UNA vez sobre el mismo fondo. Si un cuadro desenfocara el anterior, el
+    // vidrio se oscureceria y esto no coincidiria.
+    {
+      int mx, my, mw, mh; mmGeom(mx, my, mw, mh);
+      std::vector<uint16_t> held((size_t)mw * mh);
+      for(int yy = 0; yy < mh; yy++) memcpy(&held[(size_t)yy * mw], shadow.data() + (size_t)(my + yy) * SCR_W + mx, (size_t)mw * 2);
+      uint8_t acts[MM_MAX]; int na = mmN; memcpy(acts, mmAct, sizeof(acts));
+      int ax = mmAx, ay = mmAy;
+      mmClose();
+      if(app == 0) galRender(); else if(app == 1) vidListRender(); else musRender();
+      mmOpen(ax, ay, acts, na);
+      gTestMs += MM_ANIM_MS + 1; mmAnimTick();
+      bool same = true;
+      for(int yy = 0; yy < mh && same; yy++)
+        same = !memcmp(&held[(size_t)yy * mw], shadow.data() + (size_t)(my + yy) * SCR_W + mx, (size_t)mw * 2);
+      chkf(same, "[%s] el menu desplegado con el dedo encima es identico al pintado de una vez: el vidrio no se apila", an);
+    }
+    lpCloseByTap(tick);
+    chkf(!mmOn, "[%s] tocar fuera cierra el menu", an);
+    // Veinte veces: mantener, desplegar, cerrar. Nada se queda reservado.
+    size_t ps0 = gPsUsed; int opened = 0;
+    for(int k = 0; k < 20; k++){
+      LpRes q = lpHold(tick, cx, cy, 60, shadow.data());
+      if(q.menuAt >= 0) opened++;
+      lpCloseByTap(tick);
+    }
+    chkf(opened == 20 && gPsUsed == ps0 && !uiGlassBandActive(),
+         "[%s] 20 ciclos: 20 menus, PSRAM igual (%+d B) y sin banda viva", an, (int)(gPsUsed - ps0));
+    mkReset();
+  }
+  touchReset();
+  uiGlass = glass0; gNavMode = nav0; gMlOk = ok0; gPanelShadow = sh0;
+  gState = ST_HOME; gAppId = 0; uiClipFull();
+  if(gFails == before) printf("  Pulsacion larga: todas las comprobaciones pasan.\n");
+}
+
 // La hoja de Flex Web Server solo repinta lo que cambia.
 static void testHojaWebLocalizada(){
   printf("Flex Web Server: la hoja solo repinta la zona que cambia\n");
@@ -9324,6 +9453,7 @@ int main(){
   testVideoRobusto();
   testGuardadoRafaga();
   testVariasFotos();
+  testPulsacionLargaVidrio();
   testKitTemaYPapelera();
   testHojaWebLocalizada();
   testCapturasVisor();
