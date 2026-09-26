@@ -2529,9 +2529,14 @@ static void testDeslizarPaginas(){
     }
     hpTop = HOME_BAND_TOP; }
 
-  // --- 4. NADIE MAS DIBUJA MIENTRAS DURA EL GESTO ---
-  // La isla de notificaciones componia en bbuf las MISMAS filas y las
-  // publicaba sin desplazar: media pantalla quedaba en la pagina vieja.
+  // --- 4. LA ISLA SIGUE VIVA (Y ENCIMA) MIENTRAS DURA EL GESTO ---
+  // Antes la isla se PAUSABA durante el gesto y sus pixeles se quedaban en fb:
+  // con widgets de cabecera, cada cuadro pintaba la pagina encima de la
+  // tarjeta (la notificacion "detras", cortada y congelada). Ahora:
+  //   a) si la franja que se desliza no toca la banda de la isla, la isla se
+  //      compone como siempre (su propia banda);
+  //   b) si la toca, el gesto es el unico dueno de esas filas y la pinta
+  //      encima de cada cuadro: notifTick solo avanza el tiempo.
   { gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
     notifBandOn = false; notifPaused = false; notifLastMs = 0;
     gTestMs = 400000;
@@ -2540,14 +2545,19 @@ static void testDeslizarPaginas(){
     snprintf(m.name, sizeof(m.name), "Reproduccion terminada");
     notifPush(&m);
     gState = ST_HOME; qsPanelY = 0; editMode = false;
-    hpDragging = true;
+    hpDragging = true; hpTop = HOME_BAND_TOP;
+    gPanelDrawCalls = 0;
     gTestMs += 40; notifTick();
-    chk(!gNotifs[0].armed, "con un gesto de pagina en curso, la isla no dibuja");
-    chk(notifPaused,       "y contabiliza la pausa para no comerse los 5 s");
-    hpDragging = false;
+    chk(gNotifs[0].armed && !notifPaused, "sin cabecera, la isla sigue viva durante el gesto");
+    chk(gPanelDrawCalls == 1 && gPanelLastY0 == NOTIF_BAND_TOP, "y publica su propia banda, que el gesto no toca");
+    hpTop = HOME_PAGE_TOP;
+    uint32_t born = gNotifs[0].bornMs;
+    gPanelDrawCalls = 0;
     gTestMs += 40; notifTick();
-    chk(gNotifs[0].armed,  "al acabar el gesto, la isla vuelve");
-    gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs)); }
+    chk(gPanelDrawCalls == 0, "con cabecera, la isla no publica su banda sola: la compone el gesto encima");
+    chk(gNotifs[0].bornMs == born && !notifPaused, "y su tiempo sigue corriendo: no se congela");
+    hpDragging = false; hpTop = HOME_BAND_TOP;
+    gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs)); notifBandOn = false; }
 
   // --- 5. UNA APP EN LA PAGINA 2 USA UNA CASILLA NORMAL ---
   { int x0, y0, x1, y1;
@@ -8485,6 +8495,113 @@ static void testKitTemaYPapelera(){
 }
 
 // #############################################################
+//  ESCRITORIO · LA NOTIFICACION SE QUEDA ENCIMA AL CAMBIAR DE PAGINA
+//  ------------------------------------------------------------
+//  El fallo de las fotos: un aviso a la vista, el usuario desliza a otra
+//  pagina y la tarjeta acaba DETRAS de los widgets de cabecera, cortada y
+//  quieta hasta volver. Se mira la sombra del panel: dentro de la tarjeta no
+//  puede verse ni un pixel de un widget, la tarjeta sigue su vida (caduca y
+//  sale) aunque el dedo este quieto, no deja restos y el ultimo cuadro del
+//  acomodo la conserva. En Plano y en Liquid Glass.
+// #############################################################
+static void testIslaEncimaAlDeslizar(){
+  printf("Escritorio: la notificacion se queda encima de la pagina que se desliza\n");
+  int before = gFails;
+  bool glass0 = uiGlass;
+  std::vector<uint16_t> shadow((size_t)SCR_W * SCR_H, 0);
+  uint16_t* sh0 = gPanelShadow; gPanelShadow = shadow.data();
+  const uint16_t BG = TC(40, 40, 60), WA = TC(0, 252, 0), WB = TC(0, 0, 248);
+  // Interior de la tarjeta quieta, sin sus esquinas redondeadas (por fuera del
+  // arco se ve lo de debajo, como debe) y sin el borde de 1 px.
+  const int cx0 = NOTIF_MARGIN_X + NOTIF_RAD + 2, cx1 = NOTIF_MARGIN_X + NOTIF_CARD_W - NOTIF_RAD - 2;
+  const int cy1 = NOTIF_Y0 + NOTIF_CARD_H - 2;         // filas de la tarjeta que la franja pisa: [72, cy1)
+  auto dentroTarjeta = [&](uint16_t col){
+    int n = 0;
+    for(int y = HOME_PAGE_TOP; y < cy1; y++) for(int x = cx0; x < cx1; x++)
+      if(shadow[(size_t)y * SCR_W + x] == col) n++;
+    return n;
+  };
+  for(int glass = 0; glass < 2; glass++){
+    uiGlass = glass != 0;
+    const char* gm = glass ? "vidrio" : "plano";
+    gState = ST_HOME; editMode = false; qsPanelY = 0; gLand = false; gHosted = false;
+    hpDragging = false; hpSettling = false; gHomePage = 0;
+    gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+    notifBandOn = false; notifPaused = false; notifLastMs = 0; notifDragIdx = -1;
+    if(!hpEnsureBuf()){ chk(false, "hay lienzo para la pagina vecina"); break; }
+    int bandBot = homeBandBot();
+    for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++) homeBuf[i] = BG;
+    for(int y = HOME_PAGE_TOP; y < bandBot; y++) for(int x = 0; x < SCR_W; x++){
+      hpBg[(size_t)(y - HOME_PAGE_TOP) * SCR_W + x] = BG;
+      hpBuf[(size_t)(y - HOME_PAGE_TOP) * SCR_W + x] = BG;
+    }
+    // Un widget de cabecera por pagina que cruza la banda de la isla entera.
+    for(int y = HOME_PAGE_TOP; y < HOME_PAGE_TOP + 110; y++) for(int x = 8; x < SCR_W - 8; x++){
+      homeBuf[(size_t)y * SCR_W + x] = WA;
+      hpBuf[(size_t)(y - HOME_PAGE_TOP) * SCR_W + x] = WB;
+    }
+    memcpy(fb, homeBuf, (size_t)SCR_W * SCR_H * 2); setBuf(fb); uiClipFull(); flxFlushAll();
+    hpBufPage = 1; hpFrom = 0; hpTo = 1; hpTop = HOME_PAGE_TOP;
+    gGlRecN[0] = gGlRecN[1] = 0;
+    hpMaskBuild(0); hpMaskBuild(1);
+    DetectedModule m; memset(&m, 0, sizeof(m));
+    m.active = true; m.type = MOD_MEDIA;
+    snprintf(m.name, sizeof(m.name), "Foto recibida");
+    snprintf(m.sub, sizeof(m.sub), "Galeria");
+    notifPush(&m);
+    gTestMs = 900000;
+    for(int k = 0; k < 12; k++){ gTestMs += 40; notifTick(); }
+    chkf(gNotifs[0].armed && gNotifs[0].phase == NP_IDLE, "[%s] el aviso esta a la vista y quieto", gm);
+    chkf(dentroTarjeta(WA) == 0, "[%s] antes del gesto, la tarjeta tapa el widget", gm);
+    // ---- El gesto: la pagina se desliza por debajo de la tarjeta ----
+    hpDragging = true;
+    int tapada = 0, sinMover = 0;
+    for(int dx = -30; dx >= -450; dx -= 60){
+      hpRenderFrame(dx);
+      gTestMs += 40; notifTick();
+      tapada += dentroTarjeta(WA) + dentroTarjeta(WB);
+      // La pagina SI se mueve fuera de la tarjeta: a la derecha de la tarjeta
+      // (x=470) se ve ya el widget de la pagina que entra (antes, el de la otra).
+      uint16_t der = shadow[(size_t)(HOME_PAGE_TOP + 20) * SCR_W + 470];
+      if(der != WB) sinMover++;
+    }
+    chkf(tapada == 0, "[%s] durante el gesto ningun widget se pinta encima de la tarjeta (%d px)", gm, tapada);
+    chkf(sinMover == 0, "[%s] y la pagina se sigue moviendo por debajo", gm);
+    // ---- Dedo quieto: la tarjeta caduca, sale y no deja restos ----
+    T = Touch(); T.down = true; T.startX = 440; T.x = 200; T.y = T.startY = HOME_PAGE_TOP + 200;
+    hpDx = -240; hpLastDx = 0x7FFFFFFF;
+    for(int k = 0; k < 220 && (gNotifCount > 0 || notifBandOn); k++){
+      gTestMs += 40; hpTick(); notifTick();
+    }
+    chkf(gNotifCount == 0 && !notifBandOn, "[%s] con el dedo quieto el aviso caduca y sale (no se congela)", gm);
+    int restos = 0;
+    for(int y = NOTIF_BAND_TOP; y < HOME_PAGE_TOP; y++) for(int x = 0; x < SCR_W; x++)
+      if(shadow[(size_t)y * SCR_W + x] != homeBuf[(size_t)y * SCR_W + x]) restos++;
+    chkf(restos == 0, "[%s] al irse no deja restos por encima de la franja (%d px)", gm, restos);
+    chkf(dentroTarjeta(WA) + dentroTarjeta(WB) > 0, "[%s] y la pagina vuelve a verse donde estaba la tarjeta", gm);
+    // ---- Ultimo cuadro del acomodo: la tarjeta sigue encima ----
+    notifPush(&m);
+    for(int k = 0; k < 12; k++){ gTestMs += 40; notifTick(); }
+    hpRenderFrame(-240);
+    hpDragging = false; hpSettling = true; hpSettleFrom = -240; hpSettleTo = -SCR_W;
+    hpSettleT0 = (uint32_t)gTestMs - HP_SETTLE_MS - 1;
+    T = Touch();
+    hpTick();
+    chkf(!hpSettling && gHomePage == 1, "[%s] el acomodo termina en la pagina nueva", gm);
+    chkf(dentroTarjeta(WB) == 0 && dentroTarjeta(WA) == 0, "[%s] y su ultimo cuadro conserva la tarjeta encima", gm);
+    gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs)); notifBandOn = false;
+    hpSettling = false; hpDragging = false; gHomePage = 0; hpBufPage = -1;
+  }
+  uiGlass = glass0;
+  gPanelShadow = sh0;
+  T = Touch();
+  hpTop = HOME_BAND_TOP; gHomePage = 0;
+  drawWallpaper(homeBuf, false);
+  setBuf(fb); uiClipFull();
+  if(gFails == before) printf("  Isla encima al deslizar: todas las comprobaciones pasan.\n");
+}
+
+// #############################################################
 //  GALERIA · NADA FUERA DE SU CAJA, NI EN EL PANEL NI EN EL EDITOR
 //  ------------------------------------------------------------
 //  El fallo de las fotos del usuario ("partes de las imagenes de abajo
@@ -8645,6 +8762,7 @@ int main(){
   testPaginasHome();
   testNotifUnaSola();
   testDeslizarPaginas();
+  testIslaEncimaAlDeslizar();
   testCabeceras();
   testListasConScroll();
   testTarjetaCronometro();

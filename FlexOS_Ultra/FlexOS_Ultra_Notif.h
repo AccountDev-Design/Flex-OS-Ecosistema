@@ -267,43 +267,38 @@ static void notifHandleTouch(){
   }
 }
 
-// ---- Tick de la isla: anima y compone (se llama al final de loop) ----
-static void notifTick(){
-  // Throttle ~30 fps
-  if(millis() - notifLastMs < 33) return;
-  notifLastMs = millis();
-
-  // Nada que mostrar y banda ya limpia -> salida barata
-  if(gNotifCount == 0 && !notifBandOn) return;
-
-  // La isla SOLO vive en el Home principal desbloqueado (sin cortina ni edicion).
-  // Fuera de ahi no avanzamos fases ni dibujamos: las notificaciones detectadas
-  // durante el bloqueo esperan congeladas y su animacion de entrada + los 5 s
-  // arrancan al llegar aqui. Asi tambien evitamos el conflicto de dibujo con
-  // otras pantallas (que son quienes deben poseer el fb en ese momento).
-  //
-  // Y MIENTRAS SE PASA DE PAGINA, tampoco. hpRenderFrame() esta escribiendo
-  // en bbuf las mismas filas que la isla y presentandolas desplazadas; si la
-  // isla repusiera ahi el escritorio SIN desplazar, media pantalla quedaria
-  // en la pagina vieja y media en la nueva. Se cede el turno: la isla vuelve
-  // -- con su tiempo intacto, via notifPaused -- en cuanto el gesto acaba.
-  if(gState != ST_HOME || qsPanelY != 0 || editMode || notifSecureScreen() ||
-     hpDragging || hpSettling){
-    if(!notifPaused){ notifPaused = true; notifPauseT0 = millis(); }   // marca el inicio de la pausa (p.ej. se abrio una app)
-    return;
+// Las tarjetas VISIBLES (las NOTIF_VISIBLE primeras de la cola, armadas) en
+// el buffer activo, con su fase actual y respetando el recorte que haya. La
+// usan notifTick (sobre la banda restaurada de homeBuf) y el deslizamiento de
+// paginas (sobre su cuadro), asi que la tarjeta es la misma en los dos casos.
+static void notifDrawCardsOver(){
+  int shown = gNotifCount < NOTIF_VISIBLE ? gNotifCount : NOTIF_VISIBLE;
+  for(int i = 0; i < shown; i++){
+    if(!gNotifs[i].active || !gNotifs[i].armed) continue;
+    int cardY = NOTIF_Y0 + i * (NOTIF_CARD_H + NOTIF_GAP);
+    if(gNotifs[i].phase == NP_IN){
+      float p = (millis() - gNotifs[i].bornMs) / 280.0f; if(p > 1.0f) p = 1.0f;
+      cardY -= (int)((1.0f - notifEaseOut(p)) * NOTIF_ENTER_DROP);   // entrada: cae desde arriba
+    }
+    notifDrawCard(&gNotifs[i], cardY);
   }
-  if(notifPaused){
-    // Reanudando tras una pausa (p.ej. se cerro la app que se abrio encima):
-    // sumar el tiempo pausado a bornMs de cada tarjeta activa para que
-    // conserven el tiempo que les quedaba, en vez de que millis()-bornMs se
-    // dispare de golpe y todas pasen de fase (y se reindexen) en el mismo
-    // frame -- eso era el parpadeo/"se queda bugeado" al volver de una app.
-    uint32_t paused = millis() - notifPauseT0;
-    for(int i = 0; i < gNotifCount; i++) gNotifs[i].bornMs += paused;
-    notifPaused = false;
+}
+// Alguna tarjeta visible se esta MOVIENDO (entrada, salida, muelle, arrastre):
+// el deslizamiento de paginas la tiene que repintar aunque el dedo este quieto.
+static bool notifAnimating(){
+  int shown = gNotifCount < NOTIF_VISIBLE ? gNotifCount : NOTIF_VISIBLE;
+  for(int i = 0; i < shown; i++){
+    if(!gNotifs[i].active || !gNotifs[i].armed) continue;
+    uint8_t ph = gNotifs[i].phase;
+    if(ph == NP_OUT || ph == NP_SPRING || ph == NP_DRAG) return true;
+    if(ph == NP_IN && millis() - gNotifs[i].bornMs < 300) return true;
   }
-  if(gNotifCount > 0) notifBandOn = true;
+  return notifBandOn && gNotifCount == 0;         // le falta el cuadro de limpieza
+}
 
+// Avanza el TIEMPO de la isla: arma las que se hacen visibles y mueve fases
+// (entrada, espera de 5 s, muelle, salida). No dibuja nada.
+static void notifAdvance(){
   // UNA a la vez: solo las NOTIF_VISIBLE primeras de la cola se arman,
   // se animan y se dibujan. Las de detras esperan su turno intactas --
   // ni cuentan los 5 s ni ocupan pixeles -- y entran en cuanto la de
@@ -359,6 +354,50 @@ static void notifTick(){
     }
     if(!removed) i++;
   }
+}
+
+// ---- Tick de la isla: anima y compone (se llama al final de loop) ----
+static void notifTick(){
+  // Throttle ~30 fps
+  if(millis() - notifLastMs < 33) return;
+  notifLastMs = millis();
+
+  // Nada que mostrar y banda ya limpia -> salida barata
+  if(gNotifCount == 0 && !notifBandOn) return;
+
+  // La isla SOLO vive en el Home principal desbloqueado (sin cortina ni edicion).
+  // Fuera de ahi no avanzamos fases ni dibujamos: las notificaciones detectadas
+  // durante el bloqueo esperan congeladas y su animacion de entrada + los 5 s
+  // arrancan al llegar aqui. Asi tambien evitamos el conflicto de dibujo con
+  // otras pantallas (que son quienes deben poseer el fb en ese momento).
+  if(gState != ST_HOME || qsPanelY != 0 || editMode || notifSecureScreen()){
+    if(!notifPaused){ notifPaused = true; notifPauseT0 = millis(); }   // marca el inicio de la pausa (p.ej. se abrio una app)
+    return;
+  }
+  if(notifPaused){
+    // Reanudando tras una pausa (p.ej. se cerro la app que se abrio encima):
+    // sumar el tiempo pausado a bornMs de cada tarjeta activa para que
+    // conserven el tiempo que les quedaba, en vez de que millis()-bornMs se
+    // dispare de golpe y todas pasen de fase (y se reindexen) en el mismo
+    // frame -- eso era el parpadeo/"se queda bugeado" al volver de una app.
+    uint32_t paused = millis() - notifPauseT0;
+    for(int i = 0; i < gNotifCount; i++) gNotifs[i].bornMs += paused;
+    notifPaused = false;
+  }
+  if(gNotifCount > 0) notifBandOn = true;
+
+  notifAdvance();
+
+  // PASO DE PAGINA EN CURSO. La tarjeta SIGUE a la vista (y su tiempo corre):
+  // si la franja que se desliza solapa la banda de la isla, el compositor del
+  // deslizamiento es el unico dueno de esas filas y pinta la isla ENCIMA de
+  // cada cuadro (hpRenderFrame / hpPublishStill). Si la isla repusiera aqui su
+  // banda desde homeBuf, pondria la pagina de origen SIN desplazar en medio del
+  // gesto. Si no la solapa (sin widgets de cabecera), se compone como siempre.
+  if(hpDragging || hpSettling){
+    int top = hpTop < HOME_PAGE_TOP ? HOME_PAGE_TOP : hpTop;
+    if(hpOwnsIsland(top)) return;
+  }
 
   // Recorte completo (por si una app lo dejo estrecho) antes de componer
   gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
@@ -367,16 +406,7 @@ static void notifTick(){
   // tarjetas encima. Nadie mas presenta esta banda -> sin parpadeo.
   bbufSys(); setBuf(bbuf);
   notifRestoreBg();
-  if(gNotifCount < shown) shown = gNotifCount;         // alguna se fue en el bucle de fases
-  for(int i = 0; i < shown; i++){
-    if(!gNotifs[i].active || !gNotifs[i].armed) continue;
-    int cardY = NOTIF_Y0 + i * (NOTIF_CARD_H + NOTIF_GAP);
-    if(gNotifs[i].phase == NP_IN){
-      float p = (millis() - gNotifs[i].bornMs) / 280.0f; if(p > 1.0f) p = 1.0f;
-      cardY -= (int)((1.0f - notifEaseOut(p)) * NOTIF_ENTER_DROP);   // entrada: cae desde arriba
-    }
-    notifDrawCard(&gNotifs[i], cardY);
-  }
+  notifDrawCardsOver();
   // Volcado atomico bbuf->fb de una banda ya terminada. DMA2D nunca ve
   // un fb a medio pintar.
   present(NOTIF_BAND_TOP, NOTIF_BAND_BOT - 1);

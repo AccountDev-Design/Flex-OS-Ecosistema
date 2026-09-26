@@ -1024,8 +1024,24 @@ static uint32_t  hpSettleT0 = 0;
 static int       hpSettleFrom = 0;     // dx del que arranca el acomodo
 static int       hpSettleTo   = 0;     // dx al que llega (0 = se queda, -+SCR_W = cambia)
 static uint32_t  hpFrameMs = 0;
+static int       hpLastDx  = 0x7FFFFFFF; // dx del ultimo cuadro publicado (no se recompone uno identico)
 
 #define HP_FRAME_MS      33        // 30 fps estables: no saturar PSRAM + DMA2D
+
+// ---- LA ISLA DE NOTIFICACIONES ES LA CAPA DE ARRIBA, TAMBIEN AL DESLIZAR ----
+// Antes, mientras se pasaba de pagina, la isla se PAUSABA: dejaba de pintar y
+// sus pixeles se quedaban en fb. Con widgets en la fila de cabecera la franja
+// que se desliza empieza en y=72 y la tarjeta ocupa y=56..120, asi que cada
+// cuadro del gesto pintaba los widgets de las dos paginas ENCIMA de ella: la
+// notificacion quedaba "detras", cortada y congelada hasta volver.
+// Ahora, cuando las dos franjas se solapan, el compositor del deslizamiento
+// es el UNICO dueno de esas filas y pinta la isla encima de cada cuadro (y
+// del ultimo del acomodo); su tiempo sigue corriendo (notifTick avanza las
+// fases). Si no se solapan, la isla se compone como siempre. Se definen con
+// la isla (FlexOS_Ultra_Notif.h); aqui solo los prototipos.
+static void notifDrawCardsOver();                // las tarjetas visibles, en gBuf, con el recorte actual
+static bool notifAnimating();                    // alguna tarjeta se esta moviendo (entrada, salida, muelle)
+static inline bool hpOwnsIsland(int top){ return notifBandOn && top < NOTIF_BAND_BOT; }
 
 // Reserva: la franja MAS ALTA posible (rejilla de cuatro filas). Lo que se copia
 // de verdad es solo la franja ACTIVA -- hpBandPixels() --, porque copiar de mas
@@ -1216,7 +1232,39 @@ static void hpRenderFrame(int dx){
     homeDrawSafePill();
     gClipY0 = 0; gClipY1 = SCR_H - 1;
   }
-  present(top, bandBot - 1);
+  // 4) La isla, ENCIMA de todo lo anterior (ver hpOwnsIsland). Las filas de
+  //    su banda que quedan por encima de la franja de pagina son fijas: salen
+  //    de homeBuf, igual que en notifRestoreBg, y se publican con el cuadro.
+  int pubTop = top;
+  if(hpOwnsIsland(top)){
+    if(NOTIF_BAND_TOP < top){
+      pubTop = NOTIF_BAND_TOP;
+      memcpy(bbuf + (size_t)pubTop * SCR_W, homeBuf + (size_t)pubTop * SCR_W, (size_t)(top - pubTop) * SCR_W * 2);
+    }
+    gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = pubTop; gClipY1 = NOTIF_BAND_BOT - 1;
+    notifDrawCardsOver();
+    gClipY0 = 0; gClipY1 = SCR_H - 1;
+    if(gNotifCount == 0) notifBandOn = false;   // este cuadro ya era el de limpieza
+  }
+  present(pubTop, bandBot - 1);
+  hpLastDx = dx;
+  setBuf(fb);
+}
+
+// El escritorio QUIETO en la franja recorrida (ultimo cuadro del acomodo),
+// con la isla encima si el gesto era su dueno. Antes se volcaba homeBuf tal
+// cual y la tarjeta desaparecia hasta la siguiente vuelta de la isla.
+static void hpPublishStill(int top){
+  int bot = homeBandBot() - 1;
+  if(!hpOwnsIsland(top)){ fbCopyBand(homeBuf, top, bot); flxFlush(top, bot); return; }
+  int pubTop = NOTIF_BAND_TOP < top ? NOTIF_BAND_TOP : top;
+  bbufSys(); setBuf(bbuf);
+  memcpy(bbuf + (size_t)pubTop * SCR_W, homeBuf + (size_t)pubTop * SCR_W, (size_t)(bot - pubTop + 1) * SCR_W * 2);
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = pubTop; gClipY1 = NOTIF_BAND_BOT - 1;
+  notifDrawCardsOver();
+  gClipY0 = 0; gClipY1 = SCR_H - 1;
+  if(gNotifCount == 0) notifBandOn = false;
+  present(pubTop, bot);
   setBuf(fb);
 }
 
@@ -1262,6 +1310,7 @@ static bool hpTryStart(){
   hpTop = (homePageHasHdr(hpFrom) || homePageHasHdr(hpTo)) ? HOME_PAGE_TOP : HOME_BAND_TOP;
   hpDragging = true;
   hpDx = dx;
+  hpLastDx = 0x7FFFFFFF;                  // el primer cuadro del gesto siempre se compone
   return true;
 }
 
@@ -1298,10 +1347,10 @@ static bool hpTick(){
       }
       // El ultimo frame puede no haber caido exactamente en +-SCR_W. Publicar
       // solo la franja recorrida deja el resultado final exacto sin otro flush
-      // de 768 KB.
+      // de 768 KB (con la isla encima, si el gesto era su dueno).
       int top = hpTop < HOME_PAGE_TOP ? HOME_PAGE_TOP : hpTop;
-      fbCopyBand(homeBuf, top, homeBandBot() - 1);
-      flxFlush(top, homeBandBot() - 1);
+      hpPublishStill(top);
+      hpLastDx = 0x7FFFFFFF;
       return true;
     }
     float p = (float)e / (float)HP_SETTLE_MS;
@@ -1325,7 +1374,12 @@ static bool hpTick(){
     hpDx = dx;
     T.tap = false; T.swipeLeft = false; T.swipeRight = false; T.swipeUp = false; T.swipeDown = false;
     uint32_t now = millis();
-    if(now - hpFrameMs >= HP_FRAME_MS){ hpFrameMs = now; hpRenderFrame(hpDx); }
+    // Con el dedo QUIETO el cuadro seria identico al anterior: recomponer y
+    // volcar ~0,5 MB para dejar la pantalla igual es trabajo tirado (y PSRAM
+    // que le quita al panel). Solo se repite si algo encima se mueve (la isla).
+    int top = hpTop < HOME_PAGE_TOP ? HOME_PAGE_TOP : hpTop;
+    bool need = (hpDx != hpLastDx) || (hpOwnsIsland(top) && notifAnimating());
+    if(need && now - hpFrameMs >= HP_FRAME_MS){ hpFrameMs = now; hpRenderFrame(hpDx); }
     return true;
   }
   // Soltar: se acomoda a la pagina mas cercana, salvo que el gesto
