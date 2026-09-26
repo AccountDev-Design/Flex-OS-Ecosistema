@@ -129,12 +129,14 @@ solo después de corregir aquí.
 | Módulo | Qué hace |
 |---|---|
 | `FlexOS_Ultra_MediaLib.h` | el almacén sobre LittleFS, tarea de fondo `flexMedia` (reconciliar, miniaturas, guardar), caché de miniaturas, menú/diálogo y ruta de la clave compartidos |
-| `FlexOS_Ultra_MediaKit.h` | kit de listas: selección, "Seleccionar todo" (sin protegidos), menú por elemento, acciones y la hoja del servidor |
-| `FlexOS_Ultra_AppGallery.h` | Galería (fotos, vídeos, dibujos) |
+| `FlexOS_Ultra_FileKit.h` | menú, nombre, confirmación y Papelera (hasta 256 elementos; la lista vive en PSRAM y se suelta al cerrarla) |
+| `FlexOS_Ultra_MediaKit.h` | kit de listas: selección, "Seleccionar todo"/"Deseleccionar todo" (sin protegidos), menú por elemento, acciones y la hoja del servidor. Menú, diálogos y Papelera con los colores y el material del tema |
+| `FlexOS_Ultra_MediaViewer.h` | **el** visor de fotos, dibujos y vídeos del sistema (§10); lo usan la Galería y Multimedia |
+| `FlexOS_Ultra_AppGallery.h` | Galería (fotos, vídeos, dibujos); un toque abre el elemento en su propio visor, sin salir de la app |
 | `FlexOS_Ultra_GalleryEdit.h` | editor de la Galería (§7) |
-| `FlexOS_Ultra_AppMultimedia.h` | lista + visor (foto, AVI MJPEG); el audio lo manda a Música |
+| `FlexOS_Ultra_AppMultimedia.h` | lista de vídeos y fotos; abre cada elemento en el visor común (§10); el audio lo manda a Música |
 | `FlexOS_Ultra_AppMusic.h` | Música: lista, "Reproduciendo", anterior/siguiente sin protegidos, DMA alimentado desde `loop()` |
-| `FlexOS_Ultra_WebServer.h` | tarea `flexWeb`, cola de eventos hacia `loopTask`, hoja "Conectar con el móvil" con QR |
+| `FlexOS_Ultra_WebServer.h` | tarea `flexWeb`, cola de eventos hacia `loopTask`, hoja "Conectar con el móvil" con QR (repinta solo la zona que cambia, §11) |
 
 Funciones de la biblioteca que usan las apps (todas en `loopTask`):
 `mlGet`, `mlRev`, `mlDelete`, `mlTrash`, `mlSetLock`, `mlRename`,
@@ -144,9 +146,15 @@ Funciones de la biblioteca que usan las apps (todas en `loopTask`):
 
 ## 7. El editor de la Galería
 
-**Entrada:** pulsación larga sobre una foto → menú → **Editar**. Solo se
-ofrece para fotos JPEG no protegidas que el P4 sabe decodificar
-(`gedEditable`). Lo protegido no se edita.
+**Entrada:** pulsación larga sobre una foto → menú → **Editar**, o el botón
+**Editar** de la barra del visor (§10). Solo se ofrece para fotos JPEG no
+protegidas que el P4 sabe decodificar (`gedEditable`). Lo protegido no se
+edita.
+
+**Aspecto:** los colores y las superficies son los del tema del sistema
+(Claro/Oscuro, Liquid Glass o plano: `uiSurfaceFlat`/`uiSurface` y los
+tokens `TH_*`), no una paleta propia. Solo lo que va **encima de la foto**
+(marco de recorte, tercios, marco del texto) es blanco/negro fijo.
 
 **Herramientas:** Recortar (esquinas, lados y mover; proporciones Libre, 1:1,
 4:3, 3:4, 16:9 y Original; girar 90° a izquierda y derecha; voltear en
@@ -168,6 +176,10 @@ pasos; arrastrar un regulador es **un** paso.
   recorte pida más detalle; se calcula una vez por cambio y se guarda en
   RGB565, así que arrastrar un recorte, dibujar o colocar un texto solo
   recompone encima. En vivo, como mucho un repintado cada 40 ms.
+- **Abrir** lee la foto **por trozos**: el decodificador en flujo guarda una
+  ventana de 8 KB y, al leer la cabecera, `gedPickCb` elige el divisor (1, 2,
+  4 u 8) con la PSRAM libre real y reserva la base en un bloque. Antes se
+  leía el archivo entero (hasta 6 MB) a PSRAM y luego se decodificaba.
 - **Abrir y guardar** corren en un trabajador de un solo uso (`flexEdit`,
   núcleo 1, prioridad 1, 8 KB de pila), con progreso real y Cancelar. Mientras
   trabaja, la interfaz no toca el estado; el resultado se publica con barrera
@@ -204,7 +216,7 @@ UndefinedBehaviorSanitizer) y las pruebas web con Node y Chromium:
 | `test_mediaweb`, `test_httpshare`, `test_qr` | servidor, protocolo HTTP y QR |
 | `test_media` | clasificación, AVI/MJPEG, WAV PCM e IMA ADPCM por bloques |
 | `test_imgedit` | el núcleo del editor: identidad exacta, giros/volteos/recorte, historial (incluido restablecer y deshacer), cada ajuste en su sentido, filtros, trazos/formas/textos pegados a la foto, copia reducida, guardado por bandas que el firmware abre y cancelación sin memoria viva |
-| `test_ino` | el sketch entero enlazado: kit de listas, Música y el **editor de punta a punta** sobre un disco en memoria (abrir, toques reales, copia, reemplazo, protegidos, cancelar, disco lleno, escritura que falla, soltar memoria y releer, guardado en segundo plano, trabajador que tarda) |
+| `test_ino` | el sketch entero enlazado: kit de listas, Música y el **editor de punta a punta** sobre un disco en memoria (abrir, toques reales, copia, reemplazo, protegidos, cancelar, disco lleno, escritura que falla, soltar memoria y releer, guardado en segundo plano, trabajador que tarda); el **visor** mirando el framebuffer (ajuste y centrado en las dos orientaciones, vidrio idéntico tras repintar y tras Play/Pausa ×10, auto-ocultado, pellizco, arrastre, deslizar, Papelera, protegidos, sin captura en Recientes, vídeo, PSRAM devuelta); la hoja web que solo repinta su zona viva; el menú contextual sin vidrio apilado; la Papelera con más de 16 elementos |
 | `check_wiring.py` | ganchos obligatorios y llamadas prohibidas (p. ej. el trabajador del editor no pinta, no avisa por la isla y no cambia el catálogo) |
 | `tests/web` | interfaz del móvil (conversión, subida, biblioteca, bloqueo) contra el servidor real compilado para el PC |
 
@@ -231,9 +243,111 @@ tablas grandes de los medios (selección, vistas, cola de eventos del
 servidor) se reservan en PSRAM para no gastar la RAM interna, que es la
 justa.
 
+**Core 3.2.1 (auditoría del 26-09-2026):** el sketch se volvió a compilar
+(sin enlazar) con el toolchain y las librerías reales de arduino-esp32 3.2.1
+para `esp32p4`, con los mismos flags de su `platform.txt`: compila, sin
+avisos nuevos en los módulos tocados.
+
 **No ejecutado aún en el ESP32-P4 real** (no hay placa en este entorno): los
 tiempos de apertura y guardado del editor, la fluidez de la vista previa en
-vivo y el consumo real de PSRAM en cada paso. Todo lo anterior está
+vivo, los tiempos del visor (abrir, pellizco, vídeo), el efecto real de la
+corrección del destello cian (§11) y el consumo real de PSRAM en cada paso. Todo lo anterior está
 comprobado en el PC con el mismo código; las cifras de rendimiento hay que
 tomarlas en la placa (el editor escribe en Serie el tamaño y los KB de cada
 guardado).
+
+## 10. El visor común (Galería y Multimedia)
+
+`FlexOS_Ultra_MediaViewer.h` es el **único** visor de fotos, dibujos y vídeos
+del sistema. Cada app lo usa con su `VwHost` (qué app es, su sesión para
+volver al mismo elemento, el vecino para deslizar y, si la app lo ofrece,
+Editar). El visor anterior de Multimedia se retiró.
+
+- **Abrir:** en la Galería, un toque abre el elemento **dentro de la
+  Galería**; desde la rejilla, con una expansión desde la miniatura
+  (240 ms). "Abrir en Multimedia" sigue en la pulsación larga para los
+  vídeos que se reproducen.
+- **Ajuste:** la foto se decodifica en la tarea de medios **por flujo** a una
+  resolución suficiente (tope 2 MP) y se escala exacta (bilineal en reposo,
+  vecino más cercano mientras el dedo se mueve), centrada y sin deformar. El
+  vídeo (AVI MJPEG) se decodifica fila a fila al tamaño mostrado.
+- **Orientación:** automática, vertical u horizontal. En horizontal el lienzo
+  es de 800×480 durante toda la sesión (imagen, barras y tacto en las mismas
+  coordenadas) y no hay barra del sistema encima.
+- **Gestos:** pellizco con los puntos reales del GT911 (lo que está bajo los
+  dedos se queda bajo los dedos), arrastre libre con zoom, doble toque,
+  deslizar para el siguiente. Fotos **y** vídeos. El pellizco no cuenta como
+  gesto de suspensión.
+- **Barras:** arriba volver, nombre y orientación; abajo, en una foto,
+  Editar (si se puede) y Papelera; en un vídeo, progreso, −10 s,
+  reproducir/pausa, +10 s y Papelera. Se ocultan solas a los 3 s con fundido
+  y un toque las muestra u oculta. Mientras suena un vídeo, el progreso se
+  repinta como mucho cada 250 ms.
+- **Liquid Glass sin apilar:** el contenido limpio vive en su propio lienzo
+  (`vwClean`) y las barras se componen **siempre** sobre una copia limpia;
+  el fondo desenfocado de cada barra se prepara una vez por cambio de fondo.
+  Antes, cada Play/Pausa volvía a desenfocar el propio dibujo del vidrio y
+  la barra se iba oscureciendo. El material y los colores son los del tema.
+- **Protegidos:** no ofrecen Papelera ni Editar, no se recuerdan al pasar a
+  segundo plano, se sueltan de la RAM con el P4 bloqueado (`vwLockTick`), el
+  visor se cierra si el elemento se protege mientras se ve, y **Recientes
+  no guarda la captura** de la app mientras el visor enseña algo protegido
+  (`vwShowsProtected` en `appSuspend`).
+
+## 11. Transferencias grandes y el destello cian
+
+**Reinicios con archivos de 2-5 MB.** Validar una subida y hacer su
+miniatura leía el archivo **entero** en un buffer (hasta 6 MB) en la tarea
+del servidor y otra vez en la de miniaturas, a la vez; y `mediaAlloc` caía a
+la RAM interna con cualquier tamaño cuando la PSRAM no daba. Ahora:
+
+- El decodificador JPEG tiene un **modo flujo** (`flexJpegProbeStream`,
+  `flexJpegDecodeStream`, `flexJpegDecode888Stream`): ventana de 8 KB, los
+  segmentos que no hacen falta (EXIF, miniaturas incrustadas) se saltan sin
+  guardarlos y la salida es idéntica bit a bit a la del modo memoria. Lo usan
+  la validación de subidas, las miniaturas (`flexThumbFromJpegStream`), el
+  visor y el editor.
+- **Trabajo pesado de uno en uno** (`mediaHeavyBegin`/`End`): servidor, tarea
+  de miniaturas y visor no decodifican a la vez. Si en un minuto no hay
+  turno, la subida responde 503 "en curso" y el móvil la reintenta sola. El
+  editor no entra en esa fila (el visor se suelta antes de abrirlo): también
+  lee por flujo y elige su resolución con la PSRAM libre real al abrir.
+- `mediaAlloc` solo usa la RAM interna para bloques de hasta 4 KB y dejando
+  48 KB libres. Los buffers de `handleUpload` van al heap y la tarea web
+  tiene 14 KB de pila (`mlStackCheck` avisa por Serie si el margen baja de
+  2 KB).
+
+**La hoja "Conectar con el móvil".** Mientras estaba abierta se rehacía
+entera (vidrio incluido) cada 400 ms, hubiera cambios o no. Ahora separa una firma de
+lo **fijo** (estado, tema, código, URL) y otra de lo **vivo** (sesiones,
+subidas, descargas, tarjetas): si solo cambia lo vivo, repinta y envía al
+panel solo esa franja; si nada cambia, no pinta nada.
+
+**El destello cian (azul) al recibir archivos.** Causa, leída en el código
+del ESP-IDF 5.4 que trae el core 3.2.1 y en su `sdkconfig`:
+
+1. El driver DPI relanza, **desde una interrupción** al final de cada cuadro,
+   el DMA que refresca el panel.
+2. Cada borrado o escritura de la flash (LittleFS al guardar un archivo, una
+   miniatura o el catálogo) **apaga la caché** mientras dura; con ella se
+   bloquea toda interrupción que no sea IRAM-safe. Un borrado de sector dura
+   decenas de ms.
+3. El `sdkconfig` del core 3.2.1 para `esp32p4` trae
+   `# CONFIG_LCD_DSI_ISR_IRAM_SAFE is not set`,
+   `# CONFIG_SPI_FLASH_AUTO_SUSPEND is not set` y
+   `# CONFIG_SPIRAM_XIP_FROM_PSRAM is not set`: la interrupción del panel
+   espera a la flash, el puente DSI se queda sin píxeles y el panel se ve
+   azul/cian hasta el cuadro siguiente. El propio driver lo dice en el código
+   ("when an underrun happens, the LCD display may already becomes blue") y
+   la ayuda de la opción: "If you want the LCD driver to keep flushing the
+   screen even when cache ops disabled, you can enable this option".
+
+Qué hace el firmware, y qué no puede hacer: el callback del panel ya está en
+IRAM (requisito del driver con la opción activada; sin ella no cambia nada),
+al arrancar avisa por Serie si el core no trae la opción
+(`[HW] aviso: core sin CONFIG_LCD_DSI_ISR_IRAM_SAFE ...`), y las
+transferencias ya no reservan ni leen archivos enteros ni repintan la hoja
+entera. Pero **mientras la flash se escribe con la caché apagada, ningún
+código del sketch puede refrescar el panel**: la corrección completa es de
+configuración del core. Cómo aplicarla y cómo comprobarla está en
+`INSTALACION-USB-P4.md` §5. No se ha podido comprobar en una placa real.

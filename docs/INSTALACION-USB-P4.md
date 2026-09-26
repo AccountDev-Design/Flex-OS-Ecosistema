@@ -184,3 +184,79 @@ Nada de lo anterior destruye el sistema OTA. Para recuperarlo:
 
 **Ojo:** el paso 2 cambia la tabla de particiones y por tanto **sí**
 borra LittleFS. Hay que avisar al usuario antes.
+
+---
+
+## 5. Pantalla: destello azul/cian al escribir la flash
+
+**Síntoma.** Mientras llega un archivo por Flex Web Server (o se guardan
+miniaturas o el catálogo), la pantalla se pone cian/azul un instante y
+vuelve sola; puede repetirse varias veces seguidas.
+
+**Causa** (detalle en `FLEX-MEDIA-ECOSYSTEM.md` §11). Las librerías
+precompiladas del core **3.2.1** para `esp32p4` (ESP-IDF 5.4) traen en su
+`sdkconfig`:
+
+```
+# CONFIG_LCD_DSI_ISR_IRAM_SAFE is not set
+# CONFIG_SPI_FLASH_AUTO_SUSPEND is not set
+# CONFIG_SPIRAM_XIP_FROM_PSRAM is not set
+```
+
+(la opción equivalente de los paneles RGB, `CONFIG_LCD_RGB_ISR_IRAM_SAFE`,
+sí viene activada). Cada borrado o escritura de la flash apaga la caché;
+mientras dura, la interrupción que relanza el refresco del panel DSI no
+puede ejecutarse, el puente DSI se queda sin píxeles y el panel muestra
+azul/cian. **Ningún código del sketch puede refrescar el panel durante esa
+ventana**: el firmware ya reduce el trabajo de memoria y de pantalla durante
+las transferencias, pero la corrección completa es de configuración del core.
+
+### Cómo comprobarlo en tu placa (antes de cambiar nada)
+
+1. Monitor Serie a 115200 baudios.
+2. Al arrancar, Flex OS escribe
+   `[HW] aviso: core sin CONFIG_LCD_DSI_ISR_IRAM_SAFE (CACHE_SAFE); al escribir la flash el panel puede destellar`.
+   Si **no** sale, tu core ya trae la corrección (o XIP desde PSRAM).
+3. Envía una foto grande desde el móvil. Si al mismo tiempo que el destello
+   aparece `E lcd.dsi.dpi: can't fetch data from external memory fast enough, underrun happens`
+   (es el mensaje del propio driver; está en la `libesp_lcd.a` del core
+   3.2.1), la causa es esta.
+
+### Cómo corregirlo
+
+Cualquiera de estas, **una sola**:
+
+* **Librerías del core recompiladas con la opción.** Con
+  `esp32-arduino-lib-builder` (la herramienta de Espressif que genera las
+  `esp32-arduino-libs` del core), en la rama del ESP-IDF 5.4 que corresponde
+  al core 3.2.1, añadir a `configs/defconfig.esp32p4`:
+
+  ```
+  CONFIG_LCD_DSI_ISR_IRAM_SAFE=y
+  ```
+
+  (activa también `CONFIG_DW_GDMA_ISR_IRAM_SAFE`), compilar para `esp32p4` y
+  sustituir la carpeta `esp32p4` de
+  `packages/esp32/tools/esp32-arduino-libs/<version>/` por la generada.
+  Guarda antes una copia de la original.
+* **Arduino como componente de ESP-IDF** (`idf.py`): en `idf.py menuconfig`,
+  *Component config → ESP-Driver:LCD Controller Configurations → DSI LCD
+  ISR IRAM-Safe*.
+* **PlatformIO con pioarduino**: su opción `custom_sdkconfig` recompila las
+  librerías con la línea `CONFIG_LCD_DSI_ISR_IRAM_SAFE=y` (según la
+  documentación de pioarduino).
+
+En un ESP-IDF más nuevo la opción se llama `CONFIG_LCD_DSI_ISR_CACHE_SAFE`;
+el firmware reconoce las dos.
+
+Qué cambia al activarla: el driver exige que el callback del panel esté en
+IRAM y que su contexto esté en RAM interna. Flex OS ya lo cumple
+(`flxDpiFlushDone` es `IRAM_ATTR` y el semáforo lo crea FreeRTOS, que lo
+reserva en RAM interna), así
+que el panel arranca igual. Sube algo el uso de IRAM: tras compilar, mira que
+la RAM estática siga dejando margen (§0).
+
+Después: el aviso `[HW] aviso: core sin ...` deja de salir y, si la causa
+era esta, el mensaje de *underrun* y el destello desaparecen. **No se ha
+podido comprobar en una placa real** desde este entorno: la causa está
+leída en el código y la configuración del core, no medida en el P4.

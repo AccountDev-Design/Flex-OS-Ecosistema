@@ -96,19 +96,23 @@ static const FlxDcsRow ST7701_INIT[] = {
 
 // PANEL Y FLASH (el destello azul/cian durante las transferencias).
 // El driver DPI del ESP-IDF 5.4 relanza el DMA que refresca el panel DESDE UNA
-// INTERRUPCION al final de cada cuadro (mipi_dsi_dma_trans_done_cb, ~16,5 ms
-// con esta temporizacion). Cada borrado o escritura de la flash -- LittleFS al
-// recibir un archivo, una miniatura, el catalogo -- apaga la cache y con ella
-// toda interrupcion que no sea "cache safe" hasta que termina: un borrado de
-// sector dura decenas de ms, el relanzamiento no llega a tiempo y el puente
-// DSI se queda sin pixeles (el propio driver avisa: "underrun ... the LCD
-// display may already becomes blue"). Vuelve solo al terminar la operacion.
-// La correccion es de configuracion del core: CONFIG_LCD_DSI_ISR_CACHE_SAFE=y
-// (o XIP desde PSRAM, con la que la flash ya no apaga la cache). Con esa
-// opcion el driver RECHAZA un callback que no este en IRAM y el panel no
-// arrancaria: por eso este va en IRAM (sin la opcion no cambia nada).
+// INTERRUPCION al final de cada cuadro (dma_trans_done_cb; en IDF mas nuevos
+// mipi_dsi_dma_trans_done_cb), unos 16,5 ms con esta temporizacion. Cada
+// borrado o escritura de la flash -- LittleFS al recibir un archivo, una
+// miniatura, el catalogo -- apaga la cache y con ella toda interrupcion que
+// no sea "cache safe" hasta que termina: un borrado de sector dura decenas de
+// ms, el relanzamiento no llega a tiempo y el puente DSI se queda sin pixeles
+// (el propio driver avisa: "underrun ... the LCD display may already becomes
+// blue"). Vuelve solo al terminar la operacion.
+// La correccion es de configuracion del core: CONFIG_LCD_DSI_ISR_IRAM_SAFE=y
+// en el ESP-IDF 5.4 del core 3.2.1 (en IDF mas nuevos se llama
+// CONFIG_LCD_DSI_ISR_CACHE_SAFE), o XIP desde PSRAM, con la que la flash ya no
+// apaga la cache. Con esa opcion el driver RECHAZA un callback que no este en
+// IRAM (y un contexto fuera de la RAM interna: el semaforo lo esta) y el panel
+// no arrancaria: por eso este va en IRAM (sin la opcion no cambia nada).
 #if defined(CONFIG_LCD_DSI_ISR_CACHE_SAFE) || defined(CONFIG_LCD_DSI_ISR_IRAM_SAFE) || \
-    defined(CONFIG_SPI_FLASH_AUTO_SUSPEND) || (defined(CONFIG_SPIRAM_FETCH_INSTRUCTIONS) && defined(CONFIG_SPIRAM_RODATA))
+    defined(CONFIG_SPI_FLASH_AUTO_SUSPEND) || defined(CONFIG_SPIRAM_XIP_FROM_PSRAM) || \
+    (defined(CONFIG_SPIRAM_FETCH_INSTRUCTIONS) && defined(CONFIG_SPIRAM_RODATA))
   #define FLX_PANEL_FLASH_SAFE 1
 #else
   #define FLX_PANEL_FLASH_SAFE 0
@@ -252,7 +256,7 @@ static bool flexPanelInit(){
   // Una linea, una vez: explica en el monitor serie el destello azul/cian que
   // se vera al escribir la flash (ver flxDpiFlushDone). En la placa se
   // confirma con el aviso "underrun" del propio driver en el mismo instante.
-  Serial.println(F("[HW] aviso: core sin CONFIG_LCD_DSI_ISR_CACHE_SAFE; al escribir la flash el panel puede destellar"));
+  Serial.println(F("[HW] aviso: core sin CONFIG_LCD_DSI_ISR_IRAM_SAFE (CACHE_SAFE); al escribir la flash el panel puede destellar"));
 #endif
   gBlPwm = ledcAttach(PIN_LCD_BL, 20000, 8);   // backlight ON con brillo PWM
   if(gBlPwm) setBacklight(gBright);
