@@ -1119,12 +1119,19 @@ static void gedReclaim(){
   Serial.println(F("[editor] el trabajador termino: memoria recogida"));
 }
 
+// El editor devuelve la pantalla a la Galeria (rejilla o visor). Es un
+// CAMBIO DE PANTALLA, no un repintado: el marco se rehace entero UNA vez
+// (mkRedrawAll, lo mismo que al cerrar el visor), para que nada de lo que el
+// editor -- o lo que habia antes que el -- dejo fuera de la caja de la app
+// sobreviva en la pantalla siguiente. No es un repintado por cuadro.
+static void gedToGallery(){ mkRedrawAll(); }
+
 // Se cierra por algo de fuera (la foto se protegio o se borro): fuera los
 // pixeles YA, y se dice por que.
 static void gedAbort(const char* why){
   Serial.printf("[editor] cerrado: %s\n", why);
   gedCloseNow();
-  if(gedForeground()){ galRender(); mmDlgOpen("Editor cerrado", why, "Aceptar", "", false); gedAsk = GA_INFO; }
+  if(gedForeground()){ gedToGallery(); mmDlgOpen("Editor cerrado", why, "Aceptar", "", false); gedAsk = GA_INFO; }
   else sysNotify("Galer\xC3\xAD" "a", why);
 }
 
@@ -1171,7 +1178,11 @@ static bool gedOpen(uint32_t id){
   gedReopen = false; gedSeenRev = mlRev();
   Serial.printf("[editor] abriendo id=%lu (%lu KB)\n", (unsigned long)id, (unsigned long)(r.size / 1024u));
   gedStartOpen();
-  gedRender();
+  // CAMBIO DE PANTALLA: el marco ENTERO, una vez (ver gedToGallery). El
+  // editor solo repinta su caja; sin esto heredaba lo que la pantalla anterior
+  // dejo fuera de ella -- en modo gestos, la franja de 64 px de abajo con un
+  // trozo de la rejilla o de la foto del visor a pantalla completa.
+  mkRedrawAll();
   return true;
 }
 
@@ -1261,11 +1272,11 @@ static bool gedCollect(){
       Serial.printf("[editor] lista: %dx%d (archivo %dx%d)%s\n", gedW, gedH, gedSrcW, gedSrcH, gedProxy ? ", con copia reducida" : "");
     } else if(j->rc == 1){
       gedCloseNow();
-      if(gedForeground()) galRender();
+      if(gedForeground()) gedToGallery();
     } else {
       char why[sizeof(j->why)]; memcpy(why, j->why, sizeof(why)); why[sizeof(why) - 1] = 0;
       gedCloseNow();
-      if(gedForeground()){ galRender(); mmDlgOpen("No se puede editar", why, "Aceptar", "", false); gedAsk = GA_INFO; }
+      if(gedForeground()){ gedToGallery(); mmDlgOpen("No se puede editar", why, "Aceptar", "", false); gedAsk = GA_INFO; }
       else sysNotify("Galer\xC3\xAD" "a", why);
     }
     return true;
@@ -1276,7 +1287,7 @@ static bool gedCollect(){
     if(j->rc == 0){
       if(gedCommit(msg, sizeof(msg))){
         gedCloseNow();                              // hecho: se vuelve a la Galeria
-        if(gedForeground()) galRender();
+        if(gedForeground()) gedToGallery();
         sysNotify("Galer\xC3\xAD" "a", msg);
         return true;
       }
@@ -1426,13 +1437,13 @@ static bool gedBack(){
     return true;
   }
   gedCloseNow();
-  galRender();
+  gedToGallery();
   return true;
 }
 
 static void gedDlgResult(int r){
   uint8_t a = gedAsk; gedAsk = GA_NONE;
-  if(a == GA_DISCARD && r == 1){ gedCloseNow(); galRender(); return; }
+  if(a == GA_DISCARD && r == 1){ gedCloseNow(); gedToGallery(); return; }
   if(a == GA_REPLACE && r == 1){ gedStartSave(GS_REPLACE); return; }
   if(a == GA_REPLACE){ gedSheet = true; }
   if(gedActive()) gedRender(); else galRender();

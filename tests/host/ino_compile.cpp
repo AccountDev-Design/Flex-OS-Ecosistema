@@ -234,8 +234,20 @@ esp_err_t esp_lcd_panel_io_del(esp_lcd_panel_io_handle_t){ return ESP_OK; }
 esp_err_t esp_lcd_panel_init(esp_lcd_panel_handle_t){ return ESP_OK; }
 esp_err_t esp_lcd_panel_reset(esp_lcd_panel_handle_t){ return ESP_OK; }
 esp_err_t esp_lcd_panel_del(esp_lcd_panel_handle_t){ return ESP_OK; }
-esp_err_t esp_lcd_panel_draw_bitmap(esp_lcd_panel_handle_t, int, int y0, int, int y1, const void*){
-  gPanelDrawCalls++; gPanelLastY0 = y0; gPanelLastY1 = y1 - 1; return ESP_OK;
+// SOMBRA DEL PANEL. fb es lo que el sketch COMPONE; lo que el usuario VE es lo
+// que llega a esp_lcd_panel_draw_bitmap. Las dos cosas pueden separarse: un
+// pixel escrito en fb fuera de la banda que se publica no llega al panel hasta
+// que alguien vuelque esas filas, y lo que el panel tenia se queda ahi. Con
+// gPanelShadow apuntando a un lienzo de 480x800, este doble copia cada banda
+// publicada, asi una prueba puede mirar la pantalla de verdad y no solo fb.
+// (480/800 en crudo porque el sketch se incluye despues; un static_assert tras
+// el include comprueba que coinciden con SCR_W/SCR_H.)
+uint16_t* gPanelShadow = nullptr;
+esp_err_t esp_lcd_panel_draw_bitmap(esp_lcd_panel_handle_t, int, int y0, int, int y1, const void* data){
+  gPanelDrawCalls++; gPanelLastY0 = y0; gPanelLastY1 = y1 - 1;
+  if(gPanelShadow && data && y0 >= 0 && y1 <= 800 && y1 > y0)
+    memcpy(gPanelShadow + (size_t)y0 * 480, data, (size_t)(y1 - y0) * 480 * 2);
+  return ESP_OK;
 }
 esp_err_t esp_lcd_panel_disp_on_off(esp_lcd_panel_handle_t, bool){ return ESP_OK; }
 esp_err_t esp_lcd_panel_disp_sleep(esp_lcd_panel_handle_t, bool){ return ESP_OK; }
@@ -271,6 +283,7 @@ static void geoEnterSelect();
 // vez de dejar una prueba que ya no comprueba lo que dice comprobar.
 static_assert(STUB_PIN_SDA == PIN_TP_SDA, "el doble de SDA no coincide con el sketch");
 static_assert(STUB_PIN_SCL == PIN_TP_SCL, "el doble de SCL no coincide con el sketch");
+static_assert(SCR_W == 480 && SCR_H == 800, "la sombra del panel asume 480x800");
 #undef free
 
 // #############################################################
@@ -8471,6 +8484,92 @@ static void testKitTemaYPapelera(){
   gState = ST_HOME; gAppId = 0; gAppState[IC_GALERIA] = ALIFE_CLOSED; touchReset();
 }
 
+// #############################################################
+//  GALERIA · NADA FUERA DE SU CAJA, NI EN EL PANEL NI EN EL EDITOR
+//  ------------------------------------------------------------
+//  El fallo de las fotos del usuario ("partes de las imagenes de abajo
+//  cortadas, pegadas y congeladas al desplazar; el editor las hereda"):
+//  con la barra en modo GESTOS, la ultima fila de la rejilla se desbordaba
+//  en la franja de 64 px de abajo, que en ese modo no repinta nadie. La
+//  rejilla publica hasta WIN_BOT, asi que el trozo se quedaba en fb; el
+//  siguiente volcado completo (cerrar el visor) lo sacaba al panel, y ahi
+//  se quedaba congelado mientras el resto se desplazaba. Se mira la SOMBRA
+//  del panel (lo que se ve de verdad), no solo fb, en los dos modos de barra.
+// #############################################################
+static void testGaleriaSinRestos(){
+  printf("Galeria: la rejilla no sale de su caja, el panel no conserva restos y el editor no los hereda\n");
+  int before = gFails;
+  std::vector<uint16_t> shadow((size_t)SCR_W * SCR_H, 0);
+  uint16_t* sh0 = gPanelShadow; gPanelShadow = shadow.data();
+  int nav0 = gNavMode; bool ok0 = gMlOk;
+  tkReset();
+  uint32_t first = 0;
+  for(int i = 0; i < 12; i++){
+    char p[40]; snprintf(p, sizeof(p), "/Imagenes/foto%02d.jpg", i);
+    uint32_t id = tkAdd(FML_K_PHOTO, FML_F_JPEG, p, NULL, false, true);
+    if(!first) first = id;
+  }
+  gMlOk = true;
+  const int bandRows = SCR_H - WIN_BOT;
+  auto bandOf = [&](const uint16_t* buf, std::vector<uint16_t>& out){
+    out.assign(buf + (size_t)WIN_BOT * SCR_W, buf + (size_t)SCR_H * SCR_W);
+  };
+  for(int mode = 0; mode < 2; mode++){           // 0 = botones, 1 = gestos
+    gNavMode = mode;
+    const char* mn = mode ? "gestos" : "botones";
+    shotApp(IC_GALERIA); mkBind(&GAL_APP); mkReset(); galViewReady = false; galScroll = 0;
+    flxFlushAll();                                // el marco de la app, tal cual: lo que DEBE verse abajo
+    std::vector<uint16_t> want, got;
+    bandOf(shadow.data(), want);
+    // Cerrar el visor rehace el marco entero (mkRedrawAll): el volcado que
+    // sacaba el desborde al panel.
+    mkRedrawAll();
+    bandOf(shadow.data(), got);
+    chkf(got == want, "[%s] tras un volcado completo, la franja de abajo es la del sistema (sin trozos de la rejilla)", mn);
+    bandOf(fb, got);
+    chkf(got == want, "[%s] y en fb tampoco queda nada de la rejilla por debajo de su caja", mn);
+    int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+    const int hdrRows = galHeadH() - 6;
+    std::vector<uint16_t> hdr0(fb + (size_t)by * SCR_W, fb + (size_t)(by + hdrRows) * SCR_W);
+    int maxS = galMaxScroll();
+    chkf(maxS > 60, "[%s] hay recorrido de desplazamiento (%d px)", mn, maxS);
+    const int steps[5] = { 9, 40, 77, maxS / 2, maxS };
+    for(int k = 0; k < 5; k++){
+      galScroll = steps[k]; galRender();
+      bandOf(shadow.data(), got);
+      chkf(got == want, "[%s] desplazando a %d px, el panel no conserva un trozo congelado abajo", mn, steps[k]);
+      bandOf(fb, got);
+      chkf(got == want, "[%s] desplazando a %d px, la rejilla no escribe fuera de su caja", mn, steps[k]);
+      bool hdrSame = !memcmp(hdr0.data(), fb + (size_t)by * SCR_W, hdr0.size() * 2);
+      chkf(hdrSame, "[%s] desplazando a %d px, ninguna etiqueta se pinta sobre las pestanas", mn, steps[k]);
+    }
+    mkRedrawAll();                                // otro volcado completo, ya desplazada
+    bandOf(shadow.data(), got);
+    chkf(got == want, "[%s] volcado completo con la rejilla desplazada: franja limpia", mn);
+    // ---- El editor NO hereda lo que la pantalla anterior dejo abajo ----
+    // El visor, en modo gestos, ocupa la pantalla entera: al pulsar Editar la
+    // foto se queda en esas filas. Se simula con un color que no usa nadie.
+    setBuf(fb); uiClipFull();
+    fillRect(0, WIN_BOT, SCR_W, bandRows, TC(255, 0, 255));
+    flxFlushAll();
+    chkf(gedOpen(first), "[%s] el editor se abre sobre una foto JPEG", mn);
+    bandOf(shadow.data(), got);
+    chkf(got == want, "[%s] el editor rehace el marco: no hereda la franja de la pantalla anterior", mn);
+    gedWorker(nullptr);                            // el trabajo de abrir termina (sin disco: falla limpio)
+    gedCloseNow();
+    gedToGallery();
+    bandOf(shadow.data(), got);
+    chkf(got == want, "[%s] al volver a la Galeria desde el editor, la franja sigue limpia", mn);
+  }
+  mkReset();
+  gNavMode = nav0; gMlOk = ok0;
+  gPanelShadow = sh0;
+  memset(&gMs, 0, sizeof(gMs));
+  gState = ST_HOME; gAppId = 0;
+  uiClipFull(); setBuf(fb);
+  if(gFails == before) printf("  Galeria sin restos: todas las comprobaciones pasan.\n");
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -8580,6 +8679,7 @@ int main(){
   testKitTemaYPapelera();
   testHojaWebLocalizada();
   testCapturasVisor();
+  testGaleriaSinRestos();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

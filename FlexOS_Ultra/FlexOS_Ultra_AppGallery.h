@@ -256,15 +256,26 @@ static void galRenderGrid(){
     drawTextC(bx + bw / 2, by + bh / 2 + 24, "men\xC3\xBA > Conectar con el m\xC3\xB3vil", 1, TH_MUTE);
   }
 
+  // VIEWPORT EXCLUSIVO DE LA REJILLA (el mismo patron que Multimedia y el
+  // Explorador, ver uiClipViewport). Antes solo se recortaba la CELDA por
+  // arriba: la etiqueta de una fila subida se pintaba encima de las pestanas,
+  // y la ultima fila visible se desbordaba por DEBAJO de la caja de la app, en
+  // la franja de 64 px de la barra del sistema. En modo gestos esa franja no
+  // la repinta nadie y rejilla la publica solo hasta WIN_BOT, asi que el trozo
+  // desbordado se quedaba en fb: el siguiente volcado completo (cerrar el
+  // visor, un menu) lo sacaba al panel y ahi se quedaba CONGELADO mientras el
+  // resto de la rejilla se desplazaba -- las fotos "cortadas y pegadas" --, y
+  // el editor lo heredaba debajo de su barra de herramientas. Con el recorte,
+  // ni un pixel de la rejilla sale de [cabecera, fondo de la caja].
+  const int vpTop = by + galHeadH() - 6, vpBot = by + bh - 1;
+  uiClipViewport(vpTop, vpBot);
   for(int i = 0; i < n; i++){
     int x, y, w, h; galCellRect(i, x, y, w, h);
     // SOLO LAS VISIBLES: una galeria de 300 fotos cuesta lo mismo que una de 9.
-    if(y + h < by + galHeadH() - 40 || y > by + bh) continue;
+    // La huella de una fila es la celda MAS su etiqueta (h + 26).
+    if(y + h + 26 <= vpTop || y > vpBot) continue;
     const FlexMlRec* r = galRecLocked(i);
-    int ox0 = gClipX0, ox1 = gClipX1, oy0 = gClipY0, oy1 = gClipY1;
-    gClipY0 = by + galHeadH() - 6 > oy0 ? by + galHeadH() - 6 : oy0;
-    galDrawCell(r, x, y, w, h, budget);
-    gClipX0 = ox0; gClipX1 = ox1; gClipY0 = oy0; gClipY1 = oy1;
+    galDrawCell(r, x, y, w, h, budget);            // recorta la miniatura dentro del viewport y lo restaura
     if(mkMulti){
       bool sel = mkIsSel(r->id);
       int rad = w / 10; if(rad < 3) rad = 3;
@@ -282,6 +293,7 @@ static void galRenderGrid(){
       drawTextClip(x, y + h + 4, nm, 1, TH_TXT2, x + w);
     }
   }
+  uiClipFull();                                    // barra de seleccion y capas: encima, a pantalla completa
   // Recuento de la barra de seleccion, dentro del cerrojo (necesita la vista).
   int selLocked = 0, selOpen = 0, selectable = 0;
   if(mkMulti) mkCountLocked(&galView, &selLocked, &selOpen, &selectable);
