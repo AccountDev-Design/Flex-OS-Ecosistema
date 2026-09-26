@@ -189,7 +189,11 @@ void flexBrowserKeyCancel(){}
 // mismo PBKDF2 a plazos que corre en la placa.
 // Con el disco en memoria (gTestMemFs) lee de verdad: es lo que usa el lector
 // de video del visor (MediaStream). Sin el, falla limpio como sin montar.
+// Contadores de E/S: una prueba comprueba con ellos que el video se lee con el
+// archivo ABIERTO (un open al empezar) y no abriendo por ruta en cada lectura.
+unsigned gTestFsReadAtCalls = 0, gTestFsOpenReads = 0, gTestFsStreamReads = 0;
 int      flexFsReadAt(const char* p, uint32_t off, void* b, size_t n){
+  gTestFsReadAtCalls++;
   if(!memFsHas(p)) return -1;
   auto& f = gTestFiles[p];
   if(off >= f.size()) return 0;
@@ -199,13 +203,14 @@ int      flexFsReadAt(const char* p, uint32_t off, void* b, size_t n){
 }
 // Flujos y movimientos (subidas del movil, biblioteca de medios). Sin
 // sistema de archivos de verdad aqui: todo falla limpio, como sin montar.
-FlexFsStream* flexFsOpenRead(const char* p){ return memFsHas(p) ? new FlexFsStream{ p, 0 } : nullptr; }
+FlexFsStream* flexFsOpenRead(const char* p){ gTestFsOpenReads++; return memFsHas(p) ? new FlexFsStream{ p, 0 } : nullptr; }
 FlexFsStream* flexFsOpenWrite(const char* p){
   if(!gTestMemFs || !p || p[0] != '/') return nullptr;
   gTestFiles[p].clear();                        // crea o vacia, como LittleFS con "w"
   return new FlexFsStream{ p, 0 };
 }
 int      flexFsStreamRead(FlexFsStream* s, void* b, size_t n){
+  gTestFsStreamReads++;
   if(!s || !gTestFiles.count(s->path)) return -1;
   auto& f = gTestFiles[s->path];
   size_t k = s->pos >= f.size() ? 0 : (f.size() - s->pos < n ? f.size() - s->pos : n);

@@ -126,8 +126,29 @@ typedef struct {
 //  buscar un instante salta a la muestra anterior mas cercana y
 //  avanza leyendo cabeceras de trozo, que son 8 bytes cada una.
 //  Precision peor, memoria acotada y sin sorpresas.
+//
+//  La muestra se construye la PRIMERA VEZ que se busca, no al abrir:
+//  una miniatura o la validacion de una subida solo leen el primer
+//  fotograma y no tienen por que recorrer 480 KB de idx1. Un AVI SIN
+//  idx1 (una grabacion que se corto) aprende las posiciones a medida
+//  que se reproduce, con el mismo tope de memoria.
+//
+//  TRABAJO ACOTADO POR LLAMADA. Ninguna llamada recorre un numero
+//  ilimitado de trozos: un archivo danado o hecho a proposito (miles
+//  de trozos vacios) no puede dejar el bucle principal parado ni
+//  disparar el watchdog. Buscar sin indice avanza como mucho
+//  `maxSkips` fotogramas y devuelve donde quedo (antes del pedido,
+//  nunca despues): quien busca puede volver a llamar en la vuelta
+//  siguiente hasta llegar.
 // -------------------------------------------------------------
-#define FLEXAVI_IDX_MAX  512
+#define FLEXAVI_IDX_MAX       512
+#define FLEXAVI_SCAN_MAX      16384u        // trozos que no son video, por llamada
+#define FLEXAVI_SEEK_SKIPS    2048u         // fotogramas saltados por flexAviSeekFrame
+// Mayor fotograma MJPEG que se acepta leer (reproductor, miniatura y
+// validacion de subidas usan el MISMO tope). Un 1080p de camara ronda
+// 300-600 KB; lo que pase de aqui no es un video que esta placa pueda
+// mover y se trata como formato no reproducible, no como archivo danado.
+#define FLEXAVI_FRAME_MAX     (1024u * 1024u)
 
 enum {
   FLEXAVI_OK = 0,
@@ -136,7 +157,7 @@ enum {
   FLEXAVI_ERR_CODEC    = -3,   // es AVI, pero el video no es MJPEG
   FLEXAVI_ERR_NOVIDEO  = -4,   // no tiene pista de video
   FLEXAVI_ERR_EOF      = -5,   // no quedan mas fotogramas
-  FLEXAVI_ERR_TOOBIG   = -6    // un fotograma no cabe en el buffer dado
+  FLEXAVI_ERR_TOOBIG   = -6    // un fotograma no cabe en el buffer dado (ver needBytes)
 };
 
 typedef struct {
@@ -156,11 +177,20 @@ typedef struct {
   uint32_t frameNo;            // indice del proximo fotograma a entregar
 
   // Muestra dispersa: posicion del trozo de video numero
-  // idxFrame[i] dentro del fichero.
+  // idxFrame[i] dentro del fichero. Con idx1 la posicion es la de la
+  // tabla (se resuelve al usarla); aprendida, es absoluta.
   uint32_t idxOff[FLEXAVI_IDX_MAX];
   uint32_t idxFrame[FLEXAVI_IDX_MAX];
   uint16_t idxN;
-  bool     idxFromFile;        // true si vino de idx1 (busqueda fiable)
+  bool     idxFromFile;        // el archivo trae idx1 util (busqueda fiable)
+  uint8_t  idxState;           // interno: pendiente / de idx1 / aprendido
+  uint32_t idx1Off, idx1Len;   // interno: donde esta idx1 (se lee al buscar)
+  uint32_t learnStride;        // interno: se aprende 1 de cada learnStride fotogramas
+
+  // FLEXAVI_ERR_TOOBIG: bytes del fotograma que no cupo. Ese
+  // fotograma NO se consume: quien lee puede ampliar su buffer y
+  // volver a pedirlo, o saltarlo con flexAviSkipFrame.
+  uint32_t needBytes;
 
   uint8_t  videoStream;        // numero de pista de video ('00'..'09')
 } FlexAviCtx;
@@ -176,12 +206,20 @@ uint32_t flexAviDurationMs(const FlexAviCtx* a);
 // Devuelve el numero de fotograma en el que quedo de verdad, que
 // con indice disperso puede ser ANTERIOR al pedido (nunca
 // posterior: nunca se salta contenido sin querer). <0 = error.
+// Si el archivo se acaba antes (grabacion cortada), queda en el
+// ultimo fotograma que existe y `frames` pasa a ser el numero real.
 int  flexAviSeekFrame(FlexAviCtx* a, uint32_t frame);
+// Igual, saltando como mucho `maxSkips` fotogramas en esta llamada.
+int  flexAviSeekFrameMax(FlexAviCtx* a, uint32_t frame, uint32_t maxSkips);
 
 // Lee el siguiente fotograma de video en `buf`. Devuelve los bytes
 // escritos, o un FLEXAVI_ERR_*. Los trozos que no son de la pista
 // de video (audio) se saltan sin leerlos. `frameOut`, si no es
 // NULL, recibe el numero del fotograma entregado.
+// 0 = trozo de video VACIO: en AVI significa "se repite el anterior"
+// (lo escriben ffmpeg y las camaras al duplicar un fotograma); el
+// fotograma cuenta y el llamante deja la imagen que ya tenia.
+// FLEXAVI_ERR_TOOBIG: no cabe en `bufCap`; ver `needBytes`.
 int  flexAviReadFrame(FlexAviCtx* a, void* buf, uint32_t bufCap, uint32_t* frameOut);
 
 // Salta el siguiente fotograma sin leer sus bytes (solo mueve el

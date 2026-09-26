@@ -109,35 +109,44 @@ static int mediaList(const char* dir, FlexFsEntry* out, int maxn){
 // -------------------------------------------------------------
 static void mediaStreamClose(MediaStream* s){
   if(!s) return;
+  if(s->f){ flexFsStreamClose(s->f); s->f = NULL; }
   s->kind = MSTREAM_NONE;
   s->path[0] = 0;
-  s->pos = s->size = 0;
+  s->pos = s->size = s->fpos = 0;
 }
 
 static bool mediaStreamOpen(MediaStream* s, const char* path){
   if(!s || !path) return false;
   mediaStreamClose(s);
-  if(!flexFsReady() || !flexFsExists(path)) return false;
+  if(!flexFsReady()) return false;
+  s->f = flexFsOpenRead(path);
+  if(!s->f) return false;
   s->kind = MSTREAM_INT;
-  s->size = flexFsSize(path);
+  s->size = flexFsStreamSize(s->f);
   snprintf(s->path, sizeof(s->path), "%s", path);
-  s->pos = 0;
-  return s->size > 0;
+  s->pos = s->fpos = 0;
+  if(!s->size){ mediaStreamClose(s); return false; }
+  return true;
 }
 
 static inline bool mediaStreamOpenOk(const MediaStream* s){
-  return s && s->kind == MSTREAM_INT;
+  return s && s->kind == MSTREAM_INT && s->f;
 }
 
 static int mediaIoRead(void* c, void* buf, uint32_t n){
   MediaStream* s = (MediaStream*)c;
   if(!s || n == 0) return 0;
-  if(s->kind == MSTREAM_INT){
-    int r = flexFsReadAt(s->path, s->pos, buf, n);
-    if(r > 0) s->pos += (uint32_t)r;
-    return r;
+  if(s->kind != MSTREAM_INT || !s->f) return -1;
+  // Solo se mueve el flujo si la lectura no sigue donde quedo la anterior:
+  // la lectura secuencial (cabecera y datos del fotograma) no paga seeks.
+  if(s->fpos != s->pos){
+    if(!flexFsStreamSeek(s->f, s->pos)){ s->fpos = 0xFFFFFFFFu; return -1; }
+    s->fpos = s->pos;
   }
-  return -1;
+  int r = flexFsStreamRead(s->f, buf, n);
+  if(r > 0){ s->pos += (uint32_t)r; s->fpos = s->pos; }
+  else s->fpos = 0xFFFFFFFFu;                  // estado desconocido: la proxima lectura lo recoloca
+  return r;
 }
 static bool mediaIoSeek(void* c, uint32_t off){
   MediaStream* s = (MediaStream*)c;

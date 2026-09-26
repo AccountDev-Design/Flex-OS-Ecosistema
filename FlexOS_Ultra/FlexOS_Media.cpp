@@ -162,22 +162,42 @@ const char* flexAviErrStr(int err){
   }
 }
 
-// Construye la muestra dispersa a partir de idx1. Lee la tabla por
-// bloques de tamano fijo: nunca esta entera en memoria.
-static void aviBuildSparseIndex(FlexAviCtx* a, uint32_t idxOff, uint32_t idxBytes){
-  const uint32_t entries = idxBytes / 16u;
+// Estado de la muestra dispersa (FlexAviCtx.idxState).
+#define AVI_IDX_PENDING 0          // hay idx1, aun sin leer (se lee al buscar)
+#define AVI_IDX_FILE    1          // construida desde idx1
+#define AVI_IDX_LEARN   2          // sin idx1: se aprende al recorrer el video
+
+// Muestra llena: se queda con una entrada de cada dos y el paso se dobla.
+// La memoria no crece nunca y lo que queda sigue cubriendo todo lo visto.
+static void aviIdxHalve(FlexAviCtx* a, uint32_t* stride){
+  uint16_t k = 0;
+  for(uint16_t i = 0; i < a->idxN; i += 2){
+    a->idxOff[k] = a->idxOff[i]; a->idxFrame[k] = a->idxFrame[i]; k++;
+  }
+  a->idxN = k;
+  if(*stride < 0x80000000u) *stride *= 2u;
+}
+
+// Construye la muestra a partir de idx1. Lee la tabla por bloques de
+// tamano fijo: nunca esta entera en memoria. El paso sale de los
+// fotogramas declarados (idx1 cuenta tambien el audio: dividir por sus
+// entradas dejaba la mitad de la muestra sin usar); si la cabecera se
+// queda corta, la muestra se va comprimiendo y sigue cubriendo el final.
+static void aviBuildSparseIndex(FlexAviCtx* a){
+  const uint32_t entries = a->idx1Len / 16u;
+  a->idxN = 0;
   if(entries == 0) return;
-  uint32_t stride = entries / FLEXAVI_IDX_MAX;
+  uint32_t basis = a->frames ? a->frames : entries;
+  uint32_t stride = (basis + FLEXAVI_IDX_MAX - 1u) / FLEXAVI_IDX_MAX;
   if(stride == 0) stride = 1;
 
-  uint8_t blk[16 * 16];                       // 16 entradas por lectura: 256 B
+  uint8_t blk[32 * 16];                       // 32 entradas por lectura: 512 B
   uint32_t done = 0, videoSeen = 0;
-  a->idxN = 0;
-  while(done < entries && a->idxN < FLEXAVI_IDX_MAX){
+  while(done < entries){
     uint32_t batch = entries - done;
-    if(batch > 16) batch = 16;
-    if(!ioReadAt(&a->io, idxOff + done * 16u, blk, batch * 16u)) break;
-    for(uint32_t i = 0; i < batch && a->idxN < FLEXAVI_IDX_MAX; i++){
+    if(batch > 32) batch = 32;
+    if(!ioReadAt(&a->io, a->idx1Off + done * 16u, blk, batch * 16u)) break;
+    for(uint32_t i = 0; i < batch; i++){
       const uint8_t* e = blk + i * 16u;
       // ckid "##dc"/"##db": pista de video. El primer par de bytes
       // es el numero de pista en ASCII.
@@ -186,20 +206,48 @@ static void aviBuildSparseIndex(FlexAviCtx* a, uint32_t idxOff, uint32_t idxByte
                   && (e[1] == (uint8_t)('0' + a->videoStream % 10));
       if(!isVideo) continue;
       if((videoSeen % stride) == 0){
-        // dwChunkOffset es relativo al inicio de 'movi' (a su campo
-        // de datos) en la inmensa mayoria de los AVI; algunos
-        // codificadores lo escriben absoluto. Se distingue mirando
-        // si en esa posicion hay una cabecera de trozo valida.
-        uint32_t rel = rd32(e + 8);
-        a->idxOff[a->idxN]   = rel;           // se resuelve al usarlo
-        a->idxFrame[a->idxN] = videoSeen;
-        a->idxN++;
+        if(a->idxN >= FLEXAVI_IDX_MAX) aviIdxHalve(a, &stride);
+        if((videoSeen % stride) == 0){
+          // dwChunkOffset es relativo al inicio de 'movi' (a su campo
+          // de datos) en la inmensa mayoria de los AVI; algunos
+          // codificadores lo escriben absoluto. Se distingue mirando
+          // si en esa posicion hay una cabecera de trozo valida.
+          a->idxOff[a->idxN]   = rd32(e + 8);   // se resuelve al usarlo
+          a->idxFrame[a->idxN] = videoSeen;
+          a->idxN++;
+        }
       }
       videoSeen++;
     }
     done += batch;
   }
-  a->idxFromFile = (a->idxN > 0);
+}
+
+// Sin idx1: anota la posicion de la cabecera del fotograma `frame`, uno de
+// cada learnStride, en orden. Asi retroceder o volver a un punto ya visto
+// no obliga a recorrer el archivo desde el principio.
+static void aviIdxLearn(FlexAviCtx* a, uint32_t hdrOff, uint32_t frame){
+  if(a->idxState != AVI_IDX_LEARN || !a->learnStride || (frame % a->learnStride)) return;
+  for(int pass = 0; pass < 2; pass++){
+    int lo = 0, hi = a->idxN;
+    while(lo < hi){ int mid = (lo + hi) / 2; if(a->idxFrame[mid] < frame) lo = mid + 1; else hi = mid; }
+    if(lo < a->idxN && a->idxFrame[lo] == frame) return;       // ya se conocia
+    if(a->idxN >= FLEXAVI_IDX_MAX){
+      aviIdxHalve(a, &a->learnStride);
+      if(frame % a->learnStride) return;
+      continue;                                                 // la posicion cambio: se recalcula
+    }
+    for(int i = a->idxN; i > lo; i--){ a->idxOff[i] = a->idxOff[i - 1]; a->idxFrame[i] = a->idxFrame[i - 1]; }
+    a->idxOff[lo] = hdrOff; a->idxFrame[lo] = frame; a->idxN++;
+    return;
+  }
+}
+
+static void aviLearnStart(FlexAviCtx* a){
+  a->idxState = AVI_IDX_LEARN;
+  a->idxN = 0;
+  a->learnStride = a->frames ? (a->frames + FLEXAVI_IDX_MAX - 1u) / FLEXAVI_IDX_MAX : 16u;
+  if(a->learnStride == 0) a->learnStride = 1;
 }
 
 int flexAviOpen(FlexAviCtx* a, const FlexMediaIO* io){
@@ -297,7 +345,12 @@ int flexAviOpen(FlexAviCtx* a, const FlexMediaIO* io){
   if(!codecOk)                                return FLEXAVI_ERR_CODEC;
   if(a->usPerFrame == 0) a->usPerFrame = 40000;    // 25 fps si el fichero calla
 
-  if(idx1Off && idx1Len >= 16) aviBuildSparseIndex(a, idx1Off, idx1Len);
+  // idx1 NO se lee aqui: solo hace falta para buscar (ver FlexOS_Media.h).
+  if(idx1Off && idx1Len >= 16){
+    a->idx1Off = idx1Off; a->idx1Len = idx1Len;
+    a->idxState = AVI_IDX_PENDING;
+    a->idxFromFile = true;
+  } else aviLearnStart(a);
 
   a->cursor  = a->moviStart;
   a->frameNo = 0;
@@ -313,12 +366,12 @@ uint32_t flexAviDurationMs(const FlexAviCtx* a){
 // Sirve para resolver si los desplazamientos de idx1 son relativos
 // a 'movi' o absolutos, sin tener que fiarse del codificador.
 static bool aviChunkHere(FlexAviCtx* a, uint32_t off){
-  if(off + 8 > a->moviEnd) return false;
+  if(off < a->moviStart || off > a->moviEnd || off + 8 > a->moviEnd) return false;
   uint8_t c[8];
   if(!ioReadAt(&a->io, off, c, 8)) return false;
   if(c[0] < '0' || c[0] > '9' || c[1] < '0' || c[1] > '9') return false;
   uint32_t len = rd32(c + 4);
-  return off + 8 + len <= a->moviEnd + 8;
+  return len <= a->moviEnd && off + 8 + len <= a->moviEnd + 8;   // sin desbordar la suma
 }
 
 // Traduce una posicion de idx1 a un desplazamiento absoluto.
@@ -335,9 +388,12 @@ static uint32_t aviResolveIdx(FlexAviCtx* a, uint32_t rel){
 
 // Avanza el cursor hasta la siguiente cabecera de trozo de VIDEO.
 // Devuelve el tamano del trozo y deja `dataOff` en su primer byte.
-// FLEXAVI_ERR_EOF cuando se acaba 'movi'.
+// FLEXAVI_ERR_EOF cuando se acaba 'movi'. Como mucho FLEXAVI_SCAN_MAX
+// trozos ajenos por llamada: un archivo con millones de trozos vacios
+// o de listas anidadas se rechaza en vez de dejar el bucle parado.
 static int aviNextVideoChunk(FlexAviCtx* a, uint32_t* dataOff, uint32_t* lenOut){
-  for(;;){
+  for(uint32_t scan = 0; ; scan++){
+    if(scan > FLEXAVI_SCAN_MAX) return FLEXAVI_ERR_FORMAT;
     if(a->cursor + 8 > a->moviEnd) return FLEXAVI_ERR_EOF;
     uint8_t c[8];
     if(!ioReadAt(&a->io, a->cursor, c, 8)) return FLEXAVI_ERR_IO;
@@ -353,15 +409,18 @@ static int aviNextVideoChunk(FlexAviCtx* a, uint32_t* dataOff, uint32_t* lenOut)
       // Basura o relleno ('JUNK'): se salta el trozo entero si el
       // tamano es creible, y si no se aborta (no se avanza a ciegas
       // byte a byte por un fichero de megabytes).
-      if(len == 0 || a->cursor + 8 + len > a->moviEnd) return FLEXAVI_ERR_FORMAT;
+      if(len == 0 || len > a->moviEnd || a->cursor + 8 + len > a->moviEnd) return FLEXAVI_ERR_FORMAT;
       a->cursor += 8 + pad2(len);
       continue;
     }
     const bool video = (c[2] == 'd' && (c[3] == 'c' || c[3] == 'b'))
                     && c[0] == (uint8_t)('0' + a->videoStream / 10)
                     && c[1] == (uint8_t)('0' + a->videoStream % 10);
-    if(a->cursor + 8 + len > a->moviEnd + 2) return FLEXAVI_ERR_FORMAT;
+    // len > moviEnd primero: con un tamano absurdo la suma de abajo
+    // desbordaria y el trozo pareceria caber.
+    if(len > a->moviEnd || a->cursor + 8 + len > a->moviEnd + 2) return FLEXAVI_ERR_FORMAT;
     if(video){
+      aviIdxLearn(a, a->cursor, a->frameNo);
       if(dataOff) *dataOff = a->cursor + 8;
       if(lenOut)  *lenOut  = len;
       a->cursor += 8 + pad2(len);
@@ -376,18 +435,20 @@ int flexAviReadFrame(FlexAviCtx* a, void* buf, uint32_t bufCap, uint32_t* frameO
   uint32_t off = 0, len = 0;
   int r = aviNextVideoChunk(a, &off, &len);
   if(r != FLEXAVI_OK) return r;
-  if(len == 0)        return FLEXAVI_ERR_FORMAT;
   if(len > bufCap){
     // No se lee a medias: entregar medio JPEG haria que el
-    // decodificador pintase basura. Se salta el fotograma y se dice.
+    // decodificador pintase basura. Tampoco se consume: el cursor
+    // vuelve a la cabecera y `needBytes` dice cuanto hace falta, para
+    // que el llamante amplie su buffer o lo salte (flexAviSkipFrame).
+    a->cursor = off - 8;
+    a->needBytes = len;
     if(frameOut) *frameOut = a->frameNo;
-    a->frameNo++;
     return FLEXAVI_ERR_TOOBIG;
   }
-  if(!ioReadAt(&a->io, off, buf, len)) return FLEXAVI_ERR_IO;
   if(frameOut) *frameOut = a->frameNo;
+  if(len && !ioReadAt(&a->io, off, buf, len)){ a->cursor = off - 8; return FLEXAVI_ERR_IO; }
   a->frameNo++;
-  return (int)len;
+  return (int)len;                            // 0 = repetir el fotograma anterior
 }
 
 int flexAviSkipFrame(FlexAviCtx* a){
@@ -398,24 +459,28 @@ int flexAviSkipFrame(FlexAviCtx* a){
   return FLEXAVI_OK;
 }
 
-int flexAviSeekFrame(FlexAviCtx* a, uint32_t frame){
+int flexAviSeekFrameMax(FlexAviCtx* a, uint32_t frame, uint32_t maxSkips){
   if(!a) return FLEXAVI_ERR_IO;
-  if(a->frames && frame >= a->frames) frame = a->frames ? a->frames - 1 : 0;
+  if(a->frames && frame >= a->frames) frame = a->frames - 1;
+
+  // La muestra de idx1 se construye la primera vez que se busca.
+  if(a->idxState == AVI_IDX_PENDING){
+    aviBuildSparseIndex(a);
+    if(a->idxN > 0) a->idxState = AVI_IDX_FILE;
+    else { a->idxFromFile = false; aviLearnStart(a); }
+  }
 
   // Punto de partida: la muestra anterior mas cercana, o el
   // principio de 'movi'. Nunca se salta hacia delante a ciegas.
   uint32_t startOff = a->moviStart, startFrame = 0;
-  if(a->idxFromFile){
-    for(int i = (int)a->idxN - 1; i >= 0; i--){
-      if(a->idxFrame[i] <= frame){
-        uint32_t abs = aviResolveIdx(a, a->idxOff[i]);
-        if(abs){ startOff = abs; startFrame = a->idxFrame[i]; }
-        break;
-      }
-    }
-  } else if(a->frameNo <= frame){
-    // Sin idx1 solo se puede ir hacia delante desde donde estamos:
-    // rebobinar al principio para adelantar seria absurdo.
+  for(int i = (int)a->idxN - 1; i >= 0; i--){
+    if(a->idxFrame[i] > frame) continue;
+    uint32_t abs = a->idxState == AVI_IDX_FILE ? aviResolveIdx(a, a->idxOff[i]) : a->idxOff[i];
+    if(abs){ startOff = abs; startFrame = a->idxFrame[i]; break; }
+  }
+  // Donde ya esta el cursor vale igual si queda mas cerca (seguir
+  // adelante desde aqui no cuesta volver a recorrer lo ya recorrido).
+  if(a->frameNo <= frame && a->frameNo >= startFrame && a->cursor >= a->moviStart){
     startOff = a->cursor; startFrame = a->frameNo;
   }
 
@@ -423,13 +488,28 @@ int flexAviSeekFrame(FlexAviCtx* a, uint32_t frame){
   a->frameNo = startFrame;
   // Avance por cabeceras: 8 bytes leidos por fotograma saltado, sin
   // tocar los datos comprimidos.
-  int guard = 0;
-  while(a->frameNo < frame){
-    int r = flexAviSkipFrame(a);
+  uint32_t lastOff = 0, lastFrame = 0, skips = 0;
+  bool haveLast = false;
+  while(a->frameNo < frame && skips < maxSkips){
+    uint32_t off = 0;
+    int r = aviNextVideoChunk(a, &off, NULL);
+    if(r == FLEXAVI_ERR_EOF || r == FLEXAVI_ERR_FORMAT){
+      // El archivo se acaba (o se rompe) antes de lo declarado: una
+      // grabacion cortada. Se queda en el ULTIMO fotograma que existe
+      // y la duracion pasa a ser la real.
+      if(r == FLEXAVI_ERR_EOF) a->frames = a->frameNo;
+      if(haveLast){ a->cursor = lastOff; a->frameNo = lastFrame; }
+      return (int)a->frameNo;
+    }
     if(r != FLEXAVI_OK) return r;
-    if(++guard > 100000) break;               // corta un fichero circular corrupto
+    lastOff = off - 8; lastFrame = a->frameNo; haveLast = true;
+    a->frameNo++; skips++;
   }
   return (int)a->frameNo;
+}
+
+int flexAviSeekFrame(FlexAviCtx* a, uint32_t frame){
+  return flexAviSeekFrameMax(a, frame, FLEXAVI_SEEK_SKIPS);
 }
 
 // -------------------------------------------------------------

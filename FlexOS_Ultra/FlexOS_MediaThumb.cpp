@@ -219,16 +219,42 @@ int flexThumbFromAvi(const FlexMediaIO* io, int side, int quality,
   if(w) *w = a->width;
   if(h) *h = a->height;
   if(durMs) *durMs = flexAviDurationMs(a);
-  uint8_t* fb = (uint8_t*)af(FLEXTH_AVI_FRAME);
+  // Buffer del fotograma: lo que declara el propio AVI (dwSuggestedBufferSize)
+  // si es creible, y si no FLEXTH_AVI_FRAME. Si un fotograma pide mas, crece
+  // hasta FLEXAVI_FRAME_MAX, el MISMO tope del reproductor: un video de
+  // camara con fotogramas de 300 KB ya no se clasifica como "no reproducible"
+  // por un limite que el reproductor tampoco tiene.
+  uint32_t cap = FLEXTH_AVI_FRAME;
+  if(a->maxFrameBytes >= 4096u && a->maxFrameBytes <= FLEXAVI_FRAME_MAX) cap = (a->maxFrameBytes + 4095u) & ~4095u;
+  uint8_t* fb = (uint8_t*)af(cap);
   if(!fb){ ff(a); return FLEXTH_ERR_MEMORY; }
-  int n = flexAviReadFrame(a, fb, FLEXTH_AVI_FRAME, NULL);
-  ff(a);
-  if(n <= 0){
-    ff(fb);
-    return n == FLEXAVI_ERR_TOOBIG ? FLEXTH_ERR_UNSUP : (n == FLEXAVI_ERR_IO ? FLEXTH_ERR_IO : FLEXTH_ERR_DECODE);
+  // El primer fotograma CON imagen que se deje leer: los vacios (repeticion
+  // del anterior) no tienen nada que mostrar, y uno danado al principio no
+  // condena un video cuyo resto esta bien. Como mucho FLEXTH_AVI_TRIES.
+  rc = FLEXTH_ERR_DECODE;
+  bool grown = false;
+  int empties = 0;
+  for(int tries = 0; tries < FLEXTH_AVI_TRIES && empties < 256; ){
+    int n = flexAviReadFrame(a, fb, cap, NULL);
+    if(n == FLEXAVI_ERR_TOOBIG){
+      uint32_t need = a->needBytes;
+      if(need > FLEXAVI_FRAME_MAX || grown){ rc = FLEXTH_ERR_UNSUP; break; }
+      ff(fb);
+      cap = (need + 4095u) & ~4095u;
+      fb = (uint8_t*)af(cap);
+      if(!fb){ ff(a); return FLEXTH_ERR_MEMORY; }
+      grown = true;
+      continue;                                 // el mismo fotograma, ya cabe
+    }
+    grown = false;
+    if(n == 0){ empties++; continue; }          // vacio: no es un intento (pero se acotan)
+    if(n < 0){ rc = n == FLEXAVI_ERR_IO ? FLEXTH_ERR_IO : FLEXTH_ERR_DECODE; break; }
+    tries++;
+    rc = flexThumbFromJpeg(fb, (size_t)n, side, quality, out, outCtx, NULL, NULL, af, ff);
+    if(rc != FLEXTH_ERR_DECODE) break;          // hecho, o un motivo que no arregla el siguiente
   }
-  rc = flexThumbFromJpeg(fb, (size_t)n, side, quality, out, outCtx, NULL, NULL, af, ff);
   ff(fb);
+  ff(a);
   return rc;
 }
 

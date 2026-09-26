@@ -446,8 +446,9 @@ static void testAviRejects(){
     FlexAviCtx a;
     CHECK(flexAviOpen(&a, &io) == FLEXAVI_ERR_FORMAT, "fichero minusculo -> ERR_FORMAT");
   }
-  // Un fotograma que no cabe en el buffer: se avisa y se PASA al
-  // siguiente, no se entrega medio JPEG.
+  // Un fotograma que no cabe en el buffer: se avisa, NO se entrega
+  // medio JPEG y NO se consume: needBytes dice cuanto hace falta, y
+  // quien lee amplia su buffer y lo vuelve a pedir, o lo salta.
   {
     AviBuild info;
     MemIO m; m.data = makeAvi(3, 320, 240, "MJPG", true, false, false, &info);
@@ -455,14 +456,21 @@ static void testAviRejects(){
     FlexAviCtx a;
     CHECK(flexAviOpen(&a, &io) == FLEXAVI_OK, "abrir para probar buffer corto");
     uint8_t tiny[4];
-    int r = flexAviReadFrame(&a, tiny, sizeof(tiny), NULL);
+    uint32_t fn = 99;
+    int r = flexAviReadFrame(&a, tiny, sizeof(tiny), &fn);
     CHECK(r == FLEXAVI_ERR_TOOBIG, "buffer corto -> ERR_TOOBIG, dio %d", r);
-    // ...y el siguiente sigue siendo legible con un buffer normal.
+    CHECK(a.needBytes == info.frames[0].size() && fn == 0,
+          "needBytes dice el tamano real del fotograma (%u)", a.needBytes);
+    // ...el MISMO fotograma se lee entero con un buffer suficiente...
     uint8_t buf[512];
-    uint32_t fn = 0;
     int n = flexAviReadFrame(&a, buf, sizeof(buf), &fn);
-    CHECK(n == (int)info.frames[1].size() && fn == 1,
-          "tras un fotograma que no cabia, el siguiente se lee (n=%d fn=%u)", n, fn);
+    CHECK(n == (int)info.frames[0].size() && fn == 0 && std::memcmp(buf, info.frames[0].data(), (size_t)n) == 0,
+          "tras ampliar el buffer se entrega ESE fotograma (n=%d fn=%u)", n, fn);
+    // ...o se salta si no se puede ampliar.
+    CHECK(flexAviReadFrame(&a, tiny, sizeof(tiny), &fn) == FLEXAVI_ERR_TOOBIG && fn == 1, "el 1 tampoco cabe");
+    CHECK(flexAviSkipFrame(&a) == FLEXAVI_OK, "y se puede saltar");
+    n = flexAviReadFrame(&a, buf, sizeof(buf), &fn);
+    CHECK(n == (int)info.frames[2].size() && fn == 2, "tras saltarlo llega el siguiente (n=%d fn=%u)", n, fn);
   }
   // El medio DESAPARECE a mitad (la tarjeta se saca): toda lectura
   // posterior tiene que devolver error, nunca datos viejos.
@@ -478,6 +486,218 @@ static void testAviRejects(){
     CHECK(r < 0, "con el medio muerto la lectura debe fallar, dio %d", r);
     CHECK(flexAviSkipFrame(&a) < 0, "saltar tambien debe fallar");
     CHECK(flexAviSeekFrame(&a, 5) < 0, "buscar tambien debe fallar");
+  }
+}
+
+// =============================================================
+//  4b) AVI ROBUSTO: grabaciones reales y archivos danados
+//  ------------------------------------------------------------
+//  Constructor flexible: cada fotograma con su contenido exacto (un
+//  vector vacio = trozo de video de 0 bytes, "repetir el anterior"),
+//  fotogramas declarados distintos de los reales (grabacion cortada),
+//  trozos de relleno antes del primero y audio intercalado.
+// =============================================================
+static void le32(std::vector<uint8_t>& v, uint32_t x){
+  v.push_back((uint8_t)x); v.push_back((uint8_t)(x >> 8)); v.push_back((uint8_t)(x >> 16)); v.push_back((uint8_t)(x >> 24));
+}
+static void le16(std::vector<uint8_t>& v, uint16_t x){ v.push_back((uint8_t)x); v.push_back((uint8_t)(x >> 8)); }
+static void fcc(std::vector<uint8_t>& v, const char* s){ for(int i = 0; i < 4; i++) v.push_back((uint8_t)s[i]); }
+static std::vector<uint8_t> ck(const char* id, const std::vector<uint8_t>& p){
+  std::vector<uint8_t> v; fcc(v, id); le32(v, (uint32_t)p.size());
+  v.insert(v.end(), p.begin(), p.end());
+  if(p.size() & 1) v.push_back(0);
+  return v;
+}
+static std::vector<uint8_t> lst(const char* type, const std::vector<uint8_t>& p){
+  std::vector<uint8_t> v; fcc(v, "LIST"); le32(v, (uint32_t)p.size() + 4); fcc(v, type);
+  v.insert(v.end(), p.begin(), p.end());
+  return v;
+}
+struct AviSpec {
+  std::vector<std::vector<uint8_t>> frames;
+  bool withIdx = true, withAudio = false;
+  uint32_t declared = 0;          // 0 = los reales
+  uint32_t suggested = 4096;      // dwSuggestedBufferSize del strh
+  int junkBefore = 0;             // trozos 'JUNK' de 2 bytes antes del primer fotograma
+};
+static std::vector<uint8_t> buildAvi(const AviSpec& S){
+  const uint32_t nF = (uint32_t)S.frames.size(), decl = S.declared ? S.declared : nF;
+  std::vector<uint8_t> avih; le32(avih, 40000); le32(avih, 0); le32(avih, 0); le32(avih, 0x10);
+  le32(avih, decl); le32(avih, 0); le32(avih, S.withAudio ? 2 : 1); le32(avih, 0);
+  le32(avih, 320); le32(avih, 240); for(int i = 0; i < 4; i++) le32(avih, 0);
+  std::vector<uint8_t> strh; fcc(strh, "vids"); fcc(strh, "MJPG");
+  le32(strh, 0); le16(strh, 0); le16(strh, 0); le32(strh, 0); le32(strh, 1); le32(strh, 25);
+  le32(strh, 0); le32(strh, decl); le32(strh, S.suggested); le32(strh, 0); le32(strh, 0); le32(strh, 0); le32(strh, 0);
+  std::vector<uint8_t> strf; le32(strf, 40); le32(strf, 320); le32(strf, 240); le16(strf, 1); le16(strf, 24);
+  fcc(strf, "MJPG"); for(int i = 0; i < 5; i++) le32(strf, 0);
+  std::vector<uint8_t> strl = ck("strh", strh); { auto t = ck("strf", strf); strl.insert(strl.end(), t.begin(), t.end()); }
+  std::vector<uint8_t> hdrl = ck("avih", avih); { auto t = lst("strl", strl); hdrl.insert(hdrl.end(), t.begin(), t.end()); }
+  if(S.withAudio){
+    std::vector<uint8_t> sa; fcc(sa, "auds"); le32(sa, 1); le32(sa, 0); le16(sa, 0); le16(sa, 0); le32(sa, 0);
+    le32(sa, 1); le32(sa, 8000); le32(sa, 0); le32(sa, 8000); le32(sa, 1024); le32(sa, 0); le32(sa, 1); le32(sa, 0); le32(sa, 0);
+    std::vector<uint8_t> la = ck("strh", sa); { std::vector<uint8_t> f(16, 0); auto t = ck("strf", f); la.insert(la.end(), t.begin(), t.end()); }
+    auto t = lst("strl", la); hdrl.insert(hdrl.end(), t.begin(), t.end());
+  }
+  std::vector<uint8_t> movi, idx;
+  for(int j = 0; j < S.junkBefore; j++){ auto t = ck("JUNK", std::vector<uint8_t>(2, 0)); movi.insert(movi.end(), t.begin(), t.end()); }
+  for(uint32_t i = 0; i < nF; i++){
+    uint32_t here = 4u + (uint32_t)movi.size();
+    auto vc = ck("00dc", S.frames[i]); movi.insert(movi.end(), vc.begin(), vc.end());
+    fcc(idx, "00dc"); le32(idx, 0x10); le32(idx, here); le32(idx, (uint32_t)S.frames[i].size());
+    if(S.withAudio){
+      uint32_t ah = 4u + (uint32_t)movi.size();
+      auto ac = ck("01wb", std::vector<uint8_t>(9, 0x5A)); movi.insert(movi.end(), ac.begin(), ac.end());
+      fcc(idx, "01wb"); le32(idx, 0); le32(idx, ah); le32(idx, 9);
+    }
+  }
+  std::vector<uint8_t> body = lst("hdrl", hdrl);
+  { auto t = lst("movi", movi); body.insert(body.end(), t.begin(), t.end()); }
+  if(S.withIdx){ auto t = ck("idx1", idx); body.insert(body.end(), t.begin(), t.end()); }
+  std::vector<uint8_t> out; fcc(out, "RIFF"); le32(out, (uint32_t)body.size() + 4); fcc(out, "AVI ");
+  out.insert(out.end(), body.begin(), body.end());
+  return out;
+}
+// Fotograma i reconocible: 2 bytes de SOI + el numero en 4 bytes.
+static std::vector<uint8_t> tagFrame(uint32_t i, size_t len = 12){
+  std::vector<uint8_t> f(len, 0xAB); f[0] = 0xFF; f[1] = 0xD8;
+  f[2] = (uint8_t)i; f[3] = (uint8_t)(i >> 8); f[4] = (uint8_t)(i >> 16); f[5] = (uint8_t)(i >> 24);
+  return f;
+}
+static uint32_t tagOf(const uint8_t* b){ return (uint32_t)b[2] | ((uint32_t)b[3] << 8) | ((uint32_t)b[4] << 16) | ((uint32_t)b[5] << 24); }
+// Busca el primer trozo `id` a partir de `from` y devuelve su posicion.
+static size_t findCk(const std::vector<uint8_t>& v, const char* id, size_t from = 12){
+  for(size_t i = from; i + 4 <= v.size(); i++) if(!std::memcmp(&v[i], id, 4)) return i;
+  return (size_t)-1;
+}
+
+static void testAviRobust(){
+  std::printf("[media] AVI robusto: vacios, grandes, largos, cortados y malformados\n");
+  uint8_t buf[256];
+
+  // ---- trozo de video VACIO = repetir el anterior (ffmpeg, camaras) ----
+  {
+    AviSpec S; for(uint32_t i = 0; i < 5; i++) S.frames.push_back(i == 2 ? std::vector<uint8_t>() : tagFrame(i));
+    MemIO m; m.data = buildAvi(S); FlexMediaIO io = ioOf(&m);
+    FlexAviCtx a; CHECK(flexAviOpen(&a, &io) == FLEXAVI_OK, "abrir con un fotograma vacio");
+    uint32_t fn = 0; int got[5];
+    for(int i = 0; i < 5; i++){ got[i] = flexAviReadFrame(&a, buf, sizeof(buf), &fn); CHECK(fn == (uint32_t)i, "vacio: numero %u", fn); }
+    CHECK(got[2] == 0, "un trozo vacio devuelve 0 (repetir), no un error (dio %d)", got[2]);
+    CHECK(got[3] > 0 && tagOf(buf) == 4, "y la lectura sigue: el 3 y el 4 llegan enteros");
+    CHECK(flexAviReadFrame(&a, buf, sizeof(buf), NULL) == FLEXAVI_ERR_EOF, "y termina en EOF");
+  }
+
+  // ---- idx1 NO se lee al abrir; si al buscar ----
+  {
+    AviSpec S; for(uint32_t i = 0; i < 2000; i++) S.frames.push_back(tagFrame(i));
+    MemIO m; m.data = buildAvi(S); FlexMediaIO io = ioOf(&m);
+    FlexAviCtx a; CHECK(flexAviOpen(&a, &io) == FLEXAVI_OK, "abrir 2000 fotogramas con idx1");
+    CHECK(a.idxFromFile, "el archivo trae idx1 util");
+    CHECK(m.reads < 40, "abrir NO recorre idx1 (32 KB): %d lecturas", m.reads);
+    uint32_t fn = 0;
+    CHECK(flexAviReadFrame(&a, buf, sizeof(buf), &fn) > 0 && tagOf(buf) == 0, "el primer fotograma sin tocar el indice");
+    int landed = flexAviSeekFrame(&a, 1501);
+    CHECK(landed == 1501, "buscar con idx1 construido al vuelo llega al 1501 (%d)", landed);
+    CHECK(flexAviReadFrame(&a, buf, sizeof(buf), &fn) > 0 && fn == 1501 && tagOf(buf) == 1501, "y el contenido es el suyo");
+  }
+
+  // ---- con audio, la muestra usa sus 512 entradas (antes solo la mitad) ----
+  {
+    AviSpec S; S.withAudio = true; for(uint32_t i = 0; i < 1024; i++) S.frames.push_back(tagFrame(i));
+    MemIO m; m.data = buildAvi(S); FlexMediaIO io = ioOf(&m);
+    FlexAviCtx a; CHECK(flexAviOpen(&a, &io) == FLEXAVI_OK, "abrir con audio intercalado");
+    CHECK(flexAviSeekFrame(&a, 1000) == 1000, "buscar con audio");
+    CHECK(a.idxN >= 500, "la muestra dispersa aprovecha su capacidad (%u entradas)", a.idxN);
+    int r0 = m.reads; flexAviSeekFrame(&a, 777);
+    CHECK(m.reads - r0 <= 8, "y buscar hacia atras cuesta un punado de lecturas (%d)", m.reads - r0);
+  }
+
+  // ---- SIN idx1: se aprende al reproducir; volver atras no recorre todo ----
+  {
+    AviSpec S; S.withIdx = false; for(uint32_t i = 0; i < 3000; i++) S.frames.push_back(tagFrame(i));
+    MemIO m; m.data = buildAvi(S); FlexMediaIO io = ioOf(&m);
+    FlexAviCtx a; CHECK(flexAviOpen(&a, &io) == FLEXAVI_OK, "abrir 3000 fotogramas sin idx1");
+    CHECK(!a.idxFromFile, "sin idx1");
+    for(int i = 0; i < 3000; i++) flexAviReadFrame(&a, buf, sizeof(buf), NULL);
+    CHECK(a.idxN > 100, "reproducir anota posiciones (%u)", a.idxN);
+    int r0 = m.reads; uint32_t fn = 0;
+    int landed = flexAviSeekFrame(&a, 2500);
+    CHECK(landed == 2500, "sin idx1, volver al 2500 llega (%d)", landed);
+    CHECK(m.reads - r0 <= 2 * 16 + 4, "sin recorrer desde el principio (%d lecturas; antes eran 2500)", m.reads - r0);
+    CHECK(flexAviReadFrame(&a, buf, sizeof(buf), &fn) > 0 && fn == 2500 && tagOf(buf) == 2500, "y es el fotograma correcto");
+  }
+
+  // ---- buscar sin indice es trabajo ACOTADO por llamada ----
+  {
+    AviSpec S; S.withIdx = false; for(uint32_t i = 0; i < 3000; i++) S.frames.push_back(tagFrame(i));
+    MemIO m; m.data = buildAvi(S); FlexMediaIO io = ioOf(&m);
+    FlexAviCtx a; flexAviOpen(&a, &io);
+    int calls = 0, landed = 0, maxReads = 0;
+    while(calls < 100){
+      int r0 = m.reads;
+      landed = flexAviSeekFrameMax(&a, 2900, 128);
+      if(m.reads - r0 > maxReads) maxReads = m.reads - r0;
+      calls++;
+      if(landed < 0 || landed >= 2900) break;
+      CHECK(landed <= 2900, "nunca pasa del pedido");
+    }
+    CHECK(landed == 2900, "por tramos llega al 2900 (%d)", landed);
+    CHECK(calls >= 20 && calls <= 25, "en ~23 llamadas de 128 (%d)", calls);
+    CHECK(maxReads <= 128 + 4, "cada llamada lee como mucho su tramo (%d)", maxReads);
+    uint32_t fn = 0;
+    CHECK(flexAviReadFrame(&a, buf, sizeof(buf), &fn) > 0 && tagOf(buf) == 2900, "y el fotograma es el pedido");
+  }
+
+  // ---- grabacion CORTADA: declara 40 fotogramas y hay 25 ----
+  {
+    AviSpec S; S.withIdx = false; S.declared = 40; for(uint32_t i = 0; i < 25; i++) S.frames.push_back(tagFrame(i));
+    MemIO m; m.data = buildAvi(S); FlexMediaIO io = ioOf(&m);
+    FlexAviCtx a; flexAviOpen(&a, &io);
+    CHECK(a.frames == 40, "la cabecera dice 40");
+    int landed = flexAviSeekFrame(&a, 35);
+    CHECK(landed == 24, "buscar el 35 se queda en el ULTIMO que existe (%d)", landed);
+    CHECK(a.frames == 25, "y la duracion pasa a ser la real (%u fotogramas)", a.frames);
+    uint32_t fn = 0;
+    CHECK(flexAviReadFrame(&a, buf, sizeof(buf), &fn) > 0 && tagOf(buf) == 24, "se muestra el ultimo");
+    CHECK(flexAviReadFrame(&a, buf, sizeof(buf), NULL) == FLEXAVI_ERR_EOF, "y despues, fin");
+  }
+  // ---- ultimo trozo a medias (la camara se apago escribiendo) ----
+  {
+    AviSpec S; S.withIdx = false; for(uint32_t i = 0; i < 6; i++) S.frames.push_back(tagFrame(i, 40));
+    MemIO m; m.data = buildAvi(S); m.data.resize(m.data.size() - 20);
+    FlexMediaIO io = ioOf(&m);
+    FlexAviCtx a; CHECK(flexAviOpen(&a, &io) == FLEXAVI_OK, "abrir con el ultimo trozo a medias");
+    int ok = 0, r = 0;
+    for(int i = 0; i < 10; i++){ r = flexAviReadFrame(&a, buf, sizeof(buf), NULL); if(r > 0) ok++; else break; }
+    CHECK(ok == 5 && r < 0, "los 5 enteros se leen y el cortado termina con error, sin bucle (%d, %d)", ok, r);
+  }
+
+  // ---- tamanos ABSURDOS: la suma desbordaba y el cursor no avanzaba ----
+  {
+    AviSpec S; S.withIdx = false; S.withAudio = true; for(uint32_t i = 0; i < 4; i++) S.frames.push_back(tagFrame(i));
+    MemIO m; m.data = buildAvi(S);
+    size_t at = findCk(m.data, "01wb");
+    CHECK(at != (size_t)-1, "hay audio que corromper");
+    m.data[at + 4] = 0xF8; m.data[at + 5] = 0xFF; m.data[at + 6] = 0xFF; m.data[at + 7] = 0xFF;   // len = 0xFFFFFFF8
+    FlexMediaIO io = ioOf(&m);
+    FlexAviCtx a; flexAviOpen(&a, &io);
+    CHECK(flexAviReadFrame(&a, buf, sizeof(buf), NULL) > 0, "el fotograma 0 va antes del trozo roto");
+    int r0 = m.reads;
+    int r = flexAviReadFrame(&a, buf, sizeof(buf), NULL);
+    CHECK(r == FLEXAVI_ERR_FORMAT, "un trozo de 4 GB se rechaza (dio %d), no deja el bucle girando", r);
+    CHECK(m.reads - r0 <= 4, "en un par de lecturas (%d)", m.reads - r0);
+  }
+  // ---- miles de trozos de relleno: acotado por llamada ----
+  {
+    AviSpec S; S.withIdx = false; S.junkBefore = 1000; S.frames.push_back(tagFrame(7));
+    MemIO m; m.data = buildAvi(S); FlexMediaIO io = ioOf(&m);
+    FlexAviCtx a; flexAviOpen(&a, &io);
+    CHECK(flexAviReadFrame(&a, buf, sizeof(buf), NULL) > 0 && tagOf(buf) == 7, "1000 trozos de relleno se saltan");
+    AviSpec S2; S2.withIdx = false; S2.junkBefore = (int)FLEXAVI_SCAN_MAX + 10; S2.frames.push_back(tagFrame(7));
+    MemIO m2; m2.data = buildAvi(S2); FlexMediaIO io2 = ioOf(&m2);
+    FlexAviCtx a2; flexAviOpen(&a2, &io2);
+    int r = flexAviReadFrame(&a2, buf, sizeof(buf), NULL);
+    CHECK(r == FLEXAVI_ERR_FORMAT && m2.reads <= (int)FLEXAVI_SCAN_MAX + 20,
+          "mas de FLEXAVI_SCAN_MAX se corta con error (%d, %d lecturas)", r, m2.reads);
   }
 }
 
@@ -1165,6 +1385,7 @@ int main(){
   testAviAudioAndRec();
   testAviSeek();
   testAviRejects();
+  testAviRobust();
   testWav();
   testIma();
   testAudioStream();

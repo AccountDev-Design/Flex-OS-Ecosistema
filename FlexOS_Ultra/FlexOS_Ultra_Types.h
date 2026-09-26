@@ -212,14 +212,23 @@ struct TouchPoint { int id; int x, y; bool active; };
 //  en el IDE con "does not name a type".
 // -------------------------------------------------------------
 
-// Lector de medios sobre la particion interna LittleFS. Se lee por
-// desplazamiento (flexFsReadAt) y no se retiene un descriptor global.
+// Lector de medios sobre la particion interna LittleFS. Mientras el video
+// esta abierto el archivo se queda ABIERTO (un flujo de FlexOS_FS). Antes se
+// leia por ruta (flexFsReadAt): abrir, buscar, leer y cerrar en CADA lectura
+// -- dos por fotograma, mas una por cada trozo de audio saltado y cada
+// bloque de idx1 --, y abrir por ruta en LittleFS es recorrer los metadatos
+// de cada carpeta del camino con el cerrojo del sistema de archivos cogido.
+// Quien mueve o borra el archivo desde el visor lo cierra antes
+// (mediaStreamClose); LittleFS tolera que otra tarea lo borre o lo mueva con
+// el flujo abierto, y el visor lo detecta por la biblioteca (vwCheckItem).
 #define MSTREAM_NONE 0
 #define MSTREAM_INT  1      // particion interna (LittleFS)
 struct MediaStream {
-  uint8_t    kind;
-  char       path[FLEXMED_PATH_MAX];
-  uint32_t   pos, size;
+  uint8_t       kind;
+  char          path[FLEXMED_PATH_MAX];
+  uint32_t      pos, size;
+  FlexFsStream* f;          // abierto mientras dura la reproduccion
+  uint32_t      fpos;       // posicion real del flujo: sin seeks que no hacen falta
 };
 
 // Una miniatura ya decodificada. La cache es un array fijo de estas

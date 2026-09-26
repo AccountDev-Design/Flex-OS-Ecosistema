@@ -68,7 +68,8 @@
 #define VW_ZOOM_TAP       2.5f      // doble toque
 #define VW_SRC_MAX_PX     (2u * 1024u * 1024u)   // foto decodificada: 2 MP como mucho (4 MB)
 #define VW_WORK_BYTES     (1024u * 1024u)        // trabajo del decodificador en flujo
-#define VW_FRAME_CAP      (192u * 1024u)         // un fotograma MJPEG comprimido
+#define VW_FRAME_CAP      (192u * 1024u)         // fotograma MJPEG: buffer inicial si el AVI no declara el suyo
+#define VW_SEEK_TICK      256u                   // fotogramas saltados por vuelta al buscar sin indice
 #define VW_SEEK_STEP_MS   10000u
 #define VW_MAX_CATCHUP    4
 #define VW_TILE_ROWS      8
@@ -136,7 +137,10 @@ static float vwOffX = 0.0f, vwOffY = 0.0f;          // esquina de la imagen most
 static MediaStream vwStream;
 static FlexAviCtx  vwAvi;
 static uint8_t*  vwFrameBuf = NULL;
+static uint32_t  vwFrameCap = 0;                    // capacidad real de vwFrameBuf (crece si hace falta)
 static uint32_t  vwFrameLen = 0;
+static int32_t   vwSeekWant = -1;                   // busqueda por tramos en curso: fotograma pedido
+static int32_t   vwSeekLast = -1;                   // donde quedo el tramo anterior (sin avance = fin)
 static uint16_t* vwTile = NULL;
 static uint16_t* vwXMap = NULL;
 static bool      vwPlaying = false, vwEnded = false;
@@ -650,15 +654,51 @@ static int vwDecodeFrame(){
   if(r == FLEXJPG_ERR_ABORTED && vwVm.nextLy >= vwVm.y1) r = FLEXJPG_OK;
   return r;
 }
-// Lee el SIGUIENTE fotograma del archivo. false al final o con error.
-static bool vwReadFrame(){
-  if(!vwFrameBuf) return false;
-  uint32_t fn = 0;
-  int n = flexAviReadFrame(&vwAvi, vwFrameBuf, VW_FRAME_CAP, &fn);
-  if(n == FLEXAVI_ERR_EOF){ vwEnded = true; vwPlaying = false; return false; }
-  if(n < 0) return false;
-  vwFrameLen = (uint32_t)n; vwCurFrame = fn;
+// Un fotograma que no cabe: el buffer crece hasta FLEXAVI_FRAME_MAX, de 16 en
+// 16 KB, conservando el fotograma que ya tenia (lo usa el repintado al girar
+// o ampliar). Sin memoria no pasa nada: ese fotograma se salta.
+static bool vwGrowFrameBuf(uint32_t need){
+  if(need == 0 || need > FLEXAVI_FRAME_MAX || need <= vwFrameCap) return false;
+  uint32_t cap = (need + 16383u) & ~16383u;
+  if(cap > FLEXAVI_FRAME_MAX) cap = FLEXAVI_FRAME_MAX;
+  uint8_t* nb = (uint8_t*)mediaAlloc(cap);
+  if(!nb) return false;
+  if(vwFrameBuf && vwFrameLen) memcpy(nb, vwFrameBuf, vwFrameLen);
+  mediaFree(vwFrameBuf);
+  vwFrameBuf = nb; vwFrameCap = cap;
   return true;
+}
+// El video no puede seguir (archivo danado a partir de aqui, o sin acceso):
+// se para, se dice UNA vez y se queda el ultimo fotograma bueno en pantalla.
+// Antes el error se ignoraba y la reproduccion seguia "en marcha" leyendo el
+// mismo trozo roto en cada vuelta, con la imagen congelada.
+static void vwStopBroken(int err){
+  vwPlaying = false; vwEnded = true; vwSeekWant = -1;
+  sysNotify(vwName, err == FLEXAVI_ERR_IO ? "Se perdi\xC3\xB3 el acceso al archivo"
+                                          : "El v\xC3\xAD" "deo est\xC3\xA1 da\xC3\xB1" "ado a partir de aqu\xC3\xAD");
+}
+// Lee el SIGUIENTE fotograma del archivo.
+//   1 = hay uno nuevo en vwFrameBuf.
+//   0 = no hay imagen nueva: un trozo vacio (el AVI repite el anterior) o uno
+//       que no cabe ni ampliando (se salta y se sigue).
+//  -1 = se acabo: fin del video, archivo danado o sin acceso (ya se paro).
+static int vwReadFrame(){
+  if(!vwFrameBuf) return -1;
+  for(int tries = 0; tries < 2; tries++){
+    uint32_t fn = 0;
+    int n = flexAviReadFrame(&vwAvi, vwFrameBuf, vwFrameCap, &fn);
+    if(n > 0){ vwFrameLen = (uint32_t)n; vwCurFrame = fn; return 1; }
+    if(n == 0){ vwCurFrame = fn; return 0; }
+    if(n == FLEXAVI_ERR_TOOBIG){
+      if(tries == 0 && vwGrowFrameBuf(vwAvi.needBytes)) continue;   // el mismo, ya cabe
+      if(flexAviSkipFrame(&vwAvi) == FLEXAVI_OK){ vwCurFrame = fn; return 0; }
+      n = FLEXAVI_ERR_FORMAT;
+    }
+    if(n == FLEXAVI_ERR_EOF){ vwEnded = true; vwPlaying = false; return -1; }
+    vwStopBroken(n);
+    return -1;
+  }
+  return 0;
 }
 
 // Rehace vwClean entero. smooth = bilineal (en reposo); false = vecino mas
@@ -1030,7 +1070,8 @@ static void vwFreeBufs(){
   if(vwClean){ mediaFree(vwClean); vwClean = NULL; }
   if(vwThumb){ memset(vwThumb, 0, (size_t)ML_SIDE * ML_SIDE * 2); mediaFree(vwThumb); vwThumb = NULL; }
   if(vwFrameBuf){ mediaFree(vwFrameBuf); vwFrameBuf = NULL; }
-  vwFrameLen = 0;
+  vwFrameLen = 0; vwFrameCap = 0;
+  vwSeekWant = -1; vwSeekLast = -1;
   if(vwTile){ heap_caps_free(vwTile); vwTile = NULL; }
   if(vwXMap){ mediaFree(vwXMap); vwXMap = NULL; }
   if(vwGlTop){ mediaFree(vwGlTop); vwGlTop = NULL; }
@@ -1126,12 +1167,18 @@ static void vwStartContent(uint32_t frame){
     return;
   }
   if(vwKind != VWK_VIDEO) return;
-  memset(&vwStream, 0, sizeof(vwStream));
+  mediaStreamClose(&vwStream);                      // (cierra el flujo si quedaba alguno)
   if(!mediaStreamOpen(&vwStream, vwPath)){ vwKind = VWK_ERROR; snprintf(vwErr, sizeof(vwErr), "No se pudo abrir el archivo"); return; }
   FlexMediaIO io; mediaBindIO(&io, &vwStream);
   int r = flexAviOpen(&vwAvi, &io);
   if(r != FLEXAVI_OK){ vwKind = VWK_ERROR; snprintf(vwErr, sizeof(vwErr), "%s", flexAviErrStr(r)); return; }
-  vwFrameBuf = (uint8_t*)mediaAlloc(VW_FRAME_CAP);
+  // Buffer del fotograma: el que declara el propio AVI (su mayor fotograma)
+  // si es creible, y si no VW_FRAME_CAP. Crece solo si un fotograma lo pide.
+  uint32_t cap = VW_FRAME_CAP;
+  if(vwAvi.maxFrameBytes >= 4096u && vwAvi.maxFrameBytes <= FLEXAVI_FRAME_MAX) cap = (vwAvi.maxFrameBytes + 16383u) & ~16383u;
+  vwFrameBuf = (uint8_t*)mediaAlloc(cap);
+  vwFrameCap = vwFrameBuf ? cap : 0;
+  vwSeekWant = -1; vwSeekLast = -1;
   vwXMap = (uint16_t*)mediaAlloc((size_t)LW * 2);
   if(!vwFrameBuf || !vwXMap){ vwKind = VWK_ERROR; snprintf(vwErr, sizeof(vwErr), "Sin memoria para el v\xC3\xAD" "deo"); return; }
   // La tira del volcado girado: RAM interna si sobra (se escribe por columnas).
@@ -1143,12 +1190,17 @@ static void vwStartContent(uint32_t frame){
   if(frame == 0) frame = vwResumeGet(vwPath);
   vwCurFrame = 0;
   if(frame > 0 && vwAvi.frames > 0 && frame < vwAvi.frames - 1){
-    int landed = flexAviSeekFrame(&vwAvi, frame);
-    if(landed >= 0) vwCurFrame = (uint32_t)landed;
+    int landed = flexAviSeekFrameMax(&vwAvi, frame, VW_SEEK_TICK);
+    if(landed >= 0){
+      vwCurFrame = (uint32_t)landed;
+      if((uint32_t)landed < frame){ vwSeekWant = (int32_t)frame; vwSeekLast = landed; }   // sigue por tramos
+    }
   }
   vwPlaying = false; vwEnded = false;
   vwNextUs = micros();
-  vwReadFrame();                                    // el cuadro con el que se abre (en pausa)
+  // El cuadro con el que se abre (en pausa). Los trozos vacios del principio
+  // (repeticiones) no tienen imagen: se busca el primero que la tenga.
+  for(int i = 0; i < 64 && vwReadFrame() == 0; i++){}
 }
 
 // Activa el visor para el elemento de la sesion del anfitrion. `from` = celda
@@ -1321,17 +1373,32 @@ static void vwCycleOrientation(){
   vwGlassPrep();
   vwPresentAll();
 }
+// Busqueda por tramos: sin indice (o mas alla de lo ya aprendido) llegar a un
+// instante puede exigir recorrer miles de cabeceras. Se avanza VW_SEEK_TICK
+// fotogramas por vuelta de loop, con la imagen de antes en pantalla, en vez de
+// dejar el sistema parado -- o disparar el watchdog -- en una sola llamada.
+// Con idx1 casi siempre termina en la primera llamada.
+static void vwSeekStep(){
+  if(vwSeekWant < 0 || vwKind != VWK_VIDEO) return;
+  if(vwAvi.frames && (uint32_t)vwSeekWant >= vwAvi.frames) vwSeekWant = (int32_t)vwAvi.frames - 1;
+  int landed = flexAviSeekFrameMax(&vwAvi, (uint32_t)vwSeekWant, VW_SEEK_TICK);
+  if(landed < 0){ vwStopBroken(landed); vwRender(); return; }
+  vwCurFrame = (uint32_t)landed;
+  if(landed < vwSeekWant && landed != vwSeekLast){ vwSeekLast = landed; return; }   // sigue en la proxima vuelta
+  vwSeekWant = -1; vwSeekLast = -1;
+  vwEnded = false;
+  vwNextUs = micros();
+  if(vwReadFrame() > 0) vwRenderContent(false);
+  if(!vwPlaying) vwGlassPrep();
+  vwPresentAll();
+}
 static void vwSeekMs(uint32_t ms){
   if(vwKind != VWK_VIDEO || !vwAvi.usPerFrame) return;
   uint32_t target = (uint32_t)(((uint64_t)ms * 1000ull) / vwAvi.usPerFrame);
   if(vwAvi.frames && target >= vwAvi.frames) target = vwAvi.frames - 1;
-  int landed = flexAviSeekFrame(&vwAvi, target);
-  if(landed < 0){ vwKind = VWK_ERROR; snprintf(vwErr, sizeof(vwErr), "Se perdi\xC3\xB3 el acceso al archivo"); vwRender(); return; }
-  vwEnded = false;
-  vwNextUs = micros();
-  if(vwReadFrame()) vwRenderContent(false);
-  if(!vwPlaying) vwGlassPrep();
-  vwPresentAll();
+  vwSeekWant = (int32_t)(target > 0x7FFFFFFFu ? 0x7FFFFFFFu : target);
+  vwSeekLast = -1;
+  vwSeekStep();                                     // con idx1 termina aqui mismo
 }
 static void vwTogglePlay(){
   if(vwKind != VWK_VIDEO) return;
@@ -1526,6 +1593,7 @@ static void vwTapTick(){
 
 // ---- Reproduccion: un fotograma como mucho por vuelta, sin delay() ----
 static void vwPlayTick(){
+  if(vwSeekWant >= 0){ vwSeekStep(); return; }       // primero, llegar a donde se pidio
   if(!vwPlaying || vwKind != VWK_VIDEO) return;
   unsigned long now = micros();
   if((long)(now - vwNextUs) < 0) return;
@@ -1536,17 +1604,19 @@ static void vwPlayTick(){
   for(int i = 0; i < drop; i++){
     int r = flexAviSkipFrame(&vwAvi);
     if(r == FLEXAVI_ERR_EOF){ vwEnded = true; break; }
-    if(r < 0) break;
+    if(r < 0){ vwStopBroken(r); break; }
     vwCurFrame++;
   }
-  if(!vwEnded && vwReadFrame()){
+  int rf = vwEnded ? -1 : vwReadFrame();
+  if(rf > 0){
     int r = vwDecodeFrame();
     (void)r;
     vwGlOk = false;                                 // el fondo de las barras se mueve: tinte sin desenfoque
     vwPresentImage();
-    // El progreso de la barra se mueve cada 250 ms, no en cada fotograma.
-    if(vwBarsA > 0.0f && millis() - vwBarsDrawMs >= 250u){ vwBarsDrawMs = millis(); vwPresentBars(); }
   }
+  // El progreso de la barra se mueve cada 250 ms, no en cada fotograma (y
+  // tambien con trozos vacios: el tiempo avanza aunque la imagen se repita).
+  if(rf >= 0 && vwBarsA > 0.0f && millis() - vwBarsDrawMs >= 250u){ vwBarsDrawMs = millis(); vwPresentBars(); }
   vwNextUs += (unsigned long)spf * (unsigned long)(drop + 1);
   if((long)(micros() - vwNextUs) > (long)(spf * 8)) vwNextUs = micros() + spf;
   if(vwEnded){

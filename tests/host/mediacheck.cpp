@@ -68,13 +68,16 @@ static int cmdAvi(const char* path){
   int rc = flexAviOpen(&a, &io);
   if(rc != FLEXAVI_OK){ std::printf("{\"ok\":0,\"error\":\"%s\"}\n", flexAviErrStr(rc)); return 1; }
   std::vector<uint8_t> buf(FLEXTH_AVI_FRAME);
-  int n = 0, decoded = 0, bad = 0;
+  int n = 0, decoded = 0, bad = 0, repeated = 0;
   uint32_t fno = 0, maxLen = 0;
   for(;;){
     int r = flexAviReadFrame(&a, buf.data(), (uint32_t)buf.size(), &fno);
     if(r == FLEXAVI_ERR_EOF) break;
+    // Mismo tope que el reproductor: un fotograma grande amplia el buffer.
+    if(r == FLEXAVI_ERR_TOOBIG && a.needBytes <= FLEXAVI_FRAME_MAX){ buf.resize(a.needBytes); continue; }
     if(r < 0){ std::printf("{\"ok\":0,\"error\":\"%s\",\"frame\":%d}\n", flexAviErrStr(r), n); return 1; }
     n++;
+    if(r == 0){ repeated++; continue; }        // trozo vacio: repite el anterior
     if((uint32_t)r > maxLen) maxLen = (uint32_t)r;
     FlexJpegInfo inf;
     int d = flexJpegDecode(buf.data(), (size_t)r, 0, 0, 0, &inf, rowNull, nullptr, std::malloc, std::free);
@@ -85,8 +88,8 @@ static int cmdAvi(const char* path){
   int tw = 0, th = 0; uint32_t dur = 0;
   int t = flexThumbFromAvi(&io2, FLEXTH_SIDE, FLEXTH_QUALITY, sinkNull, nullptr, &tw, &th, &dur, std::malloc, std::free);
   std::printf("{\"ok\":1,\"w\":%u,\"h\":%u,\"frames\":%d,\"declared\":%u,\"us\":%u,\"dur\":%u,\"decoded\":%d,\"bad\":%d,"
-              "\"maxFrame\":%u,\"index\":%d,\"thumb\":%d,\"codec\":\"%s\"}\n",
-              a.width, a.height, n, a.frames, a.usPerFrame, flexAviDurationMs(&a), decoded, bad, maxLen,
+              "\"repeated\":%d,\"maxFrame\":%u,\"index\":%d,\"thumb\":%d,\"codec\":\"%s\"}\n",
+              a.width, a.height, n, a.frames, a.usPerFrame, flexAviDurationMs(&a), decoded, bad, repeated, maxLen,
               a.idxFromFile ? 1 : 0, t == FLEXTH_OK ? 1 : 0, a.codec);
   return 0;
 }

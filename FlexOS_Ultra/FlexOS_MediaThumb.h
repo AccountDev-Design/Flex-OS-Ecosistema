@@ -34,7 +34,8 @@ extern "C" {
 
 #define FLEXTH_SIDE       132      // = celda de la rejilla de la Galeria (3 columnas en 480 px)
 #define FLEXTH_QUALITY     82
-#define FLEXTH_AVI_FRAME  (192u * 1024u)   // el mismo tope de fotograma que el reproductor
+#define FLEXTH_AVI_FRAME  (192u * 1024u)   // buffer inicial si el AVI no declara su mayor fotograma
+#define FLEXTH_AVI_TRIES   4               // fotogramas con imagen que se prueban para la miniatura
 
 enum {
   FLEXTH_OK          =  0,

@@ -298,6 +298,7 @@ static_assert(SCR_W == 480 && SCR_H == 800, "la sombra del panel asume 480x800")
 // #############################################################
 static void testPanelRapido();
 static void testPanelOneUI();
+static void testVideoRobusto();
 static void testArrastresSinFlash();
 extern bool gFlexOtaOwns;
 static void testTecladoGlobal();
@@ -8218,7 +8219,8 @@ static bool vwIsBlue(uint16_t c){ int r = c >> 11, g = (c >> 5) & 63, b = c & 31
 static uint16_t vwSeen(int lx, int ly){ return fb[vwIdx(lx, ly)]; }
 static void vwSetDims(uint32_t id, int w, int h){ int i = flexMlFindId(&gMs.lib, id); if(i >= 0){ gMs.lib.recs[i].w = (uint16_t)w; gMs.lib.recs[i].h = (uint16_t)h; } }
 // AVI/MJPEG minimo (solo video, con idx1) a partir de fotogramas JPEG.
-static std::vector<uint8_t> vwTestAvi(const std::vector<std::vector<uint8_t>>& frames, int w, int h, uint32_t usPerFrame){
+static std::vector<uint8_t> vwTestAvi(const std::vector<std::vector<uint8_t>>& frames, int w, int h, uint32_t usPerFrame,
+                                      uint32_t declared = 0, bool withIdx = true, uint32_t suggested = 65536){
   auto u32 = [](std::vector<uint8_t>& v, uint32_t x){ for(int i = 0; i < 4; i++) v.push_back((uint8_t)(x >> (8 * i))); };
   auto u16 = [](std::vector<uint8_t>& v, uint16_t x){ v.push_back((uint8_t)x); v.push_back((uint8_t)(x >> 8)); };
   auto cc  = [](std::vector<uint8_t>& v, const char* t){ for(int i = 0; i < 4; i++) v.push_back((uint8_t)t[i]); };
@@ -8231,11 +8233,11 @@ static std::vector<uint8_t> vwTestAvi(const std::vector<std::vector<uint8_t>>& f
     std::vector<uint8_t> v; cc(v, "LIST"); u32(v, (uint32_t)p.size() + 4); cc(v, type); v.insert(v.end(), p.begin(), p.end());
     return v;
   };
-  uint32_t n = (uint32_t)frames.size();
-  std::vector<uint8_t> avih; u32(avih, usPerFrame); u32(avih, 0); u32(avih, 0); u32(avih, 0x10); u32(avih, n); u32(avih, 0);
+  uint32_t n = (uint32_t)frames.size(), nd = declared ? declared : n;
+  std::vector<uint8_t> avih; u32(avih, usPerFrame); u32(avih, 0); u32(avih, 0); u32(avih, 0x10); u32(avih, nd); u32(avih, 0);
   u32(avih, 1); u32(avih, 0); u32(avih, (uint32_t)w); u32(avih, (uint32_t)h); for(int i = 0; i < 4; i++) u32(avih, 0);
   std::vector<uint8_t> strh; cc(strh, "vids"); cc(strh, "MJPG"); u32(strh, 0); u16(strh, 0); u16(strh, 0); u32(strh, 0);
-  u32(strh, 1); u32(strh, 1000000u / usPerFrame); u32(strh, 0); u32(strh, n); u32(strh, 65536); u32(strh, 0); u32(strh, 0); u32(strh, 0); u32(strh, 0);
+  u32(strh, 1); u32(strh, 1000000u / usPerFrame); u32(strh, 0); u32(strh, nd); u32(strh, suggested); u32(strh, 0); u32(strh, 0); u32(strh, 0); u32(strh, 0);
   std::vector<uint8_t> strf; u32(strf, 40); u32(strf, (uint32_t)w); u32(strf, (uint32_t)h); u16(strf, 1); u16(strf, 24); cc(strf, "MJPG");
   for(int i = 0; i < 5; i++) u32(strf, 0);
   std::vector<uint8_t> strl = chunk("strh", strh); { auto t = chunk("strf", strf); strl.insert(strl.end(), t.begin(), t.end()); }
@@ -8248,7 +8250,7 @@ static std::vector<uint8_t> vwTestAvi(const std::vector<std::vector<uint8_t>>& f
   }
   std::vector<uint8_t> body = list("hdrl", hdrl);
   { auto t = list("movi", movi); body.insert(body.end(), t.begin(), t.end()); }
-  { auto t = chunk("idx1", idx1); body.insert(body.end(), t.begin(), t.end()); }
+  if(withIdx){ auto t = chunk("idx1", idx1); body.insert(body.end(), t.begin(), t.end()); }
   std::vector<uint8_t> out; cc(out, "RIFF"); u32(out, (uint32_t)body.size() + 4); cc(out, "AVI ");
   out.insert(out.end(), body.begin(), body.end());
   return out;
@@ -8445,6 +8447,178 @@ static void testVisorMedios(){
   gMlOk = ok0; gTestFsReady = fs0; gTestMemFs = false; gTestFiles.clear();
   memset(&gMs, 0, sizeof(gMs));
   gState = ST_HOME; gAppId = 0; gAppState[IC_GALERIA] = ALIFE_CLOSED; gLand = false; uiClipFull();
+}
+
+// #############################################################
+//  VIDEO ROBUSTO: archivo abierto, fotogramas grandes, vacios, cortados,
+//  largos sin indice y danados. Sobre el visor REAL y el disco en memoria.
+// #############################################################
+extern unsigned gTestFsReadAtCalls, gTestFsOpenReads, gTestFsStreamReads;
+static uint32_t vfAddVideo(const char* path, const std::vector<uint8_t>& avi){
+  gTestFiles[path] = avi;
+  FlexMlRec vr; memset(&vr, 0, sizeof(vr));
+  snprintf(vr.path, sizeof(vr.path), "%s", path);
+  const char* b = strrchr(path, '/');
+  snprintf(vr.name, sizeof(vr.name), "%s", b ? b + 1 : path);
+  vr.kind = FML_K_VIDEO; vr.fmt = FML_F_AVI_MJPEG; vr.state = FML_S_READY; vr.flags = FML_R_PLAYABLE;
+  vr.size = (uint32_t)avi.size(); vr.w = 320; vr.h = 240;
+  int at = flexMlAdd(&gMs.lib, &vr, 1760000000u);
+  return at >= 0 ? gMs.lib.recs[at].id : 0;
+}
+// Un tick de reproduccion "a su hora": micros() justo pasado el siguiente cuadro.
+static void vfTick(){ gTestUs = vwNextUs + 1000; vwTick(); gTestUs = 0; }
+// La foto de prueba (rojo | azul) con `pad` bytes de segmentos APP1 detras
+// del SOI: el decodificador los salta, asi que la IMAGEN es la misma y el
+// FOTOGRAMA pesa lo que haga falta.
+static std::vector<uint8_t> vfBigFrame(size_t pad){
+  std::vector<uint8_t> j = vwTestJpeg(320, 240), o(j.begin(), j.begin() + 2);
+  while(pad > 4){
+    size_t seg = pad - 4 > 65000 ? 65000 : pad - 4;
+    o.push_back(0xFF); o.push_back(0xE1); o.push_back((uint8_t)((seg + 2) >> 8)); o.push_back((uint8_t)(seg + 2));
+    o.insert(o.end(), seg, (uint8_t)0x20);
+    pad -= seg + 4;
+  }
+  o.insert(o.end(), j.begin() + 2, j.end());
+  return o;
+}
+static bool vfRedBlue(){
+  int vx0 = (int)(vwOffX + 0.5f), vw = (int)(vwFitW * vwScale + 0.5f), cy = (int)(vwOffY + vwFitH * vwScale * 0.5f);
+  return vwIsRed(vwSeen(vx0 + vw / 4, cy)) && vwIsBlue(vwSeen(vx0 + vw * 3 / 4, cy));
+}
+
+static void testVideoRobusto(){
+  printf("Video: archivo abierto, fotogramas grandes, vacios, cortados, largos sin indice y danados\n");
+  int before = gFails;
+  bool ok0 = gMlOk; bool fs0 = gTestFsReady; gTestFsReady = true;
+  bool glass0 = uiGlass; int nav0 = gNavMode;
+  geFsReset();
+  gLockType = 1; gNavMode = 0; uiGlass = false;
+  shotApp(IC_GALERIA); gAppState[IC_GALERIA] = ALIFE_RUNNING; mkBind(&GAL_APP); galViewReady = false;
+  mlTables();
+  if(!glassBuf) glassBuf = (uint16_t*)heap_caps_malloc((size_t)SCR_W * SCR_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  size_t ps0 = gPsUsed;
+  gTestMs = 9500000; touchReset();
+  std::vector<uint8_t> rb = vwTestJpeg(320, 240);
+
+  // ---- 1. EL ARCHIVO SE ABRE UNA VEZ ----
+  // Antes: cada lectura (cabecera de 8 bytes y datos de cada fotograma)
+  // abria, buscaba y cerraba el archivo por su ruta.
+  {
+    std::vector<std::vector<uint8_t>> fr(60, rb);
+    uint32_t id = vfAddVideo(FML_DIR_VIDEO "/Largo.avi", vwTestAvi(fr, 320, 240, 40000));
+    vwOpen(&GAL_VW, id, NULL, NULL);
+    chk(vwActiveFor(&GAL_VW) && vwKind == VWK_VIDEO, "se abre el video");
+    unsigned o0 = gTestFsOpenReads, r0 = gTestFsReadAtCalls, s0 = gTestFsStreamReads;
+    vwTogglePlay();
+    for(int k = 0; k < 40; k++) vfTick();
+    chkf(vwPlaying && vwCurFrame >= 38, "reproduce 40 cuadros seguidos (va por el %u)", vwCurFrame);
+    chkf(gTestFsOpenReads == o0, "sin abrir el archivo otra vez durante la reproduccion (%u)", gTestFsOpenReads - o0);
+    chkf(gTestFsReadAtCalls == r0, "ni una lectura por ruta (%u)", gTestFsReadAtCalls - r0);
+    chkf(gTestFsStreamReads - s0 <= 40 * 2 + 4, "dos lecturas del flujo por fotograma (%u)", gTestFsStreamReads - s0);
+    chk(vfRedBlue(), "y la imagen es la del video");
+    vwTogglePlay();
+    vwClose();
+  }
+
+  // ---- 2. FOTOGRAMA GRANDE: el buffer crece, no se salta ----
+  // 260 KB (> los 192 KB fijos de antes) y el AVI declara 64 KB.
+  {
+    std::vector<std::vector<uint8_t>> fr(4, rb);
+    fr[0] = vfBigFrame(260u * 1024u);
+    uint32_t id = vfAddVideo(FML_DIR_VIDEO "/Grande.avi", vwTestAvi(fr, 320, 240, 40000));
+    vwOpen(&GAL_VW, id, NULL, NULL);
+    chkf(vwKind == VWK_VIDEO && vwFrameLen == fr[0].size(), "el fotograma de 260 KB se lee entero (%u)", vwFrameLen);
+    chkf(vwFrameCap >= fr[0].size() && vwFrameCap <= FLEXAVI_FRAME_MAX, "el buffer crecio a lo justo (%u KB)", vwFrameCap / 1024);
+    chk(vfRedBlue(), "y se VE (antes: negro, fotograma descartado)");
+    vwClose();
+  }
+
+  // ---- 3. TROZO VACIO: se repite el anterior, sin error ----
+  {
+    std::vector<std::vector<uint8_t>> fr(8, rb);
+    fr[3].clear(); fr[4].clear();
+    uint32_t id = vfAddVideo(FML_DIR_VIDEO "/Vacios.avi", vwTestAvi(fr, 320, 240, 40000));
+    vwOpen(&GAL_VW, id, NULL, NULL);
+    vwTogglePlay();
+    for(int k = 0; k < 6; k++) vfTick();
+    chkf(vwPlaying && !vwEnded && vwCurFrame >= 5, "pasa por los vacios sin pararse (va por el %u)", vwCurFrame);
+    chk(vfRedBlue(), "con la imagen anterior en pantalla");
+    for(int k = 0; k < 6; k++) vfTick();
+    chk(vwEnded && !vwPlaying, "y termina normal");
+    vwClose();
+  }
+
+  // ---- 4. GRABACION CORTADA: declara 100, hay 30, sin idx1 ----
+  {
+    std::vector<std::vector<uint8_t>> fr(30, rb);
+    uint32_t id = vfAddVideo(FML_DIR_VIDEO "/Cortado.avi", vwTestAvi(fr, 320, 240, 40000, 100, false));
+    vwOpen(&GAL_VW, id, NULL, NULL);
+    vwSeekMs(90u * 40u);                                // el 90: no existe
+    for(int k = 0; k < 8 && vwSeekWant >= 0; k++) vwTick();
+    chk(vwKind == VWK_VIDEO && vwSeekWant < 0, "buscar mas alla de lo grabado no deja el visor en error");
+    chkf(vwCurFrame == 29 && vwAvi.frames == 30, "se queda en el ultimo que existe (%u) y la duracion es la real (%u)",
+        vwCurFrame, vwAvi.frames);
+    chk(vfRedBlue(), "mostrando ese ultimo fotograma");
+    vwClose();
+  }
+
+  // ---- 5. LARGO SIN INDICE: buscar por tramos, nunca de una vez ----
+  {
+    std::vector<std::vector<uint8_t>> fr(5000);
+    fr[0] = rb; fr[4000] = rb;                           // el resto: trozos vacios (cabeceras)
+    uint32_t id = vfAddVideo(FML_DIR_VIDEO "/SinIndice.avi", vwTestAvi(fr, 320, 240, 40000, 0, false));
+    vwOpen(&GAL_VW, id, NULL, NULL);
+    unsigned worst = 0; int ticks = 0;
+    unsigned s0 = gTestFsStreamReads;
+    vwSeekMs(4000u * 40u);
+    worst = gTestFsStreamReads - s0;
+    while(vwSeekWant >= 0 && ticks < 100){
+      unsigned s1 = gTestFsStreamReads; vwTick(); ticks++;
+      if(gTestFsStreamReads - s1 > worst) worst = gTestFsStreamReads - s1;
+    }
+    chkf(vwSeekWant < 0 && vwCurFrame == 4000, "llega al 4000 (%u) en %d vueltas", vwCurFrame, ticks);
+    chkf(ticks >= 10, "repartido en vueltas de loop (%d), no en una sola llamada", ticks);
+    chkf(worst <= VW_SEEK_TICK + 8, "cada vuelta lee como mucho su tramo (%u lecturas)", worst);
+    chk(vfRedBlue(), "y muestra el fotograma pedido");
+    vwClose();
+  }
+
+  // ---- 6. DANADO A MITAD: se para y lo dice; no gira en vacio ----
+  {
+    std::vector<std::vector<uint8_t>> fr(10, rb);
+    std::vector<uint8_t> avi = vwTestAvi(fr, 320, 240, 40000, 0, false);
+    // El tamano del trozo del fotograma 5 pasa a ser absurdo (~4 GB).
+    size_t at = 0; int seen = 0;
+    for(size_t i = 12; i + 8 <= avi.size(); i++)
+      if(!memcmp(&avi[i], "00dc", 4)){ if(seen++ == 5){ at = i; break; } }
+    chk(at > 0, "hay un trozo que romper");
+    avi[at + 4] = 0xF8; avi[at + 5] = 0xFF; avi[at + 6] = 0xFF; avi[at + 7] = 0xFF;
+    uint32_t id = vfAddVideo(FML_DIR_VIDEO "/Roto.avi", avi);
+    vwOpen(&GAL_VW, id, NULL, NULL);
+    memset(gNotifs, 0, sizeof(gNotifs)); gNotifCount = 0;
+    vwTogglePlay();
+    for(int k = 0; k < 12; k++) vfTick();
+    chk(!vwPlaying && vwEnded, "al llegar al trozo roto la reproduccion se PARA (antes: seguia leyendolo cada vuelta)");
+    bool avisado = false;
+    for(int i = 0; i < gNotifCount; i++) if(strstr(gNotifs[i].mod.sub, "a partir de")) avisado = true;
+    chk(avisado, "y se avisa de que el video esta danado");
+    chk(vwKind == VWK_VIDEO && vfRedBlue(), "con el ultimo fotograma bueno en pantalla");
+    unsigned s0 = gTestFsStreamReads;
+    for(int k = 0; k < 20; k++) vfTick();
+    chk(gTestFsStreamReads == s0, "parado, ya no toca el archivo");
+    vwClose();
+  }
+
+  galRender();
+  if(gPsUsed != ps0) printf("  (PSRAM sin devolver: %d bytes)\n", (int)(gPsUsed - ps0));
+  chk(gPsUsed == ps0, "todo lo del video se devuelve al cerrar (buffer ampliado incluido)");
+  uiGlass = glass0; gNavMode = nav0;
+  mkReset();
+  gMlOk = ok0; gTestFsReady = fs0; gTestMemFs = false; gTestFiles.clear();
+  memset(&gMs, 0, sizeof(gMs));
+  gNotifCount = 0;
+  gState = ST_HOME; gAppId = 0; gAppState[IC_GALERIA] = ALIFE_CLOSED; gLand = false; uiClipFull();
+  if(gFails == before) printf("  Video robusto: todas las comprobaciones pasan.\n");
 }
 
 // La hoja de Flex Web Server solo repinta lo que cambia.
@@ -8961,6 +9135,7 @@ int main(){
   testEditorGaleria();
   testCapturasEditor();
   testVisorMedios();
+  testVideoRobusto();
   testKitTemaYPapelera();
   testHojaWebLocalizada();
   testCapturasVisor();
