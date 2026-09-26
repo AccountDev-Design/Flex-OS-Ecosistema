@@ -654,3 +654,50 @@ static void flexDiagWifi(const char* where){
 #else
 #define FLEXDIAG_WIFI(w) ((void)0)
 #endif
+
+// #############################################################
+// ##  DIAGNOSTICO DE TIRONES DEL BUCLE  (FLEXOS_DIAG_HITCH)
+// ##  ----------------------------------------------------------
+// ##  Un tiron de ~4 ms cada pocos segundos no se ve leyendo el codigo
+// ##  ni en las pruebas de host: hay que medirlo en la placa. Con esto
+// ##  a 1, cada tick PERIODICO del sistema que llama loop() se cronometra
+// ##  con micros() y, si pasa de FLEXOS_HITCH_US, se escribe por Serie
+// ##  CUAL fue, cuanto tardo, su peor marca y cuanto hace de su tiron
+// ##  anterior -- un culpable que vuelve cada ~3-4 s se reconoce solo.
+// ##  Como mucho UNA linea cada 2 s: el propio Serial no puede
+// ##  convertirse en otro tiron.
+// ##
+// ##  A 0 (el valor por defecto) FLEXHITCH(x) es exactamente x: compila
+// ##  a NADA, ni una comparacion en la placa.
+// #############################################################
+#ifndef FLEXOS_DIAG_HITCH
+#define FLEXOS_DIAG_HITCH 0
+#endif
+#ifndef FLEXOS_HITCH_US
+#define FLEXOS_HITCH_US   2500u
+#endif
+#if FLEXOS_DIAG_HITCH
+struct FlexHitchSlot { const char* what; uint32_t lastMs, worstUs, n; };
+static FlexHitchSlot gHitchSlots[32];
+static uint32_t      gHitchPrintMs = 0;
+static void flexHitchNote(const char* what, uint32_t us){
+  if(us < FLEXOS_HITCH_US) return;
+  FlexHitchSlot* s = NULL;
+  for(int i = 0; i < 32 && !s; i++){
+    if(gHitchSlots[i].what == what) s = &gHitchSlots[i];
+    else if(!gHitchSlots[i].what){ gHitchSlots[i].what = what; s = &gHitchSlots[i]; }
+  }
+  if(!s) return;
+  uint32_t now = millis(), gap = s->lastMs ? now - s->lastMs : 0;
+  s->lastMs = now; s->n++;
+  if(us > s->worstUs) s->worstUs = us;
+  if(gHitchPrintMs && now - gHitchPrintMs < 2000u) return;
+  gHitchPrintMs = now ? now : 1;
+  Serial.printf("[hitch] %s: %lu us (peor %lu us, %lu veces, anterior hace %lu ms)\n", what,
+                (unsigned long)us, (unsigned long)s->worstUs, (unsigned long)s->n, (unsigned long)gap);
+}
+#define FLEXHITCH(...) do{ uint32_t _h0 = (uint32_t)micros(); __VA_ARGS__; \
+                           flexHitchNote(#__VA_ARGS__, (uint32_t)micros() - _h0); }while(0)
+#else
+#define FLEXHITCH(...) do{ __VA_ARGS__; }while(0)
+#endif

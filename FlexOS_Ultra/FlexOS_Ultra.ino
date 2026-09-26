@@ -694,13 +694,13 @@ void loop(){
     return;
   }
 
-  safeStableTick();
-  sessAutosaveTick();
-  safeToastTick();
-  memTick();              // medida de memoria por TIEMPO (nunca dentro del dibujo)
-  memAlertTick();         // avisos reales, con enfriamiento (FlexOS_Mem.cpp decide)
+  FLEXHITCH(safeStableTick());
+  FLEXHITCH(sessAutosaveTick());
+  FLEXHITCH(safeToastTick());
+  FLEXHITCH(memTick());              // medida de memoria por TIEMPO (nunca dentro del dibujo)
+  FLEXHITCH(memAlertTick());         // avisos reales, con enfriamiento (FlexOS_Mem.cpp decide)
 
-  suspFadeTick();         // SUSPENSION/APAGADO: un paso del fundido de backlight (no bloqueante)
+  FLEXHITCH(suspFadeTick());         // SUSPENSION/APAGADO: un paso del fundido de backlight (no bloqueante)
   autoLockTick();         // FASE 1: bloqueo por inactividad (lee T sin filtrar, antes de que nadie consuma el toque)
   cronoOverlayTouch();    // CRONOMETRO: la capsula y su tarjeta se quedan el toque antes que la isla
   fpbTouch();             // banner de Flex Phone: se queda el toque SOLO si el dedo
@@ -708,11 +708,11 @@ void loop(){
                           // sigue recibiendolo con normalidad -- el banner no es modal.
   notifHandleTouch();     // la isla intercepta toques dentro de sus tarjetas (Fase 1)
   flexOtaTouchBridge();   // OTA: si hay overlay visible, se queda el toque antes que nadie
-  imuServiceTick();       // Flex IMU Service: mueve el GY-BNO085 mientras alguien lo tenga
+  FLEXHITCH(imuServiceTick());       // Flex IMU Service: mueve el GY-BNO085 mientras alguien lo tenga
                           // adquirido (Device Care, Flex Compass). MISMO bus y MISMO hilo
                           // que el tactil. Sin consumidores sale en su primera linea.
-  dcSensorTick();         // deteccion de caidas: consume la muestra que acaba de llegar
-  tpSensorTick();         // proteccion contra robo: consume LA MISMA muestra del motor,
+  FLEXHITCH(dcSensorTick());         // deteccion de caidas: consume la muestra que acaba de llegar
+  FLEXHITCH(tpSensorTick());         // proteccion contra robo: consume LA MISMA muestra del motor,
                           // con su propio clasificador. Sin la funcion activada sale en
                           // su primera linea.
   tpLockPendingTick();    // bloqueo por posible arrebato que no cupo (cortina, OTA,
@@ -723,16 +723,16 @@ void loop(){
                           // DeX cerrada, pantalla en exclusiva de otro subsistema), suelta
                           // su enganche del sensor.
   faPendingTick();        // aviso de caida que no cupo (cortina, OTA, bloqueo): sale al despejarse
-  mlTick();               // biblioteca de medios: avisos de su tarea de fondo para la isla
-  webTick();              // Flex Web Server: avisos, tarjetas, Wi-Fi y bloqueo (la red va en su tarea)
-  musAudioTick();         // Musica: alimenta el DMA aunque la app no este delante (no bloquea)
-  vwLockTick();           // visor de medios: con el sistema bloqueado no se queda nada protegido en RAM
-  gedBgTick();            // Galeria: publica un guardado del editor terminado en segundo plano
+  FLEXHITCH(mlTick());               // biblioteca de medios: avisos de su tarea de fondo para la isla
+  FLEXHITCH(webTick());              // Flex Web Server: avisos, tarjetas, Wi-Fi y bloqueo (la red va en su tarea)
+  FLEXHITCH(musAudioTick());         // Musica: alimenta el DMA aunque la app no este delante (no bloquea)
+  FLEXHITCH(vwLockTick());           // visor de medios: con el sistema bloqueado no se queda nada protegido en RAM
+  FLEXHITCH(gedBgTick());            // Galeria: publica un guardado del editor terminado en segundo plano
   if(!gSafeMode){
-    wifiAutoReconnectTick();// reconexion diferida, una vez por arranque
-    ntpTick();              // la red corre en su tarea, nunca aqui
+    FLEXHITCH(wifiAutoReconnectTick());// reconexion diferida, una vez por arranque
+    FLEXHITCH(ntpTick());              // la red corre en su tarea, nunca aqui
   }
-  clkPersistTick();       // guarda la hora en NVS una vez por hora (arranque sin internet)
+  FLEXHITCH(clkPersistTick());       // guarda la hora en NVS una vez por hora (arranque sin internet)
   bool minChanged = clkUpdate();
   gMinChanged = minChanged;
 
@@ -785,11 +785,11 @@ void loop(){
     return;
   }
 
-  if(!gSafeMode) flexWeatherTick(gNetOnline);
+  if(!gSafeMode) FLEXHITCH(flexWeatherTick(gNetOnline));
   // FLEX PHONE: con el enlace apagado o no disponible sale en su
   // primera linea, asi que una placa sin telefono emparejado no paga
   // nada por que esta app exista.
-  if(!gSafeMode) flexPhoneTick();
+  if(!gSafeMode) FLEXHITCH(flexPhoneTick());
 
   // -----------------------------------------------------------
   //  PANEL RAPIDO GLOBAL
@@ -923,8 +923,8 @@ void loop(){
     case ST_SAFE:             safeTick(); break;
     case ST_FACTORY:          frTick(); break;
   }
-  kioskTick();            // FASE 4: refresca el candado y escucha el gesto de salida
-  wgDataTick();           // widgets del Home: refresco de DATOS (nunca dentro del dibujo)
+  FLEXHITCH(kioskTick());            // FASE 4: refresca el candado y escucha el gesto de salida
+  FLEXHITCH(wgDataTick());           // widgets del Home: refresco de DATOS (nunca dentro del dibujo)
   // -----------------------------------------------------------
   //  TRANSICION DE APP: UN SOLO DUENO DE LA PANTALLA
   //  ---------------------------------------------------------
@@ -956,12 +956,12 @@ void loop(){
     wgDirty = false;      // solo se repintan las filas de los widgets, ni una mas
     wgRepaint();
   }
-  uiTick();               // animacion continua del vidrio
-  notifTick();            // isla dinamica: anima y compone sobre la pantalla activa (Fase 1)
+  FLEXHITCH(uiTick());               // animacion continua del vidrio
+  FLEXHITCH(notifTick());            // isla dinamica: anima y compone sobre la pantalla activa (Fase 1)
   fpbTick();              // banner de Flex Phone: compone su banda DESPUES de que la
                           // pantalla de debajo haya dibujado, asi que siempre queda
                           // encima y no parpadea. Sin nada en cola sale en su primera linea.
-  cronoCapsuleTick();     // CRONOMETRO: capsula de la barra (solo repinta al cambiar el segundo)
+  FLEXHITCH(cronoCapsuleTick());     // CRONOMETRO: capsula de la barra (solo repinta al cambiar el segundo)
   flexOtaRender();        // OTA: ULTIMA capa del pipeline grafico (nunca toca el fb de una app)
   delay(loopPaceMs());
 }

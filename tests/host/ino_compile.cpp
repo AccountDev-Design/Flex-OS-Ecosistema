@@ -177,7 +177,9 @@ size_t heap_caps_get_free_size(uint32_t caps){
 size_t heap_caps_get_total_size(uint32_t caps){
   return (caps & MALLOC_CAP_INTERNAL) ? gTestInTotal : gTestPsTotal;
 }
+unsigned gLargestCalls = 0;     // en la placa: recorrer el monton entero en seccion critica
 size_t heap_caps_get_largest_free_block(uint32_t caps){
+  gLargestCalls++;
   size_t fr = heap_caps_get_free_size(caps);
   return (gTestPsLargest && gTestPsLargest < fr) ? gTestPsLargest : fr;
 }
@@ -8495,6 +8497,72 @@ static void testKitTemaYPapelera(){
 }
 
 // #############################################################
+//  TRABAJO PERIODICO QUE NO TIENE QUE ESTAR AHI
+//  ------------------------------------------------------------
+//  El tiron de ~4 ms cada pocos segundos en todas las pantallas: el tick de
+//  los widgets recorria la particion LittleFS entera (flexFsUsedBytes) cada
+//  2 s pasara lo que pasara -- dentro de una app, con el dedo arrastrando,
+//  sin widget de almacenamiento en el escritorio --, y la medida de memoria
+//  recorria el monton de la PSRAM (bloque contiguo) cada 2 s con la memoria
+//  holgada. Se cuenta cuantas veces ocurre cada cosa en 60 s de reloj.
+// #############################################################
+extern unsigned gTestFsUsedCalls;
+static void testTrabajoPeriodico(){
+  printf("Trabajo periodico: sin recorrer la flash ni el monton de la PSRAM cuando no hace falta\n");
+  int before = gFails;
+  HomeWidget wg0[HOME_PAGES_MAX][HOME_WG_MAX]; uint8_t wn0[HOME_PAGES_MAX];
+  memcpy(wg0, gHomeWg, sizeof(wg0)); memcpy(wn0, gHomeWgN, sizeof(wn0));
+  auto correr = [&](unsigned long ms){
+    unsigned c0 = gTestFsUsedCalls;
+    for(unsigned long t = 0; t < ms; t += 100){ gTestMs += 100; wgDataTick(); }
+    return gTestFsUsedCalls - c0;
+  };
+  for(int p = 0; p < HOME_PAGES_MAX; p++) gHomeWgN[p] = 0;
+  gState = ST_APP; T = Touch(); hpDragging = hpSettling = false; editMode = false;
+  gTestMs = 5000000; wgStoMs = 0;
+  chk(correr(60000) == 0, "sin widget de almacenamiento, 60 s dentro de una app: ni un recorrido de la flash");
+  gState = ST_HOME;
+  chk(correr(60000) == 0, "sin widget de almacenamiento, 60 s en el escritorio: ni uno");
+  // Con un widget de almacenamiento en la pagina 1
+  gHomeWgN[1] = 1; gHomeWg[1][0].type = WG_STORAGE; gHomeWg[1][0].col = 0; gHomeWg[1][0].row = 1;
+  gHomeWg[1][0].w = 2; gHomeWg[1][0].h = 1;
+  gState = ST_APP;
+  chk(correr(30000) == 0, "con widget pero dentro de una app: no se mide (no se ve)");
+  gState = ST_HOME; T.down = true;
+  chk(correr(10000) == 0, "con el dedo apoyado no se mide");
+  T.down = false; hpDragging = true;
+  chk(correr(10000) == 0, "ni durante el paso de pagina");
+  hpDragging = false;
+  unsigned n = correr(60000);
+  chkf(n >= 1 && n <= 7, "en el escritorio quieto se mide, como mucho cada 10 s (%u veces en 60 s)", n);
+  memcpy(gHomeWg, wg0, sizeof(wg0)); memcpy(gHomeWgN, wn0, sizeof(wn0));
+
+  // ---- El bloque contiguo de la PSRAM ----
+  size_t pr0 = gTestPsPressure;
+  gTestPsPressure = 0;
+  gMemAlerts.levelSeen = 1; gMemAlerts.level = FLEXMEM_LV_OK;
+  gState = ST_HOME; T = Touch();
+  auto bloques = [&](unsigned long ms, bool dedo){
+    unsigned c0 = gLargestCalls;
+    for(unsigned long t = 0; t < ms; t += 100){ gTestMs += 100; T.down = dedo; memTick(); }
+    T.down = false;
+    return gLargestCalls - c0;
+  };
+  memTick(); gTestMs += 20000; memTick();          // punto de partida conocido
+  unsigned b = bloques(60000, false);
+  chkf(b >= 5 && b <= 7, "con holgura, el mayor bloque se mide cada 10 s (%u veces en 60 s, antes 30)", b);
+  chkf(bloques(30000, true) == 0, "y nunca con el dedo apoyado si no hay presion");
+  gTestPsPressure = gTestPsTotal - gPsUsed - (8u << 20);   // 8 MB libres: presion
+  gMemAlerts.level = FLEXMEM_LV_NOTICE;
+  b = bloques(20000, true);
+  chkf(b >= 9, "con presion vuelve a medirse cada 2 s, dedo o no (%u veces en 20 s)", b);
+  gTestPsPressure = pr0; gMemAlerts.level = FLEXMEM_LV_OK;
+  memSampleNow();
+  gState = ST_HOME; T = Touch();
+  if(gFails == before) printf("  Trabajo periodico: todas las comprobaciones pasan.\n");
+}
+
+// #############################################################
 //  ESCRITORIO · LA NOTIFICACION SE QUEDA ENCIMA AL CAMBIAR DE PAGINA
 //  ------------------------------------------------------------
 //  El fallo de las fotos: un aviso a la vista, el usuario desliza a otra
@@ -8798,6 +8866,7 @@ int main(){
   testHojaWebLocalizada();
   testCapturasVisor();
   testGaleriaSinRestos();
+  testTrabajoPeriodico();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

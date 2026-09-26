@@ -67,7 +67,10 @@ bool        flexFsIsDir(const char*){ return false; }
 uint32_t    flexFsSize(const char* p){ return memFsHas(p) ? (uint32_t)gTestFiles[p].size() : 0; }
 bool        flexFsExists(const char* p){ return memFsHas(p); }
 const char* flexFsError(){ return "no montado"; }
-uint32_t    flexFsUsedBytes(){ return gTestMemFs ? memFsUsed() : 0; }
+// Cuantas veces se pidio el espacio usado: en la placa es RECORRER LittleFS
+// entero, asi que las pruebas de trabajo periodico lo cuentan.
+unsigned gTestFsUsedCalls = 0;
+uint32_t    flexFsUsedBytes(){ gTestFsUsedCalls++; return gTestMemFs ? memFsUsed() : 0; }
 uint32_t    flexFsTotalBytes(){ return gTestMemFs ? gTestFsCap : 0; }
 uint32_t    flexFsDirSize(const char*){ return 0; }
 uint32_t    flexFsCatSize(int){ return 0; }

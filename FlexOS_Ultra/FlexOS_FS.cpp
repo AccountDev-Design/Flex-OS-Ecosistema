@@ -4,11 +4,11 @@
 // #############################################################
 //
 //  Todo lo que hay aqui toca ficheros de verdad. No hay ni un
-//  contador cacheado, ni un tamano aproximado, ni un valor de
-//  ejemplo: cuando la interfaz pide "cuantos elementos tiene
-//  /Notas", se abre /Notas y se cuentan. Es mas caro que guardar
-//  un numero en RAM, pero es la unica forma de que el numero no
-//  mienta despues de un borrado, un renombrado o un reinicio.
+//  tamano aproximado ni un valor de ejemplo: cuando la interfaz
+//  pide "cuantos elementos tiene /Notas", se abre /Notas y se
+//  cuentan. La UNICA cifra que se guarda es el espacio usado de la
+//  particion, y sigue siendo exacta: se invalida con cada cambio
+//  que pasa por este modulo (ver "ESPACIO USADO", mas abajo).
 
 #include "FlexOS_FS.h"
 #include <LittleFS.h>
@@ -28,6 +28,36 @@ static const char* fsLabel   = "spiffs";
 // notaria como un cuelgue de la interfaz. Con 5 niveles sobra para
 // la estructura del sistema.
 #define FS_MAX_DEPTH 5
+
+// -------------------------------------------------------------
+//  ESPACIO USADO: exacto, pero sin recorrer la particion cada vez
+//  ------------------------------------------------------------
+//  LittleFS.usedBytes() NO es un getter: esp_littlefs lo resuelve con
+//  lfs_fs_size(), que RECORRE la particion entera (cada par de metadatos
+//  y la lista de bloques de cada archivo) con el cerrojo del sistema de
+//  archivos tomado -- y por tanto ademas ESPERA a que termine cualquier
+//  escritura de otra tarea. Con una biblioteca de fotos y videos son
+//  miles de lecturas de flash. Lo pedian cada 2 s el widget de
+//  almacenamiento del escritorio (en cualquier pantalla, animaciones
+//  incluidas) y en cada repintado Ajustes, Almacenamiento y Device Care:
+//  un tiron periodico del hilo de la interfaz que crecia con la
+//  biblioteca. totalBytes() tambien toma el cerrojo, y la particion
+//  montada no cambia de tamano.
+//
+//  La cifra guardada sigue siendo EXACTA: toda funcion de este modulo que
+//  cambia el disco sube una generacion AL TERMINAR (FsMut, un guardian de
+//  una linea que cubre todos sus return), y lo medido solo vale mientras
+//  la generacion no cambie. Lo que se escriba por fuera de este modulo (el
+//  instalador de paquetes habla con LittleFS directamente) se ve como
+//  mucho FLEXFS_USED_MAX_MS despues.
+// -------------------------------------------------------------
+#define FLEXFS_USED_MAX_MS 10000u
+static uint32_t fsGen     = 1;        // sube con cada cambio del disco hecho aqui
+static uint32_t fsUsedGen = 0;        // generacion con la que se midio fsUsed (0 = sin medida)
+static uint32_t fsUsed    = 0, fsUsedMs = 0;
+static uint32_t fsTotal   = 0;        // tamano de la particion montada (no cambia)
+static inline void fsTouch(){ __atomic_add_fetch(&fsGen, 1u, __ATOMIC_ACQ_REL); }
+struct FsMut { ~FsMut(){ fsTouch(); } };  // al salir -- por cualquier return -- de algo que cambia el disco
 
 
 // -------------------------------------------------------------
@@ -80,6 +110,7 @@ const char* flexFsError(){ return fsErr; }
 static const char* FS_LABELS[] = { "spiffs", "littlefs", "ffat", "storage" };
 
 bool flexFsBegin(){
+  FsMut fsm;                              // cambia el disco: la cifra de usado ya no vale
   if(fsMounted) return true;
 
   // formatOnFail = true cubre el caso "particion virgen": la primera vez que se
@@ -97,6 +128,7 @@ bool flexFsBegin(){
   }
   fsMounted = true;
   fsErr = "";
+  fsTotal = (uint32_t)LittleFS.totalBytes();
 
   // Estructura base. mkdir sobre una carpeta que ya existe devuelve
   // false y no es un error: por eso no se comprueba el retorno.
@@ -108,8 +140,21 @@ bool flexFsBegin(){
   return true;
 }
 
-uint32_t flexFsTotalBytes(){ return fsMounted ? (uint32_t)LittleFS.totalBytes() : 0; }
-uint32_t flexFsUsedBytes(){  return fsMounted ? (uint32_t)LittleFS.usedBytes()  : 0; }
+uint32_t flexFsTotalBytes(){ return fsMounted ? fsTotal : 0; }
+uint32_t flexFsUsedBytes(){
+  if(!fsMounted) return 0;
+  // La generacion se lee ANTES de medir: si otra tarea cambia el disco
+  // mientras se recorre, la cifra queda apuntada con la generacion vieja y la
+  // siguiente pregunta vuelve a medir. Nunca se da por buena una medida a medias.
+  uint32_t g = __atomic_load_n(&fsGen, __ATOMIC_ACQUIRE);
+  uint32_t now = (uint32_t)millis();
+  if(__atomic_load_n(&fsUsedGen, __ATOMIC_ACQUIRE) == g && now - fsUsedMs < FLEXFS_USED_MAX_MS) return fsUsed;
+  uint32_t v = (uint32_t)LittleFS.usedBytes();
+  __atomic_store_n(&fsUsedGen, 0u, __ATOMIC_RELEASE);  // mientras se reescribe, no vale
+  fsUsed = v; fsUsedMs = now;
+  __atomic_store_n(&fsUsedGen, g, __ATOMIC_RELEASE);
+  return v;
+}
 
 bool flexFsExists(const char* path){
   if(!fsMounted || !path || !path[0]) return false;
@@ -135,6 +180,7 @@ uint32_t flexFsSize(const char* path){
 }
 
 bool flexFsMkdir(const char* path){
+  FsMut fsm;                              // cambia el disco: la cifra de usado ya no vale
   if(!fsMounted) return false;
   if(LittleFS.exists(path)) return true;
   return LittleFS.mkdir(path);
@@ -343,6 +389,7 @@ static bool deleteRec(const char* path, int depth){
 }
 
 bool flexFsDelete(const char* path){
+  FsMut fsm;                              // cambia el disco: la cifra de usado ya no vale
   if(!fsMounted || !path || !path[0] || !strcmp(path, "/")) return false;
   return deleteRec(path, 0);
 }
@@ -381,6 +428,7 @@ static const char* extOf(const char* name){
 }
 
 bool flexFsRename(const char* path, const char* newName){
+  FsMut fsm;                              // cambia el disco: la cifra de usado ya no vale
   if(!fsMounted || !path || !newName || !newName[0]) return false;
   if(strchr(newName, '/')) return false;              // solo nombre, sin rutas
 
@@ -421,6 +469,7 @@ bool flexFsTrashOrigin(const char* trashName, char* out, size_t n){
 }
 
 bool flexFsTrash(const char* path){
+  FsMut fsm;                              // cambia el disco: la cifra de usado ya no vale
   if(!fsMounted || !path || !path[0]) return false;
   // La papelera no se tira a si misma.
   if(!strncmp(path, FLEXFS_DIR_TRASH, strlen(FLEXFS_DIR_TRASH))) return false;
@@ -446,6 +495,7 @@ bool flexFsTrash(const char* path){
 }
 
 bool flexFsRestore(const char* trashName){
+  FsMut fsm;                              // cambia el disco: la cifra de usado ya no vale
   if(!fsMounted || !trashName || !trashName[0]) return false;
   char src[FLEXFS_PATH_MAX];
   joinPath(FLEXFS_DIR_TRASH, baseName(trashName), src, sizeof(src));
@@ -473,6 +523,7 @@ bool flexFsRestore(const char* trashName){
 }
 
 bool flexFsEmptyTrash(){
+  FsMut fsm;                              // cambia el disco: la cifra de usado ya no vale
   if(!fsMounted) return false;
   File d = LittleFS.open(FLEXFS_DIR_TRASH);
   if(!d || !d.isDirectory()){ if(d) d.close(); return false; }
@@ -542,6 +593,7 @@ int flexFsReadText(const char* path, char* out, size_t n){
 }
 
 bool flexFsWriteText(const char* path, const char* txt){
+  FsMut fsm;                              // cambia el disco: la cifra de usado ya no vale
   if(!fsMounted) return false;
   File f = LittleFS.open(path, "w");
   if(!f) return false;
@@ -571,6 +623,7 @@ int flexFsReadBin(const char* path, void* buf, size_t n){
 }
 
 bool flexFsWriteBin(const char* path, const void* buf, size_t n){
+  FsMut fsm;                              // cambia el disco: la cifra de usado ya no vale
   if(!fsMounted) return false;
   if(n > 0 && !buf) return false;
   File f = LittleFS.open(path, "w");
@@ -581,6 +634,7 @@ bool flexFsWriteBin(const char* path, const void* buf, size_t n){
 }
 
 bool flexFsWriteBinAtomic(const char* path, const void* buf, size_t n){
+  FsMut fsm;                              // cambia el disco: la cifra de usado ya no vale
   if(!fsMounted || !path || (!buf && n)) return false;
   size_t lp = strlen(path);
   if(lp == 0 || lp + 5 >= FLEXFS_PATH_MAX) return false;
@@ -607,6 +661,7 @@ bool flexFsWriteBinAtomic(const char* path, const void* buf, size_t n){
 }
 
 bool flexFsFactoryErase(){
+  FsMut fsm;                              // cambia el disco: la cifra de usado ya no vale
   if(fsMounted){ LittleFS.end(); fsMounted = false; }
   // arduino-esp32 3.2.0 conserva internamente la etiqueta usada por begin();
   // format() no recibe parametros en esa API.
@@ -620,6 +675,7 @@ bool flexFsFactoryErase(){
   }
   fsMounted = true;
   fsErr = "";
+  fsTotal = (uint32_t)LittleFS.totalBytes();
   LittleFS.mkdir(FLEXFS_DIR_PAINT);
   LittleFS.mkdir(FLEXFS_DIR_NOTAS);
   LittleFS.mkdir(FLEXFS_DIR_SYS);
@@ -638,6 +694,7 @@ static bool paintReadHdr(File& f, FlexPaintHdr* h){
 }
 
 bool flexPaintCreate(const char* path, uint16_t w, uint16_t h){
+  FsMut fsm;                              // cambia el disco: la cifra de usado ya no vale
   if(!fsMounted) return false;
   FlexPaintHdr hd;
   hd.magic[0] = FLEXPAINT_MAGIC0; hd.magic[1] = FLEXPAINT_MAGIC1;
@@ -661,6 +718,7 @@ bool flexPaintHeader(const char* path, FlexPaintHdr* out){
 
 bool flexPaintAppend(const char* path, uint16_t color, uint8_t size,
                      const int16_t* xy, uint16_t pts){
+  FsMut fsm;                              // cambia el disco: la cifra de usado ya no vale
   if(!fsMounted || !xy || pts == 0) return false;
 
   // Se abre en "r+" para poder anadir al final Y reescribir el
@@ -720,6 +778,7 @@ bool flexPaintReplay(const char* path, float sc, int ox, int oy,
 }
 
 bool flexPaintClear(const char* path){
+  FsMut fsm;                              // cambia el disco: la cifra de usado ya no vale
   FlexPaintHdr hd;
   if(!flexPaintHeader(path, &hd)) return false;
   return flexPaintCreate(path, hd.w, hd.h);
@@ -732,6 +791,7 @@ bool flexPaintClear(const char* path){
 // dibujo, asi que el coste es aceptable a cambio de que el
 // deshacer sea de verdad y sobreviva al reinicio.
 bool flexPaintUndo(const char* path){
+  FsMut fsm;                              // cambia el disco: la cifra de usado ya no vale
   if(!fsMounted) return false;
   FlexPaintHdr hd;
   if(!flexPaintHeader(path, &hd)) return false;
@@ -823,6 +883,7 @@ FlexFsStream* flexFsOpenRead(const char* path){
 }
 
 FlexFsStream* flexFsOpenWrite(const char* path){
+  FsMut fsm;                              // cambia el disco: la cifra de usado ya no vale
   if(!fsMounted || !path || path[0] != '/') return nullptr;
   char dir[FLEXFS_PATH_MAX];
   parentDir(path, dir, sizeof(dir));
@@ -842,6 +903,7 @@ int flexFsStreamRead(FlexFsStream* s, void* buf, size_t n){
 }
 
 bool flexFsStreamWrite(FlexFsStream* s, const void* buf, size_t n){
+  FsMut fsm;                              // cambia el disco: la cifra de usado ya no vale
   if(!s || !s->f || (!buf && n)) return false;
   return n == 0 || s->f.write((const uint8_t*)buf, n) == n;
 }
@@ -855,12 +917,14 @@ uint32_t flexFsStreamSize(FlexFsStream* s){
 }
 
 void flexFsStreamClose(FlexFsStream* s){
+  FsMut fsm;                              // cambia el disco: la cifra de usado ya no vale
   if(!s) return;
   if(s->f) s->f.close();
   delete s;
 }
 
 bool flexFsMove(const char* from, const char* to){
+  FsMut fsm;                              // cambia el disco: la cifra de usado ya no vale
   if(!fsMounted || !from || !to || to[0] != '/') return false;
   if(!strcmp(from, to)) return true;
   if(!LittleFS.exists(from) || LittleFS.exists(to)) return false;   // no se pisa nada
@@ -882,6 +946,7 @@ bool flexFsMove(const char* from, const char* to){
 //  nada y devuelve false sin escribir.
 // -------------------------------------------------------------
 bool flexFsPurgeLegacyVault(){
+  FsMut fsm;                              // cambia el disco: la cifra de usado ya no vale
   if(!fsMounted) return false;
   static const char* LEGACY_ROOT = "/.fxvault";
   if(!LittleFS.exists(LEGACY_ROOT)) return false;

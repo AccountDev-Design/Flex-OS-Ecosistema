@@ -5,6 +5,7 @@ bool     gFsFailRename = false;
 int      gFsFailWriteAfter = -1;
 int      gFsWriteCount = 0;
 uint32_t gFsTotalBytes = 11136u * 1024u;   // la particion real del P4
+int      gFsUsedCalls  = 0;
 
 std::map<std::string, FsNode> gFs;
 FlexFsStub LittleFS;

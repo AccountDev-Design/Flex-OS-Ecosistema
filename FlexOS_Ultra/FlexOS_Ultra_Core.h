@@ -62,7 +62,18 @@
 // ##  refresco, ni un String, ni un delay.
 // #############################################################
 #define MEM_TICK_MS    1000       // libre/total (barato)
-#define MEM_BLOCK_MS   2000       // mayor bloque contiguo (recorre huecos)
+#define MEM_BLOCK_MS   2000       // mayor bloque contiguo con la memoria APRETADA (recorre huecos)
+#define MEM_BLOCK_IDLE_MS 10000   // ...y con holgura: el mismo dato, cinco veces menos
+// POR QUE DOS CADENCIAS. En ESP-IDF heap_caps_get_largest_free_block() pasa
+// por heap_caps_get_info(), que RECORRE todos los bloques del monton de la
+// PSRAM (tlsf_walk_pool) dentro de su seccion critica: mientras dura, ese
+// nucleo no atiende interrupciones y ninguna otra tarea puede reservar ni
+// liberar PSRAM. Cada 2 s pasara lo que pasara -- con el dedo arrastrando o a
+// mitad de una transicion -- era un pequeno tiron periodico en todas las
+// pantallas. Con la memoria holgada el dato apenas se mueve y nadie decide
+// nada con el: basta cada 10 s y fuera de una interaccion. Con presion (nivel
+// NOTICE o peor, o poca PSRAM libre) se vuelve a los 2 s de siempre, y las
+// DECISIONES (abrir una app pesada) miden en el acto con memSampleNow().
 #define MEM_FLASH_MS   15000      // flash: SOLO con la pantalla de detalle a la vista
 
 static FlexMemSnap   gMem;                 // ULTIMA medida: la unica fuente de cifras
@@ -125,7 +136,11 @@ static void memTick(){
   uint32_t now = millis();
   if(now - gMemTickMs < MEM_TICK_MS) return;
   gMemTickMs = now;
-  bool blk = (now - gMemBlockMs >= MEM_BLOCK_MS);
+  bool tight = !gMemAlerts.levelSeen || gMemAlerts.level >= FLEXMEM_LV_NOTICE ||
+               gMem.psFree < FLEXMEM_EXIT_NOTICE_BYTES;
+  bool busy  = T.down || appTrVisible() || hpDragging || hpSettling;
+  bool blk = tight ? (now - gMemBlockMs >= MEM_BLOCK_MS)
+                   : (!busy && now - gMemBlockMs >= MEM_BLOCK_IDLE_MS);
   // La medida de flash recorre el sistema de archivos: nunca con el dedo
   // apoyado. Un gesto en curso manda sobre una cifra que puede esperar.
   bool fls = (gMemWantFlash && !T.down && now - gMemFlashMs >= MEM_FLASH_MS);
@@ -138,8 +153,9 @@ static void memTick(){
   // guarda ni se pregunta: no es una preferencia del usuario.
   // Se lee el nivel SOSTENIDO (con histeresis), no el instantaneo: si no, un
   // repintado que baja la memoria un instante volveria a encender el modo
-  // eficiente justo despues de apagarlo.
-  if(gEffMode && blk && gMemAlerts.levelSeen && gMemAlerts.level == FLEXMEM_LV_OK){
+  // eficiente justo despues de apagarlo. No depende de la muestra del bloque
+  // contiguo (que con holgura ya es cada 10 s): el nivel ya la tiene en cuenta.
+  if(gEffMode && gMemAlerts.levelSeen && gMemAlerts.level == FLEXMEM_LV_OK){
     gEffMode = false;
     glcValid = false; gHomeDirty = true; qsDirty = true;
   }

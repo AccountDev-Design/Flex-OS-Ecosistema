@@ -195,6 +195,11 @@ GANCHOS = [
 # ser el hilo equivocado, que es justo lo que ni el compilador ni una prueba
 # de host pueden ver.
 PROHIBIDOS = [
+    # TRABAJO PERIODICO. flexFsUsedBytes() recorre la particion LittleFS entera
+    # (lfs_fs_size, con el cerrojo del sistema de archivos). wgDataTick corre
+    # cada 2 s en CUALQUIER pantalla: la medida del almacenamiento vive en
+    # wgStorageTick, que solo mide con un widget colocado y el escritorio quieto.
+    ("wgDataTick",       "flexFsUsedBytes(",   "recorreria LittleFS entero cada 2 s en todas las pantallas (tiron periodico)"),
     # REGLA DE ORO: esp-hosted no se toca desde loopTask. Estas tres corren en
     # el hilo de la interfaz, que esta suscrito al Task Watchdog y solo lo
     # alimenta una vez por vuelta: levantar ahi el enlace SDIO con el C6 puede

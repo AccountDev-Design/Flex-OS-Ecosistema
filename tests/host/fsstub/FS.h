@@ -46,6 +46,7 @@ extern bool     gFsFailRename;       // todo rename() falla
 extern int      gFsFailWriteAfter;   // <0 desactivado; si no, falla la escritura N
 extern int      gFsWriteCount;
 extern uint32_t gFsTotalBytes;
+extern int      gFsUsedCalls;        // veces que se RECORRIO la particion (usedBytes)
 
 struct FsNode {
   bool dir = false;
@@ -212,6 +213,7 @@ class FlexFsStub {
   }
   uint32_t totalBytes() { return gFsTotalBytes; }
   uint32_t usedBytes() {
+    gFsUsedCalls++;
     uint32_t n = 0;
     for (const auto& kv : gFs) n += (uint32_t)kv.second.data.size();
     return n;

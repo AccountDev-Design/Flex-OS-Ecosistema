@@ -15,6 +15,11 @@
 
 void fsStubReset();
 
+// Reloj de la prueba: FlexOS_FS.cpp caduca su cifra de espacio usado por
+// tiempo (lo que escribe el instalador de paquetes no pasa por el modulo).
+static unsigned long gFakeMs = 1000;
+unsigned long millis(){ return gFakeMs; }
+
 static int g_run = 0, g_fail = 0;
 #define CHECK(c, ...) do { g_run++; if(!(c)){ g_fail++; std::printf("  FALLO %s:%d  ", __FILE__, __LINE__); std::printf(__VA_ARGS__); std::printf("\n"); } } while(0)
 
@@ -73,6 +78,47 @@ int main(){
   gFsFailWriteAfter = -1;
   flexFsStreamClose(w3);
   CHECK(a && !b, "la segunda escritura falla y se sabe");
+
+  // ---- ESPACIO USADO: se mide una vez y vale hasta que algo cambia el disco ----
+  // LittleFS.usedBytes() recorre la particion entera: el widget del escritorio
+  // y los repintados de Ajustes/Almacenamiento lo pedian una y otra vez.
+  {
+    CHECK(flexFsTotalBytes() == LittleFS.totalBytes(), "total: el de la particion montada");
+    int c0 = gFsUsedCalls;
+    uint32_t u1 = flexFsUsedBytes();
+    CHECK(gFsUsedCalls == c0 + 1 && u1 == LittleFS.usedBytes(), "la primera pregunta mide, y es exacta");
+    for(int i = 0; i < 50; i++) flexFsUsedBytes();
+    CHECK(gFsUsedCalls == c0 + 2, "50 preguntas sin cambios no recorren la particion ni una vez mas");
+    c0 = gFsUsedCalls;
+    CHECK(flexFsWriteText("/Notas/cache.txt", "hola mundo"), "escribe una nota");
+    uint32_t u2 = flexFsUsedBytes();
+    CHECK(gFsUsedCalls == c0 + 1 && u2 == LittleFS.usedBytes() && u2 > u1, "tras escribir se vuelve a medir: %u -> %u", u1, u2);
+    struct { const char* what; bool ok; } steps[5];
+    int k = 0;
+    FlexFsStream* ws = flexFsOpenWrite("/System/Media/tmp/cache.part");
+    flexFsStreamWrite(ws, data.data(), 300);
+    steps[k++] = { "un trozo de un flujo", flexFsUsedBytes() == LittleFS.usedBytes() };
+    flexFsStreamWrite(ws, data.data(), 700);
+    flexFsStreamClose(ws);
+    steps[k++] = { "otro trozo y cerrar", flexFsUsedBytes() == LittleFS.usedBytes() };
+    flexFsMove("/System/Media/tmp/cache.part", "/Imagenes/cache.jpg");
+    steps[k++] = { "mover", flexFsUsedBytes() == LittleFS.usedBytes() };
+    flexFsTrash("/Imagenes/cache.jpg");
+    steps[k++] = { "a la papelera", flexFsUsedBytes() == LittleFS.usedBytes() };
+    flexFsDelete("/Notas/cache.txt");
+    steps[k++] = { "borrar", flexFsUsedBytes() == LittleFS.usedBytes() };
+    for(int i = 0; i < k; i++) CHECK(steps[i].ok, "tras %s la cifra sigue siendo exacta", steps[i].what);
+    // Lo que se escribe POR FUERA del modulo (el instalador de paquetes habla
+    // con LittleFS directamente) no invalida: se ve como mucho 10 s despues.
+    uint32_t before = flexFsUsedBytes();
+    c0 = gFsUsedCalls;
+    FsNode big; big.dir = false; big.data.assign(5000, 7);
+    gFs["/Apps/fuera.bin"] = big;
+    CHECK(flexFsUsedBytes() == before && gFsUsedCalls == c0, "escrito por fuera: aun no se ve (sin recorrer)");
+    gFakeMs += 10001;
+    CHECK(flexFsUsedBytes() == LittleFS.usedBytes() && flexFsUsedBytes() == before + 5000,
+          "pasado el plazo se vuelve a medir y aparece");
+  }
 
   std::printf("=== %d comprobaciones, %d fallos ===\n", g_run, g_fail);
   return g_fail ? 1 : 0;

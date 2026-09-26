@@ -82,6 +82,39 @@ static uint32_t wgDataMs   = 0;
 static bool     wgDirty    = false;
 
 static uint32_t wgWxGen = 0xFFFFFFFFu;   // generacion del clima ya reflejada en pantalla
+
+// ---- ALMACENAMIENTO: el unico dato caro del widget ----------------------
+// flexFsUsedBytes() recorre la particion LittleFS entera (ver FlexOS_FS.cpp).
+// Antes se pedia AQUI, cada 2 s, en CUALQUIER pantalla -- dentro de una app,
+// en mitad de una transicion o con el dedo arrastrando -- haya o no un widget
+// de almacenamiento en el escritorio: un tiron periodico del hilo de la
+// interfaz que crecia con la biblioteca de medios. Ahora solo se mide si hay
+// un widget de almacenamiento colocado, con el escritorio a la vista y quieto,
+// y como mucho cada WG_STO_MS (la capa de archivos ademas guarda la cifra
+// hasta que algo cambia el disco).
+#define WG_STO_MS 10000u
+static uint32_t wgStoMs = 0;
+static bool appTrVisible();              // FlexOS_Ultra_AppFramework.h (mas abajo)
+static bool wgStoragePlaced(){
+  for(int p = 0; p < gHomePageN && p < HOME_PAGES_MAX; p++)
+    for(int k = 0; k < gHomeWgN[p] && k < HOME_WG_MAX; k++)
+      if(gHomeWg[p][k].type == WG_STORAGE) return true;
+  return false;
+}
+static void wgStorageTick(uint32_t now, char* s1, size_t n1){
+  bool due = wgStoragePlaced() && gState == ST_HOME && !editMode && !T.down &&
+             !hpDragging && !hpSettling && !appTrVisible() &&
+             (!wgStoMs || now - wgStoMs >= WG_STO_MS);
+  if(!due){ snprintf(s1, n1, "%s", wgSto); return; }       // se conserva lo ultimo medido
+  wgStoMs = now;
+  uint32_t tot = flexFsTotalBytes(), usd = flexFsUsedBytes();
+  wgStoPct = (tot > 0) ? (int)((uint64_t)usd * 100 / tot) : 0;
+  char a[16], b[16];
+  flexFsFmtSize(usd, a, sizeof(a));
+  flexFsFmtSize(tot, b, sizeof(b));
+  snprintf(s1, n1, "%s de %s", a, b);
+}
+
 static void wgDataTick(){
   uint32_t now = millis();
   // CLIMA. Se comprueba SIEMPRE (es una comparacion de un entero, no cuesta
@@ -109,12 +142,7 @@ static void wgDataTick(){
   if(up){ const char* ss = wifiActiveSSID(); snprintf(w1, sizeof(w1), "%s", ss[0] ? ss : "Conectado"); }
   else   snprintf(w1, sizeof(w1), "Sin conexi\xC3\xB3n");
   snprintf(m1, sizeof(m1), "%u KB libres", (unsigned)(esp_get_free_heap_size() / 1024));
-  uint32_t tot = flexFsTotalBytes(), usd = flexFsUsedBytes();
-  wgStoPct = (tot > 0) ? (int)((uint64_t)usd * 100 / tot) : 0;
-  { char a[16], b[16];
-    flexFsFmtSize(usd, a, sizeof(a));
-    flexFsFmtSize(tot, b, sizeof(b));
-    snprintf(s1, sizeof(s1), "%s de %s", a, b); }
+  wgStorageTick(now, s1, sizeof(s1));
   cronoFmt(c1, sizeof(c1), cronoElapsed(), false);
   if(strcmp(t1, wgTime) || strcmp(d1, wgDate) || strcmp(w1, wgWifi) ||
      strcmp(m1, wgMem) || strcmp(s1, wgSto) || strcmp(c1, wgCro) || up != wgNetUp) wgDirty = true;
