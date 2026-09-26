@@ -149,7 +149,8 @@ size_t gTestInTotal   = 400u << 10;
 size_t gTestInFree    = 180u << 10;
 size_t gTestPsLargest = 0;           // 0 = todo lo libre en una sola pieza
 
-static void psTrack(void* p, size_t n){ if(p){ psMap()[p] = n; gPsUsed += n; } }
+size_t gPsPeak = 0;                  // pico de gPsUsed (una prueba lo pone a cero y lo mira)
+static void psTrack(void* p, size_t n){ if(p){ psMap()[p] = n; gPsUsed += n; if(gPsUsed > gPsPeak) gPsPeak = gPsUsed; } }
 static void psUntrack(void* p){
   auto it = psMap().find(p);
   if(it == psMap().end()) return;
@@ -298,6 +299,8 @@ static_assert(SCR_W == 480 && SCR_H == 800, "la sombra del panel asume 480x800")
 // #############################################################
 static void testPanelRapido();
 static void testPanelOneUI();
+static void testVariasFotos();
+static void testGuardadoRafaga();
 static void testVideoRobusto();
 static void testArrastresSinFlash();
 extern bool gFlexOtaOwns;
@@ -8621,6 +8624,189 @@ static void testVideoRobusto(){
   if(gFails == before) printf("  Video robusto: todas las comprobaciones pasan.\n");
 }
 
+// #############################################################
+//  VARIAS FOTOS SEGUIDAS: el catalogo se reescribe una vez por rafaga
+//  ------------------------------------------------------------
+//  Cada foto recibida dejaba el catalogo sucio y la tarea de medios lo
+//  reescribia ENTERO 1,5 s despues, entre foto y foto: N fotos, N
+//  reescrituras (decenas de borrados de sector con la cache apagada).
+//  Se simula la linea de tiempo real de una rafaga (progreso cada 250 ms,
+//  la tarea mirando cada 400 ms) con la MISMA decision que usa mlTask.
+// #############################################################
+static void testGuardadoRafaga(){
+  printf("Varias fotos seguidas: el catalogo se reescribe una vez por rafaga, no una por foto\n");
+  int before = gFails;
+  // ---- 1. La decision, caso por caso ----
+  chk(!mlSaveDue(10000, 0, 0, 0), "sin nada sucio no se guarda");
+  chk(!mlSaveDue(11499, 10000, 0, 0) && mlSaveDue(11500, 10000, 0, 0), "sin subidas: 1,5 s despues del primer cambio, como antes");
+  chk(!mlSaveDue(12000, 10000, 0, 11000), "con una subida hace 1 s, se espera");
+  chk(mlSaveDue(14000, 10000, 0, 11000), "3 s sin senales: la rafaga acabo y se guarda");
+  chk(mlSaveDue(30000, 10000, 0, 29900), "aunque las subidas no paren, nunca mas de 20 s sucio");
+  chk(!mlSaveDue(12000, 10000, 1, 0) && mlSaveDue(13000, 10000, 1, 0), "tras un fallo de flash se espacia el reintento, igual que antes");
+  // La marca es millis() | 1: leida en el MISMO milisegundo par va 1 ms por
+  // delante. Sin signo eso era "hace una eternidad" y se guardaba en el acto.
+  chk(!mlSaveDue(20000, 20000u | 1u, 0, 0), "sucio en este mismo milisegundo: aun no (antes: guardado inmediato)");
+  chk(!mlSaveDue(20000 + 1600, 20000, 0, 20000 + 1600 + 1), "una senal de subida de este mismo milisegundo cuenta como rafaga");
+  // ---- 2. Las senales salen de la web ----
+  gTestMs = 777000; gMlBurstMs = 0;
+  FlexWebXfer x; memset(&x, 0, sizeof(x)); x.ev = FLEXWEB_EV_UP_PROGRESS;
+  whEvent(NULL, &x);
+  chkf(gMlBurstMs == (777000u | 1u), "el progreso de una subida marca la rafaga (%u)", (unsigned)gMlBurstMs);
+  gMlBurstMs = 0; x.ev = FLEXWEB_EV_DL_PROGRESS; whEvent(NULL, &x);
+  chk(gMlBurstMs == 0, "una DESCARGA al movil no retrasa nada: no cambia el catalogo");
+  // ---- 3. Una rafaga de 5 fotos de 2,5 s cada una ----
+  uint32_t t = 1000000, dirtySince = 0, lastLook = 0; int saves = 0, savesOld = 0; uint32_t dirtyOld = 0;
+  gMlBurstMs = 0;
+  uint32_t firstDirty = 0, lastSave = 0;
+  for(uint32_t ms = 0; ms < 40000; ms += 50){
+    uint32_t now = t + ms;
+    int photo = (int)(ms / 2500);
+    bool sending = photo < 5;
+    if(sending && ms % 250 == 0) gMlBurstMs = now | 1u;                 // progreso
+    bool commit = sending && ms % 2500 == 2450;                          // la foto queda publicada
+    if(commit){ if(!dirtySince) dirtySince = now | 1u; if(!dirtyOld) dirtyOld = now | 1u; if(!firstDirty) firstDirty = now; }
+    if(now - lastLook >= 400){
+      lastLook = now;
+      if(mlSaveDue(now, dirtySince, 0, gMlBurstMs)){ saves++; dirtySince = 0; lastSave = now; }
+      if(dirtyOld && now - dirtyOld >= ML_SAVE_DELAY_MS){ savesOld++; dirtyOld = 0; }   // la politica anterior
+    }
+  }
+  chkf(savesOld >= 5, "con la politica anterior eran %d reescrituras (una por foto)", savesOld);
+  chkf(saves == 1, "ahora una sola reescritura para toda la rafaga (%d)", saves);
+  chkf(lastSave > firstDirty && lastSave - firstDirty <= ML_SAVE_MAX_MS, "y llega a tiempo: %u ms tras la primera foto",
+       (unsigned)(lastSave - firstDirty));
+  gMlBurstMs = 0;
+  if(gFails == before) printf("  Guardado por rafaga: todas las comprobaciones pasan.\n");
+}
+
+// #############################################################
+//  VARIAS FOTOS A LA VEZ, POR EL CAMINO REAL
+//  ------------------------------------------------------------
+//  El movil sube fotos de 0,3 a 12 MP por el servidor web de VERDAD
+//  (FlexOS_MediaWeb) conectado a los callbacks de la placa: validacion y
+//  miniatura con el cerrojo de trabajo pesado, publicacion en el catalogo
+//  (whCommit), avisos (webTick) y la Galeria abierta repintandose. Despues
+//  se abren todas en el visor, una tras otra. Lo que se exige:
+//    · la memoria de cada subida NO crece con el tamano de la foto (se lee
+//      por trozos: nunca entera en RAM);
+//    · nada se acumula por foto: tras N fotos la PSRAM es la de antes mas
+//      las miniaturas en cache (acotadas por ML_CACHE_N);
+//    · abrir las N en el visor y cerrarlo devuelve TODA la PSRAM;
+//    · ningun temporal se queda en el disco.
+// #############################################################
+struct VfConn { std::string in; size_t pos = 0; std::string out; };
+static int vfcRead(void* c, uint8_t* b, size_t n, uint32_t){
+  VfConn* k = (VfConn*)c;
+  if(k->pos >= k->in.size()) return -1;
+  size_t t = k->in.size() - k->pos; if(t > n) t = n; if(t > 16384) t = 16384;   // TCP troceado
+  memcpy(b, k->in.data() + k->pos, t); k->pos += t; return (int)t;
+}
+static bool vfcWrite(void* c, const uint8_t* b, size_t n){ ((VfConn*)c)->out.append((const char*)b, n); return true; }
+static std::string gVfCookie;
+static int vfHttp(const std::string& method, const std::string& path, const std::string& body, std::string* respBody = nullptr){
+  std::string r = method + " " + path + " HTTP/1.1\r\nHost: 192.168.1.50:8080\r\nX-Flex: 1\r\n";
+  if(!gVfCookie.empty()) r += "Cookie: " FLEXHTTP_SESS_COOKIE "=" + gVfCookie + "\r\n";
+  r += "Content-Length: " + std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+  VfConn c; c.in = r;
+  FlexWebConn cn = { vfcRead, vfcWrite, &c };
+  flexWebServeConn(&gWebCtx, &cn, gWebHdr, gWebIo);
+  int st = c.out.size() > 12 ? atoi(c.out.c_str() + 9) : 0;
+  size_t sc = c.out.find("fxs=");
+  if(sc != std::string::npos && gVfCookie.empty()){ size_t e = c.out.find(';', sc); gVfCookie = c.out.substr(sc + 4, e - sc - 4); }
+  if(respBody){ size_t e = c.out.find("\r\n\r\n"); *respBody = e == std::string::npos ? "" : c.out.substr(e + 4); }
+  return st;
+}
+static std::string vfEnc(const char* s){
+  std::string o; char b[4];
+  for(const unsigned char* p = (const unsigned char*)s; *p; p++){
+    if(isalnum(*p) || *p == '.' || *p == '-' || *p == '_') o += (char)*p; else { snprintf(b, 4, "%%%02X", *p); o += b; }
+  }
+  return o;
+}
+
+static void testVariasFotos(){
+  printf("Varias fotos: 8 de 0,3 a 12 MP por el servidor web REAL, con la Galeria abierta y el visor\n");
+  int before = gFails;
+  bool ok0 = gMlOk; bool fs0 = gTestFsReady; gTestFsReady = true;
+  bool glass0 = uiGlass; int nav0 = gNavMode;
+  geFsReset();
+  gLockType = 1; gNavMode = 0; uiGlass = false;
+  shotApp(IC_GALERIA); gAppState[IC_GALERIA] = ALIFE_RUNNING; mkBind(&GAL_APP); galViewReady = false;
+  mlTables();
+  if(!glassBuf) glassBuf = (uint16_t*)heap_caps_malloc((size_t)SCR_W * SCR_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  gTestMs = 9800000; touchReset();
+  // El servidor como lo arranca webStart, sin la tarea: la prueba hace de ella.
+  if(!gWebHdr) gWebHdr = (uint8_t*)mediaAlloc(FLEXWEB_HDR_BUF);
+  if(!gWebIo)  gWebIo  = (uint8_t*)mediaAlloc(FLEXWEB_IO_BUF);
+  if(!gWebEv)  gWebEv  = (FlexWebXfer*)mediaAlloc(sizeof(FlexWebXfer) * WEB_EV_N);
+  memset(&gWebCtx, 0, sizeof(gWebCtx));
+  gWebCtx.fs = { msfOpen, msfRead, msfWrite, msfSeek, msfClose, msfSize, msfRemove, wfsFree, wfsTotal, NULL };
+  gWebCtx.host = { whSnapshot, whGet, whRev, whDup, whCommit, whSetThumb, whThumbPath, whVerify, whLockType,
+                   whNow, whEpoch, whRandom, whEvent, NULL, whOthers, NULL, whHeavyBegin, whHeavyEnd };
+  gWebCtx.alloc = mediaAlloc; gWebCtx.free = mediaFree;
+  snprintf(gWebCtx.ip, sizeof(gWebCtx.ip), "192.168.1.50");
+  gWebCtx.port = 8080; gWebCtx.allowUpload = true;
+  flexWebInit(&gWebCtx);
+  gVfCookie.clear();
+  chk(vfHttp("POST", "/api/pair", std::string("code=") + gWebCtx.code) == 200 && gVfCookie.size() == 32, "el movil se empareja");
+  galRender();
+  size_t psGal = gPsUsed;
+
+  const int dims[8][2] = { {640, 480}, {480, 640}, {1600, 1200}, {1200, 1600}, {3000, 2000}, {2000, 3000}, {4000, 3000}, {3000, 4000} };
+  int n0 = gMs.lib.n, okN = 0; size_t worst = 0, worstFor = 0;
+  std::vector<uint32_t> ids;
+  for(int i = 0; i < 8; i++){
+    std::vector<uint8_t> jpg = vwTestJpeg(dims[i][0], dims[i][1]);
+    char name[32]; snprintf(name, sizeof(name), "Foto %d.jpg", i + 1);
+    uint32_t crc = flexMlCrc32(0, jpg.data(), jpg.size());
+    std::string path = std::string("/api/upload?kind=photo&name=") + vfEnc(name) + "&size=" + std::to_string(jpg.size()) +
+                       "&crc=" + std::to_string(crc) + "&w=" + std::to_string(dims[i][0]) + "&h=" + std::to_string(dims[i][1]);
+    size_t base = gPsUsed; gPsPeak = gPsUsed;
+    std::string rb;
+    int st = vfHttp("POST", path, std::string((const char*)jpg.data(), jpg.size()), &rb);
+    size_t used = gPsPeak - base;
+    if(used > worst){ worst = used; worstFor = (size_t)dims[i][0] * dims[i][1]; }
+    if(st == 201){ okN++; const char* q = strstr(rb.c_str(), "\"id\":"); if(q) ids.push_back((uint32_t)strtoul(q + 5, NULL, 10)); }
+    else printf("  (subida %d: HTTP %d %s)\n", i + 1, st, rb.c_str());
+    gTestMs += 700; webTick();                     // la interfaz recoge los avisos
+    galRender();                                   // y la Galeria se repinta con la nueva
+  }
+  printf("  [fotos] subida mas cara: %u KB de PSRAM (foto de %.1f MP) · tras 8 fotos: +%d KB (miniaturas en cache)\n",
+         (unsigned)(worst / 1024), worstFor / 1e6, (int)(gPsUsed - psGal) / 1024);
+  chkf(okN == 8 && gMs.lib.n == n0 + 8, "las 8 fotos quedan publicadas (%d, catalogo %d)", okN, gMs.lib.n - n0);
+  chkf(worst <= 1536u * 1024u, "la subida mas cara usa %u KB de PSRAM (foto de %.1f MP): no crece con la foto",
+       (unsigned)(worst / 1024), worstFor / 1e6);
+  size_t cacheMax = (size_t)ML_CACHE_N * ML_SIDE * ML_SIDE * 2;
+  chkf(gPsUsed <= psGal + cacheMax, "tras 8 fotos la PSRAM es la de antes mas las miniaturas en cache (+%d KB)",
+       (int)(gPsUsed - psGal) / 1024);
+  int tmps = 0;
+  for(auto& kv : gTestFiles) if(kv.first.compare(0, strlen(FML_DIR_TMP), FML_DIR_TMP) == 0) tmps++;
+  chkf(tmps == 0, "ningun temporal queda en el disco (%d)", tmps);
+
+  // Abrir las ocho en el visor, una tras otra.
+  size_t psBefore = gPsUsed; int opened = 0;
+  for(uint32_t id : ids){
+    vwOpen(&GAL_VW, id, NULL, NULL);
+    for(int k = 0; k < 4 && vwLoading; k++) vwTick();
+    if(vwActiveFor(&GAL_VW) && vwKind == VWK_PHOTO && vwSrc) opened++;
+    vwClose();
+  }
+  chkf(opened == 8, "las 8 se abren en el visor (%d)", opened);
+  galRender();
+  if(gPsUsed != psBefore) printf("  (PSRAM sin devolver tras el visor: %d bytes)\n", (int)(gPsUsed - psBefore));
+  chk(gPsUsed == psBefore, "abrir las 8 en el visor y cerrarlo devuelve TODA la PSRAM");
+
+  uiGlass = glass0; gNavMode = nav0;
+  mkReset();
+  memset(&gWebCtx, 0, sizeof(gWebCtx));
+  gWebEvR = gWebEvW = 0;
+  gMlOk = ok0; gTestFsReady = fs0; gTestMemFs = false; gTestFiles.clear();
+  memset(&gMs, 0, sizeof(gMs));
+  memset(gNotifs, 0, sizeof(gNotifs)); gNotifCount = 0;
+  gState = ST_HOME; gAppId = 0; gAppState[IC_GALERIA] = ALIFE_CLOSED; gLand = false; uiClipFull();
+  if(gFails == before) printf("  Varias fotos: todas las comprobaciones pasan.\n");
+}
+
 // La hoja de Flex Web Server solo repinta lo que cambia.
 static void testHojaWebLocalizada(){
   printf("Flex Web Server: la hoja solo repinta la zona que cambia\n");
@@ -9136,6 +9322,8 @@ int main(){
   testCapturasEditor();
   testVisorMedios();
   testVideoRobusto();
+  testGuardadoRafaga();
+  testVariasFotos();
   testKitTemaYPapelera();
   testHojaWebLocalizada();
   testCapturasVisor();

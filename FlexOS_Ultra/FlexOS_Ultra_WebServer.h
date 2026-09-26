@@ -92,6 +92,7 @@ static uint32_t whCommit(void*, const FlexWebUpload* up, char* why, size_t cap){
   u.kind = up->kind; u.fmt = up->fmt; u.playable = up->playable;
   u.size = up->size; u.crc = up->crc; u.created = up->created; u.durMs = up->durMs; u.w = up->w; u.h = up->h;
   uint32_t id = flexMsCommitUpload(&gMs, &u, why, cap);
+  mlBurstNote();                                  // puede venir otra: el guardado espera a la rafaga
   mlWake();                                       // guardar el catalogo
   return id;
 }
@@ -117,6 +118,8 @@ static void whRandom(void*, uint8_t* out, size_t n){ flexLockRandomBytes(out, n)
 // DESPUES de ver el indice (acquire): sin eso, el otro nucleo podia leer una
 // plaza a medio copiar.
 static void whEvent(void*, const FlexWebXfer* x){
+  if(x->ev == FLEXWEB_EV_UP_START || x->ev == FLEXWEB_EV_UP_PROGRESS || x->ev == FLEXWEB_EV_UP_CHECK)
+    mlBurstNote();                                // hay una subida en curso (ver mlSaveDue)
   if(!gWebEv) return;                             // webStart no deja arrancar sin ella
   uint8_t w = gWebEvW, used = (uint8_t)(w - __atomic_load_n(&gWebEvR, __ATOMIC_ACQUIRE));
   bool progress = x->ev == FLEXWEB_EV_UP_PROGRESS || x->ev == FLEXWEB_EV_DL_PROGRESS;

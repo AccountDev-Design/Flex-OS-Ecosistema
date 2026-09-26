@@ -1096,7 +1096,9 @@ static void gedCloseNow(){
 // ¿Se esta viendo? A pantalla completa lo dice el estado de la app; dentro
 // de una ventana de DeX, que su tick haya corrido hace nada.
 static uint32_t gedTickMs = 0;
-static bool gedTicking(){ return gedTickMs && millis() - gedTickMs < 300; }
+// Con signo: la marca es millis() | 1 y, leida en el mismo milisegundo par,
+// va 1 ms por delante (sin signo, "hace una eternidad": no se estaba viendo).
+static bool gedTicking(){ return gedTickMs && (int32_t)(millis() - gedTickMs) < 300; }
 static bool gedForeground(){
   return (gState == ST_APP && gAppId == IC_GALERIA && gAppState[IC_GALERIA] == ALIFE_RUNNING) || gedTicking();
 }

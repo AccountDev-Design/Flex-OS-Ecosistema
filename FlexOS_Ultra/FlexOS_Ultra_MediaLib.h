@@ -59,6 +59,8 @@
 // #############################################################
 
 #define ML_SAVE_DELAY_MS      1500u                 // agrupa cambios seguidos en una escritura
+#define ML_SAVE_MAX_MS        20000u                // con una rafaga de subidas, nunca mas tarde que esto
+#define ML_BURST_GAP_MS       3000u                 // sin senales de una subida en este tiempo, la rafaga acabo
 #define ML_WORKER_STACK       12288
 #define ML_PSRAM_MARGIN       (1024u * 1024u)       // ademas de la reserva del sistema
 #define ML_RETRY_MS           3000u                 // lo aplazado por memoria se reintenta tras esto
@@ -78,6 +80,32 @@ static volatile uint32_t gMlLoadedFrom = 0;         // 1 = archivo, 2 = .bak, 3 
 // loopTask, asi que la tarea deja el texto aqui y mlTick() lo entrega.
 static char              gMlMsg[ML_MSG_N][2][56];     // el aviso mas largo mide 50 bytes
 static volatile uint8_t  gMlMsgW = 0, gMlMsgR = 0;
+
+// GUARDADO DEL CATALOGO DURANTE UNA RAFAGA DE SUBIDAS. flexMsSave reescribe el
+// catalogo ENTERO (con 100 elementos, ~43 KB: una decena de borrados de sector
+// de 4 KB). Con varias fotos seguidas desde el movil, cada foto lo dejaba sucio
+// y se reescribia 1,5 s despues, entre foto y foto: N fotos, N reescrituras.
+// Cada borrado de flash apaga la cache decenas de ms -- tirones y, con el panel
+// DSI sin la opcion de ISR segura, un destello cian por borrado --. Mientras la
+// web siga mandando senales de subida (gMlBurstMs) se espera a que la rafaga
+// acabe, con un tope: lo sucio se guarda SIEMPRE antes de ML_SAVE_MAX_MS. Un
+// corte de luz en ese intervalo no pierde archivos: el recorrido del disco del
+// siguiente arranque vuelve a registrar lo que ya estaba en su carpeta.
+static volatile uint32_t gMlBurstMs = 0;           // ultima senal de una subida en curso (tarea web)
+static inline void mlBurstNote(){ gMlBurstMs = millis() | 1u; }
+// Edad de una marca `millis() | 1` (el 0 queda para "sin marca"). CON SIGNO y
+// acotada a 0: leida en el mismo milisegundo par en que se puso, la marca va 1
+// ms por delante y `now - marca` sin signo daba 4.294.967.295 ("hace una
+// eternidad"). Con la cuenta anterior, la mitad de las veces el guardado
+// "agrupado" se hacia en el acto.
+static inline uint32_t mlAge(uint32_t now, uint32_t mark){ int32_t d = (int32_t)(now - mark); return d > 0 ? (uint32_t)d : 0u; }
+static bool mlSaveDue(uint32_t now, uint32_t dirtySince, uint32_t saveFails, uint32_t burstMs){
+  if(!dirtySince) return false;
+  uint32_t age = mlAge(now, dirtySince);
+  if(age < ML_SAVE_DELAY_MS * (1u + (saveFails < 20 ? saveFails : 20))) return false;
+  if(burstMs && mlAge(now, burstMs) < ML_BURST_GAP_MS && age < ML_SAVE_MAX_MS) return false;   // la rafaga sigue
+  return true;
+}
 
 static inline void mlLock(){ if(gMlMux) xSemaphoreTake(gMlMux, portMAX_DELAY); }
 static inline void mlUnlock(){ if(gMlMux) xSemaphoreGive(gMlMux); }
@@ -249,7 +277,7 @@ static void mlTask(void*){
     // Guardado agrupado; si la flash falla, se espacia el reintento.
     if(gMs.dirty){ if(!dirtySince) dirtySince = millis() | 1u; }
     else dirtySince = 0;
-    if(dirtySince && millis() - dirtySince >= ML_SAVE_DELAY_MS * (1u + (saveFails < 20 ? saveFails : 20))){
+    if(mlSaveDue(millis(), dirtySince, saveFails, gMlBurstMs)){
       if(flexMsSave(&gMs)) saveFails = 0;
       else {
         saveFails++;
