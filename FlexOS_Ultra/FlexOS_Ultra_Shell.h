@@ -82,6 +82,7 @@ static void theftEnter();         // Ajustes -> Seguridad -> Proteccion contra r
 static void theftTick();
 static void swPushAndCapture(uint8_t id); static void activarMultitarea(); static void swTick();  // App Switcher
 static void swPushNoThumb(uint8_t id);   // apps landscape: sin miniatura (ver appClose)
+static bool vwShowsProtected(uint8_t app); // el visor de esa app ensena algo PROTEGIDO (sin miniatura en Recientes)
 static void lsuEnter(); static void lsuTick();             // Seguridad -> Bloqueo (PIN/Contraseña)
 static void lsuStartVerify();                              // pedir PIN/contraseña al desbloquear
 static void composeUnlock(int off); static void animateTo(int from, int to);

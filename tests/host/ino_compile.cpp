@@ -8046,6 +8046,16 @@ static void testCapturasEditor(){
   flexIeSetLongSide(gedE, 400);
   gedChanged(); shotApp(IC_GALERIA); gedRender(); shotSave("editor_tamano");
   gedSheet = true; shotApp(IC_GALERIA); gedRender(); shotSave("editor_guardar");
+  { // El mismo editor con el tema CLARO (vidrio y plano): sigue al sistema.
+    bool d0 = gDark, g0 = uiGlass;
+    gDark = false;
+    shotApp(IC_GALERIA); gedRender(); shotSave("editor_guardar_claro");
+    uiGlass = false; shotApp(IC_GALERIA); gedRender(); shotSave("editor_guardar_claro_plano");
+    gedSheet = false; gedSetTool(GT_ADJ);
+    shotApp(IC_GALERIA); gedRender(); shotSave("editor_ajustes_claro_plano");
+    uiGlass = true; shotApp(IC_GALERIA); gedRender(); shotSave("editor_ajustes_claro");
+    gDark = d0; uiGlass = g0; gedSetTool(GT_SIZE);
+  }
   gedSheet = false; gedSrcW = gedW; gedSrcH = gedH;
   gedStartSave(GS_COPY); gedJob.pct = 62;
   shotApp(IC_GALERIA); gedRender(); shotSave("editor_guardando");
@@ -8235,7 +8245,13 @@ static void testVisorMedios(){
   vwOpen(&GAL_VW, lk, NULL, NULL);                               // como tras acertar la clave
   chk(vwActiveFor(&GAL_VW) && vwLocked && !vwCanTrash && !vwCanEdit && !vwHasBot(), "protegido: ni Papelera ni Editar en el visor");
   chk(vwThumb == nullptr, "protegido: el visor no copia ninguna miniatura");
-  galSuspend();
+  // Recientes: al pasar a segundo plano con lo protegido delante, SIN captura.
+  gAppState[IC_GALERIA] = ALIFE_RUNNING;
+  appSuspend(IC_GALERIA, false);
+  { bool thumb = false;
+    for(int i = 0; i < swCount; i++) if(swTasks[i].appID == IC_GALERIA && swTasks[i].thumb) thumb = true;
+    chk(swCardCount() > 0 && !thumb, "Recientes no guarda la captura de una foto protegida"); }
+  gAppState[IC_GALERIA] = ALIFE_RUNNING;
   chk(!galVwSess.open && !vwClean && !vwSrc, "a segundo plano: lo protegido ni se recuerda ni queda en memoria");
   vwOpen(&GAL_VW, lk, NULL, NULL);
   { auto st0 = gState; gState = ST_LOCK; vwLockTick(); gState = st0; }

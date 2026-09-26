@@ -106,15 +106,15 @@ static const float GED_ASPECT_R[GED_ASPECTS] = { 0.0f, 1.0f, 4.0f / 3.0f, 3.0f /
 static const char* const GED_SIZE[GED_SIZES] = { "Original", "75 %", "50 %", "25 %" };
 static const uint8_t GED_SIZE_PCT[GED_SIZES] = { 100, 75, 50, 25 };
 
-// Colores propios del editor: la foto se mira sobre un fondo neutro y
-// oscuro, sea cual sea el tema (como en el editor de un movil).
-#define GED_BG      rgb565(10, 11, 14)
-#define GED_PANEL   rgb565(28, 30, 38)
-#define GED_GLASS   rgb565(44, 48, 62)
-#define GED_CHIP    rgb565(48, 52, 66)
-#define GED_TXT     rgb565(240, 242, 248)
-#define GED_TXT2    rgb565(168, 174, 190)
-#define GED_DIS     rgb565(92, 96, 110)
+// Colores del editor: los del TEMA del sistema (Claro/Oscuro), no una paleta
+// propia. Solo lo que se dibuja ENCIMA de la foto (marco de recorte, tercios,
+// marco del texto) es blanco/negro fijo: va sobre el contenido, no sobre la
+// interfaz, igual que en el visor.
+#define GED_BG      TH_PAGE
+#define GED_CHIP    TH_SURF2
+#define GED_TXT     TH_TXT
+#define GED_TXT2    TH_TXT2
+#define GED_DIS     TH_DIS
 
 // ---- Estado ----
 static uint8_t      gedPhase = GED_OFF;
@@ -193,7 +193,7 @@ static void gedJobFail(GedJob* j, const char* why){
   j->rc = -1;
 }
 
-struct GedRd { GedJob* j; FlexJpegInfo* inf; uint8_t* dst; uint32_t last; };
+struct GedRd { GedJob* j; FlexJpegInfo* inf; uint8_t* dst; uint32_t last; int mw, mh; bool noMem; };
 static bool gedRowCb(void* u, int y, int w, const uint8_t* rgb){
   GedRd* c = (GedRd*)u;
   if(c->j->cancel) return false;
@@ -201,11 +201,40 @@ static bool gedRowCb(void* u, int y, int w, const uint8_t* rgb){
   if(w > W) w = W;
   memcpy(c->dst + (size_t)y * W * 3, rgb, (size_t)w * 3);
   int oh = c->inf->outHeight > 0 ? c->inf->outHeight : 1;
-  c->j->pct = 15 + (int)(75LL * (y + 1) / oh);
+  c->j->pct = 5 + (int)(85LL * (y + 1) / oh);
   gedYield(&c->last);
   return true;
 }
+// Con la cabecera ya leida (medidas reales): el divisor que cabe en la
+// memoria libre de verdad y la base de ese tamano, en UN bloque.
+static int gedPickCb(void* u, int w, int h){
+  GedRd* c = (GedRd*)u;
+  c->j->srcW = w; c->j->srcH = h;
+  uint32_t fr = memFreePsram();
+  uint32_t keep = FLEXMEM_RESERVE_BYTES + GED_PSRAM_MARGIN + (uint32_t)GED_PROXY_LONG * GED_PROXY_LONG * 3u;
+  uint32_t budget = fr > keep ? fr - keep : 0;
+  uint32_t big = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+  if(big < budget) budget = big;
+  int sc = flexIeDecodeScale(w, h, budget);
+  if(!sc){ c->noMem = true; return 0; }
+  c->mw = (w + sc - 1) / sc; c->mh = (h + sc - 1) / sc;
+  c->dst = (uint8_t*)mediaAlloc((size_t)c->mw * c->mh * 3);
+  if(!c->dst){ c->noMem = true; return 0; }
+  return sc;
+}
+// Lectura por trozos para el decodificador en flujo.
+struct GedIn { FlexFsStream* f; GedJob* j; uint32_t last; };
+static int gedReadCb(void* u, uint8_t* buf, size_t n){
+  GedIn* r = (GedIn*)u;
+  if(r->j->cancel) return -1;
+  int k = flexFsStreamRead(r->f, buf, n);
+  gedYield(&r->last);
+  return k;
+}
 
+// Abre la foto LEYENDOLA POR TROZOS: antes se leia el archivo entero (hasta
+// 6 MB) a PSRAM y luego se decodificaba; ahora el pico no depende del tamano
+// del archivo, y esa memoria queda para la propia edicion (base mas grande).
 static void gedDoOpen(GedJob* j){
   j->pct = 0;
   uint32_t sz = flexFsSize(j->path);
@@ -216,48 +245,24 @@ static void gedDoOpen(GedJob* j){
              (unsigned)((sz + 1048575u) / 1048576u), (unsigned)(FML_LIMIT_PHOTO / 1048576u));
     gedJobFail(j, m); return;
   }
-  if(memFreePsram() < sz + FLEXMEM_RESERVE_BYTES + GED_PSRAM_MARGIN){ gedJobFail(j, "No hay memoria libre para abrir esta foto"); return; }
-  uint8_t* file = (uint8_t*)mediaAlloc(sz);
-  if(!file){ gedJobFail(j, "No hay memoria libre para abrir esta foto"); return; }
+  if(memFreePsram() < FLEXMEM_RESERVE_BYTES + GED_PSRAM_MARGIN){ gedJobFail(j, "No hay memoria libre para abrir esta foto"); return; }
   FlexFsStream* f = flexFsOpenRead(j->path);
-  uint32_t got = 0, last = millis();
-  while(f && got < sz && !j->cancel){
-    uint32_t want = sz - got > 16384u ? 16384u : sz - got;
-    int k = flexFsStreamRead(f, file + got, want);
-    if(k <= 0) break;
-    got += (uint32_t)k;
-    j->pct = (int)(15ULL * got / sz);
-    gedYield(&last);
-  }
-  flexFsStreamClose(f);
-  if(j->cancel){ mediaFree(file); j->rc = 1; return; }
-  if(got != sz){ mediaFree(file); gedJobFail(j, "No se pudo leer la foto"); return; }
+  if(!f){ gedJobFail(j, "No se pudo leer la foto"); return; }
+  GedIn in = { f, j, (uint32_t)millis() };
   FlexJpegInfo inf; memset(&inf, 0, sizeof(inf));
-  if(flexJpegProbe(file, sz, &inf) != FLEXJPG_OK){
-    mediaFree(file);
-    gedJobFail(j, inf.progressive ? "JPEG progresivo: el P4 no lo puede editar" : "No es un JPEG que se pueda editar");
-    return;
-  }
-  j->srcW = inf.width; j->srcH = inf.height;
-  // La base: lo libre menos la reserva y la copia reducida, y en UN bloque.
-  uint32_t fr = memFreePsram();
-  uint32_t keep = FLEXMEM_RESERVE_BYTES + GED_PSRAM_MARGIN + (uint32_t)GED_PROXY_LONG * GED_PROXY_LONG * 3u;
-  uint32_t budget = fr > keep ? fr - keep : 0;
-  uint32_t big = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
-  if(big < budget) budget = big;
-  int s = flexIeDecodeScale(inf.width, inf.height, budget);
-  if(!s){ mediaFree(file); gedJobFail(j, "No hay memoria para editar una foto tan grande"); return; }
-  int mw = (inf.width + s - 1) / s, mh = (inf.height + s - 1) / s;
-  uint8_t* base = (uint8_t*)mediaAlloc((size_t)mw * mh * 3);
-  if(!base){ mediaFree(file); gedJobFail(j, "No hay memoria para editar esta foto"); return; }
-  GedRd rd = { j, &inf, base, (uint32_t)millis() };
-  int rc = flexJpegDecode888(file, sz, mw, mh, 0, &inf, gedRowCb, &rd, mediaAlloc, mediaFree);
-  mediaFree(file);
+  GedRd rd; memset(&rd, 0, sizeof(rd));
+  rd.j = j; rd.inf = &inf; rd.last = (uint32_t)millis();
+  int rc = flexJpegDecode888Stream(gedReadCb, &in, 0, 0, 0, gedPickCb, &inf, gedRowCb, &rd, mediaAlloc, mediaFree);
+  flexFsStreamClose(f);
   if(rc != FLEXJPG_OK){
-    mediaFree(base);
+    if(rd.dst) mediaFree(rd.dst);
     if(j->cancel){ j->rc = 1; return; }
+    if(rd.noMem){ gedJobFail(j, "No hay memoria para editar una foto tan grande"); return; }
+    if(rc == FLEXJPG_ERR_UNSUPPORTED){ gedJobFail(j, "JPEG progresivo o CMYK: el P4 no lo puede editar"); return; }
+    if(rc == FLEXJPG_ERR_BADMARKER){ gedJobFail(j, "No es un JPEG que se pueda editar"); return; }
     gedJobFail(j, flexJpegErrStr(rc)); return;
   }
+  uint8_t* base = rd.dst;
   j->base = base; j->W = inf.outWidth; j->H = inf.outHeight;
   // Copia reducida para la vista previa (sin ella se pinta desde la base).
   int L = j->W > j->H ? j->W : j->H;
@@ -571,9 +576,10 @@ static void gedChip(int x, int y, int w, int h, const char* t, bool on, bool ena
   int fs = uiFontFit(t, w - 12, 2);
   drawTextC(x + w / 2, y + (h - uiLineH(fs)) / 2, t, fs, fg);
 }
+// La tarjeta del panel es la superficie del sistema (mismo material y tinte
+// que el resto). Debajo siempre hay el fondo plano que se acaba de pintar.
 static void gedPanelBg(int x, int y, int w, int h, int rad){
-  if(uiGlass) drawGlassCardFlat(x, y, w, h, rad, GED_GLASS, GED_BG);
-  else        fillRoundRect(x, y, w, h, rad, GED_PANEL);
+  uiSurfaceFlat(x, y, w, h, rad, UIS_CARD, GED_BG);
 }
 
 // Deslizador: geometria unica para dibujo y toque.
@@ -621,7 +627,7 @@ static void gedDrawColors(const GedGeom& g){
     uint16_t c = rgb565((GED_RGB[i] >> 16) & 255, (GED_RGB[i] >> 8) & 255, GED_RGB[i] & 255);
     if(i == gedColor) fillCircleAA((float)cx, (float)cy, (float)r + 3.0f, GED_TXT);
     fillCircleAA((float)cx, (float)cy, (float)r, c);
-    if(i == 1) drawCircle(cx, cy, r, GED_TXT2);           // el negro se ve sobre el panel oscuro
+    if(i <= 1) drawCircle(cx, cy, r, GED_TXT2);           // blanco y negro: que se vean en los dos temas
   }
 }
 static int gedColorHit(const GedGeom& g, int tx, int ty){
@@ -839,7 +845,7 @@ static void gedDrawPanel(const GedGeom& g){
       bool id = flexIeIsIdentity(gedE);
       int x, cw; gedRowCell(g, 1, 0, x, cw);
       fillRoundRect(x, g.panelY + 88, cw, 28, 14, GED_CHIP);
-      drawTextC(x + cw / 2, g.panelY + 88 + (28 - uiLineH(1)) / 2, "Restablecer todo", 1, id ? GED_DIS : rgb565(255, 120, 120));
+      drawTextC(x + cw / 2, g.panelY + 88 + (28 - uiLineH(1)) / 2, "Restablecer todo", 1, id ? GED_DIS : TH_DANGER);
       break;
     }
   }
@@ -941,7 +947,8 @@ static void gedDrawTextLive(){
     }
   }
   // Marco de "se puede mover".
-  for(int i = 0; i < tw; i += 6) if(x + i < gedVX + gedVW){ px(x + i, y - 3, GED_TXT); px(x + i, y + hpx + 2, GED_TXT); }
+  const uint16_t W = rgb565(255, 255, 255);            // va sobre la foto, como el marco de recorte
+  for(int i = 0; i < tw; i += 6) if(x + i < gedVX + gedVW){ px(x + i, y - 3, W); px(x + i, y + hpx + 2, W); }
 }
 
 // ---- El pozo de la foto ----
@@ -1001,8 +1008,11 @@ static void gedSheetBtn(const GedGeom& g, int i, int& x, int& y, int& w, int& h)
 }
 static void gedDrawSheet(const GedGeom& g){
   int x, y, w, h; gedSheetGeom(g, x, y, w, h);
-  fillRectA(g.bx, g.by, g.bw, g.bh, rgb565(0, 0, 0), 120);
-  if(uiGlass) drawLiquidGlassPanel(x, y, w, h, 26, GED_GLASS); else fillRoundRect(x, y, w, h, 26, GED_PANEL);
+  fillRectA(g.bx, g.by, g.bw, g.bh, TH_SCRIM, 120);
+  // Superficie ELEVADA del sistema. Solo la pinta gedRender, que acaba de
+  // rehacer toda la pantalla: el vidrio desenfoca contenido limpio y no se
+  // apila sobre si mismo.
+  uiSurface(x, y, w, h, 26, UIS_ELEVATED);
   int ow, oh; flexIeOutSize(gedE, &ow, &oh);
   drawTextC(x + w / 2, y + 18, "Guardar foto", 3, GED_TXT);
   char b[96];
@@ -1010,12 +1020,14 @@ static void gedDrawSheet(const GedGeom& g){
   drawTextC(x + w / 2, y + 52, b, 1, GED_TXT2);
   if(gedSrcW != gedW || gedSrcH != gedH){
     snprintf(b, sizeof(b), "La original mide %d x %d: el P4 la edita reducida", gedSrcW, gedSrcH);
-    drawTextC(x + w / 2, y + 70, b, 1, rgb565(255, 190, 110));
+    drawTextC(x + w / 2, y + 70, b, 1, TH_WARN);
   }
   static const char* const L[3] = { "Guardar como copia", "Reemplazar original", "Cancelar" };
   for(int i = 0; i < 3; i++){
     int bx, by, bw, bh; gedSheetBtn(g, i, bx, by, bw, bh);
-    if(i < 2) fillRoundRect(bx, by, bw, bh, bh / 2, i == 0 ? TH_PRIM : GED_CHIP);
+    // Boton secundario sobre la superficie ELEVADA: TH_SURF, como los dialogos
+    // del sistema (TH_SURF2 es el color de la propia hoja y no se veria).
+    if(i < 2) fillRoundRect(bx, by, bw, bh, bh / 2, i == 0 ? TH_PRIM : TH_SURF);
     drawTextC(bx + bw / 2, by + (bh - uiLineH(2)) / 2, L[i], 2, i == 0 ? TH_ONACC : i == 1 ? GED_TXT : GED_TXT2);
   }
 }

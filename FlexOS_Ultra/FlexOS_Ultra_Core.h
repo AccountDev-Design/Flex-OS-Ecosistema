@@ -478,8 +478,10 @@ static void appEnforceMemoryBudget(){
 static void appSuspend(int id, bool landscape){
   if(id < 0 || id >= APP_N) return;
   if(gAppState[id] == ALIFE_SUSPENDED) return;
-  if(landscape || (APP_REG[id].flags & APP_LAND)) swPushNoThumb(id);   // miniatura girada: mejor ninguna
-  else                                            swPushAndCapture(id);
+  // Miniatura girada: mejor ninguna. Y NUNCA una captura de algo protegido:
+  // Recientes es una cache que se reutiliza y se ve sin pedir la clave.
+  if(landscape || (APP_REG[id].flags & APP_LAND) || vwShowsProtected((uint8_t)id)) swPushNoThumb(id);
+  else                                                                         swPushAndCapture(id);
   const AppHooks* h = appHooks(id);
   if(h && h->suspend) h->suspend();
   gAppState[id] = ALIFE_SUSPENDED;

@@ -1589,6 +1589,12 @@ static void vwCheckItem(){
   }
 }
 
+// Para Recientes: la app `app` tiene el visor delante con algo PROTEGIDO. Su
+// captura no se guarda (ver appSuspend).
+static bool vwShowsProtected(uint8_t app){
+  return vwOn && vwLocked && vwHost && vwHost->app == app;
+}
+
 // ---- Una vuelta del visor ----
 static void vwTick(){
   if(!vwOn) return;
