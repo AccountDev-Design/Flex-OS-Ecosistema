@@ -298,6 +298,7 @@ static_assert(SCR_W == 480 && SCR_H == 800, "la sombra del panel asume 480x800")
 // #############################################################
 static void testPanelRapido();
 static void testPanelOneUI();
+static void testArrastresSinFlash();
 extern bool gFlexOtaOwns;
 static void testTecladoGlobal();
 static void testCajaApps();
@@ -527,6 +528,103 @@ static void qpCheckLayout(const char* ctx){
 static bool qpCfgHas(int id){
   for(int i = 0; i < qpN; i++) if(qpIt[i].id == id) return true;
   return false;
+}
+
+// #############################################################
+//  ARRASTRAR UN DESLIZADOR NO ESCRIBE FLASH EN CADA PASO
+//  ------------------------------------------------------------
+//  Cada escritura de NVS son milisegundos con la cache apagada: un
+//  tiron y, con el panel DSI, riesgo de destello cian. El volumen
+//  (panel rapido y Musica) y el brillo de Modo PC escribian en CADA
+//  paso del arrastre. Ahora el valor se APLICA en el acto (codec,
+//  PWM) y se GUARDA una vez al soltar. Se comprueban las dos cosas:
+//  que no hay escrituras durante el gesto y que el valor final SI
+//  queda guardado.
+// #############################################################
+extern bool gStubAudioOk;
+extern unsigned gStubAudioNvsWrites;
+static void testArrastresSinFlash(){
+  printf("Arrastrar un deslizador no escribe flash en cada paso\n");
+  int before = gFails;
+  // ---- 1. Volumen en el panel rapido ----
+  gStubAudioOk = true;
+  qpLoaded = false; flexPrefsWipe(); qpLoad();
+  drawWallpaper(homeBuf, false); setBuf(fb);
+  qsPanelY = SCR_H; qsLastY = SCR_H; qsDirty = true;
+  qpMode = QPM_PANEL; qpG = QG_NONE;
+  qpGH = (float)qpGroupH(qpGrows); qpScrollF = 0; qpGScrollF = 0;
+  qpRelayout();
+  int bVol = -1;
+  for(int b = 0; b < qpBlkN; b++)
+    if(qpBlk[b].kind == QB_ITEM && qpIt[qpBlk[b].item].id == QSID_VOLUME) bVol = b;
+  chk(bVol >= 0, "con codec, el volumen esta en el panel de fabrica");
+  if(bVol >= 0){
+    int x = qpBlk[bVol].x, w = qpBlk[bVol].w;
+    int py = QP_VIEW_Y0 + qpBlk[bVol].y + qpBlk[bVol].h / 2;
+    unsigned w0 = gStubAudioNvsWrites, p0 = flexPrefsWrites();
+    gTestMs += 100; touchDrag(x + 6, py, true); T.downMs = gTestMs; qsHandle();
+    chk(qpG == QG_SLIDER, "el gesto que nace en el volumen es del slider");
+    int cambios = 0; uint8_t antes = flexAudioVolume();
+    for(int k = 1; k <= 12; k++){
+      gTestMs += 16; touchDrag(x + 6 + (w - 12) * k / 12, py, false); qsHandle();
+      if(flexAudioVolume() != antes){ cambios++; antes = flexAudioVolume(); }
+    }
+    chk(cambios >= 6, "el volumen REAL cambia en cada paso del arrastre");
+    chk(flexAudioVolume() >= FLEXAUDIO_VOL_MAX - 5, "y llega casi al maximo");
+    chk(gStubAudioNvsWrites == w0 && flexPrefsWrites() == p0,
+        "durante el arrastre NO se escribe NVS (ni volumen ni preferencias)");
+    gTestMs += 16; touchReset(); T.released = true; qsHandle();
+    chk(gStubAudioNvsWrites == w0, "al soltar tampoco: el guardado queda diferido");
+    qsTick();
+    chk(gStubAudioNvsWrites == w0 + 1, "y qsTick guarda el volumen UNA vez, despues de publicar");
+    qsTick();
+    chk(gStubAudioNvsWrites == w0 + 1, "sin repetir la escritura en la vuelta siguiente");
+  }
+  qsPanelY = 0; qsLastY = 0; qpG = QG_NONE; touchReset();
+
+  // ---- 2. Volumen en Musica ----
+  {
+    bool l0 = musLoaded; musLoaded = true;
+    MusNowGeom g = musNowGeom();
+    unsigned w0 = gStubAudioNvsWrites;
+    gTestMs += 100; touchDrag(g.volX + 2, g.volY, true); musNowTouch();
+    chk(musVolDrag, "Musica: el gesto que nace en la barra de volumen la arrastra");
+    for(int k = 1; k <= 10; k++){ gTestMs += 16; touchDrag(g.volX + g.volW * k / 10, g.volY, false); musNowTouch(); }
+    chk(flexAudioVolume() >= FLEXAUDIO_VOL_MAX - 2, "Musica: el volumen real sigue al dedo");
+    chk(gStubAudioNvsWrites == w0, "Musica: ninguna escritura NVS durante el arrastre");
+    gTestMs += 16; touchReset(); T.released = true; musNowTouch();
+    chk(!musVolDrag && gStubAudioNvsWrites == w0 + 1, "Musica: una sola escritura al soltar");
+    musLoaded = l0;
+  }
+  gStubAudioOk = false;
+
+  // ---- 3. Brillo del panel de notificaciones de Modo PC ----
+  {
+    uint8_t ov0 = dexOv;
+    dexOv = DXO_NOTIF; dexOvClosing = false; dexOvT0 = gTestMs - DEX_ANIM_MS - 1;
+    int nx, ny, nw, nh; dexNpRect(nx, ny, nw, nh);
+    int by = dexNpBrightY(ny), bx = nx + 12, bw = nw - 24;
+    unsigned p0 = flexPrefsWrites();
+    pTap = pPressed = pReleased = false; pDown = true; pY = by + 14 + 13;
+    int bris = 0, b0 = gBright;
+    for(int k = 1; k <= 8; k++){
+      pX = bx + bw * k / 10; dexNotifTouch();
+      if(gBright != b0){ bris++; b0 = gBright; }
+    }
+    chk(bris >= 6, "Modo PC: el brillo REAL (PWM) cambia en cada paso");
+    chk(flexPrefsWrites() == p0, "Modo PC: ninguna escritura NVS durante el arrastre");
+    touchReset(); dexPointer();
+    chk(flexPrefsWrites() > p0, "Modo PC: al soltar se guarda");
+    Preferences p; p.begin("flexos", true);
+    chk(p.getInt("bright", -1) == gBright, "Modo PC: y lo guardado es el brillo final");
+    p.end();
+    unsigned p1 = flexPrefsWrites();
+    dexPointer();
+    chk(flexPrefsWrites() == p1, "Modo PC: una sola vez");
+    dexOv = ov0; pDown = false;
+    setBacklight(80);
+  }
+  if(gFails == before) printf("  Deslizadores: todas las comprobaciones pasan.\n");
 }
 
 static void testPanelOneUI(){
@@ -8820,6 +8918,7 @@ int main(){
 
   testPanelRapido();
   testPanelOneUI();
+  testArrastresSinFlash();
   testTecladoGlobal();
   testCajaApps();
   testCajaDescargadas();

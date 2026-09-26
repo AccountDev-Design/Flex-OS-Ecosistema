@@ -450,10 +450,26 @@ uint32_t    flexAudioBufferMs(){ return 0; }
 int         flexAudioWrite(const void*, size_t){ return -1; }
 void        flexAudioStop(){}
 bool        flexAudioPlaying(){ return false; }
-void        flexAudioSetVolume(uint8_t){}
-uint8_t     flexAudioVolume(){ return FLEXAUDIO_VOL_DEF; }
-void        flexAudioSetMuted(bool){}
-bool        flexAudioMuted(){ return false; }
+// El volumen sigue el MISMO contrato que FlexOS_Audio.cpp: aplicarlo es
+// inmediato y la NVS solo se escribe en flexAudioSavePrefs (o al silenciar,
+// que es un toque suelto). gStubAudioNvsWrites cuenta esas escrituras.
+static uint8_t gStubVol = FLEXAUDIO_VOL_DEF;
+static bool    gStubVolDirty = false, gStubMuted = false;
+unsigned       gStubAudioNvsWrites = 0;
+void        flexAudioSetVolume(uint8_t v){
+  if(v > FLEXAUDIO_VOL_MAX) v = FLEXAUDIO_VOL_MAX;
+  if(v == gStubVol) return;
+  gStubVol = v;
+  if(v > 0) gStubMuted = false;
+  gStubVolDirty = true;
+}
+uint8_t     flexAudioVolume(){ return gStubVol; }
+void        flexAudioSavePrefs(){ if(gStubVolDirty){ gStubVolDirty = false; gStubAudioNvsWrites++; } }
+void        flexAudioSetMuted(bool m){
+  if(m == gStubMuted) return;
+  gStubMuted = m; gStubVolDirty = false; gStubAudioNvsWrites++;
+}
+bool        flexAudioMuted(){ return gStubMuted; }
 
 // ---- IMU GY-BNO085 (FlexOS_BNO085.cpp) ----
 // Doble con el modulo AUSENTE: es el estado en el que Flex Device Care

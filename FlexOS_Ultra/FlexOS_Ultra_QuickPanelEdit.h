@@ -429,7 +429,7 @@ static void qsTick(){
   // 5) trabajo diferido que NO puede ocurrir dentro del gesto ni antes de
   //    publicar: una escritura de flash son decenas de milisegundos.
   if(qpSavePanel){ qpSavePanel = false; qpSave(); }
-  if(qpSavePrefs){ qpSavePrefs = false; cfgSavePrefs(); }
+  if(qpSavePrefs){ qpSavePrefs = false; cfgSavePrefs(); flexAudioSavePrefs(); }
 }
 
 // ---- CIERRE LIMPIO Y OBLIGATORIO -------------------------------------

@@ -925,6 +925,7 @@ static void poffSaveCleanFlag(){
   prefs.putBool("cleanoff", true);
   prefs.putInt("bright", gBright);      // el brillo del usuario, para restaurarlo al encender
   prefs.end();
+  flexAudioSavePrefs();                 // un volumen que se quedo sin guardar (gesto cortado)
   // La hora tambien: es el momento MAS tardio en que se conoce, asi que al
   // volver a encender (quiza sin internet) el reloj arranca donde se quedo.
   clkSaveNvs();

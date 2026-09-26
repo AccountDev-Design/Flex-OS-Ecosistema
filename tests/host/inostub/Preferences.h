@@ -35,6 +35,9 @@ struct FlexPrefEntry {
   bool          hasStr;
 };
 inline FlexPrefEntry* flexPrefsAll(){ static FlexPrefEntry e[FLEXPREF_MAX_KEYS]; return e; }
+// Escrituras hechas (cada put* es un acceso a flash en la placa): una prueba
+// comprueba con esto que un gesto NO escribe NVS en cada paso del arrastre.
+inline unsigned& flexPrefsWrites(){ static unsigned n = 0; return n; }
 inline void flexPrefsWipe(){ memset(flexPrefsAll(), 0, sizeof(FlexPrefEntry) * FLEXPREF_MAX_KEYS); }
 inline FlexPrefEntry* flexPrefsFind(const char* k, bool create){
   FlexPrefEntry* e = flexPrefsAll();
@@ -70,6 +73,7 @@ public:
   }
   size_t putString(const char* k, const char* v){
     if(ro) return 0;
+    flexPrefsWrites()++;
     char q[FLEXPREF_KEY_MAX]; mk(k, q, sizeof(q));
     FlexPrefEntry* e = flexPrefsFind(q, true);
     if(!e) return 0;
@@ -84,6 +88,7 @@ public:
   }
   size_t putNum(const char* k, long long v, size_t sz){
     if(ro) return 0;
+    flexPrefsWrites()++;
     char q[FLEXPREF_KEY_MAX]; mk(k, q, sizeof(q));
     FlexPrefEntry* e = flexPrefsFind(q, true);
     if(!e) return 0;
@@ -115,6 +120,7 @@ public:
   }
   size_t putBytes(const char* k, const void* b, size_t n){
     if(ro) return 0;
+    flexPrefsWrites()++;
     if(n > FLEXPREF_VAL_MAX) n = FLEXPREF_VAL_MAX;
     char q[FLEXPREF_KEY_MAX]; mk(k, q, sizeof(q));
     FlexPrefEntry* e = flexPrefsFind(q, true);

@@ -205,21 +205,26 @@ bool        flexAudioPlaying(){ return auPlaying; }
 uint8_t     flexAudioVolume(){ return auVol; }
 bool        flexAudioMuted(){ return auMuted; }
 
+static bool auPrefsDirty = false;   // volumen aplicado al codec pero aun no guardado
 static void auSavePrefs(){
+  auPrefsDirty = false;
   if(!auPrefs.begin("flexaudio", false)) return;
   auPrefs.putUChar("vol", auVol);
   auPrefs.putBool("mute", auMuted);
   auPrefs.end();
 }
 
+// El registro del codec se escribe en el acto (se oye mientras se arrastra);
+// la NVS, no: ver flexAudioSavePrefs en FlexOS_Audio.h.
 void flexAudioSetVolume(uint8_t v){
   if(v > FLEXAUDIO_VOL_MAX) v = FLEXAUDIO_VOL_MAX;
   if(v == auVol) return;
   auVol = v;
   if(v > 0) auMuted = false;      // subir el volumen quita el silencio
   auApplyVolume();
-  auSavePrefs();
+  auPrefsDirty = true;
 }
+void flexAudioSavePrefs(){ if(auPrefsDirty) auSavePrefs(); }
 void flexAudioSetMuted(bool m){
   if(m == auMuted) return;
   auMuted = m;

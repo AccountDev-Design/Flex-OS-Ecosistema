@@ -125,9 +125,15 @@ bool        flexAudioPlaying();
 //  ------------------------------------------------------------
 //  Escribe el registro de volumen del DAC del codec (0x32). No es
 //  un numero de la interfaz: cambia la salida analogica de verdad.
-//  El valor se guarda en NVS y se restaura al arrancar.
+//  El valor se restaura al arrancar, pero flexAudioSetVolume NO
+//  escribe en NVS: la llaman los deslizadores en CADA paso del
+//  arrastre, y cada escritura de flash apaga la cache (tiron y, con
+//  el panel DSI, riesgo de destello cian). Quien arrastra llama a
+//  flexAudioSavePrefs() UNA vez al soltar; solo escribe si cambio.
+//  El silencio es un toque suelto y se guarda en el acto.
 // -------------------------------------------------------------
 void        flexAudioSetVolume(uint8_t vol0to100);
 uint8_t     flexAudioVolume();
 void        flexAudioSetMuted(bool muted);
 bool        flexAudioMuted();
+void        flexAudioSavePrefs();     // persiste un volumen pendiente (no-op si no hay)

@@ -647,7 +647,8 @@ static void musListTouch(){
 static void musNowTouch(){
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
   MusNowGeom g = musNowGeom();
-  // Volumen: se arrastra; el registro del codec se escribe al cambiar.
+  // Volumen: se arrastra; el registro del codec se escribe al cambiar y la
+  // NVS solo al soltar (cada escritura de flash es un tiron).
   if(T.pressed && musLoaded && flexAudioAvailable() && abs(T.y - g.volY) <= 22 && T.x >= g.volX - 12 && T.x <= g.volX + g.volW + 12)
     musVolDrag = true;
   if(musVolDrag){
@@ -662,6 +663,7 @@ static void musNowTouch(){
       return;
     }
     musVolDrag = false;
+    flexAudioSavePrefs();                         // NVS una vez, al soltar (no por paso)
     return;
   }
   if(!T.tap) return;

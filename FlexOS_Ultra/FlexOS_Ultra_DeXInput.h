@@ -30,8 +30,16 @@
 // #############################################################
 // ##  ENTRADA
 // #############################################################
+// Brillo arrastrado en el panel de notificaciones: el PWM cambia en el acto,
+// la NVS UNA vez al soltar. cfgSavePrefs son una docena de claves en flash y
+// se escribian en CADA paso del arrastre: un tiron por paso y, con la cache
+// apagada durante la escritura, riesgo de destello en el panel DSI.
+static bool dexBrightSave = false;
+static void dexBrightCommit(){ if(dexBrightSave){ dexBrightSave = false; cfgSavePrefs(); } }
+
 static void dexPointer(){
   pPressed = pReleased = pTap = pLong = pDTap = false;
+  if(!T.down) dexBrightCommit();
   int lx = T.y, ly = (SCR_W - 1) - T.x;            // fisico -> landscape
   bool wasDown = pDown;
 
@@ -231,7 +239,7 @@ static bool dexNotifTouch(){
   if(pDown && dexInBox(pX, pY, bx, by + 14, bw, bh)){          // brillo REAL (PWM)
     int v = (pX - bx) * 100 / bw;
     if(v < 5) v = 5; if(v > 100) v = 100;
-    if(v != gBright){ setBacklight(v); cfgSavePrefs(); dexOvMark(DXO_NOTIF); dexDirty = true; }
+    if(v != gBright){ setBacklight(v); dexBrightSave = true; dexOvMark(DXO_NOTIF); dexDirty = true; }
   }
   return true;
 }
@@ -476,6 +484,7 @@ static void pcExit(){
   // barra/ventanas de DeX pegadas sobre el Home, y el launcher girado del que ya
   // no se salia. dexExiting corta el tick en seco en cuanto se pide la salida.
   dexExiting = true;
+  dexBrightCommit();                                // brillo arrastrado sin soltar aun
   gLand = false;
   pcStartOpen = false;
   dexOv = DXO_NONE; dexOvClosing = false;
