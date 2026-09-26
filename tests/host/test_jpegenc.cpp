@@ -320,8 +320,65 @@ static void testDecode888(){
         "sin callback: argumento invalido");
 }
 
+// =============================================================
+//  MJPEG SIN DHT (camaras, webcams USB, ESP32-CAM)
+//  ------------------------------------------------------------
+//  El formato MJPEG de camara omite el segmento DHT y da por hechas las
+//  tablas Huffman estandar del anexo K. El codificador del firmware usa
+//  EXACTAMENTE esas tablas, asi que quitarle el DHT a lo que produce no
+//  debe cambiar ni un pixel: es la prueba mas estricta posible de que el
+//  decodificador rellena las que faltan con las correctas.
+// =============================================================
+static std::vector<uint8_t> stripDht(const std::vector<uint8_t>& j, int* removed){
+  std::vector<uint8_t> o(j.begin(), j.begin() + 2);
+  size_t i = 2; *removed = 0;
+  while(i + 4 <= j.size()){
+    uint8_t m = j[i + 1];
+    size_t len = ((size_t)j[i + 2] << 8) | j[i + 3];
+    if(m == 0xDA){ o.insert(o.end(), j.begin() + i, j.end()); break; }
+    if(m == 0xC4) (*removed)++;
+    else o.insert(o.end(), j.begin() + i, j.begin() + i + 2 + len);
+    i += 2 + len;
+  }
+  return o;
+}
+static void testSinDht(){
+  std::printf("-- MJPEG sin DHT: tablas estandar del anexo K --\n");
+  const int sub[3] = { FLEXJE_SUB_420, FLEXJE_SUB_444, FLEXJE_GRAY };
+  for(int k = 0; k < 3; k++){
+    auto src = makeImage(96, 64, k == 1 ? 1 : 0);
+    Out o;
+    FlexJeCfg c; c.width = 96; c.height = 64; c.quality = 85; c.subsampling = sub[k]; c.input = FLEXJE_IN_RGB888;
+    CHECK(flexJpegEncodeMem(&c, src.data(), (size_t)96 * 3, outWrite, &o, tAlloc, tFree) == FLEXJE_OK, "codificar %d", k);
+    int removed = 0;
+    auto bare = stripDht(o.b, &removed);
+    CHECK(removed >= 1 && bare.size() < o.b.size(), "caso %d: se quito el DHT (%d segmentos)", k, removed);
+    Img a, b;
+    int ra = flexJpegDecode888(o.b.data(), o.b.size(), 0, 0, 0, NULL, row888, &a, tAlloc, tFree);
+    int rb = flexJpegDecode888(bare.data(), bare.size(), 0, 0, 0, NULL, row888, &b, tAlloc, tFree);
+    CHECK(ra == FLEXJPG_OK && rb == FLEXJPG_OK, "caso %d: con y sin DHT se decodifica (%d, %d)", k, ra, rb);
+    CHECK(a.w == b.w && a.h == b.h && a.px == b.px, "caso %d: sin DHT sale EXACTAMENTE la misma imagen", k);
+  }
+  // Una tabla 2 o 3 sin definir no tiene version estandar: error limpio.
+  auto src = makeImage(32, 16, 0);
+  Out o;
+  FlexJeCfg c; c.width = 32; c.height = 16; c.quality = 85; c.subsampling = FLEXJE_SUB_444; c.input = FLEXJE_IN_RGB888;
+  flexJpegEncodeMem(&c, src.data(), (size_t)32 * 3, outWrite, &o, tAlloc, tFree);
+  int removed = 0;
+  auto bare = stripDht(o.b, &removed);
+  for(size_t i = 2; i + 4 < bare.size(); ){                 // SOS: la luminancia pide las tablas 2/2
+    size_t len = ((size_t)bare[i + 2] << 8) | bare[i + 3];
+    if(bare[i + 1] == 0xDA){ bare[i + 6] = 0x22; break; }   // Ns, Cs, [Td|Ta]
+    i += 2 + len;
+  }
+  Img d;
+  CHECK(flexJpegDecode888(bare.data(), bare.size(), 0, 0, 0, NULL, row888, &d, tAlloc, tFree) == FLEXJPG_ERR_BADMARKER,
+        "tabla 2 sin definir: error limpio, no basura");
+}
+
 int main(){
   std::printf("=== FlexOS · codificador JPEG y salida RGB888 ===\n");
+  testSinDht();
   testRoundTrip();
   test565();
   testFailures();

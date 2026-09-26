@@ -56,7 +56,8 @@ BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test
         $(BUILD)/test_media $(BUILD)/test_mem $(BUILD)/test_fall $(BUILD)/test_theft $(BUILD)/test_imu \
         $(BUILD)/test_medialib $(BUILD)/test_jpegenc $(BUILD)/test_httpshare $(BUILD)/test_qr \
         $(BUILD)/test_mediathumb $(BUILD)/test_mediaweb $(BUILD)/test_fs $(BUILD)/test_mediastore $(BUILD)/test_imgedit \
-        $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg
+        $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg \
+        $(BUILD)/test_fuzzmedia
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun $(BUILD)/mediacheck $(BUILD)/flexweb_host
 
 .PHONY: all run all-boards fixtures clean ino web
@@ -68,6 +69,14 @@ $(BUILD):
 # --- nucleo portable: con sanitizers ---
 $(BUILD)/test_jpeg: test_jpeg.cpp $(JPEG_SRC) $(ROOT)/FlexOS_JPEG.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -pthread -o $@ test_jpeg.cpp $(JPEG_SRC)
+
+# --- Archivos DANADOS contra los lectores de medios del firmware ---
+# UBSan SIN recuperacion: el primer comportamiento indefinido aborta la prueba
+# (el resto de baterias solo lo imprime). Ver test_fuzzmedia.cpp.
+$(BUILD)/test_fuzzmedia: test_fuzzmedia.cpp $(ULTRA)/FlexOS_JPEG.cpp $(ULTRA)/FlexOS_Media.cpp $(ULTRA)/FlexOS_MediaThumb.cpp \
+                         $(ULTRA)/FlexOS_JPEGEnc.cpp $(ULTRA)/FlexOS_Media.h $(ULTRA)/FlexOS_MediaThumb.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -fno-sanitize-recover=all -o $@ test_fuzzmedia.cpp $(ULTRA)/FlexOS_JPEG.cpp \
+	  $(ULTRA)/FlexOS_Media.cpp $(ULTRA)/FlexOS_MediaThumb.cpp $(ULTRA)/FlexOS_JPEGEnc.cpp
 
 # --- Miniaturas de la biblioteca: recorte centrado y VALIDACION de lo recibido ---
 # Generar la miniatura de un JPEG obliga a decodificarlo entero: si la foto que
@@ -578,6 +587,8 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_imgedit
 	@echo
 	@$(BUILD)/test_media
+	@echo
+	@$(BUILD)/test_fuzzmedia ../fixtures
 	@echo
 	@$(BUILD)/test_medialib
 	@echo

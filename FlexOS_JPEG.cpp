@@ -261,6 +261,46 @@ static inline int huffExtend(int v, int t){
   return (t == 0) ? 0 : (v < (1 << (t - 1)) ? v - (1 << t) + 1 : v);
 }
 
+// Tablas Huffman ESTANDAR (ITU-T T.81, anexo K.3). Un fotograma MJPEG de
+// camara (el formato "AVI1" de las webcams USB, de muchas camaras IP y de la
+// ESP32-CAM) NO lleva segmento DHT: el estandar de MJPEG da por hechas estas
+// tablas. Sin ellas cada codigo se leia contra una tabla vacia y el video
+// salia como basura o se rechazaba como danado. libjpeg-turbo hace lo mismo:
+// solo para las tablas 0 (luminancia) y 1 (crominancia).
+static const uint8_t kStdDcBits[2][17] = {
+  { 0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0 }
+};
+static const uint8_t kStdDcVals[12] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+static const uint8_t kStdAcBits[2][17] = {
+  { 0, 0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 0x7d },
+  { 0, 0, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 0x77 }
+};
+static const uint8_t kStdAcVals[2][162] = {
+  { 0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06, 0x13, 0x51, 0x61, 0x07,
+    0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xa1, 0x08, 0x23, 0x42, 0xb1, 0xc1, 0x15, 0x52, 0xd1, 0xf0,
+    0x24, 0x33, 0x62, 0x72, 0x82, 0x09, 0x0a, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x25, 0x26, 0x27, 0x28,
+    0x29, 0x2a, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49,
+    0x4a, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69,
+    0x6a, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89,
+    0x8a, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
+    0xa8, 0xa9, 0xaa, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xc2, 0xc3, 0xc4, 0xc5,
+    0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xe1, 0xe2,
+    0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8,
+    0xf9, 0xfa },
+  { 0x00, 0x01, 0x02, 0x03, 0x11, 0x04, 0x05, 0x21, 0x31, 0x06, 0x12, 0x41, 0x51, 0x07, 0x61, 0x71,
+    0x13, 0x22, 0x32, 0x81, 0x08, 0x14, 0x42, 0x91, 0xa1, 0xb1, 0xc1, 0x09, 0x23, 0x33, 0x52, 0xf0,
+    0x15, 0x62, 0x72, 0xd1, 0x0a, 0x16, 0x24, 0x34, 0xe1, 0x25, 0xf1, 0x17, 0x18, 0x19, 0x1a, 0x26,
+    0x27, 0x28, 0x29, 0x2a, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+    0x49, 0x4a, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68,
+    0x69, 0x6a, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
+    0x88, 0x89, 0x8a, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0xa2, 0xa3, 0xa4, 0xa5,
+    0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xc2, 0xc3,
+    0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda,
+    0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8,
+    0xf9, 0xfa }
+};
+
 // -------------------------------------------------------------
 //  3) IDCT entera 8x8 (coma fija 13 bits, algoritmo "islow")
 // -------------------------------------------------------------
@@ -278,7 +318,18 @@ static inline int huffExtend(int v, int t){
 #define FIX_2_053119869 16819
 #define FIX_2_562915447 20995
 #define FIX_3_072711026 25172
-#define JDESCALE(x, n)  (((x) + (1 << ((n) - 1))) >> (n))
+
+// ARITMETICA ENVOLVENTE. Los pasos intermedios van en uint32_t y se vuelven a
+// int32_t solo para el descalado. Con datos validos da EXACTAMENTE los mismos
+// bits que la cuenta con signo (el complemento a dos es el mismo); con datos
+// danados (coeficientes y cuantizadores absurdos) la cuenta con signo se
+// desbordaba, y en C++ eso es comportamiento indefinido: el compilador puede
+// suponer que no ocurre. Ahora es una simple vuelta modular y la salida se
+// recorta a 0..255 como siempre: un fotograma roto es solo un fotograma feo.
+typedef uint32_t jw;
+static inline jw jwOf(int32_t x){ return (jw)x; }
+static inline int32_t jdesc(jw x, int n){ return (int32_t)(x + ((jw)1 << (n - 1))) >> n; }
+#define JWC(k) ((jw)(int32_t)(k))
 
 // coef: 64 coeficientes en orden NATURAL. quant: 64 valores en orden
 // NATURAL. out: destino de 8x8 muestras (0..255) con paso `stride`.
@@ -292,91 +343,87 @@ static void idct8x8(const int16_t* coef, const uint16_t* quant,
     const uint16_t* q = quant + c;
     if(in[8] == 0 && in[16] == 0 && in[24] == 0 && in[32] == 0 &&
        in[40] == 0 && in[48] == 0 && in[56] == 0){
-      // Multiplicacion y no desplazamiento: in[0] puede ser NEGATIVO y
-      // desplazar a la izquierda un negativo es comportamiento indefinido
-      // en C++ (lo detecta -fsanitize=undefined). El compilador genera el
-      // mismo shift para una potencia de dos.
-      int32_t dc = ((int32_t)in[0] * q[0]) * (1 << PASS1_BITS);
+      int32_t dc = (int32_t)((jwOf(in[0]) * q[0]) << PASS1_BITS);
       for(int r = 0; r < 8; r++) ws[r * 8 + c] = dc;
       continue;
     }
-    int32_t z1, z2, z3, z4, z5, t0, t1, t2, t3, t10, t11, t12, t13;
+    jw z1, z2, z3, z4, z5, t0, t1, t2, t3, t10, t11, t12, t13;
 
-    z2 = (int32_t)in[16] * q[16];
-    z3 = (int32_t)in[48] * q[48];
-    z1 = (z2 + z3) * FIX_0_541196100;
-    t2 = z1 + z3 * (-FIX_1_847759065);
-    t3 = z1 + z2 * FIX_0_765366865;
+    z2 = jwOf(in[16]) * q[16];
+    z3 = jwOf(in[48]) * q[48];
+    z1 = (z2 + z3) * JWC(FIX_0_541196100);
+    t2 = z1 + z3 * JWC(-FIX_1_847759065);
+    t3 = z1 + z2 * JWC(FIX_0_765366865);
 
-    z2 = (int32_t)in[0]  * q[0];
-    z3 = (int32_t)in[32] * q[32];
-    t0 = (z2 + z3) * (1 << CONST_BITS);
-    t1 = (z2 - z3) * (1 << CONST_BITS);
+    z2 = jwOf(in[0])  * q[0];
+    z3 = jwOf(in[32]) * q[32];
+    t0 = (z2 + z3) << CONST_BITS;
+    t1 = (z2 - z3) << CONST_BITS;
 
     t10 = t0 + t3; t13 = t0 - t3;
     t11 = t1 + t2; t12 = t1 - t2;
 
-    t0 = (int32_t)in[56] * q[56];
-    t1 = (int32_t)in[40] * q[40];
-    t2 = (int32_t)in[24] * q[24];
-    t3 = (int32_t)in[8]  * q[8];
+    t0 = jwOf(in[56]) * q[56];
+    t1 = jwOf(in[40]) * q[40];
+    t2 = jwOf(in[24]) * q[24];
+    t3 = jwOf(in[8])  * q[8];
 
     z1 = t0 + t3; z2 = t1 + t2; z3 = t0 + t2; z4 = t1 + t3;
-    z5 = (z3 + z4) * FIX_1_175875602;
+    z5 = (z3 + z4) * JWC(FIX_1_175875602);
 
-    t0 *= FIX_0_298631336; t1 *= FIX_2_053119869;
-    t2 *= FIX_3_072711026; t3 *= FIX_1_501321110;
-    z1 *= -FIX_0_899976223; z2 *= -FIX_2_562915447;
-    z3 *= -FIX_1_961570560; z4 *= -FIX_0_390180644;
+    t0 *= JWC(FIX_0_298631336); t1 *= JWC(FIX_2_053119869);
+    t2 *= JWC(FIX_3_072711026); t3 *= JWC(FIX_1_501321110);
+    z1 *= JWC(-FIX_0_899976223); z2 *= JWC(-FIX_2_562915447);
+    z3 *= JWC(-FIX_1_961570560); z4 *= JWC(-FIX_0_390180644);
     z3 += z5; z4 += z5;
     t0 += z1 + z3; t1 += z2 + z4; t2 += z2 + z3; t3 += z1 + z4;
 
-    ws[0 * 8 + c] = JDESCALE(t10 + t3, CONST_BITS - PASS1_BITS);
-    ws[7 * 8 + c] = JDESCALE(t10 - t3, CONST_BITS - PASS1_BITS);
-    ws[1 * 8 + c] = JDESCALE(t11 + t2, CONST_BITS - PASS1_BITS);
-    ws[6 * 8 + c] = JDESCALE(t11 - t2, CONST_BITS - PASS1_BITS);
-    ws[2 * 8 + c] = JDESCALE(t12 + t1, CONST_BITS - PASS1_BITS);
-    ws[5 * 8 + c] = JDESCALE(t12 - t1, CONST_BITS - PASS1_BITS);
-    ws[3 * 8 + c] = JDESCALE(t13 + t0, CONST_BITS - PASS1_BITS);
-    ws[4 * 8 + c] = JDESCALE(t13 - t0, CONST_BITS - PASS1_BITS);
+    ws[0 * 8 + c] = jdesc(t10 + t3, CONST_BITS - PASS1_BITS);
+    ws[7 * 8 + c] = jdesc(t10 - t3, CONST_BITS - PASS1_BITS);
+    ws[1 * 8 + c] = jdesc(t11 + t2, CONST_BITS - PASS1_BITS);
+    ws[6 * 8 + c] = jdesc(t11 - t2, CONST_BITS - PASS1_BITS);
+    ws[2 * 8 + c] = jdesc(t12 + t1, CONST_BITS - PASS1_BITS);
+    ws[5 * 8 + c] = jdesc(t12 - t1, CONST_BITS - PASS1_BITS);
+    ws[3 * 8 + c] = jdesc(t13 + t0, CONST_BITS - PASS1_BITS);
+    ws[4 * 8 + c] = jdesc(t13 - t0, CONST_BITS - PASS1_BITS);
   }
 
   // ---- Pase 2: filas ----
   for(int r = 0; r < 8; r++){
     const int32_t* w = ws + r * 8;
     uint8_t* o = out + (size_t)r * stride;
-    int32_t z1, z2, z3, z4, z5, t0, t1, t2, t3, t10, t11, t12, t13;
+    jw z1, z2, z3, z4, z5, t0, t1, t2, t3, t10, t11, t12, t13;
 
-    z2 = w[2]; z3 = w[6];
-    z1 = (z2 + z3) * FIX_0_541196100;
-    t2 = z1 + z3 * (-FIX_1_847759065);
-    t3 = z1 + z2 * FIX_0_765366865;
+    z2 = jwOf(w[2]); z3 = jwOf(w[6]);
+    z1 = (z2 + z3) * JWC(FIX_0_541196100);
+    t2 = z1 + z3 * JWC(-FIX_1_847759065);
+    t3 = z1 + z2 * JWC(FIX_0_765366865);
 
-    t0 = (w[0] + w[4]) * (1 << CONST_BITS);
-    t1 = (w[0] - w[4]) * (1 << CONST_BITS);
+    t0 = (jwOf(w[0]) + jwOf(w[4])) << CONST_BITS;
+    t1 = (jwOf(w[0]) - jwOf(w[4])) << CONST_BITS;
 
     t10 = t0 + t3; t13 = t0 - t3;
     t11 = t1 + t2; t12 = t1 - t2;
 
-    t0 = w[7]; t1 = w[5]; t2 = w[3]; t3 = w[1];
+    t0 = jwOf(w[7]); t1 = jwOf(w[5]); t2 = jwOf(w[3]); t3 = jwOf(w[1]);
     z1 = t0 + t3; z2 = t1 + t2; z3 = t0 + t2; z4 = t1 + t3;
-    z5 = (z3 + z4) * FIX_1_175875602;
+    z5 = (z3 + z4) * JWC(FIX_1_175875602);
 
-    t0 *= FIX_0_298631336; t1 *= FIX_2_053119869;
-    t2 *= FIX_3_072711026; t3 *= FIX_1_501321110;
-    z1 *= -FIX_0_899976223; z2 *= -FIX_2_562915447;
-    z3 *= -FIX_1_961570560; z4 *= -FIX_0_390180644;
+    t0 *= JWC(FIX_0_298631336); t1 *= JWC(FIX_2_053119869);
+    t2 *= JWC(FIX_3_072711026); t3 *= JWC(FIX_1_501321110);
+    z1 *= JWC(-FIX_0_899976223); z2 *= JWC(-FIX_2_562915447);
+    z3 *= JWC(-FIX_1_961570560); z4 *= JWC(-FIX_0_390180644);
     z3 += z5; z4 += z5;
     t0 += z1 + z3; t1 += z2 + z4; t2 += z2 + z3; t3 += z1 + z4;
 
-    o[0] = (uint8_t)jclamp255((int)JDESCALE(t10 + t3, CONST_BITS + PASS1_BITS + 3) + 128);
-    o[7] = (uint8_t)jclamp255((int)JDESCALE(t10 - t3, CONST_BITS + PASS1_BITS + 3) + 128);
-    o[1] = (uint8_t)jclamp255((int)JDESCALE(t11 + t2, CONST_BITS + PASS1_BITS + 3) + 128);
-    o[6] = (uint8_t)jclamp255((int)JDESCALE(t11 - t2, CONST_BITS + PASS1_BITS + 3) + 128);
-    o[2] = (uint8_t)jclamp255((int)JDESCALE(t12 + t1, CONST_BITS + PASS1_BITS + 3) + 128);
-    o[5] = (uint8_t)jclamp255((int)JDESCALE(t12 - t1, CONST_BITS + PASS1_BITS + 3) + 128);
-    o[3] = (uint8_t)jclamp255((int)JDESCALE(t13 + t0, CONST_BITS + PASS1_BITS + 3) + 128);
-    o[4] = (uint8_t)jclamp255((int)JDESCALE(t13 - t0, CONST_BITS + PASS1_BITS + 3) + 128);
+    o[0] = (uint8_t)jclamp255(jdesc(t10 + t3, CONST_BITS + PASS1_BITS + 3) + 128);
+    o[7] = (uint8_t)jclamp255(jdesc(t10 - t3, CONST_BITS + PASS1_BITS + 3) + 128);
+    o[1] = (uint8_t)jclamp255(jdesc(t11 + t2, CONST_BITS + PASS1_BITS + 3) + 128);
+    o[6] = (uint8_t)jclamp255(jdesc(t11 - t2, CONST_BITS + PASS1_BITS + 3) + 128);
+    o[2] = (uint8_t)jclamp255(jdesc(t12 + t1, CONST_BITS + PASS1_BITS + 3) + 128);
+    o[5] = (uint8_t)jclamp255(jdesc(t12 - t1, CONST_BITS + PASS1_BITS + 3) + 128);
+    o[3] = (uint8_t)jclamp255(jdesc(t13 + t0, CONST_BITS + PASS1_BITS + 3) + 128);
+    o[4] = (uint8_t)jclamp255(jdesc(t13 - t0, CONST_BITS + PASS1_BITS + 3) + 128);
   }
 }
 
@@ -663,8 +710,20 @@ static int jpegDecodeT(JSrc* src,
   int outW = (d.width + S - 1) / S;
   int outH = (d.height + S - 1) / S;
 
-  for(int c = 0; c < d.ncomp; c++)
-    if(!d.quantSet[d.comp[c].tq]){ ff(dp); return FLEXJPG_ERR_BADMARKER; }
+  for(int c = 0; c < d.ncomp; c++){
+    JComp* cm = &d.comp[c];
+    if(!d.quantSet[cm->tq]){ ff(dp); return FLEXJPG_ERR_BADMARKER; }
+    // Sin DHT (MJPEG de camara): las tablas estandar del anexo K. Solo
+    // existen para las tablas 0 y 1; pedir otra sin definirla es un error.
+    if(!d.hdc[cm->td].present){
+      if(cm->td > 1){ ff(dp); return FLEXJPG_ERR_BADMARKER; }
+      huffBuild(&d.hdc[cm->td], kStdDcBits[cm->td], kStdDcVals, 12);
+    }
+    if(!d.hac[cm->ta].present){
+      if(cm->ta > 1){ ff(dp); return FLEXJPG_ERR_BADMARKER; }
+      huffBuild(&d.hac[cm->ta], kStdAcBits[cm->ta], kStdAcVals[cm->ta], 162);
+    }
+  }
 
   d.mcuW  = 8 * d.hmax;  d.mcuH = 8 * d.vmax;
   d.mcusX = (d.width  + d.mcuW - 1) / d.mcuW;
@@ -730,7 +789,9 @@ static int jpegDecodeT(JSrc* src,
               int t = huffDecode(&br, &d.hdc[cm->td]);
               if(t < 0 || t > 16){ rc = FLEXJPG_ERR_HUFFMAN; goto done; }
               int diff = huffExtend(brGetBits(&br, t), t);
-              cm->dcPred += diff;
+              // Se guarda ya reducido a 16 bits: coef[0] sale identico y un
+              // flujo danado no puede desbordar el int a fuerza de sumar.
+              cm->dcPred = (int16_t)(uint16_t)(cm->dcPred + diff);
               coef[0] = (int16_t)cm->dcPred;
               // AC
               for(int k = 1; k < 64; ){
