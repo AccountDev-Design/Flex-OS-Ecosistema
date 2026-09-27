@@ -299,6 +299,7 @@ static_assert(SCR_W == 480 && SCR_H == 800, "la sombra del panel asume 480x800")
 // #############################################################
 static void testPanelRapido();
 static void testPanelOneUI();
+static void testTactoGlobal();
 static void testPulsacionLargaVidrio();
 static void testVariasFotos();
 static void testGuardadoRafaga();
@@ -8936,6 +8937,190 @@ static void testPulsacionLargaVidrio(){
   if(gFails == before) printf("  Pulsacion larga: todas las comprobaciones pasan.\n");
 }
 
+// #############################################################
+//  TACTO GLOBAL: DONDE CAE UN TOQUE Y LA ESCALA DEL GT911
+//  ------------------------------------------------------------
+//  Por la cadena REAL: registros del GT911 (doble del bus) -> gtPoll ->
+//  flexPollTouch -> la app. Nada de escribir T a mano.
+// #############################################################
+static void gtFrame(int fingers, int x, int y){
+  gWireGt[0x14E] = (uint8_t)(0x80 | fingers);
+  gWireGt[0x150] = (uint8_t)x; gWireGt[0x151] = (uint8_t)(x >> 8);
+  gWireGt[0x152] = (uint8_t)y; gWireGt[0x153] = (uint8_t)(y >> 8);
+}
+// Un toque entero: apoya en (x0,y0), el centroide se va a (x1,y1) al levantar
+// el dedo, y se suelta. `tick` corre en cada cuadro (la app).
+static void gtTapPath(int x0, int y0, int x1, int y1, void (*tick)()){
+  gtFrame(1, x0, y0); gTestMs += 16; flexPollTouch(); if(tick) tick();
+  gtFrame(1, (x0 + x1) / 2, (y0 + y1) / 2); gTestMs += 16; flexPollTouch(); if(tick) tick();
+  gtFrame(1, x1, y1); gTestMs += 16; flexPollTouch(); if(tick) tick();
+  gtFrame(0, 0, 0);  gTestMs += 16; flexPollTouch(); if(tick) tick();
+  gTestMs += 16; flexPollTouch(); if(tick) tick();                // una vuelta mas, ya sin dedo
+}
+static void testTactoGlobal(){
+  printf("Tacto global: un toque cae donde se apoyo el dedo y la escala del GT911 se respeta\n");
+  int before = gFails;
+  bool gt0 = gtOk; gtOk = true; gWireGtOn = true; memset(gWireGt, 0, sizeof(gWireGt));
+  uint16_t rx0 = gtResX, ry0 = gtResY;
+  touchReset(); gTouchSwallow = false;
+  gTestMs = 30000000;
+  // ---- 1. El toque se localiza donde se APOYO el dedo ----
+  gtFrame(1, 100, 200); gTestMs += 16; flexPollTouch();
+  chk(T.pressed && T.x == 100 && T.y == 200, "apoyar el dedo da pressed en su punto");
+  gtFrame(1, 100, 209); gTestMs += 16; flexPollTouch();
+  chk(T.down && !T.tap && T.y == 209, "mientras se mueve, T sigue al dedo");
+  gtFrame(0, 0, 0); gTestMs += 16; flexPollTouch();
+  chkf(T.tap && T.x == 100 && T.y == 200, "al soltar es un toque y cae donde se apoyo (%d,%d), no donde se levanto", T.x, T.y);
+  chkf(T.dy == 9, "y el recorrido real se conserva en T.dy (%d)", T.dy);
+  gTestMs += 16; flexPollTouch();
+  // Un arrastre de verdad no cambia: ni toque ni coordenadas movidas.
+  gtFrame(1, 100, 300); gTestMs += 16; flexPollTouch();
+  gtFrame(1, 100, 380); gTestMs += 16; flexPollTouch();
+  gtFrame(0, 0, 0); gTestMs += 16; flexPollTouch();
+  chk(!T.tap && T.y == 380 && T.swipeDown, "un deslizamiento sigue siendo deslizamiento, con su punto final");
+  gTestMs += 16; flexPollTouch();
+
+  // ---- 2. Galeria: la parte baja de una pestana cambia de pestana ----
+  // Las pestanas miden 28 px y la rejilla empieza justo debajo. Apoyando en
+  // la parte baja de "Videos" y con el centroide bajando 9 px al levantar el
+  // dedo, antes el toque caia en la rejilla y abria una foto.
+  {
+    bool ok0 = gMlOk; int nav0 = gNavMode;
+    tkReset();
+    for(int i = 0; i < 10; i++){ char p[40]; snprintf(p, sizeof(p), "/Imagenes/tt%02d.jpg", i); tkAdd(FML_K_PHOTO, FML_F_JPEG, p, NULL, false, true); }
+    gMlOk = true; gNavMode = 0;
+    shotApp(IC_GALERIA); mkBind(&GAL_APP); mkReset(); galViewReady = false; galScroll = 0; galTab = 0; galRender();
+    int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+    int pad = uiPad();
+    const int tabY = by + 38, tw = (bw - 2 * pad) / GAL_TABS;
+    int tx = bx + pad + 2 * tw + tw / 2;
+    uint32_t tap0 = galTapId;
+    gtTapPath(tx, tabY + 24, tx, tabY + 33, galTick);
+    chkf(galTab == 2 && galTapId == tap0 && !vwHostOpen(&GAL_VW),
+         "apoyar en la parte baja de 'Videos' cambia de pestana (pestana %d) y no abre una foto", galTab);
+    // Y un toque en la rejilla sigue abriendo lo que se toca.
+    galTab = 0; galScroll = 0; galRender();
+    int x, y, w, h; galCellRect(1, x, y, w, h);
+    mlLock(); galSyncLocked(); uint32_t want = galRecLocked(1)->id; mlUnlock();
+    galTapId = 0;
+    gtTapPath(x + w / 2, y + h / 2, x + w / 2 + 3, y + h / 2 + 8, galTick);
+    chkf(vwHostOpen(&GAL_VW) && vwId == want, "un toque en una celda abre ESA celda (%u, esperaba %u)", (unsigned)vwId, (unsigned)want);
+    vwClose(); mkReset();
+
+    // ---- 2b. Con miniaturas por cargar, el cuadro de SOLTAR no se pierde ----
+    // Cada vuelta sin dedo carga una tanda (GAL_THUMB_BUDGET); antes esa vuelta
+    // hacia return antes de mirar el tacto y el toque de soltar desaparecia.
+    // Version de miniatura nueva: la cache (id + version) no tiene ninguna.
+    for(int i = 0; i < gMs.lib.n; i++){ gMs.lib.recs[i].flags |= FML_R_THUMB; gMs.lib.recs[i].thumbVer = 77; }
+    gMs.lib.rev++;
+    gTestMs += 400; galRender();
+    chk(galMorePending, "hay miniaturas pendientes (se cargan por tandas)");
+    galCellRect(2, x, y, w, h);
+    mlLock(); galSyncLocked(); want = galRecLocked(2)->id; mlUnlock();
+    gtTapPath(x + w / 2, y + h / 2, x + w / 2, y + h / 2 + 6, galTick);
+    chkf(vwHostOpen(&GAL_VW) && vwId == want, "con miniaturas pendientes el toque abre la celda (%u, esperaba %u)", (unsigned)vwId, (unsigned)want);
+    vwClose(); mkReset();
+    for(int k = 0; k < 8; k++){ gTestMs += 16; flexPollTouch(); galTick(); }   // terminan de cargar
+
+    // ---- 2c. El catalogo cambia entre pintar y tocar: se abre lo que se VEIA ----
+    // "Lo mas nuevo primero": una subida entra arriba y todo se corre una
+    // posicion. Re-sincronizar al tocar hacia abrir el vecino.
+    galRender();
+    galCellRect(3, x, y, w, h);
+    mlLock(); galSyncLocked(); uint32_t seen = galRecLocked(3)->id; mlUnlock();
+    tkAdd(FML_K_PHOTO, FML_F_JPEG, "/Imagenes/recien.jpg", NULL, false, true);   // entra la primera
+    gTestMs += 400;                                   // el repintado de fondo ya "tocaria"
+    gtTapPath(x + w / 2, y + h / 2, x + w / 2, y + h / 2 + 6, galTick);
+    chkf(vwHostOpen(&GAL_VW) && vwId == seen, "si el catalogo cambia entre pintar y tocar, se abre lo que se veia (%u, esperaba %u)",
+         (unsigned)vwId, (unsigned)seen);
+    vwClose(); mkReset();
+    for(int k = 0; k < 8; k++){ gTestMs += 16; flexPollTouch(); galTick(); }
+
+    // ---- 2d. Apoyar justo cuando toca un repintado de fondo ----
+    // Antes ese repintado se comia el cuadro de APOYAR: el origen del arrastre
+    // (galDragY0) seguia siendo el del toque anterior y, al mover el dedo un
+    // pixel, el toque nuevo se convertia en un arrastre que saltaba de scroll.
+    galScroll = 0; galRender();
+    int maxS = galMaxScroll();
+    chkf(maxS > 40, "la rejilla tiene recorrido (%d px)", maxS);
+    // Toque anterior: la pestana que ya esta activa (no hace nada) -> galDragY0 arriba.
+    int tx0 = bx + pad + tw / 2;
+    gtTapPath(tx0, tabY + 14, tx0, tabY + 16, galTick);
+    int s0 = galScroll;
+    gMs.lib.rev++; gTestMs += 400;                    // el catalogo cambio (una miniatura lista)
+    galCellRect(4, x, y, w, h);
+    mlLock(); galSyncLocked(); want = galRecLocked(4)->id; mlUnlock();
+    gtTapPath(x + w / 2, y + h / 2, x + w / 2, y + h / 2 + 5, galTick);
+    chkf(galScroll == s0, "el toque siguiente no salta de scroll (%d -> %d)", s0, galScroll);
+    chkf(vwHostOpen(&GAL_VW) && vwId == want, "y abre lo que se toca (%u, esperaba %u)", (unsigned)vwId, (unsigned)want);
+    vwClose(); mkReset();
+    gMlOk = ok0; gNavMode = nav0;
+    gState = ST_HOME; gAppId = 0; uiClipFull();
+  }
+
+  // ---- 2e. Multimedia y Musica: el mismo contrato (lo que se toca es lo que se ve) ----
+  {
+    bool ok0 = gMlOk; int nav0 = gNavMode;
+    for(int app = 0; app < 2; app++){
+      tkReset();
+      for(int i = 0; i < 8; i++){
+        char p[40];
+        if(app == 0){ snprintf(p, sizeof(p), "/Videos/tv%02d.avi", i); tkAdd(FML_K_VIDEO, FML_F_AVI_MJPEG, p, NULL, false, true); }
+        else { snprintf(p, sizeof(p), "/Musica/tm%02d.wav", i); tkAdd(FML_K_AUDIO, FML_F_WAV_PCM, p, NULL, false, true); }
+      }
+      gMlOk = true; gNavMode = 0;
+      int bx, by, bw, bh;
+      uint32_t seen = 0, got = 0;
+      if(app == 0){
+        shotApp(IC_MULTIMEDIA); mkBind(&VID_APP); mkReset(); vidScreen = VS_LIST; vidListScroll = 0; vidListRender();
+        uiBox(bx, by, bw, bh);
+        mlLock(); vidSyncLocked(); seen = gMs.lib.recs[vidView.idx[2]].id; mlUnlock();
+        tkAdd(FML_K_VIDEO, FML_F_AVI_MJPEG, "/Videos/recien.avi", NULL, false, true);
+        got = vidHitId(bx + bw / 2, vidRowY(2) + VID_ROW_H / 2 - 4);
+      } else {
+        shotApp(IC_MUSICA); mkBind(&MUS_APP); mkReset(); musScreen = MUS_LIST; musScroll = 0; musRender();
+        uiBox(bx, by, bw, bh);
+        mlLock(); musSyncLocked(); seen = gMs.lib.recs[musView.idx[2]].id; mlUnlock();
+        tkAdd(FML_K_AUDIO, FML_F_WAV_PCM, "/Musica/recien.wav", NULL, false, true);
+        got = musHitId(bx + bw / 2, musRowY(2) + MUS_ROW_H / 2 - 4);
+      }
+      chkf(got == seen, "[%s] con el catalogo cambiado, la fila tocada es la que se veia (%u, esperaba %u)",
+           app == 0 ? "Multimedia" : "Musica", (unsigned)got, (unsigned)seen);
+      mkReset();
+    }
+    gMlOk = ok0; gNavMode = nav0;
+    gState = ST_HOME; gAppId = 0; uiClipFull();
+  }
+
+  // ---- 3. La escala que tenga configurada el GT911 ----
+  touchReset();
+  gWireGt[0x048] = 0xD0; gWireGt[0x049] = 0x02;                       // X: 720
+  gWireGt[0x04A] = 0xB0; gWireGt[0x04B] = 0x04;                       // Y: 1200
+  gtReadRes();
+  chkf(gtResX == 720 && gtResY == 1200, "se lee la resolucion configurada (%ux%u)", gtResX, gtResY);
+  gtFrame(1, 360, 600); gTestMs += 16; flexPollTouch();
+  chkf(T.x == 240 && T.y == 400, "un panel configurado a 720x1200 se escala a la pantalla (%d,%d)", T.x, T.y);
+  gtFrame(1, 719, 1199); gTestMs += 16; flexPollTouch();
+  chkf(T.x == 479 && T.y == 799, "su esquina es la esquina de la pantalla (%d,%d)", T.x, T.y);
+  gtFrame(0, 0, 0); gTestMs += 16; flexPollTouch(); gTestMs += 16; flexPollTouch();
+  gtResX = SCR_W; gtResY = SCR_H;
+  gWireGt[0x048] = 0x20; gWireGt[0x049] = 0x03; gWireGt[0x04A] = 0xE0; gWireGt[0x04B] = 0x01;   // 800x480: ejes cambiados
+  gtReadRes();
+  chk(gtResX == SCR_W && gtResY == SCR_H, "con los ejes cambiados NO se escala (se avisa de GT911_SWAP_XY)");
+  gWireGt[0x048] = 0xFF; gWireGt[0x049] = 0xFF; gWireGt[0x04A] = 0xFF; gWireGt[0x04B] = 0xFF;   // basura
+  gtReadRes();
+  chk(gtResX == SCR_W && gtResY == SCR_H, "un valor absurdo se ignora");
+  gWireGt[0x048] = 0xE0; gWireGt[0x049] = 0x01; gWireGt[0x04A] = 0x20; gWireGt[0x04B] = 0x03;   // 480x800
+  gtReadRes();
+  gtFrame(1, 123, 456); gTestMs += 16; flexPollTouch();
+  chk(gtResX == SCR_W && gtResY == SCR_H && T.x == 123 && T.y == 456, "con la configuracion esperada (480x800) no cambia nada");
+  gtFrame(0, 0, 0); gTestMs += 16; flexPollTouch(); gTestMs += 16; flexPollTouch();
+
+  gtResX = rx0; gtResY = ry0;
+  gWireGtOn = false; gtOk = gt0; touchReset();
+  if(gFails == before) printf("  Tacto global: todas las comprobaciones pasan.\n");
+}
+
 // La hoja de Flex Web Server solo repinta lo que cambia.
 static void testHojaWebLocalizada(){
   printf("Flex Web Server: la hoja solo repinta la zona que cambia\n");
@@ -9454,6 +9639,7 @@ int main(){
   testGuardadoRafaga();
   testVariasFotos();
   testPulsacionLargaVidrio();
+  testTactoGlobal();
   testKitTemaYPapelera();
   testHojaWebLocalizada();
   testCapturasVisor();

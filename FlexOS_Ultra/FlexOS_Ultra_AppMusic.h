@@ -63,6 +63,7 @@ static FlexMlView musView;                      // indices en mlTables()->musVie
 static bool     musViewReady = false;
 static int      musCountCache = 0;
 static bool     musMorePending = false;
+static int      musShownN = -1;         // filas de la ultima lista pintada (-1 = sin instantanea)
 static uint32_t musSeenRev = 0, musSeenMs = 0;
 
 // ---- Reproductor ----
@@ -420,6 +421,7 @@ static void musRenderList(){
   musCountCache = n;
   musSeenRev = gMs.lib.rev; musSeenMs = millis();
   mkPruneLocked(&musView);
+  { MlTables* t = mlTables(); musShownN = t ? mlShowSnapLocked(t->musShown, &musView) : -1; }
   { char cnt[48];
     if(mkMulti) snprintf(cnt, sizeof(cnt), "%u seleccionada%s", (unsigned)mkSelN, mkSelN == 1 ? "" : "s");
     else if(n == 1) snprintf(cnt, sizeof(cnt), "1 canci\xC3\xB3n");
@@ -568,6 +570,15 @@ static uint32_t musHitId(int tx, int ty){
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
   if(ty < by + MUS_HEAD_H - 6) return 0;
   uint32_t id = 0;
+  // Contra lo PINTADO (ver mlShowSnapLocked), no contra el catalogo de ahora.
+  MlTables* t = mlTables();
+  if(t && musShownN >= 0){
+    for(int i = 0; i < musShownN && !id; i++){
+      int y = musRowY(i);
+      if(ty >= y && ty <= y + MUS_ROW_H - 8 && tx >= bx && tx <= bx + bw) id = t->musShown[i];
+    }
+    return id;
+  }
   mlLock();
   musSyncLocked();
   for(int i = 0; i < musView.n && !id; i++){
@@ -739,8 +750,9 @@ static void musTick(){
     return;
   }
   if(mkTick()) return;                            // menu, dialogos, papelera, hoja del servidor
-  if(gMlOk && !musDragging && millis() - musSeenMs >= 300 && mlRev() != musSeenRev){ musRender(); return; }
-  if(musMorePending && !T.down){ musRender(); return; }
+  // Nunca en un cuadro con tacto (ver mkTouchBusy): se perdia el toque.
+  if(!mkTouchBusy() && gMlOk && millis() - musSeenMs >= 300 && mlRev() != musSeenRev){ musRender(); return; }
+  if(!mkTouchBusy() && musMorePending){ musRender(); return; }
   musListTouch();
 }
 

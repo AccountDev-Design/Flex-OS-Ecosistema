@@ -308,6 +308,18 @@ static void panelSleepIn(){
 #define GT911_FLIP_Y  0
 
 static uint8_t gtAddr = 0x5D;   // el GT911 puede ser 0x5D o 0x14
+// RESOLUCION CONFIGURADA DEL GT911 ("X/Y Output Max", registros 0x8048..0x804B).
+// El chip informa en la escala de SU configuracion, que la pone el fabricante
+// del panel, no en la de la pantalla. Antes se daba por hecho 480x800 y lo que
+// sobraba se aplastaba contra el ultimo pixel: con un panel configurado a otra
+// escala, el desfase entre lo dibujado y lo tocado crecia hacia abajo y a la
+// derecha. Se lee al arrancar y, si difiere de la pantalla, se escala. Con la
+// configuracion esperada (480x800) no cambia nada.
+static uint16_t gtResX = SCR_W, gtResY = SCR_H;
+static inline void gtScale(uint16_t &gx, uint16_t &gy){
+  if(gtResX != SCR_W) gx = (uint16_t)((uint32_t)gx * SCR_W / gtResX);
+  if(gtResY != SCR_H) gy = (uint16_t)((uint32_t)gy * SCR_H / gtResY);
+}
 static bool    gtOk   = false;
 // NUMERO DE DEDOS del ultimo frame valido del GT911. El byte de estado 0x814E
 // ya trae la cuenta en (status & 0x0F); antes se leia y se tiraba. Lo unico que
@@ -419,6 +431,28 @@ static bool gtRd(uint16_t reg, uint8_t* buf, uint8_t n){
   return true;
 }
 
+// Lee la resolucion configurada. Un valor absurdo (chip clonico, lectura
+// fallida) se ignora: se sigue con la de la pantalla. Una configuracion con los
+// ejes CAMBIADOS no se escala (seria aplastar un eje y estirar el otro): se
+// avisa, porque lo que falta ahi es GT911_SWAP_XY.
+static void gtReadRes(){
+  uint8_t cfg[4];
+  if(!gtRd(0x8048, cfg, 4)) return;
+  uint16_t rx = (uint16_t)(cfg[0] | (cfg[1] << 8)), ry = (uint16_t)(cfg[2] | (cfg[3] << 8));
+#if GT911_SWAP_XY
+  { uint16_t t = rx; rx = ry; ry = t; }
+#endif
+  if(rx < 64 || rx > 4096 || ry < 64 || ry > 4096) return;
+  if((rx > ry) != (SCR_W > SCR_H)){
+    Serial.printf("[HW] GT911 configurado a %ux%u: ejes cambiados respecto a la pantalla (revisa GT911_SWAP_XY)\n",
+                  (unsigned)rx, (unsigned)ry);
+    return;
+  }
+  gtResX = rx; gtResY = ry;
+  if(rx != SCR_W || ry != SCR_H)
+    Serial.printf("[HW] GT911 configurado a %ux%u: se escala a %dx%d\n", (unsigned)rx, (unsigned)ry, SCR_W, SCR_H);
+}
+
 void flexTouchInit(){
   pinMode(PIN_TP_RST, OUTPUT);
   digitalWrite(PIN_TP_RST, LOW);  delay(10);
@@ -441,6 +475,7 @@ void flexTouchInit(){
   gtRd(0x8140, pid, 4);
   Serial.printf("[HW] Touch GT911 en 0x%02X, ID: %c%c%c\n",
                 gtAddr, pid[0], pid[1], pid[2]);
+  gtReadRes();
 }
 
 // CONTABILIDAD DEL BUS, vista desde el tactil. El GT911 se lee en CADA vuelta
@@ -517,6 +552,7 @@ static int8_t gtPoll(uint16_t &gx, uint16_t &gy){
 #if GT911_SWAP_XY
       { uint16_t t = gx; gx = gy; gy = t; }
 #endif
+      gtScale(gx, gy);
 #if GT911_FLIP_X
       gx = (SCR_W - 1) - gx;
 #endif
@@ -582,6 +618,7 @@ static int gtPollMulti(){
 #if GT911_SWAP_XY
     { int t = px; px = py; py = t; }
 #endif
+    { uint16_t sx = (uint16_t)px, sy = (uint16_t)py; gtScale(sx, sy); px = sx; py = sy; }
 #if GT911_FLIP_X
     px = (SCR_W - 1) - px;
 #endif

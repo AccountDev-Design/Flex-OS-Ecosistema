@@ -88,6 +88,7 @@ static uint32_t   vidViewMask = 0;
 static bool       vidViewReady = false;
 static int        vidCountCache = 0;
 static bool       vidMorePending = false;
+static int        vidShownN = -1;       // filas de la ultima lista pintada (-1 = sin instantanea)
 static uint32_t   vidSeenRev = 0, vidSeenMs = 0;
 
 static void vidSyncLocked(){
@@ -184,6 +185,7 @@ static void vidListRender(){
   vidCountCache = n;
   vidSeenRev = gMs.lib.rev; vidSeenMs = millis();
   mkPruneLocked(&vidView);
+  { MlTables* t = mlTables(); vidShownN = t ? mlShowSnapLocked(t->vidShown, &vidView) : -1; }
   { char cnt[48];
     if(mkMulti) snprintf(cnt, sizeof(cnt), "%u seleccionado%s", (unsigned)mkSelN, mkSelN == 1 ? "" : "s");
     else snprintf(cnt, sizeof(cnt), "%d elemento%s", n, n == 1 ? "" : "s");
@@ -235,6 +237,15 @@ static uint32_t vidHitId(int tx, int ty){
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
   if(ty < by + VID_HEAD_H - 6) return 0;
   uint32_t id = 0;
+  // Contra lo PINTADO (ver mlShowSnapLocked), no contra el catalogo de ahora.
+  MlTables* t = mlTables();
+  if(t && vidShownN >= 0){
+    for(int i = 0; i < vidShownN && !id; i++){
+      int y = vidRowY(i);
+      if(ty >= y && ty <= y + VID_ROW_H - 8 && tx >= bx && tx <= bx + bw) id = t->vidShown[i];
+    }
+    return id;
+  }
   mlLock();
   vidSyncLocked();
   for(int i = 0; i < vidView.n && !id; i++){
@@ -434,8 +445,9 @@ static void vidTick(){
   if(mkTick()) return;                            // menu, dialogos, papelera, hoja del servidor
   // El catalogo cambio (subida del movil, miniatura lista, reconciliacion):
   // como mucho un repintado cada 300 ms, y nunca a mitad de un arrastre.
-  if(gMlOk && !vidListDragging && millis() - vidSeenMs >= 300 && mlRev() != vidSeenRev){ vidListRender(); return; }
-  if(vidMorePending && !T.down){ vidListRender(); return; }
+  // Nunca en un cuadro con tacto (ver mkTouchBusy): se perdia el toque.
+  if(!mkTouchBusy() && gMlOk && millis() - vidSeenMs >= 300 && mlRev() != vidSeenRev){ vidListRender(); return; }
+  if(!mkTouchBusy() && vidMorePending){ vidListRender(); return; }
   vidListTouch();
 }
 

@@ -279,12 +279,22 @@ static void suspGestureUpdate(){
 #endif
 }
 
+// DONDE CAE UN TOQUE. Un toque se reconoce al soltar, pero se LOCALIZA donde
+// se apoyo el dedo. En un capacitivo el centroide que informa el GT911 se
+// desplaza al levantar el dedo (el contacto se encoge hacia la yema: varios
+// pixeles, casi siempre hacia abajo), y todas las apps hacen el hit-test de
+// T.tap con T.x/T.y. Con el punto de SOLTAR, apuntar a la parte baja de un
+// boton pequeno -- las pestanas de la Galeria miden 28 px y la rejilla empieza
+// justo debajo -- caia en lo de debajo: se abria una foto en vez de cambiar de
+// pestana. Es lo que hacen LVGL y Android: el destino se decide al APOYAR y
+// soltar solo lo confirma dentro de la tolerancia (aqui, 16 px). No agranda
+// ninguna zona tactil. T.dx/T.dy conservan el recorrido real.
 static void tDoRelease(unsigned long now){
   T.down = false; T.released = true;
   T.dx = T.x - T.startX; T.dy = T.y - T.startY;
   unsigned long dur = now - T.downMs;
   int adx = abs(T.dx), ady = abs(T.dy);
-  if(adx < 16 && ady < 16 && dur < 550) T.tap = true;
+  if(adx < 16 && ady < 16 && dur < 550){ T.tap = true; T.x = T.startX; T.y = T.startY; }
   else if(ady > 55 && ady >= adx){ if(T.dy < 0) T.swipeUp = true; else T.swipeDown = true; }
   else if(adx > 55 && adx > ady){ if(T.dx < 0) T.swipeLeft = true; else T.swipeRight = true; }
 }

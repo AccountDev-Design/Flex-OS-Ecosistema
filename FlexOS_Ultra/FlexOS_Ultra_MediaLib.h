@@ -829,6 +829,9 @@ struct MlTables {
   uint32_t ids[FML_CAP];          // ids sobre los que actua una accion
   uint32_t authIds[FML_CAP];      // los que esperan a la clave del sistema
   uint16_t galView[FML_CAP], vidView[FML_CAP], musView[FML_CAP];
+  // LO QUE SE TOCA ES LO QUE SE VE: el id que ocupa cada posicion de cada
+  // lista TAL COMO SE PINTO (ver mlShowSnapLocked).
+  uint32_t galShown[FML_CAP], vidShown[FML_CAP], musShown[FML_CAP];
 };
 static MlTables* gMlT = NULL;
 static MlTables* mlTables(){
@@ -837,6 +840,21 @@ static MlTables* mlTables(){
     if(gMlT) memset(gMlT, 0, sizeof(*gMlT));
   }
   return gMlT;
+}
+// Instantanea de una lista al pintarla (con el cerrojo del catalogo tomado).
+// El hit-test de cada app lee ESTO y no la vista viva: entre dos repintados el
+// catalogo cambia -- una subida entra arriba ("lo mas nuevo primero") y todo se
+// corre una posicion -- y re-sincronizar al tocar hacia caer en el elemento de
+// al lado del que se veia. Devuelve cuantos quedaron (-1 = sin tabla: el
+// llamante hace el hit-test de siempre).
+static int mlShowSnapLocked(uint32_t* dst, const FlexMlView* v){
+  if(!dst || !v) return -1;
+  int n = 0;
+  for(int i = 0; i < v->n && i < FML_CAP; i++){
+    uint16_t k = v->idx[i];
+    dst[n++] = k < gMs.lib.n ? gMs.lib.recs[k].id : 0;
+  }
+  return n;
 }
 
 typedef void (*MediaAuthDone)(bool ok, int act, const uint32_t* ids, int n);

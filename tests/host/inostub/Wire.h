@@ -24,6 +24,13 @@ inline unsigned long gWireTxN      = 0;
 // falta para que gtPoll() recorra su camino completo.
 inline unsigned char gWireReadByte = 0;
 
+// Registros del GT911 (0x8000..0x81FF) para las pruebas que los necesitan:
+// con gWireGtOn, una lectura devuelve los bytes de este mapa a partir del
+// registro que se acaba de escribir (dos bytes, alto primero). Sin el, todo
+// sigue devolviendo gWireReadByte como siempre.
+inline bool          gWireGtOn = false;
+inline unsigned char gWireGt[0x200] = {0};
+
 class TwoWire {
 public:
   bool begin(int sda=-1, int scl=-1, uint32_t freq=0){ (void)sda;(void)scl;(void)freq; return true; }
@@ -31,8 +38,8 @@ public:
   void setClock(uint32_t){}
   void setTimeOut(uint16_t ms){ _timeOut = ms; }
   uint16_t getTimeOut(){ return _timeOut; }
-  void beginTransmission(uint8_t){}
-  size_t write(uint8_t){ return 1; }
+  void beginTransmission(uint8_t){ _wn = 0; }
+  size_t write(uint8_t b){ if(_wn < 2) _reg = (uint16_t)((_reg << 8) | b); _wn++; if(_wn == 2) _rp = _reg; return 1; }
   size_t write(const uint8_t*, size_t n){ return n; }
   uint8_t endTransmission(bool stop = true){ (void)stop; gWireTxN++; return gWireWedged ? 2 : 0; }
   uint8_t requestFrom(uint8_t a, uint8_t n){ return (uint8_t)requestFrom((int)a, (int)n); }
@@ -43,9 +50,15 @@ public:
     return _avail;
   }
   int available(){ return _avail; }
-  int read(){ if(_avail > 0) _avail--; return (int)gWireReadByte; }
+  int read(){
+    if(_avail > 0) _avail--;
+    if(gWireGtOn && _rp >= 0x8000 && _rp < 0x8200){ unsigned char v = gWireGt[_rp - 0x8000]; _rp++; return (int)v; }
+    return (int)gWireReadByte;
+  }
 private:
   uint16_t _timeOut = 50;
   int      _avail   = 0;
+  uint16_t _reg = 0, _rp = 0;
+  int      _wn  = 0;
 };
 extern TwoWire Wire;

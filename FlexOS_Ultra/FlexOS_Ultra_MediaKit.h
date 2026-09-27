@@ -56,6 +56,15 @@ static bool webSheetTick();
 static void webSheetRender();
 static void webSheetDismiss();
 
+// ¿Trae este cuadro un evento de toque (apoyar, soltar, toque)? Un repintado
+// "de fondo" -- el catalogo cambio, faltan miniaturas -- NUNCA puede gastar un
+// cuadro asi: las listas hacian `render(); return;` antes de atender el tacto
+// y el evento se PERDIA. Soltar dentro de esa vuelta era un toque que no hacia
+// nada; apoyar, un origen de arrastre viejo (el toque siguiente saltaba de
+// scroll). Tampoco se repinta con el dedo apoyado: la lista no se reordena
+// debajo de el.
+static inline bool mkTouchBusy(){ return T.down || T.pressed || T.released || T.tap; }
+
 struct MediaListApp {
   const char* name;                          // "Galeria", "Multimedia", "Musica"
   void (*redraw)();                          // repinta la app entera (sin sus capas)

@@ -94,6 +94,7 @@ static int      galDragY0 = 0, galDragS0 = 0;
 static bool     galDragging = false, galLongFired = false;
 static bool     galMorePending = false;
 static uint32_t galSeenRev = 0, galSeenMs = 0;
+static int      galShownN = -1;         // celdas de la ultima rejilla pintada (-1 = sin instantanea)
 static uint32_t galResumeId = 0;
 static int      galCountCache = 0;      // para la geometria del desplazamiento (sin cerrojo)
 static void galRender();
@@ -229,6 +230,7 @@ static void galRenderGrid(){
   galSeenRev = gMs.lib.rev; galSeenMs = millis();
   // Quita de la seleccion lo que ya no existe (lo borro el movil o la web).
   mkPruneLocked(&galView);
+  { MlTables* t = mlTables(); galShownN = t ? mlShowSnapLocked(t->galShown, &galView) : -1; }
 
   { char cnt[48];
     if(mkMulti) snprintf(cnt, sizeof(cnt), "%u seleccionado%s", (unsigned)mkSelN, mkSelN == 1 ? "" : "s");
@@ -354,6 +356,18 @@ static uint32_t galVwNeighbour(uint32_t id, int delta){
 // Toque sobre la rejilla -> elemento (o 0). `rect` recibe su celda.
 static uint32_t galHitId(int tx, int ty, int* rect = NULL){
   uint32_t id = 0;
+  // Contra lo PINTADO (ver mlShowSnapLocked), no contra el catalogo de ahora.
+  MlTables* t = mlTables();
+  if(t && galShownN >= 0){
+    for(int i = 0; i < galShownN && !id; i++){
+      int x, y, w, h; galCellRect(i, x, y, w, h);
+      if(tx >= x && tx <= x + w && ty >= y && ty <= y + h){
+        id = t->galShown[i];
+        if(rect){ rect[0] = x; rect[1] = y; rect[2] = w; rect[3] = h; }
+      }
+    }
+    return id;
+  }
   mlLock();
   galSyncLocked();
   for(int i = 0; i < galView.n && !id; i++){
@@ -385,8 +399,9 @@ static void galTick(){
   if(mkTick()) return;                            // menu, dialogos, papelera, hoja del servidor
 
   // --- El catalogo cambio (subida del movil, miniatura lista, recorrido) ---
-  if(gMlOk && !galDragging && millis() - galSeenMs >= GAL_REFRESH_MS && mlRev() != galSeenRev){ galRender(); return; }
-  if(galMorePending && !T.down){ galRender(); return; }
+  // Nunca en un cuadro con tacto (ver mkTouchBusy): se perdia el toque.
+  if(!mkTouchBusy() && gMlOk && millis() - galSeenMs >= GAL_REFRESH_MS && mlRev() != galSeenRev){ galRender(); return; }
+  if(!mkTouchBusy() && galMorePending){ galRender(); return; }
 
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
   int pad = uiPad();
