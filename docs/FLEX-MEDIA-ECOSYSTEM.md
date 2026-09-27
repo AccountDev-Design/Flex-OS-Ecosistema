@@ -214,11 +214,12 @@ UndefinedBehaviorSanitizer) y las pruebas web con Node y Chromium:
 | `test_mediastore` | disco con fallos provocados e hilos a la vez: bloquear/mover, borrar, renombrar, reemplazar con corte de luz a mitad, copia con `parent`, catálogo lleno |
 | `test_mediathumb`, `test_jpegenc`, `test_jpeg` | miniaturas y JPEG (lo codificado se vuelve a leer con el decodificador del firmware) |
 | `test_mediaweb`, `test_httpshare`, `test_qr` | servidor, protocolo HTTP y QR |
-| `test_media` | clasificación, AVI/MJPEG, WAV PCM e IMA ADPCM por bloques |
+| `test_media` | clasificación, AVI/MJPEG (índice perezoso y aprendido, búsqueda por tramos, trozos vacíos, fotogramas grandes, grabaciones cortadas, tamaños absurdos), WAV PCM e IMA ADPCM por bloques |
+| `test_fuzzmedia` | 1500 JPEG y 1500 AVI dañados y sus miniaturas con ASan y UBSan **sin recuperación** (cualquier comportamiento indefinido aborta) |
 | `test_imgedit` | el núcleo del editor: identidad exacta, giros/volteos/recorte, historial (incluido restablecer y deshacer), cada ajuste en su sentido, filtros, trazos/formas/textos pegados a la foto, copia reducida, guardado por bandas que el firmware abre y cancelación sin memoria viva |
-| `test_ino` | el sketch entero enlazado: kit de listas, Música y el **editor de punta a punta** sobre un disco en memoria (abrir, toques reales, copia, reemplazo, protegidos, cancelar, disco lleno, escritura que falla, soltar memoria y releer, guardado en segundo plano, trabajador que tarda); el **visor** mirando el framebuffer (ajuste y centrado en las dos orientaciones, vidrio idéntico tras repintar y tras Play/Pausa ×10, auto-ocultado, pellizco, arrastre, deslizar, Papelera, protegidos, sin captura en Recientes, vídeo, PSRAM devuelta); la hoja web que solo repinta su zona viva; el menú contextual sin vidrio apilado; la Papelera con más de 16 elementos |
+| `test_ino` | el sketch entero enlazado: kit de listas, Música y el **editor de punta a punta** sobre un disco en memoria (abrir, toques reales, copia, reemplazo, protegidos, cancelar, disco lleno, escritura que falla, soltar memoria y releer, guardado en segundo plano, trabajador que tarda); el **visor** mirando el framebuffer (ajuste y centrado en las dos orientaciones, vidrio idéntico tras repintar y tras Play/Pausa ×10, auto-ocultado, pellizco, arrastre, deslizar, Papelera, protegidos, sin captura en Recientes, vídeo, PSRAM devuelta); la hoja web que solo repinta su zona viva; el menú contextual sin vidrio apilado; la Papelera con más de 16 elementos; `testVideoRobusto` (el visor real con archivos largos, grandes, cortados y dañados), `testGuardadoRafaga` y `testVariasFotos` (8 fotos de 0,3 a 12 MP por el servidor real), `testPulsacionLargaVidrio`, `testTactoGlobal` (registros del GT911 → app) y `testArrastresSinFlash` |
 | `check_wiring.py` | ganchos obligatorios y llamadas prohibidas (p. ej. el trabajador del editor no pinta, no avisa por la isla y no cambia el catálogo) |
-| `tests/web` | interfaz del móvil (conversión, subida, biblioteca, bloqueo) contra el servidor real compilado para el PC |
+| `tests/web` | interfaz del móvil (conversión, subida, biblioteca, bloqueo y **tamaño por archivo**, §14) contra el servidor real compilado para el PC; lo que genera la web lo juzgan los analizadores del firmware (`mediacheck`) |
 
 Las pruebas del núcleo del editor y del pegamento de la placa se validaron
 además con mutaciones (romper el giro, deshacer, el brillo, la copia
@@ -234,7 +235,7 @@ la del temporal...): cada mutación hace fallar al menos una comprobación.
 | Formatos editables | JPEG baseline (ni progresivo, ni PNG/WebP/HEIC: esos los convierte el móvil al subirlos) |
 | Figuras por edición | 48 trazos+formas+textos y 4096 puntos de trazo (restablecer no los recupera: se pueden deshacer) |
 | Texto | la fuente del sistema: caracteres latinos y acentos; lo que no tiene glifo sale como "?" |
-| Vídeo | solo AVI MJPEG |
+| Vídeo | solo AVI MJPEG (también el de cámara sin tablas DHT); fotogramas de hasta 1 MB (`FLEXAVI_FRAME_MAX`) |
 | Audio | WAV PCM 8/16 bits y WAV IMA ADPCM |
 
 **Compilado de verdad para `esp32p4`** con el core 3.1.3 (tamaños y RAM en
@@ -351,3 +352,108 @@ entera. Pero **mientras la flash se escribe con la caché apagada, ningún
 código del sketch puede refrescar el panel**: la corrección completa es de
 configuración del core. Cómo aplicarla y cómo comprobarla está en
 `INSTALACION-USB-P4.md` §5. No se ha podido comprobar en una placa real.
+
+## 12. Vídeo: archivos largos, grandes, cortados o dañados
+
+Causas encontradas en el camino del vídeo y lo que se hizo (commit
+`fix(video)`, pruebas en `test_media` y `testVideoRobusto`):
+
+| Antes | Ahora |
+|---|---|
+| Cada lectura abría el archivo **por su ruta** (stat + recorrido de carpetas de LittleFS, con su cerrojo): la cabecera de 8 bytes y los datos de cada fotograma | el flujo queda abierto mientras el vídeo está delante y solo se busca si la lectura no es consecutiva (0 aperturas por ruta durante la reproducción) |
+| Un trozo con tamaño absurdo (`len ≈ 0xFFFFFFF8`) desbordaba `cursor + 8 + len`: bucle sin fin en el hilo de la interfaz (reinicio por watchdog) | se rechaza con error; además cada llamada recorre como mucho `FLEXAVI_SCAN_MAX` trozos |
+| Buscar sin `idx1` recorría el archivo entero de una vez en el hilo de la interfaz | presupuesto por llamada (`flexAviSeekFrameMax`), el visor avanza por tramos de `VW_SEEK_TICK` por vuelta de `loop()` y las posiciones se aprenden al reproducir |
+| `idx1` se leía entero al abrir (también para una miniatura o para validar una subida) | se lee la primera vez que se busca |
+| Fotogramas de más de 192 KB: pantalla congelada y miniatura "sin MJPEG" | el fotograma que no cabe no se consume: visor y miniatura amplían su buffer hasta 1 MB |
+| Un trozo vacío (repetir el anterior: ffmpeg, cámaras) era "AVI dañado" | cuenta como fotograma y se mantiene la imagen |
+| Grabación cortada: buscar cerca del final ponía el visor en error | se queda en el último fotograma real y la duración pasa a ser la real |
+| Un error a mitad se ignoraba y se releía el mismo trozo roto cada vuelta | se para, se avisa una vez y queda el último cuadro bueno |
+| MJPEG de cámara sin segmento DHT ("AVI1"): rechazado al subirlo | tablas Huffman estándar (ITU-T T.81, anexo K.3), como libjpeg-turbo |
+
+La duración o el peso de un vídeo ya no cambian la memoria que usa el visor:
+el vídeo nunca se carga entero; se lee fotograma a fotograma con un buffer
+del tamaño del mayor fotograma (tope 1 MB).
+
+**Aceleración por hardware:** el P4 tiene un códec JPEG por hardware
+(`esp_driver_jpeg`) y un PPA para escalar. Se evaluó y **no se usa todavía**:
+no hay placa en este entorno para validar su comportamiento con los
+fotogramas reales (tamaños no múltiplos de 16, restart markers, memoria
+DMA), y cambiar el decodificador sin medirlo iría contra la estabilidad. Es
+el siguiente paso con placa delante.
+
+## 13. Ráfagas de fotos y el catálogo
+
+Cada foto recibida dejaba el catálogo sucio y la tarea de medios lo
+reescribía entero 1,5 s después: N fotos seguidas = N reescrituras
+(tirones y, con el panel DSI sin la opción del §11, un destello por
+borrado de sector). Ahora el servidor marca la ráfaga (`mlBurstNote` en el
+inicio, el progreso y la publicación de cada subida) y el guardado espera
+3 s sin señales (`ML_BURST_GAP_MS`), con un tope duro de 20 s
+(`ML_SAVE_MAX_MS`). Las descargas al móvil no cuentan. Al probarlo apareció
+un fallo real de marcas de tiempo (`millis() | 1` leído en el mismo
+milisegundo daba 4 294 967 295 ms al restar sin signo): `mlAge()` resta con
+signo y acota a 0, y lo mismo `gedTicking()` en el editor.
+
+`testVariasFotos` sube 8 fotos de 0,3 a 12 MP por el servidor real con la
+Galería abierta: la subida más cara usa 525 KB de PSRAM (se lee por trozos:
+no crece con la foto), tras las 8 solo quedan las miniaturas en caché
+(acotadas por `ML_CACHE_N`) y abrirlas todas en el visor y cerrarlo devuelve
+toda la PSRAM. No hay límite artificial de fotos por subida.
+
+## 14. Tamaño por archivo al subir desde el móvil
+
+La hoja "Preparar para Flex OS" tiene, debajo de los perfiles, un control
+de **tamaño por archivo**:
+
+| Modo | Qué promete |
+|---|---|
+| Sin límite | lo de siempre: la calidad del perfil elegido |
+| **Límite máximo** | "No superar X": ningún archivo pasa de X; si el perfil da más, se baja paso a paso |
+| **Objetivo** | "Intentar quedar aproximadamente en X" (±10 %): la calidad se ajusta sola hasta «Alta calidad»; lo que ya pesa menos no se infla |
+
+Tamaños: 500 KB, 750 KB, 1 MB, 2 MB, 5 MB, 10 MB u **Otro** (KB o MB, de
+50 KB a 1024 MB). Ningún modo pasa del tope del P4 por clase (§5) ni del
+sitio libre, y el plan lo dice cuando es eso lo que manda. La elección se
+recuerda en ese navegador.
+
+**Búsqueda progresiva con bytes reales.** Cada intento lo codifica el
+navegador y se mide; las mismas funciones, con un modelo aproximado,
+anuncian en el plan lo que probablemente hará falta ("puede que" cuando es
+estimación; el audio se sabe al byte):
+
+- **Fotos** (JPEG, el único formato que muestra el P4): calidad hasta 0,70 y
+  resolución hasta la pantalla (800 px); luego calidad hasta 0,50; luego
+  resolución por debajo de la pantalla; y por último calidad hasta 0,30.
+  Interpolación logarítmica: como mucho ~12 JPEG por foto.
+- **Vídeo** (AVI MJPEG): escalera calidad → resolución → fps, elegida
+  midiendo 4 fotogramas de muestra del propio vídeo; después, un control
+  fotograma a fotograma reparte el presupuesto según la complejidad medida
+  y **garantiza** que el total no pasa del límite (si una escena imprevista
+  no cabe ni al mínimo, otra pasada un escalón más abajo). No se recorta: si
+  ni lo mínimo cabe, se dice. Un AVI MJPEG que pasa del límite se
+  recomprime en el navegador (hasta 64 MB); un fotograma dañado repite el
+  anterior.
+- **Audio** (WAV): PCM 16 bits → PCM 8 bits (con *dither*) → IMA ADPCM a
+  22, 16, 11 y 8 kHz; nunca por encima de la frecuencia del original.
+
+**Pérdida exagerada** (audio a 8 kHz; foto por debajo de 640 px o calidad
+< 0,50; vídeo en la zona mínima): el archivo convertido **no se sube** hasta
+que el usuario pulsa «Subir así» (o «Descartar»); la cola sigue con los
+demás. Una reducción notable se sube y la tarjeta queda con el aviso hasta
+que se lee.
+
+**Lo que enseña la tarjeta:** tamaño original → resultante y el porcentaje
+("6,7 MB → 98 KB (−99 %)"), el máximo u objetivo, los parámetros usados
+("899×674 · calidad 77 %", "480×360 · 10 fps · calidad 56 %",
+"IMA ADPCM · 8 kHz") y el aviso si la calidad se redujo de forma notable.
+
+Todo ocurre en el móvil y de forma asíncrona: cada intento es una llamada
+asíncrona del navegador (`toBlob`, `createImageBitmap`, búsqueda en el
+`<video>`) y entre una y otra la página atiende lo demás, así que la
+biblioteca, el visor y las demás transferencias siguen respondiendo. En el
+P4 no cambia nada: recibe un archivo normal y lo valida como siempre. Pruebas: `webui.test.js` (miles de
+casos con codificadores sintéticos, uno no monótono: nunca pasa del límite,
+nunca agranda; «Objetivo» dentro del ±10 % en 165/165 casos alcanzables) y
+`e2e.test.js` en Chromium (foto de 6,7 MB en ≤ 100 KB, WAV aceptado a 8 kHz y
+otro descartado, vídeo con grano y AVI de cámara con fotogramas dañados en
+≤ 300 KB, «Objetivo» 500 KB dentro del ±10 %; todo decodificado por el P4).

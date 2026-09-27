@@ -256,6 +256,26 @@ reserva en RAM interna), así
 que el panel arranca igual. Sube algo el uso de IRAM: tras compilar, mira que
 la RAM estática siga dejando margen (§0).
 
+### Lo que hace el firmware para que ocurra menos (con o sin la opción)
+
+Cada destello es una ventana de escritura en la flash. Sin tocar el core, el
+firmware ya abre muchas menos:
+
+* **Varias fotos seguidas desde el móvil:** antes, cada foto recibida
+  reescribía el catálogo entero (~43 KB con 100 elementos: una decena de
+  borrados de sector) 1,5 s después, entre foto y foto. Ahora el guardado
+  espera a que acabe la ráfaga (3 s sin subidas) con un tope duro de 20 s:
+  N fotos = 1 reescritura, no N. Los archivos no se pierden si se va la luz
+  en ese intervalo (el recorrido del arranque los vuelve a registrar).
+* **Deslizadores:** volumen (panel rápido y Música) y brillo (Modo PC) ya no
+  escriben NVS en cada paso del arrastre: se aplican en el acto y se guardan
+  una vez al soltar.
+* Las subidas se validan y se miniaturizan **por flujo** (sin buffers del
+  tamaño del archivo) y de una en una.
+
+Eso reduce el número de destellos; no los elimina: guardar el propio archivo
+sigue escribiendo la flash.
+
 Después: el aviso `[HW] aviso: core sin ...` deja de salir y, si la causa
 era esta, el mensaje de *underrun* y el destello desaparecen. **No se ha
 podido comprobar en una placa real** desde este entorno: la causa está

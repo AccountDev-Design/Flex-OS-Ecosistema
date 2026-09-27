@@ -45,6 +45,28 @@ pre-desenfocada sobre un fondo quieto; la isla de notificaciones recompone su
 vidrio en cada cuadro; el icono arrastrado en Modo Edición se desenfoca en su
 posición real.
 
+**La banda pre-desenfocada cubre el overlay más alto real.** Su tope
+(`UIGL_BAND_MAX_H`) era de 320 filas y el menú de una foto de la Galería
+creció a 8 opciones (420 filas): `uiGlassBandBegin` fallaba y cada cuadro
+del despliegue volvía a desenfocar el menú del cuadro anterior (vidrio sobre
+vidrio, cada vez más claro, y un desenfoque completo por cuadro: 4612 µs
+frente a 1086 µs medidos en el arnés). Ahora el tope es 440 filas, la banda
+se reserva solo hasta lo que se usa (de 32 en 32 filas), un `static_assert`
+junto a `MM_MAX` impide añadir opciones que no quepan y, sin PSRAM para la
+banda, el menú se pinta de una vez en lugar de animar vidrio sobre vidrio
+(`testPulsacionLargaVidrio`: el menú desplegado bajo el dedo es idéntico
+píxel a píxel al pintado de una vez, en Galería, Multimedia y Música).
+
+**La isla de notificaciones queda encima al cambiar de página.** Antes se
+pausaba durante el gesto y sus píxeles se quedaban en el framebuffer: con
+widgets en la cabecera la franja que se desliza (desde y=72) la pisaba cada
+cuadro y la tarjeta quedaba detrás, cortada. Ahora, si la franja del gesto
+solapa la banda de la isla, el compositor del deslizamiento es el único
+dueño de esas filas y pinta la isla encima de cada cuadro (y del último del
+acomodo); el tiempo de la isla (entrada, 5 s, salida) sigue corriendo
+(`notifAdvance`) y con el dedo quieto no se recompone un cuadro idéntico
+(`testIslaEncimaAlDeslizar`).
+
 ## 2. Widgets de página
 
 - La franja donde vivían **Clima y Calendario fijos** es ahora la **fila 0

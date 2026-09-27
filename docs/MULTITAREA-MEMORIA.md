@@ -108,7 +108,7 @@ dentro de la ruta de dibujo:
 |---|---|---|
 | PSRAM total / libre | `heap_caps_get_total_size` / `..._free_size(MALLOC_CAP_SPIRAM)` | 1 s (`MEM_TICK_MS`) |
 | SRAM interna total / libre | ídem con `MALLOC_CAP_INTERNAL` | 1 s |
-| Mayor bloque contiguo | `heap_caps_get_largest_free_block` | 2 s (`MEM_BLOCK_MS`) — recorre la lista de huecos |
+| Mayor bloque contiguo | `heap_caps_get_largest_free_block` | con la memoria apretada, 2 s (`MEM_BLOCK_MS`); con holgura, 10 s (`MEM_BLOCK_IDLE_MS`) y nunca con el dedo apoyado ni en mitad de una transición — recorre la lista de huecos en sección crítica |
 | Pico de PSRAM usada | máximo de `total − libre` desde el arranque | con cada muestreo |
 | Mínimo de SRAM libre | mínimo de `libre` desde el arranque | con cada muestreo |
 | Flash usada / total | `flexFsUsedBytes()` / `flexFsTotalBytes()` | **solo** con la pantalla de detalle a la vista, cada 15 s y nunca con el dedo apoyado (recorre el sistema de archivos: es una lectura de flash) |
@@ -404,9 +404,19 @@ Qué hace, y por qué sí ahorra:
   que sí es una medida real de capacidad de respuesta, y la pantalla lo dice.
 * **El tamaño del firmware depende del SDK** (`ESP.getSketchSize()`). Si no
   devuelve un valor útil, la fila dice «No disponible».
-* **La lectura de flash es cara** (`flexFsUsedBytes` recorre el sistema de
-  archivos). Por eso solo ocurre con la pantalla de detalle a la vista, como
-  mucho cada 15 s, y nunca con el dedo apoyado.
+* **La lectura de flash es cara** (`LittleFS.usedBytes()` recorre la
+  partición entera con el cerrojo del sistema de archivos). `flexFsUsedBytes`
+  guarda la cifra y la invalida por generación con cada cambio hecho por
+  `FlexOS_FS` (y a los 10 s como mucho para lo que se escribe por fuera): es
+  exacta sin recorrer en cada repintado. La pantalla de detalle solo la pide
+  a la vista, como mucho cada 15 s y nunca con el dedo apoyado; el widget de
+  almacenamiento, solo si hay uno colocado, con el escritorio quieto y como
+  mucho cada 10 s. Antes el widget la pedía cada 2 s en **cualquier**
+  pantalla, hubiera widget o no: era el tirón periódico de ~3-4 s que crecía
+  con la biblioteca de medios (`testTrabajoPeriodico`: 0 recorridos en 60 s
+  sin widget). `FLEXOS_DIAG_HITCH` (0 por defecto) cronometra los ticks
+  periódicos de `loop()` en la placa y escribe por Serie los que pasan de
+  2,5 ms.
 * **El PANIC del Wi‑Fi NO está demostrado, solo su causa más probable.** El
   arranque de esp‑hosted en `loopTask` es un defecto real y verificable
   leyendo el código —la llamada bloqueante estaba ahí, y `loopTask` alimenta
