@@ -97,6 +97,27 @@
     <button role="radio" data-p="orig">Original</button>
   </div>
   <p class="hint small" id="profileHint"></p>
+  <div class="sizebox" id="sizeBox">
+    <div class="profiles" id="sizeModes" role="radiogroup" aria-label="Tamaño por archivo">
+      <button role="radio" data-m="off" class="on" aria-checked="true">Sin límite</button>
+      <button role="radio" data-m="max" aria-checked="false">Límite máximo</button>
+      <button role="radio" data-m="target" aria-checked="false">Objetivo</button>
+    </div>
+    <div class="sizes" id="sizeChips" role="radiogroup" aria-label="Tamaño" hidden>
+      <button role="radio" data-b="512000">500 KB</button>
+      <button role="radio" data-b="768000">750 KB</button>
+      <button role="radio" data-b="1048576">1 MB</button>
+      <button role="radio" data-b="2097152">2 MB</button>
+      <button role="radio" data-b="5242880">5 MB</button>
+      <button role="radio" data-b="10485760">10 MB</button>
+      <button role="radio" data-b="custom">Otro</button>
+    </div>
+    <div class="sizecustom" id="sizeCustom" hidden>
+      <input id="sizeNum" inputmode="decimal" autocomplete="off" placeholder="1,5" aria-label="Tamaño por archivo">
+      <select id="sizeUnit" aria-label="Unidad"><option value="KB">KB</option><option value="MB" selected>MB</option></select>
+    </div>
+    <p class="hint small" id="sizeHint"></p>
+  </div>
   <ul class="plan" id="planList"></ul>
   <div class="sheet-actions">
     <button class="btn" id="planCancel">Cancelar</button>

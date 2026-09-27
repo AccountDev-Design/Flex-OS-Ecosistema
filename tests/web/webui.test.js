@@ -27,6 +27,7 @@ const MC = process.env.MEDIACHECK || path.join(ROOT, 'tests', 'host', 'build', '
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'flexweb-'));
 
 let run = 0, fail = 0;
+const pending = [];            // comprobaciones asincronas: se esperan antes del recuento
 function check(cond, msg) {
   run++;
   if (!cond) { fail++; console.log('  FALLO: ' + msg); }
@@ -436,6 +437,269 @@ section('etiquetas de audio (titulo, artista, album, portada)');
 }
 
 // =============================================================
+section('tamano por archivo: «Límite máximo» y «Objetivo»');
+{
+  const KB = 1024, MB = 1 << 20;
+  // ---- entrada y texto ----
+  check(FX.parseSize('1,5', 'MB') === 1572864 && FX.parseSize('1.5', 'MB') === 1572864 && FX.parseSize('750', 'KB') === 768000 &&
+    FX.parseSize('.5', 'MB') === 524288, 'tamano escrito: coma o punto, KB o MB');
+  check(FX.parseSize('0,04', 'MB') === 0 && FX.parseSize('49', 'KB') === 0 && FX.parseSize('2048', 'MB') === 0 &&
+    FX.parseSize('', 'MB') === 0 && FX.parseSize('1e3', 'KB') === 0 && FX.parseSize('-5', 'MB') === 0 && FX.parseSize('5 MB', 'MB') === 0,
+    'tamano escrito: fuera de 50 KB..1024 MB o no numerico = no vale');
+  check(FX.SIZE_PRESETS.map(FX.fmtTarget).join('|') === '500 KB|750 KB|1 MB|2 MB|5 MB|10 MB', 'las opciones: ' + FX.SIZE_PRESETS.map(FX.fmtTarget).join(', '));
+  check(FX.fmtTarget(1572864) === '1,5 MB' && FX.fmtTarget(FX.parseSize('0,75', 'MB')) === '768 KB', 'tamano pedido tal como se lee');
+  check(FX.sizeReport(3 * MB, 948 * KB) === '3,0 MB → 948 KB (−69 %)' && FX.sizeReport(100 * KB, 100 * KB) === '100 KB → 100 KB' &&
+    FX.sizeReport(100 * KB, 120 * KB) === '100 KB → 120 KB (+20 %)',
+    'informe: antes → despues y el porcentaje: ' + FX.sizeReport(3 * MB, 948 * KB));
+  // ---- lo que se pide a cada archivo ----
+  check(FX.sizeGoal({ mode: 'off', bytes: MB }, 6 * MB) === null && FX.sizeGoal(null, 6 * MB) === null && FX.sizeGoal({ mode: 'max', bytes: 0 }, MB) === null,
+    'sin limite: ninguna meta');
+  let g = FX.sizeGoal({ mode: 'max', bytes: MB }, 6 * MB);
+  check(g.hi === MB && g.lo === 0 && !g.capped, 'Limite maximo: nunca mas de lo pedido');
+  g = FX.sizeGoal({ mode: 'target', bytes: MB }, 6 * MB);
+  check(g.lo === Math.floor(MB * 0.9) && g.hi === Math.floor(MB * 1.1) && g.aim === MB, 'Objetivo: ±10 %');
+  g = FX.sizeGoal({ mode: 'target', bytes: 10 * MB }, 6 * MB);
+  check(g.aim === 6 * MB && g.hi === 6 * MB && g.capped, 'Objetivo de 10 MB en fotos: lo acota el tope del P4 (6 MB)');
+  g = FX.sizeGoal({ mode: 'max', bytes: 5 * MB }, 300 * KB);
+  check(g.hi === 300 * KB && g.capped, 'y el sitio libre tambien');
+
+  // Los bits bajos de este generador se repiten pronto: la moneda usa uno alto.
+  const coin = () => ((rnd() >>> 11) & 1) === 1;
+  // Tamanos pedidos repartidos en escala logaritmica: 50 KB .. 12,8 MB.
+  const anySize = () => Math.round(FX.SIZE_MIN * Math.pow(2, (rnd() % 800) / 100));
+  // ---- fotos: la busqueda, con codificadores sinteticos ----
+  // Un "JPEG" cuyo tamano depende de pixeles, calidad y contenido; con
+  // variante ruidosa (no monotona, como los codificadores reales) y otra
+  // que ignora la calidad (solo la resolucion puede ayudar).
+  const hash = (a, b, c) => { let h = (a * 73856093) ^ (b * 19349663) ^ (c * 83492791); h = (h ^ (h >>> 13)) * 1274126177; return ((h ^ (h >>> 16)) >>> 0) / 4294967296; };
+  const encs = {
+    suave: (k) => (r) => ({ size: Math.round(r.w * r.h * k / 8 * FX.jpegRel(r.q)) }),
+    ruidoso: (k) => (r) => ({ size: Math.round(r.w * r.h * k / 8 * FX.jpegRel(r.q) * (0.9 + 0.2 * hash(r.w, r.h, Math.round(r.q * 100)))) }),
+    sordo: (k) => (r) => ({ size: Math.round(r.w * r.h * k / 8) }),
+  };
+  const P = FX.PROFILES.photo;
+  let bad = 0, near = 0, nearN = 0, used = 0, usedN = 0, maxEv = 0, sevOk = true;
+  for (let i = 0; i < 3000 && bad < 5; i++) {
+    const ek = ['suave', 'ruidoso', 'sordo'][i % 3], k = 0.5 + (rnd() % 400) / 100;
+    const w = 64 + rnd() % 8000, h = 64 + rnd() % 8000;
+    const prof = ['light', 'rec', 'high'][rnd() % 3], mode = coin() ? 'max' : 'target';
+    const X = anySize(), hard = rnd() % 4 ? 6 * MB : rnd() % (6 * MB) + 1;
+    const G = FX.sizeGoal({ mode, bytes: X }, hard);
+    const c = { w, h, max: P[prof].max, q: P[prof].q, goal: G };
+    const r = FX.photoFitSync(c, encs[ek](k));
+    const box = FX.fitBox(w, h, P[prof].max);
+    if (r.evals > maxEv) maxEv = r.evals;
+    if (r.ok && (r.size > G.hi || r.w > box.w || r.h > box.h || r.q > P[prof].q + 1e-9 || r.q < 0.30 - 1e-9 || r.evals > 24)) {
+      bad++; check(false, 'foto: ' + JSON.stringify({ ek, k, w, h, prof, G, r: Object.assign({}, r, { res: 0 }) }));
+    }
+    const topFits = encs[ek](k)({ w: box.w, h: box.h, q: P[prof].q }).size <= G.hi;
+    if (r.ok && ((r.sev === '') !== topFits)) sevOk = false;
+    if (ek === 'suave' && r.ok && !topFits) {
+      if (mode === 'target' && !r.under) { nearN++; if (r.size >= G.lo) near++; }
+      if (mode === 'max') { usedN++; if (r.size >= G.aim * 0.85) used++; }
+    }
+  }
+  check(bad === 0, 'foto: 3000 casos (3 codificadores, uno no monotono): nunca pasa del limite, nunca agranda, nunca por encima del perfil');
+  check(maxEv <= 24, 'foto: como mucho ' + maxEv + ' JPEG por foto');
+  check(sevOk, 'foto: sin aviso solo si la calidad del perfil ya cabia');
+  check(nearN > 100 && near / nearN >= 0.97, 'Objetivo: ' + near + ' de ' + nearN + ' quedan dentro del ±10 %');
+  check(usedN > 100 && used / usedN >= 0.95, 'Limite maximo: ' + used + ' de ' + usedN + ' aprovechan al menos el 85 % de lo permitido');
+  console.log('   fotos: Objetivo en ±10 % ' + near + '/' + nearN + ' · Limite al 85 % o mas ' + used + '/' + usedN + ' · como mucho ' + maxEv + ' JPEG');
+  {
+    // Lo mismo con el codificador del plan (sincrono) que con el de la conversion (asincrono).
+    const c = { w: 4032, h: 3024, max: 1600, q: 0.85, goal: FX.sizeGoal({ mode: 'max', bytes: 300 * KB }, 6 * MB) };
+    const a = FX.photoFitSync(c, encs.ruidoso(2));
+    pending.push(FX.photoFit(c, async (r) => encs.ruidoso(2)(r)).then((b) => check(JSON.stringify([a.w, a.h, a.q, a.size]) === JSON.stringify([b.w, b.h, b.q, b.size]),
+      'foto: plan y conversion recorren la MISMA busqueda')));
+    const imposible = FX.photoFitSync({ w: 4000, h: 3000, max: 2048, q: 0.9, goal: FX.sizeGoal({ mode: 'max', bytes: 60 * KB }, 6 * MB) }, () => ({ size: 5 * MB }));
+    check(!imposible.ok && imposible.size === 5 * MB, 'foto imposible: se dice, sin inventar un resultado');
+    const ya = FX.photoFitSync({ w: 800, h: 600, max: 1600, q: 0.85, goal: FX.sizeGoal({ mode: 'target', bytes: 5 * MB }, 6 * MB) }, encs.suave(2));
+    check(ya.ok && ya.evals === 1 && ya.under && ya.w === 800, 'Objetivo mayor que la foto: no se infla (un JPEG, "no llega")');
+    const sev = FX.photoFitSync({ w: 4000, h: 3000, max: 1600, q: 0.85, goal: FX.sizeGoal({ mode: 'max', bytes: 50 * KB }, 6 * MB) }, encs.suave(3));
+    check(sev.ok && sev.size <= 50 * KB && sev.sev === 'severe', 'limite muy pequeno: cabe, pero se marca como perdida grande (' + sev.w + 'x' + sev.h + ' q ' + sev.q + ')');
+  }
+
+  // ---- video ----
+  const V = FX.PROFILES.video;
+  {
+    const lad = FX.videoLadder(V.high, 1920, 30);
+    const model = FX.videoModel(V.high, 1920, 1080);
+    let mono = true, soft = true, seen = false;
+    for (let i = 1; i < lad.length; i++) {
+      const a = lad[i - 1], b = lad[i];
+      const sa = FX.aviBytes(Math.ceil(60 * a.fps), model(a).fb), sb = FX.aviBytes(Math.ceil(60 * b.fps), model(b).fb);
+      if (!(sb < sa)) mono = false;
+      if (b.sev) seen = true; else if (seen) soft = false;
+    }
+    check(mono && lad[0].long === 800 && lad[0].fps === 15 && lad[0].q === 0.7, 'escalera de video: empieza en el perfil y cada escalon ocupa menos');
+    check(soft && lad.every((l) => l.long >= 240 && l.fps >= 5 && l.q >= 0.3) && !lad[9].sev && lad[10].sev,
+      'escalera: calidad → resolucion → fps hasta lo comodo; lo demas, marcado como perdida grande');
+    const small = FX.videoLadder(V.rec, 320, 10);
+    check(small[0].long === 320 && small[0].fps === 10 && small.every((l) => l.long <= 320 && l.fps <= 10), 'nunca mas resolucion ni fps que el original');
+  }
+  {
+    // El elegido esta MEDIDO: aunque el modelo se equivoque (x0,5 .. x2), lo
+    // que se acepta cabe, o se dice que no.
+    let bad2 = 0, probesMax = 0;
+    for (let i = 0; i < 400; i++) {
+      const w = 160 + rnd() % 1800, h = 120 + rnd() % 1000, durMs = 1000 + rnd() % 600000, err = 0.5 + (rnd() % 150) / 100;
+      const C = V[['light', 'rec', 'high'][rnd() % 3]], mode = coin() ? 'max' : 'target';
+      const G = FX.sizeGoal({ mode, bytes: anySize() }, 8 * MB);
+      const real = FX.videoModel(C, w, h);
+      let probes = 0;
+      const r = FX.videoChooseSync({ w, h, durMs, C, goal: G, srcFps: 0 }, (x) => { probes++; return { fb: real(x).fb * err }; });
+      if (probes > probesMax) probesMax = probes;
+      if (r.ok && r.est > G.hi) { bad2++; if (bad2 < 4) check(false, 'video: acepta ' + r.est + ' > ' + G.hi); }
+    }
+    check(bad2 === 0, 'video: 400 casos con el modelo equivocado hasta x2: lo aceptado cabe');
+    check(probesMax <= 5, 'video: como mucho ' + probesMax + ' rondas de muestras');
+  }
+  {
+    // Fotograma a fotograma: escenas que cambian (x2,2 a mitad), un pico x6
+    // y un codificador que no hace caso a la calidad. El total NUNCA pasa;
+    // y cuando la linea es alcanzable con q en [0,35 .. 0,65], la sigue.
+    let over = 0, runs = 0, onLine = 0, lineN = 0, flatOn = 0, flatN = 0;
+    for (let i = 0; i < 300; i++) {
+      const n = 10 + rnd() % 900, base = 800 + rnd() % 30000, hard = n * (base * (0.2 + (rnd() % 100) / 100)) + 5000;
+      const line = coin() ? hard * 0.97 : hard * (0.5 + (rnd() % 45) / 100);
+      const q0 = 0.4 + (rnd() % 30) / 100, peak = rnd() % n, kind = i % 3;
+      const size = (fi, q) => {
+        let s = base * FX.jpegRel(q) * (fi > n / 2 ? 2.2 : 1);
+        if (fi === peak) s *= 6;
+        if (kind === 2) s = base * 1.3 * (0.8 + 0.4 * hash(fi, n, 7));   // no hace caso a q
+        return Math.round(s);
+      };
+      // Las 4 muestras que mediria la conversion (a 10 fps: n fotogramas = n * 100 ms).
+      const smp = [0, 1, 2, 3].map((k) => size(Math.min(n - 1, Math.floor((k + 0.5) * n / 4)), q0));
+      const rc = FX.rateCtl(n, line, hard, q0, 0.7, 0.3, kind === 1 ? null : FX.sampleWeights(smp, n * 100, 10));
+      const r = FX.frameLoopSync(n, rc, 24 + Math.ceil(base * 0.25), FX.AVI_FRAME_MAX, 0.3, (x) => ({ len: size(x.i, x.q) }));
+      runs++;
+      if (rc.cum > hard) over++;
+      let lo = 0, hi = 0;
+      for (let fi = 0; fi < n; fi++) { lo += 25 + size(fi, 0.35); hi += 24 + size(fi, 0.65); }
+      if (kind !== 2 && line > lo * 1.1 && line < hi * 0.9 && line <= hard * 0.97) {
+        const good = r.ok && Math.abs(rc.cum - line) <= line * 0.12;
+        if (kind === 0) { lineN++; if (good) onLine++; } else { flatN++; if (good) flatOn++; }
+      }
+    }
+    check(over === 0, 'video: ' + runs + ' codificaciones simuladas, ninguna pasa del limite (las imposibles se detienen y lo dicen)');
+    check(lineN > 10 && onLine / lineN >= 0.9, 'video: con el peso de las muestras, el control sigue la linea alcanzable (' + onLine + ' de ' + lineN + ' a ±12 %)');
+    console.log('   video: siguiendo la complejidad medida ' + onLine + '/' + lineN + ' en la linea; con una linea recta, ' + flatOn + '/' + flatN);
+  }
+
+  // ---- audio ----
+  {
+    const A = FX.PROFILES.audio;
+    let bad3 = 0;
+    for (let i = 0; i < 2000; i++) {
+      const ms = 500 + rnd() % 3600000, C = A[['light', 'rec', 'high'][rnd() % 3]], mode = coin() ? 'max' : 'target';
+      const G = FX.sizeGoal({ mode, bytes: anySize() }, 8 * MB);
+      const src = rnd() % 3 ? 0 : [8000, 11025, 16000, 22050, 44100][rnd() % 5];
+      const r = FX.audioFit(ms, C, G, src);
+      const s0 = FX.AUDIO_LADDER.findIndex((x) => x.rate === C.rate && x.codec === C.codec);
+      const idx = r.ok ? FX.AUDIO_LADDER.indexOf(r.q) : -1;
+      if (r.ok && (r.size > G.hi || r.size !== FX.wavBytes(ms, r.q) || idx < s0 || (src && r.q.rate > Math.max(8000, src)))) {
+        bad3++; if (bad3 < 4) check(false, 'audio: ' + JSON.stringify({ ms, C, G, src, r }));
+      }
+      if (!r.ok && FX.AUDIO_LADDER.slice(s0).some((x) => FX.wavBytes(ms, x) <= G.hi && (!src || x.rate <= Math.max(8000, src)))) { bad3++; check(false, 'audio: dice que no cabe y si cabia'); }
+    }
+    check(bad3 === 0, 'audio: 2000 casos: tamano exacto, nunca por encima del limite ni del perfil ni de la frecuencia original');
+    const g1 = FX.sizeGoal({ mode: 'max', bytes: MB }, 8 * MB);
+    let r = FX.audioFit(180000, A.rec, g1);
+    check(r.ok && r.q.codec === 'ima' && r.q.rate === 11025 && r.sev === 'strong', 'MP3 de 3 min, maximo 1 MB: IMA a 11 kHz, avisado');
+    r = FX.audioFit(20000, A.rec, FX.sizeGoal({ mode: 'max', bytes: 100 * KB }, 8 * MB));
+    check(r.ok && r.q.rate === 8000 && r.sev === 'severe' && r.size <= 100 * KB, '20 s en 100 KB: 8 kHz, perdida grande');
+    r = FX.audioFit(20000, A.high, FX.sizeGoal({ mode: 'target', bytes: 400 * KB }, 8 * MB));
+    check(r.ok && r.q.codec === 'pcm8' && Math.abs(r.size - 400 * KB) <= 40 * KB, 'Objetivo 400 KB para 20 s: PCM de 8 bits, dentro del ±10 % (' + FX.fmtSize(r.size) + ')');
+    r = FX.audioFit(3600000, A.rec, g1);
+    check(!r.ok, 'una hora en 1 MB: no cabe ni a 8 kHz, y se dice');
+    // Cada escalon lo reproduce el P4 tal cual: tamano exacto, el decodificador
+    // del P4 = el de la web, y una calidad acorde (SNR tras el P4).
+    for (const q of FX.AUDIO_LADDER) {
+      const n = Math.round(q.rate * 1.37), pcm = signal(n, q.rate);
+      const bytes = q.codec === 'ima' ? FX.imaWav(pcm, q.rate) : q.codec === 'pcm8' ? FX.pcm8Wav(pcm, q.rate) : FX.pcmWav(pcm, q.rate, 1);
+      const m = mc('wav', tmpFile('l.wav', bytes), path.join(TMP, 'l.raw'));
+      const got = rawOf(path.join(TMP, 'l.raw')), js = FX.wavDecode(bytes);
+      const same = !!js && js.pcm.length === got.length && js.pcm.every((v, i) => v === got[i]);
+      const d = got.length === n ? snr(pcm, got) : 0, want = q.codec === 'pcm' ? 90 : q.codec === 'pcm8' ? 35 : 20;
+      check(m.ok === 1 && m.rate === q.rate && m.ch === 1 && bytes.length === FX.wavBytes(n * 1000 / q.rate, q) && got.length === n && same && d > want,
+        'WAV ' + FX.codecName(q.codec) + ' a ' + q.rate + ' Hz: el P4 lo decodifica igual que la web, ' + bytes.length + ' bytes exactos, SNR ' + d.toFixed(1) + ' dB');
+    }
+  }
+
+  // ---- el plan con tamano ----
+  const planS = (f, prof, size, room) => FX.plan(Object.assign({ size: MB, w: 0, h: 0, orient: 1, durMs: 0 }, f), prof, LIM, room, size);
+  {
+    let same = true;
+    for (let i = 0; i < 1500 && same; i++) {
+      const kinds = ['photo', 'video', 'audio'], k = kinds[rnd() % 3];
+      const fmts = Object.keys(FX.FMT).filter((x) => FX.FMT[x].kind === k), fmt = fmts[rnd() % fmts.length];
+      const f = { kind: k, fmt, size: rnd() % (12 << 20), w: rnd() % 5000, h: rnd() % 5000, orient: 1 + rnd() % 8,
+        durMs: rnd() % 3600000, decodable: coin(), wav: { ch: 1 + rnd() % 2, rate: 8000 + rnd() % 40000 } };
+      const prof = ['light', 'rec', 'high', 'orig'][rnd() % 4], room = rnd() % 3 ? null : rnd() % (10 << 20);
+      const a = FX.plan(f, prof, LIM, room), b = FX.plan(f, prof, LIM, room, { mode: 'off', bytes: MB });
+      if (JSON.stringify(a) !== JSON.stringify(b)) { same = false; check(false, 'sin limite cambia el plan: ' + JSON.stringify([f, prof, a, b])); }
+    }
+    check(same, '«Sin límite» deja el plan exactamente como estaba (1500 casos)');
+    let bad4 = 0;
+    for (let i = 0; i < 3000 && bad4 < 4; i++) {
+      const kinds = ['photo', 'video', 'audio'], k = kinds[rnd() % 3];
+      const fmts = Object.keys(FX.FMT).filter((x) => FX.FMT[x].kind === k), fmt = fmts[rnd() % fmts.length];
+      const f = { kind: k, fmt, size: rnd() % (80 << 20), w: rnd() % 5000, h: rnd() % 5000, orient: 1 + rnd() % 8, fps: rnd() % 40,
+        durMs: rnd() % 3600000, decodable: coin(), wav: { ch: 1 + rnd() % 2, rate: 8000 + rnd() % 40000 } };
+      const prof = ['light', 'rec', 'high', 'orig'][rnd() % 4], room = rnd() % 3 ? null : rnd() % (10 << 20);
+      const size = { mode: coin() ? 'max' : 'target', bytes: FX.SIZE_MIN + rnd() % (12 << 20) };
+      const q = FX.plan(f, prof, LIM, room, size);
+      const G = FX.sizeGoal(size, room == null ? LIM[k] : Math.min(LIM[k], room));
+      if (q.act !== 'none' && (q.est > G.hi || q.est > LIM[k] || (room != null && q.est > room) || (q.act === 'as-is' && f.size > G.hi))) {
+        bad4++; check(false, 'plan con tamano pasa del limite: ' + JSON.stringify([f, prof, room, size, q]));
+      }
+    }
+    check(bad4 === 0, 'plan con tamano: 3000 casos, nada por encima de lo pedido, del tope del P4 ni del sitio');
+  }
+  {
+    const max = (b) => ({ mode: 'max', bytes: b }), tgt = (b) => ({ mode: 'target', bytes: b });
+    let p = planS({ kind: 'photo', fmt: 'jpeg', size: 300 * KB, w: 1200, h: 900 }, 'rec', max(500 * KB));
+    check(p.act === 'as-is', 'JPEG compatible de 300 KB con maximo 500 KB: tal cual');
+    p = planS({ kind: 'photo', fmt: 'jpeg', size: 900 * KB, w: 1200, h: 900 }, 'rec', max(500 * KB));
+    check(p.act === 'photo' && p.est <= 500 * KB, 'el mismo JPEG de 900 KB: se recomprime (' + p.note + ')');
+    p = planS({ kind: 'photo', fmt: 'png', size: 9 * MB, w: 4000, h: 3000 }, 'rec', max(100 * KB));
+    check(p.act === 'photo' && p.est <= 100 * KB && p.sev && /calidad/.test(p.note), 'PNG grande en 100 KB: se reduce y se explica (' + p.note + ')');
+    p = planS({ kind: 'photo', fmt: 'jpeg', size: 7 * MB, w: 4000, h: 3000 }, 'orig', max(5 * MB));
+    check(p.act === 'photo' && p.ceil === 'high' && p.est <= 5 * MB, 'Original de 7 MB con maximo 5 MB: se comprime (ya no se rechaza)');
+    p = planS({ kind: 'photo', fmt: 'heic', size: 2 * MB }, 'orig', max(5 * MB));
+    check(p.act === 'as-is' && p.level === 'warn', 'Original HEIC de 2 MB con maximo 5 MB: tal cual, como antes');
+    p = planS({ kind: 'photo', fmt: 'png', size: 9 * MB, w: 4000, h: 3000 }, 'light', tgt(10 * MB));
+    check(p.act === 'photo' && p.ceil === 'high' && p.under && /como mucho 6,0 MB por foto/.test(p.note) && /no llegue a 10 MB/.test(p.note),
+      'Objetivo 10 MB: acotado por el P4 y sin inflar (' + p.note + ')');
+    p = planS({ kind: 'audio', fmt: 'mp3', size: 6 * MB, durMs: 3600000, decodable: true }, 'rec', max(MB));
+    check(p.act === 'none' && p.level === 'bad' && /Ni a 8 kHz cabe en 1 MB/.test(p.note), 'una hora de audio en 1 MB: no, y por que');
+    p = planS({ kind: 'audio', fmt: 'mp3', size: 30 * MB, durMs: 20000, decodable: false }, 'orig', max(MB));
+    check(p.act === 'none' && /Sin límite/.test(p.note), 'Original que no se puede abrir y pesa demasiado: se dice como guardarlo');
+    p = planS({ kind: 'video', fmt: 'mp4', size: 40 * MB, w: 1920, h: 1080, durMs: 600000, decodable: true }, 'rec', max(MB));
+    check(p.act === 'none' && /ni con lo mínimo/.test(p.note), 'video de 10 min en 1 MB: imposible y dicho (' + p.note + ')');
+    p = planS({ kind: 'video', fmt: 'mp4', size: 20 * MB, w: 1920, h: 1080, durMs: 20000, decodable: true }, 'rec', max(2 * MB));
+    check(p.act === 'video' && p.est <= 2 * MB && /AVI MJPEG · \d+×\d+ · \d+ fps/.test(p.note), 'video de 20 s en 2 MB: AVI con sus parametros (' + p.note + ')');
+    p = planS({ kind: 'video', fmt: 'avi-mjpeg', size: 20 * MB, w: 640, h: 480, fps: 15, durMs: 60000 }, 'rec', max(5 * MB));
+    check(p.act === 'video' && p.est <= 5 * MB && p.fps <= 15, 'AVI MJPEG de 20 MB con maximo 5 MB: se recomprime en el navegador');
+    p = planS({ kind: 'video', fmt: 'avi-mjpeg', size: 70 * MB, w: 640, h: 480, fps: 15, durMs: 60000 }, 'rec', max(5 * MB));
+    check(p.act === 'none' && /demasiado para recomprimirlo/.test(p.note), 'AVI de 70 MB: demasiado para el navegador, se dice');
+    p = planS({ kind: 'video', fmt: 'avi-mjpeg', size: 20 * MB, w: 640, h: 480, fps: 15, durMs: 60000 }, 'rec');
+    check(p.act === 'none' && /Límite máximo/.test(p.note), 'sin limite, un AVI que no cabe sugiere «Límite máximo»');
+    const all = FX.planAll([1, 2].map(() => ({ kind: 'photo', fmt: 'png', size: 9 * MB, w: 4000, h: 3000, orient: 1 })), 'rec',
+      { free: 512 * KB + 2 * FX.spaceNeed(300 * KB) + 1000, reserve: 512 * KB, lim: LIM }, max(300 * KB));
+    check(all.every((x) => x.act === 'photo' && x.est <= 300 * KB), 'varias fotos con maximo: cada una cuenta con lo suyo');
+  }
+  {
+    const frames = [new Uint8Array([0xFF, 0xD8, 0xFF, 0xD9]), new Uint8Array([0xFF, 0xD8, 1, 0xFF, 0xD9])];
+    const avi = FX.concat(FX.aviMux(frames, 320, 240, 12));
+    const a = FX.aviInfo(avi);
+    check(a && a.w === 320 && a.h === 240 && a.frames === 2 && Math.abs(a.us - 83333) <= 1, 'cabecera de un AVI: tamano, fps y fotogramas ' + JSON.stringify(a));
+    check(FX.aviInfo(new Uint8Array(avi.subarray(0, 40))) === null && FX.aviInfo(u8(Buffer.from('RIFF....WAVE'))) === null, 'cabecera rota o no AVI: null');
+  }
+}
+
+// =============================================================
 section('coherencia de la interfaz');
 {
   const js = fs.readFileSync(path.join(WEB, 'app.js'), 'utf8');
@@ -452,6 +716,8 @@ section('coherencia de la interfaz');
   check(!/style=/.test(html) && !/<script>/.test(html), 'HTML sin estilos ni scripts en linea');
 }
 
-fs.rmSync(TMP, { recursive: true, force: true });
-console.log('=== ' + run + ' comprobaciones, ' + fail + ' fallos ===');
-process.exit(fail ? 1 : 0);
+Promise.all(pending).then(() => {
+  fs.rmSync(TMP, { recursive: true, force: true });
+  console.log('=== ' + run + ' comprobaciones, ' + fail + ' fallos ===');
+  process.exit(fail ? 1 : 0);
+}, (e) => { console.log('  FALLO: ' + (e && e.stack || e)); process.exit(1); });

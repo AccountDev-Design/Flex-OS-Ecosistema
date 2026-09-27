@@ -171,6 +171,20 @@ button{cursor:pointer;border:0;background:none}
 .profiles{display:flex;gap:6px;background:rgba(0,0,0,.2);border-radius:14px;padding:4px;margin-bottom:6px}
 .profiles button{flex:1 1 auto;padding:9px 6px;border-radius:11px;font-size:13px;font-weight:600;color:var(--txt2);white-space:nowrap}
 .profiles button.on{background:rgba(255,255,255,.16);color:var(--txt)}
+.profiles button[disabled]{opacity:.38;cursor:default}
+/* ---- tamano por archivo ---- */
+.sizebox{margin:4px 0 2px}
+.sizes{display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 8px}
+.sizes button{padding:7px 11px;border-radius:999px;background:var(--glass2);border:1px solid var(--edge);font-size:13px;font-weight:600;color:var(--txt2)}
+.sizes button.on{background:rgba(79,125,255,.35);border-color:var(--pri2);color:var(--txt)}
+.sizecustom{display:flex;gap:8px;margin:0 0 8px}
+.sizecustom input,.sizecustom select{border-radius:12px;border:1px solid var(--edge);background:rgba(0,0,0,.25);padding:9px 12px;
+  color:var(--txt);font:inherit;outline:none}
+.sizecustom input{flex:1;min-width:0}
+.sizecustom input:focus{border-color:var(--pri2)}
+.sizecustom input.bad{border-color:var(--err)}
+.hint.small.warn{color:var(--warn)}
+.hint.small.bad{color:var(--err)}
 .plan{list-style:none;margin:8px 0 14px;padding:0;display:flex;flex-direction:column;gap:8px}
 .plan li{display:flex;gap:10px;align-items:center;padding:10px;border-radius:14px;background:rgba(255,255,255,.05);border:1px solid var(--edge2)}
 .plan li.busy{color:var(--txt2);justify-content:center}
@@ -219,6 +233,11 @@ button{cursor:pointer;border:0;background:none}
 .xfer .stop .x{transform:scale(.7)}
 .xfer .th.k{display:grid;place-items:center;font-size:9px;font-weight:800;color:#fff}
 .xfer .retry{margin-top:8px}
+.xfer span.meta{font-size:11.5px;color:var(--txt2);margin-top:2px}
+.xfer span.meta.warn,.xfer.ask span{color:var(--warn)}
+.xfer.ask .bar i{background:var(--warn)}
+.xfer .acts{display:flex;gap:8px;margin-top:8px}
+.xfer .acts .chip.go{background:linear-gradient(180deg,#5b86ff,#3d65e6);border-color:rgba(255,255,255,.25);color:#fff}
 .xfer.queue{justify-content:space-between;font-size:13px;color:var(--txt2)}
 
 .viewer{position:fixed;inset:0;z-index:50;background:#000;display:flex;flex-direction:column;animation:fadein .2s}

@@ -70,6 +70,27 @@ function png(w, h) {
   return cat([0x89], 'PNG\r\n\x1a\n', chunk('IHDR', cat(be32(w), be32(h), [8, 2, 0, 0, 0])),
     chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0)));
 }
+// Una "foto" para JPEG: degradados, bordes y grano. Con grano, lo que ocupa
+// el JPEG depende de la calidad y de la resolucion como en una foto real.
+function photoPng(w, h, seed) {
+  let sd = seed >>> 0;
+  const r = () => { sd = (sd * 1103515245 + 12345) >>> 0; return (sd >>> 16) & 255; };
+  const raw = Buffer.alloc((w * 3 + 1) * h);
+  for (let y = 0; y < h; y++) {
+    const o = y * (w * 3 + 1);
+    for (let x = 0; x < w; x++) {
+      const base = 128 + 60 * Math.sin(x / 97 + seed) * Math.cos(y / 71);
+      const edge = ((x / 150 | 0) + (y / 110 | 0)) & 1 ? 30 : -30;
+      for (let c = 0; c < 3; c++) {
+        const v = base + edge * (c === 1 ? 1 : 0.5) + (r() - 128) * 0.12 + c * 20;
+        raw[o + 1 + x * 3 + c] = Math.max(0, Math.min(255, Math.round(v)));
+      }
+    }
+  }
+  const chunk = (t, d) => cat(be32(d.length), t, d, be32(FX.crc32(cat(t, d))));
+  return cat([0x89], 'PNG\r\n\x1a\n', chunk('IHDR', cat(be32(w), be32(h), [8, 2, 0, 0, 0])),
+    chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0)));
+}
 function wavStereo(sec, rate) {
   const n = sec * rate, d = Buffer.alloc(n * 4);
   for (let i = 0; i < n; i++) {
@@ -359,6 +380,195 @@ function wavStereo(sec, rate) {
     check(unl.ok === 1 && unl.path === '/Imagenes/foto.jpg' && fs.readFileSync(path.join(disk, 'Imagenes', 'foto.jpg')).equals(photo) &&
       !fs.existsSync(lockedFile), 'desbloquear desde el P4: vuelve a /Imagenes con su nombre: ' + JSON.stringify(unl));
     check(fs.existsSync(path.join(disk, 'System', 'Media', 'th', iPhoto.id + '.jpg')), 'con su miniatura otra vez en la carpeta publica');
+
+    // =========================================================
+    section('tamano por archivo: «Límite máximo» (100 KB) con confirmacion');
+    const KB = 1024;
+    const small = fs.readFileSync((() => { const p = path.join(tmp, 'peq.jpg'); mc('jpeg', '320', '240', '7', p); return p; })());
+    const noisy = photoPng(2000, 1500, 11);
+    const long20 = wavStereo(20, 44100), long22 = wavStereo(22, 44100), long30 = wavStereo(30, 44100);
+    const before = (await dump()).length;
+    await page.click('#fab');
+    await page.setInputFiles('#picker', [
+      { name: 'ruido.png', mimeType: 'image/png', buffer: noisy },
+      { name: 'peq.jpg', mimeType: 'image/jpeg', buffer: small },
+      { name: 'veinte.wav', mimeType: 'audio/wav', buffer: long20 },
+      { name: 'veintidos.wav', mimeType: 'audio/wav', buffer: long22 },
+      { name: 'treinta.wav', mimeType: 'audio/wav', buffer: long30 },
+      { name: 'clip2.webm', mimeType: 'video/webm', buffer: webm },
+    ]);
+    await page.waitForSelector('#planList li:not(.busy)', { timeout: 30000 });
+    await page.click('#profiles button[data-p="rec"]');      // la seccion anterior dejo «Original»
+    check(await page.isHidden('#sizeChips') && /perfil elegido/.test(await page.textContent('#sizeHint')), 'por defecto, «Sin límite»: sin opciones de tamano');
+    await page.click('#sizeModes button[data-m="max"]');
+    check(await page.isVisible('#sizeChips') && (await page.$$eval('#sizeChips button', (b) => b.map((x) => x.textContent))).join('|') === '500 KB|750 KB|1 MB|2 MB|5 MB|10 MB|Otro',
+      'Limite maximo: 500 KB, 750 KB, 1 MB, 2 MB, 5 MB, 10 MB y Otro');
+    await page.click('#sizeChips button[data-b="custom"]');
+    await page.fill('#sizeNum', '20');
+    await page.selectOption('#sizeUnit', 'KB');
+    check(/entre 50 KB y 1024 MB/.test(await page.textContent('#sizeHint')) && await page.isDisabled('#planGo'), 'Otro = 20 KB: no vale, se dice y no se puede subir');
+    await page.fill('#sizeNum', '100');
+    await page.waitForFunction(() => /No superar 100 KB/.test(document.getElementById('sizeHint').textContent));
+    await shot('9_tamano_plan');
+    const sizePlan = await page.$$eval('#planList li', (li) => li.map((x) => x.textContent));
+    mark('plan con 100 KB: ' + sizePlan.join(' | '));
+    check(sizePlan.length === 6, 'plan con 6 archivos');
+    check(/PNG → JPEG · \d+×\d+ \(desde 2000×1500\)/.test(sizePlan[0]) && /\d+,\d MB → ≈ \d+ KB/.test(sizePlan[0]), 'PNG: se reduce y se anuncia antes → despues · ' + sizePlan[0]);
+    check(/Ya es compatible/.test(sizePlan[1]), 'JPEG pequeno: tal cual · ' + sizePlan[1]);
+    check(/WAV IMA ADPCM · 8 kHz mono/.test(sizePlan[2]) && /se te preguntará/.test(sizePlan[2]), '20 s en 100 KB: 8 kHz y aviso de que se preguntara · ' + sizePlan[2]);
+    check(/Ni a 8 kHz cabe en 100 KB/.test(sizePlan[4]), '30 s: no cabe ni a 8 kHz, y se dice · ' + sizePlan[4]);
+    check(/AVI MJPEG · \d+×\d+ · \d+ fps/.test(sizePlan[5]), 'WebM: AVI con sus parametros · ' + sizePlan[5]);
+    check((await page.textContent('#planGo')) === 'Subir 5', 'boton "Subir 5" (el de 30 s no)');
+    await page.click('#planGo');
+    // Los que pierden mucha calidad esperan a que se decida; los demas siguen.
+    let asks = [];
+    for (let i = 0; i < 360; i++) {
+      await sleep(500);
+      asks = await page.$$eval('.xfer.ask', (x) => x.map((e) => e.textContent));
+      const busy = await page.evaluate(() => Array.from(document.querySelectorAll('.xfer')).some((x) => !x.hidden && !x.classList.contains('queue') &&
+        !x.classList.contains('done') && !x.classList.contains('fail') && !x.classList.contains('ask')) || !!document.querySelector('.xfer.queue'));
+      if (!busy && i > 2) break;
+    }
+    await shot('10_confirmar');
+    mark('esperando decision: ' + asks.join(' | '));
+    check(asks.length >= 2 && asks.some((t) => /veinte\.wav/.test(t)) && asks.some((t) => /veintidos\.wav/.test(t)),
+      'los dos WAV a 8 kHz esperan confirmacion (' + asks.length + ')');
+    check(asks.every((t) => /¿Subirlo así\?/.test(t) && /→/.test(t) && /máximo 100 KB/.test(t) && /Subir así/.test(t) && /Descartar/.test(t)),
+      'cada uno dice antes → despues, el maximo, los parametros y pregunta: ' + asks[0]);
+    let mid = await dump();
+    check(!mid.some((it) => /^veinte/.test(it.fn)) && !mid.some((it) => /^veintidos/.test(it.fn)), 'nada se sube sin que se acepte');
+    await page.click('.xfer.ask:has-text("veintidos.wav") button:has-text("Descartar")');
+    await page.click('.xfer.ask:has-text("veinte.wav") button:has-text("Subir así")');
+    // Si la foto o el video tambien quedaron en perdida grande, se aceptan (y se cuenta).
+    for (const extra of await page.$$('.xfer.ask button:has-text("Subir así")')) await extra.click();
+    items = await settle(before + 4);
+    const log3 = await page.evaluate(() => window.__xfer);
+    mark('subidos: ' + items.filter((it) => !mid.some((m) => m.id === it.id)).map((it) => it.fn).join(', '));
+    check(items.length === before + 4 && !items.some((it) => /^veintidos/.test(it.fn)) && !items.some((it) => /^treinta/.test(it.fn)),
+      '4 nuevos en Flex OS: el descartado y el imposible no (' + (items.length - before) + ')');
+    const fRuido = find('Imagenes', /^ruido.*\.jpg$/), fPeq = find('Imagenes', /^peq.*\.jpg$/), fVeinte = find('Musica', /^veinte.*\.wav$/), fClip = find('Videos', /^clip2.*\.avi$/);
+    const sz = (p) => p ? fs.statSync(p).size : -1;
+    mark('tamanos: ruido ' + sz(fRuido) + ', peq ' + sz(fPeq) + ', veinte ' + sz(fVeinte) + ', clip2 ' + sz(fClip));
+    const tR = fRuido && mc('thumb', fRuido);
+    check(fRuido && sz(fRuido) <= 100 * KB && sz(fRuido) >= 60 * KB && tR.ok === 1, 'foto: ' + sz(fRuido) + ' bytes <= 100 KB, aprovechando el limite, y el P4 la decodifica');
+    check(fPeq && fs.readFileSync(fPeq).equals(small), 'el JPEG que ya cabia: los mismos bytes');
+    const wV = fVeinte && mc('wav', fVeinte, path.join(tmp, 'v.raw'));
+    check(fVeinte && sz(fVeinte) <= 100 * KB && wV.ok === 1 && wV.rate === 8000 && wV.format === 17 && Math.abs(wV.dur - 20000) <= 60,
+      'audio aceptado: IMA ADPCM a 8 kHz, 20 s enteros, ' + sz(fVeinte) + ' bytes');
+    const aC = fClip && mc('avi', fClip);
+    check(fClip && sz(fClip) <= 100 * KB && aC.ok === 1 && aC.decoded === aC.frames && aC.bad === 0 && aC.dur >= 1900,
+      'video: ' + sz(fClip) + ' bytes <= 100 KB, ' + (aC && aC.frames) + ' fotogramas decodificables, sin recortar (' + (aC && aC.dur) + ' ms)');
+    check(log3.some((x) => /ruido\.png.*MB → \d+ KB \(−\d+ %\) · máximo 100 KB · \d+×\d+ · calidad \d+ %/.test(x)),
+      'la tarjeta de la foto: antes → despues (−%), el maximo y los parametros');
+    check(log3.some((x) => /clip2\.webm.*→ \d+ KB .*máximo 100 KB · \d+×\d+ · \d+ fps · calidad \d+ %/.test(x)), 'y la del video, con resolucion, fps y calidad');
+    check(log3.some((x) => /veintidos\.wav.*Descartado/.test(x)), 'el descartado lo dice');
+
+    // =========================================================
+    section('tamano por archivo: «Objetivo» (500 KB)');
+    const noisy2 = photoPng(2000, 1500, 23);
+    await page.click('#fab');
+    await page.setInputFiles('#picker', [{ name: 'objetivo.png', mimeType: 'image/png', buffer: noisy2 }]);
+    await page.waitForSelector('#planList li:not(.busy)', { timeout: 30000 });
+    check(await page.isVisible('#sizeCustom') && (await page.inputValue('#sizeNum')) === '100', 'la eleccion anterior se recuerda (Limite 100 KB)');
+    await page.click('#sizeModes button[data-m="target"]');
+    await page.click('#sizeChips button[data-b="512000"]');
+    check(await page.isHidden('#sizeCustom') && /unos 500 KB/.test(await page.textContent('#sizeHint')), 'Objetivo 500 KB: "intentar quedar en unos 500 KB"');
+    const dis = await page.$$eval('#profiles button', (b) => b.map((x) => x.dataset.p + ':' + (x.disabled ? 1 : 0)).join(','));
+    check(dis === 'light:1,rec:1,high:1,orig:0' && /la calidad la decide el tamaño/.test(await page.textContent('#profileHint')),
+      'en Objetivo los perfiles de calidad no aplican (solo Original): ' + dis);
+    const objPlan = await page.textContent('#planList li');
+    check(/PNG → JPEG/.test(objPlan) && /≈ \d+ KB/.test(objPlan), 'plan: ' + objPlan);
+    await page.click('#planGo');
+    items = await settle(before + 5);
+    const fObj = find('Imagenes', /^objetivo.*\.jpg$/);
+    const tO = fObj && mc('thumb', fObj);
+    check(fObj && sz(fObj) >= 450 * KB && sz(fObj) <= 550 * KB && tO.ok === 1, 'Objetivo 500 KB: sale ' + sz(fObj) + ' bytes (±10 %) y el P4 la decodifica');
+    const log4 = await page.evaluate(() => window.__xfer);
+    check(log4.some((x) => /objetivo\.png.*→ \d+ KB \(−\d+ %\) · objetivo 500 KB/.test(x)), 'tarjeta: objetivo 500 KB y el resultado');
+    // =========================================================
+    section('tamano por archivo: video con grano y AVI de camara (maximo 300 KB)');
+    mark('grabando WebM con grano en la pagina');
+    const noiseB64 = await page.evaluate(async () => {
+      const c = document.createElement('canvas');
+      c.width = 320; c.height = 240;
+      const g = c.getContext('2d'), img = g.createImageData(320, 240);
+      const rec = new MediaRecorder(c.captureStream(30), { mimeType: 'video/webm;codecs=vp8', videoBitsPerSecond: 4000000 });
+      const parts = [];
+      rec.ondataavailable = (e) => parts.push(e.data);
+      rec.start(100);
+      const t0 = performance.now();
+      await new Promise((res) => {
+        (function draw() {
+          const t = (performance.now() - t0) / 1000;
+          for (let i = 0, p = 0; i < img.data.length; i += 4, p++) {
+            const x = p % 320, y = (p / 320) | 0, v = (Math.random() * 90) | 0;
+            img.data[i] = (x + t * 90) % 255; img.data[i + 1] = (y * 2 + v) % 255; img.data[i + 2] = 120 + v; img.data[i + 3] = 255;
+          }
+          g.putImageData(img, 0, 0);
+          if (t < 2.2) requestAnimationFrame(draw); else res();
+        })();
+      });
+      rec.stop();
+      await new Promise((r) => { rec.onstop = r; });
+      const b = new Uint8Array(await new Blob(parts).arrayBuffer());
+      let s = '';
+      for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+      return btoa(s);
+    });
+    const noiseWebm = Buffer.from(noiseB64, 'base64');
+    const camFrames = [];
+    for (let k = 0; k < 40; k++) { const p = path.join(tmp, 'c' + k + '.jpg'); mc('jpeg', '640', '480', String(k), p); camFrames.push(new Uint8Array(fs.readFileSync(p))); }
+    // Dos fotogramas danados (como los de una tarjeta SD que falla): la web
+    // repite el anterior en su lugar, igual que hace el P4 con los vacios.
+    for (const k of [5, 17]) { const b = new Uint8Array(4000); b.set([0xFF, 0xD8]); b.set([0xFF, 0xD9], 3998); camFrames[k] = b; }
+    const cam = Buffer.from(FX.concat(FX.aviMux(camFrames, 640, 480, 10)));
+    const camChk = mc('avi', (() => { const p = path.join(tmp, 'cam.avi'); fs.writeFileSync(p, cam); return p; })());
+    check(camChk.frames === 40 && camChk.bad === 2 && cam.length > 400 * KB,
+      'AVI MJPEG "de camara": 40 fotogramas 640x480 a 10 fps, 2 danados, ' + cam.length + ' bytes');
+    const before2 = (await dump()).length;
+    await page.click('#fab');
+    await page.setInputFiles('#picker', [
+      { name: 'grano.webm', mimeType: 'video/webm', buffer: noiseWebm },
+      { name: 'camara.avi', mimeType: 'video/x-msvideo', buffer: cam },
+    ]);
+    await page.waitForSelector('#planList li:not(.busy)', { timeout: 30000 });
+    await page.click('#sizeModes button[data-m="max"]');
+    await page.click('#sizeChips button[data-b="custom"]');
+    await page.fill('#sizeNum', '300');
+    await page.selectOption('#sizeUnit', 'KB');
+    await page.waitForFunction(() => /No superar 300 KB/.test(document.getElementById('sizeHint').textContent));
+    const vPlan = await page.$$eval('#planList li', (li) => li.map((x) => x.textContent));
+    mark('plan: ' + vPlan.join(' | '));
+    check(/AVI MJPEG · \d+×\d+ · \d+ fps/.test(vPlan[1]) && /→ ≈ \d+ KB/.test(vPlan[1]), 'el AVI de camara que pasa de 300 KB se recomprime: ' + vPlan[1]);
+    await page.click('#planGo');
+    for (let i = 0; i < 360; i++) {
+      await sleep(500);
+      for (const b of await page.$$('.xfer.ask button:has-text("Subir así")')) { mark('aceptando perdida grande'); await b.click(); }
+      const n = (await dump()).length;
+      if (n >= before2 + 2) break;
+      if (await page.$('.xfer.fail')) break;
+    }
+    items = await settle(before2 + 2);
+    const log5 = await page.evaluate(() => window.__xfer);
+    const fGrano = find('Videos', /^grano.*\.avi$/), fCam = find('Videos', /^camara.*\.avi$/);
+    mark('tamanos: grano ' + sz(fGrano) + ', camara ' + sz(fCam));
+    mark('tarjetas: ' + log5.filter((x) => /grano|camara/.test(x)).slice(-4).join(' | '));
+    const aG = fGrano && mc('avi', fGrano), aK = fCam && mc('avi', fCam);
+    check(fGrano && sz(fGrano) <= 300 * KB && aG.ok === 1 && aG.decoded === aG.frames && aG.bad === 0 && aG.dur >= 1900,
+      'video con grano: ' + sz(fGrano) + ' bytes <= 300 KB, entero (' + (aG && aG.dur) + ' ms) y decodificable');
+    check(fCam && sz(fCam) <= 300 * KB && sz(fCam) >= 200 * KB && aK.ok === 1 && aK.decoded === aK.frames && aK.bad === 0 && Math.abs(aK.dur - 4000) <= 200,
+      'AVI de camara recomprimido: ' + sz(fCam) + ' bytes (<= 300 KB, aprovechandolo), 4 s enteros (' + (aK && aK.dur) + ' ms), ' + (aK && aK.w) + 'x' + (aK && aK.h) +
+      ', todos sus fotogramas sanos');
+    check(log5.some((x) => /grano\.webm.*→ \d+ KB \(−\d+ %\) · máximo 300 KB · \d+×\d+ · \d+ fps · calidad \d+ %/.test(x)) &&
+      log5.some((x) => /camara\.avi.*→ \d+ KB \(−\d+ %\) · máximo 300 KB · \d+×\d+ · \d+ fps · calidad \d+ %/.test(x)),
+      'tarjetas: antes → despues, el maximo y resolucion, fps y calidad usados');
+
+    await page.click('#fab');
+    await page.setInputFiles('#picker', [{ name: 'x.png', mimeType: 'image/png', buffer: png(64, 64) }]);
+    await page.waitForSelector('#planList li:not(.busy)', { timeout: 30000 });
+    await page.click('#sizeModes button[data-m="off"]');
+    check(await page.isHidden('#sizeChips') && (await page.$$eval('#profiles button[disabled]', (b) => b.length)) === 0, 'volver a «Sin límite»: perfiles de nuevo');
+    await page.click('#planCancel');
 
     // =========================================================
     section('olvidar este movil');
