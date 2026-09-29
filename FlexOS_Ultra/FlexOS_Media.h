@@ -193,6 +193,11 @@ typedef struct {
   uint32_t needBytes;
 
   uint8_t  videoStream;        // numero de pista de video ('00'..'09')
+
+  // PORTADA: fotograma que el editor de video de la Galeria eligio para la
+  // miniatura (trozo 'IFCV' dentro de 'LIST INFO', que cualquier otro
+  // reproductor ignora). 0 = el primero, como siempre.
+  uint32_t cover;
 } FlexAviCtx;
 
 // Analiza la cabecera. NO lee ni un fotograma y no reserva memoria.

@@ -228,6 +228,18 @@ int flexThumbFromAvi(const FlexMediaIO* io, int side, int quality,
   if(a->maxFrameBytes >= 4096u && a->maxFrameBytes <= FLEXAVI_FRAME_MAX) cap = (a->maxFrameBytes + 4095u) & ~4095u;
   uint8_t* fb = (uint8_t*)af(cap);
   if(!fb){ ff(a); return FLEXTH_ERR_MEMORY; }
+  // PORTADA elegida en el editor de video: se empieza en ese fotograma. La
+  // busqueda va por el indice (acotada por llamada); si no llega justo ahi,
+  // se vuelve al principio y la miniatura es la de siempre.
+  if(a->cover && (!a->frames || a->cover < a->frames)){
+    int landed = -1;
+    for(int k = 0; k < 64; k++){
+      int prev = landed;
+      landed = flexAviSeekFrame(a, a->cover);
+      if(landed < 0 || (uint32_t)landed >= a->cover || landed == prev) break;
+    }
+    if(landed < 0 || (uint32_t)landed != a->cover) flexAviSeekFrame(a, 0);
+  }
   // El primer fotograma CON imagen que se deje leer: los vacios (repeticion
   // del anterior) no tienen nada que mostrar, y uno danado al principio no
   // condena un video cuyo resto esta bien. Como mucho FLEXTH_AVI_TRIES.

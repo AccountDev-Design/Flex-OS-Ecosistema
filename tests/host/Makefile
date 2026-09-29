@@ -55,7 +55,7 @@ BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test
         $(BUILD)/test_passcode $(BUILD)/test_weather $(BUILD)/test_flexlink $(BUILD)/test_flexphone $(BUILD)/test_flexauth $(BUILD)/test_flexphone_ui $(BUILD)/test_flexphone_discovery $(BUILD)/test_flexlink_transport $(BUILD)/test_flexlink_vectors \
         $(BUILD)/test_media $(BUILD)/test_mem $(BUILD)/test_fall $(BUILD)/test_theft $(BUILD)/test_imu \
         $(BUILD)/test_medialib $(BUILD)/test_jpegenc $(BUILD)/test_httpshare $(BUILD)/test_qr \
-        $(BUILD)/test_mediathumb $(BUILD)/test_mediaweb $(BUILD)/test_fs $(BUILD)/test_mediastore $(BUILD)/test_imgedit \
+        $(BUILD)/test_mediathumb $(BUILD)/test_mediaweb $(BUILD)/test_fs $(BUILD)/test_mediastore $(BUILD)/test_imgedit $(BUILD)/test_videdit \
         $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg \
         $(BUILD)/test_fuzzmedia
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun $(BUILD)/mediacheck $(BUILD)/flexweb_host
@@ -131,6 +131,17 @@ $(BUILD)/test_mediastore: test_mediastore.cpp $(STORE_SRC) $(ULTRA)/FlexOS_Media
 IMGEDIT_SRC := $(ULTRA)/FlexOS_ImgEdit.cpp $(ULTRA)/FlexOS_JPEG.cpp $(ULTRA)/FlexOS_JPEGEnc.cpp
 $(BUILD)/test_imgedit: test_imgedit.cpp $(IMGEDIT_SRC) $(ULTRA)/FlexOS_ImgEdit.h $(ULTRA)/FlexOS_JPEGEnc.h $(ULTRA)/FlexOS_JPEG.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) -o $@ test_imgedit.cpp $(IMGEDIT_SRC)
+
+# --- El editor de video de la Galeria ---
+# Tramos (recortar, dividir, quitar), velocidad, recorte, giro, filtro, texto,
+# volumen del audio ORIGINAL y portada, y la exportacion a AVI MJPEG sobre
+# AVIs construidos aqui: lo que sale lo vuelven a leer el lector de AVI, el
+# decodificador JPEG y el generador de miniaturas del firmware. Exportar no
+# reserva memoria fotograma a fotograma, y ningun fallo la deja viva.
+VIDEDIT_SRC := $(ULTRA)/FlexOS_VidEdit.cpp $(ULTRA)/FlexOS_ImgEdit.cpp $(ULTRA)/FlexOS_JPEG.cpp $(ULTRA)/FlexOS_JPEGEnc.cpp \
+               $(ULTRA)/FlexOS_Media.cpp $(ULTRA)/FlexOS_MediaThumb.cpp
+$(BUILD)/test_videdit: test_videdit.cpp $(VIDEDIT_SRC) $(ULTRA)/FlexOS_VidEdit.h $(ULTRA)/FlexOS_ImgEdit.h $(ULTRA)/FlexOS_Media.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) -o $@ test_videdit.cpp $(VIDEDIT_SRC)
 
 $(BUILD)/test_mediaweb: test_mediaweb.cpp $(WEB_SRC) $(WEB_HDRS) $(ULTRA)/FlexOS_MediaStore.cpp $(ULTRA)/FlexOS_MediaStore.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) $(WEBFLAGS) -o $@ test_mediaweb.cpp $(WEB_SRC) $(ULTRA)/FlexOS_MediaStore.cpp vendor/cJSON/cJSON.c
@@ -585,6 +596,8 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_mediastore
 	@echo
 	@$(BUILD)/test_imgedit
+	@echo
+	@$(BUILD)/test_videdit
 	@echo
 	@$(BUILD)/test_media
 	@echo

@@ -336,6 +336,9 @@ int flexAviOpen(FlexAviCtx* a, const FlexMediaIO* io){
     } else if(fourcc(c, "idx1")){
       idx1Off = p + 8;
       idx1Len = len;
+    } else if(fourcc(c, "IFCV") && len >= 4){
+      uint8_t v[4];
+      if(ioReadAt(&a->io, p + 8, v, 4)) a->cover = rd32(v);
     }
     p = p + 8 + pad2(len);
   }
