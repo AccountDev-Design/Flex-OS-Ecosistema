@@ -72,7 +72,8 @@ solo después de corregir aquí.
 8. **El editor vive en la Galería** (`FlexOS_Ultra_GalleryEdit.h`, misma app
    y mismo ciclo de vida). Trabaja en RGB888 para no introducir bandas: se
    añade una salida RGB888 al decodificador compartido sin tocar la RGB565.
-   Ver §7.
+   Ver §7. **El de vídeo, también y solo allí**
+   (`FlexOS_Ultra_GalleryVideoEdit.h`, §15): Multimedia no tiene editor.
 
 ## 3. Lo que NO se hace, con el motivo
 
@@ -123,6 +124,7 @@ solo después de corregir aquí.
 | `FlexOS_MediaWeb` + `FlexOS_HttpShare` + `FlexOS_QR` | Flex Web Server: sesión de propietario, subida por trozos con CRC, descarga, ZIP, bloqueo con la clave del sistema |
 | `FlexOS_Media` (`FlexAudioStream`) | lectura por bloques de WAV PCM e IMA ADPCM a PCM16 |
 | `FlexOS_ImgEdit` | el editor: estado no destructivo, historial, geometría, color, filtros, trazos/formas/textos, render por filas y guardado por bandas |
+| `FlexOS_VidEdit` | el editor de vídeo: parámetros e historial (tramos, encuadre, giro, velocidad, volumen, texto, filtro, portada), análisis del AVI y de su audio, decodificar solo la región del encuadre, y exportar AVI MJPEG por fotogramas (copia byte a byte si la imagen no cambia; si no, render con `FlexOS_ImgEdit` y JPEG por bandas) con el audio original remuestreado, portada `IFCV` y comprobación de lo escrito |
 
 ### Placa (partes del sketch único)
 
@@ -134,6 +136,7 @@ solo después de corregir aquí.
 | `FlexOS_Ultra_MediaViewer.h` | **el** visor de fotos, dibujos y vídeos del sistema (§10); lo usan la Galería y Multimedia |
 | `FlexOS_Ultra_AppGallery.h` | Galería (fotos, vídeos, dibujos); un toque abre el elemento en su propio visor, sin salir de la app |
 | `FlexOS_Ultra_GalleryEdit.h` | editor de la Galería (§7) |
+| `FlexOS_Ultra_GalleryVideoEdit.h` | editor de vídeo de la Galería (§15): interfaz, trabajador persistente por sesión y publicación |
 | `FlexOS_Ultra_AppMultimedia.h` | lista de vídeos y fotos; abre cada elemento en el visor común (§10); el audio lo manda a Música |
 | `FlexOS_Ultra_AppMusic.h` | Música: lista, "Reproduciendo", anterior/siguiente sin protegidos, DMA alimentado desde `loop()` |
 | `FlexOS_Ultra_WebServer.h` | tarea `flexWeb`, cola de eventos hacia `loopTask`, hoja "Conectar con el móvil" con QR (repinta solo la zona que cambia, §11) |
@@ -217,7 +220,8 @@ UndefinedBehaviorSanitizer) y las pruebas web con Node y Chromium:
 | `test_media` | clasificación, AVI/MJPEG (índice perezoso y aprendido, búsqueda por tramos, trozos vacíos, fotogramas grandes, grabaciones cortadas, tamaños absurdos), WAV PCM e IMA ADPCM por bloques |
 | `test_fuzzmedia` | 1500 JPEG y 1500 AVI dañados y sus miniaturas con ASan y UBSan **sin recuperación** (cualquier comportamiento indefinido aborta) |
 | `test_imgedit` | el núcleo del editor: identidad exacta, giros/volteos/recorte, historial (incluido restablecer y deshacer), cada ajuste en su sentido, filtros, trazos/formas/textos pegados a la foto, copia reducida, guardado por bandas que el firmware abre y cancelación sin memoria viva |
-| `test_ino` | el sketch entero enlazado: kit de listas, Música y el **editor de punta a punta** sobre un disco en memoria (abrir, toques reales, copia, reemplazo, protegidos, cancelar, disco lleno, escritura que falla, soltar memoria y releer, guardado en segundo plano, trabajador que tarda); el **visor** mirando el framebuffer (ajuste y centrado en las dos orientaciones, vidrio idéntico tras repintar y tras Play/Pausa ×10, auto-ocultado, pellizco, arrastre, deslizar, Papelera, protegidos, sin captura en Recientes, vídeo, PSRAM devuelta); la hoja web que solo repinta su zona viva; el menú contextual sin vidrio apilado; la Papelera con más de 16 elementos; `testVideoRobusto` (el visor real con archivos largos, grandes, cortados y dañados), `testGuardadoRafaga` y `testVariasFotos` (8 fotos de 0,3 a 12 MP por el servidor real), `testPulsacionLargaVidrio`, `testTactoGlobal` (registros del GT911 → app) y `testArrastresSinFlash` |
+| `test_videdit` | el núcleo del editor de vídeo (113 comprobaciones): parámetros, historial, tramos y velocidades; la geometría igual que el editor de fotos; el análisis (audio delante, MP3, vacío, cortado, otro códec, basura, fallo de lectura); decodificar solo la región y las miniaturas con arena; exportar copiando byte a byte, por partes y a 2×/0,5×/1,5×; recodificar (giro, encuadre 9:16, B/N, texto, divisor); audio exacto, al 50 %, en silencio, a otra velocidad, entre partes e IMA ADPCM; portada; fallos (escritura, tope de tamaño, cancelar, fotograma dañado, sin memoria, lectura) y la comprobación de lo escrito; estimaciones que cubren lo real; **ni una reserva por fotograma** |
+| `test_ino` | el sketch entero enlazado: kit de listas, Música y el **editor de punta a punta** sobre un disco en memoria (abrir, toques reales, copia, reemplazo, protegidos, cancelar, disco lleno, escritura que falla, soltar memoria y releer, guardado en segundo plano, trabajador que tarda); el **visor** mirando el framebuffer (ajuste y centrado en las dos orientaciones, vidrio idéntico tras repintar y tras Play/Pausa ×10, auto-ocultado, pellizco, arrastre, deslizar, Papelera, protegidos, sin captura en Recientes, vídeo, PSRAM devuelta); la hoja web que solo repinta su zona viva; el menú contextual sin vidrio apilado; la Papelera con más de 16 elementos; `testVideoRobusto` (el visor real con archivos largos, grandes, cortados y dañados), `testGuardadoRafaga` y `testVariasFotos` (8 fotos de 0,3 a 12 MP por el servidor real), `testPulsacionLargaVidrio`, `testTactoGlobal` (registros del GT911 → app) y `testArrastresSinFlash`; y el **editor de vídeo de punta a punta** (`testEditorVideoGaleria`, `testEditorVideoGrande`, §15) |
 | `check_wiring.py` | ganchos obligatorios y llamadas prohibidas (p. ej. el trabajador del editor no pinta, no avisa por la isla y no cambia el catálogo) |
 | `tests/web` | interfaz del móvil (conversión, subida, biblioteca, bloqueo y **tamaño por archivo**, §14) contra el servidor real compilado para el PC; lo que genera la web lo juzgan los analizadores del firmware (`mediacheck`) |
 
@@ -236,6 +240,7 @@ la del temporal...): cada mutación hace fallar al menos una comprobación.
 | Figuras por edición | 48 trazos+formas+textos y 4096 puntos de trazo (restablecer no los recupera: se pueden deshacer) |
 | Texto | la fuente del sistema: caracteres latinos y acentos; lo que no tiene glifo sale como "?" |
 | Vídeo | solo AVI MJPEG (también el de cámara sin tablas DHT); fotogramas de hasta 1 MB (`FLEXAVI_FRAME_MAX`) |
+| Editor de vídeo | abre AVI MJPEG de hasta 8 MB; exporta AVI MJPEG (+ el audio original en PCM 16 bits) de hasta 8 MB: si la salida pasaría, se detiene sin guardar nada. Hasta 8 partes y 24 pasos de historial. La vista previa no suena (el P4 no reproduce el audio de un AVI). Solo se ajusta el audio que ya trae el vídeo (PCM o IMA ADPCM); un MP3/AAC dentro del AVI se dice y sale sin sonido |
 | Audio | WAV PCM 8/16 bits y WAV IMA ADPCM |
 
 **Compilado de verdad para `esp32p4`** con el core 3.1.3 (tamaños y RAM en
@@ -280,7 +285,8 @@ Editar). El visor anterior de Multimedia se retiró.
   deslizar para el siguiente. Fotos **y** vídeos. El pellizco no cuenta como
   gesto de suspensión.
 - **Barras:** arriba volver, nombre y orientación; abajo, en una foto,
-  Editar (si se puede) y Papelera; en un vídeo, progreso, −10 s,
+  Editar (si se puede) y Papelera; en un vídeo, progreso, Editar (a la
+  izquierda, solo si la app lo ofrece: la Galería; §15), −10 s,
   reproducir/pausa, +10 s y Papelera. Se ocultan solas a los 3 s con fundido
   y un toque las muestra u oculta. Mientras suena un vídeo, el progreso se
   repinta como mucho cada 250 ms.
@@ -457,3 +463,126 @@ nunca agranda; «Objetivo» dentro del ±10 % en 165/165 casos alcanzables) y
 `e2e.test.js` en Chromium (foto de 6,7 MB en ≤ 100 KB, WAV aceptado a 8 kHz y
 otro descartado, vídeo con grano y AVI de cámara con fotogramas dañados en
 ≤ 300 KB, «Objetivo» 500 KB dentro del ±10 %; todo decodificado por el P4).
+
+## 15. El editor de vídeo de la Galería
+
+**Es de la Galería, y solo de la Galería** (`FlexOS_Ultra_GalleryVideoEdit.h`,
+una capa de la app como el editor de fotos). Se entra por dos sitios y los
+dos abren **el mismo** editor (`vedOpen`):
+
+- pulsación larga sobre un vídeo de la rejilla → el menú (el Action Sheet de
+  Liquid Glass de siempre) → **Editar**; el menú desaparece entero antes de
+  abrir (cambio de pantalla con el marco completo: ni restos ni vidrio encima);
+- el botón **Editar** de la barra flotante del visor, a la izquierda, cuando
+  el visor lo abrió la Galería.
+
+Multimedia usa el mismo visor, pero su anfitrión no ofrece Editar
+(`VID_VW` sin `edit`): allí no hay botón, ni menú, ni editor. Solo se ofrece
+para vídeos AVI MJPEG no protegidos que el P4 reproduce y que no pasan de
+8 MB (`vedEditable`). **Una sola instancia**: abrir otra vez el mismo vídeo
+reutiliza la sesión, y nunca hay dos editores (ni el de fotos y el de vídeo)
+a la vez.
+
+**Pantalla (480×800).** La barra `← Editar vídeo  ↶ ↷  ✓` va en la franja de
+la cabecera del sistema (el chevrón es el del sistema). Debajo: el vídeo, la
+línea de tiempo (reproducir, posición/duración, duración final, 8
+miniaturas, los extremos para recortar, las divisiones, la parte del
+cabezal, la marca de la portada y el cabezal), el panel de la herramienta y
+las ocho herramientas. Colores y superficies del tema (el vidrio global:
+`uiSurfaceFlat`/`uiSurface`); solo lo que va encima del vídeo (marco del
+encuadre, cabezal, marco del texto) es blanco/negro fijo. Cada zona se
+rehace entera sobre su fondo y se publica sola. La hoja de exportar
+(superficie elevada) solo la pinta el render completo, que acaba de rehacer
+la pantalla: el vidrio no se apila (la prueba la repinta y compara píxeles).
+
+**Herramientas.** Todo son **parámetros** con deshacer/rehacer (24 pasos):
+no se procesa ni un fotograma hasta exportar.
+
+| Herramienta | Qué hace |
+|---|---|
+| Cortar | arrastrar los extremos de color recorta el principio y el final (un paso al soltar); **Dividir aquí** parte el tramo del cabezal; **Quitar parte** quita ese tramo (hasta 8 partes); **Restablecer** |
+| Encuadre | libre (esquinas, lados y mover) o con proporción Original, 16:9, 4:3, 1:1 o 9:16; se ve sobre el fotograma entero y en vivo, sin recalcular el fotograma al arrastrar |
+| Girar | 0/90/180/270° y "Girar 90°"; el encuadre gira con la imagen |
+| Velocidad | 0,25×, 0,5×, 0,75×, 1× (por defecto), 1,25×, 1,5× y 2×. Sin fotogramas inventados: más rápido toma uno de cada N (mismos fps); más lento alarga cada fotograma (menos fps) |
+| Volumen | 0/25/50/75/100 % y Silenciar, **solo del audio original**; ni música ni audio externo |
+| Texto | el teclado del sistema, 8 colores y 3 tamaños; se arrastra sobre el vídeo y no se sale de la imagen |
+| Filtros | los del editor de fotos (Original, B/N, Sepia, Vívido, Frío, Cálido, Vintage), con miniaturas del fotograma a la vista |
+| Portada | el fotograma del cabezal (o volver al primero); va como `IFCV` en `LIST INFO` y la miniatura de la biblioteca la usa |
+
+ATRÁS cierra primero la hoja; con cambios, pregunta antes de descartar;
+durante la apertura o la exportación, cancela.
+
+**El trabajador.** Uno por sesión (`flexVEd`, núcleo 1, prioridad 1, 8 KB
+de pila) hace todo lo que lee el archivo: analizarlo, decodificar el
+fotograma de la vista previa a la escala justa (1, 1/2, 1/4 u 1/8), las
+miniaturas (una por vuelta) y exportar. No pinta, no avisa por la isla y no
+toca el catálogo (`check_wiring.py`). Publica con `__atomic`: las banderas
+viven en la RAM interna y los datos en la PSRAM. La vista previa es de uno a
+la vez (`baseOwner`): la interfaz nunca pinta desde una base que se está
+escribiendo (mientras, se sigue viendo la última imagen buena) y al
+arrastrar o reproducir se pide siempre el **último** fotograma, sin cola.
+Cede la CPU cada ~20 ms, suelta el archivo tras 300 ms sin trabajo, y
+cancelar y cerrar son banderas que mira entre fotogramas. Al cerrar se le
+espera (acotado); si no terminara, su memoria no se toca hasta que salga
+(`vedReclaim`) y el editor dice "ocupado" en vez de abrirse encima.
+
+**Exportar (✓).** Una hoja con las resoluciones **Original** (la del
+encuadre), **1080p**, **720p** y **480p** (solo las que no amplían y caben
+en la memoria libre), el tamaño estimado y avisos honestos (se copia sin
+pérdida / se recodifica / el audio no se puede procesar / puede pasar del
+tope); **Guardar como copia**, **Reemplazar original** (con confirmación) y,
+con varias partes, **Guardar las N partes por separado**. Sale AVI MJPEG, lo
+único que el P4 reproduce, con el audio original en PCM 16 bits si lo hay.
+
+1. Antes de empezar: espacio (lo estimado, con el tope de un vídeo por
+   salida, más la reserva de 512 KB) y memoria.
+2. Se escribe **por fotogramas** en `/System/Media/tmp/ve-<id>-<k>.avi`:
+   se lee el fotograma, se decodifica **solo la región del encuadre** al
+   divisor justo, se pinta por bandas y se codifica por bandas, con una
+   arena fija (ni una reserva por fotograma). Si la imagen no cambia, los
+   fotogramas se **copian byte a byte**. Progreso real y Cancelar.
+3. Lo escrito se vuelve a leer (`flexVeVerify`: cabecera, medidas,
+   fotogramas, índice y el primer y el último fotograma decodificables).
+4. Solo entonces se publica, en `loopTask` y también con la Galería en
+   segundo plano (`vedBgTick`). Con partes: si una falla al exportar, no se
+   publica ninguna.
+
+Cancelar, un error, quedarse sin espacio o un corte de luz dejan el original
+intacto y ningún temporal publicado.
+
+**Memoria.** Todo se reserva al abrir, con comprobación previa (PSRAM y RAM
+interna para la pila del trabajador): la base de la vista previa (≤ 640×480
+RGB888), la vista ya pintada (RGB565), 8 miniaturas pequeñas, la arena de
+decodificar y el buffer del fotograma comprimido, este del tamaño **real**
+del mayor fotograma en cuanto el análisis lo sabe. Nada se lee entero.
+Medido en el PC (`testEditorVideoGrande`): la memoria pico sobre la del
+sistema es la misma con un vídeo de 2 MB que con uno de 3 MB (~780 KB) y
+~1,2 MB con uno de 5 MB exportando con recodificación. Exportar pide su
+memoria al empezar y la suelta al acabar. `shed` (Galería suspendida) suelta
+fotogramas, miniaturas y trabajador y conserva los parámetros y el
+historial: al volver se relee. Cerrar devuelve **toda** la PSRAM (lo
+comprueban las pruebas, también tras 25 aperturas y 10 vueltas rápidas
+visor ↔ editor).
+
+**Protegidos y cambios de fuera.** Si el vídeo se protege, se borra o
+cambia de tamaño con el editor abierto, el editor se cierra, suelta todo y
+lo dice; a mitad de exportar no se publica nada. Antes de que otra parte del
+sistema lo mueva, lo borre o lo sustituya, el trabajador lo suelta y no lo
+vuelve a abrir hasta que el cambio termina (`gMlBeforeChange2`, un segundo
+oyente junto al de Música); una exportación en curso se corta y se dice por
+qué. Un renombrado no cierra el editor.
+
+**Registro por Serie.** Eventos, no fotogramas: abrir, listo (medidas,
+fotogramas, duración y audio), exportar (resolución, salidas, copia o
+recodificar), el resultado (KB y ms) y los fallos.
+
+**Pruebas.** `test_videdit` (el núcleo) y, en `test_ino`, el editor de punta
+a punta sobre el disco en memoria y con toques reales: los dos accesos (y
+que Multimedia no tiene Editar), una sola instancia, la línea de tiempo, el
+encuadre y el texto arrastrados, todas las herramientas, copia (byte a byte
+si no cambia la imagen), partes y reemplazar, cancelar al 10/50/90 % y con
+ATRÁS, disco que falla, sin espacio, protegido y borrado con el editor
+abierto, sin memoria (PSRAM, una reserva que falla, RAM interna), soltar y
+releer, exportar en segundo plano, trabajador colgado, y vídeos de 2, 3 y
+5 MB. **Pendiente de medir en la placa:** tiempos de apertura, de la vista
+previa y de exportar en el P4 real.

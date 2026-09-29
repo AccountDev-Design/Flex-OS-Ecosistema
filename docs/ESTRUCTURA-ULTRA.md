@@ -34,7 +34,8 @@ ajuste. Es además el patrón que el proyecto **ya usaba**
 Los módulos que sí son código portable y con pruebas propias siguen siendo
 `.cpp` de verdad, como hasta ahora: `FlexOS_Media`, `FlexOS_Mem`,
 `FlexOS_JPEG`, `FlexOS_Passcode`, `FlexOS_Weather`, `FlexOS_FS`,
-`FlexOS_Browser`, `FlexOS_FlexLink`, `FlexOS_FallDetect`, `FlexOS_Theft`...
+`FlexOS_Browser`, `FlexOS_FlexLink`, `FlexOS_FallDetect`, `FlexOS_Theft`,
+`FlexOS_ImgEdit`, `FlexOS_VidEdit`...
 Esa frontera no se ha tocado.
 
 ## 2. Reglas de los módulos
@@ -100,7 +101,7 @@ Esa frontera no se ha tocado.
 | `FlexOS_Ultra_Keyboard.h`          |  1564 | teclado de 4 capas y maquetacion de texto |
 | `FlexOS_Ultra_FileKit.h`           |   481 | kit de archivos: menu, nombre, confirmacion y papelera |
 | `FlexOS_Ultra_MediaKit.h`          |   475 | kit de listas de medios: seleccion, menus y acciones comunes |
-| `FlexOS_Ultra_MediaViewer.h`       |  1718 | visor comun de fotos, dibujos y videos (Galeria y Multimedia): ajuste, gestos, barras y vidrio sin apilar |
+| `FlexOS_Ultra_MediaViewer.h`       |  1722 | visor comun de fotos, dibujos y videos (Galeria y Multimedia): ajuste, gestos, barras y vidrio sin apilar; Editar solo si el anfitrion lo ofrece (la Galeria) |
 | `FlexOS_Ultra_AppMultimedia.h`     |   534 | app Multimedia: lista de videos y fotos; abre cada elemento en el visor comun |
 | `FlexOS_Ultra_AppNotes.h`          |   533 | app Notas |
 | `FlexOS_Ultra_KeyboardSettings.h`  |   529 | ajustes del teclado (pantalla propia) |
@@ -123,7 +124,8 @@ Esa frontera no se ha tocado.
 | `FlexOS_Ultra_System.h`            |   468 | soltar caches, Optimizar Flex OS y cambio de tema |
 | `FlexOS_Ultra_WebServer.h`         |   553 | Flex Web Server: tarea del servidor y hoja "Conectar con el movil" (repinta solo la zona que cambia) |
 | `FlexOS_Ultra_GalleryEdit.h`       |  1816 | Galeria: editor de imagenes (abre la foto por trozos; trabajador de abrir/guardar) |
-| `FlexOS_Ultra_AppGallery.h`        |   530 | Galeria |
+| `FlexOS_Ultra_GalleryVideoEdit.h`  |  2352 | Galeria: editor de video (tiempo, partes, encuadre, giro, velocidad, volumen, texto, filtros y portada; trabajador persistente por sesion; exportar a temporal comprobado) |
+| `FlexOS_Ultra_AppGallery.h`        |   555 | Galeria |
 | `FlexOS_Ultra_AppMusic.h`          |   787 | Musica: biblioteca de audio y reproductor en segundo plano |
 | `FlexOS_Ultra_IMU.h`               |   476 | Flex IMU Service + Flex Motion Engine: reparto del GY-BNO085 y UNA muestra para todos |
 | `FlexOS_Ultra_DeviceCare.h`        |  1697 | Flex Device Care: app, historial, salud y grafico del GY-BNO085 |
