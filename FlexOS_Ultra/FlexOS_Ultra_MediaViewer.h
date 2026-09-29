@@ -730,8 +730,9 @@ static void vwRenderContent(bool smooth){
 // ##  ------------------------------------------------------
 // ##  Arriba: volver, nombre y orientacion. Abajo: en una foto, Editar
 // ##  (si la app lo ofrece y se puede) y Papelera; en un video, progreso,
-// ##  -10 s, reproducir/pausa, +10 s y Papelera. Geometria en el lienzo
-// ##  LOGICO: dibujo y tacto leen las MISMAS funciones.
+// ##  Editar (igual: solo si la app lo ofrece -- la Galeria --, a la
+// ##  izquierda), -10 s, reproducir/pausa, +10 s y Papelera. Geometria en
+// ##  el lienzo LOGICO: dibujo y tacto leen las MISMAS funciones.
 // #############################################################
 static void vwTopGeom(int &x, int &y, int &w, int &h){ x = vwVX + 10; y = vwVY + 10; w = vwVW - 20; h = VW_TOP_H; }
 static int  vwPhotoBtns(uint8_t* b){
@@ -753,7 +754,7 @@ static void vwTrackGeom(int &sx, int &sy, int &sw){
   sx = x + 60; sw = w - 120; sy = y + 26;
 }
 // Centros de los botones del video.
-struct VwVidBtns { int cy, playX, backX, fwdX, trashX; };
+struct VwVidBtns { int cy, playX, backX, fwdX, trashX, editX; };
 static void vwVidBtns(VwVidBtns &b){
   int x, y, w, h; vwBotGeom(x, y, w, h);
   b.cy = y + 72;
@@ -761,6 +762,7 @@ static void vwVidBtns(VwVidBtns &b){
   b.backX = b.playX - 78;
   b.fwdX  = b.playX + 78;
   b.trashX = vwCanTrash ? x + w - 40 : -1000;
+  b.editX = vwCanEdit ? x + 40 : -1000;              // solo si el anfitrion ofrece Editar (la Galeria)
 }
 
 // Fondo YA desenfocado de cada barra, leido del contenido limpio.
@@ -933,6 +935,7 @@ static void vwDrawBotBar(uint8_t a){
   vwIcoArc(bt.fwdX, bt.cy, 13, true, fg);
   drawTextC(bt.fwdX, bt.cy - 3, "10", 1, fg);
   if(vwCanTrash) mmGlyph(MA_TRASH, bt.trashX, bt.cy + 2, fg);
+  if(vwCanEdit){ vwIcoPencil(bt.editX, bt.cy - 6, fg); drawTextC(bt.editX, bt.cy + 12, "Editar", 1, fg2); }
 }
 // Barras sobre lo que acaba de copiarse de vwClean, recortadas a las filas
 // FISICAS [r0, r1] (las que se van a publicar).
@@ -1437,6 +1440,7 @@ static int vwHitBtn(int x, int y){
   if(abs(x - t.backX) <= 30) return VWB_BACK10;
   if(abs(x - t.fwdX) <= 30) return VWB_FWD10;
   if(vwCanTrash && abs(x - t.trashX) <= 30) return VWB_TRASH;
+  if(vwCanEdit && abs(x - t.editX) <= 30) return VWB_EDIT;
   return VWB_NONE;
 }
 static void vwDoBtn(int b, int x){

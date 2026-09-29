@@ -187,6 +187,31 @@ GANCHOS = [
     ("gedDoSave",      "gedVerify(",      "se publicaria un JPEG sin comprobar que se escribio entero"),
     ("gedCommit",      "FML_R_LOCKED",    "una foto protegida mientras se guardaba saldria como copia SIN proteger"),
     ("gedValidate",    "FML_R_LOCKED",    "el editor seguiria ensenando una foto recien protegida"),
+    # EDITOR DE VIDEO DE LA GALERIA (y SOLO de la Galeria). Un trabajador por
+    # sesion hace todo lo que lee el archivo; publicar, en loopTask (tambien con
+    # la Galeria en segundo plano). Se entra por el menu de la rejilla y por el
+    # boton Editar del visor, y los dos abren EL MISMO editor.
+    ("loop",           "vedBgTick()",     "una exportacion terminada con la Galeria en segundo plano no se publicaria nunca"),
+    ("galTick",        "vedTick()",       "el editor de video abierto no recibiria toques"),
+    ("galRender",      "vedRender()",     "la Galeria pintaria la rejilla encima del editor de video"),
+    ("galBackLayer",   "vedBack()",       "ATRAS saldria de la Galeria sin cerrar el editor de video ni preguntar por los cambios"),
+    ("galCloseApp",    "vedCloseNow()",   "cerrar la Galeria dejaria el editor de video con su trabajador y su memoria"),
+    ("galSuspend",     "vedSuspend()",    "un arrastre o la reproduccion seguirian vivos con la Galeria en segundo plano"),
+    ("galResume",      "vedResume()",     "volver a la Galeria no releeria el video soltado por memoria"),
+    ("galShed",        "vedShed()",       "soltar memoria no soltaria los fotogramas del editor de video"),
+    ("galBgWork",      "vedBusy()",       "la Galeria se desalojaria a mitad de una exportacion"),
+    ("galDirty",       "vedDirty()",      "cerrar la Galeria no sabria que hay cambios de video sin exportar"),
+    ("galExtra",       "galEditId(",      "Editar en el menu de un video no abriria el editor"),
+    ("galVwEdit",      "galEditId(",      "el boton Editar del visor de la Galeria no abriria el editor"),
+    ("galEditId",      "vedOpen(",        "un video no se abriria en el editor de video"),
+    ("vedCloseNow",    "vedWorkerStopWait()", "cerrar soltaria memoria que el trabajador del video aun esta usando"),
+    ("vedShed",        "vedWorkerStopWait()", "soltar memoria con el trabajador del video aun leyendo en ella"),
+    ("vedDoExport",    "flexVeVerify(",   "se publicaria un AVI sin comprobar que se escribio entero"),
+    ("vedCommit",      "FML_R_LOCKED",    "un video protegido mientras se exportaba saldria como copia SIN proteger"),
+    ("vedValidate",    "FML_R_LOCKED",    "el editor seguiria con un video recien protegido"),
+    ("mlBeforeChange", "gMlBeforeChange2", "mover o borrar el video que se edita lo haria con el archivo abierto"),
+    ("vwHitBtn",       "VWB_EDIT",        "el boton Editar de la barra del video no responderia"),
+    ("vwVidBtns",      "vwCanEdit",       "el boton Editar saldria en el visor de Multimedia (su anfitrion no ofrece Editar)"),
 ]
 
 # Llamadas PROHIBIDAS dentro de una funcion: (funcion, llamada, motivo).
@@ -298,6 +323,29 @@ PROHIBIDOS = [
     ("gedDoSave",        "mlAddFile(",         "el catalogo solo se cambia desde loopTask (gedCommit)"),
     ("gedDoOpen",        "mlThumb",            "la cache de miniaturas es de loopTask"),
     ("gedDoSave",        "delay(",             "el trabajador cede con vTaskDelay entre bandas, no con delay()"),
+    # El trabajador del editor de video, igual: ni pinta, ni avisa por la isla,
+    # ni toca el catalogo, ni lee un video entero a la RAM, ni reserva por
+    # fotograma para la vista previa (base y arena se reservan al abrir).
+    ("vedWorker",        "sysNotify(",         "la isla solo se toca desde loopTask"),
+    ("vedWorkStep",      "sysNotify(",         "la isla solo se toca desde loopTask"),
+    ("vedDoOpen",        "sysNotify(",         "la isla solo se toca desde loopTask"),
+    ("vedDoExport",      "sysNotify(",         "la isla solo se toca desde loopTask"),
+    ("vedDoFrame",       "flxFlush",           "el trabajador del editor de video no pinta"),
+    ("vedDoThumb",       "flxFlush",           "el trabajador del editor de video no pinta"),
+    ("vedDoExport",      "flxFlush",           "el trabajador del editor de video no pinta"),
+    ("vedDoExport",      "mlAddFile(",         "el catalogo solo se cambia desde loopTask (vedCommit)"),
+    ("vedDoExport",      "mlReplaceFile(",     "el catalogo solo se cambia desde loopTask (vedCommit)"),
+    ("vedDoOpen",        "mlThumb",            "la cache de miniaturas es de loopTask"),
+    ("vedDoThumb",       "mlThumb",            "la cache de miniaturas es de loopTask"),
+    ("vedDoOpen",        "flexFsReadBin(",     "un video de varios MB se leeria entero en memoria"),
+    ("vedDoExport",      "flexFsReadBin(",     "un video de varios MB se leeria entero en memoria"),
+    ("vedDoFrame",       "mediaAlloc(",        "la vista previa reservaria memoria por fotograma"),
+    ("vedDoThumb",       "mediaAlloc(",        "las miniaturas reservarian memoria por fotograma"),
+    ("vedDoExport",      "delay(",             "el trabajador cede con vTaskDelay, no con delay()"),
+    # El editor de video es de la GALERIA: Multimedia no lo abre ni lo pinta.
+    ("vidTick",          "vedOpen(",           "el editor de video es de la Galeria, no de Multimedia"),
+    ("vidTick",          "vedTick(",           "el editor de video es de la Galeria, no de Multimedia"),
+    ("vidListRender",    "vedRender(",         "el editor de video es de la Galeria, no de Multimedia"),
 ]
 
 RE_MOD = re.compile(r'^#include\s+"(FlexOS_Ultra_(\w+)\.h)"', re.M)

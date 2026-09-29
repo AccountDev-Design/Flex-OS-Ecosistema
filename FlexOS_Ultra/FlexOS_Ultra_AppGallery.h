@@ -26,7 +26,7 @@
 // ##      entrada del sistema es siempre FlexOS_Ultra.ino.
 // #############################################################
 #pragma once
-#include "FlexOS_Ultra_GalleryEdit.h"   // eslabon anterior de la cadena
+#include "FlexOS_Ultra_GalleryVideoEdit.h"   // eslabon anterior de la cadena
 
 // #############################################################
 // ##  GALERIA  ·  QUE ENSENA Y DE DONDE LO SACA
@@ -49,9 +49,13 @@
 // ##  pide la clave del sistema (la misma de la pantalla de bloqueo).
 // ##
 // ##  EDITAR. "Editar" en el menu de una foto JPEG abierta lleva al
-// ##  editor (FlexOS_Ultra_GalleryEdit.h), que es una capa de esta app:
-// ##  mientras esta abierto, el render, el tick, ATRAS y el ciclo de
-// ##  vida de la Galeria pasan primero por el.
+// ##  editor de fotos (FlexOS_Ultra_GalleryEdit.h); en el de un video AVI
+// ##  MJPEG, al editor de video (FlexOS_Ultra_GalleryVideoEdit.h). Tambien
+// ##  el boton Editar de la barra del visor, que solo existe cuando el
+// ##  visor lo abrio la Galeria (Multimedia no ofrece Editar). Los dos son
+// ##  capas de esta app: mientras uno esta abierto, el render, el tick,
+// ##  ATRAS y el ciclo de vida de la Galeria pasan primero por el. Nunca
+// ##  hay dos abiertos a la vez.
 // #############################################################
 #define GAL_COLS          3
 #define GAL_THUMB_BUDGET  6        // miniaturas persistentes nuevas por repintado
@@ -108,9 +112,20 @@ static uint32_t  galTapId = 0, galTapMs = 0;
 static int       galTapRect[4] = { 0, 0, 0, 0 };
 static void galVwClosed(){ mkRedrawAll(); }        // el visor tapo tambien la cabecera: marco entero
 static uint32_t galVwNeighbour(uint32_t id, int delta);
-static void galVwEdit(uint32_t id){ gedOpen(id); }
-static bool galVwEditable(uint32_t id){ FlexMlRec r; return mlGet(id, &r) && gedEditable(&r); }
+// Editar lo que se esta viendo: una foto va al editor de fotos y un video, al
+// de video. Es el MISMO editor que abre el menu de la rejilla.
+static void galEditId(uint32_t id){
+  FlexMlRec r;
+  if(!mlGet(id, &r)) return;
+  if(r.kind == FML_K_VIDEO){ vedOpen(id); return; }      // cierra el de fotos si lo hubiera
+  if(vedActive()) vedCloseNow();                         // nunca dos editores a la vez
+  gedOpen(id);
+}
+static bool galCanEdit(const FlexMlRec* r){ return gedEditable(r) || vedEditable(r); }
+static void galVwEdit(uint32_t id){ galEditId(id); }
+static bool galVwEditable(uint32_t id){ FlexMlRec r; return mlGet(id, &r) && galCanEdit(&r); }
 static const VwHost GAL_VW = { IC_GALERIA, &galVwSess, galVwClosed, galVwNeighbour, galVwEdit, galVwEditable };
+static bool galViewerOpen(){ return vwHostOpen(&GAL_VW); }
 
 // Seleccion, menus y acciones: los del kit de listas de medios (mk*), los
 // MISMOS que Multimedia y Musica.
@@ -119,7 +134,7 @@ static void galOpenId(uint32_t id);
 // en Multimedia (el mismo archivo en la otra app; ATRAS vuelve aqui).
 static void galOpenPath(const char* path);
 static bool galExtra(int act, uint32_t id){
-  if(act == MA_EDIT){ gedOpen(id); return true; }
+  if(act == MA_EDIT){ galEditId(id); return true; }
   if(act == MA_OPENMM){ FlexMlRec r; if(mlGet(id, &r)) galOpenPath(r.path); return true; }
   return false;
 }
@@ -308,6 +323,7 @@ static void galRenderGrid(){
 
 static void galRender(){
   if(gedActive()){ gedRender(); return; }             // el editor es una capa de la Galeria
+  if(vedActive()){ vedRender(); return; }             // el de video, igual
   if(vwHostOpen(&GAL_VW)){                            // el visor (tambien al volver del editor)
     if(vwActiveFor(&GAL_VW)) vwRender();
     else if(!vwEnsure(&GAL_VW)) mkRedrawAll();
@@ -391,6 +407,7 @@ static void galSelectAll(){
 
 static void galTick(){
   if(gedActive()){ gedTick(); return; }            // editor abierto: todo es suyo
+  if(vedActive()){ vedTick(); return; }
   if(vwHostOpen(&GAL_VW)){                         // visor abierto: todo es suyo
     if(vwActiveFor(&GAL_VW) || vwEnsure(&GAL_VW)) vwTick();
     else mkRedrawAll();
@@ -426,12 +443,13 @@ static void galTick(){
     galLongFired = true;
     uint32_t id = galHitId(T.startX, T.startY);
     if(id && !mkMulti){
-      // "Editar" solo donde el editor puede de verdad (foto JPEG abierta);
-      // "Abrir en Multimedia" solo con lo que esta placa reproduce.
+      // "Editar" solo donde un editor puede de verdad (foto JPEG o video AVI
+      // MJPEG abiertos); "Abrir en Multimedia" solo con lo que esta placa
+      // reproduce.
       FlexMlRec r;
       uint8_t ex[2]; int ne = 0;
       bool have = mlGet(id, &r);
-      if(have && gedEditable(&r)) ex[ne++] = MA_EDIT;
+      if(have && galCanEdit(&r)) ex[ne++] = MA_EDIT;
       if(have && (r.flags & FML_R_PLAYABLE)) ex[ne++] = MA_OPENMM;
       mkOpenItemMenu(id, T.x, T.y + 10, ne ? ex : NULL, ne);
       return;
@@ -485,6 +503,11 @@ static bool galBackLayer(){
     if(mmDlgOn){ mmDlgOn = false; gedDlgResult(-1); return true; }
     return gedBack();
   }
+  if(vedActive()){
+    if(fkNameOn && vedTextAsk){ fkNameOn = false; vedTextAsk = false; mkRedrawAll(); return true; }
+    if(mmDlgOn){ mmDlgOn = false; vedDlgResult(-1); return true; }
+    return vedBack();
+  }
   if(vwHostOpen(&GAL_VW)){
     if(vwActiveFor(&GAL_VW)) vwClose();
     else { galVwSess.open = false; mkRedrawAll(); }
@@ -497,6 +520,7 @@ static bool galBackScreen(){ return false; }
 static void galSuspend(){
   galDragging = false; galLongFired = false;
   gedSuspend();                                   // el editor conserva su estado (y su trabajo sigue)
+  vedSuspend();                                   // el de video tambien (y su exportacion sigue)
   if(vwActiveFor(&GAL_VW)) vwSuspend();            // el visor suelta todo (lo protegido ni se recuerda)
   mkSuspend();                                    // capas y seleccion fuera; el servidor sigue
 }
@@ -504,6 +528,7 @@ static void galSuspend(){
 static void galResume(){
   mkBind(&GAL_APP);
   if(gedActive()){ gedResume(); if(gedActive()) return; }
+  if(vedActive()){ vedResume(); if(vedActive()) return; }
   if(vwHostOpen(&GAL_VW)){ if(!vwEnsure(&GAL_VW)) mkRedrawAll(); return; }
   int maxS = galMaxScroll();
   if(galScroll < 0) galScroll = 0;
@@ -513,16 +538,18 @@ static void galResume(){
 }
 
 // SOLTAR SIN CERRAR: las miniaturas decodificadas se rehacen solas, y la
-// foto del editor se vuelve a leer al volver (sus ediciones se quedan).
-static size_t galShed(){ return mlThumbDropAll() + gedShed(); }
+// foto del editor (o el video del editor de video) se vuelve a leer al
+// volver (sus ediciones se quedan).
+static size_t galShed(){ return mlThumbDropAll() + gedShed() + vedShed(); }
 
-// Trabajo REAL en segundo plano: el editor guardando (APP_BG_KEEP).
-static bool galBgWork(){ return gedBusy(); }
-// Cambios del usuario sin guardar: los del editor.
-static bool galDirty(){ return gedDirty(); }
+// Trabajo REAL en segundo plano: un editor guardando o exportando (APP_BG_KEEP).
+static bool galBgWork(){ return gedBusy() || vedBusy(); }
+// Cambios del usuario sin guardar: los de los editores.
+static bool galDirty(){ return gedDirty() || vedDirty(); }
 
 static void galCloseApp(){
   gedCloseNow();
+  vedCloseNow();
   vwForget(&GAL_VW);
   mlThumbDropAll();
   galScroll = 0;
