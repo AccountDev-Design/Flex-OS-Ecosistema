@@ -462,6 +462,17 @@ int flexAviSkipFrame(FlexAviCtx* a){
   return FLEXAVI_OK;
 }
 
+int flexAviNextFrameInfo(FlexAviCtx* a, uint32_t* dataOff, uint32_t* len){
+  if(!a) return FLEXAVI_ERR_IO;
+  uint32_t off = 0, n = 0;
+  int r = aviNextVideoChunk(a, &off, &n);
+  if(r != FLEXAVI_OK) return r;
+  if(dataOff) *dataOff = off;
+  if(len) *len = n;
+  a->frameNo++;
+  return FLEXAVI_OK;
+}
+
 int flexAviSeekFrameMax(FlexAviCtx* a, uint32_t frame, uint32_t maxSkips){
   if(!a) return FLEXAVI_ERR_IO;
   if(a->frames && frame >= a->frames) frame = a->frames - 1;

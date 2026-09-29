@@ -793,6 +793,8 @@ static inline uint8_t* h16(uint8_t* q, uint16_t v){ wr16(q, v); return q + 2; }
 // misma exportacion (depende solo de si hay audio y portada), asi que la
 // definitiva se escribe encima de la provisional al terminar.
 #define VE_HDR_MAX 512
+// Se compone en el buffer de entrada, que nunca mide menos de 4096 (xInCapFor).
+static_assert(VE_HDR_MAX <= 4096, "la cabecera tiene que caber en el buffer de entrada mas pequeno");
 static uint32_t xHeader(const FlexVeExport* x, uint8_t* h){
   const FlexVeSource* s = x->c.src;
   const bool aud = x->audioOn, info = x->hasInfo;
@@ -1160,7 +1162,9 @@ int flexVeExportBegin(FlexVeExport* x, const FlexVeExportCfg* cfg){
     x->aStep = ((uint64_t)x->spd << 32) / 100u;
     xAudioSeg(x);
   }
-  uint8_t h[VE_HDR_MAX];
+  // La cabecera se compone en el buffer de entrada (>= 4 KB y aun libre), no
+  // en la pila: el trabajador que exporta tiene una pila pequena.
+  uint8_t* h = x->inBuf;
   x->hdrBytes = xHeader(x, h);
   x->moviList = x->hdrBytes - 12;
   x->hdrBytes = xHeader(x, h);                            // mismo tamano; 'movi' ya sabe donde esta
@@ -1209,10 +1213,14 @@ int flexVeExportFinish(FlexVeExport* x){
   memcpy(h, "idx1", 4);
   wr32(h + 4, 16u * x->idxN);
   if(!xPut(x, h, 8)) return x->err;
-  uint8_t e[16 * 32];
+  // El indice y la cabecera definitiva se componen en el buffer de entrada
+  // (>= 4 KB, ya libre): nada grande en la pila, y el indice sale en pocas
+  // escrituras de hasta 4 KB.
+  uint8_t* e = x->inBuf;
+  const uint32_t per = x->inCap / 16u;
   for(uint32_t i = 0; i < x->idxN; ){
     uint32_t n = 0;
-    for(; n < 32 && i < x->idxN; n++, i++){
+    for(; n < per && i < x->idxN; n++, i++){
       uint8_t* q = e + 16 * n;
       uint32_t sz = x->idx[2 * i + 1];
       memcpy(q, (sz & 0x80000000u) ? "01wb" : "00dc", 4);
@@ -1222,7 +1230,7 @@ int flexVeExportFinish(FlexVeExport* x){
     }
     if(!xPut(x, e, 16 * n)) return x->err;
   }
-  uint8_t hd[VE_HDR_MAX];
+  uint8_t* hd = x->inBuf;
   uint32_t hb = xHeader(x, hd);
   if(hb != x->hdrBytes) return x->err = FLEXVE_ERR_ARG;
   if(!x->c.seek(x->c.outCtx, 0) || !x->c.write(x->c.outCtx, hd, hb)) return x->err = FLEXVE_ERR_WRITE;

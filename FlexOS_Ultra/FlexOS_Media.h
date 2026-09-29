@@ -232,6 +232,12 @@ int  flexAviReadFrame(FlexAviCtx* a, void* buf, uint32_t bufCap, uint32_t* frame
 // lectura de 8 bytes en vez de decodificar un JPEG entero.
 int  flexAviSkipFrame(FlexAviCtx* a);
 
+// Igual que flexAviSkipFrame, pero dice DONDE estan los datos de ese
+// fotograma y cuanto miden (0 = trozo vacio: repite el anterior). Lo usa el
+// editor de video para encontrar la imagen que se ve en un fotograma sin
+// leer los datos de los que no hacen falta.
+int  flexAviNextFrameInfo(FlexAviCtx* a, uint32_t* dataOff, uint32_t* len);
+
 // Texto corto y estable de un codigo de error.
 const char* flexAviErrStr(int err);
 

@@ -440,11 +440,16 @@ static const uint16_t* mlThumbGetLocked(const FlexMlRec* r, int* budget, bool* m
 // -------------------------------------------------------------
 static bool mlGet(uint32_t id, FlexMlRec* out){ return flexMsGet(&gMs, id, out); }
 
-// Quien tiene ABIERTO un archivo de la biblioteca durante mucho rato (Musica
-// mientras suena) lo suelta ANTES de que se mueva, se borre o se sustituya.
-// Un solo oyente: solo Musica reproduce de continuo.
+// Quien tiene ABIERTO un archivo de la biblioteca durante mucho rato lo
+// suelta ANTES de que se mueva, se borre o se sustituya. Dos oyentes, uno por
+// cada cosa que lo hace: Musica mientras suena (gMlBeforeChange) y el editor
+// de video de la Galeria mientras edita o exporta (gMlBeforeChange2).
 static void (*gMlBeforeChange)(uint32_t id) = NULL;
-static inline void mlBeforeChange(uint32_t id){ if(gMlBeforeChange) gMlBeforeChange(id); }
+static void (*gMlBeforeChange2)(uint32_t id) = NULL;
+static inline void mlBeforeChange(uint32_t id){
+  if(gMlBeforeChange) gMlBeforeChange(id);
+  if(gMlBeforeChange2) gMlBeforeChange2(id);
+}
 
 // Borrado DEFINITIVO (con su miniatura). Lo protegido tambien: pero solo
 // despues de que la interfaz haya pedido la clave del sistema.
