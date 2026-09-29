@@ -8123,6 +8123,730 @@ static void testEditorGaleria(){
   touchReset();
 }
 
+// #############################################################
+//  EDITOR DE VIDEO DE LA GALERIA · con archivos de verdad
+//  ------------------------------------------------------------
+//  Sobre el disco en memoria y el almacen REAL de la biblioteca, con toques
+//  sobre la geometria de la pantalla y entrando por galTick (el mismo camino
+//  que en la placa). El trabajador no corre solo: xTaskCreatePinnedToCore es
+//  un doble que no da tarea, asi que la prueba lo hace avanzar con
+//  vedWorkStep(), que es exactamente lo que la tarea hace en bucle.
+// #############################################################
+extern void (*gTestFsOnWrite)(long written);
+static void vtU32(std::vector<uint8_t>& v, uint32_t x){ for(int i = 0; i < 4; i++) v.push_back((uint8_t)(x >> (8 * i))); }
+static void vtU16(std::vector<uint8_t>& v, uint16_t x){ v.push_back((uint8_t)x); v.push_back((uint8_t)(x >> 8)); }
+static void vtCc(std::vector<uint8_t>& v, const char* t){ for(int i = 0; i < 4; i++) v.push_back((uint8_t)t[i]); }
+static std::vector<uint8_t> vtChunk(const char* id, const std::vector<uint8_t>& p){
+  std::vector<uint8_t> v; vtCc(v, id); vtU32(v, (uint32_t)p.size()); v.insert(v.end(), p.begin(), p.end());
+  if(p.size() & 1) v.push_back(0);
+  return v;
+}
+static std::vector<uint8_t> vtList(const char* t, const std::vector<uint8_t>& p){
+  std::vector<uint8_t> v; vtCc(v, "LIST"); vtU32(v, (uint32_t)p.size() + 4); vtCc(v, t); v.insert(v.end(), p.begin(), p.end());
+  return v;
+}
+// Fotograma i: arriba a la izquierda ROJO (para ver el giro), el resto con un
+// gris propio de cada fotograma.
+static std::vector<uint8_t> vtFrame(int W, int H, int i){
+  std::vector<uint8_t> px((size_t)W * H * 3), out;
+  for(int y = 0; y < H; y++) for(int x = 0; x < W; x++){
+    uint8_t* p = &px[((size_t)y * W + x) * 3];
+    if(x < W / 2 && y < H / 2){ p[0] = 225; p[1] = 30; p[2] = 30; }
+    else { uint8_t g = (uint8_t)(40 + (i * 13) % 180); p[0] = p[1] = p[2] = g; }
+  }
+  FlexJeCfg c; c.width = W; c.height = H; c.quality = 85; c.subsampling = FLEXJE_SUB_420; c.input = FLEXJE_IN_RGB888;
+  flexJpegEncodeMem(&c, px.data(), (size_t)W * 3, geOut, &out, nullptr, nullptr);
+  return out;
+}
+// AVI MJPEG de n fotogramas a 10 fps; con audio, PCM de 16 bits mono a 8 kHz
+// (un trozo de 800 muestras antes de cada fotograma).
+static std::vector<std::vector<uint8_t>> vtFrames;
+static std::vector<uint8_t> vtAvi(int n, int W, int H, bool audio){
+  const uint32_t us = 100000;
+  vtFrames.clear();
+  for(int i = 0; i < n; i++) vtFrames.push_back(vtFrame(W, H, i));
+  std::vector<uint8_t> avih; vtU32(avih, us); vtU32(avih, 0); vtU32(avih, 0); vtU32(avih, 0x10); vtU32(avih, (uint32_t)n); vtU32(avih, 0);
+  vtU32(avih, audio ? 2 : 1); vtU32(avih, 0); vtU32(avih, (uint32_t)W); vtU32(avih, (uint32_t)H); for(int i = 0; i < 4; i++) vtU32(avih, 0);
+  std::vector<uint8_t> vh; vtCc(vh, "vids"); vtCc(vh, "MJPG"); vtU32(vh, 0); vtU16(vh, 0); vtU16(vh, 0); vtU32(vh, 0);
+  vtU32(vh, 1); vtU32(vh, 10); vtU32(vh, 0); vtU32(vh, (uint32_t)n); vtU32(vh, 65536); vtU32(vh, 0); vtU32(vh, 0); vtU32(vh, 0); vtU32(vh, 0);
+  std::vector<uint8_t> vf; vtU32(vf, 40); vtU32(vf, (uint32_t)W); vtU32(vf, (uint32_t)H); vtU16(vf, 1); vtU16(vf, 24); vtCc(vf, "MJPG");
+  for(int i = 0; i < 5; i++) vtU32(vf, 0);
+  std::vector<uint8_t> vstrl = vtChunk("strh", vh); { auto t = vtChunk("strf", vf); vstrl.insert(vstrl.end(), t.begin(), t.end()); }
+  std::vector<uint8_t> hdrl = vtChunk("avih", avih); { auto t = vtList("strl", vstrl); hdrl.insert(hdrl.end(), t.begin(), t.end()); }
+  if(audio){
+    std::vector<uint8_t> ah; vtCc(ah, "auds"); vtU32(ah, 0); vtU32(ah, 0); vtU16(ah, 0); vtU16(ah, 0); vtU32(ah, 0);
+    vtU32(ah, 2); vtU32(ah, 16000); vtU32(ah, 0); vtU32(ah, 0); vtU32(ah, 4096); vtU32(ah, 0); vtU32(ah, 2); vtU32(ah, 0); vtU32(ah, 0);
+    std::vector<uint8_t> af; vtU16(af, 1); vtU16(af, 1); vtU32(af, 8000); vtU32(af, 16000); vtU16(af, 2); vtU16(af, 16); vtU16(af, 0);
+    std::vector<uint8_t> astrl = vtChunk("strh", ah); { auto t = vtChunk("strf", af); astrl.insert(astrl.end(), t.begin(), t.end()); }
+    auto t = vtList("strl", astrl); hdrl.insert(hdrl.end(), t.begin(), t.end());
+  }
+  std::vector<uint8_t> movi, idx1;
+  for(int i = 0; i < n; i++){
+    if(audio){
+      std::vector<uint8_t> pcm;
+      for(int s = 0; s < 800; s++) vtU16(pcm, (uint16_t)(int16_t)(((i * 800 + s) * 37) % 16000 - 8000));
+      uint32_t off = 4u + (uint32_t)movi.size();
+      auto c = vtChunk("01wb", pcm); movi.insert(movi.end(), c.begin(), c.end());
+      vtCc(idx1, "01wb"); vtU32(idx1, 0x10); vtU32(idx1, off); vtU32(idx1, (uint32_t)pcm.size());
+    }
+    uint32_t off = 4u + (uint32_t)movi.size();
+    auto c = vtChunk("00dc", vtFrames[i]); movi.insert(movi.end(), c.begin(), c.end());
+    vtCc(idx1, "00dc"); vtU32(idx1, 0x10); vtU32(idx1, off); vtU32(idx1, (uint32_t)vtFrames[i].size());
+  }
+  std::vector<uint8_t> body = vtList("hdrl", hdrl);
+  { auto t = vtList("movi", movi); body.insert(body.end(), t.begin(), t.end()); }
+  { auto t = vtChunk("idx1", idx1); body.insert(body.end(), t.begin(), t.end()); }
+  std::vector<uint8_t> out; vtCc(out, "RIFF"); vtU32(out, (uint32_t)body.size() + 4); vtCc(out, "AVI ");
+  out.insert(out.end(), body.begin(), body.end());
+  return out;
+}
+static uint32_t vtAddVideo(const char* path, const std::vector<uint8_t>& avi, int W, int H, bool locked){
+  gTestFiles[path] = avi;
+  FlexMlRec r; memset(&r, 0, sizeof(r));
+  snprintf(r.path, sizeof(r.path), "%s", path);
+  const char* b = strrchr(path, '/');
+  snprintf(r.name, sizeof(r.name), "%s", b ? b + 1 : path);
+  r.kind = FML_K_VIDEO; r.fmt = FML_F_AVI_MJPEG; r.state = FML_S_READY; r.size = (uint32_t)avi.size();
+  r.w = (uint16_t)W; r.h = (uint16_t)H;
+  r.flags = (uint16_t)(FML_R_PLAYABLE | (locked ? FML_R_LOCKED : 0));
+  int at = flexMlAdd(&gMs.lib, &r, 1760000000u);
+  return at >= 0 ? gMs.lib.recs[at].id : 0;
+}
+// Los '00dc' de un AVI, en orden (vacios incluidos).
+struct VtCk { uint32_t off, len; };
+static std::vector<VtCk> vtVideoChunks(const std::vector<uint8_t>& f){
+  std::vector<VtCk> out;
+  auto rd = [&](size_t o){ return o + 4 <= f.size() ? (uint32_t)f[o] | (uint32_t)f[o + 1] << 8 | (uint32_t)f[o + 2] << 16 | (uint32_t)f[o + 3] << 24 : 0u; };
+  size_t p = 12;
+  while(p + 12 <= f.size()){
+    uint32_t L = rd(p + 4);
+    if(!memcmp(&f[p], "LIST", 4) && !memcmp(&f[p + 8], "movi", 4)){
+      size_t q = p + 12, end = p + 8 + L;
+      while(q + 8 <= end && q + 8 <= f.size()){
+        uint32_t n = rd(q + 4);
+        if(!memcmp(&f[q + 2], "dc", 2)) out.push_back({ (uint32_t)(q + 8), n });
+        q += 8 + n + (n & 1);
+      }
+      return out;
+    }
+    p += 8 + L + (L & 1);
+  }
+  return out;
+}
+static int vtAudioChunks(const std::vector<uint8_t>& f){
+  int n = 0;
+  for(size_t p = 12; p + 8 <= f.size(); p++) if(!memcmp(&f[p], "01wb", 4)) n++;
+  return n;
+}
+static bool vtSame(const std::vector<uint8_t>& f, const VtCk& c, const std::vector<uint8_t>& frame){
+  return c.len == frame.size() && c.off + c.len <= f.size() && !memcmp(&f[c.off], frame.data(), c.len);
+}
+// Lo que el analizador del editor ve en un archivo del disco en memoria.
+struct VtMemIo { const std::vector<uint8_t>* d; uint32_t pos; };
+static int vtIoRead(void* c, void* b, uint32_t n){
+  VtMemIo* m = (VtMemIo*)c;
+  if(m->pos >= m->d->size()) return 0;
+  uint32_t k = (uint32_t)m->d->size() - m->pos; if(k > n) k = n;
+  memcpy(b, m->d->data() + m->pos, k); m->pos += k; return (int)k;
+}
+static bool vtIoSeek(void* c, uint32_t o){ VtMemIo* m = (VtMemIo*)c; if(o > m->d->size()) return false; m->pos = o; return true; }
+static uint32_t vtIoSize(void* c){ return (uint32_t)((VtMemIo*)c)->d->size(); }
+static int vtProbe(const std::vector<uint8_t>& f, FlexVeSource* s){
+  VtMemIo m = { &f, 0 };
+  FlexMediaIO io; io.read = vtIoRead; io.seek = vtIoSeek; io.size = vtIoSize; io.ctx = &m;
+  FlexAviCtx* a = (FlexAviCtx*)malloc(sizeof(FlexAviCtx));
+  memset(s, 0, sizeof(*s));
+  int rc = flexVeProbe(&io, s, a, nullptr, nullptr);
+  free(a);
+  return rc;
+}
+
+static unsigned long vtMs = 30000000;
+static void vtIdle(){ touchReset(); gTestMs = vtMs; galTick(); }
+static void vtTap(int x, int y){
+  tDown(x, y, vtMs); galTick();
+  tUp(vtMs + 60, true); galTick();
+  vtMs += 400; touchReset(); gTestMs = vtMs;
+}
+static void vtDrag(int x0, int y0, int x1, int y1){
+  tDown(x0, y0, vtMs); galTick();
+  for(int k = 1; k <= 8; k++){ tMove(x0 + (x1 - x0) * k / 8, y0 + (y1 - y0) * k / 8, vtMs + 50 * k); galTick(); }
+  tUp(vtMs + 500, false); galTick();
+  vtMs += 900; touchReset(); gTestMs = vtMs; galTick();
+}
+// El trabajador hasta que no tenga nada, y la interfaz lo recoge.
+static int vtPump(){ int n = 0; while(n < 400 && vedWorkStep()) n++; return n; }
+static void vtRun(){ for(int k = 0; k < 5; k++){ vtPump(); vtIdle(); } }
+static long vtCancelAt = -1;
+static void vtOnWrite(long w){ if(vtCancelAt >= 0 && w >= vtCancelAt){ vedSt(&vedS.cancel, 1); vtCancelAt = -1; } }
+static void vtTool(int t){ VedGeom g = vedGeom(); int tw = g.bw / VT_N; vtTap(g.bx + t * tw + tw / 2, g.tabsY + 30); vtRun(); }
+static void vtRow(int n, int i, int yOff){ VedGeom g = vedGeom(); int x, w; vedRowCell(g, n, i, x, w); vtTap(x + w / 2, g.panelY + yOff); }
+static void vtBar(int which){                     // 0 deshacer, 1 rehacer, 2 exportar
+  VedGeom g = vedGeom(); int ux, rx, okx, cy; vedBarBtns(g, ux, rx, okx, cy);
+  vtTap(which == 0 ? ux : which == 1 ? rx : okx, cy);
+}
+static void vtSheet(int i){ VedGeom g = vedGeom(); int x, y, w, h; vedSheetBtn(g, i, x, y, w, h); vtTap(x + w / 2, y + h / 2); }
+static void vtDlgPrimary(){ int dx, dy, dw, dh; mmDlgGeom(dx, dy, dw, dh); int bw2 = (dw - 48) / 2; vtTap(dx + 32 + bw2 + bw2 / 2, dy + dh - 76 + 28); }
+static void vtDlgOk(){ int dx, dy, dw, dh; mmDlgGeom(dx, dy, dw, dh); vtTap(dx + dw / 2, dy + dh - 76 + 28); }
+static uint32_t vtLastId(){ return gMs.lib.n ? gMs.lib.recs[gMs.lib.n - 1].id : 0; }
+static bool vtNoTemps(){
+  for(auto& kv : gTestFiles) if(!strncmp(kv.first.c_str(), FML_DIR_TMP "/ve-", strlen(FML_DIR_TMP "/ve-"))) return false;
+  return true;
+}
+
+static void testEditorVideoGaleria(){
+  printf("Editor de video de la Galeria: accesos, herramientas, exportar, cancelar, protegidos, memoria y estres\n");
+  int before = gFails;
+  bool ok0 = gMlOk; bool fs0 = gTestFsReady; bool glass0 = uiGlass; int nav0 = gNavMode;
+  gTestFsReady = true; uiGlass = true; gNavMode = 0;
+  geFsReset();
+  gLockType = 1;
+  vtMs = 30000000; gTestMs = vtMs;
+  const int W = 96, H = 64, N = 30;
+  auto avi = vtAvi(N, W, H, true);
+  auto srcFrames = vtFrames;
+  uint32_t id = vtAddVideo(FML_DIR_VIDEO "/Cumple.avi", avi, W, H, false);
+  uint32_t lk = vtAddVideo(FML_DIR_LOCKED "/7.avi", vtAvi(4, W, H, false), W, H, true);
+  uint32_t ph = geAddPhoto(FML_DIR_PHOTO "/foto.jpg", geJpeg(64, 48), false);
+  { FlexMlRec o = *geRec(id); o.fmt = FML_F_AVI_OTHER;
+    FlexMlRec big = *geRec(id); big.size = FML_LIMIT_VIDEO + 1;
+    chk(vedEditable(geRec(id)) && !vedEditable(geRec(lk)) && !vedEditable(geRec(ph)) && !vedEditable(&o) && !vedEditable(&big),
+        "editable: un video AVI MJPEG abierto; ni lo protegido, ni una foto, ni otro AVI, ni uno mayor que el tope"); }
+  chk(VID_VW.edit == NULL && VID_VW.editable == NULL && GAL_VW.edit && GAL_VW.editable,
+      "Multimedia no ofrece Editar en su visor; la Galeria, si");
+
+  gState = ST_APP; gAppId = IC_GALERIA; gAppState[IC_GALERIA] = ALIFE_RUNNING; gLand = false; gHosted = false;
+  gAppW = SCR_W; gAppH = SCR_H; uiClipFull(); setBuf(fb);
+  mkBind(&GAL_APP); mkReset(); galViewReady = false; galScroll = 0; galTab = 0;
+  mlTables();
+  if(!glassBuf) glassBuf = (uint16_t*)heap_caps_malloc((size_t)SCR_W * SCR_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  galRender();
+  // Lo que el sistema reserva una vez y no suelta (la banda de vidrio del menu)
+  // se reserva ANTES de medir: un menu abierto y cerrado.
+  { int x, y, w, h; galCellRect(0, x, y, w, h);
+    tDown(x + w / 2, y + h / 2, vtMs); galTick(); tMove(x + w / 2, y + h / 2, vtMs + 600); galTick();
+    tUp(vtMs + 650, false); galTick(); vtMs += 800; touchReset();
+    vtTap(5, 700); vtIdle(); galRender(); }
+  glcBuild(16, 16, 4, TH_GLASS, TH_PAGE);                // la cache de tarjetas de vidrio del sistema (una vez, nunca se suelta)
+  size_t ps0 = gPsUsed;
+
+  // ---- ACCESO 1: pulsacion larga en la rejilla > menu > Editar ----
+  int cell = -1;
+  for(int i = 0; i < 3 && cell < 0; i++){ int x, y, w, h; galCellRect(i, x, y, w, h); if(galHitId(x + w / 2, y + h / 2) == id) cell = i; }
+  chk(cell >= 0, "el video esta en la rejilla");
+  int cx = 0, cy = 0; { int x, y, w, h; galCellRect(cell < 0 ? 0 : cell, x, y, w, h); cx = x + w / 2; cy = y + h / 2; }
+  tDown(cx, cy, vtMs); galTick();
+  tMove(cx, cy, vtMs + 600); galTick();
+  int editRow = -1; for(int i = 0; i < mmN; i++) if(mmAct[i] == MA_EDIT) editRow = i;
+  chk(mmOn && editRow >= 0, "mantener pulsado un video: el menu (Action Sheet) ofrece Editar");
+  tUp(vtMs + 650, false); galTick(); vtMs += 800; touchReset();
+  uint32_t tasks0 = gPinnedTaskCreates;
+  { int x, y, w, h; mmGeom(x, y, w, h); vtTap(x + w / 2, y + MM_PAD + editRow * MM_RH + MM_RH / 2); }
+  chk(!mmOn && vedPhase == VED_OPENING && gPinnedTaskCreates == tasks0 + 1 && !gedActive(),
+      "Editar: el menu desaparece del todo y se abre EL editor de video (su trabajador, uno)");
+  chk(vedS.started && !vedS.task, "el trabajador de la sesion esta lanzado (en el arnes, sin hilo)");
+  vtRun();
+  chk(vedPhase == VED_EDIT && vedM->src.frames == (uint32_t)N && vedM->src.w == W && vedM->src.h == H &&
+      vedM->src.aud.kind == FLEXVE_AUD_PCM && vedBaseW > 0 && vedViewOk,
+      "analizado: 30 fotogramas de 96x64, audio PCM y el primer fotograma en pantalla");
+  chkf(__atomic_load_n(&vedS.thumbsDone, __ATOMIC_ACQUIRE) == VED_THUMBS && vedThSeen == VED_THUMBS,
+       "las 8 miniaturas de la linea de tiempo, hechas y pintadas (%d)", vedS.thumbsDone);
+  chk(!flexVeCanUndo(vedE) && !vedCanExport() && !vedDirty(), "recien abierto: nada que deshacer ni que exportar");
+  { VedMem* m0 = vedM;
+    chk(vedOpen(id) && vedM == m0 && gPinnedTaskCreates == tasks0 + 1 && vedPhase == VED_EDIT,
+        "abrir OTRA vez el mismo video reutiliza la sesion: ni otro editor ni otro trabajador"); }
+
+  // ---- LINEA DE TIEMPO: recortar arrastrando el extremo izquierdo ----
+  VedGeom g = vedGeom();
+  int ax = vedFrameX(g, 0), sy = g.stripY + VED_STRIP_H / 2;
+  int cur0 = vedE->cur;
+  vtDrag(ax, sy, ax + g.stripW / 5, sy);
+  chkf(vedE->p.seg[0].a >= 5 && vedE->p.seg[0].a <= 7 && vedE->cur == cur0 + 1 && vedCanExport(),
+       "arrastrar el inicio 1/5 de la tira: empieza en el fotograma ~6 y es UN paso del historial (%u)", vedE->p.seg[0].a);
+  vtRun();
+  chkf(vedBaseFrame == vedE->p.seg[0].a, "la vista previa ensena el nuevo primer fotograma (%u)", vedBaseFrame);
+  // Tocar la tira mueve el cabezal.
+  vtTap(vedFrameX(g, 18) + 2, sy);
+  vtRun();
+  chkf(vedHead == 18 && vedBaseFrame == 18, "tocar la tira lleva el cabezal alli y se decodifica ese fotograma (%u)", vedHead);
+  // Dividir aqui y quitar la parte del cabezal.
+  vtRow(3, 0, 50);
+  chk(vedE->p.nSeg == 2 && vedE->p.seg[0].b == 18 && vedE->p.seg[1].a == 18, "Dividir aqui: dos partes, cortadas en el cabezal");
+  vtRow(3, 1, 50);
+  chk(vedE->p.nSeg == 1 && vedE->p.seg[0].b == 18, "Quitar parte: se va la del cabezal (de 18 al final)");
+  vtBar(0);
+  chk(vedE->p.nSeg == 2, "deshacer devuelve la parte quitada");
+  vtBar(1);
+  chk(vedE->p.nSeg == 1, "rehacer la vuelve a quitar");
+  vtBar(0);                                              // dos partes para las pruebas de despues
+
+  // ---- ENCUADRE, GIRO, VELOCIDAD, VOLUMEN, TEXTO, FILTRO Y PORTADA ----
+  vtTool(VT_ROT);
+  chk(vedTool == VT_ROT, "pestana Girar");
+  vtRow(4, 1, 28);
+  chk(vedE->p.rot == 1, "Girar: 90 grados");
+  vtTool(VT_CROP);
+  vtRow(FLEXVE_ASP_N, FLEXVE_ASP_1_1, 26);
+  { int rw, rh; flexVeRegionSize(&vedE->p, W, H, &rw, &rh);
+    chkf(vedE->p.aspect == FLEXVE_ASP_1_1 && abs(rw - rh) <= 1, "Encuadre 1:1 sobre el video girado: cuadrado (%dx%d)", rw, rh); }
+  { float c1y = vedE->p.c1y; int cur1 = vedE->cur;
+    int x0, y0, x1, y1; vedCropRectPx(vedE->p.c0x, vedE->p.c0y, vedE->p.c1x, vedE->p.c1y, x0, y0, x1, y1);
+    vtDrag(x1, y1, x1 - 10, y1 - 10);
+    int rw, rh; flexVeRegionSize(&vedE->p, W, H, &rw, &rh);
+    chkf(vedE->p.c1y < c1y && vedE->cur == cur1 + 1 && abs(rw - rh) <= 1,
+         "arrastrar la esquina encoge el encuadre sin perder el 1:1, en UN paso (%dx%d)", rw, rh); }
+  vtRow(1, 0, 68);
+  chk(vedE->p.aspect == FLEXVE_ASP_FREE && vedE->p.c0x == 0.0f && vedE->p.c1x == 1.0f, "Restablecer encuadre");
+  vtTool(VT_SPEED);
+  vtRow(FLEXVE_SPEED_N, 6, 26);
+  chk(vedE->p.speedPct == 200, "Velocidad 2x");
+  vtTool(VT_VOL);
+  vtRow(5, 2, 26);
+  chk(vedE->p.volPct == 50 && !vedE->p.mute, "Volumen 50 %");
+  vtRow(1, 0, 70);
+  chk(vedE->p.mute, "Silenciar");
+  vtRow(1, 0, 70);
+  chk(!vedE->p.mute, "y quitar el silencio");
+  vtTool(VT_TEXT);
+  vtRow(1, 0, 24);
+  chk(fkNameOn && vedTextAsk, "Anadir texto abre el teclado del sistema");
+  snprintf(fkNameBuf, sizeof(fkNameBuf), "Feliz cumple");
+  { int fry = KB_Y + 3 * (KB_KH + KB_GAP); vtTap(kbFKeyX(5) + kbFKeyW(5) / 2, fry + KB_KH / 2); }
+  chk(!fkNameOn && !vedTextAsk && !strcmp(vedE->p.text, "Feliz cumple"), "Guardar en el teclado: el texto queda en el video");
+  { VedGeom g2 = vedGeom(); vtRun();
+    float u0 = vedE->p.textU; int cur2 = vedE->cur;
+    int tx = vedVX + (int)(vedE->p.textU * vedVW) + 4, ty = vedVY + (int)(vedE->p.textV * vedVH) + 2;
+    vtDrag(tx, ty, tx + 30, ty - 20);
+    chkf(vedE->p.textU > u0 && vedE->cur == cur2 + 1 && !vedViewNoText && vedViewOk,
+         "arrastrar el texto lo mueve (un paso) y la vista vuelve a llevarlo dentro (%.2f)", vedE->p.textU);
+    (void)g2; }
+  vtTool(VT_FILTER);
+  { VedGeom g3 = vedGeom(); int x, y, side; vedFilterGeom(g3, FLEXIE_FILTER_BW, x, y, side); vtTap(x + side / 2, y + side / 2); }
+  chk(vedE->p.filter == FLEXIE_FILTER_BW && vedFtOk, "Filtros: B/N, con sus miniaturas hechas del fotograma");
+  vtTool(VT_COVER);
+  vtRow(2, 0, 58);
+  chkf(vedE->p.cover == vedHead, "Portada: el fotograma del cabezal (%u)", vedE->p.cover);
+
+  // ---- EXPORTAR: la hoja, "Guardar como copia" ----
+  vtBar(2);
+  chk(vedSheet && vedSheetBtnN() == 4, "exportar abre la hoja: copia, reemplazar, las partes y cancelar");
+  { int ow, oh; bool fit0 = vedResDims(0, &ow, &oh), fit1 = vedResDims(1, &ow, &oh);
+    chk(fit0 && !fit1, "resoluciones: la del encuadre si; 1080p no se ofrece (seria ampliar)"); }
+  { std::vector<uint16_t> a1(fb, fb + (size_t)SCR_W * SCR_H);
+    for(int k = 0; k < 6; k++) vedRender();
+    chk(memcmp(a1.data(), fb, a1.size() * 2) == 0, "la hoja pintada 6 veces mas da EXACTAMENTE los mismos pixeles (el vidrio no se apila)"); }
+  vtSheet(3);
+  chk(!vedSheet && vedPhase == VED_EDIT, "Cancelar cierra la hoja sin exportar");
+  vtBar(2);
+  int n0 = gMs.lib.n;
+  size_t psEdit = gPsUsed;
+  vtSheet(0);
+  chk(vedPhase == VED_EXPORTING && vedJobRunning(), "Guardar como copia: exporta en el trabajador");
+  { char want[FML_PATH_MAX]; snprintf(want, sizeof(want), FML_DIR_TMP "/ve-%lu-0.avi", (unsigned long)id);
+    chk(!strcmp(vedM->tmp[0], want), "a un temporal de /System/Media/tmp"); }
+  vtPump();
+  uint32_t outFrames = vedM->frames[0]; int outW = vedM->outW, outH = vedM->outH;
+  vtIdle();
+  uint32_t cp = gMs.lib.n == n0 + 1 ? vtLastId() : 0;
+  const FlexMlRec* rc = cp ? geRec(cp) : nullptr;
+  chk(rc && rc->parent == id && rc->origin == FML_O_EDIT && !strcmp(rc->name, "Cumple (editado).avi") && rc->kind == FML_K_VIDEO,
+      "copia publicada: 'Cumple (editado).avi', nueva, y sabe de donde sale");
+  chk(gTestFiles[FML_DIR_VIDEO "/Cumple.avi"] == avi && vtNoTemps(), "el original, intacto; ningun temporal");
+  chk(vedPhase == VED_OFF && !vedM && !vedBase && !vedS.started, "exportado: el editor se cierra y su trabajador sale");
+  galRender();
+  if(gPsUsed != ps0) printf("  (PSRAM sin devolver: %d bytes)\n", (int)(gPsUsed - ps0));
+  chk(gPsUsed == ps0, "y devuelve TODA la PSRAM");
+  if(rc){
+    FlexVeSource s; int prc = vtProbe(gTestFiles[rc->path], &s);
+    // Dos partes (6..18 y 18..30 menos lo quitado: la de 18..30 volvio con deshacer), a 2x.
+    chkf(prc == FLEXVE_OK && s.frames == outFrames && s.w == outW && s.h == outH && outW == 64 && outH == 96,
+         "el AVI exportado se analiza: %u fotogramas de %dx%d (girado)", s.frames, s.w, s.h);
+    chkf(s.aud.kind == FLEXVE_AUD_PCM && vtAudioChunks(gTestFiles[rc->path]) > 0, "y lleva el audio original (PCM)");
+    chkf(s.usPerFrame == 100000, "2x: mismos fps, la mitad de fotogramas (%u us)", s.usPerFrame);
+  }
+
+  // ---- COPIA SIN RECODIFICAR: solo recortar la duracion ----
+  vedOpen(id); vtRun();
+  chk(vedPhase == VED_EDIT && !flexVeCanUndo(vedE), "se vuelve a abrir limpio (nada heredado de la sesion anterior)");
+  flexVeTrimLive(vedE, 0, 10); flexVeTrimLive(vedE, 1, 20); flexVeCommit(vedE); vedApplied();
+  vtBar(2); vtSheet(0); vtPump(); vtIdle();
+  { const FlexMlRec* r2 = geRec(vtLastId());
+    auto ck = r2 ? vtVideoChunks(gTestFiles[r2->path]) : std::vector<VtCk>();
+    bool same = ck.size() == 10;
+    for(size_t k = 0; same && k < ck.size(); k++) same = vtSame(gTestFiles[r2->path], ck[k], srcFrames[10 + k]);
+    chkf(r2 && !strcmp(r2->name, "Cumple (editado 2).avi") && same,
+         "recortar sin tocar la imagen copia los fotogramas 10..19 BYTE A BYTE (%d)", (int)ck.size()); }
+
+  // ---- GUARDAR LAS PARTES por separado ----
+  vedOpen(id); vtRun();
+  flexVeSplit(vedE, 12); vedApplied();
+  vtBar(2);
+  int n1 = gMs.lib.n;
+  vtSheet(2);
+  vtPump(); vtIdle();
+  chk(gMs.lib.n == n1 + 2 && !strcmp(gMs.lib.recs[gMs.lib.n - 2].name, "Cumple (parte 1).avi") &&
+      !strcmp(gMs.lib.recs[gMs.lib.n - 1].name, "Cumple (parte 2).avi") && vtNoTemps(),
+      "Guardar las 2 partes: dos videos nuevos, cada uno con su nombre");
+  { auto c1 = vtVideoChunks(gTestFiles[gMs.lib.recs[gMs.lib.n - 2].path]), c2 = vtVideoChunks(gTestFiles[gMs.lib.recs[gMs.lib.n - 1].path]);
+    chkf(c1.size() == 12 && c2.size() == 18, "la parte 1 son los fotogramas 0..11 y la 2, 12..29 (%d + %d)", (int)c1.size(), (int)c2.size()); }
+  // Sitio en el catalogo para lo que sigue.
+  while(gMs.lib.n > 3){ uint32_t d = vtLastId(); mlDelete(d); }
+
+  // ---- CANCELAR A MITAD: al 10, al 50 y al 90 % de lo escrito ----
+  vedOpen(id); vtRun();
+  flexVeRotate(vedE, 1); vedApplied();                  // recodificar: una exportacion con trabajo de verdad
+  long w0 = gTestFsWritten;
+  vtBar(2); vtSheet(0); vtPump(); vtIdle();
+  long total = gTestFsWritten - w0;
+  uint32_t last = vtLastId();
+  chk(total > 2000 && geRec(last) && vedPhase == VED_OFF, "exportacion de referencia (girada)");
+  mlDelete(last);
+  vedOpen(id); vtRun();
+  flexVeRotate(vedE, 1); vedApplied();
+  size_t psE = gPsUsed;
+  gTestFsOnWrite = vtOnWrite;
+  const int pcts[3] = { 10, 50, 90 };
+  for(int k = 0; k < 3; k++){
+    int nb = gMs.lib.n;
+    vtCancelAt = gTestFsWritten + total * pcts[k] / 100;
+    vtBar(2); vtSheet(0); vtPump(); vtIdle();
+    chkf(vedPhase == VED_EDIT && mmDlgOn && vedAsk == VA_INFO && gMs.lib.n == nb && vtNoTemps() &&
+         gTestFiles[FML_DIR_VIDEO "/Cumple.avi"] == avi && vedE->p.rot == 1,
+         "cancelar al %d %%: nada publicado, el temporal fuera, el original igual y se sigue editando", pcts[k]);
+    chkf(gPsUsed == psE, "cancelar al %d %% suelta la memoria de la exportacion", pcts[k]);
+    vtDlgOk();
+    chk(!mmDlgOn && vedPhase == VED_EDIT, "Aceptar vuelve al editor");
+  }
+  gTestFsOnWrite = nullptr;
+  // Cancelar con ATRAS durante la exportacion.
+  { int nb = gMs.lib.n;
+    vtBar(2); vtSheet(0);
+    chk(galBackLayer() && vedLd(&vedS.cancel), "ATRAS mientras exporta pide cancelar (no sale del editor a medias)");
+    vtPump(); vtIdle();
+    chk(vedPhase == VED_EDIT && gMs.lib.n == nb && vtNoTemps(), "y cancela limpio");
+    if(mmDlgOn) vtDlgOk(); }
+  // Fallo de escritura a mitad.
+  gTestFsFailWriteAt = gTestFsWritten + total / 2;
+  vtBar(2); vtSheet(0); vtPump(); vtIdle();
+  chk(vedPhase == VED_EDIT && mmDlgOn && vtNoTemps() && gTestFiles[FML_DIR_VIDEO "/Cumple.avi"] == avi,
+      "el disco falla a mitad: el original intacto, sin restos, y se avisa");
+  gTestFsFailWriteAt = -1;
+  if(mmDlgOn) vtDlgOk();
+  // Sin espacio: ni se empieza.
+  { uint32_t cap0 = gTestFsCap; gTestFsCap = flexFsUsedBytes() + 2000;
+    vtBar(2); vtSheet(0);
+    chk(vedPhase == VED_EDIT && !vedJobRunning() && mmDlgOn && strstr(mmDlgText, "Libera espacio") != NULL,
+        "sin espacio: no se empieza a escribir y se dice cuanto falta");
+    gTestFsCap = cap0; if(mmDlgOn) vtDlgOk(); }
+
+  // ---- REEMPLAZAR EL ORIGINAL (con confirmacion) ----
+  flexVeTrimLive(vedE, 1, 20); flexVeCommit(vedE); vedApplied();
+  vtBar(2); vtSheet(1);
+  chk(mmDlgOn && vedAsk == VA_REPLACE && vedPhase == VED_EDIT, "Reemplazar pide confirmacion antes de tocar nada");
+  vtDlgPrimary();
+  chk(vedPhase == VED_EXPORTING, "confirmado: se exporta");
+  vtPump(); vtIdle();
+  const FlexMlRec* ro = geRec(id);
+  { FlexVeSource s; int prc = ro ? vtProbe(gTestFiles[ro->path], &s) : -1;
+    chkf(ro && !strcmp(ro->path, FML_DIR_VIDEO "/Cumple.avi") && prc == FLEXVE_OK && s.frames == 20 && s.w == 64 && s.h == 96 &&
+         ro->size == gTestFiles[ro->path].size() && vtNoTemps() && vedPhase == VED_OFF,
+         "reemplazado: misma id y ruta, contenido nuevo (%u fotogramas, %dx%d)", s.frames, s.w, s.h); }
+  avi = gTestFiles[FML_DIR_VIDEO "/Cumple.avi"];
+
+  // ---- ACCESO 2: el boton Editar de la barra del visor (solo en la Galeria) ----
+  galRender();
+  galOpenId(id);
+  chk(vwActiveFor(&GAL_VW) && vwKind == VWK_VIDEO && vwCanEdit, "el visor de la Galeria abre el video con Editar");
+  vwBarsShow(true); gTestMs += VW_FADE_MS + 20; vwBarsTick();
+  { VwVidBtns bt; vwVidBtns(bt);
+    chk(bt.editX > 0 && vwHitBtn(bt.editX, bt.cy) == VWB_EDIT && vwHitBtn(bt.playX, bt.cy) == VWB_PLAY &&
+        vwHitBtn(bt.backX, bt.cy) == VWB_BACK10, "Editar va a la izquierda de la barra, sin pisar los controles");
+    uint32_t t1 = gPinnedTaskCreates;
+    vwDoBtn(VWB_EDIT, bt.editX);
+    chk(vedPhase == VED_OPENING && gPinnedTaskCreates == t1 + 1 && !vwActiveFor(&GAL_VW) && gLand == false,
+        "Editar en el visor abre EL MISMO editor (y el visor suelta su memoria)"); }
+  vtRun();
+  chk(vedPhase == VED_EDIT && vedM->src.frames == 20, "el editor abierto desde el visor tiene el video (20 fotogramas)");
+  vtIdle();
+  chk(galBackLayer() && vedPhase == VED_OFF, "ATRAS sin cambios: fuera del editor, sin preguntar");
+  vtIdle();
+  chk(vwActiveFor(&GAL_VW) && vwKind == VWK_VIDEO, "y se vuelve al visor, al mismo video");
+  vwClose();
+  // En Multimedia el mismo visor no ofrece Editar.
+  vwOpen(&VID_VW, id, NULL, NULL);
+  { VwVidBtns bt; vwVidBtns(bt); int bx, by, bw, bh; vwBotGeom(bx, by, bw, bh);
+    chk(!vwCanEdit && bt.editX < 0 && vwHitBtn(bx + 40, bt.cy) != VWB_EDIT, "Multimedia: el visor del video no tiene Editar"); }
+  vwClose();
+  gAppId = IC_GALERIA; gState = ST_APP; mkBind(&GAL_APP);
+
+  // ---- NAVEGACION RAPIDA: Galeria > video > editor > atras > video > editor ----
+  galRender();
+  size_t psNav = gPsUsed;
+  uint32_t tNav = gPinnedTaskCreates;
+  bool navOk = true;
+  for(int k = 0; k < 10; k++){
+    galOpenId(id);
+    VwVidBtns bt; vwBarsShow(true); gTestMs += VW_FADE_MS + 20; vwBarsTick(); vwVidBtns(bt);
+    vwDoBtn(VWB_EDIT, bt.editX);
+    if(k & 1) vtRun();                                    // la mitad de las veces, ATRAS antes de que acabe de abrir
+    navOk = navOk && vedActive() && !gedActive();
+    galBackLayer();                                       // abriendo: cancela; abierto: sale
+    vtPump(); vtIdle();
+    navOk = navOk && !vedActive();
+    if(vwActiveFor(&GAL_VW)) vwClose();
+  }
+  galRender();
+  chkf(navOk && !vedActive() && gPinnedTaskCreates == tNav + 10 && !vedS.started,
+       "10 vueltas rapidas visor <-> editor: un editor cada vez, ningun trabajador huerfano (%u)", gPinnedTaskCreates - tNav);
+  if(gPsUsed != psNav) printf("  (PSRAM sin devolver: %d bytes)\n", (int)(gPsUsed - psNav));
+  chk(gPsUsed == psNav, "y la PSRAM vuelve exactamente al punto de partida");
+
+  // ---- ABRIR Y CERRAR 25 VECES (sin fugas) ----
+  { size_t p0 = gPsUsed; bool all = true;
+    for(int k = 0; k < 25; k++){
+      all = all && vedOpen(id);
+      vtRun();
+      if(k % 3 == 0){ flexVeRotate(vedE, 1); vedApplied(); galBackLayer(); if(mmDlgOn) vtDlgPrimary(); }   // con cambios: Descartar
+      else galBackLayer();
+      all = all && !vedActive();
+    }
+    galRender();
+    chkf(all && gPsUsed == p0 && vtNoTemps(), "abrir, editar y descartar 25 veces: sin fugas (%d bytes)", (int)(gPsUsed - p0)); }
+
+  // ---- PROTEGIDO O BORRADO CON EL EDITOR ABIERTO ----
+  vedOpen(id); vtRun();
+  { char why[96];
+    chk(mlSetLock(id, true, why, sizeof(why)), "bloquear el video (con el editor abierto)");
+    vtIdle();
+    chk(vedPhase == VED_OFF && !vedM && mmDlgOn, "el editor se cierra, suelta todo y lo dice");
+    mmDlgOn = false; vedAsk = VA_NONE;
+    chk(mlSetLock(id, false, why, sizeof(why)), "desbloquear");
+    // ...y si se protege mientras EXPORTA, no sale nada.
+    vedOpen(id); vtRun();
+    flexVeRotate(vedE, 1); vedApplied();
+    vtBar(2); vtSheet(0);
+    vtPump();                                             // el trabajador acaba...
+    int nb = gMs.lib.n;
+    mlSetLock(id, true, why, sizeof(why));                // ...y el video se bloquea antes de publicar
+    vtIdle();
+    chk(gMs.lib.n == nb && vtNoTemps() && vedPhase == VED_OFF, "protegido a mitad de exportar: no se publica nada y el temporal se borra");
+    mmDlgOn = false; vedAsk = VA_NONE;
+    mlSetLock(id, false, why, sizeof(why)); }
+  // Otra app lo mueve a la papelera mientras se edita: se cancela lo que haya y se cierra.
+  { vedOpen(id); vtRun();
+    flexVeRotate(vedE, 1); vedApplied();
+    vtBar(2); vtSheet(0);                                 // exportando cuando llega el cambio
+    FlexMlRec keep = *geRec(id); auto keepFile = gTestFiles[keep.path];
+    chk(mlTrash(id), "a la papelera desde otra app");
+    chk(vedLd(&vedS.cancel) && vedExtCancel, "antes de moverlo, el editor suelta el archivo y corta la exportacion");
+    vtPump(); vtIdle();
+    chk(vedPhase == VED_OFF && vtNoTemps(), "y se cierra sin dejar nada");
+    mmDlgOn = false; vedAsk = VA_NONE;
+    geFsReset();                                          // biblioteca limpia para lo que sigue
+    mkReset(); galViewReady = false;
+    avi = keepFile;
+    id = vtAddVideo(FML_DIR_VIDEO "/Cumple.avi", avi, 64, 96, false); }
+
+  // ---- MEMORIA: sin PSRAM no se abre (ni se reserva nada) ----
+  galRender();
+  { size_t p0 = gPsUsed;
+    gTestPsPressure = gTestPsTotal - gPsUsed - 1024u * 1024u;
+    chk(!vedOpen(id) && mmDlgOn && !vedActive() && gPsUsed == p0, "sin memoria: se dice y no se reserva nada");
+    mmDlgOn = false; gTestPsPressure = 0;
+    gTestPsFail = true;
+    chk(!vedOpen(id) && mmDlgOn && !vedActive() && gPsUsed == p0, "una reserva que falla: se deshace lo reservado y se dice");
+    mmDlgOn = false; gTestPsFail = false;
+    size_t in0 = gTestInFree; gTestInFree = 32u * 1024u;
+    chk(!vedOpen(id) && mmDlgOn && !vedActive() && gPsUsed == p0, "sin RAM interna para la pila del trabajador: no se lanza");
+    mmDlgOn = false; gTestInFree = in0; }
+
+  // ---- SOLTAR EN SEGUNDO PLANO Y VOLVER: los cambios se quedan ----
+  vedOpen(id); vtRun();
+  flexVeRotate(vedE, 1); flexVeTrimLive(vedE, 0, 4); flexVeCommit(vedE); vedApplied();
+  { int curB = vedE->cur; size_t pEdit = gPsUsed;
+    gAppState[IC_GALERIA] = ALIFE_SUSPENDED; galSuspend();
+    size_t shed = galShed();
+    chk(shed > 0 && !vedBase && vedReopen && vedE && !vedS.started && gPsUsed < pEdit,
+        "suspendida: fotogramas y miniaturas fuera, el trabajador tambien; los cambios se quedan");
+    gAppState[IC_GALERIA] = ALIFE_RUNNING; galResume();
+    chk(vedPhase == VED_OPENING && vedS.started, "al volver se relee (con su trabajador)");
+    vtRun();
+    chk(vedPhase == VED_EDIT && vedE->p.rot == 1 && vedE->p.seg[0].a == 4 && vedE->cur == curB && vedBaseW > 0,
+        "releido: mismas ediciones y mismo historial"); }
+
+  // ---- EXPORTAR CON LA GALERIA EN SEGUNDO PLANO: lo publica loop() ----
+  { int nb = gMs.lib.n;
+    vtBar(2); vtSheet(0);
+    gAppState[IC_GALERIA] = ALIFE_SUSPENDED; galSuspend();
+    chk(galBgWork(), "exportando: trabajo real en segundo plano (no se desaloja la Galeria)");
+    vtPump();
+    gTestMs += 1000; vtMs = gTestMs;
+    vedBgTick();
+    chk(gMs.lib.n == nb + 1 && vedPhase == VED_OFF && !galBgWork(), "loop() publica la copia aunque la Galeria no este delante");
+    gAppState[IC_GALERIA] = ALIFE_RUNNING; }
+
+  // ---- UN TRABAJADOR QUE NO TERMINA: nada se suelta antes de tiempo ----
+  vedOpen(id); vtRun();
+  { VedMem* stuck = vedM;
+    vedS.task = (TaskHandle_t)0x1;                        // "hay hilo" y no responde
+    vedCloseNow();
+    chk(vedPhase == VED_OFF && vedLeak && vedM == stuck, "cerrar con el trabajador colgado: no se suelta lo que usa");
+    chk(!vedOpen(id) && mmDlgOn, "y el editor no se reabre encima: 'Editor ocupado'");
+    mmDlgOn = false;
+    vedSt(&vedS.exited, 1);                               // por fin sale
+    gTestMs += 1000; vedBgTick();
+    chk(!vedLeak && !vedM && !vedS.started, "cuando sale, loop() recoge su memoria");
+    chk(vedOpen(id) && vedPhase == VED_OPENING, "y el editor vuelve a abrir");
+    vtRun(); galBackLayer(); }
+
+  // ---- NOMBRES ----
+  vedOpen(id); vtRun();
+  { char nm[FML_NAME_MAX];
+    snprintf(vedM->name, sizeof(vedM->name), "%s", "Cumple (parte 2).avi");
+    vedFreeName(nm, sizeof(nm), 0);
+    chkf(!strcmp(nm, "Cumple (editado).avi") || !strcmp(nm, "Cumple (editado 2).avi"), "la copia de una parte no encadena sufijos (%s)", nm);
+    snprintf(vedM->name, sizeof(vedM->name), "%s", "Viaje de fin de curso con toda la clase y los profesores, verano de 2026.avi");
+    vedFreeName(nm, sizeof(nm), 3);
+    size_t L = strlen(nm);
+    const size_t S = strlen(" (parte 3).avi");
+    chkf(L < sizeof(nm) && L > S && !strcmp(nm + L - S, " (parte 3).avi") && !strncmp(nm, "Viaje de fin de curso", 21),
+         "nombre largo: se acorta el nombre, no el sufijo (%s)", nm); }
+  galBackLayer();
+
+  galRender();
+  chk(!vedActive() && !gedActive() && vtNoTemps(), "al final: ningun editor abierto ni temporal en el disco");
+  if(gFails == before) printf("  Editor de video: todas las comprobaciones pasan.\n");
+  mkReset();
+  uiGlass = glass0; gNavMode = nav0;
+  gMlOk = ok0; gTestFsReady = fs0; gTestMemFs = false; gTestFiles.clear();
+  memset(&gMs, 0, sizeof(gMs));
+  gState = ST_HOME; gAppId = 0; gAppState[IC_GALERIA] = ALIFE_CLOSED; gLand = false; uiClipFull();
+  touchReset();
+}
+
+
+// Videos GRANDES (2, 3 y 5 MB): se abren sin leerlos enteros, se exportan
+// por trozos y la memoria pico no depende del tamano del archivo.
+static std::vector<uint8_t> vtNoisyFrame(int W, int H, uint32_t seed){
+  std::vector<uint8_t> px((size_t)W * H * 3), out;
+  uint32_t r = seed * 2654435761u + 1u;
+  for(size_t i = 0; i < px.size(); i++){ r = r * 1664525u + 1013904223u; px[i] = (uint8_t)(r >> 24); }
+  for(int y = 0; y < H / 2; y++) for(int x = 0; x < W / 2; x++){ uint8_t* q = &px[((size_t)y * W + x) * 3]; q[0] = 225; q[1] = 30; q[2] = 30; }
+  FlexJeCfg c; c.width = W; c.height = H; c.quality = 92; c.subsampling = FLEXJE_SUB_420; c.input = FLEXJE_IN_RGB888;
+  flexJpegEncodeMem(&c, px.data(), (size_t)W * 3, geOut, &out, nullptr, nullptr);
+  return out;
+}
+static std::vector<uint8_t> vtBigAvi(const std::vector<std::vector<uint8_t>>& pool, int n, int W, int H){
+  std::vector<uint8_t> avih; vtU32(avih, 40000); vtU32(avih, 0); vtU32(avih, 0); vtU32(avih, 0x10); vtU32(avih, (uint32_t)n); vtU32(avih, 0);
+  vtU32(avih, 1); vtU32(avih, 0); vtU32(avih, (uint32_t)W); vtU32(avih, (uint32_t)H); for(int i = 0; i < 4; i++) vtU32(avih, 0);
+  std::vector<uint8_t> vh; vtCc(vh, "vids"); vtCc(vh, "MJPG"); vtU32(vh, 0); vtU16(vh, 0); vtU16(vh, 0); vtU32(vh, 0);
+  vtU32(vh, 1); vtU32(vh, 25); vtU32(vh, 0); vtU32(vh, (uint32_t)n); vtU32(vh, 65536); vtU32(vh, 0); vtU32(vh, 0); vtU32(vh, 0); vtU32(vh, 0);
+  std::vector<uint8_t> vf; vtU32(vf, 40); vtU32(vf, (uint32_t)W); vtU32(vf, (uint32_t)H); vtU16(vf, 1); vtU16(vf, 24); vtCc(vf, "MJPG");
+  for(int i = 0; i < 5; i++) vtU32(vf, 0);
+  std::vector<uint8_t> vstrl = vtChunk("strh", vh); { auto t = vtChunk("strf", vf); vstrl.insert(vstrl.end(), t.begin(), t.end()); }
+  std::vector<uint8_t> hdrl = vtChunk("avih", avih); { auto t = vtList("strl", vstrl); hdrl.insert(hdrl.end(), t.begin(), t.end()); }
+  std::vector<uint8_t> movi, idx1;
+  movi.reserve((size_t)n * (pool[0].size() + 16));
+  for(int i = 0; i < n; i++){
+    const auto& fr = pool[(size_t)i % pool.size()];
+    uint32_t off = 4u + (uint32_t)movi.size();
+    auto c = vtChunk("00dc", fr); movi.insert(movi.end(), c.begin(), c.end());
+    vtCc(idx1, "00dc"); vtU32(idx1, 0x10); vtU32(idx1, off); vtU32(idx1, (uint32_t)fr.size());
+  }
+  std::vector<uint8_t> body = vtList("hdrl", hdrl);
+  { auto t = vtList("movi", movi); body.insert(body.end(), t.begin(), t.end()); }
+  { auto t = vtChunk("idx1", idx1); body.insert(body.end(), t.begin(), t.end()); }
+  std::vector<uint8_t> out; vtCc(out, "RIFF"); vtU32(out, (uint32_t)body.size() + 4); vtCc(out, "AVI ");
+  out.insert(out.end(), body.begin(), body.end());
+  return out;
+}
+extern unsigned gTestFsStreamReads;
+static double vtNowMs(){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6; }
+extern size_t gPsPeak;
+static void testEditorVideoGrande(){
+  printf("Editor de video: videos de 2, 3 y 5 MB (sin leerlos enteros, memoria pico acotada)\n");
+  int before = gFails;
+  bool ok0 = gMlOk; bool fs0 = gTestFsReady; bool glass0 = uiGlass; int nav0 = gNavMode;
+  gTestFsReady = true; uiGlass = false; gNavMode = 0;
+  geFsReset();
+  gTestFsCap = 48u << 20;
+  vtMs = 60000000; gTestMs = vtMs;
+  gState = ST_APP; gAppId = IC_GALERIA; gAppState[IC_GALERIA] = ALIFE_RUNNING; gLand = false; gHosted = false;
+  gAppW = SCR_W; gAppH = SCR_H; uiClipFull(); setBuf(fb);
+  mkBind(&GAL_APP); mkReset(); galViewReady = false; galScroll = 0; galTab = 0;
+  mlTables();
+  if(!glassBuf) glassBuf = (uint16_t*)heap_caps_malloc((size_t)SCR_W * SCR_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  glcBuild(16, 16, 4, TH_GLASS, TH_PAGE);
+  galRender();
+  const int W = 320, H = 240;
+  std::vector<std::vector<uint8_t>> pool;
+  for(int k = 0; k < 4; k++) pool.push_back(vtNoisyFrame(W, H, 7u + k));
+  size_t avg = 0; for(auto& f : pool) avg += f.size(); avg /= pool.size();
+  const int MB[3] = { 2, 3, 5 };
+  size_t peaks[3] = { 0, 0, 0 };
+  for(int t = 0; t < 3; t++){
+    int n = (int)(((size_t)MB[t] << 20) / (avg + 16));
+    auto avi = vtBigAvi(pool, n, W, H);
+    char path[48]; snprintf(path, sizeof(path), FML_DIR_VIDEO "/Grande%d.avi", MB[t]);
+    uint32_t id = vtAddVideo(path, avi, W, H, false);
+    galRender();
+    size_t ps0 = gPsUsed;
+    unsigned readsBefore = gTestFsStreamReads;
+    gPsPeak = gPsUsed;
+    chk(vedOpen(id), "abrir el video grande");
+    vtRun();
+    chkf(vedPhase == VED_EDIT && vedM->src.frames == (uint32_t)n && vedFrameCap >= vedM->src.maxFrame && vedFrameCap < vedM->src.maxFrame + 4096u,
+         "%d MB (%u fotogramas): se analiza y el buffer del fotograma es el del mayor (%u B), una vez", MB[t], vedM ? vedM->src.frames : 0u, vedFrameCap);
+    // Recortar a la mitad central: copia sin recodificar.
+    flexVeTrimLive(vedE, 0, (uint32_t)n / 4); flexVeTrimLive(vedE, 1, (uint32_t)n * 3 / 4); flexVeCommit(vedE); vedApplied();
+    vtBar(2); vtSheet(0);
+    double t0 = vtNowMs();
+    vtPump();
+    double ms = vtNowMs() - t0;
+    vtIdle();
+    const FlexMlRec* rc = geRec(vtLastId());
+    auto ck = rc && rc->id != id ? vtVideoChunks(gTestFiles[rc->path]) : std::vector<VtCk>();
+    bool same = ck.size() == (size_t)(n * 3 / 4 - n / 4);
+    for(size_t k = 0; same && k < ck.size(); k += 17) same = vtSame(gTestFiles[rc->path], ck[k], pool[(size_t)(n / 4 + k) % pool.size()]);
+    chkf(same && vedPhase == VED_OFF && vtNoTemps(), "%d MB: la mitad central sale copiada byte a byte (%d fotogramas, %.0f ms en el PC)",
+         MB[t], (int)ck.size(), ms);
+    if(t == 2){
+      // Recodificar (girado) la mitad central: memoria de exportar acotada.
+      vedOpen(id); vtRun();
+      uint32_t a = (uint32_t)n / 4, b = (uint32_t)n * 3 / 4;
+      flexVeTrimLive(vedE, 0, a); flexVeTrimLive(vedE, 1, b); flexVeCommit(vedE);
+      flexVeRotate(vedE, 1); vedApplied();
+      vtBar(2); vtSheet(0);
+      t0 = vtNowMs(); vtPump(); ms = vtNowMs() - t0;
+      vtIdle();
+      const FlexMlRec* r2 = geRec(vtLastId());
+      FlexVeSource s; int prc = r2 ? vtProbe(gTestFiles[r2->path], &s) : -1;
+      chkf(prc == FLEXVE_OK && s.frames == b - a && s.w == 240 && s.h == 320 && vtNoTemps(),
+           "5 MB: la mitad central girada y recodificada (%u fotogramas %dx%d, %.1f ms/fotograma en el PC)",
+           s.frames, s.w, s.h, ms / (double)(b - a));
+    }
+    peaks[t] = gPsPeak - ps0;
+    galRender();
+    if(gPsUsed != ps0) printf("  (PSRAM sin devolver: %d bytes)\n", (int)(gPsUsed - ps0));
+    chkf(gPsUsed == ps0, "%d MB: cerrar devuelve TODA la PSRAM", MB[t]);
+    chkf(peaks[t] < avi.size() / 2, "%d MB: el archivo nunca esta entero en memoria (pico %u KB)", MB[t], (unsigned)(peaks[t] / 1024u));
+    (void)readsBefore;
+    // Sitio en el disco y en el catalogo para el siguiente.
+    while(gMs.lib.n > 0){ mlDelete(vtLastId()); }
+  }
+  printf("  [video] memoria pico sobre la del sistema: %u KB (2 MB), %u KB (3 MB), %u KB (5 MB, con recodificar)\n",
+         (unsigned)(peaks[0] / 1024u), (unsigned)(peaks[1] / 1024u), (unsigned)(peaks[2] / 1024u));
+  chkf(peaks[1] < peaks[0] + 256u * 1024u, "la memoria pico NO crece con el tamano del archivo (%u KB -> %u KB)",
+       (unsigned)(peaks[0] / 1024u), (unsigned)(peaks[1] / 1024u));
+  if(gFails == before) printf("  Videos grandes: todas las comprobaciones pasan.\n");
+  mkReset();
+  uiGlass = glass0; gNavMode = nav0;
+  gMlOk = ok0; gTestFsReady = fs0; gTestMemFs = false; gTestFiles.clear(); gTestFsCap = 16u << 20;
+  memset(&gMs, 0, sizeof(gMs));
+  gState = ST_HOME; gAppId = 0; gAppState[IC_GALERIA] = ALIFE_CLOSED; gLand = false; uiClipFull();
+  touchReset();
+}
+
 // Capturas del editor (solo con INO_SHOTS=1): una "foto" sintetica de playa.
 static std::vector<uint8_t> geBeach(int W, int H){
   std::vector<uint8_t> px((size_t)W * H * 3), out;
@@ -9633,6 +10357,8 @@ int main(){
   testMusica();
   testCapturasMedios();
   testEditorGaleria();
+  testEditorVideoGaleria();
+  testEditorVideoGrande();
   testCapturasEditor();
   testVisorMedios();
   testVideoRobusto();

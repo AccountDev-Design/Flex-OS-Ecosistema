@@ -55,6 +55,9 @@ std::map<std::string, std::vector<uint8_t>> gTestFiles;
 uint32_t gTestFsCap = 16u << 20;               // capacidad de la particion en memoria
 long     gTestFsFailWriteAt = -1;              // >= 0: una escritura que pase de aqui falla
 long     gTestFsWritten = 0;
+// La prueba mira cada escritura que sale bien (p. ej. para pedir Cancelar a
+// mitad de una exportacion, en el punto exacto que quiera).
+void   (*gTestFsOnWrite)(long written) = nullptr;
 struct FlexFsStream { std::string path; uint32_t pos; };
 static uint32_t memFsUsed(){ uint32_t u = 0; for(auto& kv : gTestFiles) u += (uint32_t)kv.second.size(); return u; }
 static bool memFsHas(const char* p){ return gTestMemFs && p && gTestFiles.count(p); }
@@ -226,6 +229,7 @@ bool     flexFsStreamWrite(FlexFsStream* s, const void* b, size_t n){
   if(s->pos + n > f.size()) f.resize(s->pos + n);
   memcpy(f.data() + s->pos, b, n);
   s->pos += (uint32_t)n; gTestFsWritten += (long)n;
+  if(gTestFsOnWrite) gTestFsOnWrite(gTestFsWritten);
   return true;
 }
 bool     flexFsStreamSeek(FlexFsStream* s, uint32_t off){
