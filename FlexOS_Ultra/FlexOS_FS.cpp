@@ -896,6 +896,20 @@ FlexFsStream* flexFsOpenWrite(const char* path){
   return s;
 }
 
+FlexFsStream* flexFsOpenAppend(const char* path){
+  FsMut fsm;                              // cambia el disco: la cifra de usado ya no vale
+  if(!fsMounted || !path || path[0] != '/') return nullptr;
+  char dir[FLEXFS_PATH_MAX];
+  parentDir(path, dir, sizeof(dir));
+  if(!mkdirsTo(dir)) return nullptr;
+  File f = LittleFS.open(path, "a");
+  if(!f) return nullptr;
+  FlexFsStream* s = new (std::nothrow) FlexFsStream();
+  if(!s){ f.close(); return nullptr; }
+  s->f = f;
+  return s;
+}
+
 int flexFsStreamRead(FlexFsStream* s, void* buf, size_t n){
   if(!s || !s->f || (!buf && n)) return -1;
   if(n == 0) return 0;

@@ -57,7 +57,7 @@ BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test
         $(BUILD)/test_medialib $(BUILD)/test_jpegenc $(BUILD)/test_httpshare $(BUILD)/test_qr \
         $(BUILD)/test_mediathumb $(BUILD)/test_mediaweb $(BUILD)/test_fs $(BUILD)/test_mediastore $(BUILD)/test_imgedit $(BUILD)/test_videdit \
         $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg \
-        $(BUILD)/test_fuzzmedia $(BUILD)/test_account
+        $(BUILD)/test_fuzzmedia $(BUILD)/test_account $(BUILD)/test_cloudcore
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun $(BUILD)/mediacheck $(BUILD)/flexweb_host
 
 .PHONY: all run all-boards fixtures clean ino web
@@ -333,6 +333,13 @@ NETHDRS  := $(wildcard netstub/*.h netstub/freertos/*.h)
 ACCT_SRC := $(ULTRA)/FlexOS_Account.cpp $(ULTRA)/FlexOS_CloudTLS.cpp
 $(BUILD)/test_account: test_account.cpp pkgbuild.h $(ACCT_SRC) $(ULTRA)/FlexOS_Account.h $(ULTRA)/FlexOS_CloudTLS.h $(NETSTUB) $(NETHDRS) | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) $(NETFLAGS) -o $@ test_account.cpp $(ACCT_SRC) $(NETSTUB) $(CJSON) -lcrypto
+
+# --- FLEX CLOUD: nucleo portable (respuestas de la API, diario, cache) -----
+# Lee bytes que llegan de internet: CON sanitizers. SHA-256 por OpenSSL aqui y
+# por mbedTLS (acelerador del P4) en la placa, mismo patron que AppGrant.
+CLCORE := $(ULTRA)/FlexOS_CloudCore.cpp
+$(BUILD)/test_cloudcore: test_cloudcore.cpp $(CLCORE) $(ULTRA)/FlexOS_CloudCore.h | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(INC) -Ivendor/cJSON -o $@ test_cloudcore.cpp $(CLCORE) $(CJSON) -lcrypto
 
 # --- Flex Link / Flex Phone: protocolo y modelo del telefono ---
 # Nucleo PURO (sin Arduino), asi que se compila igual que el del
@@ -636,6 +643,8 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_flexpkg
 	@echo
 	@$(BUILD)/test_account
+	@echo
+	@$(BUILD)/test_cloudcore
 	@echo
 	@$(BUILD)/test_browser
 	@echo

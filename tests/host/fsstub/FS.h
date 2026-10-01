@@ -59,18 +59,20 @@ extern std::map<std::string, FsNode> gFs;
 class File {
  public:
   File() {}
-  File(const std::string& path, bool write) : path_(path) {
+  // mode: 'r' leer, 'w' crear/truncar, 'a' anadir al final (crea si falta).
+  File(const std::string& path, bool write) : File(path, write ? 'w' : 'r') {}
+  File(const std::string& path, char mode) : path_(path) {
     auto it = gFs.find(path);
-    if (write) {
-      // Crear/truncar. El padre tiene que existir y ser un directorio.
+    if (mode == 'w' || mode == 'a') {
+      // El padre tiene que existir y ser un directorio.
       std::string parent = path.substr(0, path.find_last_of('/'));
       if (!parent.empty()) {
         auto p = gFs.find(parent);
         if (p == gFs.end() || !p->second.dir) return;
       }
       if (it != gFs.end() && it->second.dir) return;
-      FsNode n; n.dir = false;
-      gFs[path] = n;
+      if (mode == 'w' || it == gFs.end()) { FsNode n; n.dir = false; gFs[path] = n; }
+      if (mode == 'a') pos_ = gFs[path].data.size();
       open_ = true;
       return;
     }
@@ -163,7 +165,7 @@ class FlexFsStub {
   void end() {}
   bool format() { gFs.clear(); return true; }
   File open(const char* path, const char* mode = "r") {
-    return File(path, mode && mode[0] == 'w');
+    return File(std::string(path), (mode && (mode[0] == 'w' || mode[0] == 'a')) ? mode[0] : 'r');
   }
   bool exists(const char* path) { return gFs.count(path) != 0; }
   bool mkdir(const char* path) {

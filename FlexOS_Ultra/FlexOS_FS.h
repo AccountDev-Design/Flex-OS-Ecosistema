@@ -246,6 +246,9 @@ int      flexFsReadAt(const char* path, uint32_t off, void* buf, size_t n);
 struct FlexFsStream;
 FlexFsStream* flexFsOpenRead(const char* path);            // NULL si no existe o es carpeta
 FlexFsStream* flexFsOpenWrite(const char* path);           // crea (y su carpeta) o vacia; NULL si no
+// Abre para AÑADIR al final (crea el archivo y su carpeta si faltan). Es lo
+// que permite reanudar una descarga cortada sin volver a bajar lo que ya hay.
+FlexFsStream* flexFsOpenAppend(const char* path);
 // Bytes leidos, 0 al final, -1 si el flujo no vale.
 int      flexFsStreamRead(FlexFsStream* s, void* buf, size_t n);
 // Escribe TODO o devuelve false (sin espacio, flujo cerrado...).
