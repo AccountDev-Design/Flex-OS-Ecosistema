@@ -8,19 +8,53 @@
 #include <cJSON.h>
 #include <string.h>
 
+#include "FlexOS_CloudTLS.h"
 #include "FlexOS_OTA.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
-#include "mbedtls/bignum.h"
-#include "mbedtls/ecdsa.h"
-#include "mbedtls/ecp.h"
-#include "mbedtls/sha256.h"
-#include "mbedtls/version.h"
+
+// BACKEND CRIPTOGRAFICO. Mismo patron que FlexOS_AppGrant y FlexOS_Passcode:
+// en la placa mbedTLS (con el acelerador SHA del P4 por debajo), en el PC
+// OpenSSL. Las dos rutas comprueban EXACTAMENTE lo mismo sobre los mismos
+// bytes: asi este modulo, que antes no compilaba ninguna prueba, se ejecuta
+// entero en tests/host/test_account.cpp.
+#if defined(__has_include)
+#  if __has_include(<mbedtls/ecdsa.h>)
+#    define FXA_BACKEND_MBEDTLS 1
+#  elif __has_include(<openssl/evp.h>)
+#    define FXA_BACKEND_OPENSSL 1
+#  endif
+#endif
+#if !defined(FXA_BACKEND_MBEDTLS) && !defined(FXA_BACKEND_OPENSSL)
+#  error "FlexOS_Account: falta un backend criptografico (mbedTLS u OpenSSL)"
+#endif
+#if FXA_BACKEND_MBEDTLS
+#  include "mbedtls/bignum.h"
+#  include "mbedtls/ecdsa.h"
+#  include "mbedtls/ecp.h"
+#  include "mbedtls/sha256.h"
+#  include "mbedtls/version.h"
+#else
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#  include <openssl/bn.h>
+#  include <openssl/ec.h>
+#  include <openssl/ecdsa.h>
+#  include <openssl/evp.h>
+#  include <openssl/obj_mac.h>
+#  include <openssl/sha.h>
+#endif
 
 #ifndef FLEX_ACCOUNT_CODE_URL
 #define FLEX_ACCOUNT_CODE_URL "https://flex-developer-studio.ralvarezsantos980.chatgpt.site/api/devices/code"
+#endif
+// Validacion de la sesion: un GET autenticado con la credencial del aparato.
+// Lo atiende Flex Cloud (mismo dominio que Flex Developer Studio), que a su vez
+// pregunta a Flex Account: no hay un segundo sistema de identidad.
+#ifndef FLEX_ACCOUNT_SESSION_URL
+#define FLEX_ACCOUNT_SESSION_URL "https://flex-developer-studio.ralvarezsantos980.chatgpt.site/api/cloud/me"
 #endif
 
 namespace {
@@ -30,6 +64,14 @@ static const char* ACCOUNT_KEY_ID = "69b91cf7a9246cc2084dda73ccef77b2dc1a372b18f
 static const uint32_t HTTP_TIMEOUT_MS = 15000;
 static const uint32_t LINK_TIMEOUT_MS = 10UL * 60UL * 1000UL;
 static const size_t ENVELOPE_MAX = 8192;
+// Revalidacion periodica con la sesion ya validada: barata y rara. La que
+// importa es la del flanco "vuelve el Wi-Fi", que es inmediata.
+static const uint32_t REVALIDATE_MS = 6UL * 60UL * 60UL * 1000UL;
+// Espera tras conectar el Wi-Fi antes de la primera validacion: deja que DHCP,
+// DNS y NTP terminen y que el arranque no compita por la radio.
+static const uint32_t SETTLE_MS = 3000;
+// Un 401 de otro modulo pide revalidar, como mucho una vez por minuto.
+static const uint32_t REJECT_RATE_MS = 60000;
 
 // Misma clave publica anclada que Flex Store. La privada existe solamente en
 // Flex Developer Studio. Por eso el flujo de enlace sigue siendo autentico
@@ -43,6 +85,22 @@ static const uint8_t ACCOUNT_PUBLIC_KEY[65] = {
   0x05
 };
 
+#ifdef FLEXOS_HOST_TEST
+// Las pruebas firman con una clave EFIMERA (la privada de produccion solo
+// existe en Flex Developer Studio). En la placa esto no existe.
+static uint8_t gTestKey[65];
+static bool gTestKeySet = false;
+#endif
+static const uint8_t* accountKey(){
+#ifdef FLEXOS_HOST_TEST
+  if(gTestKeySet) return gTestKey;
+#endif
+  return ACCOUNT_PUBLIC_KEY;
+}
+
+// Valores de la clave "authst" (solo se escribe en las TRANSICIONES).
+enum : uint8_t { AUTHST_OK = 0, AUTHST_REQUIRED = 1, AUTHST_EXPIRED = 2 };
+
 static SemaphoreHandle_t gMutex = nullptr;
 static TaskHandle_t gTask = nullptr;
 static volatile bool gStartRequested = false;
@@ -50,9 +108,32 @@ static volatile bool gCancelRequested = false;
 static FlexAccountSnapshot gSnapshot;
 static char gRequestedLabel[49] = "FlexOS Ultra";
 static char gBearer[48] = "";          // 32 bytes codificados base64url = 43 caracteres
+static bool gHaveCredential = false;   // hay credencial guardada y cargada (independiente de la red)
 static char gRequestError[128] = "";
 static uint32_t gInstallationId = 0;    // distingue reinstalaciones del mismo P4
 static int gLastHttpStatus = 0;
+static uint8_t gAuthSt = AUTHST_OK;     // copia en RAM de "authst"
+
+// Estado de la validacion (solo lo toca la tarea de fondo, salvo las banderas).
+static bool gWasOnline = false;
+static volatile bool gValidateWanted = false;
+// Espera hasta el proximo intento como "desde cuando" + "cuanto": comparar
+// el TIEMPO TRANSCURRIDO sin signo sigue siendo correcto cuando millis() da
+// la vuelta. Antes se guardaba un instante absoluto y se comparaba con
+// (int32_t)(ahora - instante): a los 24,8 dias encendido esa resta cambiaba de
+// signo y la revalidacion quedaba bloqueada hasta la vuelta de los 49 dias.
+static volatile uint32_t gWaitFromMs = 0;
+static volatile uint32_t gWaitMs = 0;
+static uint32_t gLastAttemptMs = 0;
+static bool gAttempted = false;
+// Un Wi-Fi que entra y sale cada pocos segundos no puede convertirse en una
+// validacion cada pocos segundos: entre dos intentos pasan al menos 30 s.
+static const uint32_t MIN_ATTEMPT_GAP_MS = 30000;
+static uint8_t gFailures = 0;
+static uint32_t gLastVerifiedMs = 0;
+static bool gVerifiedThisBoot = false;
+static uint32_t gLastRejectMs = 0;
+static bool gRejectSeen = false;
 
 static void lock(){ if(gMutex) xSemaphoreTake(gMutex, portMAX_DELAY); }
 static void unlock(){ if(gMutex) xSemaphoreGive(gMutex); }
@@ -61,19 +142,33 @@ static void setStatus(FlexAccountState state, uint8_t progress, const char* stag
   lock();
   gSnapshot.state = state;
   gSnapshot.progress = progress;
-  gSnapshot.linked = (state == FLEX_ACCOUNT_LINKED);
+  gSnapshot.linked = gHaveCredential;
   snprintf(gSnapshot.stage, sizeof(gSnapshot.stage), "%s", stage ? stage : "");
   if(error) snprintf(gSnapshot.error, sizeof(gSnapshot.error), "%s", error);
   else if(state != FLEX_ACCOUNT_ERROR) gSnapshot.error[0] = 0;
   unlock();
 }
 
+static void setLink(FlexAccountLink link, const char* detail){
+  lock();
+  gSnapshot.link = link;
+  snprintf(gSnapshot.linkDetail, sizeof(gSnapshot.linkDetail), "%s", detail ? detail : "");
+  unlock();
+}
+
+// ---------------------------------------------------------------------------
+//  Criptografia (backend comun)
+// ---------------------------------------------------------------------------
 static bool sha256(const uint8_t* data, size_t len, uint8_t out[32]){
   if(!data || !out) return false;
-#if MBEDTLS_VERSION_NUMBER >= 0x03000000
+#if FXA_BACKEND_MBEDTLS
+#  if MBEDTLS_VERSION_NUMBER >= 0x03000000
   return mbedtls_sha256(data, len, out, 0) == 0;
-#else
+#  else
   return mbedtls_sha256_ret(data, len, out, 0) == 0;
+#  endif
+#else
+  return SHA256(data, len, out) != nullptr;
 #endif
 }
 
@@ -178,6 +273,7 @@ static bool base64UrlDecode(const char* text, uint8_t** out, size_t* outLen, siz
   return true;
 }
 
+#if FXA_BACKEND_MBEDTLS
 static bool verifySignature(const uint8_t* payload, size_t payloadLen, const uint8_t signature[64]){
   static const uint8_t P256_ORDER[32] = {
     0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
@@ -195,7 +291,7 @@ static bool verifySignature(const uint8_t* payload, size_t payloadLen, const uin
   mbedtls_mpi_init(&r); mbedtls_mpi_init(&s);
   mbedtls_mpi_init(&order); mbedtls_mpi_init(&halfOrder);
   int rc = mbedtls_ecp_group_load(&group, MBEDTLS_ECP_DP_SECP256R1);
-  if(rc == 0) rc = mbedtls_ecp_point_read_binary(&group, &key, ACCOUNT_PUBLIC_KEY, sizeof(ACCOUNT_PUBLIC_KEY));
+  if(rc == 0) rc = mbedtls_ecp_point_read_binary(&group, &key, accountKey(), sizeof(ACCOUNT_PUBLIC_KEY));
   if(rc == 0) rc = mbedtls_ecp_check_pubkey(&group, &key);
   if(rc == 0) rc = mbedtls_mpi_read_binary(&r, signature, 32);
   if(rc == 0) rc = mbedtls_mpi_read_binary(&s, signature + 32, 32);
@@ -208,6 +304,29 @@ static bool verifySignature(const uint8_t* payload, size_t payloadLen, const uin
   memset(digest, 0, sizeof(digest));
   return rc == 0;
 }
+#else
+// Ruta SOLO DE PC. Misma comprobacion sobre los mismos bytes (OpenSSL acepta
+// tambien S alto, que es la misma firma).
+static bool verifySignature(const uint8_t* payload, size_t payloadLen, const uint8_t signature[64]){
+  uint8_t digest[32];
+  if(!sha256(payload, payloadLen, digest)) return false;
+  bool ok = false;
+  EC_KEY* key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+  EC_POINT* pt = key ? EC_POINT_new(EC_KEY_get0_group(key)) : nullptr;
+  ECDSA_SIG* sig = ECDSA_SIG_new();
+  BIGNUM* r = BN_bin2bn(signature, 32, nullptr);
+  BIGNUM* s = BN_bin2bn(signature + 32, 32, nullptr);
+  if(key && pt && sig && r && s &&
+     EC_POINT_oct2point(EC_KEY_get0_group(key), pt, accountKey(), sizeof(ACCOUNT_PUBLIC_KEY), nullptr) == 1 &&
+     EC_KEY_set_public_key(key, pt) == 1 && ECDSA_SIG_set0(sig, r, s) == 1){
+    r = s = nullptr;                        // ahora son de sig
+    ok = ECDSA_do_verify(digest, 32, sig, key) == 1;
+  }
+  BN_free(r); BN_free(s);
+  ECDSA_SIG_free(sig); EC_POINT_free(pt); EC_KEY_free(key);
+  return ok;
+}
+#endif
 
 static bool signedPayload(const uint8_t* envelope, size_t envelopeLen, uint8_t** payload, size_t* payloadLen){
   *payload = nullptr; *payloadLen = 0;
@@ -232,16 +351,19 @@ static bool signedPayload(const uint8_t* envelope, size_t envelopeLen, uint8_t**
   return ok;
 }
 
-static bool readHttpBody(HTTPClient& http, uint8_t** out, size_t* outLen){
+// `honorCancel`: el flujo de enlace se puede cancelar; la validacion de la
+// sesion no depende de esa bandera.
+static bool readHttpBody(HTTPClient& http, uint8_t** out, size_t* outLen, bool honorCancel = true){
   *out = nullptr; *outLen = 0;
   int declared = http.getSize();
   if(declared > 0 && (size_t)declared > ENVELOPE_MAX) return false;
+  WiFiClient* stream = http.getStreamPtr();
+  if(!stream) return false;
   uint8_t* data = (uint8_t*)malloc(ENVELOPE_MAX + 1);
   if(!data) return false;
-  WiFiClient* stream = http.getStreamPtr();
   size_t used = 0; uint32_t last = millis();
   while(http.connected() || stream->available()){
-    if(gCancelRequested){ free(data); return false; }
+    if(honorCancel && gCancelRequested){ free(data); return false; }
     int available = stream->available();
     if(available > 0){
       size_t wanted = (size_t)available;
@@ -270,6 +392,11 @@ static bool copyJsonString(cJSON* object, const char* key, char* out, size_t cap
   }
   memcpy(out, value->valuestring, strlen(value->valuestring) + 1);
   return true;
+}
+
+static bool validAddress(const char* address){
+  size_t len = address ? strlen(address) : 0;
+  return len >= 6 && strstr(address, "@flex") == address + len - 5;
 }
 
 static bool parseCodePayload(const uint8_t* payload, size_t len, const char* expectedHash,
@@ -307,26 +434,53 @@ static PollResult parseStatusPayload(const uint8_t* payload, size_t len, char ad
     if(!strcmp(state->valuestring, "pending")) result = POLL_PENDING;
     else if(!strcmp(state->valuestring, "expired")) result = POLL_EXPIRED;
     else if(!strcmp(state->valuestring, "approved")){
-      size_t addressLen = 0;
       if(copyJsonString(root, "flexAddress", address, 48) &&
          copyJsonString(root, "displayName", displayName, 64, false) &&
-         (addressLen = strlen(address)) >= 6 &&
-         strstr(address, "@flex") == address + addressLen - 5) result = POLL_APPROVED;
+         validAddress(address)) result = POLL_APPROVED;
     }
   }
   cJSON_Delete(root);
   return result;
 }
 
+// Escribe la cuenta entera. La marca "linked" va la ULTIMA: si el corte de
+// energia llega a mitad, el arranque siguiente ve un registro incompleto (y lo
+// dice como ERROR, no como "sin cuenta") en vez de uno que parece valido.
 static bool persistLinked(const char* bearer, const char* address, const char* displayName){
   Preferences preferences;
   if(!preferences.begin("flexacct", false)) return false;
   size_t a = preferences.putString("token", bearer);
   size_t b = preferences.putString("address", address);
   preferences.putString("display", displayName ? displayName : "");
+  // Un enlace nuevo deja la sesion limpia (solo se escribe si hacia falta).
+  if(preferences.getUChar("authst", AUTHST_OK) != AUTHST_OK) preferences.putUChar("authst", AUTHST_OK);
   bool c = preferences.putBool("linked", true);
   preferences.end();
+  // putString devuelve strlen (sin terminador); getString, con terminador.
   return a == strlen(bearer) && b == strlen(address) && c;
+}
+
+static void persistAuthState(uint8_t st){
+  if(st == gAuthSt) return;                       // sin cambios: ni una escritura de flash
+  Preferences preferences;
+  if(!preferences.begin("flexacct", false)) return;
+  preferences.putUChar("authst", st);
+  preferences.end();
+  gAuthSt = st;
+}
+
+static void persistProfile(const char* address, const char* displayName){
+  Preferences preferences;
+  if(!preferences.begin("flexacct", false)) return;
+  preferences.putString("address", address);
+  preferences.putString("display", displayName ? displayName : "");
+  preferences.end();
+}
+
+// Cliente HTTPS con la credencial: SIEMPRE con certificado validado.
+static void secureClient(WiFiClientSecure& secure){
+  secure.setCACert(flexCloudRootCA());
+  secure.setHandshakeTimeout(12);
 }
 
 static bool requestDeviceCode(const char* label, const char* tokenHash, char code[9], char activationUrl[192]){
@@ -344,11 +498,13 @@ static bool requestDeviceCode(const char* label, const char* tokenHash, char cod
   WiFiClientSecure secure;
   // No secreto viaja en esta operacion: solo una huella SHA-256. La respuesta
   // se acepta unicamente despues de validar la firma P-256 anclada arriba.
+  // (Ruta existente: se conserva tal cual para no romper el enlace si el
+  // proveedor rota su certificado; la credencial NUNCA viaja por aqui.)
   secure.setInsecure();
   secure.setHandshakeTimeout(12);
   HTTPClient http; http.setTimeout(HTTP_TIMEOUT_MS); http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   // Cloudflare puede responder el POST con cuerpo chunked y mantener viva la
-  // conexion. HTTP/1.0 + Connection: close da al lector un final inequÃ­voco.
+  // conexion. HTTP/1.0 + Connection: close da al lector un final inequivoco.
   http.useHTTP10(true);
   http.setUserAgent("FlexOS-Ultra/1.0 ESP32-P4");
   if(!http.begin(secure, FLEX_ACCOUNT_CODE_URL)){ snprintf(gRequestError, sizeof(gRequestError), "No se pudo abrir el servicio de Flex Account"); return false; }
@@ -404,15 +560,170 @@ static PollResult pollDeviceCode(const char* code, const char* tokenHash, char a
   return result;
 }
 
+// ---------------------------------------------------------------------------
+//  Validacion de la sesion
+// ---------------------------------------------------------------------------
+static const char* verdictDetail(FlexSessionVerdict v){
+  switch(v){
+    case FLEX_SESSION_OK:            return "Sesion validada";
+    case FLEX_SESSION_AUTH_REQUIRED: return "Flex Account ya no reconoce este aparato: vuelve a vincularlo";
+    case FLEX_SESSION_TOKEN_EXPIRED: return "La sesion de este aparato caduco: vuelve a vincularlo";
+    default:                         return "Flex Account no responde; se reintentara";
+  }
+}
+
+// GET autenticado. Rellena el perfil si el servidor lo devuelve. Nunca
+// imprime la credencial. `detail` recibe un motivo legible en caso de fallo.
+static FlexSessionVerdict validateSession(const char* bearer, char address[48], char displayName[64],
+                                          char* detail, size_t detailCap){
+  address[0] = 0; displayName[0] = 0; detail[0] = 0;
+  if(WiFi.status() != WL_CONNECTED){ snprintf(detail, detailCap, "Sin Wi-Fi"); return FLEX_SESSION_UNAVAILABLE; }
+  WiFiClientSecure secure; secureClient(secure);
+  HTTPClient http; http.setTimeout(HTTP_TIMEOUT_MS); http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.useHTTP10(true);
+  http.setUserAgent("FlexOS-Ultra/1.0 ESP32-P4");
+  if(!http.begin(secure, FLEX_ACCOUNT_SESSION_URL)){
+    snprintf(detail, detailCap, "No se pudo abrir la conexion segura");
+    return FLEX_SESSION_UNAVAILABLE;
+  }
+  char auth[64];
+  snprintf(auth, sizeof(auth), "Bearer %s", bearer);
+  http.addHeader("Authorization", auth);
+  http.addHeader("Accept", "application/json");
+  http.addHeader("Connection", "close");
+  memset(auth, 0, sizeof(auth));
+  int status = http.GET();
+  char code[40] = "";
+  uint8_t* body = nullptr; size_t bodyLen = 0;
+  if(status > 0) readHttpBody(http, &body, &bodyLen, false);
+  http.end();
+  cJSON* root = body ? cJSON_ParseWithLength((const char*)body, bodyLen) : nullptr;
+  if(root && status != HTTP_CODE_OK){
+    cJSON* err = cJSON_GetObjectItemCaseSensitive(root, "error");
+    if(cJSON_IsObject(err)) copyJsonString(err, "code", code, sizeof(code), false);
+  }
+  FlexSessionVerdict v = flexAccountClassify(status, code);
+  if(v == FLEX_SESSION_OK){
+    // Cuerpo esperado: {"account":{"flexAddress":"...","displayName":"..."}}.
+    // Un 200 sin cuerpo valido no es una validacion: se trata como servicio
+    // no disponible (nunca como "desvinculado").
+    cJSON* acc = root ? cJSON_GetObjectItemCaseSensitive(root, "account") : nullptr;
+    if(!cJSON_IsObject(acc) || !copyJsonString(acc, "flexAddress", address, 48) || !validAddress(address)){
+      address[0] = 0;
+      v = FLEX_SESSION_UNAVAILABLE;
+      snprintf(detail, detailCap, "Respuesta de Flex Account incompleta");
+    } else copyJsonString(acc, "displayName", displayName, 64, false);
+  } else if(v == FLEX_SESSION_UNAVAILABLE){
+    if(status < 0) snprintf(detail, detailCap, "Sin respuesta segura del servidor (%d)", status);
+    else snprintf(detail, detailCap, "Flex Account respondio HTTP %d; se reintentara", status);
+  }
+  if(root) cJSON_Delete(root);
+  free(body);
+  if(!detail[0]) snprintf(detail, detailCap, "%s", verdictDetail(v));
+  return v;
+}
+
+static void sessionTick(){
+  lock();
+  bool have = gHaveCredential && gBearer[0];
+  bool busyFlow = gSnapshot.state == FLEX_ACCOUNT_REQUESTING || gSnapshot.state == FLEX_ACCOUNT_CODE_READY;
+  FlexAccountLink link = gSnapshot.link;
+  unlock();
+  if(!have || busyFlow) return;
+
+  const uint32_t now = millis();
+  if(WiFi.status() != WL_CONNECTED){
+    gWasOnline = false;
+    // Sin red la cuenta SIGUE vinculada: solo se dice que no se puede
+    // comprobar. Los estados que vienen del servidor (credencial rechazada
+    // o caducada) se conservan: no son un problema de red.
+    if(link == FLEX_LINK_LINKED || link == FLEX_LINK_NETWORK_UNAVAILABLE)
+      setLink(FLEX_LINK_LINKED_OFFLINE, "Sin Wi-Fi: se comprobara al volver la conexion");
+    return;
+  }
+  if(!gWasOnline){
+    // Flanco: acaba de volver el Wi-Fi (o es el primero de este arranque).
+    gWasOnline = true;
+    gValidateWanted = true;
+    // Lo que quede de la espera en curso (backoff tras un fallo de red) no se
+    // acorta por volver a conectar; si no hay ninguna, se deja asentar la red.
+    uint32_t left = 0;
+    if(gFailures){ uint32_t el = now - gWaitFromMs; left = el < gWaitMs ? gWaitMs - el : 0; }
+    if(left < SETTLE_MS) left = SETTLE_MS;
+    if(gAttempted){
+      uint32_t since = now - gLastAttemptMs;
+      if(since < MIN_ATTEMPT_GAP_MS && MIN_ATTEMPT_GAP_MS - since > left) left = MIN_ATTEMPT_GAP_MS - since;
+    }
+    gWaitFromMs = now; gWaitMs = left;
+  }
+  if(link == FLEX_LINK_LINKED && gVerifiedThisBoot && !gValidateWanted && (uint32_t)(now - gLastVerifiedMs) >= REVALIDATE_MS){
+    gValidateWanted = true;
+    gWaitFromMs = now; gWaitMs = 0;
+  }
+  if(!gValidateWanted || (uint32_t)(now - gWaitFromMs) < gWaitMs) return;
+
+  char bearer[48];
+  lock(); snprintf(bearer, sizeof(bearer), "%s", gBearer); unlock();
+  gAttempted = true; gLastAttemptMs = now;
+  char address[48], displayName[64], detail[96];
+  FlexSessionVerdict v = validateSession(bearer, address, displayName, detail, sizeof(detail));
+  memset(bearer, 0, sizeof(bearer));
+  const uint32_t done = millis();
+  if(v == FLEX_SESSION_OK){
+    gValidateWanted = false; gFailures = 0;
+    gLastVerifiedMs = done; gVerifiedThisBoot = true;
+    persistAuthState(AUTHST_OK);
+    bool changed = false;
+    lock();
+    changed = strcmp(address, gSnapshot.flexAddress) || strcmp(displayName, gSnapshot.displayName);
+    if(changed){
+      snprintf(gSnapshot.flexAddress, sizeof(gSnapshot.flexAddress), "%s", address);
+      snprintf(gSnapshot.displayName, sizeof(gSnapshot.displayName), "%s", displayName);
+    }
+    unlock();
+    if(changed) persistProfile(address, displayName);   // solo si el servidor cambio el perfil
+    setLink(FLEX_LINK_LINKED, "Conectada con Flex Account");
+    Serial.println(F("[ACCOUNT] sesion validada"));
+  } else if(v == FLEX_SESSION_AUTH_REQUIRED || v == FLEX_SESSION_TOKEN_EXPIRED){
+    gValidateWanted = false; gFailures = 0;
+    persistAuthState(v == FLEX_SESSION_TOKEN_EXPIRED ? AUTHST_EXPIRED : AUTHST_REQUIRED);
+    setLink(v == FLEX_SESSION_TOKEN_EXPIRED ? FLEX_LINK_TOKEN_EXPIRED : FLEX_LINK_AUTH_REQUIRED, detail);
+    Serial.printf("[ACCOUNT] el servidor rechazo la credencial (%s)\n",
+                  v == FLEX_SESSION_TOKEN_EXPIRED ? "caducada" : "revocada");
+  } else {
+    if(gFailures < 250) gFailures++;
+    gWaitFromMs = done; gWaitMs = flexAccountBackoffMs(gFailures);
+    // Si el servidor ya habia rechazado la credencial, un fallo de red no lo
+    // "arregla": se conserva ese estado.
+    if(link != FLEX_LINK_AUTH_REQUIRED && link != FLEX_LINK_TOKEN_EXPIRED)
+      setLink(FLEX_LINK_NETWORK_UNAVAILABLE, detail);
+    Serial.printf("[ACCOUNT] validacion aplazada (intento %u): %s\n", (unsigned)gFailures, detail);
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  Flujo de enlace
+// ---------------------------------------------------------------------------
+// Un enlace nuevo que no termina bien NO toca la cuenta que ya estaba
+// guardada: se vuelve a ella con el motivo del fallo a la vista.
+static void finishFailedFlow(FlexAccountState state, const char* stage, const char* error){
+  if(gHaveCredential){
+    setStatus(FLEX_ACCOUNT_LINKED, 100, "Cuenta vinculada", nullptr);
+    if(error){ lock(); snprintf(gSnapshot.error, sizeof(gSnapshot.error), "%s", error); unlock(); }
+    return;
+  }
+  setStatus(state, 0, stage, error);
+}
+
 static void linkFlow(const char* label){
   setStatus(FLEX_ACCOUNT_REQUESTING, 8, "Creando enlace seguro");
   char bearer[48] = "", tokenHash[65] = "", code[9] = "", activationUrl[192] = "";
   if(!makeBearer(bearer, tokenHash)){
-    setStatus(FLEX_ACCOUNT_ERROR, 0, "No se pudo iniciar", "No se pudo crear la credencial segura"); return;
+    finishFailedFlow(FLEX_ACCOUNT_ERROR, "No se pudo iniciar", "No se pudo crear la credencial segura"); return;
   }
-  if(gCancelRequested){ setStatus(FLEX_ACCOUNT_CANCELLED, 0, "Cancelado"); return; }
+  if(gCancelRequested){ finishFailedFlow(FLEX_ACCOUNT_CANCELLED, "Cancelado", nullptr); return; }
   if(WiFi.status() != WL_CONNECTED){
-    setStatus(FLEX_ACCOUNT_ERROR, 0, "Sin Wi-Fi", "Conecta el dispositivo a Wi-Fi y vuelve a intentar"); return;
+    finishFailedFlow(FLEX_ACCOUNT_ERROR, "Sin Wi-Fi", "Conecta el dispositivo a Wi-Fi y vuelve a intentar"); return;
   }
   setStatus(FLEX_ACCOUNT_REQUESTING, 28, "Contactando Flex Account");
   bool requested = requestDeviceCode(label, tokenHash, code, activationUrl);
@@ -426,9 +737,9 @@ static void linkFlow(const char* label){
     else snprintf(gRequestError, sizeof(gRequestError), "No se pudo guardar la nueva identidad del dispositivo");
   }
   if(!requested){
-    if(gCancelRequested) setStatus(FLEX_ACCOUNT_CANCELLED, 0, "Cancelado");
-    else setStatus(FLEX_ACCOUNT_ERROR, 0, "Enlace no disponible",
-                   gRequestError[0] ? gRequestError : "No se recibio una respuesta autentica de Flex Account");
+    if(gCancelRequested) finishFailedFlow(FLEX_ACCOUNT_CANCELLED, "Cancelado", nullptr);
+    else finishFailedFlow(FLEX_ACCOUNT_ERROR, "Enlace no disponible",
+                          gRequestError[0] ? gRequestError : "No se recibio una respuesta autentica de Flex Account");
     memset(bearer, 0, sizeof(bearer)); return;
   }
   lock();
@@ -436,7 +747,7 @@ static void linkFlow(const char* label){
   snprintf(gSnapshot.activationUrl, sizeof(gSnapshot.activationUrl), "%s", activationUrl);
   unlock();
   setStatus(FLEX_ACCOUNT_CODE_READY, 55, "Esperando aprobacion en tu celular");
-  uint32_t started = millis(), lastPoll = 0; uint8_t transientFailures = 0;
+  uint32_t started = millis(), lastPoll = 0;
   while(!gCancelRequested && millis() - started < LINK_TIMEOUT_MS){
     if(lastPoll && millis() - lastPoll < 3000){ vTaskDelay(pdMS_TO_TICKS(100)); continue; }
     lastPoll = millis();
@@ -444,40 +755,53 @@ static void linkFlow(const char* label){
     char address[48] = "", displayName[64] = "";
     PollResult result = pollDeviceCode(code, tokenHash, address, displayName);
     if(result == POLL_PENDING){
-      if(transientFailures < 8) transientFailures++;
       setStatus(FLEX_ACCOUNT_CODE_READY, 55, "Esperando aprobacion en tu celular");
     } else if(result == POLL_EXPIRED){
-      setStatus(FLEX_ACCOUNT_EXPIRED, 0, "El codigo expiro"); memset(bearer, 0, sizeof(bearer)); return;
+      finishFailedFlow(FLEX_ACCOUNT_EXPIRED, "El codigo expiro", gHaveCredential ? "El codigo de vinculacion expiro" : nullptr);
+      memset(bearer, 0, sizeof(bearer)); return;
     } else if(result == POLL_INVALID){
-      setStatus(FLEX_ACCOUNT_ERROR, 0, "Respuesta rechazada", "FlexOS rechazo un estado sin firma valida");
+      finishFailedFlow(FLEX_ACCOUNT_ERROR, "Respuesta rechazada", "FlexOS rechazo un estado sin firma valida");
       memset(bearer, 0, sizeof(bearer)); return;
     } else {
       setStatus(FLEX_ACCOUNT_REQUESTING, 88, "Guardando tu Flex Account");
       if(!persistLinked(bearer, address, displayName)){
-        setStatus(FLEX_ACCOUNT_ERROR, 0, "No se pudo guardar", "El almacenamiento seguro no respondio");
+        finishFailedFlow(FLEX_ACCOUNT_ERROR, "No se pudo guardar", "El almacenamiento seguro no respondio");
         memset(bearer, 0, sizeof(bearer)); return;
       }
       lock();
       snprintf(gBearer, sizeof(gBearer), "%s", bearer);
       snprintf(gSnapshot.flexAddress, sizeof(gSnapshot.flexAddress), "%s", address);
       snprintf(gSnapshot.displayName, sizeof(gSnapshot.displayName), "%s", displayName);
+      gHaveCredential = true;
       unlock();
+      gAuthSt = AUTHST_OK;
+      // El servidor ACABA de aprobar esta credencial: cuenta como validada.
+      gLastVerifiedMs = millis(); gVerifiedThisBoot = true;
+      gValidateWanted = false; gFailures = 0; gWasOnline = true;
+      setLink(FLEX_LINK_LINKED, "Conectada con Flex Account");
       setStatus(FLEX_ACCOUNT_LINKED, 100, "Cuenta vinculada");
+      Serial.println(F("[ACCOUNT] cuenta vinculada y guardada"));
       memset(bearer, 0, sizeof(bearer)); return;
     }
   }
   memset(bearer, 0, sizeof(bearer));
-  if(gCancelRequested) setStatus(FLEX_ACCOUNT_CANCELLED, 0, "Cancelado");
-  else setStatus(FLEX_ACCOUNT_EXPIRED, 0, "El codigo expiro");
+  if(gCancelRequested) finishFailedFlow(FLEX_ACCOUNT_CANCELLED, "Cancelado", nullptr);
+  else finishFailedFlow(FLEX_ACCOUNT_EXPIRED, "El codigo expiro", gHaveCredential ? "El codigo de vinculacion expiro" : nullptr);
+}
+
+static void accountTaskStep(){
+  if(gStartRequested){
+    char label[49];
+    lock(); snprintf(label, sizeof(label), "%s", gRequestedLabel); gStartRequested = false; unlock();
+    linkFlow(label);
+    return;
+  }
+  sessionTick();
 }
 
 static void accountTask(void*){
   for(;;){
-    if(gStartRequested){
-      char label[49];
-      lock(); snprintf(label, sizeof(label), "%s", gRequestedLabel); gStartRequested = false; unlock();
-      linkFlow(label);
-    }
+    accountTaskStep();
     vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
@@ -486,52 +810,141 @@ static void clearMemory(){
   lock();
   memset(gBearer, 0, sizeof(gBearer));
   memset(&gSnapshot, 0, sizeof(gSnapshot));
+  gHaveCredential = false;
   gSnapshot.state = FLEX_ACCOUNT_UNLINKED;
+  gSnapshot.link = FLEX_LINK_UNLINKED;
   snprintf(gSnapshot.stage, sizeof(gSnapshot.stage), "Sin cuenta vinculada");
+  snprintf(gSnapshot.linkDetail, sizeof(gSnapshot.linkDetail), "Sin cuenta vinculada");
   unlock();
+  gAuthSt = AUTHST_OK;
+  gValidateWanted = false; gFailures = 0; gVerifiedThisBoot = false;
+}
+
+// Carga la cuenta guardada. Va SIEMPRE antes de mirar la red: el estado de la
+// vinculacion es el de la NVS, no el de la ultima respuesta del servidor.
+static void loadPersisted(){
+  memset(&gSnapshot, 0, sizeof(gSnapshot));
+  memset(gBearer, 0, sizeof(gBearer));
+  gHaveCredential = false;
+  gSnapshot.state = FLEX_ACCOUNT_UNLINKED;
+  gSnapshot.link = FLEX_LINK_UNLINKED;
+  snprintf(gSnapshot.stage, sizeof(gSnapshot.stage), "Sin cuenta vinculada");
+  snprintf(gSnapshot.linkDetail, sizeof(gSnapshot.linkDetail), "Sin cuenta vinculada");
+
+  Preferences preferences;
+  if(!preferences.begin("flexacct", false)){
+    gSnapshot.link = FLEX_LINK_ERROR;
+    snprintf(gSnapshot.linkDetail, sizeof(gSnapshot.linkDetail), "El almacenamiento seguro no respondio");
+    Serial.println(F("[ACCOUNT] NVS no disponible: no se pudo leer la cuenta"));
+    return;
+  }
+  gInstallationId = preferences.getUInt("installId", 0);
+  if(gInstallationId == 0){
+    do { esp_fill_random(&gInstallationId, sizeof(gInstallationId)); } while(gInstallationId == 0);
+    preferences.putUInt("installId", gInstallationId);
+  }
+  bool linked = preferences.getBool("linked", false);
+  // EL FALLO QUE DESVINCULABA EN CADA ARRANQUE: getString(clave, char*, cap)
+  // devuelve la longitud CON el terminador (44 para un token de 43), y aqui se
+  // exigia tokenLen == 43. La cuenta se guardaba bien y se descartaba al leer.
+  size_t tokenLen = flexNvsStrLen(preferences.getString("token", gBearer, sizeof(gBearer)), gBearer, sizeof(gBearer));
+  size_t addressLen = flexNvsStrLen(preferences.getString("address", gSnapshot.flexAddress, sizeof(gSnapshot.flexAddress)),
+                                    gSnapshot.flexAddress, sizeof(gSnapshot.flexAddress));
+  if(!flexNvsStrLen(preferences.getString("display", gSnapshot.displayName, sizeof(gSnapshot.displayName)),
+                    gSnapshot.displayName, sizeof(gSnapshot.displayName))) gSnapshot.displayName[0] = 0;
+  gAuthSt = preferences.getUChar("authst", AUTHST_OK);
+  bool anyKey = linked || preferences.isKey("token") || preferences.isKey("address");
+  preferences.end();
+
+  bool valid = linked && tokenLen == 43 && addressLen >= 6 && validAddress(gSnapshot.flexAddress);
+  if(valid){
+    gHaveCredential = true;
+    gSnapshot.state = FLEX_ACCOUNT_LINKED; gSnapshot.linked = true; gSnapshot.progress = 100;
+    snprintf(gSnapshot.stage, sizeof(gSnapshot.stage), "Cuenta vinculada");
+    if(gAuthSt == AUTHST_EXPIRED){
+      gSnapshot.link = FLEX_LINK_TOKEN_EXPIRED;
+      snprintf(gSnapshot.linkDetail, sizeof(gSnapshot.linkDetail), "%s", verdictDetail(FLEX_SESSION_TOKEN_EXPIRED));
+    } else if(gAuthSt == AUTHST_REQUIRED){
+      gSnapshot.link = FLEX_LINK_AUTH_REQUIRED;
+      snprintf(gSnapshot.linkDetail, sizeof(gSnapshot.linkDetail), "%s", verdictDetail(FLEX_SESSION_AUTH_REQUIRED));
+    } else {
+      gSnapshot.link = FLEX_LINK_LINKED_OFFLINE;
+      snprintf(gSnapshot.linkDetail, sizeof(gSnapshot.linkDetail), "Vinculada; se comprobara al conectar el Wi-Fi");
+    }
+    Serial.println(F("[ACCOUNT] cuenta guardada recuperada"));
+  } else {
+    memset(gBearer, 0, sizeof(gBearer));
+    gSnapshot.flexAddress[0] = 0; gSnapshot.displayName[0] = 0;
+    if(anyKey){
+      // Habia algo, pero incompleto (corte de energia a mitad de guardar, o
+      // una version anterior danada): se dice, no se finge "sin cuenta".
+      gSnapshot.link = FLEX_LINK_ERROR;
+      snprintf(gSnapshot.linkDetail, sizeof(gSnapshot.linkDetail), "La cuenta guardada esta incompleta: vuelve a vincular");
+      Serial.println(F("[ACCOUNT] registro de cuenta incompleto en NVS"));
+    }
+  }
 }
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+//  Nucleo puro
+// ---------------------------------------------------------------------------
+FlexSessionVerdict flexAccountClassify(int httpStatus, const char* errorCode){
+  if(httpStatus >= 200 && httpStatus < 300) return FLEX_SESSION_OK;
+  if(httpStatus == 401 || httpStatus == 403){
+    if(errorCode && !strcmp(errorCode, "token_expired")) return FLEX_SESSION_TOKEN_EXPIRED;
+    // 401/403 sin un codigo reconocible del servicio puede venir de un proxy o
+    // de una pagina de error del alojamiento: no se desvincula por eso.
+    if(errorCode && (!strcmp(errorCode, "device_revoked") || !strcmp(errorCode, "auth_required") ||
+                     !strcmp(errorCode, "invalid_token") || !strcmp(errorCode, "device_unknown")))
+      return FLEX_SESSION_AUTH_REQUIRED;
+    return FLEX_SESSION_UNAVAILABLE;
+  }
+  return FLEX_SESSION_UNAVAILABLE;
+}
+
+uint32_t flexAccountBackoffMs(uint8_t failures){
+  if(failures == 0) return 0;
+  uint32_t ms = 30000u;
+  for(uint8_t i = 1; i < failures && ms < 15u * 60u * 1000u; i++) ms *= 2u;
+  if(ms > 15u * 60u * 1000u) ms = 15u * 60u * 1000u;
+  return ms;
+}
+
+size_t flexNvsStrLen(size_t nvsReturned, const char* buf, size_t cap){
+  if(nvsReturned == 0 || !buf || cap == 0) return 0;   // 0 = no existe o no cabia: buf no es fiable
+  size_t n = 0;
+  while(n < cap && buf[n]) n++;
+  if(n >= cap) return 0;                                // sin terminador: no se acepta
+  // nvs_get_str cuenta el terminador; un valor coherente cumple n + 1 == devuelto.
+  // Si una version futura del core devolviera strlen, n == devuelto tambien vale.
+  if(n + 1 != nvsReturned && n != nvsReturned) return 0;
+  return n;
+}
+
+// ---------------------------------------------------------------------------
+//  API publica
+// ---------------------------------------------------------------------------
 void flexAccountBegin(){
   if(!gMutex) gMutex = xSemaphoreCreateMutex();
-  memset(&gSnapshot, 0, sizeof(gSnapshot));
-  gSnapshot.state = FLEX_ACCOUNT_UNLINKED;
-  snprintf(gSnapshot.stage, sizeof(gSnapshot.stage), "Sin cuenta vinculada");
-  Preferences preferences;
-  bool valid = false;
-  if(preferences.begin("flexacct", false)){
-    gInstallationId = preferences.getUInt("installId", 0);
-    if(gInstallationId == 0){
-      do { esp_fill_random(&gInstallationId, sizeof(gInstallationId)); } while(gInstallationId == 0);
-      preferences.putUInt("installId", gInstallationId);
-    }
-    bool linked = preferences.getBool("linked", false);
-    size_t tokenLen = preferences.getString("token", gBearer, sizeof(gBearer));
-    size_t addressLen = preferences.getString("address", gSnapshot.flexAddress, sizeof(gSnapshot.flexAddress));
-    preferences.getString("display", gSnapshot.displayName, sizeof(gSnapshot.displayName));
-    preferences.end();
-    valid = linked && tokenLen == 43 && addressLen >= 6 &&
-            strstr(gSnapshot.flexAddress, "@flex") == gSnapshot.flexAddress + addressLen - 5;
-  }
-  if(valid){
-    gSnapshot.state = FLEX_ACCOUNT_LINKED; gSnapshot.linked = true; gSnapshot.progress = 100;
-    snprintf(gSnapshot.stage, sizeof(gSnapshot.stage), "Cuenta vinculada");
-  } else {
-    memset(gBearer, 0, sizeof(gBearer));
-    gSnapshot.flexAddress[0] = 0; gSnapshot.displayName[0] = 0;
-  }
+  lock();
+  loadPersisted();
+  unlock();
+  gWasOnline = false; gValidateWanted = false; gFailures = 0;
+  gVerifiedThisBoot = false; gLastVerifiedMs = 0; gWaitFromMs = 0; gWaitMs = 0; gAttempted = false;
   if(!gTask) xTaskCreate(accountTask, "flex-account", 12288, nullptr, 1, &gTask);
 }
 
 bool flexAccountRequestCode(const char* deviceLabel){
-  if(!gMutex || !gTask) return false;
+  if(!gMutex) return false;
   lock();
   bool busy = gStartRequested || gSnapshot.state == FLEX_ACCOUNT_REQUESTING || gSnapshot.state == FLEX_ACCOUNT_CODE_READY;
   if(!busy){
     snprintf(gRequestedLabel, sizeof(gRequestedLabel), "%s", (deviceLabel && deviceLabel[0]) ? deviceLabel : "FlexOS Ultra");
     gSnapshot.code[0] = 0; gSnapshot.activationUrl[0] = 0; gSnapshot.error[0] = 0;
-    gSnapshot.state = FLEX_ACCOUNT_REQUESTING; gSnapshot.progress = 1; gSnapshot.linked = false;
+    gSnapshot.state = FLEX_ACCOUNT_REQUESTING; gSnapshot.progress = 1;
+    gSnapshot.linked = gHaveCredential;            // la cuenta guardada sigue ahi mientras tanto
     snprintf(gSnapshot.stage, sizeof(gSnapshot.stage), "Preparando enlace");
     gCancelRequested = false; gStartRequested = true;
   }
@@ -543,7 +956,15 @@ void flexAccountCancel(){ gCancelRequested = true; }
 
 bool flexAccountLinked(){
   if(!gMutex) return false;
-  lock(); bool result = gSnapshot.linked; unlock(); return result;
+  lock(); bool result = gHaveCredential; unlock(); return result;
+}
+
+bool flexAccountUsable(){
+  if(!gMutex) return false;
+  lock();
+  bool result = gHaveCredential && gSnapshot.link != FLEX_LINK_AUTH_REQUIRED && gSnapshot.link != FLEX_LINK_TOKEN_EXPIRED;
+  unlock();
+  return result;
 }
 
 FlexAccountState flexAccountState(){
@@ -551,16 +972,50 @@ FlexAccountState flexAccountState(){
   lock(); FlexAccountState result = gSnapshot.state; unlock(); return result;
 }
 
+FlexAccountLink flexAccountLinkState(){
+  if(!gMutex) return FLEX_LINK_UNLINKED;
+  lock(); FlexAccountLink result = gSnapshot.link; unlock(); return result;
+}
+
 void flexAccountSnapshot(FlexAccountSnapshot* out){
   if(!out) return;
-  if(!gMutex){ memset(out, 0, sizeof(*out)); out->state = FLEX_ACCOUNT_UNLINKED; return; }
-  lock(); memcpy(out, &gSnapshot, sizeof(*out)); unlock();
+  if(!gMutex){ memset(out, 0, sizeof(*out)); out->state = FLEX_ACCOUNT_UNLINKED; out->link = FLEX_LINK_UNLINKED; return; }
+  lock();
+  memcpy(out, &gSnapshot, sizeof(*out));
+  out->linked = gHaveCredential;
+  out->verifiedAgeS = gVerifiedThisBoot ? (uint32_t)(millis() - gLastVerifiedMs) / 1000u : 0xFFFFFFFFu;
+  unlock();
+}
+
+const char* flexAccountLinkLabel(FlexAccountLink link){
+  switch(link){
+    case FLEX_LINK_LINKED:              return "Conectada";
+    case FLEX_LINK_LINKED_OFFLINE:      return "Vinculada \xC2\xB7 sin conexi\xC3\xB3n";
+    case FLEX_LINK_NETWORK_UNAVAILABLE: return "Vinculada \xC2\xB7 servicio no disponible";
+    case FLEX_LINK_AUTH_REQUIRED:       return "Vuelve a iniciar sesi\xC3\xB3n";
+    case FLEX_LINK_TOKEN_EXPIRED:       return "Sesi\xC3\xB3n caducada";
+    case FLEX_LINK_ERROR:               return "No se pudo leer la cuenta";
+    default:                            return "Sin cuenta vinculada";
+  }
+}
+
+void flexAccountRequestValidation(){
+  gWaitMs = 0;
+  gWaitFromMs = millis();
+  gValidateWanted = true;
+}
+
+void flexAccountReportRejected(){
+  uint32_t now = millis();
+  if(gRejectSeen && (uint32_t)(now - gLastRejectMs) < REJECT_RATE_MS) return;
+  gRejectSeen = true; gLastRejectMs = now;
+  flexAccountRequestValidation();
 }
 
 bool flexAccountCopyBearer(char* out, size_t capacity){
   if(!out || capacity == 0 || !gMutex) return false;
   lock();
-  bool ok = gSnapshot.linked && gBearer[0] && strlen(gBearer) + 1 <= capacity;
+  bool ok = gHaveCredential && gBearer[0] && strlen(gBearer) + 1 <= capacity;
   if(ok) memcpy(out, gBearer, strlen(gBearer) + 1); else out[0] = 0;
   unlock();
   return ok;
@@ -573,3 +1028,25 @@ void flexAccountForgetLocal(){
   rotateInstallationId();
   clearMemory();
 }
+
+#ifdef FLEXOS_HOST_TEST
+void flexAccountTestSetKey(const uint8_t pub[65]){ memcpy(gTestKey, pub, 65); gTestKeySet = true; }
+void flexAccountTestStep(){ accountTaskStep(); }
+void flexAccountTestPowerCycle(){
+  // Se pierde TODO lo de RAM (la NVS es de la prueba y sobrevive).
+  lock();
+  memset(&gSnapshot, 0, sizeof(gSnapshot));
+  memset(gBearer, 0, sizeof(gBearer));
+  gHaveCredential = false;
+  unlock();
+  gStartRequested = false; gCancelRequested = false;
+  gWasOnline = false; gValidateWanted = false; gWaitFromMs = 0; gWaitMs = 0; gFailures = 0;
+  gLastVerifiedMs = 0; gVerifiedThisBoot = false; gRejectSeen = false; gAuthSt = AUTHST_OK;
+  gInstallationId = 0; gAttempted = false; gLastAttemptMs = 0;
+  flexAccountBegin();
+}
+#endif
+
+#if FXA_BACKEND_OPENSSL
+#  pragma GCC diagnostic pop
+#endif

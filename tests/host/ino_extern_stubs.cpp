@@ -425,6 +425,11 @@ void flexAccountSnapshot(FlexAccountSnapshot* out){
 }
 bool flexAccountCopyBearer(char* out, size_t n){ if(out && n) out[0] = 0; return false; }
 void flexAccountForgetLocal(){}
+bool flexAccountUsable(){ return gStubAccountLinked; }
+FlexAccountLink flexAccountLinkState(){ return gStubAccountSnap.link; }
+const char* flexAccountLinkLabel(FlexAccountLink l){ return l == FLEX_LINK_LINKED ? "Conectada" : "Sin cuenta vinculada"; }
+void flexAccountRequestValidation(){}
+void flexAccountReportRejected(){}
 
 // -- Flex FS: anadidos por "secure reset and app continuity" --
 // El .ino ya llamaba a estas cuatro; sin sus dobles, test_ino no ENLAZA

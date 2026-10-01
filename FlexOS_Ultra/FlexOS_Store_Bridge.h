@@ -148,14 +148,18 @@ static void storeHeader(const char* title, bool nested){
   if(nested) storeBackGlyph(24, 30, TH_TXT);
   drawText(nested ? 66 : 24, 28, title, 3, TH_TXT);
   if(!nested){
+    // Vinculada = hay cuenta guardada (no depende de la red). Ambar si el
+    // servidor pide volver a iniciar sesion; nunca "Cuenta" por estar offline.
     bool linked = flexAccountLinked();
+    FlexAccountLink lk = flexAccountLinkState();
+    bool attention = linked && (lk == FLEX_LINK_AUTH_REQUIRED || lk == FLEX_LINK_TOKEN_EXPIRED);
     int ax = SCR_W - 132, ay = 21, aw = 112, ah = 40;
     int sx = ax - 50;
     fillRoundRect(sx, ay, 40, 40, 20, thCard());
     fillCircle(sx + 18, ay + 17, 8, TH_TXT2); fillCircle(sx + 18, ay + 17, 5, thCard());
     strokeSeg(sx + 24, ay + 23, sx + 30, ay + 29, 2, TH_TXT2);
     if(storeSearch[0]) fillCircle(sx + 33, ay + 7, 4, TH_PRIM);
-    fillRoundRect(ax, ay, aw, ah, 20, linked ? rgb565(32,171,126) : thCard());
+    fillRoundRect(ax, ay, aw, ah, 20, attention ? rgb565(214,132,60) : linked ? rgb565(32,171,126) : thCard());
     drawTextC(ax + aw / 2, ay + 13, linked ? "@flex" : "Cuenta", 1,
               linked ? rgb565(255,255,255) : TH_TXT2);
   }

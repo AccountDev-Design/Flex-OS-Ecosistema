@@ -57,7 +57,7 @@ BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test
         $(BUILD)/test_medialib $(BUILD)/test_jpegenc $(BUILD)/test_httpshare $(BUILD)/test_qr \
         $(BUILD)/test_mediathumb $(BUILD)/test_mediaweb $(BUILD)/test_fs $(BUILD)/test_mediastore $(BUILD)/test_imgedit $(BUILD)/test_videdit \
         $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg \
-        $(BUILD)/test_fuzzmedia
+        $(BUILD)/test_fuzzmedia $(BUILD)/test_account
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun $(BUILD)/mediacheck $(BUILD)/flexweb_host
 
 .PHONY: all run all-boards fixtures clean ino web
@@ -321,6 +321,18 @@ $(BUILD)/flexpkgcheck: flexpkgcheck.cpp $(PKGCORE) $(GRANTSRC) | $(BUILD)
 # sdk/test/sdk.test.js con la app de ejemplo.
 $(BUILD)/flexapprun: flexapprun.cpp pkgbuild.h $(HOSTSRC) $(VMSRC) $(GRANTSRC) | $(BUILD)
 	$(CXX) $(CXXSTD) -O2 $(WARN) $(INC) -o $@ flexapprun.cpp $(HOSTSRC) $(VMSRC) $(GRANTSRC) -lcrypto
+
+# --- FLEX ACCOUNT / FLEX COMMUNITY: el modulo REAL contra netstub/ ---------
+# FlexOS_Account.cpp no lo compilaba ninguna bateria, y por eso nadie vio que
+# la cuenta se descartaba en cada arranque (Preferences::getString(char*)
+# devuelve la longitud CON terminador). netstub/ trae una NVS con la semantica
+# exacta del core, red y Wi-Fi programables y un reloj virtual. CON sanitizers.
+NETFLAGS := -DFLEXOS_HOST_TEST -Inetstub -Ivendor/cJSON $(INC) -DARDUINO=200 -Wno-format-truncation
+NETSTUB  := netstub/netstub.cpp
+NETHDRS  := $(wildcard netstub/*.h netstub/freertos/*.h)
+ACCT_SRC := $(ULTRA)/FlexOS_Account.cpp $(ULTRA)/FlexOS_CloudTLS.cpp
+$(BUILD)/test_account: test_account.cpp pkgbuild.h $(ACCT_SRC) $(ULTRA)/FlexOS_Account.h $(ULTRA)/FlexOS_CloudTLS.h $(NETSTUB) $(NETHDRS) | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(NETFLAGS) -o $@ test_account.cpp $(ACCT_SRC) $(NETSTUB) $(CJSON) -lcrypto
 
 # --- Flex Link / Flex Phone: protocolo y modelo del telefono ---
 # Nucleo PURO (sin Arduino), asi que se compila igual que el del
@@ -622,6 +634,8 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_apphost
 	@echo
 	@$(BUILD)/test_flexpkg
+	@echo
+	@$(BUILD)/test_account
 	@echo
 	@$(BUILD)/test_browser
 	@echo
