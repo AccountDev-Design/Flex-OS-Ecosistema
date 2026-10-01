@@ -162,6 +162,7 @@
 #include "FlexOS_AppHost.h"      // gestor de ciclo de vida de apps flex-app-v1
 #include "FlexOS_Store.h"
 #include "FlexOS_Account.h"
+#include "FlexOS_Cloud.h"        // Flex Cloud Manager: subidas, descargas, miniaturas y streaming (tareas propias)
 
 // SISTEMA DE ARCHIVOS REAL (LittleFS). Toda la logica de ficheros vive en
 // FlexOS_FS.cpp -- comun a las tres placas -- para no tener tres copias de
@@ -261,6 +262,7 @@
 #include "FlexOS_Ultra_FileKit.h"            // kit de archivos: menu, nombre, confirmacion y papelera
 #include "FlexOS_Ultra_MediaKit.h"           // kit de listas de medios: seleccion, menus y acciones comunes
 #include "FlexOS_Ultra_MediaViewer.h"        // visor de fotos, dibujos y videos (Galeria y Multimedia)
+#include "FlexOS_Ultra_CloudKit.h"          // Flex Cloud en Archivos, Galeria y Multimedia: estado, cuota, lista, transferencias y avisos
 #include "FlexOS_Ultra_AppMultimedia.h"      // app Multimedia (reproductor real)
 #include "FlexOS_Ultra_AppNotes.h"           // app Notas
 #include "FlexOS_Ultra_KeyboardSettings.h"   // ajustes del teclado (pantalla propia)
@@ -467,6 +469,10 @@ void setup(){
   if(!gSafeMode){
     flexStoreBegin();       // crea la tarea de fondo; no abre WiFi ni descarga en setup()
     flexAccountBegin();     // carga la cuenta local y crea su tarea; no toca la radio
+    // FLEX CLOUD: carga su diario (subidas y descargas a medias del arranque
+    // anterior) y crea sus dos tareas. NO toca la radio: espera a que haya
+    // Wi-Fi y una Flex Account utilizable para hablar con la nube.
+    flexCloudBegin();
   }
 
   if(!gSafeMode){
@@ -730,6 +736,7 @@ void loop(){
   FLEXHITCH(vwLockTick());           // visor de medios: con el sistema bloqueado no se queda nada protegido en RAM
   FLEXHITCH(gedBgTick());            // Galeria: publica un guardado del editor terminado en segundo plano
   FLEXHITCH(vedBgTick());            // Galeria: publica una exportacion del editor de video terminada en segundo plano
+  FLEXHITCH(cloudUiTick());          // Flex Cloud: avisos de subidas/descargas (liberar espacio, colocar descargas); la red va en sus tareas
   if(!gSafeMode){
     FLEXHITCH(wifiAutoReconnectTick());// reconexion diferida, una vez por arranque
     FLEXHITCH(ntpTick());              // la red corre en su tarea, nunca aqui

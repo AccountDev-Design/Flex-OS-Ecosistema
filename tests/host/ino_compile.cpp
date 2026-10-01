@@ -3753,8 +3753,15 @@ static void testFlexAccount(){
   gStubAccountSnap.state = FLEX_ACCOUNT_LINKED;
   snprintf(gStubAccountSnap.flexAddress, sizeof(gStubAccountSnap.flexAddress), "usuario@flex");
   gStubAccountLinked = true;
+  gStubAccountSnap.link = FLEX_LINK_LINKED;
   accountSettingsText(fila, sizeof(fila));
   chk(!strcmp(fila, "usuario@flex"), "con cuenta, muestra la direccion que trajo el modulo");
+  // Vinculada pero sin red (o aun sin validar en este arranque): SIGUE
+  // vinculada y se dice que falta la conexion, nunca "sin cuenta".
+  gStubAccountSnap.link = FLEX_LINK_LINKED_OFFLINE;
+  accountSettingsText(fila, sizeof(fila));
+  chk(!strncmp(fila, "usuario@flex", 12) && strstr(fila, "sin conexi"), "vinculada sin red: la direccion y 'sin conexion'");
+  gStubAccountSnap.link = FLEX_LINK_LINKED;
 
   // --- 6. las zonas tactiles de la pantalla no se solapan ---
   // y = 600 queda POR DEBAJO de los dos botones dibujados (452..510 y 526..580)
@@ -10251,6 +10258,326 @@ static void testGaleriaSinRestos(){
   if(gFails == before) printf("  Galeria sin restos: todas las comprobaciones pasan.\n");
 }
 
+// #############################################################
+//  FLEX CLOUD EN LA INTERFAZ (Galeria, Multimedia, Archivos y el visor)
+//  ------------------------------------------------------------
+//  El codigo REAL del kit de la nube (FlexOS_Ultra_CloudKit.h), de las tres
+//  apps y del visor, contra el DOBLE programable de FlexOS_Cloud (ver
+//  ino_extern_stubs.cpp): la prueba pone el estado, la lista, los avisos y
+//  los bloques del streaming, y comprueba que la interfaz pide lo correcto,
+//  abre lo correcto y NUNCA borra un original sin el aviso que lo permite.
+//  Con INO_SHOTS=1 deja capturas en build/shot_nube_*.ppm.
+// #############################################################
+extern FlexCloudStatus gStubCloudStatus;
+extern FlexCloudListInfo gStubCloudList;
+extern std::vector<FclItem> gStubCloudItems;
+extern std::vector<FlexCloudEvent> gStubCloudEvents;
+extern std::vector<FlexCloudXfer> gStubCloudXfers;
+extern std::vector<std::string> gStubCloudCalls, gStubCloudThumbs, gStubCloudWanted;
+extern bool gStubCloudActive;
+extern uint32_t gStubCloudOp, gStubCloudThumbGen;
+extern std::vector<uint8_t> gStubStreamData;
+extern bool gStubStreamOpen;
+extern uint8_t gStubStreamState;
+extern uint32_t gStubStreamPinOff, gStubStreamPinLen, gStubStreamMisses;
+void stubStreamDeliver(int maxBlocks);
+
+static FclItem clItem(const char* id, const char* name, uint8_t kind, uint64_t size, bool folder = false, bool thumb = false){
+  FclItem it; memset(&it, 0, sizeof(it));
+  snprintf(it.id, sizeof(it.id), "%s", id); snprintf(it.name, sizeof(it.name), "%s", name);
+  it.kind = folder ? FCL_K_FOLDER : kind; it.isFolder = folder; it.size = size; it.hasThumb = thumb;
+  snprintf(it.sha256, sizeof(it.sha256), "%064d", 7); it.updatedAt = 1773273600000LL;
+  return it;
+}
+static bool clCalled(const char* prefix){ for(auto& c : gStubCloudCalls) if(!c.compare(0, strlen(prefix), prefix)) return true; return false; }
+static void clStatusOnline(){
+  memset(&gStubCloudStatus, 0, sizeof(gStubCloudStatus));
+  gStubCloudStatus.net = FCN_ONLINE; gStubCloudStatus.gen = 1;
+  gStubCloudStatus.quotaValid = true;
+  gStubCloudStatus.quota.totalBytes = 5ull << 30; gStubCloudStatus.quota.usedBytes = 1288490189ull; gStubCloudStatus.quota.permille = 240;
+  snprintf(gStubCloudStatus.address, sizeof(gStubCloudStatus.address), "ana@flex");
+}
+// Un toque completo en (x, y) con el tick de la app.
+static unsigned long clMs = 20000000;
+static void clTap(void (*tick)(), int x, int y){
+  tDown(x, y, clMs); tick();
+  tUp(clMs + 60, true); tick();
+  clMs += 400; touchReset(); gTestMs = clMs;
+}
+static void clLong(void (*tick)(), int x, int y){
+  tDown(x, y, clMs); tick();
+  tMove(x, y, clMs + 700); tick();
+  tUp(clMs + 760, false); tick();
+  clMs += 1200; touchReset(); gTestMs = clMs;
+}
+// Toca la fila del menu de medios que tenga la accion `act`.
+static bool clMenuPick(void (*tick)(), int act){
+  if(!mmOn) return false;
+  int x, y, w, h; mmGeom(x, y, w, h);
+  for(int i = 0; i < mmN; i++) if(mmAct[i] == act){
+    mmAnimDone = true;
+    clTap(tick, x + w / 2, y + MM_PAD + i * MM_RH + MM_RH / 2);
+    return true;
+  }
+  return false;
+}
+static void clCellCenter(int i, int& cx, int& cy){ int x, y, w, h; ckCellRect(i, x, y, w, h); cx = x + w / 2; cy = y + h / 2; }
+
+static void testFlexCloudUi(){
+  printf("Flex Cloud en la interfaz: Galeria, Multimedia, Archivos, visor por rangos y avisos\n");
+  int before = gFails;
+  bool ok0 = gMlOk, fs0 = gTestFsReady, glass0 = uiGlass; int nav0 = gNavMode;
+  gNavMode = 0;
+  gTestMs = clMs;
+  gStubCloudCalls.clear(); gStubCloudEvents.clear(); gStubCloudItems.clear(); gStubCloudXfers.clear();
+  gStubCloudThumbs.clear(); gStubCloudWanted.clear();
+  memset(&gStubCloudList, 0, sizeof(gStubCloudList));
+  geFsReset();                                       // disco en memoria + biblioteca con sus callbacks
+  gTestFsReady = true;
+
+  // ---- 1. SIN CUENTA: se dice, con el camino para vincular ----
+  memset(&gStubCloudStatus, 0, sizeof(gStubCloudStatus));
+  gStubCloudStatus.net = FCN_NO_ACCOUNT;
+  shotApp(IC_GALERIA); gAppState[IC_GALERIA] = ALIFE_RUNNING; mkBind(&GAL_APP); galViewReady = false;
+  galTab = GAL_TAB_CLOUD; galRender();
+  chk(ckHost == &GAL_CK, "la pestana Nube engancha el kit de la nube a la Galeria");
+  chk(clCalled("list 2 root"), "y pide la vista de medios de la nube");
+  chk(ckEmptyBtnY > 0 && ckEmptyBtnAct == 1, "sin Flex Account: boton para vincularla (no una lista vacia)");
+  if(getenv("INO_SHOTS")) shotSave("nube_sin_cuenta");
+
+  // ---- 2. CON CUENTA: rejilla de la nube con miniaturas (objeto aparte) ----
+  clStatusOnline();
+  gStubCloudItems.push_back(clItem("fil_p1", "Playa \xC3\x91" "and\xC3\xBA.jpg", FCL_K_PHOTO, 2411724, false, true));
+  gStubCloudItems.push_back(clItem("fil_v1", "Viaje.avi", FCL_K_VIDEO, 640000, false, false));
+  gStubCloudItems.push_back(clItem("fil_v2", "Clip.mp4", FCL_K_VIDEO, 9000000, false, true));
+  gStubCloudItems.push_back(clItem("fil_p2", "Retrato.heic", FCL_K_PHOTO, 3000000, false, true));
+  gStubCloudItems.push_back(clItem("fil_p3", "Mesa.jpg", FCL_K_PHOTO, 900000, false, true));
+  gStubCloudList.state = FCL_LIST_READY; gStubCloudList.gen++;
+  gStubCloudThumbs.push_back("fil_p1");
+  gStubCloudWanted.clear();
+  galRender();
+  int c0x, c0y; clCellCenter(0, c0x, c0y);
+  { int x, y, w, h; ckCellRect(0, x, y, w, h);
+    uint16_t top = fb[(size_t)(y + 8) * SCR_W + x + w / 2];
+    chk((top >> 11) > 20 && (top & 31) < 10, "la miniatura de la nube se pinta en su celda (no inventada)"); }
+  bool wantedP3 = false, wantedV1 = false;
+  for(auto& w : gStubCloudWanted){ if(w == "fil_p3") wantedP3 = true; if(w == "fil_v1") wantedV1 = true; }
+  chk(wantedP3, "las miniaturas que faltan se piden (sin bloquear)");
+  chk(!wantedV1, "un elemento sin miniatura en la nube no se pide en bucle");
+  if(getenv("INO_SHOTS")) shotSave("nube_galeria");
+
+  // ---- 3. FOTO: se trae el ORIGINAL y se abre en el visor de la Galeria ----
+  gStubCloudCalls.clear();
+  clTap(galTick, c0x, c0y);
+  chk(clCalled("view fil_p1"), "tocar una foto de la nube pide el original (no una copia reducida)");
+  const char* vp = "/System/Cloud/view/Playa.jpg";
+  gTestFiles[vp] = vwTestJpeg(800, 600);
+  FlexCloudEvent ev; memset(&ev, 0, sizeof(ev));
+  ev.kind = FCE_VIEW_READY; ev.opId = gStubCloudOp; ev.ok = true; snprintf(ev.localPath, sizeof(ev.localPath), "%s", vp);
+  gStubCloudEvents.push_back(ev);
+  cloudUiTick();
+  chk(vwActiveFor(&GAL_VW) && vwKind == VWK_PHOTO && !strcmp(vwPath, vp), "llega verificada y se abre en el visor de la Galeria");
+  chk(!vwCanTrash && !vwCanEdit, "una copia de la nube no ofrece papelera ni editor locales");
+  vwClose();
+  chk(galTab == GAL_TAB_CLOUD && ckHost == &GAL_CK, "cerrar el visor vuelve a la nube");
+
+  // ---- 4. MP4: no se intenta; se dice por que y se ofrecen sus acciones ----
+  gStubCloudCalls.clear();
+  int c2x, c2y; clCellCenter(2, c2x, c2y);
+  clTap(galTick, c2x, c2y);
+  chk(!clCalled("stream") && !clCalled("view"), "un MP4 no se intenta reproducir en el P4");
+  chk(mmOn, "se ofrecen sus acciones (descargar, detalles...)");
+  chk(clMenuPick(galTick, MA_CL_DOWNLOAD) && clCalled("down fil_v2 2"), "descargar: a la biblioteca (es un medio)");
+
+  // ---- 5. PULSACION LARGA: menu de un elemento de la nube ----
+  clLong(galTick, c0x, c0y);
+  chk(mmOn, "pulsacion larga: menu del elemento de la nube");
+  bool hasTrash = false, hasDl = false;
+  for(int i = 0; i < mmN; i++){ if(mmAct[i] == MA_TRASH) hasTrash = true; if(mmAct[i] == MA_CL_DOWNLOAD) hasDl = true; }
+  chk(hasTrash && hasDl, "con Descargar y Eliminar (a la papelera de la nube)");
+  if(getenv("INO_SHOTS")){ mmDraw(1.0f); shotSave("nube_menu"); }
+  gStubCloudCalls.clear();
+  chk(clMenuPick(galTick, MA_TRASH) && clCalled("trash fil_p1"), "Eliminar manda a la papelera de Flex Cloud");
+
+  // ---- 6. TRANSFERENCIAS: progreso real, cancelar, reintentar, limpiar ----
+  FlexCloudXfer x1; memset(&x1, 0, sizeof(x1)); x1.id = 41; x1.type = FCL_JOB_UPLOAD; x1.phase = FCX_RUNNING;
+  snprintf(x1.name, sizeof(x1.name), "Cumple.avi"); x1.size = 3u << 20; x1.done = 1258291; x1.bytesPerSec = 348160;
+  FlexCloudXfer x2 = x1; x2.id = 42; x2.type = FCL_JOB_DOWNLOAD; x2.phase = FCX_FAILED; snprintf(x2.name, sizeof(x2.name), "Mesa.jpg");
+  snprintf(x2.error, sizeof(x2.error), "No queda espacio en el dispositivo");
+  FlexCloudXfer x3 = x1; x3.id = 43; x3.phase = FCX_DONE; x3.done = x3.size; snprintf(x3.name, sizeof(x3.name), "Notas.txt");
+  gStubCloudXfers = { x1, x2, x3 };
+  gStubCloudStatus.activeXfers = 1; gStubCloudStatus.gen++;
+  ckXfersOn = true; ckRender();
+  if(getenv("INO_SHOTS")) shotSave("nube_transferencias");
+  gStubCloudCalls.clear();
+  { int bx, by, bw, bh; ckBox(bx, by, bw, bh);
+    clTap(galTick, bx + bw - 40, by + CKX_TOP + 20);
+    chk(clCalled("cancel 41"), "Cancelar una subida en curso");
+    clTap(galTick, bx + bw - 40, by + CKX_TOP + CKX_RH + 20);
+    chk(clCalled("retry 42"), "Reintentar una descarga fallida");
+    clTap(galTick, bx + bw / 2, by + bh - 40);
+    chk(clCalled("clear"), "Quitar terminadas");
+    clTap(galTick, bx + 20, by + 16);
+    chk(!ckXfersOn, "volver de Transferencias a la nube"); }
+  gStubCloudXfers.clear(); gStubCloudStatus.activeXfers = 0;
+
+  // ---- 7. VIDEO AVI: se reproduce POR RANGOS, sin descargarlo ----
+  std::vector<std::vector<uint8_t>> fr;
+  for(int k = 0; k < 400; k++) fr.push_back(vwTestJpeg(320, 240));   // ~1 MB: mas que la ventana inicial
+  gStubStreamData = vwTestAvi(fr, 320, 240, 40000);
+  gStubCloudItems[1].size = gStubStreamData.size();
+  galRender();
+  gStubCloudCalls.clear();
+  int c1x, c1y; clCellCenter(1, c1x, c1y);
+  clTap(galTick, c1x, c1y);
+  chk(clCalled("stream fil_v1"), "tocar un AVI de la nube abre el streaming (no una descarga)");
+  chk(vwActiveFor(&GAL_VW) && vwKind == VWK_VIDEO && vwCloud && vwCloudPhase == 1, "el visor espera la cabecera ensenando Cargando");
+  chk(!clCalled("down"), "y no se descarga");
+  vwTick();
+  chk(vwKind == VWK_VIDEO && vwCloudPhase == 1, "sin datos todavia: sigue esperando (no es un error)");
+  stubStreamDeliver(1000);                            // llega la ventana del principio
+  gTestMs += 10; vwTick();
+  chk(vwCloudPhase == 2 && gStubStreamPinLen > 0, "el indice del final no estaba: se fija en la cache y se espera");
+  if(getenv("INO_SHOTS")) shotSave("nube_video_cargando");
+  stubStreamDeliver(1000);
+  gTestMs += 10; vwTick();
+  chk(vwCloudPhase == 3 && vwAvi.frames == 400 && vwAvi.idxFromFile, "abierto con su indice (se podra buscar)");
+  gTestMs += 10; vwTick();
+  chk(vwFrameLen > 0, "el primer fotograma ya se ve");
+  int vx0 = (int)(vwOffX + 0.5f);
+  chk(vwIsRed(vwSeen(vx0 + 160, LH / 2)) && vwIsBlue(vwSeen(vx0 + 480, LH / 2)), "y es el del archivo (ajustado y centrado)");
+  // Reproducir con la red a tirones: los bloques llegan poco a poco.
+  vwTogglePlay();
+  if(getenv("CL_DEBUG")){ extern std::vector<bool> gStubStreamReady; int r = 0; for(bool b : gStubStreamReady) r += b; printf("   (bloques listos al empezar: %d de %zu; mf=%u)\n", r, gStubStreamReady.size(), vwAvi.maxFrameBytes); }
+  bool buffered = false;
+  for(int k = 0; k < 4000 && !vwEnded; k++){
+    gTestUs = vwNextUs + 1000; gTestMs += 41;
+    vwTick();
+    if(vwBuffering) buffered = true;
+    if(k % 200 == 199) stubStreamDeliver(1);        // ~30 fotogramas por bloque: la red va MAS LENTA que el video
+  }
+  gTestUs = 0;
+  if(!vwEnded) printf("   (video: ended=%d kind=%d frame=%u playing=%d buffering=%d err=%s misses=%u)\n", vwEnded, vwKind, vwCurFrame, vwPlaying, vwBuffering, vwErr, gStubStreamMisses);
+  chk(buffered, "cuando falta el siguiente tramo, espera (Cargando) en vez de saltarse fotogramas");
+  chk(vwEnded && vwKind == VWK_VIDEO && vwCurFrame >= 398, "y llega al final sin darse por roto");
+  gStubCloudCalls.clear();
+  vwClose();
+  chk(clCalled("stream-close") && !gStubStreamOpen, "cerrar el visor cierra el streaming (la tarea deja de bajar)");
+
+  // ---- 8. SUBIR DESDE LA GALERIA: conservar o liberar espacio ----
+  std::vector<uint8_t> jpg = vwTestJpeg(64, 64);
+  uint32_t lid = geAddPhoto(FML_DIR_PHOTO "/Atardecer.jpg", jpg, false);
+  gStubAccountLinked = true;
+  galTab = 0; ckUnbind(&GAL_CK); galViewReady = false; galRender();
+  mkOpenItemMenu(lid, 240, 300, (const uint8_t[]){ MA_EDIT, MA_OPENMM, MA_CL_UP }, 3);
+  bool up = false, del = false;
+  for(int i = 0; i < mmN; i++){ if(mmAct[i] == MA_CL_UP) up = true; if(mmAct[i] == MA_DELETE) del = true; }
+  chk(up && del && mmN <= MM_MAX, "el menu ofrece Subir a Flex Cloud SIN perder Borrar para siempre");
+  mmClose();
+  mkMenuId = lid; mkDoAction(MA_CL_UP);
+  chk(ckUpAskOn, "Subir a Flex Cloud pregunta: conservar o liberar espacio");
+  if(getenv("INO_SHOTS")) shotSave("nube_subir");
+  gStubCloudCalls.clear();
+  { int x, y, w, h; ckUpAskGeom(x, y, w, h);
+    tDown(x + w / 2, y + 136 + 64 + 30, clMs); tUp(clMs + 50, true);
+    ckUpAskTick(mkRedrawAll); touchReset(); clMs += 400; }
+  char want[160]; snprintf(want, sizeof(want), "up %s Atardecer.jpg root %lu 1", FML_DIR_PHOTO "/Atardecer.jpg", (unsigned long)lid);
+  chk(clCalled(want), "\"Subir y liberar espacio\": se encola con FREE_LOCAL (y el original sigue aqui)");
+  chk(gTestFiles.count(FML_DIR_PHOTO "/Atardecer.jpg") == 1, "encolar NO borra nada");
+  // Lo protegido no se sube: el menu ni lo ofrece.
+  uint32_t lk = geAddPhoto("/System/Media/Protegido/9.jpg", jpg, true);
+  mkOpenItemMenu(lk, 240, 300, (const uint8_t[]){ MA_CL_UP }, 1);
+  up = false; for(int i = 0; i < mmN; i++) if(mmAct[i] == MA_CL_UP) up = true;
+  chk(!up, "lo protegido no ofrece subir a la nube");
+  mmClose();
+
+  // ---- 9. LIBERAR ESPACIO: solo con el aviso que lo permite ----
+  FlexCloudEvent ue; memset(&ue, 0, sizeof(ue));
+  ue.kind = FCE_UPLOAD_DONE; ue.ok = true; ue.mlId = lid; ue.flags = FCL_JF_FREE_LOCAL;
+  snprintf(ue.localPath, sizeof(ue.localPath), "%s", FML_DIR_PHOTO "/Atardecer.jpg");
+  snprintf(ue.name, sizeof(ue.name), "Atardecer.jpg");
+  ue.size = jpg.size() + 1;                               // el original ya no mide lo que se subio
+  gStubCloudEvents.push_back(ue); cloudUiTick();
+  FlexMlRec rr;
+  chk(mlGet(lid, &rr) && gTestFiles.count(FML_DIR_PHOTO "/Atardecer.jpg"), "si el original cambio de tamano, NO se borra");
+  ue.size = jpg.size(); ue.flags = 0;
+  gStubCloudEvents.push_back(ue); cloudUiTick();
+  chk(mlGet(lid, &rr), "una subida sin 'liberar espacio' no borra nada");
+  ue.flags = FCL_JF_FREE_LOCAL;
+  gStubCloudEvents.push_back(ue); cloudUiTick();
+  chk(!mlGet(lid, &rr) && !gTestFiles.count(FML_DIR_PHOTO "/Atardecer.jpg"), "confirmada en la nube con su huella: se libera");
+  gStubCloudEvents.push_back(ue); cloudUiTick();             // el mismo aviso otra vez (tras un reinicio)
+  chk(true, "un aviso repetido no hace nada (el original ya no esta)");
+  FlexCloudEvent le = ue; le.mlId = lk; snprintf(le.localPath, sizeof(le.localPath), "/System/Media/Protegido/9.jpg");
+  gStubCloudEvents.push_back(le); cloudUiTick();
+  chk(mlGet(lk, &rr), "nunca se borra un protegido por un aviso de la nube");
+
+  // ---- 10. DESCARGAS: a la biblioteca o a /Descargas ----
+  gTestFiles["/System/Cloud/dl/7.jpg"] = jpg;
+  FlexCloudEvent de; memset(&de, 0, sizeof(de));
+  de.kind = FCE_DOWNLOAD_DONE; de.ok = true; de.flags = FCL_JF_TO_LIBRARY; de.size = jpg.size();
+  snprintf(de.localPath, sizeof(de.localPath), "/System/Cloud/dl/7.jpg"); snprintf(de.name, sizeof(de.name), "Desde la nube.jpg");
+  gStubCloudEvents.push_back(de); cloudUiTick();
+  bool inLib = false;
+  for(uint16_t i = 0; i < gMs.lib.n; i++) if(gMs.lib.recs[i].origin == FML_O_CLOUD && gMs.lib.recs[i].kind == FML_K_PHOTO) inLib = true;
+  chk(inLib && !gTestFiles.count("/System/Cloud/dl/7.jpg"), "una foto descargada entra en la Galeria (marcada como de la nube)");
+  gTestFiles["/System/Cloud/dl/8.pdf"] = std::vector<uint8_t>(1000, 7);
+  de.flags = 0; snprintf(de.localPath, sizeof(de.localPath), "/System/Cloud/dl/8.pdf"); snprintf(de.name, sizeof(de.name), "Factura.pdf");
+  gStubCloudEvents.push_back(de); cloudUiTick();
+  chk(gTestFiles.count("/Descargas/Factura.pdf") && !gTestFiles.count("/System/Cloud/dl/8.pdf"), "lo demas va a Archivos > Descargas");
+
+  // ---- 11. MULTIMEDIA: pestana Nube con los videos ----
+  gStubCloudCalls.clear();
+  galCloseApp(); gAppState[IC_GALERIA] = ALIFE_CLOSED;
+  chk(ckHost == nullptr, "cerrar la Galeria suelta la nube");
+  shotApp(IC_MULTIMEDIA); gAppState[IC_MULTIMEDIA] = ALIFE_RUNNING; mkBind(&VID_APP); vidViewReady = false;
+  vidFilter = VID_TAB_CLOUD; vidScreen = VS_LIST; vidListRender();
+  chk(ckHost == &VID_CK && clCalled("list 3 root"), "Multimedia > Nube pide los videos de la nube");
+  if(getenv("INO_SHOTS")) shotSave("nube_multimedia");
+  vidCloseApp(); gAppState[IC_MULTIMEDIA] = ALIFE_CLOSED;
+  vidFilter = 0;
+
+  // ---- 12. ARCHIVOS: "Este dispositivo | Flex Cloud", carpetas y ruta ----
+  gStubCloudItems.clear();
+  gStubCloudItems.push_back(clItem("fld_1", "Viaje a Espa\xC3\xB1" "a", 0, 0, true));
+  gStubCloudItems.push_back(clItem("fil_d1", "Presupuesto.pdf", FCL_K_DOCUMENT, 120000));
+  gStubCloudList.gen++;
+  gStubCloudCalls.clear();
+  filesEnter();
+  chk(gState == ST_FILES && !filesCloud, "Archivos entra por Este dispositivo");
+  clTap(filesTick, SCR_W * 3 / 4, FILES_SEG_Y + FILES_SEG_H / 2);
+  chk(filesCloud && ckHost == &filesCkHost && clCalled("list 0 root"), "Flex Cloud: la raiz de la nube");
+  int f0x, f0y; clCellCenter(0, f0x, f0y);
+  gStubCloudCalls.clear();
+  clTap(filesTick, f0x, f0y);
+  chk(clCalled("list 0 fld_1"), "tocar una carpeta entra en ella");
+  gStubCloudList.nCrumbs = 1; snprintf(gStubCloudList.crumbs[0].id, FCL_ID_MAX, "fld_1");
+  snprintf(gStubCloudList.crumbs[0].name, sizeof(gStubCloudList.crumbs[0].name), "Viaje a Espa\xC3\xB1" "a");
+  gStubCloudList.gen++;
+  filesRender();
+  if(getenv("INO_SHOTS")) shotSave("nube_archivos");
+  gStubCloudCalls.clear();
+  clTap(filesTick, 20, 20);                                  // ATRAS de la cabecera
+  chk(clCalled("list 0 root") && gState == ST_FILES, "atras sube a la carpeta de arriba (no sale de Archivos)");
+  gStubCloudList.nCrumbs = 0;
+  clTap(filesTick, SCR_W / 4, FILES_SEG_Y + FILES_SEG_H / 2);
+  chk(!filesCloud && ckHost == nullptr, "volver a Este dispositivo suelta la nube");
+
+  // ---- 13. La cuota solo se refresca con la nube a la vista ----
+  cloudUiTick();
+  chk(!gStubCloudActive, "sin la nube delante, FlexOS_Cloud no refresca la cuota");
+
+  gStubAccountLinked = false;
+  memset(&gStubCloudStatus, 0, sizeof(gStubCloudStatus));
+  gStubCloudItems.clear(); gStubStreamData.clear();
+  uiGlass = glass0; gNavMode = nav0;
+  mkReset();
+  gMlOk = ok0; gTestFsReady = fs0; gTestMemFs = false; gTestFiles.clear();
+  memset(&gMs, 0, sizeof(gMs));
+  gState = ST_HOME; gAppId = 0; gLand = false; uiClipFull(); setBuf(fb);
+  if(gFails == before) printf("  Flex Cloud en la interfaz: todas las comprobaciones pasan.\n");
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -10370,6 +10697,7 @@ int main(){
   testHojaWebLocalizada();
   testCapturasVisor();
   testGaleriaSinRestos();
+  testFlexCloudUi();
   testTrabajoPeriodico();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;

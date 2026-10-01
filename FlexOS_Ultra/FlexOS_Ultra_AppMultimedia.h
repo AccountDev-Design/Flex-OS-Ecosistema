@@ -25,7 +25,7 @@
 // ##      entrada del sistema es siempre FlexOS_Ultra.ino.
 // #############################################################
 #pragma once
-#include "FlexOS_Ultra_MediaViewer.h"   // eslabon anterior de la cadena
+#include "FlexOS_Ultra_CloudKit.h"   // eslabon anterior de la cadena
 
 // #############################################################
 
@@ -70,9 +70,10 @@ static void vidListRender();
 // -------------------------------------------------------------
 #define VID_ROW_H   64
 #define VID_HEAD_H  104
-#define VID_TABS_N  3
+#define VID_TABS_N  4
+#define VID_TAB_CLOUD 3               // "Nube": videos de Flex Cloud, reproducidos por rangos
 #define VID_THUMB_BUDGET 6            // miniaturas nuevas por repintado
-static const char* VID_TABS[VID_TABS_N] = { "Todo", "V\xC3\xAD" "deos", "Fotos" };
+static const char* VID_TABS[VID_TABS_N] = { "Todo", "V\xC3\xAD" "deos", "Fotos", "Nube" };
 static uint32_t vidTabMask(){
   switch(vidFilter){
     case 1: return FML_MASK(FML_K_VIDEO);
@@ -102,7 +103,12 @@ static void vidSyncLocked(){
 }
 
 static void vidOpenId(uint32_t id);
-static const MediaListApp VID_APP = { "Multimedia", vidRenderAll, vidOpenId, NULL };
+// Accion propia: subir a Flex Cloud (conservar o liberar espacio).
+static bool vidExtra(int act, uint32_t id){
+  if(act == MA_CL_UP){ mkRedraw(); ckUpAskOpen(id); return true; }
+  return false;
+}
+static const MediaListApp VID_APP = { "Multimedia", vidRenderAll, vidOpenId, vidExtra };
 
 static int vidRowY(int i){ int bx, by, bw, bh; uiBox(bx, by, bw, bh); return by + VID_HEAD_H + i * VID_ROW_H - vidListScroll; }
 
@@ -158,8 +164,39 @@ static void vidDrawRow(const FlexMlRec* r, int x, int y, int w, int &budget){
   }
 }
 
+// ---- Pestana "Nube" (FlexOS_Ultra_CloudKit.h) ----
+static VwSession vidVwSess;
+static void vidCkBox(int& x, int& y, int& w, int& h){
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+  x = bx; y = by + VID_HEAD_H - 6; w = bw; h = bh - (VID_HEAD_H - 6);
+}
+static void vidCkOpen(const char* path);    // abre en el visor de Multimedia (mas abajo, junto a VID_VW)
+static const CkHost VID_CK = { "Multimedia", CKM_VIDEO, vidCkBox, mkRedrawAll, vidCkOpen, WIN_BG };
+static void vidDrawTabs(int bx, int by, int bw, int pad){
+  const int tabY = by + 68, tw = (bw - 2 * pad) / VID_TABS_N;
+  for(int i = 0; i < VID_TABS_N; i++){
+    int tx = bx + pad + i * tw;
+    if(i == vidFilter) fillRoundRect(tx + 2, tabY, tw - 4, 28, 14, TH_PRIM);
+    drawTextC(tx + tw / 2, tabY + 8, VID_TABS[i], 1, i == vidFilter ? TH_ONACC : TH_TXT2);
+  }
+}
+static void vidRenderCloud(){
+  setBuf(fb);
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+  int pad = uiPad();
+  fillRect(bx, by, bw, VID_HEAD_H - 6, WIN_BG);
+  drawText(bx + pad, by + 14, "Multimedia", 4, TH_TXT);
+  for(int i = 0; i < 3; i++) fillCircle(bx + bw - pad - 4, by + 22 + i * 12, 4, TH_NAV);
+  drawText(bx + pad, by + 52, "V\xC3\xAD" "deos en Flex Cloud: se reproducen sin descargarlos", 1, TH_TXT2);
+  vidDrawTabs(bx, by, bw, pad);
+  ckBind(&VID_CK);
+  ckRender();
+  flxFlush(by, by + VID_HEAD_H);
+}
+
 static void vidListRender(){
   if(webSheetIsOpen()){ webSheetRender(); return; }  // la hoja del servidor manda mientras esta abierta
+  if(vidFilter == VID_TAB_CLOUD){ vidRenderCloud(); return; }
   setBuf(fb);
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
   fillRect(bx, by, bw, bh, WIN_BG);
@@ -196,12 +233,7 @@ static void vidListRender(){
   if(st) drawTextR(bx + bw - pad - 18, by + 52, st, 1, TH_TXT2);
 
   // Pestanas
-  const int tabY = by + 68, tw = (bw - 2 * pad) / VID_TABS_N;
-  for(int i = 0; i < VID_TABS_N; i++){
-    int tx = bx + pad + i * tw;
-    if(i == vidFilter) fillRoundRect(tx + 2, tabY, tw - 4, 28, 14, TH_PRIM);
-    drawTextC(tx + tw / 2, tabY + 8, VID_TABS[i], 1, i == vidFilter ? TH_ONACC : TH_TXT2);
-  }
+  vidDrawTabs(bx, by, bw, pad);
 
   if(n == 0){
     drawTextC(bx + bw / 2, by + bh / 2 - 30, "No hay fotos ni v\xC3\xAD" "deos", 3, TH_TXT2);
@@ -290,7 +322,6 @@ static uint32_t vidIdOfPath(const char* path){
 }
 
 // ---- El visor, visto desde Multimedia ----
-static VwSession vidVwSess;
 // El visor se cerro: a la app de la que se vino, o a la lista.
 static void vidVwClosed(){
   vidScreen = VS_LIST;
@@ -323,6 +354,12 @@ static uint32_t vidVwNeighbour(uint32_t id, int delta){
   return out;
 }
 static const VwHost VID_VW = { IC_MULTIMEDIA, &vidVwSess, vidVwClosed, vidVwNeighbour, NULL, NULL };
+// Lo de la nube (foto ya traida o "cloud:<id>/<nombre>") en el visor de aqui.
+static void vidCkOpen(const char* path){
+  vidScreen = VS_VIEW;
+  vidCurId = 0;
+  vwOpen(&VID_VW, 0, path, NULL);
+}
 
 static void mediaOpenInPlayer(const char* path){
   if(!path || !path[0]) return;
@@ -351,6 +388,23 @@ static void vidOpenId(uint32_t id){
   vwOpen(&VID_VW, id, NULL, NULL);
 }
 
+// La pestana "Nube": pestanas y menu de la app aqui; lo demas, el kit.
+static void vidCloudTick(){
+  bool layer = mmOn || mmDlgOn || fkNameOn || fkAskOn;
+  if(!layer && T.tap){
+    int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+    int pad = uiPad();
+    if(T.x > bx + bw - pad - 30 && T.y < by + 60){ ckAppMenu(bx + bw - MM_W / 2 - 16, by + 50); return; }
+    const int tabY = by + 68, tw = (bw - 2 * pad) / VID_TABS_N;
+    if(T.y >= tabY && T.y <= tabY + 28){
+      int k = (T.x - bx - pad) / (tw > 0 ? tw : 1);
+      if(k >= 0 && k < VID_TABS_N && k != vidFilter){ vidFilter = k; vidListScroll = 0; ckUnbind(&VID_CK); vidListRender(); }
+      return;
+    }
+  }
+  ckTick();
+}
+
 static void vidListTouch(){
   int bx, by, bw, bh; uiBox(bx, by, bw, bh);
   int pad = uiPad();
@@ -373,7 +427,7 @@ static void vidListTouch(){
      && abs(T.x - T.startX) < 14 && abs(T.y - T.startY) < 14){
     longFired = true;
     uint32_t id = vidHitId(T.startX, T.startY);
-    if(id && !mkMulti){ mkOpenItemMenu(id, T.x, T.y + 10, NULL, 0); return; }
+    if(id && !mkMulti){ static const uint8_t ex[1] = { MA_CL_UP }; mkOpenItemMenu(id, T.x, T.y + 10, ex, 1); return; }
     if(id && mkMulti){ mkToggle(id); vidListRender(); return; }
   }
   if(!T.down) longFired = false;
@@ -390,7 +444,7 @@ static void vidListTouch(){
   if(T.y >= tabY && T.y <= tabY + 28){
     int k = (T.x - bx - pad) / (tw > 0 ? tw : 1);
     if(k >= 0 && k < VID_TABS_N && k != vidFilter){
-      vidFilter = k; vidListScroll = 0; vidListRender();
+      vidFilter = k; vidListScroll = 0; mkReset(); vidListRender();
     }
     return;
   }
@@ -442,6 +496,8 @@ static void vidTick(){
     return;
   }
   vidScreen = VS_LIST;
+  if(ckUpAskTick(mkRedrawAll)) return;            // "Subir a Flex Cloud": conservar o liberar
+  if(vidFilter == VID_TAB_CLOUD){ vidCloudTick(); return; }
   if(mkTick()) return;                            // menu, dialogos, papelera, hoja del servidor
   // El catalogo cambio (subida del movil, miniatura lista, reconciliacion):
   // como mucho un repintado cada 300 ms, y nunca a mitad de un arrastre.
@@ -478,12 +534,19 @@ static bool vidBackScreen(){
   return true;
 }
 // En la lista, ATRAS cierra primero el menu, los dialogos y la seleccion.
-static bool vidBackLayer(){ return !vwHostOpen(&VID_VW) && mkBackLayer(); }
+static bool vidBackLayer(){
+  if(vwHostOpen(&VID_VW)) return false;
+  if(ckUpAskOn){ ckUpAskOn = false; mkRedrawAll(); return true; }
+  if(vidFilter == VID_TAB_CLOUD) return ckBack();
+  return mkBackLayer();
+}
 
 static void vidSuspend(){
   // Una app en segundo plano no decodifica. Se guarda la posicion y se
   // suelta todo; al volver, vidResume reabre por donde iba.
   mkSuspend();
+  ckUpAskOn = false;
+  ckUnbind(&VID_CK);                   // la nube se vuelve a pedir al volver (las transferencias siguen)
   if(vwActiveFor(&VID_VW)) vwSuspend();
   gLand = false;                       // el framework tambien lo hace; aqui por si acaso
 }
@@ -491,7 +554,7 @@ static void vidSuspend(){
 // a segundo plano, asi que aqui casi siempre no queda nada -- y entonces se
 // devuelve 0, que es lo que hace que el optimizador no se apunte bytes que no
 // libero. Existe para el caso en que la app quedara suspendida por otra via.
-static size_t vidShed(){ return vwShed(); }
+static size_t vidShed(){ return vwShed() + ckShed(); }
 static void vidResume(){
   mkBind(&VID_APP);
   if(vwHostOpen(&VID_VW)){
@@ -503,7 +566,10 @@ static void vidResume(){
   vidListRender();
 }
 static void vidCloseApp(){
+  ckUnbind(&VID_CK);
+  ckUpAskOn = false;
   vwForget(&VID_VW);
+  ckShed();                                       // miniaturas de la nube y la arena del streaming (ya cerrado)
   if(mkApp == &VID_APP) mkReset();
   gLand = false;
   vidScreen = VS_LIST;
@@ -513,7 +579,7 @@ static bool vidSaveSess(){
   if(!flexFsReady()) return true;
   VidSessV2 v;
   memset(&v, 0, sizeof(v));
-  v.filter = vidFilter;
+  v.filter = vidFilter == VID_TAB_CLOUD ? 0 : vidFilter;     // la nube no se abre sola al volver
   for(int i = 0; i < VW_RESUME_N; i++){
     v.resumeKey[i]   = vwResumeTab[i].key;
     v.resumeFrame[i] = vwResumeTab[i].frame;
@@ -525,7 +591,7 @@ static void vidLoadSess(){
   VidSessV2 v;
   if(sessRead(VID_SESS_PATH, VID_SESS_VER, IC_MULTIMEDIA, &v, sizeof(v)) != sizeof(v)) return;
   // (La pestana 3 era "Audio", que ahora vive en Musica: se vuelve a "Todo".)
-  vidFilter = (v.filter >= 0 && v.filter < VID_TABS_N) ? (int)v.filter : 0;
+  vidFilter = (v.filter >= 0 && v.filter < VID_TAB_CLOUD) ? (int)v.filter : 0;
   for(int i = 0; i < VW_RESUME_N; i++){
     vwResumeTab[i].key    = v.resumeKey[i];
     vwResumeTab[i].frame  = v.resumeFrame[i];

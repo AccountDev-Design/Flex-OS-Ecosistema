@@ -122,7 +122,7 @@ enum {
 };
 
 // Origen del elemento.
-enum { FML_O_LOCAL = 0, FML_O_WEB = 1, FML_O_EDIT = 2 };
+enum { FML_O_LOCAL = 0, FML_O_WEB = 1, FML_O_EDIT = 2, FML_O_CLOUD = 3 };   // CLOUD: bajado de Flex Cloud
 
 // Banderas del registro.
 #define FML_R_LOCKED      0x0001u   // protegido con la seguridad del sistema

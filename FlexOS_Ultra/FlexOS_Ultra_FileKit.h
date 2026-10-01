@@ -49,12 +49,14 @@
 #define FK_ACT_DEL    1
 #define FK_ACT_REN    2
 #define FK_ACT_TRASH  3
+#define FK_ACT_CLOUD  4            // solo el Explorador, sobre un archivo: "Subir a Flex Cloud"
 #define FK_MENU_W    272
 #define FK_MENU_RH    46
 #define FK_MENU_PAD   10
 
-static const char* FK_MENU_LBL[4] = { "Seleccionar", "Eliminar", "Renombrar", "Papelera" };
-static const int fkMenuN = 4;           // filas del menu
+static const char* FK_MENU_LBL[5] = { "Seleccionar", "Eliminar", "Renombrar", "Papelera", "Subir a Flex Cloud" };
+static bool fkMenuCloud = false;        // la quinta fila (la pone el Explorador al abrir el menu de un archivo)
+static inline int fkMenuRows(){ return fkMenuCloud ? 5 : 4; }
 
 // ---- Texto ajustado a una caja (para la vista previa REAL de una nota) ----
 // Corta por caracteres, no por palabras, a proposito: el contenido de una nota
@@ -109,6 +111,11 @@ static void fkMenuGlyph(int k, int cx, int cy){
     drawRoundRect(cx - 8, cy - 8, 16, 20, 3, w);
     fillRect(cx - 3, cy - 4, 2, 12, w);
     fillRect(cx + 1, cy - 4, 2, 12, w);
+  } else if(k == FK_ACT_CLOUD){                         // nube con flecha hacia arriba
+    fillCircle(cx - 6, cy + 2, 6, gr); fillCircle(cx + 2, cy - 3, 8, gr); fillCircle(cx + 9, cy + 3, 5, gr);
+    fillRect(cx - 6, cy + 3, 15, 5, gr);
+    fillRect(cx, cy - 4, 2, 9, TH_SURF2);
+    fillTriangle(cx - 4, cy - 1, cx + 5, cy - 1, cx + 1, cy - 6, TH_SURF2);
   }
 }
 
@@ -117,7 +124,7 @@ static int  fkMenuX = 0, fkMenuY = 0;
 
 static void fkMenuGeom(int &x, int &y, int &w, int &h){
   w = FK_MENU_W;
-  h = fkMenuN * FK_MENU_RH + 2 * FK_MENU_PAD;
+  h = fkMenuRows() * FK_MENU_RH + 2 * FK_MENU_PAD;
   x = fkMenuX; y = fkMenuY;
   if(x + w > SCR_W - 8) x = SCR_W - 8 - w;
   if(x < 8) x = 8;
@@ -128,7 +135,7 @@ static void fkMenuGeom(int &x, int &y, int &w, int &h){
 static void fkMenuDraw(){
   int x, y, w, h; fkMenuGeom(x, y, w, h);
   uiSurface(x, y, w, h, 18, UIS_ELEVATED);             // material y color del tema
-  for(int i = 0; i < fkMenuN; i++){
+  for(int i = 0; i < fkMenuRows(); i++){
     int ry = y + FK_MENU_PAD + i * FK_MENU_RH;
     drawTextClip(x + 16, ry + 10, FK_MENU_LBL[i], 3, i == FK_ACT_DEL ? TH_DANGER : uiSurfOn(UIS_ELEVATED), x + w - 42);
     fkMenuGlyph(i, x + w - 32, ry + FK_MENU_RH / 2);
@@ -136,14 +143,15 @@ static void fkMenuDraw(){
   flxFlush(y - 2, y + h + 2);
 }
 
-static void fkMenuOpen(int px, int py){ fkMenuOn = true; fkMenuX = px; fkMenuY = py; fkMenuDraw(); }
+static void fkMenuOpenEx(int px, int py, bool cloud){ fkMenuCloud = cloud; fkMenuOn = true; fkMenuX = px; fkMenuY = py; fkMenuDraw(); }
+static void fkMenuOpen(int px, int py){ fkMenuOpenEx(px, py, false); }
 
-// -1 = toque fuera del panel (cierra sin accion); 0..fkMenuN-1 = accion elegida.
+// -1 = toque fuera del panel (cierra sin accion); 0..fkMenuRows()-1 = accion elegida.
 static int fkMenuHit(int px, int py){
   int x, y, w, h; fkMenuGeom(x, y, w, h);
   if(px < x || px > x + w || py < y || py > y + h) return -1;
   int i = (py - y - FK_MENU_PAD) / FK_MENU_RH;
-  if(i < 0) i = 0; if(i > fkMenuN - 1) i = fkMenuN - 1;
+  if(i < 0) i = 0; if(i > fkMenuRows() - 1) i = fkMenuRows() - 1;
   return i;
 }
 

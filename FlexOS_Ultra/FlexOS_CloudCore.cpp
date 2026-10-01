@@ -800,3 +800,122 @@ uint32_t fclCacheContiguous(const FclCache* c, uint32_t pos){
 #if FCL_SHA_OPENSSL
 #  pragma GCC diagnostic pop
 #endif
+
+// =====================================================================
+//  TEXTOS Y DECISIONES DE LA INTERFAZ
+// =====================================================================
+void fclQuotaLine(const FclQuota* q, char* out, size_t cap){
+  if(!out || !cap) return;
+  if(!q || !q->totalBytes){ snprintf(out, cap, "Espacio no disponible"); return; }
+  char u[24], t[24];
+  fclFmtBytes(q->usedBytes + q->reservedBytes, u, sizeof(u));
+  fclFmtBytes(q->totalBytes, t, sizeof(t));
+  unsigned pct = (q->permille + 5u) / 10u;
+  if(pct == 0 && q->permille > 0) pct = 1;                      // algo ocupado nunca es "0 %"
+  if(pct > 100) pct = 100;
+  snprintf(out, cap, "%s de %s \xC2\xB7 %u %%", u, t, pct);
+}
+
+void fclQuotaHint(const FclQuota* q, char* out, size_t cap){
+  if(!out || !cap) return;
+  if(!q || !q->totalBytes){ out[0] = 0; return; }
+  uint64_t taken = q->usedBytes + q->reservedBytes;
+  uint64_t left = q->totalBytes > taken ? q->totalBytes - taken : 0;
+  char l[24]; fclFmtBytes(left, l, sizeof(l));
+  if(q->state == FCL_Q_FULL || !left) snprintf(out, cap, "Flex Cloud est\xC3\xA1 lleno");
+  else if(q->state == FCL_Q_LOW) snprintf(out, cap, "Espacio casi lleno: quedan %s", l);
+  else snprintf(out, cap, "Quedan %s", l);
+}
+
+static bool endsWithCi(const char* s, const char* ext){
+  size_t a = strlen(s), b = strlen(ext);
+  if(a < b) return false;
+  for(size_t i = 0; i < b; i++){
+    char c = s[a - b + i];
+    if(c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    if(c != ext[i]) return false;
+  }
+  return true;
+}
+
+int fclOpenAction(const FclItem* it, const char** why){
+  if(why) *why = nullptr;
+  if(!it) return FCL_OPEN_MENU;
+  if(it->isFolder) return FCL_OPEN_FOLDER;
+  const char* n = it->name;
+  if(endsWithCi(n, ".jpg") || endsWithCi(n, ".jpeg")){
+    if(it->size > 8ull * 1024 * 1024){ if(why) *why = "Es demasiado grande para abrirla aqu\xC3\xAD: desc\xC3\xA1rgala o \xC3\xA1" "brela en la web"; return FCL_OPEN_MENU; }
+    return FCL_OPEN_PHOTO;
+  }
+  if(endsWithCi(n, ".avi")){
+    if(it->size > 0xFFFFFFF0ull){ if(why) *why = "Es demasiado grande para este dispositivo"; return FCL_OPEN_MENU; }
+    return FCL_OPEN_STREAM;
+  }
+  if(it->kind == FCL_K_PHOTO){ if(why) *why = "Este formato de foto se ve en la web de Flex Cloud"; return FCL_OPEN_MENU; }
+  if(it->kind == FCL_K_VIDEO){ if(why) *why = "Este v\xC3\xAD" "deo no se reproduce en este dispositivo (solo AVI MJPEG). \xC3\x81" "brelo en la web"; return FCL_OPEN_MENU; }
+  if(it->kind == FCL_K_AUDIO){ if(why) *why = "Desc\xC3\xA1rgalo para escucharlo en M\xC3\xBAsica"; return FCL_OPEN_MENU; }
+  return FCL_OPEN_MENU;
+}
+
+// Dias desde 1970-01-01 -> fecha civil (algoritmo de H. Hinnant, sin tablas).
+static void civilFromDays(int64_t z, int& y, unsigned& m, unsigned& d){
+  z += 719468;
+  const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+  const unsigned doe = (unsigned)(z - era * 146097);
+  const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  const int64_t yy = (int64_t)yoe + era * 400;
+  const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  const unsigned mp = (5 * doy + 2) / 153;
+  d = doy - (153 * mp + 2) / 5 + 1;
+  m = mp < 10 ? mp + 3 : mp - 9;
+  y = (int)(yy + (m <= 2));
+}
+
+void fclFmtDate(int64_t ms, char* out, size_t cap){
+  if(!out || !cap) return;
+  out[0] = 0;
+  if(ms <= 0) return;
+  int64_t days = ms / 86400000LL;
+  int y; unsigned m, d;
+  civilFromDays(days, y, m, d);
+  snprintf(out, cap, "%02u/%02u/%04d", d, m, y);
+}
+
+void fclItemSub(const FclItem* it, char* out, size_t cap){
+  if(!out || !cap) return;
+  if(!it){ out[0] = 0; return; }
+  if(it->isFolder){ snprintf(out, cap, "Carpeta"); return; }
+  char sz[24], dt[16];
+  fclFmtBytes(it->size, sz, sizeof(sz));
+  fclFmtDate(it->updatedAt, dt, sizeof(dt));
+  if(dt[0]) snprintf(out, cap, "%s \xC2\xB7 %s", sz, dt);
+  else snprintf(out, cap, "%s", sz);
+}
+
+void fclXferLine(uint8_t phase, uint8_t type, uint64_t done, uint64_t size, uint32_t bytesPerSec,
+                 uint32_t retryInMs, const char* error, char* out, size_t cap){
+  if(!out || !cap) return;
+  bool up = type == FCL_JOB_UPLOAD;
+  char d[24], t[24], r[24];
+  fclFmtBytes(done > size ? size : done, d, sizeof(d));
+  fclFmtBytes(size, t, sizeof(t));
+  switch(phase){
+    case FCX_QUEUED:      snprintf(out, cap, "En cola \xC2\xB7 %s", t); break;
+    case FCX_PREPARING:   snprintf(out, cap, up ? "Comprobando el archivo..." : "Preparando..."); break;
+    case FCX_RUNNING:
+      if(bytesPerSec){ fclFmtBytes(bytesPerSec, r, sizeof(r)); snprintf(out, cap, "%s \xC2\xB7 %s de %s \xC2\xB7 %s/s", up ? "Subiendo" : "Descargando", d, t, r); }
+      else snprintf(out, cap, "%s \xC2\xB7 %s de %s", up ? "Subiendo" : "Descargando", d, t);
+      break;
+    case FCX_VERIFYING:   snprintf(out, cap, "Verificando integridad..."); break;
+    case FCX_WAITING_NET: snprintf(out, cap, "Esperando conexi\xC3\xB3n \xC2\xB7 %s de %s", d, t); break;
+    case FCX_RETRYING: {
+      uint32_t s = (retryInMs + 999u) / 1000u;
+      if(s) snprintf(out, cap, "Reintento en %lu s \xC2\xB7 %s de %s", (unsigned long)s, d, t);
+      else snprintf(out, cap, "Reintentando \xC2\xB7 %s de %s", d, t);
+      break;
+    }
+    case FCX_DONE:        snprintf(out, cap, "%s \xC2\xB7 %s", up ? "Subido" : "Descargado", t); break;
+    case FCX_CANCELLED:   snprintf(out, cap, "Cancelado"); break;
+    default:              snprintf(out, cap, "%s", error && error[0] ? error : "No se pudo completar"); break;
+  }
+}

@@ -552,7 +552,7 @@ $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) 
                    $(FLNKSRC) $(FLPSRC) $(FLPLINK) $(FLAUTH) $(FLPTR) $(CORE_SRC) $(MEDIA_SRC) $(MEM_SRC) $(FALL_SRC) $(THEFT_SRC) \
                    $(VMSRC) $(GRANTSRC) $(HOSTSRC) $(PKGCORE) $(PASSSRC) $(MLIB_SRC) $(THUMB_SRC) $(JENC_SRC) \
                    $(ULTRA)/FlexOS_MediaStore.cpp $(ULTRA)/FlexOS_MediaWeb.cpp $(HTTP_SRC) $(QR_SRC) \
-                   $(ULTRA)/FlexOS_ImgEdit.cpp $(ULTRA)/FlexOS_VidEdit.cpp | $(BUILD)
+                   $(ULTRA)/FlexOS_ImgEdit.cpp $(ULTRA)/FlexOS_VidEdit.cpp $(CLCORE) | $(BUILD)
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -x c++ -c ino_compile.cpp -o $(BUILD)/ino_compile.o
 	@$(CXX) $(CXXSTD) -O1 -g $(INOWARN) $(SAN) $(INOFLAGS) -c ino_extern_stubs.cpp -o $(BUILD)/ino_extern_stubs.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(JPEG_SRC) -o $(BUILD)/ino_jpeg.o
@@ -581,6 +581,7 @@ $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) 
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(QR_SRC)    -o $(BUILD)/ino_qr.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(ULTRA)/FlexOS_ImgEdit.cpp -o $(BUILD)/ino_imgedit.o
 	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -c $(ULTRA)/FlexOS_VidEdit.cpp -o $(BUILD)/ino_videdit.o
+	@$(CXX) $(CXXSTD) -O1 -g $(WARN) $(SAN) $(INC) -Ivendor/cJSON -c $(CLCORE) -o $(BUILD)/ino_cloudcore.o
 	@$(CXX) $(SAN) -o $@ $(BUILD)/ino_compile.o $(BUILD)/ino_extern_stubs.o $(BUILD)/ino_jpeg.o \
 	        $(BUILD)/ino_flexlink.o $(BUILD)/ino_flexphone.o $(BUILD)/ino_flexphonelink.o \
 	        $(BUILD)/ino_flexauth.o $(BUILD)/ino_flexphonetr.o \
@@ -590,7 +591,7 @@ $(BUILD)/test_ino: ino_compile.cpp ino_extern_stubs.cpp $(INO_SRC) $(INO_PARTS) 
 	        $(BUILD)/ino_pkgcore.o $(BUILD)/ino_cjson.o \
 	        $(BUILD)/ino_medialib.o $(BUILD)/ino_mediastore.o $(BUILD)/ino_mediathumb.o $(BUILD)/ino_jpegenc.o \
 	        $(BUILD)/ino_mediaweb.o $(BUILD)/ino_httpshare.o $(BUILD)/ino_qr.o $(BUILD)/ino_imgedit.o \
-	        $(BUILD)/ino_videdit.o -lcrypto
+	        $(BUILD)/ino_videdit.o $(BUILD)/ino_cloudcore.o -lcrypto
 
 # La tabla de particiones de la version USB. No es codigo, pero una tabla
 # mal cuadrada no falla al compilar: falla al grabar, o peor, arranca y se

@@ -61,8 +61,9 @@
 #define GAL_THUMB_BUDGET  6        // miniaturas persistentes nuevas por repintado
 #define GAL_REFRESH_MS    300      // cambios del catalogo: como mucho un repintado cada tanto
 
-#define GAL_TABS 3
-static const char* GAL_TAB_NAME[GAL_TABS] = { "Todas", "Fotos", "V\xC3\xAD" "deos" };
+#define GAL_TABS 4
+#define GAL_TAB_CLOUD 3            // "Nube": lo que hay en Flex Cloud (NO en el dispositivo)
+static const char* GAL_TAB_NAME[GAL_TABS] = { "Todas", "Fotos", "V\xC3\xAD" "deos", "Nube" };
 static int galTab = 0;
 static uint32_t galTabMask(){
   switch(galTab){
@@ -136,6 +137,7 @@ static void galOpenPath(const char* path);
 static bool galExtra(int act, uint32_t id){
   if(act == MA_EDIT){ galEditId(id); return true; }
   if(act == MA_OPENMM){ FlexMlRec r; if(mlGet(id, &r)) galOpenPath(r.path); return true; }
+  if(act == MA_CL_UP){ mkRedraw(); ckUpAskOpen(id); return true; }
   return false;
 }
 static const MediaListApp GAL_APP = { "Galer\xC3\xAD" "a", galRender, galOpenId, galExtra };
@@ -160,6 +162,39 @@ static int galMaxScroll(){
   int need = galHeadH() + rows * (h + 26) + (mkMulti ? MKB_H + 26 : 40);
   int m = need - bh;
   return m > 0 ? m : 0;
+}
+
+// ---- Pestana "Nube" (FlexOS_Ultra_CloudKit.h) ----
+static void galCkBox(int& x, int& y, int& w, int& h){
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+  x = bx; y = by + galHeadH() - 6; w = bw; h = bh - (galHeadH() - 6);
+}
+static void galCkOpen(const char* path){
+  galResumeId = 0;
+  vwOpen(&GAL_VW, 0, path, NULL);           // foto ya traida o "cloud:<id>/<nombre>"
+}
+static const CkHost GAL_CK = { "Galer\xC3\xAD" "a", CKM_MEDIA, galCkBox, mkRedrawAll, galCkOpen, WIN_BG };
+
+// La banda de arriba (titulo, menu y pestanas) es la misma en las cuatro.
+static void galDrawTabs(int bx, int by, int bw, int pad){
+  const int tabY = by + 38, tw = (bw - 2 * pad) / GAL_TABS;
+  for(int i = 0; i < GAL_TABS; i++){
+    int tx = bx + pad + i * tw;
+    if(i == galTab) fillRoundRect(tx + 2, tabY, tw - 4, 28, 14, TH_PRIM);
+    drawTextC(tx + tw / 2, tabY + 8, GAL_TAB_NAME[i], 1, i == galTab ? TH_ONACC : TH_TXT2);
+  }
+}
+static void galRenderCloud(){
+  setBuf(fb);
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+  int pad = uiPad();
+  fillRect(bx, by, bw, galHeadH() - 6, WIN_BG);
+  for(int i = 0; i < 3; i++) fillCircle(bx + bw - pad - 4, by + 8 + i * 10, 3, TH_NAV);
+  drawText(bx + pad, by + 12, "En Flex Cloud (no ocupa espacio aqu\xC3\xAD)", 1, TH_TXT2);
+  galDrawTabs(bx, by, bw, pad);
+  ckBind(&GAL_CK);
+  ckRender();
+  flxFlush(by, by + galHeadH());
 }
 
 // ---- Dibujo de una celda ----
@@ -253,12 +288,7 @@ static void galRenderGrid(){
     drawText(bx + pad, by + 12, cnt, 1, mkMulti ? TH_PRIM : TH_TXT2); }
 
   // ---- Pestanas ----
-  const int tabY = by + 38, tw = (bw - 2 * pad) / GAL_TABS;
-  for(int i = 0; i < GAL_TABS; i++){
-    int tx = bx + pad + i * tw;
-    if(i == galTab) fillRoundRect(tx + 2, tabY, tw - 4, 28, 14, TH_PRIM);
-    drawTextC(tx + tw / 2, tabY + 8, GAL_TAB_NAME[i], 1, i == galTab ? TH_ONACC : TH_TXT2);
-  }
+  galDrawTabs(bx, by, bw, pad);
 
   // ---- Estado REAL del catalogo ----
   const char* st = NULL; char stb[64];
@@ -330,6 +360,7 @@ static void galRender(){
     return;
   }
   if(webSheetIsOpen()){ webSheetRender(); return; }   // la hoja del servidor manda mientras esta abierta
+  if(galTab == GAL_TAB_CLOUD){ galRenderCloud(); return; }
   galRenderGrid();
 }
 
@@ -405,6 +436,23 @@ static void galSelectAll(){
   galRender();
 }
 
+// La pestana "Nube": pestanas y menu de la app aqui; lo demas, el kit.
+static void galCloudTick(){
+  bool layer = mmOn || mmDlgOn || fkNameOn || fkAskOn;
+  if(!layer && T.tap){
+    int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+    int pad = uiPad();
+    if(T.x > bx + bw - pad - 40 && T.y < by + 34){ ckAppMenu(bx + bw - MM_W / 2 - 16, by + 34); return; }
+    const int tabY = by + 38, tw = (bw - 2 * pad) / GAL_TABS;
+    if(T.y >= tabY && T.y <= tabY + 28){
+      int k = (T.x - bx - pad) / (tw > 0 ? tw : 1);
+      if(k >= 0 && k < GAL_TABS && k != galTab){ galTab = k; galScroll = 0; ckUnbind(&GAL_CK); galRender(); }
+      return;
+    }
+  }
+  ckTick();
+}
+
 static void galTick(){
   if(gedActive()){ gedTick(); return; }            // editor abierto: todo es suyo
   if(vedActive()){ vedTick(); return; }
@@ -413,6 +461,8 @@ static void galTick(){
     else mkRedrawAll();
     return;
   }
+  if(ckUpAskTick(mkRedrawAll)) return;            // "Subir a Flex Cloud": conservar o liberar
+  if(galTab == GAL_TAB_CLOUD){ galCloudTick(); return; }
   if(mkTick()) return;                            // menu, dialogos, papelera, hoja del servidor
 
   // --- El catalogo cambio (subida del movil, miniatura lista, recorrido) ---
@@ -447,10 +497,11 @@ static void galTick(){
       // MJPEG abiertos); "Abrir en Multimedia" solo con lo que esta placa
       // reproduce.
       FlexMlRec r;
-      uint8_t ex[2]; int ne = 0;
+      uint8_t ex[3]; int ne = 0;
       bool have = mlGet(id, &r);
       if(have && galCanEdit(&r)) ex[ne++] = MA_EDIT;
       if(have && (r.flags & FML_R_PLAYABLE)) ex[ne++] = MA_OPENMM;
+      if(have) ex[ne++] = MA_CL_UP;                 // lo protegido no: mkOpenItemMenu no lo ofrece
       mkOpenItemMenu(id, T.x, T.y + 10, ne ? ex : NULL, ne);
       return;
     }
@@ -472,7 +523,7 @@ static void galTick(){
   const int tabY = by + 38, tw = (bw - 2 * pad) / GAL_TABS;
   if(T.y >= tabY && T.y <= tabY + 28){
     int k = (T.x - bx - pad) / (tw > 0 ? tw : 1);
-    if(k >= 0 && k < GAL_TABS && k != galTab){ galTab = k; galScroll = 0; galRender(); }
+    if(k >= 0 && k < GAL_TABS && k != galTab){ galTab = k; galScroll = 0; mkReset(); galRender(); }
     return;
   }
   // --- Toque sobre un elemento ---
@@ -513,6 +564,8 @@ static bool galBackLayer(){
     else { galVwSess.open = false; mkRedrawAll(); }
     return true;
   }
+  if(ckUpAskOn){ ckUpAskOn = false; mkRedrawAll(); return true; }
+  if(galTab == GAL_TAB_CLOUD) return ckBack();
   return mkBackLayer();
 }
 static bool galBackScreen(){ return false; }
@@ -523,6 +576,8 @@ static void galSuspend(){
   vedSuspend();                                   // el de video tambien (y su exportacion sigue)
   if(vwActiveFor(&GAL_VW)) vwSuspend();            // el visor suelta todo (lo protegido ni se recuerda)
   mkSuspend();                                    // capas y seleccion fuera; el servidor sigue
+  ckUpAskOn = false;
+  ckUnbind(&GAL_CK);                              // la nube se vuelve a pedir al volver (las transferencias siguen)
 }
 
 static void galResume(){
@@ -540,7 +595,7 @@ static void galResume(){
 // SOLTAR SIN CERRAR: las miniaturas decodificadas se rehacen solas, y la
 // foto del editor (o el video del editor de video) se vuelve a leer al
 // volver (sus ediciones se quedan).
-static size_t galShed(){ return mlThumbDropAll() + gedShed() + vedShed(); }
+static size_t galShed(){ return mlThumbDropAll() + gedShed() + vedShed() + ckShed(); }
 
 // Trabajo REAL en segundo plano: un editor guardando o exportando (APP_BG_KEEP).
 static bool galBgWork(){ return gedBusy() || vedBusy(); }
@@ -553,5 +608,8 @@ static void galCloseApp(){
   vwForget(&GAL_VW);
   mlThumbDropAll();
   galScroll = 0;
+  ckUnbind(&GAL_CK);
+  ckUpAskOn = false;
+  ckShed();                                       // miniaturas de la nube y la arena del streaming (si no se usa)
   if(mkApp == &GAL_APP) mkReset();
 }

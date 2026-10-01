@@ -27,7 +27,7 @@ namespace {
 static const char*    CLOUD_DIR    = "/System/Cloud";
 static const char*    JOURNAL_PATH = "/System/Cloud/jobs.bin";
 static const char*    DL_DIR       = "/System/Cloud/dl";
-static const char*    VIEW_PATH    = "/System/Cloud/view.bin";
+static const char*    VIEW_DIR     = "/System/Cloud/view";   // UN hueco: la foto que se esta viendo
 static const size_t   JSON_CAP     = 48u * 1024u;       // pagina de 40 elementos con holgura
 static const size_t   IO_CAP       = 16u * 1024u;       // lectura/escritura de bytes, reutilizado
 static const int      PAGE         = 40;
@@ -539,9 +539,12 @@ struct Runner {
   HTTPClient*   dl;             // descarga en curso (HTTP/1.0, cuerpo sin trocear)
   WiFiClientSecure* dlSec;
   uint64_t      dlLeft;
+  bool          verifyOpen;     // "liberar espacio": comprobando el original otra vez
+  uint64_t      verifyLeft;
+  bool          localChanged;   // el original ya no es lo que se subio: NO se libera
 };
 static Runner gRun;
-enum { RS_IDLE = 0, RS_PREP, RS_HASH, RS_CREATE, RS_PARTS, RS_COMPLETE, RS_THUMB, RS_DL_PREP, RS_DL_GET, RS_DL_VERIFY };
+enum { RS_IDLE = 0, RS_PREP, RS_HASH, RS_CREATE, RS_PARTS, RS_COMPLETE, RS_VERIFY_LOCAL, RS_THUMB, RS_DL_PREP, RS_DL_GET, RS_DL_VERIFY };
 
 static const uint32_t HASH_STEP   = 1024u * 1024u;  // bytes de huella por vuelta (~0,1 s en el P4)
 static const uint8_t  MAX_SERVER_FAILS = 12;        // fallos seguidos del SERVIDOR antes de rendirse (~8 min)
@@ -600,6 +603,14 @@ static void jobFinish(FclJob* j, uint8_t state, const char* code){
   e.opId = j->id; e.ok = state == FCL_JOB_DONE; e.mlId = j->mlId; e.flags = j->flags; e.size = j->size;
   snprintf(e.code, sizeof(e.code), "%s", code ? code : "");
   snprintf(e.text, sizeof(e.text), "%s", e.ok ? (up ? "Subido a Flex Cloud" : "Descargado") : fclErrorText(code));
+  if(e.ok && up && (j->flags & FCL_JF_FREE_LOCAL) && gRun.localChanged){
+    // Subido, pero el original cambio despues (o no se pudo releer): se conserva.
+    lock(); j->flags &= (uint8_t)~FCL_JF_FREE_LOCAL; unlock();
+    e.flags = j->flags;
+    snprintf(e.code, sizeof(e.code), "local_changed");
+    snprintf(e.text, sizeof(e.text), "Subido. El original cambi\xC3\xB3 y se conserva");
+    saveJournal();
+  }
   snprintf(e.localPath, sizeof(e.localPath), "%s", j->localPath);
   snprintf(e.name, sizeof(e.name), "%s", j->name);
   snprintf(e.fileId, sizeof(e.fileId), "%s", up ? j->fileId : j->remoteId);
@@ -822,6 +833,37 @@ static void upComplete(FclJob* j){
   if(strcmp(u.sha256, j->sha256)){ jobFinish(j, FCL_JOB_FAILED, "checksum_mismatch"); return; }
   lock(); snprintf(j->fileId, sizeof(j->fileId), "%s", u.fileId); unlock();
   rtDone(j, j->size);
+  gRun.verifyOpen = false; gRun.localChanged = false;
+  gRun.stage = (j->flags & FCL_JF_FREE_LOCAL) ? RS_VERIFY_LOCAL : RS_THUMB;
+}
+
+// "Subir y liberar espacio": ANTES de avisar a la interfaz (que borrara el
+// original) se vuelve a leer el original y su SHA-256 tiene que seguir siendo
+// el que la nube acaba de confirmar. Si alguien lo cambio entre medias, o no se
+// puede leer, se conserva. Por tramos, como las huellas.
+static void upVerifyLocal(FclJob* j){
+  rtPhase(j, FCX_VERIFYING);
+  if(!gRun.verifyOpen){
+    gRun.f = flexFsOpenRead(j->localPath);
+    if(!gRun.f || flexFsStreamSize(gRun.f) != j->size){ gRun.localChanged = true; runnerDropIo(); gRun.stage = RS_THUMB; return; }
+    fclShaStart(&gRun.sha);
+    gRun.verifyLeft = j->size; gRun.verifyOpen = true;
+  }
+  uint32_t budget = HASH_STEP;
+  while(budget && gRun.verifyLeft){
+    size_t want = gRun.verifyLeft < IO_CAP ? (size_t)gRun.verifyLeft : IO_CAP;
+    if(want > budget) want = budget;
+    int r = flexFsStreamRead(gRun.f, gIo, want);
+    if(r <= 0){ gRun.localChanged = true; gRun.verifyLeft = 0; break; }
+    fclShaUpdate(&gRun.sha, gIo, (size_t)r);
+    gRun.verifyLeft -= (uint64_t)r;
+    budget = budget > (uint32_t)r ? budget - (uint32_t)r : 0;
+  }
+  if(gRun.verifyLeft) return;                                   // sigue en la proxima vuelta
+  char hex[FCL_SHA_HEX]; fclShaFinishHex(&gRun.sha, hex);
+  if(strcmp(hex, j->sha256)) gRun.localChanged = true;
+  runnerDropIo();
+  gRun.verifyOpen = false;
   gRun.stage = RS_THUMB;
 }
 
@@ -962,7 +1004,15 @@ static void dlVerify(FclJob* j){
     jobFinish(j, FCL_JOB_FAILED, "checksum_mismatch");
     return;
   }
-  lock(); snprintf(j->localPath, sizeof(j->localPath), "%s", tp); unlock();
+  // Se queda con la extension del nombre en la nube ("<id>.jpg"): la
+  // biblioteca de medios y el visor deciden por ella. Si no se puede mover, el
+  // .part verificado vale igual.
+  char local[64], fin[FCL_PATH_MAX];
+  fclLocalName(j->name, local, sizeof(local));
+  const char* dot = strrchr(local, '.');
+  snprintf(fin, sizeof(fin), "%s/%lu%s", DL_DIR, (unsigned long)j->id, dot ? dot : "");
+  if(strcmp(fin, tp)){ flexFsDelete(fin); if(!flexFsMove(tp, fin)) snprintf(fin, sizeof(fin), "%s", tp); }
+  lock(); snprintf(j->localPath, sizeof(j->localPath), "%s", fin); unlock();
   jobFinish(j, FCL_JOB_DONE, nullptr);
 }
 
@@ -1051,6 +1101,7 @@ static bool jobStep(){
     case RS_CREATE:    upCreate(j); break;
     case RS_PARTS:     upPart(j); break;
     case RS_COMPLETE:  upComplete(j); break;
+    case RS_VERIFY_LOCAL: upVerifyLocal(j); break;
     case RS_THUMB:     upThumb(j); break;
     case RS_DL_PREP:   dlPrepare(j); break;
     case RS_DL_GET:    dlChunk(j); break;
@@ -1069,7 +1120,10 @@ static void fetchView(const Cmd& c){
   uint64_t total = flexFsTotalBytes(), used = flexFsUsedBytes();
   uint64_t freeB = total > used ? total - used : 0;
   if(c.size > VIEW_MAX){ snprintf(e.code, sizeof(e.code), "file_too_large"); snprintf(e.text, sizeof(e.text), "Demasiado grande para abrirla aqu\xC3\xAD"); pushEvent(e); return; }
-  if(c.size + LOCAL_RESERVE > freeB + (flexFsExists(VIEW_PATH) ? flexFsSize(VIEW_PATH) : 0)){
+  char local[44], viewPath[FCL_PATH_MAX];
+  fclLocalName(c.text, local, sizeof(local));
+  snprintf(viewPath, sizeof(viewPath), "%s/%s", VIEW_DIR, local);
+  if(c.size + LOCAL_RESERVE > freeB + flexFsDirSize(VIEW_DIR)){
     snprintf(e.code, sizeof(e.code), "no_space_local"); snprintf(e.text, sizeof(e.text), "%s", fclErrorText(e.code)); pushEvent(e); return;
   }
   char bearer[64];
@@ -1087,7 +1141,8 @@ static void fetchView(const Cmd& c){
   FlexFsStream* f = nullptr;
   FclSha sha; fclShaStart(&sha);
   uint64_t got = 0;
-  if(st == 200 && (f = flexFsOpenWrite(VIEW_PATH)) != nullptr){
+  flexFsDelete(VIEW_DIR);                                   // la anterior se va: un solo hueco
+  if(st == 200 && (f = flexFsOpenWrite(viewPath)) != nullptr){
     WiFiClient* s = h.getStreamPtr();
     uint32_t waited = 0;
     while(got < c.size && s){
@@ -1103,9 +1158,9 @@ static void fetchView(const Cmd& c){
   char hex[FCL_SHA_HEX]; fclShaFinishHex(&sha, hex);
   if(st == 200 && got == c.size && (!c.sha[0] || !strcmp(hex, c.sha))){
     e.kind = FCE_VIEW_READY; e.ok = true;
-    snprintf(e.localPath, sizeof(e.localPath), "%s", VIEW_PATH);
+    snprintf(e.localPath, sizeof(e.localPath), "%s", viewPath);
   } else {
-    flexFsDelete(VIEW_PATH);
+    flexFsDelete(VIEW_DIR);
     const char* code = st == 401 ? "auth_required" : st == 404 ? "not_found" : got != c.size ? "network" : "checksum_mismatch";
     snprintf(e.code, sizeof(e.code), "%s", code);
     snprintf(e.text, sizeof(e.text), "%s", fclErrorText(code));
@@ -1421,7 +1476,7 @@ void flexCloudBegin(){
   loadJournal();
   reemitPending();
   gMeDue = true;
-  if(flexFsReady()) flexFsDelete(VIEW_PATH);              // la copia del visor no sobrevive a un reinicio
+  if(flexFsReady()) flexFsDelete(VIEW_DIR);               // la copia del visor no sobrevive a un reinicio
   if(!gTask) xTaskCreate(cloudTask, "flex-cloud", 16384, nullptr, 1, &gTask);
   if(!gStTask) xTaskCreate(streamTask, "flex-cloud-st", 10240, nullptr, 1, &gStTask);
   int pend = fclJournalCount(gJ, FCL_JOB_QUEUED);

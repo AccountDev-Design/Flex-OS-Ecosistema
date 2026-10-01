@@ -48,10 +48,15 @@
 // ##  motivo concreto -- no se intenta abrir "a ver si suena".
 // #############################################################
 #define FILES_MAX     24
-#define FILES_TOP    128
-// Primera fila del area con scroll: justo debajo de la cabecera comun y
-// de la linea de la ruta.
-#define FILES_VP_TOP (UIHDR_H + 34)
+// Selector "Este dispositivo | Flex Cloud" justo debajo de la cabecera: lo
+// local y lo de la nube son DOS sitios distintos y nunca se mezclan en una
+// misma lista.
+#define FILES_SEG_Y  (UIHDR_H - 2)
+#define FILES_SEG_H   36
+#define FILES_TOP    (128 + 40)
+// Primera fila del area con scroll: justo debajo de la cabecera comun, del
+// selector y de la linea de la ruta.
+#define FILES_VP_TOP (UIHDR_H + 34 + 40)
 #define FILES_RH      70
 
 static FlexFsEntry filesList[FILES_MAX];
@@ -65,6 +70,33 @@ static bool        filesMulti = false;
 static uint32_t    filesMask = 0;
 
 static void filesRender();
+static bool        filesCloud = false;          // la otra mitad: Flex Cloud (FlexOS_Ultra_CloudKit.h)
+
+// ---- Flex Cloud dentro de Archivos ----
+static void filesCkBox(int& x, int& y, int& w, int& h){
+  x = 0; y = FILES_SEG_Y + FILES_SEG_H + 4; w = SCR_W; h = SCR_H - 60 - y;
+}
+// Una foto ya traida o un video "cloud:<id>/<nombre>": al reproductor, como
+// cualquier archivo que se abre desde aqui (y ATRAS vuelve a Almacenamiento).
+static void filesCkOpen(const char* path){
+  gState = ST_APP;
+  gMediaReturnApp = IC_ALMACEN;
+  mediaOpenInPlayer(path);
+}
+// El fondo es el de la pagina, que depende del tema: se completa al pintar.
+static CkHost filesCkHost = { "Archivos", CKM_BROWSE, filesCkBox, filesRender, filesCkOpen, 0 };
+
+static void filesDrawSeg(){
+  int x = 16, w = SCR_W - 32, hw = w / 2;
+  fillRoundRect(x, FILES_SEG_Y, w, FILES_SEG_H, FILES_SEG_H / 2, TH_SURF2);
+  fillRoundRect(x + (filesCloud ? hw : 0) + 3, FILES_SEG_Y + 3, hw - 6, FILES_SEG_H - 6, (FILES_SEG_H - 6) / 2, TH_PRIM);
+  drawTextC(x + hw / 2, FILES_SEG_Y + 11, "Este dispositivo", 1, filesCloud ? TH_TXT2 : TH_ONACC);
+  drawTextC(x + hw + hw / 2, FILES_SEG_Y + 11, "Flex Cloud", 1, filesCloud ? TH_ONACC : TH_TXT2);
+}
+static int filesSegHit(int px, int py){
+  if(py < FILES_SEG_Y || py > FILES_SEG_Y + FILES_SEG_H || px < 16 || px > SCR_W - 16) return -1;
+  return px < SCR_W / 2 ? 0 : 1;
+}
 
 // /System/Media es la biblioteca por dentro: su catalogo, sus miniaturas y
 // la carpeta PROTEGIDA. El explorador no la ensena ni deja entrar: un
@@ -117,9 +149,24 @@ static int  filesMaxScroll(){
 
 static void filesRender(){
   setBuf(fb);
+  if(filesCloud){
+    // La nube: el kit pinta su zona (y la publica); aqui el marco.
+    int bx, by, bw, bh; filesCkBox(bx, by, bw, bh);
+    fillRect(0, 0, SCR_W, by, TH_PAGE);
+    fillRect(0, by + bh, SCR_W, SCR_H - by - bh, TH_PAGE);
+    uiHdrDraw("Archivos:", 5, TH_TXT, TH_NAV, true);
+    filesDrawSeg();
+    filesCkHost.bg = TH_PAGE;
+    ckBind(&filesCkHost);
+    ckRender();
+    flxFlush(0, by - 1);
+    flxFlush(by + bh, SCR_H - 1);
+    return;
+  }
   fillRect(0, 0, SCR_W, SCR_H, TH_PAGE);
   uiHdrDraw("Archivos:", 5, TH_TXT, TH_NAV, true);
-  drawTextClip(16, UIHDR_H + 8, filesDir, 2, TH_TXT2, SCR_W - 60);
+  filesDrawSeg();
+  drawTextClip(16, UIHDR_H + 8 + 40, filesDir, 2, TH_TXT2, SCR_W - 60);
 
   // Cabecera y ruta son FIJAS; de FILES_VP_TOP para abajo manda el
   // viewport. Sin este recorte, una fila a medio salir por arriba se
@@ -178,13 +225,16 @@ static void filesEnterAt(const char* dir){
   gState = ST_FILES;
   snprintf(filesDir, sizeof(filesDir), "%s", dir && dir[0] ? dir : "/");
   filesSelIdx = -1; filesScroll = 0; filesMulti = false; filesMask = 0;
+  filesCloud = false;                                // se entra siempre por "Este dispositivo"
   fkCloseAll();
   filesReload();
   filesRender();
 }
 static void filesEnter(){ filesEnterAt("/"); }
 
+static void filesCkLeave();
 static void filesExit(){
+  filesCkLeave();
   // Volver a Almacenamiento REPINTANDO: si desde aqui se borro o renombro
   // algo, los tamanos de la pantalla anterior ya no valen. Ademas hay que
   // rehacer el marco de la app entero (barra de estado y nav): el explorador
@@ -246,6 +296,17 @@ static void filesMenuAction(int act){
   char p[FLEXFS_PATH_MAX];
   if(filesSelIdx >= 0 && filesSelIdx < filesN) filesPathOf(filesSelIdx, p, sizeof(p));
   else p[0] = 0;
+  fkMenuCloud = false;
+  if(act == FK_ACT_CLOUD){
+    if(p[0] && !filesList[filesSelIdx].dir){
+      if(!flexAccountLinked()) sysNotify("Flex Cloud", "Vincula tu Flex Account en Ajustes > General");
+      else if(flexCloudUpload(p, filesList[filesSelIdx].name, "root", 0, 0))
+        sysNotify(filesList[filesSelIdx].name, "Subiendo a Flex Cloud (se conserva aqu\xC3\xAD)");
+      else sysNotify(filesList[filesSelIdx].name, "No se pudo poner en cola");
+    }
+    filesRender();
+    return;
+  }
   if(act == FK_ACT_SEL){
     filesMulti = true; filesMask = 0;
     if(filesSelIdx >= 0) filesMask |= (1UL << filesSelIdx);
@@ -264,7 +325,24 @@ static void filesMenuAction(int act){
   filesRender();
 }
 
+// Sale de la vista de la nube (las transferencias siguen en su tarea).
+static void filesCkLeave(){
+  ckUnbind(&filesCkHost);
+}
+static void filesCloudTick(){
+  bool layer = mmOn || mmDlgOn || fkNameOn || fkAskOn;
+  if(!layer && T.tap){
+    if(uiHdrBackHit(T.x, T.y)){ if(!ckBack()) filesExit(); return; }
+    if(uiHdrMenuHit(T.x, T.y)){ ckAppMenu(SCR_W - MM_W / 2 - 16, UIHDR_ZONE); return; }
+    int k = filesSegHit(T.x, T.y);
+    if(k == 0){ filesCloud = false; filesCkLeave(); filesReload(); filesRender(); return; }
+    if(k == 1) return;
+  }
+  ckTick();
+}
+
 static void filesTick(){
+  if(filesCloud){ filesCloudTick(); return; }
   if(!flexFsReady()){
     if(T.tap && T.x < 60 && T.y < 60) filesExit();
     return;
@@ -322,7 +400,7 @@ static void filesTick(){
       int y = filesRowY(base + i);
       if(T.startY >= y && T.startY < y + FILES_RH - 8){
         filesLongFired = true; filesSelIdx = i;
-        fkMenuOpen(T.x, T.y - 40);
+        fkMenuOpenEx(T.x, T.y - 40, !filesList[i].dir); // un archivo se puede subir; una carpeta, no
         return;
       }
     }
@@ -335,6 +413,7 @@ static void filesTick(){
   // preguntan por funcion para que no puedan separarse del dibujo.
   if(uiHdrMenuHit(T.x, T.y)){ filesSelIdx = -1; fkMenuOpen(SCR_W - 40, UIHDR_ZONE); return; }
   if(uiHdrBackHit(T.x, T.y)){ filesExit(); return; }
+  if(filesSegHit(T.x, T.y) == 1){ filesCloud = true; filesMulti = false; filesMask = 0; filesRender(); return; }
 
   if(filesMulti){
     int by = SCR_H - 128;

@@ -221,15 +221,23 @@ struct TouchPoint { int id; int x, y; bool active; };
 // Quien mueve o borra el archivo desde el visor lo cierra antes
 // (mediaStreamClose); LittleFS tolera que otra tarea lo borre o lo mueva con
 // el flujo abierto, y el visor lo detecta por la biblioteca (vwCheckItem).
-#define MSTREAM_NONE 0
-#define MSTREAM_INT  1      // particion interna (LittleFS)
+#define MSTREAM_NONE  0
+#define MSTREAM_INT   1     // particion interna (LittleFS)
+#define MSTREAM_CLOUD 2     // video de Flex Cloud por rangos (FlexOS_Cloud: arena FIJA de bloques)
 struct MediaStream {
   uint8_t       kind;
   char          path[FLEXMED_PATH_MAX];
   uint32_t      pos, size;
   FlexFsStream* f;          // abierto mientras dura la reproduccion
   uint32_t      fpos;       // posicion real del flujo: sin seeks que no hacen falta
+  // Solo nube: la ultima lectura que no llego a tiempo. El visor la usa para
+  // saber QUE falta (y fijarlo en la cache) en vez de dar el video por roto.
+  bool          missed;
+  uint32_t      missOff;
 };
+// Ruta de un video de Flex Cloud para el visor: "cloud:<fileId>/<nombre>".
+// No es un archivo: el visor lo reproduce por rangos sin descargarlo.
+#define MEDIA_CLOUD_PREFIX "cloud:"
 
 // Una miniatura ya decodificada. La cache es un array fijo de estas
 // (ver la Galeria): tamano constante, sin reserva por elemento y sin

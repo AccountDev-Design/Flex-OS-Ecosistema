@@ -767,6 +767,29 @@ static void testUploadFaults(){
   CHECK(!findEv(FCE_UPLOAD_DONE, id) && localFile("/f.bin") == g, "no se ofrece borrar lo local");
   C.fault = nullptr;
 
+  // "Liberar espacio": el original cambia JUSTO despues de que la nube lo
+  // confirme. Se vuelve a leer antes de avisar: NO se ofrece borrarlo.
+  std::string h1 = pattern(300 * 1024, 10);
+  putLocal("/libera.jpg", h1);
+  C.fault = [&](const NetRequest& rq, NetResponse& rs){
+    if(rq.method == "POST" && rq.url.find("/complete") != std::string::npos){
+      rs = serveCloud(rq);
+      std::string h2 = h1; h2[1234] ^= 0x40; putLocal("/libera.jpg", h2);   // otra app lo edita en ese momento
+      return true;
+    }
+    return false;
+  };
+  id = flexCloudUpload("/libera.jpg", nullptr, "root", 0, FCL_JF_FREE_LOCAL);
+  CHECK(waitEv(FCE_UPLOAD_DONE, id), "subida terminada");
+  const FlexCloudEvent* lf = findEv(FCE_UPLOAD_DONE, id);
+  CHECK(lf && !(lf->flags & FCL_JF_FREE_LOCAL) && evCode(FCE_UPLOAD_DONE, id) == "local_changed", "original cambiado tras subir: NO se ofrece liberar");
+  CHECK(lf && strstr(lf->text, "conserva"), "y se dice que se conserva");
+  C.fault = nullptr;
+  // Sin cambios: la comprobacion pasa y SI se ofrece.
+  putLocal("/libera2.jpg", h1);
+  id = flexCloudUpload("/libera2.jpg", nullptr, "root", 0, FCL_JF_FREE_LOCAL);
+  CHECK(waitEv(FCE_UPLOAD_DONE, id) && (findEv(FCE_UPLOAD_DONE, id)->flags & FCL_JF_FREE_LOCAL), "original intacto: se ofrece liberar (tras releerlo)");
+
   // El archivo local desaparece: fallo claro.
   putLocal("/g.bin", "x");
   id = flexCloudUpload("/g.bin", nullptr, "root", 0, 0);
@@ -852,6 +875,7 @@ static void testDownload(){
   CHECK(waitEv(FCE_DOWNLOAD_DONE, id), "descargada");
   const FlexCloudEvent* e = findEv(FCE_DOWNLOAD_DONE, id);
   CHECK(e && localFile(e->localPath) == data, "el temporal es el archivo exacto");
+  CHECK(e && strlen(e->localPath) > 4 && !strcmp(e->localPath + strlen(e->localPath) - 4, ".avi"), "el temporal verificado conserva la extension (la biblioteca la necesita)");
   CHECK(e && (e->flags & FCL_JF_TO_LIBRARY) && !strcmp(e->name, "Concierto \xE2\x99\xAB.avi"), "aviso con nombre y destino");
   CHECK(e && !strcmp(e->sha256, f.sha.c_str()), "huella verificada");
 
@@ -973,6 +997,11 @@ static void testThumbsAndView(){
   CHECK(waitEv(FCE_VIEW_READY, op), "foto lista para el visor");
   const FlexCloudEvent* e = findEv(FCE_VIEW_READY, op);
   CHECK(e && localFile(e->localPath) == f.data, "copia exacta (calidad original, sin recomprimir)");
+  CHECK(e && !strcmp(e->localPath, "/System/Cloud/view/roja.jpg"), "con su nombre y extension (el visor decide por ella)");
+  FFile& f2v = addCloudFile("otra foto.jpg", pattern(1000, 33));
+  FclItem it2v = itemOf(f2v);
+  uint32_t op2 = flexCloudFetchForView(&it2v);
+  CHECK(waitEv(FCE_VIEW_READY, op2) && !flexFsExists("/System/Cloud/view/roja.jpg"), "un solo hueco: la anterior se borra");
   FFile& huge = addGeneratedFile("panorama.jpg", 9u * 1024 * 1024);
   FclItem ih = itemOf(huge);
   op = flexCloudFetchForView(&ih);

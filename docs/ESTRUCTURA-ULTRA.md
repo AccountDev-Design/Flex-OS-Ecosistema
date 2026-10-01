@@ -102,7 +102,8 @@ Esa frontera no se ha tocado.
 | `FlexOS_Ultra_FileKit.h`           |   481 | kit de archivos: menu, nombre, confirmacion y papelera |
 | `FlexOS_Ultra_MediaKit.h`          |   475 | kit de listas de medios: seleccion, menus y acciones comunes |
 | `FlexOS_Ultra_MediaViewer.h`       |  1722 | visor comun de fotos, dibujos y videos (Galeria y Multimedia): ajuste, gestos, barras y vidrio sin apilar; Editar solo si el anfitrion lo ofrece (la Galeria) |
-| `FlexOS_Ultra_AppMultimedia.h`     |   534 | app Multimedia: lista de videos y fotos; abre cada elemento en el visor comun |
+| `FlexOS_Ultra_CloudKit.h`          |   844 | Flex Cloud en Archivos, Galeria y Multimedia: estado y cuota, lista/rejilla de la nube, menus, transferencias, "Subir a Flex Cloud" y los avisos (liberar espacio solo tras confirmar, colocar descargas). Ver `docs/FLEX-CLOUD.md` |
+| `FlexOS_Ultra_AppMultimedia.h`     |   534 | app Multimedia: lista de videos y fotos (y pestana Nube); abre cada elemento en el visor comun |
 | `FlexOS_Ultra_AppNotes.h`          |   533 | app Notas |
 | `FlexOS_Ultra_KeyboardSettings.h`  |   529 | ajustes del teclado (pantalla propia) |
 | `FlexOS_Ultra_AppStorage.h`        |   621 | app Almacenamiento y detalles de memoria |

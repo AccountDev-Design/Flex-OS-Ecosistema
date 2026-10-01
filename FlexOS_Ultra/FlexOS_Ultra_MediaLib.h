@@ -525,7 +525,10 @@ static bool mlReplaceFile(uint32_t id, const char* tmp, char* why, size_t whyCap
 // ##  "casi", que es peor que distintos.
 // #############################################################
 enum { MA_NONE = 0, MA_OPEN, MA_SELECT, MA_LOCK, MA_UNLOCK, MA_RENAME, MA_EDIT, MA_TRASH, MA_DELETE,
-       MA_CONNECT, MA_TRASHBIN, MA_INFO, MA_OPENMM };
+       MA_CONNECT, MA_TRASHBIN, MA_INFO, MA_OPENMM,
+       // Flex Cloud (FlexOS_Ultra_CloudKit.h): el MISMO menu, con sus acciones.
+       MA_CL_UP, MA_CL_UPFREE, MA_CL_DOWNLOAD, MA_CL_RESTORE, MA_CL_NEWFOLDER, MA_CL_XFERS,
+       MA_CL_TRASHVIEW, MA_CL_MYFILES, MA_CL_REFRESH };
 #define MM_MAX    8
 #define MM_W      300
 #define MM_RH     50
@@ -592,6 +595,40 @@ static void mmGlyph(int act, int cx, int cy, uint16_t col){
       drawRoundRect(cx - 13, cy - 10, 26, 20, 4, col);
       fillTriangle(cx - 4, cy - 6, cx - 4, cy + 6, cx + 6, cy, col);
       break;
+    case MA_CL_UP: case MA_CL_UPFREE: case MA_CL_DOWNLOAD: case MA_CL_XFERS: {
+      // Nube con flecha (arriba = subir, abajo = bajar; las dos = transferencias).
+      fillCircle(cx - 6, cy + 2, 6, col); fillCircle(cx + 2, cy - 3, 8, col); fillCircle(cx + 9, cy + 3, 5, col);
+      fillRect(cx - 6, cy + 3, 15, 5, col);
+      uint16_t bg = TH_SURF2;
+      bool down = act == MA_CL_DOWNLOAD;
+      int ay = down ? cy + 6 : cy - 6;
+      fillRect(cx, cy - 4, 2, 9, bg);
+      fillTriangle(cx - 4, down ? cy + 2 : cy - 1, cx + 5, down ? cy + 2 : cy - 1, cx + 1, ay, bg);
+      if(act == MA_CL_UPFREE) drawCircle(cx + 11, cy + 9, 5, TH_OK);
+      break;
+    }
+    case MA_CL_RESTORE:                                    // flecha que vuelve
+      for(int k = 0; k < 6; k++){
+        float a0 = 0.6f + k * 0.75f, a1 = 0.6f + (k + 1) * 0.75f;
+        strokeSegAA(cx + 9 * cosf(a0), cy + 9 * sinf(a0), cx + 9 * cosf(a1), cy + 9 * sinf(a1), 1.6f, col);
+      }
+      fillTriangle(cx + 4, cy - 12, cx + 12, cy - 9, cx + 6, cy - 3, col);
+      break;
+    case MA_CL_NEWFOLDER:
+      drawRoundRect(cx - 12, cy - 8, 24, 18, 3, col); fillRect(cx - 12, cy - 11, 10, 4, col);
+      fillRect(cx - 1, cy - 4, 2, 10, col); fillRect(cx - 5, cy, 10, 2, col);
+      break;
+    case MA_CL_TRASHVIEW: case MA_CL_MYFILES:
+      fillRect(cx - 10, cy - 12, 20, 3, col); fillRect(cx - 4, cy - 16, 8, 3, col);
+      drawRoundRect(cx - 8, cy - 8, 16, 20, 3, col);
+      break;
+    case MA_CL_REFRESH:
+      for(int k = 0; k < 7; k++){
+        float a0 = -1.2f + k * 0.75f, a1 = -1.2f + (k + 1) * 0.75f;
+        strokeSegAA(cx + 9 * cosf(a0), cy + 9 * sinf(a0), cx + 9 * cosf(a1), cy + 9 * sinf(a1), 1.6f, col);
+      }
+      fillTriangle(cx + 2, cy - 14, cx + 9, cy - 9, cx + 2, cy - 5, col);
+      break;
     case MA_CONNECT:                                       // movil con ondas
       drawRoundRect(cx - 12, cy - 12, 14, 24, 3, col);
       fillRect(cx - 8, cy + 7, 6, 2, col);
@@ -622,6 +659,15 @@ static const char* mmLabel(int act){
     case MA_OPENMM:   return "Abrir en Multimedia";
     case MA_CONNECT:  return "Conectar con el m\xC3\xB3vil";
     case MA_TRASHBIN: return "Papelera";
+    case MA_CL_UP:        return "Subir a Flex Cloud";
+    case MA_CL_UPFREE:    return "Subir y liberar espacio";
+    case MA_CL_DOWNLOAD:  return "Descargar al dispositivo";
+    case MA_CL_RESTORE:   return "Restaurar";
+    case MA_CL_NEWFOLDER: return "Nueva carpeta";
+    case MA_CL_XFERS:     return "Transferencias";
+    case MA_CL_TRASHVIEW: return "Papelera de Flex Cloud";
+    case MA_CL_MYFILES:   return "Mis archivos";
+    case MA_CL_REFRESH:   return "Actualizar";
   }
   return "Detalles";
 }

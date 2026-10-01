@@ -214,12 +214,20 @@ static void mkOpenItemMenu(uint32_t id, int ax, int ay, const uint8_t* extra, in
   if(!mlGet(id, &r)) return;
   mkMenuId = id;
   bool locked = (r.flags & FML_R_LOCKED) != 0;
+  // Prioridad: las acciones del elemento (candado, renombrar, detalles,
+  // papelera, BORRAR) siempre; luego las propias de la app; y "Seleccionar"
+  // solo si queda sitio (tambien esta en el menu de la app). El menu no pasa
+  // de MM_MAX filas (la banda de vidrio): antes, con tres acciones propias se
+  // caia "Borrar para siempre".
+  const int core = locked ? 2 : 5;
+  int room = MM_MAX - core;
   uint8_t a[MM_MAX]; int n = 0;
-  if(!locked) for(int i = 0; i < nExtra && n < MM_MAX - 5; i++) a[n++] = extra[i];
-  a[n++] = MA_SELECT;
+  int ne = locked ? 0 : (nExtra < room ? nExtra : room);
+  for(int i = 0; i < ne; i++) a[n++] = extra[i];
+  if(n + core < MM_MAX) a[n++] = MA_SELECT;
   a[n++] = locked ? MA_UNLOCK : MA_LOCK;
   if(!locked){ a[n++] = MA_RENAME; a[n++] = MA_INFO; a[n++] = MA_TRASH; }
-  if(n < MM_MAX) a[n++] = MA_DELETE;
+  a[n++] = MA_DELETE;
   mmOpen(ax, ay, a, n);
 }
 // Menu de la app (los tres puntos).

@@ -516,3 +516,134 @@ uint8_t     flexBnoFusionAcc(){ return 0xFF; }
 uint32_t    flexBnoLastReportAge(uint32_t){ return 0xFFFFFFFFu; }
 uint32_t    flexBnoReportCount(){ return 0; }
 bool        flexBnoEuler(float*){ return false; }
+
+// -- Flex Cloud (FlexOS_Cloud.h) --
+// DOBLE PROGRAMABLE. FlexOS_Cloud.cpp tiene su propia bateria contra un
+// servidor simulado (test_cloud) y contra el real (cloud_e2e.sh); aqui solo
+// hace falta que la INTERFAZ de la nube (FlexOS_Ultra_CloudKit.h, Galeria,
+// Multimedia, Archivos y el visor) se ejecute de verdad: la prueba pone el
+// estado, la lista, los avisos y los bloques del streaming, y mira que se pidio.
+#include "FlexOS_Cloud.h"
+FlexCloudStatus            gStubCloudStatus;
+FlexCloudListInfo          gStubCloudList;
+std::vector<FclItem>       gStubCloudItems;
+std::vector<FlexCloudEvent> gStubCloudEvents;
+std::vector<FlexCloudXfer> gStubCloudXfers;
+std::vector<std::string>   gStubCloudCalls;        // "list 0 root", "view fil_1", "up /a.jpg 1"...
+std::vector<std::string>   gStubCloudThumbs;       // ids con miniatura lista
+std::vector<std::string>   gStubCloudWanted;       // miniaturas pedidas
+bool     gStubCloudActive = false;
+uint32_t gStubCloudOp = 100, gStubCloudThumbGen = 1;
+// Streaming: el "archivo" y que bloques de 64 KB estan ya en la cache.
+std::vector<uint8_t> gStubStreamData;
+std::vector<bool>    gStubStreamReady;
+std::vector<bool>    gStubStreamWant;              // pedidos (fallos de lectura, saltos, fijados)
+bool     gStubStreamOpen = false;
+uint8_t  gStubStreamState = FCS_CLOSED;
+uint32_t gStubStreamPinOff = 0, gStubStreamPinLen = 0, gStubStreamMisses = 0;
+static const uint32_t STUB_BLK = 64u * 1024u;
+static void stubCall(const std::string& s){ gStubCloudCalls.push_back(s); }
+
+void flexCloudBegin(){ stubCall("begin"); }
+void flexCloudSetActive(bool a){ gStubCloudActive = a; }
+void flexCloudStatus(FlexCloudStatus* out){ if(out) *out = gStubCloudStatus; }
+const char* flexCloudNetText(uint8_t net){
+  switch(net){ case FCN_ONLINE: return "Conectado"; case FCN_OFFLINE: return "Sin Wi-Fi"; case FCN_AUTH: return "Vuelve a vincular tu cuenta";
+               case FCN_CONNECTING: return "Conectando..."; case FCN_UNAVAILABLE: return "Flex Cloud no responde"; default: return "Sin Flex Account"; }
+}
+bool flexCloudRequestList(uint8_t view, const char* folderId, const char*){
+  stubCall(std::string("list ") + std::to_string(view) + " " + (folderId ? folderId : ""));
+  gStubCloudList.view = view; gStubCloudList.gen++;
+  return true;
+}
+bool flexCloudRequestMore(){ stubCall("more"); return true; }
+void flexCloudRefresh(){ stubCall("refresh"); }
+void flexCloudListInfo(FlexCloudListInfo* out){ if(out){ *out = gStubCloudList; out->count = (int)gStubCloudItems.size(); } }
+int  flexCloudListCopy(FclItem* dst, int start, int cap){
+  int n = 0;
+  for(int i = start; i < (int)gStubCloudItems.size() && n < cap; i++) dst[n++] = gStubCloudItems[i];
+  return n;
+}
+uint32_t flexCloudMkdir(const char* p, const char* name){ stubCall(std::string("mkdir ") + (p ? p : "") + " " + (name ? name : "")); return ++gStubCloudOp; }
+uint32_t flexCloudRename(const FclItem* it, const char* n){ stubCall(std::string("rename ") + it->id + " " + n); return ++gStubCloudOp; }
+uint32_t flexCloudTrash(const FclItem* it){ stubCall(std::string("trash ") + it->id); return ++gStubCloudOp; }
+uint32_t flexCloudRestore(const FclItem* it){ stubCall(std::string("restore ") + it->id); return ++gStubCloudOp; }
+uint32_t flexCloudDeleteForever(const FclItem* it){ stubCall(std::string("delete ") + it->id); return ++gStubCloudOp; }
+uint32_t flexCloudUpload(const char* p, const char* name, const char* parent, uint32_t mlId, uint8_t flags){
+  stubCall(std::string("up ") + (p ? p : "") + " " + (name ? name : "") + " " + (parent ? parent : "") + " " + std::to_string(mlId) + " " + std::to_string(flags));
+  return ++gStubCloudOp;
+}
+uint32_t flexCloudDownload(const FclItem* it, uint8_t flags){ stubCall(std::string("down ") + it->id + " " + std::to_string(flags)); return ++gStubCloudOp; }
+bool flexCloudCancel(uint32_t id){ stubCall("cancel " + std::to_string(id)); return true; }
+bool flexCloudRetry(uint32_t id){ stubCall("retry " + std::to_string(id)); return true; }
+void flexCloudClearFinished(){ stubCall("clear"); }
+int  flexCloudXfers(FlexCloudXfer* out, int cap){ int n = 0; for(auto& x : gStubCloudXfers){ if(n >= cap) break; out[n++] = x; } return n; }
+uint32_t flexCloudFetchForView(const FclItem* it){ stubCall(std::string("view ") + it->id); return ++gStubCloudOp; }
+bool flexCloudPollEvent(FlexCloudEvent* ev){
+  if(gStubCloudEvents.empty() || !ev) return false;
+  *ev = gStubCloudEvents.front(); gStubCloudEvents.erase(gStubCloudEvents.begin());
+  return true;
+}
+void flexCloudWantThumb(const char* id){ if(id) gStubCloudWanted.push_back(id); }
+bool flexCloudThumbDraw(const char* id, void (*draw)(const uint16_t*, int, void*), void* user){
+  static uint16_t px[FLEX_CLOUD_THUMB_SIDE * FLEX_CLOUD_THUMB_SIDE];
+  for(auto& t : gStubCloudThumbs) if(t == id){
+    // Un degradado reconocible (rojo arriba, azul abajo).
+    for(int y = 0; y < FLEX_CLOUD_THUMB_SIDE; y++) for(int x = 0; x < FLEX_CLOUD_THUMB_SIDE; x++)
+      px[y * FLEX_CLOUD_THUMB_SIDE + x] = (uint16_t)(((31 - y * 31 / FLEX_CLOUD_THUMB_SIDE) << 11) | ((y * 31 / FLEX_CLOUD_THUMB_SIDE)));
+    draw(px, FLEX_CLOUD_THUMB_SIDE, user);
+    return true;
+  }
+  return false;
+}
+uint32_t flexCloudThumbGen(){ return gStubCloudThumbGen; }
+static bool stubBlocksReady(uint32_t off, uint32_t len){
+  if(!gStubStreamOpen) return false;
+  if(off >= gStubStreamData.size()) return true;
+  if(off + len > gStubStreamData.size()) len = (uint32_t)gStubStreamData.size() - off;
+  for(uint32_t b = off / STUB_BLK; len && b <= (off + len - 1) / STUB_BLK; b++) if(!gStubStreamReady[b]) return false;
+  return true;
+}
+static void stubWant(uint32_t off, uint32_t len){
+  if(gStubStreamData.empty()) return;
+  if(off >= gStubStreamData.size()) return;
+  if(off + len > gStubStreamData.size()) len = (uint32_t)gStubStreamData.size() - off;
+  for(uint32_t b = off / STUB_BLK; len && b <= (off + len - 1) / STUB_BLK; b++) gStubStreamWant[b] = true;
+}
+bool     flexCloudStreamOpen(const FclItem* it){
+  stubCall(std::string("stream ") + it->id);
+  if(gStubStreamData.empty() || it->size != gStubStreamData.size()) return false;
+  gStubStreamOpen = true; gStubStreamState = FCS_OPENING;
+  size_t nb = (gStubStreamData.size() + STUB_BLK - 1) / STUB_BLK;
+  gStubStreamReady.assign(nb, false); gStubStreamWant.assign(nb, false);
+  stubWant(0, 8 * STUB_BLK);                      // la ventana de lectura empieza al principio
+  return true;
+}
+void     flexCloudStreamClose(){ if(gStubStreamOpen) stubCall("stream-close"); gStubStreamOpen = false; gStubStreamState = FCS_CLOSED; }
+uint8_t  flexCloudStreamState(char* err, size_t cap){ if(err && cap) err[0] = 0; return gStubStreamState; }
+uint32_t flexCloudStreamSize(){ return gStubStreamOpen ? (uint32_t)gStubStreamData.size() : 0; }
+int      flexCloudStreamRead(uint32_t off, void* buf, uint32_t n){
+  if(!gStubStreamOpen) return -1;
+  if(off >= gStubStreamData.size()) return 0;
+  if(off + n > gStubStreamData.size()) n = (uint32_t)gStubStreamData.size() - off;
+  if(!stubBlocksReady(off, n)){ gStubStreamMisses++; stubWant(off, n); return -1; }
+  memcpy(buf, gStubStreamData.data() + off, n);
+  stubWant(off, 8 * STUB_BLK);                    // como la cache real: lee por delante de la ultima lectura
+  return (int)n;
+}
+bool     flexCloudStreamReady(uint32_t off, uint32_t len){ return stubBlocksReady(off, len); }
+void     flexCloudStreamPin(uint32_t off, uint32_t len){ gStubStreamPinOff = off; gStubStreamPinLen = len; stubWant(off, len); }
+void     flexCloudStreamUnpin(){ gStubStreamPinLen = 0; }
+void     flexCloudStreamSeek(uint32_t pos){ stubWant(pos, 8 * STUB_BLK); }
+uint32_t flexCloudStreamBuffered(uint32_t pos){
+  uint32_t n = 0;
+  while(pos + n < gStubStreamData.size() && stubBlocksReady(pos + n, 1)) n += STUB_BLK - ((pos + n) % STUB_BLK);
+  return n;
+}
+size_t   flexCloudShed(){ return 0; }
+// La "tarea de streaming" del doble: lo pedido llega (o `maxBlocks` bloques).
+void stubStreamDeliver(int maxBlocks){
+  for(size_t b = 0; b < gStubStreamWant.size() && maxBlocks; b++)
+    if(gStubStreamWant[b] && !gStubStreamReady[b]){ gStubStreamReady[b] = true; maxBlocks--; }
+  if(gStubStreamOpen) gStubStreamState = FCS_STREAMING;
+}

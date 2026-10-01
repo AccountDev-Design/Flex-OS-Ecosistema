@@ -278,6 +278,67 @@ static void testNames(){
   CHECK(fclChunkFor(1ull << 30) * (uint64_t)FCL_PARTS_MAX >= (1ull << 30), "archivos enormes caben en el bitmap");
 }
 
+static void testUiText(){
+  printf("-- textos y decisiones de la interfaz --\n");
+  FclQuota q; memset(&q, 0, sizeof(q));
+  char b[96];
+  fclQuotaLine(&q, b, sizeof(b));
+  CHECK(!strcmp(b, "Espacio no disponible"), "sin cuota: se dice, no se inventa");
+  q.totalBytes = 5ull << 30; q.usedBytes = 1288490189ull;      // 1,2 GB
+  q.permille = 240;
+  fclQuotaLine(&q, b, sizeof(b));
+  CHECK(!strcmp(b, "1,2 GB de 5 GB \xC2\xB7 24 %"), "linea de cuota");
+  q.reservedBytes = 0; q.usedBytes = 1000; q.permille = 1;
+  fclQuotaLine(&q, b, sizeof(b));
+  CHECK(strstr(b, "\xC2\xB7 1 %") != nullptr, "algo ocupado nunca es 0 %");
+  q.usedBytes = (5ull << 30) - (400ull << 20); q.state = FCL_Q_LOW;
+  fclQuotaHint(&q, b, sizeof(b));
+  CHECK(!strcmp(b, "Espacio casi lleno: quedan 400 MB"), "espacio bajo");
+  q.usedBytes = 5ull << 30; q.state = FCL_Q_FULL;
+  fclQuotaHint(&q, b, sizeof(b));
+  CHECK(strstr(b, "lleno") != nullptr, "lleno");
+  q.usedBytes = 1ull << 30; q.reservedBytes = 1ull << 30; q.state = FCL_Q_OK;
+  fclQuotaHint(&q, b, sizeof(b));
+  CHECK(!strcmp(b, "Quedan 3 GB"), "lo reservado por subidas en curso no se ofrece");
+
+  FclItem it; memset(&it, 0, sizeof(it));
+  const char* why = nullptr;
+  it.isFolder = true;
+  CHECK(fclOpenAction(&it, &why) == FCL_OPEN_FOLDER, "carpeta: entrar");
+  it.isFolder = false; snprintf(it.name, sizeof(it.name), "Playa.JPG"); it.size = 3u << 20; it.kind = FCL_K_PHOTO;
+  CHECK(fclOpenAction(&it, &why) == FCL_OPEN_PHOTO, "JPEG: visor con el original");
+  it.size = 9u << 20;
+  CHECK(fclOpenAction(&it, &why) == FCL_OPEN_MENU && why, "JPEG de 9 MB: no se intenta (y se dice)");
+  snprintf(it.name, sizeof(it.name), "peli.avi"); it.size = 160u << 20; it.kind = FCL_K_VIDEO;
+  CHECK(fclOpenAction(&it, &why) == FCL_OPEN_STREAM, "AVI de 160 MB: streaming");
+  snprintf(it.name, sizeof(it.name), "clip.mp4");
+  CHECK(fclOpenAction(&it, &why) == FCL_OPEN_MENU && why && strstr(why, "AVI"), "MP4: no se reproduce aqui y se dice por que");
+  snprintf(it.name, sizeof(it.name), "foto.heic"); it.kind = FCL_K_PHOTO;
+  CHECK(fclOpenAction(&it, &why) == FCL_OPEN_MENU && why, "HEIC: en la web");
+
+  fclFmtDate(0, b, sizeof(b)); CHECK(b[0] == 0, "sin fecha: vacio");
+  fclFmtDate(1767225600000LL, b, sizeof(b)); CHECK(!strcmp(b, "01/01/2026"), "1 de enero de 2026");
+  fclFmtDate(951782400000LL, b, sizeof(b)); CHECK(!strcmp(b, "29/02/2000"), "29 de febrero de 2000 (bisiesto)");
+  memset(&it, 0, sizeof(it)); it.size = 2411724; it.updatedAt = 1773273600000LL;
+  fclItemSub(&it, b, sizeof(b));
+  CHECK(!strcmp(b, "2,3 MB \xC2\xB7 12/03/2026"), "subtitulo de un archivo");
+  it.isFolder = true; fclItemSub(&it, b, sizeof(b)); CHECK(!strcmp(b, "Carpeta"), "subtitulo de una carpeta");
+
+  fclXferLine(FCX_RUNNING, FCL_JOB_UPLOAD, 1258291, 3145728, 348160, 0, "", b, sizeof(b));
+  CHECK(!strcmp(b, "Subiendo \xC2\xB7 1,2 MB de 3 MB \xC2\xB7 340 KB/s"), "subiendo con velocidad");
+  fclXferLine(FCX_RETRYING, FCL_JOB_DOWNLOAD, 0, 1024, 0, 7200, "", b, sizeof(b));
+  CHECK(!strncmp(b, "Reintento en 8 s", 16), "reintento con segundos redondeados hacia arriba");
+  fclXferLine(FCX_WAITING_NET, FCL_JOB_UPLOAD, 10, 20, 0, 0, "", b, sizeof(b));
+  CHECK(!strncmp(b, "Esperando conexi\xC3\xB3n", 17), "sin red");
+  fclXferLine(FCX_FAILED, FCL_JOB_UPLOAD, 0, 0, 0, 0, "No queda espacio suficiente en tu Flex Cloud.", b, sizeof(b));
+  CHECK(strstr(b, "espacio") != nullptr, "fallo: el motivo real");
+  fclXferLine(FCX_FAILED, FCL_JOB_UPLOAD, 0, 0, 0, 0, nullptr, b, sizeof(b));
+  CHECK(b[0] != 0, "fallo sin motivo: algo legible");
+  char tiny[8];
+  fclXferLine(FCX_RUNNING, FCL_JOB_UPLOAD, 1u << 30, 2u << 30, 1u << 20, 0, "", tiny, sizeof(tiny));
+  CHECK(strlen(tiny) < sizeof(tiny), "nunca se sale del buffer");
+}
+
 int main(){
   printf("=== FlexOS · Flex Cloud: nucleo portable ===\n");
   testJson();
@@ -285,6 +346,7 @@ int main(){
   testJournal();
   testCache();
   testNames();
+  testUiText();
   printf("=== %d comprobaciones, %d fallos ===\n", gChecks, gFails);
   return gFails ? 1 : 0;
 }

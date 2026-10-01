@@ -147,6 +147,37 @@ static bool      vwPlaying = false, vwEnded = false;
 static uint32_t  vwCurFrame = 0;
 static unsigned long vwNextUs = 0;
 
+// ---- Video de Flex Cloud (MSTREAM_CLOUD) ----
+// No se descarga: se lee por rangos de una arena FIJA de bloques
+// (FlexOS_Cloud). El visor SOLO lee cuando la cache dice que lo tiene: si
+// no, espera ensenando "Cargando" sin parar el bucle ni dar el video por roto.
+//   fase 1: esperando la cabecera del AVI (los primeros 64 KB)
+//   fase 2: esperando el indice idx1 del final (fijado en la cache para
+//           poder buscar sin volver a pedirlo)
+//   fase 3: abierto (cada fotograma espera a que este en la cache)
+#define VW_CLOUD_HEAD      (64u * 1024u)
+#define VW_CLOUD_PIN_MAX   (1536u * 1024u)        // la mitad de la arena, como mucho, para el indice
+#define VW_CLOUD_OPEN_MS   45000u                 // sin cabecera en este tiempo: se dice por que
+static bool      vwCloud = false;
+static uint8_t   vwCloudPhase = 0;
+static uint32_t  vwCloudT0 = 0, vwCloudFrame = 0, vwCloudDrawMs = 0;
+static uint32_t  vwCloudPinOff = 0, vwCloudPinLen = 0;
+static uint8_t   vwCloudReopen = 0;
+static bool      vwCloudFirst = false;            // falta el primer fotograma (se lee en cuanto llegue)
+static bool      vwBuffering = false;
+static void vwVideoOpened(uint32_t frame);
+
+// Bytes CONTIGUOS que tienen que estar en la cache desde `off` para leer el
+// siguiente fotograma sin esperar: dos fotogramas de los mas grandes que
+// declara el AVI (entre medias puede haber audio) y un margen.
+static bool vwCloudReady(uint32_t off){
+  uint32_t mf = (vwAvi.maxFrameBytes >= 4096u && vwAvi.maxFrameBytes <= FLEXAVI_FRAME_MAX) ? vwAvi.maxFrameBytes : VW_FRAME_CAP;
+  uint32_t need = mf * 2u + 64u * 1024u, size = vwStream.size;
+  if(off >= size) return true;
+  if(need > size - off) need = size - off;
+  return flexCloudStreamReady(off, need);
+}
+
 // Barras
 static float     vwBarsA = 1.0f, vwBarsA0 = 1.0f;
 static int8_t    vwBarsWant = 1;
@@ -686,7 +717,11 @@ static int vwReadFrame(){
   if(!vwFrameBuf) return -1;
   for(int tries = 0; tries < 2; tries++){
     uint32_t fn = 0;
+    vwStream.missed = false;
     int n = flexAviReadFrame(&vwAvi, vwFrameBuf, vwFrameCap, &fn);
+    // NUBE: el trozo aun no estaba en la cache. El lector AVI deja el cursor
+    // en la cabecera de ese fotograma (reintentable): se espera, no se para.
+    if(n == FLEXAVI_ERR_IO && vwCloud && vwStream.missed){ vwBuffering = true; return 0; }
     if(n > 0){ vwFrameLen = (uint32_t)n; vwCurFrame = fn; return 1; }
     if(n == 0){ vwCurFrame = fn; return 0; }
     if(n == FLEXAVI_ERR_TOOBIG){
@@ -715,6 +750,17 @@ static void vwRenderContent(bool smooth){
       vwBlitScaled(vwThumb, ML_SIDE, ML_SIDE, vwOffX + (dw - s) * 0.5f, vwOffY + (dh - s) * 0.5f, s, s, true);
     } else vwCleanText(vwVY + vwVH / 2 - 8, "Abriendo...", 2, TH_TXT2);
   } else if(vwKind == VWK_VIDEO){
+    if(vwCloud && (vwCloudPhase < 3 || (vwCloudFirst && !vwFrameLen))){
+      // Aun no hay cuadro: lo que pasa de verdad, con lo que ya llego.
+      char t[64];
+      uint32_t got = flexCloudStreamBuffered(0);
+      if(vwCloudPhase == 2) snprintf(t, sizeof(t), "Preparando el v\xC3\xAD" "deo...");
+      else if(got) snprintf(t, sizeof(t), "Cargando de Flex Cloud... %lu KB", (unsigned long)(got / 1024u));
+      else snprintf(t, sizeof(t), "Cargando de Flex Cloud...");
+      vwCleanText(vwVY + vwVH / 2 - 8, t, 2, TH_TXT2);
+      vwGlOk = false;
+      return;
+    }
     int r = vwDecodeFrame();
     if(r != FLEXJPG_OK && vwFrameLen) vwCleanText(vwVY + vwVH / 2 - 8, flexJpegErrStr(r), 1, TH_TXT2);
   } else if(vwKind == VWK_ERROR){
@@ -918,8 +964,9 @@ static void vwDrawBotBar(uint8_t a){
   int fw = dur > 0 ? (int)((uint64_t)sw * (pos > dur ? dur : pos) / dur) : 0;
   if(fw > 0) fillRoundRect(sx, sy - 3, fw, 6, 3, acc);
   if(dur > 0) fillCircle(sx + fw, sy, 8, fg);
-  char t1[16], t2[16];
+  char t1[24], t2[16];
   vwFmtTime(pos, t1, sizeof(t1));
+  if(vwBuffering) snprintf(t1, sizeof(t1), "Cargando...");          // nube: esperando el siguiente tramo
   if(dur > 0) vwFmtTime(dur, t2, sizeof(t2)); else snprintf(t2, sizeof(t2), "--:--");
   drawTextR(sx - 10, sy - 4, t1, 1, fg2);
   drawText(sx + sw + 10, sy - 4, t2, 1, fg2);
@@ -995,7 +1042,7 @@ static void vwPresentImage(){
 // ---- Aparecer / desaparecer ----
 static bool vwCanAutoHide(){
   if(vwKind == VWK_PHOTO) return !vwLoading;
-  if(vwKind == VWK_VIDEO) return vwPlaying;
+  if(vwKind == VWK_VIDEO) return vwPlaying && !vwBuffering;
   return false;
 }
 static void vwBarsShow(bool on){
@@ -1092,6 +1139,7 @@ static void vwRelease(bool keepPos){
   vwFreeBufs();
   vwKind = VWK_NONE; vwEnded = false; vwCurFrame = 0; vwLoading = false;
   vwAnimOn = false; vwPinchOn = false; vwPanOn = false; vwTapPending = false;
+  vwCloud = false; vwCloudPhase = 0; vwCloudFirst = false; vwBuffering = false; vwCloudReopen = 0;
   vwOn = false;
 }
 
@@ -1171,10 +1219,24 @@ static void vwStartContent(uint32_t frame){
   }
   if(vwKind != VWK_VIDEO) return;
   mediaStreamClose(&vwStream);                      // (cierra el flujo si quedaba alguno)
-  if(!mediaStreamOpen(&vwStream, vwPath)){ vwKind = VWK_ERROR; snprintf(vwErr, sizeof(vwErr), "No se pudo abrir el archivo"); return; }
+  vwCloud = false; vwCloudPhase = 0; vwCloudFirst = false; vwBuffering = false;
+  if(!mediaStreamOpen(&vwStream, vwPath)){
+    vwKind = VWK_ERROR;
+    snprintf(vwErr, sizeof(vwErr), "%s", mediaIsCloudPath(vwPath) ? "No se pudo abrir desde Flex Cloud" : "No se pudo abrir el archivo");
+    return;
+  }
+  if(vwStream.kind == MSTREAM_CLOUD){
+    // Se termina de abrir en vwCloudStep cuando la cabecera este en la cache.
+    vwCloud = true; vwCloudPhase = 1; vwCloudFrame = frame; vwCloudT0 = millis(); vwCloudReopen = 0;
+    return;
+  }
   FlexMediaIO io; mediaBindIO(&io, &vwStream);
   int r = flexAviOpen(&vwAvi, &io);
   if(r != FLEXAVI_OK){ vwKind = VWK_ERROR; snprintf(vwErr, sizeof(vwErr), "%s", flexAviErrStr(r)); return; }
+  vwVideoOpened(frame);
+}
+// El AVI ya esta analizado: buffers, posicion de reanudar y primer cuadro.
+static void vwVideoOpened(uint32_t frame){
   // Buffer del fotograma: el que declara el propio AVI (su mayor fotograma)
   // si es creible, y si no VW_FRAME_CAP. Crece solo si un fotograma lo pide.
   uint32_t cap = VW_FRAME_CAP;
@@ -1201,9 +1263,12 @@ static void vwStartContent(uint32_t frame){
   }
   vwPlaying = false; vwEnded = false;
   vwNextUs = micros();
+  // NUBE: el primer cuadro se lee cuando este en la cache (vwCloudStep): aqui
+  // seria esperar dentro del bucle de la interfaz.
+  if(vwCloud && !vwCloudReady(vwAvi.cursor)){ vwCloudFirst = true; return; }
   // El cuadro con el que se abre (en pausa). Los trozos vacios del principio
   // (repeticiones) no tienen imagen: se busca el primero que la tenga.
-  for(int i = 0; i < 64 && vwReadFrame() == 0; i++){}
+  for(int i = 0; i < 64 && vwReadFrame() == 0 && !vwBuffering; i++){}
 }
 
 // Activa el visor para el elemento de la sesion del anfitrion. `from` = celda
@@ -1383,14 +1448,24 @@ static void vwCycleOrientation(){
 // Con idx1 casi siempre termina en la primera llamada.
 static void vwSeekStep(){
   if(vwSeekWant < 0 || vwKind != VWK_VIDEO) return;
+  if(vwCloud && vwCloudPhase < 3) return;            // aun abriendo: la busqueda espera
   if(vwAvi.frames && (uint32_t)vwSeekWant >= vwAvi.frames) vwSeekWant = (int32_t)vwAvi.frames - 1;
+  // NUBE: el indice (idx1) se lee entero la primera vez que se busca; si no
+  // esta todo en la cache se quedaria a medias para siempre. Se espera.
+  if(vwCloud && vwAvi.idx1Len && vwAvi.idx1Len <= VW_CLOUD_PIN_MAX && !flexCloudStreamReady(vwAvi.idx1Off, vwAvi.idx1Len)) return;
+  vwStream.missed = false;
   int landed = flexAviSeekFrameMax(&vwAvi, (uint32_t)vwSeekWant, VW_SEEK_TICK);
+  if(landed < 0 && vwCloud && vwStream.missed){ vwBuffering = true; return; }   // falta un trozo: la proxima vuelta
   if(landed < 0){ vwStopBroken(landed); vwRender(); return; }
   vwCurFrame = (uint32_t)landed;
   if(landed < vwSeekWant && landed != vwSeekLast){ vwSeekLast = landed; return; }   // sigue en la proxima vuelta
   vwSeekWant = -1; vwSeekLast = -1;
   vwEnded = false;
   vwNextUs = micros();
+  if(vwCloud){
+    flexCloudStreamSeek(vwAvi.cursor);              // la ventana de lectura salta con el video
+    if(!vwCloudReady(vwAvi.cursor)){ vwBuffering = true; vwCloudFirst = true; vwPresentAll(); return; }
+  }
   if(vwReadFrame() > 0) vwRenderContent(false);
   if(!vwPlaying) vwGlassPrep();
   vwPresentAll();
@@ -1602,6 +1677,22 @@ static void vwPlayTick(){
   unsigned long now = micros();
   if((long)(now - vwNextUs) < 0) return;
   const uint32_t spf = vwAvi.usPerFrame ? vwAvi.usPerFrame : 40000;
+  if(vwCloud){
+    // Sin el siguiente tramo en la cache NO se lee (ni se saltan fotogramas
+    // para "alcanzar"): el reloj del video se para y se ensena Cargando.
+    if(vwCloudPhase < 3) return;
+    if(!vwCloudReady(vwAvi.cursor)){
+      if(!vwBuffering){ vwBuffering = true; vwBarsDrawMs = 0; vwBarsShow(true); }
+      vwNextUs = now + spf;
+      if(millis() - vwBarsDrawMs >= 500u){
+        vwBarsDrawMs = millis();
+        flexCloudStreamSeek(vwAvi.cursor);          // "voy a leer aqui": la cache trae lo de delante
+        vwPresentBars();
+      }
+      return;
+    }
+    if(vwBuffering){ vwBuffering = false; vwNextUs = now; now = micros(); }
+  }
   long late = (long)(now - vwNextUs);
   int drop = (int)(late / (long)spf);
   if(drop > VW_MAX_CATCHUP) drop = VW_MAX_CATCHUP;
@@ -1629,6 +1720,64 @@ static void vwPlayTick(){
     vwBarsShow(true);
     vwGlassPrep();
     vwPresentBars();
+  }
+}
+
+// ---- Video de Flex Cloud: apertura por fases (ver vwCloud) ----
+static void vwCloudFail(const char* why){
+  vwCloudPhase = 0; vwCloudFirst = false; vwBuffering = false; vwPlaying = false;
+  mediaStreamClose(&vwStream);
+  vwKind = VWK_ERROR;
+  snprintf(vwErr, sizeof(vwErr), "%s", why && why[0] ? why : "Flex Cloud no responde");
+  vwRenderContent(true); vwGlassPrep(); vwPresentAll();
+}
+static void vwCloudStep(){
+  if(!vwCloud || vwKind != VWK_VIDEO) return;
+  char err[96] = "";
+  uint8_t st = flexCloudStreamState(err, sizeof(err));
+  if(st == FCS_ERROR){ vwCloudFail(err); return; }
+  if(st == FCS_CLOSED && vwCloudPhase){ vwCloudFail("Se cerr\xC3\xB3 la conexi\xC3\xB3n con Flex Cloud"); return; }
+  uint32_t now = millis();
+  if(vwCloudPhase == 1 || vwCloudPhase == 2){
+    // Mientras no se puede abrir: el texto de carga, como mucho dos veces por segundo.
+    if(now - vwCloudDrawMs >= 500u){ vwCloudDrawMs = now; vwRenderContent(true); vwPresentAll(); }
+    if(now - vwCloudT0 > VW_CLOUD_OPEN_MS){ vwCloudFail(st == FCS_WAITING_NET ? "Sin conexi\xC3\xB3n con Flex Cloud" : "Flex Cloud tarda demasiado en responder"); return; }
+    uint32_t size = vwStream.size;
+    if(vwCloudPhase == 1){
+      uint32_t head = size < VW_CLOUD_HEAD ? size : VW_CLOUD_HEAD;
+      if(!flexCloudStreamReady(0, head)) return;
+    } else if(!flexCloudStreamReady(vwCloudPinOff, vwCloudPinLen)) return;
+    vwStream.missed = false;
+    FlexMediaIO io; mediaBindIO(&io, &vwStream);
+    int r = flexAviOpen(&vwAvi, &io);
+    if((r == FLEXAVI_OK || r == FLEXAVI_ERR_IO) && vwStream.missed && vwCloudReopen < 3 && vwStream.missOff < size){
+      // Falta un trozo de la estructura (casi siempre el indice del final): se
+      // fija en la cache y se vuelve a abrir cuando este.
+      vwCloudReopen++;
+      vwCloudPinOff = vwStream.missOff;
+      vwCloudPinLen = size - vwStream.missOff;
+      if(vwCloudPinLen > VW_CLOUD_PIN_MAX) vwCloudPinLen = VW_CLOUD_PIN_MAX;
+      flexCloudStreamPin(vwCloudPinOff, vwCloudPinLen);
+      vwCloudPhase = 2;
+      return;
+    }
+    if(r != FLEXAVI_OK){ vwCloudFail(flexAviErrStr(r)); return; }
+    // El indice se queda fijado (buscar no lo vuelve a pedir); lo demas, no.
+    if(vwAvi.idx1Len && vwAvi.idx1Len <= VW_CLOUD_PIN_MAX) flexCloudStreamPin(vwAvi.idx1Off, vwAvi.idx1Len);
+    else flexCloudStreamUnpin();
+    flexCloudStreamSeek(vwAvi.cursor);
+    vwCloudPhase = 3;
+    vwVideoOpened(vwCloudFrame);
+    if(vwKind != VWK_VIDEO){ vwRenderContent(true); vwGlassPrep(); vwPresentAll(); return; }
+    vwApplyOrientation();
+    vwResetView();
+    vwRenderContent(true); vwGlassPrep(); vwPresentAll();
+    return;
+  }
+  if(vwCloudPhase == 3 && vwCloudFirst && vwSeekWant < 0 && vwCloudReady(vwAvi.cursor)){
+    vwCloudFirst = false; vwBuffering = false;
+    for(int i = 0; i < 64 && vwReadFrame() == 0 && !vwBuffering; i++){}
+    vwRenderContent(true); vwGlassPrep(); vwPresentAll();
   }
 }
 
@@ -1685,6 +1834,8 @@ static void vwTick(){
     return;
   }
   vwEngine();
+  vwCloudStep();
+  if(!vwOn) return;
   if(vwCollect()){                                  // llego la foto (o el motivo de que no)
     bool land = vwLand;
     vwApplyOrientation();

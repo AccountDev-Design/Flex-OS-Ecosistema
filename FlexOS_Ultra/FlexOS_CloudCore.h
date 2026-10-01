@@ -245,4 +245,33 @@ uint32_t fclBackoffMs(uint8_t failures);
 // archivo necesite mas de FCL_PARTS_MAX partes.
 uint32_t fclChunkFor(uint64_t size);
 
+// ---------------------------------------------------------------------------
+//  TEXTOS Y DECISIONES DE LA INTERFAZ
+//  ------------------------------------------------------------------------
+//  Archivos, Galeria y Multimedia ensenan la nube con LAS MISMAS frases y
+//  deciden igual que se abre en el P4: viven aqui, probadas en el PC, y la
+//  interfaz solo las dibuja.
+// ---------------------------------------------------------------------------
+// Fases de una transferencia (FlexOS_Cloud las publica).
+enum { FCX_QUEUED = 0, FCX_PREPARING, FCX_RUNNING, FCX_VERIFYING, FCX_WAITING_NET, FCX_RETRYING, FCX_DONE, FCX_FAILED, FCX_CANCELLED };
+// "1,2 GB de 5 GB · 24 %" (lo reservado por subidas en curso cuenta como ocupado).
+void fclQuotaLine(const FclQuota* q, char* out, size_t cap);
+// "Quedan 3,8 GB" · "Espacio casi lleno: quedan 400 MB" · "Flex Cloud est\xC3\xA1 lleno".
+void fclQuotaHint(const FclQuota* q, char* out, size_t cap);
+// Que hace el P4 al tocar un elemento de la nube.
+//   FOLDER   entrar en la carpeta
+//   PHOTO    traer el ORIGINAL (verificado) y abrirlo en el visor (JPEG <= 8 MB)
+//   STREAM   reproducir por rangos sin descargar (AVI MJPEG)
+//   MENU     no se puede abrir aqui: se ensenan sus acciones y `why` dice por que
+enum { FCL_OPEN_FOLDER = 0, FCL_OPEN_PHOTO, FCL_OPEN_STREAM, FCL_OPEN_MENU };
+int  fclOpenAction(const FclItem* it, const char** why);
+// "2,3 MB · 12/03/2026" (fecha de la ultima modificacion) o "Carpeta".
+void fclItemSub(const FclItem* it, char* out, size_t cap);
+// Fecha civil "dd/mm/aaaa" de unos ms desde 1970 (UTC). "" si no hay.
+void fclFmtDate(int64_t ms, char* out, size_t cap);
+// Linea de estado de una transferencia: "Subiendo · 1,2 MB de 3 MB · 340 KB/s",
+// "Esperando conexi\xC3\xB3n", "Reintento en 8 s", "Verificando integridad"...
+void fclXferLine(uint8_t phase, uint8_t type, uint64_t done, uint64_t size, uint32_t bytesPerSec,
+                 uint32_t retryInMs, const char* error, char* out, size_t cap);
+
 #endif

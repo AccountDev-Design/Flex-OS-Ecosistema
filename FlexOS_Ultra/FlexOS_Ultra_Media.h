@@ -107,17 +107,49 @@ static int mediaList(const char* dir, FlexFsEntry* out, int maxn){
 // -------------------------------------------------------------
 //  LECTOR UNIFICADO (MediaStream + FlexMediaIO)
 // -------------------------------------------------------------
+// El elemento de Flex Cloud que el visor va a reproducir: lo deja aqui quien
+// lo abre (FlexOS_Ultra_CloudKit.h) justo antes de pasarle la ruta "cloud:".
+static FclItem gMediaCloudItem;
+static bool mediaIsCloudPath(const char* path){
+  return path && !strncmp(path, MEDIA_CLOUD_PREFIX, sizeof(MEDIA_CLOUD_PREFIX) - 1);
+}
+// "cloud:<id>/<nombre>" -> el id. false si la ruta no es de la nube o no es
+// la del elemento preparado (nunca se abre otra cosa que la que se pidio).
+static bool mediaCloudPathMatches(const char* path){
+  if(!mediaIsCloudPath(path) || !gMediaCloudItem.id[0]) return false;
+  const char* id = path + sizeof(MEDIA_CLOUD_PREFIX) - 1;
+  size_t n = strlen(gMediaCloudItem.id);
+  return !strncmp(id, gMediaCloudItem.id, n) && id[n] == '/';
+}
+// Espera ACOTADA por una lectura de la nube. El visor solo lee cuando la
+// cache dice que lo tiene (ver vwCloudReady); esto cubre lo poco que se
+// escape (una cabecera de trozo justo despues). Nunca bloquea mas de esto.
+#define MEDIA_CLOUD_WAIT_MS 25u
+
 static void mediaStreamClose(MediaStream* s){
   if(!s) return;
   if(s->f){ flexFsStreamClose(s->f); s->f = NULL; }
+  if(s->kind == MSTREAM_CLOUD) flexCloudStreamClose();
   s->kind = MSTREAM_NONE;
   s->path[0] = 0;
   s->pos = s->size = s->fpos = 0;
+  s->missed = false; s->missOff = 0;
 }
 
 static bool mediaStreamOpen(MediaStream* s, const char* path){
   if(!s || !path) return false;
   mediaStreamClose(s);
+  if(mediaIsCloudPath(path)){
+    // Video de la nube: ni LittleFS ni descarga. La arena de bloques se
+    // reserva (una vez) en flexCloudStreamOpen.
+    if(!mediaCloudPathMatches(path) || !flexCloudStreamOpen(&gMediaCloudItem)) return false;
+    s->kind = MSTREAM_CLOUD;
+    s->size = flexCloudStreamSize();
+    snprintf(s->path, sizeof(s->path), "%s", path);
+    s->pos = s->fpos = 0;
+    if(!s->size){ mediaStreamClose(s); return false; }
+    return true;
+  }
   if(!flexFsReady()) return false;
   s->f = flexFsOpenRead(path);
   if(!s->f) return false;
@@ -130,12 +162,30 @@ static bool mediaStreamOpen(MediaStream* s, const char* path){
 }
 
 static inline bool mediaStreamOpenOk(const MediaStream* s){
-  return s && s->kind == MSTREAM_INT && s->f;
+  return s && ((s->kind == MSTREAM_INT && s->f) || s->kind == MSTREAM_CLOUD);
+}
+
+static int mediaCloudRead(MediaStream* s, void* buf, uint32_t n){
+  if(s->pos >= s->size) return 0;
+  if(n > s->size - s->pos) n = s->size - s->pos;
+  int r = flexCloudStreamRead(s->pos, buf, n);
+  if(r < 0){
+    flexCloudStreamSeek(s->pos);                 // que el fetcher vaya a buscarlo ya
+    // Acotada por VUELTAS ademas de por tiempo: nunca depende de que el reloj avance.
+    uint32_t t0 = millis();
+    for(uint32_t k = 0; r < 0 && k < MEDIA_CLOUD_WAIT_MS && millis() - t0 < MEDIA_CLOUD_WAIT_MS; k++){
+      vTaskDelay(1); r = flexCloudStreamRead(s->pos, buf, n);
+    }
+  }
+  if(r < 0){ s->missed = true; s->missOff = s->pos; return -1; }
+  s->pos += (uint32_t)r;
+  return r;
 }
 
 static int mediaIoRead(void* c, void* buf, uint32_t n){
   MediaStream* s = (MediaStream*)c;
   if(!s || n == 0) return 0;
+  if(s->kind == MSTREAM_CLOUD) return mediaCloudRead(s, buf, n);
   if(s->kind != MSTREAM_INT || !s->f) return -1;
   // Solo se mueve el flujo si la lectura no sigue donde quedo la anterior:
   // la lectura secuencial (cabecera y datos del fotograma) no paga seeks.
@@ -151,7 +201,7 @@ static int mediaIoRead(void* c, void* buf, uint32_t n){
 static bool mediaIoSeek(void* c, uint32_t off){
   MediaStream* s = (MediaStream*)c;
   if(!s) return false;
-  if(s->kind == MSTREAM_INT){
+  if(s->kind == MSTREAM_INT || s->kind == MSTREAM_CLOUD){
     if(off > s->size) return false;
     s->pos = off; return true;
   }

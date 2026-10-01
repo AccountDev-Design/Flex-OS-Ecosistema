@@ -45,6 +45,20 @@ EXENTOS = {
 # Ganchos obligatorios: (funcion que contiene la llamada, llamada que debe aparecer, motivo)
 GANCHOS = [
     ("loop",           "hcTick()",        "sin esto el modo de personalizacion no anima, no pinta ni recibe toques"),
+    # FLEX CLOUD. Sin flexCloudBegin() no hay diario ni tareas: las subidas y
+    # descargas a medias del arranque anterior no se reanudarian nunca. Sin
+    # cloudUiTick() nadie leeria los avisos: "Subir y liberar espacio" no
+    # liberaria nada y las descargas verificadas se quedarian en su temporal.
+    ("setup",          "flexCloudBegin()", "las transferencias a medias no se reanudarian y la nube no tendria tareas"),
+    ("loop",           "cloudUiTick()",    "los avisos de la nube no se leerian: ni liberar espacio ni colocar descargas"),
+    ("cloudUiTick",    "flexCloudPollEvent(", "cloudUiTick no sacaria ningun aviso de la cola de Flex Cloud"),
+    ("cloudUiTick",    "flexCloudSetActive(", "la cuota no se refrescaria con la nube a la vista"),
+    ("ckFreeLocal",    "flexFsSize(",      "liberar espacio borraria el original sin comprobar que sigue siendo el que se subio"),
+    ("vwTick",         "vwCloudStep()",    "un video de Flex Cloud se quedaria en Cargando para siempre"),
+    ("mediaStreamClose", "flexCloudStreamClose()", "cerrar un video de la nube dejaria la tarea de streaming bajando bloques"),
+    ("galCloseApp",    "ckUnbind(",        "cerrar la Galeria dejaria la nube enganchada a una app cerrada"),
+    ("vidCloseApp",    "ckUnbind(",        "cerrar Multimedia dejaria la nube enganchada a una app cerrada"),
+    ("filesExit",      "filesCkLeave()",   "salir de Archivos dejaria la nube enganchada a una pantalla cerrada"),
     ("loop",           "wgDataTick()",    "los widgets del escritorio no refrescarian sus datos"),
     ("loop",           "flexWeatherTick(", "el clima no se refrescaria nunca: la app, el widget y el bloqueo se quedarian con la cache"),
     ("setup",          "flexWeatherBegin()", "no se cargarian ni las ubicaciones ni la cache del clima, y su tarea de red no existiria"),

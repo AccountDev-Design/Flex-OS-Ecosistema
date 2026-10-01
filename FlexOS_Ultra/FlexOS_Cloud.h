@@ -81,8 +81,7 @@ typedef struct {
   int      nCrumbs;
 } FlexCloudListInfo;
 
-// Fases de una transferencia para la interfaz.
-enum { FCX_QUEUED = 0, FCX_PREPARING, FCX_RUNNING, FCX_VERIFYING, FCX_WAITING_NET, FCX_RETRYING, FCX_DONE, FCX_FAILED, FCX_CANCELLED };
+// Fases de una transferencia para la interfaz: FCX_* (FlexOS_CloudCore.h).
 
 typedef struct {
   uint32_t id;
@@ -153,7 +152,8 @@ bool     flexCloudRetry(uint32_t jobId);
 void     flexCloudClearFinished();
 int      flexCloudXfers(FlexCloudXfer* out, int cap);
 // Copia temporal de una FOTO de la nube para abrirla en el visor (un solo
-// hueco: /System/Cloud/view.bin). Evento FCE_VIEW_READY con la ruta.
+// hueco: /System/Cloud/view/<nombre>, verificada con su SHA-256). Evento
+// FCE_VIEW_READY con la ruta. Nunca se recomprime: es el original.
 uint32_t flexCloudFetchForView(const FclItem* it);
 bool     flexCloudPollEvent(FlexCloudEvent* ev);
 

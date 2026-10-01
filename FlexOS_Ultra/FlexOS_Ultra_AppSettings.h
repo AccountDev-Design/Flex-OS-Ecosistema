@@ -600,6 +600,13 @@ static void settingsJumpSecurity(){
   if(gState == ST_APP) appClose();
   enterApp(IC_AJUSTES);
 }
+// Abre Ajustes en "General", donde esta la fila de Flex Account. La usa Flex
+// Cloud cuando no hay cuenta vinculada (o hay que volver a vincularla).
+static void settingsJumpAccount(){
+  setView = 1; setSel = 0; setScroll = 0; setDragging = false;
+  if(gState == ST_APP) appClose();
+  enterApp(IC_AJUSTES);
+}
 static void settingsOpenCat(int cat){
   if(cat < 0 || cat > 11) return;
   setSel = cat; setScroll = 0; setDragging = false;
