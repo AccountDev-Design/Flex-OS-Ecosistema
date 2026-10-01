@@ -57,7 +57,7 @@ BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test
         $(BUILD)/test_medialib $(BUILD)/test_jpegenc $(BUILD)/test_httpshare $(BUILD)/test_qr \
         $(BUILD)/test_mediathumb $(BUILD)/test_mediaweb $(BUILD)/test_fs $(BUILD)/test_mediastore $(BUILD)/test_imgedit $(BUILD)/test_videdit \
         $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg \
-        $(BUILD)/test_fuzzmedia $(BUILD)/test_account $(BUILD)/test_cloudcore
+        $(BUILD)/test_fuzzmedia $(BUILD)/test_account $(BUILD)/test_cloudcore $(BUILD)/test_cloud
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun $(BUILD)/mediacheck $(BUILD)/flexweb_host
 
 .PHONY: all run all-boards fixtures clean ino web
@@ -340,6 +340,24 @@ $(BUILD)/test_account: test_account.cpp pkgbuild.h $(ACCT_SRC) $(ULTRA)/FlexOS_A
 CLCORE := $(ULTRA)/FlexOS_CloudCore.cpp
 $(BUILD)/test_cloudcore: test_cloudcore.cpp $(CLCORE) $(ULTRA)/FlexOS_CloudCore.h | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) $(INC) -Ivendor/cJSON -o $@ test_cloudcore.cpp $(CLCORE) $(CJSON) -lcrypto
+
+# --- FLEX CLOUD: el gestor REAL del P4 contra un Flex Cloud simulado -------
+# FlexOS_Cloud.cpp + FlexOS_Account.cpp + FlexOS_FS.cpp tal cual van a la placa,
+# con netstub/ (red, NVS, reloj, PSRAM contada) y fsstub/ (LittleFS en memoria
+# que sobrevive a un apagado). CON sanitizers: lee bytes de internet.
+CLOUD_SRC := $(ULTRA)/FlexOS_Cloud.cpp $(ULTRA)/FlexOS_Account.cpp $(ULTRA)/FlexOS_CloudTLS.cpp $(CLCORE) \
+             $(ULTRA)/FlexOS_FS.cpp $(ULTRA)/FlexOS_JPEG.cpp $(ULTRA)/FlexOS_JPEGEnc.cpp
+$(BUILD)/test_cloud: test_cloud.cpp pkgbuild.h $(CLOUD_SRC) $(ULTRA)/FlexOS_Cloud.h $(ULTRA)/FlexOS_CloudCore.h $(ULTRA)/FlexOS_Account.h \
+                     $(NETSTUB) $(NETHDRS) fsstub/FS.h $(FSSTUB) | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(NETFLAGS) -Ifsstub -o $@ test_cloud.cpp $(CLOUD_SRC) $(NETSTUB) $(FSSTUB) $(CJSON) -lcrypto
+
+# Punta a punta contra el servidor REAL (Node, en Flex-Developer-Studio). No va
+# en `make`: necesita Node >= 22.13 y el otro repositorio. Ver cloud_e2e.sh.
+$(BUILD)/cloud_e2e: cloud_e2e.cpp pkgbuild.h $(CLOUD_SRC) $(ULTRA)/FlexOS_Cloud.h $(NETSTUB) $(NETHDRS) fsstub/FS.h $(FSSTUB) | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(NETFLAGS) -Ifsstub -o $@ cloud_e2e.cpp $(CLOUD_SRC) $(NETSTUB) $(FSSTUB) $(CJSON) -lcrypto
+.PHONY: cloud-e2e
+cloud-e2e:
+	./cloud_e2e.sh
 
 # --- Flex Link / Flex Phone: protocolo y modelo del telefono ---
 # Nucleo PURO (sin Arduino), asi que se compila igual que el del
@@ -645,6 +663,7 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@$(BUILD)/test_account
 	@echo
 	@$(BUILD)/test_cloudcore
+	@$(BUILD)/test_cloud
 	@echo
 	@$(BUILD)/test_browser
 	@echo

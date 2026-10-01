@@ -25,6 +25,8 @@ extern std::vector<NetRequest> gNetLog;
 extern bool gNetWifi;
 extern unsigned long gNetNowMs;
 extern unsigned gNetTaskCreates;
+extern size_t gNetPsNow, gNetPsPeak;    // PSRAM reservada ahora / pico (heap_caps_malloc)
+extern size_t gNetPsFailAbove;          // >0: heap_caps_malloc falla por encima de esto
 
 void netstubReset();            // red, registro y reloj a cero (la NVS NO se toca)
 void netstubNvsWipe();          // NVS de fabrica

@@ -35,8 +35,23 @@ static std::mt19937& rng(){ static std::mt19937 g(12345); return g; }
 void esp_fill_random(void* buf, size_t len){ uint8_t* p = (uint8_t*)buf; for(size_t i = 0; i < len; i++) p[i] = (uint8_t)rng()(); }
 uint32_t esp_random(){ return rng()(); }
 uint32_t esp_get_free_heap_size(){ return 300u * 1024u; }
-void* heap_caps_malloc(size_t n, uint32_t){ return malloc(n); }
-void heap_caps_free(void* p){ free(p); }
+// PSRAM con contabilidad: la prueba mira el PICO de memoria (gNetPsPeak) para
+// demostrar que un archivo de 160 MB no se carga entero en ningun momento.
+static std::map<void*, size_t>& psMap(){ static std::map<void*, size_t> m; return m; }
+size_t gNetPsNow = 0, gNetPsPeak = 0;
+size_t gNetPsFailAbove = 0;                         // >0: falla toda reserva mayor que esto
+void* heap_caps_malloc(size_t n, uint32_t){
+  if(gNetPsFailAbove && n > gNetPsFailAbove) return nullptr;
+  void* p = malloc(n);
+  if(p){ psMap()[p] = n; gNetPsNow += n; if(gNetPsNow > gNetPsPeak) gNetPsPeak = gNetPsNow; }
+  return p;
+}
+void heap_caps_free(void* p){
+  if(!p) return;
+  auto it = psMap().find(p);
+  if(it != psMap().end()){ gNetPsNow -= it->second; psMap().erase(it); }
+  free(p);
+}
 size_t heap_caps_get_free_size(uint32_t){ return 8u << 20; }
 size_t heap_caps_get_largest_free_block(uint32_t){ return 4u << 20; }
 
@@ -47,6 +62,9 @@ BaseType_t xTaskCreatePinnedToCore(TaskFunction_t f, const char* n, uint32_t s, 
   return xTaskCreate(f, n, s, a, p, h);
 }
 void vTaskDelete(TaskHandle_t) {}
+unsigned gNetTaskNotifies = 0;
+BaseType_t xTaskNotifyGive(TaskHandle_t){ gNetTaskNotifies++; return pdPASS; }
+uint32_t ulTaskNotifyTake(BaseType_t, TickType_t t){ gNetNowMs += t ? t : 1; return 0; }
 void vTaskDelay(TickType_t t){ gNetNowMs += t ? t : 1; }
 // Mutex que DETECTA anidamiento (en la placa es no recursivo: un doble
 // lock() seria un bloqueo eterno).
@@ -152,11 +170,30 @@ bool HTTPClient::hasHeader(const char* name){ return respHeaders_.count(lower(na
 int HTTPClient::sendRequest(const char* type, uint8_t* payload, size_t size){
   return dispatch(type, payload ? std::string((const char*)payload, size) : std::string());
 }
+// Mismo bucle que arduino-esp32 3.2.1: lee mientras available() > -1 y falten
+// bytes; con available() == 0 la placa espera (delay(1)) MIENTRAS la conexion
+// siga viva, es decir, para siempre. Aqui eso es un fallo de la prueba.
 int HTTPClient::sendRequest(const char* type, Stream* stream, size_t size){
+  if(!stream) return HTTPC_ERROR_NO_STREAM;
+  if(!gNetWifi) return HTTPC_ERROR_CONNECTION_REFUSED;
   std::string b;
-  if(stream){ uint8_t tmp[1024]; while(b.size() < size){ size_t want = size - b.size(); if(want > sizeof(tmp)) want = sizeof(tmp);
-      size_t got = stream->readBytes(tmp, want); if(!got) break; b.append((const char*)tmp, got); } }
-  if(b.size() != size) return HTTPC_ERROR_SEND_PAYLOAD_FAILED;
+  uint8_t tmp[1460];
+  long len = size ? (long)size : -1;
+  while(stream->available() > -1 && (len > 0 || len == -1)){
+    int av = stream->available();
+    if(!av){
+      if(len == -1) break;
+      fprintf(stderr, "netstub: sendRequest(Stream) se quedaria esperando para siempre en la placa (available()==0 con %ld bytes pendientes)\n", len);
+      abort();
+    }
+    size_t want = (size_t)av;
+    if(len > 0 && want > (size_t)len) want = (size_t)len;
+    if(want > sizeof(tmp)) want = sizeof(tmp);
+    size_t got = stream->readBytes(tmp, want);
+    b.append((const char*)tmp, got);
+    if(len > 0) len -= (long)want;
+  }
+  if(size && b.size() != size) return HTTPC_ERROR_SEND_PAYLOAD_FAILED;
   return dispatch(type, b);
 }
 int HTTPClient::dispatch(const char* type, const std::string& body){
@@ -181,6 +218,19 @@ String HTTPClient::getString(){
   std::string s; uint8_t tmp[512]; size_t n;
   while((n = body_.readBytes(tmp, sizeof(tmp))) > 0) s.append((const char*)tmp, n);
   return String(s);
+}
+
+int HTTPClient::writeToStream(Stream* stream){
+  if(!stream) return HTTPC_ERROR_NO_STREAM;
+  if(!active_) return HTTPC_ERROR_NOT_CONNECTED;
+  uint8_t tmp[1460]; size_t n; int total = 0;
+  while((n = body_.readBytes(tmp, sizeof(tmp))) > 0){
+    size_t w = stream->write(tmp, n);
+    total += (int)w;
+    if(w != n) return HTTPC_ERROR_STREAM_WRITE;
+  }
+  if(body_.cut()) return size_ < 0 ? HTTPC_ERROR_READ_TIMEOUT : HTTPC_ERROR_STREAM_WRITE;
+  return total;
 }
 
 void netstubReset(){

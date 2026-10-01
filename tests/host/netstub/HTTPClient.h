@@ -48,6 +48,8 @@ public:
     size_t k = limit() - pos_; if(k > n) k = n;
     memcpy(buf, body_.data() + pos_, k); pos_ += k; return k;
   }
+  size_t readBytes(char* buf, size_t n) override { return readBytes((uint8_t*)buf, n); }
+  bool cut() const { return cut_ < body_.size(); }
   int read(uint8_t* buf, size_t n) override { return (int)readBytes(buf, n); }
   size_t delivered() const { return pos_; }
 private:
@@ -81,6 +83,10 @@ public:
   WiFiClient* getStreamPtr(){ return active_ ? &body_ : nullptr; }
   WiFiClient& getStream(){ return body_; }
   String getString();
+  // Copia el cuerpo a `stream`. Como el real: bytes escritos, o
+  // HTTPC_ERROR_STREAM_WRITE si el destino no admite todo o el cuerpo llega
+  // mas corto que su Content-Length (o la conexion se corta a mitad).
+  int writeToStream(Stream* stream);
   bool connected(){ return active_ && body_.connected(); }
   static String errorToString(int e){ return String(std::string("error ") + std::to_string(e)); }
 private:

@@ -56,12 +56,13 @@ public:
   virtual int peek(){ return -1; }
   virtual void flush() {}
   void setTimeout(unsigned long ms){ timeout_ = ms; }
-  virtual size_t readBytes(uint8_t* buf, size_t n){
+  // Como en arduino-esp32: las DOS son virtuales y la de uint8_t llama a la de char.
+  virtual size_t readBytes(char* buf, size_t n){
     size_t k = 0;
-    while(k < n){ int c = read(); if(c < 0) break; buf[k++] = (uint8_t)c; }
+    while(k < n){ int c = read(); if(c < 0) break; buf[k++] = (char)c; }
     return k;
   }
-  size_t readBytes(char* buf, size_t n){ return readBytes((uint8_t*)buf, n); }
+  virtual size_t readBytes(uint8_t* buf, size_t n){ return readBytes((char*)buf, n); }
 protected:
   unsigned long timeout_ = 1000;
 };

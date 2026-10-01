@@ -9,3 +9,8 @@ BaseType_t xTaskCreatePinnedToCore(TaskFunction_t fn, const char* name, uint32_t
                                    UBaseType_t prio, TaskHandle_t* handle, BaseType_t core);
 void vTaskDelete(TaskHandle_t t);
 void vTaskDelay(TickType_t ticks);
+// Notificaciones de tarea: la prueba cuenta los avisos (gNetTaskNotifies) y
+// esperar solo avanza el reloj virtual.
+BaseType_t xTaskNotifyGive(TaskHandle_t t);
+uint32_t ulTaskNotifyTake(BaseType_t clearOnExit, TickType_t ticks);
+extern unsigned gNetTaskNotifies;

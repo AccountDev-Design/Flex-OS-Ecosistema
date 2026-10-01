@@ -121,6 +121,10 @@ enum { FCL_JOB_UPLOAD = 1, FCL_JOB_DOWNLOAD = 2 };
 #define FCL_JF_FREE_LOCAL   0x01u   // subir y liberar espacio: borrar lo local SOLO tras confirmar
 #define FCL_JF_TO_LIBRARY   0x02u   // descarga: a la biblioteca de medios (Galeria)
 #define FCL_JF_FROM_LIBRARY 0x04u   // subida desde la Galeria (mlId valido)
+// Banderas internas del gestor (tambien van al diario):
+#define FCL_JF_ABORT        0x20u   // subida cancelada: falta avisar al servidor para soltar la reserva
+#define FCL_JF_CLEARED      0x40u   // el usuario la quito de la lista (se borra al terminar lo pendiente)
+#define FCL_JF_DELIVERED    0x80u   // el aviso de "terminado" ya lo proceso la interfaz
 
 typedef struct {
   uint8_t  state;               // FCL_JOB_*
@@ -151,7 +155,10 @@ size_t fclJournalMaxBytes();
 // Lee lo serializado. Un registro con CRC o version incorrectos se ignora
 // (se devuelve el diario vacio pero valido) y `damaged` lo dice.
 bool   fclJournalDecode(FclJournal* j, const uint8_t* buf, size_t len, bool* damaged);
-// Un hueco libre (o el trabajo terminado mas antiguo). NULL si todos estan en curso.
+// Un hueco libre o el trabajo terminado mas antiguo que ya no le debe nada a
+// nadie: NUNCA uno en curso, uno terminado cuyo aviso no proceso la interfaz
+// (borraria el "libera espacio" de una subida) ni una cancelacion que aun
+// tiene que soltar su reserva en el servidor. NULL si no hay.
 FclJob* fclJournalAlloc(FclJournal* j);
 FclJob* fclJournalFind(FclJournal* j, uint32_t id);
 // El siguiente trabajo a ejecutar (cola en orden de alta).

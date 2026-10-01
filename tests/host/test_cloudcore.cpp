@@ -152,9 +152,15 @@ static void testJournal(){
   fclJournalInit(&j);
   for(int i = 0; i < FCL_JOBS_MAX; i++){ FclJob* x = fclJournalAlloc(&j); x->state = FCL_JOB_QUEUED; x->type = FCL_JOB_UPLOAD; }
   CHECK(fclJournalAlloc(&j) == nullptr, "lleno de trabajos en curso: no hay hueco");
-  j.jobs[3].state = FCL_JOB_DONE; j.jobs[5].state = FCL_JOB_FAILED;
+  j.jobs[1].state = FCL_JOB_DONE;                                  // aviso sin entregar
+  j.jobs[2].state = FCL_JOB_CANCELLED; j.jobs[2].flags = FCL_JF_ABORT;   // reserva sin soltar
+  CHECK(fclJournalAlloc(&j) == nullptr, "un terminado sin entregar o una cancelacion pendiente no se pisan");
+  j.jobs[3].state = FCL_JOB_DONE; j.jobs[3].flags = FCL_JF_DELIVERED; j.jobs[5].state = FCL_JOB_FAILED;
   FclJob* r = fclJournalAlloc(&j);
-  CHECK(r == &j.jobs[3], "se reutiliza el terminado mas antiguo");
+  CHECK(r == &j.jobs[3], "se reutiliza el terminado mas antiguo ya entregado");
+  r->state = FCL_JOB_QUEUED;
+  r = fclJournalAlloc(&j);
+  CHECK(r == &j.jobs[5], "despues, el fallido");
 }
 
 // Simula la tarea de red: trae bloques de un "archivo" en memoria.

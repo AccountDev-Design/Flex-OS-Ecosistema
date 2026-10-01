@@ -597,7 +597,8 @@ FclJob* fclJournalAlloc(FclJournal* j){
   for(int i = 0; i < FCL_JOBS_MAX; i++){
     FclJob* x = &j->jobs[i];
     if(x->state == FCL_JOB_FREE){ best = x; break; }
-    bool finished = x->state == FCL_JOB_DONE || x->state == FCL_JOB_FAILED || x->state == FCL_JOB_CANCELLED;
+    bool finished = (x->state == FCL_JOB_DONE && (x->flags & FCL_JF_DELIVERED)) || x->state == FCL_JOB_FAILED ||
+                    (x->state == FCL_JOB_CANCELLED && !(x->flags & FCL_JF_ABORT));
     if(finished && (!best || x->id < best->id)) best = x;
   }
   if(!best) return nullptr;
