@@ -3486,6 +3486,9 @@ extern FlexStoreState gStubStoreState;
 extern uint8_t        gStubStoreProgress;
 extern bool           gStubAccountLinked;
 extern FlexAccountSnapshot gStubAccountSnap;
+extern bool           gStubAccountAccept;
+extern int            gStubAccountRequests, gStubAccountCancels;
+extern char           gStubAccountLastLabel[64];
 
 static void stubCatalogAdd(const char* pkg, const char* name, const char* summary,
                            const char* cat, uint32_t code){
@@ -3782,6 +3785,96 @@ static void testFlexAccount(){
   memset(&gStubAccountSnap, 0, sizeof(gStubAccountSnap));
   cfgOobeDone = oobeAntes; gState = estadoAntes;
   if(!gFails) printf("  Flex Account: todas las comprobaciones pasan.\n");
+}
+
+
+// #############################################################
+//  FLEX ACCOUNT · "Iniciar sesion" CON Wi-Fi: el camino que la prueba de arriba
+//  no podia recorrer (su doble rechazaba toda peticion y el Wi-Fi siempre
+//  estaba caido). Aqui el doble acepta como el modulo real y el Wi-Fi esta
+//  conectado: pedir el enlace, cancelar, ver el codigo y SU PROBLEMA, el error
+//  y REINTENTAR sin reiniciar, y terminar el primer arranque.
+// #############################################################
+static void testFlexAccountLink(){
+  printf("Flex Account: Iniciar sesion con Wi-Fi, error, reintento y cancelar\n");
+  bool oobeAntes = cfgOobeDone; int estadoAntes = gState;
+  char nombreAntes[24]; snprintf(nombreAntes, sizeof(nombreAntes), "%s", cfgName);
+  memset(&gStubAccountSnap, 0, sizeof(gStubAccountSnap));
+  gStubAccountSnap.state = FLEX_ACCOUNT_UNLINKED; gStubAccountLinked = false;
+  gStubAccountAccept = true; gStubAccountRequests = gStubAccountCancels = 0;
+  gInoWifiStatus = WL_CONNECTED;
+  snprintf(cfgName, sizeof(cfgName), "Ana");
+  cfgOobeDone = false; gState = ST_OOBE_NAME;
+  // El toque se consume: sin limpiar T, el siguiente paso volveria a verlo.
+  auto toca = [](int x, int y){ storeTap(x, y); accountOobeTick(); T = Touch(); };
+  auto repinta = [](){ T = Touch(); gTestMs += 100; accountOobeTick(); };       // el sondeo de estado va cada 80 ms
+
+  accountOobeEnter();
+  chk(gState == ST_OOBE_ACCOUNT && accountLastState == FLEX_ACCOUNT_UNLINKED, "primer arranque: pantalla de Flex Account sin cuenta");
+
+  // 1. Con Wi-Fi el boton principal PIDE EL ENLACE (no abre el configurador de red).
+  toca(SCR_W / 2, 480);
+  chk(gStubAccountRequests == 1 && !strcmp(gStubAccountLastLabel, "Ana"), "'Iniciar sesion' pide el enlace con el nombre del aparato");
+  chk(gState == ST_OOBE_ACCOUNT, "y se queda en la pantalla de la cuenta");
+  chk(accountLastState == FLEX_ACCOUNT_REQUESTING, "que pasa a 'Creando enlace seguro'");
+  toca(SCR_W / 2, 480);
+  chk(gStubAccountRequests == 1, "con el enlace en curso un segundo toque en esa zona no pide otro");
+
+  // 2. Cancelar llega al modulo; cuando este termina, la pantalla vuelve a ofrecer el inicio de sesion.
+  toca(SCR_W / 2, 570);
+  chk(gStubAccountCancels == 1, "'Cancelar' llega al modulo");
+  gStubAccountSnap.state = FLEX_ACCOUNT_CANCELLED; repinta();
+  chk(accountLastState == FLEX_ACCOUNT_CANCELLED, "y la pantalla se repinta");
+  chk(!strcmp(accountPrimaryLabel(FLEX_ACCOUNT_CANCELLED, true), "Iniciar sesion"), "tras cancelar el boton sigue diciendo 'Iniciar sesion'");
+  toca(SCR_W / 2, 480);
+  chk(gStubAccountRequests == 2, "se puede volver a pedir el enlace");
+
+  // 3. El codigo, y la linea de debajo dice POR QUE la consulta no avanza (antes quedaba muda).
+  gStubAccountSnap.state = FLEX_ACCOUNT_CODE_READY; snprintf(gStubAccountSnap.code, sizeof(gStubAccountSnap.code), "FLX7Q2");
+  repinta();
+  chk(accountLastState == FLEX_ACCOUNT_CODE_READY, "con el codigo listo se pinta el codigo");
+  chk(!strcmp(accountCodeNote(gStubAccountSnap), "El codigo vence en 10 minutos"), "sin problema: 'El codigo vence en 10 minutos'");
+  snprintf(gStubAccountSnap.error, sizeof(gStubAccountSnap.error), "Poca memoria interna (24 KB). Reintentando");
+  repinta();
+  chk(!strcmp(accountLastError, gStubAccountSnap.error), "al cambiar el motivo la pantalla se repinta");
+  chk(!strcmp(accountCodeNote(gStubAccountSnap), "Poca memoria interna (24 KB). Reintentando"), "y la linea de debajo del codigo lo dice");
+  chk(textW(gStubAccountSnap.error, 1) < SCR_W - 56, "cabe en la tarjeta");
+
+  // 4. ERROR: el motivo y el boton principal DICE 'Reintentar'; reintentar NO exige reiniciar.
+  gStubAccountSnap.state = FLEX_ACCOUNT_ERROR;
+  snprintf(gStubAccountSnap.error, sizeof(gStubAccountSnap.error), "Poca memoria interna (24 KB libres). Cierra una app y reintenta");
+  repinta();
+  chk(accountLastState == FLEX_ACCOUNT_ERROR, "error de enlace: la pantalla lo pinta");
+  chk(!strcmp(accountPrimaryLabel(FLEX_ACCOUNT_ERROR, true), "Reintentar") && !strcmp(accountPrimaryLabel(FLEX_ACCOUNT_EXPIRED, true), "Reintentar"),
+      "tras un error o un codigo caducado el boton dice 'Reintentar'");
+  chk(!strcmp(accountPrimaryLabel(FLEX_ACCOUNT_ERROR, false), "Conectar Wi-Fi"), "y sin Wi-Fi sigue llevando al configurador");
+  chk(textW(gStubAccountSnap.error, 1) < SCR_W - 56, "el mensaje de error cabe en la tarjeta");
+  gStubAccountRequests = 0;
+  toca(SCR_W / 2, 480);
+  chk(gStubAccountRequests == 1, "'Reintentar' vuelve a pedir el enlace");
+  gStubAccountSnap.state = FLEX_ACCOUNT_ERROR; repinta();
+  toca(SCR_W / 2, 550);
+  chk(gStubAccountRequests == 2, "y 'Crear una cuenta' tambien");
+
+  // 5. El modulo rechaza la peticion (ocupado o sin tarea): la pantalla no se rompe ni cambia de estado.
+  gStubAccountAccept = false; gStubAccountSnap.state = FLEX_ACCOUNT_ERROR; repinta();
+  gStubAccountRequests = 0;
+  toca(SCR_W / 2, 480);
+  chk(gStubAccountRequests == 1 && gState == ST_OOBE_ACCOUNT && accountLastState == FLEX_ACCOUNT_ERROR, "una peticion rechazada deja la pantalla como estaba");
+
+  // 6. Vinculada: 'Continuar' termina el primer arranque.
+  gStubAccountSnap.state = FLEX_ACCOUNT_LINKED; gStubAccountLinked = true; gStubAccountSnap.link = FLEX_LINK_LINKED;
+  snprintf(gStubAccountSnap.flexAddress, sizeof(gStubAccountSnap.flexAddress), "ana@flex"); gStubAccountSnap.error[0] = 0;
+  repinta();
+  chk(accountLastState == FLEX_ACCOUNT_LINKED, "vinculada: la pantalla lo pinta");
+  toca(SCR_W / 2, 570);
+  chk(cfgOobeDone && gState == ST_LOCK, "'Continuar' cierra la primera configuracion y va al bloqueo");
+
+  gStubAccountAccept = false; gStubAccountLinked = false; memset(&gStubAccountSnap, 0, sizeof(gStubAccountSnap));
+  gInoWifiStatus = WL_DISCONNECTED;
+  snprintf(cfgName, sizeof(cfgName), "%s", nombreAntes);
+  cfgOobeDone = oobeAntes; gState = estadoAntes;
+  if(!gFails) printf("  Flex Account (enlace): todas las comprobaciones pasan.\n");
 }
 
 // #############################################################
@@ -10661,6 +10754,7 @@ int main(){
   testPersonalizarInicio();
   testFlexStore();
   testFlexAccount();
+  testFlexAccountLink();
   testRecortePorBandas();
   testIconosEnSuCaja();
   testTransicionesApps();

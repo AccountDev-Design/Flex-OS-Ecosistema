@@ -43,6 +43,9 @@ public:
   void setNoDelay(bool){}
 };
 
+// Lo programa la prueba; por defecto desconectado (como siempre fue este doble).
+inline wl_status_t gInoWifiStatus = WL_DISCONNECTED;
+
 class __FlexWiFi {
 public:
   bool setPins(int8_t, int8_t, int8_t, int8_t, int8_t, int8_t, int8_t){ return true; }
@@ -50,7 +53,7 @@ public:
   wifi_mode_t getMode(){ return WIFI_STA; }
   int begin(const char*, const char* = nullptr){ return 0; }
   bool disconnect(bool a=false, bool b=false){ (void)a;(void)b; return true; }
-  wl_status_t status(){ return WL_DISCONNECTED; }
+  wl_status_t status(){ return gInoWifiStatus; }
   IPAddress localIP(){ return IPAddress(); }
   IPAddress subnetMask(){ return IPAddress(); }
   String SSID(){ return String(""); }

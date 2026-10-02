@@ -34,6 +34,31 @@ contiene codigo del firmware.
   **espera** a que la cuenta lo compruebe (como minimo 30 s, como mucho 5 min)
   en vez de insistir con la misma credencial.
 
+### Primer arranque: Iniciar sesion y que hacer si falla
+
+La pantalla de Flex Account del primer arranque (y la de Ajustes) vincula el aparato
+con un codigo: el P4 genera una credencial aleatoria, publica **solo su SHA-256** y
+muestra un codigo que se escribe en la web de Flex Account. Estados que se ven:
+
+| Pantalla | Que pasa | Que hacer |
+|---|---|---|
+| `Creando enlace seguro` | pide el codigo al servicio | esperar; `Cancelar` lo detiene |
+| el codigo y `El codigo vence en 10 minutos` | espera la aprobacion en el celular | escribirlo en la web |
+| el codigo y una linea ambar (`Sin Wi-Fi...`, `Poca memoria interna (N KB). Reintentando`, `Sin conexion (motivo). Reintentando`) | **la consulta de aprobacion no pudo hacerse**; antes se quedaba muda hasta caducar el codigo | nada: se reintenta sola cada 3 s; si es memoria, cerrar una app |
+| `No se pudo vincular` + motivo + `Reintentar` | fallo al pedir el codigo | `Reintentar` (no hace falta reiniciar) |
+| `Poca memoria interna (N KB libres). Cierra una app y reintenta` | no hay SRAM interna para abrir TLS (suelo en `FlexOS_CloudTLS.h`) | cerrar una app y `Reintentar` |
+| `Sin memoria interna para Flex Account...` | no pudo crearse la tarea del modulo (pila de 12 KB seguidos) | cerrar una app y `Reintentar`: se recrea sin reiniciar |
+| `El codigo expiro` + `Reintentar` | pasaron 10 minutos | `Reintentar` |
+
+* Con la cuenta ya vinculada, un fallo al volver a vincular **conserva** la cuenta
+  guardada y dice por que.
+* El emparejado usa `setInsecure()` a proposito (solo viaja una huella y la respuesta
+  se acepta unicamente con firma ES256 valida del servicio, clave anclada en el
+  firmware); la **credencial** solo sale por TLS verificado (validacion y Flex Cloud).
+* **El servicio que atiende `POST/GET /api/devices/code` y `/activate` no esta en
+  ningun repositorio** (vive en el sitio publicado de Flex Developer Studio). Este
+  repositorio solo prueba que el P4 cumple su contrato (`tests/host/test_account.cpp`).
+
 ## 3. Transferencias
 
 * **Diario** en `/System/Cloud/jobs.bin` (escritura atomica, CRC por registro).

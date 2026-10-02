@@ -76,7 +76,8 @@ void vTaskDelete(TaskHandle_t) {}
 unsigned gNetTaskNotifies = 0;
 BaseType_t xTaskNotifyGive(TaskHandle_t){ gNetTaskNotifies++; return pdPASS; }
 uint32_t ulTaskNotifyTake(BaseType_t, TickType_t t){ gNetNowMs += t ? t : 1; return 0; }
-void vTaskDelay(TickType_t t){ gNetNowMs += t ? t : 1; }
+std::function<void()> gNetOnDelay;
+void vTaskDelay(TickType_t t){ gNetNowMs += t ? t : 1; if(gNetOnDelay) gNetOnDelay(); }
 // Mutex que DETECTA anidamiento (en la placa es no recursivo: un doble
 // lock() seria un bloqueo eterno).
 struct NetMutex { bool held = false; };
@@ -249,5 +250,5 @@ int HTTPClient::writeToStream(Stream* stream){
 void netstubReset(){
   gNetHandler = nullptr; gNetLog.clear(); gNetWifi = false; gNetNowMs = 1000;
   gNetInternalFree = 200u << 10; gNetInternalBlock = 100u << 10;
-  gNetTasks.clear(); gNetTaskFail = 0;
+  gNetTasks.clear(); gNetTaskFail = 0; gNetOnDelay = nullptr;
 }

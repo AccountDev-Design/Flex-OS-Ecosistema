@@ -414,8 +414,21 @@ const char* flexRuntimeError(){ return "paquete no disponible"; }
 
 // -- Flex Account --
 void flexAccountBegin(){}
-bool flexAccountRequestCode(const char*){ return false; }
-void flexAccountCancel(){}
+// Programable: por defecto rechaza (como siempre); con gStubAccountAccept pasa a REQUESTING
+// como el modulo real y anota la etiqueta con la que se pidio el enlace.
+bool gStubAccountAccept = false;
+int  gStubAccountRequests = 0, gStubAccountCancels = 0;
+char gStubAccountLastLabel[64] = "";
+bool flexAccountRequestCode(const char* label){
+  gStubAccountRequests++;
+  snprintf(gStubAccountLastLabel, sizeof(gStubAccountLastLabel), "%s", label ? label : "");
+  if(!gStubAccountAccept) return false;
+  gStubAccountSnap.state = FLEX_ACCOUNT_REQUESTING; gStubAccountSnap.progress = 1;
+  snprintf(gStubAccountSnap.stage, sizeof(gStubAccountSnap.stage), "Preparando enlace");
+  gStubAccountSnap.error[0] = 0;
+  return true;
+}
+void flexAccountCancel(){ gStubAccountCancels++; }
 bool flexAccountLinked(){ return gStubAccountLinked; }
 FlexAccountState flexAccountState(){ return gStubAccountSnap.state; }
 void flexAccountSnapshot(FlexAccountSnapshot* out){
