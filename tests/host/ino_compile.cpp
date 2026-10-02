@@ -4927,15 +4927,16 @@ static void testBlurNoPegado(){
     chk(uiGlassBandActive(), "y queda activa mientras su dueno manda");
 
     // Su dueno es ST_CTX: mientras ese estado mande, la banda vale.
+    // uiGlassBandGuard() es el guardian de loop(): ESTE codigo, no una copia.
     gState = ST_CTX;
-    if(gState != ST_CTX || cronoCardVisible()) uiGlassBandEnd();   // el guardian de loop()
+    uiGlassBandGuard();
     chk(uiGlassBandActive(), "con su dueno en pantalla la banda sigue valiendo");
 
     // La pantalla cambia de manos por una via que NO es el cierre del menu:
     // el bloqueo por inactividad. Esto es exactamente el caso que dejaba el
     // blur pegado.
     gState = ST_LOCK;
-    if(gState != ST_CTX || cronoCardVisible()) uiGlassBandEnd();   // el guardian de loop()
+    uiGlassBandGuard();
     chk(!uiGlassBandActive(), "al cambiar de pantalla la banda deja de valer");
 
     // Y con la banda cerrada, una superficie del sistema vuelve a componerse
@@ -4948,6 +4949,47 @@ static void testBlurNoPegado(){
     uint16_t ahora = bbuf[(size_t)300 * SCR_W + 240];
     chk(antes != ahora, "la tarjeta se dibuja sobre el fondo que de verdad hay debajo");
     setBuf(fb);
+  }
+
+  // ---- 1b. El MENU DE MEDIOS tambien es dueno de la banda mientras se despliega ----
+  // mmOpen arma la banda en ST_APP (Galeria, Multimedia, Archivos, la nube). El
+  // guardian de loop() solo conocia a ST_CTX y al cronometro, asi que la primera
+  // vuelta tras abrir el menu se la quitaba y el resto del despliegue (140 ms)
+  // se componia con vidrio APILADO. mmBandLive() lo declara dueno.
+  {
+    gState = ST_APP; gAppId = IC_CLIMA; gAppW = SCR_W; gAppH = SCR_H;
+    setBuf(fb);
+    fillRect(0, 0, SCR_W, SCR_H, rgb565(20, 60, 30));
+    const uint8_t acts[3] = { MA_CL_XFERS, MA_CL_REFRESH, MA_INFO };
+    gTestMs += 1000;
+    mmOpen(380, 80, acts, 3);
+    chk(mmOn && !mmAnimDone && uiGlassBandActive(), "abrir el menu de medios arma la banda");
+    chk(mmBandLive(), "y el menu se declara dueno de ella mientras se despliega");
+    uiGlassBandGuard();                                              // la primera vuelta de loop() tras abrirlo
+    chk(uiGlassBandActive(), "el guardian de loop() NO se la quita en la primera vuelta");
+    gTestMs += 70; uiGlassBandGuard(); mmAnimTick();
+    chk(mmOn && !mmAnimDone && uiGlassBandActive(), "ni a mitad del despliegue");
+    gTestMs += 100; uiGlassBandGuard(); mmAnimTick();                // t >= 1: acaba
+    chk(mmAnimDone && !uiGlassBandActive() && !mmBandLive(), "al terminar, el propio menu suelta la banda (ya nadie es su dueno)");
+
+    // Otra via de cambio de pantalla a mitad del despliegue (bloqueo, aviso de caida...):
+    // nadie vuelve a llamar a mmAnimTick y la banda NO puede quedarse colgada.
+    mmClose();
+    gTestMs += 1000;
+    mmOpen(380, 80, acts, 3);
+    gTestMs += MM_ANIM_MS + MM_BAND_GRACE_MS + 10;
+    uiGlassBandGuard();
+    chk(!uiGlassBandActive(), "si el menu se queda sin ticks la banda caduca y el guardian la cierra");
+    mmClose();
+
+    // Los otros duenos siguen mandando.
+    gState = ST_CTX; setBuf(bbuf);
+    uiGlassBandBegin(200, 400, uiSurfTint(UIS_ELEVATED)); setBuf(fb);
+    uiGlassBandGuard();
+    chk(uiGlassBandActive(), "(el menu contextual del escritorio sigue siendo dueno)");
+    gState = ST_APP;
+    uiGlassBandGuard();
+    chk(!uiGlassBandActive(), "(y fuera de el, sin menu de medios, la banda se cierra)");
   }
 
   // ---- 2. El back buffer cambia de dueno -> la app compone entera ----
@@ -10796,6 +10838,82 @@ static void testFlexCloudUi(){
   if(gFails == before) printf("  Flex Cloud en la interfaz: todas las comprobaciones pasan.\n");
 }
 
+// #############################################################
+//  EL MENU (...) DE LA NUBE SE DESPLIEGA SOBRE LA BANDA DE VIDRIO
+//  ------------------------------------------------------------
+//  Captura del usuario: Galeria -> Nube ("Flex Cloud no responde") con una
+//  barra azul "Transferencias" lavada encima de las pestanas. Era el menu (...)
+//  de la nube a medio desplegar: loop() soltaba la banda pre-desenfocada en la
+//  primera vuelta tras abrirlo (su guardian solo conocia a ST_CTX y al
+//  cronometro) y el resto del despliegue se componia con vidrio APILADO, cada
+//  cuadro desenfocando el menu del cuadro anterior.
+//  La prueba ejecuta el despliegue REAL (ckAppMenu -> mmOpen -> galTick ->
+//  mmAnimTick) dos veces sobre la misma escena: una SIN guardian (referencia) y
+//  otra con el guardian de loop() entre vuelta y vuelta. Con la banda viva las
+//  dos tienen que ser identicas pixel a pixel.
+// #############################################################
+static void testMenuNubeSinApilar(){
+  printf("Menu (...) de la nube: el despliegue no apila vidrio (barra azul de Transferencias)\n");
+  int before = gFails;
+  bool ok0 = gMlOk, fs0 = gTestFsReady, glass0 = uiGlass; int nav0 = gNavMode;
+  gNavMode = 0; uiGlass = true;
+  gTestMs = clMs;
+  gStubCloudCalls.clear(); gStubCloudEvents.clear(); gStubCloudItems.clear(); gStubCloudXfers.clear();
+  memset(&gStubCloudList, 0, sizeof(gStubCloudList));
+  geFsReset();
+  gTestFsReady = true;
+  // La escena de la captura: pestana Nube con "Flex Cloud no responde".
+  memset(&gStubCloudStatus, 0, sizeof(gStubCloudStatus));
+  gStubCloudStatus.net = FCN_UNAVAILABLE; gStubCloudStatus.gen = 1;
+  snprintf(gStubCloudStatus.netText, sizeof(gStubCloudStatus.netText), "Sin respuesta segura de Flex Cloud");
+  gStubCloudList.state = FCL_LIST_ERROR; gStubCloudList.gen++;
+  snprintf(gStubCloudList.error, sizeof(gStubCloudList.error), "Sin respuesta segura de Flex Cloud");
+  shotApp(IC_GALERIA); gAppState[IC_GALERIA] = ALIFE_RUNNING; mkBind(&GAL_APP); galViewReady = false;
+  galTab = GAL_TAB_CLOUD; galRender();
+  gCronoCard = CC_HIDDEN;
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh); int pad = uiPad();
+
+  static std::vector<uint16_t> frames[2];
+  int bandLost = 0, mx = 0, my = 0, mw = 0, mh = 0;
+  for(int guard = 0; guard < 2; guard++){
+    galRender();                                              // la misma escena de partida
+    touchReset(); gTestMs += 1000;
+    auto vuelta = [&](){
+      if(guard) uiGlassBandGuard();                           // lo primero que hace loop() en cada vuelta
+      if(mmOn && !mmAnimDone && !uiGlassBandActive()) bandLost++;
+      gTestMs += 20; galTick();
+    };
+    // Un toque sobre los tres puntos, como lo veria loop().
+    tDown(bx + bw - pad - 20, by + 12, gTestMs); vuelta(); tUp(gTestMs + 60, true); vuelta(); touchReset();
+    if(guard == 0) chk(mmOn && uiGlassBandActive(), "los tres puntos abren el menu de la nube y arman la banda");
+    mmGeom(mx, my, mw, mh);
+    for(int i = 0; i < 14; i++) vuelta();                     // los 140 ms del despliegue y unas vueltas mas
+    if(guard == 0) chk(mmOn && mmAnimDone && !uiGlassBandActive(), "el despliegue termina y el menu suelta la banda");
+    frames[guard].assign((size_t)mw * mh, 0);
+    for(int yy = 0; yy < mh; yy++) memcpy(&frames[guard][(size_t)yy * mw], &fb[(size_t)(my + yy) * SCR_W + mx], (size_t)mw * 2);
+    if(getenv("INO_SHOTS")) shotSave(guard ? "menu_nube_con_guardian" : "menu_nube_referencia");
+    mmClose();
+  }
+  chk(bandLost == 0, "con el guardian de loop(), la banda sigue viva durante TODO el despliegue");
+  int diff = 0;
+  for(size_t i = 0; i < frames[0].size(); i++) if(frames[0][i] != frames[1][i]) diff++;
+  chk(diff == 0, "el menu con el guardian de loop() es identico, pixel a pixel, al de referencia (sin vidrio apilado)");
+  if(diff) printf("   (%d de %zu pixeles distintos en el menu)\n", diff, frames[0].size());
+  // Que la comparacion tenga sentido: el menu esta dibujado (no es el fondo).
+  int tinted = 0;
+  { int bgLines = 0; for(int xx = 0; xx < mw; xx += 7) if(frames[0][(size_t)(mh / 2) * mw + xx] != frames[0][(size_t)(mh / 2) * mw + (xx ? xx - 7 : 0)]) bgLines++; tinted = bgLines; }
+  chk(tinted > 3, "(control) el menu esta dibujado: la fila central no es plana");
+
+  uiGlass = glass0; gNavMode = nav0;
+  galCloseApp(); gAppState[IC_GALERIA] = ALIFE_CLOSED;
+  memset(&gStubCloudStatus, 0, sizeof(gStubCloudStatus));
+  mkReset();
+  gMlOk = ok0; gTestFsReady = fs0; gTestMemFs = false; gTestFiles.clear();
+  memset(&gMs, 0, sizeof(gMs));
+  gState = ST_HOME; gAppId = 0; gLand = false; uiClipFull(); uiGlassBandEnd(); setBuf(fb);
+  if(gFails == before) printf("  Menu (...) de la nube: todas las comprobaciones pasan.\n");
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -10917,6 +11035,7 @@ int main(){
   testCapturasVisor();
   testGaleriaSinRestos();
   testFlexCloudUi();
+  testMenuNubeSinApilar();
   testTrabajoPeriodico();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;

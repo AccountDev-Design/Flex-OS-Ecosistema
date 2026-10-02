@@ -57,6 +57,23 @@ banda, el menú se pinta de una vez en lugar de animar vidrio sobre vidrio
 (`testPulsacionLargaVidrio`: el menú desplegado bajo el dedo es idéntico
 píxel a píxel al pintado de una vez, en Galería, Multimedia y Música).
 
+**El guardián de `loop()` conoce a TODOS los dueños de la banda.** `loop()` suelta
+la banda en cada vuelta si su dueño ya no manda (`uiGlassBandGuard`): así un
+bloqueo, una suspensión o un aviso de caída que se lleva la pantalla a mitad de
+un menú no dejan un desenfoque "pegado" detrás de la app. Pero solo conocía a
+dos dueños, el menú contextual del escritorio (`ST_CTX`) y la tarjeta del
+cronómetro; el **menú de medios** (`mmOpen`: Galería, Multimedia, Archivos y la
+nube), que arma la banda en `ST_APP`, no estaba en la lista. La primera vuelta
+tras abrirlo le quitaba la banda y el resto del despliegue (140 ms) se
+componía con vidrio apilado: halos blancos y las pestañas de debajo lavadas de
+azul (la «barra azul de Transferencias» de Galería › Nube). Ahora
+`mmBandLive()` lo declara dueño mientras se despliega, con caducidad
+(`MM_ANIM_MS` + `MM_BAND_GRACE_MS`) para que una banda no se quede colgada si
+nadie vuelve a llamar a `mmAnimTick`. `testMenuNubeSinApilar` ejecuta el
+despliegue real con el guardián de `loop()` entre vuelta y vuelta y exige el
+mismo menú, píxel a píxel, que sin guardián; `testPulsacionLargaVidrio` no lo
+veía porque llama a los ticks directamente, sin pasar por `loop()`.
+
 **La isla de notificaciones queda encima al cambiar de página.** Antes se
 pausaba durante el gesto y sus píxeles se quedaban en el framebuffer: con
 widgets en la cabecera la franja que se desliza (desde y=72) la pisaba cada
