@@ -33,7 +33,6 @@ static const size_t   IO_CAP       = 16u * 1024u;       // lectura/escritura de 
 static const int      PAGE         = 40;
 static const uint32_t HTTP_TIMEOUT = 15000;
 static const uint32_t ME_EVERY_MS  = 60000;             // cuota al dia mientras la nube esta a la vista
-static const uint32_t MIN_HEAP     = 48u * 1024u;       // TLS necesita su sitio: si no lo hay, se espera
 static const uint64_t LOCAL_RESERVE = 512u * 1024u;     // = FML_RESERVE_BYTES: nunca se llena LittleFS
 static const uint32_t VIEW_MAX     = 8u * 1024u * 1024u;// foto para el visor (el visor admite 6 MB)
 static const uint32_t THUMB_MAX    = 96u * 1024u;       // miniatura remota que se acepta
@@ -134,8 +133,15 @@ struct Stream_ {
   volatile bool busy;           // el fetcher esta escribiendo en un hueco
 } gSt;
 
+// LAS TAREAS SE CREAN CUANDO HACEN FALTA (ver ensureMainTask / ensureStreamTask).
+// Cada pila sale de la SRAM INTERNA (16 + 10 KB): tenerlas creadas siempre, con
+// o sin cuenta y con o sin nube a la vista, le quitaba al sistema 26 KB seguidos
+// que Flex Store necesita para su propia tarea (24 KB) y que mbedTLS necesita
+// para sus buffers. Todo aviso a la tarea pasa por aqui, asi que pedir algo a la
+// nube la crea si aun no existe (y si no hay memoria lo dice y se reintenta).
+static bool ensureMainTask();
 static void stNotify(){ if(gStTask) xTaskNotifyGive(gStTask); }
-static void notifyTask(){ if(gTask) xTaskNotifyGive(gTask); }
+static void notifyTask(){ if(!gTask) ensureMainTask(); if(gTask) xTaskNotifyGive(gTask); }
 
 // ======================================================================
 //  Eventos y estado publico
@@ -260,6 +266,26 @@ static Api* gApi = nullptr;                  // conexion reutilizable de la tare
 
 static bool netUsable(){ return flexAccountUsable() && WiFi.status() == WL_CONNECTED; }
 
+// Por que fallo la ultima conexion TLS (lo dice mbedTLS); vacio si no fue un fallo de transporte.
+static char gTlsWhy[48] = "";
+
+// Sitio en la SRAM INTERNA para abrir una conexion TLS (FlexOS_CloudTLS). La
+// guarda de antes miraba esp_get_free_heap_size(), que suma los 32 MB de PSRAM
+// y nunca saltaba. Sin sitio no se intenta: el llamante lo trata como "sin
+// memoria" (se reintenta con espera) en vez de dejar fallar a mbedTLS a medias.
+static bool tlsRoomOk(){
+  size_t f = 0, b = 0;
+  if(flexTlsRoom(&f, &b)) return true;
+  static uint32_t lastLogMs = 0;
+  if(!lastLogMs || millis() - lastLogMs > 10000u){
+    lastLogMs = millis() | 1u;
+    Serial.printf("[CLOUD] TLS aplazado: SRAM interna %u KB (mayor bloque %u KB), hacen falta %u y %u KB\n",
+                  (unsigned)(f / 1024u), (unsigned)(b / 1024u),
+                  (unsigned)(FLEX_TLS_MIN_INTERNAL / 1024u), (unsigned)(FLEX_TLS_MIN_BLOCK / 1024u));
+  }
+  return false;
+}
+
 static void classifyFail(int status, const char* code){
   // 401 con un codigo del servicio: la credencial no vale. Se avisa a Flex
   // Account para que lo compruebe (no se desvincula por una respuesta).
@@ -275,7 +301,10 @@ static void classifyFail(int status, const char* code){
   if(status < 0 || (status >= 500 && !permanentCode(code)) || (status == 401 && (!code || !*code))){
     if(gNetFails < 250) gNetFails++;
     gNetRetryAt = millis() + fclBackoffMs(gNetFails);
-    setNet(FCN_UNAVAILABLE, status < 0 ? "Sin respuesta segura de Flex Cloud" : fclErrorText("server"));
+    char txt[96];
+    if(status < 0) snprintf(txt, sizeof(txt), "Sin respuesta segura de Flex Cloud%s%s%s", gTlsWhy[0] ? " (" : "", gTlsWhy, gTlsWhy[0] ? ")" : "");
+    else snprintf(txt, sizeof(txt), "%s", fclErrorText("server"));
+    setNet(FCN_UNAVAILABLE, txt);
   }
 }
 
@@ -288,7 +317,7 @@ static int apiCall(const char* method, const char* path, const char* json, Strea
   if(outLen) *outLen = 0;
   if(!gApi || !gJson) return HTTPC_ERROR_TOO_LESS_RAM;
   if(!netUsable()) return HTTPC_ERROR_NOT_CONNECTED;
-  if(esp_get_free_heap_size() < MIN_HEAP){ if(code) snprintf(code, codeCap, "no_memory"); return HTTPC_ERROR_TOO_LESS_RAM; }
+  if(!tlsRoomOk()){ if(code) snprintf(code, codeCap, "no_memory"); return HTTPC_ERROR_TOO_LESS_RAM; }
   char bearer[64];
   if(!flexAccountCopyBearer(bearer, sizeof(bearer))){ if(code) snprintf(code, codeCap, "no_account"); return HTTPC_ERROR_NOT_CONNECTED; }
   char url[384];
@@ -326,6 +355,12 @@ static int apiCall(const char* method, const char* path, const char* json, Strea
       if(st >= 200 && st < 300){ st = HTTPC_ERROR_TOO_LESS_RAM; if(code) snprintf(code, codeCap, "bad_response"); }
     } else if(w < 0 && st >= 200 && st < 300) st = w;         // cuerpo cortado: no cuenta como exito
   } else gJson[0] = 0;
+  gTlsWhy[0] = 0;
+  if(st < 0){
+    // El codigo de mbedTLS de ESTA conexion, antes de soltarla.
+    char raw[64]; int e = gApi->sec.lastError(raw, sizeof(raw));
+    flexTlsReason(e, gTlsWhy, sizeof(gTlsWhy));
+  }
   h.end();
   if(st < 0) gApi->sec.stop();                               // conexion en estado desconocido: fuera
   if(outLen) *outLen = n;
@@ -362,7 +397,12 @@ static void refreshNet(){
   }
   if(net == FCN_NO_ACCOUNT || net == FCN_OFFLINE || net == FCN_AUTH){
     setNet(FCN_CONNECTING, "Conectando con Flex Cloud");
-    gMeDue = true; gNetRetryAt = 0;
+    // La cuota se pide con la nube a la vista (flexCloudSetActive), no cada vez
+    // que vuelve la red: al arrancar Flex Account ya esta validando la misma
+    // credencial contra el mismo servidor y dos handshakes a la vez agotaban la
+    // SRAM interna justo cuando entra el Wi-Fi.
+    if(gActive) gMeDue = true;
+    gNetRetryAt = 0;
   }
 }
 
@@ -915,7 +955,7 @@ static void dlPrepare(FclJob* j){
   rtDone(j, have);
   if(have == j->size){ gRun.stage = RS_DL_VERIFY; return; }
   if(!netUsable()){ stepFail(j, -1, "network"); return; }
-  if(esp_get_free_heap_size() < MIN_HEAP){ stepFail(j, -1, "no_memory"); return; }
+  if(!tlsRoomOk()){ stepFail(j, -1, "no_memory"); return; }
   char bearer[64];
   if(!flexAccountCopyBearer(bearer, sizeof(bearer))){ stepFail(j, -1, "network"); return; }
   gRun.f = have ? flexFsOpenAppend(tp) : flexFsOpenWrite(tp);
@@ -1128,6 +1168,7 @@ static void fetchView(const Cmd& c){
   }
   char bearer[64];
   if(!netUsable() || !flexAccountCopyBearer(bearer, sizeof(bearer))){ snprintf(e.code, sizeof(e.code), "network"); snprintf(e.text, sizeof(e.text), "%s", fclErrorText("network")); pushEvent(e); return; }
+  if(!tlsRoomOk()){ memset(bearer, 0, sizeof(bearer)); snprintf(e.code, sizeof(e.code), "no_memory"); snprintf(e.text, sizeof(e.text), "%s", fclErrorText("no_memory")); pushEvent(e); return; }
   WiFiClientSecure sec; HTTPClient h;
   sec.setCACert(flexCloudRootCA()); sec.setHandshakeTimeout(12);
   h.setTimeout(HTTP_TIMEOUT); h.useHTTP10(true);
@@ -1328,6 +1369,7 @@ static void stSetState(uint8_t state, const char* err){
 
 static bool stConnOpen(const char* fileId, uint32_t off, uint32_t size){
   stConnClose();
+  if(!tlsRoomOk()) return false;
   char bearer[64];
   if(!flexAccountCopyBearer(bearer, sizeof(bearer))) return false;
   gStNet.sec = new WiFiClientSecure();
@@ -1428,6 +1470,61 @@ static void streamTask(void*){
   }
 }
 
+// ======================================================================
+//  Las tareas: se crean al hacer falta, ancladas al core 1 y COMPROBANDO el resultado
+// ======================================================================
+// Core 1 como el resto de tareas de red del sistema: el 0 es del presentador
+// grafico (ver FlexOS_OTA.cpp) y xTaskCreate "a secas" las dejaba migrar a el.
+// El resultado SE COMPRUEBA: la pila sale de la SRAM interna y, con la memoria
+// justa, la creacion falla; antes ese fallo pasaba en silencio y la nube se
+// quedaba sin hilo para siempre. Ahora se dice y se reintenta en la siguiente
+// peticion (notifyTask / flexCloudStreamOpen).
+static bool gReady = false;                    // flexCloudBegin() termino de reservar su estado
+static void logTaskFail(const char* name, uint32_t stack){
+  Serial.printf("[CLOUD] no se pudo crear la tarea %s (pila %u KB): SRAM interna %u KB, mayor bloque %u KB\n", name,
+                (unsigned)(stack / 1024u),
+                (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024u),
+                (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024u));
+}
+static bool ensureMainTask(){
+  if(gTask) return true;
+  if(!gReady) return false;
+  BaseType_t rc = xTaskCreatePinnedToCore(cloudTask, "flex-cloud", 16384, nullptr, 1, &gTask, 1);
+  if(rc != pdPASS){
+    gTask = nullptr;
+    static uint32_t lastLogMs = 0;
+    if(!lastLogMs || millis() - lastLogMs > 10000u){ lastLogMs = millis() | 1u; logTaskFail("flex-cloud", 16384); }
+    // Lo que se pidio no lo va a atender nadie: la lista no se queda en "Cargando"
+    // para siempre, dice que falta memoria y ofrece "Reintentar"; y la tarjeta lo
+    // dice tambien (si no, "Conectando..." o, peor, "sin cuenta" hasta el reintento).
+    lock(); bool loading = gListInfo.state == FCL_LIST_LOADING; unlock();
+    if(loading) listError("no_memory");
+    setNet(FCN_UNAVAILABLE, fclErrorText("no_memory"));
+    return false;
+  }
+  return true;
+}
+static bool ensureStreamTask(){
+  if(gStTask) return true;
+  if(!gReady) return false;
+  BaseType_t rc = xTaskCreatePinnedToCore(streamTask, "flex-cloud-st", 10240, nullptr, 1, &gStTask, 1);
+  if(rc != pdPASS){ gStTask = nullptr; logTaskFail("flex-cloud-st", 10240); return false; }
+  return true;
+}
+
+// Trabajo que no puede esperar a que alguien abra la nube: transferencias a
+// medias del arranque anterior, o una cancelacion que aun debe soltar su
+// reserva en el servidor.
+static bool journalHasWork(){
+  if(!gJ) return false;
+  for(int i = 0; i < FCL_JOBS_MAX; i++){
+    const FclJob& x = gJ->jobs[i];
+    if(x.state == FCL_JOB_QUEUED || x.state == FCL_JOB_ACTIVE) return true;
+    if(x.state == FCL_JOB_CANCELLED && (x.flags & FCL_JF_ABORT)) return true;
+  }
+  return false;
+}
+
 static bool allocState(){
   if(!gList) gList = (FclItem*)psAlloc(sizeof(FclItem) * FLEX_CLOUD_LIST_MAX);
   if(!gJson) gJson = (char*)psAlloc(JSON_CAP);
@@ -1470,15 +1567,22 @@ void flexCloudBegin(){
   memset(&gStatus, 0, sizeof(gStatus));
   memset(&gListInfo, 0, sizeof(gListInfo));
   memset(gRt, 0, sizeof(gRt));
-  gStatus.net = FCN_NO_ACCOUNT;
-  snprintf(gStatus.netText, sizeof(gStatus.netText), "%s", fclErrorText("no_account"));
+  // Hasta que la tarea da su primera vuelta (refreshNet) NO se sabe si hay cuenta,
+  // si esta rechazada o si falta el Wi-Fi: la tarea ya no nace al arrancar sino con
+  // la primera peticion, asi que la primera pintada de la tarjeta llega ANTES de
+  // ella. Con "sin cuenta" por defecto, una cuenta vinculada ensenaba un instante
+  // "Vincular cuenta" (y, si la tarea no podia nacer, para siempre).
+  gStatus.net = FCN_CONNECTING;
+  snprintf(gStatus.netText, sizeof(gStatus.netText), "%s", "Conectando con Flex Cloud");
   gCmdHead = gCmdN = 0; gEvHead = gEvN = 0;
   loadJournal();
   reemitPending();
-  gMeDue = true;
+  gMeDue = false;                                         // la cuota se pide cuando la nube se ve (flexCloudSetActive)
   if(flexFsReady()) flexFsDelete(VIEW_DIR);               // la copia del visor no sobrevive a un reinicio
-  if(!gTask) xTaskCreate(cloudTask, "flex-cloud", 16384, nullptr, 1, &gTask);
-  if(!gStTask) xTaskCreate(streamTask, "flex-cloud-st", 10240, nullptr, 1, &gStTask);
+  gReady = true;
+  // Sin trabajo pendiente NO se crea ninguna tarea: nace con la primera peticion
+  // (notifyTask) y la de streaming con el primer video (flexCloudStreamOpen).
+  if(journalHasWork()) ensureMainTask();
   int pend = fclJournalCount(gJ, FCL_JOB_QUEUED);
   if(pend) Serial.printf("[CLOUD] %d transferencia(s) pendientes del arranque anterior\n", pend);
 }
@@ -1486,7 +1590,17 @@ void flexCloudBegin(){
 void flexCloudSetActive(bool active){
   bool was = gActive;
   gActive = active;
-  if(active && !was){ gMeDue = true; notifyTask(); }
+  if(active && !was){ gMeDue = true; notifyTask(); return; }
+  // La interfaz llama a esto en cada vuelta. Si la tarea no pudo nacer (sin
+  // memoria para su pila) y hay algo que atender -- la nube a la vista o un
+  // trabajo pendiente --, se reintenta sola cada 2 s hasta que haya sitio.
+  if(!gTask && gReady){
+    static uint32_t lastTryMs = 0;
+    if(!lastTryMs || millis() - lastTryMs >= 2000u){
+      lock(); bool work = journalHasWork(); unlock();
+      if(active || work){ lastTryMs = millis() | 1u; notifyTask(); }
+    }
+  }
 }
 
 void flexCloudStatus(FlexCloudStatus* out){
@@ -1759,6 +1873,7 @@ bool flexCloudStreamOpen(const FclItem* it){
     gSt.arena = (uint8_t*)heap_caps_malloc((size_t)FLEX_CLOUD_STREAM_BLOCK * FLEX_CLOUD_STREAM_BLOCKS, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   }
   if(!gSt.arena){ stUnlock(); return false; }
+  if(!ensureStreamTask()){ stUnlock(); return false; }     // sin hilo no hay streaming: el visor lo dice
   gSt.open = true;
   gSt.gen++;
   gSt.size = (uint32_t)it->size;
@@ -1838,6 +1953,7 @@ void flexCloudTestPowerCycle(){
   for(int i = 0; i < FLEX_CLOUD_THUMBS; i++){ psFree(gThumbs[i].px); memset(&gThumbs[i], 0, sizeof(gThumbs[i])); }
   if(gApi){ gApi->http.end(); gApi->sec.stop(); }
   gActive = false; gNetFails = 0; gNetRetryAt = 0; gNextMeMs = 0; gAuthWait = false;
+  gTask = nullptr; gStTask = nullptr; gReady = false;     // las tareas se pierden con la RAM
   flexCloudBegin();
 }
 #endif

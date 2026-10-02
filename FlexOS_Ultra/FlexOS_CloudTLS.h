@@ -23,4 +23,38 @@
 // #############################################################
 const char* flexCloudRootCA();
 
+// #############################################################
+//  SITIO PARA ABRIR UNA CONEXION TLS, Y POR QUE FALLO
+//  ------------------------------------------------------------
+//  mbedTLS reserva sus buffers de registro y analiza las raices de arriba en
+//  la SRAM INTERNA. esp_get_free_heap_size() no sirve para decidir si caben:
+//  suma los 32 MB de PSRAM del P4, asi que siempre dice "de sobra" aunque la
+//  interna este en las ultimas (la guarda que tenia Flex Cloud nunca saltaba).
+//  Aqui se mira lo que de verdad hace falta: la SRAM INTERNA libre y su mayor
+//  bloque. Sin sitio no se abre la conexion: se dice y se reintenta, en vez de
+//  dejar que mbedTLS falle a medias (un "-1" mudo) en el peor momento.
+//
+//  Los suelos son los del propio sistema (FlexOS_Ultra_Core: por debajo de
+//  40 KB de interna entra el modo de proteccion) y se pueden cambiar con
+//  -DFLEX_TLS_MIN_INTERNAL / -DFLEX_TLS_MIN_BLOCK.
+// #############################################################
+#ifndef FLEX_TLS_MIN_INTERNAL
+#define FLEX_TLS_MIN_INTERNAL (40u * 1024u)
+#endif
+#ifndef FLEX_TLS_MIN_BLOCK
+#define FLEX_TLS_MIN_BLOCK    (16u * 1024u)
+#endif
+
+#include <stddef.h>
+
+// true si hay SRAM interna para abrir ahora una conexion TLS. Devuelve lo que
+// midio (cualquiera de los dos punteros puede ser NULL).
+bool flexTlsRoom(size_t* internalFree, size_t* largestBlock);
+
+// Motivo corto y legible de un fallo de conexion TLS a partir de lo que
+// WiFiClientSecure::lastError() devuelve (codigo de mbedTLS, negativo, o -1 =
+// no hubo DNS, TCP o se agoto el tiempo; 0 o positivo = no fue un error de la
+// conexion). Siempre escribe algo en `out`.
+const char* flexTlsReason(int mbedtlsError, char* out, size_t cap);
+
 #endif

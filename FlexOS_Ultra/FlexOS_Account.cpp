@@ -10,6 +10,7 @@
 
 #include "FlexOS_CloudTLS.h"
 #include "FlexOS_OTA.h"
+#include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -578,8 +579,20 @@ static FlexSessionVerdict validateSession(const char* bearer, char address[48], 
                                           char* detail, size_t detailCap){
   address[0] = 0; displayName[0] = 0; detail[0] = 0;
   if(WiFi.status() != WL_CONNECTED){ snprintf(detail, detailCap, "Sin Wi-Fi"); return FLEX_SESSION_UNAVAILABLE; }
+  // SRAM INTERNA, no la memoria total (que suma la PSRAM): sin sitio para el
+  // handshake no se intenta. Sale como "servicio no disponible" con el motivo y
+  // se reintenta con la espera de siempre, en vez de un "-1" mudo o algo peor.
+  size_t inFree = 0, inBlock = 0;
+  if(!flexTlsRoom(&inFree, &inBlock)){
+    snprintf(detail, detailCap, "Poca memoria interna (%u KB libres): se reintentara", (unsigned)(inFree / 1024u));
+    Serial.printf("[ACCOUNT] validacion aplazada: SRAM interna %u KB (mayor bloque %u KB), hacen falta %u y %u KB\n",
+                  (unsigned)(inFree / 1024u), (unsigned)(inBlock / 1024u),
+                  (unsigned)(FLEX_TLS_MIN_INTERNAL / 1024u), (unsigned)(FLEX_TLS_MIN_BLOCK / 1024u));
+    return FLEX_SESSION_UNAVAILABLE;
+  }
   WiFiClientSecure secure; secureClient(secure);
-  HTTPClient http; http.setTimeout(HTTP_TIMEOUT_MS); http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  HTTPClient http; http.setTimeout(HTTP_TIMEOUT_MS); http.setConnectTimeout(HTTP_TIMEOUT_MS);   // sin esto la conexion TCP se corta a los 5 s del valor por defecto
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   http.useHTTP10(true);
   http.setUserAgent("FlexOS-Ultra/1.0 ESP32-P4");
   if(!http.begin(secure, FLEX_ACCOUNT_SESSION_URL)){
@@ -593,6 +606,9 @@ static FlexSessionVerdict validateSession(const char* bearer, char address[48], 
   http.addHeader("Connection", "close");
   memset(auth, 0, sizeof(auth));
   int status = http.GET();
+  // Por que no hubo conexion: el codigo de mbedTLS de esta misma conexion.
+  int tlsErr = 0;
+  if(status < 0){ char raw[64]; tlsErr = secure.lastError(raw, sizeof(raw)); }
   char code[40] = "";
   uint8_t* body = nullptr; size_t bodyLen = 0;
   if(status > 0) readHttpBody(http, &body, &bodyLen, false);
@@ -614,8 +630,12 @@ static FlexSessionVerdict validateSession(const char* bearer, char address[48], 
       snprintf(detail, detailCap, "Respuesta de Flex Account incompleta");
     } else copyJsonString(acc, "displayName", displayName, 64, false);
   } else if(v == FLEX_SESSION_UNAVAILABLE){
-    if(status < 0) snprintf(detail, detailCap, "Sin respuesta segura del servidor (%d)", status);
-    else snprintf(detail, detailCap, "Flex Account respondio HTTP %d; se reintentara", status);
+    if(status < 0){
+      char why[48]; flexTlsReason(tlsErr, why, sizeof(why));
+      snprintf(detail, detailCap, "Sin respuesta segura del servidor (%d: %s)", status, why);
+      Serial.printf("[ACCOUNT] sin conexion TLS verificada: HTTP %d, %s (mbedTLS %d), SRAM interna %u KB (bloque %u KB)\n",
+                    status, why, tlsErr, (unsigned)(inFree / 1024u), (unsigned)(inBlock / 1024u));
+    } else snprintf(detail, detailCap, "Flex Account respondio HTTP %d; se reintentara", status);
   }
   if(root) cJSON_Delete(root);
   free(body);
@@ -926,6 +946,24 @@ size_t flexNvsStrLen(size_t nvsReturned, const char* buf, size_t cap){
 // ---------------------------------------------------------------------------
 //  API publica
 // ---------------------------------------------------------------------------
+// La tarea de Flex Account. Va al NUCLEO 1 como el resto de tareas de red (el 0
+// es del presentador grafico) y su creacion SE COMPRUEBA: la pila (12 KB) sale
+// de la SRAM interna y, con la memoria justa, xTaskCreate falla. Antes ese fallo
+// pasaba en silencio y quedaba un modulo sin hilo: "Iniciar sesion" se quedaba
+// en "Creando enlace seguro" para siempre y la cuenta nunca se validaba.
+// Se llama al arrancar y otra vez al pedir un enlace, asi que un fallo del
+// arranque se recupera sin reiniciar el aparato.
+static bool ensureTask(){
+  if(gTask) return true;
+  BaseType_t rc = xTaskCreatePinnedToCore(accountTask, "flex-account", 12288, nullptr, 1, &gTask, 1);
+  if(rc == pdPASS) return true;
+  gTask = nullptr;
+  Serial.printf("[ACCOUNT] no se pudo crear la tarea: SRAM interna %u KB, mayor bloque %u KB (la pila pide 12 KB seguidos)\n",
+                (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024u),
+                (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024u));
+  return false;
+}
+
 void flexAccountBegin(){
   if(!gMutex) gMutex = xSemaphoreCreateMutex();
   lock();
@@ -933,11 +971,19 @@ void flexAccountBegin(){
   unlock();
   gWasOnline = false; gValidateWanted = false; gFailures = 0;
   gVerifiedThisBoot = false; gLastVerifiedMs = 0; gWaitFromMs = 0; gWaitMs = 0; gAttempted = false;
-  if(!gTask) xTaskCreate(accountTask, "flex-account", 12288, nullptr, 1, &gTask);
+  ensureTask();
 }
 
 bool flexAccountRequestCode(const char* deviceLabel){
   if(!gMutex) return false;
+  // Sin tarea no hay quien haga el enlace: se reintenta crearla ahora y, si
+  // tampoco hay memoria, se dice en pantalla (la cuenta guardada, si la hay, se
+  // conserva) en vez de dejar "Creando enlace seguro" para siempre.
+  if(!ensureTask()){
+    finishFailedFlow(FLEX_ACCOUNT_ERROR, "No se pudo iniciar",
+                     "Sin memoria interna para Flex Account. Cierra una app y reintenta");
+    return false;
+  }
   lock();
   bool busy = gStartRequested || gSnapshot.state == FLEX_ACCOUNT_REQUESTING || gSnapshot.state == FLEX_ACCOUNT_CODE_READY;
   if(!busy){
@@ -1003,6 +1049,7 @@ void flexAccountRequestValidation(){
   gWaitMs = 0;
   gWaitFromMs = millis();
   gValidateWanted = true;
+  if(gMutex) ensureTask();           // sin tarea nadie validaria: si no se pudo crear al arrancar, se reintenta aqui
 }
 
 void flexAccountReportRejected(){
@@ -1043,6 +1090,7 @@ void flexAccountTestPowerCycle(){
   gWasOnline = false; gValidateWanted = false; gWaitFromMs = 0; gWaitMs = 0; gFailures = 0;
   gLastVerifiedMs = 0; gVerifiedThisBoot = false; gRejectSeen = false; gAuthSt = AUTHST_OK;
   gInstallationId = 0; gAttempted = false; gLastAttemptMs = 0;
+  gTask = nullptr;                                  // las tareas se pierden con la RAM
   flexAccountBegin();
 }
 #endif

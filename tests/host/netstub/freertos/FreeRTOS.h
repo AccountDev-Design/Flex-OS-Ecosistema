@@ -9,3 +9,4 @@ typedef uint32_t TickType_t;
 #define pdPASS          pdTRUE
 #define portMAX_DELAY   ((TickType_t)0xFFFFFFFFu)
 #define pdMS_TO_TICKS(x) ((TickType_t)(x))
+#define errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY ((BaseType_t)-1)

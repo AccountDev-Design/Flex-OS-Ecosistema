@@ -52,14 +52,25 @@ void heap_caps_free(void* p){
   if(it != psMap().end()){ gNetPsNow -= it->second; psMap().erase(it); }
   free(p);
 }
-size_t heap_caps_get_free_size(uint32_t){ return 8u << 20; }
-size_t heap_caps_get_largest_free_block(uint32_t){ return 4u << 20; }
+// La SRAM INTERNA es la escasa en el P4 (la PSRAM son 32 MB): la prueba la
+// programa. Cualquier otra pregunta (PSRAM / por defecto) sigue siendo holgada.
+size_t gNetInternalFree = 200u << 10, gNetInternalBlock = 100u << 10;
+size_t heap_caps_get_free_size(uint32_t caps){ return (caps & MALLOC_CAP_INTERNAL) ? gNetInternalFree : (8u << 20); }
+size_t heap_caps_get_largest_free_block(uint32_t caps){ return (caps & MALLOC_CAP_INTERNAL) ? gNetInternalBlock : (4u << 20); }
 
-BaseType_t xTaskCreate(TaskFunction_t, const char*, uint32_t, void*, UBaseType_t, TaskHandle_t* h){
-  gNetTaskCreates++; if(h) *h = (TaskHandle_t)(uintptr_t)gNetTaskCreates; return pdPASS;
+std::vector<NetTaskRec> gNetTasks;
+unsigned gNetTaskFail = 0;
+static BaseType_t netTaskMake(const char* n, uint32_t s, TaskHandle_t* h, int core){
+  if(gNetTaskFail){ gNetTaskFail--; if(h) *h = nullptr; return errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY; }
+  gNetTaskCreates++; gNetTasks.push_back({ n ? n : "", core, s });
+  if(h) *h = (TaskHandle_t)(uintptr_t)gNetTaskCreates;
+  return pdPASS;
 }
-BaseType_t xTaskCreatePinnedToCore(TaskFunction_t f, const char* n, uint32_t s, void* a, UBaseType_t p, TaskHandle_t* h, BaseType_t){
-  return xTaskCreate(f, n, s, a, p, h);
+BaseType_t xTaskCreate(TaskFunction_t, const char* n, uint32_t s, void*, UBaseType_t, TaskHandle_t* h){
+  return netTaskMake(n, s, h, -1);
+}
+BaseType_t xTaskCreatePinnedToCore(TaskFunction_t, const char* n, uint32_t s, void*, UBaseType_t, TaskHandle_t* h, BaseType_t core){
+  return netTaskMake(n, s, h, (int)core);
 }
 void vTaskDelete(TaskHandle_t) {}
 unsigned gNetTaskNotifies = 0;
@@ -202,10 +213,12 @@ int HTTPClient::dispatch(const char* type, const std::string& body){
   for(auto& h : reqHeaders_) rq.headers[lower(h.first)] = h.second;
   rq.https = !url_.compare(0, 8, "https://");
   rq.at = gNetNowMs;
-  if(WiFiClientSecure* s = dynamic_cast<WiFiClientSecure*>(client_)){ rq.tlsInsecure = s->insecure; rq.tlsCa = s->caCert; }
+  WiFiClientSecure* sec = dynamic_cast<WiFiClientSecure*>(client_);
+  if(sec){ rq.tlsInsecure = sec->insecure; rq.tlsCa = sec->caCert; }
   gNetLog.push_back(rq);
   NetResponse rs;
   if(gNetHandler) rs = gNetHandler(rq); else rs.status = HTTPC_ERROR_CONNECTION_REFUSED;
+  if(sec) sec->lastErr = rs.status < 0 ? rs.tlsError : 0;
   if(rs.status < 0){ active_ = false; return rs.status; }
   respHeaders_.clear();
   for(auto& h : rs.headers) respHeaders_[lower(h.first)] = h.second;
@@ -235,4 +248,6 @@ int HTTPClient::writeToStream(Stream* stream){
 
 void netstubReset(){
   gNetHandler = nullptr; gNetLog.clear(); gNetWifi = false; gNetNowMs = 1000;
+  gNetInternalFree = 200u << 10; gNetInternalBlock = 100u << 10;
+  gNetTasks.clear(); gNetTaskFail = 0;
 }
