@@ -598,10 +598,33 @@ static void ckUnbind(const CkHost* h){
   if(ckRows){ mediaFree(ckRows); ckRows = NULL; }
   ckRowsN = 0;
 }
+// true si el menu abierto SALE de la zona de la nube: el menu de la app se ancla
+// arriba a la derecha y tapa las pestanas de la Galeria / el selector de Archivos,
+// que no son de la nube y no los repinta ckRender().
+static bool ckMenuSpills(){
+  if(!mmOn) return false;
+  int x, y, w, h; mmGeom(x, y, w, h);
+  int bx, by, bw, bh; ckBox(bx, by, bw, bh);
+  return y < by || y + h > by + bh;
+}
+
+// Cierra el menu y repinta lo que tapaba. Si SALIA de la zona de la nube (ckMenuSpills)
+// no basta con ckRender(): la parte de arriba del menu se quedaba pegada sobre las
+// pestanas y la tarjeta de estado, repintada debajo, la cortaba en seco (la "barra
+// azul de Transferencias" que no se iba). Entonces se repinta la app por su
+// anfitrion (como hacen los menus locales con mkRedraw); si cabe dentro, solo la
+// zona de la nube, como siempre: el area repintada no crece sin necesidad.
+static void ckMenuClose(){
+  bool spill = ckMenuSpills();
+  mmClose();
+  if(spill && ckHost && ckHost->redraw) ckHost->redraw();
+  else ckRender();
+}
+
 // ATRAS dentro de la nube: capas, transferencias, carpeta de arriba. true = se uso.
 static bool ckBack(){
   if(!ckHost) return false;
-  if(mmOn){ mmClose(); ckRender(); return true; }
+  if(mmOn){ ckMenuClose(); return true; }
   if(mmDlgOn){ mmDlgOn = false; ckRender(); return true; }
   if(fkNameOn){ fkNameOn = false; ckName = CKN_NONE; if(ckHost->redraw) ckHost->redraw(); return true; }
   if(fkAskOn){ fkAskOn = false; ckAsk = CKA_NONE; ckRender(); return true; }
@@ -658,8 +681,12 @@ static void ckTick(){
     if(T.tap){
       int a = mmHit(T.x, T.y);
       if(a == 0) return;
+      // Se cierra y se repinta lo que el menu tapaba ANTES de actuar: la accion
+      // (Transferencias, Actualizar...) pinta despues sobre una pantalla limpia.
+      bool spill = ckMenuSpills();
       mmClose();
-      if(a > 0) ckMenuAction(a); else ckRender();
+      if(spill && ckHost->redraw) ckHost->redraw();
+      if(a > 0) ckMenuAction(a); else if(!spill || !ckHost->redraw) ckRender();
     }
     return;
   }

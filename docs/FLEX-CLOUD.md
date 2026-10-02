@@ -184,6 +184,12 @@ Lo protegido no se ofrece para subir. Encolar no borra nada. Un aviso repetido
   pre-desenfocada de siempre. El progreso se repinta como mucho 4 veces por
   segundo y nunca con el dedo apoyado.
 * La cuota se refresca (cada 60 s) **solo** con la nube a la vista.
+* **El menu (...) se cierra sin restos.** Se ancla arriba a la derecha y SOBRESALE de
+  la zona de la nube (tapa las pestanas de la Galeria o el selector de Archivos).
+  Al cerrarlo, si sobresalia (`ckMenuSpills`), se repinta la app por su anfitrion
+  (como los menus locales); si cabe dentro, solo la zona de la nube. Antes solo
+  se repintaba esta, y la parte de arriba del menu se quedaba pegada sobre las
+  pestanas ("la barra azul de Transferencias que no se va").
 
 ## 7. Memoria del P4
 

@@ -10865,6 +10865,7 @@ static void testMenuNubeSinApilar(){
   // La escena de la captura: pestana Nube con "Flex Cloud no responde".
   memset(&gStubCloudStatus, 0, sizeof(gStubCloudStatus));
   gStubCloudStatus.net = FCN_UNAVAILABLE; gStubCloudStatus.gen = 1;
+  gStubAccountLinked = true; gStubAccountSnap.link = FLEX_LINK_LINKED_OFFLINE;   // la cuenta SIRVE (el servicio no responde): menu de dos filas
   snprintf(gStubCloudStatus.netText, sizeof(gStubCloudStatus.netText), "Sin respuesta segura de Flex Cloud");
   gStubCloudList.state = FCL_LIST_ERROR; gStubCloudList.gen++;
   snprintf(gStubCloudList.error, sizeof(gStubCloudList.error), "Sin respuesta segura de Flex Cloud");
@@ -10907,11 +10908,134 @@ static void testMenuNubeSinApilar(){
   uiGlass = glass0; gNavMode = nav0;
   galCloseApp(); gAppState[IC_GALERIA] = ALIFE_CLOSED;
   memset(&gStubCloudStatus, 0, sizeof(gStubCloudStatus));
+  gStubAccountLinked = false; gStubAccountSnap.link = FLEX_LINK_UNLINKED;
   mkReset();
   gMlOk = ok0; gTestFsReady = fs0; gTestMemFs = false; gTestFiles.clear();
   memset(&gMs, 0, sizeof(gMs));
   gState = ST_HOME; gAppId = 0; gLand = false; uiClipFull(); uiGlassBandEnd(); setBuf(fb);
   if(gFails == before) printf("  Menu (...) de la nube: todas las comprobaciones pasan.\n");
+}
+
+// #############################################################
+//  EL MENU (...) DE LA NUBE, AL CERRARSE, NO DEJA RESTOS
+//  ------------------------------------------------------------
+//  Captura del usuario (segunda): la parte de arriba del menu "Transferencias"
+//  se quedaba pegada sobre las pestanas de la Galeria y la tarjeta de estado,
+//  repintada debajo, la cortaba en seco. El menu se ancla arriba a la derecha y
+//  SOBRESALE de la zona de la nube (tapa las pestanas); al cerrarlo solo se
+//  repintaba la zona de la nube, no la franja de la app que el menu tapaba.
+//  La prueba abre el menu real, lo cierra por cada via (toque fuera, ATRAS,
+//  elegir una accion) y exige que la pantalla quede IDENTICA a la de antes de
+//  abrirlo.
+// #############################################################
+static void testMenuNubeAlCerrar(){
+  printf("Menu (...) de la nube: al cerrarse no deja restos sobre las pestanas\n");
+  int before = gFails;
+  bool ok0 = gMlOk, fs0 = gTestFsReady, glass0 = uiGlass; int nav0 = gNavMode;
+  gNavMode = 0; uiGlass = true;
+  gTestMs = clMs;
+  gStubCloudCalls.clear(); gStubCloudEvents.clear(); gStubCloudItems.clear(); gStubCloudXfers.clear();
+  memset(&gStubCloudList, 0, sizeof(gStubCloudList));
+  geFsReset();
+  gTestFsReady = true;
+  memset(&gStubCloudStatus, 0, sizeof(gStubCloudStatus));
+  gStubCloudStatus.net = FCN_UNAVAILABLE; gStubCloudStatus.gen = 1;
+  gStubAccountLinked = true; gStubAccountSnap.link = FLEX_LINK_LINKED_OFFLINE;   // la cuenta SIRVE (el servicio no responde): menu de dos filas
+  snprintf(gStubCloudStatus.netText, sizeof(gStubCloudStatus.netText), "Sin respuesta segura de Flex Cloud");
+  gStubCloudList.state = FCL_LIST_ERROR; gStubCloudList.gen++;
+  snprintf(gStubCloudList.error, sizeof(gStubCloudList.error), "Sin respuesta segura de Flex Cloud");
+  shotApp(IC_GALERIA); gAppState[IC_GALERIA] = ALIFE_RUNNING; mkBind(&GAL_APP); galViewReady = false;
+  galTab = GAL_TAB_CLOUD; galRender();
+  gCronoCard = CC_HIDDEN;
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh); int pad = uiPad();
+
+  static std::vector<uint16_t> clean;                         // la pantalla ANTES de abrir el menu
+  auto grab = [&](std::vector<uint16_t>& v){ v.assign(fb, fb + (size_t)SCR_W * SCR_H); };
+  // La barra de navegacion del sistema (las 64 filas de abajo) no es de la app ni del menu.
+  auto differs = [&](const std::vector<uint16_t>& a){
+    int d = 0; size_t n = (size_t)SCR_W * (SCR_H - 64); for(size_t i = 0; i < n; i++) if(a[i] != fb[i]) d++; return d; };
+  auto vuelta = [&](int n = 1){ for(int i = 0; i < n; i++){ uiGlassBandGuard(); gTestMs += 20; galTick(); } };
+  auto abre = [&](){
+    galRender(); touchReset(); gTestMs += 1000;
+    grab(clean);
+    tDown(bx + bw - pad - 20, by + 12, gTestMs); vuelta(); tUp(gTestMs + 60, true); vuelta(); touchReset();
+    vuelta(14);                                               // termina el despliegue
+  };
+
+  // El menu de la app SOBRESALE de la zona de la nube (tapa las pestanas) y lo sabe.
+  abre();
+  chk(mmOn && mmAnimDone, "los tres puntos abren el menu");
+  { int mx, my, mw, mh, cx, cy, cw, ch; mmGeom(mx, my, mw, mh); ckBox(cx, cy, cw, ch);
+    chk(my < cy, "(el menu empieza por encima de la zona de la nube: tapa las pestanas)");
+    chk(ckMenuSpills(), "y ckMenuSpills() lo detecta"); }
+  chk(differs(clean) > 1000, "(control) con el menu abierto la pantalla es distinta de la limpia");
+
+  // a) Toque FUERA del menu.
+  clTap(galTick, 60, 700);
+  chk(!mmOn, "un toque fuera cierra el menu");
+  int d = differs(clean);
+  chk(d == 0, "...y la pantalla queda IDENTICA a la de antes de abrirlo (sin restos sobre las pestanas)");
+  if(d){
+    int y0 = SCR_H, y1 = -1; for(int yy = 0; yy < SCR_H - 64; yy++) for(int xx = 0; xx < SCR_W; xx++) if(clean[(size_t)yy * SCR_W + xx] != fb[(size_t)yy * SCR_W + xx]){ if(yy < y0) y0 = yy; if(yy > y1) y1 = yy; }
+    printf("   (%d pixeles distintos tras cerrar con un toque fuera, filas %d..%d)\n", d, y0, y1);
+  }
+  if(d && getenv("INO_SHOTS")) shotSave("menu_nube_resto_toque");
+
+  // b) ATRAS.
+  abre();
+  chk(galBackLayer() && !mmOn, "ATRAS cierra el menu");
+  d = differs(clean);
+  chk(d == 0, "...y tampoco deja restos");
+  if(d) printf("   (%d pixeles distintos tras ATRAS)\n", d);
+
+  // c) Elegir "Actualizar": el menu se cierra y la accion se ejecuta sin restos.
+  abre();
+  gStubCloudCalls.clear();
+  chk(clMenuPick(galTick, MA_CL_REFRESH) && clCalled("refresh"), "elegir Actualizar cierra el menu y refresca");
+  gStubCloudStatus.gen++; vuelta(3);
+  d = differs(clean);
+  chk(d == 0, "...y tampoco deja restos");
+  if(d) printf("   (%d pixeles distintos tras elegir una accion)\n", d);
+
+  // d) Elegir "Transferencias": la pantalla de transferencias no hereda el menu; al salir, todo limpio.
+  abre();
+  chk(clMenuPick(galTick, MA_CL_XFERS) && ckXfersOn, "elegir Transferencias abre su pantalla");
+  { int top = by, strip = 0;                                  // la franja de pestanas no conserva la parte alta del menu
+    for(int yy = top + 36; yy < top + 66; yy++) for(int xx = bx + bw / 2; xx < bx + bw - 8; xx++)
+      if(fb[(size_t)yy * SCR_W + xx] != clean[(size_t)yy * SCR_W + xx]) strip++;
+    chk(strip == 0, "la franja de las pestanas queda como antes (sin la parte de arriba del menu)");
+    if(strip) printf("   (%d pixeles distintos en la franja de pestanas)\n", strip); }
+  clTap(galTick, bx + 20, by + galHeadH() - 6 + 16);          // la flecha de volver de Transferencias
+  chk(!ckXfersOn, "volver de Transferencias");
+  d = differs(clean);
+  chk(d == 0, "...y la pantalla es la de antes de abrir el menu");
+  if(d) printf("   (%d pixeles distintos tras volver de Transferencias)\n", d);
+
+  // e) ARCHIVOS: el mismo menu, anclado bajo la cabecera, sobre el selector "Este dispositivo | Flex Cloud".
+  galCloseApp(); gAppState[IC_GALERIA] = ALIFE_CLOSED;
+  filesEnter();
+  clTap(filesTick, SCR_W * 3 / 4, FILES_SEG_Y + FILES_SEG_H / 2);
+  chk(filesCloud && ckHost == &filesCkHost, "Archivos: pestana Flex Cloud");
+  filesRender(); grab(clean);
+  ckAppMenu(SCR_W - MM_W / 2 - 16, UIHDR_ZONE);
+  for(int i = 0; i < 14; i++){ uiGlassBandGuard(); gTestMs += 20; filesTick(); }
+  chk(mmOn && mmAnimDone, "Archivos: el menu se despliega");
+  chk(differs(clean) > 1000, "(control) con el menu abierto la pantalla cambia");
+  clTap(filesTick, 60, 700);
+  d = differs(clean);
+  chk(!mmOn && d == 0, "Archivos: al cerrarlo la pantalla queda como antes de abrirlo");
+  if(d) printf("   (%d pixeles distintos en Archivos)\n", d);
+  filesExit();
+
+  uiGlass = glass0; gNavMode = nav0;
+  galCloseApp(); gAppState[IC_GALERIA] = ALIFE_CLOSED;
+  memset(&gStubCloudStatus, 0, sizeof(gStubCloudStatus));
+  gStubAccountLinked = false; gStubAccountSnap.link = FLEX_LINK_UNLINKED;
+  mkReset();
+  gMlOk = ok0; gTestFsReady = fs0; gTestMemFs = false; gTestFiles.clear();
+  memset(&gMs, 0, sizeof(gMs));
+  gState = ST_HOME; gAppId = 0; gLand = false; uiClipFull(); uiGlassBandEnd(); setBuf(fb);
+  if(gFails == before) printf("  Menu (...) de la nube al cerrarse: todas las comprobaciones pasan.\n");
 }
 
 int main(){
@@ -11036,6 +11160,7 @@ int main(){
   testGaleriaSinRestos();
   testFlexCloudUi();
   testMenuNubeSinApilar();
+  testMenuNubeAlCerrar();
   testTrabajoPeriodico();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
