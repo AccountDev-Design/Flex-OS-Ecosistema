@@ -57,7 +57,7 @@ BINS := $(BUILD)/test_jpeg $(BUILD)/test_browser $(BUILD)/test_app $(BUILD)/test
         $(BUILD)/test_medialib $(BUILD)/test_jpegenc $(BUILD)/test_httpshare $(BUILD)/test_qr \
         $(BUILD)/test_mediathumb $(BUILD)/test_mediaweb $(BUILD)/test_fs $(BUILD)/test_mediastore $(BUILD)/test_imgedit $(BUILD)/test_videdit \
         $(BUILD)/test_appvm $(BUILD)/test_appgrant $(BUILD)/test_apphost $(BUILD)/test_flexpkg \
-        $(BUILD)/test_fuzzmedia $(BUILD)/test_account $(BUILD)/test_cloudcore $(BUILD)/test_cloud
+        $(BUILD)/test_fuzzmedia $(BUILD)/test_account $(BUILD)/test_cloudcore $(BUILD)/test_cloud $(BUILD)/test_storagecore
 TOOLS := $(BUILD)/jpegcheck $(BUILD)/flexpkgcheck $(BUILD)/flexapprun $(BUILD)/mediacheck $(BUILD)/flexweb_host
 
 .PHONY: all run all-boards fixtures clean ino web
@@ -350,6 +350,25 @@ CLOUD_SRC := $(ULTRA)/FlexOS_Cloud.cpp $(ULTRA)/FlexOS_Account.cpp $(ULTRA)/Flex
 $(BUILD)/test_cloud: test_cloud.cpp pkgbuild.h $(CLOUD_SRC) $(ULTRA)/FlexOS_Cloud.h $(ULTRA)/FlexOS_CloudCore.h $(ULTRA)/FlexOS_Account.h \
                      $(NETSTUB) $(NETHDRS) fsstub/FS.h $(FSSTUB) | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) $(NETFLAGS) -Ifsstub -o $@ test_cloud.cpp $(CLOUD_SRC) $(NETSTUB) $(FSSTUB) $(CJSON) -lcrypto
+
+# --- FLEX STORAGE: nucleo portable del P4 (emparejamiento con el telefono) ---
+# ECDH P-256 + codigo de verificacion + aprobacion en pantalla + sesiones, con
+# los MISMOS vectores dorados que CoreTest.kt (modulo :storage de Android). Lee
+# lo que llega de la Wi-Fi: CON sanitizers. ECDH por OpenSSL aqui y por mbedTLS
+# en la placa; `make storagecore-mbedtls MBEDTLS_DIR=<prefijo>` pasa la MISMA
+# bateria con el backend de la placa (mbedTLS 2.28 o 3.x) si se tiene a mano.
+STCORE := $(ULTRA)/FlexOS_StorageCore.cpp
+$(BUILD)/test_storagecore: test_storagecore.cpp $(STCORE) $(ULTRA)/FlexOS_StorageCore.h $(ULTRA)/FlexOS_FlexAuth.cpp | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(INC) -Ivendor/cJSON -DFST_FORCE_OPENSSL -o $@ test_storagecore.cpp $(STCORE) \
+	       $(ULTRA)/FlexOS_FlexAuth.cpp $(CJSON) -lcrypto
+MBEDTLS_DIR ?=
+MBEDTLS_LIB  = $(firstword $(wildcard $(MBEDTLS_DIR)/lib/libmbedcrypto.a $(MBEDTLS_DIR)/lib/*/libmbedcrypto.a))
+.PHONY: storagecore-mbedtls
+storagecore-mbedtls: | $(BUILD)
+	@test -n "$(MBEDTLS_LIB)" || { echo "Falta MBEDTLS_DIR=<prefijo con include/mbedtls y lib/libmbedcrypto.a>"; exit 1; }
+	$(CXX) $(COMMON) $(SAN) $(INC) -Ivendor/cJSON -I$(MBEDTLS_DIR)/include -DFST_FORCE_MBEDTLS -o $(BUILD)/test_storagecore_mbedtls \
+	       test_storagecore.cpp $(STCORE) $(ULTRA)/FlexOS_FlexAuth.cpp $(CJSON) $(MBEDTLS_LIB)
+	@$(BUILD)/test_storagecore_mbedtls
 
 # Punta a punta contra el servidor REAL (Node, en Flex-Developer-Studio). No va
 # en `make`: necesita Node >= 22.13 y el otro repositorio. Ver cloud_e2e.sh.
@@ -665,6 +684,8 @@ run: ino parts $(BUILD)/test_ino $(BINS) $(TOOLS)
 	@echo
 	@$(BUILD)/test_cloudcore
 	@$(BUILD)/test_cloud
+	@echo
+	@$(BUILD)/test_storagecore
 	@echo
 	@$(BUILD)/test_browser
 	@echo
