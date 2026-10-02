@@ -377,13 +377,28 @@ static int apiCall(const char* method, const char* path, const char* json, Strea
 // ======================================================================
 //  Cuenta, cuota y estado de la red
 // ======================================================================
+// La cuota y la direccion que se ensenaban eran de una cuenta que ya no sirve (o
+// que ya no esta): se sueltan. Si se vincula OTRA cuenta, su tarjeta no puede
+// empezar ensenando el espacio de la anterior.
+static void forgetIdentity(){
+  lock();
+  if(gStatus.quotaValid || gStatus.address[0]){
+    gStatus.quotaValid = false;
+    memset(&gStatus.quota, 0, sizeof(gStatus.quota));
+    gStatus.address[0] = 0;
+    gStatus.gen++;
+  }
+  unlock();
+}
+
 static void refreshNet(){
-  if(!flexAccountLinked()){ gAuthWait = false; setNet(FCN_NO_ACCOUNT, fclErrorText("no_account")); return; }
+  if(!flexAccountLinked()){ gAuthWait = false; forgetIdentity(); setNet(FCN_NO_ACCOUNT, fclErrorText("no_account")); return; }
   if(!flexAccountUsable()){
     // Flex Account ya lo sabe y lo ensena: de aqui se sale revinculando.
     gAuthWait = false;
+    forgetIdentity();
     FlexAccountLink l = flexAccountLinkState();
-    setNet(FCN_AUTH, flexAccountLinkLabel(l));
+    setNet(FCN_AUTH, fclErrorText(l == FLEX_LINK_TOKEN_EXPIRED ? "token_expired" : "device_revoked"));
     return;
   }
   if(WiFi.status() != WL_CONNECTED){ setNet(FCN_OFFLINE, fclErrorText("no_wifi")); return; }
@@ -409,7 +424,10 @@ static void refreshNet(){
 static bool netReady(){
   lock(); uint8_t net = gStatus.net; unlock();
   if(net == FCN_NO_ACCOUNT || net == FCN_OFFLINE || net == FCN_AUTH) return false;
-  return (int32_t)(millis() - gNetRetryAt) >= 0 || net == FCN_ONLINE;
+  // gNetRetryAt == 0 es "sin espera". Comparar millis() con 0 COMO INSTANTE da la
+  // vuelta a los 24,8 dias encendido ((int32_t)(millis() - 0) < 0): tras volver el
+  // Wi-Fi o revincular, la nube se quedaba en "Conectando" hasta reiniciar.
+  return !gNetRetryAt || (int32_t)(millis() - gNetRetryAt) >= 0 || net == FCN_ONLINE;
 }
 
 static void fetchMe(){
@@ -1419,7 +1437,15 @@ static void streamStep(){
   }
   auto giveBack = [&](){ stLock(); if(gSt.gen == gen) fclCacheAbort(&gSt.cache, slot); gSt.busy = false; stUnlock(); };
   if(gStNet.retryAt && (int32_t)(millis() - gStNet.retryAt) < 0){ giveBack(); vTaskDelay(pdMS_TO_TICKS(20)); return; }
-  if(!netUsable()){ giveBack(); stSetState(FCS_WAITING_NET, fclErrorText("no_wifi")); vTaskDelay(pdMS_TO_TICKS(200)); return; }
+  if(!netUsable()){
+    giveBack();
+    // Sin Wi-Fi se espera; sin una credencial que sirva NO: esperar "conexion"
+    // para siempre era mentir. El reproductor lo dice (FCS_ERROR) y se detiene.
+    if(!flexAccountUsable()) stSetState(FCS_ERROR, fclErrorText(flexAccountLinked() ? "auth_required" : "no_account"));
+    else stSetState(FCS_WAITING_NET, fclErrorText("no_wifi"));
+    vTaskDelay(pdMS_TO_TICKS(200));
+    return;
+  }
   if(!gStNet.http || gStNet.pos != off){
     if(!stConnOpen(fileId, off, size)){
       giveBack();
@@ -1652,8 +1678,12 @@ int flexCloudListCopy(FclItem* dst, int start, int cap){
   return n > 0 ? n : 0;
 }
 
+// SIN CREDENCIAL QUE SIRVA NO ENTRA NADA NUEVO. Con la cuenta desvinculada o
+// rechazada por Flex Account (flexAccountUsable() == false) una peticion nueva se
+// quedaria esperando "conexion" para siempre y la interfaz diria que se hizo:
+// se rechaza aqui y quien pregunta (CloudKit) dice por que.
 static uint32_t opFor(uint8_t type, const FclItem* it, const char* text, const char* id = nullptr){
-  if(!gLock) return 0;
+  if(!gLock || !flexAccountUsable()) return 0;
   Cmd c; memset(&c, 0, sizeof(c));
   c.type = type;
   lock(); c.opId = gNextOp++; unlock();
@@ -1705,6 +1735,7 @@ static uint32_t addJob(uint8_t type, const char* localPath, const char* name, co
 }
 
 uint32_t flexCloudUpload(const char* localPath, const char* name, const char* parentId, uint32_t mlId, uint8_t flags){
+  if(!flexAccountUsable()) return 0;                            // ver opFor
   if(!localPath || !localPath[0] || !flexFsExists(localPath)) return 0;
   const char* base = strrchr(localPath, '/');
   const char* nm = name && name[0] ? name : (base ? base + 1 : localPath);
@@ -1714,6 +1745,7 @@ uint32_t flexCloudUpload(const char* localPath, const char* name, const char* pa
 }
 
 uint32_t flexCloudDownload(const FclItem* it, uint8_t flags){
+  if(!flexAccountUsable()) return 0;                            // ver opFor
   if(!it || it->isFolder || !it->sha256[0]) return 0;           // sin huella no se puede verificar
   flags &= FCL_JF_TO_LIBRARY;
   return addJob(FCL_JOB_DOWNLOAD, nullptr, it->name, it->parentId, it->id, it->size, it->sha256, 0, flags);
@@ -1740,7 +1772,7 @@ bool flexCloudCancel(uint32_t jobId){
 }
 
 bool flexCloudRetry(uint32_t jobId){
-  if(!gJ) return false;
+  if(!gJ || !flexAccountUsable()) return false;                 // ver opFor
   bool ok = false;
   lock();
   FclJob* j = fclJournalFind(gJ, jobId);
@@ -1779,6 +1811,8 @@ int flexCloudXfers(FlexCloudXfer* out, int cap){
   if(!out || !gJ) return 0;
   int n = 0;
   lock();
+  // Si esperan por la CUENTA y no por el Wi-Fi, la fila lo dice (fclXferLine).
+  const char* waitWhy = gStatus.net == FCN_AUTH ? "auth_required" : gStatus.net == FCN_NO_ACCOUNT ? "no_account" : nullptr;
   // En orden de alta (el diario no esta ordenado).
   uint32_t last = 0;
   for(;;){
@@ -1802,6 +1836,7 @@ int flexCloudXfers(FlexCloudXfer* out, int cap){
     o.retryInMs = gRt[pick].retryAt && (int32_t)(gRt[pick].retryAt - now) > 0 ? gRt[pick].retryAt - now : 0;
     fclCopyUtf8(o.name, sizeof(o.name), x.name);
     snprintf(o.error, sizeof(o.error), "%s", x.error);
+    if(waitWhy && o.phase == FCX_WAITING_NET) snprintf(o.error, sizeof(o.error), "%s", fclErrorText(waitWhy));
   }
   unlock();
   return n;
@@ -1859,6 +1894,7 @@ bool flexCloudThumbDraw(const char* fileId, void (*draw)(const uint16_t* px, int
 uint32_t flexCloudThumbGen(){ lock(); uint32_t g = gThumbGen; unlock(); return g; }
 
 bool flexCloudStreamOpen(const FclItem* it){
+  if(!flexAccountUsable()) return false;                        // ver opFor
   if(!it || it->isFolder || !gStLock || it->size == 0 || it->size > 0xFFFFFFF0ull) return false;
   stLock();
   if(!gSt.arena && !gSt.busy){

@@ -32,7 +32,8 @@ contiene codigo del firmware.
 * Un `401` del servicio (`auth_required`, `device_revoked`, `token_expired`) no
   desvincula: se avisa a Flex Account (`flexAccountReportRejected`) y la nube
   **espera** a que la cuenta lo compruebe (como minimo 30 s, como mucho 5 min)
-  en vez de insistir con la misma credencial.
+  en vez de insistir con la misma credencial. Que pasa despues, en
+  "Cuenta desvinculada" (mas abajo).
 
 ### Primer arranque: Iniciar sesion y que hacer si falla
 
@@ -58,6 +59,53 @@ muestra un codigo que se escribe en la web de Flex Account. Estados que se ven:
 * **El servicio que atiende `POST/GET /api/devices/code` y `/activate` no esta en
   ningun repositorio** (vive en el sitio publicado de Flex Developer Studio). Este
   repositorio solo prueba que el P4 cumple su contrato (`tests/host/test_account.cpp`).
+
+### Cuenta desvinculada: que detecta el P4, cuando y que deja de hacer
+
+El usuario puede quitar este aparato desde la web de Flex Account. Flex Account es la
+**autoridad de identidad**: cuando el servidor deja de reconocer la credencial
+(`device_revoked`, `auth_required`, `token_expired`) el P4 pasa a
+`FLEX_LINK_AUTH_REQUIRED` / `FLEX_LINK_TOKEN_EXPIRED` ("hay que volver a vincular").
+**No** es "sin conexion" ni "servicio no disponible" (`LINKED_OFFLINE` /
+`NETWORK_UNAVAILABLE`): esos son problemas de red, la cuenta sigue vinculada y se
+reintenta.
+
+* **Cuando se entera**: en la primera peticion a Flex Cloud con la nube a la vista (y en
+  cada transferencia en marcha), al abrir la pantalla de Flex Account con Wi-Fi, al volver
+  el Wi-Fi y, en reposo, cada 6 h. **Mientras nadie pregunta, el P4 no lo sabe**: no hay
+  ningun canal por el que el servidor avise al aparato.
+* **Una sola respuesta no basta**: un `401` sin codigo del servicio (la pagina de error de un
+  proxy), un `403` suelto o un fallo de red NO desvinculan; Flex Account lo comprueba con su
+  propia peticion antes de dar la cuenta por rechazada.
+* **La credencial no se borra**: se conserva para poder decir "Vuelve a vincular" con la
+  direccion a la vista, y se sustituye al volver a vincular (o con "olvidar" / restablecer
+  de fabrica). `flexAccountUsable()` pasa a `false`: es lo que corta el uso de la nube.
+* **Que deja de hacer el P4 con una cuenta que no sirve**
+  * `FlexOS_Cloud`: no entra nada nuevo (subir, descargar, crear/renombrar/eliminar, abrir una
+    foto en el visor, abrir un video, reintentar): devuelve `0`/`false` en vez de encolar algo
+    que esperaria "conexion" para siempre. Las transferencias a medias **esperan sin
+    perderse** (su fila dice `Vuelve a vincular tu Flex Account`) y siguen solas al revincular.
+  * La lista dice lo mismo; un video ya abierto lo dice (en vez de `Sin conexion con Flex
+    Cloud` a los 15 s).
+  * La tarjeta de estado pasa a **`Vuelve a vincular tu cuenta`** en rojo, con el motivo y
+    **sin la cuota ni la direccion** de la sesion anterior (eran de otra cuenta), y un boton
+    `Abrir Flex Account`.
+  * En Galeria, Multimedia y Archivos, "Subir a Flex Cloud" dice `Vuelve a vincular en
+    Ajustes > General` (antes solo se comprobaba que HUBIERA credencial, y la subida se
+    encolaba). El menu `...` de la nube ofrece solo `Transferencias`.
+  * Un aviso **unico** por la isla (`Flex Account: sesion perdida` / `... caduco`), con o sin
+    la nube a la vista, para que una subida larga no se quede "esperando" sin que nadie diga
+    por que.
+* **Salir**: `Volver a vincular` (pantalla de Flex Account, o `Abrir Flex Account` en la
+  tarjeta) con una credencial nueva; la nube vuelve a `Conectado`, relee la cuota de la
+  cuenta nueva y las transferencias esperando continuan.
+* **Limites**
+  * El P4 **no tiene boton "Desvincular"**: no existe una API de revocacion para el
+    dispositivo; se revoca desde la web de Flex Account.
+  * Si no se puede abrir una conexion TLS verificada (`Sin respuesta segura del servidor
+    (-1: ...)`), el P4 **no puede enterarse** de que lo quitaron: seguira "Vinculada ·
+    servicio no disponible" con el motivo a la vista. Es lo correcto: aceptar una orden de
+    desvincular por un canal sin verificar seria peor que no enterarse.
 
 ## 3. Transferencias
 

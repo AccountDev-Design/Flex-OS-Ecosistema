@@ -271,6 +271,8 @@ void fclItemSub(const FclItem* it, char* out, size_t cap);
 void fclFmtDate(int64_t ms, char* out, size_t cap);
 // Linea de estado de una transferencia: "Subiendo · 1,2 MB de 3 MB · 340 KB/s",
 // "Esperando conexi\xC3\xB3n", "Reintento en 8 s", "Verificando integridad"...
+// `error`: el motivo de un fallo; en "esperando conexion" sustituye a esa frase
+// (la cuenta ya no sirve: no se espera a ninguna red).
 void fclXferLine(uint8_t phase, uint8_t type, uint64_t done, uint64_t size, uint32_t bytesPerSec,
                  uint32_t retryInMs, const char* error, char* out, size_t cap);
 

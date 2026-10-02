@@ -10389,6 +10389,10 @@ static void clStatusOnline(){
   gStubCloudStatus.quotaValid = true;
   gStubCloudStatus.quota.totalBytes = 5ull << 30; gStubCloudStatus.quota.usedBytes = 1288490189ull; gStubCloudStatus.quota.permille = 240;
   snprintf(gStubCloudStatus.address, sizeof(gStubCloudStatus.address), "ana@flex");
+  // Conectada a la nube = hay una cuenta que SIRVE: la interfaz lo comprueba
+  // (ckCloudBlock) antes de pedirle nada. Sin esto el doble de Account se quedaria
+  // "sin cuenta" mientras la nube dice "conectado": una combinacion que no existe.
+  gStubAccountLinked = true; gStubAccountSnap.link = FLEX_LINK_LINKED;
 }
 // Un toque completo en (x, y) con el tick de la app.
 static unsigned long clMs = 20000000;
@@ -10659,6 +10663,127 @@ static void testFlexCloudUi(){
   // ---- 13. La cuota solo se refresca con la nube a la vista ----
   cloudUiTick();
   chk(!gStubCloudActive, "sin la nube delante, FlexOS_Cloud no refresca la cuota");
+
+  // ---- 14. LA CUENTA YA NO SIRVE: desvinculada desde la web, revocada o caducada ----
+  // Flex Account contesto que no: la credencial SIGUE guardada (linked) pero ya NO
+  // sirve (usable). Antes la interfaz solo miraba "linked": dejaba encolar subidas
+  // que esperaban "conexion" para siempre, el menu ofrecia todo y la tarjeta seguia
+  // ensenando la cuota de la sesion anterior.
+  gStubCloudCalls.clear(); gStubCloudEvents.clear(); gStubCloudItems.clear(); gStubCloudXfers.clear();
+  gStubAccountLinked = true; gStubAccountSnap.link = FLEX_LINK_LINKED;
+  chk(ckCloudBlock() == NULL, "con la cuenta buena la nube se puede usar");
+  gStubAccountSnap.link = FLEX_LINK_NETWORK_UNAVAILABLE;
+  chk(ckCloudBlock() == NULL, "'el servicio no responde' NO es una cuenta perdida: se sigue pudiendo usar");
+  gStubAccountSnap.link = FLEX_LINK_LINKED_OFFLINE;
+  chk(ckCloudBlock() == NULL, "sin Wi-Fi tampoco: la cuenta sigue vinculada");
+  gStubAccountSnap.link = FLEX_LINK_AUTH_REQUIRED;
+  chk(flexAccountLinked() && !flexAccountUsable(), "revocada: la credencial sigue guardada pero ya no sirve");
+  chk(ckCloudBlock() && !strcmp(ckCloudBlock(), CK_MSG_RELINK), "y la interfaz lo sabe: hay que VOLVER a vincular (no 'vincula')");
+  gStubAccountSnap.link = FLEX_LINK_TOKEN_EXPIRED;
+  chk(ckCloudBlock() && !strcmp(ckCloudBlock(), CK_MSG_RELINK), "caducada: lo mismo");
+  gStubAccountLinked = false; gStubAccountSnap.link = FLEX_LINK_UNLINKED;
+  chk(ckCloudBlock() && !strcmp(ckCloudBlock(), CK_MSG_LINK), "sin cuenta: se dice que se vincule");
+  gStubAccountLinked = true; gStubAccountSnap.link = FLEX_LINK_AUTH_REQUIRED;
+
+  // La Galeria vuelve a abrirse (la 11 la cerro): su menu y su pestana Nube.
+  shotApp(IC_GALERIA); gAppState[IC_GALERIA] = ALIFE_RUNNING; mkBind(&GAL_APP); galViewReady = false;
+  galTab = 0; galRender();
+  uint32_t lid3 = geAddPhoto(FML_DIR_PHOTO "/Cumple.jpg", jpg, false);
+  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  mkMenuId = lid3; mkDoAction(MA_CL_UP);
+  chk(!ckUpAskOn, "Subir a Flex Cloud con la cuenta rechazada NO abre la pregunta");
+  chk(gNotifCount == 1 && !strcmp(gNotifs[0].mod.sub, CK_MSG_RELINK), "dice que hay que volver a vincular en Ajustes");
+  chk(!clCalled("up "), "y no se encola nada");
+  // La cuenta se pierde con el cuadro de "Subir" ya abierto.
+  gStubAccountSnap.link = FLEX_LINK_LINKED;
+  mkMenuId = lid3; mkDoAction(MA_CL_UP);
+  chk(ckUpAskOn, "(con la cuenta buena la pregunta SI se abre)");
+  gStubAccountSnap.link = FLEX_LINK_AUTH_REQUIRED;
+  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  { int x, y, w, h; ckUpAskGeom(x, y, w, h);
+    tDown(x + w / 2, y + 136 + 20, clMs); tUp(clMs + 50, true);
+    ckUpAskTick(mkRedrawAll); touchReset(); clMs += 400; }
+  chk(!clCalled("up "), "'Subir y conservar' con la cuenta ya perdida no encola nada");
+  chk(gNotifCount == 1 && !strcmp(gNotifs[0].mod.sub, CK_MSG_RELINK), "y dice por que");
+
+  // La tarjeta de la nube: en alarma, con el motivo y SIN la cuota de antes.
+  clStatusOnline();                                           // la cuota de la sesion anterior sigue en el estado
+  gStubCloudStatus.net = FCN_AUTH; gStubCloudStatus.gen++;
+  snprintf(gStubCloudStatus.netText, sizeof(gStubCloudStatus.netText), "Este dispositivo ya no est\xC3\xA1 vinculado");
+  galTab = GAL_TAB_CLOUD; galRender();
+  chk(ckHost == &GAL_CK && ckEmptyBtnY > 0 && ckEmptyBtnAct == 1, "con la cuenta perdida la nube ensena 'Abrir Flex Account' (no una lista)");
+  int sbx, sby, sbw, sbh; ckBox(sbx, sby, sbw, sbh);
+  int scx = sbx + 12, scy = sby + 4, scw = sbw - 24;
+  int barY = scy + 46 + 3, barL = scx + 14 + 4, barR = scx + 14 + (scw - 28) - 4;
+  uint16_t cardPx = fb[(size_t)barY * SCR_W + scx + 6];
+  chk(fb[(size_t)barY * SCR_W + barL] == cardPx && fb[(size_t)barY * SCR_W + barR] == cardPx,
+      "con la cuenta perdida NO se pinta la barra de cuota (era de otra sesion)");
+  chk(fb[(size_t)(scy + 9 + 4) * SCR_W + scx + 48] == TH_DANGER, "y el punto de estado es el de alarma");
+  if(getenv("INO_SHOTS")) shotSave("nube_cuenta_perdida");
+  clStatusOnline(); gStubCloudStatus.gen++; ckRender();
+  chk(fb[(size_t)barY * SCR_W + barL] != fb[(size_t)barY * SCR_W + barR], "(control) con la cuenta buena la barra de cuota SI se pinta");
+
+  // Menu (...) de la app: sin cuenta que sirva solo queda Transferencias.
+  gStubAccountSnap.link = FLEX_LINK_AUTH_REQUIRED;
+  ckAppMenu(300, 300);
+  chk(mmOn && mmN == 1 && mmAct[0] == MA_CL_XFERS, "el menu solo ofrece Transferencias (ver y cancelar lo que esperaba)");
+  mmClose();
+  gStubAccountSnap.link = FLEX_LINK_LINKED;
+  ckAppMenu(300, 300);
+  bool hasRefresh = false; for(int i = 0; i < mmN; i++) if(mmAct[i] == MA_CL_REFRESH) hasRefresh = true;
+  chk(mmOn && mmN == 2 && hasRefresh, "(control) con la cuenta buena: Transferencias y Actualizar");
+  mmClose();
+
+  // La cuenta se pierde con un menu de elemento abierto, o con la lista aun pintada.
+  gStubCloudItems.push_back(clItem("fil_x1", "Foto.jpg", FCL_K_PHOTO, 100000));
+  ckMenuItem = gStubCloudItems[0]; ckMenuForItem = true;
+  gStubAccountSnap.link = FLEX_LINK_AUTH_REQUIRED;
+  gStubCloudCalls.clear(); gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  ckMenuAction(MA_CL_DOWNLOAD);
+  ckMenuAction(MA_TRASH);
+  ckMenuAction(MA_RENAME);
+  ckOpenItem(gStubCloudItems[0]);
+  chk(!clCalled("down") && !clCalled("trash") && !clCalled("view") && !fkNameOn, "ni descargar, ni eliminar, ni renombrar, ni abrir: nada sale hacia la nube");
+  chk(gNotifCount >= 1 && !strcmp(gNotifs[0].mod.sub, CK_MSG_RELINK), "y se dice por que");
+  ckMenuAction(MA_CL_XFERS);
+  chk(ckXfersOn, "Transferencias SI se abre aunque la cuenta no sirva (ver y cancelar lo que esperaba)");
+  ckXfersOn = false;
+  gStubCloudItems.clear();
+
+  // AVISO UNICO al perder la cuenta (con o sin la nube a la vista).
+  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  gStubAccountLinked = true; gStubAccountSnap.link = FLEX_LINK_LINKED;
+  ckAcctLink = (FlexAccountLink)255; ckAcctMs = 0;
+  gTestMs = 30000000; ckAccountNoticeTick();
+  chk(gNotifCount == 0, "con la cuenta buena no hay aviso");
+  gStubAccountSnap.link = FLEX_LINK_AUTH_REQUIRED;
+  gTestMs += 100; ckAccountNoticeTick();
+  chk(gNotifCount == 0, "se mira como mucho 2 veces por segundo (aun no)");
+  gTestMs += 500; ckAccountNoticeTick();
+  chk(gNotifCount == 1 && !strcmp(gNotifs[0].mod.name, "Flex Account: sesi\xC3\xB3n perdida") && !strcmp(gNotifs[0].mod.sub, CK_MSG_RELINK),
+      "al perderse la cuenta sale UN aviso que dice que hacer");
+  for(int k = 0; k < 20; k++){ gTestMs += 600; ckAccountNoticeTick(); }
+  chk(gNotifCount == 1, "y no se repite mientras siga igual");
+  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  gStubAccountSnap.link = FLEX_LINK_TOKEN_EXPIRED; gTestMs += 600; ckAccountNoticeTick();
+  chk(gNotifCount == 0, "de 'revocada' a 'caducada' no se avisa otra vez (ya sabe que debe vincular)");
+  gStubAccountSnap.link = FLEX_LINK_NETWORK_UNAVAILABLE; gTestMs += 600; ckAccountNoticeTick();
+  gStubAccountSnap.link = FLEX_LINK_LINKED_OFFLINE; gTestMs += 600; ckAccountNoticeTick();
+  chk(gNotifCount == 0, "sin red o con el servicio caido NO es una cuenta perdida: no se avisa");
+  gStubAccountSnap.link = FLEX_LINK_LINKED; gTestMs += 600; ckAccountNoticeTick();
+  gStubAccountSnap.link = FLEX_LINK_TOKEN_EXPIRED; gTestMs += 600; ckAccountNoticeTick();
+  chk(gNotifCount == 1 && !strcmp(gNotifs[0].mod.name, "Flex Account: sesi\xC3\xB3n caduc\xC3\xB3"),
+      "tras revincular y volver a perderla avisa otra vez (caducada)");
+  // Arranque con la cuenta ya perdida (queda guardada en NVS): tambien se avisa, una vez.
+  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  ckAcctLink = (FlexAccountLink)255; gStubAccountSnap.link = FLEX_LINK_AUTH_REQUIRED; gTestMs += 600; ckAccountNoticeTick();
+  chk(gNotifCount == 1, "al arrancar con la cuenta ya perdida tambien se avisa");
+  // Sin credencial guardada no hay a quien avisar.
+  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  ckAcctLink = (FlexAccountLink)255; gStubAccountLinked = false; gStubAccountSnap.link = FLEX_LINK_UNLINKED; gTestMs += 600; ckAccountNoticeTick();
+  chk(gNotifCount == 0, "sin cuenta guardada no se avisa de nada");
+  galCloseApp(); gAppState[IC_GALERIA] = ALIFE_CLOSED;
+  gStubAccountSnap.link = FLEX_LINK_UNLINKED;
 
   gStubAccountLinked = false;
   memset(&gStubCloudStatus, 0, sizeof(gStubCloudStatus));

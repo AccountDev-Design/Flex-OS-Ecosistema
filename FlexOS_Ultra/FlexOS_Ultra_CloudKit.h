@@ -87,6 +87,28 @@ static int      ckXferN = 0;
 
 static bool ckActive(){ return ckHost != NULL; }
 
+// ---- Sin una credencial que sirva, la nube se desactiva y se dice por que ----
+// NULL = Flex Cloud se puede usar. Si no, el motivo para el usuario.
+// flexAccountLinked() solo dice que HAY una credencial guardada;
+// flexAccountUsable() que Flex Account no la ha rechazado (desvinculada desde la
+// web, revocada o caducada). Con una cuenta rechazada, "linked" sigue siendo true:
+// comprobar solo eso dejaba encolar subidas que esperaban "conexion" para siempre.
+// Los textos caben en el aviso de la isla (DetectedModule::sub: 39 letras).
+#define CK_MSG_LINK   "Vincula tu cuenta en Ajustes > General"
+#define CK_MSG_RELINK "Vuelve a vincular en Ajustes > General"
+static_assert(sizeof(CK_MSG_LINK) <= sizeof(((DetectedModule*)0)->sub) &&
+              sizeof(CK_MSG_RELINK) <= sizeof(((DetectedModule*)0)->sub), "el aviso de la isla cortaria el texto");
+static const char* ckCloudBlock(){
+  if(!flexAccountLinked()) return CK_MSG_LINK;
+  if(!flexAccountUsable()) return CK_MSG_RELINK;
+  return NULL;
+}
+// Una orden de la nube no se pudo encolar: si es por la cuenta se dice eso; si no, `otherwise`.
+static void ckNotifyFail(const char* title, const char* otherwise){
+  const char* why = ckCloudBlock();
+  sysNotify(title, why ? why : otherwise);
+}
+
 // ---- La nube esta a la vista: la cuota se mantiene al dia (FlexOS_Cloud) ----
 static void ckMarkVisible(){ ckVisibleMs = millis() | 1u; }
 
@@ -119,7 +141,8 @@ static void ckDrawStatus(int x, int y, int w, const FlexCloudStatus& st){
   int r1 = y + 9;
   ckCloudGlyph(x + 24, r1 + 6, 12, wallAccent());
   fillCircle(x + 48, r1 + 4, 4, ckNetColor(st.net));
-  drawTextClip(x + 58, r1, flexCloudNetText(st.net), 1, TH_TXT, x + w / 2 + 40);
+  // "Vuelve a vincular tu cuenta" en el color de alarma: no es un estado mas de la red.
+  drawTextClip(x + 58, r1, flexCloudNetText(st.net), 1, st.net == FCN_AUTH ? TH_DANGER : TH_TXT, x + w / 2 + 40);
   if(st.activeXfers){
     char b[32]; snprintf(b, sizeof(b), "%u en curso", (unsigned)st.activeXfers);
     int tw = textW(b, 1) + 16;
@@ -127,7 +150,10 @@ static void ckDrawStatus(int x, int y, int w, const FlexCloudStatus& st){
     drawText(x + w - tw - 4, r1, b, 1, TH_TXT);
   }
   int r2 = y + 30, r3 = y + 46;
-  if(st.quotaValid){
+  // Sin cuenta, o con una que Flex Account ya no reconoce, la cuota de antes NO se
+  // ensena: era de una cuenta que ya no sirve. En su lugar, el motivo.
+  bool acctOk = st.net != FCN_NO_ACCOUNT && st.net != FCN_AUTH;
+  if(acctOk && st.quotaValid){
     char q[64], hint[64];
     fclQuotaLine(&st.quota, q, sizeof(q));
     fclQuotaHint(&st.quota, hint, sizeof(hint));
@@ -420,6 +446,9 @@ static void ckGoUp(){
 }
 
 static void ckOpenItem(const FclItem& it){
+  // La cuenta dejo de servir mientras la lista seguia a la vista (el repintado
+  // llega en el siguiente cuarto de segundo): no se pide nada.
+  if(const char* block = ckCloudBlock()){ sysNotify(it.name, block); return; }
   const char* why = NULL;
   switch(fclOpenAction(&it, &why)){
     case FCL_OPEN_FOLDER: ckRequest(FCL_VIEW_FOLDER, it.id); ckRender(); return;
@@ -467,6 +496,7 @@ static void ckInfo(const FclItem& it){
 }
 
 static void ckItemMenu(const FclItem& it, int ax, int ay){
+  if(const char* block = ckCloudBlock()){ sysNotify(it.name, block); return; }
   ckMenuItem = it; ckMenuForItem = true;
   uint8_t a[6]; int n = 0;
   if(ckView == FCL_VIEW_TRASH){ a[n++] = MA_CL_RESTORE; a[n++] = MA_DELETE; }
@@ -482,24 +512,33 @@ static void ckItemMenu(const FclItem& it, int ax, int ay){
 static void ckAppMenu(int ax, int ay){
   ckMenuForItem = false;
   uint8_t a[5]; int n = 0;
-  if(ckHost && ckHost->mode == CKM_BROWSE){
+  // Sin una cuenta que sirva solo queda "Transferencias" (para ver y cancelar lo
+  // que esperaba): lo demas necesita a Flex Account y no se ofrece.
+  bool usable = ckCloudBlock() == NULL;
+  if(usable && ckHost && ckHost->mode == CKM_BROWSE){
     if(ckView == FCL_VIEW_TRASH) a[n++] = MA_CL_MYFILES;
     else { a[n++] = MA_CL_NEWFOLDER; a[n++] = MA_CL_TRASHVIEW; }
   }
   a[n++] = MA_CL_XFERS;
-  a[n++] = MA_CL_REFRESH;
+  if(usable) a[n++] = MA_CL_REFRESH;
   mmOpen(ax, ay, a, n);
 }
 
 static void ckMenuAction(int act){
   FclItem& it = ckMenuItem;
+  // El menu pudo abrirse con la cuenta buena y perderla antes de elegir: todo lo
+  // que habla con Flex Cloud se corta aqui (Transferencias y Detalles no).
+  if(act != MA_CL_XFERS && act != MA_INFO){
+    if(const char* block = ckCloudBlock()){ sysNotify("Flex Cloud", block); ckRender(); return; }
+  }
   switch(act){
     case MA_CL_DOWNLOAD:
       if(ckMenuForItem){
         // A la biblioteca si es un medio que el P4 cataloga; si no, a /Descargas.
         uint8_t fl = flexMlKindFromExt(it.name) != FML_K_NONE ? FCL_JF_TO_LIBRARY : 0;
         uint32_t id = flexCloudDownload(&it, fl);
-        sysNotify(it.name, id ? "Descarga en cola (Transferencias)" : "No se pudo poner en cola");
+        if(id) sysNotify(it.name, "Descarga en cola (Transferencias)");
+        else ckNotifyFail(it.name, "No se pudo poner en cola");
       }
       break;
     case MA_INFO:   if(ckMenuForItem){ ckInfo(it); return; } break;
@@ -594,14 +633,14 @@ static void ckTick(){
   if(fkNameOn){
     int r = fkNameTick();
     if(r == 1){
-      if(ckName == CKN_MKDIR){ if(!flexCloudMkdir(ckFolder[0] ? ckFolder : "root", fkNameBuf)) sysNotify("Flex Cloud", "No se pudo crear la carpeta"); }
+      if(ckName == CKN_MKDIR){ if(!flexCloudMkdir(ckFolder[0] ? ckFolder : "root", fkNameBuf)) ckNotifyFail("Flex Cloud", "No se pudo crear la carpeta"); }
       else if(ckName == CKN_RENAME){
         // Se conserva la extension si el nuevo nombre no trae una.
         char nn[FCL_NAME_MAX];
         const char* dot = strrchr(ckMenuItem.name, '.');
         if(!ckMenuItem.isFolder && dot && !strchr(fkNameBuf, '.')) snprintf(nn, sizeof(nn), "%s%s", fkNameBuf, dot);
         else snprintf(nn, sizeof(nn), "%s", fkNameBuf);
-        flexCloudRename(&ckMenuItem, nn);
+        if(!flexCloudRename(&ckMenuItem, nn)) ckNotifyFail(ckMenuItem.name, "No se pudo renombrar");
       }
     }
     if(r != 0){ ckName = CKN_NONE; if(ckHost->redraw) ckHost->redraw(); }
@@ -609,7 +648,7 @@ static void ckTick(){
   }
   if(fkAskOn){
     int r = fkAskTick();
-    if(r == 1 && ckAsk == CKA_DELETE) flexCloudDeleteForever(&ckMenuItem);
+    if(r == 1 && ckAsk == CKA_DELETE && !flexCloudDeleteForever(&ckMenuItem)) ckNotifyFail(ckMenuItem.name, "No se pudo borrar");
     if(r != 0){ ckAsk = CKA_NONE; ckRender(); }
     return;
   }
@@ -651,7 +690,7 @@ static void ckTick(){
       if(T.y >= y && T.y < y + CKX_RH - 8 && T.x > bx + bw - 130){
         FlexCloudXfer xs[FLEX_CLOUD_XFERS]; int n = flexCloudXfers(xs, FLEX_CLOUD_XFERS);
         for(int k = 0; k < n; k++) if(xs[k].id == ckXferIds[i]){
-          if(xs[k].phase == FCX_FAILED) flexCloudRetry(xs[k].id);
+          if(xs[k].phase == FCX_FAILED){ if(!flexCloudRetry(xs[k].id)) ckNotifyFail(xs[k].name, "No se pudo reintentar"); }
           else if(xs[k].phase != FCX_DONE && xs[k].phase != FCX_CANCELLED) flexCloudCancel(xs[k].id);
         }
         ckRender(); return;
@@ -757,7 +796,28 @@ static void ckFreeLocal(const FlexCloudEvent& e){
   sysNotify(e.name, msg);
 }
 
+// Aviso UNICO cuando la cuenta deja de servir (desvinculada desde la web,
+// revocada o caducada), con o sin la nube a la vista. Una subida larga o un video
+// siguen su camino sin que nadie mire la tarjeta de estado: sin esto el usuario
+// solo se enteraba al abrir Flex Cloud o Ajustes. Se mira como mucho 2 veces por
+// segundo y avisa en el FLANCO (de "sirve" a "no sirve"), no en cada vuelta.
+static FlexAccountLink ckAcctLink = (FlexAccountLink)255;
+static uint32_t        ckAcctMs = 0;
+static void ckAccountNoticeTick(){
+  uint32_t now = millis();
+  if(ckAcctMs && (uint32_t)(now - ckAcctMs) < 500u) return;
+  ckAcctMs = now | 1u;
+  FlexAccountLink l = flexAccountLinkState();
+  if(l == ckAcctLink) return;
+  bool wasLost = ckAcctLink == FLEX_LINK_AUTH_REQUIRED || ckAcctLink == FLEX_LINK_TOKEN_EXPIRED;
+  ckAcctLink = l;
+  if(wasLost || !flexAccountLinked()) return;
+  if(l == FLEX_LINK_AUTH_REQUIRED)      sysNotify("Flex Account: sesi\xC3\xB3n perdida", CK_MSG_RELINK);
+  else if(l == FLEX_LINK_TOKEN_EXPIRED) sysNotify("Flex Account: sesi\xC3\xB3n caduc\xC3\xB3", CK_MSG_RELINK);
+}
+
 static void cloudUiTick(){
+  ckAccountNoticeTick();
   // La cuota se refresca solo mientras alguien ensena la nube.
   flexCloudSetActive(ckVisibleMs && millis() - ckVisibleMs < 2000u);
   FlexCloudEvent e;
@@ -789,13 +849,13 @@ static void ckUploadMl(uint32_t id, bool freeLocal){
   FlexMlRec r;
   if(!mlGet(id, &r) || (r.flags & FML_R_LOCKED)) return;
   char nm[FML_NAME_MAX]; flexMlDisplayName(&r, nm, sizeof(nm));
-  if(!flexAccountLinked()){ sysNotify("Flex Cloud", "Vincula tu Flex Account en Ajustes > General"); return; }
+  if(const char* block = ckCloudBlock()){ sysNotify("Flex Cloud", block); return; }
   // El nombre visible conserva la extension real del archivo.
   const char* ext = strrchr(r.path, '.');
   char name[FCL_NAME_MAX];
   if(ext && !strrchr(nm, '.')) snprintf(name, sizeof(name), "%s%s", nm, ext); else snprintf(name, sizeof(name), "%s", nm);
   uint32_t job = flexCloudUpload(r.path, name, "root", id, freeLocal ? FCL_JF_FREE_LOCAL : 0);
-  if(!job){ sysNotify(nm, "No se pudo poner en cola (demasiadas transferencias)"); return; }
+  if(!job){ ckNotifyFail(nm, "No se pudo poner en cola (demasiadas transferencias)"); return; }
   sysNotify(nm, freeLocal ? "Subiendo. Se borrar\xC3\xA1 del P4 cuando Flex Cloud confirme la copia"
                           : "Subiendo a Flex Cloud (Transferencias)");
 }
@@ -834,7 +894,7 @@ static void ckUpAskDraw(){
   flxFlush(y - 2, y + h + 2);
 }
 static void ckUpAskOpen(uint32_t mlId){
-  if(!flexAccountLinked()){ sysNotify("Flex Cloud", "Vincula tu Flex Account en Ajustes > General"); return; }
+  if(const char* block = ckCloudBlock()){ sysNotify("Flex Cloud", block); return; }
   ckUpAskId = mlId; ckUpAskOn = true;
   ckUpAskDraw();
 }

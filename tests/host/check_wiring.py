@@ -54,6 +54,18 @@ GANCHOS = [
     ("cloudUiTick",    "flexCloudPollEvent(", "cloudUiTick no sacaria ningun aviso de la cola de Flex Cloud"),
     ("cloudUiTick",    "flexCloudSetActive(", "la cuota no se refrescaria con la nube a la vista"),
     ("ckFreeLocal",    "flexFsSize(",      "liberar espacio borraria el original sin comprobar que sigue siendo el que se subio"),
+    # CUENTA PERDIDA. "Hay credencial guardada" (flexAccountLinked) NO es "la cuenta
+    # sirve" (flexAccountUsable): con la desvinculada o rechazada por Flex Account la
+    # credencial sigue guardada. Sin estos cortes la interfaz dejaba encolar subidas
+    # que esperaban "conexion" para siempre y ofrecia todo el menu de la nube.
+    ("cloudUiTick",    "ckAccountNoticeTick()", "el usuario no se enteraria de que Flex Account ya no reconoce el aparato hasta abrir Flex Cloud o Ajustes"),
+    ("ckUploadMl",     "ckCloudBlock()",   "se encolarian subidas con una cuenta que Flex Account ya no reconoce"),
+    ("ckUpAskOpen",    "ckCloudBlock()",   "se ofreceria subir a la nube con una cuenta que Flex Account ya no reconoce"),
+    ("filesMenuAction", "ckCloudBlock()",  "Archivos encolaria subidas con una cuenta que Flex Account ya no reconoce"),
+    ("ckAppMenu",      "ckCloudBlock()",   "el menu ofreceria Nueva carpeta, Papelera y Actualizar sin una cuenta que sirva"),
+    ("ckMenuAction",   "ckCloudBlock()",   "una accion elegida antes de perder la cuenta se enviaria igualmente a la nube"),
+    ("ckOpenItem",     "ckCloudBlock()",   "se pediria una foto o un video con una cuenta que Flex Account ya no reconoce"),
+    ("ckItemMenu",     "ckCloudBlock()",   "se abriria el menu de un elemento con una cuenta que Flex Account ya no reconoce"),
     ("vwTick",         "vwCloudStep()",    "un video de Flex Cloud se quedaria en Cargando para siempre"),
     ("mediaStreamClose", "flexCloudStreamClose()", "cerrar un video de la nube dejaria la tarea de streaming bajando bloques"),
     ("galCloseApp",    "ckUnbind(",        "cerrar la Galeria dejaria la nube enganchada a una app cerrada"),
@@ -234,6 +246,10 @@ GANCHOS = [
 # ser el hilo equivocado, que es justo lo que ni el compilador ni una prueba
 # de host pueden ver.
 PROHIBIDOS = [
+    # "Hay credencial" no basta para usar la nube: ver ckCloudBlock() (CloudKit).
+    ("ckUploadMl",       "flexAccountLinked(", "con la cuenta rechazada seguiria 'vinculada' y se encolarian subidas (usa ckCloudBlock)"),
+    ("ckUpAskOpen",      "flexAccountLinked(", "con la cuenta rechazada seguiria 'vinculada' y se ofreceria subir (usa ckCloudBlock)"),
+    ("filesMenuAction",  "flexAccountLinked(", "con la cuenta rechazada seguiria 'vinculada' y se encolarian subidas (usa ckCloudBlock)"),
     # TRABAJO PERIODICO. flexFsUsedBytes() recorre la particion LittleFS entera
     # (lfs_fs_size, con el cerrojo del sistema de archivos). wgDataTick corre
     # cada 2 s en CUALQUIER pantalla: la medida del almacenamiento vive en
