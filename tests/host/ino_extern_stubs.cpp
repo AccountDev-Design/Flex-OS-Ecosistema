@@ -438,7 +438,8 @@ void flexAccountSnapshot(FlexAccountSnapshot* out){
 }
 bool flexAccountCopyBearer(char* out, size_t n){ if(out && n) out[0] = 0; return false; }
 void flexAccountForgetLocal(){}
-bool flexAccountUsable(){ return gStubAccountLinked; }
+// Como la real: hay credencial y Flex Account no la ha rechazado (desvinculada, revocada o caducada).
+bool flexAccountUsable(){ return gStubAccountLinked && gStubAccountSnap.link != FLEX_LINK_AUTH_REQUIRED && gStubAccountSnap.link != FLEX_LINK_TOKEN_EXPIRED; }
 FlexAccountLink flexAccountLinkState(){ return gStubAccountSnap.link; }
 const char* flexAccountLinkLabel(FlexAccountLink l){ return l == FLEX_LINK_LINKED ? "Conectada" : "Sin cuenta vinculada"; }
 void flexAccountRequestValidation(){}

@@ -299,10 +299,10 @@ static void filesMenuAction(int act){
   fkMenuCloud = false;
   if(act == FK_ACT_CLOUD){
     if(p[0] && !filesList[filesSelIdx].dir){
-      if(!flexAccountLinked()) sysNotify("Flex Cloud", "Vincula tu Flex Account en Ajustes > General");
+      if(const char* block = ckCloudBlock()) sysNotify("Flex Cloud", block);     // sin cuenta, o con una que Flex Account ya no reconoce
       else if(flexCloudUpload(p, filesList[filesSelIdx].name, "root", 0, 0))
         sysNotify(filesList[filesSelIdx].name, "Subiendo a Flex Cloud (se conserva aqu\xC3\xAD)");
-      else sysNotify(filesList[filesSelIdx].name, "No se pudo poner en cola");
+      else ckNotifyFail(filesList[filesSelIdx].name, "No se pudo poner en cola");
     }
     filesRender();
     return;
