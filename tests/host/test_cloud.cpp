@@ -28,6 +28,8 @@
 #include "FlexOS_CloudTLS.h"
 #include "FlexOS_FS.h"
 #include "FlexOS_JPEGEnc.h"
+#include "FlexOS_StorageCore.h"
+#include "FlexOS_StorageLink.h"
 #include "pkgbuild.h"
 #include <cJSON.h>
 #include <string>
@@ -238,14 +240,16 @@ static void finishUpload(FUpload& u){
   C.reserved -= u.size; C.used += u.size;
 }
 
-static NetResponse serveCloud(const NetRequest& rq){
+// `authed`: la peticion ya se autentico de otra forma (el telefono simulado
+// comprueba SU token de sesion y luego sirve el mismo almacen).
+static NetResponse serveCloud(const NetRequest& rq, bool authed = false){
   std::string path = rq.url.substr(API.size());
   std::string route = path.substr(0, path.find('?'));
   const std::string& m = rq.method;
   // ---- autenticacion: la huella de la credencial del dispositivo
   auto it = rq.headers.find("authorization");
   std::string bearer = (it != rq.headers.end() && it->second.rfind("Bearer ", 0) == 0) ? it->second.substr(7) : "";
-  if(bearer.empty() || sha256hex(bearer) != C.tokenHash) return jerr(401, "device_revoked");
+  if(!authed && (bearer.empty() || sha256hex(bearer) != C.tokenHash)) return jerr(401, "device_revoked");
   if(route == "/me"){
     C.me++;
     return jok("\"account\":{\"id\":\"acc_1\",\"flexAddress\":\"ana.p4@flex\",\"displayName\":\"Ana\"},\"quota\":" + quotaJson());
@@ -1497,6 +1501,397 @@ static void testClockWrap(){
   CHECK(pumpUntil([]{ return status().net == FCN_ONLINE; }, 800), "revincular a los 26 dias: vuelve a ONLINE (no se queda en 'Conectando')");
 }
 
+// ============================== FLEX STORAGE: destino telefono ==============================
+// El MISMO gestor con el destino en el telefono emparejado. El telefono
+// simulado habla el contrato de CloudServer.kt: reto, sesion con
+// autenticacion mutua (las mismas funciones del nucleo que el P4 usa al
+// otro lado) y la API de siempre bajo http://<telefono>:47830/api/cloud.
+// tests/host/phone_e2e.sh repite lo esencial contra el servidor Kotlin REAL.
+static const std::string PHONE_BASE = "http://192.168.1.50:47830";
+static const std::string PHONE_API = PHONE_BASE + "/api/cloud";
+static const char* PHONE_KEY_HEX = "5f1e0c9d2b7a48e3a6c4d2b1f0e9d8c7b6a5948372615041f2e3d4c5b6a79881";
+
+struct PhoneSim {
+  bool up = true;                     // contesta (false = apagado / fuera de la Wi-Fi)
+  int  sessionStatus = 0;             // !=0: /api/fs/session contesta esto (403 = no reconoce al P4)
+  bool badMac = false;                // la sesion la contesta un impostor sin la clave
+  std::vector<std::string> nonces;
+  std::string token;
+  int challenges = 0, sessions = 0, cloudCalls = 0, staleToken = 0, attempts = 0;
+  uint32_t tok = 0;
+} P;
+
+static std::vector<uint8_t> phoneKey(){ std::vector<uint8_t> k(32); fstUnhex(PHONE_KEY_HEX, k.data(), 32); return k; }
+
+static NetResponse servePhone(const NetRequest& rq){
+  NetResponse rs;
+  P.attempts++;                                               // cualquier intento, conteste o no
+  if(rq.url == PHONE_BASE + "/api/fs/challenge") P.challenges++;
+  if(!P.up){ rs.status = HTTPC_ERROR_CONNECTION_REFUSED; rs.latencyMs = 4000; return rs; }
+  std::vector<uint8_t> k = phoneKey();
+  if(rq.url == PHONE_BASE + "/api/fs/challenge" && rq.method == "GET"){
+    char n[33]; snprintf(n, sizeof(n), "%08x%08x%08x%08x", 0xa5a50000u + P.challenges, 0x1234u, 0xbeefu, (unsigned)P.challenges * 77u);
+    P.nonces.push_back(n);
+    rs.body = std::string("{\"nonce\":\"") + n + "\",\"expiresIn\":60,\"phoneId\":\"a55-sim\"}";
+    return rs;
+  }
+  if(rq.url == PHONE_BASE + "/api/fs/session" && rq.method == "POST"){
+    P.sessions++;
+    if(P.sessionStatus){ rs.status = P.sessionStatus; rs.body = "{\"ok\":false,\"error\":{\"code\":\"device_revoked\",\"message\":\"x\"}}"; return rs; }
+    std::string p4 = bodyStr(rq, "p4Id"), nonce = bodyStr(rq, "nonce"), mac = bodyStr(rq, "mac");
+    bool fresh = false;
+    for(auto it = P.nonces.begin(); it != P.nonces.end(); ++it) if(*it == nonce){ P.nonces.erase(it); fresh = true; break; }
+    uint8_t want[32]; char wh[65];
+    fstSessionMac(k.data(), nonce.c_str(), p4.c_str(), want); fstHex(want, 32, wh);
+    if(!fresh || mac != wh || p4 != "flexos-a1b2c3d4e5f6"){ rs.status = 401; rs.body = "{\"ok\":false,\"error\":{\"code\":\"auth_required\",\"message\":\"x\"}}"; return rs; }
+    P.tok++;
+    char t[49]; snprintf(t, sizeof(t), "%08x%08x%08x%08x%08x%08x", 0x70000000u + P.tok, 1u, 2u, 3u, 4u, P.tok);
+    P.token = t;
+    uint8_t ok[32]; char oh[65];
+    fstSessionOk(k.data(), nonce.c_str(), t, ok); fstHex(ok, 32, oh);
+    if(P.badMac) oh[0] = oh[0] == 'a' ? 'b' : 'a';
+    rs.body = std::string("{\"token\":\"") + t + "\",\"expiresIn\":1800,\"mac\":\"" + oh + "\",\"phoneId\":\"a55-sim\",\"name\":\"Galaxy A55 de Ana\"}";
+    return rs;
+  }
+  if(!rq.url.compare(0, PHONE_API.size(), PHONE_API)){
+    P.cloudCalls++;
+    // Como CloudServer.kt: el token de la sesion (no la credencial de Flex
+    // Account) y, si no vale, 401 auth_required.
+    auto au = rq.headers.find("authorization");
+    if(P.token.empty() || au == rq.headers.end() || au->second != "Bearer " + P.token){
+      P.staleToken++;
+      rs.status = 401; rs.body = "{\"ok\":false,\"error\":{\"code\":\"auth_required\",\"message\":\"x\"}}";
+      return rs;
+    }
+    NetRequest r2 = rq;
+    r2.url = API + rq.url.substr(PHONE_API.size());
+    NetResponse out = serveCloud(r2, true);
+    if(rq.url.find(PHONE_API + "/me") == 0 && out.status == 200)
+      out.body = "{\"ok\":true,\"account\":{\"id\":\"phone:a55-sim\",\"flexAddress\":\"Galaxy A55 de Ana\",\"displayName\":\"Galaxy A55 de Ana\"},"
+                 "\"device\":{\"id\":\"a55-sim\",\"model\":\"SM-A556B\",\"kind\":\"phone\"},\"quota\":" + quotaJson() + "}";
+    return out;
+  }
+  rs.status = 404; rs.body = "{\"ok\":false,\"error\":{\"code\":\"not_found\",\"message\":\"x\"}}";
+  return rs;
+}
+static NetResponse serveBoth(const NetRequest& rq){
+  NetResponse rs;
+  if(C.fault && C.fault(rq, rs)) return rs;
+  if(!rq.url.compare(0, PHONE_BASE.size(), PHONE_BASE)) return servePhone(rq);
+  return serve(rq);
+}
+
+static void writePhoneRecord(bool enabled = true){
+  FstPhone ph; memset(&ph, 0, sizeof(ph));
+  ph.valid = 1; ph.enabled = enabled ? 1 : 0;
+  snprintf(ph.id, sizeof(ph.id), "a55-sim"); snprintf(ph.name, sizeof(ph.name), "Galaxy A55 de Ana"); snprintf(ph.model, sizeof(ph.model), "SM-A556B");
+  std::vector<uint8_t> k = phoneKey(); memcpy(ph.key, k.data(), 32);
+  snprintf(ph.ip, sizeof(ph.ip), "192.168.1.50"); ph.port = 47830;
+  uint8_t buf[FST_PHONE_BLOB_MAX]; size_t n = fstPhoneEncode(&ph, buf, sizeof(buf));
+  Preferences pr; pr.begin("flexstor", false); pr.putBytes("phone", buf, n); pr.end();
+}
+// Arranque en el ORDEN de setup(): Flex Storage fija el destino ANTES de que
+// Flex Cloud cargue su diario.
+static void phoneReboot(){
+  flexAccountTestPowerCycle();
+  flexCloudTestPowerOff();
+  flexStorageTestReset();
+  flexStorageBegin();
+  flexCloudBegin();
+  gEv.clear();
+}
+static void phoneBoot(bool link = false){
+  boot(link);
+  P = PhoneSim();
+  gNetHandler = serveBoth;
+  writePhoneRecord();
+  phoneReboot();
+  gNetWifi = true;
+  gNetLog.clear();
+}
+static std::string storageJournal(const char* path){ return localFile(path); }
+
+// Nada de lo que sale hacia el telefono lleva la clave del emparejamiento ni la
+// credencial de Flex Account; y nada de Internet lleva el token del telefono.
+static void auditPhone(const char* when){
+  char acct[64] = ""; flexAccountCopyBearer(acct, sizeof(acct));
+  bool keyLeak = false, acctToPhone = false, tokenToInternet = false, tls = true;
+  for(auto& r : gNetLog){
+    std::string all = r.url + "\n" + r.body;
+    for(auto& h : r.headers) all += "\n" + h.second;
+    if(all.find(PHONE_KEY_HEX) != std::string::npos) keyLeak = true;
+    bool toPhone = !r.url.compare(0, PHONE_BASE.size(), PHONE_BASE);
+    if(toPhone && acct[0] && all.find(acct) != std::string::npos) acctToPhone = true;
+    if(!toPhone && !P.token.empty() && all.find(P.token) != std::string::npos) tokenToInternet = true;
+    if(!toPhone && r.headers.count("authorization") && (!r.https || r.tlsInsecure)) tls = false;
+  }
+  char m[160];
+  snprintf(m, sizeof(m), "%s: la clave del emparejamiento NUNCA sale del P4", when); CHECK(!keyLeak, m);
+  snprintf(m, sizeof(m), "%s: la credencial de Flex Account nunca va al telefono", when); CHECK(!acctToPhone, m);
+  snprintf(m, sizeof(m), "%s: el token del telefono nunca va a Internet", when); CHECK(!tokenToInternet, m);
+  snprintf(m, sizeof(m), "%s: Internet sigue siendo solo HTTPS verificado", when); CHECK(tls, m);
+}
+
+static void testPhoneBasics(){
+  printf("-- Flex Storage: Flex Cloud en el telefono (sesion mutua, misma API) --\n");
+  phoneBoot();
+  CHECK(flexCloudDest() == FCD_PHONE, "telefono emparejado y conectado: el destino es el telefono");
+  CHECK(flexStoragePhoneUsable(), "telefono utilizable");
+  CHECK(!strcmp(flexStorageP4Id(), "flexos-a1b2c3d4e5f6"), "id del P4 derivado de su MAC");
+  CHECK(status().net == FCN_CONNECTING && strstr(status().netText, "tel"), "arranca 'Conectando con el telefono'");
+  flexCloudSetActive(true);
+  CHECK(pumpUntil([]{ return status().net == FCN_ONLINE; }, 100), "ONLINE con el telefono");
+  FlexCloudStatus s = status();
+  CHECK(s.quotaValid && s.quota.totalBytes == (5ull << 30), "cuota de 5 GB que dice el TELEFONO");
+  CHECK(!strcmp(s.address, "Galaxy A55 de Ana"), "la tarjeta nombra al telefono");
+  CHECK(!strcmp(flexCloudNetText(FCN_UNAVAILABLE), "Tel\xC3\xA9" "fono desconectado"), "textos del destino telefono");
+  CHECK(P.challenges == 1 && P.sessions == 1, "UNA sesion (reto + respuesta)");
+  bool plain = true, bearerOk = true;
+  for(auto& r : gNetLog){
+    if(r.url.compare(0, PHONE_BASE.size(), PHONE_BASE)) { plain = false; continue; }
+    if(r.https) plain = false;
+    if(!r.url.compare(0, PHONE_API.size(), PHONE_API)){
+      auto it = r.headers.find("authorization");
+      if(it == r.headers.end() || it->second != "Bearer " + P.token) bearerOk = false;
+    }
+  }
+  CHECK(plain, "todo va al telefono por la red local (nada a Internet sin cuenta)");
+  CHECK(bearerOk, "cada peticion a /api/cloud lleva el token de la sesion");
+  FlexStorageInfo si; flexStorageInfo(&si);
+  CHECK(si.state == FSP_READY && si.reachable && si.lastOkAgeS < 5 && !strcmp(si.name, "Galaxy A55 de Ana"), "estado de Flex Storage: conectado");
+
+  // Listas y operaciones contra el telefono.
+  CHECK(flexCloudRequestList(FCL_VIEW_FOLDER, "root", nullptr), "lista");
+  CHECK(pumpUntil([]{ return listInfo().state == FCL_LIST_READY; }, 100), "lista del telefono lista");
+  uint32_t op = flexCloudMkdir("root", "Viaje \xC3\x91" "and\xC3\xBA");
+  CHECK(op && waitEv(FCE_OP_DONE, op) && findEv(FCE_OP_DONE, op)->ok, "carpeta creada en el telefono");
+
+  // Subida con "liberar espacio" y descarga: diario propio, temporal propio.
+  std::string data = pattern(600 * 1024 + 9, 31);
+  putLocal("/Fotos/a55.jpg", data);
+  uint32_t up = flexCloudUpload("/Fotos/a55.jpg", nullptr, "root", 0, FCL_JF_FREE_LOCAL);
+  CHECK(up >= 0x40000000u, "los trabajos del telefono no comparten numero con los de Internet");
+  CHECK(waitEv(FCE_UPLOAD_DONE, up), "subida al telefono");
+  const FlexCloudEvent* e = findEv(FCE_UPLOAD_DONE, up);
+  CHECK(e && e->ok && (e->flags & FCL_JF_FREE_LOCAL) && C.files.count(e->fileId) && C.files[e->fileId].data == data,
+        "byte a byte en el telefono y con 'liberar espacio' tras confirmarlo");
+  CHECK(localFile("/Fotos/a55.jpg") == data, "el gestor no toca el original");
+  CHECK(storageJournal("/System/Cloud/phone.bin") != "<no>", "diario propio del telefono");
+  CHECK(storageJournal("/System/Cloud/jobs.bin") == "<no>", "el diario de Internet ni se toca");
+  std::string d2 = pattern(300 * 1024, 32);
+  FFile& f2 = addCloudFile("del_telefono.avi", d2);
+  FclItem it2 = itemOf(f2);
+  uint32_t dl = flexCloudDownload(&it2, FCL_JF_TO_LIBRARY);
+  CHECK(waitEv(FCE_DOWNLOAD_DONE, dl), "descarga del telefono");
+  std::string lp = evPath(FCE_DOWNLOAD_DONE, dl);
+  CHECK(localFile(lp) == d2 && lp.rfind("/System/Cloud/pdl/", 0) == 0, "verificada y en su carpeta propia");
+  auditPhone("telefono");
+}
+
+static void testPhoneSession(){
+  printf("-- Flex Storage: sesion que caduca, telefono que no responde, que rechaza o que miente --\n");
+  phoneBoot();
+  flexCloudSetActive(true);
+  CHECK(pumpUntil([]{ return status().net == FCN_ONLINE; }, 100), "conectado");
+  // El telefono reinicia sus sesiones (o caduca el token): 401 -> sesion nueva, sola.
+  P.token = "otra";
+  int s0 = P.sessions;
+  flexCloudRefresh();
+  CHECK(pumpUntil([&]{ return P.sessions > s0; }, 100), "token rechazado: se abre otra sesion");
+  CHECK(pumpUntil([]{ return listInfo().state == FCL_LIST_READY; }, 300), "y la lista vuelve sin que nadie haga nada");
+  CHECK(status().net != FCN_AUTH, "una sesion caducada NO es 'vuelve a emparejar'");
+
+  // Telefono apagado / fuera de la Wi-Fi: "Telefono desconectado", sin bucles.
+  P.up = false;
+  int at0 = P.attempts;
+  flexCloudRefresh();
+  pump(6000, 20);                                             // 2 minutos
+  CHECK(status().net == FCN_UNAVAILABLE && strstr(status().netText, "desconectado"), "Telefono desconectado");
+  int tries = P.attempts - at0;
+  if(tries < 2 || tries > 12) printf("   (intentos de hablar con el telefono en 2 min: %d)\n", tries);
+  CHECK(tries >= 2 && tries <= 12, "reintentos con espera creciente (2 s ... 60 s), no en bucle");
+  // Y si ademas su sesion caduco mientras tanto, abrirla tampoco es un bucle.
+  P.token = "caducado";
+  int ch0 = P.challenges;
+  flexStorageSessionRejected();
+  pump(6000, 20);
+  int opens = P.challenges - ch0;
+  if(opens < 1 || opens > 10) printf("   (intentos de abrir sesion en 2 min: %d)\n", opens);
+  CHECK(opens >= 1 && opens <= 10, "abrir sesion con el telefono apagado: tambien con espera creciente");
+  FlexStorageInfo si; flexStorageInfo(&si);
+  CHECK(!si.reachable, "Flex Storage: no responde");
+  // Lo local no depende del telefono: una subida espera sin quemar nada.
+  putLocal("/Fotos/espera.jpg", pattern(100 * 1024, 41));
+  uint32_t up = flexCloudUpload("/Fotos/espera.jpg", nullptr, "root", 0, 0);
+  CHECK(up != 0, "se puede encolar sin telefono (espera)");
+  pump(500, 20);
+  CHECK(xfer(up).phase == FCX_WAITING_NET || xfer(up).phase == FCX_RETRYING, "esperando al telefono");
+  // Vuelve: todo sigue solo.
+  P.up = true;
+  CHECK(waitEv(FCE_UPLOAD_DONE, up, 60000), "el telefono vuelve y la subida termina sola");
+  CHECK(pumpUntil([]{ return status().net == FCN_ONLINE; }, 4000), "y vuelve a ONLINE");
+
+  // El telefono ya no reconoce este Flex OS: no se insiste (ni una vez mas).
+  P.sessionStatus = 403;
+  P.token = "x";
+  flexCloudRefresh();
+  CHECK(pumpUntil([]{ return status().net == FCN_AUTH; }, 4000), "rechazado: 'vuelve a emparejar'");
+  CHECK(!strcmp(flexCloudNetText(FCN_AUTH), "Vuelve a emparejar el tel\xC3\xA9" "fono"), "con el texto del telefono");
+  flexStorageInfo(&si);
+  CHECK(si.state == FSP_REJECTED && !flexStoragePhoneUsable(), "Flex Storage: rechazado");
+  int sess = P.sessions;
+  pump(30000, 20);                                            // 10 minutos
+  CHECK(P.sessions == sess, "rechazado: ni un intento mas en 10 minutos");
+  CHECK(flexCloudUpload("/Fotos/espera.jpg", nullptr, "root", 0, 0) == 0, "sin telefono que sirva no entra nada nuevo");
+  // "Volver a conectar" en la pantalla = reintentar ahora.
+  P.sessionStatus = 0;
+  CHECK(flexStorageSetEnabled(true), "volver a conectar");
+  CHECK(pumpUntil([]{ return status().net == FCN_ONLINE; }, 4000), "conectado otra vez");
+
+  // Un impostor en la IP del telefono no demuestra la clave: no se le manda nada.
+  P.badMac = true;
+  P.token = "x";
+  int calls0 = P.cloudCalls, sess0 = P.sessions;
+  std::string tokBefore = P.token;
+  flexCloudRefresh();
+  pump(200, 20);
+  CHECK(P.sessions > sess0 && P.token != tokBefore, "el impostor contesto a la sesion con un token");
+  bool usedForged = false;
+  for(auto& r : gNetLog){
+    auto it = r.headers.find("authorization");
+    if(it != r.headers.end() && it->second == "Bearer " + P.token && P.token != tokBefore) usedForged = true;
+  }
+  CHECK(!usedForged, "el token de quien no demuestra la clave no se usa NUNCA");
+  CHECK(P.cloudCalls - calls0 <= 1, "a lo sumo la peticion que descubrio el 401");
+  P.badMac = false;
+  CHECK(pumpUntil([]{ return status().net == FCN_ONLINE; }, 6000), "con el telefono de verdad, vuelve");
+  auditPhone("sesiones");
+}
+
+static void testPhoneSwitch(){
+  printf("-- Flex Storage: cambiar de destino sin perder nada (Internet <-> telefono) --\n");
+  phoneBoot(true);                                            // con Flex Account vinculada tambien
+  // Empieza en Internet (telefono desconectado por el usuario).
+  CHECK(flexStorageSetEnabled(false), "desconectar el telefono");
+  pump(3);
+  CHECK(flexCloudDest() == FCD_INTERNET, "destino: Internet");
+  std::string big = pattern(2 * 1024 * 1024 + 3, 51);         // 9 partes
+  putLocal("/Fotos/internet.avi", big);
+  uint32_t inet = flexCloudUpload("/Fotos/internet.avi", nullptr, "root", 0, 0);
+  CHECK(inet && inet < 0x40000000u, "subida a Internet");
+  CHECK(pumpUntil([]{ return C.partPuts >= 3; }, 3000), "van 3 partes");
+  int putsInet = C.partPuts;
+  // Al telefono: la de Internet queda en SU diario, a medias.
+  CHECK(flexStorageSetEnabled(true), "conectar el telefono");
+  pump(3);
+  CHECK(flexCloudDest() == FCD_PHONE, "destino: telefono");
+  CHECK(xfer(inet).phase == 255, "la lista ensena las transferencias del telefono (la de Internet espera en su diario)");
+  CHECK(storageJournal("/System/Cloud/jobs.bin") != "<no>", "la de Internet sigue guardada");
+  std::string small = pattern(200 * 1024, 52);
+  putLocal("/Fotos/telefono.jpg", small);
+  uint32_t ph = flexCloudUpload("/Fotos/telefono.jpg", nullptr, "root", 0, 0);
+  CHECK(waitEv(FCE_UPLOAD_DONE, ph), "subida al telefono mientras tanto");
+  // De vuelta a Internet: reanuda donde iba.
+  CHECK(flexStorageSetEnabled(false), "desconectar otra vez");
+  CHECK(waitEv(FCE_UPLOAD_DONE, inet), "la de Internet termina al volver");
+  const FlexCloudEvent* e = findEv(FCE_UPLOAD_DONE, inet);
+  CHECK(e && C.files.count(e->fileId) && C.files[e->fileId].data == big, "integra");
+  CHECK(C.partPuts - putsInet <= 9 - 3 + 2, "solo se enviaron las partes que faltaban");
+  auditPhone("cambio de destino");
+
+  // Desvincular la cuenta con el destino en el telefono: lo de Internet se cancela igual.
+  CHECK(flexStorageSetEnabled(true), "telefono");
+  pump(3);
+  putLocal("/Fotos/huerfana.avi", pattern(2 * 1024 * 1024, 53));
+  CHECK(flexStorageSetEnabled(false), "Internet");
+  pump(3);
+  uint32_t orphan = flexCloudUpload("/Fotos/huerfana.avi", nullptr, "root", 0, 0);
+  CHECK(pumpUntil([]{ return C.partPuts > 0; }, 3000), "empezada");
+  CHECK(flexStorageSetEnabled(true), "al telefono");
+  pump(3);
+  flexAccountForgetLocal();
+  flexCloudAccountUnlinked();
+  pump(3);
+  CHECK(flexStorageSetEnabled(false), "de vuelta a Internet");
+  pump(20);
+  CHECK(xfer(orphan).phase == 255 || xfer(orphan).phase == FCX_CANCELLED, "la subida de la cuenta desvinculada NO siguio");
+  int putsAfter = C.partPuts;
+  pump(500);
+  CHECK(C.partPuts == putsAfter, "y no se envia nada mas de ella");
+}
+
+static void testPhoneForget(){
+  printf("-- Flex Storage: olvidar el telefono cancela lo suyo y vuelve a Internet --\n");
+  phoneBoot();
+  std::string data = pattern(2 * 1024 * 1024, 61);
+  putLocal("/Fotos/pendiente.avi", data);
+  uint32_t up = flexCloudUpload("/Fotos/pendiente.avi", nullptr, "root", 0, FCL_JF_FREE_LOCAL);
+  CHECK(pumpUntil([]{ return C.partPuts >= 2; }, 3000), "subida al telefono a medias");
+  flexStorageForget();
+  pump(5);
+  CHECK(flexCloudDest() == FCD_INTERNET, "sin telefono: Internet");
+  FlexStorageInfo si; flexStorageInfo(&si);
+  CHECK(si.state == FSP_NONE, "Flex Storage: sin telefono");
+  Preferences pr; pr.begin("flexstor", false);
+  CHECK(!pr.isKey("phone"), "la clave se borro de la NVS");
+  pr.end();
+  CHECK(localFile("/Fotos/pendiente.avi") == data, "el original sigue intacto");
+  // Otro telefono (o el mismo de nuevo): el diario del anterior no revive nada.
+  writePhoneRecord();
+  phoneReboot();
+  pump(50);
+  CHECK(flexCloudDest() == FCD_PHONE, "emparejado otra vez");
+  CHECK(xfer(up).phase == 255, "la subida del telefono olvidado no revive");
+  CHECK(!flexFsExists("/System/Cloud/pdl"), "y sin temporales suyos");
+}
+
+static void testPhonePowerAndStream(){
+  printf("-- Flex Storage: apagado a mitad, streaming acotado y miniaturas desde el telefono --\n");
+  phoneBoot();
+  std::string data = pattern(3 * 1024 * 1024 + 11, 71);
+  putLocal("/Fotos/apagon.avi", data);
+  uint32_t up = flexCloudUpload("/Fotos/apagon.avi", nullptr, "root", 0, 0);
+  CHECK(pumpUntil([]{ return C.partPuts >= 4; }, 3000), "a mitad");
+  int creates = C.creates, sess = P.sessions;
+  phoneReboot();                                               // APAGON: RAM perdida, NVS y flash siguen
+  CHECK(flexCloudDest() == FCD_PHONE && xfer(up).phase == FCX_QUEUED, "tras encender: telefono y la subida en su lista");
+  CHECK(waitEv(FCE_UPLOAD_DONE, up), "termina tras el apagado");
+  CHECK(C.creates == creates, "con la MISMA sesion de subida del telefono");
+  CHECK(P.sessions == sess + 1, "una sesion nueva con el telefono (los tokens no se guardan)");
+  CHECK(C.files[evFile(FCE_UPLOAD_DONE, up)].data == data, "integra");
+
+  FFile& v = addGeneratedFile("video_del_telefono.avi", 40ull * 1024 * 1024);
+  FclItem it = itemOf(v);
+  size_t ps0 = gNetPsNow; gNetPsPeak = gNetPsNow;
+  CHECK(flexCloudStreamOpen(&it), "streaming desde el telefono");
+  auto st = [](int n){ for(int i = 0; i < n; i++){ flexCloudTestStreamStep(); netstubAdvance(2); } };
+  uint8_t buf[4096]; uint64_t bad = 0, waits = 0;
+  for(uint32_t off = 0; off < 6u * 1024 * 1024; off += sizeof(buf)){
+    int r;
+    while((r = flexCloudStreamRead(off, buf, sizeof(buf))) < 0){ st(1); if(++waits > 200000) break; }
+    for(int i = 0; i < r; i++) if(buf[i] != genByte(off + i)) bad++;
+  }
+  CHECK(bad == 0, "6 MB por rangos desde el telefono: identicos");
+  C.ranges.clear();
+  flexCloudStreamSeek(30u * 1024 * 1024);
+  int r, spins = 0;
+  while((r = flexCloudStreamRead(30u * 1024 * 1024, buf, sizeof(buf))) < 0 && spins++ < 200) st(1);
+  CHECK(r == (int)sizeof(buf) && !C.ranges.empty() && C.ranges[0] == "bytes=31457280-", "salto = rango nuevo (sin bajar lo de en medio)");
+  CHECK(gNetPsPeak - ps0 <= (size_t)FLEX_CLOUD_STREAM_BLOCK * FLEX_CLOUD_STREAM_BLOCKS + 64 * 1024, "memoria ACOTADA (la misma arena de siempre)");
+  // El telefono se apaga en mitad del video: espera, no se cuelga.
+  P.up = false;
+  flexCloudStreamSeek(10u * 1024 * 1024);
+  st(40);
+  char err[96];
+  uint8_t ss = flexCloudStreamState(err, sizeof(err));
+  CHECK(ss == FCS_WAITING_NET || ss == FCS_ERROR, "telefono apagado: esperando (o error claro), nunca colgado");
+  P.up = true;
+  flexCloudStreamClose();
+  st(2);
+  CHECK(flexCloudStreamState(err, sizeof(err)) == FCS_CLOSED, "cerrado");
+  auditPhone("streaming");
+}
+
 int main(){
   printf("=== FlexOS · Flex Cloud Manager (P4) contra un Flex Cloud simulado ===\n");
   gKey.generate();
@@ -1524,6 +1919,11 @@ int main(){
   testEventsAfterPowerLoss();
   testJournalCorrupt();
   testBigUploadBounded();
+  testPhoneBasics();
+  testPhoneSession();
+  testPhoneSwitch();
+  testPhoneForget();
+  testPhonePowerAndStream();
   gKey.free_();
   printf("=== %d comprobaciones, %d fallos ===\n", gChecks, gFails);
   return gFails ? 1 : 0;

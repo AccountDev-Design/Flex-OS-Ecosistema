@@ -17,6 +17,10 @@
 //    · La identidad es la de Flex Account (FlexOS_Account): la misma
 //      credencial del dispositivo, siempre por TLS verificado
 //      (FlexOS_CloudTLS). Sin cuenta no se toca la red.
+//    · DOS DESTINOS, uno a la vez y cada uno con su diario: el servicio de
+//      Internet de siempre o el TELEFONO emparejado con Flex Storage
+//      (FlexOS_StorageLink: misma API, red local, sesion propia). Sin
+//      telefono todo es exactamente como antes.
 //    · Subidas y descargas viven en un DIARIO en LittleFS que sobrevive a
 //      un apagado; las partes recibidas las sabe el servidor, asi que el
 //      diario solo se escribe en los cambios de estado.
@@ -112,6 +116,21 @@ typedef struct {
   char     sha256[FCL_SHA_HEX];
 } FlexCloudEvent;
 
+// ---------------------------------------------------------------- destino
+//   FCD_INTERNET  el servicio de siempre (Flex Account + TLS verificado)
+//   FCD_PHONE     el telefono emparejado con Flex Storage (red local)
+// Lo elige FlexOS_StorageLink: telefono emparejado y conectado => telefono.
+// Antes de flexCloudBegin() solo fija cual diario se carga. Despues NO
+// bloquea: el cambio lo aplica la tarea (cierra el streaming, suelta lo que
+// estaba en marcha SIN perderlo -- queda en el diario de su destino y sigue al
+// volver -- y carga el diario del otro).
+enum FlexCloudDest : uint8_t { FCD_INTERNET = 0, FCD_PHONE = 1 };
+void    flexCloudSetDest(uint8_t dest);
+uint8_t flexCloudDest();        // el que esta en uso ahora
+// El telefono emparejado se olvido (o se emparejo OTRO): lo que quedaba en su
+// diario ya no puede terminar y se cancela (los originales no se tocan).
+void    flexCloudPhoneForgotten();
+
 // ---------------------------------------------------------------- ciclo
 void flexCloudBegin();          // carga el diario y crea las tareas; no toca la radio
 // La nube esta a la vista (Archivos/Galeria/Multimedia en primer plano):
@@ -121,7 +140,8 @@ void flexCloudStatus(FlexCloudStatus* out);
 const char* flexCloudNetText(uint8_t net);
 // La cuenta se desvinculo en ESTE aparato: cancela lo que estaba en cola o en marcha
 // (era de esa cuenta) y suelta su cuota, su direccion y su lista. Lo llama quien
-// desvincula, justo despues de flexAccountForgetLocal(). No toca la red.
+// desvincula, justo despues de flexAccountForgetLocal(). No toca la red. Con el
+// destino en el telefono, lo hace la tarea sobre el diario de Internet.
 void flexCloudAccountUnlinked();
 
 // ------------------------------------------------------------- listados
@@ -191,6 +211,7 @@ void flexCloudTestSetBase(const char* base);
 void flexCloudTestStep();          // una vuelta de la tarea principal
 void flexCloudTestStreamStep();    // una vuelta de la tarea de streaming
 void flexCloudTestPowerCycle();    // se pierde la RAM; la flash (fsstub) y la NVS siguen
+void flexCloudTestPowerOff();      // lo mismo sin volver a arrancar (para el orden de setup())
 uint32_t flexCloudTestJournalSaves();
 #endif
 

@@ -426,9 +426,33 @@ const char* fclErrorText(const char* code){
     { "bad_response",       "Respuesta inesperada de Flex Cloud" },
     { "no_memory",          "No hay memoria libre ahora" },
     { "cancelled",          "Cancelado" },
+    { "dest_changed",       "Flex Cloud cambi\xC3\xB3 de destino; vuelve a intentarlo" },
+    { "no_phone",           "Empareja un tel\xC3\xA9" "fono para usar Flex Cloud" },
+    { "phone_rejected",     "El tel\xC3\xA9" "fono ya no reconoce este Flex OS: vuelve a emparejarlo" },
   };
   for(auto& e : T) if(!strcmp(code, e.c)) return e.t;
   return "No se pudo completar la operaci\xC3\xB3n";
+}
+
+// Flex Cloud en el TELEFONO (Flex Storage): las mismas respuestas de la API,
+// pero quien no contesta es el telefono y no hay cuenta que revincular.
+const char* fclPhoneErrorText(const char* code){
+  if(code && *code){
+    struct { const char* c; const char* t; } T[] = {
+      { "network",        "Tel\xC3\xA9" "fono desconectado" },
+      { "server",         "El tel\xC3\xA9" "fono no responde; se reintentar\xC3\xA1" },
+      { "no_account",     "Empareja un tel\xC3\xA9" "fono para usar Flex Cloud" },
+      { "auth_required",  "Renovando la sesi\xC3\xB3n con el tel\xC3\xA9" "fono" },
+      { "token_expired",  "Renovando la sesi\xC3\xB3n con el tel\xC3\xA9" "fono" },
+      { "device_revoked", "El tel\xC3\xA9" "fono ya no reconoce este Flex OS: vuelve a emparejarlo" },
+      { "quota_exceeded", "No queda espacio en Flex Cloud del tel\xC3\xA9" "fono" },
+      { "bad_response",   "Respuesta inesperada del tel\xC3\xA9" "fono" },
+      { "not_found",      "Ya no existe en el tel\xC3\xA9" "fono" },
+      { "server_busy",    "El tel\xC3\xA9" "fono est\xC3\xA1 ocupado; se reintentar\xC3\xA1" },
+    };
+    for(auto& e : T) if(!strcmp(code, e.c)) return e.t;
+  }
+  return fclErrorText(code);
 }
 
 // =====================================================================

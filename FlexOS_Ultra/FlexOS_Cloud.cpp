@@ -12,9 +12,11 @@
 #include "FlexOS_Account.h"
 #include "FlexOS_CloudTLS.h"
 #include "FlexOS_FS.h"
+#include "FlexOS_HttpSink.h"
 #include "FlexOS_JPEG.h"
 #include "FlexOS_MediaLib.h"
 #include "FlexOS_OTA.h"
+#include "FlexOS_StorageLink.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
@@ -26,7 +28,10 @@ namespace {
 // ---------------------------------------------------------------- constantes
 static const char*    CLOUD_DIR    = "/System/Cloud";
 static const char*    JOURNAL_PATH = "/System/Cloud/jobs.bin";
+static const char*    JOURNAL_PHONE = "/System/Cloud/phone.bin";  // destino telefono (Flex Storage)
 static const char*    DL_DIR       = "/System/Cloud/dl";
+static const char*    DL_PHONE     = "/System/Cloud/pdl";       // descargas del telefono a medias
+static const uint32_t PHONE_IDS    = 0x40000000u;  // numeros de trabajo del telefono: nunca los de Internet
 static const char*    VIEW_DIR     = "/System/Cloud/view";   // UN hueco: la foto que se esta viendo
 static const size_t   JSON_CAP     = 48u * 1024u;       // pagina de 40 elementos con holgura
 static const size_t   IO_CAP       = 16u * 1024u;       // lectura/escritura de bytes, reutilizado
@@ -58,6 +63,16 @@ static void stLock(){ if(gStLock) xSemaphoreTake(gStLock, portMAX_DELAY); }
 static void stUnlock(){ if(gStLock) xSemaphoreGive(gStLock); }
 
 static char gBase[160] = FLEX_CLOUD_BASE_URL;
+// DESTINO (FlexOS_Cloud.h): el que esta en uso y el pedido. Solo la tarea los
+// cambia (applyDest); el resto solo lee gDest (un byte).
+static volatile uint8_t gDest = FCD_INTERNET, gDestWant = FCD_INTERNET;
+static volatile bool gPhoneForgot = false;     // vaciar el diario del telefono (lo hace la tarea)
+static volatile bool gInetUnlinked = false;    // cuenta desvinculada con el destino en el telefono
+static bool phoneDest(){ return gDest == FCD_PHONE; }
+static const char* journalPath(){ return phoneDest() ? JOURNAL_PHONE : JOURNAL_PATH; }
+static const char* dlDir(){ return phoneDest() ? DL_PHONE : DL_DIR; }
+// Los textos de siempre; con el destino en el telefono, los suyos.
+static const char* errText(const char* code){ return phoneDest() ? fclPhoneErrorText(code) : fclErrorText(code); }
 static FlexCloudStatus gStatus;
 static volatile bool gActive = false;
 static uint32_t gNextMeMs = 0, gNetRetryAt = 0;
@@ -193,20 +208,26 @@ static void saveJournal(){
   if(n){
     flexFsMkdir("/System");
     flexFsMkdir(CLOUD_DIR);
-    if(!flexFsWriteBinAtomic(JOURNAL_PATH, buf, n)) Serial.println(F("[CLOUD] no se pudo guardar el diario"));
+    if(!flexFsWriteBinAtomic(journalPath(), buf, n)) Serial.println(F("[CLOUD] no se pudo guardar el diario"));
   }
   psFree(buf);
 }
 
+// Tambien al cambiar de destino, con la interfaz leyendo: el diario se
+// sustituye bajo el cerrojo (la lectura del archivo va fuera).
 static void loadJournal(){
-  fclJournalInit(gJ);
-  if(!flexFsReady()) return;
   size_t cap = fclJournalMaxBytes();
-  uint8_t* buf = (uint8_t*)psAlloc(cap);
-  if(!buf) return;
-  int n = flexFsReadBin(JOURNAL_PATH, buf, cap);
+  uint8_t* buf = flexFsReady() ? (uint8_t*)psAlloc(cap) : nullptr;
+  int n = buf ? flexFsReadBin(journalPath(), buf, cap) : 0;
   bool damaged = false;
+  lock();
+  fclJournalInit(gJ);
   if(n > 0) fclJournalDecode(gJ, buf, (size_t)n, &damaged);
+  // La interfaz cancela y reintenta POR NUMERO: los del telefono no pueden
+  // coincidir nunca con los de Internet.
+  if(phoneDest() && gJ->nextId < PHONE_IDS) gJ->nextId = PHONE_IDS;
+  gJournalDirty = false;
+  unlock();
   if(damaged) Serial.println(F("[CLOUD] diario con registros danados: se descartaron"));
   psFree(buf);
 }
@@ -216,26 +237,6 @@ static int jobIndex(const FclJob* j){ return (int)(j - gJ->jobs); }
 // ======================================================================
 //  HTTP
 // ======================================================================
-// Cuerpo de respuesta a un buffer fijo (writeToStream descodifica chunked).
-class BufSink : public Stream {
- public:
-  BufSink(char* b, size_t cap) : b_(b), cap_(cap), n_(0), over_(false) {}
-  size_t write(uint8_t c) override { if(n_ + 1 >= cap_){ over_ = true; return 0; } b_[n_++] = (char)c; return 1; }
-  size_t write(const uint8_t* p, size_t n) override {
-    if(n_ + n >= cap_){ over_ = true; n = n_ + 1 < cap_ ? cap_ - 1 - n_ : 0; }
-    memcpy(b_ + n_, p, n); n_ += n; return n;
-  }
-  int available() override { return 0; }
-  int read() override { return -1; }
-  int peek() override { return -1; }
-  void flush() override {}
-  size_t len() const { return n_; }
-  bool overflow() const { return over_; }
-  void terminate(){ b_[n_ < cap_ ? n_ : cap_ - 1] = 0; }
- private:
-  char* b_; size_t cap_, n_; bool over_;
-};
-
 // Una parte de un archivo local como cuerpo de un PUT, sin cargarla en RAM.
 // OJO: HTTPClient::sendRequest(Stream*) da vueltas mientras available() > -1
 // y faltan bytes; un error de lectura DEBE devolver -1 o se quedaria ahi.
@@ -261,10 +262,40 @@ class PartStream : public Stream {
   FlexFsStream* f_; size_t left_; bool err_;
 };
 
-struct Api { WiFiClientSecure sec; HTTPClient http; };
+struct Api { WiFiClientSecure sec; WiFiClient plain; HTTPClient http; };
 static Api* gApi = nullptr;                  // conexion reutilizable de la tarea principal
 
-static bool netUsable(){ return flexAccountUsable() && WiFi.status() == WL_CONNECTED; }
+// ---- Lo que cambia con el destino (el resto del gestor es el mismo) ----
+// Internet: Flex Account, TLS verificado. Telefono: FlexOS_StorageLink, red
+// local sin TLS (no gasta la SRAM interna de mbedTLS) y token de sesion.
+static bool destUsable(){ return phoneDest() ? flexStoragePhoneUsable() : flexAccountUsable(); }
+static bool netUsable(){ return destUsable() && WiFi.status() == WL_CONNECTED; }
+static bool destBase(char* out, size_t cap){
+  if(phoneDest()) return flexStoragePhoneBase(out, cap);
+  snprintf(out, cap, "%s", gBase);
+  return true;
+}
+// La credencial del destino; si no la hay, `code` dice por que.
+static bool destBearer(char* out, size_t cap, char* code, size_t codeCap){
+  if(phoneDest()) return flexStorageCopyBearer(out, cap, code, codeCap);
+  if(flexAccountCopyBearer(out, cap)) return true;
+  if(code && codeCap) snprintf(code, codeCap, "no_account");
+  return false;
+}
+// El destino contesto 401 con una credencial que creiamos buena.
+static void destRejected(){ if(phoneDest()) flexStorageSessionRejected(); else flexAccountReportRejected(); }
+// Por que no se puede usar el destino (codigo para errText).
+static const char* destWhy(){
+  if(phoneDest()) return flexStoragePhoneState() == FSP_REJECTED ? "phone_rejected" : "no_phone";
+  return flexAccountLinked() ? "auth_required" : "no_account";
+}
+// Codigo del motivo por el que la red "no esta lista" (taskStep, transferencias).
+static const char* netWhy(uint8_t net){
+  if(net == FCN_OFFLINE) return "no_wifi";
+  if(net == FCN_AUTH) return phoneDest() ? "phone_rejected" : "auth_required";
+  if(net == FCN_NO_ACCOUNT) return phoneDest() ? "no_phone" : "no_account";
+  return "network";
+}
 
 // Por que fallo la ultima conexion TLS (lo dice mbedTLS); vacio si no fue un fallo de transporte.
 static char gTlsWhy[48] = "";
@@ -286,7 +317,36 @@ static bool tlsRoomOk(){
   return false;
 }
 
+// Sin TLS (telefono) no hace falta sitio en la SRAM interna para mbedTLS.
+static bool roomForConn(){ return phoneDest() || tlsRoomOk(); }
+// Cliente para una conexion propia (descarga, visor, streaming): TLS verificado
+// con Internet (aqui viaja la credencial); TCP normal con el telefono.
+static WiFiClient* newClient(){
+  if(phoneDest()) return new WiFiClient();
+  WiFiClientSecure* s = new WiFiClientSecure();
+  s->setCACert(flexCloudRootCA());
+  s->setHandshakeTimeout(12);
+  return s;
+}
+
+// Telefono: no hay "cuenta" que revisar. 401 = la sesion caduco (StorageLink
+// abre otra en la siguiente peticion, con su propia espera si insiste); que el
+// telefono ya no reconozca este Flex OS es el unico motivo para no insistir.
+static void classifyPhoneFail(int status, const char* code){
+  if(code && (!strcmp(code, "phone_rejected") || !strcmp(code, "device_revoked"))){
+    setNet(FCN_AUTH, errText("phone_rejected"));
+    return;
+  }
+  if(status == 401){ flexStorageSessionRejected(); return; }
+  if(status < 0 || (status >= 500 && !permanentCode(code))){
+    if(gNetFails < 250) gNetFails++;
+    gNetRetryAt = millis() + fclBackoffMs(gNetFails);
+    setNet(FCN_UNAVAILABLE, errText(status < 0 ? "network" : "server"));
+  }
+}
+
 static void classifyFail(int status, const char* code){
+  if(phoneDest()){ classifyPhoneFail(status, code); return; }
   // 401 con un codigo del servicio: la credencial no vale. Se avisa a Flex
   // Account para que lo compruebe (no se desvincula por una respuesta).
   if(status == 401 && code && (!strcmp(code, "auth_required") || !strcmp(code, "device_revoked") || !strcmp(code, "token_expired"))){
@@ -311,26 +371,36 @@ static void classifyFail(int status, const char* code){
 // Una peticion de la API. `json` (cuerpo JSON) o `body` (flujo) o nada.
 // Devuelve el estado HTTP (<0 = transporte). El cuerpo de la respuesta queda
 // en gJson (terminado en 0) y su error.code en `code`.
-static int apiCall(const char* method, const char* path, const char* json, Stream* body, size_t bodyLen,
-                   const char* hName, const char* hVal, char* code, size_t codeCap, size_t* outLen = nullptr){
+static int apiCallOnce(const char* method, const char* path, const char* json, Stream* body, size_t bodyLen,
+                       const char* hName, const char* hVal, char* code, size_t codeCap, size_t* outLen){
   if(code && codeCap) code[0] = 0;
   if(outLen) *outLen = 0;
   if(!gApi || !gJson) return HTTPC_ERROR_TOO_LESS_RAM;
   if(!netUsable()) return HTTPC_ERROR_NOT_CONNECTED;
-  if(!tlsRoomOk()){ if(code) snprintf(code, codeCap, "no_memory"); return HTTPC_ERROR_TOO_LESS_RAM; }
+  const bool phone = phoneDest();
+  if(!roomForConn()){ if(code) snprintf(code, codeCap, "no_memory"); return HTTPC_ERROR_TOO_LESS_RAM; }
   char bearer[64];
-  if(!flexAccountCopyBearer(bearer, sizeof(bearer))){ if(code) snprintf(code, codeCap, "no_account"); return HTTPC_ERROR_NOT_CONNECTED; }
+  if(!destBearer(bearer, sizeof(bearer), code, codeCap)){
+    // Telefono sin sesion: no contesta (o espera su reintento) o ya no reconoce
+    // este Flex OS. Es su estado de red, como un fallo de transporte.
+    if(phone) classifyFail(code && !strcmp(code, "phone_rejected") ? 403 : -1, code);
+    return HTTPC_ERROR_NOT_CONNECTED;
+  }
+  char base[160];
+  if(!destBase(base, sizeof(base))){ memset(bearer, 0, sizeof(bearer)); if(code) snprintf(code, codeCap, "no_phone"); return HTTPC_ERROR_NOT_CONNECTED; }
   char url[384];
-  snprintf(url, sizeof(url), "%s%s", gBase, path);
+  snprintf(url, sizeof(url), "%s%s", base, path);
   HTTPClient& h = gApi->http;
-  gApi->sec.setCACert(flexCloudRootCA());     // TLS SIEMPRE verificado: aqui viaja la credencial
-  gApi->sec.setHandshakeTimeout(12);
+  if(!phone){
+    gApi->sec.setCACert(flexCloudRootCA());   // TLS SIEMPRE verificado: aqui viaja la credencial
+    gApi->sec.setHandshakeTimeout(12);
+  }
   h.setReuse(true);
   h.setTimeout(HTTP_TIMEOUT);
   h.setConnectTimeout(HTTP_TIMEOUT);
   h.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
   h.useHTTP10(false);
-  if(!h.begin(gApi->sec, url)){ memset(bearer, 0, sizeof(bearer)); return HTTPC_ERROR_CONNECTION_REFUSED; }
+  if(!(phone ? h.begin(gApi->plain, url) : h.begin(gApi->sec, url))){ memset(bearer, 0, sizeof(bearer)); return HTTPC_ERROR_CONNECTION_REFUSED; }
   char auth[80];
   snprintf(auth, sizeof(auth), "Bearer %s", bearer);
   memset(bearer, 0, sizeof(bearer));
@@ -348,7 +418,7 @@ static int apiCall(const char* method, const char* path, const char* json, Strea
   const uint32_t connMs = millis() - t0;                    // si no hubo conexion, lo que tardo en fallar
   size_t n = 0;
   if(st > 0){
-    BufSink sink(gJson, JSON_CAP);
+    FlexBufSink sink(gJson, JSON_CAP);
     int w = h.writeToStream(&sink);
     sink.terminate();
     n = sink.len();
@@ -358,7 +428,7 @@ static int apiCall(const char* method, const char* path, const char* json, Strea
     } else if(w < 0 && st >= 200 && st < 300) st = w;         // cuerpo cortado: no cuenta como exito
   } else gJson[0] = 0;
   gTlsWhy[0] = 0;
-  if(st < 0){
+  if(st < 0 && !phone){
     // El codigo de mbedTLS de ESTA conexion, antes de soltarla.
     char raw[64]; int e = gApi->sec.lastError(raw, sizeof(raw));
     if(e == -1 && st == HTTPC_ERROR_CONNECTION_REFUSED){
@@ -369,15 +439,28 @@ static int apiCall(const char* method, const char* path, const char* json, Strea
     } else flexTlsReason(e, gTlsWhy, sizeof(gTlsWhy));
   }
   h.end();
-  if(st < 0) gApi->sec.stop();                               // conexion en estado desconocido: fuera
+  if(st < 0){ if(phone) gApi->plain.stop(); else gApi->sec.stop(); }   // conexion en estado desconocido: fuera
+  if(phone) flexStorageNoteResult(st);
   if(outLen) *outLen = n;
   if(st >= 400 && code && !code[0]) fclParseError(gJson, n, code, codeCap, nullptr, 0);
   if(st < 0 && code && !code[0]) snprintf(code, codeCap, "network");
   if(st >= 200 && st < 300){
     gNetFails = 0;
     lock(); bool was = gStatus.net != FCN_ONLINE; unlock();
-    if(was) setNet(FCN_ONLINE, "Conectado a Flex Cloud");
+    if(was) setNet(FCN_ONLINE, phone ? "Conectado al tel\xC3\xA9" "fono" : "Conectado a Flex Cloud");
   } else classifyFail(st, code);
+  return st;
+}
+
+static int apiCall(const char* method, const char* path, const char* json, Stream* body, size_t bodyLen,
+                   const char* hName, const char* hVal, char* code, size_t codeCap, size_t* outLen = nullptr){
+  int st = apiCallOnce(method, path, json, body, bodyLen, hName, hVal, code, codeCap, outLen);
+  // Telefono: un 401 es un token que caduco (el telefono reinicio sus sesiones,
+  // o se cambio de Wi-Fi). classifyFail ya lo solto: se abre otra sesion y la
+  // peticion se repite UNA vez, si se puede repetir (un flujo de bytes ya se
+  // consumio: esa la reintenta su trabajo). Si el token recien abierto tambien
+  // se rechaza, StorageLink impone su espera: nunca un bucle.
+  if(st == 401 && phoneDest() && !body) st = apiCallOnce(method, path, json, body, bodyLen, hName, hVal, code, codeCap, outLen);
   return st;
 }
 
@@ -399,13 +482,29 @@ static void forgetIdentity(const char* why){
     gStatus.gen++;
     gListInfo.count = 0; gListInfo.more = false; gListInfo.nCrumbs = 0;
     gListInfo.state = FCL_LIST_ERROR;
-    snprintf(gListInfo.error, sizeof(gListInfo.error), "%s", fclErrorText(why));
+    snprintf(gListInfo.error, sizeof(gListInfo.error), "%s", errText(why));
     gListInfo.gen++;
   }
   unlock();
 }
 
+// Telefono: FlexOS_StorageLink sabe si hay uno emparejado, conectado y que no
+// haya rechazado a este Flex OS. Si responde lo dira la siguiente peticion.
+static void refreshNetPhone(){
+  uint8_t ps = flexStoragePhoneState();
+  if(ps == FSP_REJECTED){ forgetIdentity("phone_rejected"); setNet(FCN_AUTH, errText("phone_rejected")); return; }
+  if(ps != FSP_READY){ forgetIdentity("no_phone"); setNet(FCN_NO_ACCOUNT, errText("no_phone")); return; }
+  if(WiFi.status() != WL_CONNECTED){ setNet(FCN_OFFLINE, errText("no_wifi")); return; }
+  lock(); uint8_t net = gStatus.net; unlock();
+  if(net == FCN_NO_ACCOUNT || net == FCN_OFFLINE || net == FCN_AUTH){
+    setNet(FCN_CONNECTING, "Conectando con el tel\xC3\xA9" "fono");
+    if(gActive) gMeDue = true;
+    gNetRetryAt = 0;
+  }
+}
+
 static void refreshNet(){
+  if(phoneDest()){ refreshNetPhone(); return; }
   if(!flexAccountLinked()){ gAuthWait = false; forgetIdentity("no_account"); setNet(FCN_NO_ACCOUNT, fclErrorText("no_account")); return; }
   if(!flexAccountUsable()){
     // Flex Account ya lo sabe y lo ensena: de aqui se sale revinculando.
@@ -467,7 +566,7 @@ static void fetchMe(){
 static void listError(const char* code){
   lock();
   gListInfo.state = FCL_LIST_ERROR;
-  snprintf(gListInfo.error, sizeof(gListInfo.error), "%s", fclErrorText(code));
+  snprintf(gListInfo.error, sizeof(gListInfo.error), "%s", errText(code));
   gListInfo.gen++;
   unlock();
 }
@@ -524,7 +623,7 @@ static void opDone(uint32_t opId, int st, const char* code, const char* okText){
   FlexCloudEvent e; memset(&e, 0, sizeof(e));
   e.kind = FCE_OP_DONE; e.opId = opId; e.ok = st >= 200 && st < 300;
   snprintf(e.code, sizeof(e.code), "%s", e.ok ? "" : (code && code[0] ? code : "server"));
-  snprintf(e.text, sizeof(e.text), "%s", e.ok ? okText : fclErrorText(e.code));
+  snprintf(e.text, sizeof(e.text), "%s", e.ok ? okText : errText(e.code));
   pushEvent(e);
   if(e.ok){ gMeDue = true; lock(); gListInfo.state = FCL_LIST_LOADING; gListInfo.gen++; unlock(); doList(false); }
 }
@@ -609,7 +708,7 @@ struct Runner {
   FclSha        sha, partCtx;
   uint64_t      done;
   HTTPClient*   dl;             // descarga en curso (HTTP/1.0, cuerpo sin trocear)
-  WiFiClientSecure* dlSec;
+  WiFiClient*   dlCli;          // su conexion (TLS con Internet, TCP con el telefono)
   uint64_t      dlLeft;
   bool          verifyOpen;     // "liberar espacio": comprobando el original otra vez
   uint64_t      verifyLeft;
@@ -643,7 +742,7 @@ static void rtDone(FclJob* j, uint64_t done){
 static void runnerDropIo(){
   if(gRun.f){ flexFsStreamClose(gRun.f); gRun.f = nullptr; }
   if(gRun.dl){ gRun.dl->end(); delete gRun.dl; gRun.dl = nullptr; }
-  if(gRun.dlSec){ gRun.dlSec->stop(); delete gRun.dlSec; gRun.dlSec = nullptr; }
+  if(gRun.dlCli){ gRun.dlCli->stop(); delete gRun.dlCli; gRun.dlCli = nullptr; }
 }
 static void runnerClose(){
   runnerDropIo();
@@ -652,7 +751,7 @@ static void runnerClose(){
   gRun.stage = RS_IDLE;
 }
 
-static void dlTempPath(const FclJob* j, char* out, size_t cap){ snprintf(out, cap, "%s/%lu.part", DL_DIR, (unsigned long)j->id); }
+static void dlTempPath(const FclJob* j, char* out, size_t cap){ snprintf(out, cap, "%s/%lu.part", dlDir(), (unsigned long)j->id); }
 
 static void jobFinish(FclJob* j, uint8_t state, const char* code){
   int i = jobIndex(j);
@@ -661,7 +760,7 @@ static void jobFinish(FclJob* j, uint8_t state, const char* code){
   bool cancelled = j->state == FCL_JOB_CANCELLED;
   if(cancelled) state = FCL_JOB_CANCELLED;
   j->state = state;
-  if(state == FCL_JOB_FAILED) snprintf(j->error, sizeof(j->error), "%s", fclErrorText(code));
+  if(state == FCL_JOB_FAILED) snprintf(j->error, sizeof(j->error), "%s", errText(code));
   if(state == FCL_JOB_DONE) j->flags &= (uint8_t)~FCL_JF_ABORT;
   gRt[i].phase = state == FCL_JOB_DONE ? FCX_DONE : state == FCL_JOB_CANCELLED ? FCX_CANCELLED : FCX_FAILED;
   gRt[i].retryAt = 0;
@@ -674,7 +773,7 @@ static void jobFinish(FclJob* j, uint8_t state, const char* code){
   e.kind = state == FCL_JOB_DONE ? (up ? FCE_UPLOAD_DONE : FCE_DOWNLOAD_DONE) : (up ? FCE_UPLOAD_FAILED : FCE_DOWNLOAD_FAILED);
   e.opId = j->id; e.ok = state == FCL_JOB_DONE; e.mlId = j->mlId; e.flags = j->flags; e.size = j->size;
   snprintf(e.code, sizeof(e.code), "%s", code ? code : "");
-  snprintf(e.text, sizeof(e.text), "%s", e.ok ? (up ? "Subido a Flex Cloud" : "Descargado") : fclErrorText(code));
+  snprintf(e.text, sizeof(e.text), "%s", e.ok ? (up ? "Subido a Flex Cloud" : "Descargado") : errText(code));
   if(e.ok && up && (j->flags & FCL_JF_FREE_LOCAL) && gRun.localChanged){
     // Subido, pero el original cambio despues (o no se pudo releer): se conserva.
     lock(); j->flags &= (uint8_t)~FCL_JF_FREE_LOCAL; unlock();
@@ -712,7 +811,10 @@ static void stepFail(FclJob* j, int st, const char* code){
   // Se reanuda preguntando al servidor lo que ya tiene: nada en RAM es imprescindible.
   uint8_t back = j->type == FCL_JOB_UPLOAD ? (gRun.stage >= RS_CREATE ? RS_CREATE : RS_PREP) : RS_DL_PREP;
   if(st == 401){
-    lock(); gRt[i].phase = FCX_WAITING_NET; gRt[i].retryAt = millis() + 30000; gStatus.xferGen++; unlock();
+    // Internet: espera a que Flex Account la valide. Telefono: la sesion se
+    // renueva sola en la siguiente peticion (con su propia espera).
+    uint32_t wait = phoneDest() ? 2000u : 30000u;
+    lock(); gRt[i].phase = FCX_WAITING_NET; gRt[i].retryAt = millis() + wait; gStatus.xferGen++; unlock();
     gRun.stage = back;
     return;
   }
@@ -987,23 +1089,25 @@ static void dlPrepare(FclJob* j){
   rtDone(j, have);
   if(have == j->size){ gRun.stage = RS_DL_VERIFY; return; }
   if(!netUsable()){ stepFail(j, -1, "network"); return; }
-  if(!tlsRoomOk()){ stepFail(j, -1, "no_memory"); return; }
-  char bearer[64];
-  if(!flexAccountCopyBearer(bearer, sizeof(bearer))){ stepFail(j, -1, "network"); return; }
+  if(!roomForConn()){ stepFail(j, -1, "no_memory"); return; }
+  char bearer[64], why[FCL_CODE_MAX] = "", base[160];
+  if(!destBearer(bearer, sizeof(bearer), why, sizeof(why)) || !destBase(base, sizeof(base))){
+    memset(bearer, 0, sizeof(bearer));
+    if(phoneDest()) classifyFail(!strcmp(why, "phone_rejected") ? 403 : -1, why);
+    stepFail(j, -1, "network"); return;
+  }
   gRun.f = have ? flexFsOpenAppend(tp) : flexFsOpenWrite(tp);
   if(!gRun.f){ memset(bearer, 0, sizeof(bearer)); jobFinish(j, FCL_JOB_FAILED, "no_space_local"); return; }
   // Peticion con rango. HTTP/1.0: cuerpo sin trocear, lectura directa.
-  gRun.dlSec = new WiFiClientSecure();
+  gRun.dlCli = newClient();                        // con Internet, TLS verificado: aqui tambien viaja la credencial
   gRun.dl = new HTTPClient();
-  gRun.dlSec->setCACert(flexCloudRootCA());        // TLS verificado: aqui tambien viaja la credencial
-  gRun.dlSec->setHandshakeTimeout(12);
   gRun.dl->setTimeout(HTTP_TIMEOUT);
   gRun.dl->setConnectTimeout(HTTP_TIMEOUT);
   gRun.dl->setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
   gRun.dl->useHTTP10(true);
   char url[256];
-  snprintf(url, sizeof(url), "%s/download/%s", gBase, j->remoteId);
-  if(!gRun.dl->begin(*gRun.dlSec, url)){ memset(bearer, 0, sizeof(bearer)); stepFail(j, -1, "network"); return; }
+  snprintf(url, sizeof(url), "%s/download/%s", base, j->remoteId);
+  if(!gRun.dl->begin(*gRun.dlCli, url)){ memset(bearer, 0, sizeof(bearer)); stepFail(j, -1, "network"); return; }
   char hdr[80];
   snprintf(hdr, sizeof(hdr), "Bearer %s", bearer); memset(bearer, 0, sizeof(bearer));
   gRun.dl->addHeader("Authorization", hdr); memset(hdr, 0, sizeof(hdr));
@@ -1021,8 +1125,9 @@ static void dlPrepare(FclJob* j){
     fclShaStart(&gRun.sha); gRun.done = have = 0;
     if(!gRun.f){ jobFinish(j, FCL_JOB_FAILED, "no_space_local"); return; }
   }
+  if(phoneDest()) flexStorageNoteResult(st);
   if(st != 200 && st != 206){
-    if(st == 401) flexAccountReportRejected();
+    if(st == 401) destRejected();
     stepFail(j, st, st == 404 ? "not_found" : st == 401 ? "auth_required" : st < 0 ? "network" : "server");
     return;
   }
@@ -1082,7 +1187,7 @@ static void dlVerify(FclJob* j){
   char local[64], fin[FCL_PATH_MAX];
   fclLocalName(j->name, local, sizeof(local));
   const char* dot = strrchr(local, '.');
-  snprintf(fin, sizeof(fin), "%s/%lu%s", DL_DIR, (unsigned long)j->id, dot ? dot : "");
+  snprintf(fin, sizeof(fin), "%s/%lu%s", dlDir(), (unsigned long)j->id, dot ? dot : "");
   if(strcmp(fin, tp)){ flexFsDelete(fin); if(!flexFsMove(tp, fin)) snprintf(fin, sizeof(fin), "%s", tp); }
   lock(); snprintf(j->localPath, sizeof(j->localPath), "%s", fin); unlock();
   jobFinish(j, FCL_JOB_DONE, nullptr);
@@ -1196,17 +1301,20 @@ static void fetchView(const Cmd& c){
   fclLocalName(c.text, local, sizeof(local));
   snprintf(viewPath, sizeof(viewPath), "%s/%s", VIEW_DIR, local);
   if(c.size + LOCAL_RESERVE > freeB + flexFsDirSize(VIEW_DIR)){
-    snprintf(e.code, sizeof(e.code), "no_space_local"); snprintf(e.text, sizeof(e.text), "%s", fclErrorText(e.code)); pushEvent(e); return;
+    snprintf(e.code, sizeof(e.code), "no_space_local"); snprintf(e.text, sizeof(e.text), "%s", errText(e.code)); pushEvent(e); return;
   }
-  char bearer[64];
-  if(!netUsable() || !flexAccountCopyBearer(bearer, sizeof(bearer))){ snprintf(e.code, sizeof(e.code), "network"); snprintf(e.text, sizeof(e.text), "%s", fclErrorText("network")); pushEvent(e); return; }
-  if(!tlsRoomOk()){ memset(bearer, 0, sizeof(bearer)); snprintf(e.code, sizeof(e.code), "no_memory"); snprintf(e.text, sizeof(e.text), "%s", fclErrorText("no_memory")); pushEvent(e); return; }
-  WiFiClientSecure sec; HTTPClient h;
-  sec.setCACert(flexCloudRootCA()); sec.setHandshakeTimeout(12);
+  char bearer[64], why[FCL_CODE_MAX] = "", base[160];
+  if(!netUsable() || !destBearer(bearer, sizeof(bearer), why, sizeof(why)) || !destBase(base, sizeof(base))){
+    memset(bearer, 0, sizeof(bearer));
+    if(phoneDest() && why[0]) classifyFail(!strcmp(why, "phone_rejected") ? 403 : -1, why);
+    snprintf(e.code, sizeof(e.code), "network"); snprintf(e.text, sizeof(e.text), "%s", errText("network")); pushEvent(e); return;
+  }
+  if(!roomForConn()){ memset(bearer, 0, sizeof(bearer)); snprintf(e.code, sizeof(e.code), "no_memory"); snprintf(e.text, sizeof(e.text), "%s", errText("no_memory")); pushEvent(e); return; }
+  WiFiClient* cli = newClient(); HTTPClient h;
   h.setTimeout(HTTP_TIMEOUT); h.useHTTP10(true);
   char url[256], hdr[80];
-  snprintf(url, sizeof(url), "%s/download/%s", gBase, c.id);
-  bool ok = h.begin(sec, url);
+  snprintf(url, sizeof(url), "%s/download/%s", base, c.id);
+  bool ok = h.begin(*cli, url);
   snprintf(hdr, sizeof(hdr), "Bearer %s", bearer); memset(bearer, 0, sizeof(bearer));
   if(ok){ h.addHeader("Authorization", hdr); h.addHeader("Accept-Encoding", "identity"); }
   memset(hdr, 0, sizeof(hdr));
@@ -1228,6 +1336,8 @@ static void fetchView(const Cmd& c){
     flexFsStreamClose(f);
   }
   h.end();
+  cli->stop(); delete cli;
+  if(phoneDest()) flexStorageNoteResult(st);
   char hex[FCL_SHA_HEX]; fclShaFinishHex(&sha, hex);
   if(st == 200 && got == c.size && (!c.sha[0] || !strcmp(hex, c.sha))){
     e.kind = FCE_VIEW_READY; e.ok = true;
@@ -1236,8 +1346,8 @@ static void fetchView(const Cmd& c){
     flexFsDelete(VIEW_DIR);
     const char* code = st == 401 ? "auth_required" : st == 404 ? "not_found" : got != c.size ? "network" : "checksum_mismatch";
     snprintf(e.code, sizeof(e.code), "%s", code);
-    snprintf(e.text, sizeof(e.text), "%s", fclErrorText(code));
-    if(st == 401) flexAccountReportRejected();
+    snprintf(e.text, sizeof(e.text), "%s", errText(code));
+    if(st == 401) destRejected();
   }
   pushEvent(e);
 }
@@ -1325,24 +1435,130 @@ static bool thumbWanted(){
 }
 
 // ======================================================================
+//  Cambio de destino (SOLO en la tarea: nadie mas toca el diario ni el runner)
+// ======================================================================
+// Una orden que no se va a ejecutar se CONTESTA (la interfaz la esperaba): la
+// lista se pide de nuevo sola; las operaciones y el visor dicen que no.
+static void failCmd(const Cmd& c, const char* why){
+  if(c.type == CMD_LIST || c.type == CMD_REFRESH || c.type == CMD_MORE){ listError(why); return; }
+  if(c.type == CMD_VIEW){
+    FlexCloudEvent e; memset(&e, 0, sizeof(e));
+    e.kind = FCE_VIEW_FAILED; e.opId = c.opId;
+    snprintf(e.code, sizeof(e.code), "%s", why); snprintf(e.text, sizeof(e.text), "%s", errText(why));
+    pushEvent(e);
+    return;
+  }
+  opDone(c.opId, -1, why, "");
+}
+
+// El diario de un destino que NO esta cargado: se lee, se cambia y se guarda.
+static void editJournalFile(const char* path, void (*fn)(FclJournal*)){
+  if(!flexFsReady()) return;
+  size_t cap = fclJournalMaxBytes();
+  uint8_t* buf = (uint8_t*)psAlloc(cap);
+  FclJournal* j = (FclJournal*)psAlloc(sizeof(FclJournal));
+  int n = buf ? flexFsReadBin(path, buf, cap) : 0;
+  if(j && n > 0){
+    bool damaged = false;
+    fclJournalInit(j);
+    fclJournalDecode(j, buf, (size_t)n, &damaged);
+    fn(j);
+    size_t m = fclJournalEncode(j, buf, cap);
+    if(m && !flexFsWriteBinAtomic(path, buf, m)) Serial.println(F("[CLOUD] no se pudo guardar el diario"));
+  }
+  psFree(j); psFree(buf);
+}
+// La cuenta de Internet se desvinculo: lo suyo se cancela como en
+// flexCloudCancel() (una subida con sesion deja pendiente soltar su reserva)
+// y lo terminado se quita de la lista, como en flexCloudClearFinished().
+static void cancelForUnlink(FclJournal* j){
+  for(int i = 0; i < FCL_JOBS_MAX; i++){
+    FclJob& x = j->jobs[i];
+    if(x.state == FCL_JOB_QUEUED || x.state == FCL_JOB_ACTIVE){
+      x.state = FCL_JOB_CANCELLED;
+      if(x.type == FCL_JOB_DOWNLOAD || x.remoteId[0]) x.flags |= FCL_JF_ABORT;
+    }
+    bool finished = x.state == FCL_JOB_FAILED || x.state == FCL_JOB_CANCELLED || (x.state == FCL_JOB_DONE && (x.flags & FCL_JF_DELIVERED));
+    if(!finished) continue;
+    if(x.flags & FCL_JF_ABORT) x.flags |= FCL_JF_CLEARED; else memset(&x, 0, sizeof(x));
+  }
+}
+// El telefono se olvido: con el ya no se puede hablar (nada que soltar en el
+// otro lado). Se vacia el diario; el numero siguiente se conserva.
+static void wipeJobs(FclJournal* j){ for(int i = 0; i < FCL_JOBS_MAX; i++) memset(&j->jobs[i], 0, sizeof(j->jobs[i])); }
+
+static void applyPending(){
+  if(gInetUnlinked){
+    gInetUnlinked = false;
+    // Con el destino en Internet ya lo hizo flexCloudAccountUnlinked() al momento.
+    if(phoneDest()) editJournalFile(JOURNAL_PATH, cancelForUnlink);
+  }
+  if(gPhoneForgot){
+    gPhoneForgot = false;
+    if(phoneDest()){
+      runnerClose();
+      flexCloudStreamClose();
+      lock(); wipeJobs(gJ); memset(gRt, 0, sizeof(gRt)); gStatus.xferGen++; unlock();
+      saveJournal();
+    } else editJournalFile(JOURNAL_PHONE, wipeJobs);
+    if(flexFsReady()) flexFsDelete(DL_PHONE);
+    Serial.println(F("[CLOUD] telefono olvidado: sus transferencias pendientes se cancelaron"));
+  }
+}
+
+static void reemitPending();
+static void applyDest(){
+  uint8_t want = gDestWant;
+  if(want == gDest) return;
+  Serial.printf("[CLOUD] destino: %s\n", want == FCD_PHONE ? "telefono (Flex Storage)" : "Internet");
+  // 1. Lo que estaba en marcha se suelta SIN perderse: vive en el diario de
+  //    su destino y en su servidor, y sigue cuando ese destino vuelva.
+  runnerClose();
+  if(gApi){ gApi->http.end(); gApi->sec.stop(); gApi->plain.stop(); }
+  flexCloudStreamClose();
+  if(gJournalDirty) saveJournal();
+  // 2. Avisos y ordenes del destino anterior. Los avisos de transferencias no
+  //    se marcaron entregados: se repiten cuando ese destino vuelva.
+  lock(); gEvHead = gEvN = 0; unlock();
+  Cmd c;
+  while(popCmd(c)) failCmd(c, "dest_changed");
+  // 3. El otro destino, desde cero: nada de lo que se ensenaba era suyo.
+  lock();
+  gDest = want;
+  gStatus.net = FCN_CONNECTING;
+  snprintf(gStatus.netText, sizeof(gStatus.netText), "%s", want == FCD_PHONE ? "Conectando con el tel\xC3\xA9" "fono" : "Conectando con Flex Cloud");
+  gStatus.quotaValid = false; memset(&gStatus.quota, 0, sizeof(gStatus.quota)); gStatus.address[0] = 0;
+  gStatus.gen++;
+  gListInfo.count = 0; gListInfo.more = false; gListInfo.nCrumbs = 0; gListInfo.folderId[0] = 0;
+  gListInfo.state = FCL_LIST_ERROR;                 // la interfaz la pide otra vez al volver la conexion
+  snprintf(gListInfo.error, sizeof(gListInfo.error), "%s", gStatus.netText);
+  gListInfo.gen++;
+  gCursor[0] = 0;
+  for(int i = 0; i < FLEX_CLOUD_THUMBS; i++){ psFree(gThumbs[i].px); memset(&gThumbs[i], 0, sizeof(gThumbs[i])); }
+  gThumbGen++;
+  memset(gRt, 0, sizeof(gRt));
+  gStatus.xferGen++;
+  unlock();
+  gNetFails = 0; gNetRetryAt = 0; gAuthWait = false; gNextMeMs = 0;
+  gMeDue = gActive;
+  loadJournal();
+  reemitPending();
+  if(flexFsReady()) flexFsDelete(VIEW_DIR);
+}
+
+// ======================================================================
 //  Tarea principal
 // ======================================================================
 static void taskStep(){
+  applyPending();
+  applyDest();
   refreshNet();
   Cmd c;
   if(popCmd(c)){
     if(netReady()){ if(c.type == CMD_VIEW) fetchView(c); else runCmd(c); }
     else {
       lock(); uint8_t net = gStatus.net; unlock();
-      const char* why = net == FCN_OFFLINE ? "no_wifi" : net == FCN_AUTH ? "auth_required" : net == FCN_NO_ACCOUNT ? "no_account" : "network";
-      if(c.type == CMD_LIST || c.type == CMD_REFRESH || c.type == CMD_MORE) listError(why);
-      else if(c.type == CMD_VIEW){
-        FlexCloudEvent e; memset(&e, 0, sizeof(e));
-        e.kind = FCE_VIEW_FAILED; e.opId = c.opId;
-        snprintf(e.code, sizeof(e.code), "%s", why); snprintf(e.text, sizeof(e.text), "%s", fclErrorText(why));
-        pushEvent(e);
-      }
-      else opDone(c.opId, -1, why, "");
+      failCmd(c, netWhy(net));
     }
     return;
   }
@@ -1386,12 +1602,12 @@ static void cloudTask(void*){
 // ======================================================================
 //  Streaming (tarea propia: un video no espera a una subida)
 // ======================================================================
-struct StNet { WiFiClientSecure* sec; HTTPClient* http; uint32_t pos; uint32_t left; uint32_t gen; uint8_t fails; uint32_t retryAt; uint32_t idleMs; };
+struct StNet { WiFiClient* cli; HTTPClient* http; uint32_t pos; uint32_t left; uint32_t gen; uint8_t fails; uint32_t retryAt; uint32_t idleMs; };
 static StNet gStNet;
 
 static void stConnClose(){
   if(gStNet.http){ gStNet.http->end(); delete gStNet.http; gStNet.http = nullptr; }
-  if(gStNet.sec){ gStNet.sec->stop(); delete gStNet.sec; gStNet.sec = nullptr; }
+  if(gStNet.cli){ gStNet.cli->stop(); delete gStNet.cli; gStNet.cli = nullptr; }
   gStNet.left = 0;
 }
 
@@ -1401,26 +1617,25 @@ static void stSetState(uint8_t state, const char* err){
 
 static bool stConnOpen(const char* fileId, uint32_t off, uint32_t size){
   stConnClose();
-  if(!tlsRoomOk()) return false;
-  char bearer[64];
-  if(!flexAccountCopyBearer(bearer, sizeof(bearer))) return false;
-  gStNet.sec = new WiFiClientSecure();
+  if(!roomForConn()) return false;
+  char bearer[64], why[FCL_CODE_MAX] = "", base[160];
+  if(!destBearer(bearer, sizeof(bearer), why, sizeof(why)) || !destBase(base, sizeof(base))){ memset(bearer, 0, sizeof(bearer)); return false; }
+  gStNet.cli = newClient();                     // con Internet, TLS verificado
   gStNet.http = new HTTPClient();
-  gStNet.sec->setCACert(flexCloudRootCA());
-  gStNet.sec->setHandshakeTimeout(12);
   gStNet.http->setTimeout(HTTP_TIMEOUT);
   gStNet.http->setConnectTimeout(HTTP_TIMEOUT);
   gStNet.http->useHTTP10(true);                 // cuerpo sin trocear: se lee tal cual
   char url[256], hdr[80];
-  snprintf(url, sizeof(url), "%s/download/%s", gBase, fileId);
-  if(!gStNet.http->begin(*gStNet.sec, url)){ memset(bearer, 0, sizeof(bearer)); stConnClose(); return false; }
+  snprintf(url, sizeof(url), "%s/download/%s", base, fileId);
+  if(!gStNet.http->begin(*gStNet.cli, url)){ memset(bearer, 0, sizeof(bearer)); stConnClose(); return false; }
   snprintf(hdr, sizeof(hdr), "Bearer %s", bearer); memset(bearer, 0, sizeof(bearer));
   gStNet.http->addHeader("Authorization", hdr); memset(hdr, 0, sizeof(hdr));
   gStNet.http->addHeader("Accept-Encoding", "identity");
   snprintf(hdr, sizeof(hdr), "bytes=%lu-", (unsigned long)off);
   gStNet.http->addHeader("Range", hdr);
   int st = gStNet.http->GET();
-  if(st == 401) flexAccountReportRejected();
+  if(phoneDest()) flexStorageNoteResult(st);
+  if(st == 401) destRejected();
   bool ok = st == 206 || (st == 200 && off == 0);
   int cl = ok ? gStNet.http->getSize() : -1;
   if(!ok || (cl >= 0 && (uint32_t)cl != size - off)){
@@ -1455,8 +1670,8 @@ static void streamStep(){
     giveBack();
     // Sin Wi-Fi se espera; sin una credencial que sirva NO: esperar "conexion"
     // para siempre era mentir. El reproductor lo dice (FCS_ERROR) y se detiene.
-    if(!flexAccountUsable()) stSetState(FCS_ERROR, fclErrorText(flexAccountLinked() ? "auth_required" : "no_account"));
-    else stSetState(FCS_WAITING_NET, fclErrorText("no_wifi"));
+    if(!destUsable()) stSetState(FCS_ERROR, errText(destWhy()));
+    else stSetState(FCS_WAITING_NET, errText("no_wifi"));
     vTaskDelay(pdMS_TO_TICKS(200));
     return;
   }
@@ -1465,7 +1680,7 @@ static void streamStep(){
       giveBack();
       if(gStNet.fails < 250) gStNet.fails++;
       gStNet.retryAt = millis() + (gStNet.fails < 4 ? 500u * gStNet.fails : fclBackoffMs(gStNet.fails - 3));
-      stSetState(gStNet.fails >= 6 ? FCS_ERROR : FCS_WAITING_NET, fclErrorText(gStNet.fails >= 6 ? "server" : "network"));
+      stSetState(gStNet.fails >= 6 ? FCS_ERROR : FCS_WAITING_NET, errText(gStNet.fails >= 6 ? "server" : "network"));
       return;
     }
   }
@@ -1539,7 +1754,7 @@ static bool ensureMainTask(){
     // dice tambien (si no, "Conectando..." o, peor, "sin cuenta" hasta el reintento).
     lock(); bool loading = gListInfo.state == FCL_LIST_LOADING; unlock();
     if(loading) listError("no_memory");
-    setNet(FCN_UNAVAILABLE, fclErrorText("no_memory"));
+    setNet(FCN_UNAVAILABLE, errText("no_memory"));
     return false;
   }
   return true;
@@ -1578,10 +1793,14 @@ static bool allocState(){
 
 static void reemitPending(){
   // Trabajos terminados cuyo aviso quiza no llego a procesarse (apagado entre
-  // medias): se vuelven a anunciar hasta que la interfaz los confirme.
+  // medias, o el destino cambio antes): se vuelven a anunciar hasta que la
+  // interfaz los confirme. Tambien corre con la interfaz leyendo (cambio de
+  // destino): el estado se toca bajo el cerrojo y se avisa fuera de el.
   for(int i = 0; i < FCL_JOBS_MAX; i++){
-    FclJob& x = gJ->jobs[i];
+    lock();
+    FclJob x = gJ->jobs[i];
     gRt[i].phase = x.state == FCL_JOB_DONE ? FCX_DONE : x.state == FCL_JOB_FAILED ? FCX_FAILED : FCX_QUEUED;
+    unlock();
     if(x.state != FCL_JOB_DONE || (x.flags & FCL_JF_DELIVERED)) continue;
     FlexCloudEvent e; memset(&e, 0, sizeof(e));
     e.kind = x.type == FCL_JOB_UPLOAD ? FCE_UPLOAD_DONE : FCE_DOWNLOAD_DONE;
@@ -1600,6 +1819,20 @@ static void reemitPending(){
 // ======================================================================
 //  API publica
 // ======================================================================
+void flexCloudSetDest(uint8_t dest){
+  dest = dest == FCD_PHONE ? (uint8_t)FCD_PHONE : (uint8_t)FCD_INTERNET;
+  // Antes de flexCloudBegin() no hay tarea ni diario cargado: solo se elige cual.
+  if(!gReady){ gDest = gDestWant = dest; return; }
+  if(gDestWant == dest) return;
+  gDestWant = dest;
+  notifyTask();
+}
+uint8_t flexCloudDest(){ return gDest; }
+void flexCloudPhoneForgotten(){
+  gPhoneForgot = true;
+  if(gReady) notifyTask();
+}
+
 void flexCloudBegin(){
   if(!gLock) gLock = xSemaphoreCreateMutex();
   if(!gStLock) gStLock = xSemaphoreCreateMutex();
@@ -1613,7 +1846,7 @@ void flexCloudBegin(){
   // ella. Con "sin cuenta" por defecto, una cuenta vinculada ensenaba un instante
   // "Vincular cuenta" (y, si la tarea no podia nacer, para siempre).
   gStatus.net = FCN_CONNECTING;
-  snprintf(gStatus.netText, sizeof(gStatus.netText), "%s", "Conectando con Flex Cloud");
+  snprintf(gStatus.netText, sizeof(gStatus.netText), "%s", phoneDest() ? "Conectando con el tel\xC3\xA9" "fono" : "Conectando con Flex Cloud");
   gCmdHead = gCmdN = 0; gEvHead = gEvN = 0;
   loadJournal();
   reemitPending();
@@ -1660,6 +1893,10 @@ void flexCloudStatus(FlexCloudStatus* out){
 // cuenta) y se sueltan la cuota, la direccion y la lista de esa cuenta.
 void flexCloudAccountUnlinked(){
   if(!gLock || !gJ) return;
+  // Con el destino en el telefono, el diario de Internet no esta cargado: lo
+  // cancela la tarea sobre el archivo (applyPending), antes de cualquier cambio
+  // de destino. Lo que se ensena es del telefono: no hay identidad que soltar.
+  if(phoneDest()){ gInetUnlinked = true; notifyTask(); return; }
   uint32_t ids[FCL_JOBS_MAX]; int n = 0;
   lock();
   for(int i = 0; i < FCL_JOBS_MAX; i++){
@@ -1673,6 +1910,16 @@ void flexCloudAccountUnlinked(){
 }
 
 const char* flexCloudNetText(uint8_t net){
+  if(phoneDest()){
+    switch(net){
+      case FCN_ONLINE:      return "Conectado";
+      case FCN_CONNECTING:  return "Conectando...";
+      case FCN_OFFLINE:     return "Sin Wi-Fi";
+      case FCN_AUTH:        return "Vuelve a emparejar el tel\xC3\xA9" "fono";
+      case FCN_UNAVAILABLE: return "Tel\xC3\xA9" "fono desconectado";
+      default:              return "Sin tel\xC3\xA9" "fono";
+    }
+  }
   switch(net){
     case FCN_ONLINE:      return "Conectado";
     case FCN_CONNECTING:  return "Conectando...";
@@ -1723,7 +1970,7 @@ int flexCloudListCopy(FclItem* dst, int start, int cap){
 // quedaria esperando "conexion" para siempre y la interfaz diria que se hizo:
 // se rechaza aqui y quien pregunta (CloudKit) dice por que.
 static uint32_t opFor(uint8_t type, const FclItem* it, const char* text, const char* id = nullptr){
-  if(!gLock || !flexAccountUsable()) return 0;
+  if(!gLock || !destUsable()) return 0;
   Cmd c; memset(&c, 0, sizeof(c));
   c.type = type;
   lock(); c.opId = gNextOp++; unlock();
@@ -1775,7 +2022,7 @@ static uint32_t addJob(uint8_t type, const char* localPath, const char* name, co
 }
 
 uint32_t flexCloudUpload(const char* localPath, const char* name, const char* parentId, uint32_t mlId, uint8_t flags){
-  if(!flexAccountUsable()) return 0;                            // ver opFor
+  if(!destUsable()) return 0;                                   // ver opFor
   if(!localPath || !localPath[0] || !flexFsExists(localPath)) return 0;
   const char* base = strrchr(localPath, '/');
   const char* nm = name && name[0] ? name : (base ? base + 1 : localPath);
@@ -1785,7 +2032,7 @@ uint32_t flexCloudUpload(const char* localPath, const char* name, const char* pa
 }
 
 uint32_t flexCloudDownload(const FclItem* it, uint8_t flags){
-  if(!flexAccountUsable()) return 0;                            // ver opFor
+  if(!destUsable()) return 0;                                   // ver opFor
   if(!it || it->isFolder || !it->sha256[0]) return 0;           // sin huella no se puede verificar
   flags &= FCL_JF_TO_LIBRARY;
   return addJob(FCL_JOB_DOWNLOAD, nullptr, it->name, it->parentId, it->id, it->size, it->sha256, 0, flags);
@@ -1812,7 +2059,7 @@ bool flexCloudCancel(uint32_t jobId){
 }
 
 bool flexCloudRetry(uint32_t jobId){
-  if(!gJ || !flexAccountUsable()) return false;                 // ver opFor
+  if(!gJ || !destUsable()) return false;                        // ver opFor
   bool ok = false;
   lock();
   FclJob* j = fclJournalFind(gJ, jobId);
@@ -1851,8 +2098,9 @@ int flexCloudXfers(FlexCloudXfer* out, int cap){
   if(!out || !gJ) return 0;
   int n = 0;
   lock();
-  // Si esperan por la CUENTA y no por el Wi-Fi, la fila lo dice (fclXferLine).
-  const char* waitWhy = gStatus.net == FCN_AUTH ? "auth_required" : gStatus.net == FCN_NO_ACCOUNT ? "no_account" : nullptr;
+  // Si esperan por la CUENTA (o por el telefono) y no por el Wi-Fi, la fila lo dice (fclXferLine).
+  const char* waitWhy = gStatus.net == FCN_AUTH || gStatus.net == FCN_NO_ACCOUNT ? netWhy(gStatus.net)
+                      : phoneDest() && gStatus.net == FCN_UNAVAILABLE ? "network" : nullptr;
   // En orden de alta (el diario no esta ordenado).
   uint32_t last = 0;
   for(;;){
@@ -1876,7 +2124,7 @@ int flexCloudXfers(FlexCloudXfer* out, int cap){
     o.retryInMs = gRt[pick].retryAt && (int32_t)(gRt[pick].retryAt - now) > 0 ? gRt[pick].retryAt - now : 0;
     fclCopyUtf8(o.name, sizeof(o.name), x.name);
     snprintf(o.error, sizeof(o.error), "%s", x.error);
-    if(waitWhy && o.phase == FCX_WAITING_NET) snprintf(o.error, sizeof(o.error), "%s", fclErrorText(waitWhy));
+    if(waitWhy && o.phase == FCX_WAITING_NET) snprintf(o.error, sizeof(o.error), "%s", errText(waitWhy));
   }
   unlock();
   return n;
@@ -1934,7 +2182,7 @@ bool flexCloudThumbDraw(const char* fileId, void (*draw)(const uint16_t* px, int
 uint32_t flexCloudThumbGen(){ lock(); uint32_t g = gThumbGen; unlock(); return g; }
 
 bool flexCloudStreamOpen(const FclItem* it){
-  if(!flexAccountUsable()) return false;                        // ver opFor
+  if(!destUsable()) return false;                               // ver opFor
   if(!it || it->isFolder || !gStLock || it->size == 0 || it->size > 0xFFFFFFF0ull) return false;
   stLock();
   if(!gSt.arena && !gSt.busy){
@@ -2014,8 +2262,11 @@ void flexCloudTestSetBase(const char* base){ snprintf(gBase, sizeof(gBase), "%s"
 uint32_t flexCloudTestJournalSaves(){ return gJournalSaves; }
 void flexCloudTestStep(){ taskStep(); }
 void flexCloudTestStreamStep(){ streamStep(); }
-void flexCloudTestPowerCycle(){
+void flexCloudTestPowerCycle(){ flexCloudTestPowerOff(); flexCloudBegin(); }
+void flexCloudTestPowerOff(){
   // Se pierde la RAM (los objetos de red tambien); el diario sigue en "flash".
+  // El destino vuelve al de arranque: lo fija flexStorageBegin() otra vez.
+  gDest = gDestWant = FCD_INTERNET; gPhoneForgot = false; gInetUnlinked = false;
   runnerClose();
   stConnClose();
   stLock(); gSt.open = false; gSt.gen++; gSt.busy = false; stUnlock();
@@ -2023,6 +2274,5 @@ void flexCloudTestPowerCycle(){
   if(gApi){ gApi->http.end(); gApi->sec.stop(); }
   gActive = false; gNetFails = 0; gNetRetryAt = 0; gNextMeMs = 0; gAuthWait = false;
   gTask = nullptr; gStTask = nullptr; gReady = false;     // las tareas se pierden con la RAM
-  flexCloudBegin();
 }
 #endif

@@ -96,6 +96,10 @@ bool fclUploadHasPart(const FclUpload* u, uint32_t n);
 // Texto corto para una persona a partir de un codigo de la API (o de un
 // fallo de red, code = "network"). Siempre devuelve algo legible.
 const char* fclErrorText(const char* code);
+// Lo mismo con el destino en el TELEFONO (Flex Storage): "Telefono
+// desconectado" en vez de "Sin conexion con Flex Cloud", sin cuenta que
+// revincular... Lo que no cambia sale de fclErrorText().
+const char* fclPhoneErrorText(const char* code);
 uint8_t     fclKindOf(const char* kind);
 
 // ---------------------------------------------------------------------------

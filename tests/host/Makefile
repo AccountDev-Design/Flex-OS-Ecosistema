@@ -345,9 +345,13 @@ $(BUILD)/test_cloudcore: test_cloudcore.cpp $(CLCORE) $(ULTRA)/FlexOS_CloudCore.
 # FlexOS_Cloud.cpp + FlexOS_Account.cpp + FlexOS_FS.cpp tal cual van a la placa,
 # con netstub/ (red, NVS, reloj, PSRAM contada) y fsstub/ (LittleFS en memoria
 # que sobrevive a un apagado). CON sanitizers: lee bytes de internet.
+# Con Flex Storage el gestor tiene un segundo destino (el telefono): entran el
+# enlace con el telefono y su nucleo (ECDH por OpenSSL aqui).
 CLOUD_SRC := $(ULTRA)/FlexOS_Cloud.cpp $(ULTRA)/FlexOS_Account.cpp $(ULTRA)/FlexOS_CloudTLS.cpp $(CLCORE) \
-             $(ULTRA)/FlexOS_FS.cpp $(ULTRA)/FlexOS_JPEG.cpp $(ULTRA)/FlexOS_JPEGEnc.cpp
+             $(ULTRA)/FlexOS_FS.cpp $(ULTRA)/FlexOS_JPEG.cpp $(ULTRA)/FlexOS_JPEGEnc.cpp \
+             $(ULTRA)/FlexOS_StorageLink.cpp $(ULTRA)/FlexOS_StorageCore.cpp $(ULTRA)/FlexOS_FlexAuth.cpp
 $(BUILD)/test_cloud: test_cloud.cpp pkgbuild.h $(CLOUD_SRC) $(ULTRA)/FlexOS_Cloud.h $(ULTRA)/FlexOS_CloudCore.h $(ULTRA)/FlexOS_Account.h \
+                     $(ULTRA)/FlexOS_StorageLink.h $(ULTRA)/FlexOS_StorageCore.h $(ULTRA)/FlexOS_HttpSink.h \
                      $(NETSTUB) $(NETHDRS) fsstub/FS.h $(FSSTUB) | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) $(NETFLAGS) -Ifsstub -o $@ test_cloud.cpp $(CLOUD_SRC) $(NETSTUB) $(FSSTUB) $(CJSON) -lcrypto
 
@@ -372,11 +376,21 @@ storagecore-mbedtls: | $(BUILD)
 
 # Punta a punta contra el servidor REAL (Node, en Flex-Developer-Studio). No va
 # en `make`: necesita Node >= 22.13 y el otro repositorio. Ver cloud_e2e.sh.
-$(BUILD)/cloud_e2e: cloud_e2e.cpp pkgbuild.h $(CLOUD_SRC) $(ULTRA)/FlexOS_Cloud.h $(NETSTUB) $(NETHDRS) fsstub/FS.h $(FSSTUB) | $(BUILD)
+$(BUILD)/cloud_e2e: cloud_e2e.cpp e2e_http.h pkgbuild.h $(CLOUD_SRC) $(ULTRA)/FlexOS_Cloud.h $(NETSTUB) $(NETHDRS) fsstub/FS.h $(FSSTUB) | $(BUILD)
 	$(CXX) $(COMMON) $(SAN) $(NETFLAGS) -Ifsstub -o $@ cloud_e2e.cpp $(CLOUD_SRC) $(NETSTUB) $(FSSTUB) $(CJSON) -lcrypto
 .PHONY: cloud-e2e
 cloud-e2e:
 	./cloud_e2e.sh
+
+# Flex Storage punta a punta: el P4 contra el servidor REAL del telefono
+# (CloudServer.kt de android/FlexPhone/storage, en la JVM). No va en `make`:
+# necesita Java y Gradle. Ver phone_e2e.sh.
+$(BUILD)/phone_e2e: phone_e2e.cpp e2e_http.h pkgbuild.h $(CLOUD_SRC) $(ULTRA)/FlexOS_Cloud.h $(ULTRA)/FlexOS_StorageLink.h \
+                    $(NETSTUB) $(NETHDRS) fsstub/FS.h $(FSSTUB) | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(NETFLAGS) -Ifsstub -o $@ phone_e2e.cpp $(CLOUD_SRC) $(NETSTUB) $(FSSTUB) $(CJSON) -lcrypto
+.PHONY: phone-e2e
+phone-e2e:
+	./phone_e2e.sh
 
 # --- Flex Link / Flex Phone: protocolo y modelo del telefono ---
 # Nucleo PURO (sin Arduino), asi que se compila igual que el del
