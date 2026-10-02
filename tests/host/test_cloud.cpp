@@ -21,6 +21,7 @@
 //      identificador de cuenta elegido por el cliente.
 // #############################################################
 #include "netstub.h"
+#include "freertos/task.h"
 #include "FS.h"
 #include "FlexOS_Account.h"
 #include "FlexOS_Cloud.h"
@@ -508,6 +509,11 @@ static void powerCycle(){
 static void testStates(){
   printf("-- estados: sin cuenta, sin Wi-Fi, conectado --\n");
   boot(false);
+  // La tarea de la nube ya no nace al arrancar: la primera pintada de la tarjeta
+  // llega ANTES de su primera vuelta. Hasta entonces no se afirma "sin cuenta"
+  // (con una cuenta vinculada, la tarjeta ensenaria "Vincular cuenta").
+  CHECK(status().net == FCN_CONNECTING, "antes de la primera vuelta de la tarea no se afirma 'sin cuenta'");
+  pump(2);
   CHECK(status().net == FCN_NO_ACCOUNT, "sin cuenta: FCN_NO_ACCOUNT");
   CHECK(flexCloudRequestList(FCL_VIEW_FOLDER, "root", nullptr), "pedir lista sin cuenta se acepta (y falla con motivo)");
   pump(5);
@@ -525,11 +531,25 @@ static void testStates(){
   CHECK(gNetLog.empty(), "sin Wi-Fi no se intenta nada");
 
   gNetWifi = true;
-  CHECK(pumpUntil([]{ return status().net == FCN_ONLINE; }, 50), "con Wi-Fi: ONLINE");
+  // Con Wi-Fi pero con la nube FUERA de pantalla la cuota no se pide: Flex Account
+  // ya valida la misma credencial contra el mismo servidor al arrancar, y dos
+  // handshakes TLS a la vez agotaban la SRAM interna justo cuando entra el Wi-Fi.
+  gNetLog.clear();
+  pump(250);
+  // Flex Account valida UNA vez (GET /me sin Accept-Encoding); Flex Cloud, ninguna
+  // (sus peticiones llevan Accept-Encoding: identity).
+  int fromAccount = 0, fromCloud = 0;
+  for(auto& r : gNetLog){ if(r.headers.count("accept-encoding")) fromCloud++; else fromAccount++; }
+  CHECK(fromCloud == 0, "con la nube fuera de pantalla Flex Cloud no abre ninguna conexion al volver el Wi-Fi");
+  CHECK(fromAccount == 1, "y Flex Account valida la credencial UNA vez (no dos handshakes a la vez)");
+  CHECK(status().net == FCN_CONNECTING, "pero el estado ya no es 'sin Wi-Fi'");
+  flexCloudSetActive(true);
+  CHECK(pumpUntil([]{ return status().net == FCN_ONLINE; }, 50), "con la nube a la vista: ONLINE");
   FlexCloudStatus s = status();
   CHECK(s.quotaValid && s.quota.totalBytes == (5ull << 30), "cuota de 5 GB leida del servidor (no fija en el P4)");
   CHECK(!strcmp(s.address, "ana.p4@flex"), "direccion de la cuenta");
   // Plan mayor: el P4 no tiene limites propios.
+  flexCloudSetActive(false);                                   // la nube se cierra y se vuelve a abrir
   C.total = 100ull << 30; C.used = 92ull << 30;
   flexCloudSetActive(true);
   pump(3);
@@ -1133,6 +1153,277 @@ static void testJournalCorrupt(){
   CHECK(flexCloudXfers(x, FLEX_CLOUD_XFERS) == 0, "diario danado: lista vacia, sin basura ni cuelgues");
 }
 
+
+// ============================== tareas y memoria ==============================
+// Lo que NO se podia ver antes (los dobles no tenian SRAM interna ni creaban
+// tareas de verdad): cuantas tareas existen y donde corren, que pasa si no hay
+// memoria para una pila, y que una conexion TLS no se abre a ciegas.
+static const NetTaskRec* taskNamed(const char* n){ for(auto& t : gNetTasks) if(t.name == n) return &t; return nullptr; }
+static FclItem videoItem(const char* id, uint64_t size){
+  FclItem it; memset(&it, 0, sizeof(it));
+  snprintf(it.id, sizeof(it.id), "%s", id); snprintf(it.name, sizeof(it.name), "%s", "viaje.avi");
+  it.size = size; it.kind = FCL_K_VIDEO; snprintf(it.sha256, sizeof(it.sha256), "%064d", 1);
+  return it;
+}
+static void testLifecycle(){
+  printf("-- tareas y memoria: nada reservado de mas y nada a ciegas --\n");
+
+  // A) Arranque sin cuenta: la unica tarea es la de Flex Account, y va al core 1.
+  boot(false);
+  CHECK(gNetTasks.size() == 1 && gNetTasks[0].name == "flex-account", "al arrancar SOLO existe la tarea de Flex Account");
+  CHECK(!taskNamed("flex-cloud") && !taskNamed("flex-cloud-st"), "Flex Cloud no reserva ni 26 KB de pila sin que nadie la use");
+
+  // B) La nube a la vista crea su tarea (una vez) y la de streaming sigue sin existir.
+  flexCloudSetActive(true);
+  CHECK(taskNamed("flex-cloud") && taskNamed("flex-cloud")->stack == 16384, "al ensenar la nube nace su tarea (16 KB)");
+  flexCloudSetActive(false); flexCloudSetActive(true); flexCloudRefresh();
+  size_t n = 0; for(auto& t : gNetTasks) if(t.name == "flex-cloud") n++;
+  CHECK(n == 1, "y no se crea otra por cada peticion");
+  CHECK(!taskNamed("flex-cloud-st"), "la de streaming no existe hasta el primer video");
+
+  // C) El primer video crea la de streaming (con una cuenta que sirva: sin ella no se abre).
+  boot();
+  flexCloudSetActive(true);
+  FclItem v = videoItem("fil_v1", 5u << 20);
+  CHECK(flexCloudStreamOpen(&v), "abrir un video de la nube");
+  CHECK(taskNamed("flex-cloud-st") && taskNamed("flex-cloud-st")->stack == 10240, "con el primer video nace la tarea de streaming (10 KB)");
+  flexCloudStreamClose();
+
+  // D) Todas ancladas al core 1 (el 0 es del presentador grafico), ninguna "a secas".
+  bool allPinned = !gNetTasks.empty();
+  for(auto& t : gNetTasks) if(t.core != 1) allPinned = false;
+  CHECK(allPinned, "todas las tareas de red van ancladas al core 1");
+
+  // E) Sin memoria para la pila: se dice, nada se cuelga y la SIGUIENTE peticion la crea.
+  boot(false);
+  gNetTaskFail = 2;                                             // ni al pedir la lista ni al ensenar la nube
+  flexCloudRequestList(FCL_VIEW_FOLDER, "root", nullptr);       // lo que hace la interfaz al abrir la nube
+  flexCloudSetActive(true);
+  CHECK(!taskNamed("flex-cloud"), "sin memoria para la pila no hay tarea");
+  CHECK(listInfo().state == FCL_LIST_ERROR && strstr(listInfo().error, "memoria"), "la lista lo dice (no se queda en 'Cargando' para siempre)");
+  CHECK(status().net == FCN_UNAVAILABLE && strstr(status().netText, "memoria"), "y la tarjeta tambien (ni 'sin cuenta' ni 'Conectando' hasta el reintento)");
+  netstubAdvance(2100); flexCloudSetActive(true);               // la interfaz lo llama en cada vuelta
+  CHECK(taskNamed("flex-cloud"), "y se reintenta SOLO a los 2 s, sin que nadie pulse nada ni reiniciar");
+  boot(false);
+  gNetTaskFail = 1;
+  flexCloudRefresh();
+  CHECK(!taskNamed("flex-cloud"), "(un fallo aislado)");
+  flexCloudRefresh();
+  CHECK(taskNamed("flex-cloud"), "'Reintentar' la crea");
+  boot();
+  gNetTaskFail = 1;
+  FclItem v2 = videoItem("fil_v2", 5u << 20);
+  CHECK(!flexCloudStreamOpen(&v2), "sin memoria para la tarea de streaming el video se rechaza (no se queda 'Cargando')");
+  CHECK(flexCloudStreamOpen(&v2), "y al volver la memoria se abre");
+  flexCloudStreamClose();
+
+  // F) Con trabajo pendiente del arranque anterior la tarea SI nace al arrancar.
+  boot();
+  putLocal("/Fotos/pendiente.bin", pattern(300 * 1024, 5));
+  flexCloudUpload("/Fotos/pendiente.bin", nullptr, "root", 0, 0);
+  gNetWifi = false;                                            // sin red: queda en el diario
+  pump(3);
+  powerCycle();
+  CHECK(taskNamed("flex-cloud"), "una subida a medias del arranque anterior arranca la tarea al encender");
+  CHECK(!taskNamed("flex-cloud-st"), "(la de streaming sigue sin hacer falta)");
+  gNetWifi = true;
+  pump(400);
+
+  // G) Sin SRAM interna no se abre ninguna conexion TLS: se dice y se reintenta.
+  boot();
+  flexCloudSetActive(true);
+  CHECK(pumpUntil([]{ return status().net == FCN_ONLINE; }, 50), "(con memoria) la nube conecta");
+  gNetInternalFree = 24u << 10; gNetInternalBlock = 10u << 10; gNetLog.clear();
+  flexCloudRequestList(FCL_VIEW_FOLDER, "root", nullptr);
+  pump(20);
+  CHECK(gNetLog.empty(), "por debajo del suelo de SRAM interna no sale ninguna conexion TLS");
+  FlexCloudListInfo li = listInfo();
+  CHECK(li.state == FCL_LIST_ERROR && strstr(li.error, "memoria"), "la lista dice que falta memoria (no un '-1' mudo)");
+  CHECK(status().net == FCN_ONLINE, "y un fallo de memoria no se confunde con 'Flex Cloud no responde'");
+  gNetInternalFree = 200u << 10; gNetInternalBlock = 100u << 10;
+  flexCloudRefresh();
+  CHECK(pumpUntil([]{ return listInfo().state == FCL_LIST_READY; }, 100), "al volver la memoria, funciona sin reiniciar");
+  // El suelo mira la SRAM INTERNA: con la total/PSRAM de sobra (como en el P4) tambien se rechaza.
+  gNetInternalFree = 200u << 10; gNetInternalBlock = 12u << 10;
+  gNetLog.clear(); flexCloudRefresh(); pump(20);
+  CHECK(gNetLog.empty(), "un mayor bloque interno pequeno (memoria fragmentada) tambien impide abrir TLS");
+  gNetInternalFree = 200u << 10; gNetInternalBlock = 100u << 10;
+
+  // H) Si TLS falla, la pildora dice POR QUE (lo que mbedTLS devolvio), no solo "no responde".
+  boot();
+  flexCloudSetActive(true);
+  C.fault = [](const NetRequest& rq, NetResponse& rs){
+    if(rq.url.compare(0, API.size(), API)) return false;
+    rs.status = HTTPC_ERROR_CONNECTION_REFUSED; rs.tlsError = -0x2700;        // X509 - verificacion del certificado
+    return true;
+  };
+  pump(30);
+  FlexCloudStatus st = status();
+  CHECK(st.net == FCN_UNAVAILABLE && strstr(st.netText, "Sin respuesta segura") && strstr(st.netText, "certificado no reconocido"),
+        "TLS fallido por certificado: la pildora lo dice");
+  C.fault = [](const NetRequest& rq, NetResponse& rs){
+    if(rq.url.compare(0, API.size(), API)) return false;
+    rs.status = HTTPC_ERROR_CONNECTION_REFUSED; rs.tlsError = -0x7F00;        // SSL - asignacion fallida
+    return true;
+  };
+  pump(3200);                                                   // la nube vuelve a preguntar al minuto mientras se ve
+  st = status();
+  CHECK(strstr(st.netText, "sin memoria interna"), "TLS fallido por memoria: la pildora lo dice");
+  C.fault = nullptr;
+  char why[64];
+  CHECK(!strcmp(flexTlsReason(-1, why, sizeof(why)), "sin DNS ni TCP o tiempo agotado"), "-1: sin DNS ni TCP o tiempo agotado");
+  CHECK(!strcmp(flexTlsReason(-0x7F10, why, sizeof(why)), "sin memoria interna"), "un codigo de modulo + causa se clasifica por el modulo");
+  CHECK(!strncmp(flexTlsReason(-0x1234, why, sizeof(why)), "error TLS -0x1234", 17), "un codigo desconocido se escribe tal cual");
+  CHECK(!strcmp(flexTlsReason(0, why, sizeof(why)), "sin detalle"), "sin codigo: sin detalle");
+  CHECK(!strcmp(flexTlsReason(57, why, sizeof(why)), "sin detalle"), "un positivo es el descriptor del socket de una conexion que SI se abrio: no es un error TLS");
+}
+
+// =====================================================================
+//  LA CUENTA SE DESVINCULA EN FLEX ACCOUNT (el usuario la quita desde la web)
+// =====================================================================
+// Flex Account es la autoridad de identidad: si dice que este aparato ya no esta
+// vinculado, el P4 lo detecta, pasa a "hay que volver a vincular" (NO a "sin
+// conexion"), deja de usar la nube con esa credencial y lo dice; las
+// transferencias a medias no se pierden y todo vuelve al revincular.
+static void testUnlinked(){
+  printf("-- cuenta desvinculada en Flex Account: el P4 lo detecta, lo dice y no sigue --\n");
+  boot();
+  flexCloudSetActive(true);
+  CHECK(pumpUntil([]{ return status().net == FCN_ONLINE; }, 100), "(cuenta buena) la nube conecta");
+  CHECK(status().quotaValid && status().address[0], "con su cuota y su direccion");
+
+  // Lo que hay en marcha ANTES de perder la cuenta.
+  putLocal("/f.bin", "x");
+  uint32_t failedJob = flexCloudUpload("/f.bin", nullptr, "root", 0, 0);
+  flexFsDelete("/f.bin");
+  CHECK(waitEv(FCE_UPLOAD_FAILED, failedJob), "(una subida fallida: su original desaparecio)");
+  std::string data = pattern(800 * 1024, 31);
+  putLocal("/u.bin", data);
+  uint32_t up = flexCloudUpload("/u.bin", nullptr, "root", 0, 0);
+  CHECK(up != 0, "(cuenta buena) la subida se acepta");
+  CHECK(pumpUntil([]{ return C.partPuts >= 1; }, 2000), "y empieza");
+  FFile& vid = addGeneratedFile("pelicula.avi", 160ull * 1024 * 1024);
+  FclItem vit = itemOf(vid);
+  FFile& pho = addCloudFile("foto.jpg", pattern(50000, 7));
+  FclItem pit = itemOf(pho);
+  CHECK(flexCloudStreamOpen(&vit), "(cuenta buena) el video se abre");
+  auto st = [](int n){ for(int i = 0; i < n; i++){ flexCloudTestStreamStep(); netstubAdvance(2); } };
+  st(4);
+
+  // El usuario QUITA este aparato en Flex Account: el servidor ya no reconoce la credencial.
+  C.tokenHash = "quitado-desde-la-web";
+  CHECK(pumpUntil([]{ return status().net == FCN_AUTH; }, 3000), "la nube lo nota en cuanto el servidor contesta 401");
+  CHECK(pumpUntil([]{ return flexAccountLinkState() == FLEX_LINK_AUTH_REQUIRED; }, 5000, 20),
+        "y Flex Account lo confirma: AUTH_REQUIRED (no 'sin conexion', no 'servicio no disponible')");
+  CHECK(flexAccountLinked() && !flexAccountUsable(), "la credencial NO se borra sola, pero ya no sirve");
+  pump(10);
+  FlexCloudStatus s = status();
+  CHECK(s.net == FCN_AUTH, "tarjeta de la nube: 'Vuelve a vincular tu cuenta'");
+  CHECK(!strcmp(flexCloudNetText(s.net), "Vuelve a vincular tu cuenta"), "con ese texto");
+  CHECK(strstr(s.netText, "ya no est"), "y el motivo: este dispositivo ya no esta vinculado");
+  CHECK(!s.quotaValid && !s.address[0], "sin la cuota ni la direccion de la sesion anterior");
+
+  // Todo lo que habla con la nube se rechaza: nada se encola para "esperar conexion".
+  putLocal("/u2.bin", "datos");
+  CHECK(flexCloudUpload("/u2.bin", nullptr, "root", 0, 0) == 0, "subir: rechazado");
+  CHECK(flexCloudDownload(&pit, 0) == 0, "descargar: rechazado");
+  CHECK(flexCloudMkdir("root", "Nueva") == 0, "crear carpeta: rechazado");
+  CHECK(flexCloudRename(&pit, "otro.jpg") == 0, "renombrar: rechazado");
+  CHECK(flexCloudTrash(&pit) == 0 && flexCloudRestore(&pit) == 0 && flexCloudDeleteForever(&pit) == 0, "papelera y borrado: rechazados");
+  CHECK(flexCloudFetchForView(&pit) == 0, "abrir una foto de la nube: rechazado");
+  FclItem vit2 = videoItem("fil_otro", 5u << 20);
+  CHECK(!flexCloudStreamOpen(&vit2), "abrir otro video: rechazado");
+  CHECK(!flexCloudRetry(failedJob), "reintentar una transferencia fallida: rechazado");
+  CHECK(xfer(failedJob).phase == FCX_FAILED, "(y sigue fallida, no se re-encola)");
+
+  // La interfaz se entera, sin esperas eternas.
+  CHECK(flexCloudRequestList(FCL_VIEW_FOLDER, "root", nullptr), "pedir la lista se acepta (para poder decir por que no)");
+  pump(5);
+  FlexCloudListInfo li = listInfo();
+  CHECK(li.state == FCL_LIST_ERROR && strstr(li.error, "Vuelve a vincular"), "la lista dice que hay que volver a vincular");
+  FlexCloudXfer x = xfer(up);
+  CHECK(x.phase == FCX_WAITING_NET && strstr(x.error, "Vuelve a vincular"), "la subida en curso ESPERA por la cuenta, y la fila lo dice");
+  char line[96];
+  fclXferLine(x.phase, x.type, x.done, x.size, x.bytesPerSec, x.retryInMs, x.error, line, sizeof(line));
+  CHECK(strstr(line, "Vuelve a vincular") && !strstr(line, "Esperando conexi"), "(no 'Esperando conexion', que nunca se va a cumplir)");
+  CHECK(xfer(up).phase != FCX_FAILED && !findEv(FCE_UPLOAD_FAILED, up), "y NO se pierde: sigue en el diario");
+  char err[96];
+  flexCloudStreamSeek(100u << 20);
+  st(4);
+  CHECK(flexCloudStreamState(err, sizeof(err)) == FCS_ERROR && strstr(err, "Vuelve a vincular"),
+        "el video abierto lo dice (no 'Sin conexion con Flex Cloud' tras 15 s)");
+  flexCloudStreamClose();
+
+  // Sin insistir: una credencial rechazada no se manda otra vez a la nube.
+  size_t n0 = gNetLog.size();
+  pump(3000, 100);                                          // 5 minutos
+  CHECK(gNetLog.size() - n0 <= 3, "cuenta rechazada: no se insiste con ella (ni bucle de peticiones)");
+
+  // REVINCULAR: credencial nueva (el flujo de siempre) y todo vuelve solo.
+  C.pendingPolls = 1;
+  CHECK(flexAccountRequestCode("Flex OS Ultra"), "'Volver a vincular' pide un enlace nuevo");
+  flexAccountTestStep();
+  CHECK(flexAccountLinked() && flexAccountUsable() && flexAccountLinkState() != FLEX_LINK_AUTH_REQUIRED, "con la credencial nueva la cuenta sirve");
+  CHECK(pumpUntil([]{ return status().net == FCN_ONLINE; }, 400), "la nube vuelve a ONLINE");
+  CHECK(status().quotaValid && !strcmp(status().address, "ana.p4@flex"), "y relee la cuota y la direccion de la cuenta NUEVA");
+  CHECK(waitEv(FCE_UPLOAD_DONE, up, 60000), "la subida que esperaba continua y termina");
+  CHECK(C.files[evFile(FCE_UPLOAD_DONE, up)].data == data, "integra");
+  CHECK(flexCloudUpload("/u2.bin", nullptr, "root", 0, 0) != 0, "se vuelve a poder subir");
+  CHECK(flexCloudRetry(failedJob), "y reintentar");
+  auditNetwork("cuenta desvinculada");
+
+  // B) Solo Flex Account (nadie mira la nube): al abrir la pantalla de la cuenta se comprueba.
+  boot();
+  flexCloudSetActive(true);
+  CHECK(pumpUntil([]{ return status().net == FCN_ONLINE; }, 100), "(B) la nube conecta");
+  flexCloudSetActive(false);                                // la nube ya no esta a la vista
+  C.tokenHash = "quitado-desde-la-web";
+  pump(300);
+  CHECK(flexAccountLinkState() == FLEX_LINK_LINKED, "(B) mientras nadie pregunta, el P4 aun no lo sabe (se revalida cada 6 h)");
+  flexAccountRequestValidation();                           // lo que hace accountEnter() al abrir la pantalla de la cuenta
+  CHECK(pumpUntil([]{ return flexAccountLinkState() == FLEX_LINK_AUTH_REQUIRED; }, 500), "(B) abrir la pantalla de la cuenta lo detecta");
+  pump(5);
+  CHECK(status().net == FCN_AUTH, "(B) y la tarjeta de la nube ya dice 'Vuelve a vincular' sin haber hecho ninguna peticion");
+
+  // C) La caducidad se distingue de la revocacion.
+  boot();
+  flexCloudSetActive(true);
+  CHECK(pumpUntil([]{ return status().net == FCN_ONLINE; }, 100), "(C) la nube conecta");
+  C.fault = [](const NetRequest& rq, NetResponse& rs){
+    if(rq.url.compare(0, API.size(), API)) return false;
+    rs = jerr(401, "token_expired"); return true;
+  };
+  flexAccountRequestValidation();
+  CHECK(pumpUntil([]{ return flexAccountLinkState() == FLEX_LINK_TOKEN_EXPIRED; }, 500), "(C) 'token_expired' = sesion caducada");
+  pump(5);
+  CHECK(status().net == FCN_AUTH && strstr(status().netText, "caduc"), "(C) la nube dice que caduco");
+  C.fault = nullptr;
+}
+
+// A los 24,8 dias encendido (2^31 ms) la resta con signo `millis() - 0` cambia de
+// signo: la nube se quedaba en "Conectando" para siempre al volver el Wi-Fi o al
+// revincular (justo la salida de "Vuelve a vincular tu cuenta").
+static void testClockWrap(){
+  printf("-- 26 dias encendido: la nube no se queda en 'Conectando' --\n");
+  boot();
+  flexCloudSetActive(true);
+  CHECK(pumpUntil([]{ return status().net == FCN_ONLINE; }, 100), "(arranque) conecta");
+  gNetNowMs = 2300000000UL;                                  // > 2^31 ms
+  gNetWifi = false;
+  pump(10);
+  CHECK(status().net == FCN_OFFLINE, "se cae el Wi-Fi");
+  gNetWifi = true;
+  CHECK(pumpUntil([]{ return status().net == FCN_ONLINE; }, 600), "vuelve el Wi-Fi a los 26 dias: la nube vuelve a ONLINE");
+  // Y la salida de 'Vuelve a vincular' con ese tiempo encendido.
+  C.tokenHash = "quitado-desde-la-web";
+  flexAccountRequestValidation();
+  CHECK(pumpUntil([]{ return status().net == FCN_AUTH; }, 800), "la cuenta se pierde a los 26 dias");
+  C.pendingPolls = 1;
+  flexAccountRequestCode("Flex OS Ultra");
+  flexAccountTestStep();
+  CHECK(pumpUntil([]{ return status().net == FCN_ONLINE; }, 800), "revincular a los 26 dias: vuelve a ONLINE (no se queda en 'Conectando')");
+}
+
 int main(){
   printf("=== FlexOS · Flex Cloud Manager (P4) contra un Flex Cloud simulado ===\n");
   gKey.generate();
@@ -1142,13 +1433,16 @@ int main(){
   flexFsBegin();
   flexAccountBegin();
   flexCloudBegin();
-  CHECK(gNetTaskCreates >= 2, "Flex Cloud crea sus tareas propias (red y streaming)");
+  CHECK(gNetTaskCreates == 1, "tras el arranque solo existe la tarea de Flex Account (la nube crea las suyas al usarse)");
   testStates();
+  testLifecycle();
   testListAndOps();
   testUploadBasic();
   testUploadResume();
   testUploadFaults();
   testAuthDuringUpload();
+  testUnlinked();
+  testClockWrap();
   testCancel();
   testDownload();
   testThumbsAndView();

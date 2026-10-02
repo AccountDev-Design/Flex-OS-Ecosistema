@@ -907,7 +907,12 @@ void fclXferLine(uint8_t phase, uint8_t type, uint64_t done, uint64_t size, uint
       else snprintf(out, cap, "%s \xC2\xB7 %s de %s", up ? "Subiendo" : "Descargando", d, t);
       break;
     case FCX_VERIFYING:   snprintf(out, cap, "Verificando integridad..."); break;
-    case FCX_WAITING_NET: snprintf(out, cap, "Esperando conexi\xC3\xB3n \xC2\xB7 %s de %s", d, t); break;
+    case FCX_WAITING_NET:
+      // Con un motivo (la cuenta ya no sirve) se dice ESE, no un "esperando
+      // conexion" que nunca se va a cumplir.
+      if(error && error[0]) snprintf(out, cap, "%s", error);
+      else snprintf(out, cap, "Esperando conexi\xC3\xB3n \xC2\xB7 %s de %s", d, t);
+      break;
     case FCX_RETRYING: {
       uint32_t s = (retryInMs + 999u) / 1000u;
       if(s) snprintf(out, cap, "Reintento en %lu s \xC2\xB7 %s de %s", (unsigned long)s, d, t);

@@ -16,6 +16,7 @@ struct NetResponse {
   int status = 200;                              // < 0 = fallo de transporte (HTTPC_ERROR_*)
   std::string body;
   std::map<std::string, std::string> headers;    // nombres en minusculas
+  int tlsError = 0;                              // con status < 0: lo que devolveria WiFiClientSecure::lastError()
   size_t cutAt = (size_t)-1;                     // la conexion se corta tras N bytes del cuerpo
   bool chunked = false;                          // sin Content-Length (getSize() == -1)
 };
@@ -27,6 +28,10 @@ extern unsigned long gNetNowMs;
 extern unsigned gNetTaskCreates;
 extern size_t gNetPsNow, gNetPsPeak;    // PSRAM reservada ahora / pico (heap_caps_malloc)
 extern size_t gNetPsFailAbove;          // >0: heap_caps_malloc falla por encima de esto
+extern size_t gNetInternalFree;         // SRAM interna libre que dice heap_caps_get_free_size(MALLOC_CAP_INTERNAL)
+extern size_t gNetInternalBlock;        // y su mayor bloque contiguo
+extern std::function<void()> gNetOnDelay;  // se llama tras CADA vTaskDelay (ya avanzado el reloj): la prueba mira el estado
+                                          // y cambia Wi-Fi o memoria en un instante concreto de un flujo que bloquea
 
 void netstubReset();            // red, registro y reloj a cero (la NVS NO se toca)
 void netstubNvsWipe();          // NVS de fabrica

@@ -7,6 +7,9 @@
 // #############################################################
 #include "FlexOS_CloudTLS.h"
 
+#include <stdio.h>
+#include "esp_heap_caps.h"
+
 #ifndef FLEX_CLOUD_ROOT_CA
 // Raices de las autoridades que emiten los certificados de los proveedores
 // de alojamiento habituales (Cloudflare, Google, Let's Encrypt, AWS). mbedTLS
@@ -268,3 +271,50 @@ const char* flexCloudRootCA(){ return kBundle; }
 #else
 const char* flexCloudRootCA(){ return FLEX_CLOUD_ROOT_CA; }
 #endif
+
+// ---------------------------------------------------------------------------
+//  Sitio para TLS y motivo del fallo (ver FlexOS_CloudTLS.h)
+// ---------------------------------------------------------------------------
+bool flexTlsRoom(size_t* internalFree, size_t* largestBlock){
+  size_t f = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  size_t b = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if(internalFree) *internalFree = f;
+  if(largestBlock) *largestBlock = b;
+  return f >= FLEX_TLS_MIN_INTERNAL && b >= FLEX_TLS_MIN_BLOCK;
+}
+
+const char* flexTlsReason(int err, char* out, size_t cap){
+  if(!out || !cap) return "";
+  const char* t = nullptr;
+  // 0 = sin error y > 0 = el descriptor del socket: arduino-esp32 guarda en
+  // lastError() lo que devolvio start_ssl_client(), que tras una conexion que SI
+  // se abrio es el socket. Solo los negativos son un error de la conexion.
+  if(err >= 0)       t = "sin detalle";
+  else if(err == -1) t = "sin DNS ni TCP o tiempo agotado";   // lo que devuelve start_ssl_client() antes del handshake
+  else {
+    // mbedTLS suma un codigo de MODULO (multiplo de 0x80) y, a veces, uno de
+    // CAUSA (< 0x80): se mira primero el del modulo y despues la causa.
+    unsigned u = (unsigned)(-err), hi = u & 0xFF80u, lo = u & 0x007Fu;
+    switch(hi){
+      // Certificado: el servidor contesto, pero su cadena no llega a una de las raices de arriba.
+      case 0x2700: case 0x7A00:                       t = "certificado no reconocido"; break;
+      // Memoria: mbedTLS no pudo reservar (asignacion fallida en SSL, X.509, PK, ECP o MD).
+      case 0x7F00: case 0x2880: case 0x3F80:
+      case 0x4D80: case 0x5280:                       t = "sin memoria interna"; break;
+      case 0x6800:                                    t = "tiempo agotado en TLS"; break;
+      case 0x7280:                                    t = "el servidor cerro la conexion"; break;
+      case 0x7780: case 0x7680:                       t = "el servidor rechazo TLS"; break;
+      default: break;
+    }
+    if(!t) switch(lo){
+      case 0x10:                                      t = "sin memoria interna"; break;   // MPI: asignacion
+      case 0x50:                                      t = "el servidor cerro la conexion"; break;  // NET: conexion reiniciada
+      case 0x52:                                      t = "no se encontro el servidor"; break;
+      case 0x42: case 0x44:                           t = "no se pudo abrir la conexion"; break;
+      default: break;
+    }
+  }
+  if(t) snprintf(out, cap, "%s", t);
+  else  snprintf(out, cap, "error TLS -0x%04X", (unsigned)(-err) & 0xFFFFu);
+  return out;
+}
