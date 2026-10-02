@@ -31,7 +31,7 @@ dependencyResolutionManagement {
 // #############################################################
 //  Flex Phone -- proyecto Android + modulo de protocolo
 //  ------------------------------------------------------------
-//  DOS MODULOS A PROPOSITO:
+//  TRES MODULOS A PROPOSITO:
 //
 //    :protocol  Kotlin/JVM PURO. Es la implementacion de Flex Link
 //               y de FBP/1 del lado Android. No depende de Android
@@ -40,6 +40,11 @@ dependencyResolutionManagement {
 //               emulador y sin placa. Ahi viven los vectores
 //               dorados que comprueban que estos bytes son
 //               EXACTAMENTE los que produce el firmware.
+//
+//    :storage   Kotlin/JVM PURO tambien: el servidor de Flex Cloud
+//               del telefono (Flex Storage) con la API de Flex
+//               Cloud, la cuota, las partes, los rangos y el
+//               emparejamiento con el P4. Se prueba igual, sin SDK.
 //
 //    :app       La aplicacion Android (Compose, servicios, BLE,
 //               Browser Relay). Necesita el SDK de Android.
@@ -64,6 +69,9 @@ dependencyResolutionManagement {
 rootProject.name = "FlexPhone"
 
 include(":protocol")
+// Flex Storage: el servidor de Flex Cloud del telefono. JVM puro como
+// :protocol, asi que tambien se construye y se prueba sin el SDK.
+include(":storage")
 
 val sdkFromEnv = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
 val localProps = file("local.properties")
@@ -77,7 +85,7 @@ if (androidSdk != null) {
     logger.lifecycle("Flex Phone: SDK de Android en $androidSdk -> se incluye :app")
 } else {
     logger.lifecycle(
-        "Flex Phone: no se encontro el SDK de Android; solo se construye :protocol.\n" +
+        "Flex Phone: no se encontro el SDK de Android; solo se construyen :protocol y :storage.\n" +
         "            Para compilar el APK, pon sdk.dir en local.properties o exporta\n" +
         "            ANDROID_HOME, y vuelve a ejecutar. Ver docs/FLEX-PHONE.md."
     )
