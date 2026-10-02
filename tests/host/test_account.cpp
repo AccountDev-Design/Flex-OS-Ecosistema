@@ -44,6 +44,8 @@ struct Server {
   std::string display = "Ana \xC3\x91" "u\xC3\xB1" "ez";
   int sessionCalls = 0, codeCalls = 0;
   int tlsError = 0;                // lo que lastError() dice cuando SM_TLSFAIL corta la conexion
+  int codePostFail = 0, codePollFail = 0;   // cuantas peticiones al servicio de codigos fallan por transporte
+  int codeFailError = -1;                   // y que dice lastError() entonces
 } S;
 
 static std::string b64url(const pkgb::Bytes& b){
@@ -70,6 +72,8 @@ static NetResponse serve(const NetRequest& rq){
   NetResponse rs;
   if(!rq.url.compare(0, strlen(CODE_URL), CODE_URL)){
     S.codeCalls++;
+    int& failLeft = rq.method == "POST" ? S.codePostFail : S.codePollFail;
+    if(failLeft > 0){ failLeft--; rs.status = HTTPC_ERROR_CONNECTION_REFUSED; rs.tlsError = S.codeFailError; return rs; }
     if(rq.method == "POST"){
       cJSON* j = cJSON_Parse(rq.body.c_str());
       cJSON* h = cJSON_GetObjectItem(j, "tokenHash");
@@ -508,6 +512,103 @@ static void testTaskAndMemory(){
   CHECK(!bearerLeaked(), "ninguna de estas rutas envio la credencial sin TLS verificado");
 }
 
+
+// ------------------------------ el flujo de enlace (primer arranque) ------------------------------
+static void testLinkFlowFailures(){
+  printf("-- enlace: sin memoria, sin conexion y reintento SIN reiniciar --\n");
+  auto fresh = [](){ netstubReset(); netstubNvsWipe(); gNetHandler = serve; gNetWifi = true; S = Server(); flexAccountTestPowerCycle(); };
+
+  // A) Sin SRAM interna para el handshake: no se abre TLS y se dice QUE hacer.
+  fresh();
+  gNetInternalFree = 24u << 10; gNetInternalBlock = 10u << 10; gNetLog.clear();
+  CHECK(flexAccountRequestCode("FlexOS Ultra"), "se acepta la peticion (la tarea existe)");
+  flexAccountTestStep();
+  FlexAccountSnapshot f = snap();
+  CHECK(f.state == FLEX_ACCOUNT_ERROR && strstr(f.error, "Cierra una app"), "sin memoria interna: ERROR que dice que hacer");
+  CHECK(strstr(f.error, "24 KB"), "y cuanta hay");
+  CHECK(countReq(CODE_URL) == 0, "sin abrir ninguna conexion TLS");
+  gNetInternalFree = 200u << 10; gNetInternalBlock = 100u << 10;
+  linkNow();
+  CHECK(snap().state == FLEX_ACCOUNT_LINKED, "al cerrar una app, 'Reintentar' vincula SIN reiniciar el aparato");
+
+  // B) Fallo de transporte al pedir el codigo: el motivo llega a la pantalla.
+  fresh();
+  S.codePostFail = 1; S.codeFailError = -1;
+  CHECK(flexAccountRequestCode("FlexOS Ultra"), "peticion aceptada");
+  flexAccountTestStep();
+  f = snap();
+  CHECK(f.state == FLEX_ACCOUNT_ERROR && strstr(f.error, "Fallo HTTPS -1 (sin DNS ni TCP o tiempo agotado)"), "'Fallo HTTPS -1 (sin DNS ni TCP o tiempo agotado)'");
+  S.codePostFail = 1; S.codeFailError = -0x7F00;
+  CHECK(flexAccountRequestCode("FlexOS Ultra"), "se puede volver a pedir tras el fallo");
+  flexAccountTestStep();
+  CHECK(strstr(snap().error, "sin memoria interna"), "TLS sin memoria (mbedTLS -0x7F00): 'sin memoria interna'");
+  linkNow();
+  CHECK(snap().state == FLEX_ACCOUNT_LINKED, "y el tercer intento vincula (sin reiniciar)");
+
+  // C) Con el codigo en pantalla la consulta de aprobacion falla: se DICE (antes quedaba muda)
+  //    y, al volver, el aparato se vincula y la advertencia desaparece.
+  fresh();
+  S.pendingPolls = 0; S.codePollFail = 3; S.codeFailError = -0x6800;
+  std::string seen; bool sawWaiting = false;
+  gNetOnDelay = [&](){
+    FlexAccountSnapshot x = snap();
+    if(x.state == FLEX_ACCOUNT_CODE_READY && x.error[0] && seen.empty()) seen = x.error;
+    if(x.state == FLEX_ACCOUNT_CODE_READY && !x.error[0]) sawWaiting = true;
+  };
+  CHECK(flexAccountRequestCode("FlexOS Ultra"), "peticion aceptada");
+  flexAccountTestStep();
+  gNetOnDelay = nullptr;
+  CHECK(seen.find("Sin conexion (tiempo agotado en TLS). Reintentando") != std::string::npos, "mientras falla la consulta la pantalla dice por que");
+  CHECK(snap().state == FLEX_ACCOUNT_LINKED && !snap().error[0], "al volver la conexion se vincula y no queda ninguna advertencia");
+  CHECK(S.codeCalls >= 5, "se siguio consultando (no se rindio)");
+
+  // D) Sin memoria a mitad de la espera: no se abre TLS, se dice y, al volver la memoria, se vincula.
+  fresh();
+  S.pendingPolls = 2;
+  unsigned long t0 = gNetNowMs; std::string memText; int wifiText = 0;
+  gNetOnDelay = [&](){
+    unsigned long dt = gNetNowMs - t0;
+    if(dt > 4000 && dt < 14000){ gNetInternalFree = 24u << 10; gNetInternalBlock = 10u << 10; }
+    else { gNetInternalFree = 200u << 10; gNetInternalBlock = 100u << 10; }
+    FlexAccountSnapshot x = snap();
+    if(x.state == FLEX_ACCOUNT_CODE_READY && strstr(x.error, "Poca memoria") && memText.empty()) memText = x.error;
+  };
+  CHECK(flexAccountRequestCode("FlexOS Ultra"), "peticion aceptada");
+  gNetLog.clear();
+  flexAccountTestStep();
+  gNetOnDelay = nullptr;
+  CHECK(memText.find("Poca memoria interna (24 KB). Reintentando") == 0, "con poca memoria la pantalla lo dice junto al codigo");
+  CHECK(snap().state == FLEX_ACCOUNT_LINKED, "y al volver la memoria termina de vincular");
+  (void)wifiText;
+
+  // E) Wi-Fi que se va con el codigo en pantalla: se dice y se sigue sin reiniciar.
+  fresh();
+  S.pendingPolls = 3;
+  t0 = gNetNowMs; std::string wifiMsg;
+  gNetOnDelay = [&](){
+    unsigned long dt = gNetNowMs - t0;
+    gNetWifi = !(dt > 4000 && dt < 12000);
+    FlexAccountSnapshot x = snap();
+    if(x.state == FLEX_ACCOUNT_CODE_READY && strstr(x.error, "Sin Wi-Fi") && wifiMsg.empty()) wifiMsg = x.error;
+  };
+  CHECK(flexAccountRequestCode("FlexOS Ultra"), "peticion aceptada");
+  flexAccountTestStep();
+  gNetOnDelay = nullptr; gNetWifi = true;
+  CHECK(!wifiMsg.empty(), "sin Wi-Fi con el codigo en pantalla: la pantalla lo dice");
+  CHECK(snap().state == FLEX_ACCOUNT_LINKED, "y al volver el Wi-Fi vincula sin reiniciar");
+
+  // F) Un codigo que se deja caducar sin poder consultarlo: EXPIRED, y 'Reintentar' funciona.
+  fresh();
+  S.codePollFail = 100000; S.codeFailError = -1;
+  CHECK(flexAccountRequestCode("FlexOS Ultra"), "peticion aceptada");
+  flexAccountTestStep();
+  CHECK(snap().state == FLEX_ACCOUNT_EXPIRED, "tras 10 minutos sin poder consultar: el codigo expiro");
+  S.codePollFail = 0;
+  linkNow();
+  CHECK(snap().state == FLEX_ACCOUNT_LINKED, "y se vuelve a vincular sin reiniciar");
+  CHECK(!bearerLeaked(), "la credencial no salio por ninguna de estas rutas");
+}
+
 int main(){
   printf("=== FlexOS · Flex Account / Flex Community: persistencia del vinculo ===\n");
   gKey.generate();
@@ -524,6 +625,7 @@ int main(){
   testCorruptAndBrokenNvs();
   testWearOverTime();
   testTaskAndMemory();
+  testLinkFlowFailures();
   gKey.free_();
   printf("=== %d comprobaciones, %d fallos ===\n", gChecks, gFails);
   return gFails ? 1 : 0;

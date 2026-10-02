@@ -40,6 +40,20 @@ static uint16_t accountLinkColor(FlexAccountLink link){
   }
 }
 
+// Texto del boton principal de la pantalla de cuenta sin vincular. Tras un fallo
+// o un codigo caducado dice "Reintentar": se vuelve a pedir un enlace SIN
+// reiniciar el aparato.
+static const char* accountPrimaryLabel(FlexAccountState state, bool online){
+  if(!online) return "Conectar Wi-Fi";
+  return (state == FLEX_ACCOUNT_ERROR || state == FLEX_ACCOUNT_EXPIRED) ? "Reintentar" : "Iniciar sesion";
+}
+// Linea bajo el codigo: si la consulta de aprobacion NO se pudo hacer (sin Wi-Fi,
+// sin memoria...) dice por que, en lugar de seguir "esperando" a ciegas hasta
+// que caduque el codigo.
+static const char* accountCodeNote(const FlexAccountSnapshot& s){
+  return s.error[0] ? s.error : "El codigo vence en 10 minutos";
+}
+
 static void accountButton(int x, int y, int w, int h, const char* text, bool primary){
   fillRoundRectA(x, y, w, h, h / 2, primary ? rgb565(111,82,238) : rgb565(255,255,255), primary ? 245 : 62);
   drawTextC(x + w / 2, y + h / 2 - 8, text, 2, rgb565(255,255,255));
@@ -116,7 +130,7 @@ static void accountRender(){
     drawTextC(SCR_W / 2, 375, "y escribe este codigo", 1, rgb565(174,181,205));
     fillRoundRectA(90, 405, SCR_W - 180, 86, 24, rgb565(255,255,255), 245);
     drawTextC(SCR_W / 2, 430, snapshot.code, 5, rgb565(47,34,104));
-    drawTextC(SCR_W / 2, 514, "El codigo vence en 10 minutos", 1, rgb565(174,181,205));
+    drawTextC(SCR_W / 2, 514, accountCodeNote(snapshot), 1, snapshot.error[0] ? rgb565(255,181,61) : rgb565(174,181,205));
     accountButton(110, 552, SCR_W - 220, 54, "Cancelar", false);
   } else {
     const char* title = snapshot.state == FLEX_ACCOUNT_ERROR ? "No se pudo vincular" :
@@ -135,7 +149,7 @@ static void accountRender(){
       fillRoundRectA(52, 378, SCR_W - 104, 48, 18, rgb565(255,181,61), 52);
       drawTextC(SCR_W / 2, 394, "Necesitas conectar Wi-Fi primero", 1, rgb565(255,223,161));
     }
-    accountButton(52, 452, SCR_W - 104, 58, online ? "Iniciar sesion" : "Conectar Wi-Fi", true);
+    accountButton(52, 452, SCR_W - 104, 58, accountPrimaryLabel(snapshot.state, online), true);
     accountButton(52, 526, SCR_W - 104, 54, online ? "Crear una cuenta" : "Configurar red", false);
   }
 

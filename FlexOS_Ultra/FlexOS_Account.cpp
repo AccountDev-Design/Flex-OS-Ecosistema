@@ -496,6 +496,14 @@ static bool requestDeviceCode(const char* label, const char* tokenHash, char cod
     "{\"hardwareId\":\"%s\",\"label\":\"%s\",\"model\":\"ESP32-P4\",\"flexVersion\":\"%s\",\"tokenHash\":\"%s\"}",
     id, escaped, FLEXOS_FW_VERSION, tokenHash);
   if(written <= 0 || written >= (int)sizeof(body)){ snprintf(gRequestError, sizeof(gRequestError), "Solicitud de cuenta demasiado grande"); return false; }
+  // Sin SRAM interna para el handshake no se intenta: se dice QUE hacer (cerrar
+  // una app) en vez de un "Fallo HTTPS -1" sin explicacion.
+  size_t inFree = 0, inBlock = 0;
+  if(!flexTlsRoom(&inFree, &inBlock)){
+    snprintf(gRequestError, sizeof(gRequestError), "Poca memoria interna (%u KB libres). Cierra una app y reintenta", (unsigned)(inFree / 1024u));
+    Serial.printf("[ACCOUNT] enlace aplazado: SRAM interna %u KB (mayor bloque %u KB)\n", (unsigned)(inFree / 1024u), (unsigned)(inBlock / 1024u));
+    return false;
+  }
   WiFiClientSecure secure;
   // No secreto viaja en esta operacion: solo una huella SHA-256. La respuesta
   // se acepta unicamente despues de validar la firma P-256 anclada arriba.
@@ -514,13 +522,21 @@ static bool requestDeviceCode(const char* label, const char* tokenHash, char cod
   http.addHeader("Connection", "close");
   int statusCode = http.POST((uint8_t*)body, (size_t)written);
   gLastHttpStatus = statusCode;
+  int tlsErr = 0;
+  if(statusCode < 0){ char raw[64]; tlsErr = secure.lastError(raw, sizeof(raw)); }
   if(statusCode != HTTP_CODE_CREATED && statusCode != HTTP_CODE_OK){
     if(statusCode == HTTP_CODE_CONFLICT)
       snprintf(gRequestError, sizeof(gRequestError), "Este registro del dispositivo ya estaba vinculado");
     else if(statusCode == 429)
       snprintf(gRequestError, sizeof(gRequestError), "Demasiados intentos; espera un minuto");
-    else
-      snprintf(gRequestError, sizeof(gRequestError), statusCode > 0 ? "Flex Account respondio HTTP %d" : "Fallo HTTPS %d", statusCode);
+    else if(statusCode > 0)
+      snprintf(gRequestError, sizeof(gRequestError), "Flex Account respondio HTTP %d", statusCode);
+    else {
+      char why[48]; flexTlsReason(tlsErr, why, sizeof(why));
+      snprintf(gRequestError, sizeof(gRequestError), "Fallo HTTPS %d (%s)", statusCode, why);
+      Serial.printf("[ACCOUNT] enlace: HTTP %d, %s (mbedTLS %d), SRAM interna %u KB (bloque %u KB)\n",
+                    statusCode, why, tlsErr, (unsigned)(inFree / 1024u), (unsigned)(inBlock / 1024u));
+    }
     http.end(); return false;
   }
   uint8_t* envelope = nullptr; size_t envelopeLen = 0;
@@ -537,19 +553,39 @@ static bool requestDeviceCode(const char* label, const char* tokenHash, char cod
   return ok;
 }
 
-static PollResult pollDeviceCode(const char* code, const char* tokenHash, char address[48], char displayName[64]){
+// `problem` recibe, si la consulta NO llego a contestarse, un motivo corto que la
+// pantalla ensena mientras se reintenta. Antes quedaba mudo: con el codigo ya
+// aprobado en el celular el aparato podia seguir diciendo "Esperando aprobacion"
+// diez minutos, sin poder consultarlo, hasta que el codigo caducaba.
+static PollResult pollDeviceCode(const char* code, const char* tokenHash, char address[48], char displayName[64],
+                                 char* problem, size_t problemCap){
+  if(problem && problemCap) problem[0] = 0;
   if(WiFi.status() != WL_CONNECTED) return POLL_PENDING;
   char url[320];
   int written = snprintf(url, sizeof(url), "%s?code=%s&tokenHash=%s", FLEX_ACCOUNT_CODE_URL, code, tokenHash);
   if(written <= 0 || written >= (int)sizeof(url)) return POLL_INVALID;
+  size_t inFree = 0;
+  if(!flexTlsRoom(&inFree, nullptr)){
+    if(problem) snprintf(problem, problemCap, "Poca memoria interna (%u KB). Reintentando", (unsigned)(inFree / 1024u));
+    return POLL_PENDING;
+  }
   WiFiClientSecure secure; secure.setInsecure(); secure.setHandshakeTimeout(12);
   HTTPClient http; http.setTimeout(HTTP_TIMEOUT_MS); http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   http.useHTTP10(true);
   http.setUserAgent("FlexOS-Ultra/1.0 ESP32-P4");
-  if(!http.begin(secure, url)) return POLL_PENDING;
+  if(!http.begin(secure, url)){
+    if(problem) snprintf(problem, problemCap, "No se pudo abrir la conexion. Reintentando");
+    return POLL_PENDING;
+  }
   http.addHeader("Accept", "application/json");
   http.addHeader("Connection", "close");
   int statusCode = http.GET();
+  if(problem && statusCode < 0){
+    char raw[64], why[48]; flexTlsReason(secure.lastError(raw, sizeof(raw)), why, sizeof(why));
+    snprintf(problem, problemCap, "Sin conexion (%s). Reintentando", why);
+  } else if(problem && statusCode != HTTP_CODE_OK && statusCode != HTTP_CODE_NOT_FOUND){
+    snprintf(problem, problemCap, "Flex Account respondio HTTP %d. Reintentando", statusCode);
+  }
   if(statusCode != HTTP_CODE_OK){ http.end(); return statusCode == HTTP_CODE_NOT_FOUND ? POLL_INVALID : POLL_PENDING; }
   uint8_t* envelope = nullptr; size_t envelopeLen = 0;
   bool ok = readHttpBody(http, &envelope, &envelopeLen); http.end();
@@ -771,11 +807,12 @@ static void linkFlow(const char* label){
   while(!gCancelRequested && millis() - started < LINK_TIMEOUT_MS){
     if(lastPoll && millis() - lastPoll < 3000){ vTaskDelay(pdMS_TO_TICKS(100)); continue; }
     lastPoll = millis();
-    if(WiFi.status() != WL_CONNECTED){ setStatus(FLEX_ACCOUNT_CODE_READY, 55, "Esperando que vuelva el Wi-Fi"); continue; }
-    char address[48] = "", displayName[64] = "";
-    PollResult result = pollDeviceCode(code, tokenHash, address, displayName);
+    if(WiFi.status() != WL_CONNECTED){ setStatus(FLEX_ACCOUNT_CODE_READY, 55, "Esperando que vuelva el Wi-Fi", "Sin Wi-Fi. Se reintenta al volver la conexion"); continue; }
+    char address[48] = "", displayName[64] = "", problem[96] = "";
+    PollResult result = pollDeviceCode(code, tokenHash, address, displayName, problem, sizeof(problem));
     if(result == POLL_PENDING){
-      setStatus(FLEX_ACCOUNT_CODE_READY, 55, "Esperando aprobacion en tu celular");
+      // Si la consulta no se pudo contestar, el motivo va en `error` (la pantalla lo ensena junto al codigo).
+      setStatus(FLEX_ACCOUNT_CODE_READY, 55, "Esperando aprobacion en tu celular", problem[0] ? problem : nullptr);
     } else if(result == POLL_EXPIRED){
       finishFailedFlow(FLEX_ACCOUNT_EXPIRED, "El codigo expiro", gHaveCredential ? "El codigo de vinculacion expiro" : nullptr);
       memset(bearer, 0, sizeof(bearer)); return;
