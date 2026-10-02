@@ -170,6 +170,8 @@ uint32_t flexCloudUpload(const char* localPath, const char* name, const char* pa
 // Descargar al dispositivo (cabe en LittleFS o se dice que no). Se baja a un
 // temporal y se verifica el SHA-256 de la nube antes de avisar
 // (FCE_DOWNLOAD_DONE con la ruta del temporal: la interfaz lo coloca).
+// FCL_JF_MOVE_REMOTE: MOVER; la interfaz manda el original a la papelera de
+// la nube solo despues de colocar la copia verificada.
 uint32_t flexCloudDownload(const FclItem* it, uint8_t flags);
 bool     flexCloudCancel(uint32_t jobId);
 bool     flexCloudRetry(uint32_t jobId);

@@ -171,6 +171,17 @@ int  fstPairBegin(FstCore* c, uint32_t nowMs, const FstPairReq* req, const char*
 int  fstPairPoll(FstCore* c, uint32_t nowMs, const char* pairId, const char* proofHex,
                  uint8_t* state, char proofOut[65], bool* persist, char* err, size_t errCap);
 
+// Lo mismo, con el CUERPO JSON que hay que contestar (contrato de
+// AttachClient.kt): {"ok":1,"pairId","pub","p4id","p4name","approve",
+// "expiresIn"} / {"ok":1,"state":"pending"|"approved","proof"} / {"error":"..."}.
+// Lo usan la placa (FlexOS_StorageLink) y el servidor del PC de las pruebas.
+int  fstPairBeginHttp(FstCore* c, uint32_t nowMs, const FstPairReq* req, const char* peerIp,
+                      FstRandFn rnd, void* rctx, char* json, size_t cap, uint32_t* retryS);
+int  fstPairPollHttp(FstCore* c, uint32_t nowMs, const char* pairId, const char* proofHex,
+                     char* json, size_t cap, bool* persist);
+// {"error":"<texto escapado>"}
+void fstErrorJson(char* json, size_t cap, const char* msg);
+
 // La persona decide en la pantalla del P4.
 bool fstPairDecide(FstCore* c, bool allow);
 // Hay un emparejamiento esperando a que se apruebe (para pintarlo).

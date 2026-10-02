@@ -565,6 +565,29 @@ uint32_t gStubStreamPinOff = 0, gStubStreamPinLen = 0, gStubStreamMisses = 0;
 static const uint32_t STUB_BLK = 64u * 1024u;
 static void stubCall(const std::string& s){ gStubCloudCalls.push_back(s); }
 
+// ---- Flex Storage (FlexOS_StorageLink): sin telefono emparejado ----
+#include "FlexOS_StorageLink.h"
+FlexStorageInfo gStubStorage;
+void flexStorageBegin(){}
+void flexStorageInfo(FlexStorageInfo* out){ if(out) *out = gStubStorage; }
+const char* flexStorageP4Id(){ return "flexos-stub"; }
+bool flexStorageOffer(char out[FST_HEX32]){ if(out) out[0] = 0; return false; }
+int  flexStoragePairBegin(const FstPairReq*, const char*, char* json, size_t cap, uint32_t* retryS){ if(retryS) *retryS = 0; if(json && cap) snprintf(json, cap, "{\"error\":\"x\"}"); return 503; }
+int  flexStoragePairPoll(const char*, const char*, char* json, size_t cap){ if(json && cap) snprintf(json, cap, "{\"error\":\"x\"}"); return 404; }
+bool flexStoragePairDecide(bool allow){ (void)allow; return false; }
+void flexStoragePairCancel(){}
+bool flexStorageSetEnabled(bool on){ (void)on; return false; }
+void flexStorageForget(){}
+bool flexStoragePhoneUsable(){ return gStubStorage.state == FSP_READY; }
+uint8_t flexStoragePhoneState(){ return gStubStorage.state; }
+bool flexStoragePhoneBase(char* out, size_t cap){ if(out && cap) out[0] = 0; return false; }
+bool flexStorageCopyBearer(char* out, size_t cap, char* why, size_t whyCap){ if(out && cap) out[0] = 0; if(why && whyCap) snprintf(why, whyCap, "no_phone"); return false; }
+void flexStorageSessionRejected(){}
+void flexStorageNoteResult(int){}
+uint8_t gStubCloudDest = 0;
+void flexCloudSetDest(uint8_t d){ gStubCloudDest = d; }
+uint8_t flexCloudDest(){ return gStubCloudDest; }
+void flexCloudPhoneForgotten(){}
 void flexCloudBegin(){ stubCall("begin"); }
 void flexCloudAccountUnlinked(){ stubCall("account-unlinked"); }
 void flexCloudSetActive(bool a){ gStubCloudActive = a; }

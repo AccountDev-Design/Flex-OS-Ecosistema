@@ -71,6 +71,8 @@ public:
   uint8_t  operator[](int i) const { return o[i & 3]; }
   uint8_t& operator[](int i)       { return o[i & 3]; }
   String toString() const { return String("0.0.0.0"); }
+  // "a.b.c.d" -> true (la firma real; Flex Storage conecta con el telefono por IP).
+  bool fromString(const char* s){ unsigned a, b, c, d; if(!s || sscanf(s, "%u.%u.%u.%u", &a, &b, &c, &d) != 4 || a > 255 || b > 255 || c > 255 || d > 255) return false; o[0]=(uint8_t)a;o[1]=(uint8_t)b;o[2]=(uint8_t)c;o[3]=(uint8_t)d; return true; }
 private:
   uint8_t o[4];
 };

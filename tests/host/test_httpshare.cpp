@@ -319,6 +319,69 @@ static void testFuzzEx(){
   CHECK(ok, "6000 entradas: codigo valido, cadenas cerradas y cuerpo dentro del buffer");
 }
 
+static void testFlexStorage(){
+  std::printf("-- Flex Storage: PUT/PATCH, cabeceras de la pasarela y respuestas del telefono --\n");
+  FlexHttpReqEx r;
+  CHECK(parseEx("PUT /api/cloud/uploads/upl_x/parts/3 HTTP/1.1\r\nContent-Length: 4\r\nX-Part-SHA256: abcdef0123\r\n\r\n", &r) == 1 &&
+        r.method == FLEXHTTP_M_PUT && r.contentLength == 4 && !strcmp(r.partSha, "abcdef0123"), "PUT con la huella de la parte");
+  CHECK(parseEx("PATCH /api/cloud/files/fil_1 HTTP/1.1\r\n\r\n", &r) == 1 && r.method == FLEXHTTP_M_PATCH, "PATCH");
+  CHECK(parseEx("PUTS /a HTTP/1.1\r\n\r\n", &r) == 1 && r.method == FLEXHTTP_M_UNKNOWN, "PUTS no es PUT");
+  CHECK(parseEx("GET /f HTTP/1.1\r\nIf-Range: \"0011aa\"\r\n\r\n", &r) == 1 && !strcmp(r.ifRange, "\"0011aa\""), "If-Range");
+  std::string longv(100, 'a');
+  CHECK(parseEx(("GET /f HTTP/1.1\r\nIf-Range: " + longv + "\r\nX-Part-SHA256: " + longv + "\r\n\r\n").c_str(), &r) == 1 &&
+        r.ifRange[0] == 0 && r.partSha[0] == 0, "valores que no caben: vacios (nunca a medias)");
+  CHECK(parseEx("GET /f HTTP/1.1\r\nX-Part-SHA256: ab\x01" "cd\r\n\r\n", &r) == 1 && r.partSha[0] == 0, "con bytes de control: vacio");
+
+  FlexHttpResp rs;
+  auto resp = [&](const std::string& t){ return flexHttpParseResp(t.data(), t.size(), &rs); };
+  CHECK(resp("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 12\r\n\r\n{\"ok\":true}x") == 1 &&
+        rs.status == 200 && rs.contentLength == 12 && !strcmp(rs.ctype, "application/json") && rs.keepAlive && rs.headerLen == 71,
+        "200 con su longitud");
+  CHECK(resp("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 10-19/100\r\nAccept-Ranges: bytes\r\nETag: \"ab\"\r\n"
+             "Content-Length: 10\r\nConnection: close\r\n\r\n") == 1 && rs.status == 206 && !strcmp(rs.contentRange, "bytes 10-19/100") &&
+        !strcmp(rs.acceptRanges, "bytes") && !strcmp(rs.etag, "\"ab\"") && !rs.keepAlive, "206 con su rango");
+  CHECK(resp("HTTP/1.1 503\r\nRetry-After: 2\r\nContent-Length: 0\r\n\r\n") == 1 && rs.status == 503 && !strcmp(rs.retryAfter, "2"),
+        "sin texto de estado y con Retry-After");
+  CHECK(resp("HTTP/1.0 200 OK\r\n\r\n") == 1 && !rs.keepAlive && rs.contentLength == -1, "1.0 sin longitud");
+  CHECK(resp("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n") == 1 && rs.chunked, "por trozos (la pasarela decide)");
+  CHECK(resp("HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n") == -1, "otra codificacion: no se acepta");
+  CHECK(resp("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\n") == -1, "dos longitudes distintas");
+  CHECK(resp("HTTP/1.1 200 OK\r\nContent-Length: -1\r\n\r\n") == -1, "longitud negativa");
+  CHECK(resp("HTTP/1.1 200 OK\r\nContent-Le") == 0, "a medias: seguir leyendo");
+  CHECK(resp("HTTP/2 200 OK\r\n\r\n") == -1 && resp("HTTP/1.1 20 OK\r\n\r\n") == -1 && resp("HTTP/1.1 999 X\r\n\r\n") == -1 &&
+        resp("HTTP/1.1 200OK\r\n\r\n") == -1 && resp("FTP/1.1 200 OK\r\n\r\n") == -1, "lineas de estado raras");
+  CHECK(resp("HTTP/1.1 200 OK\r\nsin-dos-puntos\r\n\r\n") == -1, "linea que no es cabecera");
+  { std::string nul = std::string("HTTP/1.1 200 OK\r\nX: a") + '\0' + "\r\n\r\n";
+    CHECK(flexHttpParseResp(nul.data(), nul.size(), &rs) == -1, "NUL en la cabecera"); }
+  std::string huge = "HTTP/1.1 200 OK\r\n" + std::string(5000, 'a');
+  CHECK(resp(huge) == -1, "cabecera interminable: no se acepta");
+  std::string longDisp = "HTTP/1.1 200 OK\r\nContent-Disposition: attachment; filename*=UTF-8''" + std::string(700, 'a') + "\r\n\r\n";
+  CHECK(resp(longDisp) == 1 && rs.disposition[0] == 0, "Content-Disposition que no cabe: vacio");
+  CHECK(resp("HTTP/1.1 200 OK\r\nContent-Type: text/html\x01\r\n\r\n") == 1 && rs.ctype[0] == 0, "valor con control: vacio");
+
+  uint32_t seed = 0xC001D00Du;
+  char buf[1200];
+  int ok = 1;
+  for(int it = 0; it < 6000; it++){
+    const char* head = it % 2 ? "HTTP/1.1 200 OK\r\n" : "";
+    size_t hl = strlen(head);
+    memcpy(buf, head, hl);
+    seed = seed * 1103515245u + 12345u;
+    size_t len = hl + (size_t)(seed % (sizeof(buf) - hl - 1));
+    for(size_t i = hl; i < len; i++){
+      seed = seed * 1103515245u + 12345u;
+      char c = (char)((seed >> 16) & 0xFF);
+      if((seed >> 8) % 6 == 0) c = "\r\n: -"[(seed >> 3) % 5];
+      buf[i] = c;
+    }
+    int rc = flexHttpParseResp(buf, len, &rs);
+    if(rc != -1 && rc != 0 && rc != 1) ok = 0;
+    if(rc == 1 && (rs.headerLen > len || rs.status < 100 || rs.status > 599 || rs.disposition[sizeof(rs.disposition) - 1] ||
+                   rs.ctype[sizeof(rs.ctype) - 1] || strchr(rs.etag, '\r') || strchr(rs.contentRange, '\n'))) ok = 0;
+  }
+  CHECK(ok, "6000 respuestas al azar: resultado valido y nada fuera de sus buffers");
+}
+
 int main(){
   std::printf("=== FlexOS · servidor HTTP local (protocolo) ===\n");
   testParse();
@@ -328,6 +391,7 @@ int main(){
   testFuzz();
   testParseEx();
   testResponsesEx();
+  testFlexStorage();
   testFuzzEx();
   std::printf("=== %d comprobaciones, %d fallos ===\n", g_run, g_fail);
   return g_fail ? 1 : 0;

@@ -13,6 +13,10 @@ public:
   // NetworkClient en arduino-esp32 3.x. Es la que hay que usar: el
   // setTimeout() de Stream no toca el plazo del socket.
   virtual int connect(const char*, uint16_t, int32_t){ return 0; }
+  // Por IP (Flex Storage: la pasarela al telefono emparejado), con plazo en ms.
+  virtual int connect(IPAddress, uint16_t, int32_t){ return 0; }
+  int setNoDelay(bool){ return 0; }
+  IPAddress remoteIP() const { return IPAddress(); }
   // El plazo del socket de verdad, en milisegundos.
   void setConnectionTimeout(uint32_t){}
   virtual void stop(){}

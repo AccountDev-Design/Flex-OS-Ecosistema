@@ -21,6 +21,7 @@
 //      identificador de cuenta elegido por el cliente.
 // #############################################################
 #include "netstub.h"
+#include "esp_system.h"
 #include "freertos/task.h"
 #include "FS.h"
 #include "FlexOS_Account.h"
@@ -1892,6 +1893,127 @@ static void testPhonePowerAndStream(){
   auditPhone("streaming");
 }
 
+// ---- El emparejamiento de FlexOS_StorageLink: lo que contestan las rutas de la web ----
+struct SimApp {                      // lo que hace AttachClient.kt
+  const char* id;
+  FstEcdh e = {}; char pub[131] = {}; uint8_t key[32] = {}; char pairId[33] = {}; char proof[65] = {};
+  explicit SimApp(const char* i) : id(i) {}
+};
+static void appRand(void*, uint8_t* o, size_t n){ esp_fill_random(o, n); }
+static std::string jget(const std::string& json, const char* k){
+  cJSON* j = cJSON_Parse(json.c_str()); cJSON* v = cJSON_GetObjectItem(j, k);
+  std::string r = cJSON_IsString(v) ? v->valuestring : cJSON_IsNumber(v) ? std::to_string((long long)v->valuedouble) : "";
+  cJSON_Delete(j); return r;
+}
+static int appBegin(SimApp& a, const char* offer, const char* ip, std::string& json, const uint8_t* oldKey = nullptr, const char* kp4 = nullptr){
+  fstEcdhGenerate(&a.e, appRand, nullptr);
+  fstHex(a.e.pub, 65, a.pub);
+  char known[65] = "";
+  if(oldKey){ uint8_t k[32]; fstKnownProof(oldKey, offer, k); fstHex(k, 32, known); }
+  FstPairReq rq = { offer, a.id, "Galaxy A55 de Ana", "SM-A556B", "47830", a.pub, kp4, oldKey ? known : nullptr };
+  char buf[600]; uint32_t retry = 0;
+  int st = flexStoragePairBegin(&rq, ip, buf, sizeof(buf), &retry);
+  json = buf;
+  if(st == 202){
+    uint8_t peer[65], z[32];
+    fstUnhex(jget(json, "pub").c_str(), peer, 65);
+    fstEcdhShared(&a.e, peer, z, appRand, nullptr);
+    fstDeriveKey(z, offer, jget(json, "p4id").c_str(), a.id, a.key);
+    snprintf(a.pairId, sizeof(a.pairId), "%s", jget(json, "pairId").c_str());
+    uint8_t pr[32]; fstPhoneProof(a.key, a.pairId, pr); fstHex(pr, 32, a.proof);
+  }
+  return st;
+}
+static int appPoll(SimApp& a, std::string& json){
+  char buf[300];
+  int st = flexStoragePairPoll(a.pairId, a.proof, buf, sizeof(buf));
+  json = buf;
+  return st;
+}
+
+static void testPhonePairing(){
+  printf("-- Flex Storage: emparejar desde la web (StorageLink de verdad: ECDH, pantalla, NVS) --\n");
+  boot(false);
+  P = PhoneSim();
+  gNetHandler = serveBoth;
+  flexStorageTestReset(); flexStorageBegin();
+  gNetWifi = true;
+  FlexStorageInfo si; flexStorageInfo(&si);
+  CHECK(si.state == FSP_NONE && flexCloudDest() == FCD_INTERNET, "sin telefono: destino Internet");
+  char offer[FST_HEX32];
+  CHECK(flexStorageOffer(offer) && strlen(offer) == 32, "oferta");
+  SimApp a("a55-sim");
+  std::string js;
+  CHECK(appBegin(a, offer, "192.168.1.50", js) == 202, "la app empieza: 202");
+  CHECK(jget(js, "p4id") == "flexos-a1b2c3d4e5f6" && jget(js, "p4name") == "Flex OS Ultra (E5F6)" && jget(js, "approve") == "1" &&
+        jget(js, "expiresIn") == "120", "contrato de AttachClient: p4id, p4name, approve, expiresIn");
+  flexStorageInfo(&si);
+  char sas[7]; fstSas(a.key, sas);
+  CHECK(si.pairWaiting && !strcmp(si.sas, sas) && !strcmp(si.pairName, "Galaxy A55 de Ana") && si.pairLeftS > 100,
+        "la pantalla tiene que preguntar: el MISMO codigo que la app");
+  CHECK(appPoll(a, js) == 200 && jget(js, "state") == "pending", "pendiente");
+  unsigned w0 = netstubNvsWriteCount();
+  CHECK(flexStoragePairDecide(true), "aprobado en pantalla");
+  CHECK(appPoll(a, js) == 200 && jget(js, "state") == "approved", "aprobado");
+  uint8_t want[32]; fstP4Proof(a.key, a.pairId, want); char wh[65]; fstHex(want, 32, wh);
+  CHECK(jget(js, "proof") == wh, "con la prueba del P4");
+  CHECK(netstubNvsWriteCount() > w0, "guardado en la NVS antes de contestar");
+  Preferences pr; pr.begin("flexstor", false);
+  uint8_t blob[FST_PHONE_BLOB_MAX]; size_t bl = pr.getBytes("phone", blob, sizeof(blob)); pr.end();
+  FstPhone ph; CHECK(bl && fstPhoneDecode(&ph, blob, bl) && !memcmp(ph.key, a.key, 32) && !strcmp(ph.ip, "192.168.1.50"), "el registro de la NVS es el del telefono");
+  pump(3);
+  CHECK(flexCloudDest() == FCD_PHONE, "Flex Cloud pasa al telefono");
+  flexStorageInfo(&si);
+  CHECK(si.state == FSP_READY && !si.pairWaiting && !strcmp(si.name, "Galaxy A55 de Ana"), "Flex Storage: emparejado");
+
+  // El MISMO telefono cambia de IP: demuestra su clave, sin preguntar y sin perder nada.
+  putLocal("/Fotos/sigue.avi", pattern(2 * 1024 * 1024, 81));
+  uint32_t up = flexCloudUpload("/Fotos/sigue.avi", nullptr, "root", 0, 0);
+  CHECK(up != 0, "una subida pendiente con el telefono");
+  CHECK(flexStorageOffer(offer), "oferta nueva");
+  SimApp b("a55-sim");
+  CHECK(appBegin(b, offer, "192.168.1.60", js, a.key, "flexos-a1b2c3d4e5f6") == 202 && jget(js, "approve") == "0", "telefono conocido: sin preguntar");
+  CHECK(appPoll(b, js) == 200 && jget(js, "state") == "approved", "al primer sondeo");
+  pump(3);
+  flexStorageInfo(&si);
+  CHECK(!strcmp(si.ip, "192.168.1.60") && flexCloudDest() == FCD_PHONE && xfer(up).phase != 255, "IP nueva y la subida sigue en su lista");
+
+  // Si la NVS no puede guardarlo, el telefono NO puede creer que quedo emparejado.
+  CHECK(flexStorageOffer(offer), "oferta");
+  SimApp c("otro-tel");
+  CHECK(appBegin(c, offer, "192.168.1.70", js) == 202 && flexStoragePairDecide(true), "otro telefono, aprobado");
+  netstubNvsBroken() = true;
+  CHECK(appPoll(c, js) == 500 && jget(js, "error").find("guardar") != std::string::npos, "NVS rota: 500, no 'aprobado'");
+  netstubNvsBroken() = false;
+  CHECK(appPoll(c, js) == 404, "y el emparejamiento se deshizo");
+  flexStorageInfo(&si);
+  CHECK(!strcmp(si.ip, "192.168.1.60") && !strcmp(si.name, "Galaxy A55 de Ana"), "el telefono anterior sigue intacto");
+
+  // Un telefono DISTINTO sustituye al anterior: lo pendiente con el anterior se cancela.
+  CHECK(flexStorageOffer(offer), "oferta");
+  SimApp d("otro-tel");
+  CHECK(appBegin(d, offer, "192.168.1.70", js) == 202 && flexStoragePairDecide(true) && appPoll(d, js) == 200, "otro telefono emparejado");
+  pump(5);
+  CHECK(xfer(up).phase == 255, "lo pendiente con el telefono anterior no sigue con el nuevo");
+  // Rechazar en pantalla: la app recibe 403 y no se guarda nada.
+  CHECK(flexStorageOffer(offer), "oferta");
+  SimApp e("intruso");
+  CHECK(appBegin(e, offer, "192.168.1.99", js) == 202 && flexStoragePairDecide(false), "rechazado en pantalla");
+  CHECK(appPoll(e, js) == 403, "403");
+  flexStorageInfo(&si);
+  CHECK(!strcmp(si.name, "Galaxy A55 de Ana") || si.state == FSP_READY, "el emparejado sigue siendo el que era");
+  // Desde fuera de la red local: no.
+  CHECK(flexStorageOffer(offer), "oferta");
+  SimApp f("fuera");
+  CHECK(appBegin(f, offer, "8.8.8.8", js) == 403, "desde una IP publica: 403");
+  // Olvidar: NVS borrada y de vuelta a Internet.
+  flexStorageForget();
+  pump(3);
+  pr.begin("flexstor", false);
+  CHECK(!pr.isKey("phone") && flexCloudDest() == FCD_INTERNET, "olvidado: NVS borrada y destino Internet");
+  pr.end();
+}
+
 int main(){
   printf("=== FlexOS · Flex Cloud Manager (P4) contra un Flex Cloud simulado ===\n");
   gKey.generate();
@@ -1924,6 +2046,7 @@ int main(){
   testPhoneSwitch();
   testPhoneForget();
   testPhonePowerAndStream();
+  testPhonePairing();
   gKey.free_();
   printf("=== %d comprobaciones, %d fallos ===\n", gChecks, gFails);
   return gFails ? 1 : 0;

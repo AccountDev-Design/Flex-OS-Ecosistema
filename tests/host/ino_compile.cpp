@@ -9576,7 +9576,7 @@ static int vfHttp(const std::string& method, const std::string& path, const std:
   if(!gVfCookie.empty()) r += "Cookie: " FLEXHTTP_SESS_COOKIE "=" + gVfCookie + "\r\n";
   r += "Content-Length: " + std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
   VfConn c; c.in = r;
-  FlexWebConn cn = { vfcRead, vfcWrite, &c };
+  FlexWebConn cn = { vfcRead, vfcWrite, &c, NULL };
   flexWebServeConn(&gWebCtx, &cn, gWebHdr, gWebIo);
   int st = c.out.size() > 12 ? atoi(c.out.c_str() + 9) : 0;
   size_t sc = c.out.find("fxs=");
@@ -9610,7 +9610,8 @@ static void testVariasFotos(){
   memset(&gWebCtx, 0, sizeof(gWebCtx));
   gWebCtx.fs = { msfOpen, msfRead, msfWrite, msfSeek, msfClose, msfSize, msfRemove, wfsFree, wfsTotal, NULL };
   gWebCtx.host = { whSnapshot, whGet, whRev, whDup, whCommit, whSetThumb, whThumbPath, whVerify, whLockType,
-                   whNow, whEpoch, whRandom, whEvent, NULL, whOthers, NULL, whHeavyBegin, whHeavyEnd };
+                   whNow, whEpoch, whRandom, whEvent, NULL, whOthers, NULL, whHeavyBegin, whHeavyEnd,
+                   NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };   // sin Flex Storage
   gWebCtx.alloc = mediaAlloc; gWebCtx.free = mediaFree;
   snprintf(gWebCtx.ip, sizeof(gWebCtx.ip), "192.168.1.50");
   gWebCtx.port = 8080; gWebCtx.allowUpload = true;

@@ -160,13 +160,6 @@ bool nvsErase(){
   return ok;
 }
 
-// ---- JSON para el servidor web ------------------------------------------
-void errJson(char* json, size_t cap, const char* msg){
-  char esc[2 * 160];
-  if(!fclJsonEscape(msg && *msg ? msg : "Error", esc, sizeof(esc))) snprintf(esc, sizeof(esc), "Error");
-  snprintf(json, cap, "{\"error\":\"%s\"}", esc);
-}
-
 // ---- saludo de la sesion --------------------------------------------------
 // Una peticion corta al telefono. Estado HTTP (<0 = no contesto) y el cuerpo,
 // ACOTADO, en gHsBuf. Una respuesta mas grande de lo que cabe no se acepta.
@@ -255,40 +248,26 @@ bool flexStorageOffer(char out[FST_HEX32]){
 int flexStoragePairBegin(const FstPairReq* req, const char* peerIp, char* json, size_t cap, uint32_t* retryS){
   if(retryS) *retryS = 0;
   if(!json || cap < 400) return 500;
-  if(!gMx){ errJson(json, cap, "Flex Storage a\xC3\xBAn no est\xC3\xA1 listo"); return 503; }
-  FstPairResp r; memset(&r, 0, sizeof(r));
-  char err[160] = "", p4id[FST_ID_MAX], p4name[FST_NAME_MAX];
-  uint32_t waitS = 0;
+  if(!gMx){ fstErrorJson(json, cap, "Flex Storage a\xC3\xBAn no est\xC3\xA1 listo"); return 503; }
   lockMx();
-  int st = fstPairBegin(&gCore, millis(), req, peerIp, rnd, nullptr, &r, err, sizeof(err), &waitS);
-  memcpy(p4id, gCore.p4Id, sizeof(p4id));
-  memcpy(p4name, gCore.p4Name, sizeof(p4name));
+  int st = fstPairBeginHttp(&gCore, millis(), req, peerIp, rnd, nullptr, json, cap, retryS);
   if(st == 202) gGen++;
   refreshSnap(millis());
+  bool approve = gCore.pair.needsApproval;
   unlockMx();
-  if(st != 202){
-    if(retryS) *retryS = waitS;
-    errJson(json, cap, err);
-    return st;
-  }
-  char en[2 * FST_NAME_MAX];
-  if(!fclJsonEscape(p4name, en, sizeof(en))) snprintf(en, sizeof(en), "Flex OS");
-  snprintf(json, cap, "{\"ok\":1,\"pairId\":\"%s\",\"pub\":\"%s\",\"p4id\":\"%s\",\"p4name\":\"%s\",\"approve\":%u,\"expiresIn\":%lu}",
-           r.pairId, r.pub, p4id, en, (unsigned)r.approve, (unsigned long)r.expiresS);
-  Serial.printf("[STORAGE] emparejamiento pedido desde %s%s\n", peerIp ? peerIp : "?",
-                r.approve ? ": esperando la aprobacion en pantalla" : " (telefono ya emparejado)");
-  return 202;
+  if(st == 202) Serial.printf("[STORAGE] emparejamiento pedido desde %s%s\n", peerIp ? peerIp : "?",
+                              approve ? ": esperando la aprobacion en pantalla" : " (telefono ya emparejado)");
+  return st;
 }
 
 int flexStoragePairPoll(const char* pairId, const char* proofHex, char* json, size_t cap){
   if(!json || cap < 160) return 500;
-  if(!gMx){ errJson(json, cap, "Flex Storage a\xC3\xBAn no est\xC3\xA1 listo"); return 503; }
-  uint8_t state = 0; bool persist = false;
-  char proof[65] = "", err[160] = "";
+  if(!gMx){ fstErrorJson(json, cap, "Flex Storage a\xC3\xBAn no est\xC3\xA1 listo"); return 503; }
+  bool persist = false;
   FstPhone old, rec;
   lockMx();
   old = gCore.phone;
-  int st = fstPairPoll(&gCore, millis(), pairId, proofHex, &state, proof, &persist, err, sizeof(err));
+  int st = fstPairPollHttp(&gCore, millis(), pairId, proofHex, json, cap, &persist);
   if(persist){
     gCore.phone.pairedEpoch = epochNow();
     rec = gCore.phone;
@@ -313,7 +292,7 @@ int flexStoragePairPoll(const char* pairId, const char* proofHex, char* json, si
       unlockMx();
       fstPhoneWipe(&rec); fstPhoneWipe(&old);
       Serial.println(F("[STORAGE] no se pudo guardar el emparejamiento en la NVS"));
-      errJson(json, cap, "Flex OS no pudo guardar el emparejamiento. Vuelve a intentarlo.");
+      fstErrorJson(json, cap, "Flex OS no pudo guardar el emparejamiento. Vuelve a intentarlo.");
       return 500;
     }
     bool other = old.valid && strcmp(old.id, rec.id) != 0;
@@ -326,9 +305,6 @@ int flexStoragePairPoll(const char* pairId, const char* proofHex, char* json, si
   } else {
     fstPhoneWipe(&old);
   }
-  if(st == 200 && state == FSTP_DONE) snprintf(json, cap, "{\"ok\":1,\"state\":\"approved\",\"proof\":\"%s\"}", proof);
-  else if(st == 200) snprintf(json, cap, "{\"ok\":1,\"state\":\"pending\"}");
-  else errJson(json, cap, err);
   return st;
 }
 

@@ -92,7 +92,8 @@ void flexHttpToken(uint64_t seed, char* out, size_t cap);
 // #############################################################
 //  API AMPLIADA  ·  la que usa Flex Web Server
 // #############################################################
-enum { FLEXHTTP_M_POST = 3, FLEXHTTP_M_DELETE = 4, FLEXHTTP_M_OPTIONS = 5 };
+enum { FLEXHTTP_M_POST = 3, FLEXHTTP_M_DELETE = 4, FLEXHTTP_M_OPTIONS = 5,
+       FLEXHTTP_M_PUT = 6, FLEXHTTP_M_PATCH = 7 };   // PUT/PATCH: solo la pasarela de Flex Cloud
 
 #define FLEXHTTP_QUERY_MAX   512
 #define FLEXHTTP_SESS_MAX     64     // valor de la cookie de sesion
@@ -115,11 +116,16 @@ typedef struct {
   int      hasRange;                     // vino un Range: bytes=a-b valido
   long long rangeStart, rangeEnd;        // rangeEnd -1 = hasta el final; rangeStart -1 = sufijo
   int      xflex;                        // "X-Flex: 1": la peticion viene de la app (defensa CSRF)
+  // Flex Storage (la pasarela /api/cloud las reenvia al telefono). Un valor
+  // que no cabe se deja vacio: nunca se reenvia a medias.
+  char     ifRange[72];                  // If-Range (la huella "\"sha256\"")
+  char     partSha[72];                  // X-Part-SHA256 (huella de una parte de subida)
 } FlexHttpReqEx;
 
 // Como flexHttpParse, con todo lo anterior. Acepta GET, HEAD, POST,
-// DELETE y OPTIONS; cualquier otro metodo queda en FLEXHTTP_M_UNKNOWN
-// (el llamante responde 405). Devuelve 1 / 0 / -1 igual que la otra.
+// DELETE, OPTIONS, PUT y PATCH; cualquier otro metodo queda en
+// FLEXHTTP_M_UNKNOWN (el llamante responde 405). Devuelve 1 / 0 / -1 igual
+// que la otra. Que metodo vale en que ruta lo decide FlexOS_MediaWeb.
 int    flexHttpParseEx(const char* buf, size_t len, FlexHttpReqEx* out);
 
 // Busca `key` en una consulta cruda ("a=1&b=%C3%B1") y des-escapa su
@@ -149,6 +155,36 @@ size_t flexHttpChunkHead(char* out, size_t cap, size_t n);
 // Host valido para este servidor: vacio (HTTP/1.0), o la IP propia con o
 // sin ":puerto". Defensa contra el "DNS rebinding".
 int    flexHttpHostOk(const char* host, const char* ownIp, int port);
+
+// #############################################################
+//  RESPUESTAS  ·  la pasarela de Flex Storage (/api/cloud -> telefono)
+//  ------------------------------------------------------------
+//  El P4 reenvia peticiones del navegador al servidor de Flex Cloud del
+//  telefono y le devuelve la respuesta. Esto analiza la cabecera de esa
+//  respuesta: tambien son bytes que llegan de la red. Un valor que no cabe
+//  o que lleva bytes de control se deja vacio (nunca se reenvia a medias).
+// #############################################################
+#define FLEXHTTP_RESP_MAX 4096
+
+typedef struct {
+  int       status;                      // 100..599
+  int       keepAlive;
+  size_t    headerLen;                   // el cuerpo empieza aqui
+  long long contentLength;               // -1 = no vino
+  int       chunked;
+  char      ctype[FLEXHTTP_CTYPE_MAX];
+  char      contentRange[80];
+  char      etag[80];
+  char      acceptRanges[16];
+  char      retryAfter[16];
+  char      cacheControl[80];
+  char      disposition[600];
+} FlexHttpResp;
+
+// 1 = cabecera completa y valida, 0 = faltan bytes, -1 = no vale (o pasa
+// de FLEXHTTP_RESP_MAX, o dos Content-Length distintos, o una codificacion
+// que no es "chunked").
+int flexHttpParseResp(const char* buf, size_t len, FlexHttpResp* out);
 
 #ifdef __cplusplus
 }

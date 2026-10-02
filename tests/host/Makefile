@@ -153,8 +153,10 @@ $(BUILD)/mediacheck: mediacheck.cpp $(ULTRA)/FlexOS_MediaLib.cpp $(ULTRA)/FlexOS
                      $(ULTRA)/FlexOS_JPEGEnc.cpp $(ULTRA)/FlexOS_MediaThumb.cpp | $(BUILD)
 	$(CXX) $(CXXSTD) -O2 $(WARN) -o $@ mediacheck.cpp $(ULTRA)/FlexOS_MediaLib.cpp $(ULTRA)/FlexOS_Media.cpp \
 	       $(ULTRA)/FlexOS_JPEG.cpp $(ULTRA)/FlexOS_JPEGEnc.cpp $(ULTRA)/FlexOS_MediaThumb.cpp
-$(BUILD)/flexweb_host: flexweb_host.cpp $(WEB_SRC) $(WEB_HDRS) $(ULTRA)/FlexOS_MediaStore.cpp $(ULTRA)/FlexOS_MediaStore.h | $(BUILD)
-	$(CXX) $(COMMON) $(SAN) $(WEBFLAGS) -o $@ flexweb_host.cpp $(WEB_SRC) $(ULTRA)/FlexOS_MediaStore.cpp
+$(BUILD)/flexweb_host: flexweb_host.cpp e2e_http.h $(WEB_SRC) $(WEB_HDRS) $(ULTRA)/FlexOS_MediaStore.cpp $(ULTRA)/FlexOS_MediaStore.h \
+                       $(ULTRA)/FlexOS_StorageCore.cpp $(ULTRA)/FlexOS_StorageCore.h $(ULTRA)/FlexOS_FlexAuth.cpp | $(BUILD)
+	$(CXX) $(COMMON) $(SAN) $(WEBFLAGS) -Ivendor/cJSON -DFST_FORCE_OPENSSL -o $@ flexweb_host.cpp $(WEB_SRC) $(ULTRA)/FlexOS_MediaStore.cpp \
+	       $(ULTRA)/FlexOS_StorageCore.cpp $(ULTRA)/FlexOS_FlexAuth.cpp $(CJSON) -lcrypto
 
 # Pruebas de la web: funciones puras en Node (contra el firmware, via
 # mediacheck) y, si hay Playwright, Chromium de verdad contra flexweb_host.

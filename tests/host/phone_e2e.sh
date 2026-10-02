@@ -6,9 +6,10 @@
 #
 #    ./phone_e2e.sh
 #
-#  Necesita Java 17+ y Gradle (el mismo que compila android/FlexPhone). El
-#  servidor arranca ya emparejado con el id del P4 de las pruebas y con una
-#  clave aleatoria, sobre una carpeta temporal, y se para al terminar.
+#  Necesita Java 17+, Gradle (el mismo que compila android/FlexPhone) y Node.
+#  El servidor arranca ya emparejado con el id del P4 de las pruebas y con una
+#  clave aleatoria, sobre una carpeta temporal, y se para al terminar. Despues,
+#  pair_e2e.js empareja la app de verdad contra el servidor web del P4.
 # #############################################################
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -41,4 +42,12 @@ PHONE_E2E_PORT="$PORT" PHONE_E2E_KEY="$KEY" PHONE_E2E_QUOTA="$QUOTA" ./build/pho
 RC=$?
 set -e
 if [ $RC -ne 0 ]; then echo "--- registro del telefono ---"; tail -40 "$LOG"; fi
-exit $RC
+# El emparejamiento: la app (AttachClient.kt) contra el servidor web del P4
+# (flexweb_host), con la aprobacion "en pantalla" por stdin.
+make -s build/flexweb_host
+set +e
+node pair_e2e.js
+RC2=$?
+set -e
+[ $RC -ne 0 ] && exit $RC
+exit $RC2

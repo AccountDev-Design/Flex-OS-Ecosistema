@@ -588,6 +588,51 @@ int fstPairPoll(FstCore* c, uint32_t nowMs, const char* pairId, const char* proo
   return 200;
 }
 
+// ---- respuestas HTTP del emparejamiento (JSON) ----
+// Cadena JSON: comillas, barra y controles escapados; el resto (UTF-8) tal cual.
+static bool jsonEsc(const char* in, char* out, size_t cap){
+  size_t w = 0;
+  for(const unsigned char* p = (const unsigned char*)(in ? in : ""); *p; p++){
+    char e[8];
+    const char* s = NULL;
+    if(*p == '"') s = "\\\"";
+    else if(*p == '\\') s = "\\\\";
+    else if(*p < 0x20){ snprintf(e, sizeof(e), "\\u%04x", *p); s = e; }
+    if(s){ size_t L = strlen(s); if(w + L >= cap) return false; memcpy(out + w, s, L); w += L; }
+    else { if(w + 1 >= cap) return false; out[w++] = (char)*p; }
+  }
+  if(w >= cap) return false;
+  out[w] = 0;
+  return true;
+}
+void fstErrorJson(char* json, size_t cap, const char* msg){
+  char esc[320];
+  if(!jsonEsc(msg && *msg ? msg : "Error", esc, sizeof(esc))) snprintf(esc, sizeof(esc), "Error");
+  snprintf(json, cap, "{\"error\":\"%s\"}", esc);
+}
+int fstPairBeginHttp(FstCore* c, uint32_t nowMs, const FstPairReq* req, const char* peerIp,
+                     FstRandFn rnd, void* rctx, char* json, size_t cap, uint32_t* retryS){
+  FstPairResp r; char err[160] = ""; uint32_t waitS = 0;
+  int st = fstPairBegin(c, nowMs, req, peerIp, rnd, rctx, &r, err, sizeof(err), &waitS);
+  if(retryS) *retryS = st == 202 ? 0 : waitS;
+  if(st != 202){ fstErrorJson(json, cap, err); return st; }
+  char en[2 * FST_NAME_MAX];
+  if(!jsonEsc(c->p4Name, en, sizeof(en))) snprintf(en, sizeof(en), "Flex OS");
+  int n = snprintf(json, cap, "{\"ok\":1,\"pairId\":\"%s\",\"pub\":\"%s\",\"p4id\":\"%s\",\"p4name\":\"%s\",\"approve\":%u,\"expiresIn\":%lu}",
+                   r.pairId, r.pub, c->p4Id, en, (unsigned)r.approve, (unsigned long)r.expiresS);
+  if(n < 0 || (size_t)n >= cap){ fstPairCancel(c); fstErrorJson(json, cap, "Respuesta demasiado grande"); return 500; }
+  return 202;
+}
+int fstPairPollHttp(FstCore* c, uint32_t nowMs, const char* pairId, const char* proofHex,
+                    char* json, size_t cap, bool* persist){
+  uint8_t state = 0; char proof[65] = "", err[160] = "";
+  int st = fstPairPoll(c, nowMs, pairId, proofHex, &state, proof, persist, err, sizeof(err));
+  if(st == 200 && state == FSTP_DONE) snprintf(json, cap, "{\"ok\":1,\"state\":\"approved\",\"proof\":\"%s\"}", proof);
+  else if(st == 200) snprintf(json, cap, "{\"ok\":1,\"state\":\"pending\"}");
+  else fstErrorJson(json, cap, err);
+  return st;
+}
+
 bool fstPairDecide(FstCore* c, bool allow){
   if(!c || c->pair.state != FSTP_PENDING) return false;
   c->pair.state = allow ? FSTP_APPROVED : FSTP_DENIED;

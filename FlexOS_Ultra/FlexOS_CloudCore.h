@@ -125,6 +125,8 @@ enum { FCL_JOB_UPLOAD = 1, FCL_JOB_DOWNLOAD = 2 };
 #define FCL_JF_FREE_LOCAL   0x01u   // subir y liberar espacio: borrar lo local SOLO tras confirmar
 #define FCL_JF_TO_LIBRARY   0x02u   // descarga: a la biblioteca de medios (Galeria)
 #define FCL_JF_FROM_LIBRARY 0x04u   // subida desde la Galeria (mlId valido)
+#define FCL_JF_MOVE_REMOTE  0x08u   // descarga que MUEVE: el original va a la papelera de la nube
+                                    // solo cuando la copia verificada ya esta colocada
 // Banderas internas del gestor (tambien van al diario):
 #define FCL_JF_ABORT        0x20u   // subida cancelada: falta avisar al servidor para soltar la reserva
 #define FCL_JF_CLEARED      0x40u   // el usuario la quito de la lista (se borra al terminar lo pendiente)

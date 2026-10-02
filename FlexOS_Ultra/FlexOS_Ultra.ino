@@ -163,6 +163,7 @@
 #include "FlexOS_Store.h"
 #include "FlexOS_Account.h"
 #include "FlexOS_Cloud.h"        // Flex Cloud Manager: subidas, descargas, miniaturas y streaming (tareas propias)
+#include "FlexOS_StorageLink.h"  // Flex Storage: telefono emparejado, aprobacion y sesion (destino de Flex Cloud)
 
 // SISTEMA DE ARCHIVOS REAL (LittleFS). Toda la logica de ficheros vive en
 // FlexOS_FS.cpp -- comun a las tres placas -- para no tener tres copias de
@@ -469,6 +470,9 @@ void setup(){
   if(!gSafeMode){
     flexStoreBegin();       // crea la tarea de fondo; no abre WiFi ni descarga en setup()
     flexAccountBegin();     // carga la cuenta local y crea su tarea; no toca la radio
+    // FLEX STORAGE: carga el telefono emparejado (NVS) y elige el destino de
+    // Flex Cloud ANTES de que Flex Cloud cargue su diario. No toca la radio.
+    flexStorageBegin();
     // FLEX CLOUD: carga su diario (subidas y descargas a medias del arranque
     // anterior) y crea sus dos tareas. NO toca la radio: espera a que haya
     // Wi-Fi y una Flex Account utilizable para hablar con la nube.

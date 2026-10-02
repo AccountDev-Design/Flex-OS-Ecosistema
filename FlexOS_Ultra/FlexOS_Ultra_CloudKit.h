@@ -781,6 +781,16 @@ static size_t ckShed(){
 // #############################################################
 // Coloca una descarga YA VERIFICADA: a la biblioteca (Galeria/Musica) si es un
 // medio que el P4 cataloga, si no a /Descargas. El temporal se MUEVE (no se copia).
+// MOVER desde la nube (Flex Storage): la copia ya esta verificada y COLOCADA;
+// solo entonces el original va a la papelera de Flex Cloud (recuperable 30 dias).
+static void ckMoveRemoteDone(const FlexCloudEvent& e){
+  if(!(e.flags & FCL_JF_MOVE_REMOTE) || !e.fileId[0]) return;
+  FclItem it; memset(&it, 0, sizeof(it));
+  snprintf(it.id, sizeof(it.id), "%s", e.fileId);
+  fclCopyUtf8(it.name, sizeof(it.name), e.name);
+  flexCloudTrash(&it);
+}
+
 static void ckPlaceDownload(const FlexCloudEvent& e){
   if(!flexFsExists(e.localPath)) return;                       // ya colocado (aviso repetido tras un reinicio)
   char why[64] = "";
@@ -788,6 +798,7 @@ static void ckPlaceDownload(const FlexCloudEvent& e){
   if((e.flags & FCL_JF_TO_LIBRARY) && kind != FML_K_NONE && gMlOk){
     if(mlAddFile(e.localPath, kind, e.name, FML_O_CLOUD, 0, why, sizeof(why))){
       sysNotify(e.name, kind == FML_K_AUDIO ? "Descargado en M\xC3\xBAsica" : "Descargado en la Galer\xC3\xAD" "a");
+      ckMoveRemoteDone(e);
       return;
     }
   }
@@ -801,7 +812,7 @@ static void ckPlaceDownload(const FlexCloudEvent& e){
     flexFsStem(local, stem, sizeof(stem));
     if(!flexFsNewName("/Descargas", stem, dot ? dot : "", dst, sizeof(dst))) dst[0] = 0;
   }
-  if(dst[0] && flexFsMove(e.localPath, dst)) sysNotify(e.name, "Descargado en Archivos > Descargas");
+  if(dst[0] && flexFsMove(e.localPath, dst)){ sysNotify(e.name, "Descargado en Archivos > Descargas"); ckMoveRemoteDone(e); }
   else sysNotify(e.name, why[0] ? why : "No se pudo guardar la descarga");
 }
 

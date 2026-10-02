@@ -137,6 +137,174 @@ static void whHeavyEnd(void*){ mediaHeavyEnd(); }
 // ---- Conexion (WiFiClient) ----
 static WiFiServer* gWebSrv = NULL;
 static bool whOthers(void*){ return gWebSrv && gWebSrv->hasClient(); }
+static int  wcRead(void* ctx, uint8_t* buf, size_t n, uint32_t ms);
+static bool wcWrite(void* ctx, const uint8_t* b, size_t n);
+
+// #############################################################
+// ##  FLEX STORAGE en el servidor de siempre (docs/FLEX-STORAGE.md)
+// ##  ------------------------------------------------------
+// ##  Lo que el servidor decide vive en FlexOS_MediaWeb (probado en el PC);
+// ##  aqui solo se le da: una conexion con el telefono emparejado
+// ##  (FlexOS_StorageLink), el emparejamiento, las transferencias del gestor
+// ##  de la nube y las operaciones de la biblioteca hechas en loopTask.
+// #############################################################
+// Pasarela /api/cloud: una conexion TCP con el telefono por peticion.
+static bool whCloudOpen(void*, FlexWebConn* up, char* host, size_t hc, char* bearer, size_t bc, char* why, size_t wc){
+  if(!flexStorageCopyBearer(bearer, bc, why, wc)) return false;     // puede abrir sesion (red, segundos como mucho)
+  FlexStorageInfo si; flexStorageInfo(&si);
+  IPAddress ip;
+  if(si.state != FSP_READY || !si.port || !ip.fromString(si.ip)){ memset(bearer, 0, bc); snprintf(why, wc, "no_phone"); return false; }
+  WiFiClient* cli = new WiFiClient();
+  if(!cli->connect(ip, si.port, 4000)){
+    delete cli; memset(bearer, 0, bc);
+    flexStorageNoteResult(-1);
+    snprintf(why, wc, "network");
+    return false;
+  }
+  cli->setNoDelay(true);
+  up->read = wcRead; up->write = wcWrite; up->ctx = cli; up->peer = NULL;
+  snprintf(host, hc, "%s:%u", si.ip, (unsigned)si.port);
+  return true;
+}
+static void whCloudClose(void*, FlexWebConn* up){
+  WiFiClient* c = (WiFiClient*)up->ctx;
+  if(c){ c->stop(); delete c; up->ctx = NULL; }
+}
+static void whCloudResult(void*, int st){
+  flexStorageNoteResult(st);
+  if(st == 401) flexStorageSessionRejected();     // la sesion caduco: la siguiente abre otra
+}
+// Origen del telefono para la CSP: sus fotos y videos se ven DIRECTAMENTE
+// desde el (enlaces firmados de 15 min), sin pasar los bytes por el P4.
+static void whPhoneOrigin(void*, char* out, size_t cap){
+  FlexStorageInfo si; flexStorageInfo(&si);
+  if(si.state == FSP_READY && si.ip[0] && si.port) snprintf(out, cap, "http://%s:%u", si.ip, (unsigned)si.port);
+  else if(cap) out[0] = 0;
+}
+// Emparejamiento: lo decide FlexOS_StorageCore; la aprobacion es de la pantalla.
+static bool whPhoneOffer(void*, char out[FST_HEX32]){ return flexStorageOffer(out); }
+static int whPhonePair(void*, const FstPairReq* rq, const char* peer, char* json, size_t cap, uint32_t* retryS){
+  return flexStoragePairBegin(rq, peer, json, cap, retryS);
+}
+static int whPhonePoll(void*, const char* id, const char* proof, char* json, size_t cap){ return flexStoragePairPoll(id, proof, json, cap); }
+
+static void whEsc(const char* in, char* out, size_t cap){ if(!fclJsonEscape(in ? in : "", out, cap) && cap) out[0] = 0; }
+static bool whStorageJson(void*, char* out, size_t cap){
+  FlexStorageInfo si; flexStorageInfo(&si);
+  FlexCloudStatus cs; flexCloudStatus(&cs);
+  const char* st = si.state == FSP_READY ? "ready" : si.state == FSP_OFF ? "off" : si.state == FSP_REJECTED ? "rejected" : "none";
+  char nm[2 * FST_NAME_MAX], md[2 * FST_MODEL_MAX], nt[200];
+  whEsc(si.name, nm, sizeof(nm)); whEsc(si.model, md, sizeof(md)); whEsc(cs.netText, nt, sizeof(nt));
+  long ok = si.lastOkAgeS == 0xFFFFFFFFu ? -1L : (long)si.lastOkAgeS;
+  int n = snprintf(out, cap,
+    "\"phone\":{\"state\":\"%s\",\"name\":\"%s\",\"model\":\"%s\",\"ip\":\"%s\",\"port\":%u,\"reachable\":%u,\"lastOkS\":%ld,\"pairWaiting\":%u},"
+    "\"cloud\":{\"dest\":\"%s\",\"net\":%u,\"netText\":\"%s\",\"active\":%u,\"quota\":",
+    st, nm, md, si.ip, (unsigned)si.port, (unsigned)si.reachable, ok, (unsigned)si.pairWaiting,
+    flexCloudDest() == FCD_PHONE ? "phone" : "internet", (unsigned)cs.net, nt, (unsigned)cs.activeXfers);
+  if(n < 0 || (size_t)n >= cap) return false;
+  int m;
+  if(cs.quotaValid){
+    const FclQuota& q = cs.quota;
+    m = snprintf(out + n, cap - (size_t)n,
+      "{\"total\":%llu,\"used\":%llu,\"reserved\":%llu,\"trash\":%llu,\"available\":%llu,\"permille\":%u,\"state\":\"%s\"}}",
+      (unsigned long long)q.totalBytes, (unsigned long long)q.usedBytes, (unsigned long long)q.reservedBytes,
+      (unsigned long long)q.trashBytes, (unsigned long long)q.availableBytes, (unsigned)q.permille,
+      q.state == FCL_Q_FULL ? "full" : q.state == FCL_Q_LOW ? "low" : "ok");
+  } else m = snprintf(out + n, cap - (size_t)n, "null}");
+  return m > 0 && (size_t)m < cap - (size_t)n;
+}
+// Las transferencias del gestor de la nube, con la MISMA frase que ensena el P4.
+static bool whXfersJson(void*, char* out, size_t cap){
+  FlexCloudXfer x[FLEX_CLOUD_XFERS];
+  int n = flexCloudXfers(x, FLEX_CLOUD_XFERS);
+  size_t w = 0;
+  if(cap < 3) return false;
+  out[w++] = '[';
+  for(int i = 0; i < n; i++){
+    char line[120], nm[2 * 64], ln[2 * 120];
+    fclXferLine(x[i].phase, x[i].type, x[i].done, x[i].size, x[i].bytesPerSec, x[i].retryInMs, x[i].error, line, sizeof(line));
+    whEsc(x[i].name, nm, sizeof(nm)); whEsc(line, ln, sizeof(ln));
+    int k = snprintf(out + w, cap - w, "%s{\"id\":%lu,\"up\":%u,\"phase\":%u,\"name\":\"%s\",\"size\":%llu,\"done\":%llu,\"rate\":%lu,\"text\":\"%s\",\"move\":%u}",
+                     i ? "," : "", (unsigned long)x[i].id, x[i].type == FCL_JOB_UPLOAD ? 1u : 0u, (unsigned)x[i].phase, nm,
+                     (unsigned long long)x[i].size, (unsigned long long)x[i].done, (unsigned long)x[i].bytesPerSec, ln,
+                     (x[i].flags & (FCL_JF_FREE_LOCAL | FCL_JF_MOVE_REMOTE)) ? 1u : 0u);
+    if(k < 0 || (size_t)k >= cap - w - 2) break;
+    w += (size_t)k;
+  }
+  out[w++] = ']'; out[w] = 0;
+  return true;
+}
+static int whXferOp(void*, const FlexWebXferReq* rq, char* msg, size_t cap){
+  if((rq->op == FLEXWEB_X_UP || rq->op == FLEXWEB_X_DOWN) && (flexCloudDest() != FCD_PHONE || !flexStoragePhoneUsable())){
+    snprintf(msg, cap, "Conecta tu tel\xC3\xA9" "fono para usar Flex Cloud");
+    return 409;
+  }
+  switch(rq->op){
+    case FLEXWEB_X_UP: {
+      FlexMlRec r;
+      if(!flexMsGet(&gMs, rq->id, &r)){ snprintf(msg, cap, "Ya no existe"); return 404; }
+      if(r.flags & FML_R_LOCKED){ snprintf(msg, cap, "Contenido protegido"); return 403; }
+      // Mover = subir, que el telefono CONFIRME la misma huella, releer el
+      // original... y solo entonces borrarlo (ckFreeLocal, en loopTask).
+      uint32_t job = flexCloudUpload(r.path, r.name[0] ? r.name : NULL, rq->folder, r.id, rq->move ? FCL_JF_FREE_LOCAL : 0);
+      if(!job){ snprintf(msg, cap, "No se pudo poner en la cola"); return 503; }
+      snprintf(msg, cap, "%s", rq->move ? "Moviendo a Flex Cloud" : "Copiando a Flex Cloud");
+      return 202;
+    }
+    case FLEXWEB_X_DOWN: {
+      FclItem it; memset(&it, 0, sizeof(it));
+      snprintf(it.id, sizeof(it.id), "%s", rq->file);
+      fclCopyUtf8(it.name, sizeof(it.name), rq->name);
+      snprintf(it.sha256, sizeof(it.sha256), "%s", rq->sha);
+      it.size = rq->size;
+      // La copia se VERIFICA contra la huella; mover deja el original en la
+      // papelera de Flex Cloud solo despues de colocarla (ckPlaceDownload).
+      uint32_t job = flexCloudDownload(&it, (uint8_t)(FCL_JF_TO_LIBRARY | (rq->move ? FCL_JF_MOVE_REMOTE : 0)));
+      if(!job){ snprintf(msg, cap, "No se pudo poner en la cola"); return 503; }
+      snprintf(msg, cap, "%s", rq->move ? "Moviendo a Flex OS" : "Copiando a Flex OS");
+      return 202;
+    }
+    case FLEXWEB_X_CANCEL: if(flexCloudCancel(rq->id)){ snprintf(msg, cap, "Cancelada"); return 202; } snprintf(msg, cap, "Ya no est\xC3\xA1 en curso"); return 404;
+    case FLEXWEB_X_RETRY:  if(flexCloudRetry(rq->id)){ snprintf(msg, cap, "Reintentando"); return 202; } snprintf(msg, cap, "No se puede reintentar"); return 409;
+    case FLEXWEB_X_CLEAR:  flexCloudClearFinished(); snprintf(msg, cap, "Lista limpia"); return 202;
+  }
+  snprintf(msg, cap, "Operaci\xC3\xB3n no v\xC3\xA1lida");
+  return 400;
+}
+
+// Borrar y renombrar desde la web se hace en loopTask: es quien sabe si esa
+// cancion esta sonando o esa foto abierta (mlBeforeChange) y quien suelta sus
+// miniaturas de la RAM. Un solo hueco (el servidor atiende de una en una); la
+// tarea del servidor espera el resultado con un plazo y, si loopTask no lo
+// recogio a tiempo, lo retira sin que llegue a hacerse.
+enum { WLO_IDLE = 0, WLO_PENDING, WLO_RUNNING, WLO_DONE };
+enum { WLO_REMOVE = 1, WLO_RENAME };
+struct WebLibOp { volatile uint8_t state; uint8_t op; uint32_t id; char name[FML_NAME_MAX]; bool ok; char why[96]; };
+static WebLibOp gWebLibOp;
+static bool webLibRun(uint8_t op, uint32_t id, const char* name, char* why, size_t cap){
+  gWebLibOp.op = op; gWebLibOp.id = id; gWebLibOp.ok = false; gWebLibOp.why[0] = 0;
+  snprintf(gWebLibOp.name, sizeof(gWebLibOp.name), "%s", name ? name : "");
+  __atomic_store_n(&gWebLibOp.state, (uint8_t)WLO_PENDING, __ATOMIC_RELEASE);
+  uint32_t t0 = millis();
+  for(;;){
+    uint8_t st = __atomic_load_n(&gWebLibOp.state, __ATOMIC_ACQUIRE);
+    if(st == WLO_DONE) break;
+    if(st == WLO_PENDING && (millis() - t0 > 3000 || gWebStop)){
+      uint8_t exp = WLO_PENDING;
+      if(__atomic_compare_exchange_n(&gWebLibOp.state, &exp, (uint8_t)WLO_IDLE, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)){
+        snprintf(why, cap, "Flex OS est\xC3\xA1 ocupado; vuelve a intentarlo");
+        return false;
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+  bool ok = gWebLibOp.ok;
+  snprintf(why, cap, "%s", gWebLibOp.why);
+  __atomic_store_n(&gWebLibOp.state, (uint8_t)WLO_IDLE, __ATOMIC_RELEASE);
+  return ok;
+}
+static bool whRemoveRec(void*, uint32_t id, char* why, size_t cap){ return webLibRun(WLO_REMOVE, id, NULL, why, cap); }
+static bool whRenameRec(void*, uint32_t id, const char* name, char* why, size_t cap){ return webLibRun(WLO_RENAME, id, name, why, cap); }
 
 static int wcRead(void* ctx, uint8_t* buf, size_t n, uint32_t ms){
   WiFiClient* c = (WiFiClient*)ctx;
@@ -184,7 +352,10 @@ static void webTask(void*){
     if(gWebSrv->hasClient()){
       WiFiClient c = gWebSrv->accept();
       if(c){
-        FlexWebConn conn = { wcRead, wcWrite, &c };
+        // La IP de quien llama: Flex Storage solo empareja telefonos de la red local.
+        char peer[16];
+        snprintf(peer, sizeof(peer), "%s", c.remoteIP().toString().c_str());
+        FlexWebConn conn = { wcRead, wcWrite, &c, peer };
         flexWebServeConn(&gWebCtx, &conn, gWebHdr, gWebIo);
         c.stop();
       }
@@ -209,8 +380,12 @@ static bool webStart(){
   if(!gWebHdr || !gWebIo || !gWebEv){ gWebState = WEBS_FAIL; return false; }
   memset(&gWebCtx, 0, sizeof(gWebCtx));
   gWebCtx.fs = { msfOpen, msfRead, msfWrite, msfSeek, msfClose, msfSize, msfRemove, wfsFree, wfsTotal, NULL };
+  // La segunda y la tercera linea son Flex Storage: el MISMO servidor y el
+  // mismo QR (docs/FLEX-STORAGE.md).
   gWebCtx.host = { whSnapshot, whGet, whRev, whDup, whCommit, whSetThumb, whThumbPath, whVerify, whLockType,
-                   whNow, whEpoch, whRandom, whEvent, whYield, whOthers, NULL, whHeavyBegin, whHeavyEnd };
+                   whNow, whEpoch, whRandom, whEvent, whYield, whOthers, NULL, whHeavyBegin, whHeavyEnd,
+                   whCloudOpen, whCloudClose, whCloudResult, whPhoneOrigin, whPhoneOffer, whPhonePair, whPhonePoll,
+                   whStorageJson, whXfersJson, whXferOp, whRemoveRec, whRenameRec };
   gWebCtx.alloc = mediaAlloc; gWebCtx.free = mediaFree;
   snprintf(gWebCtx.ip, sizeof(gWebCtx.ip), "%s", wifiConnIP);
   gWebCtx.port = FLEXWEB_PORT;
@@ -497,7 +672,28 @@ static bool webSheetTick(){
 // -------------------------------------------------------------
 //  TICK (loop): avisos, tarjetas, Wi-Fi y bloqueo
 // -------------------------------------------------------------
+// Lo que la web pidio hacer en la biblioteca (ver webLibRun).
+static void webLibTick(){
+  uint8_t exp = WLO_PENDING;
+  if(!__atomic_compare_exchange_n(&gWebLibOp.state, &exp, (uint8_t)WLO_RUNNING, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
+  bool ok = false;
+  char why[96] = "";
+  FlexMlRec r;
+  if(!mlGet(gWebLibOp.id, &r)) snprintf(why, sizeof(why), "Ya no existe");
+  else if(gWebLibOp.op == WLO_REMOVE){
+    // A la papelera (recuperable desde Archivos). Un protegido nunca va ahi
+    // (la papelera es publica): se borra, y la web solo llega aqui con el
+    // nivel de propietario.
+    ok = (r.flags & FML_R_LOCKED) ? mlDelete(r.id) : mlTrash(r.id);
+    if(!ok) snprintf(why, sizeof(why), "No se pudo eliminar");
+  } else ok = mlRename(r.id, gWebLibOp.name, why, sizeof(why));
+  gWebLibOp.ok = ok;
+  snprintf(gWebLibOp.why, sizeof(gWebLibOp.why), "%s", why);
+  __atomic_store_n(&gWebLibOp.state, (uint8_t)WLO_DONE, __ATOMIC_RELEASE);
+}
+
 static void webTick(){
+  webLibTick();
   // El P4 se bloquea: ninguna sesion conserva el contenido protegido.
   bool locked = (gState == ST_LOCK);
   if(locked && !gWebLockSeen){ flexWebDropOwners(&gWebCtx); gWebLockSeen = true; }

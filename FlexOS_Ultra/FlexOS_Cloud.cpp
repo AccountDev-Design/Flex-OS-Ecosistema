@@ -2034,7 +2034,7 @@ uint32_t flexCloudUpload(const char* localPath, const char* name, const char* pa
 uint32_t flexCloudDownload(const FclItem* it, uint8_t flags){
   if(!destUsable()) return 0;                                   // ver opFor
   if(!it || it->isFolder || !it->sha256[0]) return 0;           // sin huella no se puede verificar
-  flags &= FCL_JF_TO_LIBRARY;
+  flags &= FCL_JF_TO_LIBRARY | FCL_JF_MOVE_REMOTE;
   return addJob(FCL_JOB_DOWNLOAD, nullptr, it->name, it->parentId, it->id, it->size, it->sha256, 0, flags);
 }
 

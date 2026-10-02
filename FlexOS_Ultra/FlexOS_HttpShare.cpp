@@ -157,6 +157,7 @@ static const char* fhStatusText(int status){
   switch(status){
     case 200: return "OK";
     case 201: return "Created";
+    case 202: return "Accepted";
     case 204: return "No Content";
     case 206: return "Partial Content";
     case 304: return "Not Modified";
@@ -167,7 +168,9 @@ static const char* fhStatusText(int status){
     case 405: return "Method Not Allowed";
     case 408: return "Request Timeout";
     case 409: return "Conflict";
+    case 410: return "Gone";
     case 411: return "Length Required";
+    case 412: return "Precondition Failed";
     case 413: return "Payload Too Large";
     case 415: return "Unsupported Media Type";
     case 416: return "Range Not Satisfiable";
@@ -175,7 +178,9 @@ static const char* fhStatusText(int status){
     case 423: return "Locked";
     case 429: return "Too Many Requests";
     case 500: return "Internal Server Error";
+    case 502: return "Bad Gateway";
     case 503: return "Service Unavailable";
+    case 504: return "Gateway Timeout";
     case 507: return "Insufficient Storage";
   }
   return "Error";
@@ -312,6 +317,11 @@ static int fhCopyTrim(const char* v, size_t vl, char* out, size_t cap){
 }
 
 static int fhIsHex(char c){ return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+// Solo texto imprimible (ni controles ni DEL): lo que se reenvia a otro servidor.
+static int fhPrintable(const char* s){
+  for(const unsigned char* p = (const unsigned char*)s; *p; p++) if((*p < 0x20 && *p != '\t') || *p == 0x7F) return 0;
+  return 1;
+}
 
 // Entero decimal no negativo, con tope. -1 si no es un numero limpio.
 static long long fhParseLL(const char* s, size_t n, long long max){
@@ -398,6 +408,8 @@ int flexHttpParseEx(const char* buf, size_t len, FlexHttpReqEx* out){
   else if(i == 4 && !strncmp(buf, "POST", 4))    out->method = FLEXHTTP_M_POST;
   else if(i == 6 && !strncmp(buf, "DELETE", 6))  out->method = FLEXHTTP_M_DELETE;
   else if(i == 7 && !strncmp(buf, "OPTIONS", 7)) out->method = FLEXHTTP_M_OPTIONS;
+  else if(i == 3 && !strncmp(buf, "PUT", 3))     out->method = FLEXHTTP_M_PUT;
+  else if(i == 5 && !strncmp(buf, "PATCH", 5))   out->method = FLEXHTTP_M_PATCH;
   else out->method = FLEXHTTP_M_UNKNOWN;
   i++;
   size_t ps = i;
@@ -466,6 +478,10 @@ int flexHttpParseEx(const char* buf, size_t len, FlexHttpReqEx* out){
     } else if(FH_IS("X-Flex")){
       char b[8];
       if(fhCopyTrim(v, vl, b, sizeof(b)) >= 0 && !strcmp(b, "1")) out->xflex = 1;
+    } else if(FH_IS("If-Range")){
+      if(fhCopyTrim(v, vl, out->ifRange, sizeof(out->ifRange)) < 0 || !fhPrintable(out->ifRange)) out->ifRange[0] = 0;
+    } else if(FH_IS("X-Part-SHA256")){
+      if(fhCopyTrim(v, vl, out->partSha, sizeof(out->partSha)) < 0 || !fhPrintable(out->partSha)) out->partSha[0] = 0;
     }
     #undef FH_IS
     lp = le + 1;
@@ -585,4 +601,73 @@ int flexHttpHostOk(const char* host, const char* ownIp, int port){
   if(host[il] != ':') return 0;
   uint32_t p;
   return flexHttpParseU32(host + il + 1, &p) && (int)p == port;
+}
+
+// #############################################################
+//  RESPUESTAS (pasarela de Flex Storage)
+// #############################################################
+static void fhCopyField(const char* v, size_t vl, char* out, size_t cap){
+  if(fhCopyTrim(v, vl, out, cap) < 0 || !fhPrintable(out)) out[0] = 0;
+}
+
+int flexHttpParseResp(const char* buf, size_t len, FlexHttpResp* out){
+  if(!buf || !out) return -1;
+  memset(out, 0, sizeof(*out));
+  out->contentLength = -1;
+  const char* end = NULL;
+  size_t scan = len > FLEXHTTP_RESP_MAX ? FLEXHTTP_RESP_MAX : len;
+  for(size_t i = 0; i + 3 < scan; i++)
+    if(buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' && buf[i + 3] == '\n'){ end = buf + i + 4; break; }
+  if(!end) return len >= FLEXHTTP_RESP_MAX ? -1 : 0;
+  size_t hlen = (size_t)(end - buf);
+  if(memchr(buf, 0, hlen)) return -1;
+  out->headerLen = hlen;
+  // "HTTP/1.x NNN texto"
+  if(hlen < 13 || strncmp(buf, "HTTP/1.", 7) || (buf[7] != '0' && buf[7] != '1') || buf[8] != ' ') return -1;
+  if(buf[9] < '1' || buf[9] > '5' || buf[10] < '0' || buf[10] > '9' || buf[11] < '0' || buf[11] > '9') return -1;
+  if(buf[12] != ' ' && buf[12] != '\r') return -1;
+  out->status = (buf[9] - '0') * 100 + (buf[10] - '0') * 10 + (buf[11] - '0');
+  out->keepAlive = buf[7] == '1';
+  const char* lp = buf;
+  while(lp < end && *lp != '\n') lp++;
+  lp++;
+  while(lp < end - 2){
+    const char* le = lp;
+    while(le < end && *le != '\n') le++;
+    size_t ll = (size_t)(le - lp);
+    if(ll && lp[ll - 1] == '\r') ll--;
+    if(ll == 0) break;
+    const char* colon = (const char*)memchr(lp, ':', ll);
+    if(!colon) return -1;
+    size_t nl = (size_t)(colon - lp);
+    const char* v = colon + 1;
+    size_t vl = ll - nl - 1;
+    #define FH_IS(name) (nl == sizeof(name) - 1 && !fhNCaseCmp(lp, name, nl))
+    if(FH_IS("Content-Length")){
+      long long n = fhParseLL(v, vl, 0x7FFFFFFFFFFFLL);
+      if(n < 0) return -1;
+      if(out->contentLength >= 0 && out->contentLength != n) return -1;
+      out->contentLength = n;
+    } else if(FH_IS("Transfer-Encoding")){
+      char b[32];
+      if(fhCopyTrim(v, vl, b, sizeof(b)) < 0 || fhCaseCmp(b, "chunked")) return -1;
+      out->chunked = 1;
+    } else if(FH_IS("Connection")){
+      char b[24];
+      if(fhCopyTrim(v, vl, b, sizeof(b)) >= 0){
+        if(!fhCaseCmp(b, "close")) out->keepAlive = 0;
+        else if(!fhCaseCmp(b, "keep-alive")) out->keepAlive = 1;
+      }
+    }
+    else if(FH_IS("Content-Type"))        fhCopyField(v, vl, out->ctype, sizeof(out->ctype));
+    else if(FH_IS("Content-Range"))       fhCopyField(v, vl, out->contentRange, sizeof(out->contentRange));
+    else if(FH_IS("ETag"))                fhCopyField(v, vl, out->etag, sizeof(out->etag));
+    else if(FH_IS("Accept-Ranges"))       fhCopyField(v, vl, out->acceptRanges, sizeof(out->acceptRanges));
+    else if(FH_IS("Retry-After"))         fhCopyField(v, vl, out->retryAfter, sizeof(out->retryAfter));
+    else if(FH_IS("Cache-Control"))       fhCopyField(v, vl, out->cacheControl, sizeof(out->cacheControl));
+    else if(FH_IS("Content-Disposition")) fhCopyField(v, vl, out->disposition, sizeof(out->disposition));
+    #undef FH_IS
+    lp = le + 1;
+  }
+  return 1;
 }

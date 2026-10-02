@@ -595,6 +595,35 @@ static void testSession(){
   }
 }
 
+static void testHttpJson(){
+  printf("-- respuestas HTTP del emparejamiento (contrato de AttachClient.kt) --\n");
+  TRng r = { 0xABCDEFull };
+  FstCore c; fstInit(&c, P4ID, "Flex \"OS\" \\ Ultra");
+  char offer[FST_HEX32]; fstOfferNew(&c, 1000, trand, &r, offer);
+  Phone ph; FstPairReq q = request(ph, offer, &r);
+  char json[600]; uint32_t retry = 99;
+  int st = fstPairBeginHttp(&c, 1000, &q, "192.168.1.5", trand, &r, json, sizeof(json), &retry);
+  CHECK(st == 202 && retry == 0, "202");
+  CHECK(strstr(json, "\"p4id\":\"flexos-a1b2c3d4e5f6\"") && strstr(json, "\"approve\":1") && strstr(json, "\"expiresIn\":120") &&
+        strstr(json, "\"p4name\":\"Flex \\\"OS\\\" \\\\ Ultra\""), "nombre del P4 escapado como JSON");
+  char pairId[33] = "";
+  const char* pi = strstr(json, "\"pairId\":\"");
+  if(pi) memcpy(pairId, pi + 10, 32);
+  bool persist = true;
+  st = fstPairPollHttp(&c, 1100, pairId, "00", json, sizeof(json), &persist);
+  CHECK(st == 403 && strstr(json, "{\"error\":\"") == json && !persist, "prueba falsa: error JSON");
+  fstOfferNew(&c, 1200, trand, &r, offer);
+  FstPairReq bad = q; bad.offer = "ffffffffffffffffffffffffffffffff";
+  for(int i = 0; i < 6; i++) st = fstPairBeginHttp(&c, 1200, &bad, "192.168.1.5", trand, &r, json, sizeof(json), &retry);
+  CHECK(st == 429 && retry == 30 && strstr(json, "\"error\""), "429 con su espera");
+  char small[40];
+  fstErrorJson(small, sizeof(small), "un mensaje muy largo que no cabe en un buffer pequeno");
+  CHECK(strlen(small) < sizeof(small), "error recortado sin salirse del buffer");
+  char ctl[100];
+  fstErrorJson(ctl, sizeof(ctl), "a\nb\x01" "c");
+  CHECK(!strcmp(ctl, "{\"error\":\"a\\u000ab\\u0001c\"}"), "controles escapados");
+}
+
 int main(){
   printf("=== FlexOS · Flex Storage: nucleo portable del P4 ===\n");
   testVectors();
@@ -607,6 +636,7 @@ int main(){
   testOffers();
   testHostileBegin();
   testSession();
+  testHttpJson();
   printf("=== %d comprobaciones, %d fallos ===\n", gChecks, gFails);
   return gFails ? 1 : 0;
 }

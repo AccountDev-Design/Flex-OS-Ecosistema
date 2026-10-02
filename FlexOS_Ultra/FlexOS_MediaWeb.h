@@ -37,6 +37,20 @@
 //     espera creciente (30 s, 1 min, 2 min... hasta 16 min).
 //  La clave del usuario no se guarda, no se registra y se borra del
 //  buffer en cuanto se ha comprobado.
+//
+//  FLEX STORAGE (docs/FLEX-STORAGE.md)
+//  -----------------------------------
+//  El MISMO servidor sirve tambien Flex Storage, sin un segundo servidor:
+//    · /api/fs/phone/pair[/<id>]  lo que pide la app Flex Phone para
+//      emparejarse (sin sesion web: la autoriza una oferta de un solo uso
+//      que solo entrega /api/fs/phone/offer a una sesion valida, y despues
+//      la aprobacion en la PANTALLA del P4);
+//    · /api/fs/*, /api/local/*    resumen, transferencias y biblioteca;
+//    · /api/cloud/*               pasarela al Flex Cloud del telefono
+//      emparejado (la sesion web del P4 y su CSRF valen aqui tambien; el
+//      token del telefono no llega nunca al navegador).
+//  Si el anfitrion no da las funciones de Flex Storage, nada de esto existe
+//  y el servidor es exactamente el de antes.
 
 #pragma once
 #include <stdint.h>
@@ -45,6 +59,7 @@
 #include "FlexOS_MediaLib.h"
 #include "FlexOS_HttpShare.h"
 #include "FlexOS_JPEG.h"
+#include "FlexOS_StorageCore.h"     // Flex Storage: FstPairReq (fuera del extern "C": es C++)
 
 #ifdef __cplusplus
 extern "C" {
@@ -64,6 +79,10 @@ extern "C" {
 #define FLEXWEB_ZIP_MAX           64
 #define FLEXWEB_TRIES             5
 #define FLEXWEB_SMALL_BODY       512
+// Flex Storage: pasarela /api/cloud -> telefono.
+#define FLEXWEB_PROXY_BODY_MAX   (17u * 1024u * 1024u)   // una parte de subida (16 MB como mucho) y algo
+#define FLEXWEB_PROXY_SMALL      4096u                   // cuerpos JSON: se guardan para poder repetirlos
+#define FLEXWEB_PROXY_TIMEOUT_MS 15000u
 
 // ---- Conexion (la placa: WiFiClient; las pruebas: memoria) -------------
 typedef struct {
@@ -73,7 +92,22 @@ typedef struct {
   // Escribe TODO o devuelve false (el otro lado se fue).
   bool (*write)(void* ctx, const uint8_t* buf, size_t n);
   void* ctx;
+  const char* peer;          // IP del otro lado ("a.b.c.d"); NULL si no se sabe
 } FlexWebConn;
+
+// Transferencias entre Flex OS y Flex Cloud que pide la web (las hace el
+// gestor de la nube del P4, verificadas con SHA-256).
+enum { FLEXWEB_X_UP = 1, FLEXWEB_X_DOWN, FLEXWEB_X_CANCEL, FLEXWEB_X_RETRY, FLEXWEB_X_CLEAR };
+typedef struct {
+  int      op;               // FLEXWEB_X_*
+  uint32_t id;               // UP: elemento de la biblioteca · CANCEL/RETRY: numero del trabajo
+  bool     move;             // mover = copiar, VERIFICAR y solo entonces quitar el original
+  char     folder[40];       // UP: carpeta de Flex Cloud ("root" o fld_...)
+  char     file[40];         // DOWN: archivo de Flex Cloud (fil_...)
+  char     name[256];        // DOWN: su nombre (UTF-8)
+  char     sha[65];          // DOWN: su SHA-256 (la descarga se comprueba contra el)
+  uint64_t size;             // DOWN
+} FlexWebXferReq;
 
 // ---- Sistema de archivos por flujos --------------------------------------
 typedef struct {
@@ -155,6 +189,28 @@ typedef struct {
   // se rechaza con 503 y el movil la reintenta; nunca se valida a la vez.
   bool     (*heavyBegin)(void* ctx);
   void     (*heavyEnd)(void* ctx);
+  // FLEX STORAGE (opcionales, detras de lo anterior: NULL = sin Flex Storage).
+  // Se llaman desde la tarea del servidor.
+  // -- pasarela /api/cloud -> Flex Cloud del telefono emparejado --
+  //    cloudOpen abre una conexion con el telefono y da la cabecera Host y el
+  //    token de su sesion (puede abrirla: red, unos segundos como mucho).
+  //    false: `why` = "no_phone" | "phone_rejected" | "network".
+  bool (*cloudOpen)(void* ctx, FlexWebConn* up, char* hostHdr, size_t hostCap, char* bearer, size_t bearerCap, char* why, size_t whyCap);
+  void (*cloudClose)(void* ctx, FlexWebConn* up);
+  void (*cloudResult)(void* ctx, int status);           // estado del telefono (<0 = no contesto; 401 = sesion caducada)
+  void (*phoneOrigin)(void* ctx, char* out, size_t cap);  // "http://ip:puerto" para la CSP ("" = ninguno)
+  // -- emparejamiento (FlexOS_StorageLink): devuelven el estado HTTP y el JSON --
+  bool (*phoneOffer)(void* ctx, char out[FST_HEX32]);
+  int  (*phonePair)(void* ctx, const FstPairReq* req, const char* peerIp, char* json, size_t cap, uint32_t* retryS);
+  int  (*phonePoll)(void* ctx, const char* pairId, const char* proofHex, char* json, size_t cap);
+  // -- resumen y transferencias (FlexOS_Cloud) --
+  bool (*storageJson)(void* ctx, char* out, size_t cap);  // "\"phone\":{...},\"cloud\":{...}" (sin llaves)
+  bool (*xfersJson)(void* ctx, char* out, size_t cap);    // "[{...},...]"
+  int  (*xferOp)(void* ctx, const FlexWebXferReq* rq, char* msg, size_t cap);   // estado HTTP; msg para la persona
+  // -- biblioteca local (en el hilo de la interfaz: la musica que suena, las miniaturas...) --
+  //    removeRec: a la papelera; un protegido (solo con nivel de propietario) se borra.
+  bool (*removeRec)(void* ctx, uint32_t id, char* why, size_t cap);
+  bool (*renameRec)(void* ctx, uint32_t id, const char* name, char* why, size_t cap);
 } FlexWebHost;
 
 typedef struct { uint8_t fails; uint32_t untilMs; } FlexWebLimiter;

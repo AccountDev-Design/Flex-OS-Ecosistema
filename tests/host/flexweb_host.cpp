@@ -22,8 +22,19 @@
 //   El catalogo es el MISMO almacen que usa la placa (FlexOS_MediaStore):
 //   publicar una subida, poner una miniatura o bloquear no tiene aqui una
 //   copia propia que pudiera portarse distinto.
+//
+//   FLEX STORAGE (opcional):
+//     flexweb_host <carpeta> [bytes] --storage [--phone-port N --phone-key HEX64]
+//   --storage: empareja telefonos con el nucleo de VERDAD (FlexOS_StorageCore,
+//   el mismo de la placa). La "pantalla del P4" son ordenes por stdin:
+//     approve | deny     decide el emparejamiento que espera
+//   y por stderr sale {"pairWaiting":...,"sas":"123456"} / {"paired":...}.
+//   --phone-port/--phone-key: un telefono YA emparejado en 127.0.0.1:N (el
+//   servidor Kotlin de pruebas, DevServer.kt) para la pasarela /api/cloud.
 #include "../../FlexOS_Ultra/FlexOS_MediaWeb.h"
 #include "../../FlexOS_Ultra/FlexOS_MediaStore.h"
+#include "../../FlexOS_Ultra/FlexOS_StorageCore.h"
+#include "e2e_http.h"
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -182,8 +193,77 @@ static bool cWrite(void* c, const uint8_t* b, size_t n){
   return true;
 }
 
+// ---------------- FLEX STORAGE (con --storage) ----------------
+static bool g_storage = false;
+static FstCore g_core;
+static char g_token[FST_TOKEN_MAX] = "";
+static void coreRand(void*, uint8_t* o, size_t n){ hRand(nullptr, o, n); }
+static bool hOffer(void*, char out[FST_HEX32]){ return fstOfferNew(&g_core, hNow(nullptr), coreRand, nullptr, out); }
+static int hPair(void*, const FstPairReq* rq, const char* peer, char* json, size_t cap, uint32_t* retry){
+  int st = fstPairBeginHttp(&g_core, hNow(nullptr), rq, peer, coreRand, nullptr, json, cap, retry);
+  if(st == 202) std::fprintf(stderr, "{\"pairWaiting\":%d,\"sas\":\"%s\",\"name\":\"%s\"}\n",
+                             g_core.pair.needsApproval ? 1 : 0, g_core.pair.sas, g_core.pair.phoneId);
+  return st;
+}
+static int hPoll(void*, const char* id, const char* proof, char* json, size_t cap){
+  bool persist = false;
+  int st = fstPairPollHttp(&g_core, hNow(nullptr), id, proof, json, cap, &persist);
+  if(persist){
+    g_token[0] = 0;                               // telefono nuevo: sesion nueva
+    std::fprintf(stderr, "{\"paired\":\"%s\",\"ip\":\"%s\",\"port\":%u}\n", g_core.phone.id, g_core.phone.ip, (unsigned)g_core.phone.port);
+  }
+  return st;
+}
+// Sesion con el telefono (reto-respuesta con autenticacion mutua, como
+// FlexOS_StorageLink) por sockets de verdad.
+static bool phoneSession(){
+  Raw ch = e2eHttp(g_core.phone.port, "GET", "/api/fs/challenge", {}, "");
+  char nonce[FST_HEX32];
+  if(ch.status != 200 || !fstParseChallenge(ch.body.data(), ch.body.size(), nonce)) return false;
+  char body[256];
+  if(!fstSessionBody(&g_core, nonce, body, sizeof(body))) return false;
+  Raw ss = e2eHttp(g_core.phone.port, "POST", "/api/fs/session", {{"Content-Type", "application/json"}}, body);
+  uint32_t exp = 0;
+  return ss.status == 200 && fstParseSession(ss.body.data(), ss.body.size(), g_core.phone.key, nonce, g_token, &exp, nullptr, 0);
+}
+static bool hCloudOpen(void*, FlexWebConn* up, char* host, size_t hc, char* bearer, size_t bc, char* why, size_t wc){
+  if(!g_core.phone.valid || !g_core.phone.enabled){ std::snprintf(why, wc, "no_phone"); return false; }
+  if(!g_token[0] && !phoneSession()){ std::snprintf(why, wc, "network"); return false; }
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  sockaddr_in a; std::memset(&a, 0, sizeof(a));
+  a.sin_family = AF_INET; a.sin_port = htons(g_core.phone.port); a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if(fd < 0 || connect(fd, (sockaddr*)&a, sizeof(a))){ if(fd >= 0) close(fd); std::snprintf(why, wc, "network"); return false; }
+  up->read = cRead; up->write = cWrite; up->ctx = new int(fd); up->peer = nullptr;
+  std::snprintf(host, hc, "%s:%u", g_core.phone.ip, (unsigned)g_core.phone.port);
+  std::snprintf(bearer, bc, "%s", g_token);
+  return true;
+}
+static void hCloudClose(void*, FlexWebConn* up){ int* fd = (int*)up->ctx; if(fd){ close(*fd); delete fd; up->ctx = nullptr; } }
+static void hCloudResult(void*, int st){ if(st == 401) g_token[0] = 0; }
+static void hOrigin(void*, char* out, size_t cap){
+  if(g_core.phone.valid) std::snprintf(out, cap, "http://%s:%u", g_core.phone.ip, (unsigned)g_core.phone.port);
+  else if(cap) out[0] = 0;
+}
+static bool hStorage(void*, char* out, size_t cap){
+  bool ok = g_core.phone.valid;
+  int n = std::snprintf(out, cap,
+    "\"phone\":{\"state\":\"%s\",\"name\":\"%s\",\"model\":\"%s\",\"ip\":\"%s\",\"port\":%u,\"reachable\":%d,\"lastOkS\":-1,\"pairWaiting\":%d},"
+    "\"cloud\":{\"dest\":\"%s\",\"net\":%d,\"netText\":\"\",\"active\":0,\"quota\":null}",
+    ok ? "ready" : "none", g_core.phone.name, g_core.phone.model, g_core.phone.ip, (unsigned)g_core.phone.port, g_token[0] ? 1 : 0,
+    g_core.pair.state == FSTP_PENDING ? 1 : 0, ok ? "phone" : "internet", ok ? 3 : 0);
+  return n > 0 && (size_t)n < cap;
+}
+static bool hRemoveRec(void*, uint32_t id, char* why, size_t cap){ bool ok = flexMsDelete(&g_ms, id); if(!ok) std::snprintf(why, cap, "No se pudo"); return ok; }
+static bool hRenameRec(void*, uint32_t id, const char* name, char* why, size_t cap){ return flexMsRename(&g_ms, id, name, why, cap); }
+
 static void command(char* line){
   char* nl = std::strchr(line, '\n'); if(nl) *nl = 0;
+  if(g_storage && (!std::strcmp(line, "approve") || !std::strcmp(line, "deny"))){
+    bool ok = fstPairDecide(&g_core, !std::strcmp(line, "approve"));
+    std::printf("{\"ok\":%d}\n", ok ? 1 : 0);
+    std::fflush(stdout);
+    return;
+  }
   if(!std::strcmp(line, "dump")){
     static char buf[1 << 20];
     size_t w = 0;
@@ -222,9 +302,27 @@ static void command(char* line){
 }
 
 int main(int argc, char** argv){
-  if(argc < 2){ std::fprintf(stderr, "uso: flexweb_host <carpeta> [bytes]\n"); return 2; }
+  if(argc < 2){ std::fprintf(stderr, "uso: flexweb_host <carpeta> [bytes] [--storage [--phone-port N --phone-key HEX64]]\n"); return 2; }
   g_root = argv[1];
-  if(argc >= 3) g_total = (uint32_t)std::strtoul(argv[2], nullptr, 10);
+  int phonePort = 0; const char* phoneKey = nullptr;
+  for(int i = 2; i < argc; i++){
+    if(!std::strcmp(argv[i], "--storage")) g_storage = true;
+    else if(!std::strcmp(argv[i], "--phone-port") && i + 1 < argc) phonePort = std::atoi(argv[++i]);
+    else if(!std::strcmp(argv[i], "--phone-key") && i + 1 < argc) phoneKey = argv[++i];
+    else g_total = (uint32_t)std::strtoul(argv[i], nullptr, 10);
+  }
+  if(g_storage){
+    // El mismo id de P4 que DevServer.kt espera en las pruebas (y que netstub da a la placa).
+    fstInit(&g_core, "flexos-a1b2c3d4e5f6", "Flex OS Ultra (pruebas)");
+    if(phonePort > 0 && phoneKey && fstUnhex(phoneKey, g_core.phone.key, 32)){
+      g_core.phone.valid = 1; g_core.phone.enabled = 1;
+      std::snprintf(g_core.phone.id, sizeof(g_core.phone.id), "a55-e2e");
+      std::snprintf(g_core.phone.name, sizeof(g_core.phone.name), "Galaxy A55 5G");
+      std::snprintf(g_core.phone.model, sizeof(g_core.phone.model), "SM-A556B");
+      std::snprintf(g_core.phone.ip, sizeof(g_core.phone.ip), "127.0.0.1");
+      g_core.phone.port = (uint16_t)phonePort;
+    }
+  }
   mkdirs(g_root);
   std::memset(&g_ms, 0, sizeof(g_ms));
   g_ms.fs = { fsOpen, fsRead, fsWrite, fsSeek, fsClose, fsSize, fsExists, fsRemove, fsMove, nullptr, fsMkdir, fsList, fsAtomic, nullptr };
@@ -246,6 +344,13 @@ int main(int argc, char** argv){
   w.fs = { fsOpen, fsRead, fsWrite, fsSeek, fsClose, fsSize, fsRemove, fsFree, fsTotal, nullptr };
   w.host = { hSnapshot, hGet, hRev, hDup, hCommit, hSetThumb, hThumbPath, hVerify, hLockType,
              hNow, hEpoch, hRand, hEvent, nullptr, hOthers, nullptr };
+  if(g_storage){
+    w.host.cloudOpen = hCloudOpen; w.host.cloudClose = hCloudClose; w.host.cloudResult = hCloudResult; w.host.phoneOrigin = hOrigin;
+    w.host.phoneOffer = hOffer; w.host.phonePair = hPair; w.host.phonePoll = hPoll; w.host.storageJson = hStorage;
+    w.host.removeRec = hRemoveRec; w.host.renameRec = hRenameRec;
+    // Transferencias Flex OS <-> Flex Cloud: las hace el gestor de la nube del
+    // P4 (test_cloud.cpp, phone_e2e.sh); aqui no hay gestor y la ruta no existe.
+  }
   std::snprintf(w.ip, sizeof(w.ip), "127.0.0.1");
   w.port = port;
   w.allowUpload = true;
@@ -266,7 +371,7 @@ int main(int argc, char** argv){
     if(p[0].revents & POLLIN){
       int fd = accept(g_listen, nullptr, nullptr);
       if(fd < 0) continue;
-      FlexWebConn conn = { cRead, cWrite, &fd };
+      FlexWebConn conn = { cRead, cWrite, &fd, "127.0.0.1" };
       flexWebServeConn(&w, &conn, hdr, io);
       close(fd);
     }

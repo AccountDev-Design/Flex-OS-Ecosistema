@@ -50,6 +50,10 @@ GANCHOS = [
     # cloudUiTick() nadie leeria los avisos: "Subir y liberar espacio" no
     # liberaria nada y las descargas verificadas se quedarian en su temporal.
     ("setup",          "flexCloudBegin()", "las transferencias a medias no se reanudarian y la nube no tendria tareas"),
+    # FLEX STORAGE. Sin flexStorageBegin() no se carga el telefono emparejado:
+    # Flex Cloud arrancaria siempre con el destino Internet (y el diario de
+    # Internet) aunque el usuario tuviera su telefono emparejado y conectado.
+    ("setup",          "flexStorageBegin()", "el telefono emparejado no se cargaria y Flex Cloud no sabria su destino"),
     ("loop",           "cloudUiTick()",    "los avisos de la nube no se leerian: ni liberar espacio ni colocar descargas"),
     ("cloudUiTick",    "flexCloudPollEvent(", "cloudUiTick no sacaria ningun aviso de la cola de Flex Cloud"),
     ("cloudUiTick",    "flexCloudSetActive(", "la cuota no se refrescaria con la nube a la vista"),

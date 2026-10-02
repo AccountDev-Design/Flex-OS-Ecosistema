@@ -6,6 +6,7 @@
 // ##  temporal en el disco.
 // #############################################################
 #include "FlexOS_MediaWeb.h"
+#include <stdarg.h>
 #include "FlexOS_MediaThumb.h"
 #include "FlexOS_Media.h"
 #include "FlexOS_WebUI.h"
@@ -287,13 +288,36 @@ static bool idFromPath(const char* path, const char* prefix, uint32_t* id){
 // -------------------------------------------------------------
 //  RUTAS PUBLICAS
 // -------------------------------------------------------------
-static const char kCsp[] =
-  "Content-Security-Policy: default-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; "
-  "style-src 'self'; script-src 'self'; connect-src 'self'; worker-src 'self' blob:; "
-  "base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\n";
+// La CSP de siempre. Con un telefono emparejado (Flex Storage), sus fotos y
+// sus videos se ven DIRECTAMENTE desde el telefono con enlaces firmados (el
+// P4 no tiene que pasar los bytes): su origen, y solo el, entra en img-src
+// y media-src.
+static bool originOk(const char* o){
+  if(strncmp(o, "http://", 7)) return false;
+  size_t n = strlen(o);
+  if(n < 16 || n > 29) return false;                 // http://a.b.c.d:p .. http://aaa.bbb.ccc.ddd:ppppp
+  int colons = 0;
+  for(const char* s = o + 7; *s; s++){
+    if(*s == ':') colons++;
+    else if(!((*s >= '0' && *s <= '9') || *s == '.')) return false;
+  }
+  return colons == 1;
+}
+static void cspHeader(FlexWebCtx* w, char* out, size_t cap){
+  char o[40] = "";
+  if(w->host.phoneOrigin) w->host.phoneOrigin(w->host.ctx, o, sizeof(o));
+  if(!originOk(o)) o[0] = 0;
+  const char* sp = o[0] ? " " : "";
+  snprintf(out, cap,
+    "Content-Security-Policy: default-src 'self'; img-src 'self' blob: data:%s%s; media-src 'self' blob:%s%s; "
+    "style-src 'self'; script-src 'self'; connect-src 'self'; worker-src 'self' blob:; "
+    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\n", sp, o, sp, o);
+}
 
-static void handleStatic(const FlexWebConn* c, Req* q, const char* mime, const char* body, size_t len){
-  q->keep = sendBody(c, 200, mime, body, len, kCsp, q->keep, q->head) && q->keep;
+static void handleStatic(FlexWebCtx* w, const FlexWebConn* c, Req* q, const char* mime, const char* body, size_t len){
+  char csp[512];
+  cspHeader(w, csp, sizeof(csp));
+  q->keep = sendBody(c, 200, mime, body, len, csp, q->keep, q->head) && q->keep;
 }
 
 static void handleHello(FlexWebCtx* w, const FlexWebConn* c, Req* q){
@@ -1020,6 +1044,434 @@ static void handleThumbPost(FlexWebCtx* w, const FlexWebConn* c, Req* q, uint32_
 }
 
 // -------------------------------------------------------------
+//  FLEX STORAGE (docs/FLEX-STORAGE.md)
+// -------------------------------------------------------------
+// Lee un cuerpo pequeno de formulario a `buf` (cap). false = ya se contesto.
+static bool formBody(const FlexWebConn* c, Req* q, char* buf, size_t cap){
+  if(readSmallBody(c, q, buf, cap) < 0){ q->keep = false; sendErr(c, 400, "Petici\xC3\xB3n no v\xC3\xA1lida", false); return false; }
+  return true;
+}
+static bool isHexLower(const char* s, size_t n){
+  if(strlen(s) != n) return false;
+  for(size_t i = 0; i < n; i++) if(!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return false;
+  return true;
+}
+// "/api/fs/phone/pair/<32 hex>"
+static bool pairIdFromPath(const char* p, char out[FST_HEX32]){
+  static const char pre[] = "/api/fs/phone/pair/";
+  if(strncmp(p, pre, sizeof(pre) - 1) || !isHexLower(p + sizeof(pre) - 1, 32)) return false;
+  memcpy(out, p + sizeof(pre) - 1, 33);
+  return true;
+}
+// Ids de Flex Cloud: prefijo y letras/cifras (los que genera el servidor).
+static bool cloudIdOk(const char* s, const char* prefix){
+  size_t pl = strlen(prefix), n = strlen(s);
+  if(strncmp(s, prefix, pl) || n < pl + 8 || n >= 40) return false;
+  for(size_t i = pl; i < n; i++) if(!((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= '0' && s[i] <= '9'))) return false;
+  return true;
+}
+
+// ---- Emparejamiento (lo pide la app del telefono) ----
+static void handlePhonePair(FlexWebCtx* w, const FlexWebConn* c, Req* q){
+  if(!w->host.phonePair){ q->keep = false; sendErr(c, 404, "Aqu\xC3\xAD no hay nada", false); return; }
+  char body[1200];
+  if(!formBody(c, q, body, sizeof(body))) return;
+  // Campos acotados: uno de mas no se recorta a algo valido (la oferta son 32
+  // cifras exactas, la clave publica 130...): el nucleo lo rechaza entero.
+  char offer[40], pid[48], name[160], model[80], port[8], pub[136], kp4[48], known[72];
+  flexHttpQueryGet(body, "offer", offer, sizeof(offer));
+  flexHttpQueryGet(body, "pid", pid, sizeof(pid));
+  flexHttpQueryGet(body, "name", name, sizeof(name));
+  flexHttpQueryGet(body, "model", model, sizeof(model));
+  flexHttpQueryGet(body, "port", port, sizeof(port));
+  flexHttpQueryGet(body, "pub", pub, sizeof(pub));
+  bool hasK = flexHttpQueryGet(body, "kp4", kp4, sizeof(kp4)) && kp4[0];
+  bool hasKnown = flexHttpQueryGet(body, "known", known, sizeof(known)) && known[0];
+  wipe(body, sizeof(body));
+  FstPairReq rq = { offer, pid, name, model, port, pub, hasK ? kp4 : NULL, hasKnown ? known : NULL };
+  char json[512]; uint32_t retry = 0;
+  int st = w->host.phonePair(w->host.ctx, &rq, c->peer ? c->peer : "", json, sizeof(json), &retry);
+  wipe(known, sizeof(known));
+  char ra[40] = "";
+  if(retry) snprintf(ra, sizeof(ra), "Retry-After: %lu\r\n", (unsigned long)retry);
+  q->keep = sendJson(c, st, json, q->keep, ra[0] ? ra : NULL) && q->keep;
+}
+static void handlePhonePoll(FlexWebCtx* w, const FlexWebConn* c, Req* q, const char* pairId){
+  if(!w->host.phonePoll){ q->keep = false; sendErr(c, 404, "Aqu\xC3\xAD no hay nada", false); return; }
+  char body[FLEXWEB_SMALL_BODY];
+  if(!formBody(c, q, body, sizeof(body))) return;
+  char proof[72];
+  flexHttpQueryGet(body, "proof", proof, sizeof(proof));
+  wipe(body, sizeof(body));
+  char json[256];
+  int st = w->host.phonePoll(w->host.ctx, pairId, proof, json, sizeof(json));
+  q->keep = sendJson(c, st, json, q->keep) && q->keep;
+}
+
+// ---- Oferta para el navegador (con sesion): abre la app del telefono ----
+static void handlePhoneOffer(FlexWebCtx* w, const FlexWebConn* c, Req* q){
+  char body[FLEXWEB_SMALL_BODY];
+  if(q->r.contentLength > 0 && !formBody(c, q, body, sizeof(body))) return;
+  char offer[FST_HEX32];
+  if(!w->host.phoneOffer || !w->host.phoneOffer(w->host.ctx, offer)){
+    q->keep = sendErr(c, 503, "Flex Storage no est\xC3\xA1 disponible", q->keep) && q->keep;
+    return;
+  }
+  char b[400];
+  // La app recibe la direccion del P4 tal cual la ve este navegador.
+  snprintf(b, sizeof(b), "{\"offer\":\"%s\",\"host\":\"%s:%d\",\"link\":\"flexstorage://attach?h=%s%%3A%d&o=%s\",\"expiresIn\":%lu}",
+           offer, w->ip, w->port, w->ip, w->port, offer, (unsigned long)(FST_OFFER_TTL_MS / 1000u));
+  q->keep = sendJson(c, 200, b, q->keep) && q->keep;
+}
+
+// ---- Resumen: Flex OS (local), el telefono y Flex Cloud ----
+static void handleOverview(FlexWebCtx* w, const FlexWebConn* c, Req* q, uint8_t* io){
+  FlexMlRec* recs = (FlexMlRec*)wAlloc(w, sizeof(FlexMlRec) * FML_CAP);
+  if(!recs){ q->keep = sendErr(c, 503, "Memoria insuficiente en Flex OS", q->keep) && q->keep; return; }
+  uint32_t rev = 0;
+  int n = w->host.snapshot ? w->host.snapshot(w->host.ctx, recs, FML_CAP, &rev) : 0;
+  // Por clase. Lo protegido va APARTE y solo con su cuenta: sin nivel de
+  // propietario no se puede saber ni cuantas fotos o videos protegidos hay.
+  uint64_t bytes[4] = { 0, 0, 0, 0 }; uint32_t cnt[4] = { 0, 0, 0, 0 };   // foto, video, audio, protegido
+  for(int i = 0; i < n; i++){
+    const FlexMlRec* r = &recs[i];
+    if(!(FLEXWEB_MASK & FML_MASK(r->kind))) continue;
+    int k = (r->flags & FML_R_LOCKED) ? 3 : r->kind == FML_K_PHOTO ? 0 : r->kind == FML_K_VIDEO ? 1 : 2;
+    bytes[k] += r->size; cnt[k]++;
+  }
+  wFree(w, recs);
+  uint32_t fr = w->fs.freeBytes ? w->fs.freeBytes(w->fs.ctx) : 0, tot = w->fs.totalBytes ? w->fs.totalBytes(w->fs.ctx) : 0;
+  // La respuesta se compone en el buffer de E/S (libre aqui), no en la pila.
+  char st[1400];
+  st[0] = 0;
+  bool hasSt = w->host.storageJson && w->host.storageJson(w->host.ctx, st, sizeof(st)) && st[0];
+  char* b = (char*)io;
+  const size_t bcap = FLEXWEB_IO_BUF;
+  int m = snprintf(b, bcap,
+    "{\"local\":{\"total\":%lu,\"free\":%lu,\"reserve\":%lu,\"rev\":%lu,"
+    "\"photo\":{\"n\":%lu,\"bytes\":%llu},\"video\":{\"n\":%lu,\"bytes\":%llu},\"audio\":{\"n\":%lu,\"bytes\":%llu},"
+    "\"protected\":{\"n\":%lu,\"bytes\":%llu}},%s}",
+    (unsigned long)tot, (unsigned long)fr, (unsigned long)FML_RESERVE_BYTES, (unsigned long)rev,
+    (unsigned long)cnt[0], (unsigned long long)bytes[0], (unsigned long)cnt[1], (unsigned long long)bytes[1],
+    (unsigned long)cnt[2], (unsigned long long)bytes[2], (unsigned long)cnt[3], (unsigned long long)bytes[3],
+    hasSt ? st : "\"phone\":{\"state\":\"none\"},\"cloud\":null");
+  if(m < 0 || (size_t)m >= bcap){ q->keep = sendErr(c, 500, "Resumen demasiado grande", q->keep) && q->keep; return; }
+  q->keep = sendJson(c, 200, b, q->keep) && q->keep;
+}
+
+// ---- Transferencias del P4 entre Flex OS y Flex Cloud ----
+static void handleXfers(FlexWebCtx* w, const FlexWebConn* c, Req* q, uint8_t* io){
+  char* b = (char*)io;
+  const size_t cap = FLEXWEB_IO_BUF;
+  int h = snprintf(b, cap, "{\"items\":");
+  char* list = b + h;
+  snprintf(list, cap - (size_t)h, "[]");
+  if(w->host.xfersJson && !w->host.xfersJson(w->host.ctx, list, cap - (size_t)h - 2)) snprintf(list, cap - (size_t)h, "[]");
+  size_t L = strlen(b);
+  b[L] = '}'; b[L + 1] = 0;
+  q->keep = sendJson(c, 200, b, q->keep) && q->keep;
+}
+static void handleXferOp(FlexWebCtx* w, const FlexWebConn* c, Req* q, uint8_t* io){
+  if(!w->host.xferOp){ q->keep = sendErr(c, 503, "Flex Storage no est\xC3\xA1 disponible", q->keep) && q->keep; return; }
+  char* body = (char*)io;
+  if(!formBody(c, q, body, 4096)) return;
+  FlexWebXferReq rq; memset(&rq, 0, sizeof(rq));
+  char op[12], v[24];
+  flexHttpQueryGet(body, "op", op, sizeof(op));
+  rq.move = flexHttpQueryGet(body, "move", v, sizeof(v)) && !strcmp(v, "1");
+  const char* bad = NULL;
+  if(!strcmp(op, "up")){
+    rq.op = FLEXWEB_X_UP;
+    if(!flexHttpQueryGet(body, "id", v, sizeof(v)) || !flexHttpParseU32(v, &rq.id) || !rq.id) bad = "Falta el elemento";
+    flexHttpQueryGet(body, "folder", rq.folder, sizeof(rq.folder));
+    if(!rq.folder[0]) snprintf(rq.folder, sizeof(rq.folder), "root");
+    if(!bad && strcmp(rq.folder, "root") && !cloudIdOk(rq.folder, "fld_")) bad = "Carpeta no v\xC3\xA1lida";
+    FlexMlRec r;
+    if(!bad && !webRec(w, rq.id, &r)) bad = "No existe";
+    // Lo protegido no sale de Flex OS desde la web.
+    if(!bad && (r.flags & FML_R_LOCKED)){ q->keep = sendErr(c, 403, kLockedMsg, q->keep, ",\"lock\":1") && q->keep; return; }
+  } else if(!strcmp(op, "down")){
+    rq.op = FLEXWEB_X_DOWN;
+    flexHttpQueryGet(body, "file", rq.file, sizeof(rq.file));
+    flexHttpQueryGet(body, "name", rq.name, sizeof(rq.name));
+    flexHttpQueryGet(body, "sha", rq.sha, sizeof(rq.sha));
+    uint32_t sz = 0;
+    if(!cloudIdOk(rq.file, "fil_")) bad = "Archivo no v\xC3\xA1lido";
+    else if(!rq.name[0]) bad = "Falta el nombre";
+    else if(!isHexLower(rq.sha, 64)) bad = "Falta la huella del archivo";
+    else if(!flexHttpQueryGet(body, "size", v, sizeof(v)) || !flexHttpParseU32(v, &sz) || !sz) bad = "Tama\xC3\xB1o no v\xC3\xA1lido";
+    rq.size = sz;
+  } else if(!strcmp(op, "cancel") || !strcmp(op, "retry")){
+    rq.op = !strcmp(op, "cancel") ? FLEXWEB_X_CANCEL : FLEXWEB_X_RETRY;
+    if(!flexHttpQueryGet(body, "job", v, sizeof(v)) || !flexHttpParseU32(v, &rq.id) || !rq.id) bad = "Falta la transferencia";
+  } else if(!strcmp(op, "clear")){
+    rq.op = FLEXWEB_X_CLEAR;
+  } else bad = "Operaci\xC3\xB3n no v\xC3\xA1lida";
+  if(bad){ q->keep = sendErr(c, 400, bad, q->keep) && q->keep; return; }
+  char msg[160] = "";
+  int st = w->host.xferOp(w->host.ctx, &rq, msg, sizeof(msg));
+  if(st >= 200 && st < 300){
+    char esc[200]; if(!flexMlJsonStr(msg, esc, sizeof(esc))) copyz(esc, sizeof(esc), "\"\"");
+    char b[300]; snprintf(b, sizeof(b), "{\"ok\":1,\"msg\":%s}", esc);
+    q->keep = sendJson(c, st, b, q->keep) && q->keep;
+  } else q->keep = sendErr(c, st, msg[0] ? msg : "No se pudo", q->keep) && q->keep;
+}
+
+// ---- Biblioteca local: a la papelera (o borrar un protegido) y renombrar ----
+static void handleLocalDelete(FlexWebCtx* w, const FlexWebConn* c, Req* q, uint8_t* io){
+  if(!w->host.removeRec){ q->keep = sendErr(c, 503, "No disponible", q->keep) && q->keep; return; }
+  // Cuerpo, lista de ids y respuesta en el buffer de E/S (no en la pila).
+  char* body = (char*)io;
+  if(!formBody(c, q, body, 2048)) return;
+  char* ids = (char*)io + 2048;                      // 1024
+  flexHttpQueryGet(body, "ids", ids, 1024);
+  int ok = 0, n = 0, locked = 0;
+  char failed[1100];
+  const size_t fcap = sizeof(failed);
+  size_t fl = 0;
+  failed[0] = 0;
+  for(char* t = ids; *t && n < FLEXWEB_ZIP_MAX;){
+    char* e = strchr(t, ',');
+    if(e) *e = 0;
+    uint32_t id;
+    FlexMlRec r;
+    char why[96] = "";
+    bool done = false;
+    if(flexHttpParseU32(t, &id) && id && webRec(w, id, &r)){
+      n++;
+      if(!accessOk(&r, q->owner)){ locked++; snprintf(why, sizeof(why), "Protegido"); }
+      else done = w->host.removeRec(w->host.ctx, id, why, sizeof(why));
+      if(done) ok++;
+      else if(fl + 80 < fcap){
+        char esc[120]; if(!flexMlJsonStr(why[0] ? why : "No se pudo", esc, sizeof(esc))) copyz(esc, sizeof(esc), "\"\"");
+        int m = snprintf(failed + fl, fcap - fl, "%s{\"id\":%lu,\"error\":%s}", fl ? "," : "", (unsigned long)id, esc);
+        if(m > 0 && (size_t)m < fcap - fl) fl += (size_t)m;
+      }
+    }
+    if(!e) break;
+    t = e + 1;
+  }
+  if(!n){ q->keep = sendErr(c, 404, "No existe", q->keep) && q->keep; return; }
+  if(!ok && locked == n){ q->keep = sendErr(c, 403, kLockedMsg, q->keep, ",\"lock\":1") && q->keep; return; }
+  char* b = (char*)io;                                 // el cuerpo ya no hace falta
+  snprintf(b, FLEXWEB_IO_BUF, "{\"ok\":%d,\"failed\":[%s]}", ok, failed);
+  q->keep = sendJson(c, 200, b, q->keep) && q->keep;
+}
+static void handleLocalRename(FlexWebCtx* w, const FlexWebConn* c, Req* q, uint8_t* io){
+  if(!w->host.renameRec){ q->keep = sendErr(c, 503, "No disponible", q->keep) && q->keep; return; }
+  char* body = (char*)io;
+  if(!formBody(c, q, body, 2048)) return;
+  char v[24], name[FML_NAME_MAX * 2];
+  uint32_t id = 0;
+  FlexMlRec r;
+  if(!flexHttpQueryGet(body, "id", v, sizeof(v)) || !flexHttpParseU32(v, &id) || !webRec(w, id, &r)){ q->keep = sendErr(c, 404, "No existe", q->keep) && q->keep; return; }
+  if(!accessOk(&r, q->owner)){ q->keep = sendErr(c, 403, kLockedMsg, q->keep, ",\"lock\":1") && q->keep; return; }
+  flexHttpQueryGet(body, "name", name, sizeof(name));
+  char clean[FML_NAME_MAX];
+  flexMlCleanName(name, clean, sizeof(clean));
+  size_t a = 0, L = strlen(clean);                   // sin espacios a los lados
+  while(clean[a] == ' ') a++;
+  while(L > a && clean[L - 1] == ' ') clean[--L] = 0;
+  if(a) memmove(clean, clean + a, L - a + 1);
+  if(!clean[0]){ q->keep = sendErr(c, 400, "El nombre no puede estar vac\xC3\xAD" "o", q->keep) && q->keep; return; }
+  char why[96] = "";
+  if(!w->host.renameRec(w->host.ctx, id, clean, why, sizeof(why))){ q->keep = sendErr(c, 409, why[0] ? why : "No se pudo renombrar", q->keep) && q->keep; return; }
+  q->keep = sendJson(c, 200, "{\"ok\":1}", q->keep) && q->keep;
+}
+
+// ---- Pasarela /api/cloud -> Flex Cloud del telefono ----
+// Errores con la forma de la API de Flex Cloud: la web los trata igual que
+// los del propio telefono.
+static void cloudErr(const FlexWebConn* c, Req* q, int status, const char* code, const char* msg, const char* extra = NULL){
+  char esc[240];
+  if(!flexMlJsonStr(msg, esc, sizeof(esc))) copyz(esc, sizeof(esc), "\"Error\"");
+  char b[400];
+  snprintf(b, sizeof(b), "{\"ok\":false,\"error\":{\"code\":\"%s\",\"message\":%s}}", code, esc);
+  q->keep = sendJson(c, status, b, q->keep, extra) && q->keep;
+}
+static bool cloudPathOk(const char* p){
+  if(strstr(p, "..") || strstr(p, "//")) return false;
+  for(const char* s = p; *s; s++){
+    char ch = *s;
+    if(!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' || ch == '.' || ch == '/')) return false;
+  }
+  return true;
+}
+// Texto imprimible sin espacios (consulta) o con ellos (Content-Type).
+static bool printable(const char* s, bool spaces = false){
+  for(const unsigned char* p = (const unsigned char*)s; *p; p++) if(*p < (spaces ? 0x20 : 0x21) || *p > 0x7E) return false;
+  return true;
+}
+static const char* methodName(int m){
+  switch(m){
+    case FLEXHTTP_M_GET: return "GET"; case FLEXHTTP_M_HEAD: return "HEAD"; case FLEXHTTP_M_POST: return "POST";
+    case FLEXHTTP_M_PUT: return "PUT"; case FLEXHTTP_M_PATCH: return "PATCH"; case FLEXHTTP_M_DELETE: return "DELETE";
+  }
+  return "GET";
+}
+
+static void handleCloud(FlexWebCtx* w, const FlexWebConn* c, Req* q, uint8_t* io){
+  const char* p = q->r.path;
+  const int m = q->r.method;
+  if(!strncmp(p, "/api/cloud/d/", 13)){ cloudErr(c, q, 404, "not_found", "Los enlaces firmados se abren directamente en el tel\xC3\xA9" "fono"); return; }
+  if(!cloudPathOk(p) || !printable(q->r.query)){ cloudErr(c, q, 400, "invalid_request", "Petici\xC3\xB3n no v\xC3\xA1lida"); return; }
+  bool needsBody = m == FLEXHTTP_M_POST || m == FLEXHTTP_M_PUT || m == FLEXHTTP_M_PATCH;
+  if(q->r.chunked || (needsBody && q->r.contentLength < 0)){ q->keep = false; cloudErr(c, q, 411, "length_required", "Falta Content-Length"); return; }
+  if(q->r.contentLength > (long long)FLEXWEB_PROXY_BODY_MAX){ q->keep = false; cloudErr(c, q, 413, "payload_too_large", "Demasiado grande para una sola petici\xC3\xB3n"); return; }
+  const size_t bodyLen = q->r.contentLength > 0 ? (size_t)q->r.contentLength : 0;
+  // El buffer de E/S se reparte: cabeceras y trozos en los primeros 12 KB;
+  // un cuerpo PEQUENO (JSON) entero en los ultimos 4 KB, para poder repetir
+  // la peticion si el telefono pide una sesion nueva.
+  const size_t STREAM_CAP = FLEXWEB_IO_BUF - FLEXWEB_PROXY_SMALL;
+  uint8_t* small = io + STREAM_CAP;
+  const bool replay = bodyLen <= FLEXWEB_PROXY_SMALL;
+  if(replay && bodyLen){
+    size_t got = q->preN < bodyLen ? q->preN : bodyLen;
+    memcpy(small, q->pre, got);
+    q->preUsed = got;
+    while(got < bodyLen){
+      int k = c->read(c->ctx, small + got, bodyLen - got, FLEXWEB_BODY_TIMEOUT_MS);
+      if(k <= 0){ q->keep = false; return; }
+      got += (size_t)k;
+    }
+  }
+  char ctype[FLEXHTTP_CTYPE_MAX];
+  copyz(ctype, sizeof(ctype), printable(q->r.ctype, true) ? q->r.ctype : "");
+  for(int attempt = 0; attempt < (replay ? 2 : 1); attempt++){
+    FlexWebConn up; memset(&up, 0, sizeof(up));
+    char hostHdr[64] = "", bearer[64] = "", why[32] = "";
+    if(!w->host.cloudOpen(w->host.ctx, &up, hostHdr, sizeof(hostHdr), bearer, sizeof(bearer), why, sizeof(why))){
+      wipe(bearer, sizeof(bearer));
+      if(!replay && bodyLen) q->keep = false;         // el cuerpo del navegador no se leyo
+      if(!strcmp(why, "no_phone")) cloudErr(c, q, 409, "no_phone", "No hay ning\xC3\xBAn tel\xC3\xA9" "fono emparejado con Flex OS");
+      else if(!strcmp(why, "phone_rejected")) cloudErr(c, q, 403, "phone_rejected", "El tel\xC3\xA9" "fono ya no reconoce este Flex OS: vuelve a emparejarlo");
+      else cloudErr(c, q, 503, "phone_offline", "Tel\xC3\xA9" "fono desconectado", "Retry-After: 5\r\n");
+      return;
+    }
+    char head[1100];
+    size_t hn = 0;
+    bool fit = true;
+    auto add = [&](const char* fmt, ...){
+      if(!fit) return;
+      va_list ap; va_start(ap, fmt);
+      int k = vsnprintf(head + hn, sizeof(head) - hn, fmt, ap);
+      va_end(ap);
+      if(k < 0 || (size_t)k >= sizeof(head) - hn){ fit = false; return; }
+      hn += (size_t)k;
+    };
+    add("%s %s%s%s HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nConnection: close\r\nAccept-Encoding: identity\r\n",
+        methodName(m), p, q->r.query[0] ? "?" : "", q->r.query, hostHdr, bearer);
+    wipe(bearer, sizeof(bearer));
+    if(ctype[0]) add("Content-Type: %s\r\n", ctype);
+    if(needsBody || bodyLen) add("Content-Length: %lu\r\n", (unsigned long)bodyLen);
+    if(q->r.hasRange){
+      if(q->r.rangeStart < 0) add("Range: bytes=-%lld\r\n", q->r.rangeEnd);
+      else if(q->r.rangeEnd < 0) add("Range: bytes=%lld-\r\n", q->r.rangeStart);
+      else add("Range: bytes=%lld-%lld\r\n", q->r.rangeStart, q->r.rangeEnd);
+    }
+    if(q->r.ifRange[0]) add("If-Range: %s\r\n", q->r.ifRange);
+    if(q->r.partSha[0]) add("X-Part-SHA256: %s\r\n", q->r.partSha);
+    add("\r\n");
+    bool ok = fit && up.write(up.ctx, (const uint8_t*)head, hn);
+    wipe(head, sizeof(head));                        // llevaba el token
+    // Cuerpo: el guardado, o a trozos desde el navegador.
+    if(ok && bodyLen){
+      if(replay) ok = up.write(up.ctx, small, bodyLen);
+      else {
+        size_t sent = q->preN < bodyLen ? q->preN : bodyLen;
+        ok = !sent || up.write(up.ctx, q->pre, sent);
+        q->preUsed = sent;
+        while(ok && sent < bodyLen){
+          size_t want = bodyLen - sent < STREAM_CAP ? bodyLen - sent : STREAM_CAP;
+          int k = c->read(c->ctx, io, want, FLEXWEB_BODY_TIMEOUT_MS);
+          if(k <= 0){
+            // El navegador se fue a mitad: no queda nada que contestarle.
+            w->host.cloudClose(w->host.ctx, &up);
+            q->keep = false;
+            return;
+          }
+          ok = up.write(up.ctx, io, (size_t)k);
+          sent += (size_t)k;
+          yieldHost(w);
+        }
+        if(!ok){
+          // El telefono dejo de escuchar a mitad. Lo que quede del cuerpo
+          // del navegador no se ha leido: la conexion no se reutiliza.
+          q->keep = false;
+        }
+      }
+    }
+    // Cabecera de la respuesta del telefono.
+    FlexHttpResp rs;
+    int pr = 0;
+    size_t have = 0;
+    while(ok && (pr = flexHttpParseResp((const char*)io, have, &rs)) == 0){
+      if(have >= FLEXHTTP_RESP_MAX){ pr = -1; break; }
+      int k = up.read(up.ctx, io + have, FLEXHTTP_RESP_MAX - have, FLEXWEB_PROXY_TIMEOUT_MS);
+      if(k <= 0){ pr = -2; break; }
+      have += (size_t)k;
+    }
+    if(!ok || pr < 0){
+      w->host.cloudClose(w->host.ctx, &up);
+      if(w->host.cloudResult) w->host.cloudResult(w->host.ctx, -1);
+      cloudErr(c, q, pr == -1 ? 502 : 504, pr == -1 ? "bad_gateway" : "phone_offline",
+               pr == -1 ? "Respuesta inesperada del tel\xC3\xA9" "fono" : "El tel\xC3\xA9" "fono no contesta", "Retry-After: 2\r\n");
+      return;
+    }
+    if(w->host.cloudResult) w->host.cloudResult(w->host.ctx, rs.status);
+    if(rs.status == 401){
+      // El token caduco (el telefono reinicio sus sesiones). cloudResult ya
+      // lo solto: con un cuerpo guardado se repite UNA vez con sesion nueva;
+      // si no, el navegador lo reintenta en un segundo (no es SU sesion).
+      w->host.cloudClose(w->host.ctx, &up);
+      if(attempt == 0 && replay) continue;
+      cloudErr(c, q, 503, "phone_session", "Renovando la sesi\xC3\xB3n con el tel\xC3\xA9" "fono", "Retry-After: 1\r\n");
+      return;
+    }
+    bool noBody = q->head || rs.status == 204 || rs.status == 304 || rs.status < 200;
+    if(!noBody && (rs.chunked || rs.contentLength < 0)){
+      w->host.cloudClose(w->host.ctx, &up);
+      cloudErr(c, q, 502, "bad_gateway", "Respuesta inesperada del tel\xC3\xA9" "fono");
+      return;
+    }
+    char extra[900];
+    size_t en = 0;
+    extra[0] = 0;
+    auto ex = [&](const char* name, const char* val){
+      if(!val[0]) return;
+      int k = snprintf(extra + en, sizeof(extra) - en, "%s: %s\r\n", name, val);
+      if(k > 0 && (size_t)k < sizeof(extra) - en) en += (size_t)k;
+    };
+    ex("Content-Range", rs.contentRange); ex("Accept-Ranges", rs.acceptRanges); ex("ETag", rs.etag);
+    ex("Retry-After", rs.retryAfter); ex("Cache-Control", rs.cacheControl); ex("Content-Disposition", rs.disposition);
+    long long len = noBody ? 0 : rs.contentLength;
+    if(!sendHead(c, rs.status, rs.ctype[0] ? rs.ctype : NULL, q->head && rs.contentLength >= 0 ? rs.contentLength : len,
+                 en ? extra : NULL, q->keep)){
+      w->host.cloudClose(w->host.ctx, &up);
+      q->keep = false;
+      return;
+    }
+    // Cuerpo, por trozos y sin guardarlo: lo que ya llego con la cabecera y el resto.
+    long long left = len;
+    size_t first = have - rs.headerLen;
+    if(first > (size_t)left) first = (size_t)left;
+    bool sent = !first || sendAll(c, io + rs.headerLen, first);
+    left -= (long long)first;
+    while(sent && left > 0){
+      size_t want = left < (long long)STREAM_CAP ? (size_t)left : STREAM_CAP;
+      int k = up.read(up.ctx, io, want, FLEXWEB_PROXY_TIMEOUT_MS);
+      if(k <= 0){ sent = false; break; }
+      sent = sendAll(c, io, (size_t)k);
+      left -= k;
+      yieldHost(w);
+    }
+    w->host.cloudClose(w->host.ctx, &up);
+    if(!sent) q->keep = false;                       // el Content-Length ya salio: no se puede reutilizar
+    return;
+  }
+}
+
+// -------------------------------------------------------------
 //  DESPACHO
 // -------------------------------------------------------------
 static void route(FlexWebCtx* w, const FlexWebConn* c, Req* q, uint8_t* io){
@@ -1029,7 +1481,10 @@ static void route(FlexWebCtx* w, const FlexWebConn* c, Req* q, uint8_t* io){
   q->head = (m == FLEXHTTP_M_HEAD);
   bool get = (m == FLEXHTTP_M_GET || m == FLEXHTTP_M_HEAD);
   bool post = (m == FLEXHTTP_M_POST);
-  if(!get && !post){
+  // PUT, PATCH y DELETE solo existen en la pasarela de Flex Cloud (es su API).
+  bool cloud = !strcmp(p, "/api/cloud") || !strncmp(p, "/api/cloud/", 11);
+  bool other = (m == FLEXHTTP_M_PUT || m == FLEXHTTP_M_PATCH || m == FLEXHTTP_M_DELETE) && cloud && w->host.cloudOpen;
+  if(!get && !post && !other){
     q->keep = false;
     sendErr(c, 405, "M\xC3\xA9todo no permitido", false, NULL, "Allow: GET, HEAD, POST\r\n");
     return;
@@ -1040,25 +1495,30 @@ static void route(FlexWebCtx* w, const FlexWebConn* c, Req* q, uint8_t* io){
 
   // ---- publico ----
   if(get && (!strcmp(p, "/") || !strcmp(p, "/index.html"))){
-    handleStatic(c, q, "text/html; charset=utf-8", FLEXWEB_INDEX_HTML, sizeof(FLEXWEB_INDEX_HTML) - 1); return;
+    handleStatic(w, c, q, "text/html; charset=utf-8", FLEXWEB_INDEX_HTML, sizeof(FLEXWEB_INDEX_HTML) - 1); return;
   }
   if(get && !strcmp(p, "/app.js")){
-    handleStatic(c, q, "text/javascript; charset=utf-8", FLEXWEB_APP_JS, sizeof(FLEXWEB_APP_JS) - 1); return;
+    handleStatic(w, c, q, "text/javascript; charset=utf-8", FLEXWEB_APP_JS, sizeof(FLEXWEB_APP_JS) - 1); return;
   }
   if(get && !strcmp(p, "/app.css")){
-    handleStatic(c, q, "text/css; charset=utf-8", FLEXWEB_APP_CSS, sizeof(FLEXWEB_APP_CSS) - 1); return;
+    handleStatic(w, c, q, "text/css; charset=utf-8", FLEXWEB_APP_CSS, sizeof(FLEXWEB_APP_CSS) - 1); return;
   }
   if(strncmp(p, "/api/", 5)){ q->keep = sendErr(c, 404, "Aqu\xC3\xAD no hay nada", q->keep) && q->keep; return; }
 
   // Toda peticion que cambia algo tiene que venir de la app (X-Flex): un
   // formulario de otra pagina no puede poner esa cabecera.
-  if(post && !q->r.xflex){ q->keep = false; sendErr(c, 403, "Petici\xC3\xB3n no permitida", false); return; }
+  if((post || other) && !q->r.xflex){ q->keep = false; sendErr(c, 403, "Petici\xC3\xB3n no permitida", false); return; }
 
   q->s = sessFind(w, q->r.session);
   q->owner = q->s ? sessOwner(w, q->s) : false;
 
   if(get && !strcmp(p, "/api/hello")){ handleHello(w, c, q); return; }
   if(post && !strcmp(p, "/api/pair")){ handlePair(w, c, q); return; }
+  // Flex Storage: lo que pide la APP del telefono para emparejarse. Sin
+  // sesion web: lo autoriza la oferta de un solo uso (y despues la pantalla).
+  char pairId[FST_HEX32];
+  if(post && w->host.phonePair && !strcmp(p, "/api/fs/phone/pair")){ handlePhonePair(w, c, q); return; }
+  if(post && w->host.phonePoll && pairIdFromPath(p, pairId)){ handlePhonePoll(w, c, q, pairId); return; }
 
   if(!q->s){
     if(post) q->keep = false;
@@ -1076,7 +1536,16 @@ static void route(FlexWebCtx* w, const FlexWebConn* c, Req* q, uint8_t* io){
   if(post && !strcmp(p, "/api/login")){ handleLogin(w, c, q); return; }
   if(post && !strcmp(p, "/api/logout")){ handleLogout(w, c, q, false); return; }
   if(post && !strcmp(p, "/api/unpair")){ handleLogout(w, c, q, true); return; }
-  if(post) q->keep = false;
+  // ---- Flex Storage ----
+  // (Sin las funciones del anfitrion, estas rutas no existen: 404 como siempre.)
+  if(get && !strcmp(p, "/api/fs/overview")){ handleOverview(w, c, q, io); return; }
+  if(post && !strcmp(p, "/api/fs/phone/offer") && w->host.phoneOffer){ handlePhoneOffer(w, c, q); return; }
+  if(get && !strcmp(p, "/api/fs/xfers") && w->host.xfersJson){ handleXfers(w, c, q, io); return; }
+  if(post && !strcmp(p, "/api/fs/xfer") && w->host.xferOp){ handleXferOp(w, c, q, io); return; }
+  if(post && !strcmp(p, "/api/local/delete") && w->host.removeRec){ handleLocalDelete(w, c, q, io); return; }
+  if(post && !strcmp(p, "/api/local/rename") && w->host.renameRec){ handleLocalRename(w, c, q, io); return; }
+  if(cloud && w->host.cloudOpen){ handleCloud(w, c, q, io); return; }
+  if(post || other) q->keep = false;
   sendErr(c, 404, "Aqu\xC3\xAD no hay nada", q->keep);
 }
 

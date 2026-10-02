@@ -648,22 +648,6 @@ static void testLocked(){
   CHECK(r.status == 200 && run(req("GET", "/api/status")).status == 401, "olvidar este movil");
 }
 
-static void testFuzz(){
-  std::printf("-- ruido contra el servidor --\n");
-  setup(); g_cookie.clear(); pair();
-  uint32_t s = 0xBEEF;
-  for(int it = 0; it < 1500; it++){
-    std::string in;
-    const char* pre[] = { "GET /api/", "POST /api/upload?kind=photo&size=10&crc=1&name=a", "HEAD /", "" };
-    in = pre[it % 4];
-    int n = (int)(s % 300);
-    for(int i = 0; i < n; i++){ s = s * 1103515245u + 12345u; char ch = (char)(s >> 16); if((s >> 9) % 5 == 0) ch = "\r\n:=&?/ "[(s >> 3) % 8]; in += ch; }
-    if(it % 3 == 0) in += "\r\n\r\n";
-    Client c; c.chunk = 1 + s % 64;
-    run(in, &c);
-  }
-  CHECK(g_fs.tmpCount() == 0 && !g_w.uploading, "1500 peticiones de ruido: sin temporales y servidor libre");
-}
 
 // =============================================================
 //  ARCHIVOS DE VARIOS MB, VARIOS SEGUIDOS, Y TRABAJO PESADO EN FILA
@@ -766,6 +750,368 @@ static void testBigAndHeavy(){
   g_w.alloc = tA;
 }
 
+// =============================================================
+//  FLEX STORAGE: emparejamiento, resumen, transferencias, biblioteca
+//  y la pasarela /api/cloud hacia el telefono (simulado aqui).
+// =============================================================
+// ---- el telefono, detras de la pasarela ----
+struct Up {
+  std::string sent;                 // lo que el P4 le manda
+  std::string resp;                 // lo que contesta
+  size_t pos = 0;
+  bool answered = false, closed = false;
+  size_t chunk = 1460;              // como llegaria por TCP
+};
+static std::vector<Up*> g_ups;
+static std::function<std::string(const std::string&)> g_phone;   // peticion completa -> respuesta
+static std::string g_openWhy, g_token = "00112233445566778899aabbccddeeff0011223344556677";
+static std::vector<int> g_results;
+static int upRead(void* c, uint8_t* b, size_t n, uint32_t){
+  Up* u = (Up*)c;
+  if(!u->answered){ u->answered = true; u->resp = g_phone ? g_phone(u->sent) : std::string(); }
+  if(u->pos >= u->resp.size()) return -1;
+  size_t t = u->resp.size() - u->pos; if(t > n) t = n; if(t > u->chunk) t = u->chunk;
+  std::memcpy(b, u->resp.data() + u->pos, t); u->pos += t; return (int)t;
+}
+static bool upWrite(void* c, const uint8_t* b, size_t n){ ((Up*)c)->sent.append((const char*)b, n); return true; }
+static bool hCloudOpen(void*, FlexWebConn* up, char* host, size_t hc, char* bearer, size_t bc, char* why, size_t wc){
+  if(!g_openWhy.empty()){ snprintf(why, wc, "%s", g_openWhy.c_str()); return false; }
+  Up* u = new Up(); g_ups.push_back(u);
+  up->read = upRead; up->write = upWrite; up->ctx = u;
+  snprintf(host, hc, "192.168.1.77:47830");
+  snprintf(bearer, bc, "%s", g_token.c_str());
+  return true;
+}
+static void hCloudClose(void*, FlexWebConn* up){ ((Up*)up->ctx)->closed = true; }
+static void hCloudResult(void*, int st){ g_results.push_back(st); }
+static std::string g_origin = "http://192.168.1.77:47830";
+static void hOrigin(void*, char* out, size_t cap){ snprintf(out, cap, "%s", g_origin.c_str()); }
+// ---- emparejamiento: lo que llega al nucleo ----
+static std::string g_pairSeen, g_pairPeer, g_pollSeen;
+static int g_pairStatus = 202; static uint32_t g_pairRetry = 0;
+static bool hOffer(void*, char out[FST_HEX32]){ snprintf(out, FST_HEX32, "%s", "0123456789abcdef0123456789abcdef"); return true; }
+static int hPair(void*, const FstPairReq* rq, const char* peer, char* json, size_t cap, uint32_t* retryS){
+  g_pairSeen = std::string(rq->offer) + "|" + rq->pid + "|" + rq->name + "|" + rq->model + "|" + rq->port + "|" + rq->pub + "|" +
+               (rq->kp4 ? rq->kp4 : "<null>") + "|" + (rq->known ? rq->known : "<null>");
+  g_pairPeer = peer;
+  if(retryS) *retryS = g_pairRetry;
+  snprintf(json, cap, g_pairStatus == 202 ? "{\"ok\":1,\"pairId\":\"abcd\"}" : "{\"error\":\"no\"}");
+  return g_pairStatus;
+}
+static int hPoll(void*, const char* id, const char* proof, char* json, size_t cap){
+  g_pollSeen = std::string(id) + "|" + proof;
+  snprintf(json, cap, "{\"ok\":1,\"state\":\"pending\"}");
+  return 200;
+}
+// ---- resumen, transferencias y biblioteca ----
+static bool hStorage(void*, char* out, size_t cap){
+  snprintf(out, cap, "\"phone\":{\"state\":\"ready\",\"name\":\"Galaxy A55\"},\"cloud\":{\"dest\":\"phone\",\"quota\":{\"total\":5368709120}}");
+  return true;
+}
+static bool hXfers(void*, char* out, size_t cap){ snprintf(out, cap, "[{\"id\":7,\"phase\":2}]"); return true; }
+static std::vector<FlexWebXferReq> g_xops;
+static int hXferOp(void*, const FlexWebXferReq* rq, char* msg, size_t cap){ g_xops.push_back(*rq); snprintf(msg, cap, "En cola"); return 202; }
+static std::vector<uint32_t> g_removed; static std::string g_renamed;
+static bool hRemove(void*, uint32_t id, char* why, size_t cap){ g_removed.push_back(id); return flexMsDelete(&g_mst, id); }
+static bool hRename(void*, uint32_t id, const char* name, char* why, size_t cap){ g_renamed = std::to_string(id) + ":" + name; return flexMsRename(&g_mst, id, name, why, cap); }
+
+static void withStorage(){
+  g_w.host.cloudOpen = hCloudOpen; g_w.host.cloudClose = hCloudClose; g_w.host.cloudResult = hCloudResult; g_w.host.phoneOrigin = hOrigin;
+  g_w.host.phoneOffer = hOffer; g_w.host.phonePair = hPair; g_w.host.phonePoll = hPoll;
+  g_w.host.storageJson = hStorage; g_w.host.xfersJson = hXfers; g_w.host.xferOp = hXferOp;
+  g_w.host.removeRec = hRemove; g_w.host.renameRec = hRename;
+  for(Up* u : g_ups) delete u;
+  g_ups.clear(); g_results.clear(); g_xops.clear(); g_removed.clear();
+  g_openWhy.clear(); g_phone = nullptr; g_origin = "http://192.168.1.77:47830";
+  g_pairStatus = 202; g_pairRetry = 0;
+}
+// Peticion desde OTRA maquina de la red (la app del telefono).
+static Resp runFrom(const char* peer, const std::string& in){
+  Client c; c.in = in;
+  FlexWebConn cn = { cRead, cWrite, &c, peer };
+  flexWebServeConn(&g_w, &cn, g_hdr, g_io);
+  auto v = parseAll(c.out);
+  return v.empty() ? Resp() : v[0];
+}
+static std::string ok200(const std::string& body, const char* type = "application/json", const std::string& extra = ""){
+  return "HTTP/1.1 200 OK\r\nContent-Type: " + std::string(type) + "\r\nContent-Length: " + std::to_string(body.size()) + "\r\n" + extra + "\r\n" + body;
+}
+
+static void testStorageRoutes(){
+  std::printf("-- Flex Storage: sin sus funciones, el servidor es el de siempre --\n");
+  setup(); g_cookie.clear();
+  CHECK(pair(), "sesion");
+  CHECK(run(req("POST", "/api/fs/phone/pair", "offer=x")).status == 404, "sin Flex Storage: no hay emparejamiento");
+  CHECK(run(req("GET", "/api/cloud/me")).status == 404, "ni pasarela");
+  CHECK(run(req("PUT", "/api/cloud/x", "1")).status == 405 && run(req("PATCH", "/api/library", "{}")).status == 405, "PUT/PATCH: 405 como antes");
+  Resp r = run(req("GET", "/"));
+  CHECK(r.h["content-security-policy"].find("media-src 'self' blob:;") != std::string::npos, "CSP de siempre");
+
+  std::printf("-- Flex Storage: emparejamiento (lo pide la app del telefono, sin sesion web) --\n");
+  withStorage();
+  r = run(req("GET", "/"));
+  CHECK(r.h["content-security-policy"].find("media-src 'self' blob: http://192.168.1.77:47830;") != std::string::npos &&
+        r.h["content-security-policy"].find("img-src 'self' blob: data: http://192.168.1.77:47830;") != std::string::npos,
+        "CSP: SOLO el origen del telefono entra en img-src/media-src");
+  g_origin = "http://evil.example;script-src *";
+  r = run(req("GET", "/"));
+  CHECK(r.h["content-security-policy"].find("evil") == std::string::npos && r.h["content-security-policy"].find("script-src 'self';") != std::string::npos,
+        "un origen raro no entra en la CSP");
+  g_origin = "http://192.168.1.77:47830";
+  Resp o = run(req("POST", "/api/fs/phone/offer"));
+  cJSON* j = js(o);
+  cJSON* link = cJSON_GetObjectItem(j, "link");
+  CHECK(o.status == 200 && cJSON_IsString(link) && !strcmp(link->valuestring, "flexstorage://attach?h=192.168.1.50%3A8080&o=0123456789abcdef0123456789abcdef"),
+        "oferta para el navegador con el enlace que abre la app");
+  cJSON_Delete(j);
+  std::string saved = g_cookie; g_cookie.clear();
+  CHECK(run(req("POST", "/api/fs/phone/offer")).status == 401, "sin sesion web no hay oferta");
+  std::string form = "offer=0123456789abcdef0123456789abcdef&pid=a55-1&name=Galaxy%20A55%20de%20%C3%91and%C3%BA&model=SM-A556B&port=47830&pub=04ab";
+  r = runFrom("192.168.1.77", req("POST", "/api/fs/phone/pair", form));
+  CHECK(r.status == 202 && r.body.find("pairId") != std::string::npos, "la app empieza sin sesion web: 202");
+  CHECK(g_pairSeen == "0123456789abcdef0123456789abcdef|a55-1|Galaxy A55 de \xC3\x91" "and\xC3\xBA|SM-A556B|47830|04ab|<null>|<null>",
+        "campos del formulario des-escapados (%s)", g_pairSeen.c_str());
+  CHECK(g_pairPeer == "192.168.1.77", "con la IP de quien lo pide (el telefono)");
+  runFrom("192.168.1.77", req("POST", "/api/fs/phone/pair", form + "&kp4=flexos-1&known=aa"));
+  CHECK(g_pairSeen.find("|flexos-1|aa") != std::string::npos, "telefono conocido: kp4 y known");
+  CHECK(runFrom("192.168.1.77", req("POST", "/api/fs/phone/pair", form, "", false)).status == 403, "sin X-Flex: 403");
+  CHECK(runFrom("192.168.1.77", req("POST", "/api/fs/phone/pair", form, "", true, "evil.example")).status == 403, "Host ajeno: 403");
+  g_pairStatus = 429; g_pairRetry = 30;
+  r = runFrom("192.168.1.77", req("POST", "/api/fs/phone/pair", form));
+  CHECK(r.status == 429 && r.h["retry-after"] == "30", "demasiadas ofertas falsas: 429 + Retry-After");
+  g_pairStatus = 202; g_pairRetry = 0;
+  r = runFrom("192.168.1.77", req("POST", "/api/fs/phone/pair/0123456789abcdef0123456789abcdef", "proof=" + std::string(64, 'a')));
+  CHECK(r.status == 200 && g_pollSeen == "0123456789abcdef0123456789abcdef|" + std::string(64, 'a'), "sondeo con su prueba");
+  CHECK(runFrom("192.168.1.77", req("POST", "/api/fs/phone/pair/NOHEX", "proof=a")).status == 401, "id que no es el de un emparejamiento: no es una ruta publica");
+  std::string big = "offer=" + std::string(3000, 'a');
+  CHECK(runFrom("192.168.1.77", req("POST", "/api/fs/phone/pair", big)).status == 400, "cuerpo enorme: 400");
+  g_cookie = saved;
+
+  std::printf("-- Flex Storage: resumen (lo protegido no se cuenta por clase) --\n");
+  std::vector<uint8_t> jpg = makeJpeg(64, 48);
+  uint32_t crc = flexMlCrc32(0, jpg.data(), jpg.size());
+  r = run(req("POST", upPath("photo", "a.jpg", jpg, crc), S(jpg)));
+  CHECK(r.status == 201, "foto subida");
+  std::vector<uint8_t> jpg2 = makeJpeg(80, 60, 9);
+  uint32_t crc2 = flexMlCrc32(0, jpg2.data(), jpg2.size());
+  r = run(req("POST", upPath("photo", "b.jpg", jpg2, crc2), S(jpg2)));
+  j = js(r); uint32_t idB = (uint32_t)jint(j, "id"); cJSON_Delete(j);
+  char why[64]; CHECK(flexMsSetLock(&g_mst, idB, true, why, sizeof(why)), "una bloqueada");
+  r = run(req("GET", "/api/fs/overview"));
+  j = js(r);
+  cJSON* loc = cJSON_GetObjectItem(j, "local");
+  CHECK(r.status == 200 && loc && jint(cJSON_GetObjectItem(loc, "photo"), "n") == 1 && jint(cJSON_GetObjectItem(loc, "protected"), "n") == 1 &&
+        jint(loc, "total") == (int)g_fs.total, "Flex OS: 1 foto a la vista y 1 protegida aparte");
+  cJSON* ph = cJSON_GetObjectItem(j, "phone");
+  CHECK(ph && cJSON_IsString(cJSON_GetObjectItem(ph, "name")) && cJSON_GetObjectItem(j, "cloud"), "telefono y Flex Cloud del anfitrion");
+  cJSON_Delete(j);
+
+  std::printf("-- Flex Storage: transferencias Flex OS <-> Flex Cloud --\n");
+  r = run(req("GET", "/api/fs/xfers"));
+  CHECK(r.status == 200 && r.body == "{\"items\":[{\"id\":7,\"phase\":2}]}", "lista de transferencias");
+  uint32_t idA = 0;
+  { FlexMlRec recs[8]; uint32_t rv; int n = flexMsSnapshot(&g_mst, recs, 8, &rv); for(int i = 0; i < n; i++) if(!(recs[i].flags & FML_R_LOCKED)) idA = recs[i].id; }
+  r = run(req("POST", "/api/fs/xfer", "op=up&id=" + std::to_string(idA) + "&folder=fld_abcdefgh2345&move=1"));
+  CHECK(r.status == 202 && g_xops.size() == 1 && g_xops[0].op == FLEXWEB_X_UP && g_xops[0].id == idA && g_xops[0].move &&
+        !strcmp(g_xops[0].folder, "fld_abcdefgh2345"), "subir y mover: a la cola del gestor");
+  CHECK(run(req("POST", "/api/fs/xfer", "op=up&id=" + std::to_string(idB))).status == 403, "lo protegido no sale desde la web");
+  CHECK(run(req("POST", "/api/fs/xfer", "op=up&id=" + std::to_string(idA) + "&folder=../x")).status == 400, "carpeta rara: 400");
+  std::string sha(64, 'b');
+  r = run(req("POST", "/api/fs/xfer", "op=down&file=fil_abcdefgh2345abcd&name=Viaje%20%C3%B1.avi&size=1048576&sha=" + sha));
+  CHECK(r.status == 202 && g_xops.size() == 2 && g_xops[1].op == FLEXWEB_X_DOWN && !strcmp(g_xops[1].name, "Viaje \xC3\xB1.avi") &&
+        g_xops[1].size == 1048576 && !strcmp(g_xops[1].sha, sha.c_str()) && !g_xops[1].move, "bajar: nombre, tamano y huella");
+  CHECK(run(req("POST", "/api/fs/xfer", "op=down&file=fil_abcdefgh2345abcd&name=x&size=10&sha=XYZ")).status == 400, "sin huella valida no se baja nada");
+  CHECK(run(req("POST", "/api/fs/xfer", "op=down&file=../../etc&name=x&size=10&sha=" + sha)).status == 400, "id de archivo raro: 400");
+  CHECK(run(req("POST", "/api/fs/xfer", "op=cancel&job=9")).status == 202 && g_xops.back().op == FLEXWEB_X_CANCEL && g_xops.back().id == 9, "cancelar");
+  CHECK(run(req("POST", "/api/fs/xfer", "op=boom")).status == 400, "operacion desconocida");
+  CHECK(run(req("POST", "/api/fs/xfer", "op=clear", "", false)).status == 403, "sin X-Flex: 403");
+
+  std::printf("-- Flex Storage: borrar y renombrar en Flex OS --\n");
+  r = run(req("POST", "/api/local/rename", "id=" + std::to_string(idA) + "&name=Playa%20%C3%91and%C3%BA"));
+  CHECK(r.status == 200 && g_renamed == std::to_string(idA) + ":Playa \xC3\x91" "and\xC3\xBA", "renombrar");
+  CHECK(run(req("POST", "/api/local/rename", "id=" + std::to_string(idA) + "&name=%20%20")).status == 400, "nombre vacio: 400");
+  CHECK(run(req("POST", "/api/local/rename", "id=" + std::to_string(idB) + "&name=x")).status == 403, "un protegido no, sin la clave");
+  r = run(req("POST", "/api/local/delete", "ids=" + std::to_string(idB)));
+  CHECK(r.status == 403 && g_removed.empty(), "borrar un protegido sin la clave: 403 y no se toca");
+  r = run(req("POST", "/api/local/delete", "ids=999," + std::to_string(idA)));
+  j = js(r);
+  CHECK(r.status == 200 && jint(j, "ok") == 1 && g_removed.size() == 1 && g_removed[0] == idA, "borrar el suyo (lo que no existe se ignora)");
+  cJSON_Delete(j);
+}
+
+static void testCloudProxy(){
+  std::printf("-- Flex Storage: pasarela /api/cloud (el token del telefono nunca llega al navegador) --\n");
+  setup(); g_cookie.clear(); withStorage();
+  CHECK(pair(), "sesion");
+  std::string list = "{\"ok\":true,\"items\":[],\"nextCursor\":null}";
+  g_phone = [&](const std::string&){ return ok200(list); };
+  Resp r = run(req("GET", "/api/cloud/files?parentId=root&limit=40"));
+  CHECK(r.status == 200 && r.body == list && r.h["content-type"] == "application/json", "lista del telefono, tal cual");
+  CHECK(g_ups.size() == 1, "una conexion con el telefono");
+  const std::string& sent = g_ups[0]->sent;
+  CHECK(sent.rfind("GET /api/cloud/files?parentId=root&limit=40 HTTP/1.1\r\n", 0) == 0, "misma ruta y consulta");
+  CHECK(sent.find("Host: 192.168.1.77:47830\r\n") != std::string::npos && sent.find("Authorization: Bearer " + g_token + "\r\n") != std::string::npos,
+        "con el Host y el token del TELEFONO");
+  CHECK(sent.find("fxs=") == std::string::npos && sent.find(g_cookie) == std::string::npos, "la cookie del P4 no viaja al telefono");
+  CHECK(r.body.find(g_token) == std::string::npos && r.h["set-cookie"].empty(), "ni el token vuelve al navegador");
+  CHECK(g_ups[0]->closed && g_results.size() == 1 && g_results[0] == 200, "conexion cerrada y resultado anotado");
+
+  std::string savedCookie = g_cookie; g_cookie.clear();
+  size_t opens = g_ups.size();
+  CHECK(run(req("GET", "/api/cloud/me")).status == 401 && g_ups.size() == opens, "sin sesion web: 401 y el telefono ni se entera");
+  g_cookie = savedCookie;
+  CHECK(run(req("PUT", "/api/cloud/uploads/upl_1/parts/1", "abc", "", false)).status == 403 && g_ups.size() == opens, "PUT sin X-Flex: 403");
+
+  // Una parte de 1 MB: a trozos, sin guardarla, con su huella.
+  std::string part(1024 * 1024, '\0');
+  for(size_t i = 0; i < part.size(); i++) part[i] = (char)(i * 131 + 7);
+  std::string partSha(64, 'c');
+  std::string got;
+  g_phone = [&](const std::string& in){
+    size_t he = in.find("\r\n\r\n");
+    got = in.substr(he + 4);
+    return ok200("{\"ok\":true,\"partNumber\":1}");
+  };
+  long live0 = g_live;
+  r = run(req("PUT", "/api/cloud/uploads/upl_1/parts/1", part, ("X-Part-SHA256: " + partSha + "\r\nContent-Type: application/octet-stream\r\n").c_str()));
+  CHECK(r.status == 200 && got == part, "1 MB llega al telefono byte a byte");
+  const std::string& ps = g_ups.back()->sent;
+  CHECK(ps.find("Content-Length: 1048576\r\n") != std::string::npos && ps.find("X-Part-SHA256: " + partSha + "\r\n") != std::string::npos &&
+        ps.find("Content-Type: application/octet-stream\r\n") != std::string::npos, "con su longitud, su tipo y su huella");
+  CHECK(g_live == live0, "sin una sola reserva de memoria: por el buffer de siempre");
+
+  // PATCH y DELETE: la API de Flex Cloud entera.
+  std::string pbody;
+  g_phone = [&](const std::string& in){ pbody = in.substr(in.find("\r\n\r\n") + 4); return ok200("{\"ok\":true}"); };
+  r = run(req("PATCH", "/api/cloud/files/fil_abcdefgh2345", "{\"name\":\"N\\u00f1\"}", "Content-Type: application/json\r\n"));
+  CHECK(r.status == 200 && pbody == "{\"name\":\"N\\u00f1\"}" && g_ups.back()->sent.rfind("PATCH ", 0) == 0, "PATCH con su JSON");
+  r = run(req("DELETE", "/api/cloud/files/fil_abcdefgh2345"));
+  CHECK(r.status == 200 && g_ups.back()->sent.rfind("DELETE /api/cloud/files/fil_abcdefgh2345 HTTP/1.1", 0) == 0, "DELETE");
+
+  // Rangos (miniaturas, descargas): 206 con su Content-Range.
+  g_phone = [&](const std::string&){
+    return std::string("HTTP/1.1 206 Partial Content\r\nContent-Type: video/x-msvideo\r\nContent-Range: bytes 100-199/1000\r\nAccept-Ranges: bytes\r\n"
+                       "ETag: \"abc\"\r\nContent-Length: 100\r\n\r\n") + std::string(100, 'v');
+  };
+  r = run(req("GET", "/api/cloud/download/fil_abcdefgh2345", "", "Range: bytes=100-199\r\nIf-Range: \"abc\"\r\n"));
+  CHECK(r.status == 206 && r.h["content-range"] == "bytes 100-199/1000" && r.h["accept-ranges"] == "bytes" && r.h["etag"] == "\"abc\"" && r.body.size() == 100,
+        "206 con Content-Range, Accept-Ranges y ETag");
+  CHECK(g_ups.back()->sent.find("Range: bytes=100-199\r\n") != std::string::npos && g_ups.back()->sent.find("If-Range: \"abc\"\r\n") != std::string::npos,
+        "el rango y el If-Range llegan al telefono");
+
+  // Descarga grande por la pasarela: a trozos y sin memoria extra.
+  std::string bigBody(3 * 1024 * 1024 + 17, 'x');
+  for(size_t i = 0; i < bigBody.size(); i += 4096) bigBody[i] = (char)i;
+  g_phone = [&](const std::string&){ return ok200(bigBody, "application/octet-stream"); };
+  live0 = g_live;
+  r = run(req("GET", "/api/cloud/download/fil_abcdefgh2345"));
+  CHECK(r.status == 200 && r.body == bigBody && g_live == live0, "3 MB del telefono al navegador a trozos, sin reservar memoria");
+
+  // La sesion del telefono caduco: con un cuerpo pequeno, se repite UNA vez.
+  int calls = 0;
+  g_phone = [&](const std::string&){
+    calls++;
+    if(calls == 1) return std::string("HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: 16\r\n\r\n{\"ok\":false,\"x\"}");
+    return ok200("{\"ok\":true,\"renamed\":1}");
+  };
+  g_results.clear();
+  r = run(req("POST", "/api/cloud/folders", "{\"name\":\"Viaje\"}", "Content-Type: application/json\r\n"));
+  CHECK(r.status == 200 && calls == 2 && g_results.size() == 2 && g_results[0] == 401, "401 del telefono: sesion nueva y se repite sola");
+  CHECK(g_ups[g_ups.size() - 2]->sent.find("{\"name\":\"Viaje\"}") != std::string::npos && g_ups.back()->sent.find("{\"name\":\"Viaje\"}") != std::string::npos,
+        "el mismo cuerpo, las dos veces");
+  // ...con una parte grande no se puede repetir: el navegador reintenta en 1 s.
+  calls = 0;
+  g_phone = [&](const std::string&){ calls++; return std::string("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n"); };
+  r = run(req("PUT", "/api/cloud/uploads/upl_1/parts/2", part, ("X-Part-SHA256: " + partSha + "\r\n").c_str()));
+  cJSON* j = js(r);
+  cJSON* er = cJSON_GetObjectItem(j, "error");
+  CHECK(r.status == 503 && r.h["retry-after"] == "1" && er && !strcmp(cJSON_GetObjectItem(er, "code")->valuestring, "phone_session") && calls == 1,
+        "parte grande con sesion caducada: 503 'phone_session' + Retry-After (no es la sesion del navegador)");
+  cJSON_Delete(j);
+
+  // Sin telefono, apagado o rechazado: errores con la forma de Flex Cloud.
+  g_openWhy = "network";
+  r = run(req("GET", "/api/cloud/me"));
+  j = js(r); er = cJSON_GetObjectItem(j, "error");
+  CHECK(r.status == 503 && r.h["retry-after"] == "5" && er && !strcmp(cJSON_GetObjectItem(er, "code")->valuestring, "phone_offline") &&
+        strstr(cJSON_GetObjectItem(er, "message")->valuestring, "desconectado"), "Telefono desconectado (503 + Retry-After)");
+  cJSON_Delete(j);
+  g_openWhy = "no_phone";
+  CHECK(run(req("GET", "/api/cloud/me")).status == 409, "sin telefono emparejado: 409");
+  g_openWhy = "phone_rejected";
+  CHECK(run(req("GET", "/api/cloud/me")).status == 403, "rechazado: 403");
+  g_openWhy.clear();
+
+  // Respuestas raras del telefono: nunca se reenvian a medias.
+  g_phone = [&](const std::string&){ return std::string("BASURA\r\n\r\n"); };
+  CHECK(run(req("GET", "/api/cloud/me")).status == 502, "basura: 502");
+  g_phone = [&](const std::string&){ return std::string(); };
+  CHECK(run(req("GET", "/api/cloud/me")).status == 504, "se corta sin contestar: 504");
+  g_phone = [&](const std::string&){ return std::string("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"); };
+  CHECK(run(req("GET", "/api/cloud/me")).status == 502, "por trozos sin longitud: 502");
+  size_t before = g_ups.size();
+  CHECK(run(req("GET", "/api/cloud/d/firmado123456")).status == 404 && g_ups.size() == before, "los enlaces firmados no pasan por el P4");
+  CHECK(run(req("GET", "/api/cloud/files%20x")).status == 400 && g_ups.size() == before, "ruta con caracteres raros: 400");
+  CHECK(run(req("PUT", "/api/cloud/uploads/upl_1/parts/1", "", "Content-Length: 20000000\r\n")).status == 413, "demasiado grande: 413");
+
+  // Keep-alive: una respuesta de la pasarela no estropea la siguiente peticion.
+  g_phone = [&](const std::string&){ return ok200("{\"ok\":true,\"n\":1}"); };
+  Client c;
+  std::string a = req("GET", "/api/cloud/me"); a.replace(a.find("Connection: close"), 17, "Connection: keep-alive");
+  c.in = a + req("GET", "/api/status");
+  FlexWebConn cn = { cRead, cWrite, &c, nullptr };
+  flexWebServeConn(&g_w, &cn, g_hdr, g_io);
+  auto v = parseAll(c.out);
+  CHECK(v.size() == 2 && v[0].status == 200 && v[0].body == "{\"ok\":true,\"n\":1}" && v[1].status == 200 && v[1].body.find("\"rev\"") != std::string::npos,
+        "dos peticiones en la misma conexion: pasarela y despues /api/status");
+  for(Up* u : g_ups) delete u;
+  g_ups.clear();
+}
+
+static void testFuzz(){
+  std::printf("-- ruido contra el servidor --\n");
+  setup(); g_cookie.clear(); pair();
+  uint32_t s = 0xBEEF;
+  for(int it = 0; it < 1500; it++){
+    std::string in;
+    const char* pre[] = { "GET /api/", "POST /api/upload?kind=photo&size=10&crc=1&name=a", "HEAD /", "" };
+    in = pre[it % 4];
+    int n = (int)(s % 300);
+    for(int i = 0; i < n; i++){ s = s * 1103515245u + 12345u; char ch = (char)(s >> 16); if((s >> 9) % 5 == 0) ch = "\r\n:=&?/ "[(s >> 3) % 8]; in += ch; }
+    if(it % 3 == 0) in += "\r\n\r\n";
+    Client c; c.chunk = 1 + s % 64;
+    run(in, &c);
+  }
+  CHECK(g_fs.tmpCount() == 0 && !g_w.uploading, "1500 peticiones de ruido: sin temporales y servidor libre");
+  // Lo mismo con Flex Storage: ruido hacia la pasarela, el emparejamiento y
+  // las rutas nuevas, con un "telefono" que a veces contesta basura.
+  withStorage();
+  uint32_t t = 0xF1E2;
+  g_phone = [&](const std::string&){
+    t = t * 1103515245u + 12345u;
+    std::string r = (t >> 8) % 2 ? std::string("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nabcd") : std::string();
+    for(int i = 0; i < (int)((t >> 4) % 200); i++){ t = t * 1103515245u + 12345u; r += (char)(t >> 16); }
+    return r;
+  };
+  long live = g_live;
+  for(int it = 0; it < 1500; it++){
+    const char* pre[] = { "GET /api/cloud/", "PUT /api/cloud/uploads/x/parts/1 HTTP/1.1\r\nX-Flex: 1\r\nCookie: fxs=", "POST /api/fs/phone/pair",
+                          "POST /api/fs/xfer HTTP/1.1\r\nX-Flex: 1\r\nContent-Length: 40\r\n\r\nop=", "PATCH /api/cloud/files/" };
+    std::string in = pre[it % 5];
+    if(it % 5 == 1) in += g_cookie + "\r\nContent-Length: 30\r\n\r\n";
+    int n = (int)(s % 300);
+    for(int i = 0; i < n; i++){ s = s * 1103515245u + 12345u; char ch = (char)(s >> 16); if((s >> 9) % 5 == 0) ch = "\r\n:=&?/ "[(s >> 3) % 8]; in += ch; }
+    if(it % 3 == 0) in += "\r\n\r\n";
+    Client c; c.chunk = 1 + s % 64;
+    run(in, &c);
+  }
+  bool allClosed = true;
+  for(Up* u : g_ups) if(!u->closed) allClosed = false;
+  CHECK(allClosed && g_live == live, "1500 mas hacia Flex Storage: toda conexion con el telefono cerrada y sin fugas");
+  for(Up* u : g_ups) delete u;
+  g_ups.clear();
+}
+
 int main(){
   std::printf("=== FlexOS · Flex Web Server de extremo a extremo ===\n");
   testPublicAndPairing();
@@ -773,6 +1119,8 @@ int main(){
   testVideoAndLibrary();
   testLocked();
   testBigAndHeavy();
+  testStorageRoutes();
+  testCloudProxy();
   testFuzz();
   std::printf("=== %d comprobaciones, %d fallos ===\n", g_run, g_fail);
   return g_fail ? 1 : 0;
