@@ -174,6 +174,11 @@ Store reserva 24 KB seguidos para su propia tarea cada vez que se usa. Por eso:
   a la vista, no cada vez que vuelve la red: Flex Account ya valida la misma
   credencial contra el mismo servidor y dos handshakes a la vez agotaban la
   interna justo cuando entra el Wi-Fi.
+* **La tarjeta no afirma nada antes de tiempo.** Como la tarea nace con la primera
+  peticion, la primera pintada llega ANTES de su primera vuelta: hasta entonces
+  el estado es "Conectando..." (antes era "Sin Flex Account", y una cuenta
+  vinculada ensenaba un instante "Vincular cuenta"). Si la tarea no puede nacer,
+  la tarjeta y la lista dicen "No hay memoria libre ahora".
 
 La cifra "~12 KB de pila" que figuraba aqui era una **estimacion con codigo
 compilado para PC** (sin mbedTLS real): no esta medida en el P4. Si en la placa
