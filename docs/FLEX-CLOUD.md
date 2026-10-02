@@ -12,7 +12,7 @@ contiene codigo del firmware.
 |---|---|---|
 | `FlexOS_CloudCore.{h,cpp}` | Nucleo **portable**: lee las respuestas de la API (sin confiar en ellas), SHA-256 por partes, diario de transferencias con CRC, cache de bloques del streaming, nombres para LittleFS y los **textos y decisiones de la interfaz** (cuota, "que se abre en el P4", lineas de transferencia). | `FlexOS_Ultra/` |
 | `FlexOS_Cloud.{h,cpp}` | **Flex Cloud Manager**: el unico modulo que habla con la nube. Dos tareas FreeRTOS propias, API sin bloqueos para la interfaz. | `FlexOS_Ultra/` |
-| `FlexOS_CloudTLS.{h,cpp}` | Raices de confianza para TLS (la misma CA que usa Flex Account). | `FlexOS_Ultra/` |
+| `FlexOS_CloudTLS.{h,cpp}` | Raices de confianza para TLS (la misma CA que usa Flex Account), `flexTlsRoom()` (hay SRAM **interna** para abrir TLS) y `flexTlsReason()` (por que fallo una conexion). | `FlexOS_Ultra/` |
 | `FlexOS_Ultra_CloudKit.h` | Interfaz de la nube **compartida** por Archivos, Galeria y Multimedia + el procesado de avisos en `loop()`. | cadena del sketch |
 | `FlexOS_Ultra_MediaViewer.h` | El visor comun reproduce un AVI de la nube **por rangos** (`cloud:<id>/<nombre>`). | cadena del sketch |
 
@@ -123,8 +123,36 @@ Lo protegido no se ofrece para subir. Encolar no borra nada. Un aviso repetido
 | Miniaturas | <= 24 x 34 KB PSRAM (LRU) | con la nube a la vista; `flexCloudShed()` las suelta |
 | Streaming | 3 MB PSRAM | desde el primer video; se suelta al cerrar Galeria/Multimedia |
 
-Pilas: `flex-cloud` 16 KB, `flex-cloud-st` 10 KB (cadena mas profunda medida con
-`-fstack-usage`: ~12 KB contando HTTP/TLS).
+### Las tareas y la SRAM interna
+
+Las pilas de tareas, los buffers de mbedTLS y el parseo de las raices salen de la
+**SRAM interna** (el P4 tiene 32 MB de PSRAM pero la interna es la escasa), y Flex
+Store reserva 24 KB seguidos para su propia tarea cada vez que se usa. Por eso:
+
+* **Las tareas se crean al hacer falta.** `flex-cloud` (16 KB) nace con la primera
+  peticion a la nube (abrirla, subir, bajar...) o al arrancar solo si el diario
+  trae trabajo pendiente; `flex-cloud-st` (10 KB) con el primer video. Sin
+  cuenta, o con la nube sin usar, no ocupan nada. (Antes se creaban siempre en
+  `setup()`: 26 KB de pila fija mas los 12 KB de Flex Account.)
+* **Van ancladas al core 1**, como el resto de tareas de red: el core 0 es del
+  presentador grafico (ver `FlexOS_OTA.cpp`). Con `xTaskCreate` "a secas" podian
+  migrar a el.
+* **La creacion se comprueba.** Si no hay un bloque contiguo para la pila se
+  escribe en el puerto serie (`[CLOUD] no se pudo crear la tarea ...`) y la
+  siguiente peticion lo reintenta, sin reiniciar. Antes el fallo era mudo y el
+  modulo se quedaba sin hilo para siempre.
+* **No se abre TLS a ciegas.** `flexTlsRoom()` mide la SRAM interna libre (suelo
+  40 KB, el del modo de proteccion del sistema) y su mayor bloque (16 KB). La guarda
+  anterior usaba `esp_get_free_heap_size()`, que suma la PSRAM y nunca saltaba. Sin
+  sitio se dice "sin memoria" y se reintenta con la espera de siempre.
+* **Al arrancar solo valida Flex Account.** La cuota (`GET /me`) se pide con la nube
+  a la vista, no cada vez que vuelve la red: Flex Account ya valida la misma
+  credencial contra el mismo servidor y dos handshakes a la vez agotaban la
+  interna justo cuando entra el Wi-Fi.
+
+La cifra "~12 KB de pila" que figuraba aqui era una **estimacion con codigo
+compilado para PC** (sin mbedTLS real): no esta medida en el P4. Si en la placa
+apareciera un desbordamiento, esa pila es lo primero que hay que revisar.
 
 ## 8. Pruebas
 
@@ -137,6 +165,16 @@ Pilas: `flex-cloud` 16 KB, `flex-cloud-st` 10 KB (cadena mas profunda medida con
 
 ## 9. Limites honestos
 
+* **TLS verificado contra el dominio real nunca se ha demostrado en la placa.**
+  Antes de la validacion de sesion todo lo que hablaba con ese host (el
+  emparejado, Flex Store) usaba `setInsecure()`. Si la conexion falla, la
+  pantalla de Flex Account y la pildora de la nube dicen POR QUE (lo que
+  devuelve `WiFiClientSecure::lastError()`): `certificado no reconocido` (la
+  cadena del servidor no llega a ninguna de las 11 raices de `FlexOS_CloudTLS`:
+  fija la correcta con `-DFLEX_CLOUD_ROOT_CA=...` o usa el bundle completo de
+  ESP-IDF), `sin memoria interna`, `sin DNS ni TCP o tiempo agotado`,
+  `tiempo agotado en TLS`... y por el puerto serie salen la SRAM interna y el
+  mayor bloque libres en ese momento (`[ACCOUNT]`, `[CLOUD]`).
 * Nada de esto se ha ejecutado aun **en la placa**: las pruebas usan dobles de
   red, FS y FreeRTOS fieles a arduino-esp32 3.2.1, y el servidor real en el PC.
   Falta medir en el P4: memoria de mbedTLS con dos o tres conexiones a la vez

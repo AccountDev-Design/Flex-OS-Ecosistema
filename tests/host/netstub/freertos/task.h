@@ -14,3 +14,11 @@ void vTaskDelay(TickType_t ticks);
 BaseType_t xTaskNotifyGive(TaskHandle_t t);
 uint32_t ulTaskNotifyTake(BaseType_t clearOnExit, TickType_t ticks);
 extern unsigned gNetTaskNotifies;
+// Registro de las tareas creadas (las pruebas comprueban nombre, nucleo y pila)
+// y fallo programable: gNetTaskFail = N hace fallar las N proximas creaciones,
+// como xTaskCreate cuando no queda un bloque contiguo de SRAM interna.
+#include <string>
+#include <vector>
+struct NetTaskRec { std::string name; int core; uint32_t stack; };   // core -1 = sin fijar (tskNO_AFFINITY)
+extern std::vector<NetTaskRec> gNetTasks;
+extern unsigned gNetTaskFail;
