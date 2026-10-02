@@ -92,7 +92,11 @@ void flexAccountReportRejected();
 // la memoria interna ni imprime la credencial.
 bool flexAccountCopyBearer(char* out, size_t capacity);
 
-// Borra solo la sesion local. La revocacion definitiva se hace desde la web,
+// DESVINCULA este aparato: borra la credencial (NVS y RAM) y deja el estado en
+// FLEX_ACCOUNT_UNLINKED / FLEX_LINK_UNLINKED, que sigue asi tras reiniciar. Escribe
+// en la NVS una sola vez y solo si habia algo que borrar. No es "sin red": una
+// cuenta desvinculada no se recupera sola, hay que volver a vincular.
+// La revocacion definitiva del dispositivo se hace desde la web de Flex Account,
 // para que perder o reiniciar la pantalla no permita secuestrar el dispositivo.
 void flexAccountForgetLocal();
 

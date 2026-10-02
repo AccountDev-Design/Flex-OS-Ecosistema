@@ -84,6 +84,12 @@ GANCHOS = [
     ("av1Close",         "flexAppStop(",       "cerrar no ejecutaria onStop ni soltaria los recursos de la app"),
     ("av1Close",         "av1FreeRegions()",   "cerrar filtraria la memoria de la app en cada apertura"),
     ("loop",           "flexPollTouch()", "no habria tactil"),
+    # DESVINCULAR CUENTA (pantalla de Flex Account). El boton pregunta primero; al
+    # confirmar, el modulo olvida la credencial y la nube suelta lo de esa cuenta
+    # (si no, las transferencias en cola seguirian hacia OTRA cuenta que se vincule despues).
+    ("accountOobeTick",   "accountUnlinkNow()",          "el boton Desvincular cuenta no haria nada al confirmar"),
+    ("accountUnlinkNow",  "flexAccountForgetLocal()",    "desvincular no borraria la credencial"),
+    ("accountUnlinkNow",  "flexCloudAccountUnlinked()",  "las transferencias de la cuenta anterior seguirian hacia la siguiente cuenta que se vincule"),
     # BANDA PRE-DESENFOCADA. Sin el guardian en loop(), una banda armada por un
     # dueno que ya no manda (el bloqueo por inactividad se lleva la pantalla a
     # mitad de un menu) se quedaria pegada detras de cualquier app. Y el guardian

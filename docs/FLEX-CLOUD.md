@@ -96,6 +96,17 @@ reintenta.
   * Un aviso **unico** por la isla (`Flex Account: sesion perdida` / `... caduco`), con o sin
     la nube a la vista, para que una subida larga no se quede "esperando" sin que nadie diga
     por que.
+* **Desvincular a proposito** (boton `Desvincular cuenta` de la pantalla de Flex
+  Account, tambien con la cuenta rechazada). Pregunta antes (`Cancelar` y el toque
+  fuera no borran nada); al confirmar, `flexAccountForgetLocal()` borra la
+  credencial (NVS y RAM, **una** escritura y solo si habia algo que borrar), deja
+  `FLEX_ACCOUNT_UNLINKED` / `FLEX_LINK_UNLINKED` (sigue asi tras reiniciar; no es
+  "sin conexion" ni "servicio no disponible") y `flexCloudAccountUnlinked()` cancela
+  lo que estaba en cola o en marcha y suelta la cuota, la direccion y la lista de
+  esa cuenta: nada de la cuenta anterior puede seguir hacia otra que se vincule
+  despues. Una validacion que estuviera en vuelo no escribe nada despues (epoch).
+  **No habla con el servidor**: el aparato sigue en la lista de la web de Flex
+  Account hasta que se quita alli, y los archivos de la nube no se borran.
 * **Salir**: `Volver a vincular` (pantalla de Flex Account, o `Abrir Flex Account` en la
   tarjeta) con una credencial nueva; la nube vuelve a `Conectado`, relee la cuota de la
   cuenta nueva y las transferencias esperando continuan.

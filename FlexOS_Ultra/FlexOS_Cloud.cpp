@@ -380,23 +380,30 @@ static int apiCall(const char* method, const char* path, const char* json, Strea
 // La cuota y la direccion que se ensenaban eran de una cuenta que ya no sirve (o
 // que ya no esta): se sueltan. Si se vincula OTRA cuenta, su tarjeta no puede
 // empezar ensenando el espacio de la anterior.
-static void forgetIdentity(){
+// Tambien la lista de archivos que se ensenaba: era de esa cuenta. Queda en ERROR
+// (no en "sin pedir"), asi que al volver la conexion la interfaz la pide otra vez
+// (CloudKit: "vuelve la conexion con la lista en error").
+static void forgetIdentity(const char* why){
   lock();
-  if(gStatus.quotaValid || gStatus.address[0]){
+  if(gStatus.quotaValid || gStatus.address[0] || gListInfo.count > 0 || gListInfo.state == FCL_LIST_READY){
     gStatus.quotaValid = false;
     memset(&gStatus.quota, 0, sizeof(gStatus.quota));
     gStatus.address[0] = 0;
     gStatus.gen++;
+    gListInfo.count = 0; gListInfo.more = false; gListInfo.nCrumbs = 0;
+    gListInfo.state = FCL_LIST_ERROR;
+    snprintf(gListInfo.error, sizeof(gListInfo.error), "%s", fclErrorText(why));
+    gListInfo.gen++;
   }
   unlock();
 }
 
 static void refreshNet(){
-  if(!flexAccountLinked()){ gAuthWait = false; forgetIdentity(); setNet(FCN_NO_ACCOUNT, fclErrorText("no_account")); return; }
+  if(!flexAccountLinked()){ gAuthWait = false; forgetIdentity("no_account"); setNet(FCN_NO_ACCOUNT, fclErrorText("no_account")); return; }
   if(!flexAccountUsable()){
     // Flex Account ya lo sabe y lo ensena: de aqui se sale revinculando.
     gAuthWait = false;
-    forgetIdentity();
+    forgetIdentity("auth_required");
     FlexAccountLink l = flexAccountLinkState();
     setNet(FCN_AUTH, fclErrorText(l == FLEX_LINK_TOKEN_EXPIRED ? "token_expired" : "device_revoked"));
     return;
@@ -1637,6 +1644,25 @@ void flexCloudStatus(FlexCloudStatus* out){
   if(gJ) for(int i = 0; i < FCL_JOBS_MAX; i++) if(gJ->jobs[i].state == FCL_JOB_QUEUED || gJ->jobs[i].state == FCL_JOB_ACTIVE) act++;
   out->activeXfers = act;
   unlock();
+}
+
+// El usuario DESVINCULO la cuenta en este aparato (FlexOS_Account_Bridge): lo que
+// estaba en cola o en marcha era de ELLA y no puede seguir hacia otra cuenta que se
+// vincule despues. Se cancelan las transferencias (con lo de siempre al cancelar:
+// los originales no se tocan y la reserva en la nube la suelta la tarea cuando haya
+// cuenta) y se sueltan la cuota, la direccion y la lista de esa cuenta.
+void flexCloudAccountUnlinked(){
+  if(!gLock || !gJ) return;
+  uint32_t ids[FCL_JOBS_MAX]; int n = 0;
+  lock();
+  for(int i = 0; i < FCL_JOBS_MAX; i++){
+    const FclJob& x = gJ->jobs[i];
+    if(x.state == FCL_JOB_QUEUED || x.state == FCL_JOB_ACTIVE) ids[n++] = x.id;
+  }
+  unlock();
+  for(int i = 0; i < n; i++) flexCloudCancel(ids[i]);
+  flexCloudClearFinished();
+  forgetIdentity("no_account");
 }
 
 const char* flexCloudNetText(uint8_t net){

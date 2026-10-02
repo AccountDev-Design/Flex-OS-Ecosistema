@@ -376,6 +376,79 @@ static void testRevokedForgetRelink(){
   CHECK(snap().link == FLEX_LINK_LINKED, "y validada tras reiniciar con Wi-Fi");
 }
 
+// ------------------------------ desvincular este aparato (accion explicita del usuario) ------------------------------
+static bool nvsHas(const char* key){ Preferences p; p.begin("flexacct", true); bool r = p.isKey(key); p.end(); return r; }
+
+static void testUnlink(){
+  printf("-- desvincular este aparato: UNLINKED, persistente, sin escrituras de mas --\n");
+  netstubNvsWipe(); netstubReset(); gNetHandler = serve; S = Server();
+  flexAccountTestPowerCycle(); gNetWifi = true; linkNow(); steps(50);
+  char old[64] = ""; flexAccountCopyBearer(old, sizeof(old));
+  CHECK(snap().link == FLEX_LINK_LINKED && snap().linked && old[0], "(vinculada y validada)");
+  CHECK(nvsHas("token") && nvsHas("address") && nvsHas("linked"), "(con su credencial en la NVS)");
+
+  // A) Desvincular: UNLINKED, no OFFLINE ni "servicio no disponible".
+  unsigned w0 = netstubNvsWriteCount();
+  flexAccountForgetLocal();
+  FlexAccountSnapshot s = snap();
+  CHECK(!s.linked && s.state == FLEX_ACCOUNT_UNLINKED && s.link == FLEX_LINK_UNLINKED, "desvincular: FLEX_ACCOUNT_UNLINKED / FLEX_LINK_UNLINKED");
+  CHECK(s.link != FLEX_LINK_LINKED_OFFLINE && s.link != FLEX_LINK_NETWORK_UNAVAILABLE, "no se confunde con 'sin conexion' ni con 'servicio no disponible'");
+  CHECK(!s.flexAddress[0] && !s.displayName[0], "sin direccion ni nombre");
+  CHECK(!flexAccountLinked() && !flexAccountUsable(), "sin cuenta guardada ni uso posible");
+  char b[64]; CHECK(!flexAccountCopyBearer(b, sizeof(b)) && !b[0], "la credencial ya no se puede copiar");
+  CHECK(!nvsHas("token") && !nvsHas("address") && !nvsHas("display") && !nvsHas("linked") && !nvsHas("authst"), "la NVS no conserva ni token, ni direccion, ni nombre");
+  unsigned w1 = netstubNvsWriteCount() - w0;
+  CHECK(w1 >= 1 && w1 <= 3, "una desvinculacion son unas pocas escrituras (borrar + id de instalacion nuevo)");
+  CHECK(nvsHas("installId"), "el aparato tiene un id de instalacion NUEVO (el servidor no lo toma por el anterior)");
+
+  // B) Pulsar dos veces, o sin cuenta, no toca la flash.
+  unsigned w2 = netstubNvsWriteCount();
+  flexAccountForgetLocal(); flexAccountForgetLocal();
+  CHECK(netstubNvsWriteCount() == w2, "desvincular una cuenta que ya no esta: ni una escritura");
+  CHECK(snap().link == FLEX_LINK_UNLINKED, "(y sigue UNLINKED)");
+
+  // C) No valida nada, con o sin Wi-Fi, y sigue asi tras reiniciar.
+  gNetLog.clear(); steps(200);
+  CHECK(countReq(SESSION_URL) == 0, "desvinculada: no hay ninguna peticion de validacion");
+  flexAccountTestPowerCycle();
+  CHECK(!snap().linked && snap().link == FLEX_LINK_UNLINKED && snap().state == FLEX_ACCOUNT_UNLINKED, "tras reiniciar sigue desvinculada");
+  gNetWifi = false; steps(20);
+  CHECK(snap().link == FLEX_LINK_UNLINKED, "sin Wi-Fi sigue UNLINKED (no pasa a LINKED_OFFLINE)");
+  gNetWifi = true; gNetLog.clear(); steps(200);
+  CHECK(snap().link == FLEX_LINK_UNLINKED && countReq(SESSION_URL) == 0, "con Wi-Fi sigue UNLINKED y sin peticiones");
+
+  // D) Volver a vincular funciona, con una credencial NUEVA.
+  linkNow();
+  char fresh[64] = ""; flexAccountCopyBearer(fresh, sizeof(fresh));
+  CHECK(snap().link == FLEX_LINK_LINKED && snap().linked && fresh[0] && strcmp(fresh, old), "revincular: LINKED con una credencial distinta");
+  flexAccountTestPowerCycle(); gNetWifi = true; steps(50);
+  CHECK(snap().link == FLEX_LINK_LINKED, "y sobrevive al reinicio");
+  CHECK(!bearerLeaked(), "la credencial solo viajo por TLS verificado");
+
+  // E) Desvincular con el servidor caido: el estado NO depende de la red.
+  S.session = SM_DOWN; flexAccountRequestValidation(); steps(5);
+  CHECK(snap().link == FLEX_LINK_NETWORK_UNAVAILABLE && snap().linked, "(servicio no disponible: SIGUE vinculada)");
+  flexAccountForgetLocal();
+  CHECK(snap().link == FLEX_LINK_UNLINKED && !snap().linked, "desvincular funciona aunque el servicio no responda");
+  S.session = SM_OK;
+
+  // F) El usuario desvincula MIENTRAS el servidor contesta la validacion (la red va en otra tarea):
+  //    su resultado no escribe nada ("address" sin token dejaba la cuenta "incompleta" al reiniciar).
+  for(int caso = 0; caso < 2; caso++){
+    netstubNvsWipe(); netstubReset(); S = Server(); gNetHandler = serve;
+    flexAccountTestPowerCycle(); gNetWifi = true; linkNow(); steps(50);
+    if(caso == 0) S.session = SM_REVOKED;                       // escribiria "authst"
+    else S.address = "otra.cuenta@flex";                       // escribiria "address" (el perfil cambio)
+    gNetHandler = [](const NetRequest& rq){ if(rq.url == SESSION_URL) flexAccountForgetLocal(); return serve(rq); };
+    flexAccountRequestValidation(); steps(5);
+    gNetHandler = serve;
+    CHECK(snap().link == FLEX_LINK_UNLINKED && !snap().linked, caso ? "desvincular durante una validacion correcta: UNLINKED" : "desvincular durante una validacion rechazada: UNLINKED");
+    CHECK(!nvsHas("authst") && !nvsHas("address") && !nvsHas("token") && !nvsHas("linked"), "la validacion en vuelo no escribio nada en la NVS");
+    flexAccountTestPowerCycle();
+    CHECK(snap().link == FLEX_LINK_UNLINKED && !snap().linked, "y tras reiniciar no hay 'cuenta incompleta' (LINK_ERROR)");
+  }
+}
+
 static void testRejectedByCloud(){
   printf("-- un 401 de Flex Cloud pide revalidar, con freno --\n");
   netstubReset(); gNetHandler = serve; gNetWifi = true;
@@ -622,6 +695,7 @@ int main(){
   testExpiredAndRelink();
   testRevokedForgetRelink();
   testRejectedByCloud();
+  testUnlink();
   testCorruptAndBrokenNvs();
   testWearOverTime();
   testTaskAndMemory();

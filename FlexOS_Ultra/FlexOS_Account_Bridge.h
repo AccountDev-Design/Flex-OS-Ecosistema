@@ -54,6 +54,38 @@ static const char* accountCodeNote(const FlexAccountSnapshot& s){
   return s.error[0] ? s.error : "El codigo vence en 10 minutos";
 }
 
+// ---- DESVINCULAR CUENTA ----------------------------------------------------
+// Enlace discreto bajo la tarjeta (con una cuenta guardada, tambien si el servidor
+// la rechazo) y una confirmacion antes de borrar nada. Su franja tactil (628..668)
+// queda entre el boton principal (hasta 622) y la barra de salir (desde 670).
+#define ACC_UNLINK_Y 632
+#define ACC_UNLINK_H 34
+static bool accountUnlinkAsk = false;                 // la confirmacion esta a la vista
+static void accountAskGeom(int& x, int& y, int& w, int& h){ w = SCR_W - 64; h = 318; x = 32; y = 236; }
+// Zona del boton "Desvincular" (derecha) y "Cancelar" (izquierda) de la confirmacion.
+static void accountAskBtns(int& cx, int& dx, int& by, int& bw, int& bh){
+  int x, y, w, h; accountAskGeom(x, y, w, h);
+  bw = (w - 60) / 2; bh = 52; by = y + h - bh - 20; cx = x + 20; dx = x + 40 + bw;
+}
+static void accountAskDraw(){
+  int x, y, w, h; accountAskGeom(x, y, w, h);
+  fillRectA(0, 0, SCR_W, SCR_H, rgb565(0,0,0), 150);
+  fillRoundRectA(x, y, w, h, 26, rgb565(24,28,52), 252);
+  drawTextC(SCR_W / 2, y + 24, "\xC2\xBF" "Desvincular esta cuenta?", 2, rgb565(255,255,255));
+  const uint16_t t1 = rgb565(205,210,228), t2 = rgb565(174,181,205);
+  drawTextC(SCR_W / 2, y + 70,  "Se borra la credencial guardada en este P4.", 1, t1);
+  drawTextC(SCR_W / 2, y + 92,  "Flex Cloud dejara de funcionar hasta que", 1, t1);
+  drawTextC(SCR_W / 2, y + 112, "vuelvas a vincular una cuenta.", 1, t1);
+  drawTextC(SCR_W / 2, y + 140, "Tus archivos en la nube NO se borran.", 1, rgb565(115,231,226));
+  drawTextC(SCR_W / 2, y + 170, "El aparato sigue en tu lista de la web", 1, t2);
+  drawTextC(SCR_W / 2, y + 190, "hasta que lo quites alli.", 1, t2);
+  int cx, dx, by, bw, bh; accountAskBtns(cx, dx, by, bw, bh);
+  fillRoundRectA(cx, by, bw, bh, bh / 2, rgb565(255,255,255), 62);
+  drawTextC(cx + bw / 2, by + bh / 2 - 8, "Cancelar", 2, rgb565(255,255,255));
+  fillRoundRectA(dx, by, bw, bh, bh / 2, rgb565(220,60,84), 250);
+  drawTextC(dx + bw / 2, by + bh / 2 - 8, "Desvincular", 2, rgb565(255,255,255));
+}
+
 static void accountButton(int x, int y, int w, int h, const char* text, bool primary){
   fillRoundRectA(x, y, w, h, h / 2, primary ? rgb565(111,82,238) : rgb565(255,255,255), primary ? 245 : 62);
   drawTextC(x + w / 2, y + h / 2 - 8, text, 2, rgb565(255,255,255));
@@ -114,6 +146,9 @@ static void accountRender(){
                     accountReturn == ACC_RET_OOBE ? "Continuar" :
                     accountReturn == ACC_RET_SETTINGS ? "Volver a Ajustes" : "Volver a Flex Store", true);
     }
+    // Oscuro como la tarjeta: legible sobre cualquier fondo de pantalla.
+    fillRoundRectA(SCR_W / 2 - 120, ACC_UNLINK_Y, 240, ACC_UNLINK_H, ACC_UNLINK_H / 2, rgb565(18,22,42), 215);
+    drawTextC(SCR_W / 2, ACC_UNLINK_Y + 9, "Desvincular cuenta", 1, rgb565(255,154,166));
   } else if(snapshot.state == FLEX_ACCOUNT_REQUESTING){
     drawTextC(SCR_W / 2, 300, "Creando enlace seguro", 3, rgb565(255,255,255));
     int px = 60, py = 368, pw = SCR_W - 120;
@@ -156,6 +191,8 @@ static void accountRender(){
   const char* bottom = accountFirstBoot ? "Omitir por ahora" : "Volver sin cambios";
   drawTextC(SCR_W / 2, 704, bottom, 2, rgb565(255,255,255));
   drawTextC(SCR_W / 2, 750, "@flex es una identidad publica, no un buzon de correo.", 1, rgb565(210,214,229));
+  if(accountUnlinkAsk && snapshot.state == FLEX_ACCOUNT_LINKED) accountAskDraw();
+  else accountUnlinkAsk = false;                   // la cuenta ya no esta: nada que confirmar
   flxFlushAll();
 
   accountLastState = snapshot.state;
@@ -167,6 +204,7 @@ static void accountRender(){
 }
 
 static void accountEnter(AccountReturn where){
+  accountUnlinkAsk = false;
   accountReturn = where;
   accountFirstBoot = (where == ACC_RET_OOBE);
   accountLastState = (FlexAccountState)255;
@@ -222,6 +260,17 @@ static void accountFinish(){
   }
 }
 
+// Confirmado: la credencial se borra (NVS y RAM, UNA escritura), el estado pasa a
+// FLEX_ACCOUNT_UNLINKED y la nube suelta lo de esa cuenta. Sin red: nada de esto
+// habla con el servidor (el aparato se quita de la lista desde la web).
+static void accountUnlinkNow(){
+  accountUnlinkAsk = false;
+  flexAccountForgetLocal();
+  flexCloudAccountUnlinked();
+  sysNotify("Flex Account", "Cuenta desvinculada de este P4");
+  accountRender();
+}
+
 static void accountOobeTick(){
   // El estado del enlace cambia como mucho cada 3 s (cadencia del sondeo de la
   // tarea de red): copiar el snapshot bajo mutex en CADA cuadro no aporta nada.
@@ -237,6 +286,15 @@ static void accountOobeTick(){
   }
   if(!T.tap) return;
 
+  // La confirmacion de "Desvincular cuenta" manda: cualquier toque es suyo.
+  if(accountUnlinkAsk){
+    int cx, dx, by, bw, bh; accountAskBtns(cx, dx, by, bw, bh);
+    if(T.y >= by && T.y <= by + bh && T.x >= dx && T.x <= dx + bw){ accountUnlinkNow(); return; }
+    accountUnlinkAsk = false;                          // Cancelar, o un toque fuera
+    accountRender();
+    return;
+  }
+
   // Barra inferior / flecha: omite solamente la vinculacion, nunca la
   // configuracion basica. Flex Store y Ajustes siguen mostrando el acceso a
   // Cuenta, asi que omitir aqui no deja el dispositivo sin via de vuelta.
@@ -244,6 +302,11 @@ static void accountOobeTick(){
 
   FlexAccountState state = accountLastState;
   if(state == FLEX_ACCOUNT_LINKED){
+    if(T.y >= ACC_UNLINK_Y - 4 && T.y <= ACC_UNLINK_Y + ACC_UNLINK_H + 2 && abs(T.x - SCR_W / 2) <= 124){
+      accountUnlinkAsk = true;                         // primero se pregunta; nada se borra todavia
+      accountRender();
+      return;
+    }
     if(T.y >= 530 && T.y <= 622){
       FlexAccountSnapshot snapshot; flexAccountSnapshot(&snapshot);
       if(accountNeedsRelink(snapshot)){

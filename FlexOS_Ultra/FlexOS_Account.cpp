@@ -114,6 +114,12 @@ static char gRequestError[128] = "";
 static uint32_t gInstallationId = 0;    // distingue reinstalaciones del mismo P4
 static int gLastHttpStatus = 0;
 static uint8_t gAuthSt = AUTHST_OK;     // copia en RAM de "authst"
+// Cambia cada vez que el USUARIO desvincula (flexAccountForgetLocal, desde el hilo
+// de la interfaz). La validacion de la sesion corre en la tarea de fondo y tarda
+// segundos: si mientras tanto se desvinculo, su resultado era de una credencial
+// que ya no existe y no puede escribir nada en la NVS (un "address" suelto sin
+// token dejaba la cuenta "incompleta" al reiniciar).
+static volatile uint32_t gEpoch = 0;
 
 // Estado de la validacion (solo lo toca la tarea de fondo, salvo las banderas).
 static bool gWasOnline = false;
@@ -719,11 +725,13 @@ static void sessionTick(){
   if(!gValidateWanted || (uint32_t)(now - gWaitFromMs) < gWaitMs) return;
 
   char bearer[48];
+  const uint32_t epoch = gEpoch;                      // ANTES de copiar la credencial: si se desvincula despues, el resultado se descarta
   lock(); snprintf(bearer, sizeof(bearer), "%s", gBearer); unlock();
   gAttempted = true; gLastAttemptMs = now;
   char address[48], displayName[64], detail[96];
   FlexSessionVerdict v = validateSession(bearer, address, displayName, detail, sizeof(detail));
   memset(bearer, 0, sizeof(bearer));
+  if(epoch != gEpoch) return;                         // se desvinculo mientras esperaba al servidor: el resultado ya no vale
   const uint32_t done = millis();
   if(v == FLEX_SESSION_OK){
     gValidateWanted = false; gFailures = 0;
@@ -1105,11 +1113,26 @@ bool flexAccountCopyBearer(char* out, size_t capacity){
   return ok;
 }
 
+// DESVINCULAR ESTE APARATO (accion explicita del usuario, o restablecer de
+// fabrica). Deja la cuenta en FLEX_ACCOUNT_UNLINKED / FLEX_LINK_UNLINKED: sin
+// credencial en la NVS ni en RAM, y con un id de instalacion nuevo para que el
+// servidor no reconozca a este aparato como el anterior. Se escribe en la NVS
+// UNA vez y solo si hay algo que borrar: llamarla sin cuenta no toca la flash.
 void flexAccountForgetLocal(){
-  gCancelRequested = true;
+  gCancelRequested = true;                          // un enlace en curso se cancela
+  gEpoch = gEpoch + 1;                              // y una validacion en vuelo no escribira nada despues
+  lock(); bool had = gHaveCredential; unlock();
   Preferences preferences;
-  if(preferences.begin("flexacct", false)){ preferences.clear(); preferences.end(); }
-  rotateInstallationId();
+  if(preferences.begin("flexacct", false)){
+    bool any = had || preferences.isKey("linked") || preferences.isKey("token") || preferences.isKey("address") ||
+               preferences.isKey("display") || preferences.isKey("authst");
+    if(any){
+      preferences.clear();
+      preferences.end();
+      rotateInstallationId();
+      Serial.println(F("[ACCOUNT] cuenta desvinculada de este aparato"));
+    } else preferences.end();
+  }
   clearMemory();
 }
 

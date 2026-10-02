@@ -437,7 +437,14 @@ void flexAccountSnapshot(FlexAccountSnapshot* out){
   out->linked = gStubAccountLinked;
 }
 bool flexAccountCopyBearer(char* out, size_t n){ if(out && n) out[0] = 0; return false; }
-void flexAccountForgetLocal(){}
+// Como el modulo real: sin cuenta guardada, UNLINKED en el estado y en el vinculo.
+int  gStubAccountForgets = 0;
+void flexAccountForgetLocal(){
+  gStubAccountForgets++;
+  gStubAccountLinked = false;
+  memset(&gStubAccountSnap, 0, sizeof(gStubAccountSnap));
+  gStubAccountSnap.state = FLEX_ACCOUNT_UNLINKED; gStubAccountSnap.link = FLEX_LINK_UNLINKED;
+}
 // Como la real: hay credencial y Flex Account no la ha rechazado (desvinculada, revocada o caducada).
 bool flexAccountUsable(){ return gStubAccountLinked && gStubAccountSnap.link != FLEX_LINK_AUTH_REQUIRED && gStubAccountSnap.link != FLEX_LINK_TOKEN_EXPIRED; }
 FlexAccountLink flexAccountLinkState(){ return gStubAccountSnap.link; }
@@ -559,6 +566,7 @@ static const uint32_t STUB_BLK = 64u * 1024u;
 static void stubCall(const std::string& s){ gStubCloudCalls.push_back(s); }
 
 void flexCloudBegin(){ stubCall("begin"); }
+void flexCloudAccountUnlinked(){ stubCall("account-unlinked"); }
 void flexCloudSetActive(bool a){ gStubCloudActive = a; }
 void flexCloudStatus(FlexCloudStatus* out){ if(out) *out = gStubCloudStatus; }
 const char* flexCloudNetText(uint8_t net){

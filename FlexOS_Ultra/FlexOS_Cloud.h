@@ -119,6 +119,10 @@ void flexCloudBegin();          // carga el diario y crea las tareas; no toca la
 void flexCloudSetActive(bool active);
 void flexCloudStatus(FlexCloudStatus* out);
 const char* flexCloudNetText(uint8_t net);
+// La cuenta se desvinculo en ESTE aparato: cancela lo que estaba en cola o en marcha
+// (era de esa cuenta) y suelta su cuota, su direccion y su lista. Lo llama quien
+// desvincula, justo despues de flexAccountForgetLocal(). No toca la red.
+void flexCloudAccountUnlinked();
 
 // ------------------------------------------------------------- listados
 bool flexCloudRequestList(uint8_t view, const char* folderId, const char* query);

@@ -1400,6 +1400,67 @@ static void testUnlinked(){
   C.fault = nullptr;
 }
 
+// =====================================================================
+//  EL USUARIO DESVINCULA LA CUENTA EN EL P4 (boton "Desvincular cuenta")
+// =====================================================================
+// Distinto de "la cuenta fue rechazada" (testUnlinked): aqui NO hay credencial. Flex
+// Cloud tiene que reconocer que no existe cuenta (FCN_NO_ACCOUNT, no AUTH ni OFFLINE),
+// dejar de funcionar, soltar lo de esa cuenta (cuota, direccion, lista, transferencias
+// en cola: no pueden seguir hacia OTRA cuenta que se vincule despues) y volver solo
+// al vincular de nuevo.
+static void testUserUnlink(){
+  printf("-- el usuario desvincula en el P4: la nube reconoce que no hay cuenta y suelta lo suyo --\n");
+  boot();
+  addCloudFile("a.jpg", pattern(2000, 1));
+  flexCloudSetActive(true);
+  CHECK(pumpUntil([]{ return status().net == FCN_ONLINE; }, 100), "(cuenta buena) la nube conecta");
+  flexCloudRequestList(FCL_VIEW_FOLDER, "root", nullptr);
+  CHECK(pumpUntil([]{ return listInfo().state == FCL_LIST_READY && listInfo().count == 1; }, 100), "(y ensena la lista de la cuenta)");
+  std::string data = pattern(800 * 1024, 41);
+  putLocal("/u.bin", data); putLocal("/w.bin", "x");
+  uint32_t up = flexCloudUpload("/u.bin", nullptr, "root", 0, 0);
+  uint32_t waiting = flexCloudUpload("/w.bin", nullptr, "root", 0, 0);
+  CHECK(pumpUntil([]{ return C.partPuts >= 1; }, 2000), "(una subida en marcha y otra esperando su turno)");
+  int puts = C.partPuts;
+
+  // El usuario pulsa "Desvincular cuenta" y confirma.
+  flexAccountForgetLocal();
+  flexCloudAccountUnlinked();
+  pump(20);
+  FlexCloudStatus s = status();
+  CHECK(s.net == FCN_NO_ACCOUNT, "la nube reconoce que NO hay cuenta (FCN_NO_ACCOUNT, no 'vuelve a vincular' ni 'sin Wi-Fi')");
+  CHECK(!strcmp(flexCloudNetText(s.net), "Sin Flex Account"), "con su texto");
+  CHECK(!s.quotaValid && !s.address[0], "sin la cuota ni la direccion de la cuenta anterior");
+  FlexCloudListInfo li = listInfo();
+  CHECK(li.count == 0 && li.state == FCL_LIST_ERROR, "ni los archivos de la cuenta anterior (la lista queda para volver a pedir)");
+  CHECK(xfer(up).phase == FCX_CANCELLED || xfer(up).phase == 255, "la subida en marcha se cancela (era de la cuenta anterior)");
+  CHECK(xfer(waiting).phase == FCX_CANCELLED || xfer(waiting).phase == 255, "y la que esperaba tambien");
+  CHECK(flexCloudUpload("/w.bin", nullptr, "root", 0, 0) == 0, "las funciones de la nube quedan deshabilitadas");
+  FclItem it = itemOf(C.files.begin()->second);
+  CHECK(flexCloudDownload(&it, 0) == 0 && flexCloudMkdir("root", "X") == 0 && !flexCloudStreamOpen(&it), "descargar, crear carpeta y abrir un video tambien");
+  gNetLog.clear(); pump(300);
+  CHECK(gNetLog.empty(), "sin cuenta no sale NADA a la red (ni siquiera lo que se estaba subiendo)");
+  CHECK(C.partPuts == puts, "la subida no sigue");
+  flexAccountTestPowerCycle(); flexCloudTestPowerCycle(); gNetWifi = true; gNetLog.clear(); pump(200);
+  CHECK(status().net == FCN_NO_ACCOUNT && !flexAccountLinked(), "tras reiniciar sigue sin cuenta");
+  CHECK(gNetLog.empty(), "y no sale nada a la red al arrancar (lo cancelado espera a que haya cuenta para soltar su reserva)");
+
+  // Volver a vincular: todo vuelve solo, y nada de la cuenta anterior reaparece.
+  C.pendingPolls = 1;
+  CHECK(flexAccountRequestCode("Flex OS Ultra"), "volver a vincular");
+  flexAccountTestStep();
+  flexCloudSetActive(true);
+  CHECK(pumpUntil([]{ return status().net == FCN_ONLINE; }, 400), "la nube vuelve a ONLINE");
+  CHECK(status().quotaValid && !strcmp(status().address, "ana.p4@flex"), "con la cuota y la direccion de la cuenta nueva");
+  flexCloudRefresh();
+  CHECK(pumpUntil([]{ return listInfo().state == FCL_LIST_READY; }, 100), "la lista se vuelve a pedir");
+  pump(600);
+  CHECK(!findEv(FCE_UPLOAD_DONE, up) && !findEv(FCE_UPLOAD_DONE, waiting), "las subidas de la cuenta anterior NO reaparecen en la nueva");
+  CHECK(C.partPuts == puts, "(ni una parte mas de la subida cancelada)");
+  CHECK(flexCloudUpload("/w.bin", nullptr, "root", 0, 0) != 0, "y se vuelve a poder subir");
+  auditNetwork("desvincular");
+}
+
 // A los 24,8 dias encendido (2^31 ms) la resta con signo `millis() - 0` cambia de
 // signo: la nube se quedaba en "Conectando" para siempre al volver el Wi-Fi o al
 // revincular (justo la salida de "Vuelve a vincular tu cuenta").
@@ -1442,6 +1503,7 @@ int main(){
   testUploadFaults();
   testAuthDuringUpload();
   testUnlinked();
+  testUserUnlink();
   testClockWrap();
   testCancel();
   testDownload();

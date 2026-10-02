@@ -11038,6 +11038,101 @@ static void testMenuNubeAlCerrar(){
   if(gFails == before) printf("  Menu (...) de la nube al cerrarse: todas las comprobaciones pasan.\n");
 }
 
+// #############################################################
+//  FLEX ACCOUNT · "Desvincular cuenta": enlace, confirmacion, accion y estado
+//  ------------------------------------------------------------
+//  El codigo REAL de la pantalla (FlexOS_Account_Bridge.h) contra el doble de
+//  FlexOS_Account, que ahora se comporta como el modulo real al olvidar: sin
+//  cuenta, UNLINKED. Lo que se comprueba: nada se borra sin confirmar; Cancelar
+//  y el toque fuera no hacen nada; Desvincular llama al modulo UNA vez y a la
+//  nube; la pantalla pasa a "sin cuenta"; y no se rompe volver a vincular.
+// #############################################################
+extern int gStubAccountForgets;
+static void testFlexAccountUnlink(){
+  printf("Flex Account: Desvincular cuenta (confirmacion, UNLINKED y revincular)\n");
+  bool oobeAntes = cfgOobeDone; int estadoAntes = gState;
+  memset(&gStubAccountSnap, 0, sizeof(gStubAccountSnap));
+  gStubAccountSnap.state = FLEX_ACCOUNT_LINKED; gStubAccountLinked = true; gStubAccountSnap.link = FLEX_LINK_LINKED;
+  snprintf(gStubAccountSnap.flexAddress, sizeof(gStubAccountSnap.flexAddress), "flexdev@flex");
+  snprintf(gStubAccountSnap.displayName, sizeof(gStubAccountSnap.displayName), "FlexDev");
+  gStubAccountAccept = true; gStubAccountRequests = 0; gStubAccountForgets = 0;
+  gInoWifiStatus = WL_CONNECTED;
+  gStubCloudCalls.clear();
+  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  auto toca = [](int x, int y){ storeTap(x, y); accountOobeTick(); T = Touch(); };
+  auto repinta = [](){ T = Touch(); gTestMs += 100; accountOobeTick(); };
+
+  gState = ST_APP; gAppId = IC_AJUSTES; setView = 1; setSel = 0;
+  accountSettingsEnter();
+  chk(gState == ST_OOBE_ACCOUNT && accountLastState == FLEX_ACCOUNT_LINKED && !accountUnlinkAsk, "cuenta vinculada: la pantalla de Flex Account");
+  { // el enlace esta dibujado (no es el color liso de la tarjeta) y no invade ni al boton principal ni a la barra de salir
+    uint16_t card = fb[(size_t)(ACC_UNLINK_Y - 6) * SCR_W + SCR_W / 2 - 100];
+    int distinto = 0;
+    for(int xx = SCR_W / 2 - 100; xx < SCR_W / 2 + 100; xx += 3) if(fb[(size_t)(ACC_UNLINK_Y + ACC_UNLINK_H / 2) * SCR_W + xx] != card) distinto++;
+    chk(distinto > 10, "el enlace 'Desvincular cuenta' esta dibujado bajo la tarjeta");
+    chk(ACC_UNLINK_Y - 4 > 622 && ACC_UNLINK_Y + ACC_UNLINK_H + 2 < 670, "y su zona tactil no pisa al boton principal (hasta 622) ni a la barra de salir (desde 670)"); }
+  if(getenv("INO_SHOTS")) shotSave("cuenta_vinculada_desvincular");
+
+  // 1. Pulsar el enlace PREGUNTA; no borra nada.
+  toca(SCR_W / 2, ACC_UNLINK_Y + ACC_UNLINK_H / 2);
+  chk(accountUnlinkAsk, "pulsar 'Desvincular cuenta' abre la confirmacion");
+  chk(gStubAccountForgets == 0 && gStubAccountLinked, "y todavia no se ha borrado nada");
+  if(getenv("INO_SHOTS")) shotSave("cuenta_desvincular_confirmar");
+
+  // 2. Cancelar y el toque fuera no hacen nada.
+  { int cx, dx, by, bw, bh; accountAskBtns(cx, dx, by, bw, bh);
+    toca(cx + bw / 2, by + bh / 2);
+    chk(!accountUnlinkAsk && gStubAccountForgets == 0 && gStubAccountLinked, "'Cancelar' cierra la confirmacion sin borrar");
+    toca(SCR_W / 2, ACC_UNLINK_Y + ACC_UNLINK_H / 2); chk(accountUnlinkAsk, "(se vuelve a abrir)");
+    toca(40, 100);
+    chk(!accountUnlinkAsk && gStubAccountForgets == 0 && gStubAccountLinked && gState == ST_OOBE_ACCOUNT, "un toque fuera tambien la cierra, sin salir de la pantalla ni borrar");
+    // Y los demas botones siguen donde estaban.
+    toca(SCR_W / 2, 570);
+    chk(gState == ST_APP && gStubAccountForgets == 0, "'Volver a Ajustes' sigue funcionando"); }
+
+  // 3. Confirmar: el modulo olvida UNA vez, la nube se entera y la pantalla pasa a "sin cuenta".
+  gStubAccountSnap.state = FLEX_ACCOUNT_LINKED; gStubAccountLinked = true; gStubAccountSnap.link = FLEX_LINK_LINKED;
+  snprintf(gStubAccountSnap.flexAddress, sizeof(gStubAccountSnap.flexAddress), "flexdev@flex");
+  accountSettingsEnter();
+  toca(SCR_W / 2, ACC_UNLINK_Y + ACC_UNLINK_H / 2);
+  { int cx, dx, by, bw, bh; accountAskBtns(cx, dx, by, bw, bh);
+    toca(dx + bw / 2, by + bh / 2); }
+  chk(gStubAccountForgets == 1, "confirmar llama a flexAccountForgetLocal() UNA vez");
+  chk(clCalled("account-unlinked"), "y avisa a Flex Cloud (que suelta lo de esa cuenta)");
+  chk(!accountUnlinkAsk && accountLastState == FLEX_ACCOUNT_UNLINKED && gState == ST_OOBE_ACCOUNT, "la pantalla pasa a 'sin cuenta' (FLEX_ACCOUNT_UNLINKED), sin salir");
+  chk(!flexAccountLinked() && flexAccountLinkState() == FLEX_LINK_UNLINKED && flexAccountState() == FLEX_ACCOUNT_UNLINKED, "el modulo esta UNLINKED (no OFFLINE ni 'servicio no disponible')");
+  chk(gNotifCount == 1 && !strcmp(gNotifs[0].mod.name, "Flex Account"), "un aviso confirma que la cuenta se desvinculo");
+  char fila[64]; accountSettingsText(fila, sizeof(fila));
+  chk(!strcmp(fila, "Sin cuenta vinculada"), "y la fila de Ajustes dice 'Sin cuenta vinculada'");
+  if(getenv("INO_SHOTS")) shotSave("cuenta_desvinculada");
+
+  // 4. Sin cuenta no hay enlace de desvincular (y un toque en su sitio no hace nada).
+  gStubAccountForgets = 0;
+  toca(SCR_W / 2, ACC_UNLINK_Y + ACC_UNLINK_H / 2);
+  chk(!accountUnlinkAsk && gStubAccountForgets == 0, "sin cuenta no se ofrece desvincular");
+
+  // 5. Volver a vincular sigue funcionando: 'Iniciar sesion' pide el enlace.
+  toca(SCR_W / 2, 480);
+  chk(gStubAccountRequests == 1, "tras desvincular, 'Iniciar sesion' pide el enlace (el flujo existente no se rompe)");
+
+  // 6. Con la cuenta RECHAZADA por el servidor (hay que volver a vincular) tambien se puede desvincular.
+  gStubAccountSnap.state = FLEX_ACCOUNT_LINKED; gStubAccountLinked = true; gStubAccountSnap.link = FLEX_LINK_AUTH_REQUIRED;
+  snprintf(gStubAccountSnap.flexAddress, sizeof(gStubAccountSnap.flexAddress), "flexdev@flex");
+  accountSettingsEnter();
+  chk(accountLastState == FLEX_ACCOUNT_LINKED, "(cuenta rechazada: 'Vuelve a iniciar sesion')");
+  toca(SCR_W / 2, ACC_UNLINK_Y + ACC_UNLINK_H / 2);
+  chk(accountUnlinkAsk, "tambien ofrece desvincular");
+  // La cuenta desaparece por otra via con la confirmacion abierta: la confirmacion se retira sola.
+  gStubAccountSnap.state = FLEX_ACCOUNT_UNLINKED; gStubAccountLinked = false; repinta();
+  chk(!accountUnlinkAsk, "si la cuenta ya no esta, no queda nada que confirmar");
+
+  gStubAccountAccept = false; gStubAccountLinked = false; memset(&gStubAccountSnap, 0, sizeof(gStubAccountSnap));
+  gInoWifiStatus = WL_DISCONNECTED; gStubCloudCalls.clear();
+  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  cfgOobeDone = oobeAntes; gState = estadoAntes; setView = 0;
+  if(!gFails) printf("  Flex Account (desvincular): todas las comprobaciones pasan.\n");
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -11161,6 +11256,7 @@ int main(){
   testFlexCloudUi();
   testMenuNubeSinApilar();
   testMenuNubeAlCerrar();
+  testFlexAccountUnlink();
   testTrabajoPeriodico();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
