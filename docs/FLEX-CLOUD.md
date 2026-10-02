@@ -267,9 +267,41 @@ apareciera un desbordamiento, esa pila es lo primero que hay que revisar.
   devuelve `WiFiClientSecure::lastError()`): `certificado no reconocido` (la
   cadena del servidor no llega a ninguna de las 11 raices de `FlexOS_CloudTLS`:
   fija la correcta con `-DFLEX_CLOUD_ROOT_CA=...` o usa el bundle completo de
-  ESP-IDF), `sin memoria interna`, `sin DNS ni TCP o tiempo agotado`,
-  `tiempo agotado en TLS`... y por el puerto serie salen la SRAM interna y el
-  mayor bloque libres en ese momento (`[ACCOUNT]`, `[CLOUD]`).
+  ESP-IDF), `sin memoria interna`, `tiempo agotado en TLS`... y por el puerto
+  serie salen la SRAM interna y el mayor bloque libres en ese momento
+  (`[ACCOUNT]`, `[CLOUD]`). **El codigo `-1`** no dice que fallo: `WiFiClientSecure`
+  lo usa para "no resuelve el nombre (DNS)", "no abre el socket TCP" y "el saludo
+  TLS no termino a tiempo". Tras ese fallo (y solo entonces) se comprueba el DNS y
+  se mira lo que tardo el intento, y la pantalla dice `no se encuentra el servidor
+  (DNS)`, `el servidor rechaza la conexion TCP` (< 3 s), `el saludo TLS no termino
+  en 12 s`, `TCP sin respuesta tras 15 s` o `sin respuesta en N s (TCP o TLS)`.
+  Es una pista (por eso lleva los segundos), no una prueba.
+
+### "Servicio no disponible": que es, que no es y que hace falta
+
+* **Es** `FLEX_LINK_NETWORK_UNAVAILABLE`: hay Wi-Fi, pero la validacion de la sesion
+  (`GET /api/cloud/me`, TLS verificado) no se completo. La cuenta SIGUE vinculada y
+  sirve; se reintenta a los 30 s, 1, 2, 4, 8 y 15 min. **No es** "desvinculada"
+  (`UNLINKED`: sin credencial), ni "rechazada" (`AUTH_REQUIRED` / `TOKEN_EXPIRED`: el
+  servidor contesto que no), ni "sin conexion" (`LINKED_OFFLINE`: sin Wi-Fi). La
+  prueba `testStateMatrix` recorre las combinaciones (primer arranque, vinculada,
+  desvinculada, Wi-Fi apagado/encendido, servicio disponible/caido, reinicio).
+* **No es una firma cambiada.** Auditoria de `FlexOS_Account.h` contra el ultimo
+  commit anterior a la validacion (`467feff`): no se elimino ni cambio ninguna
+  funcion publica; solo se **anadieron** (`flexAccountUsable`, `flexAccountLinkState`,
+  `flexAccountLinkLabel`, `flexAccountRequestValidation`, `flexAccountReportRejected`,
+  `flexAccountClassify`, `flexAccountBackoffMs`, `flexNvsStrLen`) y tres campos al final
+  de `FlexAccountSnapshot`. Todos los *call sites* (Bridge, Ajustes, Flex Store,
+  CloudKit, Cloud, Recovery) compilan contra esa cabecera y el contrato con el servidor
+  lo ejecuta `cloud_e2e.sh` contra el servidor Node real.
+* **Lo que si cambio es lo que hace el P4.** Hasta `20b32d5` el P4 **nunca validaba** la
+  credencial: la guardaba y ya (todo lo que hablaba con el host usaba `setInsecure()`),
+  asi que "servicio no disponible" no existia. Desde entonces depende de que
+  `FLEX_ACCOUNT_SESSION_URL` conteste por TLS verificado. Para eso hacen falta DOS cosas
+  que **no estan en estos repositorios**: el servicio Flex Cloud desplegado en
+  `/api/cloud/*` del mismo dominio, y que Flex Account exponga la introspeccion
+  (`POST /api/internal/introspect`, ver `cloud/docs/FLEX_ACCOUNT_INTEGRATION.md`). Si falta
+  una, o el dominio no es alcanzable desde la red del P4, aparece "servicio no disponible".
 * Nada de esto se ha ejecutado aun **en la placa**: las pruebas usan dobles de
   red, FS y FreeRTOS fieles a arduino-esp32 3.2.1, y el servidor real en el PC.
   Falta medir en el P4: memoria de mbedTLS con dos o tres conexiones a la vez

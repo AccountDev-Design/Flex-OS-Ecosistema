@@ -44,6 +44,7 @@ struct Server {
   std::string display = "Ana \xC3\x91" "u\xC3\xB1" "ez";
   int sessionCalls = 0, codeCalls = 0;
   int tlsError = 0;                // lo que lastError() dice cuando SM_TLSFAIL corta la conexion
+  unsigned long latencyMs = 0;     // cuanto tarda en contestar o en fallar la validacion de la sesion
   int codePostFail = 0, codePollFail = 0;   // cuantas peticiones al servicio de codigos fallan por transporte
   int codeFailError = -1;                   // y que dice lastError() entonces
 } S;
@@ -95,6 +96,7 @@ static NetResponse serve(const NetRequest& rq){
   }
   if(rq.url == SESSION_URL){
     S.sessionCalls++;
+    rs.latencyMs = S.latencyMs;
     switch(S.session){
       case SM_DOWN:     rs.status = HTTPC_ERROR_CONNECTION_REFUSED; return rs;
       case SM_TLSFAIL:  rs.status = HTTPC_ERROR_CONNECTION_REFUSED; rs.tlsError = S.tlsError; return rs;
@@ -449,6 +451,73 @@ static void testUnlink(){
   }
 }
 
+// ------------------------------ matriz de estados ------------------------------
+// "Servicio no disponible" es UN estado (NETWORK_UNAVAILABLE) y nada mas: nunca sustituye a
+// "cuenta desvinculada". Esta prueba recorre las combinaciones que importan, con el estado
+// exacto de cada una, y exige que las siete etiquetas de la interfaz sean distintas.
+static void testStateMatrix(){
+  printf("-- matriz: primer arranque, vinculada, desvinculada, Wi-Fi y servicio, reinicio --\n");
+  auto est = [](FlexAccountLink l, FlexAccountState st, bool linked, const char* que){
+    FlexAccountSnapshot x = snap();
+    char m[200]; snprintf(m, sizeof(m), "%s: link=%d state=%d linked=%d (esperado link=%d state=%d linked=%d)", que, (int)x.link, (int)x.state, (int)x.linked, (int)l, (int)st, (int)linked);
+    CHECK(x.link == l && x.state == st && x.linked == linked, m);
+  };
+  // 1-2. PRIMER ARRANQUE: sin cuenta no hay red, ni con Wi-Fi.
+  netstubNvsWipe(); netstubReset(); gNetHandler = serve; S = Server();
+  flexAccountTestPowerCycle(); gNetWifi = false; steps(30);
+  est(FLEX_LINK_UNLINKED, FLEX_ACCOUNT_UNLINKED, false, "primer arranque sin Wi-Fi");
+  gNetWifi = true; gNetLog.clear(); steps(300);
+  est(FLEX_LINK_UNLINKED, FLEX_ACCOUNT_UNLINKED, false, "primer arranque con Wi-Fi");
+  CHECK(countReq(SESSION_URL) == 0, "sin cuenta no se valida nada");
+  // 3. VINCULAR con Wi-Fi y servicio.
+  linkNow(); steps(30);
+  est(FLEX_LINK_LINKED, FLEX_ACCOUNT_LINKED, true, "vinculada, Wi-Fi y servicio disponibles");
+  // 4. REINICIO sin Wi-Fi: sigue vinculada (no desvinculada, no 'servicio no disponible').
+  flexAccountTestPowerCycle(); gNetWifi = false; steps(30);
+  est(FLEX_LINK_LINKED_OFFLINE, FLEX_ACCOUNT_LINKED, true, "reinicio sin Wi-Fi");
+  CHECK(flexAccountUsable(), "sin Wi-Fi la credencial sigue valiendo");
+  // 5. Se enciende el Wi-Fi con el servicio CAIDO: 'servicio no disponible', sigue vinculada.
+  S.session = SM_DOWN; gNetWifi = true; steps(80);
+  est(FLEX_LINK_NETWORK_UNAVAILABLE, FLEX_ACCOUNT_LINKED, true, "Wi-Fi con el servicio caido");
+  CHECK(flexAccountUsable(), "'servicio no disponible' no inutiliza la credencial");
+  // 6. Vuelve el servicio.
+  S.session = SM_OK; steps(400);
+  est(FLEX_LINK_LINKED, FLEX_ACCOUNT_LINKED, true, "vuelve el servicio");
+  // 7. Se apaga y se enciende el Wi-Fi.
+  gNetWifi = false; steps(20);
+  est(FLEX_LINK_LINKED_OFFLINE, FLEX_ACCOUNT_LINKED, true, "Wi-Fi apagado");
+  gNetWifi = true; steps(400);
+  est(FLEX_LINK_LINKED, FLEX_ACCOUNT_LINKED, true, "Wi-Fi encendido otra vez");
+  // 8. El servidor la rechaza / caduca: NO es 'servicio no disponible' ni 'desvinculada'.
+  S.session = SM_REVOKED; flexAccountRequestValidation(); steps(5);
+  est(FLEX_LINK_AUTH_REQUIRED, FLEX_ACCOUNT_LINKED, true, "rechazada por el servidor");
+  CHECK(!flexAccountUsable(), "rechazada: la credencial no se usa");
+  S.session = SM_EXPIRED; flexAccountRequestValidation(); steps(5);
+  est(FLEX_LINK_TOKEN_EXPIRED, FLEX_ACCOUNT_LINKED, true, "sesion caducada");
+  S.session = SM_DOWN; flexAccountRequestValidation(); steps(5);
+  est(FLEX_LINK_TOKEN_EXPIRED, FLEX_ACCOUNT_LINKED, true, "con el servicio caido NO se pierde el motivo del servidor");
+  S.session = SM_OK;
+  // 9. DESVINCULAR: UNLINKED con y sin Wi-Fi, con y sin servicio, y tras reiniciar.
+  flexAccountForgetLocal();
+  est(FLEX_LINK_UNLINKED, FLEX_ACCOUNT_UNLINKED, false, "desvinculada");
+  gNetWifi = false; steps(30);
+  est(FLEX_LINK_UNLINKED, FLEX_ACCOUNT_UNLINKED, false, "desvinculada, Wi-Fi apagado");
+  gNetWifi = true; S.session = SM_DOWN; gNetLog.clear(); steps(300);
+  est(FLEX_LINK_UNLINKED, FLEX_ACCOUNT_UNLINKED, false, "desvinculada, Wi-Fi y servicio caido: NO es 'servicio no disponible'");
+  flexAccountTestPowerCycle(); steps(100);
+  est(FLEX_LINK_UNLINKED, FLEX_ACCOUNT_UNLINKED, false, "desvinculada tras reiniciar");
+  CHECK(countReq(SESSION_URL) == 0, "(ni una peticion en todo ese rato)");
+  S.session = SM_OK;
+  // 10. Las etiquetas de la interfaz son todas distintas.
+  const FlexAccountLink todos[] = { FLEX_LINK_UNLINKED, FLEX_LINK_LINKED, FLEX_LINK_LINKED_OFFLINE, FLEX_LINK_NETWORK_UNAVAILABLE,
+                                    FLEX_LINK_AUTH_REQUIRED, FLEX_LINK_TOKEN_EXPIRED, FLEX_LINK_ERROR };
+  bool distintas = true;
+  for(int i = 0; i < 7; i++) for(int j = i + 1; j < 7; j++) if(!strcmp(flexAccountLinkLabel(todos[i]), flexAccountLinkLabel(todos[j]))) distintas = false;
+  CHECK(distintas, "las siete etiquetas (sin cuenta, conectada, sin conexion, servicio no disponible, vuelve a iniciar sesion, caducada, error) son distintas");
+  CHECK(strstr(flexAccountLinkLabel(FLEX_LINK_NETWORK_UNAVAILABLE), "servicio no disponible") && !strstr(flexAccountLinkLabel(FLEX_LINK_UNLINKED), "servicio"),
+        "'servicio no disponible' solo es de NETWORK_UNAVAILABLE");
+}
+
 static void testRejectedByCloud(){
   printf("-- un 401 de Flex Cloud pide revalidar, con freno --\n");
   netstubReset(); gNetHandler = serve; gNetWifi = true;
@@ -576,11 +645,28 @@ static void testTaskAndMemory(){
   // El motivo de un fallo de TLS llega a la pantalla.
   flexAccountRequestValidation(); S.session = SM_TLSFAIL; S.tlsError = -0x2700; steps(5);
   CHECK(snap().link == FLEX_LINK_NETWORK_UNAVAILABLE && strstr(snap().linkDetail, "(-1: certificado no reconocido)"),
-        "TLS fallido por certificado: 'Sin respuesta segura del servidor (-1: certificado no reconocido)'");
-  CHECK(strlen(snap().linkDetail) <= 78, "y la linea cabe en la tarjeta");
+        "TLS fallido por certificado: 'Sin respuesta segura (-1: certificado no reconocido)'");
+  CHECK(strlen(snap().linkDetail) <= 66, "y la linea cabe en la tarjeta (la captura del usuario llegaba al borde con 71 letras)");
   steps(310);
-  S.tlsError = -1; flexAccountRequestValidation(); steps(5);
-  CHECK(strstr(snap().linkDetail, "sin DNS ni TCP"), "-1 sin mas: 'sin DNS ni TCP o tiempo agotado'");
+
+  // -1 es DNS, TCP o saludo TLS: el DNS y lo que tardo el intento dicen cual (flexTlsPhase).
+  struct Caso { const char* nombre; bool dns; unsigned long ms; const char* texto; } casos[] = {
+    { "sin DNS (no resuelve el nombre)",         false, 4000,  "no se encuentra el servidor (DNS)" },
+    { "TCP rechazado al instante",               true,  200,   "el servidor rechaza la conexion TCP" },
+    { "el saludo TLS no termina (12 s)",         true,  12400, "el saludo TLS no termino en 12 s" },
+    { "TCP sin respuesta (15 s)",                true,  15000, "TCP sin respuesta tras 15 s" },
+    { "tardo 7 s: no se sabe cual de las dos",   true,  7000,  "sin respuesta en 7 s (TCP o TLS)" },
+  };
+  for(auto& c : casos){
+    gNetDnsOk = c.dns; S.latencyMs = c.ms; S.tlsError = -1;
+    flexAccountRequestValidation(); steps(3);
+    char msg[160]; snprintf(msg, sizeof(msg), "-1, %s: '%s'", c.nombre, c.texto);
+    CHECK(snap().link == FLEX_LINK_NETWORK_UNAVAILABLE && strstr(snap().linkDetail, c.texto) && strstr(snap().linkDetail, "(-1: "), msg);
+    CHECK(strlen(snap().linkDetail) <= 66, "(y cabe en la tarjeta)");
+    steps(310);
+  }
+  CHECK(snap().linked && flexAccountUsable(), "ninguno de ellos desvincula ni inutiliza la credencial");
+  gNetDnsOk = true; S.latencyMs = 0;
   S.session = SM_OK; S.tlsError = 0;
   CHECK(!bearerLeaked(), "ninguna de estas rutas envio la credencial sin TLS verificado");
 }
@@ -695,6 +781,7 @@ int main(){
   testExpiredAndRelink();
   testRevokedForgetRelink();
   testRejectedByCloud();
+  testStateMatrix();
   testUnlink();
   testCorruptAndBrokenNvs();
   testWearOverTime();

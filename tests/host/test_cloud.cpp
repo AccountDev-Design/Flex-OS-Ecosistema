@@ -1269,6 +1269,18 @@ static void testLifecycle(){
   pump(3200);                                                   // la nube vuelve a preguntar al minuto mientras se ve
   st = status();
   CHECK(strstr(st.netText, "sin memoria interna"), "TLS fallido por memoria: la pildora lo dice");
+  // -1 = DNS, TCP o saludo TLS: la pildora dice cual (el DNS y lo que tardo el intento).
+  C.fault = [](const NetRequest& rq, NetResponse& rs){
+    if(rq.url.compare(0, API.size(), API)) return false;
+    rs.status = HTTPC_ERROR_CONNECTION_REFUSED; rs.tlsError = -1; rs.latencyMs = 12400;
+    return true;
+  };
+  pump(3200);
+  CHECK(strstr(status().netText, "el saludo TLS no termino en 12 s"), "-1 tras 12 s con DNS: 'el saludo TLS no termino en 12 s'");
+  gNetDnsOk = false;
+  pump(3200);
+  CHECK(strstr(status().netText, "no se encuentra el servidor (DNS)"), "-1 sin DNS: 'no se encuentra el servidor (DNS)'");
+  gNetDnsOk = true;
   C.fault = nullptr;
   char why[64];
   CHECK(!strcmp(flexTlsReason(-1, why, sizeof(why)), "sin DNS ni TCP o tiempo agotado"), "-1: sin DNS ni TCP o tiempo agotado");

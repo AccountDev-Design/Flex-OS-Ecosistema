@@ -17,6 +17,7 @@ struct NetResponse {
   std::string body;
   std::map<std::string, std::string> headers;    // nombres en minusculas
   int tlsError = 0;                              // con status < 0: lo que devolveria WiFiClientSecure::lastError()
+  unsigned long latencyMs = 0;                   // lo que tarda en contestar (o en fallar): el reloj avanza esto
   size_t cutAt = (size_t)-1;                     // la conexion se corta tras N bytes del cuerpo
   bool chunked = false;                          // sin Content-Length (getSize() == -1)
 };
@@ -24,6 +25,7 @@ struct NetResponse {
 extern std::function<NetResponse(const NetRequest&)> gNetHandler;
 extern std::vector<NetRequest> gNetLog;
 extern bool gNetWifi;
+extern bool gNetDnsOk;                  // el nombre del servidor se resuelve (flexTlsDnsOk)
 extern unsigned long gNetNowMs;
 extern unsigned gNetTaskCreates;
 extern size_t gNetPsNow, gNetPsPeak;    // PSRAM reservada ahora / pico (heap_caps_malloc)

@@ -8,6 +8,7 @@
 #include <algorithm>
 
 std::function<NetResponse(const NetRequest&)> gNetHandler;
+bool gNetDnsOk = true;
 std::vector<NetRequest> gNetLog;
 bool gNetWifi = false;
 unsigned long gNetNowMs = 0;
@@ -219,6 +220,7 @@ int HTTPClient::dispatch(const char* type, const std::string& body){
   gNetLog.push_back(rq);
   NetResponse rs;
   if(gNetHandler) rs = gNetHandler(rq); else rs.status = HTTPC_ERROR_CONNECTION_REFUSED;
+  gNetNowMs += rs.latencyMs;                                   // el servidor tarda (o el intento se agota)
   if(sec) sec->lastErr = rs.status < 0 ? rs.tlsError : 0;
   if(rs.status < 0){ active_ = false; return rs.status; }
   respHeaders_.clear();
@@ -248,7 +250,7 @@ int HTTPClient::writeToStream(Stream* stream){
 }
 
 void netstubReset(){
-  gNetHandler = nullptr; gNetLog.clear(); gNetWifi = false; gNetNowMs = 1000;
+  gNetHandler = nullptr; gNetLog.clear(); gNetWifi = false; gNetNowMs = 1000; gNetDnsOk = true;
   gNetInternalFree = 200u << 10; gNetInternalBlock = 100u << 10;
   gNetTasks.clear(); gNetTaskFail = 0; gNetOnDelay = nullptr;
 }

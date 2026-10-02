@@ -341,9 +341,11 @@ static int apiCall(const char* method, const char* path, const char* json, Strea
   h.setUserAgent("FlexOS-Ultra/" FLEXOS_FW_VERSION " ESP32-P4 FlexCloud");
   if(hName && hVal) h.addHeader(hName, hVal);
   int st;
+  const uint32_t t0 = millis();
   if(json){ h.addHeader("Content-Type", "application/json"); st = h.sendRequest(method, (uint8_t*)json, strlen(json)); }
   else if(body){ if(!hName || strcasecmp(hName, "Content-Type")) h.addHeader("Content-Type", "application/octet-stream"); st = h.sendRequest(method, body, bodyLen); }
   else st = h.sendRequest(method);
+  const uint32_t connMs = millis() - t0;                    // si no hubo conexion, lo que tardo en fallar
   size_t n = 0;
   if(st > 0){
     BufSink sink(gJson, JSON_CAP);
@@ -359,7 +361,12 @@ static int apiCall(const char* method, const char* path, const char* json, Strea
   if(st < 0){
     // El codigo de mbedTLS de ESTA conexion, antes de soltarla.
     char raw[64]; int e = gApi->sec.lastError(raw, sizeof(raw));
-    flexTlsReason(e, gTlsWhy, sizeof(gTlsWhy));
+    if(e == -1 && st == HTTPC_ERROR_CONNECTION_REFUSED){
+      // -1 = DNS, TCP o saludo TLS: se distingue por el DNS y por lo que tardo (flexTlsPhase).
+      char host[80]; bool dns = true;
+      if(flexUrlHost(gBase, host, sizeof(host))) dns = flexTlsDnsOk(host);
+      flexTlsPhase(dns, connMs, 12000u, HTTP_TIMEOUT, gTlsWhy, sizeof(gTlsWhy));
+    } else flexTlsReason(e, gTlsWhy, sizeof(gTlsWhy));
   }
   h.end();
   if(st < 0) gApi->sec.stop();                               // conexion en estado desconocido: fuera

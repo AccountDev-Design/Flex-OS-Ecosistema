@@ -647,7 +647,9 @@ static FlexSessionVerdict validateSession(const char* bearer, char address[48], 
   http.addHeader("Accept", "application/json");
   http.addHeader("Connection", "close");
   memset(auth, 0, sizeof(auth));
+  const uint32_t t0 = millis();
   int status = http.GET();
+  const uint32_t tookMs = millis() - t0;
   // Por que no hubo conexion: el codigo de mbedTLS de esta misma conexion.
   int tlsErr = 0;
   if(status < 0){ char raw[64]; tlsErr = secure.lastError(raw, sizeof(raw)); }
@@ -673,10 +675,16 @@ static FlexSessionVerdict validateSession(const char* bearer, char address[48], 
     } else copyJsonString(acc, "displayName", displayName, 64, false);
   } else if(v == FLEX_SESSION_UNAVAILABLE){
     if(status < 0){
-      char why[48]; flexTlsReason(tlsErr, why, sizeof(why));
-      snprintf(detail, detailCap, "Sin respuesta segura del servidor (%d: %s)", status, why);
-      Serial.printf("[ACCOUNT] sin conexion TLS verificada: HTTP %d, %s (mbedTLS %d), SRAM interna %u KB (bloque %u KB)\n",
-                    status, why, tlsErr, (unsigned)(inFree / 1024u), (unsigned)(inBlock / 1024u));
+      char why[56];
+      if(tlsErr == -1){
+        // -1 = DNS, TCP o saludo TLS: se distingue por el DNS y por lo que tardo (ver flexTlsPhase).
+        char host[80]; bool dns = true;
+        if(flexUrlHost(FLEX_ACCOUNT_SESSION_URL, host, sizeof(host))) dns = flexTlsDnsOk(host);
+        flexTlsPhase(dns, tookMs, 12000u, HTTP_TIMEOUT_MS, why, sizeof(why));
+      } else flexTlsReason(tlsErr, why, sizeof(why));
+      snprintf(detail, detailCap, "Sin respuesta segura (%d: %s)", status, why);
+      Serial.printf("[ACCOUNT] sin conexion TLS verificada: HTTP %d, %s, tardo %lu ms (mbedTLS %d), SRAM interna %u KB (bloque %u KB)\n",
+                    status, why, (unsigned long)tookMs, tlsErr, (unsigned)(inFree / 1024u), (unsigned)(inBlock / 1024u));
     } else snprintf(detail, detailCap, "Flex Account respondio HTTP %d; se reintentara", status);
   }
   if(root) cJSON_Delete(root);

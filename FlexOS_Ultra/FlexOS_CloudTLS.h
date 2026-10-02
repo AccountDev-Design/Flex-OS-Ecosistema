@@ -46,6 +46,7 @@ const char* flexCloudRootCA();
 #endif
 
 #include <stddef.h>
+#include <stdint.h>
 
 // true si hay SRAM interna para abrir ahora una conexion TLS. Devuelve lo que
 // midio (cualquiera de los dos punteros puede ser NULL).
@@ -56,5 +57,18 @@ bool flexTlsRoom(size_t* internalFree, size_t* largestBlock);
 // no hubo DNS, TCP o se agoto el tiempo; 0 o positivo = no fue un error de la
 // conexion). Siempre escribe algo en `out`.
 const char* flexTlsReason(int mbedtlsError, char* out, size_t cap);
+
+// El codigo -1 de lastError() NO dice que fallo: WiFiClientSecure lo devuelve cuando no
+// resuelve el nombre (DNS), cuando no abre el socket TCP (rechazo, sin ruta o tiempo) y
+// cuando el saludo TLS no termina a tiempo. Lo que SI los distingue es el DNS (se
+// comprueba aparte, una vez, tras el fallo) y cuanto tardo el intento:
+//    < 3 s        el servidor rechaza la conexion o no hay ruta
+//    ~ handshake  el saludo TLS no termino (la conexion TCP si se abrio)
+//    ~ connect    el servidor no contesta por TCP
+// Es una pista, no una prueba: por eso el texto lleva los segundos.
+// `host` = el nombre del servidor (flexUrlHost); devuelve `out`.
+bool flexTlsDnsOk(const char* host);
+bool flexUrlHost(const char* url, char* out, size_t cap);
+const char* flexTlsPhase(bool dnsOk, uint32_t elapsedMs, uint32_t handshakeMs, uint32_t connectMs, char* out, size_t cap);
 
 #endif

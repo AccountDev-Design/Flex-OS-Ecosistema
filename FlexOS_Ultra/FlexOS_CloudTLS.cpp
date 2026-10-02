@@ -9,6 +9,8 @@
 
 #include <stdio.h>
 #include "esp_heap_caps.h"
+#include <string.h>
+#include <WiFi.h>
 
 #ifndef FLEX_CLOUD_ROOT_CA
 // Raices de las autoridades que emiten los certificados de los proveedores
@@ -316,5 +318,48 @@ const char* flexTlsReason(int err, char* out, size_t cap){
   }
   if(t) snprintf(out, cap, "%s", t);
   else  snprintf(out, cap, "error TLS -0x%04X", (unsigned)(-err) & 0xFFFFu);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+//  -1: DNS, TCP o saludo TLS (ver FlexOS_CloudTLS.h)
+// ---------------------------------------------------------------------------
+#ifdef FLEXOS_HOST_TEST
+extern bool gNetDnsOk;                  // la prueba decide si el nombre se resuelve
+#endif
+bool flexTlsDnsOk(const char* host){
+  if(!host || !host[0]) return false;
+#ifdef FLEXOS_HOST_TEST
+  return gNetDnsOk;
+#else
+  IPAddress ip;
+  return WiFi.hostByName(host, ip) == 1;
+#endif
+}
+
+// "https://host[:puerto]/ruta" -> "host".
+bool flexUrlHost(const char* url, char* out, size_t cap){
+  if(!out || !cap) return false;
+  out[0] = 0;
+  if(!url) return false;
+  const char* p = strstr(url, "://");
+  p = p ? p + 3 : url;
+  size_t n = 0;
+  while(p[n] && p[n] != '/' && p[n] != ':' && p[n] != '?') n++;
+  if(!n || n >= cap) return false;
+  memcpy(out, p, n); out[n] = 0;
+  return true;
+}
+
+const char* flexTlsPhase(bool dnsOk, uint32_t elapsedMs, uint32_t handshakeMs, uint32_t connectMs, char* out, size_t cap){
+  if(!out || !cap) return "";
+  unsigned s = (unsigned)((elapsedMs + 500u) / 1000u);
+  if(!dnsOk)                                   snprintf(out, cap, "no se encuentra el servidor (DNS)");
+  else if(elapsedMs < 3000u)                   snprintf(out, cap, "el servidor rechaza la conexion TCP");
+  else if(connectMs > 1000u && elapsedMs + 1000u >= connectMs)
+                                               snprintf(out, cap, "TCP sin respuesta tras %u s", s);
+  else if(handshakeMs && elapsedMs + 1500u >= handshakeMs)
+                                               snprintf(out, cap, "el saludo TLS no termino en %u s", s);
+  else                                         snprintf(out, cap, "sin respuesta en %u s (TCP o TLS)", s);
   return out;
 }
