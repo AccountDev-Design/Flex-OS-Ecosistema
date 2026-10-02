@@ -509,6 +509,11 @@ static void powerCycle(){
 static void testStates(){
   printf("-- estados: sin cuenta, sin Wi-Fi, conectado --\n");
   boot(false);
+  // La tarea de la nube ya no nace al arrancar: la primera pintada de la tarjeta
+  // llega ANTES de su primera vuelta. Hasta entonces no se afirma "sin cuenta"
+  // (con una cuenta vinculada, la tarjeta ensenaria "Vincular cuenta").
+  CHECK(status().net == FCN_CONNECTING, "antes de la primera vuelta de la tarea no se afirma 'sin cuenta'");
+  pump(2);
   CHECK(status().net == FCN_NO_ACCOUNT, "sin cuenta: FCN_NO_ACCOUNT");
   CHECK(flexCloudRequestList(FCL_VIEW_FOLDER, "root", nullptr), "pedir lista sin cuenta se acepta (y falla con motivo)");
   pump(5);
@@ -1196,6 +1201,7 @@ static void testLifecycle(){
   flexCloudSetActive(true);
   CHECK(!taskNamed("flex-cloud"), "sin memoria para la pila no hay tarea");
   CHECK(listInfo().state == FCL_LIST_ERROR && strstr(listInfo().error, "memoria"), "la lista lo dice (no se queda en 'Cargando' para siempre)");
+  CHECK(status().net == FCN_UNAVAILABLE && strstr(status().netText, "memoria"), "y la tarjeta tambien (ni 'sin cuenta' ni 'Conectando' hasta el reintento)");
   netstubAdvance(2100); flexCloudSetActive(true);               // la interfaz lo llama en cada vuelta
   CHECK(taskNamed("flex-cloud"), "y se reintenta SOLO a los 2 s, sin que nadie pulse nada ni reiniciar");
   boot(false);

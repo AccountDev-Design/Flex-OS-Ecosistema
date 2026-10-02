@@ -1521,9 +1521,11 @@ static bool ensureMainTask(){
     static uint32_t lastLogMs = 0;
     if(!lastLogMs || millis() - lastLogMs > 10000u){ lastLogMs = millis() | 1u; logTaskFail("flex-cloud", 16384); }
     // Lo que se pidio no lo va a atender nadie: la lista no se queda en "Cargando"
-    // para siempre, dice que falta memoria y ofrece "Reintentar".
+    // para siempre, dice que falta memoria y ofrece "Reintentar"; y la tarjeta lo
+    // dice tambien (si no, "Conectando..." o, peor, "sin cuenta" hasta el reintento).
     lock(); bool loading = gListInfo.state == FCL_LIST_LOADING; unlock();
     if(loading) listError("no_memory");
+    setNet(FCN_UNAVAILABLE, fclErrorText("no_memory"));
     return false;
   }
   return true;
@@ -1591,8 +1593,13 @@ void flexCloudBegin(){
   memset(&gStatus, 0, sizeof(gStatus));
   memset(&gListInfo, 0, sizeof(gListInfo));
   memset(gRt, 0, sizeof(gRt));
-  gStatus.net = FCN_NO_ACCOUNT;
-  snprintf(gStatus.netText, sizeof(gStatus.netText), "%s", fclErrorText("no_account"));
+  // Hasta que la tarea da su primera vuelta (refreshNet) NO se sabe si hay cuenta,
+  // si esta rechazada o si falta el Wi-Fi: la tarea ya no nace al arrancar sino con
+  // la primera peticion, asi que la primera pintada de la tarjeta llega ANTES de
+  // ella. Con "sin cuenta" por defecto, una cuenta vinculada ensenaba un instante
+  // "Vincular cuenta" (y, si la tarea no podia nacer, para siempre).
+  gStatus.net = FCN_CONNECTING;
+  snprintf(gStatus.netText, sizeof(gStatus.netText), "%s", "Conectando con Flex Cloud");
   gCmdHead = gCmdN = 0; gEvHead = gEvN = 0;
   loadJournal();
   reemitPending();
