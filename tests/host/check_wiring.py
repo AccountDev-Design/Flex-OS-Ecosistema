@@ -72,6 +72,18 @@ GANCHOS = [
     ("av1Close",         "flexAppStop(",       "cerrar no ejecutaria onStop ni soltaria los recursos de la app"),
     ("av1Close",         "av1FreeRegions()",   "cerrar filtraria la memoria de la app en cada apertura"),
     ("loop",           "flexPollTouch()", "no habria tactil"),
+    # BANDA PRE-DESENFOCADA. Sin el guardian en loop(), una banda armada por un
+    # dueno que ya no manda (el bloqueo por inactividad se lleva la pantalla a
+    # mitad de un menu) se quedaria pegada detras de cualquier app. Y el guardian
+    # tiene que conocer a TODOS los duenos: el menu de medios no estaba en su lista
+    # y perdia la banda en la primera vuelta tras abrirse, asi que se desplegaba con
+    # vidrio APILADO (la "barra azul de Transferencias" de Galeria > Nube).
+    ("loop",             "uiGlassBandGuard()", "una banda de vidrio de un dueno que ya no manda se quedaria pegada detras de cualquier app"),
+    ("uiGlassBandGuard", "mmBandLive()",       "el menu de medios perderia su banda en la primera vuelta y se desplegaria con vidrio apilado (barra azul de Transferencias)"),
+    ("uiGlassBandGuard", "cronoCardVisible()", "la tarjeta expandida del cronometro perderia su banda"),
+    ("uiGlassBandGuard", "ST_CTX",             "el menu contextual del escritorio perderia su banda"),
+    ("uiGlassBandGuard", "uiGlassBandEnd()",   "el guardian no cerraria nunca una banda caducada"),
+    ("mmAnimTick",       "uiGlassBandEnd()",   "el menu de medios no soltaria su banda al terminar de desplegarse"),
     ("loop",           "wifiAutoReconnectTick()", "la red guardada no se reconectaria tras arrancar"),
     # MULTITAREA POR MEMORIA. Sin memTick() la medida se quedaria congelada en la
     # del arranque: el selector, Almacenamiento y la puerta de admision de apps

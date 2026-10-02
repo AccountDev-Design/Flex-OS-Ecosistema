@@ -652,6 +652,15 @@ static uint32_t loopPaceMs(){
   return 5;
 }
 
+// GUARDIAN DE LA BANDA PRE-DESENFOCADA (el bloque de loop() explica por que). Es una
+// funcion aparte para que la prueba de host ejecute ESTE codigo y no una copia que
+// se desviaria. Duenos legitimos: el menu contextual del escritorio (ST_CTX), la
+// tarjeta expandida del cronometro y el menu de medios mientras se despliega
+// (mmBandLive: Galeria, Multimedia, Archivos y la nube).
+static void uiGlassBandGuard(){
+  if(gState != ST_CTX && !cronoCardVisible() && !mmBandLive()) uiGlassBandEnd();
+}
+
 void loop(){
   flexFeedWdt();          // alimenta el TWDT solo si loopTask sigue suscrito (ver arriba)
   loopRateTick();         // ritmo real del sistema (vueltas/s), un entero por vuelta
@@ -666,20 +675,29 @@ void loop(){
   //  esa banda esta armada, uiSurfaceA() la usa como fuente del desenfoque
   //  -- TODA uiSurfaceA, de cualquier pantalla.
   //
-  //  Solo dos cosas la arman: el menu contextual del escritorio (ST_CTX) y
-  //  la tarjeta expandida del cronometro, y las dos son duenas exclusivas de
-  //  la pantalla mientras duran. El problema no era ese: era que si la
-  //  pantalla cambiaba de manos por OTRA via -- bloqueo por inactividad,
-  //  suspension, aviso de caida, bloqueo por robo, OTA, apagado -- la banda
-  //  se quedaba armada, y a partir de ahi cualquier tarjeta de cualquier app
-  //  se componia con el desenfoque de la pantalla ANTERIOR. Ese es el blur
-  //  que se quedaba "pegado" detras de la aplicacion.
+  //  Solo tres cosas la arman: el menu contextual del escritorio (ST_CTX), la
+  //  tarjeta expandida del cronometro y el menu de medios (mmOpen: Galeria,
+  //  Multimedia, Archivos y la nube) durante los 140 ms de su despliegue. Las
+  //  dos primeras son duenas exclusivas de la pantalla mientras duran. El
+  //  problema no era ese: era que si la pantalla cambiaba de manos por OTRA via
+  //  -- bloqueo por inactividad, suspension, aviso de caida, bloqueo por robo,
+  //  OTA, apagado -- la banda se quedaba armada, y a partir de ahi cualquier
+  //  tarjeta de cualquier app se componia con el desenfoque de la pantalla
+  //  ANTERIOR. Ese es el blur que se quedaba "pegado" detras de la aplicacion.
   //
   //  Se cierra aqui, en el punto mas alto del bucle y ANTES de que nadie
   //  componga: en cuanto su dueno deja de mandar, la banda deja de valer,
   //  venga el cambio por donde venga. Cuesta una comparacion.
+  //
+  //  EL MENU DE MEDIOS TAMBIEN ES DUENO. Este guardian solo conocia a los dos
+  //  primeros y el menu de medios (que arma la banda en ST_APP desde 162c0e3) no
+  //  estaba en la lista: la primera vuelta tras abrirlo le quitaba la banda y el
+  //  resto del despliegue se componia con vidrio APILADO -- cada cuadro
+  //  desenfocaba el menu del cuadro anterior --: halos blancos y las pestanas
+  //  de debajo lavadas de azul (la "barra azul de Transferencias" de la Galeria,
+  //  pestana Nube). mmBandLive() lo declara dueno mientras se despliega.
   // -----------------------------------------------------------
-  if(gState != ST_CTX && !cronoCardVisible()) uiGlassBandEnd();
+  uiGlassBandGuard();
 
   // -----------------------------------------------------------
   //  RESTABLECIMIENTO DE FABRICA EN CURSO: PANTALLA EN EXCLUSIVA
