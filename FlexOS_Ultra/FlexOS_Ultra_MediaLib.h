@@ -755,6 +755,18 @@ static void mmAnimTick(){
   mmDraw(0.15f + 0.85f * k);
   if(t >= 1.0f){ mmAnimDone = true; uiGlassBandEnd(); }
 }
+// true mientras el menu es DUENO de la banda pre-desenfocada: se esta
+// desplegando (MM_ANIM_MS) con la banda que armo mmOpen; la suelta mmAnimTick al
+// terminar o mmClose. El guardian de loop() (uiGlassBandGuard) lo consulta: sin
+// esto, la primera vuelta tras abrir el menu le quitaba la banda y el resto del
+// despliegue se componia con vidrio APILADO (cada cuadro desenfocaba el menu del
+// cuadro anterior). La caducidad evita una banda colgada si la pantalla cambia de
+// manos a mitad del despliegue (nadie volveria a llamar a mmAnimTick): pasada la
+// animacion y un margen para una vuelta lenta, deja de valer.
+#define MM_BAND_GRACE_MS 250
+static bool mmBandLive(){
+  return mmOn && !mmAnimDone && (uint32_t)(millis() - mmT0) <= (uint32_t)(MM_ANIM_MS + MM_BAND_GRACE_MS);
+}
 // MA_* elegida, 0 si el toque cayo dentro sin elegir nada, -1 si fuera.
 static int mmHit(int px, int py){
   int x, y, w, h; mmGeom(x, y, w, h);
