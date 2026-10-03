@@ -396,6 +396,14 @@ $(BUILD)/phone_e2e: phone_e2e.cpp e2e_http.h pkgbuild.h $(CLOUD_SRC) $(ULTRA)/Fl
 phone-e2e:
 	./phone_e2e.sh
 
+# El ENLACE de Flex Phone de punta a punta: la tarea de red REAL del P4
+# (fpwTask) y la maquina de estados REAL contra el WifiLinkServer REAL del
+# telefono (Kotlin, en la JVM), con hilos y sockets de verdad. No va en
+# `make` (necesita JDK y kotlinc, y tarda ~1-2 min). Ver link_e2e.sh.
+.PHONY: link-e2e
+link-e2e:
+	./link_e2e.sh
+
 # --- Flex Link / Flex Phone: protocolo y modelo del telefono ---
 # Nucleo PURO (sin Arduino), asi que se compila igual que el del
 # navegador: con AddressSanitizer y UndefinedBehavior Sanitizer.

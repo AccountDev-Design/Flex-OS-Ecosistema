@@ -51,6 +51,12 @@ if [ -z "$KOTLINC" ]; then
 fi
 
 STDLIB="$(find "$HOME/.gradle" /root/.gradle -name 'kotlin-stdlib-2.0.21.jar' 2>/dev/null | head -1)"
+# Con un kotlinc suelto (sin cache de Gradle) la biblioteca estandar va junto
+# al compilador: sin ella la prueba compila y luego muere en NoClassDefFoundError.
+if [ -z "$STDLIB" ] && [ -n "$KOTLINC" ]; then
+  KHOME="$(cd "$(dirname "$(readlink -f "$KOTLINC")")/.." && pwd)"
+  [ -f "$KHOME/lib/kotlin-stdlib.jar" ] && STDLIB="$KHOME/lib/kotlin-stdlib.jar"
+fi
 rm -rf "$BUILD"; mkdir -p "$BUILD"
 
 echo "compilando el servidor REAL del enlace..."
