@@ -5,6 +5,106 @@ qué. Y el registro de lo que ya se ha descartado, para no volver a mirarlo.
 
 ---
 
+## Auditoría de estabilidad (Flex Phone ↔ Flex OS) — informe
+
+> **Qué se ha probado y qué no.** Este informe separa cuatro niveles. Ninguna cifra de
+> "pasa" de un nivel vale para otro:
+>
+> | Nivel | Qué es | Dónde |
+> |---|---|---|
+> | **AUTOMATIZADO** | Pruebas de PC con código real (C++ y Kotlin) | `make`, `tests/link/run.sh`, `gradle :protocol:test :storage:test`, `make web` |
+> | **EMULADO / NAVEGADOR** | El mismo código con sockets y hilos de verdad, o Chromium contra servidores reales | `tests/host/link_e2e.sh`, `tests/web/storage_e2e.test.js` |
+> | **REAL P4** | La placa ESP32-P4 con la radio y el C6 | **NO SE HA PROBADO** |
+> | **REAL A55** | El Galaxy A55 con Android de verdad | **NO SE HA PROBADO** |
+
+### El vídeo (evidencia)
+
+El vídeo adjunto (12,5 s) es la pantalla del **P4** en *Flex Phone*. Medido a 10 fps con la
+posición del indicador (cian = conectado, ambar = conectando): **conectado ≈ 2 s →
+conectando ≈ 5 s → conectado ≈ 1,5 s → conectando ≈ 1 s → conectado ≈ 3 s → …**. Con "Conectado"
+llegan batería (37 %) y red (Wi-Fi), pero la latencia sigue en "-- ms": **ninguna sesión llega
+a los 8 s**, que es cuando sale el primer latido. Y el nombre que anuncia el teléfono es
+"S24 FE de Ricardo Enrique", no "A55": o es otro móvil, o el A55 heredó ese nombre de una
+copia de seguridad (`Settings.Global.device_name`). Conviene saber cuál de los dos es.
+
+### Cómo se buscó
+
+| Hipótesis | Evidencia | Resultado |
+|---|---|---|
+| El **Browser Relay** compite con el enlace | Es otro servidor (otro puerto, otro servicio en primer plano): **no comparte socket** con el enlace. Pero sí comparte **proceso, estado y hilos** | **Implicado, no por el camino que se pensaba**: ver causa raíz |
+| La IP del teléfono cambia o es la equivocada | `localWifiAddress()` y el relay cogían la primera IPv4 de **cualquier** interfaz | Defecto real, corregido (`NetAddress`, avisos de red). No explica el ciclo por sí solo |
+| Dos servicios/instancias | Una sola instancia (`server == null`), `START_NOT_STICKY`, sin llamadas periódicas | Descartado |
+| Un temporizador corto (3–4 s) | `FLP_LINK_ACK_TIMEOUT_MS` = 3 s **no cierra**; ninguno cierra a 3–5 s | Descartado |
+| La lógica del enlace por sí sola | `tests/host/link_e2e.sh`: tarea de red real del P4 + servidor real del teléfono: 30 s en reposo sin una caída, reconecta tras reinicio del servicio y tras un corte de Wi-Fi | **Estable en PC**: el ciclo no sale de la lógica de red por sí sola |
+
+### Causa raíz (la que SÍ se encontró, y la que NO se puede afirmar)
+
+**1. `NetworkOnMainThreadException` cerraba la sesión** (Android, probado por lectura de código y
+por la propiedad que lo evita; *no ejecutado en un A55*). Android lanza esa excepción si el hilo
+**principal** toca un socket. `WifiLinkServer.send()` se llamaba, sin querer, desde el hilo
+principal en cuatro sitios:
+
+| Disparador | Quién lo llama en el hilo principal |
+|---|---|
+| Botón **Emparejar** | `submitPairingCode` desde el `onClick` de Compose |
+| **Notificación** nueva o retirada | `FlexNotificationListener.onNotificationPosted/Removed` |
+| **Cambio de reproducción / canción** | callbacks de `MediaController` (`MediaBridge.publish`) |
+| **Arrancar / parar el relay** | `BrowserRelayService.onStartCommand/onDestroy` → `state.setRelay` |
+
+`sendRaw` cogía la excepción en `catch (e: Exception)` y la tomaba por "el socket murió":
+`closeSession(...)`. **Cada una de esas acciones cerraba la sesión.** El reloj reconecta en 1–5 s y,
+si el disparador es recurrente, el ciclo se repite. Esto explica *completo* el síntoma del emparejamiento
+(pulsar Emparejar cerraba el socket: la pantalla del código desaparecía, volvía "Esperando a Flex OS", y la
+prueba solo llegaba si el reloj reconectaba y el servidor la reenviaba) y explica por qué **activar el relay
+empeoró las cosas** (cambios de estado del relay desde el principal, y un WebView con sesión multimedia
+disparando callbacks). Las pruebas de PC no lo veían: la JVM de escritorio no tiene ese guardián.
+
+**2. El P4 no veía el FIN del teléfono** (probado en el banco con la semántica de `NetworkClient` 3.2.1).
+`connected()` decide por `errno` y un FIN deja `errno = 0`; `available()`/`read()` no señalan EOF. El reloj
+enseñaba *Conectado* sobre un socket muerto hasta el siguiente latido: **4556 ms** medidos → **20 ms** con
+`fpwSocketAlive()`.
+
+**3. Las órdenes "con acuse" se entregaban hasta 6 veces** (probado, 6/6 en el banco y en el unitario).
+El teléfono no contestaba ACK y el P4 no liberaba nada: "Iniciar relay" arrancaba el relay seis veces
+(cada `RELAY_START` pisaba el estado y lanzaba otro `bringUp`) y "Hacer sonar" sonaba seis.
+
+**Lo que NO se puede afirmar.** Que el ciclo de **3–4 s** del vídeo sea *exactamente* uno de estos tres.
+Los tres son defectos reales y reproducibles; el primero encaja con todo lo observado (y con "desde que
+activé el relay"), pero la prueba definitiva es un A55 y un P4. Hay una forma de zanjarlo en **un
+minuto**, sin cable: ver "Cómo cerrar el caso con el hardware".
+
+### Cómo cerrar el caso con el hardware (1 minuto)
+
+1. Teléfono: *Flex Phone → Diagnóstico → Registro del enlace*. Deja el enlace en reposo 60 s y pulsa
+   **Copiar el registro**. Cada cierre es **una línea** con el motivo y la duración:
+   `CLOSE #7 reason=<motivo> thread=<hilo> authed=<bool> owner=<bool> upMs=<n>`.
+2. P4: *Flex Phone → Diagnóstico → Registro del enlace* (últimos 6 sucesos, con motivo y duración).
+3. Leer así (quién cierra primero):
+
+| En el teléfono | En el P4 | Significa |
+|---|---|---|
+| `reason=fallo al escribir: …` | `el telefono cerro el socket` | el teléfono falló al escribir (revisa `thread=`) |
+| `reason=el otro extremo cerro` y `upMs` ≈ 2000–4000 | `escritura fallida` | cierra el **P4**: radio o transporte C6 |
+| `reason=sin respuesta en 40 s` | — | no llegan los latidos (Wi-Fi dormida) |
+| `SESSION_HANDOVER` | — | el P4 abrió dos sockets |
+| `NET_CHANGED` / `WIFI perdida` | `sin Wi-Fi` | la red cambió (IP, banda) |
+| `FASE CONNECTED -> CONNECTION_LOST` sin cierre antes | — | el estado cae sin socket: bug de estado |
+
+"Registro detallado" (interruptor del Diagnóstico del teléfono) copia además cada entrada a logcat
+(`adb logcat -s FlexPhone/WifiLink FlexPhone/LinkSvc`). El serie del P4 queda **apagado**
+(`FLEXOS_DIAG_FLEXPHONE=0`); se enciende con `-DFLEXOS_DIAG_FLEXPHONE=1` solo para una prueba.
+
+### Lo que esto NO demuestra
+
+* **Radio y transporte SDIO P4↔C6** (esp-hosted): no hay forma de probarlos en PC.
+* **Android real**: Doze, ahorro de batería, One UI, el filtro de multidifusión del controlador Wi-Fi, y que
+  `NetworkOnMainThreadException` sea de verdad lo que veía el A55 (el código lo hace inevitable; falta verlo).
+* **Browser Relay con un WebView real**: el servidor y la sesión se arreglaron, pero solo se comprobó el
+  *contrato* (tipos, hilos, cola), no páginas reales.
+* **Memoria del P4** con el anillo (384 B), el enlace y dos sockets a la vez.
+
+---
+
 ## Estado: el ciclo de 5–7 s (posterior al fix de escritura)
 
 Con `fpwWriteAll()` y `cli.connect(host, port, FLPW_CONNECT_MS)` ya en el
