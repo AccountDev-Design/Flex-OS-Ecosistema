@@ -845,6 +845,10 @@ void fclQuotaHint(const FclQuota* q, char* out, size_t cap){
   if(!q || !q->totalBytes){ out[0] = 0; return; }
   uint64_t taken = q->usedBytes + q->reservedBytes;
   uint64_t left = q->totalBytes > taken ? q->totalBytes - taken : 0;
+  // Lo que queda DE VERDAD: si el servidor dice que hay menos disponible (el
+  // telefono de Flex Storage con menos libre que lo que falta de la cuota),
+  // manda eso. 0 = el servidor no lo dio (o esta lleno: lo dice `state`).
+  if(q->availableBytes && q->availableBytes < left) left = q->availableBytes;
   char l[24]; fclFmtBytes(left, l, sizeof(l));
   if(q->state == FCL_Q_FULL || !left) snprintf(out, cap, "Flex Cloud est\xC3\xA1 lleno");
   else if(q->state == FCL_Q_LOW) snprintf(out, cap, "Espacio casi lleno: quedan %s", l);

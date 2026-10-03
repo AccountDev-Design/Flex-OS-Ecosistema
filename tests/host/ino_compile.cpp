@@ -10463,6 +10463,187 @@ static bool clMenuPick(void (*tick)(), int act){
 }
 static void clCellCenter(int i, int& cx, int& cy){ int x, y, w, h; ckCellRect(i, x, y, w, h); cx = x + w / 2; cy = y + h / 2; }
 
+// =====================================================================
+//  FLEX STORAGE: aprobar un telefono en pantalla, Almacenamiento y la
+//  nube con destino telefono (sin Flex Account)
+// =====================================================================
+extern FlexStorageInfo gStubStorage;
+extern int gStubPairDecide, gStubSetEnabled, gStubForget;
+extern uint8_t gStubCloudDest;
+static void spaStubPair(const char* sas, const char* name, uint8_t left){
+  gStubStorage.pairWaiting = 1;
+  snprintf(gStubStorage.sas, sizeof(gStubStorage.sas), "%s", sas);
+  snprintf(gStubStorage.pairName, sizeof(gStubStorage.pairName), "%s", name);
+  snprintf(gStubStorage.pairModel, sizeof(gStubStorage.pairModel), "SM-A556B");
+  snprintf(gStubStorage.pairIp, sizeof(gStubStorage.pairIp), "192.168.1.60");
+  gStubStorage.pairLeftS = left;
+}
+// Unas vueltas de loop: la vigilancia y, si el cuadro esta a la vista, su tick.
+static void spaPump(int n){ for(int i = 0; i < n; i++){ gTestMs += SPA_WATCH_MS + 10; spaWatch(); if(spaVisible()) spaTick(); } }
+static void spaShowNow(){ spaPump(1); gTestMs += 20; spaTick(); gTestMs += SPA_ANIM_MS + 20; spaTick(); }
+static void spaTapAt(int16_t* b){ tReset(); T.tap = true; T.x = (b[0] + b[2]) / 2; T.y = (b[1] + b[3]) / 2; spaTick(); }
+static bool spaNotified(const char* sub){
+  for(int i = 0; i < gNotifCount; i++) if(strstr(gNotifs[i].mod.sub, sub)) return true;
+  return false;
+}
+static void testFlexStorage(){
+  printf("Flex Storage: aprobar un telefono en pantalla, Almacenamiento y Flex Cloud en el telefono\n");
+  int before = gFails;
+  gLand = false; gHosted = false; editMode = false; qsPanelY = 0; qsAnimOn = false;
+  gState = ST_HOME; gAppId = 0;
+  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  memset(&gStubStorage, 0, sizeof(gStubStorage));
+  gStubPairDecide = -1; gStubSetEnabled = -1; gStubForget = 0;
+  spaAbandon(); spaDecided[0] = 0; spaTold[0] = 0; spaLastState = 0xFF; spaWatchMs = 0;
+
+  // ---- 1. nada que aprobar: ni cuadro ni memoria ----
+  spaPump(2);
+  chk(!spaVisible() && spaBak == NULL, "sin emparejamiento no hay cuadro ni memoria reservada");
+
+  // ---- 2. NUNCA con la pantalla bloqueada (ni con la proteccion contra robo) ----
+  gState = ST_LOCK;
+  spaStubPair("482915", "Galaxy A55 5G", 110);
+  spaPump(2);
+  chk(!spaVisible(), "con la pantalla bloqueada el cuadro NO sale");
+  chk(spaNotified("Desbloquea para aprobar"), "...se avisa UNA vez de que hay que desbloquear");
+  gState = ST_THEFT; spaPump(1);
+  chk(!spaVisible(), "con la proteccion contra robo delante tampoco");
+  gState = ST_HOME;
+  spaPump(1);
+  chk(spaVisible(), "al desbloquear sale solo (el emparejamiento seguia esperando)");
+  gTestMs += 20; spaTick();
+  chk(spaBandReady(), "prepara su banda en la fase de dibujo (no en la vigilancia)");
+  gTestMs += SPA_ANIM_MS + 20; spaTick();
+  chk(spaState == SPA_SHOWN, "termina la animacion de entrada");
+  chk(!strcmp(spaInfo.sas, "482915") && !strcmp(spaInfo.pairName, "Galaxy A55 5G"), "ensena el codigo y el telefono que publico el nucleo");
+  chk(spaBtnOk[3] <= spaBtnNo[1] && spaBtnOk[0] == spaBtnNo[0], "en vertical: Emparejar encima de Rechazar, apilados");
+  { int lit = 0, y0 = SPA_V_Y + 168, y1 = SPA_V_Y + 244;
+    for(int y = y0; y < y1; y++) for(int x = SCR_W / 2 - 90; x < SCR_W / 2 + 90; x++) if(fb[(size_t)y * SCR_W + x] != fb[(size_t)y0 * SCR_W + SCR_W / 2 - 140]) lit++;
+    chk(lit > 400, "el codigo de 6 cifras se pinta grande en su caja"); }
+  if(getenv("INO_SHOTS")) shotSave("storage_aprobar");
+  gStubStorage.pairLeftS = 97; spaPump(1);
+  chk(spaInfo.pairLeftS == 97 && !spaDirty, "la cuenta atras se actualiza y se repinta");
+  tReset(); T.tap = true; T.x = SCR_W / 2; T.y = SPA_V_Y + 8; spaTick();
+  chk(spaVisible() && gStubPairDecide == -1, "un toque fuera de los botones no decide nada");
+
+  // ---- 3. Emparejar ----
+  spaTapAt(spaBtnOk);
+  chk(gStubPairDecide == 1, "Emparejar aprueba en el nucleo de Flex Storage");
+  chk(spaState == SPA_OUT, "y el cuadro se retira animado");
+  gTestMs += SPA_ANIM_MS + 20; spaTick();
+  chk(!spaVisible() && spaBak == NULL, "...devuelve la banda y suelta la memoria");
+  gStubStorage.pairWaiting = 1; spaPump(2);
+  chk(!spaVisible(), "lo ya decidido no vuelve a salir aunque el nucleo tarde en retirarlo");
+  gStubStorage.pairWaiting = 0;
+  gStubStorage.state = FSP_READY; snprintf(gStubStorage.name, sizeof(gStubStorage.name), "Galaxy A55 5G");
+  spaPump(1);
+  chk(spaNotified("Activado en Galaxy A55 5G"), "al quedar emparejado se avisa: Activado en Galaxy A55 5G");
+
+  // ---- 4. Rechazar otro telefono ----
+  spaStubPair("106733", "Intruso", 100);
+  spaShowNow();
+  chk(spaState == SPA_SHOWN && !strcmp(spaInfo.pairName, "Intruso"), "otro telefono pide emparejarse: otro cuadro");
+  spaTapAt(spaBtnNo);
+  chk(gStubPairDecide == 0, "Rechazar llega al nucleo");
+  gTestMs += SPA_ANIM_MS + 20; spaTick();
+  chk(!spaVisible(), "y el cuadro se va");
+
+  // ---- 5. termina por otro lado (caduca) con el cuadro a la vista ----
+  spaStubPair("777001", "Galaxy A55 5G", 2);
+  spaShowNow();
+  chk(spaState == SPA_SHOWN, "nuevo emparejamiento a la vista");
+  gStubStorage.pairWaiting = 0; spaPump(1);
+  chk(spaState == SPA_OUT, "si caduca, el cuadro se va solo");
+  gTestMs += SPA_ANIM_MS + 20; spaTick();
+  chk(!spaVisible(), "...del todo");
+
+  // ---- 6. se bloquea con el cuadro a la vista: fuera YA, sin decidir ----
+  int dec0 = gStubPairDecide;
+  spaStubPair("555123", "Galaxy A55 5G", 90);
+  spaShowNow();
+  gState = ST_LOCK; spaTick();
+  chk(!spaVisible() && gStubPairDecide == dec0, "al bloquearse el aparato el cuadro se retira sin decidir");
+  gState = ST_HOME; spaPump(1);
+  chk(spaVisible(), "y vuelve a salir al desbloquear");
+  spaAbandon(); gStubStorage.pairWaiting = 0;
+
+  // ---- 7. Modo PC: no se dibuja (espera) ----
+  gState = ST_APP; gAppId = IC_MODOPC;
+  spaStubPair("901234", "Galaxy A55 5G", 80);
+  spaPump(1);
+  chk(!spaVisible(), "en Modo PC no se dibuja un cuadro a pantalla completa");
+  gState = ST_HOME; gAppId = 0; gStubStorage.pairWaiting = 0; spaPump(1);
+
+  // ---- 8. dos maquetas de verdad ----
+  int vy0, vy1, ly0, ly1;
+  spaBand(false, vy0, vy1); spaBand(true, ly0, ly1);
+  chk(vy0 != ly0 && (vy1 - vy0) != (ly1 - ly0), "vertical y horizontal ocupan bandas distintas");
+  snprintf(spaInfo.sas, sizeof(spaInfo.sas), "482915"); spaInfo.pairLeftS = 60;
+  memset(bbuf, 0, (size_t)SCR_W * SCR_H * 2); setBuf(bbuf);
+  gLand = true; spaDrawLandscape(1.0f); gLand = false;
+  chk(spaBtnOk[1] == spaBtnNo[1] && spaBtnOk[0] > spaBtnNo[0], "en horizontal los dos botones van EN FILA");
+  setBuf(fb); uiClipFull();
+
+  // ---- 9. Flex Cloud con destino TELEFONO: sin Flex Account ----
+  bool acc0 = gStubAccountLinked; uint8_t dest0 = gStubCloudDest;
+  gStubAccountLinked = false;
+  gStubCloudDest = FCD_PHONE; gStubStorage.state = FSP_READY;
+  chk(ckCloudBlock() == NULL, "con el telefono emparejado Flex Cloud se usa SIN Flex Account");
+  gStubStorage.state = FSP_REJECTED;
+  chk(ckCloudBlock() && !strcmp(ckCloudBlock(), CK_MSG_REPAIR), "telefono que ya no reconoce el P4: Vuelve a emparejar");
+  gStubStorage.state = FSP_NONE;
+  chk(ckCloudBlock() && !strcmp(ckCloudBlock(), CK_MSG_NOPHONE), "sin telefono: Empareja tu telefono");
+  gStubCloudDest = FCD_INTERNET;
+  chk(ckCloudBlock() && !strcmp(ckCloudBlock(), CK_MSG_LINK), "con destino Internet sigue pidiendo la Flex Account de siempre");
+  // La Galeria > Nube, destino telefono y sin telefono: el boton lleva a Almacenamiento.
+  gStubCloudDest = FCD_PHONE;
+  memset(&gStubCloudStatus, 0, sizeof(gStubCloudStatus));
+  gStubCloudStatus.net = FCN_NO_ACCOUNT; gStubCloudStatus.gen++;
+  shotApp(IC_GALERIA); gAppState[IC_GALERIA] = ALIFE_RUNNING; mkBind(&GAL_APP); galViewReady = false;
+  galTab = GAL_TAB_CLOUD; galRender();
+  chk(ckEmptyBtnY > 0 && ckEmptyBtnAct == 3, "destino telefono sin telefono: Como activarlo (Almacenamiento), no Vincular cuenta");
+  if(getenv("INO_SHOTS")) shotSave("storage_nube_sin_telefono");
+  ckUnbind(&GAL_CK);
+
+  // ---- 10. Almacenamiento: la tarjeta y su pantalla ----
+  memset(&gStubStorage, 0, sizeof(gStubStorage));
+  gStubStorage.state = FSP_READY; gStubStorage.reachable = 1; gStubStorage.lastOkAgeS = 3;
+  snprintf(gStubStorage.name, sizeof(gStubStorage.name), "Galaxy A55 5G");
+  snprintf(gStubStorage.model, sizeof(gStubStorage.model), "SM-A556B");
+  snprintf(gStubStorage.ip, sizeof(gStubStorage.ip), "192.168.1.60"); gStubStorage.port = 47830;
+  clStatusOnline();                                  // cuota valida: 1,2 GB de 5 GB
+  bool fsReady0 = gTestFsReady;
+  geFsReset(); gTestFsReady = true;                  // disco en memoria: Almacenamiento tiene que leerlo
+  shotApp(IC_ALMACEN);
+  almWantPhone = false; almEnter();
+  chk(almPhY1 > almPhY0, "Almacenamiento ensena la tarjeta Flex Cloud en tu telefono");
+  if(getenv("INO_SHOTS")) shotSave("storage_almacenamiento");
+  tReset(); T.tap = true; T.x = SCR_W / 2; T.y = (almPhY0 + almPhY1) / 2; almTick();
+  chk(almScreen == ALM_SCR_PHONE, "tocarla abre la pantalla del telefono");
+  chk(almPhBtn[0][2] > almPhBtn[0][0] && almPhBtn[1][2] > almPhBtn[1][0], "con Poner en pausa y Olvidar este telefono");
+  if(getenv("INO_SHOTS")) shotSave("storage_telefono");
+  tReset(); T.tap = true; T.x = (almPhBtn[0][0] + almPhBtn[0][2]) / 2; T.y = (almPhBtn[0][1] + almPhBtn[0][3]) / 2; almTick();
+  chk(gStubSetEnabled == 0 && gStubStorage.state == FSP_OFF, "Poner en pausa: el telefono queda en pausa (sin olvidarlo)");
+  tReset(); T.tap = true; T.x = (almPhBtn[0][0] + almPhBtn[0][2]) / 2; T.y = (almPhBtn[0][1] + almPhBtn[0][3]) / 2; almTick();
+  chk(gStubSetEnabled == 1 && gStubStorage.state == FSP_READY, "Volver a conectar");
+  tReset(); T.tap = true; T.x = (almPhBtn[1][0] + almPhBtn[1][2]) / 2; T.y = (almPhBtn[1][1] + almPhBtn[1][3]) / 2; almTick();
+  chk(gStubForget == 0, "Olvidar pide un segundo toque (no se borra al primero)");
+  gTestMs += 500;
+  tReset(); T.tap = true; T.x = (almPhBtn[1][0] + almPhBtn[1][2]) / 2; T.y = (almPhBtn[1][1] + almPhBtn[1][3]) / 2; almTick();
+  chk(gStubForget == 1 && gStubStorage.state == FSP_NONE, "al segundo toque se olvida el telefono");
+  chk(almPhBtn[1][2] == 0, "sin telefono ya no hay nada que olvidar: se explica como activarlo");
+  chk(almBackScreen() && almScreen == ALM_SCR_MAIN, "atras vuelve a la pantalla principal de Almacenamiento");
+  almCloseApp();
+  gTestFsReady = fsReady0;
+
+  gStubAccountLinked = acc0; gStubCloudDest = dest0;
+  memset(&gStubStorage, 0, sizeof(gStubStorage));
+  memset(&gStubCloudStatus, 0, sizeof(gStubCloudStatus));
+  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  gState = ST_HOME; gAppId = 0;
+  printf("  %s\n", gFails == before ? "ok" : "CON FALLOS");
+}
+
 static void testFlexCloudUi(){
   printf("Flex Cloud en la interfaz: Galeria, Multimedia, Archivos, visor por rangos y avisos\n");
   int before = gFails;
@@ -11255,6 +11436,7 @@ int main(){
   testCapturasVisor();
   testGaleriaSinRestos();
   testFlexCloudUi();
+  testFlexStorage();
   testMenuNubeSinApilar();
   testMenuNubeAlCerrar();
   testFlexAccountUnlink();

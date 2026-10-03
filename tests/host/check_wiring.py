@@ -55,6 +55,15 @@ GANCHOS = [
     # Internet) aunque el usuario tuviera su telefono emparejado y conectado.
     ("setup",          "flexStorageBegin()", "el telefono emparejado no se cargaria y Flex Cloud no sabria su destino"),
     ("loop",           "cloudUiTick()",    "los avisos de la nube no se leerian: ni liberar espacio ni colocar descargas"),
+    # APROBAR UN TELEFONO. Sin spaWatch() nadie miraria si un telefono espera
+    # aprobacion: el emparejamiento caducaria siempre a los 2 minutos sin que
+    # la persona llegara a ver el codigo. Sin spaTick() el cuadro se armaria y
+    # nunca se dibujaria ni recibiria el toque de Emparejar/Rechazar.
+    ("loop",           "spaWatch()",       "los telefonos que piden emparejarse nunca se podrian aprobar en pantalla"),
+    ("loop",           "spaTick()",        "el cuadro de aprobacion se quedaria sin dibujar ni recibir toques"),
+    ("spaDecide",      "flexStoragePairDecide(", "pulsar Emparejar o Rechazar no llegaria al nucleo de Flex Storage"),
+    ("spaCanShow",     "notifSecureScreen()", "se podria aprobar un telefono con la pantalla bloqueada"),
+    ("ckCloudBlock",   "flexStoragePhoneState()", "con Flex Cloud en el telefono se pediria una Flex Account que no hace falta"),
     ("cloudUiTick",    "flexCloudPollEvent(", "cloudUiTick no sacaria ningun aviso de la cola de Flex Cloud"),
     ("cloudUiTick",    "flexCloudSetActive(", "la cuota no se refrescaria con la nube a la vista"),
     ("ckFreeLocal",    "flexFsSize(",      "liberar espacio borraria el original sin comprobar que sigue siendo el que se subio"),

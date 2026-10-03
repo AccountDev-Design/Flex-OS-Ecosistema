@@ -293,6 +293,7 @@
 #include "FlexOS_Ultra_DeviceCare.h"         // Flex Device Care: app, historial, salud y grafico del GY-BNO085
 #include "FlexOS_Ultra_DeviceTests.h"        // Device Care: pruebas, diagnostico y Post-Impact Check
 #include "FlexOS_Ultra_FallAlert.h"          // Device Care: aviso global de posible caida (vertical y horizontal)
+#include "FlexOS_Ultra_StoragePair.h"        // Flex Storage: aprobar en pantalla un telefono que pide emparejarse
 #include "FlexOS_Ultra_Recovery.h"           // restablecer datos de fabrica y modo seguro
 #include "FlexOS_Ultra_AppCompass.h"         // Flex Compass: brujula sobre el servicio IMU
 #include "FlexOS_Ultra_Theft.h"              // Proteccion contra robo: clasificador, eventos y bloqueo
@@ -752,6 +753,8 @@ void loop(){
                           // DeX cerrada, pantalla en exclusiva de otro subsistema), suelta
                           // su enganche del sensor.
   faPendingTick();        // aviso de caida que no cupo (cortina, OTA, bloqueo): sale al despejarse
+  spaWatch();             // Flex Storage: un telefono pide emparejarse -> cuadro de aprobacion con su
+                          // codigo (4 miradas por segundo al estado publicado; nunca bloquea)
   FLEXHITCH(mlTick());               // biblioteca de medios: avisos de su tarea de fondo para la isla
   FLEXHITCH(webTick());              // Flex Web Server: avisos, tarjetas, Wi-Fi y bloqueo (la red va en su tarea)
   FLEXHITCH(musAudioTick());         // Musica: alimenta el DMA aunque la app no este delante (no bloquea)
@@ -906,6 +909,21 @@ void loop(){
   if(faVisible()){
     if(minChanged) gHomeDirty = true;   // el escritorio se rehara al cerrarse
     faTick();
+    flexOtaRender();
+    delay(loopPaceMs());
+    return;
+  }
+
+  // -----------------------------------------------------------
+  //  APROBAR UN TELEFONO (Flex Storage)
+  //  ---------------------------------------------------------
+  //  El mismo patron que el aviso de caida: captura la banda real y,
+  //  mientras esta a la vista, nadie mas compone. El servidor web, Flex
+  //  Cloud y el emparejamiento siguen en sus tareas; aqui solo se dibuja.
+  // -----------------------------------------------------------
+  if(spaVisible()){
+    if(minChanged) gHomeDirty = true;
+    spaTick();
     flexOtaRender();
     delay(loopPaceMs());
     return;

@@ -300,6 +300,13 @@ static void testUiText(){
   q.usedBytes = 1ull << 30; q.reservedBytes = 1ull << 30; q.state = FCL_Q_OK;
   fclQuotaHint(&q, b, sizeof(b));
   CHECK(!strcmp(b, "Quedan 3 GB"), "lo reservado por subidas en curso no se ofrece");
+  q.availableBytes = 300ull << 20;                               // el telefono tiene menos libre que la cuota
+  fclQuotaHint(&q, b, sizeof(b));
+  CHECK(!strcmp(b, "Quedan 300 MB"), "manda el espacio real disponible si es menor que lo que falta de la cuota");
+  q.availableBytes = 4ull << 30;                                 // mas que lo que falta: manda la cuota
+  fclQuotaHint(&q, b, sizeof(b));
+  CHECK(!strcmp(b, "Quedan 3 GB"), "nunca mas de lo que falta de la cuota");
+  q.availableBytes = 0;
 
   FclItem it; memset(&it, 0, sizeof(it));
   const char* why = nullptr;

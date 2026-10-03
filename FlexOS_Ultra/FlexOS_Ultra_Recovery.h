@@ -25,7 +25,7 @@
 // ##      entrada del sistema es siempre FlexOS_Ultra.ino.
 // #############################################################
 #pragma once
-#include "FlexOS_Ultra_FallAlert.h"   // eslabon anterior de la cadena
+#include "FlexOS_Ultra_StoragePair.h"   // eslabon anterior de la cadena
 
 // #############################################################
 // ##  RESTABLECER DATOS DE FABRICA

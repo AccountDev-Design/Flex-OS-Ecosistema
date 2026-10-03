@@ -108,8 +108,12 @@ static void almFolderIcon(int x, int y, int s){
 
 // Pantalla interna activa de la app. La segunda (DETALLE) es la que anade la
 // Fase 5; la primera es exactamente la de siempre.
-enum { ALM_SCR_MAIN = 0, ALM_SCR_DETAIL };
+enum { ALM_SCR_MAIN = 0, ALM_SCR_DETAIL, ALM_SCR_PHONE };
 static int almScreen = ALM_SCR_MAIN;
+static int almPhY0 = 0, almPhY1 = 0;        // zona pulsable de la tarjeta "Flex Cloud en tu telefono"
+static bool almWantPhone = false;           // abrir directamente esa pantalla (desde Flex Cloud)
+static void almPhoneEnter();
+static void almPhonePaint();
 static int almDetY0 = 0, almDetY1 = 0;      // zona pulsable de la fila "Detalles..."
 static int almOptX0 = 0, almOptX1 = 0;      // ...y del boton "Optimizar" dentro de ella
 static void almDetailEnter();
@@ -119,7 +123,47 @@ static void almRenderMain();
 static void almDetailRepaint();
 static void almRender(){
   if(almScreen == ALM_SCR_DETAIL) almDetailRepaint();   // conserva el desplazamiento
+  else if(almScreen == ALM_SCR_PHONE) almPhonePaint();
   else                            almRenderMain();
+}
+
+// ---- Flex Cloud en el telefono (Flex Storage): estado en una frase ----
+// Todo sale del estado PUBLICADO de Flex Storage (flexStorageInfo no espera a
+// nada) y de la cuota que Flex Cloud guardo del telefono; nada se inventa.
+static void almPhoneState(const FlexStorageInfo& si, char* out, size_t cap, uint16_t* col){
+  const char* nm = si.name[0] ? si.name : "Tel\xC3\xA9" "fono";
+  switch(si.state){
+    case FSP_READY:
+      if(si.reachable){ snprintf(out, cap, "%s \xC2\xB7 conectado", nm); *col = TH_OK; }
+      else if(si.lastOkAgeS == 0xFFFFFFFFu){ snprintf(out, cap, "%s \xC2\xB7 conectando...", nm); *col = TH_PRIM; }
+      else { snprintf(out, cap, "%s \xC2\xB7 desconectado", nm); *col = TH_WARN; }
+      break;
+    case FSP_OFF:      snprintf(out, cap, "%s \xC2\xB7 en pausa", nm); *col = TH_MUTE; break;
+    case FSP_REJECTED: snprintf(out, cap, "Hay que volver a emparejar"); *col = TH_ERR; break;
+    default:           snprintf(out, cap, "Sin tel\xC3\xA9" "fono"); *col = TH_MUTE; break;
+  }
+}
+static bool almPhoneQuota(const FlexStorageInfo& si, FlexCloudStatus* cs){
+  flexCloudStatus(cs);
+  return si.state == FSP_READY && flexCloudDest() == FCD_PHONE && cs->quotaValid;
+}
+// Tarjeta de la pantalla principal (52 px). Tocarla abre la pantalla propia.
+static void almPhoneCard(int x, int y, int w){
+  FlexStorageInfo si; flexStorageInfo(&si);
+  uiSurface(x, y, w, 52, 14, UIS_ELEVATED);
+  ckCloudGlyph(x + 26, y + 27, 13, wallAccent());
+  drawText(x + 50, y + 5, "Flex Cloud en tu tel\xC3\xA9" "fono", 2, TH_TXT);
+  char st[80]; uint16_t c = TH_MUTE;
+  almPhoneState(si, st, sizeof(st), &c);
+  fillCircle(x + 54, y + 37, 4, c);
+  char line[140];
+  FlexCloudStatus cs;
+  if(almPhoneQuota(si, &cs)){ char q[64]; fclQuotaLine(&cs.quota, q, sizeof(q)); snprintf(line, sizeof(line), "%s  \xC2\xB7  %s", st, q); }
+  else if(si.state == FSP_NONE) snprintf(line, sizeof(line), "%s \xC2\xB7 act\xC3\xADvalo desde la web", st);
+  else snprintf(line, sizeof(line), "%s", st);
+  drawTextClip(x + 64, y + 31, line, 1, TH_TXT2, x + w - 30);
+  strokeSegAA(x + w - 22, y + 20, x + w - 15, y + 27, 2.0f, TH_TXT2);
+  strokeSegAA(x + w - 15, y + 27, x + w - 22, y + 34, 2.0f, TH_TXT2);
 }
 
 static void almRenderMain(){
@@ -197,6 +241,14 @@ static void almRenderMain(){
     almOptX0 = ox; almOptX1 = ox + ow;
     almDetY0 = y; almDetY1 = y + 50;
     y += 50 + gap / 2;
+  }
+
+  // ---- Flex Cloud en el telefono (Flex Storage) ----
+  almPhY0 = almPhY1 = 0;
+  if(y + 54 <= by + bh - pad){
+    almPhoneCard(bx + pad, y, bw - 2 * pad);
+    almPhY0 = y; almPhY1 = y + 52;
+    y += 52 + gap / 2;
   }
 
   // ---- Categorias: tamano REAL de cada conjunto de carpetas ----
@@ -585,14 +637,169 @@ static void almDetailTick(){
   }
 }
 
+// #############################################################
+// ##  ALMACENAMIENTO · FLEX CLOUD EN TU TELEFONO  (Flex Storage)
+// ##  ------------------------------------------------------
+// ##  El telefono emparejado como destino de Flex Cloud: quien es, si
+// ##  responde, cuanto espacio queda DE VERDAD (la cuota que dio el propio
+// ##  telefono) y las dos decisiones que son de la persona: ponerlo en
+// ##  pausa (vuelve a la nube por Internet, sin olvidarlo) u olvidarlo
+// ##  (se borra la clave del emparejamiento de la NVS).
+// ##  Emparejar NO se hace aqui: se empieza en la web desde el propio
+// ##  telefono (asi el telefono demuestra que esta en la misma Wi-Fi) y se
+// ##  aprueba en el cuadro que sale en esta pantalla con su codigo.
+// ##  Se repinta solo si cambia algo (una firma por segundo) y, mientras
+// ##  esta a la vista, la cuota se mantiene al dia.
+// #############################################################
+static uint32_t almPhSig = 0, almPhMs = 0;
+static int16_t  almPhBtn[2][4];          // [0] pausa/reanudar, [1] olvidar (x0,y0,x1,y1)
+static uint32_t almPhForgetArm = 0;      // olvidar pide un segundo toque en 4 s
+
+static uint32_t almPhoneSig(){
+  FlexStorageInfo si; flexStorageInfo(&si);
+  FlexCloudStatus cs; bool q = almPhoneQuota(si, &cs);
+  uint32_t h = 2166136261u;
+  auto mix = [&](const void* p, size_t n){ const uint8_t* b = (const uint8_t*)p; while(n--) h = (h ^ *b++) * 16777619u; };
+  uint8_t k[4] = { si.state, si.reachable, (uint8_t)(si.lastOkAgeS == 0xFFFFFFFFu), (uint8_t)q };
+  mix(k, sizeof(k)); mix(si.name, strlen(si.name)); mix(si.ip, strlen(si.ip)); mix(&si.port, sizeof(si.port));
+  if(q){ mix(&cs.quota.usedBytes, sizeof(cs.quota.usedBytes)); mix(&cs.quota.reservedBytes, sizeof(cs.quota.reservedBytes)); mix(&cs.quota.permille, sizeof(cs.quota.permille)); }
+  uint8_t arm = almPhForgetArm && millis() - almPhForgetArm < 4000u;
+  mix(&arm, 1);
+  return h;
+}
+
+static void almPhonePaint(){
+  setBuf(fb);
+  int bx, by, bw, bh; uiBox(bx, by, bw, bh);
+  fillRect(bx, by, bw, bh, WIN_BG);
+  int pad = uiPad(), x = bx + pad, w = bw - 2 * pad;
+  int y = uiTitle(bx, by + pad, bw, "Flex Cloud en tu tel\xC3\xA9" "fono", TH_TXT, uiFontH(bh / 14));
+  FlexStorageInfo si; flexStorageInfo(&si);
+  almPhBtn[0][2] = almPhBtn[1][2] = 0;
+
+  // ---- quien y como esta ----
+  uiSurface(x, y, w, 92, 16, UIS_ELEVATED);
+  char st[80]; uint16_t c = TH_MUTE;
+  almPhoneState(si, st, sizeof(st), &c);
+  fillCircle(x + 22, y + 22, 6, c);
+  if(si.state == FSP_NONE){
+    drawText(x + 38, y + 11, "Ning\xC3\xBAn tel\xC3\xA9" "fono emparejado", 2, TH_TXT);
+    drawTextClip(x + 38, y + 40, "Flex Cloud usar\xC3\xA1 Internet (Flex Account) si la tienes.", 1, TH_TXT2, x + w - 12);
+  } else {
+    drawTextClip(x + 38, y + 11, si.name[0] ? si.name : "Tel\xC3\xA9" "fono", 2, TH_TXT, x + w - 12);
+    char ln[96];
+    snprintf(ln, sizeof(ln), "%s%s%s:%u", si.model, si.model[0] ? "  \xC2\xB7  " : "", si.ip, (unsigned)si.port);
+    drawTextClip(x + 38, y + 40, ln, 1, TH_TXT2, x + w - 12);
+    const char* why = si.state == FSP_REJECTED ? "El tel\xC3\xA9" "fono ya no reconoce este Flex OS: vuelve a emparejarlo." :
+                      si.state == FSP_OFF ? "En pausa: Flex Cloud usa Internet hasta que lo reactives." :
+                      si.reachable ? "Conectado: Flex Cloud guarda en este tel\xC3\xA9" "fono." :
+                      si.lastOkAgeS == 0xFFFFFFFFu ? "Conectando con el tel\xC3\xA9" "fono..." :
+                      "Desconectado: comprueba que est\xC3\xA1 en la misma Wi-Fi.";
+    drawTextClip(x + 38, y + 62, why, 1, si.state == FSP_REJECTED ? TH_ERR : TH_TXT2, x + w - 12);
+  }
+  y += 92 + uiGap();
+
+  // ---- espacio real (la cuota que dio el telefono) ----
+  FlexCloudStatus cs;
+  if(almPhoneQuota(si, &cs)){
+    uiSurface(x, y, w, 76, 16, UIS_ELEVATED);
+    char q[64], hint[64];
+    fclQuotaLine(&cs.quota, q, sizeof(q));
+    fclQuotaHint(&cs.quota, hint, sizeof(hint));
+    drawText(x + 16, y + 10, q, 2, TH_TXT);
+    int tw = w - 32;
+    fillRoundRect(x + 16, y + 40, tw, 8, 4, TH_TRACK);
+    uint16_t qc = cs.quota.state == FCL_Q_FULL ? TH_DANGER : cs.quota.state == FCL_Q_LOW ? TH_WARN : wallAccent();
+    int fw = (int)((int64_t)tw * cs.quota.permille / 1000);
+    if(cs.quota.permille && fw < 8) fw = 8;
+    if(fw > 0) fillRoundRect(x + 16, y + 40, fw, 8, 4, qc);
+    drawText(x + 16, y + 54, hint, 1, cs.quota.state == FCL_Q_OK ? TH_TXT2 : TH_WARN);
+    y += 76 + uiGap();
+  }
+
+  // ---- que es (y, sin telefono, como se activa) ----
+  if(si.state == FSP_NONE){
+    y += mmWrap(x + 4, y, w - 8, "C\xC3\xB3" "mo activarlo: 1) En el tel\xC3\xA9" "fono, abre la web de Flex OS (Galer\xC3\xAD" "a > Conectar con el m\xC3\xB3" "vil, escanea el QR). "
+               "2) Pulsa \xC2\xAB" "Activar Flex Cloud en este tel\xC3\xA9" "fono\xC2\xBB. 3) Compara el c\xC3\xB3" "digo de 6 cifras y acepta aqu\xC3\xAD.", 1, TH_TXT, true) + 10;
+  }
+  y += mmWrap(x + 4, y, w - 8, "Flex Cloud guarda tus archivos en el espacio que el tel\xC3\xA9" "fono le reserva (hasta 5 GB). "
+             "Flex OS solo ve ese espacio: nada m\xC3\xA1s del tel\xC3\xA9" "fono.", 1, TH_TXT2, true) + 14;
+
+  // ---- decisiones ----
+  if(si.state != FSP_NONE){
+    int bwid = w, bhh = 46;
+    if(si.state == FSP_READY || si.state == FSP_OFF){
+      fillRoundRect(x, y, bwid, bhh, 16, TH_SURF2);
+      drawTextC(x + bwid / 2, y + 13, si.state == FSP_OFF ? "Volver a conectar" : "Poner en pausa", 2, TH_TXT);
+      almPhBtn[0][0] = (int16_t)x; almPhBtn[0][1] = (int16_t)y; almPhBtn[0][2] = (int16_t)(x + bwid); almPhBtn[0][3] = (int16_t)(y + bhh);
+      y += bhh + 10;
+    }
+    bool armed = almPhForgetArm && millis() - almPhForgetArm < 4000u;
+    fillRoundRect(x, y, bwid, bhh, 16, armed ? TH_DANGER : TH_SURF2);
+    drawTextC(x + bwid / 2, y + 13, armed ? "Pulsa otra vez para olvidarlo" : "Olvidar este tel\xC3\xA9" "fono", 2, armed ? TH_ONACC : TH_DANGER);
+    almPhBtn[1][0] = (int16_t)x; almPhBtn[1][1] = (int16_t)y; almPhBtn[1][2] = (int16_t)(x + bwid); almPhBtn[1][3] = (int16_t)(y + bhh);
+  }
+  flxFlush(WIN_TOP, WIN_BOT);
+  almPhSig = almPhoneSig();
+  almPhMs = millis();
+}
+
+static void almPhoneEnter(){
+  almScreen = ALM_SCR_PHONE;
+  almPhForgetArm = 0;
+  ckMarkVisible();                         // la cuota del telefono se pide ya
+  almPhonePaint();
+}
+
+static bool almPhHit(int i){
+  return almPhBtn[i][2] > almPhBtn[i][0] && T.x >= almPhBtn[i][0] && T.x < almPhBtn[i][2] && T.y >= almPhBtn[i][1] && T.y < almPhBtn[i][3];
+}
+static void almPhoneTick(){
+  ckMarkVisible();                         // a la vista: Flex Cloud mantiene la cuota al dia
+  if(T.tap){
+    FlexStorageInfo si; flexStorageInfo(&si);
+    if(almPhHit(0)){
+      bool on = si.state == FSP_OFF;
+      if(!flexStorageSetEnabled(on)) sysNotify("Flex Cloud", "No se pudo guardar el cambio");
+      else sysNotify("Flex Cloud", on ? "Tel\xC3\xA9" "fono reactivado" : "En pausa: se usa Internet");
+      almPhForgetArm = 0;
+      almPhonePaint();
+      return;
+    }
+    if(almPhHit(1)){
+      if(!(almPhForgetArm && millis() - almPhForgetArm < 4000u)){ almPhForgetArm = millis() | 1u; almPhonePaint(); return; }
+      almPhForgetArm = 0;
+      flexStorageForget();
+      sysNotify("Flex Cloud", "Tel\xC3\xA9" "fono olvidado");
+      almPhonePaint();
+      return;
+    }
+    return;
+  }
+  if(T.down || millis() - almPhMs < 1000) return;
+  almPhMs = millis();
+  if(almPhoneSig() != almPhSig) almPhonePaint();
+}
+
+// Desde Flex Cloud (sin telefono, o rechazado): abre Almacenamiento en esta
+// pantalla, como Ajustes > Flex Account para la nube por Internet.
+static void almOpenPhone(){
+  almWantPhone = true;
+  if(gState == ST_APP) appClose();
+  enterApp(IC_ALMACEN);
+}
+
 static void almEnter(){
+  if(almWantPhone){ almWantPhone = false; almPhoneEnter(); return; }
   almScreen = ALM_SCR_MAIN;
   almRenderMain();
 }
 
 static void almTick(){
   if(almScreen == ALM_SCR_DETAIL){ almDetailTick(); return; }
+  if(almScreen == ALM_SCR_PHONE){ almPhoneTick(); return; }
   if(!T.tap) return;
+  if(almPhY1 > almPhY0 && T.y >= almPhY0 && T.y <= almPhY1){ almPhoneEnter(); return; }
   if(almDetY1 > almDetY0 && T.y >= almDetY0 && T.y <= almDetY1){
     if(almOptX1 > almOptX0 && T.x >= almOptX0 && T.x <= almOptX1) optStart();
     else                                                          almDetailEnter();
@@ -605,6 +812,7 @@ static void almTick(){
 // ATRAS desde el detalle vuelve a la lista, no expulsa la app: misma regla que
 // ya siguen Galeria, Notas y Multimedia.
 static bool almBackScreen(){
+  if(almScreen == ALM_SCR_PHONE){ almScreen = ALM_SCR_MAIN; almRenderMain(); return true; }
   if(almScreen != ALM_SCR_DETAIL) return false;
   almScreen = ALM_SCR_MAIN;
   gMemWantFlash = false;
@@ -614,8 +822,10 @@ static bool almBackScreen(){
 // Suspendida, la app deja de pedir la medida cara de la flash. Es la diferencia
 // entre "la pantalla esta a la vista" y "la app existe".
 static void almSuspend(){ gMemWantFlash = false; }
-static void almCloseApp(){ gMemWantFlash = false; almScreen = ALM_SCR_MAIN; almDetScroll = 0; }
+static void almCloseApp(){ gMemWantFlash = false; almScreen = ALM_SCR_MAIN; almDetScroll = 0; almPhForgetArm = 0; }
 static void almResume(){
+  if(almWantPhone){ almWantPhone = false; almPhoneEnter(); return; }
   if(almScreen == ALM_SCR_DETAIL) almDetailEnter();
+  else if(almScreen == ALM_SCR_PHONE) almPhoneEnter();
   else                            almRenderMain();
 }

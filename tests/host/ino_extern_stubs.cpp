@@ -574,10 +574,22 @@ const char* flexStorageP4Id(){ return "flexos-stub"; }
 bool flexStorageOffer(char out[FST_HEX32]){ if(out) out[0] = 0; return false; }
 int  flexStoragePairBegin(const FstPairReq*, const char*, char* json, size_t cap, uint32_t* retryS){ if(retryS) *retryS = 0; if(json && cap) snprintf(json, cap, "{\"error\":\"x\"}"); return 503; }
 int  flexStoragePairPoll(const char*, const char*, char* json, size_t cap){ if(json && cap) snprintf(json, cap, "{\"error\":\"x\"}"); return 404; }
-bool flexStoragePairDecide(bool allow){ (void)allow; return false; }
-void flexStoragePairCancel(){}
-bool flexStorageSetEnabled(bool on){ (void)on; return false; }
-void flexStorageForget(){}
+// La interfaz decide y el nucleo deja de publicar el emparejamiento (como FlexOS_StorageCore).
+int gStubPairDecide = -1, gStubSetEnabled = -1, gStubForget = 0;
+bool flexStoragePairDecide(bool allow){
+  if(!gStubStorage.pairWaiting) return false;
+  gStubPairDecide = allow ? 1 : 0;
+  gStubStorage.pairWaiting = 0;
+  return true;
+}
+void flexStoragePairCancel(){ gStubStorage.pairWaiting = 0; }
+bool flexStorageSetEnabled(bool on){
+  if(gStubStorage.state != FSP_READY && gStubStorage.state != FSP_OFF) return false;
+  gStubSetEnabled = on ? 1 : 0;
+  gStubStorage.state = on ? FSP_READY : FSP_OFF;
+  return true;
+}
+void flexStorageForget(){ gStubForget++; memset(&gStubStorage, 0, sizeof(gStubStorage)); }
 bool flexStoragePhoneUsable(){ return gStubStorage.state == FSP_READY; }
 uint8_t flexStoragePhoneState(){ return gStubStorage.state; }
 bool flexStoragePhoneBase(char* out, size_t cap){ if(out && cap) out[0] = 0; return false; }

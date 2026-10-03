@@ -41,6 +41,7 @@
 static void mediaOpenInPlayer(const char* path);              // Multimedia (mas abajo)
 static void almFolderIcon(int x, int y, int s);                // Almacenamiento (mas abajo)
 static void settingsJumpAccount();                             // Ajustes -> General -> Flex Account
+static void almOpenPhone();                                    // Almacenamiento -> Flex Cloud en tu telefono
 
 #define CK_STATUS_H     72        // tarjeta de estado y cuota (tres filas)
 #define CK_CRUMB_H      30        // linea de la ruta (solo en Archivos)
@@ -96,9 +97,26 @@ static bool ckActive(){ return ckHost != NULL; }
 // Los textos caben en el aviso de la isla (DetectedModule::sub: 39 letras).
 #define CK_MSG_LINK   "Vincula tu cuenta en Ajustes > General"
 #define CK_MSG_RELINK "Vuelve a vincular en Ajustes > General"
+// Con Flex Cloud en el TELEFONO (Flex Storage) la cuenta no pinta nada: lo que
+// tiene que servir es el telefono emparejado.
+#define CK_MSG_NOPHONE "Empareja tu tel\xC3\xA9" "fono (web de Flex OS)"
+#define CK_MSG_REPAIR  "Vuelve a emparejar el tel\xC3\xA9" "fono"
+#define CK_MSG_PAUSED  "Reactiva el tel\xC3\xA9" "fono en Almacenamiento"
 static_assert(sizeof(CK_MSG_LINK) <= sizeof(((DetectedModule*)0)->sub) &&
-              sizeof(CK_MSG_RELINK) <= sizeof(((DetectedModule*)0)->sub), "el aviso de la isla cortaria el texto");
+              sizeof(CK_MSG_RELINK) <= sizeof(((DetectedModule*)0)->sub) &&
+              sizeof(CK_MSG_NOPHONE) <= sizeof(((DetectedModule*)0)->sub) &&
+              sizeof(CK_MSG_REPAIR) <= sizeof(((DetectedModule*)0)->sub) &&
+              sizeof(CK_MSG_PAUSED) <= sizeof(((DetectedModule*)0)->sub), "el aviso de la isla cortaria el texto");
+static bool ckPhoneDest(){ return flexCloudDest() == FCD_PHONE; }
 static const char* ckCloudBlock(){
+  if(ckPhoneDest()){
+    switch(flexStoragePhoneState()){
+      case FSP_READY:    return NULL;
+      case FSP_REJECTED: return CK_MSG_REPAIR;
+      case FSP_OFF:      return CK_MSG_PAUSED;
+      default:           return CK_MSG_NOPHONE;
+    }
+  }
   if(!flexAccountLinked()) return CK_MSG_LINK;
   if(!flexAccountUsable()) return CK_MSG_RELINK;
   return NULL;
@@ -234,7 +252,7 @@ static int ckMaxScroll(){
 // ##  PANTALLAS SIN LISTA (estado vacio, sin cuenta, sin red, error)
 // #############################################################
 // Boton de accion de un estado vacio (zona que se toca = zona que se pinta).
-static int ckEmptyBtnY = -1, ckEmptyBtnAct = 0;     // 1 vincular, 2 reintentar
+static int ckEmptyBtnY = -1, ckEmptyBtnAct = 0;     // 1 vincular, 2 reintentar, 3 telefono (Almacenamiento)
 static void ckEmptyState(int bx, int by, int bw, int bh, const char* title, const char* sub, const char* btn, int act){
   int cy = by + bh / 2 - 40;
   ckCloudGlyph(bx + bw / 2, cy - 30, 30, TH_SURF2);
@@ -314,12 +332,16 @@ static void ckRenderList(){
   int top = by + ckHeadH();
 
   // Sin cuenta / credencial rechazada / sin red: se dice, no se ensena una lista vacia.
+  // Con Flex Cloud en el telefono, lo mismo pero del telefono (boton 3:
+  // Almacenamiento > Flex Cloud en tu telefono).
   if(st.net == FCN_NO_ACCOUNT){
-    ckEmptyState(bx, top, bw, by + bh - top, "Sin Flex Account", "Vincula tu Flex Account para guardar fotos, v\xC3\xAD" "deos y archivos en Flex Cloud (5 GB incluidos).", "Vincular cuenta", 1);
+    if(ckPhoneDest()) ckEmptyState(bx, top, bw, by + bh - top, "Sin tel\xC3\xA9" "fono", "Activa Flex Cloud desde la web de Flex OS en tu tel\xC3\xA9" "fono: el espacio lo pone el tel\xC3\xA9" "fono (hasta 5 GB).", "C\xC3\xB3" "mo activarlo", 3);
+    else ckEmptyState(bx, top, bw, by + bh - top, "Sin Flex Account", "Vincula tu Flex Account para guardar fotos, v\xC3\xAD" "deos y archivos en Flex Cloud (5 GB incluidos).", "Vincular cuenta", 1);
     ckRowsN = 0; return;
   }
   if(st.net == FCN_AUTH){
-    ckEmptyState(bx, top, bw, by + bh - top, "Vuelve a vincular tu cuenta", st.netText, "Abrir Flex Account", 1);
+    if(ckPhoneDest()) ckEmptyState(bx, top, bw, by + bh - top, "Vuelve a emparejar el tel\xC3\xA9" "fono", "El tel\xC3\xA9" "fono ya no reconoce este Flex OS. Empareja de nuevo desde la web de Flex OS en el tel\xC3\xA9" "fono.", "Ver Flex Cloud", 3);
+    else ckEmptyState(bx, top, bw, by + bh - top, "Vuelve a vincular tu cuenta", st.netText, "Abrir Flex Account", 1);
     ckRowsN = 0; return;
   }
   if(li.state == FCL_LIST_ERROR && li.count == 0){
@@ -753,6 +775,7 @@ static void ckTick(){
   // ---- botones de los estados vacios ----
   if(ckEmptyBtnY >= 0 && T.y >= ckEmptyBtnY && T.y <= ckEmptyBtnY + 48 && abs(T.x - (bx + bw / 2)) < 110){
     if(ckEmptyBtnAct == 1){ const CkHost* h = ckHost; ckUnbind(h); if(gState != ST_APP) gState = ST_APP; settingsJumpAccount(); return; }
+    if(ckEmptyBtnAct == 3){ const CkHost* h = ckHost; ckUnbind(h); if(gState != ST_APP) gState = ST_APP; almOpenPhone(); return; }
     if(ckEmptyBtnAct == 2){ flexCloudRefresh(); ckRender(); return; }
   }
   // ---- chip "N en curso" de la tarjeta de estado: abre transferencias ----

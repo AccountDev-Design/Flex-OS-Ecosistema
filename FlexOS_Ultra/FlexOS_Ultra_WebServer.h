@@ -480,6 +480,11 @@ static uint32_t webLiveSig(){
   if(gWebState == WEBS_ON){
     uint32_t v[3] = { (uint32_t)flexWebSessionCount(&gWebCtx), gWebCtx.uploads, gWebCtx.downloads };
     h = webFnv(h, v, sizeof(v));
+    // Flex Cloud en el telefono: la linea de estado tambien es zona viva.
+    FlexStorageInfo si; flexStorageInfo(&si);
+    uint8_t k[2] = { si.state, si.reachable };
+    h = webFnv(h, k, sizeof(k));
+    h = webFnv(h, si.name, strlen(si.name));
   }
   for(int i = 0; i < WEB_CARDS; i++){
     const WebCard* c = &gWebCards[i];
@@ -501,6 +506,15 @@ static void webSheetDrawLive(int x, int y, int w, int h, int cy){
     snprintf(st, sizeof(st), "%d m\xC3\xB3vil%s conectado%s  \xC2\xB7  %lu recibidos  \xC2\xB7  %lu enviados",
              ns, ns == 1 ? "" : "es", ns == 1 ? "" : "s", (unsigned long)gWebCtx.uploads, (unsigned long)gWebCtx.downloads);
     drawTextC(x + w / 2, cy, st, 1, TH_TXT2);
+    cy += 20;
+    // Flex Cloud en el telefono (Flex Storage): se activa desde esta misma web.
+    FlexStorageInfo si; flexStorageInfo(&si);
+    char fc[96];
+    if(si.state == FSP_READY) snprintf(fc, sizeof(fc), "Flex Cloud: %s \xC2\xB7 %s", si.name[0] ? si.name : "tel\xC3\xA9" "fono", si.reachable ? "conectado" : "sin respuesta");
+    else if(si.state == FSP_REJECTED) snprintf(fc, sizeof(fc), "Flex Cloud: vuelve a emparejar el tel\xC3\xA9" "fono desde la web");
+    else if(si.state == FSP_OFF) snprintf(fc, sizeof(fc), "Flex Cloud: tel\xC3\xA9" "fono en pausa (Almacenamiento)");
+    else snprintf(fc, sizeof(fc), "Flex Cloud: act\xC3\xADvalo desde la web en tu tel\xC3\xA9" "fono");
+    drawTextC(x + w / 2, cy, fc, 1, si.state == FSP_READY && si.reachable ? TH_OK : TH_TXT2);
     cy += 22;
     // Acciones
     int bw = (w - 2 * pad - 12) / 2;
