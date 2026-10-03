@@ -2,10 +2,10 @@ package com.flexos.flexphone.link
 
 import android.content.Context
 import android.net.wifi.WifiManager
-import android.util.Log
 import com.flexos.flexphone.protocol.Discovery
 import com.flexos.flexphone.protocol.FlexAuth
 import com.flexos.flexphone.protocol.FlexLink
+import com.flexos.flexphone.protocol.LinkDiag
 import com.flexos.flexphone.protocol.PairFailure
 import com.flexos.flexphone.protocol.PairingSession
 import com.flexos.flexphone.protocol.PayloadReader
@@ -19,6 +19,8 @@ import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -70,12 +72,40 @@ class WifiLinkServer(
     private val onEvent: (Event) -> Unit,
     /** Mensajes de aplicacion ya reensamblados. */
     private val onMessage: (type: Int, payload: ByteArray) -> Unit,
+    /**
+     * La IPv4 de la Wi-Fi tal como la dice Android (ConnectivityManager). Si no
+     * se da, se recurre a recorrer las interfaces -- que NO distingue la Wi-Fi de
+     * los datos moviles: solo para pruebas de PC.
+     */
+    private val wifiAddress: () -> String? = { null },
+    /** Nombre de la interfaz Wi-Fi (`wlan0`), para no emitir la busqueda por los datos moviles. */
+    private val wifiInterface: () -> String? = { null },
 ) {
     sealed class Event {
         data class Listening(val port: Int, val address: String) : Event()
-        data class Error(val message: String) : Event()
+        /**
+         * Algo fue mal. [fatal] SOLO cuando este lado no puede seguir (no se pudo
+         * abrir el puerto, el servidor dejo de aceptar): ahi, y solo ahi, la app
+         * pasa a ERROR. Un canal que se cierra, un flujo descolocado o un reloj
+         * que no contesta son problemas del ENLACE, no de la app, y no pueden
+         * tirar lo que ya se habia conseguido.
+         */
+        data class Error(val message: String, val fatal: Boolean = false) : Event()
         data class SessionOpen(val peer: String) : Event()
-        object SessionClosed : Event()
+        /** Un Flex OS abrio un canal TCP (todavia sin autenticar). */
+        object ChannelOpened : Event()
+        /**
+         * Se cerro el canal que tenia el hueco de sesion. [authenticated]: ¿estaba
+         * autenticado? Un canal que nunca se presento NO es una sesion caida.
+         */
+        data class SessionClosed(val authenticated: Boolean = true) : Event()
+        /** La prueba del codigo se REENVIO sola por un canal nuevo (el codigo ya estaba tecleado). */
+        object ProofResent : Event()
+        /**
+         * La prueba del codigo NO llego a Flex OS (el canal se cayo al enviarla, o
+         * no contesto). NO dice nada sobre el codigo: se conserva y se reenvia.
+         */
+        data class ProofNotSent(val why: String) : Event()
         /**
          * El otro extremo pidio emparejar: hay que ensenar el campo
          * del codigo. [freshSession] es true cuando Flex OS abrio una
@@ -114,15 +144,15 @@ class WifiLinkServer(
     companion object {
         private const val TAG = "FlexPhone/WifiLink"
         // #########################################################
-        // ##  LOGS DEL ENLACE
+        // ##  REGISTRO DEL ENLACE
         // ##  --------------------------------------------------
-        // ##  Encendido mientras se persigue un problema de
-        // ##  estabilidad; a false en produccion. No imprime NUNCA
-        // ##  contenido de mensajes ni material de clave: solo el
-        // ##  numero de conexion y el motivo del cierre, que es lo
-        // ##  que hace falta para saber quien cuelga primero.
+        // ##  Todo lo que antes iba a logcat (y estaba ENCENDIDO en el
+        // ##  repositorio) va ahora a LinkDiag: un anillo acotado y
+        // ##  silencioso que se lee en Diagnostico, y que solo se copia a
+        // ##  logcat si la persona enciende "Registro detallado". No
+        // ##  apunta NUNCA contenido de mensajes ni material de clave:
+        // ##  solo el numero de conexion y el motivo del cierre.
         // #########################################################
-        private const val DEBUG_LINK = true
         // Los MISMOS numeros que FlexOS_FlexPhone_WiFi.h. Cambiar uno
         // solo en un lado deja al telefono y al reloj sin encontrarse,
         // y sin ningun error que lo explique.
@@ -207,6 +237,10 @@ class WifiLinkServer(
         private const val MAX_CONNS = 4
         /** Cuantos mensajes recientes se recuerdan por conexion para detectar reenvios. */
         private const val SEEN_N = 32
+        /** Tramas pendientes de salir por conexion. Una trama son <= 244 B. */
+        private const val TX_QUEUE_MAX = 64
+        /** Trama vacia que despierta al hilo de salida para que termine. */
+        private val TX_POISON = ByteArray(0)
         /** Ordenes de Flex OS que se ACUSAN: las que el reloj manda "con acuse". */
         private val ACKED_TYPES = intArrayOf(
             FlexLink.T_RELAY_START, FlexLink.T_RELAY_STOP,
@@ -248,8 +282,8 @@ class WifiLinkServer(
                 setReferenceCounted(false)
                 acquire()
             }
-        }.onFailure { Log.w(TAG, "no se pudo tomar el cerrojo de multidifusion") }
-        Log.d(TAG, "cerrojo de multidifusion: ${if (multicastLock?.isHeld == true) "tomado" else "NO"}")
+        }.onFailure { LinkDiag.w(TAG, "no se pudo tomar el cerrojo de multidifusion") }
+        LinkDiag.d(TAG, "cerrojo de multidifusion: ${if (multicastLock?.isHeld == true) "tomado" else "NO"}")
     }
 
     private fun releaseMulticast() {
@@ -302,6 +336,19 @@ class WifiLinkServer(
         // `synchronized(this)` al enmarcar.
         var txCounter = 0L
         var txPacket = 1
+        /** Latidos recibidos por esta conexion (solo para el diagnostico). */
+        var pings = 0
+
+        /**
+         * COLA DE SALIDA. Nadie escribe en el socket salvo el hilo `flex-link-tx-N`
+         * de ESTA conexion: el resto de la app (hilo principal incluido) solo
+         * encola tramas ya enmarcadas. Acotada: si el otro extremo no lee, se
+         * descarta y se cuenta; no se bloquea a nadie ni crece sin limite.
+         */
+        val txQueue = LinkedBlockingQueue<ByteArray>(TX_QUEUE_MAX)
+        /** Hilo que hizo la ULTIMA escritura al socket (para el diagnostico y las pruebas). */
+        @Volatile var lastWriteThread: String = ""
+        @Volatile var txDropped = 0
 
         /**
          * Los ultimos mensajes de aplicacion recibidos, por (tipo, id de
@@ -361,6 +408,19 @@ class WifiLinkServer(
     // =========================================================
     //  Arranque y parada
     // =========================================================
+    /**
+     * Entrega un evento a quien escucha SIN dejar que su fallo salga de aqui.
+     *
+     * Los eventos se emiten desde los hilos de conexion: una excepcion del oyente
+     * (la pantalla, el servicio) subiria hasta `serve()` y cerraria la sesion por
+     * un fallo que no es del enlace.
+     */
+    private fun emit(ev: Event) {
+        try { onEvent(ev) } catch (e: Exception) {
+            LinkDiag.w(TAG, "el oyente de ${ev::class.simpleName} fallo: ${e.javaClass.simpleName}")
+        }
+    }
+
     fun start(): Boolean {
         if (running.get()) return true
         return try {
@@ -374,17 +434,19 @@ class WifiLinkServer(
                 bind(InetSocketAddress(UDP_PORT))
             }
             running.set(true)
+            probeExec = newProbeExec()
             acquireMulticast()
             tcpThread = Thread({ acceptLoop() }, "flex-link-tcp").apply { isDaemon = true; start() }
             udpThread = Thread({ discoveryLoop() }, "flex-link-udp").apply { isDaemon = true; start() }
-            onEvent(Event.Listening(server!!.localPort, localWifiAddress() ?: "?"))
+            emit(Event.Listening(server!!.localPort, localWifiAddress() ?: "?"))
             true
         } catch (e: Exception) {
             // El motivo REAL, no un generico: un puerto ocupado y un
             // telefono sin Wi-Fi se arreglan de formas distintas.
-            onEvent(Event.Error(
+            emit(Event.Error(
                 if (e is java.net.BindException) "el puerto $TCP_PORT ya esta en uso"
-                else "no se pudo abrir el enlace"
+                else "no se pudo abrir el enlace",
+                fatal = true,
             ))
             stop()
             false
@@ -405,6 +467,7 @@ class WifiLinkServer(
         closeActive("servidor parado")
         runCatching { server?.close() }; server = null
         runCatching { udp?.close() }; udp = null
+        runCatching { probeExec?.shutdownNow() }; probeExec = null
         tcpThread = null
         udpThread = null
     }
@@ -414,7 +477,7 @@ class WifiLinkServer(
     // =========================================================
     private fun discoveryLoop() {
         val buf = ByteArray(96)
-        Log.d(TAG, "descubrimiento escuchando en UDP $UDP_PORT")
+        LinkDiag.d(TAG, "descubrimiento escuchando en UDP $UDP_PORT")
         while (running.get()) {
             try {
                 val pkt = DatagramPacket(buf, buf.size)
@@ -423,7 +486,7 @@ class WifiLinkServer(
                 //     ESP32 si dice que emite, el controlador Wi-Fi esta
                 //     filtrando la difusion (ver el cerrojo de arriba) o
                 //     el router aisla a los clientes entre si.
-                Log.d(TAG, "(b) ${pkt.length} B de ${pkt.address?.hostAddress}:${pkt.port}")
+                LinkDiag.d(TAG, "(b) ${pkt.length} B de ${pkt.address?.hostAddress}:${pkt.port}")
                 when {
                     Discovery.isProbe(buf, pkt.length) -> onWatchProbe(buf, pkt)
                     Discovery.isAnswer(buf, pkt.length) -> onWatchAnswer(buf, pkt)
@@ -432,7 +495,7 @@ class WifiLinkServer(
                     // emitio. No es un fallo.
                 }
             } catch (e: Exception) {
-                if (running.get()) Log.w(TAG, "descubrimiento detenido: ${e.javaClass.simpleName}")
+                if (running.get()) LinkDiag.w(TAG, "descubrimiento detenido: ${e.javaClass.simpleName}")
                 break
             }
         }
@@ -444,7 +507,7 @@ class WifiLinkServer(
         // Una version que no entendemos NO se contesta: seria invitar a
         // una conexion que va a fallar despues.
         if (probe.ver < FlexLink.VERSION_MIN) {
-            Log.w(TAG, "(b) sonda de protocolo v${probe.ver}, se necesita v${FlexLink.VERSION_MIN}")
+            LinkDiag.w(TAG, "(b) sonda de protocolo v${probe.ver}, se necesita v${FlexLink.VERSION_MIN}")
             return
         }
         val p = server?.localPort ?: TCP_PORT
@@ -453,14 +516,14 @@ class WifiLinkServer(
         // (c) contestado. Si se ve esto y el ESP32 no registra su (d),
         //     la respuesta se pierde de vuelta -- ahi ya es la red, no
         //     el codigo.
-        Log.d(TAG, "(c) respondido a ${pkt.address?.hostAddress}:${pkt.port}, puerto TCP $p")
+        LinkDiag.d(TAG, "(c) respondido a ${pkt.address?.hostAddress}:${pkt.port}, puerto TCP $p")
     }
 
     /** El reloj contesta a NUESTRA busqueda: entra en la lista. */
     private fun onWatchAnswer(buf: ByteArray, pkt: DatagramPacket) {
         val a = Discovery.parseAnswer(buf, pkt.length) ?: return
         if (a.ver < FlexLink.VERSION_MIN) {
-            Log.w(TAG, "(2) un reloj contesto con protocolo v${a.ver}, se necesita v${FlexLink.VERSION_MIN}")
+            LinkDiag.w(TAG, "(2) un reloj contesto con protocolo v${a.ver}, se necesita v${FlexLink.VERSION_MIN}")
             return
         }
         val addr = pkt.address?.hostAddress ?: return
@@ -469,7 +532,7 @@ class WifiLinkServer(
         //     ida y la vuelta funcionan; si no se ve nunca, el problema
         //     esta en la red (aislamiento de clientes) o el reloj no
         //     tiene el enlace encendido.
-        Log.d(TAG, "(2) reloj: ${w.name} (${w.id}) en ${w.address}${if (w.pairing) " [emparejando]" else ""}")
+        LinkDiag.d(TAG, "(2) reloj: ${w.name} (${w.id}) en ${w.address}${if (w.pairing) " [emparejando]" else ""}")
         synchronized(watches) { watches[w.id] = w }
         publishWatches()
     }
@@ -488,47 +551,71 @@ class WifiLinkServer(
             watches.entries.removeAll { now - it.value.seenAt > WATCH_TTL_MS }
             watches.values.sortedBy { it.name }
         }
-        onEvent(Event.WatchesFound(live))
+        emit(Event.WatchesFound(live))
     }
 
     private fun askPacket(): ByteArray =
         Discovery.buildAsk(server?.localPort ?: TCP_PORT, phoneName)
 
     /**
+     * Quien envia los paquetes UDP de busqueda: UN hilo propio.
+     *
+     * Estas dos funciones las llama la INTERFAZ (el hilo principal) y Android
+     * lanza NetworkOnMainThreadException en cuanto el hilo principal envia un
+     * datagrama. Antes la excepcion se tragaba en un `runCatching`: la busqueda
+     * "no emitia a ningun destino" y la pantalla decia "este telefono no tiene
+     * una direccion en ninguna red Wi-Fi" teniendola, y "Preguntar a esta
+     * direccion" contestaba "Esa no es una direccion valida" con una IP buena.
+     */
+    @Volatile private var probeExec: java.util.concurrent.ExecutorService? = null
+
+    private fun newProbeExec(): java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "flex-link-probe").apply { isDaemon = true }
+        }
+
+    /**
      * Pregunta a toda la red quien es un Flex OS.
      *
-     * Devuelve a cuantos destinos se pudo emitir. Cero significa que
-     * este telefono no pudo mandar NADA -- sin Wi-Fi, o la interfaz
-     * sin direccion --, y eso se dice en pantalla en vez de dejar un
-     * buscador girando.
+     * Devuelve a cuantos destinos se EMITIRA. Cero significa que este telefono
+     * no tiene ningun destino -- sin Wi-Fi, o la interfaz sin direccion --, y
+     * eso se dice en pantalla en vez de dejar un buscador girando. El envio en
+     * si sale en otro hilo; no se espera.
      */
     fun probeForWatches(): Int {
         val u = udp ?: return 0
+        val ex = probeExec ?: return 0
         val pkt = askPacket()
-        var sent = 0
-        // Difusion DIRIGIDA de cada interfaz activa. Es la que menos
-        // molesta y la que mas pilas dejan pasar.
+        val dests = ArrayList<InetAddress>()
+        // Difusion DIRIGIDA de cada interfaz Wi-Fi activa. Es la que menos
+        // molesta y la que mas pilas dejan pasar. (Listar interfaces no es E/S
+        // de red: se puede hacer desde cualquier hilo.)
         runCatching {
+            val only = wifiInterface()
             NetworkInterface.getNetworkInterfaces().toList()
-                .filter { it.isUp && !it.isLoopback }
+                .filter { it.isUp && !it.isLoopback && (only == null || it.name == only) }
                 .flatMap { it.interfaceAddresses }
                 .mapNotNull { it.broadcast }
                 .distinct()
-                .forEach { b ->
-                    runCatching { u.send(DatagramPacket(pkt, pkt.size, b, UDP_PORT)); sent++ }
-                }
+                .forEach { dests.add(it) }
         }
         // Y la LIMITADA, porque hay puntos de acceso que filtran la
-        // dirigida y dejan pasar esta. Son 40 bytes.
-        runCatching {
-            u.send(DatagramPacket(pkt, pkt.size, InetAddress.getByName("255.255.255.255"), UDP_PORT))
-            sent++
+        // dirigida y dejan pasar esta. Son 40 bytes. (Literal: sin DNS.)
+        runCatching { dests.add(InetAddress.getByAddress(byteArrayOf(-1, -1, -1, -1))) }
+        if (dests.isEmpty()) return 0
+        try {
+            ex.execute {
+                var sent = 0
+                for (d in dests) runCatching { u.send(DatagramPacket(pkt, pkt.size, d, UDP_PORT)); sent++ }
+                // (1) emitido. Si esto sale y nunca llega un (2), la red esta
+                //     filtrando la difusion o aislando a los clientes: para eso
+                //     esta probeHost.
+                LinkDiag.d(TAG, "(1) busqueda emitida a $sent/${dests.size} destinos")
+            }
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            return 0                       // el servidor se esta parando
         }
-        // (1) emitido. Si esto sale y nunca llega un (2), la red esta
-        //     filtrando la difusion o aislando a los clientes: para eso
-        //     esta probeHost.
-        Log.d(TAG, "(1) busqueda emitida a $sent destinos")
-        return sent
+        return dests.size
     }
 
     /**
@@ -539,23 +626,33 @@ class WifiLinkServer(
      * va en unidifusion, que no filtra nadie, y al recibirlo el reloj
      * aprende la IP y el puerto de este telefono del propio paquete --
      * asi que puede conectar sin haber descubierto nada.
+     *
+     * Devuelve false SOLO si lo tecleado no es una IPv4 valida. El envio sale en
+     * otro hilo (ver [probeExec]).
      */
     fun probeHost(ip: String): Boolean {
         val u = udp ?: return false
-        return runCatching {
-            val a = InetAddress.getByName(ip.trim())
-            val pkt = askPacket()
-            u.send(DatagramPacket(pkt, pkt.size, a, UDP_PORT))
-            Log.d(TAG, "(1) busqueda directa a $ip")
-            true
-        }.getOrElse {
-            Log.w(TAG, "direccion invalida: $ip")
-            false
+        val ex = probeExec ?: return false
+        val m = Regex("^(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})$").matchEntire(ip.trim())
+        val o = m?.groupValues?.drop(1)?.map { it.toInt() }
+        if (o == null || o.any { it > 255 }) {
+            LinkDiag.w(TAG, "direccion invalida: $ip")
+            return false
         }
+        // Por octetos, NUNCA getByName: con un nombre haria DNS (red) en este hilo.
+        val a = InetAddress.getByAddress(ByteArray(4) { o[it].toByte() })
+        val pkt = askPacket()
+        return try {
+            ex.execute {
+                runCatching { u.send(DatagramPacket(pkt, pkt.size, a, UDP_PORT)); LinkDiag.d(TAG, "(1) busqueda directa a $ip") }
+                    .onFailure { LinkDiag.w(TAG, "no se pudo preguntar a $ip: ${it.javaClass.simpleName}") }
+            }
+            true
+        } catch (e: java.util.concurrent.RejectedExecutionException) { false }
     }
 
     /** IP local de la interfaz Wi-Fi, para ensenarla. Null si no hay. */
-    fun localWifiAddress(): String? = runCatching {
+    fun localWifiAddress(): String? = wifiAddress() ?: runCatching {
         NetworkInterface.getNetworkInterfaces().toList()
             .asSequence()
             .filter { it.isUp && !it.isLoopback }
@@ -563,6 +660,20 @@ class WifiLinkServer(
             .firstOrNull { !it.isLoopbackAddress && it is java.net.Inet4Address }
             ?.hostAddress
     }.getOrNull()
+
+    /**
+     * La red Wi-Fi cambio (otra IP, otra banda, se fue y volvio).
+     *
+     * El servidor escucha en TODAS las interfaces (0.0.0.0), asi que NO hay que
+     * volver a abrir ningun socket: lo que si cambia es lo que se ensena y lo
+     * que se anuncia. Aqui solo se renueva el cerrojo de multidifusion (el
+     * controlador Wi-Fi reconfigura sus filtros al cambiar de red) cuando no hay
+     * sesion, y se deja constancia.
+     */
+    fun onNetworkChanged() {
+        LinkDiag.d(TAG, "NET_CHANGED ip=${localWifiAddress() ?: "ninguna"} sesion=${hasSession()}")
+        if (running.get() && !hasSession()) { releaseMulticast(); acquireMulticast() }
+    }
 
     // =========================================================
     //  Aceptacion
@@ -572,7 +683,7 @@ class WifiLinkServer(
             val s = try {
                 server?.accept() ?: break
             } catch (e: Exception) {
-                if (running.get()) onEvent(Event.Error("el enlace dejo de aceptar conexiones"))
+                if (running.get()) emit(Event.Error("el enlace dejo de aceptar conexiones", fatal = true))
                 break
             }
             // #####################################################
@@ -595,7 +706,7 @@ class WifiLinkServer(
             // ##  no puede desalojar a nadie.
             // #####################################################
             if (liveConns.get() >= MAX_CONNS) {
-                Log.d(TAG, "CLIENT_REJECTED: demasiadas conexiones a la vez")
+                LinkDiag.d(TAG, "CLIENT_REJECTED: demasiadas conexiones a la vez")
                 runCatching { s.close() }
                 continue
             }
@@ -609,7 +720,9 @@ class WifiLinkServer(
             // emparejamiento y los envios tengan por donde salir.
             conn.compareAndSet(null, c)
             liveConns.incrementAndGet()
-            Log.d(TAG, "CLIENT_ACCEPTED #${c.id} ${s.inetAddress?.hostAddress}")
+            LinkDiag.d(TAG, "CLIENT_ACCEPTED #${c.id} ${s.inetAddress?.hostAddress}")
+            emit(Event.ChannelOpened)
+            Thread({ txLoop(c) }, "flex-link-tx-${c.id}").apply { isDaemon = true; start() }
             Thread({ serve(c) }, "flex-link-conn-${c.id}").apply { isDaemon = true; start() }
         }
     }
@@ -670,7 +783,7 @@ class WifiLinkServer(
                 if (!c.authed && now > deadline) {
                     val expired = pair != null
                     why = if (expired) "el codigo caduco" else "no se autentico a tiempo"
-                    onEvent(Event.PairingFailed(
+                    emit(Event.PairingFailed(
                         if (expired)
                             "el codigo de Flex OS caduco; vuelve a pulsar \"Emparejar telefono\" en el reloj"
                         else "la otra parte no se autentico",
@@ -693,10 +806,9 @@ class WifiLinkServer(
                     // Sin respuesta no es "codigo mal": el codigo se
                     // conserva y se reenvia si el canal vuelve.
                     pairing?.onSendFailed()
-                    onEvent(Event.PairingFailed(
+                    emit(Event.ProofNotSent(
                         "Flex OS no contesto al codigo. Comprueba que los dos siguen en la misma red " +
                             "y vuelve a intentarlo.",
-                        PairFailure.LINK,
                     ))
                 }
                 // #############################################
@@ -726,7 +838,7 @@ class WifiLinkServer(
                 val pairingNow = pair != null && !pair.isExpired(now)
                 if (!pairingNow && now - lastRx > IDLE_TIMEOUT_MS) {
                     why = "sin respuesta en ${IDLE_TIMEOUT_MS / 1000} s"
-                    onEvent(Event.Error("sin respuesta de Flex OS"))
+                    emit(Event.Error("sin respuesta de Flex OS"))
                     break
                 }
                 val room = ACC_MAX - accN
@@ -734,7 +846,7 @@ class WifiLinkServer(
                     // Lleno sin una trama completa: el otro extremo no
                     // habla este protocolo.
                     why = "flujo sin tramas validas"
-                    onEvent(Event.Error("el otro extremo no habla Flex Link"))
+                    emit(Event.Error("el otro extremo no habla Flex Link"))
                     break
                 }
                 val got = try { input.read(acc, accN, room) } catch (e: java.net.SocketTimeoutException) {
@@ -774,12 +886,12 @@ class WifiLinkServer(
         var at = 0
         while (accN - at >= FlexLink.HDR_SIZE) {
             if (acc[at] != 0xF1.toByte() || acc[at + 1] != 0x58.toByte()) {
-                onEvent(Event.Error("el flujo llego descolocado"))
+                emit(Event.Error("el flujo llego descolocado"))
                 return null
             }
             val len = (acc[at + 10].toInt() and 0xFF) or ((acc[at + 11].toInt() and 0xFF) shl 8)
             if (len > FlexLink.MAX_PAYLOAD) {
-                onEvent(Event.Error("trama de tamano imposible"))
+                emit(Event.Error("trama de tamano imposible"))
                 return null
             }
             val total = FlexLink.HDR_SIZE + len
@@ -802,8 +914,8 @@ class WifiLinkServer(
             // un "no conecta" sin explicacion en las dos puntas.
             if (r is FlexLink.ReadResult.BadVersion) {
                 sendRaw(c, FlexLink.T_ERR, byteArrayOf(FlexLink.E_VERSION.toByte()), 0)
-                onEvent(Event.Error("Flex OS habla otra version del protocolo"))
-                Log.d(TAG, "CLOSE_REQUEST conn=#${c.id} reason=version incompatible")
+                emit(Event.Error("Flex OS habla otra version del protocolo"))
+                LinkDiag.d(TAG, "CLOSE_REQUEST conn=#${c.id} reason=version incompatible")
                 runCatching { c.socket.close() }
             }
             return
@@ -826,12 +938,14 @@ class WifiLinkServer(
             // que le dice al reloj que este socket sigue vivo.
             FlexLink.T_PING -> {
                 sendRaw(c, FlexLink.T_PONG, ByteArray(0), h.session)
-                if (DEBUG_LINK) Log.d(TAG, "PING_RECEIVED #${c.id} -> PONG_SENT")
+                // Solo el PRIMER latido de cada conexion: uno cada 8 s llenaria el
+                // anillo de diagnostico y echaria fuera lo que de verdad importa.
+                if (++c.pings == 1) LinkDiag.d(TAG, "PING_RECEIVED #${c.id} (primer latido; PONG enviado)")
             }
             FlexLink.T_PONG -> { /* latido: nada que hacer */ }
             FlexLink.T_ERR -> onPeerError(c, body)
             FlexLink.T_BYE -> {
-                Log.d(TAG, "CLOSE_REQUEST conn=#${c.id} reason=BYE de Flex OS")
+                LinkDiag.d(TAG, "CLOSE_REQUEST conn=#${c.id} reason=BYE de Flex OS")
                 runCatching { c.socket.close() }
             }
             else -> if (c.authed) {
@@ -840,8 +954,14 @@ class WifiLinkServer(
                 if (h.type in ACKED_TYPES) {
                     sendRaw(c, FlexLink.T_ACK, PayloadWriter().u16(h.packet).build(), h.session)
                 }
-                if (c.firstSight(h.type, h.packet, h.frag)) onMessage(h.type, body)
-                else if (DEBUG_LINK) Log.d(TAG, "DUPLICATE_DROPPED #${c.id} type=0x%02x packet=${h.packet}".format(h.type))
+                if (c.firstSight(h.type, h.packet, h.frag)) {
+                    // Si la orden falla (Android niega arrancar un servicio, por
+                    // ejemplo), se anota: NO es motivo para cerrar la sesion.
+                    try { onMessage(h.type, body) } catch (e: Exception) {
+                        LinkDiag.w(TAG, "la orden 0x%02x fallo: ${e.javaClass.simpleName}".format(h.type))
+                    }
+                }
+                else LinkDiag.d(TAG, "DUPLICATE_DROPPED #${c.id} type=0x%02x packet=${h.packet}".format(h.type))
             }
         }
     }
@@ -880,7 +1000,7 @@ class WifiLinkServer(
             FlexLink.E_TIMEOUT -> PairFailure.CODE_EXPIRED
             else -> PairFailure.LINK
         }
-        Log.w(TAG, "T_ERR de Flex OS: $code -- $why")
+        LinkDiag.w(TAG, "T_ERR de Flex OS: $code -- $why")
         when (kind) {
             // Un codigo rechazado NO tira la sesion: el reloj sigue
             // ensenando EL MISMO codigo, asi que el usuario puede
@@ -890,7 +1010,7 @@ class WifiLinkServer(
             PairFailure.CODE_EXPIRED -> pairing = null
             PairFailure.LINK -> { /* la sesion la decide su propio plazo */ }
         }
-        if (c.authed) onEvent(Event.Error(why)) else onEvent(Event.PairingFailed(why, kind))
+        if (c.authed) emit(Event.Error(why)) else emit(Event.PairingFailed(why, kind))
     }
 
     private fun onHello(c: Conn, body: ByteArray) {
@@ -899,7 +1019,7 @@ class WifiLinkServer(
         c.flexosId = rd.str()
         if (ver < FlexLink.VERSION_MIN) {
             sendRaw(c, FlexLink.T_ERR, byteArrayOf(FlexLink.E_VERSION.toByte()), 0)
-            onEvent(Event.Error("Flex OS habla una version anterior del protocolo"))
+            emit(Event.Error("Flex OS habla una version anterior del protocolo"))
             return
         }
         val w = PayloadWriter()
@@ -950,7 +1070,7 @@ class WifiLinkServer(
         // El PAIR_CONFIRM saldra POR AQUI: la sal llego por este socket.
         pairConn = c
         val sess = pairing ?: return
-        Log.d(TAG, "PAIR_CODE de $hostId: sesion ${if (same) "en curso" else "NUEVA"}")
+        LinkDiag.d(TAG, "PAIR_CODE de $hostId: sesion ${if (same) "en curso" else "NUEVA"}")
 
         // Solo se contesta solo con un codigo que se tecleo PARA ESTA
         // sal. En cualquier otro caso se le pide al usuario: en ningun
@@ -966,16 +1086,16 @@ class WifiLinkServer(
                 if (sendRaw(c, FlexLink.T_PAIR_CONFIRM, again.proof, 0)) {
                     c.sessionKey = again.key
                     pairSentAt = now
-                    Log.d(TAG, "PAIR_CONFIRM reenviado por el canal nuevo")
+                    LinkDiag.d(TAG, "PAIR_CONFIRM reenviado por el canal nuevo")
+                    emit(Event.ProofResent)
                 } else {
                     sess.onSendFailed()
-                    onEvent(Event.PairingFailed(
-                        "se corto la conexion al enviar el codigo", PairFailure.LINK))
+                    emit(Event.ProofNotSent("se corto la conexion al enviar el codigo"))
                 }
                 return
             }
         }
-        onEvent(Event.PairingRequested(freshSession = !same))
+        emit(Event.PairingRequested(freshSession = !same))
     }
 
     /**
@@ -988,7 +1108,7 @@ class WifiLinkServer(
      */
     fun submitPairingCode(code: String): Result {
         val sess = pairing ?: run {
-            Log.w(TAG, "codigo tecleado pero Flex OS aun no ha mandado su sal")
+            LinkDiag.w(TAG, "codigo tecleado pero Flex OS aun no ha mandado su sal")
             return Result.NO_SESSION
         }
         // Por la conexion que trajo la sal, no por "la activa": durante
@@ -1000,7 +1120,7 @@ class WifiLinkServer(
                 if (sendRaw(c, FlexLink.T_PAIR_CONFIRM, r.proof, 0)) {
                     c.sessionKey = r.key
                     pairSentAt = now
-                    Log.d(TAG, "PAIR_CONFIRM enviado")
+                    LinkDiag.d(TAG, "PAIR_CONFIRM enviado")
                     Result.SENT
                 } else {
                     // NO es un rechazo: la prueba no llego a salir. El
@@ -1061,7 +1181,7 @@ class WifiLinkServer(
             // el usuario borro los datos de la app. Se dice, en vez de
             // dejar a Flex OS esperando una respuesta que no llegara.
             sendRaw(c, FlexLink.T_ERR, byteArrayOf(FlexLink.E_NOTPAIRED.toByte()), sess)
-            onEvent(Event.PairingFailed(
+            emit(Event.PairingFailed(
                 "este telefono ya no tiene el vinculo guardado", PairFailure.LINK))
             return
         }
@@ -1083,28 +1203,37 @@ class WifiLinkServer(
         val got = rd.bytes(FlexAuth.PROOF_SIZE)
         if (!rd.ok) return
         if (!FlexAuth.verify(key, FlexAuth.ROLE_HOST, n, sess, got)) {
-            onEvent(Event.PairingFailed(
+            emit(Event.PairingFailed(
                 "quien contesta no es el Flex OS emparejado", PairFailure.LINK))
-            Log.d(TAG, "CLOSE_REQUEST conn=#${c.id} reason=la prueba de Flex OS no cuadra")
+            LinkDiag.d(TAG, "CLOSE_REQUEST conn=#${c.id} reason=la prueba de Flex OS no cuadra")
             runCatching { c.socket.close() }
             return
         }
         // Emparejamiento nuevo: ahora SI se guarda la clave. No antes:
         // guardarla al derivarla dejaria un vinculo con quien resulto
         // no ser Flex OS.
-        if (bondKey() == null) onPaired(key, c.flexosId)
+        if (bondKey() == null) {
+            // Guardar el vinculo puede fallar (Keystore). Si falla NO se abre sesion
+            // con un vinculo que no existe: se dice y se cierra este canal.
+            try { onPaired(key, c.flexosId) } catch (e: Exception) {
+                LinkDiag.w(TAG, "no se pudo guardar el vinculo: ${e.javaClass.simpleName}")
+                emit(Event.PairingFailed("no se pudo guardar el vinculo en este telefono", PairFailure.LINK))
+                runCatching { c.socket.close() }
+                return
+            }
+        }
         c.session = sess
         c.authed = true
         pairSentAt = 0L
         // AUTENTICADO: ahora si, esta conexion es LA sesion.
         claimSession(c)
-        Log.d(TAG, "SESSION_CONNECTED #${c.id} sesion=$sess")
+        LinkDiag.d(TAG, "SESSION_CONNECTED #${c.id} sesion=$sess")
         // El emparejamiento se cerro: la sesion (y con ella el codigo
         // tecleado y la clave a medio derivar) deja de existir.
         pairing?.onAccepted()
         pairing = null
         releaseMulticast()          // con sesion abierta ya no hay que oir sondas
-        onEvent(Event.SessionOpen(c.socket.inetAddress?.hostAddress ?: "?"))
+        emit(Event.SessionOpen(c.socket.inetAddress?.hostAddress ?: "?"))
     }
 
     /**
@@ -1119,26 +1248,26 @@ class WifiLinkServer(
     /**
      * TODO cierre pasa por aqui, y TODO cierre deja constancia.
      *
-     * Con `DEBUG_LINK` encendido se imprime, por cada cierre, quien lo
-     * pidio y en que estado estaba: sin eso, "se desconecta" es todo
+     * Se apunta en LinkDiag, por cada cierre, quien lo pidio y en que
+     * estado estaba: sin eso, "se desconecta" es todo
      * lo que se sabe, y no se puede distinguir un socket que murio de
      * una limpieza que cerro lo que no era suyo.
      */
     private fun closeSession(c: Conn, why: String?) {
-        if (DEBUG_LINK) {
-            Log.d(TAG, "CLOSE_REQUEST conn=#${c.id} reason=$why " +
-                "thread=${Thread.currentThread().name} " +
-                "authenticated=${c.authed} owner=${conn.get() === c} " +
-                "aliveConns=${liveConns.get()} upMs=${System.currentTimeMillis() - c.openedAt}")
-        }
         val owner = conn.compareAndSet(c, null)
+        val upMs = System.currentTimeMillis() - c.openedAt
         if (pairConn === c) pairConn = null
         runCatching { c.socket.close() }
+        c.txQueue.offer(TX_POISON)         // despierta al hilo de salida para que termine
+        // UNA sola linea por cierre, con todo lo que hace falta para saber quien
+        // cuelga primero: quien lo pidio (hilo), por que, si estaba autenticado,
+        // si era la conexion con la sesion y cuanto duro.
+        LinkDiag.d(TAG, "CLOSE #${c.id} reason=$why thread=${Thread.currentThread().name} " +
+            "authed=${c.authed} owner=$owner conns=${liveConns.get()} upMs=$upMs")
         if (!owner) {
             // Esta conexion ya habia sido relevada -- o nunca llego a
             // tener la sesion. Se cierra su propio socket y se sale sin
             // avisar a nadie: la sesion buena es de otro y sigue viva.
-            Log.d(TAG, "SOCKET_CLOSED conn=#${c.id} (sin sesion) reason=$why")
             return
         }
         pairSentAt = 0L
@@ -1150,15 +1279,16 @@ class WifiLinkServer(
         // un emparejamiento completado, o `stop()`.
         // Sin sesion vuelve a hacer falta oir las sondas del reloj.
         if (running.get()) acquireMulticast()
-        Log.d(TAG, "CLIENT_DISCONNECTED conn=#${c.id} reason=$why " +
-            "upMs=${System.currentTimeMillis() - c.openedAt}")
-        onEvent(Event.SessionClosed)
+        emit(Event.SessionClosed(authenticated = c.authed))
     }
 
     /** Cierra la conexion activa, si la hay. Para `stop()` y para revocar. */
     private fun closeActive(why: String?) {
         conn.get()?.let { closeSession(it, why) }
     }
+
+    /** Cierra SOLO la sesion abierta (el servidor sigue escuchando). Para olvidar el vinculo. */
+    fun dropSession(why: String) = closeActive(why)
 
     /**
      * [c] acaba de autenticarse: se queda con la sesion y desaloja a
@@ -1176,7 +1306,7 @@ class WifiLinkServer(
     private fun claimSession(c: Conn) {
         val old = conn.getAndSet(c)
         if (old != null && old !== c) {
-            Log.d(TAG, "SESSION_HANDOVER conn=#${old.id} -> conn=#${c.id} " +
+            LinkDiag.d(TAG, "SESSION_HANDOVER conn=#${old.id} -> conn=#${c.id} " +
                 "(la vieja llevaba ${System.currentTimeMillis() - old.openedAt} ms)")
             runCatching { old.socket.close() }   // su hilo lo vera y se ira
         }
@@ -1193,50 +1323,110 @@ class WifiLinkServer(
     }
 
     /**
-     * Enmarca y escribe POR UNA CONEXION CONCRETA.
+     * Enmarca y ENCOLA POR UNA CONEXION CONCRETA. No escribe en el socket.
+     *
+     * #############################################################
+     * ##  NADIE ESCRIBE EN EL SOCKET DESDE FUERA DE SU HILO DE SALIDA
+     * ##  ------------------------------------------------------
+     * ##  ESTE ES UN DEFECTO QUE SOLO SE VE EN UN ANDROID DE VERDAD.
+     * ##
+     * ##  Android lanza `NetworkOnMainThreadException` si el hilo
+     * ##  PRINCIPAL toca un socket. Y esta funcion se llamaba, sin
+     * ##  querer, desde el hilo principal en todos estos sitios:
+     * ##
+     * ##    · el boton "Emparejar" (submitPairingCode);
+     * ##    · onNotificationPosted / onNotificationRemoved (el servicio de
+     * ##      notificaciones se ejecuta en el hilo principal);
+     * ##    · las llamadas de MediaController (cada cambio de reproduccion);
+     * ##    · BrowserRelayService.onStartCommand / onDestroy
+     * ##      (state.setRelay).
+     * ##
+     * ##  La excepcion la cogia el `catch (e: Exception)` de aqui y la
+     * ##  trataba como "el socket murio": `closeSession(...)`. O sea que
+     * ##  CADA una de esas cosas CERRABA LA SESION DEL ENLACE: pulsar
+     * ##  "Emparejar" la tiraba (la pantalla del codigo desaparecia y
+     * ##  volvia a "Esperando a Flex OS"), una notificacion o un cambio
+     * ##  de cancion la tiraba, y activar el relay la tiraba. El reloj
+     * ##  reconectaba en un par de segundos y el ciclo empezaba otra vez.
+     * ##  Las pruebas de PC no lo veian porque la JVM de escritorio no
+     * ##  tiene ese guardian.
+     * ##
+     * ##  Ahora el hilo que llama solo COLOCA tramas en una cola acotada
+     * ##  (no hace E/S, no espera) y las escribe `txLoop`, en su propio
+     * ##  hilo. Un fallo REAL de escritura cierra la sesion; que la cola
+     * ##  este llena, no.
+     * #############################################################
      *
      * El contador y el numero de paquete son de esa conexion, y el
      * cerrojo tambien: dos conexiones solapadas ya no pueden pisarse
      * el contador ni entrelazar los bytes de sus tramas en el flujo
      * de la otra.
+     *
+     * Devuelve true si TODAS las tramas del mensaje quedaron en la cola.
      */
     private fun sendRaw(c: Conn, type: Int, payload: ByteArray, sess: Int): Boolean {
         // Se trocea segun el MTU del protocolo. Un mensaje medio
-        // entregado no se puede reensamblar, asi que el fallo de un
-        // fragmento invalida el mensaje entero.
+        // entregado no se puede reensamblar, asi que o entran todos los
+        // fragmentos o no entra ninguno.
         val perFrag = FlexLink.MAX_PAYLOAD
         val frags = if (payload.isEmpty()) 1
                     else (payload.size + perFrag - 1) / perFrag
         if (frags > FlexLink.MAX_FRAGS) return false
-        return try {
-            synchronized(c) {
-                val packet = c.txPacket.also { c.txPacket = if (it >= 0xFFFF) 1 else it + 1 }
-                var at = 0
-                for (i in 0 until frags) {
-                    val take = minOf(perFrag, payload.size - at)
-                    val chunk = if (take > 0) payload.copyOfRange(at, at + take) else ByteArray(0)
-                    c.txCounter++
-                    val frame = FlexLink.writeFrame(
-                        FlexLink.Header(
-                            type = type, session = sess, packet = packet,
-                            frag = i, fragCount = frags, counter = c.txCounter,
-                        ),
-                        chunk,
-                    )
-                    c.out.write(frame)
-                    at += take
-                }
-                c.out.flush()
+        if (c.socket.isClosed) return false
+        return synchronized(c) {
+            if (c.txQueue.remainingCapacity() < frags) {
+                c.txDropped++
+                LinkDiag.w(TAG, "TX_QUEUE_FULL #${c.id} se descarta type=0x%02x (descartados=${c.txDropped})".format(type))
+                return@synchronized false
+            }
+            val packet = c.txPacket.also { c.txPacket = if (it >= 0xFFFF) 1 else it + 1 }
+            var at = 0
+            for (i in 0 until frags) {
+                val take = minOf(perFrag, payload.size - at)
+                val chunk = if (take > 0) payload.copyOfRange(at, at + take) else ByteArray(0)
+                c.txCounter++
+                val frame = FlexLink.writeFrame(
+                    FlexLink.Header(
+                        type = type, session = sess, packet = packet,
+                        frag = i, fragCount = frags, counter = c.txCounter,
+                    ),
+                    chunk,
+                )
+                c.txQueue.offer(frame)
+                at += take
             }
             true
-        } catch (e: Exception) {
-            // Solo cae ESTA conexion. El hilo que la sirve lo vera en
-            // su proxima vuelta; si el hueco ya es de otra, closeSession
-            // no la toca.
-            closeSession(c, "fallo al escribir: ${e.javaClass.simpleName}")
-            false
         }
     }
+
+    /**
+     * El hilo de SALIDA de una conexion: el unico que escribe en su socket.
+     * Vive mientras el socket este abierto y muere con el.
+     */
+    private fun txLoop(c: Conn) {
+        try {
+            while (!c.socket.isClosed) {
+                val first = c.txQueue.poll(500, TimeUnit.MILLISECONDS) ?: continue
+                if (first === TX_POISON) return
+                c.out.write(first)
+                // Todo lo que ya este esperando sale junto antes de vaciar.
+                while (true) {
+                    val more = c.txQueue.poll() ?: break
+                    if (more === TX_POISON) return
+                    c.out.write(more)
+                }
+                c.out.flush()
+                c.lastWriteThread = Thread.currentThread().name
+            }
+        } catch (e: Exception) {
+            // Un fallo REAL de escritura: el socket murio. Si ya lo cerro otro
+            // (el cierre normal), closeSession no hace nada de mas.
+            closeSession(c, "fallo al escribir: ${e.javaClass.simpleName}")
+        }
+    }
+
+    /** Hilo que escribio por ultima vez en la conexion activa. Solo para pruebas y diagnostico. */
+    fun lastWriteThread(): String = conn.get()?.lastWriteThread ?: ""
 
     private val HANDSHAKE_TYPES = intArrayOf(
         FlexLink.T_HELLO, FlexLink.T_WELCOME, FlexLink.T_BYE, FlexLink.T_ERR,

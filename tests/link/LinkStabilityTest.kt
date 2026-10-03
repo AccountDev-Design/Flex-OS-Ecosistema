@@ -42,6 +42,8 @@ import com.flexos.flexphone.protocol.PayloadWriter
 import java.io.DataInputStream
 import java.net.InetAddress
 import java.net.Socket
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 
 private var run = 0
@@ -91,10 +93,10 @@ private class FakeWatch(val port: Int, val key: ByteArray, val hostId: String = 
      * los fallos que vengan despues, y aqui lo que interesa es
      * verlos TODOS.
      */
-    fun send(type: Int, body: ByteArray, sess: Int): Boolean = try {
+    fun send(type: Int, body: ByteArray, sess: Int, pkt: Int? = null): Boolean = try {
         counter++
         val frame = FlexLink.writeFrame(
-            FlexLink.Header(type = type, session = sess, packet = packet++,
+            FlexLink.Header(type = type, session = sess, packet = pkt ?: packet++,
                             frag = 0, fragCount = 1, counter = counter),
             body,
         )
@@ -151,6 +153,11 @@ private class Harness {
     val opened = AtomicInteger(0)
     val closed = AtomicInteger(0)
     @Volatile var lastError: String? = null
+    /** Tipos de los mensajes de aplicacion que LLEGARON a la app, en orden. */
+    val messages = ConcurrentLinkedQueue<Int>()
+    /** Hace fallar al oyente de mensajes, como lo haria Android al negar un servicio. */
+    @Volatile var failOnMessage = false
+    val events = CopyOnWriteArrayList<WifiLinkServer.Event>()
 
     val server = WifiLinkServer(
         ctx = android.content.Context(),
@@ -159,6 +166,7 @@ private class Harness {
         bondKey = { key },
         onPaired = { _, _ -> },
         onEvent = { ev ->
+            events.add(ev)
             when (ev) {
                 is WifiLinkServer.Event.SessionOpen -> opened.incrementAndGet()
                 is WifiLinkServer.Event.SessionClosed -> closed.incrementAndGet()
@@ -166,7 +174,10 @@ private class Harness {
                 else -> {}
             }
         },
-        onMessage = { _, _ -> },
+        onMessage = { type, _ ->
+            messages.add(type)
+            if (failOnMessage) throw IllegalStateException("Android nego el servicio")
+        },
     )
 
     fun start(): Boolean = server.start()
@@ -379,6 +390,171 @@ private fun testUnaSolaSesion(h: Harness) {
     Thread.sleep(2_500)
 }
 
+// =============================================================
+//  5) NADIE ESCRIBE EN EL SOCKET DESDE EL HILO QUE LLAMA
+// =============================================================
+// EL FALLO QUE SOLO SE VE EN UN ANDROID DE VERDAD. En Android el hilo
+// PRINCIPAL lanza NetworkOnMainThreadException si toca un socket, y
+// `send()` se llamaba desde el (boton Emparejar, notificaciones,
+// MediaController, arranque del relay): la excepcion se tomaba por "el
+// socket murio" y CERRABA LA SESION.
+//
+// La JVM de escritorio no tiene ese guardian, asi que aqui se comprueba la
+// PROPIEDAD que lo evita: quien llama a send() no escribe -- solo encola --,
+// y la escritura la hace el hilo de salida de la conexion.
+private fun testEnvioDesdeCualquierHilo(h: Harness) {
+    println("[enlace] enviar desde otro hilo (el principal de Android) no toca el socket ni cierra la sesion")
+    val w = h.watch()
+    check(w.handshake(), "el apreton de manos no se completo")
+    check(waitUntil(2_000) { h.server.hasSession() }, "no quedo sesion")
+    val cerradasAntes = h.closed.get()
+
+    var ok = false
+    var cuanto = Long.MAX_VALUE
+    val principal = Thread({
+        val t0 = System.nanoTime()
+        ok = h.server.send(FlexLink.T_PHONE_STATE, ByteArray(40) { it.toByte() })
+        cuanto = (System.nanoTime() - t0) / 1_000_000
+    }, "main-simulado")
+    principal.start(); principal.join(3_000)
+
+    check(ok, "send() desde otro hilo no encolo el mensaje")
+    check(cuanto < 200, "send() tardo $cuanto ms: no puede esperar a la red")
+    val r = w.recv()
+    check(r != null && r.first.type == FlexLink.T_PHONE_STATE, "el mensaje no llego al otro extremo")
+    check(h.server.lastWriteThread().startsWith("flex-link-tx-"),
+        "escribio el hilo '${h.server.lastWriteThread()}', no el hilo de salida de la conexion")
+    check(h.server.hasSession() && h.closed.get() == cerradasAntes, "enviar cerro la sesion")
+    w.close()
+    Thread.sleep(2_500)
+}
+
+// El otro extremo deja de LEER: la cola se llena, send() devuelve false SIN
+// bloquearse y SIN cerrar la sesion (un receptor lento no es un socket muerto).
+private fun testReceptorLentoNoBloqueaNiCierra(h: Harness) {
+    println("[enlace] un receptor que no lee: send() no se bloquea ni cierra la sesion")
+    val w = h.watch()
+    check(w.handshake(), "el apreton de manos no se completo")
+    check(waitUntil(2_000) { h.server.hasSession() }, "no quedo sesion")
+    val cerradasAntes = h.closed.get()
+
+    var rechazados = 0
+    val t0 = System.currentTimeMillis()
+    val principal = Thread({
+        val big = ByteArray(3_000) { it.toByte() }
+        repeat(4_000) { if (!h.server.send(FlexLink.T_PHONE_STATE, big)) rechazados++ }
+    }, "main-simulado")
+    principal.start(); principal.join(15_000)
+    val gastado = System.currentTimeMillis() - t0
+
+    check(!principal.isAlive, "el hilo que enviaba se quedo BLOQUEADO (${gastado} ms)")
+    check(rechazados > 0, "con 12 MB sin leer, la cola acotada tenia que rechazar alguno")
+    check(h.server.hasSession() && h.closed.get() == cerradasAntes,
+        "un receptor lento cerro la sesion (no es un socket muerto)")
+    w.close()
+    Thread.sleep(2_500)
+}
+
+// =============================================================
+//  6) UNA ORDEN REENVIADA NO SE EJECUTA DOS VECES, Y SE ACUSA
+// =============================================================
+private fun testOrdenesAcusadasYSinDuplicar(h: Harness) {
+    println("[enlace] una orden reenviada se acusa pero se ejecuta UNA vez")
+    val w = h.watch()
+    check(w.handshake(), "el apreton de manos no se completo")
+    check(waitUntil(2_000) { h.server.hasSession() }, "no quedo sesion")
+    h.messages.clear()
+
+    // El firmware anterior del P4 reenviaba la orden con el MISMO id de paquete.
+    repeat(4) { w.send(FlexLink.T_RELAY_START, ByteArray(0), w.session, pkt = 77) }
+    w.send(FlexLink.T_FIND_START, ByteArray(0), w.session, pkt = 78)
+    w.send(FlexLink.T_RELAY_START, ByteArray(0), w.session, pkt = 79)     // otra orden DISTINTA: si cuenta
+
+    var acuses = 0
+    val t0 = System.currentTimeMillis()
+    w.sock.soTimeout = 400
+    while (System.currentTimeMillis() - t0 < 1_500 && acuses < 6) {
+        val r = w.recv() ?: continue
+        if (r.first.type == FlexLink.T_ACK) acuses++
+    }
+    check(h.messages.count { it == FlexLink.T_RELAY_START } == 2,
+        "RELAY_START llego ${h.messages.count { it == FlexLink.T_RELAY_START }} veces; esperadas 2 (paquetes 77 y 79)")
+    check(h.messages.count { it == FlexLink.T_FIND_START } == 1, "FIND_START no llego exactamente una vez")
+    check(acuses == 6, "se esperaban 6 ACK (uno por cada recepcion) y llegaron $acuses")
+    w.close()
+    Thread.sleep(2_500)
+}
+
+// Un oyente que falla (Android niega arrancar un servicio) NO cierra la sesion.
+private fun testFalloDelOyenteNoCierra(h: Harness) {
+    println("[enlace] si falla el oyente de una orden, la sesion sigue abierta")
+    val w = h.watch()
+    check(w.handshake(), "el apreton de manos no se completo")
+    check(waitUntil(2_000) { h.server.hasSession() }, "no quedo sesion")
+    val cerradasAntes = h.closed.get()
+    h.failOnMessage = true
+    w.send(FlexLink.T_RELAY_START, ByteArray(0), w.session, pkt = 5)
+    Thread.sleep(500)
+    h.failOnMessage = false
+    check(h.server.hasSession() && h.closed.get() == cerradasAntes, "una orden que fallo CERRO la sesion")
+    w.ping()
+    w.sock.soTimeout = 2_000
+    var pong = false
+    while (true) { val r = w.recv() ?: break; if (r.first.type == FlexLink.T_PONG) { pong = true; break } }
+    check(pong, "la sesion dejo de contestar tras el fallo del oyente")
+    w.close()
+    Thread.sleep(2_500)
+}
+
+// =============================================================
+//  7) EVENTOS: un canal que NUNCA se presento no es una sesion caida
+// =============================================================
+private fun testEventosDeCanal(h: Harness) {
+    println("[enlace] ChannelOpened / SessionClosed(authenticated) dicen la verdad")
+    h.events.clear()
+    // a) un canal que se abre y se cierra sin presentarse
+    val intruso = h.watch()
+    check(waitUntil(2_000) { h.events.any { it is WifiLinkServer.Event.ChannelOpened } }, "no hubo ChannelOpened")
+    intruso.close()
+    check(waitUntil(5_000) { h.events.any { it is WifiLinkServer.Event.SessionClosed } }, "no hubo SessionClosed")
+    val c1 = h.events.filterIsInstance<WifiLinkServer.Event.SessionClosed>().first()
+    check(!c1.authenticated, "un canal que nunca se autentico se cuenta como sesion caida")
+
+    // b) una sesion autenticada que se cierra
+    h.events.clear()
+    val w = h.watch()
+    check(w.handshake(), "el apreton de manos no se completo")
+    check(waitUntil(2_000) { h.server.hasSession() }, "no quedo sesion")
+    w.close()
+    check(waitUntil(5_000) { h.events.any { it is WifiLinkServer.Event.SessionClosed } }, "no hubo SessionClosed")
+    check(h.events.filterIsInstance<WifiLinkServer.Event.SessionClosed>().first().authenticated,
+        "una sesion autenticada que se cierra tiene que decir authenticated=true")
+    Thread.sleep(2_500)
+}
+
+// =============================================================
+//  8) LAS BUSQUEDAS UDP NO BLOQUEAN NI FALLAN DESDE EL HILO PRINCIPAL
+// =============================================================
+private fun testBusquedasDesdeOtroHilo(h: Harness) {
+    println("[enlace] las busquedas UDP salen por su propio hilo y validan la IP sin DNS")
+    var destinos = -1
+    var buena = false
+    var mala = true
+    var feo = true
+    val principal = Thread({
+        destinos = h.server.probeForWatches()
+        buena = h.server.probeHost("127.0.0.1")
+        mala = h.server.probeHost("999.1.1.1")
+        feo = h.server.probeHost("no-es-una-ip.example")      // NO debe intentar resolver nada
+    }, "main-simulado")
+    principal.start(); principal.join(3_000)
+    check(!principal.isAlive, "las busquedas bloquearon al hilo que las pidio")
+    check(destinos >= 1, "la busqueda no tenia ningun destino ($destinos)")
+    check(buena, "una IP valida se rechazo")
+    check(!mala, "999.1.1.1 se acepto como IP")
+    check(!feo, "un nombre se acepto como IP (haria DNS en el hilo que llama)")
+}
+
 fun main() {
     println("\n=== FlexOS · estabilidad de la sesion de Flex Phone ===")
     android.util.Log.verbose = System.getenv("FLEX_LINK_VERBOSE") != null
@@ -396,6 +572,12 @@ fun main() {
         testCadaverNoBloqueaElHueco(h)
         testSesionEnReposo(h)
         testUnaSolaSesion(h)
+        testEnvioDesdeCualquierHilo(h)
+        testReceptorLentoNoBloqueaNiCierra(h)
+        testOrdenesAcusadasYSinDuplicar(h)
+        testFalloDelOyenteNoCierra(h)
+        testEventosDeCanal(h)
+        testBusquedasDesdeOtroHilo(h)
     } finally {
         h.stop()
     }
