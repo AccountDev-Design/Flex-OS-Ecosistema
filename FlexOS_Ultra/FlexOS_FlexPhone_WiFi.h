@@ -42,6 +42,8 @@
 #include "FlexOS_FlexPhone_Discovery.h"
 #include <WiFi.h>
 #include <WiFiUdp.h>
+#include <errno.h>
+#include <sys/socket.h>
 
 // Cada cuanto se vuelve a preguntar mientras no hay telefono. No es
 // sondeo agresivo: son unas decenas de bytes cada dos segundos, y
@@ -73,17 +75,25 @@
 // ##  logcat del telefono distingue las dos cosas.
 // #############################################################
 // #############################################################
-// ##  A 1 MIENTRAS SE PERSIGUE EL PROBLEMA DE ESTABILIDAD
+// ##  SERIE: APAGADO. EL REGISTRO DEL ENLACE VIVE EN RAM
 // ##  ------------------------------------------------------
-// ##  Con esto encendido, el puerto serie recibe la secuencia
-// ##  entera del enlace: cada conexion con su numero, cada cierre
-// ##  con su MOTIVO y cuanto duro. Es lo que hace falta para
-// ##  saber quien cuelga primero.
+// ##  Esto estuvo a 1 "mientras se persigue el problema de
+// ##  estabilidad" y se quedo asi en el repositorio. En produccion el
+// ##  puerto serie tiene que estar LIMPIO, y ademas un printf desde
+// ##  esta tarea (pila de 4 KB) no es gratis.
 // ##
-// ##  VUELVE A 0 antes de publicar: en produccion no se dejan
-// ##  lineas de enlace en el registro.
+// ##  Lo que no se pierde: cada apertura y cada cierre con su MOTIVO
+// ##  y su duracion se apuntan SIEMPRE en un anillo de 24 entradas en
+// ##  RAM (unos 400 B, sin bloquear, sin crecer) que se lee en
+// ##  Flex Phone > Diagnostico > "Registro del enlace". Es lo que hace
+// ##  falta para saber quien cuelga primero SIN cable ni PC.
+// ##
+// ##  Para volver a ver las lineas por serie en una prueba concreta:
+// ##      -DFLEXOS_DIAG_FLEXPHONE=1
 // #############################################################
-#define FLEXOS_DIAG_FLEXPHONE 1
+#ifndef FLEXOS_DIAG_FLEXPHONE
+  #define FLEXOS_DIAG_FLEXPHONE 0
+#endif
 
 #if FLEXOS_DIAG_FLEXPHONE
   #define FPW_DIAG(...) do { Serial.printf("[FLEXPHONE %8lu] ", (unsigned long)millis()); \
@@ -159,6 +169,46 @@ static FlexPhoneWifiCtx fpwCtx;
 // #############################################################
 static uint32_t    fpwConnId     = 0;      // numero del socket actual
 static const char* fpwCloseReason = "";    // por que se cerro el ultimo
+
+// =============================================================
+//  REGISTRO DEL ENLACE EN RAM
+// =============================================================
+// Quien lo escribe: SOLO la tarea de red. Quien lo lee: la pantalla de
+// diagnostico. Se copia bajo el mismo mutex corto que ya usan las colas.
+// 24 x 16 B = 384 B fijos: no crece, no bloquea, no imprime.
+#define FPW_LOG_N 24
+enum { FPWE_NONE = 0, FPWE_OPEN, FPWE_CLOSE, FPWE_CONNECT_FAIL, FPWE_WIFI_LOST, FPWE_FOUND };
+typedef struct {
+  uint32_t ms;       // millis() del suceso
+  uint32_t conn;     // numero de conexion
+  uint32_t upMs;     // en FPWE_CLOSE: cuanto duro
+  uint8_t  kind;     // FPWE_*
+  uint8_t  reason;   // en FPWE_CLOSE: FPWR_*
+  uint8_t  backoff;  // intento de reconexion en ese momento
+  uint8_t  _pad;
+} FpwEvent;
+static FpwEvent fpwLogBuf[FPW_LOG_N];
+static uint32_t fpwLogCount = 0;          // total escrito (el indice es count % N)
+
+// Motivos de cierre. El TEXTO sale de aqui, no se guarda en el anillo.
+enum { FPWR_NONE = 0, FPWR_PEER_CLOSED, FPWR_WRITE, FPWR_STREAM, FPWR_WIFI, FPWR_OFF, FPWR_UNKNOWN };
+static const char* fpwReasonText(uint8_t r){
+  switch(r){
+    case FPWR_PEER_CLOSED: return "el telefono cerro el socket";
+    case FPWR_WRITE:       return "escritura fallida";
+    case FPWR_STREAM:      return "flujo ilegible";
+    case FPWR_WIFI:        return "se perdio el Wi-Fi";
+    case FPWR_OFF:         return "enlace apagado";
+    case FPWR_UNKNOWN:     return "sin motivo conocido";
+    default:               return "";
+  }
+}
+static uint8_t fpwReasonFromText(const char* t){
+  if(!t || !t[0]) return FPWR_NONE;
+  for(uint8_t r = FPWR_PEER_CLOSED; r <= FPWR_UNKNOWN; r++)
+    if(strcmp(t, fpwReasonText(r)) == 0) return r;
+  return FPWR_UNKNOWN;
+}
 // Cuantas veces seguidas fallo la conexion. Solo lo toca la tarea de
 // red, asi que no necesita el mutex.
 static uint8_t fpwBackoff = 0;
@@ -174,6 +224,47 @@ static void fpwSetStatus(const char* s){
   fpwLock();
   flexLinkUtf8Copy(fpwCtx.status, sizeof(fpwCtx.status), s ? s : "");
   fpwUnlock();
+}
+
+static void fpwLogPush(uint8_t kind, uint32_t conn, uint32_t upMs, uint8_t reason, uint8_t backoff){
+  fpwLock();
+  FpwEvent* e = &fpwLogBuf[fpwLogCount % FPW_LOG_N];
+  e->ms = (uint32_t)millis(); e->conn = conn; e->upMs = upMs;
+  e->kind = kind; e->reason = reason; e->backoff = backoff; e->_pad = 0;
+  fpwLogCount++;
+  fpwUnlock();
+}
+
+// Cuantas entradas hay para leer (como mucho FPW_LOG_N).
+static uint8_t flexPhoneWifiLogCount(){
+  return (uint8_t)(fpwLogCount < FPW_LOG_N ? fpwLogCount : FPW_LOG_N);
+}
+// La entrada `i`-esima contando desde la MAS RECIENTE (0). Devuelve false si no hay.
+static bool flexPhoneWifiLogGet(uint8_t i, FpwEvent* out){
+  if(!out) return false;
+  fpwLock();
+  const bool ok = i < flexPhoneWifiLogCount();
+  if(ok) *out = fpwLogBuf[(fpwLogCount - 1u - i) % FPW_LOG_N];
+  fpwUnlock();
+  return ok;
+}
+// Una linea legible para la pantalla ("#4 cerrada tras 2,1 s: el telefono cerro el socket").
+static void flexPhoneWifiLogLine(const FpwEvent& e, char* out, size_t n){
+  if(!out || !n) return;
+  switch(e.kind){
+    case FPWE_OPEN:
+      snprintf(out, n, "#%u abierta", (unsigned)e.conn); break;
+    case FPWE_CLOSE:
+      snprintf(out, n, "#%u cerrada tras %u,%u s: %s", (unsigned)e.conn,
+               (unsigned)(e.upMs / 1000u), (unsigned)((e.upMs % 1000u) / 100u), fpwReasonText(e.reason)); break;
+    case FPWE_CONNECT_FAIL:
+      snprintf(out, n, "no acepto la conexion (intento %u)", (unsigned)e.backoff); break;
+    case FPWE_WIFI_LOST:
+      snprintf(out, n, "sin Wi-Fi"); break;
+    case FPWE_FOUND:
+      snprintf(out, n, "telefono encontrado"); break;
+    default: out[0] = 0;
+  }
 }
 
 // -------------------------------------------------------------
@@ -366,6 +457,42 @@ static bool fpwSendProbe(WiFiUDP& udp){
 }
 
 // #############################################################
+// ##  ¿SIGUE VIVO EL SOCKET?  --  VER EL FIN DEL TELEFONO
+// ##  ------------------------------------------------------
+// ##  NetworkClient::connected() de arduino-esp32 3.2.1 NO ve que el
+// ##  otro extremo cerro de forma ordenada (FIN). Hace
+// ##
+// ##      recv(fd, &b, 1, MSG_DONTWAIT | MSG_PEEK)
+// ##
+// ##  y, si devuelve <= 0, decide mirando `errno`. Pero un FIN hace que
+// ##  recv() devuelva 0 -- una lectura que "salio bien", con errno = 0
+// ##  en lwIP --, y el `switch` cae en `default: _connected = true`.
+// ##  available() tampoco lo cuenta (FIONREAD da 0) y read() solo da -1
+// ##  por un error real. O sea: si el TELEFONO cierra, este reloj sigue
+// ##  diciendo "conectado" hasta que una ESCRITURA reciba el RST: con el
+// ##  canal en reposo, hasta el siguiente latido (8 s).
+// ##
+// ##  Eso es lo que se veia en pantalla: "Conectado" sobre un socket
+// ##  muerto, y luego de golpe "Conectando". Aqui se mira lo unico que de
+// ##  verdad lo dice: recv() == 0 es EOF, y un error que no sea "no hay
+// ##  datos todavia" es un socket roto.
+// ##
+// ##  Medido en tests/host/link_e2e.sh: el P4 tardaba 4,5 s en enterarse
+// ##  de un cierre del telefono; ahora, un tick.
+// #############################################################
+static bool fpwSocketAlive(WiFiClient& cli){
+  if(!cli.connected()) return false;
+  const int fd = cli.fd();
+  if(fd < 0) return false;
+  uint8_t b;
+  errno = 0;
+  const int r = recv(fd, &b, 1, MSG_PEEK | MSG_DONTWAIT);
+  if(r == 0) return false;                                  // FIN: cerro el otro extremo
+  if(r < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) return false;
+  return true;
+}
+
+// #############################################################
 // ##  ESCRIBIR UNA TRAMA ENTERA
 // ##  ------------------------------------------------------
 // ##  AQUI ESTABA EL CICLO DE 10-13 SEGUNDOS.
@@ -480,15 +607,18 @@ static void fpwTask(void*){
   uint8_t acc[FLPW_RXBUF];
   size_t  accN = 0;
   uint32_t lastProbe = 0;
+  bool     noWifiLogged = false;
 
   while(!fpwCtx.stop){
     // ---- 1) Sin Wi-Fi no hay nada que hacer ----
     if(WiFi.status() != WL_CONNECTED){
+      if(!noWifiLogged){ noWifiLogged = true; fpwLogPush(FPWE_WIFI_LOST, fpwConnId, 0, FPWR_NONE, fpwBackoff); }
       fpwCtx.state = FLP_TC_SEARCHING;
       fpwSetStatus("esperando a que haya Wi-Fi");
       vTaskDelay(pdMS_TO_TICKS(1000));
       continue;
     }
+    noWifiLogged = false;
     if(!udpUp){ udpUp = udp.begin(FLPW_UDP_PORT) != 0; }
 
     // ---- 2) Atender el socket UDP, haya telefono o no ----
@@ -532,6 +662,7 @@ static void fpwTask(void*){
     snprintf(host, sizeof(host), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
     if(!cli.connect(host, port, FLPW_CONNECT_MS)){
       fpwCtx.nDrops++;
+      fpwLogPush(FPWE_CONNECT_FAIL, fpwConnId, 0, FPWR_NONE, fpwBackoff);
       fpwCtx.state = FLP_TC_FAILED;
       fpwSetStatus("el telefono no acepto la conexion");
       // La direccion descubierta puede haber caducado (el router dio
@@ -560,11 +691,12 @@ static void fpwTask(void*){
     fpwConnId++;
     fpwCloseReason = "";      // lo rellena quien cierre; ver mas abajo
     fpwSetStatus("enlace abierto");
+    fpwLogPush(FPWE_OPEN, fpwConnId, 0, FPWR_NONE, fpwBackoff);
     FPW_DIAG("(s) CONEXION #%u ABIERTA con %s:%u",
              (unsigned)fpwConnId, host, (unsigned)port);
 
     // ---- 5) Bombeo mientras el socket viva ----
-    while(!fpwCtx.stop && cli.connected() && WiFi.status() == WL_CONNECTED){
+    while(!fpwCtx.stop && fpwSocketAlive(cli) && WiFi.status() == WL_CONNECTED){
       bool worked = false;
 
       // Tambien aqui: estando conectado se sigue contestando a quien
@@ -616,11 +748,13 @@ closed:
     // escritura fallida el socket suele estar ya cerrado, asi que se
     // leeria "el telefono cerro" cuando no fue eso.
     if(!fpwCloseReason[0]){
-      if(!cli.connected())                   fpwCloseReason = "el telefono cerro el socket";
+      if(!fpwSocketAlive(cli))               fpwCloseReason = "el telefono cerro el socket";
       else if(WiFi.status() != WL_CONNECTED) fpwCloseReason = "se perdio el Wi-Fi";
       else if(fpwCtx.stop)                   fpwCloseReason = "enlace apagado";
       else                                   fpwCloseReason = "el bucle termino sin motivo";
     }
+    fpwLogPush(FPWE_CLOSE, fpwConnId, (uint32_t)(millis() - openedAtMs),
+               fpwReasonFromText(fpwCloseReason), fpwBackoff);
     FPW_DIAG("(s) CONEXION #%u CERRADA tras %u ms  motivo=%s",
              (unsigned)fpwConnId, (unsigned)(millis() - openedAtMs), fpwCloseReason);
     cli.stop();

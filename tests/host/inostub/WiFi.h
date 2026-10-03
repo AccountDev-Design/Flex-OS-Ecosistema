@@ -29,6 +29,8 @@ public:
   // puede dar por muerta una escritura corta: ver fpwWriteAll.
   virtual size_t write(const uint8_t*, size_t n){ return n; }
   void setTimeout(uint32_t){}
+  // NetworkClient::fd() es publico en arduino-esp32 3.x. Sin sockets aqui: -1.
+  virtual int fd() const { return -1; }
   // Parte de la superficie real de Client en arduino-esp32 ("if(!cli)").
   // Los dobles reproducen solo tipos y firmas: aqui no hay sockets.
   explicit operator bool() const { return false; }
