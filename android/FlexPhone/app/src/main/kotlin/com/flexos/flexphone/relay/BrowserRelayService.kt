@@ -64,6 +64,16 @@ class BrowserRelayService : Service() {
          */
         @Volatile private var alive: Boolean = false
         fun isRunning(): Boolean = alive
+
+        @Volatile private var current: BrowserRelayService? = null
+
+        /**
+         * La Wi-Fi del telefono cambio de direccion (otra IP, se fue y volvio): se
+         * vuelve a anunciar al P4 la direccion REAL. El servidor escucha en todas
+         * las interfaces, asi que no hay que reabrirlo: lo que quedaba viejo era
+         * la IP que el P4 tenia guardada para llegar al relay.
+         */
+        fun notifyAddressChanged() { current?.refreshAddress() }
     }
 
     private var server: RelayServer? = null
@@ -71,6 +81,9 @@ class BrowserRelayService : Service() {
     private var wifiLock: WifiManager.WifiLock? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private lateinit var state: FlexPhoneState
+
+    /** Hay un arranque en marcha (o ya arriba): otro RELAY_START no lo repite. */
+    private val starting = java.util.concurrent.atomic.AtomicBoolean(false)
 
     @Volatile private var clientConnected = false
     @Volatile private var lastActivityMs = System.currentTimeMillis()
@@ -83,16 +96,46 @@ class BrowserRelayService : Service() {
         super.onCreate()
         state = FlexPhoneState.instance ?: FlexPhoneState().also { FlexPhoneState.instance = it }
         createChannel()
+        current = this
+    }
+
+    /** Vuelve a anunciar la direccion Wi-Fi actual (ver [notifyAddressChanged]). */
+    private fun refreshAddress() {
+        val srv = server ?: return
+        if (!alive) return
+        val addr = com.flexos.flexphone.link.NetAddress.wifi(this)?.address?.address
+        if (addr == null) {
+            statusLine = getString(R.string.relay_no_wifi)
+            updateNotification()
+            state.setRelay(
+                RelayState.ERROR,
+                RelayInfo(ip = byteArrayOf(0, 0, 0, 0), port = 0, protoVer = 1, tls = false, caps = 0,
+                    error = "el telefono no esta en una red Wi-Fi"),
+            )
+            return
+        }
+        onServerEvent(RelayServer.Event.Listening(addr, srv.port))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) { shutdown(); return START_NOT_STICKY }
 
+        // startForeground se llama en CADA arranque (Android lo exige tras cada
+        // startForegroundService), pero el arranque en si es IDEMPOTENTE.
+        //
+        // Antes cada RELAY_START repetido -- y el P4 los repetia hasta cinco
+        // veces -- ponia el estado en STARTING otra vez (y se lo contaba a Flex OS
+        // con port 0, borrando la direccion ya anunciada) y, mientras `server`
+        // seguia a null, lanzaba OTRO bringUp: otro RelayServer y otro puerto.
+        if (!starting.compareAndSet(false, true)) {
+            startForegroundHonestly()
+            state.reannounceRelay()
+            return START_NOT_STICKY
+        }
         statusLine = getString(R.string.relay_starting)
         startForegroundHonestly()
         state.setRelay(RelayState.STARTING)
-
-        if (server == null) scope.launch { bringUp() }
+        scope.launch { bringUp() }
         return START_NOT_STICKY
     }
 
@@ -252,7 +295,7 @@ class BrowserRelayService : Service() {
         val ch = NotificationChannel(
             CHANNEL, getString(R.string.channel_relay), NotificationManager.IMPORTANCE_LOW,
         ).apply { description = getString(R.string.channel_relay_desc); setShowBadge(false) }
-        getSystemService(NotificationManager::class.java).createNotificationChannel(ch)
+        getSystemService(NotificationManager::class.java)?.createNotificationChannel(ch)
     }
 
     private fun buildNotification(): Notification {
@@ -287,11 +330,12 @@ class BrowserRelayService : Service() {
     }
 
     private fun updateNotification() {
-        runCatching { getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification()) }
+        runCatching { getSystemService(NotificationManager::class.java)?.notify(NOTIF_ID, buildNotification()) }
     }
 
     private fun shutdown() {
         alive = false
+        starting.set(false)
         scope.coroutineContext.cancelChildren()
         RelayEngine.detach()
         server?.stop(); server = null
@@ -302,10 +346,12 @@ class BrowserRelayService : Service() {
     }
 
     override fun onDestroy() {
+        if (current === this) current = null
         // Aunque nos maten: los locks se sueltan aqui tambien, y la
         // bandera baja para que el enlace deje de declarar la
         // capacidad RELAY como concedida.
         alive = false
+        starting.set(false)
         scope.cancel()
         RelayEngine.detach()
         server?.stop()

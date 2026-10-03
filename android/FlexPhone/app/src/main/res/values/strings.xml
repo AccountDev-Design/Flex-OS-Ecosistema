@@ -12,6 +12,7 @@
     <string name="link_connected">Conectado a Flex OS</string>
     <string name="link_pairing">Emparejando: confirma el codigo</string>
     <string name="link_connecting">Conectando…</string>
+    <string name="link_reconnecting">Reconectando con Flex OS…</string>
     <string name="link_searching">Esperando a Flex OS…</string>
     <!-- El enlace es una conexion de la red local: sin Wi-Fi no hay a donde
          conectarse, y decir "Bluetooth no disponible" seria mentir sobre el
@@ -30,6 +31,7 @@
     <string name="channel_relay">Browser Relay</string>
     <string name="channel_relay_desc">Notificacion permanente mientras el telefono sirve el navegador a Flex OS.</string>
     <string name="relay_title">Browser Relay</string>
+    <string name="relay_no_wifi">Sin Wi-Fi: el relay esperara a que vuelva</string>
     <string name="relay_starting">Iniciando…</string>
     <!-- %1$s = IP, %2$d = puerto -->
     <string name="relay_waiting">Esperando a Flex OS en %1$s:%2$d</string>

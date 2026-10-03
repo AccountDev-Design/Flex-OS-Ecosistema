@@ -6,6 +6,8 @@ import com.flexos.flexphone.protocol.FbpReader
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.Socket
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -34,12 +36,49 @@ class RelaySession(
         private const val OP_CLOSE = 0x8
         private const val OP_PING = 0x9
         private const val OP_PONG = 0xA
+        /**
+         * Lo que puede esperar en la cola de salida antes de empezar a descartar
+         * FOTOGRAMAS (no mensajes de control). Un fotograma son decenas de KB; con
+         * esto caben unos pocos y un P4 lento no hace crecer la memoria del telefono.
+         */
+        private const val TX_BUDGET_BYTES = 1_500_000
+        private val TX_POISON = ByteArray(0)
     }
 
     private val seq = AtomicInteger(1)
     @Volatile private var authenticated = false
     @Volatile private var closed = false
-    private val writeLock = Any()
+
+    // #############################################################
+    // ##  NADIE ESCRIBE EN EL SOCKET SALVO SU HILO DE SALIDA
+    // ##  ------------------------------------------------------
+    // ##  Los cambios de estado de una pestana (`onTabState`), la lista de
+    // ##  pestanas (`pushTabs`) y los errores se mandan desde el hilo PRINCIPAL
+    // ##  (los callbacks del WebView y `main.post`). Android lanza
+    // ##  NetworkOnMainThreadException si el hilo principal toca un socket, y
+    // ##  `sendBinary` la tragaba y marcaba la sesion como cerrada: el relay
+    // ##  moria en el primer cambio de pagina. Ahora quien llama solo ENCOLA, y
+    // ##  escribe `txLoop`. Ver tambien WifiLinkServer.sendRaw.
+    // #############################################################
+    private val txQueue = LinkedBlockingQueue<ByteArray>()
+    private val txBytes = AtomicInteger(0)
+    private val writer = Thread({ txLoop() }, "flex-relay-tx").apply { isDaemon = true; start() }
+
+    private fun txLoop() {
+        try {
+            while (true) {
+                val f = txQueue.poll(500, TimeUnit.MILLISECONDS)
+                if (f == null) { if (closed) break else continue }
+                if (f === TX_POISON) break
+                output.write(f)
+                output.flush()
+                txBytes.addAndGet(-f.size)
+            }
+        } catch (e: Exception) {
+            closed = true
+        }
+        runCatching { socket.close() }
+    }
 
     private fun nextSeq(): Int {
         // El seq se reinicia en 1 al desbordar, como dice PROTOCOL.md.
@@ -139,8 +178,16 @@ class RelaySession(
     //  Salida
     // ---------------------------------------------------------
     fun sendFrame(channel: Int, x: Int, y: Int, w: Int, h: Int,
-                  keyframe: Boolean, last: Boolean, frameId: Long, image: ByteArray): Boolean =
-        sendBinary(Fbp.frame(nextSeq(), channel, x, y, w, h, keyframe, last, frameId, image))
+                  keyframe: Boolean, last: Boolean, frameId: Long, image: ByteArray): Boolean {
+        // Un fotograma es lo UNICO que se puede descartar: si el P4 no lee tan
+        // deprisa como se captura, el siguiente lo sustituye. Se pide un
+        // keyframe para que lo que llegue despues no dependa del descartado.
+        if (!closed && txBytes.get() > TX_BUDGET_BYTES) {
+            RelayEngine.requestKeyframe(channel)
+            return true
+        }
+        return sendBinary(Fbp.frame(nextSeq(), channel, x, y, w, h, keyframe, last, frameId, image))
+    }
 
     fun sendState(channel: Int, flags: Int, progress: Int, title: String, url: String): Boolean =
         sendBinary(Fbp.state(nextSeq(), channel, flags, progress, title, url))
@@ -148,18 +195,20 @@ class RelaySession(
     fun sendError(channel: Int, code: Int, msg: String): Boolean =
         sendBinary(Fbp.error(nextSeq(), channel, code, msg))
 
+    /** Encola un mensaje FBP. Nunca toca el socket. false = la sesion ya esta cerrada. */
     fun sendBinary(payload: ByteArray): Boolean {
         if (closed) return false
-        return try {
-            synchronized(writeLock) { writeFrame(OP_BINARY, payload) }
-            true
-        } catch (e: Exception) {
-            closed = true
-            false
-        }
+        enqueue(frame(OP_BINARY, payload))
+        return true
     }
 
-    private fun writeFrame(opcode: Int, payload: ByteArray) {
+    private fun enqueue(f: ByteArray) {
+        txBytes.addAndGet(f.size)
+        txQueue.offer(f)
+    }
+
+    /** Cabecera WebSocket + carga, en un solo array listo para escribir. */
+    private fun frame(opcode: Int, payload: ByteArray): ByteArray {
         val n = payload.size
         // El SERVIDOR no enmascara (RFC 6455): solo el cliente lo hace.
         val head = when {
@@ -175,9 +224,10 @@ class RelaySession(
                 ((n ushr 8) and 0xFF).toByte(), (n and 0xFF).toByte(),
             )
         }
-        output.write(head)
-        if (n > 0) output.write(payload)
-        output.flush()
+        val out = ByteArray(head.size + n)
+        head.copyInto(out, 0)
+        if (n > 0) payload.copyInto(out, head.size)
+        return out
     }
 
     // ---------------------------------------------------------
@@ -209,7 +259,7 @@ class RelaySession(
 
             return when (opcode) {
                 OP_BINARY -> data
-                OP_PING -> { synchronized(writeLock) { writeFrame(OP_PONG, data) }; readFrame() }
+                OP_PING -> { enqueue(frame(OP_PONG, data)); readFrame() }
                 OP_PONG -> readFrame()
                 OP_CLOSE -> { closed = true; null }
                 else -> readFrame()          // texto u opcode raro: se ignora
@@ -239,8 +289,10 @@ class RelaySession(
             payload[0] = ((code ushr 8) and 0xFF).toByte()
             payload[1] = (code and 0xFF).toByte()
             body.copyInto(payload, 2)
-            synchronized(writeLock) { writeFrame(OP_CLOSE, payload) }
+            // El CLOSE sale por el hilo de salida y DESPUES de lo ya encolado; el
+            // veneno hace que el hilo termine y cierre el socket.
+            enqueue(frame(OP_CLOSE, payload))
         }
-        runCatching { socket.close() }
+        txQueue.offer(TX_POISON)
     }
 }

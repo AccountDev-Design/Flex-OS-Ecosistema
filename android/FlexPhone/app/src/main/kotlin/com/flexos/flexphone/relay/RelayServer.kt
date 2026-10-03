@@ -223,14 +223,19 @@ class RelayServer(
         }
     }
 
-    /** Direccion IPv4 del telefono en la red local. */
-    private fun localWifiAddress(): ByteArray? {
-        return runCatching {
+    /**
+     * Direccion IPv4 de la Wi-Fi del telefono, la que se le anuncia al P4.
+     *
+     * Se la pide a Android (ConnectivityManager): recorrer las interfaces se
+     * quedaba con la primera IPv4 privada que saliera, que con datos moviles o el
+     * punto de acceso activo puede no ser la de la Wi-Fi.
+     */
+    fun localWifiAddress(): ByteArray? =
+        com.flexos.flexphone.link.NetAddress.wifi(ctx)?.address?.address ?: runCatching {
             java.net.NetworkInterface.getNetworkInterfaces().toList()
                 .filter { it.isUp && !it.isLoopback }
                 .flatMap { it.inetAddresses.toList() }
                 .firstOrNull { it is java.net.Inet4Address && it.isSiteLocalAddress }
                 ?.address
         }.getOrNull()
-    }
 }
