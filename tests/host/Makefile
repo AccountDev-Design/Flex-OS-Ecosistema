@@ -159,11 +159,13 @@ $(BUILD)/flexweb_host: flexweb_host.cpp e2e_http.h $(WEB_SRC) $(WEB_HDRS) $(ULTR
 	       $(ULTRA)/FlexOS_StorageCore.cpp $(ULTRA)/FlexOS_FlexAuth.cpp $(CJSON) -lcrypto
 
 # Pruebas de la web: funciones puras en Node (contra el firmware, via
-# mediacheck) y, si hay Playwright, Chromium de verdad contra flexweb_host.
+# mediacheck) y, si hay Playwright, Chromium de verdad contra flexweb_host:
+# la biblioteca de siempre (e2e) y Flex Storage con el telefono de pruebas
+# de verdad (storage_e2e, necesita ademas Java y Gradle).
 # Sin Node, se dice que se omiten; no se dan por pasadas.
 web: $(BUILD)/mediacheck $(BUILD)/flexweb_host
 	@if command -v node >/dev/null 2>&1; then \
-	  node ../web/webui.test.js && node ../web/e2e.test.js; \
+	  node ../web/webui.test.js && node ../web/e2e.test.js && node ../web/storage_e2e.test.js; \
 	else echo "=== pruebas de la web OMITIDAS: no hay Node en esta maquina ==="; fi
 
 # --- Flex Web Server: protocolo HTTP y codigo QR ---

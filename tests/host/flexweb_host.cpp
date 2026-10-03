@@ -31,6 +31,12 @@
 //   y por stderr sale {"pairWaiting":...,"sas":"123456"} / {"paired":...}.
 //   --phone-port/--phone-key: un telefono YA emparejado en 127.0.0.1:N (el
 //   servidor Kotlin de pruebas, DevServer.kt) para la pasarela /api/cloud.
+//   Las copias Flex OS <-> Flex Cloud (POST /api/fs/xfer) son aqui un DOBLE DE
+//   PRUEBAS: se apunta lo que pide la web (stderr {"xferReq":...}) y la prueba
+//   mueve el progreso por stdin:
+//     xjob <id> <fase> <bytes>   fase como FCX_* (6 hecho, 7 fallo, 8 cancelado)
+//   En la placa las hace el gestor de la nube (FlexOS_Cloud), probado contra el
+//   telefono de verdad en phone_e2e.
 #include "../../FlexOS_Ultra/FlexOS_MediaWeb.h"
 #include "../../FlexOS_Ultra/FlexOS_MediaStore.h"
 #include "../../FlexOS_Ultra/FlexOS_StorageCore.h"
@@ -253,6 +259,69 @@ static bool hStorage(void*, char* out, size_t cap){
     g_core.pair.state == FSTP_PENDING ? 1 : 0, ok ? "phone" : "internet", ok ? 3 : 0);
   return n > 0 && (size_t)n < cap;
 }
+// ---- copias Flex OS <-> Flex Cloud: doble de pruebas (ver la cabecera) ----
+struct SimXfer { uint32_t id; bool up, move; uint8_t phase; char name[256]; unsigned long long size, done; };
+static std::vector<SimXfer> g_xf;
+static uint32_t g_xfSeq = 0x40000100u;
+static void jsonEsc(const char* in, char* out, size_t cap){
+  size_t w = 0;
+  for(const unsigned char* p = (const unsigned char*)in; *p && w + 7 < cap; p++){
+    if(*p == '"' || *p == '\\'){ out[w++] = '\\'; out[w++] = (char)*p; }
+    else if(*p < 0x20) w += (size_t)std::snprintf(out + w, cap - w, "\\u%04x", *p);
+    else out[w++] = (char)*p;
+  }
+  out[w] = 0;
+}
+static bool hXfersJson(void*, char* out, size_t cap){
+  size_t w = 0;
+  out[w++] = '[';
+  for(size_t i = 0; i < g_xf.size(); i++){
+    const SimXfer& x = g_xf[i];
+    char nm[600]; jsonEsc(x.name, nm, sizeof(nm));
+    const char* txt = x.phase == 6 ? "Hecho" : x.phase == 7 ? "No se pudo completar" : x.phase == 8 ? "Cancelado" : x.phase == 2 ? "En curso" : "En cola";
+    int k = std::snprintf(out + w, cap - w, "%s{\"id\":%lu,\"up\":%d,\"phase\":%u,\"name\":\"%s\",\"size\":%llu,\"done\":%llu,\"rate\":0,\"text\":\"%s\",\"move\":%d}",
+                          i ? "," : "", (unsigned long)x.id, x.up ? 1 : 0, (unsigned)x.phase, nm, x.size, x.done, txt, x.move ? 1 : 0);
+    if(k < 0 || (size_t)k >= cap - w - 2) break;
+    w += (size_t)k;
+  }
+  out[w++] = ']'; out[w] = 0;
+  return true;
+}
+static int hXferOp(void*, const FlexWebXferReq* rq, char* msg, size_t cap){
+  if(rq->op == FLEXWEB_X_UP || rq->op == FLEXWEB_X_DOWN){
+    SimXfer x; std::memset(&x, 0, sizeof(x));
+    x.id = ++g_xfSeq; x.up = rq->op == FLEXWEB_X_UP; x.move = rq->move;
+    if(x.up){
+      FlexMlRec r;
+      if(!flexMsGet(&g_ms, rq->id, &r)){ std::snprintf(msg, cap, "Ya no existe"); return 404; }
+      std::snprintf(x.name, sizeof(x.name), "%s", r.name); x.size = r.size;
+      std::fprintf(stderr, "{\"xferReq\":{\"op\":\"up\",\"id\":%lu,\"folder\":\"%s\",\"move\":%d,\"job\":%lu}}\n",
+                   (unsigned long)rq->id, rq->folder, rq->move ? 1 : 0, (unsigned long)x.id);
+    } else {
+      std::snprintf(x.name, sizeof(x.name), "%s", rq->name); x.size = rq->size;
+      char nm[600]; jsonEsc(rq->name, nm, sizeof(nm));
+      std::fprintf(stderr, "{\"xferReq\":{\"op\":\"down\",\"file\":\"%s\",\"name\":\"%s\",\"size\":%llu,\"sha\":\"%s\",\"move\":%d,\"job\":%lu}}\n",
+                   rq->file, nm, (unsigned long long)rq->size, rq->sha, rq->move ? 1 : 0, (unsigned long)x.id);
+    }
+    g_xf.push_back(x);
+    std::snprintf(msg, cap, "%s", x.up ? (x.move ? "Moviendo a Flex Cloud" : "Copiando a Flex Cloud") : (x.move ? "Moviendo a Flex OS" : "Copiando a Flex OS"));
+    return 202;
+  }
+  if(rq->op == FLEXWEB_X_CLEAR){
+    g_xf.erase(std::remove_if(g_xf.begin(), g_xf.end(), [](const SimXfer& x){ return x.phase >= 6; }), g_xf.end());
+    std::snprintf(msg, cap, "Lista limpia");
+    return 202;
+  }
+  for(SimXfer& x : g_xf) if(x.id == rq->id){
+    std::fprintf(stderr, "{\"xferReq\":{\"op\":\"%s\",\"job\":%lu}}\n", rq->op == FLEXWEB_X_CANCEL ? "cancel" : "retry", (unsigned long)x.id);
+    if(rq->op == FLEXWEB_X_CANCEL && x.phase < 6){ x.phase = 8; std::snprintf(msg, cap, "Cancelada"); return 202; }
+    if(rq->op == FLEXWEB_X_RETRY && x.phase == 7){ x.phase = 0; x.done = 0; std::snprintf(msg, cap, "Reintentando"); return 202; }
+    std::snprintf(msg, cap, "No se puede"); return 409;
+  }
+  std::snprintf(msg, cap, "Ya no est\xC3\xA1 en curso");
+  return 404;
+}
+
 static bool hRemoveRec(void*, uint32_t id, char* why, size_t cap){ bool ok = flexMsDelete(&g_ms, id); if(!ok) std::snprintf(why, cap, "No se pudo"); return ok; }
 static bool hRenameRec(void*, uint32_t id, const char* name, char* why, size_t cap){ return flexMsRename(&g_ms, id, name, why, cap); }
 
@@ -260,6 +329,14 @@ static void command(char* line){
   char* nl = std::strchr(line, '\n'); if(nl) *nl = 0;
   if(g_storage && (!std::strcmp(line, "approve") || !std::strcmp(line, "deny"))){
     bool ok = fstPairDecide(&g_core, !std::strcmp(line, "approve"));
+    std::printf("{\"ok\":%d}\n", ok ? 1 : 0);
+    std::fflush(stdout);
+    return;
+  }
+  unsigned long xid = 0, xdone = 0; unsigned xph = 0;
+  if(g_storage && std::sscanf(line, "xjob %lu %u %lu", &xid, &xph, &xdone) == 3){
+    bool ok = false;
+    for(SimXfer& x : g_xf) if(x.id == xid){ x.phase = (uint8_t)xph; x.done = xdone; ok = true; }
     std::printf("{\"ok\":%d}\n", ok ? 1 : 0);
     std::fflush(stdout);
     return;
@@ -348,8 +425,9 @@ int main(int argc, char** argv){
     w.host.cloudOpen = hCloudOpen; w.host.cloudClose = hCloudClose; w.host.cloudResult = hCloudResult; w.host.phoneOrigin = hOrigin;
     w.host.phoneOffer = hOffer; w.host.phonePair = hPair; w.host.phonePoll = hPoll; w.host.storageJson = hStorage;
     w.host.removeRec = hRemoveRec; w.host.renameRec = hRenameRec;
-    // Transferencias Flex OS <-> Flex Cloud: las hace el gestor de la nube del
-    // P4 (test_cloud.cpp, phone_e2e.sh); aqui no hay gestor y la ruta no existe.
+    // Copias Flex OS <-> Flex Cloud: el doble de pruebas de arriba (en la placa,
+    // el gestor de la nube; ver test_cloud.cpp y phone_e2e.sh).
+    w.host.xfersJson = hXfersJson; w.host.xferOp = hXferOp;
   }
   std::snprintf(w.ip, sizeof(w.ip), "127.0.0.1");
   w.port = port;

@@ -9,6 +9,34 @@
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
+<svg class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11l8-7 8 7v8a1.5 1.5 0 0 1-1.5 1.5h-3.5v-6h-6v6H5.5A1.5 1.5 0 0 1 4 19z"/></symbol>
+  <symbol id="i-device" viewBox="0 0 24 24"><rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M10 18.5h4"/></symbol>
+  <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18h10.5a4.5 4.5 0 0 0 .4-8.98A6 6 0 0 0 6.2 8.6 4.7 4.7 0 0 0 7 18z"/></symbol>
+  <symbol id="i-swap" viewBox="0 0 24 24"><path d="M7 20V5M3.5 8.5L7 5l3.5 3.5M17 4v15M13.5 15.5L17 19l3.5-3.5"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.6l2 2h7.4A2.5 2.5 0 0 1 21 9.5v8a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"/></symbol>
+  <symbol id="i-folderplus" viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.6l2 2h7.4A2.5 2.5 0 0 1 21 9.5v8a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"/><path d="M12 11v6M9 14h6"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6"/><path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4.5A1.5 1.5 0 0 1 10.5 3h3A1.5 1.5 0 0 1 15 4.5V7"/></symbol>
+  <symbol id="i-restore" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7"/><path d="M4 4v4h4"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 16v2.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V16"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v2.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V16"/></symbol>
+  <symbol id="i-move" viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.6l2 2h7.4A2.5 2.5 0 0 1 21 9.5v8a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"/><path d="M10 13.5h6M13.5 11l2.5 2.5-2.5 2.5"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+  <symbol id="i-photo" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="9" cy="10" r="1.8"/><path d="M21 16l-5-5-8 8"/></symbol>
+  <symbol id="i-video" viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" rx="3"/><path d="M16 10.5l5-3v9l-5-3z"/></symbol>
+  <symbol id="i-audio" viewBox="0 0 24 24"><path d="M9 18V6l11-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/></symbol>
+  <symbol id="i-document" viewBox="0 0 24 24"><path d="M14 3H7.5A2.5 2.5 0 0 0 5 5.5v13A2.5 2.5 0 0 0 7.5 21h9a2.5 2.5 0 0 0 2.5-2.5V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></symbol>
+  <symbol id="i-archive" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M12 4v3M12 9v2M12 13v2"/><rect x="10.5" y="15" width="3" height="3" rx="1"/></symbol>
+  <symbol id="i-other" viewBox="0 0 24 24"><path d="M14 3H7.5A2.5 2.5 0 0 0 5 5.5v13A2.5 2.5 0 0 0 7.5 21h9a2.5 2.5 0 0 0 2.5-2.5V8z"/><path d="M14 3v5h5"/></symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17h.01"/></symbol>
+  <symbol id="i-retry" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4v4h-4"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2.5"/><path d="M16 8V5.5A1.5 1.5 0 0 0 14.5 4h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8"/></symbol>
+</svg>
 <div class="bg" aria-hidden="true"></div>
 
 <header class="top glass" id="top">
@@ -32,6 +60,7 @@
   <button role="menuitem" id="mOwner">Ver contenido protegido</button>
   <button role="menuitem" id="mLock" hidden>Ocultar contenido protegido</button>
   <button role="menuitem" id="mRefresh">Actualizar</button>
+  <button role="menuitem" id="mPhone" hidden>Emparejar un teléfono (Flex Cloud)</button>
   <button role="menuitem" id="mUnpair" class="danger">Desconectar este móvil</button>
 </div>
 
@@ -76,13 +105,108 @@
       <p id="emptyText">Sube fotos, vídeos o música desde este móvil con el botón <b>Subir</b>.</p>
     </div>
   </section>
+  <section id="homeView" class="home" hidden>
+    <article class="hcard glass" id="hLocal">
+      <header class="hhead">
+        <span class="hico local" aria-hidden="true"><svg class="i"><use href="#i-device"></use></svg></span>
+        <div class="ht"><h2>Flex OS</h2><span class="sub" id="hLocalSub">Memoria del dispositivo</span></div>
+        <button class="chip" id="hLocalGo">Abrir</button>
+      </header>
+      <div class="qbar" id="hLocalBar"><i class="used"></i></div>
+      <p class="qline" id="hLocalLine"></p>
+      <div class="cats" id="hCats"></div>
+    </article>
+
+    <article class="hcard glass" id="hCloud">
+      <header class="hhead">
+        <span class="hico cloud" aria-hidden="true"><svg class="i"><use href="#i-cloud"></use></svg></span>
+        <div class="ht"><h2>Flex Cloud</h2><span class="sub" id="hCloudSub"></span></div>
+        <button class="chip" id="hCloudGo">Abrir</button>
+      </header>
+      <div id="hCloudQuota" hidden>
+        <div class="qbar"><i class="used" id="hqUsed"></i><i class="trash" id="hqTrash"></i><i class="reserved" id="hqRes"></i></div>
+        <p class="qline" id="hCloudLine"></p>
+        <p class="qhint" id="hCloudHint"></p>
+      </div>
+      <div class="hcta" id="hCloudCta" hidden>
+        <p id="hCloudText"></p>
+        <button class="btn primary sm" id="hCloudBtn"></button>
+      </div>
+    </article>
+
+    <article class="hcard glass" id="hXfer">
+      <header class="hhead">
+        <span class="hico xfer" aria-hidden="true"><svg class="i"><use href="#i-swap"></use></svg></span>
+        <div class="ht"><h2>Transferencias</h2><span class="sub" id="hXferSub"></span></div>
+        <button class="chip" id="hXferGo">Ver</button>
+      </header>
+      <ul class="hx" id="hXferList"></ul>
+    </article>
+
+    <h3 class="sect" id="hRecentTitle">Recientes</h3>
+    <div class="recents" id="hRecent"></div>
+  </section>
+
+  <section id="cloudView" hidden>
+    <div class="cbar glass" id="cbar">
+      <nav class="crumbs" id="crumbs" aria-label="Carpeta"></nav>
+      <button class="icon-btn" id="cNewFolder" aria-label="Nueva carpeta"><svg class="i"><use href="#i-folderplus"></use></svg></button>
+      <button class="icon-btn" id="cTrashBtn" aria-label="Papelera de Flex Cloud" aria-pressed="false"><svg class="i"><use href="#i-trash"></use></svg></button>
+    </div>
+    <div class="selbar glass" id="cselbar" hidden>
+      <button class="icon-btn" id="cselClose" aria-label="Salir de la selección"><span class="x"></span></button>
+      <span id="cselCount">0 seleccionados</span>
+      <button class="chip" id="cselAll">Seleccionar todo</button>
+    </div>
+    <div class="banner" id="cBanner" hidden>
+      <svg class="i" aria-hidden="true"><use href="#i-alert"></use></svg>
+      <span id="cBannerTxt"></span>
+      <button class="chip" id="cBannerBtn"></button>
+    </div>
+    <p class="cquota" id="cQuota"></p>
+    <div id="cgrid" class="grid cgrid" aria-live="polite"></div>
+    <div class="more-row"><button class="btn sm" id="cMore" hidden>Cargar más</button></div>
+    <div class="empty" id="cEmpty" hidden>
+      <div class="empty-ico" aria-hidden="true"></div>
+      <h2 id="cEmptyTitle">Esta carpeta está vacía</h2>
+      <p id="cEmptyText">Sube archivos con el botón Subir: se guardan en tu teléfono tal cual, sin convertir.</p>
+    </div>
+  </section>
+
+  <section id="xferView" class="xview" hidden>
+    <h3 class="sect">Desde este navegador</h3>
+    <div id="xferHere"></div>
+    <p class="hint" id="xferHereEmpty">Nada subiéndose desde este navegador.</p>
+    <div class="sect-row"><h3 class="sect">Entre Flex OS y Flex Cloud</h3><button class="chip" id="p4xClear" hidden>Quitar terminadas</button></div>
+    <ul class="p4x" id="p4xList"></ul>
+    <p class="hint" id="p4xEmpty">Ninguna copia en curso entre Flex OS y Flex Cloud.</p>
+  </section>
 </main>
 
 <button class="fab" id="fab" hidden aria-label="Subir archivos"><span class="plus" aria-hidden="true"></span><span>Subir</span></button>
 <div class="selactions glass" id="selActions" hidden>
   <button class="btn primary" id="selDl"><span class="dl-ico" aria-hidden="true"></span>Descargar</button>
+  <button class="act" id="selCloud" hidden><svg class="i"><use href="#i-cloud"></use></svg><span>A Flex Cloud</span></button>
+  <button class="act" id="selRen" hidden><svg class="i"><use href="#i-edit"></use></svg><span>Renombrar</span></button>
+  <button class="act danger" id="selDel" hidden><svg class="i"><use href="#i-trash"></use></svg><span>Eliminar</span></button>
 </div>
+<div class="selactions glass" id="cselActions" hidden>
+  <button class="act" id="cDl"><svg class="i"><use href="#i-download"></use></svg><span>Descargar</span></button>
+  <button class="act" id="cLocal"><svg class="i"><use href="#i-device"></use></svg><span>A Flex OS</span></button>
+  <button class="act" id="cMove"><svg class="i"><use href="#i-move"></use></svg><span>Mover</span></button>
+  <button class="act" id="cRen"><svg class="i"><use href="#i-edit"></use></svg><span>Renombrar</span></button>
+  <button class="act danger" id="cDel"><svg class="i"><use href="#i-trash"></use></svg><span>Papelera</span></button>
+  <button class="act" id="cRestore" hidden><svg class="i"><use href="#i-restore"></use></svg><span>Restaurar</span></button>
+  <button class="act danger" id="cPurge" hidden><svg class="i"><use href="#i-trash"></use></svg><span>Eliminar</span></button>
+</div>
+<nav class="bnav glass" id="bnav" hidden aria-label="Secciones">
+  <button data-v="home" aria-label="Inicio"><svg class="i"><use href="#i-home"></use></svg><span>Inicio</span></button>
+  <button data-v="lib" aria-label="Flex OS"><svg class="i"><use href="#i-device"></use></svg><span>Flex OS</span></button>
+  <button data-v="cloud" aria-label="Flex Cloud"><svg class="i"><use href="#i-cloud"></use></svg><span>Flex Cloud</span></button>
+  <button data-v="xfer" aria-label="Transferencias"><svg class="i"><use href="#i-swap"></use></svg><span>Transferencias</span><b class="nbadge" id="bnavBadge" hidden></b></button>
+</nav>
 <input type="file" id="picker" multiple accept="image/*,video/*,audio/*,.heic,.heif,.avi,.wav,.mp3,.m4a" hidden>
+<input type="file" id="cloudPicker" multiple hidden>
 
 <div class="scrim" id="scrim" hidden></div>
 
@@ -122,6 +246,88 @@
   <div class="sheet-actions">
     <button class="btn" id="planCancel">Cancelar</button>
     <button class="btn primary" id="planGo">Subir</button>
+  </div>
+</section>
+
+<section class="sheet glass" id="destSheet" hidden aria-labelledby="destTitle">
+  <div class="grab" aria-hidden="true"></div>
+  <h2 id="destTitle">¿Dónde quieres guardar estos archivos?</h2>
+  <div class="opts">
+    <button class="opt" id="destLocal">
+      <span class="hico local" aria-hidden="true"><svg class="i"><use href="#i-device"></use></svg></span>
+      <span class="ot"><b>Flex OS</b><span>Se preparan para verse y sonar en Flex OS (JPEG, AVI‑MJPEG, WAV).</span><em id="destLocalWhy"></em></span>
+    </button>
+    <button class="opt" id="destCloud">
+      <span class="hico cloud" aria-hidden="true"><svg class="i"><use href="#i-cloud"></use></svg></span>
+      <span class="ot"><b>Flex Cloud</b><span>En tu teléfono, tal cual: el original sin convertir.</span><em id="destCloudWhy"></em></span>
+    </button>
+  </div>
+  <div class="sheet-actions"><button class="btn" id="destCancel">Cancelar</button></div>
+</section>
+
+<section class="sheet glass" id="phoneSheet" hidden aria-labelledby="phoneTitle">
+  <div class="grab" aria-hidden="true"></div>
+  <h2 id="phoneTitle">Activar Flex Cloud en este teléfono</h2>
+  <p class="hint" id="phoneHint">Flex Cloud guarda tus archivos en el espacio que el teléfono le reserva (5 GB). Flex OS solo ve ese espacio: nada más del teléfono.</p>
+  <ol class="steps" id="phoneSteps">
+    <li id="pStep1">Pulsa <b>Abrir Flex Phone</b> en este teléfono.</li>
+    <li id="pStep2">Comprueba que el código de 6 cifras es el mismo en el teléfono y en la pantalla de Flex OS.</li>
+    <li id="pStep3">Acepta en la pantalla de Flex OS.</li>
+  </ol>
+  <p class="pstate" id="phoneState" role="status"></p>
+  <div class="sheet-actions">
+    <button class="btn" id="phoneCancel">Cerrar</button>
+    <a class="btn primary" id="phoneOpen" href="#" rel="noopener">Abrir Flex Phone</a>
+  </div>
+</section>
+
+<section class="sheet glass" id="sendSheet" hidden aria-labelledby="sendTitle">
+  <div class="grab" aria-hidden="true"></div>
+  <h2 id="sendTitle">Enviar a Flex Cloud</h2>
+  <p class="hint" id="sendHint"></p>
+  <div class="profiles" id="sendMode" role="radiogroup" aria-label="Copiar o mover">
+    <button role="radio" data-m="copy" class="on" aria-checked="true">Copiar</button>
+    <button role="radio" data-m="move" aria-checked="false">Mover</button>
+  </div>
+  <p class="hint small" id="sendModeHint"></p>
+  <button class="dest" id="sendWhere"><svg class="i" aria-hidden="true"><use href="#i-folder"></use></svg><span id="sendWhereTxt">Flex Cloud</span><svg class="i" aria-hidden="true"><use href="#i-chevron"></use></svg></button>
+  <ul class="plan" id="sendList"></ul>
+  <div class="sheet-actions">
+    <button class="btn" id="sendCancel">Cancelar</button>
+    <button class="btn primary" id="sendGo">Enviar</button>
+  </div>
+</section>
+
+<section class="sheet glass" id="folderSheet" hidden aria-labelledby="folderTitle">
+  <div class="grab" aria-hidden="true"></div>
+  <h2 id="folderTitle">Elige una carpeta</h2>
+  <p class="hint" id="folderWhere"></p>
+  <div class="picker" id="folderList" role="listbox" aria-label="Carpetas"></div>
+  <div class="sheet-actions">
+    <button class="btn" id="folderCancel">Cancelar</button>
+    <button class="btn primary" id="folderGo">Aquí</button>
+  </div>
+</section>
+
+<section class="dialog glass" id="askDlg" hidden role="dialog" aria-modal="true" aria-labelledby="askTitle">
+  <h2 id="askTitle"></h2>
+  <p id="askText"></p>
+  <form id="askForm" autocomplete="off">
+    <input id="askInput" class="field" maxlength="120" aria-label="Nombre" spellcheck="false">
+    <p class="err" id="askErr" role="alert"></p>
+    <div class="sheet-actions">
+      <button class="btn" type="button" id="askCancel">Cancelar</button>
+      <button class="btn primary" type="submit" id="askGo">Aceptar</button>
+    </div>
+  </form>
+</section>
+
+<section class="dialog glass" id="sureDlg" hidden role="alertdialog" aria-modal="true" aria-labelledby="sureTitle">
+  <h2 id="sureTitle"></h2>
+  <p id="sureText"></p>
+  <div class="sheet-actions">
+    <button class="btn" id="sureCancel">Cancelar</button>
+    <button class="btn primary" id="sureGo">Aceptar</button>
   </div>
 </section>
 

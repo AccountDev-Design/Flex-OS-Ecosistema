@@ -1347,6 +1347,223 @@ FX.uploadQuery = function (m) {
   return q;
 };
 
+// ---------------------------------------------------------------------------
+//  SHA-256 (FIPS 180-4), incremental
+// ---------------------------------------------------------------------------
+// Flex Cloud exige la huella de cada parte (X-Part-SHA256) y comprueba la del
+// archivo entero al terminar. Esta pagina se sirve por http:// desde la red
+// local, y ahi el navegador no ofrece crypto.subtle (solo existe en contextos
+// seguros): por eso va escrita aqui. Se alimenta a trozos, asi que un archivo
+// enorme nunca esta entero en memoria.
+const SHA_K = new Int32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]);
+function shaBlock(H, W, b, p) {
+  for (let i = 0; i < 16; i++, p += 4) W[i] = (b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3];
+  for (let i = 16; i < 64; i++) {
+    const x = W[i - 15], y = W[i - 2];
+    const s0 = ((x >>> 7) | (x << 25)) ^ ((x >>> 18) | (x << 14)) ^ (x >>> 3);
+    const s1 = ((y >>> 17) | (y << 15)) ^ ((y >>> 19) | (y << 13)) ^ (y >>> 10);
+    W[i] = (W[i - 16] + s0 + W[i - 7] + s1) | 0;
+  }
+  let a = H[0], b1 = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+  for (let i = 0; i < 64; i++) {
+    const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+    const t1 = (h + S1 + ((e & f) ^ (~e & g)) + SHA_K[i] + W[i]) | 0;
+    const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+    const t2 = (S0 + ((a & b1) ^ (a & c) ^ (b1 & c))) | 0;
+    h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b1; b1 = a; a = (t1 + t2) | 0;
+  }
+  H[0] = (H[0] + a) | 0; H[1] = (H[1] + b1) | 0; H[2] = (H[2] + c) | 0; H[3] = (H[3] + d) | 0;
+  H[4] = (H[4] + e) | 0; H[5] = (H[5] + f) | 0; H[6] = (H[6] + g) | 0; H[7] = (H[7] + h) | 0;
+}
+FX.Sha256 = function () {
+  this.h = new Int32Array([0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]);
+  this.w = new Int32Array(64);
+  this.buf = new Uint8Array(64);
+  this.n = 0;                 // bytes esperando en buf
+  this.len = 0;               // bytes totales (hasta 2^53: de sobra)
+};
+FX.Sha256.prototype.update = function (u8) {
+  const n = u8.length;
+  let i = 0;
+  this.len += n;
+  if (this.n) {
+    const take = Math.min(64 - this.n, n);
+    this.buf.set(u8.subarray(0, take), this.n);
+    this.n += take; i = take;
+    if (this.n < 64) return this;
+    shaBlock(this.h, this.w, this.buf, 0);
+    this.n = 0;
+  }
+  for (; i + 64 <= n; i += 64) shaBlock(this.h, this.w, u8, i);
+  if (i < n) { this.buf.set(u8.subarray(i), 0); this.n = n - i; }
+  return this;
+};
+FX.Sha256.prototype.digest = function () {
+  const L = this.n < 56 ? 64 : 128, pad = new Uint8Array(L);
+  pad.set(this.buf.subarray(0, this.n));
+  pad[this.n] = 0x80;
+  const hi = Math.floor(this.len / 0x20000000), lo = (this.len * 8) >>> 0;     // longitud en BITS, 64 bits big-endian
+  for (let k = 0; k < 4; k++) { pad[L - 8 + k] = (hi >>> (24 - 8 * k)) & 255; pad[L - 4 + k] = (lo >>> (24 - 8 * k)) & 255; }
+  shaBlock(this.h, this.w, pad, 0);
+  if (L === 128) shaBlock(this.h, this.w, pad, 64);
+  const out = new Uint8Array(32);
+  for (let k = 0; k < 8; k++) { const v = this.h[k]; out[4 * k] = v >>> 24; out[4 * k + 1] = (v >>> 16) & 255; out[4 * k + 2] = (v >>> 8) & 255; out[4 * k + 3] = v & 255; }
+  return out;
+};
+FX.Sha256.prototype.hex = function () {
+  let s = '';
+  for (const b of this.digest()) s += (b < 16 ? '0' : '') + b.toString(16);
+  return s;
+};
+FX.sha256Hex = function (u8) { return new FX.Sha256().update(u8).hex(); };
+
+// ---------------------------------------------------------------------------
+//  Flex Storage: tamanos, cuota y destinos
+// ---------------------------------------------------------------------------
+// "1,5 KB", "160 MB", "5 GB": EXACTAMENTE como fclFmtBytes del P4 (base 1024,
+// una cifra decimal por debajo de 100, ",0" fuera y redondeo al par en los
+// empates, como printf), para que la web y la pantalla digan lo mismo.
+FX.fmtBytes = function (n) {
+  n = Math.max(0, Math.floor(+n || 0));
+  if (n < 1024) return n + ' B';
+  const U = ['KB', 'MB', 'GB', 'TB'];
+  let d = 1024, i = 0;
+  while (n / d >= 1024 && i < 3) { d *= 1024; i++; }
+  const v = n / d, dec = v >= 100 ? 0 : 1, m = dec ? 10 : 1;
+  const x = n * m / d, q = Math.floor(x), fr = x - q;                // exactos: d es potencia de dos
+  const r = fr > 0.5 || (fr === 0.5 && q % 2 === 1) ? q + 1 : q;
+  let s = dec ? Math.floor(r / 10) + ',' + (r % 10) : String(r);
+  if (s.endsWith(',0')) s = s.slice(0, -2);
+  return s + ' ' + U[i];
+};
+// La cuota llega con dos formas: la de Flex Cloud (totalBytes, usedBytes...)
+// y la que el P4 guarda del ultimo contacto (total, used..., en el resumen).
+FX.normQuota = function (q) {
+  if (!q || typeof q !== 'object') return null;
+  const n = (v) => Math.max(0, Math.floor(+v || 0));
+  const flex = q.totalBytes != null;
+  const total = n(flex ? q.totalBytes : q.total);
+  if (!total) return null;
+  const used = n(flex ? q.usedBytes : q.used), reserved = n(flex ? q.reservedBytes : q.reserved);
+  const trash = n(flex ? q.trashBytes : q.trash);
+  const logical = Math.max(0, total - used - reserved);
+  const avail = Math.min(logical, n(flex ? q.availableBytes : q.available));
+  // Milesimas ocupadas como readQuota del P4: hacia arriba, y algo ocupado
+  // nunca es 0.
+  const c = used + reserved;
+  let permille = !flex ? n(q.permille) : c >= total ? 1000 : Math.floor((c * 1000 + total - 1) / total);
+  if (flex && c > 0 && permille === 0) permille = 1;
+  permille = Math.min(1000, permille);
+  const st = q.state === 'full' || q.state === 'low' ? q.state : 'ok';
+  return { total, used, reserved, trash, avail, permille, state: avail <= 0 ? 'full' : st,
+           limited: !!q.limitedByDevice || avail < logical };
+};
+// "1,2 GB de 5 GB · 24 %" (como fclQuotaLine: lo reservado cuenta como ocupado).
+FX.quotaLine = function (q) {
+  if (!q) return 'Espacio no disponible';
+  let pct = Math.floor((q.permille + 5) / 10);
+  if (pct === 0 && q.permille > 0) pct = 1;                           // algo ocupado nunca es "0 %"
+  return FX.fmtBytes(q.used + q.reserved) + ' de ' + FX.fmtBytes(q.total) + ' · ' + Math.min(100, pct) + ' %';
+};
+// Lo que queda DE VERDAD: si el telefono tiene menos libre que lo que falta
+// de la cuota, manda el telefono (y se dice).
+FX.quotaHint = function (q) {
+  if (!q) return '';
+  if (q.state === 'full' || q.avail <= 0) return q.limited ? 'El teléfono no tiene más espacio libre' : 'Flex Cloud está lleno';
+  const left = FX.fmtBytes(q.avail) + (q.limited ? ' (lo que queda libre en el teléfono)' : '');
+  return q.state === 'low' ? 'Espacio casi lleno: quedan ' + left : 'Quedan ' + left;
+};
+// Segmentos de la barra, en milesimas del total: usado, papelera (dentro de
+// lo usado: ocupa hasta que se vacia) y reservado por subidas en curso.
+FX.quotaBar = function (q) {
+  if (!q) return { used: 0, trash: 0, reserved: 0 };
+  const pm = (v) => Math.min(1000, Math.round(v * 1000 / q.total));
+  const trash = Math.min(q.trash, q.used);
+  return { used: pm(q.used - trash), trash: pm(trash), reserved: pm(q.reserved) };
+};
+
+// Subidas a Flex Cloud: partes de 1 MB, una detras de otra, a traves del P4.
+// Parte pequena = poco que repetir si se corta el Wi-Fi y el P4 atiende entre
+// medias lo demas (miniaturas, el resumen...).
+FX.CLOUD_PART = 1 << 20;
+// La MISMA clave para el mismo archivo en la misma carpeta: si la subida se
+// corto (o se recargo la pagina), volver a elegirlo continua donde iba.
+FX.cloudClientKey = function (name, size, lastModified, parentId) {
+  let h = 0x811c9dc5;
+  for (const ch of String(name) + '|' + (parentId || 'root')) { h ^= ch.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; }
+  return 'web:' + size + ':' + (lastModified || 0) + ':' + h.toString(16).padStart(8, '0');
+};
+// Ids de Flex Cloud tal como los acepta el P4 (cloudIdOk): prefijo y
+// minusculas/cifras.
+FX.cloudIdOk = function (id, prefix) {
+  return typeof id === 'string' && id.startsWith(prefix) && id.length >= prefix.length + 8 && id.length < 40 &&
+    /^[a-z0-9]+$/.test(id.slice(prefix.length));
+};
+
+// Que hara Flex OS con un archivo de Flex Cloud que se le envia (como
+// ckPlaceDownload + flexMlKindFromExt): a la Galeria o a Musica si su
+// extension es de un medio que cataloga; si no, a Archivos › Descargas.
+// `plays` = lo reproduce de verdad (JPEG, AVI MJPEG, WAV); lo demas se
+// guarda para descargarlo. Nada se convierte: va el original verificado.
+FX.p4Place = function (name) {
+  const m = /\.([a-z0-9]+)$/i.exec(String(name || ''));
+  const e = m ? m[1].toLowerCase() : '';
+  if (/^(jpg|jpeg|png|gif|bmp|webp|heic|heif|avif)$/.test(e)) return { where: 'Galería', kind: 'photo', plays: e === 'jpg' || e === 'jpeg' };
+  if (/^(avi|mp4|m4v|mov|webm|mkv|3gp)$/.test(e)) return { where: 'Galería', kind: 'video', plays: e === 'avi' };
+  if (/^(wav|mp3|aac|m4a|flac|ogg|opus)$/.test(e)) return { where: 'Música', kind: 'audio', plays: e === 'wav' };
+  return { where: 'Archivos › Descargas', kind: '', plays: false };
+};
+
+// ¿Donde se puede guardar ahora mismo? Para el selector de destino de
+// «Subir». `o` = { up, free, reserve, phone, quota, phoneOk }:
+//   phone   el estado que publica el P4 (none, ready, off, rejected)
+//   phoneOk la ultima peticion al telefono contesto (no "desconectado")
+// Devuelve, por destino, si se puede (ok), por que no (why) y que se hace
+// al tocarlo (act: 'pick' elegir archivos, 'pair' emparejar, '' nada).
+FX.destOptions = function (o) {
+  const room = Math.max(0, (o.free || 0) - (o.reserve || 0));
+  const local = !o.up ? { ok: false, act: '', why: 'Las subidas están desactivadas en Flex OS' } :
+    room <= 0 ? { ok: false, act: '', why: 'Flex OS no tiene espacio libre' } :
+    { ok: true, act: 'pick', why: 'Libre: ' + FX.fmtBytes(room) };
+  let cloud;
+  const q = o.quota;
+  if (o.phone === 'none' || !o.phone) cloud = { ok: false, act: 'pair', why: 'Activa Flex Cloud en este teléfono' };
+  else if (o.phone === 'rejected') cloud = { ok: false, act: 'pair', why: 'El teléfono ya no reconoce este Flex OS: vuelve a emparejarlo' };
+  else if (o.phone === 'off') cloud = { ok: false, act: '', why: 'Flex Cloud está desactivado en Flex OS' };
+  else if (!o.phoneOk) cloud = { ok: false, act: '', why: 'Teléfono desconectado' };
+  else if (q && q.avail <= 0) cloud = { ok: false, act: '', why: FX.quotaHint(q) };
+  else cloud = { ok: true, act: 'pick', why: q ? 'Disponible: ' + FX.fmtBytes(q.avail) + ' de ' + FX.fmtBytes(q.total) : 'Original, sin convertir' };
+  return { local, cloud };
+};
+
+// Que hacer con un error de Flex Cloud (pasarela del P4 o el telefono):
+//   retry  ms que esperar antes de repetir la MISMA peticion (0 = no repetir)
+//   phone  el problema es el telefono (desconectado / sin emparejar)
+//   text   lo que se le dice a la persona
+FX.cloudErr = function (status, json) {
+  const e = (json && typeof json.error === 'object' && json.error) || {};
+  const code = e.code || '';
+  const msg = e.message || '';
+  if (status === 0) return { code: 'network', retry: 0, phone: false, text: 'Sin conexión con Flex OS. Comprueba que sigues en la misma Wi‑Fi.' };
+  if (code === 'phone_session') return { code, retry: 1000, phone: false, text: msg || 'Renovando la sesión con el teléfono' };
+  if (code === 'phone_offline' || status === 504) return { code: 'phone_offline', retry: 0, phone: true, text: 'Teléfono desconectado' };
+  if (code === 'no_phone') return { code, retry: 0, phone: true, text: 'Activa Flex Cloud en este teléfono' };
+  if (code === 'phone_rejected') return { code, retry: 0, phone: true, text: msg || 'El teléfono ya no reconoce este Flex OS: vuelve a emparejarlo' };
+  if (code === 'upload_busy' || code === 'part_busy') return { code, retry: 2000, phone: false, text: msg || 'Esa parte se está recibiendo por otra conexión' };
+  if (code === 'quota_exceeded') return { code, retry: 0, phone: false, text: 'No queda espacio en Flex Cloud del teléfono' };
+  if (code === 'no_space_device') return { code, retry: 0, phone: false, text: msg || 'El teléfono no tiene espacio libre' };
+  if (status === 502) return { code: code || 'bad_gateway', retry: 0, phone: true, text: msg || 'Respuesta inesperada del teléfono' };
+  return { code: code || 'http_' + status, retry: 0, phone: false, text: msg || ('Flex Cloud respondió ' + status) };
+};
+
 if (typeof module !== 'undefined' && module.exports) module.exports = FX;
 if (typeof document === 'undefined') return;
 
@@ -1405,6 +1622,10 @@ function closeLayers() {
   closeMenu();
   if (!$('loginDlg').hidden) closeLogin();
   if (!$('planSheet').hidden) closePlan();
+  closeDest(); closePhoneSheet(); closeSend(); closeFolderPick(null); closeAsk(null); closeSure(false);
+}
+function anyLayer() {
+  return ['loginDlg', 'planSheet', 'menu', 'destSheet', 'phoneSheet', 'sendSheet', 'folderSheet', 'askDlg', 'sureDlg'].some((id) => !$(id).hidden);
 }
 
 // ===========================================================================
@@ -1468,8 +1689,10 @@ function startLibrary(fresh) {
   }
   refresh(true);
   schedulePoll();
+  fsStart();
 }
 function lostSession() {
+  fsStop();
   for (const j of S.queue) j.cancelled = true;
   S.queue = [];
   updateQueueCard();
@@ -1523,17 +1746,36 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 
 function updateHeader() {
   const n = S.items.length;
-  $('devSub').textContent = S.offline ? 'Sin conexión · reintentando' :
-    (n ? n + ' elemento' + (n === 1 ? '' : 's') : 'Biblioteca vacía');
-  if (S.total) {
-    const used = Math.max(0, S.total - S.free);
-    $('meterFill').style.width = Math.min(100, Math.round(used * 100 / S.total)) + '%';
-    $('meterTxt').textContent = FX.fmtSize(Math.max(0, S.free - S.reserve)) + ' libres';
+  if (FS.on && FS.view !== 'lib') headerStorage();
+  else {
+    $('devSub').textContent = S.offline ? 'Sin conexión · reintentando' :
+      (n ? n + ' elemento' + (n === 1 ? '' : 's') : 'Biblioteca vacía');
+    $('meter').hidden = !S.paired;
+    $('meter').title = 'Memoria de Flex OS';
+    if (S.total) {
+      const used = Math.max(0, S.total - S.free);
+      $('meterFill').style.width = Math.min(100, Math.round(used * 100 / S.total)) + '%';
+      $('meterTxt').textContent = FX.fmtSize(Math.max(0, S.free - S.reserve)) + ' libres';
+    }
   }
-  $('fab').hidden = !S.paired || !S.up || S.selecting;
+  updateFab();
   $('mOwner').hidden = S.owner;
   $('mLock').hidden = !S.owner;
   $('ownerChip').hidden = !S.owner;
+}
+
+// Cabecera en Inicio, Flex Cloud y Transferencias: el medidor ensena lo de
+// esa vista (en Flex Cloud, la cuota del telefono; en las otras, nada).
+function headerStorage() {
+  const v = FS.view;
+  $('devSub').textContent = S.offline ? 'Sin conexión · reintentando' :
+    v === 'home' ? 'Inicio' : v === 'xfer' ? 'Transferencias' : 'Flex Cloud';
+  // En Flex Cloud, la cuota en vivo del telefono (si no contesta, no se ensena
+  // un numero que ya no se sabe si es cierto).
+  const q = v === 'cloud' && FS.phoneOk ? FS.quota : null;
+  $('meter').hidden = !q;
+  $('meter').title = 'Flex Cloud en el teléfono';
+  if (q) { $('meterFill').style.width = (q.permille / 10) + '%'; $('meterTxt').textContent = FX.fmtBytes(q.avail) + ' libres'; }
 }
 
 // ---------- tarjetas ----------
@@ -1635,6 +1877,7 @@ function render() {
   }
   S.painted = true;
   if (S.selecting) updateSelbar();
+  if (FS.on && FS.view === 'home') renderRecents();
 }
 
 $('tabs').addEventListener('click', (e) => {
@@ -1701,6 +1944,7 @@ function enterSelect() {
   $('selActions').hidden = false;
   $('tabs').hidden = true;
   $('fab').hidden = true;
+  for (const id of ['selCloud', 'selRen', 'selDel']) $(id).hidden = !FS.on;
   updateSelbar();
 }
 function exitSelect() {
@@ -1721,6 +1965,9 @@ function updateSelbar() {
   $('selAll').textContent = every ? 'Quitar selección' : 'Seleccionar todo';
   $('selAll').disabled = all.length === 0;
   $('selDl').disabled = n === 0;
+  $('selCloud').disabled = n === 0;
+  $('selRen').disabled = n !== 1;
+  $('selDel').disabled = n === 0;
 }
 $('selClose').addEventListener('click', exitSelect);
 $('selAll').addEventListener('click', () => {
@@ -1750,7 +1997,7 @@ function download(ids) {
 // ===========================================================================
 //  Visor
 // ===========================================================================
-let viewerStop = null;
+let viewerStop = null, viewerSeq = 0;
 function openViewer(it) {
   const body = $('viewerBody');
   body.textContent = '';
@@ -1772,7 +2019,7 @@ function openViewer(it) {
     img.src = src;
     body.append(img);
   } else if (it.k === 'video' && /^AVI/.test(it.fmt || '')) {
-    if (it.p) playMjpeg(it, body); else note('Este AVI no usa MJPEG: ni Flex OS ni el navegador pueden reproducirlo. Puedes descargarlo.');
+    if (it.p) playMjpeg('/api/file/' + it.id, it.w, it.h, body); else note('Este AVI no usa MJPEG: ni Flex OS ni el navegador pueden reproducirlo. Puedes descargarlo.');
   } else if (it.k === 'video') {
     const v = el('video');
     v.controls = true; v.playsInline = true; v.preload = 'metadata';
@@ -1781,7 +2028,7 @@ function openViewer(it) {
     body.append(v);
   } else if (it.k === 'audio') {
     if (hasThumb(it)) { const img = new Image(); img.alt = ''; img.className = 'cover'; img.src = '/api/thumb/' + it.id + '?v=' + it.t; body.append(img); }
-    if (it.fmt === 'WAV IMA ADPCM') playIma(it, body);
+    if (it.fmt === 'WAV IMA ADPCM') playIma('/api/file/' + it.id, body);
     else {
       const a = el('audio');
       a.controls = true; a.preload = 'metadata';
@@ -1795,6 +2042,7 @@ function openViewer(it) {
 }
 function closeViewer() {
   if ($('viewer').hidden) return;
+  viewerSeq++;
   if (viewerStop) { viewerStop(); viewerStop = null; }
   for (const m of $('viewerBody').querySelectorAll('video,audio')) { m.pause(); m.removeAttribute('src'); m.load(); }
   $('viewerBody').textContent = '';
@@ -1826,17 +2074,17 @@ function loadingNote(body) {
 }
 
 // AVI MJPEG en el navegador: cada fotograma es un JPEG y se pinta en un lienzo.
-async function playMjpeg(it, body) {
+async function playMjpeg(src, w, h, body) {
   let stopped = false, timer = 0;
   viewerStop = () => { stopped = true; clearTimeout(timer); };
   const prog = loadingNote(body);
   let u8, ix;
-  try { u8 = await fetchBytes('/api/file/' + it.id, prog); ix = FX.aviIndex(u8); } catch (e) { body.textContent = ''; body.append(el('p', 'note', e.message)); return; }
+  try { u8 = await fetchBytes(src, prog); ix = FX.aviIndex(u8); } catch (e) { if (!stopped) { body.textContent = ''; body.append(el('p', 'note', e.message)); } return; }
   if (stopped) return;
   body.textContent = '';
   if (!ix || !ix.frames.length) { body.append(el('p', 'note', 'El vídeo no tiene fotogramas legibles.')); return; }
   const cv = el('canvas');
-  cv.width = ix.w || it.w || 320; cv.height = ix.h || it.h || 240;
+  cv.width = ix.w || w || 320; cv.height = ix.h || h || 240;
   const g = cv.getContext('2d');
   const btn = el('button', 'vctl', 'Pausa');
   body.append(cv, btn);
@@ -1866,12 +2114,13 @@ async function playMjpeg(it, body) {
 }
 
 // WAV IMA ADPCM: el navegador no lo reproduce solo; se decodifica aqui.
-async function playIma(it, body) {
-  let ac = null;
-  viewerStop = () => { if (ac) ac.close(); ac = null; };
+async function playIma(src, body) {
+  let ac = null, stopped = false;
+  viewerStop = () => { stopped = true; if (ac) ac.close(); ac = null; };
   const prog = loadingNote(body);
   let dec;
-  try { dec = FX.wavDecode(await fetchBytes('/api/file/' + it.id, prog)); } catch (e) { dec = null; }
+  try { dec = FX.wavDecode(await fetchBytes(src, prog)); } catch (e) { dec = null; }
+  if (stopped) return;
   const n = body.querySelector('.note');
   if (n) n.remove();
   if (!dec) { body.append(el('p', 'note', 'No se pudo leer el audio.')); return; }
@@ -1961,26 +2210,32 @@ $('menuBtn').addEventListener('click', (e) => { e.stopPropagation(); $('menu').h
 document.addEventListener('click', (e) => { if (!$('menu').hidden && !e.target.closest('#menu')) closeMenu(); });
 $('mOwner').addEventListener('click', openLogin);
 $('mLock').addEventListener('click', () => { closeMenu(); hideOwner(); });
-$('mRefresh').addEventListener('click', () => { closeMenu(); refresh(true); });
+$('mRefresh').addEventListener('click', () => {
+  closeMenu();
+  refresh(true);
+  if (FS.on) { FS.quotaAt = 0; FS.recentAt = 0; if (FS.view === 'cloud') cloudLoad(true); fsSchedule(50); }
+});
 $('mUnpair').addEventListener('click', async () => {
   closeMenu();
-  if (S.running) { toast('Espera a que terminen las transferencias'); return; }
+  if (S.running || FS.upRunning) { toast('Espera a que terminen las transferencias'); return; }
   await api('/api/unpair', { method: 'POST', form: '' });
+  fsStop();
   S.rev = 0; S.items = []; S.byId.clear(); clearGrid(); exitSelect();
   showPair('Este móvil se ha desconectado de Flex OS.');
 });
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (!$('viewer').hidden) { $('viewerClose').click(); return; }
-  if (!$('loginDlg').hidden || !$('planSheet').hidden || !$('menu').hidden) { closeLayers(); return; }
+  if (anyLayer()) { closeLayers(); return; }
   if (S.selecting) exitSelect();
+  if (FS.cselecting) exitCSelect();
 });
 $('scrim').addEventListener('click', closeLayers);
 
 // ===========================================================================
 //  Subir: analisis, plan y conversion en el movil
 // ===========================================================================
-$('fab').addEventListener('click', () => { if (S.selecting) exitSelect(); $('picker').click(); });
+$('fab').addEventListener('click', () => fabClick());
 $('picker').addEventListener('change', () => {
   const files = Array.from($('picker').files || []);
   $('picker').value = '';
@@ -2652,11 +2907,13 @@ async function runQueue() {
     S.running = null;
     await refresh(false);
   }
-  keepAwake(false);
+  if (!FS.upRunning) keepAwake(false);
   updateQueueCard();
 }
 // Tambien si hay algo convertido esperando a que se confirme: se perderia.
-window.addEventListener('beforeunload', (e) => { if (S.running || S.queue.length || S.asking.size) { e.preventDefault(); e.returnValue = ''; } });
+window.addEventListener('beforeunload', (e) => {
+  if (S.running || S.queue.length || S.asking.size || FS.upRunning || FS.up.some((j) => j.state === 'wait' && !j.cancelled)) { e.preventDefault(); e.returnValue = ''; }
+});
 
 async function runJob(job) {
   const f = job.f;
@@ -2886,6 +3143,1395 @@ function updateQueueCard() {
   }
   qCard.txt.textContent = n === 1 ? '1 archivo más en cola' : n + ' archivos más en cola';
 }
+
+// ===========================================================================
+//  Flex Storage: Inicio, Flex Cloud (el teléfono) y Transferencias
+// ===========================================================================
+// Solo aparece si el P4 lo tiene (GET /api/fs/overview trae el bloque
+// "cloud"). Sin eso la web es la biblioteca de siempre, sin una diferencia.
+//
+// Flex Cloud vive en el TELEFONO emparejado. Esta pagina no habla con el
+// telefono por su cuenta: todo pasa por la pasarela /api/cloud del P4, que
+// pone la sesion con el telefono (el navegador nunca ve ese token). Solo los
+// bytes que se VEN (foto, video, audio) y las descargas van directos al
+// telefono, con un enlace firmado de un archivo y 15 minutos.
+const FS = {
+  on: false, view: 'lib', ov: null, ovAt: 0, ovFails: 0,
+  quota: null, quotaAt: 0, phoneOk: false, phoneText: '',
+  folder: 'root', path: [], trash: false, items: [], byId: new Map(), next: null, loading: false, seq: 0, loadedFor: '',
+  csel: new Set(), cselecting: false,
+  p4x: [], p4xAt: 0,
+  up: [], upRunning: null,
+  recent: [], recentAt: 0,
+  pairing: null, send: null, folderPick: null,
+  cspOrigin: ''          // el telefono que la CSP de ESTA pagina deja ver directo
+};
+// La CSP de la pagina (img-src/media-src) incluye el telefono emparejado CUANDO
+// SE CARGO. Si despues cambia (se empareja aqui mismo, o el telefono cambio de
+// IP), lo que se ve pasa por el P4 (mismo origen) hasta la proxima carga.
+function phoneOrigin(ph) { return ph && ph.state === 'ready' && ph.ip && ph.port ? 'http://' + ph.ip + ':' + ph.port : ''; }
+function idle() { return !S.running && !S.queue.length && !S.asking.size && !FS.upRunning && !FS.up.some((j) => j.state === 'wait' && !j.cancelled); }
+
+function svgI(name, cls) {
+  const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  s.setAttribute('class', 'i' + (cls ? ' ' + cls : ''));
+  s.setAttribute('aria-hidden', 'true');
+  const u = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+  u.setAttribute('href', '#i-' + name);
+  s.append(u);
+  return s;
+}
+const KIND_ICON = { folder: 'folder', photo: 'photo', video: 'video', audio: 'audio', document: 'document', archive: 'archive', other: 'other' };
+function kindIco(kind) { const k = KIND_ICON[kind] ? kind : 'other'; const b = el('span', 'kico'); b.classList.add('k-' + k); b.append(svgI(KIND_ICON[k])); return b; }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---------- red: Flex Cloud por la pasarela del P4 ----------
+// { ok, status, json, err }. Repite sola lo que hay que repetir (el P4
+// renovando su sesion con el telefono); un 401 es la sesion de ESTA web.
+async function capi(method, path, body) {
+  for (let tries = 0; ; tries++) {
+    const init = { method, credentials: 'same-origin', cache: 'no-store', headers: {} };
+    if (method !== 'GET' && method !== 'HEAD') init.headers['X-Flex'] = '1';
+    if (body !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(body); }
+    let r = null, j = null;
+    try { r = await fetch(path, init); } catch (e) { r = null; }
+    if (r) { try { j = await r.json(); } catch (e) { j = null; } }
+    const status = r ? r.status : 0;
+    if (status === 401) { lostSession(); return { ok: false, status, json: j, err: { code: 'session', retry: 0, phone: false, text: 'Sesión caducada' } }; }
+    if (status >= 200 && status < 300 && j && j.ok === true) { notePhone(true); return { ok: true, status, json: j, err: null }; }
+    const err = FX.cloudErr(status, j);
+    if (err.retry && tries < 3) { await sleep(err.retry); continue; }
+    if (err.code === 'phone_offline' || err.code === 'bad_gateway') notePhone(false, err.text);
+    return { ok: false, status, json: j, err };
+  }
+}
+// Lo ultimo que se supo del telefono (para la cabecera, el Inicio y «Subir»).
+function notePhone(ok, text) {
+  const was = FS.phoneOk;
+  FS.phoneOk = ok;
+  FS.phoneText = ok ? '' : (text || 'Teléfono desconectado');
+  if (was !== ok && FS.on) { renderHome(); renderCloudBanner(); renderCloudQuota(); updateHeader(); }
+}
+function phoneState() { return (FS.ov && FS.ov.phone && FS.ov.phone.state) || 'none'; }
+
+// ---------- arranque y parada ----------
+async function fsStart() {
+  if (FS.on) return;
+  const r = await api('/api/fs/overview');
+  // Sin Flex Storage el P4 contesta igual, pero con "cloud": null: la web de siempre.
+  if (r.status !== 200 || !r.json || !r.json.local || !r.json.cloud || typeof r.json.cloud !== 'object') return;
+  FS.on = true;
+  FS.ov = r.json; FS.ovAt = Date.now();
+  FS.cspOrigin = phoneOrigin(r.json.phone);
+  document.body.classList.add('has-nav');
+  $('bnav').hidden = false;
+  $('mPhone').hidden = false;
+  setView('home');
+  fsSchedule(300);
+  try {
+    const t = sessionStorage.getItem('flexos.paired');
+    if (t) { sessionStorage.removeItem('flexos.paired'); toast(t); }
+  } catch (e) { /* sin almacenamiento: no pasa nada */ }
+}
+function fsStop() {
+  clearTimeout(fsPollT);
+  for (const j of FS.up) { j.cancelled = true; if (j.xhr) j.xhr.abort(); }
+  FS.up = []; FS.upRunning = null;
+  closePhoneSheet(); closeSend(); closeFolderPick();
+  exitCSelect();
+  FS.on = false; FS.ov = null; FS.quota = null; FS.p4x = []; FS.items = []; FS.byId.clear(); FS.loadedFor = ''; FS.recent = [];
+  FS.folder = 'root'; FS.path = []; FS.trash = false;
+  document.body.classList.remove('has-nav');
+  $('bnav').hidden = true;
+  $('mPhone').hidden = true;
+  if (FS.view !== 'lib') setView('lib', true);
+}
+
+// ---------- sondeo ----------
+// El P4 atiende de una en una: se le pregunta poco y menos aun si no hay
+// nada en marcha. Con la pagina oculta, nada.
+let fsPollT = 0;
+function fsSchedule(ms) { clearTimeout(fsPollT); fsPollT = setTimeout(fsTick, ms); }
+async function fsTick() {
+  if (!S.paired || !FS.on) return;
+  if (document.visibilityState !== 'visible') { fsSchedule(5000); return; }
+  await fsOverview();
+  if (!FS.on) return;
+  const busy = p4Active() > 0 || (FS.ov && FS.ov.cloud && FS.ov.cloud.active > 0);
+  if (busy || FS.view === 'xfer' || FS.view === 'home') await fsXfers();
+  if (!FS.on) return;
+  // La cuota en vivo, con el telefono emparejado y sin abusar.
+  if (phoneState() === 'ready' && (FS.view === 'home' || FS.view === 'cloud') && Date.now() - FS.quotaAt > 20000) await fsQuota();
+  if (FS.view === 'home' && phoneState() === 'ready' && FS.phoneOk && Date.now() - FS.recentAt > 30000) await fsRecent();
+  let next = FS.pairing ? 1500 : busy ? 2000 : 6000;
+  if (FS.ovFails) next = Math.min(20000, 2000 * (1 << Math.min(4, FS.ovFails)));
+  fsSchedule(next);
+}
+async function fsOverview() {
+  const r = await api('/api/fs/overview');
+  if (r.status === 401) { lostSession(); return; }
+  if (r.status !== 200 || !r.json) { FS.ovFails++; setOffline(r.status === 0); return; }
+  FS.ovFails = 0;
+  const before = FS.ov;
+  FS.ov = r.json; FS.ovAt = Date.now();
+  const ph = r.json.phone || {};
+  if (ph.state !== 'ready') { FS.phoneOk = false; FS.quota = null; }
+  else if (!before || !before.phone || before.phone.state !== 'ready') FS.quotaAt = 0;     // recien emparejado: cuota ya
+  if (FS.pairing) pairProgress(before, r.json);
+  if (r.json.local && r.json.local.rev && r.json.local.rev !== S.rev) refresh(false);
+  renderHome();
+  renderCloudBanner();
+  updateFab();
+}
+async function fsQuota() {
+  FS.quotaAt = Date.now();
+  const r = await capi('GET', '/api/cloud/quota');
+  if (r.ok) FS.quota = FX.normQuota(r.json.quota);
+  renderHome();
+  renderCloudQuota();
+  updateHeader();
+}
+async function fsXfers() {
+  const r = await api('/api/fs/xfers');
+  if (r.status === 401) { lostSession(); return; }
+  if (r.status !== 200 || !r.json || !Array.isArray(r.json.items)) return;
+  const wasActive = p4Active();
+  FS.p4x = r.json.items; FS.p4xAt = Date.now();
+  // Algo termino: lo que se ve puede haber cambiado (una copia nueva en la
+  // biblioteca o en la carpeta de Flex Cloud abierta).
+  if (wasActive > p4Active()) { refresh(false); if (FS.view === 'cloud') cloudLoad(true); FS.quotaAt = 0; }
+  renderXfers();
+  renderHome();
+}
+async function fsRecent() {
+  FS.recentAt = Date.now();
+  const r = await capi('GET', '/api/cloud/files?view=recent&limit=8');
+  if (r.ok && Array.isArray(r.json.items)) { FS.recent = r.json.items; renderRecents(); }
+}
+const P4X_DONE = 6, P4X_FAILED = 7, P4X_CANCELLED = 8;
+function p4Active() { return FS.p4x.filter((x) => x.phase < P4X_DONE).length; }
+
+// ---------- vistas ----------
+const VIEWS = { home: 'homeView', lib: 'libView', cloud: 'cloudView', xfer: 'xferView' };
+function setView(v, quiet) {
+  if (!VIEWS[v]) v = 'lib';
+  if (S.selecting) exitSelect();
+  if (FS.cselecting) exitCSelect();
+  closeMenu();
+  FS.view = v;
+  for (const k in VIEWS) $(VIEWS[k]).hidden = k !== v;
+  for (const b of $('bnav').querySelectorAll('button[data-v]')) {
+    const on = b.dataset.v === v;
+    b.classList.toggle('on', on);
+    if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+  }
+  // Las tarjetas de lo que sube ESTE navegador: flotando, o dentro de
+  // Transferencias (los mismos nodos: no se pierde ningun estado).
+  const xf = $('xfers');
+  if (v === 'xfer') $('xferHere').append(xf); else if (xf.parentNode !== document.body) document.body.insertBefore(xf, $('viewer'));
+  if (quiet) return;
+  window.scrollTo(0, 0);
+  if (v === 'home') { renderHome(); renderRecents(); FS.recentAt = 0; fsSchedule(50); }
+  if (v === 'cloud') { if (FS.loadedFor !== cloudKey()) cloudLoad(true); else renderCloud(); FS.quotaAt = 0; fsSchedule(50); }
+  if (v === 'xfer') { renderXfers(); fsSchedule(50); }
+  if (v === 'lib') render();
+  updateHeader();
+}
+$('bnav').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-v]');
+  if (b) setView(b.dataset.v);
+});
+$('hLocalGo').addEventListener('click', () => setView('lib'));
+$('hCloudGo').addEventListener('click', () => setView('cloud'));
+$('hXferGo').addEventListener('click', () => setView('xfer'));
+
+// ---------- Inicio ----------
+function setBar(i, permille) { i.style.width = (Math.max(0, Math.min(1000, permille)) / 10) + '%'; }
+function renderHome() {
+  if (!FS.on || !FS.ov) return;
+  const L = FS.ov.local || {};
+  // Flex OS: lo usado, lo libre de verdad (sin la reserva del sistema) y por clase.
+  if (L.total) {
+    const used = Math.max(0, L.total - L.free);
+    setBar($('hLocalBar').firstElementChild, Math.round(used * 1000 / L.total));
+    $('hLocalLine').textContent = FX.fmtBytes(Math.max(0, L.free - (L.reserve || 0))) + ' libres de ' + FX.fmtBytes(L.total);
+  }
+  const cats = $('hCats');
+  cats.textContent = '';
+  const cat = (cls, name, c) => {
+    if (!c || !c.n) return;
+    const x = el('span', 'cat ' + cls);
+    x.append(el('i'), el('b', null, name), document.createTextNode(' ' + c.n + ' · ' + FX.fmtBytes(c.bytes)));
+    cats.append(x);
+  };
+  cat('photo', 'Fotos', L.photo); cat('video', 'Vídeos', L.video); cat('audio', 'Música', L.audio);
+  if (L.protected && L.protected.n) { const x = el('span', 'cat lockc'); x.append(el('i'), el('b', null, 'Protegido'), document.createTextNode(' ' + L.protected.n)); cats.append(x); }
+  if (!cats.firstChild) cats.append(el('span', 'cat none', 'Aún no hay fotos, vídeos ni música'));
+
+  // Flex Cloud: segun el telefono.
+  const ph = FS.ov.phone || {}, card = $('hCloud');
+  const q = FS.quota || FX.normQuota(FS.ov.cloud && FS.ov.cloud.quota);
+  card.classList.remove('low', 'full');
+  let sub = '', cta = '', btn = '', showQ = false;
+  if (ph.state === 'ready') {
+    const who = ph.name || 'Teléfono';
+    sub = who + (FS.phoneOk ? ' · conectado' : (FS.quotaAt ? ' · desconectado' : ''));
+    showQ = !!q;
+    if (!q && !FS.phoneOk && FS.quotaAt) { cta = 'Teléfono desconectado. Comprueba que el teléfono está en la misma Wi‑Fi y que Flex Phone sigue activo.'; btn = 'Reintentar'; }
+    else if (!q) { cta = 'Conectando con el teléfono…'; }
+  } else if (ph.state === 'rejected') {
+    sub = 'Hay que volver a emparejar';
+    cta = 'El teléfono ya no reconoce este Flex OS (se borró su emparejamiento).'; btn = 'Volver a emparejar';
+  } else if (ph.state === 'off') {
+    sub = 'Desactivado en Flex OS';
+    cta = 'Flex Cloud está desactivado en Flex OS. Actívalo en Ajustes › Almacenamiento.';
+  } else {
+    sub = 'Sin teléfono';
+    cta = 'Usa el espacio de tu teléfono como Flex Cloud: 5 GB para guardar originales y moverlos entre Flex OS y el móvil.'; btn = 'Activar Flex Cloud en este teléfono';
+  }
+  $('hCloudSub').textContent = sub;
+  $('hCloudQuota').hidden = !showQ;
+  if (showQ) {
+    const b = FX.quotaBar(q);
+    setBar($('hqUsed'), b.used); setBar($('hqTrash'), b.trash); setBar($('hqRes'), b.reserved);
+    $('hCloudLine').textContent = FX.quotaLine(q);
+    $('hCloudHint').textContent = FX.quotaHint(q) + (FS.quota ? '' : ' · último dato conocido');
+    if (q.state !== 'ok') card.classList.add(q.state);
+  }
+  $('hCloudCta').hidden = !cta;
+  $('hCloudText').textContent = cta;
+  $('hCloudBtn').hidden = !btn;
+  $('hCloudBtn').textContent = btn;
+
+  // Transferencias: lo que esta en marcha, de aqui y del P4.
+  const list = $('hXferList');
+  list.textContent = '';
+  const rows = [];
+  if (S.running) rows.push({ n: S.running.f.name, t: 'A Flex OS desde este navegador', f: -1 });
+  for (const j of FS.up) if (!j.cancelled && j.state !== 'done' && j.state !== 'fail') rows.push({ n: j.name, t: 'A Flex Cloud desde este navegador', f: j.size ? j.sent / j.size : 0 });
+  for (const x of FS.p4x) if (x.phase < P4X_DONE) rows.push({ n: x.name, t: x.text, f: x.size ? x.done / x.size : 0 });
+  const n = rows.length + S.queue.filter((j) => !j.cancelled).length;
+  $('hXferSub').textContent = n ? n + (n === 1 ? ' en curso' : ' en curso o en cola') : 'Nada en curso';
+  for (const r of rows.slice(0, 3)) {
+    const li = el('li');
+    li.append(el('b', null, r.n), el('span', null, r.t));
+    if (r.f >= 0) { const bar = el('div', 'bar'), i = el('i'); setBar(i, Math.round(r.f * 1000)); bar.append(i); li.append(bar); }
+    list.append(li);
+  }
+  if (!rows.length) list.append(el('li', 'none', 'Las copias entre Flex OS y Flex Cloud aparecen aquí con su progreso real.'));
+  updateBadge(n);
+}
+$('hCloudBtn').addEventListener('click', () => {
+  const st = phoneState();
+  if (st === 'ready') { FS.quotaAt = 0; fsQuota(); return; }
+  openPhoneSheet();
+});
+function updateBadge(n) {
+  const b = $('bnavBadge');
+  b.hidden = !n;
+  b.textContent = n > 99 ? '99+' : String(n);
+}
+
+// Recientes: lo ultimo de Flex OS y de Flex Cloud, juntos por fecha.
+function renderRecents() {
+  if (!FS.on) return;
+  const box = $('hRecent');
+  box.textContent = '';
+  const loc = S.items.filter((it) => !redacted(it)).map((it) => ({ src: 'lib', at: (it.a || 0) * 1000, it }));
+  const cl = FS.recent.map((it) => ({ src: 'cloud', at: it.updatedAt || 0, it }));
+  const all = loc.concat(cl).sort((a, b) => b.at - a.at).slice(0, 12);
+  for (const r of all) {
+    const t = el('button', 'rtile');
+    t.type = 'button';
+    const it = r.it;
+    if (r.src === 'lib') {
+      if (hasThumb(it)) { const img = new Image(); img.alt = ''; img.loading = 'lazy'; img.onload = () => img.classList.add('ok'); img.onerror = () => img.remove(); img.src = '/api/thumb/' + it.id + '?v=' + it.t; t.append(img); }
+      else t.append(kindIco(it.k));
+      t.setAttribute('aria-label', (it.n || '') + ' en Flex OS');
+      t.addEventListener('click', () => openViewer(it));
+    } else {
+      if (it.hasThumbnail) { const img = new Image(); img.alt = ''; img.loading = 'lazy'; img.onload = () => img.classList.add('ok'); img.onerror = () => img.remove(); img.src = '/api/cloud/files/' + it.id + '/thumbnail'; t.append(img); }
+      else t.append(kindIco(it.kind));
+      t.setAttribute('aria-label', (it.name || '') + ' en Flex Cloud');
+      t.addEventListener('click', () => openCloudViewer(it));
+    }
+    const src = el('span', 'src');
+    src.append(svgI(r.src === 'lib' ? 'device' : 'cloud'));
+    t.append(src, el('span', 'rn', r.src === 'lib' ? (it.n || '') : (it.name || '')));
+    box.append(t);
+  }
+  if (!all.length) box.append(el('p', 'none', 'Lo último que guardes en Flex OS o en Flex Cloud aparecerá aquí.'));
+}
+
+// ---------- Flex Cloud: carpeta, papelera y seleccion ----------
+function cloudKey() { return FS.trash ? 'trash' : 'f:' + FS.folder; }
+async function cloudLoad(reset) {
+  if (!FS.on) return;
+  const seq = ++FS.seq, key = cloudKey();
+  FS.loading = true;
+  if (reset) {
+    FS.next = null;
+    if (FS.loadedFor !== key) {
+      FS.items = []; FS.byId.clear(); FS.csel.clear();
+      ctiles.clear();
+      const g = $('cgrid');
+      g.textContent = '';
+      for (let i = 0; i < 6; i++) { const c = el('div', 'ctile skel'); c.append(el('div', 'shimmer')); g.append(c); }
+      $('cEmpty').hidden = true;
+    }
+  }
+  let q = FS.trash ? 'view=trash' : 'parentId=' + encodeURIComponent(FS.folder);
+  q += '&limit=100';
+  if (!reset && FS.next) q += '&cursor=' + encodeURIComponent(FS.next);
+  const r = await capi('GET', '/api/cloud/files?' + q);
+  if (seq !== FS.seq || !FS.on) return;                // otra carpeta mientras tanto
+  FS.loading = false;
+  if (!r.ok) {
+    if (r.err && r.err.code === 'session') return;
+    // Carpeta que ya no existe: a la raiz.
+    if (r.status === 404 && FS.folder !== 'root' && !FS.trash) { FS.folder = 'root'; FS.path = []; cloudLoad(true); return; }
+    FS.loadedFor = '';
+    ctiles.clear();
+    $('cgrid').textContent = '';
+    cloudEmpty(r.err ? r.err.text : 'No se pudo abrir Flex Cloud', r.err && r.err.phone);
+    renderCloudBanner(r.err);
+    return;
+  }
+  const j = r.json;
+  const items = (j.items || []).filter((it) => it && (it.type === 'folder' || it.type === 'file'));
+  FS.items = reset ? items : FS.items.concat(items);
+  FS.byId = new Map(FS.items.map((it) => [it.id, it]));
+  FS.next = j.nextCursor || null;
+  if (!FS.trash && j.folder) FS.path = Array.isArray(j.folder.path) ? j.folder.path : [];
+  FS.loadedFor = key;
+  for (const id of Array.from(FS.csel)) if (!FS.byId.has(id)) FS.csel.delete(id);
+  renderCloud();
+  renderCloudBanner();
+}
+function cloudEmpty(title, phone) {
+  $('cEmpty').hidden = false;
+  $('cEmptyTitle').textContent = title;
+  $('cEmptyText').textContent = phone ? 'Flex Cloud está en tu teléfono: cuando vuelva a estar disponible, sus archivos aparecerán aquí.' : 'Vuelve a intentarlo en unos segundos.';
+}
+const ctiles = new Map();          // id -> { el, sig }
+function ctSig(it) { return [it.type, it.name, it.size, it.hasThumbnail ? 1 : 0, it.itemCount, FS.trash ? 1 : 0].join('|'); }
+function renderCloud() {
+  renderCrumbs();
+  renderCloudQuota();
+  const g = $('cgrid');
+  for (const sk of Array.from(g.querySelectorAll('.ctile.skel'))) sk.remove();
+  const keep = new Set();
+  let prev = null;
+  for (const it of FS.items) {
+    keep.add(it.id);
+    let c = ctiles.get(it.id);
+    const sg = ctSig(it);
+    if (!c || c.sig !== sg) {
+      const node = cloudTile(it);
+      if (c) c.el.replaceWith(node);
+      c = { el: node, sig: sg };
+      ctiles.set(it.id, c);
+    }
+    const want = prev ? prev.nextSibling : g.firstChild;
+    if (c.el !== want) g.insertBefore(c.el, want);
+    c.el.classList.toggle('picked', FS.csel.has(it.id));
+    prev = c.el;
+  }
+  for (const [id, c] of ctiles) if (!keep.has(id)) { c.el.remove(); ctiles.delete(id); }
+  $('cMore').hidden = !FS.next;
+  const empty = !FS.items.length;
+  $('cEmpty').hidden = !empty;
+  if (empty) {
+    $('cEmptyTitle').textContent = FS.trash ? 'La papelera está vacía' : FS.folder === 'root' ? 'Flex Cloud está vacío' : 'Esta carpeta está vacía';
+    $('cEmptyText').textContent = FS.trash ? 'Lo que mandes a la papelera se puede recuperar durante 30 días.' :
+      'Sube archivos con el botón Subir: se guardan en tu teléfono tal cual, sin convertir.';
+  }
+  $('cNewFolder').hidden = FS.trash;
+  $('cTrashBtn').setAttribute('aria-pressed', FS.trash ? 'true' : 'false');
+  if (FS.cselecting) updateCSelbar();
+}
+function cloudTile(it) {
+  const t = el('button', 'ctile' + (it.type === 'folder' ? ' folder' : ''));
+  t.type = 'button';
+  t.dataset.id = it.id;
+  t.append(el('span', 'sel'));
+  const th = el('span', 'th');
+  if (it.type === 'file' && it.hasThumbnail) {
+    const img = new Image();
+    img.alt = ''; img.loading = 'lazy'; img.decoding = 'async';
+    img.onload = () => img.classList.add('ok');
+    img.onerror = () => { img.remove(); th.append(kindIco(it.kind)); };
+    img.src = '/api/cloud/files/' + it.id + '/thumbnail';
+    th.append(img);
+  } else th.append(kindIco(it.type === 'folder' ? 'folder' : it.kind));
+  const nm = el('span', 'nm', it.name || '');
+  nm.append(el('small', null, it.type === 'folder' ? (FS.trash && it.itemCount != null ? it.itemCount + ' archivos' : 'Carpeta') : FX.fmtBytes(it.size)));
+  t.append(th, nm);
+  t.classList.toggle('picked', FS.csel.has(it.id));
+  t.setAttribute('aria-label', (it.type === 'folder' ? 'Carpeta ' : '') + (it.name || ''));
+  return t;
+}
+function renderCrumbs() {
+  const c = $('crumbs');
+  c.textContent = '';
+  const add = (id, name) => {
+    if (c.firstChild) c.append(svgI('chevron', 'sep'));
+    const b = el('button', null, name);
+    b.type = 'button';
+    b.dataset.id = id;
+    c.append(b);
+  };
+  if (FS.trash) { add('trash', 'Papelera'); return; }
+  add('root', 'Flex Cloud');
+  for (const p of FS.path) add(p.id, p.name);
+}
+$('crumbs').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-id]');
+  if (!b || FS.trash) return;
+  openFolder(b.dataset.id);
+});
+function openFolder(id) {
+  if (FS.cselecting) exitCSelect();
+  FS.trash = false;
+  FS.folder = id || 'root';
+  if (FS.folder === 'root') FS.path = [];
+  cloudLoad(true);
+  window.scrollTo(0, 0);
+}
+$('cTrashBtn').addEventListener('click', () => {
+  if (FS.cselecting) exitCSelect();
+  FS.trash = !FS.trash;
+  cloudLoad(true);
+});
+$('cMore').addEventListener('click', () => { if (!FS.loading) cloudLoad(false); });
+function renderCloudQuota() {
+  const q = FS.quota || (FS.ov && FX.normQuota(FS.ov.cloud && FS.ov.cloud.quota));
+  $('cQuota').textContent = q ? FX.quotaLine(q) + ' · ' + FX.quotaHint(q) + (FS.phoneOk ? '' : ' · último dato conocido') : '';
+  $('cQuota').hidden = !q || FS.view !== 'cloud';
+}
+// Aviso de la vista Flex Cloud: sin telefono, desconectado, rechazado...
+function renderCloudBanner(err) {
+  const st = phoneState();
+  let txt = '', btn = '';
+  if (st === 'none') { txt = 'Flex Cloud aún no está activado en ningún teléfono.'; btn = 'Activar'; }
+  else if (st === 'rejected') { txt = 'El teléfono ya no reconoce este Flex OS.'; btn = 'Volver a emparejar'; }
+  else if (st === 'off') { txt = 'Flex Cloud está desactivado en Flex OS.'; }
+  else if (!FS.phoneOk && (err || FS.phoneText)) { txt = (err && err.text) || FS.phoneText || 'Teléfono desconectado'; btn = 'Reintentar'; }
+  $('cBanner').hidden = !txt;
+  $('cBannerTxt').textContent = txt;
+  $('cBannerBtn').hidden = !btn;
+  $('cBannerBtn').textContent = btn;
+}
+$('cBannerBtn').addEventListener('click', () => {
+  if (phoneState() === 'ready') { cloudLoad(true); FS.quotaAt = 0; fsSchedule(50); return; }
+  openPhoneSheet();
+});
+
+// Toque y pulsacion larga (la misma regla que la biblioteca).
+let clp = null, clpFired = false;
+$('cgrid').addEventListener('pointerdown', (e) => {
+  const t = e.target.closest('.ctile');
+  if (!t || !t.dataset.id || (e.pointerType === 'mouse' && e.button !== 0)) return;
+  clpFired = false;
+  const id = t.dataset.id;
+  clp = { id, x: e.clientX, y: e.clientY, t: setTimeout(() => { clpFired = true; cLongPress(id); }, 480) };
+});
+$('cgrid').addEventListener('pointermove', (e) => { if (clp && Math.hypot(e.clientX - clp.x, e.clientY - clp.y) > 10) { clearTimeout(clp.t); clp = null; } });
+for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) $('cgrid').addEventListener(ev, () => { if (clp) { clearTimeout(clp.t); clp = null; } });
+$('cgrid').addEventListener('contextmenu', (e) => {
+  const t = e.target.closest('.ctile');
+  if (!t || !t.dataset.id) return;
+  e.preventDefault();
+  clpFired = true;
+  cLongPress(t.dataset.id);
+});
+$('cgrid').addEventListener('click', (e) => {
+  const t = e.target.closest('.ctile');
+  if (!t || !t.dataset.id) return;
+  if (clpFired) { clpFired = false; return; }
+  cTap(t.dataset.id);
+});
+function cLongPress(id) {
+  if (!FS.byId.has(id)) return;
+  if (navigator.vibrate) { try { navigator.vibrate(12); } catch (e) { /* sin vibracion */ } }
+  if (!FS.cselecting) enterCSelect();
+  FS.csel.add(id);
+  renderCloud();
+}
+function cTap(id) {
+  const it = FS.byId.get(id);
+  if (!it) return;
+  if (FS.cselecting) {
+    if (FS.csel.has(id)) FS.csel.delete(id); else FS.csel.add(id);
+    const t = $('cgrid').querySelector('.ctile[data-id="' + id + '"]');
+    if (t) t.classList.toggle('picked', FS.csel.has(id));
+    updateCSelbar();
+    return;
+  }
+  if (FS.trash) { enterCSelect(); FS.csel.add(id); renderCloud(); return; }
+  if (it.type === 'folder') { FS.path = FS.path.concat([{ id: it.id, name: it.name }]); openFolder(it.id); return; }
+  openCloudViewer(it);
+}
+function enterCSelect() {
+  FS.cselecting = true;
+  document.body.classList.add('cselecting');
+  $('cselbar').hidden = false;
+  $('cselActions').hidden = false;
+  $('cbar').hidden = true;
+  updateCSelbar();
+  updateFab();
+}
+function exitCSelect() {
+  FS.cselecting = false;
+  FS.csel.clear();
+  document.body.classList.remove('cselecting');
+  $('cselbar').hidden = true;
+  $('cselActions').hidden = true;
+  $('cbar').hidden = false;
+  for (const t of $('cgrid').querySelectorAll('.ctile.picked')) t.classList.remove('picked');
+  updateFab();
+}
+function cPicked() { return Array.from(FS.csel).map((id) => FS.byId.get(id)).filter(Boolean); }
+function updateCSelbar() {
+  const p = cPicked(), n = p.length, files = p.filter((it) => it.type === 'file');
+  $('cselCount').textContent = n === 1 ? '1 seleccionado' : n + ' seleccionados';
+  const every = FS.items.length > 0 && FS.items.every((it) => FS.csel.has(it.id));
+  $('cselAll').textContent = every ? 'Quitar selección' : 'Seleccionar todo';
+  for (const id of ['cDl', 'cLocal', 'cMove', 'cRen', 'cDel']) $(id).hidden = FS.trash;
+  for (const id of ['cRestore', 'cPurge']) $(id).hidden = !FS.trash;
+  $('cDl').disabled = !files.length || files.length !== n;
+  $('cLocal').disabled = !files.length || files.length !== n;
+  $('cMove').disabled = !n;
+  $('cRen').disabled = n !== 1;
+  $('cDel').disabled = !n;
+  $('cRestore').disabled = !n;
+  $('cPurge').disabled = !n;
+}
+$('cselClose').addEventListener('click', exitCSelect);
+$('cselAll').addEventListener('click', () => {
+  const every = FS.items.every((it) => FS.csel.has(it.id));
+  if (every) FS.csel.clear(); else for (const it of FS.items) FS.csel.add(it.id);
+  renderCloud();
+});
+
+// ---------- dialogos pequenos: nombre y confirmacion ----------
+let askDone = null;
+function ask(title, text, value, ok, validate) {
+  return new Promise((resolve) => {
+    closeLayers();
+    $('askTitle').textContent = title;
+    $('askText').textContent = text || '';
+    $('askText').hidden = !text;
+    $('askInput').value = value || '';
+    $('askErr').textContent = '';
+    $('askGo').textContent = ok || 'Aceptar';
+    $('askDlg').hidden = false;
+    scrim(true);
+    askDone = { resolve, validate };
+    setTimeout(() => {
+      const inp = $('askInput'), dot = (value || '').lastIndexOf('.');
+      inp.focus();
+      inp.setSelectionRange(0, dot > 0 ? dot : (value || '').length);        // el nombre sin la extension
+    }, 40);
+  });
+}
+function closeAsk(v) {
+  if ($('askDlg').hidden) return;
+  $('askDlg').hidden = true;
+  scrim(false);
+  const d = askDone; askDone = null;
+  if (d) d.resolve(v == null ? null : v);
+}
+$('askCancel').addEventListener('click', () => closeAsk(null));
+$('askForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const v = $('askInput').value.trim();
+  if (!v) { $('askErr').textContent = 'Escribe un nombre.'; return; }
+  if (askDone && askDone.validate) {
+    $('askGo').disabled = true;
+    const bad = await askDone.validate(v);
+    $('askGo').disabled = false;
+    if (bad) { $('askErr').textContent = bad; return; }
+  }
+  closeAsk(v);
+});
+let sureDone = null;
+function sure(title, text, ok, danger) {
+  return new Promise((resolve) => {
+    closeLayers();
+    $('sureTitle').textContent = title;
+    $('sureText').textContent = text;
+    $('sureGo').textContent = ok || 'Aceptar';
+    $('sureGo').classList.toggle('danger', !!danger);
+    $('sureGo').classList.toggle('primary', !danger);
+    $('sureDlg').hidden = false;
+    scrim(true);
+    sureDone = resolve;
+    setTimeout(() => $('sureGo').focus(), 40);
+  });
+}
+function closeSure(v) {
+  if ($('sureDlg').hidden) return;
+  $('sureDlg').hidden = true;
+  scrim(false);
+  const d = sureDone; sureDone = null;
+  if (d) d(!!v);
+}
+$('sureCancel').addEventListener('click', () => closeSure(false));
+$('sureGo').addEventListener('click', () => closeSure(true));
+
+// ---------- Flex Cloud: acciones ----------
+$('cNewFolder').addEventListener('click', async () => {
+  const parent = FS.folder === 'root' ? null : FS.folder;
+  const name = await ask('Nueva carpeta', 'En ' + (FS.path.length ? FS.path[FS.path.length - 1].name : 'Flex Cloud'), '', 'Crear', async (v) => {
+    const r = await capi('POST', '/api/cloud/folders', { name: v, parentId: parent });
+    return r.ok ? null : r.err.text;
+  });
+  if (name) { toast('Carpeta «' + name + '» creada'); cloudLoad(true); }
+});
+$('cRen').addEventListener('click', async () => {
+  const it = cPicked()[0];
+  if (!it) return;
+  const path = (it.type === 'folder' ? '/api/cloud/folders/' : '/api/cloud/files/') + it.id;
+  const name = await ask('Renombrar', '', it.name, 'Renombrar', async (v) => {
+    if (v === it.name) return null;
+    const r = await capi('PATCH', path, { name: v });
+    return r.ok ? null : r.err.text;
+  });
+  if (name && name !== it.name) { toast('Renombrado'); exitCSelect(); cloudLoad(true); }
+});
+$('cDel').addEventListener('click', async () => {
+  const p = cPicked();
+  if (!p.length) return;
+  if (!(await sure(p.length === 1 ? '¿Mandar «' + p[0].name + '» a la papelera?' : '¿Mandar ' + p.length + ' elementos a la papelera?',
+    'Se pueden recuperar desde la papelera de Flex Cloud durante 30 días. Siguen ocupando espacio hasta que se vacía.', 'A la papelera', true))) return;
+  let ok = 0, fail = '';
+  for (const it of p) {
+    const r = await capi('DELETE', (it.type === 'folder' ? '/api/cloud/folders/' : '/api/cloud/files/') + it.id);
+    if (r.ok) ok++; else fail = r.err.text;
+  }
+  exitCSelect();
+  toast(ok ? (ok === 1 ? 'En la papelera' : ok + ' elementos en la papelera') + (fail ? ' · ' + fail : '') : fail || 'No se pudo');
+  cloudLoad(true); FS.quotaAt = 0;
+});
+$('cRestore').addEventListener('click', async () => {
+  const p = cPicked();
+  let ok = 0, fail = '';
+  for (const it of p) {
+    const r = await capi('POST', (it.type === 'folder' ? '/api/cloud/folders/' : '/api/cloud/files/') + it.id + '/restore');
+    if (r.ok) ok++; else fail = r.err.text;
+  }
+  exitCSelect();
+  toast(ok ? (ok === 1 ? 'Restaurado' : ok + ' elementos restaurados') + (fail ? ' · ' + fail : '') : fail || 'No se pudo');
+  cloudLoad(true);
+});
+$('cPurge').addEventListener('click', async () => {
+  const p = cPicked();
+  if (!p.length) return;
+  if (!(await sure('¿Eliminar para siempre?', (p.length === 1 ? '«' + p[0].name + '»' : p.length + ' elementos') + ' se borrarán del teléfono y no se podrán recuperar.', 'Eliminar', true))) return;
+  let ok = 0, fail = '';
+  for (const it of p) {
+    const r = await capi('POST', (it.type === 'folder' ? '/api/cloud/folders/' : '/api/cloud/files/') + it.id + '/permanent-delete');
+    if (r.ok) ok++; else fail = r.err.text;
+  }
+  exitCSelect();
+  toast(ok ? (ok === 1 ? 'Eliminado' : ok + ' elementos eliminados') + (fail ? ' · ' + fail : '') : fail || 'No se pudo');
+  cloudLoad(true); FS.quotaAt = 0;
+});
+$('cMove').addEventListener('click', async () => {
+  const p = cPicked();
+  if (!p.length) return;
+  const exclude = new Set(p.filter((it) => it.type === 'folder').map((it) => it.id));
+  const dest = await pickFolder('Mover a…', exclude, 'Mover aquí');
+  if (!dest) return;
+  const parentId = dest.id === 'root' ? null : dest.id;
+  let ok = 0, fail = '';
+  for (const it of p) {
+    if ((it.parentId || 'root') === dest.id) { ok++; continue; }
+    const r = await capi('PATCH', (it.type === 'folder' ? '/api/cloud/folders/' : '/api/cloud/files/') + it.id, { parentId });
+    if (r.ok) ok++; else fail = r.err.text;
+  }
+  exitCSelect();
+  toast(ok ? (ok === 1 ? 'Movido a ' : ok + ' elementos movidos a ') + dest.name + (fail ? ' · ' + fail : '') : fail || 'No se pudo');
+  cloudLoad(true);
+});
+// Descargar: con un enlace firmado del telefono (los bytes no pasan por el P4).
+async function cloudLink(it) {
+  const r = await capi('POST', '/api/cloud/files/' + it.id + '/link');
+  if (!r.ok || !r.json.url || !/^http:\/\/[0-9.]+:\d+\/api\/cloud\/d\//.test(r.json.url)) { toast(r.err ? r.err.text : 'El teléfono no dio un enlace válido'); return null; }
+  return r.json.url;
+}
+$('cDl').addEventListener('click', async () => {
+  const files = cPicked().filter((it) => it.type === 'file');
+  if (!files.length) return;
+  if (files.length > 10) { toast('Como máximo 10 archivos a la vez'); return; }
+  exitCSelect();
+  let n = 0;
+  for (const it of files) {
+    const url = await cloudLink(it);
+    if (!url) continue;
+    const a = el('a');
+    a.href = url; a.rel = 'noopener'; a.download = it.name || '';
+    document.body.append(a); a.click(); a.remove();
+    n++;
+    if (files.length > 1) await sleep(400);
+  }
+  if (n) toast(n === 1 ? 'Descargando desde el teléfono…' : 'Descargando ' + n + ' archivos desde el teléfono…');
+});
+
+// Selector de carpeta de Flex Cloud (mover y enviar).
+let folderDone = null;
+function pickFolder(title, exclude, okText) {
+  return new Promise((resolve) => {
+    closeLayers();
+    FS.folderPick = { id: 'root', name: 'Flex Cloud', path: [], exclude: exclude || new Set() };
+    folderDone = resolve;
+    $('folderTitle').textContent = title;
+    $('folderGo').textContent = okText || 'Aquí';
+    $('folderSheet').hidden = false;
+    scrim(true);
+    folderLoad('root', []);
+  });
+}
+async function folderLoad(id, path) {
+  const fp = FS.folderPick;
+  if (!fp) return;
+  fp.id = id; fp.path = path; fp.name = path.length ? path[path.length - 1].name : 'Flex Cloud';
+  $('folderWhere').textContent = ['Flex Cloud'].concat(path.map((p) => p.name)).join(' › ');
+  const box = $('folderList');
+  box.textContent = '';
+  box.append(el('p', 'none', 'Cargando…'));
+  const r = await capi('GET', '/api/cloud/files?parentId=' + encodeURIComponent(id) + '&limit=200');
+  if (FS.folderPick !== fp || fp.id !== id) return;
+  box.textContent = '';
+  if (path.length) {
+    const up = el('button', 'up');
+    up.type = 'button';
+    up.append(svgI('back'), document.createTextNode(' Subir un nivel'));
+    up.addEventListener('click', () => folderLoad(path.length > 1 ? path[path.length - 2].id : 'root', path.slice(0, -1)));
+    box.append(up);
+  }
+  if (!r.ok) { box.append(el('p', 'none', r.err ? r.err.text : 'No se pudo')); $('folderGo').disabled = true; return; }
+  $('folderGo').disabled = false;
+  const subs = (r.json.items || []).filter((x) => x.type === 'folder' && !fp.exclude.has(x.id));
+  for (const f of subs) {
+    const b = el('button');
+    b.type = 'button';
+    b.append(svgI('folder'), document.createTextNode(' ' + f.name));
+    b.addEventListener('click', () => folderLoad(f.id, path.concat([{ id: f.id, name: f.name }])));
+    box.append(b);
+  }
+  if (!subs.length) box.append(el('p', 'none', 'Sin subcarpetas'));
+}
+function closeFolderPick(v) {
+  if ($('folderSheet').hidden) return;
+  $('folderSheet').hidden = true;
+  scrim(false);
+  const d = folderDone; folderDone = null;
+  FS.folderPick = null;
+  if (d) d(v || null);
+}
+$('folderCancel').addEventListener('click', () => closeFolderPick(null));
+$('folderGo').addEventListener('click', () => { const fp = FS.folderPick; closeFolderPick(fp ? { id: fp.id, name: fp.name } : null); });
+
+// ---------- visor de Flex Cloud ----------
+// Foto, video y audio se ven DIRECTOS desde el telefono (enlace firmado, con
+// rangos: el video salta sin descargarse entero). Lo que el navegador no
+// reproduce solo (AVI MJPEG, WAV IMA ADPCM) se lee por la pasarela.
+async function openCloudViewer(it) {
+  if (!it || it.type !== 'file') return;
+  closeViewer();
+  const tok = ++viewerSeq;
+  const body = $('viewerBody');
+  body.textContent = '';
+  $('viewerName').textContent = it.name || '';
+  const info = [FX.fmtBytes(it.size), 'Flex Cloud'];
+  const md = it.metadata || {};
+  if (md.width && md.height) info.unshift(md.width + '×' + md.height);
+  $('viewerInfo').textContent = info.join(' · ');
+  $('viewerDl').removeAttribute('download');
+  $('viewerDl').href = '#';
+  $('viewer').hidden = false;
+  history.pushState({ viewer: 'c:' + it.id }, '');
+  const p = el('p', 'note', 'Abriendo desde el teléfono…');
+  body.append(p);
+  const url = await cloudLink(it);
+  if (tok !== viewerSeq || $('viewer').hidden) return;          // cerrado o cambiado mientras tanto
+  p.remove();
+  if (!url) { body.append(el('p', 'note', 'No se pudo abrir: el teléfono no responde.')); return; }
+  $('viewerDl').href = url;
+  const note = (t) => body.append(el('p', 'note', t));
+  const name = (it.name || '').toLowerCase(), mime = it.mime || '';
+  const direct = !!FS.cspOrigin && url.startsWith(FS.cspOrigin + '/');
+  const src = direct ? url + '?inline=1' : '/api/cloud/download/' + it.id + '?inline=1';
+  if (it.kind === 'photo' && /^image\/(jpeg|png|gif|webp|bmp|avif)$/.test(mime)) {
+    const img = new Image();
+    img.alt = it.name || '';
+    img.onerror = () => { img.remove(); note('Este navegador no puede mostrar esta imagen. Descárgala para abrirla con otra aplicación.'); };
+    img.src = src;
+    body.append(img);
+  } else if (/\.avi$/.test(name) || mime === 'video/x-msvideo' || mime === 'video/avi') {
+    if (it.size > 96 * 1048576) note('Este AVI es demasiado grande para verlo en el navegador. Descárgalo o envíalo a Flex OS.');
+    else playMjpeg('/api/cloud/download/' + it.id, md.width || 0, md.height || 0, body);
+  } else if (it.kind === 'video') {
+    const v = el('video');
+    v.controls = true; v.playsInline = true; v.preload = 'metadata';
+    v.onerror = () => { v.remove(); note('Este navegador no puede reproducir este vídeo. Descárgalo para verlo.'); };
+    v.src = src;
+    body.append(v);
+  } else if (it.kind === 'audio') {
+    if ((/\.wav$/.test(name) || /wav/.test(mime)) && it.size <= 64 * 1048576) {
+      // Un WAV IMA ADPCM no lo reproduce el navegador: se mira la cabecera.
+      playCloudWav(it, src, body, tok);
+    } else {
+      const a = el('audio');
+      a.controls = true; a.preload = 'metadata';
+      a.onerror = () => { a.remove(); note('Este navegador no puede reproducir este audio. Descárgalo para escucharlo.'); };
+      a.src = src;
+      body.append(a);
+    }
+  } else note('Este archivo no se puede ver aquí. Descárgalo para abrirlo con otra aplicación.');
+}
+async function playCloudWav(it, src, body, tok) {
+  let head = null;
+  try {
+    const r = await fetch('/api/cloud/download/' + it.id, { credentials: 'same-origin', headers: { Range: 'bytes=0-4095' } });
+    if (r.ok) head = new Uint8Array(await r.arrayBuffer());
+  } catch (e) { head = null; }
+  if (tok !== viewerSeq || $('viewer').hidden) return;
+  const w = head && FX.wavInfo(head);
+  if (w && w.tag === 0x11) { playIma('/api/cloud/download/' + it.id, body); return; }
+  const a = el('audio');
+  a.controls = true; a.preload = 'metadata';
+  a.onerror = () => { a.remove(); body.append(el('p', 'note', 'Este navegador no puede reproducir este audio. Descárgalo para escucharlo.')); };
+  a.src = src;
+  body.append(a);
+}
+
+// ---------- subir a Flex Cloud desde este navegador ----------
+// Partes de 1 MB, en orden, cada una con su SHA-256; al terminar, el telefono
+// comprueba la huella del archivo ENTERO. Si se corta, se reintenta con
+// espera creciente; si se recarga la pagina, volver a elegir el mismo archivo
+// en la misma carpeta continua por donde iba (la clave del cliente).
+let cupSeq = 0;
+function cloudEnqueue(file, parentId, parentName) {
+  const job = { id: 'c' + (++cupSeq), file, name: file.name || 'Archivo', size: file.size, parentId: parentId || 'root', parentName: parentName || 'Flex Cloud',
+    state: 'wait', sent: 0, uploadId: null, xhr: null, cancelled: false, card: null };
+  job.card = cloudCard(job);
+  FS.up.push(job);
+  cloudRunQueue();
+  renderHome();
+}
+async function cloudRunQueue() {
+  if (FS.upRunning) return;
+  keepAwake(true);
+  for (;;) {
+    const job = FS.up.find((j) => j.state === 'wait' && !j.cancelled);
+    if (!job) break;
+    FS.upRunning = job;
+    await cloudUpJob(job);
+    FS.upRunning = null;
+    renderHome();
+  }
+  if (!S.running) keepAwake(false);
+  FS.up = FS.up.filter((j) => j.state !== 'done' && !j.cancelled);
+  renderHome();
+}
+function cloudCardState(job, st, text, frac) {
+  job.state = st;
+  job.card.set(st, text, frac);
+  renderHome();
+}
+async function cloudUpJob(job) {
+  const f = job.file;
+  try {
+    cloudCardState(job, 'run', 'Preparando…', 0);
+    const created = await capi('POST', '/api/cloud/uploads', {
+      name: job.name, size: job.size, mimeType: f.type || undefined, parentId: job.parentId === 'root' ? null : job.parentId,
+      chunkSize: FX.CLOUD_PART, clientKey: FX.cloudClientKey(job.name, job.size, f.lastModified, job.parentId)
+    });
+    if (job.cancelled) throw new Error('Cancelado');
+    if (!created.ok) throw new Error(created.err.text);
+    const u = created.json.upload;
+    job.uploadId = u.uploadId;
+    const chunk = u.chunkSize, total = u.totalParts, got = new Set(u.receivedParts || []);
+    if (u.state === 'completed') { cloudCardState(job, 'done', 'Ya estaba en Flex Cloud', 1); return; }
+    job.sent = 0;
+    const whole = new FX.Sha256();
+    if (got.size) cloudCardState(job, 'run', 'Continuando donde se quedó…', got.size / Math.max(1, total));
+    for (let n = 1; n <= total; n++) {
+      if (job.cancelled) throw new Error('Cancelado');
+      const start = (n - 1) * chunk, end = Math.min(job.size, start + chunk);
+      let buf;
+      try { buf = new Uint8Array(await f.slice(start, end).arrayBuffer()); } catch (e) { throw new Error('No se pudo leer el archivo: ¿se ha movido o borrado?'); }
+      whole.update(buf);
+      if (got.has(n)) { job.sent += end - start; continue; }
+      await cloudPart(job, n, buf, FX.sha256Hex(buf));
+      job.sent += end - start;
+      cloudCardState(job, 'run', 'Enviando ' + FX.fmtBytes(job.sent) + ' de ' + FX.fmtBytes(job.size), job.sent / Math.max(1, job.size));
+    }
+    cloudCardState(job, 'check', 'El teléfono está comprobando el archivo…', 1);
+    let done = null;
+    for (let tries = 0; tries < 6 && !done; tries++) {
+      const r = await capi('POST', '/api/cloud/uploads/' + job.uploadId + '/complete', { sha256: whole.hex() });
+      if (r.ok) { done = r.json; break; }
+      if (r.err.code === 'checksum_mismatch') throw new Error('El archivo cambió mientras se subía. Vuelve a subirlo.');
+      if (r.err.code === 'upload_state' || r.status === 503 || r.status === 504 || r.status === 0) { await sleep(1500 * (tries + 1)); continue; }
+      throw new Error(r.err.text);
+    }
+    if (!done) throw new Error('El teléfono no confirmó la subida. Vuelve a intentarlo: seguirá donde iba.');
+    cloudCardState(job, 'done', 'Guardado en ' + job.parentName, 1);
+    const fileRec = done.file || (done.upload && done.upload.file);
+    if (fileRec && fileRec.id) cloudThumb(fileRec.id, f);
+    if (FS.view === 'cloud' && !FS.trash && FS.folder === job.parentId) cloudLoad(true);
+    FS.quotaAt = 0; FS.recentAt = 0;
+  } catch (e) {
+    const msg = e && e.message ? e.message : 'No se pudo subir';
+    if (job.cancelled) {
+      cloudCardState(job, 'cancel', 'Cancelado', 1);
+      if (job.uploadId) capi('DELETE', '/api/cloud/uploads/' + job.uploadId);       // libera lo reservado en el telefono
+    } else cloudCardState(job, 'fail', msg, 1);
+  }
+}
+// Una parte. Lo pasajero (telefono renovando sesion, Wi-Fi que va y viene,
+// parte ocupada, huella que no cuadro por un corte) se repite; lo demas no.
+async function cloudPart(job, n, buf, sha) {
+  for (let fails = 0; ; fails++) {
+    if (job.cancelled) throw new Error('Cancelado');
+    const r = await xhrPart(job, n, buf, sha);
+    if (r.status === -1) throw new Error('Cancelado');
+    if (r.status === 401) { lostSession(); throw new Error('Sesión caducada'); }
+    if (r.status >= 200 && r.status < 300 && r.json && r.json.ok) return;
+    const err = FX.cloudErr(r.status, r.json);
+    const transient = err.retry || r.status === 0 || r.status === 502 || r.status === 503 || r.status === 504 || err.code === 'checksum_mismatch';
+    if (!transient || fails >= 8) throw new Error(err.text);
+    const wait = err.retry || Math.min(30000, 1000 * (1 << fails));
+    cloudCardState(job, 'retry', (err.phone ? err.text + ' · ' : '') + 'reintento en ' + Math.ceil(wait / 1000) + ' s', job.sent / Math.max(1, job.size));
+    await sleep(wait);
+  }
+}
+function xhrPart(job, n, buf, sha) {
+  return new Promise((res) => {
+    const x = new XMLHttpRequest();
+    job.xhr = x;
+    x.open('PUT', '/api/cloud/uploads/' + job.uploadId + '/parts/' + n);
+    x.setRequestHeader('X-Flex', '1');
+    x.setRequestHeader('X-Part-SHA256', sha);
+    x.setRequestHeader('Content-Type', 'application/octet-stream');
+    x.timeout = 120000;
+    x.upload.onprogress = (e) => {
+      if (!e.lengthComputable) return;
+      const s = job.sent + e.loaded;
+      job.card.set('run', 'Enviando ' + FX.fmtBytes(s) + ' de ' + FX.fmtBytes(job.size), s / Math.max(1, job.size));
+    };
+    const done = (st) => { job.xhr = null; let j = null; try { j = JSON.parse(x.responseText); } catch (e) { j = null; } res({ status: st, json: j }); };
+    x.onload = () => done(x.status);
+    x.onerror = () => done(0);
+    x.ontimeout = () => done(0);
+    x.onabort = () => { job.xhr = null; res({ status: -1, json: null }); };
+    x.send(buf);
+  });
+}
+// Miniatura de lo subido (objeto aparte en el telefono: el original no se toca).
+async function cloudThumb(id, file) {
+  let src = null;
+  try {
+    if (/^image\/(jpeg|png|webp|gif|bmp|avif)$/.test(file.type)) src = await decodeImage(file);
+    else if (/^video\//.test(file.type)) { src = await openVideo(file); await seekTo(src, Math.min(1, src.duration / 3)); }
+    if (!src) return;
+    const d = dimsOf(src), s = Math.min(1, 320 / Math.max(d.w, d.h)), w = Math.max(1, Math.round(d.w * s)), h = Math.max(1, Math.round(d.h * s));
+    const cv = canvas(w, h);
+    cv.getContext('2d').drawImage(src, 0, 0, w, h);
+    const b = await toJpeg(cv, 0.82);
+    await fetch('/api/cloud/files/' + id + '/thumbnail', { method: 'PUT', credentials: 'same-origin', headers: { 'X-Flex': '1', 'Content-Type': 'image/jpeg' }, body: b });
+    const it = FS.byId.get(id);
+    if (it) { it.hasThumbnail = true; if (FS.view === 'cloud') renderCloud(); }
+  } catch (e) {
+    /* sin miniatura: se ensena el icono de su tipo */
+  } finally {
+    if (src && typeof src.close === 'function') src.close();
+  }
+}
+// La tarjeta: la misma que las subidas a Flex OS, con el icono de la nube.
+function cloudCard(job) {
+  const c = el('div', 'xfer glass cloudx');
+  const th = el('span', 'th k cloudk');
+  th.append(svgI('cloud'));
+  const t = el('div', 't');
+  const line = el('span', null, 'En cola · a ' + job.parentName);
+  const bar = el('div', 'bar'), fill = el('i');
+  bar.append(fill);
+  t.append(el('b', null, job.name), line, bar);
+  const stop = el('button', 'stop');
+  stop.setAttribute('aria-label', 'Cancelar');
+  stop.append(el('span', 'x'));
+  c.append(th, t, stop);
+  $('xfers').append(c);
+  let timer = 0, again = null;
+  const remove = () => { clearTimeout(timer); c.remove(); if (!$('xfers').querySelector('.xfer')) xferHereEmpty(); };
+  stop.addEventListener('click', () => {
+    if (job.state === 'done' || job.state === 'fail' || job.state === 'cancel') { remove(); FS.up = FS.up.filter((j) => j !== job); renderHome(); return; }
+    job.cancelled = true;
+    if (job.xhr) job.xhr.abort();
+    if (FS.upRunning !== job) { cloudCardState(job, 'cancel', 'Cancelado', 1); if (job.uploadId) capi('DELETE', '/api/cloud/uploads/' + job.uploadId); }
+  });
+  xferHereEmpty();
+  return {
+    set(st, text, frac) {
+      line.textContent = text;
+      fill.style.width = Math.round(Math.max(0, Math.min(1, frac || 0)) * 100) + '%';
+      c.classList.toggle('done', st === 'done');
+      c.classList.toggle('fail', st === 'fail' || st === 'cancel');
+      c.classList.toggle('warn', st === 'retry');
+      if (again) { again.remove(); again = null; }
+      if (st === 'done') timer = setTimeout(remove, 4000);
+      if (st === 'cancel') timer = setTimeout(remove, 1500);
+      if (st === 'fail') {
+        again = el('button', 'chip retry', 'Reintentar');
+        again.addEventListener('click', () => {
+          again.remove(); again = null;
+          job.cancelled = false; job.state = 'wait';
+          line.textContent = 'En cola · a ' + job.parentName;
+          if (FS.up.indexOf(job) < 0) FS.up.push(job);
+          cloudRunQueue();
+        });
+        t.append(again);
+      }
+      xferHereEmpty();
+    },
+    remove
+  };
+}
+function xferHereEmpty() { $('xferHereEmpty').hidden = !!$('xfers').querySelector('.xfer'); }
+$('cloudPicker').addEventListener('change', () => {
+  const files = Array.from($('cloudPicker').files || []);
+  $('cloudPicker').value = '';
+  if (!files.length) return;
+  const inCloud = FS.view === 'cloud' && !FS.trash;
+  const parent = inCloud ? FS.folder : 'root';
+  const pname = inCloud && FS.path.length ? FS.path[FS.path.length - 1].name : 'Flex Cloud';
+  const q = FS.quota;
+  const total = files.reduce((a, f) => a + f.size, 0);
+  if (q && total > q.avail) { toast('No cabe: ' + FX.fmtBytes(total) + ' y en Flex Cloud quedan ' + FX.fmtBytes(q.avail), 4500); return; }
+  for (const f of files) cloudEnqueue(f, parent, pname);
+  toast(files.length === 1 ? 'Subiendo a ' + pname : 'Subiendo ' + files.length + ' archivos a ' + pname);
+});
+
+// ---------- «Subir»: ¿donde? ----------
+function updateFab() {
+  if (!FS.on) { $('fab').hidden = !S.paired || !S.up || S.selecting; return; }
+  $('fab').hidden = !S.paired || S.selecting || FS.cselecting || FS.view === 'xfer' || (FS.view === 'cloud' && FS.trash);
+}
+function destState() {
+  return FX.destOptions({ up: S.up, free: S.free, reserve: S.reserve, phone: phoneState(), phoneOk: FS.phoneOk, quota: FS.quota });
+}
+function fabClick() {
+  if (S.selecting) exitSelect();
+  if (!FS.on) { $('picker').click(); return; }
+  const d = destState();
+  const want = FS.view === 'cloud' ? 'cloud' : 'local';
+  for (const [id, o, key] of [['destLocal', d.local, 'local'], ['destCloud', d.cloud, 'cloud']]) {
+    const b = $(id);
+    b.classList.toggle('pref', key === want && o.ok);
+    b.classList.toggle('no', !o.ok);
+    b.setAttribute('aria-disabled', o.ok || o.act === 'pair' ? 'false' : 'true');
+    $(id + 'Why').textContent = o.why;
+  }
+  closeLayers();
+  $('destSheet').hidden = false;
+  scrim(true);
+}
+function closeDest() { if ($('destSheet').hidden) return; $('destSheet').hidden = true; scrim(false); }
+$('destCancel').addEventListener('click', closeDest);
+$('destLocal').addEventListener('click', () => {
+  const d = destState().local;
+  if (!d.ok) { toast(d.why); return; }
+  closeDest();
+  $('picker').click();
+});
+$('destCloud').addEventListener('click', () => {
+  const d = destState().cloud;
+  if (d.act === 'pair') { closeDest(); openPhoneSheet(); return; }
+  if (!d.ok) { toast(d.why); return; }
+  closeDest();
+  $('cloudPicker').click();
+});
+
+// ---------- Flex OS ⇄ Flex Cloud (lo hace el P4, con su verificacion) ----------
+// El P4 copia con SHA-256 de extremo a extremo; «Mover» solo borra el
+// original cuando la copia ya esta comprobada y colocada en el otro lado.
+function openSend(dir, list) {
+  closeLayers();
+  FS.send = { dir, list, move: false, dest: { id: 'root', name: 'Flex Cloud' } };
+  $('sendTitle').textContent = dir === 'up' ? 'Enviar a Flex Cloud' : 'Enviar a Flex OS';
+  $('sendWhere').hidden = dir !== 'up';
+  paintSend();
+  $('sendSheet').hidden = false;
+  scrim(true);
+}
+function paintSend() {
+  const s = FS.send;
+  if (!s) return;
+  for (const b of $('sendMode').children) { const on = (b.dataset.m === 'move') === s.move; b.classList.toggle('on', on); b.setAttribute('aria-checked', on ? 'true' : 'false'); }
+  const up = s.dir === 'up';
+  $('sendModeHint').textContent = s.move ?
+    (up ? 'El original se borra de Flex OS solo cuando el teléfono confirma la copia con la misma huella.' :
+      'El original va a la papelera de Flex Cloud solo cuando la copia ya está comprobada y guardada en Flex OS.') :
+    (up ? 'El original se queda también en Flex OS.' : 'El original se queda también en Flex Cloud.');
+  $('sendWhereTxt').textContent = 'Carpeta: ' + s.dest.name;
+  const ul = $('sendList');
+  ul.textContent = '';
+  let total = 0;
+  for (const it of s.list.slice(0, 50)) {
+    const li = el('li');
+    const kind = up ? it.k : FX.p4Place(it.name).kind;
+    const k = el('span', 'k ' + (kind || 'bad'), up ? (KIND_LABEL[it.k] || '?') : (KIND_LABEL[kind] || 'ARCH.'));
+    const t = el('div', 't');
+    t.append(el('b', null, up ? it.n : it.name));
+    if (up) t.append(el('span', null, FX.fmtBytes(it.s || 0)));
+    else {
+      const pl = FX.p4Place(it.name);
+      t.append(el('span', pl.plays ? null : 'warn', FX.fmtBytes(it.size) + ' · a ' + pl.where + (pl.where !== 'Archivos › Descargas' && !pl.plays ? ' · Flex OS no reproduce este formato: quedará para descargar' : '')));
+    }
+    li.append(k, t);
+    ul.append(li);
+    total += up ? (it.s || 0) : (it.size || 0);
+  }
+  if (s.list.length > 50) ul.append(el('li', 'busy', 'y ' + (s.list.length - 50) + ' más'));
+  let hint = s.list.length + (s.list.length === 1 ? ' elemento · ' : ' elementos · ') + FX.fmtBytes(total);
+  let ok = s.list.length > 0;
+  if (up) {
+    const q = FS.quota;
+    if (q && total > q.avail) { hint += ' · no cabe: en Flex Cloud quedan ' + FX.fmtBytes(q.avail); ok = false; }
+  } else {
+    const room = Math.max(0, S.free - S.reserve);
+    if (total > room) { hint += ' · no cabe: en Flex OS quedan ' + FX.fmtBytes(room); ok = false; }
+  }
+  $('sendHint').textContent = hint;
+  $('sendGo').disabled = !ok;
+  $('sendGo').textContent = s.move ? 'Mover' : 'Copiar';
+}
+function closeSend() { if ($('sendSheet').hidden) return; $('sendSheet').hidden = true; scrim(false); FS.send = null; }
+$('sendCancel').addEventListener('click', closeSend);
+$('sendMode').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-m]');
+  if (!b || !FS.send) return;
+  FS.send.move = b.dataset.m === 'move';
+  paintSend();
+});
+$('sendWhere').addEventListener('click', async () => {
+  const s = FS.send;
+  if (!s) return;
+  $('sendSheet').hidden = true;
+  scrim(false);
+  const keep = s;
+  const dest = await pickFolder('¿En qué carpeta de Flex Cloud?', null, 'Aquí');
+  FS.send = keep;
+  if (dest) keep.dest = dest;
+  paintSend();
+  $('sendSheet').hidden = false;
+  scrim(true);
+});
+$('sendGo').addEventListener('click', async () => {
+  const s = FS.send;
+  if (!s) return;
+  $('sendGo').disabled = true;
+  let ok = 0, fail = '';
+  for (const it of s.list) {
+    const form = s.dir === 'up' ?
+      'op=up&id=' + it.id + '&folder=' + encodeURIComponent(s.dest.id) + '&move=' + (s.move ? 1 : 0) :
+      'op=down&file=' + encodeURIComponent(it.id) + '&name=' + encodeURIComponent(it.name) + '&size=' + it.size + '&sha=' + encodeURIComponent(it.sha256 || '') + '&move=' + (s.move ? 1 : 0);
+    const r = await api('/api/fs/xfer', { method: 'POST', form });
+    if (r.status === 401) { lostSession(); return; }
+    if (r.status >= 200 && r.status < 300) ok++; else fail = errText(r, 'No se pudo');
+  }
+  closeSend();
+  if (s.dir === 'up') exitSelect(); else exitCSelect();
+  toast(ok ? (s.move ? 'Moviendo ' : 'Copiando ') + (ok === 1 ? '1 elemento' : ok + ' elementos') + (s.dir === 'up' ? ' a Flex Cloud' : ' a Flex OS') + (fail ? ' · ' + fail : '') : fail, 4000);
+  if (ok) { FS.p4xAt = 0; fsSchedule(200); }
+});
+$('cLocal').addEventListener('click', () => {
+  const files = cPicked().filter((it) => it.type === 'file' && /^[0-9a-f]{64}$/.test(it.sha256 || '') && it.size > 0 && it.size < 0xFFFFFFFF);
+  if (!files.length) { toast('Nada que enviar: elige archivos (no carpetas)'); return; }
+  openSend('down', files);
+});
+
+// ---------- Transferencias (vista) ----------
+function renderXfers() {
+  if (!FS.on) return;
+  const ul = $('p4xList');
+  ul.textContent = '';
+  for (const x of FS.p4x) {
+    const li = el('li', 'glass' + (x.phase === P4X_FAILED ? ' fail' : x.phase === P4X_DONE ? ' done' : x.phase === P4X_CANCELLED ? ' cancel' : ''));
+    const dir = el('span', 'dir ' + (x.up ? 'up' : 'down'));
+    dir.append(svgI(x.up ? 'upload' : 'download'));
+    const t = el('div', 't');
+    t.append(el('b', null, x.name || ''), el('span', null, (x.up ? (x.move ? 'Mover a Flex Cloud' : 'Copiar a Flex Cloud') : (x.move ? 'Mover a Flex OS' : 'Copiar a Flex OS')) + ' · ' + (x.text || '')));
+    const bar = el('div', 'bar'), i = el('i');
+    setBar(i, x.size ? Math.round(Math.min(1, x.done / x.size) * 1000) : (x.phase === P4X_DONE ? 1000 : 0));
+    bar.append(i);
+    t.append(bar);
+    li.append(dir, t);
+    let act = null;
+    if (x.phase === P4X_FAILED) act = ['retry', 'Reintentar'];
+    else if (x.phase < P4X_DONE) act = ['cancel', 'Cancelar'];
+    if (act) {
+      const b = el('button', 'chip', act[1]);
+      b.addEventListener('click', async () => {
+        b.disabled = true;
+        const r = await api('/api/fs/xfer', { method: 'POST', form: 'op=' + act[0] + '&job=' + x.id });
+        if (r.status === 401) { lostSession(); return; }
+        if (r.status < 200 || r.status >= 300) toast(errText(r, 'No se pudo'));
+        fsXfers();
+      });
+      li.append(b);
+    }
+    ul.append(li);
+  }
+  $('p4xEmpty').hidden = FS.p4x.length > 0;
+  $('p4xClear').hidden = !FS.p4x.some((x) => x.phase >= P4X_DONE);
+  xferHereEmpty();
+}
+$('p4xClear').addEventListener('click', async () => {
+  const r = await api('/api/fs/xfer', { method: 'POST', form: 'op=clear' });
+  if (r.status === 401) { lostSession(); return; }
+  fsXfers();
+});
+
+// ---------- Flex OS: enviar a Flex Cloud, renombrar y eliminar ----------
+function libPicked() { return Array.from(S.picked).map((id) => S.byId.get(id)).filter((it) => selectable(it)); }
+$('selCloud').addEventListener('click', () => {
+  const list = libPicked().filter((it) => !it.lock);
+  if (!list.length) { toast('Lo protegido no sale de Flex OS desde aquí'); return; }
+  const d = destState().cloud;
+  if (!d.ok && d.act === 'pair') { openPhoneSheet(); return; }
+  if (!d.ok) { toast(d.why); return; }
+  openSend('up', list);
+});
+$('selRen').addEventListener('click', async () => {
+  const it = libPicked()[0];
+  if (!it) return;
+  const name = await ask('Renombrar', '', it.n || '', 'Renombrar', async (v) => {
+    if (v === it.n) return null;
+    const r = await api('/api/local/rename', { method: 'POST', form: 'id=' + it.id + '&name=' + encodeURIComponent(v) });
+    if (r.status === 401) { lostSession(); return null; }
+    return r.status === 200 ? null : errText(r, 'No se pudo renombrar');
+  });
+  if (name && name !== it.n) { toast('Renombrado'); exitSelect(); refresh(false); }
+});
+$('selDel').addEventListener('click', async () => {
+  const list = libPicked();
+  if (!list.length) return;
+  const locked = list.filter((it) => it.lock).length;
+  const txt = 'Irán a la papelera de Flex OS (se pueden recuperar desde Archivos).' + (locked ? ' Lo protegido no va a la papelera: se borra definitivamente.' : '');
+  if (!(await sure(list.length === 1 ? '¿Eliminar «' + (list[0].n || '') + '»?' : '¿Eliminar ' + list.length + ' elementos?', txt, 'Eliminar', true))) return;
+  const r = await api('/api/local/delete', { method: 'POST', form: 'ids=' + list.map((it) => it.id).join(',') });
+  if (r.status === 401) { lostSession(); return; }
+  exitSelect();
+  if (r.status !== 200 || !r.json) { toast(errText(r, 'No se pudo eliminar')); return; }
+  const fails = (r.json.failed || []).length;
+  toast((r.json.ok === 1 ? 'Eliminado' : r.json.ok + ' eliminados') + (fails ? ' · ' + fails + ' no se pudieron' : ''));
+  refresh(false);
+});
+
+// ---------- emparejar el telefono ----------
+// La web pide una oferta de un solo uso al P4 (3 min) y abre Flex Phone con
+// ella. Lo demas pasa entre el telefono y el P4: codigo de 6 cifras en los
+// dos y aprobacion EN LA PANTALLA DE FLEX OS. Aqui solo se ve el progreso.
+let pairT = 0;
+async function openPhoneSheet() {
+  closeLayers();
+  FS.pairing = { until: 0, offer: '', waiting: false, before: phoneState(), beforeName: (FS.ov && FS.ov.phone && FS.ov.phone.name) || '' };
+  for (const id of ['pStep1', 'pStep2', 'pStep3']) $(id).className = '';
+  $('pStep1').className = 'now';
+  $('phoneState').textContent = 'Preparando una invitación…';
+  $('phoneState').className = 'pstate';
+  $('phoneOpen').classList.add('off');
+  $('phoneSheet').hidden = false;
+  scrim(true);
+  const r = await api('/api/fs/phone/offer', { method: 'POST', form: '' });
+  if (!FS.pairing) return;
+  if (r.status === 401) { lostSession(); return; }
+  if (r.status !== 200 || !r.json || !/^flexstorage:\/\/attach\?/.test(r.json.link || '')) {
+    $('phoneState').textContent = errText(r, 'Flex OS no pudo preparar la invitación');
+    $('phoneState').className = 'pstate bad';
+    return;
+  }
+  FS.pairing.offer = r.json.offer;
+  FS.pairing.until = Date.now() + (r.json.expiresIn || 180) * 1000;
+  $('phoneOpen').href = r.json.link;
+  $('phoneOpen').classList.remove('off');
+  pairCountdown();
+  fsSchedule(1000);
+}
+function pairCountdown() {
+  clearTimeout(pairT);
+  const p = FS.pairing;
+  if (!p || !p.until) return;
+  const left = Math.max(0, Math.round((p.until - Date.now()) / 1000));
+  if (p.done) return;
+  if (!left) {
+    $('phoneState').textContent = 'La invitación ha caducado. Cierra y vuelve a pulsar «Activar» para crear otra.';
+    $('phoneState').className = 'pstate bad';
+    $('phoneOpen').classList.add('off');
+    return;
+  }
+  if (!p.waiting) {
+    $('phoneState').textContent = 'Invitación válida ' + Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0') + ' · solo sirve una vez';
+    $('phoneState').className = 'pstate';
+  }
+  pairT = setTimeout(pairCountdown, 1000);
+}
+function pairProgress(before, now) {
+  const p = FS.pairing;
+  if (!p || p.done) return;
+  const ph = now.phone || {};
+  if (ph.pairWaiting && !p.waiting) {
+    p.waiting = true;
+    $('pStep1').className = 'ok'; $('pStep2').className = 'now'; $('pStep3').className = 'now';
+    $('phoneState').textContent = 'Compara el código del teléfono con el de la pantalla de Flex OS y acepta allí.';
+    $('phoneState').className = 'pstate';
+  }
+  const became = ph.state === 'ready' && (p.before !== 'ready' || (ph.name || '') !== p.beforeName || (p.waiting && !ph.pairWaiting));
+  if (became) {
+    p.done = true;
+    clearTimeout(pairT);
+    for (const id of ['pStep1', 'pStep2', 'pStep3']) $(id).className = 'ok';
+    $('phoneState').textContent = 'Flex Cloud activado en ' + (ph.name || 'el teléfono');
+    $('phoneState').className = 'pstate ok';
+    $('phoneOpen').classList.add('off');
+    FS.quotaAt = 0; FS.phoneOk = false;
+    setTimeout(() => {
+      if (FS.pairing !== p) return;
+      closePhoneSheet();
+      const msg = 'Flex Cloud activado en ' + (ph.name || 'el teléfono');
+      toast(msg);
+      // La CSP de esta pagina se calculo sin este telefono: recargarla deja
+      // ver fotos y videos DIRECTOS desde el. Solo si no hay nada en marcha
+      // (si no, se ven a traves del P4 hasta la proxima carga).
+      if (idle() && phoneOrigin(ph) !== FS.cspOrigin) {
+        try { sessionStorage.setItem('flexos.paired', msg); } catch (e) { /* sin almacenamiento */ }
+        setTimeout(() => { if (idle()) location.reload(); }, 900);
+        return;
+      }
+      if (FS.view === 'cloud') cloudLoad(true);
+    }, 1600);
+  } else if (p.waiting && !ph.pairWaiting && ph.state !== 'ready') {
+    p.waiting = false;
+    $('phoneState').textContent = 'No se aceptó en Flex OS. Puedes volver a intentarlo con otra invitación.';
+    $('phoneState').className = 'pstate bad';
+  }
+}
+function closePhoneSheet() {
+  clearTimeout(pairT);
+  FS.pairing = null;
+  if ($('phoneSheet').hidden) return;
+  $('phoneSheet').hidden = true;
+  scrim(false);
+}
+$('phoneCancel').addEventListener('click', closePhoneSheet);
+$('phoneOpen').addEventListener('click', (e) => { if ($('phoneOpen').classList.contains('off')) e.preventDefault(); });
+$('mPhone').addEventListener('click', () => { closeMenu(); openPhoneSheet(); });
 
 // ===========================================================================
 //  Arranque

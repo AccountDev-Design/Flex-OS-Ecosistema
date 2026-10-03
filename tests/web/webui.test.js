@@ -700,6 +700,103 @@ section('tamano por archivo: «Límite máximo» y «Objetivo»');
 }
 
 // =============================================================
+section('Flex Storage: SHA-256, tamanos, cuota y destinos');
+{
+  const crypto = require('crypto');
+  // FIPS 180-2, apendice B, y un millon de "a" a trozos de 1000.
+  check(FX.sha256Hex(new Uint8Array(0)) === 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855', 'SHA-256 de nada');
+  check(FX.sha256Hex(u8(utf8('abc'))) === 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad', 'SHA-256 de "abc"');
+  check(FX.sha256Hex(u8(utf8('abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq'))) ===
+    '248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1', 'SHA-256 del mensaje de 448 bits');
+  const mil = new FX.Sha256(), a1000 = new Uint8Array(1000).fill(0x61);
+  for (let i = 0; i < 1000; i++) mil.update(a1000);
+  check(mil.hex() === 'cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0', 'SHA-256 de un millon de "a", a trozos');
+  // Contra el de Node, con longitudes alrededor de cada borde de bloque y
+  // cortes aleatorios (la web lo alimenta a trozos de 1 MB).
+  let bad = 0;
+  for (let i = 0; i < 400; i++) {
+    const n = i < 260 ? i : rnd() % 150000, b = crypto.randomBytes(n);
+    const h = new FX.Sha256();
+    for (let p = 0; p < n;) { const k = Math.min(n - p, 1 + rnd() % (i & 1 ? 97 : 4096)); h.update(u8(b.subarray(p, p + k))); p += k; }
+    if (h.hex() !== crypto.createHash('sha256').update(b).digest('hex')) bad++;
+  }
+  check(bad === 0, 'SHA-256 igual que el de Node en 400 casos troceados al azar (' + bad + ' distintos)');
+
+  // Lo que imprime fclFmtBytes en el P4 (con sus empates: 1,25 KB -> "1,2 KB").
+  const V = [[0, '0 B'], [1, '1 B'], [1023, '1023 B'], [1024, '1 KB'], [1025, '1 KB'], [1152, '1,1 KB'], [1280, '1,2 KB'], [1536, '1,5 KB'],
+    [1792, '1,8 KB'], [2560, '2,5 KB'], [10240, '10 KB'], [10291, '10 KB'], [10342, '10,1 KB'], [102400, '100 KB'], [102348, '99,9 KB'],
+    [102349, '100 KB'], [1048575, '1024 KB'], [1048576, '1 MB'], [1101004, '1 MB'], [1101005, '1,1 MB'], [1153433, '1,1 MB'],
+    [1258291, '1,2 MB'], [1310720, '1,2 MB'], [5242880, '5 MB'], [10485760, '10 MB'], [104857600, '100 MB'], [104805171, '99,9 MB'],
+    [104805172, '100 MB'], [1073741823, '1024 MB'], [1073741824, '1 GB'], [1181116006, '1,1 GB'], [1342177280, '1,2 GB'],
+    [1610612736, '1,5 GB'], [5368709120, '5 GB'], [5905580032, '5,5 GB'], [107374182400, '100 GB'], [4294967295, '4 GB'],
+    [1099511627776, '1 TB'], [167772160, '160 MB'], [1048524, '1024 KB'], [1022976, '999 KB'], [1023487, '999 KB'],
+    [1023488, '1000 KB'], [1047552, '1023 KB'], [102912, '100 KB'], [103014, '101 KB']];
+  const wrong = V.filter(([n, t]) => FX.fmtBytes(n) !== t);
+  check(wrong.length === 0, 'tamanos como fclFmtBytes del P4' + (wrong.length ? ': ' + wrong.map(([n, t]) => n + ' -> ' + FX.fmtBytes(n) + ' (P4: ' + t + ')').join(', ') : ''));
+
+  const GB = 1 << 30;
+  // La cuota del telefono (Flex Cloud) y la que guarda el P4 dicen lo mismo.
+  const phoneQ = FX.normQuota({ totalBytes: 5 * GB, usedBytes: 1288490188, reservedBytes: 0, trashBytes: 104857600, availableBytes: 5 * GB - 1288490188, state: 'ok' });
+  const p4Q = FX.normQuota({ total: 5 * GB, used: 1288490188, reserved: 0, trash: 104857600, available: 5 * GB - 1288490188, permille: 240, state: 'ok' });
+  check(phoneQ && p4Q && phoneQ.permille === 240 && FX.quotaLine(phoneQ) === '1,2 GB de 5 GB · 24 %' && FX.quotaLine(p4Q) === FX.quotaLine(phoneQ),
+    'cuota: las dos formas, la misma linea (' + FX.quotaLine(phoneQ) + ')');
+  check(FX.quotaHint(phoneQ) === 'Quedan 3,8 GB', 'cuota: lo que queda (' + FX.quotaHint(phoneQ) + ')');
+  const tiny = FX.normQuota({ totalBytes: 5 * GB, usedBytes: 1000, reservedBytes: 0, trashBytes: 0, availableBytes: 5 * GB - 1000 });
+  check(tiny.permille === 1 && /· 1 %$/.test(FX.quotaLine(tiny)), 'algo ocupado nunca es "0 %"');
+  const dev = FX.normQuota({ totalBytes: 5 * GB, usedBytes: GB, reservedBytes: 0, trashBytes: 0, availableBytes: 300 << 20, limitedByDevice: true, state: 'low' });
+  check(dev.limited && dev.avail === 300 << 20 && FX.quotaHint(dev) === 'Espacio casi lleno: quedan 300 MB (lo que queda libre en el teléfono)',
+    'el telefono con poco sitio manda sobre la cuota y se dice (' + FX.quotaHint(dev) + ')');
+  const full = FX.normQuota({ totalBytes: 5 * GB, usedBytes: 5 * GB, reservedBytes: 0, trashBytes: 0, availableBytes: 0 });
+  check(full.state === 'full' && full.permille === 1000 && FX.quotaHint(full) === 'Flex Cloud está lleno', 'llena: "Flex Cloud está lleno"');
+  check(FX.normQuota(null) === null && FX.normQuota({ totalBytes: 0 }) === null && FX.quotaLine(null) === 'Espacio no disponible',
+    'sin cuota no se inventa ninguna');
+  const lies = FX.normQuota({ totalBytes: 5 * GB, usedBytes: 4 * GB, reservedBytes: 0, availableBytes: 3 * GB });
+  check(lies.avail === GB, 'nunca mas disponible que lo que falta de la cuota');
+  const bar = FX.quotaBar(FX.normQuota({ totalBytes: 1000, usedBytes: 500, reservedBytes: 100, trashBytes: 200, availableBytes: 400 }));
+  check(bar.used === 300 && bar.trash === 200 && bar.reserved === 100, 'barra: usado, papelera y reservado ' + JSON.stringify(bar));
+
+  // Destinos de «Subir».
+  const base = { up: true, free: 50 << 20, reserve: 2 << 20, phone: 'ready', phoneOk: true, quota: phoneQ };
+  let d = FX.destOptions(base);
+  check(d.local.ok && d.local.why === 'Libre: 48 MB' && d.cloud.ok && d.cloud.why === 'Disponible: 3,8 GB de 5 GB', 'los dos destinos, con su sitio real');
+  d = FX.destOptions(Object.assign({}, base, { phone: 'none' }));
+  check(!d.cloud.ok && d.cloud.act === 'pair', 'sin telefono: Flex Cloud lleva a emparejar');
+  d = FX.destOptions(Object.assign({}, base, { phoneOk: false }));
+  check(!d.cloud.ok && d.cloud.act === '' && d.cloud.why === 'Teléfono desconectado', 'telefono desconectado: no se ofrece');
+  d = FX.destOptions(Object.assign({}, base, { quota: full }));
+  check(!d.cloud.ok && d.cloud.why === 'Flex Cloud está lleno', 'Flex Cloud lleno: no se ofrece');
+  d = FX.destOptions(Object.assign({}, base, { up: false, free: 0 }));
+  check(!d.local.ok && /desactivadas/.test(d.local.why), 'subidas desactivadas en Flex OS: no se ofrece');
+  d = FX.destOptions(Object.assign({}, base, { free: 1 << 20 }));
+  check(!d.local.ok && /espacio/.test(d.local.why), 'Flex OS sin sitio por encima de la reserva: no se ofrece');
+  d = FX.destOptions(Object.assign({}, base, { phone: 'rejected' }));
+  check(!d.cloud.ok && d.cloud.act === 'pair' && /vuelve a emparejarlo/.test(d.cloud.why), 'telefono que ya no reconoce el P4: volver a emparejar');
+
+  // Errores de Flex Cloud por la pasarela.
+  const E = (st, code, msg) => FX.cloudErr(st, { ok: false, error: { code, message: msg || '' } });
+  check(E(503, 'phone_session').retry === 1000 && E(503, 'phone_offline').phone && E(504, 'phone_offline').text === 'Teléfono desconectado',
+    'pasarela: renovar sesion se repite, desconectado se dice');
+  check(E(409, 'no_phone').phone && E(403, 'phone_rejected').phone && E(503, 'upload_busy').retry > 0 && FX.cloudErr(0, null).code === 'network',
+    'pasarela: sin telefono, rechazado, parte ocupada y sin red');
+  check(E(413, 'quota_exceeded').text === 'No queda espacio en Flex Cloud del teléfono' && E(409, 'name_conflict', 'Ya existe "x"').text === 'Ya existe "x"',
+    'errores del telefono con su texto');
+
+  // Que hace Flex OS con lo que le llega de Flex Cloud.
+  check(FX.p4Place('foto.JPG').plays && FX.p4Place('foto.JPG').where === 'Galería' && !FX.p4Place('foto.heic').plays,
+    'fotos: a la Galeria (JPEG se ve; HEIC solo para descargar)');
+  check(FX.p4Place('clip.avi').plays && !FX.p4Place('clip.mp4').plays && FX.p4Place('clip.mp4').where === 'Galería', 'videos: AVI se ve; MP4 se guarda');
+  check(FX.p4Place('tema.wav').plays && FX.p4Place('tema.mp3').where === 'Música' && FX.p4Place('informe.pdf').where === 'Archivos › Descargas',
+    'audio a Musica; lo demas a Archivos › Descargas');
+
+  // Clave de reanudacion e ids.
+  const k1 = FX.cloudClientKey('vídeo.mp4', 1234, 99, 'root'), k2 = FX.cloudClientKey('vídeo.mp4', 1234, 99, 'fld_abcdefgh12');
+  check(k1 === FX.cloudClientKey('vídeo.mp4', 1234, 99, null) && k1 !== k2 && /^web:1234:99:[0-9a-f]{8}$/.test(k1),
+    'clave de reanudacion estable y distinta por carpeta (' + k1 + ')');
+  check(FX.cloudIdOk('fil_0123456789abcdef', 'fil_') && !FX.cloudIdOk('fil_ABCDEFGH1', 'fil_') && !FX.cloudIdOk('fld_short', 'fld_') &&
+    !FX.cloudIdOk('fil_../../../etc', 'fil_'), 'ids de Flex Cloud como los acepta el P4');
+}
+
+// =============================================================
 section('coherencia de la interfaz');
 {
   const js = fs.readFileSync(path.join(WEB, 'app.js'), 'utf8');
