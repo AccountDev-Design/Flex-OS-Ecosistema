@@ -722,8 +722,8 @@ static void almPhonePaint(){
     y += mmWrap(x + 4, y, w - 8, "C\xC3\xB3" "mo activarlo: 1) En el tel\xC3\xA9" "fono, abre la web de Flex OS (Galer\xC3\xAD" "a > Conectar con el m\xC3\xB3" "vil, escanea el QR). "
                "2) Pulsa \xC2\xAB" "Activar Flex Cloud en este tel\xC3\xA9" "fono\xC2\xBB. 3) Compara el c\xC3\xB3" "digo de 6 cifras y acepta aqu\xC3\xAD.", 1, TH_TXT, true) + 10;
   }
-  y += mmWrap(x + 4, y, w - 8, "Flex Cloud guarda tus archivos en el espacio que el tel\xC3\xA9" "fono le reserva (hasta 5 GB). "
-             "Flex OS solo ve ese espacio: nada m\xC3\xA1s del tel\xC3\xA9" "fono.", 1, TH_TXT2, true) + 14;
+  y += mmWrap(x + 4, y, w - 8, "Flex Cloud guarda tus archivos en el espacio que el tel\xC3\xA9" "fono le reserva (hasta 5 GB) "
+             "y Flex OS solo ve ese espacio. Los archivos viajan sin cifrar por tu Wi-Fi: \xC3\xBAsalo en una red de confianza.", 1, TH_TXT2, true) + 14;
 
   // ---- decisiones ----
   if(si.state != FSP_NONE){

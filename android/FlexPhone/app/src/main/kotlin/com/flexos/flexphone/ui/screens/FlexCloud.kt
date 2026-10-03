@@ -181,7 +181,8 @@ fun FlexCloudScreen(nav: NavController) {
                 "Qué ve Flex OS",
                 "Solo la carpeta privada de Flex Cloud de esta app. Ni tus fotos, ni tus archivos, ni otras " +
                     "aplicaciones. El servidor solo acepta conexiones de tu red local y con la sesión del Flex OS " +
-                    "emparejado; los enlaces para ver un archivo caducan a los 15 minutos.",
+                    "emparejado; los enlaces para ver un archivo caducan a los 15 minutos. Los archivos viajan " +
+                    "SIN CIFRAR por tu Wi‑Fi, como el resto del enlace con Flex OS: úsalo en una red de confianza.",
             )
 
             if (s.paired) {

@@ -3387,7 +3387,7 @@ function renderHome() {
     cta = 'Flex Cloud está desactivado en Flex OS. Actívalo en Ajustes › Almacenamiento.';
   } else {
     sub = 'Sin teléfono';
-    cta = 'Usa el espacio de tu teléfono como Flex Cloud: 5 GB para guardar originales y moverlos entre Flex OS y el móvil.'; btn = 'Activar Flex Cloud en este teléfono';
+    cta = 'Usa el espacio de tu teléfono como Flex Cloud: hasta 5 GB para guardar originales y moverlos entre Flex OS y el móvil.'; btn = 'Activar Flex Cloud en este teléfono';
   }
   $('hCloudSub').textContent = sub;
   $('hCloudQuota').hidden = !showQ;

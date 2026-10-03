@@ -74,7 +74,8 @@ class StorageAttachActivity : Activity() {
         show(Step.CONFIRM, "¿Usar este teléfono como Flex Cloud?",
             "El Flex OS de ${AttachClient.parseHost(host)!!.first} podrá guardar archivos en un espacio de este teléfono " +
                 "(hasta $gb GB, lo puedes cambiar en Flex Phone) y leerlos cuando se lo pidas.\n\n" +
-                "No verá nada más del teléfono: ni tus fotos, ni tus archivos, ni tus apps. Solo funciona en tu Wi‑Fi.")
+                "No verá nada más del teléfono: ni tus fotos, ni tus archivos, ni tus apps. Solo funciona en tu Wi‑Fi, " +
+                "y lo que se envía viaja por ella sin cifrar: úsalo en una red de confianza.")
     }
 
     private fun dp(v: Int): Int = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()

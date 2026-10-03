@@ -29,9 +29,9 @@ import java.security.MessageDigest
  *  · Nunca se escribe fuera de la zona de la parte: lo que sobra se detecta
  *    leyendo un byte de mas que no se guarda.
  *
- * La carpeta es la que la app le da (en Android, el almacenamiento ESPECIFICO de
- * la app: `getExternalFilesDir("FlexCloud")`, que no necesita ningun permiso y
- * que ni otras apps ni el P4 pueden recorrer). Todas las rutas se componen con
+ * La carpeta es la que la app le da (en Android, el almacenamiento PRIVADO de
+ * la app: `filesDir/FlexCloud`, que no necesita ningun permiso y que ni otras
+ * apps ni el P4 pueden recorrer). Todas las rutas se componen con
  * claves e ids validados, nunca con texto ajeno.
  *
  * [freeSpace]: espacio REAL que le queda a la app (Android:

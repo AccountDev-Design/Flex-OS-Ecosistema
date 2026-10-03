@@ -5,7 +5,7 @@
 // #############################################################
 #pragma once
 
-// index.html: 20901 bytes
+// index.html: 21022 bytes
 static const char FLEXWEB_INDEX_HTML[] = R"FXW(<!doctype html>
 <html lang="es">
 <head>
@@ -276,7 +276,7 @@ static const char FLEXWEB_INDEX_HTML[] = R"FXW(<!doctype html>
 <section class="sheet glass" id="phoneSheet" hidden aria-labelledby="phoneTitle">
   <div class="grab" aria-hidden="true"></div>
   <h2 id="phoneTitle">Activar Flex Cloud en este teléfono</h2>
-  <p class="hint" id="phoneHint">Flex Cloud guarda tus archivos en el espacio que el teléfono le reserva (5 GB). Flex OS solo ve ese espacio: nada más del teléfono.</p>
+  <p class="hint" id="phoneHint">Flex Cloud guarda tus archivos en el espacio que el teléfono le reserva (hasta 5 GB; la cantidad se elige en Flex Phone). Flex OS solo ve ese espacio: nada más del teléfono. Los archivos viajan sin cifrar por tu Wi‑Fi: úsalo en una red de confianza.</p>
   <ol class="steps" id="phoneSteps">
     <li id="pStep1">Pulsa <b>Abrir Flex Phone</b> en este teléfono.</li>
     <li id="pStep2">Comprueba que el código de 6 cifras es el mismo en el teléfono y en la pantalla de Flex OS.</li>
@@ -848,7 +848,7 @@ body.selecting .bnav,body.cselecting .bnav{display:none}
 }
 )FXW";
 
-// app.js: 212269 bytes
+// app.js: 212275 bytes
 static const char FLEXWEB_APP_JS[] = R"FXW(/* Flex OS · Biblioteca web (Flex Web Server)
  *
  * La sirve el propio P4 desde su memoria (FlexOS_WebUI.h, que genera
@@ -4238,7 +4238,7 @@ function renderHome() {
     cta = 'Flex Cloud está desactivado en Flex OS. Actívalo en Ajustes › Almacenamiento.';
   } else {
     sub = 'Sin teléfono';
-    cta = 'Usa el espacio de tu teléfono como Flex Cloud: 5 GB para guardar originales y moverlos entre Flex OS y el móvil.'; btn = 'Activar Flex Cloud en este teléfono';
+    cta = 'Usa el espacio de tu teléfono como Flex Cloud: hasta 5 GB para guardar originales y moverlos entre Flex OS y el móvil.'; btn = 'Activar Flex Cloud en este teléfono';
   }
   $('hCloudSub').textContent = sub;
   $('hCloudQuota').hidden = !showQ;
@@ -5401,4 +5401,4 @@ $('mPhone').addEventListener('click', () => { closeMenu(); openPhoneSheet(); });
 })();
 )FXW";
 
-#define FLEXWEB_UI_BYTES 267210
+#define FLEXWEB_UI_BYTES 267337

@@ -10621,6 +10621,7 @@ static void testFlexStorage(){
   tReset(); T.tap = true; T.x = SCR_W / 2; T.y = (almPhY0 + almPhY1) / 2; almTick();
   chk(almScreen == ALM_SCR_PHONE, "tocarla abre la pantalla del telefono");
   chk(almPhBtn[0][2] > almPhBtn[0][0] && almPhBtn[1][2] > almPhBtn[1][0], "con Poner en pausa y Olvidar este telefono");
+  chk(almPhBtn[1][3] <= WIN_BOT, "con la cuota y el aviso de red, los dos botones caben en la ventana");
   if(getenv("INO_SHOTS")) shotSave("storage_telefono");
   tReset(); T.tap = true; T.x = (almPhBtn[0][0] + almPhBtn[0][2]) / 2; T.y = (almPhBtn[0][1] + almPhBtn[0][3]) / 2; almTick();
   chk(gStubSetEnabled == 0 && gStubStorage.state == FSP_OFF, "Poner en pausa: el telefono queda en pausa (sin olvidarlo)");
