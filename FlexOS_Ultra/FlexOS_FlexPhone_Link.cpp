@@ -785,8 +785,17 @@ static bool applyMessage(FlexPhoneLink* L, FlexPhoneModel* M,
       M->relay = rl;
       return true;
     }
-    case FLNK_T_ACK:
+    case FLNK_T_ACK: {
+      // Payload: u16 con el id (`packet`) del mensaje acusado. Libera lo que
+      // todavia estuviera esperando salida; si ya salio, no hay nada que hacer.
+      FlexLinkRd r; flexLinkRdInit(&r, p, n);
+      const uint16_t acked = flexLinkRdU16(&r);
+      if(flexLinkRdOk(&r)){
+        for(int i = 0; i < FLP_LINK_TXQ; i++)
+          if(L->tx[i].used && L->tx[i].needsAck && L->tx[i].packet == acked) L->tx[i].used = false;
+      }
       return true;
+    }
     case FLNK_T_ERR: {
       FlexLinkRd r; flexLinkRdInit(&r, p, n);
       const uint8_t code = flexLinkRdU8(&r);
@@ -1215,11 +1224,27 @@ void flexPhoneLinkTick(FlexPhoneLink* L, FlexPhoneModel* M, uint32_t nowMs){
     // no cuando se encola: entre una cosa y otra hay al menos un
     // cuadro, y contarlo como tiempo de red seria inventarse ~16 ms.
     if(m->type == FLNK_T_PING && !L->pingSentMs) L->pingSentMs = nowMs ? nowMs : 1;
-    if(!m->needsAck){ m->used = false; continue; }
-    if(m->attempts >= FLNK_RETRY_MAX){ m->used = false; L->nTimeouts++; continue; }
-    const uint32_t d = flexLinkRetryDelayMs(m->attempts);
-    m->attempts++;
-    m->nextTryMs = nowMs + (d ? d : FLP_LINK_ACK_TIMEOUT_MS);
+    // #########################################################
+    // ##  UNA ORDEN ENTREGADA NO SE REENVIA
+    // ##  --------------------------------------------------
+    // ##  Antes, `needsAck` dejaba el mensaje en la cola y lo REENVIABA
+    // ##  con espera progresiva (0,5 / 1 / 2 / 4 / 8 s) hasta agotar
+    // ##  FLNK_RETRY_MAX... porque nada lo quitaba nunca: el telefono no
+    // ##  contestaba ningun ACK y aqui el ACK no liberaba nada. Resultado,
+    // ##  medido en tests/host/link_e2e.sh: el telefono recibia CADA
+    // ##  orden hasta CINCO veces -- "Iniciar relay del navegador" lo
+    // ##  arrancaba cinco veces, "Hacer sonar" sonaba cinco veces, y cada
+    // ##  RELAY_START repetido pisaba el estado del relay en el telefono.
+    // ##
+    // ##  Todos los transportes de hoy son flujos FIABLES (TCP): si
+    // ##  deliver() devolvio true, los bytes estan en camino y llegaran
+    // ##  una vez y en orden. Reenviar solo puede duplicar. Los reintentos
+    // ##  que quedan son los de ARRIBA: cuando el canal NO pudo entregar
+    // ##  (cola llena, canal cerrado), que es lo que de verdad salva un
+    // ##  corte de un segundo. El ACK del telefono (FLNK_T_ACK) sigue
+    // ##  aceptandose y libera lo que estuviera esperando salida.
+    // #########################################################
+    m->used = false;
   }
 
   // #############################################################

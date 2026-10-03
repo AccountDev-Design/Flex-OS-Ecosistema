@@ -205,6 +205,14 @@ class WifiLinkServer(
          * nadie pueda gastar hilos abriendo sockets sin hablar.
          */
         private const val MAX_CONNS = 4
+        /** Cuantos mensajes recientes se recuerdan por conexion para detectar reenvios. */
+        private const val SEEN_N = 32
+        /** Ordenes de Flex OS que se ACUSAN: las que el reloj manda "con acuse". */
+        private val ACKED_TYPES = intArrayOf(
+            FlexLink.T_RELAY_START, FlexLink.T_RELAY_STOP,
+            FlexLink.T_FIND_START, FlexLink.T_FIND_STOP,
+            FlexLink.T_REPLY_REQ, FlexLink.T_ACTION_REQ,
+        )
     }
 
     private val running = AtomicBoolean(false)
@@ -294,6 +302,32 @@ class WifiLinkServer(
         // `synchronized(this)` al enmarcar.
         var txCounter = 0L
         var txPacket = 1
+
+        /**
+         * Los ultimos mensajes de aplicacion recibidos, por (tipo, id de
+         * paquete, fragmento). Solo lo toca el hilo de ESTA conexion.
+         *
+         * Un id de paquete NO se repite dentro de una conexion (el reloj lo
+         * incrementa por mensaje), asi que ver el mismo dos veces es un
+         * REENVIO, no una orden nueva. Un reloj con el firmware anterior
+         * reenviaba cada orden "con acuse" hasta cinco veces porque este
+         * lado nunca contestaba el ACK: "Iniciar relay" arrancaba el relay
+         * cinco veces y "Hacer sonar" sonaba cinco. Ver tambien
+         * FlexOS_FlexPhone_Link.cpp.
+         */
+        private val seen = IntArray(SEEN_N)
+        private var seenAt = 0
+        private var seenFill = 0
+
+        /** true la PRIMERA vez que se ve esta clave. */
+        fun firstSight(type: Int, packet: Int, frag: Int): Boolean {
+            val key = ((type and 0xFF) shl 24) or ((frag and 0xFF) shl 16) or (packet and 0xFFFF)
+            for (i in 0 until seenFill) if (seen[i] == key) return false
+            seen[seenAt] = key
+            seenAt = (seenAt + 1) % SEEN_N
+            if (seenFill < SEEN_N) seenFill++
+            return true
+        }
     }
 
     /**
@@ -800,7 +834,15 @@ class WifiLinkServer(
                 Log.d(TAG, "CLOSE_REQUEST conn=#${c.id} reason=BYE de Flex OS")
                 runCatching { c.socket.close() }
             }
-            else -> if (c.authed) onMessage(h.type, body)
+            else -> if (c.authed) {
+                // Se ACUSA siempre (tambien un reenvio: el ACK anterior pudo
+                // perderse) y se ENTREGA solo la primera vez.
+                if (h.type in ACKED_TYPES) {
+                    sendRaw(c, FlexLink.T_ACK, PayloadWriter().u16(h.packet).build(), h.session)
+                }
+                if (c.firstSight(h.type, h.packet, h.frag)) onMessage(h.type, body)
+                else if (DEBUG_LINK) Log.d(TAG, "DUPLICATE_DROPPED #${c.id} type=0x%02x packet=${h.packet}".format(h.type))
+            }
         }
     }
 
