@@ -125,7 +125,8 @@ fun SecurityScreen(nav: NavController, store: SettingsStore, settings: Settings)
             },
             confirmButton = {
                 TextButton(onClick = {
-                    FlexLinkService.current?.forgetBond() ?: bonds.clear()
+                    FlexLinkService.current?.forgetBond()
+                        ?: run { bonds.clear(); FlexPhoneState.instance?.setBond(false, null) }
                     scope.launch { store.update { it.copy(flexosId = null, flexosName = null) } }
                     paired = false
                     confirmRevoke = false

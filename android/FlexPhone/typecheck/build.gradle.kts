@@ -44,12 +44,25 @@ kotlin {
     sourceSets["main"].kotlin.apply {
         srcDir("../app/src/main/kotlin")
         srcDir("stubs")
+        // Flex Storage (el pegamento Android de Flex Cloud en el telefono)
         include("com/flexos/flexphone/flexcloud/**")
-        include("com/flexos/flexphone/ui/screens/FlexCloud.kt")
-        include("com/flexos/flexphone/ui/screens/Common.kt")
-        include("com/flexos/flexphone/domain/FlexPhoneState.kt")
-        include("com/flexos/flexphone/domain/Settings.kt")
+        // El ENLACE de Flex Phone: servicio, servidor, relay, estado y pantallas.
+        // Todo menos lo que necesita librerias de Google Maven que aqui no hay
+        // (Welcome.kt, MainActivity, el tema y SettingsStore, que tienen su doble).
+        include("com/flexos/flexphone/FlexPhoneApp.kt")
+        include("com/flexos/flexphone/link/**")
+        include("com/flexos/flexphone/relay/**")
+        include("com/flexos/flexphone/device/**")
+        include("com/flexos/flexphone/media/**")
+        include("com/flexos/flexphone/notifications/**")
+        include("com/flexos/flexphone/domain/**")
+        include("com/flexos/flexphone/storage/BondStore.kt")
+        include("com/flexos/flexphone/ui/FlexPhoneNav.kt")
+        include("com/flexos/flexphone/ui/screens/**")
+        exclude("com/flexos/flexphone/ui/screens/Welcome.kt")
         include("com/flexos/flexphone/typecheck_stubs/**")
+        // Dobles de androidx (Google Maven): ver stubs/androidx
+        include("androidx/**")
     }
 }
 java {

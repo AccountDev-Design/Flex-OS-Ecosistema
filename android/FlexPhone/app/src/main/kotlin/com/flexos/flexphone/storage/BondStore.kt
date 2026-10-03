@@ -112,13 +112,18 @@ class BondStore(ctx: Context) {
         val c = Cipher.getInstance("AES/GCM/NoPadding")
         c.init(Cipher.ENCRYPT_MODE, wrapKey())
         val blob = c.doFinal(key)
-        prefs.edit()
+        // commit(), NO apply(): el emparejamiento tiene que estar en disco ANTES de que
+        // nada mas ocurra. Con apply() la escritura es asincrona y un cierre del proceso
+        // justo despues de emparejar (Android mata la app, el reloj reconecta y se
+        // abre otra sesion) dejaba a Flex OS con un vinculo que este telefono no tenia.
+        val ok = prefs.edit()
             .putString(P_BLOB, Base64.encodeToString(blob, Base64.NO_WRAP))
             .putString(P_IV, Base64.encodeToString(c.iv, Base64.NO_WRAP))
             .putString(P_PEER, peerId)
             .putString(P_NAME, peerName ?: "")
             .putLong(P_AT, System.currentTimeMillis())
-            .apply()
+            .commit()
+        if (!ok) throw IllegalStateException("no se pudo guardar el vinculo")
     }
 
     /**
@@ -141,8 +146,20 @@ class BondStore(ctx: Context) {
                 GCMParameterSpec(GCM_TAG_BITS, Base64.decode(iv, Base64.NO_WRAP)),
             )
             c.doFinal(Base64.decode(blob, Base64.NO_WRAP))
-        } catch (e: Exception) {
+        } catch (e: javax.crypto.AEADBadTagException) {
+            // La clave envolvente ya no es la que cifro esto (restauracion, reinstalacion):
+            // no hay forma de recuperarlo.
             clear()
+            null
+        } catch (e: java.security.UnrecoverableKeyException) {
+            clear()
+            null
+        } catch (e: Exception) {
+            // Un fallo PASAJERO del Keystore (servicio ocupado, arrancando) NO es motivo
+            // para borrar el vinculo: antes se borraba aqui por cualquier excepcion, y un
+            // tropiezo de un segundo dejaba al telefono sin vinculo para siempre. Se
+            // devuelve null ahora y se reintenta en la siguiente conexion.
+            com.flexos.flexphone.protocol.LinkDiag.w("FlexPhone/Bond", "Keystore no pudo descifrar ahora: ${e.javaClass.simpleName}")
             null
         }
     }

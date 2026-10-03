@@ -68,7 +68,7 @@ fun StatusDot(s: FlexStatus, size: Int = 12) {
 
 fun linkStatus(s: LinkState): FlexStatus = when (s) {
     LinkState.READY -> FlexStatus.OK
-    LinkState.PAIRING, LinkState.CONNECTING, LinkState.ADVERTISING -> FlexStatus.BUSY
+    LinkState.PAIRING, LinkState.CONNECTING, LinkState.ADVERTISING, LinkState.RECONNECTING -> FlexStatus.BUSY
     LinkState.ERROR, LinkState.UNAVAILABLE -> FlexStatus.BAD
     LinkState.OFF -> FlexStatus.OFF
 }
@@ -83,6 +83,7 @@ fun linkText(s: LinkState): String = when (s) {
     LinkState.PAIRING -> "Emparejando"
     LinkState.CONNECTING -> "Conectando"
     LinkState.ADVERTISING -> "Esperando a Flex OS"
+    LinkState.RECONNECTING -> "Reconectando con Flex OS"
     LinkState.OFF -> "Enlace apagado"
     LinkState.UNAVAILABLE -> "No disponible"
     LinkState.ERROR -> "Error"

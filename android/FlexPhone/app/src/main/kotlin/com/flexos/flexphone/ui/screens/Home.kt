@@ -20,7 +20,6 @@ import com.flexos.flexphone.domain.Settings
 import com.flexos.flexphone.flexcloud.FlexCloudPhone
 import com.flexos.flexphone.link.FlexLinkService
 import com.flexos.flexphone.notifications.FlexNotificationListener
-import com.flexos.flexphone.storage.BondStore
 import com.flexos.flexphone.storage.SettingsStore
 import com.flexos.flexphone.ui.FlexTopBar
 import com.flexos.flexphone.ui.Routes
@@ -45,10 +44,16 @@ fun HomeScreen(nav: NavController, store: SettingsStore, settings: Settings) {
     val link by (state?.link ?: MutableStateFlow(LinkState.OFF)).collectAsState()
     val relay by (state?.relay ?: MutableStateFlow(RelayState.OFF)).collectAsState()
     val error by (state?.error ?: MutableStateFlow<String?>(null)).collectAsState()
+    val notice by (state?.notice ?: MutableStateFlow<String?>(null)).collectAsState()
+    val address by (state?.address ?: MutableStateFlow<String?>(null)).collectAsState()
     val cloud by FlexCloudPhone.status.collectAsState()
+    // El vinculo se OBSERVA: emparejar bien actualiza la portada en el acto, sin
+    // cerrar ni volver a abrir la app. (Antes se leia BondStore en cada
+    // recomposicion y el nombre y el estado solo cambiaban cuando algo mas
+    // forzaba una.)
+    val bond by (state?.bond ?: MutableStateFlow(com.flexos.flexphone.domain.BondInfo())).collectAsState()
 
     val device = remember { DeviceAdapter(ctx) }
-    val bonds = remember { BondStore(ctx) }
 
     // El estado del telefono se refresca cada pocos segundos mientras
     // la pantalla esta a la vista. NO es sondeo del enlace: son
@@ -78,9 +83,7 @@ fun HomeScreen(nav: NavController, store: SettingsStore, settings: Settings) {
             // ---- Tarjeta del enlace ----
             GlassCard {
                 Text(
-                    bonds.peerName()?.takeIf { it.isNotBlank() }
-                        ?: bonds.peerId()?.let { "Flex OS Ultra" }
-                        ?: "Sin Flex OS vinculado",
+                    if (bond.paired) (bond.peerName ?: "Flex OS Ultra") else "Sin Flex OS vinculado",
                     style = MaterialTheme.typography.titleLarge,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
@@ -90,9 +93,15 @@ fun HomeScreen(nav: NavController, store: SettingsStore, settings: Settings) {
                     Text(linkText(link), style = MaterialTheme.typography.bodyMedium,
                         color = statusColor(linkStatus(link)))
                 }
+                // Un ERROR de verdad en rojo; un aviso del enlace (un canal que se
+                // cerro, un reloj que no contesto) en pequeno y sin alarmar.
                 error?.let {
                     Text(it, style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.error)
+                }
+                if (error == null) notice?.let {
+                    Text(it, style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
 
                 Spacer(Modifier.height(4.dp))
@@ -137,11 +146,26 @@ fun HomeScreen(nav: NavController, store: SettingsStore, settings: Settings) {
                     onClick = { nav.navigate(Routes.PAIR) },
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("Teclear el codigo de Flex OS") }
-                !bonds.isPaired() -> Notice(
+                // Con vinculo guardado y sin sesion NO se dice "esperando a Flex OS ...
+                // pulsa Emparejar": el emparejamiento ya esta hecho. Se dice lo que
+                // pasa: Flex OS vuelve solo.
+                link == LinkState.RECONNECTING -> {
+                    Notice(
+                        "Reconectando con Flex OS",
+                        "El emparejamiento sigue guardado. Flex OS vuelve a conectarse solo en cuanto " +
+                            "este a la vista en la misma red Wi-Fi" +
+                            (address?.let { " (este telefono: $it)" } ?: "") + ".",
+                    )
+                    OutlinedButton(
+                        onClick = { FlexLinkService.stop(ctx) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Apagar el enlace") }
+                }
+                !bond.paired -> Notice(
                     "Esperando a Flex OS",
                     "Abre Flex Phone en Flex OS y pulsa \"Emparejar telefono\". " +
                         "Este telefono ya esta escuchando" +
-                        (service?.linkAddress()?.let { " en $it" } ?: "") + ".",
+                        (address?.let { " en $it" } ?: "") + ".",
                 )
                 else -> OutlinedButton(
                     onClick = { FlexLinkService.stop(ctx) },
@@ -176,12 +200,12 @@ fun HomeScreen(nav: NavController, store: SettingsStore, settings: Settings) {
             ) { nav.navigate(Routes.CLOUD) }
             NavRow(
                 "Conexion",
-                service?.linkAddress()?.let { "$it:${service.linkPort()}" } ?: "Enlace apagado",
+                if (service != null && address != null) "$address:${service.linkPort()}" else "Enlace apagado",
             ) { nav.navigate(Routes.CONNECTION) }
             NavRow("Estado del dispositivo", device.displayName) { nav.navigate(Routes.DEVICE) }
             NavRow(
                 "Seguridad",
-                if (bonds.isPaired()) "Flex OS vinculado" else "Sin vincular",
+                if (bond.paired) "Flex OS vinculado" else "Sin vincular",
             ) { nav.navigate(Routes.SECURITY) }
             NavRow("Privacidad", "Que sale del telefono") { nav.navigate(Routes.PRIVACY) }
             NavRow("Diagnostico", "Contadores del enlace") { nav.navigate(Routes.DIAGNOSTICS) }

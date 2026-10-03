@@ -13,7 +13,6 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.flexos.flexphone.R
 import com.flexos.flexphone.domain.FlexPhoneState
-import com.flexos.flexphone.storage.BondStore
 import com.flexos.flexphone.storage.SettingsStore
 import com.flexos.flexphone.ui.screens.*
 import kotlinx.coroutines.flow.collectLatest
@@ -49,17 +48,38 @@ fun FlexPhoneNav() {
     val nav = rememberNavController()
     val ctx = LocalContext.current
     val store = remember { SettingsStore(ctx) }
-    val bonds = remember { BondStore(ctx) }
     val state = FlexPhoneState.instance
 
     // Los ajustes se OBSERVAN; no se sondean.
     var settings by remember { mutableStateOf(state?.settings ?: com.flexos.flexphone.domain.Settings()) }
     LaunchedEffect(Unit) { store.flow.collectLatest { settings = it } }
 
-    // La verdad sobre el vinculo la tiene BondStore, que es quien
-    // guarda la clave. Preguntar a los ajustes daria "emparejado" con
-    // un vinculo cuya clave ya no se puede descifrar.
-    val start = if (bonds.isPaired()) Routes.HOME else Routes.WELCOME
+    // #############################################################
+    // ##  EL VINCULO SE OBSERVA, NO SE LEE UNA VEZ
+    // ##  ------------------------------------------------------
+    // ##  Antes la pantalla de INICIO se elegia leyendo BondStore al abrir la
+    // ##  app, y nada la volvia a mirar. Quien abria Flex Phone sin vinculo
+    // ##  entraba por la Bienvenida, emparejaba, y al terminar el emparejamiento
+    // ##  volvia a... la Bienvenida: la portada solo aparecia al CERRAR y volver
+    // ##  a abrir la app. (Y la fuente de verdad sigue siendo BondStore, que es
+    // ##  quien guarda la clave: aqui solo se observa lo que el servicio anota
+    // ##  en cuanto el vinculo se guarda.)
+    // #############################################################
+    val bond by (state?.bond ?: kotlinx.coroutines.flow.MutableStateFlow(com.flexos.flexphone.domain.BondInfo()))
+        .collectAsState()
+    val start = remember { if (bond.paired) Routes.HOME else Routes.WELCOME }
+
+    // En cuanto hay vinculo, la portada sustituye a la bienvenida y al emparejamiento.
+    LaunchedEffect(bond.paired) {
+        if (!bond.paired) return@LaunchedEffect
+        val here = nav.currentDestination?.route
+        if (here == Routes.WELCOME || here == Routes.PAIR) {
+            nav.navigate(Routes.HOME) {
+                popUpTo(nav.graph.id) { inclusive = true }
+                launchSingleTop = true
+            }
+        }
+    }
 
     NavHost(navController = nav, startDestination = start, modifier = Modifier.fillMaxSize()) {
         composable(Routes.WELCOME) { WelcomeScreen(nav) }

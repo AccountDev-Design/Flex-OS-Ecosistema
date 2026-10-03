@@ -1,8 +1,9 @@
 @file:Suppress("unused", "UNUSED_PARAMETER")
-package com.flexos.flexphone.ui
+package com.flexos.flexphone.ui.screens
 
 import androidx.compose.runtime.Composable
+import androidx.navigation.NavController
 
-/** Firma de la cabecera comun de la app (FlexPhoneNav.kt). */
+/** WelcomeScreen usa androidx.activity.compose (Google Maven): solo se necesita su firma. */
 @Composable
-fun FlexTopBar(title: String, onBack: (() -> Unit)? = null) {}
+fun WelcomeScreen(nav: NavController) {}

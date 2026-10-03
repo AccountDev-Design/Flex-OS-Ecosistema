@@ -25,6 +25,10 @@ class FlexPhoneApp : Application() {
         val store = SettingsStore(this)
         val state = FlexPhoneState()
         FlexPhoneState.instance = state
+        // El vinculo guardado ENTRA en el estado observable desde el arranque: la
+        // navegacion y la portada lo observan, ya no lo leen una vez.
+        val bonds = com.flexos.flexphone.storage.BondStore(this)
+        state.setBond(bonds.isPaired(), bonds.peerName()?.takeIf { it.isNotBlank() })
         scope.launch { store.flow.collectLatest { state.settings = it } }
     }
 }

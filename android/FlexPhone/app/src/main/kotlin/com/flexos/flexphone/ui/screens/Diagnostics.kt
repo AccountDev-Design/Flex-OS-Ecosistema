@@ -11,7 +11,9 @@ import androidx.navigation.NavController
 import com.flexos.flexphone.domain.FlexPhoneState
 import com.flexos.flexphone.domain.LinkState
 import com.flexos.flexphone.notifications.FlexNotificationListener
+import com.flexos.flexphone.protocol.LinkDiag
 import com.flexos.flexphone.ui.FlexTopBar
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
@@ -75,6 +77,8 @@ fun DiagnosticsScreen(nav: NavController) {
                 }
             }
 
+            LinkLogCard()
+
             SectionCard("Trafico") {
                 KeyValue("Mensajes enviados", diag.sent.toString())
                 KeyValue("Mensajes recibidos", diag.received.toString())
@@ -112,5 +116,66 @@ fun DiagnosticsScreen(nav: NavController) {
                 )
             }
         }
+    }
+}
+
+
+/**
+ * REGISTRO DEL ENLACE: quien cerro cada conexion y por que.
+ *
+ * Es lo que hace falta para contestar "se desconecta cada pocos segundos" con
+ * datos y no con sospechas: cada fila es un hecho (conexion #N aceptada, cerrada
+ * por tal hilo y tal motivo tras tantos ms, cambio de fase, cambio de IP). Un
+ * anillo acotado en memoria (LinkDiag): no escribe en disco, no crece y NO
+ * apunta contenido de mensajes, claves ni el codigo de emparejamiento.
+ *
+ * La pantalla se refresca cada 2 s SOLO mientras esta a la vista, leyendo ese
+ * anillo local; no pregunta nada al enlace.
+ */
+@Composable
+private fun LinkLogCard() {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    var tick by remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) { while (true) { delay(2_000); tick++ } }
+    val entries = remember(tick) { LinkDiag.recent(40) }
+    var verbose by remember { mutableStateOf(LinkDiag.mirror != null) }
+    val fmt = remember { java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.ROOT) }
+
+    SectionCard("Registro del enlace") {
+        SwitchRow(
+            "Registro detallado (logcat)",
+            "Copia cada entrada a logcat para verla con adb. Apagado de fabrica.",
+            checked = verbose,
+        ) { on ->
+            verbose = on
+            LinkDiag.mirror = if (on) { tag, text -> android.util.Log.d(tag, text) } else null
+        }
+        if (entries.isEmpty()) {
+            Text("Todavia no hay nada que contar.", style = MaterialTheme.typography.bodyMedium)
+        } else {
+            entries.forEach { e ->
+                Text(
+                    fmt.format(java.util.Date(e.atMs)) + "  " + e.text,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            OutlinedButton(
+                onClick = {
+                    val text = LinkDiag.recent().reversed().joinToString("\n") {
+                        fmt.format(java.util.Date(it.atMs)) + " " + it.tag + " " + it.text
+                    }
+                    val cm = ctx.getSystemService(android.content.ClipboardManager::class.java)
+                    cm?.setPrimaryClip(android.content.ClipData.newPlainText("Registro del enlace de Flex Phone", text))
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Copiar el registro") }
+        }
+        Text(
+            "Solo hechos del enlace (conexion, motivo del cierre, duracion). Nunca contenido " +
+                "de notificaciones, claves ni el codigo de emparejamiento.",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }

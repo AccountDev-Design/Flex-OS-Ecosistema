@@ -21,6 +21,7 @@ import com.flexos.flexphone.domain.LinkState
 import com.flexos.flexphone.link.FlexLinkService
 import com.flexos.flexphone.link.WifiLinkServer
 import com.flexos.flexphone.protocol.FlexAuth
+import com.flexos.flexphone.protocol.LinkPhase
 import com.flexos.flexphone.protocol.PairFailure
 import com.flexos.flexphone.storage.SettingsStore
 import com.flexos.flexphone.ui.FlexTopBar
@@ -53,6 +54,9 @@ fun PairScreen(nav: NavController, store: SettingsStore) {
     val state = FlexPhoneState.instance
     val link by (state?.link ?: MutableStateFlow(LinkState.OFF)).collectAsState()
     val err by (state?.error ?: MutableStateFlow<String?>(null)).collectAsState()
+    val phase by (state?.phase ?: MutableStateFlow(LinkPhase.STOPPED)).collectAsState()
+    val bond by (state?.bond ?: MutableStateFlow(com.flexos.flexphone.domain.BondInfo())).collectAsState()
+    val notice by (state?.notice ?: MutableStateFlow<String?>(null)).collectAsState()
 
     // EL CODIGO TECLEADO VIVE EN EL ESTADO, no en un `remember`.
     // Cuando Flex OS abre una sesion nueva, el servicio tiene que
@@ -65,9 +69,13 @@ fun PairScreen(nav: NavController, store: SettingsStore) {
     var hint by remember { mutableStateOf<String?>(null) }
     val valid = FlexAuth.isValidCode(code)
 
-    // Al abrirse la sesion, el emparejamiento termino: se sale solo.
+    // Al abrirse la sesion, el emparejamiento termino. La navegacion (FlexPhoneNav)
+    // lleva a la portada en cuanto el vinculo se guarda; esto solo cubre volver
+    // atras si la persona venia de la portada (ya vinculada) y se quedo aqui. El
+    // `route` evita sacar DOS pantallas cuando las dos reaccionan a la vez.
     LaunchedEffect(link) {
-        if (link == LinkState.READY && sent) nav.popBackStack()
+        if (link == LinkState.READY && sent && nav.currentDestination?.route == com.flexos.flexphone.ui.Routes.PAIR)
+            nav.popBackStack()
         if (link != LinkState.PAIRING) sent = false
     }
     // El campo se vacia solo: es la senal de que Flex OS abrio otra
@@ -100,13 +108,29 @@ fun PairScreen(nav: NavController, store: SettingsStore) {
                 LinkState.ADVERTISING, LinkState.CONNECTING -> SearchSection()
 
                 LinkState.PAIRING -> {
+                    // LA PANTALLA DEL CODIGO NO DESAPARECE cuando el socket se cae: la
+                    // fase pasa a PAIRING_RECOVERY, el codigo sigue vivo, y aqui se dice.
+                    // El texto de por que fallo el ultimo intento sale del TIPO de
+                    // fallo (no se adivina por el texto).
+                    val failureHint = when (failure) {
+                        PairFailure.CODE_REJECTED ->
+                            "Flex OS comparo el codigo y no era el suyo. Mira otra vez la pantalla del " +
+                                "reloj y teclea los seis digitos tal cual: si empieza por 0, el 0 cuenta."
+                        PairFailure.CODE_EXPIRED ->
+                            "El codigo caduco. Pulsa \"Emparejar telefono\" en el reloj y teclea el nuevo."
+                        PairFailure.LINK ->
+                            if (valid) "Se corto la conexion con Flex OS, no el codigo. Se reenvia solo en cuanto vuelva."
+                            else notice
+                        null -> null
+                    }
                     CodeSection(
                         code = code,
                         onCode = { state?.setTypedCode(it); sent = false; hint = null },
                         valid = valid,
                         sent = sent,
-                        err = err,
-                        hint = hint,
+                        err = null,
+                        hint = hint ?: failureHint,
+                        recovering = phase == LinkPhase.PAIRING_RECOVERY,
                         onSubmit = {
                             // EL MOTIVO REAL sube hasta aqui. Antes
                             // cualquier "todavia no" se pintaba igual y
@@ -139,6 +163,22 @@ fun PairScreen(nav: NavController, store: SettingsStore) {
                         },
                     )
                 }
+
+                // Vinculado y con la sesion AUN por abrir (se acaba de caer un segundo, o Flex OS
+                // todavia no ha vuelto): el emparejamiento esta HECHO y se dice asi. Antes
+                // volvia aqui "Esperando a Flex OS" -- y nada de eso era verdad.
+                LinkState.RECONNECTING -> if (bond.paired) {
+                    Text("Emparejado", style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.secondary)
+                    Notice(
+                        "Reconectando con Flex OS",
+                        "El emparejamiento ya esta guardado. Flex OS vuelve a conectarse solo; si " +
+                            "tarda, comprueba que los dos siguen en la misma red Wi-Fi.",
+                    )
+                    Button(onClick = { nav.popBackStack() }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Listo")
+                    }
+                } else SearchSection()
 
                 LinkState.READY -> {
                     Text("Emparejado", style = MaterialTheme.typography.titleLarge,
@@ -395,22 +435,28 @@ private fun CodeSection(
     sent: Boolean,
     err: String?,
     hint: String?,
+    recovering: Boolean,
     onSubmit: () -> Unit,
 ) {
     // ¿Ha llegado ya la sal de Flex OS, y sigue valiendo? Sin ella no
     // se puede derivar nada, y pulsar "Emparejar" no mandaria nada. Se
     // dice, en vez de aceptar el codigo y dejar la pantalla esperando.
-    val svc = FlexLinkService.current
-    var ready by remember { mutableStateOf(svc?.isAwaitingCode() ?: false) }
-    var leftMs by remember { mutableLongStateOf(svc?.pairingRemainingMs() ?: 0L) }
-    // Un segundo. La cuenta atras es la DEL RELOJ -- la sesion nacio
-    // alli --, no un temporizador propio que pueda ir por su cuenta.
-    LaunchedEffect(Unit) {
-        while (true) {
-            ready = FlexLinkService.current?.isAwaitingCode() ?: false
-            leftMs = FlexLinkService.current?.pairingRemainingMs() ?: 0L
+    //
+    // SE OBSERVA, NO SE PREGUNTA. Antes esto consultaba al servicio CADA SEGUNDO
+    // (`isAwaitingCode()` y `pairingRemainingMs()`); ahora el servicio publica el
+    // estado del emparejamiento cuando cambia (FlexPhoneState.pairing) y aqui solo
+    // se calcula la cuenta atras con el reloj local, sin tocar nada del servicio.
+    val pairing by (FlexPhoneState.instance?.pairing
+        ?: MutableStateFlow(com.flexos.flexphone.domain.PairingInfo())).collectAsState()
+    val ready = pairing.awaitingCode
+    var leftMs by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(pairing.expiresAtMs) {
+        while (pairing.expiresAtMs > 0L) {
+            leftMs = (pairing.expiresAtMs - System.currentTimeMillis()).coerceAtLeast(0L)
+            if (leftMs == 0L) break
             delay(1_000)
         }
+        if (pairing.expiresAtMs == 0L) leftMs = 0L
     }
 
     Text("Teclea el codigo que ensena Flex OS", style = MaterialTheme.typography.titleMedium)
@@ -450,7 +496,16 @@ private fun CodeSection(
         modifier = Modifier.fillMaxWidth(),
     ) { Text(if (sent) "Comprobando..." else "Emparejar") }
 
-    if (!ready) {
+    if (recovering) {
+        // La conexion se cayo y vuelve sola; el codigo sigue vigente y NO hay que
+        // empezar de nuevo.
+        Notice(
+            "Reconectando con Flex OS",
+            "Se corto la conexion un momento. El codigo de la pantalla del reloj sigue siendo valido " +
+                "y, si ya lo habias tecleado, se reenvia solo al volver.",
+            MaterialTheme.colorScheme.tertiary,
+        )
+    } else if (!ready) {
         Notice(
             "Esperando a Flex OS",
             "El reloj todavia no ha mandado su parte del emparejamiento. Comprueba que el " +

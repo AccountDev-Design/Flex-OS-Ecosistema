@@ -40,7 +40,7 @@ fun RelayScreen(nav: NavController, store: SettingsStore, settings: Settings) {
 
     val pm = ctx.getSystemService(PowerManager::class.java)
     var ignoringBattery by remember {
-        mutableStateOf(runCatching { pm.isIgnoringBatteryOptimizations(ctx.packageName) }
+        mutableStateOf(runCatching { pm?.isIgnoringBatteryOptimizations(ctx.packageName) ?: false }
             .getOrDefault(false))
     }
 

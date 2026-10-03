@@ -1,5 +1,6 @@
 package com.flexos.flexphone.domain
 
+import com.flexos.flexphone.protocol.LinkPhase
 import com.flexos.flexphone.protocol.MediaState
 import com.flexos.flexphone.protocol.NotifPayload
 import com.flexos.flexphone.protocol.PairFailure
@@ -24,6 +25,35 @@ enum class LinkState {
     READY,
     /** Fallo real; `error` explica cual. */
     ERROR,
+    /**
+     * Hay un vinculo guardado y la sesion no esta abierta AHORA: se acaba de
+     * caer o Flex OS todavia no ha vuelto. NO es "esperando a Flex OS" (eso
+     * es para quien aun no se ha emparejado nunca) ni un error.
+     */
+    RECONNECTING,
+}
+
+/** El vinculo con Flex OS, tal como lo ve la pantalla. La verdad la tiene BondStore. */
+data class BondInfo(val paired: Boolean = false, val peerName: String? = null)
+
+/**
+ * El emparejamiento en curso: lo unico que la pantalla del codigo necesita
+ * saber, y que antes se PREGUNTABA al servicio cada segundo.
+ *
+ * [expiresAtMs] es un instante del reloj del telefono (0 = no hay sesion). La
+ * cuenta atras se calcula con el en la pantalla: no hace falta ningun sondeo.
+ */
+data class PairingInfo(val awaitingCode: Boolean = false, val expiresAtMs: Long = 0L)
+
+/** Traduccion de la fase de la maquina (LinkPhase) al estado que pintan las pantallas. */
+fun LinkPhase.toLinkState(): LinkState = when (this) {
+    LinkPhase.STOPPED -> LinkState.OFF
+    LinkPhase.DISCOVERING -> LinkState.ADVERTISING
+    LinkPhase.CONNECTING -> LinkState.CONNECTING
+    LinkPhase.CODE_ENTRY, LinkPhase.PAIRING, LinkPhase.PAIRING_RECOVERY -> LinkState.PAIRING
+    LinkPhase.PAIRED, LinkPhase.CONNECTED -> LinkState.READY
+    LinkPhase.CONNECTION_LOST, LinkPhase.RECONNECTING -> LinkState.RECONNECTING
+    LinkPhase.ERROR -> LinkState.ERROR
 }
 
 enum class RelayState { OFF, STARTING, UP, ERROR, SUSPENDED }
@@ -54,6 +84,39 @@ class FlexPhoneState(
 
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
+
+    /** La fase fina del enlace (la que decide [link]). */
+    private val _phase = MutableStateFlow(LinkPhase.STOPPED)
+    val phase: StateFlow<LinkPhase> = _phase.asStateFlow()
+
+    /**
+     * El vinculo guardado, OBSERVABLE. Antes la navegacion lo leia una vez al
+     * abrir la app para elegir la pantalla de inicio, asi que emparejar bien
+     * no cambiaba nada hasta cerrar y volver a abrir Flex Phone.
+     */
+    private val _bond = MutableStateFlow(BondInfo())
+    val bond: StateFlow<BondInfo> = _bond.asStateFlow()
+    fun setBond(paired: Boolean, peerName: String?) { _bond.value = BondInfo(paired, peerName) }
+
+    /** La IPv4 Wi-Fi de este telefono (la que Android da), observable: un cambio de IP se ve al instante. */
+    private val _address = MutableStateFlow<String?>(null)
+    val address: StateFlow<String?> = _address.asStateFlow()
+    fun setAddress(a: String?) { _address.value = a }
+
+    /**
+     * El ultimo aviso del enlace que NO es un error de la app (un reloj que no
+     * contesto, un canal que se cerro, una prueba que no llego). Se ensena en
+     * pequeno; la pantalla de ERROR queda para fallos de verdad.
+     */
+    private val _notice = MutableStateFlow<String?>(null)
+    val notice: StateFlow<String?> = _notice.asStateFlow()
+    fun setNotice(n: String?) { _notice.value = n }
+
+    private val _pairing = MutableStateFlow(PairingInfo())
+    val pairing: StateFlow<PairingInfo> = _pairing.asStateFlow()
+    fun setPairing(awaitingCode: Boolean, remainingMs: Long) {
+        _pairing.value = PairingInfo(awaitingCode, if (awaitingCode && remainingMs > 0) System.currentTimeMillis() + remainingMs else 0L)
+    }
 
     // #########################################################
     // ##  AQUI NO HAY NINGUN "CODIGO DE EMPAREJAMIENTO"
@@ -141,20 +204,35 @@ class FlexPhoneState(
     // ---------------------------------------------------------
     //  Transiciones del enlace
     // ---------------------------------------------------------
+    /**
+     * Pone la FASE del enlace (la maquina `LinkPhaseMachine` del servicio) y
+     * deriva de ella el estado de las pantallas.
+     */
+    fun setPhase(p: LinkPhase, why: String? = null) {
+        _phase.value = p
+        setLink(p.toLinkState(), why)
+    }
+
     fun setLink(s: LinkState, why: String? = null) {
         _link.value = s
         _error.value = why
-        // Un fallo viejo no puede seguir explicando una pantalla que
-        // ya no esta en error.
-        if (s != LinkState.ERROR) _pairFailure.value = null
+        // Un fallo viejo no puede seguir explicando una pantalla que ya
+        // no tiene nada que ver: se borra al conseguir sesion o al apagar. NO
+        // al cambiar de fase: con el emparejamiento en curso la pantalla del
+        // codigo SIGUE viva (PAIRING) y tiene que poder explicar por que fallo.
+        if (s == LinkState.READY || s == LinkState.OFF) { _pairFailure.value = null; _notice.value = null }
         if (s == LinkState.READY) _typedCode.value = ""
         if (s != LinkState.READY) {
             // Al perder la sesion, lo que dependia de ella deja de ser
             // cierto: no se conserva un estado multimedia de hace un
             // rato como si siguiera sonando.
             _media.value = null
-            if (_relay.value == RelayState.UP) _relay.value = RelayState.OFF
-            _relayInfo.value = null
+            // OJO: el RELAY NO se toca. Es un servicio aparte (otro puerto, otro
+            // servicio en primer plano) que sigue vivo aunque se caiga el enlace.
+            // Antes aqui se ponia a OFF y se borraba su direccion: la pantalla
+            // decia "Parado" con el servidor escuchando, y tras CADA reconexion
+            // Flex OS creia que el relay estaba apagado porque nadie se lo
+            // volvia a decir (ver reannounceRelay).
         }
     }
 
@@ -200,9 +278,26 @@ class FlexPhoneState(
         if (m != null) s(com.flexos.flexphone.protocol.FlexLink.T_MEDIA_STATE, m.encode())
     }
 
+    /**
+     * Vuelve a decirle a Flex OS como esta el relay. Se llama al abrirse una
+     * sesion (Flex OS borra su copia del estado del relay al perder el enlace, y
+     * sin esto no se enteraba de que el relay seguia arriba) y cuando cambia la
+     * direccion Wi-Fi del telefono. No cambia nada local.
+     */
+    fun reannounceRelay() {
+        val state = _relay.value
+        val info = _relayInfo.value
+        if (state == RelayState.OFF && info == null) return
+        sendRelayInfo(state, info)
+    }
+
     fun setRelay(state: RelayState, info: RelayInfo? = null) {
         _relay.value = state
         _relayInfo.value = info
+        sendRelayInfo(state, info)
+    }
+
+    private fun sendRelayInfo(state: RelayState, info: RelayInfo?) {
         val s = sender ?: return
         // Se anuncia SIEMPRE el estado real, error incluido: el P4
         // tiene que poder mostrar "Android suspendio el relay" en vez

@@ -9,14 +9,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
-import com.flexos.flexphone.device.DeviceAdapter
 import com.flexos.flexphone.domain.FlexPhoneState
 import com.flexos.flexphone.domain.LinkState
 import com.flexos.flexphone.link.FlexLinkService
 import com.flexos.flexphone.link.WifiLinkServer
 import com.flexos.flexphone.protocol.FlexLink
 import com.flexos.flexphone.ui.FlexTopBar
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
@@ -32,21 +30,13 @@ fun ConnectionScreen(nav: NavController) {
     val state = FlexPhoneState.instance
     val link by (state?.link ?: MutableStateFlow(LinkState.OFF)).collectAsState()
     val err by (state?.error ?: MutableStateFlow<String?>(null)).collectAsState()
-    val device = remember { DeviceAdapter(ctx) }
-
-    // La direccion local cambia al cambiar de red, y nadie avisa.
-    var address by remember { mutableStateOf<String?>(null) }
-    var port by remember { mutableStateOf(0) }
-    var onWifi by remember { mutableStateOf(device.isOnWifi()) }
-    LaunchedEffect(link) {
-        while (true) {
-            val s = FlexLinkService.current
-            address = s?.linkAddress()
-            port = s?.linkPort() ?: 0
-            onWifi = device.isOnWifi()
-            delay(3_000)
-        }
-    }
+    // La direccion Wi-Fi la publica el servicio cuando CAMBIA (aviso de red de
+    // Android): aqui se observa, no se pregunta cada 3 s. El puerto no cambia
+    // mientras el servidor esta abierto.
+    val address by (state?.address ?: MutableStateFlow<String?>(null)).collectAsState()
+    val port = remember(link) { FlexLinkService.current?.linkPort() ?: 0 }
+    val device = remember { com.flexos.flexphone.device.DeviceAdapter(ctx) }
+    val onWifi = remember(address, link) { device.isOnWifi() }
 
     Scaffold(topBar = { FlexTopBar("Conexion") { nav.popBackStack() } }) { pad ->
         Column(

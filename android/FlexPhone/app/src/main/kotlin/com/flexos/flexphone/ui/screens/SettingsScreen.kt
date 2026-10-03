@@ -10,6 +10,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.flexos.flexphone.device.DeviceAdapter
+import com.flexos.flexphone.domain.FlexPhoneState
 import com.flexos.flexphone.domain.Settings
 import com.flexos.flexphone.link.FlexLinkService
 import com.flexos.flexphone.link.WifiLinkServer
@@ -101,6 +102,7 @@ fun SettingsScreen(nav: NavController, store: SettingsStore, settings: Settings)
                 TextButton(onClick = {
                     FlexLinkService.stop(ctx)
                     bonds.clear()
+                    FlexPhoneState.instance?.setBond(false, null)
                     scope.launch { store.wipe() }
                     confirmWipe = false
                     nav.popBackStack()
