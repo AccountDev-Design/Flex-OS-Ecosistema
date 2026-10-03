@@ -279,17 +279,18 @@ No hace falta volver a mirar aquí:
 
 ## Cómo capturar la secuencia (prueba de 60 s)
 
-### 1 · Encender los registros
+### 1 · Los registros (ya NO hay que encender nada)
 
-Ya están encendidos en esta rama:
-
-| Interruptor | Dónde | Valor |
+| Dónde | Qué | Cómo se lee |
 |---|---|---|
-| `FLEXOS_DIAG_FLEXPHONE` | `FlexOS_FlexPhone_WiFi.h` | **1** |
-| `DEBUG_LINK` | `WifiLinkServer.kt` | **true** |
+| Teléfono | `LinkDiag`: anillo de 160 entradas en RAM, **siempre activo y silencioso** | *Diagnóstico → Registro del enlace* (y **Copiar**) |
+| Teléfono, `adb` | Lo mismo copiado a logcat | Interruptor *Registro detallado*; `adb logcat -s FlexPhone/WifiLink FlexPhone/LinkSvc` |
+| P4 | Anillo de 24 entradas (384 B) con aperturas, cierres, motivo y duración | *Flex Phone → Diagnóstico → Registro del enlace* |
+| P4, serie | Las líneas de antes | **Apagado** (`FLEXOS_DIAG_FLEXPHONE=0`); `-DFLEXOS_DIAG_FLEXPHONE=1` para una prueba |
 
-> **Los dos vuelven a 0/false antes de publicar.** En producción no se dejan
-> líneas del enlace en el registro.
+> Antes los dos interruptores (`FLEXOS_DIAG_FLEXPHONE` y `DEBUG_LINK`) estaban **encendidos en el
+> repositorio** y el propio texto decía "vuelven a 0/false antes de publicar". Ya no hace falta
+> acordarse: el registro es acotado, no bloquea y no escribe en ningún sitio por defecto.
 
 ### 2 · Aislar el PRIMER cierre
 
@@ -372,10 +373,14 @@ aparecía al buscar temporizadores aquí.
 ## Las baterías que cubren esto
 
 ```
-tests/host/   make            el enlace del P4 (tiempo simulado)
-tests/link/   ./run.sh        el WifiLinkServer REAL contra sockets TCP
+tests/host/   make              el enlace del P4 (tiempo simulado)
+tests/link/   ./run.sh          el WifiLinkServer REAL contra sockets TCP  (83)
+tests/host/   ./link_e2e.sh     fpwTask REAL + máquina REAL  <->  WifiLinkServer REAL  (25)
+android/FlexPhone  gradle :protocol:test        LinkPhase, protocolo, vectores  (83)
+android/FlexPhone  gradle -PflexTypecheck :typecheck:compileKotlin   servicio, servidor, relay y pantallas contra android-all
 ```
 
-Ninguna de las dos cubre `fpwTask`: necesita la pila de red del ESP32. Por eso
-el fallo sobrevivió a las dos — y por eso la instrumentación de arriba es la
-que cierra el caso.
+`link_e2e.sh` es la que antes faltaba: ejecuta `fpwTask` (con hilos y sockets POSIX que reproducen
+`NetworkClient` 3.2.1, incluido `connected()` por `recv(MSG_PEEK)` y el `errno` de lwIP) contra el
+servidor del APK. Cubre lo que el usuario ve (cuánto dura cada estado), **no** la radio, el C6 ni
+Android: eso solo lo cierra el registro de arriba en un A55 y un P4.

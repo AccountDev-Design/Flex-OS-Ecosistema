@@ -210,6 +210,26 @@ compartidos con el firmware.
   bloqueado, avisa "Desbloquea para aprobar el teléfono" y la pregunta aparece
   al desbloquear (si aún no ha caducado).
 
+### 4.1 El emparejamiento no depende de ninguna pantalla (Android)
+
+El protocolo, su estado y la cancelación viven en `StorageAttach` (un objeto de la app, un solo
+hilo), **no** en `StorageAttachActivity`. La actividad y la pantalla *Flex Cloud* solo lo observan
+(`StateFlow`): se pueden destruir y recrear (giro, tamaño de letra, Atrás, irse al navegador a mirar
+la web) sin cancelar nada, y solo el botón **Cancelar** corta un emparejamiento en curso. Antes
+`onDestroy` ponía `cancelled = true` y deshacía lo hecho, y de ahí que "se perdía la conexión un
+segundo, la pantalla del código desaparecía y volvía *Esperando a Flex OS*".
+
+### 4.2 Si «Abrir Flex Phone» no abre nada
+
+Un navegador no avisa de si abrió o no una app por un enlace `flexstorage://`. La web lo detecta por
+la visibilidad de la página: si 1,8 s después de pulsar sigue a la vista y el emparejamiento no
+avanzó, dice **«Flex Phone no se abrió»** y ofrece (1) comprobar que Flex Phone está instalada y
+actualizada con Flex Cloud, (2) abrir la página en Chrome o Samsung Internet (el navegador de la
+cámara y los WebView no abren enlaces de apps), (3) **Copiar enlace** y pegarlo en *Flex Phone → Flex
+Cloud → Usar este enlace*, y (4) un enlace `intent://` con el paquete exacto
+(`com.flexos.flexphone`). Causas habituales: la APK instalada es anterior a Flex Storage (no tiene
+la actividad `flexstorage://`), o la página se abrió desde la cámara.
+
 ## 5. Uso diario
 
 ### 5.1 Sesión P4 → teléfono
