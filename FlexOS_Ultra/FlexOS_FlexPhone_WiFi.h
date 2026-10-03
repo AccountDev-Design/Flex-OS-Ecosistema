@@ -43,7 +43,13 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <errno.h>
-#include <sys/socket.h>
+// recv(MSG_PEEK) para ver el FIN del telefono (ver fpwSocketAlive). En la placa es lwIP, que
+// es lo que usa el propio NetworkClient; en las pruebas de PC, los sockets del sistema.
+#if __has_include(<lwip/sockets.h>)
+  #include <lwip/sockets.h>
+#else
+  #include <sys/socket.h>
+#endif
 
 // Cada cuanto se vuelve a preguntar mientras no hay telefono. No es
 // sondeo agresivo: son unas decenas de bytes cada dos segundos, y
