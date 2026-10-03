@@ -15,6 +15,7 @@ contiene codigo del firmware.
 | `FlexOS_CloudTLS.{h,cpp}` | Raices de confianza para TLS (la misma CA que usa Flex Account), `flexTlsRoom()` (hay SRAM **interna** para abrir TLS) y `flexTlsReason()` (por que fallo una conexion). | `FlexOS_Ultra/` |
 | `FlexOS_Ultra_CloudKit.h` | Interfaz de la nube **compartida** por Archivos, Galeria y Multimedia + el procesado de avisos en `loop()`. | cadena del sketch |
 | `FlexOS_Ultra_MediaViewer.h` | El visor comun reproduce un AVI de la nube **por rangos** (`cloud:<id>/<nombre>`). | cadena del sketch |
+| `FlexOS_StorageLink.{h,cpp}` | **Flex Storage**: el telefono emparejado, su sesion y el destino Telefono de la nube (seccion 10). | `FlexOS_Ultra/` |
 
 ## 2. Identidad y seguridad
 
@@ -257,6 +258,8 @@ apareciera un desbordamiento, esa pila es lo primero que hay que revisar.
 | `make -C tests/host` -> `test_cloud` | el gestor REAL contra un servidor simulado con el contrato de `cloud/`: estados, listas, Unicode, subidas y descargas reanudables (apagado, Wi-Fi, cortes), errores, cuota, cancelacion, liberar espacio, miniaturas, visor, streaming de 160 MB con 3 MB, 160 MB de subida con < 256 KB, y auditoria TLS/credencial/id de cuenta |
 | `make -C tests/host` -> `test_ino` (`testFlexCloudUi`) | la interfaz REAL (Galeria, Multimedia, Archivos, visor) contra un doble programable: que pide, que abre, streaming con red lenta, liberar espacio y descargas. `INO_SHOTS=1` deja capturas `build/shot_nube_*.ppm` |
 | `tests/host/cloud_e2e.sh` | el gestor del P4 contra el servidor **real** de Flex-Developer-Studio (Node): contrato completo de la API, reanudacion, Range, miniaturas, reserva, aislamiento entre cuentas |
+| `make -C tests/host` -> `test_cloud` (bloques "Flex Storage") | el mismo gestor con destino Telefono: sesion mutua, sesion que caduca, telefono que no responde, rechaza o miente, cambio de destino sin perder nada, olvidar el telefono, apagado a mitad, streaming acotado y emparejar desde la web |
+| `tests/host/phone_e2e.sh` | el gestor y StorageLink del P4 contra el servidor **real** de Flex Cloud del telefono (`android/FlexPhone/storage`, en la JVM), y el emparejamiento de la app contra el servidor web del P4 |
 
 ## 9. Limites honestos
 
@@ -314,3 +317,38 @@ apareciera un desbordamiento, esa pila es lo primero que hay que revisar.
 * El servicio de Flex Account (la introspeccion de la credencial que usa Flex
   Cloud) debe estar desplegado en el dominio de Flex Developer Studio; su
   contrato esta en `cloud/docs/FLEX_ACCOUNT_INTEGRATION.md` del otro repositorio.
+
+## 10. Destino Telefono (Flex Storage)
+
+Flex Cloud puede vivir tambien en un **telefono Android emparejado** (Flex
+Phone › Flex Cloud). El diseno completo esta en `docs/FLEX-STORAGE.md`; aqui,
+lo que cambia en el gestor:
+
+* **Dos destinos, uno a la vez** (`FCD_INTERNET` / `FCD_PHONE`,
+  `flexCloudSetDest`). Lo elige `FlexOS_StorageLink`: telefono emparejado y
+  activo => telefono. Cada destino tiene su diario (el del telefono en
+  `/System/Cloud/phone.bin`): cambiar de destino no pierde nada, lo pendiente
+  sigue al volver. **Sin telefono emparejado todo es exactamente como antes.**
+* **Misma API, otra identidad.** El telefono habla el contrato de `cloud/`
+  (`/api/cloud/...`). En vez de la credencial de Flex Account, el P4 abre una
+  sesion por reto-respuesta con la clave del emparejamiento (ECDH; la clave no
+  viaja nunca) y comprueba que el telefono tambien la tiene. El token solo
+  vale desde la IP del P4 y caduca. **No hace falta Flex Account.**
+* **Sin TLS** (red local): `WiFiClient` normal, que no gasta la SRAM interna
+  de mbedTLS. Lo que viaja va en claro por la Wi-Fi local, como la web del P4
+  y Flex Phone; se dice en las pantallas del P4 y del telefono.
+* **Errores con sus palabras**: "El telefono no responde; se reintentara"
+  (espera de 2 s a 60 s), "Vuelve a emparejar el telefono" (el telefono ya no
+  reconoce este P4), "Empareja tu telefono (web de Flex OS)" y "Reactiva el
+  telefono en Almacenamiento". Las tarjetas vacias de Galeria, Multimedia y
+  Archivos llevan a **Almacenamiento › Flex Cloud en tu telefono**.
+* **Cuota real**: el telefono anade `deviceFreeBytes` y `limitedByDevice`. Lo
+  disponible es el menor entre lo que queda de la cuota (1, 2 o 5 GB, la elige
+  la persona en el telefono) y lo libre del telefono menos 512 MB. El P4 dice
+  "Quedan X" con ese numero (nunca el de la cuota si el telefono tiene menos);
+  la web anade "(lo que queda libre en el telefono)" cuando manda el telefono.
+* **Olvidar el telefono** (`flexCloudPhoneForgotten`) cancela lo que quedaba
+  en su diario (los originales no se tocan) y la nube vuelve a Internet.
+* **Partes**: el gestor usa las mismas (256 KB, o lo justo para no pasar de
+  512 partes); con el tope de 4 GB del P4 nunca pasan de 8 MB, dentro del
+  limite del telefono (16 MB).

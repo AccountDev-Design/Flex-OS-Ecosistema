@@ -41,5 +41,10 @@ comprobación de duplicados de todo el repositorio, está en
 ```bash
 make -C tests/host            # todas, perfil P4
 make -C tests/host all-boards # el código de dispositivo en los tres perfiles
+make -C tests/host web        # la web del P4 en Chromium (también Flex Storage)
+tests/host/phone_e2e.sh       # Flex Storage: el P4 contra el servidor real del teléfono
 node --test sdk/test/sdk.test.js
 ```
+
+Flex Storage (la web del P4, Flex Cloud en el teléfono y las transferencias,
+juntos) está explicado en [`docs/FLEX-STORAGE.md`](docs/FLEX-STORAGE.md).

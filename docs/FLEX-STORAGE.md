@@ -176,18 +176,18 @@ compartidos con el firmware.
  escanea el QR ─────────────► /?k=<código>  (sesión web, igual que siempre)
  "Activar Flex Cloud" ──────► POST /api/fs/phone/offer  → oferta (1 uso, 3 min)
  intent flexstorage://attach?h=<ip:8080>&o=<oferta> ─────────────────────────►
-                                                                 "¿Compartir 5 GB con
-                                                                  Flex OS en 192.168.1.50?"
+                                                                 "¿Usar este teléfono
+                                                                  como Flex Cloud?"
                               POST /api/fs/phone/pair ◄───────── oferta, id, nombre, puerto,
                               (ECDH P-256: clave pública)          clave pública
                               ───────────────────────────────────► clave pública del P4
                     código de verificación 482 913       código de verificación 482 913
-                    "Galaxy A55 quiere usar Flex Cloud"
-                    [Rechazar]  [Permitir]
+                    "¿Emparejar este teléfono?"
+                    [Emparejar]  [Rechazar]
                               POST /api/fs/phone/pair/<id> ◄──── prueba HMAC (sondeo 1,5 s)
                               aprobado + prueba del P4 ──────────► guarda la clave (Keystore)
                     guarda la clave (NVS)
-                    "Galaxy A55 conectado"
+                    aviso "Activado en Galaxy A55"
 ```
 
 * `K = HMAC-SHA256(Z, "flexstorage-v1-key" ‖ oferta ‖ idP4 ‖ idTeléfono)`,
@@ -198,7 +198,17 @@ compartidos con el firmware.
   anterior y no hace falta volver a aprobarlo (sirve para "cambió la IP del
   teléfono: vuelve a escanear el QR").
 * La oferta caduca a los 3 minutos, se gasta al usarla y hay como mucho dos
-  vivas. Cinco fallos seguidos activan la espera creciente del limitador.
+  vivas. Cinco **ofertas falsas** seguidas activan la espera creciente del
+  limitador (30 s, 1 min, 2 min… hasta 16 min); **una oferta buena pasa
+  siempre** (solo la da una sesión web autenticada) y limpia el limitador, así
+  que nadie en la Wi‑Fi puede bloquear el emparejamiento del teléfono de verdad
+  mandando basura.
+* Hay **2 minutos** para decidir en la pantalla del P4; tres pruebas
+  incorrectas del teléfono cancelan ese emparejamiento.
+* La aprobación sale como una ventana propia del sistema, **nunca sobre la
+  pantalla de bloqueo** ni en modo antirrobo, DeX u OTA: si el P4 está
+  bloqueado, avisa "Desbloquea para aprobar el teléfono" y la pregunta aparece
+  al desbloquear (si aún no ha caducado).
 
 ## 5. Uso diario
 
@@ -236,9 +246,16 @@ SHA-256, descargas verificadas, streaming, miniaturas.
 * Lo que viaja **va en claro** por la red local (HTTP), igual que la web del P4
   y Flex Phone. Se dice en las dos pantallas. La clave del emparejamiento no
   viaja nunca (ECDH); los tokens caducan y están ligados a una IP.
-* Límites: cabeceras ≤ 16 KB, JSON ≤ 64 KB, partes ≤ 8 MB, miniaturas ≤ 512 KB,
-  4 conexiones simultáneas en el teléfono, sesiones y retos acotados,
-  limitadores de intentos en P4 y teléfono.
+* Límites del teléfono: cabeceras ≤ 16 KB (y ≤ 64), JSON ≤ 64 KB, partes de
+  64 KB a 16 MB (la web usa 1 MB; el gestor del P4, 256 KB, o lo justo para no
+  pasar de 512 partes), miniaturas ≤ 512 KB, **6 conexiones a la vez** (la
+  séptima recibe `503 server_busy` al instante, nunca se queda colgada), 4
+  sesiones, 16 retos vivos de 60 s; 10 fallos de autenticación en un minuto
+  bloquean esa IP un minuto.
+* Límites del P4: la pasarela acepta como mucho una parte (17 MB) por
+  petición y la reenvía a trozos de 12 KB con el buffer de E/S de siempre; un
+  JSON de ≤ 4 KB se guarda para repetir la petición si el teléfono pide una
+  sesión nueva. El emparejamiento tiene su propio limitador (sección 4).
 * Cada petición del navegador que cambia algo exige la cabecera `X-Flex` y la
   sesión del P4 (CSRF); `Host` debe ser la IP del P4 (DNS rebinding).
 
@@ -247,9 +264,21 @@ SHA-256, descargas verificadas, streaming, miniaturas.
 * Teléfono sin responder: Flex Cloud dice **"El teléfono no responde"** y
   reintenta con espera creciente (2 s … 60 s). Lo local sigue funcionando y
   nada se bloquea. Las transferencias esperan y siguen solas.
-* "Desconectar" en el P4 deja de usar el teléfono sin olvidar el
-  emparejamiento; "Olvidar este teléfono" borra la clave (NVS). En el teléfono,
-  "Dejar de compartir" para el servidor y "Olvidar Flex OS" borra su clave.
+* En el P4 (Almacenamiento › Flex Cloud en tu teléfono): **«Poner en pausa»**
+  deja de usar el teléfono sin olvidar el emparejamiento y **«Volver a
+  conectar»** lo reanuda en el acto (sin esperas ni rechazos anteriores);
+  **«Olvidar este teléfono»** (pide un segundo toque) borra la clave de la NVS.
+  En el teléfono (Flex Phone › Flex Cloud): el interruptor **«Compartir con
+  Flex OS»** o **«Detener»** en la notificación paran el servidor; **«Olvidar
+  este Flex OS»** borra su clave del Keystore y **«Borrar todo lo de Flex
+  Cloud»** borra los archivos (también la papelera).
+* **Si cambia la IP (o el puerto) del teléfono**, el P4 deja de llegar a él y
+  dice "El teléfono no responde". Se arregla sin reiniciar nada: en el
+  teléfono, abrir otra vez la web de Flex OS (QR) y pulsar «Activar Flex Cloud
+  en este teléfono». Como el teléfono demuestra que conserva la clave, el P4
+  lo aprueba solo (sin pregunta en pantalla) y guarda la dirección nueva.
+* Sin Wi‑Fi, el teléfono deja de escuchar; cuando vuelve (o cambia la red),
+  vuelve a escuchar él solo, por el aviso de red de Android, sin bucles.
 * Reproducción: cambiar de vídeo o cerrar el visor cierra el flujo anterior
   (una sola arena, un solo flujo).
 
@@ -267,7 +296,7 @@ SHA-256, descargas verificadas, streaming, miniaturas.
 | Archivo | Motivo | Depende de | Impacto |
 |---|---|---|---|
 | `android/FlexPhone/storage/` (módulo nuevo `:storage`, JVM puro) | Servidor de Flex Cloud del teléfono con la API de `cloud/`, cuota, partes, rangos, emparejamiento y sesiones | JDK (sin dependencias) | Nuevo, aislado; pruebas en el PC |
-| `android/FlexPhone/app/.../storage/*` | Servicio, actividad del enlace `flexstorage://`, volumen, almacén de claves | `:storage`, Keystore | Nuevo; manifiesto: un servicio y una actividad, **sin permisos nuevos** |
+| `android/FlexPhone/app/.../flexcloud/*` y `ui/screens/FlexCloud.kt` | `FlexStorageService` (primer plano `connectedDevice`), `StorageAttachActivity` (enlace `flexstorage://`), `FlexCloudPhone` (carpeta privada, cuota, espacio real), `KeystorePairingRepo` (clave envuelta por el Keystore) y la pantalla Flex Cloud | `:storage`, Keystore | Nuevo; manifiesto: un servicio y una actividad, **sin permisos nuevos** (el tipo `connectedDevice` se apoya en `CHANGE_WIFI_MULTICAST_STATE`, que ya estaba) |
 | `FlexOS_Ultra/FlexOS_StorageCore.{h,cpp}` | Núcleo portable: registro, ECDH, derivaciones, ofertas, emparejamiento, estado | FlexOS_FlexAuth (HMAC), cJSON, OpenSSL/mbedTLS | Nuevo, probado en el PC |
 | `FlexOS_Ultra/FlexOS_StorageLink.{h,cpp}` | Mitad de placa: NVS, cerrojo, sesión con el teléfono | StorageCore, HTTPClient | Nuevo |
 | `FlexOS_Ultra/FlexOS_Cloud.{h,cpp}` | Destino Teléfono (URL, cliente sin TLS, token, diario propio, textos) | StorageLink | Con destino Internet el comportamiento es idéntico (las pruebas existentes lo vigilan) |
@@ -276,12 +305,34 @@ SHA-256, descargas verificadas, streaming, miniaturas.
 | `FlexOS_Ultra/FlexOS_Ultra_WebServer.h` | Anfitrión de las rutas nuevas; la hoja del QR enseña el teléfono y la aprobación | MediaWeb, StorageLink | Mismo servidor y mismo QR |
 | `FlexOS_Ultra/webui/*` | La web Flex Storage con el diseño de Flex Cloud | MediaWeb | FX y el flujo de subida a Flex OS no cambian |
 | `FlexOS_Ultra/FlexOS_Ultra_AppStorage.h` | Almacenamiento pasa a ser el centro de Flex Storage (Local + Flex Cloud + Transferir) | StorageLink, FlexOS_Cloud | Las cifras de siempre se conservan |
-| `FlexOS_Ultra/FlexOS_Ultra.ino` | `flexStorageBegin()` en `setup()` | StorageLink | Una línea |
+| `FlexOS_Ultra/FlexOS_Ultra_StoragePair.h` (nuevo, en la cadena tras FallAlert) | La pregunta "¿Emparejar este teléfono?" con el código de 6 cifras, como ventana del sistema (nunca con la pantalla bloqueada) | StorageLink | Nuevo; mismo patrón que la alerta de caídas (banda en PSRAM, un solo `present()`) |
+| `FlexOS_Ultra/FlexOS_Ultra_CloudKit.h` | Con destino Teléfono, la nube no exige Flex Account: dice "Empareja tu teléfono", "Vuelve a emparejar" o "Reactiva el teléfono" y lleva a Almacenamiento | StorageLink | Con destino Internet, igual que antes |
+| `FlexOS_Ultra/FlexOS_Ultra.ino` | `flexStorageBegin()` en `setup()`; `spaWatch()`/`spaTick()` en `loop()` como la alerta de caídas | StorageLink, StoragePair | Unas líneas |
+| `FlexOS_Ultra/FlexOS_HttpShare.{h,cpp}`, `FlexOS_HttpSink.h` | El analizador HTTP acepta PUT y PATCH (DELETE ya estaba), `If-Range` y `X-Part-SHA256`, y analiza las respuestas del teléfono (solo para la pasarela). `FlexOS_HttpSink.h`: el buffer acotado de respuestas que comparten Flex Cloud y StorageLink | — | Lo que ya aceptaba se acepta igual (pruebas de siempre + nuevas) |
+| Flex-Developer-Studio `cloud/` | `web/js/sha256.js` (huellas sin `crypto.subtle` por `http://`), perfil teléfono en `docs/API.md` | — | El servicio no cambia |
 | `tests/host/*` | Pruebas del núcleo, del gestor con destino Teléfono, de las rutas y e2e contra el servidor Kotlin real | — | Nuevas baterías |
 
 ## 10. Pruebas
 
-Ver la sección final ("Resultados") cuando se complete la implementación.
+Todo se ejecuta en el PC, sin placa ni teléfono (ver la sección 11). Las
+baterías nativas se compilan con ASan + UBSan.
+
+| Batería | Qué demuestra | Resultado |
+|---|---|---|
+| `make -C tests/host run` (todas las de siempre + las nuevas) | El sketch completo compila (cadena, ganchos, prototipos, pila, `FlexOS_WebUI.h` al día) y **todas** las pruebas de antes siguen pasando | ✅ |
+| `test_ino` → «Flex Storage» | La pregunta de emparejar en la pantalla real simulada (vertical y horizontal), nunca con bloqueo, antirrobo ni DeX; decidir, caducar; Flex Cloud con destino Teléfono sin Flex Account; Almacenamiento › Flex Cloud en tu teléfono (pausa, volver a conectar, olvidar con doble toque) | ✅ |
+| `test_storagecore` | Núcleo del P4: vectores dorados compartidos con Kotlin, ECDH P‑256, ofertas y limitador, peticiones hostiles, sesión, registro NVS | ✅ 16 621 (OpenSSL) y 16 621 con **mbedTLS 3.6.2** |
+| `test_cloud` → bloques «Flex Storage» | El gestor de Flex Cloud con destino Teléfono: sesión mutua, sesión que caduca, teléfono que no responde, rechaza o miente, cambio de destino sin perder nada, olvidar, apagado a mitad, streaming acotado, emparejar desde la web | ✅ 504 (toda la batería) |
+| `test_mediaweb` / `test_httpshare` | El Flex Web Server con y sin Flex Storage (sin sus funciones, el servidor es el de siempre), emparejamiento sin sesión web, pasarela `/api/cloud` (el token del teléfono nunca llega al navegador), PUT/PATCH y respuestas del teléfono | ✅ 184 / 154 |
+| `test_qr` | El QR de siempre | ✅ 171 |
+| `tests/web` (`make web`): `webui.test.js`, `e2e.test.js`, `storage_e2e.test.js` | La lógica de la web (SHA‑256 contra Node, tamaños, cuota, destinos); el flujo **clásico** completo en Chromium (subir con conversión, biblioteca, ZIP, bloqueo...); y Flex Storage en Chromium contra el servidor web del P4 **y** el servidor real del teléfono: emparejar por QR, activar, subir por partes, carpetas, mover, renombrar, miniaturas, ver directo desde el teléfono, papelera, reanudar tras cerrar la pestaña, transferencias Flex OS ↔ Flex Cloud, teléfono desconectado | ✅ 284 / 94 / 85 |
+| `tests/host/phone_e2e.sh` | El gestor y StorageLink del firmware contra `CloudServer` **real** (Kotlin en la JVM; 68 peticiones reales), y la app emparejándose con el servidor web del P4 | ✅ 41 + 16 |
+| `tests/host/cloud_e2e.sh` | El destino **Internet** de siempre contra el servidor real de Flex Developer Studio: no ha cambiado | ✅ 38 |
+| `gradle :storage:test` / `:protocol:test` | Servidor, almacén, sesiones y emparejamiento del teléfono; protocolo de Flex Phone intacto | ✅ 40 / 69 |
+| `gradle -PflexTypecheck :typecheck:compileKotlin` | El pegamento Android y la pantalla compilan contra Android 15 (android‑all de Robolectric) y Compose Multiplatform 1.7 | ✅ (solo tipos) |
+| `make all-boards` | Los tres perfiles de placa compilan y pasan | ✅ |
+| Flex Developer Studio `cloud/`: `npm test`, `npm run test:e2e`, `npm run check` | El servicio de siempre; y la subida por `http://` sin `crypto.subtle` (antes se quedaba parada) | ✅ 62 / 28 / 0 problemas |
+| Bucles de estabilidad | 10 vueltas de las baterías nativas de Flex Storage y 3 de cada e2e (web y teléfono), sin un fallo | ✅ |
 
 ## 11. Límites honestos
 
@@ -297,3 +348,23 @@ Ver la sección final ("Resultados") cuando se complete la implementación.
   que sí se compila y se prueba.
 * El P4 solo reproduce **AVI MJPEG, JPEG baseline y WAV PCM/IMA ADPCM**. Un MP4
   del teléfono se guarda en Flex Cloud y se ve en el navegador, no en el P4.
+* **Si cambia la IP (o el puerto) del teléfono**, el P4 no lo encuentra solo:
+  hay que volver a pulsar «Activar Flex Cloud en este teléfono» en la web de
+  Flex OS (el P4 lo aprueba sin preguntar, porque el teléfono conserva la
+  clave). Una reserva de IP en el router lo evita.
+* **Pantalla apagada**: con la optimización de batería de Android activa, el
+  sistema puede dormir la Wi‑Fi de Flex Phone y el P4 dejaría de llegar al
+  teléfono hasta encenderlo. La pantalla Flex Cloud del teléfono lo avisa y
+  lleva a los ajustes; la app no pide la exención por su cuenta.
+* La web del P4 se sirve por `http://`, donde el navegador no ofrece
+  `crypto.subtle`: las huellas SHA‑256 de las subidas se calculan en
+  JavaScript (por partes de 1 MB, nunca el archivo entero en memoria). Es
+  más lento que la huella nativa; en archivos grandes, desde el móvil, se
+  puede notar.
+* La cuota de Flex Cloud en el teléfono es **lógica** (Android no permite
+  particiones por app): lo que de verdad cabe es lo que el teléfono tiene
+  libre, y así se dice siempre (`limitedByDevice`).
+* Lo que viaja por la Wi‑Fi local va en claro (HTTP). La clave del
+  emparejamiento no viaja nunca y los tokens caducan, pero alguien en la misma
+  red podría ver los archivos que pasan. Es la misma situación que la web del
+  P4 de siempre, y se dice en las pantallas.

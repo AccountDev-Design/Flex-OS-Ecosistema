@@ -936,6 +936,7 @@ Se distingue con cuidado entre las tres cosas.
 | Vectores dorados (C++) | 10 vectores |
 | Núcleo del navegador (C++) | 406 comprobaciones |
 | Protocolo Android (Kotlin) | **55/55**, incluidos los vectores compartidos con el firmware |
+| **Flex Cloud del teléfono (`:storage`, Kotlin)** | servidor, almacén, sesiones y emparejamiento en la JVM, y punta a punta contra el firmware compilado en el PC (§15) |
 | Servicio de render (Node) | 35/35 |
 | SDK de apps (Node) | 10/10 |
 
@@ -966,6 +967,13 @@ y son compatibles entre sí.
 código de protocolo que comparte con el firmware **sí** está verificado, que es
 la parte que más silenciosamente se puede romper.
 
+El pegamento de **Flex Cloud en el teléfono** (`flexcloud/*` y la pantalla
+`FlexCloud.kt`) sí se ha comprobado **en tipos**: `gradle -PflexTypecheck
+:typecheck:compileKotlin` lo compila contra las clases de Android 15 de
+Robolectric (android-all, API 35) y contra Compose Multiplatform 1.7 (las
+mismas APIs `androidx.compose`), ambos desde Maven Central. Compilar no es
+ejecutar: sigue pendiente en un teléfono (§15).
+
 ### ⏳ Pendiente de prueba física
 
 Nada de esto se ha probado sobre hardware, y **no se afirma que funcione**:
@@ -990,3 +998,98 @@ Nada de esto se ha probado sobre hardware, y **no se afirma que funcione**:
 9. **Sin IMU**: que el sistema arranque y siga interactivo con el GY‑BNO085
    retirado, y que Flex Phone funcione igual. Flex Phone **no toca** el servicio
    del IMU ni ninguna de sus dependencias.
+
+---
+
+## 15. Flex Cloud en el teléfono (Flex Storage)
+
+Flex Phone puede **prestar espacio del teléfono** a Flex OS como Flex Cloud:
+1, 2 o 5 GB (5 de serie) de una carpeta **privada de la app**, solo en la red
+local. El diseño completo (emparejamiento, sesión, pasarela del P4, seguridad)
+está en `docs/FLEX-STORAGE.md`; aquí, lo que hace la app.
+
+### Qué ve Flex OS (y qué no)
+
+- **Solo la carpeta privada de Flex Cloud** de esta app (`filesDir/FlexCloud`).
+  Ni fotos, ni archivos, ni otras apps: no hay permiso de almacenamiento que
+  pedir, y no se pide.
+- El servidor (`:storage`, `CloudServer`) escucha **solo en la IP privada de
+  la Wi‑Fi** (nunca con datos móviles ni en todas las interfaces) y cierra sin
+  contestar cualquier conexión que no venga de la red local.
+- Solo entra **el Flex OS emparejado**: cada sesión se abre con
+  reto‑respuesta con la clave del emparejamiento; el token solo vale desde la
+  IP del P4 y caduca (30 min sin uso, 12 h como mucho). Los enlaces para ver
+  un archivo caducan a los 15 minutos.
+- La clave se guarda envuelta por el **Android Keystore**
+  (`KeystorePairingRepo`, como el vínculo del enlace); si no se puede
+  descifrar, se borra y hay que volver a emparejar.
+
+### Activarlo
+
+1. En el teléfono, abrir la web de Flex OS con el QR de *Conectar con el
+   móvil* (menú de Galería, Multimedia, Música o Almacenamiento en el P4) y
+   pulsar **«Activar Flex Cloud en este teléfono»**.
+2. Se abre Flex Phone (enlace `flexstorage://attach`) y explica qué va a
+   pasar. Al aceptar arranca el servidor y aparece un **código de 6 cifras**.
+3. El mismo código sale en la pantalla de Flex OS (**«¿Emparejar este
+   teléfono?»**). Al pulsar **Emparejar** allí, los dos guardan la clave. Si
+   algo falla o se cancela, no queda nada escuchando.
+
+### En segundo plano
+
+- Servicio en primer plano de tipo **`connectedDevice`** (el teléfono sirve a
+  un dispositivo externo; Android 15 no lo corta a las 6 h como a
+  `dataSync`). Su condición previa en Android 14+ la cumple
+  `CHANGE_WIFI_MULTICAST_STATE`, que la app ya declaraba: **ningún permiso
+  nuevo**.
+- Notificación permanente que dice la verdad («Esperando a Flex OS», «Flex OS
+  conectado» o por qué no escucha), con **Detener**.
+- **Sin WakeLock permanente**: los cerrojos de CPU y Wi‑Fi se toman solo
+  mientras Flex OS está hablando con el teléfono (última petición hace menos
+  de 2 minutos) y se sueltan en cuanto calla. El de CPU además caduca solo a
+  los 10 minutos (si Flex OS sigue hablando, se renueva): si el servicio
+  dejara de vigilarlo, no se queda tomado.
+- Sin Wi‑Fi no escucha; cuando vuelve la Wi‑Fi o cambia la IP, vuelve a
+  escuchar solo (aviso de red de Android, sin bucles). Tras reiniciar el
+  teléfono se reanuda solo si estaba activado **y** emparejado.
+
+### Espacio
+
+- La cuota es **lógica**: Android no deja reservar una partición para una
+  app. Lo que de verdad cabe es el menor entre lo que queda de la cuota y lo
+  libre del teléfono (`StorageManager.getAllocatableBytes`) menos 512 MB, y
+  así lo publica el servidor (`deviceFreeBytes`, `limitedByDevice`).
+- Cada subida reserva su sitio de verdad al empezar
+  (`StorageManager.allocateBytes`). La cuota no se puede bajar por debajo de
+  lo ya guardado, y la papelera ocupa hasta que se vacía (30 días).
+
+### Dejar de compartir
+
+- Interruptor **«Compartir con Flex OS»** o **Detener** en la notificación:
+  para el servidor; el emparejamiento se conserva.
+- **«Olvidar este Flex OS»**: borra la clave. Los archivos se quedan hasta
+  borrarlos.
+- **«Borrar todo lo de Flex Cloud»**: borra los archivos, también los de la
+  papelera.
+
+### Límites, sin adornos
+
+- **Si cambia la IP (o el puerto) del teléfono**, Flex OS deja de llegar a él:
+  hay que volver a pulsar «Activar Flex Cloud en este teléfono» en la web de
+  Flex OS. Como el teléfono conserva la clave, Flex OS lo aprueba solo.
+- **Pantalla apagada**: con la optimización de batería activa, Android puede
+  dormir la Wi‑Fi de las apps y entonces Flex OS no llega al teléfono. La
+  pantalla Flex Cloud lo avisa y lleva a los ajustes de batería; la app no
+  pide la exención por su cuenta.
+- Lo que viaja por la Wi‑Fi local va **en claro** (HTTP), como el resto del
+  enlace con Flex OS.
+
+### Estado de verificación
+
+| Qué | Cómo |
+|---|---|
+| Servidor de Flex Cloud del teléfono (`:storage`) | `gradle :storage:test`, en la JVM |
+| El P4 contra ese servidor | `tests/host/phone_e2e.sh`: el gestor y StorageLink del firmware, compilados en el PC, contra `CloudServer` real; y la app (`AttachClient`) emparejándose con el servidor web del P4 |
+| La web del P4 con el teléfono | `tests/web/storage_e2e.test.js`: Chromium + el servidor web del P4 + el servidor del teléfono |
+| Pegamento Android y pantalla | `gradle -PflexTypecheck :typecheck:compileKotlin` (solo tipos, §14) |
+| ⏳ En un A55 de verdad | **Pendiente**: servicio en primer plano y su notificación, Keystore, enlace `flexstorage://`, cambio de red e IP, pantalla apagada a 1, 5 y 15 minutos, consumo y velocidad real por Wi‑Fi |
