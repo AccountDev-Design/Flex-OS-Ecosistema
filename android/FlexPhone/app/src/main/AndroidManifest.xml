@@ -143,6 +143,40 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!--
+          FLEX CLOUD EN ESTE TELEFONO (Flex Storage). connectedDevice: el
+          telefono sirve a un dispositivo externo (el P4) por la red local, y
+          Android 15 no corta este tipo a las 6 horas como dataSync. El
+          servidor escucha SOLO en la IP privada de la Wi-Fi y solo acepta la
+          sesion del Flex OS emparejado. No necesita ningun permiso nuevo
+          (ni de almacenamiento: usa la carpeta privada de la app).
+        -->
+        <service
+            android:name=".flexcloud.FlexStorageService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <!--
+          Enlace flexstorage://attach que abre la web de Flex OS (en este
+          telefono) para activar Flex Cloud: pregunta a la persona, ensena el
+          codigo de 6 cifras y empareja. exported porque la abre el navegador;
+          lo que trae (direccion y oferta de un solo uso) se valida entero.
+        -->
+        <activity
+            android:name=".flexcloud.StorageAttachActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.FlexPhone">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="flexstorage" android:host="attach" />
+            </intent-filter>
+        </activity>
+
         <receiver
             android:name=".link.BootReceiver"
             android:exported="false"

@@ -17,6 +17,7 @@ import com.flexos.flexphone.domain.FlexPhoneState
 import com.flexos.flexphone.domain.LinkState
 import com.flexos.flexphone.domain.RelayState
 import com.flexos.flexphone.domain.Settings
+import com.flexos.flexphone.flexcloud.FlexCloudPhone
 import com.flexos.flexphone.link.FlexLinkService
 import com.flexos.flexphone.notifications.FlexNotificationListener
 import com.flexos.flexphone.storage.BondStore
@@ -44,6 +45,7 @@ fun HomeScreen(nav: NavController, store: SettingsStore, settings: Settings) {
     val link by (state?.link ?: MutableStateFlow(LinkState.OFF)).collectAsState()
     val relay by (state?.relay ?: MutableStateFlow(RelayState.OFF)).collectAsState()
     val error by (state?.error ?: MutableStateFlow<String?>(null)).collectAsState()
+    val cloud by FlexCloudPhone.status.collectAsState()
 
     val device = remember { DeviceAdapter(ctx) }
     val bonds = remember { BondStore(ctx) }
@@ -59,6 +61,7 @@ fun HomeScreen(nav: NavController, store: SettingsStore, settings: Settings) {
             battery = device.batteryPercent()
             charging = device.isCharging()
             onWifi = device.isOnWifi()
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { FlexCloudPhone.refresh(ctx) }
             delay(5_000)
         }
     }
@@ -163,6 +166,14 @@ fun HomeScreen(nav: NavController, store: SettingsStore, settings: Settings) {
                     RelayState.OFF -> "Parado"
                 },
             ) { nav.navigate(Routes.RELAY) }
+            NavRow(
+                "Flex Cloud",
+                when {
+                    !cloud.paired -> "Presta espacio de este telefono a Flex OS"
+                    cloud.running -> (cloud.p4Name ?: "Flex OS") + " · " + fmtBytes(cloud.usedBytes) + " de " + cloud.quotaGb + " GB"
+                    else -> "Detenido"
+                },
+            ) { nav.navigate(Routes.CLOUD) }
             NavRow(
                 "Conexion",
                 service?.linkAddress()?.let { "$it:${service.linkPort()}" } ?: "Enlace apagado",

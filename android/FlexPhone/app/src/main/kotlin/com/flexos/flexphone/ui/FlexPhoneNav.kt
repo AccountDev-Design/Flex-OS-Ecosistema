@@ -41,6 +41,7 @@ object Routes {
     const val DIAGNOSTICS = "diagnostics"
     const val SETTINGS = "settings"
     const val ABOUT = "about"
+    const val CLOUD = "cloud"
 }
 
 @Composable
@@ -73,6 +74,7 @@ fun FlexPhoneNav() {
         composable(Routes.DIAGNOSTICS) { DiagnosticsScreen(nav) }
         composable(Routes.SETTINGS) { SettingsScreen(nav, store, settings) }
         composable(Routes.ABOUT) { AboutScreen(nav) }
+        composable(Routes.CLOUD) { FlexCloudScreen(nav) }
     }
 }
 

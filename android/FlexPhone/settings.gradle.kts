@@ -72,6 +72,9 @@ include(":protocol")
 // Flex Storage: el servidor de Flex Cloud del telefono. JVM puro como
 // :protocol, asi que tambien se construye y se prueba sin el SDK.
 include(":storage")
+// Comprobacion de tipos del pegamento Android de Flex Storage SIN el SDK (ver
+// typecheck/build.gradle.kts). Solo si se pide: -PflexTypecheck
+if (providers.gradleProperty("flexTypecheck").isPresent) include(":typecheck")
 
 val sdkFromEnv = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
 val localProps = file("local.properties")

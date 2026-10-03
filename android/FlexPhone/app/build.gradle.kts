@@ -52,6 +52,9 @@ dependencies {
     // El protocolo es el modulo compartido: los MISMOS bytes que el
     // firmware, probados sin Android.
     implementation(project(":protocol"))
+    // Flex Storage: el servidor de Flex Cloud del telefono (JVM puro, probado
+    // en el PC); aqui solo se le pone delante el servicio, la carpeta y el Keystore.
+    implementation(project(":storage"))
 
     val composeBom = platform("androidx.compose:compose-bom:2024.09.03")
     implementation(composeBom)

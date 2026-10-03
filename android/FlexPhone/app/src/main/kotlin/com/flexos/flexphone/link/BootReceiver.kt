@@ -3,6 +3,8 @@ package com.flexos.flexphone.link
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import com.flexos.flexphone.flexcloud.FlexCloudPhone
+import com.flexos.flexphone.flexcloud.FlexStorageService
 import com.flexos.flexphone.storage.SettingsStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -25,6 +27,9 @@ class BootReceiver : BroadcastReceiver() {
             try {
                 val s = SettingsStore(ctx).flow.first()
                 if (s.startOnBoot && s.isPaired) FlexLinkService.start(ctx)
+                // Flex Cloud: solo si la persona lo dejo ACTIVADO y sigue emparejado
+                // (lo decidio ella al activarlo; detenerlo desde la notificacion lo apaga).
+                if (FlexCloudPhone.isEnabled(ctx) && FlexCloudPhone.repo(ctx).isPaired()) FlexStorageService.start(ctx)
             } finally {
                 pending.finish()
             }
