@@ -56,6 +56,8 @@ object FlexCloudPhone {
     val QUOTA_CHOICES_GB = intArrayOf(1, 2, 5)
 
     data class Status(
+        /** La persona dejo Flex Cloud ACTIVADO (se reanuda tras reiniciar). Observable: la pantalla no lo lee de las preferencias. */
+        val enabled: Boolean = false,
         val running: Boolean = false,
         val address: String? = null,          // "192.168.1.60:47830" mientras escucha
         val error: String? = null,            // por que no esta escuchando (o un aviso)
@@ -75,6 +77,21 @@ object FlexCloudPhone {
     private val _status = MutableStateFlow(Status())
     val status: StateFlow<Status> = _status
 
+    /**
+     * Actualiza el estado de forma ATOMICA (compare-and-set). Antes cada sitio hacia
+     * `_status.value = _status.value.copy(...)`: leer, cambiar y escribir sin
+     * cerrojo, desde el servicio, la pantalla y el hilo del emparejamiento a la
+     * vez. Si dos coincidian, una escritura pisaba a la otra con datos viejos y
+     * la pantalla decia "Detenido" con el servidor escuchando hasta el siguiente
+     * refresco (3-5 s despues).
+     */
+    private inline fun upd(f: (Status) -> Status) {
+        while (true) {
+            val cur = _status.value
+            if (_status.compareAndSet(cur, f(cur))) return
+        }
+    }
+
     private val lock = Any()
     @Volatile private var store: CloudStore? = null
     @Volatile private var storeQuotaGb = 0
@@ -85,7 +102,10 @@ object FlexCloudPhone {
     // ------------------------------------------------------------ ajustes
     /** La persona activo Flex Cloud (y no lo ha detenido): se reanuda tras reiniciar. */
     fun isEnabled(ctx: Context): Boolean = prefs(ctx).getBoolean(P_ENABLED, false)
-    fun setEnabled(ctx: Context, on: Boolean) { prefs(ctx).edit().putBoolean(P_ENABLED, on).apply() }
+    fun setEnabled(ctx: Context, on: Boolean) {
+        prefs(ctx).edit().putBoolean(P_ENABLED, on).apply()
+        upd { it.copy(enabled = on) }
+    }
 
     fun quotaGb(ctx: Context): Int {
         val q = prefs(ctx).getInt(P_QUOTA_GB, 5)
@@ -212,20 +232,20 @@ object FlexCloudPhone {
         }
         p.edit().putInt(P_PORT, port).apply()
         server = srv
-        _status.value = _status.value.copy(running = true, address = "${bind.hostAddress}:$port", error = notice)
+        upd { it.copy(running = true, address = "${bind.hostAddress}:$port", error = notice) }
         refresh(app)
         return null
     }
 
     private fun fail(ctx: Context, why: String): String {
-        _status.value = _status.value.copy(running = false, address = null, error = why)
+        upd { it.copy(running = false, address = null, error = why) }
         refresh(ctx)
         return why
     }
 
     fun stopServer(ctx: Context) {
         synchronized(lock) { stopServerLocked() }
-        _status.value = _status.value.copy(running = false, address = null)
+        upd { it.copy(running = false, address = null) }
         refresh(ctx)
     }
 
@@ -254,23 +274,33 @@ object FlexCloudPhone {
         // Sin haber usado nunca Flex Cloud no se crea nada en disco solo por mirar.
         val st = store ?: if (!r.isPaired() && !root(app).isDirectory) null
             else try { synchronized(lock) { storeLocked(app) } } catch (e: Exception) { null }
-        var s = _status.value.copy(
-            paired = r.isPaired(), p4Name = r.p4Name(), p4Host = r.p4Host(),
-            lastContactMs = server?.lastP4Contact ?: _status.value.lastContactMs,
-            quotaGb = quotaGb(app),
-        )
+        // Se leen los datos FUERA de la actualizacion y se aplican de un golpe y de forma atomica.
+        val paired = r.isPaired(); val p4Name = r.p4Name(); val p4Host = r.p4Host()
+        val contact = server?.lastP4Contact
+        val gb = quotaGb(app)
+        val enabled = isEnabled(app)
+        var q: Map<String, Any?>? = null
+        var files = 0
         if (st != null) {
-            try {
-                val q = st.quota()
+            try { q = st.quota(); files = st.fileCount() } catch (e: Exception) { /* la proxima vez */ }
+        }
+        upd { cur ->
+            var s = cur.copy(
+                enabled = enabled,
+                paired = paired, p4Name = p4Name, p4Host = p4Host,
+                lastContactMs = contact ?: cur.lastContactMs,
+                quotaGb = gb,
+            )
+            if (q != null) {
                 fun n(k: String) = (q[k] as? Number)?.toLong() ?: 0L
                 s = s.copy(
                     usedBytes = n("usedBytes"), trashBytes = n("trashBytes"), reservedBytes = n("reservedBytes"),
                     availableBytes = n("availableBytes"), limitedByDevice = q["limitedByDevice"] == true,
-                    files = st.fileCount(),
+                    files = files,
                 )
-            } catch (e: Exception) { /* la proxima vez */ }
+            }
+            s
         }
-        _status.value = s
     }
 
     /**
@@ -291,7 +321,7 @@ object FlexCloudPhone {
             store = null
         }
         val ok = root(ctx).deleteRecursively()
-        _status.value = Status(quotaGb = quotaGb(ctx))
+        _status.value = Status(enabled = isEnabled(ctx), quotaGb = quotaGb(ctx))
         refresh(ctx)
         return ok
     }

@@ -14,7 +14,12 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
-import com.flexos.flexphone.cloud.AttachClient
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 
 /**
  * ACTIVAR FLEX CLOUD EN ESTE TELEFONO (enlace `flexstorage://attach`).
@@ -37,10 +42,10 @@ class StorageAttachActivity : Activity() {
 
     private enum class Step { CONFIRM, WORKING, CODE, DONE, FAILED }
 
-    @Volatile private var cancelled = false
-    private var host: String? = null
-    private var offer: String? = null
-    private var hadPairing = false
+    // El emparejamiento NO vive aqui: vive en [StorageAttach], que es de la app. Esta
+    // pantalla solo lo ENSENA, y por eso puede destruirse y recrearse (giro, tamano de
+    // letra, Atras, irse al navegador...) sin cancelar nada. Ver StorageAttach.
+    private val ui = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     private lateinit var title: TextView
     private lateinit var body: TextView
@@ -60,22 +65,36 @@ class StorageAttachActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildUi()
-        val data: Uri? = intent?.data
-        host = data?.getQueryParameter("h")
-        offer = data?.getQueryParameter("o")
-        if (data?.scheme != "flexstorage" || data.host != "attach" ||
-            AttachClient.parseHost(host) == null || !AttachClient.validOffer(offer)) {
-            show(Step.FAILED, "Enlace no válido",
-                "Este enlace de Flex Storage no es válido o no es de tu red local. Vuelve a pulsar «Activar Flex Cloud» en la web de Flex OS.")
-            return
+        // El MISMO enlace tras recrear la actividad no es una oferta nueva: StorageAttach lo
+        // reconoce y no toca lo que esta en marcha.
+        // Sin enlace (se abre desde la pantalla Flex Cloud para VER un emparejamiento en curso)
+        // solo se observa.
+        if (intent?.data != null) StorageAttach.offer(this, intent?.data)
+        ui.launch { StorageAttach.state.collect { render(it) } }
+    }
+
+    // launchMode=singleTask: un enlace NUEVO con la actividad ya abierta llega aqui.
+    override fun onNewIntent(intent: android.content.Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        StorageAttach.offer(this, intent?.data)
+    }
+
+    private fun render(st: StorageAttach.UiState) {
+        when (st) {
+            is StorageAttach.UiState.Idle -> if (!isFinishing) finish()
+            is StorageAttach.UiState.Confirm -> show(Step.CONFIRM, "¿Usar este teléfono como Flex Cloud?",
+                "El Flex OS de ${st.p4Ip} podrá guardar archivos en un espacio de este teléfono " +
+                    "(hasta ${st.quotaGb} GB, lo puedes cambiar en Flex Phone) y leerlos cuando se lo pidas.\n\n" +
+                    "No verá nada más del teléfono: ni tus fotos, ni tus archivos, ni tus apps. Solo funciona en tu Wi‑Fi, " +
+                    "y lo que se envía viaja por ella sin cifrar: úsalo en una red de confianza.")
+            is StorageAttach.UiState.Working -> show(Step.WORKING, "Conectando con Flex OS…", "Preparando Flex Cloud en este teléfono.")
+            is StorageAttach.UiState.Code -> show(Step.CODE, "Comprueba el código",
+                "En la pantalla de ${st.p4Name} aparece este mismo código. Si coincide, pulsa «Emparejar» allí.", st.sas)
+            is StorageAttach.UiState.Done -> show(Step.DONE, "Flex Cloud activado",
+                "${st.p4Name} ya puede guardar archivos aquí. Lo verás en la web de Flex OS y en Flex Phone › Flex Cloud.")
+            is StorageAttach.UiState.Failed -> show(Step.FAILED, st.title, st.message)
         }
-        hadPairing = FlexCloudPhone.repo(this).isPaired()
-        val gb = FlexCloudPhone.quotaGb(this)
-        show(Step.CONFIRM, "¿Usar este teléfono como Flex Cloud?",
-            "El Flex OS de ${AttachClient.parseHost(host)!!.first} podrá guardar archivos en un espacio de este teléfono " +
-                "(hasta $gb GB, lo puedes cambiar en Flex Phone) y leerlos cuando se lo pidas.\n\n" +
-                "No verá nada más del teléfono: ni tus fotos, ni tus archivos, ni tus apps. Solo funciona en tu Wi‑Fi, " +
-                "y lo que se envía viaja por ella sin cifrar: úsalo en una red de confianza.")
     }
 
     private fun dp(v: Int): Int = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
@@ -139,78 +158,30 @@ class StorageAttachActivity : Activity() {
         when (step) {
             Step.CONFIRM -> {
                 primary.visibility = View.VISIBLE; primary.text = "Activar Flex Cloud"
-                primary.setOnClickListener { begin() }
+                primary.setOnClickListener { StorageAttach.begin(this) }
                 secondary.visibility = View.VISIBLE; secondary.text = "Cancelar"
-                secondary.setOnClickListener { finish() }
+                secondary.setOnClickListener { StorageAttach.dismiss(); finish() }
             }
             Step.WORKING, Step.CODE -> {
                 primary.visibility = View.GONE
+                // Cancelar es lo UNICO que corta un emparejamiento en curso. Atras, el giro de
+                // pantalla o irse al navegador no lo cortan: se puede volver y sigue ahi.
                 secondary.visibility = View.VISIBLE; secondary.text = "Cancelar"
-                secondary.setOnClickListener { cancelled = true; finish() }
+                secondary.setOnClickListener { StorageAttach.cancel(this); finish() }
             }
             Step.DONE, Step.FAILED -> {
                 primary.visibility = View.VISIBLE; primary.text = "Cerrar"
-                primary.setOnClickListener { finish() }
+                primary.setOnClickListener { StorageAttach.dismiss(); finish() }
                 secondary.visibility = View.GONE
             }
         }
     }
 
-    private fun begin() {
-        show(Step.WORKING, "Conectando con Flex OS…", "Preparando Flex Cloud en este teléfono.")
-        FlexCloudPhone.setEnabled(this, true)
-        FlexStorageService.start(this)
-        val app = applicationContext
-        Thread({
-            // El servidor tiene que estar escuchando: Flex OS abrira sesion con
-            // el en cuanto se apruebe el emparejamiento.
-            var port = 0
-            for (i in 0 until 40) {
-                port = FlexCloudPhone.port()
-                if (port > 0 || cancelled) break
-                Thread.sleep(150)
-            }
-            if (cancelled) { undo(app); return@Thread }
-            if (port <= 0) {
-                val why = FlexCloudPhone.status.value.error ?: "No se pudo arrancar Flex Cloud en este teléfono."
-                undo(app)
-                runOnUiThread { show(Step.FAILED, "No se pudo activar", why) }
-                return@Thread
-            }
-            val r = try {
-                AttachClient(FlexCloudPhone.phoneInfo(app), port, FlexCloudPhone.repo(app)).attach(host!!, offer!!, onSas = { sas, p4 ->
-                    runOnUiThread {
-                        if (!isFinishing) show(Step.CODE, "Comprueba el código",
-                            "En la pantalla de $p4 aparece este mismo código. Si coincide, pulsa «Emparejar» allí.", sas)
-                    }
-                }, cancelled = { cancelled })
-            } catch (e: Exception) {
-                AttachClient.Result.Failed("No se pudo guardar el emparejamiento en este teléfono.")
-            }
-            FlexCloudPhone.refresh(app)
-            when (r) {
-                is AttachClient.Result.Paired -> runOnUiThread {
-                    show(Step.DONE, "Flex Cloud activado",
-                        "${r.p4Name} ya puede guardar archivos aquí. Lo verás en la web de Flex OS y en Flex Phone › Flex Cloud.")
-                }
-                is AttachClient.Result.Failed -> {
-                    undo(app)
-                    runOnUiThread { if (!isFinishing) show(Step.FAILED, "No se activó", r.message) }
-                }
-            }
-        }, "flexcloud-attach").start()
-    }
-
-    /** Si no habia emparejamiento antes y no se consiguio, no se deja un servidor escuchando. */
-    private fun undo(app: android.content.Context) {
-        if (!hadPairing && !FlexCloudPhone.repo(app).isPaired()) {
-            FlexCloudPhone.setEnabled(app, false)
-            FlexStorageService.stop(app)
-        }
-    }
-
     override fun onDestroy() {
-        cancelled = true
+        // Solo se deja de OBSERVAR. El emparejamiento sigue (ver StorageAttach).
+        ui.cancel()
+        // Una pregunta sin responder (Confirm) no se queda esperando: si la persona se va, se olvida.
+        if (isFinishing && StorageAttach.state.value is StorageAttach.UiState.Confirm) StorageAttach.dismiss()
         super.onDestroy()
     }
 }

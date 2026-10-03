@@ -4441,7 +4441,8 @@ $('selDel').addEventListener('click', async () => {
 let pairT = 0;
 async function openPhoneSheet() {
   closeLayers();
-  FS.pairing = { until: 0, offer: '', waiting: false, before: phoneState(), beforeName: (FS.ov && FS.ov.phone && FS.ov.phone.name) || '' };
+  FS.pairing = { until: 0, offer: '', link: '', waiting: false, before: phoneState(), beforeName: (FS.ov && FS.ov.phone && FS.ov.phone.name) || '' };
+  $('phoneFallback').hidden = true;
   for (const id of ['pStep1', 'pStep2', 'pStep3']) $(id).className = '';
   $('pStep1').className = 'now';
   $('phoneState').textContent = 'Preparando una invitación…';
@@ -4459,10 +4460,50 @@ async function openPhoneSheet() {
   }
   FS.pairing.offer = r.json.offer;
   FS.pairing.until = Date.now() + (r.json.expiresIn || 180) * 1000;
+  FS.pairing.link = r.json.link;
   $('phoneOpen').href = r.json.link;
   $('phoneOpen').classList.remove('off');
+  $('phoneLink').value = r.json.link;
+  $('phoneIntent').href = phoneIntentUrl(r.json.link);
   pairCountdown();
   fsSchedule(1000);
+}
+// "intent://" es la forma que Chrome, Samsung Internet, Edge y Firefox para Android resuelven con el paquete
+// EXACTO de Flex Phone: si la app no esta, el navegador lo dice en vez de no hacer nada.
+function phoneIntentUrl(link) {
+  const m = /^flexstorage:\/\/attach\?(.*)$/.exec(link || '');
+  return m ? 'intent://attach?' + m[1] + '#Intent;scheme=flexstorage;package=com.flexos.flexphone;end' : '#';
+}
+// Tras pulsar «Abrir Flex Phone» el navegador NO avisa de si abrio la app o no. La unica senal es la
+// visibilidad de esta pagina: si el navegador pasa a otra app, la pagina se oculta; si a los ~1,8 s sigue
+// a la vista y el emparejamiento no avanzo, no se abrio, y se dice y se ofrecen los caminos que funcionan.
+let pairOpenT = 0;
+function pairWatchOpen() {
+  clearTimeout(pairOpenT);
+  const left = () => { clearTimeout(pairOpenT); document.removeEventListener('visibilitychange', onVis); };
+  const onVis = () => { if (document.hidden) left(); };
+  document.addEventListener('visibilitychange', onVis);
+  pairOpenT = setTimeout(() => {
+    left();
+    const p = FS.pairing;
+    if (!p || p.done || p.waiting || document.hidden) return;
+    $('phoneFallback').hidden = false;
+    $('phoneState').textContent = 'Flex Phone no se abrió. Sigue los pasos de abajo.';
+    $('phoneState').className = 'pstate bad';
+  }, 1800);
+}
+async function pairCopyLink() {
+  const link = (FS.pairing && FS.pairing.link) || $('phoneLink').value;
+  if (!link) return;
+  let ok = false;
+  try { if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(link); ok = true; } } catch (e) { /* sin permiso */ }
+  if (!ok) {
+    // http:// no es contexto seguro: no hay navigator.clipboard. Se selecciona el campo y se copia a la antigua.
+    const f = $('phoneLink');
+    f.focus(); f.select();
+    try { f.setSelectionRange(0, link.length); ok = document.execCommand('copy'); } catch (e) { ok = false; }
+  }
+  toast(ok ? 'Enlace copiado' : 'Mantén pulsado el enlace y elige Copiar');
 }
 function pairCountdown() {
   clearTimeout(pairT);
@@ -4488,6 +4529,8 @@ function pairProgress(before, now) {
   const ph = now.phone || {};
   if (ph.pairWaiting && !p.waiting) {
     p.waiting = true;
+    clearTimeout(pairOpenT);
+    $('phoneFallback').hidden = true;      // la app SI se abrio: el respaldo sobra
     $('pStep1').className = 'ok'; $('pStep2').className = 'now'; $('pStep3').className = 'now';
     $('phoneState').textContent = 'Compara el código del teléfono con el de la pantalla de Flex OS y acepta allí.';
     $('phoneState').className = 'pstate';
@@ -4524,13 +4567,20 @@ function pairProgress(before, now) {
 }
 function closePhoneSheet() {
   clearTimeout(pairT);
+  clearTimeout(pairOpenT);
+  $('phoneFallback').hidden = true;
   FS.pairing = null;
   if ($('phoneSheet').hidden) return;
   $('phoneSheet').hidden = true;
   scrim(false);
 }
 $('phoneCancel').addEventListener('click', closePhoneSheet);
-$('phoneOpen').addEventListener('click', (e) => { if ($('phoneOpen').classList.contains('off')) e.preventDefault(); });
+$('phoneOpen').addEventListener('click', (e) => {
+  if ($('phoneOpen').classList.contains('off')) { e.preventDefault(); return; }
+  pairWatchOpen();
+});
+$('phoneIntent').addEventListener('click', () => pairWatchOpen());
+$('phoneCopy').addEventListener('click', pairCopyLink);
 $('mPhone').addEventListener('click', () => { closeMenu(); openPhoneSheet(); });
 
 // ===========================================================================

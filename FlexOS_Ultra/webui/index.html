@@ -275,6 +275,21 @@
     <li id="pStep3">Acepta en la pantalla de Flex OS.</li>
   </ol>
   <p class="pstate" id="phoneState" role="status"></p>
+  <!-- Si el navegador no abre Flex Phone (no hay error visible: simplemente no pasa nada), aqui salen
+       los caminos que si funcionan. Solo se muestra tras pulsar y comprobar que la pagina sigue a la vista. -->
+  <div class="pfallback" id="phoneFallback" hidden role="group" aria-labelledby="phoneFbTitle">
+    <p class="pfb-t" id="phoneFbTitle">No se pudo abrir Flex Phone automáticamente</p>
+    <ol class="pfb-s">
+      <li>Comprueba que <b>Flex Phone</b> está instalada y actualizada (la versión con <b>Flex Cloud</b>).</li>
+      <li>Si abriste esta página desde la cámara o desde otra app, ábrela en <b>Chrome</b> o <b>Samsung Internet</b> (menú ⋮ › «Abrir en el navegador»).</li>
+      <li>O copia el enlace y pégalo en <b>Flex Phone › Flex Cloud › Usar este enlace</b>.</li>
+    </ol>
+    <input class="pfb-link" id="phoneLink" type="text" readonly spellcheck="false" aria-label="Enlace para Flex Phone">
+    <div class="sheet-actions">
+      <button class="btn" id="phoneCopy" type="button">Copiar enlace</button>
+      <a class="btn" id="phoneIntent" href="#" rel="noopener">Probar de otra forma</a>
+    </div>
+  </div>
   <div class="sheet-actions">
     <button class="btn" id="phoneCancel">Cerrar</button>
     <a class="btn primary" id="phoneOpen" href="#" rel="noopener">Abrir Flex Phone</a>

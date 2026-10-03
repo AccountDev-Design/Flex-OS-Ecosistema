@@ -411,6 +411,10 @@ body.selecting .bnav,body.cselecting .bnav{display:none}
 .pstate{min-height:1.3em;margin:6px 0 14px;font-size:14px;font-weight:600}
 .pstate.ok{color:var(--ok)}
 .pstate.bad{color:var(--err)}
+.pfallback{margin:0 0 14px;padding:12px 14px;border-radius:16px;border:1px solid var(--err);background:rgba(255,107,107,.08)}
+.pfb-t{margin:0 0 6px;font-weight:700;font-size:14px}
+.pfb-s{margin:0 0 10px;padding-left:20px;font-size:13px;line-height:1.45}
+.pfb-link{width:100%;box-sizing:border-box;margin:0 0 10px;padding:9px 10px;border-radius:10px;border:1px solid var(--edge);background:var(--glass);color:var(--txt);font:12px/1.3 ui-monospace,monospace}
 .btn.off{opacity:.45;pointer-events:none}
 .btn.danger{background:linear-gradient(180deg,#ff7b7b,#e65252);border-color:rgba(255,255,255,.2);color:#fff}
 

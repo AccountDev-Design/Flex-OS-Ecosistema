@@ -20,6 +20,7 @@ import android.os.PowerManager
 import android.util.Log
 import com.flexos.flexphone.MainActivity
 import com.flexos.flexphone.R
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -70,7 +71,13 @@ class FlexStorageService : Service() {
         fun isRunning(): Boolean = alive
     }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Un fallo dentro de una corrutina de este servicio NO puede tumbar la app: sin un
+    // CoroutineExceptionHandler la excepcion llega al manejador del hilo y Android MATA el
+    // proceso (y con el, el enlace de Flex Phone y un emparejamiento en curso).
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO +
+            CoroutineExceptionHandler { _, e -> Log.w(TAG, "corrutina del servicio fallo: ${e.javaClass.simpleName}") },
+    )
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var netCb: ConnectivityManager.NetworkCallback? = null
@@ -113,7 +120,9 @@ class FlexStorageService : Service() {
             val s = FlexCloudPhone.status.value
             val active = s.running && s.lastContactMs > 0 && System.currentTimeMillis() - s.lastContactMs < ACTIVE_MS
             if (active) acquireLocks() else releaseLocks()
+            val att = StorageAttach.state.value
             val want = when {
+                att is StorageAttach.UiState.Code -> "Emparejando: compara el código con el de Flex OS"
                 !s.running -> s.error ?: "Sin servidor"
                 active -> "Flex OS conectado" + (s.p4Name?.let { " · $it" } ?: "")
                 else -> waitingLine()

@@ -15,6 +15,8 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.flexos.flexphone.flexcloud.FlexCloudPhone
 import com.flexos.flexphone.flexcloud.FlexStorageService
+import com.flexos.flexphone.flexcloud.StorageAttach
+import com.flexos.flexphone.flexcloud.StorageAttachActivity
 import com.flexos.flexphone.ui.FlexTopBar
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -35,7 +37,12 @@ import kotlinx.coroutines.withContext
 fun FlexCloudScreen(nav: NavController) {
     val ctx = LocalContext.current
     val s by FlexCloudPhone.status.collectAsState()
-    var enabled by remember { mutableStateOf(FlexCloudPhone.isEnabled(ctx)) }
+    // "Activado" se OBSERVA en el estado (FlexCloudPhone.setEnabled lo publica): antes se
+    // leia de las preferencias cada 3 s, y tras emparejar la pantalla seguia diciendo
+    // "Sin activar" hasta el siguiente refresco.
+    val enabled = s.enabled
+    val attach by StorageAttach.state.collectAsState()
+    var linkText by remember { mutableStateOf("") }
     var quotaMsg by remember { mutableStateOf<String?>(null) }
     var confirmForget by remember { mutableStateOf(false) }
     var confirmWipe by remember { mutableStateOf(false) }
@@ -46,7 +53,6 @@ fun FlexCloudScreen(nav: NavController) {
     LaunchedEffect(Unit) {
         while (true) {
             withContext(Dispatchers.IO) { FlexCloudPhone.refresh(ctx) }
-            enabled = FlexCloudPhone.isEnabled(ctx)
             val pm = ctx.getSystemService(PowerManager::class.java)
             batteryOk = pm?.isIgnoringBatteryOptimizations(ctx.packageName) ?: true
             delay(3_000)
@@ -100,9 +106,32 @@ fun FlexCloudScreen(nav: NavController) {
                     ) { on ->
                         if (on) { FlexCloudPhone.setEnabled(ctx, true); FlexStorageService.start(ctx) }
                         else FlexStorageService.stop(ctx)
-                        enabled = on
                     }
                 }
+            }
+
+            // ---- un emparejamiento EN CURSO: se ve desde aqui aunque la pantalla del codigo se haya ido ----
+            when (val a = attach) {
+                is StorageAttach.UiState.Working, is StorageAttach.UiState.Code, is StorageAttach.UiState.Confirm -> {
+                    Notice(
+                        "Emparejando con Flex OS",
+                        when (a) {
+                            is StorageAttach.UiState.Code ->
+                                "Código ${a.sas.take(3)} ${a.sas.drop(3)}: compáralo con el de la pantalla de ${a.p4Name} y acéptalo allí."
+                            is StorageAttach.UiState.Confirm -> "Falta que confirmes que quieres compartir espacio con el Flex OS de ${a.p4Ip}."
+                            else -> "Conectando con Flex OS…"
+                        },
+                    )
+                    Button(
+                        onClick = {
+                            ctx.startActivity(Intent(ctx, StorageAttachActivity::class.java))
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Ver el emparejamiento") }
+                }
+                is StorageAttach.UiState.Done -> Notice("Emparejado", "${a.p4Name} ya puede guardar archivos aquí.")
+                is StorageAttach.UiState.Failed -> Notice(a.title, a.message, MaterialTheme.colorScheme.error)
+                else -> {}
             }
 
             if (!s.paired) {
@@ -112,6 +141,31 @@ fun FlexCloudScreen(nav: NavController) {
                         "y pulsa «Activar Flex Cloud en este teléfono». Después comprueba el código de 6 cifras " +
                         "y acéptalo en la pantalla de Flex OS.",
                 )
+                // ---- RESPALDO: si el navegador no abre Flex Phone, el enlace se pega aqui ----
+                GlassCard {
+                    Text("¿«Abrir Flex Phone» no hizo nada?", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Algunos navegadores no abren enlaces de aplicaciones. En la ventana de la web de Flex OS " +
+                            "pulsa «Copiar enlace», pégalo aquí y sigue desde este teléfono.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    androidx.compose.material3.OutlinedTextField(
+                        value = linkText,
+                        onValueChange = { linkText = it.take(300) },
+                        singleLine = true,
+                        label = { Text("Enlace de Flex OS (flexstorage://…)") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Button(
+                        onClick = {
+                            if (StorageAttach.offerText(ctx, linkText)) linkText = ""
+                            ctx.startActivity(Intent(ctx, StorageAttachActivity::class.java))
+                        },
+                        enabled = linkText.trim().startsWith("flexstorage://"),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Usar este enlace") }
+                }
             }
 
             // ---- espacio ----
@@ -213,7 +267,6 @@ fun FlexCloudScreen(nav: NavController) {
                 TextButton(onClick = {
                     FlexStorageService.stop(ctx)
                     FlexCloudPhone.forget(ctx)
-                    enabled = false
                     confirmForget = false
                 }) { Text("Olvidar") }
             },

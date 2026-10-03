@@ -164,6 +164,22 @@ async function until(page, fn, arg, ms = 20000) {
     check(hp === '127.0.0.1:' + hello.port && /^[0-9a-f]{32}$/.test(offer), 'el enlace lleva la direccion del P4 y una oferta de 128 bits (' + hp + ')');
     check(/Invitación válida [0-3]:\d\d · solo sirve una vez/.test(await page.textContent('#phoneState')), 'cuenta atras de la invitacion: ' + await page.textContent('#phoneState'));
     await shot('2_invitacion');
+
+    // "Abrir Flex Phone" NO avisa si el navegador no abrio la app (en este Chromium no hay ninguna
+    // app registrada para flexstorage://): la pagina lo detecta porque sigue a la vista y ofrece
+    // los caminos que SI funcionan, en vez de parecer un boton que no hace nada.
+    check(await page.isHidden('#phoneFallback'), 'el respaldo no estorba antes de pulsar');
+    check(/^intent:\/\/attach\?.*#Intent;scheme=flexstorage;package=com\.flexos\.flexphone;end$/.test(await page.getAttribute('#phoneIntent', 'href')),
+      'enlace alternativo intent:// con el paquete exacto de Flex Phone');
+    await page.evaluate(() => { document.getElementById('phoneOpen').addEventListener('click', (e) => e.preventDefault(), true); });
+    await page.click('#phoneOpen');
+    check(await until(page, () => !document.getElementById('phoneFallback').hidden, null, 6000),
+      'si Flex Phone no se abre, la web lo dice y ensena los pasos (sin boton mudo)');
+    check(/Flex Phone no se abrió/.test(await page.textContent('#phoneState')), 'estado: ' + await page.textContent('#phoneState'));
+    check((await page.inputValue('#phoneLink')) === href, 'el enlace completo esta a mano para copiarlo');
+    await page.click('#phoneCopy');
+    check(await until(page, () => /Enlace copiado|Mantén pulsado/.test(document.getElementById('toast').textContent), null, 3000),
+      'copiar el enlace da respuesta (copiado, o como hacerlo a mano)');
     const nP = phoneOut.lines.length;
     phone.stdin.write('attach ' + hp + ' ' + offer + '\n');
     const sasPhone = await phoneOut.wait((j) => j.sas, 30000, nP);
