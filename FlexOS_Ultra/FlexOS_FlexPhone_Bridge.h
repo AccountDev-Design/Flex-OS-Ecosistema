@@ -1250,6 +1250,36 @@ static void fphRenderDiag(){
   }
   y += 226;
 
+  // ---- REGISTRO DEL ENLACE ----
+  // Quien cerro cada conexion y por que, de lo mas reciente a lo mas viejo. Es el anillo en
+  // RAM de la tarea de red (FlexOS_FlexPhone_WiFi.h): lo que antes habia que sacar por el
+  // puerto serie con un cable y un PC. Solo hechos del enlace (numero de conexion, duracion,
+  // motivo): nunca contenido, claves ni el codigo de emparejamiento.
+  fgSectionHeader(FPH_MX + 4, y, LI() == 1 ? "LINK LOG" : "REGISTRO DEL ENLACE");
+  y += 22;
+  {
+    const uint8_t total = flexPhoneWifiLogCount();
+    const uint8_t shown = total < 6 ? total : 6;
+    const int h = shown ? 16 + shown * 24 : 52;
+    fgCard(FPH_MX, y, FPH_CW, h);
+    if(!shown){
+      drawText(FPH_MX + 18, y + 18, LI() == 1 ? "Nothing yet" : "Todavia nada", 1, TH_MUTE);
+    } else {
+      int ry3 = y + 14;
+      for(uint8_t i = 0; i < shown; i++){
+        FpwEvent e; char line[96];
+        if(!flexPhoneWifiLogGet(i, &e)) break;
+        flexPhoneWifiLogLine(e, line, sizeof(line));
+        // Rojo: un cierre; ambar: un fallo de conexion o sin Wi-Fi; normal: una apertura.
+        fgTextEllipsis(FPH_MX + 18, ry3, FPH_CW - 36, line, 1,
+                       e.kind == FPWE_CLOSE ? TH_ERR
+                       : (e.kind == FPWE_CONNECT_FAIL || e.kind == FPWE_WIFI_LOST) ? TH_WARN : TH_TXT);
+        ry3 += 24;
+      }
+    }
+    y += h + 12;
+  }
+
   fphScr.content = y - y0;
   fgScrollBar(&fphScr);
 }

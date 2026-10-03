@@ -40,6 +40,7 @@ struct Loop {
   FlexFrameRing toFlexOS;
   uint8_t  st = FLP_TC_DOWN;
   bool     phoneAnswers = true;     // se puede apagar para simular un mudo
+  bool     failSend = false;        // el canal sigue ABIERTO pero no admite mas tramas (EAGAIN)
   // Estado del telefono simulado
   char     phoneId[FLP_PEERID_MAX] = "phone-sim";
   char     flexosId[FLXA_ID_MAX]   = {0};
@@ -71,6 +72,7 @@ static uint16_t loopMtu(FlexPhoneTransport* t){ (void)t; return FLNK_MAX_FRAME; 
 static int loopSend(FlexPhoneTransport* t, const uint8_t* f, size_t n){
   Loop* L2 = (Loop*)t->ctx;
   if(L2->st != FLP_TC_OPEN) return FLP_TR_ECLOSED;
+  if(L2->failSend) return FLP_TR_EAGAIN;
   if(L2->sniffN < 32 && n <= FLNK_MAX_FRAME){
     std::memcpy(L2->sniff[L2->sniffN], f, n);
     L2->sniffLen[L2->sniffN] = (uint16_t)n;
@@ -1156,6 +1158,93 @@ static void testRing(){
   CHECK(r.nDropped > 0, "no conto la trama que no cabia");
 }
 
+// Cuenta cuantas tramas de `type` SALEN al canal mientras corren `ms` de reloj simulado.
+static int countSent(uint8_t type, uint32_t& t, uint32_t ms){
+  int n = 0;
+  const uint32_t t0 = t;
+  while(t - t0 < ms){
+    gLoop.sniffN = 0;
+    flexPhoneLinkTick(&L, &M, t);
+    for(int k = 0; k < gLoop.sniffN; k++){
+      FlexLinkHeader h; const uint8_t* p = nullptr; size_t pn = 0;
+      if(flexLinkReadFrame(gLoop.sniff[k], gLoop.sniffLen[k], &h, &p, &pn) != FLNK_OK) continue;
+      if(h.type == type) n++;
+    }
+    phoneStep();
+    t += 50;
+  }
+  return n;
+}
+
+static void testAckedCommandsSentOnce(){
+  std::printf("[link] una orden con acuse se entrega UNA vez (antes salia hasta cinco)\n");
+  uint32_t t = 300000;
+  pairUp(t);
+  CHECK(L.state == FLP_LS_READY, "no llego a READY");
+  gLoop.sniffN = 0;
+
+  // "Iniciar relay" y "Hacer sonar": las dos van con acuse, y el telefono NO contesta ningun ACK.
+  CHECK(flexPhoneLinkSend(&L, FLNK_T_RELAY_START, NULL, 0, true), "no se encolo RELAY_START");
+  CHECK(flexPhoneLinkSend(&L, FLNK_T_FIND_START,  NULL, 0, true), "no se encolo FIND_START");
+  // El plazo ENTERO de reintentos antiguos (0,5 + 1 + 2 + 4 + 8 s) y mas.
+  int relay = 0, find = 0;
+  {
+    const uint32_t t0 = t;
+    while(t - t0 < 20000){
+      gLoop.sniffN = 0;
+      flexPhoneLinkTick(&L, &M, t);
+      for(int k = 0; k < gLoop.sniffN; k++){
+        FlexLinkHeader h; const uint8_t* p = nullptr; size_t pn = 0;
+        if(flexLinkReadFrame(gLoop.sniff[k], gLoop.sniffLen[k], &h, &p, &pn) != FLNK_OK) continue;
+        if(h.type == FLNK_T_RELAY_START) relay++;
+        if(h.type == FLNK_T_FIND_START)  find++;
+      }
+      phoneStep();
+      t += 50;
+    }
+  }
+  CHECK(relay == 1, "RELAY_START salio %d veces (se encolo una)", relay);
+  CHECK(find == 1,  "FIND_START salio %d veces (se encolo una)", find);
+  CHECK(L.state == FLP_LS_READY, "mandar ordenes tumbo el enlace (%s)", flexPhoneLinkStateName(L.state));
+}
+
+static void testUndeliveredCommandIsRetried(){
+  std::printf("[link] una orden que el canal NO pudo entregar si se reintenta, y sale una vez\n");
+  uint32_t t = 400000;
+  pairUp(t);
+  CHECK(L.state == FLP_LS_READY, "no llego a READY");
+  // El canal sigue abierto pero no admite tramas (cola del transporte llena): deliver() falla y
+  // el enlace NO se cae; la orden espera y se reintenta con espera progresiva.
+  gLoop.failSend = true;
+  CHECK(flexPhoneLinkSend(&L, FLNK_T_FIND_START, NULL, 0, true), "no se encolo");
+  int sentWhileDown = countSent(FLNK_T_FIND_START, t, 1200);
+  CHECK(sentWhileDown == 0, "salio una trama por un canal que no admite nada (%d)", sentWhileDown);
+  CHECK(L.state == FLP_LS_READY, "un canal lleno tumbo el enlace (%s)", flexPhoneLinkStateName(L.state));
+  gLoop.failSend = false;                        // el canal vuelve
+  const int after = countSent(FLNK_T_FIND_START, t, 6000);
+  CHECK(after == 1, "tras volver el canal la orden salio %d veces (se esperaba 1)", after);
+}
+
+static void testAckFreesPendingCommand(){
+  std::printf("[link] un ACK del telefono libera la orden que aun esperaba salida\n");
+  uint32_t t = 500000;
+  pairUp(t);
+  CHECK(L.state == FLP_LS_READY, "no llego a READY");
+  gLoop.failSend = true;                         // no puede salir todavia
+  CHECK(flexPhoneLinkSend(&L, FLNK_T_RELAY_STOP, NULL, 0, true), "no se encolo");
+  flexPhoneLinkTick(&L, &M, t);
+  int slot = -1;
+  for(int i = 0; i < FLP_LINK_TXQ; i++) if(L.tx[i].used && L.tx[i].type == FLNK_T_RELAY_STOP) slot = i;
+  CHECK(slot >= 0, "la orden no esta esperando salida");
+  if(slot >= 0){
+    const uint16_t pk = L.tx[slot].packet;
+    uint8_t body[2] = { (uint8_t)(pk & 0xFF), (uint8_t)(pk >> 8) };
+    gLoop.failSend = false;
+    CHECK(feed(FLNK_T_ACK, body, sizeof(body), 9000, t, L.session), "el ACK no se acepto");
+    CHECK(!L.tx[slot].used, "el ACK no libero la orden");
+  }
+}
+
 int main(){
   std::printf("\n=== FlexOS · maquina de estados del enlace de Flex Phone ===\n");
   testCapability();
@@ -1173,6 +1262,9 @@ int main(){
   testSessionNonceVaries();
   testIdleSessionHolds();
   testResume();
+  testAckedCommandsSentOnce();
+  testUndeliveredCommandIsRetried();
+  testAckFreesPendingCommand();
   testAccessControl();
   testHostileFrames();
   testLatency();
