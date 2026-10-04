@@ -111,6 +111,7 @@ enum { CMD_NONE = 0, CMD_LIST, CMD_MORE, CMD_REFRESH, CMD_MKDIR, CMD_RENAME, CMD
 struct Cmd {
   uint8_t  type, view;
   bool     folder;
+  bool     play;                // leer por /files/<id>/playable (la version del perfil o el original ya compatible)
   uint32_t opId;
   uint64_t size;
   char     id[FCL_ID_MAX];
@@ -142,6 +143,7 @@ struct Stream_ {
   uint8_t  state;
   char     err[96];
   char     fileId[FCL_ID_MAX];
+  bool     play;                // por /files/<id>/playable (el telefono ya preparo lo multimedia)
   uint32_t size;
   uint8_t* arena;
   FclCache cache;
@@ -1313,7 +1315,8 @@ static void fetchView(const Cmd& c){
   WiFiClient* cli = newClient(); HTTPClient h;
   h.setTimeout(HTTP_TIMEOUT); h.useHTTP10(true);
   char url[256], hdr[80];
-  snprintf(url, sizeof(url), "%s/download/%s", base, c.id);
+  if(c.play) snprintf(url, sizeof(url), "%s/files/%s/playable", base, c.id);   // preview o version del perfil, no el original
+  else       snprintf(url, sizeof(url), "%s/download/%s", base, c.id);
   bool ok = h.begin(*cli, url);
   snprintf(hdr, sizeof(hdr), "Bearer %s", bearer); memset(bearer, 0, sizeof(bearer));
   if(ok){ h.addHeader("Authorization", hdr); h.addHeader("Accept-Encoding", "identity"); }
@@ -1615,7 +1618,7 @@ static void stSetState(uint8_t state, const char* err){
   stLock(); gSt.state = state; snprintf(gSt.err, sizeof(gSt.err), "%s", err ? err : ""); stUnlock();
 }
 
-static bool stConnOpen(const char* fileId, uint32_t off, uint32_t size){
+static bool stConnOpen(const char* fileId, uint32_t off, uint32_t size, bool play){
   stConnClose();
   if(!roomForConn()) return false;
   char bearer[64], why[FCL_CODE_MAX] = "", base[160];
@@ -1626,7 +1629,8 @@ static bool stConnOpen(const char* fileId, uint32_t off, uint32_t size){
   gStNet.http->setConnectTimeout(HTTP_TIMEOUT);
   gStNet.http->useHTTP10(true);                 // cuerpo sin trocear: se lee tal cual
   char url[256], hdr[80];
-  snprintf(url, sizeof(url), "%s/download/%s", base, fileId);
+  if(play) snprintf(url, sizeof(url), "%s/files/%s/playable", base, fileId);
+  else     snprintf(url, sizeof(url), "%s/download/%s", base, fileId);
   if(!gStNet.http->begin(*gStNet.cli, url)){ memset(bearer, 0, sizeof(bearer)); stConnClose(); return false; }
   snprintf(hdr, sizeof(hdr), "Bearer %s", bearer); memset(bearer, 0, sizeof(bearer));
   gStNet.http->addHeader("Authorization", hdr); memset(hdr, 0, sizeof(hdr));
@@ -1651,6 +1655,7 @@ static void streamStep(){
   stLock();
   bool open = gSt.open;
   uint32_t gen = gSt.gen, size = gSt.size, off = 0, len = 0;
+  bool play = gSt.play;
   char fileId[FCL_ID_MAX]; snprintf(fileId, sizeof(fileId), "%s", gSt.fileId);
   int slot = open ? fclCacheNextFetch(&gSt.cache, &off, &len) : -1;
   uint8_t* dst = slot >= 0 ? fclCacheSlot(&gSt.cache, slot) : nullptr;
@@ -1676,7 +1681,7 @@ static void streamStep(){
     return;
   }
   if(!gStNet.http || gStNet.pos != off){
-    if(!stConnOpen(fileId, off, size)){
+    if(!stConnOpen(fileId, off, size, play)){
       giveBack();
       if(gStNet.fails < 250) gStNet.fails++;
       gStNet.retryAt = millis() + (gStNet.fails < 4 ? 500u * gStNet.fails : fclBackoffMs(gStNet.fails - 3));
@@ -1974,7 +1979,11 @@ static uint32_t opFor(uint8_t type, const FclItem* it, const char* text, const c
   Cmd c; memset(&c, 0, sizeof(c));
   c.type = type;
   lock(); c.opId = gNextOp++; unlock();
-  if(it){ snprintf(c.id, sizeof(c.id), "%s", it->id); c.folder = it->isFolder; c.size = it->size; snprintf(c.sha, sizeof(c.sha), "%s", it->sha256); }
+  if(it){
+    snprintf(c.id, sizeof(c.id), "%s", it->id); c.folder = it->isFolder; c.size = it->size; snprintf(c.sha, sizeof(c.sha), "%s", it->sha256);
+    // Para VER una foto se pide la vista ligera que preparo el telefono (con SU tamano y SU SHA-256), no el original.
+    if(type == CMD_VIEW && fclPlayable(it)){ c.play = true; c.size = fclPlaySize(it); snprintf(c.sha, sizeof(c.sha), "%s", fclPlaySha(it)); }
+  }
   if(id) snprintf(c.id, sizeof(c.id), "%s", id);
   if(text) fclCopyUtf8(c.text, sizeof(c.text), text);
   return pushCmd(c) ? c.opId : 0;
@@ -1987,7 +1996,19 @@ uint32_t flexCloudRename(const FclItem* it, const char* newName){ return it && n
 uint32_t flexCloudTrash(const FclItem* it){ return it ? opFor(CMD_TRASH, it, nullptr) : 0; }
 uint32_t flexCloudRestore(const FclItem* it){ return it ? opFor(CMD_RESTORE, it, nullptr) : 0; }
 uint32_t flexCloudDeleteForever(const FclItem* it){ return it ? opFor(CMD_DELETE, it, nullptr) : 0; }
-uint32_t flexCloudFetchForView(const FclItem* it){ return it && !it->isFolder ? opFor(CMD_VIEW, it, it->name) : 0; }
+uint32_t flexCloudFetchForView(const FclItem* it){
+  if(!it || it->isFolder) return 0;
+  char nm[FCL_NAME_MAX];
+  snprintf(nm, sizeof(nm), "%s", it->name);
+  if(it->playState == FCL_PS_READY && it->kind == FCL_K_PHOTO){
+    // Lo que llega es un JPEG aunque el original sea PNG/HEIC: el visor lo reconoce por su extension.
+    char* dot = strrchr(nm, '.');
+    if(dot && dot != nm) *dot = 0;
+    size_t l = strlen(nm);
+    if(l + 5 < sizeof(nm)) snprintf(nm + l, sizeof(nm) - l, ".jpg");
+  }
+  return opFor(CMD_VIEW, it, nm);
+}
 
 static uint32_t addJob(uint8_t type, const char* localPath, const char* name, const char* parentId, const char* remoteId,
                        uint64_t size, const char* sha, uint32_t mlId, uint8_t flags){
@@ -2183,7 +2204,8 @@ uint32_t flexCloudThumbGen(){ lock(); uint32_t g = gThumbGen; unlock(); return g
 
 bool flexCloudStreamOpen(const FclItem* it){
   if(!destUsable()) return false;                               // ver opFor
-  if(!it || it->isFolder || !gStLock || it->size == 0 || it->size > 0xFFFFFFF0ull) return false;
+  const uint64_t playSz = fclPlaySize(it);           // el tamano de lo que se va a LEER (version del perfil o original)
+  if(!it || it->isFolder || !gStLock || playSz == 0 || playSz > 0xFFFFFFF0ull) return false;
   stLock();
   if(!gSt.arena && !gSt.busy){
     // UNA reserva, la primera vez: se reutiliza en todos los videos.
@@ -2193,12 +2215,13 @@ bool flexCloudStreamOpen(const FclItem* it){
   if(!ensureStreamTask()){ stUnlock(); return false; }     // sin hilo no hay streaming: el visor lo dice
   gSt.open = true;
   gSt.gen++;
-  gSt.size = (uint32_t)it->size;
+  gSt.size = (uint32_t)playSz;
+  gSt.play = fclPlayable(it);
   snprintf(gSt.fileId, sizeof(gSt.fileId), "%s", it->id);
   fclCacheInit(&gSt.cache, gSt.arena, FLEX_CLOUD_STREAM_BLOCK, FLEX_CLOUD_STREAM_BLOCKS, gSt.size);
   gSt.state = FCS_OPENING; gSt.err[0] = 0;
   stUnlock();
-  Serial.printf("[CLOUD] streaming: %s (%lu bytes)\n", it->id, (unsigned long)it->size);
+  Serial.printf("[CLOUD] streaming: %s (%lu bytes%s)\n", it->id, (unsigned long)playSz, fclPlayable(it) ? ", version del perfil" : "");
   stNotify();
   return true;
 }

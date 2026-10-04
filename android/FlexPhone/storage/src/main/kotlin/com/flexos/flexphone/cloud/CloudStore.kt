@@ -351,8 +351,8 @@ class CloudStore(
     private fun playableView(f: FileRec, p: Playable): Map<String, Any?> {
         val m = linkedMapOf<String, Any?>("state" to p.state, "plan" to p.plan, "profile" to MEDIA_PROFILE)
         when (p.state) {
-            "native" -> { m["size"] = f.size; m["mime"] = f.mime; f.metadata?.let { md -> for (k in PLAYABLE_FACTS) md[k]?.let { v -> m[k] = v } } }
-            "ready" -> { m["size"] = p.size; m["mime"] = p.mime; p.meta?.let { md -> for (k in PLAYABLE_FACTS) md[k]?.let { v -> m[k] = v } } }
+            "native" -> { m["size"] = f.size; m["mime"] = f.mime; m["sha256"] = f.sha256; f.metadata?.let { md -> for (k in PLAYABLE_FACTS) md[k]?.let { v -> m[k] = v } } }
+            "ready" -> { m["size"] = p.size; m["mime"] = p.mime; p.sha256?.let { h -> m["sha256"] = h }; p.meta?.let { md -> for (k in PLAYABLE_FACTS) md[k]?.let { v -> m[k] = v } } }
             "preparing" -> m["progress"] = p.progress
             "failed", "unsupported", "corrupt" -> m["reason"] = p.reason
         }

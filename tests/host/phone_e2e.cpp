@@ -28,6 +28,9 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <map>
+#include <unistd.h>
+#include <sys/stat.h>
 
 void fsStubReset();
 
@@ -87,6 +90,31 @@ static std::vector<FclItem> listNow(uint8_t view, const char* folder){
 }
 static const FclItem* byName(const std::vector<FclItem>& v, const char* name){ for(auto& i : v) if(!strcmp(i.name, name)) return &i; return nullptr; }
 static FlexCloudStatus status(){ FlexCloudStatus s; flexCloudStatus(&s); return s; }
+
+
+// ------------------------------------------------- lo multimedia que prepara el telefono
+static std::string readReal(const std::string& path){
+  std::string out; FILE* f = fopen(path.c_str(), "rb"); if(!f) return out;
+  char b[65536]; size_t n; while((n = fread(b, 1, sizeof(b), f)) > 0) out.append(b, n);
+  fclose(f); return out;
+}
+static void writeReal(const std::string& path, const std::string& data){ FILE* f = fopen(path.c_str(), "wb"); if(f){ fwrite(data.data(), 1, data.size(), f); fclose(f); } }
+// Lee TODO lo que el P4 reproduciria por rangos (lo que lee el visor o Musica), pidiendo los bloques como lo hace la cache.
+static bool streamAll(const FclItem& item, std::string& out){
+  out.clear();
+  if(!flexCloudStreamOpen(&item)) return false;
+  uint32_t size = flexCloudStreamSize();
+  uint8_t buf[16384]; uint32_t off = 0; int spins = 0;
+  while(off < size){
+    uint32_t want = size - off < sizeof(buf) ? size - off : (uint32_t)sizeof(buf);
+    int r = flexCloudStreamRead(off, buf, want);
+    if(r < 0){ if(spins++ > 200000) break; flexCloudTestStreamStep(); netstubAdvance(2); usleep(100); continue; }
+    if(r == 0) break;
+    out.append((const char*)buf, (size_t)r); off += (uint32_t)r; spins = 0;
+  }
+  flexCloudStreamClose();
+  return off == size;
+}
 
 // El telefono emparejado, como lo dejaria el emparejamiento en la NVS.
 static void writePhone(const char* keyHex){
@@ -242,6 +270,113 @@ int main(){
   CHECK(e && e->ok, "borrada para siempre");
   pumpUntil([&]{ return status().quota.usedBytes < used0; }, 400);
   CHECK(status().quota.usedBytes + photo.size() <= used0 + 4096, "el espacio vuelve a la cuota del telefono");
+
+
+  // ---- LO MULTIMEDIA QUE EL TELEFONO PREPARA PARA EL P4 (analiza, convierte y sirve /files/:id/playable)
+  if(const char* mdir = getenv("PHONE_E2E_MEDIA_DIR")){
+    printf("-- multimedia: el telefono analiza y convierte; el P4 lo abre con SU codigo --\n");
+    std::string dir = mdir;
+    const char* names[] = { "m_h264.mp4", "m_native.avi", "m_png.png", "m_prog.jpg", "m_big.jpg", "m_wav24.wav", "m_ima.wav", "m_aac.m4a", "m_cut.jpg", "m_h264.avi" };
+    std::map<std::string, std::string> orig;
+    for(const char* nm : names){
+      std::string d = readReal(dir + "/" + nm);
+      CHECK(!d.empty(), nm);
+      orig[nm] = d;
+      std::string lp = std::string("/Fotos/") + nm;
+      putLocal(lp.c_str(), d);
+      uint32_t u = flexCloudUpload(lp.c_str(), nm, "root", 0, 0);
+      const FlexCloudEvent* ue = waitAny(u, FCE_UPLOAD_DONE, FCE_UPLOAD_FAILED, 40000);
+      CHECK(ue != nullptr, "subido al telefono");
+    }
+    // El telefono trabaja en SU hilo (tiempo real): se espera a que ninguno quede en cola.
+    std::vector<FclItem> ml;
+    bool settledAll = false;
+    for(int t = 0; t < 400 && !settledAll; t++){
+      ml = listNow(FCL_VIEW_FOLDER, "root");
+      settledAll = true; int seen = 0;
+      for(const char* nm : names){
+        const FclItem* x = byName(ml, nm);
+        if(!x) { settledAll = false; continue; }
+        seen++;
+        if(x->playState == FCL_PS_UNKNOWN || x->playState == FCL_PS_PENDING || x->playState == FCL_PS_PREPARING) settledAll = false;
+      }
+      if(!settledAll) usleep(50000);
+    }
+    CHECK(settledAll, "el telefono dejo todos preparados (o dicho por que no)");
+    auto get = [&](const char* nm) -> FclItem { const FclItem* x = byName(ml, nm); FclItem z; memset(&z, 0, sizeof(z)); if(x) z = *x; return z; };
+    const char* why = nullptr;
+    std::string got;
+    std::string outDir = dir + "/out";
+    mkdir(outDir.c_str(), 0755);
+
+    // vídeo H.264: el P4 no lo decodifica; el telefono lo hizo AVI MJPEG y el P4 lo lee por /playable con rangos
+    FclItem h264 = get("m_h264.mp4");
+    CHECK(h264.playState == FCL_PS_READY && h264.kind == FCL_K_VIDEO, "MP4 H.264: el telefono lo dejo READY");
+    CHECK(fclOpenAction(&h264, &why) == FCL_OPEN_STREAM, "el MP4 se abre en el reproductor de video (antes: 'solo AVI MJPEG')");
+    CHECK(h264.size == orig["m_h264.mp4"].size() && h264.playSize != h264.size, "el original conserva su tamano; se lee la version");
+    CHECK(h264.hasThumb, "miniatura generada por el telefono");
+    CHECK(streamAll(h264, got) && got.size() == h264.playSize, "streaming de la version: todos los bytes");
+    CHECK(got.compare(0, 4, "RIFF") == 0 && got.compare(8, 4, "AVI ") == 0, "es un AVI");
+    CHECK(sha256hex(got) == h264.playSha, "con el SHA-256 que el telefono anuncia");
+    writeReal(outDir + "/h264.avi", got);
+
+    // AVI MJPEG ya compatible: NO se convierte; se lee el original
+    FclItem nat = get("m_native.avi");
+    CHECK(nat.playState == FCL_PS_NATIVE && fclOpenAction(&nat, &why) == FCL_OPEN_STREAM, "AVI MJPEG compatible: native, sin conversion");
+    CHECK(streamAll(nat, got) && got == orig["m_native.avi"], "se reproduce el ORIGINAL byte a byte");
+    CHECK(nat.hasThumb, "y tiene miniatura");
+    writeReal(outDir + "/native.avi", got);
+
+    // foto PNG y JPEG progresivo: el visor recibe un JPEG baseline ligero
+    FclItem png = get("m_png.png");
+    CHECK(png.playState == FCL_PS_READY && fclOpenAction(&png, &why) == FCL_OPEN_PHOTO, "PNG: READY y se abre como foto");
+    uint32_t vop = flexCloudFetchForView(&png);
+    e = waitAny(vop, FCE_VIEW_READY, FCE_VIEW_FAILED, 4000);
+    std::string pv = e ? localFile(e->localPath) : "";
+    CHECK(e && std::string(e->localPath).size() > 4 && std::string(e->localPath).substr(strlen(e->localPath) - 4) == ".jpg", "el visor recibe un .jpg (la extension de lo que llega)");
+    CHECK(pv.size() > 3 && (uint8_t)pv[0] == 0xFF && (uint8_t)pv[1] == 0xD8 && sha256hex(pv) == png.playSha, "es JPEG y con la huella de la version");
+    writeReal(outDir + "/png.jpg", pv);
+    FclItem prog = get("m_prog.jpg");
+    CHECK(prog.playState == FCL_PS_READY, "JPEG progresivo: el telefono lo paso a baseline");
+    vop = flexCloudFetchForView(&prog);
+    e = waitAny(vop, FCE_VIEW_READY, FCE_VIEW_FAILED, 4000);
+    pv = e ? localFile(e->localPath) : "";
+    CHECK(!pv.empty(), "la foto progresiva se ve");
+    writeReal(outDir + "/prog.jpg", pv);
+    FclItem big = get("m_big.jpg");
+    CHECK(big.playState == FCL_PS_READY && big.playSize < big.size, "foto grande: vista previa ligera, mucho menos que el original");
+    vop = flexCloudFetchForView(&big);
+    e = waitAny(vop, FCE_VIEW_READY, FCE_VIEW_FAILED, 4000);
+    CHECK(e && localFile(e->localPath).size() == big.playSize, "el visor descarga SOLO la vista previa");
+
+    // audio: WAV de 24 bits y AAC pasan a WAV IMA; el WAV IMA ya valia
+    FclItem w24 = get("m_wav24.wav");
+    CHECK(w24.playState == FCL_PS_READY && fclOpenAction(&w24, &why) == FCL_OPEN_AUDIO, "WAV 24 bits: READY y suena en Musica");
+    CHECK(streamAll(w24, got) && got.size() == w24.playSize && got.compare(8, 4, "WAVE") == 0, "streaming del WAV preparado");
+    writeReal(outDir + "/wav24.wav", got);
+    FclItem aac = get("m_aac.m4a");
+    CHECK(aac.playState == FCL_PS_READY && fclOpenAction(&aac, &why) == FCL_OPEN_AUDIO, "AAC: el telefono lo paso a WAV");
+    CHECK(streamAll(aac, got), "streaming del audio convertido");
+    writeReal(outDir + "/aac.wav", got);
+    FclItem ima = get("m_ima.wav");
+    CHECK(ima.playState == FCL_PS_NATIVE && fclOpenAction(&ima, &why) == FCL_OPEN_AUDIO, "WAV IMA: native");
+
+    // lo roto o imposible se dice, aunque la extension diga lo contrario
+    FclItem cut = get("m_cut.jpg");
+    CHECK(cut.playState == FCL_PS_CORRUPT && fclOpenAction(&cut, &why) == FCL_OPEN_MENU && why && strstr(why, "cortado"), "JPEG cortado: no se intenta y se dice por que");
+    FclItem fake = get("m_h264.avi");
+    CHECK(fake.playState == FCL_PS_UNSUPPORTED && fclOpenAction(&fake, &why) == FCL_OPEN_MENU && why && strstr(why, "h264"), "'.avi' con H.264: no se reproduce y se dice");
+
+    // el original sigue siendo descargable tal cual
+    uint32_t dlo = flexCloudDownload(&h264, FCL_JF_TO_LIBRARY);
+    e = waitAny(dlo, FCE_DOWNLOAD_DONE, FCE_DOWNLOAD_FAILED, 60000);
+    CHECK(e && localFile(e->localPath) == orig["m_h264.mp4"], "'Descargar a Flex OS' trae el ORIGINAL, no la version");
+
+    // se limpia: la cuota vuelve (versiones incluidas)
+    ml = listNow(FCL_VIEW_FOLDER, "root");
+    for(const char* nm : names){ FclItem x = get(nm); if(x.id[0]){ uint32_t d = flexCloudDeleteForever(&x); waitAny(d, FCE_OP_DONE, FCE_NONE, 400); } }
+    CHECK(pumpUntil([&]{ return status().quota.usedBytes <= used0 + 4096; }, 2000), "la cuota vuelve al punto de partida: los originales Y sus versiones se borraron");
+  }
 
   // ---- la cuota del telefono es real: lo que no cabe no entra
   uint64_t avail = status().quota.availableBytes;

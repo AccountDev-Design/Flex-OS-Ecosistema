@@ -28,6 +28,16 @@ fun main(args: Array<String>) {
     val os = if (free != null) ObjectStore(File(dir, "data"), { free }) else ObjectStore(File(dir, "data"))
     val store = CloudStore(os, File(dir, "meta"), CloudConfig(quotaBytes = quota, deviceMarginBytes = 0), log = { System.err.println("[telefono] $it") })
     store.recover()
+    // FLEX_DEV_MEDIA=1: el telefono prepara lo multimedia (analiza y convierte) como en la app. Sin el, es el servidor de siempre.
+    // Los decodificadores de H.264 y AAC no existen en la JVM: se sustituyen por fuentes sinteticas (la cola, el AVI y el WAV son los reales).
+    if (System.getenv("FLEX_DEV_MEDIA") == "1") {
+        val conv = com.flexos.flexphone.cloud.media.StandardConverter(
+            com.flexos.flexphone.cloud.media.JvmImageCodec(),
+            videoSource = { com.flexos.flexphone.cloud.media.FakeVideoSource(1280, 720, 0, 48, 24.0) },
+            audioSource = { com.flexos.flexphone.cloud.media.FakeAudioSource(44100, 2, 2.0) },
+        )
+        com.flexos.flexphone.cloud.media.MediaPipeline(store, conv, log = { System.err.println("[telefono] $it") }).start()
+    }
     val repo = if (args[2] == "-") MemoryPairingRepo() else {
         val key = StorageCrypto.unhex(args[2], 32) ?: error("clave no valida")
         MemoryPairingRepo(P4Pairing(args[1], "Flex OS (pruebas)", key, "127.0.0.1:8080", System.currentTimeMillis()))

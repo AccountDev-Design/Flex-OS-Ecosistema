@@ -224,6 +224,22 @@ static bool readItem(const cJSON* o, FclItem* it){
   it->hasThumb = jbool(o, "hasThumbnail");
   const char* src = jstr(o, "source");
   it->fromDevice = src && !strcmp(src, "device");
+  const cJSON* pb = cJSON_GetObjectItemCaseSensitive(o, "playable");
+  if(cJSON_IsObject(pb)){
+    const char* st = jstr(pb, "state");
+    it->playState = !st ? FCL_PS_UNKNOWN : !strcmp(st, "native") ? FCL_PS_NATIVE : !strcmp(st, "ready") ? FCL_PS_READY
+                  : !strcmp(st, "pending") ? FCL_PS_PENDING : !strcmp(st, "preparing") ? FCL_PS_PREPARING
+                  : !strcmp(st, "failed") ? FCL_PS_FAILED : !strcmp(st, "unsupported") ? FCL_PS_UNSUPPORTED
+                  : !strcmp(st, "corrupt") ? FCL_PS_CORRUPT : FCL_PS_UNKNOWN;
+    double pr = jnum(pb, "progress", 0);
+    it->playProgress = pr > 0 ? (pr > 99 ? 99 : (uint8_t)pr) : 0;
+    it->playSize = jbytes(pb, "size");
+    const char* ps = jstr(pb, "sha256");
+    if(hex64(ps)) snprintf(it->playSha, sizeof(it->playSha), "%s", ps);
+    jcopy(pb, "reason", it->playReason, sizeof(it->playReason));
+    // Lo que se lee por /playable sin tamano no se puede pedir por rangos: se trata como "no se sabe".
+    if((it->playState == FCL_PS_NATIVE || it->playState == FCL_PS_READY) && it->playSize == 0) it->playState = FCL_PS_UNKNOWN;
+  }
   const cJSON* m = cJSON_GetObjectItemCaseSensitive(o, "metadata");
   if(cJSON_IsObject(m)){
     double w = jnum(m, "width", 0), h = jnum(m, "height", 0), d = jnum(m, "durationMs", 0);
@@ -866,10 +882,67 @@ static bool endsWithCi(const char* s, const char* ext){
   return true;
 }
 
+bool fclPlayable(const FclItem* it){ return it && (it->playState == FCL_PS_NATIVE || it->playState == FCL_PS_READY); }
+uint64_t fclPlaySize(const FclItem* it){ return it ? (fclPlayable(it) && it->playSize ? it->playSize : it->size) : 0; }
+const char* fclPlaySha(const FclItem* it){
+  if(!it) return "";
+  return fclPlayable(it) && it->playSha[0] ? it->playSha : it->sha256;
+}
+
+void fclPlayLine(const FclItem* it, char* out, size_t cap){
+  if(!out || !cap) return;
+  out[0] = 0;
+  if(!it || it->isFolder) return;
+  switch(it->playState){
+    case FCL_PS_NATIVE:      snprintf(out, cap, "Compatible con Flex OS"); break;
+    case FCL_PS_READY:       snprintf(out, cap, "Preparado para Flex OS"); break;
+    case FCL_PS_PENDING:     snprintf(out, cap, "En cola para prepararse"); break;
+    case FCL_PS_PREPARING:   snprintf(out, cap, "Preparando para Flex OS... %u %%", (unsigned)it->playProgress); break;
+    case FCL_PS_FAILED:      snprintf(out, cap, "No se pudo preparar"); break;
+    case FCL_PS_UNSUPPORTED: snprintf(out, cap, "No se puede convertir"); break;
+    case FCL_PS_CORRUPT:     snprintf(out, cap, "Archivo da\xC3\xB1" "ado"); break;
+    default: break;
+  }
+}
+
 int fclOpenAction(const FclItem* it, const char** why){
   if(why) *why = nullptr;
   if(!it) return FCL_OPEN_MENU;
   if(it->isFolder) return FCL_OPEN_FOLDER;
+  // EL TELEFONO YA MIRO LOS BYTES (no la extension): manda lo que dice.
+  if(it->playState != FCL_PS_UNKNOWN){
+    switch(it->playState){
+      case FCL_PS_PENDING:
+      case FCL_PS_PREPARING:
+        if(why) *why = "El tel\xC3\xA9" "fono lo est\xC3\xA1 preparando para Flex OS";
+        return FCL_OPEN_PREPARING;
+      case FCL_PS_FAILED:
+        if(why) *why = it->playReason[0] ? it->playReason : "No se pudo preparar este archivo para Flex OS";
+        return FCL_OPEN_MENU;
+      case FCL_PS_UNSUPPORTED:
+        if(why) *why = it->playReason[0] ? it->playReason : "Este formato no se puede convertir";
+        return FCL_OPEN_MENU;
+      case FCL_PS_CORRUPT:
+        if(why) *why = it->playReason[0] ? it->playReason : "El archivo est\xC3\xA1 da\xC3\xB1" "ado";
+        return FCL_OPEN_MENU;
+      default: break;                                    // NATIVE / READY: se abre segun su clase
+    }
+    uint64_t sz = fclPlaySize(it);
+    if(it->kind == FCL_K_PHOTO){
+      if(sz > 8ull * 1024 * 1024){ if(why) *why = "Es demasiado grande para abrirla aqu\xC3\xAD: desc\xC3\xA1rgala o \xC3\xA1" "brela en la web"; return FCL_OPEN_MENU; }
+      return FCL_OPEN_PHOTO;
+    }
+    if(it->kind == FCL_K_VIDEO){
+      if(sz > 0xFFFFFFF0ull){ if(why) *why = "Es demasiado grande para este dispositivo"; return FCL_OPEN_MENU; }
+      return FCL_OPEN_STREAM;
+    }
+    if(it->kind == FCL_K_AUDIO){
+      if(sz > 0xFFFFFFF0ull){ if(why) *why = "Es demasiado grande para este dispositivo"; return FCL_OPEN_MENU; }
+      return FCL_OPEN_AUDIO;
+    }
+    return FCL_OPEN_MENU;
+  }
+  // Sin informacion del servidor (Flex Cloud en Internet o un telefono sin la preparacion multimedia): la extension.
   const char* n = it->name;
   if(endsWithCi(n, ".jpg") || endsWithCi(n, ".jpeg")){
     if(it->size > 8ull * 1024 * 1024){ if(why) *why = "Es demasiado grande para abrirla aqu\xC3\xAD: desc\xC3\xA1rgala o \xC3\xA1" "brela en la web"; return FCL_OPEN_MENU; }
@@ -879,9 +952,10 @@ int fclOpenAction(const FclItem* it, const char** why){
     if(it->size > 0xFFFFFFF0ull){ if(why) *why = "Es demasiado grande para este dispositivo"; return FCL_OPEN_MENU; }
     return FCL_OPEN_STREAM;
   }
+  if(endsWithCi(n, ".wav") && it->size <= 0xFFFFFFF0ull) return FCL_OPEN_AUDIO;        // PCM o IMA: lo dira Musica si no es de esos
   if(it->kind == FCL_K_PHOTO){ if(why) *why = "Este formato de foto se ve en la web de Flex Cloud"; return FCL_OPEN_MENU; }
   if(it->kind == FCL_K_VIDEO){ if(why) *why = "Este v\xC3\xAD" "deo no se reproduce en este dispositivo (solo AVI MJPEG). \xC3\x81" "brelo en la web"; return FCL_OPEN_MENU; }
-  if(it->kind == FCL_K_AUDIO){ if(why) *why = "Desc\xC3\xA1rgalo para escucharlo en M\xC3\xBAsica"; return FCL_OPEN_MENU; }
+  if(it->kind == FCL_K_AUDIO){ if(why) *why = "Este audio no se reproduce aqu\xC3\xAD (solo WAV): desc\xC3\xA1rgalo o \xC3\xA1" "brelo en la web"; return FCL_OPEN_MENU; }
   return FCL_OPEN_MENU;
 }
 
@@ -918,6 +992,18 @@ void fclItemSub(const FclItem* it, char* out, size_t cap){
   fclFmtDate(it->updatedAt, dt, sizeof(dt));
   if(dt[0]) snprintf(out, cap, "%s \xC2\xB7 %s", sz, dt);
   else snprintf(out, cap, "%s", sz);
+  // Lo que hay que saber ANTES de tocar: se esta preparando, no se puede convertir o esta roto.
+  const char* tag = nullptr;
+  char prep[24];
+  switch(it->playState){
+    case FCL_PS_PENDING:     tag = "En cola"; break;
+    case FCL_PS_PREPARING:   snprintf(prep, sizeof(prep), "Preparando %u %%", (unsigned)it->playProgress); tag = prep; break;
+    case FCL_PS_FAILED:      tag = "No se prepar\xC3\xB3"; break;
+    case FCL_PS_UNSUPPORTED: tag = "No se convierte"; break;
+    case FCL_PS_CORRUPT:     tag = "Da\xC3\xB1" "ado"; break;
+    default: break;
+  }
+  if(tag){ size_t l = strlen(out); if(l + 4 < cap) snprintf(out + l, cap - l, " \xC2\xB7 %s", tag); }
 }
 
 void fclXferLine(uint8_t phase, uint8_t type, uint64_t done, uint64_t size, uint32_t bytesPerSec,

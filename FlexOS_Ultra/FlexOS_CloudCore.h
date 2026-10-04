@@ -28,11 +28,18 @@
 #define FCL_PATH_MAX    112     // = FML_PATH_MAX: ruta local en LittleFS
 #define FCL_CRUMBS      8       // niveles de la ruta que se ensenan
 #define FCL_PARTS_MAX   512     // partes por subida que sigue el P4 (bitmap)
+#define FCL_REASON_MAX  96      // motivo corto de "no se pudo preparar" (lo escribe el telefono)
 
 // Tipos de elemento (los de la API).
 enum {
   FCL_K_FOLDER = 0, FCL_K_PHOTO, FCL_K_VIDEO, FCL_K_AUDIO, FCL_K_DOCUMENT, FCL_K_ARCHIVE, FCL_K_OTHER
 };
+
+// Estado de un archivo multimedia respecto al PERFIL de Flex OS (lo calcula el telefono: Flex Cloud en el A55).
+// FCL_PS_UNKNOWN = el servidor no lo dice (Flex Cloud en Internet o un telefono antiguo): se decide por la
+// extension, como siempre. NATIVE: ya vale tal cual. READY: el telefono tiene preparada una version del perfil
+// (AVI MJPEG, WAV IMA o JPEG ligero) y es la que se lee por /files/<id>/playable.
+enum { FCL_PS_UNKNOWN = 0, FCL_PS_NATIVE, FCL_PS_READY, FCL_PS_PENDING, FCL_PS_PREPARING, FCL_PS_FAILED, FCL_PS_UNSUPPORTED, FCL_PS_CORRUPT };
 
 typedef struct {
   char     id[FCL_ID_MAX];
@@ -46,6 +53,11 @@ typedef struct {
   uint32_t durationMs;
   uint16_t width, height;
   uint16_t itemCount;           // carpeta en la papelera: archivos que contiene
+  uint8_t  playState;           // FCL_PS_*
+  uint8_t  playProgress;        // 0..99 mientras se prepara
+  uint64_t playSize;            // bytes de lo que sirve /playable (la version del perfil o el original)
+  char     playSha[FCL_SHA_HEX];
+  char     playReason[FCL_REASON_MAX];
   uint8_t  kind;                // FCL_K_*
   bool     isFolder;
   bool     hasThumb;
@@ -269,8 +281,18 @@ void fclQuotaHint(const FclQuota* q, char* out, size_t cap);
 //   PHOTO    traer el ORIGINAL (verificado) y abrirlo en el visor (JPEG <= 8 MB)
 //   STREAM   reproducir por rangos sin descargar (AVI MJPEG)
 //   MENU     no se puede abrir aqui: se ensenan sus acciones y `why` dice por que
-enum { FCL_OPEN_FOLDER = 0, FCL_OPEN_PHOTO, FCL_OPEN_STREAM, FCL_OPEN_MENU };
+//   AUDIO    reproducir por rangos en Musica (WAV PCM/IMA, el mismo reproductor que lo local)
+//   PREPARING el telefono lo esta preparando para Flex OS: se dice y se espera (no se intenta abrir)
+// Con un telefono que informa del estado (playState != FCL_PS_UNKNOWN) manda LO QUE EL TELEFONO SABE de los
+// bytes del archivo; sin el (Internet, telefono antiguo), la extension, como siempre.
+enum { FCL_OPEN_FOLDER = 0, FCL_OPEN_PHOTO, FCL_OPEN_STREAM, FCL_OPEN_MENU, FCL_OPEN_AUDIO, FCL_OPEN_PREPARING };
 int  fclOpenAction(const FclItem* it, const char** why);
+// ¿Se puede leer ya por /files/<id>/playable? (NATIVE o READY.) Con eso se usan SU tamano y SU SHA-256.
+bool        fclPlayable(const FclItem* it);
+uint64_t    fclPlaySize(const FclItem* it);
+const char* fclPlaySha(const FclItem* it);
+// "Compatible con Flex OS" · "Preparando para Flex OS... 42 %" · "No se puede convertir"... ("" si no se sabe).
+void fclPlayLine(const FclItem* it, char* out, size_t cap);
 // "2,3 MB · 12/03/2026" (fecha de la ultima modificacion) o "Carpeta".
 void fclItemSub(const FclItem* it, char* out, size_t cap);
 // Fecha civil "dd/mm/aaaa" de unos ms desde 1970 (UTC). "" si no hay.

@@ -346,6 +346,96 @@ static void testUiText(){
   CHECK(strlen(tiny) < sizeof(tiny), "nunca se sale del buffer");
 }
 
+
+// #############################################################
+//  EL TELEFONO YA MIRO LOS BYTES: `playable` manda sobre la extension
+// #############################################################
+static FclItem oneItem(const char* json){
+  FclItem it; memset(&it, 0, sizeof(it));
+  std::string w = std::string("{\"ok\":true,\"file\":") + json + "}";          // como responde GET /files/:id
+  CHECK(fclParseItem(w.c_str(), w.size(), &it), "el JSON del archivo se lee");
+  return it;
+}
+
+static void testPlayable(){
+  printf("-- playable: lo que el telefono sabe de los bytes --\n");
+  const char* SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const char* SHB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  char js[900], b[160];
+  const char* why = nullptr;
+  auto mk = [&](const char* name, const char* mime, const char* kind, long long size, const char* playable) -> FclItem {
+    snprintf(js, sizeof(js), "{\"type\":\"file\",\"id\":\"fil_bbbbbbbbbbbbbbbbbbbbbbbb\",\"name\":\"%s\",\"size\":%lld,\"mime\":\"%s\",\"kind\":\"%s\","
+             "\"sha256\":\"%s\",\"hasThumbnail\":true,\"source\":\"device\",\"updatedAt\":1790000001000%s%s}", name, size, mime, kind, SHA, playable[0] ? ",\"playable\":" : "", playable);
+    return oneItem(js);
+  };
+
+  // un servidor que no dice nada (Internet, telefono antiguo): como siempre, por extension
+  FclItem it = mk("peli.avi", "video/x-msvideo", "video", 5000000, "");
+  CHECK(it.playState == FCL_PS_UNKNOWN && !fclPlayable(&it), "sin playable: desconocido");
+  CHECK(fclOpenAction(&it, &why) == FCL_OPEN_STREAM && fclPlaySize(&it) == 5000000ull, "sin playable: AVI por extension");
+  it = mk("cancion.wav", "audio/wav", "audio", 3000000, "");
+  CHECK(fclOpenAction(&it, &why) == FCL_OPEN_AUDIO, "sin playable: un .wav va a Musica");
+  it = mk("cancion.mp3", "audio/mpeg", "audio", 3000000, "");
+  CHECK(fclOpenAction(&it, &why) == FCL_OPEN_MENU && why && strstr(why, "WAV"), "sin playable: un MP3 se dice que no suena aqui");
+
+  // MP4 H.264 que el telefono ya convirtio a AVI MJPEG: se reproduce LA VERSION (su tamano, su SHA-256)
+  char pj[400];
+  snprintf(pj, sizeof(pj), "{\"state\":\"ready\",\"plan\":\"transcode\",\"profile\":\"flexos-ultra-v1\",\"size\":7340032,\"mime\":\"video/x-msvideo\",\"sha256\":\"%s\",\"width\":640,\"height\":360}", SHB);
+  it = mk("vacaciones.mp4", "video/mp4", "video", 900000000, pj);
+  CHECK(it.playState == FCL_PS_READY && fclPlayable(&it), "ready se lee");
+  CHECK(fclPlaySize(&it) == 7340032ull && !strcmp(fclPlaySha(&it), SHB), "se lee con el tamano y el SHA-256 de la version, no del original");
+  CHECK(it.size == 900000000ull && !strcmp(it.sha256, SHA), "el original sigue siendo el original");
+  CHECK(fclOpenAction(&it, &why) == FCL_OPEN_STREAM, "el MP4 preparado se reproduce en el visor (antes: 'solo AVI MJPEG')");
+  fclPlayLine(&it, b, sizeof(b)); CHECK(!strcmp(b, "Preparado para Flex OS"), "linea de estado: preparado");
+
+  // un PNG preparado como JPEG ligero: foto
+  snprintf(pj, sizeof(pj), "{\"state\":\"ready\",\"plan\":\"transcode\",\"size\":250000,\"sha256\":\"%s\"}", SHB);
+  it = mk("captura.png", "image/png", "photo", 12000000, pj);
+  CHECK(fclOpenAction(&it, &why) == FCL_OPEN_PHOTO, "un PNG preparado se abre en el visor de fotos");
+  it = mk("grande.png", "image/png", "photo", 12000000, "{\"state\":\"ready\",\"plan\":\"transcode\",\"size\":9437184}");
+  CHECK(fclOpenAction(&it, &why) == FCL_OPEN_MENU && why, "aun preparado, si pasa de 8 MB no se intenta");
+
+  // nativo: ya vale tal cual
+  it = mk("clip.avi", "video/x-msvideo", "video", 4000000, "{\"state\":\"native\",\"plan\":\"none\",\"size\":4000000}");
+  CHECK(it.playState == FCL_PS_NATIVE && fclOpenAction(&it, &why) == FCL_OPEN_STREAM, "nativo: se reproduce el original");
+  fclPlayLine(&it, b, sizeof(b)); CHECK(!strcmp(b, "Compatible con Flex OS"), "linea: compatible");
+  it = mk("tema.wav", "audio/wav", "audio", 2000000, "{\"state\":\"native\",\"size\":2000000}");
+  CHECK(fclOpenAction(&it, &why) == FCL_OPEN_AUDIO, "WAV nativo: Musica");
+  // un .mkv renombrado a .avi: el telefono mira los bytes, la extension ya no engana
+  it = mk("falso.avi", "video/x-msvideo", "video", 4000000, "{\"state\":\"unsupported\",\"reason\":\"AVI con vídeo h264: no se puede leer.\"}");
+  CHECK(fclOpenAction(&it, &why) == FCL_OPEN_MENU && why && strstr(why, "h264"), "extension .avi pero no se puede: NO se intenta y se dice por que");
+
+  // preparandose / en cola / fallo / roto
+  it = mk("a.mp4", "video/mp4", "video", 80000000, "{\"state\":\"preparing\",\"progress\":42}");
+  CHECK(it.playState == FCL_PS_PREPARING && it.playProgress == 42, "preparando 42 %");
+  CHECK(fclOpenAction(&it, &why) == FCL_OPEN_PREPARING && why, "preparando: no se intenta abrir");
+  fclPlayLine(&it, b, sizeof(b)); CHECK(!strcmp(b, "Preparando para Flex OS... 42 %"), "linea: preparando con porcentaje");
+  fclItemSub(&it, b, sizeof(b)); CHECK(strstr(b, "Preparando 42 %") != nullptr, "el subtitulo de la lista dice que se esta preparando");
+  it = mk("b.mp4", "video/mp4", "video", 80000000, "{\"state\":\"pending\"}");
+  CHECK(fclOpenAction(&it, &why) == FCL_OPEN_PREPARING, "en cola: tambien");
+  it = mk("c.mp4", "video/mp4", "video", 80000000, "{\"state\":\"failed\",\"reason\":\"No hay espacio en el teléfono para guardar la versión preparada.\"}");
+  CHECK(fclOpenAction(&it, &why) == FCL_OPEN_MENU && why && strstr(why, "espacio"), "fallo: el motivo REAL del telefono");
+  fclItemSub(&it, b, sizeof(b)); CHECK(strstr(b, "No se prepar") != nullptr, "subtitulo: no se preparo");
+  it = mk("d.jpg", "image/jpeg", "photo", 20000, "{\"state\":\"corrupt\",\"reason\":\"El JPEG está cortado: le falta el final.\"}");
+  CHECK(fclOpenAction(&it, &why) == FCL_OPEN_MENU && why && strstr(why, "cortado"), "roto: ni la extension .jpg lo abre");
+  fclPlayLine(&it, b, sizeof(b)); CHECK(strstr(b, "da\xC3\xB1") != nullptr && validUtf8(b), "linea: archivo dañado, UTF-8 valido");
+
+  // lo que no es de fiar se trata como "no se sabe"
+  it = mk("e.avi", "video/x-msvideo", "video", 5000000, "{\"state\":\"ready\"}");
+  CHECK(it.playState == FCL_PS_UNKNOWN, "ready sin tamano no se puede pedir por rangos: vuelve a la extension");
+  it = mk("f.avi", "video/x-msvideo", "video", 5000000, "{\"state\":\"inventado\",\"size\":3}");
+  CHECK(it.playState == FCL_PS_UNKNOWN, "estado desconocido: no se hace caso");
+  it = mk("g.avi", "video/x-msvideo", "video", 5000000, "{\"state\":\"ready\",\"size\":3000,\"sha256\":\"no-es-hex\"}");
+  CHECK(it.playSha[0] == 0 && !strcmp(fclPlaySha(&it), SHA), "un SHA mal formado se ignora y se usa el del original");
+  it = mk("h.avi", "video/x-msvideo", "video", 5000000, "{\"state\":\"failed\",\"reason\":\"" "x" "\"}");
+  std::string longReason(400, 'z');
+  std::string pj2 = "{\"state\":\"failed\",\"reason\":\"" + longReason + "\"}";
+  it = mk("i.avi", "video/x-msvideo", "video", 5000000, pj2.c_str());
+  CHECK(strlen(it.playReason) < FCL_REASON_MAX && validUtf8(it.playReason), "un motivo larguisimo se recorta sin salirse");
+  it = mk("j.avi", "video/x-msvideo", "video", 5000000, "{\"state\":\"preparing\",\"progress\":1e9}");
+  CHECK(it.playProgress == 99, "progreso absurdo: tope 99");
+}
+
 int main(){
   printf("=== FlexOS · Flex Cloud: nucleo portable ===\n");
   testJson();
@@ -354,6 +444,7 @@ int main(){
   testCache();
   testNames();
   testUiText();
+  testPlayable();
   printf("=== %d comprobaciones, %d fallos ===\n", gChecks, gFails);
   return gFails ? 1 : 0;
 }
