@@ -32,12 +32,29 @@
 // ##  TACTIL DE ALTO NIVEL (gestos)  ·  original
 // #############################################################
 static Touch T;
+
+// BORDES DEL SISTEMA (en vertical). La cortina de Ajustes rapidos se agarra con el dedo en cuanto baja en la franja de ARRIBA (y el panel
+// de la derecha, y el Centro de notificaciones desde la IZQUIERDA). Una pantalla que ponga un boton DENTRO de esas franjas esta poniendo un
+// boton que "a veces no responde": el toque se lo queda el gesto del sistema. Las pantallas con controles propios los colocan FUERA, como
+// Android con sus insets de gestos: el visor de medios coloca su barra de arriba y su "atras" usando estas constantes. (En horizontal no
+// hay gestos de borde.) Las constantes de cada gesto (QS_EDGE_*, FPC_EDGE_W) salen de estas.
+#define SYS_EDGE_TOP_H    30
+#define SYS_EDGE_LEFT_W   26
+#define SYS_EDGE_RIGHT_W  26
+
 // NAVEGACION: candado de "tragar el episodio tactil en curso". Lo arma
 // touchDropAll() en cada cambio de pantalla (inicio, atras, recientes,
 // reanudar una app). Mientras el dedo siga apoyado del toque ANTERIOR, la
 // pantalla nueva no ve ni pressed, ni down, ni tap: es lo que impide el toque
 // fantasma de "he pulsado inicio y se ha abierto un icono del escritorio".
+// Se suelta cuando el dedo se levanta DE VERDAD: un frame de "0 dedos" del
+// GT911, o 90 ms sin ningun frame de contacto (la misma regla que usa el
+// resto del pipeline). NO al primer poll sin dato nuevo: el GT911 refresca cada
+// ~10 ms y con vueltas de 5 ms la mitad de los polls no traen frame -- ahi el
+// candado se soltaba con el dedo todavia apoyado y el contacto heredado caia
+// como un toque nuevo sobre la pantalla que acababa de entrar.
 static bool gTouchSwallow = false;
+static uint32_t gTouchSwallowSeenMs = 0;     // ultima vez que se vio el dedo apoyado mientras el candado estaba puesto (0 = el dedo ya estaba arriba al armarlo)
 
 // ---- FASE 4: Modo Kiosco (prestamo seguro) -------------------------------
 // El estado vive AQUI ARRIBA, antes de flexPollTouch(), porque el filtro del
@@ -119,6 +136,13 @@ static bool gSuspSwallow = false;   // este poll pertenece al gesto -> no lo ve 
 // no es un toque de suspension. Lo pone quien consume el gesto; se borra al
 // empezar cada episodio. Sin esto, dos pellizcos rapidos apagaban la pantalla.
 static bool gTouchPinchUsed = false;
+// Quien tiene el control de los DOS DEDOS (el visor de medios: pellizco). Con esto puesto, un episodio de dos dedos NO anula los eventos de
+// un dedo: antes, tocar con dos pulgares en horizontal (agarre normal) se tragaba el toque entero del boton, aunque no hubiera pellizco.
+static bool gTouchOwnsTwoFinger = false;
+// Una pantalla a todo el alto (el visor de medios) que NO tiene barra de estado: lo que vive en la barra de estado -- la capsula del
+// cronometro y SU zona tactil -- no existe debajo de ella. Sin esto la capsula se estampaba encima de la foto y, aunque no se viera, su
+// zona seguia tomando los toques de la parte de arriba del visor (abria el cronometro en vez de pulsar "atras").
+static bool gAppHidesStatusBar = false;
 
 // ---- Estado del detector de doble-tap ----------------------------------
 // Un "toque" (episodio) va desde que baja el primer dedo hasta que se levantan
@@ -273,7 +297,7 @@ static void suspGestureUpdate(){
   //    gesto de suspension no abra una app ni dispare el long-press de ST_CTX.
   //  · Tecleando: NUNCA. Ver el veto de arriba -- si el episodio de 2 dedos es
   //    de alguien escribiendo, T tiene que seguir llegando al teclado entero.
-  gSuspSwallow = gSuspOn || (gEpHad2 && !kbTypingNow());
+  gSuspSwallow = gSuspOn || (gEpHad2 && !kbTypingNow() && !gTouchOwnsTwoFinger);
 #else
   gSuspSwallow = false;
 #endif
@@ -328,6 +352,18 @@ static void flexPollTouch(){
   if(ev == 1 && kioskTouchBlocked((int)gx, (int)gy)) ev = -1;
   unsigned long now = millis();
   bool wasDown = T.down;
+#ifdef FLEXOS_DIAG_TOUCH
+  // DIAGNOSTICO (apagado por defecto: -DFLEXOS_DIAG_TOUCH). Lo que no se puede saber leyendo el codigo -- si el GT911 SOBREESCRIBE su frame y
+  // un toque corto entre dos polls se pierde entero -- se mide aqui, en la placa: (1) vueltas de la interfaz de mas de 60 ms (un toque dura
+  // 50-150 ms: una vuelta asi puede esconderlo) y (2) "sueltas huerfanas" -- un frame de 0 dedos sin que se hubiera visto el apoyo --, que es
+  // exactamente la firma de un toque perdido. Solo cuenta y escribe por Serie cuando pasa: sin trafico en reposo.
+  {
+    static uint32_t prev = 0, slow = 0, orphan = 0;
+    if(prev && now - prev > 60u){ slow++; Serial.printf("[T] vuelta lenta: %lu ms (lentas=%lu huerfanas=%lu)\n", (unsigned long)(now - prev), (unsigned long)slow, (unsigned long)orphan); }
+    prev = now;
+    if(ev == 0 && !wasDown){ orphan++; Serial.printf("[T] suelta sin apoyo visto (lentas=%lu huerfanas=%lu)\n", (unsigned long)slow, (unsigned long)orphan); }
+  }
+#endif
   if(ev == 1){
     T.x = gx; T.y = gy; T.lastMs = now;
     if(!wasDown){ T.down = true; T.pressed = true; T.startX = gx; T.startY = gy; T.downMs = now; T.moved = false; }
@@ -342,12 +378,15 @@ static void flexPollTouch(){
   // que no lo vea NINGUNA capa. El candado se suelta solo cuando el dedo se
   // levanta de verdad (ev != 1 y T.down ya en false).
   if(gTouchSwallow){
-    if(T.down || ev == 1){
+    if(ev == 1) gTouchSwallowSeenMs = now;                                   // el dedo SIGUE apoyado
+    // El dedo se levanto de verdad: frame de "0 dedos" o 90 ms sin ningun frame de contacto. Un poll sin dato nuevo (ev == -1) NO lo es.
+    const bool up = ev == 0 || (ev == -1 && now - gTouchSwallowSeenMs > 90u);
+    if(up){
+      gTouchSwallow = false;
+    } else {
       T.pressed = T.released = T.tap = false;
       T.swipeUp = T.swipeDown = T.swipeLeft = T.swipeRight = false;
       T.down = false; T.moved = false;
-    } else {
-      gTouchSwallow = false;
     }
   }
   // SUSPENSION: el detector de doble-tap va AQUI, en el mismo punto alto del

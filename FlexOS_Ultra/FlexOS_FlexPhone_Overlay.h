@@ -725,7 +725,8 @@ static void fpbTick(){
 // Mientras esta a la vista es dueno de la pantalla, igual que la
 // cortina del panel rapido: su contenido se desplaza, se descarta y
 // se abre, y la pantalla de debajo no recibe toques.
-#define FPC_EDGE_W    26      // franja de borde que arma el gesto
+#define FPC_EDGE_W    SYS_EDGE_LEFT_W   // franja de borde del gesto (FlexOS_Ultra_Touch.h: la comparten las pantallas con controles propios)
+#define FPC_INTENT_PX 12      // lo que el dedo tiene que recorrer hacia dentro (y mas en horizontal que en vertical) para que cuente como el gesto
 #define FPC_ANIM_MS   190
 #define FPC_ROW_H     78
 #define FPC_HDR_H     96
@@ -945,25 +946,33 @@ static bool fpcGlobalHandle(){
   // Cerrado y sin gesto de borde: no cuesta nada.
   if(!fpcOpen() && !fpcDragging && !fpcAnimOn){
     if(!fpcCanOpen()) return false;
-    // EL GESTO SOLO CUENTA SI NACIO EN EL BORDE. Sin esto, cualquier
-    // deslizamiento dentro de una app abriria el panel por accidente,
-    // que es justo lo que no puede pasar en un juego.
-    if(!(T.pressed && T.startX < FPC_EDGE_W && T.startY > 40)) return false;
+    // EL GESTO CUENTA SI NACIO EN EL BORDE **Y SE MUEVE COMO UN GESTO** (hacia dentro y mas en horizontal que en vertical). Sin lo primero,
+    // cualquier deslizamiento dentro de una app abriria el panel por accidente, que es justo lo que no puede pasar en un juego. Sin lo
+    // segundo -- antes se armaba al APOYAR el dedo -- el Centro se quedaba el apoyo (T.pressed dura UNA vuelta), el arrastre moria en la
+    // vuelta siguiente (leia T.pressed en vez de T.down: el gesto del borde no llegaba a abrir NUNCA) y el toque se escapaba a la pantalla de
+    // debajo SIN su apoyo: un boton en esa franja ni funcionaba ni abria el Centro (el "atras" del visor, p. ej.). Ahora un toque en el
+    // borde es un toque normal de la pantalla de debajo, y el deslizamiento lo agarra cuando se ve que lo es.
+    if(!(T.down && T.startX < FPC_EDGE_W && T.startY > 40)) return false;
+    const int dx = T.x - T.startX, dy = abs(T.y - T.startY);
+    if(!(dx > FPC_INTENT_PX && dx > dy)) return false;
     fpcBuild();
     fgScrollReset(&fpcScr, FPC_HDR_H, SCR_H - 8);
     fpcDragging = true;
-    fpcDragMoved = false;
-    fpcDragX0 = T.x;
+    fpcDragMoved = true;
+    fpcDragX0 = T.startX;                                  // el panel sigue al dedo desde donde NACIO el gesto
     fpcDragBase = fpcX;
     fpcAnimOn = false;
+    { const int nx = fpcDragBase + dx; fpcX = nx > 0 ? 0 : (nx < -SCR_W ? -SCR_W : nx); }
     fpcDirty = true;
+    fpcRender();
+    touchHoldBack();                                       // desde aqui el episodio es del Centro, entero, hasta que el dedo se levante
     return true;
   }
   if(!fpcCanOpen() && fpcOpen()){ fpcForceClose(); return false; }
 
   // Arrastre del panel.
   if(fpcDragging){
-    if(T.pressed){
+    if(T.down){                                            // el NIVEL del dedo, no el pulso de apoyo (que dura una vuelta)
       const int d = T.x - fpcDragX0;
       if(!fpcDragMoved && d > 10) fpcDragMoved = true;
       if(fpcDragMoved){
@@ -976,14 +985,16 @@ static bool fpcGlobalHandle(){
       // interactivo: a medio abrir los controles no existen todavia
       // como superficie tocable.
       if(fpcDirty && fpcX > -SCR_W) fpcRender();
+      touchHoldBack();
       return true;
     }
     fpcDragging = false;
+    touchHoldBack();                                       // la suelta y el deslizamiento tampoco llegan a la pantalla de debajo
     if(!fpcDragMoved){
-      // Toque en el borde sin arrastrar: no se abre nada. Un panel que
+      // Roce del borde sin arrastrar: no se abre nada. Un panel que
       // salta con un roce del borde es peor que no tenerlo.
       fpcForceClose();
-      return false;
+      return true;
     }
     fpcAnimTo(fpcX > -SCR_W / 2 ? 0 : -SCR_W);
     return true;

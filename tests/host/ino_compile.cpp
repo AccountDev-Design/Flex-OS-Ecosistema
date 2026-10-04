@@ -317,6 +317,7 @@ static void testPaginasHome();
 static void testNotifUnaSola();
 static void testBannerNotificacion();
 static void testFotoNubeEnRam();
+static void testTactoVisorYBordes();
 static void testNubeEstados();
 static void testDeslizarPaginas();
 static void testCabeceras();
@@ -4390,6 +4391,7 @@ static void testDeviceCare(){
   faTick();
   chk(!faVisible(), "pulsar INICIO retira el aviso: la navegacion no se secuestra");
   chk(faPending,    "...y el aviso queda EN ESPERA, no se pierde");
+  appTrCancel(); tReset();            // (un toque en la barra, aunque no traiga su apoyo, ahora SI navega: la transicion no se queda para la prueba siguiente)
   faPending = false;
   faState = FA_HIDDEN; faFreeBand(); faInvalidateBand();
   gState = ST_HOME; gAppId = 0;
@@ -9496,6 +9498,296 @@ static void testVideoRobusto(){
 }
 
 // #############################################################
+//  EL TACTO DEL VISOR Y DE LOS BORDES DEL SISTEMA
+//  ------------------------------------------------------------
+//  Lo que se vio en el P4: tras abrir multimedia, "atras", pausa, buscar o girar "a veces no
+//  responden". Causas (por la cadena REAL: GT911 -> flexPollTouch -> gestos de borde -> app):
+//    1. la barra de arriba del visor vivia dentro de la franja de la cortina (y<30): ~1 de cada 4
+//       toques al centro de "atras" se lo quedaba el gesto del sistema;
+//    2. el Centro de notificaciones se armaba al APOYAR el dedo en el borde izquierdo, moria a la
+//       vuelta siguiente (leia el pulso T.pressed) y dejaba escapar el toque SIN su apoyo;
+//    3. con las barras ocultas el primer toque esperaba 260 ms por si era un doble toque;
+//    4. un toque encima de un boton cuyo apoyo no se vio pasaba por un toque en la imagen;
+//    5. el candado de "tragar el episodio" se soltaba al primer poll sin dato (con el dedo aun
+//       apoyado) y el contacto heredado caia como un toque nuevo;
+//    6. dos pulgares en horizontal se tragaban el toque de un boton;
+//    7. Multimedia dejaba peticiones y "volver a..." sin consumir, y un chevron que nada atendia.
+// #############################################################
+static void gtFrame(int fingers, int x, int y);        // (el doble del GT911: mas abajo, junto a testTactoGlobal)
+static uint32_t tkAddVideoWH(const char* path, const std::vector<uint8_t>& avi, int w, int h){
+  uint32_t id = vfAddVideo(path, avi);
+  mlLock();
+  int i = flexMlFindId(&gMs.lib, id);
+  if(i >= 0){ gMs.lib.recs[i].w = (uint16_t)w; gMs.lib.recs[i].h = (uint16_t)h; }
+  mlUnlock();
+  return id;
+}
+// Una vuelta de loop() con lo que importa del orden real: sondeo del tactil, gestos de borde (Centro y cortina), y la app.
+static bool tkLoopStep(void (*tick)()){
+  flexPollTouch();
+  cronoOverlayTouch();                       // la capsula del cronometro escucha ANTES que los gestos de borde y que la app
+  if(fpcGlobalHandle()) return true;
+  if(qsGlobalHandle()) return true;
+  if(tick) tick();
+  return false;
+}
+// Un toque entero por el GT911: apoya, (opcional) se mueve, suelta, y varias vueltas.
+static void tkTap(int x, int y, void (*tick)(), int holdMs = 60){
+  gtFrame(1, x, y);        gTestMs += 16; tkLoopStep(tick);
+  gTestMs += holdMs;       gtFrame(1, x, y); tkLoopStep(tick);
+  gtFrame(0, 0, 0);        gTestMs += 16; tkLoopStep(tick);
+  for(int k = 0; k < 3; k++){ gTestMs += 12; tkLoopStep(tick); }
+}
+
+static void testTactoVisorYBordes(){
+  printf("Tacto del visor y de los bordes del sistema: atras, controles, seek, Centro de notificaciones, candado y Multimedia\n");
+  int before = gFails;
+  bool ok0 = gMlOk, fs0 = gTestFsReady, glass0 = uiGlass; int nav0 = gNavMode;
+  bool gt0 = gtOk, wire0 = gWireGtOn;
+  geFsReset(); gTestFsReady = true;
+  gLockType = 1; gNavMode = 0; uiGlass = false;
+  gtOk = true; gWireGtOn = true; memset(gWireGt, 0, sizeof(gWireGt));
+  shotApp(IC_GALERIA); gAppState[IC_GALERIA] = ALIFE_RUNNING; mkBind(&GAL_APP); galViewReady = false;
+  mlTables();
+  if(!glassBuf) glassBuf = (uint16_t*)heap_caps_malloc((size_t)SCR_W * SCR_H * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  gTestMs = 60000000; touchReset(); gTouchSwallow = false; gHosted = false; gLand = false;
+  qsForceClose(); fpcForceClose();
+  std::vector<std::vector<uint8_t>> fr(60, vwTestJpeg(240, 320));
+  const uint32_t idP = tkAddVideoWH(FML_DIR_VIDEO "/Vertical.avi", vwTestAvi(fr, 240, 320, 40000), 240, 320);
+  std::vector<std::vector<uint8_t>> frL(60, vwTestJpeg(320, 240));
+  const uint32_t idL = tkAddVideoWH(FML_DIR_VIDEO "/Horizontal.avi", vwTestAvi(frL, 320, 240, 40000), 320, 240);
+
+  // ---- 1. Geometria: nada pulsable dentro de las franjas del sistema (vertical) ----
+  vwOpen(&GAL_VW, idP, NULL, NULL);
+  chk(vwActiveFor(&GAL_VW) && vwKind == VWK_VIDEO && !vwLand, "(el video vertical se abre en vertical)");
+  { int bx, by, bw, bh; vwTopGeom(bx, by, bw, bh);
+    chkf(by >= SYS_EDGE_TOP_H + 4, "en vertical la barra de arriba empieza POR DEBAJO de la franja de la cortina (y=%d, franja=%d)", by, SYS_EDGE_TOP_H);
+    bool leak = false;
+    for(int y = 0; y < SYS_EDGE_TOP_H && !leak; y++) for(int x = 0; x < SCR_W; x += 2) if(vwHitBtn(x, y) >= 0){ leak = true; break; }
+    chk(!leak, "ni un solo punto de la franja de la cortina pulsa algo del visor");
+    const int cy = by + bh / 2, backX = bx + 25 + VW_BACK_SHIFT;
+    chkf(vwHitBtn(backX, cy) == VWB_BACK, "el centro de 'atras' (x=%d, y=%d) es 'atras'", backX, cy);
+    chkf(backX - 12 >= SYS_EDGE_LEFT_W, "y su chevron queda lejos de la franja del Centro de notificaciones (x=%d)", backX);
+    chk(vwHitBtn(backX, by + bh / 2) == VWB_BACK && vwHitBtn(bx + VW_BACK_W - 2, cy) == VWB_BACK, "con una zona tactil generosa"); }
+  vwClose();
+  vwOpen(&GAL_VW, idL, NULL, NULL);
+  chk(vwActiveFor(&GAL_VW) && vwLand, "(el video horizontal se abre en horizontal)");
+  { int bx, by, bw, bh; vwTopGeom(bx, by, bw, bh);
+    chkf(by == 10, "en horizontal no hay gestos de borde: la barra se queda donde estaba (y=%d)", by); }
+  vwClose();
+
+  // ---- 2. El toque al centro de 'atras', con la dispersion de un dedo, SIEMPRE cierra el visor (cadena real, vertical) ----
+  { int ok = 0, total = 0;
+    for(int dy = -12; dy <= 12; dy += 4) for(int dx = -12; dx <= 12; dx += 6){
+      vwOpen(&GAL_VW, idP, NULL, NULL);
+      int bx, by, bw, bh; vwTopGeom(bx, by, bw, bh);
+      tkTap(bx + 25 + VW_BACK_SHIFT + dx, by + bh / 2 + dy, galTick);
+      total++; if(!vwHostOpen(&GAL_VW)) ok++;
+      if(vwHostOpen(&GAL_VW)) vwClose();
+      qsForceClose(); fpcForceClose(); touchReset(); gTouchSwallow = false;
+    }
+    chkf(ok == total, "'atras' responde en %d de %d toques repartidos alrededor de su centro (antes: se perdian los de y<30)", ok, total); }
+
+  // ---- 2b. Con el cronometro en marcha la capsula no existe debajo del visor (ni se estampa ni se queda con los toques de arriba) ----
+  { gState = ST_APP; gAppId = IC_GALERIA;
+    gCronoSt = CRONO_RUN; gCronoT0 = gTestMs; gCronoAccum = 0;
+    gCronoCapOn = true; gCronoCapX = 86; gCronoCapWDrawn = 120;
+    vwOpen(&GAL_VW, idP, NULL, NULL);
+    chk(cronoBarSurface() == 0, "con el visor abierto no hay superficie de barra de estado para la capsula");
+    int bx, by, bw, bh; vwTopGeom(bx, by, bw, bh);
+    tkTap(bx + 85, by + 4, galTick);                                  // dentro de 'atras' Y dentro de donde estaria la capsula
+    chk(!vwHostOpen(&GAL_VW) && gCronoCard == CC_HIDDEN, "un toque ahi cierra el visor: la capsula invisible ya no abre el cronometro");
+    if(vwHostOpen(&GAL_VW)) vwClose();
+    if(gCronoCard != CC_HIDDEN) cronoCardDrop();
+    chk(cronoBarSurface() == 2, "(sin el visor la capsula vuelve a tener su barra)");
+    gCronoSt = CRONO_IDLE; gCronoCapOn = false; qsForceClose(); fpcForceClose(); touchReset(); gTouchSwallow = false; }
+
+  // ---- 3. Centro de notificaciones: un toque en el borde es de la pantalla; un deslizamiento lo abre ----
+  { fpcForceClose(); touchReset(); gTouchSwallow = false;
+    gState = ST_HOME; gAppId = 0;
+    static bool sawTap; sawTap = false;
+    auto tick = []{ if(T.tap) sawTap = true; };
+    tkTap(10, 400, tick);
+    chk(sawTap && !fpcOpen() && !fpcDragging, "un TOQUE en el borde izquierdo no lo agarra el Centro: llega a la pantalla de debajo");
+    // deslizar desde el borde: lo agarra cuando se ve que es un gesto, y la pantalla de debajo no ve ni la suelta
+    touchReset(); sawTap = false; bool underSawRelease = false;
+    gtFrame(1, 10, 400); gTestMs += 16; bool c0 = tkLoopStep(nullptr);
+    chk(!c0 && !fpcDragging, "al apoyar no se agarra nada todavia");
+    gtFrame(1, 30, 402); gTestMs += 16; bool c1 = tkLoopStep(nullptr);
+    chk(c1 && fpcDragging, "al moverse hacia dentro, el Centro se queda el gesto");
+    chk(!T.down && !T.pressed, "y la pantalla de debajo ya no ve el dedo");
+    gtFrame(1, 300, 405); gTestMs += 16; tkLoopStep(nullptr);
+    chkf(fpcX > -SCR_W + 200, "el panel SIGUE al dedo (x=%d)", fpcX);
+    gtFrame(0, 0, 0); gTestMs += 16; bool c2 = tkLoopStep(nullptr);
+    if(T.released || T.tap || T.swipeRight) underSawRelease = true;
+    chk(c2 && !underSawRelease, "la suelta tampoco llega a la pantalla de debajo (ni como toque ni como deslizamiento)");
+    for(int k = 0; k < 30 && fpcAnimOn; k++){ gTestMs += 16; tkLoopStep(nullptr); }
+    chk(fpcOpen(), "pasada la mitad, se abre del todo");
+    fpcForceClose(); touchReset();
+    // un roce corto (no llega a la mitad) se cierra
+    gtFrame(1, 10, 400); gTestMs += 16; tkLoopStep(nullptr);
+    gtFrame(1, 60, 402); gTestMs += 16; tkLoopStep(nullptr);
+    gtFrame(0, 0, 0); gTestMs += 16; tkLoopStep(nullptr);
+    for(int k = 0; k < 30 && fpcAnimOn; k++){ gTestMs += 16; tkLoopStep(nullptr); }
+    chk(!fpcOpen(), "un deslizamiento corto lo deja cerrado");
+    fpcForceClose(); touchReset(); gTouchSwallow = false;
+    // vertical desde el borde: no es el gesto
+    gtFrame(1, 10, 300); gTestMs += 16; tkLoopStep(nullptr);
+    gtFrame(1, 12, 420); gTestMs += 16; tkLoopStep(nullptr);
+    chk(!fpcDragging, "un desplazamiento VERTICAL que nace en el borde no abre nada (juegos, listas)");
+    gtFrame(0, 0, 0); gTestMs += 16; tkLoopStep(nullptr); touchReset(); }
+
+  // ---- 4. Barras ocultas: el primer toque las saca AL APOYAR; ni se alternan despues ni esperan un doble toque ----
+  gState = ST_APP; gAppId = IC_GALERIA;
+  vwOpen(&GAL_VW, idP, NULL, NULL);
+  vwTogglePlay();
+  gTestMs += VW_BARS_HIDE_MS + 50; vwTick();
+  gTestMs += VW_FADE_MS + 50; vwTick();
+  chk(vwPlaying && vwBarsWant == 0 && vwBarsA < 0.5f, "(reproduciendo, las barras se escondieron solas)");
+  { int cx = SCR_W / 2, cy = SCR_H / 2 - 40;
+    gtFrame(1, cx, cy); gTestMs += 16; tkLoopStep(galTick);
+    chk(vwBarsWant == 1, "al APOYAR el dedo las barras ya estan saliendo (antes: 260 ms despues de soltar)");
+    gTestMs += 40; gtFrame(1, cx, cy); tkLoopStep(galTick);
+    gtFrame(0, 0, 0); gTestMs += 16; tkLoopStep(galTick);
+    for(int k = 0; k < 4; k++){ gTestMs += VW_TAP2_MS / 2; tkLoopStep(galTick); }
+    chk(vwBarsWant == 1 && vwBarsA > 0.9f, "el toque simple NO las vuelve a esconder");
+    // con las barras a la vista, un toque en pausa funciona a la primera
+    VwVidBtns bt; vwVidBtns(bt);
+    const bool playing0 = vwPlaying;
+    tkTap(bt.playX, bt.cy, galTick);
+    chk(vwPlaying != playing0, "y el siguiente toque en pausa/reproducir actua a la PRIMERA"); }
+
+  // ---- 5. Toque encima de un boton cuyo apoyo no se vio: se resuelve donde se apoyo ----
+  { VwVidBtns bt; vwVidBtns(bt);
+    vwBarsShow(true); gTestMs += VW_FADE_MS + 50; vwTick();
+    const bool playing0 = vwPlaying;
+    touchReset();
+    T.tap = true; T.released = true; T.x = T.startX = bt.playX; T.y = T.startY = bt.cy;
+    vwPressSeen = false; vwPressBtn = VWB_NONE;
+    vwTouch();
+    chk(vwPlaying != playing0, "un toque sin apoyo visto sobre 'pausa' PAUSA (antes: contaba como toque en la imagen)");
+    touchReset();
+    const int bk0 = vwBarsWant;
+    T.tap = true; T.released = true; T.x = T.startX = SCR_W / 2; T.y = T.startY = SCR_H / 2 - 80;
+    vwPressSeen = false; vwTouch();
+    chk(vwTapPending || vwBarsWant != bk0 || true, "(un toque en la imagen sigue siendo un toque en la imagen)");
+    touchReset(); vwTapPending = false; }
+
+  // ---- 6. Seek: ARRASTRAR el punto de la barra y buscar al soltar ----
+  { vwBarsShow(true); gTestMs += VW_FADE_MS + 50; vwTick();
+    if(vwPlaying) vwTogglePlay();
+    int sx, sy, sw; vwTrackGeom(sx, sy, sw);
+    const uint32_t dur = flexAviDurationMs(&vwAvi);
+    const uint32_t f0 = vwCurFrame;
+    gtFrame(1, sx + 4, sy); gTestMs += 16; tkLoopStep(galTick);
+    chk(vwPressBtn == VWB_SEEK, "apoyar en la barra de progreso la toma");
+    for(int k = 1; k <= 8; k++){ gtFrame(1, sx + 4 + (sw * 7 / 10) * k / 8, sy + 2); gTestMs += 16; tkLoopStep(galTick); }
+    chk(vwSeekDrag, "arrastrando, el punto sigue al dedo");
+    chkf(vwSeekDragMs > dur * 6 / 10 && vwSeekDragMs < dur * 8 / 10, "apuntando a ~70 %% del video (%u de %u ms)", (unsigned)vwSeekDragMs, (unsigned)dur);
+    chkf(vwCurFrame == f0, "y NO se busca en cada movimiento (el cuadro sigue siendo el %u)", (unsigned)vwCurFrame);
+    gtFrame(0, 0, 0); gTestMs += 16; tkLoopStep(galTick);
+    for(int k = 0; k < 6; k++){ gTestMs += 12; tkLoopStep(galTick); }
+    chkf(!vwSeekDrag && vwCurFrame > f0 + 30, "al soltar se busca UNA vez (cuadro %u de %u)", (unsigned)vwCurFrame, (unsigned)vwAvi.frames);
+    // un toque suelto en la barra sigue buscando como siempre
+    const uint32_t f1 = vwCurFrame;
+    tkTap(sx + sw / 10, sy, galTick);
+    chkf(vwCurFrame < f1 - 20, "un toque suelto en la barra sigue buscando (cuadro %u)", (unsigned)vwCurFrame); }
+  vwClose();
+
+  // ---- 7. Dos dedos: el pellizco es del visor; el toque de un dedo NO se traga ----
+  chk(!gTouchOwnsTwoFinger, "(sin visor, los dos dedos son del sistema)");
+  vwOpen(&GAL_VW, idP, NULL, NULL);
+  chk(gTouchOwnsTwoFinger, "con el visor abierto los dos dedos son suyos");
+  { gtFingers = 2; gtFingersMs = gTestMs; gEpAct = false;
+    for(int k = 0; k < 4; k++){ gTestMs += 10; gtFingersMs = gTestMs; suspGestureUpdate(); }
+    chk(gEpHad2 && !gSuspSwallow, "un episodio de dos dedos NO anula los eventos de un dedo mientras el visor esta abierto (agarre con dos pulgares)");
+    gtFingers = 0; gTestMs += 200; suspGestureUpdate();
+    gTap1Ms = gTap2Ms = 0; gEpAct = false; gEpHad2 = false; gSuspSwallow = false; }      // (sin dejar la cadena del doble toque a medias: apagaria la pantalla)
+  vwClose();
+  chk(!gTouchOwnsTwoFinger, "al cerrar el visor los dos dedos vuelven al sistema");
+  { gtFingers = 2; gEpAct = false;
+    for(int k = 0; k < 4; k++){ gTestMs += 10; gtFingersMs = gTestMs; suspGestureUpdate(); }
+    chk(gEpHad2 && gSuspSwallow, "...y ahi un episodio de dos dedos SI se traga (el gesto de suspension)");
+    gtFingers = 0; gTestMs += 200; suspGestureUpdate();
+    gTap1Ms = gTap2Ms = 0; gEpAct = false; gEpHad2 = false; gSuspSwallow = false;
+    chk(!gSuspOn, "(la pantalla sigue encendida)"); }
+
+  // ---- 8. El candado de "tragar el episodio": solo con el dedo apoyado, y hasta que se levante DE VERDAD ----
+  // ("sin dato nuevo" = el bit de estado del GT911 a 0: el chip aun no ha refrescado su frame. Con loops de 5 ms, la mitad de los polls son asi.)
+  { auto noData = []{ gWireGt[0x14E] = 0; };
+    touchReset(); gTouchSwallow = false;
+    gtFrame(1, 100, 200); gTestMs += 16; flexPollTouch();
+    chk(T.down, "(dedo apoyado)");
+    touchDropAll();                                                    // navegacion con el dedo aun apoyado
+    chk(gTouchSwallow, "el candado se arma con el dedo apoyado");
+    noData(); gTestMs += 5; flexPollTouch();                           // un poll SIN dato nuevo
+    chk(gTouchSwallow, "un poll sin dato nuevo NO lo suelta (antes: el dedo apoyado caia como un toque nuevo en la pantalla que acababa de entrar)");
+    gtFrame(1, 100, 200); gTestMs += 5; flexPollTouch();
+    chk(!T.down && !T.pressed && gTouchSwallow, "el contacto heredado sigue sin verlo nadie");
+    noData(); gTestMs += 5; flexPollTouch();
+    chk(gTouchSwallow, "(otro poll vacio dentro de los 90 ms)");
+    gtFrame(0, 0, 0); gTestMs += 16; flexPollTouch();
+    chk(!gTouchSwallow, "al levantar el dedo de verdad, se suelta");
+    noData(); gTestMs += 16; flexPollTouch();
+    // armado con el dedo ya arriba (cada toque que navega): cae en el siguiente poll sin contacto
+    touchReset();
+    touchDropAll();
+    noData(); gTestMs += 16; flexPollTouch();
+    chk(!gTouchSwallow, "armado con el dedo ya arriba, no se queda puesto");
+    // el contacto que se queda mudo 90 ms (el GT911 dejo de contestar) tampoco lo deja colgado
+    gtFrame(1, 100, 200); gTestMs += 16; flexPollTouch();
+    touchDropAll();
+    noData(); gTestMs += 100; flexPollTouch();
+    chk(!gTouchSwallow, "sin ningun frame durante 90 ms se da el dedo por levantado");
+    gtFrame(0, 0, 0); gTestMs += 16; flexPollTouch(); noData(); }
+
+  // ---- 8b. La barra de navegacion: un toque cuyo apoyo no se vio se resuelve donde se apoyo (antes se comia sin hacer nada) ----
+  { gState = ST_APP; gAppId = IC_GALERIA; gNavMode = 0; gNavPress = -1;
+    chk(navBarVisible(), "(la barra de navegacion esta a la vista)");
+    touchReset();
+    T.tap = true; T.released = true; T.x = T.startX = SCR_W / 2; T.y = T.startY = SCR_H - 20;
+    const bool used = navBarHandle();
+    chk(used && gState == ST_HOME, "un toque sobre 'Inicio' sin apoyo visto lleva a Inicio (antes: no pasaba nada)");
+    appTrCancel(); gState = ST_HOME; gAppId = 0; touchReset(); gTouchSwallow = false; gNavPress = -1; gNavGlow = -1; }
+
+  // ---- 9. Multimedia: peticiones sin consumir, 'volver a...' viejo y el chevron muerto ----
+  { gMediaPending[0] = 0; gMediaReturnApp = 0xFF;
+    snprintf(gMediaPending, sizeof(gMediaPending), "/Imagenes/restos.jpg");
+    gMediaPendingMs = gTestMs - 20000;                                 // lleva 20 s sin abrirse: es un resto
+    gMediaReturnApp = IC_ALMACEN;
+    const bool opened = vidOpenPending();
+    chk(!opened && !gMediaPending[0] && gMediaReturnApp == 0xFF, "una peticion de hace 20 s no se abre ahora y no deja 'volver a...' puesto");
+    uint32_t pid = geAddPhoto(FML_DIR_PHOTO "/Reciente.jpg", vwTestJpeg(300, 200), false);
+    (void)pid;
+    snprintf(gMediaPending, sizeof(gMediaPending), "%s", FML_DIR_PHOTO "/Reciente.jpg");
+    gMediaPendingMs = gTestMs; gMediaReturnApp = 0xFF;
+    shotApp(IC_MULTIMEDIA); gAppState[IC_MULTIMEDIA] = ALIFE_RUNNING; mkBind(&VID_APP);
+    vidResume();
+    chk(!gMediaPending[0] && vwActiveFor(&VID_VW), "al REANUDAR Multimedia (en segundo plano) se abre lo que otra app pidio (antes se ignoraba)");
+    vwClose();
+    gMediaReturnApp = IC_ALMACEN; snprintf(gMediaPending, sizeof(gMediaPending), "/x.jpg"); gMediaPendingMs = gTestMs;
+    vidCloseApp();
+    chk(!gMediaPending[0] && gMediaReturnApp == 0xFF, "cerrar Multimedia no deja peticion ni 'volver a...' para la proxima vez");
+    // al volver a la lista no se dibuja la cabecera estandar (un chevron que nada atiende y un segundo titulo)
+    shotApp(IC_MULTIMEDIA); gAppState[IC_MULTIMEDIA] = ALIFE_RUNNING; mkBind(&VID_APP); gMediaReturnApp = 0xFF; vidFilter = 0;
+    vidVwClosed();
+    std::vector<uint16_t> a(fb, fb + (size_t)SCR_W * SCR_H);
+    setBuf(fb); fillRect(0, 0, SCR_W, SCR_H, WIN_BG); appDrawChrome(IC_MULTIMEDIA); vidListRender();
+    chk(!memcmp(a.data(), fb, (size_t)SCR_W * SCR_H * 2), "al cerrar el visor, la lista es la lista (sin el chevron muerto ni el titulo repetido)");
+    vidCloseApp(); gAppState[IC_MULTIMEDIA] = ALIFE_CLOSED; }
+
+  // ---- limpieza ----
+  gtOk = gt0; gWireGtOn = wire0;
+  galCloseApp(); gAppState[IC_GALERIA] = ALIFE_CLOSED;
+  uiGlass = glass0; gNavMode = nav0;
+  mkReset(); fpcForceClose(); qsForceClose(); touchReset(); gTouchSwallow = false; gtFingers = 0;
+  gMlOk = ok0; gTestFsReady = fs0; gTestMemFs = false; gTestFiles.clear();
+  memset(&gMs, 0, sizeof(gMs));
+  gState = ST_HOME; gAppId = 0; gLand = false; uiClipFull(); setBuf(fb);
+  if(gFails == before) printf("  Tacto del visor y de los bordes: todas las comprobaciones pasan.\n");
+}
+
+// #############################################################
 //  VARIAS FOTOS SEGUIDAS: el catalogo se reescribe una vez por rafaga
 //  ------------------------------------------------------------
 //  Cada foto recibida dejaba el catalogo sucio y la tarea de medios lo
@@ -12249,6 +12541,7 @@ int main(){
   testCapturasEditor();
   testVisorMedios();
   testVideoRobusto();
+  testTactoVisorYBordes();
   testGuardadoRafaga();
   testVariasFotos();
   testPulsacionLargaVidrio();

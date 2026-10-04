@@ -615,6 +615,16 @@ static bool navBarHandle(){
     else              sysRecents();
     return true;
   }
+  // Un TOQUE en la barra cuyo apoyo no se vio (lo atendio otra capa del sistema, o la vuelta que lo vio fue larga -- video --): se resuelve donde
+  // se APOYO, que es lo que dice T.x/T.y en un toque. Antes se "comia" en silencio: atras / inicio / recientes "no respondia".
+  if(inBar && T.tap && gNavPress < 0){
+    const int btn = (T.x < SCR_W / 3) ? 0 : (T.x < SCR_W * 2 / 3 ? 1 : 2);
+    gNavGlow = -1;
+    if(btn == 0)      sysBack();
+    else if(btn == 1) sysHome();
+    else              sysRecents();
+    return true;
+  }
   if(inBar && (T.tap || T.released || T.down)) return true;   // nada se filtra a la app
   return false;
 }

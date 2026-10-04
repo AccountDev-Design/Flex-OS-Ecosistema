@@ -306,6 +306,8 @@ static void vidSelectAll(){
 //  en Multimedia" lo hace, a proposito).
 // -------------------------------------------------------------
 static char    gMediaPending[FLEXMED_PATH_MAX] = "";
+static uint32_t gMediaPendingMs = 0;               // cuando se pidio: lo que lleva mas de unos segundos sin abrirse es un resto, no una peticion
+#define MEDIA_PENDING_MAX_MS 5000u
 // De que app se salio para abrir el visor. "Volver" desde el visor regresa
 // alli y no a la lista de Multimedia. 0xFF = se entro a Multimedia por su
 // cuenta.
@@ -335,7 +337,8 @@ static void vidVwClosed(){
   setBuf(fb);
   fillRect(0, 0, SCR_W, SCR_H, WIN_BG);
   appDrawChrome(IC_MULTIMEDIA);
-  appDrawHeader(IC_MULTIMEDIA);
+  // (Sin appDrawHeader: Multimedia tiene CABECERA PROPIA, la pinta vidListRender. La estandar dibujaba ademas un chevron "atras" que NADA
+  //  atendia -- appTick no aplica su regla del chevron a las apps de cabecera propia -- y un segundo titulo encima del de la lista.)
   vidListRender();
   flxFlushAll();
 }
@@ -361,12 +364,27 @@ static void vidCkOpen(const char* path){
   vwOpen(&VID_VW, 0, path, NULL);
 }
 
+// Abre lo que otra app dejo pedido (Archivos > "abrir"): lo comparten vidEnter (la app arranca) y vidResume (la app ya estaba en segundo
+// plano). Antes vidResume lo ignoraba: el reproductor no se abria y la peticion se quedaba para abrir OTRA cosa en la proxima entrada.
+static bool vidOpenPending(){
+  if(!gMediaPending[0]) return false;
+  const bool fresh = millis() - gMediaPendingMs <= MEDIA_PENDING_MAX_MS;
+  char p[FLEXMED_PATH_MAX];
+  snprintf(p, sizeof(p), "%s", gMediaPending);
+  gMediaPending[0] = 0;
+  if(!fresh){ gMediaReturnApp = 0xFF; return false; }              // un resto de una peticion que no llego a abrirse: no se abre ahora
+  vidScreen = VS_VIEW;
+  vidCurId = vidIdOfPath(p);
+  vwOpen(&VID_VW, vidCurId, p, NULL);
+  if(!vwHostOpen(&VID_VW)) vidVwClosed();                         // no se pudo abrir: la lista (o la app de origen)
+  return true;
+}
 static void mediaOpenInPlayer(const char* path){
   if(!path || !path[0]) return;
   // El audio se escucha en Musica: un solo reproductor, que ademas sigue
   // sonando en segundo plano.
   const char* nm = strrchr(path, '/');
-  if(flexMediaClassify(nm ? nm + 1 : path) == FLEXMED_AUDIO){ musOpenPath(path); return; }
+  if(flexMediaClassify(nm ? nm + 1 : path) == FLEXMED_AUDIO){ gMediaReturnApp = 0xFF; musOpenPath(path); return; }   // (Musica no usa "volver a...": que no quede puesto para el visor)
   if(gState == ST_APP && gAppId == IC_MULTIMEDIA){
     // Ya estamos dentro: se abre en el acto.
     vidScreen = VS_VIEW;
@@ -375,6 +393,7 @@ static void mediaOpenInPlayer(const char* path){
     return;
   }
   snprintf(gMediaPending, sizeof(gMediaPending), "%s", path);
+  gMediaPendingMs = millis();
   if(gState == ST_APP) appClose();
   enterApp(IC_MULTIMEDIA);
 }
@@ -472,16 +491,7 @@ static void vidEnter(){
   mkBind(&VID_APP);
   appLoadSessionOnce(IC_MULTIMEDIA);
   if(!gRelayout) mkReset();
-  if(gMediaPending[0]){
-    vidScreen = VS_VIEW;
-    vidCurId = vidIdOfPath(gMediaPending);
-    char p[FLEXMED_PATH_MAX];
-    snprintf(p, sizeof(p), "%s", gMediaPending);
-    gMediaPending[0] = 0;
-    vwOpen(&VID_VW, vidCurId, p, NULL);
-    if(!vwHostOpen(&VID_VW)) vidVwClosed();       // no se pudo abrir: la lista (o la app de origen)
-    return;
-  }
+  if(vidOpenPending()) return;
   if(gRelayout && vwHostOpen(&VID_VW)){ vidRenderAll(); return; }
   if(gMlOk && !gRelayout) mlRequestScan();      // lo copiado por otras vias aparece al entrar
   vidScreen = VS_LIST;
@@ -557,6 +567,7 @@ static void vidSuspend(){
 static size_t vidShed(){ return vwShed() + ckShed(); }
 static void vidResume(){
   mkBind(&VID_APP);
+  if(vidOpenPending()) return;                    // lo que pidio otra app mientras Multimedia estaba en segundo plano
   if(vwHostOpen(&VID_VW)){
     vidScreen = VS_VIEW;
     if(!vwEnsure(&VID_VW)) vidVwClosed();
@@ -568,6 +579,7 @@ static void vidResume(){
 static void vidCloseApp(){
   ckUnbind(&VID_CK);
   ckUpAskOn = false;
+  gMediaPending[0] = 0; gMediaReturnApp = 0xFF;   // la app se va: ni una peticion sin abrir ni "volver a..." sobreviven a su cierre
   vwForget(&VID_VW);
   ckShed();                                       // miniaturas de la nube y la arena del streaming (ya cerrado)
   if(mkApp == &VID_APP) mkReset();

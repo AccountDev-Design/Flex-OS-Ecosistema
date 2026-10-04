@@ -996,12 +996,14 @@ static void navStampBar(int y0, int y1){
 // pressed/tap nuevo en la pantalla que acaba de entrar -- el toque fantasma.
 static void touchDropAll(){
   gTouchHeld = false;                   // lo que un overlay retuvo del dedo tampoco sobrevive al cambio de pantalla
+  const bool fingerOn = T.down || T.pressed;     // ¿el dedo SIGUE apoyado? Solo entonces hay un contacto heredado que tragar
   T.pressed = T.released = T.tap = false;
   T.swipeUp = T.swipeDown = T.swipeLeft = T.swipeRight = false;
   T.down = false; T.moved = false;
   T.startX = T.x; T.startY = T.y;
   T.downMs = T.lastMs = millis();
   gTouchSwallow = true;              // ...y se ignora hasta que el dedo se levante de verdad
+  gTouchSwallowSeenMs = fingerOn ? millis() : 0;   // (si ya estaba arriba, el candado cae en el siguiente poll sin contacto)
   gNavPress = -1;
   gNavGlow  = -1;
 }

@@ -71,13 +71,13 @@ static int  qsPanelY   = 0;      // 0 = oculto, SCR_H = abierto del todo
 static bool qsDragging = false;  // hay un gesto de cortina en curso
 static bool qsPower    = false;  // Ahorro Ultra (frecuencia REAL de la CPU)
 
-#define QS_EDGE_H        30              // franja del borde superior que captura el gesto
+#define QS_EDGE_H        SYS_EDGE_TOP_H  // franja del borde superior que captura el gesto (FlexOS_Ultra_Touch.h: la comparten las pantallas con controles propios)
 // Borde DERECHO: la otra forma de abrir el panel (izquierda ->
 // notificaciones, derecha -> controles). La franja es mas ancha que la
 // de arriba porque el pulgar entra en diagonal, y hace falta recorrer
 // QS_EDGE_SLOP hacia dentro para que el gesto cuente: asi un
 // desplazamiento vertical que nazca cerca del borde no abre nada.
-#define QS_EDGE_W        26
+#define QS_EDGE_W        SYS_EDGE_RIGHT_W
 #define QS_EDGE_SLOP     28
 #define QS_OPEN_PCT      40              // al soltar: >=40% del recorrido -> abrir; si no, cerrar
 #define QS_SHADOW_H      18              // alto de la sombra bajo el borde movil

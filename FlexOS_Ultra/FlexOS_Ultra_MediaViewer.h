@@ -84,6 +84,15 @@
 #define VW_LIVE_MS        40u       // repintado durante un gesto (vecino mas cercano)
 #define VW_CHECK_MS       400u      // comprobacion del elemento abierto
 #define VW_TOP_H          52
+// BORDES DEL SISTEMA. En vertical la cortina de Ajustes rapidos se agarra con el dedo en cuanto baja en la franja de arriba, y el Centro de
+// notificaciones al deslizar desde la izquierda (FlexOS_Ultra_Touch.h: SYS_EDGE_*). La barra de arriba del visor estaba en y=10..62 con "atras" en
+// x=10..74: sus 20 px de arriba eran del gesto del sistema, asi que ~1 de cada 4 toques al centro de "atras" (y=36, con la dispersion normal
+// de un dedo) y de "girar" se los quedaba la cortina: el boton "que a veces no responde". Ahora, en vertical, la barra empieza POR DEBAJO de la
+// franja (como Android con sus insets de gestos) y el chevron de "atras" queda dentro de la barra, lejos del borde. En horizontal no hay
+// gestos de borde y se queda donde estaba.
+#define VW_EDGE_TOP       (SYS_EDGE_TOP_H + 6)
+#define VW_BACK_SHIFT     24        // el chevron de "atras" se aparta del borde izquierdo (x del centro: 25 -> 49 dentro de la barra)
+#define VW_BACK_W         96        // zona tactil de "atras" desde el borde izquierdo de la barra
 #define VW_BOTP_H         66        // barra de la foto
 #define VW_BOTV_H         106       // barra del video
 #define VW_BTN_W          112       // boton de la barra de la foto
@@ -226,6 +235,10 @@ static uint32_t  vwLiveMs = 0;
 static bool      vwLiveDirty = false;               // hay que pintar suave al acabar el gesto
 static int       vwPressBtn = VWB_NONE;             // el dedo bajo en un boton de las barras
 static bool      vwPressBar = false;
+static bool      vwPressSeen = false;               // el APOYO de este contacto llego a un tick del visor (si no, el toque se resuelve donde se apoyo)
+static bool      vwRevealed = false, vwTapReveal = false;   // este contacto SACO las barras que estaban ocultas (y su toque no las vuelve a alternar)
+static bool      vwSeekDrag = false;                // el dedo esta ARRASTRANDO el punto de la barra de progreso
+static uint32_t  vwSeekDragMs = 0;                  // ...y este es el instante al que apunta (se busca al soltar)
 static int       vwDownX = 0, vwDownY = 0;
 static uint32_t  vwTap1Ms = 0;
 static int       vwTap1X = 0, vwTap1Y = 0;
@@ -841,7 +854,9 @@ static void vwRenderContent(bool smooth){
 // ##  izquierda), -10 s, reproducir/pausa, +10 s y Papelera. Geometria en
 // ##  el lienzo LOGICO: dibujo y tacto leen las MISMAS funciones.
 // #############################################################
-static void vwTopGeom(int &x, int &y, int &w, int &h){ x = vwVX + 10; y = vwVY + 10; w = vwVW - 20; h = VW_TOP_H; }
+// Fuera de la franja de la cortina en vertical; en horizontal / dentro de una ventana de DeX no hay gestos de borde.
+static int  vwTopInset(){ return (vwLand || vwHostedNow()) ? 10 : VW_EDGE_TOP; }
+static void vwTopGeom(int &x, int &y, int &w, int &h){ x = vwVX + 10; y = vwVY + vwTopInset(); w = vwVW - 20; h = VW_TOP_H; }
 static int  vwPhotoBtns(uint8_t* b){
   int n = 0;
   if(vwCanEdit)  b[n++] = VWB_EDIT;
@@ -981,14 +996,14 @@ static void vwDrawTopBar(uint8_t a){
   uint16_t base = uiGlass ? TH_GLASS2 : TH_SURF2;
   uint16_t fg = mix565(base, TH_TXT, a), fg2 = mix565(base, TH_TXT2, a);
   int cy = y + h / 2;
-  strokeSegAA(x + 30, cy - 9, x + 20, cy, 2.6f, fg);         // volver
-  strokeSegAA(x + 20, cy, x + 30, cy + 9, 2.6f, fg);
+  strokeSegAA(x + 30 + VW_BACK_SHIFT, cy - 9, x + 20 + VW_BACK_SHIFT, cy, 2.6f, fg);         // volver (apartado del borde: ver VW_BACK_SHIFT)
+  strokeSegAA(x + 20 + VW_BACK_SHIFT, cy, x + 30 + VW_BACK_SHIFT, cy + 9, 2.6f, fg);
   if(!vwHostedNow()){                                        // orientacion (en una ventana de DeX no se gira)
     vwIcoArc(x + w - 30, cy, 11, true, fg);
     const char* om = gMediaOriMode == MORI_AUTO ? "Auto" : gMediaOriMode == MORI_PORT ? "Vertical" : "Horizontal";
     drawTextR(x + w - 50, cy - 4, om, 1, fg2);
   }
-  int tx0 = x + 48, tx1 = x + w - (vwHostedNow() ? 16 : 130);
+  int tx0 = x + 48 + VW_BACK_SHIFT, tx1 = x + w - (vwHostedNow() ? 16 : 130);
   int tw = textW(vwName, 1);
   int tx = tx0 + ((tx1 - tx0) - tw) / 2;
   if(tx < tx0) tx = tx0;
@@ -1020,7 +1035,7 @@ static void vwDrawBotBar(uint8_t a){
   }
   // ---- progreso REAL ----
   int sx, sy, sw; vwTrackGeom(sx, sy, sw);
-  uint32_t dur = flexAviDurationMs(&vwAvi), pos = vwPosMs();
+  uint32_t dur = flexAviDurationMs(&vwAvi), pos = vwSeekDrag ? vwSeekDragMs : vwPosMs();   // arrastrando, el punto va donde el dedo
   fillRoundRect(sx, sy - 3, sw, 6, 3, mix565(base, TH_TRACK, a));
   int fw = dur > 0 ? (int)((uint64_t)sw * (pos > dur ? dur : pos) / dur) : 0;
   if(fw > 0) fillRoundRect(sx, sy - 3, fw, 6, 3, acc);
@@ -1246,8 +1261,10 @@ static void vwRelease(bool keepPos){
   vwFreeBufs();
   vwKind = VWK_NONE; vwEnded = false; vwCurFrame = 0; vwLoading = false;
   vwAnimOn = false; vwPinchOn = false; vwPanOn = false; vwTapPending = false;
+  vwPressSeen = false; vwRevealed = false; vwTapReveal = false; vwSeekDrag = false; vwPressBtn = VWB_NONE; vwPressBar = false;
   vwCloud = false; vwCloudPhase = 0; vwCloudFirst = false; vwBuffering = false; vwCloudReopen = 0;
   vwOn = false;
+  gTouchOwnsTwoFinger = false; gAppHidesStatusBar = false;
 }
 
 // Datos del elemento: del catalogo (id) o de la ruta.
@@ -1459,6 +1476,8 @@ static bool vwActivate(const int* from, uint32_t frame){
     return false;
   }
   vwOn = true;
+  gTouchOwnsTwoFinger = true;                      // los dos dedos son del pellizco del visor: no se traga el toque de un dedo (Touch.h)
+  gAppHidesStatusBar = true;                       // y cubre la barra de estado: la capsula del cronometro no existe debajo
   vwSeenRev = mlRev(); vwCheckMs = millis();
   vwScale = 1.0f;
   vwBarsA = 1.0f; vwBarsWant = 1; vwBarsAnim = false; vwTouchMs = millis();
@@ -1662,11 +1681,13 @@ static void vwTogglePlay(){
 // ---- Que boton hay en (x,y) del lienzo logico ----
 // -1 = fuera de las barras; VWB_NONE = en una barra, sin boton; >0 = boton.
 static int vwHitBtn(int x, int y){
-  if(vwBarsA < 0.5f) return -1;
+  // Barras ocultas (o casi): no se pulsan. Pero las que estan APARECIENDO (vwBarsWant) ya cuentan: el toque que las saca no puede tener que
+  // esperar a la mitad del fundido para que el siguiente llegue a un boton.
+  if(vwBarsWant == 0 && vwBarsA < 0.5f) return -1;
   int bx, by, bw, bh;
   vwTopGeom(bx, by, bw, bh);
   if(y >= by - 6 && y <= by + bh + 6 && x >= bx && x <= bx + bw){
-    if(x < bx + 64) return VWB_BACK;
+    if(x < bx + VW_BACK_W) return VWB_BACK;
     if(!vwHostedNow() && x > bx + bw - 140) return VWB_ROTATE;
     return VWB_NONE;
   }
@@ -1774,6 +1795,7 @@ static bool vwPinchStep(){
   float cx = (ax + bx) * 0.5f, cy = (ay + by) * 0.5f;
   vwTouchMs = millis();
   vwTapPending = false; vwPanOn = false; vwPressBtn = VWB_NONE; vwPressBar = false;
+  vwPressSeen = false; vwRevealed = false; vwSeekDrag = false;      // con dos dedos el contacto es del pellizco
   if(!vwPinchOn){ vwPinchBegin(cx, cy, d); return true; }
   if(fabsf(d - vwPinD0) > 12.0f || fabsf(cx - vwPinCx0) > 12.0f || fabsf(cy - vwPinCy0) > 12.0f) gTouchPinchUsed = true;
   if(vwPinchApply(cx, cy, d)) vwLive(false);
@@ -1784,12 +1806,41 @@ static bool vwPinchStep(){
 static void vwTouch(){
   int tx, ty; vwTouchXY(T.x, T.y, tx, ty);
   if(T.pressed){
+    vwPressSeen = true;
     vwDownX = tx; vwDownY = ty; vwPanOn = false;
-    int b = vwHitBtn(tx, ty);
+    // LAS BARRAS ESTAN OCULTAS (se esconden solas a los 3 s de reproducir): este contacto SOLO las saca, y las saca AL APOYAR, no 260 ms
+    // despues de soltar (antes el primer toque esperaba por si venia un doble toque, y un segundo toque rapido era un zoom de 2,5x: los
+    // controles parecian muertos justo cuando mas se usan -- pausar, buscar, cerrar).
+    const bool hidden = vwBarsWant == 0 && vwBarsA < 0.5f;
+    vwRevealed = false;
+    if(hidden){ vwBarsShow(true); vwRevealed = true; }
+    int b = hidden ? -1 : vwHitBtn(tx, ty);
     vwPressBar = (b >= 0);
     vwPressBtn = b > 0 ? b : VWB_NONE;
     if(vwPressBtn) vwTouchMs = millis();
     vwPanOx0 = vwOffX; vwPanOy0 = vwOffY; vwPanTx0 = tx; vwPanTy0 = ty;
+  }
+  // ARRASTRAR el punto de la barra de progreso: antes solo contaba un toque suelto (un arrastre no hacia nada). Ahora el punto sigue al
+  // dedo y se busca UNA vez, al soltar (buscar en cada movimiento seria decodificar cientos de veces el mismo trozo).
+  if(T.down && vwPressBtn == VWB_SEEK && vwKind == VWK_VIDEO){
+    int sx, sy, sw; vwTrackGeom(sx, sy, sw);
+    const uint32_t dur = flexAviDurationMs(&vwAvi);
+    if(dur > 0 && sw > 0 && (vwSeekDrag || abs(tx - vwDownX) > 6)){
+      int rel = tx - sx; if(rel < 0) rel = 0; if(rel > sw) rel = sw;
+      const uint32_t ms = (uint32_t)((uint64_t)dur * (uint32_t)rel / (uint32_t)sw);
+      vwTouchMs = millis();
+      if(!vwSeekDrag || ms != vwSeekDragMs){
+        vwSeekDrag = true; vwSeekDragMs = ms;
+        if(millis() - vwBarsDrawMs >= 60u){ vwBarsDrawMs = millis(); vwPresentBars(); }
+      }
+    }
+    return;
+  }
+  if(T.released && vwSeekDrag){
+    vwSeekDrag = false; vwPressBtn = VWB_NONE; vwPressBar = false; vwPressSeen = false;
+    vwSeekMs(vwSeekDragMs);
+    vwPresentBars();
+    return;
   }
   if(T.down && !vwPressBtn && !vwPressBar){
     int mdx = tx - vwDownX, mdy = ty - vwDownY;
@@ -1805,6 +1856,7 @@ static void vwTouch(){
     }
   }
   if(T.released){
+    if(!T.tap){ vwPressSeen = false; vwRevealed = false; }       // un arrastre o deslizamiento: este contacto ya no es un toque
     if(vwPanOn){ vwPanOn = false; vwLiveEnd(); return; }
     int dx = tx - vwDownX, dy = ty - vwDownY;
     if(!vwPressBtn && !vwPressBar && vwScale <= 1.001f && abs(dx) > 70 && abs(dx) > 2 * abs(dy)){
@@ -1812,7 +1864,17 @@ static void vwTouch(){
       return;
     }
   }
-  if(!T.tap) return;
+  if(!T.tap){ if(T.released){ vwPressSeen = false; vwRevealed = false; } return; }
+  const bool seen = vwPressSeen; vwPressSeen = false;
+  if(!seen){
+    // El APOYO de este contacto no llego a un tick del visor (lo vio otra capa del sistema, o la vuelta de reproduccion fue larga): el toque
+    // se resuelve donde se APOYO (para un toque, T.x/T.y ya son ese punto). Antes, sin el apoyo, un toque encima de un boton pasaba por un
+    // toque en la imagen y solo alternaba las barras: "pause / atras / buscar no responde".
+    vwPressBtn = VWB_NONE; vwPressBar = false;
+    const int b = vwHitBtn(tx, ty);
+    if(b > 0){ vwDoBtn(b, tx); return; }
+    if(b == VWB_NONE){ vwTouchMs = millis(); return; }              // en una barra, sin boton
+  }
   if(vwPressBtn){
     int b = vwHitBtn(tx, ty);
     int pb = vwPressBtn; vwPressBtn = VWB_NONE;
@@ -1823,7 +1885,7 @@ static void vwTouch(){
   // Toque en la imagen: el primero espera por si llega el segundo.
   uint32_t now = millis();
   if(vwTapPending && now - vwTap1Ms < VW_TAP2_MS && abs(tx - vwTap1X) < 40 && abs(ty - vwTap1Y) < 40){
-    vwTapPending = false;
+    vwTapPending = false; vwTapReveal = false; vwRevealed = false;
     if(vwKind == VWK_PHOTO || vwKind == VWK_VIDEO){
       if(vwScale > 1.001f){ vwScale = 1.0f; vwClamp(); }
       else vwZoomAt(VW_ZOOM_TAP, (float)tx, (float)ty);
@@ -1834,11 +1896,13 @@ static void vwTouch(){
     return;
   }
   vwTapPending = true; vwTap1Ms = now; vwTap1X = tx; vwTap1Y = ty;
+  vwTapReveal = vwRevealed; vwRevealed = false;              // si este toque YA saco las barras al apoyar, el toque simple no las vuelve a alternar
 }
 // El toque simple que no fue doble: muestra u oculta las barras.
 static void vwTapTick(){
   if(!vwTapPending || millis() - vwTap1Ms < VW_TAP2_MS) return;
   vwTapPending = false;
+  if(vwTapReveal){ vwTapReveal = false; return; }            // ya salieron al apoyar
   vwBarsShow(vwBarsWant == 0);
 }
 
