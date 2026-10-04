@@ -92,7 +92,7 @@ Código: `android/FlexPhone/storage/.../cloud/media/MediaProfile.kt` (única fue
 | | Sobre | Objetivo |
 |---|---|---|
 | Formato | JPEG baseline/SOF1, 8 bits, sin girar por EXIF | JPEG baseline |
-| Tamaño | ≤ 4096×4096 y ≤ 8 MB (lo que el P4 trae de la nube) | lado largo **1600**, calidad 85, EXIF aplicado |
+| Tamaño | ≤ 4096×4096 y ≤ 6 MB (lo que el P4 trae de la nube a la RAM) | lado largo **1600**, calidad 85, EXIF aplicado |
 | Miniatura | — | lado largo **256**, ≤ **40 KB** (la respuesta JSON del P4 admite 48 KB) |
 
 ---
@@ -122,7 +122,7 @@ Renombrar la extensión **no** es nunca una conversión: el analizador mira los 
 |---|---|---|
 | Vídeo H.264, HEVC, MPEG-4, VP8/9, AV1, H.263 en MP4/MOV/3GP/WebM/MKV | AVI MJPEG (sin audio) | `MediaExtractor` + `MediaCodec` (según el teléfono) |
 | MJPEG de más de 800 px / 15 fps / fotogramas de más de 192 KB / progresivo / girado / OpenDML | AVI MJPEG del perfil | `BitmapFactory`, fotograma a fotograma (sin MediaCodec) |
-| Foto PNG, GIF, BMP, WebP, HEIC/AVIF, JPEG progresivo, JPEG girado por EXIF, > 4096 px o > 8 MB | JPEG baseline derecho | `BitmapFactory` |
+| Foto PNG, GIF, BMP, WebP, HEIC/AVIF, JPEG progresivo, JPEG girado por EXIF, > 4096 px o > 6 MB | JPEG baseline derecho | `BitmapFactory` |
 | Audio MP3, AAC/M4A, FLAC, Ogg Vorbis/Opus, AMR | WAV IMA mono 22 kHz | `MediaExtractor` + `MediaCodec` |
 | WAV de 24/32 bits, float, µ-law, A-law, > 2 canales, fuera de 8–96 kHz | WAV IMA mono | Kotlin puro |
 
@@ -244,4 +244,4 @@ decide el P4 quién lo abre.
 6. Mira en la consola serie del P4 `[CLOUD] streaming: … (… bytes, versión del perfil)` y la RAM libre (PSRAM) durante varios minutos de
    reproducción: debe ser estable; vigila los síntomas ya conocidos de Multimedia (cierre del visor con el dedo, parpadeo cian,
    watchdog, fotogramas fantasma).
-7. Mide y apunta los **fps reales** a 640×360/12 fps y a 800 px/15 fps: es el único dato que falta para confirmar el sobre de B.
+7. Mide y apunta los **fps reales** a 640×360/12 fps y a 800 px/15 fps: es el único dato que falta para confirmar el sobre de B. Ya no hace falta medirlo a mano: compila con `-DFLEXOS_DIAG_MEDIA=1` y el visor imprime por Serie, cada segundo, los fps, lo que tarda decodificar y publicar cada fotograma, las esperas y la red (`docs/FLEX-MEDIA-ECOSYSTEM.md` §16.6). **Si `decodif` pasa de 83 ms a 640×360/12 fps, el objetivo de conversión (`VIDEO_TARGET_SIDE`) tiene que bajar** (a 480 el coste de decodificar cae un 44 %); mientras no haya esa medida no se toca, porque degrada la imagen de todo lo que se convierta.

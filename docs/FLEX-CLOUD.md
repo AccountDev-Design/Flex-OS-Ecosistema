@@ -160,18 +160,30 @@ Lo protegido no se ofrece para subir. Encolar no borra nada. Un aviso repetido
 
 ## 5. Ver y reproducir sin perder calidad
 
-* **Foto** (JPEG <= 8 MB): se trae el **original** verificado a un unico hueco
-  (`/System/Cloud/view/<nombre>`) y se abre en el visor de la app. No hay copias
-  reducidas ni recompresion. La miniatura de la rejilla es un **objeto aparte**
-  de la nube (132x132), nunca sustituye al original.
+* **Foto** (JPEG <= 6 MB): se trae el **original** verificado a un buffer de
+  **PSRAM** (nunca a la flash: cada borrado de sector apaga la cache y el panel
+  se ve cian; `docs/FLEX-MEDIA-ECOSYSTEM.md` §11 y §16.1) y se decodifica de ahi
+  en el visor de la app. El buffer tiene **un solo dueno** en cada momento
+  (nube -> visor -> trabajo de decodificar -> liberado), se verifica con el
+  tamano y el SHA-256 que el servidor dice en esa respuesta, tiene plazo (60 s),
+  se cancela al cerrar el visor y se rechaza antes de bajar un byte si luego no
+  quedaria memoria para decodificarla. No hay copias reducidas ni recompresion.
+  La miniatura de la rejilla es un **objeto aparte** de la nube (132x132), nunca
+  sustituye al original.
 * **Video AVI MJPEG**: streaming por rangos con una **arena fija de 48 bloques de
   64 KB (3 MB de PSRAM)**, reservada una vez y reutilizada. Un video de 160 MB se
   reproduce con esos 3 MB (prueba `test_cloud`).
   * El visor abre en fases: cabecera (64 KB) -> indice `idx1` del final (se
     **fija** en la cache para poder buscar) -> abierto.
   * Antes de leer cada fotograma comprueba que el tramo esta en la cache; si no,
-    **para el reloj** y ensena "Cargando" (no salta fotogramas ni da el video por
-    roto). Nunca espera dentro del bucle de la interfaz mas de 25 ms.
+    **para el reloj** y ensena la tarjeta "Cargando de Flex Cloud" (no salta
+    fotogramas ni da el video por roto, y las barras no salen). **Reanuda con un
+    colchon** -- 2 s de video, mas lo que la red no traera si baja menos que el
+    video, tope 1,5 MB -- y no en cuanto cabe un fotograma. Nunca espera ni
+    duerme dentro del bucle de la interfaz: una lectura que falta devuelve -1 al
+    instante.
+  * La tarea de red **no sondea**: duerme hasta que el reproductor cambia de
+    bloque, salta, fija un rango o cierra (`docs/FLEX-MEDIA-ECOSYSTEM.md` §16.5).
 * **MP4, HEIC, PNG...**: no se intentan; se dice por que y se ofrece descargar o
   abrir en la web. El P4 no transcodifica nada.
 
@@ -213,6 +225,7 @@ Lo protegido no se ofrece para subir. Encolar no borra nada. Un aviso repetido
 | Huellas de partes | 32 B x partes (<= 16 KB) | durante una subida |
 | Miniaturas | <= 24 x 34 KB PSRAM (LRU) | con la nube a la vista; `flexCloudShed()` las suelta |
 | Streaming | 3 MB PSRAM | desde el primer video; se suelta al cerrar Galeria/Multimedia |
+| Foto del visor | <= 6 MB PSRAM (+ 8 MB que deben seguir libres) | mientras se descarga y decodifica; un solo dueno; se suelta al cancelar/cerrar |
 
 ### Las tareas y la SRAM interna
 

@@ -131,10 +131,18 @@ static bool mediaCloudPathMatches(const char* path){
   size_t n = strlen(gMediaCloudItem.id);
   return !strncmp(id, gMediaCloudItem.id, n) && id[n] == '/';
 }
-// Espera ACOTADA por una lectura de la nube. El visor solo lee cuando la
-// cache dice que lo tiene (ver vwCloudReady); esto cubre lo poco que se
-// escape (una cabecera de trozo justo despues). Nunca bloquea mas de esto.
-#define MEDIA_CLOUD_WAIT_MS 25u
+// Una lectura de la nube que aun no esta en la cache devuelve -1 AL INSTANTE: ni espera ni duerme en la vuelta de la interfaz. El
+// visor solo lee cuando la cache dice que lo tiene (vwCloudReady) y, si se escapa algo (la cabecera de un trozo justo despues, un
+// salto), la propia lectura fallida anota lo que falta y avisa a la tarea de red, y el visor espera con la tarjeta de carga. Antes
+// esperaba hasta 25 ms por lectura dentro de la vuelta -- un bloque de 64 KB tarda decenas: esperar no lo trae antes, solo congela el dedo.
+
+// DIAGNOSTICO DE MEDIOS (apagado por defecto: -DFLEXOS_DIAG_MEDIA=1). Una linea por segundo por Serial mientras suena un video o una pista
+// de la nube: fotogramas por segundo, lo que tarda cada fase (decodificar / publicar), paradas por falta de datos, rendimiento de la red,
+// colchon y memoria. Es lo unico que dice CON MEDIDAS -- y no con suposiciones -- donde se pierde el tiempo en el aparato real. Apagado
+// compila a NADA (ni una variable, ni una llamada). Como FLEXOS_DIAG_WIFI / FLEXOS_DIAG_TOUCH: el interruptor vive en el codigo, no en un menu.
+#ifndef FLEXOS_DIAG_MEDIA
+  #define FLEXOS_DIAG_MEDIA 0
+#endif
 
 static void mediaStreamClose(MediaStream* s){
   if(!s) return;
@@ -178,15 +186,7 @@ static inline bool mediaStreamOpenOk(const MediaStream* s){
 static int mediaCloudRead(MediaStream* s, void* buf, uint32_t n){
   if(s->pos >= s->size) return 0;
   if(n > s->size - s->pos) n = s->size - s->pos;
-  int r = flexCloudStreamRead(s->pos, buf, n);
-  if(r < 0){
-    flexCloudStreamSeek(s->pos);                 // que el fetcher vaya a buscarlo ya
-    // Acotada por VUELTAS ademas de por tiempo: nunca depende de que el reloj avance.
-    uint32_t t0 = millis();
-    for(uint32_t k = 0; r < 0 && k < MEDIA_CLOUD_WAIT_MS && millis() - t0 < MEDIA_CLOUD_WAIT_MS; k++){
-      vTaskDelay(1); r = flexCloudStreamRead(s->pos, buf, n);
-    }
-  }
+  int r = flexCloudStreamRead(s->pos, buf, n);       // si falta, ella misma lo anota y avisa a la tarea de red
   if(r < 0){ s->missed = true; s->missOff = s->pos; return -1; }
   s->pos += (uint32_t)r;
   return r;

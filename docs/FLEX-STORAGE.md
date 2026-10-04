@@ -83,10 +83,12 @@ de la API es justo el que necesita un "Flex Cloud en el teléfono".
 
 * **Vídeo**: `FlexOS_Ultra_MediaViewer.h` + `FlexOS_Media.cpp`. **AVI MJPEG**
   (el P4 no tiene decodificador de H.264/HEVC). Local por flujo; de la nube por
-  rangos con la caché de bloques (el visor nunca espera más de 25 ms dentro del
-  bucle; si falta el tramo, para el reloj y enseña "Cargando").
-* **Fotos**: JPEG baseline (≤ 6 MB en local, ≤ 8 MB desde la nube, original
-  verificado). PNG/HEIC/WebP se guardan y se descargan, no se abren en el P4.
+  rangos con la caché de bloques (el visor nunca espera ni duerme dentro del
+  bucle; si falta el tramo, para el reloj, enseña la tarjeta "Cargando" y
+  reanuda con un colchón: `docs/FLEX-MEDIA-ECOSYSTEM.md` §16.5).
+* **Fotos**: JPEG baseline (≤ 6 MB en local y ≤ 6 MB desde la nube, original
+  verificado; la de la nube va a la RAM, nunca a la flash: §16.1 de
+  `FLEX-MEDIA-ECOSYSTEM.md`). PNG/HEIC/WebP se guardan y se descargan, no se abren en el P4.
 * **Audio**: `FlexOS_Ultra_AppMusic.h` + `FlexAudioStream`: WAV PCM 8/16 bits y
   WAV IMA ADPCM. MP3/AAC/FLAC/OGG no se reproducen en el P4 (no hay
   decodificador). El DMA guarda ~0,4 s.

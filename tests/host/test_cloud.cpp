@@ -1348,6 +1348,93 @@ static void testStreaming(){
   auditNetwork("streaming");
 }
 
+// La tarea de streaming NO sondea: trabaja mientras hay algo que traer y, si no, duerme hasta un AVISO (una lectura que cambia de bloque, un
+// salto, un rango fijado, cerrar). Antes hacia vTaskDelay(1) en bucle -- 1000 vueltas por segundo, cada una con el cerrojo que comparte con
+// la interfaz, durante TODO el video aunque la ventana ya estuviera llena. Aqui se comprueba lo que se puede ver desde fuera: lo que
+// devuelve cada paso (0 = hizo trabajo; si no, los ms que la tarea dormiria), cuando avisa quien lee, lo que mide el flujo y como se
+// calcula el colchon con el que un video de la nube reanuda tras quedarse sin datos.
+static void testStreamEvents(){
+  printf("-- streaming: tarea por eventos, lo que mide y el colchon de reanudacion --\n");
+  // ---- 1. Las cuentas puras ----
+  CHECK(fclThroughput(0, 65536, 64) == 1024000u, "primer bloque: 64 KB en 64 ms = 1.024.000 bytes/s");
+  CHECK(fclThroughput(1000000u, 65536, 64) == 1006000u, "media movil: el bloque nuevo pesa un cuarto");
+  CHECK(fclThroughput(1024000u, 65536, 640) == 793600u, "un bloque lento baja la media poco a poco, no de golpe");
+  CHECK(fclThroughput(0, 65536, 0) == 65536000u, "0 ms cuenta como 1 (un bloque que ya estaba en el socket no es velocidad infinita)");
+  CHECK(fclThroughput(1234u, 0, 50) == 1234u, "sin bytes no cambia nada");
+  const uint32_t MINB = 150000u, MAXB = 1536u * 1024u;
+  CHECK(fclResumeLead(500000u, 0, 60000u, 2000u, MINB, MAXB) == 1000000u, "red sin medir: 2 s de video (500 KB/s -> 1 MB)");
+  CHECK(fclResumeLead(500000u, 2000000u, 60000u, 2000u, MINB, MAXB) == 1000000u, "red sobrada: igual, no se pide mas");
+  CHECK(fclResumeLead(500000u, 300000u, 60000u, 2000u, MINB, MAXB) == MAXB, "red MUY por debajo del video y mucho por ver: el colchon sube hasta el tope (la arena es fija)");
+  CHECK(fclResumeLead(500000u, 450000u, 30000u, 2000u, MINB, MAXB) == 1500000u, "red algo por debajo: lo justo para llegar al final sin parar otra vez");
+  CHECK(fclResumeLead(500000u, 450000u, 4000u, 2000u, MINB, MAXB) == 1000000u, "casi al final no hace falta mas colchon que el base");
+  CHECK(fclResumeLead(0, 0, 0, 2000u, MINB, MAXB) == MINB, "sin saber lo que pesa el video: lo minimo para leer sin esperar");
+  CHECK(fclResumeLead(10000u, 0, 60000u, 2000u, MINB, MAXB) == MINB, "video ligero: nunca por debajo del minimo");
+  CHECK(fclResumeLead(0, 0, 0, 2000u, 3u * 1024 * 1024, MAXB) == MAXB, "y nunca por encima del tope");
+
+  // ---- 2. La tarea duerme cuando no hay nada que traer ----
+  boot();
+  FFile& v = addGeneratedFile("peli.avi", 40ull * 1024 * 1024);
+  FclItem it = itemOf(v);
+  CHECK(flexCloudStreamOpen(&it), "abrir");
+  FlexCloudStreamStats s;
+  CHECK(flexCloudStreamStats(&s) && s.bps == 0 && s.blocks == 0 && s.conns == 0 && s.misses == 0, "recien abierto: nada medido ni traido");
+  auto work = [](int n){ int did = 0; for(int i = 0; i < n; i++){ if(flexCloudTestStreamStep() == 0) did++; netstubAdvance(2); } return did; };
+  const int WIN = FLEX_CLOUD_STREAM_BLOCKS - 2;                 // la ventana de por delante: todos los bloques menos dos
+  CHECK(work(WIN + 10) == WIN, "trabaja hasta llenar la ventana de por delante y ni un bloque mas");
+  const unsigned nIdle = gNetTaskNotifies;
+  const size_t rIdle = C.ranges.size();
+  uint32_t w = 0; bool allIdle = true;
+  for(int i = 0; i < 1000; i++){ w = flexCloudTestStreamStep(); if(w < 50) allIdle = false; netstubAdvance(2); }
+  CHECK(allIdle && w >= 50, "con la ventana llena cada paso pide DORMIR (>= 50 ms), no volver a mirar al milisegundo");
+  CHECK(C.ranges.size() == rIdle && gNetTaskNotifies == nIdle, "y no toca la red ni se avisa a si misma");
+  CHECK(flexCloudStreamStats(&s) && s.blocks == (uint32_t)WIN && s.conns == 1 && s.bps > 0, "mide lo que bajo: 46 bloques, UNA conexion y rendimiento > 0");
+
+  // ---- 3. Quien avisa y cuando ----
+  uint8_t buf[4096];
+  unsigned n0 = gNetTaskNotifies;
+  CHECK(flexCloudStreamRead(0, buf, sizeof(buf)) == (int)sizeof(buf), "lectura del principio");
+  CHECK(gNetTaskNotifies == n0 + 1, "la primera lectura avisa una vez (entra en un bloque)");
+  n0 = gNetTaskNotifies;
+  for(uint32_t off = sizeof(buf); off < FLEX_CLOUD_STREAM_BLOCK; off += sizeof(buf)) flexCloudStreamRead(off, buf, sizeof(buf));
+  CHECK(gNetTaskNotifies == n0, "leer el resto del MISMO bloque (15 lecturas) no avisa: eso seria sondear");
+  CHECK(flexCloudStreamRead(FLEX_CLOUD_STREAM_BLOCK, buf, sizeof(buf)) == (int)sizeof(buf) && gNetTaskNotifies == n0 + 1,
+        "cruzar al bloque siguiente avisa UNA vez: la ventana se desliza y hay hueco nuevo por delante");
+  CHECK(flexCloudTestStreamStep() == 0 && flexCloudTestStreamStep() >= 50, "y ese aviso tiene trabajo detras: trae el bloque nuevo y vuelve a dormir");
+  n0 = gNetTaskNotifies;
+  CHECK(flexCloudStreamRead(30u * 1024 * 1024, buf, sizeof(buf)) == -1 && gNetTaskNotifies == n0 + 1, "una lectura que falta avisa a la tarea (y no bloquea)");
+  C.ranges.clear();
+  CHECK(flexCloudTestStreamStep() == 0 && C.ranges.size() == 1 && C.ranges[0] == "bytes=31457280-", "la tarea va a por LO QUE FALTA (rango nuevo)");
+  CHECK(flexCloudStreamStats(&s) && s.conns == 2 && s.misses == 1, "y lo cuenta: 2 conexiones, 1 lectura que no estaba");
+  n0 = gNetTaskNotifies;
+  flexCloudStreamSeek(5u * 1024 * 1024);
+  flexCloudStreamPin(39u * 1024 * 1024, 1024 * 1024);
+  CHECK(gNetTaskNotifies == n0 + 2, "un salto y un rango fijado tambien avisan");
+  flexCloudStreamClose();
+  CHECK(!flexCloudStreamStats(&s), "cerrado: no hay estadisticas");
+  CHECK(flexCloudTestStreamStep() >= 500, "y sin flujo la tarea duerme largo");
+
+  // ---- 4. Un 404 no se martillea ----
+  boot();
+  FFile& g = addGeneratedFile("fantasma.avi", 3u * 1024 * 1024);
+  flexCloudRefresh(); pump(40);
+  FclItem gi = itemOf(g);
+  CHECK(flexCloudStreamOpen(&gi), "abrir otro");
+  C.files.erase(g.id);
+  int hits = 0;
+  C.fault = [&](const NetRequest& rq, NetResponse&){ if(rq.url.find("/download/") != std::string::npos) hits++; return false; };
+  uint32_t first = flexCloudTestStreamStep();
+  char err[96] = "";
+  CHECK(flexCloudStreamState(err, sizeof(err)) == FCS_ERROR && hits == 1, "el primer 404 es error definitivo");
+  CHECK(first > 0, "y el paso pide dormir (no volver a intentarlo ya)");
+  for(int i = 0; i < 80; i++){ flexCloudTestStreamStep(); netstubAdvance(20); }       // 1,6 s sin que nadie cierre el flujo
+  CHECK(hits == 1, "si nadie cierra el flujo no se martillea al servidor: ni un intento mas en 1,6 s");
+  for(int i = 0; i < 40; i++){ flexCloudTestStreamStep(); netstubAdvance(20); }
+  CHECK(hits >= 2 && hits <= 3, "reintenta despacio (cada ~2 s), por si el telefono ya lo termino de preparar");
+  C.fault = nullptr;
+  flexCloudStreamClose();
+  auditNetwork("streaming por eventos");
+}
+
 static void testBigUploadBounded(){
   printf("-- subida de 160 MB: partes de tamano adaptado y memoria acotada --\n");
   boot();
@@ -2344,6 +2431,7 @@ int main(){
   testThumbsAndView();
   testListaAlDia();
   testStreaming();
+  testStreamEvents();
   testEventsAfterPowerLoss();
   testJournalCorrupt();
   testBigUploadBounded();

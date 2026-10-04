@@ -54,6 +54,7 @@ static unsigned gPinnedTaskCreates = 0;
 static unsigned gSemTakeCalls = 0;
 static unsigned gPanelDrawCalls = 0;
 static int gPanelLastY0 = -1, gPanelLastY1 = -1;   // filas del ultimo volcado al panel
+static int gPanelMaxSpan = 0;                       // ...y el volcado MAS GRANDE (en filas) desde que la prueba lo puso a 0
 unsigned long millis(){ return gTestMs; }
 // micros() avanza de verdad (reloj monotonico del PC) para que la
 // instrumentacion del Panel Rapido pueda medir el coste real de un cuadro.
@@ -248,6 +249,7 @@ esp_err_t esp_lcd_panel_del(esp_lcd_panel_handle_t){ return ESP_OK; }
 uint16_t* gPanelShadow = nullptr;
 esp_err_t esp_lcd_panel_draw_bitmap(esp_lcd_panel_handle_t, int, int y0, int, int y1, const void* data){
   gPanelDrawCalls++; gPanelLastY0 = y0; gPanelLastY1 = y1 - 1;
+  if(y1 - y0 > gPanelMaxSpan) gPanelMaxSpan = y1 - y0;
   if(gPanelShadow && data && y0 >= 0 && y1 <= 800 && y1 > y0)
     memcpy(gPanelShadow + (size_t)y0 * 480, data, (size_t)(y1 - y0) * 480 * 2);
   return ESP_OK;
@@ -11317,6 +11319,7 @@ static void testMusicaNube(){
   mnTick(1);
   chk(!musCloudWait && musLoaded, "llega el principio: se lee la cabecera WAV y queda listo");
   chk(musAs.wav.sampleRate == 8000 && musAs.wav.channels == 1, "con los datos reales del WAV (8 kHz mono)");
+  chkf(musPlaying && gStubAudioOut.size() > 8192 && gStubAudioOut.size() <= MUS_PUMP_MAX, "la PRIMERA vuelta del reproductor repone hasta el anillo entero del DMA (%u bytes: con 8 KB, una vuelta larga ya no alcanzaba)", (unsigned)gStubAudioOut.size());
   chk(musPlay() && musPlaying, "suena");
   mnTick(40);
   size_t before = gStubAudioOut.size();
@@ -11585,6 +11588,190 @@ static void testFlexCloudUi(){
   chk(!clCalled("stream fil_v2") && !vwActiveFor(&GAL_VW), "uno que se esta preparando tampoco: se espera");
   gStubCloudItems[2].playState = FCL_PS_UNKNOWN;
   galRender();
+
+  // ---- 7c. LA RED SE QUEDA CORTA: tarjeta de carga (no barras) y reanudar con COLCHON, no en cuanto cabe un fotograma ----
+  // Fotogramas con relleno (un comentario JPEG detras de SOI, que cualquier decodificador salta): hacen falta bytes de verdad para que
+  // "dos segundos de video" sean mas que "dos fotogramas y un margen".
+  {
+    extern std::vector<bool> gStubStreamReady;
+    auto padded = [](size_t extra){
+      std::vector<uint8_t> j = vwTestJpeg(320, 240);
+      std::vector<uint8_t> c = { 0xFF, 0xFE, (uint8_t)((extra + 2) >> 8), (uint8_t)(extra + 2) }; c.resize(4 + extra, 0x20);
+      j.insert(j.begin() + 2, c.begin(), c.end());
+      return j;
+    };
+    auto openCloudVideo = [&](const std::vector<uint8_t>& avi){
+      gStubStreamData = avi;
+      gStubCloudItems[1].size = avi.size();
+      galRender();
+      gStubCloudCalls.clear();
+      int cx, cy; clCellCenter(1, cx, cy);
+      clTap(galTick, cx, cy);
+    };
+    auto tickPlay = [&](int n){ for(int k = 0; k < n; k++){ gTestUs = vwNextUs + 1000; gTestMs += 41; vwTick(); } gTestUs = 0; };
+    std::vector<std::vector<uint8_t>> pf;
+    for(int k = 0; k < 120; k++) pf.push_back(padded(20000));
+    memset(vwResumeTab, 0, sizeof(vwResumeTab));
+    openCloudVideo(vwTestAvi(pf, 320, 240, 40000));
+    chk(vwActiveFor(&GAL_VW) && vwKind == VWK_VIDEO && vwCloud && vwCloudPhase == 1 && vwLoadPill(), "7c: abrir un video de la nube: la cabecera se espera con la TARJETA de carga");
+    {
+      char l1[40], l2[48]; int pct; vwLoadLines(l1, sizeof(l1), l2, sizeof(l2), pct);
+      chk(!strcmp(l1, "Cargando de Flex Cloud") && !strcmp(l2, "Conectando..."), "...que dice que conecta (aun no llego nada)");
+    }
+    unsigned d0 = gPanelDrawCalls; gPanelMaxSpan = 0;
+    for(int k = 0; k < 10; k++){ gTestMs += 100; vwTick(); }                       // un segundo esperando la cabecera
+    chk(gPanelDrawCalls - d0 >= 3 && gPanelDrawCalls - d0 <= 5, "esperando la cabecera la tarjeta se repinta 4 veces por segundo (no mas)");
+    chk(gPanelMaxSpan < SCR_H - 1, "y SOLO su banda: ni una sola vez la pantalla entera (antes: rehacer y volcar todo, dos veces por segundo)");
+    stubStreamDeliver(1000); gTestMs += 10; vwTick();
+    stubStreamDeliver(1000); gTestMs += 10; vwTick();
+    gTestMs += 10; vwTick();
+    chk(vwCloudPhase == 3 && vwFrameLen > 0 && !vwLoadPill(), "7c: abierto: el primer fotograma se ve y la tarjeta se va");
+    // Solo llegan los 14 primeros bloques (~900 KB de 2,5 MB): la red se queda corta a mitad del video.
+    const size_t KEEP = 14;
+    for(size_t b = 0; b < gStubStreamReady.size(); b++) gStubStreamReady[b] = b < KEEP || b + 1 == gStubStreamReady.size();   // + el bloque del indice
+    vwTogglePlay();
+    // A los 2 s sin tocar las barras de un VIDEO se quitan (cada fotograma paga el vidrio mientras estan); la foto sigue con 3 s.
+    vwBarsShow(true);
+    static_assert(VW_BARS_HIDE_VIDEO_MS < VW_BARS_HIDE_MS, "un video en reproduccion quita las barras ANTES que una foto");
+    gTestMs += 1900; vwTick();                                                     // (cifras a pelo: la prueba no puede seguir a la constante)
+    chk(vwBarsWant == 1, "7c: a los 1,9 s reproduciendo las barras siguen");
+    gTestMs += 200; vwTick();
+    chk(vwBarsWant == 0, "...y se quitan a los 2 s (no a los 3: cada fotograma paga el vidrio mientras estan)");
+    gTestMs += VW_FADE_MS + 50; vwTick();
+    chk(vwBarsA == 0.0f, "...del todo");
+    bool stalled = false;
+    for(int k = 0; k < 400 && !stalled; k++){ tickPlay(1); stalled = vwBuffering; }
+    chk(stalled, "7c: la red se queda corta: la reproduccion espera (no se salta fotogramas ni se da por rota)");
+    chk(vwBarsWant == 0 && vwBarsA == 0.0f, "las barras NO salen a contarlo (antes cada espera las sacaba y repintaba)");
+    chk(vwLoadPill() && vwPlaying, "lo cuenta la tarjeta de carga, con el video en marcha detras");
+    {
+      char l1[40], l2[48]; int pct; vwLoadLines(l1, sizeof(l1), l2, sizeof(l2), pct);
+      chkf(!strcmp(l1, "Cargando de Flex Cloud") && strstr(l2, " s de ") && pct >= 0 && pct < 100, "dice cuanto colchon lleva: '%s' (%d %%)", l2, pct);
+    }
+    chkf(vwBufTarget > vwCloudNeed() + 2u * 65536u && vwBufTarget <= VW_CLOUD_LEAD_MAX,
+        "el colchon va mucho mas alla de 'que quepa un fotograma': %lu KB (minimo para leer: %lu KB, tope %lu KB)", (unsigned long)(vwBufTarget / 1024), (unsigned long)(vwCloudNeed() / 1024), (unsigned long)(VW_CLOUD_LEAD_MAX / 1024));
+    {
+      // Una lectura que falta NO congela la vuelta de la interfaz: devuelve -1 AL INSTANTE, sin dormir (antes esperaba hasta 25 ms por lectura).
+      uint8_t b16[16]; const uint32_t keepPos = vwStream.pos;
+      vwStream.pos = (uint32_t)((KEEP + 3) * 65536u + 100u);
+      gDelayCalls = 0; vwStream.missed = false;
+      const int rr = mediaCloudRead(&vwStream, b16, sizeof(b16));
+      chkf(rr < 0 && vwStream.missed && gDelayCalls == 0 && vwStream.missOff == (uint32_t)((KEEP + 3) * 65536u + 100u),
+           "una lectura de la nube que falta devuelve -1 al instante y dice DONDE falla, sin dormir (%u esperas)", gDelayCalls);
+      vwStream.pos = keepPos; vwStream.missed = false;
+    }
+    const uint32_t frameAtStall = vwCurFrame;
+    bool early = false, resumed = false, fullScreen = false;
+    unsigned dStall = 0;
+    for(size_t nxt = KEEP; nxt + 1 < gStubStreamReady.size() && !resumed; nxt++){
+      gStubStreamReady[nxt] = true;                                                // llega UN bloque mas
+      const uint32_t cur = vwAvi.cursor, rest = vwStream.size > cur ? vwStream.size - cur : 0, goal = vwBufTarget < rest ? vwBufTarget : rest;
+      const bool enough = vwCloudReady(cur) && flexCloudStreamBuffered(cur) >= goal;
+      gPanelMaxSpan = 0; d0 = gPanelDrawCalls;
+      tickPlay(3);
+      if(!enough){
+        dStall += gPanelDrawCalls - d0;
+        if(!vwBuffering || vwCurFrame != frameAtStall) early = true;               // reanudo con menos colchon del que pide
+        if(gPanelMaxSpan >= SCR_H - 1) fullScreen = true;
+      } else {
+        resumed = true;
+        chk(!vwBuffering && vwCurFrame != frameAtStall && !vwLoadPill(), "7c: con el colchon completo reanuda: el video avanza y la tarjeta se va");
+      }
+    }
+    chk(!early, "7c: NO reanuda en cuanto cabe un fotograma (se pararia otra vez a los dos cuadros, a tirones): espera al colchon");
+    chk(resumed, "7c: y reanuda cuando lo junta");
+    chkf(!fullScreen && dStall > 0, "durante la espera solo se repinta la banda de la tarjeta (%u volcados, ninguno de pantalla entera)", dStall);
+    chk(vwBarsWant == 0, "y reanudar tampoco saca las barras");
+    // Pausar con la tarjeta puesta la quita: en pausa no se espera nada.
+    for(size_t b = 0; b < gStubStreamReady.size(); b++) gStubStreamReady[b] = b < vwAvi.cursor / 65536u + 3u || b + 1 == gStubStreamReady.size();
+    stalled = false;
+    for(int k = 0; k < 400 && !stalled; k++){ tickPlay(1); stalled = vwBuffering; }
+    chk(stalled && vwLoadPill(), "7c: otra espera");
+    vwTogglePlay();
+    chk(!vwPlaying && !vwBuffering && !vwLoadPill(), "pausar durante la espera quita la tarjeta (en pausa no se espera nada)");
+    vwClose();
+    chk(!gStubStreamOpen, "7c: cerrar el visor cierra el streaming");
+
+    // ---- el salto de fotogramas con un trozo que aun no llego NO es un archivo roto ----
+    // El AVI declara un buffer de 8 KB pero sus fotogramas pesan 60 KB: "lo minimo para leer" (2 x 8 KB + 64 KB) se queda corto y, al saltar
+    // fotogramas para alcanzar el reloj, la cabecera del 3.o puede caer en un trozo que aun no llego. Antes: "Se perdio el acceso al archivo".
+    std::vector<std::vector<uint8_t>> bf;
+    for(int k = 0; k < 40; k++) bf.push_back(padded(60000));
+    memset(vwResumeTab, 0, sizeof(vwResumeTab));                  // (el visor recuerda por donde iba ESTA ruta: se abre desde el principio)
+    openCloudVideo(vwTestAvi(bf, 320, 240, 40000, 0, true, 8192));
+    stubStreamDeliver(1000); gTestMs += 10; vwTick();
+    stubStreamDeliver(1000); gTestMs += 10; vwTick();
+    gTestMs += 10; vwTick();
+    chkf(vwKind == VWK_VIDEO && vwCloudPhase == 3 && vwFrameLen > 0, "7c: el video de fotogramas grandes abre (kind=%d fase=%d frameLen=%u err=%s size=%u mf=%u)", vwKind, vwCloudPhase, vwFrameLen, vwErr, vwStream.size, vwAvi.maxFrameBytes);
+    const uint32_t RB = 8u * 65536u;
+    for(size_t b = 0; b < gStubStreamReady.size(); b++) gStubStreamReady[b] = b < 8 || b + 1 == gStubStreamReady.size();
+    vwTogglePlay();
+    saidClear();
+    bool late = false;
+    for(int k = 0; k < 60 && !late && vwPlaying; k++){
+      const uint32_t ahead = RB > vwAvi.cursor ? RB - vwAvi.cursor : 0;
+      if(ahead >= vwCloudNeed() && ahead < vwCloudNeed() + 65000u){                // lo ultimo que aun "cabe" -- y el reloj va 5 fotogramas tarde
+        gTestUs = vwNextUs + 5u * 40000u; gTestMs += 41; vwTick(); gTestUs = 0; late = true;
+      } else tickPlay(1);
+    }
+    chk(late, "7c: se llega a la zona donde saltar fotogramas cruza lo recibido");
+    chk(vwPlaying && !vwEnded && vwKind == VWK_VIDEO && saidCount() == 0, "y NO se da por roto ni se avisa 'Se perdio el acceso al archivo'");
+    chk(vwBuffering, "espera el trozo que falta (tarjeta de carga)");
+    vwClose();
+
+    // ---- saltar a un punto que aun no llego: la tarjeta, el primer cuadro y, sonando, el colchon ----
+    memset(vwResumeTab, 0, sizeof(vwResumeTab));
+    openCloudVideo(vwTestAvi(pf, 320, 240, 40000));
+    stubStreamDeliver(1000); gTestMs += 10; vwTick();
+    stubStreamDeliver(1000); gTestMs += 10; vwTick();
+    gTestMs += 10; vwTick();
+    chk(vwKind == VWK_VIDEO && vwCloudPhase == 3 && vwFrameLen > 0, "7c: abre otra vez para saltar");
+    auto only = [&](size_t n){ for(size_t b = 0; b < gStubStreamReady.size(); b++) gStubStreamReady[b] = b < n || b + 1 == gStubStreamReady.size(); };   // el principio y el indice
+    auto arrive = [&](uint32_t from, uint32_t n){ for(uint32_t b = from; b < from + n && b < gStubStreamReady.size(); b++) gStubStreamReady[b] = true; };
+    // Llega SOLO lo que el reproductor pide (el trozo donde falla la lectura), de uno en uno, hasta que el salto aterriza.
+    auto landSeek = [&](){
+      for(int k = 0; k < 60 && vwSeekWant >= 0; k++){
+        if(vwStream.missed) arrive(vwStream.missOff / 65536u, 1);
+        gTestMs += 41; vwTick();
+      }
+    };
+    only(6);
+    vwSeekMs(4000);                                                                  // en pausa: ~ el fotograma 100, que no esta
+    chkf(vwBuffering && vwLoadPill() && vwSeekWant >= 0 && !vwPlaying, "saltar (en pausa) a lo que no llego: tarjeta de carga mientras llega el trozo del destino (buf=%d pill=%d want=%d)", vwBuffering, (int)vwLoadPill(), (int)vwSeekWant);
+    landSeek();
+    chkf(vwSeekWant < 0 && vwCurFrame >= 95, "el salto aterriza cuando llega (fotograma %u)", vwCurFrame);
+    uint32_t cb = vwAvi.cursor / 65536u;
+    arrive(cb, 4);                                                                   // lo justo para leer un fotograma (3 bloques) y un margen
+    gTestMs += 41; vwTick();
+    chkf(!vwBuffering && !vwCloudFirst && !vwLoadPill() && vwFrameLen > 0, "en pausa basta con el primer cuadro: se ve y la tarjeta se va (buf=%d first=%d pill=%d)", vwBuffering, vwCloudFirst, (int)vwLoadPill());
+    // Sonando: el mismo salto sigue esperando el COLCHON aunque ya se vea el primer cuadro.
+    only(6);
+    vwTogglePlay();
+    vwSeekMs(1000);                                                                  // ~ el fotograma 25
+    chk(vwBuffering && vwSeekWant >= 0 && vwPlaying, "sonando, saltar a lo que no llego: espera");
+    landSeek();
+    chkf(vwSeekWant < 0 && vwBuffering && vwPlaying, "el salto aterriza y sigue esperando (buf=%d)", vwBuffering);
+    cb = vwAvi.cursor / 65536u;
+    arrive(cb, 4);
+    gTestMs += 41; vwTick();
+    const uint32_t f0 = vwCurFrame;
+    chkf(!vwCloudFirst && vwFrameLen > 0 && vwBuffering && vwLoadPill(), "se ve el primer cuadro del salto pero SIGUE esperando el colchon: la tarjeta se queda (first=%d buf=%d)", vwCloudFirst, vwBuffering);
+    tickPlay(4);
+    chk(vwBuffering && vwCurFrame == f0, "y el video no avanza hasta juntarlo");
+    arrive(cb, 24);
+    tickPlay(4);
+    chk(!vwBuffering && !vwLoadPill() && vwCurFrame > f0, "con el colchon: reanuda");
+    // Quedarse sin datos y saltar a un punto que SI esta: la espera de antes no se arrastra al sitio nuevo (con la tarjeta pegada y el
+    // colchon del sitio de antes).
+    only(vwAvi.cursor / 65536u + 6u);
+    bool st2 = false;
+    for(int k = 0; k < 400 && !st2; k++){ tickPlay(1); st2 = vwBuffering; }
+    chk(st2 && vwLoadPill(), "7c: otra espera");
+    vwSeekMs(0);                                                                     // el principio SI esta
+    gTestMs += 41; vwTick();
+    chkf(vwSeekWant < 0 && !vwBuffering && !vwLoadPill() && vwFrameLen > 0, "saltar a un punto que SI esta en mitad de una espera: la espera no se arrastra (buf=%d pill=%d)", vwBuffering, (int)vwLoadPill());
+    vwClose();
+  }
 
   // ---- 8. SUBIR DESDE LA GALERIA: conservar o liberar espacio ----
   std::vector<uint8_t> jpg = vwTestJpeg(64, 64);

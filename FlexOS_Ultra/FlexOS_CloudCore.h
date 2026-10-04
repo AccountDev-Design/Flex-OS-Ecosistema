@@ -242,6 +242,22 @@ void fclCacheAbort(FclCache* c, int slot);      // no se pudo traer: queda vacio
 // Bytes listos de forma contigua desde `pos` (para la barra de "cargado").
 uint32_t fclCacheContiguous(const FclCache* c, uint32_t pos);
 
+// Rendimiento de bajada (bytes/s) como media movil: cada bloque nuevo pesa un cuarto. `ms` = 0 cuenta como 1 (un bloque que
+// ya estaba en el socket no da una velocidad infinita). prev = 0: aun no habia medida.
+uint32_t fclThroughput(uint32_t prev, uint32_t bytes, uint32_t ms);
+// Colchon -- bytes SEGUIDOS por delante de la lectura -- con el que un video de la nube REANUDA tras quedarse sin datos.
+// Reanudar en cuanto cabe un fotograma lo para otra vez enseguida (a tirones, y cada parada cuesta repintar); reanudar con
+// demasiado tarda de mas y no cabe en la arena. Lo justo:
+//   bitrate   lo que pide el video (bytes/s medios: tamano / duracion; 0 = se desconoce)
+//   netBps    lo que baja la red ahora (0 = sin medir)
+//   remainMs  lo que queda por reproducir
+//   leadMs    colchon base, en tiempo de video
+//   minBytes  lo minimo para leer sin esperar (dos fotogramas grandes y un margen)
+//   maxBytes  tope (la arena es fija: nunca mas de su mitad)
+// Si la red va MAS LENTA que el video se suma lo que faltara de aqui al final (lo que pida de mas la parte que queda),
+// acotado por maxBytes: mas colchon no cabe, y entonces solo queda parar de vez en cuando.
+uint32_t fclResumeLead(uint32_t bitrate, uint32_t netBps, uint32_t remainMs, uint32_t leadMs, uint32_t minBytes, uint32_t maxBytes);
+
 // ---------------------------------------------------------------------------
 //  Nombres y utilidades
 // ---------------------------------------------------------------------------
@@ -279,7 +295,7 @@ void fclQuotaLine(const FclQuota* q, char* out, size_t cap);
 void fclQuotaHint(const FclQuota* q, char* out, size_t cap);
 // Que hace el P4 al tocar un elemento de la nube.
 //   FOLDER   entrar en la carpeta
-//   PHOTO    traer el ORIGINAL (verificado) y abrirlo en el visor (JPEG <= 8 MB)
+//   PHOTO    traer el ORIGINAL (verificado) y abrirlo en el visor (JPEG <= 6 MB, a la RAM)
 //   STREAM   reproducir por rangos sin descargar (AVI MJPEG)
 //   MENU     no se puede abrir aqui: se ensenan sus acciones y `why` dice por que
 //   AUDIO    reproducir por rangos en Musica (WAV PCM/IMA, el mismo reproductor que lo local)

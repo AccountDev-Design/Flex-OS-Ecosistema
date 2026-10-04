@@ -51,7 +51,13 @@
 #define MUS_ROW_H       64
 #define MUS_BAR_H       68            // mini reproductor, abajo de la lista
 #define MUS_BUF_MS      400           // DMA: lo que aguanta un repintado pesado
-#define MUS_PUMP_MAX    8192          // bytes de PCM por vuelta de loop, como mucho
+// Bytes de PCM que se entregan al DMA por vuelta de loop, como mucho. Tiene que alcanzar para REPONER lo que el DMA gasto durante la vuelta MAS
+// LARGA que pueda haber (un repintado pesado, el banner con su vidrio...): a 22 kHz mono son 44 KB/s, y con 8 KB por vuelta una vuelta de mas de
+// 186 ms ya gastaba mas de lo que se podia reponer -- aunque la red fuese sobrada -- y el audio se entrecortaba. 16 KB cubren todo el anillo del DMA
+// de 400 ms (MUS_BUF_MS); el coste es proporcional a lo ENTREGADO, no al tope.
+#define MUS_PUMP_MAX    16384
+static_assert(MUS_PUMP_MAX >= (22050u * 2u * MUS_BUF_MS / 1000u) * 9u / 10u,
+              "el tope por vuelta tiene que alcanzar para reponer (casi) todo el anillo del DMA de una pista de 22,05 kHz mono, la que prepara el telefono");
 #define MUS_THUMB_BUDGET 6
 #define MUS_UI_MS       500           // refresco de la barra de progreso
 
@@ -114,9 +120,8 @@ static int musIoRead(void* c, void* b, uint32_t n){
   if(s->kind != MSTREAM_CLOUD) return mediaIoRead(c, b, n);
   if(s->pos >= s->size) return 0;
   if(n > s->size - s->pos) n = s->size - s->pos;
-  int r = flexCloudStreamRead(s->pos, b, n);
+  int r = flexCloudStreamRead(s->pos, b, n);      // si falta, ella misma lo anota y avisa a la tarea de red
   if(r < 0){
-    flexCloudStreamSeek(s->pos);                  // que el fetcher vaya a buscarlo ya
     uint8_t st = flexCloudStreamState(NULL, 0);
     return (st == FCS_ERROR || st == FCS_CLOSED) ? -1 : FLEXIO_AGAIN;
   }
@@ -278,6 +283,30 @@ static void musCloudPoll(){
   if(millis() - musCloudSince > MUS_CLOUD_WAIT_MS) musCloudFail("Sin conexi\xC3\xB3n con Flex Cloud");
 }
 
+#if FLEXOS_DIAG_MEDIA
+// Una linea por segundo mientras suena (ver FLEXOS_DIAG_MEDIA en Media.h). Lo que decide si la musica "va lenta" o "se entrecorta": lo
+// que se entrega frente a lo que hace falta, y el HUECO MAS LARGO entre dos vueltas del reproductor -- si supera lo que aguanta el DMA, se oye el corte.
+static uint32_t musDgT0 = 0, musDgLast = 0, musDgGap = 0, musDgBytes = 0, musDgStarve = 0, musDgCalls = 0;
+static void musDiag(int delivered){
+  const uint32_t now = millis();
+  if(musDgLast && now - musDgLast < 5000u && now - musDgLast > musDgGap) musDgGap = now - musDgLast;   // (un hueco de segundos es una pausa, no una vuelta)
+  musDgLast = now; musDgCalls++;
+  if(delivered > 0) musDgBytes += (uint32_t)delivered;
+  if(musAs.starved) musDgStarve++;
+  if(!musDgT0){ musDgT0 = now; return; }
+  if(now - musDgT0 < 1000u) return;
+  const uint32_t el = now - musDgT0, need = musAs.wav.sampleRate * musAs.outFrame;
+  char net[80] = "";
+  FlexCloudStreamStats st;
+  if(musCloud && flexCloudStreamStats(&st)) snprintf(net, sizeof(net), " | red %lu KB/s %lu bloques %lu fallos", (unsigned long)(st.bps / 1024u), (unsigned long)st.blocks, (unsigned long)st.misses);
+  Serial.printf("[MEDIA] musica %s: entrega %lu KB/s (hacen falta %lu), %lu vueltas, hueco maximo %lu ms (el DMA aguanta %lu), sin datos %lu veces%s | SRAM %lu KB\n",
+                musCloud ? "nube" : "local", (unsigned long)((uint64_t)musDgBytes * 1000u / el / 1024u), (unsigned long)(need / 1024u), (unsigned long)musDgCalls,
+                (unsigned long)musDgGap, (unsigned long)flexAudioBufferMs(), (unsigned long)musDgStarve, net,
+                (unsigned long)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024u));
+  musDgT0 = now; musDgGap = 0; musDgBytes = 0; musDgStarve = 0; musDgCalls = 0;
+}
+#endif
+
 static void musAudioTick(){
   // Una pista protegida no sigue sonando (ni se recuerda) con el aparato
   // bloqueado: quien lo tenga no la oye ni ve su titulo.
@@ -291,6 +320,9 @@ static void musAudioTick(){
     return;
   }
   int r = flexAsPump(&musAs, musSink, NULL, MUS_PUMP_MAX);
+#if FLEXOS_DIAG_MEDIA
+  musDiag(r);
+#endif
   if(r < 0){
     musUnload();
     snprintf(musErr, sizeof(musErr), "Se perdi\xC3\xB3 el acceso al archivo");

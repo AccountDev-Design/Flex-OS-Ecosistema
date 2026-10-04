@@ -576,6 +576,8 @@ ino: ino_compile.cpp $(INO_SRC) $(INO_PARTS) $(INO_BRIDGES) $(BNO_SRC) $(AUDIO_S
 	@python3 check_wiring.py $(INO_SRC)
 	@python3 check_stack.py $(ROOT)
 	@$(CXX) $(CXXSTD) -fsyntax-only $(INOWARN) $(INOFLAGS) -x c++ ino_compile.cpp
+	@# El diagnostico de medios (apagado en produccion) tambien tiene que COMPILAR: nadie lo enciende hasta el dia que hace falta.
+	@$(CXX) $(CXXSTD) -fsyntax-only $(INOWARN) $(INOFLAGS) -DFLEXOS_DIAG_MEDIA=1 -x c++ ino_compile.cpp
 	@$(CXX) $(CXXSTD) -fsyntax-only $(WARN) $(INOFLAGS) $(BNO_SRC)
 	@$(CXX) $(CXXSTD) -fsyntax-only $(WARN) $(INOFLAGS) $(AUDIO_SRC)
 	@$(CXX) $(CXXSTD) -fsyntax-only $(WARN) $(FSFLAGS) $(FS_SRC)

@@ -847,6 +847,28 @@ uint32_t fclCacheContiguous(const FclCache* c, uint32_t pos){
   return total;
 }
 
+uint32_t fclThroughput(uint32_t prev, uint32_t bytes, uint32_t ms){
+  if(!bytes) return prev;
+  uint64_t inst = (uint64_t)bytes * 1000u / (ms ? ms : 1u);
+  if(inst > 0xFFFFFFFFull) inst = 0xFFFFFFFFull;
+  if(!prev) return (uint32_t)inst;
+  return (uint32_t)(((uint64_t)prev * 3u + inst) / 4u);
+}
+
+uint32_t fclResumeLead(uint32_t bitrate, uint32_t netBps, uint32_t remainMs, uint32_t leadMs, uint32_t minBytes, uint32_t maxBytes){
+  uint64_t lead = minBytes;
+  if(bitrate){
+    uint64_t base = (uint64_t)bitrate * leadMs / 1000u;
+    if(netBps && netBps < bitrate){
+      const uint64_t deficit = (uint64_t)(bitrate - netBps) * remainMs / 1000u;   // lo que la red NO traera mientras suena lo que queda
+      if(deficit > base) base = deficit;
+    }
+    if(base > lead) lead = base;
+  }
+  if(lead > maxBytes) lead = maxBytes;
+  return (uint32_t)lead;
+}
+
 #if FCL_SHA_OPENSSL
 #  pragma GCC diagnostic pop
 #endif

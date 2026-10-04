@@ -287,9 +287,12 @@ Editar). El visor anterior de Multimedia se retiró.
 - **Barras:** arriba volver, nombre y orientación; abajo, en una foto,
   Editar (si se puede) y Papelera; en un vídeo, progreso, Editar (a la
   izquierda, solo si la app lo ofrece: la Galería; §15), −10 s,
-  reproducir/pausa, +10 s y Papelera. Se ocultan solas a los 3 s con fundido
-  y un toque las muestra u oculta. Mientras suena un vídeo, el progreso se
-  repinta como mucho cada 250 ms.
+  reproducir/pausa, +10 s y Papelera. Se ocultan solas con fundido a los 3 s
+  (a los **2 s** si es un vídeo en reproducción: cada fotograma paga el vidrio
+  mientras están) y un toque las muestra u oculta (al apoyar el dedo, no tras
+  los 260 ms del doble toque; §16.4). Mientras suena un vídeo el progreso va
+  dentro de cada fotograma que ya lleva las barras; solo si no las lleva se
+  repinta aparte, como mucho cada 250 ms (§16.5).
 - **Liquid Glass sin apilar:** el contenido limpio vive en su propio lienzo
   (`vwClean`) y las barras se componen **siempre** sobre una copia limpia;
   el fondo desenfocado de cada barra se prepara una vez por cambio de fondo.
@@ -348,6 +351,10 @@ del ESP-IDF 5.4 que trae el core 3.2.1 y en su `sdkconfig`:
    ("when an underrun happens, the LCD display may already becomes blue") y
    la ayuda de la opción: "If you want the LCD driver to keep flushing the
    screen even when cache ops disabled, you can enable this option".
+
+> **Actualización (§16.1).** Una foto de **Flex Cloud** ya no se escribe en la
+> flash: va a un buffer de PSRAM, con un solo dueño en cada momento, y se
+> decodifica de ahí. Era la causa de un cian de ~15 s al abrirla.
 
 Qué hace el firmware, y qué no puede hacer: el callback del panel ya está en
 IRAM (requisito del driver con la opción activada; sin ella no cambia nada),
@@ -586,3 +593,186 @@ abierto, sin memoria (PSRAM, una reserva que falla, RAM interna), soltar y
 releer, exportar en segundo plano, trabajador colgado, y vídeos de 2, 3 y
 5 MB. **Pendiente de medir en la placa:** tiempos de apertura, de la vista
 previa y de exportar en el P4 real.
+
+## 16. Flex Cloud en el P4 real: lo que falló, por qué y cómo se mide
+
+Tras añadir la reproducción desde Flex Cloud, el P4 real mostró (con vídeos y
+capturas) una regresión con varios síntomas. Todo lo que sigue se leyó en el
+código, se reprodujo en el PC con la cadena real (GT911 → gestos de borde →
+app, red simulada, servidor real del teléfono en la JVM) y tiene prueba que
+falla si se deshace el arreglo. Lo que **no** se puede saber leyendo código se
+dice como tal en §16.7.
+
+| Síntoma en la placa | Causa (en el código) | Dónde se arregla |
+|---|---|---|
+| Cian ~15 s al abrir una foto de la nube; pantalla sin respuesta | La foto se bajaba entera a LittleFS: un borrado de sector por cada 4 KB, y cada borrado **apaga la caché**; el panel DSI se queda sin datos (§11) | §16.1 |
+| "Tocar y no pasa nada"; la Galería necesita cerrarse y abrirse | El aviso de "lo está preparando el teléfono" iba por la isla (solo existe en el escritorio); la lista era una foto de un instante | §16.2 |
+| Notificaciones del teléfono negras, pegadas, con rastro, que no se descartan | El banner capturaba un trozo de `fb` y lo restauraba (el fondo viejo) | §16.3 |
+| "Atrás" y los botones de multimedia "a veces no responden" | La barra del visor vivía dentro de la franja del gesto del sistema, y otras cinco causas de tacto | §16.4 |
+| Vídeo de la nube "muy lento"; música "lenta" | Ver §16.5: sondeo de 1 kHz, reanudar a cada cuadro, barras forzadas, pantalla entera cada 500 ms… | §16.5 |
+
+### 16.1 La foto de la nube no pasa por la flash
+
+`flexCloudViewStart / State / Take / Free / Cancel` (`FlexOS_Cloud.cpp`). El
+visor pide la foto y **sigue vivo**: enseña la miniatura de la nube ampliada
+y una tarjeta de carga con el avance real, y "atrás" funciona todo el rato
+(cerrar **cancela** la descarga en curso). La foto se trae a un buffer de
+PSRAM con **un solo dueño en cada momento**:
+
+```
+nube (descargando) ──Take──▶ visor (vwMemBuf) ──Issue──▶ trabajo (gVwJob.mem) ──▶ liberado
+```
+
+Cada salida del camino lo suelta: cancelar suelta lo que tenga el visor,
+retirar el trabajo suelta lo que lleve y un trabajo que ya corre lo suelta al
+terminar, acabe como acabe.
+
+- **Verificada:** el tamaño y el SHA-256 son los que el servidor dice **en esa
+  misma respuesta** (ETag); si el archivo cambió entre la lista y la descarga
+  se dice (`file_changed`) en vez de enseñar otra cosa.
+- **Rechazada antes de bajar un byte** si luego no quedaría memoria para
+  decodificarla (`FLEX_CLOUD_VIEW_HEADROOM` = 8 MB que tienen que seguir libres
+  = lo que el visor exige: reserva del sistema + trabajo del decodificador +
+  píxeles; el visor lo comprueba con `static_assert`).
+- **Con plazo:** 60 s en el motor y 70 s en el visor (red de seguridad). Tope de
+  la foto: **6 MB** (`VIEW_MAX`, `fclOpenAction`). El perfil del teléfono
+  (`MediaProfile.PHOTO_MAX_BYTES`) es el **mismo** número: una foto de 7 MB ya
+  no se ofrece "tal cual" para que el P4 luego la rechace por grande, sino con
+  su vista previa ligera.
+- Nada se escribe en la flash: no hay borrado de sectores, no hay caché
+  apagada, no hay cian.
+
+### 16.2 La lista de la nube se pone al día sola
+
+- **La respuesta al toque va por el sitio que se ve.** `sysSay` (en
+  `FlexOS_Ultra_Media.h`) manda el aviso por el **banner** (la misma capa que
+  §16.3) cuando hay una app delante; la isla solo existe en el escritorio.
+- **Insignia en cada celda:** en cola · preparando N % · no se pudo. Un archivo
+  recién subido ("sin analizar") ya no afirma que no se reproduce: pregunta al
+  teléfono.
+- **Terminar una subida refresca la lista** (una vez, y solo con la nube a la
+  vista). `flexCloudWatch` vigila **por ID** (`GET /files/:id`) lo que se está
+  preparando: pronto si cambia (3 s), espaciado si no (hasta 15 s), con tope
+  (5 min) y solo con la nube a la vista. El teléfono además dice `rev` en
+  `/me`: si su lista cambió por fuera, el P4 la vuelve a pedir.
+- **Los toques van contra lo pintado** (`ckShownView`): si cambia otra celda
+  mientras el dedo está apoyado, el toque no se tira ni cae en otra.
+- **Respuestas definitivas:** 404/410 al reproducir → "ya no existe" al
+  momento y lista al día (antes 45 s de "Cargando" y un "Sin conexión" falso);
+  409 → "aún no está listo". "Cargando" tiene plazo y **Reintentar**; la cola
+  de órdenes llena es un error con motivo, no un "Cargando" eterno.
+
+### 16.3 El banner de notificación es la última capa
+
+(`fpb*`, `FlexOS_Ultra_Media.h`.) **Ya no vive en `fb`**: se estampa **al volcar**
+(`flxFlush`) desde su propio lienzo precalculado, así que `fb` siempre está
+limpio y no hay nada que restaurar (era el rastro y el solape con el
+escritorio, la caja de apps y las apps). El vidrio se hace sobre lo que **hay**
+debajo, con un suelo de tinte propio (`gGlMinMix`) que se lee en las dos
+apariencias (antes: negro sobre fondo oscuro). Se descarta arrastrando a
+izquierda **y** derecha (el dedo sigue la tarjeta; umbral de distancia o de
+velocidad; si no llega vuelve con un resorte; si llega sale animada y se quita
+de la cola de verdad). Se queda con el episodio **entero** del dedo
+(`touchHoldBack`): la pantalla de debajo no ve ni un flanco suelto.
+
+### 16.4 El tacto: por qué "atrás" y los botones fallaban a veces
+
+Cadena real: GT911 → `flexPollTouch` (una vez por vuelta; `T.pressed/released/tap`
+duran **una** vuelta, `T.down` es el nivel) → gestos de borde → app.
+
+1. La barra del visor (y = 10…62) estaba **dentro de la franja de la cortina**
+   (y < 30): ~29 % de los toques al centro de "atrás" se los quedaba el gesto
+   del sistema. Ahora, en vertical, la barra empieza por debajo de las franjas
+   (`SYS_EDGE_*`, como los *insets* de gestos de Android).
+2. El Centro de notificaciones (borde izquierdo) leía el **pulso** `T.pressed`
+   donde hacía falta el **nivel** `T.down`: el gesto no llegaba a abrir nunca y
+   el toque se escapaba sin su apoyo. Ahora lo agarra la **intención** (hacia
+   dentro y más en horizontal que en vertical) y el episodio es suyo.
+3. Con las barras ocultas, el primer toque esperaba 260 ms por si era un doble
+   toque: los controles parecían muertos justo cuando más se usan. Ahora las
+   barras salen **al apoyar**.
+4. Un toque sobre un botón cuyo apoyo no se vio (otra capa, una vuelta larga
+   de vídeo) pasaba por un toque en la imagen: ahora se resuelve donde se apoyó.
+5. El candado de "tragar el episodio" (`touchDropAll`) se soltaba al primer
+   *poll* sin dato; ahora solo con 0 dedos o 90 ms sin contacto.
+6. Dos pulgares en horizontal se tragaban el toque; la cápsula del cronómetro
+   tomaba toques invisibles; Multimedia arrastraba peticiones y "volver a…"
+   viejos.
+
+### 16.5 Vídeo y música de la nube: dónde se iba el tiempo
+
+Medido en el código (no en la placa; ver §16.7):
+
+| Qué | Antes | Ahora |
+|---|---|---|
+| Tarea de streaming con la ventana llena | `vTaskDelay(1)` en bucle: **1000 vueltas/s** durante todo el vídeo, cada una con el cerrojo que comparte con la interfaz | **Por eventos** (`ulTaskNotifyTake`): trabaja mientras hay algo que traer y duerme hasta un aviso (lectura que **cambia de bloque**, salto, rango fijado, abrir/cerrar). Tope de 100 ms solo como red de seguridad |
+| Reanudar tras quedarse sin datos | En cuanto cabía **un fotograma** (2 fotogramas + 64 KB): se paraba otra vez a los dos cuadros ("a tirones") y cada parada repintaba | Con un **colchón** (`fclResumeLead`): 2 s de vídeo (`VW_CLOUD_LEAD_MS`), más lo que la red no traerá si baja menos que el vídeo, nunca más de 1,5 MB (la mitad de la arena fija) |
+| Esperar datos | Sacaba las **barras** (vidrio sobre cada fotograma) y las repintaba cada 500 ms | La **tarjeta de carga** (una banda pequeña): "Cargando de Flex Cloud · 1,2 s de 2,0 s". Las barras no salen |
+| Abrir (cabecera, índice) | Rehacía y volcaba la pantalla **entera** dos veces por segundo para cambiar un número | Solo la banda de la tarjeta, 4 veces por segundo |
+| Barras en reproducción | 3 s | 2 s; y si el fotograma publicado ya llevaba las barras, el progreso no se repinta aparte |
+| Saltar fotogramas con el reloj atrasado | Si la cabecera del siguiente caía en un trozo **que aún no llegó**, el vídeo se daba por roto ("Se perdió el acceso al archivo") | Se deja de saltar y se espera el trozo |
+| Lectura que falta en la vuelta de la interfaz | Hasta **25 ms** parados, y además un "salto" redundante que **borraba** la petición urgente | **Nada**: devuelve −1 al instante (un bloque de 64 KB tarda decenas de ms: esperar no lo trae antes, solo congela el dedo); la propia lectura anota lo que falta y avisa a la tarea |
+| 404/410/409 de una pista o vídeo | Se reintentaba en cada vuelta de la tarea | Error definitivo, y como mucho un reintento cada 2 s por si el teléfono ya lo preparó |
+| Música: tope por vuelta | 8 KB de PCM: una vuelta de más de 186 ms ya gastaba más de lo que podía reponer (a 22 kHz mono), aunque la red sobrara | 16 KB = todo el anillo del DMA de 400 ms |
+
+`flexCloudStreamStats` expone lo que mide el flujo (rendimiento de bajada como
+media móvil por bloque, bloques traídos, lecturas que no estaban, conexiones
+abiertas): el visor lo usa para calcular el colchón y el diagnóstico (§16.6)
+para enseñarlo.
+
+**Lo que NO se ha cambiado, a propósito.** El objetivo de conversión del
+teléfono sigue en 640×360 a 12 fps (`MediaProfile.VIDEO_TARGET_SIDE`). Bajarlo a
+480 reduce el coste de decodificar un 44 %, pero **degrada la imagen de todo lo
+que se convierta y nadie ha medido todavía** cuánto tarda el P4 en decodificar
+un fotograma de 640×360 (`docs/FLEX-MEDIA-PROFILE.md`, punto 7 de lo pendiente).
+Con `FLEXOS_DIAG_MEDIA` (§16.6) esa medida es una línea por segundo; si
+`decodif` supera el presupuesto de 83 ms, es el cambio que toca, de una
+constante. Tampoco se han movido las tareas de red de núcleo: el 0 es del
+presentador gráfico (`FlexOS_OTA.cpp`) y no hay medida que justifique cambiarlo.
+
+### 16.6 Diagnóstico con medidas (apagado por defecto)
+
+Una línea por segundo por Serie, solo si se compila con la opción (no ocupa
+nada si no). **Los números de abajo solo ilustran el formato: no son medidas
+de ninguna placa** (no hay ninguna en este repositorio).
+
+```
+-DFLEXOS_DIAG_MEDIA=1
+[MEDIA] video nube: 11 fps (0 saltados, 0 vacios) decodif 38/61 ms, publicar 9/14 ms, esperas 0 (0 ms), barras no | red 612 KB/s 14 bloques 1 fallos 2 conex | colchon 1210 KB | SRAM 94 KB PSRAM 21340 KB
+[MEDIA] musica nube: entrega 43 KB/s (hacen falta 43), 31 vueltas, hueco maximo 52 ms (el DMA aguanta 371), sin datos 0 veces | red 11 KB/s 3 bloques 0 fallos | SRAM 94 KB
+```
+
+- `decodif`/`publicar` son **media/máximo** por fotograma: dicen si el cuello es
+  el decodificador, la presentación o la red (`esperas`, `red`, `colchon`).
+- Música: si el **hueco máximo** entre vueltas supera lo que aguanta el DMA, se
+  oye un corte; si `entrega` < `hacen falta`, suena más lenta de lo que debe.
+- `-DFLEXOS_DIAG_TOUCH` cuenta vueltas lentas y "sueltas huérfanas": lo único que
+  no se puede saber leyendo código es si el GT911 **sobreescribe** su frame o lo
+  retiene.
+- `make -C tests/host ino` compila también la variante con la opción encendida
+  (nadie la enciende hasta el día que hace falta, y ese día tiene que compilar).
+
+### 16.7 Qué queda por comprobar en el P4 real
+
+No se ha ejecutado nada de esto en la placa. En el PC está probado: el flujo
+completo foto/vídeo/música contra un servidor simulado y contra el **real** del
+teléfono, la cadena de tacto con mutaciones, el banner contra lo que llega al
+panel y la memoria acotada. Falta, **en este orden**:
+
+1. Compilar con `-DFLEXOS_DIAG_MEDIA=1` y reproducir un vídeo convertido por el
+   teléfono, local y de la nube. Apuntar `fps`, `decodif`, `publicar`, `red`.
+   **Es la medida que decide si hace falta un perfil más ligero.**
+2. Abrir 20 fotos seguidas de la nube (incluida una de 5-6 MB): ¿cian? ¿heap
+   interna estable (`SRAM`) entre la primera y la última? ¿se cierra con "atrás"
+   en mitad de la descarga?
+3. Subir un vídeo desde el móvil y, **sin cerrar la Galería**, mirar si la celda
+   pasa de "en cola" a "preparando N %" a reproducible y si el toque responde.
+4. 30 toques en "atrás" y en pausa/buscar con el vídeo en marcha, con y sin
+   barras: ¿alguno se pierde? (`-DFLEXOS_DIAG_TOUCH` dice si es el GT911).
+5. Notificaciones del teléfono en el escritorio, en la caja de apps y dentro de
+   una app: ¿vidrio? ¿rastro? ¿se descartan a izquierda y derecha?
+6. Música de la nube durante 5 minutos con la pantalla activa: `hueco máximo`
+   y `sin datos`; y si suena a la velocidad correcta (el reloj del ES8311 no se
+   puede verificar sin la placa).
+7. Un vídeo con la red del teléfono cortada a mitad: ¿tarjeta "Cargando", y al
+   volver la red reanuda con colchón y sin parar a cada cuadro?

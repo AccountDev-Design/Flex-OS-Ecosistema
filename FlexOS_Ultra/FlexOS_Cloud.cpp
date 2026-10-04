@@ -153,6 +153,9 @@ struct Stream_ {
   uint8_t* arena;
   FclCache cache;
   volatile bool busy;           // el fetcher esta escribiendo en un hueco
+  uint32_t lastBlk;             // bloque donde leyo el reproductor por ultima vez (al cambiar, hay hueco nuevo por delante: se avisa a la tarea)
+  uint32_t bps;                 // bajada reciente (bytes/s, media movil)
+  uint32_t conns;               // conexiones abiertas en este flujo
 } gSt;
 
 // LAS TAREAS SE CREAN CUANDO HACEN FALTA (ver ensureMainTask / ensureStreamTask).
@@ -1815,10 +1818,16 @@ static bool stConnOpen(const char* fileId, uint32_t off, uint32_t size, bool pla
     return false;
   }
   gStNet.pos = off; gStNet.left = size - off;
+  stLock(); gSt.conns++; stUnlock();
   return true;
 }
 
-static void streamStep(){
+// Un paso de la tarea de streaming. Devuelve 0 si ha hecho trabajo (un bloque traido: puede haber mas, se sigue ya) o los ms que la
+// tarea debe DORMIR hasta que alguien le avise (una lectura nueva, un salto, un rango fijado, el cierre): ya no se sondea cada
+// milisegundo -- con la ventana llena no hay nada que traer y la tarea no consume nada hasta que el reproductor avance.
+#define STREAM_IDLE_MS    100u      // nada que traer: tope de la espera (red de seguridad; todo cambio de estado avisa)
+#define STREAM_CLOSED_MS  1000u     // sin flujo abierto
+static uint32_t streamStep(){
   stLock();
   bool open = gSt.open;
   uint32_t gen = gSt.gen, size = gSt.size, off = 0, len = 0;
@@ -1828,24 +1837,27 @@ static void streamStep(){
   uint8_t* dst = slot >= 0 ? fclCacheSlot(&gSt.cache, slot) : nullptr;
   if(slot >= 0) gSt.busy = true;
   stUnlock();
-  if(!open){ if(gStNet.http) stConnClose(); return; }
+  if(!open){ if(gStNet.http) stConnClose(); return STREAM_CLOSED_MS; }
   if(gStNet.gen != gen){ stConnClose(); gStNet.gen = gen; gStNet.fails = 0; gStNet.retryAt = 0; }
   if(slot < 0){
     // Nada que traer ahora (la ventana por delante esta llena). Una conexion
     // parada mucho rato se cierra; se vuelve a abrir al seguir.
     if(gStNet.http && millis() - gStNet.idleMs > 20000u) stConnClose();
-    return;
+    return STREAM_IDLE_MS;
   }
   auto giveBack = [&](){ stLock(); if(gSt.gen == gen) fclCacheAbort(&gSt.cache, slot); gSt.busy = false; stUnlock(); };
-  if(gStNet.retryAt && (int32_t)(millis() - gStNet.retryAt) < 0){ giveBack(); vTaskDelay(pdMS_TO_TICKS(20)); return; }
+  if(gStNet.retryAt && (int32_t)(millis() - gStNet.retryAt) < 0){
+    giveBack();
+    const uint32_t left = gStNet.retryAt - millis();                  // lo que falta de la espera (un aviso no se la salta)
+    return left < 1u ? 1u : (left > 200u ? 200u : left);
+  }
   if(!netUsable()){
     giveBack();
     // Sin Wi-Fi se espera; sin una credencial que sirva NO: esperar "conexion"
     // para siempre era mentir. El reproductor lo dice (FCS_ERROR) y se detiene.
     if(!destUsable()) stSetState(FCS_ERROR, errText(destWhy()));
     else stSetState(FCS_WAITING_NET, errText("no_wifi"));
-    vTaskDelay(pdMS_TO_TICKS(200));
-    return;
+    return 200u;
   }
   if(!gStNet.http || gStNet.pos != off){
     if(!stConnOpen(fileId, off, size, play)){
@@ -1855,7 +1867,8 @@ static void streamStep(){
       if(gStNet.lastSt == 404 || gStNet.lastSt == 410 || gStNet.lastSt == 409){
         stSetState(FCS_ERROR, errText(gStNet.lastSt == 409 ? "not_ready" : "not_found"));
         gListStale = true;
-        return;
+        gStNet.retryAt = millis() + 2000u;                      // si nadie cierra el flujo, no se martillea al servidor
+        return 200u;
       }
       if(!gStNet.fails) gStNet.firstFailMs = millis();
       if(gStNet.fails < 250) gStNet.fails++;
@@ -1864,12 +1877,13 @@ static void streamStep(){
       gStNet.retryAt = millis() + back;
       bool giveUp = gStNet.fails >= 6 && millis() - gStNet.firstFailMs > STREAM_PATIENCE_MS;
       stSetState(giveUp ? FCS_ERROR : FCS_WAITING_NET, errText(giveUp ? "server" : "network"));
-      return;
+      return back < 200u ? back : 200u;
     }
   }
   // Se rellena el hueco SIN el cerrojo: esta en LOADING y nadie mas lo toca.
   WiFiClient* s = gStNet.http->getStreamPtr();
   uint32_t got = 0, waited = 0;
+  const uint32_t blkT0 = millis();                              // el reloj de ESTE bloque (sin contar el conectar)
   bool fail = false;
   while(got < len){
     stLock(); bool same = gSt.gen == gen && gSt.open; stUnlock();
@@ -1895,22 +1909,29 @@ static void streamStep(){
       uint32_t back = 300u * gStNet.fails; if(back > STREAM_BACKOFF_MAX) back = STREAM_BACKOFF_MAX;
       gStNet.retryAt = millis() + back;
       stSetState(FCS_WAITING_NET, "Reconectando...");
+      return back < 200u ? back : 200u;
     }
-    return;
+    return 0;                                                  // se cerro o cambio el video: el siguiente paso lo ve
   }
   gStNet.pos += len; gStNet.left -= len; gStNet.fails = 0; gStNet.idleMs = millis();
+  const uint32_t blkMs = millis() - blkT0;
   stLock();
-  if(gSt.gen == gen){ fclCacheCommit(&gSt.cache, slot); if(gSt.state != FCS_STREAMING){ gSt.state = FCS_STREAMING; gSt.err[0] = 0; } }
+  if(gSt.gen == gen){
+    fclCacheCommit(&gSt.cache, slot);
+    gSt.bps = fclThroughput(gSt.bps, len, blkMs);
+    if(gSt.state != FCS_STREAMING){ gSt.state = FCS_STREAMING; gSt.err[0] = 0; }
+  }
   gSt.busy = false;
   stUnlock();
+  return 0;                                                    // un bloque mas: puede haber otro por traer
 }
 
+// La tarea NO sondea: trabaja mientras haya algo que traer y, si no, duerme hasta que se le avise (stNotify: una lectura que
+// cambia de bloque, un salto, un rango fijado, abrir o cerrar). El tope de cada espera es solo una red de seguridad.
 static void streamTask(void*){
   for(;;){
-    streamStep();
-    stLock(); bool open = gSt.open; stUnlock();
-    if(open) vTaskDelay(pdMS_TO_TICKS(1));
-    else ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
+    const uint32_t wait = streamStep();
+    if(wait) ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait));
   }
 }
 
@@ -2467,6 +2488,7 @@ bool flexCloudStreamOpen(const FclItem* it){
   snprintf(gSt.fileId, sizeof(gSt.fileId), "%s", it->id);
   fclCacheInit(&gSt.cache, gSt.arena, FLEX_CLOUD_STREAM_BLOCK, FLEX_CLOUD_STREAM_BLOCKS, gSt.size);
   gSt.state = FCS_OPENING; gSt.err[0] = 0;
+  gSt.lastBlk = 0xFFFFFFFFu; gSt.bps = 0; gSt.conns = 0;
   stUnlock();
   Serial.printf("[CLOUD] streaming: %s (%lu bytes%s)\n", it->id, (unsigned long)playSz, fclPlayable(it) ? ", version del perfil" : "");
   stNotify();
@@ -2494,8 +2516,16 @@ int flexCloudStreamRead(uint32_t off, void* buf, uint32_t n){
   if(!gStLock) return -1;
   stLock();
   int r = gSt.open ? fclCacheRead(&gSt.cache, off, buf, n) : -1;
+  // Se avisa a la tarea de dos cosas: de que falta algo (r < 0), y de que la lectura entro en OTRO bloque (la ventana de por
+  // delante se desliza y hay hueco nuevo que llenar). Una vez por bloque -- no por lectura --: ahi esta toda la diferencia
+  // con sondear.
+  bool wake = r < 0;
+  if(gSt.open && r >= 0){
+    const uint32_t blk = off / gSt.cache.blockSize;
+    if(blk != gSt.lastBlk){ gSt.lastBlk = blk; wake = true; }
+  }
   stUnlock();
-  if(r < 0) stNotify();
+  if(wake) stNotify();
   return r;
 }
 bool flexCloudStreamReady(uint32_t off, uint32_t len){
@@ -2510,6 +2540,14 @@ uint32_t flexCloudStreamBuffered(uint32_t pos){
   if(!gStLock) return 0;
   stLock(); uint32_t r = gSt.open ? fclCacheContiguous(&gSt.cache, pos) : 0; stUnlock();
   return r;
+}
+bool flexCloudStreamStats(FlexCloudStreamStats* out){
+  if(!gStLock || !out) return false;
+  stLock();
+  const bool open = gSt.open;
+  if(open){ out->bps = gSt.bps; out->blocks = gSt.cache.fetched; out->misses = gSt.cache.misses; out->conns = gSt.conns; }
+  stUnlock();
+  return open;
 }
 
 size_t flexCloudShed(){
@@ -2536,7 +2574,7 @@ size_t flexCloudShed(){
 void flexCloudTestSetBase(const char* base){ snprintf(gBase, sizeof(gBase), "%s", base); }
 uint32_t flexCloudTestJournalSaves(){ return gJournalSaves; }
 void flexCloudTestStep(){ taskStep(); }
-void flexCloudTestStreamStep(){ streamStep(); }
+uint32_t flexCloudTestStreamStep(){ return streamStep(); }
 void flexCloudTestPowerCycle(){ flexCloudTestPowerOff(); flexCloudBegin(); }
 void flexCloudTestPowerOff(){
   // Se pierde la RAM (los objetos de red tambien); el diario sigue en "flash".

@@ -66,9 +66,20 @@
 // ##     de la RAM con el mismo decodificador. Escribirla en LittleFS
 // ##     apagaba la cache a cada borrado de sector y el panel DSI se
 // ##     quedaba sin datos: el cian de 10-15 s al abrir una foto.
+// ##
+// ##  6. EL VIDEO DE LA NUBE NO LE QUITA TIEMPO AL FOTOGRAMA. Las barras son
+// ##     vidrio compuesto sobre CADA fotograma: reproduciendo se quitan solas
+// ##     antes (VW_BARS_HIDE_VIDEO_MS) y esperar datos NO las vuelve a sacar --
+// ##     la espera se ensena con la tarjeta de carga, que es una banda pequena.
+// ##     Una espera termina con un COLCHON (fclResumeLead), no en cuanto cabe
+// ##     un fotograma: parar y arrancar a cada cuadro era el "va a tirones".
 // #############################################################
 
 #define VW_BARS_HIDE_MS   3000u     // las barras se ocultan solas tras 3 s sin tocar
+#define VW_BARS_HIDE_VIDEO_MS 2000u // ...y reproduciendo un video, tras 2 s (cada fotograma paga el vidrio mientras esten)
+#define VW_CLOUD_LEAD_MS  2000u     // colchon base de un video de la nube tras quedarse sin datos: 2 s de video
+#define VW_CLOUD_LEAD_MAX (1536u * 1024u)   // ...y nunca mas de la mitad de la arena de la nube
+#define VW_BUF_UI_MS      250u      // la tarjeta de espera se repinta 4 veces por segundo como mucho
 #define VW_FADE_MS        180u      // aparecer / desaparecer las barras
 #define VW_OPEN_MS        240u      // expansion desde la miniatura
 #define VW_ZOOM_MAX       5.0f      // sobre el tamano ajustado
@@ -180,18 +191,56 @@ static uint32_t  vwCloudT0 = 0, vwCloudFrame = 0, vwCloudDrawMs = 0;
 static uint32_t  vwCloudPinOff = 0, vwCloudPinLen = 0;
 static uint8_t   vwCloudReopen = 0;
 static bool      vwCloudFirst = false;            // falta el primer fotograma (se lee en cuanto llegue)
-static bool      vwBuffering = false;
+static bool      vwBuffering = false;             // sin datos: la reproduccion espera hasta juntar vwBufTarget (con la tarjeta de carga)
+static uint32_t  vwBufTarget = 0;                 // bytes SEGUIDOS por delante con los que se reanuda (ver vwCloudLead)
+static uint32_t  vwBufUiMs = 0;                   // ultimo repintado de la tarjeta de espera
 static void vwVideoOpened(uint32_t frame);
 
 // Bytes CONTIGUOS que tienen que estar en la cache desde `off` para leer el
 // siguiente fotograma sin esperar: dos fotogramas de los mas grandes que
 // declara el AVI (entre medias puede haber audio) y un margen.
-static bool vwCloudReady(uint32_t off){
+static uint32_t vwCloudNeed(){
   uint32_t mf = (vwAvi.maxFrameBytes >= 4096u && vwAvi.maxFrameBytes <= FLEXAVI_FRAME_MAX) ? vwAvi.maxFrameBytes : VW_FRAME_CAP;
-  uint32_t need = mf * 2u + 64u * 1024u, size = vwStream.size;
+  return mf * 2u + 64u * 1024u;
+}
+static bool vwCloudReady(uint32_t off){
+  uint32_t need = vwCloudNeed(), size = vwStream.size;
   if(off >= size) return true;
   if(need > size - off) need = size - off;
   return flexCloudStreamReady(off, need);
+}
+static uint32_t vwPosMs();                        // (mas abajo)
+// El colchon con el que se REANUDA tras quedarse sin datos: lo que pide el video (tamano / duracion), lo que baja la red ahora y lo
+// que queda por ver. Reanudar en cuanto cabe un fotograma lo para otra vez enseguida; ver fclResumeLead.
+static uint32_t vwCloudLead(){
+  const uint32_t dur = flexAviDurationMs(&vwAvi), pos = vwPosMs();
+  const uint32_t bitrate = dur >= 1000u ? (uint32_t)((uint64_t)vwStream.size * 1000u / dur) : 0;
+  FlexCloudStreamStats st; memset(&st, 0, sizeof(st));
+  const uint32_t net = flexCloudStreamStats(&st) ? st.bps : 0;
+  return fclResumeLead(bitrate, net, dur > pos ? dur - pos : 0, VW_CLOUD_LEAD_MS, vwCloudNeed(), VW_CLOUD_LEAD_MAX);
+}
+// ¿Se puede leer el siguiente fotograma YA? Parado, no basta con que quepa uno: hay que haber juntado el colchon (o lo que quede del archivo).
+static bool vwCloudAhead(){
+  const uint32_t cur = vwAvi.cursor;
+  if(!vwCloudReady(cur)) return false;
+  if(!vwBuffering) return true;
+  const uint32_t rest = vwStream.size > cur ? vwStream.size - cur : 0;
+  return flexCloudStreamBuffered(cur) >= (vwBufTarget < rest ? vwBufTarget : rest);
+}
+// Diagnostico (ver FLEXOS_DIAG_MEDIA en Media.h): contadores del ultimo segundo.
+#if FLEXOS_DIAG_MEDIA
+struct VwDiag { uint32_t t0, frames, skipped, empty, decUs, decMax, presUs, presMax, stalls, stallMs, stallT0; };
+static VwDiag vwDg;
+#  define VWDG(x) do{ x; }while(0)
+#else
+#  define VWDG(x) do{}while(0)
+#endif
+static void vwStallBegin(){
+  if(vwBuffering) return;
+  vwBuffering = true;
+  vwBufTarget = vwCloudLead();
+  vwBufUiMs = 0;
+  VWDG(vwDg.stalls++; vwDg.stallT0 = millis());
 }
 
 // ---- Foto de Flex Cloud (a la RAM, nunca a la flash) ----
@@ -211,8 +260,13 @@ static uint32_t  vwViewOp = 0;                      // peticion viva a la nube (
 static uint32_t  vwViewGot = 0, vwViewTotal = 0, vwViewT0 = 0, vwViewDrawMs = 0;
 static uint8_t*  vwMemBuf = NULL;                   // JPEG verificado ya TOMADO, a la espera de pasar al trabajo
 static uint32_t  vwMemLen = 0;
-// "Cargando"/"Preparando": la foto de la nube aun no esta lista para pintarse.
-static inline bool vwLoadPill(){ return vwKind == VWK_PHOTO && vwLoading && !vwSrc && mediaIsCloudPath(vwPath); }
+// "Cargando"/"Preparando": lo de la nube que aun no esta listo para pintarse -- la foto, o los datos del video (al abrirlo, al saltar
+// a otro punto y cada vez que la red se queda corta). Es una banda pequena sobre el ultimo fotograma: no obliga a sacar las barras ni a
+// repintar la pantalla entera.
+static inline bool vwLoadPill(){
+  if(vwKind == VWK_PHOTO) return vwLoading && !vwSrc && mediaIsCloudPath(vwPath);
+  return vwKind == VWK_VIDEO && vwCloud && (vwCloudPhase < 3 || vwBuffering || (vwCloudFirst && !vwFrameLen));
+}
 
 // Barras
 static float     vwBarsA = 1.0f, vwBarsA0 = 1.0f;
@@ -795,7 +849,7 @@ static int vwReadFrame(){
     int n = flexAviReadFrame(&vwAvi, vwFrameBuf, vwFrameCap, &fn);
     // NUBE: el trozo aun no estaba en la cache. El lector AVI deja el cursor
     // en la cabecera de ese fotograma (reintentable): se espera, no se para.
-    if(n == FLEXAVI_ERR_IO && vwCloud && vwStream.missed){ vwBuffering = true; return 0; }
+    if(n == FLEXAVI_ERR_IO && vwCloud && vwStream.missed){ vwStallBegin(); return 0; }
     if(n > 0){ vwFrameLen = (uint32_t)n; vwCurFrame = fn; return 1; }
     if(n == 0){ vwCurFrame = fn; return 0; }
     if(n == FLEXAVI_ERR_TOOBIG){
@@ -825,13 +879,8 @@ static void vwRenderContent(bool smooth){
     } else if(!vwLoadPill()) vwCleanText(vwVY + vwVH / 2 - 8, "Abriendo...", 2, TH_TXT2);   // (la de la nube: la tarjeta de carga)
   } else if(vwKind == VWK_VIDEO){
     if(vwCloud && (vwCloudPhase < 3 || (vwCloudFirst && !vwFrameLen))){
-      // Aun no hay cuadro: lo que pasa de verdad, con lo que ya llego.
-      char t[64];
-      uint32_t got = flexCloudStreamBuffered(0);
-      if(vwCloudPhase == 2) snprintf(t, sizeof(t), "Preparando el v\xC3\xAD" "deo...");
-      else if(got) snprintf(t, sizeof(t), "Cargando de Flex Cloud... %lu KB", (unsigned long)(got / 1024u));
-      else snprintf(t, sizeof(t), "Cargando de Flex Cloud...");
-      vwCleanText(vwVY + vwVH / 2 - 8, t, 2, TH_TXT2);
+      // Aun no hay cuadro: lo que pasa de verdad, con lo que ya llego, lo dice la tarjeta de carga (vwLoadPill) -- una banda que se
+      // repinta sola. Antes era un texto en el contenido y cada actualizacion rehacia la pantalla ENTERA, dos veces por segundo.
       vwGlOk = false;
       return;
     }
@@ -1067,8 +1116,33 @@ static void vwLoadGeom(int &x, int &y, int &w, int &h){
   w = vwVW - 40 < VW_VIEW_PILL_W ? vwVW - 40 : VW_VIEW_PILL_W; h = VW_VIEW_PILL_H;
   x = vwVX + (vwVW - w) / 2; y = vwVY + (vwVH - h) / 2;
 }
+// Lo que cuenta la tarjeta del VIDEO de la nube: la cabecera al abrir, el indice despues y, cada vez que la red se queda corta,
+// cuanto colchon se lleva juntado de cuanto hace falta para reanudar (en segundos de video cuando se sabe lo que pesa uno).
+static void vwVideoLoadLines(char* l1, size_t n1, char* l2, size_t n2, int& pct){
+  if(vwCloudPhase == 2){ snprintf(l1, n1, "Preparando el v\xC3\xAD" "deo..."); return; }
+  snprintf(l1, n1, "Cargando de Flex Cloud");
+  const uint32_t size = vwStream.size;
+  uint32_t from = 0, goal = 0;
+  if(vwCloudPhase < 3) goal = size < VW_CLOUD_HEAD ? size : VW_CLOUD_HEAD;                     // la cabecera
+  else {
+    from = vwAvi.cursor;
+    goal = (vwCloudFirst && !vwFrameLen) ? vwCloudNeed() : vwBufTarget;                       // el primer cuadro / el colchon
+    const uint32_t rest = size > from ? size - from : 0;
+    if(goal > rest) goal = rest;
+  }
+  const uint32_t have = flexCloudStreamBuffered(from);
+  pct = goal ? (int)((uint64_t)(have > goal ? goal : have) * 100u / goal) : 100;
+  const uint32_t dur = flexAviDurationMs(&vwAvi);
+  const uint32_t bitrate = (vwCloudPhase == 3 && dur >= 1000u) ? (uint32_t)((uint64_t)size * 1000u / dur) : 0;   // bytes por segundo de video
+  if(bitrate && !(vwCloudFirst && !vwFrameLen)){
+    const uint32_t hs = (uint32_t)((uint64_t)(have > goal ? goal : have) * 10u / bitrate), gs = (uint32_t)((uint64_t)goal * 10u / bitrate);
+    snprintf(l2, n2, "%lu,%lu s de %lu,%lu s", (unsigned long)(hs / 10u), (unsigned long)(hs % 10u), (unsigned long)(gs / 10u), (unsigned long)(gs % 10u));
+  } else if(have) snprintf(l2, n2, "%lu KB", (unsigned long)(have / 1024u));
+  else snprintf(l2, n2, "Conectando...");
+}
 static void vwLoadLines(char* l1, size_t n1, char* l2, size_t n2, int& pct){
   l2[0] = 0; pct = -1;
+  if(vwKind == VWK_VIDEO){ vwVideoLoadLines(l1, n1, l2, n2, pct); return; }
   if(vwViewOp){
     snprintf(l1, n1, "Cargando de Flex Cloud");
     if(vwViewTotal){
@@ -1093,7 +1167,7 @@ static void vwDrawLoadPill(){
     int fw = (int)((int64_t)bw * pct / 100);
     if(fw > 0) fillRoundRect(bx, by, fw < 6 ? 6 : fw, 6, 3, wallAccent());
     if(l2[0]) drawTextC(x + w / 2, y + 46, l2, 1, TH_TXT2);
-  }
+  } else if(l2[0]) drawTextC(x + w / 2, y + 34, l2, 1, TH_TXT2);
 }
 // Barras sobre lo que acaba de copiarse de vwClean, recortadas a las filas
 // FISICAS [r0, r1] (las que se van a publicar).
@@ -1148,8 +1222,16 @@ static void vwPresentBars(){
   }
   vwPresent(r0, r1);
 }
-// Filas del contenido de la imagen (un fotograma nuevo).
-static void vwPresentImage(){
+// ¿Las filas [r0, r1] que se acaban de publicar incluyen las dos barras? Entonces ya llevan el progreso al dia.
+static bool vwBarsCovered(int r0, int r1){
+  int x, y, w, h, a, b;
+  vwTopGeom(x, y, w, h); vwRowsOf(x, y, w, h, a, b);
+  if(a < r0 || b > r1) return false;
+  if(vwHasBot()){ vwBotGeom(x, y, w, h); vwRowsOf(x, y, w, h, a, b); if(a < r0 || b > r1) return false; }
+  return true;
+}
+// Filas del contenido de la imagen (un fotograma nuevo). true = esas filas incluian las barras (no hace falta repintarlas aparte).
+static bool vwPresentImage(){
   float dw = vwFitW * vwScale, dh = vwFitH * vwScale;
   int x0 = (int)floorf(vwOffX), y0 = (int)floorf(vwOffY);
   int x1 = (int)ceilf(vwOffX + dw), y1 = (int)ceilf(vwOffY + dh);
@@ -1159,12 +1241,13 @@ static void vwPresentImage(){
   if(y1 > vwVY + vwVH) y1 = vwVY + vwVH;
   int r0, r1; vwRowsOf(x0, y0, x1 - x0, y1 - y0, r0, r1);
   vwPresent(r0, r1);
+  return vwBarsA > 0.0f && vwBarsCovered(r0, r1);
 }
 
 // ---- Aparecer / desaparecer ----
 static bool vwCanAutoHide(){
   if(vwKind == VWK_PHOTO) return !vwLoading;
-  if(vwKind == VWK_VIDEO) return vwPlaying && !vwBuffering;
+  if(vwKind == VWK_VIDEO) return vwPlaying;        // tambien esperando datos: eso lo dice la tarjeta de carga, no las barras
   return false;
 }
 static void vwBarsShow(bool on){
@@ -1176,7 +1259,8 @@ static void vwBarsShow(bool on){
 }
 static void vwBarsTick(){
   if(!vwBarsAnim){
-    if(vwBarsWant == 1 && vwCanAutoHide() && !T.down && !vwPinchOn && millis() - vwTouchMs >= VW_BARS_HIDE_MS)
+    const uint32_t hide = vwKind == VWK_VIDEO ? VW_BARS_HIDE_VIDEO_MS : VW_BARS_HIDE_MS;
+    if(vwBarsWant == 1 && vwCanAutoHide() && !T.down && !vwPinchOn && millis() - vwTouchMs >= hide)
       vwBarsShow(false);
     return;
   }
@@ -1262,7 +1346,8 @@ static void vwRelease(bool keepPos){
   vwKind = VWK_NONE; vwEnded = false; vwCurFrame = 0; vwLoading = false;
   vwAnimOn = false; vwPinchOn = false; vwPanOn = false; vwTapPending = false;
   vwPressSeen = false; vwRevealed = false; vwTapReveal = false; vwSeekDrag = false; vwPressBtn = VWB_NONE; vwPressBar = false;
-  vwCloud = false; vwCloudPhase = 0; vwCloudFirst = false; vwBuffering = false; vwCloudReopen = 0;
+  vwCloud = false; vwCloudPhase = 0; vwCloudFirst = false; vwBuffering = false; vwBufTarget = 0; vwCloudReopen = 0;
+  VWDG(memset(&vwDg, 0, sizeof(vwDg)));
   vwOn = false;
   gTouchOwnsTwoFinger = false; gAppHidesStatusBar = false;
 }
@@ -1408,7 +1493,8 @@ static void vwStartContent(uint32_t frame){
   }
   if(vwKind != VWK_VIDEO) return;
   mediaStreamClose(&vwStream);                      // (cierra el flujo si quedaba alguno)
-  vwCloud = false; vwCloudPhase = 0; vwCloudFirst = false; vwBuffering = false;
+  vwCloud = false; vwCloudPhase = 0; vwCloudFirst = false; vwBuffering = false; vwBufTarget = 0;
+  VWDG(memset(&vwDg, 0, sizeof(vwDg)));
   if(!mediaStreamOpen(&vwStream, vwPath)){
     vwKind = VWK_ERROR;
     snprintf(vwErr, sizeof(vwErr), "%s", mediaIsCloudPath(vwPath) ? "No se pudo abrir desde Flex Cloud" : "No se pudo abrir el archivo");
@@ -1646,16 +1732,22 @@ static void vwSeekStep(){
   if(vwCloud && vwAvi.idx1Len && vwAvi.idx1Len <= VW_CLOUD_PIN_MAX && !flexCloudStreamReady(vwAvi.idx1Off, vwAvi.idx1Len)) return;
   vwStream.missed = false;
   int landed = flexAviSeekFrameMax(&vwAvi, (uint32_t)vwSeekWant, VW_SEEK_TICK);
-  if(landed < 0 && vwCloud && vwStream.missed){ vwBuffering = true; return; }   // falta un trozo: la proxima vuelta
+  if(landed < 0 && vwCloud && vwStream.missed){     // falta un trozo: la proxima vuelta (con la tarjeta de carga al principio y 4 veces por segundo)
+    const bool fresh = !vwBuffering;
+    vwStallBegin();
+    if(fresh || millis() - vwBufUiMs >= VW_BUF_UI_MS){ vwBufUiMs = millis(); vwViewProgress(); }
+    return;
+  }
   if(landed < 0){ vwStopBroken(landed); vwRender(); return; }
   vwCurFrame = (uint32_t)landed;
   if(landed < vwSeekWant && landed != vwSeekLast){ vwSeekLast = landed; return; }   // sigue en la proxima vuelta
   vwSeekWant = -1; vwSeekLast = -1;
   vwEnded = false;
   vwNextUs = micros();
+  vwBuffering = false;                              // (la espera de antes ya no cuenta: se vuelve a decidir con la posicion nueva)
   if(vwCloud){
     flexCloudStreamSeek(vwAvi.cursor);              // la ventana de lectura salta con el video
-    if(!vwCloudReady(vwAvi.cursor)){ vwBuffering = true; vwCloudFirst = true; vwPresentAll(); return; }
+    if(!vwCloudReady(vwAvi.cursor)){ vwStallBegin(); vwCloudFirst = true; vwPresentAll(); return; }
   }
   if(vwReadFrame() > 0) vwRenderContent(false);
   if(!vwPlaying) vwGlassPrep();
@@ -1674,7 +1766,12 @@ static void vwTogglePlay(){
   if(vwEnded){ vwSeekMs(0); vwEnded = false; }
   vwPlaying = !vwPlaying;
   vwNextUs = micros();
-  if(!vwPlaying) vwGlassPrep();                     // en pausa el fondo es fijo: vidrio completo
+  if(!vwPlaying){
+    const bool pill = vwBuffering && vwKind == VWK_VIDEO;
+    vwBuffering = false;                            // en pausa no se espera nada: la tarjeta de carga se va
+    vwGlassPrep();                                  // y el fondo es fijo: vidrio completo
+    if(pill) vwViewProgress();
+  }
   vwPresentBars();
 }
 
@@ -1914,40 +2011,66 @@ static void vwPlayTick(){
   if((long)(now - vwNextUs) < 0) return;
   const uint32_t spf = vwAvi.usPerFrame ? vwAvi.usPerFrame : 40000;
   if(vwCloud){
-    // Sin el siguiente tramo en la cache NO se lee (ni se saltan fotogramas
-    // para "alcanzar"): el reloj del video se para y se ensena Cargando.
+    // Sin el siguiente tramo en la cache NO se lee (ni se saltan fotogramas para "alcanzar"): el reloj del video se para y la tarjeta
+    // de carga dice cuanto falta. Y NO se reanuda en cuanto cabe un fotograma (se pararia otra vez enseguida, a tirones): hace falta
+    // el colchon (vwCloudAhead). Las barras NO salen a contarlo -- repintarlas a cada espera era trabajo de mas justo cuando falta tiempo.
     if(vwCloudPhase < 3) return;
-    if(!vwCloudReady(vwAvi.cursor)){
-      if(!vwBuffering){ vwBuffering = true; vwBarsDrawMs = 0; vwBarsShow(true); }
+    if(!vwCloudAhead()){
+      vwStallBegin();
       vwNextUs = now + spf;
-      if(millis() - vwBarsDrawMs >= 500u){
-        vwBarsDrawMs = millis();
-        flexCloudStreamSeek(vwAvi.cursor);          // "voy a leer aqui": la cache trae lo de delante
-        vwPresentBars();
+      if(millis() - vwBufUiMs >= VW_BUF_UI_MS){
+        vwBufUiMs = millis();
+        flexCloudStreamSeek(vwAvi.cursor);          // "voy a leer aqui": la cache trae lo de delante (y la tarea de red se entera)
+        vwViewProgress();                           // solo la banda de la tarjeta: ni el video ni las barras se repintan
       }
       return;
     }
-    if(vwBuffering){ vwBuffering = false; vwNextUs = now; now = micros(); }
+    if(vwBuffering){
+      vwBuffering = false; vwNextUs = now; now = micros();
+      VWDG(vwDg.stallMs += millis() - vwDg.stallT0);
+      vwViewProgress();                             // la tarjeta se va (el siguiente fotograma tambien la cubre, pero sin esperarlo)
+    }
   }
   long late = (long)(now - vwNextUs);
   int drop = (int)(late / (long)spf);
   if(drop > VW_MAX_CATCHUP) drop = VW_MAX_CATCHUP;
   for(int i = 0; i < drop; i++){
+    vwStream.missed = false;
     int r = flexAviSkipFrame(&vwAvi);
     if(r == FLEXAVI_ERR_EOF){ vwEnded = true; break; }
+    // NUBE: la cabecera del siguiente fotograma puede caer en un tramo que aun no llego. Eso NO es un archivo roto (antes paraba el
+    // video con "Se perdio el acceso al archivo"): se deja de saltar y vwReadFrame lo ve y espera.
+    if(r == FLEXAVI_ERR_IO && vwCloud && vwStream.missed) break;
     if(r < 0){ vwStopBroken(r); break; }
     vwCurFrame++;
+    VWDG(vwDg.skipped++);
   }
   int rf = vwEnded ? -1 : vwReadFrame();
+  bool barsDone = false;                            // el fotograma publicado ya incluia las barras con el progreso al dia
   if(rf > 0){
+#if FLEXOS_DIAG_MEDIA
+    const uint32_t dg0 = micros();
+#endif
     int r = vwDecodeFrame();
     (void)r;
+#if FLEXOS_DIAG_MEDIA
+    const uint32_t dg1 = micros();
+#endif
     vwGlOk = false;                                 // el fondo de las barras se mueve: tinte sin desenfoque
-    vwPresentImage();
+    barsDone = vwPresentImage();
+#if FLEXOS_DIAG_MEDIA
+    const uint32_t dg2 = micros();
+    vwDg.frames++; vwDg.decUs += dg1 - dg0; vwDg.presUs += dg2 - dg1;
+    if(dg1 - dg0 > vwDg.decMax) vwDg.decMax = dg1 - dg0;
+    if(dg2 - dg1 > vwDg.presMax) vwDg.presMax = dg2 - dg1;
+#endif
+  } else if(rf == 0) VWDG(vwDg.empty++);
+  // El progreso de la barra se mueve cada 250 ms (y tambien con trozos vacios: el tiempo avanza aunque la imagen se repita). Si el
+  // fotograma que se acaba de publicar ya llevaba las barras, el progreso ya esta al dia: repintarlas aparte era un volcado de mas.
+  if(rf >= 0 && vwBarsA > 0.0f && millis() - vwBarsDrawMs >= 250u){
+    vwBarsDrawMs = millis();
+    if(!barsDone) vwPresentBars();
   }
-  // El progreso de la barra se mueve cada 250 ms, no en cada fotograma (y
-  // tambien con trozos vacios: el tiempo avanza aunque la imagen se repita).
-  if(rf >= 0 && vwBarsA > 0.0f && millis() - vwBarsDrawMs >= 250u){ vwBarsDrawMs = millis(); vwPresentBars(); }
   vwNextUs += (unsigned long)spf * (unsigned long)(drop + 1);
   if((long)(micros() - vwNextUs) > (long)(spf * 8)) vwNextUs = micros() + spf;
   if(vwEnded){
@@ -1975,8 +2098,9 @@ static void vwCloudStep(){
   if(st == FCS_CLOSED && vwCloudPhase){ vwCloudFail("Se cerr\xC3\xB3 la conexi\xC3\xB3n con Flex Cloud"); return; }
   uint32_t now = millis();
   if(vwCloudPhase == 1 || vwCloudPhase == 2){
-    // Mientras no se puede abrir: el texto de carga, como mucho dos veces por segundo.
-    if(now - vwCloudDrawMs >= 500u){ vwCloudDrawMs = now; vwRenderContent(true); vwPresentAll(); }
+    // Mientras no se puede abrir: la tarjeta de carga (SOLO su banda), como mucho cuatro veces por segundo. Antes se rehacia y se
+    // volcaba la pantalla ENTERA dos veces por segundo solo para cambiar un numero.
+    if(now - vwCloudDrawMs >= VW_BUF_UI_MS){ vwCloudDrawMs = now; vwViewProgress(); }
     if(now - vwCloudT0 > VW_CLOUD_OPEN_MS){ vwCloudFail(st == FCS_WAITING_NET ? "Sin conexi\xC3\xB3n con Flex Cloud" : "Flex Cloud tarda demasiado en responder"); return; }
     uint32_t size = vwStream.size;
     if(vwCloudPhase == 1){
@@ -2010,10 +2134,15 @@ static void vwCloudStep(){
     vwRenderContent(true); vwGlassPrep(); vwPresentAll();
     return;
   }
-  if(vwCloudPhase == 3 && vwCloudFirst && vwSeekWant < 0 && vwCloudReady(vwAvi.cursor)){
-    vwCloudFirst = false; vwBuffering = false;
-    for(int i = 0; i < 64 && vwReadFrame() == 0 && !vwBuffering; i++){}
-    vwRenderContent(true); vwGlassPrep(); vwPresentAll();
+  if(vwCloudPhase == 3 && vwCloudFirst && vwSeekWant < 0){
+    if(vwCloudReady(vwAvi.cursor)){
+      const bool keep = vwBuffering && vwPlaying;     // sonando: la espera sigue hasta juntar el colchon (la decide vwPlayTick)
+      vwCloudFirst = false; vwBuffering = false;
+      for(int i = 0; i < 64 && vwReadFrame() == 0 && !vwBuffering; i++){}
+      if(vwBuffering && !vwFrameLen){ vwBuffering = false; vwCloudFirst = true; }   // se quedo a medias: la proxima vuelta lo reintenta
+      else if(keep) vwBuffering = true;
+      vwRenderContent(true); vwGlassPrep(); vwPresentAll();
+    } else if(now - vwCloudDrawMs >= VW_BUF_UI_MS){ vwCloudDrawMs = now; vwViewProgress(); }
   }
 }
 
@@ -2054,6 +2183,32 @@ static bool vwShowsProtected(uint8_t app){
   return vwOn && vwLocked && vwHost && vwHost->app == app;
 }
 
+#if FLEXOS_DIAG_MEDIA
+// Una linea por segundo mientras suena un video (o espera datos): lo que cuesta cada fase y como va la red. Con esto se decide CON
+// MEDIDAS si el cuello es el decodificador, la presentacion o la red -- en vez de adivinarlo (ver FLEXOS_DIAG_MEDIA en Media.h).
+static void vwDiagTick(){
+  if(vwKind != VWK_VIDEO || (!vwPlaying && !vwBuffering)){ vwDg.t0 = 0; return; }
+  const uint32_t now = millis();
+  if(!vwDg.t0){ memset(&vwDg, 0, sizeof(vwDg)); vwDg.t0 = now; if(vwBuffering) vwDg.stallT0 = now; return; }
+  const uint32_t el = now - vwDg.t0;
+  if(el < 1000u) return;
+  char net[112] = "";
+  FlexCloudStreamStats st;
+  if(vwCloud && flexCloudStreamStats(&st))
+    snprintf(net, sizeof(net), " | red %lu KB/s %lu bloques %lu fallos %lu conex | colchon %lu KB", (unsigned long)(st.bps / 1024u), (unsigned long)st.blocks,
+             (unsigned long)st.misses, (unsigned long)st.conns, (unsigned long)(flexCloudStreamBuffered(vwAvi.cursor) / 1024u));
+  const uint32_t n = vwDg.frames ? vwDg.frames : 1u;
+  const uint32_t stallMs = vwDg.stallMs + (vwBuffering ? now - vwDg.stallT0 : 0u);
+  Serial.printf("[MEDIA] video %s: %lu fps (%lu saltados, %lu vacios) decodif %lu/%lu ms, publicar %lu/%lu ms, esperas %lu (%lu ms), barras %s%s | SRAM %lu KB PSRAM %lu KB\n",
+                vwCloud ? "nube" : "local", (unsigned long)(vwDg.frames * 1000u / el), (unsigned long)vwDg.skipped, (unsigned long)vwDg.empty,
+                (unsigned long)(vwDg.decUs / n / 1000u), (unsigned long)(vwDg.decMax / 1000u), (unsigned long)(vwDg.presUs / n / 1000u), (unsigned long)(vwDg.presMax / 1000u),
+                (unsigned long)vwDg.stalls, (unsigned long)stallMs, vwBarsA > 0.0f ? "si" : "no", net,
+                (unsigned long)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024u), (unsigned long)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024u));
+  const bool wasStall = vwBuffering;
+  memset(&vwDg, 0, sizeof(vwDg)); vwDg.t0 = now; if(wasStall) vwDg.stallT0 = now;
+}
+#endif
+
 // ---- Una vuelta del visor ----
 static void vwTick(){
   if(!vwOn) return;
@@ -2091,6 +2246,7 @@ static void vwTick(){
   }
   if(!vwOn) return;
   vwPlayTick();
+  VWDG(vwDiagTick());
   if(!vwOn) return;
   vwCheckItem();
   if(!vwOn) return;

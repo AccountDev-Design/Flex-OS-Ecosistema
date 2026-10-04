@@ -763,7 +763,15 @@ void     flexCloudStreamSeek(uint32_t pos){ stubWant(pos, 8 * STUB_BLK); }
 uint32_t flexCloudStreamBuffered(uint32_t pos){
   uint32_t n = 0;
   while(pos + n < gStubStreamData.size() && stubBlocksReady(pos + n, 1)) n += STUB_BLK - ((pos + n) % STUB_BLK);
+  if(n && pos + n > gStubStreamData.size()) n = (uint32_t)gStubStreamData.size() - pos;  // el ultimo bloque es corto
   return n;
+}
+uint32_t gStubStreamBps = 0;                        // lo que "mide" el doble (bytes/s); 0 = sin medir
+bool     flexCloudStreamStats(FlexCloudStreamStats* out){
+  if(!gStubStreamOpen || !out) return false;
+  out->bps = gStubStreamBps; out->blocks = 0; out->misses = gStubStreamMisses; out->conns = 1;
+  for(bool b : gStubStreamReady) out->blocks += b ? 1u : 0u;
+  return true;
 }
 size_t   flexCloudShed(){ return 0; }
 // La "tarea de streaming" del doble: lo pedido llega (o `maxBlocks` bloques).

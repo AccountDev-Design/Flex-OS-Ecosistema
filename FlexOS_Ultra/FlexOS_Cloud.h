@@ -233,6 +233,14 @@ void     flexCloudStreamPin(uint32_t off, uint32_t len);
 void     flexCloudStreamUnpin();
 void     flexCloudStreamSeek(uint32_t pos);
 uint32_t flexCloudStreamBuffered(uint32_t pos);
+// Lo que mide el flujo abierto (para decidir cuanto colchon pedir y para el diagnostico FLEXOS_DIAG_MEDIA).
+struct FlexCloudStreamStats {
+  uint32_t bps;       // bajada reciente en bytes/s (media movil de los ultimos bloques); 0 = aun sin medir
+  uint32_t blocks;    // bloques traidos en este flujo
+  uint32_t misses;    // lecturas del reproductor que no estaban en la cache
+  uint32_t conns;     // conexiones abiertas en este flujo (cada salto a otro sitio del archivo abre una)
+};
+bool     flexCloudStreamStats(FlexCloudStreamStats* out);     // false = no hay flujo abierto
 
 // Suelta lo que se puede rehacer (miniaturas, arena del streaming si no se
 // esta reproduciendo, buffers). Devuelve los bytes liberados.
@@ -241,7 +249,7 @@ size_t   flexCloudShed();
 #ifdef FLEXOS_HOST_TEST
 void flexCloudTestSetBase(const char* base);
 void flexCloudTestStep();          // una vuelta de la tarea principal
-void flexCloudTestStreamStep();    // una vuelta de la tarea de streaming
+uint32_t flexCloudTestStreamStep(); // una vuelta de la tarea de streaming: 0 = hizo trabajo; si no, los ms que la tarea dormiria hasta un aviso
 void flexCloudTestPowerCycle();    // se pierde la RAM; la flash (fsstub) y la NVS siguen
 void flexCloudTestPowerOff();      // lo mismo sin volver a arrancar (para el orden de setup())
 uint32_t flexCloudTestJournalSaves();
