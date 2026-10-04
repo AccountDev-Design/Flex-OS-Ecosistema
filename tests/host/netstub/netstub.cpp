@@ -56,7 +56,10 @@ void heap_caps_free(void* p){
 // La SRAM INTERNA es la escasa en el P4 (la PSRAM son 32 MB): la prueba la
 // programa. Cualquier otra pregunta (PSRAM / por defecto) sigue siendo holgada.
 size_t gNetInternalFree = 200u << 10, gNetInternalBlock = 100u << 10;
-size_t heap_caps_get_free_size(uint32_t caps){ return (caps & MALLOC_CAP_INTERNAL) ? gNetInternalFree : (8u << 20); }
+// PSRAM libre que dice el sistema (holgada por defecto: 32 MB como el P4): la prueba la baja para comprobar que la
+// foto para el visor se RECHAZA antes de bajar un solo byte si luego no quedaria memoria para decodificarla.
+size_t gNetPsFree = 24u << 20;
+size_t heap_caps_get_free_size(uint32_t caps){ return (caps & MALLOC_CAP_INTERNAL) ? gNetInternalFree : gNetPsFree; }
 size_t heap_caps_get_largest_free_block(uint32_t caps){ return (caps & MALLOC_CAP_INTERNAL) ? gNetInternalBlock : (4u << 20); }
 
 std::vector<NetTaskRec> gNetTasks;

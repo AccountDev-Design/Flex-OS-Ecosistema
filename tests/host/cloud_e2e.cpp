@@ -117,6 +117,19 @@ static void putLocal(const char* path, const std::string& data){
   if(f){ flexFsStreamWrite(f, data.data(), data.size()); flexFsStreamClose(f); }
 }
 static std::string localFile(const std::string& path){ auto it = gFs.find(path); return it == gFs.end() ? std::string("<no>") : std::string(it->second.data.begin(), it->second.data.end()); }
+// La foto para el visor llega a un buffer de RAM (nunca a la flash): se espera, se copia y se suelta.
+static bool viewPhoto(const FclItem& it, std::string& out, std::string* err = nullptr){
+  uint32_t op = flexCloudViewStart(&it);
+  if(!op) return false;
+  pumpUntil([&]{ return flexCloudViewState(op, nullptr, nullptr, nullptr, 0) != FCV_FETCHING; }, 4000);
+  char e[96] = ""; uint8_t st = flexCloudViewState(op, nullptr, nullptr, e, sizeof(e));
+  if(err) *err = e;
+  if(st != FCV_READY) return false;
+  uint32_t n = 0; uint8_t* p = flexCloudViewTake(op, &n);
+  if(!p) return false;
+  out.assign((const char*)p, n); flexCloudViewFree(p);
+  return true;
+}
 static bool listReady(){ FlexCloudListInfo l; flexCloudListInfo(&l); return l.state == FCL_LIST_READY || l.state == FCL_LIST_ERROR; }
 static std::vector<FclItem> listNow(uint8_t view, const char* folder){
   flexCloudRequestList(view, folder, nullptr);
@@ -268,9 +281,7 @@ int main(){
   const FclItem* ph = byName(rootNow, "verde.jpg");
   CHECK(ph && ph->hasThumb && ph->size == photo.size(), "el ORIGINAL sigue con su tamano; la miniatura es aparte");
   FclItem phi; memset(&phi, 0, sizeof(phi)); if(ph) phi = *ph;
-  op = flexCloudFetchForView(&phi);
-  e = waitAny(op, FCE_VIEW_READY, FCE_VIEW_FAILED, 4000);
-  CHECK(e && localFile(e->localPath) == photo, "el visor recibe la foto ORIGINAL (sin recomprimir)");
+  { std::string pv; CHECK(viewPhoto(phi, pv) && pv == photo, "el visor recibe la foto ORIGINAL (sin recomprimir), a la RAM"); }
 
   // ---- cancelar suelta la reserva en el servidor (se mira en el propio servidor)
   auto serverReserved = [&]() -> long long {

@@ -281,6 +281,8 @@ static bool readQuota(const cJSON* q, FclQuota* out){
   const char* st = jstr(q, "state");
   out->state = (st && !strcmp(st, "full")) ? FCL_Q_FULL : (st && !strcmp(st, "low")) ? FCL_Q_LOW : FCL_Q_OK;
   jcopy(q, "plan", out->plan, sizeof(out->plan));
+  const double rv = jnum(q, "rev", 0);
+  out->rev = rv > 0 && rv < 4294967295.0 ? (uint32_t)rv : 0;
   return true;
 }
 
@@ -442,6 +444,11 @@ const char* fclErrorText(const char* code){
     { "bad_response",       "Respuesta inesperada de Flex Cloud" },
     { "no_memory",          "No hay memoria libre ahora" },
     { "cancelled",          "Cancelado" },
+    { "file_changed",       "El archivo cambi\xC3\xB3 en Flex Cloud; se actualiza la lista" },
+    { "view_timeout",       "Flex Cloud tard\xC3\xB3 demasiado en enviar la foto" },
+    { "view_checksum",      "La foto lleg\xC3\xB3 da\xC3\xB1" "ada; vuelve a abrirla" },
+    { "not_ready",          "Flex Cloud todav\xC3\xAD" "a lo est\xC3\xA1 preparando" },
+    { "busy",               "Flex Cloud est\xC3\xA1 ocupado; vuelve a intentarlo" },
     { "dest_changed",       "Flex Cloud cambi\xC3\xB3 de destino; vuelve a intentarlo" },
     { "no_phone",           "Empareja un tel\xC3\xA9" "fono para usar Flex Cloud" },
     { "phone_rejected",     "El tel\xC3\xA9" "fono ya no reconoce este Flex OS: vuelve a emparejarlo" },
@@ -465,6 +472,9 @@ const char* fclPhoneErrorText(const char* code){
       { "bad_response",   "Respuesta inesperada del tel\xC3\xA9" "fono" },
       { "not_found",      "Ya no existe en el tel\xC3\xA9" "fono" },
       { "server_busy",    "El tel\xC3\xA9" "fono est\xC3\xA1 ocupado; se reintentar\xC3\xA1" },
+      { "file_changed",   "El archivo cambi\xC3\xB3 en el tel\xC3\xA9" "fono; se actualiza la lista" },
+      { "view_timeout",   "El tel\xC3\xA9" "fono tard\xC3\xB3 demasiado en enviar la foto" },
+      { "not_ready",      "El tel\xC3\xA9" "fono todav\xC3\xAD" "a lo est\xC3\xA1 preparando" },
     };
     for(auto& e : T) if(!strcmp(code, e.c)) return e.t;
   }
@@ -929,7 +939,7 @@ int fclOpenAction(const FclItem* it, const char** why){
     }
     uint64_t sz = fclPlaySize(it);
     if(it->kind == FCL_K_PHOTO){
-      if(sz > 8ull * 1024 * 1024){ if(why) *why = "Es demasiado grande para abrirla aqu\xC3\xAD: desc\xC3\xA1rgala o \xC3\xA1" "brela en la web"; return FCL_OPEN_MENU; }
+      if(sz > 6ull * 1024 * 1024){ if(why) *why = "Es demasiado grande para abrirla aqu\xC3\xAD: desc\xC3\xA1rgala o \xC3\xA1" "brela en la web"; return FCL_OPEN_MENU; }
       return FCL_OPEN_PHOTO;
     }
     if(it->kind == FCL_K_VIDEO){
@@ -945,7 +955,7 @@ int fclOpenAction(const FclItem* it, const char** why){
   // Sin informacion del servidor (Flex Cloud en Internet o un telefono sin la preparacion multimedia): la extension.
   const char* n = it->name;
   if(endsWithCi(n, ".jpg") || endsWithCi(n, ".jpeg")){
-    if(it->size > 8ull * 1024 * 1024){ if(why) *why = "Es demasiado grande para abrirla aqu\xC3\xAD: desc\xC3\xA1rgala o \xC3\xA1" "brela en la web"; return FCL_OPEN_MENU; }
+    if(it->size > 6ull * 1024 * 1024){ if(why) *why = "Es demasiado grande para abrirla aqu\xC3\xAD: desc\xC3\xA1rgala o \xC3\xA1" "brela en la web"; return FCL_OPEN_MENU; }
     return FCL_OPEN_PHOTO;
   }
   if(endsWithCi(n, ".avi")){

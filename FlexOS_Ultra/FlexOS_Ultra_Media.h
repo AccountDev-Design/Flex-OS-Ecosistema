@@ -75,6 +75,16 @@ static void sysNotify(const char* title, const char* sub){
   notifPush(&m);
 }
 
+// RESPUESTA A LO QUE EL USUARIO ACABA DE HACER (o resultado de algo que pidio). La isla solo se dibuja en el ESCRITORIO: un "el telefono lo
+// esta preparando" dentro de la Galeria no lo veia nadie y el toque parecia no hacer nada. Dentro de una app va por el BANNER, la capa de
+// avisos que SI se ve encima de las apps (FlexOS_FlexPhone_Overlay.h: el mismo material y el mismo gesto de descartar); en el escritorio,
+// por la isla de siempre. No es un sistema de avisos nuevo: es el de siempre, elegido segun donde esta el usuario.
+static void fpbPushSystem(const char* app, const char* title, const char* body);   // FlexOS_FlexPhone_Overlay.h (mas abajo en el sketch)
+static void sysSay(const char* app, const char* title, const char* sub){
+  if(gState == ST_APP) fpbPushSystem(app, title, sub);
+  else sysNotify(title, sub);
+}
+
 static void mediaNotify(ModuleType t, const char* title, const char* sub){
   DetectedModule m;
   memset(&m, 0, sizeof(m));

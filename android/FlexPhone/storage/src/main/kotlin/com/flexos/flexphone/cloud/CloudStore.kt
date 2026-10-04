@@ -113,6 +113,15 @@ class CloudStore(
     private val indexFile = File(dir, "index.json")
     private var lastSaveMs = 0L
     private var dirty = false
+
+    /**
+     * Cuantas veces cambio lo que ve el usuario (subidas terminadas, renombrar, papelera, estado de preparacion, miniaturas...).
+     * Cada guardado del indice la sube. El P4 la lee de /me y de /quota: si cambio desde la ultima vez, la lista que ensena esta
+     * vieja y la pide otra vez SOLA -- antes un video subido desde la web o desde el propio telefono no aparecia en la Galeria
+     * del P4 hasta cerrarla y abrirla. No se guarda en disco: al reiniciar el servicio vuelve a 0 y al P4 le basta con que sea
+     * DISTINTA de la anterior.
+     */
+    @Volatile private var rev = 0L
     // El indice no se pudo leer al arrancar: los objetos del disco NO se tratan
     // como huerfanos (borrarlos seria perder los archivos por un indice roto).
     private var indexWasDamaged = false
@@ -229,6 +238,7 @@ class CloudStore(
         if (!tmp.renameTo(indexFile)) throw IOException("no se pudo guardar el indice de Flex Cloud")
         lastSaveMs = now()
         dirty = false
+        rev++
     }
 
     /** Guarda si hay cambios menores pendientes (caducidad de subidas) y hace tiempo de la ultima vez. */
@@ -283,6 +293,8 @@ class CloudStore(
             // Extra del telefono (el P4 y la web los leen si estan): el espacio real.
             "deviceFreeBytes" to deviceFreeBytes(),
             "limitedByDevice" to limited,
+            // Cambia cuando cambia la lista (ver `rev`): el P4 la vuelve a pedir sin que nadie reabra la Galeria.
+            "rev" to rev,
         )
     }
 

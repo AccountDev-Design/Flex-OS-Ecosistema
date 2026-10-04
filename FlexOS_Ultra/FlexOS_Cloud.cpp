@@ -32,14 +32,15 @@ static const char*    JOURNAL_PHONE = "/System/Cloud/phone.bin";  // destino tel
 static const char*    DL_DIR       = "/System/Cloud/dl";
 static const char*    DL_PHONE     = "/System/Cloud/pdl";       // descargas del telefono a medias
 static const uint32_t PHONE_IDS    = 0x40000000u;  // numeros de trabajo del telefono: nunca los de Internet
-static const char*    VIEW_DIR     = "/System/Cloud/view";   // UN hueco: la foto que se esta viendo
+static const char*    VIEW_DIR     = "/System/Cloud/view";   // OBSOLETO: la foto ya no pasa por la flash (solo se limpia lo que dejo un firmware anterior)
 static const size_t   JSON_CAP     = 48u * 1024u;       // pagina de 40 elementos con holgura
 static const size_t   IO_CAP       = 16u * 1024u;       // lectura/escritura de bytes, reutilizado
 static const int      PAGE         = 40;
 static const uint32_t HTTP_TIMEOUT = 15000;
 static const uint32_t ME_EVERY_MS  = 60000;             // cuota al dia mientras la nube esta a la vista
+static const uint32_t ME_PHONE_MS  = 15000;             // con el telefono, ademas, dice si SU lista cambio (rev): una consulta diminuta cada 15 s, solo a la vista
 static const uint64_t LOCAL_RESERVE = 512u * 1024u;     // = FML_RESERVE_BYTES: nunca se llena LittleFS
-static const uint32_t VIEW_MAX     = 8u * 1024u * 1024u;// foto para el visor (el visor admite 6 MB)
+static const uint32_t VIEW_MAX     = 6u * 1024u * 1024u;// foto para el visor (el limite del visor: se trae a la RAM, no a la flash)
 static const uint32_t THUMB_MAX    = 96u * 1024u;       // miniatura remota que se acepta
 static const int      EVENTS       = 12;
 static const int      CMDS         = 10;
@@ -78,6 +79,10 @@ static volatile bool gActive = false;
 static uint32_t gNextMeMs = 0, gNetRetryAt = 0;
 static uint8_t gNetFails = 0;
 static volatile bool gMeDue = true;
+// La lista que se ensena quedo VIEJA (se acaba de subir algo, un archivo cambio o ya no existe): la tarea la vuelve a pedir UNA vez
+// en cuanto esta libre y la nube se ve. Es el "terminar de subir -> verlo en la Galeria" sin reabrirla (docs/FLEX-MEDIA-ECOSYSTEM.md §16).
+static volatile bool gListStale = false;
+static uint32_t gSeenRev = 0, gListFreshMs = 0;          // ultimo "rev" que dijo el telefono y cuando se publico la lista que se ensena
 // La nube rechazo la credencial: no se vuelve a probar hasta que Flex Account
 // la haya comprobado DESPUES del rechazo (o pasen 5 min). Sin esto, "la nube
 // dice 401 / Flex Account aun no lo ha mirado" seria un bucle de peticiones.
@@ -548,7 +553,7 @@ static bool netReady(){
 static void fetchMe(){
   char code[FCL_CODE_MAX]; size_t n = 0;
   int st = apiCall("GET", "/me", nullptr, nullptr, 0, nullptr, nullptr, code, sizeof(code), &n);
-  gNextMeMs = millis() + ME_EVERY_MS;
+  gNextMeMs = millis() + (phoneDest() ? ME_PHONE_MS : ME_EVERY_MS);
   gMeDue = false;
   if(st != 200) return;
   char addr[48] = "", name[64] = "";
@@ -559,6 +564,13 @@ static void fetchMe(){
     snprintf(gStatus.address, sizeof(gStatus.address), "%s", addr);
     gStatus.gen++;
     unlock();
+    // El telefono cuenta los cambios de SU lista (subidas desde la web o desde el propio telefono, renombrados, el estado de preparacion).
+    // Si cambio desde la ultima vez y la lista que se ensena no se acaba de pedir, esta vieja: se vuelve a pedir SOLA. Lo propio del P4 (una
+    // subida o una orden suya) ya refresco la lista justo antes: eso no cuenta como un cambio ajeno.
+    if(q.rev){
+      if(gSeenRev && q.rev != gSeenRev && (uint32_t)(millis() - gListFreshMs) > 2500u) gListStale = true;
+      gSeenRev = q.rev;
+    }
   }
 }
 
@@ -616,6 +628,7 @@ static void doList(bool more){
     gListInfo.state = FCL_LIST_READY;
     gListInfo.error[0] = 0;
     gListInfo.gen++;
+    gListFreshMs = millis();
   }
   unlock();
   psFree(tmp);
@@ -677,6 +690,16 @@ static bool pushCmd(const Cmd& c){
     // Pedir otra vista sustituye a una peticion de vista que aun no salio.
     if(c.type == CMD_LIST || c.type == CMD_REFRESH)
       for(int i = 0; i < gCmdN; i++){ Cmd& x = gCmds[(gCmdHead + i) % CMDS]; if(x.type == CMD_LIST || x.type == CMD_MORE || x.type == CMD_REFRESH) x.type = CMD_NONE; }
+    // Otra pagina ya esperando turno: no se pide dos veces (el final de la lista la pide en cada repintado).
+    if(c.type == CMD_MORE)
+      for(int i = 0; i < gCmdN; i++) if(gCmds[(gCmdHead + i) % CMDS].type == CMD_MORE){ unlock(); return true; }
+    // Igual con la foto del visor: solo hay una viva, y la anterior ya no la quiere nadie.
+    if(c.type == CMD_VIEW)
+      for(int i = 0; i < gCmdN; i++){ Cmd& x = gCmds[(gCmdHead + i) % CMDS]; if(x.type == CMD_VIEW) x.type = CMD_NONE; }
+    // Una orden que se sustituyo ya no ocupa hueco: la cola no se llena de CMD_NONE que nadie va a atender.
+    { int w = 0;
+      for(int i = 0; i < gCmdN; i++){ Cmd x = gCmds[(gCmdHead + i) % CMDS]; if(x.type != CMD_NONE) gCmds[(gCmdHead + w++) % CMDS] = x; }
+      gCmdN = w; }
     if(gCmdN < CMDS){ gCmds[(gCmdHead + gCmdN) % CMDS] = c; gCmdN++; ok = true; }
   }
   unlock();
@@ -792,7 +815,7 @@ static void jobFinish(FclJob* j, uint8_t state, const char* code){
   Serial.printf("[CLOUD] %s #%lu %s %s\n", up ? "subida" : "descarga", (unsigned long)j->id,
                 state == FCL_JOB_DONE ? "terminada" : state == FCL_JOB_CANCELLED ? "cancelada" : "fallida", code ? code : "");
   runnerClose();
-  if(e.ok) gMeDue = true;
+  if(e.ok){ gMeDue = true; if(up) gListStale = true; }
 }
 
 // Fallo de un paso.
@@ -1290,30 +1313,70 @@ static bool jobStep(){
   return true;
 }
 
-// ---- Foto para el visor (un solo hueco, sin diario) ----------------------
-static void fetchView(const Cmd& c){
-  FlexCloudEvent e; memset(&e, 0, sizeof(e));
-  e.kind = FCE_VIEW_FAILED; e.opId = c.opId;
-  snprintf(e.fileId, sizeof(e.fileId), "%s", c.id);
-  snprintf(e.name, sizeof(e.name), "%s", c.text);
-  uint64_t total = flexFsTotalBytes(), used = flexFsUsedBytes();
-  uint64_t freeB = total > used ? total - used : 0;
-  if(c.size > VIEW_MAX){ snprintf(e.code, sizeof(e.code), "file_too_large"); snprintf(e.text, sizeof(e.text), "Demasiado grande para abrirla aqu\xC3\xAD"); pushEvent(e); return; }
-  char local[44], viewPath[FCL_PATH_MAX];
-  fclLocalName(c.text, local, sizeof(local));
-  snprintf(viewPath, sizeof(viewPath), "%s/%s", VIEW_DIR, local);
-  if(c.size + LOCAL_RESERVE > freeB + flexFsDirSize(VIEW_DIR)){
-    snprintf(e.code, sizeof(e.code), "no_space_local"); snprintf(e.text, sizeof(e.text), "%s", errText(e.code)); pushEvent(e); return;
+// ---- Foto para el visor: a la RAM, nunca a la flash ----------------------
+// Antes se bajaba entera a LittleFS (/System/Cloud/view): un borrado de sector por cada 4 KB, y cada borrado
+// APAGA LA CACHE mientras dura. Con el panel DSI refrescandose desde la PSRAM, eso era el parpadeo cian de
+// 10-15 s al abrir una foto (docs/FLEX-MEDIA-ECOSYSTEM.md §11), mas desgaste de la flash en cada foto vista.
+// Ahora la foto va a un buffer de PSRAM con UN duenyo en cada momento:
+//   · la tarea de la nube lo reserva, lo llena y verifica su SHA-256 (fetchView);
+//   · queda en la ranura hasta que quien la pidio la TOMA (flexCloudViewTake): desde ahi es suyo;
+//   · si nadie la toma (se cerro el visor, se pidio otra) se suelta aqui, nunca queda colgando.
+// Hay UNA peticion viva (gViewWant): pedir otra anula la anterior, y la descarga en curso lo ve en cada
+// lectura y se corta. Nada de esto toca la flash.
+static const uint32_t VIEW_DEADLINE_MS = 60000;       // plazo TOTAL de una foto: no puede bloquear la nube para siempre
+static const uint32_t VIEW_HEADROOM    = FLEX_CLOUD_VIEW_HEADROOM;   // PSRAM que debe quedar libre ademas del buffer (lo que decodifica el visor)
+struct ViewSlot { uint32_t op; uint8_t state; uint32_t got, total; uint8_t* buf; char err[96]; };
+static ViewSlot gView;                                // bajo lock()
+static volatile uint32_t gViewWant = 0;               // la peticion que el visor quiere AHORA (0 = ninguna)
+
+// Suelta lo que hubiera en la ranura (con lock() tomado).
+static void viewDropLocked(){
+  if(gView.buf){ psFree(gView.buf); gView.buf = nullptr; }
+  memset(&gView, 0, sizeof(gView));
+}
+static void viewFail(uint32_t op, const char* code){
+  lock();
+  if(gView.op == op && gViewWant == op){
+    if(gView.buf){ psFree(gView.buf); gView.buf = nullptr; }
+    gView.state = FCV_FAILED;
+    snprintf(gView.err, sizeof(gView.err), "%s", errText(code));
   }
+  unlock();
+}
+static void viewProgress(uint32_t op, uint32_t got){
+  lock(); if(gView.op == op && gView.state == FCV_FETCHING) gView.got = got; unlock();
+}
+// El SHA-256 que el servidor dice de lo que ENVIA, de su cabecera ETag ("<64 hex>" entre comillas). "" si no hay.
+static void viewEtagSha(const String& et, char* out, size_t cap){
+  out[0] = 0;
+  const char* p = et.c_str();
+  if(*p == 'W' && p[1] == '/') p += 2;
+  if(*p == '"') p++;
+  size_t n = 0;
+  while(p[n] && p[n] != '"' && n < cap) n++;
+  if(n != FCL_SHA_HEX - 1) return;
+  for(size_t i = 0; i < n; i++){ char ch = p[i]; if(!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) return; }
+  memcpy(out, p, n); out[n] = 0;
+}
+
+static void fetchView(const Cmd& c){
+  const uint32_t op = c.opId;
+  if(gViewWant != op) return;                                   // ya no se quiere: ni red ni memoria
+  if(c.size == 0 || c.size > VIEW_MAX){ viewFail(op, "file_too_large"); return; }
+  // Sin sitio para decodificarla DESPUES: se dice ya, sin gastar red (si el servidor la cambio, se vuelve a medir con lo que envia).
+  if(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < (size_t)c.size + VIEW_HEADROOM){ viewFail(op, "no_memory"); return; }
   char bearer[64], why[FCL_CODE_MAX] = "", base[160];
   if(!netUsable() || !destBearer(bearer, sizeof(bearer), why, sizeof(why)) || !destBase(base, sizeof(base))){
     memset(bearer, 0, sizeof(bearer));
     if(phoneDest() && why[0]) classifyFail(!strcmp(why, "phone_rejected") ? 403 : -1, why);
-    snprintf(e.code, sizeof(e.code), "network"); snprintf(e.text, sizeof(e.text), "%s", errText("network")); pushEvent(e); return;
+    viewFail(op, "network");
+    return;
   }
-  if(!roomForConn()){ memset(bearer, 0, sizeof(bearer)); snprintf(e.code, sizeof(e.code), "no_memory"); snprintf(e.text, sizeof(e.text), "%s", errText("no_memory")); pushEvent(e); return; }
+  if(!roomForConn()){ memset(bearer, 0, sizeof(bearer)); viewFail(op, "no_memory"); return; }
   WiFiClient* cli = newClient(); HTTPClient h;
   h.setTimeout(HTTP_TIMEOUT); h.useHTTP10(true);
+  static const char* KEYS[] = { "ETag" };               // (collectHeaders pide const char*[], no const char* const[])
+  h.collectHeaders(KEYS, 1);
   char url[256], hdr[80];
   if(c.play) snprintf(url, sizeof(url), "%s/files/%s/playable", base, c.id);   // preview o version del perfil, no el original
   else       snprintf(url, sizeof(url), "%s/download/%s", base, c.id);
@@ -1321,38 +1384,73 @@ static void fetchView(const Cmd& c){
   snprintf(hdr, sizeof(hdr), "Bearer %s", bearer); memset(bearer, 0, sizeof(bearer));
   if(ok){ h.addHeader("Authorization", hdr); h.addHeader("Accept-Encoding", "identity"); }
   memset(hdr, 0, sizeof(hdr));
-  int st = ok ? h.GET() : -1;
-  FlexFsStream* f = nullptr;
+  const int st = ok ? h.GET() : -1;
+
+  // Lo que el servidor ENVIA manda sobre lo que la lista recordaba: una foto grande puede haber ganado una vista
+  // ligera (otro tamano y otro SHA-256) DESPUES de que la lista se pidiera. Se comprueba ANTES de reservar nada.
+  uint64_t total = c.size;
+  char wantSha[FCL_SHA_HEX]; snprintf(wantSha, sizeof(wantSha), "%s", c.sha);
+  const char* code = nullptr;
+  if(st == 200){
+    const int cl = h.getSize();
+    if(cl > 0 && (uint64_t)cl != c.size){
+      char es[FCL_SHA_HEX]; viewEtagSha(h.header("ETag"), es, sizeof(es));
+      if(es[0] && (uint64_t)cl <= VIEW_MAX){ total = (uint64_t)cl; snprintf(wantSha, sizeof(wantSha), "%s", es); }
+      else code = "file_changed";                              // no se puede verificar lo distinto: se refresca la lista
+    }
+  } else code = st == 401 ? "auth_required" : st == 404 || st == 410 ? "not_found" : st == 409 ? "not_ready" : st > 0 ? "server" : "network";
+  uint8_t* buf = nullptr;
+  if(!code){
+    const uint32_t need = (uint32_t)total;
+    if(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < (size_t)need + VIEW_HEADROOM) code = "no_memory";
+    else { buf = (uint8_t*)heap_caps_malloc(need, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); if(!buf) code = "no_memory"; }
+  }
   FclSha sha; fclShaStart(&sha);
   uint64_t got = 0;
-  flexFsDelete(VIEW_DIR);                                   // la anterior se va: un solo hueco
-  if(st == 200 && (f = flexFsOpenWrite(viewPath)) != nullptr){
+  bool cancelled = false, timedOut = false;
+  if(!code){
+    lock(); if(gView.op == op){ gView.total = (uint32_t)total; } unlock();
     WiFiClient* s = h.getStreamPtr();
-    uint32_t waited = 0;
-    while(got < c.size && s){
+    const uint32_t t0 = millis();
+    uint32_t waited = 0, lastPub = 0;
+    while(got < total && s){
+      if(gViewWant != op){ cancelled = true; break; }           // el visor lo cerro / pidio otra: se corta YA
+      if(millis() - t0 > VIEW_DEADLINE_MS){ timedOut = true; break; }
       int av = s->available();
-      if(av <= 0){ if(!s->connected() || waited > HTTP_TIMEOUT) break; vTaskDelay(pdMS_TO_TICKS(5)); waited += 5; continue; }
-      int r = s->read(gIo, (size_t)(av > (int)IO_CAP ? IO_CAP : (size_t)av));
-      if(r <= 0 || !flexFsStreamWrite(f, gIo, (size_t)r)) break;
-      fclShaUpdate(&sha, gIo, (size_t)r); got += (uint64_t)r; waited = 0;
+      if(av <= 0){ if(!s->connected() || waited > HTTP_TIMEOUT) break; vTaskDelay(pdMS_TO_TICKS(2)); waited += 2; continue; }
+      uint64_t left = total - got;
+      size_t want = (size_t)(av > (int)IO_CAP ? IO_CAP : (size_t)av);
+      if((uint64_t)want > left) want = (size_t)left;
+      int r = s->read(buf + got, want);
+      if(r <= 0) break;
+      fclShaUpdate(&sha, buf + got, (size_t)r); got += (uint64_t)r; waited = 0;
+      if(got - lastPub >= 32768u){ lastPub = (uint32_t)got; viewProgress(op, (uint32_t)got); }
     }
-    flexFsStreamClose(f);
   }
   h.end();
   cli->stop(); delete cli;
   if(phoneDest()) flexStorageNoteResult(st);
-  char hex[FCL_SHA_HEX]; fclShaFinishHex(&sha, hex);
-  if(st == 200 && got == c.size && (!c.sha[0] || !strcmp(hex, c.sha))){
-    e.kind = FCE_VIEW_READY; e.ok = true;
-    snprintf(e.localPath, sizeof(e.localPath), "%s", viewPath);
-  } else {
-    flexFsDelete(VIEW_DIR);
-    const char* code = st == 401 ? "auth_required" : st == 404 ? "not_found" : got != c.size ? "network" : "checksum_mismatch";
-    snprintf(e.code, sizeof(e.code), "%s", code);
-    snprintf(e.text, sizeof(e.text), "%s", errText(code));
-    if(st == 401) destRejected();
+  if(st == 401) destRejected();
+  if(cancelled){ psFree(buf); return; }                         // nadie espera ya el resultado
+  if(!code){
+    char hex[FCL_SHA_HEX]; fclShaFinishHex(&sha, hex);
+    if(timedOut) code = "view_timeout";
+    else if(got != total) code = "network";
+    else if(wantSha[0] && strcmp(hex, wantSha)) code = "view_checksum";     // (la foto no se reintenta sola: el usuario la vuelve a abrir)
   }
-  pushEvent(e);
+  if(code){
+    psFree(buf); viewFail(op, code);
+    if(!strcmp(code, "not_found") || !strcmp(code, "file_changed") || !strcmp(code, "not_ready")) gListStale = true;   // lo que la lista decia ya no es cierto
+    return;
+  }
+  bool published = false;
+  lock();
+  if(gView.op == op && gViewWant == op && gView.state == FCV_FETCHING){
+    gView.buf = buf; gView.got = (uint32_t)got; gView.total = (uint32_t)total; gView.state = FCV_READY;
+    published = true;
+  }
+  unlock();
+  if(!published) psFree(buf);                                   // lo anularon justo ahora
 }
 
 // ======================================================================
@@ -1444,13 +1542,7 @@ static bool thumbWanted(){
 // lista se pide de nuevo sola; las operaciones y el visor dicen que no.
 static void failCmd(const Cmd& c, const char* why){
   if(c.type == CMD_LIST || c.type == CMD_REFRESH || c.type == CMD_MORE){ listError(why); return; }
-  if(c.type == CMD_VIEW){
-    FlexCloudEvent e; memset(&e, 0, sizeof(e));
-    e.kind = FCE_VIEW_FAILED; e.opId = c.opId;
-    snprintf(e.code, sizeof(e.code), "%s", why); snprintf(e.text, sizeof(e.text), "%s", errText(why));
-    pushEvent(e);
-    return;
-  }
+  if(c.type == CMD_VIEW){ viewFail(c.opId, why); return; }
   opDone(c.opId, -1, why, "");
 }
 
@@ -1546,7 +1638,72 @@ static void applyDest(){
   gMeDue = gActive;
   loadJournal();
   reemitPending();
-  if(flexFsReady()) flexFsDelete(VIEW_DIR);
+  gViewWant = 0;
+  lock(); viewDropLocked(); unlock();                       // la foto que se traia era del destino anterior
+}
+
+// ======================================================================
+//  Vigilar lo que el telefono esta preparando (ver flexCloudWatch en FlexOS_Cloud.h)
+// ======================================================================
+// La lista en pantalla es una FOTO de un instante. El telefono tarda segundos -- o minutos -- en analizar y preparar un video para el P4
+// (sin analizar -> en cola -> preparando N % -> listo/fallido), y la miniatura y la duracion llegan despues. Sin esto el estado de cada celda
+// no se movia hasta reabrir la Galeria. La interfaz dice QUE ids de lo que ve estan sin acabar y la tarea pregunta por UNO cada vez
+// (GET /files/<id>): con cambios, pronto; sin ellos, cada vez mas espaciado; y con un tope de tiempo. Nada que vigilar = nada que pedir.
+static const uint32_t WATCH_FIRST_MS = 3000, WATCH_MAX_GAP_MS = 15000, WATCH_TOTAL_MS = 300000, WATCH_PROGRESS_MS = 5000;
+static char     gWatch[FLEX_CLOUD_WATCH_MAX][FCL_ID_MAX];
+static int      gWatchN = 0, gWatchRR = 0;
+static bool     gWatchDone = false;                     // se agoto el tiempo para este conjunto (no se reanuda hasta que cambie)
+static uint32_t gWatchNextMs = 0, gWatchSinceMs = 0, gWatchGapMs = WATCH_FIRST_MS;
+static char     gWatchKick[FCL_ID_MAX] = "";
+static FclItem  gWatchItem;                             // de la tarea (nadie mas lo toca): 672 B fuera de su pila
+
+static bool watchDiffers(const FclItem& a, const FclItem& b){
+  return a.playState != b.playState || a.playProgress != b.playProgress || a.hasThumb != b.hasThumb || a.durationMs != b.durationMs ||
+         a.width != b.width || a.height != b.height || a.playSize != b.playSize || a.size != b.size || a.updatedAt != b.updatedAt ||
+         a.kind != b.kind || strcmp(a.name, b.name) || strcmp(a.playSha, b.playSha) || strcmp(a.sha256, b.sha256) ||
+         strcmp(a.playReason, b.playReason) || strcmp(a.mime, b.mime);
+}
+
+// Una consulta. true = salio a la red (la tarea vuelve a mirar sus ordenes antes de la siguiente).
+static bool watchStep(){
+  char id[FCL_ID_MAX] = "";
+  const uint32_t now = millis();
+  lock();
+  if(gWatchKick[0]){ snprintf(id, sizeof(id), "%s", gWatchKick); gWatchKick[0] = 0; }
+  else if(gWatchN > 0 && !gWatchDone && (int32_t)(now - gWatchNextMs) >= 0){
+    if(now - gWatchSinceMs > WATCH_TOTAL_MS) gWatchDone = true;
+    else { gWatchRR = (gWatchRR + 1) % gWatchN; snprintf(id, sizeof(id), "%s", gWatch[gWatchRR]); }
+  }
+  unlock();
+  if(!id[0]) return false;
+  char path[96], code[FCL_CODE_MAX] = ""; size_t n = 0;
+  snprintf(path, sizeof(path), "/files/%s", id);
+  const int st = apiCall("GET", path, nullptr, nullptr, 0, nullptr, nullptr, code, sizeof(code), &n);
+  bool changed = false, stateMoved = false;
+  if(st == 200){
+    memset(&gWatchItem, 0, sizeof(gWatchItem));
+    if(fclParseItem(gJson, n, &gWatchItem) && !strcmp(gWatchItem.id, id)){
+      lock();
+      for(int i = 0; i < gListInfo.count; i++){
+        if(strcmp(gList[i].id, id)) continue;
+        if(watchDiffers(gList[i], gWatchItem)){
+          stateMoved = gList[i].playState != gWatchItem.playState;
+          gList[i] = gWatchItem; gListInfo.gen++; changed = true;
+        }
+        break;
+      }
+      unlock();
+      if(gWatchItem.deletedAt && gListInfo.view != FCL_VIEW_TRASH) gListStale = true;     // a la papelera desde otro sitio
+    }
+  } else if(st == 404 || st == 410) gListStale = true;                                  // ya no existe: la lista ya no es esta
+  // El ritmo: una transicion de estado vuelve a empezar; un simple avance, cada 5 s; sin cambios, cada vez mas espaciado.
+  lock();
+  if(stateMoved){ gWatchGapMs = WATCH_FIRST_MS; gWatchSinceMs = now; }
+  else if(changed) gWatchGapMs = WATCH_PROGRESS_MS;
+  else { gWatchGapMs = gWatchGapMs * 3u / 2u; if(gWatchGapMs > WATCH_MAX_GAP_MS) gWatchGapMs = WATCH_MAX_GAP_MS; }
+  gWatchNextMs = now + gWatchGapMs;
+  unlock();
+  return true;
 }
 
 // ======================================================================
@@ -1577,8 +1734,11 @@ static void taskStep(){
     return;
   }
   if(gMeDue || (gActive && (int32_t)(millis() - gNextMeMs) >= 0)){ fetchMe(); return; }
+  // Lo que la interfaz ensena quedo viejo (acaba de subirse algo, un archivo cambio): se vuelve a pedir, UNA vez y solo con la nube a la vista.
+  if(gListStale && gActive){ gListStale = false; flexCloudRefresh(); return; }
   // Las miniaturas solo se piden con algo en pantalla: no hace falta mirar gActive.
   if(thumbWanted()){ fetchThumb(); return; }
+  if(gActive && watchStep()) return;
   if(cancelHousekeeping()) return;
   jobStep();
 }
@@ -1610,7 +1770,7 @@ static void cloudTask(void*){
 // tras STREAM_PATIENCE_MS seguidos sin ningun contacto se declara el fallo y el reproductor lo dice.
 #define STREAM_PATIENCE_MS  90000u
 #define STREAM_BACKOFF_MAX  5000u
-struct StNet { WiFiClient* cli; HTTPClient* http; uint32_t pos; uint32_t left; uint32_t gen; uint8_t fails; uint32_t retryAt; uint32_t idleMs; uint32_t firstFailMs; };
+struct StNet { WiFiClient* cli; HTTPClient* http; uint32_t pos; uint32_t left; uint32_t gen; uint8_t fails; uint32_t retryAt; uint32_t idleMs; uint32_t firstFailMs; int lastSt; };
 static StNet gStNet;
 
 static void stConnClose(){
@@ -1625,6 +1785,7 @@ static void stSetState(uint8_t state, const char* err){
 
 static bool stConnOpen(const char* fileId, uint32_t off, uint32_t size, bool play){
   stConnClose();
+  gStNet.lastSt = 0;
   if(!roomForConn()) return false;
   char bearer[64], why[FCL_CODE_MAX] = "", base[160];
   if(!destBearer(bearer, sizeof(bearer), why, sizeof(why)) || !destBase(base, sizeof(base))){ memset(bearer, 0, sizeof(bearer)); return false; }
@@ -1643,6 +1804,7 @@ static bool stConnOpen(const char* fileId, uint32_t off, uint32_t size, bool pla
   snprintf(hdr, sizeof(hdr), "bytes=%lu-", (unsigned long)off);
   gStNet.http->addHeader("Range", hdr);
   int st = gStNet.http->GET();
+  gStNet.lastSt = st;
   if(phoneDest()) flexStorageNoteResult(st);
   if(st == 401) destRejected();
   bool ok = st == 206 || (st == 200 && off == 0);
@@ -1688,6 +1850,13 @@ static void streamStep(){
   if(!gStNet.http || gStNet.pos != off){
     if(!stConnOpen(fileId, off, size, play)){
       giveBack();
+      // El servidor CONTESTO que ya no esta (404/410) o que aun no esta listo (409): reintentar no lo cambia. Se dice YA (antes el
+      // reproductor ensenaba "Cargando" 45 s y acababa con "Sin conexion", que no era verdad) y la lista se vuelve a pedir.
+      if(gStNet.lastSt == 404 || gStNet.lastSt == 410 || gStNet.lastSt == 409){
+        stSetState(FCS_ERROR, errText(gStNet.lastSt == 409 ? "not_ready" : "not_found"));
+        gListStale = true;
+        return;
+      }
       if(!gStNet.fails) gStNet.firstFailMs = millis();
       if(gStNet.fails < 250) gStNet.fails++;
       uint32_t back = gStNet.fails < 4 ? 500u * gStNet.fails : fclBackoffMs(gStNet.fails - 3);
@@ -1871,7 +2040,8 @@ void flexCloudBegin(){
   loadJournal();
   reemitPending();
   gMeDue = false;                                         // la cuota se pide cuando la nube se ve (flexCloudSetActive)
-  if(flexFsReady()) flexFsDelete(VIEW_DIR);               // la copia del visor no sobrevive a un reinicio
+  if(flexFsReady() && flexFsExists(VIEW_DIR)) flexFsDelete(VIEW_DIR);   // lo que dejo un firmware anterior (la foto ya no pasa por la flash)
+  memset(&gView, 0, sizeof(gView)); gViewWant = 0;
   gReady = true;
   // Sin trabajo pendiente NO se crea ninguna tarea: nace con la primera peticion
   // (notifyTask) y la de streaming con el primer video (flexCloudStreamOpen).
@@ -1960,8 +2130,11 @@ bool flexCloudRequestList(uint8_t view, const char* folderId, const char* query)
   gListInfo.count = 0; gListInfo.more = false; gListInfo.error[0] = 0; gListInfo.nCrumbs = 0;
   gListInfo.gen++;
   unlock();
+  gListStale = false;                                        // una lista nueva ya es fresca
   Cmd c; memset(&c, 0, sizeof(c)); c.type = CMD_LIST;
-  return pushCmd(c);
+  if(pushCmd(c)) return true;
+  listError("busy");                                         // la cola de ordenes esta llena: se dice, con "Reintentar"
+  return false;
 }
 bool flexCloudRequestMore(){
   lock(); bool more = gListInfo.more && gListInfo.state == FCL_LIST_READY; unlock();
@@ -1975,6 +2148,25 @@ void flexCloudRefresh(){
   pushCmd(c);
 }
 void flexCloudListInfo(FlexCloudListInfo* out){ if(!out) return; lock(); *out = gListInfo; unlock(); }
+void flexCloudWatch(const char* const* ids, int n){
+  if(!gLock) return;
+  if(!ids || n < 0) n = 0;
+  if(n > FLEX_CLOUD_WATCH_MAX) n = FLEX_CLOUD_WATCH_MAX;
+  lock();
+  bool same = n == gWatchN;
+  for(int i = 0; same && i < n; i++) same = ids[i] && !strcmp(gWatch[i], ids[i]);
+  if(!same){                                                 // el mismo conjunto en cada repintado NO reinicia nada
+    for(int i = 0; i < n; i++) snprintf(gWatch[i], sizeof(gWatch[i]), "%s", ids[i] ? ids[i] : "");
+    gWatchN = n; gWatchRR = n ? n - 1 : 0; gWatchDone = false;
+    gWatchSinceMs = millis(); gWatchGapMs = WATCH_FIRST_MS; gWatchNextMs = millis() + WATCH_FIRST_MS;
+  }
+  unlock();
+}
+void flexCloudWatchKick(const char* id){
+  if(!gLock || !id || !id[0]) return;
+  lock(); snprintf(gWatchKick, sizeof(gWatchKick), "%s", id); unlock();
+  notifyTask();
+}
 int flexCloudListCopy(FclItem* dst, int start, int cap){
   if(!dst || cap <= 0 || !gList) return 0;
   lock();
@@ -1996,8 +2188,6 @@ static uint32_t opFor(uint8_t type, const FclItem* it, const char* text, const c
   lock(); c.opId = gNextOp++; unlock();
   if(it){
     snprintf(c.id, sizeof(c.id), "%s", it->id); c.folder = it->isFolder; c.size = it->size; snprintf(c.sha, sizeof(c.sha), "%s", it->sha256);
-    // Para VER una foto se pide la vista ligera que preparo el telefono (con SU tamano y SU SHA-256), no el original.
-    if(type == CMD_VIEW && fclPlayable(it)){ c.play = true; c.size = fclPlaySize(it); snprintf(c.sha, sizeof(c.sha), "%s", fclPlaySha(it)); }
   }
   if(id) snprintf(c.id, sizeof(c.id), "%s", id);
   if(text) fclCopyUtf8(c.text, sizeof(c.text), text);
@@ -2011,18 +2201,60 @@ uint32_t flexCloudRename(const FclItem* it, const char* newName){ return it && n
 uint32_t flexCloudTrash(const FclItem* it){ return it ? opFor(CMD_TRASH, it, nullptr) : 0; }
 uint32_t flexCloudRestore(const FclItem* it){ return it ? opFor(CMD_RESTORE, it, nullptr) : 0; }
 uint32_t flexCloudDeleteForever(const FclItem* it){ return it ? opFor(CMD_DELETE, it, nullptr) : 0; }
-uint32_t flexCloudFetchForView(const FclItem* it){
-  if(!it || it->isFolder) return 0;
-  char nm[FCL_NAME_MAX];
-  snprintf(nm, sizeof(nm), "%s", it->name);
-  if(it->playState == FCL_PS_READY && it->kind == FCL_K_PHOTO){
-    // Lo que llega es un JPEG aunque el original sea PNG/HEIC: el visor lo reconoce por su extension.
-    char* dot = strrchr(nm, '.');
-    if(dot && dot != nm) *dot = 0;
-    size_t l = strlen(nm);
-    if(l + 5 < sizeof(nm)) snprintf(nm + l, sizeof(nm) - l, ".jpg");
+// ---- Foto para el visor (ver fetchView) ----------------------------------
+uint32_t flexCloudViewStart(const FclItem* it){
+  if(!it || it->isFolder || !gLock || !destUsable()) return 0;
+  const uint64_t size = fclPlaySize(it);
+  Cmd c; memset(&c, 0, sizeof(c));
+  c.type = CMD_VIEW;
+  snprintf(c.id, sizeof(c.id), "%s", it->id);
+  // Para VER una foto se pide la vista ligera que preparo el telefono (con SU tamano y SU SHA-256), no el original.
+  c.play = fclPlayable(it);
+  c.size = size;
+  snprintf(c.sha, sizeof(c.sha), "%s", fclPlaySha(it));
+  lock();
+  c.opId = gNextOp++;
+  viewDropLocked();                                          // la peticion anterior (y su buffer) ya no se quieren
+  gView.op = c.opId; gView.state = FCV_FETCHING; gView.total = size > 0xFFFFFFF0ull ? 0 : (uint32_t)size;
+  gViewWant = c.opId;                                        // ANTES de encolar: la tarea ya ve que esta vigente
+  unlock();
+  if(pushCmd(c)) return c.opId;
+  lock(); if(gView.op == c.opId){ viewDropLocked(); } unlock();
+  gViewWant = 0;
+  return 0;
+}
+uint8_t flexCloudViewState(uint32_t op, uint32_t* got, uint32_t* total, char* err, size_t cap){
+  if(!gLock || !op) return FCV_NONE;
+  uint8_t st = FCV_NONE;
+  lock();
+  if(gView.op == op){
+    st = gView.state;
+    if(got) *got = gView.got;
+    if(total) *total = gView.total;
+    if(err && cap) snprintf(err, cap, "%s", st == FCV_FAILED ? gView.err : "");
   }
-  return opFor(CMD_VIEW, it, nm);
+  unlock();
+  return st;
+}
+uint8_t* flexCloudViewTake(uint32_t op, uint32_t* len){
+  if(!gLock || !op) return nullptr;
+  uint8_t* p = nullptr;
+  lock();
+  if(gView.op == op && gView.state == FCV_READY && gView.buf){
+    p = gView.buf; if(len) *len = gView.got;
+    gView.buf = nullptr;                                     // desde aqui es de quien la toma
+    memset(&gView, 0, sizeof(gView));
+    gViewWant = 0;
+  }
+  unlock();
+  return p;
+}
+void flexCloudViewFree(uint8_t* p){ psFree(p); }
+void flexCloudViewCancel(uint32_t op){
+  if(!gLock || !op) return;
+  lock();
+  if(gView.op == op){ viewDropLocked(); if(gViewWant == op) gViewWant = 0; }
+  unlock();
 }
 
 static uint32_t addJob(uint8_t type, const char* localPath, const char* name, const char* parentId, const char* remoteId,

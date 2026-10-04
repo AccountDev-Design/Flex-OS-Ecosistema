@@ -59,6 +59,13 @@
 // ##     lo hace la tarea de medios (con el cerrojo de trabajo pesado),
 // ##     mientras la interfaz ensena la miniatura ampliada. Cancelar
 // ##     (cerrar, pasar a otra) es subir un numero de generacion.
+// ##
+// ##  5. LA FOTO DE FLEX CLOUD NO PASA POR LA FLASH. Se trae a un buffer de
+// ##     PSRAM (flexCloudViewStart), con avance real en pantalla y "atras"
+// ##     vivo todo el rato (cerrar CANCELA la descarga), y se decodifica
+// ##     de la RAM con el mismo decodificador. Escribirla en LittleFS
+// ##     apagaba la cache a cada borrado de sector y el panel DSI se
+// ##     quedaba sin datos: el cian de 10-15 s al abrir una foto.
 // #############################################################
 
 #define VW_BARS_HIDE_MS   3000u     // las barras se ocultan solas tras 3 s sin tocar
@@ -178,6 +185,26 @@ static bool vwCloudReady(uint32_t off){
   return flexCloudStreamReady(off, need);
 }
 
+// ---- Foto de Flex Cloud (a la RAM, nunca a la flash) ----
+// El visor pide la foto (flexCloudViewStart) y SIGUE VIVO: ensena el avance de verdad y "atras" funciona en todo
+// momento (cerrar CANCELA la descarga). Cuando llega -- verificada: tamano y SHA-256 -- el visor TOMA el buffer (desde
+// ese momento es suyo) y se lo pasa a la tarea de medios, que la decodifica de la RAM. UN solo dueno en cada momento:
+//     nube (descargando) --Take--> visor (vwMemBuf) --Issue--> trabajo (gVwJob.mem) --> liberado por el trabajo
+// Cada paso del camino tiene su salida: cancelar suelta lo que tenga el visor, retirar el trabajo suelta lo que lleve
+// y un trabajo que ya corre lo suelta al terminar (acabe como acabe).
+#define VW_VIEW_MS  70000u               // plazo del visor (el motor corta a los 60 s: esto es la red de seguridad)
+#define VW_VIEW_PILL_W 280               // tarjeta de carga
+#define VW_VIEW_PILL_H 64
+static_assert(FLEX_CLOUD_VIEW_HEADROOM >= VW_WORK_BYTES + FLEXMEM_RESERVE_BYTES,
+              "la nube debe dejar libre al menos lo que el visor exige para decodificar");
+static_assert(FLEX_CLOUD_THUMB_SIDE == ML_SIDE, "la miniatura de la nube se ensena ampliada en el visor tal cual");
+static uint32_t  vwViewOp = 0;                      // peticion viva a la nube (0 = ninguna)
+static uint32_t  vwViewGot = 0, vwViewTotal = 0, vwViewT0 = 0, vwViewDrawMs = 0;
+static uint8_t*  vwMemBuf = NULL;                   // JPEG verificado ya TOMADO, a la espera de pasar al trabajo
+static uint32_t  vwMemLen = 0;
+// "Cargando"/"Preparando": la foto de la nube aun no esta lista para pintarse.
+static inline bool vwLoadPill(){ return vwKind == VWK_PHOTO && vwLoading && !vwSrc && mediaIsCloudPath(vwPath); }
+
 // Barras
 static float     vwBarsA = 1.0f, vwBarsA0 = 1.0f;
 static int8_t    vwBarsWant = 1;
@@ -264,6 +291,7 @@ struct VwJob {
   uint16_t* px; int w, h;          // resultado
   int       srcW, srcH;            // medidas reales del medio
   char      why[72];               // "" = bien
+  uint8_t*  mem; uint32_t memLen;  // JPEG YA en RAM (foto de Flex Cloud): el TRABAJO es su dueno y lo suelta al acabar
 };
 static VwJob gVwJob;
 static volatile uint32_t gVwWantGen = 0;           // la generacion que la interfaz quiere AHORA (0 = ninguna)
@@ -287,6 +315,19 @@ static int vwRdFn(void* c, uint8_t* buf, size_t n){
   uint32_t now = millis();
   if(now - r->last >= 20u){ vTaskDelay(1); r->last = millis(); }   // comparte nucleo con la interfaz
   return flexFsStreamRead(r->s, buf, n);
+}
+// El mismo decodificador por flujo, leyendo de un buffer que ya esta en RAM (la foto de Flex Cloud).
+struct VwMemRd { const uint8_t* p; uint32_t len, pos, last; };
+static int vwMemRdFn(void* c, uint8_t* buf, size_t n){
+  VwMemRd* r = (VwMemRd*)c;
+  uint32_t now = millis();
+  if(now - r->last >= 20u){ vTaskDelay(1); r->last = millis(); }   // comparte nucleo con la interfaz (como vwRdFn)
+  if(r->pos >= r->len) return 0;
+  size_t k = (size_t)(r->len - r->pos);
+  if(k > n) k = n;
+  memcpy(buf, r->p + r->pos, k);
+  r->pos += (uint32_t)k;
+  return (int)k;
 }
 struct VwDec { uint16_t* px; int w, h; uint32_t gen; int wantW, wantH; int srcW, srcH; bool noMem; };
 static int vwDecPick(void* u, int w, int h){
@@ -313,13 +354,19 @@ static bool vwDecRow(void* u, int y, int w, const uint16_t* rgb){
 }
 static void vwJobJpeg(VwJob* j, uint32_t gen){
   if(memFreePsram() < VW_WORK_BYTES + FLEXMEM_RESERVE_BYTES){ snprintf(j->why, sizeof(j->why), "No hay memoria libre para abrir esta foto"); return; }
-  FlexFsStream* s = flexFsOpenRead(j->path);
-  if(!s){ snprintf(j->why, sizeof(j->why), "No se pudo leer el archivo"); return; }
-  VwRd rd = { s, (uint32_t)millis() };
+  FlexFsStream* s = NULL;
+  VwRd rd = { NULL, (uint32_t)millis() };
+  VwMemRd mr = { j->mem, j->memLen, 0, (uint32_t)millis() };
+  if(!j->mem){
+    s = flexFsOpenRead(j->path);
+    if(!s){ snprintf(j->why, sizeof(j->why), "No se pudo leer el archivo"); return; }
+    rd.s = s;
+  }
   VwDec d; memset(&d, 0, sizeof(d));
   d.gen = gen; d.wantW = j->wantW; d.wantH = j->wantH;
-  int rc = flexJpegDecodeStream(vwRdFn, &rd, 0, 0, 0, vwDecPick, NULL, vwDecRow, &d, mediaAlloc, mediaFree);
-  flexFsStreamClose(s);
+  int rc = j->mem ? flexJpegDecodeStream(vwMemRdFn, &mr, 0, 0, 0, vwDecPick, NULL, vwDecRow, &d, mediaAlloc, mediaFree)
+                  : flexJpegDecodeStream(vwRdFn, &rd, 0, 0, 0, vwDecPick, NULL, vwDecRow, &d, mediaAlloc, mediaFree);
+  if(s) flexFsStreamClose(s);
   j->srcW = d.srcW; j->srcH = d.srcH;
   if(rc == FLEXJPG_OK && d.px){ j->px = d.px; j->w = d.w; j->h = d.h; return; }
   if(d.px) mediaFree(d.px);
@@ -395,6 +442,8 @@ static bool vwJobRunIfAny(){
     if(j->kind == VWJK_DRAW) vwJobDraw(j, gen); else vwJobJpeg(j, gen);
     mediaHeavyEnd();
   }
+  // El trabajo es el dueno del JPEG de la nube: se suelta SIEMPRE (decodificado, fallido, cancelado o sin turno).
+  if(j->mem){ flexCloudViewFree(j->mem); j->mem = NULL; j->memLen = 0; }
   if(__atomic_load_n(&gVwWantGen, __ATOMIC_ACQUIRE) != gen){
     if(j->px){ mediaFree(j->px); j->px = NULL; }
     __atomic_store_n(&j->state, (uint8_t)VWJ_IDLE, __ATOMIC_RELEASE);
@@ -414,6 +463,8 @@ static void vwJobIssue(){
   VwJob* j = &gVwJob;
   j->gen = vwGen; j->kind = vwQKind; j->wantW = vwQW; j->wantH = vwQH;
   snprintf(j->path, sizeof(j->path), "%s", vwPath);
+  j->mem = vwMemBuf; j->memLen = vwMemLen;          // la foto de la nube cambia de dueno: del visor al trabajo
+  vwMemBuf = NULL; vwMemLen = 0;
   vwJobQueued = false;
   __atomic_store_n(&j->state, (uint8_t)VWJ_REQ, __ATOMIC_RELEASE);
   if(gMlTask) mlWake();
@@ -458,11 +509,21 @@ static void vwJobRequest(uint8_t kind, int wantW, int wantH){
   vwJobQueued = true;
   vwLoading = true;
 }
+// La descarga de la foto en curso se corta (la tarea de la nube lo ve en su siguiente lectura) y su buffer se suelta.
+static void vwViewCancel(){
+  if(vwViewOp){ flexCloudViewCancel(vwViewOp); vwViewOp = 0; }
+  vwViewGot = vwViewTotal = 0;
+}
 static void vwJobCancel(){
   __atomic_store_n(&gVwWantGen, 0u, __ATOMIC_RELEASE);
   vwJobQueued = false; vwLoading = false; vwGen = 0;
+  vwViewCancel();
+  if(vwMemBuf){ flexCloudViewFree(vwMemBuf); vwMemBuf = NULL; vwMemLen = 0; }   // tomado y aun sin pasar al trabajo
   uint8_t st = VWJ_REQ;                             // aun sin recoger: se retira
-  __atomic_compare_exchange_n(&gVwJob.state, &st, (uint8_t)VWJ_IDLE, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+  if(__atomic_compare_exchange_n(&gVwJob.state, &st, (uint8_t)VWJ_IDLE, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)){
+    // Retirado SIN llegar a correr: lo que llevaba (la foto de la nube) ya no lo suelta nadie mas que aqui.
+    if(gVwJob.mem){ flexCloudViewFree(gVwJob.mem); gVwJob.mem = NULL; gVwJob.memLen = 0; }
+  }
   vwJobPoll();                                      // un resultado ya hecho se suelta
 }
 
@@ -748,7 +809,7 @@ static void vwRenderContent(bool smooth){
       // cuadrado central del hueco que ocupara la foto entera.
       float dw = vwFitW * vwScale, dh = vwFitH * vwScale, s = dw < dh ? dw : dh;
       vwBlitScaled(vwThumb, ML_SIDE, ML_SIDE, vwOffX + (dw - s) * 0.5f, vwOffY + (dh - s) * 0.5f, s, s, true);
-    } else vwCleanText(vwVY + vwVH / 2 - 8, "Abriendo...", 2, TH_TXT2);
+    } else if(!vwLoadPill()) vwCleanText(vwVY + vwVH / 2 - 8, "Abriendo...", 2, TH_TXT2);   // (la de la nube: la tarjeta de carga)
   } else if(vwKind == VWK_VIDEO){
     if(vwCloud && (vwCloudPhase < 3 || (vwCloudFirst && !vwFrameLen))){
       // Aun no hay cuadro: lo que pasa de verdad, con lo que ya llego.
@@ -984,17 +1045,56 @@ static void vwDrawBotBar(uint8_t a){
   if(vwCanTrash) mmGlyph(MA_TRASH, bt.trashX, bt.cy + 2, fg);
   if(vwCanEdit){ vwIcoPencil(bt.editX, bt.cy - 6, fg); drawTextC(bt.editX, bt.cy + 12, "Editar", 1, fg2); }
 }
+// ---- Tarjeta de carga de la foto de Flex Cloud ----
+// Es un OVERLAY, como las barras: se compone al publicar sobre una copia limpia de vwClean, asi que repintar solo su
+// banda (el avance) no apila nada y no obliga a rehacer la pantalla entera. Con miniatura de fondo o sin ella se lee igual.
+static void vwLoadGeom(int &x, int &y, int &w, int &h){
+  w = vwVW - 40 < VW_VIEW_PILL_W ? vwVW - 40 : VW_VIEW_PILL_W; h = VW_VIEW_PILL_H;
+  x = vwVX + (vwVW - w) / 2; y = vwVY + (vwVH - h) / 2;
+}
+static void vwLoadLines(char* l1, size_t n1, char* l2, size_t n2, int& pct){
+  l2[0] = 0; pct = -1;
+  if(vwViewOp){
+    snprintf(l1, n1, "Cargando de Flex Cloud");
+    if(vwViewTotal){
+      char a[24], b[24]; fclFmtBytes(vwViewGot, a, sizeof(a)); fclFmtBytes(vwViewTotal, b, sizeof(b));
+      pct = (int)((uint64_t)(vwViewGot > vwViewTotal ? vwViewTotal : vwViewGot) * 100u / vwViewTotal);
+      snprintf(l2, n2, "%s de %s", a, b);
+    } else snprintf(l2, n2, "Conectando...");
+  } else {
+    snprintf(l1, n1, "Preparando la foto...");
+    pct = 100;
+  }
+}
+static void vwDrawLoadPill(){
+  int x, y, w, h; vwLoadGeom(x, y, w, h);
+  char l1[40], l2[48]; int pct; vwLoadLines(l1, sizeof(l1), l2, sizeof(l2), pct);
+  const uint16_t base = uiGlass ? TH_GLASS2 : TH_SURF2;
+  fillRoundRect(x, y, w, h, 22, base);
+  drawTextC(x + w / 2, y + 12, l1, 1, TH_TXT);
+  if(pct >= 0){
+    const int bx = x + 24, bw = w - 48, by = y + 34;
+    fillRoundRect(bx, by, bw, 6, 3, mix565(base, TH_TRACK, 255));
+    int fw = (int)((int64_t)bw * pct / 100);
+    if(fw > 0) fillRoundRect(bx, by, fw < 6 ? 6 : fw, 6, 3, wallAccent());
+    if(l2[0]) drawTextC(x + w / 2, y + 46, l2, 1, TH_TXT2);
+  }
+}
 // Barras sobre lo que acaba de copiarse de vwClean, recortadas a las filas
 // FISICAS [r0, r1] (las que se van a publicar).
 static void vwDrawOverlays(int r0, int r1){
   uint8_t a = (uint8_t)(vwBarsA * 255.0f + 0.5f);
-  if(a == 0) return;
+  const bool pill = vwLoadPill();
+  if(a == 0 && !pill) return;
   uint16_t* ob = gBuf;
   setBuf(fb);
   vwEngine();
   gClipY0 = r0; gClipY1 = r1;
-  vwDrawTopBar(a);
-  if(vwHasBot()) vwDrawBotBar(a);
+  if(pill) vwDrawLoadPill();
+  if(a){
+    vwDrawTopBar(a);
+    if(vwHasBot()) vwDrawBotBar(a);
+  }
   uiClipFull();
   gBuf = ob;
 }
@@ -1013,6 +1113,13 @@ static void vwPresent(int r0, int r1){
   flxFlush(r0, r1);
 }
 static void vwPresentAll(){ vwPresent(0, SCR_H - 1); }
+// Solo la banda de la tarjeta de carga: el avance se mueve sin repintar la foto.
+static void vwViewProgress(){
+  if(!vwOn || vwAnimOn) return;
+  int x, y, w, h, r0, r1; vwLoadGeom(x, y, w, h);
+  vwRowsOf(x - 2, y - 2, w + 4, h + 4, r0, r1);
+  vwPresent(r0, r1);
+}
 // Solo lo que ocupan las barras (aparecer/desaparecer, un boton que cambia).
 static void vwPresentBars(){
   int x, y, w, h, r0, r1;
@@ -1174,12 +1281,29 @@ static bool vwLoadItem(uint32_t id, const char* path){
       const char* why = k == FLEXMED_AUDIO ? "El audio se escucha en M\xC3\xBAsica" : flexMediaUnsupportedReason(vwName);
       snprintf(vwErr, sizeof(vwErr), "%s", why ? why : "Formato no compatible");
     }
+    if(mediaCloudPathMatches(vwPath)){
+      // Lo de Flex Cloud: el nombre que el usuario ve alli (no el saneado de la ruta) y, para la foto, las medidas que
+      // dijo el telefono: la orientacion y el ajuste salen bien desde el primer cuadro, sin esperar a decodificar.
+      mlCopyText(vwName, sizeof(vwName), gMediaCloudItem.name);
+      if(vwKind == VWK_PHOTO && gMediaCloudItem.width && gMediaCloudItem.height){
+        vwMediaW = (int)gMediaCloudItem.width; vwMediaH = (int)gMediaCloudItem.height;
+      }
+    }
   }
   if(!vwPath[0] || !mediaVolReady(vwPath)){ vwKind = VWK_ERROR; snprintf(vwErr, sizeof(vwErr), "Sin almacenamiento"); }
   return true;
 }
+// La miniatura que la nube ya tenia (la de su celda): se ensena ampliada mientras llega la foto.
+static void vwCloudThumbCopy(const uint16_t* px, int side, void* user){
+  if(side == ML_SIDE) memcpy(user, px, (size_t)ML_SIDE * ML_SIDE * 2);
+}
 // Copia de la miniatura (para la expansion y la vista previa).
 static void vwGrabThumb(){
+  if(!vwId && vwKind == VWK_PHOTO && mediaCloudPathMatches(vwPath)){
+    if(!vwThumb) vwThumb = (uint16_t*)mediaAlloc((size_t)ML_SIDE * ML_SIDE * 2);
+    if(vwThumb && !flexCloudThumbDraw(gMediaCloudItem.id, vwCloudThumbCopy, vwThumb)){ mediaFree(vwThumb); vwThumb = NULL; }
+    return;
+  }
   if(!vwId || vwLocked) return;
   if(!vwThumb) vwThumb = (uint16_t*)mediaAlloc((size_t)ML_SIDE * ML_SIDE * 2);
   if(!vwThumb) return;
@@ -1208,9 +1332,57 @@ static void vwApplyOrientation(){
   if(vwMediaW > 0 && vwMediaW == vwMediaH) gMediaSquareLand = vwLand;
   vwEngine();
 }
+// ---- Foto de Flex Cloud: pedir, esperar (sin bloquear), tomar y decodificar ----
+static void vwViewFail(const char* why){
+  vwViewCancel();
+  vwLoading = false;
+  vwKind = VWK_ERROR;
+  snprintf(vwErr, sizeof(vwErr), "%s", why && why[0] ? why : "Flex Cloud no responde");
+}
+// Pide la foto a la nube. Sin pintar: el que llama repinta (vwActivate) con la tarjeta de carga.
+static void vwViewStart(){
+  vwViewCancel();
+  if(!mediaCloudPathMatches(vwPath)){ vwViewFail("No se pudo abrir desde Flex Cloud"); return; }
+  vwViewOp = flexCloudViewStart(&gMediaCloudItem);
+  if(!vwViewOp){ vwViewFail("Flex Cloud no puede atender esta foto ahora"); return; }
+  vwViewGot = 0; vwViewTotal = 0; vwViewT0 = millis(); vwViewDrawMs = millis();
+  vwLoading = true;
+}
+// Una vuelta: avance, llegada, fallo o plazo. Devuelve true si cambio lo que hay que pintar entero.
+static bool vwViewStep(){
+  if(!vwViewOp || vwKind != VWK_PHOTO) return false;
+  char err[96] = "";
+  uint32_t got = 0, total = 0;
+  const uint8_t st = flexCloudViewState(vwViewOp, &got, &total, err, sizeof(err));
+  const uint32_t now = millis();
+  if(st == FCV_FETCHING){
+    if(now - vwViewT0 > VW_VIEW_MS){ vwViewFail("Flex Cloud tarda demasiado en responder"); return true; }
+    // El avance se pinta como mucho 4 veces por segundo y SOLO la banda de la tarjeta.
+    if((got != vwViewGot || total != vwViewTotal) && now - vwViewDrawMs >= 250u){
+      vwViewGot = got; vwViewTotal = total; vwViewDrawMs = now;
+      vwViewProgress();
+    }
+    return false;
+  }
+  if(st == FCV_READY){
+    uint32_t len = 0;
+    uint8_t* p = flexCloudViewTake(vwViewOp, &len);   // desde aqui el buffer es del visor
+    vwViewOp = 0;
+    if(!p || !len){ if(p) flexCloudViewFree(p); vwViewFail("No se pudo recibir la foto"); return true; }
+    vwMemBuf = p; vwMemLen = len;
+    int ww, wh; vwWantSize(ww, wh);
+    vwJobRequest(VWJK_JPEG, ww, wh);                  // vwJobPoll la emite cuando el trabajo este libre: ahi cambia de dueno
+    vwViewProgress();                                 // la tarjeta pasa a "Preparando la foto..."
+    return false;
+  }
+  vwViewFail(st == FCV_FAILED ? err : "Se cancel\xC3\xB3 la descarga");   // FCV_NONE: la anulo otra peticion o un cambio de destino
+  return true;
+}
+
 // Arranca el contenido: pide la foto o abre el video (sin pintar).
 static void vwStartContent(uint32_t frame){
   if(vwKind == VWK_PHOTO){
+    if(mediaIsCloudPath(vwPath)){ vwViewStart(); return; }          // Flex Cloud: a la RAM, nunca a la flash
     FlexMlRec r;
     bool draw = (vwId && mlGet(vwId, &r)) ? (r.kind == FML_K_DRAW) : (flexMediaClassify(vwName) == FLEXMED_DRAW);
     int ww, wh; vwWantSize(ww, wh);
@@ -1835,6 +2007,14 @@ static void vwTick(){
   }
   vwEngine();
   vwCloudStep();
+  if(!vwOn) return;
+  if(vwViewStep()){                                 // la foto de la nube fallo o vencio el plazo: se ensena el motivo
+    vwApplyOrientation();
+    vwLayout();
+    vwRenderContent(true);
+    vwGlassPrep();
+    vwPresentAll();
+  }
   if(!vwOn) return;
   if(vwCollect()){                                  // llego la foto (o el motivo de que no)
     bool land = vwLand;

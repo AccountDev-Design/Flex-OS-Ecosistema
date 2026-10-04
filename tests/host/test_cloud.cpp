@@ -71,6 +71,7 @@ static uint8_t genByte(uint64_t i){ uint32_t x = (uint32_t)(i * 2654435761u) ^ (
 
 struct FFile {
   std::string id, parent, name, mime, kind, sha, data, thumb;
+  std::string play;                       // fragmento JSON del estado de preparacion ("playable":{...}); vacio = el servidor no lo dice
   uint64_t size = 0; bool generated = false; bool trashed = false; int64_t updated = 0; bool fromDevice = false;
   uint8_t at(uint64_t i) const { return generated ? genByte(i) : (uint8_t)data[i]; }
 };
@@ -94,6 +95,8 @@ struct Cloud {
   std::function<bool(const NetRequest&, NetResponse&)> fault;
   // Contadores
   int me = 0, creates = 0, resumes = 0, partPuts = 0, completes = 0, aborts = 0, statusGets = 0, downloads = 0, thumbs = 0;
+  int lists = 0, itemGets = 0;            // listados y consultas de UN archivo (GET /files/:id)
+  uint32_t rev = 0;                       // el telefono lo sube cuando cambia SU lista y lo dice en la cuota (0 = no lo dice)
   std::vector<uint32_t> partLog;
   std::vector<std::string> ranges;
   bool corruptDownload = false;
@@ -123,16 +126,19 @@ static std::string quotaJson(){
   double r = (double)(C.used + C.reserved) / (double)C.total;
   const char* st = r >= 1.0 ? "full" : r >= 0.9 ? "low" : "ok";
   char b[300];
-  snprintf(b, sizeof(b), "{\"plan\":\"free\",\"totalBytes\":%llu,\"usedBytes\":%llu,\"reservedBytes\":%llu,\"trashBytes\":0,\"availableBytes\":%llu,\"state\":\"%s\"}",
+  snprintf(b, sizeof(b), "{\"plan\":\"free\",\"totalBytes\":%llu,\"usedBytes\":%llu,\"reservedBytes\":%llu,\"trashBytes\":0,\"availableBytes\":%llu,\"state\":\"%s\"",
            (unsigned long long)C.total, (unsigned long long)C.used, (unsigned long long)C.reserved, (unsigned long long)avail, st);
-  return b;
+  std::string out = b;
+  if(C.rev) out += ",\"rev\":" + std::to_string(C.rev);
+  return out + "}";
 }
 static std::string fileJson(const FFile& f){
   char b[256];
   snprintf(b, sizeof(b), ",\"size\":%llu,\"updatedAt\":%lld,\"deletedAt\":%s", (unsigned long long)f.size, (long long)f.updated, f.trashed ? "1" : "null");
   return "{\"type\":\"file\",\"id\":\"" + f.id + "\",\"parentId\":" + (f.parent.empty() ? std::string("null") : "\"" + f.parent + "\"") +
          ",\"name\":\"" + jesc(f.name) + "\",\"mime\":\"" + f.mime + "\",\"kind\":\"" + f.kind + "\",\"sha256\":\"" + f.sha + "\"" + b +
-         ",\"hasThumbnail\":" + (f.thumb.empty() ? "false" : "true") + ",\"source\":\"" + (f.fromDevice ? "device" : "web") + "\"}";
+         ",\"hasThumbnail\":" + (f.thumb.empty() ? "false" : "true") + ",\"source\":\"" + (f.fromDevice ? "device" : "web") + "\"" +
+         (f.play.empty() ? std::string() : "," + f.play) + "}";
 }
 static std::string folderJson(const FFolder& d){
   return "{\"type\":\"folder\",\"id\":\"" + d.id + "\",\"parentId\":" + (d.parent.empty() ? std::string("null") : "\"" + d.parent + "\"") +
@@ -194,6 +200,7 @@ static std::string uniqueName(const std::string& parent, const std::string& name
 }
 
 static NetResponse list(const NetRequest& rq){
+  C.lists++;
   std::string view = qp(rq.url, "view"), parent = qp(rq.url, "parentId"), kind = qp(rq.url, "kind"), q = qp(rq.url, "q");
   int limit = atoi(qp(rq.url, "limit").c_str()); if(limit <= 0 || limit > 200) limit = 50;
   int off = 0; std::string cur = qp(rq.url, "cursor"); if(!cur.empty() && cur[0] == 'o') off = atoi(cur.c_str() + 1);
@@ -270,6 +277,7 @@ static NetResponse serveCloud(const NetRequest& rq, bool authed = false){
   if(coll == "files" || coll == "folders"){
     bool isFile = coll == "files";
     if(isFile ? !C.files.count(id) : !C.folders.count(id)) return jerr(404, "not_found");
+    if(m == "GET" && action.empty()){ C.itemGets++; return isFile ? jok("\"file\":" + fileJson(C.files[id])) : jok("\"folder\":" + folderJson(C.folders[id])); }
     if(m == "PATCH"){
       std::string name = bodyStr(rq, "name");
       if(name.empty()) return jerr(400, "name_invalid");
@@ -1016,22 +1024,265 @@ static void testThumbsAndView(){
   size_t freed = flexCloudShed();
   CHECK(freed > 0 && gNetPsNow < ps0 + 4096, "flexCloudShed() las suelta");
 
-  // Foto para el visor: un solo hueco, verificada.
+  // Foto para el visor: a la RAM (NUNCA a la flash), con UN solo dueno en cada momento, verificada y cancelable.
+  auto fsBytes = []{ size_t n = 0; for(auto& kv : gFs) if(!kv.second.dir) n += kv.second.data.size(); return n; };
+  auto vstate = [](uint32_t op, uint32_t* got = nullptr, uint32_t* total = nullptr, char* err = nullptr, size_t cap = 0){
+    return flexCloudViewState(op, got, total, err, cap); };
+  auto vwait = [&](uint32_t op){ return pumpUntil([&]{ return vstate(op) != FCV_FETCHING; }, 40000); };
   FclItem it = itemOf(f);
-  uint32_t op = flexCloudFetchForView(&it);
-  CHECK(waitEv(FCE_VIEW_READY, op), "foto lista para el visor");
-  const FlexCloudEvent* e = findEv(FCE_VIEW_READY, op);
-  CHECK(e && localFile(e->localPath) == f.data, "copia exacta (calidad original, sin recomprimir)");
-  CHECK(e && !strcmp(e->localPath, "/System/Cloud/view/roja.jpg"), "con su nombre y extension (el visor decide por ella)");
+  const size_t flash0 = fsBytes(), psV0 = gNetPsNow;
+  int dl0 = C.downloads;
+  uint32_t op = flexCloudViewStart(&it);
+  CHECK(op != 0 && vstate(op) == FCV_FETCHING, "foto para el visor: pedida, en curso");
+  CHECK(vwait(op) && vstate(op) == FCV_READY, "foto lista para el visor");
+  { uint32_t g = 0, t = 0; vstate(op, &g, &t);
+    CHECK(g == f.data.size() && t == f.data.size(), "con su tamano exacto (avance == total)"); }
+  CHECK(fsBytes() == flash0 && !flexFsExists("/System/Cloud/view"),
+        "NADA se escribio en la flash (cada sector borrado apaga la cache y el panel DSI se quedaba azul)");
+  CHECK(gNetPsNow >= psV0 + f.data.size(), "esta en PSRAM, en un buffer propio");
+  uint32_t len = 0; uint8_t* vp = flexCloudViewTake(op, &len);
+  CHECK(vp && len == f.data.size() && !memcmp(vp, f.data.data(), len), "copia exacta (calidad original, sin recomprimir)");
+  CHECK(!flexCloudViewTake(op, &len) && vstate(op) == FCV_NONE, "se entrega UNA vez: la peticion tomada ya no existe");
+  flexCloudViewFree(vp);
+  pump(20);
+  CHECK(gNetPsNow <= psV0 + 4096, "y soltarla devuelve toda la memoria");
+
+  // Pedir otra ANULA la anterior (una sola peticion viva): la primera ni siquiera sale a la red.
   FFile& f2v = addCloudFile("otra foto.jpg", pattern(1000, 33));
   FclItem it2v = itemOf(f2v);
-  uint32_t op2 = flexCloudFetchForView(&it2v);
-  CHECK(waitEv(FCE_VIEW_READY, op2) && !flexFsExists("/System/Cloud/view/roja.jpg"), "un solo hueco: la anterior se borra");
+  dl0 = C.downloads;
+  uint32_t opA = flexCloudViewStart(&it), opB = flexCloudViewStart(&it2v);
+  CHECK(opA && opB && opA != opB && vstate(opA) == FCV_NONE, "pedir otra anula la anterior");
+  CHECK(vwait(opB) && vstate(opB) == FCV_READY, "la nueva llega");
+  CHECK(C.downloads == dl0 + 1, "la anulada no gasto red");
+  vp = flexCloudViewTake(opB, &len);
+  CHECK(vp && len == 1000 && !memcmp(vp, f2v.data.data(), 1000), "y es la suya");
+  flexCloudViewFree(vp);
+  // Una foto que NADIE toma se suelta sola al pedir otra (no queda colgando).
+  uint32_t opC = flexCloudViewStart(&it);
+  CHECK(vwait(opC) && vstate(opC) == FCV_READY, "lista y sin tomar");
+  const size_t psHeld = gNetPsNow;
+  uint32_t opD = flexCloudViewStart(&it2v);
+  CHECK(vstate(opC) == FCV_NONE && gNetPsNow + f.data.size() / 2 <= psHeld, "pedir otra suelta la que nadie tomo");
+  flexCloudViewCancel(opD);
+  pump(40);
+  CHECK(vstate(opD) == FCV_NONE && gNetPsNow <= psV0 + 4096, "cancelar antes de que salga: ni red ni memoria");
+
+  // Cancelar con la peticion YA en el aire (el visor se cerro): la tarea lo ve, corta y suelta su buffer.
+  { uint32_t cancelOp = 0; int hits = 0;
+    C.fault = [&](const NetRequest& rq, NetResponse&){
+      if(rq.url.find("/download/") != std::string::npos){ hits++; flexCloudViewCancel(cancelOp); }
+      return false; };
+    dl0 = C.downloads;
+    cancelOp = flexCloudViewStart(&it);
+    pump(60);
+    C.fault = nullptr;
+    CHECK(hits == 1 && C.downloads == dl0 + 1, "(la peticion llego a salir)");
+    CHECK(vstate(cancelOp) == FCV_NONE, "cancelada en pleno vuelo: no queda ni resultado ni error");
+    CHECK(gNetPsNow <= psV0 + 4096, "y el buffer que ya habia reservado se suelta (no se fuga)");
+    // la nube sigue sirviendo: la siguiente foto funciona
+    uint32_t next = flexCloudViewStart(&it2v);
+    CHECK(vwait(next) && vstate(next) == FCV_READY, "tras cancelar, la nube atiende la siguiente");
+    flexCloudViewFree(flexCloudViewTake(next, &len)); }
+
+  // Lo que el servidor ENVIA manda sobre lo que la lista recordaba: otro tamano y otro SHA-256 (su ETag) se verifican.
+  { FFile& g = addCloudFile("cambia.jpg", pattern(2000, 5));
+    FclItem ig = itemOf(g);
+    g.data = pattern(3000, 6); g.size = 3000; g.sha = sha256hex(g.data);
+    uint32_t o = flexCloudViewStart(&ig);
+    CHECK(vwait(o) && vstate(o) == FCV_READY, "el archivo cambio tras listarlo: se trae lo que hay AHORA");
+    vp = flexCloudViewTake(o, &len);
+    CHECK(vp && len == 3000 && !memcmp(vp, g.data.data(), 3000), "con SU tamano y comprobado contra SU SHA-256");
+    flexCloudViewFree(vp); }
+  { FFile& g = addCloudFile("raro.jpg", pattern(2000, 7));
+    FclItem ig = itemOf(g);
+    C.fault = [&](const NetRequest& rq, NetResponse& rs){
+      if(rq.url.find("/download/") == std::string::npos) return false;
+      rs.status = 200; rs.body = std::string(5000, 'x'); return true; };   // otro tamano y SIN ETag: no hay con que verificarlo
+    uint32_t o = flexCloudViewStart(&ig);
+    CHECK(vwait(o) && vstate(o) == FCV_FAILED, "otro tamano y sin ETag: no se acepta");
+    C.fault = nullptr;
+    char err[96]; vstate(o, nullptr, nullptr, err, sizeof(err));
+    CHECK(strstr(err, "cambi") != nullptr, "y se dice por que (el archivo cambio)"); }
+  { C.corruptDownload = true;
+    uint32_t o = flexCloudViewStart(&it);
+    CHECK(vwait(o) && vstate(o) == FCV_FAILED, "datos alterados por el camino: FALLA, no se muestra basura");
+    C.corruptDownload = false;
+    char err[96]; vstate(o, nullptr, nullptr, err, sizeof(err));
+    CHECK(strstr(err, "da\xC3\xB1" "ada") != nullptr, "con el motivo (la foto llego danada)");
+    CHECK(vstate(o) == FCV_FAILED && flexCloudViewTake(o, &len) == nullptr, "y no entrega nada");
+    pump(10);
+    CHECK(gNetPsNow <= psV0 + 4096, "el buffer del intento fallido se suelta"); }
+
+  // Demasiado grande o sin memoria para decodificarla despues: se RECHAZA antes de bajar un solo byte.
   FFile& huge = addGeneratedFile("panorama.jpg", 9u * 1024 * 1024);
   FclItem ih = itemOf(huge);
-  op = flexCloudFetchForView(&ih);
-  CHECK(waitEv(FCE_VIEW_FAILED, op) && evCode(FCE_VIEW_FAILED, op) == "file_too_large", "foto de 9 MB: se dice, no se intenta");
+  dl0 = C.downloads;
+  op = flexCloudViewStart(&ih);
+  CHECK(vwait(op) && vstate(op) == FCV_FAILED, "foto de 9 MB: se dice, no se intenta");
+  { char err[96]; vstate(op, nullptr, nullptr, err, sizeof(err)); CHECK(strstr(err, "grande") != nullptr, "con el motivo (demasiado grande)"); }
+  CHECK(C.downloads == dl0, "sin gastar red");
+  { const size_t free0 = gNetPsFree;
+    gNetPsFree = FLEX_CLOUD_VIEW_HEADROOM + (f.data.size() - 1);                // justo sin sitio para decodificarla
+    op = flexCloudViewStart(&it);
+    CHECK(vwait(op) && vstate(op) == FCV_FAILED, "sin memoria libre para decodificarla despues: rechazada");
+    { char err[96]; vstate(op, nullptr, nullptr, err, sizeof(err)); CHECK(strstr(err, "memoria") != nullptr, "con el motivo (memoria)"); }
+    CHECK(C.downloads == dl0, "ANTES de bajar un solo byte (no se descarga 1 MB para decir que no cabe)");
+    gNetPsFree = FLEX_CLOUD_VIEW_HEADROOM + f.data.size();                      // justo lo que hace falta
+    op = flexCloudViewStart(&it);
+    CHECK(vwait(op) && vstate(op) == FCV_READY, "con el margen exacto, cabe");
+    flexCloudViewFree(flexCloudViewTake(op, &len));
+    gNetPsFree = free0; }
+  pump(20);
+  CHECK(gNetPsNow <= psV0 + 4096 && fsBytes() == flash0, "al final: toda la memoria devuelta y la flash intacta");
   auditNetwork("miniaturas");
+}
+
+// ============================== la lista se pone al dia sola ==============================
+// Lo que el usuario veia: subir un video a Flex Cloud y que el P4 no lo ensenara, ni dejara abrirlo, hasta cerrar y reabrir la Galeria.
+// La lista que el P4 tiene es una FOTO de un instante; ahora (1) terminar una subida la refresca, (2) lo que el telefono esta preparando
+// se vigila por ID y se actualiza en su sitio, con ritmo acotado y solo con la nube a la vista, y (3) un archivo que ya no existe se dice
+// en el acto (antes: 45 s de "Cargando" y un "Sin conexion" que no era verdad).
+static FclItem listItem(const std::string& id){
+  FclItem buf[64]; int n = flexCloudListCopy(buf, 0, 64);
+  for(int i = 0; i < n; i++) if(id == buf[i].id) return buf[i];
+  FclItem none; memset(&none, 0, sizeof(none)); none.playState = 255; return none;
+}
+static void pumpMs(unsigned long ms){ for(unsigned long t = 0; t < ms; t += 100) step(100); }
+
+static void testListaAlDia(){
+  printf("-- lista al dia: refresco al subir, vigilar lo que prepara el telefono, 404 al reproducir y cola llena --\n");
+  boot();
+  flexCloudSetActive(true);
+  FFile& vid = addCloudFile("clip.avi", pattern(5000, 3));
+  vid.play = "\"playable\":{\"state\":\"preparing\",\"progress\":10}";
+  const std::string vidId = vid.id;
+  CHECK(flexCloudRequestList(FCL_VIEW_FOLDER, "root", nullptr), "lista pedida");
+  CHECK(pumpUntil([]{ return listInfo().state == FCL_LIST_READY; }, 400), "lista cargada");
+  CHECK(listInfo().count == 1 && listItem(vidId).playState == FCL_PS_PREPARING && listItem(vidId).playProgress == 10, "con el estado que dice el servidor");
+
+  // ---- 1. TERMINAR DE SUBIR refresca la lista SIN que nadie la pida ----
+  int lists0 = C.lists;
+  putLocal("/Fotos/nueva.avi", pattern(70000, 4));
+  uint32_t up = flexCloudUpload("/Fotos/nueva.avi", "nueva.avi", "root", 0, 0);
+  CHECK(waitEv(FCE_UPLOAD_DONE, up), "subida terminada");
+  CHECK(pumpUntil([]{ return listInfo().count == 2; }, 400), "...y el archivo recien subido APARECE en la lista (sin reabrir nada)");
+  CHECK(C.lists == lists0 + 1, "con UNA sola peticion de lista");
+  CHECK(listInfo().state == FCL_LIST_READY, "(la lista nunca se queda a medias)");
+  pumpMs(2000);
+  CHECK(C.lists == lists0 + 1, "y no vuelve a pedirla");
+  // con la nube FUERA de pantalla no se gasta red: se pone al dia al volver a verse
+  flexCloudSetActive(false);
+  lists0 = C.lists;
+  putLocal("/Fotos/otra.avi", pattern(70000, 5));
+  up = flexCloudUpload("/Fotos/otra.avi", "otra.avi", "root", 0, 0);
+  CHECK(waitEv(FCE_UPLOAD_DONE, up), "otra subida, con la nube fuera de pantalla");
+  pumpMs(3000);
+  CHECK(C.lists == lists0 && listInfo().count == 2, "sin la nube a la vista no se pide la lista");
+  flexCloudSetActive(true);
+  CHECK(pumpUntil([]{ return listInfo().count == 3; }, 400), "al volver a verse, se pone al dia");
+
+  // ---- 2. VIGILAR lo que el telefono esta preparando ----
+  const char* ids[1] = { vidId.c_str() };
+  const int lists1 = C.lists;
+  int g0 = C.itemGets;
+  flexCloudWatch(ids, 1);
+  pumpMs(2000);
+  CHECK(C.itemGets == g0, "no se pregunta antes de tiempo");
+  C.files[vidId].play = "\"playable\":{\"state\":\"preparing\",\"progress\":55}";
+  pumpMs(2000);
+  CHECK(C.itemGets == g0 + 1, "a los ~3 s pregunta por ESE archivo (una consulta suelta, no la lista entera)");
+  CHECK(listItem(vidId).playProgress == 55, "y la lista se actualiza EN SU SITIO");
+  CHECK(C.lists == lists1, "sin volver a pedir la lista");
+  const uint32_t gen0 = listInfo().gen;
+  C.files[vidId].play = "\"playable\":{\"state\":\"ready\",\"size\":4000,\"sha256\":\"" + std::string(64, 'a') + "\"}";
+  C.files[vidId].thumb = "x";
+  pumpMs(7000);
+  CHECK(listItem(vidId).playState == FCL_PS_READY && listItem(vidId).playSize == 4000, "pasa a 'listo' SOLA");
+  CHECK(listItem(vidId).hasThumb, "y la miniatura que llego despues tambien se ve");
+  CHECK(listInfo().gen != gen0, "la interfaz lo sabe (gen) y repinta");
+  // sin nada que vigilar, nada que pedir
+  flexCloudWatch(nullptr, 0);
+  g0 = C.itemGets;
+  pumpMs(60000);
+  CHECK(C.itemGets == g0, "sin nada que vigilar no se pregunta por nada");
+
+  // ---- 3. Ritmo acotado: espaciado creciente y tope de tiempo ----
+  flexCloudWatch(ids, 1);
+  g0 = C.itemGets;
+  pumpMs(60000);
+  int probes = C.itemGets - g0;
+  CHECK(probes >= 4 && probes <= 8, "sin cambios, cada vez mas espaciado: ~6 consultas en el primer minuto (no una por segundo)");
+  pumpMs(400000);
+  g0 = C.itemGets;
+  pumpMs(120000);
+  CHECK(C.itemGets == g0, "y se para solo pasado el tope (5 min): no es un sondeo eterno");
+  flexCloudWatch(ids, 1);                                   // el MISMO conjunto en cada repintado no reinicia nada
+  pumpMs(60000);
+  CHECK(C.itemGets == g0, "repetir el mismo conjunto NO reabre la vigilancia agotada");
+  flexCloudWatch(nullptr, 0);
+
+  // ---- 4. Con la nube fuera de pantalla no se pregunta por nada ----
+  flexCloudSetActive(false);
+  flexCloudWatch(ids, 1);
+  g0 = C.itemGets;
+  pumpMs(30000);
+  CHECK(C.itemGets == g0, "con la nube fuera de pantalla no se vigila");
+  flexCloudSetActive(true);
+  flexCloudWatch(nullptr, 0);
+
+  // ---- 5. "Mira ESTE ya": un toque sobre algo que se estaba preparando ----
+  g0 = C.itemGets;
+  C.files[vidId].play = "\"playable\":{\"state\":\"failed\",\"reason\":\"No se pudo convertir\"}";
+  flexCloudWatchKick(vidId.c_str());
+  pumpMs(500);
+  CHECK(C.itemGets == g0 + 1 && listItem(vidId).playState == FCL_PS_FAILED, "preguntar por un archivo concreto es inmediato (no espera al ritmo)");
+  CHECK(!strcmp(listItem(vidId).playReason, "No se pudo convertir"), "y trae el MOTIVO que escribio el telefono");
+
+  // ---- 6. Un archivo que ya no existe: la lista se actualiza sola ----
+  const int n0 = listInfo().count;
+  lists0 = C.lists;
+  C.files.erase(vidId);
+  flexCloudWatchKick(vidId.c_str());
+  CHECK(pumpUntil([&]{ return listInfo().count == n0 - 1; }, 400), "borrado desde otro sitio: desaparece de la lista sin reabrirla");
+  CHECK(C.lists == lists0 + 1, "con una sola peticion de lista");
+
+  // ---- 7. Reproducir algo que ya no existe: se dice EN EL ACTO ----
+  FFile& big = addGeneratedFile("peli.avi", 3u * 1024 * 1024);
+  flexCloudRefresh(); pump(40);
+  FclItem bit = itemOf(big);
+  lists0 = C.lists;
+  CHECK(flexCloudStreamOpen(&bit), "abrir por rangos");
+  C.files.erase(big.id);                                    // desaparece antes de que lleguen los datos
+  char err[96] = "";
+  for(int i = 0; i < 80 && flexCloudStreamState(err, sizeof(err)) != FCS_ERROR; i++){ flexCloudTestStreamStep(); step(20); }
+  CHECK(flexCloudStreamState(err, sizeof(err)) == FCS_ERROR && strstr(err, "existe") != nullptr, "404: error DEFINITIVO ('Ya no existe'), no 45 s de 'Cargando' y un 'Sin conexion' falso");
+  pumpMs(2000);
+  CHECK(C.lists > lists0, "y la lista se pone al dia (el archivo fantasma desaparece)");
+  flexCloudStreamClose();
+
+  // ---- 8. Cola de ordenes llena: el motivo, no un 'Cargando' eterno ----
+  boot();
+  flexCloudSetActive(true);
+  for(int i = 0; i < 12; i++) flexCloudMkdir("root", ("c" + std::to_string(i)).c_str());       // sin dejar correr la tarea
+  CHECK(!flexCloudRequestList(FCL_VIEW_FOLDER, "root", nullptr), "con la cola llena, pedir la lista se rechaza");
+  CHECK(listInfo().state == FCL_LIST_ERROR && strstr(listInfo().error, "ocupado") != nullptr, "y la lista lo DICE (con Reintentar), no se queda 'Cargando'");
+  pump(400);
+  CHECK(flexCloudRequestList(FCL_VIEW_FOLDER, "root", nullptr), "vaciada la cola, se acepta");
+  CHECK(pumpUntil([]{ return listInfo().state == FCL_LIST_READY; }, 400), "y se carga");
+
+  // ---- 9. Pedir "mas" varias veces seguidas es UNA peticion ----
+  boot();
+  flexCloudSetActive(true);
+  for(int i = 0; i < 120; i++) addCloudFile("f" + std::to_string(1000 + i) + ".jpg", "x");
+  CHECK(flexCloudRequestList(FCL_VIEW_FOLDER, "root", nullptr), "lista grande pedida");
+  CHECK(pumpUntil([]{ return listInfo().state == FCL_LIST_READY; }, 400), "primera pagina");
+  CHECK(listInfo().more && listInfo().count < 120, "hay mas paginas");
+  lists0 = C.lists;
+  flexCloudRequestMore(); flexCloudRequestMore(); flexCloudRequestMore();
+  pump(100);
+  CHECK(C.lists == lists0 + 1, "el final de la lista la pide en cada repintado: tres peticiones seguidas son UNA");
+  auditNetwork("lista al dia");
 }
 
 static void testStreaming(){
@@ -1347,7 +1598,7 @@ static void testUnlinked(){
   CHECK(flexCloudMkdir("root", "Nueva") == 0, "crear carpeta: rechazado");
   CHECK(flexCloudRename(&pit, "otro.jpg") == 0, "renombrar: rechazado");
   CHECK(flexCloudTrash(&pit) == 0 && flexCloudRestore(&pit) == 0 && flexCloudDeleteForever(&pit) == 0, "papelera y borrado: rechazados");
-  CHECK(flexCloudFetchForView(&pit) == 0, "abrir una foto de la nube: rechazado");
+  CHECK(flexCloudViewStart(&pit) == 0, "abrir una foto de la nube: rechazado");
   FclItem vit2 = videoItem("fil_otro", 5u << 20);
   CHECK(!flexCloudStreamOpen(&vit2), "abrir otro video: rechazado");
   CHECK(!flexCloudRetry(failedJob), "reintentar una transferencia fallida: rechazado");
@@ -1687,6 +1938,43 @@ static void testPhoneBasics(){
   std::string lp = evPath(FCE_DOWNLOAD_DONE, dl);
   CHECK(localFile(lp) == d2 && lp.rfind("/System/Cloud/pdl/", 0) == 0, "verificada y en su carpeta propia");
   auditPhone("telefono");
+}
+
+static void testPhoneRev(){
+  printf("-- Flex Storage: la lista que ensena el P4 se pone al dia cuando el TELEFONO dice que cambio (rev) --\n");
+  phoneBoot();
+  flexCloudSetActive(true);
+  CHECK(pumpUntil([]{ return status().net == FCN_ONLINE; }, 100), "conectado con el telefono");
+  C.rev = 7;
+  CHECK(flexCloudRequestList(FCL_VIEW_FOLDER, "root", nullptr), "lista");
+  CHECK(pumpUntil([]{ return listInfo().state == FCL_LIST_READY; }, 100), "lista del telefono");
+  pumpMs(20000);                                            // al menos una consulta de /me con rev = 7: el P4 lo recuerda
+  const int me0 = C.me, lists0 = C.lists;
+  pumpMs(60000);
+  CHECK(C.me - me0 >= 3 && C.me - me0 <= 6, "con el telefono, /me cada ~15 s (una consulta diminuta, solo con la nube a la vista)");
+  CHECK(C.lists == lists0, "mientras el telefono dice lo mismo, la lista no se vuelve a pedir");
+  // alguien sube un video desde la web (o desde el propio telefono): el P4 lo ve SIN reabrir nada
+  addCloudFile("desde_la_web.avi", pattern(1000, 9)); C.rev = 8;
+  unsigned long waited = 0;
+  while(listInfo().count < 1 && waited < 40000){ step(100); waited += 100; }
+  CHECK(listInfo().count == 1, "el archivo subido desde fuera aparece en la lista del P4");
+  CHECK(waited <= 16000, "y en menos de 16 s (no a los 60, ni al reabrir)");
+  CHECK(C.lists == lists0 + 1, "con UNA sola peticion de lista");
+  pumpMs(40000);
+  CHECK(C.lists == lists0 + 1, "y sin repetirla mientras no haya otro cambio");
+  // sin la nube a la vista no se pregunta por nada
+  flexCloudSetActive(false);
+  const int me1 = C.me;
+  pumpMs(60000);
+  CHECK(C.me == me1, "con la nube fuera de pantalla no hay ni una consulta");
+  flexCloudSetActive(true);
+  // un telefono antiguo que no dice rev: nada cambia respecto a siempre
+  C.rev = 0;
+  addCloudFile("otro.avi", pattern(500, 3));
+  const int lists2 = C.lists;
+  pumpMs(60000);
+  CHECK(C.lists == lists2, "sin rev (un telefono sin la preparacion multimedia) no se inventa un refresco");
+  auditPhone("rev");
 }
 
 static void testPhoneSession(){
@@ -2054,11 +2342,13 @@ int main(){
   testCancel();
   testDownload();
   testThumbsAndView();
+  testListaAlDia();
   testStreaming();
   testEventsAfterPowerLoss();
   testJournalCorrupt();
   testBigUploadBounded();
   testPhoneBasics();
+  testPhoneRev();
   testPhoneSession();
   testPhoneSwitch();
   testPhoneForget();

@@ -100,7 +100,7 @@ typedef struct {
 } FlexCloudXfer;
 
 // Resultado de una operacion (hilo grafico: flexCloudPollEvent).
-enum { FCE_NONE = 0, FCE_OP_DONE, FCE_UPLOAD_DONE, FCE_UPLOAD_FAILED, FCE_DOWNLOAD_DONE, FCE_DOWNLOAD_FAILED, FCE_VIEW_READY, FCE_VIEW_FAILED };
+enum { FCE_NONE = 0, FCE_OP_DONE, FCE_UPLOAD_DONE, FCE_UPLOAD_FAILED, FCE_DOWNLOAD_DONE, FCE_DOWNLOAD_FAILED };
 typedef struct {
   uint8_t  kind;                // FCE_*
   uint32_t opId;                // el devuelto al pedirlo
@@ -152,6 +152,17 @@ void flexCloudListInfo(FlexCloudListInfo* out);
 // Copia elementos [start, start+cap) de la vista actual. Devuelve los copiados.
 int  flexCloudListCopy(FclItem* dst, int start, int cap);
 
+// ------------------------------------------- vigilar lo que se esta preparando
+// La lista que el P4 ensena es una FOTO de un instante, y el telefono tarda segundos (o minutos) en analizar y preparar un
+// video para el P4: sin analizar -> en cola -> preparando N % -> listo / fallido; la miniatura y la duracion llegan despues.
+// La interfaz dice QUE ids de lo que tiene a la vista estan sin acabar (hasta FLEX_CLOUD_WATCH_MAX) y la tarea los consulta
+// de UNO en uno (GET /files/<id>) y actualiza la lista en su sitio (gen++ => la interfaz repinta). Solo con la nube a la vista,
+// pronto si hay cambios, cada vez mas espaciado si no, y con un tope de tiempo: nada que vigilar = nada que pedir.
+// Pasar el MISMO conjunto en cada repintado no reinicia nada.
+#define FLEX_CLOUD_WATCH_MAX 8
+void flexCloudWatch(const char* const* ids, int n);       // sustituye lo vigilado (n = 0: nada)
+void flexCloudWatchKick(const char* id);                  // "mira ESTE ahora": el usuario toco algo que se estaba preparando
+
 // ----------------------------------------------------------- operaciones
 // Devuelven un id de operacion (0 = no se pudo encolar).
 uint32_t flexCloudMkdir(const char* parentId, const char* name);
@@ -177,11 +188,28 @@ bool     flexCloudCancel(uint32_t jobId);
 bool     flexCloudRetry(uint32_t jobId);
 void     flexCloudClearFinished();
 int      flexCloudXfers(FlexCloudXfer* out, int cap);
-// Copia temporal de una FOTO de la nube para abrirla en el visor (un solo
-// hueco: /System/Cloud/view/<nombre>, verificada con su SHA-256). Evento
-// FCE_VIEW_READY con la ruta. Nunca se recomprime: es el original.
-uint32_t flexCloudFetchForView(const FclItem* it);
 bool     flexCloudPollEvent(FlexCloudEvent* ev);
+
+// ------------------------------------------------- foto para el visor (RAM)
+// La foto de la nube se trae a un buffer de PSRAM -- NUNCA a la flash -- y el visor la decodifica de ahi.
+// Escribirla en LittleFS costaba un borrado de sector por cada 4 KB, y cada borrado apaga la cache: el
+// panel DSI se quedaba sin datos y se veia azul/cian durante todo el tiempo de la descarga (docs/FLEX-
+// MEDIA-ECOSYSTEM.md §11). El buffer tiene UN solo duenyo en cada momento: la tarea de la nube lo llena
+// (con el tamano y el SHA-256 que el servidor DICE en esa respuesta, verificados) y quien lo pidio lo
+// TOMA; si nadie lo toma, se suelta solo. Hay una sola peticion viva: pedir otra anula la anterior, y
+// anularla (flexCloudViewCancel) corta la descarga en curso.
+// PSRAM que tiene que SEGUIR libre despues de reservar la foto: lo mismo que el visor exige para decodificarla (reserva del
+// sistema 6 MB + trabajo del decodificador 1 MB + el minimo de pixeles 1 MB). Si no, la foto se bajaria entera, ocuparia la
+// memoria y el visor diria "no hay memoria": se rechaza ANTES de bajar un solo byte. (El visor lo comprueba con static_assert.)
+#define FLEX_CLOUD_VIEW_HEADROOM (8u * 1024u * 1024u)
+enum { FCV_NONE = 0, FCV_FETCHING, FCV_READY, FCV_FAILED };
+uint32_t flexCloudViewStart(const FclItem* it);                 // 0 = no se pudo encolar
+// Estado de la peticion `op`. FCV_NONE = ya no es la vigente (la anulo otra o se cancelo).
+uint8_t  flexCloudViewState(uint32_t op, uint32_t* got, uint32_t* total, char* err, size_t cap);
+// Entrega el JPEG verificado: la PROPIEDAD pasa a quien llama, que lo suelta con flexCloudViewFree.
+uint8_t* flexCloudViewTake(uint32_t op, uint32_t* len);
+void     flexCloudViewFree(uint8_t* p);
+void     flexCloudViewCancel(uint32_t op);
 
 // ------------------------------------------------------------ miniaturas
 void flexCloudWantThumb(const char* fileId);

@@ -316,6 +316,8 @@ static void testCronometro();
 static void testPaginasHome();
 static void testNotifUnaSola();
 static void testBannerNotificacion();
+static void testFotoNubeEnRam();
+static void testNubeEstados();
 static void testDeslizarPaginas();
 static void testCabeceras();
 static void testListasConScroll();
@@ -10212,8 +10214,6 @@ static void testTrabajoPeriodico(){
 //  sale) aunque el dedo este quieto, no deja restos y el ultimo cuadro del
 //  acomodo la conserva. En Plano y en Liquid Glass.
 // #############################################################
-static void testIslaEncimaAlDeslizar(){
-// #############################################################
 //  BANNER DE NOTIFICACION: LA ULTIMA CAPA ANTES DEL PANEL
 //  ------------------------------------------------------------
 //  Reproduce lo que se vio en la placa (capturas de la caja de apps y de Flex Compass): el banner capturaba
@@ -10496,6 +10496,8 @@ static void testBannerNotificacion(){
   if(gFails == before) printf("  Banner de notificacion: todas las comprobaciones pasan.\n");
 }
 
+// #############################################################
+static void testIslaEncimaAlDeslizar(){
   printf("Escritorio: la notificacion se queda encima de la pagina que se desliza\n");
   int before = gFails;
   bool glass0 = uiGlass;
@@ -10701,6 +10703,17 @@ extern bool gStubStreamOpen;
 extern uint8_t gStubStreamState;
 extern uint32_t gStubStreamPinOff, gStubStreamPinLen, gStubStreamMisses;
 void stubStreamDeliver(int maxBlocks);
+// La foto de la nube (a la RAM): el doble hace de tarea de la nube y cuenta los buffers sin liberar.
+extern uint32_t gStubViewOp, gStubViewGot, gStubViewTotal;
+extern uint8_t gStubViewState;
+extern int gStubViewLive, gStubViewCancels;
+extern bool gStubViewRefuse;
+extern std::string gStubViewErr;
+extern std::vector<std::string> gStubWatched, gStubWatchKicks;
+extern int gStubWatchCalls;
+void stubViewProgress(uint32_t got);
+void stubViewDeliver(const std::vector<uint8_t>& jpeg);
+void stubViewFail(const char* why);
 
 static FclItem clItem(const char* id, const char* name, uint8_t kind, uint64_t size, bool folder = false, bool thumb = false){
   FclItem it; memset(&it, 0, sizeof(it));
@@ -10709,6 +10722,11 @@ static FclItem clItem(const char* id, const char* name, uint8_t kind, uint64_t s
   snprintf(it.sha256, sizeof(it.sha256), "%064d", 7); it.updatedAt = 1773273600000LL;
   return it;
 }
+// Lo que la nube le dijo al usuario, por el canal que toque: la isla en el escritorio, el BANNER dentro de una app (sysSay).
+static void saidClear(){ gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs)); fpbQueueN = 0; fpbMore = 0; }
+static int saidCount(){ return gNotifCount + fpbQueueN; }
+static std::string saidSub(){ return fpbQueueN > 0 ? std::string(fpbQueue[fpbQueueN - 1].body) : gNotifCount > 0 ? std::string(gNotifs[0].mod.sub) : std::string(); }
+static std::string saidTitle(){ return fpbQueueN > 0 ? std::string(fpbQueue[fpbQueueN - 1].title) : gNotifCount > 0 ? std::string(gNotifs[0].mod.name) : std::string(); }
 static bool clCalled(const char* prefix){ for(auto& c : gStubCloudCalls) if(!c.compare(0, strlen(prefix), prefix)) return true; return false; }
 static void clStatusOnline(){
   memset(&gStubCloudStatus, 0, sizeof(gStubCloudStatus));
@@ -11147,18 +11165,21 @@ static void testFlexCloudUi(){
   chk(!wantedV1, "un elemento sin miniatura en la nube no se pide en bucle");
   if(getenv("INO_SHOTS")) shotSave("nube_galeria");
 
-  // ---- 3. FOTO: se trae el ORIGINAL y se abre en el visor de la Galeria ----
+  // ---- 3. FOTO: el visor aparece EN EL ACTO y trae la foto a la RAM (nunca a la flash) ----
   gStubCloudCalls.clear();
   clTap(galTick, c0x, c0y);
-  chk(clCalled("view fil_p1"), "tocar una foto de la nube pide el original (no una copia reducida)");
-  const char* vp = "/System/Cloud/view/Playa.jpg";
-  gTestFiles[vp] = vwTestJpeg(800, 600);
-  FlexCloudEvent ev; memset(&ev, 0, sizeof(ev));
-  ev.kind = FCE_VIEW_READY; ev.opId = gStubCloudOp; ev.ok = true; snprintf(ev.localPath, sizeof(ev.localPath), "%s", vp);
-  gStubCloudEvents.push_back(ev);
-  cloudUiTick();
-  chk(vwActiveFor(&GAL_VW) && vwKind == VWK_PHOTO && !strcmp(vwPath, vp), "llega verificada y se abre en el visor de la Galeria");
-  chk(!vwCanTrash && !vwCanEdit, "una copia de la nube no ofrece papelera ni editor locales");
+  chk(clCalled("view fil_p1"), "tocar una foto de la nube la pide a la nube");
+  chk(vwActiveFor(&GAL_VW) && vwKind == VWK_PHOTO && vwLoading && vwViewOp != 0,
+      "el visor aparece EN EL ACTO (antes esperaba a la descarga entera, con el panel azul), esperando la foto");
+  chk(!strcmp(vwName, "Playa \xC3\x91" "and\xC3\xBA.jpg"), "con el nombre que el usuario ve en Flex Cloud");
+  stubViewProgress(600000); gTestMs += 300; galTick();
+  chk(vwViewGot == 600000, "el avance real llega al visor");
+  stubViewDeliver(vwTestJpeg(800, 600)); gTestMs += 20; galTick();
+  chk(vwKind == VWK_PHOTO && vwSrc && !vwLoading && !vwViewOp, "llega verificada y se decodifica DE LA RAM");
+  chk(gStubViewLive == 0, "y el buffer de la nube queda liberado (un solo dueno en cada momento)");
+  { bool onFlash = false; for(auto& kv : gTestFiles) if(!kv.first.compare(0, 14, "/System/Cloud/")) onFlash = true;
+    chk(!onFlash, "NADA se escribio en la flash (cada sector borrado apagaba la cache y el panel se quedaba azul)"); }
+  chk(!vwCanTrash && !vwCanEdit, "una foto de la nube no ofrece papelera ni editor locales");
   vwClose();
   chk(galTab == GAL_TAB_CLOUD && ckHost == &GAL_CK, "cerrar el visor vuelve a la nube");
 
@@ -11401,22 +11422,22 @@ static void testFlexCloudUi(){
   shotApp(IC_GALERIA); gAppState[IC_GALERIA] = ALIFE_RUNNING; mkBind(&GAL_APP); galViewReady = false;
   galTab = 0; galRender();
   uint32_t lid3 = geAddPhoto(FML_DIR_PHOTO "/Cumple.jpg", jpg, false);
-  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  saidClear();
   mkMenuId = lid3; mkDoAction(MA_CL_UP);
   chk(!ckUpAskOn, "Subir a Flex Cloud con la cuenta rechazada NO abre la pregunta");
-  chk(gNotifCount == 1 && !strcmp(gNotifs[0].mod.sub, CK_MSG_RELINK), "dice que hay que volver a vincular en Ajustes");
+  chk(saidCount() == 1 && saidSub() == CK_MSG_RELINK, "dice que hay que volver a vincular en Ajustes (dentro de la app: en el banner)");
   chk(!clCalled("up "), "y no se encola nada");
   // La cuenta se pierde con el cuadro de "Subir" ya abierto.
   gStubAccountSnap.link = FLEX_LINK_LINKED;
   mkMenuId = lid3; mkDoAction(MA_CL_UP);
   chk(ckUpAskOn, "(con la cuenta buena la pregunta SI se abre)");
   gStubAccountSnap.link = FLEX_LINK_AUTH_REQUIRED;
-  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  saidClear();
   { int x, y, w, h; ckUpAskGeom(x, y, w, h);
     tDown(x + w / 2, y + 136 + 20, clMs); tUp(clMs + 50, true);
     ckUpAskTick(mkRedrawAll); touchReset(); clMs += 400; }
   chk(!clCalled("up "), "'Subir y conservar' con la cuenta ya perdida no encola nada");
-  chk(gNotifCount == 1 && !strcmp(gNotifs[0].mod.sub, CK_MSG_RELINK), "y dice por que");
+  chk(saidCount() == 1 && saidSub() == CK_MSG_RELINK, "y dice por que");
 
   // La tarjeta de la nube: en alarma, con el motivo y SIN la cuota de antes.
   clStatusOnline();                                           // la cuota de la sesion anterior sigue en el estado
@@ -11450,13 +11471,13 @@ static void testFlexCloudUi(){
   gStubCloudItems.push_back(clItem("fil_x1", "Foto.jpg", FCL_K_PHOTO, 100000));
   ckMenuItem = gStubCloudItems[0]; ckMenuForItem = true;
   gStubAccountSnap.link = FLEX_LINK_AUTH_REQUIRED;
-  gStubCloudCalls.clear(); gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  gStubCloudCalls.clear(); saidClear();
   ckMenuAction(MA_CL_DOWNLOAD);
   ckMenuAction(MA_TRASH);
   ckMenuAction(MA_RENAME);
   ckOpenItem(gStubCloudItems[0]);
   chk(!clCalled("down") && !clCalled("trash") && !clCalled("view") && !fkNameOn, "ni descargar, ni eliminar, ni renombrar, ni abrir: nada sale hacia la nube");
-  chk(gNotifCount >= 1 && !strcmp(gNotifs[0].mod.sub, CK_MSG_RELINK), "y se dice por que");
+  chk(saidCount() >= 1 && saidSub() == CK_MSG_RELINK, "y se dice por que");
   ckMenuAction(MA_CL_XFERS);
   chk(ckXfersOn, "Transferencias SI se abre aunque la cuenta no sirva (ver y cancelar lo que esperaba)");
   ckXfersOn = false;
@@ -11506,6 +11527,318 @@ static void testFlexCloudUi(){
   memset(&gMs, 0, sizeof(gMs));
   gState = ST_HOME; gAppId = 0; gLand = false; uiClipFull(); setBuf(fb);
   if(gFails == before) printf("  Flex Cloud en la interfaz: todas las comprobaciones pasan.\n");
+}
+
+// #############################################################
+//  LA FOTO DE FLEX CLOUD EN EL VISOR: A LA RAM, NUNCA A LA FLASH
+//  ------------------------------------------------------------
+//  Video del usuario: al tocar una foto de la nube el panel se ponia azul/cian
+//  unos 15 s y la pantalla no respondia. La foto se escribia en LittleFS (un
+//  borrado de sector por cada 4 KB, y cada borrado apaga la cache: el panel DSI
+//  se queda sin datos) y el visor no aparecia hasta el final. Ahora el visor sale
+//  en el acto, la foto va a un buffer de PSRAM con UN dueno en cada momento
+//  (nube -> visor -> trabajo de decodificar -> liberado) y todo se cancela al
+//  cerrar. Aqui: avance real (solo la banda de la tarjeta), cancelar, fallos,
+//  plazo, JPEG roto y el balance de memoria.
+// #############################################################
+static void testFotoNubeEnRam(){
+  printf("Foto de Flex Cloud en el visor: a la RAM, con avance real, cancelable y sin fugas\n");
+  int before = gFails;
+  bool ok0 = gMlOk, fs0 = gTestFsReady, glass0 = uiGlass; int nav0 = gNavMode;
+  const size_t N = (size_t)SCR_W * SCR_H;
+  std::vector<uint16_t> shadow(N, 0);
+  uint16_t* sh0 = gPanelShadow; gPanelShadow = shadow.data();
+  flxPanel = (esp_lcd_panel_handle_t)1; flxDpiSem = (SemaphoreHandle_t)1;
+  gNavMode = 0; uiGlass = true;
+  gTestMs = clMs;
+  gStubCloudCalls.clear(); gStubCloudEvents.clear(); gStubCloudItems.clear(); gStubCloudXfers.clear();
+  gStubCloudThumbs.clear(); gStubCloudWanted.clear();
+  memset(&gStubCloudList, 0, sizeof(gStubCloudList));
+  gStubViewRefuse = false; gStubViewOp = 0; gStubViewState = FCV_NONE; gStubViewLive = 0; gStubViewCancels = 0;
+  geFsReset(); gTestFsReady = true;
+  clStatusOnline();
+  shotApp(IC_GALERIA); gAppState[IC_GALERIA] = ALIFE_RUNNING; mkBind(&GAL_APP); galViewReady = false;
+  galTab = GAL_TAB_CLOUD;
+  gStubCloudItems.push_back(clItem("fil_p1", "Playa.jpg", FCL_K_PHOTO, 2411724, false, true));
+  gStubCloudList.state = FCL_LIST_READY; gStubCloudList.gen++;
+  gStubCloudThumbs.push_back("fil_p1");
+  galRender();
+  int cx, cy; clCellCenter(0, cx, cy);
+  // El boton "atras" de la barra de arriba del visor, en el lienzo LOGICO (x=30, y=36): en horizontal el toque fisico va girado.
+  auto backPhys = [&](int& px, int& py){ const int lx = 30, ly = 36; if(vwLand){ px = (SCR_W - 1) - ly; py = lx; } else { px = lx; py = ly; } };
+  auto openPhoto = [&]{ gStubCloudCalls.clear(); clTap(galTick, cx, cy); };
+  auto back = [&]{ int px, py; backPhys(px, py); clTap(galTick, px, py); };
+  auto tickMs = [&](unsigned long ms){ gTestMs += ms; galTick(); };
+  auto base = [&]{ return uiGlass ? TH_GLASS2 : TH_SURF2; };
+
+  // Calentamiento: el primer visor reserva sus buffers persistentes (vidrio); la linea base se mide despues.
+  openPhoto(); stubViewDeliver(vwTestJpeg(480, 640)); tickMs(20); back();
+  chk(!vwOn, "(calentamiento) el visor se cierra");
+  const size_t psBase = gPsUsed;
+  gStubViewLive = 0; gStubViewCancels = 0;
+
+  // ---- 1. Tocar: el visor sale EN EL ACTO, con su tarjeta de carga y la miniatura de la nube ----
+  openPhoto();
+  chk(clCalled("view fil_p1"), "tocar una foto de la nube la pide a la nube");
+  chk(vwActiveFor(&GAL_VW) && vwKind == VWK_PHOTO && vwLoading && vwViewOp != 0 && !vwSrc,
+      "el visor aparece al instante, esperando (antes: 15 s de pantalla azul y sin respuesta)");
+  chk(vwThumb != NULL, "con la miniatura que la nube ya tenia, ampliada");
+  { int x, y, w, h; vwLoadGeom(x, y, w, h);
+    chk(shadow[(size_t)(y + h / 2) * SCR_W + x + 3] == base(), "la tarjeta de carga esta EN EL PANEL");
+    chk(vwLoadPill() && vwViewTotal == 0, "(sin avance todavia)"); }
+
+  // ---- 2. El avance se pinta SOLO en la banda de la tarjeta (nada de repintar la pantalla entera) ----
+  std::fill(shadow.begin(), shadow.end(), (uint16_t)0x1357);
+  stubViewProgress(900000); tickMs(300);
+  { int x, y, w, h; vwLoadGeom(x, y, w, h);
+    int sent = 0, outside = 0;
+    for(int r = 0; r < SCR_H; r++) if(shadow[(size_t)r * SCR_W + 3] != 0x1357){ sent++; if(r < y - 4 || r > y + h + 4) outside++; }
+    chk(vwViewGot == 900000 && sent > 0, "el avance real llega a la tarjeta");
+    chk(outside == 0 && sent <= h + 8, "y solo se manda al panel la banda de la tarjeta (no el cuadro entero)"); }
+  { int x, y, w, h; vwLoadGeom(x, y, w, h);
+    std::fill(shadow.begin(), shadow.end(), (uint16_t)0x1357);
+    stubViewProgress(900000); tickMs(300);
+    int sent = 0; for(int r = 0; r < SCR_H; r++) if(shadow[(size_t)r * SCR_W + 3] != 0x1357) sent++;
+    chk(sent == 0, "sin cambios de avance no se vuelve a pintar nada"); }
+
+  // ---- 3. Atras con la descarga en curso: CANCELA y no queda nada ----
+  gStubViewCancels = 0;
+  back();
+  chk(!vwOn && vwViewOp == 0 && vwMemBuf == NULL, "atras funciona en todo momento (la foto no bloquea la interfaz)");
+  chk(gStubViewCancels == 1 && clCalled("view-cancel"), "y CANCELA la descarga en la nube");
+  chk(gStubViewOp == 0 && gStubViewLive == 0 && gPsUsed == psBase, "sin buffers colgando ni memoria sin devolver");
+  chk(galTab == GAL_TAB_CLOUD && ckHost == &GAL_CK, "vuelve a la nube");
+
+  // ---- 4. Llega bien: se decodifica DE LA RAM y el buffer pasa de dueno en dueno hasta soltarse ----
+  openPhoto();
+  stubViewDeliver(vwTestJpeg(600, 800));
+  tickMs(20);
+  chk(vwKind == VWK_PHOTO && vwSrc && !vwLoading && !vwLoadPill(), "llega verificada y se ve");
+  chk(gStubViewLive == 0, "el buffer de la nube ya se solto (lo suelta quien lo decodifico)");
+  { int x, y, w, h; vwLoadGeom(x, y, w, h);
+    chk(shadow[(size_t)(y + h / 2) * SCR_W + x + 3] != base(), "la tarjeta de carga desaparece"); }
+  back();
+  chk(!vwOn && gPsUsed == psBase, "al cerrar, toda la memoria devuelta (foto, miniatura, lienzo)");
+
+  // ---- 5. Se cierra JUSTO tras recibirla, antes de que el trabajo la reciba: no se fuga ----
+  openPhoto();
+  stubViewDeliver(vwTestJpeg(600, 800));
+  vwViewStep();
+  chk(gStubViewLive == 1 && vwMemBuf != NULL && vwJobQueued, "tomada: el visor es su dueno (el trabajo aun no la tiene)");
+  vwClose();
+  chk(gStubViewLive == 0 && vwMemBuf == NULL && gPsUsed == psBase, "cerrar suelta la foto tomada");
+  // ... y tampoco si el trabajo YA la llevaba pero se retira antes de correr
+  openPhoto();
+  stubViewDeliver(vwTestJpeg(600, 800));
+  vwViewStep(); vwJobPoll();                                       // sin tarea de medios corre en el acto: se simula el REQ sin recoger
+  vwClose();
+  chk(gStubViewLive == 0 && gPsUsed == psBase, "nada colgando tras cerrar con el trabajo en marcha");
+  { VwJob* j = &gVwJob; j->mem = (uint8_t*)heap_caps_malloc(64, MALLOC_CAP_SPIRAM); j->memLen = 64; gStubViewLive++;
+    __atomic_store_n(&j->state, (uint8_t)VWJ_REQ, __ATOMIC_RELEASE);
+    vwJobCancel();
+    chk(j->mem == NULL && gStubViewLive == 0 && __atomic_load_n(&j->state, __ATOMIC_ACQUIRE) == VWJ_IDLE,
+        "un trabajo retirado SIN correr suelta lo que llevaba"); }
+
+  // ---- 6. La nube falla: se dice POR QUE, sin colgarse, y atras sigue funcionando ----
+  openPhoto();
+  stubViewFail("No hay memoria libre ahora");
+  tickMs(20);
+  chk(vwKind == VWK_ERROR && !vwLoading && !vwViewOp && !strcmp(vwErr, "No hay memoria libre ahora"), "el motivo de la nube, tal cual");
+  back();
+  chk(!vwOn && gPsUsed == psBase, "(y se cierra limpio)");
+  openPhoto();
+  gStubViewOp = 0; gStubViewState = FCV_NONE;                       // la anulo otra peticion o un cambio de destino
+  tickMs(20);
+  chk(vwKind == VWK_ERROR && strstr(vwErr, "cancel") != NULL, "una peticion anulada por debajo se dice, no se queda cargando");
+  back();
+  gStubViewRefuse = true;
+  openPhoto();
+  chk(vwKind == VWK_ERROR && strstr(vwErr, "no puede atender") != NULL && !vwViewOp && !vwLoading, "si la nube no puede ni encolarla: se dice");
+  gStubViewRefuse = false;
+  back();
+
+  // ---- 7. Plazo: la nube no contesta nunca. El visor lo corta, lo dice y le dice a la nube que pare ----
+  gStubCloudCalls.clear();
+  openPhoto();
+  const unsigned long t0 = gTestMs;
+  tickMs(VW_VIEW_MS - 1000);
+  chk(vwLoading && vwViewOp, "antes del plazo sigue esperando");
+  tickMs(2000);
+  chk(vwKind == VWK_ERROR && strstr(vwErr, "tarda") != NULL, "vencido el plazo: se dice");
+  chk(clCalled("view-cancel") && gStubViewOp == 0, "y se corta la descarga en la nube");
+  (void)t0;
+  back();
+  clMs = gTestMs + 1000;
+
+  // ---- 8. Un JPEG roto: el trabajo falla, lo dice y SUELTA el buffer igualmente ----
+  openPhoto();
+  stubViewDeliver(std::vector<uint8_t>(96, 0x55));
+  tickMs(20);
+  chk(vwKind == VWK_ERROR && vwErr[0] && !vwSrc && !vwLoading, "bytes que no son una foto: error, no basura en pantalla");
+  chk(gStubViewLive == 0, "y el buffer se suelta tambien en el camino de error");
+  back();
+  chk(gPsUsed == psBase, "memoria devuelta");
+
+  // ---- 9. Cambiar de foto / de app / bloquear con una descarga en curso: se cancela, no se acumula ----
+  openPhoto();
+  chk(vwViewOp != 0, "(otra vez esperando)");
+  gStubViewCancels = 0;
+  vwSuspend();                                                       // la app pasa a segundo plano
+  chk(!vwOn && vwViewOp == 0 && gStubViewCancels == 1 && gPsUsed == psBase, "pasar a segundo plano cancela la descarga y suelta todo");
+  openPhoto();
+  vwSuspend();
+  vwRelease(false);
+  chk(gStubViewLive == 0 && gPsUsed == psBase, "soltar dos veces no rompe nada");
+  { VwSession* ss = GAL_VW.sess; if(ss) ss->open = false; }
+
+  // ---- limpieza ----
+  gStubCloudItems.clear(); gStubCloudThumbs.clear();
+  galCloseApp(); gAppState[IC_GALERIA] = ALIFE_CLOSED;
+  gStubAccountLinked = false; memset(&gStubCloudStatus, 0, sizeof(gStubCloudStatus));
+  uiGlass = glass0; gNavMode = nav0; gPanelShadow = sh0;
+  mkReset();
+  gMlOk = ok0; gTestFsReady = fs0; gTestMemFs = false; gTestFiles.clear();
+  memset(&gMs, 0, sizeof(gMs));
+  gState = ST_HOME; gAppId = 0; gLand = false; uiClipFull(); setBuf(fb);
+  if(gFails == before) printf("  Foto de Flex Cloud en el visor: todas las comprobaciones pasan.\n");
+}
+
+// #############################################################
+//  LA NUBE EN LA GALERIA: QUE DICE CADA CELDA Y QUE PASA AL TOCARLA
+//  ------------------------------------------------------------
+//  Lo que veia el usuario: subia un video, tocaba y NADA ocurria hasta cerrar y reabrir la
+//  Galeria. El telefono lo estaba preparando; la celda no lo decia y el aviso iba por la isla,
+//  que solo se dibuja en el escritorio. Ahora cada celda dice su estado, el toque responde
+//  DENTRO de la app (banner), lo que se esta preparando se vigila por ID y la lista de
+//  encima no tira los toques.
+// #############################################################
+static void testNubeEstados(){
+  printf("La nube en la Galeria: estado en cada celda, respuesta al toque dentro de la app y vigilancia de lo que se prepara\n");
+  int before = gFails;
+  bool ok0 = gMlOk, fs0 = gTestFsReady, glass0 = uiGlass; int nav0 = gNavMode;
+  gNavMode = 0; uiGlass = true;
+  gTestMs = clMs;
+  gStubCloudCalls.clear(); gStubCloudEvents.clear(); gStubCloudItems.clear(); gStubCloudXfers.clear();
+  gStubCloudThumbs.clear(); gStubCloudWanted.clear(); gStubWatchKicks.clear(); gStubWatched.clear();
+  memset(&gStubCloudList, 0, sizeof(gStubCloudList));
+  geFsReset(); gTestFsReady = true;
+  clStatusOnline();
+  uint8_t dest0 = gStubCloudDest;
+  gStubCloudDest = FCD_PHONE; gStubStorage.state = FSP_READY;          // Flex Cloud en el TELEFONO (el que prepara lo multimedia)
+  shotApp(IC_GALERIA); gAppState[IC_GALERIA] = ALIFE_RUNNING; mkBind(&GAL_APP); galViewReady = false;
+  galTab = GAL_TAB_CLOUD;
+
+  // (Los elementos viven en el vector del doble, no en la pila: un FclItem son 672 B y el loopTask tiene 8 KB.)
+  auto addVid = [&](const char* id, const char* name, uint8_t ps, uint8_t prog, const char* reason = ""){
+    gStubCloudItems.push_back(clItem(id, name, FCL_K_VIDEO, 40u << 20, false, false));
+    FclItem& it = gStubCloudItems.back();
+    it.playState = ps; it.playProgress = prog;
+    if(ps == FCL_PS_NATIVE || ps == FCL_PS_READY) it.playSize = it.size;
+    snprintf(it.playReason, sizeof(it.playReason), "%s", reason); };
+  addVid("fil_q", "Cola.avi", FCL_PS_PENDING, 0);
+  addVid("fil_p", "Prep.avi", FCL_PS_PREPARING, 42);
+  addVid("fil_b", "Roto.avi", FCL_PS_FAILED, 0, "El video no tiene pista que se pueda abrir");
+  addVid("fil_n", "Nuevo.mp4", FCL_PS_UNKNOWN, 0);                     // recien subido: el telefono aun no lo ha analizado
+  addVid("fil_g", "Listo.avi", FCL_PS_NATIVE, 0);
+  gStubCloudList.state = FCL_LIST_READY; gStubCloudList.gen++;
+  galRender();
+  auto cell = [&](int i, int& cx, int& cy){ clCellCenter(i, cx, cy); };
+  auto tapCell = [&](int i){ int cx, cy; cell(i, cx, cy); gStubCloudCalls.clear(); clTap(galTick, cx, cy); };
+
+  // ---- 1. Cada celda dice su estado ANTES de tocar ----
+  { int x, y, w, h;
+    ckCellRect(1, x, y, w, h);                                           // preparando 42 %
+    chk(fb[(size_t)(y + h - 14) * SCR_W + x + 8] == TH_PRIM, "preparando: insignia de color de la app en la celda");
+    ckCellRect(2, x, y, w, h);                                           // fallido
+    chk(fb[(size_t)(y + h - 14) * SCR_W + x + 8] == TH_DANGER, "no se pudo preparar: insignia de peligro");
+    ckCellRect(4, x, y, w, h);                                           // listo: sin insignia
+    chk(fb[(size_t)(y + h - 14) * SCR_W + x + 8] != TH_PRIM && fb[(size_t)(y + h - 14) * SCR_W + x + 8] != TH_DANGER, "lo que ya vale no lleva insignia"); }
+
+  // ---- 2. Lo que no esta acabado se VIGILA (y solo eso) ----
+  chk(gStubWatched.size() == 3 && gStubWatched[0] == "fil_q" && gStubWatched[1] == "fil_p" && gStubWatched[2] == "fil_n",
+      "se vigila lo que esta en cola, preparando y el recien subido sin analizar (en el telefono); no lo listo ni lo fallido");
+  gStubCloudDest = FCD_INTERNET; gStubWatched.clear(); gStubCloudList.gen++; galRender();
+  chk(gStubWatched.size() == 2, "con Flex Cloud en Internet (no analiza nada) 'sin analizar' es lo normal: no se vigila");
+  gStubCloudDest = FCD_PHONE; gStubCloudList.gen++; galRender();
+  chk(gStubWatched.size() == 3, "(de vuelta al telefono)");
+
+  // ---- 3. Tocar lo que se esta preparando RESPONDE, dentro de la app ----
+  saidClear(); gStubWatchKicks.clear();
+  tapCell(1);
+  chk(!clCalled("stream") && !clCalled("view") && !mmOn, "no se intenta abrir algo que fallaria (ni se abre un menu)");
+  chk(saidCount() == 1 && saidTitle() == "Prep.avi" && saidSub().find("42") != std::string::npos,
+      "dice QUE pasa, con el avance real: el aviso va por el banner (la isla no se dibuja dentro de una app)");
+  chk(gStubWatchKicks.size() == 1 && gStubWatchKicks[0] == "fil_p", "y le pregunta al telefono por ESE video ahora");
+  tapCell(1);
+  chk(saidCount() == 1, "tocar otra vez lo mismo no apila tarjetas iguales");
+
+  // ---- 4. Lo que fallo dice POR QUE y ofrece sus acciones ----
+  saidClear();
+  tapCell(2);
+  chk(saidCount() == 1 && saidSub() == "El video no tiene pista que se pueda abrir", "el motivo que escribio el telefono");
+  chk(mmOn, "y las acciones (descargar, detalles...)");
+  mmClose(); galRender();
+  { ckInfo(gStubCloudItems[2]);
+    chk(strstr(mmDlgText, "El video no tiene pista") != nullptr, "'Detalles' trae el motivo completo, no solo 'No se pudo preparar'");
+    mmDlgOn = false; galRender(); }
+
+  // ---- 5. Recien subido y sin analizar (telefono): se PREGUNTA, no se afirma que no se reproduce ----
+  saidClear(); gStubWatchKicks.clear();
+  tapCell(3);
+  chk(!mmOn && saidCount() == 1 && saidSub().find("analizando") != std::string::npos,
+      "'el telefono aun lo esta analizando' (antes: 'solo AVI MJPEG, abrelo en la web', que era falso)");
+  chk(gStubWatchKicks.size() == 1 && gStubWatchKicks[0] == "fil_n", "y se le pregunta al telefono");
+  saidClear();
+  tapCell(3);
+  chk(mmOn && saidCount() >= 1 && saidSub().find("MJPEG") != std::string::npos,
+      "si sigue igual (un telefono sin preparacion multimedia) vuelve el menu de siempre con su motivo: nunca sin salida");
+  mmClose(); galRender();
+  gTestMs += CK_UNKNOWN_KICK_MS + 1000; clMs = gTestMs; saidClear();
+  tapCell(3);
+  chk(!mmOn && saidSub().find("analizando") != std::string::npos, "pasado un rato se vuelve a preguntar");
+
+  // ---- 6. Lo que vale se abre ----
+  tapCell(4);
+  chk(clCalled("stream fil_g") || vwActiveFor(&GAL_VW), "un video listo se abre en el visor");
+  if(vwActiveFor(&GAL_VW)) vwClose();
+  flexCloudStreamClose();
+
+  // ---- 7. La lista cambia debajo (el telefono actualizo OTRA celda): el toque NO se pierde ----
+  galRender();
+  stubStreamDeliver(1);
+  gStubCloudList.gen++;                                                 // llego un cambio: aun sin repintar
+  int cx, cy; clCellCenter(4, cx, cy);
+  gStubCloudCalls.clear();
+  clTap(galTick, cx, cy);
+  chk(clCalled("stream fil_g") || vwActiveFor(&GAL_VW), "con la lista cambiando debajo, el toque va contra lo que el usuario VIO");
+  if(vwActiveFor(&GAL_VW)) vwClose();
+  flexCloudStreamClose();
+
+  // ---- 8. "Cargando" sin fin: se dice y se ofrece Reintentar ----
+  gStubCloudItems.clear();
+  gStubCloudList.state = FCL_LIST_LOADING; gStubCloudList.count = 0; gStubCloudList.gen++;
+  galRender();
+  chk(ckLoadMs != 0 && !ckLoadTimedOut && ckEmptyBtnY < 0, "'Cargando Flex Cloud...' (aun dentro del plazo)");
+  gTestMs += CK_LOAD_TIMEOUT_MS + 500; clMs = gTestMs;
+  galTick();
+  chk(ckLoadTimedOut && ckEmptyBtnY > 0 && ckEmptyBtnAct == 2, "pasado el plazo: 'El telefono tarda en responder' con boton Reintentar");
+  gStubCloudCalls.clear();
+  { int bx, by, bw, bh; ckBox(bx, by, bw, bh); clTap(galTick, bx + bw / 2, ckEmptyBtnY + 20); }
+  chk(clCalled("refresh") && !ckLoadTimedOut, "Reintentar vuelve a pedirla");
+
+  // ---- limpieza ----
+  gStubCloudDest = dest0;
+  gStubCloudItems.clear(); gStubWatched.clear(); gStubWatchKicks.clear(); saidClear();
+  ckUnbind(&GAL_CK);
+  chk(gStubWatched.empty(), "al salir de la nube no se vigila nada");
+  galCloseApp(); gAppState[IC_GALERIA] = ALIFE_CLOSED;
+  gStubAccountLinked = false; memset(&gStubCloudStatus, 0, sizeof(gStubCloudStatus)); memset(&gStubStorage, 0, sizeof(gStubStorage));
+  uiGlass = glass0; gNavMode = nav0;
+  mkReset();
+  gMlOk = ok0; gTestFsReady = fs0; gTestMemFs = false; gTestFiles.clear();
+  memset(&gMs, 0, sizeof(gMs));
+  gState = ST_HOME; gAppId = 0; gLand = false; uiClipFull(); setBuf(fb);
+  if(gFails == before) printf("  La nube en la Galeria: todas las comprobaciones pasan.\n");
 }
 
 // #############################################################
@@ -11878,6 +12211,7 @@ int main(){
   testCronometro();
   testPaginasHome();
   testNotifUnaSola();
+  testBannerNotificacion();
   testDeslizarPaginas();
   testIslaEncimaAlDeslizar();
   testCabeceras();
@@ -11924,6 +12258,8 @@ int main(){
   testCapturasVisor();
   testGaleriaSinRestos();
   testFlexCloudUi();
+  testFotoNubeEnRam();
+  testNubeEstados();
   testMusicaNube();
   testFlexStorage();
   testMenuNubeSinApilar();
@@ -11933,4 +12269,3 @@ int main(){
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }
-  testBannerNotificacion();

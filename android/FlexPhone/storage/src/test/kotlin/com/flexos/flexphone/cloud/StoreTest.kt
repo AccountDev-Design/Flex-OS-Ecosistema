@@ -51,6 +51,37 @@ class StoreTest {
         return (c.completeUpload(id, emptyMap())["file"] as Map<String, Any?>)
     }
 
+    @Test fun `rev cambia cuando cambia la lista y solo entonces`() {
+        val c = open()
+        fun rev() = c.quota()["rev"] as Long
+        val r0 = rev()
+        // leer no la mueve
+        c.list(mapOf()); c.quota(); c.fileCount()
+        assertEquals(r0, rev(), "listar y pedir la cuota no cambian nada")
+        // terminar una subida SI
+        val f = upload(c, "Clip.avi", bytes(100_000))
+        val r1 = rev()
+        assertTrue(r1 > r0, "una subida terminada cambia la lista")
+        // el estado de preparacion (lo que el P4 vigila) tambien
+        c.setPlayable(f["id"] as String, "preparing", "mjpeg")
+        val r2 = rev()
+        assertTrue(r2 > r1, "pasar a 'preparando' cambia lo que se ve")
+        // renombrar, papelera: tambien
+        c.updateFile(f["id"] as String, mapOf("name" to "Otro.avi"))
+        val r3 = rev()
+        assertTrue(r3 > r2, "renombrar cambia la lista")
+        c.trash("file", f["id"] as String)
+        assertTrue(rev() > r3, "mandar a la papelera cambia la lista")
+        // el progreso vive solo en memoria: no mueve rev (el P4 lo ve por la vigilancia de ese archivo)
+        val g = upload(c, "Otro.avi", bytes(50_000, 2))
+        c.setPlayable(g["id"] as String, "preparing", "mjpeg")
+        val r4 = rev()
+        c.setPlayableProgress(g["id"] as String, 40)
+        assertEquals(r4, rev(), "el avance de la preparacion no cambia rev")
+        // la forma que lee el P4: dentro de "quota"
+        assertNotNull(c.quota()["rev"])
+    }
+
     @Test fun `carpetas, conflictos de nombre y migas de pan`() {
         val c = open()
         val a = c.createFolder(mapOf("name" to "Viajes"))

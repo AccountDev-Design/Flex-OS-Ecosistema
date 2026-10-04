@@ -79,6 +79,19 @@ static void putLocal(const char* path, const std::string& data){
   if(f){ flexFsStreamWrite(f, data.data(), data.size()); flexFsStreamClose(f); }
 }
 static std::string localFile(const std::string& path){ auto it = gFs.find(path); return it == gFs.end() ? std::string("<no>") : std::string(it->second.data.begin(), it->second.data.end()); }
+// La foto para el visor llega a un buffer de RAM (nunca a la flash): se espera, se copia y se suelta.
+static bool viewPhoto(const FclItem& it, std::string& out, std::string* err = nullptr){
+  uint32_t op = flexCloudViewStart(&it);
+  if(!op) return false;
+  pumpUntil([&]{ return flexCloudViewState(op, nullptr, nullptr, nullptr, 0) != FCV_FETCHING; }, 4000);
+  char e[96] = ""; uint8_t st = flexCloudViewState(op, nullptr, nullptr, e, sizeof(e));
+  if(err) *err = e;
+  if(st != FCV_READY) return false;
+  uint32_t n = 0; uint8_t* p = flexCloudViewTake(op, &n);
+  if(!p) return false;
+  out.assign((const char*)p, n); flexCloudViewFree(p);
+  return true;
+}
 static bool listReady(){ FlexCloudListInfo l; flexCloudListInfo(&l); return l.state == FCL_LIST_READY || l.state == FCL_LIST_ERROR; }
 static std::vector<FclItem> listNow(uint8_t view, const char* folder){
   flexCloudRequestList(view, folder, nullptr);
@@ -243,9 +256,7 @@ int main(){
   const FclItem* ph = byName(rootNow, "verde.jpg");
   CHECK(ph && ph->hasThumb && ph->size == photo.size(), "el ORIGINAL conserva su tamano; la miniatura es aparte");
   FclItem phi; memset(&phi, 0, sizeof(phi)); if(ph) phi = *ph;
-  op = flexCloudFetchForView(&phi);
-  e = waitAny(op, FCE_VIEW_READY, FCE_VIEW_FAILED, 4000);
-  CHECK(e && localFile(e->localPath) == photo, "el visor recibe la foto ORIGINAL");
+  { std::string pv; CHECK(viewPhoto(phi, pv) && pv == photo, "el visor recibe la foto ORIGINAL (a la RAM)"); }
 
   // ---- renombrar, papelera, restaurar y borrar para siempre
   op = flexCloudRename(&phi, "verde (copia de seguridad).jpg");
@@ -330,24 +341,19 @@ int main(){
     // foto PNG y JPEG progresivo: el visor recibe un JPEG baseline ligero
     FclItem png = get("m_png.png");
     CHECK(png.playState == FCL_PS_READY && fclOpenAction(&png, &why) == FCL_OPEN_PHOTO, "PNG: READY y se abre como foto");
-    uint32_t vop = flexCloudFetchForView(&png);
-    e = waitAny(vop, FCE_VIEW_READY, FCE_VIEW_FAILED, 4000);
-    std::string pv = e ? localFile(e->localPath) : "";
-    CHECK(e && std::string(e->localPath).size() > 4 && std::string(e->localPath).substr(strlen(e->localPath) - 4) == ".jpg", "el visor recibe un .jpg (la extension de lo que llega)");
-    CHECK(pv.size() > 3 && (uint8_t)pv[0] == 0xFF && (uint8_t)pv[1] == 0xD8 && sha256hex(pv) == png.playSha, "es JPEG y con la huella de la version");
+    std::string pv;
+    bool gotPng = viewPhoto(png, pv);
+    CHECK(gotPng && pv.size() > 3 && (uint8_t)pv[0] == 0xFF && (uint8_t)pv[1] == 0xD8 && sha256hex(pv) == png.playSha, "el visor recibe un JPEG, con la huella de la version (a la RAM)");
     writeReal(outDir + "/png.jpg", pv);
     FclItem prog = get("m_prog.jpg");
     CHECK(prog.playState == FCL_PS_READY, "JPEG progresivo: el telefono lo paso a baseline");
-    vop = flexCloudFetchForView(&prog);
-    e = waitAny(vop, FCE_VIEW_READY, FCE_VIEW_FAILED, 4000);
-    pv = e ? localFile(e->localPath) : "";
-    CHECK(!pv.empty(), "la foto progresiva se ve");
+    pv.clear();
+    CHECK(viewPhoto(prog, pv) && !pv.empty(), "la foto progresiva se ve");
     writeReal(outDir + "/prog.jpg", pv);
     FclItem big = get("m_big.jpg");
     CHECK(big.playState == FCL_PS_READY && big.playSize < big.size, "foto grande: vista previa ligera, mucho menos que el original");
-    vop = flexCloudFetchForView(&big);
-    e = waitAny(vop, FCE_VIEW_READY, FCE_VIEW_FAILED, 4000);
-    CHECK(e && localFile(e->localPath).size() == big.playSize, "el visor descarga SOLO la vista previa");
+    std::string pvBig;
+    CHECK(viewPhoto(big, pvBig) && pvBig.size() == big.playSize, "el visor descarga SOLO la vista previa");
 
     // audio: WAV de 24 bits y AAC pasan a WAV IMA; el WAV IMA ya valia
     FclItem w24 = get("m_wav24.wav");

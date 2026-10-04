@@ -50,6 +50,8 @@ static void almOpenPhone();                                    // Almacenamiento
 #define CK_ROWS_MAX     24        // elementos que se copian para un repintado (los visibles)
 #define CK_REDRAW_MS   250        // progreso / miniaturas: como mucho 4 repintados por segundo
 #define CK_THUMBS_PER_DRAW 8
+#define CK_LOAD_TIMEOUT_MS 20000u // sin lista y "Cargando" tanto rato: se dice y se ofrece Reintentar (un plazo, no un sondeo)
+#define CK_UNKNOWN_KICK_MS 120000u // tras mirar un archivo "sin analizar", si sigue igual el menu de siempre (un telefono sin la preparacion)
 
 enum { CKM_BROWSE = 0, CKM_MEDIA, CKM_VIDEO };
 
@@ -75,10 +77,14 @@ static uint32_t ckShownGen = 0;                          // lista que se pinto (
 static uint8_t  ckLastNet = 0xFF;                         // para pedir otra vez la lista al volver la conexion
 static FclItem* ckRows = NULL;                           // CK_ROWS_MAX (PSRAM): los visibles
 static int      ckRowsFrom = 0, ckRowsN = 0;
+static uint8_t  ckShownView = 0xFF;                      // vista y carpeta que se PINTARON: los toques van contra lo pintado
+static char     ckShownFolder[FCL_ID_MAX] = "";
+static uint32_t ckLoadMs = 0;                            // desde cuando se ensena "Cargando..." sin lista (0 = no se ensena)
+static bool     ckLoadTimedOut = false;
+static char     ckKickId[FCL_ID_MAX] = "";               // ultimo archivo "sin analizar" que se le pregunto al telefono
+static uint32_t ckKickMs = 0;
 static FclItem  ckMenuItem;                              // elemento del menu abierto
 static bool     ckMenuForItem = false;
-static uint32_t ckViewOp = 0;                            // foto que se esta trayendo para el visor
-static char     ckViewName[64] = "";
 enum { CKA_NONE = 0, CKA_DELETE };
 enum { CKN_NONE = 0, CKN_MKDIR, CKN_RENAME };
 static uint8_t  ckAsk = CKA_NONE, ckName = CKN_NONE;
@@ -121,10 +127,13 @@ static const char* ckCloudBlock(){
   if(!flexAccountUsable()) return CK_MSG_RELINK;
   return NULL;
 }
+// Respuesta al usuario DENTRO de la nube (ver sysSay en Media.h): dentro de una app va en el banner, que SI se ve encima de ella. Antes
+// "el telefono lo esta preparando" iba por la isla, que solo se dibuja en el escritorio, y el toque parecia no hacer nada.
+static void ckSay(const char* title, const char* sub){ sysSay(ckHost && ckHost->name ? ckHost->name : "Flex Cloud", title, sub); }
 // Una orden de la nube no se pudo encolar: si es por la cuenta se dice eso; si no, `otherwise`.
 static void ckNotifyFail(const char* title, const char* otherwise){
   const char* why = ckCloudBlock();
-  sysNotify(title, why ? why : otherwise);
+  ckSay(title, why ? why : otherwise);
 }
 
 // ---- La nube esta a la vista: la cuota se mantiene al dia (FlexOS_Cloud) ----
@@ -273,6 +282,26 @@ static void ckEmptyState(int bx, int by, int bw, int bh, const char* title, cons
 // #############################################################
 // ##  LISTA / REJILLA
 // #############################################################
+// Lo que hay que saber ANTES de tocar una celda de la rejilla (en las filas ya lo dice su subtitulo): se esta preparando en el telefono, no
+// se pudo preparar o esta roto. Antes la celda no decia nada y el toque tampoco: parecia colgado.
+static void ckDrawBadge(int x, int y, int w, int h, const FclItem& it){
+  char t[24] = "";
+  bool bad = false;
+  switch(it.playState){
+    case FCL_PS_PENDING:     snprintf(t, sizeof(t), "En cola"); break;
+    case FCL_PS_PREPARING:   snprintf(t, sizeof(t), "%u %%", (unsigned)it.playProgress); break;
+    case FCL_PS_FAILED:      snprintf(t, sizeof(t), "No se prepar\xC3\xB3"); bad = true; break;
+    case FCL_PS_UNSUPPORTED: snprintf(t, sizeof(t), "No se convierte"); bad = true; break;
+    case FCL_PS_CORRUPT:     snprintf(t, sizeof(t), "Da\xC3\xB1" "ado"); bad = true; break;
+    default: return;
+  }
+  const int tw = textW(t, 1) + 14;
+  const int bx = x + 6, by = y + h - 22;
+  if(tw > w - 12) return;
+  fillRoundRect(bx, by, tw, 16, 8, bad ? TH_DANGER : TH_PRIM);
+  drawText(bx + 7, by + 4, t, 1, bad ? rgb565(255, 255, 255) : TH_ONACC);
+}
+
 static void ckDrawItem(int i, const FclItem& it){
   int x, y, w, h; ckCellRect(i, x, y, w, h);
   uint16_t bg = ckHost ? ckHost->bg : WIN_BG;
@@ -285,6 +314,7 @@ static void ckDrawItem(int i, const FclItem& it){
     // Marca de nube: esto NO esta en el dispositivo.
     fillCircle(x + w - 15, y + 15, 11, rgb565(0, 0, 0));
     ckCloudGlyph(x + w - 15, y + 15, 9, rgb565(255, 255, 255));
+    ckDrawBadge(x, y, w, h, it);
     drawTextClip(x, y + h + 4, it.name, 1, TH_TXT2, x + w);
     return;
   }
@@ -317,7 +347,24 @@ static void ckCrumbs(int bx, int y, int bw, const FlexCloudListInfo& li){
   drawText(bx + 14, y + 8, p, 1, TH_TXT2);
 }
 
-static void ckRenderList(){
+// Lo que se ve y aun no esta acabado lo vigila la tarea de la nube (FlexOS_Cloud.h: flexCloudWatch): en el telefono un archivo recien subido
+// aun no tiene analisis, y un video pasa de "en cola" a "preparando N %" a "listo" sin que la lista lo sepa. Con el MISMO conjunto en cada
+// repintado no se reinicia nada; sin nada sin acabar, no se pide nada.
+static void ckWatchVisible(){
+  const char* ids[FLEX_CLOUD_WATCH_MAX];
+  int n = 0;
+  const bool phone = ckPhoneDest();
+  for(int k = 0; ckRows && k < ckRowsN && n < FLEX_CLOUD_WATCH_MAX; k++){
+    const FclItem& it = ckRows[k];
+    if(it.isFolder) continue;
+    bool open = it.playState == FCL_PS_PENDING || it.playState == FCL_PS_PREPARING;
+    if(!open && phone && it.playState == FCL_PS_UNKNOWN && (it.kind == FCL_K_VIDEO || it.kind == FCL_K_AUDIO || it.kind == FCL_K_PHOTO)) open = true;
+    if(open) ids[n++] = it.id;
+  }
+  flexCloudWatch(ids, n);
+}
+
+static void ckRenderListBody(){
   int bx, by, bw, bh; ckBox(bx, by, bw, bh);
   uint16_t bg = ckHost->bg;
   setBuf(fb);
@@ -327,6 +374,9 @@ static void ckRenderList(){
   FlexCloudListInfo li; flexCloudListInfo(&li);
   ckSeenStatus = st.gen; ckSeenList = li.gen; ckSeenThumb = flexCloudThumbGen(); ckSeenXfer = st.xferGen;
   ckShownGen = li.gen;
+  ckShownView = li.view; snprintf(ckShownFolder, sizeof(ckShownFolder), "%s", li.folderId);
+  const bool loadingEmpty = (li.state == FCL_LIST_LOADING || li.state == FCL_LIST_IDLE) && li.count == 0 && st.net != FCN_NO_ACCOUNT && st.net != FCN_AUTH;
+  if(!loadingEmpty){ ckLoadMs = 0; ckLoadTimedOut = false; }
   ckDrawStatus(bx + 12, by + 4, bw - 24, st);
   if(ckHost->mode == CKM_BROWSE) ckCrumbs(bx, by + CK_STATUS_H, bw, li);
   int top = by + ckHeadH();
@@ -349,7 +399,14 @@ static void ckRenderList(){
     ckRowsN = 0; return;
   }
   if((li.state == FCL_LIST_LOADING || li.state == FCL_LIST_IDLE) && li.count == 0){
-    drawTextC(bx + bw / 2, top + 80, "Cargando Flex Cloud...", 2, TH_TXT2);
+    if(!ckLoadMs) ckLoadMs = millis() | 1u;
+    if(ckLoadTimedOut){
+      // Un plazo, no un sondeo: pasado el tiempo se dice y se ofrece Reintentar (antes se quedaba "Cargando" sin boton y sin fin).
+      ckEmptyState(bx, top, bw, by + bh - top, "No responde",
+                   ckPhoneDest() ? "El tel\xC3\xA9" "fono tarda en responder. Comprueba que esta encendido y en la misma Wi-Fi."
+                                 : "Flex Cloud tarda en responder. Comprueba tu conexi\xC3\xB3n.",
+                   "Reintentar", 2);
+    } else drawTextC(bx + bw / 2, top + 80, "Cargando Flex Cloud...", 2, TH_TXT2);
     ckRowsN = 0; return;
   }
   if(li.count == 0 && !ckHasUp()){
@@ -388,6 +445,11 @@ static void ckRenderList(){
     if(y < by + bh + 200) flexCloudRequestMore();
   }
   uiClipFull();
+}
+// (Los estados sin lista dejan ckRowsN en 0: entonces no hay nada que vigilar.)
+static void ckRenderList(){
+  ckRenderListBody();
+  ckWatchVisible();
 }
 
 // ---- Transferencias (pantalla propia dentro de la zona de la nube) ----
@@ -489,18 +551,16 @@ static void ckPlayPath(const FclItem& it, char* out, size_t cap){
 static void ckOpenItem(const FclItem& it){
   // La cuenta dejo de servir mientras la lista seguia a la vista (el repintado
   // llega en el siguiente cuarto de segundo): no se pide nada.
-  if(const char* block = ckCloudBlock()){ sysNotify(it.name, block); return; }
+  if(const char* block = ckCloudBlock()){ ckSay(it.name, block); return; }
   const char* why = NULL;
   switch(fclOpenAction(&it, &why)){
     case FCL_OPEN_FOLDER: ckRequest(FCL_VIEW_FOLDER, it.id); ckRender(); return;
-    case FCL_OPEN_PHOTO: {
-      ckViewOp = flexCloudFetchForView(&it);
-      snprintf(ckViewName, sizeof(ckViewName), "%s", it.name);
-      if(ckViewOp) sysNotify(it.name, "Abriendo desde Flex Cloud...");
-      return;
-    }
+    case FCL_OPEN_PHOTO:
     case FCL_OPEN_STREAM: {
-      // Se reproduce por rangos: el visor lee de la arena de bloques.
+      // Foto y video se abren IGUAL: el visor aparece en el acto (con el nombre y el avance de verdad) y es EL quien
+      // trae lo que necesita -- la foto a un buffer de RAM (flexCloudViewStart), el video por rangos -- y quien lo
+      // cancela al cerrarse. Antes la foto se bajaba a la flash desde aqui y el visor no aparecia hasta el final:
+      // sin respuesta al toque, con la pantalla azul por los borrados de flash y sin forma de cancelar.
       gMediaCloudItem = it;
       char p[FLEXMED_PATH_MAX];
       ckPlayPath(it, p, sizeof(p));
@@ -515,12 +575,26 @@ static void ckOpenItem(const FclItem& it){
       if(ckHost && ckHost->openLocal) ckHost->openLocal(p);
       return;
     }
-    case FCL_OPEN_PREPARING:
-      // El telefono lo esta preparando para Flex OS: se dice (con el avance) y se espera, sin intentar abrir algo que fallaria.
-      { char ln[64]; fclPlayLine(&it, ln, sizeof(ln)); sysNotify(it.name, ln[0] ? ln : (why ? why : "Preparando para Flex OS...")); }
+    case FCL_OPEN_PREPARING: {
+      // El telefono lo esta preparando para Flex OS: se dice (con el avance de verdad) DENTRO de la app y se le pregunta su estado AHORA;
+      // la celda se actualiza sola cuando cambie (flexCloudWatch). Sin intentar abrir algo que fallaria.
+      char ln[64]; fclPlayLine(&it, ln, sizeof(ln));
+      ckSay(it.name, ln[0] ? ln : (why ? why : "Preparando para Flex OS..."));
+      flexCloudWatchKick(it.id);
       return;
+    }
     default:
-      if(why) sysNotify(it.name, why);
+      // Un archivo recien subido AUN SIN ANALIZAR en el telefono (la extension no decide): no se afirma que "no se reproduce". Se le
+      // pregunta al telefono y la celda se actualiza sola. Si ya se pregunto hace poco y sigue igual (un telefono sin la preparacion
+      // multimedia), se vuelve al menu de siempre con su motivo: nunca se deja al usuario sin salida.
+      if(it.playState == FCL_PS_UNKNOWN && ckPhoneDest() && (it.kind == FCL_K_VIDEO || it.kind == FCL_K_AUDIO || it.kind == FCL_K_PHOTO) &&
+         !(ckKickMs && !strcmp(ckKickId, it.id) && millis() - ckKickMs < CK_UNKNOWN_KICK_MS)){
+        snprintf(ckKickId, sizeof(ckKickId), "%s", it.id); ckKickMs = millis() | 1u;
+        ckSay(it.name, "El tel\xC3\xA9" "fono a\xC3\xBAn lo est\xC3\xA1 analizando");
+        flexCloudWatchKick(it.id);
+        return;
+      }
+      if(why) ckSay(it.name, why);
       ckMenuItem = it; ckMenuForItem = true;
       {
         uint8_t a[4] = { MA_CL_DOWNLOAD, MA_INFO, MA_RENAME, MA_TRASH };
@@ -532,7 +606,7 @@ static void ckOpenItem(const FclItem& it){
 }
 
 static void ckInfo(const FclItem& it){
-  char sz[24], dt[16], txt[300];
+  char sz[24], dt[16], txt[420];
   fclFmtBytes(it.size, sz, sizeof(sz));
   fclFmtDate(it.updatedAt, dt, sizeof(dt));
   if(it.isFolder) snprintf(txt, sizeof(txt), "%s\nCarpeta de Flex Cloud%s%s", it.name, dt[0] ? "\nModificada: " : "", dt);
@@ -541,16 +615,18 @@ static void ckInfo(const FclItem& it){
     if(it.width && it.height) snprintf(dim, sizeof(dim), " \xC2\xB7 %ux%u", (unsigned)it.width, (unsigned)it.height);
     if(it.durationMs){ char t[16]; mlFmtDur(it.durationMs, t, sizeof(t)); snprintf(dur, sizeof(dur), " \xC2\xB7 %s", t); }
     fclPlayLine(&it, st, sizeof(st));
-    snprintf(txt, sizeof(txt), "%s\n%s%s%s \xC2\xB7 %s\n%s%s%s%s\nSHA-256: %.16s...\n%s",
+    // El MOTIVO completo (lo escribe el telefono) cuando no se pudo preparar: antes solo se veia "No se pudo preparar".
+    const bool why = it.playReason[0] && (it.playState == FCL_PS_FAILED || it.playState == FCL_PS_UNSUPPORTED || it.playState == FCL_PS_CORRUPT);
+    snprintf(txt, sizeof(txt), "%s\n%s%s%s \xC2\xB7 %s\n%s%s%s%s%s%s\nSHA-256: %.16s...\n%s",
              it.name, sz, dim, dur, it.mime[0] ? it.mime : "archivo",
-             dt[0] ? "Modificado: " : "", dt, st[0] ? "\n" : "", st, it.sha256,
+             dt[0] ? "Modificado: " : "", dt, st[0] ? "\n" : "", st, why ? "\n" : "", why ? it.playReason : "", it.sha256,
              it.fromDevice ? "Subido desde un Flex OS Ultra" : "Subido desde la web");
   }
   mmDlgOpen("Detalles", txt, "Cerrar", "", false);
 }
 
 static void ckItemMenu(const FclItem& it, int ax, int ay){
-  if(const char* block = ckCloudBlock()){ sysNotify(it.name, block); return; }
+  if(const char* block = ckCloudBlock()){ ckSay(it.name, block); return; }
   ckMenuItem = it; ckMenuForItem = true;
   uint8_t a[6]; int n = 0;
   if(ckView == FCL_VIEW_TRASH){ a[n++] = MA_CL_RESTORE; a[n++] = MA_DELETE; }
@@ -583,7 +659,7 @@ static void ckMenuAction(int act){
   // El menu pudo abrirse con la cuenta buena y perderla antes de elegir: todo lo
   // que habla con Flex Cloud se corta aqui (Transferencias y Detalles no).
   if(act != MA_CL_XFERS && act != MA_INFO){
-    if(const char* block = ckCloudBlock()){ sysNotify("Flex Cloud", block); ckRender(); return; }
+    if(const char* block = ckCloudBlock()){ ckSay("Flex Cloud", block); ckRender(); return; }
   }
   switch(act){
     case MA_CL_DOWNLOAD:
@@ -591,7 +667,7 @@ static void ckMenuAction(int act){
         // A la biblioteca si es un medio que el P4 cataloga; si no, a /Descargas.
         uint8_t fl = flexMlKindFromExt(it.name) != FML_K_NONE ? FCL_JF_TO_LIBRARY : 0;
         uint32_t id = flexCloudDownload(&it, fl);
-        if(id) sysNotify(it.name, "Descarga en cola (Transferencias)");
+        if(id) ckSay(it.name, "Descarga en cola (Transferencias)");
         else ckNotifyFail(it.name, "No se pudo poner en cola");
       }
       break;
@@ -600,7 +676,7 @@ static void ckMenuAction(int act){
       if(ckMenuForItem){ ckName = CKN_RENAME; fkNameOpen("Renombrar", it.name); return; }
       break;
     case MA_TRASH:
-      if(ckMenuForItem){ if(flexCloudTrash(&it)) sysNotify(it.name, "A la papelera de Flex Cloud"); }
+      if(ckMenuForItem){ if(flexCloudTrash(&it)) ckSay(it.name, "A la papelera de Flex Cloud"); }
       break;
     case MA_CL_RESTORE:
       if(ckMenuForItem) flexCloudRestore(&it);
@@ -646,9 +722,11 @@ static void ckUnbind(const CkHost* h){
   mmDlgOn = false;
   if(ckName != CKN_NONE){ fkNameOn = false; ckName = CKN_NONE; }
   if(ckAsk != CKA_NONE){ fkAskOn = false; ckAsk = CKA_NONE; }
-  ckHost = NULL; ckXfersOn = false; ckViewOp = 0;
+  ckHost = NULL; ckXfersOn = false;
   ckVisibleMs = 0;                                    // ya no se ve: la cuota deja de refrescarse
   flexCloudSetActive(false);
+  flexCloudWatch(NULL, 0);                            // ...y nada se vigila: sin la nube a la vista no se pregunta por nada
+  ckLoadMs = 0; ckLoadTimedOut = false;
   if(ckRows){ mediaFree(ckRows); ckRows = NULL; }
   ckRowsN = 0;
 }
@@ -690,8 +768,10 @@ static bool ckBack(){
 
 // Toque sobre la lista -> indice del elemento (o -1). Contra lo PINTADO.
 static int ckHitIndex(int tx, int ty){
+  // Los toques van contra lo PINTADO (ckRows es la copia de lo que el usuario VIO): que el telefono actualice el estado de otra celda
+  // mientras tanto -- ahora ocurre cada pocos segundos -- no tira el toque. Solo si se cambio de vista o de carpeta se descarta.
   FlexCloudListInfo li; flexCloudListInfo(&li);
-  if(li.gen != ckShownGen) return -1;                         // la lista cambio debajo: nada
+  if(li.view != ckShownView || strcmp(li.folderId, ckShownFolder)) return -1;
   int bx, by, bw, bh; ckBox(bx, by, bw, bh);
   if(ty < by + ckHeadH() || ty > by + bh) return -1;
   for(int k = 0; k < ckRowsN; k++){
@@ -744,6 +824,9 @@ static void ckTick(){
     }
     return;
   }
+
+  // ---- "Cargando" sin lista durante demasiado rato: se repinta UNA vez para ofrecer Reintentar (un plazo, no un sondeo) ----
+  if(ckLoadMs && !ckLoadTimedOut && !mkTouchBusy() && millis() - ckLoadMs > CK_LOAD_TIMEOUT_MS){ ckLoadTimedOut = true; ckRender(); return; }
 
   // ---- repintados por cambios (nunca con el dedo apoyado) ----
   if(!mkTouchBusy() && millis() - ckDrawMs >= CK_REDRAW_MS){
@@ -808,7 +891,7 @@ static void ckTick(){
   if(ckEmptyBtnY >= 0 && T.y >= ckEmptyBtnY && T.y <= ckEmptyBtnY + 48 && abs(T.x - (bx + bw / 2)) < 110){
     if(ckEmptyBtnAct == 1){ const CkHost* h = ckHost; ckUnbind(h); if(gState != ST_APP) gState = ST_APP; settingsJumpAccount(); return; }
     if(ckEmptyBtnAct == 3){ const CkHost* h = ckHost; ckUnbind(h); if(gState != ST_APP) gState = ST_APP; almOpenPhone(); return; }
-    if(ckEmptyBtnAct == 2){ flexCloudRefresh(); ckRender(); return; }
+    if(ckEmptyBtnAct == 2){ ckLoadMs = 0; ckLoadTimedOut = false; flexCloudRefresh(); ckRender(); return; }
   }
   // ---- chip "N en curso" de la tarjeta de estado: abre transferencias ----
   if(T.y >= by + 4 && T.y <= by + 30 && T.x > bx + bw - 140){
@@ -852,7 +935,7 @@ static void ckPlaceDownload(const FlexCloudEvent& e){
   int kind = flexMlKindFromExt(e.name);
   if((e.flags & FCL_JF_TO_LIBRARY) && kind != FML_K_NONE && gMlOk){
     if(mlAddFile(e.localPath, kind, e.name, FML_O_CLOUD, 0, why, sizeof(why))){
-      sysNotify(e.name, kind == FML_K_AUDIO ? "Descargado en M\xC3\xBAsica" : "Descargado en la Galer\xC3\xAD" "a");
+      ckSay(e.name, kind == FML_K_AUDIO ? "Descargado en M\xC3\xBAsica" : "Descargado en la Galer\xC3\xAD" "a");
       ckMoveRemoteDone(e);
       return;
     }
@@ -867,8 +950,8 @@ static void ckPlaceDownload(const FlexCloudEvent& e){
     flexFsStem(local, stem, sizeof(stem));
     if(!flexFsNewName("/Descargas", stem, dot ? dot : "", dst, sizeof(dst))) dst[0] = 0;
   }
-  if(dst[0] && flexFsMove(e.localPath, dst)){ sysNotify(e.name, "Descargado en Archivos > Descargas"); ckMoveRemoteDone(e); }
-  else sysNotify(e.name, why[0] ? why : "No se pudo guardar la descarga");
+  if(dst[0] && flexFsMove(e.localPath, dst)){ ckSay(e.name, "Descargado en Archivos > Descargas"); ckMoveRemoteDone(e); }
+  else ckSay(e.name, why[0] ? why : "No se pudo guardar la descarga");
 }
 
 // "Subir y liberar espacio": el original se borra AQUI y solo si el aviso lo
@@ -886,7 +969,7 @@ static void ckFreeLocal(const FlexCloudEvent& e){
   char msg[96];
   if(freed) snprintf(msg, sizeof(msg), "En Flex Cloud. Liberados %s del dispositivo", sz);
   else snprintf(msg, sizeof(msg), "En Flex Cloud. El original se conserva");
-  sysNotify(e.name, msg);
+  ckSay(e.name, msg);
 }
 
 // Aviso UNICO cuando la cuenta deja de servir (desvinculada desde la web,
@@ -919,19 +1002,12 @@ static void cloudUiTick(){
     switch(e.kind){
       case FCE_UPLOAD_DONE:
         if(e.flags & FCL_JF_FREE_LOCAL) ckFreeLocal(e);
-        else sysNotify(e.name, e.text[0] ? e.text : "Subido a Flex Cloud");
+        else ckSay(e.name, e.text[0] ? e.text : "Subido a Flex Cloud");
         break;
-      case FCE_UPLOAD_FAILED:   sysNotify(e.name[0] ? e.name : "Flex Cloud", e.text); break;
+      case FCE_UPLOAD_FAILED:   ckSay(e.name[0] ? e.name : "Flex Cloud", e.text); break;
       case FCE_DOWNLOAD_DONE:   ckPlaceDownload(e); break;
-      case FCE_DOWNLOAD_FAILED: sysNotify(e.name[0] ? e.name : "Flex Cloud", e.text); break;
-      case FCE_OP_DONE:         if(!e.ok) sysNotify("Flex Cloud", e.text); break;
-      case FCE_VIEW_READY:
-        // Solo si quien la pidio sigue delante (si no, se queda para la proxima vez).
-        if(e.opId == ckViewOp && ckHost && ckHost->openLocal && millis() - ckVisibleMs < 1000u){ ckViewOp = 0; ckHost->openLocal(e.localPath); }
-        break;
-      case FCE_VIEW_FAILED:
-        if(e.opId == ckViewOp){ ckViewOp = 0; sysNotify(ckViewName[0] ? ckViewName : "Flex Cloud", e.text); }
-        break;
+      case FCE_DOWNLOAD_FAILED: ckSay(e.name[0] ? e.name : "Flex Cloud", e.text); break;
+      case FCE_OP_DONE:         if(!e.ok) ckSay("Flex Cloud", e.text); break;
     }
   }
 }
@@ -942,15 +1018,15 @@ static void ckUploadMl(uint32_t id, bool freeLocal){
   FlexMlRec r;
   if(!mlGet(id, &r) || (r.flags & FML_R_LOCKED)) return;
   char nm[FML_NAME_MAX]; flexMlDisplayName(&r, nm, sizeof(nm));
-  if(const char* block = ckCloudBlock()){ sysNotify("Flex Cloud", block); return; }
+  if(const char* block = ckCloudBlock()){ ckSay("Flex Cloud", block); return; }
   // El nombre visible conserva la extension real del archivo.
   const char* ext = strrchr(r.path, '.');
   char name[FCL_NAME_MAX];
   if(ext && !strrchr(nm, '.')) snprintf(name, sizeof(name), "%s%s", nm, ext); else snprintf(name, sizeof(name), "%s", nm);
   uint32_t job = flexCloudUpload(r.path, name, "root", id, freeLocal ? FCL_JF_FREE_LOCAL : 0);
   if(!job){ ckNotifyFail(nm, "No se pudo poner en cola (demasiadas transferencias)"); return; }
-  sysNotify(nm, freeLocal ? "Subiendo. Se borrar\xC3\xA1 del P4 cuando Flex Cloud confirme la copia"
-                          : "Subiendo a Flex Cloud (Transferencias)");
+  ckSay(nm, freeLocal ? "Subiendo. Se borrar\xC3\xA1 del P4 cuando Flex Cloud confirme la copia"
+                      : "Subiendo a Flex Cloud (Transferencias)");
 }
 
 // #############################################################
@@ -987,7 +1063,7 @@ static void ckUpAskDraw(){
   flxFlush(y - 2, y + h + 2);
 }
 static void ckUpAskOpen(uint32_t mlId){
-  if(const char* block = ckCloudBlock()){ sysNotify("Flex Cloud", block); return; }
+  if(const char* block = ckCloudBlock()){ ckSay("Flex Cloud", block); return; }
   ckUpAskId = mlId; ckUpAskOn = true;
   ckUpAskDraw();
 }

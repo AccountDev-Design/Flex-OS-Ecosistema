@@ -30,6 +30,7 @@ extern unsigned long gNetNowMs;
 extern unsigned gNetTaskCreates;
 extern size_t gNetPsNow, gNetPsPeak;    // PSRAM reservada ahora / pico (heap_caps_malloc)
 extern size_t gNetPsFailAbove;          // >0: heap_caps_malloc falla por encima de esto
+extern size_t gNetPsFree;               // PSRAM libre que dice heap_caps_get_free_size(MALLOC_CAP_SPIRAM)
 extern size_t gNetInternalFree;         // SRAM interna libre que dice heap_caps_get_free_size(MALLOC_CAP_INTERNAL)
 extern size_t gNetInternalBlock;        // y su mayor bloque contiguo
 extern std::function<void()> gNetOnDelay;  // se llama tras CADA vTaskDelay (ya avanzado el reloj): la prueba mira el estado

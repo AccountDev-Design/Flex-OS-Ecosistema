@@ -71,6 +71,7 @@ typedef struct {
   uint16_t permille;            // uso en tanto por mil (0..1000)
   uint8_t  state;               // FCL_Q_*
   char     plan[16];
+  uint32_t rev;                 // 0 = el servidor no lo dice. El telefono lo sube cada vez que cambia SU lista (ver docs/FLEX-MEDIA-ECOSYSTEM.md §16)
 } FclQuota;
 enum { FCL_Q_OK = 0, FCL_Q_LOW, FCL_Q_FULL };
 

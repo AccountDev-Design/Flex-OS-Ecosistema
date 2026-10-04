@@ -645,7 +645,63 @@ bool flexCloudCancel(uint32_t id){ stubCall("cancel " + std::to_string(id)); ret
 bool flexCloudRetry(uint32_t id){ stubCall("retry " + std::to_string(id)); return true; }
 void flexCloudClearFinished(){ stubCall("clear"); }
 int  flexCloudXfers(FlexCloudXfer* out, int cap){ int n = 0; for(auto& x : gStubCloudXfers){ if(n >= cap) break; out[n++] = x; } return n; }
-uint32_t flexCloudFetchForView(const FclItem* it){ stubCall(std::string("view ") + it->id); return ++gStubCloudOp; }
+// ---- Vigilar lo que el telefono esta preparando: la prueba mira QUE se vigila y a quien se le pregunto "ahora" ----
+std::vector<std::string> gStubWatched;                  // el ultimo conjunto que paso la interfaz
+std::vector<std::string> gStubWatchKicks;               // "mira ESTE ya"
+int gStubWatchCalls = 0;
+void flexCloudWatch(const char* const* ids, int n){
+  gStubWatchCalls++;
+  gStubWatched.clear();
+  for(int i = 0; i < n && ids; i++) gStubWatched.push_back(ids[i] ? ids[i] : "");
+}
+void flexCloudWatchKick(const char* id){ if(id) gStubWatchKicks.push_back(id); }
+
+// ---- Foto para el visor (a la RAM): una peticion viva, con el mismo contrato que FlexOS_Cloud.cpp ----
+// La prueba hace de "tarea de la nube": pone el avance (stubViewProgress), entrega la foto (stubViewDeliver) o la falla
+// (stubViewFail). gStubViewLive cuenta los buffers entregados y aun sin liberar: distinto de 0 = una fuga de propiedad.
+#include "esp_heap_caps.h"
+uint32_t    gStubViewOp = 0;
+uint8_t     gStubViewState = FCV_NONE;
+uint32_t    gStubViewGot = 0, gStubViewTotal = 0;
+std::string gStubViewErr;
+std::vector<uint8_t> gStubViewData;
+int         gStubViewLive = 0;                       // buffers tomados y no liberados
+int         gStubViewCancels = 0;
+bool        gStubViewRefuse = false;                 // flexCloudViewStart devuelve 0 (no se pudo encolar)
+uint32_t flexCloudViewStart(const FclItem* it){
+  if(gStubViewRefuse) return 0;
+  stubCall(std::string("view ") + it->id);
+  gStubViewOp = ++gStubCloudOp; gStubViewState = FCV_FETCHING; gStubViewGot = 0; gStubViewTotal = (uint32_t)fclPlaySize(it);
+  gStubViewErr.clear();
+  return gStubViewOp;
+}
+uint8_t flexCloudViewState(uint32_t op, uint32_t* got, uint32_t* total, char* err, size_t cap){
+  if(!op || op != gStubViewOp) return FCV_NONE;
+  if(got) *got = gStubViewGot;
+  if(total) *total = gStubViewTotal;
+  if(err && cap) snprintf(err, cap, "%s", gStubViewState == FCV_FAILED ? gStubViewErr.c_str() : "");
+  return gStubViewState;
+}
+uint8_t* flexCloudViewTake(uint32_t op, uint32_t* len){
+  if(!op || op != gStubViewOp || gStubViewState != FCV_READY || gStubViewData.empty()) return nullptr;
+  uint8_t* p = (uint8_t*)heap_caps_malloc(gStubViewData.size(), MALLOC_CAP_SPIRAM);
+  if(!p) return nullptr;
+  memcpy(p, gStubViewData.data(), gStubViewData.size());
+  if(len) *len = (uint32_t)gStubViewData.size();
+  gStubViewLive++;
+  gStubViewOp = 0; gStubViewState = FCV_NONE;          // desde aqui es de quien la toma
+  return p;
+}
+void flexCloudViewFree(uint8_t* p){ if(p){ heap_caps_free(p); gStubViewLive--; } }
+void flexCloudViewCancel(uint32_t op){
+  if(!op) return;
+  stubCall("view-cancel " + std::to_string(op));
+  gStubViewCancels++;
+  if(op == gStubViewOp){ gStubViewOp = 0; gStubViewState = FCV_NONE; }
+}
+void stubViewProgress(uint32_t got){ gStubViewGot = got; }
+void stubViewDeliver(const std::vector<uint8_t>& jpeg){ gStubViewData = jpeg; gStubViewGot = gStubViewTotal = (uint32_t)jpeg.size(); gStubViewState = FCV_READY; }
+void stubViewFail(const char* why){ gStubViewErr = why; gStubViewState = FCV_FAILED; }
 bool flexCloudPollEvent(FlexCloudEvent* ev){
   if(gStubCloudEvents.empty() || !ev) return false;
   *ev = gStubCloudEvents.front(); gStubCloudEvents.erase(gStubCloudEvents.begin());

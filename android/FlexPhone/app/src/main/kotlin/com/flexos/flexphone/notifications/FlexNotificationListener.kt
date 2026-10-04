@@ -144,6 +144,10 @@ class FlexNotificationListener : NotificationListenerService() {
         val n = sbn ?: return
         val state = FlexPhoneState.instance ?: return
 
+        // 0) Las notificaciones del PROPIO Flex Phone (el servicio de Flex Storage "activo", el avance de preparar un video...) nunca se
+        //    reflejan en el P4: no son del usuario y se repiten con cada avance. Aunque alguien permitiera este paquete a mano.
+        if (n.packageName == packageName) return
+
         // 1) Filtro por app. Si el usuario no la permitio, ni se mira.
         if (!state.settings.isPackageAllowed(n.packageName)) return
 
