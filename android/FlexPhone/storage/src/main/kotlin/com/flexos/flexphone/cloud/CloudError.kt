@@ -39,6 +39,10 @@ object E {
     fun partConflict() = CloudError(409, "part_conflict", "Esa parte ya se recibió con otro contenido.")
     fun incomplete(missing: List<Int>) = CloudError(409, "incomplete_upload", "Faltan partes por subir.", mapOf("missing" to missing))
     fun range(size: Long) = CloudError(416, "range_not_satisfiable", "El rango pedido no existe en el archivo.", mapOf("size" to size))
+    fun notReady(state: String, reason: String?) = CloudError(
+        409, "not_ready", reason ?: "Todavía no está listo para reproducirse en Flex OS (estado: $state).",
+        mapOf("state" to state),
+    )
     fun rateLimited() = CloudError(429, "rate_limited", "Demasiadas solicitudes. Espera un momento.")
     fun folderCycle() = CloudError(400, "folder_cycle", "No puedes mover una carpeta dentro de sí misma.")
     fun linkInvalid() = CloudError(403, "link_invalid", "El enlace no es válido o caducó.")

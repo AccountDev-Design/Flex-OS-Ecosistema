@@ -68,10 +68,28 @@ class CloudStore(
     class FileRec(
         val id: String, var parentId: String?, var name: String, var nameKey: String,
         val storageKey: String, val size: Long, val mime: String, val kind: String, val sha256: String,
-        var version: Int, val source: String, val metadata: Map<String, Any?>?,
+        var version: Int, val source: String, var metadata: Map<String, Any?>?,
         var thumbKey: String? = null, var thumbMime: String? = null, var thumbSize: Long = 0,
         val createdAt: Long, var updatedAt: Long,
         var deletedAt: Long? = null, var trashRoot: Boolean = false, var trashBatch: String? = null,
+    ) {
+        /** Lo que hay que saber para que el P4 lo reproduzca (null = todavia no se ha mirado, o no es multimedia). */
+        var playable: Playable? = null
+    }
+
+    /**
+     * El estado de un archivo multimedia respecto al PERFIL de Flex OS (ver `media/MediaProfile`):
+     *  native      ya vale tal cual, se reproduce el original;
+     *  pending     esperando turno para prepararlo;   preparing  convirtiendose ahora ([progress] 0..99);
+     *  ready       hay una version del perfil guardada ([key], [size]...); se reproduce esa;
+     *  failed      se intento y no salio ([reason]), se puede reintentar;
+     *  unsupported ni el P4 ni este telefono saben convertirlo ([reason]);
+     *  corrupt     el archivo esta roto o cortado ([reason]).
+     */
+    class Playable(
+        var state: String, var plan: String, var reason: String? = null, var progress: Int = 0,
+        var key: String? = null, var size: Long = 0, var mime: String? = null, var sha256: String? = null,
+        var meta: Map<String, Any?>? = null, var updatedAt: Long = 0,
     )
 
     class Upload(
@@ -98,6 +116,8 @@ class CloudStore(
     // El indice no se pudo leer al arrancar: los objetos del disco NO se tratan
     // como huerfanos (borrarlos seria perder los archivos por un indice roto).
     private var indexWasDamaged = false
+    /** Se avisa (fuera del cerrojo) cuando un archivo nuevo ya esta guardado: la cola multimedia lo recoge. */
+    @Volatile var onFileReady: ((String) -> Unit)? = null
     @Volatile private var freeCacheMs = 0L
     @Volatile private var freeCache = 0L
 
@@ -140,7 +160,7 @@ class CloudStore(
                 m["thumbKey"] as? String, m["thumbMime"] as? String, m["thumbSize"].jsonLong() ?: 0,
                 m["createdAt"].jsonLong() ?: 0, m["updatedAt"].jsonLong() ?: 0,
                 m["deletedAt"].jsonLong(), m["trashRoot"] == true, m["trashBatch"] as? String,
-            )
+            ).also { f -> (m["playable"] as? Map<String, Any?>)?.let { f.playable = playableFrom(it) } }
         }
         for (m in (root["uploads"] as? List<Map<String, Any?>>).orEmpty()) {
             val id = m["id"] as? String ?: continue
@@ -167,8 +187,22 @@ class CloudStore(
         "size" to f.size, "mime" to f.mime, "kind" to f.kind, "sha256" to f.sha256, "version" to f.version,
         "source" to f.source, "metadata" to f.metadata, "thumbKey" to f.thumbKey, "thumbMime" to f.thumbMime,
         "thumbSize" to f.thumbSize, "createdAt" to f.createdAt, "updatedAt" to f.updatedAt, "deletedAt" to f.deletedAt,
-        "trashRoot" to f.trashRoot, "trashBatch" to f.trashBatch,
+        "trashRoot" to f.trashRoot, "trashBatch" to f.trashBatch, "playable" to f.playable?.let(::playableMap),
     )
+
+    private fun playableMap(p: Playable) = linkedMapOf<String, Any?>(
+        "state" to p.state, "plan" to p.plan, "reason" to p.reason, "key" to p.key, "size" to p.size, "mime" to p.mime,
+        "sha256" to p.sha256, "meta" to p.meta, "updatedAt" to p.updatedAt,
+    )
+
+    @Suppress("UNCHECKED_CAST")
+    private fun playableFrom(m: Map<String, Any?>): Playable? {
+        val st = m["state"] as? String ?: return null
+        // Lo que estaba convirtiendose cuando el telefono se apago vuelve a la cola.
+        val state = if (st == "preparing") "pending" else st
+        return Playable(state, m["plan"] as? String ?: "none", m["reason"] as? String, 0, m["key"] as? String, m["size"].jsonLong() ?: 0,
+            m["mime"] as? String, m["sha256"] as? String, m["meta"] as? Map<String, Any?>, m["updatedAt"].jsonLong() ?: 0)
+    }
 
     private fun uploadMap(u: Upload) = linkedMapOf<String, Any?>(
         "id" to u.id, "parentId" to u.parentId, "name" to u.name, "mime" to u.mime, "size" to u.size,
@@ -207,8 +241,9 @@ class CloudStore(
         return freeCache
     }
 
-    private fun usedBytes() = files.values.sumOf { it.size }
-    private fun trashBytes() = files.values.filter { it.deletedAt != null }.sumOf { it.size }
+    private fun variantBytes(f: FileRec): Long = f.playable?.takeIf { it.key != null }?.size ?: 0L
+    private fun usedBytes() = files.values.sumOf { it.size + variantBytes(it) }
+    private fun trashBytes() = files.values.filter { it.deletedAt != null }.sumOf { it.size + variantBytes(it) }
     private fun reservedBytes() = uploads.values.filter { it.live() }.sumOf { it.size }
     private fun receivedOf(u: Upload): Long = u.parts.keys.sumOf { expectedPartSize(u, it) }
 
@@ -307,7 +342,22 @@ class CloudStore(
         "mime" to f.mime, "kind" to f.kind, "sha256" to f.sha256, "version" to f.version, "status" to "ready",
         "storageLocation" to "phone", "source" to f.source, "hasThumbnail" to (f.thumbKey != null),
         "metadata" to f.metadata, "createdAt" to f.createdAt, "updatedAt" to f.updatedAt,
-    ).also { if (f.deletedAt != null) it["deletedAt"] = f.deletedAt }
+    ).also {
+        if (f.deletedAt != null) it["deletedAt"] = f.deletedAt
+        f.playable?.let { p -> it["playable"] = playableView(f, p) }
+    }
+
+    /** `playable` en el JSON: que hay que saber para abrirlo en el P4 (y que dice el telefono mientras lo prepara). */
+    private fun playableView(f: FileRec, p: Playable): Map<String, Any?> {
+        val m = linkedMapOf<String, Any?>("state" to p.state, "plan" to p.plan, "profile" to MEDIA_PROFILE)
+        when (p.state) {
+            "native" -> { m["size"] = f.size; m["mime"] = f.mime; f.metadata?.let { md -> for (k in PLAYABLE_FACTS) md[k]?.let { v -> m[k] = v } } }
+            "ready" -> { m["size"] = p.size; m["mime"] = p.mime; p.meta?.let { md -> for (k in PLAYABLE_FACTS) md[k]?.let { v -> m[k] = v } } }
+            "preparing" -> m["progress"] = p.progress
+            "failed", "unsupported", "corrupt" -> m["reason"] = p.reason
+        }
+        return m
+    }
 
     fun createFolder(body: Map<String, Any?>): Map<String, Any?> = synchronized(lock) {
         val clean = Names.normalizeName(body["name"])
@@ -550,8 +600,8 @@ class CloudStore(
 
     private fun purgeBatch(batch: String): Purged {
         val gone = files.values.filter { it.trashBatch == batch }
-        val bytes = gone.sumOf { it.size }
-        val keys = gone.flatMap { listOfNotNull(it.storageKey, it.thumbKey) }
+        val bytes = gone.sumOf { it.size + variantBytes(it) }
+        val keys = gone.flatMap { listOfNotNull(it.storageKey, it.thumbKey, it.playable?.key) }
         for (f in gone) files.remove(f.id)
         val fids = folders.values.filter { it.trashBatch == batch }.map { it.id }
         for (fid in fids) {
@@ -854,6 +904,7 @@ class CloudStore(
         }
         store.removeUpload(u.id)
         log("subida completada ${u.id} -> ${u.fileId}")
+        u.fileId?.let { announce(it) }
         return synchronized(lock) { uploadView(u) }
     }
 
@@ -933,7 +984,111 @@ class CloudStore(
             files[fid] = FileRec(fid, parent, final, Names.nameKey(final), key, h.size, mime, Names.kindFor(mime), h.sha256, 1, "phone", null, createdAt = t, updatedAt = t)
             save()
             fileView(files[fid]!!)
+        }.also { v -> (v["id"] as? String)?.let { announce(it) } }
+    }
+
+
+    // ------------------------------------------------------- multimedia (perfil de Flex OS)
+    private fun announce(id: String) { try { onFileReady?.invoke(id) } catch (e: Exception) { log("aviso multimedia fallido") } }
+
+    /** Lo que la cola multimedia necesita de un archivo. */
+    class MediaSource(val id: String, val key: String, val size: Long, val name: String, val mime: String, val kind: String,
+                      val metadata: Map<String, Any?>?, val hasThumb: Boolean, val playableState: String?, val sha256: String)
+
+    fun mediaSource(id: String): MediaSource? = synchronized(lock) {
+        val f = files[id]?.takeIf { it.deletedAt == null } ?: return null
+        MediaSource(f.id, f.storageKey, f.size, f.name, f.mime, f.kind, f.metadata, f.thumbKey != null, f.playable?.state, f.sha256)
+    }
+
+    /** Archivos multimedia vivos que aun no se han mirado o que se quedaron en cola (para reanudar tras reiniciar). */
+    fun mediaToPrepare(): List<String> = synchronized(lock) {
+        files.values.filter { it.deletedAt == null && it.kind in MEDIA_KINDS && (it.playable == null || it.playable!!.state == "pending" || (it.playable!!.state == "unsupported" && it.playable!!.plan != "none")) }.map { it.id }
+    }
+
+    fun originalFile(key: String): File = store.fileOf(key)
+    fun newTempFile(prefix: String): File = store.newTempFile(prefix)
+
+    /** ¿Cabe [bytes] mas (cuota y espacio real del telefono)? */
+    fun canFit(bytes: Long): Boolean = synchronized(lock) { availableBytes().first >= bytes }
+
+    /** Los datos que el analizador SI leyo pasan a `metadata` (los del cliente que no coincidan se conservan). */
+    fun mergeMetadata(id: String, facts: Map<String, Any?>) = synchronized(lock) {
+        val f = files[id] ?: return@synchronized
+        val m = LinkedHashMap<String, Any?>(f.metadata ?: emptyMap())
+        m.putAll(facts)
+        f.metadata = m
+        dirty = true
+    }
+
+    /** Cambia el estado de preparacion. Los cambios de estado se guardan; el progreso solo vive en memoria. */
+    fun setPlayable(id: String, state: String, plan: String, reason: String? = null) = synchronized(lock) {
+        val f = files[id] ?: return@synchronized
+        val old = f.playable
+        val p = Playable(state, plan, reason, 0, old?.key, old?.size ?: 0, old?.mime, old?.sha256, old?.meta, now())
+        f.playable = p
+        save()
+    }
+
+    fun setPlayableProgress(id: String, pct: Int) = synchronized(lock) {
+        val p = files[id]?.playable ?: return@synchronized
+        if (p.state == "preparing") p.progress = pct.coerceIn(0, 99)
+    }
+
+    /**
+     * Guarda [tmp] (un temporal de este almacen) como la version del perfil de [id]. null = no cabia o el archivo
+     * ya no existe. La cuota incluye la version: es espacio que ocupa de verdad.
+     */
+    fun attachVariant(id: String, tmp: File, mime: String, meta: Map<String, Any?>, plan: String): Boolean {
+        val size = tmp.length()
+        val ok = synchronized(lock) { files[id]?.deletedAt == null && files[id] != null && availableBytes().first >= size }
+        if (!ok) { tmp.delete(); return false }
+        val key = store.newStorageKey()
+        val h = store.adoptFile(key, tmp)
+        var orphan = false
+        var old: String? = null
+        synchronized(lock) {
+            val f = files[id]
+            if (f == null) orphan = true
+            else {
+                old = f.playable?.key
+                f.playable = Playable("ready", plan, null, 0, key, h.size, mime, h.sha256, meta, now())
+                save()
+            }
         }
+        val drop = if (orphan) key else old
+        if (drop != null) try { store.remove(drop) } catch (e: Exception) { /* lo recoge recover() */ }
+        return !orphan
+    }
+
+    /** Lo que se sirve al P4: la version del perfil si la hay, el original si ya vale tal cual; si no, `not_ready`. */
+    fun playableDownload(id: String): Download = synchronized(lock) {
+        val f = file(id)
+        val p = f.playable ?: throw E.notReady("unknown", "Este archivo todavía no se ha preparado para Flex OS.")
+        when (p.state) {
+            "native" -> Download(f.storageKey, f.size, f.mime, f.name, f.sha256, f.updatedAt)
+            "ready" -> Download(p.key!!, p.size, p.mime ?: "application/octet-stream", derivedName(f.name, p.mime), p.sha256 ?: "", p.updatedAt)
+            else -> throw E.notReady(p.state, p.reason)
+        }
+    }
+
+    private fun derivedName(name: String, mime: String?): String {
+        val stem = name.substringBeforeLast('.', name)
+        val ext = when (mime) { "video/x-msvideo" -> ".avi"; "audio/wav" -> ".wav"; "image/jpeg" -> ".jpg"; else -> "" }
+        return stem + ext
+    }
+
+    /** Reintenta lo que fallo (o lo que no se pudo convertir porque aun no habia conversor). */
+    fun retryPrepare(id: String): Map<String, Any?> {
+        synchronized(lock) {
+            val f = file(id)
+            val p = f.playable
+            if (f.kind !in MEDIA_KINDS) throw E.invalid("Este archivo no es multimedia.")
+            if (p != null && p.state in setOf("pending", "preparing", "native", "ready")) return fileView(f)
+            f.playable = Playable("pending", p?.plan ?: "none", null, 0, null, 0, null, null, null, now())
+            save()
+        }
+        announce(id)
+        return synchronized(lock) { fileView(file(id)) }
     }
 
     // ------------------------------------------------------------ mantenimiento
@@ -952,7 +1107,7 @@ class CloudStore(
         }
         // Objetos que ningun registro reclama: un borrado definitivo interrumpido.
         val keys = HashSet<String>()
-        for (f in files.values) { keys.add(f.storageKey); f.thumbKey?.let(keys::add) }
+        for (f in files.values) { keys.add(f.storageKey); f.thumbKey?.let(keys::add); f.playable?.key?.let(keys::add) }
         for (u in uploads.values) if (u.live()) keys.add(u.storageKey)
         if (!indexWasDamaged) store.sweepOrphans(keys)
         save()
@@ -962,9 +1117,13 @@ class CloudStore(
     // ------------------------------------------------------------ utilidades
     companion object {
         const val PAGE_MAX = 200
+        val MEDIA_KINDS = setOf("photo", "video", "audio")
         const val MAX_DEPTH = 64
-        private val META_INT = setOf("width", "height", "durationMs", "takenAt", "orientation")
-        private val META_STR = setOf("device", "localPath", "origin")
+        // El cliente puede mandar estos; el analizador del telefono (MediaAnalyzer) rellena los de medios.
+        private val META_INT = setOf("width", "height", "durationMs", "takenAt", "orientation", "fpsX100", "sampleRate", "channels")
+        private val META_STR = setOf("device", "localPath", "origin", "container", "codec", "audioCodec")
+        const val MEDIA_PROFILE = "flexos-ultra-v1"
+        private val PLAYABLE_FACTS = listOf("width", "height", "durationMs", "fpsX100", "sampleRate", "channels", "container", "codec", "audioCodec")
 
         fun isHex64(s: String) = s.length == 64 && s.all { it in '0'..'9' || it in 'a'..'f' }
         fun ceilDiv(a: Long, b: Long): Int = ((a + b - 1) / b).toInt()

@@ -224,7 +224,12 @@ class CloudServer(
         val (status, body) = errorBody(e)
         // Error a mitad de recibir un cuerpo grande: se cierra en vez de leerlo.
         if (c.body.remaining > 64 * 1024) c.closeAfter = true
-        val extra = if (status == 429) listOf("Retry-After" to "60") else emptyList()
+        val extra = when {
+            status == 429 -> listOf("Retry-After" to "60")
+            // 416: dice cuanto mide el archivo, como manda la RFC 9110 (los reproductores lo usan para recolocarse).
+            status == 416 && e is CloudError -> listOf("Content-Range" to "bytes */${e.details?.get("size") ?: 0}")
+            else -> emptyList()
+        }
         c.headSent = true
         try { writeJson(c.out, status, body, c.req.keepAlive && !c.closeAfter, extra) } catch (x: IOException) { c.closeAfter = true }
     }
@@ -317,7 +322,7 @@ class CloudServer(
                 else -> throw E.methodNotAllowed()
             }
         }
-        mt = Regex("^/files/$idRe/(restore|permanent-delete|thumbnail|link)$").matchEntire(r)
+        mt = Regex("^/files/$idRe/(restore|permanent-delete|thumbnail|link|playable|prepare)$").matchEntire(r)
         if (mt != null) {
             val id = mt.groupValues[1]
             when (mt.groupValues[2] to m) {
@@ -329,6 +334,8 @@ class CloudServer(
                     return ok(c, cloud.setThumbnail(id, c.body.readAllBounded(cloud.cfg.thumbMaxBytes), mime))
                 }
                 "thumbnail" to "GET", "thumbnail" to "HEAD" -> return sendThumb(c, id)
+                "playable" to "GET", "playable" to "HEAD" -> return sendFile(c, cloud.playableDownload(id), true, crossOrigin = false)
+                "prepare" to "POST" -> return ok(c, mapOf("file" to cloud.retryPrepare(id)))
                 "link" to "POST" -> {
                     val (token, exp) = cloud.signLink(id)
                     val host = c.localAddr.hostAddress?.let { if (it.contains(':')) "[$it]" else it } ?: "127.0.0.1"

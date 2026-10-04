@@ -27,6 +27,9 @@ object MediaProfile {
     const val PHOTO_MAX_BYTES = 8L shl 20
     const val PHOTO_TARGET_SIDE = 1600
     const val PHOTO_TARGET_QUALITY = 85
+    /** Una foto compatible mas pesada que esto (o de mas de 2400 px) tambien tiene vista previa ligera. */
+    const val PHOTO_PREVIEW_MIN_BYTES = 1_500_000L
+    const val PHOTO_PREVIEW_MIN_SIDE = 2400
 
     /** Miniatura: el P4 la decodifica a 132x132 con recorte central; y su respuesta JSON cabe en 48 KB. */
     const val THUMB_SIDE = 256

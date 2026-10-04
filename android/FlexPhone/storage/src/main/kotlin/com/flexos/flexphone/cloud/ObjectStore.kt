@@ -216,6 +216,26 @@ class ObjectStore(
         return RangeStream(raf, end - start + 1)
     }
 
+    /** Un archivo temporal en la carpeta de temporales del almacen (mismo disco que los objetos: adoptarlo es un renombrado). */
+    fun newTempFile(prefix: String): File = newTmp(prefix)
+
+    /** El archivo de un objeto, solo para LEERLO (el conversor lo abre por su ruta). */
+    fun fileOf(key: String): File = objFile(key)
+
+    /** Publica [f] (un temporal de este almacen) como objeto [key]: SHA-256 y renombrado atomico. */
+    fun adoptFile(key: String, f: File): Hashed {
+        val md = MessageDigest.getInstance("SHA-256")
+        var size = 0L
+        f.inputStream().use { inp ->
+            val buf = ByteArray(1 shl 20)
+            while (true) { val r = inp.read(buf); if (r < 0) break; md.update(buf, 0, r); size += r }
+        }
+        val dst = objFile(key)
+        dst.parentFile?.let { if (!it.isDirectory && !it.mkdirs()) throw IOException("no se pudo crear la carpeta del objeto") }
+        if (!f.renameTo(dst)) throw IOException("no se pudo guardar el objeto")
+        return Hashed(size, hex(md.digest()))
+    }
+
     fun readSmall(key: String, max: Int): ByteArray {
         val f = objFile(key)
         if (f.length() > max) throw IOException("objeto demasiado grande")

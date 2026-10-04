@@ -25,7 +25,7 @@ class AviHeader(
     val moviEnd: Long,
 ) {
     val fpsX100: Int? get() = if (usPerFrame in 1..9_999_999) (100_000_000L / usPerFrame).toInt() else null
-    val durationMs: Long? get() = if (usPerFrame in 1..9_999_999 && totalFrames > 0) totalFrames * usPerFrame / 1000 else null
+    val durationMs: Long? get() = if (usPerFrame in 1..9_999_999 && totalFrames > 0) (totalFrames * usPerFrame + 500) / 1000 else null
 }
 
 /** Lo que dice el indice `idx1` (si lo hay) sobre los fotogramas de vídeo. */
@@ -143,20 +143,31 @@ object Avi {
      * necesitar idx1). [cb] devuelve false para parar. Trozos vacios = fotograma repetido.
      */
     fun forEachFrame(src: ByteSource, h: AviHeader, cb: (index: Int, jpeg: ByteArray) -> Boolean) {
-        var p = h.moviPos + 4
+        val c = FrameCursor(src, h)
         var n = 0
-        while (p + 8 <= h.moviEnd) {
-            val hd = src.bytes(p, 8) ?: return
-            val id = hd.tag(0)
-            val len = hd.u32le(4)
-            if (id == "LIST") { p += 12; continue }                        // 'LIST rec ': entra
-            val isVideo = id.length == 4 && id[2] == 'd' && (id[3] == 'c' || id[3] == 'b')
-            if (isVideo) {
-                if (len > MAX_FRAME) throw IOException("fotograma absurdo")
-                val body = src.bytes(p + 8, len.toInt(), 8 shl 20) ?: return
-                if (!cb(n++, body)) return
+        while (true) { val f = c.next() ?: return; if (!cb(n++, f)) return }
+    }
+
+    /** Lo mismo pero a demanda (un fotograma por llamada): lo que necesita una fuente de vídeo. */
+    class FrameCursor(private val src: ByteSource, private val h: AviHeader) {
+        private var p = h.moviPos + 4
+        /** El siguiente fotograma de vídeo (vacio = repite el anterior), o null al terminar. */
+        fun next(): ByteArray? {
+            while (p + 8 <= h.moviEnd) {
+                val hd = src.bytes(p, 8) ?: return null
+                val id = hd.tag(0)
+                val len = hd.u32le(4)
+                if (id == "LIST") { p += 12; continue }                        // 'LIST rec ': entra
+                val isVideo = id.length == 4 && id[2] == 'd' && (id[3] == 'c' || id[3] == 'b')
+                if (isVideo) {
+                    if (len > MAX_FRAME) throw IOException("fotograma absurdo")
+                    val body = src.bytes(p + 8, len.toInt(), 8 shl 20) ?: return null
+                    p += 8 + len + (len and 1)
+                    return body
+                }
+                p += 8 + len + (len and 1)
             }
-            p += 8 + len + (len and 1)
+            return null
         }
     }
 }
