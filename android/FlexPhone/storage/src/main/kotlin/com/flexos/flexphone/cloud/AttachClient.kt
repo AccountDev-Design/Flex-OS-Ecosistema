@@ -1,53 +1,7 @@
 package com.flexos.flexphone.cloud
 
 import java.io.IOException
-import java.net.HttpURLConnection
 import java.net.InetAddress
-import java.net.URL
-import java.net.URLEncoder
-
-/** POST de un formulario (en Android y en la JVM: HttpURLConnection). */
-fun interface FormPoster {
-    /** Estado HTTP y cuerpo. Lanza IOException si no hay conexion. */
-    fun post(url: String, form: Map<String, String>, timeoutMs: Int): Pair<Int, String>
-}
-
-object UrlFormPoster : FormPoster {
-    override fun post(url: String, form: Map<String, String>, timeoutMs: Int): Pair<Int, String> {
-        val body = form.entries.joinToString("&") { (k, v) -> URLEncoder.encode(k, "UTF-8") + "=" + URLEncoder.encode(v, "UTF-8") }
-            .toByteArray(Charsets.UTF_8)
-        val c = URL(url).openConnection() as HttpURLConnection
-        try {
-            c.requestMethod = "POST"
-            c.connectTimeout = timeoutMs
-            c.readTimeout = timeoutMs
-            c.instanceFollowRedirects = false
-            c.useCaches = false
-            c.doOutput = true
-            // La web del P4 exige esta cabecera en todo lo que cambia algo (CSRF).
-            c.setRequestProperty("X-Flex", "1")
-            c.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
-            c.setFixedLengthStreamingMode(body.size)
-            c.outputStream.use { it.write(body) }
-            val code = c.responseCode
-            val stream = if (code >= 400) c.errorStream else c.inputStream
-            // Sin readNBytes(): en Android solo existe desde la API 33 y la app arranca en la 26.
-            val text = stream?.use { s ->
-                val out = java.io.ByteArrayOutputStream()
-                val buf = ByteArray(4096)
-                while (out.size() < 64 * 1024) {
-                    val r = s.read(buf)
-                    if (r < 0) break
-                    out.write(buf, 0, minOf(r, 64 * 1024 - out.size()))
-                }
-                String(out.toByteArray(), Charsets.UTF_8)
-            } ?: ""
-            return code to text
-        } finally {
-            c.disconnect()
-        }
-    }
-}
 
 /**
  * EMPAREJAR ESTE TELEFONO CON UN FLEX OS (lado telefono).
@@ -73,18 +27,22 @@ class AttachClient(
     private val phone: PhoneInfo,
     private val serverPort: Int,
     private val repo: PairingRepo,
-    private val poster: FormPoster = UrlFormPoster,
+    private val poster: FormPoster = LocalHttpPoster(),
     private val now: () -> Long = System::currentTimeMillis,
     private val sleep: (Long) -> Unit = { Thread.sleep(it) },
+    /** Para una IP de Flex OS que no responde: una pista sobre la red del telefono (o null). Ver [lanHint]. */
+    private val lanHint: (p4Ip: String) -> String? = { null },
 ) {
     sealed class Result {
         data class Paired(val p4Name: String, val p4Id: String) : Result()
-        data class Failed(val message: String) : Result()
+        data class Failed(val message: String, val detail: String = "") : Result()
     }
 
     companion object {
         const val POLL_MS = 1500L
         const val TOTAL_MS = 120_000L
+        const val CONNECT_ATTEMPTS = 3
+        const val CONNECT_RETRY_MS = 1_000L
 
         /** "a.b.c.d:puerto" de la red LOCAL, o null. Nada de nombres ni de IPs publicas. */
         fun parseHost(h: String?): Pair<String, Int>? {
@@ -116,9 +74,20 @@ class AttachClient(
             form["kp4"] = old.p4Id
             form["known"] = StorageCrypto.hex(StorageCrypto.knownProof(old.key, offer))
         }
-        val (st, txt) = try { poster.post("$base/api/fs/phone/pair", form, 15_000) } catch (e: IOException) {
-            return Result.Failed("No se pudo hablar con Flex OS. Comprueba que el teléfono y Flex OS están en la misma Wi‑Fi.")
+        // Un fallo ANTES de que el pedido llegue (sin ruta, puerto cerrado) se repite: no gasta la
+        // oferta de un solo uso, y una Wi-Fi que acaba de despertar tarda un par de segundos.
+        // Uno que ocurre DESPUES de mandarlo no se repite: la oferta pudo gastarse.
+        var first: Pair<Int, String>? = null
+        var attempt = 0
+        while (first == null) {
+            if (cancelled()) return Result.Failed("Cancelado.")
+            try { first = poster.post("$base/api/fs/phone/pair", form, 15_000) } catch (e: IOException) {
+                attempt++
+                if (e is HttpStageException && e.requestNotDelivered && attempt < CONNECT_ATTEMPTS) { sleep(CONNECT_RETRY_MS); continue }
+                return explain(e, hp)
+            }
         }
+        val (st, txt) = first
         val j = try { Json.parseObject(txt) } catch (e: JsonException) { emptyMap() }
         if (st != 202 && st != 200) return Result.Failed((j["error"] as? String) ?: "Flex OS rechazó la conexión ($st).")
         val pairId = (j["pairId"] as? String)?.takeIf { Regex("^[a-f0-9]{16,32}$").matches(it) } ?: return Result.Failed("Respuesta inesperada de Flex OS.")
@@ -130,11 +99,14 @@ class AttachClient(
         if (j["approve"].jsonLong() != 0L) onSas(StorageCrypto.sas(key), p4Name)
         val proof = StorageCrypto.hex(StorageCrypto.phoneProof(key, pairId))
         val until = now() + TOTAL_MS
+        var lastNetErr: IOException? = null
         while (now() < until) {
             if (cancelled()) return Result.Failed("Cancelado.")
             val (ps, ptxt) = try { poster.post("$base/api/fs/phone/pair/$pairId", mapOf("proof" to proof), 10_000) } catch (e: IOException) {
+                lastNetErr = e
                 sleep(POLL_MS); continue                     // un hipo de la Wi-Fi no tira el emparejamiento
             }
+            lastNetErr = null
             val pj = try { Json.parseObject(ptxt) } catch (e: JsonException) { emptyMap() }
             when {
                 ps == 200 && pj["state"] == "approved" -> {
@@ -151,6 +123,31 @@ class AttachClient(
                 else -> sleep(POLL_MS)
             }
         }
+        // Si lo ULTIMO que paso fue un fallo de red, el motivo no es "no lo aprobaron": se perdio la comunicacion.
+        lastNetErr?.let { return explain(it, hp, lost = true) }
         return Result.Failed("Se acabó el tiempo para aprobarlo en Flex OS. Vuelve a intentarlo.")
+    }
+
+    /** Dice QUE paso fallo (y no un unico "no se pudo hablar con Flex OS" para todo). */
+    private fun explain(e: IOException, hp: Pair<String, Int>, lost: Boolean = false): Result.Failed {
+        val t = "${hp.first}:${hp.second}"
+        val detail = e.message ?: e.javaClass.simpleName
+        val stage = (e as? HttpStageException)?.stage
+        val lead = if (lost) "Se perdió la comunicación con Flex OS mientras esperaba su aprobación. " else ""
+        val msg = when (stage) {
+            HttpStage.UNREACHABLE ->
+                lead + "El teléfono no llega a Flex OS ($t). " +
+                    (lanHint(hp.first) ?: "Comprueba que los dos usan la misma red Wi‑Fi y que el router no aísla a los clientes entre sí (aislamiento de clientes o red de invitados).")
+            HttpStage.REFUSED ->
+                lead + "El teléfono llegó a la dirección de Flex OS ($t), pero su servidor web no aceptó la conexión. " +
+                    "Vuelve a abrir la web de Flex OS y pulsa «Activar Flex Cloud» otra vez."
+            HttpStage.NO_REPLY ->
+                lead + "Flex OS ($t) aceptó la conexión pero no contestó a tiempo. Vuelve a intentarlo; si se repite, reinicia Flex OS."
+            HttpStage.BAD_REPLY ->
+                lead + "Lo que hay en $t no contestó como Flex OS. Comprueba que la dirección del enlace es la de tu Flex OS."
+            HttpStage.NOT_LOCAL -> "La dirección de Flex OS no es de la red local."
+            null -> lead + "No se pudo hablar con Flex OS ($t)."
+        }
+        return Result.Failed(msg, detail)
     }
 }

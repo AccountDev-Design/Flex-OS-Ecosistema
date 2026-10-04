@@ -2,8 +2,10 @@ package com.flexos.flexphone.link
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
 import java.net.Inet4Address
+import java.net.Socket
 
 /**
  * LA DIRECCION WI-FI DE ESTE TELEFONO, preguntada a Android y no adivinada.
@@ -23,7 +25,14 @@ import java.net.Inet4Address
 object NetAddress {
 
     /** Lo que se sabe de la Wi-Fi ahora mismo. null = no hay red Wi-Fi con IPv4 privada. */
-    data class WifiInfo(val address: Inet4Address, val interfaceName: String?)
+    data class WifiInfo(
+        val address: Inet4Address,
+        val interfaceName: String?,
+        /** La mascara REAL de la red (el prefijo que da Android), no un /24 supuesto. */
+        val prefixLength: Int = 24,
+        /** La red Wi-Fi de Android: por ella se abren los sockets hacia Flex OS. */
+        val network: Network? = null,
+    )
 
     @Suppress("DEPRECATION")
     fun wifi(ctx: Context): WifiInfo? {
@@ -35,12 +44,20 @@ object NetAddress {
             for (la in lp.linkAddresses) {
                 val a = la.address
                 if (a is Inet4Address && !a.isLoopbackAddress && a.isSiteLocalAddress) {
-                    return WifiInfo(a, lp.interfaceName)
+                    return WifiInfo(a, lp.interfaceName, la.prefixLength, n)
                 }
             }
         }
         return null
     }
+
+    /**
+     * Un socket nuevo que sale POR LA WI-FI aunque Android haya elegido los datos moviles como
+     * red predeterminada (una Wi-Fi sin Internet): sin esto, una conexion a 192.168.x.x puede
+     * intentar salir por la red movil y no llegar nunca. Sin Wi-Fi, un socket normal.
+     */
+    fun wifiSocket(ctx: Context): Socket =
+        runCatching { wifi(ctx)?.network?.socketFactory?.createSocket() }.getOrNull() ?: Socket()
 
     fun wifiIpv4(ctx: Context): String? = wifi(ctx)?.address?.hostAddress
     fun wifiInterface(ctx: Context): String? = wifi(ctx)?.interfaceName

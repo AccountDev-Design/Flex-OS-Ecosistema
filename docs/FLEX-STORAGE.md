@@ -230,6 +230,45 @@ Cloud → Usar este enlace*, y (4) un enlace `intent://` con el paquete exacto
 (`com.flexos.flexphone`). Causas habituales: la APK instalada es anterior a Flex Storage (no tiene
 la actividad `flexstorage://`), o la página se abrió desde la cámara.
 
+### 4.3 «No se activó · No se pudo hablar con Flex OS» con el enlace abierto
+
+**Quién llama a quién.** Hay DOS canales distintos y que uno funcione no prueba el otro:
+
+| Canal | Quién inicia | A dónde | Qué prueba |
+|---|---|---|---|
+| Enlace Flex Phone (la pantalla *Conexión* del P4: «conectado», latencia) | P4 | teléfono `192.168.1.2:47820`, TCP propio | que el P4 llega al teléfono |
+| Emparejar Flex Cloud (`flexstorage://attach?h=<ip:puerto>&o=<oferta>`) | **teléfono** | web del P4 `http://192.168.1.4:<puerto>/api/fs/phone/pair` | que el teléfono llega al P4 y habla HTTP |
+| Sesión Flex Cloud (ya emparejado) | P4 | servidor de Flex Cloud del teléfono (puerto que el teléfono declara en el emparejamiento) | almacenamiento |
+
+Que el P4 tenga `192.168.1.4` y el teléfono `192.168.1.2` es lo normal: misma LAN, IP distinta. Ningún
+código compara IPs para decidir nada (`Lan.sameSubnet` usa la máscara REAL que da Android, y solo
+para dar una pista cuando algo falla).
+
+**La causa.** `AttachClient` hablaba con el P4 con `HttpURLConnection`. Android 9+ **prohíbe el HTTP
+en claro** en esa pila (la app apunta a la API 35 y no declara nada), y lo hace lanzando una
+`IOException` («Cleartext HTTP traffic to 192.168.1.4 not permitted») *antes* de abrir ningún socket.
+Cualquier `IOException` se contaba como «no se pudo hablar con Flex OS… misma Wi‑Fi», así que con la
+Wi‑Fi perfecta y el enlace abierto fallaba siempre. En la JVM del PC esa regla no existe: ninguna
+prueba lo veía.
+
+**La corrección.** `LocalHttpPoster` (módulo `:storage`) habla HTTP sobre un `Socket` propio, solo
+con IPv4 literales de la red local (nada de nombres ni de Internet), y la app abre ese socket por la
+red **Wi‑Fi** (`NetAddress.wifiSocket`) aunque Android haya elegido los datos móviles (una Wi‑Fi sin
+Internet). No se activa `usesCleartextTraffic` para toda la app: Android no deja acotarlo por rango
+de IP y abriría la puerta a cualquier conexión futura.
+
+**Qué paso falla** (el mensaje y el «Detalle técnico» lo dicen, y el motivo sale también en logcat
+`FlexPhone/FlexCloud`):
+
+| Paso | Mensaje | Se reintenta |
+|---|---|---|
+| TCP, sin ruta o sin respuesta | «El teléfono no llega a Flex OS (ip:puerto)» + pista de subred si la hay, si no «aislamiento de clientes / red de invitados» | sí, 3 veces (el pedido no llegó) |
+| TCP, puerto rechazado | «llegó a la dirección… pero su servidor web no aceptó la conexión» | sí |
+| HTTP, abierto sin respuesta | «aceptó la conexión pero no contestó a tiempo» | **no** (la oferta de un solo uso pudo gastarse) |
+| HTTP, respuesta que no es HTTP | «no contestó como Flex OS» | no |
+| Aprobación (403 / 410 / 404 / prueba) | el motivo que da Flex OS | no |
+| Corte de red mientras se espera la aprobación | «Se perdió la comunicación con Flex OS mientras esperaba su aprobación» | el sondeo sigue cada 1,5 s |
+
 ## 5. Uso diario
 
 ### 5.1 Sesión P4 → teléfono

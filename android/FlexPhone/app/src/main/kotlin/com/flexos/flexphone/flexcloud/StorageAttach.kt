@@ -3,6 +3,9 @@ package com.flexos.flexphone.flexcloud
 import android.content.Context
 import android.net.Uri
 import com.flexos.flexphone.cloud.AttachClient
+import com.flexos.flexphone.cloud.Lan
+import com.flexos.flexphone.cloud.LocalHttpPoster
+import com.flexos.flexphone.link.NetAddress
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -129,7 +132,14 @@ object StorageAttach {
             return
         }
         val r = try {
-            AttachClient(FlexCloudPhone.phoneInfo(app), port, FlexCloudPhone.repo(app)).attach(h, o, onSas = { sas, p4 ->
+            AttachClient(
+                FlexCloudPhone.phoneInfo(app), port, FlexCloudPhone.repo(app),
+                poster = LocalHttpPoster(newSocket = { NetAddress.wifiSocket(app) }),
+                lanHint = { p4Ip ->
+                    val w = NetAddress.wifi(app)
+                    Lan.hintFor(p4Ip, w?.address, w?.prefixLength ?: 24)
+                },
+            ).attach(h, o, onSas = { sas, p4 ->
                 synchronized(lock) { if (!cancelled) _state.value = UiState.Code(sas, p4) }
             }, cancelled = { cancelled })
         } catch (e: Exception) {
@@ -143,7 +153,8 @@ object StorageAttach {
             is AttachClient.Result.Failed -> {
                 if (cancelled) { undo(app); return }
                 undo(app)
-                fail("No se activó", r.message)
+                android.util.Log.w("FlexPhone/FlexCloud", "emparejamiento fallido: ${r.detail.ifEmpty { r.message }}")
+                fail("No se activó", if (r.detail.isEmpty()) r.message else r.message + "\n\nDetalle técnico: " + r.detail)
             }
         }
     }
