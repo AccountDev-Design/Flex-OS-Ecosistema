@@ -279,6 +279,22 @@ static void suspGestureUpdate(){
 #endif
 }
 
+// UN OVERLAY SE QUEDA EL EPISODIO DEL DEDO. El banner de notificacion no es modal: el toque es suyo solo si el
+// dedo baja DENTRO de su tarjeta, y entonces el episodio entero -- bajar, arrastrar, soltar -- es suyo hasta que
+// se levante, y de nadie mas. Anular T.down "a pelo" no sirve: flexPollTouch deduce los flancos de T.down de la
+// vuelta anterior, asi que el siguiente cuadro veria un "dedo que baja" nuevo en mitad del gesto (y una pulsacion
+// larga en el escritorio, y un toque de verdad al soltar). Por eso el estado REAL del dedo se guarda aparte y
+// flexPollTouch lo recupera al empezar la vuelta siguiente: el overlay y la pantalla de debajo ven cosas
+// distintas EN ESTA VUELTA, y el estado del tactil -- el que decide cuando es un toque, un arrastre o un
+// deslizamiento -- sigue siendo uno solo y no se entera.
+static bool gTouchHeld = false, gTouchHeldDown = false, gTouchHeldMoved = false;
+static void touchHoldBack(){
+  gTouchHeldDown = T.down; gTouchHeldMoved = T.moved; gTouchHeld = true;
+  T.pressed = T.released = T.tap = false;
+  T.swipeUp = T.swipeDown = T.swipeLeft = T.swipeRight = false;
+  T.down = false; T.moved = false;
+}
+
 // DONDE CAE UN TOQUE. Un toque se reconoce al soltar, pero se LOCALIZA donde
 // se apoyo el dedo. En un capacitivo el centroide que informa el GT911 se
 // desplaza al levantar el dedo (el contacto se encoge hacia la yema: varios
@@ -301,6 +317,7 @@ static void tDoRelease(unsigned long now){
 static void flexPollTouch(){
   T.pressed = T.released = T.tap = false;
   T.swipeUp = T.swipeDown = T.swipeLeft = T.swipeRight = false;
+  if(gTouchHeld){ T.down = gTouchHeldDown; T.moved = gTouchHeldMoved; gTouchHeld = false; }   // ver touchHoldBack
   uint16_t gx = 0, gy = 0;
   int8_t ev = gtPoll(gx, gy);
   // FASE 4: descarte SILENCIOSO del area excluida, en el punto mas alto del

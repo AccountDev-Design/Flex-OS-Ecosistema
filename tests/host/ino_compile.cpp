@@ -315,6 +315,7 @@ static void testCajaUnificada();
 static void testCronometro();
 static void testPaginasHome();
 static void testNotifUnaSola();
+static void testBannerNotificacion();
 static void testDeslizarPaginas();
 static void testCabeceras();
 static void testListasConScroll();
@@ -10212,6 +10213,289 @@ static void testTrabajoPeriodico(){
 //  acomodo la conserva. En Plano y en Liquid Glass.
 // #############################################################
 static void testIslaEncimaAlDeslizar(){
+// #############################################################
+//  BANNER DE NOTIFICACION: LA ULTIMA CAPA ANTES DEL PANEL
+//  ------------------------------------------------------------
+//  Reproduce lo que se vio en la placa (capturas de la caja de apps y de Flex Compass): el banner capturaba
+//  una banda de fb al armarse, la repintaba y la devolvia al irse, asi que si lo de debajo cambiaba
+//  -- la caja de apps subia, una app se animaba -- seguia pegando el escritorio viejo encima. Aqui se mira
+//  LO QUE LLEGA AL PANEL (gPanelShadow), no solo fb:
+//    · fb no guarda nunca el banner;
+//    · cuando lo de debajo cambia, el panel muestra lo NUEVO con el banner encima (ni un pixel viejo);
+//    · el vidrio es vidrio de verdad: depende de lo que hay debajo (no es un rectangulo oscuro fijo);
+//    · al irse, el panel recibe fb tal cual: sin rastro;
+//    · quien toma la pantalla lo apaga en el mismo cuadro;
+//    · el toque: arrastrar a izquierda o derecha, umbral, lanzamiento, vuelta al sitio, retirada REAL de la
+//      notificacion, y la pantalla de debajo no ve NI UN evento del gesto.
+// #############################################################
+static uint16_t bnA(int x, int y){ return rgb565((uint8_t)(10 + (x >> 4)), (uint8_t)(20 + (y & 31)), 60); }          // oscuro (una app)
+static uint16_t bnB(int x, int y){ return rgb565(215, (uint8_t)(200 + ((x >> 3) & 31)), (uint8_t)(225 - (y & 15))); } // claro (la caja de apps)
+static void bnPaint(uint16_t (*f)(int, int), int y0, int y1){
+  for(int y = y0; y <= y1; y++) for(int x = 0; x < SCR_W; x++) fb[(size_t)y * SCR_W + x] = f(x, y);
+}
+static int bnLuma(uint16_t c){
+  int r = ((c >> 11) & 31) * 255 / 31, g = ((c >> 5) & 63) * 255 / 63, b = (c & 31) * 255 / 31;
+  return (r + g + b) / 3;
+}
+static int bnAvg(const uint16_t* buf, int x0, int y0, int x1, int y1){
+  long sum = 0; int n = 0;
+  for(int y = y0; y <= y1; y++) for(int x = x0; x <= x1; x++){ sum += bnLuma(buf[(size_t)y * SCR_W + x]); n++; }
+  return n ? (int)(sum / n) : 0;
+}
+// Lo que la pantalla de DEBAJO ve del toque en esta vuelta (despues de que el banner haya tenido su turno).
+struct BnUnder { bool pressed, down, tap, released, swipe; };
+static BnUnder gBnUnder;
+static void bnUnderReset(){ gBnUnder = BnUnder(); }
+// Una vuelta de loop(): el GT911 entrega un cuadro, flexPollTouch, el banner, la pantalla de debajo (que mira T), y el tick del banner.
+static void bnStep(int fingers, int x, int y){
+  gtFrame(fingers, x, y); gTestMs += 16; flexPollTouch();
+  fpbTouch();
+  if(T.pressed) gBnUnder.pressed = true;
+  if(T.down) gBnUnder.down = true;
+  if(T.tap) gBnUnder.tap = true;
+  if(T.released) gBnUnder.released = true;
+  if(T.swipeLeft || T.swipeRight || T.swipeUp || T.swipeDown) gBnUnder.swipe = true;
+  fpbTick();
+}
+static void bnIdle(int n){                        // vueltas sin cuadro nuevo del GT911 (-1) y con el dedo ya fuera
+  for(int i = 0; i < n; i++){
+    gTestMs += 16; flexPollTouch(); fpbTouch();
+    if(T.pressed) gBnUnder.pressed = true;
+    if(T.down) gBnUnder.down = true;
+    if(T.tap) gBnUnder.tap = true;
+    if(T.released) gBnUnder.released = true;
+    if(T.swipeLeft || T.swipeRight) gBnUnder.swipe = true;
+    fpbTick();
+  }
+}
+static bool bnUnderSawNothing(){ return !gBnUnder.pressed && !gBnUnder.down && !gBnUnder.tap && !gBnUnder.released && !gBnUnder.swipe; }
+static void bnShow(uint8_t src, uint32_t id, const char* title){
+  fpbPush(src, id, "Flex Phone", title, "Cuerpo del aviso", FLP_PRI_DEFAULT);
+  for(int i = 0; i < 40 && fpbState != FPB_SHOWN; i++){ gTestMs += 16; fpbTick(); }
+}
+static void bnWaitHidden(){
+  for(int i = 0; i < 400 && fpbState != FPB_HIDDEN; i++){ gTestMs += 16; fpbTick(); }
+}
+
+static void testBannerNotificacion(){
+  printf("Banner de notificacion: ultima capa antes del panel, vidrio real, sin rastro y descartable con el dedo\n");
+  int before = gFails;
+  const size_t N = (size_t)SCR_W * SCR_H;
+  std::vector<uint16_t> shadow(N, 0), ref(N, 0);
+  uint16_t* sh0 = gPanelShadow; gPanelShadow = shadow.data();
+  flxPanel = (esp_lcd_panel_handle_t)1; flxDpiSem = (SemaphoreHandle_t)1;
+  bool glass0 = uiGlass, dnd0 = gDnd; int nav0 = gNavMode; bool ok0 = gtOk, wire0 = gWireGtOn;
+  uiGlass = true; gNavMode = 0; gDnd = false;
+  gtOk = true; gWireGtOn = true; memset(gWireGt, 0, sizeof(gWireGt));
+  if(fpbVisible()) fpbAbandon();
+  fpbQueueN = 0; fpbMore = 0;
+  appTrCancel(); qsForceClose();
+  gState = ST_HOME; gAppId = 0; gLand = false; editMode = false; gHosted = false; gSuspOn = false;
+  setBuf(fb); uiClipFull(); touchReset(); gTouchSwallow = false;
+  gTestMs = 50000000;
+  const size_t ps0 = gPsUsed;
+  const int CX0 = FPB_V_X, CX1 = FPB_V_X + FPB_V_W - 1, CY0 = FPB_V_Y, CY1 = FPB_V_Y + FPB_V_H - 1;
+
+  // ---- 1. Escritorio parado: no cuesta nada y no toca nada ----
+  bnPaint(bnA, 0, SCR_H - 1); flxFlush(0, SCR_H - 1);
+  chk(!memcmp(shadow.data(), fb, N * 2), "sin banner, el panel es fb");
+  chk(!fpbLive && fpbCv == NULL && fpbSave == NULL, "sin banner no hay nada reservado");
+  const unsigned draws0 = gPanelDrawCalls;
+  fpbTick();
+  chk(gPanelDrawCalls == draws0, "sin nada en cola, el tick no manda nada al panel");
+
+  // ---- 2. Llega un aviso: se ve ENCIMA, y fb no lo guarda NUNCA ----
+  std::vector<uint16_t> refA(fb, fb + N);
+  bnShow(FPN_SRC_SYSTEM, 0, "Hola");
+  chk(fpbState == FPB_SHOWN && fpbLive, "el banner llega a su sitio");
+  chk(!memcmp(fb, refA.data(), N * 2), "fb sigue LIMPIO con el banner a la vista (el banner no vive en fb)");
+  {
+    bool cardOnPanel = false;
+    for(int y = CY0 + 6; y < CY1 - 6 && !cardOnPanel; y += 7) for(int x = CX0 + 20; x < CX1 - 20; x += 11)
+      if(shadow[(size_t)y * SCR_W + x] != fb[(size_t)y * SCR_W + x]){ cardOnPanel = true; break; }
+    chk(cardOnPanel, "el panel muestra la tarjeta encima de lo que hay");
+    bool restOk = true;
+    for(int y = 130; y < SCR_H && restOk; y += 13) for(int x = 0; x < SCR_W; x += 17)
+      if(shadow[(size_t)y * SCR_W + x] != fb[(size_t)y * SCR_W + x]) restOk = false;
+    chk(restOk, "y el resto del panel es el de siempre");
+  }
+  const int lumaOscuro = bnAvg(shadow.data(), 400, 40, 450, 60);     // interior de la tarjeta, sin texto, sobre fondo OSCURO
+
+  // ---- 3. LA PANTALLA DE DEBAJO CAMBIA (sube la caja de apps): ni un pixel del fondo viejo ----
+  std::vector<uint16_t> refB(N, 0);
+  { uint16_t* f0 = fb; (void)f0; bnPaint(bnB, 0, SCR_H - 1); memcpy(refB.data(), fb, N * 2); }
+  flxFlush(0, SCR_H - 1);
+  {
+    bool old = false, newOk = true;
+    for(int y = 0; y < 112; y++) for(int x = 0; x < SCR_W; x++){
+      bool inCard = x >= CX0 - 2 && x <= CX1 + 6 && y >= CY0 - 2 && y <= CY1 + 6;
+      if(inCard) continue;
+      if(shadow[(size_t)y * SCR_W + x] == bnA(x, y) && bnA(x, y) != bnB(x, y)) old = true;
+      if(shadow[(size_t)y * SCR_W + x] != bnB(x, y)) newOk = false;
+    }
+    chk(!old, "tras repintar lo de debajo NO queda ni un pixel del fondo anterior (antes pegaba el escritorio viejo)");
+    chk(newOk, "fuera de la tarjeta el panel muestra EXACTAMENTE lo nuevo");
+  }
+  chk(!memcmp(fb, refB.data(), N * 2), "y fb sigue limpio");
+  gTestMs += FPB_REGLASS_MS + 20; fpbTick();                        // el vidrio se resuelve sobre lo nuevo
+  const int lumaClaro = bnAvg(shadow.data(), 400, 40, 450, 60);
+  chkf(lumaClaro > lumaOscuro + 25, "el vidrio es de VERDAD: sobre un fondo claro la tarjeta es mas clara (%d -> %d), no un rectangulo oscuro fijo", lumaOscuro, lumaClaro);
+  chkf(lumaClaro > 70, "y sobre un fondo claro no es negro (luma %d)", lumaClaro);
+  // Una banda suelta (solo unas filas) tambien lleva la tarjeta
+  bnPaint(bnA, 40, 50); flxFlush(40, 50);
+  chk(shadow[(size_t)45 * SCR_W + 5] == bnA(5, 45) && shadow[(size_t)45 * SCR_W + 240] != bnA(240, 45),
+      "una transferencia parcial: lo nuevo fuera de la tarjeta y la tarjeta encima");
+  bnPaint(bnB, 40, 50);
+
+  // ---- 4. Se va solo: el panel recibe fb tal cual ----
+  gTestMs += FPB_HOLD_MS + 20; bnWaitHidden();
+  chk(fpbState == FPB_HIDDEN && !fpbLive, "el banner se retira solo");
+  chk(!memcmp(shadow.data(), fb, N * 2), "al irse el panel es EXACTAMENTE fb: sin rastro");
+  chk(fpbCv == NULL && fpbSave == NULL && gPsUsed == ps0, "y suelta lo que reservo");
+
+  // ---- 5. Alguien se queda la pantalla a mitad de banner: se apaga en ese mismo cuadro ----
+  bnPaint(bnA, 0, SCR_H - 1); flxFlush(0, SCR_H - 1);
+  bnShow(FPN_SRC_SYSTEM, 0, "Cortina");
+  chk(fpbState == FPB_SHOWN, "(otro aviso a la vista)");
+  qsPanelY = SCR_H / 2;                                              // la cortina del panel rapido manda
+  flxFlush(100, 140);                                                // ...y manda UNA banda que no cubre toda la tarjeta
+  chk(!memcmp(shadow.data(), fb, N * 2), "con la cortina de por medio el panel no lleva banner ni rastro en el mismo cuadro");
+  chk(fpbSuppressed && !fpbLive, "el banner quedo apagado");
+  fpbTick();
+  chk(fpbState == FPB_HIDDEN && fpbCv == NULL, "y el siguiente tick lo da de baja del todo");
+  qsPanelY = 0; qsAnimOn = false; qsDragging = false;
+  chk(gPsUsed == ps0, "(sin memoria colgada)");
+
+  // ---- 6. Horizontal ----
+  gLand = true;
+  bnPaint(bnA, 0, SCR_H - 1); flxFlush(0, SCR_H - 1);
+  bnShow(FPN_SRC_SYSTEM, 0, "Apaisado");
+  chk(fpbState == FPB_SHOWN && fpbLand, "en horizontal tambien se arma");
+  {
+    int px = (SCR_W - 1) - (FPB_L_Y + FPB_L_H / 2), py = FPB_L_X + FPB_L_W / 2;   // el centro de la tarjeta, en pixeles FISICOS
+    chk(shadow[(size_t)py * SCR_W + px] != fb[(size_t)py * SCR_W + px], "el panel muestra la tarjeta en su sitio (girada)");
+    chk(fpbInsidePhys(px, py) && !fpbInsidePhys(10, 700), "y el tacto la encuentra donde se ve");
+  }
+  gLand = false;                                                     // la app giro: el banner se va, el panel se limpia
+  chk(fpbScreenAllows() || true, "(girar)");
+  bnPaint(bnA, 0, SCR_H - 1); flxFlush(0, SCR_H - 1);
+  fpbTick();
+  chk(fpbState == FPB_HIDDEN && !memcmp(shadow.data(), fb, N * 2), "al girar la pantalla el banner se retira y no deja rastro");
+
+  // ---- 7. El dedo: arrastrar a la izquierda hasta pasar el umbral descarta; la pantalla de debajo no ve NADA ----
+  bnPaint(bnA, 0, SCR_H - 1); flxFlush(0, SCR_H - 1);
+  memset(gWireGt, 0, sizeof(gWireGt)); touchReset(); gTouchSwallow = false;
+  {
+    FlexPhoneNotif n; memset(&n, 0, sizeof(n));
+    n.id = 77; n.used = true; n.pri = FLP_PRI_DEFAULT;
+    snprintf(n.pkg, sizeof(n.pkg), "com.test"); snprintf(n.app, sizeof(n.app), "Prueba");
+    snprintf(n.title, sizeof(n.title), "Aviso"); snprintf(n.text, sizeof(n.text), "texto");
+    flexPhoneNotifPut(&fphModel, &n, gTestMs);
+    chk(flexPhoneNotifFind(&fphModel, 77) >= 0, "(la notificacion esta en el modelo)");
+    bnShow(FPN_SRC_PHONE, 77, "Aviso");
+    bnUnderReset();
+    bnStep(1, 300, 54); chk(fpbGesture, "el dedo baja dentro de la tarjeta: el gesto es del banner");
+    bnStep(1, 280, 54); chk(fpbSlide == -20.0f, "sigue al dedo 1:1 hacia la izquierda");
+    bnStep(1, 240, 54); chk(fpbSlide == -60.0f, "(y mas)");
+    bnStep(1, 200, 54);
+    bnStep(1, 140, 54); chk(fpbSlide == -160.0f, "pasado un tercio de su ancho");
+    bnStep(0, 0, 0);
+    chkf(fpbState == FPB_OUT && fpbOutDir == -1, "al soltar sale deslizandose a la izquierda (estado %d, dir %d)", fpbState, fpbOutDir);
+    bnIdle(3);
+    chk(bnUnderSawNothing(), "la pantalla de debajo NO vio ni un evento del gesto (ni bajar, ni arrastrar, ni soltar, ni deslizar)");
+    bnWaitHidden();
+    chk(fpbState == FPB_HIDDEN && !memcmp(shadow.data(), fb, N * 2), "sale y el panel queda limpio");
+    chk(flexPhoneNotifFind(&fphModel, 77) < 0, "y la notificacion se RETIRA de verdad (no solo se mueve el dibujo)");
+    // Sin overlay fantasma: el siguiente toque en el mismo sitio es de la pantalla de debajo, ya.
+    bnUnderReset();
+    bnStep(1, 300, 54); bnStep(0, 0, 0); bnIdle(2);
+    chk(gBnUnder.pressed && gBnUnder.tap, "tras descartarla el toque vuelve a la pantalla de debajo en el acto");
+    bnIdle(3);
+  }
+
+  // ---- 8. A la derecha tambien ----
+  {
+    bnShow(FPN_SRC_SYSTEM, 0, "Derecha");
+    bnUnderReset();
+    bnStep(1, 100, 54); bnStep(1, 140, 54); bnStep(1, 200, 54); bnStep(1, 270, 54);
+    chk(fpbSlide == 170.0f, "sigue al dedo hacia la derecha");
+    bnStep(0, 0, 0);
+    chkf(fpbState == FPB_OUT && fpbOutDir == 1, "al soltar sale deslizandose a la derecha (estado %d, dir %d)", fpbState, fpbOutDir);
+    bnIdle(3);
+    chk(bnUnderSawNothing(), "(a la derecha) la pantalla de debajo no vio nada del gesto");
+    bnWaitHidden();
+    chk(fpbState == FPB_HIDDEN && !memcmp(shadow.data(), fb, N * 2), "(a la derecha) sale sin rastro");
+  }
+
+  // ---- 9. No llega al umbral: vuelve a su sitio y sigue ahi ----
+  {
+    bnShow(FPN_SRC_SYSTEM, 0, "Cancelar");
+    bnUnderReset();
+    bnStep(1, 300, 54); bnStep(1, 290, 54); bnStep(1, 275, 54);
+    chk(fpbSlide == -25.0f, "arrastra un poco");
+    gTestMs += 160;                                                  // se queda quieto antes de soltar: no es un lanzamiento
+    bnStep(0, 0, 0);
+    chk(fpbState == FPB_SHOWN && fpbSpring, "no llego al umbral: vuelve a su sitio (no se descarta)");
+    for(int i = 0; i < 20; i++){ gTestMs += 16; flexPollTouch(); fpbTouch(); fpbTick(); }
+    chk(fpbSlide == 0.0f && fpbState == FPB_SHOWN, "y se queda en su sitio");
+    chk(bnUnderSawNothing(), "(cancelado) la pantalla de debajo tampoco vio nada");
+    chk(!memcmp(fb, refA.data(), N * 2), "(fb sigue limpio)");
+    // Un lanzamiento corto pero rapido SI descarta
+    bnUnderReset();
+    bnStep(1, 300, 54); bnStep(1, 250, 54); bnStep(1, 200, 54);
+    bnStep(0, 0, 0);
+    chkf(fpbState == FPB_OUT && fpbOutDir == -1, "un lanzamiento rapido descarta aunque no llegue al umbral (estado %d)", fpbState);
+    bnIdle(3);
+    chk(bnUnderSawNothing(), "(lanzamiento) la pantalla de debajo no vio nada");
+    bnWaitHidden();
+  }
+
+  // ---- 10. Un toque sin arrastrar: lo atiende el banner y la pantalla de debajo no lo recibe ----
+  {
+    bnShow(FPN_SRC_SYSTEM, 0, "Toque");
+    bnUnderReset();
+    bnStep(1, 200, 54); bnStep(0, 0, 0); bnIdle(3);
+    chk(bnUnderSawNothing(), "un toque en la tarjeta no llega a la pantalla de debajo (antes la tocaba tambien: p. ej. el 'atras' de la cabecera)");
+    chk(fpbState == FPB_OUT || fpbState == FPB_HIDDEN, "y cierra el banner");
+    bnWaitHidden();
+  }
+
+  // ---- 11. Un toque FUERA de la tarjeta es de la pantalla de debajo, con el banner a la vista ----
+  {
+    bnShow(FPN_SRC_SYSTEM, 0, "Fuera");
+    bnUnderReset();
+    bnStep(1, 200, 400); bnStep(0, 0, 0); bnIdle(3);
+    chk(gBnUnder.pressed && gBnUnder.tap, "un toque fuera de la tarjeta lo recibe la pantalla de debajo con normalidad");
+    chk(fpbState == FPB_SHOWN, "y el banner sigue ahi");
+    // El dedo que empezo FUERA y pasa por encima de la tarjeta sigue siendo de la pantalla de debajo
+    bnUnderReset();
+    bnStep(1, 100, 400); bnStep(1, 100, 200); bnStep(1, 100, 60); bnStep(1, 120, 54); bnStep(0, 0, 0); bnIdle(3);
+    chk(gBnUnder.pressed && gBnUnder.down && !fpbGesture, "un gesto que empezo fuera no lo roba el banner al pasar por encima");
+    gTestMs += FPB_HOLD_MS + 20; bnWaitHidden();
+  }
+
+  // ---- 12. No molestar: un aviso del TELEFONO no se ve; el del sistema (respuesta a un toque) si ----
+  {
+    gDnd = true;
+    fpbPush(FPN_SRC_PHONE, 5, "Tel", "no", "no", FLP_PRI_DEFAULT);
+    for(int i = 0; i < 10; i++){ gTestMs += 16; fpbTick(); }
+    chk(fpbState == FPB_HIDDEN && fpbQueueN == 1, "con No molestar un aviso del telefono espera (no se pierde ni se dibuja)");
+    fpbQueueN = 0;
+    fpbPushSystem("Flex Cloud", "Preparando", "40 %");
+    for(int i = 0; i < 40 && fpbState != FPB_SHOWN; i++){ gTestMs += 16; fpbTick(); }
+    chk(fpbState == FPB_SHOWN, "pero el aviso del propio sistema (la respuesta a lo que se acaba de tocar) si sale");
+    gDnd = false;
+    gTestMs += FPB_HOLD_MS + 20; bnWaitHidden();
+  }
+
+  chk(fpbState == FPB_HIDDEN && fpbCv == NULL && fpbSave == NULL && gPsUsed == ps0, "al final no queda nada reservado ni a la vista");
+  memset(gWireGt, 0, sizeof(gWireGt)); touchReset(); gTouchSwallow = false;
+  gtOk = ok0; gWireGtOn = wire0;
+  uiGlass = glass0; gDnd = dnd0; gNavMode = nav0; gPanelShadow = sh0;
+  gState = ST_HOME; gAppId = 0; gLand = false; uiClipFull(); setBuf(fb);
+  if(gFails == before) printf("  Banner de notificacion: todas las comprobaciones pasan.\n");
+}
+
   printf("Escritorio: la notificacion se queda encima de la pagina que se desliza\n");
   int before = gFails;
   bool glass0 = uiGlass;
@@ -11649,3 +11933,4 @@ int main(){
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }
+  testBannerNotificacion();

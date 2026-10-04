@@ -995,6 +995,7 @@ static void navStampBar(int y0, int y1){
 // sin esto, el dedo que sigue apoyado despues de pulsar "inicio" genera un
 // pressed/tap nuevo en la pantalla que acaba de entrar -- el toque fantasma.
 static void touchDropAll(){
+  gTouchHeld = false;                   // lo que un overlay retuvo del dedo tampoco sobrevive al cambio de pantalla
   T.pressed = T.released = T.tap = false;
   T.swipeUp = T.swipeDown = T.swipeLeft = T.swipeRight = false;
   T.down = false; T.moved = false;

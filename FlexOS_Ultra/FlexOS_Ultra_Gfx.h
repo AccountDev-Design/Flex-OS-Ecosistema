@@ -94,6 +94,17 @@ static void kioskStampBadge(int y0, int y1);
 // Barra de navegacion del sistema: se estampa por el MISMO camino y por el
 // mismo motivo que el candado del kiosco (ver el bloque de navegacion).
 static void navStampBar(int y0, int y1);
+// BANNER DE NOTIFICACION (FlexOS_FlexPhone_Overlay.h). Es la ULTIMA capa antes del panel y,
+// a diferencia de las dos de arriba, vive ENCIMA de contenido que cambia (una app, el escritorio,
+// la caja de apps): por eso no se estampa en fb para siempre ni guarda una foto de lo de debajo.
+// fpbStampBegin dibuja la tarjeta en fb justo antes de la transferencia -- sobre el contenido
+// LIMPIO que haya en ese instante -- y fpbStampEnd devuelve a fb esos pixeles al acabar. fb no
+// guarda nunca el banner, asi que no puede quedar un rastro, ni pegarse un fondo viejo, ni
+// tapar a la pantalla de debajo cuando esta cambia.
+static bool fpbStampBegin(int y0, int y1);
+static void fpbStampEnd();
+static bool fpbCleanPending();
+static void fpbCleanFlush();
 
 static void flxFlush(int y0, int y1){
   if(gRtTarget){ gRtDirty = true; return; }   // app hospedada: no toca el panel
@@ -104,6 +115,8 @@ static void flxFlush(int y0, int y1){
   kioskStampBadge(y0, y1);
   navStampBar(y0, y1);
   if(!flxPanel || !flxDpiSem || !fb) return;
+  // El banner de notificacion se dibuja AQUI, sobre lo que fb tiene ahora, y se retira al volver.
+  const bool fpbOn = fpbStampBegin(y0, y1);
 
   // Un token viejo haria que la espera siguiente terminase ANTES que la DMA
   // actual. Se drena siempre justo antes de iniciar una transferencia.
@@ -115,6 +128,7 @@ static void flxFlush(int y0, int y1){
     if(!flxFlushFault || now - flxFlushFaultMs > 2000)
       Serial.println(F("[GFX] draw_bitmap fallo; cuadro descartado"));
     flxFlushFault = true; flxFlushFaultMs = now;
+    if(fpbOn) fpbStampEnd();
     return;
   }
   // 120 ms son mas de siete periodos a 60 Hz. Si no llega el callback hay un
@@ -124,9 +138,14 @@ static void flxFlush(int y0, int y1){
     if(!flxFlushFault || now - flxFlushFaultMs > 2000)
       Serial.println(F("[GFX] timeout esperando DMA2D; compositor liberado"));
     flxFlushFault = true; flxFlushFaultMs = now;
+    if(fpbOn) fpbStampEnd();
     return;
   }
   flxFlushFault = false;
+  if(fpbOn) fpbStampEnd();
+  // Una pantalla de debajo tomo el control y el banner ya no puede dibujarse: sus filas del panel
+  // se limpian desde fb (que nunca lo tuvo). Una sola vez, sin recursion (el banner ya esta apagado).
+  if(fpbCleanPending()) fpbCleanFlush();
 }
 static inline void flxFlushAll(){ flxFlush(0, SCR_H - 1); }
 // Vuelca la banda [y0,y1] del back buffer a fb de una sola pasada.

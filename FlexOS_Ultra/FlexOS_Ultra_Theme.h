@@ -437,13 +437,23 @@ static void glassLevelApply(){
   gGlCornS    = (uint8_t)(156 + (d * 40) / 50);      // 116 .. 196
   gGlCornW    = (uint8_t)(104 + (d * 30) / 50);      //  74 .. 134
 }
+// SUELO DE TINTE (legibilidad). 0 = ninguno (el material de siempre). Quien dibuja vidrio SOBRE
+// CONTENIDO AJENO que no controla -- el banner de una notificacion, que cae sobre una foto clara, un
+// documento blanco o el fondo de pantalla -- lo sube mientras pinta y lo deja a 0 al acabar: con el
+// tinte adaptativo normal (18-27 %) el texto claro se pierde sobre un fondo claro. Es el mismo criterio
+// que ya usan las barras del visor (VW_GLASS_MIN_MIX), pero en el material COMPARTIDO, no en uno propio.
+static uint8_t gGlMinMix = 0;
 // Mezcla de tinte adaptativa: la MISMA regla en todas las rutas del vidrio.
 static inline uint8_t glassTintMix(uint32_t lumaSum, int lumaN, uint16_t tint){
-  if(lumaN <= 0) return gGlTintBase;
-  int dif = (int)(lumaSum / (uint32_t)lumaN) - glassLuma(tint);
-  if(dif < 0) dif = -dif;
-  if(dif > GLASS_TINT_DIFF_MAX) dif = GLASS_TINT_DIFF_MAX;
-  return (uint8_t)(gGlTintMin + (dif * (gGlTintMax - gGlTintMin)) / GLASS_TINT_DIFF_MAX);
+  uint8_t m;
+  if(lumaN <= 0) m = gGlTintBase;
+  else {
+    int dif = (int)(lumaSum / (uint32_t)lumaN) - glassLuma(tint);
+    if(dif < 0) dif = -dif;
+    if(dif > GLASS_TINT_DIFF_MAX) dif = GLASS_TINT_DIFF_MAX;
+    m = (uint8_t)(gGlTintMin + (dif * (gGlTintMax - gGlTintMin)) / GLASS_TINT_DIFF_MAX);
+  }
+  return m < gGlMinMix ? gGlMinMix : m;
 }
 // Especular (blanco, mitad superior) y sombreado (negro, inferior) de la fila
 // j de un panel de alto h. Solo depende de la fila.

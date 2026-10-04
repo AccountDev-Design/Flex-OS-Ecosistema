@@ -108,6 +108,35 @@ typedef struct {
 // =============================================================
 //  3) BANNER FLOTANTE
 // =============================================================
+// LA ULTIMA CAPA ANTES DEL PANEL
+// -------------------------------------------------------------
+// Un banner es una capa que flota SOBRE una pantalla que sigue viva: el escritorio, una app, la caja de
+// aplicaciones, un video. La version anterior capturaba una banda de fb al armarse, la repintaba en cada
+// cuadro desde esa copia y se la devolvia a fb al irse. Eso solo vale si lo de debajo NO cambia mientras
+// el banner esta puesto, y casi nunca es asi:
+//
+//   · la caja de aplicaciones subia, repintaba su cabecera... y el banner seguia pegando encima las 98
+//     filas del ESCRITORIO que habia capturado (el rectangulo partido de la foto), y al irse las dejaba;
+//   · en una app que se anima, la banda quedaba congelada con el fondo viejo;
+//   · el vidrio se calculaba como si debajo hubiera SIEMPRE el color de la pagina (drawGlassCardFlat con
+//     TH_PAGE): sobre el escritorio o una foto salia un rectangulo oscuro, con la sombra opaca.
+//
+// AHORA EL BANNER NO TOCA fb. Su tarjeta (vidrio sobre lo que hay debajo + contenido) se resuelve UNA vez
+// en un lienzo propio (fpbRender, en el bucle normal, con la pila entera) y se vuelve a resolver solo si lo
+// de debajo repinta esas filas (como mucho cada FPB_REGLASS_MS). Cada vez que algo se manda al panel,
+// flxFlush llama a fpbStampBegin: copia la tarjeta sobre las filas que van a salir, y fpbStampEnd devuelve
+// a fb lo que tenia. fb NO guarda nunca el banner. Consecuencias, todas por construccion y no por parche:
+//
+//   · lo que hay debajo puede repintar, animarse o cambiar de pantalla: el banner siempre queda ENCIMA
+//     de lo ultimo que se dibujo, y al irse el panel recibe esas filas LIMPIAS de fb;
+//   · no hay copia que envejezca, ni restauracion de pixeles viejos, ni orden de dibujo que cuidar;
+//   · quien manda de verdad sobre la pantalla (un modal, la cortina, el OTA, una transicion) apaga el banner
+//     (fpbScreenAllows) y el panel se limpia en el mismo cuadro;
+//   · un banner quieto no cuesta NADA: solo trabaja cuando alguien manda filas al panel que lo tocan.
+//
+// EL TACTIL. El banner es un overlay no modal: el toque es suyo SOLO si el dedo baja dentro de la tarjeta, y
+// entonces el episodio entero (bajar, arrastrar, soltar) es suyo hasta que se levante -- y de nadie mas
+// (touchHoldBack). Fuera de la tarjeta el toque es de la pantalla de debajo, como siempre.
 // ---- Geometria ----------------------------------------------
 // VERTICAL: banda compacta ARRIBA. Nunca en el centro: tapar el
 // centro de la pantalla por un mensaje es lo que hace que la gente
@@ -123,10 +152,19 @@ typedef struct {
 #define FPB_L_W      300
 #define FPB_L_Y      14
 #define FPB_L_H      64
+#define FPB_RAD      18
 
-#define FPB_IN_MS    220
-#define FPB_OUT_MS   180
-#define FPB_HOLD_MS  4200      // visible antes de irse solo
+#define FPB_IN_MS      220
+#define FPB_OUT_MS     180
+#define FPB_SPRING_MS  140
+#define FPB_HOLD_MS    4200      // visible antes de irse solo
+#define FPB_DRAG_PX    10        // hasta aqui el dedo solo tiembla; mas es un arrastre
+#define FPB_FLING      0.7f      // px/ms: un lanzamiento que descarta aunque no llegue al umbral
+#define FPB_FLING_MIN  40        // ...pero con al menos este recorrido
+#define FPB_REGLASS_MS 150       // el vidrio se recalcula como mucho cada tanto si lo de debajo cambia
+#define FPB_SHADOW_A   60
+#define FPB_MIN_MIX    150       // tinte minimo del vidrio: el texto se lee sobre cualquier cosa (el del visor)
+#define FPB_SAVE_BYTES (80 * 1024)   // lo que fb tenia bajo la tarjeta durante UNA transferencia (<= 480x80x2)
 // Cuantos avisos esperan turno. Al llenarse se resume: "y N mas".
 // Una torre de tarjetas apiladas es justo lo que NO se quiere.
 #define FPB_QUEUE    6
@@ -145,43 +183,90 @@ typedef struct {
 static int      fpbState = FPB_HIDDEN;
 static uint32_t fpbT0 = 0;
 static bool     fpbLand = false;
-static float    fpbSlide = 0.0f;        // desplazamiento del descarte
-static bool     fpbDragging = false;
-static int      fpbDragX0 = 0;
+static float    fpbSlide = 0.0f;        // desplazamiento horizontal de la tarjeta (px logicos)
+static float    fpbDrop = 0.0f;         // cuanto esta POR ENCIMA de su sitio (entrada y salida)
+static int      fpbOutDir = 0;          // salida: 0 = sube y se va, -1 / +1 = sale deslizandose
+static float    fpbOutFrom = 0.0f;
+static bool     fpbSpring = false;      // no llego al umbral: vuelve a su sitio
+static float    fpbSpringFrom = 0.0f;
+static uint32_t fpbSpringT0 = 0;
+static bool     fpbPaintWanted = false; // hay que mandar sus filas al panel en esta vuelta
 static FlexPhoneBannerMsg fpbCur;
 static FlexPhoneBannerMsg fpbQueue[FPB_QUEUE];
 static int      fpbQueueN = 0;
 static uint32_t fpbMore = 0;            // cuantas se resumieron
 
-// Banda capturada. Se pide al abrir y se suelta al cerrar: el banner
-// es excepcional, y retener memoria permanentemente por algo que
-// puede no ocurrir en horas no se sostiene.
-static uint16_t* fpbBak = NULL;
-static size_t    fpbBakCap = 0;
-static int       fpbBakY0 = 0, fpbBakY1 = -1;
+// El gesto en curso: el dedo bajo DENTRO de la tarjeta. Es del banner hasta que se levante.
+static bool     fpbGesture = false;
+static bool     fpbGMoved = false;
+static int      fpbGx0 = 0, fpbGLx = 0;
+static uint32_t fpbGMs = 0;
+static float    fpbGvx = 0.0f;
 
-static void fpbFreeBand(){
-  if(fpbBak){ free(fpbBak); fpbBak = NULL; fpbBakCap = 0; }
+// Pixeles. Se piden al armarse y se sueltan al irse: el banner es excepcional, y retener memoria
+// permanentemente por algo que puede no ocurrir en horas no se sostiene.
+static uint16_t* fpbCv = NULL;          // la tarjeta ya resuelta, en su sitio de reposo, disposicion LOGICA (stride SCR_W)
+static uint16_t* fpbSave = NULL;        // lo que fb tenia bajo la tarjeta mientras dura una transferencia
+static bool     fpbLive = false;        // el banner se puede estampar ahora
+static bool     fpbStamping = false;    // entre fpbStampBegin y fpbStampEnd
+static bool     fpbOnPanel = false;     // el panel tiene (o pudo tener) pixeles del banner
+static bool     fpbSuppressed = false;  // una pantalla de debajo tomo el control
+static bool     fpbCleanNeed = false;   // hay que devolver al panel sus filas limpias
+static bool     fpbOwnFlush = false;    // la transferencia en curso es del propio banner
+static bool     fpbUnderDirty = false;  // lo de debajo repinto esas filas: el vidrio puede estar viejo
+static uint32_t fpbCvMs = 0;
+static int      fpbSavX = 0, fpbSavY = 0, fpbSavW = 0, fpbSavH = 0;
+static int      fpbLastY0 = 0, fpbLastY1 = -1;   // filas FISICAS de la ultima tarjeta mandada al panel
+
+static void fpbFreeBufs(){
+  if(fpbCv){ free(fpbCv); fpbCv = NULL; }
+  if(fpbSave){ free(fpbSave); fpbSave = NULL; }
 }
-static inline void fpbInvalidateBand(){ fpbBakY1 = fpbBakY0 - 1; }
-static inline bool fpbBandReady(){ return fpbBak && fpbBakY1 >= fpbBakY0; }
 static inline bool fpbVisible(){ return fpbState != FPB_HIDDEN; }
 
-// Banda FISICA (filas del panel). En landscape la x logica ES la
-// fila fisica, por eso la banda sale del eje contrario.
-static void fpbBand(bool land, int &y0, int &y1){
-  if(land){ y0 = FPB_L_X - 8; y1 = FPB_L_X + FPB_L_W + 8; }
-  else    { y0 = FPB_V_Y - 8; y1 = FPB_V_Y + FPB_V_H + 8; }
+static inline int fpbCardW(){ return fpbLand ? FPB_L_W : FPB_V_W; }
+static inline int fpbCardH(){ return fpbLand ? FPB_L_H : FPB_V_H; }
+static inline int fpbRestX(){ return fpbLand ? FPB_L_X : FPB_V_X; }
+static inline int fpbRestY(){ return fpbLand ? FPB_L_Y : FPB_V_Y; }
+static inline int fpbDropMax(){ return fpbRestY() + fpbCardH() + 10; }
+static inline int fpbCardX(){ return fpbRestX() + (int)fpbSlide; }
+static inline int fpbCardY(){ return fpbRestY() - (int)fpbDrop; }
+// Pixel LOGICO <-> pixel FISICO de fb (en horizontal la x fisica es (SCR_W-1)-ly y la y fisica es lx).
+static inline void fpbToPhys(int lx, int ly, int &px, int &py){
+  if(fpbLand){ px = (SCR_W - 1) - ly; py = lx; } else { px = lx; py = ly; }
+}
+static inline void fpbToLogical(int px, int py, int &lx, int &ly){
+  if(fpbLand){ lx = py; ly = (SCR_W - 1) - px; } else { lx = px; ly = py; }
+}
+// Rectangulo FISICO de la tarjeta con su sombra (y un margen de antialias), acotado a la pantalla.
+static bool fpbPhysRect(int &x0, int &y0, int &x1, int &y1){
+  int ax, ay, bx, by;
+  fpbToPhys(fpbCardX() - 1, fpbCardY() - 1, ax, ay);
+  fpbToPhys(fpbCardX() + fpbCardW() + 4, fpbCardY() + fpbCardH() + 5, bx, by);
+  x0 = ax < bx ? ax : bx; x1 = ax < bx ? bx : ax;
+  y0 = ay < by ? ay : by; y1 = ay < by ? by : ay;
+  if(x0 < 0) x0 = 0;
   if(y0 < 0) y0 = 0;
+  if(x1 > SCR_W - 1) x1 = SCR_W - 1;
   if(y1 > SCR_H - 1) y1 = SCR_H - 1;
+  return x1 >= x0 && y1 >= y0;
+}
+// ¿El punto FISICO (px,py) cae dentro de la tarjeta (sin la sombra)?
+static bool fpbInsidePhys(int px, int py){
+  int lx, ly; fpbToLogical(px, py, lx, ly);
+  return lx >= fpbCardX() && lx < fpbCardX() + fpbCardW() && ly >= fpbCardY() && ly < fpbCardY() + fpbCardH();
 }
 
 // #############################################################
 // ##  ¿SE PUEDE DIBUJAR EL BANNER AHORA MISMO?
 // ##  ------------------------------------------------------
 // ##  Las mismas pantallas en las que el sistema ya decide no
-// ##  notificar nada, mas las que poseen la pantalla en exclusiva,
-// ##  mas DeX.
+// ##  notificar nada, mas las que poseen la pantalla en exclusiva
+// ##  (un modal, la cortina, el Centro, una transicion), mas DeX.
+// ##  La pregunta se hace en DOS sitios: al armarse (fpbTick) y en
+// ##  cada transferencia al panel (fpbStampBegin): si alguien se
+// ##  queda la pantalla a mitad de banner, ese mismo cuadro ya sale
+// ##  sin el.
 // ##
 // ##  DeX ES UNA EXCLUSION DURA. Con el escritorio de Modo PC
 // ##  delante, el usuario esta trabajando con ventanas, teclado y
@@ -193,17 +278,24 @@ static void fpbBand(bool land, int &y0, int &y1){
 static bool fpbDexActive(){
   return (gState == ST_APP && gAppId == IC_MODOPC) || gHosted;
 }
-static bool fpbCanShow(){
-  if(!phoneCanInterrupt()) return false;          // No molestar
+static bool fpcBusy();                    // el Centro de notificaciones esta a la vista o moviendose (seccion 4)
+static bool fpbScreenAllows(){
   if(notifSecureScreen()) return false;           // arranque, OOBE, bloqueo, apagado
   if(gFrPending || gState == ST_FACTORY || gSafeMode) return false;
   if(flexOtaOwnsScreen() || optActive()) return false;
   if(fpbDexActive()) return false;                // DeX: se registra, no se dibuja
   if(gSuspOn) return false;                       // pantalla apagada: no se pinta a oscuras
   if(appTrOwnsScreen()) return false;             // transicion de app dibujando
-  if(faVisible() || cronoCardVisible()) return false;  // ya hay un modal encima
+  if(faVisible() || cronoCardVisible() || spaVisible()) return false;   // ya hay un modal encima
   if(qsPanelY != 0 || qsAnimOn || qsDragging) return false;   // la cortina dibuja encima
+  if(fpcBusy()) return false;                     // el Centro es dueno de la pantalla
   return true;
+}
+// Un aviso del TELEFONO respeta No molestar; uno del propio sistema (el resultado de algo que el usuario
+// acaba de pedir) no: no es una interrupcion, es la respuesta a su toque.
+static bool fpbCanShow(uint8_t src){
+  if(src == FPN_SRC_PHONE && !phoneCanInterrupt()) return false;
+  return fpbScreenAllows();
 }
 
 // -------------------------------------------------------------
@@ -213,192 +305,336 @@ static bool fpbCanShow(){
 // llenarse la cola, se cuenta y se resume en el propio banner.
 static void fpbPush(uint8_t src, uint32_t id, const char* app,
                     const char* title, const char* body, uint8_t pri){
+  FlexPhoneBannerMsg n;
+  memset(&n, 0, sizeof(n));
+  n.src = src;
+  n.id = id;
+  n.pri = pri;
+  flexLinkUtf8Copy(n.app,   sizeof(n.app),   app   ? app   : "");
+  flexLinkUtf8Copy(n.title, sizeof(n.title), title ? title : "");
+  flexLinkUtf8Copy(n.body,  sizeof(n.body),  body  ? body  : "");
+  if(src == FPN_SRC_SYSTEM){
+    // El MISMO aviso del sistema ya a la vista o esperando (dos toques seguidos sobre lo mismo) no se repite: la respuesta a un
+    // toque es UNA, no una torre de tarjetas iguales.
+    if(fpbState != FPB_HIDDEN && fpbCur.src == FPN_SRC_SYSTEM && !strcmp(fpbCur.title, n.title) && !strcmp(fpbCur.body, n.body)) return;
+    for(int i = 0; i < fpbQueueN; i++)
+      if(fpbQueue[i].src == FPN_SRC_SYSTEM && !strcmp(fpbQueue[i].title, n.title) && !strcmp(fpbQueue[i].body, n.body)) return;
+  }
   if(fpbQueueN >= FPB_QUEUE){ fpbMore++; return; }
-  FlexPhoneBannerMsg* m = &fpbQueue[fpbQueueN++];
-  memset(m, 0, sizeof(*m));
-  m->src = src;
-  m->id = id;
-  m->pri = pri;
-  flexLinkUtf8Copy(m->app,   sizeof(m->app),   app   ? app   : "");
-  flexLinkUtf8Copy(m->title, sizeof(m->title), title ? title : "");
-  flexLinkUtf8Copy(m->body,  sizeof(m->body),  body  ? body  : "");
+  fpbQueue[fpbQueueN++] = n;
+}
+// Un aviso del propio sistema (no viene del telefono): la misma capa, el mismo material.
+static void fpbPushSystem(const char* app, const char* title, const char* body){
+  fpbPush(FPN_SRC_SYSTEM, 0, app, title, body, FLP_PRI_DEFAULT);
 }
 
 // -------------------------------------------------------------
-//  Dibujo
+//  Dibujo: la tarjeta se resuelve en su lienzo
 // -------------------------------------------------------------
-static void fpbDrawCard(int x, int y, int w, int h, float p){
-  // Entrada: cae desde arriba con desaceleracion. Corta (220 ms) y
-  // sin bloquear nada: es una interpolacion, no una espera.
-  const int drop = (int)((1.0f - p) * 26.0f);
-  const int sx = x + (int)fpbSlide;
-  const int sy = y - drop;
-  // Sombra corta debajo, para que despegue del fondo sin pagar un
-  // desenfoque de pantalla completa.
-  fillRoundRect(sx + 3, sy + 4, w, h, 18, TH_SHADOW);
-  drawGlassCardFlat(sx, sy, w, h, 18, uiGlass ? TH_GLASS : TH_SURF, TH_PAGE);
-
+// El contenido, con las coordenadas del propio lienzo (la tarjeta empieza en 0,0).
+static void fpbDrawContent(int w, int h){
   // Barra de prioridad: se ve de un vistazo si es urgente sin leer.
   const uint16_t accent = (fpbCur.pri >= FLP_PRI_HIGH) ? TH_PRIM : TH_DIV;
-  fillRoundRect(sx + 8, sy + 12, 4, h - 24, 2, accent);
-
-  const int tx = sx + 22;
+  fillRoundRect(8, 12, 4, h - 24, 2, accent);
+  const int tx = 22;
   const int tw = w - 40;
-  fgTextEllipsis(tx, sy + 10, tw, fpbCur.app[0] ? fpbCur.app : "Flex OS", 1, TH_MUTE);
-  fgTextEllipsis(tx, sy + 28, tw, fpbCur.title, 2, TH_TXT);
-  if(fpbCur.body[0]) fgTextEllipsis(tx, sy + 50, tw, fpbCur.body, 1, TH_TXT2);
-
+  fgTextEllipsis(tx, 10, tw, fpbCur.app[0] ? fpbCur.app : "Flex OS", 1, TH_MUTE);
+  fgTextEllipsis(tx, 28, tw, fpbCur.title, 2, TH_TXT);
+  if(fpbCur.body[0]) fgTextEllipsis(tx, 50, tw, fpbCur.body, 1, TH_TXT2);
   // Resumen de lo que espera. NO se apilan tarjetas.
   const int pend = fpbQueueN + (int)fpbMore;
   if(pend > 0){
     char more[24];
     snprintf(more, sizeof(more), "+%d", pend);
-    drawTextR(sx + w - 14, sy + 10, more, 1, TH_MUTE);
+    drawTextR(w - 14, 10, more, 1, TH_MUTE);
   }
 }
 
-static void fpbCompose(float p){
-  if(!fpbBandReady()) return;
+// Resuelve la tarjeta: vidrio -- el material del sistema, el MISMO que el resto de overlays -- sobre lo que
+// fb tiene AHORA donde va a caer, mas el contenido. Corre en el bucle normal (nunca dentro de una
+// transferencia) y como mucho cada FPB_REGLASS_MS.
+static void fpbRender(){
+  if(!fpbCv) return;
+  const int w = fpbCardW(), h = fpbCardH(), x0 = fpbRestX(), y0 = fpbRestY();
+  // 1) El fondo: el contenido LIMPIO de la pantalla de debajo (fb nunca guarda el banner).
+  for(int j = 0; j < h; j++){
+    uint16_t* d = fpbCv + (size_t)j * SCR_W;
+    if(!fpbLand && (unsigned)(y0 + j) < (unsigned)SCR_H && x0 >= 0 && x0 + w <= SCR_W){
+      memcpy(d, fb + (size_t)(y0 + j) * SCR_W + x0, (size_t)w * 2);
+      continue;
+    }
+    for(int i = 0; i < w; i++){
+      int px, py; fpbToPhys(x0 + i, y0 + j, px, py);
+      d[i] = ((unsigned)px < (unsigned)SCR_W && (unsigned)py < (unsigned)SCR_H) ? fb[(size_t)py * SCR_W + px] : (uint16_t)0;
+    }
+  }
+  // 2) El material, sobre ese lienzo y SIN las bandas pre-desenfocadas de otros duenos: el vidrio del banner
+  //    se desenfoca sobre lo que hay debajo ahora, no sobre la banda cacheada de un menu o de una tarjeta.
+  uint16_t* ob = gBuf; const bool wl = gLand;
   const int c0 = gClipY0, c1 = gClipY1, cx0 = gClipX0, cx1 = gClipX1;
-  const bool wl = gLand;
-  gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
-  bbufSys(); setBuf(bbuf);
-  memcpy(bbuf + (size_t)fpbBakY0 * SCR_W, fpbBak,
-         (size_t)SCR_W * (fpbBakY1 - fpbBakY0 + 1) * 2);
-  gLand = fpbLand;
-  if(fpbLand) fpbDrawCard(FPB_L_X, FPB_L_Y, FPB_L_W, FPB_L_H, p);
-  else        fpbDrawCard(FPB_V_X, FPB_V_Y, FPB_V_W, FPB_V_H, p);
-  gLand = wl;
-  // Volcado ATOMICO de una banda ya terminada: DMA2D nunca ve un fb a
-  // medio pintar, y por eso no hay parpadeo.
-  present(fpbBakY0, fpbBakY1);
-  setBuf(fb);
+  const uint16_t* bd = gGlBd; const int rec = gGlRecSlot; const int band = uiGlBandY1; const uint8_t mm = gGlMinMix;
+  gGlBd = NULL; gGlRecSlot = -1; uiGlBandY1 = -1; gGlMinMix = FPB_MIN_MIX;
+  gBuf = fpbCv; gLand = false;
+  gClipY0 = 0; gClipY1 = h - 1; gClipX0 = 0; gClipX1 = w - 1;
+  uiSurface(0, 0, w, h, FPB_RAD, UIS_ELEVATED);
+  gGlMinMix = mm; gGlBd = bd; gGlRecSlot = rec; uiGlBandY1 = band;
+  // 3) El contenido.
+  fpbDrawContent(w, h);
+  gBuf = ob; gLand = wl;
   gClipY0 = c0; gClipY1 = c1; gClipX0 = cx0; gClipX1 = cx1;
+  fpbCvMs = millis() | 1u;
+  fpbUnderDirty = false;
 }
 
-// Devuelve la banda a como estaba. Es lo que impide que quede un
-// rastro del banner detras de la app.
-static void fpbRestore(){
-  if(!fpbBandReady()) return;
-  fbLock();
-  memcpy(fb + (size_t)fpbBakY0 * SCR_W, fpbBak,
-         (size_t)SCR_W * (fpbBakY1 - fpbBakY0 + 1) * 2);
-  fbUnlock();
-  flxFlush(fpbBakY0, fpbBakY1);
-  fpbInvalidateBand();
-  // Y ademas se pide repintado a quien tuviera la pantalla: si la app
-  // de debajo repinto esa banda mientras el banner estaba encima, la
-  // copia ya no la describe. Restaurar y pedir repintado cubre los dos
-  // casos sin que ninguno deje residuos.
-  if(gState == ST_HOME) gHomeDirty = true;
+// Mezcla de un pixel LOGICO de fb, acotado a las filas fisicas [a0,a1].
+static inline void fpbMixPx(int lx, int ly, uint16_t col, uint8_t a, int a0, int a1){
+  int px, py; fpbToPhys(lx, ly, px, py);
+  if((unsigned)px >= (unsigned)SCR_W || py < a0 || py > a1) return;
+  uint16_t* d = fb + (size_t)py * SCR_W + px;
+  *d = mix565(*d, col, a);
 }
-
-// Reserva y captura. Corre UNA vez, en la fase de dibujo.
-static bool fpbArm(){
-  fpbBand(fpbLand, fpbBakY0, fpbBakY1);
-  if(fpbBakY1 < fpbBakY0) return false;
-  const size_t need = (size_t)SCR_W * (fpbBakY1 - fpbBakY0 + 1) * 2;
-  // La reserva NO puede comerse la proteccion del sistema.
-  if(fpbBakCap < need && memFreePsram() < FLEXMEM_CRIT_BYTES + need) return false;
-  if(fpbBakCap < need) fpbFreeBand();
-  if(!fpbBak){
-    fpbBak = (uint16_t*)heap_caps_aligned_alloc(64, need, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    fpbBakCap = fpbBak ? need : 0;
+// Estampa la sombra y la tarjeta en fb, SOLO en las filas fisicas [a0,a1].
+static void fpbBlit(int a0, int a1){
+  const int w = fpbCardW(), h = fpbCardH(), cx = fpbCardX(), cy = fpbCardY();
+  const uint16_t sh = TH_SHADOW;
+  // Sombra corta (3,4) con alpha: despega la tarjeta del fondo sin ser un rectangulo opaco. Primero, y solo
+  // la parte que la tarjeta no tapa.
+  for(int j = 4; j < h + 4; j++){
+    const int ly = cy + j;
+    if(!fpbLand && (ly < a0 || ly > a1)) continue;
+    const int sIns = glInset(j - 4, h, FPB_RAD);
+    int s0 = cx + 3 + sIns, s1 = cx + 3 + w - 1 - sIns;
+    int c0 = 1, c1 = 0;                                   // (vacio)
+    if(j < h){ const int cIns = glInset(j, h, FPB_RAD); c0 = cx + cIns; c1 = cx + w - 1 - cIns; }
+    for(int lx = s0; lx <= s1; lx++){
+      if(lx >= c0 && lx <= c1){ lx = c1; continue; }
+      fpbMixPx(lx, ly, sh, FPB_SHADOW_A, a0, a1);
+    }
   }
-  if(!fpbBak) return false;
-  fbLock();
-  memcpy(fpbBak, fb + (size_t)fpbBakY0 * SCR_W, need);
-  fbUnlock();
-  return fpbBandReady();
+  // La tarjeta, dentro de su forma (las esquinas redondeadas del propio vidrio).
+  for(int j = 0; j < h; j++){
+    const int ly = cy + j;
+    if(!fpbLand && (ly < a0 || ly > a1)) continue;
+    const int ins = glInset(j, h, FPB_RAD);
+    const uint16_t* src = fpbCv + (size_t)j * SCR_W;
+    if(!fpbLand){
+      if(ly < 0 || ly >= SCR_H) continue;
+      int xs = cx + ins, xe = cx + w - 1 - ins;
+      if(xs < 0) xs = 0;
+      if(xe > SCR_W - 1) xe = SCR_W - 1;
+      if(xs > xe) continue;
+      memcpy(fb + (size_t)ly * SCR_W + xs, src + (xs - cx), (size_t)(xe - xs + 1) * 2);
+      continue;
+    }
+    for(int i = ins; i < w - ins; i++){
+      int px, py; fpbToPhys(cx + i, ly, px, py);
+      if((unsigned)px >= (unsigned)SCR_W || py < a0 || py > a1) continue;
+      fb[(size_t)py * SCR_W + px] = src[i];
+    }
+  }
 }
 
-// Cierre inmediato SIN restaurar. Lo usa quien toma la pantalla por
-// su cuenta: la pantalla nueva se pinta entera y restaurar encima
-// solo devolveria un fotograma viejo.
-static void fpbAbandon(){
+// ---- Los dos extremos de la transferencia (los llama flxFlush) ----------
+static bool fpbStampBegin(int y0, int y1){
+  if(!fpbLive || fpbStamping || !fpbCv || !fpbSave) return false;
+  if(!fpbScreenAllows() || gLand != fpbLand){
+    // Alguien tomo la pantalla (o la giro): el banner se apaga YA y el panel recupera sus filas limpias.
+    fpbLive = false; fpbSuppressed = true;
+    if(fpbOnPanel) fpbCleanNeed = true;
+    return false;
+  }
+  int rx0, ry0, rx1, ry1;
+  if(!fpbPhysRect(rx0, ry0, rx1, ry1)) return false;
+  const int a0 = ry0 > y0 ? ry0 : y0, a1 = ry1 < y1 ? ry1 : y1;
+  if(a0 > a1) return false;                                   // esta banda no toca la tarjeta
+  const int cw = rx1 - rx0 + 1, ch = a1 - a0 + 1;
+  if((size_t)cw * (size_t)ch * 2u > (size_t)FPB_SAVE_BYTES) return false;
+  if(!fpbOwnFlush) fpbUnderDirty = true;                      // otro repinto estas filas: el vidrio puede estar viejo
+  for(int r = 0; r < ch; r++)
+    memcpy(fpbSave + (size_t)r * cw, fb + (size_t)(a0 + r) * SCR_W + rx0, (size_t)cw * 2);
+  fpbSavX = rx0; fpbSavY = a0; fpbSavW = cw; fpbSavH = ch;
+  fpbStamping = true;
+  fpbBlit(a0, a1);
+  fpbOnPanel = true;
+  return true;
+}
+static void fpbStampEnd(){
+  if(!fpbStamping) return;
+  for(int r = 0; r < fpbSavH; r++)
+    memcpy(fb + (size_t)(fpbSavY + r) * SCR_W + fpbSavX, fpbSave + (size_t)r * fpbSavW, (size_t)fpbSavW * 2);
+  fpbStamping = false;
+}
+static bool fpbCleanPending(){ return fpbCleanNeed; }
+// El panel todavia tiene pixeles del banner en esas filas y ya no se puede dibujar: se le mandan limpias.
+static void fpbCleanFlush(){
+  fpbCleanNeed = false;
+  const bool had = fpbOnPanel;
+  fpbOnPanel = false;
+  if(had && fpbLastY1 >= fpbLastY0) flxFlush(fpbLastY0, fpbLastY1);
+}
+
+// Manda al panel las filas que ocupa la tarjeta ahora y las que ocupaba en la ultima vez.
+static void fpbPaint(){
+  fpbPaintWanted = false;
+  int x0, y0, x1, y1;
+  const bool vis = fpbPhysRect(x0, y0, x1, y1);
+  int r0 = vis ? y0 : 1, r1 = vis ? y1 : 0;
+  if(fpbOnPanel && fpbLastY1 >= fpbLastY0){
+    if(r1 < r0){ r0 = fpbLastY0; r1 = fpbLastY1; }
+    else { if(fpbLastY0 < r0) r0 = fpbLastY0; if(fpbLastY1 > r1) r1 = fpbLastY1; }
+  }
+  if(r1 < r0) return;
+  fpbOwnFlush = true;
+  flxFlush(r0, r1);
+  fpbOwnFlush = false;
+  if(vis){ fpbLastY0 = y0; fpbLastY1 = y1; }
+}
+
+// Cierra el banner del todo y deja el panel limpio. `clean` = hay que devolver al panel sus filas.
+static void fpbFinish(bool clean){
+  const bool had = fpbOnPanel;
+  fpbLive = false;
+  fpbOnPanel = false;
   fpbState = FPB_HIDDEN;
-  fpbSlide = 0.0f;
-  fpbDragging = false;
-  fpbInvalidateBand();
-  fpbFreeBand();
+  fpbSlide = 0.0f; fpbDrop = 0.0f; fpbOutDir = 0; fpbSpring = false; fpbPaintWanted = false;
+  fpbCleanNeed = false;
+  fpbUnderDirty = false;
+  if(fpbGesture){
+    // El dedo sigue abajo y el banner ya no esta: lo que quede del episodio no es de nadie
+    // (ni del banner ni de la pantalla de debajo, que no vio el principio).
+    fpbGesture = false;
+    if(T.down) gTouchSwallow = true;
+  }
+  if(clean && had && fpbLastY1 >= fpbLastY0) flxFlush(fpbLastY0, fpbLastY1);
+  fpbLastY0 = 0; fpbLastY1 = -1;
+  fpbFreeBufs();
 }
+// Cierre inmediato: quien toma la pantalla (o el banner sin memoria) ya la repinta, pero el panel se
+// limpia igualmente desde fb, que nunca tuvo el banner.
+static void fpbAbandon(){ fpbFinish(true); }
 
-static void fpbClose(){
+static void fpbBeginOut(int dir){
   if(fpbState == FPB_HIDDEN || fpbState == FPB_OUT) return;
   if(fpbState == FPB_ARMED){ fpbAbandon(); return; }
   fpbState = FPB_OUT;
   fpbT0 = millis();
+  fpbOutDir = dir;
+  fpbOutFrom = fpbSlide;
+  fpbSpring = false;
+  fpbPaintWanted = true;
+}
+static void fpbClose(){ fpbBeginOut(0); }
+
+// Reserva y primer dibujo. Corre UNA vez, al armarse.
+static bool fpbArm(){
+  const size_t cvBytes = (size_t)SCR_W * FPB_V_H * 2;
+  if(!fpbCv || !fpbSave){
+    // La reserva NO puede comerse la proteccion del sistema.
+    if(memFreePsram() < FLEXMEM_CRIT_BYTES + cvBytes + FPB_SAVE_BYTES) return false;
+    fpbCv   = (uint16_t*)heap_caps_aligned_alloc(64, cvBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    fpbSave = (uint16_t*)heap_caps_aligned_alloc(64, FPB_SAVE_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(!fpbCv || !fpbSave){ fpbFreeBufs(); return false; }
+  }
+  fpbRender();
+  return true;
 }
 
 // -------------------------------------------------------------
 //  Toque
 // -------------------------------------------------------------
-// Devuelve true si el banner se queda el toque. SOLO se lo queda
-// cuando el dedo esta DENTRO de su tarjeta: fuera de ahi el toque es
-// de la app de debajo, que sigue funcionando con normalidad.
-static bool fpbTouch(){
-  if(fpbState != FPB_SHOWN && fpbState != FPB_IN) return false;
-  if(!fpbBandReady()) return false;
-
-  // Zona de la tarjeta en coordenadas FISICAS.
-  int x0, y0, x1, y1;
-  if(fpbLand){ y0 = FPB_L_X; y1 = FPB_L_X + FPB_L_W; x0 = FPB_L_Y; x1 = FPB_L_Y + FPB_L_H; }
-  else       { x0 = FPB_V_X; x1 = FPB_V_X + FPB_V_W; y0 = FPB_V_Y; y1 = FPB_V_Y + FPB_V_H; }
-
-  const bool inside = (T.startX >= x0 && T.startX <= x1 && T.startY >= y0 && T.startY <= y1);
-  if(!inside && !fpbDragging) return false;
-
-  if(T.pressed){
-    if(!fpbDragging){ fpbDragging = true; fpbDragX0 = T.x; }
-    // Arrastre para descartar: se sigue el dedo 1:1 hacia la
-    // izquierda. Hacia la derecha no se mueve, porque ahi no hay
-    // ningun gesto detras y un muelle que no lleva a nada confunde.
-    const int d = T.x - fpbDragX0;
-    fpbSlide = (d < 0) ? (float)d : 0.0f;
-    return true;
-  }
-
-  if(fpbDragging){
-    fpbDragging = false;
-    const int w = fpbLand ? FPB_L_W : FPB_V_W;
-    if(fpbSlide < -(w / 3)){
-      // Descartado por el usuario. Si viene del telefono, se descarta
-      // TAMBIEN alli: descartarla en un lado y que siga en el otro es
-      // lo que hace molesto un puente de notificaciones.
-      if(fpbCur.src == FPN_SRC_PHONE && fpbCur.id && flexPhoneLinkReady(&fphLink)){
-        uint8_t body[4];
-        FlexLinkWr w2; flexLinkWrInit(&w2, body, sizeof(body));
-        flexLinkWrU32(&w2, fpbCur.id);
-        if(flexLinkWrOk(&w2))
-          flexPhoneLinkSend(&fphLink, FLNK_T_NOTIF_REMOVE, body, w2.at, false);
-        flexPhoneNotifRemove(&fphModel, fpbCur.id);
-        flexPhoneConvRebuild(&fphModel);
-        fphModel.dirty = true;
-      }
-      fpbClose();
-      return true;
+// El banner se queda el EPISODIO del dedo que baja dentro de su tarjeta, entero y hasta que se levante:
+// la pantalla de debajo ni lo ve (touchHoldBack). Un episodio que empezo fuera es de la pantalla de debajo,
+// aunque el dedo pase por encima de la tarjeta.
+//   · arrastrar a izquierda o derecha sigue al dedo 1:1;
+//   · soltar pasado 1/3 de su ancho, o con un lanzamiento, DESCARTA: sale deslizandose y la notificacion se
+//     retira de verdad (del modelo y del telefono);
+//   · soltar antes vuelve a su sitio (muelle) y no pasa nada;
+//   · un toque sin arrastrar abre Flex Phone en Notificaciones.
+static void fpbDismissed(){
+  // Descartado por el usuario. Si viene del telefono, se descarta TAMBIEN alli: descartarla en un lado y que
+  // siga en el otro es lo que hace molesto un puente de notificaciones.
+  if(fpbCur.src == FPN_SRC_PHONE && fpbCur.id){
+    if(flexPhoneLinkReady(&fphLink)){
+      uint8_t body[4];
+      FlexLinkWr w2; flexLinkWrInit(&w2, body, sizeof(body));
+      flexLinkWrU32(&w2, fpbCur.id);
+      if(flexLinkWrOk(&w2))
+        flexPhoneLinkSend(&fphLink, FLNK_T_NOTIF_REMOVE, body, w2.at, false);
     }
+    flexPhoneNotifRemove(&fphModel, fpbCur.id);
+    flexPhoneConvRebuild(&fphModel);
+    fphModel.dirty = true;
+  }
+}
+static void fpbTouch(){
+  const bool targetable = fpbLive && (fpbState == FPB_IN || fpbState == FPB_SHOWN);
+  if(!fpbGesture){
+    if(!targetable || !T.pressed || gTouchSwallow) return;     // el episodio es de quien este debajo
+    if(!fpbInsidePhys(T.x, T.y)) return;
+    int lx, ly; fpbToLogical(T.x, T.y, lx, ly);
+    fpbGesture = true; fpbGMoved = false; fpbSpring = false;
+    fpbGx0 = lx; fpbGLx = lx; fpbGMs = millis(); fpbGvx = 0.0f;
+  }
+  if(!targetable){
+    // El banner desaparecio a mitad del gesto: lo que quede del episodio no es de nadie (ni del banner ni de
+    // la pantalla de debajo, que no vio el principio).
+    fpbGesture = false;
+    if(T.down) gTouchSwallow = true;
+    touchHoldBack();
+    return;
+  }
+  int lx, ly; fpbToLogical(T.x, T.y, lx, ly);
+  if(T.down){
+    // Dedo apoyado: sigue al dedo, sin pasarse del ancho de la tarjeta + un margen.
+    const int dx = lx - fpbGx0;
+    if(!fpbGMoved && (dx > FPB_DRAG_PX || dx < -FPB_DRAG_PX)) fpbGMoved = true;
+    if(fpbGMoved){
+      const float lim = (float)(fpbCardW() + 40);
+      float s = (float)dx;
+      if(s < -lim) s = -lim;
+      if(s > lim) s = lim;
+      if(s != fpbSlide){ fpbSlide = s; fpbPaintWanted = true; }
+      const uint32_t now = millis();
+      if(now - fpbGMs >= 16u){                     // velocidad: lo que se movio en la ultima ventana
+        fpbGvx = (float)(lx - fpbGLx) / (float)(now - fpbGMs);
+        fpbGLx = lx; fpbGMs = now;
+      }
+    }
+    touchHoldBack();
+    return;
+  }
+  // Soltado.
+  const bool tap = T.tap;
+  fpbGesture = false;
+  if(millis() - fpbGMs > 100u) fpbGvx = 0.0f;       // se paro antes de soltar: no es un lanzamiento
+  const int w = fpbCardW();
+  const float a = fpbSlide < 0 ? -fpbSlide : fpbSlide;
+  const float v = fpbGvx < 0 ? -fpbGvx : fpbGvx;
+  const bool sameWay = (fpbSlide < 0 && fpbGvx < 0) || (fpbSlide > 0 && fpbGvx > 0);
+  if(fpbGMoved && (a >= (float)(w / 3) || (sameWay && v >= FPB_FLING && a >= (float)FPB_FLING_MIN))){
+    fpbDismissed();
+    fpbBeginOut(fpbSlide < 0 ? -1 : 1);
+  } else if(fpbGMoved || fpbSlide != 0.0f){
     // No llego: vuelve a su sitio.
-    fpbSlide = 0.0f;
-    if(T.tap){
-      // Toque: abre Flex Phone en la seccion de notificaciones. Es la
-      // unica accion real que se puede ofrecer desde aqui.
-      fpbClose();
-      if(fpbCur.src == FPN_SRC_PHONE){
-        fphSection = FPH_NOTIFS;
-        if(gState == ST_APP) appClose();
-        enterApp(IC_FLEXPHONE);
-      }
-      return true;
+    fpbSpring = true; fpbSpringFrom = fpbSlide; fpbSpringT0 = millis();
+    fpbPaintWanted = true;
+  } else if(tap){
+    // Toque: abre Flex Phone en la seccion de notificaciones. Es la unica accion real que se puede ofrecer.
+    const bool phone = fpbCur.src == FPN_SRC_PHONE;
+    fpbClose();
+    if(phone){
+      fphSection = FPH_NOTIFS;
+      if(gState == ST_APP) appClose();
+      enterApp(IC_FLEXPHONE);
     }
-    return true;
   }
-  return false;
+  touchHoldBack();                                 // el tap, la suelta y el deslizamiento no llegan a la pantalla de debajo
 }
 
 // -------------------------------------------------------------
 //  Tick
 // -------------------------------------------------------------
+static float fpbEase(float p){ return 1.0f - (1.0f - p) * (1.0f - p); }
 static void fpbTick(){
   // Cola vacia y nada a la vista: salida barata. Es lo que hace que
   // este modulo no cueste FPS cuando no hay notificaciones.
@@ -406,62 +642,74 @@ static void fpbTick(){
 
   // Arrancar el siguiente de la cola.
   if(fpbState == FPB_HIDDEN){
-    if(!fpbCanShow()) return;              // se espera: la cola no se pierde
+    if(!fpbCanShow(fpbQueue[0].src)) return;   // se espera: la cola no se pierde
     fpbCur = fpbQueue[0];
     for(int i = 1; i < fpbQueueN; i++) fpbQueue[i - 1] = fpbQueue[i];
     fpbQueueN--;
     fpbLand = gLand;
     fpbSlide = 0.0f;
+    fpbDrop = (float)fpbDropMax();
+    fpbSuppressed = false;
     fpbState = FPB_ARMED;
     fpbT0 = millis();
   }
 
-  // La orientacion cambio debajo (se abrio un juego, Modo PC, un
-  // video): la banda capturada ya no describe nada.
-  if(gLand != fpbLand){ fpbAbandon(); return; }
-  // Alguien tomo la pantalla: se abandona sin restaurar.
-  if(!fpbCanShow()){ fpbAbandon(); return; }
+  // Alguien tomo la pantalla, o la giro: el banner se retira y el panel se limpia.
+  if(fpbSuppressed || gLand != fpbLand || !fpbScreenAllows()){ fpbAbandon(); return; }
 
   if(fpbState == FPB_ARMED){
     if(!fpbArm()){
-      // Sin memoria para la banda: NO se dibuja. La notificacion no
-      // se pierde -- esta en el Centro -- y el sistema no se queda
-      // con un overlay que no puede pintar.
+      // Sin memoria para la tarjeta: NO se dibuja. La notificacion no se pierde -- esta en el Centro -- y el
+      // sistema no se queda con un overlay que no puede pintar.
       fpbAbandon();
       return;
     }
+    fpbLive = true;
     fpbState = FPB_IN;
     fpbT0 = millis();
-    fpbCompose(0.0f);
+    fpbPaint();
     return;
   }
-  if(!fpbBandReady()){ fpbAbandon(); return; }
+  if(!fpbLive){ fpbAbandon(); return; }
 
-  const uint32_t e = millis() - fpbT0;
+  const uint32_t now = millis();
+  const uint32_t e = now - fpbT0;
+
+  // Lo de debajo repinto sus filas: el vidrio se resuelve otra vez (pocas veces por segundo, nunca por cuadro).
+  if(fpbUnderDirty && now - fpbCvMs >= FPB_REGLASS_MS){
+    fpbRender();
+    fpbPaintWanted = true;
+  }
+
   switch(fpbState){
     case FPB_IN: {
       float p = (e >= FPB_IN_MS) ? 1.0f : (float)e / (float)FPB_IN_MS;
-      p = 1.0f - (1.0f - p) * (1.0f - p);
-      fpbCompose(p);
-      if(e >= FPB_IN_MS){ fpbState = FPB_SHOWN; fpbT0 = millis(); }
+      fpbDrop = (1.0f - fpbEase(p)) * (float)fpbDropMax();
+      fpbPaint();
+      if(e >= FPB_IN_MS){ fpbDrop = 0.0f; fpbState = FPB_SHOWN; fpbT0 = now; }
       break;
     }
     case FPB_SHOWN:
-      // Mientras el dedo lo arrastra NO caduca: nadie quiere que se
-      // le vaya lo que esta tocando.
-      if(fpbDragging || fpbSlide != 0.0f){ fpbCompose(1.0f); fpbT0 = millis(); break; }
-      fpbCompose(1.0f);
+      if(fpbSpring){
+        float p = (now - fpbSpringT0 >= FPB_SPRING_MS) ? 1.0f : (float)(now - fpbSpringT0) / (float)FPB_SPRING_MS;
+        fpbSlide = fpbSpringFrom * (1.0f - fpbEase(p));
+        if(p >= 1.0f){ fpbSlide = 0.0f; fpbSpring = false; }
+        fpbPaintWanted = true;
+      }
+      // Mientras el dedo lo arrastra NO caduca: nadie quiere que se le vaya lo que esta tocando.
+      if(fpbGesture || fpbSpring || fpbSlide != 0.0f){ fpbT0 = now; if(fpbPaintWanted) fpbPaint(); break; }
+      if(fpbPaintWanted) fpbPaint();
       if(e >= FPB_HOLD_MS) fpbClose();
       break;
     case FPB_OUT: {
-      // Sale por arriba, por donde entro.
       float p = (e >= FPB_OUT_MS) ? 1.0f : (float)e / (float)FPB_OUT_MS;
-      fpbCompose(1.0f - p);
+      if(fpbOutDir == 0) fpbDrop = fpbEase(p) * (float)fpbDropMax();               // sube por donde entro
+      else fpbSlide = fpbOutFrom + ((float)fpbOutDir * (float)(fpbCardW() + 40) - fpbOutFrom) * fpbEase(p);
+      fpbPaint();
       if(e >= FPB_OUT_MS){
-        fpbRestore();
-        fpbFreeBand();
-        fpbState = FPB_HIDDEN;
-        fpbSlide = 0.0f;
+        const uint32_t more = fpbMore;
+        (void)more;
+        fpbFinish(true);
         fpbMore = 0;
       }
       break;
@@ -496,6 +744,8 @@ static FlexPhoneEntry fpcList[FPN_LIST_MAX];
 static int      fpcListN = 0;
 
 static inline bool fpcOpen(){ return fpcX > -SCR_W; }
+// El Centro es dueno de la pantalla mientras esta abierto, se arrastra o se anima (lo pregunta el banner).
+static bool fpcBusy(){ return fpcOpen() || fpcDragging || fpcAnimOn; }
 
 // ¿Se puede abrir el Centro desde el borde? Mismas restricciones que
 // la cortina: en DeX y en las pantallas en exclusiva, no.
