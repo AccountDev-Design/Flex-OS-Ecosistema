@@ -46,12 +46,17 @@ class MediaAnalyzerTest {
         assertPlan(Plan.NONE, a(MediaFixtures.jpeg(320, 240, orientation = 1)))
     }
 
-    @Test fun `JPEG de mas de 4096 px o de mas de 8 MB - TRANSCODE`() {
+    @Test fun `JPEG de mas de 4096 px o de mas de 6 MB - TRANSCODE`() {
         assertPlan(Plan.TRANSCODE, a(MediaFixtures.jpeg(4200, 100, quality = 0.3f)))
         val big = MediaFixtures.jpeg(1200, 800, quality = 0.9f)
         val padded = big.copyOf(big.size) // no se puede engordar sin romper el EOI: se rellena antes del final
         val withPad = padded.copyOfRange(0, padded.size - 2) + ByteArray((MediaProfile.PHOTO_MAX_BYTES + 10).toInt()) + byteArrayOf(0xFF.toByte(), 0xD9.toByte())
         assertPlan(Plan.TRANSCODE, a(withPad))
+        // 7 MB: con el tope de antes (8) pasaba por "compatible" y el P4 la rechazaba al abrirla ("demasiado grande": su visor la trae a la RAM
+        // con tope de 6 MB). El tope del telefono tiene que ser el del P4: aqui tiene vista previa ligera y se abre.
+        val seven = padded.copyOfRange(0, padded.size - 2) + ByteArray(7 shl 20) + byteArrayOf(0xFF.toByte(), 0xD9.toByte())
+        assertPlan(Plan.TRANSCODE, a(seven))
+        assertEquals(6L shl 20, MediaProfile.PHOTO_MAX_BYTES)
     }
 
     @Test fun `JPEG cortado o con cabecera rota - CORRUPT`() {

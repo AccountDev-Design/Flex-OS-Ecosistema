@@ -23,8 +23,12 @@ object MediaProfile {
     // ---------------------------------------------------------------- JPEG (fotos y fotogramas)
     /** Techo del decodificador propio del P4 (FlexOS_JPEG.h). */
     const val JPEG_DECODER_MAX_SIDE = 4096
-    /** Lo que el P4 trae de la nube para una foto (FlexOS_Cloud.cpp VIEW_MAX). */
-    const val PHOTO_MAX_BYTES = 8L shl 20
+    /**
+     * Lo que el P4 trae de la nube para una foto (FlexOS_Cloud.cpp VIEW_MAX y FlexOS_CloudCore.cpp fclOpenAction). Va a la RAM, no a la flash:
+     * el buffer del JPEG y, despues, lo que el visor necesita para decodificarlo tienen que caber a la vez en la PSRAM. Si el P4 baja este
+     * tope, esta cifra baja con el: una foto "compatible" que el P4 luego rechaza por grande es peor que una vista previa de mas.
+     */
+    const val PHOTO_MAX_BYTES = 6L shl 20
     const val PHOTO_TARGET_SIDE = 1600
     const val PHOTO_TARGET_QUALITY = 85
     /** Una foto compatible mas pesada que esto (o de mas de 2400 px) tambien tiene vista previa ligera. */
