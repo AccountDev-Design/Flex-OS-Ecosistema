@@ -396,6 +396,12 @@ $(BUILD)/phone_e2e: phone_e2e.cpp e2e_http.h pkgbuild.h $(CLOUD_SRC) $(ULTRA)/Fl
 phone-e2e:
 	./phone_e2e.sh
 
+# El PERFIL MULTIMEDIA: lo que escribe y analiza el Kotlin del telefono (AVI MJPEG, WAV IMA, remuxes),
+# abierto y decodificado por el FIRMWARE (build/mediacheck). No va en `make` (JDK + Gradle). Ver media_profile_e2e.sh.
+.PHONY: media-profile-e2e
+media-profile-e2e:
+	./media_profile_e2e.sh
+
 # El ENLACE de Flex Phone de punta a punta: la tarea de red REAL del P4
 # (fpwTask) y la maquina de estados REAL contra el WifiLinkServer REAL del
 # telefono (Kotlin, en la JVM), con hilos y sockets de verdad. No va en
