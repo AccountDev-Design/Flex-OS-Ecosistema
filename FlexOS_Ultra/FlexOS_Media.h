@@ -104,9 +104,13 @@ void flexMediaExt(const char* name, char* out, size_t n);
 //  es EL MISMO codigo en la placa y en el PC, que es lo que hace
 //  que probarlo en el PC signifique algo.
 // -------------------------------------------------------------
+#define FLEXIO_AGAIN (-2)
 typedef struct {
   // Lee hasta `n` bytes en la posicion actual. Devuelve los leidos
-  // (0 = fin) o -1 si hubo error o el medio desaparecio.
+  // (0 = fin), -1 si hubo error o el medio desaparecio, o FLEXIO_AGAIN si
+  // los datos AUN NO HAN LLEGADO (streaming desde Flex Cloud). Solo el
+  // reproductor de audio (flexAsPump) sabe reintentar: para cualquier otro
+  // lector, un valor negativo es un error.
   int      (*read)(void* ctx, void* buf, uint32_t n);
   // Coloca la posicion. false si no se pudo.
   bool     (*seek)(void* ctx, uint32_t off);
@@ -304,6 +308,7 @@ typedef struct {
   uint64_t    limit;             // tope de salida ('fact' del IMA), o ~0
   uint16_t    outFrame;          // bytes por muestra de salida (canales x 2)
   bool        ended;
+  bool        starved;           // la ultima vuelta se quedo sin datos del origen (streaming): "cargando", no error
 } FlexAudioStream;
 
 // Memoria de trabajo que necesita ese WAV (0 = formato que no se reproduce).
@@ -314,7 +319,10 @@ bool     flexAsOpen(FlexAudioStream* s, const FlexMediaIO* io, const FlexWavInfo
                     uint8_t* work, size_t cap);
 // Entrega al destino lo que acepte ahora, como mucho `budget` bytes.
 // Devuelve los entregados (>= 0), o -1 si el archivo o el destino fallaron.
-// s->ended = ya no queda nada que entregar.
+// s->ended = ya no queda nada que entregar. Si el origen contesta FLEXIO_AGAIN
+// (la nube aun no trajo ese tramo) no es un fallo ni el final: entrega lo que
+// tenia, deja s->starved y se reintenta en la siguiente vuelta, sin perder
+// ni repetir una muestra.
 int      flexAsPump(FlexAudioStream* s, FlexAsSink sink, void* ctx, uint32_t budget);
 uint32_t flexAsPosMs(const FlexAudioStream* s);
 uint32_t flexAsDurMs(const FlexAudioStream* s);

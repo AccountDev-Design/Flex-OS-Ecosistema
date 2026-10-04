@@ -2232,6 +2232,11 @@ void flexCloudStreamClose(){
   stUnlock();
   stNotify();
 }
+bool flexCloudStreamIs(const char* fileId){
+  if(!gStLock || !fileId) return false;
+  stLock(); bool r = gSt.open && !strcmp(gSt.fileId, fileId); stUnlock();
+  return r;
+}
 uint8_t flexCloudStreamState(char* err, size_t cap){
   if(!gStLock) return FCS_CLOSED;
   stLock(); uint8_t s = gSt.state; if(err && cap) snprintf(err, cap, "%s", gSt.err); stUnlock();

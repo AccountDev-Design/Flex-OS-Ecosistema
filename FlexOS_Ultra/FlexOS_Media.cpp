@@ -718,22 +718,28 @@ bool flexAsOpen(FlexAudioStream* s, const FlexMediaIO* io, const FlexWavInfo* w,
   return true;
 }
 
-static bool asRead(FlexAudioStream* s, uint8_t* dst, uint32_t n){
+// 1 = leido; 0 = error o fin inesperado; FLEXIO_AGAIN = los datos aun no han llegado.
+static int asRead(FlexAudioStream* s, uint8_t* dst, uint32_t n){
   if(s->ioPos != s->pos){
-    if(!s->io.seek(s->io.ctx, s->pos)) return false;
+    if(!s->io.seek(s->io.ctx, s->pos)) return 0;
     s->ioPos = s->pos;
   }
   uint32_t got = 0;
   while(got < n){
     int r = s->io.read(s->io.ctx, dst + got, n - got);
-    if(r <= 0) return false;
+    if(r == FLEXIO_AGAIN){
+      // Puede que ya se hubiera leido una parte: el descriptor no esta donde creemos. La siguiente vuelta recoloca.
+      s->ioPos = 0xFFFFFFFFu;
+      return FLEXIO_AGAIN;
+    }
+    if(r <= 0) return 0;
     got += (uint32_t)r;
   }
   s->pos += n; s->ioPos = s->pos;
-  return true;
+  return 1;
 }
 
-// Prepara el siguiente trozo de salida. 0 = no queda nada, -1 = error.
+// Prepara el siguiente trozo de salida. 0 = no queda nada, -1 = error, FLEXIO_AGAIN = faltan datos por llegar.
 static int asFill(FlexAudioStream* s){
   s->bufOff = s->bufLen = 0;
   if(s->pos >= s->end || s->produced >= s->limit) return 0;
@@ -743,7 +749,9 @@ static int asFill(FlexAudioStream* s){
     n = s->end - s->pos;
     if(n > w->blockAlign) n = w->blockAlign;
     if(n <= 4u * w->channels){ s->pos = s->end; return 0; }   // resto sin muestras
-    if(!asRead(s, s->blk, n)) return -1;
+    int a = asRead(s, s->blk, n);
+    if(a == FLEXIO_AGAIN) return FLEXIO_AGAIN;
+    if(!a) return -1;
     int fr = flexImaDecodeBlock(s->blk, n, w->channels, (int16_t*)s->buf, w->samplesPerBlock);
     if(fr < 0) return -1;
     s->bufLen = (uint32_t)fr * s->outFrame;
@@ -755,11 +763,15 @@ static int asFill(FlexAudioStream* s){
     n -= n % inFrame;
     if(!n){ s->pos = s->end; return 0; }
     if(w->bits == 16){
-      if(!asRead(s, s->buf, n)) return -1;
+      int a = asRead(s, s->buf, n);
+      if(a == FLEXIO_AGAIN) return FLEXIO_AGAIN;
+      if(!a) return -1;
       s->bufLen = n;
     } else {
       // WAV de 8 bits es SIN signo (128 = silencio): a 16 bits con signo.
-      if(!asRead(s, s->blk, n)) return -1;
+      int a = asRead(s, s->blk, n);
+      if(a == FLEXIO_AGAIN) return FLEXIO_AGAIN;
+      if(!a) return -1;
       int16_t* o = (int16_t*)s->buf;
       for(uint32_t i = 0; i < n; i++) o[i] = (int16_t)(((int)s->blk[i] - 128) * 256);
       s->bufLen = n * 2u;
@@ -773,9 +785,11 @@ static int asFill(FlexAudioStream* s){
 int flexAsPump(FlexAudioStream* s, FlexAsSink sink, void* ctx, uint32_t budget){
   if(!s || !sink || !s->buf) return -1;
   uint32_t total = 0;
+  s->starved = false;
   while(total < budget){
     if(s->bufOff >= s->bufLen){
       int f = asFill(s);
+      if(f == FLEXIO_AGAIN){ s->starved = true; break; }      // aun no ha llegado: ni error ni final
       if(f < 0) return -1;
       if(f == 0){ s->ended = true; break; }
     }

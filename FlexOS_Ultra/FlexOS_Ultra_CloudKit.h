@@ -467,6 +467,25 @@ static void ckGoUp(){
   ckRequest(FCL_VIEW_FOLDER, up);
 }
 
+// Ruta "cloud:<id>/<nombre>" de lo que el visor o Musica van a LEER. Si el telefono ya miro los bytes (nativo o preparado), la
+// extension es la de lo que LLEGA -- AVI, WAV o JPG --, porque por ella decide el P4 quien lo abre: un MP4 preparado sale
+// como "peli.avi" y suena/ se ve en el reproductor de siempre.
+static void ckPlayPath(const FclItem& it, char* out, size_t cap){
+  char nm[48]; fclLocalName(it.name, nm, sizeof(nm));
+  if(fclPlayable(&it)){
+    const char* ext = it.kind == FCL_K_VIDEO ? ".avi" : it.kind == FCL_K_AUDIO ? ".wav" : it.kind == FCL_K_PHOTO ? ".jpg" : "";
+    char* dot = strrchr(nm, '.');
+    if(ext[0]){
+      if(dot && dot != nm) *dot = 0;
+      size_t l = strlen(nm);
+      if(l + 5 > sizeof(nm)) nm[sizeof(nm) - 5] = 0;
+      l = strlen(nm);
+      snprintf(nm + l, sizeof(nm) - l, "%s", ext);
+    }
+  }
+  snprintf(out, cap, MEDIA_CLOUD_PREFIX "%s/%s", it.id, nm);
+}
+
 static void ckOpenItem(const FclItem& it){
   // La cuenta dejo de servir mientras la lista seguia a la vista (el repintado
   // llega en el siguiente cuarto de segundo): no se pide nada.
@@ -484,11 +503,22 @@ static void ckOpenItem(const FclItem& it){
       // Se reproduce por rangos: el visor lee de la arena de bloques.
       gMediaCloudItem = it;
       char p[FLEXMED_PATH_MAX];
-      char nm[48]; fclLocalName(it.name, nm, sizeof(nm));
-      snprintf(p, sizeof(p), MEDIA_CLOUD_PREFIX "%s/%s", it.id, nm);
+      ckPlayPath(it, p, sizeof(p));
       if(ckHost && ckHost->openLocal) ckHost->openLocal(p);
       return;
     }
+    case FCL_OPEN_AUDIO: {
+      // Musica: el MISMO reproductor que lo local (play, pausa, buscar, volumen), leyendo por rangos de Flex Cloud.
+      gMediaCloudItem = it;
+      char p[FLEXMED_PATH_MAX];
+      ckPlayPath(it, p, sizeof(p));
+      if(ckHost && ckHost->openLocal) ckHost->openLocal(p);
+      return;
+    }
+    case FCL_OPEN_PREPARING:
+      // El telefono lo esta preparando para Flex OS: se dice (con el avance) y se espera, sin intentar abrir algo que fallaria.
+      { char ln[64]; fclPlayLine(&it, ln, sizeof(ln)); sysNotify(it.name, ln[0] ? ln : (why ? why : "Preparando para Flex OS...")); }
+      return;
     default:
       if(why) sysNotify(it.name, why);
       ckMenuItem = it; ckMenuForItem = true;
@@ -507,11 +537,13 @@ static void ckInfo(const FclItem& it){
   fclFmtDate(it.updatedAt, dt, sizeof(dt));
   if(it.isFolder) snprintf(txt, sizeof(txt), "%s\nCarpeta de Flex Cloud%s%s", it.name, dt[0] ? "\nModificada: " : "", dt);
   else {
-    char dim[32] = "";
+    char dim[32] = "", dur[24] = "", st[72];
     if(it.width && it.height) snprintf(dim, sizeof(dim), " \xC2\xB7 %ux%u", (unsigned)it.width, (unsigned)it.height);
-    snprintf(txt, sizeof(txt), "%s\n%s%s \xC2\xB7 %s\n%s%s\nSHA-256: %.16s...\n%s",
-             it.name, sz, dim, it.mime[0] ? it.mime : "archivo",
-             dt[0] ? "Modificado: " : "", dt, it.sha256,
+    if(it.durationMs){ char t[16]; mlFmtDur(it.durationMs, t, sizeof(t)); snprintf(dur, sizeof(dur), " \xC2\xB7 %s", t); }
+    fclPlayLine(&it, st, sizeof(st));
+    snprintf(txt, sizeof(txt), "%s\n%s%s%s \xC2\xB7 %s\n%s%s%s%s\nSHA-256: %.16s...\n%s",
+             it.name, sz, dim, dur, it.mime[0] ? it.mime : "archivo",
+             dt[0] ? "Modificado: " : "", dt, st[0] ? "\n" : "", st, it.sha256,
              it.fromDevice ? "Subido desde un Flex OS Ultra" : "Subido desde la web");
   }
   mmDlgOpen("Detalles", txt, "Cerrar", "", false);

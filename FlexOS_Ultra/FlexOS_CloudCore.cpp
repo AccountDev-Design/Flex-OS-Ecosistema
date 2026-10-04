@@ -992,6 +992,15 @@ void fclItemSub(const FclItem* it, char* out, size_t cap){
   fclFmtDate(it->updatedAt, dt, sizeof(dt));
   if(dt[0]) snprintf(out, cap, "%s \xC2\xB7 %s", sz, dt);
   else snprintf(out, cap, "%s", sz);
+  // Duracion (video y audio), solo si el telefono la leyo de los bytes: nunca inventada.
+  if(it->durationMs && (it->kind == FCL_K_VIDEO || it->kind == FCL_K_AUDIO)){
+    uint32_t sec = (it->durationMs + 500u) / 1000u;
+    size_t l = strlen(out);
+    if(l + 12 < cap){
+      if(sec >= 3600u) snprintf(out + l, cap - l, " \xC2\xB7 %u:%02u:%02u", (unsigned)(sec / 3600u), (unsigned)(sec / 60u % 60u), (unsigned)(sec % 60u));
+      else snprintf(out + l, cap - l, " \xC2\xB7 %u:%02u", (unsigned)(sec / 60u), (unsigned)(sec % 60u));
+    }
+  }
   // Lo que hay que saber ANTES de tocar: se esta preparando, no se puede convertir o esta roto.
   const char* tag = nullptr;
   char prep[24];

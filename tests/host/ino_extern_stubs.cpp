@@ -480,9 +480,18 @@ bool        gStubAudioOk = false;
 bool        flexAudioAvailable(){ return gStubAudioOk; }
 const char* flexAudioError(){ return "Sin codec de audio"; }
 bool        flexAudioStartPcm(uint32_t, uint16_t, uint16_t){ return false; }
-bool        flexAudioStartPcmBuffered(uint32_t, uint16_t, uint16_t, uint16_t){ return false; }
+// Las pruebas de Musica desde la nube SI reproducen: con gStubAudioPlay el "codec" acepta PCM y lo apunta en gStubAudioOut.
+bool        gStubAudioPlay = false;
+std::vector<uint8_t> gStubAudioOut;
+size_t      gStubAudioChunk = 4096;            // lo que acepta de golpe (un DMA que se llena)
+bool        flexAudioStartPcmBuffered(uint32_t, uint16_t, uint16_t, uint16_t){ return gStubAudioPlay; }
 uint32_t    flexAudioBufferMs(){ return 0; }
-int         flexAudioWrite(const void*, size_t){ return -1; }
+int         flexAudioWrite(const void* p, size_t n){
+  if(!gStubAudioPlay) return -1;
+  size_t take = n < gStubAudioChunk ? n : gStubAudioChunk;
+  gStubAudioOut.insert(gStubAudioOut.end(), (const uint8_t*)p, (const uint8_t*)p + take);
+  return (int)take;
+}
 void        flexAudioStop(){}
 bool        flexAudioPlaying(){ return false; }
 // El volumen sigue el MISMO contrato que FlexOS_Audio.cpp: aplicarlo es
@@ -560,6 +569,7 @@ std::vector<uint8_t> gStubStreamData;
 std::vector<bool>    gStubStreamReady;
 std::vector<bool>    gStubStreamWant;              // pedidos (fallos de lectura, saltos, fijados)
 bool     gStubStreamOpen = false;
+std::string gStubStreamId;                         // el archivo que esta abierto por rangos
 uint8_t  gStubStreamState = FCS_CLOSED;
 uint32_t gStubStreamPinOff = 0, gStubStreamPinLen = 0, gStubStreamMisses = 0;
 static const uint32_t STUB_BLK = 64u * 1024u;
@@ -669,7 +679,8 @@ static void stubWant(uint32_t off, uint32_t len){
 }
 bool     flexCloudStreamOpen(const FclItem* it){
   stubCall(std::string("stream ") + it->id);
-  if(gStubStreamData.empty() || it->size != gStubStreamData.size()) return false;
+  if(gStubStreamData.empty() || fclPlaySize(it) != gStubStreamData.size()) return false;
+  gStubStreamId = it->id;
   gStubStreamOpen = true; gStubStreamState = FCS_OPENING;
   size_t nb = (gStubStreamData.size() + STUB_BLK - 1) / STUB_BLK;
   gStubStreamReady.assign(nb, false); gStubStreamWant.assign(nb, false);
@@ -677,6 +688,7 @@ bool     flexCloudStreamOpen(const FclItem* it){
   return true;
 }
 void     flexCloudStreamClose(){ if(gStubStreamOpen) stubCall("stream-close"); gStubStreamOpen = false; gStubStreamState = FCS_CLOSED; }
+bool     flexCloudStreamIs(const char* id){ return gStubStreamOpen && id && gStubStreamId == id; }
 uint8_t  flexCloudStreamState(char* err, size_t cap){ if(err && cap) err[0] = 0; return gStubStreamState; }
 uint32_t flexCloudStreamSize(){ return gStubStreamOpen ? (uint32_t)gStubStreamData.size() : 0; }
 int      flexCloudStreamRead(uint32_t off, void* buf, uint32_t n){

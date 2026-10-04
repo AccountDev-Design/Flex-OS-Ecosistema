@@ -1097,6 +1097,77 @@ static void testAudioStream(){
 }
 
 // =============================================================
+//  5d) AUDIO DESDE LA NUBE: los datos llegan A TROZOS
+//  ------------------------------------------------------------
+//  Con Flex Cloud la musica se lee por rangos y el tramo que toca puede no haber
+//  llegado todavia. Eso NO es un error ni el final de la pista: el reproductor
+//  entrega lo que tiene, queda "cargando" y sigue cuando llega, sin perder ni
+//  repetir una muestra (y sin tragarse un trozo a medias al reintentar).
+// =============================================================
+struct GateIO { MemIO m; uint32_t avail = 0; int agains = 0; };
+static int gateRead(void* c, void* buf, uint32_t n){
+  GateIO* g = (GateIO*)c;
+  if(g->m.pos >= g->avail && g->m.pos < g->m.data.size()){ g->agains++; return FLEXIO_AGAIN; }
+  uint32_t lim = g->avail < g->m.data.size() ? g->avail : (uint32_t)g->m.data.size();
+  if(n > lim - g->m.pos) n = lim - g->m.pos;           // lectura parcial: solo hasta donde ha llegado
+  return memRead(&g->m, buf, n);
+}
+static bool gateSeek(void* c, uint32_t off){ return memSeek(&((GateIO*)c)->m, off); }
+static uint32_t gateSize(void* c){ return memSize(&((GateIO*)c)->m); }
+
+static void testAudioStarved(){
+  std::printf("[media] audio por rangos: lo que aun no llego no es un error\n");
+  struct Case { const char* name; std::vector<uint8_t> file; };
+  std::vector<Case> cases;
+  { std::vector<uint8_t> d(8000 * 2 * 2); for(size_t i = 0; i < d.size(); i++) d[i] = (uint8_t)(i * 13 + (i >> 8)); cases.push_back({ "PCM16 estereo", pcmWav(2, 8000, 16, d) }); }
+  { std::vector<uint8_t> d(8000); for(size_t i = 0; i < d.size(); i++) d[i] = (uint8_t)(i * 5 + 3); cases.push_back({ "PCM8", pcmWav(1, 8000, 8, d) }); }
+  {
+    std::vector<int16_t> pcm(4000); for(size_t i = 0; i < pcm.size(); i++) pcm[i] = (int16_t)(sin(i * 0.05) * 9000);
+    int spb = 0; std::vector<uint8_t> enc = imaEncode(pcm, 1, 256, &spb);
+    cases.push_back({ "IMA mono", imaWav(enc, 1, 8000, 256, spb, (uint32_t)pcm.size()) });
+  }
+  for(auto& c : cases){
+    // referencia: el archivo entero disponible
+    MemIO full; full.data = c.file; FlexMediaIO fio = ioOf(&full);
+    FlexWavInfo w; CHECK(flexWavParse(&fio, &w) == FLEXWAV_OK, "%s: se lee la cabecera", c.name);
+    std::vector<uint8_t> work(flexAsWorkBytes(&w)); FlexAudioStream st;
+    CHECK(flexAsOpen(&st, &fio, &w, work.data(), work.size()), "%s: prepara", c.name);
+    Sink ref; ref.seed = 1;
+    for(int i = 0; i < 200000 && !st.ended; i++){ int r = flexAsPump(&st, sinkAccept, &ref, 1500); if(r < 0) break; }
+    // lo mismo, pero los bytes van llegando de 1 KB en 1 KB (y el destino a su ritmo)
+    GateIO g; g.m.data = c.file; g.avail = w.dataStart;
+    FlexMediaIO gio; gio.read = gateRead; gio.seek = gateSeek; gio.size = gateSize; gio.ctx = &g;
+    std::vector<uint8_t> work2(flexAsWorkBytes(&w)); FlexAudioStream s2;
+    CHECK(flexAsOpen(&s2, &gio, &w, work2.data(), work2.size()), "%s: prepara con origen a trozos", c.name);
+    Sink out; out.seed = 9;
+    bool sawStarved = false, errored = false; int rounds = 0;
+    while(!s2.ended && rounds++ < 400000){
+      int r = flexAsPump(&s2, sinkAccept, &out, 700);
+      if(r < 0){ errored = true; break; }
+      if(s2.starved){ sawStarved = true; if(g.avail < g.m.data.size()) g.avail += 1000; }      // "llega" otro trozo
+      if(s2.starved && s2.ended) break;
+    }
+    CHECK(!errored, "%s: quedarse sin datos NO es un error", c.name);
+    CHECK(sawStarved && g.agains > 0, "%s: se quedo 'cargando' mientras faltaban datos", c.name);
+    CHECK(s2.ended && !s2.starved, "%s: acaba cuando llegaron todos", c.name);
+    CHECK(out.out == ref.out, "%s: la salida es IDENTICA a la de tener todo el archivo (%zu bytes)", c.name, out.out.size());
+    // buscar mientras faltan datos no rompe nada
+    g.avail = w.dataStart;
+    CHECK(flexAsSeekMs(&s2, 300), "%s: busca", c.name);
+    int r = flexAsPump(&s2, sinkAccept, &out, 700);
+    CHECK(r >= 0 && s2.starved && !s2.ended, "%s: tras buscar sin datos: cargando, no final", c.name);
+    g.avail = (uint32_t)c.file.size();
+    for(int i = 0; i < 200000 && !s2.ended; i++){ r = flexAsPump(&s2, sinkAccept, &out, 700); if(r < 0) break; }
+    CHECK(r >= 0 && s2.ended, "%s: y sigue donde debe al llegar", c.name);
+    // un error DE VERDAD sigue siendo un error
+    MemIO dead; dead.data = c.file; dead.dead = true; FlexMediaIO dio = ioOf(&dead);
+    FlexAudioStream s3; std::vector<uint8_t> work3(flexAsWorkBytes(&w));
+    flexAsOpen(&s3, &dio, &w, work3.data(), work3.size());
+    Sink k3; CHECK(flexAsPump(&s3, sinkAccept, &k3, 700) == -1 && !s3.starved, "%s: el medio que desaparece sigue siendo -1", c.name);
+  }
+}
+
+// =============================================================
 //  6) INDICE INCREMENTAL
 //  ------------------------------------------------------------
 //  Volumen de mentira: un mapa de "ruta -> entradas". Cuenta las
@@ -1389,6 +1460,7 @@ int main(){
   testWav();
   testIma();
   testAudioStream();
+  testAudioStarved();
   testIndexBasics();
   testIndexSiblingsAfterSubdir();
   testIndexEdges();

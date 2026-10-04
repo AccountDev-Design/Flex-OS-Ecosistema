@@ -67,8 +67,16 @@ static int      musShownN = -1;         // filas de la ultima lista pintada (-1 
 static uint32_t musSeenRev = 0, musSeenMs = 0;
 
 // ---- Reproductor ----
-struct MusIo { FlexFsStream* f; uint32_t size; };
-static MusIo           musIo = { NULL, 0 };
+// LA FUENTE de la pista: LittleFS o Flex Cloud por rangos, con el MISMO lector (MediaStream) que usa el visor de video. Un solo
+// reproductor, dos fuentes: lo que cambia es de donde salen los bytes.
+static MediaStream     musMs;
+static bool            musCloud = false;        // la pista que hay (o se esta cargando) viene de Flex Cloud
+static bool            musCloudWait = false;    // esperando a que llegue el principio del archivo
+static uint32_t        musCloudSince = 0;
+static char            musCloudId[FCL_ID_MAX] = "";
+static bool            musWasBusy = false;      // ultimo "cargando" pintado
+#define MUS_CLOUD_HEAD_BYTES 16384u             // cabecera WAV + los primeros datos: con eso se puede empezar
+#define MUS_CLOUD_WAIT_MS    45000u
 static FlexAudioStream musAs;
 static uint8_t*        musWork = NULL;
 static size_t          musWorkCap = 0;
@@ -99,9 +107,24 @@ static void musSyncLocked(){
 // -------------------------------------------------------------
 //  MOTOR: archivo abierto + FlexAudioStream + DMA
 // -------------------------------------------------------------
-static int musIoRead(void* c, void* b, uint32_t n){ return flexFsStreamRead(((MusIo*)c)->f, b, n); }
-static bool musIoSeek(void* c, uint32_t off){ return flexFsStreamSeek(((MusIo*)c)->f, off); }
-static uint32_t musIoSize(void* c){ return ((MusIo*)c)->size; }
+// Local: lo de siempre. Nube: SIN esperar (esto corre en loop()): si el tramo aun no llego dice FLEXIO_AGAIN y el motor de
+// audio lo reintenta en la siguiente vuelta; solo un fallo de verdad (flujo cerrado o en error) es -1.
+static int musIoRead(void* c, void* b, uint32_t n){
+  MediaStream* s = (MediaStream*)c;
+  if(s->kind != MSTREAM_CLOUD) return mediaIoRead(c, b, n);
+  if(s->pos >= s->size) return 0;
+  if(n > s->size - s->pos) n = s->size - s->pos;
+  int r = flexCloudStreamRead(s->pos, b, n);
+  if(r < 0){
+    flexCloudStreamSeek(s->pos);                  // que el fetcher vaya a buscarlo ya
+    uint8_t st = flexCloudStreamState(NULL, 0);
+    return (st == FCS_ERROR || st == FCS_CLOSED) ? -1 : FLEXIO_AGAIN;
+  }
+  s->pos += (uint32_t)r;
+  return r;
+}
+static bool musIoSeek(void* c, uint32_t off){ return mediaIoSeek(c, off); }
+static uint32_t musIoSize(void* c){ return mediaIoSize(c); }
 static int musSink(void*, const void* p, size_t n){ return flexAudioWrite(p, n); }
 
 // Lo que de verdad se ha oido: lo entregado menos lo que aun espera en el DMA.
@@ -123,7 +146,10 @@ static void musUnload(){
   if(musPlaying) flexAudioStop();
   musPlaying = false;
   musDrainUntil = 0;
-  if(musIo.f){ flexFsStreamClose(musIo.f); musIo.f = NULL; }
+  musCloudWait = false;
+  // El flujo de la nube es UNO para toda la app: si otro (un video) ya se llevo la arena, no se le cierra el suyo.
+  if(musMs.kind == MSTREAM_CLOUD && !flexCloudStreamIs(musCloudId)) musMs.kind = MSTREAM_NONE;
+  mediaStreamClose(&musMs);
   musLoaded = false;
 }
 // Ademas la OLVIDA: ni titulo, ni ruta. Es lo que toca cuando la pista deja
@@ -131,7 +157,34 @@ static void musUnload(){
 static void musForget(){
   musUnload();
   musId = 0; musProtected = false;
+  musCloud = false; musCloudId[0] = 0;
   musPath[0] = 0; musTitle[0] = 0; musSub[0] = 0;
+}
+
+// Con la fuente abierta (local, o de la nube con el principio ya traido): cabecera, memoria de trabajo y motor de audio.
+static bool musFinishLoad(){
+  FlexMediaIO io; io.read = musIoRead; io.seek = musIoSeek; io.size = musIoSize; io.ctx = &musMs;
+  FlexWavInfo w;
+  int rc = flexWavParse(&io, &w);
+  size_t need = rc == FLEXWAV_OK ? flexAsWorkBytes(&w) : 0;
+  if(rc != FLEXWAV_OK || !need){
+    snprintf(musErr, sizeof(musErr), "%s", rc == FLEXWAV_ERR_CODEC ? "Este WAV usa un c\xC3\xB3" "dec que Flex OS no reproduce"
+                                                                   : "El archivo de audio est\xC3\xA1 da\xC3\xB1" "ado");
+    mediaStreamClose(&musMs); musProtected = false;
+    return false;
+  }
+  if(musWorkCap < need){
+    mediaFree(musWork);
+    musWork = (uint8_t*)mediaAlloc(need);
+    musWorkCap = musWork ? need : 0;
+  }
+  if(!musWork || !flexAsOpen(&musAs, &io, &w, musWork, musWorkCap)){
+    snprintf(musErr, sizeof(musErr), "Sin memoria para el audio");
+    mediaStreamClose(&musMs); musProtected = false;
+    return false;
+  }
+  musLoaded = true;
+  return true;
 }
 
 // Prepara una pista. false con el motivo en musErr (y nada abierto).
@@ -165,40 +218,71 @@ static bool musLoad(uint32_t id, const char* path){
     musProtected = false;
     return false;
   }
-  musIo.f = flexFsOpenRead(musPath);
-  musIo.size = musIo.f ? flexFsStreamSize(musIo.f) : 0;
-  if(!musIo.f){ snprintf(musErr, sizeof(musErr), "No se pudo abrir el archivo"); musProtected = false; return false; }
-  FlexMediaIO io; io.read = musIoRead; io.seek = musIoSeek; io.size = musIoSize; io.ctx = &musIo;
-  FlexWavInfo w;
-  int rc = flexWavParse(&io, &w);
-  size_t need = rc == FLEXWAV_OK ? flexAsWorkBytes(&w) : 0;
-  if(rc != FLEXWAV_OK || !need){
-    snprintf(musErr, sizeof(musErr), "%s", rc == FLEXWAV_ERR_CODEC ? "Este WAV usa un c\xC3\xB3" "dec que Flex OS no reproduce"
-                                                                   : "El archivo de audio est\xC3\xA1 da\xC3\xB1" "ado");
-    flexFsStreamClose(musIo.f); musIo.f = NULL; musProtected = false;
-    return false;
+  musCloud = mediaIsCloudPath(musPath);
+  if(musCloud){
+    // Flex Cloud: se abre el flujo por rangos y musAudioTick espera a que llegue el principio del archivo.
+    const char* idp = musPath + sizeof(MEDIA_CLOUD_PREFIX) - 1;
+    const char* sl = strchr(idp, '/');
+    size_t idl = sl ? (size_t)(sl - idp) : 0;
+    if(!idl || idl >= sizeof(musCloudId)){ snprintf(musErr, sizeof(musErr), "Ruta de Flex Cloud no v\xC3\xA1lida"); musCloud = false; musProtected = false; return false; }
+    memcpy(musCloudId, idp, idl); musCloudId[idl] = 0;
+    if(!mediaStreamOpen(&musMs, musPath)){
+      snprintf(musErr, sizeof(musErr), "No se pudo abrir desde Flex Cloud");
+      musCloud = false; musCloudId[0] = 0; musProtected = false;
+      return false;
+    }
+    // El titulo es el nombre que tiene en la nube (la ruta lleva el del archivo preparado: .wav).
+    if(mediaCloudPathMatches(musPath)){
+      mlCopyText(musTitle, sizeof(musTitle), gMediaCloudItem.name);
+      char* dot = strrchr(musTitle, '.'); if(dot && dot != musTitle) *dot = 0;
+    }
+    snprintf(musSub, sizeof(musSub), "Flex Cloud");
+    musProtected = false;
+    musCloudWait = true; musCloudSince = millis();
+    return true;
   }
-  if(musWorkCap < need){
-    mediaFree(musWork);
-    musWork = (uint8_t*)mediaAlloc(need);
-    musWorkCap = musWork ? need : 0;
-  }
-  if(!musWork || !flexAsOpen(&musAs, &io, &w, musWork, musWorkCap)){
-    snprintf(musErr, sizeof(musErr), "Sin memoria para el audio");
-    flexFsStreamClose(musIo.f); musIo.f = NULL; musProtected = false;
-    return false;
-  }
-  musLoaded = true;
-  return true;
+  if(!mediaStreamOpen(&musMs, musPath)){ snprintf(musErr, sizeof(musErr), "No se pudo abrir el archivo"); musProtected = false; return false; }
+  return musFinishLoad();
 }
 
 // Una vuelta del reproductor. Va en loop(), no en el tick de la app: la
 // musica sigue en segundo plano. Nunca bloquea: entrega lo que el DMA acepte.
 static void musNext(int delta, bool automatic);
+static bool musPlay();
+static void musRender();
+
+// El principio del archivo de la nube aun no llego / el flujo fallo: se dice, no se queda "cargando" para siempre.
+static void musCloudFail(const char* msg){
+  musCloudWait = false;
+  musUnload();
+  if(msg != musErr) snprintf(musErr, sizeof(musErr), "%s", msg);        // (el motivo puede ser el que ya esta en musErr)
+  sysNotify("M\xC3\xBAsica", musErr);
+  if(gState == ST_APP && gAppId == IC_MUSICA) musRender();
+}
+// Una vuelta MIENTRAS se espera el principio del archivo (musAudioTick, desde loop()): sin bloquear nada.
+static void musCloudPoll(){
+  char err[96] = "";
+  uint8_t st = flexCloudStreamState(err, sizeof(err));
+  if(st == FCS_ERROR || st == FCS_CLOSED || !flexCloudStreamIs(musCloudId)){
+    musCloudFail(err[0] ? err : "No se pudo traer el audio de Flex Cloud");
+    return;
+  }
+  uint32_t head = musMs.size < MUS_CLOUD_HEAD_BYTES ? musMs.size : MUS_CLOUD_HEAD_BYTES;
+  if(flexCloudStreamReady(0, head)){
+    musCloudWait = false;
+    if(!musFinishLoad()){ musCloudFail(musErr[0] ? musErr : "El audio no se pudo abrir"); return; }
+    if(!musPlay() && musErr[0]) sysNotify("M\xC3\xBAsica", musErr);
+    if(gState == ST_APP && gAppId == IC_MUSICA) musRender();
+    return;
+  }
+  if(millis() - musCloudSince > MUS_CLOUD_WAIT_MS) musCloudFail("Sin conexi\xC3\xB3n con Flex Cloud");
+}
+
 static void musAudioTick(){
   // Una pista protegida no sigue sonando (ni se recuerda) con el aparato
   // bloqueado: quien lo tenga no la oye ni ve su titulo.
   if(musProtected && gState == ST_LOCK){ musForget(); return; }
+  if(musCloudWait){ musCloudPoll(); return; }
   if(!musPlaying) return;
   if(musDrainUntil){
     if((int32_t)(millis() - musDrainUntil) < 0) return;
@@ -257,7 +341,7 @@ static void musBeforeChange(uint32_t id){
 static void musStart(uint32_t id, const char* path){
   gMlBeforeChange = musBeforeChange;
   bool ok = musLoad(id, path);
-  if(ok && !musPlay()) ok = false;
+  if(ok && !musCloudWait && !musPlay()) ok = false;      // de la nube: suena cuando llegue el principio (musCloudPoll)
   musScreen = MUS_NOW;
   musRender();
   if(!ok && musErr[0]) sysNotify("M\xC3\xBAsica", musErr);
@@ -266,7 +350,38 @@ static void musStart(uint32_t id, const char* path){
 // Anterior/siguiente por el orden de la lista, SALTANDO lo protegido y lo
 // que el P4 no reproduce. Automatico (al acabar una pista) = sin dar la
 // vuelta: al final de la lista, se para.
+// Anterior/siguiente DENTRO DE LA NUBE: por el orden de la lista que se esta viendo en Flex Cloud, saltando lo que no suena aqui.
+static void musNextCloud(int delta, bool automatic){
+  FlexCloudListInfo li; flexCloudListInfo(&li);
+  const int n = li.count;
+  FclItem it;
+  int cur = -1;
+  for(int i = 0; i < n && cur < 0; i++) if(flexCloudListCopy(&it, i, 1) == 1 && !strcmp(it.id, musCloudId)) cur = i;
+  int found = -1;
+  for(int step = 1; cur >= 0 && step <= n && found < 0; step++){
+    int k = cur + delta * step;
+    if(automatic && (k < 0 || k >= n)) break;
+    k = ((k % n) + n) % n;
+    if(k == cur) break;
+    const char* why = NULL;
+    if(flexCloudListCopy(&it, k, 1) == 1 && !it.isFolder && fclOpenAction(&it, &why) == FCL_OPEN_AUDIO) found = k;
+  }
+  if(found < 0){
+    if(automatic){ musUnload(); if(gState == ST_APP && gAppId == IC_MUSICA) musRender(); }
+    return;
+  }
+  flexCloudListCopy(&it, found, 1);
+  gMediaCloudItem = it;
+  char p[FLEXMED_PATH_MAX];
+  ckPlayPath(it, p, sizeof(p));
+  bool ok = musLoad(0, p);
+  if(ok && !musCloudWait) ok = musPlay();
+  if(!ok && musErr[0]) sysNotify("M\xC3\xBAsica", musErr);
+  if(gState == ST_APP && gAppId == IC_MUSICA) musRender();
+}
+
 static void musNext(int delta, bool automatic){
+  if(musCloud && musCloudId[0]){ musNextCloud(delta, automatic); return; }
   char path[FML_PATH_MAX] = "";
   uint32_t id = 0;
   mlLock();
@@ -527,6 +642,8 @@ static void musRenderNow(){
   const char* title = musTitle[0] ? musTitle : "Nada sonando";
   drawTextC(bx + bw / 2, g.titleY, title, 3, TH_TXT);
   if(musErr[0]) drawTextC(bx + bw / 2, g.titleY + 40, musErr, 1, TH_ERR);
+  else if(musCloudWait) drawTextC(bx + bw / 2, g.titleY + 40, "Cargando desde Flex Cloud...", 1, TH_TXT2);
+  else if(musCloud && musAs.starved) drawTextC(bx + bw / 2, g.titleY + 40, "Cargando...", 1, TH_TXT2);
   else if(musSub[0]) drawTextC(bx + bw / 2, g.titleY + 40, musSub, 1, TH_TXT2);
 
   if(!flexAudioAvailable()){
@@ -745,6 +862,8 @@ static void musEnter(){
 static void musTick(){
   if(musScreen == MUS_NOW){
     if(mkTick()) return;                          // (un dialogo abierto desde aqui)
+    { bool busy = musCloudWait || (musCloud && musAs.starved);        // "Cargando..." aparece y desaparece solo
+      if(busy != musWasBusy){ musWasBusy = busy; musRender(); return; } }
     if(musPlaying && millis() - musUiMs >= MUS_UI_MS){ musUiMs = millis(); musDrawProgress(true); }
     musNowTouch();
     return;

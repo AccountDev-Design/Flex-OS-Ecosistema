@@ -194,6 +194,8 @@ uint32_t flexCloudThumbGen();
 enum { FCS_CLOSED = 0, FCS_OPENING, FCS_STREAMING, FCS_WAITING_NET, FCS_ERROR };
 bool     flexCloudStreamOpen(const FclItem* it);
 void     flexCloudStreamClose();
+// ¿Sigue abierto el flujo de ESE archivo? (Musica y el visor comparten una sola arena: quien cierra comprueba que el flujo aun es el suyo.)
+bool     flexCloudStreamIs(const char* fileId);
 uint8_t  flexCloudStreamState(char* err, size_t cap);
 uint32_t flexCloudStreamSize();
 // -1 = aun no ha llegado (NO bloquea; el reproductor ensena "Cargando").

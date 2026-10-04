@@ -10645,6 +10645,152 @@ static void testFlexStorage(){
   printf("  %s\n", gFails == before ? "ok" : "CON FALLOS");
 }
 
+
+// #############################################################
+//  MUSICA DESDE FLEX CLOUD: el MISMO reproductor, otra fuente
+//  ------------------------------------------------------------
+//  El codigo REAL de Musica y del kit de la nube sobre el doble del streaming (que decide
+//  que bloques de 64 KB han llegado). Se comprueba lo que importa en la placa: que el audio
+//  no se pierda ni se repita cuando los datos llegan a trozos, que "cargando" no sea un error,
+//  y que anterior/siguiente funcionen dentro de la nube.
+// #############################################################
+extern bool gStubAudioOk, gStubAudioPlay;
+extern std::vector<uint8_t> gStubAudioOut;
+extern std::vector<uint8_t> gStubStreamData;
+extern uint8_t gStubStreamState;
+extern std::vector<bool> gStubStreamReady, gStubStreamWant;
+extern bool gStubStreamOpen;
+static std::vector<uint8_t> mnWav(uint32_t rate, int seconds, size_t* dataStart){
+  std::vector<uint8_t> pcm((size_t)rate * 2 * seconds);
+  for(size_t i = 0; i < pcm.size(); i++) pcm[i] = (uint8_t)(i * 7 + (i >> 10));
+  std::vector<uint8_t> w;
+  auto u32 = [&](uint32_t v){ for(int i = 0; i < 4; i++) w.push_back((uint8_t)(v >> (8 * i))); };
+  auto u16 = [&](uint16_t v){ w.push_back((uint8_t)v); w.push_back((uint8_t)(v >> 8)); };
+  auto cc = [&](const char* t){ for(int i = 0; i < 4; i++) w.push_back((uint8_t)t[i]); };
+  cc("RIFF"); u32((uint32_t)(36 + pcm.size())); cc("WAVE"); cc("fmt "); u32(16); u16(1); u16(1); u32(rate); u32(rate * 2); u16(2); u16(16);
+  cc("data"); u32((uint32_t)pcm.size());
+  *dataStart = w.size();
+  w.insert(w.end(), pcm.begin(), pcm.end());
+  return w;
+}
+static void mnTick(int n = 1){ for(int i = 0; i < n; i++){ gTestMs += 40; musAudioTick(); } }
+
+static void testMusicaNube(){
+  printf("Musica desde Flex Cloud: el mismo reproductor, datos que llegan a trozos\n");
+  bool ok0 = gMlOk; gMlOk = true;
+  gStubAudioOk = true; gStubAudioPlay = true; gStubAudioOut.clear();
+  gStubCloudCalls.clear(); gStubCloudItems.clear(); memset(&gStubCloudList, 0, sizeof(gStubCloudList));
+  size_t ds = 0;
+  std::vector<uint8_t> wav = mnWav(8000, 20, &ds);                 // 320 KB: cinco bloques de 64 KB
+  gStubStreamData = wav;
+  gStubStreamReady.clear(); gStubStreamWant.clear();
+  // (los elementos van al monton: un FclItem pesa ~650 bytes y el marco de esta funcion no puede pasar del presupuesto de pila)
+  auto mk = [&](const char* id, const char* name, uint8_t kind, uint8_t ps, uint64_t playSize){
+    FclItem it = clItem(id, name, kind, 777777, false, false);
+    it.playState = ps; it.playSize = playSize;
+    gStubCloudItems.push_back(it);
+  };
+  mk("fil_a", "Cancion A.m4a", FCL_K_AUDIO, FCL_PS_READY, wav.size());
+  mk("fil_v", "Clip.mp4", FCL_K_VIDEO, FCL_PS_READY, wav.size());
+  mk("fil_b", "Cancion B.wav", FCL_K_AUDIO, FCL_PS_NATIVE, wav.size());
+  mk("fil_x", "Rota.mp3", FCL_K_AUDIO, FCL_PS_UNSUPPORTED, 0);
+  mk("fil_c", "Cancion C.wav", FCL_K_AUDIO, FCL_PS_NATIVE, wav.size());
+  const FclItem& a = gStubCloudItems[0]; const FclItem& v = gStubCloudItems[1]; const FclItem& b = gStubCloudItems[2];
+  const FclItem& x = gStubCloudItems[3];
+  gStubCloudList.state = FCL_LIST_READY; gStubCloudList.gen++;
+
+  // La ruta lleva la extension de lo que LLEGA (por ella decide el P4 quien lo reproduce): un M4A preparado es un .wav.
+  char path[FLEXMED_PATH_MAX]; ckPlayPath(a, path, sizeof(path));
+  chk(!strcmp(path, "cloud:fil_a/Cancion A.wav"), "un M4A preparado se abre como .wav (y Archivos lo manda a Musica)");
+  chk(flexMediaClassify("Cancion A.wav") == FLEXMED_AUDIO, "y esa extension es la de audio");
+  ckPlayPath(v, path, sizeof(path)); chk(!strcmp(path, "cloud:fil_v/Clip.avi"), "un MP4 preparado se abre como .avi (el visor de video)");
+  { FclItem photo = clItem("fil_f", "captura.png", FCL_K_PHOTO, 1000); photo.playState = FCL_PS_READY; photo.playSize = 1000; ckPlayPath(photo, path, sizeof(path)); }
+  chk(!strcmp(path, "cloud:fil_f/captura.jpg"), "un PNG preparado, .jpg");
+  const char* why = NULL;
+  chk(fclOpenAction(&a, &why) == FCL_OPEN_AUDIO && fclOpenAction(&v, &why) == FCL_OPEN_STREAM && fclOpenAction(&x, &why) == FCL_OPEN_MENU,
+      "la nube decide por lo que el telefono sabe: audio, video, y lo imposible al menu");
+
+  // ---- empezar: el flujo se abre y se espera a que llegue el principio (sin bloquear nada)
+  gMediaCloudItem = a;
+  ckPlayPath(a, path, sizeof(path));
+  musForget();
+  bool opened = musLoad(0, path);
+  chk(opened && musCloudWait && !musLoaded && !musErr[0], "de la nube: abre el flujo y queda 'cargando' (no es un error)");
+  chk(clCalled("stream fil_a") && !strcmp(musTitle, "Cancion A") && !strcmp(musSub, "Flex Cloud"), "pide los bytes del archivo y titula con su nombre en la nube");
+  mnTick(3);
+  chk(musCloudWait && !musLoaded && !musPlaying, "sin el principio del archivo: sigue esperando, sin sonar ni fallar");
+  stubStreamDeliver(1);                                            // llega el primer bloque
+  mnTick(1);
+  chk(!musCloudWait && musLoaded, "llega el principio: se lee la cabecera WAV y queda listo");
+  chk(musAs.wav.sampleRate == 8000 && musAs.wav.channels == 1, "con los datos reales del WAV (8 kHz mono)");
+  chk(musPlay() && musPlaying, "suena");
+  mnTick(40);
+  size_t before = gStubAudioOut.size();
+  chk(before > 0 && before <= 64 * 1024, "suena lo que ya llego (el primer bloque)");
+  chk(std::equal(gStubAudioOut.begin(), gStubAudioOut.end(), wav.begin() + ds), "y es EXACTAMENTE el audio del archivo");
+
+  // ---- el tramo siguiente aun no llego: 'cargando', ni error ni final, y sin perder el hilo
+  mnTick(60);
+  chk(musAs.starved && musPlaying && !musErr[0] && musLoaded, "sin el siguiente bloque: queda cargando, SIN error y sin parar");
+  chk(gStubAudioOut.size() <= 64 * 1024 + 4096, "no inventa audio que no ha llegado");
+  chk(gStubStreamMisses > 0, "y lo pide a la nube");
+  stubStreamDeliver(1); mnTick(40);
+  chk(!musAs.starved || gStubAudioOut.size() > before, "llega y sigue");
+  while(!musAs.ended && gStubAudioOut.size() < wav.size()){ stubStreamDeliver(1); mnTick(80); if(gTestMs > 5000000000UL) break; }
+  chk(musAs.ended, "acaba la pista");
+  chk(gStubAudioOut.size() == wav.size() - ds && std::equal(gStubAudioOut.begin(), gStubAudioOut.end(), wav.begin() + ds),
+      "TODO el audio salio, en orden y sin repetir una sola muestra (aunque llegaba a trozos)");
+
+  // ---- anterior / siguiente: DENTRO de la nube, saltando lo que no suena aqui
+  gStubAudioOut.clear(); gStubStreamReady.assign(gStubStreamReady.size(), true);
+  gStubCloudCalls.clear();
+  gMediaCloudItem = a; ckPlayPath(a, path, sizeof(path));
+  musForget(); chk(musLoad(0, path), "otra vez la primera");
+  stubStreamDeliver(5); mnTick(2);
+  chk(musLoaded && musPlay(), "lista");
+  musNext(+1, false);
+  chk(!strcmp(musCloudId, "fil_b"), "siguiente de A: B (se salta el video y...)");
+  chk(!strcmp(gMediaCloudItem.id, "fil_b"), "...el elemento que se abre es el de la lista");
+  stubStreamDeliver(5); mnTick(2);
+  musNext(+1, false);
+  chk(!strcmp(musCloudId, "fil_c"), "siguiente de B: C (se salta el MP3 que no se puede preparar)");
+  stubStreamDeliver(5); mnTick(2);
+  musNext(+1, false);
+  chk(!strcmp(musCloudId, "fil_a"), "siguiente de la ultima vuelve a la primera (como en lo local)");
+  musNext(-1, false);
+  chk(!strcmp(musCloudId, "fil_c"), "anterior de la primera: la ultima");
+  // al acabar una pista sola, en la ultima, no vuelve a empezar
+  musNext(+1, true);
+  chk(!musLoaded && !musPlaying && !musCloudWait, "al acabar la ultima por si sola, para (no da la vuelta)");
+
+  // ---- fallos de verdad: se dicen
+  gMediaCloudItem = a; ckPlayPath(a, path, sizeof(path));
+  musForget(); musLoad(0, path);
+  gStubStreamState = FCS_ERROR;
+  mnTick(2);
+  chk(!musCloudWait && !musLoaded && musErr[0], "si el flujo de la nube falla mientras se espera: se dice, no se queda cargando");
+  gStubStreamState = FCS_OPENING;
+  musForget(); gStubStreamReady.assign(gStubStreamReady.size(), false); gStubStreamOpen = false;
+  musLoad(0, path);
+  gStubStreamReady.assign(gStubStreamReady.size(), false);
+  mnTick(1); gTestMs += 50000; mnTick(1);
+  chk(!musCloudWait && musErr[0] && strstr(musErr, "Sin conexi") != NULL, "45 s sin recibir nada: 'Sin conexion con Flex Cloud'");
+  // un WAV que no es de los que suenan se dice igual que en lo local
+  musForget(); musErr[0] = 0;
+  { std::vector<uint8_t> bad = wav; bad[20] = 0x55; gStubStreamData = bad; gStubStreamReady.clear(); gStubStreamWant.clear(); }
+  gMediaCloudItem = b; ckPlayPath(b, path, sizeof(path));
+  gStubStreamState = FCS_OPENING;
+  musLoad(0, path); stubStreamDeliver(1); mnTick(2);
+  chk(strstr(musErr, "c\xC3\xB3" "dec") != NULL, "y dice POR QUE (el codec), no un error generico");
+  chk(!musLoaded && musErr[0], "audio con un codec que no suena: el motivo, sin colgarse");
+
+  // ---- limpieza
+  musForget(); musErr[0] = 0; flexCloudStreamClose();
+  gStubStreamData.clear(); gStubCloudItems.clear();
+  gStubAudioOk = false; gStubAudioPlay = false; gStubAudioOut.clear();
+  gMlOk = ok0;
+}
+
 static void testFlexCloudUi(){
   printf("Flex Cloud en la interfaz: Galeria, Multimedia, Archivos, visor por rangos y avisos\n");
   int before = gFails;
@@ -10785,6 +10931,34 @@ static void testFlexCloudUi(){
   gStubCloudCalls.clear();
   vwClose();
   chk(clCalled("stream-close") && !gStubStreamOpen, "cerrar el visor cierra el streaming (la tarea deja de bajar)");
+
+  // ---- 7b. UN MP4 QUE EL TELEFONO PREPARO: se reproduce en ESE MISMO visor (antes: "solo AVI MJPEG") ----
+  gStubCloudItems[2].playState = FCL_PS_READY; gStubCloudItems[2].playSize = gStubStreamData.size();
+  galRender();
+  gStubCloudCalls.clear();
+  int c7bx, c7by; clCellCenter(2, c7bx, c7by);
+  clTap(galTick, c7bx, c7by);
+  chk(clCalled("stream fil_v2") && !clCalled("down"), "tocar un MP4 PREPARADO por el telefono abre el streaming de su version");
+  chk(vwActiveFor(&GAL_VW) && vwKind == VWK_VIDEO && vwCloud, "en el visor de video de siempre (no uno nuevo)");
+  stubStreamDeliver(1000); gTestMs += 10; vwTick();
+  stubStreamDeliver(1000); gTestMs += 10; vwTick();
+  gTestMs += 10; vwTick();
+  chk(vwAvi.frames == 400 && vwFrameLen > 0, "y se ve el AVI que el telefono dejo preparado");
+  vwClose();
+  // el telefono no pudo convertirlo: NO se abre el visor para que falle despues; se dice por que
+  gStubCloudItems[2].playState = FCL_PS_UNSUPPORTED;
+  snprintf(gStubCloudItems[2].playReason, sizeof(gStubCloudItems[2].playReason), "V\xC3\xADdeo hevc: este tel\xC3\xA9" "fono no sabe decodificarlo.");
+  galRender();
+  gStubCloudCalls.clear();
+  clTap(galTick, c7bx, c7by);
+  chk(!clCalled("stream fil_v2") && !vwActiveFor(&GAL_VW), "un video que el telefono NO puede convertir no abre el visor (y se dice por que)");
+  gStubCloudItems[2].playState = FCL_PS_PREPARING; gStubCloudItems[2].playProgress = 37;
+  galRender();
+  gStubCloudCalls.clear();
+  clTap(galTick, c7bx, c7by);
+  chk(!clCalled("stream fil_v2") && !vwActiveFor(&GAL_VW), "uno que se esta preparando tampoco: se espera");
+  gStubCloudItems[2].playState = FCL_PS_UNKNOWN;
+  galRender();
 
   // ---- 8. SUBIR DESDE LA GALERIA: conservar o liberar espacio ----
   std::vector<uint8_t> jpg = vwTestJpeg(64, 64);
@@ -11437,6 +11611,7 @@ int main(){
   testCapturasVisor();
   testGaleriaSinRestos();
   testFlexCloudUi();
+  testMusicaNube();
   testFlexStorage();
   testMenuNubeSinApilar();
   testMenuNubeAlCerrar();
