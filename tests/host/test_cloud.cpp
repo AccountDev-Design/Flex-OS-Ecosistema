@@ -1886,6 +1886,23 @@ static void testPhonePowerAndStream(){
   char err[96];
   uint8_t ss = flexCloudStreamState(err, sizeof(err));
   CHECK(ss == FCS_WAITING_NET || ss == FCS_ERROR, "telefono apagado: esperando (o error claro), nunca colgado");
+  // Un corte LARGO pero razonable (el movil apaga la pantalla, cambia de punto de acceso) NO es un error: "Reconectando...",
+  // y al volver el video/audio sigue DONDE ESTABA (la posicion y la cache no se pierden).
+  unsigned long t60 = gNetNowMs;
+  { int n = 0; while(gNetNowMs - t60 < 60000 && n++ < 400000) st(1); }       // 60 s de reloj virtual sin telefono
+  ss = flexCloudStreamState(err, sizeof(err));
+  CHECK(ss == FCS_WAITING_NET, "tras 60 s sin telefono sigue esperando: no se da por perdido");
+  P.up = true;
+  { int r3, sp3 = 0; bool same3 = true;
+    while((r3 = flexCloudStreamRead(10u * 1024 * 1024, buf, sizeof(buf))) < 0 && sp3++ < 20000) st(1);
+    for(int i = 0; i < r3; i++) if(buf[i] != genByte(10u * 1024 * 1024 + i)) same3 = false;
+    CHECK(r3 == (int)sizeof(buf) && same3, "al volver el telefono sigue desde donde estaba (10 MB), con los bytes correctos");
+    CHECK(flexCloudStreamState(err, sizeof(err)) == FCS_STREAMING, "y vuelve a STREAMING"); }
+  // Pasada la paciencia (90 s sin ningun contacto) SI se declara, con motivo.
+  P.up = false;
+  flexCloudStreamSeek(20u * 1024 * 1024);
+  { unsigned long t100 = gNetNowMs; int n = 0; while(gNetNowMs - t100 < 100000 && n++ < 600000) st(1); }       // 100 s
+  CHECK(flexCloudStreamState(err, sizeof(err)) == FCS_ERROR && err[0], "tras 90 s sin ningun contacto: error claro, no 'cargando' eterno");
   P.up = true;
   flexCloudStreamClose();
   st(2);

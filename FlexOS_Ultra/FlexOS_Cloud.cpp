@@ -1605,7 +1605,12 @@ static void cloudTask(void*){
 // ======================================================================
 //  Streaming (tarea propia: un video no espera a una subida)
 // ======================================================================
-struct StNet { WiFiClient* cli; HTTPClient* http; uint32_t pos; uint32_t left; uint32_t gen; uint8_t fails; uint32_t retryAt; uint32_t idleMs; };
+// El streaming NO se da por perdido a la primera: con la Wi-Fi o el telefono fuera un rato (se apaga la pantalla, cambia de punto de
+// acceso) se queda "Reconectando..." con una espera acotada y, al volver, sigue donde estaba (la cache y la posicion se conservan). Solo
+// tras STREAM_PATIENCE_MS seguidos sin ningun contacto se declara el fallo y el reproductor lo dice.
+#define STREAM_PATIENCE_MS  90000u
+#define STREAM_BACKOFF_MAX  5000u
+struct StNet { WiFiClient* cli; HTTPClient* http; uint32_t pos; uint32_t left; uint32_t gen; uint8_t fails; uint32_t retryAt; uint32_t idleMs; uint32_t firstFailMs; };
 static StNet gStNet;
 
 static void stConnClose(){
@@ -1683,9 +1688,13 @@ static void streamStep(){
   if(!gStNet.http || gStNet.pos != off){
     if(!stConnOpen(fileId, off, size, play)){
       giveBack();
+      if(!gStNet.fails) gStNet.firstFailMs = millis();
       if(gStNet.fails < 250) gStNet.fails++;
-      gStNet.retryAt = millis() + (gStNet.fails < 4 ? 500u * gStNet.fails : fclBackoffMs(gStNet.fails - 3));
-      stSetState(gStNet.fails >= 6 ? FCS_ERROR : FCS_WAITING_NET, errText(gStNet.fails >= 6 ? "server" : "network"));
+      uint32_t back = gStNet.fails < 4 ? 500u * gStNet.fails : fclBackoffMs(gStNet.fails - 3);
+      if(back > STREAM_BACKOFF_MAX) back = STREAM_BACKOFF_MAX;
+      gStNet.retryAt = millis() + back;
+      bool giveUp = gStNet.fails >= 6 && millis() - gStNet.firstFailMs > STREAM_PATIENCE_MS;
+      stSetState(giveUp ? FCS_ERROR : FCS_WAITING_NET, errText(giveUp ? "server" : "network"));
       return;
     }
   }
@@ -1711,7 +1720,13 @@ static void streamStep(){
   if(fail){
     giveBack(); stConnClose();
     stLock(); bool same = gSt.gen == gen; stUnlock();
-    if(same){ if(gStNet.fails < 250) gStNet.fails++; gStNet.retryAt = millis() + 300u * gStNet.fails; stSetState(FCS_WAITING_NET, "Reconectando..."); }
+    if(same){
+      if(!gStNet.fails) gStNet.firstFailMs = millis();
+      if(gStNet.fails < 250) gStNet.fails++;
+      uint32_t back = 300u * gStNet.fails; if(back > STREAM_BACKOFF_MAX) back = STREAM_BACKOFF_MAX;
+      gStNet.retryAt = millis() + back;
+      stSetState(FCS_WAITING_NET, "Reconectando...");
+    }
     return;
   }
   gStNet.pos += len; gStNet.left -= len; gStNet.fails = 0; gStNet.idleMs = millis();

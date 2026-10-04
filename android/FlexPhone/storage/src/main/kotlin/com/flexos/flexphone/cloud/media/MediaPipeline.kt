@@ -24,6 +24,8 @@ class MediaPipeline(
     private val converter: MediaConverter?,
     private val gate: () -> Boolean = { true },
     private val log: (String) -> Unit = {},
+    /** Se avisa al empezar y al acabar un trabajo pesado: la app toma y suelta ahi su cerrojo de CPU (con tope). */
+    private val onBusy: (Boolean) -> Unit = {},
 ) {
     private val queue = LinkedBlockingQueue<String>()
     private val queued = HashSet<String>()
@@ -48,8 +50,7 @@ class MediaPipeline(
 
     fun stop() {
         running = false
-        cloud.onFileReady = null
-        worker?.interrupt()
+        cloud.onFileReady = null          // (el hilo sale solo en cuanto acaba lo que tiene entre manos: sin interrumpirlo a mitad de un E/S)
     }
 
     fun enqueue(id: String) {
@@ -116,6 +117,11 @@ class MediaPipeline(
         if (!running && converter == null) return
         cloud.setPlayable(id, "preparing", planName)
         val tmp = cloud.newTempFile("m")
+        onBusy(true)
+        try { convertNow(id, file, a, planName, tmp) } finally { onBusy(false) }
+    }
+
+    private fun convertNow(id: String, file: java.io.File, a: Analysis, planName: String, tmp: java.io.File) {
         var lastCheck = 0L
         var gone = false
         val cancelled = {
@@ -125,7 +131,7 @@ class MediaPipeline(
         }
         try {
             converter!!.convert(file, a.facts, a.plan, tmp, { cloud.setPlayableProgress(id, it) }, cancelled)
-            if (gone || !running) { tmp.delete(); return }
+            if (gone || !running) { tmp.delete(); if (!gone) cloud.setPlayable(id, "pending", planName); return }
             val check = FileSource(tmp).use { MediaAnalyzer.analyze(it) }
             // Nunca se publica lo que el propio analizador no daria por bueno: el P4 no tiene que fiarse del conversor.
             if (check.plan != Plan.NONE || check.facts.kind != a.facts.kind) {
@@ -140,10 +146,13 @@ class MediaPipeline(
             }
         } catch (e: MediaException) {
             tmp.delete()
-            if (gone || !running) return
+            if (gone) return
+            // Se paro el servicio a mitad: no es un fallo del archivo, vuelve a la cola para la proxima vez.
+            if (!running) { cloud.setPlayable(id, "pending", planName); return }
             cloud.setPlayable(id, "failed", planName, e.message ?: "No se pudo convertir.")
         } catch (e: Exception) {
             tmp.delete()
+            if (!running) { if (cloud.mediaSource(id) != null) cloud.setPlayable(id, "pending", planName); return }
             log("media: fallo inesperado ${e.javaClass.simpleName}")
             cloud.setPlayable(id, "failed", planName, "No se pudo convertir este archivo.")
         }
@@ -159,6 +168,7 @@ class MediaPipeline(
         val big = src.size > MediaProfile.PHOTO_PREVIEW_MIN_BYTES || (f.longSide ?: 0) > MediaProfile.PHOTO_PREVIEW_MIN_SIDE
         if (!big || !converter.canConvert(f, Plan.TRANSCODE)) return
         val tmp = cloud.newTempFile("pv")
+        onBusy(true)
         try {
             converter.convert(file, f, Plan.TRANSCODE, tmp, {}, { !running })
             val check = FileSource(tmp).use { MediaAnalyzer.analyze(it) }
@@ -166,7 +176,7 @@ class MediaPipeline(
             cloud.attachVariant(id, tmp, "image/jpeg", check.facts.toMetadata(), "preview")
         } catch (e: Exception) {
             tmp.delete()
-        }
+        } finally { onBusy(false) }
     }
 
     companion object {

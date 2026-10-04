@@ -110,6 +110,7 @@ class FlexStorageService : Service() {
 
     private suspend fun bringUp() {
         val err = FlexCloudPhone.startServer(this)
+        FlexCloudPhone.startMedia(this)                       // la cola que prepara lo multimedia para el P4
         line = err ?: waitingLine()
         updateNotification()
         watchNetwork()
@@ -123,6 +124,7 @@ class FlexStorageService : Service() {
             val att = StorageAttach.state.value
             val want = when {
                 att is StorageAttach.UiState.Code -> "Emparejando: compara el código con el de Flex OS"
+                s.mediaWorking || s.mediaQueued > 0 -> "Preparando archivos para Flex OS" + (if (s.mediaQueued > 0) " (${s.mediaQueued} en cola)" else "")
                 !s.running -> s.error ?: "Sin servidor"
                 active -> "Flex OS conectado" + (s.p4Name?.let { " · $it" } ?: "")
                 else -> waitingLine()
@@ -257,6 +259,7 @@ class FlexStorageService : Service() {
         alive = false
         scope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
         unwatchNetwork()
+        FlexCloudPhone.stopMedia()
         FlexCloudPhone.stopServer(this)
         releaseLocks()
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -274,6 +277,7 @@ class FlexStorageService : Service() {
         alive = false
         scope.cancel()
         unwatchNetwork()
+        FlexCloudPhone.stopMedia()
         FlexCloudPhone.stopServer(this)
         releaseLocks()
         super.onDestroy()

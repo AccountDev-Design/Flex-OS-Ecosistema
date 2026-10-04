@@ -1002,7 +1002,7 @@ class CloudStore(
 
     /** Archivos multimedia vivos que aun no se han mirado o que se quedaron en cola (para reanudar tras reiniciar). */
     fun mediaToPrepare(): List<String> = synchronized(lock) {
-        files.values.filter { it.deletedAt == null && it.kind in MEDIA_KINDS && (it.playable == null || it.playable!!.state == "pending" || (it.playable!!.state == "unsupported" && it.playable!!.plan != "none")) }.map { it.id }
+        files.values.filter { it.deletedAt == null && it.kind in MEDIA_KINDS && (it.playable == null || it.playable!!.state == "pending" || it.playable!!.state == "preparing" || (it.playable!!.state == "unsupported" && it.playable!!.plan != "none")) }.map { it.id }
     }
 
     fun originalFile(key: String): File = store.fileOf(key)

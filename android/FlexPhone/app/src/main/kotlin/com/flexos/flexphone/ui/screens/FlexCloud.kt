@@ -193,6 +193,14 @@ fun FlexCloudScreen(nav: NavController) {
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                if (s.mediaWorking || s.mediaQueued > 0) {
+                    // Lo que Flex OS no abre (H.264, PNG, MP3...) se prepara AQUI, en el teléfono, y no en el reloj.
+                    Text(
+                        "Preparando archivos para Flex OS" + if (s.mediaQueued > 0) " · ${s.mediaQueued} en cola" else "",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
                 Text("Espacio que prestas a Flex OS", style = MaterialTheme.typography.bodyMedium)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     for (gb in FlexCloudPhone.QUOTA_CHOICES_GB) {

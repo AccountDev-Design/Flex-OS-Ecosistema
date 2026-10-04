@@ -385,6 +385,38 @@ class MediaServerTest {
         assertTrue(File(tmp, "data/tmp").listFiles().orEmpty().isEmpty(), "quedan temporales")
     }
 
+
+    @Test fun `si se para el servicio a mitad de una conversion no es un fallo, vuelve a la cola y termina al arrancar`() {
+        val slow = StandardConverter(codec, videoSource = { object : com.flexos.flexphone.cloud.media.VideoFrameSource {
+            val inner = FakeVideoSource(640, 480, 0, 400, 12.0)
+            override val width = 640; override val height = 480; override val rotation = 0
+            override val durationMs: Long? = 33_000; override val fps: Double? = 12.0
+            override fun nextFrame(outW: Int, outH: Int, keep: (Long) -> Boolean): com.flexos.flexphone.cloud.media.VideoFrame? { Thread.sleep(15); return inner.nextFrame(outW, outH, keep) }
+            override fun close() = inner.close()
+        } })
+        val busy = java.util.concurrent.atomic.AtomicInteger()
+        pipeline = MediaPipeline(store, slow, { true }, onBusy = { busy.addAndGet(if (it) 1 else -1) }).also { it.start() }
+        val t = login()
+        val id = upload(t, "largo.mp4", MediaFixtures.mov("avc1", 640, 480, List(5) { ByteArray(1000) }, fps = 12, brand = "isom"))
+        val end = System.currentTimeMillis() + 10_000
+        while (System.currentTimeMillis() < end && (file(t, id)["playable"] as? Map<*, *>)?.get("state") != "preparing") Thread.sleep(20)
+        assertEquals("preparing", playable(t, id)["state"])
+        assertEquals(1, busy.get(), "el aviso de trabajo pesado: la app toma la CPU solo ahora")
+        val p = (file(t, id)["playable"] as Map<*, *>)
+        assertTrue(((p["progress"] ?: 0L) as Long) >= 0L)
+        pipeline!!.stop()                                            // el servicio se para (o Android lo mata)
+        val end2 = System.currentTimeMillis() + 10_000
+        while (System.currentTimeMillis() < end2 && busy.get() != 0) Thread.sleep(20)
+        assertEquals(0, busy.get(), "y la CPU se suelta")
+        Thread.sleep(300)
+        assertEquals("pending", playable(t, id)["state"], "no es un fallo del archivo: vuelve a la cola")
+        assertEquals(0, File(tmp, "data/tmp").listFiles().orEmpty().size, "sin temporales")
+        // al arrancar de nuevo (con un conversor rapido) se completa solo
+        pipeline = MediaPipeline(store, StandardConverter(codec, videoSource = { FakeVideoSource(640, 480, 0, 24, 12.0) }), { true }).also { it.start() }
+        assertTrue(settle())
+        assertEquals("ready", playable(t, id)["state"])
+    }
+
     @Test fun `416 lleva Content-Range con el tamano, y If-Range con una fecha manda el archivo entero`() {
         val t = login()
         val data = ByteArray(10_000) { it.toByte() }

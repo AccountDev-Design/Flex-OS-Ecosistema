@@ -12,6 +12,7 @@ import com.flexos.flexphone.cloud.CloudServer
 import com.flexos.flexphone.cloud.CloudStore
 import com.flexos.flexphone.cloud.Http
 import com.flexos.flexphone.cloud.ObjectStore
+import com.flexos.flexphone.cloud.media.MediaPipeline
 import com.flexos.flexphone.cloud.PhoneInfo
 import com.flexos.flexphone.cloud.SessionManager
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -72,6 +73,9 @@ object FlexCloudPhone {
         val availableBytes: Long = 0L,
         val limitedByDevice: Boolean = false,
         val files: Int = 0,
+        /** Archivos esperando turno para prepararse para Flex OS (convertirse al perfil del P4) y si se esta convirtiendo uno ahora. */
+        val mediaQueued: Int = 0,
+        val mediaWorking: Boolean = false,
     )
 
     private val _status = MutableStateFlow(Status())
@@ -96,6 +100,8 @@ object FlexCloudPhone {
     @Volatile private var store: CloudStore? = null
     @Volatile private var storeQuotaGb = 0
     @Volatile private var server: CloudServer? = null
+    @Volatile private var pipeline: MediaPipeline? = null
+    @Volatile private var mediaOn = false
 
     private fun prefs(ctx: Context) = ctx.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -200,7 +206,37 @@ object FlexCloudPhone {
         st.recover()
         store = st
         storeQuotaGb = gb
+        // Si la cuota cambia y el almacen se rehace con la cola en marcha, la cola sigue con el almacen NUEVO.
+        if (mediaOn) pipelineFor(app, st)
         return st
+    }
+
+    // ------------------------------------------------------------ preparacion multimedia
+    /**
+     * La cola que deja lo multimedia listo para el P4 (analiza, y convierte en el telefono lo que Flex OS no abre). Vive mientras
+     * vive el servicio de Flex Cloud; las conversiones se aplazan con poca bateria y toman la CPU solo mientras trabajan.
+     */
+    fun startMedia(ctx: Context) = synchronized(lock) {
+        mediaOn = true
+        val app = ctx.applicationContext
+        val st = try { storeLocked(app) } catch (e: Exception) { return@synchronized }
+        if (pipeline == null) pipelineFor(app, st)
+    }
+
+    fun stopMedia() = synchronized(lock) {
+        mediaOn = false
+        pipeline?.stop()
+        pipeline = null
+    }
+
+    private fun pipelineFor(app: Context, st: CloudStore) {
+        pipeline?.stop()
+        pipeline = MediaPipeline(
+            st, AndroidMedia.converter(),
+            gate = { AndroidMedia.goodMoment(app) },
+            log = { Log.i(TAG, it) },
+            onBusy = { AndroidMedia.busy(app, it) },
+        ).also { it.start() }
     }
 
     // ------------------------------------------------------------ servidor
@@ -277,6 +313,7 @@ object FlexCloudPhone {
         // Se leen los datos FUERA de la actualizacion y se aplican de un golpe y de forma atomica.
         val paired = r.isPaired(); val p4Name = r.p4Name(); val p4Host = r.p4Host()
         val contact = server?.lastP4Contact
+        val mc = pipeline?.counts()
         val gb = quotaGb(app)
         val enabled = isEnabled(app)
         var q: Map<String, Any?>? = null
@@ -290,6 +327,7 @@ object FlexCloudPhone {
                 paired = paired, p4Name = p4Name, p4Host = p4Host,
                 lastContactMs = contact ?: cur.lastContactMs,
                 quotaGb = gb,
+                mediaQueued = mc?.queued ?: 0, mediaWorking = mc?.working ?: false,
             )
             if (q != null) {
                 fun n(k: String) = (q[k] as? Number)?.toLong() ?: 0L
@@ -318,6 +356,7 @@ object FlexCloudPhone {
     fun wipe(ctx: Context): Boolean {
         synchronized(lock) {
             stopServerLocked()
+            pipeline?.stop(); pipeline = null
             store = null
         }
         val ok = root(ctx).deleteRecursively()
