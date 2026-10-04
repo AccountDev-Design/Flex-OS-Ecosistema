@@ -10784,10 +10784,39 @@ static void testMusicaNube(){
   chk(strstr(musErr, "c\xC3\xB3" "dec") != NULL, "y dice POR QUE (el codec), no un error generico");
   chk(!musLoaded && musErr[0], "audio con un codec que no suena: el motivo, sin colgarse");
 
+  // ---- desde ARCHIVOS > FLEX CLOUD: tocar un audio abre Musica (el MISMO reproductor) con ese archivo, no un visor ni un menu
+  musForget(); musErr[0] = 0; flexCloudStreamClose();
+  gStubAudioOk = true; gTestMs = clMs;
+  geFsReset(); gTestFsReady = true;
+  clStatusOnline(); gStubAccountLinked = true; gStubAccountSnap.link = FLEX_LINK_LINKED;
+  gStubCloudItems.clear();
+  { FclItem au = clItem("fil_au", "Tema.m4a", FCL_K_AUDIO, 3000000); au.playState = FCL_PS_READY; au.playSize = 700000; gStubCloudItems.push_back(au); }
+  gStubCloudList.state = FCL_LIST_READY; gStubCloudList.gen++;
+  gStubStreamData.assign(700000, 7); gStubStreamReady.clear(); gStubStreamWant.clear(); gStubStreamOpen = false;
+  filesEnter();
+  clTap(filesTick, SCR_W * 3 / 4, FILES_SEG_Y + FILES_SEG_H / 2);                // Flex Cloud
+  gStubCloudList.gen++; filesRender();
+  { int ax, ay; clCellCenter(0, ax, ay);
+    gStubCloudCalls.clear();
+    clTap(filesTick, ax, ay);
+    chk(gState == ST_APP && gAppId == IC_MUSICA, "tocar un audio de la nube en Archivos abre Musica (no un menu ni el visor)");
+    // el enter() de la app corre al acabar la animacion de apertura: se termina como lo hace el bucle real
+    gTestUs += (ATR_OPEN_MS + 50) * 1000u; appTrTick();
+    chk(!strcmp(musPath, "cloud:fil_au/Tema.wav") && musCloud && musCloudWait && clCalled("stream fil_au"),
+        "con el archivo de la nube (su version .wav) abierto por rangos, esperando el principio"); }
+  musCloseApp(); gAppState[IC_MUSICA] = ALIFE_CLOSED; gAppState[IC_ALMACEN] = ALIFE_CLOSED;
+  gTrEnterPending = false; gTrIn.on = false; gTrOut.on = false;
+  filesCloud = false; ckUnbind(&filesCkHost);
+  gState = ST_HOME; gAppId = 0; gMediaReturnApp = 0xFF;
+
   // ---- limpieza
   musForget(); musErr[0] = 0; flexCloudStreamClose();
   gStubStreamData.clear(); gStubCloudItems.clear();
   gStubAudioOk = false; gStubAudioPlay = false; gStubAudioOut.clear();
+  gStubAccountLinked = false; memset(&gStubCloudStatus, 0, sizeof(gStubCloudStatus));
+  gTestFsReady = false; gTestMemFs = false; gTestFiles.clear(); memset(&gMs, 0, sizeof(gMs));
+  mkReset();
+  gState = ST_HOME; gAppId = 0; gLand = false; uiClipFull(); setBuf(fb);
   gMlOk = ok0;
 }
 

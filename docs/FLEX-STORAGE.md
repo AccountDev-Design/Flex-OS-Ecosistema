@@ -78,6 +78,9 @@ de la API es justo el que necesita un "Flex Cloud en el teléfono".
 
 ### 1.4 Reproductores (P4) — se REUTILIZAN
 
+> Actualización: Música también lee de Flex Cloud (por `MediaStream`, el mismo lector que el visor) y
+> todo lo multimedia pasa por el perfil de [`FLEX-MEDIA-PROFILE.md`](FLEX-MEDIA-PROFILE.md).
+
 * **Vídeo**: `FlexOS_Ultra_MediaViewer.h` + `FlexOS_Media.cpp`. **AVI MJPEG**
   (el P4 no tiene decodificador de H.264/HEVC). Local por flujo; de la nube por
   rangos con la caché de bloques (el visor nunca espera más de 25 ms dentro del
@@ -405,8 +408,11 @@ baterías nativas se compilan con ASan + UBSan.
   Google no es accesible): el código de plataforma se comprueba contra las
   clases de Android 15 de Robolectric y la lógica entera vive en `:storage`,
   que sí se compila y se prueba.
-* El P4 solo reproduce **AVI MJPEG, JPEG baseline y WAV PCM/IMA ADPCM**. Un MP4
-  del teléfono se guarda en Flex Cloud y se ve en el navegador, no en el P4.
+* El P4 solo reproduce **AVI MJPEG, JPEG baseline y WAV PCM/IMA ADPCM**, pero lo que no sabe
+  abrir (MP4/H.264, PNG, MP3...) **lo prepara el teléfono**: lo analiza por sus bytes, deja
+  una versión del perfil y el P4 abre esa, con el mismo visor/reproductor que lo local. Ver
+  [`FLEX-MEDIA-PROFILE.md`](FLEX-MEDIA-PROFILE.md) (perfil, conversión, streaming y límites:
+  el P4 sigue sin reproducir el audio de un vídeo).
 * **Si cambia la IP (o el puerto) del teléfono**, el P4 no lo encuentra solo:
   hay que volver a pulsar «Activar Flex Cloud en este teléfono» en la web de
   Flex OS (el P4 lo aprueba sin preguntar, porque el teléfono conserva la
