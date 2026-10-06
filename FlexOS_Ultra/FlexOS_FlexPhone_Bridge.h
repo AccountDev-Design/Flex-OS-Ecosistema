@@ -407,6 +407,24 @@ static bool flexPhoneRelayToken(char* out, size_t outN){
 // sigue tomando flexBrSourceResolve, en el nucleo probado del
 // navegador: aqui solo se le dan las disponibilidades reales.
 static bool fphRelayUp(){ return fphModel.relay.state == FLP_RELAY_UP; }
+// El nombre del estado del servidor del telefono, el MISMO en todas las
+// pantallas. Parado a proposito ("detenido por el usuario") y suspendido por
+// Android son estados propios, no un "error" en rojo. `brief` = celda pequena.
+static const char* fphRelayStateName(bool brief){
+  switch(fphModel.relay.state){
+    case FLP_RELAY_UP:        return LI() == 1 ? "Running" : "Activo";
+    case FLP_RELAY_STARTING:  return LI() == 1 ? "Starting" : "Arrancando";
+    case FLP_RELAY_ERROR:     return LI() == 1 ? "Error" : (brief ? "Con error" : "Error");
+    case FLP_RELAY_SUSPENDED: return brief ? (LI() == 1 ? "Suspended" : "Suspendido")
+                                           : (LI() == 1 ? "Suspended by Android" : "Suspendido por Android");
+    default: break;
+  }
+  // Parado. Si fue la persona (desde el telefono o desde aqui), se dice.
+  if(fphModel.relay.byUser)
+    return brief ? (LI() == 1 ? "Stopped" : "Detenido")
+                 : (LI() == 1 ? "Stopped by the user" : "Detenido por el usuario");
+  return LI() == 1 ? "Stopped" : "Parado";
+}
 
 static int fphBrSourcePref(){
   const BrSettings* st = flexBrowserSettings();
@@ -654,10 +672,7 @@ static void fphRenderInicio(){
         else snprintf(sub, sizeof(sub), LI() == 1 ? "Nothing yet" : "Todavia nada");
         break;
       case FPH_SERVIDOR:
-        snprintf(sub, sizeof(sub), "%s",
-                 fphModel.relay.state == FLP_RELAY_UP    ? (LI() == 1 ? "Running" : "Activo") :
-                 fphModel.relay.state == FLP_RELAY_ERROR ? (LI() == 1 ? "Error" : "Con error") :
-                                                           (LI() == 1 ? "Stopped" : "Parado"));
+        snprintf(sub, sizeof(sub), "%s", fphRelayStateName(true));
         break;
       case FPH_NAVEGADOR: snprintf(sub, sizeof(sub), "%s", fphBrSourceActiveName()); break;
       case FPH_ESTADO:
@@ -772,15 +787,14 @@ static void fphRenderServidor(){
 
   const FlexPhoneRelay* r = &fphModel.relay;
   uint8_t st = FG_ST_OFF;
-  const char* stName = LI() == 1 ? "Stopped" : "Parado";
   switch(r->state){
-    case FLP_RELAY_UP:        st = FG_ST_OK;   stName = LI() == 1 ? "Running" : "Activo"; break;
-    case FLP_RELAY_STARTING:  st = FG_ST_BUSY; stName = LI() == 1 ? "Starting" : "Arrancando"; break;
-    case FLP_RELAY_ERROR:     st = FG_ST_BAD;  stName = LI() == 1 ? "Error" : "Error"; break;
-    case FLP_RELAY_SUSPENDED: st = FG_ST_BAD;  stName = LI() == 1 ? "Suspended by Android"
-                                                                  : "Suspendido por Android"; break;
+    case FLP_RELAY_UP:        st = FG_ST_OK;   break;
+    case FLP_RELAY_STARTING:  st = FG_ST_BUSY; break;
+    case FLP_RELAY_ERROR:     st = FG_ST_BAD;  break;
+    case FLP_RELAY_SUSPENDED: st = FG_ST_BAD;  break;
     default: break;
   }
+  const char* stName = fphRelayStateName(false);
 
   fgCard(FPH_MX, y, FPH_CW, 132);
   drawText(FPH_MX + 18, y + 12, LI() == 1 ? "Phone server" : "Servidor del telefono", 2, TH_TXT);
@@ -1201,9 +1215,8 @@ static void fphRenderDiag(){
   rows[n].st = fphModel.relay.state == FLP_RELAY_UP ? FG_ST_OK
              : (fphModel.relay.state == FLP_RELAY_STARTING ? FG_ST_BUSY
              : (fphModel.relay.state == FLP_RELAY_ERROR ? FG_ST_BAD : FG_ST_OFF));
-  rows[n].detail = fphModel.relay.state == FLP_RELAY_UP ? (LI() == 1 ? "Running" : "Activo")
-                 : (fphModel.relay.state == FLP_RELAY_ERROR && fphModel.relay.err[0]
-                    ? fphModel.relay.err : (LI() == 1 ? "Stopped" : "Parado"));
+  rows[n].detail = (fphModel.relay.state == FLP_RELAY_ERROR && fphModel.relay.err[0])
+                 ? fphModel.relay.err : fphRelayStateName(true);
   n++;
 
   rows[n].name = LI() == 1 ? "Browser" : "Navegador";
@@ -1653,11 +1666,14 @@ static void fphHandleHit(uint16_t id){
       if(up){
         if(flexPhoneLinkSend(&fphLink, FLNK_T_RELAY_STOP, NULL, 0, true)){
           fphModel.relay.state = FLP_RELAY_OFF;
+          fphModel.relay.byUser = true;          // parado A PROPOSITO, no un fallo
+          fphModel.relay.err[0] = 0;
           fphToastShow(LI() == 1 ? "Stopping" : "Deteniendo");
         } else fphToastShow(LI() == 1 ? "Could not send it" : "No se pudo enviar");
       } else {
         if(flexPhoneLinkSend(&fphLink, FLNK_T_RELAY_START, NULL, 0, true)){
           fphModel.relay.state = FLP_RELAY_STARTING;
+          fphModel.relay.byUser = false;
           fphToastShow(LI() == 1 ? "Asking the phone" : "Pidiendolo al telefono");
         } else fphToastShow(LI() == 1 ? "Could not send it" : "No se pudo enviar");
       }

@@ -14,8 +14,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.flexos.flexphone.domain.FlexPhoneState
+import com.flexos.flexphone.domain.RelayClient
 import com.flexos.flexphone.domain.RelayState
 import com.flexos.flexphone.domain.Settings
+import com.flexos.flexphone.domain.relayStatusText
 import com.flexos.flexphone.relay.BrowserRelayService
 import com.flexos.flexphone.storage.SettingsStore
 import com.flexos.flexphone.ui.FlexTopBar
@@ -37,6 +39,8 @@ fun RelayScreen(nav: NavController, store: SettingsStore, settings: Settings) {
     val state = FlexPhoneState.instance
     val relay by (state?.relay ?: MutableStateFlow(RelayState.OFF)).collectAsState()
     val info by (state?.relayInfo ?: MutableStateFlow(null)).collectAsState()
+    val client by (state?.relayClient ?: MutableStateFlow(RelayClient.NONE)).collectAsState()
+    val byUser by (state?.relayStoppedByUser ?: MutableStateFlow(false)).collectAsState()
 
     val pm = ctx.getSystemService(PowerManager::class.java)
     var ignoringBattery by remember {
@@ -51,13 +55,7 @@ fun RelayScreen(nav: NavController, store: SettingsStore, settings: Settings) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             SectionCard("Estado") {
-                KeyValue("Relay", when (relay) {
-                    RelayState.UP -> "Activo"
-                    RelayState.STARTING -> "Iniciando"
-                    RelayState.ERROR -> "Error"
-                    RelayState.SUSPENDED -> "Suspendido por Android"
-                    RelayState.OFF -> "Detenido"
-                }, emphasis = true)
+                KeyValue("Relay", relayStatusText(relay, client, byUser), emphasis = true)
                 info?.let { i ->
                     if (i.port > 0) {
                         KeyValue("Direccion",
@@ -66,11 +64,16 @@ fun RelayScreen(nav: NavController, store: SettingsStore, settings: Settings) {
                     // Se dice que NO hay TLS. No se llama "seguro" a
                     // algo que va en claro por la red local.
                     KeyValue("Cifrado", if (i.tls) "TLS" else "Sin TLS (red local)")
-                    if (i.error.isNotEmpty()) {
+                    if (i.error.isNotEmpty() && !i.stoppedByUser) {
                         Text(i.error, style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.error)
                     }
                 }
+                // Cerrar la app NO es parar el relay: se dice, para que nadie
+                // tenga que dejar Flex Phone abierto "por si acaso".
+                Text(ctx.getString(com.flexos.flexphone.R.string.relay_keeps_running),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (relay == RelayState.OFF || relay == RelayState.ERROR) {
                         Button(onClick = { BrowserRelayService.start(ctx) }) { Text("Iniciar") }
@@ -127,7 +130,9 @@ fun RelayScreen(nav: NavController, store: SettingsStore, settings: Settings) {
             SectionCard("Ajustes del relay") {
                 KeyValue("Puerto", if (settings.relayPort == 0) "automatico"
                                    else settings.relayPort.toString())
-                KeyValue("Cerrar tras inactividad", "${settings.relayIdleTimeoutMin} min")
+                // Sin Flex OS conectado el relay NO se apaga: lo que se suelta
+                // pasado este tiempo son las pestanas (la memoria).
+                KeyValue("Conservar pestanas sin conexion", "${settings.relayIdleTimeoutMin} min")
                 KeyValue("Maximo de pestanas", settings.relayMaxTabs.toString())
                 KeyValue("Calidad JPEG", settings.relayQuality.toString())
                 Text(

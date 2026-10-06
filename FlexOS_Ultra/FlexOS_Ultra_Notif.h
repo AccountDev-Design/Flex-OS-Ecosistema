@@ -28,6 +28,33 @@
 #include "FlexOS_Ultra_Conn.h"   // eslabon anterior de la cadena
 
 // #############################################################
+// ##  LA ISLA YA NO PINTA: GUARDA, Y EL BANNER PRESENTA
+// ##  ------------------------------------------------------
+// ##  gNotifs[] es el MODELO de los avisos del sistema -- lo que leen
+// ##  el Centro de notificaciones, el panel de DeX y el widget de
+// ##  Inicio -- y notifPush los PRESENTA por el banner global
+// ##  (FlexOS_FlexPhone_Overlay.h, "PRESENTADOR UNICO DE AVISOS").
+// ##
+// ##  Por que: la isla y el banner eran dos capas independientes sobre
+// ##  la MISMA franja de arriba, y podian salir a la vez una encima de
+// ##  la otra (un aviso del telefono tapando a medias uno del sistema).
+// ##  Ademas la isla solo existia en el escritorio: un aviso del
+// ##  sistema con una app abierta esperaba sin verse. Con un solo
+// ##  presentador: nunca dos a la vez, el del sistema antes que el del
+// ##  telefono, y los dos encima de cualquier pantalla, con el vidrio
+// ##  de lo que haya debajo en ese momento.
+// ##
+// ##  El modelo es un HISTORIAL acotado (NOTIF_MAX): lo nuevo entra al
+// ##  final y, lleno, sale lo mas antiguo. Ya no se borra al acabar una
+// ##  animacion: se quita al descartarlo en el Centro.
+// ##
+// ##  Lo que sigue (fases, tarjetas, banda) es el render de la isla de
+// ##  la Fase 1. Se conserva compilado porque el compositor del paso de
+// ##  pagina de Inicio lo referencia, pero con notifBandOn siempre a
+// ##  false no se ejecuta.
+// #############################################################
+
+// #############################################################
 // ##  ISLA DINAMICA · logica y render  (FASE 1, parche anti-flicker)
 // ##  ------------------------------------------------------
 // ##  FIX aplicado tras el bug de parpadeo + tarjetas pegadas:
@@ -131,29 +158,6 @@ static int notifFindKey(uint32_t key){
   return -1;
 }
 
-// Encola una notificacion a partir de un modulo
-static void notifPush(const DetectedModule* m){
-  uint32_t key = notifKeyOf(m);
-  int dup = notifFindKey(key);
-  if(dup >= 0){
-    // Ya esta en la cola: se refresca en su sitio. Si estaba VISIBLE se le
-    // reinicia la cuenta atras (el aviso vuelve a ser reciente); si estaba
-    // esperando, sigue esperando su turno y no se cuela por delante.
-    gNotifs[dup].mod = *m;
-    if(gNotifs[dup].armed) gNotifs[dup].bornMs = millis();
-    return;
-  }
-  if(gNotifCount >= NOTIF_MAX) return;           // cola llena: se descarta (Fase 1)
-  Notification* n = &gNotifs[gNotifCount++];
-  n->mod    = *m;
-  n->active = true;
-  n->phase  = NP_IN;
-  n->bornMs = millis();
-  n->slideX = 0.0f;
-  n->armed  = false;            // se arma (entrada + 5 s) al hacerse visible en Home
-  n->key    = key;
-}
-
 // Elimina la ranura idx y compacta la cola
 static void notifRemove(int idx){
   if(idx < 0 || idx >= gNotifCount) return;
@@ -165,6 +169,33 @@ static void notifRemove(int idx){
   memset(&gNotifs[gNotifCount], 0, sizeof(gNotifs[gNotifCount]));
   if(notifDragIdx == idx)      notifDragIdx = -1;
   else if(notifDragIdx > idx)  notifDragIdx--;
+}
+
+// El presentador (FlexOS_FlexPhone_Overlay.h, mas abajo en la cadena).
+static void fpbPushSystemKeyed(uint32_t key, uint8_t type, const char* title, const char* body);
+
+// Registra un aviso del sistema en el MODELO y lo PRESENTA por el banner (ver
+// LA ISLA YA NO PINTA). El mismo aviso (misma huella) no se duplica: se
+// actualiza en su sitio y vuelve a ser el mas reciente; y el banner hace lo
+// mismo con su tarjeta, este a la vista o esperando turno.
+static void notifPush(const DetectedModule* m){
+  uint32_t key = notifKeyOf(m);
+  int dup = notifFindKey(key);
+  if(dup >= 0){
+    gNotifs[dup].mod = *m;
+    gNotifs[dup].bornMs = millis();               // el Centro ordena por esto
+  } else {
+    if(gNotifCount >= NOTIF_MAX) notifRemove(0);  // historial lleno: sale el mas antiguo
+    Notification* n = &gNotifs[gNotifCount++];
+    n->mod    = *m;
+    n->active = true;
+    n->phase  = NP_IDLE;
+    n->bornMs = millis();
+    n->slideX = 0.0f;
+    n->armed  = false;           // la isla no lo arma: lo presenta el banner
+    n->key    = key;
+  }
+  fpbPushSystemKeyed(key, (uint8_t)m->type, m->name, m->sub);
 }
 
 // Ease-out cubica (0..1)
@@ -296,121 +327,23 @@ static bool notifAnimating(){
   return notifBandOn && gNotifCount == 0;         // le falta el cuadro de limpieza
 }
 
-// Avanza el TIEMPO de la isla: arma las que se hacen visibles y mueve fases
-// (entrada, espera de 5 s, muelle, salida). No dibuja nada.
-static void notifAdvance(){
-  // UNA a la vez: solo las NOTIF_VISIBLE primeras de la cola se arman,
-  // se animan y se dibujan. Las de detras esperan su turno intactas --
-  // ni cuentan los 5 s ni ocupan pixeles -- y entran en cuanto la de
-  // delante se va. Eso es lo que convierte gNotifs[] en una cola de
-  // verdad en vez de una pila de tarjetas superpuestas.
-  int shown = gNotifCount < NOTIF_VISIBLE ? gNotifCount : NOTIF_VISIBLE;
-
-  // Armar la entrada de las notificaciones aun no mostradas
-  for(int i = 0; i < shown; i++){
-    if(!gNotifs[i].armed){
-      gNotifs[i].armed  = true;
-      gNotifs[i].phase  = NP_IN;
-      gNotifs[i].bornMs = millis();
-      gNotifs[i].slideX = 0.0f;
-    }
-  }
-
-  // Avanzar fases de animacion
-  for(int i = 0; i < shown; ){
-    Notification* n = &gNotifs[i];
-    // Al salir la de delante, la siguiente sube a esta ranura en el MISMO
-    // frame, todavia sin armar. No se le avanza la fase aqui: su bornMs es
-    // el de cuando se encolo, asi que la caducidad de 5 s la mataria de
-    // golpe sin haberse visto nunca. Se arma en la vuelta siguiente.
-    if(!n->armed){ i++; continue; }
-    bool removed = false;
-    switch(n->phase){
-      case NP_IN:
-        if(millis() - n->bornMs >= 280) n->phase = NP_IDLE;
-        break;
-      case NP_IDLE:
-        if(millis() - n->bornMs >= NOTIF_HOLD_MS) n->phase = NP_OUT;   // auto-descarte a los 5 s
-        break;
-      case NP_SPRING:
-        n->slideX += (0.0f - n->slideX) * 0.35f;           // muelle de vuelta
-        if(n->slideX > -0.5f){ n->slideX = 0.0f; n->phase = NP_IDLE; }
-        break;
-      case NP_OUT:
-        n->slideX -= (NOTIF_CARD_W + NOTIF_MARGIN_X) * 0.18f + 6.0f;  // sale por la izquierda
-        if(n->slideX < -(NOTIF_CARD_W + NOTIF_MARGIN_X + 4)){
-          notifRemove(i);
-          // `shown` era una instantanea tomada antes de compactar. Con la
-          // ultima tarjeta quedaba en 1 aunque gNotifCount ya fuera 0; el
-          // antiguo i-- volvia a procesar para siempre la ranura eliminada y
-          // el TASK_WDT reiniciaba todo el OS. Recalcular el limite y mantener
-          // i hace que la tarjeta siguiente (si existe) ocupe la ranura de
-          // forma segura, sin saltarla ni leer una entrada muerta.
-          shown = gNotifCount < NOTIF_VISIBLE ? gNotifCount : NOTIF_VISIBLE;
-          removed = true;
-        }
-        break;
-      default: break;
-    }
-    if(!removed) i++;
-  }
-}
-
-// ---- Tick de la isla: anima y compone (se llama al final de loop) ----
+// ---- Tick de la isla (se llama al final de loop) ----
+// LA ISLA YA NO PINTA (ver arriba): los avisos los presenta el banner. Lo unico
+// que queda aqui es devolver limpia una banda que hubiera quedado marcada.
 static void notifTick(){
   // Throttle ~30 fps
   if(millis() - notifLastMs < 33) return;
   notifLastMs = millis();
 
-  // Nada que mostrar y banda ya limpia -> salida barata
-  if(gNotifCount == 0 && !notifBandOn) return;
-
-  // La isla SOLO vive en el Home principal desbloqueado (sin cortina ni edicion).
-  // Fuera de ahi no avanzamos fases ni dibujamos: las notificaciones detectadas
-  // durante el bloqueo esperan congeladas y su animacion de entrada + los 5 s
-  // arrancan al llegar aqui. Asi tambien evitamos el conflicto de dibujo con
-  // otras pantallas (que son quienes deben poseer el fb en ese momento).
-  if(gState != ST_HOME || qsPanelY != 0 || editMode || notifSecureScreen()){
-    if(!notifPaused){ notifPaused = true; notifPauseT0 = millis(); }   // marca el inicio de la pausa (p.ej. se abrio una app)
-    return;
-  }
-  if(notifPaused){
-    // Reanudando tras una pausa (p.ej. se cerro la app que se abrio encima):
-    // sumar el tiempo pausado a bornMs de cada tarjeta activa para que
-    // conserven el tiempo que les quedaba, en vez de que millis()-bornMs se
-    // dispare de golpe y todas pasen de fase (y se reindexen) en el mismo
-    // frame -- eso era el parpadeo/"se queda bugeado" al volver de una app.
-    uint32_t paused = millis() - notifPauseT0;
-    for(int i = 0; i < gNotifCount; i++) gNotifs[i].bornMs += paused;
-    notifPaused = false;
-  }
-  if(gNotifCount > 0) notifBandOn = true;
-
-  notifAdvance();
-
-  // PASO DE PAGINA EN CURSO. La tarjeta SIGUE a la vista (y su tiempo corre):
-  // si la franja que se desliza solapa la banda de la isla, el compositor del
-  // deslizamiento es el unico dueno de esas filas y pinta la isla ENCIMA de
-  // cada cuadro (hpRenderFrame / hpPublishStill). Si la isla repusiera aqui su
-  // banda desde homeBuf, pondria la pagina de origen SIN desplazar en medio del
-  // gesto. Si no la solapa (sin widgets de cabecera), se compone como siempre.
-  if(hpDragging || hpSettling){
-    int top = hpTop < HOME_PAGE_TOP ? HOME_PAGE_TOP : hpTop;
-    if(hpOwnsIsland(top)) return;
-  }
-
-  // Recorte completo (por si una app lo dejo estrecho) antes de componer
+  // Sin banda marcada no hay nada que hacer: es el caso de siempre.
+  if(!notifBandOn) return;
+  if(gState != ST_HOME || qsPanelY != 0 || editMode || notifSecureScreen()) return;
+  if(hpDragging || hpSettling) return;
   gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
-
-  // Componer en bbuf (nadie mas lo lee): restaurar fondo limpio y dibujar las
-  // tarjetas encima. Nadie mas presenta esta banda -> sin parpadeo.
   bbufSys(); setBuf(bbuf);
   notifRestoreBg();
-  notifDrawCardsOver();
-  // Volcado atomico bbuf->fb de una banda ya terminada. DMA2D nunca ve
-  // un fb a medio pintar.
   present(NOTIF_BAND_TOP, NOTIF_BAND_BOT - 1);
-
-  // Banda vaciada: el frame de limpieza ya se compuso y volco arriba.
-  if(gNotifCount == 0) notifBandOn = false;
+  setBuf(fb);
+  notifBandOn = false;
 }
+

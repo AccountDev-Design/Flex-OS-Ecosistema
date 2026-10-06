@@ -94,8 +94,8 @@ extern "C" {
 //
 //  Sube este numero cuando cambie algo que obligue a recopiar todo.
 // =============================================================
-#define FLEXBR_BUILD 4
-void flexBrVersionGuard_v4_copia_los_4_ficheros_del_navegador(void);
+#define FLEXBR_BUILD 5
+void flexBrVersionGuard_v5_copia_los_4_ficheros_del_navegador(void);
 
 // =============================================================
 //  1) INTERRUPTORES MAESTROS
@@ -509,6 +509,12 @@ typedef struct {
   uint32_t rttMs;
   uint32_t freeHeap, freePsram, minFreeHeap;
   uint32_t navCount, errCount;
+  // Viewport que el servicio tiene pedido AHORA (el ultimo HELLO o VIEWPORT
+  // enviado) y cuantas veces se ha renegociado. Es lo que permite ver en
+  // flex://about -- y comprobar en las pruebas -- que redimensionar la ventana
+  // llega de verdad al servicio, en vez de suponerlo.
+  uint16_t viewW, viewH;
+  uint32_t viewportMsgs;
 } BrStats;
 
 // Estado del transporte.
@@ -696,6 +702,13 @@ void flexBrowserKeyEnter();
 void flexBrowserKeyCancel();
 // true mientras el omnibox esta en edicion y necesita el teclado.
 bool flexBrowserKeyboardOpen();
+// Toque POR ENCIMA del teclado mientras se edita, en coordenadas del lienzo.
+// true = el navegador se lo queda y el teclado SIGUE abierto: sobre el propio
+// campo que se edita (tocar la barra de direcciones mientras se escribe en
+// ella no la cierra), o sobre la pagina cuando se escribe EN la pagina (el
+// toque llega a la pagina, que decide el foco). false = es "fuera": el puente
+// cierra el teclado, como hace cualquier teclado del sistema.
+bool flexBrowserKeyboardTapAbove(int x, int y);
 // Texto actual del omnibox (para que el puente lo pinte).
 const char* flexBrowserEditText();
 // Etiqueta de lo que se esta editando ("Dirección", "Servidor"...).
@@ -748,6 +761,25 @@ void flexBrowserClearData(uint32_t mask);
 int      brHostScrW();
 int      brHostScrH();
 void     brHostContentRect(int* x, int* y, int* w, int* h);  // area util de la app
+// El MISMO rectangulo pero SIN descontar el teclado: es el tamano de la
+// ventana (o de la pantalla) que el gestor de ventanas le ha dado a la app.
+// El navegador lo necesita para no renegociar el viewport de la pagina cada
+// vez que se abre el teclado del omnibox (la pagina queda DEBAJO del teclado;
+// no tiene por que reacomodarse). Con el teclado escribiendo EN la pagina si
+// se usa el reducido, igual que hace Chrome.
+void     brHostLayoutRect(int* x, int* y, int* w, int* h);
+
+// PANTALLA COMPLETA (inmersiva). El navegador NO decide el marco del
+// sistema: lo pide y el host lo aplica (barra de estado y de navegacion
+// ocultas, lienzo entero, orientacion). El estado se consulta en cada
+// tick a traves de brHostContentRect, que ya refleja el lienzo nuevo.
+//   -1  esta placa no tiene modo inmersivo (la opcion no se ofrece)
+//    0  normal
+//    1  pantalla completa en vertical
+//    2  pantalla completa en horizontal
+enum { BRFS_UNSUPPORTED = -1, BRFS_OFF = 0, BRFS_PORTRAIT = 1, BRFS_LANDSCAPE = 2 };
+int      brHostFullscreenState();
+void     brHostFullscreenRequest(int state);
 bool     brHostDark();
 bool     brHostGlass();
 bool     brHostHosted();          // dentro de una ventana de Modo PC/DeX

@@ -46,6 +46,8 @@ class RelayServer(
     sealed class Event {
         data class Listening(val address: ByteArray, val port: Int) : Event()
         data class Error(val message: String) : Event()
+        /** Escuchando, pero sin Wi-Fi a la que anunciarse: se espera a que vuelva. */
+        object NoWifi : Event()
         object ClientConnected : Event()
         object ClientGone : Event()
     }
@@ -55,12 +57,24 @@ class RelayServer(
         private const val WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
         /** Tope de un mensaje entrante. Un HELLO son decenas de bytes. */
         private const val MAX_INBOUND = 64 * 1024
+        /**
+         * Conexiones abiertas a la vez (la sesion, una reconexion en curso y
+         * algun /v1/health). Por encima se cierran al aceptar: nadie puede
+         * agotar los hilos del telefono abriendo sockets.
+         */
+        private const val MAX_CONNS = 4
+        /** Tiempo para mandar la peticion HTTP y el HELLO. Despues, ver RelaySession. */
+        private const val HANDSHAKE_MS = 10_000
     }
 
     private var server: ServerSocket? = null
     private val running = AtomicBoolean(false)
     private var thread: Thread? = null
+    /** LA sesion: la ultima que se autentico (ver RelayEngine, "la mas nueva gana"). */
     @Volatile private var session: RelaySession? = null
+    private val conns = java.util.concurrent.atomic.AtomicInteger(0)
+    private val open = java.util.Collections.newSetFromMap(
+        java.util.concurrent.ConcurrentHashMap<Socket, Boolean>())
 
     val port: Int get() = server?.localPort ?: 0
 
@@ -73,13 +87,13 @@ class RelayServer(
             server = ServerSocket(preferredPort)
             running.set(true)
             thread = Thread({ acceptLoop() }, "flex-relay").apply { isDaemon = true; start() }
+            // Sin Wi-Fi el servidor NO se cierra: escucha en todas las
+            // interfaces y, cuando la Wi-Fi vuelva, el servicio anuncia la
+            // direccion nueva. Antes se paraba y habia que volver a arrancarlo
+            // a mano.
             val addr = localWifiAddress()
-            if (addr == null) {
-                onEvent(Event.Error("el telefono no esta en una red Wi-Fi"))
-                stop()
-                return false
-            }
-            onEvent(Event.Listening(addr, server!!.localPort))
+            if (addr == null) onEvent(Event.NoWifi)
+            else onEvent(Event.Listening(addr, server!!.localPort))
             true
         } catch (e: Exception) {
             onEvent(Event.Error("no se pudo abrir el puerto"))
@@ -94,6 +108,10 @@ class RelayServer(
         runCatching { server?.close() }
         server = null
         thread = null
+        // Las conexiones que aun no eran sesion (una reconexion a medias, un
+        // health) tambien se cierran: sus hilos terminan en vez de colgar.
+        open.toList().forEach { runCatching { it.close() } }
+        open.clear()
     }
 
     fun isRunning(): Boolean = running.get()
@@ -109,19 +127,31 @@ class RelayServer(
                 if (running.get()) onEvent(Event.Error("el servidor dejo de aceptar conexiones"))
                 break
             }
-            // UNA sesion a la vez: el relay sirve a un solo Flex OS.
-            // Una segunda conexion se cierra en vez de repartir los
-            // fotogramas entre dos.
-            if (session != null) { runCatching { sock.close() }; continue }
-            Thread({ serve(sock) }, "flex-relay-conn").apply { isDaemon = true; start() }
+            // UNA sesion a la vez, pero la que manda es la MAS NUEVA que se
+            // autentique. Antes una segunda conexion se cerraba sin mas
+            // mientras hubiera sesion, y un P4 que se reiniciaba (o perdia la
+            // Wi-Fi un momento) se quedaba fuera hasta que el socket viejo
+            // caducara: el "relay desconectado" que no volvia solo. Ahora la
+            // conexion nueva hace su saludo; si trae el token bueno sustituye
+            // a la vieja, y si no, se cierra sin tocar a nadie.
+            if (conns.incrementAndGet() > MAX_CONNS) {
+                conns.decrementAndGet()
+                runCatching { sock.close() }
+                continue
+            }
+            open.add(sock)
+            Thread({
+                try { serve(sock) } finally { open.remove(sock); conns.decrementAndGet() }
+            }, "flex-relay-conn").apply { isDaemon = true; start() }
         }
     }
 
     private fun serve(sock: Socket) {
-        sock.soTimeout = 60_000
-        val input = sock.getInputStream()
-        val output = sock.getOutputStream()
+        // Hasta el HELLO, poco margen; la sesion autenticada pone el suyo.
+        runCatching { sock.soTimeout = HANDSHAKE_MS }
         try {
+            val input = sock.getInputStream()
+            val output = sock.getOutputStream()
             val req = readHttpRequest(input) ?: return
             when {
                 req.path == "/v1/health" -> respondJson(output, health())
@@ -133,7 +163,7 @@ class RelayServer(
             // Nada de trazas con contenido: solo el hecho.
             Log.w(TAG, "conexion terminada")
         } finally {
-            if (session?.socket !== sock) runCatching { sock.close() }
+            runCatching { sock.close() }
         }
     }
 
@@ -211,14 +241,21 @@ class RelayServer(
         output.write(head.toString().toByteArray(Charsets.US_ASCII))
         output.flush()
 
-        val s = RelaySession(sock, input, output, sessionToken, onEvent)
-        session = s
-        onEvent(Event.ClientConnected)
+        val s = RelaySession(sock, input, output, sessionToken, onEvent) { authed ->
+            // HELLO bueno: esta conexion pasa a ser LA sesion. La anterior la
+            // cierra RelayEngine.attach (la mas nueva gana).
+            session = authed
+            onEvent(Event.ClientConnected)
+        }
         try {
             s.loop()
         } finally {
-            session = null
-            onEvent(Event.ClientGone)
+            // Solo avisa de que el cliente se fue si era LA sesion: una
+            // sustituida, o una que nunca se autentico, no cambia nada.
+            if (session === s) {
+                session = null
+                onEvent(Event.ClientGone)
+            }
             runCatching { sock.close() }
         }
     }

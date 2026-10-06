@@ -216,12 +216,20 @@ void vQueueDelete(QueueHandle_t h){ delete (RealQueue*)h; }
 #define SCRH 800
 static uint16_t g_canvas[SCRW * SCRH];
 static std::atomic<long> g_blitted{0};
+static std::atomic<int> g_helloW{0}, g_helloH{0}, g_vpW{0}, g_vpH{0}, g_vpCount{0};
 
 int  brHostScrW(){ return SCRW; }
 int  brHostScrH(){ return SCRH; }
+// El area que da el gestor de ventanas. Variable: la prueba la cambia en
+// mitad de la sesion, como al redimensionar una ventana de DeX.
+static std::atomic<int> g_cw{SCRW}, g_ch{SCRH - 96 - 64};
 void brHostContentRect(int* x, int* y, int* w, int* h){
-  *x = 0; *y = 96; *w = SCRW; *h = SCRH - 96 - 64;
+  *x = 0; *y = 96; *w = g_cw.load(); *h = g_ch.load();
 }
+void brHostLayoutRect(int* x, int* y, int* w, int* h){ brHostContentRect(x, y, w, h); }
+// Pantalla completa: en este doble no hay (como en una ventana de DeX).
+int  brHostFullscreenState(){ return BRFS_UNSUPPORTED; }
+void brHostFullscreenRequest(int){}
 bool brHostDark(){ return true; }
 bool brHostGlass(){ return false; }
 bool brHostHosted(){ return false; }
@@ -418,7 +426,14 @@ static void serverThread(int listenFd){
     if(!wsReadClient(fd, msg)){ ::close(fd); return; }
     FbpHeader h;
     if(!fbpReadHeader(msg.data(), msg.size(), &h)) continue;
-    if(h.type == FBP_C_HELLO){ g_gotHello = true; break; }
+    if(h.type == FBP_C_HELLO){
+      // ver(1) w(2) h(2) ...: el viewport con el que se abre la sesion.
+      if(h.len >= 5){
+        const uint8_t* q = msg.data() + FBP_HDR_SIZE;
+        g_helloW = q[1] | (q[2] << 8); g_helloH = q[3] | (q[4] << 8);
+      }
+      g_gotHello = true; break;
+    }
   }
   {
     std::vector<uint8_t> p;
@@ -486,9 +501,16 @@ static void serverThread(int listenFd){
     }
   }
 
-  // Se atiende lo que quede (ACK, PING) hasta que la prueba termine.
+  // Se atiende lo que quede (ACK, PING, VIEWPORT) hasta que la prueba termine.
   while(!g_srvStop){
     if(!wsReadClient(fd, msg)) break;
+    FbpHeader h;
+    if(!fbpReadHeader(msg.data(), msg.size(), &h)) continue;
+    if(h.type == FBP_C_VIEWPORT && h.len >= 7){
+      const uint8_t* q = msg.data() + FBP_HDR_SIZE;
+      g_vpW = q[0] | (q[1] << 8); g_vpH = q[2] | (q[3] << 8);
+      g_vpCount++;
+    }
   }
   ::close(fd);
 }
@@ -612,6 +634,33 @@ int main(int argc, char** argv){
         "la imagen no se pinto: solo %ld pixeles", g_blitted.load());
   CHECK(st->reconnects == 0,
         "hubo %u reconexiones: el tramado se perdio", (unsigned)st->reconnects);
+
+  // ---- VIEWPORT: el de la sesion es el del area REAL, y sigue al redimensionar ----
+  //  El HELLO lleva el ancho del area que dio el gestor de ventanas. Despues se
+  //  cambia esa area (una ventana de DeX que se redimensiona) SIN tocar nada:
+  //  el navegador tiene que mandar UN VIEWPORT con el tamano nuevo en cuanto la
+  //  geometria se asienta, solo con el tick -- ni un click, ni una reconexion.
+  CHECK(g_helloW.load() == SCRW, "el HELLO pidio %d de ancho y el area es %d", g_helloW.load(), SCRW);
+  CHECK(g_helloH.load() >= 120 && g_helloH.load() <= SCRH - 96 - 64,
+        "el HELLO pidio %d de alto (area %d)", g_helloH.load(), SCRH - 96 - 64);
+  const int vp0 = g_vpCount.load();
+  g_cw = 400; g_ch = 500;
+  t0 = (uint32_t)millis();
+  while(g_vpW.load() != 400 && millis() - t0 < 3000){
+    flexBrowserTick();
+    delay(5);
+  }
+  // Un poco mas: si mandara uno por tick, aqui se veria la rafaga.
+  t0 = (uint32_t)millis();
+  while(millis() - t0 < 400){ flexBrowserTick(); delay(5); }
+  CHECK(g_vpW.load() == 400, "tras redimensionar el servicio recibio %d de ancho (esperado 400)", g_vpW.load());
+  CHECK(g_vpH.load() >= 120 && g_vpH.load() < g_helloH.load(),
+        "tras encoger el area, el alto del viewport es %d (antes %d)", g_vpH.load(), g_helloH.load());
+  CHECK(g_vpCount.load() - vp0 == 1,
+        "un redimensionado produjo %d mensajes VIEWPORT (deberia ser 1)", g_vpCount.load() - vp0);
+  CHECK(flexBrowserStats()->viewW == 400 && flexBrowserStats()->viewportMsgs >= 1,
+        "las estadisticas no reflejan el viewport enviado (%u)", (unsigned)flexBrowserStats()->viewW);
+  CHECK(flexBrowserStats()->reconnects == 0, "redimensionar provoco una reconexion");
 
   g_srvStop = true;
   flexBrowserExit();

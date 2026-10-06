@@ -313,4 +313,25 @@ class FlexLinkTest {
         assertEquals(0L, FlexLink.retryDelayMs(FlexLink.RETRY_MAX), "no se rinde")
         assertEquals(0L, FlexLink.retryDelayMs(200))
     }
+
+    // ---------------------------------------------------------
+    //  10) RELAY_INFO: el byte de banderas
+    // ---------------------------------------------------------
+    // ip(4) · puerto(2) · version(1) · BANDERAS · caps(2) · error. Las mismas
+    // posiciones las lee flexPhoneDecRelayInfo en el P4 (tests/host/
+    // test_flexphone.cpp prueba los mismos bits desde C++).
+    @Test
+    fun `relay info - detenido por el usuario y suspendido son bits propios`() {
+        val ip0 = byteArrayOf(0, 0, 0, 0)
+        val up = RelayInfo(byteArrayOf(192.toByte(), 168.toByte(), 1, 50), 8443, 1, tls = true, caps = 3).encode()
+        assertEquals(0x01, up[7].toInt() and 0xFF, "arriba con TLS: solo el bit 0")
+        val plain = RelayInfo(byteArrayOf(192.toByte(), 168.toByte(), 1, 50), 8443, 1, tls = false, caps = 3).encode()
+        assertEquals(0x00, plain[7].toInt() and 0xFF, "sin TLS ni parada: los bytes de siempre (compatible)")
+        val user = RelayInfo(ip0, 0, 1, false, 0, "detenido por el usuario", stoppedByUser = true).encode()
+        assertEquals(0x02, user[7].toInt() and 0xFF, "parado por la persona: bit 1")
+        val susp = RelayInfo(ip0, 0, 1, false, 0, "Android suspendio el relay", suspended = true).encode()
+        assertEquals(0x04, susp[7].toInt() and 0xFF, "suspendido por Android: bit 2")
+        assertFalse(RelayInfo(ip0, 0, 1, false, 0, "x", stoppedByUser = true) ==
+                    RelayInfo(ip0, 0, 1, false, 0, "x"), "la parada por la persona cuenta en la igualdad")
+    }
 }

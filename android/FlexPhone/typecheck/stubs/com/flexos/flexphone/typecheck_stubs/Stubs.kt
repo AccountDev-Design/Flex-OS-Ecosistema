@@ -37,6 +37,8 @@ object R {
         const val relay_title: Int = 22
         const val relay_waiting: Int = 23
         const val stop: Int = 24
+        const val relay_reconnecting: Int = 25
+        const val relay_keeps_running: Int = 26
     }
 }
 

@@ -74,15 +74,14 @@ despliegue real con el guardián de `loop()` entre vuelta y vuelta y exige el
 mismo menú, píxel a píxel, que sin guardián; `testPulsacionLargaVidrio` no lo
 veía porque llama a los ticks directamente, sin pasar por `loop()`.
 
-**La isla de notificaciones queda encima al cambiar de página.** Antes se
-pausaba durante el gesto y sus píxeles se quedaban en el framebuffer: con
-widgets en la cabecera la franja que se desliza (desde y=72) la pisaba cada
-cuadro y la tarjeta quedaba detrás, cortada. Ahora, si la franja del gesto
-solapa la banda de la isla, el compositor del deslizamiento es el único
-dueño de esas filas y pinta la isla encima de cada cuadro (y del último del
-acomodo); el tiempo de la isla (entrada, 5 s, salida) sigue corriendo
-(`notifAdvance`) y con el dedo quieto no se recompone un cuadro idéntico
-(`testIslaEncimaAlDeslizar`).
+**El aviso queda encima al cambiar de página.** Los avisos (del sistema y
+del teléfono) los presenta un **único** presentador, el banner global
+(`FlexOS_FlexPhone_Overlay.h`, «PRESENTADOR ÚNICO DE AVISOS»), que se
+estampa en **cada** volcado al panel y nunca se guarda en el framebuffer: la
+franja que se desliza no puede taparlo, porque cada cuadro del gesto sale ya
+con la tarjeta encima, y al irse no deja restos. La isla de
+`FlexOS_Ultra_Notif.h` ya no pinta: es el modelo de avisos del sistema que
+leen el Centro, DeX y el widget (`testIslaEncimaAlDeslizar`).
 
 ## 2. Widgets de página
 

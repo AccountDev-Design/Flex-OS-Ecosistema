@@ -137,6 +137,16 @@ static int      g_outOfBounds = 0;      // escrituras fuera de la pantalla
 static int      g_chromeViolations = 0; // pixeles de PAGINA sobre la barra
 static int      g_pageTop = 0;          // primera fila valida para brHostBlitRow
 static int      g_contentTop = 96, g_contentH = SCRH - 96 - 64;
+// Ancho del lienzo y alto que se come el teclado: con ellos se simula lo que
+// hace el gestor de ventanas (redimensionar una ventana de DeX, pantalla
+// completa) sin tocar el modulo bajo prueba.
+static int      g_contentW = SCRW;
+static int      g_kbH = 0;
+// Pantalla completa del doble: estado que "aplica" el host y la ultima
+// peticion que hizo el navegador.
+static int      g_fsState = BRFS_OFF;
+static int      g_fsLastReq = -99;
+static int      g_fsReqs = 0;
 static uint32_t g_freeHeap = 300000, g_freePsram = 4u * 1024 * 1024;
 static bool     g_online = true, g_fsReady = true;
 static BrTouch  g_touch;
@@ -149,8 +159,13 @@ static std::map<std::string, std::vector<uint8_t>> g_files;
 int  brHostScrW(){ return SCRW; }
 int  brHostScrH(){ return SCRH; }
 void brHostContentRect(int* x, int* y, int* w, int* h){
-  *x = 0; *y = g_contentTop; *w = SCRW; *h = g_contentH;
+  *x = 0; *y = g_contentTop; *w = g_contentW; *h = g_contentH - g_kbH;
 }
+void brHostLayoutRect(int* x, int* y, int* w, int* h){
+  *x = 0; *y = g_contentTop; *w = g_contentW; *h = g_contentH;
+}
+int  brHostFullscreenState(){ return g_fsState; }
+void brHostFullscreenRequest(int st){ g_fsLastReq = st; g_fsReqs++; if(g_fsState != BRFS_UNSUPPORTED) g_fsState = st; }
 bool brHostDark(){ return true; }
 bool brHostGlass(){ return false; }
 bool brHostHosted(){ return false; }

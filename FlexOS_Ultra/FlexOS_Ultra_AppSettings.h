@@ -112,11 +112,7 @@ static int drawTextClip(int x, int y, const char* s, int size, uint16_t col, int
   if(size <= 1){
     while(*s){
       if(x + 6 > maxRight) break;
-      uint8_t b = (uint8_t)*s++; uint32_t cp;
-      if(b < 0x80) cp = b;
-      else if((b & 0xE0) == 0xC0){ uint8_t b1 = *s ? (uint8_t)*s++ : 0; cp = ((b & 0x1F) << 6) | (b1 & 0x3F); }
-      else if((b & 0xF0) == 0xE0){ if(*s) s++; if(*s) s++; cp = 0x3F; }
-      else cp = 0x3F;
+      const uint32_t cp = nextCP(&s);                 // el mismo decodificador que drawTextA
       uint8_t base, acc; mapCP(cp, base, acc);
       drawGlyphSmooth(x, y, base, 1, col, 255);
       if(acc) drawAccent(x, y, 1, acc, col);

@@ -86,14 +86,20 @@ En la misma pantalla del móvil, la línea **«Relay»** tiene que poner:
 
 | Lo que pone | Qué significa |
 |---|---|
-| **Activo** | ✅ funcionando, listo |
-| Iniciando | está arrancando; espera un par de segundos |
-| Detenido | está apagado — vuelve al paso 3 |
-| Error | no pudo arrancar (mira el paso 10) |
+| **Relay activo** | ✅ Flex OS está conectado y recibiendo páginas |
+| **Desconectado (esperando a Flex OS)** | ✅ el servidor está encendido y esperando: en cuanto abras el navegador del reloj, se conecta |
+| **Reconectando** | Flex OS se acaba de ir (el reloj cerró el navegador, perdió la Wi‑Fi un momento…). Sus pestañas se conservan unos minutos: si vuelve, encuentra la misma página |
+| Arrancando | está arrancando; espera un par de segundos |
+| **Detenido por el usuario** | lo paraste tú (aquí, en la notificación o desde el reloj). No vuelve solo hasta que le des a **Iniciar** |
+| Parado | está apagado |
+| Con error | no pudo arrancar (mira el paso 10) |
 | Suspendido por Android | el sistema lo frenó por batería (paso 10) |
 
-*(En la fila del inicio los mismos estados se escriben un poco distinto:
-«Parado», «Arrancando», «Con error».)*
+*(En la fila del inicio se escriben más cortos: «Desconectado», «Detenido»,
+«Suspendido».)*
+
+> **Cerrar la app Flex Phone NO detiene el relay.** Es un servicio aparte:
+> sigue funcionando en segundo plano hasta que pulses **Detener**.
 
 Cuando pone **Activo** aparecen además:
 
@@ -101,8 +107,9 @@ Cuando pone **Activo** aparecen además:
 - **Cifrado** → `Sin TLS (red local)`
 
 También te saldrá una **notificación permanente** en el móvil que pone
-*«Esperando a Flex OS en 192.168.1.40:45671»*. Mientras esa notificación esté
-ahí, el servidor está vivo.
+*«Desconectado: esperando a Flex OS en 192.168.1.40:45671»* (y *«Relay
+activo…»* con el reloj conectado). Mientras esa notificación esté ahí, el
+servidor está vivo.
 
 > **No apuntes esa dirección.** No vas a necesitarla, y además **cambia**: de
 > fábrica el puerto lo elige Android cada vez que enciendes el servidor. Se
@@ -215,11 +222,14 @@ Android frenó la app para ahorrar batería. En la pantalla **Browser Relay**
 aparece un aviso **«Ahorro de batería activo»** con un botón **«Abrir ajustes
 de batería»**: úsalo para que el sistema deje de restringir Flex Phone.
 
-### El relay se apaga solo al rato
+### ¿El relay se apaga solo al rato?
 
-Es a propósito: si nadie lo usa durante un tiempo, se cierra para no gastar
-batería. Ese tiempo se cambia en *Browser Relay → Ajustes del relay →
-**Cerrar tras inactividad*** (de fábrica, **10 minutos**).
+Ya no. Sin ningún Flex OS conectado se queda **escuchando** (sin cerrojos de
+CPU ni de Wi‑Fi, casi sin gastar). Lo único que se suelta pasado un tiempo son
+las **pestañas** que tenía abiertas (cada una es un navegador vivo en memoria).
+Ese tiempo se cambia en *Browser Relay → Ajustes del relay → **Conservar
+pestañas sin conexión*** (de fábrica, **10 minutos**). Si el reloj vuelve
+antes, encuentra la misma página.
 
 ### «Browser Relay desconectado» / el reloj deja de recibir páginas
 
@@ -227,7 +237,8 @@ Repasa, en este orden:
 
 1. ¿El móvil y el reloj siguen en **la misma Wi‑Fi**?
 2. ¿La notificación del relay sigue en el móvil? Si desapareció, Android
-   mató el servicio: vuelve a darle a **Iniciar**.
+   mató el servicio. Si lo tenías encendido, vuelve solo en cuanto Android lo
+   permita (o al abrir Flex Phone); si no, dale a **Iniciar**.
 3. ¿El router **aísla a los clientes** entre sí? Algunos routers traen una
    opción («aislamiento de clientes», «AP isolation») que impide que dos
    aparatos de la misma Wi‑Fi se hablen. Hay que apagarla.
@@ -243,12 +254,13 @@ prometer algo que no puede cumplir.
 
 | Situación | Qué pasa de verdad |
 |---|---|
-| **Pantalla apagada** | suele seguir funcionando: el relay mantiene la CPU y el Wi‑Fi despiertos mientras hay sesión |
+| **Pantalla apagada** | suele seguir funcionando: el relay mantiene la CPU y el Wi‑Fi despiertos mientras el reloj está conectado |
 | **Batería baja / ahorro de energía** | Android puede frenar o matar el servicio. Sale como `Suspendido` o `Error`, no como silencio |
 | **Fabricante** (Xiaomi, Samsung, Huawei…) | algunos cierran servicios en segundo plano de forma agresiva. Quita a Flex Phone de la «optimización de batería» |
-| **Cambio de Wi‑Fi** o salir de casa | se corta. Al volver hay que encender el relay otra vez |
+| **Cambio de Wi‑Fi** o salir de casa | se corta. Al volver la Wi‑Fi, el relay se anuncia solo con la dirección nueva |
 | **Poca memoria** | Android puede cerrar la app para dar sitio a otra |
-| **Nadie lo usa** | se cierra solo pasado el tiempo de inactividad (a propósito) |
+| **Nadie lo usa** | sigue encendido y esperando; solo suelta las pestañas pasado el tiempo configurado |
+| **Android mata el proceso** | si lo tenías encendido, vuelve solo (o al abrir Flex Phone). Si lo paraste tú, se queda parado |
 
 Y una cosa más: **esto gasta batería del móvil**. Está dibujando páginas web y
 mandándolas por Wi‑Fi. Para ratos largos, ten el móvil cargando.

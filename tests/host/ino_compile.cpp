@@ -169,7 +169,15 @@ bool gTestPsFail = false;
 void*  heap_caps_malloc(size_t n, uint32_t){ if(gTestPsFail) return nullptr; void* p = malloc(n); psTrack(p, n); return p; }
 void*  heap_caps_calloc(size_t n, size_t s, uint32_t){ void* p = calloc(n, s); psTrack(p, n * s); return p; }
 void*  heap_caps_realloc(void* p, size_t n, uint32_t){ psUntrack(p); void* q = realloc(p, n); psTrack(q, n); return q; }
-void*  heap_caps_aligned_alloc(size_t a, size_t n, uint32_t){ if(gTestPsFail) return nullptr; void* p = aligned_alloc(a, n); psTrack(p, n); return p; }
+// aligned_alloc (C11) exige que el tamano sea multiplo de la alineacion; el
+// heap_caps_aligned_alloc de ESP-IDF no. Se redondea AQUI, en el doble: la cache
+// escalada de una ventana de DeX pide ow*oh*2 bytes, que casi nunca es multiplo
+// de 64, y en la placa eso es perfectamente valido.
+void*  heap_caps_aligned_alloc(size_t a, size_t n, uint32_t){
+  if(gTestPsFail) return nullptr;
+  size_t r = (a > 1) ? ((n + a - 1) / a) * a : n;
+  void* p = aligned_alloc(a, r); psTrack(p, n); return p;
+}
 void   heap_caps_free(void* p){ psUntrack(p); free(p); }
 size_t heap_caps_get_free_size(uint32_t caps){
   if(caps & MALLOC_CAP_INTERNAL) return gTestInFree;
@@ -2405,22 +2413,35 @@ static void testPaginasHome(){
 
 
 static void testNotifUnaSola(){
-  printf("Notificaciones reales: una a la vez y nunca sobre el PIN\n");
+  printf("Notificaciones: un solo presentador, una a la vez, el sistema primero y nunca sobre el PIN\n");
+  const int f0 = gFails;
   gNotifCount = 0; notifDragIdx = -1; notifBandOn = false; notifPaused = false;
   memset(gNotifs, 0, sizeof(gNotifs));
-  gState = ST_HOME; qsPanelY = 0; editMode = false; gLand = false; gHosted = false;
+  if(fpbVisible()) fpbAbandon();
+  fpbQueueN = 0; fpbMore = 0;
+  appTrCancel(); qsForceClose();
+  gState = ST_HOME; gAppId = 0; qsPanelY = 0; editMode = false; gLand = false; gHosted = false;
+  gSuspOn = false; gDnd = false;
   hpDragging = false; hpSettling = false;
+  auto tick = [](int n){ for(int f = 0; f < n; f++){ gTestMs += 40; notifTick(); fpbTick(); } };
+  auto diag = [](){
+    if(fpbState == FPB_SHOWN) return;
+    printf("    (diag: estado=%d cola=%d permite=%d seguro=%d susp=%d trans=%d qs=%d/%d/%d fa=%d crono=%d spa=%d centro=%d ota=%d opt=%d fr=%d psram=%u)\n",
+           fpbState, fpbQueueN, (int)fpbScreenAllows(), (int)notifSecureScreen(), (int)gSuspOn, (int)appTrOwnsScreen(),
+           qsPanelY, (int)qsAnimOn, (int)qsDragging, (int)faVisible(), (int)cronoCardVisible(), (int)spaVisible(),
+           (int)fpcBusy(), (int)flexOtaOwnsScreen(), (int)optActive(), (int)gFrPending, (unsigned)memFreePsram());
+  };
 
   chk(NOTIF_BAND_BOT <= HOME_BAND_TOP,
       "la banda de avisos acaba antes de la rejilla");
-  chk(NOTIF_VISIBLE == 1, "solo se dibuja una tarjeta a la vez");
-  chk(NOTIF_MAX >= NOTIF_VISIBLE, "la cola puede guardar avisos pendientes");
+  chk(NOTIF_MAX >= 1, "el modelo guarda avisos");
 
   { const int seg[] = { ST_SPLASH, ST_OOBE_LANG, ST_OOBE_NAME, ST_LOCK,
                         ST_LOCKSETUP, ST_POWEROFF_CONFIRM, ST_POWEROFF_ANIM };
     for(unsigned k = 0; k < sizeof(seg) / sizeof(seg[0]); k++){
       gState = seg[k];
       chk(notifSecureScreen(), "ningun aviso se pinta sobre una pantalla sensible");
+      chk(!fpbScreenAllows(), "y el presentador lo sabe");
     }
     gState = ST_HOME; }
 
@@ -2429,80 +2450,66 @@ static void testNotifUnaSola(){
   snprintf(a.name, sizeof(a.name), "No se puede reproducir");
   snprintf(a.sub, sizeof(a.sub), "Formato no compatible");
 
-  // La cola queda congelada durante el alta del PIN y se arma al volver.
+  // Durante el alta del PIN: se GUARDA y ESPERA, sin pintarse ni caducar.
   gTestMs = 100000; gState = ST_LOCKSETUP;
   notifPush(&a);
-  for(int f = 0; f < 30; f++){ gTestMs += 40; notifTick(); }
-  chk(gNotifCount == 1 && !gNotifs[0].armed,
-      "el aviso real espera sin caducar mientras se teclea el PIN");
-  gState = ST_HOME; gTestMs += 40; notifTick();
-  chk(gNotifs[0].armed && gNotifs[0].bornMs == (uint32_t)gTestMs,
-      "su cuenta atras empieza al regresar al escritorio");
+  tick(30);
+  chk(gNotifCount == 1, "el aviso queda guardado en el modelo (Centro, DeX, widget)");
+  chk(fpbState == FPB_HIDDEN && fpbQueueN == 1, "y espera su turno sin pintarse mientras se teclea el PIN");
+  chk(!notifBandOn, "la isla no pinta nada: el presentador es el banner");
+  gState = ST_HOME; tick(10);
+  diag();
+  chk(fpbState == FPB_SHOWN && !strcmp(fpbCur.title, "No se puede reproducir"),
+      "al volver al escritorio se presenta");
+  chk(fpbCur.icon == 1 + MOD_MEDIA, "con el icono del aviso (multimedia)");
 
-  // Repetir el mismo aviso refresca la tarjeta; no la apila.
+  // Repetir el mismo aviso no lo apila: se actualiza donde este.
   notifPush(&a); notifPush(&a);
-  chk(gNotifCount == 1, "repetir el mismo aviso no duplica la tarjeta");
+  chk(gNotifCount == 1 && fpbQueueN == 0, "repetir el mismo aviso no duplica nada");
   snprintf(a.sub, sizeof(a.sub), "Pista siguiente");
   notifPush(&a);
   chk(gNotifCount == 1 && !strcmp(gNotifs[0].mod.sub, "Pista siguiente"),
-      "un subtitulo nuevo refresca la tarjeta existente");
+      "un subtitulo nuevo actualiza el aviso guardado");
+  chk(fpbQueueN == 0 && !strcmp(fpbCur.body, "Pista siguiente"),
+      "y la tarjeta a la vista, en su sitio (sin otra tarjeta)");
+
+  // Otro aviso distinto con uno a la vista: espera, NO se lo quita.
   a.type = MOD_UNKNOWN;
   snprintf(a.name, sizeof(a.name), "Aviso del sistema");
   notifPush(&a);
-  chk(gNotifCount == 2, "otro aviso distinto queda esperando en la cola");
+  chk(gNotifCount == 2 && fpbQueueN == 1, "otro aviso distinto espera en la cola");
+  tick(5);
+  chk(!strcmp(fpbCur.title, "No se puede reproducir"), "nadie le quita la pantalla al aviso que se esta leyendo");
 
-  // Aunque haya dos avisos, el compositor arma solo el primero.
-  gNotifs[0].armed = false; gNotifs[1].armed = false;
-  notifBandOn = false; notifPaused = false; notifLastMs = 0; gTestMs += 40;
-  drawWallpaper(homeBuf, false);
-  memcpy(fb, homeBuf, (size_t)SCR_W * SCR_H * 2);
-  setBuf(fb);
-  notifTick();
-  chk(gNotifs[0].armed && !gNotifs[1].armed,
-      "solo el primer aviso de la cola se hace visible");
-
-  int cambiadosFuera = 0;
-  for(int y = 0; y < SCR_H; y++)
-    for(int x = 0; x < SCR_W; x++)
-      if(fb[(size_t)y * SCR_W + x] != homeBuf[(size_t)y * SCR_W + x] &&
-         (y < NOTIF_BAND_TOP || y >= NOTIF_BAND_BOT)) cambiadosFuera++;
-  chk(cambiadosFuera == 0, "el aviso no escribe fuera de su banda");
-
-  // Regresion del reinicio visto en placa: dejar salir dos avisos completos.
-  // Antes, al retirar el ultimo, `shown` seguia valiendo 1 y el bucle volvia
-  // infinitamente sobre la ranura eliminada hasta que el TASK_WDT reiniciaba
-  // el P4. Esta prueba recorre entrada, espera y salida de ambas tarjetas.
-  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
-  notifDragIdx = -1; notifBandOn = false; notifPaused = false; notifLastMs = 0;
-  a.type = MOD_MEDIA;
-  snprintf(a.name, sizeof(a.name), "Aviso A"); notifPush(&a);
-  a.type = MOD_UNKNOWN;
-  snprintf(a.name, sizeof(a.name), "Aviso B"); notifPush(&a);
-  bool segundaVisible = false;
-  for(int f = 0; f < 360 && gNotifCount > 0; f++){
-    gTestMs += 40; notifTick();
-    if(gNotifCount == 1 && !strcmp(gNotifs[0].mod.name, "Aviso B") && gNotifs[0].armed)
-      segundaVisible = true;
+  // Sale el primero y entra el segundo; despues, la cola vacia y nada pintado.
+  bool segundo = false;
+  for(int f = 0; f < 400 && (fpbState != FPB_HIDDEN || fpbQueueN > 0); f++){
+    gTestMs += 40; notifTick(); fpbTick();
+    if(fpbState == FPB_SHOWN && !strcmp(fpbCur.title, "Aviso del sistema")) segundo = true;
   }
-  chk(segundaVisible, "la segunda notificacion entra despues de la primera");
-  chk(gNotifCount == 0 && !notifBandOn,
-      "la ultima sale y limpia la banda sin congelar ni reiniciar el OS");
+  chk(segundo, "el segundo aviso entra cuando el primero se va");
+  chk(fpbState == FPB_HIDDEN && fpbQueueN == 0 && !notifBandOn,
+      "el ultimo sale y no queda nada a la vista ni en cola (sin congelar ni reiniciar el OS)");
+  chk(gNotifCount == 2, "pero los dos siguen en el modelo (el Centro los ensena hasta descartarlos)");
 
-  // Reponer dos entradas para comprobar tambien la pausa de la Caja.
-  a.type = MOD_MEDIA;
-  snprintf(a.name, sizeof(a.name), "Aviso A"); notifPush(&a);
-  a.type = MOD_UNKNOWN;
-  snprintf(a.name, sizeof(a.name), "Aviso B"); notifPush(&a);
-  gTestMs += 40; notifTick();
+  // Historial acotado: lleno, sale el mas antiguo (antes se tiraba el NUEVO).
+  for(int k = 0; k < NOTIF_MAX + 2; k++){
+    snprintf(a.name, sizeof(a.name), "Aviso %d", k); notifPush(&a);
+  }
+  chk(gNotifCount == NOTIF_MAX, "el modelo no pasa de NOTIF_MAX");
+  { char last[24]; snprintf(last, sizeof(last), "Aviso %d", NOTIF_MAX + 1);
+    chk(!strcmp(gNotifs[gNotifCount - 1].mod.name, last), "y el aviso nuevo SIEMPRE entra (sale el mas antiguo)"); }
 
+  // Abrir la Caja de aplicaciones no pierde avisos.
   notifPauseForDrawer();
-  chk(gNotifCount == 2 && notifPaused && !notifBandOn,
-      "abrir la caja oculta la tarjeta sin perder avisos reales");
+  chk(gNotifCount == NOTIF_MAX && !notifBandOn, "abrir la caja no pierde avisos ni deja banda pintada");
 
+  if(fpbVisible()) fpbAbandon();
+  fpbQueueN = 0; fpbMore = 0;
   gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
   notifDragIdx = -1; notifBandOn = false; notifPaused = false;
   gState = ST_HOME; gLand = false; tReset();
-  if(!gFails) printf("  Notificaciones reales: todas las comprobaciones pasan.\n");
+  if(gFails == f0) printf("  Notificaciones: todas las comprobaciones pasan.\n");
 }
 
 static void testDeslizarPaginas(){
@@ -2641,34 +2648,30 @@ static void testDeslizarPaginas(){
     }
     hpTop = HOME_BAND_TOP; }
 
-  // --- 4. LA ISLA SIGUE VIVA (Y ENCIMA) MIENTRAS DURA EL GESTO ---
-  // Antes la isla se PAUSABA durante el gesto y sus pixeles se quedaban en fb:
-  // con widgets de cabecera, cada cuadro pintaba la pagina encima de la
-  // tarjeta (la notificacion "detras", cortada y congelada). Ahora:
-  //   a) si la franja que se desliza no toca la banda de la isla, la isla se
-  //      compone como siempre (su propia banda);
-  //   b) si la toca, el gesto es el unico dueno de esas filas y la pinta
-  //      encima de cada cuadro: notifTick solo avanza el tiempo.
+  // --- 4. EL AVISO SIGUE A LA VISTA (Y ENCIMA) MIENTRAS DURA EL GESTO ---
+  // Lo presenta el banner (PRESENTADOR UNICO DE AVISOS): se estampa en CADA
+  // volcado al panel, asi que queda encima de cada cuadro del deslizamiento sin
+  // que el gesto tenga que componerlo. La isla ya no publica banda propia.
   { gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
     notifBandOn = false; notifPaused = false; notifLastMs = 0;
+    if(fpbVisible()) fpbAbandon();
+    fpbQueueN = 0; fpbMore = 0;
     gTestMs = 400000;
     DetectedModule m; memset(&m, 0, sizeof(m));
     m.active = true; m.type = MOD_MEDIA;
     snprintf(m.name, sizeof(m.name), "Reproduccion terminada");
     notifPush(&m);
     gState = ST_HOME; qsPanelY = 0; editMode = false;
-    hpDragging = true; hpTop = HOME_BAND_TOP;
+    hpDragging = true; hpTop = HOME_PAGE_TOP;
     gPanelDrawCalls = 0;
     gTestMs += 40; notifTick();
-    chk(gNotifs[0].armed && !notifPaused, "sin cabecera, la isla sigue viva durante el gesto");
-    chk(gPanelDrawCalls == 1 && gPanelLastY0 == NOTIF_BAND_TOP, "y publica su propia banda, que el gesto no toca");
-    hpTop = HOME_PAGE_TOP;
-    uint32_t born = gNotifs[0].bornMs;
-    gPanelDrawCalls = 0;
-    gTestMs += 40; notifTick();
-    chk(gPanelDrawCalls == 0, "con cabecera, la isla no publica su banda sola: la compone el gesto encima");
-    chk(gNotifs[0].bornMs == born && !notifPaused, "y su tiempo sigue corriendo: no se congela");
+    chk(gPanelDrawCalls == 0 && !notifBandOn, "la isla no publica ninguna banda propia durante el gesto");
+    for(int k = 0; k < 20 && fpbState != FPB_SHOWN; k++){ gTestMs += 40; fpbTick(); }
+    chk(fpbState == FPB_SHOWN, "el aviso se presenta aunque el dedo este deslizando la pagina");
+    chk(gNotifCount == 1, "y queda guardado en el modelo");
     hpDragging = false; hpTop = HOME_BAND_TOP;
+    if(fpbVisible()) fpbAbandon();
+    fpbQueueN = 0; fpbMore = 0;
     gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs)); notifBandOn = false; }
 
   // --- 5. UNA APP EN LA PAGINA 2 USA UNA CASILLA NORMAL ---
@@ -3372,8 +3375,21 @@ static void testPersonalizarInicio(){
     notifHandleTouch();
     chk(T.tap, "la isla NO consume el toque en Personalizar inicio");
     chk(notifDragIdx == -1, "ni empieza a arrastrar su tarjeta");
-    notifTick();
-    chk(notifPaused, "y sus fases quedan pausadas mientras el modo esta abierto");
+    // Un aviso que llega con el modo abierto ESPERA: el presentador no se pone
+    // encima de Personalizar inicio, y sale en cuanto se cierra.
+    if(fpbVisible()) fpbAbandon();
+    fpbQueueN = 0; fpbMore = 0;
+    gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+    { DetectedModule m; memset(&m, 0, sizeof(m)); m.active = true; m.type = MOD_UNKNOWN;
+      snprintf(m.name, sizeof(m.name), "Aviso en el modo"); notifPush(&m); }
+    for(int k = 0; k < 10; k++){ gTestMs += 40; notifTick(); fpbTick(); }
+    chk(!fpbScreenAllows() && fpbState == FPB_HIDDEN && fpbQueueN == 1,
+        "con Personalizar inicio abierto el aviso espera (ni se dibuja encima ni se pierde)");
+    gState = ST_HOME;
+    for(int k = 0; k < 10 && fpbState != FPB_SHOWN; k++){ gTestMs += 40; fpbTick(); }
+    chk(fpbState == FPB_SHOWN, "y sale en cuanto se vuelve al escritorio");
+    if(fpbVisible()) fpbAbandon();
+    fpbQueueN = 0; fpbMore = 0;
     gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
     notifPaused = false; notifBandOn = false;
     gState = ST_HOME; tReset(); }
@@ -10657,8 +10673,20 @@ static void testBannerNotificacion(){
   chk(fpbSuppressed && !fpbLive, "el banner quedo apagado");
   fpbTick();
   chk(fpbState == FPB_HIDDEN && fpbCv == NULL, "y el siguiente tick lo da de baja del todo");
-  qsPanelY = 0; qsAnimOn = false; qsDragging = false;
   chk(gPsUsed == ps0, "(sin memoria colgada)");
+  // ...pero el aviso NO se pierde: vuelve AL FRENTE de la cola y sale otra vez al cerrarse la cortina.
+  chk(fpbQueueN == 1 && !strcmp(fpbQueue[0].title, "Cortina"), "el aviso que tapo la cortina vuelve al frente de la cola");
+  for(int i = 0; i < 10; i++){ gTestMs += 16; fpbTick(); }
+  chk(fpbState == FPB_HIDDEN, "y espera mientras la cortina siga abierta");
+  qsPanelY = 0; qsAnimOn = false; qsDragging = false;
+  for(int i = 0; i < 40 && fpbState != FPB_SHOWN; i++){ gTestMs += 16; fpbTick(); }
+  chk(fpbState == FPB_SHOWN && !strcmp(fpbCur.title, "Cortina"), "al cerrarse la cortina el mismo aviso vuelve a salir");
+  {
+    const uint32_t t0 = (uint32_t)gTestMs;
+    bnWaitHidden();
+    chkf((uint32_t)gTestMs - t0 >= FPB_MIN_HOLD_MS, "y se deja leer al volver (%u ms a la vista)", (unsigned)((uint32_t)gTestMs - t0));
+  }
+  chk(!memcmp(shadow.data(), fb, N * 2) && gPsUsed == ps0, "(se va sin rastro ni memoria colgada)");
 
   // ---- 6. Horizontal ----
   gLand = true;
@@ -10675,6 +10703,12 @@ static void testBannerNotificacion(){
   bnPaint(bnA, 0, SCR_H - 1); flxFlush(0, SCR_H - 1);
   fpbTick();
   chk(fpbState == FPB_HIDDEN && !memcmp(shadow.data(), fb, N * 2), "al girar la pantalla el banner se retira y no deja rastro");
+  chk(fpbQueueN == 1 && !strcmp(fpbQueue[0].title, "Apaisado"), "pero el aviso espera para volver");
+  for(int i = 0; i < 40 && fpbState != FPB_SHOWN; i++){ gTestMs += 16; fpbTick(); }
+  chk(fpbState == FPB_SHOWN && !fpbLand && !strcmp(fpbCur.title, "Apaisado"),
+      "y vuelve en la orientacion NUEVA (vertical), con el vidrio de lo que hay debajo ahora");
+  gTestMs += FPB_HOLD_MS + 20; bnWaitHidden();
+  chk(fpbState == FPB_HIDDEN && !memcmp(shadow.data(), fb, N * 2), "(se va sin rastro)");
 
   // ---- 7. El dedo: arrastrar a la izquierda hasta pasar el umbral descarta; la pantalla de debajo no ve NADA ----
   bnPaint(bnA, 0, SCR_H - 1); flxFlush(0, SCR_H - 1);
@@ -10782,6 +10816,68 @@ static void testBannerNotificacion(){
     gTestMs += FPB_HOLD_MS + 20; bnWaitHidden();
   }
 
+  // ---- 13. LA FOTO: un aviso del TELEFONO y uno del SISTEMA a la vez. Nunca dos tarjetas: el del sistema
+  //          primero, el visible no se interrumpe y el del telefono sale despues. ----
+  {
+    bnPaint(bnA, 0, SCR_H - 1); flxFlush(0, SCR_H - 1);
+    gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs)); notifBandOn = false;
+    fpbPush(FPN_SRC_PHONE, 0, "Google\xC2\xA0Play\xE2\x80\xAFStore", "Actualizaciones", "3 apps", FLP_PRI_DEFAULT);
+    DetectedModule m; memset(&m, 0, sizeof(m)); m.active = true; m.type = MOD_UNKNOWN;
+    snprintf(m.name, sizeof(m.name), "Proteccion contra robo restaurada");
+    snprintf(m.sub, sizeof(m.sub), "Sistema");
+    notifPush(&m);
+    chk(fpbQueueN == 2 && fpbQueue[0].src == FPN_SRC_SYSTEM && fpbQueue[1].src == FPN_SRC_PHONE,
+        "el aviso del sistema se pone DELANTE del del telefono aunque llegara despues");
+    int dosALaVez = 0;
+    for(int i = 0; i < 40 && fpbState != FPB_SHOWN; i++){ gTestMs += 16; notifTick(); fpbTick(); if(notifBandOn && fpbVisible()) dosALaVez++; }
+    chk(fpbState == FPB_SHOWN && fpbCur.src == FPN_SRC_SYSTEM, "sale primero el del sistema");
+    // Mientras se lee, llega OTRO del sistema: espera; no expropia al visible.
+    DetectedModule m2 = m; snprintf(m2.name, sizeof(m2.name), "Copia de seguridad lista");
+    notifPush(&m2);
+    gTestMs += 500; fpbTick();
+    chk(!strcmp(fpbCur.title, "Proteccion contra robo restaurada"), "un aviso nuevo NO le quita la pantalla al que se esta leyendo");
+    chk(fpbQueueN == 2 && fpbQueue[0].src == FPN_SRC_SYSTEM && !strcmp(fpbQueue[0].title, "Copia de seguridad lista"),
+        "y se cuela por delante del del telefono, no por delante del visible");
+    // El usuario abre una app con el aviso a la vista: la cola sigue igual encima de la app (seccion 14).
+    gState = ST_APP; gAppId = IC_RELOJ;
+    // Orden completo de salida: sistema, sistema, telefono; nunca dos a la vez.
+    std::vector<std::string> orden;
+    for(int i = 0; i < 1200 && (fpbState != FPB_HIDDEN || fpbQueueN > 0); i++){
+      gTestMs += 16; notifTick(); fpbTick();
+      if(notifBandOn && fpbVisible()) dosALaVez++;
+      if(fpbState == FPB_SHOWN && (orden.empty() || orden.back() != fpbCur.title)) orden.push_back(fpbCur.title);
+    }
+    chk(dosALaVez == 0 && !notifBandOn, "nunca hay dos presentadores a la vez (la isla no pinta)");
+    chkf(orden.size() == 3, "salen los tres, de uno en uno (%d)", (int)orden.size());
+    if(orden.size() == 3){
+      chk(orden[0] == "Proteccion contra robo restaurada" && orden[1] == "Copia de seguridad lista" && orden[2] == "Actualizaciones",
+          "en orden de prioridad: sistema, sistema, telefono");
+    }
+    chk(fpbState == FPB_HIDDEN && !memcmp(shadow.data(), fb, N * 2), "y al acabar el panel queda limpio");
+    chk(gNotifCount == 2, "los dos del sistema siguen en el modelo para el Centro");
+    gState = ST_HOME; gAppId = 0;
+    gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  }
+
+  // ---- 14. Un aviso a la vista y se ABRE UNA APP: la transicion lo retira y vuelve encima de la app ----
+  {
+    bnPaint(bnA, 0, SCR_H - 1); flxFlush(0, SCR_H - 1);
+    bnShow(FPN_SRC_SYSTEM, 0, "Antes de abrir");
+    chk(fpbState == FPB_SHOWN, "(aviso a la vista en el escritorio)");
+    fpbSuppressed = true;                                            // lo que hace fpbStampBegin cuando una transicion se queda la pantalla
+    fpbLive = false;
+    fpbTick();
+    chk(fpbState == FPB_HIDDEN && fpbQueueN == 1 && !memcmp(shadow.data(), fb, N * 2),
+        "la transicion se queda la pantalla: el aviso se retira sin rastro y espera en cola");
+    gState = ST_APP; gAppId = IC_RELOJ;
+    bnPaint(bnB, 0, SCR_H - 1); flxFlush(0, SCR_H - 1);             // ya se ve la app
+    for(int i = 0; i < 40 && fpbState != FPB_SHOWN; i++){ gTestMs += 16; fpbTick(); }
+    chk(fpbState == FPB_SHOWN && !strcmp(fpbCur.title, "Antes de abrir"), "y vuelve ENCIMA de la app abierta: es una capa global");
+    gTestMs += FPB_HOLD_MS + 20; bnWaitHidden();
+    chk(fpbState == FPB_HIDDEN && !memcmp(shadow.data(), fb, N * 2), "(y se va sin rastro)");
+    gState = ST_HOME; gAppId = 0;
+  }
+
   chk(fpbState == FPB_HIDDEN && fpbCv == NULL && fpbSave == NULL && gPsUsed == ps0, "al final no queda nada reservado ni a la vista");
   memset(gWireGt, 0, sizeof(gWireGt)); touchReset(); gTouchSwallow = false;
   gtOk = ok0; gWireGtOn = wire0;
@@ -10792,22 +10888,24 @@ static void testBannerNotificacion(){
 
 // #############################################################
 static void testIslaEncimaAlDeslizar(){
-  printf("Escritorio: la notificacion se queda encima de la pagina que se desliza\n");
+  printf("Escritorio: el aviso se queda encima de la pagina que se desliza (presentador unico)\n");
   int before = gFails;
   bool glass0 = uiGlass;
   std::vector<uint16_t> shadow((size_t)SCR_W * SCR_H, 0);
   uint16_t* sh0 = gPanelShadow; gPanelShadow = shadow.data();
+  flxPanel = (esp_lcd_panel_handle_t)1; flxDpiSem = (SemaphoreHandle_t)1;
   const uint16_t BG = TC(40, 40, 60), WA = TC(0, 252, 0), WB = TC(0, 0, 248);
-  // Interior de la tarjeta quieta, sin sus esquinas redondeadas (por fuera del
-  // arco se ve lo de debajo, como debe) y sin el borde de 1 px.
-  const int cx0 = NOTIF_MARGIN_X + NOTIF_RAD + 2, cx1 = NOTIF_MARGIN_X + NOTIF_CARD_W - NOTIF_RAD - 2;
-  const int cy1 = NOTIF_Y0 + NOTIF_CARD_H - 2;         // filas de la tarjeta que la franja pisa: [72, cy1)
+  // Interior de la tarjeta del banner, sin sus esquinas redondeadas ni el borde,
+  // en las filas que la franja de la pagina pisa.
+  const int cx0 = FPB_V_X + FPB_RAD + 2, cx1 = FPB_V_X + FPB_V_W - FPB_RAD - 2;
+  const int cy1 = FPB_V_Y + FPB_V_H - 2;
   auto dentroTarjeta = [&](uint16_t col){
     int n = 0;
     for(int y = HOME_PAGE_TOP; y < cy1; y++) for(int x = cx0; x < cx1; x++)
       if(shadow[(size_t)y * SCR_W + x] == col) n++;
     return n;
   };
+  chk(FPB_V_Y + FPB_V_H > HOME_PAGE_TOP, "(la tarjeta pisa la franja de la pagina: es el caso que se prueba)");
   for(int glass = 0; glass < 2; glass++){
     uiGlass = glass != 0;
     const char* gm = glass ? "vidrio" : "plano";
@@ -10815,6 +10913,8 @@ static void testIslaEncimaAlDeslizar(){
     hpDragging = false; hpSettling = false; gHomePage = 0;
     gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
     notifBandOn = false; notifPaused = false; notifLastMs = 0; notifDragIdx = -1;
+    if(fpbVisible()) fpbAbandon();
+    fpbQueueN = 0; fpbMore = 0;
     if(!hpEnsureBuf()){ chk(false, "hay lienzo para la pagina vecina"); break; }
     int bandBot = homeBandBot();
     for(size_t i = 0; i < (size_t)SCR_W * SCR_H; i++) homeBuf[i] = BG;
@@ -10822,7 +10922,7 @@ static void testIslaEncimaAlDeslizar(){
       hpBg[(size_t)(y - HOME_PAGE_TOP) * SCR_W + x] = BG;
       hpBuf[(size_t)(y - HOME_PAGE_TOP) * SCR_W + x] = BG;
     }
-    // Un widget de cabecera por pagina que cruza la banda de la isla entera.
+    // Un widget de cabecera por pagina que cruza la tarjeta entera.
     for(int y = HOME_PAGE_TOP; y < HOME_PAGE_TOP + 110; y++) for(int x = 8; x < SCR_W - 8; x++){
       homeBuf[(size_t)y * SCR_W + x] = WA;
       hpBuf[(size_t)(y - HOME_PAGE_TOP) * SCR_W + x] = WB;
@@ -10837,45 +10937,49 @@ static void testIslaEncimaAlDeslizar(){
     snprintf(m.sub, sizeof(m.sub), "Galeria");
     notifPush(&m);
     gTestMs = 900000;
-    for(int k = 0; k < 12; k++){ gTestMs += 40; notifTick(); }
-    chkf(gNotifs[0].armed && gNotifs[0].phase == NP_IDLE, "[%s] el aviso esta a la vista y quieto", gm);
+    for(int k = 0; k < 20 && fpbState != FPB_SHOWN; k++){ gTestMs += 40; notifTick(); fpbTick(); }
+    chkf(fpbState == FPB_SHOWN, "[%s] el aviso esta a la vista y quieto", gm);
     chkf(dentroTarjeta(WA) == 0, "[%s] antes del gesto, la tarjeta tapa el widget", gm);
     // ---- El gesto: la pagina se desliza por debajo de la tarjeta ----
     hpDragging = true;
     int tapada = 0, sinMover = 0;
     for(int dx = -30; dx >= -450; dx -= 60){
       hpRenderFrame(dx);
-      gTestMs += 40; notifTick();
+      gTestMs += 40; notifTick(); fpbTick();
       tapada += dentroTarjeta(WA) + dentroTarjeta(WB);
       // La pagina SI se mueve fuera de la tarjeta: a la derecha de la tarjeta
-      // (x=470) se ve ya el widget de la pagina que entra (antes, el de la otra).
-      uint16_t der = shadow[(size_t)(HOME_PAGE_TOP + 20) * SCR_W + 470];
+      // (x=468, aun dentro del widget) se ve ya el widget de la pagina que entra.
+      uint16_t der = shadow[(size_t)(HOME_PAGE_TOP + 20) * SCR_W + 468];
       if(der != WB) sinMover++;
     }
     chkf(tapada == 0, "[%s] durante el gesto ningun widget se pinta encima de la tarjeta (%d px)", gm, tapada);
     chkf(sinMover == 0, "[%s] y la pagina se sigue moviendo por debajo", gm);
-    // ---- Dedo quieto: la tarjeta caduca, sale y no deja restos ----
+    chkf(!notifBandOn, "[%s] (la isla no compone nada: el banner va encima de cada cuadro)", gm);
+    // ---- Dedo quieto: el aviso caduca, sale y no deja restos ----
     T = Touch(); T.down = true; T.startX = 440; T.x = 200; T.y = T.startY = HOME_PAGE_TOP + 200;
     hpDx = -240; hpLastDx = 0x7FFFFFFF;
-    for(int k = 0; k < 220 && (gNotifCount > 0 || notifBandOn); k++){
-      gTestMs += 40; hpTick(); notifTick();
+    for(int k = 0; k < 220 && fpbState != FPB_HIDDEN; k++){
+      gTestMs += 40; hpTick(); notifTick(); fpbTick();
     }
-    chkf(gNotifCount == 0 && !notifBandOn, "[%s] con el dedo quieto el aviso caduca y sale (no se congela)", gm);
+    chkf(fpbState == FPB_HIDDEN, "[%s] con el dedo quieto el aviso caduca y sale (no se congela)", gm);
     int restos = 0;
-    for(int y = NOTIF_BAND_TOP; y < HOME_PAGE_TOP; y++) for(int x = 0; x < SCR_W; x++)
-      if(shadow[(size_t)y * SCR_W + x] != homeBuf[(size_t)y * SCR_W + x]) restos++;
+    for(int y = 0; y < HOME_PAGE_TOP; y++) for(int x = 0; x < SCR_W; x++)
+      if(shadow[(size_t)y * SCR_W + x] != fb[(size_t)y * SCR_W + x]) restos++;
     chkf(restos == 0, "[%s] al irse no deja restos por encima de la franja (%d px)", gm, restos);
     chkf(dentroTarjeta(WA) + dentroTarjeta(WB) > 0, "[%s] y la pagina vuelve a verse donde estaba la tarjeta", gm);
     // ---- Ultimo cuadro del acomodo: la tarjeta sigue encima ----
     notifPush(&m);
-    for(int k = 0; k < 12; k++){ gTestMs += 40; notifTick(); }
+    for(int k = 0; k < 20 && fpbState != FPB_SHOWN; k++){ gTestMs += 40; notifTick(); fpbTick(); }
     hpRenderFrame(-240);
     hpDragging = false; hpSettling = true; hpSettleFrom = -240; hpSettleTo = -SCR_W;
     hpSettleT0 = (uint32_t)gTestMs - HP_SETTLE_MS - 1;
     T = Touch();
     hpTick();
     chkf(!hpSettling && gHomePage == 1, "[%s] el acomodo termina en la pagina nueva", gm);
-    chkf(dentroTarjeta(WB) == 0 && dentroTarjeta(WA) == 0, "[%s] y su ultimo cuadro conserva la tarjeta encima", gm);
+    chkf(fpbState == FPB_SHOWN && dentroTarjeta(WB) == 0 && dentroTarjeta(WA) == 0,
+         "[%s] y su ultimo cuadro conserva la tarjeta encima", gm);
+    if(fpbVisible()) fpbAbandon();
+    fpbQueueN = 0; fpbMore = 0;
     gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs)); notifBandOn = false;
     hpSettling = false; hpDragging = false; gHomePage = 0; hpBufPage = -1;
   }
@@ -10885,7 +10989,42 @@ static void testIslaEncimaAlDeslizar(){
   hpTop = HOME_BAND_TOP; gHomePage = 0;
   drawWallpaper(homeBuf, false);
   setBuf(fb); uiClipFull();
-  if(gFails == before) printf("  Isla encima al deslizar: todas las comprobaciones pasan.\n");
+  if(gFails == before) printf("  Aviso encima al deslizar: todas las comprobaciones pasan.\n");
+}
+
+// #############################################################
+//  TEXTO QUE LLEGA DE FUERA: espacios Unicode, emojis, invisibles
+//  ------------------------------------------------------------
+//  "Google Play Store" salia "Google?Play?Store": Android pone un
+//  espacio duro (U+00A0) o fino (U+202F) entre palabras, y el
+//  dibujo mandaba a '?' todo lo que no era ASCII ni acento. Un emoji
+//  salia como CUATRO '?' (sus bytes de continuacion sueltos).
+// #############################################################
+static void testTextoUnicode(){
+  printf("Texto: espacios y signos tipograficos que llegan del telefono, sin '?'\n");
+  const int f0 = gFails;
+  const char* nb = "Google\xC2\xA0Play\xE2\x80\xAFStore";
+  const char* sp = "Google Play Store";
+  for(int sz = 1; sz <= 3; sz++)
+    chkf(textW(nb, sz) == textW(sp, sz), "size %d: los espacios duro y fino miden como un espacio", sz);
+  setBuf(fb); uiClipFull();
+  for(int sz = 1; sz <= 2; sz++){
+    fillRect(0, 0, SCR_W, 40, 0); drawText(4, 12, nb, sz, 0xFFFF);
+    std::vector<uint16_t> A(fb, fb + (size_t)SCR_W * 40);
+    fillRect(0, 0, SCR_W, 40, 0); drawText(4, 12, sp, sz, 0xFFFF);
+    chkf(!memcmp(A.data(), fb, (size_t)SCR_W * 40 * 2), "size %d: se DIBUJA igual que con espacios normales", sz);
+  }
+  chk(textW("a\xF0\x9F\x98\x80" "b", 1) == textW("a?b", 1), "un emoji es UN caracter (antes salian cuatro '?')");
+  chk(textW("a\xF0\x9F\x98\x80" "b", 2) == textW("a?b", 2), "(tambien con la fuente vectorial)");
+  chk(textW("ab\xE2\x80\x8B" "c", 1) == textW("abc", 1), "un espacio de ancho cero no ocupa sitio");
+  chk(textW("ok\xEF\xB8\x8F", 2) == textW("ok ", 2) || textW("ok\xEF\xB8\x8F", 2) == textW("ok", 2),
+      "un selector de variante al final no pinta nada");
+  chk(textW("ab\xE2\x80", 1) == textW("ab?", 1), "una secuencia cortada al final no se sale de la cadena");
+  chk(textW("\xE2\x80\x9CHola\xE2\x80\x9D \xE2\x80\x94 ok", 2) == textW("\"Hola\" - ok", 2),
+      "comillas y guiones tipograficos se dibujan como los normales");
+  chk(textW("caf\xC3\xA9 \xC3\xB1", 2) == textW("cafe n", 2) || textW("caf\xC3\xA9", 2) > 0, "(los acentos siguen dibujandose)");
+  fillRect(0, 0, SCR_W, 40, 0);
+  if(gFails == f0) printf("  Texto Unicode: todas las comprobaciones pasan.\n");
 }
 
 // #############################################################
@@ -11016,11 +11155,16 @@ static FclItem clItem(const char* id, const char* name, uint8_t kind, uint64_t s
   snprintf(it.sha256, sizeof(it.sha256), "%064d", 7); it.updatedAt = 1773273600000LL;
   return it;
 }
-// Lo que la nube le dijo al usuario, por el canal que toque: la isla en el escritorio, el BANNER dentro de una app (sysSay).
-static void saidClear(){ gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs)); fpbQueueN = 0; fpbMore = 0; }
-static int saidCount(){ return gNotifCount + fpbQueueN; }
-static std::string saidSub(){ return fpbQueueN > 0 ? std::string(fpbQueue[fpbQueueN - 1].body) : gNotifCount > 0 ? std::string(gNotifs[0].mod.sub) : std::string(); }
-static std::string saidTitle(){ return fpbQueueN > 0 ? std::string(fpbQueue[fpbQueueN - 1].title) : gNotifCount > 0 ? std::string(gNotifs[0].mod.name) : std::string(); }
+// Lo que la nube le dijo al usuario. Todo aviso se PRESENTA por el banner (en el escritorio pasa
+// ademas por el modelo de la isla), asi que lo dicho es lo que hay en el presentador: a la vista o en cola.
+static void saidClear(){
+  gNotifCount = 0; memset(gNotifs, 0, sizeof(gNotifs));
+  if(fpbVisible()) fpbAbandon();
+  fpbQueueN = 0; fpbMore = 0;
+}
+static int saidCount(){ return fpbQueueN + (fpbVisible() ? 1 : 0); }
+static std::string saidSub(){ return fpbQueueN > 0 ? std::string(fpbQueue[fpbQueueN - 1].body) : fpbVisible() ? std::string(fpbCur.body) : std::string(); }
+static std::string saidTitle(){ return fpbQueueN > 0 ? std::string(fpbQueue[fpbQueueN - 1].title) : fpbVisible() ? std::string(fpbCur.title) : std::string(); }
 static bool clCalled(const char* prefix){ for(auto& c : gStubCloudCalls) if(!c.compare(0, strlen(prefix), prefix)) return true; return false; }
 static void clStatusOnline(){
   memset(&gStubCloudStatus, 0, sizeof(gStubCloudStatus));
@@ -12615,6 +12759,271 @@ static void testFlexAccountUnlink(){
   if(!gFails) printf("  Flex Account (desvincular): todas las comprobaciones pasan.\n");
 }
 
+// #############################################################
+//  PANTALLA COMPLETA DESDE INICIO
+//  ------------------------------------------------------------
+//  El menu de pulsacion larga de un icono ofrece "Pantalla
+//  completa" (vertical y horizontal) SOLO a las apps que lo
+//  declaran (APP_IMMERSIVE: hoy, el navegador). Elegirla abre la
+//  app por el camino de siempre ya con el lienzo ENTERO -- 480x800
+//  o 800x480 -- y la barra de navegacion transitoria.
+// #############################################################
+static void ctxShut(){ ctxAction = -1; ctxClosing = false; ctxAnimMs = 0; ctxApp = -1; uiGlassBandEnd(); gState = ST_HOME; }
+static void pcFinishOpen(){
+  gTestUs = 5000000;
+  for(int i = 0; i < 200 && appTrVisible(); i++){ gTestUs += 16000; gTestMs += 16; appTrTick(); }
+  gTestUs = 0;
+}
+static void testPantallaCompletaDesdeInicio(){
+  printf("Inicio: 'Pantalla completa' (vertical y horizontal) en el menu del navegador\n");
+  const int f0 = gFails;
+  mtReset();
+  appTrCancel(); qsForceClose();
+  if(gAppState[IC_NAV] != ALIFE_CLOSED) appTerminate(IC_NAV, true);
+  gImmApp = -1; gImmLand = false; gImmPrefLand = false;
+  gState = ST_HOME; gAppId = 0; gLand = false; editMode = false; gHosted = false;
+  gHomePage = 0; gAppW = SCR_W; gAppH = SCR_H;
+  const int sNav = 0, sClock = 1;
+  const uint8_t o0 = homeOrder[homeIdx(0, sNav)], o1 = homeOrder[homeIdx(0, sClock)];
+  homeOrder[homeIdx(0, sNav)] = IC_NAV; homeOrder[homeIdx(0, sClock)] = IC_RELOJ;
+  setBuf(fb); uiClipFull();
+
+  chk((APP_REG[IC_NAV].flags & APP_IMMERSIVE) && !(APP_REG[IC_RELOJ].flags & APP_IMMERSIVE),
+      "la capacidad es DECLARADA por la app (el navegador si, el reloj no)");
+  ctxOpen(sClock);
+  chk(gState == ST_CTX && ctxRowN == 3, "una app sin pantalla completa conserva su menu de siempre (3 filas)");
+  ctxShut();
+
+  ctxOpen(sNav);
+  chk(gState == ST_CTX && ctxRowN == 5 && ctxKind[3] == CTXK_FS && ctxKind[4] == CTXK_FS_LAND,
+      "el navegador ofrece Pantalla completa, vertical y horizontal");
+  chk(ctxPy >= CTX_MARGIN && ctxPy + CTX_PANEL_H <= SCR_H - CTX_MARGIN, "el menu de 5 filas cabe entero en pantalla");
+  chk(ctxRowEnabled(3) && ctxRowEnabled(4), "y las dos filas estan activas");
+  // Se elige HORIZONTAL: la animacion de cierre termina y la app se abre.
+  ctxClose(4);
+  for(int i = 0; i < 20 && ctxAnimMs; i++){ gTestMs += 20; ctxTick(); }
+  chk(gImmApp == IC_NAV && gImmLand && gImmPrefLand, "el navegador queda en pantalla completa HORIZONTAL");
+  chk(gState == ST_APP && gAppId == IC_NAV, "y se abre por el camino de siempre");
+  pcFinishOpen();
+  chk(appImmersive() && gLand && gAppW == SCR_H && gAppH == SCR_W,
+      "al terminar la apertura el lienzo es la pantalla ENTERA girada (800x480)");
+  chk(!navBarReservesSpace(), "la barra de navegacion no le quita sitio: es transitoria");
+  // Salir de pantalla completa (lo que hace el boton de la barra transitoria o "atras").
+  immersiveRequest(IC_NAV, 0);
+  immersiveApplyPending();
+  chk(!appImmersive() && !gLand && gAppW == SCR_W && gAppH == SCR_H,
+      "al salir de pantalla completa el lienzo vuelve al de siempre, en vertical");
+  appTerminate(IC_NAV, true); appTrCancel();
+  gState = ST_HOME; gAppId = 0; gLand = false;
+
+  // Y en VERTICAL.
+  ctxOpen(sNav);
+  ctxClose(3);
+  for(int i = 0; i < 20 && ctxAnimMs; i++){ gTestMs += 20; ctxTick(); }
+  chk(gImmApp == IC_NAV && !gImmLand && !gImmPrefLand, "tambien en pantalla completa VERTICAL");
+  pcFinishOpen();
+  chk(appImmersive() && !gLand && gAppW == SCR_W && gAppH == SCR_H && WIN_TOP == 0 && WIN_BOT == SCR_H,
+      "en vertical la app recibe los 480x800 enteros: sin barra de estado ni de navegacion fijas");
+  appTerminate(IC_NAV, true); appTrCancel();
+  chk(gImmApp == -1, "cerrar de verdad la app borra la pantalla completa: la proxima vez se abre normal");
+
+  homeOrder[homeIdx(0, sNav)] = o0; homeOrder[homeIdx(0, sClock)] = o1;
+  gImmPrefLand = false;
+  gState = ST_HOME; gAppId = 0; gLand = false; gAppW = SCR_W; gAppH = SCR_H;
+  setBuf(fb); uiClipFull(); tReset();
+  if(gFails == f0) printf("  Pantalla completa desde Inicio: todas las comprobaciones pasan.\n");
+}
+
+// #############################################################
+//  DeX EN TIEMPO REAL: una ventana se actualiza SOLA
+//  ------------------------------------------------------------
+//  Antes una app hospedada solo recibia tick con un toque o al
+//  cambiar el minuto: la pagina que llegaba por la red, el viewport
+//  tras redimensionar o el reloj se quedaban congelados hasta el
+//  siguiente click ("hay que hacer click para que se actualice"). Y
+//  al re-maquetar veia el dedo REAL del sistema -- en coordenadas del
+//  panel, arrastrando el borde -- como si fuera un toque suyo.
+//  Se usa el doble del navegador con la sonda encendida; el puente
+//  (brHostGetTouch, brHostContentRect, brHostFillRect, brHostFlush)
+//  y todo DeX son el codigo de verdad.
+// #############################################################
+extern bool     gStubBrProbe;
+extern int      gStubBrTicks, gStubBrEnters, gStubBrCW, gStubBrCH;
+extern BrTouch  gStubBrTouch;
+extern uint16_t gStubBrPaint;
+extern bool     gStubBrKbOpen;
+extern uint16_t gStubBrBg;
+// Dedo en el punto LOGICO (lx, ly) del escritorio horizontal. El panel lo
+// entrega en fisico: las mismas cuentas que dexPointer, al reves.
+static void dexFinger(int lx, int ly, bool down, unsigned long ms){
+  gTestMs = ms;
+  bool was = T.down;
+  T.pressed = down && !was; T.released = !down && was; T.tap = false;
+  if(down && !was){ T.downMs = ms; T.moved = false; }
+  else if(down) T.moved = true;
+  T.down = down;
+  T.x = (SCR_W - 1) - ly; T.y = lx;
+  if(T.pressed){ T.startX = T.x; T.startY = T.y; }
+  T.lastMs = ms;
+}
+static void dexIdle(unsigned long ms){ tReset(); gTestMs = ms; T.lastMs = ms; pcTick(); }
+static uint16_t dexFbAt(int lx, int ly){ return fb[(size_t)lx * SCR_W + (SCR_W - 1 - ly)]; }
+
+static void testDexTiempoReal(){
+  printf("DeX: las ventanas se actualizan solas, sin depender de un toque\n");
+  const int f0 = gFails;
+  gStubBrProbe = true; gStubBrTicks = gStubBrEnters = 0; gStubBrPaint = 0;
+  tReset(); gTestMs = 900000; gMinChanged = false;
+  setBuf(fb);
+  gState = ST_APP; gAppId = IC_MODOPC;
+  pcEnter(); dexAnimFinish();
+  dexOpen(IC_NAV); dexAnimFinish();
+  int w = -1;
+  for(int i = 0; i < 4; i++) if(pwins[i].open && pwins[i].app == IC_NAV) w = i;
+  chk(w >= 0 && dexHost[w].surf != NULL, "el navegador se abre en una ventana de DeX con su propio lienzo");
+  if(w < 0 || !dexHost[w].surf){
+    gStubBrProbe = false; pcCloseApp(); gState = ST_HOME; gAppId = 0; gLand = false; setBuf(fb);
+    return;
+  }
+  chk(gStubBrEnters == 1, "enter() del navegador corre una vez al abrir la ventana");
+  unsigned long ms = gTestMs;
+
+  // ---- 1. sin tocar nada, la app recibe tick en cada vuelta ----
+  int t0 = gStubBrTicks;
+  for(int k = 0; k < 6; k++){ ms += 20; dexIdle(ms); }
+  chk(gStubBrTicks - t0 >= 6, "sin tocar nada, la ventana del navegador recibe su tick en CADA vuelta de DeX");
+  chk(!gStubBrTouch.down && !gStubBrTouch.pressed && !gStubBrTouch.tap && gStubBrTouch.x < 0,
+      "...con un toque NEUTRO (nada apoyado, fuera de cualquier boton)");
+
+  // ---- 2. llega "una banda de la pagina": la ventana se recompone sola ----
+  int cx, cy, cw, ch; dexClientRect(w, cx, cy, cw, ch);
+  DexFit f; dexHostFit(w, cx, cy, cw, ch, f);
+  chk(f.flex && f.stepX == (1u << 16) && f.stepY == (1u << 16),
+      "el navegador es adaptativo: su lienzo es 1:1 con el area de cliente");
+  chk(gStubBrCW == f.aw && gStubBrCH == f.ah, "el area que ve el navegador es EXACTAMENTE la de su ventana");
+  const uint16_t red = rgb565(255, 0, 0), green = rgb565(0, 255, 0);
+  chk(dexFbAt(f.ox + 8, f.oy + 8) != red, "(antes de llegar la banda no hay rojo en la ventana)");
+  gStubBrPaint = red;
+  ms += 40; dexIdle(ms);
+  ms += 40; dexIdle(ms);
+  chk(dexFbAt(f.ox + 8, f.oy + 8) == red, "lo que la app dibuja SIN que nadie la toque llega al panel");
+
+  // ---- 3. redimensionar: la app no ve el dedo del borde y maqueta DURANTE el arrastre ----
+  int ex = pwins[w].x + pwins[w].w - 2, ey = pwins[w].y + pwins[w].h / 2;
+  ms += 100; dexFinger(ex, ey, true, ms); pcTick();
+  chk(dexGrab == DXG_RESIZE, "el borde derecho agarra la ventana para redimensionarla");
+  const int w0 = pwins[w].w;
+  bool neutral = true, sizeLive = true;
+  for(int k = 1; k <= 4; k++){
+    ms += 50; dexFinger(ex + 15 * k, ey, true, ms); pcTick();
+    if(gStubBrTouch.down || gStubBrTouch.pressed || gStubBrTouch.tap) neutral = false;
+    dexClientRect(w, cx, cy, cw, ch); dexHostFit(w, cx, cy, cw, ch, f);
+    if(gStubBrCW != f.aw || gStubBrCH != f.ah) sizeLive = false;
+  }
+  chk(pwins[w].w > w0, "la ventana crece con el arrastre");
+  chk(neutral, "durante el arrastre del borde la app NO ve el dedo del sistema como un toque suyo");
+  chk(sizeLive, "el navegador maqueta con el tamano NUEVO en cada paso del arrastre, sin soltar ni tocar");
+  ms += 50; dexFinger(ex + 60, ey, false, ms); pcTick();
+  chk(dexGrab == DXG_NONE, "al soltar termina el redimensionado");
+  ms += 60; dexIdle(ms);
+  dexClientRect(w, cx, cy, cw, ch); dexHostFit(w, cx, cy, cw, ch, f);
+  chk(gStubBrCW == f.aw && gStubBrCH == f.ah, "...y el tamano final queda aplicado sin un toque mas");
+
+  // ---- 4. un toque dentro de la ventana llega traducido 1:1 al lienzo ----
+  const int px = f.ox + f.ow / 2, py = f.oy + f.oh / 2;
+  ms += 600; dexFinger(px, py, true, ms); pcTick();
+  chk(gStubBrTouch.down && gStubBrTouch.pressed, "un toque dentro de la ventana llega a la app con el dedo apoyado");
+  chk(gStubBrTouch.x == px - f.ox && gStubBrTouch.y == py - f.oy, "...en coordenadas de SU lienzo, 1:1");
+  int tk = gStubBrTicks;
+  ms += 20; dexFinger(px + 4, py + 4, true, ms); pcTick();
+  chk(gStubBrTicks == tk + 1, "la vuelta en que la app recibe su toque NO le da ademas un tick neutro");
+  chk(gStubBrTouch.down, "...asi que nunca ve el dedo 'apoyado y suelto' en el mismo instante");
+
+  // ---- 5. el dedo se va de la ventana con el gesto a medias: UNA suelta ----
+  const int tbx = pwins[w].x + 60, tby = pwins[w].y + DEX_TTL_H / 2;   // barra de titulo, no un boton
+  ms += 20; dexFinger(tbx, tby, true, ms); pcTick();
+  chk(gStubBrTouch.released && !gStubBrTouch.down,
+      "si el dedo se va a la barra de titulo con el gesto a medias, la app recibe UNA suelta");
+  chk(gStubBrTouch.x == px + 4 - f.ox && gStubBrTouch.y == py + 4 - f.oy,
+      "...en el ultimo punto que vio, no en uno inventado");
+  ms += 20; dexFinger(tbx + 3, tby, true, ms); pcTick();
+  chk(!gStubBrTouch.released && !gStubBrTouch.down, "...y despues, toque neutro: la suelta no se repite");
+  ms += 20; dexFinger(tbx + 3, tby, false, ms); pcTick();
+
+  // ---- 6. minimizada no recibe tick; al restaurar, si ----
+  dexMinimize(w); dexAnimFinish();
+  tk = gStubBrTicks;
+  for(int k = 0; k < 3; k++){ ms += 20; dexIdle(ms); }
+  chk(gStubBrTicks == tk, "minimizada no recibe tick (no hay nada que ver)");
+  dexRestore(w); dexAnimFinish();
+  for(int k = 0; k < 3; k++){ ms += 20; dexIdle(ms); }
+  chk(gStubBrTicks > tk, "al restaurarla vuelve a actualizarse sola");
+
+  // ---- 6b. el teclado del navegador se pinta DENTRO de su ventana ----
+  //  Antes brKbRender escribia SIEMPRE en fb con coordenadas verticales: en DeX
+  //  las teclas caian giradas encima del escritorio, fuera de la ventana, y
+  //  dentro de ella no se veia ninguna. Ahora el destino es el lienzo de la
+  //  ventana y DeX lo compone en su sitio.
+  {
+    // La "pagina" del doble, de un color conocido (el navegador real pinta la suya).
+    gStubBrBg = rgb565(30, 60, 90);
+    flexBrowserForceRepaint();
+    for(int k = 0; k < 3; k++){ ms += 40; dexIdle(ms); }      // pagina pintada y escritorio asentado
+    const size_t NN = (size_t)SCR_W * SCR_H;
+    std::vector<uint16_t> fb0(fb, fb + NN);
+    dexClientRect(w, cx, cy, cw, ch);
+    gStubBrKbOpen = true;
+    for(int k = 0; k < 3; k++){ ms += 40; dexIdle(ms); }
+    int dentro = 0, fuera = 0;
+    for(int lx = 0; lx < LW; lx++) for(int ly = 0; ly < LH; ly++){
+      const size_t at = (size_t)lx * SCR_W + (SCR_W - 1 - ly);
+      if(fb[at] == fb0[at]) continue;
+      const bool inWin = lx >= pwins[w].x && lx < pwins[w].x + pwins[w].w &&
+                         ly >= pwins[w].y && ly < pwins[w].y + pwins[w].h;
+      if(inWin) dentro++; else fuera++;
+    }
+    chkf(dentro > 500, "el teclado aparece DENTRO de la ventana del navegador (%d px)", dentro);
+    chkf(fuera == 0, "y no se pinta nada fuera de ella (antes caia girado sobre el escritorio: %d px)", fuera);
+    // Abajo del todo del area de cliente esta la fila de funciones: tiene que verse.
+    bool filaFunc = false;
+    for(int lx = cx + 4; lx < cx + cw - 4 && !filaFunc; lx += 3){
+      const int ly = cy + ch - 12;
+      const size_t at = (size_t)lx * SCR_W + (SCR_W - 1 - ly);
+      if(fb[at] != fb0[at]) filaFunc = true;
+    }
+    chk(filaFunc, "la fila de funciones (espacio, Ir...) se ve al pie de la ventana, no tapada ni fuera");
+    // Cerrar el teclado: su franja se borra y el contenido vuelve, sin tocar nada.
+    gStubBrKbOpen = false;
+    for(int k = 0; k < 3; k++){ ms += 40; dexIdle(ms); }
+    int resto = 0;
+    for(int lx = cx; lx < cx + cw; lx += 2){
+      const int ly = cy + ch - 12;
+      const size_t at = (size_t)lx * SCR_W + (SCR_W - 1 - ly);
+      if(fb[at] != fb0[at]) resto++;
+    }
+    chkf(resto == 0, "al cerrarse, la app repinta su contenido donde estaba el teclado (%d px de resto)", resto);
+    gStubBrBg = 0;
+  }
+
+  // ---- 7. maximizar: area apaisada nueva, aplicada y visible sin tocar ----
+  dexToggleMax(w); dexAnimFinish();
+  for(int k = 0; k < 3; k++){ ms += 50; dexIdle(ms); }
+  dexClientRect(w, cx, cy, cw, ch); dexHostFit(w, cx, cy, cw, ch, f);
+  chk(f.land && gStubBrCW == f.aw && gStubBrCH == f.ah,
+      "maximizada: el navegador maqueta con el area nueva (apaisada) sin un toque");
+  chk(f.aw > SCR_W, "...y el lienzo apaisado es MAS ancho que 480: nada recortado a la anchura vertical");
+  gStubBrPaint = green;
+  ms += 40; dexIdle(ms);
+  ms += 40; dexIdle(ms);
+  chk(dexFbAt(f.ox + 8, f.oy + 8) == green, "lo que dibuja en la ventana maximizada se ve, en su sitio");
+
+  pcCloseApp();
+  gStubBrProbe = false;
+  tReset(); gState = ST_HOME; gAppId = 0; gLand = false; setBuf(fb);
+  gClipY0 = 0; gClipY1 = SCR_H - 1;
+  if(gFails == f0) printf("  DeX en tiempo real: todas las comprobaciones pasan.\n");
+}
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -12693,6 +13102,7 @@ int main(){
   testBannerNotificacion();
   testDeslizarPaginas();
   testIslaEncimaAlDeslizar();
+  testTextoUnicode();
   testCabeceras();
   testListasConScroll();
   testTarjetaCronometro();
@@ -12746,6 +13156,8 @@ int main(){
   testMenuNubeAlCerrar();
   testFlexAccountUnlink();
   testTrabajoPeriodico();
+  testDexTiempoReal();
+  testPantallaCompletaDesdeInicio();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;
 }

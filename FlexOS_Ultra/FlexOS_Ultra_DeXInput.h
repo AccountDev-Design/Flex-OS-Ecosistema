@@ -593,14 +593,12 @@ static void pcTick(){
   dexOvTick();
   dexTbAnimTick();
   dexTbLayout();
+  dexLoopSeq++;                             // dexHostTouch anota en que vuelta toco a quien
   dexInput();
   // dexInput() puede haber llamado a pcExit() (menu de la barra, boton del
   // panel). En ese caso ya estamos en ST_HOME y el escritorio esta pintado:
   // cualquier dibujo de aqui en adelante seria basura encima del launcher.
   if(dexExiting || !gLand) return;
-  // Tick periodico de las apps hospedadas: es lo que mantiene vivo el reloj, el
-  // calendario... Solo cuando cambia el minuto, no por frame: las
-  // apps interactivas ya se refrescan en dexHostTouch.
   // Re-maquetado por cambio de tamano y avance de los fundidos.
   {
     bool wasFading = uiFading;
@@ -608,16 +606,22 @@ static void pcTick(){
     for(int k = 0; k < 4; k++) dexHostRelayout(dexOrder[k]);
     if(uiFading || wasFading) dexDirty = true;     // sigue pidiendo frames mientras funde
   }
-  if(gMinChanged){
+  // Tick CONTINUO de las apps hospedadas (ver dexHostTickIdle): igual que la app
+  // a pantalla completa recibe su tick en cada vuelta del bucle, una ventana de
+  // DeX tambien. Asi el contenido se actualiza en tiempo real -- la pagina que
+  // llega, el viewport tras redimensionar, el reloj -- sin esperar a un toque.
+  // Se recorre una COPIA del orden: dexHostServe puede cerrar o abrir ventanas.
+  {
+    uint8_t ord[4]; for(int k = 0; k < 4; k++) ord[k] = dexOrder[k];
     for(int k = 0; k < 4; k++){
-      int i = dexOrder[k];
-      if(pwins[i].open && !pwins[i].mini && dexHost[i].surf){
-        dexHostRun(i, false, true, NULL);
-        dexHostServe(i);
-      }
+      int i = ord[k];
+      if(!pwins[i].open || pwins[i].mini || !dexHost[i].surf) continue;
+      dexHostTickIdle(i);
+      dexHostServe(i);
+      if(dexExiting || !gLand) return;
     }
-    dexMarkAll(); dexDirty = true;
   }
+  if(gMinChanged){ dexMarkAll(); dexDirty = true; }
   if(!dexDirty) return;
   // Pasos discretos ligados a millis(): ~33 fps de techo. No bloquea el loop ni
   // el tactil -- si aun no toca frame se sale, y se repinta en la siguiente

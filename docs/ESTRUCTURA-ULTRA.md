@@ -120,7 +120,7 @@ Esa frontera no se ha tocado.
 | `FlexOS_Ultra_Network.h`           |   832 | arranque seguro de la radio y Wi-Fi |
 | `FlexOS_Ultra_NTP.h`               |   297 | cliente NTP en su propia tarea |
 | `FlexOS_Ultra_Conn.h`              |   350 | conectividad: Wi-Fi / BLE / modo avion |
-| `FlexOS_Ultra_Notif.h`             |   416 | isla dinamica: notificaciones |
+| `FlexOS_Ultra_Notif.h`             |   349 | avisos del sistema: el MODELO (los presenta el banner) |
 | `FlexOS_Ultra_AppChrono.h`         |   929 | cronometro: app, capsula y tarjeta |
 | `FlexOS_Ultra_System.h`            |   468 | soltar caches, Optimizar Flex OS y cambio de tema |
 | `FlexOS_Ultra_WebServer.h`         |   553 | Flex Web Server: tarea del servidor y hoja "Conectar con el movil" (repinta solo la zona que cambia) |

@@ -480,7 +480,7 @@ concreto. Ver `docs/NAVEGADOR.md`, sección 7.4.
 
 **Decidido.** `FLEXBR_BUILD` en la cabecera, un `static_assert` en cada
 fichero, y una función cuyo nombre lleva la versión dentro
-(`flexBrVersionGuard_v4_...`) que el puente llama y
+(`flexBrVersionGuard_v5_...`, hoy `FLEXBR_BUILD 5`) que el puente llama y
 `FlexOS_BrowserApp.cpp` define.
 
 **Por qué.** El navegador se instala copiando cuatro ficheros a mano a
@@ -687,3 +687,115 @@ memoria**: debajo hay un `memcpy` directo sobre el framebuffer, y un
 descuadre en el área de contenido o una banda de recorte mal puesta no
 puede convertirse nunca en una escritura fuera del buffer. Cuestan
 cuatro comparaciones por fila.
+
+---
+
+## D35 · Una sola fuente de verdad de la geometría: el gestor de ventanas
+
+**Decidido.** El navegador no guarda ningún tamaño "de fábrica": en **cada
+tick** (y al entrar y al reanudar) pregunta al puente el área que le dio el
+gestor de ventanas (`brHostContentRect` / `brHostLayoutRect`, que salen de
+`gAppW`/`gAppH`: pantalla, pantalla completa o ventana de DeX) y, si cambió,
+se re-maqueta y se repinta en ese mismo tick (`brSyncGeometry`). El viewport
+que se pide al servicio es el del área de página real; se manda un
+`VIEWPORT` cuando la geometría se asienta (140 ms sin cambios) o, durante un
+arrastre largo, como mucho cada 400 ms. El `HELLO` abre la sesión ya con ese
+viewport, y nunca se manda `0×0`.
+
+**Por qué.** Antes el viewport solo se negociaba al conectar: redimensionar
+una ventana de DeX, girar o entrar en pantalla completa dejaba la página
+maquetada para el tamaño viejo (franja blanca, imagen recortada, "hay que
+hacer click"). Y los ajustes de calidad mandaban `VIEWPORT 0×0`, que el relay
+del teléfono convertía en 120×120: la web salía gigante.
+
+**Comprobado**: `test_app` (re-maquetado sin toque, un VIEWPORT por
+redimensionado), `test_net` (sockets reales: el HELLO lleva el área real y un
+redimensionado produce **exactamente un** VIEWPORT con el tamaño nuevo, sin
+reconexión).
+
+---
+
+## D36 · El lienzo apaisado se recorta en sus dos ejes
+
+**Decidido.** En horizontal el motor gráfico recorta también la Y lógica
+(`gClipLY0/1`, además de `gClipY0/1` que acota la X lógica), y
+`brHostBlitRow` escribe las filas de la página girándolas directamente sobre
+el framebuffer con ese recorte.
+
+**Por qué.** Con el lienzo de 800×480 (ventana apaisada de DeX o pantalla
+completa horizontal) la página se cortaba en x=480 —el ancho vertical—: zona
+negra a la derecha y la imagen comprimida.
+
+---
+
+## D37 · Las ventanas de DeX reciben tick en cada vuelta
+
+**Decidido.** `pcTick` da tick a **todas** las ventanas abiertas y no
+minimizadas en cada vuelta (`dexHostTickIdle`), como recibe tick una app a
+pantalla completa. Sin dedo, la app ve un toque **neutro** (nada apoyado,
+coordenadas fuera de cualquier botón); si el gesto que había empezado en su
+ventana sale de ella, recibe **una** suelta en su último punto. La ventana
+que ya recibió su toque en esa vuelta no recibe otro tick. El teclado del
+navegador se pinta en el **lienzo de su ventana** y solo marca la ventana
+como sucia cuando el propio teclado cambia.
+
+**Por qué.** Antes solo había tick con un toque o al cambiar el minuto: las
+bandas que llegaban por la red, el `VIEWPORT` tras redimensionar o el reloj
+se quedaban congelados hasta el siguiente click. Y al re-maquetar, la app
+veía el dedo REAL del sistema (arrastrando el borde) como si fuera suyo.
+
+**Comprobado**: `test_ino` · `testDexTiempoReal` (tick sin toque, lo que la
+app dibuja llega al panel sin click, el área se actualiza en cada paso del
+arrastre del borde, toque neutro, suelta sintética, maximizar a 800×480 y el
+teclado dentro de la ventana, nada fuera).
+
+---
+
+## D38 · Pantalla completa: la pide la app o Inicio, la aplica el gestor
+
+**Decidido.** Modo inmersivo del sistema: la app (o el menú de pulsación
+larga de su icono en Inicio, si la app declara `APP_IMMERSIVE`) lo **pide**;
+el gestor lo aplica en un punto en el que nadie dibuja, con el lienzo
+entero (480×800 o 800×480). La barra de navegación pasa a ser
+**transitoria**: un gesto desde el borde inferior la revela (atrás, inicio,
+recientes y salir de pantalla completa) y se oculta sola. "Atrás" sale
+primero de pantalla completa y conserva la página tal cual: es un
+re-maquetado, no una recarga ni un WebView nuevo.
+
+---
+
+## D39 · El relay del teléfono: viewport en px CSS y captura con el scroll
+
+**Decidido.** El WebView del relay se mide a `W·d × H·d` píxeles del teléfono
+(d = densidad) para que su viewport CSS sea **exactamente** el `W×H` que pide
+el P4 (como el servicio de Ubuntu/PC, `deviceScaleFactor 1`), y la captura se
+dibuja con escala `1/d` (y la escala de envío) sobre un bitmap de `W×H`,
+trasladada `(-scrollX, -scrollY)`. Toque y desplazamiento llegan en px CSS y
+se convierten con la misma `d`. El rectángulo de cada `FRAME` es el que la
+captura cubre. Un `VIEWPORT` con ancho o alto < 120 significa "sin cambio",
+igual que en `session.js`.
+
+**Por qué.** Maquetado a `W×H` píxeles del teléfono, con densidad 2,75 la
+página veía un móvil de 175 px CSS: todo ampliado (m.youtube.com). Y sin la
+traslación, al bajar la página la superficie entera se movía y dejaba una
+franja en blanco.
+
+---
+
+## D40 · El relay del teléfono es un servicio que se queda
+
+**Decidido.** `BrowserRelayService` es `connectedDevice` (con `dataSync`,
+Android 15 lo cortaba a las 6 horas), vuelve solo si Android mata el proceso
+(`START_STICKY`) **solo** si la persona lo dejó encendido, no se apaga por
+inactividad (lo que se suelta tras ese tiempo son las **pestañas**), espera a
+que vuelva la Wi-Fi en vez de pararse, y toma los cerrojos solo con un Flex
+OS conectado (renovándolos). Una conexión nueva **autenticada** sustituye a
+la anterior. Estados claros en el teléfono y en el P4: **Relay activo**,
+**Reconectando**, **Desconectado (esperando a Flex OS)**, **Detenido por el
+usuario**. Cerrar la app Flex Phone no detiene el relay.
+
+**Comprobado**: comprobación de tipos de `:app` contra Android API 35
+(`gradle -PflexTypecheck :typecheck:compileKotlin`), pruebas de `:protocol`
+(bits de `RELAY_INFO`) y `test_flexphone` (el P4 los lee). **No** se ha
+probado en un teléfono real.
+

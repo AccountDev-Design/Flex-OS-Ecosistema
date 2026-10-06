@@ -35,7 +35,7 @@
 // Panel unico anclado al icono, estilo hoja de acciones de iOS: una sola
 // tarjeta redondeada, texto a la IZQUIERDA, glifo a la DERECHA y filas separadas
 // por una linea de 1 px. No lleva fila "Cancelar": se cierra tocando fuera.
-#define CTX_ROWS     3
+#define CTX_ROWS     5               // MAXIMO de filas (las que se ven dependen de la app)
 #define CTX_ROW_H    58
 #define CTX_W        244
 #define CTX_RAD      20
@@ -46,7 +46,12 @@
 #define CTX_GAPX     12              // separacion entre el icono y el panel
 #define CTX_ICON_S   72              // lado del icono en la rejilla del Home
 #define CTX_ANIM_MS  150
-#define CTX_PANEL_H  (CTX_ROWS * CTX_ROW_H)
+// FILAS DEL MENU. Las tres de siempre (candado, edicion, kiosco) y, si la app
+// declara APP_IMMERSIVE, abrirla en pantalla completa en vertical u horizontal.
+enum { CTXK_LOCK = 0, CTXK_EDIT, CTXK_KIOSK, CTXK_FS, CTXK_FS_LAND };
+static uint8_t  ctxKind[CTX_ROWS];
+static int      ctxRowN = 3;
+#define CTX_PANEL_H  (ctxRowN * CTX_ROW_H)
 static int      ctxApp = -1, ctxAction = -1;
 static bool     ctxClosing = false;
 static uint32_t ctxAnimMs = 0;
@@ -56,20 +61,37 @@ static int      ctxBandY0 = 0, ctxBandY1 = 0;      // banda que se recompone por
 // panel (uiSurfaceA/UIS_ELEVATED), para que candado y rejilla no se recorten
 // contra un color que el panel ya no usa.
 static uint16_t ctxPanelCol(){ return uiGlass ? uiSurfTint(UIS_ELEVATED) : uiSurfFlat(UIS_ELEVATED); }
-// Fila 0 = candado de app, 1 = Modo edicion, 2 = Modo kiosco. Las dos que
-// necesitan una clave del sistema con la que verificar se dibujan atenuadas y
-// son inertes si no hay ninguna configurada: se ve por que no se pueden usar,
-// en vez de no hacer nada al tocarlas.
+// Las filas que tiene ESTA app (se decide al abrir el menu).
+static void ctxBuildRows(){
+  ctxRowN = 0;
+  ctxKind[ctxRowN++] = CTXK_LOCK;
+  ctxKind[ctxRowN++] = CTXK_EDIT;
+  ctxKind[ctxRowN++] = CTXK_KIOSK;
+#if FLEXOS_IMMERSIVE_ON
+  if(ctxApp >= 0 && ctxApp < APP_N && (APP_REG[ctxApp].flags & APP_IMMERSIVE)){
+    ctxKind[ctxRowN++] = CTXK_FS;
+    ctxKind[ctxRowN++] = CTXK_FS_LAND;
+  }
+#endif
+}
+// Candado y kiosco necesitan una clave del sistema con la que verificar: se
+// dibujan atenuadas y son inertes si no hay ninguna configurada (se ve por que
+// no se pueden usar, en vez de no hacer nada al tocarlas).
 static bool ctxRowEnabled(int i){
-  if(i == 0) return APPLOCK_ON && gLockType > 0;
-  if(i == 2) return KIOSK_ON   && gLockType > 0;
-  return true;
+  if(i < 0 || i >= ctxRowN) return false;
+  switch(ctxKind[i]){
+    case CTXK_LOCK:  return APPLOCK_ON && gLockType > 0;
+    case CTXK_KIOSK: return KIOSK_ON   && gLockType > 0;
+    default:         return true;
+  }
 }
 static const char* ctxLabel(int i){
-  switch(i){
-    case 0:  return appLockGet(ctxApp) ? "Desbloquear app" : "Bloquear app";
-    case 1:  return "Modo edici\xC3\xB3" "n";
-    default: return "Modo kiosko";
+  switch(ctxKind[i]){
+    case CTXK_LOCK:    return appLockGet(ctxApp) ? "Desbloquear app" : "Bloquear app";
+    case CTXK_EDIT:    return "Modo edici\xC3\xB3" "n";
+    case CTXK_FS:      return "Pantalla completa";
+    case CTXK_FS_LAND: return "Pantalla completa horizontal";
+    default:           return "Modo kiosko";
   }
 }
 // Glifos vectoriales de 26x26, dibujados con las primitivas que ya existen: no
@@ -89,6 +111,17 @@ static void ctxGlyph(int kind, int x, int y, int s, uint8_t a){
     fillRoundRectA(x + q + 5,     y,             q, q, 2, c, a);
     fillRoundRectA(x,             y + q + 5,     q, q, 2, c, a);
     fillRoundRectA(x + q + 5,     y + q + 5,     q, q, 2, c, a);
+  } else if(kind == CTXK_FS || kind == CTXK_FS_LAND){  // cuatro esquinas que se abren (pantalla completa)
+    uint16_t c = TH_PRIM;
+    // Vertical: las esquinas de un marco alto; horizontal: las de uno ancho.
+    const bool land = kind == CTXK_FS_LAND;
+    const int bw = land ? s : s * 2 / 3, bh = land ? s * 2 / 3 : s;
+    const int bx = x + (s - bw) / 2, by = y + (s - bh) / 2;
+    const int L = 8, t = 3;
+    fillRectA(bx,          by,          L, t, c, a); fillRectA(bx,          by,          t, L, c, a);
+    fillRectA(bx + bw - L, by,          L, t, c, a); fillRectA(bx + bw - t, by,          t, L, c, a);
+    fillRectA(bx,          by + bh - t, L, t, c, a); fillRectA(bx,          by + bh - L, t, L, c, a);
+    fillRectA(bx + bw - L, by + bh - t, L, t, c, a); fillRectA(bx + bw - t, by + bh - L, t, L, c, a);
   } else {                                              // pantalla con candado (Modo kiosco)
     uint16_t c = TH_OK;
     fillRoundRectA(x, y + 1, s, s - 7, 3, c, a);        // marco
@@ -124,9 +157,9 @@ static void ctxRender(float p){
   // tiene que muestrearla. En Plano es el relleno solido de la paleta, con su
   // alpha: solido y visible, sin resto alguno de vidrio.
   uiSurfaceA(px, py, pw, ph, rad, UIS_ELEVATED, (uint8_t)(238 * (int)a / 255));
-  int rh = ph / CTX_ROWS;
+  int rh = ph / ctxRowN;
   int textMax = CTX_W - CTX_PAD_L - CTX_GLYPH_S - CTX_PAD_R - 10;
-  for(int i = 0; i < CTX_ROWS; i++){
+  for(int i = 0; i < ctxRowN; i++){
     int ry = py + i * rh;
     if(i > 0) fillRectA(px + 14, ry, pw - 28, 1, SET_TXT_MUTE, (uint8_t)(95 * (int)a / 255));  // separador
     bool en = ctxRowEnabled(i);
@@ -136,7 +169,7 @@ static void ctxRender(float p){
     int fs = uiFontFit(lb, textMax, 3);
     drawTextA(px + CTX_PAD_L, ry + rh / 2 - uiLineH(fs) / 2, lb, fs,
               en ? SET_TXT_HI : SET_TXT_MUTE, a);
-    ctxGlyph(i, px + pw - CTX_PAD_R - CTX_GLYPH_S, ry + rh / 2 - CTX_GLYPH_S / 2,
+    ctxGlyph(ctxKind[i], px + pw - CTX_PAD_R - CTX_GLYPH_S, ry + rh / 2 - CTX_GLYPH_S / 2,
              CTX_GLYPH_S, en ? a : (uint8_t)((int)a * 110 / 255));
   }
   present(ctxBandY0, ctxBandY1);
@@ -152,6 +185,7 @@ static void ctxOpen(int slot){
   // geometria sale de homeSlotXY/homeGrid, las mismas que pintan el escritorio.
   if(!CTXMENU_ON || slot < 0 || slot >= homeSlotCount()) return;
   ctxApp = homeOrder[homeIdx(gHomePage, slot)];
+  ctxBuildRows();                               // filas de ESTA app (antes de medir el panel)
   int ix, iy;   homeSlotXY(slot, ix, iy);
   int gS, ggx0, ggy0, gcs, grs, gcols, grows; homeGrid(gS, ggx0, ggy0, gcs, grs, gcols, grows);
   // Lado: se prefiere la DERECHA del icono, pero solo si el panel cabe entero
@@ -202,22 +236,36 @@ static void ctxClose(int action){
 }
 static void ctxFinish(){
   int a = ctxAction, app = ctxApp;
+  const int k = (a >= 0 && a < ctxRowN) ? ctxKind[a] : -1;
+  const bool en = ctxRowEnabled(a);
   ctxAction = -1; ctxClosing = false; ctxAnimMs = 0; ctxApp = -1;
   uiGlassBandEnd();                    // la banda pre-desenfocada caduca con el menu
   gState = ST_HOME;
   showHome();                          // escritorio limpio en un solo volcado
-  // a < 0 = cancelado (toque fuera del panel): no hay nada que hacer.
-  if(a == 0 && ctxRowEnabled(0)){
+  // k < 0 = cancelado (toque fuera del panel): no hay nada que hacer.
+  if(k == CTXK_LOCK && en){
     // Poner Y quitar el candado exigen clave: asi nadie desbloquea la app de
     // otro con solo tocar el icono. Misma ruta de verificacion que todo lo demas.
     lsuStartVerifyFor(appLockGet(app) ? LSU_AFTER_UNLOCKAPP : LSU_AFTER_LOCKAPP, app);
-  } else if(a == 1){
+  } else if(k == CTXK_EDIT){
     // Modo Edicion: el comportamiento de siempre, pero SIN agarrar el icono --
     // cuando se elige esta fila el dedo ya se levanto del icono hace rato.
     edEnter();
-  } else if(a == 2 && ctxRowEnabled(2)){
+  } else if(k == CTXK_KIOSK && en){
     kioskSetEnter(app);
   }
+#if FLEXOS_IMMERSIVE_ON
+  else if(k == CTXK_FS || k == CTXK_FS_LAND){
+    // PANTALLA COMPLETA desde Inicio, en la orientacion elegida (queda como la
+    // preferida). Es la MISMA apertura de siempre: si la app tiene candado, la
+    // verificacion va antes y, al acertar, se abre ya a pantalla completa.
+    gImmPrefLand = (k == CTXK_FS_LAND);
+    if(APPLOCK_ON && appLockGet(app) && gLockType > 0){
+      gImmApp = app; gImmLand = gImmPrefLand;
+      lsuStartVerifyFor(LSU_AFTER_OPENAPP, app);
+    } else immersiveOpen(app);
+  }
+#endif
 }
 static void ctxTick(){
   if(ctxAnimMs){
@@ -231,7 +279,7 @@ static void ctxTick(){
     return;
   }
   if(T.tap){
-    for(int i = 0; i < CTX_ROWS; i++){
+    for(int i = 0; i < ctxRowN; i++){
       int y = ctxPy + i * CTX_ROW_H;
       if(T.x >= ctxPx && T.x <= ctxPx + CTX_W && T.y >= y && T.y <= y + CTX_ROW_H){
         if(!ctxRowEnabled(i)) return;                 // inerte: ni siquiera cierra el menu

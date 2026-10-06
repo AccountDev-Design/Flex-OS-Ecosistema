@@ -24,10 +24,10 @@
 #include "FlexOS_Browser.h"
 
 // Guardia de version (ver el bloque 0 de FlexOS_Browser.h).
-static_assert(FLEXBR_BUILD == 4,
+static_assert(FLEXBR_BUILD == 5,
   "FlexOS_BrowserApp.cpp y FlexOS_Browser.h son de versiones distintas: "
   "copia otra vez LOS CUATRO ficheros del navegador a la carpeta del sketch.");
-void flexBrVersionGuard_v4_copia_los_4_ficheros_del_navegador(void){}
+void flexBrVersionGuard_v5_copia_los_4_ficheros_del_navegador(void){}
 
 #if FLEXBR_ON_DEVICE && FLEXBR_ON
 
@@ -68,6 +68,35 @@ static bool        gNeedChromeRedraw = true;
 // orden de repintado.
 static bool        gDidFullRepaint = false;
 
+// -------------------------------------------------------------
+//  GEOMETRIA: UNA SOLA FUENTE DE VERDAD
+//  ------------------------------------------------------------
+//  El tamano del navegador NO lo decide el navegador: lo decide el gestor de
+//  ventanas (pantalla completa, ventana de Modo PC/DeX, modo inmersivo,
+//  teclado) y llega por brHostContentRect(). Antes solo se consultaba al
+//  conectar (HELLO) y al pintar, asi que redimensionar una ventana de DeX no
+//  llegaba a ningun sitio:
+//    · el servicio seguia rasterizando el viewport VIEJO: en una ventana mas
+//      ancha la pagina ocupaba solo una parte y el resto quedaba negro; en una
+//      mas estrecha se salia del area y se cortaba;
+//    · la interfaz no se re-maquetaba hasta que algo -- un toque -- pedia un
+//      repintado completo: "hay que hacer click para que se actualice".
+//  Ahora cada tick compara el rectangulo con el de la vez anterior (ver
+//  brSyncGeometry) y, si cambio, re-maqueta y repinta EN ESE MISMO tick y
+//  renegocia el viewport con el servicio.
+// -------------------------------------------------------------
+#define BR_VP_SETTLE_MS   140   // el tamano tiene que llevar esto quieto para renegociar...
+#define BR_VP_MAX_LAG_MS  400   // ...salvo en un arrastre largo: como mucho este retraso
+static bool     gGeoValid = false;
+static int      gGeoX = 0, gGeoY = 0, gGeoW = 0, gGeoH = 0;   // area con la que se maqueto por ultima vez
+// Lo que pide la geometria actual. Lo publica el hilo GRAFICO y lo lee la tarea
+// de red para el HELLO: la tarea de red no puede consultar el lienzo por su
+// cuenta, porque en Modo PC sus variables (gAppW/gAppH) cambian de valor
+// mientras se ejecuta OTRA ventana.
+static volatile uint16_t gVpWantW = 0, gVpWantH = 0;
+static volatile uint16_t gVpSentW = 0, gVpSentH = 0;          // lo que el servicio tiene pedido
+static uint32_t gVpChangeMs = 0, gVpSentMs = 0;
+
 // Edicion de texto (omnibox, campos de Ajustes y escritura en la pagina).
 enum { BRE_NONE = 0, BRE_OMNIBOX, BRE_SERVER, BRE_TOKEN, BRE_SEARCHTPL, BRE_PAGEKEY };
 static int   gEditTarget = BRE_NONE;
@@ -90,6 +119,8 @@ static void brNavigateTo(const char* url, bool addHistory);
 static void brOpenInternal(int page);
 static bool brPushCmd(uint8_t type, uint8_t ch, int16_t a, int16_t b,
                       uint8_t u1, uint8_t u2, uint8_t u3, uint32_t arg, const char* text);
+static bool brSendViewport();
+static void brSyncGeometry();
 
 // Desplazamiento de las paginas internas (historial, favoritos...).
 static int   gIntScroll = 0;
@@ -253,6 +284,18 @@ static bool brAllocBuffers(){
   }
 #endif
   return true;
+}
+
+// La fila de escalado tiene que cubrir el ancho ACTUAL del area de contenido.
+// Se reservaba una sola vez al abrir: si la ventana de DeX crecia despues, las
+// filas ampliadas se cortaban a ese ancho viejo y la pagina no llegaba al borde.
+static void brEnsureScaleLine(int w){
+  if(w <= 0 || (gScaleLine && w <= gScaleLineCap)) return;
+  if(!gRx) return;                       // sin sesion abierta: se reserva al abrir
+  uint16_t* n = (uint16_t*)brHostAlloc((size_t)w * sizeof(uint16_t), true);
+  if(!n) return;                         // se conserva la anterior: el escalado se acota a su ancho
+  if(gScaleLine) brHostFree(gScaleLine);
+  gScaleLine = n; gScaleLineCap = w;
 }
 
 static void brFreeBuffers(){
@@ -1146,18 +1189,27 @@ static void brNetTask(void*){
         if(backoff < 16000) backoff *= 2;
         continue;
       }
-      // HELLO con la credencial del dispositivo y el tamano real.
-      int cx, cy, cw, chh; brHostContentRect(&cx, &cy, &cw, &chh);
+      // HELLO con la credencial del dispositivo y el viewport que pide la
+      // geometria ACTUAL. Lo calcula el hilo grafico (brSyncGeometry); solo si
+      // aun no lo ha hecho se mide aqui, como antes.
+      uint16_t hw = gVpWantW, hh = gVpWantH;
+      if(!hw || !hh){
+        int cx, cy, cw, chh; brHostContentRect(&cx, &cy, &cw, &chh);
+        hw = (uint16_t)cw; hh = (uint16_t)brContentPageH();
+      }
       int n = fbpBuildHello(tx, sizeof(tx), 0, srvTok, brHostDeviceName(),
-                            (uint16_t)cw, (uint16_t)brContentPageH(),
-                            gSt.quality, gSt.profile, gCaps);
+                            hw, hh, gSt.quality, gSt.profile, gCaps);
       if(n <= 0 || !wsSendFrame(0x2, tx, (size_t)n)){
         BR_NETLOG("[NET] no se pudo enviar HELLO (n=%d)\n", n);
         wsDisconnect(); gNetState = BRN_ERROR; continue;
       }
+      // El servicio rasteriza a partir de AHORA a este tamano: lo que el hilo
+      // grafico compare despues tiene que ser contra esto.
+      gVpSentW = hw; gVpSentH = hh; gVpSentMs = brHostMillis();
+      gStats.viewW = hw; gStats.viewH = hh;
       brNetInfo("Autenticando (%s credencial)", srvTok[0] ? "con" : "SIN");
       BR_NETLOG("[NET] HELLO enviado: %d B  vista=%ux%u  cred=%s\n",
-                n, (unsigned)cw, (unsigned)brContentPageH(),
+                n, (unsigned)hw, (unsigned)hh,
                 srvTok[0] ? "si" : "NO CONFIGURADA");
       backoff = 1000;
       helloMs = brHostMillis();
@@ -1694,21 +1746,29 @@ static void brCommitOmnibox(){
 //  dos sin una sola rama especifica: es el mismo patron que siguen
 //  las demas apps APP_FLEX del sistema.
 // =============================================================
+// La barra se dimensiona contra el lienzo de la VENTANA (brHostLayoutRect), no
+// contra el que deja el teclado: si no, al abrir el teclado la barra de
+// direcciones encogia y la pagina "saltaba" justo cuando se iba a escribir.
+// Solo si el area visible queda tan pequena que no cabe, se reduce.
 static int brToolH(){
-  int x, y, w, h; brHostContentRect(&x, &y, &w, &h);
+  int x, y, w, h; brHostLayoutRect(&x, &y, &w, &h);
+  int cx, cy, cw, chh; brHostContentRect(&cx, &cy, &cw, &chh);
   int t = h / 13;
   if(t < 40) t = 40;                 // objetivo tactil minimo
   if(t > 56) t = 56;
   if(t > h / 4) t = h / 4;
+  if(t > chh / 2) t = chh / 2;       // area visible diminuta (teclado en una ventana pequena)
+  if(t < 16) t = 16;
   return t;
 }
 static bool brTabBarShown(){
-  int x, y, w, h; brHostContentRect(&x, &y, &w, &h);
-  return (gCaps & FLEXBR_CAP_TABS) && w >= 360 && h >= 420 && brTabLimit() > 1;
+  int x, y, w, h; brHostLayoutRect(&x, &y, &w, &h);
+  int cx, cy, cw, chh; brHostContentRect(&cx, &cy, &cw, &chh);
+  return (gCaps & FLEXBR_CAP_TABS) && w >= 360 && h >= 420 && chh >= 200 && brTabLimit() > 1;
 }
 static int brTabBarH(){
   if(!brTabBarShown()) return 0;
-  int x, y, w, h; brHostContentRect(&x, &y, &w, &h);
+  int x, y, w, h; brHostLayoutRect(&x, &y, &w, &h);
   int t = h / 22;
   if(t < 28) t = 28;
   if(t > 38) t = 38;
@@ -1716,6 +1776,63 @@ static int brTabBarH(){
 }
 #define BR_PROG_H 3
 static int brChromeH(){ return brTabBarH() + brToolH() + BR_PROG_H; }
+
+// Viewport que corresponde a la geometria actual: el ancho del area y el alto
+// de la zona de pagina. Con el teclado escribiendo EN LA PAGINA se usa el alto
+// que queda por encima de las teclas -- es lo que hace Chrome: el viewport
+// encoge y la pagina sube el campo con foco a la vista --. Con el teclado del
+// omnibox (o de Ajustes) NO: la pagina sigue entera debajo y renegociarla solo
+// la haria reflotar y saltar justo cuando el usuario va a escribir.
+static void brViewportFor(uint16_t* vw, uint16_t* vh){
+  int lx, ly, lw, lh; brHostLayoutRect(&lx, &ly, &lw, &lh);
+  int cx, cy, cw, chh; brHostContentRect(&cx, &cy, &cw, &chh);
+  int baseH = (gEditTarget == BRE_PAGEKEY) ? chh : lh;
+  int ph = baseH - brChromeH();
+  if(ph < 32) ph = 32;
+  if(cw < 32) cw = 32;
+  *vw = (uint16_t)cw; *vh = (uint16_t)ph;
+}
+
+// Pide al servicio el viewport de la geometria actual, con la calidad, el
+// perfil y la escala vigentes. Es el UNICO sitio que construye un VIEWPORT:
+// antes los cambios de Ajustes lo mandaban con ancho y alto 0, y el relay del
+// telefono -- que no lo trataba como "sin cambio" -- encogia la pagina a
+// 120x120: la web salia gigante.
+static bool brSendViewport(){
+  const uint16_t w = gVpWantW, h = gVpWantH;
+  if(!w || !h) return false;
+  if(!brPushCmd(FBP_C_VIEWPORT, (uint8_t)(gTab + 1), (int16_t)w, (int16_t)h,
+                gSt.quality, gSt.profile, gSt.scalePct, 0, NULL)) return false;
+  gVpSentW = w; gVpSentH = h; gVpSentMs = brHostMillis();
+  gStats.viewW = w; gStats.viewH = h; gStats.viewportMsgs++;
+  return true;
+}
+
+// Se llama al principio de CADA tick (y al abrir). Es lo que convierte
+// "el gestor de ventanas cambio los limites" en "la app se re-maqueta, se
+// repinta y el servicio re-rasteriza", sin esperar a ningun toque.
+static void brSyncGeometry(){
+  int x, y, w, h; brHostContentRect(&x, &y, &w, &h);
+  if(!gGeoValid || x != gGeoX || y != gGeoY || w != gGeoW || h != gGeoH){
+    const bool first = !gGeoValid;
+    gGeoX = x; gGeoY = y; gGeoW = w; gGeoH = h; gGeoValid = true;
+    brEnsureScaleLine(w);
+    // Lo que hay en el lienzo se maqueto para otro tamano: se rehace entero en
+    // este mismo tick. La pagina se repinta desde la cache recortada al area
+    // nueva (nunca se sale de ella) y, donde aun no hay imagen del tamano
+    // nuevo, queda el fondo de pagina -- no franjas negras ni restos.
+    if(!first) gNeedFullRedraw = true;
+  }
+  const uint32_t now = brHostMillis();
+  uint16_t vw, vh; brViewportFor(&vw, &vh);
+  if(vw != gVpWantW || vh != gVpWantH){ gVpWantW = vw; gVpWantH = vh; gVpChangeMs = now; }
+  if(gVpWantW == gVpSentW && gVpWantH == gVpSentH) return;
+  // Sin sesion abierta no se manda nada: el HELLO de la conexion (o de la
+  // reconexion) ya lleva el tamano nuevo.
+  if(gNetState != BRN_READY) return;
+  if(now - gVpChangeMs < BR_VP_SETTLE_MS && now - gVpSentMs < BR_VP_MAX_LAG_MS) return;
+  brSendViewport();
+}
 
 // Botones de la barra: [atras] [adelante] [recargar] [omnibox] [menu]
 enum { BRBTN_BACK = 0, BRBTN_FWD, BRBTN_RELOAD, BRBTN_OMNI, BRBTN_MENU, BRBTN_N };
@@ -2037,6 +2154,11 @@ static void brDrawInternal(){
       snprintf(line, sizeof(line), "Protocolo: FBP/%d", FBP_VERSION);
       brHostText(px + pad, y, line, 1, t2); y += 18;
       snprintf(line, sizeof(line), "Pesta\xC3\xB1" "as: %d de %d", brTabCount(), brTabLimit());
+      brHostText(px + pad, y, line, 1, t2); y += 18;
+      // El viewport que el servicio tiene pedido AHORA: es la forma de ver
+      // que redimensionar la ventana llega de verdad al otro lado.
+      snprintf(line, sizeof(line), "Viewport: %ux%u (renegociado %u veces)",
+               (unsigned)gStats.viewW, (unsigned)gStats.viewH, (unsigned)gStats.viewportMsgs);
       brHostText(px + pad, y, line, 1, t2); y += 24;
 
       brHostText(px + pad, y, "Capacidades", 2, tx); y += 24;
@@ -2181,9 +2303,25 @@ static int brSettingsHit(int ty, int py){
 
 // ---- menu propio ----
 enum { BRM_NEWTAB = 0, BRM_BOOKMARK, BRM_BOOKMARKS, BRM_HISTORY, BRM_DOWNLOADS,
-       BRM_MEDIA, BRM_KEYBOARD, BRM_SETTINGS, BRM_ABOUT, BRM_CLOSE, BRM_N };
+       BRM_MEDIA, BRM_KEYBOARD, BRM_FULLSCREEN, BRM_ROTATE, BRM_SETTINGS, BRM_ABOUT,
+       BRM_CLOSE, BRM_N };
+// Filas que EXISTEN ahora: "Pantalla completa" solo si el host tiene modo
+// inmersivo, y "Girar" solo dentro de el. Una fila que no aplica no se pinta
+// atenuada: no esta.
+static int brMenuItems(int* out){
+  int n = 0;
+  const int fs = brHostFullscreenState();
+  for(int i = 0; i < BRM_N; i++){
+    if(i == BRM_FULLSCREEN && fs == BRFS_UNSUPPORTED) continue;
+    if(i == BRM_ROTATE && fs <= BRFS_OFF) continue;
+    out[n++] = i;
+  }
+  return n;
+}
 static const char* brMenuLabel(int i){
   switch(i){
+    case BRM_FULLSCREEN: return brHostFullscreenState() > 0 ? "Salir de pantalla completa" : "Pantalla completa";
+    case BRM_ROTATE:     return brHostFullscreenState() == BRFS_LANDSCAPE ? "Girar a vertical" : "Girar a horizontal";
     case BRM_NEWTAB:    return "Nueva pesta\xC3\xB1" "a";
     case BRM_BOOKMARK:  return brBookmarkIndex(gTabs[gTab].url) >= 0 ? "Quitar de favoritos" : "A\xC3\xB1" "adir a favoritos";
     case BRM_BOOKMARKS: return "Favoritos";
@@ -2205,26 +2343,49 @@ static bool brMenuEnabled(int i){
   return true;
 }
 #define BR_MENU_ROWH 42
+#define BR_MENU_ROWH_MIN 30
+// Alto de fila ADAPTADO al sitio que hay: en una ventana baja de DeX o en
+// pantalla completa horizontal (480 de alto) las filas se compactan hasta
+// BR_MENU_ROWH_MIN en vez de dejar las de abajo -- "Cerrar" incluida -- fuera
+// de alcance. Dibujo y toque usan la MISMA funcion.
+static int brMenuRowH(int n, int avail){
+  if(n <= 0) return BR_MENU_ROWH;
+  int r = (avail - 12) / n;
+  if(r > BR_MENU_ROWH) r = BR_MENU_ROWH;
+  if(r < BR_MENU_ROWH_MIN) r = BR_MENU_ROWH_MIN;
+  return r;
+}
 static void brMenuRect(int* mx, int* my, int* mw, int* mh){
   int x, y, w, h; brHostContentRect(&x, &y, &w, &h);
+  int items[BRM_N]; int n = brMenuItems(items);
   int mwid = w * 3 / 4; if(mwid > 300) mwid = 300; if(mwid > w - 16) mwid = w - 16;
-  int mhei = BRM_N * BR_MENU_ROWH + 12;
   int top = y + brTabBarH() + brToolH() + BR_PROG_H + 4;
+  int rowH = brMenuRowH(n, y + h - top - 4);
+  int mhei = n * rowH + 12;
   if(top + mhei > y + h) mhei = y + h - top - 4;
   *mx = x + w - mwid - 6; *my = top; *mw = mwid; *mh = mhei;
 }
+static int brMenuRowHNow(){
+  int x, y, w, h; brHostContentRect(&x, &y, &w, &h);
+  int items[BRM_N]; int n = brMenuItems(items);
+  int top = y + brTabBarH() + brToolH() + BR_PROG_H + 4;
+  return brMenuRowH(n, y + h - top - 4);
+}
 static void brDrawMenu(){
   int mx, my, mw, mh; brMenuRect(&mx, &my, &mw, &mh);
+  int items[BRM_N]; int n = brMenuItems(items);
+  int rowH = brMenuRowHNow();
   brHostFillRoundRect(mx, my, mw, mh, 12, brHostColor(BRC_SURF2));
   brHostDrawRoundRect(mx, my, mw, mh, 12, brHostColor(BRC_BORDER));
-  for(int i = 0; i < BRM_N; i++){
-    int ry = my + 6 + i * BR_MENU_ROWH;
-    if(ry + BR_MENU_ROWH > my + mh) break;
+  for(int k = 0; k < n; k++){
+    int i = items[k];
+    int ry = my + 6 + k * rowH;
+    if(ry + rowH > my + mh) break;
     bool en = brMenuEnabled(i);
     uint16_t c = (i == BRM_CLOSE) ? brHostColor(BRC_DANGER)
                                   : (en ? brHostColor(BRC_TXT) : brHostColor(BRC_MUTE));
-    brHostTextClip(mx + 14, ry + BR_MENU_ROWH / 2 - 7, brMenuLabel(i), 2, c, mx + mw - 12);
-    if(i + 1 < BRM_N) brHostFillRect(mx + 10, ry + BR_MENU_ROWH - 1, mw - 20, 1, brHostColor(BRC_DIV));
+    brHostTextClip(mx + 14, ry + rowH / 2 - 7, brMenuLabel(i), 2, c, mx + mw - 12);
+    if(k + 1 < n) brHostFillRect(mx + 10, ry + rowH - 1, mw - 20, 1, brHostColor(BRC_DIV));
   }
   brHostFlush(my, my + mh - 1);
 }
@@ -2413,6 +2574,16 @@ static void brMenuAction(int i){
     case BRM_KEYBOARD:
       if(brMenuEnabled(BRM_KEYBOARD)){ gEditTarget = BRE_PAGEKEY; gEdit[0] = 0; }
       break;
+    // Pantalla completa: el navegador solo lo PIDE; el host cambia el marco y
+    // el lienzo, y la geometria (brSyncGeometry) re-maqueta y renegocia el
+    // viewport en el tick siguiente. La sesion, la pagina, el scroll y el
+    // historial no se tocan: no se recarga nada.
+    case BRM_FULLSCREEN:
+      brHostFullscreenRequest(brHostFullscreenState() > 0 ? BRFS_OFF : BRFS_PORTRAIT);
+      break;
+    case BRM_ROTATE:
+      brHostFullscreenRequest(brHostFullscreenState() == BRFS_LANDSCAPE ? BRFS_PORTRAIT : BRFS_LANDSCAPE);
+      break;
     case BRM_CLOSE: gWantClose = true; break;
   }
   gNeedFullRedraw = true;
@@ -2456,13 +2627,13 @@ static void brSettingsAction(int row){
       else if(gSt.profile == BRQ_DATASAVER){ gSt.quality = 38; gSt.scalePct = 70; }
       else {                             gSt.quality = 62; gSt.scalePct = 100; }
       brSaveSettings();
-      brPushCmd(FBP_C_VIEWPORT, (uint8_t)(gTab + 1), 0, 0, gSt.quality, gSt.profile, gSt.scalePct, 0, NULL);
+      brSendViewport();          // con el tamano REAL: nunca 0x0
       break;
     }
     case SR_QUALITY: gSt.quality = (uint8_t)(gSt.quality >= 85 ? 25 : gSt.quality + 10); brSaveSettings();
-                     brPushCmd(FBP_C_VIEWPORT, (uint8_t)(gTab + 1), 0, 0, gSt.quality, gSt.profile, gSt.scalePct, 0, NULL); break;
+                     brSendViewport(); break;
     case SR_SCALE:   gSt.scalePct = (uint8_t)(gSt.scalePct >= 100 ? 50 : gSt.scalePct + 10); brSaveSettings();
-                     brPushCmd(FBP_C_VIEWPORT, (uint8_t)(gTab + 1), 0, 0, gSt.quality, gSt.profile, gSt.scalePct, 0, NULL); break;
+                     brSendViewport(); break;
     case SR_HISTORY: gSt.saveHistory = !gSt.saveHistory; brSaveSettings(); break;
     case SR_TELEM:   gSt.telemetry = !gSt.telemetry; brSaveSettings(); break;
     case SR_MEDIA:   gSt.mediaNative = !gSt.mediaNative; brSaveSettings(); break;
@@ -2620,8 +2791,10 @@ static void brHandleTouch(){
     if(t.tap){
       int mx, my, mw, mh; brMenuRect(&mx, &my, &mw, &mh);
       if(t.x >= mx && t.x < mx + mw && t.y >= my && t.y < my + mh){
-        int i = (t.y - my - 6) / BR_MENU_ROWH;
-        if(i >= 0 && i < BRM_N && brMenuEnabled(i)) brMenuAction(i);
+        int items[BRM_N]; int n = brMenuItems(items);
+        int k = (t.y - my - 6) / brMenuRowHNow();
+        int i = (k >= 0 && k < n) ? items[k] : -1;
+        if(i >= 0 && brMenuEnabled(i)) brMenuAction(i);
         else gNeedFullRedraw = true;
       } else {
         gView = gTabs[gTab].view;
@@ -2791,6 +2964,13 @@ void flexBrowserEnter(){
   char last[FLEXBR_URL_MAX];
   brHostPrefsGetStr("brlast", last, sizeof(last), "");
 
+  // La geometria se resuelve ANTES de arrancar la red: el HELLO tiene que
+  // salir con el viewport de ESTE lienzo (pantalla, ventana de DeX o pantalla
+  // completa), no con uno supuesto.
+  gGeoValid = false;
+  gVpSentW = gVpSentH = 0;
+  brSyncGeometry();
+
 #if FLEXBR_REMOTE_ON
   if((gCaps & FLEXBR_CAP_REMOTE) && gRx && !gNetTask){
     gNetStop = false;
@@ -2809,6 +2989,12 @@ void flexBrowserEnter(){
 
 void flexBrowserTick(){
   if(!gActive) return;
+
+  // 0) La geometria que dio el gestor de ventanas. Si cambio (redimensionar
+  //    o maximizar una ventana de DeX, pantalla completa, girar), la app se
+  //    re-maqueta y se repinta en ESTE tick y el servicio recibe el viewport
+  //    nuevo. Sin esperar a ningun toque.
+  brSyncGeometry();
 
   // 1) El tactil SIEMPRE primero: es lo que hace que la interfaz se
   //    sienta viva aunque este llegando una pagina pesada.
@@ -2926,6 +3112,10 @@ void flexBrowserResume(){
     if(!gKey) gKeyCap = 0;
   }
 #endif
+  // En segundo plano pudo cambiar el lienzo (otra orientacion, salir de
+  // pantalla completa, abrirse en una ventana de DeX): se mide antes de pintar.
+  gGeoValid = false;
+  brSyncGeometry();
   gNeedFullRedraw = true;
   brRenderAll();
 }
@@ -3000,6 +3190,15 @@ bool flexBrowserHandleSystemBack(){
     gView = gTabs[gTab].view; gMediaPlaying = false; gNeedFullRedraw = true;
     return true;
   }
+  // PANTALLA COMPLETA: "atras" vuelve al navegador normal con EXACTAMENTE lo
+  // que habia -- misma pagina, mismo scroll, mismo historial, mismo
+  // formulario --. No se recarga ni se reinicia nada: solo cambia el lienzo,
+  // y brSyncGeometry lo renegocia en el tick siguiente.
+  if(brHostFullscreenState() > 0){
+    brHostFullscreenRequest(BRFS_OFF);
+    gNeedFullRedraw = true;
+    return true;
+  }
   if(gTabs[gTab].view == BRV_INTERNAL && gTabs[gTab].page != BRP_NEWTAB){
     brOpenInternal(BRP_NEWTAB);
     return true;
@@ -3023,6 +3222,30 @@ const char* flexBrowserEditLabel(){
     case BRE_PAGEKEY:   return "Escribir en la p\xC3\xA1gina";
     default:            return "";
   }
+}
+
+bool flexBrowserKeyboardTapAbove(int x, int y){
+  if(!gActive || gEditTarget == BRE_NONE) return false;
+  if(gEditTarget == BRE_OMNIBOX){
+    // Tocar la barra de direcciones MIENTRAS se escribe en ella era cerrarla:
+    // el usuario volvia a tocarla para seguir y se le abria otra vez -- el
+    // "toca, se cierra, toca otra vez" de escribir una URL. Ahora se queda.
+    int bx, by, bw, bh;
+    return brBtnRect(BRBTN_OMNI, &bx, &by, &bw, &bh) &&
+           x >= bx && x < bx + bw && y >= by && y < by + bh;
+  }
+  if(gEditTarget == BRE_PAGEKEY){
+    // Escribiendo EN la pagina, la pagina sigue viva encima del teclado: el
+    // toque es para ella (otro campo, mover el cursor, un boton). Si quita el
+    // foco del campo, el servicio lo dira (STATE sin "editando") y el teclado
+    // se cerrara solo.
+    int px, py, pw, ph; brPageRect(&px, &py, &pw, &ph);
+    if(x < px || x >= px + pw || y < py || y >= py + ph) return false;
+    brPushCmd(FBP_C_POINTER, (uint8_t)(gTab + 1), (int16_t)(x - px), (int16_t)(y - py),
+              FBP_PTR_TAP, 0, 0, 0, NULL);
+    return true;
+  }
+  return false;                       // campos de Ajustes: tocar fuera cierra
 }
 
 void flexBrowserKeyText(const char* utf8){
@@ -3132,6 +3355,7 @@ void flexBrowserKeyBackspace(){}
 void flexBrowserKeyEnter(){}
 void flexBrowserKeyCancel(){}
 bool flexBrowserKeyboardOpen(){ return false; }
+bool flexBrowserKeyboardTapAbove(int, int){ return false; }
 const char* flexBrowserEditText(){ return ""; }
 const char* flexBrowserEditLabel(){ return ""; }
 const BrStats* flexBrowserStats(){ static BrStats s; return &s; }

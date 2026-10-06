@@ -27,11 +27,21 @@ class RelaySession(
     private val output: OutputStream,
     private val expectedToken: String,
     private val onEvent: (RelayServer.Event) -> Unit,
+    /** HELLO valido: esta conexion pasa a ser LA sesion (ver RelayServer). */
+    private val onAuthenticated: (RelaySession) -> Unit = {},
 ) {
     companion object {
         private const val TAG = "FlexPhone/RelaySess"
         /** Tope de una trama entrante. El P4 nunca manda nada grande. */
         private const val MAX_INBOUND = 64 * 1024
+        /**
+         * Silencio maximo de un P4 autenticado. Flex OS manda un ACK cada
+         * 250 ms y un PING cada 15 s mientras la sesion esta lista, asi que
+         * 30 s sin un solo byte es un P4 que ya no esta (se reinicio, perdio
+         * la Wi-Fi): la sesion se da por cerrada y sus pestanas quedan a la
+         * espera de la reconexion. Antes eran 60 s.
+         */
+        private const val IDLE_READ_MS = 30_000
         private const val OP_BINARY = 0x2
         private const val OP_CLOSE = 0x8
         private const val OP_PING = 0x9
@@ -92,7 +102,9 @@ class RelaySession(
             val msg = readFrame() ?: break
             handle(msg)
         }
-        RelayEngine.detach()
+        closed = true
+        txQueue.offer(TX_POISON)                // el hilo de salida termina y cierra el socket
+        RelayEngine.detach(this)                // solo cuenta si sigue siendo LA sesion
     }
 
     // ---------------------------------------------------------
@@ -157,6 +169,8 @@ class RelaySession(
             return
         }
         authenticated = true
+        runCatching { socket.soTimeout = IDLE_READ_MS }
+        onAuthenticated(this)
 
         val vp = RelayEngine.configure(hello)
         sendBinary(

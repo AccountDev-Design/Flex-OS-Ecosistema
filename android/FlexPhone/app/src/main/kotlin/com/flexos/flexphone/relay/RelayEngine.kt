@@ -26,6 +26,23 @@ import java.util.concurrent.atomic.AtomicLong
  *   · NO acumular fotogramas: si el P4 va atrasado, se descarta el
  *     viejo y se manda el MAS RECIENTE. Un fotograma antiguo entregado
  *     tarde es peor que ninguno.
+ *
+ * SESIONES Y PESTANAS -- LO QUE SOBREVIVE A UNA RECONEXION
+ * --------------------------------------------------------
+ *   · Una conexion nueva AUTENTICADA sustituye a la anterior ("la mas
+ *     nueva gana"): si el P4 se reinicio o su Wi-Fi se corto, el socket
+ *     viejo puede seguir pareciendo vivo un rato, y antes eso dejaba
+ *     fuera la reconexion hasta que caducara.
+ *   · Las pestanas NO se destruyen al irse el cliente: se conservan un
+ *     periodo de gracia (el ajuste "liberar memoria tras inactividad").
+ *     Si el P4 vuelve antes, encuentra la MISMA pagina, con su scroll,
+ *     sus formularios y su historial. Pasado ese tiempo se sueltan (cada
+ *     WebView es memoria que Android puede querer); el servidor sigue
+ *     escuchando.
+ *   · Si el proceso de render de una pestana muere, se rehace en la
+ *     misma direccion en vez de dejar un WebView muerto en pantalla.
+ *   · Un solo hilo de bombeo: cada arranque lleva su generacion y el
+ *     hilo de una generacion vieja termina solo.
  */
 object RelayEngine {
 
@@ -41,9 +58,15 @@ object RelayEngine {
     private var ctx: Context? = null
     private val main = Handler(Looper.getMainLooper())
 
+    // Las pestanas solo se tocan en el hilo PRINCIPAL. El hilo del bombeo lee
+    // la activa por [current], que se publica cada vez que cambia.
     private val tabs = LinkedHashMap<Int, RelayTab>()
     private var activeTab = 1
     private var nextTabId = 1
+    @Volatile private var current: RelayTab? = null
+    /** Tiempo que se conservan las pestanas sin cliente (ver SESIONES Y PESTANAS). */
+    @Volatile private var keepTabsMs = 10 * 60_000L
+    private val releaseTabs = Runnable { destroyTabs() }
 
     @Volatile private var session: RelaySession? = null
     @Volatile private var viewportW = 480
@@ -57,16 +80,19 @@ object RelayEngine {
     @Volatile private var suspended = false
 
     private val frameId = AtomicLong(1)
-    private var pump: Thread? = null
-    @Volatile private var pumping = false
+    private val pumpGen = java.util.concurrent.atomic.AtomicInteger(0)
     private var sessionIdStr = ""
 
-    fun init(context: Context, maxTabs: Int, jpegQuality: Int) {
+    fun init(context: Context, maxTabs: Int, jpegQuality: Int, keepTabsMin: Int = 10) {
         ctx = context.applicationContext
         maxTabsAllowed = maxTabs.coerceIn(1, 6)
         quality = jpegQuality.coerceIn(20, 90)
+        keepTabsMs = keepTabsMin.coerceIn(1, 120) * 60_000L
         sessionIdStr = "flexphone-" + System.currentTimeMillis().toString(16)
     }
+
+    /** ¿Hay un Flex OS conectado y autenticado ahora mismo? */
+    fun hasClient(): Boolean = session != null
 
     fun tabCount(): Int = tabs.size
     fun sessionId(): String = sessionIdStr
@@ -80,46 +106,101 @@ object RelayEngine {
         viewportH = hello.viewportH.coerceIn(120, 1920)
         quality = hello.quality.coerceIn(20, 90)
         maxFrame = hello.maxFrameBytes.coerceAtMost(512L * 1024).toInt()
-        main.post { tabs.values.forEach { it.resize(viewportW, viewportH) } }
+        val w = viewportW; val h = viewportH
+        main.post { tabs.values.forEach { it.resize(w, h) } }
         return viewportW to viewportH
     }
 
+    /**
+     * VIEWPORT: las MISMAS reglas que el servicio de Ubuntu/PC (session.js).
+     * Un ancho o alto por debajo de 120 significa "el tamano no cambia" -- no
+     * "hazlo de 120x120", que es lo que salia antes cuando el P4 mandaba 0x0
+     * al cambiar un ajuste de calidad. Calidad 0 = se queda; escala fuera de
+     * 25..100 = se queda.
+     */
     fun viewport(v: Fbp.Viewport) {
-        viewportW = v.w.coerceIn(120, 1920)
-        viewportH = v.h.coerceIn(120, 1920)
-        quality = v.quality.coerceIn(20, 90)
-        scalePct = v.scalePct.coerceIn(50, 100)
+        if (v.w >= 120 && v.h >= 120) {
+            viewportW = v.w.coerceAtMost(1920)
+            viewportH = v.h.coerceAtMost(1920)
+        }
+        if (v.quality > 0) quality = v.quality.coerceIn(20, 90)
+        if (v.scalePct in 25..100) scalePct = v.scalePct
         forceKeyframe = true
-        main.post { tabs.values.forEach { it.resize(viewportW, viewportH) } }
+        val w = viewportW; val h = viewportH
+        main.post {
+            tabs.values.forEach { it.resize(w, h) }
+            current?.markDirty()
+        }
     }
 
     // ---------------------------------------------------------
     //  Sesion
     // ---------------------------------------------------------
     fun attach(s: RelaySession) {
+        val old = session
         session = s
+        // La mas nueva gana: la anterior se cierra (ver SESIONES Y PESTANAS).
+        if (old != null && old !== s) runCatching { old.close(1001, "sustituida por una conexion nueva") }
         forceKeyframe = true
         suspended = false
-        main.post { ensureTab(activeTab) }
+        main.post {
+            main.removeCallbacks(releaseTabs)          // vuelve a tiempo: nada se suelta
+            ensureTab(activeTab)
+            publishCurrent()
+            // El P4 recien llegado no sabe nada: lista de pestanas y estado
+            // de la activa ya, sin esperar a que la pagina cambie.
+            pushTabs()
+            tabs[activeTab]?.let { onTabState(it) }
+            current?.markDirty()
+        }
         startPump()
     }
 
-    fun detach() {
+    /**
+     * Se fue la sesion [s]. Solo cuenta si es la ACTUAL: una sustituida que
+     * termina despues no puede dejar sin cliente a la nueva.
+     */
+    fun detach(s: RelaySession) {
+        if (session !== s) return
         session = null
         stopPump()
-        // Las pestanas se sueltan al irse el cliente: cada WebView vivo
-        // es memoria que Android puede querer, y volver a crearlo es
-        // barato comparado con que mate el proceso entero.
+        // Las pestanas se CONSERVAN un tiempo (ver SESIONES Y PESTANAS).
         main.post {
-            tabs.values.forEach { it.destroy() }
-            tabs.clear()
+            main.removeCallbacks(releaseTabs)
+            main.postDelayed(releaseTabs, keepTabsMs)
         }
+    }
+
+    /** Parada del relay (el servicio se va): todo fuera, ya. */
+    fun shutdown() {
+        val old = session
+        session = null
+        stopPump()
+        if (old != null) runCatching { old.close(1001, "relay detenido") }
+        main.post {
+            main.removeCallbacks(releaseTabs)
+            destroyTabs()
+        }
+    }
+
+    private fun destroyTabs() {
+        tabs.values.forEach { it.destroy() }
+        tabs.clear()
+        current = null
     }
 
     /** Marca el relay como suspendido por Android. */
     fun markSuspended(why: String) {
+        if (suspended) return
         suspended = true
         session?.sendError(0, 503, why)
+    }
+
+    /** Android ya no lo restringe: el bombeo vuelve a su ritmo. */
+    fun clearSuspended() {
+        if (!suspended) return
+        suspended = false
+        forceKeyframe = true
     }
 
     // ---------------------------------------------------------
@@ -137,6 +218,9 @@ object RelayEngine {
         return t
     }
 
+    /** Publica la pestana activa para el hilo del bombeo. Hilo principal. */
+    private fun publishCurrent() { current = tabs[activeTab] }
+
     private fun tab(id: Int): RelayTab? = tabs[id]
 
     fun newTab() = main.post {
@@ -147,18 +231,21 @@ object RelayEngine {
         nextTabId++
         activeTab = nextTabId
         ensureTab(nextTabId)
+        publishCurrent()
         pushTabs()
     }
 
     fun closeTab(id: Int) = main.post {
         tabs.remove(id)?.destroy()
         if (activeTab == id) activeTab = tabs.keys.firstOrNull() ?: 1
+        publishCurrent()
         pushTabs()
     }
 
     fun selectTab(id: Int) = main.post {
         activeTab = id
         ensureTab(id)
+        publishCurrent()
         forceKeyframe = true
         pushTabs()
     }
@@ -175,6 +262,7 @@ object RelayEngine {
     // ---------------------------------------------------------
     fun navigate(ch: Int, url: String) = main.post {
         val t = ensureTab(if (ch == 0) activeTab else ch) ?: return@post
+        publishCurrent()
         touch(); t.navigate(url)
     }
     fun back(ch: Int) = main.post { tab(ch)?.back(); touch() }
@@ -199,6 +287,21 @@ object RelayEngine {
     private fun touch() { lastInteractionMs = System.currentTimeMillis() }
 
     private fun onTabState(t: RelayTab) {
+        // El proceso de render de la pestana murio: se rehace AQUI, en la misma
+        // direccion, en vez de dejar un WebView muerto. El P4 recibe el error
+        // (abajo) y despues la pagina vuelve sola.
+        if (t.renderGone && tabs[t.id] === t) {
+            val url = t.lastUrl()
+            main.post {
+                if (tabs[t.id] !== t) return@post
+                tabs.remove(t.id)
+                t.destroy()
+                val n = ensureTab(t.id)
+                publishCurrent()
+                if (n != null && url.isNotEmpty() && url != "about:blank") n.navigate(url)
+                forceKeyframe = true
+            }
+        }
         val s = session ?: return
         var flags = 0
         if (t.loading) flags = flags or Fbp.ST_LOADING
@@ -215,52 +318,65 @@ object RelayEngine {
     //  Bombeo de fotogramas
     // ---------------------------------------------------------
     private fun startPump() {
-        if (pumping) return
-        pumping = true
-        pump = Thread({
-            while (pumping) {
-                val s = session ?: break
-                if (suspended) { Thread.sleep(500); continue }
-                val active = System.currentTimeMillis() - lastInteractionMs < ACTIVE_WINDOW_MS
-                val fps = if (active) FPS_MAX else FPS_IDLE
-                val periodMs = (1000 / fps).toLong()
-                val t0 = System.currentTimeMillis()
+        // UNA generacion por arranque. Antes, un detach() seguido de un attach()
+        // rapido (una reconexion) volvia a poner `pumping` a true antes de que
+        // el hilo viejo lo viera en false: quedaban DOS hilos capturando el
+        // mismo bitmap y mandando fotogramas duplicados.
+        val gen = pumpGen.incrementAndGet()
+        Thread({
+            try {
+                while (pumpGen.get() == gen) {
+                    val s = session ?: break
+                    if (suspended) { Thread.sleep(500); continue }
+                    val active = System.currentTimeMillis() - lastInteractionMs < ACTIVE_WINDOW_MS
+                    val fps = if (active) FPS_MAX else FPS_IDLE
+                    val periodMs = (1000 / fps).toLong()
+                    val t0 = System.currentTimeMillis()
 
-                val t = tabs[activeTab]
-                if (t != null) {
-                    val force = forceKeyframe
-                    val img = t.capture(quality, scalePct, force)
-                    if (img != null) {
-                        if (img.size > maxFrame) {
-                            // No cabe en lo que el P4 dijo que puede
-                            // recibir: se baja la calidad en vez de
-                            // mandar algo que va a descartar.
-                            quality = (quality - 10).coerceAtLeast(20)
-                            Log.i(TAG, "fotograma demasiado grande; calidad -> $quality")
-                        } else {
-                            forceKeyframe = false
-                            val ok = s.sendFrame(
-                                channel = t.id, x = 0, y = 0,
-                                w = viewportW, h = viewportH,
-                                keyframe = force, last = true,
-                                frameId = frameId.getAndIncrement(), image = img,
-                            )
-                            if (!ok) break
+                    val t = current
+                    if (t != null) {
+                        val force = forceKeyframe
+                        val cap = t.capture(quality, scalePct, force)
+                        if (cap != null && pumpGen.get() == gen) {
+                            if (cap.jpeg.size > maxFrame) {
+                                // No cabe en lo que el P4 dijo que puede
+                                // recibir: se baja la calidad en vez de
+                                // mandar algo que va a descartar.
+                                quality = (quality - 10).coerceAtLeast(20)
+                                Log.i(TAG, "fotograma demasiado grande; calidad -> $quality")
+                            } else {
+                                forceKeyframe = false
+                                // El rectangulo es el que la captura CUBRE (ver
+                                // RelayTab.Capture), en px CSS del viewport.
+                                val ok = s.sendFrame(
+                                    channel = t.id, x = 0, y = 0,
+                                    w = cap.viewW, h = cap.viewH,
+                                    keyframe = force, last = true,
+                                    frameId = frameId.getAndIncrement(), image = cap.jpeg,
+                                )
+                                if (!ok) break
+                            }
                         }
                     }
+                    // Ritmo por TIEMPO TRANSCURRIDO: si la captura tardo
+                    // mas que el periodo, se sigue de inmediato en vez de
+                    // acumular retraso.
+                    val spent = System.currentTimeMillis() - t0
+                    val wait = periodMs - spent
+                    if (wait > 0) Thread.sleep(wait)
                 }
-                // Ritmo por TIEMPO TRANSCURRIDO: si la captura tardo
-                // mas que el periodo, se sigue de inmediato en vez de
-                // acumular retraso.
-                val spent = System.currentTimeMillis() - t0
-                val wait = periodMs - spent
-                if (wait > 0) Thread.sleep(wait)
+            } catch (e: InterruptedException) {
+                // parada: nada que hacer
+            } catch (e: Exception) {
+                // Un fallo aqui NO puede tumbar la app (hilo propio = proceso
+                // muerto). Se registra el tipo y el bombeo de esta generacion
+                // termina; la siguiente conexion arranca otro.
+                Log.w(TAG, "bombeo detenido: ${e.javaClass.simpleName}")
             }
         }, "flex-relay-pump").apply { isDaemon = true; start() }
     }
 
     private fun stopPump() {
-        pumping = false
-        pump = null
+        pumpGen.incrementAndGet()          // el hilo actual sale en su siguiente vuelta
     }
 }

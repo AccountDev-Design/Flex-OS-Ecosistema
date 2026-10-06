@@ -37,7 +37,7 @@
 #include "FlexOS_FS.h"
 
 // Guardia de version (ver el bloque 0 de FlexOS_Browser.h).
-static_assert(FLEXBR_BUILD == 4,
+static_assert(FLEXBR_BUILD == 5,
   "FlexOS_Browser_Bridge.h y FlexOS_Browser.h son de versiones distintas: "
   "copia otra vez LOS CUATRO ficheros del navegador a la carpeta del sketch.");
 
@@ -72,18 +72,85 @@ static int brKbLastBottom = -1;
 // teclado se dibujaria por debajo del area visible de la ventana y
 // pasaria lo mismo que en la pantalla completa: teclas que responden
 // pero que no se ven.
-static int brKbBottom(){ return gHosted ? gAppH : SCR_H; }
-static int brKbDY(){ return gHosted ? (gAppH - SCR_H) : 0; }
+//
+// EL LIENZO DEL TECLADO. El teclado es del SISTEMA, pero vive dentro del
+// lienzo LOGICO de la app que lo abre:
+//   · pantalla completa vertical .... 480x800 (el de siempre: identidad);
+//   · pantalla completa horizontal .. 800x480 (modo inmersivo girado, gLand);
+//   · ventana de Modo PC/DeX ....... el area de cliente (gAppW x gAppH),
+//                                     vertical u horizontal segun la ventana.
+static int brKbCanvasW(){ if(gHosted) return gAppW; return gLand ? SCR_H : SCR_W; }
+static int brKbCanvasH(){ if(gHosted) return gAppH; return gLand ? SCR_W : SCR_H; }
+static int brKbBottom(){ return brKbCanvasH(); }
+static int brKbDY(){ return brKbCanvasH() - SCR_H; }
+
+// LO QUE HAY DEBAJO DEL TECLADO Y NO ES SUYO: la barra de navegacion del
+// sistema. Con la barra ocupando su franja (modo botones, app a pantalla
+// completa vertical) el teclado se apoya ENCIMA, igual que en Notas; sin ella
+// (gestos, pantalla completa inmersiva, ventana de DeX) llega al borde.
+// Antes el navegador no fijaba esto y heredaba el valor de la ULTIMA
+// superficie que abrio un teclado: con 0, la fila de funciones (shift, ?123,
+// idioma, espacio, borrar, Ir) caia DEBAJO de la barra. La barra se estampa
+// encima y se queda esos toques ANTES que la app, asi que "espacio" llevaba a
+// Inicio, "Ir" a Recientes y "shift" cerraba el teclado. Escribir una
+// direccion era una carrera de obstaculos.
+static void brKbSyncReserve(){
+#ifdef NAV_H
+  kbBotReserve = (!gHosted && navBarReservesSpace()) ? NAV_H : 0;
+#endif
+}
+
+// Geometria horizontal del teclado AJUSTADA AL LIENZO: centrado si sobra
+// ancho, y con teclas mas estrechas si falta (ventana estrecha de DeX). Dibujo
+// y toque la ponen y la quitan con el MISMO par de llamadas, asi que lo que se
+// ve y lo que se toca no pueden separarse. A pantalla completa vertical el
+// resultado es exactamente la geometria que eligio el usuario.
+#if KB_SIZE_CONFIG_ON
+static int brKbSaveKW = 0, brKbSaveX = 0, brKbGeomDepth = 0;
+#endif
+static void brKbGeomBegin(){
+  brKbSyncReserve();
+#if KB_SIZE_CONFIG_ON
+  if(brKbGeomDepth++ > 0) return;
+  brKbSaveKW = kbKW; brKbSaveX = kbX;
+  const int cw = brKbCanvasW();
+  int gw = KB_COLS * kbKW + (KB_COLS - 1) * kbGap;
+  if(gw > cw - 4){
+    int kw = (cw - 4 - (KB_COLS - 1) * kbGap) / KB_COLS;
+    if(kw < 14) kw = 14;
+    kbKW = kw;
+    gw = KB_COLS * kbKW + (KB_COLS - 1) * kbGap;
+  }
+  kbX = (cw - gw) / 2; if(kbX < 0) kbX = 0;
+#endif
+}
+static void brKbGeomEnd(){
+#if KB_SIZE_CONFIG_ON
+  if(brKbGeomDepth <= 0) return;
+  if(--brKbGeomDepth > 0) return;
+  kbKW = brKbSaveKW; kbX = brKbSaveX;
+#endif
+}
 
 // Altura reservada por el teclado. El navegador maqueta CONTRA esto
 // (brHostKeyboardTop), asi que su contenido nunca queda debajo de las
 // teclas y no hace falta desplazar nada a mano.
 static int brKbTop(){
   if(!flexBrowserKeyboardOpen()) return brKbBottom();
+  brKbSyncReserve();
   int top = kbPanelTop() - 34 + brKbDY();   // 34 px para la linea del campo
-  int floorY = gHosted ? 0 : 80;
+  int floorY = (gHosted || gLand) ? 0 : 80;
   if(top < floorY) top = floorY;
   return top;
+}
+
+// Coordenadas del toque EN EL LIENZO de la app. Dentro de una ventana de DeX
+// ya llegan traducidas (DeX inyecta un Touch en coordenadas de lienzo); a
+// pantalla completa horizontal hay que girarlas, con la MISMA convencion que
+// putPhys/dexPointer: x logica = y fisica, y logica = (SCR_W-1) - x fisica.
+static void brTouchToCanvas(int px, int py, int &x, int &y){
+  if(gLand && !gHosted){ x = py; y = (SCR_W - 1) - px; }
+  else { x = px; y = py; }
 }
 
 // -------------------------------------------------------------
@@ -153,33 +220,60 @@ static void brKbDebugMark(int x, int y, uint16_t c){
 //  final), asi que lo que pinte no lo puede tapar ningun repintado
 //  posterior de la app.
 // -------------------------------------------------------------
+// Firma de lo que el teclado ENSENA (texto, capa, mayusculas, idioma). En
+// horizontal a pantalla completa la franja del teclado son COLUMNAS fisicas
+// del panel: volcarla entera en cada vuelta seria mandar la pantalla completa
+// por cuadro. Ahi solo se vuelca cuando algo cambio (o cada medio segundo,
+// como red de seguridad contra un repintado que se haya colado debajo).
+static uint32_t brKbLastSig = 0;
+static uint32_t brKbLastFlushMs = 0;
+static uint32_t brKbHostSig = 0;          // ultima firma volcada DENTRO de una ventana de DeX
+static uint32_t brKbSig(){
+  uint32_t h = 2166136261u;
+  for(const char* p = flexBrowserEditText(); *p; p++) h = (h ^ (uint8_t)*p) * 16777619u;
+  h = (h ^ (uint32_t)(uintptr_t)mapaActivo) * 16777619u;
+  h = (h ^ (kbShift ? 1u : 0u) ^ (kbLangEs ? 2u : 0u)) * 16777619u;
+  return h ? h : 1u;
+}
+
 static void brKbRender(){
   if(!flexBrowserKeyboardOpen()) return;
 
+  brKbGeomBegin();
   const int dy       = brKbDY();
   const int bottom   = brKbBottom();
   const int ky       = KB_Y + dy;
   const int panelTop = brKbTop();
-  if(panelTop >= bottom || !fb) return;      // ventana demasiado baja o sin lienzo
+  const int cw       = brKbCanvasW();
+  // DESTINO: el lienzo de la app. A pantalla completa es el framebuffer real;
+  // dentro de una ventana de DeX es el lienzo de ESA ventana (gRtTarget). Antes
+  // se escribia SIEMPRE en fb con coordenadas verticales: en DeX el teclado
+  // caia girado encima del escritorio, fuera de su ventana, y dentro de la
+  // ventana no se veia ninguna tecla.
+  uint16_t* target = gRtTarget ? gRtTarget : fb;
+  if(panelTop >= bottom || !target){ brKbGeomEnd(); return; }
 
   // Se apunta la franja EXACTA que se va a pintar. Hace falta al
   // cerrar: la fila de funciones (shift, ?123, Es, espacio, borrar, Ir)
-  // vive entre y=732 y y=792 a pantalla completa, mientras que el area
-  // util de la app termina en WIN_BOT = 736. Esos 56 px de mas no los
-  // repinta NADIE cuando el teclado se cierra, y por eso quedaba la
-  // fila inferior flotando sobre el navegador. brKbErase() los borra.
+  // es la ultima del lienzo, y esa franja no la repinta NADIE cuando el
+  // teclado se cierra. brKbErase() la borra.
   brKbLastTop = panelTop;
   brKbLastBottom = bottom;
 
   // ---- se guarda TODO el estado grafico ----
   uint16_t* oBuf = gBuf;
   const int  oy0 = gClipY0, oy1 = gClipY1, ox0 = gClipX0, ox1 = gClipX1;
-  const bool oLand = gLand;
 
-  gBuf    = fb;              // framebuffer real, sin desvios
-  gLand   = false;           // el teclado siempre es vertical
-  gClipY0 = panelTop; gClipY1 = bottom - 1;
-  gClipX0 = 0;        gClipX1 = SCR_W - 1;
+  gBuf = target;
+  // gLand NO se toca: es la orientacion del LIENZO (ventana horizontal de DeX
+  // o pantalla completa girada) y las primitivas ya giran con ella. En
+  // vertical la banda de recorte es la del teclado; en horizontal la banda del
+  // motor acota la X logica, asi que se deja el lienzo entero.
+  if(gLand){ gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1; }
+  else {
+    gClipY0 = panelTop; gClipY1 = bottom - 1;
+    gClipX0 = 0;        gClipX1 = (cw < SCR_W ? cw : SCR_W) - 1;
+  }
 
   // Cabecera del campo: que se esta editando y el texto actual. Se pinta
   // aqui y no en el navegador porque este trozo de pantalla pertenece al
@@ -187,19 +281,19 @@ static void brKbRender(){
   // Los colores salen de brHostColor() y no de las macros TH_* del .ino:
   // esas solo existen en Ultra (el tema semantico aun no esta en las otras
   // dos placas) y este fichero es el MISMO para las tres.
-  fillRect(0, panelTop, SCR_W, bottom - panelTop, brHostColor(BRC_PAGE));
+  fillRect(0, panelTop, cw, bottom - panelTop, brHostColor(BRC_PAGE));
   drawText(12, panelTop + 4, flexBrowserEditLabel(), 1, brHostColor(BRC_MUTE));
   const char* txt = flexBrowserEditText();
   int tw = textW(txt, 2);
-  if(tw <= SCR_W - 24) drawText(12, panelTop + 16, txt, 2, brHostColor(BRC_TXT));
-  else                 drawTextR(SCR_W - 12, panelTop + 16, txt, 2, brHostColor(BRC_TXT));
+  if(tw <= cw - 24) drawText(12, panelTop + 16, txt, 2, brHostColor(BRC_TXT));
+  else              drawTextR(cw - 12, panelTop + 16, txt, 2, brHostColor(BRC_TXT));
 
   // El panel de vidrio escribe en gBuf con indexacion directa y se salta
   // la banda de recorte (ver drawLiquidGlassPanelEx). Con el teclado eso
   // daria igual porque la franja es suya entera, pero se usa la ruta
   // plana cuando el vidrio esta apagado, como en el resto del sistema.
-  if(uiGlass) drawLiquidGlassPanel(0, ky - 4, SCR_W, bottom - (ky - 4), 0, kbColPanel());
-  else        fillRect(0, ky - 4, SCR_W, bottom - (ky - 4), kbColPanel());
+  if(uiGlass) drawLiquidGlassPanel(0, ky - 4, cw, bottom - (ky - 4), 0, kbColPanel());
+  else        fillRect(0, ky - 4, cw, bottom - (ky - 4), kbColPanel());
 
   const int fs = kbFontSize();
   for(int r = 0; r < KB_ROWS; r++) for(int c = 0; c < KB_COLS; c++){
@@ -218,10 +312,12 @@ static void brKbRender(){
   const int probeX = KB_X + KB_KW / 2;
   const int probeY = ky + (KB_KH + KB_GAP) + KB_KH / 2;
   uint16_t probe = 0xFFFF;
-  if(probeX >= 0 && probeX < SCR_W && probeY >= 0 && probeY < SCR_H)
-    probe = fb[(size_t)probeY * SCR_W + probeX];
-  brKbDebugMark(0, panelTop, rgb565(255, 0, 255));               // magenta: inicio de la franja
-  brKbDebugMark(SCR_W - 12, bottom - 12, rgb565(0, 255, 255));   // cian: final de la franja
+  if(!gLand && probeX >= 0 && probeX < SCR_W && probeY >= 0 && probeY < SCR_H)
+    probe = target[(size_t)probeY * SCR_W + probeX];
+  if(target == fb){
+    brKbDebugMark(0, panelTop, rgb565(255, 0, 255));               // magenta: inicio de la franja
+    brKbDebugMark(SCR_W - 12, bottom - 12, rgb565(0, 255, 255));   // cian: final de la franja
+  }
   static uint32_t dbgLast = 0;
   static uint32_t dbgN = 0;
   dbgN++;
@@ -229,7 +325,7 @@ static void brKbRender(){
     dbgLast = millis();
     Serial.printf("[KB] #%u buf=%s(%p) fb=%p land=%d hosted=%d gAppH=%d\n",
                   (unsigned)dbgN,
-                  (gBuf == fb ? "fb" : (gBuf == bbuf ? "bbuf" : "otro")),
+                  (gBuf == fb ? "fb" : (gBuf == bbuf ? "bbuf" : "lienzo")),
                   (void*)gBuf, (void*)fb, (int)gLand, (int)gHosted, gAppH);
     Serial.printf("     franja=%d..%d  ky=%d  clip=y[%d..%d] x[%d..%d]  kbSize=%d %dx%d\n",
                   panelTop, bottom - 1, ky, gClipY0, gClipY1, gClipX0, gClipX1,
@@ -241,12 +337,40 @@ static void brKbRender(){
 #endif
 
   // ---- se devuelve el estado grafico EXACTAMENTE como estaba ----
-  gBuf = oBuf; gLand = oLand;
+  gBuf = oBuf;
   gClipY0 = oy0; gClipY1 = oy1; gClipX0 = ox0; gClipX1 = ox1;
+  brKbGeomEnd();
 
   // El volcado va DESPUES de restaurar: flxFlush no mira el recorte, y
-  // asi la banda que se sube al panel es exactamente la del teclado.
-  flxFlush(panelTop, bottom - 1);
+  // asi la banda que se sube al panel es exactamente la del teclado. Dentro
+  // de una ventana de DeX flxFlush solo marca el lienzo como sucio: es DeX
+  // quien lo compone dentro de su ventana.
+  if(gLand && !gRtTarget){
+    const uint32_t sig = brKbSig();
+    if(sig != brKbLastSig || millis() - brKbLastFlushMs > 500){
+      brKbLastSig = sig; brKbLastFlushMs = millis();
+      flxFlush(0, SCR_H - 1);
+    }
+  } else if(gRtTarget){
+    // DENTRO DE UNA VENTANA DE DeX el volcado no sube nada al panel: marca el
+    // lienzo como sucio y DeX lo recompone (reescalado + composicion de la
+    // banda). La ventana recibe tick en CADA vuelta, asi que marcarlo siempre
+    // recompondria la ventana a ritmo de frame mientras el teclado este
+    // abierto aunque no cambie nada. Las teclas SI se redibujan en el lienzo
+    // en cada vuelta (siguen siendo la ultima capa): si la app repinto algo,
+    // ella misma marco el lienzo y la composicion ya las incluye. Solo falta
+    // marcarlo cuando cambia el propio teclado: texto, capa, mayusculas,
+    // idioma, su franja o la ventana en la que esta.
+    uint32_t sig = brKbSig();
+    sig = (sig ^ (uint32_t)panelTop) * 16777619u;
+    sig = (sig ^ (uint32_t)bottom) * 16777619u;
+    sig = (sig ^ (uint32_t)cw) * 16777619u;
+    sig = (sig ^ (uint32_t)(uintptr_t)gRtTarget) * 16777619u;
+    if(!sig) sig = 1u;
+    if(sig != brKbHostSig){ brKbHostSig = sig; flxFlush(panelTop, bottom - 1); }
+  } else {
+    flxFlush(panelTop, bottom - 1);
+  }
 }
 
 // -------------------------------------------------------------
@@ -269,49 +393,77 @@ static void brKbRender(){
 //  se le pide un repintado completo con el area ya crecida.
 // -------------------------------------------------------------
 static void brKbErase(){
-  if(brKbLastTop < 0 || !fb) { brKbLastTop = brKbLastBottom = -1; return; }
+  brKbHostSig = 0;                         // al volver a abrirse se vuelca seguro
+  uint16_t* target = gRtTarget ? gRtTarget : fb;
+  if(brKbLastTop < 0 || !target) { brKbLastTop = brKbLastBottom = -1; return; }
   int top = brKbLastTop, bottom = brKbLastBottom;
   brKbLastTop = brKbLastBottom = -1;
+  const int ch = brKbCanvasH(), cw = brKbCanvasW();
   if(top < 0) top = 0;
-  if(bottom > SCR_H) bottom = SCR_H;
+  if(bottom > ch) bottom = ch;
   if(bottom <= top) return;
 
   uint16_t* oBuf = gBuf;
   const int  oy0 = gClipY0, oy1 = gClipY1, ox0 = gClipX0, ox1 = gClipX1;
-  const bool oLand = gLand;
 
-  gBuf    = fb;
-  gLand   = false;
-  gClipY0 = top; gClipY1 = bottom - 1;
-  gClipX0 = 0;   gClipX1 = SCR_W - 1;
+  // Mismo lienzo y misma orientacion en los que se pinto (ver brKbRender).
+  gBuf = target;
+  if(gLand){ gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1; }
+  else { gClipY0 = top; gClipY1 = bottom - 1; gClipX0 = 0; gClipX1 = SCR_W - 1; }
 
-  fillRect(0, top, SCR_W, bottom - top, brHostColor(BRC_WIN));
+  fillRect(0, top, cw, bottom - top, brHostColor(BRC_WIN));
 
-  gBuf = oBuf; gLand = oLand;
+  gBuf = oBuf;
   gClipY0 = oy0; gClipY1 = oy1; gClipX0 = ox0; gClipX1 = ox1;
 
   // El marco del sistema (barra de estado arriba, barra de navegacion
   // abajo) se repinta entero: es barato y evita razonar sobre que trozo
-  // cayo dentro de la franja borrada.
+  // cayo dentro de la franja borrada. Dentro de una ventana de DeX y a
+  // pantalla completa no hay marco: no hace nada.
   appDrawChrome(IC_NAV);
 
   // Y el navegador vuelve a pintar su contenido con el area ya completa.
   flexBrowserForceRepaint();
 
-  flxFlush(top, bottom - 1);
+  if(gLand && !gRtTarget) flxFlush(0, SCR_H - 1);
+  else                    flxFlush(top, bottom - 1);
 }
 
 // Devuelve true si el toque se consumio dentro del teclado.
+//
+// LA TECLA SE RESUELVE DONDE SE APOYO EL DEDO, al soltar. Antes solo valia un
+// "tap" perfecto (soltar sin moverse mas de 12 px y en menos de 550 ms): una
+// pulsacion con un poco de deslizamiento -- lo normal al escribir deprisa con
+// el pulgar -- se perdia entera, y el usuario tenia que repetirla. Ahora se
+// acepta mientras el dedo no se haya ido mas de UNA tecla de donde se apoyo.
+// Y un episodio que EMPIEZA en el teclado es del teclado hasta que se levanta
+// el dedo: si sube por encima, no toca la pagina ni cierra el teclado.
 static bool brKbTouch(){
   if(!flexBrowserKeyboardOpen()) return false;
-  if(T.y < brKbTop()) return false;              // por encima: es de la app
-  if(!T.tap){ return true; }                     // el area del teclado consume todo
+  int cx, cy; brTouchToCanvas(T.x, T.y, cx, cy);
+  // Donde se APOYO el dedo. En un toque el sistema ya deja T.x/T.y en ese
+  // punto (ver tDoRelease); con el dedo abajo o al soltar tras moverse, es
+  // T.startX/T.startY.
+  int sx = cx, sy = cy;
+  if(!T.tap && (T.down || T.released)) brTouchToCanvas(T.startX, T.startY, sx, sy);
+  const int top = brKbTop();
+  if(sy < top) return false;                     // empezo por encima: es de la app
+  if(!T.released && !T.tap) return true;         // el teclado se queda el episodio hasta soltar
+
+  brKbGeomBegin();
   // Las funciones kb* del sistema razonan en coordenadas ABSOLUTAS de
   // pantalla, asi que se deshace el desplazamiento antes de
-  // preguntarles. A pantalla completa dy es 0: la identidad.
-  const int ty = T.y - brKbDY();
-  int fi = kbFRowHit(T.x, ty);
+  // preguntarles. A pantalla completa vertical dy es 0: la identidad.
+  const int dy = brKbDY();
+  const int px = sx, py = sy - dy;               // donde se APOYO
+  const int ex = cx, ey = cy - dy;               // donde se levanto
+  const int tolX = KB_KW + KB_GAP, tolY = KB_KH + KB_GAP;
+  const bool stayed = (ex - px <= tolX && px - ex <= tolX && ey - py <= tolY && py - ey <= tolY);
+  if(!stayed){ brKbGeomEnd(); return true; }     // se fue lejos: no es una pulsacion
+
+  int fi = kbFRowHit(px, py);
   if(fi >= 0){
+    brKbGeomEnd();
     if(fi == 0) kbShift = !kbShift;
     else if(fi == 1) mapaActivo = (mapaActivo == LAYOUT_NUM) ? LAYOUT_EMOJI
                                 : (mapaActivo == LAYOUT_EMOJI) ? (kbLangEs ? LAYOUT_ES : LAYOUT_EN)
@@ -325,7 +477,8 @@ static bool brKbTouch(){
     // ademas seria dibujarlo dos veces por pulsacion.
     return true;
   }
-  int cell = kbCellAt(T.x, ty);
+  int cell = kbCellAt(px, py);
+  brKbGeomEnd();
   if(cell >= 0){
     const char* k = mapaActivo[cell / KB_COLS][cell % KB_COLS];
     if(kbShift && k[1] == 0 && k[0] >= 'a' && k[0] <= 'z'){
@@ -352,6 +505,29 @@ const char* brHostDeviceName(){ return cfgName; }
 uint32_t brHostMillis(){ return (uint32_t)millis(); }
 int  brHostKeyboardTop(){ return brKbTop(); }
 
+// PANTALLA COMPLETA. El navegador la pide; quien la aplica es el marco de
+// apps del sistema (immersive* en FlexOS_Ultra_AppFramework.h), que es el
+// unico que decide el lienzo, las barras y la orientacion. Dentro de una
+// ventana de Modo PC/DeX no se ofrece: alli se maximiza la VENTANA. En las
+// placas sin modo inmersivo (S3, Pro) la opcion no existe.
+int brHostFullscreenState(){
+#ifdef FLEXOS_IMMERSIVE_ON
+  if(gHosted) return BRFS_UNSUPPORTED;
+  return immersiveState(IC_NAV);
+#else
+  return BRFS_UNSUPPORTED;
+#endif
+}
+void brHostFullscreenRequest(int st){
+#ifdef FLEXOS_IMMERSIVE_ON
+  if(gHosted) return;
+  if(st > 0) gImmPrefLand = (st == BRFS_LANDSCAPE);
+  immersiveRequest(IC_NAV, st);
+#else
+  (void)st;
+#endif
+}
+
 // Area util de la app. Sale de uiBox(), que es lo que usan TODAS las
 // apps APP_FLEX: a pantalla completa es la ventana y dentro de una
 // ventana de Modo PC/DeX es el area de cliente. Por eso el navegador se
@@ -365,6 +541,13 @@ void brHostContentRect(int* x, int* y, int* w, int* h){
   int kbTop = brKbTop();
   if(kbTop < by + bh) bh = kbTop - by;
   if(bh < 64) bh = 64;
+  *x = bx; *y = by; *w = bw; *h = bh;
+}
+// El lienzo que el gestor de ventanas le dio a la app, sin descontar el
+// teclado (ver FlexOS_Browser.h).
+void brHostLayoutRect(int* x, int* y, int* w, int* h){
+  int bx, by, bw, bh;
+  uiBox(bx, by, bw, bh);
   *x = bx; *y = by; *w = bw; *h = bh;
 }
 
@@ -383,6 +566,18 @@ void brHostGetTouch(BrTouch* t){
   t->swipeLeft = T.swipeLeft; t->swipeRight = T.swipeRight;
   t->x = T.x; t->y = T.y; t->startX = T.startX; t->startY = T.startY;
   t->dx = T.dx; t->dy = T.dy; t->downMs = (uint32_t)T.downMs;
+  // PANTALLA COMPLETA HORIZONTAL: el navegador maqueta en coordenadas del
+  // lienzo girado (800x480) y el tactil llega en las del panel (480x800). Se
+  // giran aqui, con la misma convencion que putPhys, para que tocar un boton
+  // sea tocar ESE boton. (En una ventana de DeX ya llegan traducidas.)
+  if(gLand && !gHosted){
+    brTouchToCanvas(T.x, T.y, t->x, t->y);
+    brTouchToCanvas(T.startX, T.startY, t->startX, t->startY);
+    t->dx = t->x - t->startX; t->dy = t->y - t->startY;
+    // Fisico arriba (y baja) = logico izquierda; fisico izquierda = logico abajo.
+    t->swipeLeft = T.swipeUp;  t->swipeRight = T.swipeDown;
+    t->swipeDown = T.swipeLeft; t->swipeUp = T.swipeRight;
+  }
 }
 void brHostConsumeTouch(){
   T.pressed = false; T.released = false; T.tap = false; T.moved = false;
@@ -473,16 +668,38 @@ void brHostTextC(int cx, int y, const char* s, int size, uint16_t c){ drawTextC(
 void brHostTextR(int rx, int y, const char* s, int size, uint16_t c){ drawTextR(rx, y, s, size, c); }
 void brHostTextClip(int x, int y, const char* s, int size, uint16_t c, int mr){ drawTextClip(x, y, s, size, c, mr); }
 int  brHostTextW(const char* s, int size){ return textW(s, size); }
-void brHostFlush(int y0, int y1){ flxFlush(y0, y1); }
+// VOLCADO Y RECORTE EN COORDENADAS DEL LIENZO.
+// El navegador habla siempre de filas LOGICAS. En vertical son las filas del
+// panel y no hay nada que traducir. En HORIZONTAL (pantalla completa girada)
+// una fila logica es una COLUMNA del panel: el rango [y0,y1] cruza todas las
+// filas fisicas, asi que se publica el lienzo entero. Y el recorte vertical
+// pasa a la banda de la Y logica (gClipLY0/gClipLY1): con el de siempre
+// (gClipY*), que en horizontal acota la X, la pagina se cortaba en x=480.
+// (Dentro de una ventana de DeX flxFlush solo marca el lienzo como sucio.)
+void brHostFlush(int y0, int y1){
+  if(gLand && !gRtTarget){ flxFlush(0, SCR_H - 1); return; }
+  flxFlush(y0, y1);
+}
 
 void brHostClip(int y0, int y1){
   if(y0 < 0) y0 = 0;
+#ifdef FLEXOS_GFX_LANDCLIP
+  if(gLand){
+    if(y1 > SCR_W - 1) y1 = SCR_W - 1;
+    gClipLY0 = y0; gClipLY1 = y1;
+    gClipY0 = 0; gClipY1 = SCR_H - 1;
+    return;
+  }
+#endif
   if(y1 > SCR_H - 1) y1 = SCR_H - 1;
   gClipY0 = y0; gClipY1 = y1;
 }
 void brHostClipReset(){
   gClipY0 = 0; gClipY1 = SCR_H - 1;
   gClipX0 = 0; gClipX1 = SCR_W - 1;
+#ifdef FLEXOS_GFX_LANDCLIP
+  gClipLY0 = 0; gClipLY1 = SCR_W - 1;
+#endif
 }
 
 // -------------------------------------------------------------
@@ -506,23 +723,37 @@ void brHostBlitRow(int x, int y, int w, const uint16_t* src){
   if(x + w > cx + cw) w = cx + cw - x;
   if(w <= 0) return;
 
-  // (b) Recorte contra la banda activa del motor grafico (gClip*), que es
-  //     lo que respetan todas las demas primitivas.
-  if(y < gClipY0 || y > gClipY1) return;
-  if(x < gClipX0){ int d = gClipX0 - x; src += d; w -= d; x = gClipX0; }
-  if(x + w - 1 > gClipX1) w = gClipX1 - x + 1;
+  // (b) Recorte contra la banda activa del motor grafico, que es lo que
+  //     respetan todas las demas primitivas. OJO A LA ORIENTACION: en un
+  //     lienzo horizontal (ventana ancha de DeX, pantalla completa girada) la
+  //     banda gClipY* acota la X LOGICA y la Y logica la acota gClipLY*. Antes
+  //     se aplicaban SIEMPRE los limites verticales (gClipX* y SCR_W = 480):
+  //     en una ventana de 780 de ancho cada fila de la pagina se cortaba en
+  //     x=480 y el resto de la ventana se quedaba negro.
+  const int lw = gLand ? SCR_H : SCR_W;            // ancho y alto del lienzo LOGICO
+  const int lh = gLand ? SCR_W : SCR_H;
+  if(gLand){
+    if(x < gClipY0){ int d = gClipY0 - x; src += d; w -= d; x = gClipY0; }
+    if(x + w - 1 > gClipY1) w = gClipY1 - x + 1;
+#ifdef FLEXOS_GFX_LANDCLIP
+    if(y < gClipLY0 || y > gClipLY1) return;
+#endif
+  } else {
+    if(y < gClipY0 || y > gClipY1) return;
+    if(x < gClipX0){ int d = gClipX0 - x; src += d; w -= d; x = gClipX0; }
+    if(x + w - 1 > gClipX1) w = gClipX1 - x + 1;
+  }
   if(w <= 0) return;
 
-  // (c) Y un tope DURO contra el lienzo fisico, sin depender de que (a) y
-  //     (b) esten bien calculados. Los dos primeros recortes son de
-  //     maquetacion; este es de seguridad de memoria: debajo hay un
-  //     memcpy sobre el framebuffer, y un descuadre en el area de
-  //     contenido o en la banda de recorte no puede convertirse en una
-  //     escritura fuera del buffer.
-  if(y < 0 || y >= SCR_H) return;
+  // (c) Y un tope DURO contra el lienzo, sin depender de que (a) y (b) esten
+  //     bien calculados. Los dos primeros recortes son de maquetacion; este es
+  //     de seguridad de memoria: debajo hay escrituras directas sobre el
+  //     framebuffer, y un descuadre en el area de contenido o en la banda de
+  //     recorte no puede convertirse en una escritura fuera del buffer.
+  if(y < 0 || y >= lh) return;
   if(x < 0){ int d = -x; src += d; w -= d; x = 0; }
-  if(x >= SCR_W) return;
-  if(x + w > SCR_W) w = SCR_W - x;
+  if(x >= lw) return;
+  if(x + w > lw) w = lw - x;
   if(w <= 0) return;
 
 #if FLEXBR_PLAT_PRO
@@ -535,12 +766,14 @@ void brHostBlitRow(int x, int y, int w, const uint16_t* src){
   for(int i = 0; i < w; i++) px(x + i, y, src[i]);
 #else
   // Ultra y Ultra S3: el lienzo logico ES el framebuffer (mismo paso de
-  // SCR_W que usa px()), asi que una fila entera es un memcpy. Es la
-  // ruta que de verdad importa: se ejecuta una vez por fila de cada
-  // frame. En horizontal (gLand) el mapeo no es lineal, asi que ahi se
-  // cae al camino por pixel -- el navegador nunca es landscape, pero no
-  // se deja el caso abierto.
-  if(gLand){ for(int i = 0; i < w; i++) px(x + i, y, src[i]); }
+  // SCR_W que usa px()), asi que una fila vertical es un memcpy. En
+  // horizontal una fila logica es una COLUMNA fisica: (lx, ly) cae en
+  // gBuf[lx * SCR_W + (SCR_W-1-ly)], con paso SCR_W. Ya recortada arriba,
+  // se escribe directamente, sin repetir los recortes de px() por pixel.
+  if(gLand){
+    uint16_t* d = gBuf + (size_t)x * SCR_W + (size_t)((SCR_W - 1) - y);
+    for(int i = 0; i < w; i++){ *d = src[i]; d += SCR_W; }
+  }
   else memcpy(gBuf + (size_t)y * SCR_W + x, src, (size_t)w * 2);
 #endif
 }
@@ -628,11 +861,14 @@ static void navEnter(){
   // gRelayout es true cuando enter() se re-ejecuta SOLO para volver a
   // maquetar tras cambiar de tamano (arrastrando el borde de una ventana
   // de DeX). En ese caso no hay que reiniciar la sesion: basta repintar.
-  if(gRelayout){ flexBrowserTick(); return; }
+  // El teclado, si esta abierto, se vuelve a pintar ENCIMA: es la ultima capa
+  // de cualquier cuadro, tambien del que sale de re-maquetar.
+  if(gRelayout){ flexBrowserTick(); if(flexBrowserKeyboardOpen()) brKbRender(); return; }
   // Si FlexOS_BrowserApp.cpp fuera de otra version, esto no enlaza y el
   // error dice el nombre de la funcion -- que es la instruccion.
-  flexBrVersionGuard_v4_copia_los_4_ficheros_del_navegador();
+  flexBrVersionGuard_v5_copia_los_4_ficheros_del_navegador();
   brKbWasOpen = false;
+  brKbHostSig = 0;
   brKbLastTop = brKbLastBottom = -1;
   kbExtrasOn = false;                      // sin portapapeles en el omnibox
   mapaActivo = LAYOUT_ES; kbLangEs = true; kbShift = false;
@@ -647,8 +883,9 @@ static void navEnter(){
 // repinta desde el estado vivo.
 static void navSuspend(){ flexBrowserSuspend(); }
 static void navResume(){
-  if(gRelayout){ flexBrowserTick(); return; }
+  if(gRelayout){ flexBrowserTick(); if(flexBrowserKeyboardOpen()) brKbRender(); return; }
   brKbWasOpen = false;
+  brKbHostSig = 0;
   brKbLastTop = brKbLastBottom = -1;
   kbExtrasOn = false;
   mapaActivo = LAYOUT_ES; kbLangEs = true; kbShift = false;
@@ -680,7 +917,14 @@ static void navTick(){
     // detras, que es lo que hace cualquier teclado del sistema, y sobre
     // todo evita que el mismo dedo escriba y desplace Ajustes a la vez.
     if(!brKbTouch()){
-      if(T.tap) flexBrowserKeyCancel();     // toque fuera: cerrar, sin mas
+      // Toque POR ENCIMA del teclado. Sobre el propio campo (la barra de
+      // direcciones) o, escribiendo en la pagina, sobre la pagina: el
+      // navegador se lo queda y se SIGUE escribiendo. Fuera de eso, se
+      // cierra el teclado, como cualquier teclado del sistema.
+      if(T.tap){
+        int cx, cy; brTouchToCanvas(T.x, T.y, cx, cy);
+        if(!flexBrowserKeyboardTapAbove(cx, cy)) flexBrowserKeyCancel();
+      }
     }
     brHostConsumeTouch();
     // Si acaba de cerrarse por el toque de arriba, se borra ya: asi el
@@ -698,6 +942,12 @@ static void navTick(){
   //    APP_OWN_TOUCH el framework ya no los mira, asi que se atienden
   //    aqui: primero retroceden dentro del navegador y solo cierran la
   //    app cuando no queda historial ni capas abiertas.
+  //    En Flex OS Ultra NO: alli la barra y el chevron son del SISTEMA
+  //    (navBarHandle va antes que la app y llama al gancho backLayer del
+  //    navegador, que hace exactamente esto). Mirarlo aqui tambien convertia
+  //    un toque en la parte baja de la PAGINA a pantalla completa -- donde no
+  //    hay barra -- en un "atras".
+#ifndef NAV_H
   if(!gHosted && T.tap){
     int ny = SCR_H - 52;
     bool navBack = (gNavMode == 0 && T.y >= ny - 10 && T.y <= ny + 22 && T.x < SCR_W / 3);
@@ -708,6 +958,7 @@ static void navTick(){
       return;
     }
   }
+#endif
   // 3) El navegador.
   flexBrowserTick();
 

@@ -338,6 +338,7 @@
 // que es justo lo que no tiene sentido conservar con la app en segundo plano.
 // Al volver, el navegador repinta y pide un fotograma nuevo al servicio.
 static void navSuspendLife(){ navSuspend(); }
+static bool navBackLayerLife(){ return flexBrowserHandleSystemBack(); }
 static void navResumeLife(){  navResume(); }
 static size_t navShedLife(){  return flexBrowserReleaseVisualCache(); }
 static void navCloseLife(){ flexBrowserExit(); }

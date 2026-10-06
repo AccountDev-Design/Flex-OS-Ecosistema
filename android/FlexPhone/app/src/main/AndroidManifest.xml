@@ -48,8 +48,10 @@
 
     <!-- ==== Servicio en primer plano ==== -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Los tres servicios (enlace, Flex Storage y Browser Relay) son
+         connectedDevice. dataSync ya no lo usa ninguno: el relay lo
+         usaba y Android 15 lo cortaba a las 6 horas. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- ==== Red local y cerrojos ==== -->
@@ -134,14 +136,17 @@
             android:foregroundServiceType="connectedDevice" />
 
         <!--
-          Browser Relay. dataSync porque lo que hace es servir
-          contenido por Wi-Fi al P4. Se levanta SOLO con una sesion
-          activa y se para al cerrarla, junto con sus locks.
+          Browser Relay. connectedDevice: el telefono sirve el navegador a
+          un dispositivo externo (el P4) por la red local -- el mismo caso
+          que Flex Storage --, y Android 15 no corta este tipo a las 6 horas
+          como hacia con dataSync. Sigue en marcha aunque se cierre la app;
+          solo se para cuando la persona (o Flex OS) lo pide. Los cerrojos,
+          solo con Flex OS conectado.
         -->
         <service
             android:name=".relay.BrowserRelayService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="connectedDevice" />
 
         <!--
           FLEX CLOUD EN ESTE TELEFONO (Flex Storage). connectedDevice: el

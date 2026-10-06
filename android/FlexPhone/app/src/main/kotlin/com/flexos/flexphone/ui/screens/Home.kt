@@ -43,6 +43,8 @@ fun HomeScreen(nav: NavController, store: SettingsStore, settings: Settings) {
     val state = FlexPhoneState.instance
     val link by (state?.link ?: MutableStateFlow(LinkState.OFF)).collectAsState()
     val relay by (state?.relay ?: MutableStateFlow(RelayState.OFF)).collectAsState()
+    val relayClient by (state?.relayClient ?: MutableStateFlow(com.flexos.flexphone.domain.RelayClient.NONE)).collectAsState()
+    val relayByUser by (state?.relayStoppedByUser ?: MutableStateFlow(false)).collectAsState()
     val error by (state?.error ?: MutableStateFlow<String?>(null)).collectAsState()
     val notice by (state?.notice ?: MutableStateFlow<String?>(null)).collectAsState()
     val address by (state?.address ?: MutableStateFlow<String?>(null)).collectAsState()
@@ -108,13 +110,8 @@ fun HomeScreen(nav: NavController, store: SettingsStore, settings: Settings) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                     Stat("Bateria", if (battery in 0..100) "$battery%${if (charging) " +" else ""}" else "--")
                     Stat("Red", if (onWifi) "Wi-Fi" else "Sin Wi-Fi")
-                    Stat("Servidor", when (relay) {
-                        RelayState.UP -> "Activo"
-                        RelayState.STARTING -> "Arrancando"
-                        RelayState.ERROR -> "Error"
-                        RelayState.SUSPENDED -> "Suspendido"
-                        RelayState.OFF -> "Parado"
-                    })
+                    Stat("Servidor", com.flexos.flexphone.domain.relayStatusText(
+                        relay, relayClient, relayByUser, short = true))
                 }
             }
 
@@ -182,13 +179,7 @@ fun HomeScreen(nav: NavController, store: SettingsStore, settings: Settings) {
             ) { nav.navigate(Routes.APPS) }
             NavRow(
                 "Servidor del navegador",
-                when (relay) {
-                    RelayState.UP -> "Activo"
-                    RelayState.STARTING -> "Arrancando"
-                    RelayState.ERROR -> "Con error"
-                    RelayState.SUSPENDED -> "Suspendido por Android"
-                    RelayState.OFF -> "Parado"
-                },
+                com.flexos.flexphone.domain.relayStatusText(relay, relayClient, relayByUser),
             ) { nav.navigate(Routes.RELAY) }
             NavRow(
                 "Flex Cloud",

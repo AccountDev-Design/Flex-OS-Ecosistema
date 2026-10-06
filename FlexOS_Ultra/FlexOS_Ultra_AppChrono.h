@@ -316,6 +316,7 @@ static void cronoBarClock(int y, uint16_t col){
 static int cronoBarSurface(){
   if(gSuspOn || gLand || gHosted) return 0;
   if(gState == ST_APP && gAppHidesStatusBar) return 0;      // el visor de medios cubre la barra de estado: ni se pinta ni escucha
+  if(appImmersive()) return 0;                              // pantalla completa: no hay barra de estado
   if(KIOSK_ON && kioskOn) return 0;
   if(gState == ST_HOME && qsPanelY == 0 && !qsAnimOn && !editMode) return 1;
   if(gState == ST_APP  && !(APP_REG[gAppId].flags & APP_CUSTOM_HEADER)) return 2;

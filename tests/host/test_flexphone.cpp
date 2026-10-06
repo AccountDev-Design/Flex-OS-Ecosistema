@@ -335,6 +335,31 @@ static void testCodecs(){
   CHECK(flexPhoneDecRelayInfo(liar, w6.at, &rl), "no decodifico el relay bueno");
   CHECK(rl.state == FLP_RELAY_UP && rl.port == 8443 && rl.tls, "relay bueno mal leido");
   CHECK(rl.ip[0] == 192 && rl.ip[3] == 50, "IP mal leida");
+  CHECK(!rl.byUser, "un relay arriba no puede estar 'detenido por el usuario'");
+
+  // -- Relay DETENIDO POR EL USUARIO (bit1): parado a proposito, no un error --
+  FlexLinkWr w7; flexLinkWrInit(&w7, liar, sizeof(liar));
+  flexLinkWrBytes(&w7, ip0, 4); flexLinkWrU16(&w7, 0);
+  flexLinkWrU8(&w7, 1); flexLinkWrU8(&w7, 0x02); flexLinkWrU16(&w7, 0);
+  flexLinkWrStr(&w7, "detenido por el usuario", 63);
+  CHECK(flexPhoneDecRelayInfo(liar, w7.at, &rl), "no decodifico el relay detenido");
+  CHECK(rl.state == FLP_RELAY_OFF && rl.byUser, "un relay parado por la persona se leyo como error (%d)", rl.state);
+
+  // -- Relay SUSPENDIDO por Android (bit2): estado propio --
+  FlexLinkWr w8; flexLinkWrInit(&w8, liar, sizeof(liar));
+  flexLinkWrBytes(&w8, ip0, 4); flexLinkWrU16(&w8, 0);
+  flexLinkWrU8(&w8, 1); flexLinkWrU8(&w8, 0x04); flexLinkWrU16(&w8, 0);
+  flexLinkWrStr(&w8, "Android suspendio el relay", 63);
+  CHECK(flexPhoneDecRelayInfo(liar, w8.at, &rl), "no decodifico el relay suspendido");
+  CHECK(rl.state == FLP_RELAY_SUSPENDED && !rl.byUser, "un relay suspendido se leyo como %d", rl.state);
+
+  // -- Telefono ANTIGUO (sin los bits nuevos): el texto de error decide, como siempre --
+  FlexLinkWr w9; flexLinkWrInit(&w9, liar, sizeof(liar));
+  flexLinkWrBytes(&w9, ip0, 4); flexLinkWrU16(&w9, 0);
+  flexLinkWrU8(&w9, 1); flexLinkWrU8(&w9, 0); flexLinkWrU16(&w9, 0);
+  flexLinkWrStr(&w9, "relay detenido", 63);
+  CHECK(flexPhoneDecRelayInfo(liar, w9.at, &rl), "no decodifico el relay antiguo");
+  CHECK(rl.state == FLP_RELAY_ERROR && !rl.byUser, "un telefono antiguo cambio de significado");
 
   // -- Ordenes multimedia: solo las cuatro validas --
   CHECK(flexPhoneEncMediaCmd(buf, sizeof(buf), FLP_MCMD_PLAY) == 1, "play no codifica");

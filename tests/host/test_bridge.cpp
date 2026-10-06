@@ -103,11 +103,20 @@ static uint16_t g_bbuf[SCR_W * SCR_H];
 static uint16_t* fb   = g_fb;
 static uint16_t* bbuf = g_bbuf;
 static uint16_t* gBuf = g_fb;
+// Lienzo de la ventana de DeX en la que corre la app (NULL a pantalla
+// completa). Los tres .ino lo tienen; el puente dibuja el teclado AHI cuando
+// la app esta hospedada, nunca encima del escritorio.
+static uint16_t* gRtTarget = NULL;
 // Preferencias del teclado que consulta el diagnostico del puente.
 static int  gKbSize = 1, gKbOpacity = 100, gKbStyle = 0;
 static bool gKbHiCon = false;
 static int gClipY0 = 0, gClipY1 = SCR_H - 1;
 static int gClipX0 = 0, gClipX1 = SCR_W - 1;
+// Recorte de la Y logica en horizontal (FlexOS_Ultra_Gfx.h). El puente lo usa
+// cuando existe; aqui se declara para que la prueba lo ejercite.
+#define FLEXOS_GFX_LANDCLIP 1
+static int gClipLY0 = 0, gClipLY1 = SCR_W - 1;
+#define KB_SIZE_CONFIG_ON 1
 static bool gLand = false, gHosted = false, gDark = true, uiGlass = false;
 static volatile bool gNetOnline = true;
 static char cfgName[24] = "FlexOS Ultra";
@@ -132,6 +141,12 @@ static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b){
 }
 static inline void setBuf(uint16_t* b){ gBuf = b; }
 static inline void px(int x, int y, uint16_t c){
+  if(gLand){                                  // misma rotacion que putPhys en los .ino
+    if((unsigned)x >= SCR_H || (unsigned)y >= SCR_W) return;
+    if(x < gClipY0 || x > gClipY1 || y < gClipLY0 || y > gClipLY1) return;
+    gBuf[(size_t)x * SCR_W + (SCR_W - 1 - y)] = c;
+    return;
+  }
   if((unsigned)x >= SCR_W || (unsigned)y >= SCR_H) return;
   if(y < gClipY0 || y > gClipY1 || x < gClipX0 || x > gClipX1) return;
   gBuf[(size_t)y * SCR_W + x] = c;
@@ -586,6 +601,136 @@ int main(){
       if(antesFb[i] != g_fb[(size_t)muestraY * SCR_W + i]) cambiados++;
     CHECK(cambiados == 0,
           "el arrastre sobre el teclado movio %ld pixeles de Ajustes", cambiados);
+  }
+
+  // -----------------------------------------------------------
+  //  LIENZO HORIZONTAL (ventana ancha de DeX / pantalla completa girada)
+  //  ----------------------------------------------------------
+  //  Regresion del fallo de las capturas de Modo PC: en una ventana de
+  //  780x400 la pagina ocupaba solo el ~60 % izquierdo y el resto quedaba
+  //  negro. brHostBlitRow recortaba cada fila contra los limites VERTICALES
+  //  (gClipX1 y SCR_W = 480) aunque el lienzo fuera horizontal, y
+  //  brHostClip acotaba con gClipY* -- que en horizontal es la X -- la
+  //  altura de la pagina: lo que pasaba de x=480 no se pintaba nunca.
+  {
+    flexBrowserKeyCancel();
+    gHosted = true; gLand = true;
+    gAppW = 780; gAppH = 400;
+    int cx, cy, cw, ch; brHostContentRect(&cx, &cy, &cw, &ch);
+    CHECK(cw == 780 && ch == 400, "area de contenido horizontal %dx%d, esperado 780x400", cw, ch);
+    std::memset(g_fb, 0, sizeof(g_fb));
+    static uint16_t row[800];
+    for(int i = 0; i < 800; i++) row[i] = 0x07E0;
+    brHostClipReset();
+    brHostBlitRow(0, 50, 780, row);            // una fila de pagina entera
+    long fila = 0, fuera = 0;
+    for(int lx = 0; lx < 800; lx++){
+      uint16_t v = g_fb[(size_t)lx * SCR_W + (SCR_W - 1 - 50)];
+      if(v == 0x07E0){ if(lx < 780) fila++; else fuera++; }
+    }
+    long total = 0; for(int i = 0; i < SCR_W * SCR_H; i++) if(g_fb[i]) total++;
+    CHECK(fila == 780, "en horizontal la fila de pagina pinto %ld de 780 pixeles", fila);
+    CHECK(fuera == 0 && total == 780, "la fila de pagina se salio: %ld fuera, %ld en total", fuera, total);
+
+    // brHostClip en horizontal acota la Y LOGICA, no la X: un recorte de la
+    // zona de pagina no puede cortar la pagina por la derecha.
+    std::memset(g_fb, 0, sizeof(g_fb));
+    brHostClip(100, 399);
+    fillRect(0, 0, 780, 400, 0x001F);          // lo que pinta la pagina, recortado
+    long arriba = 0, dentro = 0, derecha = 0;
+    for(int lx = 0; lx < 780; lx++) for(int ly = 0; ly < 400; ly++){
+      if(g_fb[(size_t)lx * SCR_W + (SCR_W - 1 - ly)] != 0x001F) continue;
+      if(ly < 100) arriba++; else dentro++;
+      if(lx >= 480) derecha++;
+    }
+    brHostClipReset();
+    CHECK(arriba == 0, "el recorte horizontal dejo %ld pixeles por encima de y=100", arriba);
+    CHECK(dentro == 780L * 300L, "el recorte horizontal pinto %ld de %ld pixeles", dentro, 780L * 300L);
+    CHECK(derecha > 0, "en horizontal no se pinto nada a la derecha de x=480");
+    gHosted = false; gLand = false;
+    gAppW = SCR_W; gAppH = SCR_H;
+  }
+
+  // -----------------------------------------------------------
+  //  TECLADO EN UNA VENTANA ESTRECHA DE DeX
+  //  ----------------------------------------------------------
+  //  La rejilla del teclado mide 468 px. En una ventana de 300 px de ancho
+  //  la ultima columna caia FUERA de la ventana: la "p" no se podia pulsar.
+  //  Ahora la geometria se ajusta al lienzo (teclas mas estrechas) y la
+  //  misma geometria vale para dibujar y para tocar.
+  {
+    gHosted = true; gLand = false;
+    gAppW = 300; gAppH = 600;
+    flexBrowserKeyCancel();
+    navTick();                                 // el cuadro que borra el teclado anterior
+    T.tap = true; T.released = true; T.x = 150; T.y = 40;     // omnibox de la ventana
+    navTick();
+    T.tap = false; T.released = false;
+    CHECK(flexBrowserKeyboardOpen(), "en una ventana estrecha no se abrio el teclado");
+    if(flexBrowserKeyboardOpen()){
+      std::memset(g_fb, 0, sizeof(g_fb));
+      brKbRender();
+      // Geometria ajustada: 10 teclas de (300-4-18)/10 = 27 px, centradas.
+      const int kw = (300 - 4 - 9 * kbGap) / 10, gw = 10 * kw + 9 * kbGap, kx0 = (300 - gw) / 2;
+      const int dy = gAppH - SCR_H;
+      int px_ = kx0 + 9 * (kw + kbGap) + kw / 2;             // centro de la "p"
+      int py_ = KB_Y + 0 * (KB_KH + KB_GAP) + KB_KH / 2 + dy;
+      CHECK(px_ < 300, "la ultima tecla sigue fuera de la ventana (%d)", px_);
+      long derecha = 0;
+      for(int yy = 0; yy < SCR_H; yy++) for(int xx = 300; xx < SCR_W; xx++) if(g_fb[yy * SCR_W + xx]) derecha++;
+      CHECK(derecha == 0, "el teclado pinto %ld pixeles fuera de la ventana estrecha", derecha);
+      CHECK(kbKW == 45 && kbX == 6, "la geometria del usuario no se restauro (%d, %d)", kbKW, kbX);
+      T.tap = true; T.released = true; T.x = px_; T.y = py_;
+      navTick();
+      T.tap = false; T.released = false;
+      CHECK(!std::strcmp(flexBrowserEditText(), "p"),
+            "en una ventana estrecha la ultima tecla dio \"%s\", esperado \"p\"", flexBrowserEditText());
+    }
+    flexBrowserKeyCancel();
+    navTick();
+    gHosted = false;
+    gAppW = SCR_W; gAppH = SCR_H;
+  }
+
+  // -----------------------------------------------------------
+  //  TOCAR LA BARRA DE DIRECCIONES MIENTRAS SE ESCRIBE NO LA CIERRA
+  //  ----------------------------------------------------------
+  //  Era el "toca, se cierra, toca otra vez" de escribir una URL: cualquier
+  //  toque por encima del teclado lo cerraba, tambien el que caia sobre el
+  //  propio campo que se estaba editando.
+  {
+    flexBrowserKeyCancel();
+    navTick();
+    T.tap = true; T.released = true; T.x = SCR_W / 2; T.y = 96 + 40;
+    navTick();
+    T.tap = false; T.released = false;
+    if(!flexBrowserKeyboardOpen()){
+      T.tap = true; T.released = true; T.y = 96 + 60;
+      navTick();
+      T.tap = false; T.released = false;
+    }
+    int oy = T.y;
+    CHECK(flexBrowserKeyboardOpen(), "no se abrio el omnibox");
+    T.tap = true; T.released = true; T.x = SCR_W / 2; T.y = oy;   // otra vez sobre el campo
+    navTick();
+    T.tap = false; T.released = false;
+    CHECK(flexBrowserKeyboardOpen(), "tocar el campo mientras se escribe cerro el teclado");
+    // Una pulsacion con algo de deslizamiento (dentro de una tecla) sigue
+    // siendo esa tecla: ya no hace falta un "tap" perfecto.
+    int kx = KB_X + 0 * (KB_KW + KB_GAP) + KB_KW / 2;
+    int ky = KB_Y + 1 * (KB_KH + KB_GAP) + KB_KH / 2;
+    T.tap = false; T.released = true; T.moved = true;
+    T.startX = kx; T.startY = ky; T.x = kx + 20; T.y = ky + 6;
+    navTick();
+    T.released = false; T.moved = false;
+    CHECK(!std::strcmp(flexBrowserEditText(), "a"),
+          "una pulsacion con deslizamiento dio \"%s\", esperado \"a\"", flexBrowserEditText());
+    // Un toque FUERA (sobre la pagina) si lo cierra.
+    T.tap = true; T.released = true; T.x = SCR_W / 2; T.y = 300; T.startX = T.x; T.startY = T.y;
+    navTick();
+    T.tap = false; T.released = false;
+    CHECK(!flexBrowserKeyboardOpen(), "un toque sobre la pagina no cerro el teclado del omnibox");
+    navTick();
   }
 
   // Cancelar y cerrar.

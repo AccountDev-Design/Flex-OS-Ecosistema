@@ -359,21 +359,29 @@ data class MediaState(
  * que el telefono esta escuchando; si el relay no llego a levantarse,
  * se manda [error] y el P4 lo muestra como error, nunca como
  * "conectado".
+ *
+ * Byte de banderas: bit0 TLS · bit1 DETENIDO POR EL USUARIO (parado a
+ * proposito: no es un error) · bit2 SUSPENDIDO por Android. Los dos
+ * ultimos son nuevos y compatibles: un P4 que no los conoce los ignora y
+ * sigue viendo el texto de [error], como antes.
  */
 data class RelayInfo(
     val ip: ByteArray, val port: Int, val protoVer: Int,
     val tls: Boolean, val caps: Int, val error: String = "",
+    val stoppedByUser: Boolean = false, val suspended: Boolean = false,
 ) {
+    fun flags(): Int = (if (tls) 0x01 else 0) or (if (stoppedByUser) 0x02 else 0) or (if (suspended) 0x04 else 0)
     fun encode(): ByteArray {
         require(ip.size == 4) { "la IP tiene que ser IPv4 (4 bytes)" }
         val w = PayloadWriter()
         w.bytes(ip); w.u16(port); w.u8(protoVer)
-        w.u8(if (tls) 1 else 0); w.u16(caps)
+        w.u8(flags()); w.u16(caps)
         w.str(error, 63)
         return w.build()
     }
     override fun equals(other: Any?): Boolean =
         other is RelayInfo && ip.contentEquals(other.ip) && port == other.port &&
-        protoVer == other.protoVer && tls == other.tls && caps == other.caps && error == other.error
+        protoVer == other.protoVer && tls == other.tls && caps == other.caps && error == other.error &&
+        stoppedByUser == other.stoppedByUser && suspended == other.suspended
     override fun hashCode(): Int = ip.contentHashCode() * 31 + port
 }

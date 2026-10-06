@@ -214,11 +214,15 @@ struct DexHost {
   int       fw, fh;    // tamano del contenido con el que se construyo la cache
   int       rw, rh;    // lienzo logico con el que la app dibujo por ultima vez
   uint32_t  reMs;      // ultimo re-render por cambio de tamano (limita la cadencia)
+  uint32_t  touchSeq;  // vuelta de pcTick en la que recibio su toque (no se le da otro tick)
+  int       hx, hy;    // ultimo punto inyectado, en coordenadas de SU lienzo
+  bool      held;      // el ultimo toque inyectado tenia el dedo apoyado
   bool      scaled;    // la cache refleja el lienzo actual
   bool      live;
 };
 static DexHost dexHost[4];
 static bool dexHostBusy = false;              // reentrada: una app no puede hospedar a otra
+static uint32_t dexLoopSeq = 0;               // una por vuelta de pcTick
 // Depuracion del mapeo tactil: con DEX_TOUCH_DEBUG a 1 se pinta un punto en la
 // coordenada TRADUCIDA, dentro del propio lienzo de la app. Si el punto cae bajo
 // el dedo, la traduccion es correcta; si se desvia, el fallo esta en el mapeo.
@@ -333,6 +337,7 @@ static void dexHostRun(int i, bool doEnter, bool doTick, const Touch* inject){
 
   uint16_t* oBuf = gBuf; bool oLand = gLand;
   int oC0 = gClipY0, oC1 = gClipY1, oX0 = gClipX0, oX1 = gClipX1;
+  int oLY0 = gClipLY0, oLY1 = gClipLY1;
   int oApp = gAppId, oState = gState;
   int oAW = gAppW, oAH = gAppH;
   Touch oT = T;                                      // el T REAL del sistema
@@ -347,8 +352,22 @@ static void dexHostRun(int i, bool doEnter, bool doTick, const Touch* inject){
     gAppW = f.aw; gAppH = f.ah;                      // lo que la app usa para maquetar
   }
   gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
+  gClipLY0 = 0; gClipLY1 = SCR_W - 1;
   gAppId = app; gState = ST_APP;
+  // EL TOQUE QUE VE LA APP. Con `inject` es el de esta ventana, ya traducido a
+  // su lienzo. SIN el (re-maquetado al redimensionar, tick periodico) la app
+  // NO puede ver el toque real del sistema: esta en coordenadas del panel, no
+  // de su lienzo, y casi siempre es el dedo que arrastra el BORDE de la
+  // ventana. Antes lo veia tal cual: un arrastre de redimension podia llegar
+  // al navegador como un toque en su menu o en la pagina. Se le da un toque
+  // NEUTRO: nada apoyado, ningun flanco.
   if(inject) T = *inject;                            // toque ya traducido a la app
+  else {
+    Touch idle;                                      // todo a false / 0
+    idle.x = idle.y = idle.startX = idle.startY = -1;   // fuera de cualquier boton
+    idle.downMs = idle.lastMs = oT.lastMs;
+    T = idle;
+  }
   setBuf(fb);                                        // -> redirigido al lienzo
 
   if(doEnter){
@@ -383,6 +402,7 @@ static void dexHostRun(int i, bool doEnter, bool doTick, const Touch* inject){
   gAppW = oAW; gAppH = oAH;
   T = oT;                                            // restaura el T REAL, no el inyectado
   gLand = oLand; gClipY0 = oC0; gClipY1 = oC1; gClipX0 = oX0; gClipX1 = oX1;
+  gClipLY0 = oLY0; gClipLY1 = oLY1;
   gBuf = oBuf;
   dexHostBusy = false;
 
@@ -395,6 +415,7 @@ static void dexHostClose(int i){
   if(dexHost[i].cache){ heap_caps_free(dexHost[i].cache); dexHost[i].cache = NULL; }
   dexHost[i].cap = 0; dexHost[i].fw = dexHost[i].fh = 0;
   dexHost[i].rw = dexHost[i].rh = 0; dexHost[i].reMs = 0;
+  dexHost[i].touchSeq = 0; dexHost[i].hx = dexHost[i].hy = -1; dexHost[i].held = false;
   dexHost[i].scaled = false; dexHost[i].live = false;
 }
 // Arranca la app de la ventana i. Si no hay PSRAM para el lienzo se sigue
@@ -560,7 +581,37 @@ static void dexHostTouch(int i, int cx, int cy, int cw, int ch){
   e.downMs = T.downMs; e.lastMs = T.lastMs;
   e.swipeUp = e.swipeDown = e.swipeLeft = e.swipeRight = false;
   dexHostTouchX = tx; dexHostTouchY = ty; dexHostTouchWin = i;   // depuracion
+  dexHost[i].touchSeq = dexLoopSeq;              // esta vuelta ya tuvo su tick (con toque)
+  dexHost[i].held = e.down; dexHost[i].hx = tx; dexHost[i].hy = ty;
   dexHostRun(i, false, true, &e);
+}
+// TICK CONTINUO DE UNA VENTANA HOSPEDADA. Es lo que hace que una app de DeX se
+// actualice SOLA: el navegador vuelca las bandas que llegan de la red y envia
+// el viewport nuevo cuando la ventana deja de cambiar de tamano; el reloj, el
+// cronometro o el reproductor avanzan. Antes solo habia tick con un toque o al
+// cambiar el minuto, y por eso "habia que hacer click para que el contenido se
+// actualizara". Cuesta poco: una app que no dibuja no marca nada sucio
+// (gRtDirty) y DeX no recompone esa ventana.
+//
+// El toque: la ventana que ya recibio el suyo en esta vuelta no se vuelve a
+// ejecutar (veria el dedo apoyado y suelto en el mismo instante). Y si el
+// ultimo toque que recibio tenia el dedo APOYADO pero el gesto ha salido de su
+// area (el dedo se fue a la barra de titulo, a otra ventana, a la barra de
+// tareas), se le entrega UNA suelta en su ultimo punto: un arrastre de la
+// pagina no puede quedarse "pegado" esperando un levantar que ya no llegara.
+static void dexHostTickIdle(int i){
+  if(i < 0 || i > 3 || !pwins[i].open || pwins[i].mini || !dexHost[i].surf) return;
+  if(dexHost[i].touchSeq == dexLoopSeq) return;
+  if(dexHost[i].held){
+    Touch up;                                      // todo a false / 0
+    up.x = up.startX = dexHost[i].hx; up.y = up.startY = dexHost[i].hy;
+    up.released = true;
+    up.downMs = up.lastMs = T.lastMs;
+    dexHost[i].held = false;
+    dexHostRun(i, false, true, &up);
+  } else {
+    dexHostRun(i, false, true, NULL);
+  }
 }
 // Una app APP_FLEX maqueta contra el tamano de SU ventana, asi que al
 // redimensionar hay que volver a ejecutar su enter() con el lienzo nuevo -- si

@@ -62,6 +62,15 @@ static inline void setBuf(uint16_t* b){ gBuf = (gRtTarget && b == fb) ? gRtTarge
 // Banda de recorte vertical (para listas con scroll). Por defecto: toda la pantalla.
 static int gClipY0 = 0, gClipY1 = SCR_H - 1;
 static int gClipX0 = 0, gClipX1 = SCR_W - 1;   // recorte horizontal
+// RECORTE DE LA Y LOGICA EN HORIZONTAL (gLand). Con el motor girado,
+// gClipY0/gClipY1 acotan la fila FISICA, que es la X logica; la Y logica no la
+// acotaba nada. Una app adaptativa en un lienzo horizontal (ventana ancha de
+// DeX, pantalla completa girada) no podia recortar su contenido por arriba y
+// por abajo: una lista desplazada se pintaba encima de su barra. Por defecto
+// es el lienzo entero, asi que nada de lo que ya existe cambia; solo lo
+// estrecha quien lo pide (el puente del navegador) y lo repone al terminar.
+static int gClipLY0 = 0, gClipLY1 = SCR_W - 1;
+#define FLEXOS_GFX_LANDCLIP 1      // lo consulta el puente del navegador (compartido con S3/Pro)
 // PRESENTACION SIN HILO PARALELO.
 //
 // El panel DPI refresca continuamente su framebuffer interno. La version
@@ -93,7 +102,10 @@ static inline void fbUnlock(){}
 static void kioskStampBadge(int y0, int y1);
 // Barra de navegacion del sistema: se estampa por el MISMO camino y por el
 // mismo motivo que el candado del kiosco (ver el bloque de navegacion).
+// A pantalla completa la barra es TRANSITORIA y flota sobre la app: entonces
+// navStampEnd devuelve a fb, despues de la transferencia, lo que habia debajo.
 static void navStampBar(int y0, int y1);
+static void navStampEnd();
 // BANNER DE NOTIFICACION (FlexOS_FlexPhone_Overlay.h). Es la ULTIMA capa antes del panel y,
 // a diferencia de las dos de arriba, vive ENCIMA de contenido que cambia (una app, el escritorio,
 // la caja de apps): por eso no se estampa en fb para siempre ni guarda una foto de lo de debajo.
@@ -114,7 +126,7 @@ static void flxFlush(int y0, int y1){
   // actualizacion llega al panel sin el, aunque la app repinte esa esquina.
   kioskStampBadge(y0, y1);
   navStampBar(y0, y1);
-  if(!flxPanel || !flxDpiSem || !fb) return;
+  if(!flxPanel || !flxDpiSem || !fb){ navStampEnd(); return; }
   // El banner de notificacion se dibuja AQUI, sobre lo que fb tiene ahora, y se retira al volver.
   const bool fpbOn = fpbStampBegin(y0, y1);
 
@@ -129,6 +141,7 @@ static void flxFlush(int y0, int y1){
       Serial.println(F("[GFX] draw_bitmap fallo; cuadro descartado"));
     flxFlushFault = true; flxFlushFaultMs = now;
     if(fpbOn) fpbStampEnd();
+    navStampEnd();
     return;
   }
   // 120 ms son mas de siete periodos a 60 Hz. Si no llega el callback hay un
@@ -139,10 +152,12 @@ static void flxFlush(int y0, int y1){
       Serial.println(F("[GFX] timeout esperando DMA2D; compositor liberado"));
     flxFlushFault = true; flxFlushFaultMs = now;
     if(fpbOn) fpbStampEnd();
+    navStampEnd();
     return;
   }
   flxFlushFault = false;
   if(fpbOn) fpbStampEnd();
+  navStampEnd();                 // despues del banner: se deshace en orden inverso al estampado
   // Una pantalla de debajo tomo el control y el banner ya no puede dibujarse: sus filas del panel
   // se limpian desde fb (que nunca lo tuvo). Una sola vez, sin recursion (el banner ya esta apagado).
   if(fpbCleanPending()) fpbCleanFlush();
@@ -331,12 +346,14 @@ static inline int isqrt32(int v){
 static bool gLand = false;
 static inline void putPhys(int lx, int ly, uint16_t c){
   if((unsigned)lx >= SCR_H || (unsigned)ly >= SCR_W) return;
+  if(ly < gClipLY0 || ly > gClipLY1) return;
   int x = (SCR_W - 1) - ly, y = lx;
   if(y < gClipY0 || y > gClipY1) return;
   gBuf[(size_t)y * SCR_W + x] = c;
 }
 static inline void putPhysA(int lx, int ly, uint16_t c, uint8_t a){
   if((unsigned)lx >= SCR_H || (unsigned)ly >= SCR_W) return;
+  if(ly < gClipLY0 || ly > gClipLY1) return;
   int x = (SCR_W - 1) - ly, y = lx;
   if(y < gClipY0 || y > gClipY1) return;
   if(a >= 255){ gBuf[(size_t)y * SCR_W + x] = c; return; }
@@ -416,6 +433,8 @@ static void fillSpanLand(int lx, int ly, int n, uint16_t c){
   if(n <= 0) return;
   if((unsigned)lx >= SCR_H) return;
   if(lx < gClipY0 || lx > gClipY1) return;
+  if(ly < gClipLY0){ n -= gClipLY0 - ly; ly = gClipLY0; }
+  if(ly + n > gClipLY1 + 1) n = gClipLY1 + 1 - ly;
   if(ly < 0){ n += ly; ly = 0; }
   if(ly + n > SCR_W) n = SCR_W - ly;
   if(n <= 0) return;
@@ -427,6 +446,8 @@ static void fillSpanLandA(int lx, int ly, int n, uint16_t c, uint8_t a){
   if(a == 0 || n <= 0) return;
   if((unsigned)lx >= SCR_H) return;
   if(lx < gClipY0 || lx > gClipY1) return;
+  if(ly < gClipLY0){ n -= gClipLY0 - ly; ly = gClipLY0; }
+  if(ly + n > gClipLY1 + 1) n = gClipLY1 + 1 - ly;
   if(ly < 0){ n += ly; ly = 0; }
   if(ly + n > SCR_W) n = SCR_W - ly;
   if(n <= 0) return;
@@ -684,6 +705,10 @@ static void strokeSeg(float x0, float y0, float x1, float y1, int rad, uint16_t 
 #define AA_EPS 0.02f      // holgura de los atajos (ver la nota 2 de arriba)
 static inline bool aaClipBox(int* x0, int* x1, int* y0, int* y1){
   if(gLand){
+    if(*x0 < gClipY0)    *x0 = gClipY0;          // la X logica es la fila fisica
+    if(*x1 > gClipY1)    *x1 = gClipY1;
+    if(*y0 < gClipLY0)   *y0 = gClipLY0;
+    if(*y1 > gClipLY1)   *y1 = gClipLY1;
     if(*x0 < 0)          *x0 = 0;
     if(*x1 > SCR_H - 1)  *x1 = SCR_H - 1;
     if(*y0 < 0)          *y0 = 0;

@@ -1294,7 +1294,11 @@ static bool hpTryStart(){
   // la barra de estado, el dock o la barra de navegacion el gesto sigue siendo
   // de quien era. Y con un aviso a la vista, su tarjeta es de la isla.
   if(T.startY < HOME_PAGE_TOP || T.startY >= homeBandBot()) return false;
-  if(gNotifCount > 0 && T.startY <= NOTIF_BAND_BOT) return false;
+  // La banda de la isla solo es suya mientras la isla PINTA (notifBandOn). Los
+  // avisos los presenta el banner, que se queda solo los toques que caen en su
+  // tarjeta: mirar gNotifCount (que ahora es un historial) bloquearia el gesto
+  // en esa franja para siempre.
+  if(notifBandOn && T.startY <= NOTIF_BAND_BOT) return false;
   int to = gHomePage + (dx < 0 ? 1 : -1);
   if(to < 0 || to >= gHomePageN){
     // Borde: no hay pagina a ese lado. No se arrastra -- ni siquiera

@@ -4,9 +4,11 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.View
 import android.webkit.WebResourceRequest
@@ -40,6 +42,29 @@ import java.io.ByteArrayOutputStream
  * plano por politica propia. Por eso el servicio detecta la muerte
  * del WebView y avisa al P4 con un error VISIBLE en vez de dejar la
  * pantalla congelada. Ver docs/FLEX-PHONE.md, "pruebas pendientes".
+ *
+ * EL VIEWPORT -- CSS PX, NO PIXELES DEL TELEFONO
+ * ---------------------------------------------
+ * El P4 pide un viewport de W x H y trata cada pixel suyo como UN px
+ * CSS (es lo que hace el servicio de Ubuntu/PC: deviceScaleFactor 1).
+ * Un WebView, en cambio, mide su viewport CSS como
+ * (pixeles de la vista) / densidad del telefono. Antes se maquetaba a
+ * W x H pixeles del TELEFONO: con una densidad de 2,75 la pagina veia
+ * un movil de 175 px CSS de ancho y todo salia ampliado (el "zoom
+ * raro" de m.youtube.com). Ahora la vista mide W*d x H*d pixeles --
+ * viewport CSS de W x H EXACTOS -- y la captura se dibuja con escala
+ * 1/d sobre un bitmap de W x H: un px CSS acaba en un pixel del P4,
+ * igual que con el otro servicio. El toque y el desplazamiento llegan
+ * del P4 en px CSS y se pasan a pixeles de la vista con la misma d.
+ *
+ * EL DESPLAZAMIENTO DE LA PAGINA
+ * ------------------------------
+ * El scroll de la pagina ES el scroll de la vista (scrollX/scrollY del
+ * WebView), y draw() pinta el contenido desplazado esa cantidad: cuenta
+ * con que quien lo dibuja traslade el lienzo, que es lo que hace el
+ * padre en una jerarquia normal. Aqui lo dibujamos nosotros, asi que la
+ * captura traslada (-scrollX, -scrollY). Sin eso, al bajar la pagina la
+ * superficie entera se movia y quedaba una franja en blanco.
  */
 @SuppressLint("SetJavaScriptEnabled", "ViewConstructor")
 class RelayTab(
@@ -82,9 +107,42 @@ class RelayTab(
     /** Bitmap REUTILIZADO. No se crea uno por frame. */
     private var bitmap: Bitmap? = null
     private val main = Handler(Looper.getMainLooper())
+    private val res = ctx.resources
+
+    /** El proceso de render murio: esta pestana hay que rehacerla (ver RelayEngine). */
+    @Volatile var renderGone: Boolean = false
+        private set
+
+    /** Inicio del gesto en curso: MOVE y UP llevan el MISMO downTime que su DOWN. */
+    private var downTime = 0L
+
+    /**
+     * Pixeles de la vista por px CSS. Se lee cada vez: si la persona cambia el
+     * tamano de pantalla de Android con el relay en marcha, la siguiente
+     * maqueta ya usa la densidad nueva.
+     */
+    private fun density(): Float = res.displayMetrics.density.coerceAtLeast(0.5f)
+
+    /** Pixeles de la vista para un viewport CSS de w x h. */
+    private fun viewPx(cssPx: Int): Int = Math.round(cssPx * density()).coerceAtLeast(1)
 
     init {
         main.post { configure() }
+    }
+
+    /**
+     * Mide y coloca el WebView para un viewport CSS de [w] x [h]. Medir antes de
+     * colocar es lo que hace un padre de verdad: sin measure(), algunas versiones
+     * del WebView se quedan con la medida anterior y la pagina no se re-maqueta.
+     */
+    private fun layoutFor(w: Int, h: Int) {
+        val pw = viewPx(w)
+        val ph = viewPx(h)
+        webView.measure(
+            View.MeasureSpec.makeMeasureSpec(pw, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(ph, View.MeasureSpec.EXACTLY),
+        )
+        webView.layout(0, 0, pw, ph)
     }
 
     private fun configure() {
@@ -122,8 +180,9 @@ class RelayTab(
             }
         }
         // El WebView se mide al tamano del viewport del P4 aunque no
-        // este en pantalla: sin esto, draw() saldria vacio.
-        webView.layout(0, 0, viewportW, viewportH)
+        // este en pantalla: sin esto, draw() saldria vacio. En px CSS
+        // (ver EL VIEWPORT, arriba).
+        layoutFor(viewportW, viewportH)
     }
 
     private val client = object : WebViewClient() {
@@ -162,6 +221,7 @@ class RelayTab(
             // usuario ve el error.
             lastError = "el navegador del telefono se quedo sin memoria"
             loading = false; dirty = true
+            renderGone = true          // RelayEngine la rehace en la misma direccion
             Log.w(TAG, "render process gone (pestana $id)")
             onState(this@RelayTab)
             return true
@@ -185,50 +245,66 @@ class RelayTab(
     fun canGoBack(): Boolean = webView.canGoBack()
     fun canGoForward(): Boolean = webView.canGoForward()
 
+    /**
+     * Nuevo viewport (ventana de DeX redimensionada, pantalla completa, giro).
+     * Se re-maqueta la MISMA pagina: ni se recarga ni se recrea el WebView, asi
+     * que el desplazamiento, los formularios y el historial siguen ahi.
+     */
     fun resize(w: Int, h: Int) {
         if (w == viewportW && h == viewportH) return
         viewportW = w; viewportH = h
         main.post {
-            webView.layout(0, 0, w, h)
-            // El bitmap viejo ya no sirve: se suelta para que el
-            // siguiente se cree al tamano nuevo.
-            bitmap?.recycle(); bitmap = null
+            layoutFor(w, h)
             dirty = true
         }
     }
 
+    /** Ultima direccion conocida (para rehacer la pestana si su render murio). */
+    fun lastUrl(): String = url
+
     // -----------------------------------------------------------
     //  Entrada
     // -----------------------------------------------------------
+    // El P4 manda el punto en px CSS del viewport; la vista mide en pixeles
+    // del telefono (ver EL VIEWPORT). Mismo factor que la maqueta.
     fun pointer(action: Int, x: Int, y: Int) = main.post {
         val now = android.os.SystemClock.uptimeMillis()
+        val d = density()
+        val fx = x.coerceIn(0, viewportW - 1) * d
+        val fy = y.coerceIn(0, viewportH - 1) * d
         val motion = when (action) {
-            com.flexos.flexphone.protocol.Fbp.Pointer.DOWN -> MotionEvent.ACTION_DOWN
+            com.flexos.flexphone.protocol.Fbp.Pointer.DOWN -> { downTime = now; MotionEvent.ACTION_DOWN }
             com.flexos.flexphone.protocol.Fbp.Pointer.UP -> MotionEvent.ACTION_UP
             com.flexos.flexphone.protocol.Fbp.Pointer.MOVE -> MotionEvent.ACTION_MOVE
             com.flexos.flexphone.protocol.Fbp.Pointer.CANCEL -> MotionEvent.ACTION_CANCEL
             com.flexos.flexphone.protocol.Fbp.Pointer.TAP -> {
                 // Un tap son dos eventos: sin el UP, la pagina se queda
                 // con el dedo "apoyado" y no dispara el click.
-                send(MotionEvent.ACTION_DOWN, now, x, y)
-                send(MotionEvent.ACTION_UP, now + 40, x, y)
+                send(MotionEvent.ACTION_DOWN, now, now, fx, fy)
+                send(MotionEvent.ACTION_UP, now, now + 40, fx, fy)
                 dirty = true
                 return@post
             }
             else -> return@post
         }
-        send(motion, now, x, y)
+        // Un MOVE/UP sin DOWN previo (el DOWN se perdio) arranca su propio gesto.
+        if (downTime == 0L) downTime = now
+        send(motion, downTime, now, fx, fy)
+        if (motion == MotionEvent.ACTION_UP || motion == MotionEvent.ACTION_CANCEL) downTime = 0L
         dirty = true
     }
 
-    private fun send(action: Int, time: Long, x: Int, y: Int) {
-        val ev = MotionEvent.obtain(time, time, action, x.toFloat(), y.toFloat(), 0)
+    private fun send(action: Int, down: Long, time: Long, x: Float, y: Float) {
+        val ev = MotionEvent.obtain(down, time, action, x, y, 0)
+        ev.source = InputDevice.SOURCE_TOUCHSCREEN
         runCatching { webView.dispatchTouchEvent(ev) }
         ev.recycle()
     }
 
+    /** Desplazamiento en px CSS (como el `mouse.wheel` del otro servicio). */
     fun scroll(dx: Int, dy: Int) = main.post {
-        webView.scrollBy(dx, dy)
+        val d = density()
+        webView.scrollBy(Math.round(dx * d), Math.round(dy * d))
         dirty = true
     }
 
@@ -290,6 +366,14 @@ class RelayTab(
     //  Captura
     // -----------------------------------------------------------
     /**
+     * Un fotograma: el JPEG y el viewport (px CSS) que CUBRE. El rectangulo
+     * del FRAME se manda con ESTAS medidas, no con las del motor en el momento
+     * de enviar: si el P4 cambio de tamano entre la captura y el envio, el
+     * fotograma sigue describiendo exactamente lo que se capturo.
+     */
+    class Capture(val jpeg: ByteArray, val viewW: Int, val viewH: Int)
+
+    /**
      * Dibuja el WebView y devuelve un JPEG, o null si no hay nada
      * nuevo que mandar.
      *
@@ -298,43 +382,62 @@ class RelayTab(
      * acabaria provocando justo el `onRenderProcessGone` que se
      * intenta evitar.
      */
-    fun capture(quality: Int, scalePct: Int, force: Boolean): ByteArray? {
+    fun capture(quality: Int, scalePct: Int, force: Boolean): Capture? {
         if (!dirty && !force) return null
-        val w = (viewportW * scalePct / 100).coerceAtLeast(1)
-        val h = (viewportH * scalePct / 100).coerceAtLeast(1)
-
-        var bmp = bitmap
-        if (bmp == null || bmp.width != w || bmp.height != h) {
-            bmp?.recycle()
-            bmp = runCatching { Bitmap.createBitmap(w, h, Bitmap.Config.RGB_565) }.getOrNull()
-                ?: return null          // sin memoria: se salta este frame, no se cae
-            bitmap = bmp
-        }
-
+        if (renderGone) return null              // un WebView muerto no pinta nada
+        // TODO lo que define el fotograma se lee y se usa en el hilo principal,
+        // junto con el dibujo: un resize() que llegue mientras tanto ya no
+        // puede mezclar un tamano con la maqueta del otro.
         val done = java.util.concurrent.CountDownLatch(1)
-        var ok = false
+        var shot: Bitmap? = null
+        var vw = 0; var vh = 0
         main.post {
             runCatching {
-                val c = Canvas(bmp)
-                if (scalePct != 100) c.scale(scalePct / 100f, scalePct / 100f)
+                vw = viewportW; vh = viewportH
+                val w = (vw * scalePct / 100).coerceAtLeast(1)
+                val h = (vh * scalePct / 100).coerceAtLeast(1)
+                var bmp = bitmap
+                if (bmp == null || bmp.width != w || bmp.height != h) {
+                    // El anterior se suelta sin recycle(): ver destroy().
+                    bmp = Bitmap.createBitmap(w, h, Bitmap.Config.RGB_565)
+                    bitmap = bmp
+                }
+                val b = bmp ?: return@runCatching
+                // "Limpio" ANTES de dibujar: si la pagina cambia mientras este
+                // fotograma se comprime, el cambio vuelve a marcarla y sale en
+                // el siguiente (antes se marcaba limpia DESPUES y se perdia).
+                dirty = false
+                // El bitmap se reutiliza: lo que la pagina no pinte (fondo
+                // transparente, un borde) no puede ensenar el fotograma anterior.
+                b.eraseColor(Color.WHITE)
+                val c = Canvas(b)
+                // px de la vista -> px CSS -> escala de envio: una sola matriz.
+                val k = (scalePct / 100f) / density()
+                c.scale(k, k)
+                // El contenido se dibuja desplazado lo que va la pagina: el
+                // lienzo se traslada lo contrario (ver EL DESPLAZAMIENTO).
+                c.translate(-webView.scrollX.toFloat(), -webView.scrollY.toFloat())
                 // draw() sobre un canvas propio: no depende del
                 // compositor de pantalla, que es lo que se apaga con
                 // la pantalla.
                 webView.draw(c)
-                ok = true
+                shot = b
             }
             done.countDown()
         }
         // Espera ACOTADA: si el hilo principal esta atascado, se
         // pierde un frame y ya. Nunca se bloquea el servidor.
-        if (!done.await(400, java.util.concurrent.TimeUnit.MILLISECONDS) || !ok) return null
+        if (!done.await(400, java.util.concurrent.TimeUnit.MILLISECONDS)) { dirty = true; return null }
+        val bmp = shot ?: run { dirty = true; return null }   // sin memoria: se salta este frame, no se cae
 
         val out = ByteArrayOutputStream(64 * 1024)
         // JPEG baseline: es el unico formato que el decodificador del
-        // P4 sabe leer (FlexOS_JPEG.cpp).
-        if (!bmp.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(20, 90), out)) return null
-        dirty = false
-        return out.toByteArray()
+        // P4 sabe leer (FlexOS_JPEG.cpp). Acotado: esto corre en el hilo del
+        // bombeo, y una excepcion sin capturar en un hilo propio TUMBA la app.
+        val ok = runCatching { bmp.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(20, 90), out) }
+            .getOrDefault(false)
+        if (!ok) { dirty = true; return null }      // se reintenta en la vuelta siguiente
+        return Capture(out.toByteArray(), vw, vh)
     }
 
     fun markDirty() { dirty = true }
@@ -347,7 +450,10 @@ class RelayTab(
                 webView.removeAllViews()
                 webView.destroy()
             }
-            bitmap?.recycle(); bitmap = null
+            // Sin recycle(): el hilo del bombeo podria estar comprimiendo este
+            // mismo bitmap ahora mismo. Soltar la referencia basta; el
+            // recolector lo libera cuando nadie lo use.
+            bitmap = null
         }
     }
 }

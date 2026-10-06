@@ -43,8 +43,10 @@
 // Son macros que se expanden en el punto de uso, y todos los usos quedan por
 // debajo de donde se declaran gHosted y gAppH (justo aqui abajo, con los flags
 // de APP_REG), asi que la expansion siempre las conoce.
-#define WIN_TOP (gHosted ? 0 : 96)
-#define WIN_BOT (gHosted ? gAppH : (SCR_H - 64))
+// A pantalla completa INMERSIVA (appImmersive, mas abajo) tampoco hay marco: la
+// app usa el lienzo entero, vertical (480x800) u horizontal (800x480).
+#define WIN_TOP ((gHosted || appImmersive()) ? 0 : 96)
+#define WIN_BOT ((gHosted || appImmersive()) ? gAppH : (SCR_H - 64))
 #define WIN_BG  TH_WIN              // fondo de ventana: lo elige la paleta activa (ver TEMA SEMANTICO)
 
 // REGISTRO CENTRAL DE APPS. Una app de Flex OS ES su entrada en APP_REG, y su
@@ -75,6 +77,10 @@ static bool gRelayout = false;
                               // seguir teniendo trabajo REAL en curso (lo decide su
                               // hook bgWork()). Ni "Cerrar todo" ni el desalojo por
                               // limite de sesiones la tocan mientras ese trabajo dure.
+#define APP_IMMERSIVE    32   // la app SABE ir a pantalla completa (lienzo entero, barra
+                              // de navegacion transitoria): Inicio ofrece "Pantalla
+                              // completa" (vertical y horizontal) en su menu. Es una
+                              // capacidad DECLARADA, no una lista de apps en el menu.
 // Lienzo LOGICO de la app en curso. A pantalla completa es la pantalla entera;
 // dentro de una ventana de DeX, para una app APP_FLEX, es el area de cliente.
 // Las apps adaptativas maquetan contra esto en vez de contra SCR_W/SCR_H.
@@ -88,6 +94,32 @@ static int gAppW = SCR_W, gAppH = SCR_H;
 static bool gHosted    = false;
 static int  gHostReq   = 0;      // 0 nada · 1 cerrar ventana · 2 abrir app · 3 recientes
 static int  gHostReqApp = -1;
+
+// #############################################################
+// ##  PANTALLA COMPLETA INMERSIVA
+// ##  ------------------------------------------------------
+// ##  Una app adaptativa (APP_FLEX) puede pedir el lienzo ENTERO: sin barra
+// ##  de estado, sin cabecera y con la barra de navegacion OCULTA (no
+// ##  eliminada: un deslizamiento desde el borde de abajo la revela un rato,
+// ##  ver navImm*). En vertical (480x800) o en horizontal (800x480, motor
+// ##  girado con gLand).
+// ##
+// ##  El gestor es el UNICO que toca el marco y el lienzo: la app solo PIDE
+// ##  (immersiveRequest) y se entera porque su lienzo cambio (uiBox /
+// ##  gAppW / gAppH), igual que cuando se redimensiona su ventana de DeX. Asi
+// ##  ninguna app calcula por su cuenta donde esta ni que tamano tiene.
+// ##
+// ##  Es una propiedad de la SESION de la app: si pasa a segundo plano y
+// ##  vuelve, vuelve en pantalla completa. Cerrarla de verdad la borra.
+// #############################################################
+static int  gImmApp    = -1;     // app en pantalla completa (o -1)
+static bool gImmLand   = false;  // ...en horizontal
+static int  gImmReq    = -1;     // peticion pendiente: 0 normal · 1 vertical · 2 horizontal
+static int  gImmReqApp = -1;
+#define FLEXOS_IMMERSIVE_ON 1    // lo consulta el puente del navegador (compartido con S3/Pro)
+static inline bool appImmersive(){
+  return gImmApp >= 0 && gImmApp == gAppId && gState == ST_APP && !gHosted;
+}
 static void settingsEnter(); static void settingsTick();   // Ajustes (M3), abajo
 // Navegacion interna de Ajustes: devuelve true si "atras" tenia una pantalla
 // de categoria que cerrar (y la cierra). Lo consulta appTick para que el boton
@@ -108,6 +140,7 @@ static bool   noteDirty();   // Notas: hay texto escrito sin volcar
 static bool   paintDirty();  // Paint: hay trazo sin volcar
 static void   storeSuspendLife(); // Flex Store: suspende la app flex-app-v1 que corra dentro
 static void   navSuspendLife();  // Navegador: al pasar a segundo plano
+static bool   navBackLayerLife();// Navegador: "atras" del sistema (teclado, menu, pantalla completa, historial)
 static size_t navShedLife();     // Navegador: suelta la cache de fotogramas
 static bool galBackLayer(); static bool galBackScreen(); static void galSuspend(); static void galResume();
 static bool galBgWork(); static bool galDirty();           // Galeria: el editor guardando / con cambios
@@ -203,7 +236,16 @@ static void getIconRect(int id, int &rx, int &ry, int &rs){
 // Marco estandar de ventana (barra de estado + cabecera + nav bar)
 static void appDrawChrome(int id){
   if(gHosted){ (void)id; return; }   // embebida: la ventana ya tiene su barra de titulo
+  if(appImmersive()) return;         // pantalla completa: no hay marco que pintar
   setBuf(fb);
+  // LA BARRA DE ESTADO ES DEL MARCO: se BORRA antes de pintarla. Se puede
+  // llamar con el marco ya pintado (el navegador lo repone al cerrarse su
+  // teclado, Archivos al volver del explorador...) y el reloj se escribe con
+  // la fuente proporcional: "10:02 AM" encima de "10:01 AM" no tapa al
+  // anterior -- los digitos cambian de ancho y las letras caen corridas --, y
+  // quedaba un "AM" doble y emborronado. Mismo borrado que cronoBarRebuild:
+  // hasta y=46, porque la cabecera de la app empieza en y=50 y no es nuestra.
+  fillRect(0, 0, SCR_W, 46, WIN_BG);
   // Barra de estado y de navegacion del marco de app: van sobre el fondo de
   // VENTANA del tema (no sobre el wallpaper), asi que usan el color de iconos
   // de navegacion de la paleta activa.
@@ -221,6 +263,7 @@ static void appDrawChrome(int id){
 // APP_CUSTOM_HEADER se saltan esto y pintan su propia cabecera.
 static void appDrawHeader(int id){
   if(gHosted) return;                // el nombre de la app lo pone la barra de titulo
+  if(appImmersive()) return;         // pantalla completa: sin cabecera
   uint16_t W = TH_TXT;
   int hy = 50;
   strokeSegAA(30, hy + 16, 18, hy + 8, 2.4f, W);
@@ -647,7 +690,12 @@ static const AppHooks H_CAMERA   = { NULL, NULL, camSuspend, camResume, camClose
 static const AppHooks H_NOTES    = { noteBackLayer, noteBackScreen, noteSuspend, noteResume, noteCloseApp, noteSaveSess, noteLoadSess, NULL, NULL, noteDirty };
 static const AppHooks H_PAINT    = { NULL, paintBackScreen, paintSuspend, paintResume, paintCloseApp, paintSaveSess, paintLoadSess, NULL, NULL, paintDirty };
 static const AppHooks H_GAMES    = { NULL, NULL, gamesSuspend, gamesResume, gamesCloseApp, NULL, NULL, NULL, NULL, NULL };
-static const AppHooks H_BROWSER  = { NULL, NULL, navSuspendLife, navResumeLife, navCloseLife, NULL, NULL, NULL, navShedLife, NULL };
+// Navegador. backLayer es TODO su "atras": cierra el teclado o el menu, sale de
+// pantalla completa, retrocede en el historial de la pagina... y solo cuando no
+// queda nada devuelve false y el sistema lo manda a segundo plano. Sin el gancho,
+// el boton atras de la barra cerraba el navegador directamente aunque la pagina
+// tuviera historial (la barra lo atiende ANTES que la app).
+static const AppHooks H_BROWSER  = { navBackLayerLife, NULL, navSuspendLife, navResumeLife, navCloseLife, NULL, NULL, NULL, navShedLife, NULL };
 // Flex Store lleva ahora gancho de SUSPENSION: si dentro corre una app
 // flex-app-v1, pasar a segundo plano tiene que soltar sus recursos
 // privilegiados (pantalla exclusiva, orientacion, PSRAM reservada) en vez de
@@ -695,7 +743,7 @@ static FlexApp APP_REG[APP_N] = {
   { almEnter, almTick, APP_FLEX, APP_CAT_SISTEMA, APP_DEF_FAV, &H_ALM },
   { pcEnter, pcTick, APP_CUSTOM_HEADER, APP_CAT_SISTEMA, APP_DEF_FAV, &H_MODOPC },
   { noteEnter, noteTick, APP_CUSTOM_HEADER | APP_OWN_TOUCH, APP_CAT_TRABAJO, APP_DEF_FAV, &H_NOTES },
-  { navEnter, navTick, APP_FLEX | APP_OWN_TOUCH, APP_CAT_ESENCIAL, APP_DEF_FAV, &H_BROWSER },
+  { navEnter, navTick, APP_FLEX | APP_OWN_TOUCH | APP_IMMERSIVE, APP_CAT_ESENCIAL, APP_DEF_FAV, &H_BROWSER },
   // 7 Flex Compass. OCUPA LA RANURA QUE ERA DE CODE IDE, con todo lo que eso
   // arrastra: este id es el que sale en Inicio, en la Caja de aplicaciones y en
   // el escritorio de fabrica. Cabecera propia (uiHdrDraw, con menu de tres
@@ -935,11 +983,19 @@ static int      gNavGlow  = -1;              // boton que muestra el destello (s
 static uint32_t gNavGlowMs = 0;
 
 static int  navBarH(){ return (gNavMode == 0) ? NAV_H : 0; }
+// ---- Barra TRANSITORIA de la pantalla completa (estado; el resto, abajo) ----
+static bool     gNavImmOn    = false;     // revelada ahora mismo
+static uint32_t gNavImmMs    = 0;         // ultima interaccion: se oculta sola NAV_IMM_HIDE_MS despues
+static int      gNavImmPress = -1;        // boton pulsado (0 atras · 1 inicio · 2 recientes · 3 salir)
 // La barra existe cuando el sistema la posee: modo de botones, en una app, a
 // pantalla completa y en portrait. En Modo Kiosco NO se dibuja a proposito: ahi
 // no puede haber vias de escape (es exactamente la misma regla que ya aplican
 // handleiOSGestures y activarMultitarea).
+// En PANTALLA COMPLETA INMERSIVA la barra no desaparece: esta OCULTA y solo
+// existe mientras el usuario la revela con el gesto del borde (en cualquiera
+// de los dos modos de navegacion y en las dos orientaciones).
 static bool navBarVisible(){
+  if(appImmersive()) return gNavImmOn && !(KIOSK_ON && kioskOn);
   if(gNavMode != 0) return false;
   if(gHosted || gLand) return false;
   if(KIOSK_ON && kioskOn) return false;
@@ -951,6 +1007,10 @@ static bool navBarVisible(){
   if(APP_REG[gAppId].flags & APP_LAND) return false;
   return true;
 }
+// ¿La barra OCUPA su franja (y por tanto el contenido debe terminar encima)?
+// A pantalla completa no: alli la barra es una capa transitoria que flota sobre
+// la app y se va sola, asi que el teclado y el contenido llegan al borde.
+static bool navBarReservesSpace(){ return navBarVisible() && !appImmersive(); }
 static int  navBarTop(){ return SCR_H - NAV_H; }
 static uint16_t navBgCol(){  return gDark ? rgb565(13,15,22)    : rgb565(238,241,247); }
 static uint16_t navFgCol(){  return gDark ? rgb565(232,236,245) : rgb565(44,48,60); }
@@ -976,9 +1036,128 @@ static void navBarPaint(){
   drawRoundRect(SCR_W * 5 / 6 - 11, ny - 3, 22, 22, 4, fg);                     // recientes
 }
 
+// #############################################################
+// ##  BARRA DE NAVEGACION TRANSITORIA (pantalla completa)
+// ##  ------------------------------------------------------
+// ##  Oculta al entrar. Un deslizamiento desde el borde de ABAJO del lienzo
+// ##  (el de la pantalla vertical, o el de la horizontal si esta girada) la
+// ##  revela con cuatro botones: atras, inicio, recientes y salir de pantalla
+// ##  completa. Se oculta sola a los NAV_IMM_HIDE_MS sin tocarla.
+// ##
+// ##  A DIFERENCIA de la barra normal, aqui debajo HAY contenido de la app
+// ##  (la pagina llega hasta el borde), asi que la barra NO se pinta en fb para
+// ##  quedarse: se ESTAMPA en cada transferencia al panel y fb recupera sus
+// ##  pixeles justo despues (mismo esquema que el banner de notificaciones).
+// ##  Al ocultarse, el panel recibe esas filas limpias de fb: no queda ni un
+// ##  pixel de barra encima de la pagina y la app no tiene que repintar nada.
+// #############################################################
+#define NAV_IMM_HIDE_MS   3500     // sin tocarla, se oculta sola
+#define NAV_IMM_EDGE      26       // franja del borde inferior que arma el gesto
+#define NAV_IMM_CLAIM_DY  14       // recorrido hacia dentro que lo convierte en el gesto
+static bool      gNavImmWatch = false, gNavImmOwn = false;
+static int       gNavImmY0 = 0;
+static uint16_t* gNavImmSave = NULL;       // lo que fb tenia bajo la barra durante UNA transferencia
+static bool      gNavImmStamping = false;
+static int       gNavImmSavY = 0, gNavImmSavRows = 0, gNavImmSavX = 0, gNavImmSavW = 0;
+#define NAV_IMM_SAVE_PX  ((size_t)NAV_H * (size_t)SCR_H)   // peor caso: horizontal, 64 columnas x 800 filas
+
+static inline int navImmCW(){ return gImmLand ? SCR_H : SCR_W; }   // lienzo LOGICO
+static inline int navImmCH(){ return gImmLand ? SCR_W : SCR_H; }
+static inline void navImmToLogical(int px, int py, int &lx, int &ly){
+  if(gImmLand){ lx = py; ly = (SCR_W - 1) - px; } else { lx = px; ly = py; }
+}
+// Rectangulo FISICO que ocupa la barra. En vertical: las ultimas NAV_H filas.
+// En horizontal el borde de abajo del lienzo girado son las primeras NAV_H
+// columnas fisicas, a lo largo de las 800 filas.
+static void navImmPhysRect(int &x0, int &y0, int &x1, int &y1){
+  if(gImmLand){ x0 = 0; x1 = NAV_H - 1; y0 = 0; y1 = SCR_H - 1; }
+  else        { x0 = 0; x1 = SCR_W - 1; y0 = SCR_H - NAV_H; y1 = SCR_H - 1; }
+}
+static int navImmBtnAt(int lx){
+  int i = lx * 4 / navImmCW();
+  return i < 0 ? 0 : (i > 3 ? 3 : i);
+}
+// Glifo de "salir de pantalla completa": cuatro esquinas apuntando hacia dentro.
+static void navGlyphExitFull(int cx, int cy, uint16_t c){
+  const int r = 9, k = 5;
+  for(int sx = -1; sx <= 1; sx += 2) for(int sy = -1; sy <= 1; sy += 2){
+    int ex = cx + sx * r, ey = cy + sy * r;
+    strokeSegAA((float)ex, (float)(ey - sy * k), (float)ex, (float)ey, 2.0f, c);
+    strokeSegAA((float)(ex - sx * k), (float)ey, (float)ex, (float)ey, 2.0f, c);
+  }
+}
+// Pinta la barra en el buffer activo, en coordenadas del lienzo LOGICO.
+static void navImmPaint(){
+  const int cw = navImmCW(), ch = navImmCH();
+  const int top = ch - NAV_H, ny = ch - 52;
+  fillRect(0, top, cw, NAV_H, navBgCol());
+  fillRect(0, top, cw, 1, navLineCol());
+  const uint16_t fg = navFgCol();
+  int cx[4]; for(int i = 0; i < 4; i++) cx[i] = cw * (2 * i + 1) / 8;
+  if(gNavImmPress >= 0) fillCircleA(cx[gNavImmPress], ny + 8, 24, fg, 46);
+  fillTriangle(cx[0] - 10, ny + 8, cx[0] + 8, ny - 2, cx[0] + 8, ny + 18, fg);    // atras
+  drawCircle(cx[1], ny + 8, 12, fg); drawCircle(cx[1], ny + 8, 11, fg);           // inicio
+  drawRoundRect(cx[2] - 11, ny - 3, 22, 22, 4, fg);                                // recientes
+  navGlyphExitFull(cx[3], ny + 8, fg);                                             // salir de pantalla completa
+}
+static bool navImmEnsureBuf(){
+  if(gNavImmSave) return true;
+  gNavImmSave = (uint16_t*)heap_caps_aligned_alloc(64, NAV_IMM_SAVE_PX * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  return gNavImmSave != NULL;
+}
+// Los dos extremos de la transferencia (los llama flxFlush, como al banner).
+static void navImmStampBegin(int y0, int y1){
+  if(!gNavImmOn || gNavImmStamping || !fb) return;
+  if(!navImmEnsureBuf()) return;                 // sin memoria la barra no se pinta (sigue respondiendo)
+  int x0, py0, x1, py1; navImmPhysRect(x0, py0, x1, py1);
+  const int a0 = py0 > y0 ? py0 : y0, a1 = py1 < y1 ? py1 : y1;
+  if(a0 > a1) return;                            // esta banda no toca la barra
+  const int w = x1 - x0 + 1, rows = a1 - a0 + 1;
+  if((size_t)w * (size_t)rows > NAV_IMM_SAVE_PX) return;
+  for(int r = 0; r < rows; r++)
+    memcpy(gNavImmSave + (size_t)r * w, fb + (size_t)(a0 + r) * SCR_W + x0, (size_t)w * 2);
+  gNavImmSavY = a0; gNavImmSavRows = rows; gNavImmSavX = x0; gNavImmSavW = w;
+  gNavImmStamping = true;
+  uint16_t* ob = gBuf; const bool wl = gLand;
+  const int sx0 = gClipX0, sx1 = gClipX1, sy0 = gClipY0, sy1 = gClipY1, ly0 = gClipLY0, ly1 = gClipLY1;
+  gBuf = fb; gLand = gImmLand;
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = a0; gClipY1 = a1;   // solo las filas FISICAS que salen ahora
+  gClipLY0 = 0; gClipLY1 = SCR_W - 1;
+  navImmPaint();
+  gBuf = ob; gLand = wl;
+  gClipX0 = sx0; gClipX1 = sx1; gClipY0 = sy0; gClipY1 = sy1; gClipLY0 = ly0; gClipLY1 = ly1;
+}
+static void navImmStampEnd(){
+  if(!gNavImmStamping) return;
+  for(int r = 0; r < gNavImmSavRows; r++)
+    memcpy(fb + (size_t)(gNavImmSavY + r) * SCR_W + gNavImmSavX, gNavImmSave + (size_t)r * gNavImmSavW, (size_t)gNavImmSavW * 2);
+  gNavImmStamping = false;
+}
+// Manda al panel las filas de la barra (con ella si esta revelada; limpias si no).
+static void navImmFlush(){
+  int x0, y0, x1, y1; navImmPhysRect(x0, y0, x1, y1);
+  flxFlush(y0, y1);
+}
+static void navImmShow(){
+  gNavImmOn = true; gNavImmMs = millis(); gNavImmPress = -1;
+  navImmFlush();
+}
+static void navImmHide(){
+  if(!gNavImmOn) return;
+  gNavImmOn = false; gNavImmPress = -1;
+  navImmFlush();                                 // el panel recupera la pagina de debajo, desde fb
+}
+// Se deja como estaba al salir de la app o de la pantalla completa. `freeBuf`
+// suelta tambien los ~100 KB de la copia de seguridad.
+static void navImmReset(bool freeBuf){
+  gNavImmOn = false; gNavImmPress = -1; gNavImmWatch = gNavImmOwn = false;
+  if(freeBuf && gNavImmSave && !gNavImmStamping){ heap_caps_free(gNavImmSave); gNavImmSave = NULL; }
+}
+
 // Estampado dentro de flxFlush (ver el bloque de arriba). Solo toca fb, solo si
 // la banda que se va a publicar cruza la franja de la barra.
 static void navStampBar(int y0, int y1){
+  if(appImmersive()){ navImmStampBegin(y0, y1); return; }   // capa transitoria: fb la recupera despues
   if(!navBarVisible()) return;
   if(y1 < navBarTop() || y0 > SCR_H - 1) return;
   uint16_t* ob = gBuf; bool wl = gLand;
@@ -990,6 +1169,9 @@ static void navStampBar(int y0, int y1){
   setBuf(ob); gLand = wl;
   gClipX0 = sx0; gClipX1 = sx1; gClipY0 = sy0; gClipY1 = sy1;
 }
+// Despues de la transferencia: la barra transitoria devuelve a fb lo que tenia.
+// La barra normal no necesita nada (vive en su franja reservada).
+static void navStampEnd(){ navImmStampEnd(); }
 
 // Corta el episodio tactil en curso. Se llama en CADA transicion de pantalla:
 // sin esto, el dedo que sigue apoyado despues de pulsar "inicio" genera un
@@ -1006,6 +1188,138 @@ static void touchDropAll(){
   gTouchSwallowSeenMs = fingerOn ? millis() : 0;   // (si ya estaba arriba, el candado cae en el siguiente poll sin contacto)
   gNavPress = -1;
   gNavGlow  = -1;
+}
+
+// #############################################################
+// ##  PANTALLA COMPLETA: aplicar, entrar y el tactil de la barra transitoria
+// #############################################################
+// Lienzo de la app en primer plano segun su modo. El UNICO sitio que decide
+// gAppW/gAppH/gLand para una app a pantalla completa; la app solo lo lee.
+static void immersiveLayout(){
+  const bool landApp = (APP_REG[gAppId].flags & APP_LAND) != 0;
+  if(appImmersive() && gImmLand){ gLand = true; gAppW = SCR_H; gAppH = SCR_W; }
+  else {
+    if(!landApp) gLand = false;
+    gAppW = SCR_W; gAppH = SCR_H;
+  }
+}
+// La app la PIDE; se aplica en appTick, ANTES de su tick, en un punto donde
+// nadie esta dibujando. Pedirlo desde dentro del propio tick (el menu del
+// navegador) no cambia el lienzo bajo los pies del cuadro en curso.
+//   st: 0 normal · 1 vertical · 2 horizontal
+static void immersiveRequest(int app, int st){
+  if(app < 0 || app >= APP_N) return;
+  gImmReq = st < 0 ? 0 : (st > 2 ? 2 : st);
+  gImmReqApp = app;
+}
+static int immersiveState(int app){
+  if(app < 0 || app >= APP_N || gImmApp != app) return 0;
+  return gImmLand ? 2 : 1;
+}
+static void immersiveApplyPending(){
+  if(gImmReq < 0) return;
+  const int st = gImmReq, app = gImmReqApp;
+  gImmReq = -1; gImmReqApp = -1;
+  if(app != gAppId || gState != ST_APP || gHosted) return;
+  if(APP_REG[app].flags & APP_LAND) return;            // las apps horizontales ya mandan sobre su lienzo
+  if(immersiveState(app) == st) return;
+  navImmHide();                                        // la barra transitoria no sobrevive al cambio
+  navImmReset(st == 0);
+  if(st == 0){ gImmApp = -1; }
+  else { gImmApp = app; gImmLand = (st == 2); }
+  immersiveLayout();
+  // El lienzo NUEVO, limpio y con su marco (o sin el): lo que dejo el anterior
+  // -- otra orientacion, la barra de estado, la cabecera -- no puede asomar. La
+  // app se re-maqueta en su propio tick, en esta misma vuelta: ve que su
+  // lienzo cambio (uiBox) igual que al redimensionar una ventana de DeX.
+  gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
+  gClipLY0 = 0; gClipLY1 = SCR_W - 1;
+  setBuf(fb);
+  const bool wl = gLand;
+  gLand = false;
+  fillRect(0, 0, SCR_W, SCR_H, WIN_BG);
+  gLand = wl;
+  if(!appImmersive()){
+    appDrawChrome(app);
+    if(!(APP_REG[app].flags & APP_CUSTOM_HEADER)) appDrawHeader(app);
+  }
+  flxFlushAll();
+  touchDropAll();                                      // el toque que lo pidio no cae en el lienzo nuevo
+}
+// Abre (o reanuda) una app directamente en pantalla completa. Lo usa el menu
+// de pulsacion larga del escritorio. Solo apps adaptativas: las demas dibujan
+// contra 480x800 fijos y no sabrian usar el lienzo.
+static bool gImmPrefLand = false;    // ultima orientacion elegida (la de la proxima apertura)
+static void immersiveOpen(int id){
+  if(id < 0 || id >= APP_N) return;
+  if(!(APP_REG[id].flags & APP_FLEX) || (APP_REG[id].flags & APP_LAND)) return;
+  gImmApp = id; gImmLand = gImmPrefLand;
+  enterApp(id);
+}
+// La app deja la pantalla (inicio, recientes, otra app): el lienzo vuelve al
+// de siempre. El MODO se conserva -- al volver, vuelve a pantalla completa --;
+// lo que no sobrevive es la barra transitoria.
+static void immersiveLeave(){
+  navImmReset(true);
+  gAppW = SCR_W; gAppH = SCR_H;
+  gClipLY0 = 0; gClipLY1 = SCR_W - 1;
+}
+
+// TACTIL de la pantalla completa: el gesto que revela la barra y la propia
+// barra. Devuelve true si el toque es del sistema (la app no lo ve).
+static void navImmAction(int btn){
+  gNavImmMs = millis();
+  if(btn == 0)      sysBack();                         // la app decide: el navegador sale de pantalla completa
+  else if(btn == 1) sysHome();
+  else if(btn == 2) sysRecents();
+  else              immersiveRequest(gAppId, 0);       // salir de pantalla completa, sin tocar la app
+}
+static bool navImmHandle(){
+  if(!appImmersive()) return false;
+  if(KIOSK_ON && kioskOn) return false;                // en kiosco no hay vias de escape
+  const uint32_t now = millis();
+  int lx, ly; navImmToLogical(T.x, T.y, lx, ly);
+  int sx, sy; navImmToLogical(T.startX, T.startY, sx, sy);
+  const int ch = navImmCH();
+  // Se oculta sola si nadie la toca.
+  if(gNavImmOn && gNavImmPress < 0 && !T.down && now - gNavImmMs > NAV_IMM_HIDE_MS) navImmHide();
+  if(gNavImmOn){
+    const bool inBar = ly >= ch - NAV_H;
+    if(T.pressed && inBar){
+      gNavImmPress = navImmBtnAt(lx); gNavImmMs = now;
+      navImmFlush();                                   // destello del boton
+      return true;
+    }
+    if(T.down && gNavImmPress >= 0){ gNavImmMs = now; return true; }
+    if(gNavImmPress >= 0 && (T.released || T.tap)){
+      const int btn = gNavImmPress;
+      gNavImmPress = -1;
+      if(!inBar){ navImmFlush(); return true; }        // el dedo se fue de la barra: se cancela
+      navImmFlush();
+      navImmAction(btn);
+      return true;
+    }
+    if(inBar && (T.tap || T.released || T.down)){ gNavImmMs = now; return true; }
+  }
+  // EL GESTO: un deslizamiento que EMPIEZA en el borde inferior del lienzo y
+  // entra hacia dentro. Mientras no recorre NAV_IMM_CLAIM_DY la app sigue
+  // recibiendo el toque (un toque en la parte baja de la pagina sigue siendo
+  // un toque); en cuanto lo recorre, el resto del episodio es del sistema.
+  if(T.pressed && sy >= ch - NAV_IMM_EDGE){
+    gNavImmWatch = true; gNavImmOwn = false; gNavImmY0 = sy;
+    return false;
+  }
+  if(gNavImmWatch){
+    if(T.down){
+      if(!gNavImmOwn && gNavImmY0 - ly >= NAV_IMM_CLAIM_DY){ gNavImmOwn = true; navImmShow(); }
+      if(gNavImmOwn){ touchHoldBack(); return true; }
+      return false;
+    }
+    const bool own = gNavImmOwn;
+    gNavImmWatch = false; gNavImmOwn = false;
+    if(own){ touchHoldBack(); return true; }
+  }
+  return false;
 }
 
 // #############################################################
@@ -1117,6 +1431,7 @@ static bool appTerminate(int id, bool force){
   if(h && h->close) h->close();
   flexFeedWdt();
   gAppState[id] = ALIFE_CLOSED;
+  if(gImmApp == id) gImmApp = -1;   // cerrar DE VERDAD borra la pantalla completa: la proxima vez se abre normal
   gAppSeenMs[id] = 0;
   appMemForget(id);                 // su huella medida deja de existir con ella
   return true;

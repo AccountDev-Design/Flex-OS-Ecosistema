@@ -660,11 +660,13 @@ accidente dentro de una lista o de un juego.
 
 ### El banner flotante
 
-La isla dinámica (`FlexOS_Ultra_Notif.h`) solo vive en el escritorio: compone
-sobre `homeBuf`, que solo es un fondo válido ahí. Una notificación del teléfono
-tiene que verse **estés donde estés**, así que el banner sigue el patrón del
-aviso de caída: captura su banda, dibuja encima y la devuelve pixel a pixel al
-cerrarse.
+El banner es el **único presentador de avisos** del sistema: los del teléfono
+y los del propio Flex OS (la isla de `FlexOS_Ultra_Notif.h` ya solo guarda el
+historial que leen el Centro, DeX y el widget). Tiene que verse **estés donde
+estés**, así que no vive en el framebuffer: su tarjeta (vidrio sobre lo que
+hay debajo en ese momento + contenido) se estampa en cada volcado al panel y
+se retira al acabar la transferencia. No puede dejar rastro ni pegar un fondo
+viejo.
 
 Con una diferencia que es la importante: **no es modal**. No se queda la
 pantalla, no para la app de debajo y no le roba el toque salvo que el dedo
@@ -675,7 +677,9 @@ haya dibujado, así que siempre queda encima sin parpadear.
 |---|---|
 | Vertical | banda compacta **arriba**. Nunca en el centro |
 | Horizontal | arriba y **más estrecho**: una banda a lo ancho se comería la mitad útil de un juego |
-| A la vez | **uno**. Lo que llega detrás espera turno y se resume (`+3`), no se apila |
+| A la vez | **uno**. Lo que llega detrás espera turno y se resume (`+3`), no se apila. Nadie le quita la pantalla al que se está leyendo |
+| Prioridad | **sistema** > teléfono urgente > teléfono normal; dentro de cada nivel, por orden de llegada |
+| Si algo le quita la pantalla | (una transición de app, la cortina, un modal, girar) se retira sin rastro y **vuelve** al frente de la cola con el tiempo que le quedaba, con el vidrio y la orientación nuevos |
 | Descartar | arrastre a la izquierda; si viene del teléfono, se descarta **también allí** |
 | Tocar | abre Flex Phone en Notificaciones |
 | Solo | a los 4,2 s — y no mientras el dedo lo está tocando |

@@ -578,6 +578,7 @@ static void sysRecents(){
     // Igual que en appClose: una app que todavia no ha corrido su enter() no se
     // suspende (no tendria ni estado ni miniatura que guardar), se cancela.
     if(!appCancelPendingOpen(gAppId)) appSuspend(gAppId, land);
+    immersiveLeave();     // el lienzo vuelve al de siempre (el modo se conserva para la vuelta)
     if(gHomeDirty) renderHome();
   }
   appTrCancel();          // Recientes dibuja la pantalla entera: ninguna capa sobrevive
@@ -588,6 +589,7 @@ static void sysRecents(){
 // Reparto del toque en la franja del sistema. Devuelve true si lo consumio: el
 // tick de la app no llega a verlo nunca.
 static bool navBarHandle(){
+  if(appImmersive()) return false;            // pantalla completa: la atiende navImmHandle
   if(!navBarVisible()) return false;
   int top = navBarTop();
   bool inBar = (T.y >= top);
@@ -661,6 +663,7 @@ static void appClose(){
   // existir (ver appCancelPendingOpen).
   if(!appCancelPendingOpen(outId))
     appSuspend(outId, wasLand);        // conserva capas, toma miniatura y arma el guardado
+  immersiveLeave();                    // lienzo de siempre para Inicio (el modo pantalla completa se conserva)
   // La transicion compone SOBRE homeBuf: si Ajustes lo dejo sucio, hay que
   // recomponerlo ANTES, o la animacion de cierre encoge hacia el escritorio
   // viejo y este cambia de golpe al terminar.
@@ -872,10 +875,20 @@ static void appTrFinishOpen(){
   if(gState != ST_APP || gAppId != id) return;
   gLand = false;
   gClipX0 = 0; gClipX1 = SCR_W - 1; gClipY0 = 0; gClipY1 = SCR_H - 1;
+  gClipLY0 = 0; gClipLY1 = SCR_W - 1;
   setBuf(fb);
+  // Lienzo de la app: el de siempre, o el entero si esta en pantalla completa
+  // (vertical u horizontal). Lo decide el gestor ANTES de que la app pinte.
+  immersiveLayout();
   const AppHooks* h = appHooks(id);
   if(resuming && !(h && h->resume)) resuming = false;
-  if(!(APP_REG[id].flags & APP_CUSTOM_HEADER)){   // apps normales: marco estandar
+  if(appImmersive()){
+    // Sin marco: el lienzo entero, limpio. Lo que la transicion dejo detras
+    // no puede asomar por donde antes estaban las barras.
+    const bool wl = gLand; gLand = false;
+    fillRect(0, 0, SCR_W, SCR_H, WIN_BG);
+    gLand = wl;
+  } else if(!(APP_REG[id].flags & APP_CUSTOM_HEADER)){   // apps normales: marco estandar
     appDrawChrome(id);
     appDrawHeader(id);
   }
@@ -957,6 +970,16 @@ static void appTick(){
   if(gTrEnterPending){
     if(gNavMode == 1 && handleiOSGestures()) return;
     if(navBarHandle()) return;
+    return;
+  }
+  // PANTALLA COMPLETA: lo que la app haya pedido se aplica AQUI, antes de su
+  // tick y con nadie dibujando. Y en ella la franja de abajo no es una barra
+  // fija sino el gesto que revela la barra transitoria (en los dos modos de
+  // navegacion y en las dos orientaciones).
+  immersiveApplyPending();
+  if(appImmersive()){
+    if(navImmHandle()) return;
+    if(APP_REG[gAppId].tick) APP_REG[gAppId].tick();
     return;
   }
   if(gLand){ if(APP_REG[gAppId].tick) APP_REG[gAppId].tick(); return; }  // Modo PC / Juegos: gestionan todo por su cuenta

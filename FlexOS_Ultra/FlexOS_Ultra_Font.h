@@ -1685,13 +1685,63 @@ static inline uint8_t fgPix(const FGlyph* g, int x, int y){
   return (x & 1) ? (b & 0x0F) : (b >> 4);
 }
 static inline float fontSc(int size){ return (float)(size * FONT_HPS) / (float)FONT_LINEH; }
+// -------------------------------------------------------------
+//  DECODIFICACION UTF-8 Y PLEGADO TIPOGRAFICO
+//  ------------------------------------------------------------
+//  El texto que llega de fuera (notificaciones del telefono, nombres de
+//  apps, titulos de paginas) trae caracteres que la fuente no tiene pero
+//  que SI tienen un equivalente: el espacio duro (U+00A0) y el espacio fino
+//  (U+202F) que Android pone entre palabras -- "Google Play Store" salia
+//  "Google?Play?Store" --, las comillas tipograficas, los guiones largos.
+//  Antes, ademas, cualquier caracter de 3 bytes se pintaba '?' sin mirarlo,
+//  y uno de 4 (un emoji) dejaba sus bytes de continuacion sueltos: CUATRO
+//  '?' por cada emoji. Ahora se decodifica entero y se pliega a lo que la
+//  fuente sabe dibujar; lo invisible (espacios de ancho cero, selectores de
+//  variante de los emoji, el guion blando) no se dibuja ni ocupa sitio.
+// -------------------------------------------------------------
+static uint32_t utf8Decode(const char** ps){
+  const uint8_t* s = (const uint8_t*)*ps;
+  const uint8_t b = *s++;
+  uint32_t cp; int extra;
+  if(b < 0x80){ *ps = (const char*)s; return b; }
+  if((b & 0xE0) == 0xC0){ cp = b & 0x1F; extra = 1; }
+  else if((b & 0xF0) == 0xE0){ cp = b & 0x0F; extra = 2; }
+  else if((b & 0xF8) == 0xF0){ cp = b & 0x07; extra = 3; }
+  else { *ps = (const char*)s; return 0xFFFD; }            // byte suelto o invalido
+  for(int k = 0; k < extra; k++){
+    // Secuencia cortada: se para SIN comerse el byte siguiente (puede ser el
+    // terminador, o el principio del caracter que viene).
+    if((*s & 0xC0) != 0x80){ *ps = (const char*)s; return 0xFFFD; }
+    cp = (cp << 6) | (uint32_t)(*s++ & 0x3F);
+  }
+  *ps = (const char*)s;
+  return cp;
+}
+static inline bool cpZeroWidth(uint32_t cp){
+  return cp == 0x00AD || (cp >= 0x200B && cp <= 0x200F) || cp == 0x2060 ||
+         cp == 0xFEFF || (cp >= 0xFE00 && cp <= 0xFE0F);
+}
+static uint32_t cpFold(uint32_t cp){
+  if(cp < 0x80) return cp;
+  if(cp >= 0x2000 && cp <= 0x200A) return ' ';           // espacios de ancho fijo
+  switch(cp){
+    case 0x00A0: case 0x1680: case 0x202F: case 0x205F: case 0x3000: return ' ';
+    case 0x2010: case 0x2011: case 0x2012: case 0x2013: case 0x2014: case 0x2015: case 0x2212: return '-';
+    case 0x2018: case 0x2019: case 0x201A: case 0x201B: case 0x2032: return '\'';
+    case 0x201C: case 0x201D: case 0x201E: case 0x00AB: case 0x00BB: case 0x2033: return '"';
+    case 0x2022: case 0x2027: case 0x2219: return 0xB7;    // vinetas -> punto medio
+    case 0x2026: return '.';
+    default: return cp;
+  }
+}
+// Siguiente caracter DIBUJABLE: decodificado, plegado y sin los invisibles.
+// Si la cadena acaba con invisibles, devuelve un espacio (no pinta nada).
 static uint32_t nextCP(const char** ps){
-  const char* s = *ps; uint8_t b = (uint8_t)*s++; uint32_t cp;
-  if(b < 0x80) cp = b;
-  else if((b & 0xE0) == 0xC0){ uint8_t b1 = *s ? (uint8_t)*s++ : 0; cp = ((b & 0x1F) << 6) | (b1 & 0x3F); }
-  else if((b & 0xF0) == 0xE0){ if(*s) s++; if(*s) s++; cp = 0x3F; }
-  else cp = 0x3F;
-  *ps = s; return cp;
+  for(;;){
+    const uint32_t cp = utf8Decode(ps);
+    if(!cpZeroWidth(cp)) return cpFold(cp);
+    if(!**ps) return ' ';
+  }
 }
 // Columnas del glifo: x0 entero y su fraccion. Dependen SOLO de tx y de la
 // escala -- no de la fila --, asi que la version anterior repetia la division
@@ -1788,10 +1838,7 @@ static void drawGlyphScaled(int px0, int py0, const FGlyph* g, float sc, uint16_
 static int textW(const char* s, int size){
   if(size <= 1){                 // texto minusculo: bitmap 5x7 nitido (6px monoespaciado)
     int n = 0;
-    while(*s){ uint8_t b = (uint8_t)*s++;
-      if(b >= 0x80){ if((b & 0xE0) == 0xC0){ if(*s) s++; } else if((b & 0xF0) == 0xE0){ if(*s) s++; if(*s) s++; } }
-      n++;
-    }
+    while(*s){ (void)nextCP(&s); n++; }        // MISMA cuenta que drawTextA: un caracter, 6 px
     return n > 0 ? n * 6 - 1 : 0;
   }
   float sc = fontSc(size), w = 0;
@@ -1804,11 +1851,7 @@ static int textW(const char* s, int size){
 static int drawTextA(int x, int y, const char* s, int size, uint16_t col, uint8_t alpha){
   if(size <= 1){
     while(*s){
-      uint8_t b = (uint8_t)*s++; uint32_t cp;
-      if(b < 0x80) cp = b;
-      else if((b & 0xE0) == 0xC0){ uint8_t b1 = *s ? (uint8_t)*s++ : 0; cp = ((b & 0x1F) << 6) | (b1 & 0x3F); }
-      else if((b & 0xF0) == 0xE0){ if(*s) s++; if(*s) s++; cp = 0x3F; }
-      else cp = 0x3F;
+      const uint32_t cp = nextCP(&s);
       uint8_t base, acc; mapCP(cp, base, acc);
       drawGlyphSmooth(x, y, base, 1, col, alpha);     // 1:1 = nitido
       if(acc) drawAccent(x, y, 1, acc, col);

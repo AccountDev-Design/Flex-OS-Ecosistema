@@ -527,6 +527,9 @@ bool flexPhoneDecMedia(const uint8_t* in, size_t n, FlexPhoneMedia* out){
 }
 
 // FLNK_T_RELAY_INFO: u8 ip[4] · u16 puerto · u8 ver · u8 flags · u16 caps · str error
+// flags: bit0 TLS · bit1 DETENIDO POR EL USUARIO · bit2 SUSPENDIDO por Android.
+// Los bits 1 y 2 son nuevos: un telefono antiguo manda 0 y todo se lee como
+// siempre (el texto de error decide).
 bool flexPhoneDecRelayInfo(const uint8_t* in, size_t n, FlexPhoneRelay* out){
   if(!in || !out) return false;
   FlexPhoneRelay s; memset(&s, 0, sizeof(s));
@@ -539,6 +542,11 @@ bool flexPhoneDecRelayInfo(const uint8_t* in, size_t n, FlexPhoneRelay* out){
   s.caps = flexLinkRdU16(&r);
   flexLinkRdStr(&r, s.err, sizeof(s.err));
   if(!flexLinkRdOk(&r)) return false;
+  // Parado A PROPOSITO por la persona: no es un error y no se pinta en rojo.
+  // err conserva el motivo para ensenarlo ("detenido por el usuario").
+  if(flags & 0x02){ s.state = FLP_RELAY_OFF; s.byUser = true; *out = s; return true; }
+  // Android lo suspendio (ahorro de bateria): estado propio, no "error".
+  if(flags & 0x04){ s.state = FLP_RELAY_SUSPENDED; *out = s; return true; }
   // Un relay sin puerto o sin IP no esta arriba, diga lo que diga el
   // byte de estado: se refleja como error, nunca como "conectado".
   if(s.err[0])                     s.state = FLP_RELAY_ERROR;

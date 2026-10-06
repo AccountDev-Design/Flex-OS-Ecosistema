@@ -1214,7 +1214,7 @@ static bool homeEmptySpaceAt(int px, int py){
   int id;
   if(hitHomeIcon(px, py, id)) return false;
   if(homeWgAt(gHomePage, px, py) >= 0) return false;
-  if(gNotifCount > 0 && py >= NOTIF_BAND_TOP && py <= NOTIF_BAND_BOT) return false;
+  if(notifBandOn && py >= NOTIF_BAND_TOP && py <= NOTIF_BAND_BOT) return false;   // ver Home: gNotifCount es historial
   return true;
 }
 

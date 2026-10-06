@@ -188,6 +188,10 @@ class FlexLinkService : Service() {
                 return START_NOT_STICKY
             }
             state.sender = { type, payload -> s.send(type, payload) }
+            // El relay estaba encendido y Android lo cerro: vuelve ahora, que
+            // Flex Phone esta en primer plano y puede arrancarlo. Si la persona
+            // lo paro, se queda parado (ver BrowserRelayService.wanted).
+            BrowserRelayService.restoreIfWanted(this)
             media = MediaBridge(this, state).also { it.start() }
             lastWifiIp = NetAddress.wifiIpv4(this)
             state.setAddress(lastWifiIp)

@@ -59,6 +59,34 @@ fun LinkPhase.toLinkState(): LinkState = when (this) {
 enum class RelayState { OFF, STARTING, UP, ERROR, SUSPENDED }
 
 /**
+ * Quien hay al otro lado del relay, con el relay ARRIBA:
+ *   · CONNECTED    -> Flex OS conectado: "Relay activo";
+ *   · RECONNECTING -> Flex OS se acaba de ir y sus pestanas se conservan
+ *                     esperando la reconexion: "Reconectando";
+ *   · NONE         -> nadie: "Desconectado (esperando a Flex OS)".
+ */
+enum class RelayClient { NONE, CONNECTED, RECONNECTING }
+
+/**
+ * El texto UNICO del estado del relay, el mismo en la portada, en la pantalla
+ * del relay y en cualquier otro sitio: cuatro estados claros y distintos
+ * (activo / reconectando / desconectado / detenido por el usuario) mas los de
+ * arranque y fallo. [short] es la version para una celda pequena.
+ */
+fun relayStatusText(state: RelayState, client: RelayClient, stoppedByUser: Boolean, short: Boolean = false): String =
+    when (state) {
+        RelayState.UP -> when (client) {
+            RelayClient.CONNECTED -> "Relay activo"
+            RelayClient.RECONNECTING -> "Reconectando"
+            RelayClient.NONE -> if (short) "Desconectado" else "Desconectado (esperando a Flex OS)"
+        }
+        RelayState.STARTING -> "Arrancando"
+        RelayState.ERROR -> "Con error"
+        RelayState.SUSPENDED -> if (short) "Suspendido" else "Suspendido por Android"
+        RelayState.OFF -> if (stoppedByUser) (if (short) "Detenido" else "Detenido por el usuario") else "Parado"
+    }
+
+/**
  * Estado observable de Flex Phone.
  *
  * UNA SOLA INSTANCIA, creada por [com.flexos.flexphone.FlexPhoneApp].
@@ -163,6 +191,15 @@ class FlexPhoneState(
 
     private val _relayInfo = MutableStateFlow<RelayInfo?>(null)
     val relayInfo: StateFlow<RelayInfo?> = _relayInfo.asStateFlow()
+
+    /** Cliente del relay (ver [RelayClient]). */
+    private val _relayClient = MutableStateFlow(RelayClient.NONE)
+    val relayClient: StateFlow<RelayClient> = _relayClient.asStateFlow()
+    fun setRelayClient(c: RelayClient) { _relayClient.value = c }
+
+    /** El relay esta parado PORQUE la persona lo paro (no Android, no un error). */
+    private val _relayStoppedByUser = MutableStateFlow(false)
+    val relayStoppedByUser: StateFlow<Boolean> = _relayStoppedByUser.asStateFlow()
 
     private val _media = MutableStateFlow<MediaState?>(null)
     val media: StateFlow<MediaState?> = _media.asStateFlow()
@@ -287,11 +324,17 @@ class FlexPhoneState(
     fun reannounceRelay() {
         val state = _relay.value
         val info = _relayInfo.value
-        if (state == RelayState.OFF && info == null) return
+        if (state == RelayState.OFF && info == null && !_relayStoppedByUser.value) return
         sendRelayInfo(state, info)
     }
 
-    fun setRelay(state: RelayState, info: RelayInfo? = null) {
+    /**
+     * [byUser] solo cuenta con [RelayState.OFF]: la persona lo paro a proposito
+     * (boton de la app, de la notificacion o desde Flex OS). Se le dice asi al
+     * P4, que lo ensena como "Detenido por el usuario" y no como un error.
+     */
+    fun setRelay(state: RelayState, info: RelayInfo? = null, byUser: Boolean = false) {
+        _relayStoppedByUser.value = state == RelayState.OFF && byUser
         _relay.value = state
         _relayInfo.value = info
         sendRelayInfo(state, info)
@@ -302,14 +345,17 @@ class FlexPhoneState(
         // Se anuncia SIEMPRE el estado real, error incluido: el P4
         // tiene que poder mostrar "Android suspendio el relay" en vez
         // de quedarse esperando frames que no van a llegar.
+        val byUser = state == RelayState.OFF && _relayStoppedByUser.value
         val payload = info ?: RelayInfo(
             ip = byteArrayOf(0, 0, 0, 0), port = 0, protoVer = 1, tls = false, caps = 0,
             error = when (state) {
                 RelayState.SUSPENDED -> "Android suspendio el relay"
                 RelayState.ERROR -> "el relay no pudo arrancar"
-                RelayState.OFF -> "relay detenido"
+                RelayState.OFF -> if (byUser) "detenido por el usuario" else "relay detenido"
                 else -> ""
             },
+            stoppedByUser = byUser,
+            suspended = state == RelayState.SUSPENDED,
         )
         s(com.flexos.flexphone.protocol.FlexLink.T_RELAY_INFO, payload.encode())
     }

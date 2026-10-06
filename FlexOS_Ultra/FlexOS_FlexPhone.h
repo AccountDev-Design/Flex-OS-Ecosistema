@@ -195,7 +195,8 @@ typedef struct {
   bool     tls;
   uint16_t caps;          // mapa de capacidades declaradas
   uint32_t stampMs;
-  char     err[64];       // motivo REAL si state == FLP_RELAY_ERROR
+  bool     byUser;        // FLP_RELAY_OFF porque la persona lo paro (telefono o Flex OS)
+  char     err[64];       // motivo REAL: del error, de la suspension o de la parada
 } FlexPhoneRelay;
 
 // ---- Privacidad -----------------------------------------------

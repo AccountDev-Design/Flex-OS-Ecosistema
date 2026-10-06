@@ -161,7 +161,8 @@ typedef struct {
 #define FPB_DRAG_PX    10        // hasta aqui el dedo solo tiembla; mas es un arrastre
 #define FPB_FLING      0.7f      // px/ms: un lanzamiento que descarta aunque no llegue al umbral
 #define FPB_FLING_MIN  40        // ...pero con al menos este recorrido
-#define FPB_REGLASS_MS 150       // el vidrio se recalcula como mucho cada tanto si lo de debajo cambia
+#define FPB_REGLASS_MS 80        // el vidrio se recalcula como mucho cada tanto si lo de debajo cambia
+#define FPB_MIN_HOLD_MS 1500     // al volver tras perder la pantalla, como poco esto a la vista
 #define FPB_SHADOW_A   60
 #define FPB_MIN_MIX    150       // tinte minimo del vidrio: el texto se lee sobre cualquier cosa (el del visor)
 #define FPB_SAVE_BYTES (80 * 1024)   // lo que fb tenia bajo la tarjeta durante UNA transferencia (<= 480x80x2)
@@ -169,6 +170,32 @@ typedef struct {
 // Una torre de tarjetas apiladas es justo lo que NO se quiere.
 #define FPB_QUEUE    6
 
+// #############################################################
+// ##  PRESENTADOR UNICO DE AVISOS
+// ##  ------------------------------------------------------
+// ##  Este banner es el UNICO sitio que presenta avisos en
+// ##  pantalla: los del telefono Y los del propio sistema. Antes
+// ##  habia dos capas -- la isla (avisos del sistema, solo en el
+// ##  escritorio, compuesta en bbuf) y este banner -- que no sabian
+// ##  la una de la otra, asi que podian salir A LA VEZ en la misma
+// ##  franja de arriba ("Google Play Store" encima de "Proteccion
+// ##  contra robo restaurada"). Ahora la isla solo GUARDA (es el
+// ##  modelo que leen el Centro, DeX y el widget) y presenta aqui.
+// ##
+// ##  REGLAS DE LA COLA
+// ##    · Uno a la vez. Lo que llega mientras hay uno a la vista
+// ##      espera: NADIE quita la pantalla al que se esta leyendo.
+// ##    · Prioridad: SISTEMA > telefono urgente > telefono normal;
+// ##      dentro de cada nivel, por orden de llegada.
+// ##    · El mismo aviso del sistema (misma huella) no se repite: si
+// ##      cambia su texto se actualiza donde este, a la vista o en
+// ##      la cola.
+// ##    · Si algo le quita la pantalla a medias (una transicion de
+// ##      app, la cortina, un modal, girar la pantalla), el aviso NO
+// ##      se pierde: vuelve AL FRENTE de la cola con el tiempo que le
+// ##      quedaba, y reaparece -- con el vidrio de lo que haya debajo
+// ##      ENTONCES y en la orientacion nueva -- en cuanto se puede.
+// #############################################################
 enum { FPB_HIDDEN = 0, FPB_ARMED, FPB_IN, FPB_SHOWN, FPB_OUT };
 
 typedef struct {
@@ -176,8 +203,11 @@ typedef struct {
   char     title[FPN_ENTRY_TITLE];
   char     body[FPN_ENTRY_BODY];
   uint32_t id;
+  uint32_t key;          // huella de un aviso del sistema (0 = sin huella)
+  uint32_t shownMs;      // lo que ya estuvo a la vista antes de volver a la cola
   uint8_t  src;
   uint8_t  pri;
+  uint8_t  icon;         // 1 + ModuleType de un aviso del sistema; 0 = sin icono
 } FlexPhoneBannerMsg;
 
 static int      fpbState = FPB_HIDDEN;
@@ -191,6 +221,7 @@ static bool     fpbSpring = false;      // no llego al umbral: vuelve a su sitio
 static float    fpbSpringFrom = 0.0f;
 static uint32_t fpbSpringT0 = 0;
 static bool     fpbPaintWanted = false; // hay que mandar sus filas al panel en esta vuelta
+static bool     fpbRefresh = false;     // el aviso a la vista cambio de texto: se resuelve otra vez
 static FlexPhoneBannerMsg fpbCur;
 static FlexPhoneBannerMsg fpbQueue[FPB_QUEUE];
 static int      fpbQueueN = 0;
@@ -289,6 +320,7 @@ static bool fpbScreenAllows(){
   if(faVisible() || cronoCardVisible() || spaVisible()) return false;   // ya hay un modal encima
   if(qsPanelY != 0 || qsAnimOn || qsDragging) return false;   // la cortina dibuja encima
   if(fpcBusy()) return false;                     // el Centro es dueno de la pantalla
+  if(gState == ST_HOMECFG) return false;          // Personalizar inicio: ningun overlay compite con el modo
   return true;
 }
 // Un aviso del TELEFONO respeta No molestar; uno del propio sistema (el resultado de algo que el usuario
@@ -299,33 +331,92 @@ static bool fpbCanShow(uint8_t src){
 }
 
 // -------------------------------------------------------------
-//  Encolar
+//  Encolar (ver PRESENTADOR UNICO DE AVISOS)
 // -------------------------------------------------------------
-// UNO visible a la vez. Lo que llega detras espera turno; al
-// llenarse la cola, se cuenta y se resume en el propio banner.
+// Nivel de prioridad: cuanto MAS alto, antes sale.
+static inline int fpbRank(const FlexPhoneBannerMsg* m){
+  if(m->src == FPN_SRC_SYSTEM) return 2;
+  return m->pri >= FLP_PRI_HIGH ? 1 : 0;
+}
+// Mete un aviso en la cola ORDENADA por prioridad. `front` = delante de los de
+// su nivel (el aviso que se estaba viendo y vuelve a la cola); si no, detras
+// de los de su nivel (por orden de llegada). Llena: si hay algo de MENOS
+// prioridad, sale el mas nuevo de ellos -- sigue en el Centro y se cuenta en el
+// "+N" --; si no, el que se cuenta es el nuevo.
+static void fpbEnqueue(const FlexPhoneBannerMsg* m, bool front){
+  const int r = fpbRank(m);
+  if(fpbQueueN >= FPB_QUEUE){
+    int victim = -1;
+    for(int i = fpbQueueN - 1; i >= 0; i--) if(fpbRank(&fpbQueue[i]) < r){ victim = i; break; }
+    if(victim < 0 && !front){ fpbMore++; return; }
+    if(victim < 0) victim = fpbQueueN - 1;           // el que vuelve tiene preferencia sobre el ultimo
+    for(int i = victim; i < fpbQueueN - 1; i++) fpbQueue[i] = fpbQueue[i + 1];
+    fpbQueueN--;
+    fpbMore++;
+  }
+  int at = 0;
+  if(front){ while(at < fpbQueueN && fpbRank(&fpbQueue[at]) > r) at++; }
+  else     { for(int i = 0; i < fpbQueueN; i++) if(fpbRank(&fpbQueue[i]) >= r) at = i + 1; }
+  for(int i = fpbQueueN; i > at; i--) fpbQueue[i] = fpbQueue[i - 1];
+  fpbQueue[at] = *m;
+  fpbQueueN++;
+}
+// Dos avisos del sistema son el MISMO si traen la misma huella (o, sin huella,
+// el mismo texto).
+static bool fpbSameSys(const FlexPhoneBannerMsg* a, const FlexPhoneBannerMsg* b){
+  if(a->key && b->key) return a->key == b->key;
+  return !strcmp(a->title, b->title) && !strcmp(a->body, b->body);
+}
+static void fpbOffer(const FlexPhoneBannerMsg* n){
+  if(n->src == FPN_SRC_SYSTEM){
+    // El MISMO aviso del sistema ya a la vista o esperando (dos toques seguidos sobre lo mismo, un estado
+    // que se actualiza) no se repite: la respuesta es UNA, no una torre de tarjetas iguales. Si cambio el
+    // texto, se actualiza donde este.
+    if(fpbState != FPB_HIDDEN && fpbState != FPB_OUT && fpbCur.src == FPN_SRC_SYSTEM && fpbSameSys(&fpbCur, n)){
+      if(strcmp(fpbCur.title, n->title) || strcmp(fpbCur.body, n->body)){
+        memcpy(fpbCur.title, n->title, sizeof(fpbCur.title));
+        memcpy(fpbCur.body,  n->body,  sizeof(fpbCur.body));
+        fpbRefresh = true;
+      }
+      return;
+    }
+    for(int i = 0; i < fpbQueueN; i++)
+      if(fpbQueue[i].src == FPN_SRC_SYSTEM && fpbSameSys(&fpbQueue[i], n)){
+        memcpy(fpbQueue[i].title, n->title, sizeof(fpbQueue[i].title));
+        memcpy(fpbQueue[i].body,  n->body,  sizeof(fpbQueue[i].body));
+        return;
+      }
+  }
+  fpbEnqueue(n, false);
+}
+static void fpbMsgInit(FlexPhoneBannerMsg* n, uint8_t src, uint32_t id, const char* app,
+                       const char* title, const char* body, uint8_t pri){
+  memset(n, 0, sizeof(*n));
+  n->src = src;
+  n->id = id;
+  n->pri = pri;
+  flexLinkUtf8Copy(n->app,   sizeof(n->app),   app   ? app   : "");
+  flexLinkUtf8Copy(n->title, sizeof(n->title), title ? title : "");
+  flexLinkUtf8Copy(n->body,  sizeof(n->body),  body  ? body  : "");
+}
 static void fpbPush(uint8_t src, uint32_t id, const char* app,
                     const char* title, const char* body, uint8_t pri){
   FlexPhoneBannerMsg n;
-  memset(&n, 0, sizeof(n));
-  n.src = src;
-  n.id = id;
-  n.pri = pri;
-  flexLinkUtf8Copy(n.app,   sizeof(n.app),   app   ? app   : "");
-  flexLinkUtf8Copy(n.title, sizeof(n.title), title ? title : "");
-  flexLinkUtf8Copy(n.body,  sizeof(n.body),  body  ? body  : "");
-  if(src == FPN_SRC_SYSTEM){
-    // El MISMO aviso del sistema ya a la vista o esperando (dos toques seguidos sobre lo mismo) no se repite: la respuesta a un
-    // toque es UNA, no una torre de tarjetas iguales.
-    if(fpbState != FPB_HIDDEN && fpbCur.src == FPN_SRC_SYSTEM && !strcmp(fpbCur.title, n.title) && !strcmp(fpbCur.body, n.body)) return;
-    for(int i = 0; i < fpbQueueN; i++)
-      if(fpbQueue[i].src == FPN_SRC_SYSTEM && !strcmp(fpbQueue[i].title, n.title) && !strcmp(fpbQueue[i].body, n.body)) return;
-  }
-  if(fpbQueueN >= FPB_QUEUE){ fpbMore++; return; }
-  fpbQueue[fpbQueueN++] = n;
+  fpbMsgInit(&n, src, id, app, title, body, pri);
+  fpbOffer(&n);
 }
 // Un aviso del propio sistema (no viene del telefono): la misma capa, el mismo material.
 static void fpbPushSystem(const char* app, const char* title, const char* body){
   fpbPush(FPN_SRC_SYSTEM, 0, app, title, body, FLP_PRI_DEFAULT);
+}
+// Un aviso del sistema que viene del MODELO de avisos (notifPush): con su huella
+// -- el mismo aviso no se repite y se actualiza en su sitio -- y su icono.
+static void fpbPushSystemKeyed(uint32_t key, uint8_t type, const char* title, const char* body){
+  FlexPhoneBannerMsg n;
+  fpbMsgInit(&n, FPN_SRC_SYSTEM, 0, "", title, body, FLP_PRI_DEFAULT);
+  n.key = key;
+  n.icon = (uint8_t)(1 + type);
+  fpbOffer(&n);
 }
 
 // -------------------------------------------------------------
@@ -336,8 +427,14 @@ static void fpbDrawContent(int w, int h){
   // Barra de prioridad: se ve de un vistazo si es urgente sin leer.
   const uint16_t accent = (fpbCur.pri >= FLP_PRI_HIGH) ? TH_PRIM : TH_DIV;
   fillRoundRect(8, 12, 4, h - 24, 2, accent);
-  const int tx = 22;
-  const int tw = w - 40;
+  int tx = 22;
+  // Avisos del sistema: su icono, como los tenia la isla (sistema o multimedia).
+  if(fpbCur.icon){
+    const int is = h - 28 < 40 ? h - 28 : 40;
+    drawModuleIcon((ModuleType)(fpbCur.icon - 1), 20, (h - is) / 2, is);
+    tx = 20 + is + 12;
+  }
+  const int tw = w - tx - 18;
   fgTextEllipsis(tx, 10, tw, fpbCur.app[0] ? fpbCur.app : "Flex OS", 1, TH_MUTE);
   fgTextEllipsis(tx, 28, tw, fpbCur.title, 2, TH_TXT);
   if(fpbCur.body[0]) fgTextEllipsis(tx, 50, tw, fpbCur.body, 1, TH_TXT2);
@@ -525,6 +622,18 @@ static void fpbBeginOut(int dir){
 }
 static void fpbClose(){ fpbBeginOut(0); }
 
+// Algo le quito la pantalla al aviso a medias (transicion, cortina, modal, giro):
+// el panel queda limpio y el aviso vuelve AL FRENTE de la cola con el tiempo que
+// le quedaba (ver PRESENTADOR UNICO DE AVISOS). Uno que ya se estaba yendo, se va.
+static void fpbRequeue(){
+  const bool again = fpbState == FPB_ARMED || fpbState == FPB_IN || fpbState == FPB_SHOWN;
+  FlexPhoneBannerMsg m = fpbCur;
+  if(fpbState == FPB_SHOWN) m.shownMs += millis() - fpbT0;
+  fpbAbandon();
+  fpbRefresh = false;
+  if(again) fpbEnqueue(&m, true);
+}
+
 // Reserva y primer dibujo. Corre UNA vez, al armarse.
 static bool fpbArm(){
   const size_t cvBytes = (size_t)SCR_W * FPB_V_H * 2;
@@ -654,8 +763,9 @@ static void fpbTick(){
     fpbT0 = millis();
   }
 
-  // Alguien tomo la pantalla, o la giro: el banner se retira y el panel se limpia.
-  if(fpbSuppressed || gLand != fpbLand || !fpbScreenAllows()){ fpbAbandon(); return; }
+  // Alguien tomo la pantalla, o la giro: el banner se retira, el panel se limpia y
+  // el aviso espera AL FRENTE de la cola a poder volver (ver fpbRequeue).
+  if(fpbSuppressed || gLand != fpbLand || !fpbScreenAllows()){ fpbRequeue(); return; }
 
   if(fpbState == FPB_ARMED){
     if(!fpbArm()){
@@ -675,8 +785,11 @@ static void fpbTick(){
   const uint32_t now = millis();
   const uint32_t e = now - fpbT0;
 
-  // Lo de debajo repinto sus filas: el vidrio se resuelve otra vez (pocas veces por segundo, nunca por cuadro).
-  if(fpbUnderDirty && now - fpbCvMs >= FPB_REGLASS_MS){
+  // Lo de debajo repinto sus filas: el vidrio se resuelve otra vez (unas pocas veces por segundo, nunca por
+  // cuadro). Y si el aviso a la vista cambio de texto, tambien -- y vuelve a contar su tiempo desde cero.
+  if(fpbRefresh || (fpbUnderDirty && now - fpbCvMs >= FPB_REGLASS_MS)){
+    if(fpbRefresh && fpbState == FPB_SHOWN){ fpbT0 = now; fpbCur.shownMs = 0; }
+    fpbRefresh = false;
     fpbRender();
     fpbPaintWanted = true;
   }
@@ -699,7 +812,13 @@ static void fpbTick(){
       // Mientras el dedo lo arrastra NO caduca: nadie quiere que se le vaya lo que esta tocando.
       if(fpbGesture || fpbSpring || fpbSlide != 0.0f){ fpbT0 = now; if(fpbPaintWanted) fpbPaint(); break; }
       if(fpbPaintWanted) fpbPaint();
-      if(e >= FPB_HOLD_MS) fpbClose();
+      {
+        // Lo que ya estuvo a la vista antes de perder la pantalla cuenta (pero
+        // al volver se ve, como poco, FPB_MIN_HOLD_MS).
+        const uint32_t hold = (fpbCur.shownMs + FPB_MIN_HOLD_MS < (uint32_t)FPB_HOLD_MS)
+                              ? (uint32_t)FPB_HOLD_MS - fpbCur.shownMs : (uint32_t)FPB_MIN_HOLD_MS;
+        if(e >= hold) fpbClose();
+      }
       break;
     case FPB_OUT: {
       float p = (e >= FPB_OUT_MS) ? 1.0f : (float)e / (float)FPB_OUT_MS;
@@ -787,7 +906,7 @@ static void fpcBuild(){
       flexLinkUtf8Copy(e->body, sizeof(e->body),
                        LI() == 1 ? "Content hidden" : "Contenido oculto");
   }
-  // 2) Las del propio sistema, las que siguen vivas en la isla.
+  // 2) Las del propio sistema: el historial que guarda la isla (notifPush).
   for(int i = 0; i < gNotifCount && fpcListN < FPN_LIST_MAX; i++){
     if(!gNotifs[i].active) continue;
     FlexPhoneEntry* e = &fpcList[fpcListN++];
