@@ -94,8 +94,8 @@ extern "C" {
 //
 //  Sube este numero cuando cambie algo que obligue a recopiar todo.
 // =============================================================
-#define FLEXBR_BUILD 5
-void flexBrVersionGuard_v5_copia_los_4_ficheros_del_navegador(void);
+#define FLEXBR_BUILD 6
+void flexBrVersionGuard_v6_copia_los_4_ficheros_del_navegador(void);
 
 // =============================================================
 //  1) INTERRUPTORES MAESTROS
@@ -515,6 +515,12 @@ typedef struct {
   // llega de verdad al servicio, en vez de suponerlo.
   uint16_t viewW, viewH;
   uint32_t viewportMsgs;
+  // Quien ejecuta las paginas, segun el id de sesion de su WELCOME (ver
+  // flexBrRelayBuild): relayKind BRRELAY_* y, si es el telefono, que build del
+  // Browser Relay corre. Es lo que permite DECIR "tu Flex Phone es antiguo" en vez
+  // de que el usuario vea una web ampliada y no sepa por que.
+  int16_t  relayBuild;
+  uint8_t  relayKind;
 } BrStats;
 
 // Estado del transporte.
@@ -620,6 +626,24 @@ typedef struct {
   char     sessionId[40];
 } FbpWelcome;
 bool fbpParseWelcome(const uint8_t* p, uint32_t n, FbpWelcome* out);
+
+// ---- BUILD DEL BROWSER RELAY DEL TELEFONO --------------------------
+// El relay del telefono anuncia su build al final del id de sesion del WELCOME
+// ("flexphone-18c3f2a.r6"; el formato lo fija Fbp.tagSessionId en Kotlin y se
+// comprueba con los mismos ejemplos en las dos pruebas). Antes de r6 el relay
+// maquetaba la pagina con la densidad del telefono (la web salia ampliada
+// ~2,75x) y al desplazar movia la superficie entera: hay que reinstalar Flex Phone.
+#define FLEXBR_RELAY_MIN_BUILD 6
+enum { BRRELAY_UNKNOWN = 0, BRRELAY_PHONE = 1, BRRELAY_OTHER = 2 };
+// Build anunciado en `sessionId`, o -1 si no lleva marca ".rN" (un relay anterior
+// o un servicio de otro tipo). Nunca lee mas alla del terminador.
+int  flexBrRelayBuild(const char* sessionId);
+// BRRELAY_PHONE si el id es el de un Browser Relay de Flex Phone ("flexphone-..."),
+// BRRELAY_OTHER si es de cualquier otro servicio (el Ubuntu/PC), BRRELAY_UNKNOWN si esta vacio.
+int  flexBrRelayKind(const char* sessionId);
+// ¿Es un relay del TELEFONO anterior al que arregla el viewport y el desplazamiento?
+// Un servicio de otro tipo nunca es "antiguo" por esto.
+bool flexBrRelayIsStale(const char* sessionId);
 
 typedef struct {
   uint8_t  flags, progress;

@@ -37,7 +37,7 @@
 #include "FlexOS_FS.h"
 
 // Guardia de version (ver el bloque 0 de FlexOS_Browser.h).
-static_assert(FLEXBR_BUILD == 5,
+static_assert(FLEXBR_BUILD == 6,
   "FlexOS_Browser_Bridge.h y FlexOS_Browser.h son de versiones distintas: "
   "copia otra vez LOS CUATRO ficheros del navegador a la carpeta del sketch.");
 
@@ -866,7 +866,7 @@ static void navEnter(){
   if(gRelayout){ flexBrowserTick(); if(flexBrowserKeyboardOpen()) brKbRender(); return; }
   // Si FlexOS_BrowserApp.cpp fuera de otra version, esto no enlaza y el
   // error dice el nombre de la funcion -- que es la instruccion.
-  flexBrVersionGuard_v5_copia_los_4_ficheros_del_navegador();
+  flexBrVersionGuard_v6_copia_los_4_ficheros_del_navegador();
   brKbWasOpen = false;
   brKbHostSig = 0;
   brKbLastTop = brKbLastBottom = -1;

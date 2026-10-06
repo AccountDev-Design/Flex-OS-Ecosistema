@@ -318,6 +318,10 @@ static std::vector<uint8_t> g_jpeg;              // imagen que se manda
 static std::atomic<bool> g_srvStop{false};
 static std::atomic<bool> g_gotHello{false};
 static std::atomic<bool> g_gotNavigate{false};
+// Id de sesion que anuncia el servidor en su WELCOME. Un relay de Flex Phone lo lleva con su build
+// al final (".r6"); uno anterior no lleva marca. "Solo saludo" = tras el WELCOME no se sigue el guion.
+static std::string g_sessionId = "flexphone-prueba.r6";
+static std::atomic<bool> g_welcomeOnly{false};
 static std::string       g_navUrl;
 
 static bool sendAll(int fd, const uint8_t* p, size_t n){
@@ -388,7 +392,8 @@ static std::vector<uint8_t> fbpMsg(uint8_t type, uint8_t ch, uint16_t seq,
   return m;
 }
 
-static void serverThread(int listenFd){
+static std::atomic<int> g_srvEnded{0};
+static void serverThreadBody(int listenFd){
   int fd = ::accept(listenFd, nullptr, nullptr);
   if(fd < 0) return;
   int one = 1;
@@ -442,9 +447,14 @@ static void serverThread(int listenFd){
     putU32(p, 0xFFFFFFFFu);
     putU16(p, 4);
     putU32(p, FBP_PAYLOAD_MAX);
-    putStr(p, "sesion-de-prueba");
+    putStr(p, g_sessionId);
     auto f = wsServerFrame(fbpMsg(FBP_S_WELCOME, 0, 1, p));
     if(!sendAll(fd, f.data(), f.size())){ ::close(fd); return; }
+  }
+  if(g_welcomeOnly){                                  // segunda sesion: solo interesa el saludo
+    while(!g_srvStop){ if(!wsReadClient(fd, msg)) break; }
+    ::close(fd);
+    return;
   }
 
   // ---- se espera un NAVIGATE ----
@@ -533,6 +543,16 @@ static bool cargaJpeg(const char* dir){
   size_t rd = std::fread(g_jpeg.data(), 1, (size_t)n, f);
   std::fclose(f);
   return rd == (size_t)n && n > 0;
+}
+
+static void serverThread(int listenFd){ serverThreadBody(listenFd); g_srvEnded++; }
+
+// Espera a que el hilo del servidor termine (lo hace en cuanto el dispositivo cierra su socket). Si por
+// lo que fuera no termina, se suelta en vez de colgar la bateria entera.
+static void endServer(std::thread& t, int endedBefore){
+  const uint32_t t0 = (uint32_t)millis();
+  while(g_srvEnded.load() <= endedBefore && millis() - t0 < 3000) delay(10);
+  if(t.joinable()){ if(g_srvEnded.load() > endedBefore) t.join(); else t.detach(); }
 }
 
 int main(int argc, char** argv){
@@ -662,11 +682,56 @@ int main(int argc, char** argv){
         "las estadisticas no reflejan el viewport enviado (%u)", (unsigned)flexBrowserStats()->viewW);
   CHECK(flexBrowserStats()->reconnects == 0, "redimensionar provoco una reconexion");
 
+  // ---- RELAY DEL TELEFONO: el build sale del id de sesion del WELCOME ----
+  //  Un Flex Phone que corre el relay de hoy lo anuncia (".r6") y el navegador lo sabe sin adivinar;
+  //  no hay aviso. (Lo que pasa con uno ANTIGUO se comprueba mas abajo, en una segunda sesion.)
+  CHECK(flexBrowserStats()->relayKind == BRRELAY_PHONE && flexBrowserStats()->relayBuild == 6,
+        "el WELCOME del telefono dice build r6 y el navegador lee tipo=%d build=%d",
+        (int)flexBrowserStats()->relayKind, (int)flexBrowserStats()->relayBuild);
+  const uint32_t err1 = flexBrowserStats()->errCount;
+
   g_srvStop = true;
   flexBrowserExit();
   ::shutdown(lfd, SHUT_RDWR);
   ::close(lfd);
-  if(srv.joinable()) srv.detach();
+  endServer(srv, 0);
+
+  // ---- SEGUNDA SESION: un Flex Phone ANTIGUO (su WELCOME no lleva marca de build) ----
+  //  Es el caso del usuario que flashea el P4 y se olvida de reinstalar el APK: la web sale ampliada
+  //  y al desplazar se mueve toda la superficie. El navegador tiene que DECIRLO (una vez), no dejar
+  //  que se busque el fallo en el firmware.
+  {
+    int lfd2 = ::socket(AF_INET, SOCK_STREAM, 0);
+    ::setsockopt(lfd2, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    sockaddr_in a2{};
+    a2.sin_family = AF_INET; a2.sin_addr.s_addr = inet_addr("127.0.0.1"); a2.sin_port = 0;
+    if(::bind(lfd2, (sockaddr*)&a2, sizeof(a2)) == 0 && ::listen(lfd2, 1) == 0){
+      socklen_t al2 = sizeof(a2);
+      ::getsockname(lfd2, (sockaddr*)&a2, &al2);
+      g_sessionId = "flexphone-viejo";               // sin ".rN": anterior a r6
+      g_welcomeOnly = true; g_srvStop = false; g_gotHello = false;
+      std::thread srv2(serverThread, lfd2);
+      std::snprintf(url, sizeof(url), "ws://127.0.0.1:%u/v1/session", (unsigned)ntohs(a2.sin_port));
+      g_prefsS["brsrv"] = url;
+      flexBrowserEnter();
+      uint32_t t1 = (uint32_t)millis();
+      while(flexBrowserNetState() != BRN_READY && millis() - t1 < 8000){ flexBrowserTick(); delay(10); }
+      CHECK(flexBrowserNetState() == BRN_READY, "la segunda sesion no llego a READY");
+      CHECK(flexBrowserStats()->relayKind == BRRELAY_PHONE && flexBrowserStats()->relayBuild == -1,
+            "un relay sin marca se lee como telefono sin build (tipo=%d build=%d)",
+            (int)flexBrowserStats()->relayKind, (int)flexBrowserStats()->relayBuild);
+      CHECK(flexBrowserStats()->errCount > err1,
+            "el navegador AVISA de que el Relay del telefono es antiguo (errores %u -> %u)",
+            (unsigned)err1, (unsigned)flexBrowserStats()->errCount);
+      g_srvStop = true;
+      flexBrowserExit();
+      ::shutdown(lfd2, SHUT_RDWR);
+      ::close(lfd2);
+      endServer(srv2, 1);
+    } else {
+      std::printf("   (segunda sesion omitida: no se pudo abrir un socket)\n");
+    }
+  }
 
   std::printf("=== %d comprobaciones, %d fallos ===\n", g_run, g_fail);
   return g_fail ? 1 : 0;

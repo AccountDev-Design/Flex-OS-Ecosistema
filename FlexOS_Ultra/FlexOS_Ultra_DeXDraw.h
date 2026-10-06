@@ -212,7 +212,10 @@ struct DexHost {
   uint16_t* cache;     // resultado YA escalado, en orden de volcado
   size_t    cap;       // capacidad de cache, en pixeles
   int       fw, fh;    // tamano del contenido con el que se construyo la cache
-  int       rw, rh;    // lienzo logico con el que la app dibujo por ultima vez
+  int       rw, rh;    // lienzo logico con el que se EJECUTO enter() por ultima vez (decide el re-maquetado)
+  bool      rl;        // ...y su orientacion
+  int       sw, sh;    // lienzo logico del que `surf` es BUENO: lo dibujo la app o lo limpio DeX (ver dexHostExpose)
+  bool      sl;        // ...y su orientacion (en horizontal la misma fila logica cae en otra fila fisica)
   uint32_t  reMs;      // ultimo re-render por cambio de tamano (limita la cadencia)
   uint32_t  touchSeq;  // vuelta de pcTick en la que recibio su toque (no se le da otro tick)
   int       hx, hy;    // ultimo punto inyectado, en coordenadas de SU lienzo
@@ -394,7 +397,14 @@ static void dexHostRun(int i, bool doEnter, bool doTick, const Touch* inject){
   // eso significaba volver a poner el display a "0" inmediatamente despues de
   // cada tecla: el toque SI llegaba, pero el resultado se borraba antes de
   // verse. De ahi el "el touch dejo de responder".
-  dexHost[i].rw = gAppW; dexHost[i].rh = gAppH;
+  // OJO: solo cuando se ejecuto enter(). Un tick NO re-maqueta (la mayoria de las apps solo lo
+  // hacen en enter): anotar el tamano nuevo tambien tras un tick hacia creer a dexHostRelayout que la
+  // app YA estaba maquetada a ese tamano, y el enter() pendiente -- el re-maquetado -- no llegaba
+  // nunca: la ventana se quedaba con la maqueta vieja hasta que algo la tocaba.
+  if(doEnter){
+    dexHost[i].rw = gAppW; dexHost[i].rh = gAppH; dexHost[i].rl = gLand;
+    dexHost[i].sw = gAppW; dexHost[i].sh = gAppH; dexHost[i].sl = gLand;   // lo que enter() acaba de dibujar es bueno
+  }
 
   gRtTarget = NULL;
   gHosted = false;
@@ -414,7 +424,8 @@ static void dexHostClose(int i){
   if(dexHost[i].surf){ heap_caps_free(dexHost[i].surf); dexHost[i].surf = NULL; }
   if(dexHost[i].cache){ heap_caps_free(dexHost[i].cache); dexHost[i].cache = NULL; }
   dexHost[i].cap = 0; dexHost[i].fw = dexHost[i].fh = 0;
-  dexHost[i].rw = dexHost[i].rh = 0; dexHost[i].reMs = 0;
+  dexHost[i].rw = dexHost[i].rh = 0; dexHost[i].reMs = 0; dexHost[i].rl = false;
+  dexHost[i].sw = dexHost[i].sh = 0; dexHost[i].sl = false;
   dexHost[i].touchSeq = 0; dexHost[i].hx = dexHost[i].hy = -1; dexHost[i].held = false;
   dexHost[i].scaled = false; dexHost[i].live = false;
 }
@@ -430,6 +441,53 @@ static void dexHostOpen(int i){
   memset(dexHost[i].surf, 0, (size_t)SCR_W * SCR_H * 2);
   dexHost[i].live = true;
   dexHostRun(i, true, false, NULL);
+}
+
+// Rellena un rectangulo LOGICO del lienzo `surf` de la ventana i (con la orientacion `land`).
+static void dexHostFill(int i, bool land, int x, int y, int w, int h, uint16_t col){
+  if(i < 0 || i > 3 || !dexHost[i].surf || w <= 0 || h <= 0) return;
+  uint16_t* oBuf = gBuf; const bool oLand = gLand;
+  const int c0 = gClipY0, c1 = gClipY1, x0 = gClipX0, x1 = gClipX1, l0 = gClipLY0, l1 = gClipLY1;
+  gBuf = dexHost[i].surf; gLand = land;                // gBuf directo: setBuf lo desviaria
+  gClipY0 = 0; gClipY1 = SCR_H - 1; gClipX0 = 0; gClipX1 = SCR_W - 1;
+  gClipLY0 = 0; gClipLY1 = SCR_W - 1;
+  fillRect(x, y, w, h, col);
+  gBuf = oBuf; gLand = oLand;
+  gClipY0 = c0; gClipY1 = c1; gClipX0 = x0; gClipX1 = x1; gClipLY0 = l0; gClipLY1 = l1;
+}
+
+// #############################################################
+// ##  LO QUE LA APP TODAVIA NO HA DIBUJADO NO SE VE NEGRO
+// ##  ----------------------------------------------------------
+// ##  `surf` nace a cero y la app solo dibuja el lienzo de su tamano. Al AGRANDAR la
+// ##  ventana, la franja nueva del area de cliente era memoria sin dibujar (negro, o
+// ##  restos de otro tamano) hasta que el re-maquetado llegaba -- uno, dos o mas cuadros
+// ##  despues --; y al GIRAR la forma de la ventana (de apaisada a vertical o al reves)
+// ##  el lienzo se lee con otro eje y TODO era basura. Era el "hueco negro" mientras se
+// ##  arrastra el borde.
+// ##
+// ##  Aqui se lleva la cuenta de de que tamano (y orientacion) es BUENO `surf` -- lo que
+// ##  dibujo la app en su ultimo enter() o lo que DeX ya limpio -- y, cuando el area de
+// ##  cliente pasa a ser mayor, la parte NUEVA se rellena con el color del cuerpo de la
+// ##  ventana: neutro, y la app la pisa en cuanto re-maqueta. Se hace al principio de la
+// ##  vuelta (dexHostRelayout), antes de que nadie dibuje: lo que la app dibuje despues
+// ##  en ese mismo cuadro -- el navegador re-maqueta en su propio tick -- queda encima.
+// ##  Nunca se toca lo que ya era bueno, asi que no hay parpadeo al redimensionar.
+// #############################################################
+static void dexHostExpose(int i, const DexFit& f){
+  if(i < 0 || i > 3 || !dexHost[i].surf || !f.flex) return;     // las apps no adaptativas se escalan de un lienzo fijo
+  DexHost& H = dexHost[i];
+  const uint16_t body = DEX_WIN_BODY;
+  bool touched = false;
+  if(H.sw <= 0 || H.sh <= 0 || H.sl != f.land){
+    dexHostFill(i, f.land, 0, 0, f.aw, f.ah, body);             // primera vez o lienzo girado: nada de lo que hay vale
+    touched = true;
+  } else {
+    if(f.aw > H.sw){ dexHostFill(i, f.land, H.sw, 0, f.aw - H.sw, f.ah, body); touched = true; }                 // franja de la derecha
+    if(f.ah > H.sh){ dexHostFill(i, f.land, 0, H.sh, (f.aw < H.sw ? f.aw : H.sw), f.ah - H.sh, body); touched = true; }   // franja de abajo
+  }
+  if(touched) H.scaled = false;                                 // la cache escalada ya no refleja el lienzo
+  H.sw = f.aw; H.sh = f.ah; H.sl = f.land;
 }
 
 // Construye la version escalada del lienzo. Se ejecuta SOLO cuando la app ha
@@ -491,18 +549,31 @@ static void dexHostBlit(int i, int cx, int cy, int cw, int ch){
   if(f.oy > cy)                  fillRect(f.ox, cy, f.ow, f.oy - cy, bar);
   if(f.oy + f.oh < cy + ch)      fillRect(f.ox, f.oy + f.oh, f.ow, (cy + ch) - (f.oy + f.oh), bar);
 
+  // Extension de `surf` que se puede MOSTRAR: la que es buena (ver dexHostExpose). Con la ventana en
+  // movimiento (la animacion de maximizar enseña un area distinta de la que la app maqueto) o con el
+  // lienzo girado, lo de fuera de ella es memoria sin dibujar y NUNCA se copia: se queda con el color
+  // del cuerpo. Una app no adaptativa se escala de un lienzo fijo, siempre bueno entero.
+  int ve_w = f.ow, ve_h = f.oh;
+  if(f.flex){
+    if(H.sl != f.land || H.sw <= 0 || H.sh <= 0){ ve_w = 0; ve_h = 0; }
+    else { if(ve_w > H.sw) ve_w = H.sw; if(ve_h > H.sh) ve_h = H.sh; }
+    if(ve_w < f.ow) fillRect(f.ox + ve_w, f.oy, f.ow - ve_w, f.oh, bar);
+    if(ve_h < f.oh && ve_w > 0) fillRect(f.ox, f.oy + ve_h, ve_w, f.oh - ve_h, bar);
+    if(ve_w <= 0 || ve_h <= 0) return;                                   // nada que copiar
+  }
+
   if(H.fw != f.ow || H.fh != f.oh) H.scaled = false;      // se redimensiono -> reescalar
   if(!H.scaled) dexHostScale(i, f);
 
   int b0 = dexBandLo(), b1 = dexBandHi();
   if(!H.cache){                                          // sin PSRAM: vecino mas cercano al vuelo
     bool land = f.land;
-    for(int k = 0; k < f.ow; k++){
+    for(int k = 0; k < ve_w; k++){
       int lx = f.ox + k;
       if(lx < b0 || lx > b1 || (unsigned)lx >= SCR_H) continue;
       int sx = dexStep(k, f.stepX, f.aw);
       uint16_t* d = gBuf + (size_t)lx * SCR_W;
-      for(int j = 0; j < f.oh; j++){
+      for(int j = 0; j < ve_h; j++){
         int ly = f.oy + j;
         if((unsigned)ly >= SCR_W) continue;
         int sy = dexStep(j, f.stepY, f.ah);
@@ -512,10 +583,10 @@ static void dexHostBlit(int i, int cx, int cy, int cw, int ch){
     }
     return;
   }
-  for(int k = 0; k < f.ow; k++){                          // ruta normal: memcpy por columna
+  for(int k = 0; k < ve_w; k++){                          // ruta normal: memcpy por columna
     int lx = f.ox + k;
     if(lx < b0 || lx > b1 || (unsigned)lx >= SCR_H) continue;
-    int y0 = f.oy, n = f.oh;
+    int y0 = f.oy, n = ve_h;
     if(y0 < 0){ n += y0; y0 = 0; }                        // recorte contra el lienzo fisico
     if(y0 + n > SCR_W) n = SCR_W - y0;
     if(n <= 0) continue;
@@ -626,7 +697,10 @@ static void dexHostRelayout(int i){
   if(i < 0 || i > 3 || !pwins[i].open || pwins[i].mini || !dexHost[i].surf) return;
   int cx, cy, cw, ch; dexClientRect(i, cx, cy, cw, ch);
   DexFit f; dexHostFit(i, cx, cy, cw, ch, f);
-  bool sizeChanged = (f.aw != dexHost[i].rw || f.ah != dexHost[i].rh);
+  dexHostExpose(i, f);            // lo que la app aun no ha dibujado del tamano nuevo no se ve negro
+  // `rw/rh` es el tamano del ultimo ENTER, y la forma de la ventana tambien cuenta: apaisada <-> vertical
+  // cambia el eje del lienzo aunque el area sea la misma.
+  bool sizeChanged = (f.aw != dexHost[i].rw || f.ah != dexHost[i].rh || f.land != dexHost[i].rl);
   if(!sizeChanged && !uiFading) return;
   uint32_t now = millis();
   if(sizeChanged && dexHost[i].reMs && now - dexHost[i].reMs < DEX_RELAYOUT_MS) return;

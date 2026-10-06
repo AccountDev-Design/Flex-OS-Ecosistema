@@ -98,11 +98,83 @@ static void dexPointer(){
   // lo que separa un clic de una pulsacion larga es dexLongFired, no el reloj.
   if(pReleased && !T.moved && !dexLongFired){
     pTap = true;
+    // UN TOQUE SE ATIENDE DONDE EMPEZO. El dedo rueda unos pixeles entre apoyar y levantar (el umbral de
+    // "no ha arrastrado" son 12 px) y el punto de LEVANTAR podia caer en el boton de al lado, o fuera del
+    // suyo: de ahi lo de "hay que tocar un punto exacto". Es lo que ya hace el sistema a pantalla completa
+    // (tDoRelease: un toque vale T.startX/T.startY) y lo que hace cualquier UI tactil.
+    pX = dexPressX; pY = dexPressY;
     if(millis() - dexTapMs < DEX_DTAP_MS && abs(pX - dexTapX) < 26 && abs(pY - dexTapY) < 26){
       pDTap = true; dexTapMs = 0;
     } else { dexTapMs = millis(); dexTapX = pX; dexTapY = pY; }
   }
   if(!T.down) dexLongFired = false;
+}
+
+// #############################################################
+// ##  ZONAS DE TOQUE DE LA BARRA DE TAREAS
+// ##  ----------------------------------------------------------
+// ##  QUE FALLABA. Cada control (cuadricula, buscador, touchpad, campana, ajustes)
+// ##  se DIBUJA como un chip de 34 o 30 px y se TOCABA con ese mismo rectangulo
+// ##  exacto, sin un pixel de tolerancia y sin cubrir el hueco que lo separa de
+// ##  su vecino: con el dedo -- que tapa 40-50 px y llega con un par de pixeles de
+// ##  deriva -- "habia que tocar exactamente en un punto". Los iconos de apps si
+// ##  tenian margen (±8 px), asi que unos botones de la misma barra se tocaban bien
+// ##  y otros no.
+// ##
+// ##  COMO SE ARREGLA. UNA sola resolucion para toda la barra: el toque se asigna al
+// ##  control cuyo CENTRO queda mas cerca en horizontal, con un tope de alcance, y
+// ##  en vertical vale toda la altura de la barra (el dedo no tiene que acertar la
+// ##  fila de pixeles del icono). Asi las zonas de dos vecinos se reparten el hueco
+// ##  que hay entre ellos -- nunca se solapan -- y cada control sigue pudiendose
+// ##  tocar en TODO su dibujo. La geometria sale de los mismos rectangulos que usa
+// ##  el dibujo (dexR*, dexTbItemRect), asi que lo que se ve es lo que se toca.
+// #############################################################
+enum { DXT_NONE = 0, DXT_DRW, DXT_FND, DXT_PAD, DXT_BELL, DXT_GEAR, DXT_CLOCK, DXT_APP };
+#define DEX_TB_REACH   26     // hasta donde llega un control a cada lado de su centro (px)
+#define DEX_TB_CLK_W   100    // el reloj abre Recientes: la zona va a su izquierda (y llega hasta el borde derecho)
+
+// Control de la barra bajo (x,y), o DXT_NONE. Para DXT_APP deja el indice de la lista en *appIdx.
+static int dexTbHit(int x, int y, int* appIdx = NULL){
+  const int ty = dexTbY();
+  if(ty >= LH || y < ty) return DXT_NONE;                     // oculta del todo / por encima de la barra
+  if(x >= dexRClkX - DEX_TB_CLK_W) return DXT_CLOCK;           // hasta el borde derecho de la pantalla: el margen tambien es del reloj
+  int best = DXT_NONE, bestIdx = -1, bestD = 1 << 20;
+  struct C { int id, idx, cx, reach; };
+  C cs[8 + 10];
+  int n = 0;
+  cs[n++] = { DXT_DRW,  -1, dexRDrw[0]  + dexRDrw[2]  / 2, DEX_TB_REACH };
+  cs[n++] = { DXT_FND,  -1, dexRFnd[0]  + dexRFnd[2]  / 2, DEX_TB_REACH };
+  cs[n++] = { DXT_PAD,  -1, dexRPad[0]  + dexRPad[2]  / 2, DEX_TB_REACH };
+  cs[n++] = { DXT_BELL, -1, dexRBell[0] + dexRBell[2] / 2, DEX_TB_REACH };
+  cs[n++] = { DXT_GEAR, -1, dexRGear[0] + dexRGear[2] / 2, DEX_TB_REACH };
+  int app[10]; bool op[10];
+  const int na = dexTbItems(app, op);
+  for(int i = 0; i < na && n < 8 + 10; i++){
+    int ix, iy, is; dexTbItemRect(i, na, ix, iy, is);
+    cs[n++] = { DXT_APP, i, ix + is / 2, DEX_TB_REACH + 2 };  // el paso entre iconos es de 52: cada uno cubre ~52
+  }
+  for(int i = 0; i < n; i++){
+    int d = x - cs[i].cx; if(d < 0) d = -d;
+    // El primer control llega hasta el borde izquierdo de la pantalla: el panel tactil es
+    // el menos preciso justo ahi, y tocar "en la esquina" tiene que seguir valiendo.
+    if(cs[i].id == DXT_DRW && x < cs[i].cx) d = 0;
+    if(d > cs[i].reach || d >= bestD) continue;
+    bestD = d; best = cs[i].id; bestIdx = cs[i].idx;
+  }
+  if(appIdx) *appIdx = bestIdx;
+  return best;
+}
+
+// Zona de TOQUE de un control de la barra de titulo: toda la altura de la barra y su
+// ancho, mas la mitad del hueco que lo separa del vecino (no hay hueco: son contiguos).
+// Es la que usa tanto el reparto de la pulsacion como el toque.
+static bool dexWinBtnAt(int i, int x, int y, int* which = NULL){
+  PWin* w = &pwins[i];
+  for(int k = 0; k < 3; k++){
+    int bx, by, bw, bh; dexWinBtnHit(w->x, w->y, w->w, k, bx, by, bw, bh);
+    if(dexInBox(x, y, bx, by, bw, bh)){ if(which) *which = k; return true; }
+  }
+  return false;
 }
 
 static int dexWinAt(int x, int y){
@@ -365,37 +437,41 @@ static void dexInput(){
   if(pY >= ty && ty < LH){
     if(pLong){ dexMenuOpen(1, pX - DEX_MENU_W / 2, ty - 12 - (10 + 4 * DEX_MENU_IH), -1); return; }
     if(!pTap) return;
-    if(dexIn(pX, pY, dexRDrw)){
-      if(dexOv == DXO_DRAWER && !dexOvClosing) dexOvClose(); else dexOvOpen(DXO_DRAWER);
-      return;
-    }
-    if(dexIn(pX, pY, dexRFnd)){
-      if(dexOv == DXO_FINDER && !dexOvClosing) dexOvClose(); else dexOvOpen(DXO_FINDER);
-      return;
-    }
-    if(dexIn(pX, pY, dexRPad)){
-      dexPadOn = !dexPadOn;
-      if(dexPadOn){ dexCurX = LW / 2; dexCurY = LH / 2 - 40; }
-      dexMarkAll(); dexDirty = true; return;
-    }
-    if(dexIn(pX, pY, dexRBell) || dexIn(pX, pY, dexRGear)){
-      if(dexOv == DXO_NOTIF && !dexOvClosing) dexOvClose(); else dexOvOpen(DXO_NOTIF);
-      return;
-    }
-    if(pX >= dexRClkX - 100 && pX <= dexRClkX){ dexOvOpen(DXO_RECENTS); return; }   // reloj -> Recientes
-    int app[10]; bool op[10];
-    int n = dexTbItems(app, op);
-    for(int i = 0; i < n; i++){
-      int x, y, s; dexTbItemRect(i, n, x, y, s);
-      if(!dexInBox(pX, pY, x - 8, y - 6, s + 16, s + 14)) continue;
-      int win = -1;
-      for(int k = 0; k < 4; k++) if(pwins[k].open && pwins[k].app == app[i]) win = k;
-      if(win < 0) dexOpenFrom(app[i], x, y, s);
-      else if(pwins[win].mini) dexRestore(win);
-      else if(win == dexFocus) dexMinimize(win);                // tocar la activa = minimizar
-      else dexRaise(win);
-      dexDirty = true;
-      return;
+    // UNA sola resolucion para toda la barra (ver dexTbHit): lo que se ve es lo que se toca.
+    int ai = -1;
+    switch(dexTbHit(pX, pY, &ai)){
+      case DXT_DRW:
+        if(dexOv == DXO_DRAWER && !dexOvClosing) dexOvClose(); else dexOvOpen(DXO_DRAWER);
+        return;
+      case DXT_FND:
+        if(dexOv == DXO_FINDER && !dexOvClosing) dexOvClose(); else dexOvOpen(DXO_FINDER);
+        return;
+      case DXT_PAD:
+        dexPadOn = !dexPadOn;
+        if(dexPadOn){ dexCurX = LW / 2; dexCurY = LH / 2 - 40; }
+        dexMarkAll(); dexDirty = true; return;
+      case DXT_BELL:
+      case DXT_GEAR:
+        if(dexOv == DXO_NOTIF && !dexOvClosing) dexOvClose(); else dexOvOpen(DXO_NOTIF);
+        return;
+      case DXT_CLOCK:
+        dexOvOpen(DXO_RECENTS);                                  // reloj -> Recientes
+        return;
+      case DXT_APP: {
+        int app[10]; bool op[10];
+        int n = dexTbItems(app, op);
+        if(ai < 0 || ai >= n) return;
+        int x, y, s; dexTbItemRect(ai, n, x, y, s);
+        int win = -1;
+        for(int k = 0; k < 4; k++) if(pwins[k].open && pwins[k].app == app[ai]) win = k;
+        if(win < 0) dexOpenFrom(app[ai], x, y, s);
+        else if(pwins[win].mini) dexRestore(win);
+        else if(win == dexFocus) dexMinimize(win);                // tocar la activa = minimizar
+        else dexRaise(win);
+        dexDirty = true;
+        return;
+      }
+      default: break;
     }
     return;
   }
@@ -406,6 +482,11 @@ static void dexInput(){
     PWin* w = &pwins[hit];
     if(pPressed){
       uint8_t m = dexResizeMask(hit, pX, pY);
+      // Un CONTROL de la barra de titulo (minimizar, maximizar, cerrar) gana a la franja de
+      // agarre INTERIOR del borde: antes los 6 px de arriba de los tres controles y los 6 de la
+      // derecha de "cerrar" empezaban un redimensionado en vez de pulsar el boton -- justo en la
+      // esquina donde el dedo cae. Fuera de la ventana (el agarre exterior) sigue mandando el borde.
+      if(m && dexInBox(pX, pY, w->x, w->y, w->w, DEX_TTL_H) && dexWinBtnAt(hit, pX, pY)) m = 0;
       if(m){                                                    // redimensionar (8 zonas)
         dexRaise(hit);
         w->snap = SNAP_FREE;
@@ -417,11 +498,7 @@ static void dexInput(){
       // Zona de arrastre: la barra de titulo mas un margen por encima, para que
       // no haya una franja muerta entre el borde de la ventana y el titulo.
       if(dexInBox(pX, pY, w->x - 4, w->y - 6, w->w + 8, DEX_TTL_H + 6)){
-        bool onBtn = false;
-        for(int k = 0; k < 3; k++){
-          int bx, by, bw, bh; dexWinBtnHit(w->x, w->y, w->w, k, bx, by, bw, bh);
-          if(dexInBox(pX, pY, bx, by, bw, bh)) onBtn = true;
-        }
+        const bool onBtn = dexWinBtnAt(hit, pX, pY);
         if(!onBtn){                                             // arrastrar por la barra de titulo
           dexRaise(hit);
           if(w->snap != SNAP_FREE){                             // "despegar" de su anclaje
@@ -453,9 +530,8 @@ static void dexInput(){
       }
     }
     if(pTap){
-      for(int k = 0; k < 3; k++){
-        int bx, by, bw, bh; dexWinBtnHit(w->x, w->y, w->w, k, bx, by, bw, bh);
-        if(!dexInBox(pX, pY, bx, by, bw, bh)) continue;
+      int k = -1;
+      if(dexWinBtnAt(hit, pX, pY, &k)){
         if(k == 0) dexMinimize(hit);
         else if(k == 1) dexToggleMax(hit);
         else dexCloseWin(hit);

@@ -246,6 +246,9 @@ static bool     fpbCleanNeed = false;   // hay que devolver al panel sus filas l
 static bool     fpbOwnFlush = false;    // la transferencia en curso es del propio banner
 static bool     fpbUnderDirty = false;  // lo de debajo repinto esas filas: el vidrio puede estar viejo
 static uint32_t fpbCvMs = 0;
+// Posicion LOGICA de la tarjeta para la que se resolvio fpbCv (ver fpbRender). Si la tarjeta se mueve --
+// entra, sale, sigue al dedo, vuelve de rebote --, su vidrio ya no es el de lo que tiene debajo.
+static int      fpbRendX = -100000, fpbRendY = -100000;
 static int      fpbSavX = 0, fpbSavY = 0, fpbSavW = 0, fpbSavH = 0;
 static int      fpbLastY0 = 0, fpbLastY1 = -1;   // filas FISICAS de la ultima tarjeta mandada al panel
 
@@ -448,21 +451,39 @@ static void fpbDrawContent(int w, int h){
 }
 
 // Resuelve la tarjeta: vidrio -- el material del sistema, el MISMO que el resto de overlays -- sobre lo que
-// fb tiene AHORA donde va a caer, mas el contenido. Corre en el bucle normal (nunca dentro de una
-// transferencia) y como mucho cada FPB_REGLASS_MS.
+// fb tiene AHORA DEBAJO DE ELLA, mas el contenido. Corre en el bucle normal (nunca dentro de una
+// transferencia), como mucho cada FPB_REGLASS_MS con la tarjeta quieta y en cada cuadro en que se mueve.
+//
+// EL VIDRIO NO ES UNA FOTO. Antes la tarjeta se resolvia UNA vez, en su sitio de reposo, y se estampaba
+// desplazada: al entrar, salir o seguir al dedo llevaba pegada la imagen del fondo de DONDE se compuso
+// (lo que habia tras el reposo), en vez de dejar ver lo que tiene detras en cada posicion -- el cristal
+// "se llevaba" el fondo consigo, que es el mismo fallo que ya tuvo el escritorio con sus paginas (ver VIDRIO
+// SOBRE UN FONDO PRE-DESENFOCADO en Theme.h). Ahora el fondo se muestrea bajo la tarjeta donde esta en ESTE
+// momento; fuera de la pantalla (entrando desde arriba, saliendo por un lado) se repite el pixel de borde,
+// que es lo que haria el desenfoque. Y en reposo no cuesta nada: solo se vuelve a resolver si lo de debajo
+// cambia.
 static void fpbRender(){
   if(!fpbCv) return;
-  const int w = fpbCardW(), h = fpbCardH(), x0 = fpbRestX(), y0 = fpbRestY();
-  // 1) El fondo: el contenido LIMPIO de la pantalla de debajo (fb nunca guarda el banner).
+  const int w = fpbCardW(), h = fpbCardH();
+  const int x0 = fpbCardX(), y0 = fpbCardY();               // donde esta AHORA, no su sitio de reposo
+  const int lw = fpbLand ? SCR_H : SCR_W, lh = fpbLand ? SCR_W : SCR_H;   // pantalla LOGICA
+  // 1) El fondo: el contenido LIMPIO de la pantalla bajo la tarjeta (fb nunca guarda el banner).
   for(int j = 0; j < h; j++){
     uint16_t* d = fpbCv + (size_t)j * SCR_W;
-    if(!fpbLand && (unsigned)(y0 + j) < (unsigned)SCR_H && x0 >= 0 && x0 + w <= SCR_W){
-      memcpy(d, fb + (size_t)(y0 + j) * SCR_W + x0, (size_t)w * 2);
+    int ly = y0 + j; if(ly < 0) ly = 0; else if(ly > lh - 1) ly = lh - 1;
+    if(!fpbLand){
+      const uint16_t* srow = fb + (size_t)ly * SCR_W;
+      int i = 0;
+      for(; i < w && x0 + i < 0; i++) d[i] = srow[0];               // fuera por la izquierda: se repite el borde
+      int n = w - i; if(x0 + i + n > lw) n = lw - (x0 + i);
+      if(n > 0){ memcpy(d + i, srow + x0 + i, (size_t)n * 2); i += n; }
+      for(; i < w; i++) d[i] = srow[lw - 1];                       // fuera por la derecha
       continue;
     }
     for(int i = 0; i < w; i++){
-      int px, py; fpbToPhys(x0 + i, y0 + j, px, py);
-      d[i] = ((unsigned)px < (unsigned)SCR_W && (unsigned)py < (unsigned)SCR_H) ? fb[(size_t)py * SCR_W + px] : (uint16_t)0;
+      int lx = x0 + i; if(lx < 0) lx = 0; else if(lx > lw - 1) lx = lw - 1;
+      int px, py; fpbToPhys(lx, ly, px, py);
+      d[i] = fb[(size_t)py * SCR_W + px];
     }
   }
   // 2) El material, sobre ese lienzo y SIN las bandas pre-desenfocadas de otros duenos: el vidrio del banner
@@ -479,6 +500,7 @@ static void fpbRender(){
   fpbDrawContent(w, h);
   gBuf = ob; gLand = wl;
   gClipY0 = c0; gClipY1 = c1; gClipX0 = cx0; gClipX1 = cx1;
+  fpbRendX = x0; fpbRendY = y0;
   fpbCvMs = millis() | 1u;
   fpbUnderDirty = false;
 }
@@ -573,6 +595,9 @@ static void fpbCleanFlush(){
 // Manda al panel las filas que ocupa la tarjeta ahora y las que ocupaba en la ultima vez.
 static void fpbPaint(){
   fpbPaintWanted = false;
+  // La tarjeta se resuelve contra lo que hay debajo de ELLA AHORA: si se movio desde la ultima vez, su
+  // vidrio se vuelve a muestrear ahi (ver fpbRender). Con la tarjeta quieta no cuesta nada.
+  if(fpbCv && (fpbCardX() != fpbRendX || fpbCardY() != fpbRendY)) fpbRender();
   int x0, y0, x1, y1;
   const bool vis = fpbPhysRect(x0, y0, x1, y1);
   int r0 = vis ? y0 : 1, r1 = vis ? y1 : 0;
@@ -596,6 +621,7 @@ static void fpbFinish(bool clean){
   fpbSlide = 0.0f; fpbDrop = 0.0f; fpbOutDir = 0; fpbSpring = false; fpbPaintWanted = false;
   fpbCleanNeed = false;
   fpbUnderDirty = false;
+  fpbRendX = fpbRendY = -100000;           // la resolucion del vidrio muere con la tarjeta
   if(fpbGesture){
     // El dedo sigue abajo y el banner ya no esta: lo que quede del episodio no es de nadie
     // (ni del banner ni de la pantalla de debajo, que no vio el principio).

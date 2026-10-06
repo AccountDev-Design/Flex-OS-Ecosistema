@@ -358,6 +358,31 @@ static void testProtocol(){
     { uint8_t q[64]; std::memcpy(q, p, o); q[1] = 0; q[2] = 0;
       FbpWelcome bad; CHECK(!fbpParseWelcome(q, o, &bad), "WELCOME con ancho 0 aceptado"); }
   }
+  // --- build del Browser Relay del telefono, en el id de sesion ---
+  //  Los MISMOS ejemplos que la prueba de Kotlin (FbpTest: "el build del relay viaja en el id de
+  //  sesion"): si un extremo cambia el formato de la marca ".rN" y el otro no, falla una de las dos.
+  {
+    CHECK(flexBrRelayBuild("flexphone-18c3f2a.r6") == 6, "build r6 mal leido");
+    CHECK(flexBrRelayBuild("flexphone-18c3f2a") == -1, "un relay anterior no lleva marca");
+    CHECK(flexBrRelayBuild("s-77f2") == -1, "un servicio de otro tipo no lleva marca");
+    CHECK(flexBrRelayBuild("abc.r") == -1, "marca sin numero");
+    CHECK(flexBrRelayBuild("abc.r6x") == -1, "basura detras de los digitos");
+    CHECK(flexBrRelayBuild("abc.r12345") == -1, "demasiado largo para ser un build");
+    CHECK(flexBrRelayBuild("a.r1.b.r12") == 12, "cuenta la ULTIMA marca");
+    CHECK(flexBrRelayBuild(NULL) == -1 && flexBrRelayBuild("") == -1, "nulo y vacio");
+    CHECK(flexBrRelayKind("flexphone-18c3f2a.r6") == BRRELAY_PHONE, "el relay del telefono se reconoce");
+    CHECK(flexBrRelayKind("sess-123") == BRRELAY_OTHER, "el servicio Ubuntu/PC es otro tipo");
+    CHECK(flexBrRelayKind("") == BRRELAY_UNKNOWN && flexBrRelayKind(NULL) == BRRELAY_UNKNOWN, "sin id no se sabe");
+    // Solo es "antiguo" el relay del TELEFONO anterior al build que arregla viewport y desplazamiento.
+    CHECK(!flexBrRelayIsStale("flexphone-1.r6"), "r6 no es antiguo");
+    CHECK(!flexBrRelayIsStale("flexphone-1.r7"), "un build posterior tampoco");
+    CHECK(flexBrRelayIsStale("flexphone-1.r5"), "r5 es antiguo");
+    CHECK(flexBrRelayIsStale("flexphone-1"), "sin marca (anterior a r6) es antiguo");
+    CHECK(!flexBrRelayIsStale("sess-123"), "un servicio de otro tipo nunca es antiguo por esto");
+    CHECK(!flexBrRelayIsStale(NULL) && !flexBrRelayIsStale(""), "sin id no hay aviso");
+    // El id etiquetado cabe en el campo del firmware (FbpWelcome.sessionId, 40 bytes).
+    CHECK(sizeof(((FbpWelcome*)0)->sessionId) >= 24, "el id de sesion del firmware no cabe");
+  }
   {
     uint8_t p[256]; uint32_t o = 0;
     p[o++] = FBP_ST_LOADING | FBP_ST_SECURE | FBP_ST_CAN_BACK;

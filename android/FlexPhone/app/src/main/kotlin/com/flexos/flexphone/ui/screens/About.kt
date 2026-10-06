@@ -11,6 +11,7 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.flexos.flexphone.protocol.Fbp
 import com.flexos.flexphone.protocol.FlexLink
+import com.flexos.flexphone.relay.RelayEngine
 import com.flexos.flexphone.ui.FlexTopBar
 
 @Composable
@@ -30,6 +31,9 @@ fun AboutScreen(nav: NavController) {
                 KeyValue("Version de la app", version ?: "?")
                 KeyValue("Protocolo Flex Link", "v${FlexLink.VERSION}")
                 KeyValue("Protocolo del navegador", "FBP/${Fbp.VERSION}")
+                // El build del Relay es lo que el P4 lee para saber si este telefono lleva la correccion
+                // de la web ampliada (ver FLEXBR_RELAY_MIN_BUILD): aqui se ve sin tener que adivinarlo.
+                KeyValue("Navegador del telefono (Relay)", "build ${RelayEngine.BUILD}")
                 KeyValue("Transporte del enlace", "Wi-Fi (red local)")
             }
 

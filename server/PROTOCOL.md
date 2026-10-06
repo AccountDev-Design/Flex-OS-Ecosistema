@@ -143,6 +143,14 @@ u32  tamaño máximo de FRAME que enviará
 str  identificador de sesión
 ```
 
+El identificador de sesión es opaco para el dispositivo salvo por una
+convención opcional: un servicio puede terminarlo en `.rN` (`N` = 0..9999) para
+anunciar su **build**. El Browser Relay del teléfono (`flexphone-<hex>.rN`) lo
+usa para que Flex OS pueda avisar de que el Flex Phone instalado es anterior a
+una corrección (`flexBrRelayBuild/Kind/IsStale` en `FlexOS_Browser.h`; el
+dispositivo exige hoy `N ≥ 6`). Un servicio que no lo pone (el de Ubuntu/PC)
+simplemente no se evalúa; no hace falta cambiar nada para seguir siendo válido.
+
 ### FRAME (18 bytes fijos + imagen)
 
 ```

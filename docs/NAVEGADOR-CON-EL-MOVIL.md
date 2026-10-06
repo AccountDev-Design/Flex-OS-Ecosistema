@@ -216,6 +216,21 @@ Casi siempre es una de dos:
   Ajustes del relay*, el **Puerto** puesto en `automatico` deja que Android
   elija uno libre. Si tienes un número fijo puesto, cámbialo a automático.
 
+### La web sale ampliada, o al deslizar se mueve toda la página
+
+Casi seguro que el móvil lleva una versión **anterior** de Flex Phone. El
+reloj lo sabe: cada Relay anuncia su **build** y, si es anterior al 6, al
+abrir el navegador sale *«Reinstala Flex Phone: su Relay es antiguo (web
+ampliada)»*. En `flex://about` (escribe esa dirección en el navegador) se ve
+la línea **Relay del teléfono: build r6** (o *ANTIGUO, reinstala Flex Phone*),
+y en el móvil, *Acerca de → Navegador del teléfono (Relay)*.
+
+Para arreglarlo, instala en el móvil la versión actual de Flex Phone
+(compilada de este repositorio: `android/FlexPhone`), ábrela y vuelve a darle a
+**Iniciar**. Con el build 6 el navegador del móvil maqueta exactamente al
+tamaño que pide el reloj (no al de la pantalla del móvil) y el deslizamiento
+mueve la página, no la imagen.
+
 ### «Suspendido por Android»
 
 Android frenó la app para ahorrar batería. En la pantalla **Browser Relay**

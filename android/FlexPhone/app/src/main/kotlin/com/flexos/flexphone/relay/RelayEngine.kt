@@ -48,6 +48,27 @@ object RelayEngine {
 
     private const val TAG = "FlexPhone/Engine"
 
+    /**
+     * BUILD DEL RELAY. Se anuncia al P4 al final del id de sesion (".r6"), sin
+     * tocar el formato del WELCOME: un Flex OS que no lo conoce lo ignora y uno que
+     * si lo conoce sabe, sin adivinar, que Flex Phone hay instalado en el telefono.
+     *
+     *   r6  el viewport CSS es el que pidio el P4 (escala MEDIDA en la pagina, no
+     *       supuesta, y sin el "viewport ancho" del motor, que encogia las paginas
+     *       sin <meta viewport> a 980 px), el desplazamiento es el del DOCUMENTO y no
+     *       mueve la superficie, y la captura no arrastra barras ni resplandores.
+     *
+     * Subelo cuando cambie algo que el P4 deba exigir (ver FLEXBR_RELAY_MIN_BUILD
+     * en FlexOS_Browser.h). Antes de r6 la web salia ampliada con la densidad del
+     * telefono y al desplazar se movia toda la superficie.
+     */
+    const val BUILD = 6
+
+    /** Bits de capacidades del WELCOME. 0x01 navegacion, 0x02 toque (los de siempre). */
+    private const val CAP_NAV_TOUCH = 0x03L
+    /** El viewport CSS pedido es el real y el desplazamiento es del documento (build >= 6). */
+    private const val CAP_CSS_VIEWPORT = 0x10L
+
     /** Tope realista. Con una pagina estatica se baja mucho de aqui. */
     private const val FPS_MAX = 12
     /** Ritmo en reposo: la pagina no cambia, no hay nada que mandar. */
@@ -88,7 +109,7 @@ object RelayEngine {
         maxTabsAllowed = maxTabs.coerceIn(1, 6)
         quality = jpegQuality.coerceIn(20, 90)
         keepTabsMs = keepTabsMin.coerceIn(1, 120) * 60_000L
-        sessionIdStr = "flexphone-" + System.currentTimeMillis().toString(16)
+        sessionIdStr = Fbp.tagSessionId("flexphone-" + System.currentTimeMillis().toString(16), BUILD)
     }
 
     /** ¿Hay un Flex OS conectado y autenticado ahora mismo? */
@@ -96,7 +117,7 @@ object RelayEngine {
 
     fun tabCount(): Int = tabs.size
     fun sessionId(): String = sessionIdStr
-    fun capabilities(): Long = 0x03            // navegacion + entrada tactil
+    fun capabilities(): Long = CAP_NAV_TOUCH or CAP_CSS_VIEWPORT   // navegacion + toque + viewport CSS exacto
     fun maxTabs(requested: Int): Int = minOf(requested.coerceAtLeast(1), maxTabsAllowed)
     fun maxFrameBytes(requested: Long): Long = minOf(requested, maxFrame.toLong())
 

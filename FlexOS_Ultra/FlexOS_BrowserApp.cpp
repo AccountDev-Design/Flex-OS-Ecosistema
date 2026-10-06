@@ -24,10 +24,10 @@
 #include "FlexOS_Browser.h"
 
 // Guardia de version (ver el bloque 0 de FlexOS_Browser.h).
-static_assert(FLEXBR_BUILD == 5,
+static_assert(FLEXBR_BUILD == 6,
   "FlexOS_BrowserApp.cpp y FlexOS_Browser.h son de versiones distintas: "
   "copia otra vez LOS CUATRO ficheros del navegador a la carpeta del sketch.");
-void flexBrVersionGuard_v5_copia_los_4_ficheros_del_navegador(void){}
+void flexBrVersionGuard_v6_copia_los_4_ficheros_del_navegador(void){}
 
 #if FLEXBR_ON_DEVICE && FLEXBR_ON
 
@@ -67,6 +67,9 @@ static bool        gNeedChromeRedraw = true;
 // teclado siempre queda por delante de la app, pase lo que pase con el
 // orden de repintado.
 static bool        gDidFullRepaint = false;
+// El aviso de "tu Flex Phone es antiguo" sale una vez por apertura del navegador,
+// no en cada reconexion de la sesion.
+static bool        gRelayStaleWarned = false;
 
 // -------------------------------------------------------------
 //  GEOMETRIA: UNA SOLA FUENTE DE VERDAD
@@ -1024,6 +1027,18 @@ static void brHandleMessage(int len){
       gNetState = BRN_READY;
       brNetInfo("Sesi\xC3\xB3n abierta: esperando la p\xC3\xA1gina");
       BR_NETLOG("[NET] WELCOME: sesion aceptada\n");
+      // QUIEN ejecuta las paginas. El Browser Relay del telefono anuncia su build en el
+      // id de sesion: uno anterior al que arregla el viewport y el desplazamiento muestra
+      // la web ampliada con la densidad del telefono y mueve la superficie al desplazar,
+      // y eso NO se arregla desde aqui: hay que reinstalar Flex Phone. Se dice, en vez de
+      // dejar al usuario buscando el fallo en el firmware.
+      gStats.relayKind  = (uint8_t)flexBrRelayKind(w.sessionId);
+      gStats.relayBuild = (int16_t)flexBrRelayBuild(w.sessionId);
+      BR_NETLOG("[NET] relay: tipo=%u build=%d\n", (unsigned)gStats.relayKind, (int)gStats.relayBuild);
+      if(flexBrRelayIsStale(w.sessionId) && !gRelayStaleWarned){
+        gRelayStaleWarned = true;
+        brSetError("Reinstala Flex Phone: su Relay es antiguo (web ampliada)");
+      }
       gNeedFullRedraw = true;
       break;
     }
@@ -2159,7 +2174,18 @@ static void brDrawInternal(){
       // que redimensionar la ventana llega de verdad al otro lado.
       snprintf(line, sizeof(line), "Viewport: %ux%u (renegociado %u veces)",
                (unsigned)gStats.viewW, (unsigned)gStats.viewH, (unsigned)gStats.viewportMsgs);
-      brHostText(px + pad, y, line, 1, t2); y += 24;
+      brHostText(px + pad, y, line, 1, t2); y += 18;
+      // Quien ejecuta las paginas. Con el telefono, su build: es lo que separa "el
+      // firmware esta mal" de "el telefono corre un Flex Phone anterior".
+      if(gStats.relayKind == BRRELAY_PHONE){
+        const bool old = gStats.relayBuild < FLEXBR_RELAY_MIN_BUILD;
+        if(old) snprintf(line, sizeof(line), "Relay del tel\xC3\xA9" "fono: ANTIGUO, reinstala Flex Phone");
+        else    snprintf(line, sizeof(line), "Relay del tel\xC3\xA9" "fono: build r%d", (int)gStats.relayBuild);
+        brHostText(px + pad, y, line, 1, old ? brHostColor(BRC_WARN) : t2); y += 18;
+      } else if(gStats.relayKind == BRRELAY_OTHER){
+        brHostText(px + pad, y, "Servicio: Ubuntu/PC", 1, t2); y += 18;
+      }
+      y += 6;
 
       brHostText(px + pad, y, "Capacidades", 2, tx); y += 24;
       struct { uint32_t cap; const char* name; } caps[] = {
@@ -2931,6 +2957,7 @@ void flexBrowserBegin(){
 void flexBrowserEnter(){
   if(!gInit) flexBrowserBegin();
   gActive = true;
+  gRelayStaleWarned = false;
   gWantClose = false;
   gEditTarget = BRE_NONE;
   gErr[0] = 0;

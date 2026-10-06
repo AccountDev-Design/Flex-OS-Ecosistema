@@ -17,7 +17,7 @@
 #include "FlexOS_Browser.h"
 
 // Guardia de version (ver el bloque 0 de FlexOS_Browser.h).
-static_assert(FLEXBR_BUILD == 5,
+static_assert(FLEXBR_BUILD == 6,
   "FlexOS_Browser.cpp y FlexOS_Browser.h son de versiones distintas: "
   "copia otra vez LOS CUATRO ficheros del navegador a la carpeta del sketch.");
 
@@ -798,6 +798,29 @@ bool fbpParseWelcome(const uint8_t* p, uint32_t n, FbpWelcome* out){
   if(w.viewW == 0 || w.viewH == 0 || w.viewW > 4096 || w.viewH > 4096) return false;
   *out = w;
   return true;
+}
+
+// ---- BUILD DEL RELAY (ver FlexOS_Browser.h) ---------------------------
+int flexBrRelayBuild(const char* sessionId){
+  if(!sessionId) return -1;
+  // La ULTIMA marca ".r" del id: es la que pone el relay al final.
+  const char* at = NULL;
+  for(const char* p = sessionId; p[0] && p[1]; p++)
+    if(p[0] == '.' && p[1] == 'r') at = p;
+  if(!at) return -1;
+  const char* d = at + 2;
+  int n = 0, v = 0;
+  while(d[n] >= '0' && d[n] <= '9'){ v = v * 10 + (d[n] - '0'); n++; if(n > 4) return -1; }
+  if(n == 0 || d[n] != 0) return -1;            // sin digitos, o basura detras de ellos
+  return v;
+}
+int flexBrRelayKind(const char* sessionId){
+  if(!sessionId || !sessionId[0]) return BRRELAY_UNKNOWN;
+  return strncmp(sessionId, "flexphone-", 10) == 0 ? BRRELAY_PHONE : BRRELAY_OTHER;
+}
+bool flexBrRelayIsStale(const char* sessionId){
+  if(flexBrRelayKind(sessionId) != BRRELAY_PHONE) return false;
+  return flexBrRelayBuild(sessionId) < FLEXBR_RELAY_MIN_BUILD;   // sin marca (-1) = anterior a r6
 }
 
 bool fbpParseState(const uint8_t* p, uint32_t n, FbpState* out){

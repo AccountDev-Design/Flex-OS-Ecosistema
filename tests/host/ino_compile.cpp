@@ -326,6 +326,9 @@ static void testCronometro();
 static void testPaginasHome();
 static void testNotifUnaSola();
 static void testBannerNotificacion();
+static void testBannerVidrioSigueAlFondo();
+static void testDexRedimensionado();
+static void testDexToqueBotones();
 static void testFotoNubeEnRam();
 static void testTactoVisorYBordes();
 static void testNubeEstados();
@@ -13024,6 +13027,556 @@ static void testDexTiempoReal(){
   if(gFails == f0) printf("  DeX en tiempo real: todas las comprobaciones pasan.\n");
 }
 
+// #############################################################
+//  DeX: REDIMENSIONAR LA VENTANA ADAPTA SU CONTENIDO AL INSTANTE
+//  ------------------------------------------------------------
+//  Lo que se vio en la placa al cambiar una ventana de grande a pequena y de apaisada a vertical:
+//    · una franja NEGRA donde la app aun no habia dibujado el tamano nuevo -- el lienzo de la ventana nace
+//      a cero y la app solo pinta el area que ya conoce --;
+//    · basura al girar la forma de la ventana (el mismo lienzo se lee con otro eje);
+//    · y la peor: un re-maquetado PERDIDO. El tick que corre en cada vuelta anotaba el tamano nuevo como "ya
+//      maquetado" y el enter() pendiente -- el re-maquetado, frenado a 45 ms mientras se arrastra -- no llegaba
+//      nunca: la app se quedaba con la maqueta vieja, o el navegador con el viewport viejo, hasta que algo la
+//      tocaba ("hay que hacer click").
+//  Se usa una app de prueba que pinta TODO su lienzo de un color y solo cuando se ejecuta enter() -- como casi
+//  todas las apps del sistema --, y el doble del navegador con la imagen RETRASADA (la banda que llega de la red).
+//  Todo lo demas es el codigo de verdad: DeX, el puente y el re-maquetado.
+// #############################################################
+extern int gStubBrLag, gStubBrLayouts, gStubBrLW, gStubBrLH, gStubBrSeenW, gStubBrSeenH;
+
+static int      gRzEnters = 0, gRzTicks = 0, gRzEnW = 0, gRzEnH = 0;
+static bool     gRzEnLand = false;
+static uint16_t gRzCol = 0;
+static void rzEnter(){ gRzEnters++; gRzEnW = gAppW; gRzEnH = gAppH; gRzEnLand = gLand; fillRect(0, 0, gAppW, gAppH, gRzCol); }
+static void rzTick(){ gRzTicks++; }
+
+static std::vector<uint16_t> gRzBase;      // el panel antes del arrastre
+static int      gRzBox[4];                 // la ventana antes del arrastre (x, y, w, h)
+static int      gRzBlack, gRzOther, gRzOutside, gRzFrames;
+static uint16_t gRzPage;                   // color con el que la app pinta su lienzo
+static bool rzIn(int lx, int ly, const int* b, int m){
+  return lx >= b[0] - m && lx < b[0] + b[2] + m && ly >= b[1] - m && ly < b[1] + b[3] + m;
+}
+static void rzBegin(int w){
+  gRzBase.assign(fb, fb + (size_t)SCR_W * SCR_H);
+  gRzBox[0] = pwins[w].x; gRzBox[1] = pwins[w].y; gRzBox[2] = pwins[w].w; gRzBox[3] = pwins[w].h;
+  gRzBlack = gRzOther = gRzOutside = gRzFrames = 0;
+}
+// Lo que se ve tras cada vuelta: dentro del area de cliente solo hay color de la app o del cuerpo de la ventana (nunca
+// negro, nunca restos); fuera de la ventana -- la de partida o la de ahora, con margen para su sombra -- no cambia ni un pixel.
+static void rzCheck(int w){
+  gRzFrames++;
+  int cx, cy, cw, ch; dexClientRect(w, cx, cy, cw, ch);
+  for(int lx = cx; lx < cx + cw; lx++) for(int ly = cy; ly < cy + ch; ly++){
+    const uint16_t p = dexFbAt(lx, ly);
+    if(p == 0) gRzBlack++;
+    else if(p != gRzPage && p != (uint16_t)DEX_WIN_BODY) gRzOther++;
+  }
+  const int cur[4] = { pwins[w].x, pwins[w].y, pwins[w].w, pwins[w].h };
+  for(int lx = 0; lx < LW; lx++) for(int ly = 0; ly < LH; ly++){
+    if(rzIn(lx, ly, gRzBox, 26) || rzIn(lx, ly, cur, 26)) continue;
+    if(dexFbAt(lx, ly) != gRzBase[(size_t)lx * SCR_W + (SCR_W - 1 - ly)]) gRzOutside++;
+  }
+}
+static int rzCountNot(int w, uint16_t col){
+  int cx, cy, cw, ch; dexClientRect(w, cx, cy, cw, ch);
+  int n = 0;
+  for(int lx = cx; lx < cx + cw; lx++) for(int ly = cy; ly < cy + ch; ly++) if(dexFbAt(lx, ly) != col) n++;
+  return n;
+}
+// Arrastra la esquina inferior derecha de la ventana w hasta que mida (nw x nh), en `steps` pasos de `dt` ms.
+static void rzDrag(int w, int nw, int nh, int steps, unsigned long dt, unsigned long& ms){
+  const int sx = pwins[w].x + pwins[w].w - 3, sy = pwins[w].y + pwins[w].h - 3;
+  const int dx = nw - pwins[w].w, dy = nh - pwins[w].h;
+  ms += dt; dexFinger(sx, sy, true, ms); pcTick();
+  for(int k = 1; k <= steps; k++){
+    ms += dt; dexFinger(sx + dx * k / steps, sy + dy * k / steps, true, ms); pcTick(); rzCheck(w);
+  }
+  ms += dt; dexFinger(sx + dx, sy + dy, false, ms); pcTick(); rzCheck(w);
+}
+static void rzSettle(int w, unsigned long& ms, int n){
+  for(int k = 0; k < n; k++){ ms += 25; dexIdle(ms); rzCheck(w); }
+}
+static void rzCloseAll(){
+  for(int i = 0; i < 4; i++) if(pwins[i].open){ dexCloseWin(i); dexAnimFinish(); }
+}
+
+static void testDexRedimensionado(){
+  printf("DeX: al redimensionar, el contenido se adapta al instante (sin huecos negros, sin maquetas perdidas, sin salirse de la ventana)\n");
+  const int f0 = gFails;
+  const FlexApp keep = APP_REG[IC_CALC];
+  APP_REG[IC_CALC].enter = rzEnter; APP_REG[IC_CALC].tick = rzTick;
+  APP_REG[IC_CALC].flags = APP_FLEX | APP_CUSTOM_HEADER;
+  gRzCol = rgb565(40, 120, 220); gRzPage = gRzCol; gRzEnters = gRzTicks = 0;
+  gStubBrProbe = false; gStubBrLag = -1; gStubBrBg = 0;
+  tReset(); gTestMs = 3000000; gMinChanged = false;
+  setBuf(fb);
+  gState = ST_APP; gAppId = IC_MODOPC;
+  pcEnter(); dexAnimFinish();
+  rzCloseAll();
+  dexOpen(IC_CALC); dexAnimFinish();
+  int w = -1;
+  for(int i = 0; i < 4; i++) if(pwins[i].open && pwins[i].app == IC_CALC) w = i;
+  chk(w >= 0 && dexHost[w].surf != NULL, "la app de prueba se abre en una ventana de DeX con su propio lienzo");
+  if(w < 0 || !dexHost[w].surf){
+    APP_REG[IC_CALC] = keep; pcCloseApp(); gState = ST_HOME; gAppId = 0; gLand = false; setBuf(fb);
+    return;
+  }
+  unsigned long ms = gTestMs;
+  int cx, cy, cw, ch; DexFit f;
+  for(int k = 0; k < 4; k++){ ms += 40; dexIdle(ms); }
+  chkf(rzCountNot(w, gRzCol) == 0, "al abrirse, el area de cliente es toda de la app (%d px de otro color)", rzCountNot(w, gRzCol));
+  const int X0 = pwins[w].x, Y0 = pwins[w].y, W0 = pwins[w].w;
+  dexClientRect(w, cx, cy, cw, ch); dexHostFit(w, cx, cy, cw, ch, f);
+  chk(!f.land && gRzEnW == f.aw && gRzEnH == f.ah, "empieza vertical, maquetada con el area de cliente exacta");
+
+  // ---- 1. AGRANDAR arrastrando la esquina, de vertical a apaisada, con pasos de 30 ms: por debajo de DEX_RELAYOUT_MS
+  //         el re-maquetado se frena en varios cuadros, y es justo ahi donde se perdia ----
+  rzBegin(w);
+  rzDrag(w, 480, pwins[w].h, 7, 30, ms);
+  rzSettle(w, ms, 6);
+  dexClientRect(w, cx, cy, cw, ch); dexHostFit(w, cx, cy, cw, ch, f);
+  chkf(pwins[w].w > W0 + 200 && f.land, "la ventana crece (%d -> %d) y pasa a apaisada", W0, pwins[w].w);
+  chkf(gRzBlack == 0, "al agrandar NUNCA hay un solo pixel negro en el area de cliente, en ninguno de los %d cuadros (%d)", gRzFrames, gRzBlack);
+  chkf(gRzOther == 0, "...ni restos de otro color (%d)", gRzOther);
+  chkf(gRzOutside == 0, "...y no se pinta ni un pixel fuera de la ventana ni de su sombra (%d)", gRzOutside);
+  chkf(gRzEnW == f.aw && gRzEnH == f.ah && gRzEnLand == f.land,
+       "el ultimo re-maquetado de la app es el del tamano FINAL (%dx%d, ve %dx%d): no se perdio ninguno", f.aw, f.ah, gRzEnW, gRzEnH);
+  chkf(rzCountNot(w, gRzCol) == 0, "asentada, toda el area de cliente es de la app (%d px de otro color)", rzCountNot(w, gRzCol));
+  chk(pwins[w].x == X0 && pwins[w].y == Y0 && dexGrab == DXG_NONE, "y la ventana no se movio de sitio al redimensionarla");
+
+  // ---- 2. ENCOGER, de apaisada a vertical ----
+  rzBegin(w);
+  rzDrag(w, 300, pwins[w].h, 5, 30, ms);
+  rzSettle(w, ms, 6);
+  dexClientRect(w, cx, cy, cw, ch); dexHostFit(w, cx, cy, cw, ch, f);
+  chkf(!f.land && pwins[w].w < 340, "la ventana encoge (%d) y vuelve a vertical", pwins[w].w);
+  chkf(gRzBlack == 0 && gRzOther == 0, "al encoger tampoco hay negro ni restos (%d / %d)", gRzBlack, gRzOther);
+  chkf(gRzOutside == 0, "...ni nada fuera de la ventana (%d)", gRzOutside);
+  chkf(gRzEnW == f.aw && gRzEnH == f.ah && gRzEnLand == f.land,
+       "y la app se re-maqueto al tamano FINAL (%dx%d, ve %dx%d)", f.aw, f.ah, gRzEnW, gRzEnH);
+  chkf(rzCountNot(w, gRzCol) == 0, "asentada, el area de cliente es toda de la app (%d)", rzCountNot(w, gRzCol));
+
+  // ---- 3. UN CUADRO EN QUE LA APP NO RE-MAQUETA: el hueco se ve del color de la ventana, no negro ----
+  // La app tarda: se agranda la ventana y se pinta UN cuadro sin dejarla correr (un re-maquetado frenado, una app lenta).
+  {
+    const int pre = gRzEnters;
+    pwins[w].w = 460; dexClampWin(&pwins[w]); dexMarkAll(); dexDirty = true;
+    dexHost[w].reMs = (uint32_t)(ms + 30);                       // 10 ms antes del cuadro: el limite de cadencia aun no deja re-maquetar
+    ms += 40; dexIdle(ms);
+    chk(gRzEnters == pre, "(el re-maquetado quedo frenado este cuadro)");
+    int negro = 0, cuerpo = 0;
+    dexClientRect(w, cx, cy, cw, ch);
+    for(int lx = cx; lx < cx + cw; lx++) for(int ly = cy; ly < cy + ch; ly++){
+      const uint16_t p = dexFbAt(lx, ly);
+      if(p == 0) negro++; else if(p == (uint16_t)DEX_WIN_BODY) cuerpo++;
+    }
+    chkf(negro == 0, "con el re-maquetado frenado la franja nueva NO es negra (%d px negros)", negro);
+    chkf(cuerpo > 500, "...es del color del cuerpo de la ventana hasta que la app la pinta (%d px)", cuerpo);
+    dexHost[w].reMs = 0;
+    for(int k = 0; k < 4; k++){ ms += 60; dexIdle(ms); }
+    dexClientRect(w, cx, cy, cw, ch); dexHostFit(w, cx, cy, cw, ch, f);
+    chkf(gRzEnW == f.aw && gRzEnH == f.ah && rzCountNot(w, gRzCol) == 0,
+         "en cuanto puede, la app re-maqueta y llena todo (%dx%d)", gRzEnW, gRzEnH);
+  }
+
+  // ---- 4. MAXIMIZAR y restaurar: area apaisada nueva, aplicada y visible sin tocar ----
+  rzBegin(w);
+  dexToggleMax(w); dexAnimFinish();
+  rzSettle(w, ms, 6);
+  dexClientRect(w, cx, cy, cw, ch); dexHostFit(w, cx, cy, cw, ch, f);
+  chkf(f.land && gRzEnW == f.aw && gRzEnH == f.ah, "maximizada: la app maqueta con el area nueva (%dx%d) sin tocar nada", f.aw, f.ah);
+  chkf(gRzBlack == 0 && gRzOther == 0 && rzCountNot(w, gRzCol) == 0, "...y se ve entera, sin huecos (%d / %d / %d)", gRzBlack, gRzOther, rzCountNot(w, gRzCol));
+  dexToggleMax(w); dexAnimFinish();
+  rzSettle(w, ms, 6);
+  dexClientRect(w, cx, cy, cw, ch); dexHostFit(w, cx, cy, cw, ch, f);
+  chkf(gRzEnW == f.aw && gRzEnH == f.ah && rzCountNot(w, gRzCol) == 0, "restaurada: vuelve a su tamano y se re-maqueta (%dx%d)", f.aw, f.ah);
+
+  // ---- 5. EL NAVEGADOR: la imagen del tamano nuevo llega tarde, y mientras tanto no hay negro; no se recrea ----
+  rzCloseAll();
+  gStubBrProbe = true; gStubBrTicks = gStubBrEnters = 0; gStubBrBg = rgb565(250, 248, 240); gStubBrLag = 3;
+  gStubBrSeenW = gStubBrSeenH = -1; gStubBrLayouts = 0; gRzPage = gStubBrBg;
+  dexOpen(IC_NAV); dexAnimFinish();
+  int nw = -1;
+  for(int i = 0; i < 4; i++) if(pwins[i].open && pwins[i].app == IC_NAV) nw = i;
+  chk(nw >= 0 && dexHost[nw].surf != NULL, "el navegador se abre en una ventana de DeX");
+  if(nw >= 0 && dexHost[nw].surf){
+    for(int k = 0; k < 8; k++){ ms += 40; dexIdle(ms); }
+    dexClientRect(nw, cx, cy, cw, ch); dexHostFit(nw, cx, cy, cw, ch, f);
+    chkf(gStubBrLW == f.aw && gStubBrLH == f.ah, "la pagina se pinta con el area exacta de la ventana (%dx%d)", gStubBrLW, gStubBrLH);
+    const int nx0 = pwins[nw].x, ny0 = pwins[nw].y;
+    rzBegin(nw);
+    rzDrag(nw, 480, pwins[nw].h, 7, 30, ms);
+    rzSettle(nw, ms, 10);
+    dexClientRect(nw, cx, cy, cw, ch); dexHostFit(nw, cx, cy, cw, ch, f);
+    chkf(f.land && gStubBrCW == f.aw && gStubBrCH == f.ah, "el navegador ve el viewport NUEVO tras agrandar (%dx%d)", gStubBrCW, gStubBrCH);
+    chkf(gStubBrLW == f.aw && gStubBrLH == f.ah, "...y repinta la pagina con el (%dx%d), sin un click", gStubBrLW, gStubBrLH);
+    chkf(gRzBlack == 0 && gRzOther == 0, "mientras llega la imagen nueva no hay negro ni restos (%d / %d)", gRzBlack, gRzOther);
+    chkf(gRzOutside == 0, "...y no se pinta fuera de la ventana (%d)", gRzOutside);
+    chkf(rzCountNot(nw, gStubBrBg) == 0, "asentado, el area de cliente es toda la pagina (%d px)", rzCountNot(nw, gStubBrBg));
+    rzBegin(nw);
+    rzDrag(nw, 290, pwins[nw].h, 6, 30, ms);
+    rzSettle(nw, ms, 10);
+    dexClientRect(nw, cx, cy, cw, ch); dexHostFit(nw, cx, cy, cw, ch, f);
+    chkf(!f.land && gStubBrCW == f.aw && gStubBrCH == f.ah && gStubBrLW == f.aw && gStubBrLH == f.ah,
+         "al encoger y volver a vertical, el viewport y la pagina siguen al tamano de la ventana (%dx%d)", gStubBrLW, gStubBrLH);
+    chkf(gRzBlack == 0 && gRzOther == 0 && gRzOutside == 0, "...sin negro, restos ni nada fuera (%d / %d / %d)", gRzBlack, gRzOther, gRzOutside);
+    chk(gStubBrEnters == 1, "el navegador NO se recrea ni se recarga al redimensionar: un solo enter() en toda la sesion");
+    chk(pwins[nw].x == nx0 && pwins[nw].y == ny0, "y la ventana no se movio");
+
+    // ---- 6. SWIPE VERTICAL dentro de la pagina: se mueve el documento, no la ventana ----
+    dexClientRect(nw, cx, cy, cw, ch);
+    const int wx = pwins[nw].x, wy = pwins[nw].y, ww = pwins[nw].w, wh = pwins[nw].h;
+    const int sx = cx + cw / 2;
+    int sy = cy + ch * 3 / 4;
+    rzBegin(nw);
+    ms += 80; dexFinger(sx, sy, true, ms); pcTick(); rzCheck(nw);
+    bool moved = false, grabbed = false, sawDown = false, sawUp = false;
+    int firstY = gStubBrTouch.y, lastY = firstY;
+    if(gStubBrTouch.down) sawDown = true;
+    for(int k = 1; k <= 8; k++){
+      sy -= 22;
+      ms += 30; dexFinger(sx, sy, true, ms); pcTick(); rzCheck(nw);
+      if(pwins[nw].x != wx || pwins[nw].y != wy || pwins[nw].w != ww || pwins[nw].h != wh) moved = true;
+      if(dexGrab != DXG_NONE) grabbed = true;
+      if(gStubBrTouch.down) sawDown = true;
+      lastY = gStubBrTouch.y;
+      if(gStubBrTouch.y < firstY) sawUp = true;
+    }
+    ms += 30; dexFinger(sx, sy, false, ms); pcTick(); rzCheck(nw);
+    chk(!moved && !grabbed, "un swipe vertical dentro de la pagina NO mueve ni redimensiona la ventana");
+    chkf(sawDown && sawUp && lastY < firstY - 100, "...el gesto llega a la app como arrastre hacia arriba (%d -> %d)", firstY, lastY);
+    chkf(gRzBlack == 0 && gRzOther == 0 && gRzOutside == 0, "...y la ventana, su contenido y el escritorio no se alteran (%d / %d / %d)", gRzBlack, gRzOther, gRzOutside);
+    chk(pwins[nw].x == wx && pwins[nw].y == wy && pwins[nw].w == ww && pwins[nw].h == wh, "al soltar, la ventana esta exactamente donde estaba");
+  }
+
+  pcCloseApp();
+  gStubBrProbe = false; gStubBrLag = -1; gStubBrBg = 0; gStubBrSeenW = gStubBrSeenH = -1;
+  APP_REG[IC_CALC] = keep;
+  tReset(); gState = ST_HOME; gAppId = 0; gLand = false; setBuf(fb);
+  gClipY0 = 0; gClipY1 = SCR_H - 1;
+  if(gFails == f0) printf("  DeX al redimensionar: todas las comprobaciones pasan.\n");
+}
+
+// #############################################################
+//  DeX: LA ZONA DE TOQUE ES LA DEL DIBUJO
+//  ------------------------------------------------------------
+//  Lo que se vio en la placa: los botones de la barra de tareas y los de la barra de titulo solo respondian si
+//  se tocaba "justo en un punto". Cada control se DIBUJA como un chip de 30-34 px y se tocaba con ese mismo
+//  rectangulo exacto, sin un pixel de tolerancia -- con el dedo, que tapa 40-50 px, es un blanco de aguja --, y
+//  en los controles de la ventana la franja de agarre INTERIOR del borde (6 px) empezaba un redimensionado
+//  justo en la esquina donde cae el dedo, en vez de pulsar el boton.
+//  Aqui se barre cada pixel del dibujo y su holgura, y se toca de verdad (pulsar y soltar por todo el sistema).
+// #############################################################
+static void dxTap(int lx, int ly, unsigned long& ms, bool* grabbed){
+  ms += 90; dexFinger(lx, ly, true, ms); pcTick();
+  if(grabbed) *grabbed = (dexGrab != DXG_NONE);
+  ms += 50; dexFinger(lx, ly, false, ms); pcTick();
+  ms += 90; dexIdle(ms);
+}
+static void dxFresh(unsigned long& ms){
+  tReset(); setBuf(fb); gState = ST_APP; gAppId = IC_MODOPC;
+  pcEnter(); dexAnimFinish();
+  rzCloseAll();
+  ms += 3000; dexIdle(ms);
+}
+
+static void testDexToqueBotones(){
+  printf("DeX: los botones se tocan donde se ven (barra de tareas y controles de ventana), con holgura de dedo\n");
+  const int f0 = gFails;
+  const FlexApp keep = APP_REG[IC_CALC];
+  APP_REG[IC_CALC].enter = rzEnter; APP_REG[IC_CALC].tick = rzTick;
+  APP_REG[IC_CALC].flags = APP_FLEX | APP_CUSTOM_HEADER;
+  gRzCol = rgb565(40, 120, 220);
+  gStubBrProbe = false;
+  gTestMs = 5000000; gMinChanged = false;
+  unsigned long ms = gTestMs;
+  dxFresh(ms);
+
+  // ---- 1. Geometria: cada pixel del dibujo de un control es de ESE control, a cualquier altura de la barra ----
+  {
+    struct Ctl { const char* name; int id; const int* r; };
+    const Ctl cs[] = { { "cuadricula", DXT_DRW, dexRDrw }, { "buscador", DXT_FND, dexRFnd }, { "touchpad", DXT_PAD, dexRPad },
+                       { "campana", DXT_BELL, dexRBell }, { "ajustes", DXT_GEAR, dexRGear } };
+    const int ty = dexTbY();
+    for(const Ctl& c : cs){
+      int bad = 0, tot = 0, badY = 0;
+      for(int y = c.r[1]; y < c.r[1] + c.r[3]; y++) for(int x = c.r[0]; x < c.r[0] + c.r[2]; x++){ tot++; if(dexTbHit(x, y) != c.id) bad++; }
+      chkf(bad == 0, "%s: los %d px de su dibujo se tocan como suyos (%d fallan)", c.name, tot, bad);
+      const int mx = c.r[0] + c.r[2] / 2;
+      for(int y = ty; y < LH; y++) if(dexTbHit(mx, y) != c.id) badY++;
+      chkf(badY == 0, "%s: vale toda la altura de la barra, no solo la fila del icono (%d fallan)", c.name, badY);
+      chk(dexTbHit(mx, ty - 1) == DXT_NONE, "...y por encima de la barra no es de la barra");
+    }
+    chk(dexTbHit(0, ty + 20) == DXT_DRW && dexTbHit(3, LH - 1) == DXT_DRW, "la cuadricula se alcanza hasta el borde izquierdo de la pantalla (esquina)");
+    chk(dexTbHit(dexRClkX - 30, ty + 20) == DXT_CLOCK && dexTbHit(LW - 1, ty + 20) == DXT_CLOCK, "el reloj abre Recientes tambien en el margen del borde derecho");
+    int app[10]; bool op[10]; const int n = dexTbItems(app, op);
+    int badApp = 0, totApp = 0;
+    for(int i = 0; i < n; i++){
+      int ix, iy, is; dexTbItemRect(i, n, ix, iy, is);
+      for(int y = iy; y < iy + is; y++) for(int x = ix; x < ix + is; x++){
+        int ai = -1; totApp++;
+        if(dexTbHit(x, y, &ai) != DXT_APP || ai != i) badApp++;
+      }
+    }
+    chkf(badApp == 0, "los %d iconos de apps: cada pixel de su dibujo abre SU app (%d fallan)", n, badApp);
+    // Sin huecos muertos entre los controles de la izquierda ni entre la campana y los ajustes: el hueco se reparte.
+    int muertos = 0;
+    for(int x = 0; x < dexRFnd[0] + dexRFnd[2]; x++) if(dexTbHit(x, ty + 20) == DXT_NONE) muertos++;
+    chkf(muertos == 0, "entre la cuadricula y el buscador no hay un solo pixel muerto (%d)", muertos);
+    muertos = 0;
+    for(int x = dexRPad[0]; x < dexRGear[0] + dexRGear[2]; x++) if(dexTbHit(x, ty + 20) == DXT_NONE) muertos++;
+    chkf(muertos == 0, "ni entre el touchpad, la campana y los ajustes (%d)", muertos);
+    // Holgura de dedo: unos pixeles FUERA del dibujo todavia es el control (el extremo que no tiene vecino).
+    chk(dexTbHit(dexRGear[0] + dexRGear[2] + 6, ty + 20) == DXT_GEAR, "6 px a la derecha de ajustes todavia es ajustes");
+    chk(dexTbHit(dexRDrw[0] - 6, ty + 20) == DXT_DRW, "6 px a la izquierda de la cuadricula todavia es la cuadricula");
+  }
+
+  // ---- 2. Tocar de verdad: centro, esquinas y holgura de cada control abren lo que dicen ----
+  {
+    struct Ctl { const char* name; int id; const int* r; };
+    const Ctl cs[] = { { "cuadricula", DXT_DRW, dexRDrw }, { "buscador", DXT_FND, dexRFnd }, { "touchpad", DXT_PAD, dexRPad },
+                       { "campana", DXT_BELL, dexRBell }, { "ajustes", DXT_GEAR, dexRGear } };
+    int fallos = 0, intentos = 0;
+    for(const Ctl& c : cs){
+      const int x0 = c.r[0], y0 = c.r[1], w0 = c.r[2], h0 = c.r[3];
+      const int pts[][2] = { { x0 + w0 / 2, y0 + h0 / 2 }, { x0, y0 }, { x0 + w0 - 1, y0 }, { x0, y0 + h0 - 1 },
+                             { x0 + w0 - 1, y0 + h0 - 1 }, { x0 + w0 / 2, dexTbY() + 1 }, { x0 + w0 / 2, LH - 2 } };
+      for(const auto& p : pts){
+        dxFresh(ms); intentos++;
+        dxTap(p[0], p[1], ms, NULL);
+        bool ok = false;
+        switch(c.id){
+          case DXT_DRW:  ok = dexOv == DXO_DRAWER && !dexOvClosing; break;
+          case DXT_FND:  ok = dexOv == DXO_FINDER && !dexOvClosing; break;
+          case DXT_PAD:  ok = dexPadOn; break;
+          default:       ok = dexOv == DXO_NOTIF && !dexOvClosing; break;
+        }
+        if(!ok){ fallos++; printf("    (falla: %s tocado en %d,%d)\n", c.name, p[0], p[1]); }
+      }
+    }
+    chkf(fallos == 0, "tocar el centro, las 4 esquinas y la base de cada control de la barra hace lo suyo (%d de %d fallan)", fallos, intentos);
+    // El reloj abre Recientes (en su texto y en el margen)
+    dxFresh(ms); dxTap(dexRClkX - 20, dexTbY() + 20, ms, NULL);
+    chk(dexOv == DXO_RECENTS, "tocar el reloj abre Recientes");
+    dxFresh(ms); dxTap(LW - 3, dexTbY() + 20, ms, NULL);
+    chk(dexOv == DXO_RECENTS, "...tambien en el margen del borde derecho");
+    // Iconos de apps: abrir; esquinas incluidas
+    int app[10]; bool op[10]; const int n = dexTbItems(app, op);
+    int fa = 0, ia = 0;
+    for(int i = 0; i < n; i++){
+      int ix, iy, is; dexTbItemRect(i, n, ix, iy, is);
+      const int pts[][2] = { { ix + is / 2, iy + is / 2 }, { ix, iy }, { ix + is - 1, iy + is - 1 }, { ix + is / 2, LH - 2 } };
+      for(const auto& p : pts){
+        dxFresh(ms); ia++;
+        dxTap(p[0], p[1], ms, NULL);
+        bool abierta = false;
+        for(int k = 0; k < 4; k++) if(pwins[k].open && pwins[k].app == app[i]) abierta = true;
+        if(!abierta) fa++;
+      }
+    }
+    chkf(fa == 0, "tocar cada icono de app (centro, esquinas y base de la barra) abre SU ventana (%d de %d fallan)", fa, ia);
+  }
+
+  // ---- 3. Controles de la ventana: minimizar, maximizar y cerrar, tambien en la esquina de la ventana ----
+  {
+    int fallos = 0, intentos = 0, agarres = 0;
+    for(int k = 0; k < 3; k++){
+      dxFresh(ms); dexOpen(IC_CALC); dexAnimFinish();
+      int w = -1;
+      for(int i = 0; i < 4; i++) if(pwins[i].open && pwins[i].app == IC_CALC) w = i;
+      if(w < 0){ chk(false, "(no se abrio la ventana de prueba)"); break; }
+      int bx, by, bw, bh; dexWinBtnHit(pwins[w].x, pwins[w].y, pwins[w].w, k, bx, by, bw, bh);
+      const int pts[][2] = { { bx + bw / 2, by + bh / 2 }, { bx, by }, { bx + bw - 1, by }, { bx, by + bh - 1 }, { bx + bw - 1, by + bh - 1 },
+                             { bx + bw / 2, by + 1 } };
+      for(const auto& p : pts){
+        dxFresh(ms); dexOpen(IC_CALC); dexAnimFinish();
+        for(int i = 0; i < 4; i++) if(pwins[i].open && pwins[i].app == IC_CALC) w = i;
+        dexWinBtnHit(pwins[w].x, pwins[w].y, pwins[w].w, k, bx, by, bw, bh);
+        const int px = p[0], py = p[1];
+        intentos++;
+        bool grabbed = false;
+        dxTap(px, py, ms, &grabbed);
+        dexAnimFinish();
+        if(grabbed) agarres++;
+        bool ok = false;
+        if(k == 0) ok = pwins[w].open && pwins[w].mini;
+        else if(k == 1) ok = pwins[w].open && pwins[w].snap == SNAP_MAX;
+        else ok = !pwins[w].open;
+        if(!ok){ fallos++; printf("    (falla: control %d tocado en %d,%d; ventana en %d,%d %dx%d)\n", k, px, py, pwins[w].x, pwins[w].y, pwins[w].w, pwins[w].h); }
+      }
+    }
+    chkf(fallos == 0, "minimizar, maximizar y cerrar: centro y las 4 esquinas de cada uno hacen lo suyo (%d de %d fallan)", fallos, intentos);
+    chkf(agarres == 0, "...y ninguna esquina de un control empieza un redimensionado (%d)", agarres);
+  }
+
+  // ---- 3b. El dedo rueda unos pixeles entre apoyar y levantar: el toque vale donde EMPEZO ----
+  {
+    dxFresh(ms); dexOpen(IC_CALC); dexAnimFinish();
+    int w = -1;
+    for(int i = 0; i < 4; i++) if(pwins[i].open && pwins[i].app == IC_CALC) w = i;
+    if(w >= 0){
+      int bx, by, bw, bh; dexWinBtnHit(pwins[w].x, pwins[w].y, pwins[w].w, 1, bx, by, bw, bh);   // maximizar
+      const int py = by + bh / 2;
+      ms += 90; dexFinger(bx + 3, py, true, ms); pcTick();                  // apoya en maximizar, junto al borde con minimizar
+      ms += 60; dexFinger(bx - 8, py, false, ms); pcTick();                 // levanta 11 px a la izquierda, ya sobre minimizar
+      dexAnimFinish();
+      chk(pwins[w].open && pwins[w].snap == SNAP_MAX && !pwins[w].mini,
+          "apoyar en maximizar y levantar 11 px mas alla maximiza: un toque vale donde EMPEZO, no donde se levanta");
+    }
+    dxFresh(ms);
+    const int fx = dexRFnd[0] + dexRFnd[2] - 1, fy = dexTbY() + 20;          // el borde derecho del icono del buscador
+    ms += 90; dexFinger(fx, fy, true, ms); pcTick();
+    ms += 60; dexFinger(fx + 11, fy, false, ms); pcTick();                  // y levanta 11 px mas alla, en el hueco
+    chk(dexOv == DXO_FINDER, "apoyar en el buscador y levantar 11 px mas alla (en el hueco de la barra) abre el buscador");
+  }
+
+  // ---- 4. El borde sigue redimensionando: fuera de la ventana y en el costado, donde no hay controles ----
+  {
+    dxFresh(ms); dexOpen(IC_CALC); dexAnimFinish();
+    int w = -1;
+    for(int i = 0; i < 4; i++) if(pwins[i].open && pwins[i].app == IC_CALC) w = i;
+    if(w >= 0){
+      const int ex = pwins[w].x + pwins[w].w + 8, ey = pwins[w].y + pwins[w].h / 2;          // agarre exterior, a media altura
+      ms += 90; dexFinger(ex, ey, true, ms); pcTick();
+      chk(dexGrab == DXG_RESIZE, "el agarre EXTERIOR del borde (fuera de la ventana) sigue redimensionando");
+      ms += 50; dexFinger(ex, ey, false, ms); pcTick(); ms += 90; dexIdle(ms);
+      const int tx = pwins[w].x + pwins[w].w - 3, ty = pwins[w].y + pwins[w].h - 3;             // esquina inferior: sin controles
+      ms += 90; dexFinger(tx, ty, true, ms); pcTick();
+      chk(dexGrab == DXG_RESIZE, "la esquina inferior (sin controles) sigue redimensionando");
+      ms += 50; dexFinger(tx, ty, false, ms); pcTick(); ms += 90; dexIdle(ms);
+      const int dx = pwins[w].x + 60, dy = pwins[w].y + DEX_TTL_H / 2;                           // barra de titulo, lejos de los controles
+      ms += 90; dexFinger(dx, dy, true, ms); pcTick();
+      chk(dexGrab == DXG_MOVE, "la barra de titulo sigue arrastrando la ventana");
+      ms += 50; dexFinger(dx, dy, false, ms); pcTick(); ms += 90; dexIdle(ms);
+    }
+  }
+
+  pcCloseApp();
+  APP_REG[IC_CALC] = keep;
+  tReset(); gState = ST_HOME; gAppId = 0; gLand = false; setBuf(fb);
+  gClipY0 = 0; gClipY1 = SCR_H - 1;
+  if(gFails == f0) printf("  DeX, zonas de toque: todas las comprobaciones pasan.\n");
+}
+
+// #############################################################
+//  BANNER DE NOTIFICACION: EL VIDRIO NO ES UNA FOTO
+//  ------------------------------------------------------------
+//  Lo que se vio en la placa: al entrar, salir o arrastrar, la tarjeta de cristal llevaba pegada la imagen del
+//  fondo de DONDE se resolvio -- su sitio de reposo -- y la paseaba por encima de lo que de verdad tenia debajo:
+//  el cristal "se llevaba" el fondo, en vez de ser una capa dinamica que muestrea lo que hay detras en cada
+//  posicion. Se mira LO QUE LLEGA AL PANEL con un fondo de alto contraste (oscuro a la izquierda, claro a la
+//  derecha) y la tarjeta arrastrada de un lado al otro:
+//    · en reposo, sobre lo claro, el vidrio es claro; arrastrada sobre lo oscuro, es oscuro (sigue al fondo);
+//    · al volver a su sitio, vuelve a ser el de reposo (no queda memoria de la posicion anterior);
+//    · tras entrar y salir muchas veces sobre fondos opuestos, el vidrio es siempre el del fondo de ESE ciclo;
+//    · al irse, el panel es fb tal cual y no queda ni una superficie reservada.
+// #############################################################
+static uint16_t bnEdge(int x, int y){ (void)y; return x < 200 ? rgb565(10, 20, 60) : rgb565(235, 230, 240); }
+
+static void testBannerVidrioSigueAlFondo(){
+  printf("Banner de notificacion: el vidrio sigue a lo que hay DEBAJO en cada posicion, no es una foto que viaja con la tarjeta\n");
+  int before = gFails;
+  const size_t N = (size_t)SCR_W * SCR_H;
+  std::vector<uint16_t> shadow(N, 0);
+  uint16_t* sh0 = gPanelShadow; gPanelShadow = shadow.data();
+  flxPanel = (esp_lcd_panel_handle_t)1; flxDpiSem = (SemaphoreHandle_t)1;
+  bool glass0 = uiGlass, dnd0 = gDnd; int nav0 = gNavMode; bool ok0 = gtOk, wire0 = gWireGtOn;
+  uiGlass = true; gNavMode = 0; gDnd = false;
+  gtOk = true; gWireGtOn = true; memset(gWireGt, 0, sizeof(gWireGt));
+  if(fpbVisible()) fpbAbandon();
+  fpbQueueN = 0; fpbMore = 0;
+  appTrCancel(); qsForceClose();
+  gState = ST_HOME; gAppId = 0; gLand = false; editMode = false; gHosted = false; gSuspOn = false;
+  setBuf(fb); uiClipFull(); touchReset(); gTouchSwallow = false;
+  gTestMs = 70000000;
+  const size_t ps0 = gPsUsed;
+  // Region de la tarjeta SIN texto (la misma que mide testBannerNotificacion), en su sitio de reposo: (400..430, 40..60).
+  const int RY0 = 40, RY1 = 60, RX0 = 400, RX1 = 430;
+
+  // ---- 1. Reposo sobre un fondo con un borde: la region esta sobre lo CLARO ----
+  bnPaint(bnEdge, 0, SCR_H - 1); flxFlush(0, SCR_H - 1);
+  std::vector<uint16_t> limpio(fb, fb + N);
+  bnShow(FPN_SRC_SYSTEM, 0, "Vidrio");
+  chk(fpbState == FPB_SHOWN, "(el aviso esta a la vista)");
+  const int lumaReposo = bnAvg(shadow.data(), RX0, RY0, RX1, RY1);
+  chkf(lumaReposo > 70, "en reposo, sobre el lado claro del fondo, el vidrio es claro (luma %d)", lumaReposo);
+
+  // ---- 2. Arrastrada a la izquierda: la misma region de la tarjeta pasa a estar sobre lo OSCURO ----
+  // (un dedo que baja sobre la tarjeta y la arrastra 1:1; la posicion del dedo es 300 - 25 * k)
+  bnUnderReset();
+  bnStep(1, 300, 54);
+  for(int k = 1; k <= 6; k++) bnStep(1, 300 - 25 * k, 54);
+  {
+    const int D6 = -(int)fpbSlide;
+    chkf(D6 == 150, "(la tarjeta sigue al dedo: %d px)", D6);
+    // 150 px a la izquierda la region cae en 250..280: SIGUE sobre lo claro (control: no es "oscura al arrastrar").
+    const int l150 = bnAvg(shadow.data(), RX0 - D6, RY0, RX1 - D6, RY1);
+    chkf(std::abs(l150 - lumaReposo) <= 12, "desplazada 150 px, sobre lo claro, el vidrio sigue claro (luma %d, en reposo %d)", l150, lumaReposo);
+  }
+  for(int k = 7; k <= 10; k++) bnStep(1, 300 - 25 * k, 54);
+  const int D = -(int)fpbSlide;
+  chkf(D == 250, "(la tarjeta sigue al dedo: %d px)", D);
+  chk(!memcmp(fb, limpio.data(), N * 2), "fb sigue limpio con la tarjeta arrastrada (la tarjeta nunca vive en fb)");
+  const int lumaArr = bnAvg(shadow.data(), RX0 - D, RY0, RX1 - D, RY1);
+  chkf(lumaArr + 25 < lumaReposo, "desplazada 250 px, sobre el lado OSCURO, la tarjeta es oscura (luma %d, en reposo %d): su vidrio sigue al fondo, no lo trae pegado", lumaArr, lumaReposo);
+
+  // ---- 3. Vuelve a su sitio con el dedo apoyado: el vidrio vuelve a ser el de reposo ----
+  for(int k = 9; k >= 0; k--) bnStep(1, 300 - 25 * k, 54);
+  chkf(fpbSlide == 0.0f, "(la tarjeta vuelve a su sitio: %d)", (int)fpbSlide);
+  const int lumaVuelta = bnAvg(shadow.data(), RX0, RY0, RX1, RY1);
+  chkf(std::abs(lumaVuelta - lumaReposo) <= 6, "al volver a su sitio el vidrio vuelve a ser el de reposo (%d, antes %d): sin memoria de la posicion anterior", lumaVuelta, lumaReposo);
+
+  // ---- 4. Fuera otra vez y se suelta pasado el umbral: sale, y el vidrio de la salida tambien sigue al fondo ----
+  for(int k = 1; k <= 10; k++) bnStep(1, 300 - 25 * k, 54);
+  bnStep(0, 0, 0);
+  chkf(fpbState == FPB_OUT && fpbOutDir == -1, "al soltar sale deslizandose a la izquierda (estado %d)", fpbState);
+  for(int i = 0; i < 3; i++){ gTestMs += 16; flexPollTouch(); fpbTouch(); fpbTick(); }
+  {
+    const int Ds = -(int)fpbSlide;
+    const int lSal = bnAvg(shadow.data(), RX0 - Ds > 0 ? RX0 - Ds : 0, RY0, RX1 - Ds > 1 ? RX1 - Ds : 1, RY1);
+    chkf(Ds >= 250 && lSal + 25 < lumaReposo, "saliendo, la parte visible de la tarjeta sigue al fondo que tiene debajo (luma %d, desplazada %d)", lSal, Ds);
+  }
+  bnIdle(3);
+  bnWaitHidden();
+  chk(fpbState == FPB_HIDDEN && !memcmp(shadow.data(), fb, N * 2), "al irse el panel es EXACTAMENTE fb: sin rastro del vidrio");
+  chk(fpbCv == NULL && fpbSave == NULL && gPsUsed == ps0, "y la capa de vidrio se libera: no queda ninguna superficie reservada");
+  chk(!memcmp(fb, limpio.data(), N * 2), "fb sigue siendo el contenido limpio de debajo");
+
+  // ---- 5. Entrar y salir muchas veces sobre fondos opuestos: ni rastro del ciclo anterior ----
+  int lumaOsc0 = -1, lumaCla0 = -1;
+  for(int c = 0; c < 8; c++){
+    const bool oscuro = (c & 1) == 0;
+    bnPaint(oscuro ? bnA : bnB, 0, SCR_H - 1); flxFlush(0, SCR_H - 1);
+    bnShow(FPN_SRC_SYSTEM, 0, "Ciclo");
+    const int l = bnAvg(shadow.data(), RX0, RY0, RX1, RY1);
+    int& l0 = oscuro ? lumaOsc0 : lumaCla0;
+    if(l0 < 0) l0 = l;
+    chkf(std::abs(l - l0) <= 8, "ciclo %d (fondo %s): el vidrio es el de ESTE fondo, no el del ciclo anterior (%d, referencia %d)", c, oscuro ? "oscuro" : "claro", l, l0);
+    gTestMs += FPB_HOLD_MS + 20; bnWaitHidden();
+    chk(fpbState == FPB_HIDDEN && !memcmp(shadow.data(), fb, N * 2) && fpbCv == NULL && fpbSave == NULL && gPsUsed == ps0,
+        "...y al irse: panel == fb, nada reservado");
+  }
+  chkf(lumaCla0 > lumaOsc0 + 25, "(el vidrio sobre fondo claro es claramente mas claro que sobre fondo oscuro: %d vs %d)", lumaCla0, lumaOsc0);
+
+  // ---- 6. Descartar con el dedo repetidas veces: sin rastro y sin superficie colgada ----
+  for(int c = 0; c < 4; c++){
+    bnPaint(bnEdge, 0, SCR_H - 1); flxFlush(0, SCR_H - 1);
+    bnShow(FPN_SRC_SYSTEM, 0, "Arrastre");
+    bnStep(1, 300, 54); bnStep(1, 250, 54); bnStep(1, 200, 54); bnStep(1, 140, 54); bnStep(0, 0, 0);
+    bnIdle(2); bnWaitHidden();
+    chk(fpbState == FPB_HIDDEN && !memcmp(shadow.data(), fb, N * 2) && fpbCv == NULL && fpbSave == NULL && gPsUsed == ps0,
+        "descartada con el dedo: el panel es fb y no queda ninguna capa reservada");
+  }
+
+  memset(gWireGt, 0, sizeof(gWireGt)); touchReset(); gTouchSwallow = false;
+  gtOk = ok0; gWireGtOn = wire0;
+  uiGlass = glass0; gDnd = dnd0; gNavMode = nav0; gPanelShadow = sh0;
+  gState = ST_HOME; gAppId = 0; gLand = false; uiClipFull(); setBuf(fb);
+  if(gFails == before) printf("  Vidrio del banner: todas las comprobaciones pasan.\n");
+}
+
+
 int main(){
   printf("Reloj del sistema (epoca UTC -> Lima UTC-5)\n");
 
@@ -13100,6 +13653,7 @@ int main(){
   testPaginasHome();
   testNotifUnaSola();
   testBannerNotificacion();
+  testBannerVidrioSigueAlFondo();
   testDeslizarPaginas();
   testIslaEncimaAlDeslizar();
   testTextoUnicode();
@@ -13157,6 +13711,8 @@ int main(){
   testFlexAccountUnlink();
   testTrabajoPeriodico();
   testDexTiempoReal();
+  testDexRedimensionado();
+  testDexToqueBotones();
   testPantallaCompletaDesdeInicio();
   if(gFails){ printf("%d comprobacion(es) han fallado.\n", gFails); return 1; }
   return 0;

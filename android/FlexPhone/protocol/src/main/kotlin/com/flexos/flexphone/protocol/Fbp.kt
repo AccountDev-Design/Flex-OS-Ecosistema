@@ -267,6 +267,38 @@ object Fbp {
         val s = r.str()
         return if (r.ok) s else null
     }
+
+    // =============================================================
+    //  BUILD DEL RELAY EN EL ID DE SESION
+    //  ------------------------------------------------------------
+    //  El relay del telefono anuncia que build es al final del id de sesion de su
+    //  WELCOME: "flexphone-18c3f2a.r6". No cambia el formato del mensaje (el id ya es
+    //  una cadena libre de hasta 64 bytes), asi que un Flex OS que no lo conoce lo
+    //  ignora, y uno que si lo conoce deja de tener que ADIVINAR si el telefono corre
+    //  el relay de hoy o uno anterior (el sintoma de uno antiguo es una web ampliada
+    //  con la densidad del telefono y la superficie entera moviendose al desplazar).
+    //  El firmware lo lee con flexBrRelayBuild() (FlexOS_Browser.cpp): las dos
+    //  implementaciones se comprueban con los mismos ejemplos.
+    // =============================================================
+    private const val BUILD_MARK = ".r"
+    private const val BUILD_MAX = 9999
+
+    /** [base] + ".r<build>". Si [base] ya lleva una marca, la sustituye. */
+    fun tagSessionId(base: String, build: Int): String {
+        // Solo se quita lo que de verdad es una marca (".r" + digitos al final): un id que
+        // contenga ".r" por otro motivo no se parte.
+        val head = if (sessionBuild(base) >= 0) base.substring(0, base.lastIndexOf(BUILD_MARK)) else base
+        return head + BUILD_MARK + build.coerceIn(0, BUILD_MAX)
+    }
+
+    /** Build anunciado en [sessionId], o -1 si no lleva marca (un servicio sin ella, o un relay anterior). */
+    fun sessionBuild(sessionId: String): Int {
+        val at = sessionId.lastIndexOf(BUILD_MARK)
+        if (at < 0) return -1
+        val digits = sessionId.substring(at + BUILD_MARK.length)
+        if (digits.isEmpty() || digits.length > 4 || !digits.all { it in '0'..'9' }) return -1
+        return digits.toInt()
+    }
 }
 
 /** Escritor little-endian para cargas FBP. */

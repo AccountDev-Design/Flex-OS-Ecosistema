@@ -480,7 +480,7 @@ concreto. Ver `docs/NAVEGADOR.md`, sección 7.4.
 
 **Decidido.** `FLEXBR_BUILD` en la cabecera, un `static_assert` en cada
 fichero, y una función cuyo nombre lleva la versión dentro
-(`flexBrVersionGuard_v5_...`, hoy `FLEXBR_BUILD 5`) que el puente llama y
+(`flexBrVersionGuard_v6_...`, hoy `FLEXBR_BUILD 6`) que el puente llama y
 `FlexOS_BrowserApp.cpp` define.
 
 **Por qué.** El navegador se instala copiando cuatro ficheros a mano a

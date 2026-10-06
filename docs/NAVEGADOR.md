@@ -430,7 +430,7 @@ navegador a la carpeta del sketch.
 o, si el que se quedó viejo es `FlexOS_BrowserApp.cpp`:
 
 ```
-undefined reference to `flexBrVersionGuard_v5_copia_los_4_ficheros_del_navegador'
+undefined reference to `flexBrVersionGuard_v6_copia_los_4_ficheros_del_navegador'
 ```
 
 Los cuatro son: `FlexOS_Browser.h`, `FlexOS_Browser.cpp`,

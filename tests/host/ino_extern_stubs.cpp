@@ -137,7 +137,7 @@ bool        flexPaintUndo(const char*){ return false; }
 bool        flexPaintClear(const char*){ return false; }
 
 // ---- Navegador ----
-void flexBrVersionGuard_v5_copia_los_4_ficheros_del_navegador(void){}
+void flexBrVersionGuard_v6_copia_los_4_ficheros_del_navegador(void){}
 // flexBrSource* NO se doblan: son NUCLEO PURO de FlexOS_Browser.cpp y
 // entran de verdad en el enlace (abajo, en la regla de test_ino). Lo
 // que si necesita doble es el ACCESOR de ajustes, porque vive en
@@ -179,10 +179,32 @@ uint16_t gStubBrPaint = 0;
 // teclado o al re-maquetar.
 uint16_t gStubBrBg = 0;
 static bool gStubBrRepaint = false;
+// MODO "IMAGEN CON RETRASO" (testDexRedimensionado). Imita al navegador real cuando la ventana cambia de
+// tamano: ve la geometria nueva en SU tick, pero la imagen del tamano nuevo -- la banda que llega de la red
+// -- no esta hasta `gStubBrLag` ticks despues. Mientras tanto NO pinta nada: lo que hay en su lienzo es lo que
+// habia, o NADA si el lienzo es nuevo. Ese es el hueco que DeX tiene que cubrir. -1 = apagado.
+int      gStubBrLag = -1;
+int      gStubBrLayouts = 0;                       // veces que ha repintado la pagina entera por cambio de tamano
+int      gStubBrLW = 0, gStubBrLH = 0;             // el tamano con el que pinto por ultima vez
+int      gStubBrSeenW = -1, gStubBrSeenH = -1;     // el ultimo tamano que vio (-1: ninguno)
+static int  gStubBrWait = 0;
+static bool gStubBrPend = false;
 static void stubBrProbe(){
   brHostGetTouch(&gStubBrTouch);
   int x, y, w, h; brHostContentRect(&x, &y, &w, &h);
   gStubBrCW = w; gStubBrCH = h;
+  if(gStubBrLag >= 0 && gStubBrBg){
+    if(w != gStubBrSeenW || h != gStubBrSeenH){ gStubBrSeenW = w; gStubBrSeenH = h; gStubBrWait = gStubBrLag; gStubBrPend = true; }
+    if(gStubBrPend){
+      if(gStubBrWait > 0) gStubBrWait--;
+      else {
+        gStubBrPend = false;
+        brHostFillRect(x, y, w, h, gStubBrBg);
+        brHostFlush(y, y + h - 1);
+        gStubBrLayouts++; gStubBrLW = w; gStubBrLH = h;
+      }
+    }
+  }
 }
 void flexBrowserEnter(){
   if(!gStubBrProbe) return;

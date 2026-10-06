@@ -168,6 +168,30 @@ class FbpTest {
     }
 
     @Test
+    fun `el build del relay viaja en el id de sesion`() {
+        // Los MISMOS ejemplos que comprueba el firmware (test_browser: flexBrRelayBuild).
+        assertEquals("flexphone-18c3f2a.r6", Fbp.tagSessionId("flexphone-18c3f2a", 6))
+        assertEquals(6, Fbp.sessionBuild("flexphone-18c3f2a.r6"))
+        assertEquals(-1, Fbp.sessionBuild("flexphone-18c3f2a"))        // un relay anterior no la lleva
+        assertEquals(-1, Fbp.sessionBuild("s-77f2"))                   // ni un servicio de otro tipo
+        assertEquals(-1, Fbp.sessionBuild("abc.r"))                    // marca sin numero
+        assertEquals(-1, Fbp.sessionBuild("abc.r6x"))                  // basura detras de los digitos
+        assertEquals(-1, Fbp.sessionBuild("abc.r12345"))               // demasiado largo para ser un build
+        assertEquals(12, Fbp.sessionBuild("a.r1.b.r12"))               // cuenta la ULTIMA marca
+        // Etiquetar dos veces no apila marcas.
+        assertEquals("flexphone-1.r7", Fbp.tagSessionId("flexphone-1.r6", 7))
+        // Un id que contiene ".r" por otro motivo se conserva entero.
+        assertEquals("a.rx.r3", Fbp.tagSessionId("a.rx", 3))
+        // Cabe en el WELCOME (el id va con tope de 64 bytes) y se lee de vuelta de ahi.
+        val id = Fbp.tagSessionId("flexphone-" + System.currentTimeMillis().toString(16), 6)
+        assertTrue(id.toByteArray().size < 40, "tiene que caber en el id de sesion del firmware (40 bytes)")
+        val wel = Fbp.welcome(1, 480, 800, caps = 0x13, maxTabs = 3, maxFrameBytes = 196608, sessionId = id)
+        val r = FbpReader(wel.copyOfRange(Fbp.HDR_SIZE, wel.size))
+        r.u8(); r.u16(); r.u16(); r.u32(); r.u16(); r.u32()
+        assertEquals(6, Fbp.sessionBuild(r.str()))
+    }
+
+    @Test
     fun `las cadenas se truncan en frontera UTF-8`() {
         val w = FbpWriter()
         // "café" son 5 bytes; con tope 4 tiene que quedarse en "caf".
