@@ -137,8 +137,8 @@
 
         <!--
           Browser Relay. connectedDevice: el telefono sirve el navegador a
-          un dispositivo externo (el P4) por la red local -- el mismo caso
-          que Flex Storage --, y Android 15 no corta este tipo a las 6 horas
+          un dispositivo externo (el P4) por la red local  -  el mismo caso
+          que Flex Storage  - , y Android 15 no corta este tipo a las 6 horas
           como hacia con dataSync. Sigue en marcha aunque se cierre la app;
           solo se para cuando la persona (o Flex OS) lo pide. Los cerrojos,
           solo con Flex OS conectado.
