@@ -1,0 +1,100 @@
+# Flex OS Ultra (ESP-IDF 5.5.5) · configuracion base, comun a todas las
+# revisiones del ESP32-P4. La revision va en sdkconfig.defaults.rev_* y los
+# ajustes de produccion en sdkconfig.defaults.release.
+#
+# Un simbolo mal escrito NO da error: el build lo ignora en silencio. Por eso
+# tools/check_sdkconfig.py comprueba que cada linea de estos archivos llega con
+# el mismo valor al sdkconfig generado.
+
+CONFIG_IDF_TARGET="esp32p4"
+
+# ---- Flash: 16 MB QIO a 80 MHz (la de la placa, igual que en Arduino) -------
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# ---- Particiones: candidata A, PROVISIONAL (docs/PARTICIONES.md) ------------
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/partitions_a.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+
+# ---- PSRAM 32 MB: framebuffers, buffers grandes y objetos grandes de LVGL ---
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_HEX=y
+CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MEMTEST=y
+# malloc() de hasta 16 KB va a RAM interna; lo mayor, a PSRAM
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+# XIP desde PSRAM queda apagado en las Fases 0-1: carga el mismo bus que el
+# barrido del panel (~46 MB/s). Se medira en la Fase 2 frente a CACHE_SAFE.
+# CONFIG_SPIRAM_XIP_FROM_PSRAM is not set
+
+# ---- Cache (valores por defecto, explicitos) --------------------------------
+CONFIG_CACHE_L2_CACHE_128KB=y
+CONFIG_CACHE_L2_CACHE_LINE_64B=y
+
+# ---- Pantalla MIPI-DSI ------------------------------------------------------
+# La ISR del DSI sigue funcionando con la cache apagada (escrituras en flash):
+# corrige el destello azul/cian de la version Arduino.
+CONFIG_LCD_DSI_ISR_CACHE_SAFE=y
+# CONFIG_LCD_ENABLE_DEBUG_LOG is not set
+# CONFIG_SPI_FLASH_AUTO_SUSPEND is not set
+
+# ---- FreeRTOS y sistema -----------------------------------------------------
+CONFIG_FREERTOS_HZ=1000
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
+CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT=y
+CONFIG_ESP_INT_WDT=y
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_INIT=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=y
+# CONFIG_ESP_TASK_WDT_PANIC is not set
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_EQUALS_DEFAULT=y
+# Bootloader en WARN: con INFO ocupa 24 160 B y solo le quedan 416 B antes de
+# la tabla de particiones (0x2000..0x8000); con WARN, 21 408 B y 3 168 B
+# libres (medido con ESP-IDF 5.5.5). Si creciera mas, habria que mover la
+# tabla y con ella la NVS, perdiendo la compatibilidad con los datos Arduino.
+# La revision del chip la sigue imprimiendo la aplicacion al arrancar.
+CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
+# El bootloader casi nunca se regraba: el rollback de OTA se deja ya activo
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# ---- LVGL 9.6 (unico motor grafico de la interfaz) --------------------------
+CONFIG_LV_CONF_SKIP=y
+CONFIG_LV_COLOR_FORMAT_RGB565=y
+# Todo el dibujo en la tarea de UI (nucleo 1). El reparto en dos nucleos se
+# medira mas adelante.
+CONFIG_LV_OS_NONE=y
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_LV_USE_CLIB_STRING=y
+CONFIG_LV_USE_CLIB_SPRINTF=y
+CONFIG_LV_DEF_REFR_PERIOD=16
+CONFIG_LV_DRAW_BUF_ALIGN=64
+CONFIG_LV_DRAW_BUF_STRIDE_ALIGN=1
+CONFIG_LV_USE_LOG=y
+CONFIG_LV_LOG_LEVEL_WARN=y
+CONFIG_LV_LOG_PRINTF=y
+CONFIG_LV_FONT_MONTSERRAT_12=y
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
+CONFIG_LV_USE_THEME_DEFAULT=y
+CONFIG_LV_THEME_DEFAULT_DARK=y
+# CONFIG_LV_USE_PPA is not set
+# CONFIG_LV_USE_PERF_MONITOR is not set
+# CONFIG_LV_USE_SYSMON is not set
+# CONFIG_LV_BUILD_EXAMPLES is not set
+# CONFIG_LV_BUILD_DEMOS is not set

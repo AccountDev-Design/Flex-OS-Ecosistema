@@ -1,0 +1,9 @@
+# Salidas del build de ESP-IDF (una carpeta por variante, ver tools/build.sh)
+build/
+build_*/
+sdkconfig
+sdkconfig.old
+managed_components/
+# Simulador de la UI en el PC
+sim/build/
+sim/out/

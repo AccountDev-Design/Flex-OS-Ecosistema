@@ -1,0 +1,39 @@
+dependencies:
+  idf:
+    source:
+      type: idf
+    version: 5.5.5
+  lvgl/lvgl:
+    component_hash: dc9b37f52ee8ecc2dfa3f618d35337cb4211a24c937663f930b7cf49cd07de35
+    dependencies:
+    - name: espressif/freetype
+      require: private
+      rules:
+      - if: idf_version >=5.5 && $CONFIG{LV_USE_FREETYPE} == True
+      version: ^2.14.3
+    - name: espressif/libjpeg-turbo
+      require: private
+      rules:
+      - if: idf_version >=5.5 && $CONFIG{LV_USE_LIBJPEG_TURBO} == True
+      version: ^3.1.1
+    - name: espressif/libpng
+      require: private
+      rules:
+      - if: idf_version >=5.5 && $CONFIG{LV_USE_LIBPNG} == True
+      version: ^1.6.58
+    - name: espressif/lz4
+      require: private
+      rules:
+      - if: idf_version >=5.5 && $CONFIG{LV_USE_LZ4} == True && $CONFIG{LV_USE_LZ4_INTERNAL} == False
+      version: ^1.10.0
+    source:
+      git: https://github.com/lvgl/lvgl.git
+      path: .
+      type: git
+    version: 80ca777e37a2b176770726a02e07a6fb79ef0b39
+direct_dependencies:
+- idf
+- lvgl/lvgl
+manifest_hash: a8f7c48f860de932a51d3f087dd36761c3b1f5427f668f796101dc1949187084
+target: esp32p4
+version: 2.0.0

@@ -1,0 +1,18 @@
+# Flex OS Ultra (ESP-IDF) - tabla de particiones CANDIDATA B  ·  PROVISIONAL
+#
+# Estado: NO es la tabla definitiva (ver docs/PARTICIONES.md).
+#
+# Mas margen de firmware (4 MB por ranura OTA) a cambio de MOVER LittleFS:
+# empieza en 0x810000 en vez de 0x510000 y pasa de 0xAE0000 a 0x7E0000 bytes.
+# Grabarla sobre una placa con datos Arduino obliga a copiar antes los archivos
+# del usuario y a reformatear LittleFS. NVS no se mueve.
+#
+# Cuadre: 0x410000 = 0x10000 + 0x400000 · 0x810000 = 0x410000 + 0x400000
+#         0xFF0000 = 0x810000 + 0x7E0000 · 0x1000000 = 0xFF0000 + 0x10000
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x5000,
+otadata,    data, ota,      0xE000,   0x2000,
+ota_0,      app,  ota_0,    0x10000,  0x400000,
+ota_1,      app,  ota_1,    0x410000, 0x400000,
+spiffs,     data, spiffs,   0x810000, 0x7E0000,
+coredump,   data, coredump, 0xFF0000, 0x10000,

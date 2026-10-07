@@ -1,0 +1,8 @@
+# Dependencias externas, fijadas. Se obtienen por git (GitHub) para que el
+# build no dependa del registro de componentes; dependencies.lock guarda el
+# commit exacto.
+dependencies:
+  idf: "5.5.5"
+  lvgl/lvgl:
+    git: https://github.com/lvgl/lvgl.git
+    version: v9.6.0

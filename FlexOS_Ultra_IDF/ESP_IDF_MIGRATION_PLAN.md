@@ -1,6 +1,9 @@
 # Flex OS Ultra — ESP-IDF · Plan de migración
 
-> **Estado:** plan, sin implementar. **Nada de lo descrito aquí se ha probado en
+> **Estado:** plan aprobado. **Fases 0 y 1 implementadas** (ver
+> `docs/FASE_0_1_INFORME.md`); el resto, pendiente. Condición añadida al aprobarlo:
+> toda la interfaz se reconstruye con LVGL, sin conservar ni envolver el motor
+> gráfico Arduino (`docs/ARQUITECTURA_GRAFICA_LVGL.md`). **Nada se ha probado en
 > hardware real.** Las capacidades del ESP32-P4 que se citan se han comprobado en
 > el código fuente de ESP-IDF v5.5.5, de LVGL v9.6.0 y de `esp_h264` (se indica la
 > fuente en cada caso); las cifras de rendimiento de terceros son las que publica

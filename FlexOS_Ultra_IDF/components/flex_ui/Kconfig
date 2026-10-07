@@ -1,0 +1,10 @@
+menu "Flex OS Ultra: interfaz"
+
+    config FLEX_DEBUG_METRICS
+        bool "Metricas de depuracion en el log (FPS, latencia tactil, CPU de la UI)"
+        default y
+        help
+            Una linea de resumen cada 5 s en el log. Nada se registra por
+            fotograma. La pantalla de prueba muestra las metricas siempre.
+
+endmenu

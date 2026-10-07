@@ -1,0 +1,45 @@
+menu "Flex OS Ultra: pantalla"
+
+    config FLEX_BACKLIGHT_DEFAULT_PCT
+        int "Brillo inicial (%)"
+        range 5 100
+        default 80
+
+    config FLEX_DISPLAY_DCS_BEFORE_VIDEO
+        bool "Enviar la tabla DCS del ST7701 antes de arrancar el video"
+        default n
+        help
+            Por defecto se usa el orden de la version Arduino, el probado en
+            esta placa: arrancar el video DPI y despues enviar la tabla del
+            ST7701, SLPOUT y DISPON. Con esta opcion se usa el orden del
+            driver esp_lcd_st7701 de Espressif: toda la tabla en modo comando
+            y despues el video. Probar si el panel queda en negro.
+            NO PROBADO EN HARDWARE REAL con ESP-IDF 5.5.5 (ninguno de los dos).
+
+    config FLEX_DSI_CLOCK_LANE_FORCE_HS
+        bool "Reloj DSI continuo (carril de reloj siempre en HS)"
+        default n
+        help
+            ESP-IDF 5.5 deja el carril de reloj en modo automatico (no
+            continuo). Si el panel no muestra nada o parpadea, probar a
+            activarlo. NO PROBADO EN HARDWARE REAL.
+
+    config FLEX_DISPLAY_MSYNC_FULL_FRAME
+        bool "Escribir a PSRAM el framebuffer entero en cada cuadro"
+        default n
+        help
+            Por defecto, antes de cada cambio de framebuffer solo se pasan de
+            la cache a la PSRAM las filas que LVGL ha escrito en ese cuadro y
+            en el anterior. Esta opcion escribe los 768 000 bytes siempre:
+            sirve para descartar un fallo de coherencia de cache si aparecen
+            restos de imagenes viejas.
+
+    config FLEX_DISPLAY_BOOT_TEST_PATTERN
+        bool "Barras de color del host DSI durante 2 s al arrancar"
+        default n
+        help
+            Diagnostico: las barras las genera el propio controlador DSI, sin
+            framebuffer, DMA ni LVGL. Si se ven, el enlace DSI y el ST7701
+            estan bien y cualquier fallo esta en el pipeline grafico.
+
+endmenu
