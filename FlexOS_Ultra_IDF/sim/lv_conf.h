@@ -24,6 +24,10 @@
 #define LV_FONT_DEFAULT         &lv_font_montserrat_14
 
 #define LV_USE_THEME_DEFAULT    1
+
+// Interfaz completa (Fase 3): mismos valores que sdkconfig.defaults
+#define LV_GRADIENT_MAX_STOPS   4
+#define LV_USE_FONT_COMPRESSED  1
 #define LV_THEME_DEFAULT_DARK   1
 
 // Solo en el simulador: render de referencia para comparar con lo "mostrado"

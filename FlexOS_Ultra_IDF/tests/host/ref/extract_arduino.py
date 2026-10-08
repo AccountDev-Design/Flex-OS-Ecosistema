@@ -24,7 +24,21 @@ def extract(lines, name):
     pat_func = re.compile(r"^\s*(static\s+)?(inline\s+)?[\w\s\*]+?\b" + re.escape(name) + r"\s*\(")
     pat_def = re.compile(r"^\s*#define\s+" + re.escape(name) + r"\b")
     pat_var = re.compile(r"^\s*(static\s+)?(const\s+)?[\w\s\*]+?\b" + re.escape(name) + r"\s*(\[[^\]]*\])*\s*(=|;|,)")
+    pat_struct = re.compile(r"^\s*struct\s+" + re.escape(name) + r"\s*\{")
     for i, line in enumerate(lines):
+        is_enum = re.match(r"^\s*enum\s*\{", line) is not None
+        if pat_struct.match(line) or is_enum:
+            depth, out = 0, []
+            for j in range(i, len(lines)):
+                code = strip_strings_comments(lines[j])
+                out.append(lines[j])
+                depth += code.count("{") - code.count("}")
+                if depth == 0 and ";" in code:
+                    break
+            block = "".join(out)
+            if pat_struct.match(line) or re.search(r"\b" + re.escape(name) + r"\b", strip_strings_comments(block)):
+                return block
+            continue
         if pat_def.match(line):
             out = [line]
             while out[-1].rstrip().endswith("\\"):

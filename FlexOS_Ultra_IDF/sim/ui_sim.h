@@ -1,0 +1,20 @@
+#pragma once
+#include <stdbool.h>
+#include <stdint.h>
+
+typedef struct {
+    int x, y;
+    bool pressed;
+} sim_touch_t;
+
+void sim_run(uint32_t ms);
+void sim_touch(int x, int y, bool pressed);
+void sim_tap(int x, int y);
+void sim_drag(int x0, int y0, int x1, int y1, uint32_t ms);
+void sim_shot(const char *name);
+
+typedef struct {
+    const char *name;
+    bool (*run)(void);   // false = la escena detecto un fallo
+} sim_scene_t;
+extern const sim_scene_t sim_scenes[];

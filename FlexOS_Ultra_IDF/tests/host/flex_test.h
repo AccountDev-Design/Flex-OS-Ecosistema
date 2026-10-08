@@ -30,3 +30,6 @@ void test_fs_path(void);
 void test_flip_rows(void);
 void test_wallpaper(void);
 void test_glass(void);
+void test_home(void);
+void test_home_load(void);
+#define FLEX_APP_N_TEST 19

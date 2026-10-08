@@ -38,3 +38,34 @@ target_include_directories(flexos_sim PRIVATE
 )
 target_compile_options(flexos_sim PRIVATE -Wall -Wextra -Werror -Wno-unused-parameter)
 target_link_libraries(flexos_sim PRIVATE lvgl m)
+
+# ---- Interfaz completa (Fase 3+): flexos_ui_sim ------------------------------
+file(GLOB UI_THEME   ${FLEX_ROOT}/components/flex_ui/src/theme/*.c)
+file(GLOB UI_WIDGETS ${FLEX_ROOT}/components/flex_ui/src/widgets/*.c)
+file(GLOB UI_FONTS   ${FLEX_ROOT}/components/flex_ui/src/fonts/*.c)
+file(GLOB UI_SHELL   ${FLEX_ROOT}/components/flex_ui/src/shell/*.c)
+file(GLOB UI_APPS    ${FLEX_ROOT}/components/flex_ui/src/apps/*.c)
+file(GLOB SIM_SCENES ${CMAKE_CURRENT_LIST_DIR}/scenes/*.c)
+add_executable(flexos_ui_sim
+    ui_sim.c
+    ${SIM_SCENES}
+    stubs/flex_services_stub.c
+    ${FLEX_ROOT}/components/flex_storage/src/flex_kv.c
+    ${UI_THEME} ${UI_WIDGETS} ${UI_FONTS} ${UI_SHELL} ${UI_APPS}
+)
+target_include_directories(flexos_ui_sim PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}
+    ${CMAKE_CURRENT_LIST_DIR}/stubs/include
+    ${FLEX_ROOT}/components/flex_ui/include
+    ${FLEX_ROOT}/components/flex_ui/src
+    ${FLEX_ROOT}/components/flex_ui/src/theme
+    ${FLEX_ROOT}/components/flex_ui/src/widgets
+    ${FLEX_ROOT}/components/flex_ui/src/shell
+    ${FLEX_ROOT}/components/flex_ui/src/apps
+    ${FLEX_ROOT}/components/flex_core/include
+    ${FLEX_ROOT}/components/flex_storage/include
+    ${FLEX_ROOT}/components/flex_system/include
+)
+target_compile_definitions(flexos_ui_sim PRIVATE FLEX_SIM=1)
+target_compile_options(flexos_ui_sim PRIVATE -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
+target_link_libraries(flexos_ui_sim PRIVATE lvgl m)
