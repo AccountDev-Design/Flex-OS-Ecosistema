@@ -56,6 +56,8 @@ bool flex_lock_verify_alone(const char *secret);
 // El secreto se copia y se borra. Devuelve false si no se pudo lanzar.
 typedef void (*flex_lock_result_cb_t)(bool ok, void *user);
 bool flex_lock_verify_async(const char *secret, flex_lock_result_cb_t cb, void *user);
+// Guardar una clave nueva en segundo plano (ok = grabada en la flash).
+bool flex_lock_set_async(const char *secret, int type, flex_lock_result_cb_t cb, void *user);
 
 // Fallos seguidos (NVS "lockfails", tope 9999) y espera progresiva:
 // 1-3 sin espera, 4-5 -> 30 s, >= 6 -> 5 min (Lock.h:189-336).

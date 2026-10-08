@@ -646,6 +646,15 @@ esp_err_t flex_cfg_flush(uint32_t timeout_ms)
     return err;
 }
 
+esp_err_t flex_cfg_flush_async(void)
+{
+    job_t *job = new_job(JOB_FLUSH, NULL, NULL, NULL);
+    if (!job) {
+        return ESP_ERR_NO_MEM;
+    }
+    return enqueue(job);
+}
+
 uint32_t flex_storage_repair_token(void)
 {
     uint32_t t = esp_random() | 1u;

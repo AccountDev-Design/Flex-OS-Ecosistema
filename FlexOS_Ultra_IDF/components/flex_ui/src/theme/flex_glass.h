@@ -51,6 +51,9 @@ void flex_surface_set_min_mix(lv_obj_t *obj, uint8_t min_mix);
 // Color y opacidad del estilo Plano distintos de los del rol (p. ej. tarjetas
 // del bloqueo: TH_SURF a215; dock: TH_SURF a90).
 void flex_surface_set_flat(lv_obj_t *obj, lv_color_t color, lv_opa_t opa);
+// Velo que la pantalla pone sobre el fondo antes que el panel (la pantalla de
+// clave vela el wallpaper con rgb(8,10,18) a70): el vidrio lo incluye debajo.
+void flex_surface_set_veil(lv_obj_t *obj, lv_color_t color, lv_opa_t opa);
 // Brillo superior del estilo Plano de los iconos (blanco a22 en la mitad de arriba).
 void flex_surface_set_flat_sheen(lv_obj_t *obj, bool on);
 

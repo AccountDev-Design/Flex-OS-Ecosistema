@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "flex_app.h"
+#include "flex_auth.h"
 #include "flex_clock.h"
 #include "flex_frame.h"
 #include "flex_glass.h"
@@ -349,14 +350,14 @@ void flex_sys_home(void)
 {
     if (s_state == FLEX_SH_APP) {
         flex_app_close();
-    } else if (s_state != FLEX_SH_LOCK) {
+    } else if (s_state != FLEX_SH_LOCK && s_state != FLEX_SH_AUTH) {
         flex_shell_show_home();
     }
 }
 
 void flex_sys_recents(void)
 {
-    if (s_state == FLEX_SH_LOCK) {
+    if (s_state == FLEX_SH_LOCK || s_state == FLEX_SH_AUTH) {
         return;
     }
     if (s_state == FLEX_SH_APP) {
@@ -415,6 +416,7 @@ void flex_shell_show_home(void)
 
 void flex_shell_lock(void)
 {
+    flex_auth_abort();   // una clave a medias no sobrevive a bloquear
     suspend_fg();
     flex_lock_reset();
     lv_obj_set_hidden(s_lock, false);
@@ -427,6 +429,24 @@ void flex_shell_unlocked(void)
 {
     lv_obj_set_hidden(s_lock, true);
     flex_shell_show_home();
+}
+
+void flex_shell_auth_begin(void)
+{
+    s_state = FLEX_SH_AUTH;
+    flex_navbar_set_ctx(FLEX_NAV_HIDDEN);
+}
+
+void flex_shell_reveal_prepare(void)
+{
+    lv_obj_set_hidden(s_lock, true);
+    lv_obj_set_hidden(s_apps, true);
+    lv_obj_set_hidden(s_home, false);
+}
+
+void flex_shell_home_shift(int32_t dx)
+{
+    lv_obj_set_style_translate_x(s_home, dx, 0);
 }
 
 static void minute_tick(lv_timer_t *t)

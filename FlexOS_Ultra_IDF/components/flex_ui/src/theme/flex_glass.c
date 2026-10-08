@@ -19,6 +19,8 @@ typedef struct {
     bool flat_custom;         // color/opacidad propios en Plano
     lv_color_t flat_col;
     lv_opa_t flat_opa;
+    lv_color_t veil_col;      // velo sobre el fondo (pantalla de clave: blurBgVeil)
+    lv_opa_t veil_opa;
     lv_image_dsc_t view;      // vista sobre el backdrop (vive mientras viva el objeto)
     lv_area_t mix_area;       // area con la que se calculo mix
     uint8_t mix;
@@ -83,6 +85,11 @@ static uint8_t compute_mix(surf_t *s, const lv_area_t *coords, lv_color_t tint)
         n = 1;
     } else {
         flex_wallmgr_backdrop_luma(s->bd == FLEX_BD_HOME ? FLEX_WALL_HOME : FLEX_WALL_LOCK, coords, &sum, &n);
+        if (s->veil_opa && n > 0) {
+            // lo que hay detras es el fondo YA velado: la luma se mezcla igual
+            uint32_t lv = (uint32_t)flex_glass_luma(flex_lv_to_565(s->veil_col));
+            sum = (uint32_t)(((uint64_t)sum * (255u - s->veil_opa) + (uint64_t)n * lv * s->veil_opa) / 255u);
+        }
     }
     s->mix = flex_glass_tint_mix(gp, sum, n, flex_lv_to_565(tint), s->min_mix);
     s->mix_area = *coords;
@@ -169,6 +176,11 @@ static void draw_cb(lv_event_t *e)
             id.opa = s->opa;
             id.image_area = c;
             lv_draw_image(layer, &id, &c);
+            if (s->veil_opa) {
+                rd.bg_color = s->veil_col;
+                rd.bg_opa = scale(s->veil_opa, s->opa);
+                lv_draw_rect(layer, &rd, &c);
+            }
         } else {
             // Sin backdrop (sin memoria): tinte translucido, como el respaldo de Arduino (a210)
             rd.bg_color = tint;
@@ -321,6 +333,17 @@ void flex_surface_set_flat(lv_obj_t *obj, lv_color_t color, lv_opa_t opa)
         s->flat_custom = true;
         s->flat_col = color;
         s->flat_opa = opa;
+        lv_obj_invalidate(obj);
+    }
+}
+
+void flex_surface_set_veil(lv_obj_t *obj, lv_color_t color, lv_opa_t opa)
+{
+    surf_t *s = get(obj);
+    if (s) {
+        s->veil_col = color;
+        s->veil_opa = opa;
+        s->mix_area.x2 = -1;
         lv_obj_invalidate(obj);
     }
 }

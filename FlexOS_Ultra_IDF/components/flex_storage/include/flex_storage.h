@@ -92,6 +92,9 @@ esp_err_t flex_kvs_set_str(const char *ns, const char *key, const char *v);
 // Fuerza a grabar ya los ajustes pendientes (apagado, OTA). Espera hasta
 // timeout_ms. No llamar desde la tarea de UI salvo en el apagado.
 esp_err_t flex_cfg_flush(uint32_t timeout_ms);
+// Pide grabar ya lo pendiente SIN esperar (seguro desde la tarea de UI). Para
+// lo que no puede quedar en RAM ni 300 ms (el contador de intentos fallidos).
+esp_err_t flex_cfg_flush_async(void);
 
 // ---- Archivos (rutas relativas a la raiz de LittleFS, p. ej. "/notes/a.txt") --
 // Las asincronas copian los datos, los graban en la tarea de almacenamiento y

@@ -1,6 +1,7 @@
 // Flex OS Ultra · pantalla de bloqueo (docs/spec/01a §4, Home.h:502-545 y 1415-1500).
 #include <stdio.h>
 #include <string.h>
+#include "flex_auth.h"
 #include "flex_clock.h"
 #include "flex_frame.h"
 #include "flex_glass.h"
@@ -24,18 +25,6 @@
 static lv_obj_t *s_root, *s_wall, *s_glass, *s_clock, *s_date, *s_cards;
 static int32_t s_y0, s_off;
 static bool s_verify_started;
-
-// La verificacion de clave la aporta el modulo de clave (FlexOS_Passcode). Si
-// hay clave guardada y ese modulo no esta, el bloqueo NO se abre: nunca se
-// revela el escritorio sin verificar.
-__attribute__((weak)) bool flex_passcode_required(void)
-{
-    return flex_cfg_get_i32("locktype", 0) > 0;
-}
-__attribute__((weak)) void flex_passcode_verify_open(void (*on_ok)(void))
-{
-    (void)on_ok;
-}
 
 static int32_t ease_out_quad(const lv_anim_t *a)
 {
@@ -73,9 +62,24 @@ static void animate_to(int32_t target, bool unlock)
     lv_anim_start(&a);
 }
 
-static void verify_ok(void)
+static void verify_ok(void *ctx)
 {
+    (void)ctx;
     flex_shell_unlocked();
+}
+
+static void verify_cancel(void *ctx)
+{
+    (void)ctx;
+    flex_shell_lock();   // cancelar SIEMPRE vuelve al bloqueo, nunca al escritorio
+}
+
+static void verify_open(void)
+{
+    // Con clave el escritorio nunca se revela sin verificar
+    static const flex_auth_req_t req = {
+        .from_lock = true, .reveal = true, .on_ok = verify_ok, .on_cancel = verify_cancel};
+    flex_auth_verify(&req);
 }
 
 static void touch_cb(lv_event_t *e)
@@ -83,7 +87,7 @@ static void touch_cb(lv_event_t *e)
     lv_event_code_t code = lv_event_get_code(e);
     lv_point_t p;
     lv_indev_get_point(lv_indev_active(), &p);
-    bool need_pin = flex_passcode_required();
+    bool need_pin = flex_auth_required();
     if (code == LV_EVENT_PRESSED) {
         lv_anim_delete(s_root, set_off);
         s_y0 = p.y + s_off;
@@ -95,7 +99,7 @@ static void touch_cb(lv_event_t *e)
             // Con clave el escritorio nunca se revela: pasado 60 px se pide la clave.
             if (off > VERIFY_PX && !s_verify_started) {
                 s_verify_started = true;
-                flex_passcode_verify_open(verify_ok);
+                verify_open();
             }
             return;
         }
@@ -105,7 +109,7 @@ static void touch_cb(lv_event_t *e)
         if (need_pin) {
             if (dy > SWIPE_PX && !s_verify_started) {
                 s_verify_started = true;
-                flex_passcode_verify_open(verify_ok);
+                verify_open();
             }
             return;
         }

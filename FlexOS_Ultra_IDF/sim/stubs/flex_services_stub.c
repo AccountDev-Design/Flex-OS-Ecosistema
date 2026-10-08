@@ -175,6 +175,7 @@ esp_err_t flex_cfg_set_str(const char *k, const char *v) { return flex_kvs_set_s
 esp_err_t flex_cfg_set_blob(const char *k, const void *d, size_t l) { return flex_kvs_set_blob(FLEX_NVS_NS, k, d, l); }
 esp_err_t flex_cfg_erase(const char *k) { kv(); flex_kv_erase(&s_kv, FLEX_NVS_NS, k); return ESP_OK; }
 esp_err_t flex_cfg_flush(uint32_t t) { (void)t; return ESP_OK; }
+esp_err_t flex_cfg_flush_async(void) { return ESP_OK; }
 
 // ---- almacenamiento ----------------------------------------------------------
 void flex_storage_get_status(flex_storage_status_t *out)

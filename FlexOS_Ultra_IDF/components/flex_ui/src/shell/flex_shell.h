@@ -21,6 +21,7 @@ typedef enum {
     FLEX_SH_HOME,
     FLEX_SH_APP,
     FLEX_SH_OVERLAY,      // caja de apps, Recientes, personalizar... (los gestionan sus modulos)
+    FLEX_SH_AUTH,         // pantalla de la clave (flex_auth.c)
 } flex_shell_state_t;
 
 // Construye el shell (tras flex_theme_init, flex_wallmgr_init, flex_i18n_init)
@@ -32,6 +33,10 @@ lv_obj_t *flex_shell_screen(void);
 void flex_shell_show_home(void);      // estado Inicio (sin animacion)
 void flex_shell_lock(void);           // bloquear ahora (inactividad, boton)
 void flex_shell_unlocked(void);       // el bloqueo termino (desliz o clave correcta)
+// Pantalla de la clave (flex_auth.c)
+void flex_shell_auth_begin(void);     // estado AUTH, sin barra de navegacion
+void flex_shell_reveal_prepare(void); // escritorio debajo y bloqueo fuera (revelado)
+void flex_shell_home_shift(int32_t dx);   // temblor del revelado
 
 // Vistas (las implementan flex_home.c y flex_lock.c)
 lv_obj_t *flex_home_create(lv_obj_t *parent);

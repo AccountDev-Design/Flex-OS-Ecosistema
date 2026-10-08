@@ -18,7 +18,7 @@ static void deliver(void *arg)
     free(j);
 }
 
-bool flex_lock_verify_async(const char *secret, flex_lock_result_cb_t cb, void *user)
+static bool launch(const char *secret, int set_type, flex_lock_result_cb_t cb, void *user)
 {
     if (!secret || !cb || strlen(secret) >= FLEX_LOCK_SECRET_MAX) {
         return false;
@@ -29,10 +29,23 @@ bool flex_lock_verify_async(const char *secret, flex_lock_result_cb_t cb, void *
     }
     j->cb = cb;
     j->user = user;
-    j->ok = flex_lock_verify_alone(secret);
+    j->ok = set_type ? flex_lock_set(secret, set_type) : flex_lock_verify_alone(secret);
     if (!flex_inbox_post(deliver, j)) {
         free(j);
         return false;
     }
     return true;
+}
+
+bool flex_lock_verify_async(const char *secret, flex_lock_result_cb_t cb, void *user)
+{
+    return launch(secret, 0, cb, user);
+}
+
+bool flex_lock_set_async(const char *secret, int type, flex_lock_result_cb_t cb, void *user)
+{
+    if (type != FLEX_LOCK_PIN && type != FLEX_LOCK_PASS) {
+        return false;
+    }
+    return launch(secret, type, cb, user);
 }

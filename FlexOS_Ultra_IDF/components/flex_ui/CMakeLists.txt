@@ -14,4 +14,9 @@ idf_component_register(
     PRIV_INCLUDE_DIRS "src" "src/theme" "src/widgets" "src/i18n" "src/shell" "src/apps"
     REQUIRES lvgl__lvgl flex_core
     PRIV_REQUIRES flex_display flex_touch flex_i2c flex_storage flex_system flex_security esp_timer heap esp_system
+    # Las apps y los modulos opcionales se enganchan por simbolos weak (tabla de
+    # apps, menus): en una biblioteca estatica un weak sin referencia fuerte NO
+    # arrastra el objeto que lo define. Se enlaza el componente entero (las
+    # secciones sin usar las sigue quitando --gc-sections).
+    WHOLE_ARCHIVE
 )
