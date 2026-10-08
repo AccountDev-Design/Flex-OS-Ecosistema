@@ -66,6 +66,7 @@ static SemaphoreHandle_t s_kv_mtx;
 static QueueHandle_t s_jobs;
 static TaskHandle_t s_task;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
+static esp_err_t s_flush_err = ESP_OK;   // resultado de la ultima pasada pedida (s_mux)
 static flex_storage_status_t s_st;
 static int64_t s_last_set_us;
 static int64_t s_fs_info_us;
@@ -226,18 +227,26 @@ static esp_err_t nvs_write_snapshot(const flex_kv_snapshot_t *s)
     return err;
 }
 
-static void settings_flush(void)
+// ESP_OK solo si TODO lo pendiente quedo grabado: quien encadena escrituras
+// (la clave del sistema: hash nuevo antes de borrar el antiguo) decide con esto.
+static esp_err_t settings_flush(void)
 {
     bool nvs_ok;
     portENTER_CRITICAL(&s_mux);
     nvs_ok = s_st.nvs_ok;
     portEXIT_CRITICAL(&s_mux);
     if (!nvs_ok) {
-        return;   // quedan pendientes en RAM; no hay donde grabar
+        return ESP_ERR_INVALID_STATE;   // quedan pendientes en RAM; no hay donde grabar
     }
     flex_kv_snapshot_t snap;
     size_t guard = s_kv.count + 4;
-    while (guard-- && flex_kv_next_dirty(&s_kv, &snap)) {
+    for (;;) {
+        if (guard-- == 0) {
+            return ESP_ERR_TIMEOUT;   // otra tarea no para de escribir: la siguiente pasada sigue
+        }
+        if (!flex_kv_next_dirty(&s_kv, &snap)) {
+            return ESP_OK;
+        }
         esp_err_t err = nvs_write_snapshot(&snap);
         if (err == ESP_OK) {
             flex_kv_mark_written(&s_kv, &snap);
@@ -246,7 +255,7 @@ static void settings_flush(void)
             ESP_LOGE(TAG, "no se pudo grabar %s/%s: %s", snap.ns, snap.key, esp_err_to_name(err));
             flex_bus_post(FLEX_EV_STORAGE, FLEX_STORAGE_EV_WRITE_ERROR, &err, sizeof(err));
             flex_kv_snapshot_free(&snap);
-            break;   // se reintenta en la siguiente pasada
+            return err;   // se reintenta en la siguiente pasada
         }
         flex_kv_snapshot_free(&snap);
         esp_task_wdt_reset();
@@ -455,7 +464,10 @@ static void run_job(job_t *job)
         return;
     }
     case JOB_FLUSH:
-        settings_flush();
+        err = settings_flush();
+        portENTER_CRITICAL(&s_mux);
+        s_flush_err = err;
+        portEXIT_CRITICAL(&s_mux);
         if (job->done) {
             xSemaphoreGive(job->done);
         }
@@ -624,6 +636,13 @@ esp_err_t flex_cfg_flush(uint32_t timeout_ms)
         return err;
     }
     vSemaphoreDelete(done);
+    if (err == ESP_OK) {
+        // Resultado de una pasada que termino DESPUES de encolar esta peticion
+        // (la suya o una posterior): cubre todo lo escrito antes de llamar.
+        portENTER_CRITICAL(&s_mux);
+        err = s_flush_err;
+        portEXIT_CRITICAL(&s_mux);
+    }
     return err;
 }
 

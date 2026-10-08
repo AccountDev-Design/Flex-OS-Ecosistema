@@ -60,3 +60,16 @@ build asan -fsanitize=address,undefined -fno-sanitize-recover=all
 "$OUT/host_asan"
 build tsan -fsanitize=thread
 "$OUT/host_tsan"
+
+# Clave del sistema: la implementacion de ESP-IDF y la de Arduino
+# (FlexOS_Ultra/FlexOS_Passcode.cpp, solo lectura) sobre la MISMA NVS en memoria
+# (el doble de Preferences del arnes Arduino): lo que guarda una lo abre la otra.
+SAN=(-fsanitize=address,undefined -fno-sanitize-recover=all)
+PINC=(-I$ROOT/components/flex_security/include -I$ROOT/components/flex_storage/include -I../../sim/stubs/include)
+cc -std=gnu11 "${CFLAGS[@]}" "${SAN[@]}" -DFLEX_HOST_TEST "${PINC[@]}" \
+    -c $ROOT/components/flex_security/src/flex_passcode.c -o "$OUT/flex_passcode_asan.o"
+c++ -std=gnu++17 -O1 -g -Wall -Wextra -Werror -Wno-format-truncation -DARDUINO=200 "${SAN[@]}" \
+    -I$ROOT/../tests/host/inostub -I$ROOT/../FlexOS_Ultra "${PINC[@]}" \
+    test_passcode.cpp $ROOT/../FlexOS_Ultra/FlexOS_Passcode.cpp "$OUT/flex_passcode_asan.o" -lcrypto \
+    -o "$OUT/passcode_asan"
+"$OUT/passcode_asan"

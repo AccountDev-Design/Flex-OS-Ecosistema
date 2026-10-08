@@ -95,6 +95,13 @@ CONFIG_LV_FONT_MONTSERRAT_20=y
 CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
 CONFIG_LV_USE_THEME_DEFAULT=y
 CONFIG_LV_THEME_DEFAULT_DARK=y
+# Liquid Glass: especular + sombreado en un solo degradado de 4 paradas
+CONFIG_LV_GRADIENT_MAX_STOPS=4
+# Reloj grande (200 px) comprimido
+CONFIG_LV_USE_FONT_COMPRESSED=y
+# Sin cache de imagenes decodificadas: los fondos son imagenes en RAM (y las
+# vistas del backdrop cambian de origen cada cuadro)
+CONFIG_LV_CACHE_DEF_SIZE=0
 # CONFIG_LV_USE_PPA is not set
 # CONFIG_LV_USE_PERF_MONITOR is not set
 # CONFIG_LV_USE_SYSMON is not set

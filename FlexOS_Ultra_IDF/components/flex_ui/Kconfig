@@ -7,4 +7,12 @@ menu "Flex OS Ultra: interfaz"
             Una linea de resumen cada 5 s en el log. Nada se registra por
             fotograma. La pantalla de prueba muestra las metricas siempre.
 
+    config FLEX_UI_BOOT_DIAG
+        bool "Arrancar en la pantalla de prueba de la Fase 1 (en vez del sistema)"
+        default n
+        help
+            Para la puesta en marcha en la placa: rejilla 480x800 con las
+            esquinas, colores, metricas, brillo y puntos tactiles. Con esta
+            opcion apagada arranca el sistema (bloqueo, escritorio, apps).
+
 endmenu

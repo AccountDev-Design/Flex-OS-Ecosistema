@@ -18,6 +18,10 @@
 #include "flex_touch.h"
 #include "flex_touch_lvgl.h"
 #include "flex_ui_diag.h"
+#include "flex_i18n.h"
+#include "flex_shell.h"
+#include "flex_theme.h"
+#include "flex_wallmgr.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
@@ -160,8 +164,18 @@ static void ui_task(void *arg)
     if (!flex_touch_lvgl_create(disp)) {
         ESP_LOGW(TAG, "sin entrada tactil en LVGL");
     }
+#if CONFIG_FLEX_UI_BOOT_DIAG
     s_diag_ops.initial_brightness = flex_display_get_brightness();
     flex_ui_diag_create(&s_diag_ops);
+#else
+    (void)s_diag_ops;
+    // El sistema: idioma y tema de la NVS (los de la version Arduino si estan),
+    // fondos y backdrops, y el shell (arranca en el bloqueo).
+    flex_i18n_init();
+    flex_theme_init();
+    flex_wallmgr_init();
+    flex_shell_start();
+#endif
     ESP_LOGI(TAG, "interfaz LVGL %d.%d.%d en marcha (nucleo %d)", LVGL_VERSION_MAJOR, LVGL_VERSION_MINOR,
              LVGL_VERSION_PATCH, xPortGetCoreID());
 

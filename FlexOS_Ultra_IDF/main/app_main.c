@@ -4,6 +4,7 @@
 #include "flex_bus.h"
 #include "flex_core.h"
 #include "flex_i2c.h"
+#include "flex_passcode.h"
 #include "flex_storage.h"
 #include "flex_system.h"
 #include "flex_touch.h"
@@ -23,6 +24,17 @@ void app_main(void)
     esp_err_t err = flex_storage_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "almacenamiento: %s (se sigue sin el)", esp_err_to_name(err));
+    }
+
+    // Clave del bloqueo guardada en texto claro por versiones antiguas -> hash
+    // con sal, en tres pasos (escribir, comprobar, y solo entonces borrar la
+    // antigua). Antes de la interfaz, para que el bloqueo ya vea el estado
+    // definitivo. Si no hay nada que migrar no escribe. Nunca se imprime la clave.
+    int mg = flex_lock_migrate();
+    if (mg > 0) {
+        ESP_LOGI(TAG, "clave del bloqueo migrada a hash con sal");
+    } else if (mg < 0) {
+        ESP_LOGW(TAG, "no se pudo migrar la clave del bloqueo: se conserva la anterior");
     }
 
     err = flex_system_start();
