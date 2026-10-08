@@ -3,6 +3,16 @@ dependencies:
     source:
       type: idf
     version: 5.5.5
+  joltwallet/littlefs:
+    component_hash: 10770cd263e2b6dabb3574a49a6a2cc0e95e5b8425c29b0c133f959790ab9097
+    dependencies:
+    - name: idf
+      version: '>=5.0'
+    source:
+      git: https://github.com/joltwallet/esp_littlefs.git
+      path: .
+      type: git
+    version: 281493e93e480573e73b7e13de9f87c37744825d
   lvgl/lvgl:
     component_hash: dc9b37f52ee8ecc2dfa3f618d35337cb4211a24c937663f930b7cf49cd07de35
     dependencies:
@@ -33,7 +43,8 @@ dependencies:
     version: 80ca777e37a2b176770726a02e07a6fb79ef0b39
 direct_dependencies:
 - idf
+- joltwallet/littlefs
 - lvgl/lvgl
-manifest_hash: a8f7c48f860de932a51d3f087dd36761c3b1f5427f668f796101dc1949187084
+manifest_hash: 0d9ad2dd409c2639db7e799eea07419c9a10c22bf992513f0431804b134ad223
 target: esp32p4
 version: 2.0.0

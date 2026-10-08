@@ -21,6 +21,23 @@ extern "C" {
 #define FLEX_TASK_TOUCH_PRIO     6
 #define FLEX_TASK_TOUCH_STACK    (4 * 1024)
 
+#define FLEX_TASK_BUS_NAME       "flex_bus"
+#define FLEX_TASK_BUS_CORE       0
+#define FLEX_TASK_BUS_PRIO       5
+#define FLEX_TASK_BUS_STACK      (4 * 1024)
+
+// Unico escritor de NVS y LittleFS
+#define FLEX_TASK_STORAGE_NAME   "storage"
+#define FLEX_TASK_STORAGE_CORE   0
+#define FLEX_TASK_STORAGE_PRIO   3
+#define FLEX_TASK_STORAGE_STACK  (6 * 1024)
+
+// Device Care: metricas, temperatura, historial
+#define FLEX_TASK_SYSTEM_NAME    "system"
+#define FLEX_TASK_SYSTEM_CORE    0
+#define FLEX_TASK_SYSTEM_PRIO    2
+#define FLEX_TASK_SYSTEM_STACK   (4 * 1024)
+
 typedef struct {
     uint16_t chip_rev;          // revision real del silicio: mayor*100 + menor
     uint16_t build_rev_min;     // revision minima para la que se compilo

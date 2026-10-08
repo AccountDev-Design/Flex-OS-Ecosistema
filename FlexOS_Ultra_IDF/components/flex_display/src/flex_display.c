@@ -57,6 +57,11 @@ static bool IRAM_ATTR on_fb_complete(esp_lcd_panel_handle_t panel, esp_lcd_dpi_p
     ctx->flip_armed = false;
     BaseType_t hp = pdFALSE;
     xSemaphoreGiveFromISR(ctx->fb_done, &hp);
+    if (ctx->wake_task) {
+        // La UI duerme en su notificacion (la comparte con el buzon): despues
+        // del semaforo, para que al despertar ya pueda recogerlo.
+        vTaskNotifyGiveFromISR(ctx->wake_task, &hp);
+    }
     return hp == pdTRUE;
 }
 
@@ -259,6 +264,8 @@ esp_err_t flex_display_init(void)
     // 5) Aviso de fin de cuadro, registrado antes de arrancar el video
     g_flex_dsi.fb_done = xSemaphoreCreateBinary();
     ESP_RETURN_ON_FALSE(g_flex_dsi.fb_done, ESP_ERR_NO_MEM, TAG, "semaforo de fin de cuadro");
+    // flex_display_init() la llama la tarea de UI: es la que debe despertar.
+    g_flex_dsi.wake_task = xTaskGetCurrentTaskHandle();
     const esp_lcd_dpi_panel_event_callbacks_t cbs = {
         .on_frame_buf_complete = on_fb_complete,
     };

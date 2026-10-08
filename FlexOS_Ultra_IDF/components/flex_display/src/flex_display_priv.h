@@ -6,6 +6,7 @@
 #include "esp_lcd_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 // Vive en RAM interna (variable estatica en .bss de DRAM): con
 // CONFIG_LCD_DSI_ISR_CACHE_SAFE el driver exige que el contexto de la ISR no
@@ -15,6 +16,7 @@ typedef struct {
     volatile uint32_t vsync_count;
     volatile bool     flip_armed;
     volatile int64_t  shown_us;  // instante del fin de cuadro que estreno el FB nuevo
+    TaskHandle_t      wake_task; // tarea de UI: la ISR la despierta con una notificacion
 } flex_dsi_ctx_t;
 
 extern flex_dsi_ctx_t g_flex_dsi;

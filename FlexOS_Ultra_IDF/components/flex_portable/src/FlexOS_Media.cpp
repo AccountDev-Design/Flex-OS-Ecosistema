@@ -1,0 +1,1010 @@
+// #############################################################
+// ##  FlexOS · MEDIOS · implementacion portable
+// #############################################################
+//
+//  Sin Arduino, sin sistema de archivos y sin pantalla: todo entra
+//  por FlexMediaIO / FlexMediaVolume. Esa es la razon de que las
+//  pruebas del PC ejerciten EXACTAMENTE este codigo y no una
+//  version parecida.
+
+#include "FlexOS_Media.h"
+#include <string.h>
+#include <stdio.h>
+
+// -------------------------------------------------------------
+//  Utilidades
+// -------------------------------------------------------------
+static char lower1(char c){ return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
+
+// Compara la cola de `name` con `ext` sin distinguir mayusculas.
+static bool extIs(const char* name, const char* ext){
+  if(!name || !ext) return false;
+  size_t ln = strlen(name), le = strlen(ext);
+  if(ln <= le) return false;                 // "  .jpg" si, ".jpg" solo no
+  const char* a = name + ln - le;
+  for(size_t k = 0; k < le; k++)
+    if(lower1(a[k]) != lower1(ext[k])) return false;
+  return true;
+}
+
+void flexMediaExt(const char* name, char* out, size_t n){
+  if(!out || n == 0) return;
+  out[0] = 0;
+  if(!name) return;
+  const char* d = strrchr(name, '.');
+  if(!d || !d[1]) return;
+  size_t k = 0;
+  for(const char* p = d + 1; *p && k + 1 < n; p++) out[k++] = lower1(*p);
+  out[k] = 0;
+}
+
+// -------------------------------------------------------------
+//  CLASIFICACION
+//  ------------------------------------------------------------
+//  La tabla es explicita a proposito. Un "else -> intentalo y a ver"
+//  es justo lo que produce pantallas en negro y cuelgues: si un
+//  formato no esta escrito aqui como soportado, NO se abre.
+// -------------------------------------------------------------
+struct UnsupEntry { const char* ext; const char* why; };
+
+static const UnsupEntry UNSUP[] = {
+  // --- formatos de video comunes ---
+  { ".mp4",  "MP4/H.264: esta placa no tiene decodificador de video" },
+  { ".m4v",  "MP4/H.264: esta placa no tiene decodificador de video" },
+  { ".mov",  "MOV/H.264: esta placa no tiene decodificador de video" },
+  { ".mkv",  "MKV: contenedor no soportado" },
+  { ".webm", "WebM/VP8-VP9: sin decodificador" },
+  { ".3gp",  "3GP/H.263: sin decodificador" },
+  { ".flv",  "FLV: contenedor no soportado" },
+  { ".wmv",  "WMV: contenedor no soportado" },
+  { ".mpg",  "MPEG-1/2: sin decodificador" },
+  { ".mpeg", "MPEG-1/2: sin decodificador" },
+  { ".ts",   "MPEG-TS: sin decodificador" },
+  // --- audio comprimido ---
+  { ".mp3",  "MP3: sin decodificador de audio comprimido" },
+  { ".aac",  "AAC: sin decodificador de audio comprimido" },
+  { ".m4a",  "M4A/AAC: sin decodificador de audio comprimido" },
+  { ".flac", "FLAC: sin decodificador de audio comprimido" },
+  { ".ogg",  "OGG/Vorbis: sin decodificador de audio comprimido" },
+  { ".opus", "Opus: sin decodificador de audio comprimido" },
+  { ".wma",  "WMA: sin decodificador de audio comprimido" },
+  // --- imagen que no es JPEG ---
+  { ".png",  "PNG: solo se decodifica JPEG" },
+  { ".gif",  "GIF: solo se decodifica JPEG" },
+  { ".bmp",  "BMP: solo se decodifica JPEG" },
+  { ".webp", "WebP: solo se decodifica JPEG" },
+  { ".heic", "HEIC: solo se decodifica JPEG" },
+  { ".heif", "HEIF: solo se decodifica JPEG" },
+  { ".tif",  "TIFF: solo se decodifica JPEG" },
+  { ".tiff", "TIFF: solo se decodifica JPEG" },
+  { ".raw",  "RAW: solo se decodifica JPEG" },
+  { ".dng",  "DNG: solo se decodifica JPEG" },
+};
+static const int UNSUP_N = (int)(sizeof(UNSUP) / sizeof(UNSUP[0]));
+
+int flexMediaClassify(const char* name){
+  if(!name || !name[0]) return FLEXMED_NONE;
+  if(extIs(name, ".jpg") || extIs(name, ".jpeg")) return FLEXMED_PHOTO;
+  if(extIs(name, ".avi"))                        return FLEXMED_VIDEO;
+  if(extIs(name, ".wav"))                        return FLEXMED_AUDIO;
+  if(extIs(name, ".fxp"))                        return FLEXMED_DRAW;
+  for(int i = 0; i < UNSUP_N; i++)
+    if(extIs(name, UNSUP[i].ext)) return FLEXMED_UNSUP;
+  return FLEXMED_NONE;
+}
+
+const char* flexMediaUnsupportedReason(const char* name){
+  if(!name) return "Archivo sin nombre";
+  int k = flexMediaClassify(name);
+  if(k != FLEXMED_UNSUP) return NULL;
+  for(int i = 0; i < UNSUP_N; i++)
+    if(extIs(name, UNSUP[i].ext)) return UNSUP[i].why;
+  return "Formato no soportado";
+}
+
+// -------------------------------------------------------------
+//  Lectura primitiva sobre FlexMediaIO
+// -------------------------------------------------------------
+static bool ioReadAt(const FlexMediaIO* io, uint32_t off, void* buf, uint32_t n){
+  if(!io || !io->read || !io->seek) return false;
+  if(!io->seek(io->ctx, off)) return false;
+  uint8_t* p = (uint8_t*)buf;
+  uint32_t got = 0;
+  while(got < n){
+    int r = io->read(io->ctx, p + got, n - got);
+    if(r <= 0) return false;
+    got += (uint32_t)r;
+  }
+  return true;
+}
+static inline uint32_t rd32(const uint8_t* p){
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+static inline uint16_t rd16(const uint8_t* p){
+  return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+static inline bool fourcc(const uint8_t* p, const char* s){
+  return p[0] == (uint8_t)s[0] && p[1] == (uint8_t)s[1]
+      && p[2] == (uint8_t)s[2] && p[3] == (uint8_t)s[3];
+}
+
+// -------------------------------------------------------------
+//  AVI · analisis de cabecera
+//  ------------------------------------------------------------
+//  Estructura que se recorre (solo lo que hace falta):
+//
+//    'RIFF' tam 'AVI '
+//      LIST tam 'hdrl'
+//        'avih' 56   -> us por fotograma, ancho, alto, total
+//        LIST tam 'strl'
+//          'strh' 56 -> tipo de pista ('vids') y codec ('MJPG')
+//          'strf' .. -> BITMAPINFOHEADER (ancho/alto reales)
+//      LIST tam 'movi'   <- los fotogramas
+//      'idx1' tam        <- tabla de posiciones (opcional)
+//
+//  Todo trozo RIFF esta alineado a 2 bytes: si el tamano es impar
+//  hay un byte de relleno detras. Olvidar ese detalle es el fallo
+//  clasico que hace que el recorrido se desalinee a mitad del
+//  fichero y empiece a leer basura.
+// -------------------------------------------------------------
+static inline uint32_t pad2(uint32_t n){ return n + (n & 1u); }
+
+const char* flexAviErrStr(int err){
+  switch(err){
+    case FLEXAVI_OK:          return "correcto";
+    case FLEXAVI_ERR_IO:      return "no se pudo leer el archivo";
+    case FLEXAVI_ERR_FORMAT:  return "el AVI esta danado o incompleto";
+    case FLEXAVI_ERR_CODEC:   return "AVI sin video MJPEG: no se puede reproducir";
+    case FLEXAVI_ERR_NOVIDEO: return "el AVI no tiene pista de video";
+    case FLEXAVI_ERR_EOF:     return "fin del video";
+    case FLEXAVI_ERR_TOOBIG:  return "un fotograma no cabe en memoria";
+    default:                  return "error desconocido";
+  }
+}
+
+// Estado de la muestra dispersa (FlexAviCtx.idxState).
+#define AVI_IDX_PENDING 0          // hay idx1, aun sin leer (se lee al buscar)
+#define AVI_IDX_FILE    1          // construida desde idx1
+#define AVI_IDX_LEARN   2          // sin idx1: se aprende al recorrer el video
+
+// Muestra llena: se queda con una entrada de cada dos y el paso se dobla.
+// La memoria no crece nunca y lo que queda sigue cubriendo todo lo visto.
+static void aviIdxHalve(FlexAviCtx* a, uint32_t* stride){
+  uint16_t k = 0;
+  for(uint16_t i = 0; i < a->idxN; i += 2){
+    a->idxOff[k] = a->idxOff[i]; a->idxFrame[k] = a->idxFrame[i]; k++;
+  }
+  a->idxN = k;
+  if(*stride < 0x80000000u) *stride *= 2u;
+}
+
+// Construye la muestra a partir de idx1. Lee la tabla por bloques de
+// tamano fijo: nunca esta entera en memoria. El paso sale de los
+// fotogramas declarados (idx1 cuenta tambien el audio: dividir por sus
+// entradas dejaba la mitad de la muestra sin usar); si la cabecera se
+// queda corta, la muestra se va comprimiendo y sigue cubriendo el final.
+static void aviBuildSparseIndex(FlexAviCtx* a){
+  const uint32_t entries = a->idx1Len / 16u;
+  a->idxN = 0;
+  if(entries == 0) return;
+  uint32_t basis = a->frames ? a->frames : entries;
+  uint32_t stride = (basis + FLEXAVI_IDX_MAX - 1u) / FLEXAVI_IDX_MAX;
+  if(stride == 0) stride = 1;
+
+  uint8_t blk[32 * 16];                       // 32 entradas por lectura: 512 B
+  uint32_t done = 0, videoSeen = 0;
+  while(done < entries){
+    uint32_t batch = entries - done;
+    if(batch > 32) batch = 32;
+    if(!ioReadAt(&a->io, a->idx1Off + done * 16u, blk, batch * 16u)) break;
+    for(uint32_t i = 0; i < batch; i++){
+      const uint8_t* e = blk + i * 16u;
+      // ckid "##dc"/"##db": pista de video. El primer par de bytes
+      // es el numero de pista en ASCII.
+      bool isVideo = (e[2] == 'd' && (e[3] == 'c' || e[3] == 'b'))
+                  && (e[0] == (uint8_t)('0' + a->videoStream / 10))
+                  && (e[1] == (uint8_t)('0' + a->videoStream % 10));
+      if(!isVideo) continue;
+      if((videoSeen % stride) == 0){
+        if(a->idxN >= FLEXAVI_IDX_MAX) aviIdxHalve(a, &stride);
+        if((videoSeen % stride) == 0){
+          // dwChunkOffset es relativo al inicio de 'movi' (a su campo
+          // de datos) en la inmensa mayoria de los AVI; algunos
+          // codificadores lo escriben absoluto. Se distingue mirando
+          // si en esa posicion hay una cabecera de trozo valida.
+          a->idxOff[a->idxN]   = rd32(e + 8);   // se resuelve al usarlo
+          a->idxFrame[a->idxN] = videoSeen;
+          a->idxN++;
+        }
+      }
+      videoSeen++;
+    }
+    done += batch;
+  }
+}
+
+// Sin idx1: anota la posicion de la cabecera del fotograma `frame`, uno de
+// cada learnStride, en orden. Asi retroceder o volver a un punto ya visto
+// no obliga a recorrer el archivo desde el principio.
+static void aviIdxLearn(FlexAviCtx* a, uint32_t hdrOff, uint32_t frame){
+  if(a->idxState != AVI_IDX_LEARN || !a->learnStride || (frame % a->learnStride)) return;
+  for(int pass = 0; pass < 2; pass++){
+    int lo = 0, hi = a->idxN;
+    while(lo < hi){ int mid = (lo + hi) / 2; if(a->idxFrame[mid] < frame) lo = mid + 1; else hi = mid; }
+    if(lo < a->idxN && a->idxFrame[lo] == frame) return;       // ya se conocia
+    if(a->idxN >= FLEXAVI_IDX_MAX){
+      aviIdxHalve(a, &a->learnStride);
+      if(frame % a->learnStride) return;
+      continue;                                                 // la posicion cambio: se recalcula
+    }
+    for(int i = a->idxN; i > lo; i--){ a->idxOff[i] = a->idxOff[i - 1]; a->idxFrame[i] = a->idxFrame[i - 1]; }
+    a->idxOff[lo] = hdrOff; a->idxFrame[lo] = frame; a->idxN++;
+    return;
+  }
+}
+
+static void aviLearnStart(FlexAviCtx* a){
+  a->idxState = AVI_IDX_LEARN;
+  a->idxN = 0;
+  a->learnStride = a->frames ? (a->frames + FLEXAVI_IDX_MAX - 1u) / FLEXAVI_IDX_MAX : 16u;
+  if(a->learnStride == 0) a->learnStride = 1;
+}
+
+int flexAviOpen(FlexAviCtx* a, const FlexMediaIO* io){
+  if(!a || !io || !io->read || !io->seek || !io->size) return FLEXAVI_ERR_IO;
+  memset(a, 0, sizeof(*a));
+  a->io = *io;
+  a->videoStream = 0;
+
+  const uint32_t total = io->size(io->ctx);
+  if(total < 64) return FLEXAVI_ERR_FORMAT;
+
+  uint8_t h[12];
+  if(!ioReadAt(&a->io, 0, h, 12)) return FLEXAVI_ERR_IO;
+  if(!fourcc(h, "RIFF") || !fourcc(h + 8, "AVI ")) return FLEXAVI_ERR_FORMAT;
+
+  uint32_t idx1Off = 0, idx1Len = 0;
+  bool haveAvih = false, haveVideo = false, codecOk = false;
+  int  streamNo  = -1;                        // pista que se esta describiendo
+
+  // Recorrido de los trozos de primer nivel.
+  uint32_t p = 12;
+  while(p + 8 <= total){
+    uint8_t c[8];
+    if(!ioReadAt(&a->io, p, c, 8)) break;
+    const uint32_t len = rd32(c + 4);
+    if(len > total) break;                    // cabecera corrupta: se para
+
+    if(fourcc(c, "LIST")){
+      uint8_t t[4];
+      if(!ioReadAt(&a->io, p + 8, t, 4)) break;
+      if(fourcc(t, "movi")){
+        a->moviStart = p + 12;
+        a->moviEnd   = p + 8 + len;
+        if(a->moviEnd > total) a->moviEnd = total;
+        p = p + 8 + pad2(len);                // 'movi' no se recorre aqui
+        continue;
+      }
+      // hdrl y strl se ABREN (se entra dentro), por eso solo se
+      // avanzan 12 bytes y no el trozo entero.
+      p += 12;
+      continue;
+    }
+
+    if(fourcc(c, "avih") && len >= 40){
+      uint8_t v[40];
+      if(ioReadAt(&a->io, p + 8, v, 40)){
+        a->usPerFrame = rd32(v + 0);
+        a->frames     = rd32(v + 16);
+        a->width      = (uint16_t)rd32(v + 32);
+        a->height     = (uint16_t)rd32(v + 36);
+        haveAvih = true;
+      }
+    } else if(fourcc(c, "strh") && len >= 40){
+      streamNo++;
+      uint8_t v[40];
+      if(ioReadAt(&a->io, p + 8, v, 40)){
+        if(fourcc(v, "vids") && !haveVideo){
+          haveVideo = true;
+          a->videoStream = (uint8_t)(streamNo < 0 ? 0 : streamNo);
+          memcpy(a->codec, v + 4, 4);
+          a->codec[4] = 0;
+          // MJPG / mjpg / JPEG / dmb1 son los identificadores que
+          // usan de verdad las camaras y ffmpeg para MJPEG.
+          char cc[5];
+          for(int i = 0; i < 4; i++) cc[i] = lower1(a->codec[i]);
+          cc[4] = 0;
+          codecOk = (!strcmp(cc, "mjpg") || !strcmp(cc, "jpeg")
+                  || !strcmp(cc, "dmb1") || !strcmp(cc, "mjpa"));
+          // dwScale/dwRate: mas fiable que avih cuando existe.
+          uint32_t scale = rd32(v + 20), rate = rd32(v + 24);
+          if(rate && scale){
+            uint64_t us = (uint64_t)scale * 1000000ull / rate;
+            if(us > 0 && us < 1000000ull) a->usPerFrame = (uint32_t)us;
+          }
+          uint32_t length = rd32(v + 32);
+          if(length) a->frames = length;
+          a->maxFrameBytes = rd32(v + 36);
+        }
+      }
+    } else if(fourcc(c, "strf") && haveVideo && a->width == 0 && len >= 16){
+      uint8_t v[16];
+      if(ioReadAt(&a->io, p + 8, v, 16)){
+        a->width  = (uint16_t)rd32(v + 4);
+        a->height = (uint16_t)rd32(v + 8);
+      }
+    } else if(fourcc(c, "idx1")){
+      idx1Off = p + 8;
+      idx1Len = len;
+    } else if(fourcc(c, "IFCV") && len >= 4){
+      uint8_t v[4];
+      if(ioReadAt(&a->io, p + 8, v, 4)) a->cover = rd32(v);
+    }
+    p = p + 8 + pad2(len);
+  }
+
+  if(!haveAvih || a->moviEnd <= a->moviStart) return FLEXAVI_ERR_FORMAT;
+  if(!haveVideo)                              return FLEXAVI_ERR_NOVIDEO;
+  if(!codecOk)                                return FLEXAVI_ERR_CODEC;
+  if(a->usPerFrame == 0) a->usPerFrame = 40000;    // 25 fps si el fichero calla
+
+  // idx1 NO se lee aqui: solo hace falta para buscar (ver FlexOS_Media.h).
+  if(idx1Off && idx1Len >= 16){
+    a->idx1Off = idx1Off; a->idx1Len = idx1Len;
+    a->idxState = AVI_IDX_PENDING;
+    a->idxFromFile = true;
+  } else aviLearnStart(a);
+
+  a->cursor  = a->moviStart;
+  a->frameNo = 0;
+  return FLEXAVI_OK;
+}
+
+uint32_t flexAviDurationMs(const FlexAviCtx* a){
+  if(!a || !a->frames || !a->usPerFrame) return 0;
+  return (uint32_t)(((uint64_t)a->frames * a->usPerFrame) / 1000ull);
+}
+
+// ¿Hay en `off` una cabecera de trozo con aspecto de valida?
+// Sirve para resolver si los desplazamientos de idx1 son relativos
+// a 'movi' o absolutos, sin tener que fiarse del codificador.
+static bool aviChunkHere(FlexAviCtx* a, uint32_t off){
+  if(off < a->moviStart || off > a->moviEnd || off + 8 > a->moviEnd) return false;
+  uint8_t c[8];
+  if(!ioReadAt(&a->io, off, c, 8)) return false;
+  if(c[0] < '0' || c[0] > '9' || c[1] < '0' || c[1] > '9') return false;
+  uint32_t len = rd32(c + 4);
+  return len <= a->moviEnd && off + 8 + len <= a->moviEnd + 8;   // sin desbordar la suma
+}
+
+// Traduce una posicion de idx1 a un desplazamiento absoluto.
+static uint32_t aviResolveIdx(FlexAviCtx* a, uint32_t rel){
+  // Caso normal: relativo al campo de datos de 'movi' menos 4 (los
+  // desplazamientos de idx1 se miden desde el 'movi' del LIST).
+  uint32_t cand = a->moviStart - 4 + rel;
+  if(aviChunkHere(a, cand)) return cand;
+  if(aviChunkHere(a, rel))  return rel;       // codificador que lo escribe absoluto
+  cand = a->moviStart + rel;
+  if(aviChunkHere(a, cand)) return cand;
+  return 0;
+}
+
+// Avanza el cursor hasta la siguiente cabecera de trozo de VIDEO.
+// Devuelve el tamano del trozo y deja `dataOff` en su primer byte.
+// FLEXAVI_ERR_EOF cuando se acaba 'movi'. Como mucho FLEXAVI_SCAN_MAX
+// trozos ajenos por llamada: un archivo con millones de trozos vacios
+// o de listas anidadas se rechaza en vez de dejar el bucle parado.
+static int aviNextVideoChunk(FlexAviCtx* a, uint32_t* dataOff, uint32_t* lenOut){
+  for(uint32_t scan = 0; ; scan++){
+    if(scan > FLEXAVI_SCAN_MAX) return FLEXAVI_ERR_FORMAT;
+    if(a->cursor + 8 > a->moviEnd) return FLEXAVI_ERR_EOF;
+    uint8_t c[8];
+    if(!ioReadAt(&a->io, a->cursor, c, 8)) return FLEXAVI_ERR_IO;
+    const uint32_t len = rd32(c + 4);
+
+    // Un 'LIST' 'rec ' agrupa los trozos de un mismo instante: se
+    // entra dentro en vez de saltarlo, o se perderian los
+    // fotogramas de los AVI entrelazados.
+    if(fourcc(c, "LIST")){ a->cursor += 12; continue; }
+
+    const bool isChunk = (c[0] >= '0' && c[0] <= '9' && c[1] >= '0' && c[1] <= '9');
+    if(!isChunk){
+      // Basura o relleno ('JUNK'): se salta el trozo entero si el
+      // tamano es creible, y si no se aborta (no se avanza a ciegas
+      // byte a byte por un fichero de megabytes).
+      if(len == 0 || len > a->moviEnd || a->cursor + 8 + len > a->moviEnd) return FLEXAVI_ERR_FORMAT;
+      a->cursor += 8 + pad2(len);
+      continue;
+    }
+    const bool video = (c[2] == 'd' && (c[3] == 'c' || c[3] == 'b'))
+                    && c[0] == (uint8_t)('0' + a->videoStream / 10)
+                    && c[1] == (uint8_t)('0' + a->videoStream % 10);
+    // len > moviEnd primero: con un tamano absurdo la suma de abajo
+    // desbordaria y el trozo pareceria caber.
+    if(len > a->moviEnd || a->cursor + 8 + len > a->moviEnd + 2) return FLEXAVI_ERR_FORMAT;
+    if(video){
+      aviIdxLearn(a, a->cursor, a->frameNo);
+      if(dataOff) *dataOff = a->cursor + 8;
+      if(lenOut)  *lenOut  = len;
+      a->cursor += 8 + pad2(len);
+      return FLEXAVI_OK;
+    }
+    a->cursor += 8 + pad2(len);               // audio u otra pista: se salta
+  }
+}
+
+int flexAviReadFrame(FlexAviCtx* a, void* buf, uint32_t bufCap, uint32_t* frameOut){
+  if(!a || !buf) return FLEXAVI_ERR_IO;
+  uint32_t off = 0, len = 0;
+  int r = aviNextVideoChunk(a, &off, &len);
+  if(r != FLEXAVI_OK) return r;
+  if(len > bufCap){
+    // No se lee a medias: entregar medio JPEG haria que el
+    // decodificador pintase basura. Tampoco se consume: el cursor
+    // vuelve a la cabecera y `needBytes` dice cuanto hace falta, para
+    // que el llamante amplie su buffer o lo salte (flexAviSkipFrame).
+    a->cursor = off - 8;
+    a->needBytes = len;
+    if(frameOut) *frameOut = a->frameNo;
+    return FLEXAVI_ERR_TOOBIG;
+  }
+  if(frameOut) *frameOut = a->frameNo;
+  if(len && !ioReadAt(&a->io, off, buf, len)){ a->cursor = off - 8; return FLEXAVI_ERR_IO; }
+  a->frameNo++;
+  return (int)len;                            // 0 = repetir el fotograma anterior
+}
+
+int flexAviSkipFrame(FlexAviCtx* a){
+  if(!a) return FLEXAVI_ERR_IO;
+  int r = aviNextVideoChunk(a, NULL, NULL);
+  if(r != FLEXAVI_OK) return r;
+  a->frameNo++;
+  return FLEXAVI_OK;
+}
+
+int flexAviNextFrameInfo(FlexAviCtx* a, uint32_t* dataOff, uint32_t* len){
+  if(!a) return FLEXAVI_ERR_IO;
+  uint32_t off = 0, n = 0;
+  int r = aviNextVideoChunk(a, &off, &n);
+  if(r != FLEXAVI_OK) return r;
+  if(dataOff) *dataOff = off;
+  if(len) *len = n;
+  a->frameNo++;
+  return FLEXAVI_OK;
+}
+
+int flexAviSeekFrameMax(FlexAviCtx* a, uint32_t frame, uint32_t maxSkips){
+  if(!a) return FLEXAVI_ERR_IO;
+  if(a->frames && frame >= a->frames) frame = a->frames - 1;
+
+  // La muestra de idx1 se construye la primera vez que se busca.
+  if(a->idxState == AVI_IDX_PENDING){
+    aviBuildSparseIndex(a);
+    if(a->idxN > 0) a->idxState = AVI_IDX_FILE;
+    else { a->idxFromFile = false; aviLearnStart(a); }
+  }
+
+  // Punto de partida: la muestra anterior mas cercana, o el
+  // principio de 'movi'. Nunca se salta hacia delante a ciegas.
+  uint32_t startOff = a->moviStart, startFrame = 0;
+  for(int i = (int)a->idxN - 1; i >= 0; i--){
+    if(a->idxFrame[i] > frame) continue;
+    uint32_t abs = a->idxState == AVI_IDX_FILE ? aviResolveIdx(a, a->idxOff[i]) : a->idxOff[i];
+    if(abs){ startOff = abs; startFrame = a->idxFrame[i]; break; }
+  }
+  // Donde ya esta el cursor vale igual si queda mas cerca (seguir
+  // adelante desde aqui no cuesta volver a recorrer lo ya recorrido).
+  if(a->frameNo <= frame && a->frameNo >= startFrame && a->cursor >= a->moviStart){
+    startOff = a->cursor; startFrame = a->frameNo;
+  }
+
+  a->cursor  = startOff;
+  a->frameNo = startFrame;
+  // Avance por cabeceras: 8 bytes leidos por fotograma saltado, sin
+  // tocar los datos comprimidos.
+  uint32_t lastOff = 0, lastFrame = 0, skips = 0;
+  bool haveLast = false;
+  while(a->frameNo < frame && skips < maxSkips){
+    uint32_t off = 0;
+    int r = aviNextVideoChunk(a, &off, NULL);
+    if(r == FLEXAVI_ERR_EOF || r == FLEXAVI_ERR_FORMAT){
+      // El archivo se acaba (o se rompe) antes de lo declarado: una
+      // grabacion cortada. Se queda en el ULTIMO fotograma que existe
+      // y la duracion pasa a ser la real.
+      if(r == FLEXAVI_ERR_EOF) a->frames = a->frameNo;
+      if(haveLast){ a->cursor = lastOff; a->frameNo = lastFrame; }
+      return (int)a->frameNo;
+    }
+    if(r != FLEXAVI_OK) return r;
+    lastOff = off - 8; lastFrame = a->frameNo; haveLast = true;
+    a->frameNo++; skips++;
+  }
+  return (int)a->frameNo;
+}
+
+int flexAviSeekFrame(FlexAviCtx* a, uint32_t frame){
+  return flexAviSeekFrameMax(a, frame, FLEXAVI_SEEK_SKIPS);
+}
+
+// -------------------------------------------------------------
+//  WAV
+// -------------------------------------------------------------
+int flexWavParse(const FlexMediaIO* io, FlexWavInfo* w){
+  if(!io || !w || !io->read || !io->seek || !io->size) return FLEXWAV_ERR_IO;
+  memset(w, 0, sizeof(*w));
+  const uint32_t total = io->size(io->ctx);
+  if(total < 44) return FLEXWAV_ERR_FORMAT;
+
+  uint8_t h[12];
+  if(!ioReadAt(io, 0, h, 12)) return FLEXWAV_ERR_IO;
+  if(!fourcc(h, "RIFF") || !fourcc(h + 8, "WAVE")) return FLEXWAV_ERR_FORMAT;
+
+  bool haveFmt = false;
+  uint32_t p = 12;
+  while(p + 8 <= total){
+    uint8_t c[8];
+    if(!ioReadAt(io, p, c, 8)) break;
+    uint32_t len = rd32(c + 4);
+    if(fourcc(c, "fmt ") && len >= 16){
+      uint8_t v[20];
+      if(!ioReadAt(io, p + 8, v, len >= 20 ? 20 : 16)) return FLEXWAV_ERR_IO;
+      uint16_t tag = rd16(v);
+      w->channels   = rd16(v + 2);
+      w->sampleRate = rd32(v + 4);
+      w->blockAlign = rd16(v + 12);
+      w->bits       = rd16(v + 14);
+      if(w->channels == 0 || w->channels > 2) return FLEXWAV_ERR_CODEC;
+      if(tag == FLEXWAV_FMT_IMA){
+        // IMA ADPCM de Microsoft: cabecera de 4 bytes por canal y el resto
+        // en nibbles. Solo se acepta la disposicion estandar -- con otro
+        // numero de muestras por bloque los nibbles no caerian donde se
+        // decodifican, y eso suena a ruido, no a un error legible.
+        const uint32_t hdr = 4u * w->channels;
+        if(w->bits != 4 || w->blockAlign <= hdr || w->blockAlign > 8192 ||
+           (w->blockAlign % hdr) != 0) return FLEXWAV_ERR_CODEC;
+        uint16_t expect = (uint16_t)((w->blockAlign - hdr) * 8u / hdr + 1u);
+        uint16_t spb = (len >= 20 && rd16(v + 16) >= 2) ? rd16(v + 18) : 0;
+        if(spb == 0) spb = expect;
+        if(spb != expect) return FLEXWAV_ERR_CODEC;
+        w->samplesPerBlock = spb;
+        w->format = FLEXWAV_FMT_IMA;
+      } else {
+        // 1 = PCM entero. 0xFFFE (extensible) se acepta solo si los
+        // bits y canales son los de un PCM normal; cualquier otro tag
+        // es audio comprimido y aqui no hay decodificador.
+        if(tag != 1 && tag != 0xFFFE) return FLEXWAV_ERR_CODEC;
+        if(w->bits != 8 && w->bits != 16) return FLEXWAV_ERR_CODEC;
+        w->format = FLEXWAV_FMT_PCM;
+        w->blockAlign = (uint16_t)(w->channels * (w->bits / 8u));
+        w->samplesPerBlock = 0;
+      }
+      if(w->sampleRate < 4000 || w->sampleRate > 192000) return FLEXWAV_ERR_FORMAT;
+      haveFmt = true;
+    } else if(fourcc(c, "fact") && len >= 4){
+      uint8_t v[4];
+      if(ioReadAt(io, p + 8, v, 4)) w->frames = rd32(v);
+    } else if(fourcc(c, "data")){
+      if(!haveFmt) return FLEXWAV_ERR_FORMAT;
+      w->dataStart = p + 8;
+      uint32_t avail = total - w->dataStart;
+      w->dataBytes  = (len <= avail) ? len : avail;   // fichero truncado: lo que haya
+      return FLEXWAV_OK;
+    }
+    if(len == 0) break;
+    p = p + 8 + pad2(len);
+  }
+  return FLEXWAV_ERR_FORMAT;
+}
+
+uint32_t flexWavDurationMs(const FlexWavInfo* w){
+  if(!w || !w->sampleRate || !w->channels || !w->bits) return 0;
+  uint64_t frames;
+  if(w->format == FLEXWAV_FMT_IMA){
+    if(!w->blockAlign || !w->samplesPerBlock) return 0;
+    // Por bloques: los completos llevan samplesPerBlock; uno final corto
+    // lleva su cabecera y dos muestras por byte (mono) o una (estereo).
+    uint32_t full = w->dataBytes / w->blockAlign, rem = w->dataBytes % w->blockAlign;
+    frames = (uint64_t)full * w->samplesPerBlock;
+    uint32_t hdr = 4u * w->channels;
+    if(rem > hdr) frames += (uint64_t)(rem - hdr) * 2u / w->channels + 1u;
+    // El chunk 'fact' dice cuantas muestras son de verdad (el ultimo bloque
+    // se rellena): si viene y es coherente, manda el.
+    if(w->frames && w->frames <= frames) frames = w->frames;
+  } else {
+    uint32_t frameBytes = (uint32_t)w->channels * (w->bits / 8u);
+    if(!frameBytes) return 0;
+    frames = w->dataBytes / frameBytes;
+  }
+  return (uint32_t)((frames * 1000ull) / w->sampleRate);
+}
+
+// ---- IMA ADPCM --------------------------------------------------
+static const int16_t kImaStep[89] = {
+  7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+  50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230,
+  253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963,
+  1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327,
+  3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487,
+  12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
+};
+static const int8_t kImaIdx[16] = { -1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8 };
+
+static inline int16_t imaNib(int* pred, int* idx, int nib){
+  int step = kImaStep[*idx];
+  int diff = step >> 3;
+  if(nib & 4) diff += step;
+  if(nib & 2) diff += step >> 1;
+  if(nib & 1) diff += step >> 2;
+  if(nib & 8) *pred -= diff; else *pred += diff;
+  if(*pred > 32767) *pred = 32767; else if(*pred < -32768) *pred = -32768;
+  *idx += kImaIdx[nib];
+  if(*idx < 0) *idx = 0; else if(*idx > 88) *idx = 88;
+  return (int16_t)*pred;
+}
+
+int flexImaDecodeBlock(const uint8_t* blk, size_t n, int ch, int16_t* out, int maxFrames){
+  if(!blk || !out || ch < 1 || ch > 2 || maxFrames < 1 || n < (size_t)(4 * ch)) return -1;
+  int pred[2] = { 0, 0 }, idx[2] = { 0, 0 };
+  for(int c = 0; c < ch; c++){
+    pred[c] = (int16_t)rd16(blk + 4 * c);
+    idx[c]  = blk[4 * c + 2];
+    if(idx[c] > 88) return -1;                  // cabecera imposible: bloque danado
+    out[c] = (int16_t)pred[c];                  // la primera muestra va en la cabecera
+  }
+  int frames = 1;
+  const uint8_t* p = blk + 4 * ch;
+  size_t rem = n - (size_t)(4 * ch);
+  if(ch == 1){
+    for(size_t i = 0; i < rem && frames + 2 <= maxFrames; i++){
+      out[frames++] = imaNib(&pred[0], &idx[0], p[i] & 15);
+      out[frames++] = imaNib(&pred[0], &idx[0], p[i] >> 4);
+    }
+    return frames;
+  }
+  // Estereo: grupos de 8 bytes, 4 del canal izquierdo (8 muestras) y 4 del
+  // derecho.
+  while(rem >= 8 && frames + 8 <= maxFrames){
+    for(int c = 0; c < 2; c++)
+      for(int k = 0; k < 4; k++){
+        uint8_t b = p[c * 4 + k];
+        out[(size_t)(frames + 2 * k) * 2 + (size_t)c]     = imaNib(&pred[c], &idx[c], b & 15);
+        out[(size_t)(frames + 2 * k + 1) * 2 + (size_t)c] = imaNib(&pred[c], &idx[c], b >> 4);
+      }
+    frames += 8; p += 8; rem -= 8;
+  }
+  return frames;
+}
+
+// -------------------------------------------------------------
+//  REPRODUCCION POR BLOQUES
+// -------------------------------------------------------------
+#define FLEXAS_PCM_CHUNK 4096u         // lectura de PCM por vuelta (bytes de archivo)
+
+size_t flexAsWorkBytes(const FlexWavInfo* w){
+  if(!w || !w->channels || w->channels > 2) return 0;
+  if(w->format == FLEXWAV_FMT_IMA){
+    if(!w->blockAlign || !w->samplesPerBlock) return 0;
+    return (size_t)w->blockAlign + (size_t)w->samplesPerBlock * w->channels * 2u;
+  }
+  if(w->bits == 16) return FLEXAS_PCM_CHUNK;                 // se entrega tal cual
+  if(w->bits == 8)  return FLEXAS_PCM_CHUNK + FLEXAS_PCM_CHUNK * 2u;
+  return 0;
+}
+
+bool flexAsOpen(FlexAudioStream* s, const FlexMediaIO* io, const FlexWavInfo* w, uint8_t* work, size_t cap){
+  if(!s || !io || !w || !work) return false;
+  size_t need = flexAsWorkBytes(w);
+  if(!need || cap < need) return false;
+  memset(s, 0, sizeof(*s));
+  s->io = *io;
+  s->wav = *w;
+  s->pos = w->dataStart;
+  s->end = w->dataStart + w->dataBytes;
+  s->ioPos = 0xFFFFFFFFu;
+  s->outFrame = (uint16_t)(w->channels * 2u);
+  s->limit = ~(uint64_t)0;
+  if(w->format == FLEXWAV_FMT_IMA){
+    s->blk = work;             s->blkCap = w->blockAlign;
+    s->buf = work + w->blockAlign; s->bufCap = (uint32_t)w->samplesPerBlock * w->channels * 2u;
+    // El ultimo bloque se rellena: 'fact' dice cuantas muestras son de verdad.
+    if(w->frames) s->limit = (uint64_t)w->frames * s->outFrame;
+  } else if(w->bits == 16){
+    s->buf = work; s->bufCap = FLEXAS_PCM_CHUNK;
+  } else {
+    s->blk = work; s->blkCap = FLEXAS_PCM_CHUNK;
+    s->buf = work + FLEXAS_PCM_CHUNK; s->bufCap = FLEXAS_PCM_CHUNK * 2u;
+  }
+  s->ended = s->pos >= s->end;
+  return true;
+}
+
+// 1 = leido; 0 = error o fin inesperado; FLEXIO_AGAIN = los datos aun no han llegado.
+static int asRead(FlexAudioStream* s, uint8_t* dst, uint32_t n){
+  if(s->ioPos != s->pos){
+    if(!s->io.seek(s->io.ctx, s->pos)) return 0;
+    s->ioPos = s->pos;
+  }
+  uint32_t got = 0;
+  while(got < n){
+    int r = s->io.read(s->io.ctx, dst + got, n - got);
+    if(r == FLEXIO_AGAIN){
+      // Puede que ya se hubiera leido una parte: el descriptor no esta donde creemos. La siguiente vuelta recoloca.
+      s->ioPos = 0xFFFFFFFFu;
+      return FLEXIO_AGAIN;
+    }
+    if(r <= 0) return 0;
+    got += (uint32_t)r;
+  }
+  s->pos += n; s->ioPos = s->pos;
+  return 1;
+}
+
+// Prepara el siguiente trozo de salida. 0 = no queda nada, -1 = error, FLEXIO_AGAIN = faltan datos por llegar.
+static int asFill(FlexAudioStream* s){
+  s->bufOff = s->bufLen = 0;
+  if(s->pos >= s->end || s->produced >= s->limit) return 0;
+  const FlexWavInfo* w = &s->wav;
+  uint32_t n;
+  if(w->format == FLEXWAV_FMT_IMA){
+    n = s->end - s->pos;
+    if(n > w->blockAlign) n = w->blockAlign;
+    if(n <= 4u * w->channels){ s->pos = s->end; return 0; }   // resto sin muestras
+    int a = asRead(s, s->blk, n);
+    if(a == FLEXIO_AGAIN) return FLEXIO_AGAIN;
+    if(!a) return -1;
+    int fr = flexImaDecodeBlock(s->blk, n, w->channels, (int16_t*)s->buf, w->samplesPerBlock);
+    if(fr < 0) return -1;
+    s->bufLen = (uint32_t)fr * s->outFrame;
+  } else {
+    uint32_t inFrame = (uint32_t)w->channels * (w->bits / 8u);
+    n = s->end - s->pos;
+    uint32_t cap = w->bits == 16 ? s->bufCap : s->blkCap;
+    if(n > cap) n = cap;
+    n -= n % inFrame;
+    if(!n){ s->pos = s->end; return 0; }
+    if(w->bits == 16){
+      int a = asRead(s, s->buf, n);
+      if(a == FLEXIO_AGAIN) return FLEXIO_AGAIN;
+      if(!a) return -1;
+      s->bufLen = n;
+    } else {
+      // WAV de 8 bits es SIN signo (128 = silencio): a 16 bits con signo.
+      int a = asRead(s, s->blk, n);
+      if(a == FLEXIO_AGAIN) return FLEXIO_AGAIN;
+      if(!a) return -1;
+      int16_t* o = (int16_t*)s->buf;
+      for(uint32_t i = 0; i < n; i++) o[i] = (int16_t)(((int)s->blk[i] - 128) * 256);
+      s->bufLen = n * 2u;
+    }
+  }
+  if(s->produced + s->bufLen > s->limit) s->bufLen = (uint32_t)(s->limit - s->produced);
+  s->produced += s->bufLen;
+  return s->bufLen ? 1 : 0;
+}
+
+int flexAsPump(FlexAudioStream* s, FlexAsSink sink, void* ctx, uint32_t budget){
+  if(!s || !sink || !s->buf) return -1;
+  uint32_t total = 0;
+  s->starved = false;
+  while(total < budget){
+    if(s->bufOff >= s->bufLen){
+      int f = asFill(s);
+      if(f == FLEXIO_AGAIN){ s->starved = true; break; }      // aun no ha llegado: ni error ni final
+      if(f < 0) return -1;
+      if(f == 0){ s->ended = true; break; }
+    }
+    uint32_t want = s->bufLen - s->bufOff;
+    if(want > budget - total) want = budget - total;
+    int k = sink(ctx, s->buf + s->bufOff, want);
+    if(k < 0) return -1;
+    if(k == 0) break;                           // el destino esta lleno ahora
+    if((uint32_t)k > want) k = (int)want;
+    s->bufOff += (uint32_t)k;
+    s->delivered += (uint32_t)k;
+    total += (uint32_t)k;
+  }
+  return (int)total;
+}
+
+uint32_t flexAsPosMs(const FlexAudioStream* s){
+  if(!s || !s->outFrame || !s->wav.sampleRate) return 0;
+  return (uint32_t)((s->delivered / s->outFrame) * 1000ull / s->wav.sampleRate);
+}
+uint32_t flexAsDurMs(const FlexAudioStream* s){ return s ? flexWavDurationMs(&s->wav) : 0; }
+
+bool flexAsSeekMs(FlexAudioStream* s, uint32_t ms){
+  if(!s || !s->buf || !s->wav.sampleRate) return false;
+  const FlexWavInfo* w = &s->wav;
+  uint64_t frame = (uint64_t)ms * w->sampleRate / 1000u;
+  uint64_t outStart;
+  uint32_t off;
+  if(w->format == FLEXWAV_FMT_IMA){
+    uint32_t blocks = w->dataBytes / w->blockAlign + (w->dataBytes % w->blockAlign ? 1u : 0u);
+    uint64_t b = frame / w->samplesPerBlock;
+    if(b >= blocks) b = blocks ? blocks - 1u : 0u;
+    off = (uint32_t)(b * w->blockAlign);
+    outStart = b * w->samplesPerBlock * s->outFrame;
+  } else {
+    uint32_t inFrame = (uint32_t)w->channels * (w->bits / 8u);
+    uint64_t frames = w->dataBytes / inFrame;
+    if(frame > frames) frame = frames;
+    off = (uint32_t)(frame * inFrame);
+    outStart = frame * s->outFrame;
+  }
+  if(outStart > s->limit) outStart = s->limit;
+  s->pos = w->dataStart + off;
+  s->bufLen = s->bufOff = 0;
+  s->produced = s->delivered = outStart;
+  s->ended = s->pos >= s->end;
+  return true;
+}
+
+// -------------------------------------------------------------
+//  INDICE INCREMENTAL
+//  ------------------------------------------------------------
+//  El recorrido es una pila de como mucho FLEXMED_DEPTH_MAX
+//  niveles, cada uno con su contador de "entradas ya consumidas".
+//  No hay recursion: la pila es explicita y de tamano fijo, asi que
+//  ni se desborda ni gasta pila de la tarea de dibujo.
+//
+//  Cada llamada a Step consume como mucho `budget` entradas y
+//  vuelve. El estado que hace falta para continuar cabe entero en
+//  el struct, asi que se puede parar y seguir en cualquier punto,
+//  incluido a mitad de una carpeta de 4.000 ficheros.
+// -------------------------------------------------------------
+#define FLEXMED_BATCH 8      // entradas por lectura de directorio
+
+void flexMediaIndexInit(FlexMediaIndex* ix, FlexMediaItem* store, uint16_t cap){
+  if(!ix) return;
+  memset(ix, 0, sizeof(*ix));
+  ix->items = store;
+  ix->cap   = store ? cap : 0;
+  ix->state = FLEXMED_SCAN_IDLE;
+  ix->depth = -1;
+}
+
+void flexMediaIndexAddRoot(FlexMediaIndex* ix, const char* path){
+  if(!ix || !path || ix->rootN >= FLEXMED_ROOTS_MAX) return;
+  ix->roots[ix->rootN].path = path;
+  ix->rootN++;
+}
+
+void flexMediaIndexStart(FlexMediaIndex* ix){
+  if(!ix) return;
+  ix->n     = 0;
+  ix->full  = false;
+  ix->rootI = 0;
+  ix->depth = -1;
+  ix->seen  = 0;
+  ix->state = ix->rootN ? FLEXMED_SCAN_RUNNING : FLEXMED_SCAN_DONE;
+  memset(ix->stackSkip, 0, sizeof(ix->stackSkip));
+}
+
+void flexMediaIndexAbort(FlexMediaIndex* ix){
+  if(!ix) return;
+  ix->state = FLEXMED_SCAN_ABORTED;
+  ix->depth = -1;
+}
+
+// Empuja un directorio en la pila. false si ya no cabe mas hondo.
+static bool pushDir(FlexMediaIndex* ix, const char* path){
+  if(ix->depth + 1 >= FLEXMED_DEPTH_MAX) return false;
+  ix->depth++;
+  snprintf(ix->stackPath[ix->depth], FLEXMED_PATH_MAX, "%s", path);
+  ix->stackSkip[ix->depth] = 0;
+  return true;
+}
+
+static void addItem(FlexMediaIndex* ix, const char* dir, const FlexMediaDirent* e,
+                    int kind){
+  if(ix->n >= ix->cap){ ix->full = true; return; }
+  FlexMediaItem* it = &ix->items[ix->n];
+  // Una ruta que no cabe entera se DESCARTA en vez de guardarse
+  // truncada: una ruta truncada no abre el fichero, abre otro (o
+  // ninguno), y eso es peor que no tenerlo en la lista.
+  int need = snprintf(it->path, FLEXMED_PATH_MAX, "%s/%s", dir, e->name);
+  if(need < 0 || need >= FLEXMED_PATH_MAX) return;
+  it->size = e->size;
+  it->kind = (uint8_t)kind;
+  ix->n++;
+}
+
+int flexMediaIndexStep(FlexMediaIndex* ix, int budget){
+  if(!ix) return FLEXMED_SCAN_IDLE;
+  if(ix->state != FLEXMED_SCAN_RUNNING) return ix->state;
+  if(budget <= 0) budget = 1;
+
+  while(budget > 0){
+    // ---- entre carpetas: abrir la siguiente raiz ----
+    if(ix->depth < 0){
+      if(ix->rootI >= ix->rootN){ ix->state = FLEXMED_SCAN_DONE; return ix->state; }
+      const FlexMediaRoot* r = &ix->roots[ix->rootI];
+      const FlexMediaVolume* v = &ix->volume;
+      // Un volumen que no esta no es un error: sencillamente no
+      // aporta nada al indice y se pasa a la siguiente raiz.
+      if(!v->list || (v->alive && !v->alive(v->ctx))){ ix->rootI++; continue; }
+      if(!pushDir(ix, r->path)){ ix->rootI++; continue; }
+      continue;
+    }
+
+    const FlexMediaVolume* v = &ix->volume;
+    if(v->alive && !v->alive(v->ctx)){
+      // El almacenamiento dejo de estar disponible. Se abandona esa raiz
+      // sin bloquear el bucle principal.
+      ix->depth = -1;
+      ix->rootI++;
+      continue;
+    }
+
+    FlexMediaDirent ent[FLEXMED_BATCH];
+    const char* dir = ix->stackPath[ix->depth];
+    int want = budget < FLEXMED_BATCH ? budget : FLEXMED_BATCH;
+    int got  = v->list(v->ctx, dir, ent, want, (int)ix->stackSkip[ix->depth]);
+
+    if(got <= 0){
+      // 0 = carpeta terminada; -1 = no se pudo abrir. En los dos
+      // casos se sube un nivel: un directorio ilegible no puede
+      // parar el indice entero.
+      ix->depth--;
+      if(ix->depth < 0) ix->rootI++;
+      if(got < 0) budget--;                   // el intento tambien cuesta
+      continue;
+    }
+
+    // CUENTA EXACTA DE LO CONSUMIDO. stackSkip se sube por lo que
+    // se ha mirado DE VERDAD, no por el tamano del lote: si en
+    // mitad del lote aparece una subcarpeta se entra en ella y el
+    // resto del lote se vuelve a pedir al volver. Sumar `got` de
+    // golpe aqui haria que los ficheros que van detras de una
+    // subcarpeta dentro del mismo lote no se indexaran nunca.
+    int used = 0;
+    bool descended = false;
+    for(int i = 0; i < got; i++){
+      used++;
+      ix->seen++;
+      budget--;
+      if(ent[i].name[0] == '.') continue;     // ocultos y ".", ".."
+      if(ent[i].dir){
+        char sub[FLEXMED_PATH_MAX];
+        int need = snprintf(sub, sizeof(sub), "%s/%s", dir, ent[i].name);
+        // Si no cabe mas hondo (o la ruta no cabe) la subcarpeta se
+        // ignora: el limite de profundidad esta documentado y es
+        // preferible a una pila sin tope.
+        if(need > 0 && need < (int)sizeof(sub) && ix->depth + 1 < FLEXMED_DEPTH_MAX){
+          ix->stackSkip[ix->depth] += (uint32_t)used;   // lo del padre, ya visto
+          pushDir(ix, sub);
+          descended = true;
+          break;
+        }
+        continue;
+      }
+      int kind = flexMediaClassify(ent[i].name);
+      if(kind == FLEXMED_PHOTO || kind == FLEXMED_VIDEO
+      || kind == FLEXMED_AUDIO || kind == FLEXMED_DRAW)
+        addItem(ix, dir, &ent[i], kind);
+    }
+    if(!descended) ix->stackSkip[ix->depth] += (uint32_t)used;
+  }
+  return ix->state;
+}
+
+static bool itemMatches(const FlexMediaItem* it, int kind){
+  if(kind && it->kind != (uint8_t)kind) return false;
+  return true;
+}
+
+int flexMediaIndexCount(const FlexMediaIndex* ix, int kind){
+  if(!ix || !ix->items) return 0;
+  int c = 0;
+  for(uint16_t i = 0; i < ix->n; i++) if(itemMatches(&ix->items[i], kind)) c++;
+  return c;
+}
+
+int flexMediaIndexNth(const FlexMediaIndex* ix, int kind, int nth){
+  if(!ix || !ix->items || nth < 0) return -1;
+  for(uint16_t i = 0; i < ix->n; i++){
+    if(!itemMatches(&ix->items[i], kind)) continue;
+    if(nth-- == 0) return (int)i;
+  }
+  return -1;
+}

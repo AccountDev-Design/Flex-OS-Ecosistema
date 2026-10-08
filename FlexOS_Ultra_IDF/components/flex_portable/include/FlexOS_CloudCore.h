@@ -1,0 +1,324 @@
+#ifndef FLEXOS_CLOUDCORE_H
+#define FLEXOS_CLOUDCORE_H
+
+// #############################################################
+//  FLEX CLOUD · NUCLEO PORTABLE
+//  ------------------------------------------------------------
+//  Lo que Flex Cloud DECIDE en el P4 sin tocar la red, la flash ni la
+//  pantalla: leer las respuestas de la API, el diario de subidas que
+//  sobrevive a un reinicio, la cache de bloques del streaming de video,
+//  los nombres que caben en LittleFS y el SHA-256 por partes.
+//
+//  Es la frontera de siempre en este proyecto: el .ino dibuja, la tarea
+//  mueve los bytes y ESTE fichero decide. Por eso se compila y se ejecuta
+//  entero en el PC, con sanitizers (tests/host/test_cloudcore.cpp): aqui
+//  se leen bytes que llegan de internet.
+// #############################################################
+#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
+
+#define FCL_ID_MAX      32      // "fil_" + 24 base32 (+ margen)
+#define FCL_NAME_MAX    256     // 255 bytes UTF-8 + NUL (el limite del servidor)
+#define FCL_MIME_MAX    64
+#define FCL_SHA_HEX     65
+#define FCL_CODE_MAX    40
+#define FCL_MSG_MAX     160
+#define FCL_CURSOR_MAX  96
+#define FCL_PATH_MAX    112     // = FML_PATH_MAX: ruta local en LittleFS
+#define FCL_CRUMBS      8       // niveles de la ruta que se ensenan
+#define FCL_PARTS_MAX   512     // partes por subida que sigue el P4 (bitmap)
+#define FCL_REASON_MAX  96      // motivo corto de "no se pudo preparar" (lo escribe el telefono)
+
+// Tipos de elemento (los de la API).
+enum {
+  FCL_K_FOLDER = 0, FCL_K_PHOTO, FCL_K_VIDEO, FCL_K_AUDIO, FCL_K_DOCUMENT, FCL_K_ARCHIVE, FCL_K_OTHER
+};
+
+// Estado de un archivo multimedia respecto al PERFIL de Flex OS (lo calcula el telefono: Flex Cloud en el A55).
+// FCL_PS_UNKNOWN = el servidor no lo dice (Flex Cloud en Internet o un telefono antiguo): se decide por la
+// extension, como siempre. NATIVE: ya vale tal cual. READY: el telefono tiene preparada una version del perfil
+// (AVI MJPEG, WAV IMA o JPEG ligero) y es la que se lee por /files/<id>/playable.
+enum { FCL_PS_UNKNOWN = 0, FCL_PS_NATIVE, FCL_PS_READY, FCL_PS_PENDING, FCL_PS_PREPARING, FCL_PS_FAILED, FCL_PS_UNSUPPORTED, FCL_PS_CORRUPT };
+
+typedef struct {
+  char     id[FCL_ID_MAX];
+  char     parentId[FCL_ID_MAX];
+  char     name[FCL_NAME_MAX];
+  char     mime[FCL_MIME_MAX];
+  char     sha256[FCL_SHA_HEX];
+  uint64_t size;
+  int64_t  updatedAt;           // ms desde 1970 (0 = desconocido)
+  int64_t  deletedAt;           // 0 = no esta en la papelera
+  uint32_t durationMs;
+  uint16_t width, height;
+  uint16_t itemCount;           // carpeta en la papelera: archivos que contiene
+  uint8_t  playState;           // FCL_PS_*
+  uint8_t  playProgress;        // 0..99 mientras se prepara
+  uint64_t playSize;            // bytes de lo que sirve /playable (la version del perfil o el original)
+  char     playSha[FCL_SHA_HEX];
+  char     playReason[FCL_REASON_MAX];
+  uint8_t  kind;                // FCL_K_*
+  bool     isFolder;
+  bool     hasThumb;
+  bool     fromDevice;          // lo subio un Flex OS Ultra
+} FclItem;
+
+typedef struct { char id[FCL_ID_MAX]; char name[64]; } FclCrumb;
+
+typedef struct {
+  uint64_t totalBytes, usedBytes, reservedBytes, trashBytes, availableBytes;
+  uint16_t permille;            // uso en tanto por mil (0..1000)
+  uint8_t  state;               // FCL_Q_*
+  char     plan[16];
+  uint32_t rev;                 // 0 = el servidor no lo dice. El telefono lo sube cada vez que cambia SU lista (ver docs/FLEX-MEDIA-ECOSYSTEM.md §16)
+} FclQuota;
+enum { FCL_Q_OK = 0, FCL_Q_LOW, FCL_Q_FULL };
+
+typedef struct {
+  char     uploadId[FCL_ID_MAX];
+  char     state[16];           // active / completing / completed / aborted / expired / failed
+  char     fileId[FCL_ID_MAX];  // al completar
+  char     sha256[FCL_SHA_HEX]; // del archivo, al completar
+  uint64_t size, receivedBytes;
+  uint32_t chunkSize, totalParts, receivedCount;
+  bool     resumed;
+  uint32_t parts[FCL_PARTS_MAX / 32];   // bitmap de partes recibidas (bit n-1)
+} FclUpload;
+
+// ---------------------------------------------------------------------------
+//  Respuestas de la API (JSON). Todas aceptan cuerpos de cualquier forma y
+//  devuelven false/-1 si no son lo esperado: nunca leen fuera de `len`.
+// ---------------------------------------------------------------------------
+// error.code y error.message de una respuesta {ok:false}. false si no hay.
+bool fclParseError(const char* body, size_t len, char* code, size_t codeCap, char* msg, size_t msgCap);
+// Cuota de /me o /quota (o de cualquier respuesta con "quota").
+bool fclParseQuota(const char* body, size_t len, FclQuota* q);
+// Cuenta de /me.
+bool fclParseMe(const char* body, size_t len, char* address, size_t addrCap, char* displayName, size_t nameCap, FclQuota* q);
+// Pagina de /files. Devuelve los elementos leidos (0..cap) o -1. `more` =
+// hay mas paginas (cursor en `cursor`). `crumbs`/`nCrumbs` = ruta de la carpeta.
+int  fclParseList(const char* body, size_t len, FclItem* items, int cap, char* cursor, size_t cursorCap,
+                  bool* more, FclCrumb* crumbs, int crumbCap, int* nCrumbs);
+// Un archivo o carpeta suelto: {"file":{...}} / {"folder":{...}} / {"item":{...}}.
+bool fclParseItem(const char* body, size_t len, FclItem* it);
+// Sesion de subida: {"upload":{...}} (o la respuesta de una parte).
+bool fclParseUpload(const char* body, size_t len, FclUpload* u);
+bool fclUploadHasPart(const FclUpload* u, uint32_t n);
+
+// Texto corto para una persona a partir de un codigo de la API (o de un
+// fallo de red, code = "network"). Siempre devuelve algo legible.
+const char* fclErrorText(const char* code);
+// Lo mismo con el destino en el TELEFONO (Flex Storage): "Telefono
+// desconectado" en vez de "Sin conexion con Flex Cloud", sin cuenta que
+// revincular... Lo que no cambia sale de fclErrorText().
+const char* fclPhoneErrorText(const char* code);
+uint8_t     fclKindOf(const char* kind);
+
+// ---------------------------------------------------------------------------
+//  SHA-256 incremental (mbedTLS en la placa, OpenSSL en el PC)
+// ---------------------------------------------------------------------------
+typedef struct { uint8_t opaque[256]; } FclSha;
+void fclShaStart(FclSha* s);
+void fclShaUpdate(FclSha* s, const void* data, size_t n);
+void fclShaFinishHex(FclSha* s, char out[FCL_SHA_HEX]);
+void fclShaHex(const void* data, size_t n, char out[FCL_SHA_HEX]);
+
+// ---------------------------------------------------------------------------
+//  DIARIO DE TRABAJOS (subidas y descargas que sobreviven a un reinicio)
+//  ------------------------------------------------------------------------
+//  Se escribe SOLO en los cambios de estado (encolado, sesion creada,
+//  terminado, fallido), nunca por parte: las partes recibidas las sabe el
+//  servidor. Formato binario con version y CRC32: un registro danado se
+//  descarta entero en vez de interpretarse a medias.
+// ---------------------------------------------------------------------------
+#define FCL_JOBS_MAX 8
+enum { FCL_JOB_FREE = 0, FCL_JOB_QUEUED, FCL_JOB_ACTIVE, FCL_JOB_DONE, FCL_JOB_FAILED, FCL_JOB_CANCELLED };
+enum { FCL_JOB_UPLOAD = 1, FCL_JOB_DOWNLOAD = 2 };
+#define FCL_JF_FREE_LOCAL   0x01u   // subir y liberar espacio: borrar lo local SOLO tras confirmar
+#define FCL_JF_TO_LIBRARY   0x02u   // descarga: a la biblioteca de medios (Galeria)
+#define FCL_JF_FROM_LIBRARY 0x04u   // subida desde la Galeria (mlId valido)
+#define FCL_JF_MOVE_REMOTE  0x08u   // descarga que MUEVE: el original va a la papelera de la nube
+                                    // solo cuando la copia verificada ya esta colocada
+// Banderas internas del gestor (tambien van al diario):
+#define FCL_JF_ABORT        0x20u   // subida cancelada: falta avisar al servidor para soltar la reserva
+#define FCL_JF_CLEARED      0x40u   // el usuario la quito de la lista (se borra al terminar lo pendiente)
+#define FCL_JF_DELIVERED    0x80u   // el aviso de "terminado" ya lo proceso la interfaz
+
+typedef struct {
+  uint8_t  state;               // FCL_JOB_*
+  uint8_t  type;                // FCL_JOB_UPLOAD / FCL_JOB_DOWNLOAD
+  uint8_t  flags;               // FCL_JF_*
+  uint8_t  attempts;
+  uint32_t id;                  // numero del trabajo (no se repite en esta instalacion)
+  uint32_t mlId;                // elemento de la biblioteca (0 = ninguno)
+  uint64_t size;
+  char     localPath[FCL_PATH_MAX];
+  char     name[FCL_NAME_MAX];  // nombre en la nube (subida) o nombre a mostrar
+  char     parentId[FCL_ID_MAX];
+  char     remoteId[FCL_ID_MAX];// uploadId (subida) o fileId (descarga)
+  char     fileId[FCL_ID_MAX];  // archivo resultante en la nube (subida terminada)
+  char     sha256[FCL_SHA_HEX]; // del archivo completo (verificado)
+  char     error[FCL_MSG_MAX];
+} FclJob;
+
+typedef struct {
+  uint32_t nextId;
+  FclJob   jobs[FCL_JOBS_MAX];
+} FclJournal;
+
+void   fclJournalInit(FclJournal* j);
+// Serializa a `buf`. Devuelve los bytes escritos o 0 si no cabe.
+size_t fclJournalEncode(const FclJournal* j, uint8_t* buf, size_t cap);
+size_t fclJournalMaxBytes();
+// Lee lo serializado. Un registro con CRC o version incorrectos se ignora
+// (se devuelve el diario vacio pero valido) y `damaged` lo dice.
+bool   fclJournalDecode(FclJournal* j, const uint8_t* buf, size_t len, bool* damaged);
+// Un hueco libre o el trabajo terminado mas antiguo que ya no le debe nada a
+// nadie: NUNCA uno en curso, uno terminado cuyo aviso no proceso la interfaz
+// (borraria el "libera espacio" de una subida) ni una cancelacion que aun
+// tiene que soltar su reserva en el servidor. NULL si no hay.
+FclJob* fclJournalAlloc(FclJournal* j);
+FclJob* fclJournalFind(FclJournal* j, uint32_t id);
+// El siguiente trabajo a ejecutar (cola en orden de alta).
+FclJob* fclJournalNext(FclJournal* j);
+int     fclJournalCount(const FclJournal* j, uint8_t state);
+
+// ---------------------------------------------------------------------------
+//  CACHE DE BLOQUES PARA EL STREAMING
+//  ------------------------------------------------------------------------
+//  Un video de la nube NUNCA se descarga entero: el lector (el demultiplexor
+//  de AVI, en el hilo de la interfaz) lee de una arena FIJA de bloques que
+//  una tarea de red va rellenando con peticiones Range, por delante de la
+//  posicion de lectura. Si el lector pide algo que aun no esta, la lectura
+//  falla SIN bloquear y queda anotada como "lo siguiente que hace falta":
+//  el reproductor ensena "Cargando" y vuelve a intentarlo en el siguiente
+//  cuadro. La arena se reserva una vez y se reutiliza entre videos.
+// ---------------------------------------------------------------------------
+#define FCL_CACHE_BLOCKS_MAX 64
+enum { FCL_B_EMPTY = 0, FCL_B_LOADING, FCL_B_READY };
+
+typedef struct {
+  uint32_t off;                 // desplazamiento del bloque en el archivo (multiplo de blockSize)
+  uint32_t len;                 // bytes validos (el ultimo bloque puede ser corto)
+  uint32_t lru;
+  uint8_t  state;
+} FclBlock;
+
+typedef struct {
+  uint8_t* arena;
+  uint32_t blockSize;
+  uint16_t nBlocks;
+  uint32_t fileSize;
+  uint32_t tick;
+  uint32_t readPos;             // ultima lectura (para leer por delante)
+  uint32_t ahead;               // bytes por delante de readPos que se mantienen
+  uint32_t behind;              // bytes por detras que no se desalojan
+  bool     wantSet;             // hubo una lectura sin datos
+  uint32_t wantOff;
+  bool     pinSet;              // rango que hace falta ENTERO (p. ej. idx1 para buscar)
+  uint32_t pinOff, pinLen;
+  uint32_t misses, hits, fetched;
+  FclBlock blocks[FCL_CACHE_BLOCKS_MAX];
+} FclCache;
+
+// `arena` = nBlocks * blockSize bytes. `ahead` se recorta a lo que cabe.
+void fclCacheInit(FclCache* c, uint8_t* arena, uint32_t blockSize, uint16_t nBlocks, uint32_t fileSize);
+// Copia [off, off+n) si esta ENTERO en la cache: devuelve n. Si falta algo,
+// devuelve -1 y anota lo que falta (no bloquea nunca). 0 = fin del archivo.
+int  fclCacheRead(FclCache* c, uint32_t off, void* buf, uint32_t n);
+bool fclCacheReady(const FclCache* c, uint32_t off, uint32_t len);
+// Pide que [off, off+len) este entero (y protegido) hasta fclCacheUnpin().
+void fclCachePin(FclCache* c, uint32_t off, uint32_t len);
+void fclCacheUnpin(FclCache* c);
+// Cambio de posicion (buscar): lo que habia por delante ya no sirve igual.
+void fclCacheSeek(FclCache* c, uint32_t pos);
+// Para la tarea de red: el siguiente bloque que hay que traer. Reserva su
+// hueco (LOADING) y devuelve su indice, o -1 si no hace falta nada ahora.
+int  fclCacheNextFetch(FclCache* c, uint32_t* off, uint32_t* len);
+uint8_t* fclCacheSlot(FclCache* c, int slot);
+void fclCacheCommit(FclCache* c, int slot);     // el hueco ya tiene sus bytes
+void fclCacheAbort(FclCache* c, int slot);      // no se pudo traer: queda vacio
+// Bytes listos de forma contigua desde `pos` (para la barra de "cargado").
+uint32_t fclCacheContiguous(const FclCache* c, uint32_t pos);
+
+// Rendimiento de bajada (bytes/s) como media movil: cada bloque nuevo pesa un cuarto. `ms` = 0 cuenta como 1 (un bloque que
+// ya estaba en el socket no da una velocidad infinita). prev = 0: aun no habia medida.
+uint32_t fclThroughput(uint32_t prev, uint32_t bytes, uint32_t ms);
+// Colchon -- bytes SEGUIDOS por delante de la lectura -- con el que un video de la nube REANUDA tras quedarse sin datos.
+// Reanudar en cuanto cabe un fotograma lo para otra vez enseguida (a tirones, y cada parada cuesta repintar); reanudar con
+// demasiado tarda de mas y no cabe en la arena. Lo justo:
+//   bitrate   lo que pide el video (bytes/s medios: tamano / duracion; 0 = se desconoce)
+//   netBps    lo que baja la red ahora (0 = sin medir)
+//   remainMs  lo que queda por reproducir
+//   leadMs    colchon base, en tiempo de video
+//   minBytes  lo minimo para leer sin esperar (dos fotogramas grandes y un margen)
+//   maxBytes  tope (la arena es fija: nunca mas de su mitad)
+// Si la red va MAS LENTA que el video se suma lo que faltara de aqui al final (lo que pida de mas la parte que queda),
+// acotado por maxBytes: mas colchon no cabe, y entonces solo queda parar de vez en cuando.
+uint32_t fclResumeLead(uint32_t bitrate, uint32_t netBps, uint32_t remainMs, uint32_t leadMs, uint32_t minBytes, uint32_t maxBytes);
+
+// ---------------------------------------------------------------------------
+//  Nombres y utilidades
+// ---------------------------------------------------------------------------
+// Nombre de la nube -> nombre que cabe en LittleFS (FLEXFS_NAME_MAX = 48
+// bytes con el terminador): se conserva la extension, no se parte nunca un
+// caracter UTF-8 y se cambian los caracteres que el sistema de archivos no
+// admite. Siempre deja algo valido.
+void fclLocalName(const char* cloudName, char* out, size_t cap);
+// Copia UTF-8 recortando SIN partir un caracter.
+void fclCopyUtf8(char* out, size_t cap, const char* in);
+// Codifica para una URL (consulta o ruta).
+bool fclUrlEncode(const char* in, char* out, size_t cap);
+// Escapa para una cadena JSON. false si no cabe.
+bool fclJsonEscape(const char* in, char* out, size_t cap);
+// Tamano para personas en base 1024, como el resto de Flex OS ("1,4 GB").
+void fclFmtBytes(uint64_t n, char* out, size_t cap);
+// Espera antes del reintento `failures` (1, 2, ...): 2 s, 4 s ... 60 s como mucho.
+uint32_t fclBackoffMs(uint8_t failures);
+// Plan de partes para una subida desde el P4: partes de 256 KB salvo que el
+// archivo necesite mas de FCL_PARTS_MAX partes.
+uint32_t fclChunkFor(uint64_t size);
+
+// ---------------------------------------------------------------------------
+//  TEXTOS Y DECISIONES DE LA INTERFAZ
+//  ------------------------------------------------------------------------
+//  Archivos, Galeria y Multimedia ensenan la nube con LAS MISMAS frases y
+//  deciden igual que se abre en el P4: viven aqui, probadas en el PC, y la
+//  interfaz solo las dibuja.
+// ---------------------------------------------------------------------------
+// Fases de una transferencia (FlexOS_Cloud las publica).
+enum { FCX_QUEUED = 0, FCX_PREPARING, FCX_RUNNING, FCX_VERIFYING, FCX_WAITING_NET, FCX_RETRYING, FCX_DONE, FCX_FAILED, FCX_CANCELLED };
+// "1,2 GB de 5 GB · 24 %" (lo reservado por subidas en curso cuenta como ocupado).
+void fclQuotaLine(const FclQuota* q, char* out, size_t cap);
+// "Quedan 3,8 GB" · "Espacio casi lleno: quedan 400 MB" · "Flex Cloud est\xC3\xA1 lleno".
+void fclQuotaHint(const FclQuota* q, char* out, size_t cap);
+// Que hace el P4 al tocar un elemento de la nube.
+//   FOLDER   entrar en la carpeta
+//   PHOTO    traer el ORIGINAL (verificado) y abrirlo en el visor (JPEG <= 6 MB, a la RAM)
+//   STREAM   reproducir por rangos sin descargar (AVI MJPEG)
+//   MENU     no se puede abrir aqui: se ensenan sus acciones y `why` dice por que
+//   AUDIO    reproducir por rangos en Musica (WAV PCM/IMA, el mismo reproductor que lo local)
+//   PREPARING el telefono lo esta preparando para Flex OS: se dice y se espera (no se intenta abrir)
+// Con un telefono que informa del estado (playState != FCL_PS_UNKNOWN) manda LO QUE EL TELEFONO SABE de los
+// bytes del archivo; sin el (Internet, telefono antiguo), la extension, como siempre.
+enum { FCL_OPEN_FOLDER = 0, FCL_OPEN_PHOTO, FCL_OPEN_STREAM, FCL_OPEN_MENU, FCL_OPEN_AUDIO, FCL_OPEN_PREPARING };
+int  fclOpenAction(const FclItem* it, const char** why);
+// ¿Se puede leer ya por /files/<id>/playable? (NATIVE o READY.) Con eso se usan SU tamano y SU SHA-256.
+bool        fclPlayable(const FclItem* it);
+uint64_t    fclPlaySize(const FclItem* it);
+const char* fclPlaySha(const FclItem* it);
+// "Compatible con Flex OS" · "Preparando para Flex OS... 42 %" · "No se puede convertir"... ("" si no se sabe).
+void fclPlayLine(const FclItem* it, char* out, size_t cap);
+// "2,3 MB · 12/03/2026" (fecha de la ultima modificacion) o "Carpeta".
+void fclItemSub(const FclItem* it, char* out, size_t cap);
+// Fecha civil "dd/mm/aaaa" de unos ms desde 1970 (UTC). "" si no hay.
+void fclFmtDate(int64_t ms, char* out, size_t cap);
+// Linea de estado de una transferencia: "Subiendo · 1,2 MB de 3 MB · 340 KB/s",
+// "Esperando conexi\xC3\xB3n", "Reintento en 8 s", "Verificando integridad"...
+// `error`: el motivo de un fallo; en "esperando conexion" sustituye a esa frase
+// (la cuenta ya no sirve: no se espera a ninguna red).
+void fclXferLine(uint8_t phase, uint8_t type, uint64_t done, uint64_t size, uint32_t bytesPerSec,
+                 uint32_t retryInMs, const char* error, char* out, size_t cap);
+
+#endif

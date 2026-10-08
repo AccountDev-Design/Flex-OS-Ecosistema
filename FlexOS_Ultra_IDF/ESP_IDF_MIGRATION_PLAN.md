@@ -446,6 +446,21 @@ HARDWARE REAL**.
 | **9. Cámara** | CSI + ISP + `esp_video`, vista previa por PPA, foto con JPEG HW | build | **necesita el modelo del sensor** |
 | **10. Energía y cierre** | perfiles 1000–4000 mAh (**estimación**, nunca "medido"), suspensión/apagado, pruebas de estrés, `ESP_IDF_MIGRATION_REPORT.md`, `ESP_IDF_HARDWARE_REQUIREMENTS.md` | build | consumo real |
 
+**Numeración vigente (orden de continuación).** Desde la Fase 2 se sigue la numeración de 17 fases de
+la orden de continuación; el contenido es el mismo de la tabla anterior, repartido así:
+
+| Fase vigente | Contenido | Equivale a |
+|---|---|---|
+| 2 | Arquitectura base | 2 |
+| 3 · 4 · 5 | UI completa en LVGL · Liquid Glass (3 niveles) · táctil y gestos | 3 y 8 (apps) |
+| 6 · 7 · 8 | Wi-Fi C6 · Flex Account · Flex Cloud | 4 y 5 |
+| 9 · 10 · 11 | Multimedia · Cámara · Audio ES8311 | 6 y 9 |
+| 12 · 13 | Device Care · Flex Compass | 7 |
+| 14 · 15 | OTA con identificadores propios · particiones A/B con tamaño medido | 5 y 10 |
+| 16 · 17 | Revisión de seguridad/estabilidad · optimización medida | 10 |
+
+El estado de cada fase está en `ESP_IDF_MIGRATION_REPORT.md`.
+
 **Sobre el alcance:** la versión Arduino tiene 116 000 líneas y ~45 pantallas.
 Reimplementarla bien en LVGL no cabe en una sola sesión de trabajo; se hará fase
 a fase, cada una compilada y documentada, sin dar por hecha ninguna pantalla que

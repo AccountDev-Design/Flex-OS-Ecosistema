@@ -147,15 +147,14 @@ void flex_display_lvgl_idle(uint32_t max_ms)
     if (ticks == 0) {
         ticks = 1;
     }
-    if (!s_flip_pending) {
-        vTaskDelay(ticks);
-        return;
-    }
-    // Con un cambio de FB pendiente, la tarea de UI duerme en el propio aviso de
-    // fin de cuadro: se despierta en cuanto el panel estrena el cuadro (o cuando
-    // toque el siguiente timer de LVGL, lo que llegue antes). Esta espera es
-    // reposo, no bloquea el dibujo: no cuenta como espera de fin de cuadro.
-    if (xSemaphoreTake(g_flex_dsi.fb_done, ticks) == pdTRUE) {
+    // La tarea de UI duerme en su notificacion: la despiertan el fin de cuadro
+    // (si habia un cambio de FB armado), el buzon (flex_inbox_post) o el plazo
+    // del siguiente timer de LVGL, lo que llegue antes. Es reposo, no bloquea el
+    // dibujo: no cuenta como espera de fin de cuadro.
+    ulTaskNotifyTake(pdTRUE, ticks);
+    if (s_flip_pending && xSemaphoreTake(g_flex_dsi.fb_done, 0) == pdTRUE) {
+        // Asi una pantalla quieta tambien termina su ultimo cuadro (y enciende
+        // el retroiluminado) sin esperar a que LVGL vuelva a dibujar.
         finish_flip(true);
         lv_display_flush_ready(s_disp);
     }

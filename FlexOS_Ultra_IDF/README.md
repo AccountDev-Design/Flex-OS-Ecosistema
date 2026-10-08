@@ -5,9 +5,11 @@ MIPI-DSI 480×800 con ST7701, táctil GT911). La interfaz se dibuja **solo con L
 (`docs/ARQUITECTURA_GRAFICA_LVGL.md`). La versión Arduino (`../FlexOS_Ultra/`) es la referencia
 funcional y no se modifica.
 
-**Estado: Fases 0 y 1** (infraestructura + pantalla, táctil y LVGL con una pantalla de prueba).
-Todo compila y se ha verificado en el PC; **nada está probado en hardware real**
-(`docs/FASE_0_1_INFORME.md`). Plan completo: `ESP_IDF_MIGRATION_PLAN.md`.
+**Estado: Fases 0, 1 y 2** (infraestructura; pantalla, táctil y LVGL con una pantalla de prueba;
+arquitectura base: bus de eventos, almacenamiento compatible con los datos de Arduino, ajustes y monitor
+del sistema). Todo compila y se ha verificado en el PC; **nada está probado en hardware real**.
+Estado y matriz de funcionalidades: `ESP_IDF_MIGRATION_REPORT.md`. Plan: `ESP_IDF_MIGRATION_PLAN.md`.
+Pruebas en la placa: `ESP_IDF_HARDWARE_REQUIREMENTS.md`.
 
 ## Requisitos
 
@@ -41,6 +43,15 @@ La guardia lee la revisión real con esptool, se niega si el binario no correspo
 escribe y comprueba que NVS y LittleFS (datos de la versión Arduino) no se tocan. No uses `idf.py flash`
 mientras la revisión y la tabla no estén cerradas (`docs/REVISION_CHIP.md`, `docs/PARTICIONES.md`).
 
+## Pruebas sin la placa
+
+```
+tools/run_tests.sh
+```
+
+Pruebas de host con sanitizadores (`tests/host`), compatibilidad del LittleFS de la versión Arduino
+(`tests/littlefs_compat`), simulador de la interfaz y reglas de arquitectura.
+
 ## Simulador de la interfaz en el PC
 
 ```
@@ -57,13 +68,17 @@ modelo de doble framebuffer y de caché del puerto de pantalla (ver el informe).
 |---|---|
 | `main/` | `app_main()`: orden de arranque y nada más |
 | `components/flex_board` | pines, geometría y temporización de la placa (un solo sitio) |
-| `components/flex_core` | reparto de tareas, datos de arranque, métricas de depuración |
+| `components/flex_core` | reparto de tareas, datos de arranque, métricas, bus de eventos (`flex_bus`), buzón de la UI (`flex_inbox`) |
+| `components/flex_storage` | NVS (caché de ajustes compatible con `Preferences`) + LittleFS, escritor único, sin borrados automáticos |
+| `components/flex_system` | métricas para Device Care: memoria, temperatura, CPU, tareas, reinicios, fallos |
+| `components/flex_portable` | lógica pura de la versión Arduino, copiada sin cambios (`tools/check_portable.py`) |
 | `components/flex_i2c` | bus I2C compartido con recuperación |
 | `components/flex_display` | LDO + DSI + ST7701 + DPI con 2 framebuffers + puerto LVGL + brillo |
 | `components/flex_touch` | GT911 en su propia tarea + entrada de LVGL |
 | `components/flex_ui` | LVGL: sistema de diseño y pantallas (Fase 1: pantalla de prueba) |
 | `components/flex_*` (resto) | reservados para las fases siguientes; cada uno dice qué recibirá |
 | `partitions/` | tablas candidatas A y B (provisionales) |
-| `tools/` | build, guardia de grabación, informes y comprobaciones |
+| `tools/` | build, guardia de grabación, informes, comprobaciones y `run_tests.sh` |
+| `tests/` | pruebas de host y de compatibilidad de LittleFS |
 | `sim/` | simulador de la UI en el PC |
-| `docs/` | arquitectura, revisión del chip, particiones, informe de fases |
+| `docs/` | arquitectura, revisión del chip, particiones, informes de fases, especificación de pantallas (`docs/spec/`) |

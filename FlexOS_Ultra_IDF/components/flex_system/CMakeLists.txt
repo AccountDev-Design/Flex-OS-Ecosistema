@@ -1,2 +1,5 @@
-# Componente reservado (Fase 2). Sin codigo todavia.
-idf_component_register()
+idf_component_register(
+    SRCS "src/flex_system.c"
+    INCLUDE_DIRS "include"
+    PRIV_REQUIRES flex_core flex_storage esp_driver_tsens espcoredump esp_psram esp_timer esp_system heap
+)

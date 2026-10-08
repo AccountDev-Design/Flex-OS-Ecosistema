@@ -12,7 +12,9 @@
 #include "flex_display_lvgl.h"
 #include "flex_display_lvgl_service.h"
 #include "flex_i2c.h"
+#include "flex_inbox.h"
 #include "flex_metrics.h"
+#include "flex_storage.h"
 #include "flex_touch.h"
 #include "flex_touch_lvgl.h"
 #include "flex_ui_diag.h"
@@ -25,6 +27,12 @@
 // tarea vuelve a tiempo para el watchdog y para las metricas.
 #define UI_MAX_IDLE_MS      50
 #define METRICS_LOG_EVERY   5
+// Entregas del buzon: hueco para rafagas (resultados de archivos, eventos del
+// bus) y tope por vuelta para que LVGL siga dibujando aunque llegue mucho.
+#define UI_INBOX_DEPTH      48
+#define UI_INBOX_PER_LOOP   16
+// Brillo: misma clave y tipo que la version Arduino (prefs.putInt("bright")).
+#define CFG_BRIGHT          "bright"
 
 static const char *TAG = "flex.ui";
 
@@ -80,6 +88,20 @@ static void diag_get_sys(flex_diag_sys_t *out)
 static void diag_set_brightness(uint8_t pct)
 {
     flex_display_set_brightness(pct);
+    // Solo pasa a la cache; la tarea de almacenamiento lo graba al soltar el
+    // deslizador (escritura diferida), nunca desde aqui.
+    flex_cfg_set_i32(CFG_BRIGHT, pct);
+}
+
+static uint8_t saved_brightness(void)
+{
+    int32_t v = flex_cfg_get_i32(CFG_BRIGHT, CONFIG_FLEX_BACKLIGHT_DEFAULT_PCT);
+    if (v < 5) {
+        v = 5;   // un valor raro guardado no deja la pantalla a oscuras
+    } else if (v > 100) {
+        v = 100;
+    }
+    return (uint8_t)v;
 }
 
 static flex_diag_ops_t s_diag_ops = {
@@ -119,6 +141,13 @@ static void ui_task(void *arg)
         }
     }
 
+    // Despues de flex_display_init(): la notificacion de esta tarea la dan
+    // tanto el fin de cuadro como el buzon (ver flex_display_lvgl_idle).
+    if (flex_inbox_init(UI_INBOX_DEPTH, xTaskGetCurrentTaskHandle()) != ESP_OK) {
+        ESP_LOGE(TAG, "sin buzon de UI: los servicios no podran entregar resultados");
+    }
+    flex_display_set_brightness(saved_brightness());
+
     lv_init();
     lv_tick_set_cb(tick_ms);
     lv_display_t *disp = flex_display_lvgl_create();
@@ -139,6 +168,7 @@ static void ui_task(void *arg)
     bool wdt = esp_task_wdt_add(NULL) == ESP_OK;
     for (;;) {
         int64_t t0 = esp_timer_get_time();
+        size_t delivered = flex_inbox_drain(UI_INBOX_PER_LOOP);
         uint32_t next_ms = lv_timer_handler();
         int64_t t1 = esp_timer_get_time();
         flex_metrics_ui_busy((t1 - t0) - flex_display_lvgl_take_wait_us());
@@ -150,6 +180,9 @@ static void ui_task(void *arg)
         }
         if (next_ms > UI_MAX_IDLE_MS) {
             next_ms = UI_MAX_IDLE_MS;
+        }
+        if (delivered == UI_INBOX_PER_LOOP) {
+            next_ms = 1;   // quedan entregas: otra vuelta enseguida
         }
         flex_display_lvgl_idle(next_ms ? next_ms : 1);
     }

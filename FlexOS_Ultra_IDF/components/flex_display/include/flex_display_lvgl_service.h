@@ -7,9 +7,10 @@
 extern "C" {
 #endif
 
-// Duerme hasta max_ms. Si hay un cambio de framebuffer pendiente, duerme en el
-// aviso de fin de cuadro y lo completa en cuanto llega (asi una pantalla quieta
-// tambien termina su ultimo cuadro y enciende el retroiluminado).
+// Duerme hasta max_ms en la notificacion de la tarea de UI (la dan el fin de
+// cuadro y el buzon). Si habia un cambio de framebuffer pendiente y ya se
+// estreno, lo completa (asi una pantalla quieta tambien termina su ultimo
+// cuadro y enciende el retroiluminado).
 void flex_display_lvgl_idle(uint32_t max_ms);
 
 // Tiempo que la tarea de UI ha pasado bloqueada esperando fin de cuadro dentro

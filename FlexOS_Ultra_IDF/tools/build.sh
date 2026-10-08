@@ -56,4 +56,5 @@ idf.py -B "$DIR" \
 
 python3 tools/check_sdkconfig.py --build "$DIR" "${FRAGS[@]}"
 python3 tools/check_lvgl_only.py
+python3 tools/check_portable.py
 python3 tools/size_report.py "$DIR"

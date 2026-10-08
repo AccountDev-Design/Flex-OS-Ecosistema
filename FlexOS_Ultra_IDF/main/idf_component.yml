@@ -6,3 +6,6 @@ dependencies:
   lvgl/lvgl:
     git: https://github.com/lvgl/lvgl.git
     version: v9.6.0
+  joltwallet/littlefs:
+    git: https://github.com/joltwallet/esp_littlefs.git
+    version: v1.22.3
