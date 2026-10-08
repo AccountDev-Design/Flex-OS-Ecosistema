@@ -226,3 +226,15 @@ void flex_system_get(flex_sys_snapshot_t *o)
     o->boot_count = 7;
     o->samples = 1;
 }
+
+// ---- pantalla (retroiluminado y panel) ----------------------------------------
+#include "flex_display.h"
+static uint8_t s_bright = 80, s_raw = 80;
+static bool s_bl_on = true, s_panel_on = true;
+void flex_display_set_brightness(uint8_t pct) { s_bright = pct < 5 ? 5 : pct > 100 ? 100 : pct; }
+uint8_t flex_display_get_brightness(void) { return s_bright; }
+void flex_display_backlight_enable(bool on) { s_bl_on = on; s_raw = on ? s_bright : 0; }
+void flex_display_backlight_raw(uint8_t pct) { s_raw = pct; s_bl_on = pct > 0; }
+void flex_display_panel_on(bool on) { s_panel_on = on; }
+uint8_t sim_display_backlight(void) { return s_bl_on ? s_raw : 0; }
+bool sim_display_panel_on(void) { return s_panel_on; }

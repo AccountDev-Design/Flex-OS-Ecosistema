@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "flex_storage.h"
+#include "flex_touch_lvgl.h"
 #include "lvgl.h"
 #include "ui_sim.h"
 
@@ -37,12 +38,19 @@ static void flush_cb(lv_display_t *d, const lv_area_t *a, uint8_t *px)
     lv_display_flush_ready(d);
 }
 
+// Como el GT911: un cuadro por lectura mientras hay dedos y UNO de "0 dedos"
+// al levantarlos. Pasa por el mismo arbitraje que en la placa.
+static bool s_was_down;
 static void indev_read(lv_indev_t *i, lv_indev_data_t *d)
 {
-    (void)i;
-    d->point.x = s_touch.x;
-    d->point.y = s_touch.y;
-    d->state = s_touch.pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    int ev = -1;
+    if (s_touch.pressed) {
+        ev = 1;
+    } else if (s_was_down) {
+        ev = 0;
+    }
+    s_was_down = s_touch.pressed;
+    flex_touch_feed(i, d, ev, s_touch.x, s_touch.y, s_touch.pressed ? (s_touch.fingers ? s_touch.fingers : 1) : 0);
 }
 
 void sim_run(uint32_t ms)
@@ -61,6 +69,15 @@ void sim_touch(int x, int y, bool pressed)
     s_touch.x = x;
     s_touch.y = y;
     s_touch.pressed = pressed;
+    s_touch.fingers = 1;
+}
+
+void sim_touch_n(int x, int y, int fingers)
+{
+    s_touch.x = x;
+    s_touch.y = y;
+    s_touch.pressed = fingers > 0;
+    s_touch.fingers = fingers;
 }
 
 void sim_tap(int x, int y)

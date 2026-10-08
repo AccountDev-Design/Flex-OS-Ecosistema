@@ -11,6 +11,7 @@
 #include "flex_i18n.h"
 #include "flex_icons.h"
 #include "flex_theme.h"
+#include "flex_touch_lvgl.h"
 #include "flex_wallmgr.h"
 
 // Transiciones (AppFramework.h:821-961)
@@ -316,7 +317,7 @@ void flex_app_open(int id, const lv_area_t *from_icon)
     s_fg = id;
     s_state = FLEX_SH_APP;
     flex_navbar_set_ctx(FLEX_NAV_APP);
-    lv_indev_reset(NULL, NULL);   // touchDropAll: el dedo que abrio no toca la app
+    flex_touch_drop_all();   // touchDropAll: el dedo que abrio no toca la app
     card_run(true, id, from_icon);
 }
 
@@ -417,6 +418,7 @@ void flex_shell_show_home(void)
 void flex_shell_lock(void)
 {
     flex_auth_abort();   // una clave a medias no sobrevive a bloquear
+    flex_lock_set_return_app(-1);
     suspend_fg();
     flex_lock_reset();
     lv_obj_set_hidden(s_lock, false);
@@ -506,6 +508,7 @@ void flex_shell_start(void)
     s_last_minute = flex_clock_minute();
     lv_timer_create(minute_tick, 1000, NULL);
     lv_screen_load(s_scr);
+    flex_power_init();
     flex_shell_lock();
 }
 

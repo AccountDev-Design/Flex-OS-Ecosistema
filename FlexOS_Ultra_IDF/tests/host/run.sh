@@ -20,6 +20,12 @@ python3 ref/extract_arduino.py "$OUT/ref_glass.inc" \
     FlexOS_Ultra_Gfx.h:rgb565,isqrt32 \
     FlexOS_Ultra_Theme.h:glassBuf,glLine,un565,pk565,glassLuma,GLB_RMAX,GLB_STRIP,glbRecip,glbSR,glbRing,glassBlur,glInset,GLASS_TINT_DIFF_MAX,GLASS_LVL_DEF,GLASS_LVL_STEP,gGlassLvl,gGlR,gGlSpec,glassLevelApply,gGlMinMix,glassTintMix,glassShadeRow
 
+python3 ref/extract_arduino.py "$OUT/ref_touch.inc" \
+    FlexOS_Ultra_Types.h:Touch,SUSPEND_ON,SUSP_TAP_WINDOW_MS,SUSP_TAP_GAP_MS,SUSP_TAP_MAX_MS,SUSP_TAP_FRAMES \
+    FlexOS_Ultra_HAL.h:gtFingers,gtFingersMs \
+    FlexOS_Ultra_Touch.h:T,gTouchSwallow,gTouchSwallowSeenMs,KIOSK_ON,kioskOn,kioskExX,KIOSK_BADGE_X,KIOSK_BADGE_Y,KIOSK_BADGE_S,KIOSK_EXIT_PAD,kioskInExcluded,kioskInExit,gSuspOn,gTouchPinchUsed,gTouchOwnsTwoFinger,gEpAct,gEpT0,gEpRun2,gEpHad2,gEpHad3,gTap2Ms,gTap1Ms,gSuspSwallow,gTouchHeld,suspGestureUpdate,tDoRelease,flexPollTouch \
+    FlexOS_Ultra_AppFramework.h:touchDropAll
+
 python3 ref/extract_arduino.py "$OUT/ref_home.inc" \
     FlexOS_Ultra_Types.h:HOME_WG_MAX,HOME_WG_MAX_V1,HomeWidget,WG_NONE,WgDesc \
     FlexOS_Ultra_Prefs.h:HOME_EMPTY,HOME_PKG_BASE,gAppFav,gAppHidden,gAppLock,homeIsPkg,homePkgSlot,appIsFav,appIsHidden \
@@ -35,22 +41,23 @@ python3 ref/extract_arduino.py "$OUT/ref_home_load.inc" \
     FlexOS_Ultra_AppFramework.h:drawerRegistryDefaults,drawerRegistryAdopt \
     FlexOS_Ultra_Home.h:homeFirstFree,homePageAppendQuiet,homeFirstFreeGrow,gHomePkgSeen,homePkgSeen,homePkgMarkSeen,homeOrderNormalize,homeOrderLoad
 
-SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c
+SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c
       $ROOT/components/flex_storage/src/flex_kv.c
       $ROOT/components/flex_storage/src/flex_fs_path.c
       $ROOT/components/flex_ui/src/theme/flex_wallpaper.c
       $ROOT/components/flex_ui/src/theme/flex_glass_math.c
       $ROOT/components/flex_ui/src/shell/flex_home_model.c
+      $ROOT/components/flex_touch/src/flex_touch_arb.c
       stub_cfg.c)
 INC=(-I. -I$ROOT/components/flex_storage/include -I$ROOT/components/flex_storage/src
      -I$ROOT/components/flex_display/src -I$ROOT/components/flex_ui/src/theme
-     -I$ROOT/components/flex_ui/src/shell -I$ROOT/components/flex_ui/src/widgets -I../../sim/stubs/include)
+     -I$ROOT/components/flex_ui/src/shell -I$ROOT/components/flex_ui/src/widgets -I$ROOT/components/flex_touch/include -I../../sim/stubs/include)
 CFLAGS=(-O1 -g -Wall -Wextra -Werror -pthread)
 
 build() {   # $1 = sufijo, resto = flags de sanitizador
     local sfx=$1; shift
     local refs=()
-    for r in wall glass home home_load; do
+    for r in wall glass home home_load touch; do
         c++ -std=gnu++17 -O1 -g -w "$@" -Iref -I"$OUT" -c ref/ref_${r}_main.cpp -o "$OUT/ref_${r}_$sfx.o"
         refs+=("$OUT/ref_${r}_$sfx.o")
     done

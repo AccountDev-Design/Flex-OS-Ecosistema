@@ -27,6 +27,14 @@ uint8_t flex_display_get_brightness(void);
 // LVGL tras mostrar el primer cuadro) o lo apaga sin olvidar el brillo.
 void    flex_display_backlight_enable(bool on);
 
+// Fundidos de la suspension (blWritePct de Arduino): 0..100 lineal, sin suelo
+// y sin cambiar el brillo elegido. flex_display_backlight_enable(true) vuelve
+// al brillo del usuario con su curva.
+void    flex_display_backlight_raw(uint8_t pct);
+// DISPOFF / DISPON del ST7701 (la suspension apaga el panel tras el fundido).
+// Solo tarea de UI.
+void    flex_display_panel_on(bool on);
+
 // Fines de cuadro del DPI contados por la ISR desde el arranque.
 uint32_t flex_display_vsync_count(void);
 

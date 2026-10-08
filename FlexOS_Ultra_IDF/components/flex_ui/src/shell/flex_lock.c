@@ -1,6 +1,8 @@
 // Flex OS Ultra · pantalla de bloqueo (docs/spec/01a §4, Home.h:502-545 y 1415-1500).
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
+#include "flex_app.h"
 #include "flex_auth.h"
 #include "flex_clock.h"
 #include "flex_frame.h"
@@ -62,10 +64,24 @@ static void animate_to(int32_t target, bool unlock)
     lv_anim_start(&a);
 }
 
+static int s_ret_app = -1;   // gSuspRetApp: app a la que volver tras despertar y acertar
+
 static void verify_ok(void *ctx)
 {
     (void)ctx;
     flex_shell_unlocked();
+}
+
+static void verify_ok_app(void *ctx)
+{
+    // LSU_AFTER_OPENAPP: escritorio y la app, con su animacion de apertura
+    flex_shell_unlocked();
+    flex_app_open((int)(intptr_t)ctx, NULL);
+}
+
+void flex_lock_set_return_app(int app)
+{
+    s_ret_app = app;
 }
 
 static void verify_cancel(void *ctx)
@@ -76,9 +92,17 @@ static void verify_cancel(void *ctx)
 
 static void verify_open(void)
 {
-    // Con clave el escritorio nunca se revela sin verificar
-    static const flex_auth_req_t req = {
-        .from_lock = true, .reveal = true, .on_ok = verify_ok, .on_cancel = verify_cancel};
+    // Con clave el escritorio nunca se revela sin verificar. Si el bloqueo lo
+    // puso el despertar con una app abierta, al acertar se vuelve a ella (sin
+    // revelado); el destino se consume: cancelar y reintentar va al escritorio.
+    int app = s_ret_app;
+    s_ret_app = -1;
+    flex_auth_req_t req = {.from_lock = true, .reveal = true, .on_ok = verify_ok, .on_cancel = verify_cancel};
+    if (app >= 0) {
+        req.reveal = false;
+        req.on_ok = verify_ok_app;
+        req.ctx = (void *)(intptr_t)app;
+    }
     flex_auth_verify(&req);
 }
 
@@ -202,6 +226,16 @@ void flex_lock_refresh(void)
     lv_label_set_text(s_clock, cs);
     lv_label_set_text(s_date, ds);
     lv_image_set_src(s_wall, flex_wallmgr_image(FLEX_WALL_LOCK));
+}
+
+void flex_lock_drop_in(void)
+{
+    // autoLockNow: el bloqueo baja desde arriba (animateTo(SCR_H, 0))
+    if (!s_root) {
+        return;
+    }
+    set_off(NULL, 800);
+    animate_to(0, false);
 }
 
 void flex_lock_reset(void)

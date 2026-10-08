@@ -29,6 +29,7 @@ LVGL_ALLOWED = (
     "components/flex_display/src/flex_display_lvgl.c",
     "components/flex_display/include/flex_display_lvgl.h",
     "components/flex_touch/src/flex_touch_lvgl.c",
+    "components/flex_touch/src/flex_touch_feed.c",   # arbitraje del tactil -> indev de LVGL
     "components/flex_touch/include/flex_touch_lvgl.h",
 )
 # main/ solo puede ver la API publica de flex_ui (flex_ui.h), nunca LVGL.

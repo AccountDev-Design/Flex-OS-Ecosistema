@@ -45,6 +45,15 @@ bool flex_home_icon_area(int app_id, lv_area_t *out); // icono visible de la app
 lv_obj_t *flex_lock_create(lv_obj_t *parent);
 void flex_lock_refresh(void);
 void flex_lock_reset(void);                           // vuelve a la posicion de reposo
+void flex_lock_drop_in(void);                         // cae desde arriba (bloqueo por inactividad)
+void flex_lock_set_return_app(int app);               // al acertar, volver a esta app (-1: escritorio)
+
+// Energia (flex_power.c): suspension por doble toque y bloqueo por inactividad
+void flex_power_init(void);
+bool flex_power_suspended(void);
+void flex_power_suspend(void);
+void flex_power_wake(void);
+uint32_t flex_power_autolock_ms(void);
 
 // Pantallas superpuestas opcionales (si su modulo no esta, no hacen nada).
 void flex_drawer_open(void);

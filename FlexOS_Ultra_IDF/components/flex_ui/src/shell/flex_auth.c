@@ -18,6 +18,7 @@
 #include "flex_shell.h"
 #include "flex_storage.h"
 #include "flex_theme.h"
+#include "flex_touch_lvgl.h"
 #include "flex_wallmgr.h"
 
 #define FADE_OUT_MS   190
@@ -417,7 +418,7 @@ static void reveal_done(lv_anim_t *a)
 {
     (void)a;
     flex_shell_home_shift(0);
-    lv_indev_reset(NULL, NULL);   // el dedo del ultimo digito no abre un icono
+    flex_touch_drop_all();   // el dedo del ultimo digito no abre un icono
     finish_ok();
 }
 

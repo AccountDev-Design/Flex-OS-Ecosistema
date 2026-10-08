@@ -133,6 +133,20 @@ void flex_display_backlight_enable(bool on)
     bl_write(on ? pct_to_duty(s_brightness) : 0);
 }
 
+void flex_display_backlight_raw(uint8_t pct)
+{
+    pct = pct > 100 ? 100 : pct;
+    s_bl_on = pct > 0;
+    bl_write((uint32_t)pct * BL_DUTY_MAX / 100U);
+}
+
+void flex_display_panel_on(bool on)
+{
+    if (s_io) {
+        esp_lcd_panel_io_tx_param(s_io, on ? ST7701_CMD_DISPON : ST7701_CMD_DISPOFF, NULL, 0);
+    }
+}
+
 uint32_t flex_display_vsync_count(void)
 {
     return g_flex_dsi.vsync_count;

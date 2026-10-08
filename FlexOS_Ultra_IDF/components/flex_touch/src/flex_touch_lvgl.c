@@ -5,43 +5,31 @@
 #include "flex_touch.h"
 
 // El indev se lee con el mismo ritmo que la tarea del tactil publica cuadros.
+// Lo que llega a LVGL pasa antes por el arbitraje (flex_touch_feed.c).
 #define READ_PERIOD_MS 8
 
 static uint32_t s_seq;
-static int32_t s_x, s_y;
-static bool s_pressed;
+static bool s_shown_down;
 
 static void read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
-    (void)indev;
     flex_touch_frame_t f;
-    if (!flex_touch_get_frame(&f)) {
-        data->point.x = s_x;
-        data->point.y = s_y;
-        data->state = LV_INDEV_STATE_RELEASED;
-        return;
-    }
-    // Mismo criterio que la version Arduino (FlexOS_Ultra_Touch.h): con un dedo
-    // apoyado el GT911 publica cuadros continuamente; si pasan mas de 100 ms sin
-    // ninguno, el dedo se da por levantado.
-    bool pressed = f.count > 0 && esp_timer_get_time() - f.t_read_us <= FLEX_TOUCH_STALE_US;
-    bool moved = pressed && (f.pts[0].x != s_x || f.pts[0].y != s_y);
-    if (f.seq != s_seq) {
+    int ev = -1, x = 0, y = 0, n = 0;
+    if (flex_touch_get_frame(&f) && f.seq != s_seq) {
+        // Cuadro nuevo del GT911 (como gtPoll de Arduino: 1 con dedo, 0 sin dedos)
         s_seq = f.seq;
-        // Solo cuenta para la latencia un cuadro que cambia algo visible:
-        // pulsar, soltar o mover. Un dedo quieto no genera un cuadro nuevo.
-        if (pressed != s_pressed || moved) {
-            flex_metrics_input(f.t_read_us, esp_timer_get_time());
-        }
+        n = f.count;
+        ev = n > 0 ? 1 : 0;
+        x = f.pts[0].x;
+        y = f.pts[0].y;
     }
-    if (pressed) {
-        s_x = f.pts[0].x;
-        s_y = f.pts[0].y;
+    flex_touch_feed(indev, data, ev, x, y, n);
+    // Latencia toque -> pantalla: solo cuadros que cambian algo visible
+    bool down = data->state == LV_INDEV_STATE_PRESSED;
+    if (ev != -1 && (down != s_shown_down || down)) {
+        flex_metrics_input(f.t_read_us, esp_timer_get_time());
     }
-    s_pressed = pressed;
-    data->point.x = s_x;
-    data->point.y = s_y;
-    data->state = pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    s_shown_down = down;
 }
 
 lv_indev_t *flex_touch_lvgl_create(lv_display_t *disp)

@@ -54,6 +54,8 @@ add_executable(flexos_ui_sim
     stubs/flex_passcode_async_stub.c
     ${FLEX_ROOT}/components/flex_storage/src/flex_kv.c
     ${FLEX_ROOT}/components/flex_security/src/flex_passcode.c
+    ${FLEX_ROOT}/components/flex_touch/src/flex_touch_arb.c
+    ${FLEX_ROOT}/components/flex_touch/src/flex_touch_feed.c
     ${UI_THEME} ${UI_WIDGETS} ${UI_FONTS} ${UI_SHELL} ${UI_APPS} ${UI_I18N}
 )
 target_include_directories(flexos_ui_sim PRIVATE
@@ -70,6 +72,8 @@ target_include_directories(flexos_ui_sim PRIVATE
     ${FLEX_ROOT}/components/flex_storage/include
     ${FLEX_ROOT}/components/flex_system/include
     ${FLEX_ROOT}/components/flex_security/include
+    ${FLEX_ROOT}/components/flex_touch/include
+    ${FLEX_ROOT}/components/flex_display/include
 )
 target_compile_definitions(flexos_ui_sim PRIVATE FLEX_SIM=1 FLEX_HOST_TEST=1)
 target_compile_options(flexos_ui_sim PRIVATE -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
