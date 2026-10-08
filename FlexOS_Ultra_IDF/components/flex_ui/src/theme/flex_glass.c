@@ -16,6 +16,9 @@ typedef struct {
     int8_t material;          // -1 tema, 0 plano, 1 vidrio, 2 estilo de icono
     uint8_t min_mix;
     bool flat_sheen;
+    bool flat_custom;         // color/opacidad propios en Plano
+    lv_color_t flat_col;
+    lv_opa_t flat_opa;
     lv_image_dsc_t view;      // vista sobre el backdrop (vive mientras viva el objeto)
     lv_area_t mix_area;       // area con la que se calculo mix
     uint8_t mix;
@@ -134,8 +137,8 @@ static void draw_cb(lv_event_t *e)
     rd.radius = rad;
 
     if (!glass) {
-        rd.bg_color = flat_color(s);
-        rd.bg_opa = s->opa;
+        rd.bg_color = s->flat_custom ? s->flat_col : flat_color(s);
+        rd.bg_opa = s->flat_custom ? scale(s->flat_opa, s->opa) : s->opa;
         lv_draw_rect(layer, &rd, &c);
         if (s->flat_sheen) {
             // Brillo de los iconos planos: mitad superior, blanco a22 (Icons.h:77)
@@ -307,6 +310,17 @@ void flex_surface_set_flat_sheen(lv_obj_t *obj, bool on)
     surf_t *s = get(obj);
     if (s) {
         s->flat_sheen = on;
+        lv_obj_invalidate(obj);
+    }
+}
+
+void flex_surface_set_flat(lv_obj_t *obj, lv_color_t color, lv_opa_t opa)
+{
+    surf_t *s = get(obj);
+    if (s) {
+        s->flat_custom = true;
+        s->flat_col = color;
+        s->flat_opa = opa;
         lv_obj_invalidate(obj);
     }
 }

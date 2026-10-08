@@ -62,6 +62,7 @@ typedef struct {
 } flex_app_def_t;
 
 const flex_app_def_t *flex_app_def(int id);
+uint32_t flex_app_factory_fav(void);   // bitmask de APP_DEF_FAV (0x283FF)
 const char *flex_app_cat_name(int cat);
 
 // Navegacion del sistema (Core.h:551-704)

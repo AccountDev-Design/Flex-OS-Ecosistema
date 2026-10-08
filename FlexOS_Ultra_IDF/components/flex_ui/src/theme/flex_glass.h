@@ -48,6 +48,9 @@ void flex_surface_set_opa(lv_obj_t *obj, lv_opa_t opa);
 void flex_surface_force_material(lv_obj_t *obj, int material);
 // Suelo de tinte para legibilidad sobre contenido ajeno (banner: 150).
 void flex_surface_set_min_mix(lv_obj_t *obj, uint8_t min_mix);
+// Color y opacidad del estilo Plano distintos de los del rol (p. ej. tarjetas
+// del bloqueo: TH_SURF a215; dock: TH_SURF a90).
+void flex_surface_set_flat(lv_obj_t *obj, lv_color_t color, lv_opa_t opa);
 // Brillo superior del estilo Plano de los iconos (blanco a22 en la mitad de arriba).
 void flex_surface_set_flat_sheen(lv_obj_t *obj, bool on);
 
