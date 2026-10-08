@@ -39,6 +39,21 @@ static void publish_info(const gt911_t *gt, bool present)
     portEXIT_CRITICAL(&s_mux);
 }
 
+// Publica "ningun dedo" si lo ultimo publicado era un toque. Se usa cuando los
+// datos del GT911 dejan de ser fiables (lecturas fallidas seguidas o reinicio
+// del chip, que ademas tira el cuadro de "dedo levantado" que tuviera pendiente):
+// sin esto LVGL veria el dedo pulsado para siempre.
+static void publish_release(uint32_t *seq)
+{
+    portENTER_CRITICAL(&s_mux);
+    if (s_have_frame && s_frame.count) {
+        s_frame.count = 0;
+        s_frame.seq = ++*seq;
+        s_frame.t_read_us = esp_timer_get_time();
+    }
+    portEXIT_CRITICAL(&s_mux);
+}
+
 static void wait_ms(uint32_t ms)
 {
     // Esperas largas en trozos para no hacer saltar el watchdog de tareas.
@@ -95,6 +110,9 @@ static void touch_task(void *arg)
             portENTER_CRITICAL(&s_mux);
             s_info.read_errors++;
             portEXIT_CRITICAL(&s_mux);
+            if (fails == BACKOFF_AFTER) {
+                publish_release(&seq);
+            }
             // El bus ya se recupera solo en flex_i2c. Si aun asi el GT911 no
             // vuelve, se le da su pulso de reset (como la version Arduino) y se
             // le busca en sus dos direcciones. Nunca se rinde.
@@ -104,7 +122,9 @@ static void touch_task(void *arg)
                 portENTER_CRITICAL(&s_mux);
                 s_info.chip_resets++;
                 portEXIT_CRITICAL(&s_mux);
-                if (gt911_reset_and_find(&gt) == ESP_OK) {
+                bool found = gt911_reset_and_find(&gt) == ESP_OK;
+                publish_release(&seq);
+                if (found) {
                     fails = 0;
                     publish_info(&gt, true);
                 }

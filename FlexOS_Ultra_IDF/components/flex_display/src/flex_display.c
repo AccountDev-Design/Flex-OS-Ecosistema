@@ -71,6 +71,8 @@ static uint32_t pct_to_duty(uint8_t pct)
 static void bl_write(uint32_t duty)
 {
     if (!s_bl_ready) {
+        // Sin PWM: encendido fijo por GPIO, como el respaldo de la version Arduino.
+        gpio_set_level(FLEX_PIN_LCD_BL, duty ? 1 : 0);
         return;
     }
     ledc_set_duty(BL_MODE, BL_CHANNEL, duty);
@@ -193,7 +195,13 @@ esp_err_t flex_display_init(void)
 
     // 0) Retroiluminado apagado durante todo el arranque (evita el destello blanco)
     if (backlight_init() != ESP_OK) {
-        ESP_LOGW(TAG, "sin PWM de brillo: el retroiluminado queda apagado");
+        ESP_LOGW(TAG, "sin PWM de brillo: el retroiluminado ira encendido/apagado por GPIO");
+        const gpio_config_t bl = {
+            .pin_bit_mask = 1ULL << FLEX_PIN_LCD_BL,
+            .mode = GPIO_MODE_OUTPUT,
+        };
+        gpio_config(&bl);
+        gpio_set_level(FLEX_PIN_LCD_BL, 0);
     }
 
     // 1) LDO interno que alimenta el PHY MIPI. Antes que el bus: el driver del

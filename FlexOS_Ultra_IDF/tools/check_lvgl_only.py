@@ -31,13 +31,22 @@ LVGL_ALLOWED = (
     "components/flex_touch/src/flex_touch_lvgl.c",
     "components/flex_touch/include/flex_touch_lvgl.h",
 )
+# main/ solo puede ver la API publica de flex_ui (flex_ui.h), nunca LVGL.
+UI_CONSUMERS = ("main/app_main.c",)
 CANVAS_ALLOWED: tuple = ()
 
 PANEL_API = re.compile(
     r"\b(esp_lcd_panel_draw_bitmap|esp_lcd_dpi_panel_get_frame_buffer|esp_lcd_new_panel_dpi"
     r"|esp_lcd_new_dsi_bus|esp_lcd_new_panel_io_dbi)\s*\("
 )
-LVGL_INCLUDE = re.compile(r'#\s*include\s*[<"](lvgl\.h|lvgl/lvgl\.h|src/[^">]*lv_[^">]*\.h)[">]')
+# Cualquier cabecera de LVGL (lvgl.h, lvgl_private.h, core/lv_obj.h, lvgl__lvgl/...)
+# o de los puertos que la reexportan.
+LVGL_INCLUDE = re.compile(
+    r'#\s*include\s*[<"]([^">]*/)?(lvgl[^">/]*\.h|lv_[^">/]*\.h|flex_display_lvgl\.h|flex_touch_lvgl\.h'
+    r'|flex_ui[^">/]*\.h)[">]|#\s*include\s*[<"]lvgl__lvgl/'
+)
+# Llamadas o tipos de LVGL fuera de la UI (aunque llegaran por otra cabecera).
+LVGL_SYMBOL = re.compile(r"\blv_[a-z0-9_]+\s*\(|\blv_[a-z0-9_]+_t\b")
 ARDUINO_GFX_INCLUDE = re.compile(r'#\s*include\s*[<"](FlexOS_Ultra_[^">]*|Arduino\.h)[">]')
 ARDUINO_GFX_PRIMITIVE = re.compile(
     r"\b(fillRect|drawRect|drawText|drawPixel|fillRoundRect|drawRoundRect|fillCircle|drawCircle"
@@ -69,8 +78,10 @@ def main() -> int:
             for no, line in enumerate(code.splitlines(), 1):
                 if PANEL_API.search(line) and not r.startswith(PANEL_OWNERS):
                     problems.append(f"{r}:{no}: API del panel fuera de flex_display: {line.strip()}")
-                if LVGL_INCLUDE.search(line) and not r.startswith(LVGL_ALLOWED):
-                    problems.append(f"{r}:{no}: lvgl.h incluido fuera de la UI/puertos: {line.strip()}")
+                if LVGL_INCLUDE.search(line) and not r.startswith(LVGL_ALLOWED + UI_CONSUMERS):
+                    problems.append(f"{r}:{no}: cabecera de LVGL fuera de la UI/puertos: {line.strip()}")
+                if LVGL_SYMBOL.search(line) and not r.startswith(LVGL_ALLOWED):
+                    problems.append(f"{r}:{no}: uso de LVGL fuera de la UI/puertos: {line.strip()}")
                 if ARDUINO_GFX_INCLUDE.search(line):
                     problems.append(f"{r}:{no}: cabecera de la version Arduino: {line.strip()}")
                 if ARDUINO_GFX_PRIMITIVE.search(line):

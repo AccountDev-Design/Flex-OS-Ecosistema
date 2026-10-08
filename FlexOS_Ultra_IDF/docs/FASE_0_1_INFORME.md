@@ -136,3 +136,18 @@ Todo. En particular:
 4. Medida de batería (pin/ADC o *fuel gauge*).
 5. Versión del firmware esp-hosted del C6.
 6. ¿El INT del GT911 está cableado a un GPIO? (permitiría leer por interrupción).
+
+## Revisión adversarial (5 revisores + verificadores contra el código fuente real)
+
+| Hallazgo | Severidad | Resultado | Corrección |
+|---|---|---|---|
+| Pulsación "pegada": si el GT911 deja de responder con un dedo apoyado, LVGL seguía viendo el toque (y tras reiniciar el chip, nunca llegaba la liberación). Lo encontraron 3 revisores por separado | media | confirmado | La tarea del táctil publica "ningún dedo" tras 3 lecturas fallidas y tras reiniciar el GT911; el indev y la pantalla de prueba dan por levantado un dedo sin cuadros en 100 ms (regla de la versión Arduino) |
+| `check_sdkconfig.py` no entendía los grupos *choice*: `build.sh --release` fallaba siempre | media | confirmado (reproducido) | Lee el árbol Kconfig del build (`kconfig_menus.json`), entiende los *choice* y además marca como error cualquier símbolo inexistente, también en las líneas "is not set" |
+| `flash_guard.py` comprobaba el CSV y no la tabla que de verdad graba | baja | confirmado | Decodifica `partition-table.bin` y comprueba que ningún archivo a grabar pise NVS o LittleFS |
+| Un sdkconfig existente de otra variante (release/dev o revisión) se usaba sin avisar | baja | confirmado | CMake aborta con la instrucción para corregirlo |
+| `check_lvgl_only.py` no veía LVGL entrando por otras cabeceras ni llamadas `lv_*` | baja | confirmado | Detecta cualquier cabecera de LVGL o de los puertos y cualquier llamada/tipo `lv_*` fuera de la UI |
+| Mensaje incorrecto de la guardia para un chip v0.0 | baja | confirmado | Indica el cambio a `REV_MIN_0` y a flash de 40 MHz |
+| El tiempo límite de fin de cuadro "perdía" un aviso válido | baja | refutado | — |
+| Exceso de log con el bus I2C trabado | baja | refutado | — |
+
+Además: si el PWM del brillo no pudiera configurarse, el retroiluminado se enciende por GPIO (respaldo de la versión Arduino).

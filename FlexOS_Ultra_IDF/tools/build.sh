@@ -54,6 +54,6 @@ idf.py -B "$DIR" \
     -D FLEX_BUILD="$FLAVOR" \
     build
 
-python3 tools/check_sdkconfig.py "$DIR/sdkconfig" "${FRAGS[@]}"
+python3 tools/check_sdkconfig.py --build "$DIR" "${FRAGS[@]}"
 python3 tools/check_lvgl_only.py
 python3 tools/size_report.py "$DIR"

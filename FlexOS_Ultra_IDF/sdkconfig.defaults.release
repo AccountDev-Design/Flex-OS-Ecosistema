@@ -5,3 +5,7 @@ CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
 CONFIG_ESP_TASK_WDT_PANIC=y
 CONFIG_LV_LOG_LEVEL_ERROR=y
 # CONFIG_FLEX_DEBUG_METRICS is not set
+
+# Los miembros de los grupos "choice" de la base se desmarcan de forma explicita
+# CONFIG_LOG_DEFAULT_LEVEL_INFO is not set
+# CONFIG_LV_LOG_LEVEL_WARN is not set

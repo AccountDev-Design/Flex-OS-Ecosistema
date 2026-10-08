@@ -21,7 +21,10 @@ static void read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         data->state = LV_INDEV_STATE_RELEASED;
         return;
     }
-    bool pressed = f.count > 0;
+    // Mismo criterio que la version Arduino (FlexOS_Ultra_Touch.h): con un dedo
+    // apoyado el GT911 publica cuadros continuamente; si pasan mas de 100 ms sin
+    // ninguno, el dedo se da por levantado.
+    bool pressed = f.count > 0 && esp_timer_get_time() - f.t_read_us <= FLEX_TOUCH_STALE_US;
     bool moved = pressed && (f.pts[0].x != s_x || f.pts[0].y != s_y);
     if (f.seq != s_seq) {
         s_seq = f.seq;

@@ -32,11 +32,17 @@ endif()
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(flexos_ultra_idf)
 
-# El sdkconfig en uso tiene que corresponder a la revision pedida.
+# El sdkconfig en uso manda sobre los defaults: si no corresponde a la variante
+# pedida, el binario saldria para otra revision o con ajustes de otra variante
+# sin que nada lo dijera. Se aborta con la instruccion para corregirlo.
+set(_flex_fix "Borra ese sdkconfig o compila con tools/build.sh (un directorio y un sdkconfig por variante).")
 if(FLEX_P4_REV STREQUAL "lt_v3" AND NOT CONFIG_ESP32P4_SELECTS_REV_LESS_V3)
-    message(WARNING "FLEX_P4_REV=lt_v3 pero el sdkconfig existente es para v3.x. "
-                    "Borra ese sdkconfig o usa tools/build.sh (un sdkconfig por variante).")
+    message(FATAL_ERROR "FLEX_P4_REV=lt_v3 pero el sdkconfig existente es para chips v3.x. ${_flex_fix}")
 elseif(FLEX_P4_REV STREQUAL "v3" AND CONFIG_ESP32P4_SELECTS_REV_LESS_V3)
-    message(WARNING "FLEX_P4_REV=v3 pero el sdkconfig existente es para chips < v3. "
-                    "Borra ese sdkconfig o usa tools/build.sh (un sdkconfig por variante).")
+    message(FATAL_ERROR "FLEX_P4_REV=v3 pero el sdkconfig existente es para chips < v3. ${_flex_fix}")
+endif()
+if(FLEX_BUILD STREQUAL "release" AND (CONFIG_FLEX_DEBUG_METRICS OR NOT CONFIG_LOG_DEFAULT_LEVEL_WARN))
+    message(FATAL_ERROR "FLEX_BUILD=release pero el sdkconfig existente es de desarrollo. ${_flex_fix}")
+elseif(FLEX_BUILD STREQUAL "dev" AND CONFIG_LOG_DEFAULT_LEVEL_WARN AND NOT CONFIG_FLEX_DEBUG_METRICS)
+    message(FATAL_ERROR "FLEX_BUILD=dev pero el sdkconfig existente es de release. ${_flex_fix}")
 endif()

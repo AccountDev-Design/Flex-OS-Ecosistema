@@ -14,6 +14,8 @@ extern "C" {
 #endif
 
 #define FLEX_TOUCH_MAX_POINTS 5
+// Un cuadro con dedos mas viejo que esto ya no cuenta como toque.
+#define FLEX_TOUCH_STALE_US   (100 * 1000)
 
 typedef struct {
     uint8_t  id;       // track id del GT911 (identifica al dedo entre cuadros)

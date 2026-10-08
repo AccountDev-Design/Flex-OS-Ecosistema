@@ -44,16 +44,23 @@ def fmt(rev):
     return f"v{rev // 100}.{rev % 100}"
 
 
-def parse_table(path):
+def parse_table_bin(path):
+    """Decodifica partition-table.bin, la tabla que de verdad se escribe en 0x8000."""
+    data = path.read_bytes()
     parts = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        c = [x.strip() for x in line.split(",")]
-        if len(c) >= 5:
-            parts[c[0]] = (int(c[3], 0), int(c[4], 0))
+    for i in range(0, len(data) - 31, 32):
+        e = data[i:i + 32]
+        if e[:2] != b"\xAA\x50":   # fin de tabla (0xFF..) o entrada MD5 (0xEB 0xEB)
+            break
+        off = int.from_bytes(e[4:8], "little")
+        size = int.from_bytes(e[8:12], "little")
+        label = e[12:28].split(b"\0", 1)[0].decode("ascii", "replace")
+        parts[label] = (off, size)
     return parts
+
+
+def overlaps(a_off, a_size, b_off, b_size):
+    return a_off < b_off + b_size and b_off < a_off + a_size
 
 
 def main():
@@ -81,13 +88,17 @@ def main():
     rmin, rmax = int(cfg["ESP_REV_MIN_FULL"]), int(cfg["ESP_REV_MAX_FULL"])
     print(f"Build {args.build}: compilado para {fmt(rmin)} .. {fmt(rmax)}")
     if not (rmin <= rev <= rmax):
-        other = "--rev v3" if rev >= 300 else "--rev lt_v3"
-        raise SystemExit(f"NO SE GRABA: el chip es {fmt(rev)} y el binario no arranca en el. "
-                         f"Compila con tools/build.sh {other}.")
+        if rev < rmin and rev < 100:
+            how = ("cambia CONFIG_ESP32P4_REV_MIN_1 por CONFIG_ESP32P4_REV_MIN_0 en sdkconfig.defaults.rev_lt_v3 "
+                   "y CONFIG_ESPTOOLPY_FLASHFREQ_80M por CONFIG_ESPTOOLPY_FLASHFREQ_40M en sdkconfig.defaults "
+                   "(con REV_MIN_0 ESP-IDF no permite flash a 80 MHz), y recompila con tools/build.sh --clean")
+        else:
+            how = "compila con tools/build.sh " + ("--rev v3" if rev >= 300 else "--rev lt_v3")
+        raise SystemExit(f"NO SE GRABA: el chip es {fmt(rev)} y el binario no arranca en el: {how}.")
 
     table_rel = cfg["PARTITION_TABLE_CUSTOM_FILENAME"]
-    table = parse_table(ROOT / table_rel)
-    print(f"Tabla de particiones del build: {table_rel} (PROVISIONAL)")
+    table = parse_table_bin(build / "partition_table" / "partition-table.bin")
+    print(f"Tabla de particiones que se escribe (de partition-table.bin; origen {table_rel}, PROVISIONAL):")
     for name, (off, size) in table.items():
         print(f"  {name:<9} 0x{off:06X}  {size:>9,} B")
     moved = [n for n, area in ARDUINO_DATA.items() if table.get(n) != area]
@@ -96,7 +107,14 @@ def main():
         if not args.acepto_perder_littlefs:
             raise SystemExit("NO SE GRABA: haz copia de los datos y repite con --acepto-perder-littlefs.")
     else:
-        print("NVS y LittleFS quedan en el mismo sitio que en Arduino: no se escriben ni se borran.")
+        print("NVS y LittleFS quedan en el mismo sitio que en Arduino.")
+    files = json.loads((build / "flasher_args.json").read_text())["flash_files"]
+    for off_s, rel in files.items():
+        off, size = int(off_s, 16), (build / rel).stat().st_size
+        for name, (aoff, asize) in ARDUINO_DATA.items():
+            if overlaps(off, size, aoff, asize) and not args.acepto_perder_littlefs:
+                raise SystemExit(f"NO SE GRABA: {rel} (0x{off:X}, {size} B) pisaria {name} de la version Arduino.")
+    print("Ningun archivo a grabar pisa NVS ni LittleFS.")
     if not args.acepto_tabla_provisional:
         raise SystemExit("NO SE GRABA: la tabla A/B aun no es definitiva. Repite con --acepto-tabla-provisional "
                          "si quieres probar esta fase en la placa.")

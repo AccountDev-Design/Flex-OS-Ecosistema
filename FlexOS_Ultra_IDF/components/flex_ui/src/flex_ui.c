@@ -39,7 +39,11 @@ static bool diag_get_touch(flex_diag_touch_t *out)
     if (!flex_touch_get_frame(&f)) {
         return false;
     }
-    out->count = f.count > FLEX_DIAG_MAX_POINTS ? FLEX_DIAG_MAX_POINTS : f.count;
+    uint8_t count = f.count;
+    if (esp_timer_get_time() - f.t_read_us > FLEX_TOUCH_STALE_US) {
+        count = 0;   // mismo criterio que el indev: sin cuadros recientes no hay dedo
+    }
+    out->count = count > FLEX_DIAG_MAX_POINTS ? FLEX_DIAG_MAX_POINTS : count;
     for (uint8_t i = 0; i < out->count; i++) {
         out->pts[i].id = f.pts[i].id;
         out->pts[i].x = (int16_t)f.pts[i].x;
