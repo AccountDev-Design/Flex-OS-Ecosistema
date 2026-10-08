@@ -28,3 +28,5 @@ void test_flex_kv(void);
 void test_flex_kv_threads(void);
 void test_fs_path(void);
 void test_flip_rows(void);
+void test_wallpaper(void);
+void test_glass(void);
