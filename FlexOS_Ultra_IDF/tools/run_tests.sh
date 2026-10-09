@@ -20,7 +20,17 @@ rm -f "$LOG"
 echo "### 3. Simulador de la interfaz"
 cmake -S sim -B sim/build -DCMAKE_BUILD_TYPE=Release >/dev/null
 cmake --build sim/build -j >/dev/null
+mkdir -p sim/out
 sim/build/flexos_sim sim/out | tail -4
+echo "### 3b. Simulador de la interfaz completa (escenas del shell y las apps)"
+UI_LOG=$(mktemp)
+if ! sim/build/flexos_ui_sim sim/out >"$UI_LOG" 2>&1; then
+    grep -E "FALLO|ESTADO INESPERADO" "$UI_LOG"
+    echo "FALLO en las escenas de la interfaz (registro: $UI_LOG)"
+    exit 1
+fi
+grep -E "correct|OK:" "$UI_LOG"
+rm -f "$UI_LOG"
 echo "### 4. Reglas"
 python3 tools/check_lvgl_only.py
 python3 tools/check_portable.py
