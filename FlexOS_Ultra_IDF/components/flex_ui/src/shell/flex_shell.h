@@ -78,6 +78,19 @@ int  flex_recents_app_at(int i);
 bool flex_recents_has_thumb(int i);
 uint32_t flex_app_last_used(int id);   // lv_tick de la ultima vez en primer plano (0 = nunca)
 
+// Panel rapido (flex_qs.c): capa global sobre el escritorio o una app.
+void flex_qs_init(void);              // engancha el tactil (antes de LVGL)
+void flex_qs_open(void);              // abrir con su animacion (pruebas, atajos)
+void flex_qs_close_now(void);         // qsForceClose: sin animacion, descarta la edicion
+bool flex_qs_is_open(void);
+int  flex_qs_panel_y(void);           // borde de la cortina, 0..800
+int  flex_qs_mode(void);              // 0 panel · 1 editor · 2 catalogo
+int  flex_qs_visible_ids(uint8_t *out, int cap);   // controles que se ven ahora
+uint8_t flex_qs_grows(void);
+bool flex_qs_ctl_rect(int id, lv_area_t *out);      // en pantalla, modo actual
+bool flex_qs_group_rect(lv_area_t *out);
+int  flex_qs_catalog_index(int id);                // posicion en "Anadir un control" (-1)
+
 void flex_drawer_open(void);
 void flex_drawer_close_now(void);     // sin animacion (bloquear, suspender)
 bool flex_drawer_is_open(void);

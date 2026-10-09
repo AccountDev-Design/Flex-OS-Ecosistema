@@ -318,6 +318,7 @@ void flex_app_open(int id, const lv_area_t *from_icon)
     if (s_fg >= 0 && s_fg != id) {
         suspend_fg();
     }
+    flex_qs_close_now();
     s_fg = id;
     s_state = FLEX_SH_APP;
     flex_navbar_set_ctx(FLEX_NAV_APP);
@@ -327,6 +328,7 @@ void flex_app_open(int id, const lv_area_t *from_icon)
 
 void flex_app_close(void)
 {
+    flex_qs_close_now();
     int id = s_fg;
     if (id < 0) {
         flex_shell_show_home();
@@ -428,6 +430,7 @@ void flex_sys_recents(void)
         s_overlay->on_recents();
         return;
     }
+    flex_qs_close_now();
     if (s_state == FLEX_SH_APP) {
         suspend_fg();
         flex_shell_show_home();
@@ -477,6 +480,7 @@ lv_obj_t *flex_shell_screen(void)
 
 void flex_shell_show_home(void)
 {
+    flex_qs_close_now();
     s_state = FLEX_SH_HOME;
     lv_obj_set_hidden(s_home, false);
     lv_obj_set_hidden(s_apps, true);
@@ -486,6 +490,7 @@ void flex_shell_show_home(void)
 void flex_shell_lock(void)
 {
     flex_auth_abort();   // una clave a medias no sobrevive a bloquear
+    flex_qs_close_now();
     flex_drawer_close_now();
     flex_recents_close_now();
     flex_lock_set_return_app(-1);
@@ -579,6 +584,7 @@ void flex_shell_start(void)
     lv_timer_create(minute_tick, 1000, NULL);
     lv_screen_load(s_scr);
     flex_power_init();
+    flex_qs_init();
     flex_shell_lock();
 }
 

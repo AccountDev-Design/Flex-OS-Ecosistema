@@ -35,8 +35,9 @@
 
 static const char *TAG = "flex.storage";
 
-// Espacios de NVS que se cargan en la cache al arrancar (los de la version Arduino).
-static const char *const k_namespaces[] = {FLEX_NVS_NS, "flexcare", "flexphone"};
+// Espacios de NVS que se cargan en la cache al arrancar (los de la version
+// Arduino). Cada modulo anade el suyo al migrarse: "flexqs" es el panel rapido.
+static const char *const k_namespaces[] = {FLEX_NVS_NS, "flexcare", "flexphone", "flexqs"};
 
 typedef enum {
     JOB_WRITE, JOB_REMOVE, JOB_RENAME, JOB_MKDIR, JOB_READ, JOB_FLUSH, JOB_NVS_ERASE, JOB_FS_FORMAT,

@@ -63,7 +63,17 @@ python3 ref/extract_arduino.py "$OUT/ref_kb_b.inc" \
     FlexOS_Ultra_Power.h:utf8Count,lsuPassAppend \
     FlexOS_Ultra_KeyboardSettings.h:kbsScField,kbsScA,kbsAppendField,kbsBackField
 
-SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c
+# Panel rapido: en dos partes porque qpCtlAvail (la disponibilidad) la fija la
+# prueba entre las dos (ref_qs_main.cpp).
+python3 ref/extract_arduino.py "$OUT/ref_qs_a.inc" \
+    FlexOS_Ultra_Types.h:QsCtl,QpItem \
+    FlexOS_Ultra_QuickPanel.h:QP_MX,QP_CONT_W,QP_GAP,QP_CW,qpSpanW,qpColX,QP_HDR_H,QP_FOOT_H,QP_VIEW_Y0,QP_VIEW_Y1,QP_VIEW_H,QP_RH1,QP_RH2,QP_VGAP,QP_GPAD,QP_TROW,QP_TCIRC,QP_HANDLE_H,QP_GROWS_MIN,QP_GROWS_MAX,qpGroupH,QSID_WIFI,QT_TOGGLE,QSZ_1x1,QSZ_2x1,QSZ_4x1,QSZ_2x2,QOR_H,QOR_V,QCAT_CONN,QP_CAT_NAME,QS_REG,qpCtl
+python3 ref/extract_arduino.py "$OUT/ref_qs_b.inc" \
+    FlexOS_Ultra_QuickPanel.h:qpCtlShown,qpFirstSize,qpSizeAllowed,qpNextSize,QP_CFG_VER,QP_MAX_ITEMS,QP_BLOB_N,QP_NVS_NS,QP_NVS_KEY,qpIt,qpN,qpGrows,qpLoaded,qpEdIt,qpEdN,qpEdGrows,QpDef,QP_FACTORY,QP_FACTORY_N,qpFactory,qpNormalize,qpAdoptNew,qpSerialize,qpDeserialize,qpLoad,QB_ITEM,QpBlock,qpBlk,qpBlkN,qpTiles,qpTileN,qpContentH,qpGroupBlk,qpLaySrc,qpLayN,qpLayGroupPx,qpLayEdit,qpTotalRows,qpGroupInnerH,qpGroupMinPx,qpGroupMaxPx,qpLayout,QP_TCOLW,qpTileCenter,QPM_PANEL,qpMode,qpScrollF,qpGH,qpGScrollF,qpGAnim,qpGFrom,qpGT0,qpEdRejectF,qpEdRejectMs,qpCatIds,qpCatN \
+    FlexOS_Ultra_QuickPanelGlass.h:qpRelayout,qpScrollMax,qpGroupSnap,qpCatBuild \
+    FlexOS_Ultra_QuickPanelEdit.h:qpEditRemove,qpEditMove,qpEditAdd
+
+SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c
       $ROOT/components/flex_storage/src/flex_kv.c
       $ROOT/components/flex_storage/src/flex_fs_path.c
       $ROOT/components/flex_ui/src/theme/flex_wallpaper.c
@@ -71,6 +81,7 @@ SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_
       $ROOT/components/flex_ui/src/shell/flex_home_model.c
       $ROOT/components/flex_ui/src/shell/flex_drawer_model.c
       $ROOT/components/flex_ui/src/shell/flex_recents_model.c
+      $ROOT/components/flex_ui/src/shell/flex_qs_model.c
       $ROOT/components/flex_ui/src/widgets/flex_kb_layout.c
       $ROOT/components/flex_touch/src/flex_touch_arb.c
       stub_cfg.c)
@@ -82,7 +93,7 @@ CFLAGS=(-O1 -g -Wall -Wextra -Werror -pthread)
 build() {   # $1 = sufijo, resto = flags de sanitizador
     local sfx=$1; shift
     local refs=()
-    for r in wall glass home home_load touch drawer kb recents; do
+    for r in wall glass home home_load touch drawer kb recents qs; do
         c++ -std=gnu++17 -O1 -g -w "$@" -Iref -I"$OUT" -c ref/ref_${r}_main.cpp -o "$OUT/ref_${r}_$sfx.o"
         refs+=("$OUT/ref_${r}_$sfx.o")
     done

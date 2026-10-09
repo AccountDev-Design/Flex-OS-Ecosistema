@@ -10,6 +10,7 @@ bool scene_auth_run(void);
 bool scene_power_run(void);
 bool scene_drawer_run(void);
 bool scene_recents_run(void);
+bool scene_qs_run(void);
 
 const sim_scene_t sim_scenes[] = {
     {"galeria", scene_gallery_run},
@@ -20,5 +21,6 @@ const sim_scene_t sim_scenes[] = {
     {"energia", scene_power_run},
     {"caja", scene_drawer_run},
     {"recientes", scene_recents_run},
+    {"panel", scene_qs_run},
     {NULL, NULL},
 };

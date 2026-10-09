@@ -23,6 +23,12 @@ void flex_touch_set_gesture_cb(flex_touch_gesture_cb_t cb);
 // touchDropAll: al cambiar de pantalla, el dedo que sigue apoyado no toca nada
 // de la pantalla nueva hasta que se levante de verdad.
 void flex_touch_drop_all(void);
+// Capas globales del sistema (panel rapido, centro de notificaciones): ven cada
+// cuadro del arbitraje ANTES que LVGL y devuelven true mientras el episodio sea
+// suyo. Un episodio reclamado no llega a LVGL (si ya habia un objeto pulsado,
+// se suelta sin click). Solo tarea de UI.
+typedef bool (*flex_touch_sys_hook_t)(const flex_arb_touch_t *t);
+void flex_touch_set_sys_hook(flex_touch_sys_hook_t hook);
 // Una lectura del indev pasada por el arbitraje (la usan el puerto y el
 // simulador). ev: 1 cuadro nuevo con dedo, 0 cuadro nuevo sin dedos, -1 nada nuevo.
 void flex_touch_feed(lv_indev_t *indev, lv_indev_data_t *data, int ev, int x, int y, int fingers);

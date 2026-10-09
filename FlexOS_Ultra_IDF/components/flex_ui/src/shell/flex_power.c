@@ -101,6 +101,7 @@ void flex_power_suspend(void)
     if (S.on) {
         return;
     }
+    flex_qs_close_now();   // qsForceClose: la cortina no sobrevive a apagar la pantalla
     S.bright = flex_display_get_brightness();
     if (!S.timer) {
         S.cur = S.bright;
