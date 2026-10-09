@@ -433,7 +433,9 @@ static void card_cb(lv_event_t *e)
             lv_obj_get_coords(card, &a);
             R.opening = true;
             close_recents();
-            flex_app_open(app, &a);
+            // Por la misma puerta que el escritorio: una app con candado pide la
+            // clave tambien al volver desde Recientes (Arduino la reabria sin pedirla).
+            flex_app_launch(app, &a);
         } else {
             lv_obj_scroll_to_x(R.car, idx * STEP, LV_ANIM_ON);   // lateral: la centra
         }

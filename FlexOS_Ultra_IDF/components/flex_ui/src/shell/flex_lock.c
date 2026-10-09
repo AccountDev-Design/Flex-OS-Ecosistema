@@ -114,6 +114,11 @@ static void touch_cb(lv_event_t *e)
     bool need_pin = flex_auth_required();
     if (code == LV_EVENT_PRESSED) {
         lv_anim_delete(s_root, set_off);
+        if (need_pin && s_off != 0) {
+            // Con clave el bloqueo no se queda a medias por un toque durante su
+            // caida (en Arduino la caida no lee el tactil): termina en el acto.
+            set_off(NULL, 0);
+        }
         s_y0 = p.y + s_off;
         s_verify_started = false;
     } else if (code == LV_EVENT_PRESSING) {

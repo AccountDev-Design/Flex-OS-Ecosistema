@@ -30,6 +30,8 @@ bool flex_auth_verify(const flex_auth_req_t *req);
 // on_done(ctx) al guardar o al salir.
 void flex_auth_setup(void (*on_done)(void *ctx), void *ctx);
 bool flex_auth_active(void);
+// La verificacion abierta salio del bloqueo (no de un candado de app ni de Ajustes).
+bool flex_auth_from_lock(void);
 // Corta sin avisar a nadie (bloquear, suspender, apagar): borra lo tecleado.
 void flex_auth_abort(void);
 

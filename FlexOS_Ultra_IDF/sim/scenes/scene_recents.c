@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include "flex_app.h"
 #include "flex_app_ids.h"
+#include "flex_home_model.h"
 #include "flex_i18n.h"
 #include "flex_passcode.h"
 #include "flex_shell.h"
@@ -122,6 +123,24 @@ bool scene_recents_run(void)
     sim_run(300);
     CHK(!flex_recents_is_open());
     CHK(flex_shell_state() == FLEX_SH_HOME);
+
+    // una app con candado pide la clave tambien al volver desde Recientes
+    CHK(flex_lock_set("2580", FLEX_LOCK_PIN));
+    flex_app_open(IC_NOTAS, NULL);
+    sim_run(400);
+    flex_sys_recents();
+    sim_run(400);
+    CHK(flex_recents_is_open() && flex_recents_count() == 1);
+    g_home.lock = 1u << IC_NOTAS;
+    sim_tap(240, 330);
+    sim_run(600);
+    CHK(flex_shell_state() == FLEX_SH_AUTH);
+    CHK(flex_app_current() < 0);
+    sim_tap(24, 20);   // atras: no se abre
+    sim_run(300);
+    CHK(flex_shell_state() == FLEX_SH_HOME);
+    g_home.lock = 0;
+    flex_lock_clear();
 
     printf("recientes: %s\n", ok ? "estados correctos" : "ESTADO INESPERADO");
     return ok;

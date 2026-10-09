@@ -21,6 +21,7 @@
 extern "C" {
 #include "flex_passcode.h"
 #include "flex_storage.h"
+void flex_lock_test_hmac_fail_after(int n);
 }
 
 static int g_checks, g_fails;
@@ -509,6 +510,84 @@ static void test_power_cut(void)
     CHECK(flex_lock_verify_alone("1111"));
 }
 
+// El diario no pisa lo que Arduino hizo despues: un cambio de ESP-IDF cortado
+// justo tras grabar el diario y, antes de volver a arrancar ESP-IDF, el
+// firmware Arduino cambia la clave o la quita (Recovery).
+static void test_stale_journal(void)
+{
+    // a) Arduino cambia el PIN: manda el de Arduino
+    prep_old(OLD_PIN);   // 1111
+    g_cut = 1;           // solo el diario llega a la flash
+    g_cut_n = 0;
+    flex_lock_set("2222", FLEX_LOCK_PIN);
+    g_cut = -1;
+    CHECK(has("lockjrn"));
+    CHECK(flexLockSet("3333", FLEXLOCK_PIN));   // arranca Arduino
+    flex_lock_migrate();                         // y despues ESP-IDF
+    CHECK(flex_lock_verify_alone("3333") && flexLockVerify("3333"));
+    CHECK(!flex_lock_verify_alone("2222") && !flex_lock_verify_alone("1111"));
+    CHECK(!has("lockjrn"));
+
+    // b) Arduino quita la clave (Recovery: tipo y texto claro, no la sal ni el hash)
+    prep_old(OLD_PIN);
+    g_cut = 1;
+    g_cut_n = 0;
+    flex_lock_set("2222", FLEX_LOCK_PIN);
+    g_cut = -1;
+    {
+        Preferences p;
+        p.begin("flexos", false);
+        p.remove("locktype");
+        p.remove("lockpin");
+        p.remove("lockpass");
+    }
+    flex_lock_migrate();
+    CHECK(flex_lock_type() == FLEX_LOCK_NONE);
+    CHECK(!has("lockjrn"));
+
+    // c) sin nada de Arduino entre medias, el cambio si se completa
+    prep_old(OLD_PIN);
+    g_cut = 1;
+    g_cut_n = 0;
+    flex_lock_set("2222", FLEX_LOCK_PIN);
+    g_cut = -1;
+    CHECK(flex_lock_migrate() == 1);
+    CHECK(flex_lock_verify_alone("2222") && flexLockVerify("2222"));
+}
+
+// Un fallo del HMAC (sin memoria) al poner la clave no deja un hash falso: la
+// operacion falla y la clave de antes sigue abriendo.
+static void test_hmac_failure(void)
+{
+    prep_old(OLD_PIN);   // 1111
+    static const int AT[] = {0, 1, 5000, 11999, 12000, 12001, 23999};
+    for (int at : AT) {
+        flex_lock_test_hmac_fail_after(at);
+        bool r = flex_lock_set("2468", FLEX_LOCK_PIN);
+        flex_lock_test_hmac_fail_after(-1);
+        CHECK(!r);
+        CHECK(flex_lock_verify_alone("1111"));
+        CHECK(!flex_lock_verify_alone("2468"));
+        CHECK(!has("lockjrn"));
+    }
+    // y verificar con el HMAC fallando nunca abre
+    flex_lock_test_hmac_fail_after(100);
+    CHECK(!flex_lock_verify_alone("1111"));
+    flex_lock_test_hmac_fail_after(100);
+    CHECK(!flex_lock_verify("1111"));
+    flex_lock_test_hmac_fail_after(-1);
+    CHECK(flex_lock_verify("1111"));
+    uint8_t dk[32];
+    flex_lock_test_hmac_fail_after(3);
+    CHECK(!flex_lock_kdf("x", (const uint8_t *)"salt", 4, 10, dk, 32));
+    flex_lock_test_hmac_fail_after(-1);
+    bool zero = true;
+    for (int i = 0; i < 32; i++) {
+        zero &= dk[i] == 0;
+    }
+    CHECK(zero);
+}
+
 int main(void)
 {
     test_kdf();
@@ -518,6 +597,8 @@ int main(void)
     test_corrupt();
     test_clear_fails();
     test_power_cut();
+    test_stale_journal();
+    test_hmac_failure();
     printf("%s: clave del sistema, %d comprobaciones, %d fallos\n", g_fails ? "FALLO" : "OK", g_checks, g_fails);
     return g_fails ? 1 : 0;
 }

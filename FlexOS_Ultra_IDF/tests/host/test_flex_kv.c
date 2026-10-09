@@ -1,4 +1,5 @@
 #include <pthread.h>
+#include <stdio.h>
 #include <stdatomic.h>
 #include <string.h>
 #include "flex_kv.h"
@@ -180,12 +181,79 @@ static void t_write_order(void)
     flex_kv_clear(&kv);
 }
 
+// Pasada del escritor: lo que falla se salta y el resto sigue; el grupo
+// ordenado (clave del sistema) no deja adelantarse a nada suyo.
+static char s_wr[16][16];
+static int s_wr_n;
+static const char *s_fail[4];
+static bool s_fail_f;   // fallan todas las que empiezan por 'f'
+static int pass_write(const flex_kv_snapshot_t *sn, void *ctx)
+{
+    (void)ctx;
+    if (s_fail_f && sn->key[0] == 'f') {
+        return 0x105;
+    }
+    for (int i = 0; i < 4 && s_fail[i]; i++) {
+        if (strcmp(sn->key, s_fail[i]) == 0) {
+            return 0x105;
+        }
+    }
+    if (s_wr_n < 16) {
+        strcpy(s_wr[s_wr_n++], sn->key);
+    }
+    return 0;
+}
+static bool pass_ordered(const char *ns, const char *key)
+{
+    (void)ns;
+    return strncmp(key, "lock", 4) == 0;
+}
+static void t_flush_pass(void)
+{
+    flex_kv_t kv;
+    flex_kv_init(&kv, NULL, NULL, NULL);
+    flex_kv_set_num(&kv, "flexos", "lockx", FLEX_KV_I32, 1);
+    flex_kv_set_num(&kv, "flexos", "a", FLEX_KV_I32, 1);
+    flex_kv_set_num(&kv, "flexos", "b", FLEX_KV_I32, 1);
+    flex_kv_set_num(&kv, "flexos", "locky", FLEX_KV_I32, 1);
+    flex_kv_set_num(&kv, "flexos", "c", FLEX_KV_I32, 1);
+    s_fail[0] = "lockx";
+    s_fail[1] = "a";
+    s_fail[2] = NULL;
+    s_wr_n = 0;
+    int first = 0;
+    CHECK(flex_kv_flush_pass(&kv, pass_write, pass_ordered, NULL, &first) == FLEX_KV_PASS_ERR);
+    CHECK(first == 0x105);
+    CHECK(s_wr_n == 2 && strcmp(s_wr[0], "b") == 0 && strcmp(s_wr[1], "c") == 0);   // locky espera
+    CHECK_EQ_I(flex_kv_dirty_count(&kv), 3);
+    s_fail[0] = NULL;
+    s_wr_n = 0;
+    CHECK(flex_kv_flush_pass(&kv, pass_write, pass_ordered, NULL, &first) == FLEX_KV_PASS_OK);
+    CHECK(s_wr_n == 3 && strcmp(s_wr[0], "lockx") == 0 && strcmp(s_wr[1], "a") == 0 && strcmp(s_wr[2], "locky") == 0);
+    CHECK_EQ_I(flex_kv_dirty_count(&kv), 0);
+    // muchas que fallan: la pasada termina (no se queda dando vueltas)
+    static const char *const FK[12] = {"f0", "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "fa", "fb"};
+    for (int i = 0; i < 12; i++) {
+        flex_kv_set_num(&kv, "flexos", FK[i], FLEX_KV_I32, 1);
+    }
+    flex_kv_set_num(&kv, "flexos", "z", FLEX_KV_I32, 1);
+    s_fail_f = true;
+    s_wr_n = 0;
+    CHECK(flex_kv_flush_pass(&kv, pass_write, pass_ordered, NULL, &first) == FLEX_KV_PASS_ERR);
+    CHECK_EQ_I(flex_kv_dirty_count(&kv), 13);   // 8 saltadas y la pasada para: "z" a la siguiente
+    s_fail_f = false;
+    CHECK(flex_kv_flush_pass(&kv, pass_write, pass_ordered, NULL, &first) == FLEX_KV_PASS_OK);
+    CHECK_EQ_I(flex_kv_dirty_count(&kv), 0);
+    flex_kv_clear(&kv);
+}
+
 void test_flex_kv(void)
 {
     t_types_like_preferences();
     t_dirty_and_versions();
     t_buffers_and_limits();
     t_write_order();
+    t_flush_pass();
 }
 
 // ---- concurrencia: la UI cambia ajustes mientras el escritor graba ----------

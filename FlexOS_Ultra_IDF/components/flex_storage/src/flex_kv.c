@@ -31,6 +31,19 @@ static void unlock(flex_kv_t *kv)
     }
 }
 
+// Los ajustes llevan secretos (texto claro antiguo de la clave, sal, hash, el
+// diario): ningun buffer vuelve al heap sin borrarlo antes.
+static void free_wipe(void *p, size_t n)
+{
+    if (p) {
+        volatile uint8_t *v = p;
+        while (n--) {
+            *v++ = 0;
+        }
+        free(p);
+    }
+}
+
 static bool valid_name(const char *s, size_t max)
 {
     return s && s[0] && strlen(s) < max;
@@ -83,7 +96,7 @@ void flex_kv_clear(flex_kv_t *kv)
     flex_kv_entry_t *e = kv->head;
     while (e) {
         flex_kv_entry_t *n = e->next;
-        free(e->buf);
+        free_wipe(e->buf, e->len);
         free(e);
         e = n;
     }
@@ -102,7 +115,7 @@ static bool store_buf(flex_kv_entry_t *e, flex_kv_type_t type, const void *data,
         }
         memcpy(copy, data, len);
     }
-    free(e->buf);
+    free_wipe(e->buf, e->len);
     e->buf = copy;
     e->len = len;
     e->type = type;
@@ -119,7 +132,7 @@ bool flex_kv_load_num(flex_kv_t *kv, const char *ns, const char *key, flex_kv_ty
     lock(kv);
     flex_kv_entry_t *e = find_or_add(kv, ns, key);
     if (e) {
-        free(e->buf);
+        free_wipe(e->buf, e->len);
         e->buf = NULL;
         e->len = 0;
         e->type = type;
@@ -201,7 +214,7 @@ bool flex_kv_set_num(flex_kv_t *kv, const char *ns, const char *key, flex_kv_typ
     lock(kv);
     flex_kv_entry_t *e = find_or_add(kv, ns, key);
     if (e && (e->erased || e->type != type || e->num != v)) {
-        free(e->buf);
+        free_wipe(e->buf, e->len);
         e->buf = NULL;
         e->len = 0;
         e->type = type;
@@ -243,7 +256,7 @@ bool flex_kv_erase(flex_kv_t *kv, const char *ns, const char *key)
     lock(kv);
     flex_kv_entry_t *e = find(kv, ns, key);
     if (e && !e->erased) {
-        free(e->buf);
+        free_wipe(e->buf, e->len);
         e->buf = NULL;
         e->len = 0;
         e->erased = true;
@@ -259,14 +272,15 @@ bool flex_kv_erase(flex_kv_t *kv, const char *ns, const char *key)
 // orden en que se hicieron. Quien encadena escrituras que dependen unas de
 // otras (la clave del sistema: "sin clave" antes de borrar el hash) cuenta
 // con ello si se corta la corriente a mitad de una pasada.
-int flex_kv_next_dirty(flex_kv_t *kv, flex_kv_snapshot_t *snap)
+int flex_kv_next_dirty_skip(flex_kv_t *kv, flex_kv_snapshot_t *snap, flex_kv_skip_fn_t skip, void *ctx)
 {
     int ret = 0;
     memset(snap, 0, sizeof(*snap));
     lock(kv);
     flex_kv_entry_t *best = NULL;
     for (flex_kv_entry_t *e = kv->head; e; e = e->next) {
-        if (e->version != e->written && (!best || (int32_t)(e->seq - best->seq) < 0)) {
+        if (e->version != e->written && (!best || (int32_t)(e->seq - best->seq) < 0) &&
+            !(skip && skip(e->ns, e->key, ctx))) {
             best = e;
         }
     }
@@ -294,6 +308,83 @@ int flex_kv_next_dirty(flex_kv_t *kv, flex_kv_snapshot_t *snap)
     return ret;
 }
 
+int flex_kv_next_dirty(flex_kv_t *kv, flex_kv_snapshot_t *snap)
+{
+    return flex_kv_next_dirty_skip(kv, snap, NULL, NULL);
+}
+
+// ---- una pasada del escritor -------------------------------------------------------
+typedef struct {
+    char ns[FLEX_KV_NS_MAX];
+    char key[FLEX_KV_KEY_MAX];
+} skip_ent_t;
+
+typedef struct {
+    skip_ent_t e[FLEX_KV_PASS_SKIP_MAX];
+    int n;
+    bool group_blocked;
+    bool (*ordered)(const char *ns, const char *key);
+} pass_t;
+
+static bool pass_skip(const char *ns, const char *key, void *ctx)
+{
+    pass_t *p = ctx;
+    if (p->group_blocked && p->ordered && p->ordered(ns, key)) {
+        return true;
+    }
+    for (int i = 0; i < p->n; i++) {
+        if (strcmp(p->e[i].key, key) == 0 && strcmp(p->e[i].ns, ns) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+flex_kv_pass_t flex_kv_flush_pass(flex_kv_t *kv, int (*write)(const flex_kv_snapshot_t *s, void *ctx),
+                                  bool (*ordered)(const char *ns, const char *key), void *ctx, int *first_err)
+{
+    pass_t p = {.ordered = ordered};
+    flex_kv_pass_t res = FLEX_KV_PASS_OK;
+    *first_err = 0;
+    size_t guard = kv->count + FLEX_KV_PASS_SKIP_MAX + 4;
+    for (;;) {
+        if (guard-- == 0) {
+            return res == FLEX_KV_PASS_OK ? FLEX_KV_PASS_BUSY : res;   // no para de cambiar: la siguiente sigue
+        }
+        flex_kv_snapshot_t snap;
+        int nd = flex_kv_next_dirty_skip(kv, &snap, pass_skip, &p);
+        if (nd == 0) {
+            return res;
+        }
+        if (nd < 0) {
+            return FLEX_KV_PASS_NOMEM;   // queda pendiente: la siguiente pasada lo reintenta
+        }
+        int err = write(&snap, ctx);
+        if (err == 0) {
+            flex_kv_mark_written(kv, &snap);
+        } else {
+            // Se salta en ESTA pasada y el resto sigue (una clave que no cabe no
+            // puede bloquear todas las demas). Dentro de un grupo ordenado (la
+            // clave del sistema) nada de lo posterior se adelanta a la que fallo.
+            if (res == FLEX_KV_PASS_OK) {
+                res = FLEX_KV_PASS_ERR;
+                *first_err = err;
+            }
+            if (ordered && ordered(snap.ns, snap.key)) {
+                p.group_blocked = true;
+            }
+            if (p.n == FLEX_KV_PASS_SKIP_MAX) {
+                flex_kv_snapshot_free(&snap);
+                return res;
+            }
+            strcpy(p.e[p.n].ns, snap.ns);
+            strcpy(p.e[p.n].key, snap.key);
+            p.n++;
+        }
+        flex_kv_snapshot_free(&snap);
+    }
+}
+
 void flex_kv_mark_written(flex_kv_t *kv, const flex_kv_snapshot_t *snap)
 {
     lock(kv);
@@ -306,7 +397,7 @@ void flex_kv_mark_written(flex_kv_t *kv, const flex_kv_snapshot_t *snap)
 
 void flex_kv_snapshot_free(flex_kv_snapshot_t *snap)
 {
-    free(snap->buf);
+    free_wipe(snap->buf, snap->len);
     snap->buf = NULL;
     snap->len = 0;
 }

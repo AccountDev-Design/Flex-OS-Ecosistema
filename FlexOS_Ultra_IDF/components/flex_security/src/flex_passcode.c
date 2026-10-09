@@ -10,10 +10,21 @@
 #ifdef FLEX_HOST_TEST
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
-static void hmac256(const uint8_t *key, size_t klen, const uint8_t *in, size_t ilen, uint8_t out[32])
+static int g_hmac_fail_after = -1;   // pruebas: falla a partir de la llamada numero N
+static bool hmac256(const uint8_t *key, size_t klen, const uint8_t *in, size_t ilen, uint8_t out[32])
 {
+    if (g_hmac_fail_after == 0) {
+        return false;
+    }
+    if (g_hmac_fail_after > 0) {
+        g_hmac_fail_after--;
+    }
     unsigned int n = 32;
-    HMAC(EVP_sha256(), key, (int)klen, in, ilen, out, &n);
+    return HMAC(EVP_sha256(), key, (int)klen, in, ilen, out, &n) != NULL && n == 32;
+}
+void flex_lock_test_hmac_fail_after(int n)
+{
+    g_hmac_fail_after = n;
 }
 static void random_bytes(void *out, size_t n)
 {
@@ -22,9 +33,11 @@ static void random_bytes(void *out, size_t n)
 #else
 #include "esp_random.h"
 #include "mbedtls/md.h"
-static void hmac256(const uint8_t *key, size_t klen, const uint8_t *in, size_t ilen, uint8_t out[32])
+// mbedtls reserva memoria en cada llamada: sin memoria devuelve error y NO
+// escribe out. Seguir como si nada daria un hash que no es el de la clave.
+static bool hmac256(const uint8_t *key, size_t klen, const uint8_t *in, size_t ilen, uint8_t out[32])
 {
-    mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), key, klen, in, ilen, out);
+    return mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), key, klen, in, ilen, out) == 0;
 }
 static void random_bytes(void *out, size_t n)
 {
@@ -54,12 +67,13 @@ bool flex_lock_equal_ct(const void *a, const void *b, size_t n)
 }
 
 // PBKDF2-HMAC-SHA256, un solo bloque (out_len <= 32): U1 = HMAC(clave, sal||00000001),
-// Ui = HMAC(clave, Ui-1), resultado = XOR de todas.
-void flex_lock_kdf(const char *secret, const uint8_t *salt, size_t salt_len, uint32_t iters, uint8_t *out,
+// Ui = HMAC(clave, Ui-1), resultado = XOR de todas. false (y out a cero) si una
+// sola vuelta del HMAC fallo.
+bool flex_lock_kdf(const char *secret, const uint8_t *salt, size_t salt_len, uint32_t iters, uint8_t *out,
                    size_t out_len)
 {
     if (!out || out_len == 0) {
-        return;
+        return false;
     }
     out_len = out_len > 32 ? 32 : out_len;
     iters = iters ? iters : 1;
@@ -75,18 +89,25 @@ void flex_lock_kdf(const char *secret, const uint8_t *salt, size_t salt_len, uin
     blk[bl + 2] = 0;
     blk[bl + 3] = 1;
     uint8_t u[32], acc[32];
-    hmac256((const uint8_t *)secret, sl, blk, bl + 4, u);
-    memcpy(acc, u, 32);
-    for (uint32_t i = 1; i < iters; i++) {
-        hmac256((const uint8_t *)secret, sl, u, 32, u);
-        for (int k = 0; k < 32; k++) {
+    bool ok = hmac256((const uint8_t *)secret, sl, blk, bl + 4, u);
+    if (ok) {
+        memcpy(acc, u, 32);
+    }
+    for (uint32_t i = 1; ok && i < iters; i++) {
+        ok = hmac256((const uint8_t *)secret, sl, u, 32, u);
+        for (int k = 0; ok && k < 32; k++) {
             acc[k] ^= u[k];
         }
     }
-    memcpy(out, acc, out_len);
+    if (ok) {
+        memcpy(out, acc, out_len);
+    } else {
+        memset(out, 0, out_len);
+    }
     flex_lock_wipe(u, sizeof(u));
     flex_lock_wipe(acc, sizeof(acc));
     flex_lock_wipe(blk, sizeof(blk));
+    return ok;
 }
 
 int flex_lock_type(void)
@@ -112,8 +133,11 @@ int flex_lock_len(void)
 #define JRN_KEY   "lockjrn"
 #define JRN_MAGIC0 'F'
 #define JRN_MAGIC1 'J'
-#define JRN_VER    1
-#define JRN_LEN    (4 + 4 + 4 + SALT_LEN + KEY_LEN)   // cabecera, longitud, iteraciones, sal, hash
+#define JRN_VER    2
+// cabecera, longitud, iteraciones, sal, hash y la huella de lo que habia antes
+// (tipo, si habia sal+hash, y cuales): el arranque solo completa un cambio de
+// ESTE firmware, nunca pisa una clave que Arduino cambio o quito despues.
+#define JRN_LEN    (4 + 4 + 4 + SALT_LEN + KEY_LEN + 2 + SALT_LEN + KEY_LEN)
 
 typedef struct {
     int type;
@@ -121,6 +145,10 @@ typedef struct {
     uint32_t iters;
     uint8_t salt[SALT_LEN];
     uint8_t hash[KEY_LEN];
+    int prev_type;
+    bool prev_keys;
+    uint8_t prev_salt[SALT_LEN];
+    uint8_t prev_hash[KEY_LEN];
 } jrn_t;
 
 static void put32(uint8_t *p, uint32_t v)
@@ -144,8 +172,14 @@ static void jrn_pack(const jrn_t *j, uint8_t out[JRN_LEN])
     out[3] = (uint8_t)j->type;
     put32(out + 4, (uint32_t)j->len);
     put32(out + 8, j->iters);
-    memcpy(out + 12, j->salt, SALT_LEN);
-    memcpy(out + 12 + SALT_LEN, j->hash, KEY_LEN);
+    uint8_t *p = out + 12;
+    memcpy(p, j->salt, SALT_LEN);
+    memcpy(p + SALT_LEN, j->hash, KEY_LEN);
+    p += SALT_LEN + KEY_LEN;
+    p[0] = (uint8_t)j->prev_type;
+    p[1] = j->prev_keys ? 1 : 0;
+    memcpy(p + 2, j->prev_salt, SALT_LEN);
+    memcpy(p + 2 + SALT_LEN, j->prev_hash, KEY_LEN);
 }
 
 // false si no hay diario o no es valido (uno ilegible no se aplica: se borra).
@@ -159,9 +193,15 @@ static bool jrn_read(jrn_t *j)
         j->type = b[3];
         j->len = (int32_t)get32(b + 4);
         j->iters = get32(b + 8);
-        memcpy(j->salt, b + 12, SALT_LEN);
-        memcpy(j->hash, b + 12 + SALT_LEN, KEY_LEN);
-        ok = j->iters != 0 && j->iters <= 1000000u && j->len > 0 && j->len < FLEX_LOCK_SECRET_MAX;
+        const uint8_t *p = b + 12;
+        memcpy(j->salt, p, SALT_LEN);
+        memcpy(j->hash, p + SALT_LEN, KEY_LEN);
+        p += SALT_LEN + KEY_LEN;
+        j->prev_type = p[0];
+        j->prev_keys = p[1] == 1;
+        memcpy(j->prev_salt, p + 2, SALT_LEN);
+        memcpy(j->prev_hash, p + 2 + SALT_LEN, KEY_LEN);
+        ok = j->iters != 0 && j->iters <= 1000000u && j->len > 0 && j->len < FLEX_LOCK_SECRET_MAX && p[1] <= 1;
     }
     flex_lock_wipe(b, sizeof(b));
     return ok;
@@ -182,12 +222,25 @@ static bool store(const char *secret, int type, bool drop_plain)
 {
     jrn_t j = {.type = type, .len = (int32_t)strlen(secret), .iters = FLEX_LOCK_ITERS};
     random_bytes(j.salt, sizeof(j.salt));
-    flex_lock_kdf(secret, j.salt, sizeof(j.salt), j.iters, j.hash, sizeof(j.hash));
-    uint8_t b[JRN_LEN];
+    uint8_t chk[KEY_LEN];
+    // Derivada DOS veces y comparada: un fallo del HMAC (sin memoria) o un
+    // error de la derivacion nunca llega a ser "la clave" del usuario.
+    bool ok = flex_lock_kdf(secret, j.salt, sizeof(j.salt), j.iters, j.hash, sizeof(j.hash)) &&
+              flex_lock_kdf(secret, j.salt, sizeof(j.salt), j.iters, chk, sizeof(chk)) &&
+              flex_lock_equal_ct(j.hash, chk, sizeof(chk));
+    flex_lock_wipe(chk, sizeof(chk));
+    j.prev_type = (int)flex_cfg_get_i32("locktype", 0);
+    j.prev_keys = flex_cfg_get_blob("lockslt", j.prev_salt, SALT_LEN) == SALT_LEN &&
+                  flex_cfg_get_blob("lockhsh", j.prev_hash, KEY_LEN) == KEY_LEN;
+    uint8_t b[JRN_LEN], back[JRN_LEN + 1];
     jrn_pack(&j, b);
-    // 1) el diario, en un unico blob, hasta la flash
-    bool ok = flex_cfg_set_blob(JRN_KEY, b, sizeof(b)) == ESP_OK && flex_cfg_flush(3000) == ESP_OK;
+    // 1) el diario, en un unico blob, hasta la flash (y comprobado en la cache:
+    // sin memoria la cache no lo guardaria y el paso 2 correria sin red)
+    ok = ok && flex_cfg_set_blob(JRN_KEY, b, sizeof(b)) == ESP_OK &&
+         flex_cfg_get_blob(JRN_KEY, back, sizeof(back)) == JRN_LEN && memcmp(back, b, JRN_LEN) == 0 &&
+         flex_cfg_flush(3000) == ESP_OK;
     flex_lock_wipe(b, sizeof(b));
+    flex_lock_wipe(back, sizeof(back));
     if (!ok) {
         // No llego: nada cambia (ni en la cache ni en la flash) y el llamante lo sabe.
         flex_cfg_erase(JRN_KEY);
@@ -292,10 +345,14 @@ bool flex_lock_verify_begin(const char *secret)
     blk[SALT_LEN + 1] = 0;
     blk[SALT_LEN + 2] = 0;
     blk[SALT_LEN + 3] = 1;
-    hmac256((const uint8_t *)s_secret, strlen(s_secret), blk, sizeof(blk), s_u);
+    bool hok = hmac256((const uint8_t *)s_secret, strlen(s_secret), blk, sizeof(blk), s_u);
     memcpy(s_acc, s_u, 32);
     flex_lock_wipe(blk, sizeof(blk));
     flex_lock_wipe(salt, sizeof(salt));
+    if (!hok) {
+        flex_lock_verify_cancel();   // sin derivacion valida no hay comparacion posible
+        return false;
+    }
     s_iters = iters;
     s_done = 1;
     s_on = true;
@@ -311,7 +368,10 @@ int flex_lock_verify_step(uint32_t budget)
     size_t sl = strlen(s_secret);
     uint32_t n = 0;
     while (s_done < s_iters && n < budget) {
-        hmac256((const uint8_t *)s_secret, sl, s_u, 32, s_u);
+        if (!hmac256((const uint8_t *)s_secret, sl, s_u, 32, s_u)) {
+            flex_lock_verify_cancel();
+            return FLEX_LOCK_FAIL;   // nunca "acierto" con una derivacion rota
+        }
         for (int k = 0; k < 32; k++) {
             s_acc[k] ^= s_u[k];
         }
@@ -345,8 +405,8 @@ bool flex_lock_verify_alone(const char *secret)
     uint32_t iters;
     bool ok = false;
     if (read_params(salt, want, &iters)) {
-        flex_lock_kdf(secret, salt, sizeof(salt), iters, got, sizeof(got));
-        ok = flex_lock_equal_ct(got, want, sizeof(want));
+        ok = flex_lock_kdf(secret, salt, sizeof(salt), iters, got, sizeof(got)) &&
+             flex_lock_equal_ct(got, want, sizeof(want));
     } else {
         ok = legacy_match(secret);
     }
@@ -357,13 +417,14 @@ bool flex_lock_verify_alone(const char *secret)
 }
 
 // Orden pensado para un corte a mitad (la flash recibe los cambios en el orden
-// en que se hacen): primero un diario a medias, despues "sin clave" y por ultimo
-// el hash. Un corte deja o la clave de antes o ninguna, nunca "PIN" sin hash.
+// en que se hacen): primero "sin clave", despues el diario a medias y por ultimo
+// el hash. Un corte deja o la clave de antes o ninguna, nunca "PIN" sin hash
+// (con un paso 2 pendiente, la sal nueva y el hash viejo + "PIN" bloquearian).
 bool flex_lock_clear(void)
 {
     flex_lock_verify_cancel();
-    flex_cfg_erase(JRN_KEY);
     flex_cfg_set_i32("locktype", 0);
+    flex_cfg_erase(JRN_KEY);
     flex_cfg_erase("lockslt");
     flex_cfg_erase("lockhsh");
     flex_cfg_erase("lockitr");
@@ -371,6 +432,25 @@ bool flex_lock_clear(void)
     flex_cfg_erase("lockpin");
     flex_cfg_erase("lockpass");
     return true;
+}
+
+// Lo que hay ahora es un cambio de ESTE firmware cortado a medias: cada clave
+// compartida vale lo de antes o lo nuevo del diario (cualquier mezcla).
+static bool jrn_matches(const jrn_t *j)
+{
+    uint8_t cs[SALT_LEN + 1], ch[KEY_LEN + 1];
+    size_t ns = flex_cfg_get_blob("lockslt", cs, sizeof(cs));
+    size_t nh = flex_cfg_get_blob("lockhsh", ch, sizeof(ch));
+    bool salt_ok = (ns == 0 && !j->prev_keys) ||
+                   (ns == SALT_LEN && (memcmp(cs, j->salt, SALT_LEN) == 0 ||
+                                       (j->prev_keys && memcmp(cs, j->prev_salt, SALT_LEN) == 0)));
+    bool hash_ok = (nh == 0 && !j->prev_keys) ||
+                   (nh == KEY_LEN && (memcmp(ch, j->hash, KEY_LEN) == 0 ||
+                                      (j->prev_keys && memcmp(ch, j->prev_hash, KEY_LEN) == 0)));
+    int ct = (int)flex_cfg_get_i32("locktype", 0);
+    flex_lock_wipe(cs, sizeof(cs));
+    flex_lock_wipe(ch, sizeof(ch));
+    return salt_ok && hash_ok && (ct == j->prev_type || ct == j->type);
 }
 
 // Un cambio de clave cortado a medias: se completa desde el diario.
@@ -384,9 +464,13 @@ static int roll_forward(void)
     if (!present) {
         return 0;
     }
-    if (!have) {
-        flex_cfg_erase(JRN_KEY);   // ilegible: no se aplica; las claves de siempre mandan
+    if (!have || !jrn_matches(&j)) {
+        // Ilegible, o lo de ahora no es ni lo de antes ni lo nuevo del diario
+        // (Arduino cambio o quito la clave despues): no se aplica, mandan las
+        // claves de siempre.
+        flex_cfg_erase(JRN_KEY);
         flex_cfg_flush(3000);
+        flex_lock_wipe(&j, sizeof(j));
         return 0;
     }
     int ret = -1;

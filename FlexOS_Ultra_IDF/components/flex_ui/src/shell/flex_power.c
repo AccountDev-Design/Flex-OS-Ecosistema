@@ -119,9 +119,15 @@ static void wake_lock_screen(void)
         return;   // sin clave se despierta donde estaba
     }
     flex_shell_state_t st = flex_shell_state();
-    if (st == FLEX_SH_LOCK || st == FLEX_SH_AUTH) {
-        return;   // ya estaba en el bloqueo o tecleando la clave
+    if (st == FLEX_SH_LOCK) {
+        flex_lock_reset();   // ya bloqueado: entero, nunca a medias de una caida
+        return;
     }
+    if (st == FLEX_SH_AUTH && flex_auth_from_lock()) {
+        return;   // tecleando la clave del bloqueo
+    }
+    // Un candado de app o la clave de Ajustes a medias NO cuentan como bloqueo
+    // (Arduino si los contaba: "atras" dejaba el escritorio sin pedir la clave).
     int app = flex_app_current();   // la app NO se cierra: se vuelve a ella al acertar
     flex_shell_lock();
     flex_lock_set_return_app(app);
@@ -144,6 +150,7 @@ static void wake_cb(lv_timer_t *t)
         lv_refr_now(NULL);
         W.drawn = true;
         W.vs = flex_display_vsync_count();
+        W.t0 = lv_tick_get();   // la red de seguridad cuenta desde el dibujo, no desde el gesto
         return;
     }
     if ((uint32_t)(flex_display_vsync_count() - W.vs) < WAKE_VSYNCS && lv_tick_elaps(W.t0) < WAKE_MAX_MS) {
@@ -232,8 +239,9 @@ static void autolock_cb(lv_timer_t *t)
         return;   // "Nunca"
     }
     flex_shell_state_t st = flex_shell_state();
-    if (st != FLEX_SH_HOME && st != FLEX_SH_APP && st != FLEX_SH_OVERLAY) {
-        return;   // bloqueo, clave: no aplica
+    bool app_auth = st == FLEX_SH_AUTH && !flex_auth_from_lock();   // candado de app: si aplica
+    if (st != FLEX_SH_HOME && st != FLEX_SH_APP && st != FLEX_SH_OVERLAY && !app_auth) {
+        return;   // bloqueo, clave del bloqueo: no aplica
     }
     if (lv_display_get_inactive_time(lv_display_get_default()) < win) {
         return;

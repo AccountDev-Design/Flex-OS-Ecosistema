@@ -97,6 +97,11 @@ bool flex_auth_active(void)
     return A.root != NULL;
 }
 
+bool flex_auth_from_lock(void)
+{
+    return A.root != NULL && A.verify && A.req.from_lock;
+}
+
 // ---- espera progresiva (Lock.h:238-336) -------------------------------------------
 static bool wait_active(void)
 {

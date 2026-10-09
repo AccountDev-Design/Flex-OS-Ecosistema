@@ -30,7 +30,8 @@ extern "C" {
 // Primitivas (publicas para las pruebas de host contra vectores conocidos)
 void flex_lock_wipe(void *p, size_t n);
 bool flex_lock_equal_ct(const void *a, const void *b, size_t n);
-void flex_lock_kdf(const char *secret, const uint8_t *salt, size_t salt_len, uint32_t iters, uint8_t *out,
+// false (y out a cero) si el HMAC fallo (sin memoria): nunca un hash que no es el de la clave.
+bool flex_lock_kdf(const char *secret, const uint8_t *salt, size_t salt_len, uint32_t iters, uint8_t *out,
                    size_t out_len);
 
 int  flex_lock_type(void);

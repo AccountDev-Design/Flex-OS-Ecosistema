@@ -80,6 +80,19 @@ bool flex_kv_erase(flex_kv_t *kv, const char *ns, const char *key);
 // 1 si hay, 0 si no queda ninguna, -1 si no hay memoria para la copia (la
 // entrada sigue pendiente; *snap queda vacio).
 int flex_kv_next_dirty(flex_kv_t *kv, flex_kv_snapshot_t *snap);
+// Igual, sin las entradas para las que skip() diga true.
+typedef bool (*flex_kv_skip_fn_t)(const char *ns, const char *key, void *ctx);
+int flex_kv_next_dirty_skip(flex_kv_t *kv, flex_kv_snapshot_t *snap, flex_kv_skip_fn_t skip, void *ctx);
+
+// Una pasada del escritor: graba con write() (0 = bien) todo lo pendiente en el
+// orden de los cambios. Una entrada que falla se salta en esta pasada y el
+// resto sigue; si pertenece a un grupo ordenado (ordered() true: la clave del
+// sistema), todo su grupo espera a la siguiente pasada. *first_err recibe el
+// primer error de write.
+#define FLEX_KV_PASS_SKIP_MAX 8
+typedef enum { FLEX_KV_PASS_OK = 0, FLEX_KV_PASS_ERR, FLEX_KV_PASS_NOMEM, FLEX_KV_PASS_BUSY } flex_kv_pass_t;
+flex_kv_pass_t flex_kv_flush_pass(flex_kv_t *kv, int (*write)(const flex_kv_snapshot_t *s, void *ctx),
+                                  bool (*ordered)(const char *ns, const char *key), void *ctx, int *first_err);
 // Marca grabada la version de la copia. Si la entrada cambio mientras tanto,
 // sigue pendiente (no se pierde la actualizacion).
 void flex_kv_mark_written(flex_kv_t *kv, const flex_kv_snapshot_t *snap);

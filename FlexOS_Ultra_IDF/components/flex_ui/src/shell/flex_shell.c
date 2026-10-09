@@ -31,6 +31,9 @@ typedef struct {
 } app_inst_t;
 
 static lv_obj_t *s_scr, *s_home, *s_apps, *s_lock;
+// Bajo el bloqueo con clave: nada de lo de debajo se puede tocar aunque el
+// bloqueo no lo tape entero (durante su caida, por ejemplo).
+static lv_obj_t *s_shield;
 static app_inst_t s_inst[FLEX_APP_N];
 static int s_fg = -1;                     // app en primer plano (estado logico)
 static flex_shell_state_t s_state = FLEX_SH_LOCK;
@@ -376,8 +379,8 @@ static void launch_cancel(void *ctx)
 
 void flex_app_launch(int id, const lv_area_t *from_icon)
 {
-    if (!flex_app_def(id)) {
-        return;
+    if (!flex_app_def(id) || s_state == FLEX_SH_LOCK || s_state == FLEX_SH_AUTH) {
+        return;   // bloqueado o tecleando una clave: no se abre nada
     }
     bool locked = id >= 0 && id < 32 && ((g_home.lock >> id) & 1u);
     if (locked && flex_auth_required()) {
@@ -481,6 +484,7 @@ lv_obj_t *flex_shell_screen(void)
 void flex_shell_show_home(void)
 {
     flex_qs_close_now();
+    lv_obj_set_hidden(s_shield, true);
     s_state = FLEX_SH_HOME;
     lv_obj_set_hidden(s_home, false);
     lv_obj_set_hidden(s_apps, true);
@@ -496,6 +500,8 @@ void flex_shell_lock(void)
     flex_lock_set_return_app(-1);
     suspend_fg();
     flex_lock_reset();
+    lv_obj_set_hidden(s_shield, !flex_auth_required());
+    lv_obj_move_foreground(s_shield);
     lv_obj_set_hidden(s_lock, false);
     lv_obj_move_foreground(s_lock);
     s_state = FLEX_SH_LOCK;
@@ -504,6 +510,7 @@ void flex_shell_lock(void)
 
 void flex_shell_unlocked(void)
 {
+    lv_obj_set_hidden(s_shield, true);
     lv_obj_set_hidden(s_lock, true);
     flex_shell_show_home();
 }
@@ -516,6 +523,7 @@ void flex_shell_auth_begin(void)
 
 void flex_shell_reveal_prepare(void)
 {
+    lv_obj_set_hidden(s_shield, true);
     lv_obj_set_hidden(s_lock, true);
     lv_obj_set_hidden(s_apps, true);
     lv_obj_set_hidden(s_home, false);
@@ -572,6 +580,10 @@ void flex_shell_start(void)
     s_apps = flex_box(s_scr);
     lv_obj_set_size(s_apps, 480, 800);
     lv_obj_set_hidden(s_apps, true);
+    s_shield = flex_box(s_scr);
+    lv_obj_set_size(s_shield, 480, 800);
+    lv_obj_set_clickable(s_shield, true);   // se traga los toques, no hace nada con ellos
+    lv_obj_set_hidden(s_shield, true);
     s_lock = flex_lock_create(s_scr);
 
     flex_navbar_init();

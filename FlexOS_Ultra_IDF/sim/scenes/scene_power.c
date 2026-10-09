@@ -5,6 +5,7 @@
 #include "flex_app.h"
 #include "flex_app_ids.h"
 #include "flex_auth.h"
+#include "flex_home_model.h"
 #include "flex_i18n.h"
 #include "flex_passcode.h"
 #include "flex_shell.h"
@@ -118,6 +119,65 @@ bool scene_power_run(void)
     CHK(flex_shell_state() == FLEX_SH_APP);
     CHK(flex_app_current() == IC_NOTAS);
     sim_shot("en_02_vuelta_app");
+
+    // 3b) con clave, durante la caida del bloqueo nada de lo de debajo se toca y
+    // un toque sobre el bloqueo no lo deja a medias (antes quedaba el
+    // escritorio usable sin PIN)
+    flex_app_close();
+    sim_run(400);
+    CHK(flex_shell_state() == FLEX_SH_HOME);
+    flex_shell_lock();
+    flex_lock_drop_in();
+    sim_run(40);
+    sim_tap(72, 672);   // icono del dock, aun destapado
+    CHK(flex_shell_state() == FLEX_SH_LOCK);
+    CHK(flex_app_current() < 0);
+    flex_shell_lock();
+    flex_lock_drop_in();
+    sim_run(30);
+    sim_touch(240, 40, true);   // sobre el bloqueo, a mitad de su caida
+    sim_run(300);
+    sim_touch(240, 40, false);
+    sim_run(300);
+    CHK(flex_shell_state() == FLEX_SH_LOCK);
+    sim_tap(72, 672);   // el bloqueo esta entero: el dock no se ve ni se toca
+    sim_run(300);
+    CHK(flex_shell_state() == FLEX_SH_LOCK && flex_app_current() < 0);
+    sim_shot("en_02b_bloqueo_tras_toque");
+    sim_drag(240, 700, 240, 400, 200);
+    sim_run(600);
+    CHK(flex_shell_state() == FLEX_SH_AUTH);
+    pin("1470");
+    sim_run(800);
+    CHK(flex_shell_state() == FLEX_SH_HOME);
+    flex_app_open(IC_NOTAS, NULL);
+    sim_run(400);
+
+    // 3c) un candado de app a medio verificar NO es un bloqueo: al despertar
+    // sale el bloqueo de verdad (antes "atras" dejaba el escritorio sin PIN)
+    flex_app_close();
+    sim_run(400);
+    g_home.lock = 1u << IC_NOTAS;   // candado de la app (Inicio -> menu de la app)
+    flex_app_launch(IC_NOTAS, NULL);
+    sim_run(300);
+    CHK(flex_shell_state() == FLEX_SH_AUTH);
+    two_finger_tap();
+    sim_run(60);
+    two_finger_tap();
+    sim_run(300);
+    one_finger_tap();
+    one_finger_tap();
+    sim_run(400);
+    CHK(flex_shell_state() == FLEX_SH_LOCK);
+    g_home.lock = 0;
+    sim_drag(240, 700, 240, 400, 200);
+    sim_run(600);
+    pin("1470");
+    sim_run(800);
+    CHK(flex_shell_state() == FLEX_SH_HOME);
+    flex_app_open(IC_NOTAS, NULL);
+    sim_run(400);
+    lv_display_trigger_activity(lv_display_get_default());   // el minuto cuenta desde aqui
 
     // 4) bloqueo por inactividad (1 min): cierra la app y cae el bloqueo
     sim_run(59000);

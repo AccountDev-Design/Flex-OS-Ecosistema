@@ -163,6 +163,8 @@ static void nvs_load_namespace(const char *ns)
                     if (e == ESP_OK) {
                         flex_kv_load_buf(&s_kv, ns, info.key, str ? FLEX_KV_STR : FLEX_KV_BLOB, buf, len);
                     }
+                    memset(buf, 0, len);   // puede ser una clave antigua en claro
+                    __asm__ __volatile__("" ::: "memory");
                     free(buf);
                 }
             }
@@ -210,7 +212,10 @@ static bool nvs_load_readonly(void)
         return false;
     }
     load_all_namespaces();
-    nvs_flash_deinit_partition(NVS_DEFAULT_PART_NAME);   // mismo estado que "sin NVS" para los demas
+    // Mismo estado que "sin NVS" para los demas. IDF 5.5 no registra el objeto
+    // de particion que crea init_partition_ptr y deinit no lo libera: unos
+    // pocos bytes, una vez por arranque y solo en este camino de fallo (aceptado).
+    nvs_flash_deinit_partition(NVS_DEFAULT_PART_NAME);
     return true;
 }
 
@@ -269,8 +274,29 @@ static esp_err_t nvs_write_snapshot(const flex_kv_snapshot_t *s)
     return err;
 }
 
+// Grupo cuyo orden de grabado importa: la clave del sistema ("sin clave" antes
+// de borrar el hash; el diario antes de las claves). Una que falla deja a las
+// demas del grupo para la siguiente pasada.
+static bool ordered_group(const char *ns, const char *key)
+{
+    return strcmp(ns, FLEX_NVS_NS) == 0 && strncmp(key, "lock", 4) == 0;
+}
+
+static int write_one(const flex_kv_snapshot_t *snap, void *ctx)
+{
+    (void)ctx;
+    esp_err_t err = nvs_write_snapshot(snap);
+    if (err != ESP_OK) {
+        status_update(st_write_error, NULL);
+        ESP_LOGE(TAG, "no se pudo grabar %s/%s: %s", snap->ns, snap->key, esp_err_to_name(err));
+        flex_bus_post(FLEX_EV_STORAGE, FLEX_STORAGE_EV_WRITE_ERROR, &err, sizeof(err));
+    }
+    esp_task_wdt_reset();
+    return err;
+}
+
 // ESP_OK solo si TODO lo pendiente quedo grabado: quien encadena escrituras
-// (la clave del sistema: hash nuevo antes de borrar el antiguo) decide con esto.
+// (la clave del sistema: diario antes que las claves) decide con esto.
 static esp_err_t settings_flush(void)
 {
     bool nvs_ok;
@@ -280,31 +306,12 @@ static esp_err_t settings_flush(void)
     if (!nvs_ok) {
         return ESP_ERR_INVALID_STATE;   // quedan pendientes en RAM; no hay donde grabar
     }
-    flex_kv_snapshot_t snap;
-    size_t guard = s_kv.count + 4;
-    for (;;) {
-        if (guard-- == 0) {
-            return ESP_ERR_TIMEOUT;   // otra tarea no para de escribir: la siguiente pasada sigue
-        }
-        int nd = flex_kv_next_dirty(&s_kv, &snap);
-        if (nd == 0) {
-            return ESP_OK;
-        }
-        if (nd < 0) {
-            return ESP_ERR_NO_MEM;   // queda pendiente: la siguiente pasada lo reintenta
-        }
-        esp_err_t err = nvs_write_snapshot(&snap);
-        if (err == ESP_OK) {
-            flex_kv_mark_written(&s_kv, &snap);
-        } else {
-            status_update(st_write_error, NULL);
-            ESP_LOGE(TAG, "no se pudo grabar %s/%s: %s", snap.ns, snap.key, esp_err_to_name(err));
-            flex_bus_post(FLEX_EV_STORAGE, FLEX_STORAGE_EV_WRITE_ERROR, &err, sizeof(err));
-            flex_kv_snapshot_free(&snap);
-            return err;   // se reintenta en la siguiente pasada
-        }
-        flex_kv_snapshot_free(&snap);
-        esp_task_wdt_reset();
+    int first = 0;
+    switch (flex_kv_flush_pass(&s_kv, write_one, ordered_group, NULL, &first)) {
+    case FLEX_KV_PASS_OK: return ESP_OK;
+    case FLEX_KV_PASS_ERR: return (esp_err_t)first;   // se reintenta en la siguiente pasada
+    case FLEX_KV_PASS_NOMEM: return ESP_ERR_NO_MEM;
+    default: return ESP_ERR_TIMEOUT;   // otra tarea no para de escribir: la siguiente pasada sigue
     }
 }
 
