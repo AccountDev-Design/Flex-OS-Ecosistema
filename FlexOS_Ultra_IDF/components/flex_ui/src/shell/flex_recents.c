@@ -543,8 +543,8 @@ static void rebuild(void)
 static void root_cb(lv_event_t *e)
 {
     (void)e;
-    if (R.modal || R.opening) {
-        return;
+    if (R.modal || R.opening || !flex_touch_arb()->t.tap) {
+        return;   // solo un toque de verdad (T.tap): un arrastre no vuelve a Inicio
     }
     close_recents();   // cualquier otro sitio (y > 740 incluido) -> Inicio
 }
@@ -618,7 +618,10 @@ void flex_recents_open(void)
 
     R.car = flex_box(R.root);
     lv_obj_set_size(R.car, 480, 600);
-    lv_obj_set_clickable(R.car, false);
+    // Un arrastre que empieza en un hueco tambien mueve el carrusel (swTick
+    // decide el gesto desde cualquier apoyo); un toque en el hueco -> Inicio.
+    lv_obj_set_clickable(R.car, true);
+    lv_obj_add_event_cb(R.car, root_cb, LV_EVENT_SHORT_CLICKED, NULL);
     lv_obj_set_scrollable(R.car, true);
     lv_obj_set_scroll_dir(R.car, LV_DIR_HOR);
     lv_obj_set_scroll_snap_x(R.car, LV_SCROLL_SNAP_CENTER);
