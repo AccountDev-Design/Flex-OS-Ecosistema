@@ -35,6 +35,14 @@ static int g_checks, g_fails;
 
 // ---- flex_cfg_* sobre el almacen de Preferences ("flexos") ----------------------
 static bool g_fail_blob;   // inyecta un fallo de escritura (flash llena)
+// Corte de corriente: a partir de la escritura numero g_cut ya no llega nada a
+// la flash. El almacen real graba en el orden de los cambios (flex_kv), que es
+// el orden de las llamadas: este doble escribe en ese mismo orden.
+static int g_cut = -1, g_cut_n;
+static bool cut_now(void)
+{
+    return g_cut >= 0 && g_cut_n++ >= g_cut;
+}
 
 extern "C" {
 int32_t flex_cfg_get_i32(const char *k, int32_t d)
@@ -69,6 +77,9 @@ size_t flex_cfg_get_blob(const char *k, void *out, size_t cap)
 }
 esp_err_t flex_cfg_set_i32(const char *k, int32_t v)
 {
+    if (cut_now()) {
+        return ESP_OK;
+    }
     Preferences p;
     p.begin(FLEX_NVS_NS, false);
     p.putInt(k, v);
@@ -76,6 +87,9 @@ esp_err_t flex_cfg_set_i32(const char *k, int32_t v)
 }
 esp_err_t flex_cfg_set_u32(const char *k, uint32_t v)
 {
+    if (cut_now()) {
+        return ESP_OK;
+    }
     Preferences p;
     p.begin(FLEX_NVS_NS, false);
     p.putUInt(k, v);
@@ -83,6 +97,9 @@ esp_err_t flex_cfg_set_u32(const char *k, uint32_t v)
 }
 esp_err_t flex_cfg_set_str(const char *k, const char *v)
 {
+    if (cut_now()) {
+        return ESP_OK;
+    }
     Preferences p;
     p.begin(FLEX_NVS_NS, false);
     p.putString(k, v);
@@ -93,6 +110,9 @@ esp_err_t flex_cfg_set_blob(const char *k, const void *d, size_t l)
     if (g_fail_blob) {
         return ESP_FAIL;
     }
+    if (cut_now()) {
+        return ESP_OK;
+    }
     Preferences p;
     p.begin(FLEX_NVS_NS, false);
     p.putBytes(k, d, l);
@@ -100,6 +120,9 @@ esp_err_t flex_cfg_set_blob(const char *k, const void *d, size_t l)
 }
 esp_err_t flex_cfg_erase(const char *k)
 {
+    if (cut_now()) {
+        return ESP_OK;
+    }
     Preferences p;
     p.begin(FLEX_NVS_NS, false);
     p.remove(k);
@@ -401,6 +424,91 @@ static void test_clear_fails(void)
     CHECK(flex_lock_fails() == 0);
 }
 
+// Un corte de corriente en CUALQUIER punto de cambiar o quitar la clave: tras
+// el arranque (flex_lock_migrate) abre la de antes o la nueva, nunca ninguna, y
+// Arduino y ESP-IDF ven lo mismo.
+enum { OLD_NONE, OLD_PIN, OLD_PASS, OLD_LEGACY };
+static void prep_old(int old)
+{
+    flexPrefsWipe();
+    if (old == OLD_PIN) {
+        flex_lock_set("1111", FLEX_LOCK_PIN);
+    } else if (old == OLD_PASS) {
+        flex_lock_set("vieja clave", FLEX_LOCK_PASS);
+    } else if (old == OLD_LEGACY) {
+        legacy("lockpin", "2468", FLEX_LOCK_PIN);
+    }
+}
+
+static void run_op(int op)
+{
+    if (op == 0) {
+        flex_lock_set("2580", FLEX_LOCK_PIN);
+    } else if (op == 1) {
+        flex_lock_set("nueva clave", FLEX_LOCK_PASS);
+    } else {
+        flex_lock_clear();
+    }
+}
+
+static void test_power_cut(void)
+{
+    static const char *olds[] = {NULL, "1111", "vieja clave", "2468"};
+    static const char *news[] = {"2580", "nueva clave", NULL};
+    int cases = 0;
+    for (int old = OLD_NONE; old <= OLD_LEGACY; old++) {
+        for (int op = 0; op < 3; op++) {
+            prep_old(old);
+            g_cut = 1 << 30;
+            g_cut_n = 0;
+            run_op(op);
+            int total = g_cut_n;
+            g_cut = -1;
+            for (int k = 0; k <= total; k++) {
+                prep_old(old);
+                g_cut = k;
+                g_cut_n = 0;
+                run_op(op);
+                g_cut = -1;           // arranque siguiente
+                flex_lock_migrate();
+                cases++;
+                const char *o = olds[old], *n = news[op];
+                bool vo = o && flex_lock_verify_alone(o);
+                bool vn = n && flex_lock_verify_alone(n);
+                int t = flex_lock_type();
+                // sin bloqueo, o se abre con la de antes o con la nueva
+                CHECK(t == FLEX_LOCK_NONE || vo || vn);
+                // la de antes deja de valer solo si la nueva ya vale (o se quito)
+                if (o && !vo && t != FLEX_LOCK_NONE) {
+                    CHECK(vn);
+                }
+                // los dos firmwares, de acuerdo
+                CHECK(flexLockType() == t);
+                if (o) {
+                    CHECK(flexLockVerify(o) == vo);
+                }
+                if (n) {
+                    CHECK(flexLockVerify(n) == vn);
+                }
+                CHECK(!has("lockjrn"));   // el arranque lo completa y lo borra
+                // con el corte al final, el cambio esta hecho
+                if (k == total) {
+                    CHECK(op == 2 ? t == FLEX_LOCK_NONE : (vn && !(o && vo && strcmp(o, n) != 0)));
+                }
+            }
+        }
+    }
+    CHECK(cases > 40);
+
+    // Diario ilegible (otro formato, corrupto): no se aplica y se borra
+    prep_old(OLD_PIN);
+    uint8_t junk[60] = {'F', 'J', 9};
+    flex_cfg_set_blob("lockjrn", junk, sizeof(junk));
+    CHECK(flex_lock_migrate() == 0);
+    CHECK(!has("lockjrn"));
+    CHECK(flex_lock_verify_alone("1111"));
+}
+
 int main(void)
 {
     test_kdf();
@@ -409,6 +517,7 @@ int main(void)
     test_migrate();
     test_corrupt();
     test_clear_fails();
+    test_power_cut();
     printf("%s: clave del sistema, %d comprobaciones, %d fallos\n", g_fails ? "FALLO" : "OK", g_checks, g_fails);
     return g_fails ? 1 : 0;
 }

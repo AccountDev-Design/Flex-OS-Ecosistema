@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "flex_shell.h"
 #include "flex_storage.h"
 #include "flex_touch_lvgl.h"
 #include "lvgl.h"
@@ -29,11 +30,22 @@ static sim_touch_t s_touch;
 static uint32_t tick_cb(void) { return s_ms; }
 uint16_t *sim_fb(void) { return s_fb; }
 
+// Fines de cuadro del DPI simulados (~60 Hz con el reloj de la simulacion)
+uint32_t flex_display_vsync_count(void) { return s_ms / 17; }
+
+// Estado del shell en el ultimo cuadro dibujado: el panel no debe encenderse
+// al despertar con un cuadro anterior al bloqueo (stubs: sim_display_panel_on).
+static int s_drawn_state = -1;
+int sim_drawn_shell_state(void) { return s_drawn_state; }
+
 static void flush_cb(lv_display_t *d, const lv_area_t *a, uint8_t *px)
 {
     int32_t w = lv_area_get_width(a);
     for (int32_t y = a->y1; y <= a->y2; y++) {
         memcpy(s_fb + (size_t)y * W + a->x1, px + (size_t)(y - a->y1) * w * 2, (size_t)w * 2);
+    }
+    if (lv_display_flush_is_last(d)) {
+        s_drawn_state = (int)flex_shell_state();
     }
     lv_display_flush_ready(d);
 }

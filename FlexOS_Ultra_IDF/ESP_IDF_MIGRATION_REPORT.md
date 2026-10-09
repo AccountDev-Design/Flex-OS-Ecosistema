@@ -15,7 +15,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 0 | Infraestructura: proyecto, sdkconfig por revisión, particiones provisionales, herramientas | Hecha | `docs/FASE_0_1_INFORME.md` |
 | 1 | Pantalla ST7701 por MIPI-DSI, 2 framebuffers, LVGL DIRECT, GT911, pantalla de prueba | Hecha | `docs/FASE_0_1_INFORME.md` |
 | 2 | Arquitectura base: bus de eventos, buzón de UI, almacenamiento (NVS + LittleFS compatibles), ajustes, monitor del sistema, lógica portable | Hecha | `docs/FASE_2_INFORME.md` |
-| 3 | Interfaz completa en LVGL | Pendiente | |
+| 3 | Interfaz completa en LVGL | En curso (shell: bloqueo, clave, escritorio, caja de apps, recientes, energía, teclado) | `docs/spec/` |
 | 4 | Liquid Glass (3 niveles) | Pendiente | |
 | 5 | Táctil y gestos | Pendiente | |
 | 6 | Wi-Fi por ESP32-C6 (esp-hosted) | Pendiente | |
@@ -71,3 +71,7 @@ La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la
 | Ajustes | `Preferences.put*` escribe al momento | Caché en RAM + escritura diferida 300 ms por un único escritor | La UI nunca espera a la flash |
 | LittleFS sin montar | `LittleFS.begin(true)` **formatea** si no monta | Nunca formatea; avisa y pide confirmación | No perder datos del usuario |
 | Gráficos | Motor propio sobre framebuffer | Solo LVGL | Requisito del proyecto |
+| Orden de grabado de ajustes | Cada `put*` va a la flash al momento | El escritor único graba en el **orden de los cambios** (no en el de la lista) | Quien encadena escrituras dependientes (la clave) cuenta con ese orden si se corta la corriente |
+| Cambiar la clave del bloqueo | Cinco claves NVS sin orden garantizado: un corte entre la sal y el hash nuevos deja una pareja que no abre con ninguna clave | Diario atómico `lockjrn` (un único blob con todo) grabado y confirmado **antes** de tocar las claves de siempre; el arranque completa un cambio a medias. Quitar la clave pone "sin clave" antes de borrar el hash | Probado con un corte en cada escritura posible (4 estados × 3 operaciones): tras el arranque abre la de antes o la nueva, nunca ninguna, y Arduino ve lo mismo. Arduino no lee `lockjrn` |
+| NVS que no arranca (sin páginas libres) | `Preferences` falla y todo vale por defecto (el bloqueo desaparece) | Se lee en **solo lectura** (copia de la partición marcada `readonly`: NVS no repara ni escribe nada) y los ajustes, incluida la clave, siguen en vigor; los cambios quedan en RAM. Si ni así se puede leer, valores por defecto como en Arduino | No borrar datos sin confirmación y no abrir el bloqueo por un fallo de la flash. Límite: con NVS ilegible del todo el bloqueo no se aplica (igual que Arduino) |
+| Despertar con clave | El bloqueo se dibuja y se enciende en el mismo bucle | El panel se enciende (DISPON + fundido) solo cuando el cuadro del bloqueo ha salido entero por el DPI (dibujado + 2 fines de cuadro, máx. 250 ms) | Con DPI el panel muestra lo que llega: encender antes dejaría ver 1–2 cuadros de la app |

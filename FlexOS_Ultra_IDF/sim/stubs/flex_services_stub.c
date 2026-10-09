@@ -235,6 +235,15 @@ void flex_display_set_brightness(uint8_t pct) { s_bright = pct < 5 ? 5 : pct > 1
 uint8_t flex_display_get_brightness(void) { return s_bright; }
 void flex_display_backlight_enable(bool on) { s_bl_on = on; s_raw = on ? s_bright : 0; }
 void flex_display_backlight_raw(uint8_t pct) { s_raw = pct; s_bl_on = pct > 0; }
-void flex_display_panel_on(bool on) { s_panel_on = on; }
+int sim_drawn_shell_state(void);
+static int s_on_drawn = -1;   // shell en el ultimo cuadro dibujado al mandar DISPON
+void flex_display_panel_on(bool on)
+{
+    if (on && !s_panel_on) {
+        s_on_drawn = sim_drawn_shell_state();
+    }
+    s_panel_on = on;
+}
+int sim_panel_on_drawn_state(void) { return s_on_drawn; }
 uint8_t sim_display_backlight(void) { return s_bl_on ? s_raw : 0; }
 bool sim_display_panel_on(void) { return s_panel_on; }

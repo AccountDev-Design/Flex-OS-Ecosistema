@@ -32,7 +32,7 @@ void app_main(void)
     // definitivo. Si no hay nada que migrar no escribe. Nunca se imprime la clave.
     int mg = flex_lock_migrate();
     if (mg > 0) {
-        ESP_LOGI(TAG, "clave del bloqueo migrada a hash con sal");
+        ESP_LOGI(TAG, "clave del bloqueo: migrada a hash con sal o cambio a medias completado");
     } else if (mg < 0) {
         ESP_LOGW(TAG, "no se pudo migrar la clave del bloqueo: se conserva la anterior");
     }

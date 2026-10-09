@@ -37,7 +37,11 @@ int  flex_lock_type(void);
 int  flex_lock_len(void);           // longitud del PIN (autoconfirmar); 0 si contrasena o nada
 bool flex_lock_set(const char *secret, int type);
 bool flex_lock_clear(void);
-int  flex_lock_migrate(void);       // 1 migro/limpio, 0 nada que hacer, -1 no se pudo (todo queda como estaba)
+// Al arrancar, antes de la interfaz: completa un cambio de clave que un corte de
+// corriente dejo a medias (diario "lockjrn") o pasa una clave en claro antigua a
+// hash con sal. 1 hecho, 0 nada que hacer, -1 no se pudo grabar (la clave valida
+// sigue abriendo: la antigua o, si habia diario, la nueva desde la cache).
+int  flex_lock_migrate(void);
 
 // Verificacion de una sentada (no desde la tarea de UI: tarda decenas de ms)
 bool flex_lock_verify(const char *secret);

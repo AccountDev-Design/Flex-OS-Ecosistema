@@ -86,7 +86,7 @@ static void t_dirty_and_versions(void)
     // Tras borrar el almacen, todo lo vivo se vuelve a grabar (lo borrado no).
     flex_kv_load_num(&kv, "flexos", "dark", FLEX_KV_U8, 1);
     flex_kv_erase(&kv, "flexos", "dark");
-    while (flex_kv_next_dirty(&kv, &s)) {
+    while (flex_kv_next_dirty(&kv, &s) > 0) {
         flex_kv_mark_written(&kv, &s);
         flex_kv_snapshot_free(&s);
     }
@@ -133,11 +133,59 @@ static void t_buffers_and_limits(void)
     CHECK_EQ_I(kv.count, 0);
 }
 
+// El escritor graba en el orden de los cambios, no en el de la lista: la clave
+// del sistema pone "sin clave" antes de borrar el hash, y un corte a mitad de
+// la pasada no puede dejar "PIN" sin hash en la flash.
+static void t_write_order(void)
+{
+    flex_kv_t kv;
+    flex_kv_init(&kv, NULL, NULL, NULL);
+    // creadas en orden a, b, c (la lista queda c, b, a)
+    flex_kv_load_num(&kv, "flexos", "a", FLEX_KV_I32, 0);
+    flex_kv_load_num(&kv, "flexos", "b", FLEX_KV_I32, 0);
+    flex_kv_load_num(&kv, "flexos", "c", FLEX_KV_I32, 0);
+    CHECK(flex_kv_set_num(&kv, "flexos", "b", FLEX_KV_I32, 1));
+    CHECK(flex_kv_erase(&kv, "flexos", "c"));
+    CHECK(flex_kv_set_num(&kv, "flexos", "a", FLEX_KV_I32, 1));
+    CHECK(flex_kv_set_num(&kv, "flexos", "n", FLEX_KV_I32, 1));   // nueva: cabeza de la lista
+    CHECK(flex_kv_set_num(&kv, "flexos", "b", FLEX_KV_I32, 2));   // vuelve a cambiar: pasa al final
+    const char *want[] = {"c", "a", "n", "b"};
+    flex_kv_snapshot_t s;
+    for (int i = 0; i < 4; i++) {
+        CHECK(flex_kv_next_dirty(&kv, &s) == 1);
+        CHECK(strcmp(s.key, want[i]) == 0);
+        flex_kv_mark_written(&kv, &s);
+        flex_kv_snapshot_free(&s);
+    }
+    CHECK(flex_kv_next_dirty(&kv, &s) == 0);
+    // Una copia que cambia mientras se graba vuelve a la cola detras de lo posterior
+    CHECK(flex_kv_set_num(&kv, "flexos", "a", FLEX_KV_I32, 5));
+    CHECK(flex_kv_next_dirty(&kv, &s) == 1);
+    CHECK(flex_kv_set_num(&kv, "flexos", "b", FLEX_KV_I32, 5));
+    CHECK(flex_kv_set_num(&kv, "flexos", "a", FLEX_KV_I32, 6));
+    flex_kv_mark_written(&kv, &s);   // version vieja: "a" sigue pendiente
+    flex_kv_snapshot_free(&s);
+    CHECK(flex_kv_next_dirty(&kv, &s) == 1 && strcmp(s.key, "b") == 0);
+    flex_kv_mark_written(&kv, &s);
+    flex_kv_snapshot_free(&s);
+    CHECK(flex_kv_next_dirty(&kv, &s) == 1 && strcmp(s.key, "a") == 0 && s.num == 6);
+    flex_kv_mark_written(&kv, &s);
+    flex_kv_snapshot_free(&s);
+    // Contador dando la vuelta: la comparacion sigue el orden
+    kv.seq = 0xFFFFFFFEu;
+    CHECK(flex_kv_set_num(&kv, "flexos", "a", FLEX_KV_I32, 7));   // seq 0xFFFFFFFF
+    CHECK(flex_kv_set_num(&kv, "flexos", "b", FLEX_KV_I32, 7));   // seq 0
+    CHECK(flex_kv_next_dirty(&kv, &s) == 1 && strcmp(s.key, "a") == 0);
+    flex_kv_snapshot_free(&s);
+    flex_kv_clear(&kv);
+}
+
 void test_flex_kv(void)
 {
     t_types_like_preferences();
     t_dirty_and_versions();
     t_buffers_and_limits();
+    t_write_order();
 }
 
 // ---- concurrencia: la UI cambia ajustes mientras el escritor graba ----------
@@ -168,7 +216,7 @@ static void *writer(void *arg)
     for (;;) {
         int finished = atomic_load(&s_done);
         bool any = false;
-        while (flex_kv_next_dirty(&s_kv, &s)) {
+        while (flex_kv_next_dirty(&s_kv, &s) > 0) {
             any = true;
             s_store[s.key[1] - '0'] = s.num;
             flex_kv_mark_written(&s_kv, &s);

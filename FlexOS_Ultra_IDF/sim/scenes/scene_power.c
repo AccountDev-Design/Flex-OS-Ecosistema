@@ -16,6 +16,7 @@
 
 uint8_t sim_display_backlight(void);
 bool sim_display_panel_on(void);
+int sim_panel_on_drawn_state(void);
 
 #define CHK(c)                                                       \
     do {                                                             \
@@ -105,6 +106,9 @@ bool scene_power_run(void)
     one_finger_tap();
     CHK(flex_shell_state() == FLEX_SH_LOCK);   // compuesto antes de encender
     sim_run(400);
+    CHK(sim_display_panel_on());
+    // el panel se encendio con el bloqueo ya dibujado, no con un cuadro de la app
+    CHK(sim_panel_on_drawn_state() == FLEX_SH_LOCK);
     sim_shot("en_01_despertar_bloqueo");
     sim_drag(240, 700, 240, 400, 200);
     sim_run(600);

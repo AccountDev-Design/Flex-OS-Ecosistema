@@ -10,6 +10,7 @@
 #include "esp_check.h"
 #include "esp_littlefs.h"
 #include "esp_log.h"
+#include "esp_partition.h"
 #include "esp_random.h"
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
@@ -177,18 +178,58 @@ static void nvs_load_namespace(const char *ns)
     }
 }
 
+// Copia de la particion marcada de solo lectura: NVS guarda el puntero mientras
+// la tiene abierta.
+static esp_partition_t s_nvs_ro;
+
+static void load_all_namespaces(void)
+{
+    for (size_t i = 0; i < sizeof(k_namespaces) / sizeof(k_namespaces[0]); i++) {
+        nvs_load_namespace(k_namespaces[i]);
+    }
+}
+
+// La NVS no arranca en modo normal (p. ej. sin paginas libres): se intenta LEER
+// sin escribir ni un byte (en solo lectura NVS no repara ni reorganiza nada).
+// Asi los ajustes, y sobre todo la clave del bloqueo, siguen en vigor; los
+// cambios quedan en RAM. Si ni asi se puede leer, el aparato arranca con los
+// valores por defecto, como la version Arduino (ESP_IDF_MIGRATION_REPORT.md).
+static bool nvs_load_readonly(void)
+{
+    const esp_partition_t *p =
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, NVS_DEFAULT_PART_NAME);
+    if (!p) {
+        return false;
+    }
+    s_nvs_ro = *p;
+    s_nvs_ro.readonly = true;
+    esp_err_t err = nvs_flash_init_partition_ptr(&s_nvs_ro);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS tampoco se puede leer en solo lectura (%s)", esp_err_to_name(err));
+        return false;
+    }
+    load_all_namespaces();
+    nvs_flash_deinit_partition(NVS_DEFAULT_PART_NAME);   // mismo estado que "sin NVS" para los demas
+    return true;
+}
+
 static esp_err_t nvs_bring_up(void)
 {
     esp_err_t err = nvs_flash_init();
     if (err != ESP_OK) {
         // Sin borrar: esa NVS puede tener los ajustes de la version Arduino.
-        ESP_LOGE(TAG, "NVS no disponible (%s): ajustes solo en RAM; reparar requiere confirmacion",
-                 esp_err_to_name(err));
+        ESP_LOGE(TAG, "NVS no disponible (%s): reparar requiere confirmacion", esp_err_to_name(err));
+        bool ro = nvs_load_readonly();
+        portENTER_CRITICAL(&s_mux);
+        s_st.nvs_readonly = ro;
+        portEXIT_CRITICAL(&s_mux);
+        if (ro) {
+            ESP_LOGW(TAG, "NVS leida en solo lectura: %u claves en vigor; los cambios no se guardan",
+                     (unsigned)s_kv.count);
+        }
         return err;
     }
-    for (size_t i = 0; i < sizeof(k_namespaces) / sizeof(k_namespaces[0]); i++) {
-        nvs_load_namespace(k_namespaces[i]);
-    }
+    load_all_namespaces();
     ESP_LOGI(TAG, "NVS lista: %u claves en cache", (unsigned)s_kv.count);
     return ESP_OK;
 }
@@ -244,8 +285,12 @@ static esp_err_t settings_flush(void)
         if (guard-- == 0) {
             return ESP_ERR_TIMEOUT;   // otra tarea no para de escribir: la siguiente pasada sigue
         }
-        if (!flex_kv_next_dirty(&s_kv, &snap)) {
+        int nd = flex_kv_next_dirty(&s_kv, &snap);
+        if (nd == 0) {
             return ESP_OK;
+        }
+        if (nd < 0) {
+            return ESP_ERR_NO_MEM;   // queda pendiente: la siguiente pasada lo reintenta
         }
         esp_err_t err = nvs_write_snapshot(&snap);
         if (err == ESP_OK) {
@@ -480,6 +525,9 @@ static void run_job(job_t *job)
         }
         status_update(st_set_nvs, &err);
         if (err == ESP_OK) {
+            portENTER_CRITICAL(&s_mux);
+            s_st.nvs_readonly = false;
+            portEXIT_CRITICAL(&s_mux);
             // La cache conserva los valores en uso: se vuelven a grabar todos.
             flex_kv_mark_all_dirty(&s_kv);
             s_last_set_us = 0;
@@ -521,9 +569,13 @@ static void storage_task(void *arg)
         if (dirty && esp_timer_get_time() - s_last_set_us >= SETTINGS_DEBOUNCE_US) {
             settings_flush();
         }
+        // Fuera de la seccion critica: dirty_count toma el mutex de la cache y
+        // bloquearse con un spinlock tomado cuelga el nucleo.
+        uint32_t ps = (uint32_t)flex_kv_dirty_count(&s_kv);
+        uint32_t pj = (uint32_t)uxQueueMessagesWaiting(s_jobs);
         portENTER_CRITICAL(&s_mux);
-        s_st.pending_settings = (uint32_t)flex_kv_dirty_count(&s_kv);
-        s_st.pending_jobs = (uint32_t)uxQueueMessagesWaiting(s_jobs);
+        s_st.pending_settings = ps;
+        s_st.pending_jobs = pj;
         portEXIT_CRITICAL(&s_mux);
         if (wdt) {
             esp_task_wdt_reset();

@@ -9,6 +9,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#define POST_TRIES   500   // x 10 ms: el buzon solo sigue lleno 5 s si la UI esta parada
+#define POST_WAIT_MS 10
+
+static const char *TAG = "flex.lock";
+
 typedef struct {
     char secret[FLEX_LOCK_SECRET_MAX];
     int set_type;                 // 0 = verificar; 1/2 = guardar como PIN/contrasena
@@ -31,10 +36,20 @@ static void work_task(void *arg)
     job_t *j = arg;
     j->ok = j->set_type ? flex_lock_set(j->secret, j->set_type) : flex_lock_verify_alone(j->secret);
     flex_lock_wipe(j->secret, sizeof(j->secret));
+    // Libre ANTES de entregar: el resultado puede lanzar enseguida otra tarea
+    // (verificar y despues guardar) desde la UI, que corre en el otro nucleo.
     s_busy = false;
-    while (!flex_inbox_post(deliver, j)) {
-        vTaskDelay(pdMS_TO_TICKS(10));   // el buzon se vacia en la siguiente vuelta de la UI
+    for (int i = 0; i < POST_TRIES; i++) {
+        if (flex_inbox_post(deliver, j)) {
+            vTaskDelete(NULL);
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(POST_WAIT_MS));   // el buzon se vacia en la siguiente vuelta de la UI
     }
+    // Sin buzon (no iniciado o UI parada): el resultado se pierde, la tarea no
+    // se queda viva para siempre. La pantalla de la clave sigue con su flecha atras.
+    ESP_LOGE(TAG, "resultado de la clave perdido: la interfaz no atiende el buzon");
+    free(j);
     vTaskDelete(NULL);
 }
 

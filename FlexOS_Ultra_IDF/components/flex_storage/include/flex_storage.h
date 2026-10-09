@@ -41,6 +41,7 @@ typedef struct {
 
 typedef struct {
     bool nvs_ok;
+    bool nvs_readonly;   // !nvs_ok pero los ajustes se pudieron LEER (cambios solo en RAM)
     bool fs_mounted;
     esp_err_t nvs_err;
     esp_err_t fs_err;

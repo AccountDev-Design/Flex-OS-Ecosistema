@@ -36,6 +36,7 @@ typedef struct flex_kv_entry flex_kv_entry_t;
 typedef struct {
     flex_kv_entry_t *head;
     size_t count;
+    uint32_t seq;   // contador de cambios
     void (*lock)(void *ctx);
     void (*unlock)(void *ctx);
     void *lock_ctx;
@@ -75,8 +76,10 @@ bool flex_kv_set_buf(flex_kv_t *kv, const char *ns, const char *key, flex_kv_typ
                      const void *data, size_t len);
 bool flex_kv_erase(flex_kv_t *kv, const char *ns, const char *key);
 
-// Escritor: toma la siguiente entrada pendiente (copia). false si no hay.
-bool flex_kv_next_dirty(flex_kv_t *kv, flex_kv_snapshot_t *snap);
+// Escritor: toma la entrada pendiente con el cambio mas antiguo (copia).
+// 1 si hay, 0 si no queda ninguna, -1 si no hay memoria para la copia (la
+// entrada sigue pendiente; *snap queda vacio).
+int flex_kv_next_dirty(flex_kv_t *kv, flex_kv_snapshot_t *snap);
 // Marca grabada la version de la copia. Si la entrada cambio mientras tanto,
 // sigue pendiente (no se pierde la actualizacion).
 void flex_kv_mark_written(flex_kv_t *kv, const flex_kv_snapshot_t *snap);

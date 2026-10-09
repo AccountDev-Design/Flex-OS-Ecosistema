@@ -4,8 +4,11 @@
 //
 // La suspension NO duerme el chip ni cambia el estado del shell: funde el
 // retroiluminado a 0 (6 puntos cada 10 ms), manda DISPOFF y deja todo vivo.
-// Despertar con clave compone el bloqueo A OSCURAS antes de encender (lo que
-// habia no se ve ni un cuadro) y, al acertar, vuelve a la app donde estaba.
+// Despertar con clave compone el bloqueo A OSCURAS antes de encender y, al
+// acertar, vuelve a la app donde estaba. "A oscuras" de verdad: el panel no se
+// enciende hasta que el cuadro con el bloqueo ha salido entero por el DPI (dos
+// fines de cuadro despues de dibujarlo); encender en el mismo instante dejaria
+// ver uno o dos cuadros de la app que habia.
 #include <stdbool.h>
 #include "flex_app.h"
 #include "flex_auth.h"
@@ -20,6 +23,9 @@
 #define AUTOLOCK_DEF_MS 60000u
 #define AUTOLOCK_TICK_MS 250
 #define CLOSE_WAIT_MS 200   // el cierre de la app (190 ms) termina antes de que caiga el bloqueo
+#define WAKE_VSYNCS 2       // 1: el DMA pasa al framebuffer nuevo; 2: ese cuadro ya salio entero
+#define WAKE_MAX_MS 250     // red de seguridad: sin fines de cuadro (driver parado) se enciende igual
+#define WAKE_POLL_MS 4
 
 static const uint32_t AUTOLOCK_OPTS[6] = {30000u, 60000u, 300000u, 600000u, 1800000u, 0u};
 
@@ -34,6 +40,12 @@ static struct {
 
 static lv_timer_t *s_autolock;
 static lv_timer_t *s_close_wait;
+static struct {
+    lv_timer_t *timer;   // encendido pendiente
+    bool drawn;
+    uint32_t vs;         // fines de cuadro al dibujar
+    uint32_t t0;
+} W;
 
 bool flex_power_suspended(void)
 {
@@ -114,17 +126,46 @@ static void wake_lock_screen(void)
     flex_lock_set_return_app(app);
 }
 
-void flex_power_wake(void)
+static void light_up(void)
 {
-    if (!S.on) {
-        return;
-    }
-    wake_lock_screen();   // a oscuras: lo de antes no llega a verse
     if (S.dark) {
         flex_display_panel_on(true);   // DISPON antes de subir el retroiluminado
         S.dark = false;
     }
     fade_to(S.bright);
+}
+
+static void wake_cb(lv_timer_t *t)
+{
+    if (!W.drawn) {
+        // Ya fuera de la lectura del tactil: lo que cambio (el bloqueo) se dibuja
+        // ahora mismo, sin esperar al siguiente refresco.
+        lv_refr_now(NULL);
+        W.drawn = true;
+        W.vs = flex_display_vsync_count();
+        return;
+    }
+    if ((uint32_t)(flex_display_vsync_count() - W.vs) < WAKE_VSYNCS && lv_tick_elaps(W.t0) < WAKE_MAX_MS) {
+        return;
+    }
+    lv_timer_delete(t);
+    W.timer = NULL;
+    light_up();
+}
+
+void flex_power_wake(void)
+{
+    if (!S.on || W.timer) {
+        return;
+    }
+    wake_lock_screen();   // a oscuras: lo de antes no llega a verse
+    if (!S.dark) {
+        light_up();   // aun no se habia apagado (a mitad del fundido): se ve el cambio, sin mas
+        return;
+    }
+    W.drawn = false;
+    W.t0 = lv_tick_get();
+    W.timer = lv_timer_create(wake_cb, WAKE_POLL_MS, NULL);
 }
 
 static void gesture_cb(int ev)

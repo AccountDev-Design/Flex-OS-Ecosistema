@@ -13,6 +13,7 @@ struct flex_kv_entry {
     bool erased;              // borrada en la cache, falta borrarla del almacen
     uint32_t version;         // sube con cada cambio
     uint32_t written;         // ultima version grabada
+    uint32_t seq;             // orden del ultimo cambio (el escritor graba en este orden)
     flex_kv_entry_t *next;
 };
 
@@ -207,6 +208,7 @@ bool flex_kv_set_num(flex_kv_t *kv, const char *ns, const char *key, flex_kv_typ
         e->num = v;
         e->erased = false;
         e->version++;
+        e->seq = ++kv->seq;
         changed = true;
     }
     unlock(kv);
@@ -227,6 +229,7 @@ bool flex_kv_set_buf(flex_kv_t *kv, const char *ns, const char *key, flex_kv_typ
         if (store_buf(e, type, data, len)) {
             e->erased = false;
             e->version++;
+            e->seq = ++kv->seq;
             changed = true;
         }
     }
@@ -245,40 +248,50 @@ bool flex_kv_erase(flex_kv_t *kv, const char *ns, const char *key)
         e->len = 0;
         e->erased = true;
         e->version++;
+        e->seq = ++kv->seq;
         changed = true;
     }
     unlock(kv);
     return changed;
 }
 
-bool flex_kv_next_dirty(flex_kv_t *kv, flex_kv_snapshot_t *snap)
+// La pendiente con el cambio MAS ANTIGUO: la flash recibe los cambios en el
+// orden en que se hicieron. Quien encadena escrituras que dependen unas de
+// otras (la clave del sistema: "sin clave" antes de borrar el hash) cuenta
+// con ello si se corta la corriente a mitad de una pasada.
+int flex_kv_next_dirty(flex_kv_t *kv, flex_kv_snapshot_t *snap)
 {
-    bool found = false;
+    int ret = 0;
     memset(snap, 0, sizeof(*snap));
     lock(kv);
+    flex_kv_entry_t *best = NULL;
     for (flex_kv_entry_t *e = kv->head; e; e = e->next) {
-        if (e->version == e->written) {
-            continue;
+        if (e->version != e->written && (!best || (int32_t)(e->seq - best->seq) < 0)) {
+            best = e;
         }
-        strcpy(snap->ns, e->ns);
-        strcpy(snap->key, e->key);
-        snap->type = e->type;
-        snap->num = e->num;
-        snap->erase = e->erased;
-        snap->version = e->version;
-        if (e->len) {
-            snap->buf = malloc(e->len);
+    }
+    if (best) {
+        ret = 1;
+        if (best->len) {
+            snap->buf = malloc(best->len);
             if (!snap->buf) {
-                break;   // sin memoria: se reintenta en la siguiente pasada
+                ret = -1;   // sin memoria: sigue pendiente y quien graba lo sabe
+            } else {
+                memcpy(snap->buf, best->buf, best->len);
+                snap->len = best->len;
             }
-            memcpy(snap->buf, e->buf, e->len);
-            snap->len = e->len;
         }
-        found = true;
-        break;
+        if (ret == 1) {
+            strcpy(snap->ns, best->ns);
+            strcpy(snap->key, best->key);
+            snap->type = best->type;
+            snap->num = best->num;
+            snap->erase = best->erased;
+            snap->version = best->version;
+        }
     }
     unlock(kv);
-    return found;
+    return ret;
 }
 
 void flex_kv_mark_written(flex_kv_t *kv, const flex_kv_snapshot_t *snap)
