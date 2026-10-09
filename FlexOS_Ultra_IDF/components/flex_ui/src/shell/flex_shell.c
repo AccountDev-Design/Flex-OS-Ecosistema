@@ -8,6 +8,7 @@
 #include "flex_frame.h"
 #include "flex_glass.h"
 #include "flex_home_model.h"
+#include "flex_storage.h"
 #include "flex_i18n.h"
 #include "flex_icons.h"
 #include "flex_theme.h"
@@ -335,8 +336,63 @@ void flex_app_close(void)
     card_run(false, id, has_icon ? &icon : NULL);
 }
 
+static const flex_overlay_ops_t *s_overlay;
+
+void flex_shell_overlay_begin(const flex_overlay_ops_t *ops)
+{
+    s_overlay = ops;
+    s_state = FLEX_SH_OVERLAY;
+}
+
+void flex_shell_overlay_end(void)
+{
+    s_overlay = NULL;
+    if (s_state == FLEX_SH_OVERLAY) {
+        flex_shell_show_home();
+    }
+}
+
+// ---- abrir con candado ----------------------------------------------------------------
+static lv_area_t s_launch_from;
+static bool s_launch_has_from;
+
+static void launch_ok(void *ctx)
+{
+    // lsuFinishAfter(LSU_AFTER_OPENAPP): escritorio y la app con su animacion
+    flex_shell_show_home();
+    flex_app_open((int)(intptr_t)ctx, s_launch_has_from ? &s_launch_from : NULL);
+}
+
+static void launch_cancel(void *ctx)
+{
+    (void)ctx;
+    flex_shell_show_home();   // la verificacion no salio del bloqueo: se queda en Inicio
+}
+
+void flex_app_launch(int id, const lv_area_t *from_icon)
+{
+    if (!flex_app_def(id)) {
+        return;
+    }
+    bool locked = id >= 0 && id < 32 && ((g_home.lock >> id) & 1u);
+    if (locked && flex_auth_required()) {
+        s_launch_has_from = from_icon != NULL;
+        if (from_icon) {
+            s_launch_from = *from_icon;
+        }
+        flex_auth_req_t r = {.on_ok = launch_ok, .on_cancel = launch_cancel, .ctx = (void *)(intptr_t)id};
+        flex_auth_verify(&r);
+        return;
+    }
+    flex_app_open(id, from_icon);
+}
+
 void flex_sys_back(void)
 {
+    if (s_state == FLEX_SH_OVERLAY && s_overlay && s_overlay->on_back) {
+        s_overlay->on_back();
+        return;
+    }
     if (s_state != FLEX_SH_APP || s_fg < 0) {
         return;
     }
@@ -349,6 +405,10 @@ void flex_sys_back(void)
 
 void flex_sys_home(void)
 {
+    if (s_state == FLEX_SH_OVERLAY && s_overlay && s_overlay->on_home) {
+        s_overlay->on_home();
+        return;
+    }
     if (s_state == FLEX_SH_APP) {
         flex_app_close();
     } else if (s_state != FLEX_SH_LOCK && s_state != FLEX_SH_AUTH) {
@@ -359,6 +419,10 @@ void flex_sys_home(void)
 void flex_sys_recents(void)
 {
     if (s_state == FLEX_SH_LOCK || s_state == FLEX_SH_AUTH) {
+        return;
+    }
+    if (s_state == FLEX_SH_OVERLAY && s_overlay && s_overlay->on_recents) {
+        s_overlay->on_recents();
         return;
     }
     if (s_state == FLEX_SH_APP) {
@@ -418,6 +482,7 @@ void flex_shell_show_home(void)
 void flex_shell_lock(void)
 {
     flex_auth_abort();   // una clave a medias no sobrevive a bloquear
+    flex_drawer_close_now();
     flex_lock_set_return_app(-1);
     suspend_fg();
     flex_lock_reset();
@@ -513,5 +578,4 @@ void flex_shell_start(void)
 }
 
 // Modulos opcionales: si no estan enlazados, estas versiones no hacen nada.
-__attribute__((weak)) void flex_drawer_open(void) {}
 __attribute__((weak)) void flex_recents_open(void) {}

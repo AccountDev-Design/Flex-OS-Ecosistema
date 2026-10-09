@@ -44,7 +44,7 @@ static void wg_click_cb(lv_event_t *e)
     int app = (int)(intptr_t)lv_event_get_user_data(e);
     lv_area_t a;
     lv_obj_get_coords(lv_event_get_target_obj(e), &a);
-    flex_app_open(app, &a);
+    flex_app_launch(app, &a);   // con candado pide la clave antes
 }
 
 static void build_widget(lv_obj_t *page, const flex_home_wg_t *w)
@@ -207,7 +207,7 @@ static void icon_cb(lv_event_t *e)
     } else if (code == LV_EVENT_SHORT_CLICKED && !s_press.long_done) {
         lv_area_t a;
         lv_obj_get_coords(o, &a);
-        flex_app_open(app, &a);
+        flex_app_launch(app, &a);   // con candado pide la clave antes
     }
 }
 
@@ -416,6 +416,13 @@ void flex_home_refresh(void)
     }
 }
 
+void flex_home_rebuild(void)
+{
+    if (s_root) {
+        rebuild();   // el modelo cambio (favoritas, ocultas, orden)
+    }
+}
+
 bool flex_home_icon_area(int app_id, lv_area_t *out)
 {
     if (!s_root) {
@@ -452,6 +459,9 @@ lv_obj_t *flex_home_create(lv_obj_t *parent)
     s_root = flex_box(parent);
     lv_obj_set_size(s_root, 480, 800);
     lv_obj_set_clickable(s_root, true);
+    // En LVGL 9.6 el gesto sube por todos los padres con gesture_bubble (el
+    // valor por defecto) hasta la pantalla: se corta aqui para recibirlo.
+    lv_obj_set_gesture_bubble(s_root, false);
     lv_obj_add_event_cb(s_root, root_gesture_cb, LV_EVENT_GESTURE, NULL);
     lv_obj_add_event_cb(s_root, empty_cb, LV_EVENT_SHORT_CLICKED, NULL);
     s_wall = lv_image_create(s_root);

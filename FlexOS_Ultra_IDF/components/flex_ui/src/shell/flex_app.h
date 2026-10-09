@@ -68,6 +68,9 @@ const char *flex_app_cat_name(int cat);
 // Navegacion del sistema (Core.h:551-704)
 void flex_app_open(int id, const lv_area_t *from_icon);   // from_icon: para la animacion Zoom (NULL = centro)
 void flex_app_close(void);                                 // suspende y vuelve a Inicio
+// Abrir desde Inicio o la caja: con candado (y clave puesta) pide la clave
+// antes (LSU_AFTER_OPENAPP); al cancelar se queda en Inicio.
+void flex_app_launch(int id, const lv_area_t *from_icon);
 void flex_sys_back(void);
 void flex_sys_home(void);
 void flex_sys_recents(void);

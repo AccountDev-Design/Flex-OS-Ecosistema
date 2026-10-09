@@ -41,6 +41,7 @@ void flex_shell_home_shift(int32_t dx);   // temblor del revelado
 // Vistas (las implementan flex_home.c y flex_lock.c)
 lv_obj_t *flex_home_create(lv_obj_t *parent);
 void flex_home_refresh(void);                         // cambio de minuto / tema
+void flex_home_rebuild(void);                         // el modelo cambio (favoritas, ocultas)
 bool flex_home_icon_area(int app_id, lv_area_t *out); // icono visible de la app (origen del zoom)
 lv_obj_t *flex_lock_create(lv_obj_t *parent);
 void flex_lock_refresh(void);
@@ -55,8 +56,21 @@ void flex_power_suspend(void);
 void flex_power_wake(void);
 uint32_t flex_power_autolock_ms(void);
 
+// Capas superpuestas al escritorio (caja de apps, Recientes, Personalizar):
+// mientras una esta abierta el estado es OVERLAY y Atras/Inicio/Recientes van
+// a ella.
+typedef struct {
+    void (*on_back)(void);
+    void (*on_home)(void);
+    void (*on_recents)(void);
+} flex_overlay_ops_t;
+void flex_shell_overlay_begin(const flex_overlay_ops_t *ops);
+void flex_shell_overlay_end(void);   // vuelve al estado Inicio
+
 // Pantallas superpuestas opcionales (si su modulo no esta, no hacen nada).
 void flex_drawer_open(void);
+void flex_drawer_close_now(void);     // sin animacion (bloquear, suspender)
+bool flex_drawer_is_open(void);
 void flex_recents_open(void);
 
 #ifdef __cplusplus
