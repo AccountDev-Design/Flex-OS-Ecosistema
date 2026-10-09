@@ -35,6 +35,9 @@ python3 ref/extract_arduino.py "$OUT/ref_home.inc" \
     FlexOS_Ultra_Prefs.h:appCanHide \
     FlexOS_Ultra_AppDrawer.h:drwFavToggle,drwHideToggle
 
+python3 ref/extract_arduino.py "$OUT/ref_recents.inc" \
+    FlexOS_Ultra_AppSwitcher.h:SW_MAX,SW_THUMB_MAX,TH_W,TH_H,AppTask,swTasks,swCount,swThumbTrim,captureThumb,swPush,swDropCard
+
 python3 ref/extract_arduino.py "$OUT/ref_drawer.inc" \
     FlexOS_Ultra_DeX.h:dexLower,dexMatch \
     FlexOS_Ultra_PkgApps.h:pkgAppFold,pkgAppNameCmp \
@@ -60,13 +63,14 @@ python3 ref/extract_arduino.py "$OUT/ref_kb_b.inc" \
     FlexOS_Ultra_Power.h:utf8Count,lsuPassAppend \
     FlexOS_Ultra_KeyboardSettings.h:kbsScField,kbsScA,kbsAppendField,kbsBackField
 
-SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c
+SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c
       $ROOT/components/flex_storage/src/flex_kv.c
       $ROOT/components/flex_storage/src/flex_fs_path.c
       $ROOT/components/flex_ui/src/theme/flex_wallpaper.c
       $ROOT/components/flex_ui/src/theme/flex_glass_math.c
       $ROOT/components/flex_ui/src/shell/flex_home_model.c
       $ROOT/components/flex_ui/src/shell/flex_drawer_model.c
+      $ROOT/components/flex_ui/src/shell/flex_recents_model.c
       $ROOT/components/flex_ui/src/widgets/flex_kb_layout.c
       $ROOT/components/flex_touch/src/flex_touch_arb.c
       stub_cfg.c)
@@ -78,7 +82,7 @@ CFLAGS=(-O1 -g -Wall -Wextra -Werror -pthread)
 build() {   # $1 = sufijo, resto = flags de sanitizador
     local sfx=$1; shift
     local refs=()
-    for r in wall glass home home_load touch drawer kb; do
+    for r in wall glass home home_load touch drawer kb recents; do
         c++ -std=gnu++17 -O1 -g -w "$@" -Iref -I"$OUT" -c ref/ref_${r}_main.cpp -o "$OUT/ref_${r}_$sfx.o"
         refs+=("$OUT/ref_${r}_$sfx.o")
     done

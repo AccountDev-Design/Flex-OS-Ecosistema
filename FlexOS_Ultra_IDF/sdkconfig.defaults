@@ -102,6 +102,8 @@ CONFIG_LV_USE_FONT_COMPRESSED=y
 # Sin cache de imagenes decodificadas: los fondos son imagenes en RAM (y las
 # vistas del backdrop cambian de origen cada cuadro)
 CONFIG_LV_CACHE_DEF_SIZE=0
+# Miniaturas de Recientes: captura de la app al suspenderla (lv_snapshot)
+CONFIG_LV_USE_SNAPSHOT=y
 # CONFIG_LV_USE_PPA is not set
 # CONFIG_LV_USE_PERF_MONITOR is not set
 # CONFIG_LV_USE_SYSMON is not set

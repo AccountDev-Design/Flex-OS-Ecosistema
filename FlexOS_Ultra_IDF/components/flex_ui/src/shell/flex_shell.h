@@ -68,6 +68,16 @@ void flex_shell_overlay_begin(const flex_overlay_ops_t *ops);
 void flex_shell_overlay_end(void);   // vuelve al estado Inicio
 
 // Pantallas superpuestas opcionales (si su modulo no esta, no hacen nada).
+// Recientes (flex_recents.c)
+void flex_recents_note_suspend(int app, lv_obj_t *root, bool capture);   // la app sale del primer plano
+void flex_recents_note_closed(int app);                                   // la app se cerro de verdad
+void flex_recents_close_now(void);
+bool flex_recents_is_open(void);
+int  flex_recents_count(void);
+int  flex_recents_app_at(int i);
+bool flex_recents_has_thumb(int i);
+uint32_t flex_app_last_used(int id);   // lv_tick de la ultima vez en primer plano (0 = nunca)
+
 void flex_drawer_open(void);
 void flex_drawer_close_now(void);     // sin animacion (bloquear, suspender)
 bool flex_drawer_is_open(void);

@@ -294,6 +294,9 @@ static void suspend_fg(void)
     app_inst_t *in = &s_inst[s_fg];
     const flex_app_def_t *d = flex_app_def(s_fg);
     if (in->root) {
+        // tarjeta de Recientes + miniatura, ANTES de ocultarla (las horizontales sin
+        // miniatura: saldria girada)
+        flex_recents_note_suspend(s_fg, in->root, !(d->flags & FLEX_APP_LAND));
         lv_obj_set_hidden(in->root, true);
         in->life = APP_SUSPENDED;
         if (d->ops && d->ops->on_suspend) {
@@ -458,6 +461,7 @@ void flex_app_terminate(int id)
     lv_obj_delete(s_inst[id].root);
     s_inst[id].root = NULL;
     s_inst[id].life = APP_CLOSED;
+    flex_recents_note_closed(id);
 }
 
 // ---- estados del shell -------------------------------------------------------------
@@ -483,6 +487,7 @@ void flex_shell_lock(void)
 {
     flex_auth_abort();   // una clave a medias no sobrevive a bloquear
     flex_drawer_close_now();
+    flex_recents_close_now();
     flex_lock_set_return_app(-1);
     suspend_fg();
     flex_lock_reset();
@@ -577,5 +582,7 @@ void flex_shell_start(void)
     flex_shell_lock();
 }
 
-// Modulos opcionales: si no estan enlazados, estas versiones no hacen nada.
-__attribute__((weak)) void flex_recents_open(void) {}
+uint32_t flex_app_last_used(int id)
+{
+    return id >= 0 && id < FLEX_APP_N ? s_inst[id].last_used : 0;
+}
