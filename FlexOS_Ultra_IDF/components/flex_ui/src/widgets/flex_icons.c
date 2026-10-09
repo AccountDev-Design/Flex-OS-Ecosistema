@@ -577,6 +577,51 @@ static void glyph_draw_cb(lv_event_t *e)
         p_rrect_outline(&p, cx - s * 0.36f, cy - s * 0.3f, s * 0.46f, s * 0.46f, 4, col);
         p_rect(&p, cx - s * 0.1f, cy - s * 0.16f, s * 0.46f, s * 0.46f, 4, col, 140);
         break;
+    case FLEX_GLYPH_EYE: {
+        // drwGlyphEye (AppDrawer.h:552): dos parabolas dy = h/2 (1 - t^2), pupila r s/6
+        float ew = s, eh = s / 2;
+        float px0 = cx - ew / 2, py0 = cy;
+        for (int k = 1; k <= 8; k++) {
+            float t = -1.0f + k / 4.0f;
+            float x1 = cx + t * ew / 2, dy = eh * 0.5f * (1.0f - t * t);
+            float tp = -1.0f + (k - 1) / 4.0f, dyp = eh * 0.5f * (1.0f - tp * tp);
+            p_seg(&p, px0, py0 - dyp + (py0 - cy), x1, cy - dy, 0, col);
+            p_seg(&p, px0, cy + dyp, x1, cy + dy, 0, col);
+            px0 = x1;
+            py0 = cy;
+        }
+        p_circle(&p, cx, cy, (int32_t)(s / 6), col, 235);
+        if (gd->value == 0) {
+            p_seg(&p, cx - ew / 2, cy + eh / 2, cx + ew / 2, cy - eh / 2, 1, col);
+        }
+        break;
+    }
+    case FLEX_GLYPH_INFO:
+        p_ring(&p, cx, cy, (int32_t)(s / 2 - 1), 1, col);
+        p_rect(&p, cx - 1, cy - 5, 2, 10, 0, col, 255);
+        p_rect(&p, cx - 1, cy - 9, 2, 2, 0, col, 255);
+        break;
+    case FLEX_GLYPH_OPEN:
+        p_seg(&p, cx - s / 2, cy, cx + s / 2, cy, 1, col);
+        p_seg(&p, cx + s / 2 - 9, cy - 8, cx + s / 2, cy, 1, col);
+        p_seg(&p, cx + s / 2 - 9, cy + 8, cx + s / 2, cy, 1, col);
+        break;
+    case FLEX_GLYPH_RING:
+        p_ring(&p, cx, cy, (int32_t)(s / 3), 4, col);
+        break;
+    case FLEX_GLYPH_TRASH: {
+        float bw = s - 8, bh = s - 8, bx = cx - s / 2 + 4, by = cy - s / 2 + 6;
+        p_rrect_outline(&p, bx, by + 4, bw, bh - 4, 3, col);
+        p_rect(&p, bx - 2, by, bw + 4, 2, 0, col, 255);
+        p_rect(&p, bx + bw / 2 - 4, by - 3, 8, 3, 0, col, 255);
+        p_rect(&p, bx + bw / 3, by + 9, 2, bh - 16, 0, col, 255);
+        p_rect(&p, bx + 2 * bw / 3, by + 9, 2, bh - 16, 0, col, 255);
+        break;
+    }
+    case FLEX_GLYPH_CHEVRON_DOWN:
+        p_seg(&p, cx - 9, cy - 4, cx, cy + 5, 1, col);
+        p_seg(&p, cx + 9, cy - 4, cx, cy + 5, 1, col);
+        break;
     }
 }
 

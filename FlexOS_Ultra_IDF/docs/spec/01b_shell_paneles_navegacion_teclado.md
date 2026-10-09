@@ -772,3 +772,199 @@ Cuesta ~2,3 MB de PSRAM mientras está abierto y lo libera al cerrarse. Hay perf
   (§5.11).
 
 ---
+
+## Teclado del sistema
+
+> Fuentes: `FlexOS_Ultra_Keyboard.h` (todo), `FlexOS_Ultra_KeyboardSettings.h` (todo), `FlexOS_Ultra_Prefs.h:147-249`,
+> `FlexOS_Ultra_Power.h:276-578` (pantalla de contraseña), `FlexOS_Ultra_Lock.h:37-76` (colores de la clave),
+> `FlexOS_Ultra_AppNotes.h:376-531` (sesión de Notas), `FlexOS_Ultra_Types.h:184-190` (interruptores `KB_*_ON`, todos a 1),
+> y los usos en `Network.h` (Wi-Fi), `AppWeather.h` (buscador), `FileKit.h` (nombre de archivo) y `FlexOS_Browser_Bridge.h`.
+>
+> **Implementación ESP-IDF:** `components/flex_ui/src/widgets/flex_kb_layout.{h,c}` (lógica pura, sin LVGL) y
+> `components/flex_ui/src/widgets/flex_kb.{h,c}` (widget LVGL). Pruebas: `tests/host/test_kb.c` (contra el código Arduino
+> extraído, bit a bit) y la escena `teclado` del simulador (`sim/scenes/scene_kb.c`).
+> **Estado: NO PROBADO EN HARDWARE REAL** (solo host y simulador LVGL en el PC).
+
+### T.1 Quién lo usa y con qué variante
+
+El teclado es UN recurso del sistema con una sola geometría, un solo hit-test y una sola tabla de mapas; cada superficie
+cambia solo los colores, la etiqueta de la tecla enter, la reserva inferior y los extras.
+
+| Superficie | Colores | Enter | Extras (barra + chips) | `kbBotReserve` | Fn al tocar | Acentos |
+|---|---|---|---|---|---|---|
+| Notas (`noteEditorEnter`) | sistema (`kbCol*`) | `ent` (salto de línea) | sí | `NAV_H` = 64 si hay barra | sí (vía rápida) | sí |
+| Clave al **crear** (`lsuEnter`, `lsuVerify=false`) | página: `PAGE_BG` / `SET_CARD_BG` / `SET_TXT_HI` | `OK` | **no** (seguridad) | 0 | no | no |
+| Clave al **verificar** (`lsuVerify=true`) | sobre fondo: `TH_WALLPANEL` / `TH_WALLSURF` / `TH_ONWALL` | `OK` | **no** | 0 | no | no |
+| Wi-Fi (`wifiRenderPass`) | sistema | `Conectar` | no | 0 | no | no |
+| Ajustes del teclado → editor de atajos | sistema | `OK` | no | 0 | no | no |
+| Clima (buscador), FileKit (nombre) | sistema (FileKit: tinte `TH_KEYPANEL`) | `wt(WT_SEARCH)` / `Guardar` | no | 0 | no | no |
+
+Regla de seguridad (Keyboard.h:136-140, 155-158): en las pantallas de clave **no** hay barra de herramientas, chips,
+portapapeles, ajustes ni reserva de barra de navegación: serían una vía de escape.
+
+### T.2 Geometría (Fase A, `kbApplySize`, NVS `kbsize`)
+
+Rejilla de 10×3 teclas + fila de 6 teclas de función. Todo sale de 4 números; la rejilla se centra en 480
+(`KB_X = (480 - (10·KW + 9·GAP)) / 2`, mínimo 2).
+
+| `kbsize` | Tecla KW×KH | GAP | `KB_X` | Rejilla | `KB_Y` (reserva 0) | Panel (`kbPanelTop`) | Fila fn (`kbFuncY`) | Alto del panel |
+|---|---|---|---|---|---|---|---|---|
+| 0 Compacto | 43×50 | 4 | 7 | 466 | 578 | 574 | 740 | 226 |
+| 1 Normal (defecto) | 45×60 | 2 | 6 | 468 | 546 | 542 | 732 | 258 |
+| 2 Grande | 45×72 | 2 | 6 | 468 | 498 | 494 | 720 | 306 |
+
+* `KB_Y = kbRowsTop() = 800 − kbBotReserve − 4·(KH+GAP) − 6`. Los extras crecen **hacia arriba**: no empujan las teclas.
+* `kbPanelTop() = KB_Y − 4 − kbTopH()`, `kbTopH = barra (56) + chips (32)`; `kbToolbarY = kbPanelTop + 4`;
+  `kbChipsY = kbToolbarY + barra`. Notas con reserva 64 y extras (Normal): `KB_Y = 482`, panel en 390, barra en 394,
+  chips en 450.
+* Tecla `(fila r, columna c)`: `x = KB_X + c·(KW+GAP)`, `y = KB_Y + r·(KH+GAP)`.
+* Fila de función: pesos `{0.135, 0.125, 0.110, 0.420, 0.100, 0.110}` (shift, capa, idioma, espacio, borrar, enter) sobre
+  `usable = rejilla − 5·GAP`; `w = (int)(usable·peso + 0.5f)` (mín. 20), `x` acumulado con GAP. Resultado `(x, w)`:
+  Compacto `(7,60) (71,56) (131,49) (184,187) (375,45) (424,49)`; Normal y Grande `(6,62) (70,57) (129,50) (181,192)
+  (375,46) (423,50)`. Ningún producto cae cerca de .5 (prueba de host), así que el resultado no depende de FMA.
+* **Hit-test sin franjas muertas** (`kbCellAt`): el área de cada tecla es su **paso completo** (tecla + separación):
+  `c = (px−KB_X)/(KW+GAP)`, `r = (py−KB_Y)/(KH+GAP)`. Fila de función (`kbFRowHit`): `fy−GAP ≤ py ≤ fy+KH+GAP`,
+  `px ≥ KB_X−GAP`, y cada tecla se queda con la separación de su derecha. En los 2-4 px donde se solapan la fila 3 y la
+  fila de función, la ruta rápida da la letra y la ruta "al soltar" da la función (como Arduino).
+* `kbSizeCheck`: rejilla y fila dentro de 480, fila de función por encima de `800 − reserva − 4` y panel por debajo de
+  y = 120. Se cumple en los tres tamaños, con y sin reserva y con extras.
+* El navegador (DeX) estrecha `KW` si el lienzo es menor que la rejilla (`brKbGeomBegin`); no aplica en vertical a pantalla
+  completa (pendiente si se migra DeX).
+
+### T.3 Capas, resolución de tecla y fila de función
+
+Mapas (`Keyboard.h:44-59`, copiados tal cual):
+
+| Capa | Fila 1 | Fila 2 | Fila 3 |
+|---|---|---|---|
+| `LAYOUT_ES` | `q w e r t y u i o p` | `a s d f g h j k l ñ` | `z x c v b n m , . ?` |
+| `LAYOUT_EN` | `q w e r t y u i o p` | `a s d f g h j k l ;` | `z x c v b n m , . ?` |
+| `LAYOUT_NUM` | `1 2 3 4 5 6 7 8 9 0` | `@ # $ % & - _ ( ) /` | `* " ' : ; ! ? + = .` |
+| `LAYOUT_EMOJI` | `:) :D :( ;) :P xD :o :\| <3 :3` | `^^ o_o >:( :'( B) -_- =) D: :v :c` | `uwu :* <_< >_> (y) !! :] [: T_T o/` |
+
+* La capa "emoji" son **emoticonos de texto ASCII**: la fuente Outfit (ASCII + Latin-1) los dibuja todos. No hace falta
+  fuente de emoji (ni la versión Arduino la tenía).
+* `kbResolveKey`: con shift, `a-z → A-Z`, `ñ → Ñ` (`C3 B1 → C3 91`) y, solo en `?123`, `( → {` y `) → }`. Escribir una
+  variante **apaga el shift** (shift de una pulsación); un símbolo sin variante no lo consume. Las etiquetas se pintan ya
+  resueltas (en mayúscula con shift).
+* Fila de función: **shift** (conmuta; pintada con `kbColFnOn` cuando está activo), **capa** (letras → `?123` → emoji →
+  letras del idioma; etiqueta `?123` / `emoji` / `ABC`), **idioma** (`ES`/`EN`; si la capa activa es de letras cambia
+  de mapa), **espacio** (etiqueta `espacio`, inserta `" "`), **`<-`** (borra **un carácter UTF-8 completo**, nunca medio
+  byte de `ñ`), **enter** (etiqueta por superficie).
+* Estado de sesión de Notas: capa codificada 0..3 (ES, EN, NUM, EMOJI) + flags idioma/shift (`noteCaptureKbState`).
+
+### T.4 Colores y material
+
+| Elemento | Sistema (Notas, Wi-Fi…) | Clave al crear | Clave al verificar |
+|---|---|---|---|
+| Panel, Liquid Glass | vidrio con tinte `TH_GLASS` | vidrio, tinte `TH_GLASS` | vidrio sobre el fondo, tinte `TH_WALLPANEL` |
+| Panel, Plano | `TH_KEYPANEL` | `TH_PAGE` | `TH_WALLPANEL` |
+| Tecla / texto | `TH_KEYFACE` / `TH_TXT` | `TH_SURF` / `TH_TXT` | `TH_WALLSURF` / `TH_ONWALL` |
+| Tecla de función / texto | `TH_KEYALT` / `TH_TXT` | ídem | ídem (Arduino usa `kbFKey` también aquí) |
+| Shift activo / texto | `TH_PRIM` / `TH_ONACC` | ídem | ídem |
+| Tecla pulsada | `mix565(TH_PRIM, TH_KEYFACE, 60)` | ídem | ídem |
+
+* Las **teclas son siempre planas** (`fillRoundRect`, radio 6) incluso con Liquid Glass: el vidrio es solo el panel (radio 0,
+  de `kbPanelTop` al borde inferior).
+* Contraste alto (`kbhicon`, solo superficies del sistema para panel/teclas): tecla y panel negros, texto blanco, función
+  `rgb(24,24,24)`, shift y pulsada ámbar `rgb(255,210,0)` con texto negro, borde blanco.
+* Opacidad del panel (`kbopa`, 40..100, solo sistema): por debajo de 100 el panel pasa a relleno **plano con alfa**
+  (`opa·255/100`) aunque esté Liquid Glass, con el color `kbColPanel()`.
+* Estilo (`kbstyle`): 0 redondeada (r 6), 1 cuadrada (r 0), 2 contorno (sin relleno, borde 1 px `TH_BORDER`; la pulsada sí se
+  rellena). Aplica a todas las superficies.
+* Tipografía (`kbfont`): talla 1/2/3 → `FLEX_FONT_S1/S2/S3` (Outfit 11/13/19) para las teclas, `min(talla, 2)` para la fila de
+  función; el **tope de las mayúsculas** en `y + h/2 − dy` con `dy = 4/8/12`.
+* En IDF: `TH_PRIM` → `flex_accent()` (acento del sistema; con las preferencias por defecto es el mismo `primary`).
+
+### T.5 Entrada, destello y animaciones
+
+* **Escritura rápida** (`kbfast`, por defecto activada): la tecla se escribe al **tocar**, sin esperar a soltar, y se ve
+  hundida mientras el dedo está encima. Sin ella, se escribe al **soltar** si el gesto es un *tap* (|dx|,|dy| < 16 px y
+  < 550 ms, localizado donde se apoyó) y la tecla destella al apoyar como única señal.
+* Teclas de función: al soltar (tap) — confirmar o borrar tiene que salir de un toque deliberado; en Notas, con escritura
+  rápida, también al tocar.
+* **Destello** (`kbfx` = 60/100/160 ms, defecto 100): la tecla escrita se pinta con el color de pulsada durante ese tiempo y
+  vuelve sola (por reloj, sin repintar el teclado entero). Las teclas de función no destellan.
+* **Entrada**: deslizando desde abajo, **300 ms lineal**, `y = top + (int)((1 − t/300)·kbh)`, con `kbh = 800 − KB_Y`
+  (clave, Wi-Fi) o `800 − kbPanelTop` (Notas). Mientras dura **no se atiende ningún toque**.
+* **Sacudida** (clave equivocada, FASE 1): se desplazan solo las teclas en horizontal dentro del panel, que no se mueve.
+* **Acentos** (Notas): pulsación larga en `a e i o u` de las capas de letras (umbral `kblp` 350/500/700 ms) → ventana
+  elevada (`uiSurface` r10) con 40×46 por variante (r8, talla 3) encima de la tecla:
+  `á à â ã`, `é è ê`, `í ì î`, `ó ò ô õ`, `ú ù û ü`. Soltar en una variante la escribe (si la vía rápida ya escribió la
+  vocal, primero se borra); soltar fuera escribe la vocal si no estaba escrita.
+
+### T.6 Preferencias (NVS `flexos`, mismas claves que Arduino)
+
+| Clave | Tipo | Defecto | Normalización |
+|---|---|---|---|
+| `kbsize` | i32 | 1 | 0..2, si no 1 |
+| `kbfast` | bool | true | — |
+| `kbtool` / `kbpred` | bool | true / true | — |
+| `kbspell` / `kbemoji` / `kbhicon` | bool | false | — |
+| `kbopa` | i32 | 100 | acotado 40..100 |
+| `kbstyle` / `kbfont` | i32 | 0 / 1 | 0..2 |
+| `kblp` | i32 | 500 | 350/500/700 |
+| `kbfx` | i32 | 100 | 60/100/160 |
+| `kbsyms` | blob 4 B | 0,1,2,3 | índices 0..15 de `@ # $ % & * + = / \ ( ) [ ] < >` |
+| `kbscabr` / `kbscexp` | blob 8×10 / 8×24 | `xq→porque`, `q→que`, `tb→también`, `pf→por favor` | si el tamaño no cuadra, de fábrica |
+
+El widget las lee al crearse; `flex_kb_reload_prefs()` las reaplica al momento (Arduino: sin reiniciar).
+
+### T.7 API IDF (`flex_kb.h`)
+
+```c
+lv_obj_t *flex_kb_create(lv_obj_t *parent, const flex_kb_cfg_t *cfg);   // parent: 480x800 en (0,0)
+// cfg: flags FLEX_KB_F_WALLPAPER | _PAGE | _LANG_EN | _EXTRAS | _FN_ON_PRESS | _ACCENTS | _NO_FAST,
+//      layout inicial, backdrop (FLAT/HOME/LOCK), bottom_reserve, enter_label,
+//      on_text(kb, utf8, user), on_backspace(kb, user), on_enter(kb, user), user
+void flex_kb_set_layout / flex_kb_get_layout, flex_kb_set_shift / _get_shift, flex_kb_set_lang_es / _get_lang_es
+int32_t flex_kb_height(kb | NULL), flex_kb_top(kb), flex_kb_keys_y(kb); const flex_kb_geom_t *flex_kb_geom(kb)
+void flex_kb_slide_in(kb); bool flex_kb_is_animating(kb)
+void flex_kb_set_shift_x(kb, dx); lv_obj_t *flex_kb_keys_obj(kb)     // sacudida
+void flex_kb_set_input_enabled(kb, en); void flex_kb_reload_prefs(kb)
+```
+
+* El teclado **no guarda texto**: avisa por callbacks. `flex_kb_buf_append()` / `flex_kb_buf_backspace()` son las
+  operaciones de buffer de la clave y del editor de atajos (`lsuPassAppend`, `kbsBackField`).
+* Objetos: panel (`flex_surface`, recibe todos los toques y resuelve con `flex_kb_cell_at`/`flex_kb_frow_hit`) →
+  contenedor de teclas (lo que se mueve en la sacudida) → 36 teclas (`flex_surface` con material forzado a Plano) con su
+  etiqueta. `scroll_chain` desactivado: teclear no desplaza la pantalla de debajo.
+* Los callbacks se llaman al final de cada evento: si uno borra el teclado, usar `lv_obj_delete_async`.
+
+### T.8 Pendiente (API preparada) y cómo se hará
+
+* **Barra de herramientas (Fase C, `FLEX_KB_F_EXTRAS` + `kbtool`)**: 5 botones circulares r21 en `x = 48 + 96·i`,
+  `y = kbToolbarY + 26`, relleno `kbColKey`, icono `kbColKeyTxt` (carita, globo, portapapeles, engranaje, tres puntos;
+  hit `|px − x| ≤ 26`, `kbToolbarY ≤ py ≤ +52`). Emoji y globo se resuelven dentro del teclado (capa emoji / tecla idioma);
+  portapapeles, ajustes y "más" irán a un callback `on_tool` porque abren pantallas de la app. Hoy el flag no dibuja nada ni
+  reserva alto.
+* **Chips (Fase F)**: franja de 32 px en `kbChipsY`; en capas de letras hasta 3 sugerencias de `flex_kb_suggest()` (ya
+  implementado y probado contra Arduino: atajos del usuario, diccionario local por prefijo con plegado de tildes, emoticono
+  sugerido), en `?123` los 4 símbolos de `kbsyms`. Necesita que la app pase el texto antes del cursor
+  (`flex_kb_set_context`); aceptar un chip = `on_backspace` por cada carácter de la palabra + `on_text(palabra)` + `" "`.
+  Fundido de entrada 140 ms; divisores 1×16 `TH_DIV` a 160.
+* **Portapapeles de 12 ranuras (Fase D)**: lógica pura (`clipPush`, fijadas en NVS `clip0..clip11`) + panel de 2 columnas;
+  es de la app Notas, no del widget.
+* **Escritura rápida multitáctil (Fase B)**: con un solo `indev` de puntero, LVGL solo ve un dedo; la versión actual
+  escribe al tocar (lo mismo para un dedo). El *rollover* de varios dedos necesita la capa de gestos del sistema (§2.3):
+  el `read_cb` del táctil entrega los puntos del GT911 con su *track id* y el teclado dispara una tecla por id nuevo
+  (`kbMtPoll`); el diagnóstico "el panel ha dado N dedos" sale de ahí.
+* Revisión ortográfica (subrayado de Notas) usa `flex_kb_dict_has()` (ya implementado).
+
+### T.9 Decisiones y discrepancias con Arduino
+
+* **Teclas de función sobre el fondo**: Arduino las pinta con `kbFKey` (colores del sistema, `TH_KEYALT`/`TH_TXT`) también
+  en la clave al verificar, aunque el resto del teclado use `TH_WALL*`. Se reproduce tal cual (en tema claro quedan teclas
+  claras sobre el panel oscuro). Si se quiere coherencia total, es un cambio de una línea en `compute_colors()`.
+* **Estilo contorno + shift activo**: Arduino no rellena la tecla shift activa en este estilo (texto `TH_ONACC` sin fondo);
+  se reproduce.
+* **Notas, soltar sin tap**: `handleKeyRelease` de Notas escribía también al soltar tras un arrastre; el widget usa la regla
+  de la clave (solo un *tap* escribe) en todas las superficies.
+* **Solape de 2-4 px fila 3 / fila de función**: Arduino podía escribir la letra al tocar y además ejecutar la función al
+  soltar; aquí un toque solo hace una cosa.
+* **Acento del sistema**: `TH_PRIM` → `flex_accent()` (igual con preferencias por defecto).
+* **Tipografía**: Outfit LVGL 11/13/19 px para las tallas 1/2/3 (la talla 1 de Arduino era el bitmap 5×7).
+* El panel en vidrio sobre el fondo usa el backdrop ya desenfocado (`FLEX_BD_LOCK`); Arduino volvía a desenfocar lo que
+  había debajo (el fondo ya borroso): diferencia de matiz mínima.
+
+---

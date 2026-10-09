@@ -77,6 +77,18 @@ void flex_home_load(void);
 void flex_home_save(void);
 void flex_home_normalize(void);
 
+// Primera ranura libre (homeFirstFree) y la misma creando pagina si no hay
+// (homeFirstFreeGrow); -1 si no cabe.
+int  flex_home_first_free(void);
+int  flex_home_first_free_grow(void);
+// Caja de aplicaciones: favorita en Inicio si/no y visible si/no
+// (drwFavToggle / drwHideToggle, AppDrawer.h:1080-1114). Normalizan; quien
+// llama guarda (flex_home_save). Devuelven false si no cambio nada.
+bool flex_home_fav_toggle(int id);
+bool flex_home_hide_toggle(int id);
+// Ajustes no se puede ocultar (appCanHide, Prefs.h:124)
+bool flex_app_can_hide(int id);
+
 // Geometria de la rejilla activa (homeGrid)
 void flex_home_grid(int *S, int *gx0, int *gy0, int *cstep, int *rstep, int *cols, int *rows);
 void flex_home_slot_xy(int slot, int *x, int *y);

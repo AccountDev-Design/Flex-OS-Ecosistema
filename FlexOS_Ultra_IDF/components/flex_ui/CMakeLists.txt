@@ -1,5 +1,10 @@
 # Interfaz de Flex OS Ultra: SOLO LVGL (tools/check_lvgl_only.py).
-file(GLOB FLEX_UI_SRCS
+# CONFIGURE_DEPENDS: un .c nuevo entra en el build sin reconfigurar a mano (IDF
+# tambien lee este archivo en modo script, donde la opcion no existe).
+if(NOT CMAKE_SCRIPT_MODE_FILE)
+    set(FLEX_UI_GLOB_OPT CONFIGURE_DEPENDS)
+endif()
+file(GLOB FLEX_UI_SRCS ${FLEX_UI_GLOB_OPT}
     "${CMAKE_CURRENT_LIST_DIR}/src/*.c"
     "${CMAKE_CURRENT_LIST_DIR}/src/diag/*.c"
     "${CMAKE_CURRENT_LIST_DIR}/src/theme/*.c"

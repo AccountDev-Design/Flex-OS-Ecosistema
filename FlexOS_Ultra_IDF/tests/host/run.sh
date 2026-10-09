@@ -31,7 +31,14 @@ python3 ref/extract_arduino.py "$OUT/ref_home.inc" \
     FlexOS_Ultra_Prefs.h:HOME_EMPTY,HOME_PKG_BASE,gAppFav,gAppHidden,gAppLock,homeIsPkg,homePkgSlot,appIsFav,appIsHidden \
     FlexOS_Ultra_Home.h:HOME_LEGACY_PAGES,HOME_PAGES_MAX,HOME_COLS_MAX,HOME_ROWS_MAX,HOME_STRIDE,HOME_TOTAL,HOME_HDR_Y,HOME_HDR_H,HOME_GY0,HOME_ROWSTEP,homeOrder,gHomePage,gHomePageN,gHomeMain,gHomeCols,gHomeIconSz,homeSlotCount,homeIdx,gHomeWg,gHomeWgN,homeGrid,homeDotsY \
     FlexOS_Ultra_Widgets.h:WG_REG,wgRect,homeCellMask,homeHdrMask,homeWgFits,homeWgFreeOfWidgets,homeWgSizeOk,homeWgPlaceOk,homeWgNormalize \
-    FlexOS_Ultra_Home.h:homeFirstFree,homePageAppendQuiet,homeFirstFreeGrow,gHomePkgSeen,homePkgSeen,homePkgMarkSeen,homeOrderNormalize
+    FlexOS_Ultra_Home.h:homeFirstFree,homePageAppendQuiet,homeFirstFreeGrow,gHomePkgSeen,homePkgSeen,homePkgMarkSeen,homeOrderNormalize \
+    FlexOS_Ultra_Prefs.h:appCanHide \
+    FlexOS_Ultra_AppDrawer.h:drwFavToggle,drwHideToggle
+
+python3 ref/extract_arduino.py "$OUT/ref_drawer.inc" \
+    FlexOS_Ultra_DeX.h:dexLower,dexMatch \
+    FlexOS_Ultra_PkgApps.h:pkgAppFold,pkgAppNameCmp \
+    FlexOS_Ultra_AppDrawer.h:DRW_QMAX,drwCells,drwN,drwAnyPkg,drwQuery,drwQLen,drwShowHid,drwFilter
 
 python3 ref/extract_arduino.py "$OUT/ref_home_load.inc" \
     FlexOS_Ultra_Types.h:HOME_WG_MAX,HOME_WG_MAX_V1,HomeWidget,WG_NONE,WgDesc \
@@ -41,12 +48,26 @@ python3 ref/extract_arduino.py "$OUT/ref_home_load.inc" \
     FlexOS_Ultra_AppFramework.h:drawerRegistryDefaults,drawerRegistryAdopt \
     FlexOS_Ultra_Home.h:homeFirstFree,homePageAppendQuiet,homeFirstFreeGrow,gHomePkgSeen,homePkgSeen,homePkgMarkSeen,homeOrderNormalize,homeOrderLoad
 
-SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c
+# Teclado del sistema: en dos partes porque mapaActivo (puntero a fila) lo
+# declara a mano ref_kb_main.cpp entre las dos.
+python3 ref/extract_arduino.py "$OUT/ref_kb_a.inc" \
+    FlexOS_Ultra_Types.h:KB_SIZE_CONFIG_ON,KB_MULTITOUCH_ON,KB_TOOLBAR_ON,KB_SETTINGS_ON,KB_AUTOCOMPLETE_ON,KB_ANIM_POLISH_ON \
+    FlexOS_Ultra_Prefs.h:KB_SIZE_COMPACT,KB_SIZE_NORMAL,KB_SIZE_BIG,gKbSize,gKbFastType,gKbToolbar,gKbPredict,gKbSpell,gKbEmojiSug,gKbHiCon,gKbOpacity,gKbStyle,gKbFontSc,gKbLpMs,gKbFxMs,KB_SYMS,gKbSym,KB_SC_MAX,KB_SC_ABR,KB_SC_EXP,gKbScAbr,gKbScExp,kbShortcutsDefaults,kbPrefsNormalize \
+    FlexOS_Ultra_Keyboard.h:KB_COLS,KB_ROWS,LAYOUT_ES,LAYOUT_EN,LAYOUT_NUM,LAYOUT_EMOJI
+python3 ref/extract_arduino.py "$OUT/ref_kb_b.inc" \
+    FlexOS_Ultra_Keyboard.h:kbShift,kbResolveKey,kbKW,kbApplySize,KB_KW,KB_KH,KB_GAP,KB_X,kbExtrasOn,kbToolbarH,kbChipsWant,kbChipsH,kbTopH,kbBotReserve,kbRowsTop,KB_Y,kbPanelTop,kbToolbarY,kbChipsY,kbFuncY,KB_FKEYS,KB_FW,kbFKeyW,kbFKeyX,kbFRowHit,kbSizeCheck,kbFontSize,kbFontDy,kbRadius,kbCellAt,KB_SYM_POOL_N,KB_SYM_POOL,kbSymAt,kbFxCell,kbFxT0,kbFxStart,kbFxActive,kbFxLevel,KB_DICT_ES,KB_DICT_EN,KB_DICT_ES_N,KB_DICT_EN_N,kbFoldCh,kbStartsWith,kbSameWord,kbDictHas,KB_EMOSUG_N,KB_EMOSUG_W,KB_EMOSUG_E,kbSuggest,kbCurrentWord,utf8Prev,kbGetVariants,kbIsVowelCell,kbLayerLabel \
+    FlexOS_Ultra_Lock.h:lsuPin \
+    FlexOS_Ultra_Power.h:utf8Count,lsuPassAppend \
+    FlexOS_Ultra_KeyboardSettings.h:kbsScField,kbsScA,kbsAppendField,kbsBackField
+
+SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c
       $ROOT/components/flex_storage/src/flex_kv.c
       $ROOT/components/flex_storage/src/flex_fs_path.c
       $ROOT/components/flex_ui/src/theme/flex_wallpaper.c
       $ROOT/components/flex_ui/src/theme/flex_glass_math.c
       $ROOT/components/flex_ui/src/shell/flex_home_model.c
+      $ROOT/components/flex_ui/src/shell/flex_drawer_model.c
+      $ROOT/components/flex_ui/src/widgets/flex_kb_layout.c
       $ROOT/components/flex_touch/src/flex_touch_arb.c
       stub_cfg.c)
 INC=(-I. -I$ROOT/components/flex_storage/include -I$ROOT/components/flex_storage/src
@@ -57,7 +78,7 @@ CFLAGS=(-O1 -g -Wall -Wextra -Werror -pthread)
 build() {   # $1 = sufijo, resto = flags de sanitizador
     local sfx=$1; shift
     local refs=()
-    for r in wall glass home home_load touch; do
+    for r in wall glass home home_load touch drawer kb; do
         c++ -std=gnu++17 -O1 -g -w "$@" -Iref -I"$OUT" -c ref/ref_${r}_main.cpp -o "$OUT/ref_${r}_$sfx.o"
         refs+=("$OUT/ref_${r}_$sfx.o")
     done

@@ -438,6 +438,68 @@ static int first_free_grow(void)
     return first_free();
 }
 
+int flex_home_first_free(void)
+{
+    return first_free();
+}
+
+int flex_home_first_free_grow(void)
+{
+    return first_free_grow();
+}
+
+bool flex_app_can_hide(int id)
+{
+    return id != IC_AJUSTES;
+}
+
+bool flex_home_fav_toggle(int id)
+{
+    if (id < 0 || id >= s_app_n) {
+        return false;
+    }
+    if (flex_app_is_fav(id)) {
+        g_home.fav &= ~(1u << id);
+        for (int i = 0; i < FLEX_HOME_TOTAL; i++) {
+            if (g_home.order[i] == (uint8_t)id) {
+                g_home.order[i] = EMPTY;
+            }
+        }
+    } else {
+        if (flex_app_is_hidden(id)) {
+            return false;   // una app oculta no puede estar en Inicio
+        }
+        int slot = first_free_grow();   // sin hueco se crea pagina
+        if (slot < 0) {
+            return false;   // maximo de paginas y todas llenas
+        }
+        g_home.fav |= 1u << id;
+        g_home.order[slot] = (uint8_t)id;
+    }
+    flex_home_normalize();
+    return true;
+}
+
+bool flex_home_hide_toggle(int id)
+{
+    if (id < 0 || id >= s_app_n || !flex_app_can_hide(id)) {
+        return false;
+    }
+    if (flex_app_is_hidden(id)) {
+        g_home.hidden &= ~(1u << id);
+    } else {
+        g_home.hidden |= 1u << id;
+        g_home.fav &= ~(1u << id);   // fuera de la caja: tambien fuera de Inicio
+        for (int i = 0; i < FLEX_HOME_TOTAL; i++) {
+            if (g_home.order[i] == (uint8_t)id) {
+                g_home.order[i] = EMPTY;
+            }
+        }
+    }
+    flex_home_normalize();
+    return true;
+}
+
 static bool pkg_seen(uint8_t v)
 {
     int n = flex_home_is_pkg(v) ? v - FLEX_HOME_PKG_BASE : -1;

@@ -14,6 +14,7 @@
 #include <string.h>
 #include "flex_frame.h"
 #include "flex_glass.h"
+#include "flex_kb.h"
 #include "flex_passcode.h"
 #include "flex_shell.h"
 #include "flex_storage.h"
@@ -52,6 +53,7 @@ static struct {
     lv_obj_t *flash[12];
     lv_obj_t *wait_box, *wait_m2, *wait_num;
     lv_obj_t *pass_dots;
+    lv_obj_t *kb;                        // teclado del sistema (contrasena)
     lv_timer_t *tick, *retry;
     auth_mode_t mode;
     bool verify;
@@ -208,6 +210,9 @@ static void destroy(void)
         if (A.band) {
             lv_anim_delete(A.band, NULL);
         }
+        if (A.kb) {
+            lv_anim_delete(A.kb, NULL);
+        }
         if (A.content) {
             lv_anim_delete(A.content, NULL);
         }
@@ -277,7 +282,11 @@ static void shake_exec(void *obj, int32_t e)
 {
     float p = (float)e / (float)SHAKE_MS;
     int32_t off = e >= SHAKE_MS ? 0 : (int32_t)(SHAKE_AMP * (1.0f - p) * sinf(p * SHAKE_CYC * 6.2831853f));
-    lv_obj_set_style_translate_x(obj, off, 0);
+    if (obj == A.kb) {
+        flex_kb_set_shift_x(obj, off);   // contrasena: solo las teclas, el panel quieto
+    } else {
+        lv_obj_set_style_translate_x(obj, off, 0);   // PIN: puntos y teclado juntos
+    }
 }
 
 static void shake_done(lv_anim_t *a)
@@ -288,13 +297,14 @@ static void shake_done(lv_anim_t *a)
 
 static void shake_start(void)
 {
-    if (!A.band) {
+    lv_obj_t *target = A.mode == M_PASS ? A.kb : A.band;
+    if (!target) {
         return;
     }
     A.shaking = true;   // mientras dura no se aceptan pulsaciones
     lv_anim_t a;
     lv_anim_init(&a);
-    lv_anim_set_var(&a, A.band);
+    lv_anim_set_var(&a, target);
     lv_anim_set_exec_cb(&a, shake_exec);
     lv_anim_set_values(&a, 0, SHAKE_MS);
     lv_anim_set_duration(&a, SHAKE_MS);
@@ -665,20 +675,16 @@ static void build_pass(void)
     lv_obj_set_size(A.pass_dots, 480, 15);
     lv_obj_set_clickable(A.pass_dots, false);
     build_wait();
-    // En la contrasena se sacuden solo las teclas: la banda es el teclado
-    A.band = flex_box(A.content);
-    lv_obj_set_size(A.band, 480, 800);
-    lv_obj_set_clickable(A.band, false);
-    pass_kb_build(A.band);
+    pass_kb_build(A.content);   // en la contrasena se sacuden solo las teclas
 }
 
 // Lo llama el teclado de la contrasena (flex_auth_pass.c)
-bool flex_auth_pass_input_ok(void)
+static bool flex_auth_pass_input_ok(void)
 {
     return A.root && A.mode == M_PASS && !A.checking && !A.shaking && !A.revealing && !wait_active();
 }
 
-void flex_auth_pass_append(const char *utf8)
+static void flex_auth_pass_append(const char *utf8)
 {
     if (!flex_auth_pass_input_ok() || !utf8) {
         return;
@@ -696,7 +702,7 @@ void flex_auth_pass_append(const char *utf8)
     }
 }
 
-void flex_auth_pass_backspace(void)
+static void flex_auth_pass_backspace(void)
 {
     if (!flex_auth_pass_input_ok()) {
         return;
@@ -713,7 +719,7 @@ void flex_auth_pass_backspace(void)
     }
 }
 
-void flex_auth_pass_enter(void)
+static void flex_auth_pass_enter(void)
 {
     if (!flex_auth_pass_input_ok()) {
         return;
@@ -727,14 +733,52 @@ void flex_auth_pass_enter(void)
     }
 }
 
-// TEMPORAL hasta integrar flex_kb (teclado del sistema)
-static void pass_kb_build(lv_obj_t *band)
+// Teclado del sistema sin barra ni sugerencias, espanol por defecto (lsuEnter)
+static void kb_text_cb(lv_obj_t *kb, const char *utf8, void *user)
 {
-    (void)band;
+    (void)kb;
+    (void)user;
+    flex_auth_pass_append(utf8);
+}
+
+static void kb_back_cb(lv_obj_t *kb, void *user)
+{
+    (void)kb;
+    (void)user;
+    flex_auth_pass_backspace();
+}
+
+static void kb_enter_cb(lv_obj_t *kb, void *user)
+{
+    (void)kb;
+    (void)user;
+    flex_auth_pass_enter();
+}
+
+static void pass_kb_build(lv_obj_t *parent)
+{
+    flex_kb_cfg_t c = {
+        .flags = A.verify ? FLEX_KB_F_WALLPAPER : FLEX_KB_F_PAGE,
+        .backdrop = A.verify ? FLEX_BD_HOME : FLEX_BD_FLAT,
+        .on_text = kb_text_cb,
+        .on_backspace = kb_back_cb,
+        .on_enter = kb_enter_cb,
+    };
+    A.kb = flex_kb_create(parent, &c);
+    if (!A.kb) {
+        return;
+    }
+    if (A.verify) {
+        flex_surface_set_veil(A.kb, lv_color_make(8, 10, 18), 70);   // el panel esta sobre el fondo velado
+    }
+    lv_obj_set_y(A.kb, 800);   // fuera hasta que entre deslizandose
 }
 
 static void pass_kb_slide(void)
 {
+    if (A.kb) {
+        flex_kb_slide_in(A.kb);
+    }
 }
 
 // ---- selector PIN / Contrasena (crear) ------------------------------------------------------
@@ -745,6 +789,7 @@ static void sel_async(void *arg)
         return;
     }
     lv_obj_clean(A.content);
+    A.kb = NULL;
     A.band = NULL;
     A.pass_dots = NULL;
     memset(A.dots, 0, sizeof(A.dots));

@@ -49,6 +49,12 @@ typedef enum {
     FLEX_GLYPH_SPEAKER,       // valor = volumen 0..100
     FLEX_GLYPH_GLASS,         // dos laminas
     FLEX_GLYPH_CHECK,
+    FLEX_GLYPH_EYE,           // ojo (drwGlyphEye); valor 0 = tachado (apagado)
+    FLEX_GLYPH_INFO,          // "i" en un circulo
+    FLEX_GLYPH_OPEN,          // flecha de abrir
+    FLEX_GLYPH_TRASH,         // papelera
+    FLEX_GLYPH_RING,          // anillo grueso (en Inicio)
+    FLEX_GLYPH_CHEVRON_DOWN,  // cerrar el teclado de la caja
 } flex_glyph_t;
 
 lv_obj_t *flex_glyph_create(lv_obj_t *parent, flex_glyph_t g, int32_t w, int32_t h);

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include "flex_auth.h"
 #include "flex_i18n.h"
+#include "flex_kb_layout.h"
 #include "flex_passcode.h"
 #include "flex_shell.h"
 #include "flex_storage.h"
@@ -50,6 +51,39 @@ static void open_verify(void)
     sim_run(100);
     sim_drag(240, 700, 240, 400, 200);
     sim_run(600);   // fundidos 190 + 230 ms
+}
+
+// Contrasena: teclea en el teclado del sistema (tamano Normal, capa de letras ES)
+static void pass_type(const char *txt)
+{
+    flex_kb_geom_t g;
+    flex_kb_geom_init(&g, FLEX_KB_SIZE_NORMAL, 0, 0);
+    flex_kb_state_t st;
+    flex_kb_state_init(&st, true);
+    for (; *txt; txt++) {
+        if (*txt == ' ') {
+            sim_tap(flex_kb_fkey_x(&g, FLEX_KB_FN_SPACE) + flex_kb_fkey_w(&g, FLEX_KB_FN_SPACE) / 2,
+                    flex_kb_func_y(&g) + g.kh / 2);
+            continue;
+        }
+        for (int c = 0; c < FLEX_KB_CELLS; c++) {
+            const char *b = flex_kb_key_base(&st, c);
+            if (b[0] == *txt && b[1] == 0) {
+                int x, y;
+                flex_kb_cell_xy(&g, c, &x, &y);
+                sim_tap(x + g.kw / 2, y + g.kh / 2);
+                break;
+            }
+        }
+    }
+}
+
+static void pass_ok(void)
+{
+    flex_kb_geom_t g;
+    flex_kb_geom_init(&g, FLEX_KB_SIZE_NORMAL, 0, 0);
+    sim_tap(flex_kb_fkey_x(&g, FLEX_KB_FKEYS - 1) + flex_kb_fkey_w(&g, FLEX_KB_FKEYS - 1) / 2,
+            flex_kb_func_y(&g) + g.kh / 2);
 }
 
 static bool s_setup_done;
@@ -164,6 +198,44 @@ bool scene_auth_run(void)
     CHK(!flex_lock_verify_alone("2580"));
     flex_theme_set_glass(true);
     flex_theme_set_dark(true);
+    flex_shell_lock();
+    sim_run(100);
+
+    // 9) contrasena: teclado del sistema que entra deslizando tras el fundido
+    flex_lock_set_fails(0);
+    CHK(flex_lock_set("flex os", FLEX_LOCK_PASS));
+    open_verify();
+    sim_run(400);
+    CHK(flex_shell_state() == FLEX_SH_AUTH);
+    pass_type("flex");
+    sim_shot("au_09_contrasena");
+    pass_ok();   // incompleta: fallo, sacudida de las teclas y campo vacio
+    sim_run(400);
+    CHK(flex_shell_state() == FLEX_SH_AUTH);
+    CHK(flex_lock_fails() == 1);
+    pass_type("flex os");
+    pass_ok();
+    sim_run(800);
+    CHK(flex_shell_state() == FLEX_SH_HOME);
+    CHK(flex_lock_fails() == 0);
+    // crear contrasena desde Ajustes
+    s_setup_done = false;
+    flex_auth_setup(setup_done, NULL);
+    sim_run(100);
+    sim_tap(240, 430);   // "Contrasena"
+    sim_run(500);
+    sim_shot("au_10_crear_contrasena");
+    pass_type("abc");
+    pass_ok();   // < 4 bytes: no guarda
+    sim_run(100);
+    CHK(!s_setup_done);
+    pass_type("d");
+    pass_ok();
+    sim_run(300);
+    CHK(s_setup_done);
+    CHK(flex_lock_verify_alone("abcd"));
+    CHK(flex_cfg_get_i32("locktype", 0) == FLEX_LOCK_PASS);
+    flex_lock_clear();
     flex_shell_lock();
     sim_run(100);
 

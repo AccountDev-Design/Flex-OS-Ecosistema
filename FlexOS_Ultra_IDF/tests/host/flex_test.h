@@ -33,4 +33,6 @@ void test_glass(void);
 void test_home(void);
 void test_home_load(void);
 void test_touch_arb(void);
+void test_drawer(void);
+void test_kb(void);
 #define FLEX_APP_N_TEST 19

@@ -13,6 +13,8 @@ int main(void)
     test_home();
     test_home_load();
     test_touch_arb();
+    test_drawer();
+    test_kb();
     printf("%s: %d comprobaciones, %d fallos\n", g_fails ? "FALLO" : "OK", g_checks, g_fails);
     return g_fails ? 1 : 0;
 }

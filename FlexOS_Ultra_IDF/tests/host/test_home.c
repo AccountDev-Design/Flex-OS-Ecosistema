@@ -16,6 +16,7 @@ typedef struct {
 void ref_home_normalize(ref_state_t *s);
 void ref_home_grid(uint8_t cols, uint8_t rows, uint8_t icon_sz, int out[8]);
 void ref_wg_rect(uint8_t cols, uint8_t rows, uint8_t icon_sz, const uint8_t w5[5], int out[4]);
+void ref_home_toggle(ref_state_t *s, int id, int op);
 
 static uint32_t s_seed = 777;
 static uint32_t rnd(void)
@@ -134,6 +135,56 @@ void test_home(void)
         fprintf(stderr, "normalizacion del escritorio: %d estados distintos de la version Arduino\n", diffs);
     }
     CHECK_EQ_I(diffs, 0);
+
+    // Caja de aplicaciones: favorita / ocultar, sobre escritorios ya normales,
+    // encadenando operaciones (drwFavToggle / drwHideToggle de Arduino)
+    int tdiffs = 0;
+    for (int it = 0; it < 3000; it++) {
+        ref_state_t s;
+        memset(&s, 0, sizeof(s));
+        for (int i = 0; i < FLEX_HOME_TOTAL; i++) {
+            uint32_t r = rnd() % 10;
+            s.order[i] = r < 6 ? 0xFF : (uint8_t)(rnd() % 19);
+        }
+        s.page_n = (uint8_t)(1 + rnd() % 5);
+        s.main = 0;
+        s.cols = (uint8_t)(3 + rnd() % 3);
+        s.rows = (uint8_t)(2 + rnd() % 3);
+        s.icon_sz = (uint8_t)(rnd() % 3);
+        s.fav = rnd() & 0x7FFFF;
+        s.hidden = (rnd() % 3 == 0) ? (rnd() & 0x7FFFF) : 0;
+        for (int p = 0; p < FLEX_HOME_PAGES_MAX; p++) {
+            s.wg_n[p] = (uint8_t)(rnd() % 3);
+            for (int k = 0; k < FLEX_HOME_WG_MAX; k++) {
+                s.wg[p][k][0] = (uint8_t)(rnd() % 13);
+                s.wg[p][k][1] = (uint8_t)(rnd() % 5);
+                s.wg[p][k][2] = (uint8_t)(rnd() % 5);
+                s.wg[p][k][3] = (uint8_t)(1 + rnd() % 4);
+                s.wg[p][k][4] = (uint8_t)(1 + rnd() % 4);
+            }
+        }
+        ref_home_normalize(&s);
+        to_mine(&s);
+        for (int k = 0; k < 6; k++) {
+            int id = (int)(rnd() % 21) - 1;   // incluye -1 y 19 (fuera de rango)
+            int op = (int)(rnd() % 2);
+            ref_home_toggle(&s, id, op);
+            if (op == 0) {
+                flex_home_fav_toggle(id);
+            } else {
+                flex_home_hide_toggle(id);
+            }
+            if (!same(&s)) {
+                tdiffs++;
+                to_mine(&s);
+            }
+        }
+    }
+    if (tdiffs) {
+        fprintf(stderr, "favorita/ocultar: %d operaciones distintas de la version Arduino\n", tdiffs);
+    }
+    CHECK_EQ_I(tdiffs, 0);
+    CHECK(!flex_app_can_hide(10) && flex_app_can_hide(0));   // IC_AJUSTES = 10
 }
 
 // ---- carga desde la NVS con migraciones, contra homeOrderLoad de Arduino ----
