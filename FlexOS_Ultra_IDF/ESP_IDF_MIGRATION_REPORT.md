@@ -15,7 +15,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 0 | Infraestructura: proyecto, sdkconfig por revisión, particiones provisionales, herramientas | Hecha | `docs/FASE_0_1_INFORME.md` |
 | 1 | Pantalla ST7701 por MIPI-DSI, 2 framebuffers, LVGL DIRECT, GT911, pantalla de prueba | Hecha | `docs/FASE_0_1_INFORME.md` |
 | 2 | Arquitectura base: bus de eventos, buzón de UI, almacenamiento (NVS + LittleFS compatibles), ajustes, monitor del sistema, lógica portable | Hecha | `docs/FASE_2_INFORME.md` |
-| 3 | Interfaz completa en LVGL | En curso (shell: bloqueo, clave, escritorio, caja de apps, recientes, energía, teclado, panel rápido, avisos: banner, Centro de notificaciones y No molestar; apagado completo con deep sleep y filtro de encendido; Modo seguro). Las 19 apps siguen sin migrar (pantalla "Pendiente de migrar") | `docs/spec/` |
+| 3 | Interfaz completa en LVGL | En curso (shell: bloqueo, clave, escritorio, caja de apps, recientes, energía, teclado, panel rápido, avisos: banner, Centro de notificaciones y No molestar; apagado completo con deep sleep y filtro de encendido; Modo seguro; restablecimiento de fábrica). Las 19 apps siguen sin migrar (pantalla "Pendiente de migrar") | `docs/spec/` |
 | 4 | Liquid Glass (3 niveles) | Parcial: superficies de vidrio sobre fondo y sobre color liso en uso; bandas visibles y PPA sin medir | `docs/spec/02` |
 | 5 | Táctil y gestos | Parcial: arbitraje antes de LVGL, bordes del sistema, suspensión con dos dedos; falta el veto al teclear y los umbrales de toque de Arduino | `docs/spec/01b` |
 | 6 | Wi-Fi por ESP32-C6 (esp-hosted) | Pendiente | |
@@ -100,6 +100,12 @@ La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la
 | Modo seguro: textos | Sin tildes ("minimo", "caches", "fabrica") | Con tildes | Visual |
 | Candado de app pedido desde otra app (rueda del panel rápido) | Cancelar la clave llevaba a Inicio | Vuelve a la app que estaba delante (ir a Inicio la dejaba huérfana y Recientes se trababa) | Revisión adversarial 4 |
 | Umbrales de toque | Toque = < 16 px y < 550 ms | Igual, aplicado al indev de LVGL (por defecto LVGL usa 10 px y 400 ms) | docs/spec/01b |
+| Restablecimiento: qué se borra de la NVS | Solo los espacios de nombres conocidos: quedaban el vínculo con el teléfono, Flex Storage, Device Care, robo, audio, clima, navegador (un aparato "restablecido" seguía emparejado) | TODOS los espacios de nombres salvo el marcador `flexreset` (incluidos los del sistema: credenciales Wi-Fi del controlador, calibración del PHY); el aviso lo dice ("Vínculo con el teléfono y Flex Storage") | docs/spec/01c §13.5 (riesgo de privacidad) |
+| Restablecimiento: marcador terminado | Se borra al entrar al OOBE | Sin OOBE migrado todavía: se borra en el primer arranque tras terminar | docs/spec/01c §13.6 |
+| Restablecimiento: ejecución | En `loop`, etapa por vuelta; apaga la radio desde loopTask | En el escritor único de almacenamiento, en exclusiva (ningún volcado de ajustes se cuela entre etapas); la radio se apagará por `flex_wifi` cuando exista (Fase 6) | docs/spec/01c §13.7-13.8 |
+| Restablecimiento: aviso de OTA en curso | Pantalla "Actualización en curso" | No existe hasta que haya OTA (Fase 14) | — |
+| Restablecimiento: Cancelar | Vuelve a Ajustes o al Modo seguro | Vuelve a donde se estaba (la app delante, Inicio o el Modo seguro) | Coherencia |
+| Restablecimiento: suspender | El doble toque con dos dedos dentro del asistente dejaba el táctil sin respuesta | Vetado mientras el asistente está abierto | docs/spec/01c §9.6 |
 | Avisos: texto guardado | `sysNotify` corta el título y el texto en bytes y puede partir una letra con tilde | Se cortan en caracteres UTF-8 (el banner ya lo hacía en Arduino) | docs/spec/01c §6 |
 | Avisos: tarjeta del bloqueo | El título más reciente se dibuja aunque se salga de la tarjeta | Una línea con "..." dentro de la tarjeta | docs/spec/01a §4 |
 | Avisos: Centro | Solo se lee el borde con el dedo moviéndose (igual) y se cierra arrastrando a la derecha (igual) | Igual; los avisos del teléfono vinculado llegarán con Flex Phone (el Centro tiene hoy los del sistema) | docs/spec/01c §6 |

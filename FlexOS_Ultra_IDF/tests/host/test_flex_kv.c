@@ -247,8 +247,34 @@ static void t_flush_pass(void)
     flex_kv_clear(&kv);
 }
 
+// Restablecimiento: soltar espacios de nombres de la cache sin dejar nada que grabar
+static void t_drop_ns(void)
+{
+    flex_kv_t kv;
+    flex_kv_init(&kv, NULL, NULL, NULL);
+    flex_kv_load_num(&kv, "flexos", "bright", FLEX_KV_I32, 80);
+    flex_kv_set_num(&kv, "flexos", "dark", FLEX_KV_U8, 1);   // pendiente de grabar
+    flex_kv_set_buf(&kv, "flexos", "lockhsh", FLEX_KV_BLOB, "secreto", 7);
+    flex_kv_load_num(&kv, "flexphone", "dnd", FLEX_KV_U8, 1);
+    flex_kv_set_num(&kv, "flexphone", "autolink", FLEX_KV_U8, 1);
+    flex_kv_load_num(&kv, "flexreset", "stage", FLEX_KV_I32, 5);
+    CHECK_EQ_I(flex_kv_dirty_count(&kv), 3);
+    CHECK_EQ_I(flex_kv_drop_ns(&kv, "flexphone"), 2);
+    CHECK(!flex_kv_exists(&kv, "flexphone", "dnd"));
+    CHECK(flex_kv_exists(&kv, "flexos", "bright"));
+    CHECK_EQ_I(flex_kv_dirty_count(&kv), 2);   // lo de flexphone ya no se grabara
+    CHECK_EQ_I(flex_kv_drop_ns(&kv, "nada"), 0);
+    CHECK_EQ_I(flex_kv_drop_all_except(&kv, "flexreset"), 3);
+    CHECK_EQ_I(flex_kv_dirty_count(&kv), 0);
+    int64_t v = 0;
+    CHECK(flex_kv_get_num(&kv, "flexreset", "stage", FLEX_KV_I32, &v) && v == 5);
+    CHECK_EQ_I(flex_kv_drop_all_except(&kv, NULL), 1);
+    flex_kv_clear(&kv);
+}
+
 void test_flex_kv(void)
 {
+    t_drop_ns();
     t_types_like_preferences();
     t_dirty_and_versions();
     t_buffers_and_limits();

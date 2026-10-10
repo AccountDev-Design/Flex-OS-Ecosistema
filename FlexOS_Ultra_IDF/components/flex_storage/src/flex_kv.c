@@ -105,6 +105,48 @@ void flex_kv_clear(flex_kv_t *kv)
     unlock(kv);
 }
 
+// match(ns, arg): true = se suelta
+static size_t drop_if(flex_kv_t *kv, bool (*match)(const char *ns, const char *arg), const char *arg)
+{
+    size_t n = 0;
+    lock(kv);
+    flex_kv_entry_t **pp = &kv->head;
+    while (*pp) {
+        flex_kv_entry_t *e = *pp;
+        if (match(e->ns, arg)) {
+            *pp = e->next;
+            free_wipe(e->buf, e->len);
+            free(e);
+            kv->count--;
+            n++;
+        } else {
+            pp = &e->next;
+        }
+    }
+    unlock(kv);
+    return n;
+}
+
+static bool ns_is(const char *ns, const char *arg)
+{
+    return strcmp(ns, arg) == 0;
+}
+
+static bool ns_not(const char *ns, const char *arg)
+{
+    return !arg || strcmp(ns, arg) != 0;
+}
+
+size_t flex_kv_drop_ns(flex_kv_t *kv, const char *ns)
+{
+    return ns ? drop_if(kv, ns_is, ns) : 0;
+}
+
+size_t flex_kv_drop_all_except(flex_kv_t *kv, const char *keep)
+{
+    return drop_if(kv, ns_not, keep);
+}
+
 static bool store_buf(flex_kv_entry_t *e, flex_kv_type_t type, const void *data, size_t len)
 {
     uint8_t *copy = NULL;

@@ -127,6 +127,23 @@ uint32_t  flex_storage_repair_token(void);
 esp_err_t flex_storage_nvs_erase_confirmed(uint32_t token);
 esp_err_t flex_storage_fs_format_confirmed(uint32_t token);
 
+// ---- Trabajo exclusivo (restablecimiento de fabrica) ----------------------------
+// Ejecuta fn en la tarea del escritor: mientras dura nadie mas toca la NVS ni
+// LittleFS (ni el volcado de ajustes pendientes). Bloquea a quien llama hasta
+// que termina: NUNCA desde la UI ni desde el propio escritor. ctx debe vivir
+// hasta el final aunque venza el plazo.
+esp_err_t flex_storage_exclusive(void (*fn)(void *ctx), void *ctx, uint32_t timeout_ms);
+// Solo dentro de fn (si no: ESP_ERR_INVALID_STATE). Mantienen la cache al dia:
+// lo borrado no se vuelve a escribir y lo escrito se relee antes de dar el OK.
+esp_err_t flex_storage_x_nvs_erase_ns(const char *ns);
+esp_err_t flex_storage_x_nvs_erase_keys(const char *ns, const char *const *keys, int n);
+esp_err_t flex_storage_x_nvs_erase_all_except(const char *keep);
+esp_err_t flex_storage_x_nvs_set_i32(const char *ns, const char *key, int32_t v);
+esp_err_t flex_storage_x_nvs_set_u8(const char *ns, const char *key, uint8_t v);
+esp_err_t flex_storage_x_fs_format(void);
+int       flex_storage_x_wipe_dir(const char *rel, bool *failed);
+esp_err_t flex_storage_x_mkdir(const char *rel);
+
 #ifdef __cplusplus
 }
 #endif

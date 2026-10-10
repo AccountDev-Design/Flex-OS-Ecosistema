@@ -41,4 +41,5 @@ void test_qs(void);
 void test_notif(void);
 void test_poweroff(void);
 void test_safeboot(void);
+void test_reset(void);
 #define FLEX_APP_N_TEST 19

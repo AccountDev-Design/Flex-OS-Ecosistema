@@ -58,6 +58,7 @@ add_executable(flexos_ui_sim
     ${FLEX_ROOT}/components/flex_touch/src/flex_touch_feed.c
     ${FLEX_ROOT}/components/flex_power/src/flex_poweroff_model.c
     ${FLEX_ROOT}/components/flex_system/src/flex_safeboot_model.c
+    ${FLEX_ROOT}/components/flex_system/src/flex_reset_model.c
     ${UI_THEME} ${UI_WIDGETS} ${UI_FONTS} ${UI_SHELL} ${UI_APPS} ${UI_I18N}
 )
 target_include_directories(flexos_ui_sim PRIVATE

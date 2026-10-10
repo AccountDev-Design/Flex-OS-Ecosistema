@@ -57,6 +57,11 @@ typedef struct {
 
 void flex_kv_init(flex_kv_t *kv, void (*lock)(void *), void (*unlock)(void *), void *ctx);
 void flex_kv_clear(flex_kv_t *kv);
+// Suelta de la cache todo un espacio de nombres (o todos menos keep) SIN dejar
+// nada pendiente de grabar: lo usa el restablecimiento tras borrarlo de la NVS,
+// para que el escritor no vuelva a escribir lo borrado. Devuelve las entradas soltadas.
+size_t flex_kv_drop_ns(flex_kv_t *kv, const char *ns);
+size_t flex_kv_drop_all_except(flex_kv_t *kv, const char *keep);
 
 // Carga desde el almacen (no queda pendiente de grabar).
 bool flex_kv_load_num(flex_kv_t *kv, const char *ns, const char *key, flex_kv_type_t type, int64_t v);

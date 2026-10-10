@@ -37,10 +37,11 @@ static const char *TAG = "flex.storage";
 
 // Espacios de NVS que se cargan en la cache al arrancar (los de la version
 // Arduino). Cada modulo anade el suyo al migrarse: "flexqs" es el panel rapido.
-static const char *const k_namespaces[] = {FLEX_NVS_NS, "flexcare", "flexphone", "flexqs", "flexsafe"};
+static const char *const k_namespaces[] = {FLEX_NVS_NS, "flexcare", "flexphone", "flexqs", "flexsafe", "flexreset"};
 
 typedef enum {
     JOB_WRITE, JOB_REMOVE, JOB_RENAME, JOB_MKDIR, JOB_WIPE_DIR, JOB_READ, JOB_FLUSH, JOB_NVS_ERASE, JOB_FS_FORMAT,
+    JOB_EXCL,
 } job_op_t;
 
 typedef struct {
@@ -557,6 +558,13 @@ static void run_job(job_t *job)
             flex_bus_post(FLEX_EV_STORAGE, FLEX_STORAGE_EV_NVS_READY, NULL, 0);
         }
         break;
+    case JOB_EXCL:
+        // Trabajo exclusivo (restablecimiento): nadie mas toca NVS ni LittleFS mientras dura
+        ((void (*)(void *))job->cb)(job->user);
+        if (job->done) {
+            xSemaphoreGive(job->done);
+        }
+        return;
     case JOB_FS_FORMAT:
         err = esp_littlefs_format(FLEX_FS_LABEL);
         if (err == ESP_OK && !esp_littlefs_mounted(FLEX_FS_LABEL)) {
@@ -774,6 +782,223 @@ esp_err_t flex_storage_fs_format_confirmed(uint32_t token)
     }
     job_t *job = new_job(JOB_FS_FORMAT, NULL, NULL, NULL);
     return job ? enqueue(job) : ESP_ERR_NO_MEM;
+}
+
+// ---------------------------------------------------------------- trabajo exclusivo
+static bool in_writer(void)
+{
+    return s_task && xTaskGetCurrentTaskHandle() == s_task;
+}
+
+esp_err_t flex_storage_exclusive(void (*fn)(void *ctx), void *ctx, uint32_t timeout_ms)
+{
+    if (!fn || in_writer()) {
+        return ESP_ERR_INVALID_STATE;   // desde el propio escritor se bloquearia
+    }
+    job_t *job = new_job(JOB_EXCL, NULL, (void *)fn, ctx);
+    if (!job) {
+        return ESP_ERR_NO_MEM;
+    }
+    SemaphoreHandle_t done = xSemaphoreCreateBinary();
+    if (!done) {
+        free(job);
+        return ESP_ERR_NO_MEM;
+    }
+    job->done = done;
+    esp_err_t err = enqueue(job);
+    if (err != ESP_OK) {
+        vSemaphoreDelete(done);
+        return err;
+    }
+    if (xSemaphoreTake(done, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;   // el trabajo aun puede usar el semaforo: se deja vivo
+    }
+    vSemaphoreDelete(done);
+    return ESP_OK;
+}
+
+esp_err_t flex_storage_x_nvs_erase_ns(const char *ns)
+{
+    if (!in_writer() || !ns) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(ns, NVS_READWRITE, &h);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        flex_kv_drop_ns(&s_kv, ns);
+        return ESP_OK;   // nunca existio: nada que borrar
+    }
+    if (err == ESP_OK) {
+        err = nvs_erase_all(h);
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    if (err == ESP_OK) {
+        flex_kv_drop_ns(&s_kv, ns);   // la cache no vuelve a escribir lo borrado
+    }
+    return err;
+}
+
+esp_err_t flex_storage_x_nvs_erase_keys(const char *ns, const char *const *keys, int n)
+{
+    if (!in_writer() || !ns) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(ns, NVS_READWRITE, &h);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        err = ESP_OK;
+    } else if (err == ESP_OK) {
+        for (int i = 0; i < n && err == ESP_OK; i++) {
+            esp_err_t e = nvs_erase_key(h, keys[i]);
+            err = (e == ESP_OK || e == ESP_ERR_NVS_NOT_FOUND) ? ESP_OK : e;
+        }
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    if (err == ESP_OK) {
+        for (int i = 0; i < n; i++) {
+            flex_kv_erase(&s_kv, ns, keys[i]);   // borrado ya hecho en la NVS: dejarlo limpio
+        }
+        // flex_kv_erase deja la entrada "pendiente de borrar": borrarla otra vez no falla
+    }
+    return err;
+}
+
+esp_err_t flex_storage_x_nvs_erase_all_except(const char *keep)
+{
+    if (!in_writer()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    // Primero los nombres (no se borra mientras se recorre la NVS)
+    char names[48][NVS_KEY_NAME_MAX_SIZE];
+    int n = 0;
+    nvs_iterator_t it = NULL;
+    esp_err_t err = nvs_entry_find(NVS_DEFAULT_PART_NAME, NULL, NVS_TYPE_ANY, &it);
+    while (err == ESP_OK && it) {
+        nvs_entry_info_t info;
+        nvs_entry_info(it, &info);
+        bool seen = keep && strcmp(info.namespace_name, keep) == 0;
+        for (int i = 0; i < n && !seen; i++) {
+            seen = strcmp(names[i], info.namespace_name) == 0;
+        }
+        if (!seen) {
+            if (n >= (int)(sizeof(names) / sizeof(names[0]))) {
+                nvs_release_iterator(it);
+                return ESP_ERR_NO_MEM;   // mas espacios de nombres de los previstos: no a medias
+            }
+            strlcpy(names[n++], info.namespace_name, sizeof(names[0]));
+        }
+        err = nvs_entry_next(&it);
+    }
+    nvs_release_iterator(it);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        return err;
+    }
+    for (int i = 0; i < n; i++) {
+        esp_err_t e = flex_storage_x_nvs_erase_ns(names[i]);
+        if (e != ESP_OK) {
+            return e;
+        }
+    }
+    flex_kv_drop_all_except(&s_kv, keep);
+    return ESP_OK;
+}
+
+esp_err_t flex_storage_x_nvs_set_i32(const char *ns, const char *key, int32_t v)
+{
+    if (!in_writer()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(ns, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_i32(h, key, v);
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        int32_t back = ~v;
+        if (err == ESP_OK && (nvs_get_i32(h, key, &back) != ESP_OK || back != v)) {
+            err = ESP_ERR_INVALID_CRC;   // la relectura no cuadra
+        }
+        nvs_close(h);
+    }
+    if (err == ESP_OK) {
+        flex_kv_load_num(&s_kv, ns, key, FLEX_KV_I32, v);   // la cache ve lo grabado, limpio
+    }
+    return err;
+}
+
+esp_err_t flex_storage_x_nvs_set_u8(const char *ns, const char *key, uint8_t v)
+{
+    if (!in_writer()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(ns, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(h, key, v);
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        uint8_t back = (uint8_t)~v;
+        if (err == ESP_OK && (nvs_get_u8(h, key, &back) != ESP_OK || back != v)) {
+            err = ESP_ERR_INVALID_CRC;
+        }
+        nvs_close(h);
+    }
+    if (err == ESP_OK) {
+        flex_kv_load_num(&s_kv, ns, key, FLEX_KV_U8, v);
+    }
+    return err;
+}
+
+esp_err_t flex_storage_x_fs_format(void)
+{
+    if (!in_writer()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    bool mounted;
+    portENTER_CRITICAL(&s_mux);
+    mounted = s_st.fs_mounted;
+    portEXIT_CRITICAL(&s_mux);
+    if (!mounted) {
+        return ESP_OK;   // sin LittleFS montado no hay archivos que borrar (como Arduino)
+    }
+    esp_err_t err = esp_littlefs_format(FLEX_FS_LABEL);
+    if (err == ESP_OK && !esp_littlefs_mounted(FLEX_FS_LABEL)) {
+        err = fs_mount();
+    }
+    status_update(st_set_fs, &err);
+    if (err == ESP_OK) {
+        fs_info_refresh(true);
+    }
+    return err;
+}
+
+int flex_storage_x_wipe_dir(const char *rel, bool *failed)
+{
+    char a[FLEX_FS_PATH_MAX];
+    if (!in_writer() || !flex_fs_abs(rel, a, sizeof(a))) {
+        if (failed) {
+            *failed = true;
+        }
+        return 0;
+    }
+    return flex_fs_wipe_tree(a, failed);
+}
+
+esp_err_t flex_storage_x_mkdir(const char *rel)
+{
+    char a[FLEX_FS_PATH_MAX];
+    if (!in_writer() || !flex_fs_abs(rel, a, sizeof(a))) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return (mkdirs_for(a) == ESP_OK && (mkdir(a, 0775) == 0 || errno == EEXIST)) ? ESP_OK : ESP_FAIL;
 }
 
 void flex_storage_get_status(flex_storage_status_t *out)

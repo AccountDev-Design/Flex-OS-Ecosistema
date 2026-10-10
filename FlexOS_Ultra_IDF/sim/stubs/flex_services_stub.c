@@ -294,3 +294,105 @@ esp_err_t flex_fs_wipe_dir_async(const char *p, flex_fs_count_cb_t cb, void *u)
     return ESP_OK;
 }
 int sim_fs_wipes(const char **last) { if (last) { *last = s_wipe_last; } return s_wipes; }
+
+// ---- Restablecimiento de fabrica: el motor real (modelo) sobre un disco simulado -----------
+// Nada se borra en el simulador: se anota que etapa corrio. Las escenas inyectan fallos.
+#include "flex_reset.h"
+#include "lvgl.h"
+static flex_fr_marker_t s_fr, s_fr_disk;
+static flex_fr_boot_t s_fr_boot;
+static uint32_t s_fr_token;
+static int s_fr_runs[FLEX_FR_FAIL + 1];
+static int s_fr_fail_stage, s_fr_reboots;
+static bool s_fr_fail_arm;
+static flex_reset_cb_t s_fr_cb;
+static void *s_fr_user;
+static lv_timer_t *s_fr_tmr;
+static int s_fr_mode;   // 0 avanzar, 1 armar, 2 reintentar
+
+static bool fr_save(void *ctx, const flex_fr_marker_t *m)
+{
+    (void)ctx;
+    if (s_fr_fail_arm && m->stage == FLEX_FR_ARMED && !s_fr_disk.pending) {
+        return false;
+    }
+    s_fr_disk = *m;
+    return true;
+}
+static bool fr_run(void *ctx, int st)
+{
+    (void)ctx;
+    s_fr_runs[st]++;
+    return st != s_fr_fail_stage;
+}
+static const flex_fr_ops_t FR_OPS = {fr_save, fr_run, NULL};
+
+static void fr_note(int st, int err) { if (s_fr_cb) { s_fr_cb(st, err, s_fr_user); } }
+
+static void fr_tick(lv_timer_t *t)
+{
+    (void)t;
+    if (s_fr_mode == 1 || s_fr_mode == 2) {
+        bool ok = s_fr_mode == 1 ? flex_fr_arm(&FR_OPS, &s_fr) : flex_fr_retry(&FR_OPS, &s_fr);
+        s_fr_mode = 0;
+        if (!ok) {
+            s_fr.stage = FLEX_FR_FAIL;
+            fr_note(FLEX_FR_FAIL, s_fr.err);
+            lv_timer_delete(s_fr_tmr);
+            s_fr_tmr = NULL;
+        }
+        return;
+    }
+    if (s_fr.stage >= FLEX_FR_ARMED && s_fr.stage <= FLEX_FR_DEFAULTS) {
+        fr_note(s_fr.stage, 0);
+        flex_fr_step(&FR_OPS, &s_fr);
+        return;
+    }
+    fr_note(s_fr.stage, s_fr.err);
+    lv_timer_delete(s_fr_tmr);
+    s_fr_tmr = NULL;
+}
+
+static bool fr_spawn(int mode, flex_reset_cb_t cb, void *user)
+{
+    if (s_fr_tmr) {
+        return false;
+    }
+    s_fr_cb = cb;
+    s_fr_user = user;
+    s_fr_mode = mode;
+    s_fr_tmr = lv_timer_create(fr_tick, 40, NULL);
+    return true;
+}
+
+bool flex_reset_boot_check(void) { s_fr_boot = flex_fr_boot_decision(&s_fr_disk); s_fr = s_fr_disk; return s_fr_boot == FLEX_FR_BOOT_RESUME; }
+flex_fr_boot_t flex_reset_boot_state(void) { return s_fr_boot; }
+const flex_fr_marker_t *flex_reset_marker(void) { return &s_fr; }
+uint32_t flex_reset_token(void) { s_fr_token = (uint32_t)rand() | 1u; return s_fr_token; }
+bool flex_reset_start(uint32_t token, flex_reset_cb_t cb, void *user)
+{
+    bool ok = token && token == s_fr_token;
+    s_fr_token = 0;
+    return ok && fr_spawn(1, cb, user);
+}
+bool flex_reset_resume(flex_reset_cb_t cb, void *user)
+{
+    return s_fr_boot == FLEX_FR_BOOT_RESUME && s_fr.stage != FLEX_FR_FAIL && fr_spawn(0, cb, user);
+}
+bool flex_reset_retry(flex_reset_cb_t cb, void *user) { return s_fr.stage == FLEX_FR_FAIL && fr_spawn(2, cb, user); }
+void flex_reset_confirm_clean_boot(void)
+{
+    if (s_fr_boot == FLEX_FR_BOOT_DONE) {
+        s_fr_boot = FLEX_FR_BOOT_NORMAL;
+        s_fr_disk.pending = false;
+    }
+}
+void flex_reset_reboot(void) { s_fr_reboots++; }
+
+// para las escenas
+void sim_reset_clear(void) { memset(&s_fr, 0, sizeof(s_fr)); memset(&s_fr_disk, 0, sizeof(s_fr_disk)); memset(s_fr_runs, 0, sizeof(s_fr_runs)); s_fr_boot = FLEX_FR_BOOT_NORMAL; s_fr_fail_stage = 0; s_fr_fail_arm = false; }
+void sim_reset_fail(int stage, bool arm) { s_fr_fail_stage = stage; s_fr_fail_arm = arm; }
+int sim_reset_runs(int stage) { return s_fr_runs[stage]; }
+int sim_reset_reboots(void) { return s_fr_reboots; }
+const flex_fr_marker_t *sim_reset_disk(void) { return &s_fr_disk; }
+void sim_reset_set_disk(const flex_fr_marker_t *m) { s_fr_disk = *m; }

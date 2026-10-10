@@ -179,8 +179,8 @@ void flex_power_wake(void)
 static void gesture_cb(int ev)
 {
     if (ev == FLEX_ARB_EV_SUSPEND) {
-        if (flex_poweroff_running()) {
-            return;   // apagando: la animacion termina sola
+        if (flex_poweroff_running() || flex_factory_active()) {
+            return;   // apagando o en el asistente de restablecimiento (§9.6: alli el tactil se perdia)
         }
         flex_power_suspend();
     } else if (ev == FLEX_ARB_EV_WAKE) {

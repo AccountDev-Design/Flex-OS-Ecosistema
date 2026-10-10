@@ -6,6 +6,7 @@
 #include "flex_i2c.h"
 #include "flex_passcode.h"
 #include "flex_poweroff.h"
+#include "flex_reset.h"
 #include "flex_safeboot.h"
 #include "flex_storage.h"
 #include "flex_system.h"
@@ -39,11 +40,15 @@ void app_main(void)
     // sus fases y consultaran flex_safe_mode()); la interfaz entra en su pantalla.
     flex_safeboot_eval();
 
+    // Restablecimiento de fabrica a medias (se fue la luz) o fallido: no se
+    // arranca nada mas ni se migra la clave; la interfaz entra directa al asistente.
+    bool reset_pending = flex_reset_boot_check();
+
     // Clave del bloqueo guardada en texto claro por versiones antiguas -> hash
     // con sal, en tres pasos (escribir, comprobar, y solo entonces borrar la
     // antigua). Antes de la interfaz, para que el bloqueo ya vea el estado
     // definitivo. Si no hay nada que migrar no escribe. Nunca se imprime la clave.
-    int mg = flex_lock_migrate();
+    int mg = reset_pending ? 0 : flex_lock_migrate();
     if (mg > 0) {
         ESP_LOGI(TAG, "clave del bloqueo: migrada a hash con sal o cambio a medias completado");
     } else if (mg < 0) {

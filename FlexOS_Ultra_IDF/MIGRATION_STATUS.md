@@ -31,13 +31,14 @@ source ~/esp/env.sh && tools/build.sh --rev v3   # firmware (no graba nada)
 | Apagado completo: confirmación, apagado seguro, animación, deep sleep, filtro de 3 s | `flex_poweroff_ui.c`, `components/flex_power` | host + escena `apagado` |
 | Modo seguro: arranque, pantalla, clave antes del acceso, escritorio limitado, limpiar cachés | `flex_safe_ui.c`, `flex_system/flex_safeboot*` | host + escena `seguro` |
 | Correcciones de la revisión 4 (tacto, Centro, bloqueo, candados, umbrales, refresco) | varios | escena `regresiones` |
+| Restablecimiento de fábrica: marcador transaccional, etapas en exclusiva en el escritor, asistente de 5 vistas, reanudación tras corte | `flex_system/flex_reset*`, `flex_storage` (exclusivo), `flex_factory_ui.c` | host (15 cortes) + escena `fabrica` |
 
 ## En curso / pendiente (orden de trabajo)
 
 1. Revisión 4: sus 10 hallazgos verificados y corregidos (escena `regresiones`, una
    comprobación por hallazgo con su mutación). Dimensiones nunca ejecutadas:
    memoria, fidelidad a Arduino, arranque/pruebas.
-2. Fase 3, shell restante: restablecimiento de fábrica (§13), sesiones de app (§14),
+2. Fase 3, shell restante: sesiones de app (§14),
    memoria y "Optimizar" (§17), OOBE, edición/personalización del escritorio y menús,
    kiosco, arranque (splash/banda forense).
 3. Fase 3, apps (las 19 abren hoy "Pendiente de migrar"): marco común de apps → Ajustes,
@@ -65,4 +66,4 @@ conservador ≈420 h de trabajo efectivo. Validación en la placa aparte (≈20�
 conjuntas, depende de grabar con autorización). Base: tamaño del código Arduino que
 queda frente al ritmo medido en las Fases 0–3 (ver el informe de auditoría del 10-10).
 
-Última actualización: correcciones de la revisión 4 (Fase 3).
+Última actualización: restablecimiento de fábrica (Fase 3).
