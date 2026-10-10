@@ -98,6 +98,8 @@ La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la
 | Modo seguro: qué es anormal | PANIC, INT_WDT, TASK_WDT, WDT, BROWNOUT | Además CPU_LOCKUP y PWR_GLITCH (el P4 los informa) | docs/spec/01c §11.1 |
 | Modo seguro: bloquear | — | Bloquear (p. ej. al despertar con clave) cierra la pantalla; al desbloquear, escritorio limitado con su píldora | Coherencia |
 | Modo seguro: textos | Sin tildes ("minimo", "caches", "fabrica") | Con tildes | Visual |
+| Candado de app pedido desde otra app (rueda del panel rápido) | Cancelar la clave llevaba a Inicio | Vuelve a la app que estaba delante (ir a Inicio la dejaba huérfana y Recientes se trababa) | Revisión adversarial 4 |
+| Umbrales de toque | Toque = < 16 px y < 550 ms | Igual, aplicado al indev de LVGL (por defecto LVGL usa 10 px y 400 ms) | docs/spec/01b |
 | Avisos: texto guardado | `sysNotify` corta el título y el texto en bytes y puede partir una letra con tilde | Se cortan en caracteres UTF-8 (el banner ya lo hacía en Arduino) | docs/spec/01c §6 |
 | Avisos: tarjeta del bloqueo | El título más reciente se dibuja aunque se salga de la tarjeta | Una línea con "..." dentro de la tarjeta | docs/spec/01a §4 |
 | Avisos: Centro | Solo se lee el borde con el dedo moviéndose (igual) y se cierra arrastrando a la derecha (igual) | Igual; los avisos del teléfono vinculado llegarán con Flex Phone (el Centro tiene hoy los del sistema) | docs/spec/01c §6 |

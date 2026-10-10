@@ -110,6 +110,7 @@ size_t flex_inbox_drain(size_t max)
     return n;
 }
 uint32_t flex_inbox_dropped(void) { return 0; }
+bool flex_inbox_in_ui(void) { return true; }   // el simulador es una sola tarea
 
 // ---- ajustes -----------------------------------------------------------------
 static int64_t gnum(const char *ns, const char *k, flex_kv_type_t t, int64_t def)

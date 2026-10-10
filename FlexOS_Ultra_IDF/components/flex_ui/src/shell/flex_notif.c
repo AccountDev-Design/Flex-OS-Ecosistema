@@ -295,8 +295,12 @@ static void banner_tick(lv_timer_t *tm)
         banner_place();
         return;
     }
-    if (B.state != FPB_OUT && !screen_allows()) {
-        banner_requeue();
+    if (!screen_allows()) {
+        if (B.state == FPB_OUT) {
+            banner_finish();   // fpbAbandon: el que ya se iba no se queda encima del bloqueo
+        } else {
+            banner_requeue();
+        }
         return;
     }
     uint32_t now = lv_tick_get(), e = now - B.t0;
@@ -418,7 +422,7 @@ static bool banner_hook(const flex_arb_touch_t *t)
 
 // ---- servicio --------------------------------------------------------------------------
 typedef struct {
-    int kind;   // 0 historial, 1 solo banner (sysSay dentro de una app)
+    int kind;   // 0 historial, 1 solo banner (sysSay dentro de una app), 2 sysSay: se decide al entregar
     uint8_t type;
     char app[FLEX_BQ_APP_MAX];
     char title[FLEX_NTF_TITLE_MAX];
@@ -437,14 +441,17 @@ static void post_ui(void *arg)
     post_t *p = arg;
     if (flex_safe_mode()) {
         // Modo seguro: sin banner (Recovery.h). Lo del sistema queda en el historial.
-        if (p->kind == 0) {
+        if (p->kind != 1 && (p->kind != 2 || flex_shell_state() != FLEX_SH_APP)) {
             flex_ntf_push(&s_hist, p->type, p->title, p->sub, lv_tick_get());
             lock_refresh_if_visible();
         }
         free(p);
         return;
     }
-    if (p->kind == 1 && flex_shell_state() == FLEX_SH_APP) {
+    if (p->kind == 2) {
+        p->kind = flex_shell_state() == FLEX_SH_APP ? 1 : 0;   // llamado desde otra tarea
+    }
+    if (p->kind == 1) {
         flex_bq_msg_t m;
         flex_bq_msg_init(&m, FLEX_BQ_SRC_SYSTEM, 0, p->app, p->title, p->sub, FLEX_PRI_DEFAULT);
         flex_bq_offer(&s_bq, &m);
@@ -490,7 +497,14 @@ void flex_notify_media(const char *title, const char *sub)
 
 void flex_say(const char *app, const char *title, const char *sub)
 {
-    post(1, FLEX_NTF_SYSTEM, app, title, sub);
+    // sysSay mira gState AL LLAMARLO (Media.h:83): desde la UI se decide ya (una
+    // app que avisa y se cierra en la misma vuelta sigue siendo "dentro de la app");
+    // desde otra tarea, al entregarlo.
+    int kind = 2;
+    if (flex_inbox_in_ui()) {
+        kind = flex_shell_state() == FLEX_SH_APP ? 1 : 0;
+    }
+    post(kind, FLEX_NTF_SYSTEM, app, title, sub);
 }
 
 int flex_notif_count(void)

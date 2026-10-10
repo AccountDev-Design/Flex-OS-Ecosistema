@@ -26,6 +26,7 @@
 
 static lv_obj_t *s_root, *s_wall, *s_glass, *s_clock, *s_date, *s_cards;
 static int32_t s_y0, s_off;
+static bool s_dropping;   // cayendo desde arriba (bloqueo por inactividad)
 static bool s_verify_started;
 
 static int32_t ease_out_quad(const lv_anim_t *a)
@@ -40,6 +41,9 @@ static void set_off(void *obj, int32_t off)
 {
     (void)obj;
     s_off = off;
+    if (off == 0) {
+        s_dropping = false;
+    }
     lv_obj_set_y(s_root, -off);
 }
 
@@ -114,9 +118,10 @@ static void touch_cb(lv_event_t *e)
     bool need_pin = flex_auth_required();
     if (code == LV_EVENT_PRESSED) {
         lv_anim_delete(s_root, set_off);
-        if (need_pin && s_off != 0) {
-            // Con clave el bloqueo no se queda a medias por un toque durante su
-            // caida (en Arduino la caida no lee el tactil): termina en el acto.
+        if ((need_pin || s_dropping) && s_off != 0) {
+            // El bloqueo no se queda a medias por un toque durante su caida (en
+            // Arduino la caida no lee el tactil): termina en el acto. Sin esto,
+            // sin clave, un toque quieto contaba la caida como desliz y desbloqueaba.
             set_off(NULL, 0);
         }
         s_y0 = p.y + s_off;
@@ -156,6 +161,7 @@ static void card(lv_obj_t *parent, int32_t y, flex_glyph_t glyph, lv_color_t acc
     // lockWidgetCard (Home.h:490): 28, y, 424x50 r16; Vidrio GLASS2 / Plano SURF a215
     const flex_palette_t *t = flex_th();
     lv_obj_t *c = flex_box(parent);
+    lv_obj_set_clickable(c, false);   // el desliz para desbloquear puede empezar encima
     lv_obj_set_pos(c, 28, y);
     lv_obj_set_size(c, 424, 50);
     lv_obj_set_style_radius(c, 16, 0);
@@ -191,6 +197,7 @@ static void build_content(void)
     if (w & LW_WEATHER) {
         // wxLockCard sin datos (AppWeather.h:1365): el servicio de clima llega con el Wi-Fi
         lv_obj_t *c = flex_box(s_cards);
+        lv_obj_set_clickable(c, false);
         lv_obj_set_pos(c, 28, y);
         lv_obj_set_size(c, 424, 50);
         lv_obj_set_style_radius(c, 16, 0);
@@ -250,6 +257,7 @@ void flex_lock_drop_in(void)
         return;
     }
     set_off(NULL, 800);
+    s_dropping = true;
     animate_to(0, false);
 }
 

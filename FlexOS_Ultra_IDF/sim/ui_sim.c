@@ -149,6 +149,7 @@ int main(int argc, char **argv)
     lv_indev_t *in = lv_indev_create();
     lv_indev_set_type(in, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(in, indev_read);
+    flex_touch_lvgl_tune(in);   // los mismos umbrales de toque que el firmware
 
     int fails = 0;
     for (int i = 0; sim_scenes[i].name; i++) {

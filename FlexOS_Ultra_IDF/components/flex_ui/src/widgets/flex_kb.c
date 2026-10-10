@@ -15,6 +15,7 @@
 #include <string.h>
 #include "flex_frame.h"
 #include "flex_theme.h"
+#include "flex_touch_lvgl.h"
 #include "flex_wallpaper.h"
 
 typedef enum {
@@ -373,6 +374,10 @@ static void release_held(kb_t *k)
 
 static void touch_cb(lv_event_t *e)
 {
+    lv_event_code_t tc = lv_event_get_code(e);
+    if (tc == LV_EVENT_PRESSED || tc == LV_EVENT_PRESSING) {
+        flex_touch_typing_mark();   // veto del gesto de suspender mientras se teclea
+    }
     kb_t *k = lv_event_get_user_data(e);
     lv_event_code_t code = lv_event_get_code(e);
     lv_indev_t *in = lv_indev_active();

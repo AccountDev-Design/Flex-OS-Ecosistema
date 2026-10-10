@@ -19,6 +19,7 @@
 #include "flex_storage.h"
 #include "flex_system.h"
 #include "flex_theme.h"
+#include "flex_touch_lvgl.h"
 #include "flex_wallmgr.h"
 
 #define LONGPRESS_ICON_MS  1000
@@ -43,6 +44,9 @@ static void wg_label(lv_obj_t *p, const char *txt, const lv_font_t *f, lv_color_
 
 static void wg_click_cb(lv_event_t *e)
 {
+    if (flex_shell_state() != FLEX_SH_HOME) {
+        return;   // durante la apertura de una app o con la caja subiendo, el escritorio no manda
+    }
     int app = (int)(intptr_t)lv_event_get_user_data(e);
     lv_area_t a;
     lv_obj_get_coords(lv_event_get_target_obj(e), &a);
@@ -187,6 +191,9 @@ static press_t s_press;
 
 static void icon_cb(lv_event_t *e)
 {
+    if (flex_shell_state() != FLEX_SH_HOME) {
+        return;   // durante la apertura de una app o con la caja subiendo, el escritorio no manda
+    }
     lv_event_code_t code = lv_event_get_code(e);
     lv_obj_t *o = lv_event_get_current_target_obj(e);
     int app = (int)(intptr_t)lv_event_get_user_data(e);
@@ -317,6 +324,9 @@ static void pages_scroll_cb(lv_event_t *e)
 // ---- gestos del escritorio --------------------------------------------------------
 static void root_gesture_cb(lv_event_t *e)
 {
+    if (flex_shell_state() != FLEX_SH_HOME) {
+        return;   // durante la apertura de una app o con la caja subiendo, el escritorio no manda
+    }
     lv_indev_t *in = lv_indev_active();
     if (!in) {
         return;
@@ -332,6 +342,9 @@ static void root_gesture_cb(lv_event_t *e)
 
 static void empty_cb(lv_event_t *e)
 {
+    if (flex_shell_state() != FLEX_SH_HOME) {
+        return;   // durante la apertura de una app o con la caja subiendo, el escritorio no manda
+    }
     lv_event_code_t code = lv_event_get_code(e);
     lv_point_t p;
     lv_indev_get_point(lv_indev_active(), &p);
@@ -404,9 +417,33 @@ static void rebuild(void)
     dots_update((float)g_home.page);
 }
 
+// El minuto (y el tema) rehacen las paginas con widgets: con un dedo encima o
+// las paginas aun deslizandose se cortaria el gesto y la pagina quedaria entre
+// dos encajes. Se aplaza hasta que el escritorio este quieto.
+static lv_timer_t *s_refresh_retry;
+
+static void refresh_retry_cb(lv_timer_t *t)
+{
+    (void)t;
+    s_refresh_retry = NULL;   // repeat_count 1: LVGL lo borra al volver
+    flex_home_refresh();
+}
+
+static bool home_busy(void)
+{
+    return flex_touch_arb()->t.down || lv_anim_get(s_pages, NULL) != NULL;
+}
+
 void flex_home_refresh(void)
 {
     if (!s_root) {
+        return;
+    }
+    if (home_busy()) {
+        if (!s_refresh_retry) {
+            s_refresh_retry = lv_timer_create(refresh_retry_cb, 250, NULL);
+            lv_timer_set_repeat_count(s_refresh_retry, 1);
+        }
         return;
     }
     if (s_safe_pill) {
@@ -425,6 +462,11 @@ void flex_home_rebuild(void)
     if (s_root) {
         rebuild();   // el modelo cambio (favoritas, ocultas, orden)
     }
+}
+
+int32_t flex_home_scroll_x(void)
+{
+    return s_pages ? lv_obj_get_scroll_x(s_pages) : 0;
 }
 
 bool flex_home_icon_area(int app_id, lv_area_t *out)

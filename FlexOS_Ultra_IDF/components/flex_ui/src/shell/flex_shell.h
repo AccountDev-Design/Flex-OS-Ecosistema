@@ -46,6 +46,7 @@ lv_obj_t *flex_home_create(lv_obj_t *parent);
 void flex_home_refresh(void);                         // cambio de minuto / tema
 void flex_home_rebuild(void);                         // el modelo cambio (favoritas, ocultas)
 bool flex_home_icon_area(int app_id, lv_area_t *out); // icono visible de la app (origen del zoom)
+int32_t flex_home_scroll_x(void);                     // desplazamiento real de las paginas (pruebas)
 lv_obj_t *flex_lock_create(lv_obj_t *parent);
 void flex_lock_refresh(void);
 void flex_lock_reset(void);                           // vuelve a la posicion de reposo

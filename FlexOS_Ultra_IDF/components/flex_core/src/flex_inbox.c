@@ -62,3 +62,8 @@ uint32_t flex_inbox_dropped(void)
     portEXIT_CRITICAL(&s_mux);
     return n;
 }
+
+bool flex_inbox_in_ui(void)
+{
+    return s_ui && xTaskGetCurrentTaskHandle() == s_ui;
+}

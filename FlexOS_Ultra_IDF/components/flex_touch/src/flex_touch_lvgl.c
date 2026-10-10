@@ -41,6 +41,7 @@ lv_indev_t *flex_touch_lvgl_create(lv_display_t *disp)
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(indev, read_cb);
     lv_indev_set_display(indev, disp);
+    flex_touch_lvgl_tune(indev);
     lv_timer_t *t = lv_indev_get_read_timer(indev);
     if (t) {
         lv_timer_set_period(t, READ_PERIOD_MS);

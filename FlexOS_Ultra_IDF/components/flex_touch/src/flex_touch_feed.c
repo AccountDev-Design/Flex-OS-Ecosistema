@@ -9,6 +9,23 @@ static bool s_init;
 static flex_touch_gesture_cb_t s_cb;
 static lv_indev_t *s_indev;
 static bool s_lv_down;   // lo ultimo que vio LVGL
+static bool s_hook_ep;   // una capa del sistema se quedo algun cuadro de este episodio
+static uint32_t s_typing_ms;   // ultima vez con el dedo sobre un teclado (0 = nunca)
+#define TYPING_MS 500          // kbTypingNow (Keyboard.h:388)
+
+void flex_touch_lvgl_tune(lv_indev_t *indev)
+{
+    if (indev) {
+        // LVGL 9.6 no publica el setter del limite de scroll: campos del indev (lvgl_private.h)
+        indev->scroll_limit = FLEX_TOUCH_TAP_PX;
+        indev->long_press_time = FLEX_TOUCH_TAP_MS;
+    }
+}
+
+void flex_touch_typing_mark(void)
+{
+    s_typing_ms = lv_tick_get() | 1u;
+}
 #define HOOK_MAX 4
 static struct {
     flex_touch_sys_hook_t fn;
@@ -132,9 +149,22 @@ void flex_touch_feed(lv_indev_t *indev, lv_indev_data_t *data, int ev, int x, in
 {
     s_indev = indev;
     flex_arb_t *a = flex_touch_arb();
+    a->typing = s_typing_ms && lv_tick_get() - s_typing_ms < TYPING_MS;
     int evt = flex_arb_poll(a, ev, x, y, fingers, lv_tick_get());
     const flex_arb_touch_t *t = &a->t;
-    if (!a->suspended && hooks_claim(t)) {
+    bool claimed = !a->suspended && hooks_claim(t);
+    // touchHoldBack: si una capa del sistema se quedo un cuadro de este episodio,
+    // el resto tampoco llega a LVGL aunque la capa ya se haya ido (cerrar el
+    // Centro con el dedo encima no puede pulsar el icono de debajo).
+    if (!claimed && s_hook_ep && t->down) {
+        claimed = true;
+    }
+    if (claimed && t->down) {
+        s_hook_ep = true;
+    } else if (!t->down) {
+        s_hook_ep = false;
+    }
+    if (claimed) {
         // El episodio es de una capa del sistema: LVGL no lo ve. Sigue siendo
         // actividad (el bloqueo por inactividad no puede saltar con el dedo encima).
         if (t->down) {

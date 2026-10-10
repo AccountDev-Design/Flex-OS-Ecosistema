@@ -374,9 +374,18 @@ static void launch_ok(void *ctx)
     flex_app_open((int)(intptr_t)ctx, s_launch_has_from ? &s_launch_from : NULL);
 }
 
+static bool s_launch_over_app;   // el candado se pidio con una app delante
+
 static void launch_cancel(void *ctx)
 {
     (void)ctx;
+    if (s_launch_over_app && s_fg >= 0) {
+        // Desde una app (panel rapido): vuelve a ella. Ir a Inicio la dejaba
+        // delante sin suspender (huerfana) y Recientes se quedaba trabado.
+        s_state = FLEX_SH_APP;
+        flex_navbar_set_ctx(FLEX_NAV_APP);
+        return;
+    }
     flex_shell_show_home();   // la verificacion no salio del bloqueo: se queda en Inicio
 }
 
@@ -393,6 +402,7 @@ void flex_app_launch(int id, const lv_area_t *from_icon)
     bool locked = id >= 0 && id < 32 && ((g_home.lock >> id) & 1u);
     if (locked && flex_auth_required()) {
         s_launch_has_from = from_icon != NULL;
+        s_launch_over_app = s_state == FLEX_SH_APP;
         if (from_icon) {
             s_launch_from = *from_icon;
         }
@@ -474,7 +484,9 @@ void flex_app_terminate(int id)
     const flex_app_def_t *d = flex_app_def(id);
     if (id == s_fg) {
         suspend_fg();
-        flex_shell_show_home();
+        if (s_state == FLEX_SH_APP) {
+            flex_shell_show_home();   // desde Recientes (OVERLAY) la capa sigue mandando
+        }
     }
     if (d->ops && d->ops->on_close) {
         d->ops->on_close();

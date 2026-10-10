@@ -30,15 +30,13 @@ source ~/esp/env.sh && tools/build.sh --rev v3   # firmware (no graba nada)
 | Avisos: banner, Centro, No molestar | `flex_notif*.c` | host + escena `avisos` |
 | Apagado completo: confirmación, apagado seguro, animación, deep sleep, filtro de 3 s | `flex_poweroff_ui.c`, `components/flex_power` | host + escena `apagado` |
 | Modo seguro: arranque, pantalla, clave antes del acceso, escritorio limitado, limpiar cachés | `flex_safe_ui.c`, `flex_system/flex_safeboot*` | host + escena `seguro` |
+| Correcciones de la revisión 4 (tacto, Centro, bloqueo, candados, umbrales, refresco) | varios | escena `regresiones` |
 
 ## En curso / pendiente (orden de trabajo)
 
-1. **Hallazgos abiertos de la revisión 4** (sin verificar, detalle en el informe de la sesión):
-   Centro devuelve el toque a LVGL al cerrar; tarjetas del bloqueo bloquean el desliz;
-   banner saliendo sobre el bloqueo; `flex_say` decide tarde; app huérfana al cancelar
-   un candado desde una app; veto al teclear inexistente; el escritorio acepta toques
-   fuera de HOME; umbrales de toque (550 ms / 16 px); el minuto rehace las páginas; un
-   toque durante la caída del bloqueo desbloquea.
+1. Revisión 4: sus 10 hallazgos verificados y corregidos (escena `regresiones`, una
+   comprobación por hallazgo con su mutación). Dimensiones nunca ejecutadas:
+   memoria, fidelidad a Arduino, arranque/pruebas.
 2. Fase 3, shell restante: restablecimiento de fábrica (§13), sesiones de app (§14),
    memoria y "Optimizar" (§17), OOBE, edición/personalización del escritorio y menús,
    kiosco, arranque (splash/banda forense).
@@ -67,4 +65,4 @@ conservador ≈420 h de trabajo efectivo. Validación en la placa aparte (≈20�
 conjuntas, depende de grabar con autorización). Base: tamaño del código Arduino que
 queda frente al ritmo medido en las Fases 0–3 (ver el informe de auditoría del 10-10).
 
-Última actualización: Modo seguro (Fase 3).
+Última actualización: correcciones de la revisión 4 (Fase 3).

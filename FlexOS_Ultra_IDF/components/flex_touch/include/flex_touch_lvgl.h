@@ -23,6 +23,15 @@ void flex_touch_set_gesture_cb(flex_touch_gesture_cb_t cb);
 // touchDropAll: al cambiar de pantalla, el dedo que sigue apoyado no toca nada
 // de la pantalla nueva hasta que se levante de verdad.
 void flex_touch_drop_all(void);
+// kbTypingMark: el dedo esta sobre un teclado. Durante 500 ms el gesto de
+// suspender con dos dedos no cuenta y dos pulgares no se tragan.
+void flex_touch_typing_mark(void);
+// Umbrales de toque de Flex OS en el indev: un toque es < 16 px y < 550 ms
+// (T.tap de Arduino). LVGL por defecto: 10 px y 400 ms (una pulsacion de 450 ms
+// sobre un icono no hacia nada).
+#define FLEX_TOUCH_TAP_PX 16
+#define FLEX_TOUCH_TAP_MS 550
+void flex_touch_lvgl_tune(lv_indev_t *indev);
 // Capas globales del sistema (panel rapido, centro de notificaciones): ven cada
 // cuadro del arbitraje ANTES que LVGL y devuelven true mientras el episodio sea
 // suyo. Un episodio reclamado no llega a LVGL (si ya habia un objeto pulsado,

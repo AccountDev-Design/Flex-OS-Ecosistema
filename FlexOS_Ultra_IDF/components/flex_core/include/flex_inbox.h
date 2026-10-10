@@ -33,6 +33,8 @@ bool flex_inbox_post(flex_inbox_fn_t fn, void *arg);
 size_t flex_inbox_drain(size_t max);
 
 uint32_t flex_inbox_dropped(void);
+// true si quien llama es la tarea de UI (puede leer el estado de la interfaz ya).
+bool flex_inbox_in_ui(void);
 
 #ifdef __cplusplus
 }
