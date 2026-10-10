@@ -13,6 +13,7 @@ bool scene_recents_run(void);
 bool scene_qs_run(void);
 bool scene_notif_run(void);
 bool scene_poweroff_run(void);
+bool scene_safe_run(void);
 
 const sim_scene_t sim_scenes[] = {
     {"galeria", scene_gallery_run},
@@ -25,6 +26,7 @@ const sim_scene_t sim_scenes[] = {
     {"recientes", scene_recents_run},
     {"panel", scene_qs_run},
     {"avisos", scene_notif_run},
+    {"seguro", scene_safe_run},
     {"apagado", scene_poweroff_run},
     {NULL, NULL},
 };

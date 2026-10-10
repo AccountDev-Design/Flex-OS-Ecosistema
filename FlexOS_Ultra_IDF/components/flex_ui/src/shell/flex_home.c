@@ -13,6 +13,7 @@
 #include "flex_glass.h"
 #include "flex_home_model.h"
 #include "flex_i18n.h"
+#include "flex_safeboot.h"
 #include "flex_icons.h"
 #include "flex_shell.h"
 #include "flex_storage.h"
@@ -25,6 +26,7 @@
 
 static lv_obj_t *s_root, *s_wall, *s_pages, *s_dots, *s_dock, *s_page[FLEX_HOME_PAGES_MAX];
 static lv_obj_t *s_dock_icon[FLEX_HOME_DOCK_N];
+static lv_obj_t *s_safe_pill;
 static int32_t s_band_top, s_band_bot;
 
 // Ganchos opcionales (otros modulos del shell)
@@ -407,6 +409,9 @@ void flex_home_refresh(void)
     if (!s_root) {
         return;
     }
+    if (s_safe_pill) {
+        lv_obj_set_hidden(s_safe_pill, !flex_safe_mode());   // el Modo seguro es de este arranque
+    }
     // relojes y calendario de los widgets
     for (int p = 0; p < g_home.page_n; p++) {
         if (g_home.wg_n[p]) {
@@ -453,6 +458,29 @@ static void theme_cb(void *ctx)
     rebuild();
 }
 
+// Pildora "Modo seguro" (HomeCfg.h:1240): vuelve a la pantalla del Modo seguro.
+static void safe_pill_cb(lv_event_t *e)
+{
+    (void)e;
+    flex_safe_open();
+}
+
+static void safe_pill_create(void)
+{
+    lv_obj_t *p = flex_box(s_root);
+    s_safe_pill = p;
+    lv_obj_set_pos(p, 146, 56);
+    lv_obj_set_size(p, 188, 38);
+    lv_obj_set_style_radius(p, 19, 0);
+    lv_obj_set_style_bg_color(p, lv_color_hex(0xBA7030), 0);
+    lv_obj_set_style_bg_opa(p, LV_OPA_COVER, 0);
+    lv_obj_set_clickable(p, true);
+    lv_obj_set_ext_click_area(p, 10);   // (136..344, 48..104) como Arduino
+    lv_obj_add_event_cb(p, safe_pill_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *l = flex_label(p, "Modo seguro", FLEX_FONT_S2, lv_color_white());
+    flex_label_cap_center(l, 94, 66 - 56);
+}
+
 lv_obj_t *flex_home_create(lv_obj_t *parent)
 {
     s_root = flex_box(parent);
@@ -481,5 +509,7 @@ lv_obj_t *flex_home_create(lv_obj_t *parent)
     lv_obj_set_clickable(s_dots, false);
     flex_theme_listen(theme_cb, NULL);
     rebuild();
+    safe_pill_create();
+    lv_obj_set_hidden(s_safe_pill, !flex_safe_mode());
     return s_root;
 }

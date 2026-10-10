@@ -109,6 +109,10 @@ esp_err_t flex_fs_write_async(const char *path, const void *data, size_t len, fl
 esp_err_t flex_fs_remove_async(const char *path, flex_fs_done_cb_t cb, void *user);
 esp_err_t flex_fs_rename_async(const char *from, const char *to, flex_fs_done_cb_t cb, void *user);
 esp_err_t flex_fs_mkdir_async(const char *path, flex_fs_done_cb_t cb, void *user);
+// Vacia una carpeta (archivos y subcarpetas) y la deja; count = archivos borrados.
+// Nunca la raiz. Para cachés y sesiones (fsWipeDir de Arduino).
+typedef void (*flex_fs_count_cb_t)(esp_err_t err, size_t count, void *user);
+esp_err_t flex_fs_wipe_dir_async(const char *path, flex_fs_count_cb_t cb, void *user);
 esp_err_t flex_fs_read_async(const char *path, size_t max_len, flex_fs_read_cb_t cb, void *user);
 
 // Sincronas, para tareas de servicio (NUNCA desde la UI): pueden esperar a la flash.

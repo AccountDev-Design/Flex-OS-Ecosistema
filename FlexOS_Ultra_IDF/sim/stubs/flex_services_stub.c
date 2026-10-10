@@ -261,3 +261,35 @@ void flex_poweroff_deep_sleep(void)
     s_deep_sleeps++;
 }
 int sim_deep_sleeps(void) { return s_deep_sleeps; }
+
+// ---- Modo seguro: el arranque lo decide la escena ---------------------------------------
+#include "flex_safeboot.h"
+static flex_safe_eval_t s_safe;
+static int s_reboots;
+void flex_safeboot_eval(void) {}
+bool flex_safe_mode(void) { return s_safe.safe; }
+int flex_safe_fails(void) { return s_safe.fails; }
+int flex_safe_cause(void) { return s_safe.cause; }
+void flex_safe_exit_and_reboot(void)
+{
+    s_safe.fails = 0;
+    flex_kvs_set_i32("flexsafe", "fails", 0);
+    s_reboots++;
+}
+void sim_safe_set(int reason, int saved_fails) { s_safe = flex_safe_eval(reason, saved_fails, reason, true); }
+void sim_safe_clear(void) { s_safe = (flex_safe_eval_t){0}; }
+int sim_reboots(void) { return s_reboots; }
+
+// Vaciar una carpeta: en el simulador se cuenta (no hay LittleFS)
+static int s_wipes;
+static char s_wipe_last[64];
+esp_err_t flex_fs_wipe_dir_async(const char *p, flex_fs_count_cb_t cb, void *u)
+{
+    s_wipes++;
+    snprintf(s_wipe_last, sizeof(s_wipe_last), "%s", p ? p : "");
+    if (cb) {
+        cb(ESP_OK, 0, u);
+    }
+    return ESP_OK;
+}
+int sim_fs_wipes(const char **last) { if (last) { *last = s_wipe_last; } return s_wipes; }

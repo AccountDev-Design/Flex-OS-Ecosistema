@@ -27,6 +27,7 @@ extern int g_fails, g_checks;
 void test_flex_kv(void);
 void test_flex_kv_threads(void);
 void test_fs_path(void);
+void test_fs_wipe(void);
 void test_flip_rows(void);
 void test_wallpaper(void);
 void test_glass(void);
@@ -39,4 +40,5 @@ void test_recents(void);
 void test_qs(void);
 void test_notif(void);
 void test_poweroff(void);
+void test_safeboot(void);
 #define FLEX_APP_N_TEST 19

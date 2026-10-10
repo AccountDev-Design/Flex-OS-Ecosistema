@@ -15,9 +15,9 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 0 | Infraestructura: proyecto, sdkconfig por revisión, particiones provisionales, herramientas | Hecha | `docs/FASE_0_1_INFORME.md` |
 | 1 | Pantalla ST7701 por MIPI-DSI, 2 framebuffers, LVGL DIRECT, GT911, pantalla de prueba | Hecha | `docs/FASE_0_1_INFORME.md` |
 | 2 | Arquitectura base: bus de eventos, buzón de UI, almacenamiento (NVS + LittleFS compatibles), ajustes, monitor del sistema, lógica portable | Hecha | `docs/FASE_2_INFORME.md` |
-| 3 | Interfaz completa en LVGL | En curso (shell: bloqueo, clave, escritorio, caja de apps, recientes, energía, teclado, panel rápido, avisos: banner, Centro de notificaciones y No molestar; apagado completo con deep sleep y filtro de encendido) | `docs/spec/` |
-| 4 | Liquid Glass (3 niveles) | Pendiente | |
-| 5 | Táctil y gestos | Pendiente | |
+| 3 | Interfaz completa en LVGL | En curso (shell: bloqueo, clave, escritorio, caja de apps, recientes, energía, teclado, panel rápido, avisos: banner, Centro de notificaciones y No molestar; apagado completo con deep sleep y filtro de encendido; Modo seguro). Las 19 apps siguen sin migrar (pantalla "Pendiente de migrar") | `docs/spec/` |
+| 4 | Liquid Glass (3 niveles) | Parcial: superficies de vidrio sobre fondo y sobre color liso en uso; bandas visibles y PPA sin medir | `docs/spec/02` |
+| 5 | Táctil y gestos | Parcial: arbitraje antes de LVGL, bordes del sistema, suspensión con dos dedos; falta el veto al teclear y los umbrales de toque de Arduino | `docs/spec/01b` |
 | 6 | Wi-Fi por ESP32-C6 (esp-hosted) | Pendiente | |
 | 7 | Flex Account | Pendiente | |
 | 8 | Flex Cloud | Pendiente | |
@@ -37,8 +37,8 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 |---|---|---|---|---|
 | Home | Escritorio por páginas, widgets, edición | Escritorio LVGL (páginas, dock, widgets), bloqueo, clave, caja de apps, Recientes, panel rápido, avisos (banner + Centro + No molestar); edición del escritorio pendiente | En curso (Fase 3) | NO |
 | Interfaz LVGL | Motor gráfico propio (no se reutiliza) | LVGL 9.6 DIRECT, 2 FB en PSRAM, solo LVGL dibuja (`check_lvgl_only.py`) | Base hecha (Fase 1); pantallas pendientes | NO |
-| Liquid Glass | Desenfoque propio con caché | — | Pendiente (Fase 4) | NO |
-| Táctil | GT911 en el bucle | GT911 en tarea propia, 5 dedos, recuperación del bus | Hecho (Fase 1); gestos pendientes | NO |
+| Liquid Glass | Desenfoque propio con caché | Superficies de vidrio LVGL (fondo desenfocado, tinte adaptativo, luz y borde); bandas visibles | Parcial (Fase 4) | NO |
+| Táctil | GT911 en el bucle | GT911 en tarea propia, 5 dedos, recuperación del bus; arbitraje del sistema antes de LVGL (bordes, suspensión) | Parcial (Fases 1 y 5) | NO |
 | Wi-Fi | esp-hosted (C6) | — | Pendiente (Fase 6) | NO |
 | Flex Account | ES256, claves fijadas | Lógica portable copiada (`FlexAuth`) | Pendiente (Fase 7) | NO |
 | Flex Cloud | Control + streaming | Lógica portable copiada (`CloudCore`) | Pendiente (Fase 8) | NO |
@@ -61,6 +61,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 2 | `lt_v3` dev | 918 864 B | 35,1 % | 21,9 % |
 | 2 | `v3` dev | 921 056 B | 35,1 % | 22,0 % |
 | 3 (en curso: shell, panel rápido, avisos, apagado) | `v3` dev | 1 341 632 B | 51,2 % | 32,0 % |
+| 3 (en curso: + Modo seguro) | `v3` dev | 1 351 200 B | 51,5 % | 32,2 % |
 
 La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la interfaz completa
 (Fase 15). No se ha grabado nada.
@@ -92,6 +93,11 @@ La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la
 | Apagado: Cancelar | Vuelve siempre a Inicio, aunque se viniera de una app (que quedaba viva debajo) | Vuelve a donde se estaba (Inicio o la app delante) | docs/spec/01c §10.8 |
 | Apagado: con "Apagado seguro" | La animación arranca desde la pantalla de la clave | Arranca desde el deslizador (la clave se cierra al acertar) | Visual |
 | Apagado: durante la animación final | El doble toque con dos dedos podía suspender a medias | No se suspende ni se bloquea: la animación termina y duerme | docs/spec/01c §10.5 |
+| Modo seguro: acceso | Entra sin pantalla de bloqueo y ofrece escritorio, Ajustes y Explorador sin clave (3 reinicios anormales provocados = acceso sin PIN) | Toda fila que da acceso pide la clave (una vez por arranque); "Reiniciar normalmente" no | docs/spec/01c §11.6 (riesgo) |
+| Modo seguro: pie de la pantalla | "Un arranque estable limpia el contador solo" (en Modo seguro no ocurre nunca) | "Para salir: Reiniciar normalmente" | docs/spec/01c §11.6 |
+| Modo seguro: qué es anormal | PANIC, INT_WDT, TASK_WDT, WDT, BROWNOUT | Además CPU_LOCKUP y PWR_GLITCH (el P4 los informa) | docs/spec/01c §11.1 |
+| Modo seguro: bloquear | — | Bloquear (p. ej. al despertar con clave) cierra la pantalla; al desbloquear, escritorio limitado con su píldora | Coherencia |
+| Modo seguro: textos | Sin tildes ("minimo", "caches", "fabrica") | Con tildes | Visual |
 | Avisos: texto guardado | `sysNotify` corta el título y el texto en bytes y puede partir una letra con tilde | Se cortan en caracteres UTF-8 (el banner ya lo hacía en Arduino) | docs/spec/01c §6 |
 | Avisos: tarjeta del bloqueo | El título más reciente se dibuja aunque se salga de la tarjeta | Una línea con "..." dentro de la tarjeta | docs/spec/01a §4 |
 | Avisos: Centro | Solo se lee el borde con el dedo moviéndose (igual) y se cierra arrastrando a la derecha (igual) | Igual; los avisos del teléfono vinculado llegarán con Flex Phone (el Centro tiene hoy los del sistema) | docs/spec/01c §6 |

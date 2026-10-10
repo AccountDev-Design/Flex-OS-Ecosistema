@@ -8,6 +8,7 @@
 #include "flex_frame.h"
 #include "flex_glass.h"
 #include "flex_home_model.h"
+#include "flex_safeboot.h"
 #include "flex_storage.h"
 #include "flex_i18n.h"
 #include "flex_icons.h"
@@ -381,8 +382,13 @@ static void launch_cancel(void *ctx)
 
 void flex_app_launch(int id, const lv_area_t *from_icon)
 {
-    if (!flex_app_def(id) || s_state == FLEX_SH_LOCK || s_state == FLEX_SH_AUTH || s_state == FLEX_SH_POWEROFF) {
-        return;   // bloqueado, tecleando una clave o apagando: no se abre nada
+    if (!flex_app_def(id) || s_state == FLEX_SH_LOCK || s_state == FLEX_SH_AUTH || s_state == FLEX_SH_POWEROFF ||
+        s_state == FLEX_SH_SAFE) {
+        return;   // bloqueado, tecleando una clave, apagando o en la pantalla de Modo seguro
+    }
+    if (!flex_safe_app_allowed(id)) {
+        flex_safe_deny_app(id);   // Modo seguro: solo la lista blanca
+        return;
     }
     bool locked = id >= 0 && id < 32 && ((g_home.lock >> id) & 1u);
     if (locked && flex_auth_required()) {
@@ -421,14 +427,15 @@ void flex_sys_home(void)
     }
     if (s_state == FLEX_SH_APP) {
         flex_app_close();
-    } else if (s_state != FLEX_SH_LOCK && s_state != FLEX_SH_AUTH && s_state != FLEX_SH_POWEROFF) {
+    } else if (s_state != FLEX_SH_LOCK && s_state != FLEX_SH_AUTH && s_state != FLEX_SH_POWEROFF &&
+               s_state != FLEX_SH_SAFE) {
         flex_shell_show_home();
     }
 }
 
 void flex_sys_recents(void)
 {
-    if (s_state == FLEX_SH_LOCK || s_state == FLEX_SH_AUTH || s_state == FLEX_SH_POWEROFF) {
+    if (s_state == FLEX_SH_LOCK || s_state == FLEX_SH_AUTH || s_state == FLEX_SH_POWEROFF || s_state == FLEX_SH_SAFE) {
         return;
     }
     if (s_state == FLEX_SH_OVERLAY && s_overlay && s_overlay->on_recents) {
@@ -447,6 +454,11 @@ void flex_sys_recents(void)
 int flex_app_current(void)
 {
     return s_state == FLEX_SH_APP ? s_fg : -1;
+}
+
+int flex_shell_fg_app(void)
+{
+    return s_fg;
 }
 
 bool flex_app_is_open(int id)
@@ -502,6 +514,7 @@ void flex_shell_lock(void)
     }
     flex_auth_abort();   // una clave a medias no sobrevive a bloquear
     flex_poweroff_close_now();
+    flex_safe_close_now();   // al desbloquear: escritorio limitado (con su pildora)
     flex_qs_close_now();
     flex_notif_center_close_now();
     flex_drawer_close_now();
@@ -528,6 +541,22 @@ void flex_shell_auth_begin(void)
 {
     s_state = FLEX_SH_AUTH;
     flex_navbar_set_ctx(FLEX_NAV_HIDDEN);
+}
+
+void flex_shell_safe_begin(void)
+{
+    flex_qs_close_now();
+    flex_notif_center_close_now();
+    s_state = FLEX_SH_SAFE;
+    flex_navbar_set_ctx(FLEX_NAV_HIDDEN);
+}
+
+void flex_shell_safe_end(void)
+{
+    if (s_state == FLEX_SH_SAFE || s_state == FLEX_SH_AUTH) {
+        flex_home_refresh();   // la pildora "Modo seguro"
+        flex_shell_show_home();
+    }
 }
 
 static flex_shell_state_t s_poff_prev = FLEX_SH_HOME;
@@ -631,7 +660,11 @@ void flex_shell_start(void)
     flex_power_init();
     flex_qs_init();
     flex_notif_init();
-    flex_shell_lock();
+    if (flex_safe_mode()) {
+        flex_safe_open();   // Modo seguro: directo a su pantalla, sin bloqueo (las filas piden la clave)
+    } else {
+        flex_shell_lock();
+    }
 }
 
 bool flex_shell_transition_active(void)

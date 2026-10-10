@@ -7,6 +7,7 @@ int main(void)
     test_flex_kv();
     test_flex_kv_threads();
     test_fs_path();
+    test_fs_wipe();
     test_flip_rows();
     test_wallpaper();
     test_glass();
@@ -19,6 +20,7 @@ int main(void)
     test_qs();
     test_notif();
     test_poweroff();
+    test_safeboot();
     printf("%s: %d comprobaciones, %d fallos\n", g_fails ? "FALLO" : "OK", g_checks, g_fails);
     return g_fails ? 1 : 0;
 }

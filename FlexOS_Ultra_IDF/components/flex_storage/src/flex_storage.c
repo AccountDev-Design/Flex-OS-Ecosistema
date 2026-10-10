@@ -37,10 +37,10 @@ static const char *TAG = "flex.storage";
 
 // Espacios de NVS que se cargan en la cache al arrancar (los de la version
 // Arduino). Cada modulo anade el suyo al migrarse: "flexqs" es el panel rapido.
-static const char *const k_namespaces[] = {FLEX_NVS_NS, "flexcare", "flexphone", "flexqs"};
+static const char *const k_namespaces[] = {FLEX_NVS_NS, "flexcare", "flexphone", "flexqs", "flexsafe"};
 
 typedef enum {
-    JOB_WRITE, JOB_REMOVE, JOB_RENAME, JOB_MKDIR, JOB_READ, JOB_FLUSH, JOB_NVS_ERASE, JOB_FS_FORMAT,
+    JOB_WRITE, JOB_REMOVE, JOB_RENAME, JOB_MKDIR, JOB_WIPE_DIR, JOB_READ, JOB_FLUSH, JOB_NVS_ERASE, JOB_FS_FORMAT,
 } job_op_t;
 
 typedef struct {
@@ -60,7 +60,7 @@ typedef struct {
     esp_err_t err;
     uint8_t *data;
     size_t len;
-    bool is_read;
+    uint8_t kind;   // 0 hecho, 1 lectura, 2 cuenta (vaciar carpeta)
 } reply_t;
 
 static flex_kv_t s_kv;
@@ -444,8 +444,10 @@ bool flex_fs_exists(const char *rel)
 static void reply_in_ui(void *arg)
 {
     reply_t *r = arg;
-    if (r->is_read) {
+    if (r->kind == 1) {
         ((flex_fs_read_cb_t)r->cb)(r->err, r->data, r->len, r->user);
+    } else if (r->kind == 2) {
+        ((flex_fs_count_cb_t)r->cb)(r->err, r->len, r->user);
     } else {
         ((flex_fs_done_cb_t)r->cb)(r->err, r->user);
     }
@@ -460,7 +462,8 @@ static void reply(job_t *job, esp_err_t err, uint8_t *data, size_t len)
     }
     reply_t *r = malloc(sizeof(*r));
     if (r) {
-        *r = (reply_t){job->cb, job->user, err, data, len, job->op == JOB_READ};
+        *r = (reply_t){job->cb, job->user, err, data, len,
+                       (uint8_t)(job->op == JOB_READ ? 1 : job->op == JOB_WIPE_DIR ? 2 : 0)};
         // Quien pidio el trabajo espera la respuesta (p. ej. una pantalla con
         // "Guardando..."): si el buzon esta lleno se reintenta un rato, esta
         // tarea no es la de UI y puede esperar.
@@ -509,6 +512,18 @@ static void run_job(job_t *job)
                   ? ((mkdirs_for(a) == ESP_OK && (mkdir(a, 0775) == 0 || errno == EEXIST)) ? ESP_OK : ESP_FAIL)
                   : ESP_ERR_INVALID_ARG;
         break;
+    case JOB_WIPE_DIR: {
+        bool failed = false;
+        int n = flex_fs_abs(job->path, a, sizeof(a)) ? flex_fs_wipe_tree(a, &failed) : (failed = true, 0);
+        err = failed ? ESP_FAIL : ESP_OK;
+        fs_info_refresh(false);
+        if (err != ESP_OK) {
+            status_update(st_write_error, NULL);
+            ESP_LOGW(TAG, "vaciar '%s': %d borrados, alguno no se pudo", job->path, n);
+        }
+        reply(job, err, NULL, (size_t)n);
+        return;
+    }
     case JOB_READ: {
         uint8_t *data = NULL;
         size_t len = 0;
@@ -659,6 +674,15 @@ esp_err_t flex_fs_rename_async(const char *from, const char *to, flex_fs_done_cb
     }
     strlcpy(job->path2, to, sizeof(job->path2));
     return enqueue(job);
+}
+
+esp_err_t flex_fs_wipe_dir_async(const char *path, flex_fs_count_cb_t cb, void *user)
+{
+    if (!path || strcmp(path, "/") == 0) {
+        return ESP_ERR_INVALID_ARG;   // nunca la raiz entera por este camino
+    }
+    job_t *job = new_job(JOB_WIPE_DIR, path, (void *)cb, user);
+    return job ? enqueue(job) : ESP_ERR_INVALID_ARG;
 }
 
 esp_err_t flex_fs_mkdir_async(const char *path, flex_fs_done_cb_t cb, void *user)

@@ -23,6 +23,7 @@ typedef enum {
     FLEX_SH_OVERLAY,      // caja de apps, Recientes, personalizar... (los gestionan sus modulos)
     FLEX_SH_AUTH,         // pantalla de la clave (flex_auth.c)
     FLEX_SH_POWEROFF,     // "Apagar FlexOS?" y la animacion final (flex_poweroff_ui.c)
+    FLEX_SH_SAFE,         // pantalla de Modo seguro (flex_safe_ui.c)
 } flex_shell_state_t;
 
 // Construye el shell (tras flex_theme_init, flex_wallmgr_init, flex_i18n_init)
@@ -30,6 +31,7 @@ typedef enum {
 void flex_shell_start(void);
 flex_shell_state_t flex_shell_state(void);
 lv_obj_t *flex_shell_screen(void);
+int flex_shell_fg_app(void);   // app en primer plano aunque algo la tape (-1: ninguna). Pruebas.
 
 void flex_shell_show_home(void);      // estado Inicio (sin animacion)
 void flex_shell_lock(void);           // bloquear ahora (inactividad, boton)
@@ -120,6 +122,19 @@ bool flex_poweroff_running(void);     // animacion final en marcha: ya no tiene 
 int  flex_poweroff_knob(void);        // 0..304 (pruebas)
 void flex_shell_poweroff_begin(void); // estado POWEROFF, sin barra (recuerda de donde se venia)
 void flex_shell_poweroff_end(void);   // vuelve a Inicio o a la app que estaba delante
+
+// Modo seguro (flex_safe_ui.c; la decision de arranque esta en flex_system/flex_safeboot)
+void flex_safe_open(void);            // la pantalla (arranque en Modo seguro o pildora del escritorio)
+void flex_safe_close_now(void);       // a Inicio (limitado)
+bool flex_safe_screen_active(void);
+bool flex_safe_app_allowed(int id);   // lista blanca: Ajustes, Almacenamiento, Reloj, Calculadora
+void flex_safe_deny_app(int id);      // "No disponible en Modo seguro" (1,8 s)
+bool flex_safe_toast_visible(void);
+void flex_shell_safe_begin(void);
+void flex_shell_safe_end(void);
+// Restablecimiento de datos de fabrica (flex_factory_ui.c)
+bool flex_factory_reset_available(void);
+void flex_factory_reset_open(bool from_safe);
 
 void flex_drawer_open(void);
 void flex_drawer_close_now(void);     // sin animacion (bloquear, suspender)

@@ -6,6 +6,7 @@
 #include "flex_i2c.h"
 #include "flex_passcode.h"
 #include "flex_poweroff.h"
+#include "flex_safeboot.h"
 #include "flex_storage.h"
 #include "flex_system.h"
 #include "flex_touch.h"
@@ -32,6 +33,11 @@ void app_main(void)
     }
 
     flex_poweroff_boot_note();
+
+    // Modo seguro: 3 reinicios anormales seguidos (crash, watchdog, brownout).
+    // Hoy no hay servicios pesados que dejar fuera (Wi-Fi, nube, OTA llegan en
+    // sus fases y consultaran flex_safe_mode()); la interfaz entra en su pantalla.
+    flex_safeboot_eval();
 
     // Clave del bloqueo guardada en texto claro por versiones antiguas -> hash
     // con sal, en tres pasos (escribir, comprobar, y solo entonces borrar la

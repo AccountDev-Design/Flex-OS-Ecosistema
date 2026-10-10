@@ -21,6 +21,7 @@
 #include "flex_icons.h"
 #include "flex_inbox.h"
 #include "flex_notif_model.h"
+#include "flex_safeboot.h"
 #include "flex_shell.h"
 #include "flex_storage.h"
 #include "flex_theme.h"
@@ -434,6 +435,15 @@ static void lock_refresh_if_visible(void)
 static void post_ui(void *arg)
 {
     post_t *p = arg;
+    if (flex_safe_mode()) {
+        // Modo seguro: sin banner (Recovery.h). Lo del sistema queda en el historial.
+        if (p->kind == 0) {
+            flex_ntf_push(&s_hist, p->type, p->title, p->sub, lv_tick_get());
+            lock_refresh_if_visible();
+        }
+        free(p);
+        return;
+    }
     if (p->kind == 1 && flex_shell_state() == FLEX_SH_APP) {
         flex_bq_msg_t m;
         flex_bq_msg_init(&m, FLEX_BQ_SRC_SYSTEM, 0, p->app, p->title, p->sub, FLEX_PRI_DEFAULT);
