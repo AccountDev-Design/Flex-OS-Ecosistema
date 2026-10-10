@@ -382,6 +382,14 @@ static void build_grid(void)
 // ---- menu contextual (pulsacion larga) ---------------------------------------------
 enum { CTX_OPEN = 0, CTX_HOME, CTX_HIDE, CTX_INFO, CTX_ROWS };
 
+// Hay sitio en Inicio: un hueco o una pagina por crear (drwFavToggle crea la
+// pagina: "anadir a Inicio no puede fallar mientras queden paginas"). La misma
+// condicion para el texto de la fila y para activarla.
+static bool home_room(void)
+{
+    return flex_home_first_free() >= 0 || g_home.page_n < FLEX_HOME_PAGES_MAX;
+}
+
 static const char *ctx_label(int i)
 {
     int id = D.ctx_app;
@@ -391,7 +399,7 @@ static const char *ctx_label(int i)
         if (flex_app_is_fav(id)) {
             return "Quitar de inicio";
         }
-        return flex_home_first_free() >= 0 ? "A\xC3\xB1" "adir a inicio" : "Inicio completo";
+        return home_room() ? "A\xC3\xB1" "adir a inicio" : "Inicio completo";
     case CTX_HIDE: return flex_app_is_hidden(id) ? "Mostrar" : "Ocultar";
     default: return "Informaci\xC3\xB3n";
     }
@@ -402,8 +410,7 @@ static bool ctx_enabled(int i)
     int id = D.ctx_app;
     if (i == CTX_HOME) {
         // "Inicio completo": sin hueco Y sin paginas por crear
-        bool room = flex_home_first_free() >= 0 || g_home.page_n < FLEX_HOME_PAGES_MAX;
-        return flex_app_is_fav(id) || (room && !flex_app_is_hidden(id));
+        return flex_app_is_fav(id) || (home_room() && !flex_app_is_hidden(id));
     }
     if (i == CTX_HIDE) {
         return flex_app_can_hide(id);   // Ajustes no se puede ocultar (fila atenuada)

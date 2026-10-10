@@ -29,6 +29,7 @@
 void sim_safe_set(int reason, int saved_fails);
 void sim_safe_clear(void);
 int sim_reboots(void);
+void sim_safe_exit_fail(bool on);
 int sim_fs_wipes(const char **last);
 
 #define ROW_Y(i) (292 + (i) * 66 + 29)
@@ -186,6 +187,14 @@ bool scene_safe_run(void)
     flex_safe_open();
     sim_run(100);
     int rb = sim_reboots();
+    // sin poder grabar el contador no se reinicia (volveria al Modo seguro): se avisa
+    sim_safe_exit_fail(true);
+    sim_tap(240, ROW_Y(0));
+    sim_run(100);
+    CHK(sim_reboots() == rb && flex_safe_toast_visible());
+    sim_shot("safe_06_no_reinicia");
+    sim_safe_exit_fail(false);
+    sim_run(2000);
     sim_tap(240, ROW_Y(0));
     sim_run(100);
     CHK(sim_reboots() == rb + 1);

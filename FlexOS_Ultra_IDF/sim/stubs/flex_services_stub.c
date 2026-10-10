@@ -265,18 +265,33 @@ int sim_deep_sleeps(void) { return s_deep_sleeps; }
 
 // ---- Modo seguro: el arranque lo decide la escena ---------------------------------------
 #include "flex_safeboot.h"
+#include "lvgl.h"
 static flex_safe_eval_t s_safe;
 static int s_reboots;
 void flex_safeboot_eval(void) {}
 bool flex_safe_mode(void) { return s_safe.safe; }
 int flex_safe_fails(void) { return s_safe.fails; }
 int flex_safe_cause(void) { return s_safe.cause; }
-void flex_safe_exit_and_reboot(void)
+static bool s_exit_fail;
+static void (*s_exit_cb)(void);
+static void exit_fail_async(void *arg)
+{
+    (void)arg;
+    if (s_exit_cb) s_exit_cb();
+}
+bool flex_safe_exit_and_reboot(void (*on_fail)(void))
 {
     s_safe.fails = 0;
     flex_kvs_set_i32("flexsafe", "fails", 0);
+    if (s_exit_fail) {
+        s_exit_cb = on_fail;
+        lv_async_call(exit_fail_async, NULL);   // en el firmware llega por el buzon de la UI
+        return true;
+    }
     s_reboots++;
+    return true;
 }
+void sim_safe_exit_fail(bool on) { s_exit_fail = on; }
 void sim_safe_set(int reason, int saved_fails) { s_safe = flex_safe_eval(reason, saved_fails, reason, true); }
 void sim_safe_clear(void) { s_safe = (flex_safe_eval_t){0}; }
 int sim_reboots(void) { return s_reboots; }
@@ -396,3 +411,10 @@ int sim_reset_runs(int stage) { return s_fr_runs[stage]; }
 int sim_reset_reboots(void) { return s_fr_reboots; }
 const flex_fr_marker_t *sim_reset_disk(void) { return &s_fr_disk; }
 void sim_reset_set_disk(const flex_fr_marker_t *m) { s_fr_disk = *m; }
+
+// ---- Cronometro de la app Reloj (aun sin migrar): lo pone la escena de widgets ----------
+static uint32_t s_cro_ms;
+static bool s_cro_run;
+uint32_t flex_crono_elapsed_ms(void) { return s_cro_ms; }
+bool flex_crono_running(void) { return s_cro_run; }
+void sim_crono_set(uint32_t ms, bool running) { s_cro_ms = ms; s_cro_run = running; }

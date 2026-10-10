@@ -34,12 +34,13 @@ source ~/esp/env.sh && tools/build.sh --rev v3   # firmware (no graba nada)
 | Restablecimiento de fábrica: marcador transaccional, etapas en exclusiva en el escritor, asistente de 5 vistas, reanudación tras corte | `flex_system/flex_reset*`, `flex_storage` (exclusivo), `flex_factory_ui.c` | host (15 cortes) + escena `fabrica` |
 | Primera configuración (OOBE): idioma en vivo, nombre del equipo con su teclado, fin en el bloqueo; borra el marcador de un restablecimiento terminado. Falta el paso de Flex Account (Fases 6–7) | `flex_oobe_*.c` | host (20 000 teclas frente a Arduino) + escena `oobe` |
 | Avisos: no salen encima del apagado, el restablecimiento ni la primera configuración (como `fpbScreenAllows`); esperan en la cola | `flex_notif.c` | escenas `fabrica` y `oobe` (mutación) |
+| Revisión 5 (memoria, fidelidad, arranque; las tres dimensiones que nunca se habían ejecutado): memoria sin hallazgos; 6 hallazgos verificados y corregidos: contador del Modo seguro grabado antes de seguir (alta), "Reiniciar normalmente" sin reinicio a ciegas, desliz del bloqueo solo vertical, caja no se abre desde la barra de estado, fila "Añadir a inicio" coherente, widgets como Arduino | `flex_safeboot.c`, `flex_lock.c`, `flex_home*.c`, `flex_drawer.c` | host `boot_fw` (código de arranque real sobre NVS falsa) + escenas `regresiones`, `seguro`, `widgets` (mutación de cada uno) |
+| Widgets del escritorio como `wgDrawCell`: esfera con agujas, rótulos, barra de almacenamiento, antena, Clima de una fila con su material; datos en su sitio cada 2 s; solo Cámara, Clima y Calendario se tocan | `flex_home_widgets.c` | escena `widgets` |
 
 ## En curso / pendiente (orden de trabajo)
 
-1. Revisión 4: sus 10 hallazgos verificados y corregidos (escena `regresiones`, una
-   comprobación por hallazgo con su mutación). Dimensiones nunca ejecutadas:
-   memoria, fidelidad a Arduino, arranque/pruebas.
+1. Revisiones 4 y 5 cerradas (todas las dimensiones ejecutadas al menos una vez). La
+   siguiente revisión, al cerrar el marco de apps y las primeras apps.
 2. Fase 3, shell restante: sesiones de app (§14),
    memoria y "Optimizar" (§17), edición/personalización del escritorio y menús,
    kiosco, arranque (splash/banda forense).
@@ -58,14 +59,15 @@ source ~/esp/env.sh && tools/build.sh --rev v3   # firmware (no graba nada)
 * **Ninguna prueba en la placa**: la primera prueba de humo de las Fases 0–2 (con
   autorización expresa del usuario para grabar) es lo que más riesgo quita.
 * Revisiones multiagente: los flujos grandes mueren por el límite de uso (revisión 3:
-  23/24 agentes; revisión 4: 5/7). Las dimensiones "memoria", "fidelidad" y
-  "arranque/pruebas" no se han ejecutado nunca: lanzarlas pequeñas (2–3 agentes).
+  23/24 agentes; revisión 4: 5/7). La revisión 5 (3 agentes) terminó entera: seguir
+  con flujos de 2–3 agentes.
 
 ## Estimación del trabajo restante (actualizar al cerrar cada bloque)
 
-Implementación (sin validación en la placa): optimista ≈190 h, realista ≈280 h,
-conservador ≈420 h de trabajo efectivo. Validación en la placa aparte (≈20–40 h
+Implementación (sin validación en la placa): optimista ≈180 h, realista ≈270 h,
+conservador ≈405 h de trabajo efectivo (desde la auditoría del 10-10 se han cerrado
+la primera configuración, la revisión 5 y los widgets: ≈10 h del escenario realista). Validación en la placa aparte (≈20–40 h
 conjuntas, depende de grabar con autorización). Base: tamaño del código Arduino que
 queda frente al ritmo medido en las Fases 0–3 (ver el informe de auditoría del 10-10).
 
-Última actualización: primera configuración (Fase 3).
+Última actualización: revisión 5 y widgets del escritorio (Fase 3).

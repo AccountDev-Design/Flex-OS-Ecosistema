@@ -117,12 +117,15 @@ static void text_at(lv_obj_t *p, const char *s, const lv_font_t *f, lv_color_t c
 }
 
 static void build(void);
+static void reboot_failed(void);
 
 static void run_row(int i)
 {
     switch (i) {
     case R_REBOOT:
-        flex_safe_exit_and_reboot();
+        if (!flex_safe_exit_and_reboot(reboot_failed)) {
+            reboot_failed();
+        }
         return;
     case R_APPS3RD:
         flex_cfg_set_i32("apps3rd", 0);
@@ -281,7 +284,7 @@ static void toast_off(lv_timer_t *t)
     }
 }
 
-void flex_safe_deny_app(int id)
+static void toast(const char *title, const char *sub)
 {
     if (S.toast_tmr) {
         lv_timer_delete(S.toast_tmr);   // un aviso nuevo reemplaza al anterior
@@ -289,12 +292,23 @@ void flex_safe_deny_app(int id)
     toast_off(NULL);
     S.toast = card(lv_layer_top(), 28, 308, 424, 60, 16, lv_color_make(24, 26, 36));
     lv_obj_set_style_bg_opa(S.toast, 240, 0);
-    lv_obj_t *l = flex_label(S.toast, "No disponible en Modo seguro", FLEX_FONT_S2, lv_color_make(240, 244, 252));
+    lv_obj_t *l = flex_label(S.toast, title, FLEX_FONT_S2, lv_color_make(240, 244, 252));
     flex_label_cap_center(l, 212, 10);
-    l = flex_label(S.toast, flex_app_name(id), FLEX_FONT_S1, lv_color_make(170, 178, 196));
+    l = flex_label(S.toast, sub, FLEX_FONT_S1, lv_color_make(170, 178, 196));
     flex_label_cap_center(l, 212, 34);
     S.toast_tmr = lv_timer_create(toast_off, 1800, NULL);
     lv_timer_set_repeat_count(S.toast_tmr, 1);
+}
+
+void flex_safe_deny_app(int id)
+{
+    toast("No disponible en Modo seguro", flex_app_name(id));
+}
+
+// No se pudo grabar el contador: no se reinicia (volveria en silencio al Modo seguro)
+static void reboot_failed(void)
+{
+    toast("No se pudo reiniciar", "No se guardaron los ajustes: inténtalo de nuevo");
 }
 
 bool flex_safe_toast_visible(void)

@@ -64,6 +64,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 3 (en curso: + Modo seguro) | `v3` dev | 1 351 200 B | 51,5 % | 32,2 % |
 | 3 (en curso: + restablecimiento de fábrica) | `v3` dev | 1 369 152 B | 52,2 % | 32,6 % |
 | 3 (en curso: + primera configuración) | `v3` dev | 1 372 432 B | 52,4 % | 32,7 % |
+| 3 (en curso: + revisión 5, widgets como Arduino) | `v3` dev | 1 377 584 B | 52,6 % | 32,8 % |
 
 La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la interfaz completa
 (Fase 15). No se ha grabado nada.
@@ -100,6 +101,9 @@ La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la
 | Modo seguro: qué es anormal | PANIC, INT_WDT, TASK_WDT, WDT, BROWNOUT | Además CPU_LOCKUP y PWR_GLITCH (el P4 los informa) | docs/spec/01c §11.1 |
 | Modo seguro: bloquear | — | Bloquear (p. ej. al despertar con clave) cierra la pantalla; al desbloquear, escritorio limitado con su píldora | Coherencia |
 | Modo seguro: textos | Sin tildes ("minimo", "caches", "fabrica") | Con tildes | Visual |
+| Modo seguro: "Reiniciar normalmente" sin poder grabar | Escritura síncrona y reinicio | Se graba fuera de la interfaz (puede esperar a "Limpiar cachés" en la cola del escritor); si no se puede grabar NO reinicia (volvería en silencio al Modo seguro) y avisa "No se pudo reiniciar" | Revisión adversarial 5 |
+| Caja de apps: "Añadir a inicio" con las páginas llenas | La fila dice "Inicio completo" y está atenuada, aunque la acción (`drwFavToggle`) crearía otra página | "Añadir a inicio" activa mientras queden páginas por crear (crea la página); "Inicio completo" solo con las 5 páginas llenas | Revisión adversarial 5 (coherencia con `drwFavToggle`) |
+| Widgets: agujas del reloj analógico | Trazo con antialias de 2,4 px (hora) y 1,8 px (minutos) | 2 px las dos (LVGL usa anchos enteros); la hora se distingue por la longitud, como en Arduino | Visual |
 | Candado de app pedido desde otra app (rueda del panel rápido) | Cancelar la clave llevaba a Inicio | Vuelve a la app que estaba delante (ir a Inicio la dejaba huérfana y Recientes se trababa) | Revisión adversarial 4 |
 | Umbrales de toque | Toque = < 16 px y < 550 ms | Igual, aplicado al indev de LVGL (por defecto LVGL usa 10 px y 400 ms) | docs/spec/01b |
 | Restablecimiento: qué se borra de la NVS | Solo los espacios de nombres conocidos: quedaban el vínculo con el teléfono, Flex Storage, Device Care, robo, audio, clima, navegador (un aparato "restablecido" seguía emparejado) | TODOS los espacios de nombres salvo el marcador `flexreset` (incluidos los del sistema: credenciales Wi-Fi del controlador, calibración del PHY); el aviso lo dice ("Vínculo con el teléfono y Flex Storage") | docs/spec/01c §13.5 (riesgo de privacidad) |

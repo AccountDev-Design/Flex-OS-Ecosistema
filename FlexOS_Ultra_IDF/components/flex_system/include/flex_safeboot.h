@@ -50,8 +50,11 @@ void flex_safeboot_eval(void);
 bool flex_safe_mode(void);
 int  flex_safe_fails(void);
 int  flex_safe_cause(void);
-// "Reiniciar normalmente": contador a 0 (guardado sincronico) y reinicio.
-void flex_safe_exit_and_reboot(void);
+// "Reiniciar normalmente": contador a 0, grabado y reinicio, en una tarea propia
+// (puede esperar en la cola del escritor a "Limpiar caches"). Si no se puede
+// grabar NO reinicia y llama a on_fail en la tarea de UI. false si no se pudo
+// lanzar (on_fail no se llama).
+bool flex_safe_exit_and_reboot(void (*on_fail)(void));
 
 #ifdef __cplusplus
 }

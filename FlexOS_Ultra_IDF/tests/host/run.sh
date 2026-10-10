@@ -123,6 +123,16 @@ build tsan -fsanitize=thread
 # (FlexOS_Ultra/FlexOS_Passcode.cpp, solo lectura) sobre la MISMA NVS en memoria
 # (el doble de Preferences del arnes Arduino): lo que guarda una lo abre la otra.
 SAN=(-fsanitize=address,undefined -fno-sanitize-recover=all)
+
+# Codigo de ARRANQUE del firmware tal cual (no el modelo), sobre una NVS falsa
+# que separa la cache de ajustes de lo grabado: un corte entre arranques solo
+# conserva lo grabado.
+FWINC=(-Ifw/include -I$ROOT/components/flex_system/include -I$ROOT/components/flex_storage/include
+       -I$ROOT/components/flex_core/include -I../../sim/stubs/include)
+cc -std=gnu11 "${CFLAGS[@]}" "${SAN[@]}" "${FWINC[@]}" test_boot_fw.c \
+    $ROOT/components/flex_system/src/flex_safeboot.c $ROOT/components/flex_system/src/flex_safeboot_model.c \
+    -o "$OUT/boot_fw_asan"
+"$OUT/boot_fw_asan"
 PINC=(-I$ROOT/components/flex_security/include -I$ROOT/components/flex_storage/include -I../../sim/stubs/include)
 cc -std=gnu11 "${CFLAGS[@]}" "${SAN[@]}" -DFLEX_HOST_TEST "${PINC[@]}" \
     -c $ROOT/components/flex_security/src/flex_passcode.c -o "$OUT/flex_passcode_asan.o"

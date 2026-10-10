@@ -25,7 +25,7 @@
 #define ANIM_MS       200
 
 static lv_obj_t *s_root, *s_wall, *s_glass, *s_clock, *s_date, *s_cards;
-static int32_t s_y0, s_off;
+static int32_t s_x0, s_y0, s_off;
 static bool s_dropping;   // cayendo desde arriba (bloqueo por inactividad)
 static bool s_verify_started;
 
@@ -124,6 +124,7 @@ static void touch_cb(lv_event_t *e)
             // sin clave, un toque quieto contaba la caida como desliz y desbloqueaba.
             set_off(NULL, 0);
         }
+        s_x0 = p.x;
         s_y0 = p.y + s_off;
         s_verify_started = false;
     } else if (code == LV_EVENT_PRESSING) {
@@ -140,14 +141,18 @@ static void touch_cb(lv_event_t *e)
         set_off(NULL, off);   // el bloqueo sube como un telon y deja ver el escritorio
     } else if (code == LV_EVENT_RELEASED) {
         int32_t dy = s_y0 - p.y;
+        int32_t adx = p.x > s_x0 ? p.x - s_x0 : s_x0 - p.x;
+        // swipeUp de Arduino (tDoRelease): mas vertical que horizontal; un roce de
+        // lado (en el bolsillo) no desbloquea
+        bool swipe_up = dy > SWIPE_PX && dy >= adx;
         if (need_pin) {
-            if (dy > SWIPE_PX && !s_verify_started) {
+            if (swipe_up && !s_verify_started) {
                 s_verify_started = true;
                 verify_open();
             }
             return;
         }
-        if (s_off > UNLOCK_PX || dy > SWIPE_PX) {
+        if (s_off > UNLOCK_PX || swipe_up) {
             animate_to(800, true);
         } else {
             animate_to(0, false);

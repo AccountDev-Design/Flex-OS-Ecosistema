@@ -8,16 +8,14 @@
 #include <stdio.h>
 #include <string.h>
 #include "flex_app.h"
-#include "flex_clock.h"
 #include "flex_frame.h"
 #include "flex_glass.h"
 #include "flex_home_model.h"
+#include "flex_home_wg.h"
 #include "flex_i18n.h"
 #include "flex_safeboot.h"
 #include "flex_icons.h"
 #include "flex_shell.h"
-#include "flex_storage.h"
-#include "flex_system.h"
 #include "flex_theme.h"
 #include "flex_touch_lvgl.h"
 #include "flex_wallmgr.h"
@@ -33,152 +31,6 @@ static int32_t s_band_top, s_band_bot;
 // Ganchos opcionales (otros modulos del shell)
 __attribute__((weak)) void flex_home_ctx_menu(int app_id, const lv_area_t *icon) { (void)app_id; (void)icon; }
 __attribute__((weak)) void flex_home_customize_open(void) {}
-
-// ---- widgets -------------------------------------------------------------------------
-static void wg_label(lv_obj_t *p, const char *txt, const lv_font_t *f, lv_color_t c, int32_t x, int32_t cap_y)
-{
-    lv_obj_t *l = flex_label(p, txt, f, c);
-    lv_obj_set_x(l, x);
-    flex_label_cap_y(l, cap_y);
-}
-
-static void wg_click_cb(lv_event_t *e)
-{
-    if (flex_shell_state() != FLEX_SH_HOME) {
-        return;   // durante la apertura de una app o con la caja subiendo, el escritorio no manda
-    }
-    int app = (int)(intptr_t)lv_event_get_user_data(e);
-    lv_area_t a;
-    lv_obj_get_coords(lv_event_get_target_obj(e), &a);
-    flex_app_launch(app, &a);   // con candado pide la clave antes
-}
-
-static void build_widget(lv_obj_t *page, const flex_home_wg_t *w)
-{
-    int x, y, ww, hh;
-    flex_home_wg_rect(w, &x, &y, &ww, &hh);
-    const flex_palette_t *t = flex_th();
-    lv_obj_t *c = flex_box(page);
-    lv_obj_set_pos(c, x, y - s_band_top);
-    lv_obj_set_size(c, ww, hh);
-    lv_obj_set_style_radius(c, 20, 0);
-    // wgDrawCell: Vidrio GLASS2 / Plano SURF a225; texto con onColor del material
-    flex_surface(c, FLEX_SURF_ELEVATED, FLEX_BD_HOME);
-    flex_surface_set_flat(c, t->surf, 225);
-    lv_color_t base = flex_look()->glass ? t->glass2 : t->surf;
-    lv_color_t fg = flex_on_color_lv(base), fg2 = lv_color_mix(base, fg, 96);
-    char buf[64];
-    struct tm tm;
-    flex_clock_now(&tm);
-    switch (w->type) {
-    case FLEX_WG_CLOCK:
-    case FLEX_WG_CLOCK_A:
-        flex_clock_str_bar(buf, sizeof(buf));
-        wg_label(c, buf, hh >= 90 ? FLEX_FONT_S5 : FLEX_FONT_S4, fg, 16, 14);
-        flex_date_short(buf, sizeof(buf), tm.tm_wday, tm.tm_mday, tm.tm_mon + 1);
-        wg_label(c, buf, FLEX_FONT_S1, fg2, 16, hh - 22);
-        break;
-    case FLEX_WG_DATE:
-        flex_date_long(buf, sizeof(buf), tm.tm_wday, tm.tm_mday, tm.tm_mon + 1);
-        wg_label(c, buf, FLEX_FONT_S2, fg, 16, hh / 2 - 6);
-        break;
-    case FLEX_WG_WIFI: {
-        lv_obj_t *g = flex_glyph_create(c, FLEX_GLYPH_WIFI, 28, 28);
-        lv_obj_set_pos(g, 14, hh / 2 - 14);
-        lv_obj_set_style_text_color(g, fg, 0);
-        flex_glyph_set(g, FLEX_GLYPH_WIFI, -1);
-        wg_label(c, "Sin conexi\xC3\xB3n", FLEX_FONT_S1, fg2, 50, hh / 2 - 4);
-        break;
-    }
-    case FLEX_WG_MEM: {
-        static flex_sys_snapshot_t snap;   // grande: no en la pila
-        flex_system_get(&snap);
-        snprintf(buf, sizeof(buf), "PSRAM libre %u MB", (unsigned)(snap.heap_psram_free >> 20));
-        wg_label(c, "Memoria", FLEX_FONT_S2, fg, 16, 14);
-        wg_label(c, buf, FLEX_FONT_S1, fg2, 16, 40);
-        break;
-    }
-    case FLEX_WG_STORAGE: {
-        flex_storage_status_t st;
-        flex_storage_get_status(&st);
-        if (st.fs_mounted && st.fs_total) {
-            snprintf(buf, sizeof(buf), "%u%% usado de %u MB", (unsigned)(st.fs_used * 100 / st.fs_total),
-                     (unsigned)(st.fs_total >> 20));
-        } else {
-            snprintf(buf, sizeof(buf), "No disponible");
-        }
-        wg_label(c, "Almacenamiento", FLEX_FONT_S2, fg, 16, 14);
-        wg_label(c, buf, FLEX_FONT_S1, fg2, 16, 40);
-        break;
-    }
-    case FLEX_WG_CRONO:
-        wg_label(c, flex_t(FLEX_S_CRN_STOPW), FLEX_FONT_S2, fg, 16, 14);
-        wg_label(c, "00:00", FLEX_FONT_S3, fg, 16, 38);
-        lv_obj_add_event_cb(c, wg_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)IC_RELOJ);
-        break;
-    case FLEX_WG_CAM: {
-        lv_obj_t *ic = flex_app_icon_create(c, IC_CAMARA, 40, FLEX_BD_HOME);
-        lv_obj_align(ic, LV_ALIGN_CENTER, 0, 0);
-        lv_obj_set_clickable(ic, false);
-        lv_obj_add_event_cb(c, wg_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)IC_CAMARA);
-        break;
-    }
-    case FLEX_WG_CLIMA:
-        wg_label(c, flex_t(FLEX_S_WEATHER), FLEX_FONT_S2, fg, 16, 14);
-        wg_label(c, "Sin datos meteorol\xC3\xB3gicos", FLEX_FONT_S1, fg2, 16, 40);
-        lv_obj_add_event_cb(c, wg_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)IC_CLIMA);
-        break;
-    case FLEX_WG_CALEND: {
-        // calWidgetBody (Home.h:567): "oct 2026" + iniciales + dia de hoy marcado
-        snprintf(buf, sizeof(buf), "%s %d", flex_i18n_mo_short[flex_li()][tm.tm_mon], tm.tm_year + 1900);
-        wg_label(c, buf, FLEX_FONT_S2, fg, 12, 9);
-        static const char *const wd1[5][7] = {
-            {"D", "L", "M", "M", "J", "V", "S"}, {"S", "M", "T", "W", "T", "F", "S"},
-            {"D", "L", "M", "M", "J", "V", "S"}, {"D", "S", "T", "Q", "Q", "S", "S"},
-            {"D", "L", "M", "M", "G", "V", "S"},
-        };
-        int li = flex_li(), pad = 9, cw = (ww - 2 * pad) / 7;
-        for (int i = 0; i < 7; i++) {
-            lv_obj_t *l = flex_label(c, wd1[li][i], FLEX_FONT_S1, fg2);
-            lv_obj_set_width(l, cw);
-            lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
-            lv_obj_set_x(l, pad + i * cw);
-            flex_label_cap_y(l, 33);
-        }
-        if (hh >= 110) {
-            static const int dm[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-            int y = tm.tm_year + 1900, mo = tm.tm_mon;
-            int dim = dm[mo] + (mo == 1 && ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0));
-            int first = ((tm.tm_wday - (tm.tm_mday - 1)) % 7 + 7) % 7;
-            int grid_y = 49, rh = (hh - 54) / 6;
-            rh = rh < 9 ? 9 : rh;
-            for (int d = 1; d <= dim; d++) {
-                int cell = first + d - 1, row = cell / 7, col = cell % 7;
-                int cx = pad + col * cw + cw / 2, cy = grid_y + row * rh + rh / 2;
-                char ds[12];
-                snprintf(ds, sizeof(ds), "%d", d);
-                if (d == tm.tm_mday) {
-                    lv_obj_t *dot = flex_box(c);
-                    lv_obj_set_size(dot, 16, 16);
-                    lv_obj_set_pos(dot, cx - 8, cy - 8);
-                    lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
-                    lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
-                    lv_obj_set_style_bg_color(dot, t->primary, 0);
-                }
-                lv_obj_t *l = flex_label(c, ds, FLEX_FONT_S1, d == tm.tm_mday ? t->on_acc : fg);
-                lv_obj_set_width(l, 24);
-                lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
-                lv_obj_set_x(l, cx - 12);
-                flex_label_cap_y(l, cy - 4);
-            }
-        }
-        lv_obj_add_event_cb(c, wg_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)IC_CALEND);
-        break;
-    }
-    default:
-        break;
-    }
-}
 
 // ---- iconos ----------------------------------------------------------------------
 typedef struct {
@@ -246,7 +98,7 @@ static void build_page(int p)
     lv_obj_clean(pg);
     for (int k = 0; k < g_home.wg_n[p]; k++) {
         if (g_home.wg[p][k].type != FLEX_WG_NONE) {
-            build_widget(pg, &g_home.wg[p][k]);
+            flex_home_wg_build(pg, &g_home.wg[p][k], s_band_top);
         }
     }
     int S, gx0, gy0, cs, rs, cols, rows;
@@ -333,7 +185,11 @@ static void root_gesture_cb(lv_event_t *e)
     }
     lv_dir_t dir = lv_indev_get_gesture_dir(in);
     if (dir == LV_DIR_TOP) {
-        // swipeUp que empezo en y > 96 -> Caja de aplicaciones
+        // swipeUp que empezo en y > 96 -> Caja de aplicaciones (HomeCfg.h:1298);
+        // desde la barra de estado no
+        if (flex_touch_arb()->t.start_y <= 96) {
+            return;
+        }
         lv_indev_wait_release(in);
         flex_drawer_open();
     }

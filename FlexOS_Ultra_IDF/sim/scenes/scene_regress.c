@@ -10,6 +10,10 @@
 //  F7 una pulsacion de 450 ms sobre un icono es un toque (umbral 550 ms)
 //  F8 el refresco del minuto no deja las paginas entre dos encajes
 //  F9 un toque durante la caida del bloqueo (sin clave) no desbloquea
+// Revision 5 (fidelidad a Arduino):
+//  R1 sin clave, un desliz mas horizontal que vertical no desbloquea (swipeUp)
+//  R2 la caja no se abre con un desliz que empieza en la barra de estado (y <= 96)
+//  R3 el menu de la caja dice "Anadir a inicio" si la fila anade (crea pagina)
 #include <stdio.h>
 #include <string.h>
 #include "flex_app.h"
@@ -47,6 +51,42 @@ static void quiet(uint32_t max_ms)
     for (uint32_t t = 0; t < max_ms && (flex_notif_banner_visible() || flex_notif_queue_len()); t += 100) {
         sim_run(100);
     }
+}
+
+// Una etiqueta visible con ese texto exacto en la pantalla o en la capa superior
+static bool text_visible(lv_obj_t *o, const char *txt)
+{
+    if (lv_obj_is_hidden(o)) {
+        return false;
+    }
+    if (lv_obj_check_type(o, &lv_label_class) && strcmp(lv_label_get_text(o), txt) == 0) {
+        return true;
+    }
+    for (uint32_t i = 0; i < lv_obj_get_child_count(o); i++) {
+        if (text_visible(lv_obj_get_child(o, (int32_t)i), txt)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool on_screen(const char *txt)
+{
+    return text_visible(lv_screen_active(), txt) || text_visible(lv_layer_top(), txt);
+}
+
+// Centro de la fila "row" del menu contextual de la celda i de la caja (sin scroll)
+static void ctx_row_xy(int i, int row, int *x, int *y)
+{
+    int cx = 24 + (i % 4) * 120, iy = 152 + (i / 4) * 116, h = 4 * 56;
+    int px = cx + 72 + 12;
+    if (px + 262 > 480 - 8) {
+        px = cx - 12 - 262;
+    }
+    px = px < 8 ? 8 : px > 480 - 8 - 262 ? 480 - 8 - 262 : px;
+    int py = iy < 152 ? 152 : iy > 800 - 8 - h ? 800 - 8 - h : iy;
+    *x = px + 100;
+    *y = py + row * 56 + 28;
 }
 
 // Centro de un icono de la pagina del escritorio a la vista (no del dock)
@@ -256,6 +296,78 @@ bool scene_regress_run(void)
     sim_run(300);
     CHK(!flex_power_suspended());
     CHK(flex_shell_state() == FLEX_SH_AUTH);
+
+    // R1: sin clave, un roce en diagonal (dx -220, dy 70) no desbloquea; uno vertical si
+    flex_lock_clear();
+    flex_shell_lock();
+    sim_run(200);
+    sim_drag(400, 500, 180, 430, 200);
+    sim_run(500);
+    CHK(flex_shell_state() == FLEX_SH_LOCK);
+    sim_drag(240, 500, 240, 430, 200);
+    sim_run(500);
+    CHK(flex_shell_state() == FLEX_SH_HOME);
+
+    // R2: desde la barra de estado (y 90) no se abre la caja; desde abajo si
+    sim_drag(240, 90, 240, 10, 150);
+    sim_run(400);
+    CHK(!flex_drawer_is_open());
+    sim_drag(240, 600, 240, 250, 200);
+    sim_run(400);
+    CHK(flex_drawer_is_open());
+    flex_sys_back();
+    sim_run(400);
+
+    // R3: paginas llenas pero sin llegar al maximo: la fila dice "Anadir a inicio"
+    // y anade (crea la pagina); nunca "Inicio completo" activa
+    flex_home_t home0 = g_home;
+    g_home.page_n = 1;   // una sola pagina, sin widgets, que se llena con apps
+    g_home.page = 0;
+    g_home.fav = 0;
+    memset(g_home.order, FLEX_HOME_EMPTY, sizeof(g_home.order));
+    memset(g_home.wg_n, 0, sizeof(g_home.wg_n));
+    for (int id = 0; id < FLEX_APP_N && flex_home_first_free() >= 0; id++) {
+        if (!flex_app_is_fav(id) && !flex_app_is_hidden(id)) {
+            flex_home_fav_toggle(id);
+        }
+    }
+    flex_home_rebuild();
+    CHK(flex_home_first_free() < 0 && g_home.page_n < FLEX_HOME_PAGES_MAX);
+    int pages0 = g_home.page_n;
+    sim_drag(240, 600, 240, 250, 200);
+    sim_run(400);
+    CHK(flex_drawer_is_open());
+    bool menu = false;
+    for (int c = 0; c < 16 && !menu; c++) {   // la primera app de la caja que no esta en Inicio
+        int cx = 24 + (c % 4) * 120 + 36, cy = 152 + (c / 4) * 116 + 36;
+        sim_touch(cx, cy, true);
+        sim_run(700);
+        sim_touch(cx, cy, false);
+        sim_run(200);
+        if (on_screen("Quitar de inicio")) {
+            flex_sys_back();   // esta ya esta: cerrar el menu y probar la siguiente
+            sim_run(200);
+            continue;
+        }
+        menu = true;
+        CHK(!on_screen("Inicio completo"));
+        CHK(on_screen("A\xC3\xB1" "adir a inicio"));
+        sim_shot("rg_r3_menu_anadir");
+        uint32_t fav0 = g_home.fav;
+        int mx, my;
+        ctx_row_xy(c, 1, &mx, &my);
+        sim_tap(mx, my);
+        sim_run(300);
+        CHK(g_home.fav != fav0 && g_home.page_n == pages0 + 1);
+    }
+    CHK(menu);
+    while (flex_drawer_is_open()) {
+        flex_sys_back();
+        sim_run(400);
+    }
+    g_home = home0;
+    flex_home_save();
+    flex_home_rebuild();
 
     flex_lock_clear();
     flex_shell_lock();

@@ -4,6 +4,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "flex_inbox.h"
 #include "flex_storage.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -19,8 +20,16 @@ _Static_assert(SAME(FLEX_RST_PANIC, ESP_RST_PANIC) && SAME(FLEX_RST_INT_WDT, ESP
 static const char *TAG = "flex.safe";
 #define NS "flexsafe"
 
+// El escritor acaba de arrancar con la cola vacia: el volcado es inmediato.
+#define BOOT_FLUSH_MS 1500
+// "Reiniciar normalmente" puede ir en la cola detras de "Limpiar caches"
+// (borrar la carpeta entera, acotado): se espera fuera de la UI.
+#define EXIT_FLUSH_MS 30000
+
 static flex_safe_eval_t s_ev;
 static esp_timer_handle_t s_stable;
+static TaskHandle_t s_exit_task;
+static void (*s_exit_fail)(void);
 
 static void save(void)
 {
@@ -46,6 +55,14 @@ void flex_safeboot_eval(void)
     s_ev = flex_safe_eval(rr, fails, cause, cause >= 0);
     if (s_ev.write) {
         save();
+        // El contador tiene que sobrevivir a la caida que viene a contar: se graba
+        // YA y no con la escritura diferida de los ajustes (hasta ~1,3 s), o un
+        // fallo al levantar la interfaz no llegaria nunca a 3 (Arduino: putInt
+        // sincrono, Session.h:182).
+        esp_err_t e = flex_cfg_flush(BOOT_FLUSH_MS);
+        if (e != ESP_OK) {
+            ESP_LOGE(TAG, "no se pudo grabar el contador de reinicios: %s", esp_err_to_name(e));
+        }
     }
     ESP_LOGI(TAG, "motivo=%d anormal=%s fallos=%d modo_seguro=%s", rr, s_ev.abnormal ? "si" : "no", s_ev.fails,
              s_ev.safe ? "SI" : "no");
@@ -72,12 +89,41 @@ int flex_safe_cause(void)
     return s_ev.cause;
 }
 
-void flex_safe_exit_and_reboot(void)
+static void exit_fail_ui(void *arg)
 {
+    (void)arg;
+    if (s_exit_fail) {
+        s_exit_fail();
+    }
+}
+
+static void exit_task(void *arg)
+{
+    (void)arg;
+    // Grabado antes de reiniciar o el siguiente arranque volveria al Modo seguro
+    esp_err_t e = flex_cfg_flush(EXIT_FLUSH_MS);
+    if (e == ESP_OK) {
+        ESP_LOGI(TAG, "saliendo del Modo seguro -> reinicio normal");
+        vTaskDelay(pdMS_TO_TICKS(40));
+        esp_restart();
+    } else {
+        // Sin grabar no se reinicia: volveria en silencio al Modo seguro
+        ESP_LOGE(TAG, "no se pudo grabar el contador (%s): no se reinicia", esp_err_to_name(e));
+        for (int i = 0; i < 50 && !flex_inbox_post(exit_fail_ui, NULL); i++) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+    }
+    s_exit_task = NULL;
+    vTaskDelete(NULL);
+}
+
+bool flex_safe_exit_and_reboot(void (*on_fail)(void))
+{
+    if (s_exit_task) {
+        return true;   // ya en marcha (doble toque)
+    }
     s_ev.fails = 0;
     save();
-    flex_cfg_flush(1500);   // antes de reiniciar o el siguiente arranque volveria al Modo seguro
-    ESP_LOGI(TAG, "saliendo del Modo seguro -> reinicio normal");
-    vTaskDelay(pdMS_TO_TICKS(40));
-    esp_restart();
+    s_exit_fail = on_fail;
+    return xTaskCreate(exit_task, "safe_exit", 3072, NULL, 4, &s_exit_task) == pdPASS;
 }
