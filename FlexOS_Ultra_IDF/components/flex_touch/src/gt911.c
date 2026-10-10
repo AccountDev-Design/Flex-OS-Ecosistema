@@ -73,7 +73,11 @@ esp_err_t gt911_reset_and_find(gt911_t *gt)
     vTaskDelay(pdMS_TO_TICKS(10));
     gpio_set_level(FLEX_PIN_TP_RST, 1);
     vTaskDelay(pdMS_TO_TICKS(100));
+    return gt911_find(gt);
+}
 
+esp_err_t gt911_find(gt911_t *gt)
+{
     uint16_t found = 0;
     if (flex_i2c_probe(GT911_ADDR_A, GT911_IO_TIMEOUT_MS) == ESP_OK) {
         found = GT911_ADDR_A;

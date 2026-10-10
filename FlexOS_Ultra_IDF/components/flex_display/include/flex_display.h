@@ -34,6 +34,9 @@ void    flex_display_backlight_raw(uint8_t pct);
 // DISPOFF / DISPON del ST7701 (la suspension apaga el panel tras el fundido).
 // Solo tarea de UI.
 void    flex_display_panel_on(bool on);
+// Apagado completo: DISPOFF + SLPIN del ST7701 (panelSleepIn). Solo tarea de UI;
+// despues solo queda dormir (el panel no se vuelve a encender sin reiniciar).
+void    flex_display_sleep_in(void);
 
 // Fines de cuadro del DPI contados por la ISR desde el arranque.
 uint32_t flex_display_vsync_count(void);

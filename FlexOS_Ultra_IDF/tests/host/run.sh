@@ -80,7 +80,7 @@ python3 ref/extract_arduino.py "$OUT/ref_ntf.inc" \
     FlexOS_FlexPhone_Overlay.h:FPN_SRC_PHONE,FPB_HIDDEN,FPB_QUEUE,fpbState,fpbRefresh,fpbCur,fpbQueue,fpbQueueN,fpbMore,fpbRank,fpbEnqueue,fpbSameSys,fpbOffer,fpbMsgInit,fpbPush,fpbPushSystemKeyed \
     FlexOS_Ultra_Media.h:sysNotify,mediaNotify
 
-SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c
+SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c
       $ROOT/components/flex_storage/src/flex_kv.c
       $ROOT/components/flex_storage/src/flex_fs_path.c
       $ROOT/components/flex_ui/src/theme/flex_wallpaper.c
@@ -90,12 +90,13 @@ SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_
       $ROOT/components/flex_ui/src/shell/flex_recents_model.c
       $ROOT/components/flex_ui/src/shell/flex_qs_model.c
       $ROOT/components/flex_ui/src/shell/flex_notif_model.c
+      $ROOT/components/flex_power/src/flex_poweroff_model.c
       $ROOT/components/flex_ui/src/widgets/flex_kb_layout.c
       $ROOT/components/flex_touch/src/flex_touch_arb.c
       stub_cfg.c)
 INC=(-I. -I$ROOT/components/flex_storage/include -I$ROOT/components/flex_storage/src
      -I$ROOT/components/flex_display/src -I$ROOT/components/flex_ui/src/theme
-     -I$ROOT/components/flex_ui/src/shell -I$ROOT/components/flex_ui/src/widgets -I$ROOT/components/flex_touch/include -I../../sim/stubs/include)
+     -I$ROOT/components/flex_ui/src/shell -I$ROOT/components/flex_ui/src/widgets -I$ROOT/components/flex_touch/include -I$ROOT/components/flex_power/include -I../../sim/stubs/include)
 CFLAGS=(-O1 -g -Wall -Wextra -Werror -pthread)
 
 build() {   # $1 = sufijo, resto = flags de sanitizador

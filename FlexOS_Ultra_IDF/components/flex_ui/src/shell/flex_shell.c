@@ -381,8 +381,8 @@ static void launch_cancel(void *ctx)
 
 void flex_app_launch(int id, const lv_area_t *from_icon)
 {
-    if (!flex_app_def(id) || s_state == FLEX_SH_LOCK || s_state == FLEX_SH_AUTH) {
-        return;   // bloqueado o tecleando una clave: no se abre nada
+    if (!flex_app_def(id) || s_state == FLEX_SH_LOCK || s_state == FLEX_SH_AUTH || s_state == FLEX_SH_POWEROFF) {
+        return;   // bloqueado, tecleando una clave o apagando: no se abre nada
     }
     bool locked = id >= 0 && id < 32 && ((g_home.lock >> id) & 1u);
     if (locked && flex_auth_required()) {
@@ -404,7 +404,7 @@ void flex_sys_back(void)
         return;
     }
     if (s_state != FLEX_SH_APP || s_fg < 0) {
-        return;
+        return;   // POWEROFF: sin gesto de atras (Cancelar es la salida)
     }
     const flex_app_def_t *d = flex_app_def(s_fg);
     if (d->ops && d->ops->on_back && d->ops->on_back()) {
@@ -421,14 +421,14 @@ void flex_sys_home(void)
     }
     if (s_state == FLEX_SH_APP) {
         flex_app_close();
-    } else if (s_state != FLEX_SH_LOCK && s_state != FLEX_SH_AUTH) {
+    } else if (s_state != FLEX_SH_LOCK && s_state != FLEX_SH_AUTH && s_state != FLEX_SH_POWEROFF) {
         flex_shell_show_home();
     }
 }
 
 void flex_sys_recents(void)
 {
-    if (s_state == FLEX_SH_LOCK || s_state == FLEX_SH_AUTH) {
+    if (s_state == FLEX_SH_LOCK || s_state == FLEX_SH_AUTH || s_state == FLEX_SH_POWEROFF) {
         return;
     }
     if (s_state == FLEX_SH_OVERLAY && s_overlay && s_overlay->on_recents) {
@@ -497,7 +497,11 @@ void flex_shell_show_home(void)
 
 void flex_shell_lock(void)
 {
+    if (flex_poweroff_running()) {
+        return;   // la animacion de apagado no tiene vuelta (y nada deberia pedirlo)
+    }
     flex_auth_abort();   // una clave a medias no sobrevive a bloquear
+    flex_poweroff_close_now();
     flex_qs_close_now();
     flex_notif_center_close_now();
     flex_drawer_close_now();
@@ -524,6 +528,30 @@ void flex_shell_auth_begin(void)
 {
     s_state = FLEX_SH_AUTH;
     flex_navbar_set_ctx(FLEX_NAV_HIDDEN);
+}
+
+static flex_shell_state_t s_poff_prev = FLEX_SH_HOME;
+
+void flex_shell_poweroff_begin(void)
+{
+    if (s_state == FLEX_SH_HOME || s_state == FLEX_SH_APP) {
+        s_poff_prev = s_state;   // AUTH (la clave del apagado) no: se vuelve a lo de antes
+    }
+    s_state = FLEX_SH_POWEROFF;
+    flex_navbar_set_ctx(FLEX_NAV_HIDDEN);
+}
+
+void flex_shell_poweroff_end(void)
+{
+    if (s_state != FLEX_SH_POWEROFF && s_state != FLEX_SH_AUTH) {
+        return;
+    }
+    if (s_poff_prev == FLEX_SH_APP && s_fg >= 0) {
+        s_state = FLEX_SH_APP;   // la app sigue delante (Arduino volvia a Inicio con la app viva)
+        flex_navbar_set_ctx(FLEX_NAV_APP);
+    } else {
+        flex_shell_show_home();
+    }
 }
 
 void flex_shell_reveal_prepare(void)

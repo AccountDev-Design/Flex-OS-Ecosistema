@@ -62,8 +62,8 @@
 #define GLASS_LVL_DEF 50
 #define GLASS_LVL_STEP 5
 #define TICK_MS       8
-// "Apagar" (desliza para apagar) todavia no esta migrado: ni boton ni control.
-#define QS_HAS_POWEROFF 0
+// "Apagar": boton de la cabecera y control (flex_poweroff_ui.c)
+#define QS_HAS_POWEROFF 1
 
 static const int HBTN_CX[3] = {338, 390, 442};
 
@@ -144,7 +144,7 @@ static bool fs_mounted(void)
 
 // Lo que funciona AHORA en ESP-IDF. Pendientes: Wi-Fi y Sincronizar hora (Fase 6),
 // Ahorro (gestion de energia, Fase 17), Actualizaciones (Fase 14), Volumen y
-// Silencio (Fase 11), Cronometro (app) y Apagar.
+// Silencio (Fase 11) y Cronometro (app).
 static bool qs_shown(int id)
 {
     switch (id) {
@@ -158,6 +158,7 @@ static bool qs_shown(int id)
     case FLEX_QS_CAMERA:
     case FLEX_QS_GALLERY:
     case FLEX_QS_DND:   // politica del sistema (flex_notif.c), no un periferico
+    case FLEX_QS_POWEROFF:
         return true;
     case FLEX_QS_GLASSFX:
         return flex_look()->glass;   // con el estilo Plano la intensidad no cambia nada
@@ -1103,6 +1104,10 @@ static bool exec_ctl(int id, bool detail)
         flex_qs_close_now();
         flex_power_suspend();   // al despertar sale el bloqueo
         return true;
+    case FLEX_QS_POWEROFF:
+        flex_qs_close_now();
+        flex_poweroff_open();
+        return true;
     case FLEX_QS_AIRPLANE:
         // Sin radios todavia en ESP-IDF: el estado es real (lo leera el Wi-Fi).
         flex_cfg_set_bool("airpl", !airplane());
@@ -1891,6 +1896,9 @@ static bool panel_touch(const flex_arb_touch_t *t)
             Q.tgt_hdr = -1;
             if (h == 0) {
                 edit_enter();
+            } else if (h == 1) {
+                flex_qs_close_now();
+                flex_poweroff_open();
             } else if (h == 2) {
                 leave_to_app(IC_AJUSTES);
             }

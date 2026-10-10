@@ -26,6 +26,7 @@ static flex_touch_frame_t s_frame;
 static bool s_have_frame;
 static flex_touch_info_t s_info;
 static TaskHandle_t s_task;
+static gt911_t s_gt;   // un solo alta en el bus: la usan el filtro de encendido y la tarea
 
 static void publish_info(const gt911_t *gt, bool present)
 {
@@ -69,7 +70,6 @@ static void touch_task(void *arg)
 {
     (void)arg;
     bool wdt = esp_task_wdt_add(NULL) == ESP_OK;
-    gt911_t gt = {0};
     bool present = false;
     uint32_t fails = 0;
     int64_t last_chip_reset_us = 0;
@@ -78,13 +78,13 @@ static void touch_task(void *arg)
 
     for (;;) {
         if (!present) {
-            if (gt911_reset_and_find(&gt) == ESP_OK) {
+            if (gt911_reset_and_find(&s_gt) == ESP_OK) {
                 present = true;
                 fails = 0;
-                publish_info(&gt, true);
+                publish_info(&s_gt, true);
             } else {
                 ESP_LOGW(TAG, "GT911 no detectado (0x5D/0x14); reintento en %d ms", SEARCH_RETRY_MS);
-                publish_info(&gt, false);
+                publish_info(&s_gt, false);
                 wait_ms(SEARCH_RETRY_MS);
             }
             last_wake = xTaskGetTickCount();
@@ -93,7 +93,7 @@ static void touch_task(void *arg)
 
         flex_touch_frame_t f = {0};
         bool fresh = false;
-        esp_err_t err = gt911_poll(&gt, &f, &fresh);
+        esp_err_t err = gt911_poll(&s_gt, &f, &fresh);
         if (fresh) {
             f.t_read_us = esp_timer_get_time();
             f.seq = ++seq;
@@ -122,11 +122,11 @@ static void touch_task(void *arg)
                 portENTER_CRITICAL(&s_mux);
                 s_info.chip_resets++;
                 portEXIT_CRITICAL(&s_mux);
-                bool found = gt911_reset_and_find(&gt) == ESP_OK;
+                bool found = gt911_reset_and_find(&s_gt) == ESP_OK;
                 publish_release(&seq);
                 if (found) {
                     fails = 0;
-                    publish_info(&gt, true);
+                    publish_info(&s_gt, true);
                 }
             }
         }
@@ -152,11 +152,46 @@ esp_err_t flex_touch_start(void)
     };
     ESP_RETURN_ON_ERROR(gpio_config(&rst), TAG, "GPIO de reset del GT911");
     gpio_set_level(FLEX_PIN_TP_RST, 1);
+    // El apagado completo lo deja retenido en alto (flex_power): sin soltarlo, el
+    // pulso de reset del GT911 no llegaria al chip. Ya en alto: sin glitch.
+    gpio_hold_dis(FLEX_PIN_TP_RST);
 
     BaseType_t ok = xTaskCreatePinnedToCore(touch_task, FLEX_TASK_TOUCH_NAME, FLEX_TASK_TOUCH_STACK, NULL,
                                             FLEX_TASK_TOUCH_PRIO, &s_task, FLEX_TASK_TOUCH_CORE);
     ESP_RETURN_ON_FALSE(ok == pdPASS, ESP_ERR_NO_MEM, TAG, "no se pudo crear la tarea del tactil");
     return ESP_OK;
+}
+
+// ---- filtro de encendido (antes de flex_touch_start) ------------------------------------
+static int64_t s_gate_finger_us;
+static uint8_t s_gate_count;
+
+esp_err_t flex_touch_gate_open(void)
+{
+    if (s_task) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return gt911_find(&s_gt);
+}
+
+int flex_touch_gate_fingers(void)
+{
+    if (s_task || !s_gt.dev) {
+        return -1;
+    }
+    flex_touch_frame_t f = {0};
+    bool fresh = false;
+    if (gt911_poll(&s_gt, &f, &fresh) != ESP_OK) {
+        return -1;
+    }
+    int64_t now = esp_timer_get_time();
+    if (fresh) {
+        s_gate_count = f.count;
+        s_gate_finger_us = now;
+    }
+    // Sin cuadro nuevo el chip no tiene nada que contar: vale el ultimo mientras
+    // sea reciente (Power.h:1074, 120 ms).
+    return now - s_gate_finger_us > FLEX_TOUCH_GATE_STALE_US ? 0 : s_gate_count;
 }
 
 bool flex_touch_get_frame(flex_touch_frame_t *out)

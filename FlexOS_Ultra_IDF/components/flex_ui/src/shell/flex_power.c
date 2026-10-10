@@ -179,6 +179,9 @@ void flex_power_wake(void)
 static void gesture_cb(int ev)
 {
     if (ev == FLEX_ARB_EV_SUSPEND) {
+        if (flex_poweroff_running()) {
+            return;   // apagando: la animacion termina sola
+        }
         flex_power_suspend();
     } else if (ev == FLEX_ARB_EV_WAKE) {
         flex_power_wake();

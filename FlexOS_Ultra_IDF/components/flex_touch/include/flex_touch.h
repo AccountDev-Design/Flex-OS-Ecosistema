@@ -49,6 +49,14 @@ esp_err_t flex_touch_start(void);
 
 // Copia sin bloquear el ultimo cuadro publicado. false si aun no hay ninguno.
 bool flex_touch_get_frame(flex_touch_frame_t *out);
+
+// Filtro de encendido tras el deep sleep (flex_power), ANTES de flex_touch_start
+// y con el bus ya iniciado: el GT911 siguio escaneando (RST retenido en alto), asi
+// que se busca SIN pulso de reset. Bloqueante y solo desde la tarea de arranque.
+#define FLEX_TOUCH_GATE_STALE_US (120 * 1000)
+esp_err_t flex_touch_gate_open(void);
+// Dedos del ultimo cuadro (0 si es de hace mas de 120 ms); < 0 si falla el bus.
+int flex_touch_gate_fingers(void);
 void flex_touch_get_info(flex_touch_info_t *out);
 
 #ifdef __cplusplus

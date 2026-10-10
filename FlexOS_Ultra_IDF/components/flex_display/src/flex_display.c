@@ -147,6 +147,14 @@ void flex_display_panel_on(bool on)
     }
 }
 
+void flex_display_sleep_in(void)
+{
+    if (s_io) {
+        esp_lcd_panel_io_tx_param(s_io, ST7701_CMD_DISPOFF, NULL, 0);
+        esp_lcd_panel_io_tx_param(s_io, ST7701_CMD_SLPIN, NULL, 0);
+    }
+}
+
 uint32_t flex_display_vsync_count(void)
 {
     return g_flex_dsi.vsync_count;

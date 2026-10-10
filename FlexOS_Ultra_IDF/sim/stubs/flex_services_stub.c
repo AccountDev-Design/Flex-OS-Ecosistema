@@ -247,3 +247,17 @@ void flex_display_panel_on(bool on)
 int sim_panel_on_drawn_state(void) { return s_on_drawn; }
 uint8_t sim_display_backlight(void) { return s_bl_on ? s_raw : 0; }
 bool sim_display_panel_on(void) { return s_panel_on; }
+static bool s_sleep_in;
+void flex_display_sleep_in(void) { s_panel_on = false; s_sleep_in = true; }
+bool sim_display_sleep_in(void) { return s_sleep_in; }
+
+// ---- apagado completo: en el simulador se registra y se vuelve ------------------------
+#include "flex_poweroff.h"
+static int s_deep_sleeps;
+void flex_poweroff_deep_sleep(void)
+{
+    flex_cfg_set_bool("cleanoff", true);   // lo mismo que guarda el firmware antes de dormir
+    flex_cfg_set_i32("bright", flex_display_get_brightness());
+    s_deep_sleeps++;
+}
+int sim_deep_sleeps(void) { return s_deep_sleeps; }

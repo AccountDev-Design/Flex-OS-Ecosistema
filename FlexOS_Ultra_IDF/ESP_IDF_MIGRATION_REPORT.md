@@ -15,7 +15,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 0 | Infraestructura: proyecto, sdkconfig por revisión, particiones provisionales, herramientas | Hecha | `docs/FASE_0_1_INFORME.md` |
 | 1 | Pantalla ST7701 por MIPI-DSI, 2 framebuffers, LVGL DIRECT, GT911, pantalla de prueba | Hecha | `docs/FASE_0_1_INFORME.md` |
 | 2 | Arquitectura base: bus de eventos, buzón de UI, almacenamiento (NVS + LittleFS compatibles), ajustes, monitor del sistema, lógica portable | Hecha | `docs/FASE_2_INFORME.md` |
-| 3 | Interfaz completa en LVGL | En curso (shell: bloqueo, clave, escritorio, caja de apps, recientes, energía, teclado, panel rápido, avisos: banner, Centro de notificaciones y No molestar) | `docs/spec/` |
+| 3 | Interfaz completa en LVGL | En curso (shell: bloqueo, clave, escritorio, caja de apps, recientes, energía, teclado, panel rápido, avisos: banner, Centro de notificaciones y No molestar; apagado completo con deep sleep y filtro de encendido) | `docs/spec/` |
 | 4 | Liquid Glass (3 niveles) | Pendiente | |
 | 5 | Táctil y gestos | Pendiente | |
 | 6 | Wi-Fi por ESP32-C6 (esp-hosted) | Pendiente | |
@@ -60,7 +60,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 1 | `lt_v3` dev | ver `docs/FASE_0_1_INFORME.md` | | |
 | 2 | `lt_v3` dev | 918 864 B | 35,1 % | 21,9 % |
 | 2 | `v3` dev | 921 056 B | 35,1 % | 22,0 % |
-| 3 (en curso: shell, panel rápido, avisos) | `v3` dev | 1 319 472 B | 50,3 % | 31,5 % |
+| 3 (en curso: shell, panel rápido, avisos, apagado) | `v3` dev | 1 341 632 B | 51,2 % | 32,0 % |
 
 La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la interfaz completa
 (Fase 15). No se ha grabado nada.
@@ -88,6 +88,10 @@ La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la
 | Panel rápido: fondo sobre una app | Captura de 768 KB de la app, reducida y desenfocada | El color de ventana de la app bajo el mismo velo (el desenfoque de una pantalla de app es casi su color); sobre el escritorio, su fondo ya desenfocado | Sin 768 KB extra de PSRAM por cada apertura |
 | Panel rápido: dos dedos sobre un control | El episodio que el arbitraje se traga (gesto de suspender) se leía como "soltar sin mover" y ejecutaba el control (cambiaba el tema, abría la cámara) | Un episodio anulado no es un toque; tampoco en el editor ni en el catálogo | docs/spec/01b §5 |
 | Panel rápido: atajos a apps (Ajustes, Cámara, Galería, Modo PC, Archivos, Conectividad) | Abren la app | Abren la misma entrada que el icono del escritorio; mientras la app no esté migrada es la pantalla "Pendiente de migrar a ESP-IDF" (honesta). Cronómetro sí se oculta: es un interruptor con estado propio (cronoStart/Pause), no un atajo | Revisión adversarial 3 (hallazgo descartado con motivo) |
+| Apagado: filtro de encendido | Sin dedo espera la ventana entera (4,2 s) antes de volver a dormir: con el despertar por temporizador el chip está despierto ~91 % del tiempo | Vuelve a dormir tras 300 ms sin dedo (al empezar o al levantarlo); levantarlo menos solo reinicia la cuenta de 3 s. El GT911 se busca sin pulso de reset (siguió escaneando con RST retenido) | docs/spec/01c §10.6 |
+| Apagado: Cancelar | Vuelve siempre a Inicio, aunque se viniera de una app (que quedaba viva debajo) | Vuelve a donde se estaba (Inicio o la app delante) | docs/spec/01c §10.8 |
+| Apagado: con "Apagado seguro" | La animación arranca desde la pantalla de la clave | Arranca desde el deslizador (la clave se cierra al acertar) | Visual |
+| Apagado: durante la animación final | El doble toque con dos dedos podía suspender a medias | No se suspende ni se bloquea: la animación termina y duerme | docs/spec/01c §10.5 |
 | Avisos: texto guardado | `sysNotify` corta el título y el texto en bytes y puede partir una letra con tilde | Se cortan en caracteres UTF-8 (el banner ya lo hacía en Arduino) | docs/spec/01c §6 |
 | Avisos: tarjeta del bloqueo | El título más reciente se dibuja aunque se salga de la tarjeta | Una línea con "..." dentro de la tarjeta | docs/spec/01a §4 |
 | Avisos: Centro | Solo se lee el borde con el dedo moviéndose (igual) y se cierra arrastrando a la derecha (igual) | Igual; los avisos del teléfono vinculado llegarán con Flex Phone (el Centro tiene hoy los del sistema) | docs/spec/01c §6 |

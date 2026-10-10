@@ -22,6 +22,7 @@ typedef enum {
     FLEX_SH_APP,
     FLEX_SH_OVERLAY,      // caja de apps, Recientes, personalizar... (los gestionan sus modulos)
     FLEX_SH_AUTH,         // pantalla de la clave (flex_auth.c)
+    FLEX_SH_POWEROFF,     // "Apagar FlexOS?" y la animacion final (flex_poweroff_ui.c)
 } flex_shell_state_t;
 
 // Construye el shell (tras flex_theme_init, flex_wallmgr_init, flex_i18n_init)
@@ -110,6 +111,15 @@ void flex_notif_center_close_now(void);   // fpcForceClose: sin animacion
 // Lo que necesita el banner de los demas modulos
 bool flex_shell_transition_active(void);  // la tarjeta de abrir/cerrar app esta a la vista
 void flex_lock_refresh_widgets(void);     // tarjetas de la pantalla de bloqueo (aviso mas reciente)
+
+// Apagado completo (flex_poweroff_ui.c)
+void flex_poweroff_open(void);        // "Apagar FlexOS?" (desde el panel rapido)
+void flex_poweroff_close_now(void);   // Cancelar: vuelve a donde se estaba (no durante la animacion)
+bool flex_poweroff_active(void);
+bool flex_poweroff_running(void);     // animacion final en marcha: ya no tiene vuelta
+int  flex_poweroff_knob(void);        // 0..304 (pruebas)
+void flex_shell_poweroff_begin(void); // estado POWEROFF, sin barra (recuerda de donde se venia)
+void flex_shell_poweroff_end(void);   // vuelve a Inicio o a la app que estaba delante
 
 void flex_drawer_open(void);
 void flex_drawer_close_now(void);     // sin animacion (bloquear, suspender)

@@ -5,6 +5,7 @@
 #include "flex_core.h"
 #include "flex_i2c.h"
 #include "flex_passcode.h"
+#include "flex_poweroff.h"
 #include "flex_storage.h"
 #include "flex_system.h"
 #include "flex_touch.h"
@@ -14,6 +15,10 @@ static const char *TAG = "flex.main";
 
 void app_main(void)
 {
+    // Despertar de un apagado completo: si el dedo no se sostiene 3 s se vuelve a
+    // dormir aqui mismo, sin encender la pantalla. Cualquier otro arranque pasa.
+    flex_poweroff_wake_gate();
+
     flex_core_boot_report();
 
     // El bus va primero: los servicios avisan por el de lo que encuentran.
@@ -25,6 +30,8 @@ void app_main(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "almacenamiento: %s (se sigue sin el)", esp_err_to_name(err));
     }
+
+    flex_poweroff_boot_note();
 
     // Clave del bloqueo guardada en texto claro por versiones antiguas -> hash
     // con sal, en tres pasos (escribir, comprobar, y solo entonces borrar la

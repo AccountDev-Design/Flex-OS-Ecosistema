@@ -20,6 +20,9 @@ typedef struct {
 // Pulso de reset por RST y busqueda en 0x5D y 0x14. Bloquea ~110 ms: solo se
 // llama desde la tarea del tactil.
 esp_err_t gt911_reset_and_find(gt911_t *gt);
+// Solo la busqueda, sin pulso de reset (el chip ya estaba escaneando: filtro de
+// encendido tras el deep sleep, con RST retenido en alto).
+esp_err_t gt911_find(gt911_t *gt);
 
 // Lee un cuadro si el chip tiene uno nuevo. *fresh = false si no habia datos.
 // Las coordenadas salen ya en pixeles de la pantalla (0..479 x 0..799).
