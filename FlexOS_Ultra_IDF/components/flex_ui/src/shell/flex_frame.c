@@ -7,6 +7,7 @@
 #include "flex_i18n.h"
 #include "flex_icons.h"
 #include "flex_theme.h"
+#include "lvgl_private.h"   // lv_text_get_width (LVGL fijada a 9.6)
 
 // ---- etiquetas con la y de la version Arduino (tope de mayusculas) ----------
 static int32_t cap_offset(const lv_font_t *f)
@@ -317,4 +318,14 @@ void flex_navbar_set_ctx(flex_nav_ctx_t ctx)
 flex_nav_ctx_t flex_navbar_ctx(void)
 {
     return s_ctx;
+}
+
+int32_t flex_text_width(const char *s, const lv_font_t *f)
+{
+    if (!s || !f) {
+        return 0;
+    }
+    lv_text_attributes_t at;
+    lv_text_attributes_init(&at);   // sin espaciado extra, una linea
+    return lv_text_get_width(s, (uint32_t)strlen(s), f, &at);
 }

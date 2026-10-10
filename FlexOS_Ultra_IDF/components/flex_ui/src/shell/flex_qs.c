@@ -1043,13 +1043,19 @@ static void grab_curtain(int y)
     Q.g = QG_CURTAIN;
 }
 
+static bool can_open(void)
+{
+    flex_shell_state_t st = flex_shell_state();
+    // kiosco: la cortina no se abre (QuickPanelEdit.h:492)
+    return (st == FLEX_SH_HOME || st == FLEX_SH_APP) && !flex_power_suspended() && !flex_kiosk_active();
+}
+
 void flex_qs_open(void)
 {
     if (is_open()) {
         return;
     }
-    flex_shell_state_t st = flex_shell_state();
-    if (st != FLEX_SH_HOME && st != FLEX_SH_APP) {
+    if (!can_open()) {
         return;
     }
     begin_open();
@@ -1914,11 +1920,6 @@ static bool panel_touch(const flex_arb_touch_t *t)
 }
 
 // ---- punto de entrada global (qsGlobalHandle) ---------------------------------------
-static bool can_open(void)
-{
-    flex_shell_state_t st = flex_shell_state();
-    return (st == FLEX_SH_HOME || st == FLEX_SH_APP) && !flex_power_suspended();
-}
 
 static bool hook(const flex_arb_touch_t *t)
 {

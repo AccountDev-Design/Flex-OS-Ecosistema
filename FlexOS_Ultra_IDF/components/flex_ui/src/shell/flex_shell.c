@@ -39,6 +39,12 @@ static lv_obj_t *s_shield;
 static app_inst_t s_inst[FLEX_APP_N];
 static int s_fg = -1;                     // app en primer plano (estado logico)
 static flex_shell_state_t s_state = FLEX_SH_LOCK;
+
+// Barra de navegacion de una app: invisible con el kiosco (AppFramework.h:1001)
+static void nav_app(void)
+{
+    flex_navbar_set_ctx(flex_kiosk_active() ? FLEX_NAV_HIDDEN : FLEX_NAV_APP);
+}
 static int32_t s_last_minute = -1;
 
 // ---- tarjeta de transicion ------------------------------------------------------
@@ -313,8 +319,8 @@ static void suspend_fg(void)
 
 void flex_app_open(int id, const lv_area_t *from_icon)
 {
-    if (!flex_app_def(id)) {
-        return;
+    if (!flex_app_def(id) || (flex_kiosk_active() && id != flex_kiosk_app())) {
+        return;   // kiosco: una app no puede abrir otra (Core.h:688)
     }
     lv_area_t icon;
     if (!from_icon && flex_home_icon_area(id, &icon)) {
@@ -327,13 +333,16 @@ void flex_app_open(int id, const lv_area_t *from_icon)
     flex_notif_center_close_now();
     s_fg = id;
     s_state = FLEX_SH_APP;
-    flex_navbar_set_ctx(FLEX_NAV_APP);
+    nav_app();
     flex_touch_drop_all();   // touchDropAll: el dedo que abrio no toca la app
     card_run(true, id, from_icon);
 }
 
 void flex_app_close(void)
 {
+    if (flex_kiosk_active()) {
+        return;   // kiosco: la app clavada no se cierra (Core.h:646)
+    }
     flex_qs_close_now();
     flex_notif_center_close_now();
     int id = s_fg;
@@ -383,15 +392,27 @@ static void launch_cancel(void *ctx)
     if (s_launch_over_app && s_fg >= 0) {
         // Desde una app (panel rapido): vuelve a ella. Ir a Inicio la dejaba
         // delante sin suspender (huerfana) y Recientes se quedaba trabado.
-        s_state = FLEX_SH_APP;
-        flex_navbar_set_ctx(FLEX_NAV_APP);
+        flex_shell_return_to_app();
         return;
     }
     flex_shell_show_home();   // la verificacion no salio del bloqueo: se queda en Inicio
 }
 
+void flex_shell_return_to_app(void)
+{
+    if (s_fg < 0) {
+        flex_shell_show_home();
+        return;
+    }
+    s_state = FLEX_SH_APP;
+    nav_app();
+}
+
 void flex_app_launch(int id, const lv_area_t *from_icon)
 {
+    if (flex_kiosk_active() && id != flex_kiosk_app()) {
+        return;
+    }
     if (!flex_app_def(id) || s_state == FLEX_SH_LOCK || s_state == FLEX_SH_AUTH || s_state == FLEX_SH_POWEROFF ||
         s_state == FLEX_SH_SAFE || s_state == FLEX_SH_FACTORY || s_state == FLEX_SH_OOBE) {
         return;   // bloqueado, clave, apagando, Modo seguro, restableciendo o primera configuracion
@@ -416,6 +437,9 @@ void flex_app_launch(int id, const lv_area_t *from_icon)
 
 void flex_sys_back(void)
 {
+    if (flex_kiosk_active()) {
+        return;   // kiosco: Atras, Inicio y Recientes no hacen nada (Core.h:552-571)
+    }
     if (s_state == FLEX_SH_OVERLAY && s_overlay && s_overlay->on_back) {
         s_overlay->on_back();
         return;
@@ -432,6 +456,9 @@ void flex_sys_back(void)
 
 void flex_sys_home(void)
 {
+    if (flex_kiosk_active()) {
+        return;
+    }
     if (s_state == FLEX_SH_OVERLAY && s_overlay && s_overlay->on_home) {
         s_overlay->on_home();
         return;
@@ -446,6 +473,9 @@ void flex_sys_home(void)
 
 void flex_sys_recents(void)
 {
+    if (flex_kiosk_active()) {
+        return;
+    }
     if (s_state == FLEX_SH_LOCK || s_state == FLEX_SH_AUTH || s_state == FLEX_SH_POWEROFF || s_state == FLEX_SH_SAFE ||
         s_state == FLEX_SH_FACTORY || s_state == FLEX_SH_OOBE) {
         return;
@@ -544,6 +574,11 @@ void flex_shell_lock(void)
     flex_navbar_set_ctx(FLEX_NAV_HIDDEN);
 }
 
+bool flex_shell_lock_visible(void)
+{
+    return s_lock && !lv_obj_is_hidden(s_lock);
+}
+
 void flex_shell_unlocked(void)
 {
     lv_obj_set_hidden(s_shield, true);
@@ -596,7 +631,7 @@ void flex_shell_factory_end(flex_shell_state_t prev)
     }
     if (prev == FLEX_SH_APP && s_fg >= 0) {
         s_state = FLEX_SH_APP;   // Ajustes (o la app desde la que se llego) sigue delante
-        flex_navbar_set_ctx(FLEX_NAV_APP);
+        nav_app();
     } else {
         flex_shell_show_home();
     }
@@ -620,7 +655,7 @@ void flex_shell_poweroff_end(void)
     }
     if (s_poff_prev == FLEX_SH_APP && s_fg >= 0) {
         s_state = FLEX_SH_APP;   // la app sigue delante (Arduino volvia a Inicio con la app viva)
-        flex_navbar_set_ctx(FLEX_NAV_APP);
+        nav_app();
     } else {
         flex_shell_show_home();
     }
@@ -703,17 +738,24 @@ void flex_shell_start(void)
     flex_power_init();
     flex_qs_init();
     flex_notif_init();
+    flex_kiosk_load();
     if (flex_reset_boot_state() == FLEX_FR_BOOT_RESUME) {
         flex_factory_resume_boot();   // un borrado a medias se termina antes que nada
     } else if (flex_safe_mode()) {
         flex_safe_open();   // Modo seguro: directo a su pantalla, sin bloqueo (las filas piden la clave)
     } else if (!flex_cfg_get_bool("oobe", false)) {
-        flex_oobe_start();   // placa virgen o recien restablecida
+        flex_oobe_start();   // placa virgen o recien restablecida (borra el marcador)
     } else {
-        // Primer arranque tras un restablecimiento: aparato nuevo. Arduino borra el
-        // marcador al entrar al OOBE; sin OOBE migrado todavia, se borra aqui.
+        // Un marcador de restablecimiento terminado con el OOBE ya hecho (no deberia:
+        // la NVS queda vacia) se borra igualmente aqui.
         flex_reset_confirm_clean_boot();
-        flex_shell_lock();
+        if (flex_kiosk_active()) {
+            // Kiosco: directo a la app clavada, sin pasar por el bloqueo (Home.h:310):
+            // reiniciar no es una via de escape
+            flex_kiosk_boot();
+        } else {
+            flex_shell_lock();
+        }
     }
 }
 

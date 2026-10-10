@@ -38,6 +38,7 @@ int flex_shell_fg_app(void);   // app en primer plano aunque algo la tape (-1: n
 void flex_shell_show_home(void);      // estado Inicio (sin animacion)
 void flex_shell_lock(void);           // bloquear ahora (inactividad, boton)
 void flex_shell_unlocked(void);       // el bloqueo termino (desliz o clave correcta)
+bool flex_shell_lock_visible(void);   // la vista del bloqueo esta puesta (pruebas)
 // Pantalla de la clave (flex_auth.c)
 void flex_shell_auth_begin(void);     // estado AUTH, sin barra de navegacion
 void flex_shell_reveal_prepare(void); // escritorio debajo y bloqueo fuera (revelado)
@@ -151,6 +152,19 @@ int  flex_oobe_view(void);            // pruebas: 1 idioma, 2 nombre
 const char *flex_oobe_name(void);
 void flex_shell_oobe_begin(void);
 void flex_shell_factory_end(flex_shell_state_t prev);   // Cancelar: a la app que estaba o a Inicio
+void flex_shell_return_to_app(void);  // una verificacion pedida sobre la app se cancelo: vuelve a ella
+// Modo kiosco (flex_kiosk.c; docs/spec/01a §5.14, 01c §12)
+void flex_kiosk_load(void);           // NVS al arrancar (sin clave o app invalida: desactivado)
+bool flex_kiosk_active(void);
+int  flex_kiosk_app(void);            // app clavada (-1 sin kiosco)
+void flex_kiosk_set_open(int app);    // pantalla "definir area excluida" (menu del icono)
+bool flex_kiosk_set_active(void);
+void flex_kiosk_boot(void);           // arranque con kiosco: la app sin bloqueo
+void flex_kiosk_exit_now(void);       // tras la clave: borra el estado y va a Inicio
+bool flex_kiosk_badge_visible(void);  // pruebas
+// Menu contextual del escritorio (flex_home_ctx.c): pulsacion larga en un icono de la rejilla
+void flex_home_ctx_menu(int app_id, const lv_area_t *icon);
+bool flex_home_ctx_open(void);
 
 void flex_drawer_open(void);
 void flex_drawer_close_now(void);     // sin animacion (bloquear, suspender)

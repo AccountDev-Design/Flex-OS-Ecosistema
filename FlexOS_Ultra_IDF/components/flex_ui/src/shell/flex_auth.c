@@ -902,6 +902,9 @@ bool flex_auth_verify(const flex_auth_req_t *req)
 
 void flex_auth_setup(void (*on_done)(void *ctx), void *ctx)
 {
+    if (flex_kiosk_active()) {
+        return;   // kiosco: crear o cambiar la clave no se abre (Power.h:420)
+    }
     flex_auth_abort();
     A.verify = false;
     A.setup_done = on_done;

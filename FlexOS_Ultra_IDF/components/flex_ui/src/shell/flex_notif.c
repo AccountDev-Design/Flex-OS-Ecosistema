@@ -544,7 +544,8 @@ static bool center_busy(void)
 static bool center_can_open(void)
 {
     flex_shell_state_t st = flex_shell_state();
-    return (st == FLEX_SH_HOME || st == FLEX_SH_APP) && !flex_qs_is_open() && !flex_power_suspended();
+    return (st == FLEX_SH_HOME || st == FLEX_SH_APP) && !flex_qs_is_open() && !flex_power_suspended() &&
+           !flex_kiosk_active();   // kiosco: el Centro no se abre (Overlay.h:902)
 }
 
 static bool es(void)

@@ -778,4 +778,5 @@ void flex_home_save(void)
     flex_cfg_set_i32("appver", FLEX_HOME_APPREG_VER);
     flex_cfg_set_i32("appfav", (int32_t)g_home.fav);
     flex_cfg_set_i32("apphide", (int32_t)g_home.hidden);
+    flex_cfg_set_i32("applockm", (int32_t)g_home.lock);   // 32 bits (Arduino guardaba 16: §5.13)
 }

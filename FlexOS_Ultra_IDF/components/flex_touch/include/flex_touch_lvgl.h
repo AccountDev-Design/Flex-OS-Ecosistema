@@ -20,6 +20,11 @@ flex_arb_t *flex_touch_arb(void);
 // Gestos del sistema (FLEX_ARB_EV_SUSPEND / FLEX_ARB_EV_WAKE), en la tarea de UI.
 typedef void (*flex_touch_gesture_cb_t)(int ev);
 void flex_touch_set_gesture_cb(flex_touch_gesture_cb_t cb);
+// Antes (after=false) y despues (after=true) de cada lectura del arbitraje, en
+// la tarea de UI: el kiosco pone ahi su filtro y escucha su gesto de salida.
+// Despues NO se puede crear UI (es el callback de lectura de LVGL): diferirla.
+typedef void (*flex_touch_poll_hook_t)(flex_arb_t *a, bool after);
+void flex_touch_set_poll_hook(flex_touch_poll_hook_t fn);
 // touchDropAll: al cambiar de pantalla, el dedo que sigue apoyado no toca nada
 // de la pantalla nueva hasta que se levante de verdad.
 void flex_touch_drop_all(void);

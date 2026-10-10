@@ -39,6 +39,8 @@ void flex_label_cap_center(lv_obj_t *label, int32_t cx, int32_t y);
 // Una sola linea de ancho w con "..." si no cabe (fgTextEllipsis). El alto se fija
 // a una linea: con alto automatico LVGL parte el texto en varias y no pone los puntos.
 void flex_label_one_line(lv_obj_t *label, int32_t w);
+// Ancho en px de una linea de texto con esa fuente (uiFontFit y similares).
+int32_t flex_text_width(const char *s, const lv_font_t *f);
 
 #ifdef __cplusplus
 }

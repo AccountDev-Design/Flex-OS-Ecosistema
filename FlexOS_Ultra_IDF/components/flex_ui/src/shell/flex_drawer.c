@@ -691,7 +691,7 @@ static void sheet_gesture_cb(lv_event_t *e)
 
 void flex_drawer_open(void)
 {
-    if (D.open || flex_shell_state() != FLEX_SH_HOME) {
+    if (D.open || flex_shell_state() != FLEX_SH_HOME || flex_kiosk_active()) {
         return;
     }
     D.qn = 0;

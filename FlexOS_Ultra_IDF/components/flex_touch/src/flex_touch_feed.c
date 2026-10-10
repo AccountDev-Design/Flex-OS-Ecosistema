@@ -11,6 +11,7 @@ static lv_indev_t *s_indev;
 static bool s_lv_down;   // lo ultimo que vio LVGL
 static bool s_hook_ep;   // una capa del sistema se quedo algun cuadro de este episodio
 static uint32_t s_typing_ms;   // ultima vez con el dedo sobre un teclado (0 = nunca)
+static flex_touch_poll_hook_t s_poll_hook;
 #define TYPING_MS 500          // kbTypingNow (Keyboard.h:388)
 
 void flex_touch_lvgl_tune(lv_indev_t *indev)
@@ -45,6 +46,11 @@ flex_arb_t *flex_touch_arb(void)
 void flex_touch_set_gesture_cb(flex_touch_gesture_cb_t cb)
 {
     s_cb = cb;
+}
+
+void flex_touch_set_poll_hook(flex_touch_poll_hook_t fn)
+{
+    s_poll_hook = fn;
 }
 
 void flex_touch_add_sys_hook(flex_touch_sys_hook_t hook, int prio)
@@ -150,7 +156,13 @@ void flex_touch_feed(lv_indev_t *indev, lv_indev_data_t *data, int ev, int x, in
     s_indev = indev;
     flex_arb_t *a = flex_touch_arb();
     a->typing = s_typing_ms && lv_tick_get() - s_typing_ms < TYPING_MS;
+    if (s_poll_hook) {
+        s_poll_hook(a, false);
+    }
     int evt = flex_arb_poll(a, ev, x, y, fingers, lv_tick_get());
+    if (s_poll_hook) {
+        s_poll_hook(a, true);
+    }
     const flex_arb_touch_t *t = &a->t;
     bool claimed = !a->suspended && hooks_claim(t);
     // touchHoldBack: si una capa del sistema se quedo un cuadro de este episodio,

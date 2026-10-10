@@ -29,7 +29,6 @@ static lv_obj_t *s_safe_pill;
 static int32_t s_band_top, s_band_bot;
 
 // Ganchos opcionales (otros modulos del shell)
-__attribute__((weak)) void flex_home_ctx_menu(int app_id, const lv_area_t *icon) { (void)app_id; (void)icon; }
 __attribute__((weak)) void flex_home_customize_open(void) {}
 
 // ---- iconos ----------------------------------------------------------------------
@@ -57,8 +56,9 @@ static void icon_cb(lv_event_t *e)
         s_press.p0 = p;
         s_press.long_done = false;
     } else if (code == LV_EVENT_PRESSING) {
-        if (!s_press.long_done && lv_tick_elaps(s_press.t0) > LONGPRESS_ICON_MS && LV_ABS(p.x - s_press.p0.x) < 12 &&
-            LV_ABS(p.y - s_press.p0.y) < 12) {
+        // menu contextual: iconos de la rejilla, no del dock (01a §9)
+        if (!s_press.long_done && lv_obj_get_parent(o) != s_dock && lv_tick_elaps(s_press.t0) > LONGPRESS_ICON_MS &&
+            LV_ABS(p.x - s_press.p0.x) < 12 && LV_ABS(p.y - s_press.p0.y) < 12) {
             s_press.long_done = true;
             lv_area_t a;
             lv_obj_get_coords(o, &a);

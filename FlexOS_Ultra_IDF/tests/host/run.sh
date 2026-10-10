@@ -80,7 +80,7 @@ python3 ref/extract_arduino.py "$OUT/ref_ntf.inc" \
     FlexOS_FlexPhone_Overlay.h:FPN_SRC_PHONE,FPB_HIDDEN,FPB_QUEUE,fpbState,fpbRefresh,fpbCur,fpbQueue,fpbQueueN,fpbMore,fpbRank,fpbEnqueue,fpbSameSys,fpbOffer,fpbMsgInit,fpbPush,fpbPushSystemKeyed \
     FlexOS_Ultra_Media.h:sysNotify,mediaNotify
 
-SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c
+SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c test_kiosk.c
       $ROOT/components/flex_storage/src/flex_kv.c
       $ROOT/components/flex_storage/src/flex_fs_path.c
       $ROOT/components/flex_storage/src/flex_fs_wipe.c
@@ -92,6 +92,7 @@ SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_
       $ROOT/components/flex_ui/src/shell/flex_qs_model.c
       $ROOT/components/flex_ui/src/shell/flex_notif_model.c
       $ROOT/components/flex_ui/src/shell/flex_oobe_model.c
+      $ROOT/components/flex_ui/src/shell/flex_kiosk_model.c
       $ROOT/components/flex_power/src/flex_poweroff_model.c
       $ROOT/components/flex_system/src/flex_safeboot_model.c
       $ROOT/components/flex_system/src/flex_reset_model.c

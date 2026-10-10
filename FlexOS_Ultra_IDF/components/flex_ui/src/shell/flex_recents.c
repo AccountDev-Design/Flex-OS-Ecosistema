@@ -591,7 +591,7 @@ static void close_recents(void)
 
 void flex_recents_open(void)
 {
-    if (R.root || flex_shell_state() != FLEX_SH_HOME) {
+    if (R.root || flex_shell_state() != FLEX_SH_HOME || flex_kiosk_active()) {
         return;
     }
     R.press_card = -1;

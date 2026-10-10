@@ -241,8 +241,8 @@ static void autolock_cb(lv_timer_t *t)
         return;   // cortina abierta: no bloquear a media interaccion (Lock.h:392)
     }
     uint32_t win = flex_power_autolock_ms();
-    if (!win) {
-        return;   // "Nunca"
+    if (!win || flex_kiosk_active()) {
+        return;   // "Nunca"; con el kiosco no hay bloqueo automatico (Lock.h:361)
     }
     flex_shell_state_t st = flex_shell_state();
     bool app_auth = st == FLEX_SH_AUTH && !flex_auth_from_lock();   // candado de app: si aplica
