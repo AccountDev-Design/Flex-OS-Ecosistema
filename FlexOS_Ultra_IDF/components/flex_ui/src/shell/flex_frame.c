@@ -163,6 +163,11 @@ static void flash_off(lv_timer_t *t)
     s_flash_tmr = NULL;
 }
 
+bool flex_navbar_flash_visible(void)
+{
+    return s_flash && !lv_obj_is_hidden(s_flash);
+}
+
 static void nav_btn_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);

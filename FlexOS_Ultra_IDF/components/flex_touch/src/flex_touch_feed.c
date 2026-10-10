@@ -2,6 +2,7 @@
 #include "flex_touch_lvgl.h"
 
 #include <stdint.h>
+#include "lvgl_private.h"   // indev->pointer.act_obj (LVGL fijada a 9.6 en idf_component.yml)
 
 static flex_arb_t s_arb;
 static bool s_init;
@@ -101,6 +102,13 @@ static int32_t snap_dist(lv_obj_t *o, bool hor)
 // cortar el scroll a medias lo dejaria movido unos pixeles.
 static void lv_release(lv_indev_t *indev)
 {
+    lv_obj_t *act = indev->pointer.act_obj;
+    if (act) {
+        // lv_indev_reset solo avisa con LV_EVENT_INDEV_RESET: quien sigue la
+        // pulsacion con RELEASED/PRESS_LOST (destello de la barra, teclado,
+        // Recientes) se quedaria "pulsado" para siempre.
+        lv_obj_send_event(act, LV_EVENT_PRESS_LOST, indev);
+    }
     lv_obj_t *scr = lv_indev_get_scroll_obj(indev);
     lv_indev_reset(indev, NULL);
     if (scr) {

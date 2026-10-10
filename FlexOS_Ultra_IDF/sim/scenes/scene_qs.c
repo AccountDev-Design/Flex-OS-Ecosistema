@@ -7,6 +7,7 @@
 #include "flex_app.h"
 #include "flex_app_ids.h"
 #include "flex_display.h"
+#include "flex_frame.h"
 #include "flex_i18n.h"
 #include "flex_passcode.h"
 #include "flex_qs_model.h"
@@ -73,6 +74,32 @@ static bool cfg_has(int id)
         }
     }
     return false;
+}
+
+static uint32_t obj_count(lv_obj_t *o)
+{
+    uint32_t n = 1;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(o); i++) {
+        n += obj_count(lv_obj_get_child(o, (int32_t)i));
+    }
+    return n;
+}
+
+// Controles que se ven en el modo actual del panel (en el editor, los de la edicion).
+static int shown_now(int *first)
+{
+    int n = 0;
+    lv_area_t a;
+    *first = -1;
+    for (int id = 0; id < FLEX_QS_COUNT; id++) {
+        if (flex_qs_ctl_rect(id, &a)) {
+            if (*first < 0) {
+                *first = id;
+            }
+            n++;
+        }
+    }
+    return n;
 }
 
 bool scene_qs_run(void)
@@ -164,6 +191,29 @@ bool scene_qs_run(void)
     sim_run(300);
     CHK(!flex_qs_is_open());
 
+    // 6b) dos dedos sobre un control NO es un toque (el arbitraje se traga el
+    // episodio para el gesto de suspender; Arduino ejecutaba el control)
+    open_top();
+    {
+        lv_area_t th;
+        CHK(flex_qs_ctl_rect(FLEX_QS_THEME, &th));
+        int cx = (th.x1 + th.x2) / 2, cy = (th.y1 + th.y2) / 2;
+        bool dark0 = flex_look()->dark;
+        sim_touch(cx, cy, true);
+        sim_run(40);
+        for (int k = 0; k < 8; k++) {
+            sim_touch_n(cx, cy, 2);
+            sim_run(16);
+        }
+        sim_touch_n(cx, cy, 0);
+        sim_run(1200);   // pasa la ventana del doble toque: no suspende
+        CHK(flex_look()->dark == dark0);
+        CHK(flex_qs_panel_y() == 800);
+        CHK(!flex_power_suspended());
+    }
+    flex_qs_close_now();
+    sim_run(100);
+
     // 7) editor: Cancelar no guarda nada
     open_top();
     int n0 = cfg_count();
@@ -181,6 +231,64 @@ bool scene_qs_run(void)
     CHK(flex_qs_mode() == 0);
     CHK(visible(FLEX_QS_CAMERA));
     CHK(cfg_count() == n0);
+
+    // 7b) mover un control (mantener y arrastrar) no deja fantasmas al cancelar
+    {
+        uint32_t objs0 = obj_count(lv_layer_top());
+        sim_tap(338, 50);
+        sim_run(200);
+        CHK(flex_qs_ctl_rect(FLEX_QS_CAMERA, &a));
+        int cx = (a.x1 + a.x2) / 2, cy = (a.y1 + a.y2) / 2;
+        sim_touch(cx, cy, true);
+        sim_run(450);   // > 320 ms: se levanta
+        int ex = cx - 240 < 12 ? 12 : cx - 240;
+        for (int x = cx; x >= ex; x -= 10) {
+            sim_touch(x, cy, true);   // pasa por encima de otros controles
+            sim_run(16);
+        }
+        sim_touch(ex, cy, false);
+        sim_run(300);
+        sim_tap(60, 28);   // Cancelar
+        sim_run(300);
+        CHK(flex_qs_mode() == 0);
+        CHK(obj_count(lv_layer_top()) == objs0);
+    }
+
+    // 7c) el ultimo control que SE VE no se puede quitar (el panel nunca queda vacio)
+    sim_tap(338, 50);
+    sim_run(200);
+    {
+        int first, n = shown_now(&first), guard = 0;
+        while (n > 1 && guard++ < 40) {
+            CHK(flex_qs_ctl_rect(first, &a));
+            sim_tap(a.x1 + 4, a.y1 + 4);
+            sim_run(150);
+            int n2 = shown_now(&first);
+            if (n2 >= n) {
+                break;   // no se pudo quitar: el fallo lo dice la comprobacion de abajo
+            }
+            n = n2;
+        }
+        CHK(n == 1);
+        CHK(flex_qs_ctl_rect(first, &a));
+        sim_tap(a.x1 + 4, a.y1 + 4);
+        sim_run(300);
+        CHK(shown_now(&first) == 1);
+    }
+    sim_tap(60, 28);   // Cancelar
+    sim_run(300);
+    CHK(cfg_count() == n0);
+
+    // 7d) el bloqueo por inactividad no cae con la cortina abierta (Lock.h:392)
+    flex_cfg_set_i32("autolockms", 60000);
+    sim_tap(338, 50);
+    sim_run(200);
+    CHK(flex_qs_mode() == 1);
+    sim_run(65000);
+    CHK(flex_qs_mode() == 1 && flex_qs_is_open());
+    CHK(flex_shell_state() == FLEX_SH_HOME);
+    sim_tap(60, 28);   // Cancelar
+    sim_run(300);
 
     // 8) editor: Modo PC de capsula a circulo (asa derecha) y quitar Camara; Listo guarda
     sim_tap(338, 50);
@@ -302,6 +410,20 @@ bool scene_qs_run(void)
     sim_run(500);
     CHK(!flex_qs_is_open());
     sim_shot("qs_10_inicio_tras_borde");   // el escritorio queda como estaba
+    // abrir desde el borde derecho EMPEZANDO en un boton de la barra: el boton no
+    // se queda pulsado (LVGL solo avisaba con INDEV_RESET, no con PRESS_LOST)
+    sim_touch(470, 770, true);
+    sim_run(40);
+    for (int x = 470; x >= 398; x -= 8) {
+        sim_touch(x, 770, true);
+        sim_run(16);
+    }
+    sim_touch(398, 770, false);
+    sim_run(600);
+    CHK(flex_qs_panel_y() == 800);
+    flex_qs_close_now();
+    sim_run(400);
+    CHK(!flex_navbar_flash_visible());
     // un desplazamiento vertical junto al borde derecho NO abre
     sim_drag(470, 300, 466, 600, 200);
     sim_run(300);

@@ -829,7 +829,10 @@ static void build_body(void)
     if (Q.body) {
         lv_obj_delete(Q.body);
     }
-    Q.ghost = NULL;   // hijo de root: se rehace abajo
+    if (Q.ghost) {
+        lv_obj_delete(Q.ghost);   // hijo de root, no del cuerpo: se rehace abajo
+        Q.ghost = NULL;
+    }
     Q.body = box(Q.root, 0, 0, SCR_W, SCR_H);
     Q.view = Q.content = Q.tiles_box = Q.group_inner = Q.gbar = Q.gpill = Q.cat_grid = NULL;
     Q.flash_obj = Q.reject_obj = NULL;
@@ -1118,6 +1121,26 @@ static bool exec_ctl(int id, bool detail)
     return false;
 }
 
+// Quitar en el editor. La configuracion conserva controles ocultos (sin backend
+// todavia), asi que "el ultimo" es el ultimo que SE VE: el panel nunca queda vacio.
+static bool ed_remove(int idx)
+{
+    if (idx < 0 || idx >= Q.ed.n) {
+        return false;
+    }
+    const flex_qs_item_t *it = &Q.ed.it[idx];
+    if (it->vis && qs_shown(it->id)) {
+        int shown = 0;
+        for (int i = 0; i < Q.ed.n; i++) {
+            shown += Q.ed.it[i].vis && qs_shown(Q.ed.it[i].id);
+        }
+        if (shown <= 1) {
+            return false;
+        }
+    }
+    return flex_qs_edit_remove(&Q.ed, idx);
+}
+
 // ---- hit-test (QuickPanelGlass.h:1348-1404) ------------------------------------------
 static int hdr_btn_at(int px, int py)
 {
@@ -1372,7 +1395,7 @@ static bool edit_touch(const flex_arb_touch_t *t)
                              flex_qs_next_size(it->id, it->w, it->h, -1, &nw, &nh);
             if (k->kind == FLEX_QB_ITEM) {
                 if (t->x <= bx + 26 && t->y <= by + 26) {   // "-"
-                    if (!flex_qs_edit_remove(&Q.ed, idx)) {
+                    if (!ed_remove(idx)) {
                         reject(it->id);
                     } else {
                         build_body();
@@ -1405,7 +1428,7 @@ static bool edit_touch(const flex_arb_touch_t *t)
                     int cx, cy;
                     flex_qs_tile_center(kt, gy_top, &cx, &cy);
                     if (t->x <= cx - FLEX_QP_TCIRC / 2 + 20 && t->y <= cy - FLEX_QP_TCIRC / 2 + 20) {
-                        if (!flex_qs_edit_remove(&Q.ed, idx)) {
+                        if (!ed_remove(idx)) {
                             reject(it->id);
                         } else {
                             build_body();
@@ -1908,6 +1931,15 @@ static bool hook(const flex_arb_touch_t *t)
     if (Q.panel_y > 0 || Q.dragging) {
         if (Q.panel_y < SCR_H && Q.g != QG_CURTAIN && Q.g != QG_NONE) {
             Q.g = QG_NONE;
+        }
+        // Episodio anulado (segundo dedo, touchDropAll): el dedo no se levanto,
+        // el arbitraje se lo trago. Lo que iba a ser un toque NO lo es (Arduino
+        // lo ejecutaba: el doble toque con dos dedos cambiaba el tema o abria
+        // la camara antes de suspender).
+        if (Q.g == QG_PENDING && !t->down && !t->released) {
+            Q.g = QG_NONE;
+            Q.g_long = false;
+            return true;
         }
         if (Q.panel_y >= SCR_H && Q.mode == QPM_EDIT) {
             return edit_touch(t);

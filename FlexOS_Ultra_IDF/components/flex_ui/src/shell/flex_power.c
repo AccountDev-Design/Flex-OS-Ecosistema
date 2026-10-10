@@ -234,6 +234,9 @@ static void autolock_cb(lv_timer_t *t)
         lv_display_trigger_activity(lv_display_get_default());
         return;
     }
+    if (flex_qs_is_open()) {
+        return;   // cortina abierta: no bloquear a media interaccion (Lock.h:392)
+    }
     uint32_t win = flex_power_autolock_ms();
     if (!win) {
         return;   // "Nunca"

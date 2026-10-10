@@ -196,7 +196,11 @@ bool scene_notif_run(void)
 
     // 5) el panel rapido le quita la pantalla: vuelve al frente al cerrarlo
     sim_drag(240, 120, 240, 600, 260);   // desde debajo del banner no se abre
-    sim_drag(240, 6, 240, 560, 260);     // borde superior: abre
+    // borde superior: el apoyo quieto en y=6 (si el primer cuadro leido cayera
+    // ya dentro de la tarjeta, el gesto seria del banner, como en Arduino)
+    sim_touch(240, 6, true);
+    sim_run(60);
+    sim_drag(240, 6, 240, 560, 260);
     sim_run(300);
     CHK(flex_qs_is_open());
     CHK(!flex_notif_banner_visible());

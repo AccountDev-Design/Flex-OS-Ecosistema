@@ -29,6 +29,7 @@ typedef enum {
 void flex_navbar_init(void);
 void flex_navbar_set_ctx(flex_nav_ctx_t ctx);
 flex_nav_ctx_t flex_navbar_ctx(void);
+bool flex_navbar_flash_visible(void);   // destello de pulsacion de un boton (pruebas)
 
 // Coloca una etiqueta de forma que el TOPE DE LAS MAYUSCULAS quede en y (las
 // coordenadas de la version Arduino se refieren a eso, no a la caja de linea).
