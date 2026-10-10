@@ -25,6 +25,7 @@ typedef enum {
     FLEX_SH_POWEROFF,     // "Apagar FlexOS?" y la animacion final (flex_poweroff_ui.c)
     FLEX_SH_SAFE,         // pantalla de Modo seguro (flex_safe_ui.c)
     FLEX_SH_FACTORY,      // asistente de restablecimiento de fabrica (flex_factory_ui.c)
+    FLEX_SH_OOBE,         // primera configuracion (flex_oobe_ui.c)
 } flex_shell_state_t;
 
 // Construye el shell (tras flex_theme_init, flex_wallmgr_init, flex_i18n_init)
@@ -143,6 +144,12 @@ int  flex_factory_view(void);         // pruebas: 1 aviso, 2 escribir, 3 desliza
 int  flex_factory_shown_stage(void);
 int  flex_factory_knob(void);
 void flex_shell_factory_begin(void);
+// Primera configuracion (flex_oobe_ui.c): NVS "oobe" = false
+void flex_oobe_start(void);
+bool flex_oobe_active(void);
+int  flex_oobe_view(void);            // pruebas: 1 idioma, 2 nombre
+const char *flex_oobe_name(void);
+void flex_shell_oobe_begin(void);
 void flex_shell_factory_end(flex_shell_state_t prev);   // Cancelar: a la app que estaba o a Inicio
 
 void flex_drawer_open(void);

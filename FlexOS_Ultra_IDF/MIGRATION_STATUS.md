@@ -32,6 +32,8 @@ source ~/esp/env.sh && tools/build.sh --rev v3   # firmware (no graba nada)
 | Modo seguro: arranque, pantalla, clave antes del acceso, escritorio limitado, limpiar cachés | `flex_safe_ui.c`, `flex_system/flex_safeboot*` | host + escena `seguro` |
 | Correcciones de la revisión 4 (tacto, Centro, bloqueo, candados, umbrales, refresco) | varios | escena `regresiones` |
 | Restablecimiento de fábrica: marcador transaccional, etapas en exclusiva en el escritor, asistente de 5 vistas, reanudación tras corte | `flex_system/flex_reset*`, `flex_storage` (exclusivo), `flex_factory_ui.c` | host (15 cortes) + escena `fabrica` |
+| Primera configuración (OOBE): idioma en vivo, nombre del equipo con su teclado, fin en el bloqueo; borra el marcador de un restablecimiento terminado. Falta el paso de Flex Account (Fases 6–7) | `flex_oobe_*.c` | host (20 000 teclas frente a Arduino) + escena `oobe` |
+| Avisos: no salen encima del apagado, el restablecimiento ni la primera configuración (como `fpbScreenAllows`); esperan en la cola | `flex_notif.c` | escenas `fabrica` y `oobe` (mutación) |
 
 ## En curso / pendiente (orden de trabajo)
 
@@ -39,7 +41,7 @@ source ~/esp/env.sh && tools/build.sh --rev v3   # firmware (no graba nada)
    comprobación por hallazgo con su mutación). Dimensiones nunca ejecutadas:
    memoria, fidelidad a Arduino, arranque/pruebas.
 2. Fase 3, shell restante: sesiones de app (§14),
-   memoria y "Optimizar" (§17), OOBE, edición/personalización del escritorio y menús,
+   memoria y "Optimizar" (§17), edición/personalización del escritorio y menús,
    kiosco, arranque (splash/banda forense).
 3. Fase 3, apps (las 19 abren hoy "Pendiente de migrar"): marco común de apps → Ajustes,
    Almacenamiento/Explorador, Reloj, Calculadora, Calendario, Notas, Paint, Clima,
@@ -66,4 +68,4 @@ conservador ≈420 h de trabajo efectivo. Validación en la placa aparte (≈20�
 conjuntas, depende de grabar con autorización). Base: tamaño del código Arduino que
 queda frente al ritmo medido en las Fases 0–3 (ver el informe de auditoría del 10-10).
 
-Última actualización: restablecimiento de fábrica (Fase 3).
+Última actualización: primera configuración (Fase 3).

@@ -393,8 +393,8 @@ static void launch_cancel(void *ctx)
 void flex_app_launch(int id, const lv_area_t *from_icon)
 {
     if (!flex_app_def(id) || s_state == FLEX_SH_LOCK || s_state == FLEX_SH_AUTH || s_state == FLEX_SH_POWEROFF ||
-        s_state == FLEX_SH_SAFE || s_state == FLEX_SH_FACTORY) {
-        return;   // bloqueado, tecleando una clave, apagando o en la pantalla de Modo seguro
+        s_state == FLEX_SH_SAFE || s_state == FLEX_SH_FACTORY || s_state == FLEX_SH_OOBE) {
+        return;   // bloqueado, clave, apagando, Modo seguro, restableciendo o primera configuracion
     }
     if (!flex_safe_app_allowed(id)) {
         flex_safe_deny_app(id);   // Modo seguro: solo la lista blanca
@@ -439,7 +439,7 @@ void flex_sys_home(void)
     if (s_state == FLEX_SH_APP) {
         flex_app_close();
     } else if (s_state != FLEX_SH_LOCK && s_state != FLEX_SH_AUTH && s_state != FLEX_SH_POWEROFF &&
-               s_state != FLEX_SH_SAFE && s_state != FLEX_SH_FACTORY) {
+               s_state != FLEX_SH_SAFE && s_state != FLEX_SH_FACTORY && s_state != FLEX_SH_OOBE) {
         flex_shell_show_home();
     }
 }
@@ -447,7 +447,7 @@ void flex_sys_home(void)
 void flex_sys_recents(void)
 {
     if (s_state == FLEX_SH_LOCK || s_state == FLEX_SH_AUTH || s_state == FLEX_SH_POWEROFF || s_state == FLEX_SH_SAFE ||
-        s_state == FLEX_SH_FACTORY) {
+        s_state == FLEX_SH_FACTORY || s_state == FLEX_SH_OOBE) {
         return;
     }
     if (s_state == FLEX_SH_OVERLAY && s_overlay && s_overlay->on_recents) {
@@ -523,8 +523,8 @@ void flex_shell_show_home(void)
 
 void flex_shell_lock(void)
 {
-    if (flex_poweroff_running() || flex_factory_active()) {
-        return;   // apagando o restableciendo: nada lo interrumpe (y nada deberia pedirlo)
+    if (flex_poweroff_running() || flex_factory_active() || flex_oobe_active()) {
+        return;   // apagando, restableciendo o configurando: nada lo interrumpe
     }
     flex_auth_abort();   // una clave a medias no sobrevive a bloquear
     flex_poweroff_close_now();
@@ -571,6 +571,14 @@ void flex_shell_safe_end(void)
         flex_home_refresh();   // la pildora "Modo seguro"
         flex_shell_show_home();
     }
+}
+
+void flex_shell_oobe_begin(void)
+{
+    flex_qs_close_now();
+    flex_notif_center_close_now();
+    s_state = FLEX_SH_OOBE;
+    flex_navbar_set_ctx(FLEX_NAV_HIDDEN);
 }
 
 void flex_shell_factory_begin(void)
@@ -699,6 +707,8 @@ void flex_shell_start(void)
         flex_factory_resume_boot();   // un borrado a medias se termina antes que nada
     } else if (flex_safe_mode()) {
         flex_safe_open();   // Modo seguro: directo a su pantalla, sin bloqueo (las filas piden la clave)
+    } else if (!flex_cfg_get_bool("oobe", false)) {
+        flex_oobe_start();   // placa virgen o recien restablecida
     } else {
         // Primer arranque tras un restablecimiento: aparato nuevo. Arduino borra el
         // marcador al entrar al OOBE; sin OOBE migrado todavia, se borra aqui.

@@ -150,6 +150,8 @@ int main(int argc, char **argv)
     lv_indev_set_type(in, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(in, indev_read);
     flex_touch_lvgl_tune(in);   // los mismos umbrales de toque que el firmware
+    // Un aparato ya configurado (la escena "oobe" prueba la primera configuracion)
+    flex_cfg_set_bool("oobe", true);
 
     int fails = 0;
     for (int i = 0; sim_scenes[i].name; i++) {

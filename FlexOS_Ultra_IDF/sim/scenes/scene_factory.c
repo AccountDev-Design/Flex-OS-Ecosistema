@@ -148,11 +148,20 @@ bool scene_factory_run(void)
     // 2) desde una app: Cancelar vuelve a la app
     flex_app_open(IC_NOTAS, NULL);
     sim_run(500);
+    // un aviso a la vista se retira al abrir el asistente (nunca encima) y vuelve despues
+    flex_notify("Aviso antes del asistente", NULL);
+    sim_run(600);
+    CHK(flex_notif_banner_visible());
     flex_factory_reset_open(false);
-    sim_run(200);
+    sim_run(400);
+    CHK(!flex_notif_banner_visible());
     sim_tap(129, 733);
     sim_run(300);
     CHK(flex_shell_state() == FLEX_SH_APP && flex_app_current() == IC_NOTAS);
+    sim_run(600);
+    CHK(flex_notif_banner_visible());
+    sim_run(9000);
+    CHK(!flex_notif_banner_visible() && flex_notif_queue_len() == 0);
 
     // 3) sin clave: escribir RESTABLECER (solo esa palabra habilita Continuar)
     flex_factory_reset_open(false);

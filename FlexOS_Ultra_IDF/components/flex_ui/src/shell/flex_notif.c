@@ -119,8 +119,11 @@ static bool center_busy(void);
 static bool screen_allows(void)
 {
     flex_shell_state_t st = flex_shell_state();
-    if (st == FLEX_SH_LOCK || st == FLEX_SH_AUTH) {
-        return false;   // pantallas seguras: el aviso espera
+    if (st != FLEX_SH_HOME && st != FLEX_SH_APP && st != FLEX_SH_OVERLAY) {
+        // bloqueo, clave, apagado, Modo seguro, restablecimiento, primera
+        // configuracion: el aviso espera (fpbScreenAllows, FlexPhone_Overlay.h:316).
+        // Cuando existan, tambien: Personalizar inicio, Optimizar, OTA y Modo PC.
+        return false;
     }
     if (flex_power_suspended() || flex_shell_transition_active()) {
         return false;

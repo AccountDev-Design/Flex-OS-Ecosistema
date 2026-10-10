@@ -16,6 +16,7 @@ bool scene_poweroff_run(void);
 bool scene_safe_run(void);
 bool scene_regress_run(void);
 bool scene_factory_run(void);
+bool scene_oobe_run(void);
 
 const sim_scene_t sim_scenes[] = {
     {"galeria", scene_gallery_run},
@@ -31,6 +32,7 @@ const sim_scene_t sim_scenes[] = {
     {"seguro", scene_safe_run},
     {"regresiones", scene_regress_run},
     {"fabrica", scene_factory_run},
+    {"oobe", scene_oobe_run},
     {"apagado", scene_poweroff_run},
     {NULL, NULL},
 };
