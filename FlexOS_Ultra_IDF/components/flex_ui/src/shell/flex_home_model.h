@@ -96,6 +96,28 @@ int  flex_home_dots_y(void);
 int  flex_home_slot_count(void);
 void flex_home_wg_rect(const flex_home_wg_t *w, int *x, int *y, int *ww, int *hh);
 uint32_t flex_home_cell_mask(int page, int skip_wg);
+
+// Modo edicion (01a §8): la misma logica que Arduino (Home.h:1894-2046, Widgets.h:348-445)
+#define FLEX_HOME_BAND_BOT_MAX 596
+#define FLEX_HOME_ED_EDGE_W    34
+#define FLEX_HOME_ED_EDGE_MS   700
+typedef struct {
+    int dir;
+    uint32_t ms;
+} flex_home_edge_t;
+bool flex_home_wg_place_ok(int page, int type, int c, int r, int w, int h, int skip_wg);
+void flex_home_wg_limits(int type, int *min_w, int *max_w, int *min_h, int *max_h);
+bool flex_home_wg_can_resize(int type);
+int  flex_home_wg_at(int page, int px, int py);
+void flex_home_wg_remove(int page, int idx);
+int  flex_home_wg_to_page(int src, int idx, int dst);
+int  flex_home_slot_at(int px, int py);                           // edSlotAt (-1 fuera)
+bool flex_home_layout_cell_at(int px, int py, int *c, int *r);    // fila 0 = cabecera
+void flex_home_ed_move(int page, int from, int to);               // edMove
+int  flex_home_first_free_cell(int page);
+int  flex_home_band_bot(void);                                    // homeBandBot
+// -1/+1 cuando toca cambiar de pagina, 0 si no
+int  flex_home_ed_edge(flex_home_edge_t *e, int x, int page, int page_n, uint32_t now);
 static inline int flex_home_idx(int page, int local) { return page * FLEX_HOME_STRIDE + local; }
 static inline bool flex_home_is_pkg(uint8_t v) { return v >= FLEX_HOME_PKG_BASE && v != FLEX_HOME_EMPTY; }
 

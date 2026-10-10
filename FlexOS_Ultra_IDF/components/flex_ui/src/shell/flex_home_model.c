@@ -269,6 +269,214 @@ static bool wg_place_ok(int page, int type, int c, int r, int w, int h, int skip
     return wg_size_ok(type, r, w, h) && wg_fits(page, c, r, w, h, skip_wg);
 }
 
+// ---- Modo edicion: widgets (Widgets.h:348-445) ------------------------------------------
+bool flex_home_wg_place_ok(int page, int type, int c, int r, int w, int h, int skip_wg)
+{
+    return wg_place_ok(page, type, c, r, w, h, skip_wg);
+}
+
+// homeWgSpotFor: primer hueco por filas, de arriba abajo y de izquierda a derecha
+static bool wg_spot_for(int page, int type, int w, int h, int skip_wg, int *oc, int *orow)
+{
+    int S, gx0, gy0, cs, rs, cols, rows;
+    flex_home_grid(&S, &gx0, &gy0, &cs, &rs, &cols, &rows);
+    for (int r = 0; r + h <= rows + 1; r++) {
+        for (int c = 0; c + w <= cols; c++) {
+            if (wg_place_ok(page, type, c, r, w, h, skip_wg)) {
+                *oc = c;
+                *orow = r;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void flex_home_wg_limits(int type, int *min_w, int *max_w, int *min_h, int *max_h)
+{
+    if (type <= FLEX_WG_NONE || type >= FLEX_WG_COUNT) {
+        *min_w = *max_w = *min_h = *max_h = 1;
+        return;
+    }
+    const flex_home_wg_desc_t *d = &flex_home_wg_reg[type];
+    *min_w = d->min_w;
+    *max_w = d->max_w;
+    *min_h = d->min_h;
+    *max_h = d->max_h;
+}
+
+bool flex_home_wg_can_resize(int type)
+{
+    if (type <= FLEX_WG_NONE || type >= FLEX_WG_COUNT) {
+        return false;
+    }
+    const flex_home_wg_desc_t *d = &flex_home_wg_reg[type];
+    return d->min_w != d->max_w || d->min_h != d->max_h;
+}
+
+int flex_home_wg_at(int page, int px, int py)
+{
+    if (page < 0 || page >= FLEX_HOME_PAGES_MAX) {
+        return -1;
+    }
+    for (int k = 0; k < g_home.wg_n[page] && k < FLEX_HOME_WG_MAX; k++) {
+        if (g_home.wg[page][k].type == FLEX_WG_NONE) {
+            continue;
+        }
+        int x, y, w, h;
+        flex_home_wg_rect(&g_home.wg[page][k], &x, &y, &w, &h);
+        if (px >= x && px < x + w && py >= y && py < y + h) {
+            return k;
+        }
+    }
+    return -1;
+}
+
+void flex_home_wg_remove(int page, int idx)
+{
+    if (page < 0 || page >= FLEX_HOME_PAGES_MAX || idx < 0 || idx >= g_home.wg_n[page]) {
+        return;
+    }
+    for (int k = idx; k < g_home.wg_n[page] - 1; k++) {
+        g_home.wg[page][k] = g_home.wg[page][k + 1];
+    }
+    g_home.wg_n[page]--;
+    g_home.wg[page][g_home.wg_n[page]].type = FLEX_WG_NONE;
+}
+
+// homeWgToPage: mismo sitio y tamano; si no, primer hueco con su tamano; si no, con
+// el minimo (y una fila mas). Nunca pisa nada; -1 si no cabe o la pagina esta llena.
+int flex_home_wg_to_page(int src, int idx, int dst)
+{
+    if (src < 0 || src >= g_home.page_n || dst < 0 || dst >= g_home.page_n || src == dst) {
+        return -1;
+    }
+    if (idx < 0 || idx >= g_home.wg_n[src] || g_home.wg_n[dst] >= FLEX_HOME_WG_MAX) {
+        return -1;
+    }
+    flex_home_wg_t w = g_home.wg[src][idx];
+    int c = w.col, r = w.row, ww = w.w, hh = w.h;
+    if (!wg_place_ok(dst, w.type, c, r, ww, hh, -1)) {
+        if (!wg_spot_for(dst, w.type, ww, hh, -1, &c, &r)) {
+            ww = flex_home_wg_reg[w.type].min_w;
+            hh = flex_home_wg_reg[w.type].min_h;
+            if (!wg_spot_for(dst, w.type, ww, hh, -1, &c, &r)) {
+                hh++;
+                if (hh > flex_home_wg_reg[w.type].max_h || !wg_spot_for(dst, w.type, ww, hh, -1, &c, &r)) {
+                    return -1;
+                }
+            }
+        }
+    }
+    flex_home_wg_t *d = &g_home.wg[dst][g_home.wg_n[dst]];
+    *d = (flex_home_wg_t){w.type, (uint8_t)c, (uint8_t)r, (uint8_t)ww, (uint8_t)hh};
+    g_home.wg_n[dst]++;
+    flex_home_wg_remove(src, idx);
+    return g_home.wg_n[dst] - 1;
+}
+
+// ---- Modo edicion: rejilla (Home.h:1894-1938) ----------------------------------------------
+int flex_home_slot_at(int px, int py)
+{
+    int S, gx0, gy0, cs, rs, cols, rows;
+    flex_home_grid(&S, &gx0, &gy0, &cs, &rs, &cols, &rows);
+    if (py < gy0) {
+        return -1;
+    }
+    int c = px / cs, r = (py - gy0) / rs;
+    if (c < 0 || c >= cols || r < 0 || r >= rows) {
+        return -1;
+    }
+    int slot = r * cols + c;
+    return slot < flex_home_slot_count() ? slot : -1;
+}
+
+bool flex_home_layout_cell_at(int px, int py, int *c, int *r)
+{
+    int S, gx0, gy0, cs, rs, cols, rows;
+    flex_home_grid(&S, &gx0, &gy0, &cs, &rs, &cols, &rows);
+    if (cs < 1) {
+        return false;
+    }
+    *c = px / cs;
+    if (px < 0 || *c >= cols) {
+        return false;
+    }
+    int g_top = gy0 - 6;
+    if (py >= FLEX_HOME_HDR_Y && py < g_top) {
+        *r = 0;
+        return true;
+    }
+    if (py < g_top) {
+        return false;
+    }
+    int i = (py - g_top) / rs;
+    if (i >= rows) {
+        return false;
+    }
+    *r = i + 1;
+    return true;
+}
+
+// edMove: reinserta el icono desplazando los de en medio
+void flex_home_ed_move(int page, int from, int to)
+{
+    int cells = flex_home_slot_count();
+    if (from == to || from < 0 || to < 0 || from >= cells || to >= cells) {
+        return;
+    }
+    uint8_t v = g_home.order[flex_home_idx(page, from)];
+    if (from < to) {
+        for (int i = from; i < to; i++) {
+            g_home.order[flex_home_idx(page, i)] = g_home.order[flex_home_idx(page, i + 1)];
+        }
+    } else {
+        for (int i = from; i > to; i--) {
+            g_home.order[flex_home_idx(page, i)] = g_home.order[flex_home_idx(page, i - 1)];
+        }
+    }
+    g_home.order[flex_home_idx(page, to)] = v;
+}
+
+// Primera celda de iconos libre (ni icono ni widget) de la pagina, o -1
+int flex_home_first_free_cell(int page)
+{
+    uint32_t occ = flex_home_cell_mask(page, -1);
+    for (int i = 0; i < flex_home_slot_count(); i++) {
+        if (!(occ & (1u << i))) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int flex_home_band_bot(void)
+{
+    int y = flex_home_dots_y() + 18;
+    return y > FLEX_HOME_BAND_BOT_MAX ? FLEX_HOME_BAND_BOT_MAX : y;
+}
+
+// edEdgeCheck: sostener contra un borde lateral ED_EDGE_MS cambia a la pagina vecina
+int flex_home_ed_edge(flex_home_edge_t *e, int x, int page, int page_n, uint32_t now)
+{
+    int dir = 0;
+    if (x <= FLEX_HOME_ED_EDGE_W) {
+        dir = -1;
+    } else if (x >= 480 - FLEX_HOME_ED_EDGE_W) {
+        dir = 1;
+    }
+    if (dir == 0 || page + dir < 0 || page + dir >= page_n) {
+        e->dir = 0;
+        return 0;
+    }
+    if (e->dir != dir) {
+        e->dir = dir;
+        e->ms = now;
+        return 0;
+    }
+    return now - e->ms > FLEX_HOME_ED_EDGE_MS ? dir : 0;
+}
+
 // homeWgNormalize (Widgets.h:447)
 static void wg_normalize(void)
 {

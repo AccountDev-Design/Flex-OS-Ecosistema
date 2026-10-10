@@ -15,7 +15,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 0 | Infraestructura: proyecto, sdkconfig por revisión, particiones provisionales, herramientas | Hecha | `docs/FASE_0_1_INFORME.md` |
 | 1 | Pantalla ST7701 por MIPI-DSI, 2 framebuffers, LVGL DIRECT, GT911, pantalla de prueba | Hecha | `docs/FASE_0_1_INFORME.md` |
 | 2 | Arquitectura base: bus de eventos, buzón de UI, almacenamiento (NVS + LittleFS compatibles), ajustes, monitor del sistema, lógica portable | Hecha | `docs/FASE_2_INFORME.md` |
-| 3 | Interfaz completa en LVGL | En curso (shell: bloqueo, clave, escritorio, caja de apps, recientes, energía, teclado, panel rápido, avisos: banner, Centro de notificaciones y No molestar; apagado completo con deep sleep y filtro de encendido; Modo seguro; restablecimiento de fábrica; primera configuración; widgets como Arduino; menú contextual del escritorio; Modo kiosco). Las 19 apps siguen sin migrar (pantalla "Pendiente de migrar") | `docs/spec/` |
+| 3 | Interfaz completa en LVGL | En curso (shell: bloqueo, clave, escritorio, caja de apps, recientes, energía, teclado, panel rápido, avisos: banner, Centro de notificaciones y No molestar; apagado completo con deep sleep y filtro de encendido; Modo seguro; restablecimiento de fábrica; primera configuración; widgets como Arduino; menú contextual del escritorio; Modo kiosco; Modo edición del escritorio). Las 19 apps siguen sin migrar (pantalla "Pendiente de migrar") | `docs/spec/` |
 | 4 | Liquid Glass (3 niveles) | Parcial: superficies de vidrio sobre fondo y sobre color liso en uso; bandas visibles y PPA sin medir | `docs/spec/02` |
 | 5 | Táctil y gestos | Parcial: arbitraje antes de LVGL, bordes del sistema, suspensión con dos dedos; falta el veto al teclear y los umbrales de toque de Arduino | `docs/spec/01b` |
 | 6 | Wi-Fi por ESP32-C6 (esp-hosted) | Pendiente | |
@@ -35,7 +35,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 
 | Funcionalidad | Arduino | ESP-IDF | Estado | Hardware probado |
 |---|---|---|---|---|
-| Home | Escritorio por páginas, widgets, edición | Escritorio LVGL (páginas, dock, widgets), bloqueo, clave, caja de apps, Recientes, panel rápido, avisos (banner + Centro + No molestar), menú contextual, Modo kiosco; edición del escritorio y Personalizar pendientes | En curso (Fase 3) | NO |
+| Home | Escritorio por páginas, widgets, edición | Escritorio LVGL (páginas, dock, widgets), bloqueo, clave, caja de apps, Recientes, panel rápido, avisos (banner + Centro + No molestar), menú contextual, Modo kiosco, Modo edición; Personalizar inicio pendiente | En curso (Fase 3) | NO |
 | Interfaz LVGL | Motor gráfico propio (no se reutiliza) | LVGL 9.6 DIRECT, 2 FB en PSRAM, solo LVGL dibuja (`check_lvgl_only.py`) | Base hecha (Fase 1); pantallas pendientes | NO |
 | Liquid Glass | Desenfoque propio con caché | Superficies de vidrio LVGL (fondo desenfocado, tinte adaptativo, luz y borde); bandas visibles | Parcial (Fase 4) | NO |
 | Táctil | GT911 en el bucle | GT911 en tarea propia, 5 dedos, recuperación del bus; arbitraje del sistema antes de LVGL (bordes, suspensión) | Parcial (Fases 1 y 5) | NO |
@@ -66,6 +66,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 3 (en curso: + primera configuración) | `v3` dev | 1 372 432 B | 52,4 % | 32,7 % |
 | 3 (en curso: + revisión 5, widgets como Arduino) | `v3` dev | 1 377 584 B | 52,6 % | 32,8 % |
 | 3 (en curso: + menú contextual y Modo kiosco) | `v3` dev | 1 384 400 B | 52,8 % | 33,0 % |
+| 3 (en curso: + Modo edición del escritorio) | `v3` dev | 1 391 504 B | 53,1 % | 33,2 % |
 
 La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la interfaz completa
 (Fase 15). No se ha grabado nada.
@@ -108,7 +109,10 @@ La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la
 | Kiosco: al salir | La app clavada queda "en marcha" con el escritorio delante | Se suspende por el camino normal (pasa a Recientes) | docs/spec/01c §12.5 |
 | Kiosco: textos | Sin tildes ("tactil", "manten") | Con tildes | Visual |
 | Candados de app: guardado | `applockm` se leía en 16 bits: los de Flex Phone, Device Care y Música se perdían al reiniciar | 32 bits; se guarda con el escritorio | docs/spec/01a §5.13 |
-| Menú contextual: "Modo edición" y "Pantalla completa" | Activas | Se ven atenuadas hasta migrar la edición del escritorio (01a §8) y las apps inmersivas (marco de apps) | Pendiente |
+| Menú contextual: "Pantalla completa" | Activa en el Navegador | Se ve atenuada hasta migrar las apps inmersivas (marco de apps) | Pendiente |
+| Modo edición: quitar un widget | Tocar la insignia lo quita y, al soltar, el toque cuenta como "en vacío": se sale del Modo edición | Se quita y se sigue editando | docs/spec/01a §8 (toque consumido) |
+| Modo edición: diseño bloqueado | Tocar un widget lo selecciona y al soltar se deselecciona (no se ve nunca) | Queda seleccionado (lo que dice la especificación) | docs/spec/01a §8 |
+| Modo edición: suspender | Sale del modo | Igual; también al bloquear y con Atrás/Inicio/Recientes | — |
 | Widgets: agujas del reloj analógico | Trazo con antialias de 2,4 px (hora) y 1,8 px (minutos) | 2 px las dos (LVGL usa anchos enteros); la hora se distingue por la longitud, como en Arduino | Visual |
 | Candado de app pedido desde otra app (rueda del panel rápido) | Cancelar la clave llevaba a Inicio | Vuelve a la app que estaba delante (ir a Inicio la dejaba huérfana y Recientes se trababa) | Revisión adversarial 4 |
 | Umbrales de toque | Toque = < 16 px y < 550 ms | Igual, aplicado al indev de LVGL (por defecto LVGL usa 10 px y 400 ms) | docs/spec/01b |

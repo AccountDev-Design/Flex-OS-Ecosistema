@@ -102,6 +102,10 @@ void flex_power_suspend(void)
         return;
     }
     flex_qs_close_now();   // qsForceClose: la cortina no sobrevive a apagar la pantalla
+    if (flex_home_edit_active()) {
+        flex_home_edit_close_now();   // la suspension saca del Modo edicion (guardando)
+        flex_shell_overlay_end();
+    }
     S.bright = flex_display_get_brightness();
     if (!S.timer) {
         S.cur = S.bright;

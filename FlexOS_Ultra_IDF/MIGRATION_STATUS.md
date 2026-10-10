@@ -36,15 +36,16 @@ source ~/esp/env.sh && tools/build.sh --rev v3   # firmware (no graba nada)
 | Avisos: no salen encima del apagado, el restablecimiento ni la primera configuración (como `fpbScreenAllows`); esperan en la cola | `flex_notif.c` | escenas `fabrica` y `oobe` (mutación) |
 | Revisión 5 (memoria, fidelidad, arranque; las tres dimensiones que nunca se habían ejecutado): memoria sin hallazgos; 6 hallazgos verificados y corregidos: contador del Modo seguro grabado antes de seguir (alta), "Reiniciar normalmente" sin reinicio a ciegas, desliz del bloqueo solo vertical, caja no se abre desde la barra de estado, fila "Añadir a inicio" coherente, widgets como Arduino | `flex_safeboot.c`, `flex_lock.c`, `flex_home*.c`, `flex_drawer.c` | host `boot_fw` (código de arranque real sobre NVS falsa) + escenas `regresiones`, `seguro`, `widgets` (mutación de cada uno) |
 | Menú contextual del escritorio (candado de app con la clave, kiosco; edición y pantalla completa atenuadas hasta sus bloques) y Modo kiosco completo (zona excluida, candado, vetos de 01c §12.4, salida con la clave, persistencia, arranque directo) | `flex_home_ctx.c`, `flex_kiosk*.c`, `flex_touch_feed.c` (gancho) | host (carga, zona y salida frente a Arduino) + escena `kiosco` (mutaciones) |
+| Modo edición del escritorio: temblor y resorte, reordenar con 400 ms, llevar iconos y widgets a la página vecina (700 ms en el borde), seleccionar / mover / redimensionar / quitar widgets, diseño bloqueado, salida guardando | `flex_home_edit.c`, `flex_home_model.c` | host (24 000 operaciones frente a Arduino) + escena `edicion` (mutaciones) |
 | Widgets del escritorio como `wgDrawCell`: esfera con agujas, rótulos, barra de almacenamiento, antena, Clima de una fila con su material; datos en su sitio cada 2 s; solo Cámara, Clima y Calendario se tocan | `flex_home_widgets.c` | escena `widgets` |
 
 ## En curso / pendiente (orden de trabajo)
 
 1. Revisiones 4 y 5 cerradas (todas las dimensiones ejecutadas al menos una vez). La
    siguiente revisión, al cerrar el marco de apps y las primeras apps.
-2. Fase 3, shell restante: Modo edición del escritorio (01a §8) y Personalizar inicio
-   (§10), sesiones de app (§14), memoria y "Optimizar" (§17), arranque (splash/banda
-   forense).
+2. Fase 3, shell restante: Personalizar inicio (01a §10: páginas, fondo, mis imágenes,
+   temas, widgets, ajustes de inicio, pellizco), sesiones de app (§14), memoria y
+   "Optimizar" (§17), arranque (splash/banda forense).
 3. Fase 3, apps (las 19 abren hoy "Pendiente de migrar"): marco común de apps → Ajustes,
    Almacenamiento/Explorador, Reloj, Calculadora, Calendario, Notas, Paint, Clima,
    Galería (+editores, visor), Multimedia, Música, Cámara, Device Care, Flex Compass,
@@ -65,11 +66,11 @@ source ~/esp/env.sh && tools/build.sh --rev v3   # firmware (no graba nada)
 
 ## Estimación del trabajo restante (actualizar al cerrar cada bloque)
 
-Implementación (sin validación en la placa): optimista ≈176 h, realista ≈264 h,
-conservador ≈396 h de trabajo efectivo (desde la auditoría del 10-10 se han cerrado
-la primera configuración, la revisión 5, los widgets, el menú contextual y el kiosco:
-≈16 h del escenario realista). Validación en la placa aparte (≈20–40 h
+Implementación (sin validación en la placa): optimista ≈172 h, realista ≈258 h,
+conservador ≈387 h de trabajo efectivo (desde la auditoría del 10-10 se han cerrado
+la primera configuración, la revisión 5, los widgets, el menú contextual, el kiosco y
+el Modo edición: ≈22 h del escenario realista). Validación en la placa aparte (≈20–40 h
 conjuntas, depende de grabar con autorización). Base: tamaño del código Arduino que
 queda frente al ritmo medido en las Fases 0–3 (ver el informe de auditoría del 10-10).
 
-Última actualización: menú contextual del escritorio y Modo kiosco (Fase 3).
+Última actualización: Modo edición del escritorio (Fase 3).

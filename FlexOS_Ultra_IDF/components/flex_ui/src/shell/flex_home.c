@@ -320,6 +320,19 @@ void flex_home_rebuild(void)
     }
 }
 
+lv_obj_t *flex_home_root_obj(void)
+{
+    return s_root;
+}
+
+void flex_home_pages_show(bool on)
+{
+    if (s_pages) {
+        lv_obj_set_hidden(s_pages, !on);
+        lv_obj_set_hidden(s_dots, !on);
+    }
+}
+
 int32_t flex_home_scroll_x(void)
 {
     return s_pages ? lv_obj_get_scroll_x(s_pages) : 0;

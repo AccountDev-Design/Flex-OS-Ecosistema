@@ -162,6 +162,13 @@ bool flex_kiosk_set_active(void);
 void flex_kiosk_boot(void);           // arranque con kiosco: la app sin bloqueo
 void flex_kiosk_exit_now(void);       // tras la clave: borra el estado y va a Inicio
 bool flex_kiosk_badge_visible(void);  // pruebas
+// Modo edicion del escritorio (flex_home_edit.c)
+void flex_home_edit_enter(void);
+bool flex_home_edit_active(void);
+void flex_home_edit_close_now(void);  // bloquear o suspender: sale guardando
+int  flex_home_edit_drag(void);       // pruebas: icono agarrado (-1)
+int  flex_home_edit_wsel(void);       // pruebas: widget seleccionado (-1)
+const char *flex_home_edit_hint(void);
 // Menu contextual del escritorio (flex_home_ctx.c): pulsacion larga en un icono de la rejilla
 void flex_home_ctx_menu(int app_id, const lv_area_t *icon);
 bool flex_home_ctx_open(void);

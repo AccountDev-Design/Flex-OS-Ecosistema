@@ -562,6 +562,7 @@ void flex_shell_lock(void)
     flex_qs_close_now();
     flex_notif_center_close_now();
     flex_drawer_close_now();
+    flex_home_edit_close_now();   // el Modo edicion sale guardando (edExit)
     flex_recents_close_now();
     flex_lock_set_return_app(-1);
     suspend_fg();

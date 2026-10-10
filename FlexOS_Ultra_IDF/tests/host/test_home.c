@@ -272,3 +272,84 @@ void test_home_load(void)
     flex_home_load();
     CHECK_EQ_I(g_home.lock, (1u << 16) | (1u << 18) | 1u);
 }
+
+// ---- Modo edicion: las mismas operaciones que Arduino sobre escritorios al azar ----
+int ref_ed_op(ref_state_t *s, int op, int a, int b, int c, int out[4]);
+
+static int my_ed_op(int op, int a, int b, int c, int out[4])
+{
+    switch (op) {
+    case 0: return flex_home_slot_at(a, b);
+    case 1: { int cc = -9, rr = -9; int r = flex_home_layout_cell_at(a, b, &cc, &rr); out[0] = cc; out[1] = rr; return r; }
+    case 2: g_home.page = a; flex_home_ed_move(a, b, c); return 0;
+    case 3: return flex_home_wg_at(a, b, c);
+    case 4: flex_home_wg_remove(a, b); return 0;
+    case 5: return flex_home_wg_to_page(a, b, c);
+    case 6: return flex_home_band_bot();
+    case 7: { flex_home_wg_limits(a, &out[0], &out[1], &out[2], &out[3]); return flex_home_wg_can_resize(a); }
+    case 8: return flex_home_first_free_cell(a);
+    }
+    return 0;
+}
+
+void test_home_edit(void)
+{
+    int diffs = 0, ops = 0;
+    for (int it = 0; it < 3000; it++) {
+        ref_state_t s;
+        memset(&s, 0, sizeof(s));
+        for (int i = 0; i < FLEX_HOME_TOTAL; i++) {
+            uint32_t r = rnd() % 10;
+            s.order[i] = r < 5 ? 0xFF : (uint8_t)(rnd() % 19);
+        }
+        s.page_n = (uint8_t)(1 + rnd() % 5);
+        s.cols = (uint8_t)(4 + rnd() % 2);
+        s.rows = (uint8_t)(3 + rnd() % 2);
+        s.icon_sz = (uint8_t)(rnd() % 3);
+        s.fav = rnd() & 0x7FFFF;
+        for (int p = 0; p < FLEX_HOME_PAGES_MAX; p++) {
+            s.wg_n[p] = (uint8_t)(rnd() % 7);
+            for (int k = 0; k < FLEX_HOME_WG_MAX; k++) {
+                s.wg[p][k][0] = (uint8_t)(1 + rnd() % 11);
+                s.wg[p][k][1] = (uint8_t)(rnd() % 5);
+                s.wg[p][k][2] = (uint8_t)(rnd() % 5);
+                s.wg[p][k][3] = (uint8_t)(1 + rnd() % 4);
+                s.wg[p][k][4] = (uint8_t)(1 + rnd() % 3);
+            }
+        }
+        ref_home_normalize(&s);
+        to_mine(&s);
+        for (int k = 0; k < 8; k++, ops++) {
+            int op = (int)(rnd() % 9);
+            int a = (int)(rnd() % 520) - 20, b = (int)(rnd() % 820) - 10, c = (int)(rnd() % 820) - 10;
+            if (op == 2) { a = (int)(rnd() % s.page_n); b = (int)(rnd() % 22) - 1; c = (int)(rnd() % 22) - 1; }
+            if (op == 3) { a = (int)(rnd() % 6) - 1; }
+            if (op == 4) { a = (int)(rnd() % 6) - 1; b = (int)(rnd() % 8) - 1; }
+            if (op == 5) { a = (int)(rnd() % 6) - 1; b = (int)(rnd() % 8) - 1; c = (int)(rnd() % 6) - 1; }
+            if (op == 7) { a = (int)(rnd() % 14) - 1; }
+            if (op == 8) { a = (int)(rnd() % s.page_n); }
+            int ro[4] = {0}, mo[4] = {0};
+            int rr = ref_ed_op(&s, op, a, b, c, ro);
+            int mr = my_ed_op(op, a, b, c, mo);
+            if (rr != mr || memcmp(ro, mo, sizeof(ro)) || !same(&s)) {
+                if (diffs < 5) {
+                    fprintf(stderr, "edicion: op %d (%d,%d,%d) ref %d mio %d\n", op, a, b, c, rr, mr);
+                }
+                diffs++;
+                to_mine(&s);
+            }
+        }
+    }
+    CHECK_EQ_I(diffs, 0);
+
+    // edEdgeCheck: 700 ms contra un borde (34 px), solo si existe la pagina vecina
+    flex_home_edge_t e = {0, 0};
+    CHECK(flex_home_ed_edge(&e, 20, 1, 3, 1000) == 0);    // empieza a contar
+    CHECK(flex_home_ed_edge(&e, 20, 1, 3, 1700) == 0);    // 700: aun no (> 700)
+    CHECK(flex_home_ed_edge(&e, 20, 1, 3, 1701) == -1);
+    CHECK(flex_home_ed_edge(&e, 240, 1, 3, 1800) == 0 && e.dir == 0);
+    CHECK(flex_home_ed_edge(&e, 470, 2, 3, 1900) == 0 && e.dir == 0);   // ultima pagina: no hay vecina
+    CHECK(flex_home_ed_edge(&e, 446, 0, 3, 2000) == 0 && e.dir == 1);  // 480-34
+    CHECK(flex_home_ed_edge(&e, 470, 0, 3, 2800) == 1);
+    printf("edicion del escritorio: %d operaciones iguales a Arduino\n", ops);
+}

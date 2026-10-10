@@ -33,7 +33,9 @@ python3 ref/extract_arduino.py "$OUT/ref_home.inc" \
     FlexOS_Ultra_Widgets.h:WG_REG,wgRect,homeCellMask,homeHdrMask,homeWgFits,homeWgFreeOfWidgets,homeWgSizeOk,homeWgPlaceOk,homeWgNormalize \
     FlexOS_Ultra_Home.h:homeFirstFree,homePageAppendQuiet,homeFirstFreeGrow,gHomePkgSeen,homePkgSeen,homePkgMarkSeen,homeOrderNormalize \
     FlexOS_Ultra_Prefs.h:appCanHide \
-    FlexOS_Ultra_AppDrawer.h:drwFavToggle,drwHideToggle
+    FlexOS_Ultra_AppDrawer.h:drwFavToggle,drwHideToggle \
+    FlexOS_Ultra_Widgets.h:homeWgSpotFor,wgSizeLimits,wgCanResize,homeWgAt,homeWgRemove,homeWgToPage \
+    FlexOS_Ultra_Home.h:edSlot,edSlotAt,homeLayoutCellAt,edMove,HOME_BAND_BOT_MAX,homeBandBot
 
 python3 ref/extract_arduino.py "$OUT/ref_recents.inc" \
     FlexOS_Ultra_AppSwitcher.h:SW_MAX,SW_THUMB_MAX,TH_W,TH_H,AppTask,swTasks,swCount,swThumbTrim,captureThumb,swPush,swDropCard

@@ -29,13 +29,8 @@
 
 enum { K_LOCK = 0, K_EDIT, K_KIOSK, K_FS, K_FS_LAND };
 
-// Modo edicion y pantalla completa llegan con sus bloques (edicion del escritorio;
-// marco de apps inmersivas). Mientras no esten, sus filas se ven pero inactivas.
-__attribute__((weak)) bool flex_home_edit_available(void)
-{
-    return false;
-}
-__attribute__((weak)) void flex_home_edit_enter(void) {}
+// Pantalla completa llega con el marco de apps inmersivas: mientras no este, sus
+// filas se ven pero inactivas.
 __attribute__((weak)) bool flex_app_immersive_available(void)
 {
     return false;
@@ -63,7 +58,7 @@ static bool row_enabled(int i)
     switch (C.kind[i]) {
     case K_LOCK:
     case K_KIOSK: return flex_auth_required();   // sin clave no hay con que verificar
-    case K_EDIT: return flex_home_edit_available();
+    case K_EDIT: return true;
     default: return flex_app_immersive_available();
     }
 }

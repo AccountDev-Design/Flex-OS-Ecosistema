@@ -19,6 +19,7 @@ bool scene_factory_run(void);
 bool scene_oobe_run(void);
 bool scene_widgets_run(void);
 bool scene_kiosk_run(void);
+bool scene_edit_run(void);
 
 const sim_scene_t sim_scenes[] = {
     {"galeria", scene_gallery_run},
@@ -37,6 +38,7 @@ const sim_scene_t sim_scenes[] = {
     {"oobe", scene_oobe_run},
     {"widgets", scene_widgets_run},
     {"kiosco", scene_kiosk_run},
+    {"edicion", scene_edit_run},
     {"apagado", scene_poweroff_run},
     {NULL, NULL},
 };
