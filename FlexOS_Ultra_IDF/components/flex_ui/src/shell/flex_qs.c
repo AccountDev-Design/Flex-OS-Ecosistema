@@ -4,7 +4,7 @@
 // Capa GLOBAL (escritorio o app) en lv_layer_top. La cortina descubre el panel
 // desde arriba: el contenido esta fijo en la pantalla y el borde movil decide
 // cuanto se ve (la raiz mide 480 x panel_y y recorta a sus hijos). Todo el tacto
-// del panel llega por flex_touch_set_sys_hook, ANTES que LVGL: la maquina de
+// del panel llega por flex_touch_add_sys_hook, ANTES que LVGL: la maquina de
 // gestos de Arduino (qpPanelTouch, qpEditTouch, qpCatTouch) se conserva tal
 // cual, con la propiedad del gesto decidida al apoyar y sin scroll de LVGL. El
 // modelo (catalogo, disposicion, maquetacion) es flex_qs_model.c, probado
@@ -144,7 +144,7 @@ static bool fs_mounted(void)
 
 // Lo que funciona AHORA en ESP-IDF. Pendientes: Wi-Fi y Sincronizar hora (Fase 6),
 // Ahorro (gestion de energia, Fase 17), Actualizaciones (Fase 14), Volumen y
-// Silencio (Fase 11), Cronometro (app), No molestar (notificaciones) y Apagar.
+// Silencio (Fase 11), Cronometro (app) y Apagar.
 static bool qs_shown(int id)
 {
     switch (id) {
@@ -157,6 +157,7 @@ static bool qs_shown(int id)
     case FLEX_QS_DEX:
     case FLEX_QS_CAMERA:
     case FLEX_QS_GALLERY:
+    case FLEX_QS_DND:   // politica del sistema (flex_notif.c), no un periferico
         return true;
     case FLEX_QS_GLASSFX:
         return flex_look()->glass;   // con el estilo Plano la intensidad no cambia nada
@@ -181,6 +182,7 @@ static bool ctl_on(int id)
     case FLEX_QS_AIRPLANE: return airplane();
     case FLEX_QS_THEME: return flex_look()->dark;   // ON = oscuro (Arduino lo tenia al reves)
     case FLEX_QS_GLASS: return flex_look()->glass;
+    case FLEX_QS_DND: return flex_notif_dnd();
     default: return false;
     }
 }
@@ -203,6 +205,8 @@ static void ctl_sub(int id, char *o, size_t n)
     case FLEX_QS_THEME: snprintf(o, n, "%s", flex_look()->dark ? "Oscuro" : "Claro"); break;
     case FLEX_QS_GLASS: snprintf(o, n, "%s", flex_look()->glass ? "Liquid Glass" : "Plano"); break;
     case FLEX_QS_BRIGHT: snprintf(o, n, "%d%%", bright()); break;
+    // Lo que de verdad pasa. "Avisos, sin sonido" llegara con el audio (Fase 11).
+    case FLEX_QS_DND: snprintf(o, n, "%s", flex_notif_dnd() ? "Sin avisos" : "Avisos normales"); break;
     case FLEX_QS_GLASSFX: {
         int v = glass_lvl();
         snprintf(o, n, "%s %d%%", v < 35 ? "Sutil" : v > 65 ? "Intenso" : "Normal", v);
@@ -215,7 +219,8 @@ static void ctl_sub(int id, char *o, size_t n)
 // Accion secundaria (pulsacion larga): la pantalla de Ajustes del control.
 static bool ctl_has_detail(int id)
 {
-    return id == FLEX_QS_AIRPLANE || id == FLEX_QS_BRIGHT || id == FLEX_QS_THEME || id == FLEX_QS_GLASS;
+    return id == FLEX_QS_AIRPLANE || id == FLEX_QS_BRIGHT || id == FLEX_QS_THEME || id == FLEX_QS_GLASS ||
+           id == FLEX_QS_DND;
 }
 
 // ---- colores (QuickPanelGlass.h:146-155, QuickPanel.h:975) -----------------------------
@@ -1099,6 +1104,7 @@ static bool exec_ctl(int id, bool detail)
         // Sin radios todavia en ESP-IDF: el estado es real (lo leera el Wi-Fi).
         flex_cfg_set_bool("airpl", !airplane());
         break;
+    case FLEX_QS_DND: flex_notif_set_dnd(!flex_notif_dnd()); break;
     case FLEX_QS_THEME: flex_theme_set_dark(!flex_look()->dark); return false;   // el aviso de tema rehace el panel
     case FLEX_QS_GLASS: flex_theme_set_glass(!flex_look()->glass); return false;
     case FLEX_QS_GLASSFX:
@@ -2079,7 +2085,7 @@ static void theme_cb(void *ctx)
 
 void flex_qs_init(void)
 {
-    flex_touch_set_sys_hook(hook);
+    flex_touch_add_sys_hook(hook, 2);
     flex_theme_listen(theme_cb, NULL);
 }
 

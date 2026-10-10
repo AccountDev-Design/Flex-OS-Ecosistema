@@ -37,4 +37,5 @@ void test_drawer(void);
 void test_kb(void);
 void test_recents(void);
 void test_qs(void);
+void test_notif(void);
 #define FLEX_APP_N_TEST 19

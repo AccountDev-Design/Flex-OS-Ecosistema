@@ -223,8 +223,7 @@ static lv_obj_t *add_icon(lv_obj_t *parent, int app, int32_t x, int32_t y, int32
     lv_obj_add_event_cb(ic, icon_cb, LV_EVENT_SHORT_CLICKED, (void *)(intptr_t)app);
     if (label) {
         lv_obj_t *l = flex_label(parent, flex_app_name(app), lf, FLEX_ONWALL);
-        lv_label_set_long_mode(l, LV_LABEL_LONG_MODE_DOTS);
-        lv_obj_set_width(l, lbl_w);
+        flex_label_one_line(l, lbl_w);
         lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_x(l, x + S / 2 - lbl_w / 2);
         flex_label_cap_y(l, y + S + 6);

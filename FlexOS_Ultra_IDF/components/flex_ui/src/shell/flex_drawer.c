@@ -367,8 +367,7 @@ static void build_grid(void)
         }
         // en la rejilla (no en la celda, de 84 px: la recortaria)
         lv_obj_t *l = flex_label(D.grid, nm, f, dim ? FLEX_ONWALL2 : FLEX_ONWALL);
-        lv_label_set_long_mode(l, LV_LABEL_LONG_MODE_DOTS);
-        lv_obj_set_width(l, COL_STEP - 14);
+        flex_label_one_line(l, COL_STEP - 14);
         lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_x(l, COL_X0 + c * COL_STEP + ICON_S / 2 - (COL_STEP - 14) / 2);
         flex_label_cap_y(l, r * ROW_STEP + ICON_S + 8);
@@ -501,8 +500,7 @@ static void open_ctx(int cell)
         }
         lv_color_t col = ctx_enabled(i) ? t->txt : t->txt2;
         lv_obj_t *l = flex_label(row, ctx_label(i), FLEX_FONT_S3, col);
-        lv_label_set_long_mode(l, LV_LABEL_LONG_MODE_DOTS);
-        lv_obj_set_width(l, CTX_W - 76);
+        flex_label_one_line(l, CTX_W - 76);
         lv_obj_set_x(l, 18);
         lv_obj_set_y(l, CTX_ROW_H / 2 - lv_font_get_line_height(FLEX_FONT_S3) / 2);
         static const flex_glyph_t gl[CTX_ROWS] = {FLEX_GLYPH_OPEN, FLEX_GLYPH_RING, FLEX_GLYPH_EYE, FLEX_GLYPH_INFO};
@@ -550,8 +548,7 @@ static void info_open(int id)
     lv_obj_set_pos(ic, 20, 20);
     lv_obj_set_clickable(ic, false);
     lv_obj_t *nm = flex_label(card, flex_app_name(id), FLEX_FONT_S3, t->txt);
-    lv_label_set_long_mode(nm, LV_LABEL_LONG_MODE_DOTS);
-    lv_obj_set_width(nm, INFO_W - 108);
+    flex_label_one_line(nm, INFO_W - 108);
     lv_obj_set_x(nm, 88);
     flex_label_cap_y(nm, 28);
     const flex_app_def_t *d = flex_app_def(id);

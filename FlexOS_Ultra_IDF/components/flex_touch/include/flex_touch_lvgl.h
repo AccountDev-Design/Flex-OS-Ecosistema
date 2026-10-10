@@ -27,8 +27,10 @@ void flex_touch_drop_all(void);
 // cuadro del arbitraje ANTES que LVGL y devuelven true mientras el episodio sea
 // suyo. Un episodio reclamado no llega a LVGL (si ya habia un objeto pulsado,
 // se suelta sin click). Solo tarea de UI.
+// Varias capas: se preguntan por orden de prioridad (menor primero) y la primera
+// que devuelve true se queda ese cuadro (banner de avisos 0, Centro 1, panel 2).
 typedef bool (*flex_touch_sys_hook_t)(const flex_arb_touch_t *t);
-void flex_touch_set_sys_hook(flex_touch_sys_hook_t hook);
+void flex_touch_add_sys_hook(flex_touch_sys_hook_t hook, int prio);
 // Una lectura del indev pasada por el arbitraje (la usan el puerto y el
 // simulador). ev: 1 cuadro nuevo con dedo, 0 cuadro nuevo sin dedos, -1 nada nuevo.
 void flex_touch_feed(lv_indev_t *indev, lv_indev_data_t *data, int ev, int x, int y, int fingers);

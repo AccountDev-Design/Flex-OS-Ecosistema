@@ -168,6 +168,7 @@ static void card(lv_obj_t *parent, int32_t y, flex_glyph_t glyph, lv_color_t acc
     lv_obj_set_x(l1, 82 - 28);
     flex_label_cap_y(l1, 9);
     lv_obj_t *l2 = flex_label(c, val, FLEX_FONT_S1, t->txt2);
+    flex_label_one_line(l2, 424 - (82 - 28) - 14);   // un titulo largo no se sale de la tarjeta
     lv_obj_set_x(l2, 82 - 28);
     flex_label_cap_y(l2, 30);
 }
@@ -212,7 +213,9 @@ static void build_content(void)
         y += 60;
     }
     if (w & LW_NOTIF) {
-        card(s_cards, y, FLEX_GLYPH_BELL, lv_color_hex(0xE6B45A), flex_t(FLEX_S_NOTIFS), flex_t(FLEX_S_NONOTIFS));
+        const char *last = flex_notif_latest_title();   // dato real: el aviso mas reciente
+        card(s_cards, y, FLEX_GLYPH_BELL, lv_color_hex(0xE6B45A), flex_t(FLEX_S_NOTIFS),
+             last ? last : flex_t(FLEX_S_NONOTIFS));
         y += 60;
     }
     (void)t;
@@ -231,6 +234,13 @@ void flex_lock_refresh(void)
     lv_label_set_text(s_clock, cs);
     lv_label_set_text(s_date, ds);
     lv_image_set_src(s_wall, flex_wallmgr_image(FLEX_WALL_LOCK));
+}
+
+void flex_lock_refresh_widgets(void)
+{
+    if (s_root) {
+        build_content();
+    }
 }
 
 void flex_lock_drop_in(void)

@@ -322,6 +322,7 @@ void flex_app_open(int id, const lv_area_t *from_icon)
         suspend_fg();
     }
     flex_qs_close_now();
+    flex_notif_center_close_now();
     s_fg = id;
     s_state = FLEX_SH_APP;
     flex_navbar_set_ctx(FLEX_NAV_APP);
@@ -332,6 +333,7 @@ void flex_app_open(int id, const lv_area_t *from_icon)
 void flex_app_close(void)
 {
     flex_qs_close_now();
+    flex_notif_center_close_now();
     int id = s_fg;
     if (id < 0) {
         flex_shell_show_home();
@@ -434,6 +436,7 @@ void flex_sys_recents(void)
         return;
     }
     flex_qs_close_now();
+    flex_notif_center_close_now();
     if (s_state == FLEX_SH_APP) {
         suspend_fg();
         flex_shell_show_home();
@@ -484,6 +487,7 @@ lv_obj_t *flex_shell_screen(void)
 void flex_shell_show_home(void)
 {
     flex_qs_close_now();
+    flex_notif_center_close_now();
     lv_obj_set_hidden(s_shield, true);
     s_state = FLEX_SH_HOME;
     lv_obj_set_hidden(s_home, false);
@@ -495,6 +499,7 @@ void flex_shell_lock(void)
 {
     flex_auth_abort();   // una clave a medias no sobrevive a bloquear
     flex_qs_close_now();
+    flex_notif_center_close_now();
     flex_drawer_close_now();
     flex_recents_close_now();
     flex_lock_set_return_app(-1);
@@ -597,7 +602,13 @@ void flex_shell_start(void)
     lv_screen_load(s_scr);
     flex_power_init();
     flex_qs_init();
+    flex_notif_init();
     flex_shell_lock();
+}
+
+bool flex_shell_transition_active(void)
+{
+    return s_tr.card && !lv_obj_is_hidden(s_tr.card);
 }
 
 uint32_t flex_app_last_used(int id)

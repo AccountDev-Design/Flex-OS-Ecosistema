@@ -8,7 +8,12 @@ static bool s_init;
 static flex_touch_gesture_cb_t s_cb;
 static lv_indev_t *s_indev;
 static bool s_lv_down;   // lo ultimo que vio LVGL
-static flex_touch_sys_hook_t s_hook;
+#define HOOK_MAX 4
+static struct {
+    flex_touch_sys_hook_t fn;
+    int prio;
+} s_hooks[HOOK_MAX];
+static int s_nhooks;
 
 flex_arb_t *flex_touch_arb(void)
 {
@@ -24,9 +29,34 @@ void flex_touch_set_gesture_cb(flex_touch_gesture_cb_t cb)
     s_cb = cb;
 }
 
-void flex_touch_set_sys_hook(flex_touch_sys_hook_t hook)
+void flex_touch_add_sys_hook(flex_touch_sys_hook_t hook, int prio)
 {
-    s_hook = hook;
+    for (int i = 0; i < s_nhooks; i++) {
+        if (s_hooks[i].fn == hook) {
+            return;
+        }
+    }
+    if (s_nhooks >= HOOK_MAX) {
+        return;
+    }
+    int at = s_nhooks;
+    while (at > 0 && s_hooks[at - 1].prio > prio) {
+        s_hooks[at] = s_hooks[at - 1];
+        at--;
+    }
+    s_hooks[at].fn = hook;
+    s_hooks[at].prio = prio;
+    s_nhooks++;
+}
+
+static bool hooks_claim(const flex_arb_touch_t *t)
+{
+    for (int i = 0; i < s_nhooks; i++) {
+        if (s_hooks[i].fn(t)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Distancia (con signo) de un eje al punto de encaje mas cercano, sin limitarse
@@ -96,7 +126,7 @@ void flex_touch_feed(lv_indev_t *indev, lv_indev_data_t *data, int ev, int x, in
     flex_arb_t *a = flex_touch_arb();
     int evt = flex_arb_poll(a, ev, x, y, fingers, lv_tick_get());
     const flex_arb_touch_t *t = &a->t;
-    if (s_hook && !a->suspended && s_hook(t)) {
+    if (!a->suspended && hooks_claim(t)) {
         // El episodio es de una capa del sistema: LVGL no lo ve. Sigue siendo
         // actividad (el bloqueo por inactividad no puede saltar con el dedo encima).
         if (t->down) {

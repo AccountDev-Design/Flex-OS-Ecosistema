@@ -15,7 +15,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 0 | Infraestructura: proyecto, sdkconfig por revisión, particiones provisionales, herramientas | Hecha | `docs/FASE_0_1_INFORME.md` |
 | 1 | Pantalla ST7701 por MIPI-DSI, 2 framebuffers, LVGL DIRECT, GT911, pantalla de prueba | Hecha | `docs/FASE_0_1_INFORME.md` |
 | 2 | Arquitectura base: bus de eventos, buzón de UI, almacenamiento (NVS + LittleFS compatibles), ajustes, monitor del sistema, lógica portable | Hecha | `docs/FASE_2_INFORME.md` |
-| 3 | Interfaz completa en LVGL | En curso (shell: bloqueo, clave, escritorio, caja de apps, recientes, energía, teclado, panel rápido) | `docs/spec/` |
+| 3 | Interfaz completa en LVGL | En curso (shell: bloqueo, clave, escritorio, caja de apps, recientes, energía, teclado, panel rápido, avisos: banner, Centro de notificaciones y No molestar) | `docs/spec/` |
 | 4 | Liquid Glass (3 niveles) | Pendiente | |
 | 5 | Táctil y gestos | Pendiente | |
 | 6 | Wi-Fi por ESP32-C6 (esp-hosted) | Pendiente | |
@@ -35,7 +35,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 
 | Funcionalidad | Arduino | ESP-IDF | Estado | Hardware probado |
 |---|---|---|---|---|
-| Home | Escritorio por páginas, widgets, edición | — | Pendiente (Fase 3) | NO |
+| Home | Escritorio por páginas, widgets, edición | Escritorio LVGL (páginas, dock, widgets), bloqueo, clave, caja de apps, Recientes, panel rápido, avisos (banner + Centro + No molestar); edición del escritorio pendiente | En curso (Fase 3) | NO |
 | Interfaz LVGL | Motor gráfico propio (no se reutiliza) | LVGL 9.6 DIRECT, 2 FB en PSRAM, solo LVGL dibuja (`check_lvgl_only.py`) | Base hecha (Fase 1); pantallas pendientes | NO |
 | Liquid Glass | Desenfoque propio con caché | — | Pendiente (Fase 4) | NO |
 | Táctil | GT911 en el bucle | GT911 en tarea propia, 5 dedos, recuperación del bus | Hecho (Fase 1); gestos pendientes | NO |
@@ -60,6 +60,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 1 | `lt_v3` dev | ver `docs/FASE_0_1_INFORME.md` | | |
 | 2 | `lt_v3` dev | 918 864 B | 35,1 % | 21,9 % |
 | 2 | `v3` dev | 921 056 B | 35,1 % | 22,0 % |
+| 3 (en curso: shell, panel rápido, avisos) | `v3` dev | 1 319 472 B | 50,3 % | 31,5 % |
 
 La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la interfaz completa
 (Fase 15). No se ha grabado nada.
@@ -85,3 +86,6 @@ La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la
 | Panel rápido: borde derecho | Exige el cuadro del apoyo y nunca se dispara | Se evalúa con el dedo moviéndose hacia dentro (más que en vertical); lo que LVGL estuviera desplazando vuelve a su punto de encaje | docs/spec/01b §5.1 |
 | Panel rápido: "Modo oscuro" | Encendido = tema CLARO | Encendido = oscuro | docs/spec/01b §5.3 |
 | Panel rápido: fondo sobre una app | Captura de 768 KB de la app, reducida y desenfocada | El color de ventana de la app bajo el mismo velo (el desenfoque de una pantalla de app es casi su color); sobre el escritorio, su fondo ya desenfocado | Sin 768 KB extra de PSRAM por cada apertura |
+| Avisos: texto guardado | `sysNotify` corta el título y el texto en bytes y puede partir una letra con tilde | Se cortan en caracteres UTF-8 (el banner ya lo hacía en Arduino) | docs/spec/01c §6 |
+| Avisos: tarjeta del bloqueo | El título más reciente se dibuja aunque se salga de la tarjeta | Una línea con "..." dentro de la tarjeta | docs/spec/01a §4 |
+| Avisos: Centro | Solo se lee el borde con el dedo moviéndose (igual) y se cierra arrastrando a la derecha (igual) | Igual; los avisos del teléfono vinculado llegarán con Flex Phone (el Centro tiene hoy los del sistema) | docs/spec/01c §6 |

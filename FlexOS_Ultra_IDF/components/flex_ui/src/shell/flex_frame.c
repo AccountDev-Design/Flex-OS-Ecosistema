@@ -25,6 +25,13 @@ void flex_label_cap_y(lv_obj_t *label, int32_t y)
     lv_obj_set_y(label, y - cap_offset(f));
 }
 
+void flex_label_one_line(lv_obj_t *label, int32_t w)
+{
+    const lv_font_t *f = lv_obj_get_style_text_font(label, LV_PART_MAIN);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_set_size(label, w, lv_font_get_line_height(f));
+}
+
 void flex_label_cap_center(lv_obj_t *label, int32_t cx, int32_t y)
 {
     lv_obj_set_width(label, 480);

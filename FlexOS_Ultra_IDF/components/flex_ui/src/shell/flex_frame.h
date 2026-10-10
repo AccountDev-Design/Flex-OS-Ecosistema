@@ -35,6 +35,9 @@ flex_nav_ctx_t flex_navbar_ctx(void);
 void flex_label_cap_y(lv_obj_t *label, int32_t y);
 // Igual, centrada en x = cx.
 void flex_label_cap_center(lv_obj_t *label, int32_t cx, int32_t y);
+// Una sola linea de ancho w con "..." si no cabe (fgTextEllipsis). El alto se fija
+// a una linea: con alto automatico LVGL parte el texto en varias y no pone los puntos.
+void flex_label_one_line(lv_obj_t *label, int32_t w);
 
 #ifdef __cplusplus
 }

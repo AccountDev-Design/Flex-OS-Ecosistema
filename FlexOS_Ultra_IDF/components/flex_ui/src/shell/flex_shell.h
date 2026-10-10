@@ -91,6 +91,26 @@ bool flex_qs_ctl_rect(int id, lv_area_t *out);      // en pantalla, modo actual
 bool flex_qs_group_rect(lv_area_t *out);
 int  flex_qs_catalog_index(int id);                // posicion en "Anadir un control" (-1)
 
+// Avisos (flex_notif.c): banner flotante, Centro de notificaciones y No molestar.
+// flex_notify/flex_notify_media/flex_say valen desde cualquier tarea (buzon de la UI).
+void flex_notif_init(void);           // engancha el tactil (antes de LVGL)
+void flex_notify(const char *title, const char *sub);        // sysNotify: historial + banner
+void flex_notify_media(const char *title, const char *sub);  // igual, con icono de Multimedia
+void flex_say(const char *app, const char *title, const char *sub);   // sysSay: en una app, solo banner
+bool flex_notif_dnd(void);            // No molestar (flexphone/dnd)
+void flex_notif_set_dnd(bool on);
+int  flex_notif_count(void);
+const char *flex_notif_latest_title(void);   // el mas reciente del historial (NULL si no hay)
+bool flex_notif_banner_visible(void);
+const char *flex_notif_banner_title(void);
+int  flex_notif_queue_len(void);
+bool flex_notif_center_open(void);    // abierto, arrastrandose o animandose
+void flex_notif_center_show(void);    // abrir con su animacion (pruebas, atajos)
+void flex_notif_center_close_now(void);   // fpcForceClose: sin animacion
+// Lo que necesita el banner de los demas modulos
+bool flex_shell_transition_active(void);  // la tarjeta de abrir/cerrar app esta a la vista
+void flex_lock_refresh_widgets(void);     // tarjetas de la pantalla de bloqueo (aviso mas reciente)
+
 void flex_drawer_open(void);
 void flex_drawer_close_now(void);     // sin animacion (bloquear, suspender)
 bool flex_drawer_is_open(void);

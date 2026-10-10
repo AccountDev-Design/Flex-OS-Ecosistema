@@ -73,7 +73,14 @@ python3 ref/extract_arduino.py "$OUT/ref_qs_b.inc" \
     FlexOS_Ultra_QuickPanelGlass.h:qpRelayout,qpScrollMax,qpGroupSnap,qpCatBuild \
     FlexOS_Ultra_QuickPanelEdit.h:qpEditRemove,qpEditMove,qpEditAdd
 
-SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c
+# Avisos: modelo de la isla (historial) y cola del banner
+python3 ref/extract_arduino.py "$OUT/ref_ntf.inc" \
+    FlexOS_Ultra_Types.h:DetectedModule,NOTIF_MAX,Notification,gNotifs,gNotifCount \
+    FlexOS_Ultra_Notif.h:notifKeyOf,notifFindKey,notifRemove,notifPush \
+    FlexOS_FlexPhone_Overlay.h:FPN_SRC_PHONE,FPB_HIDDEN,FPB_QUEUE,fpbState,fpbRefresh,fpbCur,fpbQueue,fpbQueueN,fpbMore,fpbRank,fpbEnqueue,fpbSameSys,fpbOffer,fpbMsgInit,fpbPush,fpbPushSystemKeyed \
+    FlexOS_Ultra_Media.h:sysNotify,mediaNotify
+
+SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c
       $ROOT/components/flex_storage/src/flex_kv.c
       $ROOT/components/flex_storage/src/flex_fs_path.c
       $ROOT/components/flex_ui/src/theme/flex_wallpaper.c
@@ -82,6 +89,7 @@ SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_
       $ROOT/components/flex_ui/src/shell/flex_drawer_model.c
       $ROOT/components/flex_ui/src/shell/flex_recents_model.c
       $ROOT/components/flex_ui/src/shell/flex_qs_model.c
+      $ROOT/components/flex_ui/src/shell/flex_notif_model.c
       $ROOT/components/flex_ui/src/widgets/flex_kb_layout.c
       $ROOT/components/flex_touch/src/flex_touch_arb.c
       stub_cfg.c)
@@ -93,10 +101,12 @@ CFLAGS=(-O1 -g -Wall -Wextra -Werror -pthread)
 build() {   # $1 = sufijo, resto = flags de sanitizador
     local sfx=$1; shift
     local refs=()
-    for r in wall glass home home_load touch drawer kb recents qs; do
-        c++ -std=gnu++17 -O1 -g -w "$@" -Iref -I"$OUT" -c ref/ref_${r}_main.cpp -o "$OUT/ref_${r}_$sfx.o"
+    for r in wall glass home home_load touch drawer kb recents qs ntf; do
+        c++ -std=gnu++17 -O1 -g -w "$@" -Iref -I"$OUT" -I$ROOT/components/flex_portable/include -c ref/ref_${r}_main.cpp -o "$OUT/ref_${r}_$sfx.o"
         refs+=("$OUT/ref_${r}_$sfx.o")
     done
+    c++ -std=gnu++17 -O1 -g -w "$@" -I$ROOT/components/flex_portable/include -c $ROOT/components/flex_portable/src/FlexOS_FlexLink.cpp -o "$OUT/flexlink_$sfx.o"
+    refs+=("$OUT/flexlink_$sfx.o")
     cc -std=gnu11 "${CFLAGS[@]}" "$@" "${INC[@]}" "${SRCS[@]}" "${refs[@]}" -lstdc++ -lm -o "$OUT/host_$sfx"
 }
 build asan -fsanitize=address,undefined -fno-sanitize-recover=all
