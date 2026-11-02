@@ -143,7 +143,7 @@ bool scene_session_run(void)
     sim_run(3000);
     CHK(sim_fs_writes() == wf);                        // nadie lo reintenta con la app delante
     flex_sys_home();
-    sim_run(1800);
+    sim_run(450);                                      // armado y vencido: el siguiente tick lo vuelca
     CHK(sim_fs_writes() == wf + 1 && !flex_session_pending(IC_AJUSTES));
 
     // 4) Recientes: cerrar la app con el disco lleno (no se puede poner en cola) NO la cierra

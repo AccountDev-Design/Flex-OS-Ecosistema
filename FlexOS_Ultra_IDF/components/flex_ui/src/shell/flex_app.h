@@ -57,6 +57,10 @@ typedef struct {
     // La primera vez que se abre la app, ANTES de on_create. data = NULL: no hay sesion valida
     // (otra version, otra app o corrupta) y debe abrir en un estado seguro.
     void (*load_session)(const void *data, size_t len);
+    // Soltar recursos PESADOS y RECONSTRUIBLES sin perder estado (miniaturas, fotogramas, buffers de
+    // medios). Solo se llama con la app SUSPENDIDA y sin trabajo real en segundo plano. Devuelve una
+    // pista (!= 0 si solto algo); los bytes se MIDEN desde fuera.
+    size_t (*shed)(void);
 } flex_app_ops_t;
 
 typedef struct {
@@ -89,6 +93,19 @@ bool flex_app_terminate_ex(int id, bool force);
 
 // Sesiones (flex_session.c). Las apps llaman a mark_dirty cuando cambian algo: el volcado ocurre
 // 1200 ms despues (tope 30 s) y nunca con el dedo apoyado.
+// Memoria (flex_mem.c, docs/spec/01c 17): medir, soltar, admitir y desalojar por presupuesto
+void flex_mem_start(void);
+bool flex_mem_admit_app(int id);              // memAdmitApp: false = "no se abre ahora" (ya avisado)
+void flex_mem_register_cache(const char *name, size_t (*shed)(void), bool (*guard)(void));
+bool flex_mem_app_known(int id);              // huella medida (sin medida la interfaz escribe "--")
+uint32_t flex_mem_app_bytes(int id);
+bool flex_mem_app_shed(int id);               // "Estado guardado" en vez de "Pausada"
+int  flex_mem_level(void);                    // FLEXMEM_LV_*: nivel sostenido
+int  flex_app_life(int id);                   // 0 cerrada, 1 en marcha, 2 suspendida
+// "Optimizar Flex OS" (flex_optimize.c): lo abren Almacenamiento y Device Care; on_done = a donde volver
+void flex_optimize_open(void (*on_done)(void));
+bool flex_optimize_active(void);
+void flex_optimize_close_now(void);
 void flex_session_start(void);
 void flex_session_mark_dirty(int id);
 void flex_session_flush_now(void);

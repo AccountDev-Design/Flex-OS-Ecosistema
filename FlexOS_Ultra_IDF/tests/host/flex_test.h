@@ -47,4 +47,5 @@ void test_kiosk(void);
 void test_home_edit(void);
 void test_homecfg(void);
 void test_session(void);
+void test_mem_model(void);
 #define FLEX_APP_N_TEST 19

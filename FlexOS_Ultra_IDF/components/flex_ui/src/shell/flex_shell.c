@@ -233,6 +233,11 @@ static void std_header_back_cb(lv_event_t *e)
     flex_sys_back();
 }
 
+uint32_t flex_mem_free_psram(void);
+void flex_mem_app_commit(int id, uint32_t free_before);
+void flex_mem_app_forget(int id);
+void flex_mem_app_resumed(int id);
+void flex_mem_enforce(void);
 void flex_session_load_once(int id);
 void flex_session_note_suspend(int id);
 bool flex_session_terminate_begin(int id, bool force);
@@ -241,6 +246,7 @@ static void build_app(int id)
 {
     const flex_app_def_t *d = flex_app_def(id);
     flex_session_load_once(id);   // appLoadSessionOnce: la sesion de disco, antes de crear la interfaz
+    uint32_t free_before = flex_mem_free_psram();   // huella medida: la PSRAM que desaparece al construirla
     app_inst_t *in = &s_inst[id];
     lv_obj_t *r = flex_box(s_apps);
     lv_obj_set_size(r, 480, 800);
@@ -278,6 +284,7 @@ static void build_app(int id)
     }
     lv_obj_set_hidden(r, true);
     in->life = APP_SUSPENDED;
+    flex_mem_app_commit(id, free_before);
 }
 
 static void show_app_root(int id)
@@ -297,8 +304,11 @@ static void show_app_root(int id)
     lv_obj_set_hidden(s_home, true);
     in->life = APP_RUNNING;
     in->last_used = lv_tick_get();
-    if (!was_closed && d->ops && d->ops->on_resume) {
-        d->ops->on_resume();
+    if (!was_closed) {
+        flex_mem_app_resumed(id);   // al reanudarla ya tiene lo suyo otra vez ("Pausada")
+        if (d->ops && d->ops->on_resume) {
+            d->ops->on_resume();
+        }
     }
 }
 
@@ -321,12 +331,16 @@ static void suspend_fg(void)
         flex_session_note_suspend(s_fg);   // arma el volcado vencido (fuera de la animacion)
     }
     s_fg = -1;
+    flex_mem_enforce();                    // appEnforceMemoryBudget: en cada suspension; solo actua en CRITICAL
 }
 
 void flex_app_open(int id, const lv_area_t *from_icon)
 {
     if (!flex_app_def(id) || (flex_kiosk_active() && id != flex_kiosk_app())) {
         return;   // kiosco: una app no puede abrir otra (Core.h:688)
+    }
+    if (!flex_app_is_open(id) && !flex_mem_admit_app(id)) {
+        return;   // admision: solo apps CERRADAS (volver a una suspendida nunca se bloquea); ya se aviso
     }
     lv_area_t icon;
     if (!from_icon && flex_home_icon_area(id, &icon)) {
@@ -443,6 +457,9 @@ void flex_app_launch(int id, const lv_area_t *from_icon)
 
 void flex_sys_back(void)
 {
+    if (flex_optimize_active()) {
+        return;   // Optimizar es modal mientras trabaja
+    }
     if (flex_kiosk_active()) {
         return;   // kiosco: Atras, Inicio y Recientes no hacen nada (Core.h:552-571)
     }
@@ -462,6 +479,9 @@ void flex_sys_back(void)
 
 void flex_sys_home(void)
 {
+    if (flex_optimize_active()) {
+        return;   // Optimizar es modal mientras trabaja
+    }
     if (flex_kiosk_active()) {
         return;
     }
@@ -479,6 +499,9 @@ void flex_sys_home(void)
 
 void flex_sys_recents(void)
 {
+    if (flex_optimize_active()) {
+        return;   // Optimizar es modal mientras trabaja
+    }
     if (flex_kiosk_active()) {
         return;
     }
@@ -543,7 +566,16 @@ bool flex_app_terminate_ex(int id, bool force)
     s_inst[id].root = NULL;
     s_inst[id].life = APP_CLOSED;
     flex_recents_note_closed(id);
+    flex_mem_app_forget(id);   // su huella medida deja de existir con ella
     return true;
+}
+
+int flex_app_life(int id)
+{
+    if (id < 0 || id >= FLEX_APP_N || !s_inst[id].root) {
+        return 0;
+    }
+    return s_inst[id].life == APP_RUNNING ? 1 : 2;
 }
 
 // ---- estados del shell -------------------------------------------------------------
@@ -581,6 +613,7 @@ void flex_shell_lock(void)
     flex_drawer_close_now();
     flex_home_edit_close_now();   // el Modo edicion sale guardando (edExit)
     flex_home_customize_close_now();   // Personalizar inicio tambien (hcClose(true))
+    flex_optimize_close_now();
     flex_recents_close_now();
     flex_lock_set_return_app(-1);
     suspend_fg();
@@ -759,6 +792,7 @@ void flex_shell_start(void)
     flex_notif_init();
     flex_homecfg_init();
     flex_session_start();
+    flex_mem_start();
     flex_kiosk_load();
     if (flex_reset_boot_state() == FLEX_FR_BOOT_RESUME) {
         flex_factory_resume_boot();   // un borrado a medias se termina antes que nada

@@ -27,6 +27,7 @@ int main(void)
     test_home_edit();
     test_homecfg();
     test_session();
+    test_mem_model();
     printf("%s: %d comprobaciones, %d fallos\n", g_fails ? "FALLO" : "OK", g_checks, g_fails);
     return g_fails ? 1 : 0;
 }

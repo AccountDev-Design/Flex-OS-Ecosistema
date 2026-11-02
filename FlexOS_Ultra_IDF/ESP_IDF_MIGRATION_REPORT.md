@@ -69,6 +69,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 3 (en curso: + Modo edición del escritorio) | `v3` dev | 1 391 504 B | 53,1 % | 33,2 % |
 | 3 (en curso: + Personalizar inicio) | `v3` dev | 1 418 448 B | 54,1 % | 33,8 % |
 | 3 (en curso: + sesiones de app) | `v3` dev | 1 420 592 B | 54,2 % | 33,9 % |
+| 3 (en curso: + memoria y Optimizar) | `v3` dev | 1 429 152 B | 54,5 % | 34,1 % |
 
 La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la interfaz completa
 (Fase 15). No se ha grabado nada.
@@ -123,6 +124,11 @@ La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la
 | Sesiones: lectura | `appLoadSessionOnce` lee el archivo la primera vez que se abre la app | Se leen TODAS al arrancar por la tarea de almacenamiento (≤ 1 KB por app) y se aplican de forma perezosa antes de crear la app | La flash nunca se toca desde la UI |
 | Sesiones: escritura | `flexFsWriteBinAtomic` síncrona; si falla, la app no se cierra | Cola del escritor único (atómica: temporal + renombrado). Poner la escritura en cola es "guardado"; un fallo posterior del disco se reintenta 3 veces y se registra | Una sesión es estado de interfaz, no el documento; si ni siquiera se puede encolar, la app no se cierra (salvo el restablecimiento) |
 | Sesiones: corte de corriente | Un corte entre renombrar a `.bak` y a la ruta final deja solo `.bak` y `.tmp`: la sesión se pierde | El renombrado atómico del escritor no pasa por `.bak`: queda la sesión vieja o la nueva | Hueco de Arduino (01c §14.3) |
+| Memoria: medir | `memTick` mide cada 1 s en el bucle y el mayor bloque cada 2 s / 10 s | Un `lv_timer` de 1 s con `heap_caps_*`; el mayor bloque con las mismas cadencias (2 s apretado, 10 s con holgura y sin dedo ni transición) | Mismo reparto; el estado de las apps se copia del marco antes de decidir |
+| Memoria: soltar | `memShedSystem` llama a una lista fija de cachés propias | Registro `flex_mem_register_cache` (fondos desenfocados y miniaturas de Recientes hoy; el panel rápido, el vidrio y la caja se registran cuando se midan) con guardia por pantalla; los bytes liberados son los MEDIDOS | Las cachés de LVGL no existen igual que las del motor propio |
+| Memoria: radio | `wifiRadioBusy` cede el alivio mientras el enlace del C6 se levanta | Gancho débil `flex_net_radio_busy` (falso hasta la Fase 6) | Aún no hay enlace con el C6 |
+| Optimizar: fondo | Captura de la banda del panel para no apilar el vidrio | Un `lv_obj` modal sobre la pantalla: LVGL repinta debajo sin apilar capas | No hace falta la captura |
+| Optimizar: caché temporal | `fsWipeDir` síncrono en el bucle | `flex_fs_wipe_dir_async`: la cuenta llega a la UI cuando termina y completa la línea del resultado | La flash no se toca desde la UI |
 | Umbrales de toque | Toque = < 16 px y < 550 ms | Igual, aplicado al indev de LVGL (por defecto LVGL usa 10 px y 400 ms) | docs/spec/01b |
 | Restablecimiento: qué se borra de la NVS | Solo los espacios de nombres conocidos: quedaban el vínculo con el teléfono, Flex Storage, Device Care, robo, audio, clima, navegador (un aparato "restablecido" seguía emparejado) | TODOS los espacios de nombres salvo el marcador `flexreset` (incluidos los del sistema: credenciales Wi-Fi del controlador, calibración del PHY); el aviso lo dice ("Vínculo con el teléfono y Flex Storage") | docs/spec/01c §13.5 (riesgo de privacidad) |
 | Restablecimiento: marcador terminado | Se borra al entrar al OOBE | Igual: se borra al entrar a la primera configuración | docs/spec/01c §13.6 |

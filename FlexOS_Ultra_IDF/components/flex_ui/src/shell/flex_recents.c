@@ -110,6 +110,13 @@ void flex_recents_note_suspend(int app, lv_obj_t *root, bool capture)
     lv_draw_buf_destroy(snap);
 }
 
+// memShedSystem: deja como mucho 2 miniaturas (1 en modo eficiente); se rehacen al volver a suspender
+size_t flex_recents_shed(void)
+{
+    flex_rc_thumb_trim(&L, flex_look()->eff_mode ? 1 : 2);
+    return 1;
+}
+
 void flex_recents_note_closed(int app)
 {
     flex_rc_drop(&L, flex_rc_find(&L, app));

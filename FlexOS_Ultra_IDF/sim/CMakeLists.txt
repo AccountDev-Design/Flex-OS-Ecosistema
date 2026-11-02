@@ -52,6 +52,7 @@ add_executable(flexos_ui_sim
     ${SIM_SCENES}
     stubs/flex_services_stub.c
     stubs/flex_passcode_async_stub.c
+    ${FLEX_ROOT}/components/flex_portable/src/FlexOS_Mem.cpp
     ${FLEX_ROOT}/components/flex_storage/src/flex_kv.c
     ${FLEX_ROOT}/components/flex_security/src/flex_passcode.c
     ${FLEX_ROOT}/components/flex_touch/src/flex_touch_arb.c
@@ -65,6 +66,7 @@ target_include_directories(flexos_ui_sim PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
     ${CMAKE_CURRENT_LIST_DIR}/stubs/include
     ${FLEX_ROOT}/components/flex_ui/include
+    ${FLEX_ROOT}/components/flex_portable/include
     ${FLEX_ROOT}/components/flex_ui/src
     ${FLEX_ROOT}/components/flex_ui/src/theme
     ${FLEX_ROOT}/components/flex_ui/src/widgets

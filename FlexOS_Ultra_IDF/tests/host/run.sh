@@ -97,7 +97,11 @@ python3 ref/extract_arduino.py "$OUT/ref_session.inc" \
     FlexOS_Ultra_Session.h:SESS_MAGIC,SESS_IO_MAX,gSessIo,crc32u,sessWrite,sessRead \
     FlexOS_Ultra_AppFramework.h:SESS_IDLE_MS,SESS_MAXWAIT_MS,gAppState,gAppSeenMs,gSessDirtyApp,gSessDirtyMs,appHooks,gSessNeedSave,appSaveSession,sessMarkDirty,sessFlushNow,sessAutosaveTick,appTerminate
 
-SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c test_kiosk.c test_homecfg.c test_session.c
+python3 ref/extract_arduino.py "$OUT/ref_mem.inc" \
+    FlexOS_Ultra_AppFramework.h:gAppState,gAppSeenMs,appHooks,appBgBusy \
+    FlexOS_Ultra_Core.h:gAppMem,gAppMemKnown,gAppShed,appMemCommit,appMemReleased,appMemForget,appMemHas,appMemBytes,memShedApp,memShedAll,memAdmitApp,memAlertTick,appEnforceMemoryBudget
+
+SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c test_kiosk.c test_homecfg.c test_session.c test_mem_model.c
       $ROOT/components/flex_storage/src/flex_kv.c
       $ROOT/components/flex_storage/src/flex_fs_path.c
       $ROOT/components/flex_storage/src/flex_fs_wipe.c
@@ -105,6 +109,7 @@ SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_
       $ROOT/components/flex_ui/src/theme/flex_glass_math.c
       $ROOT/components/flex_ui/src/shell/flex_home_model.c
       $ROOT/components/flex_ui/src/shell/flex_session_model.c
+      $ROOT/components/flex_ui/src/shell/flex_mem_model.c
       $ROOT/components/flex_ui/src/shell/flex_drawer_model.c
       $ROOT/components/flex_ui/src/shell/flex_recents_model.c
       $ROOT/components/flex_ui/src/shell/flex_qs_model.c
@@ -119,18 +124,21 @@ SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_
       stub_cfg.c)
 INC=(-I. -I$ROOT/components/flex_storage/include -I$ROOT/components/flex_storage/src
      -I$ROOT/components/flex_display/src -I$ROOT/components/flex_ui/src/theme
-     -I$ROOT/components/flex_ui/src/shell -I$ROOT/components/flex_ui/src/widgets -I$ROOT/components/flex_touch/include -I$ROOT/components/flex_power/include -I$ROOT/components/flex_system/include -I../../sim/stubs/include)
+     -I$ROOT/components/flex_ui/src/shell -I$ROOT/components/flex_portable/include -I$ROOT/components/flex_ui/src/widgets -I$ROOT/components/flex_touch/include -I$ROOT/components/flex_power/include -I$ROOT/components/flex_system/include -I../../sim/stubs/include)
 CFLAGS=(-O1 -g -Wall -Wextra -Werror -pthread)
 
 build() {   # $1 = sufijo, resto = flags de sanitizador
     local sfx=$1; shift
     local refs=()
-    for r in wall glass home home_load touch drawer kb recents qs ntf homecfg session; do
+    for r in wall glass home home_load touch drawer kb recents qs ntf homecfg session mem; do
         c++ -std=gnu++17 -O1 -g -w "$@" -Iref -I"$OUT" -I$ROOT/components/flex_portable/include -c ref/ref_${r}_main.cpp -o "$OUT/ref_${r}_$sfx.o"
         refs+=("$OUT/ref_${r}_$sfx.o")
     done
     c++ -std=gnu++17 -O1 -g -w "$@" -I$ROOT/components/flex_portable/include -c $ROOT/components/flex_portable/src/FlexOS_FlexLink.cpp -o "$OUT/flexlink_$sfx.o"
     refs+=("$OUT/flexlink_$sfx.o")
+    c++ -std=gnu++17 -O1 -g -w "$@" -I$ROOT/components/flex_portable/include -c $ROOT/components/flex_portable/src/FlexOS_Mem.cpp -o "$OUT/flexmem_$sfx.o"
+    c++ -std=gnu++17 -O1 -g -w "$@" -Iref -I$ROOT/components/flex_portable/include -c ref/test_mem_core.cpp -o "$OUT/testmemcore_$sfx.o"
+    refs+=("$OUT/flexmem_$sfx.o" "$OUT/testmemcore_$sfx.o")
     cc -std=gnu11 "${CFLAGS[@]}" "$@" "${INC[@]}" "${SRCS[@]}" "${refs[@]}" -lstdc++ -lm -o "$OUT/host_$sfx"
 }
 build asan -fsanitize=address,undefined -fno-sanitize-recover=all

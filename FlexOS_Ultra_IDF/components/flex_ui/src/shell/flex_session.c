@@ -165,11 +165,15 @@ void flex_session_flush_now(void)
     flex_sess_flush_now(&S, save_cb, NULL);
 }
 
-// appSuspend (Core.h:512): arma el volcado vencido para la vuelta siguiente, fuera de la animacion
+// appSuspend (Core.h:512-515): deja el volcado ARMADO y VENCIDO (marcas a 0): el siguiente tick lo
+// hace, ya fuera de la animacion de salida y con el dedo levantado
 void flex_session_note_suspend(int id)
 {
-    if (id >= 0 && id < FLEX_APP_N && S.need[id] && S.dirty_app != id) {
-        flex_sess_mark_dirty(&S, id, lv_tick_get(), save_cb, NULL);
+    if (id >= 0 && id < FLEX_APP_N && S.need[id]) {
+        if (S.dirty_app != id) {
+            flex_sess_mark_dirty(&S, id, lv_tick_get(), save_cb, NULL);
+        }
+        S.dirty_ms = S.first_ms = 0;
     }
 }
 
