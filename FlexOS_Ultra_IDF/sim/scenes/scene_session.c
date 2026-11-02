@@ -79,7 +79,7 @@ bool scene_session_run(void)
         flex_shell_start();
     }
     to_home();
-    flex_app_terminate_ex(IC_AJUSTES, true);   // otras escenas pudieron dejarla abierta
+    for (int i = 0; i < FLEX_APP_N; i++) flex_app_terminate_ex(i, true);   // otras escenas pudieron dejar apps abiertas
     sim_fs_enable(true);
     flex_app_test_set_ops(IC_AJUSTES, &k_ops);
     flex_session_forget_loaded(IC_AJUSTES);   // otras escenas la abrieron antes
@@ -188,6 +188,29 @@ bool scene_session_run(void)
     CHK(flex_sess_unpack(file, n, 1, IC_AJUSTES, &back, sizeof(back)) == 0);
     CHK(flex_sess_unpack(file, n, 2, IC_AJUSTES, &back, sizeof(back)) == 0);   // otra version
     (void)valid;
+
+    // 7) Recientes: cerrar una tarjeta con cambios sin guardar y el disco lleno NO la cierra; con disco, si
+    flex_app_open(IC_AJUSTES, NULL);
+    sim_run(500);
+    g_state.sel = 11;
+    sim_fs_fail_writes(true, false);                    // el disco no acepta la escritura
+    flex_session_mark_dirty(IC_AJUSTES);
+    flex_sys_home();
+    sim_run(300);
+    CHK(flex_session_pending(IC_AJUSTES));              // el volcado fallo: sigue desfasada
+    flex_recents_open();
+    sim_run(400);
+    CHK(flex_recents_count() == 1 && flex_recents_app_at(0) == IC_AJUSTES);
+    sim_drag(240, 400, 240, 260, 250);                 // deslizar la tarjeta hacia arriba: cerrar
+    sim_run(500);
+    CHK(flex_app_is_open(IC_AJUSTES) && flex_recents_count() == 1);   // "Sin espacio para guardar"
+    sim_fs_fail_writes(false, false);
+    int w7 = sim_fs_writes();
+    sim_drag(240, 400, 240, 260, 250);
+    sim_run(500);
+    CHK(!flex_app_is_open(IC_AJUSTES) && flex_recents_count() == 0 && sim_fs_writes() == w7 + 1);
+    flex_recents_close_now();
+    sim_run(300);
 
     flex_app_test_set_ops(IC_AJUSTES, NULL);
     sim_fs_enable(false);

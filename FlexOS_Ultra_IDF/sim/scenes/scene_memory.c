@@ -175,6 +175,13 @@ bool scene_memory_run(void)
     sim_run(1200);
     CHK(flex_optimize_stage() == 5);
     CHK(g_shed_calls == s1 + 1);          // solo la suspendida: la app de delante no se toca
+    CHK(strcmp(flex_recents_state_text(IC_PAINT), "Estado guardado") == 0);   // se le solto lo pesado
+    CHK(strcmp(flex_recents_state_text(IC_NOTAS), "Activa") == 0);
+    {
+        char c[24];
+        flex_recents_cost_text(IC_PAINT, c, sizeof(c));
+        CHK(strstr(c, "MB") != NULL || strstr(c, "KB") != NULL || strstr(c, "B") != NULL);   // huella medida
+    }
     sim_shot("optimizar_fin");
     sim_tap(240, 545);                    // "Hecho"
     sim_run(300);

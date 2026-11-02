@@ -83,7 +83,9 @@ bool flex_recents_is_open(void);
 int  flex_recents_count(void);
 int  flex_recents_app_at(int i);
 bool flex_recents_has_thumb(int i);
-uint32_t flex_app_last_used(int id);   // lv_tick de la ultima vez en primer plano (0 = nunca)
+uint32_t flex_app_last_used(int id);
+const char *flex_recents_state_text(int app);                     // "Activa" / "Pausada" / "Estado guardado"
+void flex_recents_cost_text(int app, char *out, size_t cap);       // PSRAM medida o "No disponible"   // lv_tick de la ultima vez en primer plano (0 = nunca)
 
 // Panel rapido (flex_qs.c): capa global sobre el escritorio o una app.
 void flex_qs_init(void);              // engancha el tactil (antes de LVGL)

@@ -71,6 +71,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 3 (en curso: + sesiones de app) | `v3` dev | 1 420 592 B | 54,2 % | 33,9 % |
 | 3 (en curso: + memoria y Optimizar) | `v3` dev | 1 429 152 B | 54,5 % | 34,1 % |
 | 3 (en curso: + arranque) | `v3` dev | 1 430 800 B | 54,6 % | 34,1 % |
+| 3 (en curso: + Recientes con memoria y sesiones) | `v3` dev | 1 431 568 B | 54,6 % | 34,1 % |
 
 La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la interfaz completa
 (Fase 15). No se ha grabado nada.

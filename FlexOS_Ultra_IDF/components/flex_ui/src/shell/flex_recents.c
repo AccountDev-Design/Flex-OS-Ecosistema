@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "FlexOS_Mem.h"
 #include "flex_app.h"
 #include "flex_frame.h"
 #include "flex_glass.h"
@@ -164,16 +165,35 @@ static void toast(const char *msg)
     lv_timer_set_repeat_count(R.toast_t, 1);
 }
 
+// "Activa" (en marcha), "Pausada" (todavia tiene lo suyo cargado) o "Estado guardado" (se le solto lo pesado
+// y al volver lo rehace: flex_mem_app_shed)
 static const char *state_name(int app)
 {
-    (void)app;
-    return "Pausada";   // "Estado guardado" llega con el soltado de recursos (memoria)
+    if (flex_app_life(app) == 1) {
+        return "Activa";
+    }
+    return flex_mem_app_shed(app) ? "Estado guardado" : "Pausada";
 }
 
+// appUnsaved (Core.h:256): su propio gancho dirty() o la sesion de disco desfasada
 static bool app_dirty(int app)
 {
     const flex_app_def_t *d = flex_app_def(app);
-    return d && d->ops && d->ops->dirty && d->ops->dirty();
+    return (d && d->ops && d->ops->dirty && d->ops->dirty()) || flex_session_pending(app);
+}
+
+// Pruebas del simulador y la ficha: el estado y el consumo medido tal y como los ensena Recientes
+const char *flex_recents_state_text(int app)
+{
+    return state_name(app);
+}
+void flex_recents_cost_text(int app, char *out, size_t cap)
+{
+    if (flex_mem_app_known(app)) {
+        flexMemFmt(flex_mem_app_bytes(app), out, cap);   // PSRAM medida, nunca un numero inventado
+    } else {
+        snprintf(out, cap, "No disponible");
+    }
 }
 
 static bool app_bg_busy(int app)
@@ -193,24 +213,31 @@ static bool close_card(int idx)
         toast("Tarea en curso: no se cierra");
         return false;
     }
-    flex_app_terminate(app);   // tambien quita la tarjeta (flex_recents_note_closed)
+    if (!flex_app_terminate_ex(app, false)) {   // guarda la sesion en el acto; tambien quita la tarjeta
+        toast("Sin espacio para guardar");     // no se pudo guardar: la app se queda abierta
+        return false;
+    }
     return true;
 }
 
 static void close_all(void)
 {
-    int kept = 0;
+    int kept = 0, nospace = 0;
     for (int i = L.n - 1; i >= 0; i--) {
         int app = L.c[i].app;
         if (app_bg_busy(app)) {
             kept++;
             continue;
         }
-        flex_app_terminate(app);
+        if (!flex_app_terminate_ex(app, false)) {
+            nospace++;   // la que no pueda guardarse se queda abierta
+        }
     }
     rebuild();
     if (kept) {
         toast("Tarea en curso: no se cierra");
+    } else if (nospace) {
+        toast("Sin espacio para guardar");
     }
 }
 
@@ -329,7 +356,9 @@ static void info_open(int idx)
     const flex_app_def_t *d = flex_app_def(app);
     static const char *const cls[3] = {"Ligera", "Media", "Pesada"};
     char buf[32];
-    info_row(sh, 0, "Consumo estimado", "No disponible", FLEX_ONWALL);
+    char cost[24];
+    flex_recents_cost_text(app, cost, sizeof(cost));
+    info_row(sh, 0, "Consumo estimado", cost, FLEX_ONWALL);
     info_row(sh, 1, "Clase", cls[d && d->weight < 3 ? d->weight : 0], FLEX_ONWALL);
     info_row(sh, 2, "Miniatura", L.c[idx].thumb ? "73 KB" : "Sin captura", FLEX_ONWALL);
     uint32_t used = flex_app_last_used(app);
