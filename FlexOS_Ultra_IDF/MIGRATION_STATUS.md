@@ -39,6 +39,77 @@ source ~/esp/env.sh && tools/build.sh --rev v3   # firmware (no graba nada)
 | Modo edición del escritorio: temblor y resorte, reordenar con 400 ms, llevar iconos y widgets a la página vecina (700 ms en el borde), seleccionar / mover / redimensionar / quitar widgets, diseño bloqueado, salida guardando | `flex_home_edit.c`, `flex_home_model.c` | host (24 000 operaciones frente a Arduino) + escena `edicion` (mutaciones) |
 | Widgets del escritorio como `wgDrawCell`: esfera con agujas, rótulos, barra de almacenamiento, antena, Clima de una fila con su material; datos en su sitio cada 2 s; solo Cámara, Clima y Calendario se tocan | `flex_home_widgets.c` | escena `widgets` |
 
+## Progreso global (método congelado v1)
+
+Cálculo reproducible: `python3 tools/progress.py` (lee la tabla de abajo; no hay otro origen).
+
+* **Pesos** (suma 2000): esfuerzo ≈ líneas del firmware Arduino de referencia que cada ítem
+  reemplaza (`WebUI.h` ×0,3 por ser HTML en cadenas; motor `Gfx/Font/Types/HAL` = 0, no se
+  migra), más pesos fijos para lo que Arduino no tiene (base IDF, C6, particiones, revisión
+  y optimización). 1 punto ≈ 100 líneas Arduino equivalentes. **No se tocan entre sesiones**:
+  solo si cambia el alcance, y entonces se anota aquí la causa y se recalcula.
+* **Crédito**: `Impl=1` (85 % del peso) solo si el ítem está implementado, integrado, verificado
+  en host o simulador y sin regresiones. `Hw=1` (15 %) solo con evidencia en la placa real. Sin
+  créditos parciales: código a medias, planes, documentación y escenas decorativas = 0.
+* La lógica portable ya copiada (≈20 000 líneas en `flex_portable`) no cuenta hasta que el
+  ítem que la usa esté integrado y probado.
+* Sin la placa, el máximo alcanzable es el 85 %.
+
+| id | Ítem | Peso | Impl | Hw |
+|---|---|---:|:-:|:-:|
+| B1 | Base: proyecto ESP-IDF 5.5.5, sdkconfig por revision, particiones provisionales, herramientas | 20 | 1 | 0 |
+| B2 | Base: pantalla ST7701 DSI, 2 framebuffers, LVGL DIRECT, GT911 | 60 | 1 | 0 |
+| B3 | Base: bus de eventos, buzon de UI, NVS/LittleFS compatibles, monitor del sistema, clave PBKDF2 | 60 | 1 | 0 |
+| S1 | Shell migrado: bloqueo, clave, kiosco, escritorio, edicion, widgets, caja, Recientes, panel rapido, avisos, energia, apagado, Modo seguro, restablecimiento, OOBE (sin Account), teclado | 258 | 1 | 0 |
+| S2 | Arranque: splash, banda forense de reinicio anormal, paso Flex Account del OOBE | 9 | 0 | 0 |
+| S3a | Personalizar inicio: operaciones del modelo (paginas, principal, rejilla, reset) + host | 6 | 1 | 0 |
+| S3b | Personalizar inicio: vistas Paginas y Ajustes de inicio + modales (LVGL) | 11 | 0 | 0 |
+| S3c | Personalizar inicio: Fondo, Mis imagenes, Temas y Widgets (LVGL) | 8 | 0 | 0 |
+| S3d | Personalizar inicio: pellizco de dos dedos (clasificador + consumidor de toque) | 3 | 0 | 0 |
+| S4a | Marco de apps: sesiones y ciclo de vida (01a 14), Recientes<->sesiones, regreso, memoria por app | 31 | 0 | 0 |
+| S4b | Memoria y funcion Optimizar (01a 17), umbrales y avisos | 8 | 0 | 0 |
+| S5 | Infraestructura compartida de apps en LVGL (cabecera, listas, dialogos, selector de archivos, barra de medios) | 12 | 0 | 0 |
+| A01 | App Reloj (reloj, alarmas, cronometro, temporizador) | 17 | 0 | 0 |
+| A02 | App Galeria + visor + editor de fotos + editor de video | 145 | 0 | 0 |
+| A03 | App Multimedia | 16 | 0 | 0 |
+| A04 | App Almacenamiento + Archivos/Explorador | 76 | 0 | 0 |
+| A05 | App Modo PC (DeX) | 40 | 0 | 0 |
+| A06 | App Notas | 8 | 0 | 0 |
+| A07 | App Navegador | 95 | 0 | 0 |
+| A08 | App Flex Compass (brujula + AHRS) y sensores BNO085 | 40 | 0 | 0 |
+| A09 | App Paint | 9 | 0 | 0 |
+| A10 | App Juegos (Jumper y demas) | 40 | 0 | 0 |
+| A11 | App Ajustes (+ ajustes de teclado y conectividad) | 25 | 0 | 0 |
+| A12 | Apps Calculadora y Calendario | 6 | 0 | 0 |
+| A13 | App Camara (necesita el modelo del sensor) | 3 | 0 | 0 |
+| A14 | App Clima + servicio del tiempo | 57 | 0 | 0 |
+| A15 | App Flex Store + paquetes + maquina virtual de apps + permisos | 101 | 0 | 0 |
+| A16 | App Flex Phone (enlace con el telefono) | 127 | 0 | 0 |
+| A17 | App Device Care (estado, diagnostico, pruebas) | 39 | 0 | 0 |
+| A18 | App Musica + audio ES8311 | 21 | 0 | 0 |
+| M1 | Multimedia nucleo: JPEG HW, miniaturas, biblioteca, AVI MJPEG, escritores WAV/AVI | 82 | 0 | 0 |
+| N1 | Red: Wi-Fi (estados, reconexion) y NTP en LVGL/servicio | 17 | 0 | 0 |
+| N2 | Servidor web + compartir por HTTP + Media web (la web embebida cuenta x0.3) | 78 | 0 | 0 |
+| N3 | Flex Account (ES256, claves fijadas, OOBE) | 31 | 0 | 0 |
+| N4 | Flex Cloud (control, streaming, TLS) | 87 | 0 | 0 |
+| N5 | OTA con identificadores propios (manifiesto, MD5, rollback) | 33 | 0 | 0 |
+| N6 | Antirrobo y deteccion de caidas | 51 | 0 | 0 |
+| X1a | Liquid Glass: superficies de vidrio sobre fondo y color liso | 16 | 1 | 0 |
+| X1b | Liquid Glass: 3 niveles y bandas visibles | 18 | 0 | 0 |
+| X1c | Liquid Glass: PPA/aceleracion medidos | 16 | 0 | 0 |
+| X2a | Tactil: arbitraje antes de LVGL, bordes del sistema, suspension con dos dedos | 14 | 1 | 0 |
+| X2b | Tactil: veto al teclear y umbrales de toque de Arduino | 16 | 0 | 0 |
+| X3 | Wi-Fi por el ESP32-C6 (esp-hosted) + integracion P4-C6 + firmware del C6 | 70 | 0 | 0 |
+| X4 | Particiones A/B con el tamano medido | 30 | 0 | 0 |
+| X5 | Revision de seguridad y estabilidad globales | 50 | 0 | 0 |
+| X6 | Optimizacion medida (memoria, rendimiento, consumo) | 40 | 0 | 0 |
+
+**Contraste con la estimación anterior** (≈258 h realistas restantes, sin desglose conservado):
+con este inventario lo hecho equivale al 18 % de la obra medida en líneas de referencia, así que
+esa cifra de horas era optimista para el reparto de las 19 apps. Se recalibrará con la velocidad
+medida en las primeras apps (el shell se cerró a ≈120 líneas Arduino/h, con lógica portable a
+favor en las apps).
+
 ## En curso / pendiente (orden de trabajo)
 
 1. Revisiones 4 y 5 cerradas (todas las dimensiones ejecutadas al menos una vez). La

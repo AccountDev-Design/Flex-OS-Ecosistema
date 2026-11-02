@@ -82,7 +82,17 @@ python3 ref/extract_arduino.py "$OUT/ref_ntf.inc" \
     FlexOS_FlexPhone_Overlay.h:FPN_SRC_PHONE,FPB_HIDDEN,FPB_QUEUE,fpbState,fpbRefresh,fpbCur,fpbQueue,fpbQueueN,fpbMore,fpbRank,fpbEnqueue,fpbSameSys,fpbOffer,fpbMsgInit,fpbPush,fpbPushSystemKeyed \
     FlexOS_Ultra_Media.h:sysNotify,mediaNotify
 
-SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c test_kiosk.c
+python3 ref/extract_arduino.py "$OUT/ref_homecfg.inc" \
+    FlexOS_Ultra_Types.h:HOME_WG_MAX,HOME_WG_MAX_V1,HomeWidget,WG_NONE,WgDesc \
+    FlexOS_Ultra_Prefs.h:HOME_EMPTY,HOME_PKG_BASE,gAppFav,gAppHidden,gAppLock,homeIsPkg,homePkgSlot,appIsFav,appIsHidden \
+    FlexOS_Ultra_Gfx.h:isqrt32 \
+    FlexOS_Ultra_Home.h:HOME_LEGACY_PAGES,HOME_PAGES_MAX,HOME_COLS_MAX,HOME_ROWS_MAX,HOME_STRIDE,HOME_TOTAL,HOME_HDR_Y,HOME_HDR_H,HOME_GY0,HOME_ROWSTEP,homeOrder,gHomePage,gHomePageN,gHomeMain,gHomeCols,gHomeIconSz,homeSlotCount,homeIdx,gHomeWg,gHomeWgN,homeGrid,homeDotsY \
+    FlexOS_Ultra_Widgets.h:WG_REG,wgRect,homeCellMask,homeHdrMask,homeWgFits,homeWgFreeOfWidgets,homeWgSizeOk,homeWgPlaceOk,homeWgNormalize,homeWgFactory,homeWgSpotFor,homeWgAdd \
+    FlexOS_Ultra_AppFramework.h:drawerRegistryDefaults \
+    FlexOS_Ultra_Home.h:homeFirstFree,homePageAppendQuiet,homeFirstFreeGrow,gHomePkgSeen,homePkgSeen,homePkgMarkSeen,homeOrderNormalize \
+    FlexOS_Ultra_HomeCfg.h:HC_PICK_MAX,hcPickPath,hcPickN,homePageItems,homePageAdd,homePageDelete,homePageSwap,homeSetMain,homeSetGrid,homeResetLayout,HC_GRID_OPTS,HC_GRID_C,HC_GRID_R,hcGridIdx,hcScanImages,HPZ_MIN_START_D2,HPZ_MIN_OPEN_D2,HPZ_MIN_MS,HPZ_MAX_MS,HPZ_ABS_PX,hpzState,hpzIdA,hpzD2Ref,hpzT0,hpzSwallow,hpzSwallowing,hpzReset,hpzUpdate
+
+SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c test_kiosk.c test_homecfg.c
       $ROOT/components/flex_storage/src/flex_kv.c
       $ROOT/components/flex_storage/src/flex_fs_path.c
       $ROOT/components/flex_storage/src/flex_fs_wipe.c
@@ -109,7 +119,7 @@ CFLAGS=(-O1 -g -Wall -Wextra -Werror -pthread)
 build() {   # $1 = sufijo, resto = flags de sanitizador
     local sfx=$1; shift
     local refs=()
-    for r in wall glass home home_load touch drawer kb recents qs ntf; do
+    for r in wall glass home home_load touch drawer kb recents qs ntf homecfg; do
         c++ -std=gnu++17 -O1 -g -w "$@" -Iref -I"$OUT" -I$ROOT/components/flex_portable/include -c ref/ref_${r}_main.cpp -o "$OUT/ref_${r}_$sfx.o"
         refs+=("$OUT/ref_${r}_$sfx.o")
     done

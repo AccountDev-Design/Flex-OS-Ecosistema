@@ -45,4 +45,5 @@ void test_reset(void);
 void test_oobe(void);
 void test_kiosk(void);
 void test_home_edit(void);
+void test_homecfg(void);
 #define FLEX_APP_N_TEST 19

@@ -1,8 +1,10 @@
 #include "flex_home_model.h"
 
+#include <stdio.h>
 #include <string.h>
 #include "flex_app_ids.h"
 #include "flex_storage.h"
+#include "flex_wallpaper.h"
 
 #define EMPTY FLEX_HOME_EMPTY
 
@@ -987,4 +989,367 @@ void flex_home_save(void)
     flex_cfg_set_i32("appfav", (int32_t)g_home.fav);
     flex_cfg_set_i32("apphide", (int32_t)g_home.hidden);
     flex_cfg_set_i32("applockm", (int32_t)g_home.lock);   // 32 bits (Arduino guardaba 16: §5.13)
+}
+
+
+// ===========================================================================================
+// Personalizar inicio (01a §10): operaciones del modelo (HomeCfg.h:301-380, Widgets.h:383)
+// ===========================================================================================
+int flex_hc_page_items(int page)
+{
+    if (page < 0 || page >= g_home.page_n) {
+        return 0;
+    }
+    int n = flex_home_slot_count(), k = 0;
+    for (int i = 0; i < n; i++) {
+        if (g_home.order[flex_home_idx(page, i)] != EMPTY) {
+            k++;
+        }
+    }
+    for (int w = 0; w < g_home.wg_n[page] && w < FLEX_HOME_WG_MAX; w++) {
+        if (g_home.wg[page][w].type != FLEX_WG_NONE) {
+            k++;
+        }
+    }
+    return k;
+}
+
+flex_hc_res_t flex_hc_page_add(void)
+{
+    if (!page_append_quiet()) {
+        return FLEX_HC_MAX_PAGES;
+    }
+    flex_home_save();
+    return FLEX_HC_OK;
+}
+
+// Borra la pagina. Sus iconos NO se pierden: la normalizacion los recoloca en el primer
+// hueco libre de las paginas que quedan.
+flex_hc_res_t flex_hc_page_delete(int page)
+{
+    if (g_home.page_n <= 1) {
+        return FLEX_HC_LAST_PAGE;
+    }
+    if (page < 0 || page >= g_home.page_n) {
+        return FLEX_HC_BAD;
+    }
+    for (int p = page; p < g_home.page_n - 1; p++) {
+        for (int i = 0; i < FLEX_HOME_STRIDE; i++) {
+            g_home.order[flex_home_idx(p, i)] = g_home.order[flex_home_idx(p + 1, i)];
+        }
+        memcpy(g_home.wg[p], g_home.wg[p + 1], sizeof(g_home.wg[p]));
+        g_home.wg_n[p] = g_home.wg_n[p + 1];
+    }
+    for (int i = 0; i < FLEX_HOME_STRIDE; i++) {
+        g_home.order[flex_home_idx(g_home.page_n - 1, i)] = EMPTY;
+    }
+    g_home.wg_n[g_home.page_n - 1] = 0;
+    g_home.page_n--;
+    // Si se borro la principal, la nueva es la vecina de la izquierda (si existe).
+    if (g_home.main == page) {
+        g_home.main = (uint8_t)(page > 0 ? page - 1 : 0);
+    } else if (g_home.main > page) {
+        g_home.main--;
+    }
+    if (g_home.main >= g_home.page_n) {
+        g_home.main = (uint8_t)(g_home.page_n - 1);
+    }
+    if (g_home.page >= g_home.page_n) {
+        g_home.page = g_home.main;
+    }
+    flex_home_normalize();
+    flex_home_save();
+    return FLEX_HC_OK;
+}
+
+void flex_hc_page_swap(int a, int b)
+{
+    if (a < 0 || b < 0 || a >= g_home.page_n || b >= g_home.page_n || a == b) {
+        return;
+    }
+    for (int i = 0; i < FLEX_HOME_STRIDE; i++) {
+        uint8_t t = g_home.order[flex_home_idx(a, i)];
+        g_home.order[flex_home_idx(a, i)] = g_home.order[flex_home_idx(b, i)];
+        g_home.order[flex_home_idx(b, i)] = t;
+    }
+    flex_home_wg_t tw[FLEX_HOME_WG_MAX];
+    memcpy(tw, g_home.wg[a], sizeof(tw));
+    memcpy(g_home.wg[a], g_home.wg[b], sizeof(tw));
+    memcpy(g_home.wg[b], tw, sizeof(tw));
+    uint8_t tn = g_home.wg_n[a];
+    g_home.wg_n[a] = g_home.wg_n[b];
+    g_home.wg_n[b] = tn;
+    if (g_home.main == a) {
+        g_home.main = (uint8_t)b;
+    } else if (g_home.main == b) {
+        g_home.main = (uint8_t)a;
+    }
+    flex_home_save();
+}
+
+void flex_hc_set_main(int page)
+{
+    if (page < 0 || page >= g_home.page_n) {
+        return;
+    }
+    g_home.main = (uint8_t)page;
+    flex_home_save();
+}
+
+// Cambio de rejilla SIN perder elementos: la normalizacion rescata los iconos de las ranuras
+// que dejan de existir y retira los widgets que ya no caben.
+void flex_hc_set_grid(int cols, int rows)
+{
+    if (cols < 4) {
+        cols = 4;
+    }
+    if (cols > FLEX_HOME_COLS_MAX) {
+        cols = FLEX_HOME_COLS_MAX;
+    }
+    if (rows < 3) {
+        rows = 3;
+    }
+    if (rows > FLEX_HOME_ROWS_MAX) {
+        rows = FLEX_HOME_ROWS_MAX;
+    }
+    g_home.cols = (uint8_t)cols;
+    g_home.rows = (uint8_t)rows;
+    flex_home_normalize();
+    flex_home_save();
+}
+
+void flex_hc_reset_layout(void)
+{
+    for (int i = 0; i < FLEX_HOME_TOTAL; i++) {
+        g_home.order[i] = EMPTY;
+    }
+    for (int p = 0; p < FLEX_HOME_PAGES_MAX; p++) {
+        g_home.wg_n[p] = 0;
+    }
+    g_home.page_n = FLEX_HOME_LEGACY_PAGES;
+    g_home.main = 0;
+    g_home.page = 0;
+    g_home.cols = 4;
+    g_home.rows = 3;
+    g_home.icon_sz = 1;
+    wg_factory();                  // Clima y Calendario en la cabecera de la principal
+    g_home.fav = s_factory_fav;    // drawerRegistryDefaults: favoritas de fabrica, nada oculto
+    g_home.hidden = 0;
+    flex_home_normalize();
+    flex_home_save();
+}
+
+int flex_hc_wg_add(int page, int type)
+{
+    if (page < 0 || page >= g_home.page_n) {
+        return 2;
+    }
+    if (type <= FLEX_WG_NONE || type >= FLEX_WG_COUNT || type == FLEX_WG_RETIRED_7) {
+        return 2;
+    }
+    if (g_home.wg_n[page] >= FLEX_HOME_WG_MAX) {
+        return 1;
+    }
+    int w = flex_home_wg_reg[type].w, h = flex_home_wg_reg[type].h, c, r;
+    if (!wg_spot_for(page, type, w, h, -1, &c, &r)) {
+        return 2;
+    }
+    flex_home_wg_t *d = &g_home.wg[page][g_home.wg_n[page]];
+    d->type = (uint8_t)type;
+    d->col = (uint8_t)c;
+    d->row = (uint8_t)r;
+    d->w = (uint8_t)w;
+    d->h = (uint8_t)h;
+    g_home.wg_n[page]++;
+    return 0;
+}
+
+const uint8_t flex_hc_grid_c[FLEX_HC_GRID_OPTS] = {4, 5, 4, 5};
+const uint8_t flex_hc_grid_r[FLEX_HC_GRID_OPTS] = {3, 3, 4, 4};
+
+int flex_hc_grid_idx(void)
+{
+    for (int i = 0; i < FLEX_HC_GRID_OPTS; i++) {
+        if (flex_hc_grid_c[i] == g_home.cols && flex_hc_grid_r[i] == g_home.rows) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+int flex_hc_reorder_dest(int reorder, float slide, int step, int page_n)
+{
+    int dst = reorder - (int)((slide + (slide < 0 ? -step / 2 : step / 2)) / step);
+    if (dst < 0) {
+        dst = 0;
+    }
+    if (dst > page_n - 1) {
+        dst = page_n - 1;
+    }
+    return dst;
+}
+
+int flex_hc_reorder_apply(int from, float slide, int step)
+{
+    int dst = flex_hc_reorder_dest(from, slide, step, g_home.page_n);
+    while (dst > from) {
+        flex_hc_page_swap(from, from + 1);
+        from++;
+    }
+    while (dst < from) {
+        flex_hc_page_swap(from, from - 1);
+        from--;
+    }
+    return from;
+}
+
+bool flex_hc_is_jpeg_name(const char *nm)
+{
+    int L = (int)strlen(nm);
+    if (L < 5) {
+        return false;
+    }
+    const char *ext = nm + L - 4;
+    if (!strcmp(ext, ".jpg") || !strcmp(ext, ".JPG")) {
+        return true;
+    }
+    return L >= 6 && (!strcmp(nm + L - 5, ".jpeg") || !strcmp(nm + L - 5, ".JPEG"));
+}
+
+// ---- Pellizco de dos dedos (hpzUpdate, HomeCfg.h:1154) ---------------------------------------
+void flex_pz_init(flex_pz_t *p)
+{
+    p->state = 0;
+    p->id_a = p->id_b = -1;
+    p->d2_ref = 0;
+    p->t0 = 0;
+    p->swallow = false;
+}
+
+static void pz_reset(flex_pz_t *p)
+{
+    p->state = 0;
+    p->id_a = p->id_b = -1;
+    p->d2_ref = 0;
+}
+
+int flex_pz_update(flex_pz_t *p, int mode, uint8_t fingers_raw, uint32_t fingers_ms, uint32_t now,
+                   flex_pz_poll_fn poll, void *ctx)
+{
+    bool in_home = mode == 1, in_cfg = mode == 2;
+    if (!in_home && !in_cfg) {
+        if (p->state) {
+            pz_reset(p);
+        }
+        p->swallow = false;
+        return FLEX_PZ_NONE;
+    }
+    uint8_t fingers = (now - fingers_ms > FLEX_PZ_FINGERS_FRESH_MS) ? 0 : fingers_raw;
+    if (p->state == 2) {                // gesto ya resuelto: tragar hasta soltar los dos dedos
+        if (fingers == 0) {
+            pz_reset(p);
+            p->swallow = false;
+        } else {
+            p->swallow = true;
+        }
+        return FLEX_PZ_NONE;
+    }
+    if (fingers < 2) {
+        if (p->state) {
+            pz_reset(p);
+        }
+        p->swallow = false;
+        return FLEX_PZ_NONE;
+    }
+    flex_pz_pt_t pts[4];
+    int n = poll(ctx, pts);
+    if (n < 2) {
+        pz_reset(p);
+        p->swallow = false;
+        return FLEX_PZ_NONE;
+    }
+    if (n > 2) {                        // tercer contacto: cancelacion segura
+        p->state = 2;
+        p->swallow = true;
+        return FLEX_PZ_NONE;
+    }
+    int ax = pts[0].x, ay = pts[0].y, bx = pts[1].x, by = pts[1].y, ida = pts[0].id, idb = pts[1].id;
+    int lo = ida < idb ? ida : idb, hi = ida < idb ? idb : ida;   // orden independiente del dedo
+    int32_t dx = ax - bx, dy = ay - by, d2 = dx * dx + dy * dy;
+    if (p->state == 0) {
+        if (d2 < (in_home ? FLEX_PZ_MIN_START_D2 : FLEX_PZ_MIN_OPEN_D2)) {
+            p->swallow = false;
+            return FLEX_PZ_NONE;
+        }
+        p->state = 1;
+        p->id_a = lo;
+        p->id_b = hi;
+        p->d2_ref = d2;
+        p->t0 = now;
+        p->swallow = true;
+        return FLEX_PZ_NONE;
+    }
+    if (lo != p->id_a || hi != p->id_b) {   // cambio de dedos: se rearma sin abrir nada
+        p->id_a = lo;
+        p->id_b = hi;
+        p->d2_ref = d2;
+        p->t0 = now;
+        p->swallow = true;
+        return FLEX_PZ_NONE;
+    }
+    p->swallow = true;
+    // La referencia sigue el EXTREMO del recorrido: dos dedos que solo se apoyan y se asientan
+    // no acumulan un falso pellizco.
+    if (in_home) {
+        if (d2 > p->d2_ref) {
+            p->d2_ref = d2;
+            p->t0 = now;
+        }
+    } else if (d2 < p->d2_ref) {
+        p->d2_ref = d2;
+        p->t0 = now;
+    }
+    uint32_t el = now - p->t0;
+    if (el > FLEX_PZ_MAX_MS) {              // fuera de ventana: se consume, no abre
+        p->state = 2;
+        return FLEX_PZ_NONE;
+    }
+    if (el < FLEX_PZ_MIN_MS) {
+        return FLEX_PZ_NONE;
+    }
+    if (in_home) {
+        // Cierre: -28 % de distancia (0,72^2 = 0,518 -> 52/100 en cuadrados) Y >= 50 px reales.
+        if ((int64_t)d2 * 100 <= (int64_t)p->d2_ref * 52) {
+            int d = flex_isqrt32(d2), d0 = flex_isqrt32(p->d2_ref);
+            if (d0 - d >= FLEX_PZ_ABS_PX) {
+                p->state = 2;
+                return FLEX_PZ_OPEN_CFG;
+            }
+        }
+    } else if ((int64_t)d2 * 100 >= (int64_t)p->d2_ref * 190) {
+        int d = flex_isqrt32(d2), d0 = flex_isqrt32(p->d2_ref);
+        if (d - d0 >= FLEX_PZ_ABS_PX) {
+            p->state = 2;
+            return FLEX_PZ_EXIT_CFG;
+        }
+    }
+    return FLEX_PZ_NONE;
+}
+
+int flex_hc_scan_images(flex_hc_ls_fn ls, void *ctx, char paths[FLEX_HC_PICK_MAX][FLEX_HC_PATH_MAX])
+{
+    static const char DIRS[3][12] = {"/Imagenes", "/Camara", "/Descargas"};
+    flex_hc_ent_t ents[FLEX_HC_ENT_MAX];
+    int n = 0;
+    for (int d = 0; d < 3 && n < FLEX_HC_PICK_MAX; d++) {
+        int k = ls(ctx, DIRS[d], ents, FLEX_HC_ENT_MAX);
+        for (int i = 0; i < k && n < FLEX_HC_PICK_MAX; i++) {
+            if (ents[i].dir || !flex_hc_is_jpeg_name(ents[i].name)) {
+                continue;
+            }
+            snprintf(paths[n], FLEX_HC_PATH_MAX, "%s/%s", DIRS[d], ents[i].name);
+            n++;
+        }
+    }
+    return n;
 }
