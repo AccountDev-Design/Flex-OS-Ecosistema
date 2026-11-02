@@ -325,7 +325,7 @@ static void begin_wipe(void *arg)
     // ARMED en la interfaz: ninguna app sigue abierta ni en Recientes
     for (int id = 0; id < FLEX_APP_N; id++) {
         if (flex_app_is_open(id)) {
-            flex_app_terminate(id);
+            flex_app_terminate_ex(id, true);   // el restablecimiento cierra aunque no se pueda guardar
         }
     }
     F.latest = F.shown = FLEX_FR_ARMED;

@@ -64,11 +64,30 @@ static const char *const k_cat[FLEX_CAT_N][5] = {
     {"Ocio", "Fun", "Loisirs", "Lazer", "Svago"},
 };
 
+#ifdef FLEX_SIM
+// Solo el simulador: una app de prueba en lugar de la pantalla "en construccion" (escena de sesiones)
+static const flex_app_ops_t *s_test_ops[FLEX_APP_N];
+void flex_app_test_set_ops(int id, const flex_app_ops_t *ops)
+{
+    if (id >= 0 && id < FLEX_APP_N) {
+        s_test_ops[id] = ops;
+    }
+}
+static flex_app_def_t s_test_def[FLEX_APP_N];
+#endif
+
 const flex_app_def_t *flex_app_def(int id)
 {
     if (id < 0 || id >= FLEX_APP_N) {
         return NULL;
     }
+#ifdef FLEX_SIM
+    if (s_test_ops[id]) {
+        s_test_def[id] = k_reg[id];
+        s_test_def[id].ops = s_test_ops[id];
+        return &s_test_def[id];
+    }
+#endif
     const flex_app_def_t *d = &k_reg[id];
     // Una app sin ops reales (simbolo weak sin definir) apunta a NULL.
     return d;

@@ -68,6 +68,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 3 (en curso: + menú contextual y Modo kiosco) | `v3` dev | 1 384 400 B | 52,8 % | 33,0 % |
 | 3 (en curso: + Modo edición del escritorio) | `v3` dev | 1 391 504 B | 53,1 % | 33,2 % |
 | 3 (en curso: + Personalizar inicio) | `v3` dev | 1 418 448 B | 54,1 % | 33,8 % |
+| 3 (en curso: + sesiones de app) | `v3` dev | 1 420 592 B | 54,2 % | 33,9 % |
 
 La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la interfaz completa
 (Fase 15). No se ha grabado nada.
@@ -119,6 +120,9 @@ La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la
 | Personalizar inicio: miniaturas de página | Se dibujan del modelo a escala con los iconos en estilo Plano (sin Vidrio por icono) | Captura real (`lv_snapshot`) de cada página del escritorio reducida al vecino más cercano y compuesta sobre el fondo; los iconos salen con el estilo activo | Sin motor propio; coste de una captura por página al abrir y tras cada cambio |
 | Personalizar inicio: pellizco | `gtPollMulti()` desde `loop()` | Mismo clasificador (`flex_pz_update`) como consumidor previo a LVGL, con el multipunto de `flex_touch_get_frame()` (tarea del GT911); la acción se difiere con `lv_async_call` | El gancho corre dentro de la lectura del indev de LVGL, donde no se puede crear UI |
 | Personalizar inicio: "Mis imágenes" | Lista y decodifica el JPEG al momento | Lista por la tarea de almacenamiento (`flex_fs_list_async`; nunca la flash desde la UI) y "Usar" avisa de que no se puede hasta la Fase 9 | Decodificador JPEG por hardware aún sin integrar |
+| Sesiones: lectura | `appLoadSessionOnce` lee el archivo la primera vez que se abre la app | Se leen TODAS al arrancar por la tarea de almacenamiento (≤ 1 KB por app) y se aplican de forma perezosa antes de crear la app | La flash nunca se toca desde la UI |
+| Sesiones: escritura | `flexFsWriteBinAtomic` síncrona; si falla, la app no se cierra | Cola del escritor único (atómica: temporal + renombrado). Poner la escritura en cola es "guardado"; un fallo posterior del disco se reintenta 3 veces y se registra | Una sesión es estado de interfaz, no el documento; si ni siquiera se puede encolar, la app no se cierra (salvo el restablecimiento) |
+| Sesiones: corte de corriente | Un corte entre renombrar a `.bak` y a la ruta final deja solo `.bak` y `.tmp`: la sesión se pierde | El renombrado atómico del escritor no pasa por `.bak`: queda la sesión vieja o la nueva | Hueco de Arduino (01c §14.3) |
 | Umbrales de toque | Toque = < 16 px y < 550 ms | Igual, aplicado al indev de LVGL (por defecto LVGL usa 10 px y 400 ms) | docs/spec/01b |
 | Restablecimiento: qué se borra de la NVS | Solo los espacios de nombres conocidos: quedaban el vínculo con el teléfono, Flex Storage, Device Care, robo, audio, clima, navegador (un aparato "restablecido" seguía emparejado) | TODOS los espacios de nombres salvo el marcador `flexreset` (incluidos los del sistema: credenciales Wi-Fi del controlador, calibración del PHY); el aviso lo dice ("Vínculo con el teléfono y Flex Storage") | docs/spec/01c §13.5 (riesgo de privacidad) |
 | Restablecimiento: marcador terminado | Se borra al entrar al OOBE | Igual: se borra al entrar a la primera configuración | docs/spec/01c §13.6 |

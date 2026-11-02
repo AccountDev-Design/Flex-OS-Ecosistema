@@ -188,15 +188,52 @@ void flex_storage_get_status(flex_storage_status_t *out)
     out->fs_total = 0xAE0000;
     out->fs_used = 3 * 1024 * 1024;   // SIMULADO
 }
+// Archivos en memoria (solo si la escena los activa con sim_fs_enable): para las sesiones de app
+static struct { char path[96]; uint8_t data[1100]; size_t len; bool used; } s_mf[16];
+static bool s_mf_on, s_mf_fail, s_mf_late_fail;
+static int s_mf_writes;
+void sim_fs_enable(bool on) { s_mf_on = on; if (!on) memset(s_mf, 0, sizeof(s_mf)); s_mf_writes = 0; }
+void sim_fs_fail_writes(bool queue_fail, bool disk_fail) { s_mf_fail = queue_fail; s_mf_late_fail = disk_fail; }
+int sim_fs_writes(void) { return s_mf_writes; }
+size_t sim_fs_get(const char *p, uint8_t *out, size_t cap)
+{
+    for (int i = 0; i < 16; i++) if (s_mf[i].used && !strcmp(s_mf[i].path, p)) { size_t n = s_mf[i].len < cap ? s_mf[i].len : cap; memcpy(out, s_mf[i].data, n); return n; }
+    return 0;
+}
+void sim_fs_put(const char *p, const uint8_t *d, size_t l)
+{
+    for (int i = 0; i < 16; i++) if (!s_mf[i].used || !strcmp(s_mf[i].path, p)) { snprintf(s_mf[i].path, sizeof(s_mf[i].path), "%s", p); memcpy(s_mf[i].data, d, l); s_mf[i].len = l; s_mf[i].used = true; return; }
+}
 esp_err_t flex_fs_write_async(const char *p, const void *d, size_t l, flex_fs_done_cb_t cb, void *u)
 {
-    (void)p; (void)d; (void)l;
-    if (cb) cb(ESP_ERR_INVALID_STATE, u);
+    if (!s_mf_on) {
+        (void)p; (void)d; (void)l;
+        if (cb) cb(ESP_ERR_INVALID_STATE, u);
+        return ESP_OK;
+    }
+    if (s_mf_fail || l > sizeof(s_mf[0].data)) {
+        return ESP_ERR_INVALID_STATE;   // no se pudo ni poner en cola
+    }
+    s_mf_writes++;
+    if (!s_mf_late_fail) {
+        sim_fs_put(p, d, l);
+    }
+    if (cb) cb(s_mf_late_fail ? ESP_FAIL : ESP_OK, u);
     return ESP_OK;
 }
 esp_err_t flex_fs_read_async(const char *p, size_t m, flex_fs_read_cb_t cb, void *u)
 {
-    (void)p; (void)m;
+    if (s_mf_on) {
+        for (int i = 0; i < 16; i++) {
+            if (s_mf[i].used && !strcmp(s_mf[i].path, p) && s_mf[i].len <= m) {
+                uint8_t *c = malloc(s_mf[i].len);
+                memcpy(c, s_mf[i].data, s_mf[i].len);
+                if (cb) cb(ESP_OK, c, s_mf[i].len, u);
+                else free(c);
+                return ESP_OK;
+            }
+        }
+    }
     if (cb) cb(ESP_ERR_NOT_FOUND, NULL, 0, u);
     return ESP_OK;
 }

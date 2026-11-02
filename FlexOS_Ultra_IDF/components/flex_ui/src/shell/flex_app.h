@@ -13,6 +13,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "flex_icons.h"
 #include "lvgl.h"
@@ -50,6 +51,12 @@ typedef struct {
     bool (*bg_work)(void);            // trabajo real en segundo plano
     bool (*dirty)(void);              // cambios sin guardar
     void (*on_minute)(void);          // cambio de minuto (relojes)
+    // Sesion (docs/spec/01c 14): el minimo estado de interfaz que merece sobrevivir a un reinicio
+    // (vista, scroll, seleccion; nunca el documento). Devuelve false si no pudo prepararlo.
+    bool (*save_session)(void *out, size_t cap, size_t *len);
+    // La primera vez que se abre la app, ANTES de on_create. data = NULL: no hay sesion valida
+    // (otra version, otra app o corrupta) y debe abrir en un estado seguro.
+    void (*load_session)(const void *data, size_t len);
 } flex_app_ops_t;
 
 typedef struct {
@@ -76,7 +83,16 @@ void flex_sys_home(void);
 void flex_sys_recents(void);
 int  flex_app_current(void);                               // id en primer plano o -1
 bool flex_app_is_open(int id);                             // suspendida o en primer plano
-void flex_app_terminate(int id);                           // cerrar de verdad (Recientes)
+void flex_app_terminate(int id);                           // cerrar de verdad (Recientes); no cierra si no pudo guardar su sesion
+// force = true (restablecimiento): cierra aunque no se pueda guardar. false: la app sigue viva.
+bool flex_app_terminate_ex(int id, bool force);
+
+// Sesiones (flex_session.c). Las apps llaman a mark_dirty cuando cambian algo: el volcado ocurre
+// 1200 ms despues (tope 30 s) y nunca con el dedo apoyado.
+void flex_session_start(void);
+void flex_session_mark_dirty(int id);
+void flex_session_flush_now(void);
+bool flex_session_pending(int id);
 
 // Para las apps: cabecera compartida (uiHdr: zonas 56x56, titulo recortado).
 lv_obj_t *flex_app_header(lv_obj_t *parent, const char *title, bool menu, lv_event_cb_t on_menu);

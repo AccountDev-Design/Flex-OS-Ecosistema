@@ -233,9 +233,14 @@ static void std_header_back_cb(lv_event_t *e)
     flex_sys_back();
 }
 
+void flex_session_load_once(int id);
+void flex_session_note_suspend(int id);
+bool flex_session_terminate_begin(int id, bool force);
+
 static void build_app(int id)
 {
     const flex_app_def_t *d = flex_app_def(id);
+    flex_session_load_once(id);   // appLoadSessionOnce: la sesion de disco, antes de crear la interfaz
     app_inst_t *in = &s_inst[id];
     lv_obj_t *r = flex_box(s_apps);
     lv_obj_set_size(r, 480, 800);
@@ -313,6 +318,7 @@ static void suspend_fg(void)
         if (d->ops && d->ops->on_suspend) {
             d->ops->on_suspend();
         }
+        flex_session_note_suspend(s_fg);   // arma el volcado vencido (fuera de la animacion)
     }
     s_fg = -1;
 }
@@ -510,8 +516,18 @@ bool flex_app_is_open(int id)
 
 void flex_app_terminate(int id)
 {
+    (void)flex_app_terminate_ex(id, false);
+}
+
+// appTerminate: guarda la sesion EN EL ACTO; si no se pudo y el cierre no es forzado, la app no se
+// cierra (su contenido sigue vivo en RAM): perder el trabajo del usuario en silencio no es opcion.
+bool flex_app_terminate_ex(int id, bool force)
+{
     if (!flex_app_is_open(id)) {
-        return;
+        return true;
+    }
+    if (!flex_session_terminate_begin(id, force)) {
+        return false;
     }
     const flex_app_def_t *d = flex_app_def(id);
     if (id == s_fg) {
@@ -527,6 +543,7 @@ void flex_app_terminate(int id)
     s_inst[id].root = NULL;
     s_inst[id].life = APP_CLOSED;
     flex_recents_note_closed(id);
+    return true;
 }
 
 // ---- estados del shell -------------------------------------------------------------
@@ -741,6 +758,7 @@ void flex_shell_start(void)
     flex_qs_init();
     flex_notif_init();
     flex_homecfg_init();
+    flex_session_start();
     flex_kiosk_load();
     if (flex_reset_boot_state() == FLEX_FR_BOOT_RESUME) {
         flex_factory_resume_boot();   // un borrado a medias se termina antes que nada

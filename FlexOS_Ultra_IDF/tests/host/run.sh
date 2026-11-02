@@ -92,13 +92,19 @@ python3 ref/extract_arduino.py "$OUT/ref_homecfg.inc" \
     FlexOS_Ultra_Home.h:homeFirstFree,homePageAppendQuiet,homeFirstFreeGrow,gHomePkgSeen,homePkgSeen,homePkgMarkSeen,homeOrderNormalize \
     FlexOS_Ultra_HomeCfg.h:HC_PICK_MAX,hcPickPath,hcPickN,homePageItems,homePageAdd,homePageDelete,homePageSwap,homeSetMain,homeSetGrid,homeResetLayout,HC_GRID_OPTS,HC_GRID_C,HC_GRID_R,hcGridIdx,hcScanImages,HPZ_MIN_START_D2,HPZ_MIN_OPEN_D2,HPZ_MIN_MS,HPZ_MAX_MS,HPZ_ABS_PX,hpzState,hpzIdA,hpzD2Ref,hpzT0,hpzSwallow,hpzSwallowing,hpzReset,hpzUpdate
 
-SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c test_kiosk.c test_homecfg.c
+python3 ref/extract_arduino.py "$OUT/ref_session.inc" \
+    FlexOS_Ultra_Types.h:SessHdr \
+    FlexOS_Ultra_Session.h:SESS_MAGIC,SESS_IO_MAX,gSessIo,crc32u,sessWrite,sessRead \
+    FlexOS_Ultra_AppFramework.h:SESS_IDLE_MS,SESS_MAXWAIT_MS,gAppState,gAppSeenMs,gSessDirtyApp,gSessDirtyMs,appHooks,gSessNeedSave,appSaveSession,sessMarkDirty,sessFlushNow,sessAutosaveTick,appTerminate
+
+SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c test_kiosk.c test_homecfg.c test_session.c
       $ROOT/components/flex_storage/src/flex_kv.c
       $ROOT/components/flex_storage/src/flex_fs_path.c
       $ROOT/components/flex_storage/src/flex_fs_wipe.c
       $ROOT/components/flex_ui/src/theme/flex_wallpaper.c
       $ROOT/components/flex_ui/src/theme/flex_glass_math.c
       $ROOT/components/flex_ui/src/shell/flex_home_model.c
+      $ROOT/components/flex_ui/src/shell/flex_session_model.c
       $ROOT/components/flex_ui/src/shell/flex_drawer_model.c
       $ROOT/components/flex_ui/src/shell/flex_recents_model.c
       $ROOT/components/flex_ui/src/shell/flex_qs_model.c
@@ -119,7 +125,7 @@ CFLAGS=(-O1 -g -Wall -Wextra -Werror -pthread)
 build() {   # $1 = sufijo, resto = flags de sanitizador
     local sfx=$1; shift
     local refs=()
-    for r in wall glass home home_load touch drawer kb recents qs ntf homecfg; do
+    for r in wall glass home home_load touch drawer kb recents qs ntf homecfg session; do
         c++ -std=gnu++17 -O1 -g -w "$@" -Iref -I"$OUT" -I$ROOT/components/flex_portable/include -c ref/ref_${r}_main.cpp -o "$OUT/ref_${r}_$sfx.o"
         refs+=("$OUT/ref_${r}_$sfx.o")
     done
