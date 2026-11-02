@@ -53,6 +53,11 @@ static int desc_of(int id)
     return -1;
 }
 
+static int save_cb(void *ctx, int id);
+
+// La escritura ya se puso en cola y el disco fallo despues. Una sesion es estado de interfaz, no el documento:
+// se reintenta 3 veces SOLO si la app sigue abierta (una app cerrada no tiene interfaz que leer) y, al agotar
+// los reintentos, la marca "desfasada" se queda puesta (Recientes la ensena) y se registra.
 static void write_done(esp_err_t err, void *user)
 {
     int id = (int)(intptr_t)user;
@@ -60,8 +65,16 @@ static void write_done(esp_err_t err, void *user)
         A[id].fails = 0;
         return;
     }
+    if (!flex_app_is_open(id)) {
+        printf("[SESS] sesion de la app %d: el disco fallo tras cerrarla; se pierde\n", id);
+        return;
+    }
     if (++A[id].fails <= 3) {
-        flex_sess_mark_dirty(&S, id, lv_tick_get(), NULL, NULL);   // se reintenta tras la espera normal
+        // con el gancho REAL: si hay otra app sucia, mark_dirty la guarda ya con el
+        flex_sess_mark_dirty(&S, id, lv_tick_get(), save_cb, NULL);
+    } else {
+        S.need[id] = true;
+        printf("[SESS] sesion de la app %d: 3 reintentos sin exito; queda sin guardar\n", id);
     }
 }
 

@@ -192,6 +192,19 @@ void flex_storage_get_status(flex_storage_status_t *out)
 static struct { char path[96]; uint8_t data[1100]; size_t len; bool used; } s_mf[16];
 static bool s_mf_on, s_mf_fail, s_mf_late_fail;
 static int s_mf_writes;
+// Callbacks diferidos: la escritura se pone en cola y su resultado llega despues (como con la tarea de almacenamiento)
+static bool s_mf_defer;
+static struct { flex_fs_done_cb_t cb; void *u; } s_mf_pend[8];
+static int s_mf_npend;
+void sim_fs_defer(bool on) { s_mf_defer = on; }
+void sim_fs_complete(bool fail)
+{
+    int n = s_mf_npend;
+    s_mf_npend = 0;
+    for (int i = 0; i < n; i++) {
+        if (s_mf_pend[i].cb) s_mf_pend[i].cb(fail ? ESP_FAIL : ESP_OK, s_mf_pend[i].u);
+    }
+}
 void sim_fs_enable(bool on) { s_mf_on = on; if (!on) memset(s_mf, 0, sizeof(s_mf)); s_mf_writes = 0; }
 void sim_fs_fail_writes(bool queue_fail, bool disk_fail) { s_mf_fail = queue_fail; s_mf_late_fail = disk_fail; }
 int sim_fs_writes(void) { return s_mf_writes; }
@@ -215,6 +228,13 @@ esp_err_t flex_fs_write_async(const char *p, const void *d, size_t l, flex_fs_do
         return ESP_ERR_INVALID_STATE;   // no se pudo ni poner en cola
     }
     s_mf_writes++;
+    if (s_mf_defer && s_mf_npend < 8) {
+        sim_fs_put(p, d, l);
+        s_mf_pend[s_mf_npend].cb = cb;
+        s_mf_pend[s_mf_npend].u = u;
+        s_mf_npend++;
+        return ESP_OK;
+    }
     if (!s_mf_late_fail) {
         sim_fs_put(p, d, l);
     }

@@ -29,7 +29,8 @@ int flex_optimize_stage(void);
 #define MB(x) ((uint32_t)((x) * 1024u * 1024u))
 
 static FlexMemSnap g_snap;
-static int g_shed_calls, g_closed;
+static int g_shed_calls, g_closed, g_creates;
+static uint32_t g_close_gain, g_shed_pool = 1000u * 1024u * 1024u;   // lo que todavia se puede soltar
 static int g_done_cb;
 static void set_free(uint32_t free_b, uint32_t largest)
 {
@@ -37,17 +38,19 @@ static void set_free(uint32_t free_b, uint32_t largest)
     g_snap.psLargest = largest;
     flex_mem_sim_set(&g_snap);
 }
-static void t_create(lv_obj_t *root, const lv_area_t *area) { (void)root; (void)area; }
+static void t_create(lv_obj_t *root, const lv_area_t *area) { (void)root; (void)area; g_creates++; }
 static void t_close(void)
 {
     g_closed++;
-    set_free(g_snap.psFree + MB(3), g_snap.psLargest + MB(2));   // cerrar la app devuelve su memoria
+    set_free(g_snap.psFree + g_close_gain, g_snap.psLargest + g_close_gain);   // cerrar la app devuelve su memoria
 }
 static size_t t_shed(void)
 {
     g_shed_calls++;
-    set_free(g_snap.psFree + MB(1), g_snap.psLargest + MB(1));
-    return 1;
+    uint32_t g = g_shed_pool < MB(1) ? g_shed_pool : MB(1);   // cada app suelta 1 MB mientras quede en la reserva comun
+    g_shed_pool -= g;
+    if (g) set_free(g_snap.psFree + g, g_snap.psLargest + g);
+    return g ? 1 : 0;
 }
 static const flex_app_ops_t k_ops = {.on_create = t_create, .on_close = t_close, .shed = t_shed};
 static void on_done(void) { g_done_cb++; }
@@ -82,6 +85,7 @@ bool scene_memory_run(void)
     g_snap.fsUsed = MB(2);
     g_snap.fsValid = 1;
     set_free(MB(14), MB(12));
+    g_close_gain = MB(3);
     static const int apps[3] = {IC_NOTAS, IC_PAINT, IC_CALC};
     for (int i = 0; i < 3; i++) flex_app_test_set_ops(apps[i], &k_ops);
 
@@ -98,10 +102,13 @@ bool scene_memory_run(void)
     set_free(MB(4), MB(3));
     flex_app_open(IC_MULTIMEDIA, NULL);   // pesada
     CHK(!flex_app_is_open(IC_MULTIMEDIA));
-    sim_run(60);                                                                   // el aviso pasa por el buzon de la UI
-    CHK(strstr(flex_notif_latest_title(), "Multimedia no se abre ahora") != NULL);
+    bool denied_seen = false;                                                      // el aviso pasa por el buzon de la UI y,
+    for (int k = 0; k < 200; k++) {                                                // despues, el alivio puede avisar tambien:
+        sim_run(4);                                                                // se mira cada 4 ms
+        denied_seen |= strstr(flex_notif_latest_title(), "Multimedia no se abre ahora") != NULL;
+    }
+    CHK(denied_seen);
     (void)n0;
-    sim_run(440);
     flex_app_open(IC_NOTAS, NULL);        // ligera: siempre
     sim_run(500);
     CHK(flex_app_is_open(IC_NOTAS));
@@ -131,6 +138,7 @@ bool scene_memory_run(void)
     sim_run(300);
     CHK(flex_app_is_open(IC_PAINT) && flex_app_is_open(IC_CALC) && flex_app_is_open(IC_NOTAS));
     int s0 = g_shed_calls, c0 = g_closed;
+    g_shed_pool = MB(3);                  // lo soltable en total: 3 MB, lo haga quien lo haga (alivio o presupuesto)
     set_free(MB(1), MB(1));               // critica: tras soltar (+3 MB) sigue por debajo de 5 MB
     flex_app_open(IC_CALC, NULL);         // vuelve a una suspendida (no se bloquea)...
     sim_run(400);
@@ -139,6 +147,20 @@ bool scene_memory_run(void)
     CHK(g_shed_calls > s0);               // primero se suelta lo reconstruible
     CHK(g_closed > c0);                   // y luego se cierra la suspendida menos reciente
     CHK(!flex_app_is_open(IC_PAINT));     // Paint era la menos reciente
+
+    // 4d) cerrar de verdad la app de delante con la memoria critica la cierra UNA vez (el presupuesto no se aplica
+    //     dentro de su propia suspension: antes on_close corria dos veces)
+    for (int i = 0; i < FLEX_APP_N; i++) flex_app_terminate_ex(i, true);
+    set_free(MB(14), MB(12));
+    flex_app_open(IC_NOTAS, NULL);
+    sim_run(400);
+    g_shed_pool = 0;
+    set_free(MB(0.5), MB(0.5));
+    int c4 = g_closed;
+    CHK(flex_app_terminate_ex(IC_NOTAS, true) && !flex_app_is_open(IC_NOTAS));
+    CHK(g_closed == c4 + 1);
+    sim_run(300);
+    g_shed_pool = 1000u * 1024u * 1024u;
 
     // 5) alivio automatico: al empeorar a WARN se suelta solo y, si sigue, UN aviso; con holgura, silencio
     for (int i = 0; i < FLEX_APP_N; i++) flex_app_terminate_ex(i, true);
@@ -153,6 +175,51 @@ bool scene_memory_run(void)
     flex_notify("(marca 2)", "");
     sim_run(5000);
     CHK(strcmp(flex_notif_latest_title(), "(marca 2)") == 0);   // sin repetirse (el aviso solo sale al empeorar)
+
+    // 4b) el presupuesto sigue cerrando mientras haga falta: con CRITICAL tras la primera, cierra tambien la
+    //     siguiente menos reciente (y no se queda dando vueltas con la misma)
+    for (int i = 0; i < FLEX_APP_N; i++) flex_app_terminate_ex(i, true);
+    g_close_gain = MB(1);
+    set_free(MB(14), MB(12));
+    flex_app_open(IC_PAINT, NULL);   // la mas antigua
+    sim_run(400);
+    flex_sys_home();
+    sim_run(300);
+    flex_app_open(IC_CALC, NULL);
+    sim_run(400);
+    flex_sys_home();
+    sim_run(300);
+    flex_app_open(IC_NOTAS, NULL);   // la mas reciente
+    sim_run(400);
+    int c1 = g_closed;
+    g_shed_pool = MB(3);
+    set_free(MB(0.5), MB(0.5));      // las tres sueltan 1 MB cada una (3,5 MB: aun critica) y cada cierre da 1 MB
+    flex_sys_home();
+    sim_run(500);
+    CHK(g_closed == c1 + 2);                                          // dos cierres, no uno ni diecinueve
+    CHK(!flex_app_is_open(IC_PAINT) && !flex_app_is_open(IC_CALC));   // las dos menos recientes
+    CHK(flex_app_is_open(IC_NOTAS));                                  // la mas reciente se queda
+    g_close_gain = MB(3);
+
+    // 4c) la app que se abre NO es candidata al suspender la de delante, aunque sea la menos reciente
+    for (int i = 0; i < FLEX_APP_N; i++) flex_app_terminate_ex(i, true);
+    set_free(MB(14), MB(12));
+    flex_app_open(IC_PAINT, NULL);   // B: suspendida y la mas antigua
+    sim_run(400);
+    flex_sys_home();
+    sim_run(300);
+    flex_app_open(IC_CALC, NULL);    // A: delante
+    sim_run(400);
+    int cr = g_creates;
+    g_shed_pool = 0;
+    set_free(MB(0.5), MB(0.5));      // critica
+    flex_app_open(IC_PAINT, NULL);   // al suspender Calc se aplica el presupuesto
+    sim_run(500);
+    CHK(flex_app_current() == IC_PAINT && g_creates == cr);           // Paint volvio viva, sin reconstruirse
+    flex_sys_home();
+    sim_run(300);
+    g_shed_pool = 1000u * 1024u * 1024u;
+    g_close_gain = MB(3);
 
     // 6) Optimizar Flex OS: modal, cinco etapas a 420 ms, resultado y cierre con un toque
     set_free(MB(14), MB(12));

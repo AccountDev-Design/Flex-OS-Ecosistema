@@ -373,7 +373,13 @@ static void layout_cards(void)
         }
         int x = card_x(i);
         lv_obj_set_x(H.card[i], x);
-        lv_obj_set_hidden(H.card[i], x > 480 || x + CARD_W < 0);
+        bool hidden = x > 480 || x + CARD_W < 0;
+        lv_obj_set_hidden(H.card[i], hidden);
+        lv_obj_t *lbl = lv_obj_get_user_data(H.card[i]);   // "Pagina N" / "Nueva pagina": va con su tarjeta
+        if (lbl) {
+            lv_obj_set_x(lbl, x);
+            lv_obj_set_hidden(lbl, hidden);
+        }
         bool center = i == H.page_view;
         if (i < g_home.page_n) {
             lv_obj_t *frame = lv_obj_get_child(H.card[i], 2);
@@ -419,6 +425,9 @@ static void bar_build(lv_obj_t *p)
 
 static void build_pages(void)
 {
+    if (H.page_view >= total_cards()) {
+        H.page_view = total_cards() - 1;   // p. ej. con "Bloquear diseno" desaparece la tarjeta "+"
+    }
     lv_obj_clean(H.content);
     memset(H.card, 0, sizeof(H.card));
     if (!H.thumbs_ok) {
@@ -455,7 +464,10 @@ static void build_pages(void)
             char nb[24];
             snprintf(nb, sizeof(nb), "P\xC3\xA1gina %d", i + 1);
             lv_obj_t *l = flex_label(H.content, nb, FLEX_FONT_S2, FLEX_ONWALL);
-            flex_label_cap_center(l, card_x(i) + CARD_W / 2, CARD_Y + CARD_H + 6);
+            lv_obj_set_width(l, CARD_W);   // centrada en el ancho de su tarjeta: se mueve con ella
+            lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_x(l, card_x(i));
+            flex_label_cap_y(l, CARD_Y + CARD_H + 6);
             lv_obj_set_user_data(c, l);
         } else {   // tarjeta "+"
             part(c, 0, 0, CARD_W, CARD_H, 26, lv_color_white(), 34);
@@ -464,7 +476,10 @@ static void build_pages(void)
             lv_obj_set_style_border_color(frame, FLEX_ONWALL2, 0);
             glyph(c, G_PLUS, CARD_W / 2, CARD_H / 2, 64, FLEX_ONWALL);
             lv_obj_t *l = flex_label(H.content, "Nueva p\xC3\xA1gina", FLEX_FONT_S2, FLEX_ONWALL);
-            flex_label_cap_center(l, card_x(i) + CARD_W / 2, CARD_Y + CARD_H + 6);
+            lv_obj_set_width(l, CARD_W);   // centrada en el ancho de su tarjeta: se mueve con ella
+            lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_x(l, card_x(i));
+            flex_label_cap_y(l, CARD_Y + CARD_H + 6);
             lv_obj_set_user_data(c, l);
         }
     }
@@ -567,6 +582,7 @@ static void layer_cb(lv_event_t *e)
         H.p0 = p;
         H.t0 = lv_tick_get();
         H.lp_armed = true;
+        H.drag = H.drag_moved = false;
         if (p.y >= CARD_Y - 40 && p.y <= CARD_Y + CARD_H + 40) {
             H.drag = true;
             H.drag_moved = false;
@@ -620,6 +636,7 @@ static void layer_cb(lv_event_t *e)
             return;
         }
         bool moved = H.drag_moved;
+        H.drag_moved = false;   // un toque posterior fuera de la banda de arrastre no hereda "ya se arrastro"
         if (H.drag && moved) {
             if (H.slide > STEP / 3 && H.page_view < total - 1) {
                 H.page_view++;
@@ -661,7 +678,8 @@ static void modal_ok_cb(lv_event_t *e)
     } else if (m == M_RESET) {
         flex_hc_reset_layout();
         H.page_view = 0;
-        refresh_pages();
+        H.thumbs_ok = false;
+        show_view(V_SETTINGS);   // como Arduino: se queda en Ajustes de inicio
     }
 }
 
@@ -730,6 +748,16 @@ static void chrome(const char *title, const char *sub, bool back)
     }
 }
 
+static void unclick_tree(lv_obj_t *o)
+{
+    uint32_t n = lv_obj_get_child_count(o);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *c = lv_obj_get_child(o, (int32_t)i);
+        lv_obj_set_clickable(c, false);
+        unclick_tree(c);
+    }
+}
+
 static lv_obj_t *list_create(void)
 {
     lv_obj_t *l = flex_box(H.content);
@@ -785,11 +813,12 @@ static void pv_tick(lv_timer_t *t)
         lv_timer_pause(H.pv_timer);
         return;
     }
-    int i = H.pv_next++;
+    int i = H.pv_next;
     uint16_t *buf = malloc((size_t)FLEX_WALL_W * FLEX_WALL_H * 2);
     if (!buf) {
-        return;
+        return;   // sin memoria: se reintenta en el siguiente tick (no se salta esa miniatura)
     }
+    H.pv_next++;
     if (!H.pv[i]) {
         H.pv[i] = malloc((size_t)PV_W * PV_H * 2);
     }
@@ -898,9 +927,9 @@ static void pk_cb(esp_err_t err, const flex_fs_ent_t *ents, size_t n, void *user
         PK.e[d][PK.n[d]].dir = ents[i].dir;
         PK.n[d]++;
     }
-    if (d < 2) {
-        flex_fs_list_async(PK_DIRS[d + 1], FLEX_HC_ENT_MAX, pk_cb, (void *)(uintptr_t)((PK.gen << 2) | (uint32_t)(d + 1)));
-        return;
+    if (d < 2 &&
+        flex_fs_list_async(PK_DIRS[d + 1], FLEX_HC_ENT_MAX, pk_cb, (void *)(uintptr_t)((PK.gen << 2) | (uint32_t)(d + 1))) == ESP_OK) {
+        return;   // si la cola esta llena se termina con lo ya leido en vez de quedarse en "Buscando..."
     }
     PK.loading = false;
     H.pick_n = flex_hc_scan_images(pk_ls, NULL, H.pick_path);
@@ -954,7 +983,7 @@ static void build_pick(void)
         }
         label_at(r, H.pick_path[i], FLEX_FONT_S2, t->txt, 16, 16, 330);
         if (sel) {
-            btn(r, 448 - 126 + 16 - 16, 8, 100, 36, "Usar", true, pick_cb, 1000 + i);
+            btn(r, 448 - 126 + 16, 8, 100, 36, "Usar", true, pick_cb, 1000 + i);
         }
     }
 }
@@ -1073,12 +1102,14 @@ static void build_widgets(void)
         lv_obj_set_scrollable(pv, false);
         flex_home_wg_t w = {.type = (uint8_t)i, .col = 0, .row = 0, .w = d->w, .h = d->h};
         flex_home_wg_build_preview(pv, &w, 108, 60);
+        lv_obj_set_clickable(pv, false);   // la miniatura no recoge el toque: lo recoge la fila entera
+        unclick_tree(pv);
         label_at(r, d->name, FLEX_FONT_S2, t->txt, 132, 18, 300);
         char sz[24];
         snprintf(sz, sizeof(sz), "%dx%d celdas", d->w, d->h);
         label_at(r, sz, FLEX_FONT_S1, t->txt2, 132, 42, 0);
         if (sel) {
-            btn(r, 448 - 122 + 16 - 16, 20, 96, 36, "A\xC3\xB1" "adir", true, wg_cb, 1000 + i);
+            btn(r, 448 - 122 + 16, 20, 96, 36, "A\xC3\xB1" "adir", true, wg_cb, 1000 + i);
         }
         y += 82;
     }
@@ -1434,6 +1465,7 @@ void flex_home_customize_close_now(void)
         flex_home_save();
         destroy();
         flex_shell_overlay_end();
+        flex_home_rebuild();   // el modelo pudo cambiar (rejilla, iconos, nombres) y el escritorio sigue con lo viejo
     }
 }
 

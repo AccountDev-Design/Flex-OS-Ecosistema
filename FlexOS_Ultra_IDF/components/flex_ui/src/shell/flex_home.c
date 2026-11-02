@@ -243,8 +243,15 @@ static void build_dock(void)
     }
 }
 
+static int s_built_grid;   // cols << 8 | rows con los que se dibujo el escritorio por ultima vez (pruebas)
+int flex_home_built_grid(void)
+{
+    return s_built_grid;
+}
+
 static void rebuild(void)
 {
+    s_built_grid = ((int)g_home.cols << 8) | g_home.rows;
     int32_t bot = flex_home_dots_y() + 18;
     s_band_bot = bot > 596 ? 596 : bot;
     s_band_top = FLEX_HOME_HDR_Y;

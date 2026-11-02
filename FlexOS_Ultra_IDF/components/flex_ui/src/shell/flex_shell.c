@@ -238,6 +238,8 @@ void flex_mem_app_commit(int id, uint32_t free_before);
 void flex_mem_app_forget(int id);
 void flex_mem_app_resumed(int id);
 void flex_mem_enforce(void);
+void flex_mem_protect(int id);
+static bool s_skip_enforce;   // cerrar una app de verdad no aplica el presupuesto dentro de su propia suspension
 void flex_boot_begin(void (*done)(void));   // flex_boot_ui.c
 void flex_session_load_once(int id);
 void flex_session_note_suspend(int id);
@@ -307,9 +309,11 @@ static void show_app_root(int id)
     in->last_used = lv_tick_get();
     if (!was_closed) {
         flex_mem_app_resumed(id);   // al reanudarla ya tiene lo suyo otra vez ("Pausada")
+        uint32_t free_before = flex_mem_free_psram();   // Arduino tambien mide resume() (Core.h:902)
         if (d->ops && d->ops->on_resume) {
             d->ops->on_resume();
         }
+        flex_mem_app_commit(id, free_before);
     }
 }
 
@@ -332,7 +336,9 @@ static void suspend_fg(void)
         flex_session_note_suspend(s_fg);   // arma el volcado vencido (fuera de la animacion)
     }
     s_fg = -1;
-    flex_mem_enforce();                    // appEnforceMemoryBudget: en cada suspension; solo actua en CRITICAL
+    if (!s_skip_enforce) {
+        flex_mem_enforce();                // appEnforceMemoryBudget: en cada suspension; solo actua en CRITICAL
+    }
 }
 
 void flex_app_open(int id, const lv_area_t *from_icon)
@@ -340,19 +346,21 @@ void flex_app_open(int id, const lv_area_t *from_icon)
     if (!flex_app_def(id) || (flex_kiosk_active() && id != flex_kiosk_app())) {
         return;   // kiosco: una app no puede abrir otra (Core.h:688)
     }
-    if (!flex_app_is_open(id) && !flex_mem_admit_app(id)) {
+    if (!flex_app_is_open(id) && !(flex_kiosk_active() && id == flex_kiosk_app()) && !flex_mem_admit_app(id)) {
         return;   // admision: solo apps CERRADAS (volver a una suspendida nunca se bloquea); ya se aviso
     }
     lv_area_t icon;
     if (!from_icon && flex_home_icon_area(id, &icon)) {
         from_icon = &icon;
     }
+    flex_mem_protect(id);   // la que se abre no puede ser la victima del presupuesto al suspender la de delante
     if (s_fg >= 0 && s_fg != id) {
         suspend_fg();
     }
     flex_qs_close_now();
     flex_notif_center_close_now();
     s_fg = id;
+    flex_mem_protect(-1);
     s_state = FLEX_SH_APP;
     nav_app();
     flex_touch_drop_all();   // touchDropAll: el dedo que abrio no toca la app
@@ -555,7 +563,9 @@ bool flex_app_terminate_ex(int id, bool force)
     }
     const flex_app_def_t *d = flex_app_def(id);
     if (id == s_fg) {
+        s_skip_enforce = true;   // si lo aplicara aqui, podria cerrarla DENTRO de su propio cierre (on_close dos veces)
         suspend_fg();
+        s_skip_enforce = false;
         if (s_state == FLEX_SH_APP) {
             flex_shell_show_home();   // desde Recientes (OVERLAY) la capa sigue mandando
         }

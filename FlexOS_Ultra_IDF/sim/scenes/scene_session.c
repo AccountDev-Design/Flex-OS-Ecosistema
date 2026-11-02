@@ -20,6 +20,8 @@ void flex_app_test_set_ops(int id, const flex_app_ops_t *ops);
 void flex_session_test_preload(int id, const uint8_t *file, size_t len);
 void flex_session_forget_loaded(int id);
 void sim_fs_enable(bool on);
+void sim_fs_defer(bool on);
+void sim_fs_complete(bool fail);
 void sim_fs_fail_writes(bool queue_fail, bool disk_fail);
 int sim_fs_writes(void);
 size_t sim_fs_get(const char *p, uint8_t *out, size_t cap);
@@ -35,7 +37,7 @@ size_t sim_fs_get(const char *p, uint8_t *out, size_t cap);
 // "Ajustes" de prueba: la sesion de Arduino son {int16 view, sel, scroll, listScroll} (8 B)
 typedef struct { int16_t view, sel, scroll, list; } sess_t;
 static sess_t g_state;
-static int g_loads, g_creates, g_loaded_valid;
+static int g_loads, g_creates, g_loaded_valid, g_saves1, g_saves2;
 static void t_create(lv_obj_t *root, const lv_area_t *area)
 {
     (void)root;
@@ -44,6 +46,7 @@ static void t_create(lv_obj_t *root, const lv_area_t *area)
 }
 static bool t_save(void *out, size_t cap, size_t *len)
 {
+    g_saves1++;
     if (cap < sizeof(g_state)) return false;
     memcpy(out, &g_state, sizeof(g_state));
     *len = sizeof(g_state);
@@ -58,7 +61,17 @@ static void t_load(const void *data, size_t len)
         g_loaded_valid++;
     }
 }
+static sess_t g_state2;
+static bool t2_save(void *out, size_t cap, size_t *len)
+{
+    g_saves2++;
+    memcpy(out, &g_state2, sizeof(g_state2));
+    *len = sizeof(g_state2);
+    return cap >= sizeof(g_state2);
+}
+static void t2_load(const void *data, size_t len) { (void)data; (void)len; memset(&g_state2, 0, sizeof(g_state2)); }
 static const flex_app_ops_t k_ops = {.on_create = t_create, .save_session = t_save, .load_session = t_load};
+static const flex_app_ops_t k_ops2 = {.on_create = t_create, .save_session = t2_save, .load_session = t2_load};
 
 static void to_home(void)
 {
@@ -211,6 +224,58 @@ bool scene_session_run(void)
     CHK(!flex_app_is_open(IC_AJUSTES) && flex_recents_count() == 0 && sim_fs_writes() == w7 + 1);
     flex_recents_close_now();
     sim_run(300);
+
+    // 8) el disco falla DESPUES de encolar mientras otra app tiene cambios pendientes: el reintento guarda ya a la
+    //    otra con el gancho real (antes saltaba a un puntero nulo), y una app cerrada no se reintenta
+    flex_app_test_set_ops(IC_NOTAS, &k_ops2);
+    flex_session_forget_loaded(IC_NOTAS);
+    flex_app_open(IC_AJUSTES, NULL);
+    sim_run(400);
+    flex_sys_home();
+    sim_run(200);
+    flex_app_open(IC_NOTAS, NULL);
+    sim_run(400);
+    flex_sys_home();
+    sim_run(200);
+    sim_fs_fail_writes(true, false);                    // Ajustes: la escritura ni se encola (su marca se queda)
+    g_state.sel = 3;
+    flex_session_mark_dirty(IC_AJUSTES);
+    sim_run(300);
+    CHK(flex_session_pending(IC_AJUSTES));
+    g_state2.sel = 5;
+    flex_session_mark_dirty(IC_NOTAS);                  // la unica app "sucia" ahora es Notas
+    sim_fs_fail_writes(false, true);                    // se encola bien y el disco falla despues
+    int sv1 = g_saves1, sv2 = g_saves2;
+    flex_app_terminate_ex(IC_AJUSTES, true);            // sin el arreglo: salto a NULL
+    CHK(g_saves2 > sv2);                                // Notas se guardo ya, con su gancho
+    sim_run(300);
+    int sv1b = g_saves1;
+    CHK(sv1b >= sv1 + 1);
+    sim_run(8000);
+    CHK(g_saves1 == sv1b);                              // cerrada: nadie la reintenta
+    sim_fs_fail_writes(false, false);
+    flex_app_terminate_ex(IC_NOTAS, true);
+    flex_app_test_set_ops(IC_NOTAS, NULL);
+
+    // 9) el fallo llega con la app ya CERRADA: se registra y no se reintenta (no hay interfaz de la que leer)
+    flex_app_open(IC_AJUSTES, NULL);
+    sim_run(400);
+    g_state.sel = 6;
+    flex_session_mark_dirty(IC_AJUSTES);
+    flex_session_flush_now();                           // una escritura buena: la cuenta de reintentos vuelve a 0
+    g_state.sel = 7;
+    flex_session_mark_dirty(IC_AJUSTES);
+    sim_fs_defer(true);
+    flex_session_flush_now();                           // en cola, sin resultado todavia
+    flex_sys_home();
+    sim_run(100);
+    flex_app_terminate_ex(IC_AJUSTES, true);            // la app se cierra con la escritura sin confirmar
+    CHK(!flex_app_is_open(IC_AJUSTES));
+    int sv9 = g_saves1;
+    sim_fs_complete(true);                              // ahora el disco dice que fallo
+    sim_run(8000);
+    CHK(g_saves1 == sv9);                               // nadie vuelve a llamar a su save_session
+    sim_fs_defer(false);
 
     flex_app_test_set_ops(IC_AJUSTES, NULL);
     sim_fs_enable(false);

@@ -8,19 +8,19 @@ Arduino, tamaños) y `ESP_IDF_HARDWARE_REQUIREMENTS.md` (qué probar en la placa
 > host + escena del simulador que falla al revertir la corrección (mutación).
 
 Rama: `flexos-esp-idf` (la rama Arduino `claude/flexos-ota-system-blq9g9-2csacx` no se toca).
-Último bloque cerrado: **Recientes con memoria y sesiones** (S4e); antes, **Arranque** (S2), **Memoria y Optimizar**, **Sesiones de app** y **Personalizar inicio**. Entorno de
+Último bloque cerrado: **App Calculadora** (A12) y la **revisión 6**; antes, **Recientes con memoria y sesiones** (S4e), **Arranque** (S2), **Memoria y Optimizar**, **Sesiones de app** y **Personalizar inicio**. Entorno de
 compilación en un contenedor nuevo: `bash tools/setup_idf_cloud.sh` (ver "Entorno" abajo).
 
 ### Punto de reanudación (siguiente tarea exacta)
 
-1. **S5 — infraestructura compartida de apps** (cabecera con zonas de 56×56, listas con scroll, diálogos, selector
-   de archivos, barra de medios, teclado en las apps): `docs/spec/02_diseno_visual_liquid_glass.md` (componentes) y
-   `docs/spec/03_apps_productividad.md`. `flex_app_header` y `flex_app_placeholder` ya existen en `flex_shell.c`;
-   falta el resto. Mejor extraerlo de la primera app (Ajustes) que diseñarlo en vacío.
-2. Revisión adversarial corta de Personalizar inicio + sesiones + memoria + arranque + Recientes (nunca ejecutada
-   para estos bloques; 2–3 agentes como máximo: la revisión 5 terminó entera con 3).
-3. Primeras apps en el orden de dependencias: Ajustes (`03b`), Almacenamiento (trae los puntos de entrada a
-   Optimizar), Reloj, Calculadora, Notas, Paint... Cada app implementa `save_session`/`load_session`/`shed`.
+1. **S5 — extraer la infraestructura compartida de apps** a partir de la Calculadora (ya existe: `app_calc.c` define
+   la caja del lienzo, el display como tarjeta, las teclas con material y el ciclo `save_session`/`load_session`) y
+   de la siguiente app: cabecera con zonas de 56×56, listas con scroll, diálogos, selector de archivos, barra de
+   medios. Mejor extraerlo de dos apps reales que diseñarlo en vacío (`docs/spec/02`, `03_apps_productividad.md`).
+2. Siguientes apps (orden de dependencias): **Calendario** (A19, `AppsBasic.h` + `03` §4), **Notas** (`03`, trae
+   teclado y archivos), Reloj/Cronómetro, Ajustes (`03b`, la más grande y la que abre Optimizar), Almacenamiento.
+   Cada app implementa `save_session`/`load_session`/`shed` y su escena con mutantes.
+3. Deuda de la revisión 6 (ver abajo): ítems 3, 8 y 11 de las dos revisiones, de baja prioridad.
 
 ## Cómo validar antes de cada commit
 
@@ -56,6 +56,7 @@ source ~/esp/env.sh && tools/build.sh --rev v3   # firmware (no graba nada)
 | Memoria (01c §17): nivel sostenido con histéresis y avisos (núcleo `FlexOS_Mem.cpp` de Arduino, con su `test_mem.cpp` portado), soltar en orden LRU solo apps suspendidas y sin trabajo real, admisión al abrir una app cerrada (`"%s no se abre ahora"`), alivio automático con un solo aviso al empeorar, desalojo por presupuesto en cada suspensión (cierra la menos reciente solo si su sesión se guardó), huella medida por app, registro de cachés reconstruibles (fondos, miniaturas de Recientes) y **Optimizar Flex OS** (5 etapas de 420 ms, modal, borra `/System/Cache` por la tarea de almacenamiento, modo visual eficiente temporal que se apaga solo) | `flex_mem_model.c` (portable), `flex_mem.c`, `flex_optimize.c`, `flex_shell.c` | host (12 000 mundos × 8 operaciones frente a `Core.h` de Arduino: 1 660 cierres, 13 246 avisos; 4 mutantes) + escena `memoria` (6 mutantes y el del guardián modal) + firmware `esp32p4` |
 | Arranque (01a §2.3-2.5): banda forense solo tras un reinicio anormal (cualquier motivo salvo POWERON, SW o DEEPSLEEP; 2200 ms), splash negro con "FlexOS Ultra" / "ESP32-P4" y la curva de opacidad de Arduino (600 ms sube, 1400 fijo, 600 baja) con tres puntos que cambian cada 320 ms, toques tragados mientras dura, destino al terminar (Modo seguro tras la banda sin splash, primera configuración, kiosco o bloqueo); nada bloquea la tarea de UI (`lv_timer`) | `flex_boot_model.c` (portable), `flex_boot_ui.c`, `flex_shell.c` (destino) | host (motivos 0..20 y curva 0..3200 ms frente a `resetReasonStr` y `splashTick`) + escena `arranque` (4 casos, 3 mutantes) + firmware `esp32p4` |
 | Recientes con la memoria y las sesiones (01a §12.3, §12.5): estado de cada tarjeta "Activa" / "Pausada" / "Estado guardado" (`flex_mem_app_shed`), "Consumo estimado" con la PSRAM medida o "No disponible" (nunca un número inventado), punto de cambios sin guardar (`dirty()` o sesión de disco desfasada), cerrar una tarjeta guarda la sesión en el acto y, si no se puede, la app se queda abierta con "Sin espacio para guardar" (también en "Cerrar todas") | `flex_recents.c` | escenas `memoria` y `sesiones` (3 mutantes) + firmware `esp32p4` |
+| App Calculadora (03 §3): lógica pura probada tecla a tecla frente a `AppsBasic.h` (30 000 secuencias, 1 047 errores, 246 714 operaciones a medias; sesión `calc.bin` byte a byte), línea de operación ("25 + 10"), "Error", reparto adaptativo del lienzo con la rejilla 5×4 prioritaria, teclas naranja de marca, la primera apertura tras el arranque recupera la sesión y las demás empiezan en "0"; primera app real sobre el marco (guardado diferido, restauración, Recientes) | `flex_calc_model.c`, `app_calc.c` | host + escena `calculadora` (24 pasos, 4 mutantes) + firmware `esp32p4` |
 
 ## Progreso global (método congelado v1)
 
@@ -102,7 +103,8 @@ Cálculo reproducible: `python3 tools/progress.py` (lee la tabla de abajo; no ha
 | A09 | App Paint | 9 | 0 | 0 |
 | A10 | App Juegos (Jumper y demas) | 40 | 0 | 0 |
 | A11 | App Ajustes (+ ajustes de teclado y conectividad) | 25 | 0 | 0 |
-| A12 | Apps Calculadora y Calendario | 6 | 0 | 0 |
+| A12 | App Calculadora (cuatro operaciones, linea de operacion, sesion calc.bin) | 3 | 1 | 0 |
+| A19 | App Calendario | 3 | 0 | 0 |
 | A13 | App Camara (necesita el modelo del sensor) | 3 | 0 | 0 |
 | A14 | App Clima + servicio del tiempo | 57 | 0 | 0 |
 | A15 | App Flex Store + paquetes + maquina virtual de apps + permisos | 101 | 0 | 0 |
@@ -152,14 +154,15 @@ favor en las apps).
 
 | Comprobación | Resultado |
 |---|---|
-| `tests/host` (ASan+UBSan y TSan), incl. `test_homecfg`, `test_session`, `test_mem_model` y `test_boot` | OK: 983 844 comprobaciones, 0 fallos |
+| `tests/host` (ASan+UBSan y TSan), incl. `test_homecfg`, `test_session`, `test_mem_model`, `test_boot` y `test_calc` | OK: 983 850 comprobaciones, 0 fallos |
 | Mutantes de los modelos (pellizco, principal al borrar, redondeo del reordenar; tope de 30 s, cierre forzado, CRC al leer, otra app pendiente; LRU con empates, cerrar sin guardar, admitir dos veces, alivio sin empeorar) | 11/11 detectados |
 | `tools/run_tests.sh` completo (host, LittleFS, 22 escenas, reglas) | TODO OK |
+| Escena `calculadora` | 24 pasos OK (teclas con el dedo, encadenado, Error, sesión y restauración); 4 mutantes detectados |
 | Escena `arranque` | 4 casos OK (normal, tras un PANIC, Modo seguro, primera configuración); 3 mutantes detectados |
 | Escena `memoria` | OK; 7 mutantes de la interfaz detectados (admisión, presupuesto al suspender, soltar en Optimizar, modo eficiente, cierre con un toque, guardián modal de Inicio) |
 | Escena `sesiones` | 13 comprobaciones OK; 4 mutantes de la interfaz detectados (el último, tras añadir el paso de re-armado) |
 | Escena `personalizar` | 14 pasos OK; mutantes de la interfaz (nueva página, cierre al bloquear, confirmar borrado, casita) detectados |
-| Firmware `tools/build.sh --rev v3` | OK: 1 431 568 B, 54,6 % de la ranura A (2,5 MB), 34,1 % de la B (4 MB) |
+| Firmware `tools/build.sh --rev v3` | OK: 1 443 840 B, 55,1 % de la ranura A (2,5 MB), 34,4 % de la B (4 MB) |
 | Capturas revisadas a ojo | Páginas, Fondo, Widgets, Ajustes y modal fieles a 01a §10 |
 | **Placa real** | NO probado (tacto del carrusel, fluidez de la animación y del pellizco con el GT911) |
 
@@ -171,6 +174,24 @@ favor en las apps).
   Después: `source ~/esp/env.sh && tools/build.sh --rev v3`. La compilación completa tarda ≈4 min.
 * Decisión: compilar y probar en cada punto de control; no repetir `build.sh --clean` salvo que cambie
   el `sdkconfig`.
+
+## Revisión 6 (adversarial, 2 revisores en paralelo, solo lectura)
+
+Alcance: Personalizar inicio, arranque, sesiones, memoria/Optimizar y Recientes. **21 hallazgos, 17 corregidos** con su
+prueba de regresión (cada reversión se comprobó contra las escenas): `write_done` llamaba a un puntero nulo si otra app
+tenía cambios pendientes (alta); el desalojo por presupuesto elegía siempre la misma víctima porque `terminate_cb` no
+dejaba la app cerrada (la maqueta de la prueba sí lo hacía y lo escondía); la app que se abre podía ser la víctima al
+suspender la de delante; cerrar la app de delante bajo presión ejecutaba `on_close` dos veces; `drag_moved` no se
+reiniciaba y se perdía el primer toque en la barra inferior tras arrastrar el carrusel (alta); cerrar por bloqueo no
+reconstruía el escritorio; un fallo de disco tras cerrar la app reintentaba su `save_session`; la guardia de las
+miniaturas de Recientes; la app del kiosco se podía negar por memoria; las etiquetas "Página N" no seguían a su
+tarjeta; la miniatura del widget no recogía el toque; "Usar"/"Añadir" 16 px a la izquierda; "Restablecer" iba a Páginas;
+la cadena de listados de "Mis imágenes" sin comprobar; y la huella no se re-medía al reanudar.
+**Pendiente (baja):** `load_once` marca "cargada" aunque la lectura asíncrona no haya llegado (solo en arranques
+con la UI antes que el disco); Device Care guarda su historial por su cuenta (sin descriptor); la huella solo mide
+PSRAM, así que las apps ligeras (objetos LVGL en SRAM interna por `ALWAYSINTERNAL=16384`) enseñan "0 B" en vez de
+"No disponible"; las miniaturas de páginas fuera de pantalla con vidrio por icono salen con el fondo desplazado
+(cosmético).
 
 ## Bloqueos y datos que faltan
 
@@ -191,4 +212,4 @@ el Modo edición: ≈22 h del escenario realista). Validación en la placa apart
 conjuntas, depende de grabar con autorización). Base: tamaño del código Arduino que
 queda frente al ritmo medido en las Fases 0–3 (ver el informe de auditoría del 10-10).
 
-Última actualización: memoria y Optimizar (Fase 3). Quedan de realista ≈231 h (S3e depende del JPEG de la Fase 9).
+Última actualización: Calculadora y revisión 6. Quedan de realista ≈228 h (S3e depende del JPEG de la Fase 9).

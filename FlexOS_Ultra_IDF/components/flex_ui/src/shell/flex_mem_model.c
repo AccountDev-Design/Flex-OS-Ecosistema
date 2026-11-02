@@ -210,6 +210,7 @@ int flex_mem_enforce_budget(flex_mem_t *m, const flex_mem_ops_t *o)
         if (!o->terminate(o->ctx, victim)) {
             break;   // no se pudo guardar: mejor conservar
         }
+        m->state[victim] = FLEX_ALIFE_CLOSED;   // appTerminate la deja cerrada: sin esto se elegiria otra vez la misma
         flex_mem_forget(m, victim);
         o->drop_card(o->ctx, victim);
         closed++;

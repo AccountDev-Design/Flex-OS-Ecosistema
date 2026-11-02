@@ -132,11 +132,18 @@ static const flex_mem_ops_t OPS = {free_cb, sample_now, snap, shed_system, bg_bu
                                    radio_busy, terminate_cb, drop_card, notify_cb, NULL};
 
 // El estado de cada app vive en el marco (flex_shell.c): se copia antes de decidir
+// La app que se esta abriendo (aunque aun este suspendida mientras se suspende la de delante) nunca es candidata
+static int s_protect = -1;
+void flex_mem_protect(int id) { s_protect = id; }
+
 static void sync_apps(void)
 {
     for (int i = 0; i < FLEX_APP_N; i++) {
         int life = flex_app_life(i);   // 0 cerrada, 1 en marcha, 2 suspendida
         M.state[i] = (uint8_t)(life == 2 ? FLEX_ALIFE_SUSPENDED : life == 1 ? FLEX_ALIFE_RUNNING : FLEX_ALIFE_CLOSED);
+        if (life != 0 && i == s_protect) {
+            M.state[i] = FLEX_ALIFE_RUNNING;
+        }
         M.seen_ms[i] = flex_app_last_used(i);
     }
 }
@@ -268,12 +275,16 @@ static bool guard_wall(void)
     return st == FLEX_SH_HOME || st == FLEX_SH_APP;   // no en el bloqueo, la clave, Recientes, la caja ni el apagado
 }
 size_t flex_recents_shed(void);
+static bool guard_recents(void)
+{
+    return !flex_recents_is_open();   // con Recientes a la vista sus miniaturas estan en pantalla
+}
 
 void flex_mem_start(void)
 {
     flex_mem_init(&M, FLEX_APP_N);
     flex_mem_register_cache("fondos", shed_wall, guard_wall);
-    flex_mem_register_cache("recientes", flex_recents_shed, NULL);
+    flex_mem_register_cache("recientes", flex_recents_shed, guard_recents);
     if (!s_timer) {
         s_timer = lv_timer_create(tick_cb, MEM_TICK_MS, NULL);
     }

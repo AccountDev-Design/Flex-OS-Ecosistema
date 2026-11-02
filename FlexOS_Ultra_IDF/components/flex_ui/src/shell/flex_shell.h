@@ -48,6 +48,7 @@ void flex_shell_home_shift(int32_t dx);   // temblor del revelado
 lv_obj_t *flex_home_create(lv_obj_t *parent);
 void flex_home_refresh(void);                         // cambio de minuto / tema
 void flex_home_rebuild(void);                         // el modelo cambio (favoritas, ocultas)
+int  flex_home_built_grid(void);                      // cols << 8 | rows del ultimo dibujo (pruebas)
 bool flex_home_icon_area(int app_id, lv_area_t *out); // icono visible de la app (origen del zoom)
 int32_t flex_home_scroll_x(void);                     // desplazamiento real de las paginas (pruebas)
 lv_obj_t *flex_lock_create(lv_obj_t *parent);
@@ -186,7 +187,7 @@ bool flex_home_customize_active(void);
 int  flex_home_customize_view(void);  // pruebas: 0 paginas, 1 fondo, 2 temas, 3 widgets, 4 ajustes, 5 mis imagenes (-1 cerrado)
 int  flex_home_customize_page_view(void);
 bool flex_home_customize_animating(void);
-void flex_home_customize_close_now(void);   // bloquear o suspender: sale guardando
+void flex_home_customize_close_now(void);   // bloquear: sale guardando (la suspension no lo cierra, como Arduino)
 
 void flex_drawer_open(void);
 void flex_drawer_close_now(void);     // sin animacion (bloquear, suspender)

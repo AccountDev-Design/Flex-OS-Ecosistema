@@ -104,7 +104,10 @@ python3 ref/extract_arduino.py "$OUT/ref_mem.inc" \
 python3 ref/extract_arduino.py "$OUT/ref_boot.inc" \
     FlexOS_Ultra_Home.h:resetReasonStr
 
-SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c test_kiosk.c test_homecfg.c test_session.c test_mem_model.c test_boot.c
+python3 ref/extract_arduino.py "$OUT/ref_calc.inc" \
+    FlexOS_Ultra_AppsBasic.h:calcDisp,calcAcc,calcOp,calcFresh,calcErr,calcFinite,calcFmtTo,calcFmt,calcLine,calcCompute,calcKey,calcKeyFromLabel,CalcSessV1,CALC_SESS_VER,CALC_SESS_PATH,calcSaveSess,calcLoadSess
+
+SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c test_kiosk.c test_homecfg.c test_session.c test_mem_model.c test_boot.c test_calc.c
       $ROOT/components/flex_storage/src/flex_kv.c
       $ROOT/components/flex_storage/src/flex_fs_path.c
       $ROOT/components/flex_storage/src/flex_fs_wipe.c
@@ -114,6 +117,7 @@ SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_
       $ROOT/components/flex_ui/src/shell/flex_session_model.c
       $ROOT/components/flex_ui/src/shell/flex_mem_model.c
       $ROOT/components/flex_ui/src/shell/flex_boot_model.c
+      $ROOT/components/flex_ui/src/apps/flex_calc_model.c
       $ROOT/components/flex_ui/src/shell/flex_drawer_model.c
       $ROOT/components/flex_ui/src/shell/flex_recents_model.c
       $ROOT/components/flex_ui/src/shell/flex_qs_model.c
@@ -128,13 +132,13 @@ SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_
       stub_cfg.c)
 INC=(-I. -I$ROOT/components/flex_storage/include -I$ROOT/components/flex_storage/src
      -I$ROOT/components/flex_display/src -I$ROOT/components/flex_ui/src/theme
-     -I$ROOT/components/flex_ui/src/shell -I$ROOT/components/flex_portable/include -I$ROOT/components/flex_ui/src/widgets -I$ROOT/components/flex_touch/include -I$ROOT/components/flex_power/include -I$ROOT/components/flex_system/include -I../../sim/stubs/include)
+     -I$ROOT/components/flex_ui/src/shell -I$ROOT/components/flex_ui/src/apps -I$ROOT/components/flex_portable/include -I$ROOT/components/flex_ui/src/widgets -I$ROOT/components/flex_touch/include -I$ROOT/components/flex_power/include -I$ROOT/components/flex_system/include -I../../sim/stubs/include)
 CFLAGS=(-O1 -g -Wall -Wextra -Werror -pthread)
 
 build() {   # $1 = sufijo, resto = flags de sanitizador
     local sfx=$1; shift
     local refs=()
-    for r in wall glass home home_load touch drawer kb recents qs ntf homecfg session mem boot; do
+    for r in wall glass home home_load touch drawer kb recents qs ntf homecfg session mem boot calc; do
         c++ -std=gnu++17 -O1 -g -w "$@" -Iref -I"$OUT" -I$ROOT/components/flex_portable/include -c ref/ref_${r}_main.cpp -o "$OUT/ref_${r}_$sfx.o"
         refs+=("$OUT/ref_${r}_$sfx.o")
     done

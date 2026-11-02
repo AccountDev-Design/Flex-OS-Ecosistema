@@ -216,7 +216,11 @@ bool scene_homecfg_run(void)
     (void)second;
     CHK(total_items() == items0);
 
-    // 7) Fondo: elegir el 3.o y aplicarlo a los dos; Restaurar vuelve a Flex Original
+    // 7) Fondo: elegir el 3.o y aplicarlo a los dos; Restaurar vuelve a Flex Original.
+    //    Tras ARRASTRAR el carrusel, el toque siguiente en la barra de abajo (fuera de la banda de arrastre)
+    //    funciona: el "ya se arrastro" no se hereda
+    sim_drag(340, 300, 140, 300, 250);
+    sim_run(300);
     bar_tap(0);
     CHK(flex_home_customize_view() == 1);
     sim_run(500);
@@ -271,12 +275,12 @@ bool scene_homecfg_run(void)
     int wn = g_home.wg_n[flex_home_customize_page_view()];
     bar_tap(2);
     CHK(flex_home_customize_view() == 3);
-    sim_tap(240, 128 + 4 + 26 + 38);   // primera fila de la lista
+    sim_tap(70, 128 + 4 + 26 + 38);    // primera fila, sobre su MINIATURA: tambien la selecciona
     sim_run(300);
     sim_shot("homecfg_widgets");
     sim_tap(480 - 122 + 50, 128 + 4 + 26 + 20 + 18);   // Anadir
     sim_run(400);
-    CHK(g_home.wg_n[flex_home_customize_page_view()] == wn + 1 || flex_home_customize_view() == 3);
+    CHK(g_home.wg_n[flex_home_customize_page_view()] == wn + 1);
     if (flex_home_customize_view() != 0) {
         sim_tap(60, 70);
         sim_run(300);
@@ -306,7 +310,8 @@ bool scene_homecfg_run(void)
     }
     sim_tap(32 + 32 + 184 + 90, 300 + 200 - 62 + 23);   // Restablecer (modal)
     sim_run(500);
-    CHK((g_home.page_n == 3 && g_home.cols == 4 && g_home.rows == 3) || flex_home_customize_view() != 0);
+    CHK(g_home.page_n == 3 && g_home.cols == 4 && g_home.rows == 3);
+    CHK(flex_home_customize_view() == 4);   // Restablecer se queda en Ajustes de inicio (como Arduino)
     flex_hc_reset_layout();
 
     // 12) el boton Inicio sale guardando y deja el escritorio normal
@@ -337,9 +342,22 @@ bool scene_homecfg_run(void)
     sim_run(300);
     open_by_long_press(&ok);
     CHK(flex_home_customize_active());
-    flex_shell_lock();
+    bar_tap(3);                                          // Ajustes de inicio: cambia la cuadricula a 5x3...
+    sim_tap(240, 128 + 4 + 26);
+    sim_run(300);
+    CHK(g_home.cols == 5);
+    flex_shell_lock();                                   // ...y bloquea sin volver a Paginas
     sim_run(300);
     CHK(!flex_home_customize_active());
+    {   // el escritorio (bajo el bloqueo) ya se reconstruyo con la rejilla nueva: los iconos dibujados coinciden
+        // con la rejilla de pulsacion
+        lv_area_t ia;
+        int sx, sy;
+        CHK(flex_home_icon_area(IC_RELOJ, &ia));
+        flex_home_slot_xy(0, &sx, &sy);
+        CHK(ia.x1 == sx && ia.y1 == sy);
+        CHK(flex_home_built_grid() == ((g_home.cols << 8) | g_home.rows));
+    }
     to_home();
 
     g_home = home0;
