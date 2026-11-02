@@ -12,6 +12,10 @@ extern "C" {
 // Sus datos se refrescan solos cada 2 s mientras exista.
 void flex_home_wg_build(lv_obj_t *page, const flex_home_wg_t *wg, int32_t band_top);
 
+// Vista previa REAL del widget reducida a bw x bh dentro de box (Personalizar inicio > Widgets).
+void flex_home_wg_build_preview(lv_obj_t *box, const flex_home_wg_t *wg, int32_t bw, int32_t bh);
+lv_obj_t *flex_home_page_obj(int p);   // la pagina p del escritorio real (NULL si no existe)
+
 // Para el Modo edicion (flex_home_edit.c): la raiz del escritorio y las paginas
 lv_obj_t *flex_home_root_obj(void);
 void flex_home_pages_show(bool on);

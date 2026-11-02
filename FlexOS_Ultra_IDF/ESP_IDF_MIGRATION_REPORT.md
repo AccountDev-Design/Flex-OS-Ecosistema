@@ -15,7 +15,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 0 | Infraestructura: proyecto, sdkconfig por revisión, particiones provisionales, herramientas | Hecha | `docs/FASE_0_1_INFORME.md` |
 | 1 | Pantalla ST7701 por MIPI-DSI, 2 framebuffers, LVGL DIRECT, GT911, pantalla de prueba | Hecha | `docs/FASE_0_1_INFORME.md` |
 | 2 | Arquitectura base: bus de eventos, buzón de UI, almacenamiento (NVS + LittleFS compatibles), ajustes, monitor del sistema, lógica portable | Hecha | `docs/FASE_2_INFORME.md` |
-| 3 | Interfaz completa en LVGL | En curso (shell: bloqueo, clave, escritorio, caja de apps, recientes, energía, teclado, panel rápido, avisos: banner, Centro de notificaciones y No molestar; apagado completo con deep sleep y filtro de encendido; Modo seguro; restablecimiento de fábrica; primera configuración; widgets como Arduino; menú contextual del escritorio; Modo kiosco; Modo edición del escritorio). Las 19 apps siguen sin migrar (pantalla "Pendiente de migrar") | `docs/spec/` |
+| 3 | Interfaz completa en LVGL | En curso (shell: bloqueo, clave, escritorio, caja de apps, recientes, energía, teclado, panel rápido, avisos: banner, Centro de notificaciones y No molestar; apagado completo con deep sleep y filtro de encendido; Modo seguro; restablecimiento de fábrica; primera configuración; widgets como Arduino; menú contextual del escritorio; Modo kiosco; Modo edición del escritorio; Personalizar inicio). Las 19 apps siguen sin migrar (pantalla "Pendiente de migrar") | `docs/spec/` |
 | 4 | Liquid Glass (3 niveles) | Parcial: superficies de vidrio sobre fondo y sobre color liso en uso; bandas visibles y PPA sin medir | `docs/spec/02` |
 | 5 | Táctil y gestos | Parcial: arbitraje antes de LVGL, bordes del sistema, suspensión con dos dedos; falta el veto al teclear y los umbrales de toque de Arduino | `docs/spec/01b` |
 | 6 | Wi-Fi por ESP32-C6 (esp-hosted) | Pendiente | |
@@ -35,7 +35,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 
 | Funcionalidad | Arduino | ESP-IDF | Estado | Hardware probado |
 |---|---|---|---|---|
-| Home | Escritorio por páginas, widgets, edición | Escritorio LVGL (páginas, dock, widgets), bloqueo, clave, caja de apps, Recientes, panel rápido, avisos (banner + Centro + No molestar), menú contextual, Modo kiosco, Modo edición; Personalizar inicio pendiente | En curso (Fase 3) | NO |
+| Home | Escritorio por páginas, widgets, edición | Escritorio LVGL (páginas, dock, widgets), bloqueo, clave, caja de apps, Recientes, panel rápido, avisos (banner + Centro + No molestar), menú contextual, Modo kiosco, Modo edición; Personalizar inicio (sin "Mis imágenes" como fondo) | En curso (Fase 3) | NO |
 | Interfaz LVGL | Motor gráfico propio (no se reutiliza) | LVGL 9.6 DIRECT, 2 FB en PSRAM, solo LVGL dibuja (`check_lvgl_only.py`) | Base hecha (Fase 1); pantallas pendientes | NO |
 | Liquid Glass | Desenfoque propio con caché | Superficies de vidrio LVGL (fondo desenfocado, tinte adaptativo, luz y borde); bandas visibles | Parcial (Fase 4) | NO |
 | Táctil | GT911 en el bucle | GT911 en tarea propia, 5 dedos, recuperación del bus; arbitraje del sistema antes de LVGL (bordes, suspensión) | Parcial (Fases 1 y 5) | NO |
@@ -67,6 +67,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 3 (en curso: + revisión 5, widgets como Arduino) | `v3` dev | 1 377 584 B | 52,6 % | 32,8 % |
 | 3 (en curso: + menú contextual y Modo kiosco) | `v3` dev | 1 384 400 B | 52,8 % | 33,0 % |
 | 3 (en curso: + Modo edición del escritorio) | `v3` dev | 1 391 504 B | 53,1 % | 33,2 % |
+| 3 (en curso: + Personalizar inicio) | `v3` dev | 1 418 448 B | 54,1 % | 33,8 % |
 
 La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la interfaz completa
 (Fase 15). No se ha grabado nada.
@@ -115,6 +116,9 @@ La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la
 | Modo edición: suspender | Sale del modo | Igual; también al bloquear y con Atrás/Inicio/Recientes | — |
 | Widgets: agujas del reloj analógico | Trazo con antialias de 2,4 px (hora) y 1,8 px (minutos) | 2 px las dos (LVGL usa anchos enteros); la hora se distingue por la longitud, como en Arduino | Visual |
 | Candado de app pedido desde otra app (rueda del panel rápido) | Cancelar la clave llevaba a Inicio | Vuelve a la app que estaba delante (ir a Inicio la dejaba huérfana y Recientes se trababa) | Revisión adversarial 4 |
+| Personalizar inicio: miniaturas de página | Se dibujan del modelo a escala con los iconos en estilo Plano (sin Vidrio por icono) | Captura real (`lv_snapshot`) de cada página del escritorio reducida al vecino más cercano y compuesta sobre el fondo; los iconos salen con el estilo activo | Sin motor propio; coste de una captura por página al abrir y tras cada cambio |
+| Personalizar inicio: pellizco | `gtPollMulti()` desde `loop()` | Mismo clasificador (`flex_pz_update`) como consumidor previo a LVGL, con el multipunto de `flex_touch_get_frame()` (tarea del GT911); la acción se difiere con `lv_async_call` | El gancho corre dentro de la lectura del indev de LVGL, donde no se puede crear UI |
+| Personalizar inicio: "Mis imágenes" | Lista y decodifica el JPEG al momento | Lista por la tarea de almacenamiento (`flex_fs_list_async`; nunca la flash desde la UI) y "Usar" avisa de que no se puede hasta la Fase 9 | Decodificador JPEG por hardware aún sin integrar |
 | Umbrales de toque | Toque = < 16 px y < 550 ms | Igual, aplicado al indev de LVGL (por defecto LVGL usa 10 px y 400 ms) | docs/spec/01b |
 | Restablecimiento: qué se borra de la NVS | Solo los espacios de nombres conocidos: quedaban el vínculo con el teléfono, Flex Storage, Device Care, robo, audio, clima, navegador (un aparato "restablecido" seguía emparejado) | TODOS los espacios de nombres salvo el marcador `flexreset` (incluidos los del sistema: credenciales Wi-Fi del controlador, calibración del PHY); el aviso lo dice ("Vínculo con el teléfono y Flex Storage") | docs/spec/01c §13.5 (riesgo de privacidad) |
 | Restablecimiento: marcador terminado | Se borra al entrar al OOBE | Igual: se borra al entrar a la primera configuración | docs/spec/01c §13.6 |

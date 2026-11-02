@@ -27,7 +27,7 @@ void flex_touch_typing_mark(void)
 {
     s_typing_ms = lv_tick_get() | 1u;
 }
-#define HOOK_MAX 4
+#define HOOK_MAX 6   // banner 0, Centro 1, panel 2, pellizco 3
 static struct {
     flex_touch_sys_hook_t fn;
     int prio;

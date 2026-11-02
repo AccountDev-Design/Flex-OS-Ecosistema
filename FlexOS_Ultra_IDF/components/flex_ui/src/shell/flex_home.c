@@ -325,6 +325,11 @@ lv_obj_t *flex_home_root_obj(void)
     return s_root;
 }
 
+lv_obj_t *flex_home_page_obj(int p)
+{
+    return (p >= 0 && p < FLEX_HOME_PAGES_MAX) ? s_page[p] : NULL;
+}
+
 void flex_home_pages_show(bool on)
 {
     if (s_pages) {

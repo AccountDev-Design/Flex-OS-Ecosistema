@@ -173,6 +173,15 @@ const char *flex_home_edit_hint(void);
 void flex_home_ctx_menu(int app_id, const lv_area_t *icon);
 bool flex_home_ctx_open(void);
 
+// Personalizar inicio (flex_homecfg.c; docs/spec/01a §10): pulsacion larga en un hueco o pellizco
+void flex_homecfg_init(void);         // engancha el pellizco de dos dedos (antes de LVGL)
+void flex_home_customize_open(void);
+bool flex_home_customize_active(void);
+int  flex_home_customize_view(void);  // pruebas: 0 paginas, 1 fondo, 2 temas, 3 widgets, 4 ajustes, 5 mis imagenes (-1 cerrado)
+int  flex_home_customize_page_view(void);
+bool flex_home_customize_animating(void);
+void flex_home_customize_close_now(void);   // bloquear o suspender: sale guardando
+
 void flex_drawer_open(void);
 void flex_drawer_close_now(void);     // sin animacion (bloquear, suspender)
 bool flex_drawer_is_open(void);

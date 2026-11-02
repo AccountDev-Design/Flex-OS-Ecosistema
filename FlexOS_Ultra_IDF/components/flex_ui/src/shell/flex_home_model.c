@@ -1347,7 +1347,7 @@ int flex_hc_scan_images(flex_hc_ls_fn ls, void *ctx, char paths[FLEX_HC_PICK_MAX
             if (ents[i].dir || !flex_hc_is_jpeg_name(ents[i].name)) {
                 continue;
             }
-            snprintf(paths[n], FLEX_HC_PATH_MAX, "%s/%s", DIRS[d], ents[i].name);
+            snprintf(paths[n], FLEX_HC_PATH_MAX, "%.11s/%.47s", DIRS[d], ents[i].name);
             n++;
         }
     }

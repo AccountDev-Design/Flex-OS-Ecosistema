@@ -86,6 +86,7 @@ void flex_theme_set_anim_style(uint8_t style);
 void flex_theme_set_h24(bool h24);
 void flex_theme_set_wallpapers(uint8_t home, uint8_t lock);
 void flex_theme_set_wall_palette(bool on);
+void flex_theme_set_wall_fit(uint8_t fit);   // 0 rellenar · 1 ajustar · 2 centrar (se aplica con las imagenes propias)
 // Aplica un tema integrado entero (apariencia, material, iconos, fondos, acento).
 bool flex_theme_apply_look(uint8_t look);
 // Modo visual eficiente (lo enciende la optimizacion de memoria; no se guarda).

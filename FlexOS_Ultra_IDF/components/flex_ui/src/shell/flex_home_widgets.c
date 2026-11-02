@@ -442,7 +442,7 @@ static void build_calend(lv_obj_t *c, int32_t w, int32_t h, lv_color_t fg, lv_co
 }
 
 // ---- wgDrawCell ----------------------------------------------------------------------------
-void flex_home_wg_build(lv_obj_t *page, const flex_home_wg_t *wg, int32_t band_top)
+static void wg_build_at(lv_obj_t *page, const flex_home_wg_t *wg, int32_t ox, int32_t oy)
 {
     if (!wg || wg->type <= FLEX_WG_NONE || wg->type >= FLEX_WG_COUNT) {
         return;
@@ -457,7 +457,7 @@ void flex_home_wg_build(lv_obj_t *page, const flex_home_wg_t *wg, int32_t band_t
     flex_home_wg_rect(wg, &x, &y, &w, &h);
     const flex_palette_t *t = flex_th();
     lv_obj_t *c = flex_box(page);
-    lv_obj_set_pos(c, x, y - band_top);
+    lv_obj_set_pos(c, x - ox, y - oy);
     lv_obj_set_size(c, w, h);
     lv_obj_set_style_radius(c, 20, 0);
     if (wg->type == FLEX_WG_CLIMA && h < 180) {
@@ -524,4 +524,26 @@ void flex_home_wg_build(lv_obj_t *page, const flex_home_wg_t *wg, int32_t band_t
     default:
         break;
     }
+}
+
+void flex_home_wg_build(lv_obj_t *page, const flex_home_wg_t *wg, int32_t band_top)
+{
+    wg_build_at(page, wg, 0, band_top);
+}
+
+void flex_home_wg_build_preview(lv_obj_t *box, const flex_home_wg_t *wg, int32_t bw, int32_t bh)
+{
+    if (!wg || wg->type <= FLEX_WG_NONE || wg->type >= FLEX_WG_COUNT) {
+        return;
+    }
+    int x, y, w, h;
+    flex_home_wg_rect(wg, &x, &y, &w, &h);
+    lv_obj_t *holder = flex_box(box);   // se construye a su tamano real y se reduce para caber
+    lv_obj_set_pos(holder, 0, 0);
+    lv_obj_set_size(holder, w, h);
+    lv_obj_set_style_transform_pivot_x(holder, 0, 0);
+    lv_obj_set_style_transform_pivot_y(holder, 0, 0);
+    int32_t sc = bw * 256 / w < bh * 256 / h ? bw * 256 / w : bh * 256 / h;
+    lv_obj_set_style_transform_scale(holder, sc, 0);
+    wg_build_at(holder, wg, x, y);
 }

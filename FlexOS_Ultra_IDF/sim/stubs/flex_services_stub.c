@@ -11,6 +11,7 @@
 #include "flex_kv.h"
 #include "flex_storage.h"
 #include "flex_system.h"
+#include "flex_touch.h"
 
 ESP_EVENT_DEFINE_BASE(FLEX_EV_SYSTEM);
 ESP_EVENT_DEFINE_BASE(FLEX_EV_STORAGE);
@@ -418,3 +419,59 @@ static bool s_cro_run;
 uint32_t flex_crono_elapsed_ms(void) { return s_cro_ms; }
 bool flex_crono_running(void) { return s_cro_run; }
 void sim_crono_set(uint32_t ms, bool running) { s_cro_ms = ms; s_cro_run = running; }
+
+// ---- tactil multipunto: los puntos los fija la escena (sim_set_frame) ------------------------
+static flex_touch_frame_t s_frame;
+static bool s_frame_ok;
+bool flex_touch_get_frame(flex_touch_frame_t *out)
+{
+    if (!s_frame_ok) {
+        return false;
+    }
+    *out = s_frame;
+    return true;
+}
+// pts[i] = {x, y, id}; n = 0 borra el cuadro
+void sim_set_frame(const int pts[][3], int n)
+{
+    memset(&s_frame, 0, sizeof(s_frame));
+    s_frame.count = (uint8_t)(n > FLEX_TOUCH_MAX_POINTS ? FLEX_TOUCH_MAX_POINTS : n);
+    for (int i = 0; i < s_frame.count; i++) {
+        s_frame.pts[i].x = (uint16_t)pts[i][0];
+        s_frame.pts[i].y = (uint16_t)pts[i][1];
+        s_frame.pts[i].id = (uint8_t)pts[i][2];
+    }
+    s_frame_ok = n > 0;
+}
+
+// ---- listado de carpetas: la escena pone los archivos (sim_fs_set) ---------------------------
+static struct {
+    char dir[24];
+    flex_fs_ent_t e[32];
+    int n;
+} s_fsd[4];
+void sim_fs_set(const char *dir, const char *const *names, int n)
+{
+    for (int i = 0; i < 4; i++) {
+        if (!s_fsd[i].dir[0] || !strcmp(s_fsd[i].dir, dir)) {
+            snprintf(s_fsd[i].dir, sizeof(s_fsd[i].dir), "%s", dir);
+            s_fsd[i].n = n > 32 ? 32 : n;
+            for (int k = 0; k < s_fsd[i].n; k++) {
+                memset(&s_fsd[i].e[k], 0, sizeof(s_fsd[i].e[k]));
+                snprintf(s_fsd[i].e[k].name, sizeof(s_fsd[i].e[k].name), "%s", names[k]);
+            }
+            return;
+        }
+    }
+}
+esp_err_t flex_fs_list_async(const char *path, size_t max, flex_fs_list_cb_t cb, void *user)
+{
+    for (int i = 0; i < 4; i++) {
+        if (!strcmp(s_fsd[i].dir, path)) {
+            cb(ESP_OK, s_fsd[i].e, (size_t)s_fsd[i].n < max ? (size_t)s_fsd[i].n : max, user);
+            return ESP_OK;
+        }
+    }
+    cb(ESP_ERR_NOT_FOUND, NULL, 0, user);
+    return ESP_OK;
+}

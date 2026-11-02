@@ -224,6 +224,15 @@ void flex_theme_set_wallpapers(uint8_t home, uint8_t lock)
     }
 }
 
+void flex_theme_set_wall_fit(uint8_t fit)
+{
+    fit = fit > 2 ? 0 : fit;
+    if (s_prefs.wall_fit != fit) {
+        s_prefs.wall_fit = fit;
+        flex_cfg_set_i32("wallfit", fit);
+    }
+}
+
 void flex_theme_set_wall_palette(bool on)
 {
     if (s_prefs.wall_pal != on) {

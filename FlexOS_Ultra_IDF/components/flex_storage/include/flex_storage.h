@@ -114,6 +114,16 @@ esp_err_t flex_fs_mkdir_async(const char *path, flex_fs_done_cb_t cb, void *user
 typedef void (*flex_fs_count_cb_t)(esp_err_t err, size_t count, void *user);
 esp_err_t flex_fs_wipe_dir_async(const char *path, flex_fs_count_cb_t cb, void *user);
 esp_err_t flex_fs_read_async(const char *path, size_t max_len, flex_fs_read_cb_t cb, void *user);
+// Lista una carpeta (hasta max entradas, sin "." ni ".."). Se lee en la tarea de almacenamiento y cb
+// se llama en la tarea de UI; ents solo vale dentro de cb. Para cualquier pantalla que lista archivos.
+#define FLEX_FS_NAME_MAX 48
+typedef struct {
+    char name[FLEX_FS_NAME_MAX];
+    uint32_t size;
+    bool dir;
+} flex_fs_ent_t;
+typedef void (*flex_fs_list_cb_t)(esp_err_t err, const flex_fs_ent_t *ents, size_t n, void *user);
+esp_err_t flex_fs_list_async(const char *path, size_t max, flex_fs_list_cb_t cb, void *user);
 
 // Sincronas, para tareas de servicio (NUNCA desde la UI): pueden esperar a la flash.
 esp_err_t flex_fs_read_file(const char *path, uint8_t **data, size_t *len, size_t max_len);

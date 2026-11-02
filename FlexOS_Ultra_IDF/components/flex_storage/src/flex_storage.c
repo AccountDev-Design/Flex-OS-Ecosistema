@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include "esp_check.h"
@@ -40,7 +41,7 @@ static const char *TAG = "flex.storage";
 static const char *const k_namespaces[] = {FLEX_NVS_NS, "flexcare", "flexphone", "flexqs", "flexsafe", "flexreset"};
 
 typedef enum {
-    JOB_WRITE, JOB_REMOVE, JOB_RENAME, JOB_MKDIR, JOB_WIPE_DIR, JOB_READ, JOB_FLUSH, JOB_NVS_ERASE, JOB_FS_FORMAT,
+    JOB_WRITE, JOB_REMOVE, JOB_RENAME, JOB_MKDIR, JOB_WIPE_DIR, JOB_READ, JOB_LIST, JOB_FLUSH, JOB_NVS_ERASE, JOB_FS_FORMAT,
     JOB_EXCL,
 } job_op_t;
 
@@ -61,7 +62,7 @@ typedef struct {
     esp_err_t err;
     uint8_t *data;
     size_t len;
-    uint8_t kind;   // 0 hecho, 1 lectura, 2 cuenta (vaciar carpeta)
+    uint8_t kind;   // 0 hecho, 1 lectura, 2 cuenta (vaciar carpeta), 3 listado
 } reply_t;
 
 static flex_kv_t s_kv;
@@ -449,6 +450,9 @@ static void reply_in_ui(void *arg)
         ((flex_fs_read_cb_t)r->cb)(r->err, r->data, r->len, r->user);
     } else if (r->kind == 2) {
         ((flex_fs_count_cb_t)r->cb)(r->err, r->len, r->user);
+    } else if (r->kind == 3) {
+        ((flex_fs_list_cb_t)r->cb)(r->err, (const flex_fs_ent_t *)r->data, r->len, r->user);
+        free(r->data);
     } else {
         ((flex_fs_done_cb_t)r->cb)(r->err, r->user);
     }
@@ -464,7 +468,7 @@ static void reply(job_t *job, esp_err_t err, uint8_t *data, size_t len)
     reply_t *r = malloc(sizeof(*r));
     if (r) {
         *r = (reply_t){job->cb, job->user, err, data, len,
-                       (uint8_t)(job->op == JOB_READ ? 1 : job->op == JOB_WIPE_DIR ? 2 : 0)};
+                       (uint8_t)(job->op == JOB_READ ? 1 : job->op == JOB_WIPE_DIR ? 2 : job->op == JOB_LIST ? 3 : 0)};
         // Quien pidio el trabajo espera la respuesta (p. ej. una pantalla con
         // "Guardando..."): si el buzon esta lleno se reintenta un rato, esta
         // tarea no es la de UI y puede esperar.
@@ -488,7 +492,7 @@ static void run_job(job_t *job)
     portENTER_CRITICAL(&s_mux);
     fs_ok = s_st.fs_mounted;
     portEXIT_CRITICAL(&s_mux);
-    bool needs_fs = job->op <= JOB_READ;
+    bool needs_fs = job->op <= JOB_LIST;
     if (needs_fs && !fs_ok) {
         reply(job, ESP_ERR_INVALID_STATE, NULL, 0);
         return;
@@ -530,6 +534,34 @@ static void run_job(job_t *job)
         size_t len = 0;
         err = flex_fs_read_file(job->path, &data, &len, job->len);
         reply(job, err, data, len);
+        return;
+    }
+    case JOB_LIST: {
+        flex_fs_ent_t *ents = job->len ? calloc(job->len, sizeof(*ents)) : NULL;
+        size_t n = 0;
+        DIR *d = (ents && flex_fs_abs(job->path, a, sizeof(a))) ? opendir(a) : NULL;
+        err = d ? ESP_OK : (ents ? ESP_ERR_NOT_FOUND : ESP_ERR_NO_MEM);
+        while (d && n < job->len) {
+            struct dirent *de = readdir(d);
+            if (!de) {
+                break;
+            }
+            if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..") || strlen(de->d_name) >= FLEX_FS_NAME_MAX) {
+                continue;
+            }
+            struct stat stt;
+            if (snprintf(b, sizeof(b), "%s/%s", a, de->d_name) >= (int)sizeof(b) || stat(b, &stt) != 0) {
+                continue;
+            }
+            strcpy(ents[n].name, de->d_name);
+            ents[n].dir = S_ISDIR(stt.st_mode);
+            ents[n].size = ents[n].dir ? 0 : (uint32_t)stt.st_size;
+            n++;
+        }
+        if (d) {
+            closedir(d);
+        }
+        reply(job, err, (uint8_t *)ents, n);
         return;
     }
     case JOB_FLUSH:
@@ -706,6 +738,16 @@ esp_err_t flex_fs_read_async(const char *path, size_t max_len, flex_fs_read_cb_t
         return ESP_ERR_INVALID_ARG;
     }
     job->len = max_len;
+    return enqueue(job);
+}
+
+esp_err_t flex_fs_list_async(const char *path, size_t max, flex_fs_list_cb_t cb, void *user)
+{
+    job_t *job = new_job(JOB_LIST, path, (void *)cb, user);
+    if (!job) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    job->len = max;
     return enqueue(job);
 }
 

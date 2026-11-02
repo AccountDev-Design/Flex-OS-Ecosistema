@@ -8,6 +8,17 @@ Arduino, tamaños) y `ESP_IDF_HARDWARE_REQUIREMENTS.md` (qué probar en la placa
 > host + escena del simulador que falla al revertir la corrección (mutación).
 
 Rama: `flexos-esp-idf` (la rama Arduino `claude/flexos-ota-system-blq9g9-2csacx` no se toca).
+Último bloque cerrado: **Personalizar inicio** (ver el commit más reciente de la rama). Entorno de
+compilación en un contenedor nuevo: `bash tools/setup_idf_cloud.sh` (ver "Entorno" abajo).
+
+### Punto de reanudación (siguiente tarea exacta)
+
+1. **Sesiones de app** (`docs/spec/01c` §14, ítem S4a): guardar y restaurar el estado de UI. `flex_frame.c` y
+   `flex_app_registry.c` ya tienen el marco mínimo; falta el ciclo completo (crear/suspender/reanudar/
+   destruir por app, regreso, memoria por app, Recientes↔sesiones). Leer `01c` §14 y
+   `FlexOS_Ultra_Session.h` + `FlexOS_Ultra_AppFramework.h` (Arduino); extender `flex_app.h`. Pruebas: host de la política de
+   sesiones frente a Arduino + escena de ciclo de vida.
+2. Memoria y "Optimizar Flex OS" (`01c` §17, S4b), luego arranque (splash/banda forense, S2), luego S5 y las apps.
 
 ## Cómo validar antes de cada commit
 
@@ -38,6 +49,7 @@ source ~/esp/env.sh && tools/build.sh --rev v3   # firmware (no graba nada)
 | Menú contextual del escritorio (candado de app con la clave, kiosco; edición y pantalla completa atenuadas hasta sus bloques) y Modo kiosco completo (zona excluida, candado, vetos de 01c §12.4, salida con la clave, persistencia, arranque directo) | `flex_home_ctx.c`, `flex_kiosk*.c`, `flex_touch_feed.c` (gancho) | host (carga, zona y salida frente a Arduino) + escena `kiosco` (mutaciones) |
 | Modo edición del escritorio: temblor y resorte, reordenar con 400 ms, llevar iconos y widgets a la página vecina (700 ms en el borde), seleccionar / mover / redimensionar / quitar widgets, diseño bloqueado, salida guardando | `flex_home_edit.c`, `flex_home_model.c` | host (24 000 operaciones frente a Arduino) + escena `edicion` (mutaciones) |
 | Widgets del escritorio como `wgDrawCell`: esfera con agujas, rótulos, barra de almacenamiento, antena, Clima de una fila con su material; datos en su sitio cada 2 s; solo Cámara, Clima y Calendario se tocan | `flex_home_widgets.c` | escena `widgets` |
+| Personalizar inicio (01a §10): carrusel de páginas con arrastre elástico, "+", casita, papelera con modal, reordenar con 650 ms, Fondo (8 fondos, Inicio/Bloqueo/Ambos, Restaurar, paleta), Temas (aplicar coherente y restaurar), Widgets (vista previa real, añadir con avisos), Ajustes de inicio (rejilla, tamaño, nombres, bloqueo, indicadores, principal, pellizco, animaciones, encuadre, restablecer), animación de 180 ms con captura del escritorio, pellizco de dos dedos como consumidor previo a LVGL, cierre al bloquear/suspender. Falta "Mis imágenes" como fondo (JPEG por hardware) | `flex_homecfg.c`, `flex_home_model.c` (operaciones y clasificador), `flex_storage` (`flex_fs_list_async`), `flex_home_widgets.c` (vista previa) | host (5000 escritorios, 3000 carpetas, 7500 guiones de pellizco frente a Arduino; 3 mutantes) + escena `personalizar` (14 pasos, 4 mutantes) + firmware `esp32p4` |
 
 ## Progreso global (método congelado v1)
 
@@ -63,11 +75,12 @@ Cálculo reproducible: `python3 tools/progress.py` (lee la tabla de abajo; no ha
 | S1 | Shell migrado: bloqueo, clave, kiosco, escritorio, edicion, widgets, caja, Recientes, panel rapido, avisos, energia, apagado, Modo seguro, restablecimiento, OOBE (sin Account), teclado | 258 | 1 | 0 |
 | S2 | Arranque: splash, banda forense de reinicio anormal, paso Flex Account del OOBE | 9 | 0 | 0 |
 | S3a | Personalizar inicio: operaciones del modelo (paginas, principal, rejilla, reset) + host | 6 | 1 | 0 |
-| S3b | Personalizar inicio: vistas Paginas y Ajustes de inicio + modales (LVGL) | 11 | 0 | 0 |
-| S3c | Personalizar inicio: Fondo, Mis imagenes, Temas y Widgets (LVGL) | 8 | 0 | 0 |
-| S3d | Personalizar inicio: pellizco de dos dedos (clasificador + consumidor de toque) | 3 | 0 | 0 |
-| S4a | Marco de apps: sesiones y ciclo de vida (01a 14), Recientes<->sesiones, regreso, memoria por app | 31 | 0 | 0 |
-| S4b | Memoria y funcion Optimizar (01a 17), umbrales y avisos | 8 | 0 | 0 |
+| S3b | Personalizar inicio: vistas Paginas y Ajustes de inicio + modales (LVGL) | 11 | 1 | 0 |
+| S3c | Personalizar inicio: Fondo, Temas y Widgets (LVGL) | 6 | 1 | 0 |
+| S3e | Personalizar inicio: Mis imagenes, imagen propia como fondo y encuadre (necesita el JPEG por hardware, M1) | 2 | 0 | 0 |
+| S3d | Personalizar inicio: pellizco de dos dedos (clasificador + consumidor de toque) | 3 | 1 | 0 |
+| S4a | Marco de apps: sesiones y ciclo de vida (01c 14), Recientes<->sesiones, regreso, memoria por app | 31 | 0 | 0 |
+| S4b | Memoria y funcion Optimizar (01c 17), umbrales y avisos | 8 | 0 | 0 |
 | S5 | Infraestructura compartida de apps en LVGL (cabecera, listas, dialogos, selector de archivos, barra de medios) | 12 | 0 | 0 |
 | A01 | App Reloj (reloj, alarmas, cronometro, temporizador) | 17 | 0 | 0 |
 | A02 | App Galeria + visor + editor de fotos + editor de video | 145 | 0 | 0 |
@@ -113,10 +126,11 @@ favor en las apps).
 ## En curso / pendiente (orden de trabajo)
 
 1. Revisiones 4 y 5 cerradas (todas las dimensiones ejecutadas al menos una vez). La
-   siguiente revisión, al cerrar el marco de apps y las primeras apps.
-2. Fase 3, shell restante: Personalizar inicio (01a §10: páginas, fondo, mis imágenes,
-   temas, widgets, ajustes de inicio, pellizco), sesiones de app (§14), memoria y
-   "Optimizar" (§17), arranque (splash/banda forense).
+   siguiente revisión, al cerrar el marco de apps y las primeras apps. Personalizar inicio aún
+   no ha pasado por revisión adversarial (candidata: junto con el marco de apps).
+2. Fase 3, shell restante: sesiones de app (01c §14), memoria y "Optimizar" (01c §17), arranque
+   (splash/banda forense, 01a §2). Personalizar inicio está hecho salvo "Mis imágenes" como fondo
+   (S3e, necesita el JPEG por hardware de la Fase 9).
 3. Fase 3, apps (las 19 abren hoy "Pendiente de migrar"): marco común de apps → Ajustes,
    Almacenamiento/Explorador, Reloj, Calculadora, Calendario, Notas, Paint, Clima,
    Galería (+editores, visor), Multimedia, Música, Cámara, Device Care, Flex Compass,
@@ -124,6 +138,27 @@ favor en las apps).
 4. Fase 4 (bandas del vidrio, 3 niveles, PPA medido) y Fase 5 (veto al teclear, umbrales).
 5. Fases 6–8 (Wi-Fi C6 esp-hosted, red, servidor web, Account, Cloud), 9–13 (multimedia,
    cámara, audio, Device Care, Compass), 14–17 (OTA, particiones, seguridad, optimización).
+
+## Resultados de la última validación (Personalizar inicio)
+
+| Comprobación | Resultado |
+|---|---|
+| `tests/host` (ASan+UBSan y TSan), incl. `test_homecfg` | OK: 983 827 comprobaciones, 0 fallos |
+| Mutantes del modelo (pellizco 52→60, principal al borrar, redondeo del reordenar) | 3/3 detectados |
+| `tools/run_tests.sh` completo (host, LittleFS, 22 escenas, reglas) | TODO OK |
+| Escena `personalizar` | 14 pasos OK; mutantes de la interfaz (nueva página, cierre al bloquear, confirmar borrado, casita) detectados |
+| Firmware `tools/build.sh --rev v3` | OK: 1 418 448 B, 54,1 % de la ranura A (2,5 MB), 33,8 % de la B (4 MB) |
+| Capturas revisadas a ojo | Páginas, Fondo, Widgets, Ajustes y modal fieles a 01a §10 |
+| **Placa real** | NO probado (tacto del carrusel, fluidez de la animación y del pellizco con el GT911) |
+
+## Entorno de compilación (contenedor de la nube)
+
+* El proxy solo permite GitHub y PyPI: `dl.espressif.com` y `components.espressif.com` están
+  bloqueados. `bash tools/setup_idf_cloud.sh` instala ESP-IDF v5.5.5 y la cadena RISC-V en `~/esp`
+  (las herramientas salen de las releases de GitHub; lvgl y esp_littlefs ya se piden por git).
+  Después: `source ~/esp/env.sh && tools/build.sh --rev v3`. La compilación completa tarda ≈4 min.
+* Decisión: compilar y probar en cada punto de control; no repetir `build.sh --clean` salvo que cambie
+  el `sdkconfig`.
 
 ## Bloqueos y datos que faltan
 
@@ -144,4 +179,5 @@ el Modo edición: ≈22 h del escenario realista). Validación en la placa apart
 conjuntas, depende de grabar con autorización). Base: tamaño del código Arduino que
 queda frente al ritmo medido en las Fases 0–3 (ver el informe de auditoría del 10-10).
 
-Última actualización: Modo edición del escritorio (Fase 3).
+Última actualización: Personalizar inicio (Fase 3): ≈11 h de trabajo de este bloque; quedan de realista
+≈247 h (S3e depende del JPEG de la Fase 9).

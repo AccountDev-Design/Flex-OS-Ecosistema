@@ -563,6 +563,7 @@ void flex_shell_lock(void)
     flex_notif_center_close_now();
     flex_drawer_close_now();
     flex_home_edit_close_now();   // el Modo edicion sale guardando (edExit)
+    flex_home_customize_close_now();   // Personalizar inicio tambien (hcClose(true))
     flex_recents_close_now();
     flex_lock_set_return_app(-1);
     suspend_fg();
@@ -739,6 +740,7 @@ void flex_shell_start(void)
     flex_power_init();
     flex_qs_init();
     flex_notif_init();
+    flex_homecfg_init();
     flex_kiosk_load();
     if (flex_reset_boot_state() == FLEX_FR_BOOT_RESUME) {
         flex_factory_resume_boot();   // un borrado a medias se termina antes que nada
