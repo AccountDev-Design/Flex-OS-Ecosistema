@@ -8,12 +8,12 @@ Arduino, tamaños) y `ESP_IDF_HARDWARE_REQUIREMENTS.md` (qué probar en la placa
 > host + escena del simulador que falla al revertir la corrección (mutación).
 
 Rama: `flexos-esp-idf` (la rama Arduino `claude/flexos-ota-system-blq9g9-2csacx` no se toca).
-Último bloque cerrado: **Sesiones de app** (S4a1); antes, **Personalizar inicio**. Entorno de
+Último bloque cerrado: **Sesiones de app** (S4c); antes, **Personalizar inicio**. Entorno de
 compilación en un contenedor nuevo: `bash tools/setup_idf_cloud.sh` (ver "Entorno" abajo).
 
 ### Punto de reanudación (siguiente tarea exacta)
 
-1. **Memoria y ciclo de vida** (`docs/spec/01c` §17 + S4a2/S4b): integrar el núcleo de memoria que ya está en
+1. **Memoria y ciclo de vida** (`docs/spec/01c` §17 + S4d/S4b): integrar el núcleo de memoria que ya está en
    `flex_portable` (`FlexOS_Mem.cpp`: presupuesto, presión, fragmentación, "¿cabe esta app?", avisos con
    enfriamiento) con el ciclo de vida de `flex_shell.c` (desalojo de apps suspendidas por presupuesto, apps con
    segundo plano `bg_work`, huella medida por app) y la función **"Optimizar Flex OS"** (§17: soltar lo
@@ -82,8 +82,8 @@ Cálculo reproducible: `python3 tools/progress.py` (lee la tabla de abajo; no ha
 | S3c | Personalizar inicio: Fondo, Temas y Widgets (LVGL) | 6 | 1 | 0 |
 | S3e | Personalizar inicio: Mis imagenes, imagen propia como fondo y encuadre (necesita el JPEG por hardware, M1) | 2 | 0 | 0 |
 | S3d | Personalizar inicio: pellizco de dos dedos (clasificador + consumidor de toque) | 3 | 1 | 0 |
-| S4a1 | Marco de apps: sesiones (formato, guardado diferido, restauracion perezosa, cierre seguro) y ganchos save/load_session | 8 | 1 | 0 |
-| S4a2 | Marco de apps: desalojo por presupuesto de memoria, segundo plano, Recientes<->sesiones, regreso, memoria por app (01c 17, junto a S4b) | 23 | 0 | 0 |
+| S4c | Marco de apps: sesiones (formato, guardado diferido, restauracion perezosa, cierre seguro) y ganchos save/load_session | 8 | 1 | 0 |
+| S4d | Marco de apps: desalojo por presupuesto de memoria, segundo plano, Recientes<->sesiones, regreso, memoria por app (01c 17, junto a S4b) | 23 | 0 | 0 |
 | S4b | Memoria y funcion Optimizar (01c 17), umbrales y avisos | 8 | 0 | 0 |
 | S5 | Infraestructura compartida de apps en LVGL (cabecera, listas, dialogos, selector de archivos, barra de medios) | 12 | 0 | 0 |
 | A01 | App Reloj (reloj, alarmas, cronometro, temporizador) | 17 | 0 | 0 |
