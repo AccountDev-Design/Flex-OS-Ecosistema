@@ -8,18 +8,18 @@ Arduino, tamaños) y `ESP_IDF_HARDWARE_REQUIREMENTS.md` (qué probar en la placa
 > host + escena del simulador que falla al revertir la corrección (mutación).
 
 Rama: `flexos-esp-idf` (la rama Arduino `claude/flexos-ota-system-blq9g9-2csacx` no se toca).
-Último bloque cerrado: **Memoria y Optimizar** (S4b, S4d); antes, **Sesiones de app** y **Personalizar inicio**. Entorno de
+Último bloque cerrado: **Arranque** (S2); antes, **Memoria y Optimizar**, **Sesiones de app** y **Personalizar inicio**. Entorno de
 compilación en un contenedor nuevo: `bash tools/setup_idf_cloud.sh` (ver "Entorno" abajo).
 
 ### Punto de reanudación (siguiente tarea exacta)
 
-1. **Arranque** (`docs/spec/01a` §2, ítem S2): splash animado (`splashFrame`/`splashTick`), banda forense de reinicio
-   anormal (`showBootBanner`), destino al terminar el splash y paso Flex Account del OOBE (este último depende de las
-   Fases 6–7). Hoy `main/app_main.c` + `flex_shell_start` muestran el bloqueo directamente. Leer `01a` §2.2–2.8.
-2. **S4e** (Recientes: huella medida "--", "Pausada"/"Estado guardado" con `flex_mem_app_shed`, aviso de cambios sin
-   guardar con `flex_session_pending`/`dirty`) y **S5** (infraestructura compartida de apps) antes de la primera app.
-3. Revisión adversarial corta de Personalizar inicio + sesiones + memoria + marco (nunca ejecutada para estos bloques).
-4. Primeras apps en el orden de dependencias: Ajustes, Almacenamiento (trae los puntos de entrada a Optimizar),
+1. **S4e** (Recientes: huella medida con "--" si no hay medida, "Pausada"/"Estado guardado" con `flex_mem_app_shed`,
+   aviso de cambios sin guardar con `flex_session_pending`/`dirty`) y **S5** (infraestructura compartida de apps:
+   cabecera, listas, diálogos, selector de archivos, barra de medios) antes de la primera app. Ver `01a` §12
+   (Recientes) y `docs/spec/02` (componentes) y `03_apps_productividad.md`.
+2. Revisión adversarial corta de Personalizar inicio + sesiones + memoria + arranque + marco (nunca ejecutada para
+   estos bloques; 2–3 agentes como máximo, la revisión 5 terminó entera con 3).
+3. Primeras apps en el orden de dependencias: Ajustes, Almacenamiento (trae los puntos de entrada a Optimizar),
    Reloj, Calculadora, Notas, Paint... Cada app implementa `save_session`/`load_session`/`shed`.
 
 ## Cómo validar antes de cada commit
@@ -54,6 +54,7 @@ source ~/esp/env.sh && tools/build.sh --rev v3   # firmware (no graba nada)
 | Personalizar inicio (01a §10): carrusel de páginas con arrastre elástico, "+", casita, papelera con modal, reordenar con 650 ms, Fondo (8 fondos, Inicio/Bloqueo/Ambos, Restaurar, paleta), Temas (aplicar coherente y restaurar), Widgets (vista previa real, añadir con avisos), Ajustes de inicio (rejilla, tamaño, nombres, bloqueo, indicadores, principal, pellizco, animaciones, encuadre, restablecer), animación de 180 ms con captura del escritorio, pellizco de dos dedos como consumidor previo a LVGL, cierre al bloquear/suspender. Falta "Mis imágenes" como fondo (JPEG por hardware) | `flex_homecfg.c`, `flex_home_model.c` (operaciones y clasificador), `flex_storage` (`flex_fs_list_async`), `flex_home_widgets.c` (vista previa) | host (5000 escritorios, 3000 carpetas, 7500 guiones de pellizco frente a Arduino; 3 mutantes) + escena `personalizar` (14 pasos, 4 mutantes) + firmware `esp32p4` |
 | Sesiones de app (01c §14): formato de archivo de Arduino (cabecera de 16 B + CRC-32), guardado diferido (1200 ms / tope 30 s / nunca con el dedo apoyado ni con un restablecimiento en curso), un único volcado pendiente, no reescribir una sesión idéntica, restauración perezosa antes de crear la app, volcado en el acto al cerrar (si no se pudo guardar la app NO se cierra salvo el restablecimiento), re-armado al suspender; ganchos `save_session`/`load_session` en `flex_app_ops_t` | `flex_session_model.c` (portable), `flex_session.c`, `flex_shell.c` (ciclo de vida), `flex_storage` (lectura/escritura asíncrona ya existentes) | host (6000 guiones y 20 000 archivos frente a Arduino; 4 mutantes) + escena `sesiones` (13 comprobaciones, 4 mutantes) + firmware `esp32p4` |
 | Memoria (01c §17): nivel sostenido con histéresis y avisos (núcleo `FlexOS_Mem.cpp` de Arduino, con su `test_mem.cpp` portado), soltar en orden LRU solo apps suspendidas y sin trabajo real, admisión al abrir una app cerrada (`"%s no se abre ahora"`), alivio automático con un solo aviso al empeorar, desalojo por presupuesto en cada suspensión (cierra la menos reciente solo si su sesión se guardó), huella medida por app, registro de cachés reconstruibles (fondos, miniaturas de Recientes) y **Optimizar Flex OS** (5 etapas de 420 ms, modal, borra `/System/Cache` por la tarea de almacenamiento, modo visual eficiente temporal que se apaga solo) | `flex_mem_model.c` (portable), `flex_mem.c`, `flex_optimize.c`, `flex_shell.c` | host (12 000 mundos × 8 operaciones frente a `Core.h` de Arduino: 1 660 cierres, 13 246 avisos; 4 mutantes) + escena `memoria` (6 mutantes y el del guardián modal) + firmware `esp32p4` |
+| Arranque (01a §2.3-2.5): banda forense solo tras un reinicio anormal (cualquier motivo salvo POWERON, SW o DEEPSLEEP; 2200 ms), splash negro con "FlexOS Ultra" / "ESP32-P4" y la curva de opacidad de Arduino (600 ms sube, 1400 fijo, 600 baja) con tres puntos que cambian cada 320 ms, toques tragados mientras dura, destino al terminar (Modo seguro tras la banda sin splash, primera configuración, kiosco o bloqueo); nada bloquea la tarea de UI (`lv_timer`) | `flex_boot_model.c` (portable), `flex_boot_ui.c`, `flex_shell.c` (destino) | host (motivos 0..20 y curva 0..3200 ms frente a `resetReasonStr` y `splashTick`) + escena `arranque` (4 casos, 3 mutantes) + firmware `esp32p4` |
 
 ## Progreso global (método congelado v1)
 
@@ -77,7 +78,8 @@ Cálculo reproducible: `python3 tools/progress.py` (lee la tabla de abajo; no ha
 | B2 | Base: pantalla ST7701 DSI, 2 framebuffers, LVGL DIRECT, GT911 | 60 | 1 | 0 |
 | B3 | Base: bus de eventos, buzon de UI, NVS/LittleFS compatibles, monitor del sistema, clave PBKDF2 | 60 | 1 | 0 |
 | S1 | Shell migrado: bloqueo, clave, kiosco, escritorio, edicion, widgets, caja, Recientes, panel rapido, avisos, energia, apagado, Modo seguro, restablecimiento, OOBE (sin Account), teclado | 258 | 1 | 0 |
-| S2 | Arranque: splash, banda forense de reinicio anormal, paso Flex Account del OOBE | 9 | 0 | 0 |
+| S2 | Arranque: banda forense de reinicio anormal, splash con su curva y destino (01a 2.3-2.5) | 8 | 1 | 0 |
+| S2b | Paso Flex Account del OOBE (necesita las Fases 6-7) | 1 | 0 | 0 |
 | S3a | Personalizar inicio: operaciones del modelo (paginas, principal, rejilla, reset) + host | 6 | 1 | 0 |
 | S3b | Personalizar inicio: vistas Paginas y Ajustes de inicio + modales (LVGL) | 11 | 1 | 0 |
 | S3c | Personalizar inicio: Fondo, Temas y Widgets (LVGL) | 6 | 1 | 0 |
@@ -145,17 +147,18 @@ favor en las apps).
 5. Fases 6–8 (Wi-Fi C6 esp-hosted, red, servidor web, Account, Cloud), 9–13 (multimedia,
    cámara, audio, Device Care, Compass), 14–17 (OTA, particiones, seguridad, optimización).
 
-## Resultados de la última validación (Personalizar inicio, sesiones de app y memoria)
+## Resultados de la última validación (Personalizar inicio, sesiones, memoria y arranque)
 
 | Comprobación | Resultado |
 |---|---|
-| `tests/host` (ASan+UBSan y TSan), incl. `test_homecfg`, `test_session` y `test_mem_model` | OK: 983 837 comprobaciones, 0 fallos |
+| `tests/host` (ASan+UBSan y TSan), incl. `test_homecfg`, `test_session`, `test_mem_model` y `test_boot` | OK: 983 844 comprobaciones, 0 fallos |
 | Mutantes de los modelos (pellizco, principal al borrar, redondeo del reordenar; tope de 30 s, cierre forzado, CRC al leer, otra app pendiente; LRU con empates, cerrar sin guardar, admitir dos veces, alivio sin empeorar) | 11/11 detectados |
 | `tools/run_tests.sh` completo (host, LittleFS, 22 escenas, reglas) | TODO OK |
+| Escena `arranque` | 4 casos OK (normal, tras un PANIC, Modo seguro, primera configuración); 3 mutantes detectados |
 | Escena `memoria` | OK; 7 mutantes de la interfaz detectados (admisión, presupuesto al suspender, soltar en Optimizar, modo eficiente, cierre con un toque, guardián modal de Inicio) |
 | Escena `sesiones` | 13 comprobaciones OK; 4 mutantes de la interfaz detectados (el último, tras añadir el paso de re-armado) |
 | Escena `personalizar` | 14 pasos OK; mutantes de la interfaz (nueva página, cierre al bloquear, confirmar borrado, casita) detectados |
-| Firmware `tools/build.sh --rev v3` | OK: 1 429 152 B, 54,5 % de la ranura A (2,5 MB), 34,1 % de la B (4 MB) |
+| Firmware `tools/build.sh --rev v3` | OK: 1 430 800 B, 54,6 % de la ranura A (2,5 MB), 34,1 % de la B (4 MB) |
 | Capturas revisadas a ojo | Páginas, Fondo, Widgets, Ajustes y modal fieles a 01a §10 |
 | **Placa real** | NO probado (tacto del carrusel, fluidez de la animación y del pellizco con el GT911) |
 
@@ -187,4 +190,4 @@ el Modo edición: ≈22 h del escenario realista). Validación en la placa apart
 conjuntas, depende de grabar con autorización). Base: tamaño del código Arduino que
 queda frente al ritmo medido en las Fases 0–3 (ver el informe de auditoría del 10-10).
 
-Última actualización: memoria y Optimizar (Fase 3). Quedan de realista ≈235 h (S3e depende del JPEG de la Fase 9).
+Última actualización: memoria y Optimizar (Fase 3). Quedan de realista ≈233 h (S3e depende del JPEG de la Fase 9).

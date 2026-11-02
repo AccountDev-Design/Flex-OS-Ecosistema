@@ -70,6 +70,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 3 (en curso: + Personalizar inicio) | `v3` dev | 1 418 448 B | 54,1 % | 33,8 % |
 | 3 (en curso: + sesiones de app) | `v3` dev | 1 420 592 B | 54,2 % | 33,9 % |
 | 3 (en curso: + memoria y Optimizar) | `v3` dev | 1 429 152 B | 54,5 % | 34,1 % |
+| 3 (en curso: + arranque) | `v3` dev | 1 430 800 B | 54,6 % | 34,1 % |
 
 La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la interfaz completa
 (Fase 15). No se ha grabado nada.
@@ -129,6 +130,9 @@ La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la
 | Memoria: radio | `wifiRadioBusy` cede el alivio mientras el enlace del C6 se levanta | Gancho débil `flex_net_radio_busy` (falso hasta la Fase 6) | Aún no hay enlace con el C6 |
 | Optimizar: fondo | Captura de la banda del panel para no apilar el vidrio | Un `lv_obj` modal sobre la pantalla: LVGL repinta debajo sin apilar capas | No hace falta la captura |
 | Optimizar: caché temporal | `fsWipeDir` síncrono en el bucle | `flex_fs_wipe_dir_async`: la cuenta llega a la UI cuando termina y completa la línea del resultado | La flash no se toca desde la UI |
+| Arranque: banda y splash | `delay(2200)` y `delay(16)` por cuadro en `setup()` (la tarea no atiende nada) | `lv_timer`: la tarea de UI sigue viva (los toques se tragan con una raíz modal) | Nada bloquea la tarea LVGL |
+| Arranque: Modo seguro | La banda (si hubo reinicio anormal) y luego la pantalla de Modo seguro; el splash nunca sale | Igual (la rama de Modo seguro del final del splash de Arduino es código muerto) | Fiel al comportamiento real |
+| Arranque: reinicio anormal para la banda | Todo motivo salvo POWERON, SW y DEEPSLEEP (incluye EXT y desconocido) | Igual; el criterio del Modo seguro es otro (`flex_safe_abnormal`, además PWR_GLITCH y CPU_LOCKUP) | Dos preguntas distintas |
 | Umbrales de toque | Toque = < 16 px y < 550 ms | Igual, aplicado al indev de LVGL (por defecto LVGL usa 10 px y 400 ms) | docs/spec/01b |
 | Restablecimiento: qué se borra de la NVS | Solo los espacios de nombres conocidos: quedaban el vínculo con el teléfono, Flex Storage, Device Care, robo, audio, clima, navegador (un aparato "restablecido" seguía emparejado) | TODOS los espacios de nombres salvo el marcador `flexreset` (incluidos los del sistema: credenciales Wi-Fi del controlador, calibración del PHY); el aviso lo dice ("Vínculo con el teléfono y Flex Storage") | docs/spec/01c §13.5 (riesgo de privacidad) |
 | Restablecimiento: marcador terminado | Se borra al entrar al OOBE | Igual: se borra al entrar a la primera configuración | docs/spec/01c §13.6 |

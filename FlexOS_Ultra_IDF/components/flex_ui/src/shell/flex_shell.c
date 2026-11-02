@@ -238,6 +238,7 @@ void flex_mem_app_commit(int id, uint32_t free_before);
 void flex_mem_app_forget(int id);
 void flex_mem_app_resumed(int id);
 void flex_mem_enforce(void);
+void flex_boot_begin(void (*done)(void));   // flex_boot_ui.c
 void flex_session_load_once(int id);
 void flex_session_note_suspend(int id);
 bool flex_session_terminate_begin(int id, bool force);
@@ -795,8 +796,16 @@ void flex_shell_start(void)
     flex_mem_start();
     flex_kiosk_load();
     if (flex_reset_boot_state() == FLEX_FR_BOOT_RESUME) {
-        flex_factory_resume_boot();   // un borrado a medias se termina antes que nada
-    } else if (flex_safe_mode()) {
+        flex_factory_resume_boot();   // un borrado a medias se termina antes que nada (sin splash)
+    } else {
+        flex_boot_begin(flex_shell_boot_destination);   // banda forense -> splash -> destino
+    }
+}
+
+// Destino al terminar el splash (01a §2.5): Modo seguro, primera configuracion, kiosco o bloqueo
+void flex_shell_boot_destination(void)
+{
+    if (flex_safe_mode()) {
         flex_safe_open();   // Modo seguro: directo a su pantalla, sin bloqueo (las filas piden la clave)
     } else if (!flex_cfg_get_bool("oobe", false)) {
         flex_oobe_start();   // placa virgen o recien restablecida (borra el marcador)

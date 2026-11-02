@@ -173,6 +173,10 @@ const char *flex_home_edit_hint(void);
 void flex_home_ctx_menu(int app_id, const lv_area_t *icon);
 bool flex_home_ctx_open(void);
 
+// Arranque (flex_boot_ui.c; docs/spec/01a 2.3-2.5): banda forense, splash y destino
+void flex_shell_boot_destination(void);
+bool flex_boot_active(void);
+
 // Personalizar inicio (flex_homecfg.c; docs/spec/01a §10): pulsacion larga en un hueco o pellizco
 void flex_homecfg_init(void);         // engancha el pellizco de dos dedos (antes de LVGL)
 void flex_home_customize_open(void);

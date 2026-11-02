@@ -23,6 +23,7 @@ bool scene_edit_run(void);
 bool scene_homecfg_run(void);
 bool scene_session_run(void);
 bool scene_memory_run(void);
+bool scene_boot_run(void);
 
 const sim_scene_t sim_scenes[] = {
     {"galeria", scene_gallery_run},
@@ -45,6 +46,7 @@ const sim_scene_t sim_scenes[] = {
     {"personalizar", scene_homecfg_run},
     {"sesiones", scene_session_run},
     {"memoria", scene_memory_run},
+    {"arranque", scene_boot_run},
     {"apagado", scene_poweroff_run},
     {NULL, NULL},
 };

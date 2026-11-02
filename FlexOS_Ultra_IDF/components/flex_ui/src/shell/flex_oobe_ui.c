@@ -156,6 +156,10 @@ static void finish(void)
     flex_shell_lock();   // el fin del OOBE lleva al bloqueo, no al escritorio
 }
 
+#ifdef FLEX_SIM
+void flex_oobe_finish_for_test(void) { finish(); }   // solo el simulador: deja el OOBE como si se hubiera completado
+#endif
+
 static void name_ok(void *arg)
 {
     (void)arg;

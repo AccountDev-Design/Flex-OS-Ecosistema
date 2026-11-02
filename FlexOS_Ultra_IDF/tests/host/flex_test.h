@@ -48,4 +48,5 @@ void test_home_edit(void);
 void test_homecfg(void);
 void test_session(void);
 void test_mem_model(void);
+void test_boot(void);
 #define FLEX_APP_N_TEST 19
