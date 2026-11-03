@@ -125,6 +125,26 @@ typedef struct {
 typedef void (*flex_fs_list_cb_t)(esp_err_t err, const flex_fs_ent_t *ents, size_t n, void *user);
 esp_err_t flex_fs_list_async(const char *path, size_t max, flex_fs_list_cb_t cb, void *user);
 
+// ---- Kit de archivos (flexFs* de Arduino: borrar, renombrar, papelera) ----------
+// Se ejecutan en la tarea de almacenamiento (una a una, sin carreras entre comprobar y
+// renombrar) y avisan en la tarea de UI. ESP_ERR_INVALID_STATE = el destino ya existe (no se pisa),
+// ESP_ERR_NOT_FOUND = no existe lo que se pide, ESP_ERR_INVALID_ARG = nombre o ruta no valida
+// (o que no cabe), ESP_FAIL = fallo del disco.
+// Borra un fichero o una carpeta entera (flexFsDelete).
+esp_err_t flex_fs_delete_async(const char *path, flex_fs_done_cb_t cb, void *user);
+// Cambia SOLO el nombre (sin '/'); sin extension en el nombre nuevo conserva la del original.
+esp_err_t flex_fs_rename_name_async(const char *path, const char *new_name, flex_fs_done_cb_t cb, void *user);
+// Mueve a /Papelera con la ruta original en el nombre; restaura sin pisar; vacia la papelera.
+esp_err_t flex_fs_trash_async(const char *path, flex_fs_done_cb_t cb, void *user);
+esp_err_t flex_fs_restore_async(const char *trash_name, flex_fs_done_cb_t cb, void *user);
+esp_err_t flex_fs_empty_trash_async(flex_fs_done_cb_t cb, void *user);
+// Crea "<dir>/<name> N<ext>" vacio con el primer N libre (1..999); cb recibe su ruta.
+typedef void (*flex_fs_name_cb_t)(esp_err_t err, const char *path, void *user);
+esp_err_t flex_fs_new_file_async(const char *dir, const char *name, const char *ext, flex_fs_name_cb_t cb, void *user);
+// Entradas directas de una carpeta y bytes de todo lo que cuelga de ella (hasta 5 niveles): flexFsCount + flexFsDirSize.
+typedef void (*flex_fs_stat_cb_t)(esp_err_t err, uint32_t count, uint32_t bytes, void *user);
+esp_err_t flex_fs_dirstat_async(const char *dir, flex_fs_stat_cb_t cb, void *user);
+
 // Sincronas, para tareas de servicio (NUNCA desde la UI): pueden esperar a la flash.
 esp_err_t flex_fs_read_file(const char *path, uint8_t **data, size_t *len, size_t max_len);
 bool      flex_fs_exists(const char *path);

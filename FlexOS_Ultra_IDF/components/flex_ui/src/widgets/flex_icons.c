@@ -618,6 +618,48 @@ static void glyph_draw_cb(lv_event_t *e)
         p_rect(&p, bx + 2 * bw / 3, by + 9, 2, bh - 16, 0, col, 255);
         break;
     }
+    case FLEX_GLYPH_FK_SELECT: {   // fkMenuGlyph(FK_ACT_SEL)
+        p_rect(&p, cx - 5, cy - 10, 10, 14, 4, col, 255);
+        p_seg(&p, cx - 11, cy - 12, cx - 14, cy - 16, 1, col);
+        p_seg(&p, cx, cy - 14, cx, cy - 19, 1, col);
+        p_seg(&p, cx + 11, cy - 12, cx + 14, cy - 16, 1, col);
+        p_rect(&p, cx - 8, cy + 2, 16, 8, 3, col, 255);
+        break;
+    }
+    case FLEX_GLYPH_FK_DELETE: {   // fkMenuGlyph(FK_ACT_DEL)
+        lv_color_t det = lv_obj_get_style_bg_color(obj, LV_PART_MAIN);
+        p_rect(&p, cx - 10, cy - 12, 20, 3, 0, col, 255);
+        p_rect(&p, cx - 4, cy - 16, 8, 3, 0, col, 255);
+        p_rect(&p, cx - 8, cy - 8, 16, 20, 3, col, 255);
+        p_rect(&p, cx - 3, cy - 4, 2, 12, 0, det, 255);
+        p_rect(&p, cx + 1, cy - 4, 2, 12, 0, det, 255);
+        break;
+    }
+    case FLEX_GLYPH_FK_RENAME: {   // fkMenuGlyph(FK_ACT_REN)
+        p_rect(&p, cx - 14, cy - 7, 20, 14, 3, col, 255);
+        p_rect(&p, cx + 8, cy - 10, 2, 20, 0, col, 255);
+        p_rect(&p, cx + 5, cy - 10, 8, 2, 0, col, 255);
+        p_rect(&p, cx + 5, cy + 8, 8, 2, 0, col, 255);
+        break;
+    }
+    case FLEX_GLYPH_FK_TRASH: {   // fkMenuGlyph(FK_ACT_TRASH)
+        p_rect(&p, cx - 10, cy - 12, 20, 3, 0, col, 255);
+        p_rect(&p, cx - 4, cy - 16, 8, 3, 0, col, 255);
+        p_rrect_outline(&p, cx - 8, cy - 8, 16, 20, 3, col);
+        p_rect(&p, cx - 3, cy - 4, 2, 12, 0, col, 255);
+        p_rect(&p, cx + 1, cy - 4, 2, 12, 0, col, 255);
+        break;
+    }
+    case FLEX_GLYPH_FK_CLOUD: {   // fkMenuGlyph(FK_ACT_CLOUD)
+        lv_color_t det = lv_obj_get_style_bg_color(obj, LV_PART_MAIN);
+        p_circle(&p, cx - 6, cy + 2, 6, col, 255);
+        p_circle(&p, cx + 2, cy - 3, 8, col, 255);
+        p_circle(&p, cx + 9, cy + 3, 5, col, 255);
+        p_rect(&p, cx - 6, cy + 3, 15, 5, 0, col, 255);
+        p_rect(&p, cx, cy - 4, 2, 9, 0, det, 255);
+        p_tri(&p, cx - 4, cy - 1, cx + 5, cy - 1, cx + 1, cy - 6, det);
+        break;
+    }
     case FLEX_GLYPH_CHEVRON_DOWN:
         p_seg(&p, cx - 9, cy - 4, cx, cy + 5, 1, col);
         p_seg(&p, cx + 9, cy - 4, cx, cy + 5, 1, col);

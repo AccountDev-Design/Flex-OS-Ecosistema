@@ -6,7 +6,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "flex_bus.h"
+#include "flex_fs_names.h"
+#include "flex_fs_ops.h"
+#include "flex_fs_path.h"
 #include "flex_inbox.h"
 #include "flex_kv.h"
 #include "flex_storage.h"
@@ -217,8 +224,170 @@ void sim_fs_put(const char *p, const uint8_t *d, size_t l)
 {
     for (int i = 0; i < 16; i++) if (!s_mf[i].used || !strcmp(s_mf[i].path, p)) { snprintf(s_mf[i].path, sizeof(s_mf[i].path), "%s", p); memcpy(s_mf[i].data, d, l); s_mf[i].len = l; s_mf[i].used = true; return; }
 }
+
+// ---- Disco real (directorio temporal) -----------------------------------------------------------------
+// Las escenas que prueban el kit de archivos trabajan con las MISMAS operaciones que la tarea de
+// almacenamiento del firmware (flex_fs_ops.c, flex_fs_names.c) sobre un directorio de verdad, y los avisos
+// llegan por el buzon (en la siguiente vuelta), como los de la tarea de almacenamiento. Con el disco apagado
+// rige el modo en memoria de arriba. Las perillas sim_fs_fail_writes valen tambien aqui.
+static char s_disk[64];
+static bool s_disk_on;
+static void disk_cleanup(void)
+{
+    if (s_disk[0]) {
+        bool f;
+        flex_fs_wipe_tree(s_disk, &f);
+        rmdir(s_disk);
+    }
+}
+static bool disk_abs(const char *rel, char *out, size_t n)
+{
+    return s_disk_on && flex_fs_path_valid(rel, 0, 0, 160) && snprintf(out, n, "%s%s", s_disk, rel) < (int)n;
+}
+void sim_disk_enable(bool on)
+{
+    if (on && !s_disk[0]) {
+        snprintf(s_disk, sizeof(s_disk), "/tmp/flexsim.XXXXXX");
+        if (!mkdtemp(s_disk)) {
+            s_disk[0] = 0;
+        } else {
+            atexit(disk_cleanup);
+        }
+    }
+    if (s_disk[0]) {
+        bool f;
+        flex_fs_wipe_tree(s_disk, &f);   // arranca vacio
+    }
+    s_disk_on = on && s_disk[0];
+    s_mf_writes = 0;
+}
+bool sim_disk_active(void) { return s_disk_on; }
+static void disk_mkdirs(char *abs)   // carpetas de la ruta (sin el ultimo componente)
+{
+    for (char *q = abs + strlen(s_disk) + 1; *q; q++) {
+        if (*q == '/') {
+            *q = 0;
+            mkdir(abs, 0775);
+            *q = '/';
+        }
+    }
+}
+bool sim_disk_put(const char *rel, const void *d, size_t l)
+{
+    char a[200];
+    if (!disk_abs(rel, a, sizeof(a))) return false;
+    disk_mkdirs(a);
+    FILE *f = fopen(a, "wb");
+    if (!f) return false;
+    bool ok = l == 0 || fwrite(d, 1, l, f) == l;
+    return fclose(f) == 0 && ok;
+}
+size_t sim_disk_get(const char *rel, void *out, size_t cap)
+{
+    char a[200];
+    if (!disk_abs(rel, a, sizeof(a))) return (size_t)-1;
+    FILE *f = fopen(a, "rb");
+    if (!f) return (size_t)-1;
+    size_t n = fread(out, 1, cap, f);
+    fclose(f);
+    return n;
+}
+bool sim_disk_exists(const char *rel)
+{
+    char a[200];
+    struct stat st;
+    return disk_abs(rel, a, sizeof(a)) && stat(a, &st) == 0;
+}
+bool sim_disk_is_dir(const char *rel)
+{
+    char a[200];
+    struct stat st;
+    return disk_abs(rel, a, sizeof(a)) && stat(a, &st) == 0 && S_ISDIR(st.st_mode);
+}
+bool sim_disk_mkdir(const char *rel)
+{
+    char a[200];
+    if (!disk_abs(rel, a, sizeof(a))) return false;
+    disk_mkdirs(a);
+    return mkdir(a, 0775) == 0 || errno == EEXIST;
+}
+
+typedef struct {
+    int kind;   // 0 hecho, 1 lectura, 2 cuenta, 3 listado, 4 nombre, 5 estadistica
+    void *cb, *user;
+    esp_err_t err;
+    uint8_t *data;
+    size_t len;
+    uint32_t a, b;
+} dpost_t;
+static void dpost_run(void *arg)
+{
+    dpost_t *p = arg;
+    if (p->cb) {
+        switch (p->kind) {
+        case 1: ((flex_fs_read_cb_t)p->cb)(p->err, p->data, p->len, p->user); p->data = NULL; break;   // la lectura se queda con el buffer
+        case 2: ((flex_fs_count_cb_t)p->cb)(p->err, p->len, p->user); break;
+        case 3: ((flex_fs_list_cb_t)p->cb)(p->err, (const flex_fs_ent_t *)p->data, p->len, p->user); break;
+        case 4: ((flex_fs_name_cb_t)p->cb)(p->err, p->data ? (const char *)p->data : "", p->user); break;
+        case 5: ((flex_fs_stat_cb_t)p->cb)(p->err, p->a, p->b, p->user); break;
+        default: ((flex_fs_done_cb_t)p->cb)(p->err, p->user); break;
+        }
+    }
+    free(p->data);
+    free(p);
+}
+static esp_err_t dpost(const dpost_t *t)
+{
+    dpost_t *p = malloc(sizeof(*p));
+    if (!p) {
+        free(t->data);
+        return ESP_ERR_NO_MEM;
+    }
+    *p = *t;
+    if (!flex_inbox_post(dpost_run, p)) {
+        free(p->data);
+        free(p);
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+static esp_err_t fsx_err(flex_fsx_res_t r)
+{
+    switch (r) {
+    case FLEX_FSX_OK: return ESP_OK;
+    case FLEX_FSX_ARG: return ESP_ERR_INVALID_ARG;
+    case FLEX_FSX_NOTFOUND: return ESP_ERR_NOT_FOUND;
+    case FLEX_FSX_EXISTS: return ESP_ERR_INVALID_STATE;
+    default: return ESP_FAIL;
+    }
+}
+static esp_err_t disk_done(void *cb, void *u, esp_err_t err)
+{
+    return dpost(&(dpost_t){.kind = 0, .cb = cb, .user = u, .err = err});
+}
 esp_err_t flex_fs_write_async(const char *p, const void *d, size_t l, flex_fs_done_cb_t cb, void *u)
 {
+    if (s_disk_on) {
+        char a[200], tmp[220];
+        if (!disk_abs(p, a, sizeof(a)) || snprintf(tmp, sizeof(tmp), "%s.tmp", a) >= (int)sizeof(tmp)) return ESP_ERR_INVALID_ARG;
+        if (s_mf_fail) return ESP_ERR_INVALID_STATE;   // no se pudo ni poner en cola
+        s_mf_writes++;
+        esp_err_t e = ESP_OK;
+        if (s_mf_late_fail) {
+            e = ESP_FAIL;
+        } else {
+            disk_mkdirs(a);
+            FILE *f = fopen(tmp, "wb");
+            if (!f) e = ESP_FAIL;
+            else {
+                if (l && fwrite(d, 1, l, f) != l) e = ESP_ERR_NO_MEM;
+                if (fclose(f) != 0 && e == ESP_OK) e = ESP_FAIL;
+                if (e == ESP_OK && rename(tmp, a) != 0) e = ESP_FAIL;
+                if (e != ESP_OK) unlink(tmp);
+            }
+        }
+        return disk_done((void *)cb, u, e);
+    }
     if (!s_mf_on) {
         (void)p; (void)d; (void)l;
         if (cb) cb(ESP_ERR_INVALID_STATE, u);
@@ -243,6 +412,33 @@ esp_err_t flex_fs_write_async(const char *p, const void *d, size_t l, flex_fs_do
 }
 esp_err_t flex_fs_read_async(const char *p, size_t m, flex_fs_read_cb_t cb, void *u)
 {
+    if (s_disk_on) {
+        char a[200];
+        struct stat st;
+        if (!disk_abs(p, a, sizeof(a))) return ESP_ERR_INVALID_ARG;
+        dpost_t t = {.kind = 1, .cb = (void *)cb, .user = u, .err = ESP_ERR_NOT_FOUND};
+        if (stat(a, &st) == 0) {
+            if ((size_t)st.st_size > m) {
+                t.err = ESP_ERR_INVALID_SIZE;
+            } else if ((t.data = malloc((size_t)st.st_size + 1)) != NULL) {
+                FILE *f = fopen(a, "rb");
+                size_t n = f ? fread(t.data, 1, (size_t)st.st_size, f) : 0;
+                if (f) fclose(f);
+                if (f && n == (size_t)st.st_size) {
+                    t.data[n] = 0;
+                    t.len = n;
+                    t.err = ESP_OK;
+                } else {
+                    free(t.data);
+                    t.data = NULL;
+                    t.err = ESP_FAIL;
+                }
+            } else {
+                t.err = ESP_ERR_NO_MEM;
+            }
+        }
+        return dpost(&t);
+    }
     if (s_mf_on) {
         for (int i = 0; i < 16; i++) {
             if (s_mf[i].used && !strcmp(s_mf[i].path, p) && s_mf[i].len <= m) {
@@ -257,10 +453,79 @@ esp_err_t flex_fs_read_async(const char *p, size_t m, flex_fs_read_cb_t cb, void
     if (cb) cb(ESP_ERR_NOT_FOUND, NULL, 0, u);
     return ESP_OK;
 }
-esp_err_t flex_fs_remove_async(const char *p, flex_fs_done_cb_t cb, void *u) { (void)p; if (cb) cb(ESP_ERR_INVALID_STATE, u); return ESP_OK; }
-esp_err_t flex_fs_rename_async(const char *a, const char *b, flex_fs_done_cb_t cb, void *u) { (void)a; (void)b; if (cb) cb(ESP_ERR_INVALID_STATE, u); return ESP_OK; }
-esp_err_t flex_fs_mkdir_async(const char *p, flex_fs_done_cb_t cb, void *u) { (void)p; if (cb) cb(ESP_ERR_INVALID_STATE, u); return ESP_OK; }
-bool flex_fs_exists(const char *p) { (void)p; return false; }
+esp_err_t flex_fs_remove_async(const char *p, flex_fs_done_cb_t cb, void *u)
+{
+    char a[200];
+    if (s_disk_on) {
+        if (!disk_abs(p, a, sizeof(a))) return ESP_ERR_INVALID_ARG;
+        return disk_done((void *)cb, u, (unlink(a) == 0 || rmdir(a) == 0) ? ESP_OK : ESP_FAIL);
+    }
+    if (cb) cb(ESP_ERR_INVALID_STATE, u);
+    return ESP_OK;
+}
+esp_err_t flex_fs_rename_async(const char *f, const char *t, flex_fs_done_cb_t cb, void *u)
+{
+    char a[200], b[200];
+    if (s_disk_on) {
+        if (!disk_abs(f, a, sizeof(a)) || !disk_abs(t, b, sizeof(b))) return ESP_ERR_INVALID_ARG;
+        return disk_done((void *)cb, u, rename(a, b) == 0 ? ESP_OK : ESP_FAIL);
+    }
+    if (cb) cb(ESP_ERR_INVALID_STATE, u);
+    return ESP_OK;
+}
+esp_err_t flex_fs_mkdir_async(const char *p, flex_fs_done_cb_t cb, void *u)
+{
+    if (s_disk_on) {
+        char a[200];
+        if (!disk_abs(p, a, sizeof(a))) return ESP_ERR_INVALID_ARG;
+        sim_disk_mkdir(p);
+        return disk_done((void *)cb, u, sim_disk_is_dir(p) ? ESP_OK : ESP_FAIL);
+    }
+    if (cb) cb(ESP_ERR_INVALID_STATE, u);
+    return ESP_OK;
+}
+bool flex_fs_exists(const char *p) { return s_disk_on && sim_disk_exists(p); }
+
+// ---- kit de archivos: las operaciones reales sobre el disco temporal (con el disco apagado: sin sistema) ----
+#define FSX_ASYNC(CALL)                                                                                  \
+    do {                                                                                                  \
+        if (!s_disk_on) {                                                                                 \
+            if (cb) cb(ESP_ERR_INVALID_STATE, u);                                                         \
+            return ESP_OK;                                                                                \
+        }                                                                                                 \
+        return disk_done((void *)cb, u, fsx_err(CALL));                                                   \
+    } while (0)
+esp_err_t flex_fs_delete_async(const char *p, flex_fs_done_cb_t cb, void *u) { if (!p) return ESP_ERR_INVALID_ARG; FSX_ASYNC(flex_fsx_delete(s_disk, p)); }
+esp_err_t flex_fs_rename_name_async(const char *p, const char *n, flex_fs_done_cb_t cb, void *u)
+{
+    if (!p || !n || strlen(n) >= FLEX_FS_NAME_MAX) return ESP_ERR_INVALID_ARG;
+    FSX_ASYNC(flex_fsx_rename(s_disk, p, n));
+}
+esp_err_t flex_fs_trash_async(const char *p, flex_fs_done_cb_t cb, void *u) { if (!p) return ESP_ERR_INVALID_ARG; FSX_ASYNC(flex_fsx_trash(s_disk, p)); }
+esp_err_t flex_fs_restore_async(const char *n, flex_fs_done_cb_t cb, void *u) { if (!n) return ESP_ERR_INVALID_ARG; FSX_ASYNC(flex_fsx_restore(s_disk, n)); }
+esp_err_t flex_fs_empty_trash_async(flex_fs_done_cb_t cb, void *u) { FSX_ASYNC(flex_fsx_empty_trash(s_disk)); }
+esp_err_t flex_fs_new_file_async(const char *dir, const char *name, const char *ext, flex_fs_name_cb_t cb, void *u)
+{
+    if (!dir || !name || !cb) return ESP_ERR_INVALID_ARG;
+    if (!s_disk_on) {
+        cb(ESP_ERR_INVALID_STATE, "", u);
+        return ESP_OK;
+    }
+    char out[160];
+    flex_fsx_res_t r = flex_fsx_new_file(s_disk, dir, name, ext ? ext : "", out, sizeof(out));
+    return dpost(&(dpost_t){.kind = 4, .cb = (void *)cb, .user = u, .err = fsx_err(r), .data = r == FLEX_FSX_OK ? (uint8_t *)strdup(out) : NULL});
+}
+esp_err_t flex_fs_dirstat_async(const char *dir, flex_fs_stat_cb_t cb, void *u)
+{
+    if (!dir || !cb) return ESP_ERR_INVALID_ARG;
+    if (!s_disk_on) {
+        cb(ESP_ERR_INVALID_STATE, 0, 0, u);
+        return ESP_OK;
+    }
+    uint32_t n = 0, b = 0;
+    flex_fsx_res_t r = flex_fsx_dirstat(s_disk, dir, &n, &b);
+    return dpost(&(dpost_t){.kind = 5, .cb = (void *)cb, .user = u, .err = fsx_err(r), .a = n, .b = b});
+}
 uint32_t flex_storage_repair_token(void) { return 0x1234; }
 esp_err_t flex_storage_nvs_erase_confirmed(uint32_t t) { (void)t; return ESP_ERR_INVALID_STATE; }
 esp_err_t flex_storage_fs_format_confirmed(uint32_t t) { (void)t; return ESP_ERR_INVALID_STATE; }
@@ -523,6 +788,28 @@ void sim_fs_set(const char *dir, const char *const *names, int n)
 }
 esp_err_t flex_fs_list_async(const char *path, size_t max, flex_fs_list_cb_t cb, void *user)
 {
+    if (s_disk_on) {
+        char a[200], b[400];
+        if (!disk_abs(path, a, sizeof(a))) return ESP_ERR_INVALID_ARG;
+        flex_fs_ent_t *ents = max ? calloc(max, sizeof(*ents)) : NULL;
+        size_t n = 0;
+        DIR *d = opendir(a);
+        esp_err_t err = d ? ESP_OK : ESP_ERR_NOT_FOUND;
+        while (d && ents && n < max) {
+            struct dirent *de = readdir(d);
+            if (!de) break;
+            if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..") || strlen(de->d_name) >= FLEX_FS_NAME_MAX) continue;
+            struct stat st;
+            snprintf(b, sizeof(b), "%s/%s", a, de->d_name);
+            if (stat(b, &st) != 0) continue;
+            strcpy(ents[n].name, de->d_name);
+            ents[n].dir = S_ISDIR(st.st_mode);
+            ents[n].size = ents[n].dir ? 0 : (uint32_t)st.st_size;
+            n++;
+        }
+        if (d) closedir(d);
+        return dpost(&(dpost_t){.kind = 3, .cb = (void *)cb, .user = user, .err = err, .data = (uint8_t *)ents, .len = n});
+    }
     for (int i = 0; i < 4; i++) {
         if (!strcmp(s_fsd[i].dir, path)) {
             cb(ESP_OK, s_fsd[i].e, (size_t)s_fsd[i].n < max ? (size_t)s_fsd[i].n : max, user);

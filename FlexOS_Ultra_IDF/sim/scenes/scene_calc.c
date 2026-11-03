@@ -130,8 +130,8 @@ bool scene_calc_run(void)
     sim_run(300);
     flex_app_terminate_ex(IC_CALC, true);
     // "arranque": se vuelve a leer el archivo y la primera apertura recupera "12 x 3"
-    flex_session_test_preload(IC_CALC, file, n);
     flex_session_forget_loaded(IC_CALC);
+    flex_session_test_preload(IC_CALC, file, n);
     flex_app_open(IC_CALC, NULL);
     sim_run(500);
     CHK(strcmp(line(), "12 x 3") == 0);

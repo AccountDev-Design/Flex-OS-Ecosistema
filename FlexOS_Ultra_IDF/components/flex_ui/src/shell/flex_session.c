@@ -118,7 +118,7 @@ static void tick_cb(lv_timer_t *t)
 static void read_done(esp_err_t err, uint8_t *data, size_t len, void *user)
 {
     int id = (int)(intptr_t)user, di = desc_of(id);
-    if (err == ESP_OK && data && di >= 0 && !A[id].data) {
+    if (err == ESP_OK && data && di >= 0 && !A[id].data && !A[id].loaded) {   // si la app ya abrio sin ella, no se retiene
         uint8_t *out = malloc(FLEX_SESS_IO_MAX);
         size_t n = out ? flex_sess_unpack(data, len, k_desc[di].ver, (uint16_t)id, out, FLEX_SESS_IO_MAX - FLEX_SESS_HDR_SIZE) : 0;
         if (n) {

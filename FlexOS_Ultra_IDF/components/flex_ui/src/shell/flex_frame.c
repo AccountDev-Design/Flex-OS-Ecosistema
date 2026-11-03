@@ -10,7 +10,7 @@
 #include "lvgl_private.h"   // lv_text_get_width (LVGL fijada a 9.6)
 
 // ---- etiquetas con la y de la version Arduino (tope de mayusculas) ----------
-static int32_t cap_offset(const lv_font_t *f)
+int32_t flex_font_cap_offset(const lv_font_t *f)
 {
     lv_font_glyph_dsc_t g;
     if (!f || !lv_font_get_glyph_dsc(f, &g, 'H', 0)) {
@@ -20,10 +20,19 @@ static int32_t cap_offset(const lv_font_t *f)
     return (f->line_height - f->base_line) - (g.ofs_y + g.box_h);
 }
 
+int32_t flex_font_cap_h(const lv_font_t *f)
+{
+    lv_font_glyph_dsc_t g;
+    if (!lv_font_get_glyph_dsc(f, &g, 'H', 0)) {
+        return f->line_height * 7 / 10;
+    }
+    return g.box_h;
+}
+
 void flex_label_cap_y(lv_obj_t *label, int32_t y)
 {
     const lv_font_t *f = lv_obj_get_style_text_font(label, LV_PART_MAIN);
-    lv_obj_set_y(label, y - cap_offset(f));
+    lv_obj_set_y(label, y - flex_font_cap_offset(f));
 }
 
 void flex_label_one_line(lv_obj_t *label, int32_t w)

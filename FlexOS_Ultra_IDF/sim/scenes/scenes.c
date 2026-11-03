@@ -25,6 +25,9 @@ bool scene_session_run(void);
 bool scene_memory_run(void);
 bool scene_boot_run(void);
 bool scene_calc_run(void);
+bool scene_kit_run(void);
+bool scene_filekit_run(void);
+bool scene_calendar_run(void);
 
 const sim_scene_t sim_scenes[] = {
     {"galeria", scene_gallery_run},
@@ -49,6 +52,9 @@ const sim_scene_t sim_scenes[] = {
     {"memoria", scene_memory_run},
     {"arranque", scene_boot_run},
     {"calculadora", scene_calc_run},
+    {"kit", scene_kit_run},
+    {"kit-archivos", scene_filekit_run},
+    {"calendario", scene_calendar_run},
     {"apagado", scene_poweroff_run},
     {NULL, NULL},
 };

@@ -54,6 +54,10 @@ add_executable(flexos_ui_sim
     stubs/flex_passcode_async_stub.c
     ${FLEX_ROOT}/components/flex_portable/src/FlexOS_Mem.cpp
     ${FLEX_ROOT}/components/flex_storage/src/flex_kv.c
+    ${FLEX_ROOT}/components/flex_storage/src/flex_fs_names.c
+    ${FLEX_ROOT}/components/flex_storage/src/flex_fs_ops.c
+    ${FLEX_ROOT}/components/flex_storage/src/flex_fs_path.c
+    ${FLEX_ROOT}/components/flex_storage/src/flex_fs_wipe.c
     ${FLEX_ROOT}/components/flex_security/src/flex_passcode.c
     ${FLEX_ROOT}/components/flex_touch/src/flex_touch_arb.c
     ${FLEX_ROOT}/components/flex_touch/src/flex_touch_feed.c
@@ -75,6 +79,7 @@ target_include_directories(flexos_ui_sim PRIVATE
     ${FLEX_ROOT}/components/flex_ui/src/i18n
     ${FLEX_ROOT}/components/flex_core/include
     ${FLEX_ROOT}/components/flex_storage/include
+    ${FLEX_ROOT}/components/flex_storage/src
     ${FLEX_ROOT}/components/flex_system/include
     ${FLEX_ROOT}/components/flex_security/include
     ${FLEX_ROOT}/components/flex_touch/include

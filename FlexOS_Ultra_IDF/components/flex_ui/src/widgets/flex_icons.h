@@ -55,6 +55,13 @@ typedef enum {
     FLEX_GLYPH_TRASH,         // papelera
     FLEX_GLYPH_RING,          // anillo grueso (en Inicio)
     FLEX_GLYPH_CHEVRON_DOWN,  // cerrar el teclado de la caja
+    // Menu contextual del kit de archivos (FileKit.h fkMenuGlyph). Color principal = color de texto del objeto; el
+    // detalle (barras de la papelera roja, flecha de la nube) = color de fondo del objeto, que se deja transparente.
+    FLEX_GLYPH_FK_SELECT,     // mano que pulsa
+    FLEX_GLYPH_FK_DELETE,     // papelera rellena (borrado definitivo)
+    FLEX_GLYPH_FK_RENAME,     // campo de texto con cursor
+    FLEX_GLYPH_FK_TRASH,      // papelera de contorno (mover a la Papelera)
+    FLEX_GLYPH_FK_CLOUD,      // nube con flecha hacia arriba
 } flex_glyph_t;
 
 lv_obj_t *flex_glyph_create(lv_obj_t *parent, flex_glyph_t g, int32_t w, int32_t h);

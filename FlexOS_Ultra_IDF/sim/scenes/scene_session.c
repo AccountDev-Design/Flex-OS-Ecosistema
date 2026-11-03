@@ -183,9 +183,9 @@ bool scene_session_run(void)
     CHK(sim_fs_writes() == w1 + 1 && !flex_app_is_open(IC_AJUSTES));
     // otra "placa": se relee el archivo del disco (arranque) y se aplica al abrir por primera vez
     n = sim_fs_get(path, file, sizeof(file));
+    flex_session_forget_loaded(IC_AJUSTES);   // "primer arranque" de esta app: ahora llega lo leido del disco
     flex_session_test_preload(IC_AJUSTES, file, n);
     int loads = g_loads, valid = g_loaded_valid;
-    flex_session_forget_loaded(IC_AJUSTES);   // "primer arranque" de esta app
     memset(&g_state, 0, sizeof(g_state));
     flex_app_open(IC_AJUSTES, NULL);
     sim_run(500);
@@ -193,6 +193,18 @@ bool scene_session_run(void)
     CHK(g_state.view == 2 && g_state.sel == 4 && g_state.scroll == 77 && g_state.list == 12);   // restaurada
     flex_sys_home();
     sim_run(300);
+
+    // 5b) lo leido del disco que llega CUANDO la app ya abrio sin ello no se retiene: la proxima "primera apertura"
+    //     no recibe un dato viejo
+    flex_app_terminate_ex(IC_AJUSTES, true);
+    flex_session_test_preload(IC_AJUSTES, file, n);     // llega tarde (la app sigue marcada como cargada)
+    flex_session_forget_loaded(IC_AJUSTES);
+    valid = g_loaded_valid;
+    flex_app_open(IC_AJUSTES, NULL);
+    sim_run(400);
+    CHK(g_loaded_valid == valid);                       // se abre en estado seguro (load con NULL)
+    flex_sys_home();
+    sim_run(200);
 
     // 6) una sesion danada o de otra version se ignora (no se repara): la app abre en estado seguro
     flex_app_terminate_ex(IC_AJUSTES, true);

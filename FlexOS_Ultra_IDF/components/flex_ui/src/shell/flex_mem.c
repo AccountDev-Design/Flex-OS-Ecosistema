@@ -57,9 +57,13 @@ void flex_mem_register_cache(const char *name, size_t (*shed)(void), bool (*guar
 static FlexMemSnap s_sim;
 void flex_mem_sim_set(const FlexMemSnap *s) { s_sim = *s; }
 static uint32_t free_psram(void) { return s_sim.psFree; }
+static uint32_t free_alloc(void) { return s_sim.psFree; }
 static void measure(FlexMemSnap *s, bool block) { (void)block; *s = s_sim; }
 #else
 static uint32_t free_psram(void) { return (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM); }
+// Lo que una app reserva al crearse cae en PSRAM (> 16 KB) o en SRAM interna (objetos LVGL pequenos,
+// CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL): la huella y lo que suelta cada app se miden sobre las dos
+static uint32_t free_alloc(void) { return free_psram() + (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL); }
 static void measure(FlexMemSnap *s, bool block)
 {
     uint32_t used_peak = s->psPeakUsed;
@@ -89,7 +93,7 @@ static void sample_now(void *ctx)
     s_block_ms = lv_tick_get();
 }
 static const FlexMemSnap *snap(void *ctx) { (void)ctx; return &s_snap; }
-static uint32_t free_cb(void *ctx) { (void)ctx; return free_psram(); }
+static uint32_t free_cb(void *ctx) { (void)ctx; return free_alloc(); }
 
 // ---- soltar --------------------------------------------------------------------------------
 static uint32_t shed_system(void *ctx)
@@ -199,9 +203,9 @@ bool flex_mem_admit_app(int id)
 }
 
 // ---- huella medida por app -------------------------------------------------------------------
-uint32_t flex_mem_free_psram(void)
+uint32_t flex_mem_free_psram(void)   // para la huella de las apps: PSRAM + SRAM interna
 {
-    return free_psram();
+    return free_alloc();
 }
 void flex_mem_app_commit(int id, uint32_t free_before)
 {

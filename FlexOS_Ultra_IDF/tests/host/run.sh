@@ -107,10 +107,24 @@ python3 ref/extract_arduino.py "$OUT/ref_boot.inc" \
 python3 ref/extract_arduino.py "$OUT/ref_calc.inc" \
     FlexOS_Ultra_AppsBasic.h:calcDisp,calcAcc,calcOp,calcFresh,calcErr,calcFinite,calcFmtTo,calcFmt,calcLine,calcCompute,calcKey,calcKeyFromLabel,CalcSessV1,CALC_SESS_VER,CALC_SESS_PATH,calcSaveSess,calcLoadSess
 
-SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c test_kiosk.c test_homecfg.c test_session.c test_mem_model.c test_boot.c test_calc.c
+python3 ref/extract_arduino.py "$OUT/ref_fsn.inc" \
+    FlexOS_FS.h:FLEXFS_PATH_MAX,FLEXFS_NAME_MAX,FLEXFS_DIR_TRASH \
+    FlexOS_FS.cpp:baseName,joinPath,parentDir,extOf,encodeTrashName,flexFsTrashOrigin,flexFsStem,flexFsFmtSize,flexFsRename,flexFsTrash,flexFsRestore,flexFsNewName
+
+python3 ref/extract_arduino.py "$OUT/ref_fk.inc" \
+    FlexOS_FS.h:FLEXFS_NAME_MAX \
+    FlexOS_Ultra_FileKit.h:FK_MENU_W,FK_MENU_RH,FK_MENU_PAD,fkMenuCloud,fkMenuRows,fkMenuOn,fkMenuX,fkMenuGeom,fkMenuHit,fkAskOn,fkAskGeom,fkAskTick,FK_TRASH_TOP,FK_TRASH_RH,fkTrashN,fkTrashMaxScroll,fkTextBox,fkNameBuf,fkNameAppend,fkNameBack
+
+python3 ref/extract_arduino.py "$OUT/ref_layout.inc" \
+    FlexOS_Ultra_Clock.h:daysInMonth \
+    FlexOS_Ultra_AppFramework.h:uiBox,uiW,uiH,uiTop,uiPad,uiGap,uiFontFit,uiFontH,uiLineH
+
+SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c test_kiosk.c test_homecfg.c test_session.c test_mem_model.c test_boot.c test_calc.c test_layout.c test_fsnames.c test_fsops.c test_fk.c
       $ROOT/components/flex_storage/src/flex_kv.c
       $ROOT/components/flex_storage/src/flex_fs_path.c
       $ROOT/components/flex_storage/src/flex_fs_wipe.c
+      $ROOT/components/flex_storage/src/flex_fs_names.c
+      $ROOT/components/flex_storage/src/flex_fs_ops.c
       $ROOT/components/flex_ui/src/theme/flex_wallpaper.c
       $ROOT/components/flex_ui/src/theme/flex_glass_math.c
       $ROOT/components/flex_ui/src/shell/flex_home_model.c
@@ -118,6 +132,9 @@ SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_
       $ROOT/components/flex_ui/src/shell/flex_mem_model.c
       $ROOT/components/flex_ui/src/shell/flex_boot_model.c
       $ROOT/components/flex_ui/src/apps/flex_calc_model.c
+      $ROOT/components/flex_ui/src/apps/flex_cal_model.c
+      $ROOT/components/flex_ui/src/widgets/flex_layout.c
+      $ROOT/components/flex_ui/src/widgets/flex_fk_model.c
       $ROOT/components/flex_ui/src/shell/flex_drawer_model.c
       $ROOT/components/flex_ui/src/shell/flex_recents_model.c
       $ROOT/components/flex_ui/src/shell/flex_qs_model.c
@@ -138,7 +155,7 @@ CFLAGS=(-O1 -g -Wall -Wextra -Werror -pthread)
 build() {   # $1 = sufijo, resto = flags de sanitizador
     local sfx=$1; shift
     local refs=()
-    for r in wall glass home home_load touch drawer kb recents qs ntf homecfg session mem boot calc; do
+    for r in wall glass home home_load touch drawer kb recents qs ntf homecfg session mem boot calc layout fsnames fk; do
         c++ -std=gnu++17 -O1 -g -w "$@" -Iref -I"$OUT" -I$ROOT/components/flex_portable/include -c ref/ref_${r}_main.cpp -o "$OUT/ref_${r}_$sfx.o"
         refs+=("$OUT/ref_${r}_$sfx.o")
     done

@@ -8,19 +8,29 @@ Arduino, tamaños) y `ESP_IDF_HARDWARE_REQUIREMENTS.md` (qué probar en la placa
 > host + escena del simulador que falla al revertir la corrección (mutación).
 
 Rama: `flexos-esp-idf` (la rama Arduino `claude/flexos-ota-system-blq9g9-2csacx` no se toca).
-Último bloque cerrado: **App Calculadora** (A12) y la **revisión 6**; antes, **Recientes con memoria y sesiones** (S4e), **Arranque** (S2), **Memoria y Optimizar**, **Sesiones de app** y **Personalizar inicio**. Entorno de
+Último bloque cerrado: **Calendario** (A19), el **kit de componentes** y el **kit de archivos con su capa de operaciones** (S5, a falta de integrarlo en Notas); antes, **App Calculadora** (A12) y la **revisión 6**; antes, **Recientes con memoria y sesiones** (S4e), **Arranque** (S2), **Memoria y Optimizar**, **Sesiones de app** y **Personalizar inicio**. Entorno de
 compilación en un contenedor nuevo: `bash tools/setup_idf_cloud.sh` (ver "Entorno" abajo).
 
 ### Punto de reanudación (siguiente tarea exacta)
 
-1. **S5 — extraer la infraestructura compartida de apps** a partir de la Calculadora (ya existe: `app_calc.c` define
-   la caja del lienzo, el display como tarjeta, las teclas con material y el ciclo `save_session`/`load_session`) y
-   de la siguiente app: cabecera con zonas de 56×56, listas con scroll, diálogos, selector de archivos, barra de
-   medios. Mejor extraerlo de dos apps reales que diseñarlo en vacío (`docs/spec/02`, `03_apps_productividad.md`).
-2. Siguientes apps (orden de dependencias): **Calendario** (A19, `AppsBasic.h` + `03` §4), **Notas** (`03`, trae
-   teclado y archivos), Reloj/Cronómetro, Ajustes (`03b`, la más grande y la que abre Optimizar), Almacenamiento.
+1. **Notas (A06)**, que integra S5 (el kit de archivos): ya están hechos y probados `flex_fs_names/ops` (papelera, renombrar,
+   restaurar, nombre nuevo, estadística de carpeta, todo en la tarea de almacenamiento), `flex_fk_model`, `flex_filekit`
+   (menú, nombre con el teclado del sistema, confirmación, papelera, sin almacenamiento, texto en caja), el disco real del
+   simulador (`sim_disk_*`, escena `kit-archivos`). **Falta**: (a) `flex_ned` (editor: lógica pura ya escrita en el
+   bloc de trabajo, sin integrar; ver abajo) + prueba contra Arduino (`ref_ned_main.cpp` escrito) y vista LVGL; (b) lista
+   (tarjetas en 2 columnas, FAB, selección, menú, renombrar, papelera); (c) extras del teclado: barra de 5 botones y chips
+   (`FLEX_KB_F_EXTRAS`, `flex_kb_set_context`, `on_tool`), portapapeles de 12 ranuras (`clipPush`, fijadas en NVS
+   `clip0..clip11`) y su panel, menú "más"; (d) sesión `notas.bin` v3 (116 B) y ciclo de vida; (e) escena con mutantes;
+   (f) al cerrar: acreditar S5 y A06.
+   Decisiones ya tomadas para Notas (anotarlas en el informe al implementarlas): buffer de 16 KB en PSRAM y una nota que lo
+   supere NO se abre (Arduino la truncaba al abrir y la guardaba truncada: pérdida de datos); insertar sin sitio no borra la
+   selección; el autoguardado mira una revisión del texto, no su longitud; la lista solo muestra ficheros, sin carpetas y
+   con hasta 64 notas (aviso si hay más); la tarjeta se ordena por nombre sin mayúsculas antes de recortar.
+2. Después (orden de dependencias): **Ajustes** (`03b`, abre Optimizar y el teclado), Reloj/Cronómetro, Almacenamiento/Archivos
+   (reutiliza el kit de archivos y trae los puntos de entrada de Optimizar), Paint (usa el kit de archivos), Clima, ...
    Cada app implementa `save_session`/`load_session`/`shed` y su escena con mutantes.
-3. Deuda de la revisión 6 (ver abajo): ítems 3, 8 y 11 de las dos revisiones, de baja prioridad.
+3. Deuda de baja prioridad: el historial de Device Care no tiene descriptor de sesión (se tratará con esa app) y las
+   miniaturas de páginas fuera de pantalla con vidrio por icono salen con el fondo desplazado (cosmético).
 
 ## Cómo validar antes de cada commit
 
@@ -57,6 +67,10 @@ source ~/esp/env.sh && tools/build.sh --rev v3   # firmware (no graba nada)
 | Arranque (01a §2.3-2.5): banda forense solo tras un reinicio anormal (cualquier motivo salvo POWERON, SW o DEEPSLEEP; 2200 ms), splash negro con "FlexOS Ultra" / "ESP32-P4" y la curva de opacidad de Arduino (600 ms sube, 1400 fijo, 600 baja) con tres puntos que cambian cada 320 ms, toques tragados mientras dura, destino al terminar (Modo seguro tras la banda sin splash, primera configuración, kiosco o bloqueo); nada bloquea la tarea de UI (`lv_timer`) | `flex_boot_model.c` (portable), `flex_boot_ui.c`, `flex_shell.c` (destino) | host (motivos 0..20 y curva 0..3200 ms frente a `resetReasonStr` y `splashTick`) + escena `arranque` (4 casos, 3 mutantes) + firmware `esp32p4` |
 | Recientes con la memoria y las sesiones (01a §12.3, §12.5): estado de cada tarjeta "Activa" / "Pausada" / "Estado guardado" (`flex_mem_app_shed`), "Consumo estimado" con la PSRAM medida o "No disponible" (nunca un número inventado), punto de cambios sin guardar (`dirty()` o sesión de disco desfasada), cerrar una tarjeta guarda la sesión en el acto y, si no se puede, la app se queda abierta con "Sin espacio para guardar" (también en "Cerrar todas") | `flex_recents.c` | escenas `memoria` y `sesiones` (3 mutantes) + firmware `esp32p4` |
 | App Calculadora (03 §3): lógica pura probada tecla a tecla frente a `AppsBasic.h` (30 000 secuencias, 1 047 errores, 246 714 operaciones a medias; sesión `calc.bin` byte a byte), línea de operación ("25 + 10"), "Error", reparto adaptativo del lienzo con la rejilla 5×4 prioritaria, teclas naranja de marca, la primera apertura tras el arranque recupera la sesión y las demás empiezan en "0"; primera app real sobre el marco (guardado diferido, restauración, Recientes) | `flex_calc_model.c`, `app_calc.c` | host + escena `calculadora` (24 pasos, 4 mutantes) + firmware `esp32p4` |
+| Kit de componentes y de maquetación (02 §7, §8.4): botones, interruptor, fila-tarjeta, línea informativa, barra, deslizador, pestañas, diálogo, aviso local (uno por padre, sin estado global) y `uiBox/uiPad/uiGap/uiFontH/uiLineH/uiFontFit` | `widgets/flex_kit.*`, `flex_layout.*` | host (`test_layout` frente a Arduino) + escena `kit` (mutantes) |
+| App Calendario (03 §4): rejilla del mes, círculo de hoy, panel lateral "Hoy", estadísticas; modelo probado frente a `AppsBasic.h` | `apps/app_calendar.c`, `flex_cal_model.*` | host + escena `calendario` |
+| Capa de operaciones de archivo (flexFs*): borrar recursivo, renombrar conservando la extensión, papelera con la ruta en el nombre, restaurar sin pisar, vaciar, fichero nuevo con el primer nombre libre, estadística de carpeta; todo en la tarea de almacenamiento | `flex_storage/src/flex_fs_names.*`, `flex_fs_ops.*`, `flex_storage.c` | host (frente a `FlexOS_FS.cpp` + disco real; 10 mutantes) |
+| Kit de archivos (03 §5): menú contextual, diálogo de nombre con el teclado del sistema, confirmación, papelera (lista con ventana de filas), "sin almacenamiento", texto en caja. **S5 se acredita al integrarlo en Notas** | `widgets/flex_filekit.*`, `flex_fk_model.*`, glifos del menú en `flex_icons.c`; disco real en el simulador (`sim_disk_*`) | host (`test_fk` frente a `FileKit.h`) + escena `kit-archivos` (11 mutantes) |
 
 ## Progreso global (método congelado v1)
 
@@ -91,7 +105,8 @@ Cálculo reproducible: `python3 tools/progress.py` (lee la tabla de abajo; no ha
 | S4d | Marco de apps: desalojo por presupuesto, apps con segundo plano, huella medida por app y admision al abrir (01c 17.3, 17.6, 17.9) | 15 | 1 | 0 |
 | S4e | Marco de apps: Recientes con huella, Pausada/Estado guardado y aviso de cambios sin guardar; regreso | 8 | 1 | 0 |
 | S4b | Memoria y funcion Optimizar (01c 17), umbrales y avisos | 8 | 1 | 0 |
-| S5 | Infraestructura compartida de apps en LVGL (cabecera, listas, dialogos, selector de archivos, barra de medios) | 12 | 0 | 0 |
+| S5 | Infraestructura compartida de apps en LVGL: kit de componentes, kit de archivos (menu, nombre, confirmacion, papelera) y su capa de operaciones. Se acredita al integrarse en la primera app que lo usa (Notas) | 9 | 0 | 0 |
+| S5b | Infraestructura compartida: barra de medios (alcance separado de S5 al cerrarse el kit; el total de 2000 no cambia) | 3 | 0 | 0 |
 | A01 | App Reloj (reloj, alarmas, cronometro, temporizador) | 17 | 0 | 0 |
 | A02 | App Galeria + visor + editor de fotos + editor de video | 145 | 0 | 0 |
 | A03 | App Multimedia | 16 | 0 | 0 |
@@ -104,7 +119,7 @@ Cálculo reproducible: `python3 tools/progress.py` (lee la tabla de abajo; no ha
 | A10 | App Juegos (Jumper y demas) | 40 | 0 | 0 |
 | A11 | App Ajustes (+ ajustes de teclado y conectividad) | 25 | 0 | 0 |
 | A12 | App Calculadora (cuatro operaciones, linea de operacion, sesion calc.bin) | 3 | 1 | 0 |
-| A19 | App Calendario | 3 | 0 | 0 |
+| A19 | App Calendario | 3 | 1 | 0 |
 | A13 | App Camara (necesita el modelo del sensor) | 3 | 0 | 0 |
 | A14 | App Clima + servicio del tiempo | 57 | 0 | 0 |
 | A15 | App Flex Store + paquetes + maquina virtual de apps + permisos | 101 | 0 | 0 |
@@ -150,11 +165,13 @@ favor en las apps).
 5. Fases 6–8 (Wi-Fi C6 esp-hosted, red, servidor web, Account, Cloud), 9–13 (multimedia,
    cámara, audio, Device Care, Compass), 14–17 (OTA, particiones, seguridad, optimización).
 
-## Resultados de la última validación (Personalizar inicio, sesiones, memoria, arranque y Recientes)
+## Resultados de la última validación (kit de componentes, Calendario, kit de archivos; antes: Personalizar inicio, sesiones, memoria, arranque y Recientes)
 
 | Comprobación | Resultado |
 |---|---|
-| `tests/host` (ASan+UBSan y TSan), incl. `test_homecfg`, `test_session`, `test_mem_model`, `test_boot` y `test_calc` | OK: 983 850 comprobaciones, 0 fallos |
+| `tests/host` (ASan+UBSan y TSan), incl. `test_homecfg`, `test_session`, `test_mem_model`, `test_boot`, `test_calc`, `test_layout`, `test_fsnames` (20 013 operaciones de papelera/restaurar/renombrar/nombre nuevo frente a `FlexOS_FS.cpp`), `test_fsops` (operaciones sobre un disco real, con salida de la raíz intentada) y `test_fk` (menú, confirmación, papelera, texto en caja y nombre frente a `FileKit.h`) | OK: 984 655 comprobaciones, 0 fallos |
+| Mutantes de las operaciones de archivo (colisión que pisa, `@` sin escapar, recorte del nombre, sufijos agotados, restaurar sin validar la ruta, renombrar que pisa, tirar la papelera a sí misma, renombrar sin conservar la extensión, fichero nuevo que pisa, borrar sin recursión) | 10/10 detectados |
+| Mutantes de la interfaz del kit de archivos (barra sin rehacer, menú que no se cierra, nombre inicial con `/`, volver de "sin almacenamiento", todas las filas creadas, ocupado sin liberar, borrar y vaciar sin confirmar, cancelar que confirma, `close_all` que no cierra) | 11/11 detectados (2 sobrevivían por una escena floja: se reforzó con `flex_fk_layers`) |
 | Mutantes de los modelos (pellizco, principal al borrar, redondeo del reordenar; tope de 30 s, cierre forzado, CRC al leer, otra app pendiente; LRU con empates, cerrar sin guardar, admitir dos veces, alivio sin empeorar) | 11/11 detectados |
 | `tools/run_tests.sh` completo (host, LittleFS, 22 escenas, reglas) | TODO OK |
 | Escena `calculadora` | 24 pasos OK (teclas con el dedo, encadenado, Error, sesión y restauración); 4 mutantes detectados |
@@ -162,7 +179,8 @@ favor en las apps).
 | Escena `memoria` | OK; 7 mutantes de la interfaz detectados (admisión, presupuesto al suspender, soltar en Optimizar, modo eficiente, cierre con un toque, guardián modal de Inicio) |
 | Escena `sesiones` | 13 comprobaciones OK; 4 mutantes de la interfaz detectados (el último, tras añadir el paso de re-armado) |
 | Escena `personalizar` | 14 pasos OK; mutantes de la interfaz (nueva página, cierre al bloquear, confirmar borrado, casita) detectados |
-| Firmware `tools/build.sh --rev v3` | OK: 1 443 840 B, 55,1 % de la ranura A (2,5 MB), 34,4 % de la B (4 MB) |
+| Escenas `kit`, `calendario` y `kit-archivos` | OK (la última con disco real: menú, confirmación, nombre con el teclado, papelera con restaurar/borrar/vaciar, lista de 60 con ventana de filas, "sin almacenamiento") |
+| Firmware `tools/build.sh --rev v3` | OK sin avisos: 1 454 976 B, 55,6 % de la ranura A (2,5 MB), 34,7 % de la B (4 MB) |
 | Capturas revisadas a ojo | Páginas, Fondo, Widgets, Ajustes y modal fieles a 01a §10 |
 | **Placa real** | NO probado (tacto del carrusel, fluidez de la animación y del pellizco con el GT911) |
 
@@ -187,11 +205,11 @@ reconstruía el escritorio; un fallo de disco tras cerrar la app reintentaba su 
 miniaturas de Recientes; la app del kiosco se podía negar por memoria; las etiquetas "Página N" no seguían a su
 tarjeta; la miniatura del widget no recogía el toque; "Usar"/"Añadir" 16 px a la izquierda; "Restablecer" iba a Páginas;
 la cadena de listados de "Mis imágenes" sin comprobar; y la huella no se re-medía al reanudar.
-**Pendiente (baja):** `load_once` marca "cargada" aunque la lectura asíncrona no haya llegado (solo en arranques
-con la UI antes que el disco); Device Care guarda su historial por su cuenta (sin descriptor); la huella solo mide
-PSRAM, así que las apps ligeras (objetos LVGL en SRAM interna por `ALWAYSINTERNAL=16384`) enseñan "0 B" en vez de
-"No disponible"; las miniaturas de páginas fuera de pantalla con vidrio por icono salen con el fondo desplazado
-(cosmético).
+**Baja prioridad, verificada y cerrada (sesión del kit):** `load_once` ya no marca "cargada" si la lectura
+asíncrona no llegó (`flex_session.c`, con su regresión); la huella mide PSRAM **y** SRAM interna (`free_alloc()` en
+`flex_mem.c`), así que una app ligera ya no enseña "0 B". **Pendientes, documentados:** Device Care guarda su historial
+por su cuenta (sin descriptor; se resuelve con esa app); las miniaturas de páginas fuera de pantalla con vidrio por icono
+salen con el fondo desplazado (cosmético).
 
 ## Bloqueos y datos que faltan
 

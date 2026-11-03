@@ -17,6 +17,7 @@
 #include "esp_timer.h"
 #include "flex_bus.h"
 #include "flex_core.h"
+#include "flex_fs_ops.h"
 #include "flex_fs_path.h"
 #include "flex_inbox.h"
 #include "flex_kv.h"
@@ -42,11 +43,15 @@ static const char *const k_namespaces[] = {FLEX_NVS_NS, "flexcare", "flexphone",
 
 typedef enum {
     JOB_WRITE, JOB_REMOVE, JOB_RENAME, JOB_MKDIR, JOB_WIPE_DIR, JOB_READ, JOB_LIST, JOB_FLUSH, JOB_NVS_ERASE, JOB_FS_FORMAT,
-    JOB_EXCL,
+    JOB_EXCL, JOB_FSOP,
 } job_op_t;
+
+// Operaciones compuestas del kit de archivos (flex_fs_ops.c), dentro de JOB_FSOP.
+typedef enum { FSOP_DELETE, FSOP_RENAME_NAME, FSOP_TRASH, FSOP_RESTORE, FSOP_EMPTY_TRASH, FSOP_NEW_FILE, FSOP_DIRSTAT } fsop_t;
 
 typedef struct {
     job_op_t op;
+    fsop_t fsop;              // JOB_FSOP: cual
     char path[FLEX_FS_PATH_MAX];
     char path2[FLEX_FS_PATH_MAX];
     uint8_t *data;
@@ -62,7 +67,7 @@ typedef struct {
     esp_err_t err;
     uint8_t *data;
     size_t len;
-    uint8_t kind;   // 0 hecho, 1 lectura, 2 cuenta (vaciar carpeta), 3 listado
+    uint8_t kind;   // 0 hecho, 1 lectura, 2 cuenta (vaciar carpeta), 3 listado, 4 nombre (ruta creada), 5 estadistica de carpeta
 } reply_t;
 
 static flex_kv_t s_kv;
@@ -453,6 +458,16 @@ static void reply_in_ui(void *arg)
     } else if (r->kind == 3) {
         ((flex_fs_list_cb_t)r->cb)(r->err, (const flex_fs_ent_t *)r->data, r->len, r->user);
         free(r->data);
+    } else if (r->kind == 4) {
+        ((flex_fs_name_cb_t)r->cb)(r->err, r->data ? (const char *)r->data : "", r->user);
+        free(r->data);
+    } else if (r->kind == 5) {
+        uint32_t st[2] = {0, 0};
+        if (r->data && r->len >= sizeof(st)) {
+            memcpy(st, r->data, sizeof(st));
+        }
+        ((flex_fs_stat_cb_t)r->cb)(r->err, st[0], st[1], r->user);
+        free(r->data);
     } else {
         ((flex_fs_done_cb_t)r->cb)(r->err, r->user);
     }
@@ -468,7 +483,9 @@ static void reply(job_t *job, esp_err_t err, uint8_t *data, size_t len)
     reply_t *r = malloc(sizeof(*r));
     if (r) {
         *r = (reply_t){job->cb, job->user, err, data, len,
-                       (uint8_t)(job->op == JOB_READ ? 1 : job->op == JOB_WIPE_DIR ? 2 : job->op == JOB_LIST ? 3 : 0)};
+                       (uint8_t)(job->op == JOB_READ ? 1 : job->op == JOB_WIPE_DIR ? 2 : job->op == JOB_LIST ? 3
+                                 : (job->op == JOB_FSOP && job->fsop == FSOP_NEW_FILE) ? 4
+                                 : (job->op == JOB_FSOP && job->fsop == FSOP_DIRSTAT) ? 5 : 0)};
         // Quien pidio el trabajo espera la respuesta (p. ej. una pantalla con
         // "Guardando..."): si el buzon esta lleno se reintenta un rato, esta
         // tarea no es la de UI y puede esperar.
@@ -484,6 +501,76 @@ static void reply(job_t *job, esp_err_t err, uint8_t *data, size_t len)
     free(data);
 }
 
+static esp_err_t fsx_to_err(flex_fsx_res_t r)
+{
+    switch (r) {
+    case FLEX_FSX_OK:       return ESP_OK;
+    case FLEX_FSX_ARG:      return ESP_ERR_INVALID_ARG;
+    case FLEX_FSX_NOTFOUND: return ESP_ERR_NOT_FOUND;
+    case FLEX_FSX_EXISTS:   return ESP_ERR_INVALID_STATE;   // el destino existe: no se pisa
+    default:                return ESP_FAIL;
+    }
+}
+
+// Operaciones del kit de archivos (borrar, renombrar, papelera, restaurar, vaciar, fichero nuevo)
+// en la tarea del escritor. Solo un fallo del disco cuenta como error de escritura: que el destino
+// exista o que el nombre no valga es una respuesta normal para quien pregunto.
+static void run_fsop(job_t *job)
+{
+    flex_fsx_res_t r = FLEX_FSX_ARG;
+    uint8_t *name_out = NULL;
+    switch (job->fsop) {
+    case FSOP_DELETE:
+        r = flex_fsx_delete(FLEX_FS_BASE, job->path);
+        break;
+    case FSOP_RENAME_NAME:
+        r = flex_fsx_rename(FLEX_FS_BASE, job->path, job->path2);
+        break;
+    case FSOP_TRASH:
+        r = flex_fsx_trash(FLEX_FS_BASE, job->path);
+        break;
+    case FSOP_RESTORE:
+        r = flex_fsx_restore(FLEX_FS_BASE, job->path);
+        break;
+    case FSOP_EMPTY_TRASH:
+        r = flex_fsx_empty_trash(FLEX_FS_BASE);
+        break;
+    case FSOP_DIRSTAT: {
+        uint32_t st[2] = {0, 0};
+        name_out = malloc(sizeof(st));
+        r = name_out ? flex_fsx_dirstat(FLEX_FS_BASE, job->path, &st[0], &st[1]) : FLEX_FSX_IO;
+        if (name_out && r == FLEX_FSX_OK) {
+            memcpy(name_out, st, sizeof(st));
+            reply(job, ESP_OK, name_out, sizeof(st));
+            return;
+        }
+        free(name_out);
+        name_out = NULL;
+        if (r != FLEX_FSX_IO) {   // sin carpeta / ruta no valida: respuesta normal, sin datos
+            reply(job, fsx_to_err(r), NULL, 0);
+            return;
+        }
+        break;
+    }
+    case FSOP_NEW_FILE:
+        name_out = malloc(FLEX_FS_PATH_MAX);
+        r = name_out ? flex_fsx_new_file(FLEX_FS_BASE, job->path, job->path2, job->data ? (const char *)job->data : "",
+                                         (char *)name_out, FLEX_FS_PATH_MAX)
+                     : FLEX_FSX_IO;
+        if (r != FLEX_FSX_OK) {
+            free(name_out);
+            name_out = NULL;
+        }
+        break;
+    }
+    fs_info_refresh(false);
+    if (r == FLEX_FSX_IO) {
+        status_update(st_write_error, NULL);
+        ESP_LOGW(TAG, "operacion %d sobre '%s' fallo (disco)", (int)job->fsop, job->path);
+    }
+    reply(job, fsx_to_err(r), name_out, name_out ? strlen((char *)name_out) + 1 : 0);
+}
+
 static void run_job(job_t *job)
 {
     esp_err_t err = ESP_OK;
@@ -492,7 +579,7 @@ static void run_job(job_t *job)
     portENTER_CRITICAL(&s_mux);
     fs_ok = s_st.fs_mounted;
     portEXIT_CRITICAL(&s_mux);
-    bool needs_fs = job->op <= JOB_LIST;
+    bool needs_fs = job->op <= JOB_LIST || job->op == JOB_FSOP;
     if (needs_fs && !fs_ok) {
         reply(job, ESP_ERR_INVALID_STATE, NULL, 0);
         return;
@@ -512,6 +599,9 @@ static void run_job(job_t *job)
                   ? (rename(a, b) == 0 ? ESP_OK : ESP_FAIL)
                   : ESP_ERR_INVALID_ARG;
         break;
+    case JOB_FSOP:
+        run_fsop(job);
+        return;
     case JOB_MKDIR:
         err = flex_fs_abs(job->path, a, sizeof(a))
                   ? ((mkdirs_for(a) == ESP_OK && (mkdir(a, 0775) == 0 || errno == EEXIST)) ? ESP_OK : ESP_FAIL)
@@ -714,6 +804,69 @@ esp_err_t flex_fs_rename_async(const char *from, const char *to, flex_fs_done_cb
     }
     strlcpy(job->path2, to, sizeof(job->path2));
     return enqueue(job);
+}
+
+static esp_err_t fsop_enqueue(fsop_t op, const char *path, const char *arg, const char *arg2, void *cb, void *user)
+{
+    job_t *job = new_job(JOB_FSOP, path, cb, user);
+    if (!job) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    job->fsop = op;
+    if (arg) {
+        strlcpy(job->path2, arg, sizeof(job->path2));
+    }
+    if (arg2) {
+        job->data = (uint8_t *)strdup(arg2);   // free(job->data) lo libera al terminar
+        if (!job->data) {
+            free(job);
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    return enqueue(job);
+}
+
+esp_err_t flex_fs_delete_async(const char *path, flex_fs_done_cb_t cb, void *user)
+{
+    return path ? fsop_enqueue(FSOP_DELETE, path, NULL, NULL, (void *)cb, user) : ESP_ERR_INVALID_ARG;
+}
+
+esp_err_t flex_fs_rename_name_async(const char *path, const char *new_name, flex_fs_done_cb_t cb, void *user)
+{
+    return (path && new_name && strlen(new_name) < FLEX_FS_NAME_MAX)
+               ? fsop_enqueue(FSOP_RENAME_NAME, path, new_name, NULL, (void *)cb, user)
+               : ESP_ERR_INVALID_ARG;
+}
+
+esp_err_t flex_fs_trash_async(const char *path, flex_fs_done_cb_t cb, void *user)
+{
+    return path ? fsop_enqueue(FSOP_TRASH, path, NULL, NULL, (void *)cb, user) : ESP_ERR_INVALID_ARG;
+}
+
+esp_err_t flex_fs_restore_async(const char *trash_name, flex_fs_done_cb_t cb, void *user)
+{
+    // el nombre de una entrada de la papelera ("@Notas@a.txt"): se pasa como ruta relativa
+    char rel[FLEX_FS_PATH_MAX];
+    if (!trash_name || snprintf(rel, sizeof(rel), "/%s", trash_name[0] == '/' ? trash_name + 1 : trash_name) >= (int)sizeof(rel)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return fsop_enqueue(FSOP_RESTORE, rel, NULL, NULL, (void *)cb, user);
+}
+
+esp_err_t flex_fs_empty_trash_async(flex_fs_done_cb_t cb, void *user)
+{
+    return fsop_enqueue(FSOP_EMPTY_TRASH, NULL, NULL, NULL, (void *)cb, user);
+}
+
+esp_err_t flex_fs_dirstat_async(const char *dir, flex_fs_stat_cb_t cb, void *user)
+{
+    return (dir && cb) ? fsop_enqueue(FSOP_DIRSTAT, dir, NULL, NULL, (void *)cb, user) : ESP_ERR_INVALID_ARG;
+}
+
+esp_err_t flex_fs_new_file_async(const char *dir, const char *name, const char *ext, flex_fs_name_cb_t cb, void *user)
+{
+    return (dir && name && cb) ? fsop_enqueue(FSOP_NEW_FILE, dir, name, ext ? ext : "", (void *)cb, user)
+                               : ESP_ERR_INVALID_ARG;
 }
 
 esp_err_t flex_fs_wipe_dir_async(const char *path, flex_fs_count_cb_t cb, void *user)

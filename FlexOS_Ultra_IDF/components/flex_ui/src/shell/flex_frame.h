@@ -34,6 +34,9 @@ bool flex_navbar_flash_visible(void);   // destello de pulsacion de un boton (pr
 // Coloca una etiqueta de forma que el TOPE DE LAS MAYUSCULAS quede en y (las
 // coordenadas de la version Arduino se refieren a eso, no a la caja de linea).
 void flex_label_cap_y(lv_obj_t *label, int32_t y);
+// Altura de las mayusculas de la fuente (alto del glifo 'H'): para centrar texto sobre un punto.
+int32_t flex_font_cap_h(const lv_font_t *f);
+int32_t flex_font_cap_offset(const lv_font_t *f);   // del tope de la caja de linea al tope de las mayusculas
 // Igual, centrada en x = cx.
 void flex_label_cap_center(lv_obj_t *label, int32_t cx, int32_t y);
 // Una sola linea de ancho w con "..." si no cabe (fgTextEllipsis). El alto se fija

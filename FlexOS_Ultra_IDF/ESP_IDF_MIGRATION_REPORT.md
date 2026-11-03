@@ -73,6 +73,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 3 (en curso: + arranque) | `v3` dev | 1 430 800 B | 54,6 % | 34,1 % |
 | 3 (en curso: + Recientes con memoria y sesiones) | `v3` dev | 1 431 568 B | 54,6 % | 34,1 % |
 | 3 (en curso: + Calculadora y correcciones de la revisión 6) | `v3` dev | 1 443 840 B | 55,1 % | 34,4 % |
+| 3 (en curso: + kit de componentes, Calendario y kit de archivos con su capa de operaciones) | `v3` dev | 1 454 976 B | 55,6 % | 34,7 % |
 
 La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la interfaz completa
 (Fase 15). No se ha grabado nada.
@@ -137,6 +138,21 @@ La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la
 | Arranque: reinicio anormal para la banda | Todo motivo salvo POWERON, SW y DEEPSLEEP (incluye EXT y desconocido) | Igual; el criterio del Modo seguro es otro (`flex_safe_abnormal`, además PWR_GLITCH y CPU_LOCKUP) | Dos preguntas distintas |
 | Calculadora: % y notación | `%g`: 6 cifras significativas y `1e+06` para números grandes | Igual (misma `snprintf`) | Fiel; documentado en 03 §3.6 |
 | Calculadora: teclas | Sin estado pulsado | Sin estado pulsado (toque = clic < 16 px y < 550 ms) | Igual |
+| Calendario: iniciales de los días | Fijas "D L M M J V S" | Las del idioma activo (`flex_i18n_wd_short`); en español salen las mismas | Idioma |
+| Calendario: números de dos cifras | Tamaño fijo del texto de las celdas | Se ajusta a la celda (`flex_ui_font_fit`) para que 28–31 no se salgan del círculo del día | Legibilidad |
+| Papelera: nombres largos | `encodeTrashName` recorta a 47 bytes en silencio: el fichero se restauraba con otro nombre o pisaba otro de la papelera | Si el nombre codificado no cabe (47 bytes, con el sufijo `(k)`), la operación falla y el fichero se queda donde estaba | Integridad de datos (`flex_fs_names.c`) |
+| Papelera: `@` y `%` en el nombre | `a@b.txt` se restauraba como carpeta `a` con el fichero `b.txt` (la `@` es el separador) | `@` y `%` del nombre original viajan escapados (`%40`, `%25`); lo que dejó Arduino (sin escapes) se lee igual | Integridad de datos |
+| Papelera: sufijos agotados | Con las 98 variantes ocupadas reutilizaba la última, que existe, y la sobrescribía | Falla y no toca nada | Integridad de datos |
+| Papelera: restaurar con 2 o más colisiones | `ext` apuntaba DENTRO del búfer `dst`, que el bucle sobrescribe: desde la 3.ª colisión el nombre salía `"x (3) (2).txt"` | `"<stem> (k)<ext>"` como dice el spec (reproducido contra Arduino en `test_fsnames.c`) | Defecto de Arduino |
+| Papelera: ruta de la entrada | Una entrada `@..@x` se restauraba fuera de la raíz | Se rechaza (ruta con `..`, hacia dentro de la propia papelera o carpeta pelada) | Seguridad |
+| Renombrar | Nombre + extensión recortados a 47 bytes sin avisar | Si no cabe (≥ 48 bytes) devuelve error; el diálogo de nombre ya limita a 46 | Integridad de datos |
+| Diálogo de nombre: tope | El spec decía 47 bytes; el código admite 46 (`L + sl < NAME_MAX - 1`) | 46 bytes, igual que el código; spec corregido | Fidelidad |
+| Diálogo de nombre: teclado | Panel hasta el borde inferior | Se apoya sobre la barra de navegación cuando está visible (`bottom_reserve = 64`): si no, la fila de funciones quedaba bajo ella | Barra de navegación del marco |
+| Papelera: borrar un elemento | La confirmación muestra el nombre codificado (`@Notas@a`) | Muestra el nombre original | Usabilidad |
+| Papelera: lista y cabecera | Redibuja todo y los elementos pueden pisar la cabecera al desplazar | Lista con ventana de filas (solo las de la vista) entre la cabecera y la barra; cabeceras fijas | Memoria: 256 elementos no son 700 objetos |
+| "Sin almacenamiento" | Aconseja el Partition Scheme de Arduino IDE | La tabla de particiones es fija: aconseja reinstalar el firmware o reparar el almacenamiento en Ajustes | Sin Arduino IDE |
+| Borrar | `deleteRec` ignora los fallos de los hijos y devuelve el de `rmdir` | Vacía por tandas (`flex_fs_wipe_tree`) y devuelve error si algo no se pudo borrar | Integridad de datos |
+| Operaciones de archivo | Síncronas, en el hilo de la UI | Todas en la tarea de almacenamiento (`flex_fs_*_async`), sin carreras entre comprobar y renombrar; la UI nunca toca la flash | Arquitectura |
 | Umbrales de toque | Toque = < 16 px y < 550 ms | Igual, aplicado al indev de LVGL (por defecto LVGL usa 10 px y 400 ms) | docs/spec/01b |
 | Restablecimiento: qué se borra de la NVS | Solo los espacios de nombres conocidos: quedaban el vínculo con el teléfono, Flex Storage, Device Care, robo, audio, clima, navegador (un aparato "restablecido" seguía emparejado) | TODOS los espacios de nombres salvo el marcador `flexreset` (incluidos los del sistema: credenciales Wi-Fi del controlador, calibración del PHY); el aviso lo dice ("Vínculo con el teléfono y Flex Storage") | docs/spec/01c §13.5 (riesgo de privacidad) |
 | Restablecimiento: marcador terminado | Se borra al entrar al OOBE | Igual: se borra al entrar a la primera configuración | docs/spec/01c §13.6 |

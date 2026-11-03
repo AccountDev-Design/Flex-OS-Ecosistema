@@ -464,7 +464,7 @@ de la papelera; se llama al entrar/suspender/cerrar cada app (la superficie de d
 * `fkNameTick` actúa **al soltar** (`T.released`): shift conmuta; capa cicla NUM → EMOJI → ES/EN → NUM; idioma
   conmuta ES/EN; espacio; borrar un **carácter UTF-8** completo; "Guardar" → devuelve 1 si el nombre no está vacío (si
   está vacío devuelve −1 = cancelado). *Tap* en `x < 60, y < 90` → cancelar (−1). Cualquier otra tecla añade su texto.
-  **Se rechaza cualquier texto que contenga `'/'`**. Longitud máx. `FLEXFS_NAME_MAX-1 = 47` bytes.
+  **Se rechaza cualquier texto que contenga `'/'`**. Longitud máx. **46 bytes** (`L + sl < FLEXFS_NAME_MAX - 1`; la primera versión de este spec decía 47).
 * `flexFsRename(path, nuevo)`: solo nombre; si el nuevo no trae extensión **conserva la del original**; no pisa un
   fichero existente (devuelve false y no avisa).
 
