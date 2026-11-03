@@ -705,6 +705,19 @@ existe (color por defecto `P_PAL[0]` si no). `paintBackScreen`: lienzo → galer
 * Escrituras al levantar el dedo → tarea de almacenamiento (asíncrono); el trazo en curso se mantiene en RAM hasta su
   confirmación.
 
+**Implementado** (`app_paint.c`, `flex_paint_model.c`, `flex_raster.c`; pruebas en `test_paint.c`, `test_raster.c` y la escena `paint`):
+* Rasterizador propio (`flex_raster.c`) en lugar de `lv_draw_line`: es `fillCircleAA` / `strokeSegAA` de Arduino con la misma
+  aritmética y se prueba **píxel a píxel** contra el original; evita crear una tarea de dibujo de LVGL por segmento (un dibujo de
+  32 000 puntos serían MB de tareas) y permite invalidar solo la franja tocada. El lienzo es un búfer RGB565 del tamaño del
+  documento escalado (≤ 464×574, 532 KB) mostrado por un `lv_image`; las miniaturas son búferes del interior de la tarjeta,
+  creados **una vez** por carga de la lista y liberados con `shed()` o al entrar en un dibujo.
+* Máquina de estados del lienzo (`flex_pcv_*`): captura del trazo, herramientas, deshacer y limpiar; se compara con
+  `paintCanvasTick` de Arduino fotograma a fotograma (dibujo, estado, contadores y bytes del fichero).
+* El dibujo vive en memoria (`flex_fxp_t`) mientras el lienzo está abierto y se escribe **entero y de forma atómica**
+  (`flex_fs_write_async`: temporal + renombrado) al levantar el dedo; nunca hay más de una escritura en vuelo (la siguiente espera
+  y lleva el dibujo ya actualizado); si falla se avisa y el siguiente trazo vuelve a intentarlo. Al volver a la galería se espera a
+  que la escritura termine para que la miniatura sea la última.
+
 ---
 
 ## 8. Archivos (explorador, estado `ST_FILES`)

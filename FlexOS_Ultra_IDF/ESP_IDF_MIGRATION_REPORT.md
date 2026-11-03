@@ -74,7 +74,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 3 (en curso: + Recientes con memoria y sesiones) | `v3` dev | 1 431 568 B | 54,6 % | 34,1 % |
 | 3 (en curso: + Calculadora y correcciones de la revisión 6) | `v3` dev | 1 443 840 B | 55,1 % | 34,4 % |
 | 3 (en curso: + kit de componentes, Calendario y kit de archivos con su capa de operaciones) | `v3` dev | 1 454 976 B | 55,6 % | 34,7 % |
-| 3 (en curso: + Notas con el editor, el teclado con barra y chips y el portapapeles) | `v3` dev | 1 472 384 B | 56,2 % | 35,1 % |
+| 3 (en curso: + Paint con la galería, el lienzo y el rasterizador de Arduino) | `v3` dev | 1 515 296 B | 57,8 % | 36,1 % |
 
 La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la interfaz completa
 (Fase 15). No se ha grabado nada.
@@ -150,6 +150,17 @@ La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la
 | Notas: manijas y cursor fuera de la hoja | Si la selección o el cursor quedan fuera de lo visible (se arrastró el scroll), el recorrido se corta y se dibujan en (18, …) | Se calculan sobre todo el texto y la hoja los recorta | Fidelidad visual |
 | Notas: portapapeles | El texto se corta a 199 / 511 bytes aunque parta un carácter UTF-8 | Corta en un límite de carácter | Integridad de datos |
 | Notas: botón "ajustes del teclado" | Abre `kbsEnter()` | Llama a `flex_kbsettings_open()` (símbolo débil que pondrá la app Ajustes, A11); mientras no exista, aviso "Ajustes del teclado: con la app Ajustes" | Dependencia de A11 |
+| Paint: dibujos con el fichero cortado | `flexPaintAppend` añade el trazo DETRÁS de los bytes sueltos de un trazo cortado por un apagón: el dibujo queda ilegible a partir de ahí | Al abrir se recorta al último trazo completo y se corrige el contador | Integridad de datos |
+| Paint: tamaño de un dibujo | Sin tope: crece hasta llenar el disco | Tope de 192 KB en memoria; el trazo que no cabe se avisa ("El dibujo es demasiado grande") y un fichero mayor no se abre | Integridad de datos / memoria |
+| Paint: guardado | Cada trazo se añade al fichero (la cabecera se reescribe en el sitio) y el resultado se ignora | El dibujo se escribe entero y de forma atómica en la tarea de almacenamiento (una escritura en vuelo; la siguiente lleva el dibujo ya actualizado); si falla se avisa "No se pudo guardar el dibujo" y se reintenta con el siguiente trazo o al salir | Arquitectura (la UI no toca la flash) / integridad |
+| Paint: trazo de más de 512 puntos | Al cerrar el trazo se vuelve a abrir con el último punto pero se DESCARTA el actual: un segmento dibujado en pantalla no queda en el fichero | El trazo nuevo lleva el último punto y el actual: cada segmento dibujado está guardado | Integridad de datos |
+| Paint: lista | `PAINT_MAX_LIST = 16` recortada antes de ordenar; salen carpetas y restos | Hasta 24 dibujos, ordenados antes de recortar, con aviso si hay más; solo ficheros `.fxp` (no se ven carpetas ni restos `.tmp~`) | Integridad de datos |
+| Paint: miniaturas | Se reproducen todos los ficheros en cada repintado de la galería | Se renderizan una vez por carga de la lista (lecturas asíncronas de una en una) en búferes que `shed()` suelta | Rendimiento / arquitectura |
+| Paint: limpiar un dibujo vacío | Reescribe el fichero y repinta | No hace nada (sin desgaste de flash) | Rendimiento |
+| Paint: contador de la cabecera | "N trazos guardados", siempre en plural y solo al abrir / deshacer / limpiar | Singular con 1 trazo ("1 trazo guardado") y se actualiza tras cada trazo | Usabilidad |
+| Paint: suspender con el dedo apoyado | La app no se ticaba suspendida | LVGL sigue entregando el dedo apoyado al lienzo oculto: se ignora mientras está suspendida (un trazo suelto aparecía al soltar) | Fidelidad |
+| Paint: errores al crear, abrir o renombrar | Silenciosos | Avisos: "No se pudo crear el dibujo", "No es un dibujo de Paint", "No se pudo abrir el dibujo", "Ya hay un dibujo con ese nombre", "Sin memoria para el lienzo" | Usabilidad |
+| Paint: bordes suaves | `fillCircleAA` / `strokeSegAA` | Portados a `flex_raster.c` con la misma aritmética (en lugar de `lv_draw_line`, que no coincide y crea una tarea de dibujo por segmento) y comparados píxel a píxel | Fidelidad visual / rendimiento |
 | Notas: lápiz del botón flotante | Trazos de 5 y 4 px | 5 y 3 px (el motor de trazos de LVGL solo da anchos impares) | Cosmético |
 | Teclado: barra y chips | `FLEX_KB_F_EXTRAS` preparado y sin dibujar | Barra de 5 botones (carita, globo, portapapeles, engranaje, más), chips de sugerencias o de símbolos con fundido de 140 ms, el panel sube y avisa (`on_resize`) | Cierra el "pendiente" de spec 01b T.8 |
 | Calendario: iniciales de los días | Fijas "D L M M J V S" | Las del idioma activo (`flex_i18n_wd_short`); en español salen las mismas | Idioma |

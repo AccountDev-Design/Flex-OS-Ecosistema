@@ -126,11 +126,19 @@ python3 ref/extract_arduino.py "$OUT/ref_notes.inc" \
     FlexOS_FS.h:FLEXFS_PATH_MAX \
     FlexOS_Ultra_AppNotes.h:NOTE_COLS,NOTE_CARD_TOP,noteListN,noteView,noteScroll,notePath,noteCardH,noteCardRect,noteMaxScroll,noteFabRect,NOTE_SESS_VER,NOTE_SESS_PATH,NoteSessV3,gNoteSess,noteSaveSess,noteLoadSess
 
+python3 ref/extract_arduino.py "$OUT/ref_paint.inc" \
+    FlexOS_FS.h:FLEXFS_PATH_MAX,FLEXPAINT_MAGIC0,FLEXPAINT_MAGIC1,FLEXPAINT_MAGIC2,FLEXPAINT_MAGIC3,FlexPaintHdr,FlexPaintStroke \
+    FlexOS_FS.cpp:paintReadHdr,flexPaintCreate,flexPaintHeader,flexPaintAppend,flexPaintReplay,flexPaintClear,flexPaintUndo \
+    FlexOS_Ultra_AppPaint.h:P_TOP,P_BOT,PAINT_CX,PAINT_CW,PAINT_CH,PAINT_MAX_PTS,PAINT_COLS,PAINT_CARD_TOP,P_PAL,P_SIZES,paintView,paintListN,paintScroll,paintPath,pColor,pSizeIx,pStroke,pStrokeN,pPrevX,pDocW,pDocX,pDocDispW,pDocScale,paintDocLayout,paintDocHit,paintDocCoord,paintDocRadius,paintFlushStroke,paintCanvasTick,paintCardRect,paintMaxScroll,paintFabRect,PAINT_SESS_VER,PAINT_SESS_PATH,PaintSessV1,paintSaveSess,paintLoadSess
+
+python3 ref/extract_arduino.py "$OUT/ref_raster.inc" \
+    FlexOS_Ultra_Gfx.h:DIV255,mix565,px,pxA,hLine,AA_EPS,aaClipBox,fillCircleAA,strokeSegAA
+
 python3 ref/extract_arduino.py "$OUT/ref_layout.inc" \
     FlexOS_Ultra_Clock.h:daysInMonth \
     FlexOS_Ultra_AppFramework.h:uiBox,uiW,uiH,uiTop,uiPad,uiGap,uiFontFit,uiFontH,uiLineH
 
-SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c test_kiosk.c test_homecfg.c test_session.c test_mem_model.c test_boot.c test_calc.c test_layout.c test_fsnames.c test_fsops.c test_fk.c test_ned.c test_clip.c test_notes.c
+SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c test_kiosk.c test_homecfg.c test_session.c test_mem_model.c test_boot.c test_calc.c test_layout.c test_fsnames.c test_fsops.c test_fk.c test_ned.c test_clip.c test_notes.c test_paint.c test_raster.c
       $ROOT/components/flex_storage/src/flex_kv.c
       $ROOT/components/flex_storage/src/flex_fs_path.c
       $ROOT/components/flex_storage/src/flex_fs_wipe.c
@@ -146,6 +154,8 @@ SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_
       $ROOT/components/flex_ui/src/apps/flex_cal_model.c
       $ROOT/components/flex_ui/src/apps/flex_ned.c
       $ROOT/components/flex_ui/src/apps/flex_note_model.c
+      $ROOT/components/flex_ui/src/apps/flex_paint_model.c
+      $ROOT/components/flex_ui/src/widgets/flex_raster.c
       $ROOT/components/flex_ui/src/widgets/flex_layout.c
       $ROOT/components/flex_ui/src/widgets/flex_clip.c
       $ROOT/components/flex_ui/src/widgets/flex_fk_model.c
@@ -169,7 +179,7 @@ CFLAGS=(-O1 -g -Wall -Wextra -Werror -pthread)
 build() {   # $1 = sufijo, resto = flags de sanitizador
     local sfx=$1; shift
     local refs=()
-    for r in wall glass home home_load touch drawer kb recents qs ntf homecfg session mem boot calc layout fsnames fk ned clip notes; do
+    for r in wall glass home home_load touch drawer kb recents qs ntf homecfg session mem boot calc layout fsnames fk ned clip notes paint raster; do
         c++ -std=gnu++17 -O1 -g -w "$@" -Iref -I"$OUT" -I$ROOT/components/flex_portable/include -c ref/ref_${r}_main.cpp -o "$OUT/ref_${r}_$sfx.o"
         refs+=("$OUT/ref_${r}_$sfx.o")
     done
