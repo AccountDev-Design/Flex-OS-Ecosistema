@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -298,5 +299,35 @@ flex_fsx_res_t flex_fsx_dirstat(const char *base, const char *dir, uint32_t *cou
     uint64_t b = dir_bytes(a, 0);
     *count = n;
     *bytes = b > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)b;
+    return FLEX_FSX_OK;
+}
+
+flex_fsx_res_t flex_fsx_read_head(const char *base, const char *path, size_t n, uint8_t **out, size_t *len)
+{
+    char a[ABS_MAX];
+    if (!base || !path || !out || !len || !rel_ok(path) || !abs_of(base, path, a, sizeof(a))) {
+        return FLEX_FSX_ARG;
+    }
+    struct stat st;
+    if (stat(a, &st) != 0 || S_ISDIR(st.st_mode)) {
+        return FLEX_FSX_NOTFOUND;
+    }
+    size_t want = (size_t)st.st_size < n ? (size_t)st.st_size : n;
+    uint8_t *buf = malloc(want + 1);
+    if (!buf) {
+        return FLEX_FSX_IO;
+    }
+    FILE *f = fopen(a, "rb");
+    size_t got = f ? fread(buf, 1, want, f) : 0;
+    if (f) {
+        fclose(f);
+    }
+    if (!f || got != want) {
+        free(buf);
+        return FLEX_FSX_IO;
+    }
+    buf[got] = 0;
+    *out = buf;
+    *len = got;
     return FLEX_FSX_OK;
 }

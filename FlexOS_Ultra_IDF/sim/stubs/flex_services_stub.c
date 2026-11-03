@@ -515,6 +515,18 @@ esp_err_t flex_fs_new_file_async(const char *dir, const char *name, const char *
     flex_fsx_res_t r = flex_fsx_new_file(s_disk, dir, name, ext ? ext : "", out, sizeof(out));
     return dpost(&(dpost_t){.kind = 4, .cb = (void *)cb, .user = u, .err = fsx_err(r), .data = r == FLEX_FSX_OK ? (uint8_t *)strdup(out) : NULL});
 }
+esp_err_t flex_fs_read_head_async(const char *p, size_t n, flex_fs_read_cb_t cb, void *u)
+{
+    if (!p || !cb || n == 0 || n > 4096) return ESP_ERR_INVALID_ARG;
+    if (!s_disk_on) {
+        cb(ESP_ERR_INVALID_STATE, NULL, 0, u);
+        return ESP_OK;
+    }
+    uint8_t *d = NULL;
+    size_t l = 0;
+    flex_fsx_res_t r = flex_fsx_read_head(s_disk, p, n, &d, &l);
+    return dpost(&(dpost_t){.kind = 1, .cb = (void *)cb, .user = u, .err = fsx_err(r), .data = d, .len = l});
+}
 esp_err_t flex_fs_dirstat_async(const char *dir, flex_fs_stat_cb_t cb, void *u)
 {
     if (!dir || !cb) return ESP_ERR_INVALID_ARG;

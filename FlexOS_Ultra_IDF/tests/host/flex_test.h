@@ -54,4 +54,7 @@ void test_layout(void);
 void test_fsnames(void);
 void test_fsops(void);
 void test_fk(void);
+void test_ned(void);
+void test_clip(void);
+void test_notes(void);
 #define FLEX_APP_N_TEST 19

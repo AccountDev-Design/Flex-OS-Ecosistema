@@ -931,25 +931,25 @@ void flex_kb_set_input_enabled(kb, en); void flex_kb_reload_prefs(kb)
   etiqueta. `scroll_chain` desactivado: teclear no desplaza la pantalla de debajo.
 * Los callbacks se llaman al final de cada evento: si uno borra el teclado, usar `lv_obj_delete_async`.
 
-### T.8 Pendiente (API preparada) y cómo se hará
+### T.8 Extras de Notas (implementados) y lo que sigue pendiente
 
 * **Barra de herramientas (Fase C, `FLEX_KB_F_EXTRAS` + `kbtool`)**: 5 botones circulares r21 en `x = 48 + 96·i`,
-  `y = kbToolbarY + 26`, relleno `kbColKey`, icono `kbColKeyTxt` (carita, globo, portapapeles, engranaje, tres puntos;
-  hit `|px − x| ≤ 26`, `kbToolbarY ≤ py ≤ +52`). Emoji y globo se resuelven dentro del teclado (capa emoji / tecla idioma);
-  portapapeles, ajustes y "más" irán a un callback `on_tool` porque abren pantallas de la app. Hoy el flag no dibuja nada ni
-  reserva alto.
-* **Chips (Fase F)**: franja de 32 px en `kbChipsY`; en capas de letras hasta 3 sugerencias de `flex_kb_suggest()` (ya
-  implementado y probado contra Arduino: atajos del usuario, diccionario local por prefijo con plegado de tildes, emoticono
-  sugerido), en `?123` los 4 símbolos de `kbsyms`. Necesita que la app pase el texto antes del cursor
-  (`flex_kb_set_context`); aceptar un chip = `on_backspace` por cada carácter de la palabra + `on_text(palabra)` + `" "`.
-  Fundido de entrada 140 ms; divisores 1×16 `TH_DIV` a 160.
-* **Portapapeles de 12 ranuras (Fase D)**: lógica pura (`clipPush`, fijadas en NVS `clip0..clip11`) + panel de 2 columnas;
-  es de la app Notas, no del widget.
-* **Escritura rápida multitáctil (Fase B)**: con un solo `indev` de puntero, LVGL solo ve un dedo; la versión actual
-  escribe al tocar (lo mismo para un dedo). El *rollover* de varios dedos necesita la capa de gestos del sistema (§2.3):
-  el `read_cb` del táctil entrega los puntos del GT911 con su *track id* y el teclado dispara una tecla por id nuevo
-  (`kbMtPoll`); el diagnóstico "el panel ha dado N dedos" sale de ahí.
-* Revisión ortográfica (subrayado de Notas) usa `flex_kb_dict_has()` (ya implementado).
+  `y = kbToolbarY + 26`, relleno `kbColKey`, icono `kbColKeyTxt` (glifos `FLEX_GLYPH_KB_FACE/GLOBE/CLIP/GEAR/DOTS`; hit
+  `|px − x| ≤ 26`, `kbToolbarY ≤ py ≤ +52`). Emoji y globo se resuelven dentro del teclado (capa emoji / tecla ES-EN);
+  portapapeles, ajustes y "más" van al callback `on_tool` porque abren pantallas de la app.
+* **Chips (Fase F)**: franja de 32 px en `kbChipsY`; en capas de letras hasta 3 sugerencias de `flex_kb_suggest()` sobre la
+  palabra que la app pasa con `flex_kb_set_context`; en `?123` los 4 símbolos de `kbsyms`. Aceptar un chip llama a `on_chip`
+  (símbolo: se inserta tal cual; palabra: una retroceso por carácter de la palabra en curso + texto + `" "`, lo hace la app).
+  Fundido de entrada 140 ms; divisores 1×16 a 160 de opacidad. Al cambiar de capa el alto del panel puede cambiar (los chips
+  existen en algunas capas): `on_resize` avisa para recolocar lo que va encima.
+* **Portapapeles de 12 ranuras (Fase D)**: lógica pura en `flex_clip.c` (frente a Arduino, con la NVS `clip0..clip11` de las
+  fijadas) y panel de 2 columnas en la app Notas (`app_notes.c`), que es quien lo usa.
+* **Pendiente**: las **Ajustes del teclado** (botón del engranaje) pertenecen a la app Ajustes (03b §11);
+  **escritura rápida multitáctil (Fase B)**: con un solo `indev` de puntero, LVGL solo ve un dedo; la versión actual escribe al
+  tocar (lo mismo para un dedo). El *rollover* de varios dedos necesita la capa de gestos del sistema (§2.3): el `read_cb`
+  del táctil entrega los puntos del GT911 con su *track id* y el teclado dispara una tecla por id nuevo (`kbMtPoll`); el
+  diagnóstico "el panel ha dado N dedos" sale de ahí.
+* Revisión ortográfica (subrayado de Notas): la app usa `flex_kb_dict_has()` en el recorrido del texto (`flex_ned_scan`).
 
 ### T.9 Decisiones y discrepancias con Arduino
 

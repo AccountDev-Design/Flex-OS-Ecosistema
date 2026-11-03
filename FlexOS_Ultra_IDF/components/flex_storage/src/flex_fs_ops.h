@@ -33,6 +33,9 @@ flex_fsx_res_t flex_fsx_empty_trash(const char *base);                          
 flex_fsx_res_t flex_fsx_new_file(const char *base, const char *dir, const char *name, const char *ext,
                                  char *out, size_t n);
 
+// Los primeros hasta `n` bytes de un fichero (la vista previa de una nota): *out se libera con free(), con un NUL detras.
+flex_fsx_res_t flex_fsx_read_head(const char *base, const char *path, size_t n, uint8_t **out, size_t *len);
+
 // Entradas directas de `dir` (flexFsCount) y bytes de todo lo que cuelga de ella, hasta 5 niveles (flexFsDirSize).
 flex_fsx_res_t flex_fsx_dirstat(const char *base, const char *dir, uint32_t *count, uint32_t *bytes);
 

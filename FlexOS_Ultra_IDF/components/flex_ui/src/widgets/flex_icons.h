@@ -62,6 +62,17 @@ typedef enum {
     FLEX_GLYPH_FK_RENAME,     // campo de texto con cursor
     FLEX_GLYPH_FK_TRASH,      // papelera de contorno (mover a la Papelera)
     FLEX_GLYPH_FK_CLOUD,      // nube con flecha hacia arriba
+    // Barra de herramientas del teclado (kbToolIcon, Keyboard.h:1071), en el color de texto del objeto.
+    FLEX_GLYPH_KB_FACE,       // carita (emoji)
+    FLEX_GLYPH_KB_GLOBE,      // globo (idioma)
+    FLEX_GLYPH_KB_CLIP,       // portapapeles
+    FLEX_GLYPH_KB_GEAR,       // engranaje (ajustes del teclado)
+    FLEX_GLYPH_KB_DOTS,       // tres puntos horizontales (mas opciones)
+    // Boton de nueva nota de Notas (noteDrawFab): hoja con tres renglones y un lapiz; renglones en el color de fondo del objeto.
+    FLEX_GLYPH_NOTES_FAB,
+    // Panel del portapapeles (Keyboard.h:1268-1327): el pin (valor 100 = el grande de la cabecera, otro = el de una ficha) y la papelera.
+    FLEX_GLYPH_KB_PIN,
+    FLEX_GLYPH_KB_BIN,
 } flex_glyph_t;
 
 lv_obj_t *flex_glyph_create(lv_obj_t *parent, flex_glyph_t g, int32_t w, int32_t h);

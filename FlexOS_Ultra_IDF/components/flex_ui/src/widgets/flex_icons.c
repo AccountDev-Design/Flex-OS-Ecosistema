@@ -660,6 +660,68 @@ static void glyph_draw_cb(lv_event_t *e)
         p_tri(&p, cx - 4, cy - 1, cx + 5, cy - 1, cx + 1, cy - 6, det);
         break;
     }
+    case FLEX_GLYPH_KB_PIN: {   // pin: cuerpo y cabeza (grande en la cabecera; pequeno en cada ficha)
+        if (gd->value == 100) {
+            p_rect(&p, cx - 2, cy - 2, 4, 12, 0, col, 255);
+            p_rect(&p, cx - 7, cy - 11, 14, 9, 3, col, 255);
+        } else {
+            p_rect(&p, cx - 2, cy - 1, 4, 9, 0, col, 255);
+            p_rect(&p, cx - 6, cy - 9, 12, 8, 2, col, 255);
+        }
+        break;
+    }
+    case FLEX_GLYPH_KB_BIN: {   // papelera de la cabecera del portapapeles
+        p_rect(&p, cx - 8, cy - 6, 16, 15, 3, col, 255);
+        p_rect(&p, cx - 10, cy - 9, 20, 3, 0, col, 255);
+        p_rect(&p, cx - 3, cy - 12, 6, 3, 0, col, 255);
+        break;
+    }
+    case FLEX_GLYPH_NOTES_FAB: {   // noteDrawFab: la hoja, tres renglones y el lapiz (trazos de 5 y 4 px)
+        lv_color_t line = lv_obj_get_style_bg_color(obj, LV_PART_MAIN);
+        p_rect(&p, cx - 22, cy - 24, 34, 44, 4, col, 255);
+        for (int k = 0; k < 3; k++) {
+            p_rect(&p, cx - 17, cy - 17 + k * 10, 24 - k * 6, 4, 0, line, 255);
+        }
+        p_seg(&p, cx + 4, cy + 18, cx + 24, cy - 6, 2, col);
+        p_seg(&p, cx + 22, cy - 8, cx + 27, cy - 13, 1, col);
+        break;
+    }
+    case FLEX_GLYPH_KB_FACE: {   // carita
+        p_ring(&p, cx, cy, 11, 2, col);
+        p_circle(&p, cx - 4, cy - 3, 2, col, 255);
+        p_circle(&p, cx + 4, cy - 3, 2, col, 255);
+        p_arc(&p, cx, cy + 1, 6, 20, 160, 2, col);
+        break;
+    }
+    case FLEX_GLYPH_KB_GLOBE: {   // globo
+        p_ring(&p, cx, cy, 11, 1, col);
+        p_rect(&p, cx - 11, cy, 22, 1, 0, col, 255);
+        p_arc(&p, cx, cy, 11, 250, 290, 2, col);
+        p_arc(&p, cx, cy, 11, 70, 110, 2, col);
+        p_rect(&p, cx, cy - 11, 1, 22, 0, col, 255);
+        break;
+    }
+    case FLEX_GLYPH_KB_CLIP: {   // portapapeles
+        p_rrect_outline(&p, cx - 8, cy - 10, 16, 21, 3, col);
+        p_rect(&p, cx - 5, cy - 13, 10, 5, 2, col, 255);
+        p_rect(&p, cx - 4, cy - 1, 8, 1, 0, col, 255);
+        p_rect(&p, cx - 4, cy + 4, 8, 1, 0, col, 255);
+        break;
+    }
+    case FLEX_GLYPH_KB_GEAR: {   // engranaje: anillo y seis radios
+        p_ring(&p, cx, cy, 5, 1, col);
+        for (int k = 0; k < 6; k++) {
+            float a = (float)k * 1.0471976f;
+            p_seg(&p, cx + cosf(a) * 7, cy + sinf(a) * 7, cx + cosf(a) * 11, cy + sinf(a) * 11, 1, col);
+        }
+        break;
+    }
+    case FLEX_GLYPH_KB_DOTS: {   // mas opciones
+        p_circle(&p, cx - 8, cy, 2, col, 255);
+        p_circle(&p, cx, cy, 2, col, 255);
+        p_circle(&p, cx + 8, cy, 2, col, 255);
+        break;
+    }
     case FLEX_GLYPH_CHEVRON_DOWN:
         p_seg(&p, cx - 9, cy - 4, cx, cy + 5, 1, col);
         p_seg(&p, cx + 9, cy - 4, cx, cy + 5, 1, col);

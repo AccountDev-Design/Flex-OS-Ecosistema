@@ -74,6 +74,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 3 (en curso: + Recientes con memoria y sesiones) | `v3` dev | 1 431 568 B | 54,6 % | 34,1 % |
 | 3 (en curso: + Calculadora y correcciones de la revisión 6) | `v3` dev | 1 443 840 B | 55,1 % | 34,4 % |
 | 3 (en curso: + kit de componentes, Calendario y kit de archivos con su capa de operaciones) | `v3` dev | 1 454 976 B | 55,6 % | 34,7 % |
+| 3 (en curso: + Notas con el editor, el teclado con barra y chips y el portapapeles) | `v3` dev | 1 472 384 B | 56,2 % | 35,1 % |
 
 La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la interfaz completa
 (Fase 15). No se ha grabado nada.
@@ -138,6 +139,19 @@ La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la
 | Arranque: reinicio anormal para la banda | Todo motivo salvo POWERON, SW y DEEPSLEEP (incluye EXT y desconocido) | Igual; el criterio del Modo seguro es otro (`flex_safe_abnormal`, además PWR_GLITCH y CPU_LOCKUP) | Dos preguntas distintas |
 | Calculadora: % y notación | `%g`: 6 cifras significativas y `1e+06` para números grandes | Igual (misma `snprintf`) | Fiel; documentado en 03 §3.6 |
 | Calculadora: teclas | Sin estado pulsado | Sin estado pulsado (toque = clic < 16 px y < 550 ms) | Igual |
+| Notas: tamaño del texto | Buffer de 4 KB en PSRAM (512 B sin ella); al abrir una nota mayor la **recorta en silencio** y al guardar escribe el recorte: se pierde lo que sobraba | Buffer de 16 KB en PSRAM; una nota que no cabe NO se abre (aviso "demasiado grande") y no se toca; tampoco se abre un archivo con bytes 0 (cortaría el texto al guardar) | Integridad de datos (spec 03 §6.4/§18) |
+| Notas: insertar sin sitio | `noteInsert` borra antes la selección y luego rechaza el texto: pegar algo grande sobre una selección la destruía | Si no cabe (contando lo que libera la selección) no se cambia nada y se avisa "La nota está llena" | Integridad de datos |
+| Notas: autoguardado | Se arma si cambia la LONGITUD del texto: reemplazar una selección por otra de igual tamaño no se guardaba | Se arma con cada cambio (revisión del texto) | Integridad de datos |
+| Notas: guardar falla | Se ignora el resultado | Se avisa "No se pudo guardar", el texto sigue en memoria y se reintenta cada segundo | Integridad de datos |
+| Notas: lista | `NOTE_MAX_LIST = 16`, recortada ANTES de ordenar (se perdían notas sin avisar); aparecían carpetas y abrirlas montaba un editor sobre un directorio | Hasta 64 notas, ordenadas (sin distinguir mayúsculas) antes de recortar, con aviso si hay más; solo ficheros | Integridad de datos |
+| Notas: vista previa | 16 lecturas síncronas de 96 bytes por recarga, en el hilo de la UI | Lecturas asíncronas de los primeros 95 bytes (`flex_fs_read_head_async`), una a una; la tarjeta se rellena al llegar | Arquitectura: la UI no toca la flash |
+| Notas: errores al renombrar / crear | Silenciosos | Avisos: "Ya hay una nota con ese nombre", "Nombre demasiado largo", "No se pudo crear la nota" | Usabilidad |
+| Notas: "atrás" con un diálogo del kit abierto | Solo el menú contextual lo cerraba; los demás dejaban salir de la app con el diálogo abierto | Cierra el de arriba (la papelera avisa para recargar la lista) | Coherencia |
+| Notas: manijas y cursor fuera de la hoja | Si la selección o el cursor quedan fuera de lo visible (se arrastró el scroll), el recorrido se corta y se dibujan en (18, …) | Se calculan sobre todo el texto y la hoja los recorta | Fidelidad visual |
+| Notas: portapapeles | El texto se corta a 199 / 511 bytes aunque parta un carácter UTF-8 | Corta en un límite de carácter | Integridad de datos |
+| Notas: botón "ajustes del teclado" | Abre `kbsEnter()` | Llama a `flex_kbsettings_open()` (símbolo débil que pondrá la app Ajustes, A11); mientras no exista, aviso "Ajustes del teclado: con la app Ajustes" | Dependencia de A11 |
+| Notas: lápiz del botón flotante | Trazos de 5 y 4 px | 5 y 3 px (el motor de trazos de LVGL solo da anchos impares) | Cosmético |
+| Teclado: barra y chips | `FLEX_KB_F_EXTRAS` preparado y sin dibujar | Barra de 5 botones (carita, globo, portapapeles, engranaje, más), chips de sugerencias o de símbolos con fundido de 140 ms, el panel sube y avisa (`on_resize`) | Cierra el "pendiente" de spec 01b T.8 |
 | Calendario: iniciales de los días | Fijas "D L M M J V S" | Las del idioma activo (`flex_i18n_wd_short`); en español salen las mismas | Idioma |
 | Calendario: números de dos cifras | Tamaño fijo del texto de las celdas | Se ajusta a la celda (`flex_ui_font_fit`) para que 28–31 no se salgan del círculo del día | Legibilidad |
 | Papelera: nombres largos | `encodeTrashName` recorta a 47 bytes en silencio: el fichero se restauraba con otro nombre o pisaba otro de la papelera | Si el nombre codificado no cabe (47 bytes, con el sufijo `(k)`), la operación falla y el fichero se queda donde estaba | Integridad de datos (`flex_fs_names.c`) |

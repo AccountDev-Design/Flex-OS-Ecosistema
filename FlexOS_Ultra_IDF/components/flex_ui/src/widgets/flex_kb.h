@@ -40,9 +40,10 @@ extern "C" {
 #define FLEX_KB_F_PAGE        (1u << 1)
 // Idioma inicial ingles (por defecto espanol, como lsuEnter / noteEditorEnter).
 #define FLEX_KB_F_LANG_EN     (1u << 2)
-// Barra de herramientas + franja de sugerencias encima de las teclas (solo
-// Notas: en una pantalla de clave seria una via de escape). PREPARADO, NO
-// IMPLEMENTADO: hoy no dibuja nada ni reserva alto (docs/spec/01b, Teclado).
+// Barra de herramientas (5 botones: carita, globo, portapapeles, engranaje, "mas") + franja de chips encima de
+// las teclas (solo Notas: en una pantalla de clave seria una via de escape). La barra sale de la preferencia
+// "kbtool" y los chips de "kbpred" (letras) o de los 4 simbolos de "kbsyms" (capa ?123). Reservan alto: el panel
+// sube y quien lo usa se entera por on_resize (docs/spec/01b, Teclado).
 #define FLEX_KB_F_EXTRAS      (1u << 3)
 // Con escritura rapida, las teclas de funcion tambien actuan al TOCAR (Notas).
 // Sin el flag actuan al soltar, como en la clave: confirmar o borrar tiene que
@@ -56,6 +57,19 @@ extern "C" {
 typedef void (*flex_kb_text_cb_t)(lv_obj_t *kb, const char *utf8, void *user);
 typedef void (*flex_kb_key_cb_t)(lv_obj_t *kb, void *user);
 
+// Botones de la barra (kbToolIcon). EMOJI y LANG se resuelven dentro del teclado (capa de emoticonos / tecla ES-EN);
+// el resto va a on_tool porque abre pantallas de la app.
+#define FLEX_KB_TB_EMOJI 0
+#define FLEX_KB_TB_LANG  1
+#define FLEX_KB_TB_CLIP  2
+#define FLEX_KB_TB_SET   3
+#define FLEX_KB_TB_MORE  4
+#define FLEX_KB_TB_N     5
+typedef void (*flex_kb_tool_cb_t)(lv_obj_t *kb, int tool, void *user);
+// Aceptar un chip. symbol = capa ?123: se inserta tal cual. Si no, SUSTITUYE la palabra en curso y deja un espacio
+// (kbApplyChip): una retroceso por cada caracter de la palabra + text + " " lo hace quien lo use.
+typedef void (*flex_kb_chip_cb_t)(lv_obj_t *kb, const char *text, bool symbol, void *user);
+
 typedef struct {
     uint32_t flags;               // FLEX_KB_F_*
     flex_kb_layout_t layout;      // capa inicial: NUM o EMOJI; si no, letras del idioma
@@ -65,6 +79,9 @@ typedef struct {
     flex_kb_text_cb_t on_text;    // caracter(es) UTF-8 a insertar (tecla, espacio, acento)
     flex_kb_key_cb_t on_backspace;// "<-": borrar UN caracter UTF-8 completo
     flex_kb_key_cb_t on_enter;    // tecla enter / OK
+    flex_kb_tool_cb_t on_tool;    // FLEX_KB_TB_CLIP / SET / MORE (con FLEX_KB_F_EXTRAS)
+    flex_kb_chip_cb_t on_chip;    // un chip aceptado (con FLEX_KB_F_EXTRAS)
+    flex_kb_key_cb_t on_resize;   // el panel cambio de alto (barra, chips o capa): recolocar lo de encima
     void *user;
 } flex_kb_cfg_t;
 
@@ -92,6 +109,12 @@ int32_t flex_kb_height(const lv_obj_t *kb);
 int32_t flex_kb_top(const lv_obj_t *kb);
 int32_t flex_kb_keys_y(const lv_obj_t *kb);
 const flex_kb_geom_t *flex_kb_geom(const lv_obj_t *kb);
+
+// La palabra en curso (la que acaba en el cursor): de ella salen los chips de sugerencias (kbChipsBuild). Llamar tras
+// cada cambio del texto o del cursor.
+void flex_kb_set_context(lv_obj_t *kb, const char *word);
+int flex_kb_chip_count(const lv_obj_t *kb);               // chips visibles (para pruebas)
+const char *flex_kb_chip_text(const lv_obj_t *kb, int i);
 
 // Entrada deslizando desde abajo, 0.3 s lineal (lsuKbAnim / noteKbAnim).
 // Mientras dura no se atiende ningun toque.

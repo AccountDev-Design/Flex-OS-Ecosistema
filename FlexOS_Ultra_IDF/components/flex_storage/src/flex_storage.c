@@ -47,7 +47,7 @@ typedef enum {
 } job_op_t;
 
 // Operaciones compuestas del kit de archivos (flex_fs_ops.c), dentro de JOB_FSOP.
-typedef enum { FSOP_DELETE, FSOP_RENAME_NAME, FSOP_TRASH, FSOP_RESTORE, FSOP_EMPTY_TRASH, FSOP_NEW_FILE, FSOP_DIRSTAT } fsop_t;
+typedef enum { FSOP_DELETE, FSOP_RENAME_NAME, FSOP_TRASH, FSOP_RESTORE, FSOP_EMPTY_TRASH, FSOP_NEW_FILE, FSOP_DIRSTAT, FSOP_READ_HEAD } fsop_t;
 
 typedef struct {
     job_op_t op;
@@ -484,6 +484,7 @@ static void reply(job_t *job, esp_err_t err, uint8_t *data, size_t len)
     if (r) {
         *r = (reply_t){job->cb, job->user, err, data, len,
                        (uint8_t)(job->op == JOB_READ ? 1 : job->op == JOB_WIPE_DIR ? 2 : job->op == JOB_LIST ? 3
+                                 : (job->op == JOB_FSOP && job->fsop == FSOP_READ_HEAD) ? 1
                                  : (job->op == JOB_FSOP && job->fsop == FSOP_NEW_FILE) ? 4
                                  : (job->op == JOB_FSOP && job->fsop == FSOP_DIRSTAT) ? 5 : 0)};
         // Quien pidio el trabajo espera la respuesta (p. ej. una pantalla con
@@ -535,6 +536,17 @@ static void run_fsop(job_t *job)
     case FSOP_EMPTY_TRASH:
         r = flex_fsx_empty_trash(FLEX_FS_BASE);
         break;
+    case FSOP_READ_HEAD: {
+        uint8_t *head = NULL;
+        size_t hn = 0;
+        r = flex_fsx_read_head(FLEX_FS_BASE, job->path, job->len, &head, &hn);
+        if (r == FLEX_FSX_OK) {
+            reply(job, ESP_OK, head, hn);
+        } else {
+            reply(job, fsx_to_err(r), NULL, 0);
+        }
+        return;
+    }
     case FSOP_DIRSTAT: {
         uint32_t st[2] = {0, 0};
         name_out = malloc(sizeof(st));
@@ -856,6 +868,20 @@ esp_err_t flex_fs_restore_async(const char *trash_name, flex_fs_done_cb_t cb, vo
 esp_err_t flex_fs_empty_trash_async(flex_fs_done_cb_t cb, void *user)
 {
     return fsop_enqueue(FSOP_EMPTY_TRASH, NULL, NULL, NULL, (void *)cb, user);
+}
+
+esp_err_t flex_fs_read_head_async(const char *path, size_t n, flex_fs_read_cb_t cb, void *user)
+{
+    if (!path || !cb || n == 0 || n > 4096) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    job_t *job = new_job(JOB_FSOP, path, (void *)cb, user);
+    if (!job) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    job->fsop = FSOP_READ_HEAD;
+    job->len = n;
+    return enqueue(job);
 }
 
 esp_err_t flex_fs_dirstat_async(const char *dir, flex_fs_stat_cb_t cb, void *user)

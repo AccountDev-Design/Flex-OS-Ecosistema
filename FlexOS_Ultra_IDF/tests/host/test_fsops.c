@@ -173,6 +173,22 @@ void test_fsops(void)
         CHECK(flex_fsx_dirstat(B, "/Papelera", &n, &by) == FLEX_FSX_OK && n == 2 && by == 4 + 1);   // lo que dejaron los casos de arriba
     }
 
+    // ---- primeros bytes: la vista previa de una nota que no cabe entera
+    {
+        uint8_t *d = NULL;
+        size_t l = 0;
+        put("/Notas/larga.txt", "0123456789ABCDEF");
+        CHECK(flex_fsx_read_head(B, "/Notas/larga.txt", 5, &d, &l) == FLEX_FSX_OK && l == 5 && !memcmp(d, "01234", 6));   // con NUL detras
+        free(d);
+        CHECK(flex_fsx_read_head(B, "/Notas/larga.txt", 100, &d, &l) == FLEX_FSX_OK && l == 16 && !strcmp((char *)d, "0123456789ABCDEF"));
+        free(d);
+        put("/Notas/vacia.txt", "");
+        CHECK(flex_fsx_read_head(B, "/Notas/vacia.txt", 10, &d, &l) == FLEX_FSX_OK && l == 0 && d[0] == 0);
+        free(d);
+        CHECK(flex_fsx_read_head(B, "/Notas/no.txt", 10, &d, &l) == FLEX_FSX_NOTFOUND && flex_fsx_read_head(B, "/Notas", 10, &d, &l) == FLEX_FSX_NOTFOUND);
+        CHECK(flex_fsx_read_head(B, "/a/../..", 10, &d, &l) == FLEX_FSX_ARG);
+    }
+
     // ---- limpieza
     {
         bool f = false;

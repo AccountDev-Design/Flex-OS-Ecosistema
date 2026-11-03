@@ -11,9 +11,11 @@
 // lo que se toca salen de la misma geometria.
 #include "flex_kb.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "flex_frame.h"
+#include "flex_icons.h"
 #include "flex_theme.h"
 #include "flex_touch_lvgl.h"
 #include "flex_wallpaper.h"
@@ -38,6 +40,12 @@ typedef struct kb_s {
     lv_obj_t *key[FLEX_KB_CELLS], *klbl[FLEX_KB_CELLS];
     lv_obj_t *fkey[FLEX_KB_FKEYS], *flbl[FLEX_KB_FKEYS];
     lv_obj_t *pop;
+    // extras (FLEX_KB_F_EXTRAS): barra de 5 botones y franja de chips
+    lv_obj_t *tool[FLEX_KB_TB_N], *tool_gl[FLEX_KB_TB_N];
+    lv_obj_t *chips, *chip_lbl[4], *chip_div[3];
+    char word[40];                // palabra en curso (flex_kb_set_context)
+    const char *chip_txt[4];
+    int chip_n;
     flex_kb_cfg_t cfg;
     scheme_t scheme;
     flex_kb_state_t st;
@@ -65,6 +73,8 @@ typedef struct kb_s {
 
 static kb_t *s_live;
 static bool s_listening;
+static bool extras_on(const kb_t *k);
+static void extras_paint(kb_t *k);
 
 static bool fast_on(const kb_t *k)
 {
@@ -165,6 +175,9 @@ static void paint_all(kb_t *k)
     for (int i = 0; i < FLEX_KB_FKEYS; i++) {
         paint_fkey(k, i);
     }
+    if (extras_on(k) && k->tool[0]) {
+        extras_paint(k);
+    }
 }
 
 // Coloca una tecla y su etiqueta: el tope de las mayusculas en h/2 - kbFontDy,
@@ -200,9 +213,24 @@ static void apply_style(kb_t *k)
     paint_all(k);
 }
 
+static bool extras_on(const kb_t *k)
+{
+    return (k->cfg.flags & FLEX_KB_F_EXTRAS) != 0;
+}
+static int toolbar_h(const kb_t *k)
+{
+    return flex_kb_toolbar_h(extras_on(k), k->pr.toolbar);
+}
+static int chips_h(const kb_t *k)
+{
+    return flex_kb_chips_h(extras_on(k), k->st.layout, k->pr.predict);
+}
+
+static void extras_layout(kb_t *k);
+
 static void apply_geometry(kb_t *k)
 {
-    flex_kb_geom_init(&k->g, k->pr.size, k->cfg.bottom_reserve, 0);
+    flex_kb_geom_init(&k->g, k->pr.size, k->cfg.bottom_reserve, toolbar_h(k) + chips_h(k));
     int top = flex_kb_panel_top(&k->g);
     lv_obj_set_pos(k->obj, 0, top);
     lv_obj_set_size(k->obj, FLEX_KB_SCR_W, FLEX_KB_SCR_H - top);
@@ -219,6 +247,202 @@ static void apply_geometry(kb_t *k)
     for (int i = 0; i < FLEX_KB_FKEYS; i++) {
         place_key(k->fkey[i], k->flbl[i], flex_kb_fkey_x(&k->g, i), fy, flex_kb_fkey_w(&k->g, i), k->g.kh, rad,
                   font_of(fs > 2 ? 2 : fs), dy);
+    }
+    extras_layout(k);
+}
+
+// ---- extras: barra de herramientas y chips (kbDrawToolbar, kbChipsBuild, kbDrawChips) ----------------------------------
+static const flex_glyph_t TOOL_GLYPH[FLEX_KB_TB_N] = {FLEX_GLYPH_KB_FACE, FLEX_GLYPH_KB_GLOBE, FLEX_GLYPH_KB_CLIP,
+                                                      FLEX_GLYPH_KB_GEAR, FLEX_GLYPH_KB_DOTS};
+
+static int tool_x(int i)   // centro x del boton i (kbToolX)
+{
+    int step = FLEX_KB_SCR_W / FLEX_KB_TB_N;
+    return step / 2 + i * step;
+}
+
+static int tool_hit(const kb_t *k, int px, int py)   // kbToolHit
+{
+    if (toolbar_h(k) == 0) {
+        return -1;
+    }
+    int y0 = flex_kb_toolbar_y(&k->g);
+    if (py < y0 || py > y0 + 52) {
+        return -1;
+    }
+    for (int i = 0; i < FLEX_KB_TB_N; i++) {
+        if (abs(px - tool_x(i)) <= 26) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int chip_hit(const kb_t *k, int px, int py)   // kbChipHit
+{
+    if (chips_h(k) == 0 || k->chip_n <= 0) {
+        return -1;
+    }
+    int y0 = flex_kb_chips_y(&k->g, toolbar_h(k));
+    if (py < y0 || py > y0 + 32) {
+        return -1;
+    }
+    int cw = (FLEX_KB_SCR_W - 12) / k->chip_n;
+    for (int i = 0; i < k->chip_n; i++) {
+        int x = 6 + i * cw;
+        if (px >= x && px <= x + cw) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// kbChipsBuild: en la capa ?123 los simbolos personalizados; en las de letras hasta 3 sugerencias de la palabra en curso.
+static bool chips_build(kb_t *k)
+{
+    const char *prev[4];
+    int prev_n = k->chip_n;
+    for (int i = 0; i < prev_n && i < 4; i++) {
+        prev[i] = k->chip_txt[i];
+    }
+    k->chip_n = 0;
+    if (chips_h(k) > 0) {
+        if (k->st.layout == FLEX_KB_LAYOUT_NUM) {
+            for (int i = 0; i < FLEX_KB_SYMS; i++) {
+                k->chip_txt[k->chip_n++] = flex_kb_sym_at(&k->pr, i);
+            }
+        } else if (k->word[0]) {
+            k->chip_n = flex_kb_suggest(&k->pr, k->st.lang_es, k->word, k->chip_txt, 3);
+        }
+    }
+    bool changed = k->chip_n != prev_n;
+    for (int i = 0; i < k->chip_n && !changed; i++) {
+        changed = k->chip_txt[i] != prev[i];
+    }
+    return changed;
+}
+
+static void chips_fade_exec(void *var, int32_t v)
+{
+    lv_obj_set_style_opa(var, (lv_opa_t)v, 0);
+}
+
+static void extras_paint(kb_t *k)
+{
+    for (int i = 0; i < FLEX_KB_TB_N && k->tool[i]; i++) {
+        flex_surface_set_flat(k->tool[i], k->col.key, LV_OPA_COVER);
+        lv_obj_set_style_text_color(k->tool_gl[i], k->col.key_txt, 0);
+    }
+    for (int i = 0; i < 4 && k->chip_lbl[i]; i++) {
+        lv_obj_set_style_text_color(k->chip_lbl[i], k->col.key_txt, 0);
+    }
+    for (int i = 0; i < 3 && k->chip_div[i]; i++) {
+        lv_obj_set_style_bg_color(k->chip_div[i], k->pr.hicon ? k->col.edge : flex_th()->divider, 0);
+    }
+}
+
+// Coloca la barra y los chips dentro del panel (coordenadas del panel = pantalla - panel_top).
+static void extras_layout(kb_t *k)
+{
+    if (!extras_on(k)) {
+        return;
+    }
+    int top = flex_kb_panel_top(&k->g);
+    bool tb = toolbar_h(k) > 0;
+    for (int i = 0; i < FLEX_KB_TB_N; i++) {
+        if (!k->tool[i]) {
+            continue;
+        }
+        lv_obj_set_hidden(k->tool[i], !tb);
+        lv_obj_set_pos(k->tool[i], tool_x(i) - 21, flex_kb_toolbar_y(&k->g) + 26 - 21 - top);
+    }
+    int ch = chips_h(k);
+    lv_obj_set_hidden(k->chips, ch == 0 || k->chip_n <= 0);
+    if (ch > 0 && k->chip_n > 0) {
+        int y0 = flex_kb_chips_y(&k->g, toolbar_h(k)) - top;
+        int cw = (FLEX_KB_SCR_W - 12) / k->chip_n;
+        lv_obj_set_pos(k->chips, 0, y0);
+        for (int i = 0; i < 4; i++) {
+            bool on = i < k->chip_n;
+            lv_obj_set_hidden(k->chip_lbl[i], !on);
+            if (on) {
+                lv_label_set_text(k->chip_lbl[i], k->chip_txt[i]);
+                lv_obj_set_width(k->chip_lbl[i], cw);
+                lv_obj_set_x(k->chip_lbl[i], 6 + i * cw);
+                flex_label_cap_y(k->chip_lbl[i], 8);
+            }
+        }
+        for (int i = 0; i < 3; i++) {
+            bool on = i + 1 < k->chip_n;
+            lv_obj_set_hidden(k->chip_div[i], !on);
+            if (on) {
+                lv_obj_set_pos(k->chip_div[i], 6 + (i + 1) * cw, 8);
+            }
+        }
+    }
+    extras_paint(k);
+}
+
+static void extras_create(kb_t *k)
+{
+    for (int i = 0; i < FLEX_KB_TB_N; i++) {
+        k->tool[i] = flex_box(k->obj);
+        lv_obj_set_size(k->tool[i], 42, 42);
+        lv_obj_set_style_radius(k->tool[i], LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_clickable(k->tool[i], false);
+        flex_surface(k->tool[i], FLEX_SURF_TINT, FLEX_BD_FLAT);
+        flex_surface_force_material(k->tool[i], 0);
+        k->tool_gl[i] = flex_glyph_create(k->tool[i], TOOL_GLYPH[i], 42, 42);
+    }
+    k->chips = flex_box(k->obj);
+    lv_obj_set_size(k->chips, FLEX_KB_SCR_W, 32);
+    lv_obj_set_clickable(k->chips, false);
+    for (int i = 0; i < 4; i++) {
+        k->chip_lbl[i] = flex_label(k->chips, "", FLEX_FONT_S2, lv_color_white());
+        lv_label_set_long_mode(k->chip_lbl[i], LV_LABEL_LONG_MODE_DOTS);
+        lv_obj_set_style_text_align(k->chip_lbl[i], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_height(k->chip_lbl[i], lv_font_get_line_height(FLEX_FONT_S2));
+        lv_obj_set_clickable(k->chip_lbl[i], false);
+    }
+    for (int i = 0; i < 3; i++) {
+        k->chip_div[i] = flex_box(k->chips);
+        lv_obj_set_size(k->chip_div[i], 1, 16);
+        lv_obj_set_style_bg_opa(k->chip_div[i], 160, 0);
+        lv_obj_set_clickable(k->chip_div[i], false);
+    }
+}
+
+// La capa o el idioma cambiaron: etiquetas, alto del panel (los chips solo existen en algunas capas) y chips.
+static void layer_changed(kb_t *k)
+{
+    int before = flex_kb_panel_top(&k->g);
+    refresh_labels(k);
+    bool fade = chips_build(k);
+    apply_geometry(k);
+    if (fade && k->chip_n > 0) {
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, k->chips);
+        lv_anim_set_exec_cb(&a, chips_fade_exec);
+        lv_anim_set_values(&a, 60, 255);   // los chips no aparecen de golpe: fundido de 140 ms (Fase G)
+        lv_anim_set_duration(&a, 140);
+        lv_anim_start(&a);
+    }
+    if (flex_kb_panel_top(&k->g) != before && k->cfg.on_resize) {
+        k->cfg.on_resize(k->obj, k->cfg.user);
+    }
+}
+
+static void tool_press(kb_t *k, int t)
+{
+    if (t == FLEX_KB_TB_EMOJI) {
+        flex_kb_set_layout_state(&k->st, FLEX_KB_LAYOUT_EMOJI);
+        layer_changed(k);
+    } else if (t == FLEX_KB_TB_LANG) {
+        flex_kb_fn_apply(&k->st, FLEX_KB_FN_LANG);   // misma logica que la tecla ES/EN
+        layer_changed(k);
+    } else if (k->cfg.on_tool) {
+        k->cfg.on_tool(k->obj, t, k->cfg.user);
     }
 }
 
@@ -341,10 +565,13 @@ static void fn_key(kb_t *k, int fn)
 {
     switch (fn) {
     case FLEX_KB_FN_SHIFT:
+        flex_kb_fn_apply(&k->st, fn);
+        refresh_labels(k);
+        break;
     case FLEX_KB_FN_LAYER:
     case FLEX_KB_FN_LANG:
         flex_kb_fn_apply(&k->st, fn);
-        refresh_labels(k);
+        layer_changed(k);
         break;
     case FLEX_KB_FN_SPACE:
         emit_text(k, " ");
@@ -481,6 +708,20 @@ static void touch_cb(lv_event_t *e)
     if (!flex_kb_is_tap(px - k->px0, py - k->py0, lv_tick_elaps(k->t0))) {
         return;
     }
+    if (extras_on(k)) {
+        int t = tool_hit(k, k->px0, k->py0);
+        if (t >= 0) {
+            tool_press(k, t);
+            return;
+        }
+        int ci = chip_hit(k, k->px0, k->py0);
+        if (ci >= 0) {
+            if (k->cfg.on_chip) {
+                k->cfg.on_chip(k->obj, k->chip_txt[ci], k->st.layout == FLEX_KB_LAYOUT_NUM, k->cfg.user);
+            }
+            return;
+        }
+    }
     int fn = flex_kb_frow_hit(&k->g, k->px0, k->py0);
     if (fn >= 0) {
         fn_key(k, fn);
@@ -519,6 +760,9 @@ static void delete_cb(lv_event_t *e)
         return;
     }
     lv_anim_delete(k->obj, slide_exec);
+    if (k->chips) {
+        lv_anim_delete(k->chips, chips_fade_exec);
+    }
     if (k->fx_timer) {
         lv_timer_delete(k->fx_timer);
     }
@@ -587,6 +831,9 @@ lv_obj_t *flex_kb_create(lv_obj_t *parent, const flex_kb_cfg_t *cfg)
     for (int i = 0; i < FLEX_KB_FKEYS; i++) {
         k->fkey[i] = make_key(k, &k->flbl[i]);
     }
+    if (extras_on(k)) {
+        extras_create(k);
+    }
     k->fx_timer = lv_timer_create(fx_timer_cb, (uint32_t)k->pr.fx_ms, k);
     lv_timer_pause(k->fx_timer);
 
@@ -596,6 +843,7 @@ lv_obj_t *flex_kb_create(lv_obj_t *parent, const flex_kb_cfg_t *cfg)
     lv_obj_add_event_cb(k->obj, touch_cb, LV_EVENT_PRESS_LOST, k);
     lv_obj_add_event_cb(k->obj, delete_cb, LV_EVENT_DELETE, k);
 
+    chips_build(k);
     apply_geometry(k);
     refresh_labels(k);
     apply_style(k);
@@ -619,7 +867,7 @@ void flex_kb_set_layout(lv_obj_t *kb, flex_kb_layout_t layout)
     kb_t *k = get(kb);
     if (k) {
         flex_kb_set_layout_state(&k->st, layout);
-        refresh_labels(k);
+        layer_changed(k);
     }
 }
 
@@ -649,7 +897,7 @@ void flex_kb_set_lang_es(lv_obj_t *kb, bool es)
     kb_t *k = get(kb);
     if (k && k->st.lang_es != es) {
         flex_kb_fn_apply(&k->st, FLEX_KB_FN_LANG);
-        refresh_labels(k);
+        layer_changed(k);
     }
 }
 
@@ -766,9 +1014,40 @@ void flex_kb_reload_prefs(lv_obj_t *kb)
     if (!k) {
         return;
     }
+    int before = flex_kb_panel_top(&k->g);
     flex_kb_prefs_load(&k->pr);
     popup_close(k);
+    chips_build(k);
     apply_geometry(k);
     refresh_labels(k);
     apply_style(k);
+    if (flex_kb_panel_top(&k->g) != before && k->cfg.on_resize) {
+        k->cfg.on_resize(k->obj, k->cfg.user);
+    }
+}
+
+void flex_kb_set_context(lv_obj_t *kb, const char *word)
+{
+    kb_t *k = get(kb);
+    if (!k) {
+        return;
+    }
+    snprintf(k->word, sizeof(k->word), "%s", word ? word : "");
+    if (extras_on(k)) {
+        if (chips_build(k)) {
+            layer_changed(k);   // otro numero de chips: se recoloca y se desvanece
+        }
+    }
+}
+
+int flex_kb_chip_count(const lv_obj_t *kb)
+{
+    kb_t *k = get(kb);
+    return k ? k->chip_n : 0;
+}
+
+const char *flex_kb_chip_text(const lv_obj_t *kb, int i)
+{
+    kb_t *k = get(kb);
+    return (k && i >= 0 && i < k->chip_n) ? k->chip_txt[i] : "";
 }

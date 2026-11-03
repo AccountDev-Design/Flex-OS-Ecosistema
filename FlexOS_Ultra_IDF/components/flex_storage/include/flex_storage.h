@@ -141,6 +141,9 @@ esp_err_t flex_fs_empty_trash_async(flex_fs_done_cb_t cb, void *user);
 // Crea "<dir>/<name> N<ext>" vacio con el primer N libre (1..999); cb recibe su ruta.
 typedef void (*flex_fs_name_cb_t)(esp_err_t err, const char *path, void *user);
 esp_err_t flex_fs_new_file_async(const char *dir, const char *name, const char *ext, flex_fs_name_cb_t cb, void *user);
+// Los primeros hasta n bytes (n <= 4096) de un fichero, aunque sea mas grande: la vista previa de una nota. data se
+// libera con free() y lleva un NUL detras. ESP_ERR_NOT_FOUND si no existe o es una carpeta.
+esp_err_t flex_fs_read_head_async(const char *path, size_t n, flex_fs_read_cb_t cb, void *user);
 // Entradas directas de una carpeta y bytes de todo lo que cuelga de ella (hasta 5 niveles): flexFsCount + flexFsDirSize.
 typedef void (*flex_fs_stat_cb_t)(esp_err_t err, uint32_t count, uint32_t bytes, void *user);
 esp_err_t flex_fs_dirstat_async(const char *dir, flex_fs_stat_cb_t cb, void *user);

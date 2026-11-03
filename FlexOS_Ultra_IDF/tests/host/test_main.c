@@ -34,6 +34,9 @@ int main(void)
     test_fsnames();
     test_fsops();
     test_fk();
+    test_ned();
+    test_clip();
+    test_notes();
     printf("%s: %d comprobaciones, %d fallos\n", g_fails ? "FALLO" : "OK", g_checks, g_fails);
     return g_fails ? 1 : 0;
 }

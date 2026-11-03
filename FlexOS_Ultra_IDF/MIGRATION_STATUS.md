@@ -8,29 +8,24 @@ Arduino, tamaños) y `ESP_IDF_HARDWARE_REQUIREMENTS.md` (qué probar en la placa
 > host + escena del simulador que falla al revertir la corrección (mutación).
 
 Rama: `flexos-esp-idf` (la rama Arduino `claude/flexos-ota-system-blq9g9-2csacx` no se toca).
-Último bloque cerrado: **Calendario** (A19), el **kit de componentes** y el **kit de archivos con su capa de operaciones** (S5, a falta de integrarlo en Notas); antes, **App Calculadora** (A12) y la **revisión 6**; antes, **Recientes con memoria y sesiones** (S4e), **Arranque** (S2), **Memoria y Optimizar**, **Sesiones de app** y **Personalizar inicio**. Entorno de
+Último bloque cerrado: **Notas** (A06: lista, editor, teclado con barra y chips, portapapeles, sesión) que integra el **kit de archivos** (S5); antes **Calendario** (A19), el **kit de componentes**, **App Calculadora** (A12) y la **revisión 6**; antes, **Recientes con memoria y sesiones** (S4e), **Arranque** (S2), **Memoria y Optimizar**, **Sesiones de app** y **Personalizar inicio**. Entorno de
 compilación en un contenedor nuevo: `bash tools/setup_idf_cloud.sh` (ver "Entorno" abajo).
 
 ### Punto de reanudación (siguiente tarea exacta)
 
-1. **Notas (A06)**, que integra S5 (el kit de archivos): ya están hechos y probados `flex_fs_names/ops` (papelera, renombrar,
-   restaurar, nombre nuevo, estadística de carpeta, todo en la tarea de almacenamiento), `flex_fk_model`, `flex_filekit`
-   (menú, nombre con el teclado del sistema, confirmación, papelera, sin almacenamiento, texto en caja), el disco real del
-   simulador (`sim_disk_*`, escena `kit-archivos`). **Falta**: (a) `flex_ned` (editor: lógica pura ya escrita en el
-   bloc de trabajo, sin integrar; ver abajo) + prueba contra Arduino (`ref_ned_main.cpp` escrito) y vista LVGL; (b) lista
-   (tarjetas en 2 columnas, FAB, selección, menú, renombrar, papelera); (c) extras del teclado: barra de 5 botones y chips
-   (`FLEX_KB_F_EXTRAS`, `flex_kb_set_context`, `on_tool`), portapapeles de 12 ranuras (`clipPush`, fijadas en NVS
-   `clip0..clip11`) y su panel, menú "más"; (d) sesión `notas.bin` v3 (116 B) y ciclo de vida; (e) escena con mutantes;
-   (f) al cerrar: acreditar S5 y A06.
-   Decisiones ya tomadas para Notas (anotarlas en el informe al implementarlas): buffer de 16 KB en PSRAM y una nota que lo
-   supere NO se abre (Arduino la truncaba al abrir y la guardaba truncada: pérdida de datos); insertar sin sitio no borra la
-   selección; el autoguardado mira una revisión del texto, no su longitud; la lista solo muestra ficheros, sin carpetas y
-   con hasta 64 notas (aviso si hay más); la tarjeta se ordena por nombre sin mayúsculas antes de recortar.
-2. Después (orden de dependencias): **Ajustes** (`03b`, abre Optimizar y el teclado), Reloj/Cronómetro, Almacenamiento/Archivos
-   (reutiliza el kit de archivos y trae los puntos de entrada de Optimizar), Paint (usa el kit de archivos), Clima, ...
-   Cada app implementa `save_session`/`load_session`/`shed` y su escena con mutantes.
-3. Deuda de baja prioridad: el historial de Device Care no tiene descriptor de sesión (se tratará con esa app) y las
-   miniaturas de páginas fuera de pantalla con vidrio por icono salen con el fondo desplazado (cosmético).
+1. **Siguiente app**, en este orden por valor y viabilidad sin hardware ni red: **Juegos** (A10, 40: autocontenida), **Reloj**
+   (A01, 17: reloj, alarmas, cronómetro y temporizador; las alarmas necesitan el sonido de la Fase 11), **Paint** (A09, 9: usa el
+   kit de archivos y la papelera), **Almacenamiento + Archivos** (A04, 76: el explorador local y los medidores salen de
+   `flex_fs_dirstat_async`/`flex_fs_list_async`; la pestaña de Flex Cloud y la tarjeta del teléfono dependen de N4/A16: al
+   abrirlo habrá que separar en el inventario la parte local de la de nube, anotando la causa, porque el total no cambia), **Ajustes**
+   (A11, 25: abre Optimizar y las Ajustes del teclado, `flex_kbsettings_open()`, que Notas ya espera como símbolo débil; muchas
+   filas dependen de servicios de las Fases 6-8).
+   Cada app implementa `save_session`/`load_session`/`shed` y su escena con mutantes. Ejemplo completo de app con ficheros: `apps/app_notes.c`.
+2. Deuda: el historial de Device Care no tiene descriptor de sesión (se tratará con esa app); las miniaturas de páginas fuera
+   de pantalla con vidrio por icono salen con el fondo desplazado (cosmético); S5b (barra de medios) espera a Música/Galería.
+3. Notas: los mutantes "el autoguardado no llega" y "suspender no guarda" **sobreviven por ser equivalentes**: la sesión (a los
+   1,2 s y al suspender) también guarda la nota, como en Arduino (`noteSaveSess`); el temporizador de 2 s cubre el caso en que la
+   sesión no esté activa.
 
 ## Cómo validar antes de cada commit
 
@@ -71,6 +66,7 @@ source ~/esp/env.sh && tools/build.sh --rev v3   # firmware (no graba nada)
 | App Calendario (03 §4): rejilla del mes, círculo de hoy, panel lateral "Hoy", estadísticas; modelo probado frente a `AppsBasic.h` | `apps/app_calendar.c`, `flex_cal_model.*` | host + escena `calendario` |
 | Capa de operaciones de archivo (flexFs*): borrar recursivo, renombrar conservando la extensión, papelera con la ruta en el nombre, restaurar sin pisar, vaciar, fichero nuevo con el primer nombre libre, estadística de carpeta; todo en la tarea de almacenamiento | `flex_storage/src/flex_fs_names.*`, `flex_fs_ops.*`, `flex_storage.c` | host (frente a `FlexOS_FS.cpp` + disco real; 10 mutantes) |
 | Kit de archivos (03 §5): menú contextual, diálogo de nombre con el teclado del sistema, confirmación, papelera (lista con ventana de filas), "sin almacenamiento", texto en caja. **S5 se acredita al integrarlo en Notas** | `widgets/flex_filekit.*`, `flex_fk_model.*`, glifos del menú en `flex_icons.c`; disco real en el simulador (`sim_disk_*`) | host (`test_fk` frente a `FileKit.h`) + escena `kit-archivos` (11 mutantes) |
+| App Notas (03 §6): lista de tarjetas (vista previa real, selección, menú, renombrar, papelera, borrar), editor (texto con cursor, selección y manijas, Cortar/Copiar/Pegar/Todo, pulsación larga, scroll, acentos, corrector), teclado con barra de 5 botones y chips, portapapeles de 12 ranuras con panel, menú "más", autoguardado, sesión `notas.bin` v3. Lógica pura probada frente a Arduino (3 000 dibujos con cursor, selección, ortografía y menú) | `apps/app_notes.c`, `flex_ned.*`, `flex_note_model.*`, `widgets/flex_clip.*`, `flex_kb.c` (extras), glifos en `flex_icons.c` | host (`test_ned`, `test_clip`, `test_notes`) + escena `notas` (15 mutantes detectados, 2 equivalentes) |
 
 ## Progreso global (método congelado v1)
 
@@ -105,14 +101,14 @@ Cálculo reproducible: `python3 tools/progress.py` (lee la tabla de abajo; no ha
 | S4d | Marco de apps: desalojo por presupuesto, apps con segundo plano, huella medida por app y admision al abrir (01c 17.3, 17.6, 17.9) | 15 | 1 | 0 |
 | S4e | Marco de apps: Recientes con huella, Pausada/Estado guardado y aviso de cambios sin guardar; regreso | 8 | 1 | 0 |
 | S4b | Memoria y funcion Optimizar (01c 17), umbrales y avisos | 8 | 1 | 0 |
-| S5 | Infraestructura compartida de apps en LVGL: kit de componentes, kit de archivos (menu, nombre, confirmacion, papelera) y su capa de operaciones. Se acredita al integrarse en la primera app que lo usa (Notas) | 9 | 0 | 0 |
+| S5 | Infraestructura compartida de apps en LVGL: kit de componentes, kit de archivos (menu, nombre, confirmacion, papelera) y su capa de operaciones; integrada en Notas | 9 | 1 | 0 |
 | S5b | Infraestructura compartida: barra de medios (alcance separado de S5 al cerrarse el kit; el total de 2000 no cambia) | 3 | 0 | 0 |
 | A01 | App Reloj (reloj, alarmas, cronometro, temporizador) | 17 | 0 | 0 |
 | A02 | App Galeria + visor + editor de fotos + editor de video | 145 | 0 | 0 |
 | A03 | App Multimedia | 16 | 0 | 0 |
 | A04 | App Almacenamiento + Archivos/Explorador | 76 | 0 | 0 |
 | A05 | App Modo PC (DeX) | 40 | 0 | 0 |
-| A06 | App Notas | 8 | 0 | 0 |
+| A06 | App Notas | 8 | 1 | 0 |
 | A07 | App Navegador | 95 | 0 | 0 |
 | A08 | App Flex Compass (brujula + AHRS) y sensores BNO085 | 40 | 0 | 0 |
 | A09 | App Paint | 9 | 0 | 0 |
@@ -165,11 +161,11 @@ favor en las apps).
 5. Fases 6–8 (Wi-Fi C6 esp-hosted, red, servidor web, Account, Cloud), 9–13 (multimedia,
    cámara, audio, Device Care, Compass), 14–17 (OTA, particiones, seguridad, optimización).
 
-## Resultados de la última validación (kit de componentes, Calendario, kit de archivos; antes: Personalizar inicio, sesiones, memoria, arranque y Recientes)
+## Resultados de la última validación (Notas, kit de componentes, Calendario, kit de archivos; antes: Personalizar inicio, sesiones, memoria, arranque y Recientes)
 
 | Comprobación | Resultado |
 |---|---|
-| `tests/host` (ASan+UBSan y TSan), incl. `test_homecfg`, `test_session`, `test_mem_model`, `test_boot`, `test_calc`, `test_layout`, `test_fsnames` (20 013 operaciones de papelera/restaurar/renombrar/nombre nuevo frente a `FlexOS_FS.cpp`), `test_fsops` (operaciones sobre un disco real, con salida de la raíz intentada) y `test_fk` (menú, confirmación, papelera, texto en caja y nombre frente a `FileKit.h`) | OK: 984 655 comprobaciones, 0 fallos |
+| `tests/host` (ASan+UBSan y TSan), incl. `test_homecfg`, `test_session`, `test_mem_model`, `test_boot`, `test_calc`, `test_layout`, `test_fsnames` (20 013 operaciones de papelera/restaurar/renombrar/nombre nuevo frente a `FlexOS_FS.cpp`), `test_fsops` (operaciones sobre un disco real, con salida de la raíz intentada) `test_fk` (menú, confirmación, papelera, texto en caja y nombre frente a `FileKit.h`), `test_ned` (editor de Notas: 3 000 dibujos con cursor, selección, ortografía y menú frente a `Keyboard.h`), `test_clip` (portapapeles de 12 ranuras y NVS frente a Arduino) y `test_notes` (lista y sesión `notas.bin` v3) | OK: 984 688 comprobaciones, 0 fallos |
 | Mutantes de las operaciones de archivo (colisión que pisa, `@` sin escapar, recorte del nombre, sufijos agotados, restaurar sin validar la ruta, renombrar que pisa, tirar la papelera a sí misma, renombrar sin conservar la extensión, fichero nuevo que pisa, borrar sin recursión) | 10/10 detectados |
 | Mutantes de la interfaz del kit de archivos (barra sin rehacer, menú que no se cierra, nombre inicial con `/`, volver de "sin almacenamiento", todas las filas creadas, ocupado sin liberar, borrar y vaciar sin confirmar, cancelar que confirma, `close_all` que no cierra) | 11/11 detectados (2 sobrevivían por una escena floja: se reforzó con `flex_fk_layers`) |
 | Mutantes de los modelos (pellizco, principal al borrar, redondeo del reordenar; tope de 30 s, cierre forzado, CRC al leer, otra app pendiente; LRU con empates, cerrar sin guardar, admitir dos veces, alivio sin empeorar) | 11/11 detectados |
@@ -179,8 +175,9 @@ favor en las apps).
 | Escena `memoria` | OK; 7 mutantes de la interfaz detectados (admisión, presupuesto al suspender, soltar en Optimizar, modo eficiente, cierre con un toque, guardián modal de Inicio) |
 | Escena `sesiones` | 13 comprobaciones OK; 4 mutantes de la interfaz detectados (el último, tras añadir el paso de re-armado) |
 | Escena `personalizar` | 14 pasos OK; mutantes de la interfaz (nueva página, cierre al bloquear, confirmar borrado, casita) detectados |
+| Escena `notas` (disco real, dedo y teclado: crear, escribir, chips, acentos, menú de selección, portapapeles, "más", autoguardado, renombrar, papelera, borrar, límites, sesión, suspensión, fallo de guardado) | OK; 16 mutantes: 14 detectados y 2 equivalentes (la sesión también guarda la nota); el escenario encontró y corrigió un fallo grave: al abrir una nota existente se vaciaba el texto (y se habría guardado vacío) |
 | Escenas `kit`, `calendario` y `kit-archivos` | OK (la última con disco real: menú, confirmación, nombre con el teclado, papelera con restaurar/borrar/vaciar, lista de 60 con ventana de filas, "sin almacenamiento") |
-| Firmware `tools/build.sh --rev v3` | OK sin avisos: 1 454 976 B, 55,6 % de la ranura A (2,5 MB), 34,7 % de la B (4 MB) |
+| Firmware `tools/build.sh --rev v3` | OK sin avisos: 1 472 384 B, 56,2 % de la ranura A (2,5 MB), 35,1 % de la B (4 MB) |
 | Capturas revisadas a ojo | Páginas, Fondo, Widgets, Ajustes y modal fieles a 01a §10 |
 | **Placa real** | NO probado (tacto del carrusel, fluidez de la animación y del pellizco con el GT911) |
 
