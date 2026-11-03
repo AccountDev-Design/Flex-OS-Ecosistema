@@ -39,6 +39,7 @@ int main(void)
     test_notes();
     test_paint();
     test_raster();
+    test_set();
     printf("%s: %d comprobaciones, %d fallos\n", g_fails ? "FALLO" : "OK", g_checks, g_fails);
     return g_fails ? 1 : 0;
 }

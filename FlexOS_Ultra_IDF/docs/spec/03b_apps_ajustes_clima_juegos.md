@@ -367,6 +367,11 @@ tarjeta de vidrio cacheada, banda pre-desenfocada, fondo de Modo PC y miniaturas
   de batería, los valores "maqueta" de Dispositivos/Desarrollador/Sistema (marcarlos como no disponibles), la duplicación
   Estilo/Personalizar UI (mantenerla si se quiere 1:1, pero que ambas filas lean el mismo estado).
 
+**Implementado** (`app_settings.c`, `flex_set_model.*`; pruebas `test_set.c` y escena `ajustes`): el modelo entrega una lista de operaciones de dibujo
+(tarjeta, glifo, texto con recorte, chevron) con las coordenadas exactas de Arduino y la app solo las convierte en objetos LVGL; las acciones de fila
+devuelven banderas (que guardar, que repintar, que abrir) que la app aplica con los setters existentes. Los servicios de otras areas son simbolos
+debiles (`flex_ntp_texts`, `flex_ota_status_text`, `flex_account_settings_*`, `flex_conn_*`, `flex_theft_*`, `flex_audio_*`, `flex_kbsettings_open`).
+
 ---
 
 ## 12. Hora del sistema y NTP

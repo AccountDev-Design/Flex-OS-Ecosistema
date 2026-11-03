@@ -59,4 +59,5 @@ void test_clip(void);
 void test_notes(void);
 void test_paint(void);
 void test_raster(void);
+void test_set(void);
 #define FLEX_APP_N_TEST 19

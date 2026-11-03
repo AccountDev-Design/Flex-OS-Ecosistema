@@ -29,6 +29,7 @@ bool scene_kit_run(void);
 bool scene_filekit_run(void);
 bool scene_notes_run(void);
 bool scene_paint_run(void);
+bool scene_settings_run(void);
 bool scene_calendar_run(void);
 
 const sim_scene_t sim_scenes[] = {
@@ -58,6 +59,7 @@ const sim_scene_t sim_scenes[] = {
     {"kit-archivos", scene_filekit_run},
     {"notas", scene_notes_run},
     {"paint", scene_paint_run},
+    {"ajustes", scene_settings_run},
     {"calendario", scene_calendar_run},
     {"apagado", scene_poweroff_run},
     {NULL, NULL},

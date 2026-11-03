@@ -670,6 +670,128 @@ static void glyph_draw_cb(lv_event_t *e)
         }
         break;
     }
+    case FLEX_GLYPH_SET_ROW: {   // drawRowGlyph: centrado en el objeto; 20x20 de dibujo
+        lv_color_t hole = lv_obj_get_style_bg_color(obj, LV_PART_MAIN);
+        switch (gd->value) {
+        case 0:   // globo
+            p_ring(&p, cx, cy, 10, 1, col);
+            p_rect(&p, cx, cy - 10, 1, 21, 0, col, 255);
+            p_rect(&p, cx - 10, cy, 21, 1, 0, col, 255);
+            p_arc(&p, cx, cy, 5, 90, 270, 1, col);
+            p_arc(&p, cx, cy, 5, -90, 90, 1, col);
+            break;
+        case 1:   // calendario
+            p_rrect_outline(&p, cx - 9, cy - 8, 18, 17, 3, col);
+            p_rect(&p, cx - 9, cy - 8, 18, 5, 0, col, 255);
+            p_circle(&p, cx - 4, cy + 2, 1, col, 255);
+            p_circle(&p, cx + 3, cy + 2, 1, col, 255);
+            break;
+        case 2:   // reloj
+            p_ring(&p, cx, cy, 10, 1, col);
+            p_seg(&p, cx, cy, cx, cy - 6, 1, col);
+            p_seg(&p, cx, cy, cx + 4, cy, 1, col);
+            break;
+        case 3:   // chincheta
+            p_circle(&p, cx, cy - 3, 7, col, 255);
+            p_tri(&p, cx - 6, cy, cx + 6, cy, cx, cy + 9, col);
+            p_circle(&p, cx, cy - 3, 3, hole, 255);
+            break;
+        case 4:   // refrescar
+            p_arc(&p, cx, cy, 9, 30, 300, 2, col);
+            p_tri(&p, cx + 8, cy - 7, cx + 14, cy - 4, cx + 7, cy - 1, col);
+            break;
+        case 5:   // nube
+            p_circle(&p, cx - 4, cy + 2, 5, col, 255);
+            p_circle(&p, cx + 4, cy + 2, 6, col, 255);
+            p_circle(&p, cx, cy - 2, 6, col, 255);
+            p_rect(&p, cx - 8, cy + 2, 16, 5, 0, col, 255);
+            break;
+        case 6:   // reiniciar
+            p_arc(&p, cx, cy, 9, 40, 320, 2, col);
+            p_tri(&p, cx + 6, cy - 8, cx + 12, cy - 9, cx + 8, cy - 2, col);
+            break;
+        default:
+            p_circle(&p, cx, cy, 4, col, 255);
+            break;
+        }
+        break;
+    }
+    case FLEX_GLYPH_SET_CAT: {   // drawSetCatIcon: lado S = el menor de ancho y alto
+        lv_color_t hole = lv_obj_get_style_bg_color(obj, LV_PART_MAIN);
+        float S = s;
+        const float A = 0.7853982f;
+        switch (gd->value) {
+        case 0:   // engranaje
+            p_circle(&p, cx, cy, (int32_t)(S * 0.18f + 0.5f), col, 255);
+            for (int k = 0; k < 8; k++) {
+                p_circle(&p, cx + cosf(k * A) * S * 0.30f, cy + sinf(k * A) * S * 0.30f, (int32_t)(S * 0.065f + 0.5f), col, 255);
+            }
+            p_circle(&p, cx, cy, (int32_t)(S * 0.08f + 0.5f), hole, 255);
+            break;
+        case 1:   // sol
+            p_circle(&p, cx, cy, (int32_t)(S * 0.15f + 0.5f), col, 255);
+            for (int k = 0; k < 8; k++) {
+                p_seg(&p, cx + cosf(k * A) * S * 0.24f, cy + sinf(k * A) * S * 0.24f, cx + cosf(k * A) * S * 0.34f, cy + sinf(k * A) * S * 0.34f, 1, col);
+            }
+            break;
+        case 2:   // altavoz
+            p_rect(&p, cx - S * 0.22f, cy - S * 0.06f, S * 0.10f, S * 0.12f, 0, col, 255);
+            p_tri(&p, cx - S * 0.12f, cy - S * 0.14f, cx - S * 0.12f, cy + S * 0.14f, cx + S * 0.02f, cy, col);
+            p_arc(&p, cx - S * 0.02f, cy, S * 0.14f, -55, 55, 2, col);
+            break;
+        case 3: {   // Wi-Fi: drawWifi(cx, cy + S*0.14, S*0.28)
+            float R = S * 0.28f, by = cy + S * 0.14f;
+            for (int k = 0; k < 3; k++) {
+                p_arc(&p, cx, by, R * (k == 0 ? 1.0f : k == 1 ? 0.66f : 0.33f), 225, 315, 2, col);
+            }
+            p_circle(&p, cx, by, 2, col, 255);
+            break;
+        }
+        case 4: {   // cubo isometrico: cara de arriba y dos laterales mas oscuros
+            lv_color_t d1 = lv_color_mix(lv_color_black(), col, 70), d2 = lv_color_mix(lv_color_black(), col, 120);
+            p_tri(&p, cx, cy - S * 0.22f, cx + S * 0.20f, cy - S * 0.10f, cx, cy + S * 0.02f, col);
+            p_tri(&p, cx, cy - S * 0.22f, cx, cy + S * 0.02f, cx - S * 0.20f, cy - S * 0.10f, col);
+            p_tri(&p, cx, cy + S * 0.02f, cx + S * 0.20f, cy - S * 0.10f, cx + S * 0.20f, cy + S * 0.14f, d1);
+            p_tri(&p, cx, cy + S * 0.02f, cx + S * 0.20f, cy + S * 0.14f, cx, cy + S * 0.26f, d1);
+            p_tri(&p, cx, cy + S * 0.02f, cx - S * 0.20f, cy - S * 0.10f, cx - S * 0.20f, cy + S * 0.14f, d2);
+            p_tri(&p, cx, cy + S * 0.02f, cx - S * 0.20f, cy + S * 0.14f, cx, cy + S * 0.26f, d2);
+            break;
+        }
+        case 5:   // pincel
+            p_seg(&p, cx - S * 0.16f, cy + S * 0.18f, cx + S * 0.10f, cy - S * 0.16f, 1, col);
+            p_circle(&p, cx - S * 0.18f, cy + S * 0.20f, (int32_t)(S * 0.08f + 0.5f), col, 255);
+            break;
+        case 6:   // candado
+            p_rect(&p, cx - S * 0.16f, cy - S * 0.02f, S * 0.32f, S * 0.24f, 3, col, 255);
+            p_arc(&p, cx, cy - S * 0.02f, S * 0.12f, 180, 360, 2, col);
+            break;
+        case 7: {   // bateria al 80 %: contorno doble, borne y relleno
+            float bx = cx - S * 0.26f, bw = S * 0.5f, bh = S * 0.3f, by2 = cy - S * 0.16f;
+            p_rrect_outline(&p, bx, by2, bw, bh, 2, col);
+            p_rrect_outline(&p, bx + 1, by2 + 1, bw - 2, bh - 2, 2, col);
+            p_rect(&p, bx + bw, by2 + bh / 3, 2, bh / 3, 0, col, 255);
+            p_rect(&p, bx + 2, by2 + 2, (bw - 4) * 0.8f, bh - 4, 1, col, 255);
+            break;
+        }
+        case 8:   // discos apilados
+            for (int k = 0; k < 3; k++) {
+                p_rect(&p, cx - S * 0.22f, cy - S * 0.16f + k * S * 0.14f, S * 0.44f, S * 0.09f, 2, col, 255);
+            }
+            break;
+        case 9:   // </>
+            p_seg(&p, cx - S * 0.05f, cy - S * 0.14f, cx - S * 0.20f, cy, 1, col);
+            p_seg(&p, cx - S * 0.20f, cy, cx - S * 0.05f, cy + S * 0.14f, 1, col);
+            p_seg(&p, cx + S * 0.05f, cy - S * 0.14f, cx + S * 0.20f, cy, 1, col);
+            p_seg(&p, cx + S * 0.20f, cy, cx + S * 0.05f, cy + S * 0.14f, 1, col);
+            break;
+        default:   // info (i)
+            p_ring(&p, cx, cy, (int32_t)(S * 0.30f), 2, col);
+            p_circle(&p, cx, cy - S * 0.13f, 2, col, 255);
+            p_rect(&p, cx - 1, cy - S * 0.03f, 3, S * 0.18f, 0, col, 255);
+            break;
+        }
+        break;
+    }
     case FLEX_GLYPH_KB_BIN: {   // papelera de la cabecera del portapapeles
         p_rect(&p, cx - 8, cy - 6, 16, 15, 3, col, 255);
         p_rect(&p, cx - 10, cy - 9, 20, 3, 0, col, 255);

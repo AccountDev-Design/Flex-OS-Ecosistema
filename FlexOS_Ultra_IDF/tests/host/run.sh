@@ -134,11 +134,16 @@ python3 ref/extract_arduino.py "$OUT/ref_paint.inc" \
 python3 ref/extract_arduino.py "$OUT/ref_raster.inc" \
     FlexOS_Ultra_Gfx.h:DIV255,mix565,px,pxA,hLine,AA_EPS,aaClipBox,fillCircleAA,strokeSegAA
 
+python3 ref/extract_arduino.py "$OUT/ref_set.inc" \
+    FlexOS_Ultra_Prefs.h:AUTOLOCK_NOPT,AUTOLOCK_OPTS,AUTOLOCK_NAMES,AUTOLOCK_DEFAULT_IDX,AUTOLOCK_DEFAULT_MS,gAutoLockMs,autoLockIdx,autoLockName,autoLockNormalize,LW_CLOCK,LW_WEATHER,LW_CAL,LW_NOTIF \
+    FlexOS_Ultra_Session.h:NLANG,LANG_ENDONYM \
+    FlexOS_Ultra_AppSettings.h:RI_GLOBE,SET_CARD_X,SET_CARD_W,DP_X,DP_W,SET_LIST_TOP,SET_LIST_BOT,DLIST_TOP,DLIST_BOT,PAGE_BG,SET_CARD_BG,SET_CARD_GLASS,SET_TXT_HI,SET_TXT_LO,SET_TXT_MUTE,SET_CHEV,SET_SIDE_SUB,SET_NAVPILL,SET_CATCARD_H,SET_CATCARD_GAP,SET_BACK_W,SET_ROW_MAX,SET_SESS_VER,SET_SESS_PATH,SET_CAT,SET_SUB,SET_DESC,SET_ACCENT,setSel,setListScroll,setRowY0,setCatY0,langNameCur,settingsDateTimeStr,buildUptime,setRowCard,drawInfoLine,drawDeviceInfo,settingsDetailContent,settingsDrawListHead,settingsListContent,settingsDrawDetailHead,setBandTop,setBandBot,setMaxScroll,settingsRenderDetailOnly,settingsRowAction,SetSessV1,setSaveSess,setLoadSess
+
 python3 ref/extract_arduino.py "$OUT/ref_layout.inc" \
     FlexOS_Ultra_Clock.h:daysInMonth \
     FlexOS_Ultra_AppFramework.h:uiBox,uiW,uiH,uiTop,uiPad,uiGap,uiFontFit,uiFontH,uiLineH
 
-SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c test_kiosk.c test_homecfg.c test_session.c test_mem_model.c test_boot.c test_calc.c test_layout.c test_fsnames.c test_fsops.c test_fk.c test_ned.c test_clip.c test_notes.c test_paint.c test_raster.c
+SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c test_kiosk.c test_homecfg.c test_session.c test_mem_model.c test_boot.c test_calc.c test_layout.c test_fsnames.c test_fsops.c test_fk.c test_ned.c test_clip.c test_notes.c test_paint.c test_raster.c test_set.c
       $ROOT/components/flex_storage/src/flex_kv.c
       $ROOT/components/flex_storage/src/flex_fs_path.c
       $ROOT/components/flex_storage/src/flex_fs_wipe.c
@@ -156,6 +161,7 @@ SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_
       $ROOT/components/flex_ui/src/apps/flex_note_model.c
       $ROOT/components/flex_ui/src/apps/flex_paint_model.c
       $ROOT/components/flex_ui/src/widgets/flex_raster.c
+      $ROOT/components/flex_ui/src/apps/flex_set_model.c
       $ROOT/components/flex_ui/src/widgets/flex_layout.c
       $ROOT/components/flex_ui/src/widgets/flex_clip.c
       $ROOT/components/flex_ui/src/widgets/flex_fk_model.c
@@ -179,8 +185,8 @@ CFLAGS=(-O1 -g -Wall -Wextra -Werror -pthread)
 build() {   # $1 = sufijo, resto = flags de sanitizador
     local sfx=$1; shift
     local refs=()
-    for r in wall glass home home_load touch drawer kb recents qs ntf homecfg session mem boot calc layout fsnames fk ned clip notes paint raster; do
-        c++ -std=gnu++17 -O1 -g -w "$@" -Iref -I"$OUT" -I$ROOT/components/flex_portable/include -c ref/ref_${r}_main.cpp -o "$OUT/ref_${r}_$sfx.o"
+    for r in wall glass home home_load touch drawer kb recents qs ntf homecfg session mem boot calc layout fsnames fk ned clip notes paint raster set; do
+        c++ -std=gnu++17 -O1 -g -w "$@" -Iref -I"$OUT" -I$ROOT/components/flex_portable/include -I$ROOT/components/flex_ui/src/apps -c ref/ref_${r}_main.cpp -o "$OUT/ref_${r}_$sfx.o"
         refs+=("$OUT/ref_${r}_$sfx.o")
     done
     c++ -std=gnu++17 -O1 -g -w "$@" -I$ROOT/components/flex_portable/include -c $ROOT/components/flex_portable/src/FlexOS_FlexLink.cpp -o "$OUT/flexlink_$sfx.o"

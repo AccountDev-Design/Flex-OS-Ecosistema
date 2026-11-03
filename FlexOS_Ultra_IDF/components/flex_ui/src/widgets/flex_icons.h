@@ -73,6 +73,10 @@ typedef enum {
     // Panel del portapapeles (Keyboard.h:1268-1327): el pin (valor 100 = el grande de la cabecera, otro = el de una ficha) y la papelera.
     FLEX_GLYPH_KB_PIN,
     FLEX_GLYPH_KB_BIN,
+    // Ajustes (AppSettings.h:151-221): glifos de fila (valor = RI_* 0..7: globo, calendario, reloj, chincheta, refrescar, nube, reiniciar, punto)
+    // y iconos de categoria (valor = 0..11). Color principal = color de texto; el hueco (chincheta, engranaje) = color de fondo del objeto.
+    FLEX_GLYPH_SET_ROW,
+    FLEX_GLYPH_SET_CAT,
 } flex_glyph_t;
 
 lv_obj_t *flex_glyph_create(lv_obj_t *parent, flex_glyph_t g, int32_t w, int32_t h);

@@ -74,7 +74,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 3 (en curso: + Recientes con memoria y sesiones) | `v3` dev | 1 431 568 B | 54,6 % | 34,1 % |
 | 3 (en curso: + Calculadora y correcciones de la revisión 6) | `v3` dev | 1 443 840 B | 55,1 % | 34,4 % |
 | 3 (en curso: + kit de componentes, Calendario y kit de archivos con su capa de operaciones) | `v3` dev | 1 454 976 B | 55,6 % | 34,7 % |
-| 3 (en curso: + Paint con la galería, el lienzo y el rasterizador de Arduino) | `v3` dev | 1 515 296 B | 57,8 % | 36,1 % |
+| 3 (en curso: + Ajustes con sus 12 pantallas y la transición) | `v3` dev | 1 535 600 B | 58,6 % | 36,6 % |
 
 La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la interfaz completa
 (Fase 15). No se ha grabado nada.
@@ -161,6 +161,15 @@ La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la
 | Paint: suspender con el dedo apoyado | La app no se ticaba suspendida | LVGL sigue entregando el dedo apoyado al lienzo oculto: se ignora mientras está suspendida (un trazo suelto aparecía al soltar) | Fidelidad |
 | Paint: errores al crear, abrir o renombrar | Silenciosos | Avisos: "No se pudo crear el dibujo", "No es un dibujo de Paint", "No se pudo abrir el dibujo", "Ya hay un dibujo con ese nombre", "Sin memoria para el lienzo" | Usabilidad |
 | Paint: bordes suaves | `fillCircleAA` / `strokeSegAA` | Portados a `flex_raster.c` con la misma aritmética (en lugar de `lv_draw_line`, que no coincide y crea una tarea de dibujo por segmento) y comparados píxel a píxel | Fidelidad visual / rendimiento |
+| Ajustes: barra de estado | La app pinta la suya con Wi-Fi y bateria FIJOS (82 %) y los glifos de navegacion | Usa la barra global del sistema (valores reales), transparente sobre la pagina | Fidelidad de datos |
+| Ajustes: valores vivos | Se congelan hasta el siguiente toque (hora, estado NTP...) | Se leen de nuevo al abrir una categoria, tras cada accion y al reanudar; la papelera se mide en la tarea de almacenamiento y la fila se actualiza al llegar ("--" mientras tanto). No hay refresco por minuto (como Arduino) | Arquitectura (la UI no toca la flash) |
+| Ajustes: servicios sin migrar | Siempre estan | Hora por red, actualizaciones, Flex Account, Conectividad/Wi-Fi/BLE, proteccion contra robo y audio son simbolos debiles: la fila dice "No disponible" (en Sincronizar ahora tambien) y tocarla avisa "Proximamente" en vez de abrir nada | Honestidad: no se ofrece lo que no funciona (inventario A11n) |
+| Ajustes: guardado | `cfgSavePrefs` reescribe 30 claves por toque | Cada fila escribe solo su clave (`flex_theme_set_*`, `flex_set_lang`, `flex_cfg_set_*`) | Desgaste de NVS |
+| Ajustes: desplazamiento | Umbral de arrastre de 6 px propio | El de LVGL, sin inercia ni rebote | Arquitectura |
+| Ajustes: volver desde el borde | Se decide al soltar con `T` | Igual (>70 px a la derecha y <90 de desvio), siguiendo el tactil del arbitro con un temporizador de 16 ms (LVGL da la pulsacion por perdida en cuanto el dedo se mueve) | Arquitectura |
+| Ajustes: transicion | Se copian filas de dos lienzos de 750 KB y la sombra son 8 columnas con alfa 62..6 | Dos paginas LVGL cuya `x` sigue la misma curva (270 ms, cubica, paralaje 28 %); sombra de LVGL de 12 px al 40 % | Ahorra 1,5 MB de PSRAM y la animacion funciona tambien en una ventana |
+| Ajustes: pagina desde y = 30 | Banda de la transicion desde y = 40 | Desde y = 30 para que el titulo de tamano 4 no quede cortado por su caja de linea | Fidelidad visual |
+| Ajustes: Fecha y hora / Zona horaria | Filas con chevron sin accion | Igual (informativas); el ajuste manual llega con la hora por red (A11n) | — |
 | Notas: lápiz del botón flotante | Trazos de 5 y 4 px | 5 y 3 px (el motor de trazos de LVGL solo da anchos impares) | Cosmético |
 | Teclado: barra y chips | `FLEX_KB_F_EXTRAS` preparado y sin dibujar | Barra de 5 botones (carita, globo, portapapeles, engranaje, más), chips de sugerencias o de símbolos con fundido de 140 ms, el panel sube y avisa (`on_resize`) | Cierra el "pendiente" de spec 01b T.8 |
 | Calendario: iniciales de los días | Fijas "D L M M J V S" | Las del idioma activo (`flex_i18n_wd_short`); en español salen las mismas | Idioma |

@@ -8,17 +8,17 @@ Arduino, tamaños) y `ESP_IDF_HARDWARE_REQUIREMENTS.md` (qué probar en la placa
 > host + escena del simulador que falla al revertir la corrección (mutación).
 
 Rama: `flexos-esp-idf` (la rama Arduino `claude/flexos-ota-system-blq9g9-2csacx` no se toca).
-Último bloque cerrado: **Paint** (A09: galería con miniaturas reales, lienzo con trazo en vivo, deshacer/limpiar, guardado atómico asíncrono, sesión; rasterizador de Arduino portado píxel a píxel); antes **Notas** (A06: lista, editor, teclado con barra y chips, portapapeles, sesión) que integra el **kit de archivos** (S5); antes **Calendario** (A19), el **kit de componentes**, **App Calculadora** (A12) y la **revisión 6**; antes, **Recientes con memoria y sesiones** (S4e), **Arranque** (S2), **Memoria y Optimizar**, **Sesiones de app** y **Personalizar inicio**. Entorno de
+Último bloque cerrado: **Ajustes** (A11: lista de 12 categorías, filas con valores reales y su acción, transición de 270 ms con paralaje, sesión; el inventario se parte en A11 / A11k teclado / A11n servicios sin migrar, el total de 2000 no cambia); antes **Paint** (A09: galería con miniaturas reales, lienzo con trazo en vivo, deshacer/limpiar, guardado atómico asíncrono, sesión; rasterizador de Arduino portado píxel a píxel); antes **Notas** (A06: lista, editor, teclado con barra y chips, portapapeles, sesión) que integra el **kit de archivos** (S5); antes **Calendario** (A19), el **kit de componentes**, **App Calculadora** (A12) y la **revisión 6**; antes, **Recientes con memoria y sesiones** (S4e), **Arranque** (S2), **Memoria y Optimizar**, **Sesiones de app** y **Personalizar inicio**. Entorno de
 compilación en un contenedor nuevo: `bash tools/setup_idf_cloud.sh` (ver "Entorno" abajo).
 
 ### Punto de reanudación (siguiente tarea exacta)
 
 1. **Siguiente app**, en este orden por valor y viabilidad sin hardware ni red: **Juegos** (A10, 40: autocontenida), **Reloj**
-   (A01, 17: reloj, alarmas, cronómetro y temporizador; las alarmas necesitan el sonido de la Fase 11), **Almacenamiento + Archivos** (A04, 76: el explorador local y los medidores salen de
+   (A01, 17: reloj, alarmas, cronómetro y temporizador; las alarmas necesitan el sonido de la Fase 11), **Ajustes del teclado** (A11k, 8: lo espera Notas), **Almacenamiento + Archivos** (A04, 76: el explorador local y los medidores salen de
    `flex_fs_dirstat_async`/`flex_fs_list_async`; la pestaña de Flex Cloud y la tarjeta del teléfono dependen de N4/A16: al
-   abrirlo habrá que separar en el inventario la parte local de la de nube, anotando la causa, porque el total no cambia), **Ajustes**
-   (A11, 25: abre Optimizar y las Ajustes del teclado, `flex_kbsettings_open()`, que Notas ya espera como símbolo débil; muchas
-   filas dependen de servicios de las Fases 6-8).
+   abrirlo habrá que separar en el inventario la parte local de la de nube, anotando la causa, porque el total no cambia).
+   Las filas de **A11n** (hora por red, actualizaciones, Flex Account, Wi-Fi/BLE, robo, audio) se acreditan cuando exista cada servicio: son
+   símbolos débiles `flex_*` que `app_settings.c` ya consulta (hoy ausentes: la fila dice "No disponible" y tocarla avisa "Proximamente").
    Cada app implementa `save_session`/`load_session`/`shed` y su escena con mutantes. Ejemplo completo de app con ficheros: `apps/app_notes.c`.
 2. Deuda: el historial de Device Care no tiene descriptor de sesión (se tratará con esa app); las miniaturas de páginas fuera
    de pantalla con vidrio por icono salen con el fondo desplazado (cosmético); S5b (barra de medios) espera a Música/Galería.
@@ -67,6 +67,7 @@ source ~/esp/env.sh && tools/build.sh --rev v3   # firmware (no graba nada)
 | Kit de archivos (03 §5): menú contextual, diálogo de nombre con el teclado del sistema, confirmación, papelera (lista con ventana de filas), "sin almacenamiento", texto en caja. **S5 se acredita al integrarlo en Notas** | `widgets/flex_filekit.*`, `flex_fk_model.*`, glifos del menú en `flex_icons.c`; disco real en el simulador (`sim_disk_*`) | host (`test_fk` frente a `FileKit.h`) + escena `kit-archivos` (11 mutantes) |
 | App Notas (03 §6): lista de tarjetas (vista previa real, selección, menú, renombrar, papelera, borrar), editor (texto con cursor, selección y manijas, Cortar/Copiar/Pegar/Todo, pulsación larga, scroll, acentos, corrector), teclado con barra de 5 botones y chips, portapapeles de 12 ranuras con panel, menú "más", autoguardado, sesión `notas.bin` v3. Lógica pura probada frente a Arduino (3 000 dibujos con cursor, selección, ortografía y menú) | `apps/app_notes.c`, `flex_ned.*`, `flex_note_model.*`, `widgets/flex_clip.*`, `flex_kb.c` (extras), glifos en `flex_icons.c` | host (`test_ned`, `test_clip`, `test_notes`) + escena `notas` (15 mutantes detectados, 2 equivalentes) |
 | App Paint (03 §7): galería (tarjetas con la miniatura real: los mismos trazos reproducidos a escala; botón flotante; selección; menú; renombrar; papelera; borrar), lienzo (dibujo con su proporción, trazo en vivo con bordes suaves, 6 colores, 3 grosores, deshacer y limpiar reales), guardado atómico asíncrono tras cada trazo (una escritura en vuelo, la siguiente lleva lo último), reintento tras un fallo de disco, sesión `paint.bin` v1, `shed` de miniaturas y del lienzo. Formato `.fxp`, geometría, captura del trazo y rasterizador probados frente a Arduino (12 000 operaciones, 475 995 fotogramas de dedo, 5 000 figuras píxel a píxel) | `apps/app_paint.c`, `flex_paint_model.*`, `widgets/flex_raster.*` | host (`test_paint`, `test_raster`; 12 mutantes del modelo) + escena `paint` (23 mutantes detectados) |
+| App Ajustes (03b §11): lista de 12 categorías y su pantalla con scroll nativo sin inercia, transición de 270 ms con paralaje del 28 %, volver por chevron / borde izquierdo / botón atrás, 12 pantallas con sus filas y valores REALES (idioma, formato de hora, brillo con el ciclo de 25 en 25, estilo, apariencia, barra de navegación, widgets del bloqueo, iconos, transiciones, bloqueo de inactividad, apagado seguro, restablecer, almacenamiento con la papelera medida, "Dispositivo"), cada fila escribe solo su clave, sesión `ajustes.bin` v1. Contenido, acciones y sesión probados frente a Arduino (18 000 pantallas, 9 000 acciones); 8 glifos de fila y 12 iconos de categoría en `flex_icons.c` | `apps/app_settings.c`, `flex_set_model.*`, `widgets/flex_icons.c` | host (`test_set`; 16 mutantes del modelo) + escena `ajustes` (16 mutantes de la app) |
 
 ## Progreso global (método congelado v1)
 
@@ -113,7 +114,9 @@ Cálculo reproducible: `python3 tools/progress.py` (lee la tabla de abajo; no ha
 | A08 | App Flex Compass (brujula + AHRS) y sensores BNO085 | 40 | 0 | 0 |
 | A09 | App Paint | 9 | 1 | 0 |
 | A10 | App Juegos (Jumper y demas) | 40 | 0 | 0 |
-| A11 | App Ajustes (+ ajustes de teclado y conectividad) | 25 | 0 | 0 |
+| A11 | App Ajustes: lista de categorias, las 12 pantallas con sus filas reales, transicion, sesion y acciones locales | 14 | 1 | 0 |
+| A11k | Ajustes del teclado (01b §8: filas, idiomas, tamano y diseno, atajos, simbolos; el simbolo debil `flex_kbsettings_open` que Notas ya espera) | 8 | 0 | 0 |
+| A11n | Ajustes: filas que dependen de servicios sin migrar (hora por red, actualizaciones, Flex Account, Conectividad/Wi-Fi/BLE, proteccion contra robo, audio); hoy dicen "No disponible" y no abren nada | 3 | 0 | 0 |
 | A12 | App Calculadora (cuatro operaciones, linea de operacion, sesion calc.bin) | 3 | 1 | 0 |
 | A19 | App Calendario | 3 | 1 | 0 |
 | A13 | App Camara (necesita el modelo del sensor) | 3 | 0 | 0 |
