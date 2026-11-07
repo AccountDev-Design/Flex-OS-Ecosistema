@@ -139,6 +139,8 @@ void flex_kb_shortcuts_defaults(flex_kb_prefs_t *p);
 void flex_kb_prefs_normalize(flex_kb_prefs_t *p);  // kbPrefsNormalize
 // kbPrefsLoad: lee la cache de ajustes (flex_cfg_*) y normaliza.
 void flex_kb_prefs_load(flex_kb_prefs_t *p);
+// kbPrefsSave: las claves del teclado (solo estas, no las del sistema), con los mismos tipos y blobs que Arduino.
+void flex_kb_prefs_save(const flex_kb_prefs_t *p);
 // Talla de letra de las teclas (1..3 = FLEX_FONT_S1..S3) y su desfase vertical
 // (kbFontSize / kbFontDy), radio (kbRadius).
 int  flex_kb_font_size(const flex_kb_prefs_t *p);

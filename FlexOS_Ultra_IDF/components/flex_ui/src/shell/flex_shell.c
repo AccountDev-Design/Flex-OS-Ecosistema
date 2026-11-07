@@ -464,10 +464,18 @@ void flex_app_launch(int id, const lv_area_t *from_icon)
     flex_app_open(id, from_icon);
 }
 
+bool flex_kbs_active(void);   // app_kbsettings.c: Ajustes del teclado, modal sobre la app en primer plano
+void flex_kbs_back(void);
+void flex_kbs_close_now(void);
+
 void flex_sys_back(void)
 {
     if (flex_optimize_active()) {
         return;   // Optimizar es modal mientras trabaja
+    }
+    if (flex_kbs_active()) {
+        flex_kbs_back();   // Ajustes del teclado: de una pagina a la anterior y, de la principal, sale
+        return;
     }
     if (flex_kiosk_active()) {
         return;   // kiosco: Atras, Inicio y Recientes no hacen nada (Core.h:552-571)
@@ -491,6 +499,7 @@ void flex_sys_home(void)
     if (flex_optimize_active()) {
         return;   // Optimizar es modal mientras trabaja
     }
+    flex_kbs_close_now();   // Ajustes del teclado se cierra y Inicio sigue su camino
     if (flex_kiosk_active()) {
         return;
     }
@@ -511,6 +520,7 @@ void flex_sys_recents(void)
     if (flex_optimize_active()) {
         return;   // Optimizar es modal mientras trabaja
     }
+    flex_kbs_close_now();
     if (flex_kiosk_active()) {
         return;
     }
@@ -625,6 +635,7 @@ void flex_shell_lock(void)
     flex_home_edit_close_now();   // el Modo edicion sale guardando (edExit)
     flex_home_customize_close_now();   // Personalizar inicio tambien (hcClose(true))
     flex_optimize_close_now();
+    flex_kbs_close_now();
     flex_recents_close_now();
     flex_lock_set_return_app(-1);
     suspend_fg();

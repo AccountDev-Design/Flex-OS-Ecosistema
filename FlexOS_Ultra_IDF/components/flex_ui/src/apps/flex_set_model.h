@@ -43,7 +43,7 @@ extern const uint16_t flex_set_accent[FLEX_SET_NCAT];    // SET_ACCENT (RGB565)
 // glifos de fila (RI_*)
 typedef enum { FLEX_RI_GLOBE = 0, FLEX_RI_CAL, FLEX_RI_CLOCK, FLEX_RI_PIN, FLEX_RI_REFRESH, FLEX_RI_CLOUD, FLEX_RI_RESET, FLEX_RI_DOT } flex_ri_t;
 // roles de color del texto (los resuelve el tema: TH_TXT, TH_TXT2, TH_MUTE)
-typedef enum { FLEX_SR_HI = 0, FLEX_SR_LO, FLEX_SR_MUTE } flex_sr_t;
+typedef enum { FLEX_SR_HI = 0, FLEX_SR_LO, FLEX_SR_MUTE, FLEX_SR_DIS, FLEX_SR_ONACC } flex_sr_t;   // + TH_DIS (fila apagada por hardware) y TH_ONACC (sobre el acento)
 
 // ---- lo que las filas leen del sistema -----------------------------------------------------------------------------------
 #define FLEX_LW_CLOCK   0x01
@@ -100,6 +100,9 @@ typedef enum {
     FLEX_SO_TEXT_R,      // drawTextR: alineado a la derecha en x
     FLEX_SO_CHEV,        // chevron ">": centro (x, y)
     FLEX_SO_BACK,        // chevron "<" de la cabecera de categoria
+    FLEX_SO_FRAME,       // contorno redondeado (campo enfocado): x, y, w, h, r; color de acento
+    FLEX_SO_BTN,         // boton relleno: x, y, w, h, r; glyph 0 = primario, 1 = peligro
+    FLEX_SO_TEXT_C,      // drawTextC: texto CENTRADO en x
 } flex_so_kind_t;
 
 typedef struct {

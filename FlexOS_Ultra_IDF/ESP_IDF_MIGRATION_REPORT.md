@@ -74,7 +74,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 3 (en curso: + Recientes con memoria y sesiones) | `v3` dev | 1 431 568 B | 54,6 % | 34,1 % |
 | 3 (en curso: + Calculadora y correcciones de la revisión 6) | `v3` dev | 1 443 840 B | 55,1 % | 34,4 % |
 | 3 (en curso: + kit de componentes, Calendario y kit de archivos con su capa de operaciones) | `v3` dev | 1 454 976 B | 55,6 % | 34,7 % |
-| 3 (en curso: + Ajustes con sus 12 pantallas y la transición) | `v3` dev | 1 535 600 B | 58,6 % | 36,6 % |
+| 3 (en curso: + Ajustes del teclado con su editor de atajos) | `v3` dev | 1 548 032 B | 59,1 % | 36,9 % |
 
 La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la interfaz completa
 (Fase 15). No se ha grabado nada.
@@ -170,6 +170,11 @@ La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la
 | Ajustes: transicion | Se copian filas de dos lienzos de 750 KB y la sombra son 8 columnas con alfa 62..6 | Dos paginas LVGL cuya `x` sigue la misma curva (270 ms, cubica, paralaje 28 %); sombra de LVGL de 12 px al 40 % | Ahorra 1,5 MB de PSRAM y la animacion funciona tambien en una ventana |
 | Ajustes: pagina desde y = 30 | Banda de la transicion desde y = 40 | Desde y = 30 para que el titulo de tamano 4 no quede cortado por su caja de linea | Fidelidad visual |
 | Ajustes: Fecha y hora / Zona horaria | Filas con chevron sin accion | Igual (informativas); el ajuste manual llega con la hora por red (A11n) | — |
+| Ajustes del teclado: pantalla | Estado propio `ST_KBSET` a todo el alto | Pantalla modal sobre la app que la abre (Ajustes o el engranaje del teclado de Notas), como Optimizar: Atras va de pagina en pagina, Inicio / Recientes / el bloqueo la cierran, y al salir avisa a quien la abrio | Arquitectura |
+| Ajustes del teclado: editor de atajos | El teclado se REDIBUJA a mano dentro del editor (copia de la geometria y las teclas) | Es el teclado del sistema (`flex_kb`) escribiendo en el campo enfocado; se apoya sobre la barra de navegacion, que en IDF sigue siempre a la vista | Una sola implementacion del teclado |
+| Ajustes del teclado: idioma activo | `kbLangEs` global | Dura lo que el encendido y se sincroniza con la tecla ES/EN del teclado del editor | Fidelidad |
+| Ajustes del teclado: "dedos a la vez" | Maximo de puntos del GT911 visto | El indev de LVGL entrega UN punto: la fila dice "1 dedo", que es lo cierto (la escritura rapida multitoque sigue pendiente, 01b) | Honestidad |
+| Ajustes del teclado: transicion | Copia de buffers por tiempo | Objetos LVGL: zoom del 88 % al 100 %, fundido o deslizar, 90 ms | Arquitectura |
 | Notas: lápiz del botón flotante | Trazos de 5 y 4 px | 5 y 3 px (el motor de trazos de LVGL solo da anchos impares) | Cosmético |
 | Teclado: barra y chips | `FLEX_KB_F_EXTRAS` preparado y sin dibujar | Barra de 5 botones (carita, globo, portapapeles, engranaje, más), chips de sugerencias o de símbolos con fundido de 140 ms, el panel sube y avisa (`on_resize`) | Cierra el "pendiente" de spec 01b T.8 |
 | Calendario: iniciales de los días | Fijas "D L M M J V S" | Las del idioma activo (`flex_i18n_wd_short`); en español salen las mismas | Idioma |

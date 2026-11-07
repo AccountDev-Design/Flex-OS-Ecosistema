@@ -398,6 +398,29 @@ void flex_kb_prefs_load(flex_kb_prefs_t *p)
     flex_kb_prefs_normalize(p);
 }
 
+void flex_kb_prefs_save(const flex_kb_prefs_t *p)
+{
+    flex_cfg_set_i32("kbsize", p->size);
+    flex_cfg_set_bool("kbfast", p->fast);
+    flex_cfg_set_bool("kbtool", p->toolbar);
+    flex_cfg_set_bool("kbpred", p->predict);
+    flex_cfg_set_bool("kbspell", p->spell);
+    flex_cfg_set_bool("kbemoji", p->emoji_sug);
+    flex_cfg_set_bool("kbhicon", p->hicon);
+    flex_cfg_set_i32("kbopa", p->opacity);
+    flex_cfg_set_i32("kbstyle", p->style);
+    flex_cfg_set_i32("kbfont", p->font);
+    flex_cfg_set_i32("kblp", p->lp_ms);
+    flex_cfg_set_i32("kbfx", p->fx_ms);
+    uint8_t sb[FLEX_KB_SYMS];
+    for (int i = 0; i < FLEX_KB_SYMS; i++) {
+        sb[i] = (uint8_t)p->sym[i];
+    }
+    flex_cfg_set_blob("kbsyms", sb, sizeof(sb));
+    flex_cfg_set_blob("kbscabr", p->sc_abr, sizeof(p->sc_abr));
+    flex_cfg_set_blob("kbscexp", p->sc_exp, sizeof(p->sc_exp));
+}
+
 // kbFontSize / kbFontDy / kbRadius (Keyboard.h:238-241)
 int flex_kb_font_size(const flex_kb_prefs_t *p)
 {

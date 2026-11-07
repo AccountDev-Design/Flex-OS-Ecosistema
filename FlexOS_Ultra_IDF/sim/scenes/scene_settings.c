@@ -36,6 +36,7 @@ bool flex_app_settings_row_xy(int i, int *x, int *y);
 const flex_set_sys_t *flex_app_settings_sys(void);
 int flex_app_settings_page_x(bool detail);
 bool flex_app_settings_shown(const char *txt);
+bool flex_kbs_active(void);
 bool flex_app_settings_list_hidden(void);
 bool flex_session_pending(int id);
 
@@ -273,9 +274,12 @@ bool scene_settings_run(void)
     CHK(flex_look()->glass);
     row(0);
     CHK(!flex_look()->glass);
-    row(3);                                                      // Teclado: los ajustes del teclado llegan con su bloque: avisa
-    CHK(flex_kit_toast_count(flex_app_settings_root()) == 1);
-    sim_run(2000);
+    row(3);                                                      // Teclado: abre los Ajustes del teclado (A11k)
+    sim_run(300);
+    CHK(flex_kbs_active() && flex_kit_toast_count(flex_app_settings_root()) == 0);
+    flex_sys_back();                                             // atras: sale de esa pantalla y Ajustes sigue en su categoria
+    sim_run(300);
+    CHK(!flex_kbs_active() && flex_app_settings_view() == 1 && flex_app_settings_sel() == 5);
     back_chevron();
     CHK(wait_view(0));
 

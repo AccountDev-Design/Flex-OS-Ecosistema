@@ -944,8 +944,9 @@ void flex_kb_set_input_enabled(kb, en); void flex_kb_reload_prefs(kb)
   existen en algunas capas): `on_resize` avisa para recolocar lo que va encima.
 * **Portapapeles de 12 ranuras (Fase D)**: lógica pura en `flex_clip.c` (frente a Arduino, con la NVS `clip0..clip11` de las
   fijadas) y panel de 2 columnas en la app Notas (`app_notes.c`), que es quien lo usa.
-* **Pendiente**: las **Ajustes del teclado** (botón del engranaje) pertenecen a la app Ajustes (03b §11);
-  **escritura rápida multitáctil (Fase B)**: con un solo `indev` de puntero, LVGL solo ve un dedo; la versión actual escribe al
+* **Ajustes del teclado** (botón del engranaje y Ajustes > Personalización > Teclado): implementadas en `app_kbsettings.c` (`flex_kbs_model.c` probado
+  frente a `KeyboardSettings.h`); editor de atajos con el propio teclado.
+* **Pendiente**: **escritura rápida multitáctil (Fase B)**: con un solo `indev` de puntero, LVGL solo ve un dedo; la versión actual escribe al
   tocar (lo mismo para un dedo). El *rollover* de varios dedos necesita la capa de gestos del sistema (§2.3): el `read_cb`
   del táctil entrega los puntos del GT911 con su *track id* y el teclado dispara una tecla por id nuevo (`kbMtPoll`); el
   diagnóstico "el panel ha dado N dedos" sale de ahí.

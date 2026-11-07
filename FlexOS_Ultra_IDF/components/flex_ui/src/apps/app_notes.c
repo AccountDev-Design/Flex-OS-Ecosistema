@@ -1293,6 +1293,13 @@ static void kb_enter_cb(lv_obj_t *kb, void *user)
     }
 }
 
+static void kbs_closed_cb(void)
+{
+    if (N.created && N.view == 1 && N.kb) {
+        flex_kb_reload_prefs(N.kb);
+    }
+}
+
 static void kb_tool_cb(lv_obj_t *kb, int tool, void *user)
 {
     (void)kb;
@@ -1308,7 +1315,7 @@ static void kb_tool_cb(lv_obj_t *kb, int tool, void *user)
         // Ajustes del teclado: pertenecen a la app Ajustes (03b §11); mientras no exista no hay a donde ir
         extern void flex_kbsettings_open(void (*on_back)(void)) __attribute__((weak));
         if (flex_kbsettings_open) {
-            flex_kbsettings_open(NULL);
+            flex_kbsettings_open(kbs_closed_cb);   // al salir, el teclado de la nota lee sus ajustes otra vez (kbApplySize, kbChipsBuild)
         } else {
             flex_kit_toast(N.root, "Ajustes del teclado: con la app Ajustes");
         }
