@@ -77,7 +77,10 @@ lv_obj_t *flex_kit_slider(lv_obj_t *parent, int x, int y, int w, int min, int ma
 
 // ---- pestanas segmentadas (relojDrawTabs, AppFramework.h:511) ------------------------------------
 typedef void (*flex_kit_seg_cb_t)(lv_obj_t *seg, int index, void *user);
-// alto 36, margenes 16, superficie de tarjeta r = h/2, segmento activo TH_PRIM r = (h-4)/2
+// alto 36, superficie de tarjeta r = h/2, segmento activo TH_PRIM r = (h-4)/2, segmentos de w / n (146 px con w = 440)
+lv_obj_t *flex_kit_segmented_at(lv_obj_t *parent, int x, int y, int w, const char *const *labels, int n, int active,
+                                flex_kit_seg_cb_t cb, void *user);
+// A pantalla completa (margen uiPad() = 20): x = 20, w = 440
 lv_obj_t *flex_kit_segmented(lv_obj_t *parent, int y, const char *const *labels, int n, int active, flex_kit_seg_cb_t cb,
                              void *user);
 void flex_kit_segmented_set(lv_obj_t *seg, int active);   // no llama al callback

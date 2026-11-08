@@ -144,7 +144,12 @@ bool scene_widgets_run(void)
     CHK(cro != NULL);
     sim_crono_set(65000, true);
     sim_run(2100);
-    CHK(find_text(scr, "01:05", true) == cro);   // el mismo objeto: no se rehizo
+    // el mismo objeto (no se rehizo) con el tiempo al dia. El cronometro es el servicio real (corre solo): 65 s + lo que paso,
+    // leido cada 2 s. Se mira el texto del propio objeto: la capsula de la barra de estado muestra el mismo tiempo.
+    {
+        const char *ct = lv_label_get_text(cro);
+        CHK(strcmp(ct, "01:05") == 0 || strcmp(ct, "01:06") == 0 || strcmp(ct, "01:07") == 0);
+    }
     CHK(find_text(scr, "Cron\xC3\xB3metro en marcha", true));
 
     // 3) el cronometro no es un boton; Camara si

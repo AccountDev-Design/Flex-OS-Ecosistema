@@ -32,6 +32,7 @@ bool scene_paint_run(void);
 bool scene_settings_run(void);
 bool scene_kbsettings_run(void);
 bool scene_calendar_run(void);
+bool scene_reloj_run(void);
 
 const sim_scene_t sim_scenes[] = {
     {"galeria", scene_gallery_run},
@@ -63,6 +64,7 @@ const sim_scene_t sim_scenes[] = {
     {"ajustes", scene_settings_run},
     {"teclado-ajustes", scene_kbsettings_run},
     {"calendario", scene_calendar_run},
+    {"reloj", scene_reloj_run},
     {"apagado", scene_poweroff_run},
     {NULL, NULL},
 };

@@ -334,6 +334,21 @@ relleno con alfa 70 de `TH_DANGER` (si RUN) o acento, más contorno 1 px del mis
   `lv_timer` de 33 ms solo en RUN.
 * Respetar: cápsula sin vidrio, prioridad cápsula > hora normal, zona de toque del icono vs resto, umbral 700 ms.
 
+**Implementado** (`app_reloj.c`, `flex_chrono_model.c`, `shell/flex_crono.c`; pruebas en `test_chrono.c` y la escena `reloj`):
+* Modelo puro `flex_chrono_model` (sin LVGL, `now` inyectado): lógica, formato, glifo, cápsula (clase de formato, ancho, posición,
+  prioridad), `cronoBarSurface`, `cronoCapsuleTick`, maqueta, esfera, fila de vueltas, tarjeta (fotograma, contenido), tacto
+  (`cronoOverlayTouch`) y la maqueta de las pestañas y de la pestaña Hora. Se compara con el código EXTRAÍDO de Arduino
+  (`ref_chrono_main.cpp`: `AppChrono.h` y `relojBody/relojTabs/appRelojHoraRender` compilados tal cual con dobles que registran lo
+  dibujado): secuencias aleatorias con desbordamiento de `millis`, 2048 combinaciones de superficie, el dibujo de la esfera, la tabla,
+  los botones y la tarjeta cuadro a cuadro, 60 000 cuadros de tacto y la pestaña Hora en 8 anchos × 9 alturas.
+* Servicio `flex_crono` (estado único; en lugar de eventos, la app y la barra miran las banderas de "repintar" del modelo y un
+  `lv_timer` de 100 ms —16 ms con la tarjeta en pantalla— decide qué hacer con la cápsula, igual que `cronoCapsuleTick`):
+  la cápsula es un hijo de la barra de estado del escritorio y del marco estándar (`flex_statusbar_enable_crono`), la tarjeta un
+  objeto de `lv_layer_top` que se crea al abrir y se borra al cerrar (cero bytes fijos; Arduino reservaba 318 KB de PSRAM), y el
+  tacto un gancho de sistema de prioridad -1 (antes que la isla de avisos): la tarjeta lo reclama todo, la cápsula solo el toque
+  que consume. El mosaico "Cronómetro" del panel rápido y el widget del escritorio leen el mismo estado.
+* Sin migrar: Temporizador y alarmas. Arduino no los tiene (la pestaña dice "Próximamente"); el inventario los separa en A01t.
+
 ---
 
 ## 3. Calculadora

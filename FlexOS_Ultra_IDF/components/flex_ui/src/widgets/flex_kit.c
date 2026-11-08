@@ -441,13 +441,14 @@ static void seg_click_cb(lv_event_t *e)
     }
 }
 
-lv_obj_t *flex_kit_segmented(lv_obj_t *p, int y, const char *const *labels, int n, int active, flex_kit_seg_cb_t cb, void *user)
+lv_obj_t *flex_kit_segmented_at(lv_obj_t *p, int x, int y, int w, const char *const *labels, int n, int active,
+                                flex_kit_seg_cb_t cb, void *user)
 {
     if (n < 1 || n > SEG_MAX) {
         return NULL;
     }
-    const int h = 36, pad = 16, w = 480 - 2 * pad;
-    lv_obj_t *bar = box(p, pad, y, w, h, h / 2);
+    const int h = 36;
+    lv_obj_t *bar = box(p, x, y, w, h, h / 2);
     flex_surface(bar, FLEX_SURF_CARD, FLEX_BD_FLAT);
     seg_t *c = ctx_new(bar, sizeof(*c));
     if (!c) {
@@ -457,20 +458,27 @@ lv_obj_t *flex_kit_segmented(lv_obj_t *p, int y, const char *const *labels, int 
     c->active = active;
     c->cb = cb;
     c->user = user;
-    int seg = (w - 4) / n;
+    // relojDrawTabs: seg = w / n; el activo ocupa (sx + 2, y + 2, seg - 4, h - 4) con radio (h - 4) / 2
+    int seg = w / n;
     for (int i = 0; i < n; i++) {
-        lv_obj_t *s = box(bar, 2 + i * seg, 2, seg, h - 4, (h - 4) / 2);
+        lv_obj_t *s = box(bar, i * seg + 2, 2, seg - 4, h - 4, (h - 4) / 2);
         lv_obj_set_clickable(s, true);
         lv_obj_add_event_cb(s, seg_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
         lv_obj_t *l = text(s, labels[i], FLEX_FONT_S2, flex_th()->txt2);
         flex_label_one_line(l, seg - 12);
         lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_x(l, 6);
+        lv_obj_set_x(l, 4);
         flex_label_cap_y(l, 11);
         c->seg[i] = s;
     }
     seg_apply(c);
     return bar;
+}
+
+lv_obj_t *flex_kit_segmented(lv_obj_t *p, int y, const char *const *labels, int n, int active, flex_kit_seg_cb_t cb, void *user)
+{
+    // a pantalla completa uiPad() = 20: x = 20, w = 440
+    return flex_kit_segmented_at(p, 20, y, 440, labels, n, active, cb, user);
 }
 
 void flex_kit_segmented_set(lv_obj_t *bar, int active)

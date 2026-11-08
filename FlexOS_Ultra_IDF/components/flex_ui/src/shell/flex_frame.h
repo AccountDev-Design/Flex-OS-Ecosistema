@@ -19,6 +19,11 @@ typedef enum {
 // la conexion.
 lv_obj_t *flex_statusbar_create(lv_obj_t *parent, flex_sb_kind_t kind);
 void flex_statusbar_refresh_all(void);
+// La barra aloja la capsula del cronometro (escritorio y marco estandar de app): la hora se corre o se cede (cronoBarClock)
+void flex_statusbar_enable_crono(lv_obj_t *bar);
+void flex_statusbar_crono_update(void);   // solo el texto de la capsula (cada segundo)
+// Pruebas: la capsula visible en alguna barra (rectangulo y texto)
+bool flex_statusbar_crono_shown(lv_area_t *out, char *text, size_t n);
 
 // Barra de navegacion del sistema (en lv_layer_top: ninguna app puede taparla).
 typedef enum {

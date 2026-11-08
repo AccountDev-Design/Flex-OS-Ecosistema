@@ -61,4 +61,5 @@ void test_paint(void);
 void test_raster(void);
 void test_set(void);
 void test_kbs(void);
+void test_chrono(void);
 #define FLEX_APP_N_TEST 19

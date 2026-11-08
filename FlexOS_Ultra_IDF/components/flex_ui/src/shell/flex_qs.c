@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "flex_crono.h"
 #include "flex_app.h"
 #include "flex_app_ids.h"
 #include "flex_auth.h"
@@ -158,6 +159,7 @@ static bool qs_shown(int id)
     case FLEX_QS_CAMERA:
     case FLEX_QS_GALLERY:
     case FLEX_QS_DND:   // politica del sistema (flex_notif.c), no un periferico
+    case FLEX_QS_CRONO: // el cronometro de la app Reloj (flex_crono.c)
     case FLEX_QS_POWEROFF:
         return true;
     case FLEX_QS_GLASSFX:
@@ -184,6 +186,7 @@ static bool ctl_on(int id)
     case FLEX_QS_THEME: return flex_look()->dark;   // ON = oscuro (Arduino lo tenia al reves)
     case FLEX_QS_GLASS: return flex_look()->glass;
     case FLEX_QS_DND: return flex_notif_dnd();
+    case FLEX_QS_CRONO: return flex_crono_running();
     default: return false;
     }
 }
@@ -206,6 +209,7 @@ static void ctl_sub(int id, char *o, size_t n)
     case FLEX_QS_THEME: snprintf(o, n, "%s", flex_look()->dark ? "Oscuro" : "Claro"); break;
     case FLEX_QS_GLASS: snprintf(o, n, "%s", flex_look()->glass ? "Liquid Glass" : "Plano"); break;
     case FLEX_QS_BRIGHT: snprintf(o, n, "%d%%", bright()); break;
+    case FLEX_QS_CRONO: flex_crono_state_text(o, n); break;
     // Lo que de verdad pasa. "Avisos, sin sonido" llegara con el audio (Fase 11).
     case FLEX_QS_DND: snprintf(o, n, "%s", flex_notif_dnd() ? "Sin avisos" : "Avisos normales"); break;
     case FLEX_QS_GLASSFX: {
@@ -1119,6 +1123,7 @@ static bool exec_ctl(int id, bool detail)
         flex_cfg_set_bool("airpl", !airplane());
         break;
     case FLEX_QS_DND: flex_notif_set_dnd(!flex_notif_dnd()); break;
+    case FLEX_QS_CRONO: flex_crono_svc_toggle(); break;   // qpTapCrono: marcha <-> pausa
     case FLEX_QS_THEME: flex_theme_set_dark(!flex_look()->dark); return false;   // el aviso de tema rehace el panel
     case FLEX_QS_GLASS: flex_theme_set_glass(!flex_look()->glass); return false;
     case FLEX_QS_GLASSFX:

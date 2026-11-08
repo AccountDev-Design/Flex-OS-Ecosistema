@@ -747,12 +747,9 @@ int sim_reset_reboots(void) { return s_fr_reboots; }
 const flex_fr_marker_t *sim_reset_disk(void) { return &s_fr_disk; }
 void sim_reset_set_disk(const flex_fr_marker_t *m) { s_fr_disk = *m; }
 
-// ---- Cronometro de la app Reloj (aun sin migrar): lo pone la escena de widgets ----------
-static uint32_t s_cro_ms;
-static bool s_cro_run;
-uint32_t flex_crono_elapsed_ms(void) { return s_cro_ms; }
-bool flex_crono_running(void) { return s_cro_run; }
-void sim_crono_set(uint32_t ms, bool running) { s_cro_ms = ms; s_cro_run = running; }
+// ---- Cronometro: el servicio real (flex_crono.c); la escena de widgets lo pone en un estado conocido ----------
+void flex_crono_svc_test_set(uint32_t elapsed_ms, bool running);
+void sim_crono_set(uint32_t ms, bool running) { flex_crono_svc_test_set(ms, running); }
 
 // ---- tactil multipunto: los puntos los fija la escena (sim_set_frame) ------------------------
 static flex_touch_frame_t s_frame;

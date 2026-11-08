@@ -1,9 +1,11 @@
 #include "flex_frame.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "flex_app.h"
 #include "flex_clock.h"
+#include "flex_crono.h"
 #include "flex_i18n.h"
 #include "flex_icons.h"
 #include "flex_theme.h"
@@ -54,10 +56,100 @@ void flex_label_cap_center(lv_obj_t *label, int32_t cx, int32_t y)
 typedef struct {
     flex_sb_kind_t kind;
     lv_obj_t *obj, *time, *date, *wifi, *batt;
+    bool crono;                       // aloja la capsula del cronometro
+    lv_obj_t *cap, *cap_gl, *cap_lbl; // capsula: pildora opaca, glifo y tiempo
 } sb_t;
 
 #define SB_MAX 24
 static sb_t *s_sb[SB_MAX];
+
+// cronoBarClock: la hora en x = 20 y la capsula detras a 12 px; si no cabe, la capsula pasa a x = 20 y la hora se cede.
+// Pildora opaca a proposito (sin vidrio): se repinta cada segundo encima de si misma.
+static void sb_crono_layout(sb_t *sb)
+{
+    char cs[16], txt[16];
+    flex_clock_str_bar(cs, sizeof(cs));
+    flex_crono_bar_t bar;
+    int cw = 0;
+    flex_crono_svc_bar_view(flex_text_width(cs, FLEX_FONT_S2), &bar, &cw, txt, sizeof(txt));
+    lv_obj_set_hidden(sb->time, !bar.show_clock);
+    if (!bar.on) {
+        if (sb->cap) {
+            lv_obj_set_hidden(sb->cap, true);
+        }
+        return;
+    }
+    const flex_palette_t *t = flex_th();
+    if (!sb->cap) {
+        sb->cap = flex_box(sb->obj);
+        lv_obj_set_clickable(sb->cap, false);
+        lv_obj_set_style_radius(sb->cap, FLEX_CRONO_CAP_H / 2, 0);
+        lv_obj_set_style_bg_opa(sb->cap, LV_OPA_COVER, 0);
+        sb->cap_gl = flex_glyph_create(sb->cap, FLEX_GLYPH_STOPWATCH, FLEX_CRONO_CAP_ICON, FLEX_CRONO_CAP_ICON);
+        // cronoGlyph(x + PADL + ir, y + h / 2 + 1, ir - 2, ONACC, 1.5)
+        int ir = FLEX_CRONO_CAP_ICON / 2;
+        flex_glyph_set(sb->cap_gl, FLEX_GLYPH_STOPWATCH, (ir - 2) | (15 << 8));
+        lv_obj_set_pos(sb->cap_gl, FLEX_CRONO_CAP_PADL, FLEX_CRONO_CAP_H / 2 + 1 - ir);
+        sb->cap_lbl = flex_label(sb->cap, "", FLEX_FONT_S2, t->on_acc);
+        lv_obj_set_x(sb->cap_lbl, FLEX_CRONO_CAP_PADL + FLEX_CRONO_CAP_ICON + FLEX_CRONO_CAP_GAP);
+        flex_label_cap_y(sb->cap_lbl, 8);
+    }
+    lv_obj_set_hidden(sb->cap, false);
+    lv_obj_set_pos(sb->cap, bar.x, FLEX_CRONO_CAP_Y);
+    lv_obj_set_size(sb->cap, cw, FLEX_CRONO_CAP_H);
+    lv_obj_set_style_bg_color(sb->cap, flex_accent(), 0);
+    lv_obj_set_style_text_color(sb->cap_lbl, t->on_acc, 0);
+    lv_obj_set_style_text_color(sb->cap_gl, t->on_acc, 0);
+    if (strcmp(lv_label_get_text(sb->cap_lbl), txt) != 0) {
+        lv_label_set_text(sb->cap_lbl, txt);
+    }
+}
+
+void flex_statusbar_enable_crono(lv_obj_t *bar)
+{
+    for (int i = 0; i < SB_MAX; i++) {
+        if (s_sb[i] && s_sb[i]->obj == bar) {
+            s_sb[i]->crono = true;
+            sb_crono_layout(s_sb[i]);
+            return;
+        }
+    }
+}
+
+void flex_statusbar_crono_update(void)
+{
+    char cs[16], txt[16];
+    for (int i = 0; i < SB_MAX; i++) {
+        sb_t *sb = s_sb[i];
+        if (!sb || !sb->crono || !sb->cap || lv_obj_is_hidden(sb->cap)) {
+            continue;
+        }
+        flex_clock_str_bar(cs, sizeof(cs));
+        flex_crono_bar_t bar;
+        int cw = 0;
+        flex_crono_svc_bar_view(flex_text_width(cs, FLEX_FONT_S2), &bar, &cw, txt, sizeof(txt));
+        if (bar.on && strcmp(lv_label_get_text(sb->cap_lbl), txt) != 0) {
+            lv_label_set_text(sb->cap_lbl, txt);
+        }
+    }
+}
+
+bool flex_statusbar_crono_shown(lv_area_t *out, char *text, size_t n)
+{
+    for (int i = 0; i < SB_MAX; i++) {
+        sb_t *sb = s_sb[i];
+        if (sb && sb->crono && sb->cap && lv_obj_is_visible(sb->cap)) {
+            if (out) {
+                lv_obj_get_coords(sb->cap, out);
+            }
+            if (text && n) {
+                snprintf(text, n, "%s", lv_label_get_text(sb->cap_lbl));
+            }
+            return true;
+        }
+    }
+    return false;
+}
 
 static void sb_fill(sb_t *sb)
 {
@@ -84,6 +176,9 @@ static void sb_fill(sb_t *sb)
     // nunca el 82 % fijo de la version Arduino.
     lv_obj_set_style_text_color(sb->wifi, fg, 0);
     lv_obj_set_style_text_color(sb->batt, fg, 0);
+    if (sb->crono && sb->time) {
+        sb_crono_layout(sb);
+    }
 }
 
 static void sb_delete_cb(lv_event_t *e)

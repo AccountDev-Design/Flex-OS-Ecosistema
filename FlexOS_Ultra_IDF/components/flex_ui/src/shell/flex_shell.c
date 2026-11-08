@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "flex_app.h"
+#include "flex_crono.h"
 #include "flex_auth.h"
 #include "flex_clock.h"
 #include "flex_frame.h"
@@ -28,6 +29,7 @@ typedef enum { APP_CLOSED = 0, APP_RUNNING, APP_SUSPENDED } app_life_t;
 
 typedef struct {
     lv_obj_t *root;
+    lv_obj_t *chev, *title;   // cabecera estandar: se recolorean al cambiar el tema (los colores se leen al crear)
     app_life_t life;
     uint32_t last_used;
 } app_inst_t;
@@ -260,7 +262,7 @@ static void build_app(int id)
     int32_t bot = flex_look()->nav_mode == 1 ? 800 : FLEX_WIN_BOT;
     lv_area_t area = {0, custom ? 0 : FLEX_WIN_TOP, 479, bot - 1};
     if (!custom) {
-        flex_statusbar_create(r, FLEX_SB_APP);
+        flex_statusbar_enable_crono(flex_statusbar_create(r, FLEX_SB_APP));   // marco estandar: aloja la capsula del cronometro
         // cabecera estandar: chevron (18..30, 50..66) + nombre centrado, tamano 3
         lv_obj_t *hz = flex_box(r);
         lv_obj_set_pos(hz, 0, 46);
@@ -273,6 +275,8 @@ static void build_app(int id)
         lv_obj_set_style_text_color(chev, flex_th()->txt, 0);
         lv_obj_t *title = flex_label(r, flex_app_name(id), FLEX_FONT_S3, flex_th()->txt);
         flex_label_cap_center(title, 240, 53);
+        in->chev = chev;
+        in->title = title;
     }
     lv_obj_t *content = flex_box(r);
     lv_obj_set_pos(content, 0, area.y1);
@@ -585,6 +589,7 @@ bool flex_app_terminate_ex(int id, bool force)
     }
     lv_obj_delete(s_inst[id].root);
     s_inst[id].root = NULL;
+    s_inst[id].chev = s_inst[id].title = NULL;
     s_inst[id].life = APP_CLOSED;
     flex_recents_note_closed(id);
     flex_mem_app_forget(id);   // su huella medida deja de existir con ella
@@ -636,6 +641,7 @@ void flex_shell_lock(void)
     flex_home_customize_close_now();   // Personalizar inicio tambien (hcClose(true))
     flex_optimize_close_now();
     flex_kbs_close_now();
+    flex_crono_card_close_now();
     flex_recents_close_now();
     flex_lock_set_return_app(-1);
     suspend_fg();
@@ -773,6 +779,10 @@ static void theme_cb(void *ctx)
     for (int i = 0; i < FLEX_APP_N; i++) {
         if (s_inst[i].root) {
             lv_obj_set_style_bg_color(s_inst[i].root, flex_th()->win, 0);
+            if (s_inst[i].chev) {
+                lv_obj_set_style_text_color(s_inst[i].chev, flex_th()->txt, 0);
+                lv_obj_set_style_text_color(s_inst[i].title, flex_th()->txt, 0);
+            }
         }
     }
     flex_statusbar_refresh_all();
@@ -812,6 +822,7 @@ void flex_shell_start(void)
     flex_power_init();
     flex_qs_init();
     flex_notif_init();
+    flex_crono_svc_init();
     flex_homecfg_init();
     flex_session_start();
     flex_mem_start();

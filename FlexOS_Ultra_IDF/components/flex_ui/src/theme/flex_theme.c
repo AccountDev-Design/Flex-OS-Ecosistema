@@ -139,6 +139,12 @@ void flex_theme_init(void)
 
 void flex_theme_listen(flex_theme_listener_t cb, void *ctx)
 {
+    // El mismo oyente (funcion y contexto) no se registra dos veces: un modulo que se arranca de nuevo no agota la lista
+    for (int i = 0; i < s_nlisteners; i++) {
+        if (s_listeners[i].cb == cb && s_listeners[i].ctx == ctx) {
+            return;
+        }
+    }
     if (cb && s_nlisteners < MAX_LISTENERS) {
         s_listeners[s_nlisteners].cb = cb;
         s_listeners[s_nlisteners].ctx = ctx;

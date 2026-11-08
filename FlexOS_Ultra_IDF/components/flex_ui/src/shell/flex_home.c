@@ -416,7 +416,7 @@ lv_obj_t *flex_home_create(lv_obj_t *parent)
     lv_obj_add_event_cb(s_root, empty_cb, LV_EVENT_SHORT_CLICKED, NULL);
     s_wall = lv_image_create(s_root);
     lv_obj_set_pos(s_wall, 0, 0);
-    flex_statusbar_create(s_root, FLEX_SB_WALL);
+    flex_statusbar_enable_crono(flex_statusbar_create(s_root, FLEX_SB_WALL));   // escritorio: aloja la capsula del cronometro
     s_pages = flex_box(s_root);
     lv_obj_set_scrollable(s_pages, true);
     lv_obj_set_scroll_dir(s_pages, LV_DIR_HOR);

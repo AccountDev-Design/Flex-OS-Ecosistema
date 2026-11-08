@@ -75,6 +75,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 3 (en curso: + Calculadora y correcciones de la revisión 6) | `v3` dev | 1 443 840 B | 55,1 % | 34,4 % |
 | 3 (en curso: + kit de componentes, Calendario y kit de archivos con su capa de operaciones) | `v3` dev | 1 454 976 B | 55,6 % | 34,7 % |
 | 3 (en curso: + Ajustes del teclado con su editor de atajos) | `v3` dev | 1 548 032 B | 59,1 % | 36,9 % |
+| 3 (en curso: + Reloj y Cronometro con su capsula y su tarjeta) | `v3` dev | 1 564 656 B | 59,7 % | 37,3 % |
 
 La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la interfaz completa
 (Fase 15). No se ha grabado nada.
@@ -175,6 +176,22 @@ La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la
 | Ajustes del teclado: idioma activo | `kbLangEs` global | Dura lo que el encendido y se sincroniza con la tecla ES/EN del teclado del editor | Fidelidad |
 | Ajustes del teclado: "dedos a la vez" | Maximo de puntos del GT911 visto | El indev de LVGL entrega UN punto: la fila dice "1 dedo", que es lo cierto (la escritura rapida multitoque sigue pendiente, 01b) | Honestidad |
 | Ajustes del teclado: transicion | Copia de buffers por tiempo | Objetos LVGL: zoom del 88 % al 100 %, fundido o deslizar, 90 ms | Arquitectura |
+| Reloj: reloj grande de la pestana Hora | Fuente vectorial propia (`drawBigClock`: cifras trazadas con segmentos y arcos de grosor `thick`) | La fuente Outfit de 200 px del bloqueo escalada (`transform_scale`) para que la altura de las cifras sea la que calcula Arduino (`capH`); el trazo `thick` no existe, la fuente ya trae su peso | Arquitectura (LVGL) / cosmetico |
+| Reloj: secciones opcionales (fecha, tarjetas) | Aparecen y desaparecen con un fundido de 130 ms (`uiSection`) | Aparecen enteras sin fundido: el lienzo solo cambia al abrir la app, no se arrastra el borde de una ventana | Cosmetico |
+| Reloj: Temporizador y alarmas | Pestana "Proximamente"; no hay alarmas | Igual (no se finge un motor). El inventario separa esos puntos (A01t) | Fidelidad / honestidad |
+| Reloj: pestanas | `relojTabsTouch` reparte el toque por `x / 146` | Tres segmentos de 146 px (`seg = w / n`) y el activo inset 2 px (142 x 32), como `relojDrawTabs`; el kit `flex_kit_segmented` usaba antes 16 px de margen y segmentos de 148: corregido | Fidelidad |
+| Cronometro: texto de la esfera, la tarjeta y la tabla | Fuente de mapa de bits tamanos 1-7 | Outfit 13-38: el tamano se elige con el mismo algoritmo (el mayor que cabe en el disco / el hueco) | Arquitectura |
+| Cronometro: esfera | `strokeSegAA` con grosores fraccionarios (1,1 / 1,9 / 1,4 / 2,3) | `lv_draw_line` de ancho entero (1 / 2 / 1 / 2) con el antialiasing de LVGL | Cosmetico |
+| Cronometro: persistencia | No se guarda (la propia fuente deja "PERSISTENCIA pendiente") | Igual: se pierde al reiniciar; sin sesion de app | Fidelidad |
+| Cronometro: reloj de tiempo | `millis()` | `lv_tick_get()` (ms de 32 bits que dan la vuelta; la misma resta sin signo) | Fidelidad |
+| Capsula: material y posicion | Pildora opaca dibujada en la barra (`cronoCapsuleDraw`) | Igual (opaca a proposito, hijo de la barra de estado del escritorio y del marco estandar); la hora normal cede si no cabe todo | Fidelidad |
+| Capsula: con la cortina o el Centro de avisos abiertos sobre una app | La superficie 2 no mira el panel: sigue sensible bajo la cortina | El gancho no reclama el toque si la cortina o el Centro estan abiertos | Endurecimiento |
+| Tarjeta expandida: fondo | Captura la banda de pantalla y la restaura al cerrar (dos bufers PERMANENTES de PSRAM: 480 x 236 x 2 y 480 x 96 x 2 = 318 KB) | Objetos LVGL en `lv_layer_top` que se crean al abrir y se borran al cerrar: 0 bytes permanentes | Memoria |
+| Tarjeta: vidrio | Desenfoca la banda entera (widgets incluidos) con alfa 200; plano 240 | Vidrio opaco (255) sobre el fondo ya desenfocado (LVGL no desenfoca los widgets de debajo); plano 240 como Arduino | Cosmetico / legibilidad |
+| Tarjeta: ultimo cuadro de la animacion | `cronoLerp` trunca hacia 0 al disminuir: la tarjeta queda en x = 21 si la capsula esta a la derecha de 20 | Reposo exacto en x = 20 (el modelo conserva la formula para compararla con Arduino) | Correccion |
+| Tarjeta: pantalla del OTA | `flexOtaOwnsScreen()` la suelta | El OTA no esta migrado (N2): el gancho se anade con el | Dependencia |
+| Marco de apps: cabecera estandar y el tema | Se repinta todo al cambiar el tema | El chevron y el titulo no se recoloreaban al cambiar Oscuro / Claro con la app delante (los colores se leian al crear): el shell los recolorea | Correccion |
+| Tema: oyentes | Lista fija de 24 | Un oyente repetido (misma funcion y contexto) ya no se registra dos veces: un modulo que se arranca de nuevo no agota la lista | Correccion |
 | Notas: lápiz del botón flotante | Trazos de 5 y 4 px | 5 y 3 px (el motor de trazos de LVGL solo da anchos impares) | Cosmético |
 | Teclado: barra y chips | `FLEX_KB_F_EXTRAS` preparado y sin dibujar | Barra de 5 botones (carita, globo, portapapeles, engranaje, más), chips de sugerencias o de símbolos con fundido de 140 ms, el panel sube y avisa (`on_resize`) | Cierra el "pendiente" de spec 01b T.8 |
 | Calendario: iniciales de los días | Fijas "D L M M J V S" | Las del idioma activo (`flex_i18n_wd_short`); en español salen las mismas | Idioma |

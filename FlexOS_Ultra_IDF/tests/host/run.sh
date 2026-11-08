@@ -148,7 +148,16 @@ python3 ref/extract_arduino.py "$OUT/ref_layout.inc" \
     FlexOS_Ultra_Clock.h:daysInMonth \
     FlexOS_Ultra_AppFramework.h:uiBox,uiW,uiH,uiTop,uiPad,uiGap,uiFontFit,uiFontH,uiLineH
 
-SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c test_kiosk.c test_homecfg.c test_session.c test_mem_model.c test_boot.c test_calc.c test_layout.c test_fsnames.c test_fsops.c test_fk.c test_ned.c test_clip.c test_notes.c test_paint.c test_raster.c test_set.c test_kbs.c
+python3 ref/extract_arduino.py "$OUT/ref_chrono_t.inc" \
+    FlexOS_Ultra_Types.h:CRONO_MAX_LAPS,CronoLap,gCronoSt,gCronoAccum,gCronoT0,gCronoLapBase,gCronoLaps,gCronoNLaps,gCronoLap0,gCronoBest,gCronoWorst,gCronoLapsDirty,gCronoBtnDirty,gCronoDialDirty,gCronoBarDirty,gRelojTab,gCronoCapX,gCronoCapWDrawn,gCronoCapSec,gCronoCapStDrawn,gCronoCapOn,gCronoCard,gCronoCardT0,gCronoCardBg
+
+python3 ref/extract_arduino.py "$OUT/ref_chrono_ui.inc" \
+    FlexOS_Ultra_AppFramework.h:uiBox,uiW,uiH,uiTop,uiPad,uiGap,uiFontFit,uiFontH,uiLineH,UI_FADE_MS,UI_SEC_MAX,UiSec,uiSecs,uiSecN,uiFading,uiSection,RELOJ_TABS_H,RELOJ_TAB_N,relojBody,relojTabsVisible,relojDrawTabs,relojTabsTouch,appRelojHoraRender
+
+python3 ref/extract_arduino.py "$OUT/ref_chrono.inc" \
+    FlexOS_Ultra_AppChrono.h:CRONO_CAP_Y,CRONO_CAP_H,CRONO_CAP_ICON,CRONO_CAP_PADL,CRONO_CAP_GAP,CRONO_CAP_PADR,CRONO_CARD_X,CRONO_CARD_W,CRONO_CARD_Y,CRONO_CARD_H,CRONO_CARD_RAD,CRONO_CARD_ANIM,CRONO_BAND_T,CRONO_BAND_B,CRONO_BAND_H,CRONO_DYN_T,CRONO_DYN_B,CRONO_DYN_H,CRONO_ACCENT,CRONO_DISC,CRONO_CARDBG,CRONO_ONACC,cronoElapsed,cronoLapElapsed,cronoActive,cronoCurLapNo,cronoFmt,cronoRecalcExtremes,cronoStart,cronoPause,cronoReset,cronoLapMark,cronoActionLeft,cronoActionRight,cronoLabelLeft,cronoLabelRight,cronoEase,cronoLerp,cronoGlyph,cronoCapsuleW,cronoCapsuleRight,cronoCapsuleDraw,cronoBarClock,cronoBarSurface,cronoCapsuleTick,CronoLayout,gCL,cronoLayout,cronoFitBig,cronoDrawDial,cronoDrawLaps,cronoDrawButtons,cronoTabTouch,cronoCardDynText,cronoCardStatic,cronoCardCompose,cronoOverlayTouch
+
+SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c test_kiosk.c test_homecfg.c test_session.c test_mem_model.c test_boot.c test_calc.c test_layout.c test_fsnames.c test_fsops.c test_fk.c test_ned.c test_clip.c test_notes.c test_paint.c test_raster.c test_set.c test_kbs.c test_chrono.c
       $ROOT/components/flex_storage/src/flex_kv.c
       $ROOT/components/flex_storage/src/flex_fs_path.c
       $ROOT/components/flex_storage/src/flex_fs_wipe.c
@@ -168,6 +177,7 @@ SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_
       $ROOT/components/flex_ui/src/widgets/flex_raster.c
       $ROOT/components/flex_ui/src/apps/flex_set_model.c
       $ROOT/components/flex_ui/src/apps/flex_kbs_model.c
+      $ROOT/components/flex_ui/src/apps/flex_chrono_model.c
       $ROOT/components/flex_ui/src/widgets/flex_layout.c
       $ROOT/components/flex_ui/src/widgets/flex_clip.c
       $ROOT/components/flex_ui/src/widgets/flex_fk_model.c
@@ -191,7 +201,7 @@ CFLAGS=(-O1 -g -Wall -Wextra -Werror -pthread)
 build() {   # $1 = sufijo, resto = flags de sanitizador
     local sfx=$1; shift
     local refs=()
-    for r in wall glass home home_load touch drawer kb recents qs ntf homecfg session mem boot calc layout fsnames fk ned clip notes paint raster set kbs; do
+    for r in wall glass home home_load touch drawer kb recents qs ntf homecfg session mem boot calc layout fsnames fk ned clip notes paint raster set kbs chrono; do
         c++ -std=gnu++17 -O1 -g -w "$@" -Iref -I"$OUT" -I$ROOT/components/flex_portable/include -I$ROOT/components/flex_ui/src/apps -I$ROOT/components/flex_ui/src/widgets -I$ROOT/components/flex_ui/src/theme -I$ROOT/components/flex_storage/include -I../../sim/stubs/include -c ref/ref_${r}_main.cpp -o "$OUT/ref_${r}_$sfx.o"
         refs+=("$OUT/ref_${r}_$sfx.o")
     done

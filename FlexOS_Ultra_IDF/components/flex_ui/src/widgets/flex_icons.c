@@ -1,4 +1,5 @@
 #include "flex_icons.h"
+#include "flex_chrono_model.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -77,6 +78,23 @@ static void p_seg(pen_t *p, float x0, float y0, float x1, float y1, int32_t rad,
     d.color = c;
     d.opa = p->opa;
     d.width = 2 * rad + 1;
+    d.round_start = 1;
+    d.round_end = 1;
+    d.p1.x = (lv_value_precise_t)(x0 + 0.5f);
+    d.p1.y = (lv_value_precise_t)(y0 + 0.5f);
+    d.p2.x = (lv_value_precise_t)(x1 + 0.5f);
+    d.p2.y = (lv_value_precise_t)(y1 + 0.5f);
+    lv_draw_line(p->L, &d);
+}
+
+// Trazo de grosor entero (>= 1) con extremos redondos: los glifos vectoriales de Arduino piden grosores fraccionarios
+static void p_line(pen_t *p, float x0, float y0, float x1, float y1, int32_t width, lv_color_t c)
+{
+    lv_draw_line_dsc_t d;
+    lv_draw_line_dsc_init(&d);
+    d.color = c;
+    d.opa = p->opa;
+    d.width = width < 1 ? 1 : width;
     d.round_start = 1;
     d.round_end = 1;
     d.p1.x = (lv_value_precise_t)(x0 + 0.5f);
@@ -542,6 +560,18 @@ static void glyph_draw_cb(lv_event_t *e)
         p_ring(&p, cx - s * 0.08f, cy - s * 0.08f, (int32_t)(s * 0.24f), 2, col);
         p_seg(&p, cx + s * 0.1f, cy + s * 0.1f, cx + s * 0.32f, cy + s * 0.32f, 1, col);
         break;
+    case FLEX_GLYPH_STOPWATCH: {   // cronoGlyph: orejas, tallo de la corona, esfera y aguja hacia las 2
+        int r = gd->value & 0xFF;
+        float th = (float)((gd->value >> 8) & 0xFF) / 10.0f;
+        flex_crono_glyph_t g;
+        flex_crono_glyph((int)cx, (int)cy, r, th, &g);
+        int32_t wd = (int32_t)(th + 0.5f);
+        p_line(&p, g.seg[0][0], g.seg[0][1], g.seg[0][2], g.seg[0][3], wd, col);
+        p_line(&p, g.seg[1][0], g.seg[1][1], g.seg[1][2], g.seg[1][3], wd, col);
+        p_ring(&p, cx, cy, g.r, g.ring, col);
+        p_line(&p, g.seg[2][0], g.seg[2][1], g.seg[2][2], g.seg[2][3], wd, col);
+        break;
+    }
     case FLEX_GLYPH_BELL:
         p_arc(&p, cx, cy, s * 0.24f, 180, 360, 3, col);
         p_rect(&p, cx - s * 0.26f, cy, s * 0.52f, s * 0.2f, 2, col, 255);
