@@ -11,6 +11,35 @@ Rama: `flexos-esp-idf` (la rama Arduino `claude/flexos-ota-system-blq9g9-2csacx`
 Último bloque cerrado: **Reloj** (A01: pestañas Hora / Cronómetro / Temporizador, cronómetro con esfera, tabla de vueltas y dos botones, cápsula en la barra de estado, tarjeta expandida modal, mosaico del panel rápido y widget del escritorio con el mismo servicio; el inventario separa Temporizador y alarmas como A01t); antes **Ajustes del teclado** (A11k: 8 páginas navegables, atajos con el teclado del sistema, ajustes que guardan su clave; modal sobre la app que la abre: Ajustes o el engranaje del teclado de Notas); antes **Ajustes** (A11: lista de 12 categorías, filas con valores reales y su acción, transición de 270 ms con paralaje, sesión; el inventario se parte en A11 / A11k teclado / A11n servicios sin migrar, el total de 2000 no cambia); antes **Paint** (A09: galería con miniaturas reales, lienzo con trazo en vivo, deshacer/limpiar, guardado atómico asíncrono, sesión; rasterizador de Arduino portado píxel a píxel); antes **Notas** (A06: lista, editor, teclado con barra y chips, portapapeles, sesión) que integra el **kit de archivos** (S5); antes **Calendario** (A19), el **kit de componentes**, **App Calculadora** (A12) y la **revisión 6**; antes, **Recientes con memoria y sesiones** (S4e), **Arranque** (S2), **Memoria y Optimizar**, **Sesiones de app** y **Personalizar inicio**. Entorno de
 compilación en un contenedor nuevo: `bash tools/setup_idf_cloud.sh` (ver "Entorno" abajo).
 
+### Migración DETENIDA a petición (estado exacto para reanudar)
+
+* **Rama:** `flexos-esp-idf`. **Último commit:** `990e6ef` ("Reloj (A01) ...") ya subido a `origin/flexos-esp-idf`; árbol de trabajo
+  limpio, sin cambios pendientes, sin procesos ni agentes ni tareas programadas en segundo plano.
+* **Progreso** (`python3 tools/progress.py`): **24,2 %** completado · 75,8 % pendiente · placa 0,0 % de 15 % posible. Inventario de 2000
+  puntos intacto (A01 se partió en A01 14 + A01t 3).
+* **Último módulo completado:** Reloj (A01). Firmware `v3`: 1 564 656 B (59,7 % de la ranura A provisional, 37,3 % de la B), 0 avisos.
+  Batería `tools/run_tests.sh`: TODO OK; `test_chrono` 649 393 comprobaciones; mutantes: 62/62 del modelo muertos y 45/51 de la interfaz
+  (6 equivalentes documentados: repintado inmediato del botón, `edit_mode` redundante con el estado OVERLAY, `card_was` redundante
+  con las banderas del modelo, reapertura de Reloj ya delante solo visual, `bar_dirty` al cerrar sin efecto visible, hora cedida
+  cuando no cabe: inalcanzable con las fuentes reales y probada en el modelo).
+* **Hecho en A01 que no hay que repetir:** `flex_chrono_model.*` (modelo puro), `app_reloj.c`, `shell/flex_crono.*` (servicio, cápsula,
+  tarjeta, gancho de tacto prioridad -1), cápsula en `flex_frame.c` (`flex_statusbar_enable_crono`), glifo `FLEX_GLYPH_STOPWATCH`,
+  `flex_kit_segmented_at`, mosaico "Cronómetro" del panel rápido, widget del escritorio con el servicio real (el simulador ya no lo
+  falsea), cabecera estándar del marco recoloreada al cambiar el tema, `flex_theme_listen` sin duplicados.
+* **Pendiente de Reloj:** A01t (Temporizador y alarmas: sin referencia en Arduino, necesita sonido de la Fase 11 y avisos) y toda la
+  validación en la placa (`ESP_IDF_HARDWARE_REQUIREMENTS.md`, fila "Reloj y Cronómetro"). `flex_crono_svc_hide_bar(bool)` está listo
+  para que Galería / Multimedia (visor a pantalla completa) quiten la cápsula; hay que llamarlo al crearlas.
+* **Reanudar exactamente aquí:** decidir entre (a) **Juegos** (A10, 40 pts; Jumper es horizontal y el marco de IDF no tiene modo
+  horizontal: primero hay que decidir cómo resolverlo, p. ej. rotación del lienzo de la app o una pantalla propia) y (b) **Almacenamiento +
+  Archivos** (A04, 76 pts, parte local primero; separar en el inventario la de Flex Cloud y la tarjeta del teléfono con su causa). No se
+  ha iniciado ninguno. Después, en el orden ya fijado: servicios N1–N6, X1b/X1c, X2b, X3 (C6 esp-hosted: comprobar antes la
+  compatibilidad del firmware C6 existente), X4, X5, X6, S2b, S3e, M1 y las apps restantes (Galería A02, Multimedia A03, Modo PC A05,
+  Navegador A07, Compass A08, Cámara A13, Clima A14, Flex Store A15, Flex Phone A16, Device Care A17, Música A18).
+* **Reglas vigentes al reanudar:** no grabar firmware ni tocar particiones sin autorización expresa (identificar antes la revisión del
+  P4, `docs/REVISION_CHIP.md`); no tocar la rama Arduino; tras cada módulo `tools/run_tests.sh` + `tools/build.sh --rev v3`, actualizar este
+  archivo, commit y push, y mostrar el bloque de progreso. **No editar fuentes mientras corre un script de mutación** (restaura todos
+  los archivos que snapshotea al empezar y pisa lo editado: pasó una vez en A01 y se rehízo).
+
 ### Punto de reanudación (siguiente tarea exacta)
 
 1. **Siguiente app**, en este orden por valor y viabilidad sin hardware ni red: **Juegos** (A10, 40: autocontenida; Jumper es
