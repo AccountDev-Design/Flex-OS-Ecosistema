@@ -471,6 +471,9 @@ void flex_app_launch(int id, const lv_area_t *from_icon)
 bool flex_kbs_active(void);   // app_kbsettings.c: Ajustes del teclado, modal sobre la app en primer plano
 void flex_kbs_back(void);
 void flex_kbs_close_now(void);
+bool flex_files_active(void);   // flex_files.c: el explorador de Archivos, modal sobre Almacenamiento
+void flex_files_back(void);
+void flex_files_close_now(void);
 
 void flex_sys_back(void)
 {
@@ -479,6 +482,10 @@ void flex_sys_back(void)
     }
     if (flex_kbs_active()) {
         flex_kbs_back();   // Ajustes del teclado: de una pagina a la anterior y, de la principal, sale
+        return;
+    }
+    if (flex_files_active()) {
+        flex_files_back();   // Archivos: cierra la capa abierta (menu, dialogo, papelera), vuelve de la nube o sale a Almacenamiento
         return;
     }
     if (flex_kiosk_active()) {
@@ -504,6 +511,7 @@ void flex_sys_home(void)
         return;   // Optimizar es modal mientras trabaja
     }
     flex_kbs_close_now();   // Ajustes del teclado se cierra y Inicio sigue su camino
+    flex_files_close_now();
     if (flex_kiosk_active()) {
         return;
     }
@@ -525,6 +533,7 @@ void flex_sys_recents(void)
         return;   // Optimizar es modal mientras trabaja
     }
     flex_kbs_close_now();
+    flex_files_close_now();
     if (flex_kiosk_active()) {
         return;
     }
@@ -641,6 +650,7 @@ void flex_shell_lock(void)
     flex_home_customize_close_now();   // Personalizar inicio tambien (hcClose(true))
     flex_optimize_close_now();
     flex_kbs_close_now();
+    flex_files_close_now();
     flex_crono_card_close_now();
     flex_recents_close_now();
     flex_lock_set_return_app(-1);

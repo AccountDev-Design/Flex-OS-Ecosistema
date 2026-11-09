@@ -39,6 +39,18 @@ flex_fsx_res_t flex_fsx_read_head(const char *base, const char *path, size_t n, 
 // Entradas directas de `dir` (flexFsCount) y bytes de todo lo que cuelga de ella, hasta 5 niveles (flexFsDirSize).
 flex_fsx_res_t flex_fsx_dirstat(const char *base, const char *dir, uint32_t *count, uint32_t *bytes);
 
+#include "flex_fs_scan.h"
+
+// ---- listado y medidas de Almacenamiento / Archivos (los tipos estan en flex_fs_scan.h) --------------------------------------------------
+// Carpetas primero y luego por nombre sin distinguir mayusculas (orden estable). Lee hasta FLEX_FSX_LIST_SCAN entradas, ordena
+// y devuelve las `max` primeras en `out`; *total = entradas leidas (por si `max` se queda corto). Un nombre que no cabe en
+// FLEX_FSX_NAME_MAX no se puede mostrar ni operar: se salta. NOTFOUND si no es una carpeta.
+flex_fsx_res_t flex_fsx_list(const char *base, const char *dir, flex_fsx_ent_t *out, size_t max, size_t *n, size_t *total);
+
+// Mide todo lo que ensena Almacenamiento en una pasada. Los ficheros bajo `skip_prefix` (p. ej. "/System/Media/": la biblioteca
+// por dentro) no entran en "archivos grandes". NOTFOUND si la raiz no existe.
+flex_fsx_res_t flex_fsx_scan(const char *base, const char *skip_prefix, flex_fsx_scan_t *out);
+
 #ifdef __cplusplus
 }
 #endif

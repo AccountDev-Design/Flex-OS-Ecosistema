@@ -79,6 +79,8 @@ typedef enum {
     FLEX_GLYPH_SET_CAT,
     // Cronometro (cronoGlyph): valor = radio | (grosor * 10) << 8; centrado en el objeto
     FLEX_GLYPH_STOPWATCH,
+    // Nube vectorial de Flex Cloud (ckCloudGlyph): valor = tamano `s`; centrada en el objeto
+    FLEX_GLYPH_CLOUD,
 } flex_glyph_t;
 
 lv_obj_t *flex_glyph_create(lv_obj_t *parent, flex_glyph_t g, int32_t w, int32_t h);

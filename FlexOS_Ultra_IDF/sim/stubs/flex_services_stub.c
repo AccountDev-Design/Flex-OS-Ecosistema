@@ -16,6 +16,7 @@
 #include "flex_fs_path.h"
 #include "flex_inbox.h"
 #include "flex_kv.h"
+#include "flex_metrics.h"
 #include "flex_storage.h"
 #include "flex_system.h"
 #include "flex_touch.h"
@@ -187,11 +188,14 @@ esp_err_t flex_cfg_flush(uint32_t t) { (void)t; return ESP_OK; }
 esp_err_t flex_cfg_flush_async(void) { return ESP_OK; }
 
 // ---- almacenamiento ----------------------------------------------------------
+static bool s_sim_mounted = true;
+void sim_fs_mounted(bool on) { s_sim_mounted = on; }   // la particion de datos monta o no (escenas de "sin almacenamiento")
 void flex_storage_get_status(flex_storage_status_t *out)
 {
     memset(out, 0, sizeof(*out));
     out->nvs_ok = true;
-    out->fs_mounted = true;
+    out->fs_mounted = s_sim_mounted;
+    out->fs_err = s_sim_mounted ? ESP_OK : ESP_ERR_NOT_FOUND;
     out->fs_total = 0xAE0000;
     out->fs_used = 3 * 1024 * 1024;   // SIMULADO
 }
@@ -313,7 +317,7 @@ bool sim_disk_mkdir(const char *rel)
 }
 
 typedef struct {
-    int kind;   // 0 hecho, 1 lectura, 2 cuenta, 3 listado, 4 nombre, 5 estadistica
+    int kind;   // 0 hecho, 1 lectura, 2 cuenta, 3 listado, 4 nombre, 5 estadistica, 6 carpeta, 7 medida de Almacenamiento
     void *cb, *user;
     esp_err_t err;
     uint8_t *data;
@@ -330,12 +334,19 @@ static void dpost_run(void *arg)
         case 3: ((flex_fs_list_cb_t)p->cb)(p->err, (const flex_fs_ent_t *)p->data, p->len, p->user); break;
         case 4: ((flex_fs_name_cb_t)p->cb)(p->err, p->data ? (const char *)p->data : "", p->user); break;
         case 5: ((flex_fs_stat_cb_t)p->cb)(p->err, p->a, p->b, p->user); break;
+        case 6: ((flex_fs_explore_cb_t)p->cb)(p->err, (const flex_fsx_ent_t *)p->data, p->len, p->a, p->user); break;
+        case 7: ((flex_fs_scan_cb_t)p->cb)(p->err, (const flex_fsx_scan_t *)p->data, p->user); break;
         default: ((flex_fs_done_cb_t)p->cb)(p->err, p->user); break;
         }
     }
     free(p->data);
     free(p);
 }
+// Respuestas de carpeta y de medida retenidas (kinds 6 y 7): las escenas las sueltan cuando quieren, para probar que una respuesta tardia de otra carpeta no se pinta
+static bool s_hold_explore;
+static dpost_t *s_held[4];
+static int s_nheld;
+void sim_explore_hold(bool on) { s_hold_explore = on; }
 static esp_err_t dpost(const dpost_t *t)
 {
     dpost_t *p = malloc(sizeof(*p));
@@ -344,6 +355,10 @@ static esp_err_t dpost(const dpost_t *t)
         return ESP_ERR_NO_MEM;
     }
     *p = *t;
+    if (s_hold_explore && (p->kind == 6 || p->kind == 7) && s_nheld < 4) {
+        s_held[s_nheld++] = p;
+        return ESP_OK;
+    }
     if (!flex_inbox_post(dpost_run, p)) {
         free(p->data);
         free(p);
@@ -351,6 +366,21 @@ static esp_err_t dpost(const dpost_t *t)
     }
     return ESP_OK;
 }
+void sim_explore_release_n(int n)   // suelta las n primeras respuestas retenidas (en el orden en que se pidieron)
+{
+    int k = n < s_nheld ? n : s_nheld;
+    for (int i = 0; i < k; i++) {
+        if (!flex_inbox_post(dpost_run, s_held[i])) {
+            free(s_held[i]->data);
+            free(s_held[i]);
+        }
+    }
+    for (int i = k; i < s_nheld; i++) {
+        s_held[i - k] = s_held[i];
+    }
+    s_nheld -= k;
+}
+void sim_explore_release(void) { sim_explore_release_n(4); }
 static esp_err_t fsx_err(flex_fsx_res_t r)
 {
     switch (r) {
@@ -538,11 +568,54 @@ esp_err_t flex_fs_dirstat_async(const char *dir, flex_fs_stat_cb_t cb, void *u)
     flex_fsx_res_t r = flex_fsx_dirstat(s_disk, dir, &n, &b);
     return dpost(&(dpost_t){.kind = 5, .cb = (void *)cb, .user = u, .err = fsx_err(r), .a = n, .b = b});
 }
+// Almacenamiento y Archivos (las mismas funciones puras que la tarea de almacenamiento, sobre el disco temporal)
+esp_err_t flex_fs_explore_async(const char *dir, size_t max, flex_fs_explore_cb_t cb, void *u)
+{
+    if (!dir || !cb || max == 0 || max > FLEX_FSX_LIST_SCAN) return ESP_ERR_INVALID_ARG;
+    if (!s_disk_on) {
+        cb(ESP_ERR_INVALID_STATE, NULL, 0, 0, u);
+        return ESP_OK;
+    }
+    flex_fsx_ent_t *e = calloc(max, sizeof(*e));
+    size_t n = 0, total = 0;
+    flex_fsx_res_t r = e ? flex_fsx_list(s_disk, dir, e, max, &n, &total) : FLEX_FSX_ARG;
+    return dpost(&(dpost_t){.kind = 6, .cb = (void *)cb, .user = u, .err = fsx_err(r), .data = (uint8_t *)e, .len = n, .a = (uint32_t)total});
+}
+esp_err_t flex_fs_scan_async(const char *skip, flex_fs_scan_cb_t cb, void *u)
+{
+    if (!cb) return ESP_ERR_INVALID_ARG;
+    if (!s_disk_on) {
+        cb(ESP_ERR_INVALID_STATE, NULL, u);
+        return ESP_OK;
+    }
+    flex_fsx_scan_t *sc = calloc(1, sizeof(*sc));
+    flex_fsx_res_t r = sc ? flex_fsx_scan(s_disk, skip, sc) : FLEX_FSX_ARG;
+    return dpost(&(dpost_t){.kind = 7, .cb = (void *)cb, .user = u, .err = fsx_err(r), .data = (uint8_t *)sc});
+}
 uint32_t flex_storage_repair_token(void) { return 0x1234; }
 esp_err_t flex_storage_nvs_erase_confirmed(uint32_t t) { (void)t; return ESP_ERR_INVALID_STATE; }
 esp_err_t flex_storage_fs_format_confirmed(uint32_t t) { (void)t; return ESP_ERR_INVALID_STATE; }
 
 // ---- sistema -----------------------------------------------------------------
+static bool s_sim_online;
+void sim_net_online(bool on) { s_sim_online = on; }
+bool flex_net_online(void) { return s_sim_online; }   // el simulador pone el estado de la red (en el firmware lo dara el servicio de red)
+static float s_sim_loops = 58.0f;   // vueltas de la tarea de UI por segundo (la escena lo cambia)
+void sim_metrics_set_loops(float n) { s_sim_loops = n; }
+void flex_metrics_get(flex_metrics_t *o)
+{
+    memset(o, 0, sizeof(*o));
+    o->ui_loops = s_sim_loops;
+}
+static uint32_t s_sim_fw = 1564656;   // el tamano de la imagen de esta version; la escena lo cambia
+static int s_sim_reset = 1;           // ESP_RST_POWERON
+void sim_system_set(uint32_t fw_size, int reset_reason)
+{
+    s_sim_fw = fw_size;
+    s_sim_reset = reset_reason;
+}
+uint32_t flex_system_fw_size(void) { return s_sim_fw; }
+int flex_system_reset_reason(void) { return s_sim_reset; }
 void flex_system_get(flex_sys_snapshot_t *o)
 {
     memset(o, 0, sizeof(*o));

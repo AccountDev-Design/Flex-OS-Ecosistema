@@ -798,6 +798,20 @@ de app completo, `almEnter()` (`AppFiles.h:236-249`).
 * Si `filesScroll > filas·70` se resetea a 0 tras recargar.
 
 ### 8.5 Migración
+
+**Implementado** (`apps/flex_files.c`, `flex_files_model.*`, `flex_storage/src/flex_fs_ops.c`; pruebas `test_files.c`, `test_fsscan.c` y la escena `almacenamiento`):
+* Pantalla modal (como Optimizar y Ajustes del teclado) sobre Almacenamiento: cabecera estándar, selector "Este dispositivo | Flex Cloud",
+  ruta recortada sin puntos suspensivos, lista con scroll nativo y FILAS POR VENTANA (hasta 256 entradas), barra de selección, y el kit
+  de archivos (menú, confirmación, nombre con el teclado del sistema, papelera). Atrás cierra la capa abierta, vuelve de la nube o sale.
+* Qué significa cada toque, la pulsación larga (550 ms, < 14 px), los resultados de los diálogos y el contenido de las filas es del modelo
+  (`flex_files_*`), comparado con `filesTick/filesReload/filesOpenEntry/filesMenuAction` EXTRAÍDOS de Arduino. Diferencias deliberadas,
+  todas con prueba: la biblioteca `/System/Media` no se lista ni se entra; la lista llega a 256 entradas ordenadas (Arduino: las 24
+  primeras); una entrada cuyo nombre (≥ 48) o ruta (≥ 160) no cabe no se lista (Arduino la recortaba y la acción tocaba otro archivo);
+  la lista solo recoge toques dentro de su ventana.
+* Listado y recuentos en la tarea de almacenamiento (`flex_fs_explore_async`, asíncrono; una respuesta de una carpeta que ya no se mira
+  se descarta). Sin la partición: la pantalla "sin almacenamiento" del kit.
+* **No implementado (A04c):** la pestaña Flex Cloud ("Flex Cloud no disponible"), "Subir a Flex Cloud" (aviso) y abrir fotos / dibujos /
+  video / audio (aviso: sin visor hasta A02 / A03).
 Pantalla LVGL propia (no app) con `lv_list`/filas personalizadas, `lv_buttonmatrix` de dos segmentos, ruta en una
 etiqueta con `LV_LABEL_LONG_DOT`. Listado y recuentos en la tarea de almacenamiento (asíncrono, con "cargando"). La
 apertura por tipo usa el clasificador de medios portable (`flex_portable/FlexOS_Media`).
@@ -908,6 +922,19 @@ teléfono (lo usa Flex Cloud cuando no hay teléfono o fue rechazado).
 resetea pantalla, scroll y armado; **sin sesión en disco**.
 
 ### 9.7 Migración
+
+**Implementado** (`apps/app_storage.c`, `flex_stor_model.*`, `flex_stor_ui.*`; pruebas `test_stor.c`, `test_fsscan.c` y la escena `almacenamiento`):
+* Las dos pantallas (principal y detalles) son LVGL sobre una LISTA DE OPERACIONES que entrega el modelo con las coordenadas exactas de
+  Arduino y que `flex_stor_ui` pinta; así lo que se compara en el PC con `almRenderMain` / `almDetDrawSection` (4 000 variantes de caja,
+  telefono y medidas; 3 000 estados del detalle × 5 secciones) es lo que se ve. Los detalles son cinco secciones en un contenedor con scroll nativo y un
+  `lv_timer` de 1 s que repinta solo la sección cuya firma cambió, con el dedo fuera; Atrás desde ellos vuelve a la lista.
+* Medida real: `flex_fs_scan_async` (categorías, caché, los 3 mayores sin la biblioteca) en la tarea de almacenamiento; "..." / "Calculando..."
+  hasta que llega, "--" / "No se pudo leer" si falla. PSRAM y SRAM de `flex_mem`, tamaño del firmware de la cabecera de la imagen en
+  ejecución (una vez por arranque), motivo del último arranque de `esp_reset_reason`, ritmo del sistema = vueltas de la tarea de UI por segundo.
+* Diferencias deliberadas con prueba: "Ver..." tiene prioridad sobre los archivos grandes (Arduino dejaba el explorador inalcanzable cuando
+  ocupaban el sitio); la línea "ruta · tamaño" no se trunca a 64 B.
+* **No implementado (A04c):** `§9.5` (pantalla del teléfono emparejado) y `§10` (cuadro de aprobación): son del servicio Flex Storage; la tarjeta
+  dice "No disponible todavía" y avisa al tocarla.
 * Pantallas como `lv_obj` con `lv_bar` para medidores; el detalle con secciones en un contenedor con scroll y
   actualización por `lv_timer` 1 s que solo toca las etiquetas cuyo valor cambió (LVGL ya invalida solo lo necesario:
   la técnica de firmas sobra salvo para evitar trabajo de formateo).

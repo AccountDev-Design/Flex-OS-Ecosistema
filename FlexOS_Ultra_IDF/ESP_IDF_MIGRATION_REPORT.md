@@ -76,6 +76,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 3 (en curso: + kit de componentes, Calendario y kit de archivos con su capa de operaciones) | `v3` dev | 1 454 976 B | 55,6 % | 34,7 % |
 | 3 (en curso: + Ajustes del teclado con su editor de atajos) | `v3` dev | 1 548 032 B | 59,1 % | 36,9 % |
 | 3 (en curso: + Reloj y Cronometro con su capsula y su tarjeta) | `v3` dev | 1 564 656 B | 59,7 % | 37,3 % |
+| 3 (en curso: + Almacenamiento y Archivos: medidas asincronas, detalles, explorador modal con filas por ventana) | `v3` dev | 1 600 768 B | 61,1 % | 38,2 % |
 
 La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la interfaz completa
 (Fase 15). No se ha grabado nada.
@@ -183,6 +184,21 @@ La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la
 | Cronometro: texto de la esfera, la tarjeta y la tabla | Fuente de mapa de bits tamanos 1-7 | Outfit 13-38: el tamano se elige con el mismo algoritmo (el mayor que cabe en el disco / el hueco) | Arquitectura |
 | Cronometro: esfera | `strokeSegAA` con grosores fraccionarios (1,1 / 1,9 / 1,4 / 2,3) | `lv_draw_line` de ancho entero (1 / 2 / 1 / 2) con el antialiasing de LVGL | Cosmetico |
 | Cronometro: persistencia | No se guarda (la propia fuente deja "PERSISTENCIA pendiente") | Igual: se pierde al reiniciar; sin sesion de app | Fidelidad |
+| Almacenamiento: medida de las categorias y de los archivos grandes | Sincrona en el dibujo (`almScan`: recorre el arbol entero con la UI parada) | En la tarea de almacenamiento (`flex_fs_scan_async`); la pantalla dice "..." y "Calculando..." hasta que llega, "--" y "No se pudo leer" si falla. Se mide al entrar, al volver del explorador y tras Optimizar | Arquitectura / honestidad |
+| Almacenamiento: archivos grandes | Pide 12 y filtra los de la biblioteca (`/System/Media/`): con 9 o mas por encima se queda sin ninguno | La biblioteca se salta al recorrer: siempre salen los 3 mayores de verdad | Fidelidad (error corregido) |
+| Almacenamiento: fila "Todos los archivos / Ver..." | Se omite si los archivos grandes ocupan el sitio (a 640 px, ya con dos): el explorador quedaba inalcanzable | Tiene prioridad: solo se pinta un archivo grande si despues cabe la fila; si ni uno cabe, el titulo se queda sin archivos y sin "No hay archivos guardados" (los hay). Probado frente a Arduino con 4 000 variantes (mismo resultado salvo estos casos, comprobados aparte) | Fidelidad (error corregido) |
+| Almacenamiento: linea "ruta · tamano" de un archivo grande | `ln[64]`: una ruta larga pierde el tamano | Buffer sin recorte: el tamano se ve siempre | Fidelidad (error corregido) |
+| Almacenamiento: pantalla "sin almacenamiento" | Aconseja elegir un Partition Scheme con SPIFFS en el IDE | "Reinstala el firmware o repara el almacenamiento en Ajustes" (la tabla de particiones es fija) | Arquitectura |
+| Almacenamiento: tarjeta "Flex Cloud en tu telefono" | Estado real del telefono emparejado (Flex Storage) | "No disponible todavia" y un aviso al tocarla: el servicio de telefono no esta migrado (A04c). No se finge "Sin telefono" ni "activalo desde la web" | Honestidad |
+| Almacenamiento: tamano del firmware | `ESP.getSketchSize()` | `esp_image_get_metadata` de la particion en ejecucion (`image_len`), una vez por arranque; 0 = "No disponible" | Plataforma (pendiente en la placa) |
+| Almacenamiento: "Ritmo del sistema" | `gLoopRate` (vueltas del `loop()`) | Vueltas por segundo de la tarea de UI (`flex_metrics.ui_loops`) | Plataforma |
+| Archivos: lista | `FILES_MAX = 24` entradas en el orden del disco, luego ordenadas; mascara de 32 bits | Hasta 256 entradas leidas, ordenadas (carpetas primero, sin distinguir mayusculas y, a igualdad, por bytes); filas por ventana (solo las visibles mas un colchon) | Fidelidad (limite subido) / rendimiento |
+| Archivos: nombres de 48 caracteres o mas, y rutas de 160 o mas | Se truncan en silencio: borrar o renombrar tocaba el archivo que se llama como el principio | No se listan (no se pueden operar con seguridad). Probado con un arbol de 118 caracteres y entradas de 40, 41 y 8 | Seguridad de datos |
+| Archivos: toques sobre la cabecera, la ruta y el selector | Una fila desplazada por debajo recibia toques ahi | La lista solo recoge toques dentro de su ventana (probado en 3 000 casos) | Fidelidad (error corregido) |
+| Archivos: pulsacion larga y arrastre | 550 ms y menos de 14 px; con scroll, mas de 8 px es arrastre | Las mismas reglas del modelo (`flex_files_long`) sobre el indev de LVGL; el scroll es nativo (umbral de LVGL) | Arquitectura |
+| Archivos: gesto Atras del sistema | No hace nada dentro del explorador (solo la flecha sale) | Cierra la capa abierta (menu, dialogo, papelera), vuelve de la nube a "Este dispositivo" y, si no, sale a Almacenamiento (igual que la flecha); Inicio, Recientes y el bloqueo lo cierran | Fidelidad (mejora) |
+| Archivos: "Flex Cloud" y "Subir a Flex Cloud" | La nube real (CloudKit) / cola de subidas | "Flex Cloud no disponible" y un aviso al subir: sin N4 no hay a donde (A04c) | Honestidad |
+| Archivos: abrir una foto, dibujo, video o audio | `mediaOpenInPlayer` | Un aviso "El visor aun no esta disponible en esta version": Galeria y Multimedia no estan migradas (A02 / A03) | Honestidad |
 | Cronometro: reloj de tiempo | `millis()` | `lv_tick_get()` (ms de 32 bits que dan la vuelta; la misma resta sin signo) | Fidelidad |
 | Capsula: material y posicion | Pildora opaca dibujada en la barra (`cronoCapsuleDraw`) | Igual (opaca a proposito, hijo de la barra de estado del escritorio y del marco estandar); la hora normal cede si no cabe todo | Fidelidad |
 | Capsula: con la cortina o el Centro de avisos abiertos sobre una app | La superficie 2 no mira el panel: sigue sensible bajo la cortina | El gancho no reclama el toque si la cortina o el Centro estan abiertos | Endurecimiento |

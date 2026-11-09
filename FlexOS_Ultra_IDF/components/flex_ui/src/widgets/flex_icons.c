@@ -680,6 +680,14 @@ static void glyph_draw_cb(lv_event_t *e)
         p_rect(&p, cx + 1, cy - 4, 2, 12, 0, col, 255);
         break;
     }
+    case FLEX_GLYPH_CLOUD: {   // ckCloudGlyph(cx, cy, s): tres circulos y la base redondeada, con la aritmetica entera de Arduino
+        int cs = gd->value, x = (int)cx, y = (int)cy;
+        p_circle(&p, x - cs * 5 / 10, y + cs / 10, cs * 4 / 10, col, 255);
+        p_circle(&p, x + cs / 10, y - cs * 2 / 10, cs * 55 / 100, col, 255);
+        p_circle(&p, x + cs * 6 / 10, y + cs / 6, cs * 35 / 100, col, 255);
+        p_rect(&p, x - cs * 5 / 10, y + cs / 10, cs * 11 / 10, cs * 4 / 10 + 1, cs / 5, col, 255);
+        break;
+    }
     case FLEX_GLYPH_FK_CLOUD: {   // fkMenuGlyph(FK_ACT_CLOUD)
         lv_color_t det = lv_obj_get_style_bg_color(obj, LV_PART_MAIN);
         p_circle(&p, cx - 6, cy + 2, 6, col, 255);

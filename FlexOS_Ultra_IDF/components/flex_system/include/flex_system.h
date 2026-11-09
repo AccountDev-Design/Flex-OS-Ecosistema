@@ -53,6 +53,10 @@ esp_err_t flex_system_start(void);
 // Copia la ultima muestra (estructura grande: que el llamante la tenga estatica).
 void flex_system_get(flex_sys_snapshot_t *out);
 
+// Tamano de la imagen de firmware en ejecucion en bytes (0 = no se pudo leer) y motivo del ultimo reinicio (esp_reset_reason_t).
+uint32_t flex_system_fw_size(void);
+int flex_system_reset_reason(void);
+
 // Eventos de FLEX_EV_SYSTEM
 enum {
     FLEX_SYS_EV_LOW_INTERNAL_RAM = 1,   // RAM interna libre por debajo del umbral (dato: uint32_t bytes)

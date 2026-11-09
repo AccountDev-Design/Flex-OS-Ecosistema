@@ -47,7 +47,7 @@ typedef enum {
 } job_op_t;
 
 // Operaciones compuestas del kit de archivos (flex_fs_ops.c), dentro de JOB_FSOP.
-typedef enum { FSOP_DELETE, FSOP_RENAME_NAME, FSOP_TRASH, FSOP_RESTORE, FSOP_EMPTY_TRASH, FSOP_NEW_FILE, FSOP_DIRSTAT, FSOP_READ_HEAD } fsop_t;
+typedef enum { FSOP_DELETE, FSOP_RENAME_NAME, FSOP_TRASH, FSOP_RESTORE, FSOP_EMPTY_TRASH, FSOP_NEW_FILE, FSOP_DIRSTAT, FSOP_READ_HEAD, FSOP_EXPLORE, FSOP_SCAN } fsop_t;
 
 typedef struct {
     job_op_t op;
@@ -67,7 +67,7 @@ typedef struct {
     esp_err_t err;
     uint8_t *data;
     size_t len;
-    uint8_t kind;   // 0 hecho, 1 lectura, 2 cuenta (vaciar carpeta), 3 listado, 4 nombre (ruta creada), 5 estadistica de carpeta
+    uint8_t kind;   // 0 hecho, 1 lectura, 2 cuenta (vaciar carpeta), 3 listado, 4 nombre (ruta creada), 5 estadistica de carpeta, 6 listado de Archivos, 7 medidas de Almacenamiento
 } reply_t;
 
 static flex_kv_t s_kv;
@@ -461,6 +461,14 @@ static void reply_in_ui(void *arg)
     } else if (r->kind == 4) {
         ((flex_fs_name_cb_t)r->cb)(r->err, r->data ? (const char *)r->data : "", r->user);
         free(r->data);
+    } else if (r->kind == 6) {   // data: size_t total + r->len entradas
+        const size_t total = r->data ? *(const size_t *)r->data : 0;
+        ((flex_fs_explore_cb_t)r->cb)(r->err, r->data ? (const flex_fsx_ent_t *)(r->data + sizeof(size_t)) : NULL, r->len, total,
+                                      r->user);
+        free(r->data);
+    } else if (r->kind == 7) {
+        ((flex_fs_scan_cb_t)r->cb)(r->err, (const flex_fsx_scan_t *)r->data, r->user);
+        free(r->data);
     } else if (r->kind == 5) {
         uint32_t st[2] = {0, 0};
         if (r->data && r->len >= sizeof(st)) {
@@ -486,7 +494,9 @@ static void reply(job_t *job, esp_err_t err, uint8_t *data, size_t len)
                        (uint8_t)(job->op == JOB_READ ? 1 : job->op == JOB_WIPE_DIR ? 2 : job->op == JOB_LIST ? 3
                                  : (job->op == JOB_FSOP && job->fsop == FSOP_READ_HEAD) ? 1
                                  : (job->op == JOB_FSOP && job->fsop == FSOP_NEW_FILE) ? 4
-                                 : (job->op == JOB_FSOP && job->fsop == FSOP_DIRSTAT) ? 5 : 0)};
+                                 : (job->op == JOB_FSOP && job->fsop == FSOP_DIRSTAT) ? 5
+                                 : (job->op == JOB_FSOP && job->fsop == FSOP_EXPLORE) ? 6
+                                 : (job->op == JOB_FSOP && job->fsop == FSOP_SCAN) ? 7 : 0)};
         // Quien pidio el trabajo espera la respuesta (p. ej. una pantalla con
         // "Guardando..."): si el buzon esta lleno se reintenta un rato, esta
         // tarea no es la de UI y puede esperar.
@@ -559,6 +569,36 @@ static void run_fsop(job_t *job)
         free(name_out);
         name_out = NULL;
         if (r != FLEX_FSX_IO) {   // sin carpeta / ruta no valida: respuesta normal, sin datos
+            reply(job, fsx_to_err(r), NULL, 0);
+            return;
+        }
+        break;
+    }
+    case FSOP_EXPLORE: {   // flexFsList: carpetas primero, por nombre, con el conteo y el tamano reales de cada carpeta
+        size_t max = job->len > FLEX_FSX_LIST_SCAN ? FLEX_FSX_LIST_SCAN : job->len, n = 0, total = 0;
+        uint8_t *blk = max ? malloc(sizeof(size_t) + max * sizeof(flex_fsx_ent_t)) : NULL;
+        r = blk ? flex_fsx_list(FLEX_FS_BASE, job->path, (flex_fsx_ent_t *)(blk + sizeof(size_t)), max, &n, &total) : FLEX_FSX_IO;
+        if (blk && r == FLEX_FSX_OK) {
+            *(size_t *)blk = total;
+            reply(job, ESP_OK, blk, n);
+            return;
+        }
+        free(blk);
+        if (r != FLEX_FSX_IO) {   // no es una carpeta / ruta no valida: respuesta normal, sin datos
+            reply(job, fsx_to_err(r), NULL, 0);
+            return;
+        }
+        break;
+    }
+    case FSOP_SCAN: {   // flexFsCatSize + flexFsLargest en una pasada
+        flex_fsx_scan_t *sc = malloc(sizeof(*sc));
+        r = sc ? flex_fsx_scan(FLEX_FS_BASE, job->path2[0] ? job->path2 : NULL, sc) : FLEX_FSX_IO;
+        if (sc && r == FLEX_FSX_OK) {
+            reply(job, ESP_OK, (uint8_t *)sc, sizeof(*sc));
+            return;
+        }
+        free(sc);
+        if (r != FLEX_FSX_IO) {
             reply(job, fsx_to_err(r), NULL, 0);
             return;
         }
@@ -887,6 +927,25 @@ esp_err_t flex_fs_read_head_async(const char *path, size_t n, flex_fs_read_cb_t 
 esp_err_t flex_fs_dirstat_async(const char *dir, flex_fs_stat_cb_t cb, void *user)
 {
     return (dir && cb) ? fsop_enqueue(FSOP_DIRSTAT, dir, NULL, NULL, (void *)cb, user) : ESP_ERR_INVALID_ARG;
+}
+
+esp_err_t flex_fs_explore_async(const char *dir, size_t max, flex_fs_explore_cb_t cb, void *user)
+{
+    if (!dir || !cb || max == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    job_t *job = new_job(JOB_FSOP, dir, (void *)cb, user);
+    if (!job) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    job->fsop = FSOP_EXPLORE;
+    job->len = max;
+    return enqueue(job);
+}
+
+esp_err_t flex_fs_scan_async(const char *skip_prefix, flex_fs_scan_cb_t cb, void *user)
+{
+    return cb ? fsop_enqueue(FSOP_SCAN, "/", skip_prefix, NULL, (void *)cb, user) : ESP_ERR_INVALID_ARG;
 }
 
 esp_err_t flex_fs_new_file_async(const char *dir, const char *name, const char *ext, flex_fs_name_cb_t cb, void *user)

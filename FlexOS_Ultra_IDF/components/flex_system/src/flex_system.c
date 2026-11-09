@@ -8,7 +8,11 @@
 #include "esp_core_dump.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_image_format.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "esp_psram.h"
+#include "esp_system.h"
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "flex_bus.h"
@@ -233,4 +237,34 @@ void flex_system_get(flex_sys_snapshot_t *out)
     portENTER_CRITICAL(&s_mux);
     *out = s_snap;
     portEXIT_CRITICAL(&s_mux);
+}
+
+// ---- datos fijos del arranque (Almacenamiento > Detalles) -------------------------------------------------------------------------------------
+// Tamano de la imagen en ejecucion: una lectura de la CABECERA de la imagen (esp_image_get_metadata), no un recorrido de la flash; no cambia
+// hasta la siguiente actualizacion, asi que se mide una vez por arranque (ESP.getSketchSize() de Arduino). 0 = no se pudo leer.
+uint32_t flex_system_fw_size(void)
+{
+    static uint32_t s_size;
+    static bool s_done;
+    if (s_done) {
+        return s_size;
+    }
+    s_done = true;
+    const esp_partition_t *p = esp_ota_get_running_partition();
+    if (!p) {
+        return 0;
+    }
+    esp_partition_pos_t pos = {.offset = p->address, .size = p->size};
+    esp_image_metadata_t meta;
+    if (esp_image_get_metadata(&pos, &meta) == ESP_OK) {
+        s_size = meta.image_len;
+    } else {
+        ESP_LOGW(TAG, "no se pudo leer la cabecera de la imagen en ejecucion");
+    }
+    return s_size;
+}
+
+int flex_system_reset_reason(void)
+{
+    return (int)esp_reset_reason();
 }

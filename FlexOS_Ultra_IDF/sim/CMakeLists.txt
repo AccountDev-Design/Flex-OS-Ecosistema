@@ -53,6 +53,7 @@ add_executable(flexos_ui_sim
     stubs/flex_services_stub.c
     stubs/flex_passcode_async_stub.c
     ${FLEX_ROOT}/components/flex_portable/src/FlexOS_Mem.cpp
+    ${FLEX_ROOT}/components/flex_portable/src/FlexOS_Media.cpp
     ${FLEX_ROOT}/components/flex_storage/src/flex_kv.c
     ${FLEX_ROOT}/components/flex_storage/src/flex_fs_names.c
     ${FLEX_ROOT}/components/flex_storage/src/flex_fs_ops.c

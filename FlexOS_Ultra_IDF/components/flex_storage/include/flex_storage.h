@@ -13,6 +13,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "flex_fs_scan.h"   // listado de Archivos y medidas de Almacenamiento (flex_fs_explore_async / flex_fs_scan_async)
 
 #ifdef __cplusplus
 extern "C" {

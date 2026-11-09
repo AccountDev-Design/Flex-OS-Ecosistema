@@ -62,4 +62,7 @@ void test_raster(void);
 void test_set(void);
 void test_kbs(void);
 void test_chrono(void);
+void test_fsscan(void);
+void test_stor(void);
+void test_files(void);
 #define FLEX_APP_N_TEST 19

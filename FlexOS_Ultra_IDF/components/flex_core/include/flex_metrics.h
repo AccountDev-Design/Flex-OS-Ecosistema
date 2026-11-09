@@ -28,6 +28,7 @@ typedef struct {
     float render_ms_max;
     float vsync_wait_ms_avg;    // espera al fin de cuadro antes de reutilizar el FB
     float ui_cpu_pct;           // tiempo de CPU de la tarea de UI (sin las esperas)
+    float ui_loops;             // vueltas de la tarea de UI por segundo (el "ritmo del sistema" de Almacenamiento)
     float touch_used_ms_avg;    // t_used - t_read
     float touch_flip_ms_avg;    // t_flip - t_read
     float touch_flip_ms_max;

@@ -144,6 +144,21 @@ python3 ref/extract_arduino.py "$OUT/ref_kbs.inc" \
     FlexOS_Ultra_Keyboard.h:KB_SYM_POOL_N,KB_SYM_POOL,kbSymAt \
     FlexOS_Ultra_KeyboardSettings.h:KBS_MAIN,KBS_DESIGN,KBS_TOUCH,KBS_SYMS,KBS_SHORT,KBS_SCEDIT,KBS_ABOUT,KBS_LANG,KBS_ROW_MAX,kbsPage,kbsScroll,kbsRowY0,kbsRet,kbsScSel,kbsScField,kbsScA,kbsDragY0,kbsDragging,KBS_TOP,KBS_BOT,kbsBg,kbsCard,kbsRow,kbsSection,kbsSizeName,kbsStyleName,kbsFontName,kbsFxName,kbsOnOff,kbsAppendField,kbsBackField,kbsContent,kbsTitle,kbsGo,kbsResetDefaults,kbsRowAction,kbsTick
 
+python3 ref/extract_arduino.py "$OUT/ref_fsscan.inc" \
+    FlexOS_FS.cpp:baseName,joinPath,flexFsCount,dirSizeRec,flexFsDirSize,cmpEntry,flexFsList,flexFsCatSize,bigWalk,flexFsLargest
+
+python3 ref/extract_arduino.py "$OUT/ref_stor_ui.inc" \
+    FlexOS_Ultra_AppFramework.h:uiBox,uiW,uiH,uiTop,uiPad,uiGap,uiFontFit,uiFontH,uiLineH,uiTitle
+
+python3 ref/extract_arduino.py "$OUT/ref_stor.inc" \
+    FlexOS_Ultra_AppStorage.h:ALM_BIG_MAX,almBig,almBigN,almCat,almVerY0,ALM_CAT_NAME,ALM_CAT_COL,simpBar,almScan,almFolderIcon,ALM_SCR_MAIN,almScreen,almPhY0,almDetY0,almOptX0,almPhoneState,almPhoneQuota,almPhoneCard,almRenderMain,ALMD_VY0,ALMD_VY1,ALMD_SEC_N,ALMD_SEC_H,almDetScroll,almDetSig,almDetMs,almDetDrag,almDetTouching,almDetStartY,ALMD_BW,ALMD_BX,ALMD_BH,almDetSecTop,almDetContentH,almDetMaxScroll,almDetRow,almDetNote,almDetTitle,almBootCause,almTopApps,almDetSecSig,almDetDrawSection,almDetailTick,almTick
+
+python3 ref/extract_arduino.py "$OUT/ref_files_fs.inc" \
+    FlexOS_FS.cpp:baseName,flexFsStem
+
+python3 ref/extract_arduino.py "$OUT/ref_files_inc.inc" \
+    FlexOS_Ultra_AppFiles.h:FILES_MAX,FILES_SEG_Y,FILES_SEG_H,FILES_TOP,FILES_VP_TOP,FILES_RH,filesList,filesN,filesDir,filesSelIdx,filesScroll,filesDragY0,filesDragging,filesMulti,filesMask,filesCloud,filesCkBox,filesCkOpen,filesCkHost,filesDrawSeg,filesSegHit,filesIsLibraryDir,filesReload,filesPathOf,filesHasUp,filesRowY,filesMaxScroll,filesRender,filesGoUp,filesOpenEntry,filesMenuAction,filesCkLeave,filesCloudTick,filesTick
+
 python3 ref/extract_arduino.py "$OUT/ref_layout.inc" \
     FlexOS_Ultra_Clock.h:daysInMonth \
     FlexOS_Ultra_AppFramework.h:uiBox,uiW,uiH,uiTop,uiPad,uiGap,uiFontFit,uiFontH,uiLineH
@@ -157,7 +172,7 @@ python3 ref/extract_arduino.py "$OUT/ref_chrono_ui.inc" \
 python3 ref/extract_arduino.py "$OUT/ref_chrono.inc" \
     FlexOS_Ultra_AppChrono.h:CRONO_CAP_Y,CRONO_CAP_H,CRONO_CAP_ICON,CRONO_CAP_PADL,CRONO_CAP_GAP,CRONO_CAP_PADR,CRONO_CARD_X,CRONO_CARD_W,CRONO_CARD_Y,CRONO_CARD_H,CRONO_CARD_RAD,CRONO_CARD_ANIM,CRONO_BAND_T,CRONO_BAND_B,CRONO_BAND_H,CRONO_DYN_T,CRONO_DYN_B,CRONO_DYN_H,CRONO_ACCENT,CRONO_DISC,CRONO_CARDBG,CRONO_ONACC,cronoElapsed,cronoLapElapsed,cronoActive,cronoCurLapNo,cronoFmt,cronoRecalcExtremes,cronoStart,cronoPause,cronoReset,cronoLapMark,cronoActionLeft,cronoActionRight,cronoLabelLeft,cronoLabelRight,cronoEase,cronoLerp,cronoGlyph,cronoCapsuleW,cronoCapsuleRight,cronoCapsuleDraw,cronoBarClock,cronoBarSurface,cronoCapsuleTick,CronoLayout,gCL,cronoLayout,cronoFitBig,cronoDrawDial,cronoDrawLaps,cronoDrawButtons,cronoTabTouch,cronoCardDynText,cronoCardStatic,cronoCardCompose,cronoOverlayTouch
 
-SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c test_kiosk.c test_homecfg.c test_session.c test_mem_model.c test_boot.c test_calc.c test_layout.c test_fsnames.c test_fsops.c test_fk.c test_ned.c test_clip.c test_notes.c test_paint.c test_raster.c test_set.c test_kbs.c test_chrono.c
+SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c test_kiosk.c test_homecfg.c test_session.c test_mem_model.c test_boot.c test_calc.c test_layout.c test_fsnames.c test_fsops.c test_fk.c test_ned.c test_clip.c test_notes.c test_paint.c test_raster.c test_set.c test_kbs.c test_chrono.c test_fsscan.c test_stor.c test_files.c
       $ROOT/components/flex_storage/src/flex_kv.c
       $ROOT/components/flex_storage/src/flex_fs_path.c
       $ROOT/components/flex_storage/src/flex_fs_wipe.c
@@ -178,6 +193,8 @@ SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_
       $ROOT/components/flex_ui/src/apps/flex_set_model.c
       $ROOT/components/flex_ui/src/apps/flex_kbs_model.c
       $ROOT/components/flex_ui/src/apps/flex_chrono_model.c
+      $ROOT/components/flex_ui/src/apps/flex_stor_model.c
+      $ROOT/components/flex_ui/src/apps/flex_files_model.c
       $ROOT/components/flex_ui/src/widgets/flex_layout.c
       $ROOT/components/flex_ui/src/widgets/flex_clip.c
       $ROOT/components/flex_ui/src/widgets/flex_fk_model.c
@@ -201,7 +218,7 @@ CFLAGS=(-O1 -g -Wall -Wextra -Werror -pthread)
 build() {   # $1 = sufijo, resto = flags de sanitizador
     local sfx=$1; shift
     local refs=()
-    for r in wall glass home home_load touch drawer kb recents qs ntf homecfg session mem boot calc layout fsnames fk ned clip notes paint raster set kbs chrono; do
+    for r in wall glass home home_load touch drawer kb recents qs ntf homecfg session mem boot calc layout fsnames fk ned clip notes paint raster set kbs chrono fsscan stor files; do
         c++ -std=gnu++17 -O1 -g -w "$@" -Iref -I"$OUT" -I$ROOT/components/flex_portable/include -I$ROOT/components/flex_ui/src/apps -I$ROOT/components/flex_ui/src/widgets -I$ROOT/components/flex_ui/src/theme -I$ROOT/components/flex_storage/include -I../../sim/stubs/include -c ref/ref_${r}_main.cpp -o "$OUT/ref_${r}_$sfx.o"
         refs+=("$OUT/ref_${r}_$sfx.o")
     done
@@ -209,7 +226,8 @@ build() {   # $1 = sufijo, resto = flags de sanitizador
     refs+=("$OUT/flexlink_$sfx.o")
     c++ -std=gnu++17 -O1 -g -w "$@" -I$ROOT/components/flex_portable/include -c $ROOT/components/flex_portable/src/FlexOS_Mem.cpp -o "$OUT/flexmem_$sfx.o"
     c++ -std=gnu++17 -O1 -g -w "$@" -Iref -I$ROOT/components/flex_portable/include -c ref/test_mem_core.cpp -o "$OUT/testmemcore_$sfx.o"
-    refs+=("$OUT/flexmem_$sfx.o" "$OUT/testmemcore_$sfx.o")
+    c++ -std=gnu++17 -O1 -g -w "$@" -I$ROOT/components/flex_portable/include -c $ROOT/components/flex_portable/src/FlexOS_Media.cpp -o "$OUT/flexmedia_$sfx.o"
+    refs+=("$OUT/flexmem_$sfx.o" "$OUT/testmemcore_$sfx.o" "$OUT/flexmedia_$sfx.o")
     cc -std=gnu11 "${CFLAGS[@]}" "$@" "${INC[@]}" "${SRCS[@]}" "${refs[@]}" -lstdc++ -lm -o "$OUT/host_$sfx"
 }
 build asan -fsanitize=address,undefined -fno-sanitize-recover=all

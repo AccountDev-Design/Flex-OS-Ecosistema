@@ -18,6 +18,7 @@ static struct {
     uint32_t vsync_timeouts;
     int64_t render_start_us;
     int64_t ui_busy_us;
+    uint32_t ui_loops;
     acc_t render, vsync_wait, touch_used, touch_flip, touch_shown;
     int latency_state;          // 0 libre, 1 espera cambio de FB, 2 espera fin de cuadro
     int64_t latency_t0;
@@ -94,6 +95,7 @@ void flex_metrics_input(int64_t t_read_us, int64_t t_used_us)
 
 void flex_metrics_ui_busy(int64_t busy_us)
 {
+    s.ui_loops++;   // se llama una vez por vuelta de la tarea de UI
     if (busy_us > 0) {
         s.ui_busy_us += busy_us;
     }
@@ -118,6 +120,7 @@ bool flex_metrics_tick(int64_t now_us, uint32_t vsync_total)
         .render_ms_max = acc_max_ms(&s.render),
         .vsync_wait_ms_avg = acc_avg_ms(&s.vsync_wait),
         .ui_cpu_pct = 100.0f * (float)s.ui_busy_us / (float)elapsed,
+        .ui_loops = (float)s.ui_loops / secs,
         .touch_used_ms_avg = acc_avg_ms(&s.touch_used),
         .touch_flip_ms_avg = acc_avg_ms(&s.touch_flip),
         .touch_flip_ms_max = acc_max_ms(&s.touch_flip),
@@ -132,6 +135,7 @@ bool flex_metrics_tick(int64_t now_us, uint32_t vsync_total)
     s.vsync_at_start = vsync_total;
     s.frames_in_window = 0;
     s.ui_busy_us = 0;
+    s.ui_loops = 0;
     memset(&s.render, 0, sizeof(s.render));
     memset(&s.vsync_wait, 0, sizeof(s.vsync_wait));
     memset(&s.touch_used, 0, sizeof(s.touch_used));
