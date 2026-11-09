@@ -620,6 +620,13 @@ int flex_app_life(int id)
 }
 
 // ---- estados del shell -------------------------------------------------------------
+// La hora por red (flex_net) solo hace la PRIMERA consulta con el sistema en el escritorio o en el bloqueo (ntpTick: gState == ST_HOME / ST_LOCK)
+bool flex_net_system_ready(void)
+{
+    flex_shell_state_t s = flex_shell_state();
+    return s == FLEX_SH_HOME || s == FLEX_SH_LOCK;
+}
+
 flex_shell_state_t flex_shell_state(void)
 {
     return s_state;

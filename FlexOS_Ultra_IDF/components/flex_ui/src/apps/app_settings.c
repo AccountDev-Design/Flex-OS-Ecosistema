@@ -37,6 +37,7 @@
 // ---- servicios de otras areas (simbolos debiles) -------------------------------------------------------------------------------
 extern void flex_ntp_texts(char *state, size_t ns, char *last, size_t nl, bool *busy) __attribute__((weak));
 extern void flex_ntp_request_sync(bool force) __attribute__((weak));
+extern bool flex_ntp_time_nvs_ok(void) __attribute__((weak));
 extern const char *flex_ota_status_text(void) __attribute__((weak));
 extern void flex_ota_open_settings(void) __attribute__((weak));
 extern void flex_account_settings_text(char *out, size_t n) __attribute__((weak));
@@ -134,7 +135,7 @@ static void sys_fill(void)
     s->rtc_y = tm.tm_year + 1900;
     s->rtc_h = tm.tm_hour;
     s->rtc_min = tm.tm_min;
-    s->time_nvs_ok = true;
+    s->time_nvs_ok = flex_ntp_time_nvs_ok ? flex_ntp_time_nvs_ok() : true;   // gTimeNvsOk: el espacio de la hora responde
     // hora por red
     s->ntp_available = flex_ntp_texts != NULL && flex_ntp_request_sync != NULL;
     if (flex_ntp_texts) {

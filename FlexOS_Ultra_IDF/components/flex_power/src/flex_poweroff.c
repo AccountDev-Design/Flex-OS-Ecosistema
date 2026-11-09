@@ -18,6 +18,9 @@
 
 static const char *TAG = "flex.poweroff";
 
+// La hora por red (flex_net, si esta enlazado): un apagado limpio guarda la hora ya, no espera al guardado horario
+extern void flex_ntp_save_time(void) __attribute__((weak));
+
 #define WAKE_POLL_MS     400    // sin INT cableado: el temporizador despierta a mirar el tactil
 #define SAVE_TIMEOUT_MS  1500   // vaciado sincronico de los ajustes antes de dormir
 #define GATE_BUS_ERRORS  20     // lecturas fallidas seguidas: sin tactil fiable, se arranca
@@ -69,6 +72,9 @@ void flex_poweroff_deep_sleep(void)
 {
     // flexos/cleanoff y el brillo, de forma SINCRONICA (el escritor de ajustes es
     // asincrono: sin esperar, el apagado se comeria lo pendiente).
+    if (flex_ntp_save_time) {
+        flex_ntp_save_time();
+    }
     flex_cfg_set_bool("cleanoff", true);
     flex_cfg_set_i32("bright", flex_display_get_brightness());
     esp_err_t err = flex_cfg_flush(SAVE_TIMEOUT_MS);

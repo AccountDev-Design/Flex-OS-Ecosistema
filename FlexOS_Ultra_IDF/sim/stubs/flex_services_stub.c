@@ -18,6 +18,7 @@
 #include "flex_inbox.h"
 #include "flex_kv.h"
 #include "flex_metrics.h"
+#include "flex_ntp.h"
 #include "flex_storage.h"
 #include "flex_system.h"
 #include "flex_touch.h"
@@ -138,6 +139,7 @@ static esp_err_t snum(const char *ns, const char *k, flex_kv_type_t t, int64_t v
 bool flex_kvs_get_bool(const char *ns, const char *key, bool def) { return gnum(ns, key, FLEX_KV_U8, def) != 0; }
 int32_t flex_kvs_get_i32(const char *ns, const char *key, int32_t def) { return (int32_t)gnum(ns, key, FLEX_KV_I32, def); }
 uint32_t flex_kvs_get_u32(const char *ns, const char *key, uint32_t def) { return (uint32_t)gnum(ns, key, FLEX_KV_U32, def); }
+uint64_t flex_kvs_get_u64(const char *ns, const char *key, uint64_t def) { return (uint64_t)gnum(ns, key, FLEX_KV_U64, (int64_t)def); }
 size_t flex_kvs_get_blob(const char *ns, const char *key, void *out, size_t cap)
 {
     kv();
@@ -157,6 +159,7 @@ void flex_kvs_get_str(const char *ns, const char *key, char *out, size_t cap, co
 esp_err_t flex_kvs_set_bool(const char *ns, const char *key, bool v) { return snum(ns, key, FLEX_KV_U8, v); }
 esp_err_t flex_kvs_set_i32(const char *ns, const char *key, int32_t v) { return snum(ns, key, FLEX_KV_I32, v); }
 esp_err_t flex_kvs_set_u32(const char *ns, const char *key, uint32_t v) { return snum(ns, key, FLEX_KV_U32, v); }
+esp_err_t flex_kvs_set_u64(const char *ns, const char *key, uint64_t v) { return snum(ns, key, FLEX_KV_U64, (int64_t)v); }
 esp_err_t flex_kvs_set_blob(const char *ns, const char *key, const void *d, size_t len)
 {
     kv();
@@ -599,9 +602,7 @@ esp_err_t flex_storage_nvs_erase_confirmed(uint32_t t) { (void)t; return ESP_ERR
 esp_err_t flex_storage_fs_format_confirmed(uint32_t t) { (void)t; return ESP_ERR_INVALID_STATE; }
 
 // ---- sistema -----------------------------------------------------------------
-static bool s_sim_online;
-void sim_net_online(bool on) { s_sim_online = on; }
-bool flex_net_online(void) { return s_sim_online; }   // el simulador pone el estado de la red (en el firmware lo dara el servicio de red)
+void sim_net_online(bool on) { flex_net_set_online(on); }   // el simulador pone el estado de la red; lo guarda el servicio de hora por red (flex_net)
 static float s_sim_loops = 58.0f;   // vueltas de la tarea de UI por segundo (la escena lo cambia)
 void sim_metrics_set_loops(float n) { s_sim_loops = n; }
 void flex_metrics_get(flex_metrics_t *o)

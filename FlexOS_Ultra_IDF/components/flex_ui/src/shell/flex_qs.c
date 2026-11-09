@@ -143,9 +143,12 @@ static bool fs_mounted(void)
     return st.fs_mounted;
 }
 
-// Lo que funciona AHORA en ESP-IDF. Pendientes: Wi-Fi y Sincronizar hora (Fase 6),
+// Lo que funciona AHORA en ESP-IDF. Pendientes: Wi-Fi (Fase 6),
 // Ahorro (gestion de energia, Fase 17), Actualizaciones (Fase 14), Volumen y
 // Silencio (Fase 11) y Cronometro (app).
+extern void flex_ntp_request_sync(bool force) __attribute__((weak));   // flex_net: la hora por red
+static bool airplane(void);
+
 static bool qs_shown(int id)
 {
     switch (id) {
@@ -162,6 +165,8 @@ static bool qs_shown(int id)
     case FLEX_QS_CRONO: // el cronometro de la app Reloj (flex_crono.c)
     case FLEX_QS_POWEROFF:
         return true;
+    case FLEX_QS_NTP:
+        return flex_ntp_request_sync != NULL && !airplane();   // qpAvNtp: con el servicio y fuera del modo avion
     case FLEX_QS_GLASSFX:
         return flex_look()->glass;   // con el estilo Plano la intensidad no cambia nada
     case FLEX_QS_FILES:
@@ -1122,6 +1127,11 @@ static bool exec_ctl(int id, bool detail)
     case FLEX_QS_AIRPLANE:
         // Sin radios todavia en ESP-IDF: el estado es real (lo leera el Wi-Fi).
         flex_cfg_set_bool("airpl", !airplane());
+        break;
+    case FLEX_QS_NTP:
+        if (flex_ntp_request_sync) {
+            flex_ntp_request_sync(true);   // qpTapNtp: "Sincronizar hora" salta la espera progresiva; no bloquea
+        }
         break;
     case FLEX_QS_DND: flex_notif_set_dnd(!flex_notif_dnd()); break;
     case FLEX_QS_CRONO: flex_crono_svc_toggle(); break;   // qpTapCrono: marcha <-> pausa

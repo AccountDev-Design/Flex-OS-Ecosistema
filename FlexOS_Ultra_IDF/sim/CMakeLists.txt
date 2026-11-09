@@ -55,6 +55,9 @@ add_executable(flexos_ui_sim
     ${FLEX_ROOT}/components/flex_portable/src/FlexOS_Mem.cpp
     ${FLEX_ROOT}/components/flex_portable/src/FlexOS_Media.cpp
     ${FLEX_ROOT}/components/flex_games/src/flex_jumper.cpp
+    ${FLEX_ROOT}/components/flex_core/src/flex_time.c
+    ${FLEX_ROOT}/components/flex_net/src/flex_ntp_model.c
+    ${FLEX_ROOT}/components/flex_net/src/flex_ntp.c
     ${FLEX_ROOT}/components/flex_storage/src/flex_kv.c
     ${FLEX_ROOT}/components/flex_storage/src/flex_fs_names.c
     ${FLEX_ROOT}/components/flex_storage/src/flex_fs_ops.c
@@ -75,6 +78,7 @@ target_include_directories(flexos_ui_sim PRIVATE
     ${FLEX_ROOT}/components/flex_portable/include
     ${FLEX_ROOT}/components/flex_games/include
     ${FLEX_ROOT}/components/flex_i2c/include
+    ${FLEX_ROOT}/components/flex_net/include
     ${FLEX_ROOT}/components/flex_ui/src
     ${FLEX_ROOT}/components/flex_ui/src/theme
     ${FLEX_ROOT}/components/flex_ui/src/widgets

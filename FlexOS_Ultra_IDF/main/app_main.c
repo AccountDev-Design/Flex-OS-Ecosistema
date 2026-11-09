@@ -4,6 +4,7 @@
 #include "flex_bus.h"
 #include "flex_core.h"
 #include "flex_i2c.h"
+#include "flex_ntp.h"
 #include "flex_passcode.h"
 #include "flex_poweroff.h"
 #include "flex_reset.h"
@@ -60,6 +61,9 @@ void app_main(void)
         ESP_LOGE(TAG, "monitor del sistema: %s", esp_err_to_name(err));
     }
 
+    // La hora de antes del apagado (aproximada hasta sincronizar), ANTES de la interfaz: nunca arranca en 1970 ni en la semilla si hay una mejor
+    flex_ntp_boot_load();
+
     err = flex_i2c_init();
     if (err == ESP_OK) {
         err = flex_touch_start();
@@ -69,4 +73,7 @@ void app_main(void)
     }
 
     ESP_ERROR_CHECK(flex_ui_start());
+
+    // La hora por red: un trabajador de baja prioridad. Sin Wi-Fi (X3) no consulta nada y lo dice ("Esperando Wi-Fi")
+    flex_ntp_start();
 }

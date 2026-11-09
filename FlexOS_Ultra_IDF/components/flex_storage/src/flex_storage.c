@@ -39,7 +39,7 @@ static const char *TAG = "flex.storage";
 
 // Espacios de NVS que se cargan en la cache al arrancar (los de la version
 // Arduino). Cada modulo anade el suyo al migrarse: "flexqs" es el panel rapido.
-static const char *const k_namespaces[] = {FLEX_NVS_NS, "flexcare", "flexphone", "flexqs", "flexsafe", "flexreset"};
+static const char *const k_namespaces[] = {FLEX_NVS_NS, "flexcare", "flexphone", "flexqs", "flexsafe", "flexreset", "flexos_time"};
 
 typedef enum {
     JOB_WRITE, JOB_REMOVE, JOB_RENAME, JOB_MKDIR, JOB_WIPE_DIR, JOB_READ, JOB_LIST, JOB_FLUSH, JOB_NVS_ERASE, JOB_FS_FORMAT,
@@ -1335,6 +1335,7 @@ static int64_t get_num(const char *ns, const char *key, flex_kv_type_t t, int64_
 bool flex_kvs_get_bool(const char *ns, const char *key, bool def) { return get_num(ns, key, FLEX_KV_U8, def) != 0; }
 int32_t flex_kvs_get_i32(const char *ns, const char *key, int32_t def) { return (int32_t)get_num(ns, key, FLEX_KV_I32, def); }
 uint32_t flex_kvs_get_u32(const char *ns, const char *key, uint32_t def) { return (uint32_t)get_num(ns, key, FLEX_KV_U32, def); }
+uint64_t flex_kvs_get_u64(const char *ns, const char *key, uint64_t def) { return (uint64_t)get_num(ns, key, FLEX_KV_U64, (int64_t)def); }
 
 size_t flex_kvs_get_blob(const char *ns, const char *key, void *out, size_t cap)
 {
@@ -1361,6 +1362,7 @@ void flex_kvs_get_str(const char *ns, const char *key, char *out, size_t cap, co
 esp_err_t flex_kvs_set_bool(const char *ns, const char *key, bool v) { return set_num(ns, key, FLEX_KV_U8, v ? 1 : 0); }
 esp_err_t flex_kvs_set_i32(const char *ns, const char *key, int32_t v) { return set_num(ns, key, FLEX_KV_I32, v); }
 esp_err_t flex_kvs_set_u32(const char *ns, const char *key, uint32_t v) { return set_num(ns, key, FLEX_KV_U32, v); }
+esp_err_t flex_kvs_set_u64(const char *ns, const char *key, uint64_t v) { return set_num(ns, key, FLEX_KV_U64, (int64_t)v); }
 esp_err_t flex_kvs_set_blob(const char *ns, const char *key, const void *d, size_t len) { return set_buf(ns, key, FLEX_KV_BLOB, d, len); }
 
 esp_err_t flex_kvs_set_str(const char *ns, const char *key, const char *v)

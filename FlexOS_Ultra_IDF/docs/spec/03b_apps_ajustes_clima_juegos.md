@@ -504,6 +504,12 @@ NEVER/OK/FAIL ──(due && online && !airplane)──► BUSY (tarea ntp) ─�
   (tras un primer arranque sin red, el siguiente arranque la presenta como "Hora aproximada"); el re-anclaje horario que
   fuerza un falso "cambio de minuto".
 
+**Implementado** (`components/flex_net`, `flex_core/flex_time`; pruebas `test_ntp.c` y la escena `ntp`): se mantuvo el cliente propio con sockets BSD de
+lwIP (opcion b), con el modelo en C puro comparado con las funciones de Arduino y el transporte probado contra un servidor UDP real. El servicio entra
+por `flex_ntp_env_t`; el reloj es `flex_time` (POSIX); la persistencia usa `flexos_time` / `epoch` / `lastsync` (U64) sin guardar la semilla de
+fabrica. Sin Wi-Fi (X3, N1b) dice "Esperando Wi-Fi". Ver las diferencias (origen de la respuesta, comprobaciones extra, hora de fabrica, epoca corrupta,
+un trabajador en lugar de una tarea por consulta) en `ESP_IDF_MIGRATION_REPORT.md`.
+
 ---
 
 ## 14. Juegos: Jumper (`FlexOS_Ultra_AppGames.h`, `FlexOS_Jumper.h`, `FlexOS_Jumper_Level.h`)

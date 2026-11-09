@@ -37,6 +37,7 @@ bool scene_almacen_run(void);
 bool scene_juegos_run(void);
 bool scene_devcare_run(void);
 bool scene_dcui_run(void);
+bool scene_ntp_run(void);
 
 const sim_scene_t sim_scenes[] = {
     {"galeria", scene_gallery_run},
@@ -73,6 +74,7 @@ const sim_scene_t sim_scenes[] = {
     {"juegos", scene_juegos_run},
     {"devcare", scene_devcare_run},
     {"dcui", scene_dcui_run},
+    {"ntp", scene_ntp_run},
     {"apagado", scene_poweroff_run},
     {NULL, NULL},
 };

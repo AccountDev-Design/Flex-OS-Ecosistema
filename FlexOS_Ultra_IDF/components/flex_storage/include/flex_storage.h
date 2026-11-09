@@ -83,11 +83,13 @@ esp_err_t flex_cfg_erase(const char *key);
 bool      flex_kvs_get_bool(const char *ns, const char *key, bool def);
 int32_t   flex_kvs_get_i32(const char *ns, const char *key, int32_t def);
 uint32_t  flex_kvs_get_u32(const char *ns, const char *key, uint32_t def);
+uint64_t  flex_kvs_get_u64(const char *ns, const char *key, uint64_t def);
 size_t    flex_kvs_get_blob(const char *ns, const char *key, void *out, size_t cap);
 void      flex_kvs_get_str(const char *ns, const char *key, char *out, size_t cap, const char *def);
 esp_err_t flex_kvs_set_bool(const char *ns, const char *key, bool v);
 esp_err_t flex_kvs_set_i32(const char *ns, const char *key, int32_t v);
 esp_err_t flex_kvs_set_u32(const char *ns, const char *key, uint32_t v);
+esp_err_t flex_kvs_set_u64(const char *ns, const char *key, uint64_t v);
 esp_err_t flex_kvs_set_blob(const char *ns, const char *key, const void *data, size_t len);
 esp_err_t flex_kvs_set_str(const char *ns, const char *key, const char *v);
 
