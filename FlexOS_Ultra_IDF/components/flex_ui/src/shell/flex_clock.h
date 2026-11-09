@@ -20,6 +20,8 @@ void flex_clock_init(void);
 void flex_clock_now(struct tm *out);
 // true si la hora vino de la red (NTP) y no de la semilla.
 bool flex_clock_synced(void);
+// Epoca UTC actual (con la semilla de fabrica mientras no haya hora de red): la de los registros del historial de Device Care
+uint32_t flex_clock_utc(void);
 void flex_clock_set_utc(uint32_t utc);   // NTP / ajuste manual
 // "13:23" o "1:23" (reloj grande, sin AM/PM) y "13:23" / "1:23 PM" (barras).
 void flex_clock_str_big(char *out, int cap);

@@ -74,6 +74,7 @@ target_include_directories(flexos_ui_sim PRIVATE
     ${FLEX_ROOT}/components/flex_ui/include
     ${FLEX_ROOT}/components/flex_portable/include
     ${FLEX_ROOT}/components/flex_games/include
+    ${FLEX_ROOT}/components/flex_i2c/include
     ${FLEX_ROOT}/components/flex_ui/src
     ${FLEX_ROOT}/components/flex_ui/src/theme
     ${FLEX_ROOT}/components/flex_ui/src/widgets

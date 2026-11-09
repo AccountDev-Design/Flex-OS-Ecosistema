@@ -35,4 +35,5 @@ echo "### 4. Reglas"
 python3 tools/check_lvgl_only.py
 python3 tools/check_portable.py
 python3 tools/gen_jumper_engine.py --check
+python3 tools/gen_devcare_text.py --check
 echo "TODO OK"

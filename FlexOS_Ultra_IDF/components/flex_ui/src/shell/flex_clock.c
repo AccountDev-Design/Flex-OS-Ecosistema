@@ -46,6 +46,11 @@ void flex_clock_set_utc(uint32_t utc)
     s_synced = true;
 }
 
+uint32_t flex_clock_utc(void)
+{
+    return now_utc();
+}
+
 bool flex_clock_synced(void)
 {
     return s_synced;

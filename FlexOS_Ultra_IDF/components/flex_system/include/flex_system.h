@@ -54,6 +54,9 @@ esp_err_t flex_system_start(void);
 void flex_system_get(flex_sys_snapshot_t *out);
 
 // Tamano de la imagen de firmware en ejecucion en bytes (0 = no se pudo leer) y motivo del ultimo reinicio (esp_reset_reason_t).
+// Reinicios inesperados acumulados (espacio "flexcare", clave "badboot": la misma que usa Device Care de Arduino); se cuenta uno mas en cada arranque
+// cuyo motivo no es encendido, software ni sueno profundo.
+uint32_t flex_system_abnormal_boots(void);
 uint32_t flex_system_fw_size(void);
 int flex_system_reset_reason(void);
 

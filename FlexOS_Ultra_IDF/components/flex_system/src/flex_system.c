@@ -205,9 +205,26 @@ static void read_crash(flex_sys_snapshot_t *w)
     free(sum);
 }
 
+static uint32_t s_abnormal;
+
+uint32_t flex_system_abnormal_boots(void)
+{
+    return s_abnormal;
+}
+
 esp_err_t flex_system_start(void)
 {
     memset(&s_work, 0, sizeof(s_work));
+    {   // dcBegin: los reinicios inesperados acumulados (Arduino: Preferences "flexcare" / "badboot")
+        esp_reset_reason_t rr = esp_reset_reason();
+        bool abnormal = !(rr == ESP_RST_POWERON || rr == ESP_RST_SW || rr == ESP_RST_DEEPSLEEP);
+        int32_t bad = flex_kvs_get_i32(CARE_NS, "badboot", 0);
+        if (abnormal) {
+            bad++;
+            flex_kvs_set_i32(CARE_NS, "badboot", bad);
+        }
+        s_abnormal = bad > 0 ? (uint32_t)bad : 0;
+    }
     strlcpy(s_work.reset_reason, reset_reason_text(esp_reset_reason()), sizeof(s_work.reset_reason));
     uint32_t boots = flex_kvs_get_u32(CARE_NS, BOOTS_KEY, 0) + 1;
     flex_kvs_set_u32(CARE_NS, BOOTS_KEY, boots);

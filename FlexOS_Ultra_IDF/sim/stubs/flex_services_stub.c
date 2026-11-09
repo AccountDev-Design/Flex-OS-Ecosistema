@@ -14,6 +14,7 @@
 #include "flex_fs_names.h"
 #include "flex_fs_ops.h"
 #include "flex_fs_path.h"
+#include "flex_i2c.h"
 #include "flex_inbox.h"
 #include "flex_kv.h"
 #include "flex_metrics.h"
@@ -343,10 +344,11 @@ static void dpost_run(void *arg)
     free(p);
 }
 // Respuestas de carpeta y de medida retenidas (kinds 6 y 7): las escenas las sueltan cuando quieren, para probar que una respuesta tardia de otra carpeta no se pinta
-static bool s_hold_explore;
+static bool s_hold_explore, s_hold_read;
 static dpost_t *s_held[4];
 static int s_nheld;
 void sim_explore_hold(bool on) { s_hold_explore = on; }
+void sim_read_hold(bool on) { s_hold_read = on; }   // retiene las respuestas de lectura de archivo (kind 1): la app sigue "leyendo"
 static esp_err_t dpost(const dpost_t *t)
 {
     dpost_t *p = malloc(sizeof(*p));
@@ -355,7 +357,7 @@ static esp_err_t dpost(const dpost_t *t)
         return ESP_ERR_NO_MEM;
     }
     *p = *t;
-    if (s_hold_explore && (p->kind == 6 || p->kind == 7) && s_nheld < 4) {
+    if (((s_hold_explore && (p->kind == 6 || p->kind == 7)) || (s_hold_read && p->kind == 1)) && s_nheld < 4) {
         s_held[s_nheld++] = p;
         return ESP_OK;
     }
@@ -615,7 +617,21 @@ void sim_system_set(uint32_t fw_size, int reset_reason)
     s_sim_reset = reset_reason;
 }
 uint32_t flex_system_fw_size(void) { return s_sim_fw; }
+static uint32_t s_sim_abnormal;
+void sim_system_abnormal(uint32_t n) { s_sim_abnormal = n; }
+uint32_t flex_system_abnormal_boots(void) { return s_sim_abnormal; }
 int flex_system_reset_reason(void) { return s_sim_reset; }
+// Device Care: recuperaciones del bus I2C y vigilancia de la tarea de UI (la escena los pone)
+static uint32_t s_sim_i2c_recover;
+void sim_i2c_recoveries(uint32_t n) { s_sim_i2c_recover = n; }
+void flex_i2c_get_stats(flex_i2c_stats_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->recoveries = s_sim_i2c_recover;
+}
+static bool s_sim_wdt = true;
+void sim_task_wdt(bool ok) { s_sim_wdt = ok; }
+bool sim_task_wdt_ok(void) { return s_sim_wdt; }
 void flex_system_get(flex_sys_snapshot_t *o)
 {
     memset(o, 0, sizeof(*o));

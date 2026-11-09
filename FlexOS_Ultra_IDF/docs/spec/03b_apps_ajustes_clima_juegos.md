@@ -525,3 +525,45 @@ La app Juegos es el contenedor de UN juego, Jumper (no hay editor de niveles, ti
 **Implementado** (`components/flex_games`, `apps/app_games.c`; pruebas `test_jumper.c` y la escena `juegos`): el juego y el motor de dibujo de Arduino
 corren SIN CAMBIOS (copias identicas y extraccion comprobada en cada `run_tests.sh`); el adaptador da el lienzo fisico, el tactil, el reloj, los
 records y la salida; la app muestra el lienzo como una imagen de LVGL. Ver las diferencias en `ESP_IDF_MIGRATION_REPORT.md`.
+
+---
+
+## 15. Device Care (`FlexOS_Ultra_DeviceCare.h`, `FlexOS_Ultra_DeviceTests.h`)
+
+Mide lo que el sistema SABE de si mismo, lo puntua y lo explica; lleva un diagnostico guiado (sistema, IMU, pantalla, tactil) y un historial. Nada de
+lo que ensena esta inventado: lo que no se puede medir es `DCL_NA` ("No disponible") y no puntua ni a favor ni en contra. Registro `IC_DEVCARE` con
+`CUSTOM_HEADER | OWN_TOUCH | FLEX`, peso ligero; cabecera propia (el titulo cambia con la pantalla interna).
+
+* **Caja y cabecera:** `uiBox` = (0, 96, 480, 640) (`WIN_TOP`..`WIN_BOT`); margen `uiPad` = min(w, h) / 24 acotado a 5..22, hueco `uiGap`. Cabecera: barra
+  de estado, chevron de tres puntos (30,62) (18,54) (30,46), titulo centrado en y = 49 con `uiFontFit(titulo, 360, 3)`; zona de "atras" x < 72, y <= 96.
+* **Pantallas** (`DC_*`): Inicio (tarjeta de estado con anillo de puntuacion que barre en 520 ms con ease-out y la cifra que cuenta; "Ultima revision";
+  estado de la monitorizacion de caidas; rejilla de 6 accesos), Estado del dispositivo, Deteccion de caidas, Historial, Salud de Flex OS, Optimizacion,
+  prueba del modulo IMU, Diagnostico completo / Revision tras impacto, Test de pantalla, Test tactil y Resultado. Atras: de las pruebas y del resultado
+  vuelve a donde se lanzaron (`dcPrev`); de la prueba del IMU a Caidas; del resto, a Inicio; desde Inicio sale de la app.
+* **Metricas** (`dcCollect`, 8): Memoria (SRAM interna libre), PSRAM (nivel del presupuesto de memoria + mayor bloque), Estabilidad (motivo de reinicio y
+  tiempo encendido), Vigilante (`esp_task_wdt_status`) y ritmo del sistema, Servicios (particion montada, reloj anclado, NVS de la hora: n/3), Errores
+  (volcado del panel, NVS, particion, recuperaciones del bus I2C), Reinicios (inesperados acumulados en NVS `flexcare` / `badboot`), Almacenamiento
+  (% usado de LittleFS). Nivel por metrica OK / WARN / BAD / NA.
+* **Puntuacion** (`dcScoreFrom`): media de las metricas medibles; con porcentaje es su valor (x 70 / 100 en aviso, x 35 / 100 en critico), sin porcentaje
+  100 / 62 / 25; sin ninguna medible no hay nota. Palabra: >= 80 "Todo correcto", >= 55 "Necesita atencion", si no "Estado critico".
+* **Diagnostico:** cinco etapas (Sistema, IMU, Pantalla, Tactil, Hecho) de 620 ms a la vista cada una; el trabajo de cada etapa corre UNA vez al entrar;
+  el anillo late (circulo que respira, 1200 ms) mientras trabaja. Sistema: nueve filas (CPU, RAM, PSRAM, Flash, almacenamiento, vigilante, servicios,
+  errores, reinicios). Pantalla: ocho pasadas a pantalla completa (negro, blanco, rojo, verde, azul, gris, degradado vertical con tres rampas de color,
+  rejilla de un pixel + tablero de 40 px + borde rojo de 2 px) que avanzan tocando, con el indicador de avance; al final la pregunta "Si" / "No".
+  Tactil: rejilla de 6 x 8 celdas que enciende la celda bajo el dedo (tocar o arrastrar), cobertura = celdas * 100 / 48, ultima coordenada leida.
+  Resultado: media de lo que SE PUDO medir (sistema, IMU si hay modulo, pantalla si se contesto, tactil); anota el diagnostico en el historial.
+* **Historial:** 16 registros de 8 bytes (`utc`, tipo, nota, banderas, extra) en `/System/devcare.bin` (cabecera `'DCAR'`, version 1, n); el mas reciente
+  primero; se guarda en el acto con escritura atomica; otra version u otro formato se ignora, y solo se aceptan los registros que de verdad venian.
+  Lista agrupada por dia local (26 px por cambio de dia, 66 px por tarjeta) con desplazamiento tactil.
+* **Optimizacion:** no reimplementa nada: abre "Optimizar Flex OS" del sistema y, al terminar, anota la pasada en el historial y vuelve a ESTA pantalla.
+* **Test de pantalla:** va PRIMERO en el reparto de toques (un toque es "siguiente patron", tambien en la esquina del chevron); la salida es la barra
+  de navegacion del sistema.
+* **Deteccion de caidas / IMU (GY-BNO085):** sondeo del modulo al entrar en Caidas, estados ausente / sondeando / listo, cinco comprobaciones
+  (I2C, acelerometro, giroscopio, magnetometro, fusion), prueba con lecturas en vivo, detector en segundo plano (`dcBgWork`), aviso global de caida y
+  revision tras impacto. Depende del controlador del IMU (A08 / N6).
+
+**Implementado** (`apps/flex_dc_model.*`, `flex_dc_screens.*`, `flex_dc_ui.*`, `app_devcare.c`, `tools/gen_devcare_text.py`; pruebas `test_dc.c` y las
+escenas `devcare` y `dcui`): metricas, puntuacion, historial y motor de diagnostico en C portable comparados con las funciones de Arduino compiladas tal
+cual; las nueve pantallas como listas de operaciones de dibujo comparadas primitiva a primitiva con las de Arduino; la interfaz LVGL pinta esas
+operaciones y atiende los toques; los servicios son los reales. **No implementado (A17h):** todo lo del IMU y las caidas; la pantalla de caidas dice
+"No disponible", nombra el modulo que espera y no finge ni un estado. Ver las diferencias en `ESP_IDF_MIGRATION_REPORT.md`.

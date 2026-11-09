@@ -153,6 +153,14 @@ python3 ref/extract_arduino.py "$OUT/ref_stor_ui.inc" \
 python3 ref/extract_arduino.py "$OUT/ref_stor.inc" \
     FlexOS_Ultra_AppStorage.h:ALM_BIG_MAX,almBig,almBigN,almCat,almVerY0,ALM_CAT_NAME,ALM_CAT_COL,simpBar,almScan,almFolderIcon,ALM_SCR_MAIN,almScreen,almPhY0,almDetY0,almOptX0,almPhoneState,almPhoneQuota,almPhoneCard,almRenderMain,ALMD_VY0,ALMD_VY1,ALMD_SEC_N,ALMD_SEC_H,almDetScroll,almDetSig,almDetMs,almDetDrag,almDetTouching,almDetStartY,ALMD_BW,ALMD_BX,ALMD_BH,almDetSecTop,almDetContentH,almDetMaxScroll,almDetRow,almDetNote,almDetTitle,almBootCause,almTopApps,almDetSecSig,almDetDrawSection,almDetailTick,almTick
 
+python3 ref/extract_arduino.py "$OUT/ref_dc.inc" \
+    FlexOS_Ultra_DeviceCare.h:DCS_APPTITLE,DCH,dct,DC_HIST_MAGIC,DC_HIST_VER,DC_HIST_MAX,DC_HIST_PATH,DC_EV_DIAG,DcRec,DcHistFile,dcHist,dcHistN,dcHistDirty,dcHistLoaded,dcLastScore,dcLastCheck,dcHistLoad,dcHistSave,dcHistAdd,dcBootAbnormal,dcBootReason,DCH_MEM,DCL_OK,DcMetric,dcMetricSet,dcCollect,dcScoreFrom,dcLevelColor,dcScoreColor,dcScoreWord,dcHistContentH,DC_HIT_MAX,DcHit,dcHits,dcHitN,dcHitClear,dcHitAdd,dcHitTest,dcFallOn,DCI_STATUS,dcGlyphPhone,dcSectionIcon,dcBtnGlyphPlay,dcBtnGlyphRetry,dcBtnGlyphCheck,dcBtnGlyphPower,dcScoreRing,dcRowLed,DCB_PLAY,dcButton,DCH_HERO,dcHomeScore,dcHomeScoreOk,DcGrid,dcGrid,dcHomeLayout,dcDrawTile,DC_RING_MS,dcHomeCard,dcHomeCardGeom,dcRenderHome,DCH_RUNDIAG,dcRenderStatus,dcHistIcon,dcRenderHist \
+    FlexOS_Ultra_DeviceTests.h:DG_SYS,DC_DIAG_STEP_MS,dcDiagStage,dcDiagPost,dcResSys,dcResSysOk,dcResImuMask,dcResImuAvail,dcResScreen,dcResTouch,dcResFinal,dcResFinalOk,DcSysRow,DC_SYS_ROWS,dcSysRow,dcSysSet,dcRunSystemTest,dcRunImuTest,dcResultCompute,DCP_BLACK,dcScrStep,DCH_SCR_YES,dcScrTestRender,DC_TT_COLS,DC_TT_ROWS,dcTtCell,dcTtHit,dcTtLastX,dcTouchTestGeom,dcTouchTestRender,dcDiagRender,dcResultRender,dcHealthRender,dcOptimRender
+python3 ref/extract_arduino.py "$OUT/ref_dc_ui.inc" \
+    FlexOS_Ultra_AppFramework.h:uiBox,uiW,uiH,uiTop,uiPad,uiGap,uiFontFit,uiFontH,uiLineH
+python3 ref/extract_arduino.py "$OUT/ref_dc_clk.inc" \
+    FlexOS_Ultra_Clock.h:clkCivilFromDays FlexOS_Ultra_Session.h:MO_SHORT
+
 python3 ref/extract_arduino.py "$OUT/ref_files_fs.inc" \
     FlexOS_FS.cpp:baseName,flexFsStem
 
@@ -172,7 +180,7 @@ python3 ref/extract_arduino.py "$OUT/ref_chrono_ui.inc" \
 python3 ref/extract_arduino.py "$OUT/ref_chrono.inc" \
     FlexOS_Ultra_AppChrono.h:CRONO_CAP_Y,CRONO_CAP_H,CRONO_CAP_ICON,CRONO_CAP_PADL,CRONO_CAP_GAP,CRONO_CAP_PADR,CRONO_CARD_X,CRONO_CARD_W,CRONO_CARD_Y,CRONO_CARD_H,CRONO_CARD_RAD,CRONO_CARD_ANIM,CRONO_BAND_T,CRONO_BAND_B,CRONO_BAND_H,CRONO_DYN_T,CRONO_DYN_B,CRONO_DYN_H,CRONO_ACCENT,CRONO_DISC,CRONO_CARDBG,CRONO_ONACC,cronoElapsed,cronoLapElapsed,cronoActive,cronoCurLapNo,cronoFmt,cronoRecalcExtremes,cronoStart,cronoPause,cronoReset,cronoLapMark,cronoActionLeft,cronoActionRight,cronoLabelLeft,cronoLabelRight,cronoEase,cronoLerp,cronoGlyph,cronoCapsuleW,cronoCapsuleRight,cronoCapsuleDraw,cronoBarClock,cronoBarSurface,cronoCapsuleTick,CronoLayout,gCL,cronoLayout,cronoFitBig,cronoDrawDial,cronoDrawLaps,cronoDrawButtons,cronoTabTouch,cronoCardDynText,cronoCardStatic,cronoCardCompose,cronoOverlayTouch
 
-SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c test_kiosk.c test_homecfg.c test_session.c test_mem_model.c test_boot.c test_calc.c test_layout.c test_fsnames.c test_fsops.c test_fk.c test_ned.c test_clip.c test_notes.c test_paint.c test_raster.c test_set.c test_kbs.c test_chrono.c test_fsscan.c test_stor.c test_files.c test_jumper.c
+SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_home.c test_touch_arb.c test_drawer.c test_kb.c test_recents.c test_qs.c test_notif.c test_poweroff.c test_safeboot.c test_reset.c test_oobe.c test_kiosk.c test_homecfg.c test_session.c test_mem_model.c test_boot.c test_calc.c test_layout.c test_fsnames.c test_fsops.c test_fk.c test_ned.c test_clip.c test_notes.c test_paint.c test_raster.c test_set.c test_kbs.c test_chrono.c test_fsscan.c test_stor.c test_files.c test_jumper.c test_dc.c
       $ROOT/components/flex_storage/src/flex_kv.c
       $ROOT/components/flex_storage/src/flex_fs_path.c
       $ROOT/components/flex_storage/src/flex_fs_wipe.c
@@ -195,6 +203,9 @@ SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_
       $ROOT/components/flex_ui/src/apps/flex_chrono_model.c
       $ROOT/components/flex_ui/src/apps/flex_stor_model.c
       $ROOT/components/flex_ui/src/apps/flex_files_model.c
+      $ROOT/components/flex_ui/src/apps/flex_dc_model.c
+      $ROOT/components/flex_ui/src/apps/flex_dc_screens.c
+      $ROOT/components/flex_ui/src/i18n/flex_i18n_data.c
       $ROOT/components/flex_ui/src/widgets/flex_layout.c
       $ROOT/components/flex_ui/src/widgets/flex_clip.c
       $ROOT/components/flex_ui/src/widgets/flex_fk_model.c
@@ -210,16 +221,16 @@ SRCS=(test_main.c test_flex_kv.c test_misc.c test_wallpaper.c test_glass.c test_
       $ROOT/components/flex_ui/src/widgets/flex_kb_layout.c
       $ROOT/components/flex_touch/src/flex_touch_arb.c
       stub_cfg.c)
-INC=(-I. -I$ROOT/components/flex_games/include -I$ROOT/components/flex_storage/include -I$ROOT/components/flex_storage/src
+INC=(-I. -I$ROOT/components/flex_games/include -I$ROOT/components/flex_ui/src/i18n -I$ROOT/components/flex_storage/include -I$ROOT/components/flex_storage/src
      -I$ROOT/components/flex_display/src -I$ROOT/components/flex_ui/src/theme
      -I$ROOT/components/flex_ui/src/shell -I$ROOT/components/flex_ui/src/apps -I$ROOT/components/flex_portable/include -I$ROOT/components/flex_ui/src/widgets -I$ROOT/components/flex_touch/include -I$ROOT/components/flex_power/include -I$ROOT/components/flex_system/include -I../../sim/stubs/include)
-CFLAGS=(-O1 -g -Wall -Wextra -Werror -pthread)
+CFLAGS=(-O1 -g -Wall -Wextra -Werror -pthread -ffp-contract=off)
 
 build() {   # $1 = sufijo, resto = flags de sanitizador
     local sfx=$1; shift
     local refs=()
-    for r in wall glass home home_load touch drawer kb recents qs ntf homecfg session mem boot calc layout fsnames fk ned clip notes paint raster set kbs chrono fsscan stor files; do
-        c++ -std=gnu++17 -O1 -g -w "$@" -Iref -I"$OUT" -I$ROOT/components/flex_portable/include -I$ROOT/components/flex_ui/src/apps -I$ROOT/components/flex_ui/src/widgets -I$ROOT/components/flex_ui/src/theme -I$ROOT/components/flex_storage/include -I../../sim/stubs/include -c ref/ref_${r}_main.cpp -o "$OUT/ref_${r}_$sfx.o"
+    for r in wall glass home home_load touch drawer kb recents qs ntf homecfg session mem boot calc layout fsnames fk ned clip notes paint raster set kbs chrono fsscan stor files dc; do
+        c++ -std=gnu++17 -O1 -g -w "$@" -Iref -I"$OUT" -I$ROOT/components/flex_portable/include -I$ROOT/components/flex_ui/src/apps -I$ROOT/components/flex_ui/src/widgets -I$ROOT/components/flex_ui/src/theme -I$ROOT/components/flex_storage/include -I../../sim/stubs/include -ffp-contract=off -c ref/ref_${r}_main.cpp -o "$OUT/ref_${r}_$sfx.o"
         refs+=("$OUT/ref_${r}_$sfx.o")
     done
     c++ -std=gnu++17 -O1 -g -w "$@" -I$ROOT/components/flex_portable/include -c $ROOT/components/flex_portable/src/FlexOS_FlexLink.cpp -o "$OUT/flexlink_$sfx.o"
