@@ -14,6 +14,7 @@
 #include "flex_storage.h"
 #include "flex_i18n.h"
 #include "flex_icons.h"
+#include "flex_ota_ui.h"
 #include "flex_theme.h"
 #include "flex_touch_lvgl.h"
 #include "flex_wallmgr.h"
@@ -477,8 +478,12 @@ void flex_files_close_now(void);
 
 void flex_sys_back(void)
 {
-    if (flex_optimize_active()) {
-        return;   // Optimizar es modal mientras trabaja
+    if (flex_optimize_active() || flex_ota_ui_busy()) {
+        return;   // Optimizar y la instalacion del sistema son modales mientras trabajan
+    }
+    if (flex_ota_ui_owns_screen()) {
+        flex_ota_ui_back();   // changelog, ajustes de actualizaciones o aviso de error: Atras sale
+        return;
     }
     if (flex_kbs_active()) {
         flex_kbs_back();   // Ajustes del teclado: de una pagina a la anterior y, de la principal, sale
@@ -507,9 +512,10 @@ void flex_sys_back(void)
 
 void flex_sys_home(void)
 {
-    if (flex_optimize_active()) {
-        return;   // Optimizar es modal mientras trabaja
+    if (flex_optimize_active() || flex_ota_ui_busy()) {
+        return;   // Optimizar y la instalacion del sistema son modales mientras trabajan
     }
+    flex_ota_ui_close_now();
     flex_kbs_close_now();   // Ajustes del teclado se cierra y Inicio sigue su camino
     flex_files_close_now();
     if (flex_kiosk_active()) {
@@ -529,9 +535,10 @@ void flex_sys_home(void)
 
 void flex_sys_recents(void)
 {
-    if (flex_optimize_active()) {
-        return;   // Optimizar es modal mientras trabaja
+    if (flex_optimize_active() || flex_ota_ui_busy()) {
+        return;   // Optimizar y la instalacion del sistema son modales mientras trabajan
     }
+    flex_ota_ui_close_now();
     flex_kbs_close_now();
     flex_files_close_now();
     if (flex_kiosk_active()) {
@@ -662,6 +669,7 @@ void flex_shell_lock(void)
     flex_home_edit_close_now();   // el Modo edicion sale guardando (edExit)
     flex_home_customize_close_now();   // Personalizar inicio tambien (hcClose(true))
     flex_optimize_close_now();
+    flex_ota_ui_close_now();   // la instalacion en marcha se queda (el bloqueo automatico ni siquiera la interrumpe)
     flex_kbs_close_now();
     flex_files_close_now();
     flex_crono_card_close_now();
@@ -849,6 +857,7 @@ void flex_shell_start(void)
     flex_homecfg_init();
     flex_session_start();
     flex_mem_start();
+    flex_ota_ui_start();   // el aviso de version nueva y la capa de actualizaciones
     flex_kiosk_load();
     if (flex_reset_boot_state() == FLEX_FR_BOOT_RESUME) {
         flex_factory_resume_boot();   // un borrado a medias se termina antes que nada (sin splash)

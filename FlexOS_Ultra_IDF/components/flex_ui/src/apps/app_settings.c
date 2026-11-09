@@ -312,6 +312,15 @@ static void detail_rebuild(void)
     lv_obj_scroll_to_y(S.dview, keep, LV_ANIM_OFF);
 }
 
+// Algo del sistema ha cambiado debajo de la pagina abierta (la capa de actualizaciones al cerrarse: la fila ya dice otra cosa): se vuelve a leer, sin tocar
+// el scroll. Arduino lo hace con settingsRender() al repintar tras cerrar la capa OTA.
+void flex_app_settings_refresh(void)
+{
+    if (S.created && !S.suspended && S.view == 1 && S.pd && S.dview && !S.animating) {
+        detail_rebuild();
+    }
+}
+
 static void rebuild_all(void)
 {
     int ls = S.lview ? (int)lv_obj_get_scroll_y(S.lview) : S.list_scroll;

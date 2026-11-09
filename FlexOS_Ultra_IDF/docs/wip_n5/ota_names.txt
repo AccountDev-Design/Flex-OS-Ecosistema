@@ -1,0 +1,1 @@
+jIsSpace,jFind,jBlock,jStr,jNum,verParse,verCmp,gState,gError,gPercent,gDone,gTotal,gBps,gCancel,gHasUpd,gRemoteVer,gUrl,gMd5,gChangelog,gSig,gChunk,gManifest,otaSet,otaFail,otaOpen,otaCheck,otaMd5Usable,otaLogProgress,otaInstall,otaErrText,otaPhaseText

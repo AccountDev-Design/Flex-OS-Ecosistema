@@ -1,0 +1,99 @@
+components/flex_ota/src/flex_ota_model.c {'MUERTO': 29, 'SOBREVIVE': 8, 'INVALIDO': 13}
+  SOBREVIVE linea 20:
+    if ((size_t)(end - q) > kl + 2 && memcmp(q + 1, key, kl) == 0 && q[1 + kl] == '"') {
+ -> if ((size_t)(end - q) > kl - 2 && memcmp(q + 1, key, kl) == 0 && q[1 + kl] == '"') {
+  SOBREVIVE linea 33:
+    p = q + 1;
+ -> p = q + 2;
+  SOBREVIVE linea 291:
+    strncpy(out->md5, md5, sizeof(out->md5) - 1);
+ -> strncpy(out->md5, md5, sizeof(out->md5) - 2);
+  SOBREVIVE linea 75:
+    if (!p || p >= end || *p != '"' || cap == 0) {
+ -> if (!p || p > end || *p != '"' || cap == 0) {
+  SOBREVIVE linea 244:
+    uint16_t rv[3], lv[3];
+ -> uint16_t rv[3], lv[4];
+  SOBREVIVE linea 94:
+    for (int i = 0; i < 4 && p < end; i++) {
+ -> for (int i = 0; i < 4 && p <= end; i++) {
+  SOBREVIVE linea 20:
+    if ((size_t)(end - q) > kl + 2 && memcmp(q + 1, key, kl) == 0 && q[1 + kl] == '"') {
+ -> if ((size_t)(end - q) >= kl + 2 && memcmp(q + 1, key, kl) == 0 && q[1 + kl] == '"') {
+  SOBREVIVE linea 244:
+    uint16_t rv[3], lv[3];
+ -> uint16_t rv[4], lv[3];
+components/flex_ota/src/flex_ota.c {'MUERTO': 38, 'SOBREVIVE': 24, 'INVALIDO': 28}
+  SOBREVIVE linea 249:
+    if (len <= 0) {
+ -> if (len < 0) {
+  SOBREVIVE linea 161:
+    while (n < sizeof(s_manifest) - 1) {
+ -> while (n < sizeof(s_manifest) - 2) {
+  SOBREVIVE linea 337:
+    if (o->millis() - last > FLEX_OTA_STALL_TIMEOUT) {   // ni un byte en 15 s
+ -> if (o->millis() - last >= FLEX_OTA_STALL_TIMEOUT) {   // ni un byte en 15 s
+  SOBREVIVE linea 202:
+    strncpy(G.url, m.url, sizeof(G.url) - 1);
+ -> strncpy(G.url, m.url, sizeof(G.url) - 2);
+  SOBREVIVE linea 203:
+    G.url[sizeof(G.url) - 1] = 0;
+ -> G.url[sizeof(G.url) - 2] = 0;
+  SOBREVIVE linea 286:
+    size_t want = avail > sizeof(s_chunk) ? sizeof(s_chunk) : avail;
+ -> size_t want = avail >= sizeof(s_chunk) ? sizeof(s_chunk) : avail;
+  SOBREVIVE linea 484:
+    strncpy(G.remote, remote, sizeof(G.remote) - 1);
+ -> strncpy(G.remote, remote, sizeof(G.remote) - 2);
+  SOBREVIVE linea 485:
+    strncpy(G.url, url, sizeof(G.url) - 1);
+ -> strncpy(G.url, url, sizeof(G.url) - 2);
+  SOBREVIVE linea 209:
+    G.sig[sizeof(G.sig) - 1] = 0;
+ -> G.sig[sizeof(G.sig) - 2] = 0;
+  SOBREVIVE linea 254:
+    if (total < FLEX_OTA_MIN_BIN || total > FLEX_OTA_MAX_BIN) {
+ -> if (total < FLEX_OTA_MIN_BIN || total >= FLEX_OTA_MAX_BIN) {
+  SOBREVIVE linea 206:
+    strncpy(G.changelog, m.changelog, sizeof(G.changelog) - 1);
+ -> strncpy(G.changelog, m.changelog, sizeof(G.changelog) - 2);
+  SOBREVIVE linea 202:
+    strncpy(G.url, m.url, sizeof(G.url) - 1);
+ -> strncpy(G.url, m.url, sizeof(G.url) + 1);
+  SOBREVIVE linea 486:
+    strncpy(G.md5, md5, sizeof(G.md5) - 1);
+ -> strncpy(G.md5, md5, sizeof(G.md5) - 2);
+  SOBREVIVE linea 573:
+    static char buf[48];
+ -> static char buf[49];
+  SOBREVIVE linea 204:
+    strncpy(G.md5, m.md5, sizeof(G.md5) - 1);
+ -> strncpy(G.md5, m.md5, sizeof(G.md5) + 1);
+  SOBREVIVE linea 445:
+    if (flex_ota_busy() || !has) {
+ -> if (flex_ota_busy() && !has) {
+  SOBREVIVE linea 208:
+    strncpy(G.sig, m.sig, sizeof(G.sig) - 1);
+ -> strncpy(G.sig, m.sig, sizeof(G.sig) - 2);
+  SOBREVIVE linea 284:
+    size_t avail = (size_t)(o->http_available() > 0 ? o->http_available() : 0);
+ -> size_t avail = (size_t)(o->http_available() >= 0 ? o->http_available() : 0);
+  SOBREVIVE linea 131:
+    if (code < 0) {
+ -> if (code <= 0) {
+  SOBREVIVE linea 287:
+    if (want > total - written) {
+ -> if (want >= total - written) {
+  SOBREVIVE linea 287:
+    if (want > total - written) {
+ -> if (want > total + written) {
+  SOBREVIVE linea 502:
+    if (!o || !c) {
+ -> if (!o && !c) {
+  SOBREVIVE linea 288:
+    want = total - written;
+ -> want = total + written;
+  SOBREVIVE linea 204:
+    strncpy(G.md5, m.md5, sizeof(G.md5) - 1);
+ -> strncpy(G.md5, m.md5, sizeof(G.md5) - 2);
+fin

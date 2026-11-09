@@ -14,6 +14,7 @@
 #include "flex_auth.h"
 #include "flex_frame.h"
 #include "flex_kb.h"
+#include "flex_ota.h"
 #include "flex_reset.h"
 #include "flex_safeboot.h"
 #include "flex_shell.h"
@@ -27,6 +28,7 @@
 #define WORD_MAX 19
 #define STEP_MIN_MS 260   // FR_STEP_MIN_MS: cada etapa se ve al menos esto
 #define DONE_MS     1200  // "Listo / Reiniciando..." antes de reiniciar
+#define BLOCKED_MS  2200  // el aviso de "Actualizacion en curso" se retira solo (frTick)
 
 // Deslizador (FRS_*): pista 400x72 en (40,600), pomo de 60, recorrido 328
 #define SL_X 40
@@ -38,7 +40,7 @@
 #define SL_RUN (SL_W - 2 * SL_PAD - SL_D)
 #define SL_DONE_PCT 92
 
-enum { V_NONE = 0, V_INTRO, V_TYPE, V_SLIDE, V_RUN, V_FAIL };
+enum { V_NONE = 0, V_INTRO, V_TYPE, V_SLIDE, V_RUN, V_FAIL, V_BLOCKED };
 
 static struct {
     lv_obj_t *root, *content, *kb, *field, *btn, *btn_l, *knob, *step_l, *name_l, *seg[FLEX_FR_STEPS];
@@ -144,7 +146,7 @@ static void cancel_to_origin(void)
 static void cancel_async(void *arg)
 {
     (void)arg;
-    if (F.view == V_INTRO || F.view == V_TYPE || F.view == V_SLIDE) {
+    if (F.view == V_INTRO || F.view == V_TYPE || F.view == V_SLIDE || F.view == V_BLOCKED) {
         cancel_to_origin();
     }
 }
@@ -467,9 +469,41 @@ static void wipe_progress(int stage, int err, void *user)
     }
 }
 
+// Con una actualizacion en marcha no se puede empezar un restablecimiento: el OTA esta escribiendo en la particion de firmware y cortarlo a media
+// instalacion es exactamente lo que no puede pasar (frEnterWizard). Solo un aviso, que se retira solo o con un toque.
+static void cancel_async_blocked(void *arg)
+{
+    (void)arg;
+    if (F.root) {
+        cancel_to_origin();
+    }
+}
+
+static void blocked_click_cb(lv_event_t *e)
+{
+    (void)e;
+    if (F.view == V_BLOCKED) {
+        F.view = V_NONE;
+        lv_async_call(cancel_async_blocked, NULL);
+    }
+}
+
+static void build_blocked(lv_obj_t *p)
+{
+    text_c(p, "Actualizacion en curso", FLEX_FONT_S2, c_hi(), SCR_H / 2 - 20);
+    text_c(p, "Espera a que termine para restablecer", FLEX_FONT_S1, c_lo(), SCR_H / 2 + 12);
+}
+
 static void tick_cb(lv_timer_t *t)
 {
     (void)t;
+    if (F.view == V_BLOCKED) {
+        if (lv_tick_get() - F.shown_ms > BLOCKED_MS) {
+            F.view = V_NONE;   // una sola vez
+            lv_async_call(cancel_async_blocked, NULL);
+        }
+        return;
+    }
     if (F.view != V_RUN) {
         return;
     }
@@ -520,6 +554,10 @@ static void show(int view)
     case V_SLIDE: build_slide(F.content); break;
     case V_RUN: build_run(F.content); break;
     case V_FAIL: build_fail(F.content); break;
+    case V_BLOCKED:
+        build_blocked(F.content);
+        F.shown_ms = lv_tick_get();
+        break;
     default: break;
     }
     flex_touch_drop_all();   // el dedo que cambio de vista no toca la nueva
@@ -538,6 +576,7 @@ static void create_root(void)
     lv_obj_add_event_cb(F.root, slide_cb, LV_EVENT_PRESSING, NULL);
     lv_obj_add_event_cb(F.root, slide_cb, LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(F.root, slide_cb, LV_EVENT_PRESS_LOST, NULL);
+    lv_obj_add_event_cb(F.root, blocked_click_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_move_foreground(F.root);
     F.tick = lv_timer_create(tick_cb, 30, NULL);
 }
@@ -555,12 +594,11 @@ void flex_factory_reset_open(bool from_safe)
         flex_shell_factory_begin();
         return;
     }
-    // Sin OTA todavia (Fase 14): el aviso "Actualizacion en curso" no puede darse.
     F.from_safe = from_safe;
     F.prev = flex_shell_state();
     flex_shell_factory_begin();
     create_root();
-    show(V_INTRO);
+    show(flex_ota_busy() ? V_BLOCKED : V_INTRO);   // con una actualizacion en marcha solo el aviso
 }
 
 // Arranque con un borrado a medias (o fallido): directo al progreso o al fallo.

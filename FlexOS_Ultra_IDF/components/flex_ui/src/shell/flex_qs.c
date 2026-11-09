@@ -32,6 +32,8 @@
 #include "flex_storage.h"
 #include "flex_theme.h"
 #include "flex_touch_lvgl.h"
+#include "flex_ota.h"
+#include "flex_ota_ui.h"
 #include "flex_wallmgr.h"
 #include "flex_wallpaper.h"
 
@@ -164,6 +166,7 @@ static bool qs_shown(int id)
     case FLEX_QS_DND:   // politica del sistema (flex_notif.c), no un periferico
     case FLEX_QS_CRONO: // el cronometro de la app Reloj (flex_crono.c)
     case FLEX_QS_POWEROFF:
+    case FLEX_QS_OTA:   // qpAvTrue: siempre; lleva a Ajustes > Actualizaciones
         return true;
     case FLEX_QS_NTP:
         return flex_ntp_request_sync != NULL && !airplane();   // qpAvNtp: con el servicio y fuera del modo avion
@@ -215,6 +218,7 @@ static void ctl_sub(int id, char *o, size_t n)
     case FLEX_QS_GLASS: snprintf(o, n, "%s", flex_look()->glass ? "Liquid Glass" : "Plano"); break;
     case FLEX_QS_BRIGHT: snprintf(o, n, "%d%%", bright()); break;
     case FLEX_QS_CRONO: flex_crono_state_text(o, n); break;
+    case FLEX_QS_OTA: snprintf(o, n, "Versi\xC3\xB3n %s", flex_ota_local_version()[0] ? flex_ota_local_version() : "?"); break;   // qpSubOta
     // Lo que de verdad pasa. "Avisos, sin sonido" llegara con el audio (Fase 11).
     case FLEX_QS_DND: snprintf(o, n, "%s", flex_notif_dnd() ? "Sin avisos" : "Avisos normales"); break;
     case FLEX_QS_GLASSFX: {
@@ -1057,7 +1061,8 @@ static bool can_open(void)
     flex_shell_state_t st = flex_shell_state();
     // kiosco: la cortina no se abre (QuickPanelEdit.h:492)
     return (st == FLEX_SH_HOME || st == FLEX_SH_APP) && !flex_power_suspended() && !flex_kiosk_active() &&
-           !flex_shell_land();   // horizontal: sin gestos del sistema (Core.h:997)
+           !flex_shell_land() &&   // horizontal: sin gestos del sistema (Core.h:997)
+           !flex_ota_ui_owns_screen();   // la pantalla es del OTA (QuickPanelEdit.h:41)
 }
 
 void flex_qs_open(void)
@@ -1113,6 +1118,10 @@ static bool exec_ctl(int id, bool detail)
     case FLEX_QS_SETTINGS:
     case FLEX_QS_CONN: leave_to_app(IC_AJUSTES); return true;
     case FLEX_QS_DEX: leave_to_app(IC_MODOPC); return true;
+    case FLEX_QS_OTA:   // qpTapOta: cierra la cortina y abre Ajustes > Actualizaciones
+        flex_qs_close_now();
+        flex_ota_open_settings();
+        return true;
     case FLEX_QS_CAMERA: leave_to_app(IC_CAMARA); return true;
     case FLEX_QS_GALLERY: leave_to_app(IC_GALERIA); return true;
     case FLEX_QS_FILES: leave_to_app(IC_ALMACEN); return true;

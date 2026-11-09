@@ -68,4 +68,5 @@ void test_files(void);
 void test_jumper(void);
 void test_dc(void);
 void test_ntp(void);
+void test_ota(void);
 #define FLEX_APP_N_TEST 19
