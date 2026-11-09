@@ -34,6 +34,7 @@ bool scene_kbsettings_run(void);
 bool scene_calendar_run(void);
 bool scene_reloj_run(void);
 bool scene_almacen_run(void);
+bool scene_juegos_run(void);
 
 const sim_scene_t sim_scenes[] = {
     {"galeria", scene_gallery_run},
@@ -67,6 +68,7 @@ const sim_scene_t sim_scenes[] = {
     {"calendario", scene_calendar_run},
     {"reloj", scene_reloj_run},
     {"almacenamiento", scene_almacen_run},
+    {"juegos", scene_juegos_run},
     {"apagado", scene_poweroff_run},
     {NULL, NULL},
 };

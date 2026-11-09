@@ -503,3 +503,25 @@ NEVER/OK/FAIL ──(due && online && !airplane)──► BUSY (tarea ntp) ─�
   (en IDF lo resuelve `settimeofday`/`time()`); el guardado de la **semilla de fábrica** en NVS en la primera vuelta
   (tras un primer arranque sin red, el siguiente arranque la presenta como "Hora aproximada"); el re-anclaje horario que
   fuerza un falso "cambio de minuto".
+
+---
+
+## 14. Juegos: Jumper (`FlexOS_Ultra_AppGames.h`, `FlexOS_Jumper.h`, `FlexOS_Jumper_Level.h`)
+
+La app Juegos es el contenedor de UN juego, Jumper (no hay editor de niveles, tienda, multijugador ni audio): registro `IC_JUEGOS` con
+`OWN_TOUCH | CUSTOM_HEADER | LAND`, ciclo de vida `suspend` / `resume` / `close` y sin sesion de app.
+
+* **Mundo:** lienzo logico horizontal de 800 x 480 (el motor gira 90 grados), 45 px por bloque, suelo en y = 410, jugador en x = 230; nivel de
+  900 bloques a 10,4 bloques/s (468 px/s, 86,5 s); cubo (salto 1007 px/s, gravedad 4738) y nave; fisica de paso fijo de 120 Hz con acumulador
+  (tope de 10 pasos); particulas en un pool de 64; sin memoria dinamica durante el juego.
+* **Pantallas:** intro de 2,65 s (el toque que abre la app no la salta hasta pasados 300 ms), selector (record normal y de practica en %, flechas,
+  informacion, "Normal" y "Practica"), partida (HUD con barra de progreso y pausa arriba a la izquierda; tocar salta, mantener repite el salto),
+  muerte (reaparece sola), final con resultados y monedas, pausa (continuar / reintentar / niveles), informacion.
+* **Persistencia:** namespace "flexos", claves `jmp_bn`, `jmp_bp`, `jmp_coin`, `jmp_cmp`, `jmp_att`; se escribe solo cuando cambia un record o un
+  estado (al reaparecer, al terminar, al suspender o cerrar), nunca por cuadro.
+* **Tactil:** `lx = py`, `ly = 479 - px` (mapeo horizontal); el HUD (x < 84, y < 62 logicas) nunca salta.
+* **Horizontal:** sin barra de navegacion ni gestos (`appTick`: `if(gLand){ tick; return; }`); suspender en horizontal no deja miniatura en Recientes.
+
+**Implementado** (`components/flex_games`, `apps/app_games.c`; pruebas `test_jumper.c` y la escena `juegos`): el juego y el motor de dibujo de Arduino
+corren SIN CAMBIOS (copias identicas y extraccion comprobada en cada `run_tests.sh`); el adaptador da el lienzo fisico, el tactil, el reloj, los
+records y la salida; la app muestra el lienzo como una imagen de LVGL. Ver las diferencias en `ESP_IDF_MIGRATION_REPORT.md`.

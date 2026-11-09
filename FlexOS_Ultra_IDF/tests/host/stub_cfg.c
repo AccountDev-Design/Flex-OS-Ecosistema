@@ -47,3 +47,13 @@ esp_err_t flex_cfg_set_blob(const char *k, const void *d, size_t l)
     flex_kv_set_buf(kv(), FLEX_NVS_NS, k, FLEX_KV_BLOB, d, l);
     return 0;
 }
+uint32_t flex_cfg_get_u32(const char *k, uint32_t d)
+{
+    int64_t v;
+    return flex_kv_get_num(kv(), FLEX_NVS_NS, k, FLEX_KV_U32, &v) ? (uint32_t)v : d;
+}
+esp_err_t flex_cfg_set_u32(const char *k, uint32_t v)
+{
+    flex_kv_set_num(kv(), FLEX_NVS_NS, k, FLEX_KV_U32, v);
+    return 0;
+}

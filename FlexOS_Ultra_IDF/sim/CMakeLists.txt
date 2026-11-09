@@ -54,6 +54,7 @@ add_executable(flexos_ui_sim
     stubs/flex_passcode_async_stub.c
     ${FLEX_ROOT}/components/flex_portable/src/FlexOS_Mem.cpp
     ${FLEX_ROOT}/components/flex_portable/src/FlexOS_Media.cpp
+    ${FLEX_ROOT}/components/flex_games/src/flex_jumper.cpp
     ${FLEX_ROOT}/components/flex_storage/src/flex_kv.c
     ${FLEX_ROOT}/components/flex_storage/src/flex_fs_names.c
     ${FLEX_ROOT}/components/flex_storage/src/flex_fs_ops.c
@@ -72,6 +73,7 @@ target_include_directories(flexos_ui_sim PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/stubs/include
     ${FLEX_ROOT}/components/flex_ui/include
     ${FLEX_ROOT}/components/flex_portable/include
+    ${FLEX_ROOT}/components/flex_games/include
     ${FLEX_ROOT}/components/flex_ui/src
     ${FLEX_ROOT}/components/flex_ui/src/theme
     ${FLEX_ROOT}/components/flex_ui/src/widgets
@@ -89,4 +91,5 @@ target_include_directories(flexos_ui_sim PRIVATE
 )
 target_compile_definitions(flexos_ui_sim PRIVATE FLEX_SIM=1 FLEX_HOST_TEST=1)
 target_compile_options(flexos_ui_sim PRIVATE -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
+set_source_files_properties(${FLEX_ROOT}/components/flex_games/src/flex_jumper.cpp PROPERTIES COMPILE_OPTIONS "-Wno-misleading-indentation;-Wno-unused-function;-Wno-unused-variable")
 target_link_libraries(flexos_ui_sim PRIVATE lvgl m crypto)

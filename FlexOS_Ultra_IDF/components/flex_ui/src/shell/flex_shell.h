@@ -33,6 +33,7 @@ typedef enum {
 void flex_shell_start(void);
 flex_shell_state_t flex_shell_state(void);
 lv_obj_t *flex_shell_screen(void);
+bool flex_shell_land(void);    // la app en primer plano es horizontal (FLEX_APP_LAND): sin barra de navegacion ni gestos del sistema (Core.h:997)
 int flex_shell_fg_app(void);   // app en primer plano aunque algo la tape (-1: ninguna). Pruebas.
 
 void flex_shell_show_home(void);      // estado Inicio (sin animacion)

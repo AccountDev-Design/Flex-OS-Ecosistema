@@ -34,4 +34,5 @@ rm -f "$UI_LOG"
 echo "### 4. Reglas"
 python3 tools/check_lvgl_only.py
 python3 tools/check_portable.py
+python3 tools/gen_jumper_engine.py --check
 echo "TODO OK"

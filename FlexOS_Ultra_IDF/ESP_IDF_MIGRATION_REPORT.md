@@ -77,6 +77,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 3 (en curso: + Ajustes del teclado con su editor de atajos) | `v3` dev | 1 548 032 B | 59,1 % | 36,9 % |
 | 3 (en curso: + Reloj y Cronometro con su capsula y su tarjeta) | `v3` dev | 1 564 656 B | 59,7 % | 37,3 % |
 | 3 (en curso: + Almacenamiento y Archivos: medidas asincronas, detalles, explorador modal con filas por ventana) | `v3` dev | 1 600 768 B | 61,1 % | 38,2 % |
+| 3 (en curso: + Juegos: Jumper de Arduino sobre el motor de dibujo de Arduino extraido, con su fuente de 31 KB) | `v3` dev | 1 690 576 B | 64,5 % | 40,3 % |
 
 La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la interfaz completa
 (Fase 15). No se ha grabado nada.
@@ -199,6 +200,12 @@ La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la
 | Archivos: gesto Atras del sistema | No hace nada dentro del explorador (solo la flecha sale) | Cierra la capa abierta (menu, dialogo, papelera), vuelve de la nube a "Este dispositivo" y, si no, sale a Almacenamiento (igual que la flecha); Inicio, Recientes y el bloqueo lo cierran | Fidelidad (mejora) |
 | Archivos: "Flex Cloud" y "Subir a Flex Cloud" | La nube real (CloudKit) / cola de subidas | "Flex Cloud no disponible" y un aviso al subir: sin N4 no hay a donde (A04c) | Honestidad |
 | Archivos: abrir una foto, dibujo, video o audio | `mediaOpenInPlayer` | Un aviso "El visor aun no esta disponible en esta version": Galeria y Multimedia no estan migradas (A02 / A03) | Honestidad |
+| Juegos: motor de dibujo | El del sketch (`Gfx.h`, `Font.h`) sobre `bbuf` / `fb` con DMA2D | El MISMO codigo extraido (`jumper_engine.inc`, generado y comprobado contra los originales) sobre un lienzo RGB565 de 480 x 800 en PSRAM que LVGL muestra como una imagen. Excepcion ACOTADA a la regla "toda la UI con LVGL" (`check_lvgl_only.py`, `GAME_CANVAS_ALLOWED`): el juego rasteriza cada cuadro con cientos de primitivas, mezcla alfa por pixel y fuente antialiasada; reescribirlo en LVGL cambiaria el aspecto y la fisica de temporizacion. No toca el panel | Arquitectura (excepcion documentada) |
+| Juegos: doble buffer | `fb` / `bbuf` se intercambian y `flxFlush` copia por DMA2D | Un solo lienzo: el juego y LVGL corren en la misma tarea, asi que no hay desgarro; el intercambio de punteros de `jmpPresent` es inocuo y "presentar" invalida la imagen | Arquitectura |
+| Juegos: horizontal | `gLand = true` gira el motor 90 grados y el sistema oculta la barra y los gestos | Igual: el lienzo es fisico y el motor gira al dibujar (mismas coordenadas tactiles); `FLEX_APP_LAND` deja la app a pantalla completa sin barra de navegacion ni gestos del sistema (cortina, Centro de avisos) y sin miniatura en Recientes. Sin rotacion de la pantalla ni del panel | Fidelidad |
+| Juegos: reloj y cadencia | `micros()`; `loop()` del sketch | `esp_timer_get_time()` (el simulador, el reloj de LVGL); un `lv_timer` de 4 ms da vueltas al juego y este presenta a 60 Hz exactos por si mismo | Plataforma |
+| Juegos: records | `Preferences` ("flexos": `jmp_bn`, `jmp_bp`, `jmp_coin`, `jmp_cmp`, `jmp_att`) | `flex_cfg_*` con las mismas claves: la NVS de Arduino se lee tal cual. Los intentos solo se guardan en los puntos de guardado del juego (como en Arduino) | Fidelidad |
+| Juegos: memoria | Dos framebuffers de 768 KB | Un lienzo de 768 KB mientras la app existe (se libera al cerrarla); sin `shed` (reconstruirlo exigiria otro puntero de lienzo en el juego) | Arquitectura |
 | Cronometro: reloj de tiempo | `millis()` | `lv_tick_get()` (ms de 32 bits que dan la vuelta; la misma resta sin signo) | Fidelidad |
 | Capsula: material y posicion | Pildora opaca dibujada en la barra (`cronoCapsuleDraw`) | Igual (opaca a proposito, hijo de la barra de estado del escritorio y del marco estandar); la hora normal cede si no cabe todo | Fidelidad |
 | Capsula: con la cortina o el Centro de avisos abiertos sobre una app | La superficie 2 no mira el panel: sigue sensible bajo la cortina | El gancho no reclama el toque si la cortina o el Centro estan abiertos | Endurecimiento |

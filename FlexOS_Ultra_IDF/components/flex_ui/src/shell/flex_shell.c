@@ -45,7 +45,7 @@ static flex_shell_state_t s_state = FLEX_SH_LOCK;
 // Barra de navegacion de una app: invisible con el kiosco (AppFramework.h:1001)
 static void nav_app(void)
 {
-    flex_navbar_set_ctx(flex_kiosk_active() ? FLEX_NAV_HIDDEN : FLEX_NAV_APP);
+    flex_navbar_set_ctx(flex_kiosk_active() || flex_shell_land() ? FLEX_NAV_HIDDEN : FLEX_NAV_APP);
 }
 static int32_t s_last_minute = -1;
 
@@ -259,7 +259,7 @@ static void build_app(int id)
     lv_obj_set_style_bg_color(r, flex_th()->win, 0);
     in->root = r;
     bool custom = d->flags & FLEX_APP_CUSTOM_HEADER;
-    int32_t bot = flex_look()->nav_mode == 1 ? 800 : FLEX_WIN_BOT;
+    int32_t bot = flex_look()->nav_mode == 1 || (d->flags & FLEX_APP_LAND) ? 800 : FLEX_WIN_BOT;   // una app horizontal usa el lienzo entero
     lv_area_t area = {0, custom ? 0 : FLEX_WIN_TOP, 479, bot - 1};
     if (!custom) {
         flex_statusbar_enable_crono(flex_statusbar_create(r, FLEX_SB_APP));   // marco estandar: aloja la capsula del cronometro
@@ -562,6 +562,12 @@ int flex_app_current(void)
 int flex_shell_fg_app(void)
 {
     return s_fg;
+}
+
+bool flex_shell_land(void)
+{
+    const flex_app_def_t *d = s_state == FLEX_SH_APP && s_fg >= 0 ? flex_app_def(s_fg) : NULL;
+    return d && (d->flags & FLEX_APP_LAND);
 }
 
 bool flex_app_is_open(int id)

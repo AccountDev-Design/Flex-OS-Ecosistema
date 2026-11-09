@@ -1051,7 +1051,8 @@ static bool can_open(void)
 {
     flex_shell_state_t st = flex_shell_state();
     // kiosco: la cortina no se abre (QuickPanelEdit.h:492)
-    return (st == FLEX_SH_HOME || st == FLEX_SH_APP) && !flex_power_suspended() && !flex_kiosk_active();
+    return (st == FLEX_SH_HOME || st == FLEX_SH_APP) && !flex_power_suspended() && !flex_kiosk_active() &&
+           !flex_shell_land();   // horizontal: sin gestos del sistema (Core.h:997)
 }
 
 void flex_qs_open(void)

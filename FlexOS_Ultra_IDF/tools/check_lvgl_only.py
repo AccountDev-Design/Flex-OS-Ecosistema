@@ -13,6 +13,11 @@
 4. lv_canvas (dibujo por pixeles) solo donde el contenido ES un lienzo
    (lista explicita, vacia en las Fases 0-1).
 
+Excepcion ACOTADA a la regla 3 (GAME_CANVAS_ALLOWED): el juego Jumper de Arduino, copiado SIN CAMBIOS, rasteriza cada cuadro por software
+(paleta por HSV, mezcla alfa por pixel, fuente antialiasada, cientos de primitivas) sobre un lienzo propio RGB565 en PSRAM; ese lienzo lo muestra LVGL
+como UNA imagen (apps/app_games.c). No toca el panel ni crea otra ruta de pantalla (las reglas 1, 2 y 4 siguen valiendo tambien ahi: el componente ni
+incluye LVGL ni usa lv_canvas). Cualquier otro archivo sigue sin poder reimplementar el motor de Arduino.
+
 Uso: python3 tools/check_lvgl_only.py   (sale con 1 si hay infracciones)
 """
 import pathlib
@@ -35,6 +40,7 @@ LVGL_ALLOWED = (
 # main/ solo puede ver la API publica de flex_ui (flex_ui.h), nunca LVGL.
 UI_CONSUMERS = ("main/app_main.c",)
 CANVAS_ALLOWED: tuple = ()
+GAME_CANVAS_ALLOWED = ("components/flex_games/",)
 
 PANEL_API = re.compile(
     r"\b(esp_lcd_panel_draw_bitmap|esp_lcd_dpi_panel_get_frame_buffer|esp_lcd_new_panel_dpi"
@@ -85,7 +91,7 @@ def main() -> int:
                     problems.append(f"{r}:{no}: uso de LVGL fuera de la UI/puertos: {line.strip()}")
                 if ARDUINO_GFX_INCLUDE.search(line):
                     problems.append(f"{r}:{no}: cabecera de la version Arduino: {line.strip()}")
-                if ARDUINO_GFX_PRIMITIVE.search(line):
+                if ARDUINO_GFX_PRIMITIVE.search(line) and not r.startswith(GAME_CANVAS_ALLOWED):
                     problems.append(f"{r}:{no}: primitiva de dibujo manual (motor paralelo): {line.strip()}")
                 if CANVAS_API.search(line) and not r.startswith(CANVAS_ALLOWED):
                     problems.append(f"{r}:{no}: lv_canvas fuera de la lista de lienzos permitidos: {line.strip()}")

@@ -17,9 +17,18 @@ for f in files:
         bad.append(f"{f.name}: no existe en {ARDUINO}")
     elif orig.read_bytes() != f.read_bytes():
         bad.append(f"{f.name}: distinto del original Arduino")
+# Jumper (components/flex_games): el juego de Arduino, copiado sin cambios
+GAMES = ROOT / "components" / "flex_games" / "src"
+for f in sorted(GAMES.glob("FlexOS_*.h")):
+    orig = ARDUINO / f.name
+    if not orig.exists():
+        bad.append(f"{f.name}: no existe en {ARDUINO}")
+    elif orig.read_bytes() != f.read_bytes():
+        bad.append(f"{f.name}: distinto del original Arduino")
+    files.append(f)
 if bad:
     print("flex_portable NO es identico a la version Arduino:")
     for b in bad:
         print("  " + b)
     sys.exit(1)
-print(f"OK: {len(files)} archivos de flex_portable identicos a FlexOS_Ultra/")
+print(f"OK: {len(files)} archivos de flex_portable y flex_games identicos a FlexOS_Ultra/")

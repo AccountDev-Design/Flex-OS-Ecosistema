@@ -65,4 +65,5 @@ void test_chrono(void);
 void test_fsscan(void);
 void test_stor(void);
 void test_files(void);
+void test_jumper(void);
 #define FLEX_APP_N_TEST 19
