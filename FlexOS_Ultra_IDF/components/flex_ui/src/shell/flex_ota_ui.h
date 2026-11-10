@@ -27,5 +27,7 @@ int flex_ota_ui_card_y(void);
 int flex_ota_ui_log_scroll(void);   // desplazamiento del changelog (-1: sin changelog en pantalla)
 int flex_ota_ui_log_max(void);      // lo que se puede desplazar en total
 #ifdef FLEX_SIM
+void flex_ota_ui_test_open_changelog(void);
+int flex_ota_ui_bar_width(void);
 uint32_t flex_ota_ui_tree_crc(void);   // huella de geometria, colores y textos de la capa visible
 #endif

@@ -7,3 +7,4 @@ managed_components/
 # Simulador de la UI en el PC
 sim/build/
 sim/out/
+*.automut_orig

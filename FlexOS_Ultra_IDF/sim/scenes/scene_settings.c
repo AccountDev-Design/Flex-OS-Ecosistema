@@ -3,6 +3,7 @@
 // apagado seguro), servicios aun sin migrar que lo dicen, volver (chevron, borde izquierdo, boton atras), sesion y suspension a medias.
 #include <stdio.h>
 #include <string.h>
+#include "flex_ota_ui.h"
 #include "flex_app.h"
 #include "flex_app_ids.h"
 #include "flex_auth.h"
@@ -40,6 +41,7 @@ bool flex_kbs_active(void);
 bool flex_app_settings_list_hidden(void);
 bool flex_session_pending(int id);
 
+void flex_sys_back(void);
 #define CHK(c)                                                       \
     do {                                                             \
         if (!(c)) {                                                  \
@@ -243,12 +245,14 @@ bool scene_settings_run(void)
     CHK(flex_look()->h24 && flex_cfg_get_bool("h24", false) && has_text("24 horas"));
     row(2);
     CHK(!flex_look()->h24 && has_text("12 horas"));
-    CHK(has_text("No disponible"));                              // la hora por red no esta migrada: lo dice
+    CHK(has_text("Buscar actualizacion"));                       // la fila de Actualizaciones dice el estado del servicio (sin comprobar nunca)
     row(6);                                                      // "Sincronizar ahora": no hay servicio, no hace nada
     CHK(flex_app_settings_view() == 1);
-    row(7);                                                      // "Actualizaciones": no hay OTA, avisa
-    CHK(flex_kit_toast_count(flex_app_settings_root()) == 1);
-    sim_run(2000);
+    row(7);                                                      // "Actualizaciones": abre su capa (Ajustes > Actualizaciones), sin avisos de "Proximamente"
+    CHK(flex_ota_ui_overlay() == 4 && flex_kit_toast_count(flex_app_settings_root()) == 0);
+    flex_sys_back();                                             // Atras sale de la capa y se vuelve a la categoria
+    sim_run(300);
+    CHK(flex_ota_ui_overlay() == 0 && flex_app_settings_view() == 1);
     row(3);                                                      // zona horaria: informativa
     row(1);                                                      // fecha y hora: informativa (Arduino tampoco hace nada)
     CHK(flex_app_settings_view() == 1 && flex_lang() == 0 && flex_kit_toast_count(flex_app_settings_root()) == 0);

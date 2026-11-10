@@ -590,6 +590,10 @@ static void t_http(void)
     CHECK_EQ(OPS->http_get(), FLEX_OTA_HTTPE_OTHER);
     OPS->http_end();
     // sin cliente
+    {
+        uint8_t nb[16];
+        CHECK_EQ(OPS->http_read(nb, sizeof(nb)), -1);   // leer sin peticion abierta no toca nada
+    }
     CHECK_EQ(OPS->http_get(), FLEX_OTA_HTTPE_OTHER);
     CHECK_EQ(OPS->http_size(), 0);
     CHECK(!OPS->http_stream() && !OPS->http_connected() && OPS->http_available() == 0);
@@ -605,6 +609,14 @@ static void t_http(void)
     CHECK(OPS->http_begin("https://x/y", "PEM", false, 12000));
     CHECK_EQ(OPS->http_get(), 200);
     CHECK_EQ(OPS->http_size(), 0);
+    OPS->http_end();
+    // abierto el cliente pero sin peticion todavia: tampoco se lee
+    world_reset();
+    CHECK(OPS->http_begin("https://x/y", "PEM", false, 12000));
+    {
+        uint8_t nb[16];
+        CHECK_EQ(OPS->http_read(nb, sizeof(nb)), -1);
+    }
     OPS->http_end();
     // volver a empezar cierra lo anterior
     world_reset();

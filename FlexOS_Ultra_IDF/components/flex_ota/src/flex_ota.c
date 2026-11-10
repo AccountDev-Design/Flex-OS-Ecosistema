@@ -505,6 +505,17 @@ void flex_ota_test_force(flex_ota_state_t st, flex_ota_err_t err, const char *re
     ulk(o);
 }
 
+void flex_ota_test_progress(uint8_t percent, uint32_t done, uint32_t total, uint32_t bps)
+{
+    const flex_ota_ops_t *o = ops();
+    lk(o);
+    G.percent = percent;
+    G.done = done;
+    G.total = total;
+    G.bps = bps;
+    ulk(o);
+}
+
 bool flex_ota_work_pending(void)
 {
     return atomic_load(&s_cmd) != CMD_NONE;

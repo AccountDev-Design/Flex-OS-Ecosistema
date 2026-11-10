@@ -511,6 +511,22 @@ static void t_json_edges(void)
     CHECK(!flex_ota_json_str(str + 1, str + 1, out, sizeof(out)) && (unsigned char)out[0] == 0x55);   // p == end: ni se lee ni se escribe
     CHECK(!flex_ota_json_str(NULL, str, out, sizeof(out)) && (unsigned char)out[0] == 0x55);
     CHECK(!flex_ota_json_str(str + 1, str + 6, out, 0) && (unsigned char)out[0] == 0x55);
+    // `end` cae DENTRO de lo que sigue: lo de mas alla no cuenta (una cadena sin cerrar dentro del rango, un numero cortado, una barra al final)
+    {
+        const char *cutq = "\"abc\"";   // comilla de cierre justo en `end`
+        CHECK(!flex_ota_json_str(cutq, cutq + 4, out, sizeof(out)));
+        CHECK(!strcmp(out, "abc"));
+        const char *num = "123456";
+        CHECK_EQ_I(flex_ota_json_num(num, num + 3), 123);   // el 4 esta fuera
+        CHECK_EQ_I(flex_ota_json_num(num, num + 6), 123456);
+        CHECK_EQ_I(flex_ota_json_num(num, num), 0);
+        const char *bs1 = "\"ab\\\"";   // " a b \ "  y end justo tras la barra
+        CHECK(!flex_ota_json_str(bs1, bs1 + 4, out, sizeof(out)));
+        CHECK(!strcmp(out, "ab\\"));   // la barra se queda tal cual: no se lee la comilla de mas alla
+        const char *good = "\"abc\"";
+        CHECK(flex_ota_json_str(good, good + 5, out, sizeof(out)) && !strcmp(out, "abc"));
+        CHECK(!flex_ota_json_str(good, good + 4, out, sizeof(out)));   // cortada antes de la comilla de cierre
+    }
     // un \u cortado justo en `end` (4 digitos que no estan)
     const char *cut = "\"a\\u12";
     CHECK(!flex_ota_json_str(cut, cut + strlen(cut), out, sizeof(out)));

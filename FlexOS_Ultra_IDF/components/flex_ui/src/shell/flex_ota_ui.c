@@ -317,7 +317,7 @@ static void build_modal(void)
     int cw = W - 2 * OTA_M * 2;
     int ch = OTA_MODAL_H > H - 80 ? H - 80 : OTA_MODAL_H;
     int cx = (W - cw) / 2, cy = (H - ch) / 2;
-    U.card = box(U.root, cx, cy, cw, ch);
+    U.card = box(U.root, cx, cy + 40, cw, ch);   // empieza 40 px mas abajo (p = 0) y sube mientras aparece
     fill(U.card, c_card(), OTA_RAD);
     int y = 26;
     int is = OTA_ICON + 8;
@@ -810,6 +810,19 @@ int flex_ota_ui_log_scroll(void) { return s_logview ? (int)lv_obj_get_scroll_y(s
 int flex_ota_ui_log_max(void) { return s_logview ? (int)lv_obj_get_scroll_bottom(s_logview) + (int)lv_obj_get_scroll_y(s_logview) : -1; }
 
 #ifdef FLEX_SIM
+void flex_ota_ui_test_open_changelog(void) { show(OV_CHANGELOG); }
+int flex_ota_ui_bar_width(void)   // -1 sin barra, 0 oculta, o el ancho del relleno
+{
+    if (!U.bar_fill) {
+        return -1;
+    }
+    if (lv_obj_is_hidden(U.bar_fill)) {
+        return 0;
+    }
+    lv_obj_update_layout(U.bar_fill);
+    return (int)lv_obj_get_width(U.bar_fill);
+}   // el simulador abre el modal sin pasar por el toque del aviso (para medir su entrada)
+
 // Huella de la capa: geometria, visibilidad, colores y textos de CADA objeto (el trazo de los glifos va en la huella del framebuffer que calcula la escena).
 // Cualquier cambio de una medida, de un color o de una cadena la cambia.
 static uint32_t crc_u32(uint32_t c, uint32_t v)

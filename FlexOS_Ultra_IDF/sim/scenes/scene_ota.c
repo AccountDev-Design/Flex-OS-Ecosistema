@@ -403,9 +403,9 @@ bool scene_ota_run(void)
     flex_sys_back();   // (el boton de la flecha se prueba mas abajo: aqui se necesita medir la entrada desde el primer cuadro)
     {
         // el aviso aparece solo (en el siguiente cuadro) y entra deslizando desde abajo: se muestrea cuadro a cuadro
-        int first = -1, last = -1, prev = 10000;
+        int first = -1, last = -1, prev = 10000, mid = 0;
         bool mono = true;
-        uint32_t t0 = lv_tick_get();
+        uint32_t t0 = lv_tick_get(), t_seen = 0, t_end = 0;
         while (lv_tick_get() - t0 < 700) {
             sim_run(4);
             if (ov() != OV_TOAST) {
@@ -414,11 +414,20 @@ bool scene_ota_run(void)
             int y = flex_ota_ui_card_y();
             if (first < 0) {
                 first = y;
+                t_seen = lv_tick_get();
             }
             mono = mono && y <= prev;
+            if (y > 800 - 80 - 96 && y < 800) {
+                mid++;   // cuadros intermedios: de verdad se anima
+            }
+            if (y == 800 - 80 - 96 && !t_end) {
+                t_end = lv_tick_get();
+            }
             prev = y;
             last = y;
         }
+        CHK(mid >= 4);
+        CHK(t_end > t_seen && t_end - t_seen >= 250 && t_end - t_seen <= 360);   // OTA_ANIM_IN = 300 ms
         printf("ota: aviso first=%d last=%d mono=%d\n", first, last, (int)mono);
         CHK(first > 800 - 80 - 96 + 100);
         CHK(last == 800 - 80 - 96);
@@ -677,6 +686,28 @@ bool scene_ota_run(void)
 
     flex_sys_home();
     sim_run(600);
+    // ---- 11b) el tamano se dice con la unidad que toca (MB desde 1 MB exacto, KB desde 1 KB exacto) ---------------------------------------------------------
+    {
+        static const struct { unsigned total; const char *txt; } SZ[] = {{1048576u, "1,0 MB"}, {1048575u, "1023 KB"}, {1024u, "1 KB"}, {1023u, "1023 B"},
+                                                                         {5u * 1048576u + 524288u, "5,5 MB"}, {0, NULL}};
+        for (unsigned k = 0; k < sizeof(SZ) / sizeof(SZ[0]); k++) {
+            flex_ota_service_reset();
+            flex_ota_prime("1.8.0", "https://flex.test/ota/x.bin", "", SZ[k].total);
+            flex_ota_open_settings();
+            sim_run(200);
+            if (SZ[k].txt) {
+                CHK(shown("Tamano") && shown(SZ[k].txt));
+            } else {
+                CHK(!shown("Tamano"));   // sin tamano no hay fila
+            }
+            CHK(!shown("Novedades"));   // y sin changelog tampoco el cuadro de novedades
+            flex_ota_ui_back();
+            sim_run(100);
+        }
+        flex_ota_service_reset();
+        sim_run(200);
+    }
+
     // ---- 12) el aviso solo se abre con un TOQUE: arrastrarlo un poco y soltar no abre el changelog; Atras no cierra el aviso ---------------------------------
     flex_ota_service_reset();
     W.net = true;
@@ -693,8 +724,40 @@ bool scene_ota_run(void)
     flex_sys_back();
     sim_run(100);
     CHK(ov() == OV_TOAST);
-    sim_drag(240, 640, 240, 700, 120);   // 60 px: se descarta
-    sim_run(600);
+    // 60 px con el dedo puesto: se descarta deslizandose hacia abajo en 240 ms
+    {
+        sim_touch(240, 650, true);
+        sim_run(30);
+        sim_touch(240, 675, true);
+        sim_run(30);
+        sim_touch(240, 700, true);
+        int prev = 0, mid = 0;
+        bool mono = true;
+        uint32_t t_start = 0, t_gone = 0, t0 = lv_tick_get();
+        while (lv_tick_get() - t0 < 700) {
+            sim_run(4);
+            if (ov() != OV_TOAST) {
+                if (!t_gone) {
+                    t_gone = lv_tick_get();
+                }
+                continue;
+            }
+            int y = flex_ota_ui_card_y();
+            mono = mono && y >= prev;
+            prev = y;
+            if (y > 800 - 80 - 96 && !t_start) {
+                t_start = lv_tick_get();
+            }
+            if (y > 800 - 80 - 96 && y < 800) {
+                mid++;
+            }
+        }
+        sim_touch(240, 700, false);
+        printf("ota: salida del aviso mid=%d inicio=%u fin=%u mono=%d\n", mid, (unsigned)t_start, (unsigned)t_gone, (int)mono);
+        CHK(mono && mid >= 4);
+        CHK(t_start && t_gone > t_start && t_gone - t_start >= 150 && t_gone - t_start <= 240);   // OTA_ANIM_OUT = 240 ms (la curva de salida casi no mueve el principio)
+    }
+    sim_run(300);
     CHK(ov() == OV_NONE);
     // arrastrar hacia arriba y soltar tampoco lo abre
     flex_ota_service_reset();
@@ -712,6 +775,42 @@ bool scene_ota_run(void)
     flex_sys_back();
     sim_run(300);
     CHK(ov() == OV_NONE);
+
+    // el modal sube 40 px en 300 ms al aparecer
+    {
+        flex_ota_service_reset();
+        publish("1.7.3");
+        flex_ota_request_check();
+        CHK(pump_until(FLEX_OTA_AVAILABLE, 3000));
+        flex_ota_ui_back();
+        sim_run(100);
+        flex_ota_ui_test_open_changelog();
+        int first = -1, last = -1, prev = 10000, mid = 0;
+        bool mono = true;
+        uint32_t t_seen = lv_tick_get(), t_end = 0, t0 = lv_tick_get();
+        while (lv_tick_get() - t0 < 700) {
+            sim_run(4);
+            int y = flex_ota_ui_card_y();
+            if (first < 0) {
+                first = y;
+            }
+            mono = mono && y <= prev;
+            if (y > 130 && y < 170) {
+                mid++;
+            }
+            if (y == 130 && !t_end) {
+                t_end = lv_tick_get();
+            }
+            prev = y;
+            last = y;
+        }
+        printf("ota: modal first=%d last=%d mid=%d dt=%u\n", first, last, mid, (unsigned)(t_end - t_seen));
+        CHK(first >= 160 && last == 130 && mono && mid >= 4);
+        CHK(t_end > t_seen && t_end - t_seen >= 190 && t_end - t_seen <= 250);   // OTA_ANIM_IN = 300 ms (la curva llega a menos de 1 px antes del final)
+        flex_sys_back();
+        sim_run(300);
+        CHK(ov() == OV_NONE);
+    }
 
     // ---- 13) modo claro: los mismos colores de Arduino con su paleta clara --------------------------------------------------------------------------------
     flex_theme_set_dark(false);
@@ -758,6 +857,103 @@ bool scene_ota_run(void)
     CHK(ov() == OV_NONE);
     flex_theme_set_dark(true);
     sim_run(300);
+
+    // ---- 14) la pantalla de instalacion sigue al motor: se cierra sola SOLO si el motor ya no esta instalando -----------------------------------------------
+    {
+        static const struct { int st, stays; } T[] = {{FLEX_OTA_IDLE, 0}, {FLEX_OTA_CHECKING, 0}, {FLEX_OTA_UP_TO_DATE, 0}, {FLEX_OTA_AVAILABLE, 0},
+                                                      {FLEX_OTA_CONNECTING, 1}, {FLEX_OTA_DOWNLOADING, 1}, {FLEX_OTA_VERIFYING, 1}, {FLEX_OTA_INSTALLING, 1},
+                                                      {FLEX_OTA_FINALIZING, 1}, {FLEX_OTA_REBOOTING, 1}, {FLEX_OTA_ERROR, 1}};
+        for (unsigned k = 0; k < sizeof(T) / sizeof(T[0]); k++) {
+            flex_ota_service_reset();
+            flex_ota_test_force(FLEX_OTA_CONNECTING, FLEX_OTA_ERR_NONE, "1.9.0");
+            flex_ota_ui_install_started();
+            sim_run(150);
+            CHK(ov() == OV_PROGRESS);
+            flex_ota_test_force((flex_ota_state_t)T[k].st, T[k].st == FLEX_OTA_ERROR ? FLEX_OTA_ERR_TLS : FLEX_OTA_ERR_NONE, "1.9.0");
+            sim_run(150);
+            CHK((ov() == OV_PROGRESS) == (T[k].stays != 0));
+            flex_ota_service_reset();   // el motor vuelve a reposo: la pantalla de instalacion se cierra en cualquier caso
+            sim_run(150);
+            CHK(ov() != OV_PROGRESS);   // (con AVAILABLE sale el aviso del escritorio: es otra capa)
+            flex_ota_ui_close_now();
+            CHK(ov() == OV_NONE);
+        }
+    }
+
+    // ---- 15) la pantalla de instalacion: la barra (minimo visible de 10 px) y cada campo se actualiza por su cuenta ------------------------------------------
+    {
+        flex_ota_service_reset();
+        flex_ota_test_force(FLEX_OTA_DOWNLOADING, FLEX_OTA_ERR_NONE, "1.9.0");
+        flex_ota_test_progress(0, 0, 0, 0);
+        flex_ota_ui_install_started();
+        sim_run(150);
+        CHK(ov() == OV_PROGRESS);
+        CHK(!flex_ota_ui_shown_part(" / ") && !flex_ota_ui_shown_part("/s"));   // sin tamano no hay linea de bytes, ni velocidad
+        static const struct { int pct, w; } B[] = {{0, 0}, {1, 10}, {2, 10}, {3, 12}, {50, 200}, {99, 396}, {100, 400}};
+        for (unsigned k = 0; k < sizeof(B) / sizeof(B[0]); k++) {
+            char t[8];
+            flex_ota_test_progress((uint8_t)B[k].pct, (uint32_t)B[k].pct * 1000u, 100000u, 0);
+            sim_run(100);
+            snprintf(t, sizeof(t), "%d%%", B[k].pct);
+            CHK(flex_ota_ui_bar_width() == B[k].w && shown(t));
+        }
+        flex_ota_test_progress(10, 10240, 102400, 0);
+        sim_run(100);
+        CHK(shown("10%") && shown("10 KB / 100 KB") && !flex_ota_ui_shown_part("/s"));
+        flex_ota_test_progress(11, 10240, 102400, 0);   // cambia SOLO el porcentaje
+        sim_run(100);
+        CHK(shown("11%") && shown("10 KB / 100 KB"));
+        flex_ota_test_progress(11, 20480, 102400, 0);   // SOLO los bytes
+        sim_run(100);
+        CHK(shown("11%") && shown("20 KB / 100 KB"));
+        flex_ota_test_progress(11, 20480, 102400, 2048);   // SOLO la velocidad
+        sim_run(100);
+        CHK(shown("2 KB/s") && shown("20 KB / 100 KB"));
+        flex_ota_test_force(FLEX_OTA_VERIFYING, FLEX_OTA_ERR_NONE, "1.9.0");   // la velocidad solo se dice descargando
+        sim_run(100);
+        CHK(shown("Verificando...") && !flex_ota_ui_shown_part("/s"));
+        flex_ota_service_reset();
+        sim_run(150);
+        CHK(ov() == OV_NONE);
+        // un error con una version ya confirmada la sigue ofreciendo (y sin tamano, el modal no dice tamano)
+        flex_ota_test_force(FLEX_OTA_ERROR, FLEX_OTA_ERR_TLS, "1.9.0");
+        flex_ota_open_settings();
+        sim_run(200);
+        CHK(shown("Actualizacion disponible") && shown("Version disponible") && shown("1.9.0") && shown("Buscar") && shown("Actualizar ahora"));
+        flex_ota_ui_back();
+        flex_ota_service_reset();
+        flex_ota_prime("1.9.0", "https://flex.test/ota/x.bin", "", 0);
+        flex_ota_ui_test_open_changelog();
+        sim_run(400);
+        CHK(ov() == OV_CHANGELOG && shown("Cancelar") && !flex_ota_ui_shown_part("Tamano de la descarga") && flex_ota_ui_shown_part("Sin notas de la version"));
+        flex_ota_ui_back();
+        flex_ota_service_reset();
+        sim_run(200);
+    }
+
+    // ---- 16) los umbrales del gesto sobre el aviso: 16 px de recorrido siguen siendo un toque, 17 ya no; se descarta pasando de 36 -----------------------------
+    {
+        static const struct { int dy; int want; } G[] = {{16, OV_CHANGELOG}, {-16, OV_CHANGELOG}, {17, OV_TOAST}, {-17, OV_TOAST}, {36, OV_TOAST}, {37, OV_NONE}};
+        for (unsigned k = 0; k < sizeof(G) / sizeof(G[0]); k++) {
+            char ver[8];
+            snprintf(ver, sizeof(ver), "2.0.%u", k);
+            flex_ota_service_reset();
+            publish(ver);
+            flex_ota_request_check();
+            CHK(pump_until(FLEX_OTA_AVAILABLE, 3000));
+            sim_run(700);
+            CHK(ov() == OV_TOAST && flex_ota_ui_card_y() == 800 - 80 - 96);
+            sim_touch(240, 670, true);
+            sim_run(40);
+            sim_touch(240, 670 + G[k].dy, true);
+            sim_run(150);
+            sim_touch(240, 670 + G[k].dy, false);
+            sim_run(500);
+            CHK(ov() == G[k].want);
+            flex_ota_ui_close_now();
+            CHK(ov() == OV_NONE);
+        }
+    }
 
     flex_ota_set(NULL, NULL);
     flex_ota_service_reset();

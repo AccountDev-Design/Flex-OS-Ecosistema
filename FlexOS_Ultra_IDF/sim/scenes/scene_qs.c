@@ -146,7 +146,8 @@ bool scene_qs_run(void)
     // 2) NADA FALSO: lo que se ve tiene backend; lo pendiente no aparece
     CHK(visible(FLEX_QS_AIRPLANE) && visible(FLEX_QS_BRIGHT) && visible(FLEX_QS_THEME));
     CHK(visible(FLEX_QS_GLASS) && visible(FLEX_QS_SETTINGS) && visible(FLEX_QS_CAMERA));
-    CHK(!visible(FLEX_QS_WIFI) && !visible(FLEX_QS_BLE) && !visible(FLEX_QS_VOLUME) && !visible(FLEX_QS_OTA));
+    CHK(!visible(FLEX_QS_WIFI) && !visible(FLEX_QS_BLE) && !visible(FLEX_QS_VOLUME));
+    CHK(visible(FLEX_QS_OTA));   // Actualizaciones: ya tiene su servicio y su capa (qpAvTrue en Arduino)
     CHK(!visible(FLEX_QS_LOCK));   // sin clave no hay "Bloquear"
 
     // 3) controles reales

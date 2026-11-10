@@ -167,6 +167,9 @@ static int p_http_available(void)
 }
 static int p_http_read(uint8_t *buf, size_t n)
 {
+    if (!H.cli || !H.opened) {
+        return -1;   // sin peticion abierta no hay nada que leer
+    }
     int r = esp_http_client_read(H.cli, (char *)buf, (int)n);
     if (r == -ESP_ERR_HTTP_EAGAIN) {
         return 0;   // nada en esta rebanada

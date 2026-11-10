@@ -227,6 +227,17 @@ const char *flex_ota_phase_text(flex_ota_state_t s)
     }
 }
 
+// Copia acotada y SIEMPRE terminada en 0 (lo que Arduino hace con strncpy + terminador a mano)
+static void copy_cap(char *dst, size_t cap, const char *src)
+{
+    size_t n = strlen(src);
+    if (n >= cap) {
+        n = cap - 1;
+    }
+    memcpy(dst, src, n);
+    dst[n] = 0;
+}
+
 flex_ota_err_t flex_ota_manifest_read(const char *buf, const flex_ota_cfg_t *cfg, flex_ota_manifest_t *out, bool *newer)
 {
     memset(out, 0, sizeof(*out));
@@ -288,16 +299,11 @@ flex_ota_err_t flex_ota_manifest_read(const char *buf, const flex_ota_cfg_t *cfg
     }
     // Cada cadena acaba en 0 aunque llene el buffer (como los strncpy + terminador de Arduino): quien lea `out` nunca ve basura tras el ultimo caracter
     memset(out, 0, sizeof(*out));
-    strncpy(out->ver, ver, sizeof(out->ver) - 1);
-    out->ver[sizeof(out->ver) - 1] = 0;
-    strncpy(out->url, url, sizeof(out->url) - 1);
-    out->url[sizeof(out->url) - 1] = 0;
-    strncpy(out->md5, md5, sizeof(out->md5) - 1);
-    out->md5[sizeof(out->md5) - 1] = 0;
-    strncpy(out->changelog, log, sizeof(out->changelog) - 1);
-    out->changelog[sizeof(out->changelog) - 1] = 0;
-    strncpy(out->sig, sig, sizeof(out->sig) - 1);
-    out->sig[sizeof(out->sig) - 1] = 0;
+    copy_cap(out->ver, sizeof(out->ver), ver);
+    copy_cap(out->url, sizeof(out->url), url);
+    copy_cap(out->md5, sizeof(out->md5), md5);
+    copy_cap(out->changelog, sizeof(out->changelog), log);
+    copy_cap(out->sig, sizeof(out->sig), sig);
     out->size = size;
     *newer = true;
     return FLEX_OTA_ERR_NONE;

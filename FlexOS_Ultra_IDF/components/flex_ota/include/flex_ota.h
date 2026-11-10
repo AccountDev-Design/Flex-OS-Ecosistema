@@ -142,6 +142,7 @@ bool flex_ota_run_check(void);                            // otaCheck: la compro
 bool flex_ota_run_install(void);                          // otaInstall: la descarga y la instalacion ya, en esta tarea
 void flex_ota_prime(const char *remote, const char *url, const char *md5, uint32_t total);   // solo pruebas: el estado tras una comprobacion buena
 void flex_ota_test_force(flex_ota_state_t st, flex_ota_err_t err, const char *remote);      // solo pruebas: cualquier estado (remote != NULL: ademas una version confirmada)
+void flex_ota_test_progress(uint8_t percent, uint32_t done, uint32_t total, uint32_t bps);   // solo pruebas: el progreso tal cual (cada campo por su cuenta)
 void flex_ota_auto_check_tick(void);                      // la comprobacion automatica (~20 s tras el arranque, una vez)
 
 typedef struct {

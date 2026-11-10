@@ -4,7 +4,12 @@ target, runner, nmax, seed = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys
 lo = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 hi = int(sys.argv[6]) if len(sys.argv) > 6 else 10**9
 F=ROOT+'/'+target
+import os
+BK=F+'.automut_orig'
+if os.path.exists(BK):
+    open(F,'w').write(open(BK).read())   # un reinicio mato una ejecucion anterior a medias: se restaura primero
 orig=open(F).read()
+open(BK,'w').write(orig)
 lines=orig.split('\n')
 ops=[(r'(?<![<>=!-])<(?![<=])', '<='), (r'<=', '<'), (r'(?<![-<>=])>(?![>=])', '>='), (r'>=', '>'), (r'==', '!='), (r'!=', '=='), (r'&&', '||'), (r'\|\|', '&&'),
      (r'(?<=[\w\)\] ]) \+ (?=[\w\(])', ' - '), (r'(?<=[\w\)\] ]) - (?=[\w\(])', ' + ')]
@@ -49,5 +54,6 @@ try:
             res['SOBREVIVE']+=1; surv.append((i+1,l.strip()[:110],new.strip()[:110]))
 finally:
     open(F,'w').write(orig)
+    os.remove(BK)
 print(target, res)
 for s in surv: print('  SOBREVIVE linea %d:\n    %s\n -> %s'%s)
