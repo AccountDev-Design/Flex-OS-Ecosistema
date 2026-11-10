@@ -108,6 +108,9 @@ static uint32_t run_until_end(void)
     return t;
 }
 
+void account_scene_request_pending(void);   // scene_account.c
+bool account_scene_link_cancelled(void);
+
 bool scene_factory_run(void)
 {
     bool ok = true;
@@ -197,11 +200,13 @@ bool scene_factory_run(void)
     type_word("RESTABLECER");
     sim_tap(240, 259);
     sim_run(300);
+    account_scene_request_pending();   // un enlace de cuenta pedido y sin empezar
     slide(46 + 30 + 330);
     uint32_t t0 = lv_tick_get();
     sim_run(100);
     CHK(flex_factory_view() == V_RUN);
     CHK(!flex_app_is_open(IC_NOTAS));   // ARMED: ninguna app sigue abierta
+    CHK(account_scene_link_cancelled());   // ... y el enlace de cuenta se cancela (flexAccountCancel)
     sim_shot("fr_04_progreso");
     // nada lo interrumpe: tocar, dos dedos, bloquear
     sim_tap(240, 733);

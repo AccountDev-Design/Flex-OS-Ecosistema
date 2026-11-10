@@ -617,3 +617,37 @@ escenas `devcare` y `dcui`): metricas, puntuacion, historial y motor de diagnost
 cual; las nueve pantallas como listas de operaciones de dibujo comparadas primitiva a primitiva con las de Arduino; la interfaz LVGL pinta esas
 operaciones y atiende los toques; los servicios son los reales. **No implementado (A17h):** todo lo del IMU y las caidas; la pantalla de caidas dice
 "No disponible", nombra el modulo que espera y no finge ni un estado. Ver las diferencias en `ESP_IDF_MIGRATION_REPORT.md`.
+
+## 16. Flex Account: servicio (`FlexOS_Account.h/.cpp`, `FlexOS_CloudTLS.h/.cpp`)
+
+La pantalla (`FlexOS_Account_Bridge.h`) está en `01a` §3.3; aquí, el servicio que la alimenta.
+
+### 16.1 Qué hace y con qué límites
+Vincula este P4 con una cuenta de Flex por **código de dispositivo**, valida la sesión y desvincula. Todo el trabajo de red va en una tarea de fondo (core 1, pila de 12 KB, vuelta cada
+100 ms); la interfaz solo lee una foto bajo cerrojo. Constantes (`FlexOS_Account.cpp:61-143`): HTTP 15 s, enlace 10 min, sobre ≤ 8 KB, revalidar cada 6 h, asentamiento tras conectar 3 s,
+intervalo mínimo entre intentos 30 s, un 401 ajeno revalida como mucho cada 60 s, espera tras fallo 30 s ×2 hasta 15 min.
+
+### 16.2 Credencial y firma
+32 bytes del aleatorio del P4 en base64url (43 caracteres); al servidor solo llega `SHA-256(credencial)` en hexadecimal. `POST /api/devices/code` (id del aparato `P4-<MAC>-<id de instalación>`,
+etiqueta, modelo, versión, huella) devuelve un **sobre** `{schema:2, algorithm:"ES256", keyId, payload (base64url), signature (r‖s, base64url)}` que se acepta solo si el `keyId` es el anclado y la
+firma sobre `SHA-256(payload)` verifica con la clave P-256 anclada (S alto aceptado; sobre ≤ 8 KB). La carga `flex-device-code` lleva el código (5-8 letras A-Z y 2-9), la huella (la misma que se envió) y la URL
+de activación (empieza por el prefijo fijo); la `flex-device-status` lleva `pending` / `approved` (+ `flexAddress` terminada en `@flex` y `displayName`) / `expired`.
+
+### 16.3 Flujo de enlace
+Pedir → `REQUESTING` (8 %, 28 %) → `CODE_READY` (55 %) → sondeo cada 3 s hasta aprobar, caducar (10 min) o cancelar → guardar (`REQUESTING` 88 %) → `LINKED`. Un 409 ("ya vinculado") rota el id de instalación
+y reintenta UNA vez (recupera el mismo hardware sin reutilizar el token perdido). Un enlace que no termina bien **no toca** la cuenta ya guardada: se vuelve a ella con el motivo del fallo. Sin SRAM interna para
+el handshake (< 40 KB o bloque < 16 KB) no se abre TLS y se dice qué hacer ("Cierra una app y reintenta").
+
+### 16.4 Sesión (estado del vínculo)
+`GET /api/cloud/me` con `Authorization: Bearer`, siempre con certificado validado. 200 con `account.flexAddress` válido → `LINKED`; 401/403 con `error.code` `token_expired` → `TOKEN_EXPIRED`, con `device_revoked` o
+`auth_required` → `AUTH_REQUIRED` (se guarda en `authst` solo en las transiciones); cualquier otra cosa (sin red, 5xx, 401 sin código, cuerpo roto) → `NETWORK_UNAVAILABLE`, nunca desvincula. Al arrancar con cuenta
+guardada el estado es `LINKED_OFFLINE` hasta validar. El motivo de un fallo de conexión se dice con su causa (`flexTlsReason`: código de mbedTLS) y, si es -1, con el DNS y lo que tardó (`flexTlsPhase`).
+
+### 16.5 Persistencia
+NVS `flexacct`: `token`, `address`, `display` (cadenas), `linked`, `authst` (u8), `installId` (u32). `linked` se escribe la última. Al leer, `nvs_get_str` devuelve la longitud **con** el terminador (44 para
+un token de 43): la comprobación `== 43` de la primera versión desvinculaba la cuenta en cada arranque (`flexNvsStrLen`). Un registro a medias es `LINK_ERROR` ("la cuenta guardada está incompleta"), no "sin cuenta".
+
+### 16.6 Migración a IDF
+* Tres capas: núcleo C puro (`flex_account_model.c`), servicio sobre `flex_account_ops_t` (`flex_account.c`) y transporte (`flex_account_port.c`). Backend criptográfico mbedTLS en la placa y OpenSSL en el PC; el host prueba **los dos**.
+* TLS siempre validado con las raíces de `flex_net/certs/cloud_root_bundle.pem` (idénticas a las de Arduino): se pierde el enlace "sin hora" (ver `components/flex_account/README.md`).
+* Lo que ve el resto del sistema: `flex_account_linked/usable/state/link_state/snapshot/copy_bearer/request_validation/report_rejected/forget_local`; las pantallas y la fila de Ajustes leen la foto, nadie toca la NVS.

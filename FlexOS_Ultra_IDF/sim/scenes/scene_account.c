@@ -424,6 +424,24 @@ static void open_from_settings(void)
     sim_run(300);
 }
 
+// Para la escena del restablecimiento: un enlace pedido y sin empezar, y comprobar despues que el borrado lo canceló (flex_account_cancel en begin_wipe)
+void account_scene_request_pending(void)
+{
+    static const flex_account_cfg_t cfg = {"1.0.0"};
+    account_fake_reset();
+    flex_account_set(&cfg, account_fake_ops());
+    account_fake_set_delay_hook(NULL);
+    net(true);
+    flex_account_begin();
+    flex_account_request_code("FlexOS Ultra");
+}
+bool account_scene_link_cancelled(void)
+{
+    bool pending = flex_account_state() == FLEX_ACCOUNT_REQUESTING;
+    flex_account_step();   // la tarea de fondo: el enlace pedido se cancela antes de abrir ninguna conexion
+    return pending && flex_account_state() != FLEX_ACCOUNT_REQUESTING && flex_account_state() != FLEX_ACCOUNT_CODE_READY && account_fake_count(AF_POSTS) == 0;
+}
+
 bool scene_account_run(void)
 {
     bool ok = true;
@@ -441,7 +459,7 @@ bool scene_account_run(void)
     // ---- 0) el dibujo coincide con el de Arduino, primitiva a primitiva ----
     {
         const char *g = getenv("FLEX_ACCOUNT_GOLDEN");
-        CHK(parity(g ? g : "tests/host/out/account_ui_golden.txt"));
+        CHK(parity(g ? g : "tests/host/build/acct/account_ui_golden.txt"));
         flex_account_ui_close_now();
         sim_run(100);
         CHK(!open_());
