@@ -101,10 +101,16 @@ static void t_taps(void)
                                                       {0, FLEX_LINK_AUTH_REQUIRED}};
     int xs[64], nx = 0;
     static const int XB[] = {0, 1, 5, 51, 52, 63, 64, 65, 100, 115, 116, 117, 229, 230, 239, 240, 241, 249, 250, 251, 363, 364, 365, 400, 427, 428, 429, 450, 479};
-    for (unsigned i = 0; i < sizeof(XB) / sizeof(XB[0]); i++) xs[nx++] = XB[i];
+    static const int XF[] = {0, 63, 64, 116, 117, 240, 249, 250, 364, 365, 428, 429, 479};   // mutacion (ACCT_FAST): las fronteras, no la rejilla entera
+    const bool fast = getenv("ACCT_FAST") != NULL;
+    if (fast) {
+        for (unsigned i = 0; i < sizeof(XF) / sizeof(XF[0]); i++) xs[nx++] = XF[i];
+    } else {
+        for (unsigned i = 0; i < sizeof(XB) / sizeof(XB[0]); i++) xs[nx++] = XB[i];
+    }
     long long total = 0, buckets[8] = {0};
     for (int built = 0; built < 7; built++) {
-        for (int curs = 0; curs < 2; curs++) {
+        for (int curs = 0; curs < (fast ? 1 : 2); curs++) {
             for (int ask = 0; ask < 2; ask++) {
                 for (int ret = 0; ret < 3; ret++) {
                     for (int online = 0; online < 2; online++) {
