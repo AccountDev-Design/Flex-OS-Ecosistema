@@ -1,10 +1,23 @@
+#!/usr/bin/env python3
+"""Mutacion por sustitucion de operadores y constantes sobre UN archivo, ejecutando un runner de pruebas por mutante.
+
+  tools/automut.py <archivo relativo al proyecto> "<runner>" <max mutantes> <semilla> [<linea desde> <linea hasta>]
+
+El runner se ejecuta en tests/host y tiene que imprimir `checks=N fails=M` (los de tools/mutation/*.sh lo hacen). Un mutante MUERE si fails > 0, si el
+runner se cuelga o se cae, y se cuenta INVALIDO si no compila (ojo: un `runtime error` del sanitizador tambien lo parece: es una muerte). Los que SOBREVIVEN
+hay que clasificarlos a mano: equivalentes (un tamano de buffer mayor, un borde que no se alcanza) o un hueco de las pruebas.
+
+  - El archivo original se guarda en <archivo>.automut_orig y se restaura al terminar o, si un reinicio mato la ejecucion, al empezar la siguiente.
+  - NUNCA editar el archivo mutado, ni los de pruebas, mientras corre. Dos ejecuciones a la vez sobre el mismo arbol se contaminan entre si (cada
+    mutante compila TODO lo que esta en el arbol): para paralelizar, un `git worktree` por ejecucion (FLEX_ROOT=<worktree>).
+"""
 import re, random, subprocess, sys
-ROOT="/tmp/claude-0/sp/wt/FlexOS_Ultra_IDF"
+import os, pathlib
+ROOT=os.environ.get('FLEX_ROOT') or str(pathlib.Path(__file__).resolve().parent.parent)
 target, runner, nmax, seed = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
 lo = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 hi = int(sys.argv[6]) if len(sys.argv) > 6 else 10**9
 F=ROOT+'/'+target
-import os
 BK=F+'.automut_orig'
 if os.path.exists(BK):
     open(F,'w').write(open(BK).read())   # un reinicio mato una ejecucion anterior a medias: se restaura primero

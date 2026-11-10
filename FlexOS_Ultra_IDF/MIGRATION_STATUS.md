@@ -11,67 +11,6 @@ Rama: `flexos-esp-idf` (la rama Arduino `claude/flexos-ota-system-blq9g9-2csacx`
 Último bloque cerrado: **Hora por red** (N1a: cliente SNTP propio sobre sockets UDP con el paquete y la planificación de Arduino, hora aproximada tras un reinicio, guardado horario y al apagar, textos de Ajustes y el control "Hora" del panel rápido; el inventario separa el Wi-Fi como N1b); antes **Device Care** (A17: inicio con tarjeta y anillo animado, estado, salud, optimización, historial persistente y diagnóstico completo —sistema, pantalla en ocho pasadas, táctil, resultado— sobre los servicios reales, con las pantallas como listas de operaciones de dibujo comparadas primitiva a primitiva con Arduino; el inventario separa el IMU y las caídas como A17h); antes **Juegos** (A10: Jumper de Arduino sin cambios sobre el motor de dibujo de Arduino extraido, en un lienzo vertical que gira el propio motor, a pantalla completa y sin gestos del sistema); antes **Almacenamiento + Archivos** (A04 local: pantalla principal con medidas reales asíncronas, detalles de memoria y sistema, explorador modal con filas por ventana, borrar / renombrar / papelera / selección múltiple sobre las operaciones reales; el inventario separa lo que depende de servicios sin migrar como A04c: teléfono emparejado, Flex Cloud y visores de medios); antes **Reloj** (A01: pestañas Hora / Cronómetro / Temporizador, cronómetro con esfera, tabla de vueltas y dos botones, cápsula en la barra de estado, tarjeta expandida modal, mosaico del panel rápido y widget del escritorio con el mismo servicio; el inventario separa Temporizador y alarmas como A01t); antes **Ajustes del teclado** (A11k: 8 páginas navegables, atajos con el teclado del sistema, ajustes que guardan su clave; modal sobre la app que la abre: Ajustes o el engranaje del teclado de Notas); antes **Ajustes** (A11: lista de 12 categorías, filas con valores reales y su acción, transición de 270 ms con paralaje, sesión; el inventario se parte en A11 / A11k teclado / A11n servicios sin migrar, el total de 2000 no cambia); antes **Paint** (A09: galería con miniaturas reales, lienzo con trazo en vivo, deshacer/limpiar, guardado atómico asíncrono, sesión; rasterizador de Arduino portado píxel a píxel); antes **Notas** (A06: lista, editor, teclado con barra y chips, portapapeles, sesión) que integra el **kit de archivos** (S5); antes **Calendario** (A19), el **kit de componentes**, **App Calculadora** (A12) y la **revisión 6**; antes, **Recientes con memoria y sesiones** (S4e), **Arranque** (S2), **Memoria y Optimizar**, **Sesiones de app** y **Personalizar inicio**. Entorno de
 compilación en un contenedor nuevo: `bash tools/setup_idf_cloud.sh` (ver "Entorno" abajo).
 
-### ⛔ DETENIDO POR ORDEN DEL USUARIO — N5 (OTA) A MEDIAS · reanudar SOLO cuando el usuario lo indique
-
-**Qué hay en el árbol (commit WIP, SIN VERIFICAR como conjunto):** el último estado verde y completo sigue siendo `6a965db` (N1a: batería
-`tools/run_tests.sh` TODO OK y firmware `v3` 1 829 696 B). Todo lo de N5 de abajo es posterior y **no se ha pasado por la batería completa ni por
-el build del firmware**, ni se ha tocado `MIGRATION_STATUS.md` (inventario) ni el informe: **N5 no suma nada** (30,1 % sin cambio; la fila N5 de 33
-puntos sigue sin partir). Sin procesos, agentes ni tareas programadas en segundo plano (comprobado al parar; se mató un `qota_q` huérfano de un
-mutante que se había quedado en bucle).
-
-**N5a · motor OTA — escrito y con pruebas locales verdes, mutación analizada, falta cerrar:**
-* `components/flex_ota/{CMakeLists.txt, include/flex_ota.h, src/flex_ota_model.c, src/flex_ota.c}`: modelo puro (JSON mínimo, versiones, MD5
-  utilizable, textos, lectura del manifiesto con la clave propia `flex_os_ultra_idf`) + servicio sobre `flex_ota_ops_t` (HTTP, flash, tiempo,
-  red, pendiente de saludo, reinicio, cerrojo). Sin `flex_ota_port.c` todavía: `flex_ota_port_cfg/ops` débiles devuelven NULL (OTA inerte).
-* Pruebas: `tests/host/test_ota.c` + `tests/host/ref/ref_ota_main.cpp` (+ `ref/sdkconfig.h`) frente a `FlexOS_OTA.cpp` EXTRAÍDO en sus cuatro
-  configuraciones (CA fijado / firma + antirretroceso / sin CA / sin CA inseguro). `run.sh`, `test_main.c`, `flex_test.h` ya cableados.
-  Último resultado medido con el runner rápido: `checks=50185 fails=0` bajo ASan/UBSan y TSan. **La batería completa (`tools/run_tests.sh`) NO se
-  ha ejecutado desde este cableado.**
-* Mutación (`docs/wip_n5/mutacion_N5a.log`): `flex_ota_model.c` 50 mutantes → 29 muertos, 13 no compilan, **8 sobreviven**; `flex_ota.c` 90 →
-  38 muertos, 28 no compilan, **24 sobreviven**. Análisis hecho de los 8 del modelo (todos equivalentes o cubiertos por el parche pendiente):
-  línea 20 (`>`→`>=` y `kl-2`: guarda redundante con el `r < end` posterior; el `kl-2` solo se ve como lectura de más con ASan → lo mata el test de
-  bloque exacto del parche), línea 33 (`p = q + 2`: comilla suelta delante de una clave → test `ODD` del parche), línea 291 (`md5 - 2`: hace falta
-  un md5 más largo que el buffer → generador del parche), línea 75 (`p >= end` → `p > end`: solo se ve con `*end == '"'` → test directo del
-  parche), líneas 94 y 244 (equivalentes: el bucle acaba igual / un array más grande). **Los 24 de `flex_ota.c` NO están analizados todavía**: los
-  `strncpy(... sizeof - 2)` y `buf[49]` se matan con el mismo generador de campos largos del parche; hay que revisar a mano `len <= 0`→`< 0`
-  (línea 249), los límites de `FLEX_OTA_MIN_BIN/MAX_BIN` (254), `want >= total - written` (287/288), `code <= 0` (131), `busy && !has` (445),
-  `!o && !c` (502), el reloj de atasco `>=` (337) y `while (n < sizeof - 2)` (161).
-* **Parche de pruebas pendiente (NO aplicado):** `docs/wip_n5/patch_ota_tests.py` (edita `tests/host/test_ota.c`: campos más largos que los buffers
-  —md5 80, url 260, sig 200, changelog 600—, `t_json_edges` con bloques exactos del heap bajo ASan, comillas sueltas y `json_str` con `p == end`).
-  Aplicarlo con `python3 docs/wip_n5/patch_ota_tests.py`, re-ejecutar el runner (`docs/wip_n5/qota.sh`, copiarlo a `/tmp/claude-0/sp/` junto con
-  `automut.py` y `ota_names.txt`) y repetir la mutación sobre los supervivientes. NUNCA editar `flex_ota*.c`/`test_ota.c` mientras corra `automut.py`.
-
-**N5b · interfaz LVGL — escrita, COMPILA en el simulador, escena creada pero NUNCA EJECUTADA:**
-* `components/flex_ui/src/shell/flex_ota_ui.{c,h}`: aviso flotante (entra deslizando, 9 s, deslizar hacia abajo lo descarta, solo en el escritorio),
-  modal del changelog (velo opaco, scroll, Cancelar / Actualizar ahora), pantalla de instalación (modal: Atrás/Inicio/Recientes no hacen nada; Cancelar
-  solo en CONNECTING/DOWNLOADING; error con "Entendido"), Ajustes > Actualizaciones; gesto "atrás" a la derecha; `flex_power_autolock_vetoed()` fuerte
-  (sin bloqueo automático con OTA ocupada o capa a pantalla completa, Lock.h:381); `flex_ota_open_settings`, `flex_ota_ui_install_started`,
-  `flex_ota_auto_check_tick()` desde el temporizador de 33 ms (`flex_ota_ui_start()` desde `flex_shell_start`).
-* Pegamento ya editado: `flex_shell.c` (Atrás/Inicio/Recientes/bloqueo), `flex_qs.c` (mosaico `FLEX_QS_OTA`: siempre visible, "Versión x", toca →
-  cierra la cortina y abre la capa; `can_open` vetado con la capa a pantalla completa), `flex_drawer.c` (caja de apps vetada con cualquier capa
-  OTA), `app_settings.c` (`flex_app_settings_refresh()` al cerrar la capa), `flex_factory_ui.c` (vista `V_BLOCKED`: "Actualizacion en curso /
-  Espera a que termine para restablecer", se retira a los 2,2 s o con un toque), `components/flex_ui/CMakeLists.txt` (`PRIV_REQUIRES flex_ota`),
-  `sim/CMakeLists.txt` (fuentes e include de `flex_ota`), `sim/scenes/scene_ota.c` registrada en `scenes.c` como `ota`.
-* **Pendiente:** ejecutar la escena `ota` (`sim/build/flexos_ui_sim sim/out ota`; ¿el simulador se compiló alguna vez con el `flex_ota.c` limpio?: el
-  último build del simulador pudo enlazar un mutante, **recompilar de cero**), corregir lo que falle, verificar que `V_BLOCKED` de Restablecer tiene
-  su comprobación en la escena (no la tiene aún), mutantes del pegamento (escena `ota`), comprobar que `lv_obj_delete` dentro de los callbacks de
-  botón es seguro (se rehace la capa desde `btn_click`) y ejecutar la batería completa.
-
-**N5c · transporte de la placa — NO empezado (solo diseñado):** `components/flex_ota/src/flex_ota_port.c` (esp_http_client con `cert_pem` fijado y
-timeout de lectura de 1 s tras las cabeceras, `esp_ota_begin/write/end/set_boot_partition`, MD5 con mbedtls en streaming comparado con el del manifiesto
-en `upd_end`, NVS `flexota`/`pend` para el saludo, `flex_reset_reboot()` como reinicio, mutex, tarea trabajadora que llama a `flex_ota_work()`),
-`PROJECT_VER "1.0.0"` en el `CMakeLists.txt` raíz (la versión local sale de `esp_app_get_description()` y debe ser `x.y.z` estricta), CA raíz
-opcional embebida desde `components/flex_ota/certs/ota_root_ca.pem` (vacía = `ERR_NO_CA`, como Arduino con `FLEXOS_OTA_ROOT_CA` vacío), confirmación
-de arranque con `esp_ota_mark_app_valid_cancel_rollback()` ~15 s tras un arranque sano (el rollback del bootloader ya está en `sdkconfig.defaults`),
-`flex_ota` en `main/CMakeLists.txt` y `flex_ota_begin()` en `app_main`. La tabla de particiones candidata A ya tiene `ota_0`/`ota_1` + `otadata`:
-**no se ha tocado ninguna partición ni se ha flasheado nada.** N5c cuenta 0 hasta la placa.
-
-**Al reanudar, en este orden:** (1) `git status` y confirmar que `flex_ota.c` no tiene ningún mutante (`grep -n "FLEX_OTA_CONNECTING ||" components/flex_ota/src/flex_ota.c`
-debe ser una sola `||` encadenada, sin `&&`); (2) aplicar el parche de pruebas y cerrar N5a (mutantes de `flex_ota.c`); (3) recompilar el simulador
-de cero y ejecutar/arreglar la escena `ota`; (4) N5c; (5) `tools/run_tests.sh` + `tools/build.sh --rev v3`; (6) partir la fila N5 del inventario
-(N5a ≈14 con Impl 1 / N5b ≈11 / N5c ≈8 con Impl 0 hasta la placa), actualizar informe, requisitos de hardware y `python3 tools/progress.py`;
-(7) commit sin la etiqueta WIP y `git push`. Luego, sin repetir nada: N3, Modo PC (A05) y el resto del inventario.
-
 ### Estado para reanudar (tras la hora por red, N1a)
 
 * **Rama:** `flexos-esp-idf`. **Último commit:** el de la hora por red ("Hora por red (N1a): ..."), subido a `origin/flexos-esp-idf`; sin

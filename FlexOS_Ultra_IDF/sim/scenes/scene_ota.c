@@ -663,6 +663,7 @@ bool scene_ota_run(void)
     sim_run(300);
     CHK(flex_factory_active() && flex_factory_view() == 6);
     sim_shot("ota_restablecer_bloqueado");
+    CHK(golden("restablecer_bloqueado", 0x00000000u, 0xd617d4bau, 0, 300, 479, 500));   // el aviso: sus dos lineas, su tamano y su posicion
     sim_run(2400);
     CHK(!flex_factory_active());   // se retira solo a los 2,2 s
     row(9);
@@ -953,6 +954,34 @@ bool scene_ota_run(void)
             flex_ota_ui_close_now();
             CHK(ov() == OV_NONE);
         }
+    }
+
+    // ---- 17) la instalacion es modal tambien con una app delante: Inicio, Recientes y Atras no hacen nada; al terminar, Inicio vuelve a cerrar la app ----------
+    {
+        flex_ota_service_reset();
+        flex_app_open(IC_AJUSTES, NULL);
+        sim_run(800);
+        CHK(flex_shell_state() == FLEX_SH_APP);
+        flex_ota_test_force(FLEX_OTA_DOWNLOADING, FLEX_OTA_ERR_NONE, "1.9.0");
+        flex_ota_test_progress(5, 5000, 100000, 1000);
+        flex_ota_ui_install_started();
+        sim_run(200);
+        CHK(ov() == OV_PROGRESS);
+        flex_sys_home();
+        sim_run(300);
+        CHK(flex_shell_state() == FLEX_SH_APP && ov() == OV_PROGRESS);
+        flex_sys_recents();
+        sim_run(300);
+        CHK(flex_shell_state() == FLEX_SH_APP && ov() == OV_PROGRESS);
+        flex_sys_back();
+        sim_run(300);
+        CHK(flex_shell_state() == FLEX_SH_APP && ov() == OV_PROGRESS);
+        flex_ota_service_reset();
+        sim_run(200);
+        CHK(ov() == OV_NONE);
+        flex_sys_home();
+        sim_run(700);
+        CHK(flex_shell_state() == FLEX_SH_HOME);
     }
 
     flex_ota_set(NULL, NULL);
