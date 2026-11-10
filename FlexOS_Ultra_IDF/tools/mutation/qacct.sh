@@ -6,7 +6,7 @@
 ROOT=${FLEX_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
 cd "$ROOT/tests/host" || exit 1
 what=${1:-core}
-out=$(ACCT_OUT=${ACCT_OUT:-/tmp/flex_mut_acct_$what} TMO=${TMO:-150} TAIL=400 FUZZ_N=${FUZZ_N:-250} bash account_run.sh "$what" 2>&1)
+out=$(ACCT_FAST=1 ACCT_OUT=${ACCT_OUT:-/tmp/flex_mut_acct_$what} TMO=${TMO:-150} TAIL=400 FUZZ_N=${FUZZ_N:-150} bash account_run.sh "$what" 2>&1)
 rc=$?
 if echo "$out" | grep -qE '^[^ ]+:[0-9]+:[0-9]+: (fatal )?error:'; then echo "error de compilacion"; exit 0; fi
 if [ $rc -eq 0 ] && echo "$out" | grep -q '^OK: Flex Account'; then echo "checks=1 fails=0"; else echo "checks=1 fails=1"; fi

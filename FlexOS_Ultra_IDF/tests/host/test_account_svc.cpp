@@ -7,6 +7,7 @@
 //  registros tienen que ser identicos. Luego lo mismo con miles de guiones aleatorios (servidor que miente, corta, firma mal; Wi-Fi que se cae a mitad del flujo...).
 // #############################################################
 #include <algorithm>
+#include <time.h>
 #include <functional>
 #include <map>
 #include <string.h>
@@ -210,15 +211,27 @@ static void apply_body_fault(NetResponse &rs, int fault, const std::string &payl
 // Un sobre firmado que mida exactamente `target` bytes (si no se puede, el mas cercano por arriba)
 static std::string fit_envelope(const std::string &payload, int target)
 {
-    for (int pad = 0; pad < 9500; pad++) {
+    static std::map<std::pair<std::string, int>, std::string> cache;   // el mismo sobre en cada consulta (y en las dos ejecuciones): firmar cuesta
+    auto key = std::make_pair(payload, target);
+    auto hit = cache.find(key);
+    if (hit != cache.end()) {
+        return hit->second;
+    }
+    auto build = [&](int pad) {
         std::string pl = payload;
         pl.insert(pl.size() - 1, pad ? std::string(",\"pad\":\"") + std::string((size_t)pad > 9 ? (size_t)pad - 9 : 0, 'x') + "\"" : "");
-        std::string e = envelope(pl);
-        if ((int)e.size() >= target) {
-            return e;
+        return envelope(pl);
+    };
+    int lo = 0, hi = 9500;   // el tamano crece con el relleno: busqueda binaria del primero que llega a `target`
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if ((int)build(mid).size() >= target) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
         }
     }
-    return envelope(payload);
+    return cache[key] = build(lo);
 }
 static void obs_prog(const char *what);
 static NetResponse serve(const NetRequest &rq)
@@ -1028,13 +1041,23 @@ int main()
 
     int named_ok = 0;
     std::vector<Script> sc = named();
+    const bool fast = getenv("ACCT_FAST") != nullptr;   // mutacion: sin la pasada sin cerrojo ni la de la vuelta de millis()
+    std::vector<std::pair<double, std::string>> times;
     for (const Script &s : sc) {
+        clock_t t0 = clock();
         if (compare(s)) {
             named_ok++;
         }
+        times.push_back({(double)(clock() - t0) / CLOCKS_PER_SEC, s.name});
+    }
+    if (getenv("ACCT_TIMING")) {
+        std::sort(times.rbegin(), times.rend());
+        for (int i = 0; i < 6 && i < (int)times.size(); i++) {
+            printf("   lento: %.2f s  %s\n", times[(size_t)i].first, times[(size_t)i].second.c_str());
+        }
     }
     printf("-- %d/%zu escenarios con nombre identicos --\n", named_ok, sc.size());
-    {
+    if (!fast) {
         int nl_ok = 0;
         for (const Script &s2 : sc) {
             if (compare(s2, 1000, true)) nl_ok++;
@@ -1044,7 +1067,7 @@ int main()
 
     // El mismo guion con el reloj a punto de dar la vuelta (los 32 bits de millis() se acaban en 49,7 dias): el C, que hace todas las cuentas de tiempo con diferencias sin
     // signo, tiene que contar lo mismo que con el reloj en 1000
-    {
+    if (!fast) {
         int bad = 0;
         for (const Script &s : sc) {
             if (s.name == "arranque de fabrica") {

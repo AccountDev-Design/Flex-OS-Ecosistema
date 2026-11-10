@@ -439,7 +439,9 @@ bool account_scene_link_cancelled(void)
 {
     bool pending = flex_account_state() == FLEX_ACCOUNT_REQUESTING;
     flex_account_step();   // la tarea de fondo: el enlace pedido se cancela antes de abrir ninguna conexion
-    return pending && flex_account_state() != FLEX_ACCOUNT_REQUESTING && flex_account_state() != FLEX_ACCOUNT_CODE_READY && account_fake_count(AF_POSTS) == 0;
+    bool cancelled = pending && flex_account_state() != FLEX_ACCOUNT_REQUESTING && flex_account_state() != FLEX_ACCOUNT_CODE_READY && account_fake_count(AF_POSTS) == 0;
+    net(false);   // la red de la escena que siga no es la de la cuenta
+    return cancelled;
 }
 
 bool scene_account_run(void)
@@ -706,6 +708,7 @@ bool scene_account_run(void)
     CHK(!tap_open(240, 575) && s_oobe_done == 2);   // "Continuar"
     CHK(!open_() && !shown("Flex Account") && !flex_account_ui_shown_part("Flex"));   // cerrada: no hay texto que encontrar
     CHK(flex_account_ui_bar_width() == -1);
+    net(false);   // el mundo vuelve a como estaba (sin red) para las escenas que siguen
     unlock_and_clean();
     return ok;
 }
