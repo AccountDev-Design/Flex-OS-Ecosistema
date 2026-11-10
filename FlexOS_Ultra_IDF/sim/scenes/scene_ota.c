@@ -24,6 +24,8 @@
 void sim_net_online(bool on);
 const uint16_t *sim_fb(void);
 bool flex_power_autolock_vetoed(void);
+bool flex_factory_active(void);
+int flex_factory_view(void);
 void flex_sys_back(void);
 void flex_sys_home(void);
 void flex_sys_recents(void);
@@ -195,6 +197,48 @@ static void unlock_and_clean(void)
     sim_run(200);
 }
 
+// ---- Ajustes (como en la escena `ntp`) ----
+static bool wait_view(int v)
+{
+    for (int i = 0; i < 80; i++) {
+        if (flex_app_settings_view() == v && !flex_app_settings_animating()) {
+            return true;
+        }
+        sim_run(20);
+    }
+    return false;
+}
+static void settings_general(void)
+{
+    flex_app_open(IC_AJUSTES, NULL);
+    sim_run(700);
+    int x, y;
+    if (flex_app_settings_card_xy(0, &x, &y)) {
+        sim_touch(x, y, true);
+        sim_run(30);
+        sim_touch(x, y, false);
+        sim_run(400);
+    }
+}
+static void settings_close(void)
+{
+    flex_app_terminate_ex(IC_AJUSTES, true);
+    sim_run(300);
+}
+static void row(int i)
+{
+    int x, y;
+    if (!flex_app_settings_row_xy(i, &x, &y) || y > 700 || y < 140) {
+        sim_drag(240, 600, 240, 250, 200);
+        sim_run(100);
+    }
+    if (flex_app_settings_row_xy(i, &x, &y)) {
+        sim_tap(x, y);
+        sim_run(150);
+    }
+}
+static bool has(const char *t) { return flex_app_settings_shown(t); }
+
 static bool shown(const char *t) { return flex_ota_ui_shown(t); }
 static int ov(void) { return flex_ota_ui_overlay(); }
 static bool tap_btn(int id)
@@ -207,10 +251,40 @@ static bool tap_btn(int id)
     return true;
 }
 static uint16_t px(int x, int y) { return sim_fb()[(size_t)y * 480 + (size_t)x]; }
+// Huellas de referencia de cada pantalla: la de los objetos (geometria, colores, textos) y la de los pixeles (glifos incluidos). Cualquier cambio de una medida, de un
+// color o de una cadena de la interfaz las cambia: la escena no solo mira que "haya" una capa, mira que sea ESTA. Se regeneran a proposito al cambiar el diseno
+// (la escena imprime las nuevas con "GOLDEN"; con los valores a 0 la comprobacion falla).
+static uint32_t crc_fb(int x0, int y0, int x1, int y1)
+{
+    uint32_t c = 0xFFFFFFFFu;
+    const uint16_t *fb = sim_fb();
+    for (int y = y0; y <= y1; y++) {
+        for (int x = x0; x <= x1; x++) {
+            uint16_t v = fb[(size_t)y * 480 + (size_t)x];
+            for (int b = 0; b < 2; b++) {
+                c ^= (uint32_t)((v >> (8 * b)) & 0xffu);
+                for (int k = 0; k < 8; k++) {
+                    c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
+                }
+            }
+        }
+    }
+    return c;
+}
+static bool golden(const char *name, uint32_t want_tree, uint32_t want_fb, int x0, int y0, int x1, int y1)
+{
+    uint32_t t = flex_ota_ui_tree_crc(), f = crc_fb(x0, y0, x1, y1);
+    if (t != want_tree || f != want_fb) {
+        printf("ota: GOLDEN %s tree=0x%08xu fb=0x%08xu (esperado tree=0x%08xu fb=0x%08xu)\n", name, t, f, want_tree, want_fb);
+        return false;
+    }
+    return true;
+}
 static uint16_t c565(int r, int g, int b) { return lv_color_to_u16(lv_color_make((uint8_t)r, (uint8_t)g, (uint8_t)b)); }
 
 // gancho de la descarga: la instalacion a medias, vista desde fuera
 static bool g_mid_ok;
+static int g_gold_mid;   // la huella de la pantalla de instalacion solo se mira en la instalacion buena (al 40 %)
 static void hook_mid(void)
 {
     bool ok = true;
@@ -218,17 +292,20 @@ static void hook_mid(void)
     flex_ota_get(&i);
     sim_run(60);
     CHK(ov() == OV_PROGRESS && i.state == FLEX_OTA_DOWNLOADING);
-    CHK(shown("Descargando"));
+    CHK(shown("Descargando..."));
     CHK(i.percent >= 25 && i.percent <= 60);
     {
         char p[8];
         snprintf(p, sizeof(p), "%u%%", (unsigned)i.percent);
         CHK(shown(p));
     }
-    CHK(shown("/s"));   // la velocidad
+    CHK(flex_ota_ui_shown_part("KB/s"));   // la velocidad
     int x, y;
     CHK(flex_ota_ui_btn_xy(FLEX_OTA_BT_CANCEL, &x, &y));   // se puede cancelar: aun no se ha tocado la particion de arranque
     sim_shot("ota_instalando");
+    if (g_gold_mid) {
+        CHK(golden("instalando", 0xbf43a7bau, 0xf89096b5u, 0, 0, 479, 799));
+    }
     // modal: Atras, Inicio y Recientes no hacen nada; el bloqueo automatico no actua
     flex_sys_back();
     flex_sys_home();
@@ -291,6 +368,7 @@ bool scene_ota_run(void)
     CHK(shown("Actualizacion de software") && shown("El sistema esta al dia") && shown("Flex OS Ultra 1.0.0") && shown("Buscar actualizacion"));
     CHK(flex_power_autolock_vetoed());   // una capa a pantalla completa: el bloqueo automatico no actua (Lock.h:381)
     sim_shot("ota_ajustes_idle");
+    CHK(golden("ajustes_idle", 0x3a1f1243u, 0xe5640b5bu, 0, 0, 479, 799));
 
     // ---- 2) sin Wi-Fi: el error exacto en la propia pagina ----------------------------------------------------------------------------------------
     W.net = false;
@@ -298,6 +376,7 @@ bool scene_ota_run(void)
     sim_run(200);
     CHK(shown("No se pudo comprobar") && shown(flex_ota_err_text(FLEX_OTA_ERR_NO_WIFI)) && shown("Buscar actualizacion"));
     sim_shot("ota_ajustes_error");
+    CHK(golden("ajustes_error", 0xfeeefc03u, 0xb23b8301u, 0, 0, 479, 799));
 
     // ---- 3) con red y una version nueva: busca, y la pagina muestra la version, el tamano y las novedades; los botones se cambian ------------------
     W.net = true;
@@ -318,22 +397,39 @@ bool scene_ota_run(void)
     CHK(shown("Actualizacion disponible") && shown("Version disponible") && shown("1.2.0") && shown("Tamano") && shown("1,2 MB") && shown("Novedades"));
     CHK(shown("Buscar") && shown("Actualizar ahora"));
     sim_shot("ota_ajustes_disponible");
+    CHK(golden("ajustes_disponible", 0x6e78e7a8u, 0x67a07f35u, 0, 0, 479, 799));
 
     // ---- 4) Atras cierra la pagina; en el escritorio sale el aviso (una vez por version), entra deslizando y se queda donde debe ------------------
-    CHK(tap_btn(FLEX_OTA_BT_BACK));
-    sim_run(60);
-    CHK(ov() == OV_TOAST);
+    flex_sys_back();   // (el boton de la flecha se prueba mas abajo: aqui se necesita medir la entrada desde el primer cuadro)
     {
-        int y0 = flex_ota_ui_card_y();
-        sim_run(60);
-        int y1 = flex_ota_ui_card_y();
-        CHK(y0 > 624 && y1 < y0);   // viene de abajo
-        sim_run(450);
-        CHK(flex_ota_ui_card_y() == 800 - 80 - 96);
+        // el aviso aparece solo (en el siguiente cuadro) y entra deslizando desde abajo: se muestrea cuadro a cuadro
+        int first = -1, last = -1, prev = 10000;
+        bool mono = true;
+        uint32_t t0 = lv_tick_get();
+        while (lv_tick_get() - t0 < 700) {
+            sim_run(4);
+            if (ov() != OV_TOAST) {
+                continue;
+            }
+            int y = flex_ota_ui_card_y();
+            if (first < 0) {
+                first = y;
+            }
+            mono = mono && y <= prev;
+            prev = y;
+            last = y;
+        }
+        printf("ota: aviso first=%d last=%d mono=%d\n", first, last, (int)mono);
+        CHK(first > 800 - 80 - 96 + 100);
+        CHK(last == 800 - 80 - 96);
+        CHK(mono);
     }
+    CHK(ov() == OV_TOAST);
+    CHK(flex_ota_ui_card_y() == 800 - 80 - 96);
     CHK(shown("Nueva actualizacion disponible") && shown("Flex OS Ultra 1.2.0"));
     CHK(!flex_power_autolock_vetoed());   // la tarjeta flotante no cuenta
     sim_shot("ota_aviso");
+    CHK(golden("aviso", 0x900822b0u, 0x5b7f5d81u, 8, 616, 471, 730));
     sim_drag(240, 500, 240, 200, 200);   // con el aviso visible la caja de aplicaciones no se abre
     sim_run(300);
     CHK(!flex_drawer_is_open());
@@ -378,19 +474,22 @@ bool scene_ota_run(void)
     sim_run(500);
     CHK(ov() == OV_CHANGELOG);
     CHK(shown("Actualizacion de software") && shown("Flex OS Ultra  1.4.0") && shown("Version actual: 1.0.0") && shown("Tamano de la descarga: 1,2 MB"));
-    CHK(shown("Cancelar") && shown("Actualizar ahora") && shown("- Cambio 01"));
+    CHK(shown("Cancelar") && shown("Actualizar ahora") && flex_ota_ui_shown_part("- Cambio 01"));
     {
         bool dark = flex_look()->dark;
         CHK(px(5, 5) == (dark ? c565(8, 10, 16) : c565(228, 232, 240)));   // velo OPACO
         CHK(px(5, 790) == px(5, 5));
+        CHK(px(80, 756) == px(5, 5) && px(240, 756) == px(5, 5) && px(400, 756) == px(5, 5));   // sin barra de navegacion: la capa lo ocupa todo
     }
     CHK(flex_power_autolock_vetoed());
     sim_shot("ota_changelog");
+    CHK(golden("changelog", 0x42461376u, 0x40a39a09u, 0, 0, 479, 799));
     CHK(flex_ota_ui_log_scroll() == 0 && flex_ota_ui_log_max() > 0);
     sim_drag(240, 400, 240, 250, 250);
     sim_run(300);
     CHK(flex_ota_ui_log_scroll() > 0);
     sim_shot("ota_changelog_scroll");
+    CHK(golden("changelog_scroll", 0x91b856d4u, 0x14af67a4u, 0, 0, 479, 799));
     // la pantalla de debajo no recibe nada: ni la cortina ni la caja de aplicaciones
     sim_drag(240, 10, 240, 520, 200);
     sim_run(300);
@@ -405,6 +504,11 @@ bool scene_ota_run(void)
     CHK(ov() == OV_SETTINGS);
     sim_drag(100, 300, 420, 300, 150);
     sim_run(300);
+    CHK(ov() == OV_NONE);
+    flex_ota_open_settings();   // y la flecha de la cabecera
+    sim_run(100);
+    CHK(ov() == OV_SETTINGS && tap_btn(FLEX_OTA_BT_BACK));
+    sim_run(100);
     CHK(ov() == OV_NONE);
 
     // ---- 7) instalar y cancelar a mitad: el error exacto, "El equipo no se ha modificado." y la flash se aborta --------------------------------------
@@ -431,6 +535,7 @@ bool scene_ota_run(void)
     CHK(ov() == OV_PROGRESS);
     CHK(shown("No se pudo actualizar") && shown(flex_ota_err_text(FLEX_OTA_ERR_CANCELLED)) && shown("El equipo no se ha modificado.") && shown("Entendido"));
     sim_shot("ota_error");
+    CHK(golden("error", 0xb7a83f03u, 0x5fbce6b8u, 0, 0, 479, 799));
     flex_sys_back();   // el error no es modal: Atras sale
     sim_run(100);
     CHK(ov() == OV_NONE);
@@ -448,6 +553,7 @@ bool scene_ota_run(void)
     sim_run(100);
     CHK(shown("Actualizar ahora"));
     W.hook = hook_mid;
+    g_gold_mid = 1;
     W.hook_at = (uint32_t)((uint64_t)BIN_LEN * 40 / 100);
     W.hooks = 0;
     g_mid_ok = false;
@@ -474,6 +580,7 @@ bool scene_ota_run(void)
     }
     CHK(flex_power_autolock_vetoed());
     sim_shot("ota_reiniciando");
+    CHK(golden("reiniciando", 0x2818da09u, 0xad96a8a7u, 0, 0, 479, 799));
     flex_sys_back();
     flex_sys_home();
     sim_run(100);
@@ -516,6 +623,142 @@ bool scene_ota_run(void)
         CHK(i.state == FLEX_OTA_UP_TO_DATE || i.state == FLEX_OTA_AVAILABLE);
     }
     sim_run(100);
+
+    // ---- 11) Ajustes > General > Actualizaciones: la fila dice el estado, lleva a la capa, y al cerrarla se vuelve a leer ----------------------------
+    flex_ota_service_reset();
+    W.net = true;
+    publish("1.6.0");
+    settings_general();
+    CHK(wait_view(1));
+    CHK(has("Actualizaciones") && has("Buscar actualizacion"));
+    row(7);
+    sim_run(300);
+    CHK(ov() == OV_SETTINGS);
+    CHK(tap_btn(FLEX_OTA_BT_CHECK));
+    CHK(pump_until(FLEX_OTA_AVAILABLE, 3000));
+    sim_run(200);
+    CHK(ov() == OV_SETTINGS && shown("1.6.0"));
+    CHK(tap_btn(FLEX_OTA_BT_BACK));
+    sim_run(300);
+    CHK(ov() == OV_NONE);   // con una app delante no sale el aviso (solo en el escritorio)
+    CHK(has("1.6.0 disponible"));   // la fila se ha vuelto a leer al cerrar la capa
+    sim_shot("ota_fila_ajustes");
+    // Restablecer con una actualizacion en marcha: solo el aviso, que se retira solo
+    flex_ota_service_reset();
+    flex_ota_request_check();   // CHECKING, sin que el trabajador la ejecute: la OTA esta ocupada
+    CHK(flex_ota_busy());
+    settings_close();
+    settings_general();
+    CHK(wait_view(1));
+    row(9);
+    sim_run(300);
+    CHK(flex_factory_active() && flex_factory_view() == 6);
+    sim_shot("ota_restablecer_bloqueado");
+    sim_run(2400);
+    CHK(!flex_factory_active());   // se retira solo a los 2,2 s
+    row(9);
+    sim_run(300);
+    CHK(flex_factory_active() && flex_factory_view() == 6);
+    sim_tap(240, 400);   // o con un toque
+    sim_run(400);
+    CHK(!flex_factory_active());
+    pump(500);
+    settings_close();
+    // sin actualizacion en marcha, Restablecer abre su asistente de siempre
+    settings_general();
+    CHK(wait_view(1));
+    row(9);
+    sim_run(300);
+    CHK(flex_factory_active() && flex_factory_view() == 1);
+    sim_tap(129, 733);   // "Cancelar": vuelve a Ajustes sin haber tocado nada
+    sim_run(500);
+    CHK(!flex_factory_active());
+    settings_close();
+
+    flex_sys_home();
+    sim_run(600);
+    // ---- 12) el aviso solo se abre con un TOQUE: arrastrarlo un poco y soltar no abre el changelog; Atras no cierra el aviso ---------------------------------
+    flex_ota_service_reset();
+    W.net = true;
+    snprintf(W.changelog, sizeof(W.changelog), "Mejoras generales\\n- Mas rapido\\n- Menos consumo");
+    publish("1.7.0");
+    flex_ota_request_check();
+    CHK(pump_until(FLEX_OTA_AVAILABLE, 3000));
+    sim_run(700);
+    CHK(ov() == OV_TOAST && flex_ota_ui_card_y() == 800 - 80 - 96);
+    sim_drag(240, 660, 240, 680, 120);   // 20 px hacia abajo: ni descarta el aviso ni lo "toca"
+    sim_run(600);
+    CHK(ov() == OV_TOAST);
+    flex_ota_ui_back();   // la tarjeta flotante no es una capa de la que se salga con Atras
+    flex_sys_back();
+    sim_run(100);
+    CHK(ov() == OV_TOAST);
+    sim_drag(240, 640, 240, 700, 120);   // 60 px: se descarta
+    sim_run(600);
+    CHK(ov() == OV_NONE);
+    // arrastrar hacia arriba y soltar tampoco lo abre
+    flex_ota_service_reset();
+    publish("1.7.1");
+    flex_ota_request_check();
+    CHK(pump_until(FLEX_OTA_AVAILABLE, 3000));
+    sim_run(700);
+    CHK(ov() == OV_TOAST);
+    sim_drag(240, 690, 240, 665, 120);
+    sim_run(400);
+    CHK(ov() == OV_TOAST);
+    CHK(tap_btn(FLEX_OTA_BT_TOAST));   // un toque de verdad si lo abre
+    sim_run(500);
+    CHK(ov() == OV_CHANGELOG);
+    flex_sys_back();
+    sim_run(300);
+    CHK(ov() == OV_NONE);
+
+    // ---- 13) modo claro: los mismos colores de Arduino con su paleta clara --------------------------------------------------------------------------------
+    flex_theme_set_dark(false);
+    sim_run(300);
+    flex_ota_service_reset();
+    W.net = true;
+    publish("1.7.2");
+    flex_ota_open_settings();
+    sim_run(300);
+    CHK(golden("ajustes_idle_claro", 0xe81d0ebfu, 0x88b1be35u, 0, 0, 479, 799));
+    CHK(tap_btn(FLEX_OTA_BT_CHECK));
+    CHK(pump_until(FLEX_OTA_AVAILABLE, 3000));
+    sim_run(400);
+    CHK(golden("ajustes_disponible_claro", 0xa7813c25u, 0x87e2727fu, 0, 0, 479, 799));
+    flex_sys_back();
+    sim_run(700);
+    CHK(ov() == OV_TOAST && flex_ota_ui_card_y() == 800 - 80 - 96);
+    CHK(golden("aviso_claro", 0x486b5e49u, 0x432454bbu, 8, 616, 471, 730));
+    CHK(tap_btn(FLEX_OTA_BT_TOAST));
+    sim_run(600);
+    CHK(ov() == OV_CHANGELOG);
+    CHK(golden("changelog_claro", 0xcdfab3d6u, 0x7ec245cau, 0, 0, 479, 799));
+    CHK(tap_btn(FLEX_OTA_BT_CANCEL));
+    sim_run(300);
+    CHK(ov() == OV_NONE);
+    flex_ota_test_force(FLEX_OTA_ERROR, FLEX_OTA_ERR_CANCELLED, "1.7.2");
+    flex_ota_ui_install_started();   // la pantalla de instalacion, ya en su rama de error
+    sim_run(300);
+    CHK(ov() == OV_PROGRESS);
+    CHK(golden("error_claro", 0x2d50d24au, 0x86e3a9c8u, 0, 0, 479, 799));
+    CHK(tap_btn(FLEX_OTA_BT_CLOSE));
+    sim_run(300);
+    CHK(ov() == OV_NONE);
+    flex_ota_test_force(FLEX_OTA_CONNECTING, FLEX_OTA_ERR_NONE, "1.7.2");
+    flex_ota_ui_install_started();
+    sim_run(300);
+    CHK(ov() == OV_PROGRESS);
+    CHK(golden("conectando_claro", 0x2302dddbu, 0x5d3024afu, 0, 0, 479, 799));
+    flex_ota_test_force(FLEX_OTA_ERROR, FLEX_OTA_ERR_TLS, "1.7.2");   // el error sustituye a la fase sin cerrar la capa
+    sim_run(300);
+    CHK(ov() == OV_PROGRESS && shown("No se pudo actualizar") && shown(flex_ota_err_text(FLEX_OTA_ERR_TLS)));
+    flex_ota_service_reset();   // el motor ya no instala: la pantalla de instalacion no se queda colgada
+    sim_run(300);
+    CHK(ov() == OV_NONE);
+    flex_theme_set_dark(true);
+    sim_run(300);
+
     flex_ota_set(NULL, NULL);
     flex_ota_service_reset();
     flex_cfg_set_i32("autolockms", 60000);

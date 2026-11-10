@@ -490,6 +490,21 @@ void flex_ota_prime(const char *remote, const char *url, const char *md5, uint32
     ulk(o);
 }
 
+void flex_ota_test_force(flex_ota_state_t st, flex_ota_err_t err, const char *remote)
+{
+    const flex_ota_ops_t *o = ops();
+    lk(o);
+    G.state = st;
+    G.error = err;
+    if (remote) {
+        strncpy(G.remote, remote, sizeof(G.remote) - 1);
+        G.remote[sizeof(G.remote) - 1] = 0;
+        strcpy(G.url, "https://x/fw.bin");
+        G.has_upd = true;
+    }
+    ulk(o);
+}
+
 bool flex_ota_work_pending(void)
 {
     return atomic_load(&s_cmd) != CMD_NONE;

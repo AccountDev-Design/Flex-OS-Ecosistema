@@ -46,7 +46,7 @@ static struct {
     uint8_t shown_pct;
     uint32_t shown_done, shown_bps;
     char toast_ver[FLEX_OTA_VER_MAX];
-    bool tdrag;
+    bool tdrag, tmoved;
     int ty0, builds;
     int btn_xy[8][2];
     bool btn_has[8];
@@ -235,11 +235,17 @@ static void toast_press_cb(lv_event_t *e)
     }
     if (c == LV_EVENT_PRESSED) {
         U.tdrag = true;
+        U.tmoved = false;
         U.ty0 = p.y;
-    } else if (c == LV_EVENT_PRESSING && U.tdrag && p.y - U.ty0 > 36 && !U.closing) {   // un deslizamiento hacia abajo lo descarta
-        U.tdrag = false;
-        U.closing = true;
-        U.close_t0 = lv_tick_get();
+    } else if (c == LV_EVENT_PRESSING && U.tdrag) {
+        if (p.y - U.ty0 > 16 || U.ty0 - p.y > 16) {
+            U.tmoved = true;   // ya no es un toque: soltar encima no abre el changelog
+        }
+        if (p.y - U.ty0 > 36 && !U.closing) {   // un deslizamiento hacia abajo lo descarta
+            U.tdrag = false;
+            U.closing = true;
+            U.close_t0 = lv_tick_get();
+        }
     } else if (c == LV_EVENT_RELEASED || c == LV_EVENT_PRESS_LOST) {
         U.tdrag = false;
     }
@@ -249,7 +255,7 @@ static void build_toast(void)
 {
     flex_ota_info_t i;
     flex_ota_get(&i);
-    U.root = box(flex_shell_screen(), OTA_M, H - OTA_TOAST_GAP - OTA_TOAST_H, W - 2 * OTA_M, OTA_TOAST_H);
+    U.root = box(flex_shell_screen(), OTA_M, H, W - 2 * OTA_M, OTA_TOAST_H);   // empieza justo bajo la pantalla (p = 0) y entra deslizando
     lv_obj_move_foreground(U.root);
     U.card = U.root;
     if (flex_look()->glass) {
@@ -305,7 +311,8 @@ static void build_modal(void)
     U.root = box(flex_shell_screen(), 0, 0, W, H);
     lv_obj_move_foreground(U.root);
     fill(U.root, dark() ? rgb(8, 10, 16) : rgb(228, 232, 240), 0);   // velo OPACO, como en Arduino
-    lv_obj_set_clickable(U.root, true);   // una capa a pantalla completa se queda TODO lo que le llegue
+    lv_obj_set_clickable(U.root, true);
+    lv_obj_set_gesture_bubble(U.root, false);   // el gesto lo recoge esta capa: no sube a la pantalla de debajo   // una capa a pantalla completa se queda TODO lo que le llegue
     lv_obj_add_event_cb(U.root, root_gesture_cb, LV_EVENT_GESTURE, NULL);
     int cw = W - 2 * OTA_M * 2;
     int ch = OTA_MODAL_H > H - 80 ? H - 80 : OTA_MODAL_H;
@@ -340,7 +347,7 @@ static void build_modal(void)
     int bw = (cw - 20 * 2 - 12) / 2;
     button(U.card, BT_CANCEL, 20, btn_y, bw, OTA_BTN_H, "Cancelar", false);
     button(U.card, BT_INSTALL, 20 + bw + 12, btn_y, bw, OTA_BTN_H, "Actualizar ahora", true);
-    for (int b = BT_CANCEL; b <= BT_INSTALL; b++) {   // las coordenadas guardadas son de la tarjeta: se pasan a la pantalla
+    for (int b = BT_INSTALL; b <= BT_CANCEL; b++) {   // las coordenadas guardadas son de la tarjeta: se pasan a la pantalla
         U.btn_xy[b][0] += cx;
         U.btn_xy[b][1] += cy;
     }
@@ -393,6 +400,7 @@ static void build_progress(void)
     lv_obj_move_foreground(U.root);
     fill(U.root, c_bg(), 0);
     lv_obj_set_clickable(U.root, true);
+    lv_obj_set_gesture_bubble(U.root, false);   // el gesto lo recoge esta capa: no sube a la pantalla de debajo
     int y_top = H / 2 - OTA_MODAL_H / 2;
     if (y_top < 60) {
         y_top = 60;
@@ -461,6 +469,7 @@ static void build_settings(void)
     lv_obj_move_foreground(U.root);
     fill(U.root, c_bg(), 0);
     lv_obj_set_clickable(U.root, true);
+    lv_obj_set_gesture_bubble(U.root, false);   // el gesto lo recoge esta capa: no sube a la pantalla de debajo
     lv_obj_add_event_cb(U.root, root_gesture_cb, LV_EVENT_GESTURE, NULL);
     // cabecera con flecha atras
     lv_obj_t *back = box(U.root, 4, 6, 60, 56);
@@ -553,6 +562,11 @@ static void show(ov_t ov)
     U.shown_st = FLEX_OTA_IDLE;
     U.builds++;
     flex_touch_drop_all();   // el toque que abrio la capa no se filtra
+    if (ov == OV_CHANGELOG || ov == OV_PROGRESS || ov == OV_SETTINGS) {
+        flex_navbar_set_ctx(FLEX_NAV_HIDDEN);   // una capa a pantalla completa lo ocupa todo, tambien la barra (flexOtaOwnsScreen: nadie mas dibuja)
+    } else {
+        flex_shell_nav_refresh();   // el aviso flotante vive sobre el escritorio con su barra
+    }
     switch (ov) {
     case OV_TOAST: build_toast(); break;
     case OV_CHANGELOG: build_modal(); break;
@@ -574,6 +588,7 @@ static void close_overlay(void)
     U.ov = OV_HIDDEN;
     U.closing = false;
     flex_touch_drop_all();
+    flex_shell_nav_refresh();
     flex_app_settings_refresh();   // la fila de Ajustes > Actualizaciones ya dice otra cosa
 }
 
@@ -582,7 +597,9 @@ static void btn_click(lv_event_t *e)
     int id = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_current_target_obj(e));
     switch (id) {
     case BT_TOAST:
-        show(OV_CHANGELOG);   // pulsar el aviso abre el modal
+        if (!U.tmoved && !U.closing) {
+            show(OV_CHANGELOG);   // pulsar el aviso abre el modal; arrastrarlo, no
+        }
         break;
     case BT_INSTALL:
         flex_ota_request_install();   // el servicio avisa a esta capa (flex_ota_ui_install_started) y se abre la pantalla de instalacion
@@ -675,6 +692,10 @@ static void tick_cb(lv_timer_t *t)
         break;
     }
     case OV_PROGRESS:
+        if (i.state == FLEX_OTA_IDLE || i.state == FLEX_OTA_CHECKING || i.state == FLEX_OTA_UP_TO_DATE || i.state == FLEX_OTA_AVAILABLE) {
+            close_overlay();   // el motor ya no esta instalando (nunca pasa en la placa sin un reinicio): la pantalla de instalacion no se queda colgada
+            return;
+        }
         // la pantalla de instalacion sigue al estado del motor: un cambio de fase rehace el marco; un avance solo cambia la banda dinamica
         if (i.state != U.shown_st) {
             show(OV_PROGRESS);
@@ -763,19 +784,77 @@ bool flex_ota_ui_btn_xy(int id, int *x, int *y)
     *y = U.btn_xy[id][1];
     return true;
 }
-static bool find_text(lv_obj_t *o, const char *t)
+static bool find_text(lv_obj_t *o, const char *t, bool part)
 {
-    if (lv_obj_check_type(o, &lv_label_class) && !strcmp(lv_label_get_text(o), t)) {
+    if (lv_obj_check_type(o, &lv_label_class) && (part ? strstr(lv_label_get_text(o), t) != NULL : !strcmp(lv_label_get_text(o), t))) {
         return true;
     }
     for (uint32_t k = 0; k < lv_obj_get_child_count(o); k++) {
-        if (find_text(lv_obj_get_child(o, (int32_t)k), t)) {
+        if (find_text(lv_obj_get_child(o, (int32_t)k), t, part)) {
             return true;
         }
     }
     return false;
 }
-bool flex_ota_ui_shown(const char *t) { return U.root && find_text(U.root, t); }
-int flex_ota_ui_card_y(void) { return U.card ? (int)lv_obj_get_y(U.card) : -1; }
+bool flex_ota_ui_shown(const char *t) { return U.root && find_text(U.root, t, false); }
+bool flex_ota_ui_shown_part(const char *t) { return U.root && find_text(U.root, t, true); }
+int flex_ota_ui_card_y(void)
+{
+    if (!U.card) {
+        return -1;
+    }
+    lv_obj_update_layout(U.card);   // la posicion recien puesta aun no esta calculada
+    return (int)lv_obj_get_y(U.card);
+}
 int flex_ota_ui_log_scroll(void) { return s_logview ? (int)lv_obj_get_scroll_y(s_logview) : -1; }
 int flex_ota_ui_log_max(void) { return s_logview ? (int)lv_obj_get_scroll_bottom(s_logview) + (int)lv_obj_get_scroll_y(s_logview) : -1; }
+
+#ifdef FLEX_SIM
+// Huella de la capa: geometria, visibilidad, colores y textos de CADA objeto (el trazo de los glifos va en la huella del framebuffer que calcula la escena).
+// Cualquier cambio de una medida, de un color o de una cadena la cambia.
+static uint32_t crc_u32(uint32_t c, uint32_t v)
+{
+    for (int i = 0; i < 4; i++) {
+        c ^= (v >> (8 * i)) & 0xffu;
+        for (int k = 0; k < 8; k++) {
+            c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
+        }
+    }
+    return c;
+}
+static uint32_t tree_crc(lv_obj_t *o, uint32_t c)
+{
+    lv_area_t a;
+    lv_obj_get_coords(o, &a);
+    c = crc_u32(c, (uint32_t)a.x1);
+    c = crc_u32(c, (uint32_t)a.y1);
+    c = crc_u32(c, (uint32_t)a.x2);
+    c = crc_u32(c, (uint32_t)a.y2);
+    c = crc_u32(c, lv_obj_is_hidden(o) ? 1u : 0u);
+    c = crc_u32(c, lv_obj_is_clickable(o) ? 1u : 0u);
+    c = crc_u32(c, lv_color_to_u16(lv_obj_get_style_bg_color(o, LV_PART_MAIN)));
+    c = crc_u32(c, (uint32_t)lv_obj_get_style_bg_opa(o, LV_PART_MAIN));
+    c = crc_u32(c, (uint32_t)lv_obj_get_style_radius(o, LV_PART_MAIN));
+    c = crc_u32(c, (uint32_t)lv_obj_get_style_border_width(o, LV_PART_MAIN));
+    c = crc_u32(c, (uint32_t)lv_obj_get_style_shadow_width(o, LV_PART_MAIN));
+    if (lv_obj_check_type(o, &lv_label_class)) {
+        for (const char *t = lv_label_get_text(o); *t; t++) {
+            c = crc_u32(c, (uint32_t)(unsigned char)*t);
+        }
+        c = crc_u32(c, lv_color_to_u16(lv_obj_get_style_text_color(o, LV_PART_MAIN)));
+        c = crc_u32(c, (uint32_t)lv_font_get_line_height(lv_obj_get_style_text_font(o, LV_PART_MAIN)));
+    }
+    for (uint32_t k = 0; k < lv_obj_get_child_count(o); k++) {
+        c = tree_crc(lv_obj_get_child(o, (int32_t)k), c);
+    }
+    return c;
+}
+uint32_t flex_ota_ui_tree_crc(void)
+{
+    if (!U.root) {
+        return 0;
+    }
+    lv_obj_update_layout(U.root);
+    return tree_crc(U.root, 0xFFFFFFFFu);
+}
+#endif

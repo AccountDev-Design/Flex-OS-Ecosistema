@@ -50,6 +50,16 @@ static void nav_app(void)
 }
 static int32_t s_last_minute = -1;
 
+// La barra de navegacion que corresponde al estado actual: la capa a pantalla completa de las actualizaciones la oculta mientras esta y la devuelve al cerrarse
+void flex_shell_nav_refresh(void)
+{
+    if (s_state == FLEX_SH_HOME) {
+        flex_navbar_set_ctx(FLEX_NAV_HOME);
+    } else if (s_state == FLEX_SH_APP) {
+        nav_app();
+    }
+}
+
 // ---- tarjeta de transicion ------------------------------------------------------
 static struct {
     lv_obj_t *card;

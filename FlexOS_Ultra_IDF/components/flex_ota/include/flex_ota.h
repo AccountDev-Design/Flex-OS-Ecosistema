@@ -83,6 +83,13 @@ typedef struct {
 // (*newer = false); si no, el error exacto. Es el nucleo de otaCheck de Arduino sin la red.
 flex_ota_err_t flex_ota_manifest_read(const char *buf, const flex_ota_cfg_t *cfg, flex_ota_manifest_t *out, bool *newer);
 
+// ---- confirmacion de arranque (rollback del bootloader) ----
+// Una imagen recien instalada arranca "pendiente de validar": si no se confirma, el siguiente reinicio vuelve a la anterior. Se confirma cuando el sistema lleva sano
+// FLEX_OTA_CONFIRM_MS (sin Modo seguro); con Modo seguro NO se confirma nunca: el siguiente reinicio da la imagen por mala. Es lo unico de la OTA que Arduino no tiene.
+#define FLEX_OTA_CONFIRM_MS 15000u
+typedef enum { FLEX_OTA_BOOT_NONE = 0, FLEX_OTA_BOOT_WAIT, FLEX_OTA_BOOT_CONFIRM, FLEX_OTA_BOOT_HOLD } flex_ota_boot_t;
+flex_ota_boot_t flex_ota_boot_decide(bool pending, uint32_t uptime_ms, bool safe_mode, bool ui_ready);
+
 // ---- operaciones del sistema ----
 #define FLEX_OTA_HTTPE_OTHER    (-1)    // cualquier fallo de transporte
 #define FLEX_OTA_HTTPE_TIMEOUT  (-11)   // HTTPC_ERROR_READ_TIMEOUT
@@ -134,6 +141,7 @@ void flex_ota_work(void);                                 // una vuelta del trab
 bool flex_ota_run_check(void);                            // otaCheck: la comprobacion ya, en esta tarea (flex_ota_work la usa; las pruebas la comparan con Arduino)
 bool flex_ota_run_install(void);                          // otaInstall: la descarga y la instalacion ya, en esta tarea
 void flex_ota_prime(const char *remote, const char *url, const char *md5, uint32_t total);   // solo pruebas: el estado tras una comprobacion buena
+void flex_ota_test_force(flex_ota_state_t st, flex_ota_err_t err, const char *remote);      // solo pruebas: cualquier estado (remote != NULL: ademas una version confirmada)
 void flex_ota_auto_check_tick(void);                      // la comprobacion automatica (~20 s tras el arranque, una vez)
 
 typedef struct {

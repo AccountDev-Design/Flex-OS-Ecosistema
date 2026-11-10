@@ -29,6 +29,10 @@ if(NOT DEFINED SDKCONFIG_DEFAULTS AND NOT DEFINED ENV{SDKCONFIG_DEFAULTS})
     endif()
 endif()
 
+# Version del firmware (esp_app_desc_t.version): es la que compara la OTA contra el manifiesto, asi que tiene que ser MAJOR.MINOR.PATCH estricto.
+# Sin esto IDF usa `git describe`, que no lo es.
+set(PROJECT_VER "1.0.0")
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(flexos_ultra_idf)
 

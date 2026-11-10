@@ -286,12 +286,34 @@ flex_ota_err_t flex_ota_manifest_read(const char *buf, const flex_ota_cfg_t *cfg
     if (cfg->require_signature && !sig[0]) {
         return FLEX_OTA_ERR_NO_SIG;
     }
+    // Cada cadena acaba en 0 aunque llene el buffer (como los strncpy + terminador de Arduino): quien lea `out` nunca ve basura tras el ultimo caracter
+    memset(out, 0, sizeof(*out));
     strncpy(out->ver, ver, sizeof(out->ver) - 1);
+    out->ver[sizeof(out->ver) - 1] = 0;
     strncpy(out->url, url, sizeof(out->url) - 1);
+    out->url[sizeof(out->url) - 1] = 0;
     strncpy(out->md5, md5, sizeof(out->md5) - 1);
+    out->md5[sizeof(out->md5) - 1] = 0;
     strncpy(out->changelog, log, sizeof(out->changelog) - 1);
+    out->changelog[sizeof(out->changelog) - 1] = 0;
     strncpy(out->sig, sig, sizeof(out->sig) - 1);
+    out->sig[sizeof(out->sig) - 1] = 0;
     out->size = size;
     *newer = true;
     return FLEX_OTA_ERR_NONE;
+}
+
+// Que hacer con la confirmacion de arranque: nada (la imagen ya esta validada), esperar, confirmarla o mantenerla sin confirmar
+flex_ota_boot_t flex_ota_boot_decide(bool pending, uint32_t uptime_ms, bool safe_mode, bool ui_ready)
+{
+    if (!pending) {
+        return FLEX_OTA_BOOT_NONE;
+    }
+    if (safe_mode) {
+        return FLEX_OTA_BOOT_HOLD;
+    }
+    if (!ui_ready || uptime_ms < FLEX_OTA_CONFIRM_MS) {
+        return FLEX_OTA_BOOT_WAIT;
+    }
+    return FLEX_OTA_BOOT_CONFIRM;
 }

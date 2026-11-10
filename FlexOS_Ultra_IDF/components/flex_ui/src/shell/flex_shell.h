@@ -33,6 +33,7 @@ typedef enum {
 void flex_shell_start(void);
 flex_shell_state_t flex_shell_state(void);
 lv_obj_t *flex_shell_screen(void);
+void flex_shell_nav_refresh(void);   // devuelve la barra de navegacion que toca al estado (escritorio o app)
 bool flex_shell_land(void);    // la app en primer plano es horizontal (FLEX_APP_LAND): sin barra de navegacion ni gestos del sistema (Core.h:997)
 int flex_shell_fg_app(void);   // app en primer plano aunque algo la tape (-1: ninguna). Pruebas.
 
@@ -145,7 +146,7 @@ bool flex_factory_reset_available(void);
 void flex_factory_reset_open(bool from_safe);
 void flex_factory_resume_boot(void);  // el arranque encontro un borrado a medias
 bool flex_factory_active(void);
-int  flex_factory_view(void);         // pruebas: 1 aviso, 2 escribir, 3 deslizar, 4 progreso, 5 fallo
+int  flex_factory_view(void);         // pruebas: 1 aviso, 2 escribir, 3 deslizar, 4 progreso, 5 fallo, 6 "Actualizacion en curso"
 int  flex_factory_shown_stage(void);
 int  flex_factory_knob(void);
 void flex_shell_factory_begin(void);

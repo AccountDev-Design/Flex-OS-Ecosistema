@@ -3,6 +3,7 @@
 // despues se ejecuta Arduino sobre la misma situacion), en las cuatro configuraciones del preprocesador de Arduino (CA fijado, firma obligatoria + antirretroceso,
 // sin CA, sin CA con TLS sin verificar). Y lo que Arduino no tiene o cambia a proposito: la clave de manifiesto propia, la API de la interfaz.
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "flex_ota.h"
 #include "flex_test.h"
@@ -276,11 +277,11 @@ static void gen_manifest(char *out, size_t cap)
 {
     static const char *const VER[] = {"1.2.0", "1.0.1", "2.0.0", "1.0.0", "0.9.9", "1.2", "1.2.3.4", "v1.2.3", "1.2.70000", "01.002.0003", "", "1..2", "1.2.", "1.a.2", " 1.2.3", "65535.65535.65535", "1.0.0-rc1", "9.9.9"};
     static const char *const URL[] = {"https://github.com/x/y/releases/download/v1.2.0/fw.bin", "http://insecure.example/fw.bin", "ftp://x/fw.bin", "", "https://", "https://a/b?c=d&e=f",
-                                      "HTTPS://upper/fw.bin"};
-    static const char *const MD5[] = {"d41d8cd98f00b204e9800998ecf8427e", "00000000000000000000000000000000", "D41D8CD98F00B204E9800998ECF8427E", "d41d8cd98f00b204e9800998ecf8427", "zzzd8cd98f00b204e9800998ecf8427e", ""};
-    static const char *const LOG[] = {"Mejoras de rendimiento", "Linea 1\\nLinea 2\\nLinea 3", "Con \\\"comillas\\\" y barra \\\\ y tab\\t y unicode \\u00e9 fin", "", "{llaves}} dentro { de cadena", "\\/"};
-    static const char *const SIG[] = {"aabbccdd", "", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"};
-    char blk[1400];
+                                      "HTTPS://upper/fw.bin", "https://x.example/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/p/fw.bin"};
+    static const char *const MD5[] = {"d41d8cd98f00b204e9800998ecf8427e", "00000000000000000000000000000000", "D41D8CD98F00B204E9800998ECF8427E", "d41d8cd98f00b204e9800998ecf8427", "zzzd8cd98f00b204e9800998ecf8427e", "", "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12"};
+    static const char *const LOG[] = {"Mejoras de rendimiento", "Linea 1\\nLinea 2\\nLinea 3", "Con \\\"comillas\\\" y barra \\\\ y tab\\t y unicode \\u00e9 fin", "", "{llaves}} dentro { de cadena", "\\/", "Linea000-Linea001-Linea002-Linea003-Linea004-Linea005-Linea006-Linea007-Linea008-Linea009-Linea010-Linea011-Linea012-Linea013-Linea014-Linea015-Linea016-Linea017-Linea018-Linea019-Linea020-Linea021-Linea022-Linea023-Linea024-Linea025-Linea026-Linea027-Linea028-Linea029-Linea030-Linea031-Linea032-Linea033-Linea034-Linea035-Linea036-Linea037-Linea038-Linea039-Linea040-Linea041-Linea042-Linea043-Linea044-Linea045-Linea046-Linea047-Linea048-Linea049-Linea050-Linea051-Linea052-Linea053-Linea054-Linea055-Linea056-Linea057-Linea058-Linea059-Linea060-Linea061-Linea062-Linea063-Linea064-Linea065-Linea066-Linea067-Linea068-Linea069-Linea070-Linea071-Linea072-Linea073-Linea074"};
+    static const char *const SIG[] = {"aabbccdd", "", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"};
+    char blk[3200];
     size_t n = 0;
     n += (size_t)snprintf(blk + n, sizeof(blk) - n, "{");
     int fields = 0;
@@ -290,11 +291,11 @@ static void gen_manifest(char *out, size_t cap)
         n += (size_t)snprintf(blk + n, sizeof(blk) - n, "%s\"version\"%s:%s\"%s\"", fields++ ? "," : "", sp, sp, VERPICK);
     }
     if (rnd() % 10) {
-        const char *u = rnd() % 5 ? URL[0] : pick(URL, 7);
+        const char *u = rnd() % 5 ? URL[0] : pick(URL, 8);
         n += (size_t)snprintf(blk + n, sizeof(blk) - n, "%s\"url\": \"%s\"", fields++ ? "," : "", u);
     }
     if (rnd() % 3) {
-        n += (size_t)snprintf(blk + n, sizeof(blk) - n, "%s\"md5\": \"%s\"", fields++ ? "," : "", pick(MD5, 6));
+        n += (size_t)snprintf(blk + n, sizeof(blk) - n, "%s\"md5\": \"%s\"", fields++ ? "," : "", pick(MD5, 7));
     }
     if (rnd() % 3) {
         long sz = rnd() % 5 == 0 ? 4294967295L : (long)(rnd() % 3000000);
@@ -302,10 +303,10 @@ static void gen_manifest(char *out, size_t cap)
         else n += (size_t)snprintf(blk + n, sizeof(blk) - n, "%s\"size\": %ld", fields++ ? "," : "", sz);
     }
     if (rnd() % 2) {
-        n += (size_t)snprintf(blk + n, sizeof(blk) - n, "%s\"changelog\": \"%s\"", fields++ ? "," : "", pick(LOG, 6));
+        n += (size_t)snprintf(blk + n, sizeof(blk) - n, "%s\"changelog\": \"%s\"", fields++ ? "," : "", pick(LOG, 7));
     }
     if (rnd() % 2) {
-        n += (size_t)snprintf(blk + n, sizeof(blk) - n, "%s\"sig\": \"%s\", \"sigalg\": \"ed25519\"", fields++ ? "," : "", pick(SIG, 3));
+        n += (size_t)snprintf(blk + n, sizeof(blk) - n, "%s\"sig\": \"%s\", \"sigalg\": \"ed25519\"", fields++ ? "," : "", pick(SIG, 4));
     }
     if (rnd() % 5 == 0) {   // un objeto anidado, con sus propias claves repetidas
         n += (size_t)snprintf(blk + n, sizeof(blk) - n, "%s\"assets\": {\"url\": \"https://nested/x.bin\", \"version\": \"7.7.7\"}", fields++ ? "," : "");
@@ -358,6 +359,8 @@ static Net rand_net(void)
     case 9: n.stay = 1; break;
     case 10: n.zero = 1; break;
     case 11: n.partition = 0; break;
+    case 12: n.code = 0; break;
+    case 13: n.code = 204; break;
     default: break;
     }
     return n;
@@ -374,7 +377,8 @@ static void set_body(const Ref *r, const unsigned char *body, int len)
     unsigned at[40], cum[40];
     int k = 1 + (int)(rnd() % 12);
     unsigned t = (unsigned)(rnd() % 50), c = 0;
-    int mode = (int)(rnd() % 8);
+    int mode = (int)(rnd() % 9);
+    if (mode == 8) t = 14994 + (unsigned)(rnd() % 12);   // el primer trozo llega justo en el limite de los 15 s sin datos
     for (int i = 0; i < k; i++) {
         c += (unsigned)((len / k) + 1);
         if (c > (unsigned)len || i == k - 1) c = (unsigned)len;
@@ -467,6 +471,51 @@ static void t_model(void)
     }
 }
 
+
+// El micro-lector no mira mas alla de `end`: cada clave cortada en cada punto, en un bloque EXACTO del heap (ASan vigila un byte de mas), contra Arduino; las
+// comillas sueltas delante de una clave; y una cadena que empieza justo en `end` no toca el buffer de salida.
+static void t_json_edges(void)
+{
+    static const char *const KEYS[] = {"version", "url", "md5", "size", "changelog", "sig", "flex_os_ultra_idf", "a}"};
+    for (int k = 0; k < 16; k++) {
+        char full[96];
+        snprintf(full, sizeof(full), k < 8 ? "\"%s\" : 1," : "\"%s\":1,", KEYS[k & 7]);
+        size_t fl = strlen(full);
+        for (size_t L = 0; L <= fl; L++) {
+            char *h = (char *)malloc(L + 1);
+            memcpy(h, full, L);
+            h[L] = 0;
+            const char *f1 = flex_ota_json_find(h, h + L, KEYS[k & 7]);
+            if ((k & 7) < 7) CHECK(f1 == R[0].find(h, KEYS[k & 7]));
+            else (void)f1;   // la clave con una llave dentro: solo la memoria se vigila
+            free(h);
+        }
+        char *h = (char *)malloc(fl + 3);   // `end` antes del final de un buffer mas largo, con la clave justo despues
+        memcpy(h, full, fl);
+        memcpy(h + fl, "xyz", 3);
+        for (size_t L = 0; L < fl; L++) {
+            const char *f1 = flex_ota_json_find(h, h + L, KEYS[k & 7]);
+            CHECK(f1 == NULL || f1 <= h + L);
+        }
+        free(h);
+    }
+    static const char *const ODD[] = {"\"\"version\": 1", "x\"\"url\":\"u\"", "\"\"\"\"md5\":2", "\"a\"\"size\":3", "\"\"changelog\" : \"c\"", "\"\"sig\":\"\"", "\"\"flex_os_ultra_idf\":{}"};
+    static const char *const OK[] = {"version", "url", "md5", "size", "changelog", "sig", "flex_os_ultra_idf"};
+    for (int i = 0; i < 7; i++) {
+        const char *f1 = flex_ota_json_find(ODD[i], ODD[i] + strlen(ODD[i]), OK[i]);
+        CHECK(f1 != NULL && f1 == R[0].find(ODD[i], OK[i]));
+    }
+    char out[8];
+    const char *str = "x\"abc\"";
+    memset(out, 0x55, sizeof(out));
+    CHECK(!flex_ota_json_str(str + 1, str + 1, out, sizeof(out)) && (unsigned char)out[0] == 0x55);   // p == end: ni se lee ni se escribe
+    CHECK(!flex_ota_json_str(NULL, str, out, sizeof(out)) && (unsigned char)out[0] == 0x55);
+    CHECK(!flex_ota_json_str(str + 1, str + 6, out, 0) && (unsigned char)out[0] == 0x55);
+    // un \u cortado justo en `end` (4 digitos que no estan)
+    const char *cut = "\"a\\u12";
+    CHECK(!flex_ota_json_str(cut, cut + strlen(cut), out, sizeof(out)));
+}
+
 // ---- la comprobacion del manifiesto en paso con Arduino (otaCheck) ----
 static void t_check(void)
 {
@@ -485,6 +534,17 @@ static void t_check(void)
             memset(body + len, ' ', 5000);
             len += 5000;
             body[len] = 0;
+        }
+        if (rnd() % 10 == 0) {   // el cierre del bloque propio cae en cada byte alrededor del limite del buffer de Arduino (4095 utiles)
+            const char *bs, *be;
+            if (flex_ota_json_block(body, "flex_os_ultra", &bs, &be)) {
+                int shift = 4090 + (int)(rnd() % 9) - (int)(be - body);
+                if (shift > 0 && len + shift < 15000) {
+                    memmove(body + shift, body, (size_t)len + 1);
+                    memset(body, ' ', (size_t)shift);
+                    len += shift;
+                }
+            }
         }
         if (n.stay && rnd() % 2) len = len / 2;   // cuelga a medias: tiempo de atasco
         set_body(r, (const unsigned char *)body, len);
@@ -505,12 +565,18 @@ static void t_check(void)
 static unsigned char s_fw[300000];
 static int s_ui_calls;
 void flex_ota_ui_install_started(void) { s_ui_calls++; }   // la interfaz (N5b): aqui solo cuenta
+// Lo de la placa (flex_ota_port.c): aqui se enciende a mano, para probar que con solo la mitad el servicio no se cae
+static int g_port_cfg_on, g_port_ops_on;
+static flex_ota_cfg_t g_port_cfg;
+static flex_ota_ops_t g_port_ops;
+const flex_ota_cfg_t *flex_ota_port_cfg(void) { return g_port_cfg_on ? &g_port_cfg : NULL; }
+const flex_ota_ops_t *flex_ota_port_ops(void) { return g_port_ops_on ? &g_port_ops : NULL; }
 
 static void t_install(void)
 {
     s_seed = 33;
     static const char *const MD5[] = {"d41d8cd98f00b204e9800998ecf8427e", "00000000000000000000000000000000", "", "zz", "D41D8CD98F00B204E9800998ECF8427E"};
-    int done = 0, errs[24] = {0}, rebooted = 0, cancelled = 0, stalls = 0;
+    int done = 0, errs[24] = {0}, rebooted = 0, cancelled = 0, stalls = 0, extra_ok = 0, max_total = 0;
     for (int it = 0; it < 3000; it++) {
         int v = (int)(it % 4);
         const Ref *r = &R[v];
@@ -524,12 +590,14 @@ static void t_install(void)
         case 2: total = (int)FLEX_OTA_MIN_BIN - 1; break;
         case 3: total = (int)FLEX_OTA_MIN_BIN; break;
         case 4: total = (int)FLEX_OTA_MAX_BIN + 1; break;
+        case 5: total = (int)FLEX_OTA_MAX_BIN; break;
         default: total = 65536 + (int)(rnd() % 200000); break;
         }
         n.size = total;
         set_net(r, &n);
         int body_len = total > 0 && total <= (int)sizeof(s_fw) ? total : 70000;
         if (rnd() % 8 == 0) body_len = body_len / 2 + 1;   // el servidor cierra antes de tiempo
+        else if (rnd() % 7 == 0 && total > 0 && total + 6000 < (int)sizeof(s_fw)) body_len = total + 1 + (int)(rnd() % 5000);   // manda de mas que lo anunciado
         if (body_len > (int)sizeof(s_fw)) body_len = (int)sizeof(s_fw);
         set_body(r, s_fw, body_len);
         int cancel_after = rnd() % 9 == 0 ? (int)(rnd() % (unsigned)(body_len + 1)) : -1;
@@ -544,9 +612,12 @@ static void t_install(void)
         rebooted += i.state == FLEX_OTA_REBOOTING;
         if (i.state == FLEX_OTA_ERROR && i.error < 24) errs[i.error]++;
         cancelled += i.error == FLEX_OTA_ERR_CANCELLED;
+        extra_ok += (body_len > total && total >= (int)FLEX_OTA_MIN_BIN && total <= (int)FLEX_OTA_MAX_BIN);
+        max_total += total == (int)FLEX_OTA_MAX_BIN;
         stalls += i.error == FLEX_OTA_ERR_TIMEOUT;
     }
     CHECK(rebooted > 300 && cancelled > 40 && stalls > 40);
+    CHECK(extra_ok > 20 && max_total > 20);
     int kinds = 0;
     for (int e = 1; e < 22; e++) kinds += errs[e] > 0;
     CHECK(kinds >= 14);
@@ -682,22 +753,36 @@ static void t_api(void)
     flex_ota_prime("1.5.0", "https://x/fw.bin", "", 1);   // no en reposo (ya hay una version): no pisa
     flex_ota_auto_check_tick();
     CHECK(!flex_ota_work_pending());
-    // los textos de estado
+    // los estados: "ocupado" son exactamente los de trabajo de red, y cada uno dice lo que flexOtaStatusText de Arduino
     {
-        static const struct { int st, err; const char *txt; } T[] = {{FLEX_OTA_CHECKING, 0, "Buscando actualizaciones..."}, {FLEX_OTA_UP_TO_DATE, 0, "El sistema esta al dia"},
-                                                                     {FLEX_OTA_ERROR, FLEX_OTA_ERR_TLS, "Certificado no valido"}, {FLEX_OTA_DOWNLOADING, 0, "Descargando..."},
-                                                                     {FLEX_OTA_VERIFYING, 0, "Verificando..."}, {FLEX_OTA_INSTALLING, 0, "Instalando..."},
-                                                                     {FLEX_OTA_FINALIZING, 0, "Finalizando..."}};
-        (void)T;
+        static const struct { int st, err, busy; const char *txt; } T[] = {
+            {FLEX_OTA_IDLE, 0, 0, "Buscar actualizacion"}, {FLEX_OTA_CHECKING, 0, 1, "Buscando actualizaciones..."}, {FLEX_OTA_UP_TO_DATE, 0, 0, "El sistema esta al dia"},
+            {FLEX_OTA_AVAILABLE, 0, 0, "1.5.0 disponible"}, {FLEX_OTA_CONNECTING, 0, 1, "Conectando..."}, {FLEX_OTA_DOWNLOADING, 0, 1, "Descargando..."},
+            {FLEX_OTA_VERIFYING, 0, 1, "Verificando..."}, {FLEX_OTA_INSTALLING, 0, 1, "Instalando..."}, {FLEX_OTA_FINALIZING, 0, 1, "Finalizando..."},
+            {FLEX_OTA_REBOOTING, 0, 1, "Reiniciando..."}, {FLEX_OTA_ERROR, FLEX_OTA_ERR_TLS, 0, NULL}, {FLEX_OTA_ERROR, FLEX_OTA_ERR_CANCELLED, 0, NULL}};
+        for (unsigned k = 0; k < sizeof(T) / sizeof(T[0]); k++) {
+            service_setup(0);
+            flex_ota_test_force((flex_ota_state_t)T[k].st, (flex_ota_err_t)T[k].err, "1.5.0");
+            CHECK_EQ_I(flex_ota_busy() ? 1 : 0, T[k].busy);
+            CHECK(!strcmp(flex_ota_status_text(), T[k].txt ? T[k].txt : R[0].errtext(T[k].err)));
+            if (T[k].busy) {
+                // ocupado: ni comprobar ni instalar hacen nada, aunque haya una version confirmada
+                r->world(200000, 1, 1);
+                int ui0 = s_ui_calls;
+                flex_ota_request_install();
+                flex_ota_request_check();
+                flex_ota_get(&i);
+                CHECK(i.state == (flex_ota_state_t)T[k].st && !flex_ota_work_pending() && s_ui_calls == ui0);
+            }
+        }
     }
-    // ocupado: exactamente los estados de trabajo de red
-    static const flex_ota_state_t BUSY[] = {FLEX_OTA_CHECKING, FLEX_OTA_CONNECTING, FLEX_OTA_DOWNLOADING, FLEX_OTA_VERIFYING, FLEX_OTA_INSTALLING, FLEX_OTA_FINALIZING, FLEX_OTA_REBOOTING};
-    for (int s = 0; s <= FLEX_OTA_ERROR; s++) {
-        bool want = false;
-        for (unsigned k = 0; k < sizeof(BUSY) / sizeof(BUSY[0]); k++) want = want || (int)BUSY[k] == s;
-        // se llega a cada estado por la API publica: no hay setter; se comprueba con la lista de la cabecera
-        (void)want;
-    }
+    // pedir instalar necesita una version confirmada Y una direccion
+    service_setup(0);
+    r->world(200000, 1, 1);
+    flex_ota_test_force(FLEX_OTA_UP_TO_DATE, FLEX_OTA_ERR_NONE, NULL);
+    flex_ota_request_install();
+    flex_ota_get(&i);
+    CHECK(i.state == FLEX_OTA_UP_TO_DATE && !flex_ota_work_pending());
     // sin operaciones el servicio no hace nada ni falla
     flex_ota_set(NULL, NULL);
     flex_ota_request_check();
@@ -707,6 +792,97 @@ static void t_api(void)
     flex_ota_begin();
     flex_ota_auto_check_tick();
     CHECK(!flex_ota_run_check() && !flex_ota_run_install());
+    // la mitad de lo de la placa (solo la configuracion, o solo las operaciones): nada se desreferencia
+    service_setup(0);
+    r->world(200000, 1, 1);
+    flex_ota_request_check();   // una orden pendiente con las operaciones...
+    CHECK(flex_ota_work_pending());
+    g_port_cfg = make_cfg(0);
+    g_port_cfg_on = 1;
+    flex_ota_set(NULL, NULL);   // ...que desaparecen (queda solo la configuracion)
+    flex_ota_work();
+    CHECK(flex_ota_work_pending());   // no se ejecuta ni se pierde
+    flex_ota_begin();
+    flex_ota_request_check();
+    flex_ota_request_install();
+    flex_ota_work();
+    flex_ota_auto_check_tick();
+    CHECK(!flex_ota_run_check() && !flex_ota_run_install());
+    CHECK(!strcmp(flex_ota_local_version(), "1.0.0"));
+    g_port_cfg_on = 0;
+    g_port_ops = make_ops();
+    g_port_ops.load_pending = o_loadp;
+    g_port_ops.clear_pending = o_clearp;
+    g_port_ops_on = 1;
+    g_pend_set = 1;
+    snprintf(g_pend, sizeof(g_pend), "1.0.0");
+    flex_ota_service_reset();
+    r->world(200000, 1, 1);
+    flex_ota_request_check();   // las operaciones sin configuracion: pide, pero no se puede ejecutar
+    CHECK(flex_ota_work_pending());
+    flex_ota_work();
+    CHECK(flex_ota_work_pending());
+    flex_ota_service_reset();
+    flex_ota_begin();   // sin configuracion no se sabe que version corre: no saluda
+    flex_ota_get(&i);
+    CHECK(!i.just_updated);
+    CHECK(!strcmp(flex_ota_local_version(), ""));
+    g_port_ops_on = 0;
+    g_pend_set = 0;
+    flex_ota_service_reset();
+    // flex_ota_set exige las DOS cosas: con solo una se vuelve a lo de la placa (nada se copia desde un NULL)
+    {
+        flex_ota_cfg_t c = make_cfg(0);
+        flex_ota_ops_t o = make_ops();
+        service_setup(0);
+        CHECK(!strcmp(flex_ota_local_version(), "1.0.0"));
+        flex_ota_set(&c, NULL);
+        CHECK(!strcmp(flex_ota_local_version(), ""));
+        service_setup(0);
+        flex_ota_set(NULL, &o);
+        CHECK(!strcmp(flex_ota_local_version(), ""));
+        flex_ota_request_check();   // sin operaciones no hace nada
+        CHECK(!flex_ota_work_pending());
+    }
+    // flex_ota_prime acota cada cadena a su buffer y la deja terminada en 0 (version 15, url 191, md5 35)
+    {
+        char rv[40], url[300], md5[60];
+        memset(rv, 'v', sizeof(rv) - 1); rv[sizeof(rv) - 1] = 0;
+        memcpy(url, "https://", 8); memset(url + 8, 'u', sizeof(url) - 9); url[sizeof(url) - 1] = 0;
+        memset(md5, 'a', sizeof(md5) - 1); md5[sizeof(md5) - 1] = 0;
+        service_setup(0);
+        flex_ota_prime(rv, url, md5, 1234);
+        flex_ota_get(&i);
+        CHECK_EQ_I(strlen(i.remote), FLEX_OTA_VER_MAX - 1);
+        flex_ota_manifest_t pm;
+        CHECK(flex_ota_manifest_copy(&pm));
+        CHECK_EQ_I(strlen(pm.ver), FLEX_OTA_VER_MAX - 1);
+        CHECK_EQ_I(strlen(pm.url), FLEX_OTA_URL_MAX - 1);
+        CHECK_EQ_I(strlen(pm.md5), FLEX_OTA_MD5_MAX - 1);
+        CHECK(i.state == FLEX_OTA_AVAILABLE && i.total == 1234 && i.has_update);
+        flex_ota_service_reset();
+    }
+}
+
+// ---- la confirmacion de arranque (rollback): lo unico que Arduino no tiene, asi que aqui la referencia es la especificacion ----
+static void t_boot(void)
+{
+    static const unsigned UP[] = {0, 1, 14999, 15000, 15001, 60000, 0xFFFFFFFFu};
+    for (int pend = 0; pend < 2; pend++) {
+        for (int safe = 0; safe < 2; safe++) {
+            for (int ui = 0; ui < 2; ui++) {
+                for (unsigned k = 0; k < sizeof(UP) / sizeof(UP[0]); k++) {
+                    flex_ota_boot_t want;
+                    if (!pend) want = FLEX_OTA_BOOT_NONE;                     // ya validada: nada que hacer
+                    else if (safe) want = FLEX_OTA_BOOT_HOLD;                 // Modo seguro: jamas se confirma
+                    else if (!ui || UP[k] < 15000u) want = FLEX_OTA_BOOT_WAIT; // aun no esta sano
+                    else want = FLEX_OTA_BOOT_CONFIRM;
+                    CHECK_EQ_I(flex_ota_boot_decide(pend != 0, UP[k], safe != 0, ui != 0), want);
+                }
+            }
+        }
+    }
+    CHECK_EQ_I((int)FLEX_OTA_CONFIRM_MS, 15000);
 }
 
 // ---- los identificadores propios: la clave del manifiesto de este firmware no es la de Arduino ----
@@ -735,9 +911,11 @@ static void t_ids(void)
 
 void test_ota(void)
 {
+    t_json_edges();
     t_model();
     t_check();
     t_install();
     t_api();
     t_ids();
+    t_boot();
 }

@@ -5,6 +5,7 @@
 #include "flex_core.h"
 #include "flex_i2c.h"
 #include "flex_ntp.h"
+#include "flex_ota_port.h"
 #include "flex_passcode.h"
 #include "flex_poweroff.h"
 #include "flex_reset.h"
@@ -76,4 +77,8 @@ void app_main(void)
 
     // La hora por red: un trabajador de baja prioridad. Sin Wi-Fi (X3) no consulta nada y lo dice ("Esperando Wi-Fi")
     flex_ntp_start();
+
+    // Las actualizaciones: el trabajador, el saludo tras una OTA y la confirmacion de arranque (una imagen recien instalada se da por buena a los 15 s de un
+    // arranque sano; si el sistema se reinicia antes, el bootloader vuelve a la anterior)
+    flex_ota_start();
 }

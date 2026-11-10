@@ -512,6 +512,50 @@ un trabajador en lugar de una tarea por consulta) en `ESP_IDF_MIGRATION_REPORT.m
 
 ---
 
+## 13. Actualizaciones OTA (`FlexOS_OTA.h/.cpp`, `FlexOS_OTA_Bridge.h`)
+
+### 13.1 Qué hace y con qué límites
+Comprueba un manifiesto JSON por HTTPS, y si trae una versión MAYOR que la que corre, descarga el binario POR STREAMING (bloques de 4 KB: la imagen
+nunca está entera en RAM), lo escribe en la otra ranura y reinicia SOLO si el cierre confirma que la imagen está entera. Ante cualquier fallo se
+aborta y la ranura activa queda intacta. Nunca corre en la tarea de la interfaz. Constantes (`FlexOS_OTA.h:59-165`): `CHUNK 4096`, manifiesto ≤ 4 KB,
+changelog ≤ 320 B, heap libre ≥ 56 000 B antes de abrir TLS, conexión + cabeceras 12 s, atasco (ni un byte) 15 s, imagen entre 64 KB y 8 MB. Comprobación
+automática UNA vez ~20 s tras el arranque, solo con red y en reposo (`otaAutoCheckTick`).
+
+### 13.2 Manifiesto y versiones
+`{"flex_os_ultra": {"version","url","md5","size","changelog","sig"}, "flex_os_ultra_s3": {...}}`: cada placa lee SU bloque (la clave se busca con comillas, así
+`flex_os_ultra` no casa con `flex_os_ultra_s3`; el bloque se acota contando llaves y respetando las de dentro de una cadena). Versión `MAJOR.MINOR.PATCH` ESTRICTA
+(tres números de hasta 65535, sin sufijos). `url` tiene que ser `https://`. `md5` solo se usa si es hexadecimal de 32 con algún dígito distinto de cero
+(un relleno de ceros condenaría toda actualización: `Update.end()` fallaría siempre). `sig` se lee y se guarda siempre; con `REQUIRE_SIGNATURE`
+su ausencia es `NO_SIG` (arquitectura preparada, apagada: ni Arduino ni IDF verifican la firma todavía). Igual o más antigua → "al día" (con `ANTIROLLBACK`, más
+antigua es `ROLLBACK`).
+
+### 13.3 Estados y errores
+`IDLE → CHECKING → UP_TO_DATE | AVAILABLE | ERROR`; instalar: `CONNECTING → DOWNLOADING → VERIFYING → INSTALLING → FINALIZING → REBOOTING`. "Ocupado" son todos
+menos IDLE, UP_TO_DATE, AVAILABLE y ERROR. 21 causas con código propio (nunca se colapsan): sin Wi-Fi, poca memoria, HTTPS, TLS, estado HTTP, tiempo agotado, JSON,
+sin bloque, versión inválida, URL inválida, tamaño inválido, sin partición, no cabe, escritura, truncada, corrupta, cancelada, sin CA, sin firma, firma inválida, retroceso.
+Cancelar solo se ofrece en CONNECTING y DOWNLOADING; a partir de INSTALLING ya no.
+
+### 13.4 Interfaz (`FlexOS_OTA.cpp:700-1596`)
+Cuatro capas con paleta propia: (1) **aviso flotante** abajo (96 de alto, a 80 del borde), entra deslizando en 300 ms, sale a los 9 s o con un deslizamiento hacia abajo, solo
+sobre el escritorio y una vez por versión; tocarlo abre (2) el **modal del changelog** (velo OPACO, tarjeta de 416 de ancho, changelog con scroll, Cancelar / Actualizar ahora); (3) la
+**pantalla de instalación** (porcentaje gigante, barra de 10 px, fase, bytes y velocidad; MODAL: Atrás, Inicio y Recientes no hacen nada; el error con "Entendido");
+(4) **Ajustes › Actualizaciones** (estado, versión disponible y tamaño, novedades, Buscar / Actualizar ahora). Una capa a pantalla completa se queda TODO lo que le llegue y nadie más dibuja
+(`flexOtaOwnsScreen`); el gesto atrás (deslizar a la derecha) sale del changelog y de Ajustes, no de la instalación.
+
+### 13.5 Integración
+Mosaico "Actualizaciones" del panel rápido (siempre visible; subtítulo "Versión x"; tocar cierra la cortina y abre la capa). Fila de Ajustes › General. El bloqueo automático NO actúa con una
+actualización en marcha ni con una capa a pantalla completa (`Lock.h:381`). Restablecer de fábrica con una actualización en marcha solo muestra "Actualización en curso / Espera a que termine
+para restablecer" (se retira a los 2,2 s o con un toque; `Recovery.h:378`). Tras el reinicio, `flexOtaBegin` compara la versión apuntada (`flexota/pend`) con la que corre y saluda una vez.
+
+### 13.6 Migración a IDF
+* Motor en tres capas: modelo C puro (`flex_ota_model.c`), servicio sobre `flex_ota_ops_t` (`flex_ota.c`: red, flash, tiempo, cerrojo y reinicio inyectados) y transporte de la placa (`flex_ota_port.c`:
+  `esp_http_client` con el certificado raíz FIJADO, `esp_ota_*`, MD5 con mbedtls). El host prueba las dos primeras contra `FlexOS_OTA.cpp` EXTRAÍDO en sus cuatro configuraciones del preprocesador.
+* Clave de manifiesto propia `flex_os_ultra_idf` (una placa no instala el binario de la otra) y comprobación de que el proyecto de la imagen descargada es el que corre.
+* Rollback del bootloader: la imagen nueva arranca PENDIENTE de validar y se confirma a los 15 s de un arranque sano y sin Modo seguro; si el sistema se reinicia antes, vuelve la anterior.
+  Arduino no tiene rollback.
+* Sin TLS inseguro en la placa (`allow_insecure` no existe en `http_begin`); sin certificado fijado el motor no conecta ("Falta el certificado del servidor").
+* La interfaz es LVGL (cada capa una vista con objetos, glifos dibujados con el mismo trazo) y oculta la barra de navegación mientras ocupa la pantalla.
+
 ## 14. Juegos: Jumper (`FlexOS_Ultra_AppGames.h`, `FlexOS_Jumper.h`, `FlexOS_Jumper_Level.h`)
 
 La app Juegos es el contenedor de UN juego, Jumper (no hay editor de niveles, tienda, multijugador ni audio): registro `IC_JUEGOS` con

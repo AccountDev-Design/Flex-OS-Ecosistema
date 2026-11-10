@@ -282,6 +282,12 @@ cc -std=gnu11 "${CFLAGS[@]}" "${SAN[@]}" "${FWINC[@]}" test_boot_fw.c \
     $ROOT/components/flex_system/src/flex_safeboot.c $ROOT/components/flex_system/src/flex_safeboot_model.c \
     -o "$OUT/boot_fw_asan"
 "$OUT/boot_fw_asan"
+# Transporte OTA de la placa (flex_ota_port.c) compilado en el host contra dobles de ESP-IDF (ota_port_stub): configuracion, HTTP, flash con MD5 y proyecto, motor real,
+# saludo y confirmacion de arranque
+cc -std=gnu11 "${CFLAGS[@]}" "${SAN[@]}" -DFLEX_OTA_HAVE_CA -Iota_port_stub -I$ROOT/components/flex_ota/include -I$ROOT/components/flex_net/include \
+    -I$ROOT/components/flex_system/include test_ota_port.c $ROOT/components/flex_ota/src/flex_ota_port.c $ROOT/components/flex_ota/src/flex_ota.c \
+    $ROOT/components/flex_ota/src/flex_ota_model.c -lm -o "$OUT/ota_port_asan"
+"$OUT/ota_port_asan"
 PINC=(-I$ROOT/components/flex_security/include -I$ROOT/components/flex_storage/include -I../../sim/stubs/include)
 cc -std=gnu11 "${CFLAGS[@]}" "${SAN[@]}" -DFLEX_HOST_TEST "${PINC[@]}" \
     -c $ROOT/components/flex_security/src/flex_passcode.c -o "$OUT/flex_passcode_asan.o"
