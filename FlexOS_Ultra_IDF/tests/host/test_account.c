@@ -418,9 +418,67 @@ static void t_tls(void)
     for (unsigned i = 0; i < 5; i++) for (unsigned j = 0; j < 5; j++) CHECK_EQ(flex_tls_room_ok(F[i], B[j]), ref_tls_room(F[i], B[j]));
 }
 
+
+// Longitudes EXACTAS en el borde de cada buffer destino (47/48/49 del que copia la direccion, 63/64/65 del nombre, 8/9 del codigo, 191/192 de la URL): una cota mal puesta
+// escribe un byte mas alla y AddressSanitizer lo ve porque los destinos miden justo eso
+static void t_edges(void)
+{
+    char hash[65];
+    memset(hash, 'a', 64);
+    hash[64] = 0;
+    for (int len = 40; len <= 60; len++) {   // direccion: relleno + "@flex"
+        for (int nlen = 58; nlen <= 70; nlen++) {
+            char pj[400], addr[80], name[100];
+            memset(addr, 'b', sizeof(addr));
+            memcpy(addr + len - 5, "@flex", 6);
+            memset(name, 'n', (size_t)nlen);
+            name[nlen] = 0;
+            snprintf(pj, sizeof(pj), "{\"schema\":1,\"purpose\":\"flex-device-status\",\"state\":\"approved\",\"flexAddress\":\"%.*s\",\"displayName\":\"%s\"}", len, addr, name);
+            char a1[48], n1[64], a2[48], n2[64];
+            memset(a1, 'x', sizeof(a1)); memset(n1, 'x', sizeof(n1)); memset(a2, 'x', sizeof(a2)); memset(n2, 'x', sizeof(n2));
+            int ra = flex_account_parse_status((const uint8_t *)pj, strlen(pj), a1, n1);
+            int rb = ref_acct_parse_status((const unsigned char *)pj, strlen(pj), a2, n2);
+            CHECK_EQ(ra, rb);
+            if (ra == FLEX_POLL_APPROVED && rb == FLEX_POLL_APPROVED) CHECK(!strcmp(a1, a2) && !strcmp(n1, n2));
+        }
+    }
+    for (int clen = 4; clen <= 12; clen++) {
+        for (int ulen = 180; ulen <= 200; ulen++) {
+            char code[20], url[260], pj[900];
+            for (int i = 0; i < clen; i++) code[i] = (char)('A' + i % 8);
+            code[clen] = 0;
+            size_t pl = strlen(FLEX_ACCOUNT_ACTIVATE_PREFIX);
+            memcpy(url, FLEX_ACCOUNT_ACTIVATE_PREFIX, pl);
+            for (size_t i = pl; i < (size_t)ulen; i++) url[i] = 'u';
+            url[ulen] = 0;
+            snprintf(pj, sizeof(pj), "{\"schema\":1,\"purpose\":\"flex-device-code\",\"code\":\"%s\",\"tokenHash\":\"%s\",\"activationUrl\":\"%s\"}", code, hash, url);
+            char c1[9], u1[192], c2[9], u2[192];
+            memset(c1, 'x', sizeof(c1)); memset(u1, 'x', sizeof(u1)); memset(c2, 'x', sizeof(c2)); memset(u2, 'x', sizeof(u2));
+            int ra = flex_account_parse_code((const uint8_t *)pj, strlen(pj), hash, c1, u1);
+            int rb = ref_acct_parse_code((const unsigned char *)pj, strlen(pj), hash, c2, u2);
+            CHECK_EQ(ra, rb);
+            if (ra && rb) CHECK(!strcmp(c1, c2) && !strcmp(u1, u2));
+        }
+    }
+    // flex_nvs_str_len con el buffer del tamano EXACTO en el montón: leer el byte `cap` es un desbordamiento
+    for (unsigned long cap = 1; cap < 20; cap++) {
+        for (int fill = 0; fill < 3; fill++) {   // 0: sin terminador, 1: terminador al final, 2: terminador antes
+            char *buf = (char *)malloc(cap);
+            memset(buf, 'k', cap);
+            if (fill == 1) buf[cap - 1] = 0;
+            if (fill == 2 && cap > 2) buf[cap / 2] = 0;
+            for (unsigned long ret = 0; ret <= cap + 2; ret++) {
+                CHECK_EQ(flex_nvs_str_len(ret, buf, cap), ref_acct_nvslen(ret, buf, cap));
+            }
+            free(buf);
+        }
+    }
+}
+
 int main(void)
 {
     key_setup();
+    t_edges();
     t_simple();
     t_b64();
     t_signed();

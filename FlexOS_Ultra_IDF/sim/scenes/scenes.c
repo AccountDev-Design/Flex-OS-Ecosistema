@@ -39,6 +39,7 @@ bool scene_devcare_run(void);
 bool scene_dcui_run(void);
 bool scene_ntp_run(void);
 bool scene_ota_run(void);
+bool scene_account_run(void);
 
 const sim_scene_t sim_scenes[] = {
     {"galeria", scene_gallery_run},
@@ -77,6 +78,7 @@ const sim_scene_t sim_scenes[] = {
     {"dcui", scene_dcui_run},
     {"ntp", scene_ntp_run},
     {"ota", scene_ota_run},
+    {"cuenta", scene_account_run},
     {"apagado", scene_poweroff_run},
     {NULL, NULL},
 };

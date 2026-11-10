@@ -10,6 +10,7 @@
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
+#include "flex_account_svc.h"
 #include "flex_app.h"
 #include "flex_auth.h"
 #include "flex_frame.h"
@@ -324,7 +325,8 @@ static void wipe_progress(int stage, int err, void *user);
 static void begin_wipe(void *arg)
 {
     (void)arg;
-    // ARMED en la interfaz: ninguna app sigue abierta ni en Recientes
+    // ARMED en la interfaz: ninguna app sigue abierta ni en Recientes, y un enlace de cuenta en curso se cancela (flexAccountCancel)
+    flex_account_cancel();
     for (int id = 0; id < FLEX_APP_N; id++) {
         if (flex_app_is_open(id)) {
             flex_app_terminate_ex(id, true);   // el restablecimiento cierra aunque no se pueda guardar

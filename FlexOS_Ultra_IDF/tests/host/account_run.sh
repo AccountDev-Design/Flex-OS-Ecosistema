@@ -1,7 +1,9 @@
 #!/bin/bash
 # Flex Account en el host. Desde tests/host:   bash account_run.sh [core|svc|all]
 #   core: el nucleo puro (flex_account_model.c + flex_tls.c) contra las funciones de FlexOS_Account.cpp / FlexOS_CloudTLS.cpp del Arduino (test_account.c)
+#   mbed: el nucleo con el MISMO backend de la placa (mbedTLS 3.6 de ESP-IDF compilado para el PC): la verificacion ES256 y el SHA-256 que de verdad corren en el P4
 #   thr:  el servicio con hilos reales (tarea de fondo + interfaz + nube) bajo ThreadSanitizer y AddressSanitizer (test_account_thr.c)
+#   ui:   las decisiones de la pantalla (flex_account_ui_model.c) contra FlexOS_Account_Bridge.h de Arduino (test_account_ui.c)
 #   svc:  el servicio (flex_account.c) contra FlexOS_Account.cpp entero, paso a paso sobre el mismo mundo simulado (test_account_svc.cpp)
 # Entorno: ACCT_OUT (carpeta de objetos; los de la referencia se reutilizan), SAN (sanitizadores; vacio = sin ellos), FUZZ_N (guiones aleatorios), TMO (segundos).
 set -e
@@ -49,9 +51,39 @@ if [ "$what" = thr ] || [ "$what" = all ]; then
         cc $TC -c ${MODEL:-$ROOT/components/flex_account/src/flex_account_model.c} -o "$T/model.o"
         cc $TC -c $ROOT/components/flex_net/src/flex_tls.c -o "$T/tls.o"
         cc -std=gnu11 -O1 -g -w $TF -c $ARD/vendor/cJSON/cJSON.c -o "$T/cjson.o"
-        cc $TC -c test_account_thr.c -o "$T/thr.o"
-        cc $TF "$T/thr.o" "$T/svc.o" "$T/model.o" "$T/tls.o" "$T/cjson.o" -lpthread -lm -lcrypto -o "$T/test_account_thr"
+        cc $TC -I. -c test_account_thr.c -o "$T/thr.o"
+        cc $TC -I. -c account_fake.c -o "$T/fake.o"
+        cc $TF "$T/thr.o" "$T/fake.o" "$T/svc.o" "$T/model.o" "$T/tls.o" "$T/cjson.o" -lpthread -lm -lcrypto -o "$T/test_account_thr"
         timeout "${TMO:-300}" "$T/test_account_thr" 2>&1 | tail -n "${TAIL:-40}"
         [ "${PIPESTATUS[0]}" = 0 ]
     done
+fi
+if [ "$what" = ui ] || [ "$what" = all ]; then
+    cached ref_ui.o c++ $CXXF -c ref/ref_account_ui.cpp
+    cc $CF -c $ROOT/components/flex_account/src/flex_account_ui_model.c -o "$OUT/uimodel.o"
+    cc $CF -I. test_account_ui.c "$OUT/uimodel.o" "$OUT/model.o" "$OUT/tls.o" "$OUT/ref_ui.o" "$OUT/cloudtls.o" "$OUT/netstub.o" "$OUT/cjson.o" -lstdc++ -lm -lcrypto -o "$OUT/test_account_ui"
+    timeout "${TMO:-300}" "$OUT/test_account_ui" 2>&1 | tail -n "${TAIL:-40}"
+    [ "${PIPESTATUS[0]}" = 0 ]
+    # el dorado de la escena del simulador: lo que pinta accountRender de Arduino por cada caso (sim/scenes/scene_account.c lo lee)
+    GOLD="${ACCT_GOLDEN:-$OUT/account_ui_golden.txt}"
+    "$OUT/test_account_ui" --golden "$GOLD" | tail -n 1
+fi
+if [ "$what" = mbed ] || [ "$what" = all ]; then
+    MB=${MBEDTLS_SRC:-$HOME/esp/esp-idf/components/mbedtls/mbedtls}
+    if [ -d "$MB/library" ]; then
+        D="$OUT/mbed"
+        mkdir -p "$D"
+        if [ ! -f "$D/libmbedhost.a" ]; then
+            ls "$MB"/library/*.c | xargs -P4 -I{} sh -c "cc -O1 -w -I$MB/include -I$MB/library -c {} -o $D/\$(basename {} .c).o"
+            ar rcs "$D/libmbedhost.a" "$D"/*.o
+        fi
+        cached ref_core.o c++ $CXXF -c ref/ref_account_main.cpp
+        cc $CF -I"$MB/include" -c ${MODEL:-$ROOT/components/flex_account/src/flex_account_model.c} -o "$D/model_mbed.o"
+        cc $CF test_account.c "$D/model_mbed.o" "$OUT/tls.o" "$OUT/ref_core.o" "$OUT/cloudtls.o" "$OUT/netstub.o" "$OUT/cjson.o" "$D/libmbedhost.a" -lstdc++ -lm -lcrypto -o "$D/test_account_mbed"
+        timeout "${TMO:-300}" "$D/test_account_mbed" 2>&1 | tail -n "${TAIL:-40}"
+        [ "${PIPESTATUS[0]}" = 0 ]
+    else
+        echo "AVISO: sin las fuentes de mbedTLS de ESP-IDF ($MB): no se prueba el backend de la placa" >&2
+        [ "$what" = all ] || exit 1
+    fi
 fi

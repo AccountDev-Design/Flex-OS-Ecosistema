@@ -13,6 +13,7 @@
 #include "flex_icons.h"
 #include "flex_kit.h"
 #include "flex_ota.h"
+#include "flex_account_ui.h"
 #include "flex_ota_ui.h"
 #include "flex_shell.h"
 #include "flex_theme.h"
@@ -736,7 +737,7 @@ bool flex_ota_ui_overlay_active(void)
 // El bloqueo automatico no actua con una actualizacion en marcha ni con una capa OTA a pantalla completa (Lock.h:381): una descarga no genera toques
 bool flex_power_autolock_vetoed(void)
 {
-    return flex_ota_busy() || flex_ota_ui_owns_screen();
+    return flex_ota_busy() || flex_ota_ui_owns_screen() || flex_account_ui_owns_screen();   // la pantalla de la cuenta tampoco se bloquea sola (gState distinto de HOME/APP)
 }
 
 bool flex_ota_ui_busy(void)   // la instalacion trabajando: modal (Atras, Inicio y Recientes no hacen nada)

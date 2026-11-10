@@ -20,6 +20,7 @@
 #include "flex_shell.h"
 #include "flex_theme.h"
 #include "flex_touch_lvgl.h"
+#include "flex_account_ui.h"
 #include "flex_ota_ui.h"
 #include "flex_wallmgr.h"
 #include "flex_wallpaper.h"
@@ -692,7 +693,7 @@ static void sheet_gesture_cb(lv_event_t *e)
 
 void flex_drawer_open(void)
 {
-    if (D.open || flex_shell_state() != FLEX_SH_HOME || flex_kiosk_active() || flex_ota_ui_overlay_active()) {
+    if (D.open || flex_shell_state() != FLEX_SH_HOME || flex_kiosk_active() || flex_ota_ui_overlay_active() || flex_account_ui_owns_screen()) {
         return;   // con una capa OTA (la tarjeta tambien) la caja de apps no se abre (AppDrawer.h:1121)
     }
     D.qn = 0;

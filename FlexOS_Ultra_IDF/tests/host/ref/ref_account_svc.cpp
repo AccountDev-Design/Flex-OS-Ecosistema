@@ -1,15 +1,10 @@
 // Referencia del SERVICIO: FlexOS_Account.cpp (Arduino) entero, con la API publica exportada con nombres planos (sin tipos de Arduino) para que la prueba "lockstep" la
 // maneje con la misma interfaz que el puerto en C. El nucleo (ref_acct_*) sale de ref_account_main.cpp.
 #include "ref_account_main.cpp"
+#include "ref_snap.h"
 
 extern "C" {
-typedef struct {
-    int state, progress, linked;
-    char stage[72], error[144], code[9], activation_url[192], flex_address[48], display_name[64];
-    int link;
-    char link_detail[96];
-    unsigned verified_age_s;
-} ref_snap_t;
+
 
 void ref_svc_begin() { flexAccountBegin(); }
 int ref_svc_request_code(const char *label) { return flexAccountRequestCode(label) ? 1 : 0; }

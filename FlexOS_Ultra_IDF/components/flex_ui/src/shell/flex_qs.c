@@ -33,6 +33,7 @@
 #include "flex_theme.h"
 #include "flex_touch_lvgl.h"
 #include "flex_ota.h"
+#include "flex_account_ui.h"
 #include "flex_ota_ui.h"
 #include "flex_wallmgr.h"
 #include "flex_wallpaper.h"
@@ -1062,7 +1063,8 @@ static bool can_open(void)
     // kiosco: la cortina no se abre (QuickPanelEdit.h:492)
     return (st == FLEX_SH_HOME || st == FLEX_SH_APP) && !flex_power_suspended() && !flex_kiosk_active() &&
            !flex_shell_land() &&   // horizontal: sin gestos del sistema (Core.h:997)
-           !flex_ota_ui_owns_screen();   // la pantalla es del OTA (QuickPanelEdit.h:41)
+           !flex_ota_ui_owns_screen() &&   // la pantalla es del OTA (QuickPanelEdit.h:41)
+           !flex_account_ui_owns_screen();   // ... o de la cuenta (gState = ST_OOBE_ACCOUNT)
 }
 
 void flex_qs_open(void)

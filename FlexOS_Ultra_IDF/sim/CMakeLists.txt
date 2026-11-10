@@ -60,6 +60,12 @@ add_executable(flexos_ui_sim
     ${FLEX_ROOT}/components/flex_net/src/flex_ntp.c
     ${FLEX_ROOT}/components/flex_ota/src/flex_ota_model.c
     ${FLEX_ROOT}/components/flex_ota/src/flex_ota.c
+    ${FLEX_ROOT}/components/flex_account/src/flex_account_model.c
+    ${FLEX_ROOT}/components/flex_account/src/flex_account.c
+    ${FLEX_ROOT}/components/flex_account/src/flex_account_ui_model.c
+    ${FLEX_ROOT}/components/flex_net/src/flex_tls.c
+    ${FLEX_ROOT}/../tests/host/vendor/cJSON/cJSON.c
+    ${FLEX_ROOT}/tests/host/account_fake.c
     ${FLEX_ROOT}/components/flex_storage/src/flex_kv.c
     ${FLEX_ROOT}/components/flex_storage/src/flex_fs_names.c
     ${FLEX_ROOT}/components/flex_storage/src/flex_fs_ops.c
@@ -82,6 +88,9 @@ target_include_directories(flexos_ui_sim PRIVATE
     ${FLEX_ROOT}/components/flex_i2c/include
     ${FLEX_ROOT}/components/flex_net/include
     ${FLEX_ROOT}/components/flex_ota/include
+    ${FLEX_ROOT}/components/flex_account/include
+    ${FLEX_ROOT}/../tests/host/vendor/cJSON
+    ${FLEX_ROOT}/tests/host
     ${FLEX_ROOT}/components/flex_ui/src
     ${FLEX_ROOT}/components/flex_ui/src/theme
     ${FLEX_ROOT}/components/flex_ui/src/widgets
