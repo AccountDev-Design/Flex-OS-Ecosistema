@@ -288,6 +288,9 @@ cc -std=gnu11 "${CFLAGS[@]}" "${SAN[@]}" -DFLEX_OTA_HAVE_CA -Iota_port_stub -I$R
     -I$ROOT/components/flex_system/include test_ota_port.c $ROOT/components/flex_ota/src/flex_ota_port.c $ROOT/components/flex_ota/src/flex_ota.c \
     $ROOT/components/flex_ota/src/flex_ota_model.c -lm -o "$OUT/ota_port_asan"
 "$OUT/ota_port_asan"
+# Flex Account (N3): nucleo puro, servicio paso a paso contra FlexOS_Account.cpp del Arduino sobre el mismo mundo simulado (tests/host/netstub) y servicio con hilos
+# reales (ThreadSanitizer y AddressSanitizer). Ver account_run.sh
+ACCT_OUT="$OUT/acct" bash account_run.sh all
 PINC=(-I$ROOT/components/flex_security/include -I$ROOT/components/flex_storage/include -I../../sim/stubs/include)
 cc -std=gnu11 "${CFLAGS[@]}" "${SAN[@]}" -DFLEX_HOST_TEST "${PINC[@]}" \
     -c $ROOT/components/flex_security/src/flex_passcode.c -o "$OUT/flex_passcode_asan.o"
