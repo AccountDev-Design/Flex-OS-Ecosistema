@@ -80,6 +80,7 @@ Rama: `flexos-esp-idf` · Carpeta: `FlexOS_Ultra_IDF/` · Referencia funcional (
 | 3 (en curso: + Juegos: Jumper de Arduino sobre el motor de dibujo de Arduino extraido, con su fuente de 31 KB) | `v3` dev | 1 690 576 B | 64,5 % | 40,3 % |
 | 3 (en curso: + Device Care: pantallas como operaciones de dibujo con el pintor LVGL, historial persistente y diagnostico) | `v3` dev | 1 736 608 B | 66,2 % | 41,4 % |
 | 3 (en curso: + hora por red: sockets y DNS de lwIP, servicio y trabajador) | `v3` dev | 1 829 696 B | 69,8 % | 43,6 % |
+| 3 (en curso: + actualizaciones OTA: cliente HTTP/TLS —`esp_http_client`, mbedtls—, `esp_ota`, interfaz de cuatro capas y transporte) | `v3` dev | 2 076 864 B | 79,2 % | 49,5 % |
 
 La tabla de particiones sigue **provisional (A)** hasta medir el firmware con la interfaz completa
 (Fase 15). No se ha grabado nada.

@@ -22,3 +22,11 @@ Actualizaciones OTA de Flex OS Ultra (referencia: `FlexOS_OTA.h/.cpp` y `FlexOS_
 
 ## Identificadores propios
 Clave del manifiesto `flex_os_ultra_idf` (el de Arduino usa `flex_os_ultra`); versión local = `PROJECT_VER` del `CMakeLists.txt` raíz (`MAJOR.MINOR.PATCH` estricto).
+
+## Limitaciones conocidas
+* Sin hardware: el transporte solo se ha probado contra dobles de ESP-IDF (`tests/host/test_ota_port.c`). Faltan el Wi-Fi (X3), un servidor real y la flash real
+  (ver la fila "Actualizaciones OTA" de `ESP_IDF_HARDWARE_REQUIREMENTS.md`).
+* En los primeros ~15 s tras instalar una imagen, `esp_ota_begin` se niega (la imagen en marcha aun no esta confirmada) y la interfaz dice "No hay espacio para la
+  imagen": hay que esperar a que el log diga "arranque confirmado".
+* Pulsar reset antes de la confirmacion devuelve a la imagen anterior (es el rollback del bootloader; esperado).
+* Sin certificado fijado (`certs/ota_root_ca.pem`) no hay descarga.
