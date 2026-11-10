@@ -28,7 +28,6 @@ bool flex_account_ui_shown_part(const char *text);   // ...o lo contiene
 #ifdef FLEX_SIM
 uint32_t flex_account_ui_tree_crc(void);   // huella de geometria, colores y textos de la pantalla
 int flex_account_ui_bar_width(void);       // ancho del relleno de la barra de progreso (-1 si no hay)
-void flex_account_ui_test_tick(void);
 struct _lv_obj_t *flex_account_ui_test_root(void);   // la raiz de la pantalla (la escena recorre el arbol)
-void flex_account_ui_test_render(const flex_account_snapshot_t *s, bool online, bool ask, flex_acc_return_t where);      // un paso del temporizador, sin esperar los 80 ms
+void flex_account_ui_test_render(const flex_account_snapshot_t *s, bool online, bool ask, flex_acc_return_t where);   // dibuja una foto cualquiera
 #endif

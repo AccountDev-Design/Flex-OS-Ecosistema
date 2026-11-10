@@ -101,7 +101,9 @@ unsigned& netstubNvsWriteCount(){ static unsigned n = 0; return n; }
 bool& netstubNvsBroken(){ static bool b = false; return b; }
 void netstubNvsWipe(){ netstubNvs().clear(); netstubNvsWriteCount() = 0; netstubNvsBroken() = false; }
 
+std::function<void()> gNetOnNvsBegin;
 bool Preferences::begin(const char* name, bool readOnly){
+  if(gNetOnNvsBegin) gNetOnNvsBegin();
   if(netstubNvsBroken() || !name || strlen(name) > 15) return false;   // NVS_KEY_NAME_MAX_SIZE - 1
   ns_ = name; ro_ = readOnly; started_ = true; return true;
 }
@@ -228,7 +230,7 @@ int HTTPClient::dispatch(const char* type, const std::string& body){
   if(rs.status < 0){ active_ = false; return rs.status; }
   respHeaders_.clear();
   for(auto& h : rs.headers) respHeaders_[lower(h.first)] = h.second;
-  body_.reset(rs.body, rs.cutAt);
+  body_.reset(rs.body, rs.cutAt, rs.stallMs ? (rs.stallMs == 0xFFFFFFFFul ? ~0ul : gNetNowMs + rs.stallMs) : 0);
   size_ = rs.chunked ? -1 : (int)rs.body.size();
   active_ = true;
   return rs.status;
@@ -255,5 +257,5 @@ int HTTPClient::writeToStream(Stream* stream){
 void netstubReset(){
   gNetHandler = nullptr; gNetLog.clear(); gNetWifi = false; gNetNowMs = 1000; gNetDnsOk = true;
   gNetInternalFree = 200u << 10; gNetInternalBlock = 100u << 10;
-  gNetTasks.clear(); gNetTaskFail = 0; gNetOnDelay = nullptr;
+  gNetTasks.clear(); gNetTaskFail = 0; gNetOnDelay = nullptr; gNetOnNvsBegin = nullptr;
 }

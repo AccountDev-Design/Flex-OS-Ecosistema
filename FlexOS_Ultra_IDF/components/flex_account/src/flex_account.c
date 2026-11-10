@@ -19,10 +19,6 @@ static flex_account_cfg_t s_cfg = {"1.0.0"};
 static flex_account_ops_t s_ops;
 static bool s_set;
 
-// la de la placa cuando nadie ha puesto otra (flex_account_port.c)
-__attribute__((weak)) const flex_account_ops_t *flex_account_port_ops(void) { return NULL; }
-__attribute__((weak)) const flex_account_cfg_t *flex_account_port_cfg(void) { return NULL; }
-
 void flex_account_set(const flex_account_cfg_t *cfg, const flex_account_ops_t *ops)
 {
     if (cfg && ops) {
@@ -33,15 +29,8 @@ void flex_account_set(const flex_account_cfg_t *cfg, const flex_account_ops_t *o
         s_set = false;
     }
 }
-const flex_account_ops_t *flex_account_ops(void) { return s_set ? &s_ops : flex_account_port_ops(); }
-static const flex_account_cfg_t *cfg(void)
-{
-    if (s_set) {
-        return &s_cfg;
-    }
-    const flex_account_cfg_t *c = flex_account_port_cfg();
-    return c ? c : &s_cfg;
-}
+const flex_account_ops_t *flex_account_ops(void) { return s_set ? &s_ops : NULL; }   // sin operaciones el servicio no hace nada (la placa las pone con flex_account_start)
+static const flex_account_cfg_t *cfg(void) { return &s_cfg; }
 
 // ---- estado ----
 static bool s_begun;   // el cerrojo existe (gMutex): antes de flex_account_begin las consultas dicen "sin cuenta" y las peticiones se rechazan

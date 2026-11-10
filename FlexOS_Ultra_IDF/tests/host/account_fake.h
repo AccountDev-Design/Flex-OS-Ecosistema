@@ -3,6 +3,7 @@
 // serializadas, el resto son atomicos.
 #pragma once
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "flex_account_svc.h"
 
@@ -30,7 +31,9 @@ uint32_t account_fake_now(void);
 int account_fake_count(int what);
 bool account_fake_nvs_linked(void);   // hay una cuenta completa en la NVS
 void account_fake_nvs_save(const char *token43, const char *address, const char *display, int authst);   // una cuenta ya guardada (arranque con cuenta)
-void account_fake_server_register(const char *token43);   // el servidor conoce esta credencial (la validacion la acepta)
+void account_fake_server_register(const char *token43);
+// El servidor sin transporte: contesta una peticion (codigo HTTP, o -1 si falla el transporte) y deja el cuerpo en `reply`
+int account_fake_serve(const char *method, const char *url, const char *auth, const char *body, char *reply, size_t cap);   // el servidor conoce esta credencial (la validacion la acepta)
 
 #ifdef __cplusplus
 }

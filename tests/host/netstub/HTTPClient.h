@@ -38,13 +38,17 @@
 
 typedef enum { HTTPC_DISABLE_FOLLOW_REDIRECTS, HTTPC_STRICT_FOLLOW_REDIRECTS, HTTPC_FORCE_FOLLOW_REDIRECTS } followRedirects_t;
 
+extern unsigned long gNetNowMs;   // netstub.cpp: el reloj simulado (el cuerpo "atascado" depende de el)
+
 class NetBodyClient : public WiFiClient {
 public:
-  void reset(const std::string& body, size_t cutAt){ body_ = body; pos_ = 0; cut_ = cutAt; }
-  uint8_t connected() override { return pos_ < limit() ? 1 : 0; }
-  int available() override { return (int)(limit() - pos_); }
-  int read() override { return pos_ < limit() ? (uint8_t)body_[pos_++] : -1; }
+  // readyAt: hasta ese instante del reloj simulado el cuerpo no ha llegado (available() == 0 y la conexion sigue viva); ~0ul = nunca llega
+  void reset(const std::string& body, size_t cutAt, unsigned long readyAt = 0){ body_ = body; pos_ = 0; cut_ = cutAt; ready_ = readyAt; }
+  uint8_t connected() override { return (pos_ < limit() || waiting()) ? 1 : 0; }
+  int available() override { return waiting() ? 0 : (int)(limit() - pos_); }
+  int read() override { return !waiting() && pos_ < limit() ? (uint8_t)body_[pos_++] : -1; }
   size_t readBytes(uint8_t* buf, size_t n) override {
+    if(waiting()) return 0;
     size_t k = limit() - pos_; if(k > n) k = n;
     memcpy(buf, body_.data() + pos_, k); pos_ += k; return k;
   }
@@ -53,8 +57,9 @@ public:
   int read(uint8_t* buf, size_t n) override { return (int)readBytes(buf, n); }
   size_t delivered() const { return pos_; }
 private:
+  bool waiting() const { return ready_ && gNetNowMs < ready_; }
   size_t limit() const { return cut_ < body_.size() ? cut_ : body_.size(); }
-  std::string body_; size_t pos_ = 0, cut_ = (size_t)-1;
+  std::string body_; size_t pos_ = 0, cut_ = (size_t)-1; unsigned long ready_ = 0;
 };
 
 class HTTPClient {

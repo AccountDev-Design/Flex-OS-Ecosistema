@@ -496,12 +496,6 @@ int flex_account_ui_bar_width(void)
     lv_obj_update_layout(A.bar_fill);
     return (int)lv_obj_get_width(A.bar_fill);
 }
-void flex_account_ui_test_tick(void)
-{
-    A.poll_ms = lv_tick_get() - POLL_MS;
-    tick_cb(NULL);
-}
-
 // Huella de la pantalla: geometria, visibilidad, colores y textos de CADA objeto (los trazos van en la huella del framebuffer que calcula la escena)
 static uint32_t crc_u32(uint32_t c, uint32_t v)
 {

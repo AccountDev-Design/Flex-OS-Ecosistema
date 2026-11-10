@@ -190,12 +190,11 @@ static void reply_text(const char *t)
     R.reply_len = strlen(t);
     memcpy(R.reply, t, R.reply_len);
 }
-static int o_http_send(void)
+static void reply_into(char *out, size_t cap, const char *t) { snprintf(out, cap, "%s", t); }
+static int serve_into(const char *method, const char *url, const char *auth, const char *body, char *out, size_t outcap)
 {
-    o_delay(atomic_load(&g_latency));   // la red tarda un poco: da pie a que otro hilo se meta en medio
-    if (!atomic_load(&g_wifi)) return -1;
-    if (!strncmp(R.url, FLEX_ACCOUNT_CODE_URL, strlen(FLEX_ACCOUNT_CODE_URL))) {
-        if (!strcmp(R.method, "POST")) {
+    if (!strncmp(url, FLEX_ACCOUNT_CODE_URL, strlen(FLEX_ACCOUNT_CODE_URL))) {
+        if (!strcmp(method, "POST")) {
             atomic_fetch_add(&g_cnt[AF_POSTS], 1);
             int fails = atomic_load(&g_post_fail);
             if (fails > 0) {
@@ -204,7 +203,7 @@ static int o_http_send(void)
             }
             int st = atomic_load(&g_post_status);
             if (st) return st;
-            const char *h = strstr(R.body, "\"tokenHash\":\"");
+            const char *h = strstr(body, "\"tokenHash\":\"");
             if (!h) return 400;
             pthread_mutex_lock(&g_cfg_mu);
             snprintf(g_pending_hash, sizeof(g_pending_hash), "%.64s", h + 13);
@@ -213,7 +212,7 @@ static int o_http_send(void)
                      FLEX_ACCOUNT_ACTIVATE_PREFIX);
             pthread_mutex_unlock(&g_cfg_mu);
             make_envelope(payload, env, sizeof(env));
-            reply_text(env);
+            reply_into(out, outcap, env);
             return 201;
         }
         atomic_fetch_add(&g_cnt[AF_POLLS], 1);
@@ -229,29 +228,49 @@ static int o_http_send(void)
             pthread_mutex_unlock(&g_cfg_mu);
         }
         make_envelope(payload, env, sizeof(env));
-        reply_text(env);
+        reply_into(out, outcap, env);
         return 200;
     }
     atomic_fetch_add(&g_cnt[AF_SESSIONS], 1);
     switch (atomic_load(&g_session)) {
     case AF_SESS_DOWN: return -1;
-    case AF_SESS_REVOKED: reply_text("{\"ok\":false,\"error\":{\"code\":\"device_revoked\",\"message\":\"x\"}}"); return 401;
-    case AF_SESS_EXPIRED: reply_text("{\"ok\":false,\"error\":{\"code\":\"token_expired\",\"message\":\"x\"}}"); return 401;
+    case AF_SESS_REVOKED: reply_into(out, outcap, "{\"ok\":false,\"error\":{\"code\":\"device_revoked\",\"message\":\"x\"}}"); return 401;
+    case AF_SESS_EXPIRED: reply_into(out, outcap, "{\"ok\":false,\"error\":{\"code\":\"token_expired\",\"message\":\"x\"}}"); return 401;
     default: break;
     }
     char hash[72];
-    hex_sha256(strlen(R.auth) > 7 ? R.auth + 7 : "", hash);
+    hex_sha256(strlen(auth) > 7 ? auth + 7 : "", hash);
     pthread_mutex_lock(&g_cfg_mu);
     bool known = !strcmp(hash, g_registered_hash);
-    char body[400];
-    snprintf(body, sizeof(body), "{\"ok\":true,\"account\":{\"id\":\"acc_1\",\"flexAddress\":\"%s\",\"displayName\":\"%s\"}}", g_address, g_display);
+    char okbody[400];
+    snprintf(okbody, sizeof(okbody), "{\"ok\":true,\"account\":{\"id\":\"acc_1\",\"flexAddress\":\"%s\",\"displayName\":\"%s\"}}", g_address, g_display);
     pthread_mutex_unlock(&g_cfg_mu);
     if (!known) {
-        reply_text("{\"ok\":false,\"error\":{\"code\":\"device_revoked\",\"message\":\"x\"}}");
+        reply_into(out, outcap, "{\"ok\":false,\"error\":{\"code\":\"device_revoked\",\"message\":\"x\"}}");
         return 401;
     }
-    reply_text(body);
+    reply_into(out, outcap, okbody);
     return 200;
+}
+
+// El servidor sin transporte: contesta una peticion y deja el cuerpo en `reply` (para dobles de otros transportes, como el de esp_http_client del puerto)
+int account_fake_serve(const char *method, const char *url, const char *auth, const char *body, char *reply, size_t cap)
+{
+    char tmp[4096];
+    int status = serve_into(method, url, auth ? auth : "", body ? body : "", tmp, sizeof(tmp));
+    snprintf(reply, cap, "%s", tmp);
+    return status;
+}
+static int o_http_send(void)
+{
+    o_delay(atomic_load(&g_latency));   // la red tarda un poco: da pie a que otro hilo se meta en medio
+    if (!atomic_load(&g_wifi)) return -1;
+    char tmp[4096] = "";
+    int status = serve_into(R.method, R.url, R.auth, R.body, tmp, sizeof(tmp));
+    if (status > 0) {
+        reply_text(tmp);
+    }
+    return status;
 }
 static int o_http_tls_error(void) { return -1; }
 static int o_http_size(void) { return (int)R.reply_len; }

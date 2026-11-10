@@ -1,6 +1,7 @@
 #!/bin/bash
 # Flex Account en el host. Desde tests/host:   bash account_run.sh [core|svc|all]
 #   core: el nucleo puro (flex_account_model.c + flex_tls.c) contra las funciones de FlexOS_Account.cpp / FlexOS_CloudTLS.cpp del Arduino (test_account.c)
+#   port: flex_account_port.c (lo de la placa) compilado en el host contra dobles de ESP-IDF, con el servicio real encima (test_account_port.c)
 #   mbed: el nucleo con el MISMO backend de la placa (mbedTLS 3.6 de ESP-IDF compilado para el PC): la verificacion ES256 y el SHA-256 que de verdad corren en el P4
 #   thr:  el servicio con hilos reales (tarea de fondo + interfaz + nube) bajo ThreadSanitizer y AddressSanitizer (test_account_thr.c)
 #   ui:   las decisiones de la pantalla (flex_account_ui_model.c) contra FlexOS_Account_Bridge.h de Arduino (test_account_ui.c)
@@ -86,4 +87,27 @@ if [ "$what" = mbed ] || [ "$what" = all ]; then
         echo "AVISO: sin las fuentes de mbedTLS de ESP-IDF ($MB): no se prueba el backend de la placa" >&2
         [ "$what" = all ] || exit 1
     fi
+fi
+if [ "$what" = port ] || [ "$what" = all ]; then
+    D="$OUT/port"
+    mkdir -p "$D"
+    python3 - "$ROOT/components/flex_net/certs/cloud_root_bundle.pem" "$D/account_roots.inc" <<'PY'
+import sys
+lines = open(sys.argv[1]).read().split("\n")
+with open(sys.argv[2], "w") as o:
+    for l in lines:
+        if l:
+            o.write('"' + l + '\\n"\n')
+PY
+    PF="-std=gnu11 -O1 -g -Wall -Wextra -Werror -ffp-contract=off $SAN -DFLEX_HOST_TEST $INC -Iaccount_port_stub"
+    cc $PF -DFLEX_ACCOUNT_HAVE_ROOTS -Dgetaddrinfo=stub_getaddrinfo -Dfreeaddrinfo=stub_freeaddrinfo -c $ROOT/components/flex_account/src/flex_account_port.c -o "$D/port.o"
+    cc $PF -c $ROOT/components/flex_account/src/flex_account.c -o "$D/svc.o"
+    cc $PF -c ${MODEL:-$ROOT/components/flex_account/src/flex_account_model.c} -o "$D/model.o"
+    cc $PF -c $ROOT/components/flex_net/src/flex_tls.c -o "$D/tls.o"
+    cc $PF -I. -I"$D" -Wno-deprecated-declarations -c account_fake.c -o "$D/fake.o"
+    cc $PF -I. -I"$D" -c test_account_port.c -o "$D/test.o"
+    cc -std=gnu11 -O1 -g -w $SAN -c $ARD/vendor/cJSON/cJSON.c -o "$D/cjson.o"
+    cc $SAN "$D"/*.o -lpthread -lm -lcrypto -o "$D/test_account_port"
+    timeout "${TMO:-300}" "$D/test_account_port" 2>&1 | tail -n "${TAIL:-40}"
+    [ "${PIPESTATUS[0]}" = 0 ]
 fi

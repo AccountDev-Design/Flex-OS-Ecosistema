@@ -20,6 +20,7 @@ struct NetResponse {
   unsigned long latencyMs = 0;                   // lo que tarda en contestar (o en fallar): el reloj avanza esto
   size_t cutAt = (size_t)-1;                     // la conexion se corta tras N bytes del cuerpo
   bool chunked = false;                          // sin Content-Length (getSize() == -1)
+  unsigned long stallMs = 0;                     // el cuerpo llega tras este tiempo desde la respuesta (0xFFFFFFFF = nunca): hasta entonces available() == 0 con la conexion viva
 };
 
 extern std::function<NetResponse(const NetRequest&)> gNetHandler;
@@ -33,6 +34,7 @@ extern size_t gNetPsFailAbove;          // >0: heap_caps_malloc falla por encima
 extern size_t gNetPsFree;               // PSRAM libre que dice heap_caps_get_free_size(MALLOC_CAP_SPIRAM)
 extern size_t gNetInternalFree;         // SRAM interna libre que dice heap_caps_get_free_size(MALLOC_CAP_INTERNAL)
 extern size_t gNetInternalBlock;        // y su mayor bloque contiguo
+extern std::function<void()> gNetOnNvsBegin;   // se llama al abrir la NVS (Preferences::begin): la prueba mira el estado en ese instante
 extern std::function<void()> gNetOnDelay;  // se llama tras CADA vTaskDelay (ya avanzado el reloj): la prueba mira el estado
                                           // y cambia Wi-Fi o memoria en un instante concreto de un flujo que bloquea
 

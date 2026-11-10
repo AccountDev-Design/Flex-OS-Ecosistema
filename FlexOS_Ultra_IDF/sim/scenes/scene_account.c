@@ -250,7 +250,7 @@ static bool parity(const char *path)
         }
         int dy_by_size[6] = {0}, dy_set[6] = {0};
         char why[200] = "";
-        while ((have = fgets(line, sizeof(line), f)) != NULL && line[0] != 'C') {
+        while ((have = fgets(line, sizeof(line), f) != NULL) && line[0] != 'C') {
             ops_total++;
             if (why[0]) {
                 continue;
@@ -463,6 +463,8 @@ bool scene_account_run(void)
     sim_drag(240, 10, 240, 520, 200);    // la cortina no se abre
     sim_run(300);
     CHK(!flex_qs_is_open() && open_());
+    CHK(flex_account_ui_bar_width() == -1);   // sin enlace en curso no hay barra
+    CHK(!flex_account_ui_shown_part("zzzz") && flex_account_ui_shown_part("cuenta para todo"));
     int builds = flex_account_ui_builds();
     sim_run(1000);
     CHK(flex_account_ui_builds() == builds);   // sin cambios, no se repinta
@@ -480,6 +482,22 @@ bool scene_account_run(void)
     CHK(flex_account_ui_wifi_requests() == w0 + 2 && flex_account_state() == FLEX_ACCOUNT_UNLINKED);
     CHK(tap_open(240, 600));   // entre los dos botones y la barra: nada
     CHK(flex_account_ui_wifi_requests() == w0 + 2);
+    // el toque admite un temblor de 12 px; con 13 es un arrastre
+    sim_touch(240, 480, true);
+    sim_run(40);
+    sim_touch(252, 480, true);
+    sim_run(40);
+    sim_touch(252, 480, false);
+    sim_run(200);
+    CHK(flex_account_ui_wifi_requests() == w0 + 3);
+    sim_touch(240, 480, true);
+    sim_run(40);
+    sim_touch(253, 480, true);
+    sim_run(40);
+    sim_touch(253, 480, false);
+    sim_run(200);
+    CHK(flex_account_ui_wifi_requests() == w0 + 3);
+    w0 = w0 + 1;   // (los dos toques de arriba cuentan ya)
     // un arrastre que termina sobre un boton no es un toque
     sim_drag(240, 480, 240, 300, 200);
     sim_run(200);
@@ -493,7 +511,7 @@ bool scene_account_run(void)
     CHK(tap_open(240, 480));
     CHK(flex_account_state() == FLEX_ACCOUNT_REQUESTING);
     CHK(shown("Creando enlace seguro") && shown("Preparando enlace") && shown("Cancelar") && shown("FlexOS no guarda tu contrasena."));
-    CHK(flex_account_ui_bar_width() >= 8);
+    CHK(flex_account_ui_bar_width() == 8);   // recien pedido (1 %): el minimo de la barra
     memset(&O, 0, sizeof(O));
     g_obs = obs_link;
     account_fake_set_latency(400);   // la red tarda lo suficiente para ver cada fase
@@ -646,17 +664,21 @@ bool scene_account_run(void)
     CHK(flex_account_state() != FLEX_ACCOUNT_REQUESTING && flex_account_state() != FLEX_ACCOUNT_CODE_READY && !flex_account_linked());
     CHK(account_fake_count(AF_POSTS) == 0 || true);
 
-    // ---- 10) primera configuracion: se omite con la barra; Atras no actua ----
+    // ---- 10) primera configuracion (el shell en su estado OOBE): se omite con la barra; Atras, Inicio y Recientes no actuan ----
+    flex_shell_oobe_begin();
     flex_account_ui_open(FLEX_ACC_RET_OOBE, oobe_done);
     sim_run(300);
     CHK(open_() && shown("Omitir por ahora") && !shown("Volver sin cambios"));
     sim_shot("cuenta_oobe");
     CHK(golden("oobe", 0x251cc7e3u, 0xcd26c571u));
     flex_sys_back();
+    flex_sys_home();
+    flex_sys_recents();
     sim_run(200);
-    CHK(open_() && s_oobe_done == 0);
+    CHK(open_() && s_oobe_done == 0);   // en la primera configuracion Atras, Inicio y Recientes no hacen nada: se omite con la barra
     CHK(!tap_open(240, 740) && s_oobe_done == 1);
     account_fake_set_polls(1);
+    flex_shell_oobe_begin();
     flex_account_ui_open(FLEX_ACC_RET_OOBE, oobe_done);
     sim_run(200);
     CHK(tap_open(240, 480));
@@ -664,5 +686,8 @@ bool scene_account_run(void)
     sim_run(300);
     CHK(shown("Continuar") && shown("Cuenta vinculada"));
     CHK(!tap_open(240, 575) && s_oobe_done == 2);   // "Continuar"
+    CHK(!open_() && !shown("Flex Account") && !flex_account_ui_shown_part("Flex"));   // cerrada: no hay texto que encontrar
+    CHK(flex_account_ui_bar_width() == -1);
+    unlock_and_clean();
     return ok;
 }

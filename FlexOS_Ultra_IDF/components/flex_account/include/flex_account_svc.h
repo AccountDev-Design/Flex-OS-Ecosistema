@@ -62,7 +62,7 @@ typedef struct {
     void (*log)(const char *msg);   // NULL permitido (nunca se le pasa la credencial)
 } flex_account_ops_t;
 
-void flex_account_set(const flex_account_cfg_t *cfg, const flex_account_ops_t *ops);   // NULL: lo de la placa (flex_account_port_*)
+void flex_account_set(const flex_account_cfg_t *cfg, const flex_account_ops_t *ops);   // NULL: sin servicio (la placa pone lo suyo con flex_account_start)
 const flex_account_ops_t *flex_account_ops(void);
 
 // ---- API (flexAccount* de Arduino) ----

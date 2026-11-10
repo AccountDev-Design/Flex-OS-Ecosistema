@@ -10,8 +10,13 @@
 
 static std::vector<uint8_t> g_rnd;
 static size_t g_rnd_pos = 0;
+static void (*g_on_random)() = nullptr;
+extern "C" void ref_acct_on_random(void (*fn)()) { g_on_random = fn; }
 void ref_fill_random(void *buf, size_t len)
 {
+    if (g_on_random) {
+        g_on_random();   // la prueba mira el estado (la foto) en el instante de pedir aleatorio
+    }
     uint8_t *p = (uint8_t *)buf;
     for (size_t i = 0; i < len; i++) {
         p[i] = g_rnd.empty() ? (uint8_t)(i * 7 + 1) : g_rnd[g_rnd_pos++ % g_rnd.size()];
@@ -80,5 +85,6 @@ int ref_tls_room(unsigned long internal_free, unsigned long block)
 }
 const char *ref_tls_reason(int e, char *out, unsigned long cap) { return flexTlsReason(e, out, cap); }
 const char *ref_tls_phase(int dns, unsigned el, unsigned hs, unsigned cn, char *out, unsigned long cap) { return flexTlsPhase(dns != 0, el, hs, cn, out, cap); }
+const char *ref_cloud_root_ca() { return flexCloudRootCA(); }   // las raices de Flex Cloud (Arduino)
 int ref_url_host(const char *url, char *out, unsigned long cap) { return flexUrlHost(url, out, cap) ? 1 : 0; }
 }

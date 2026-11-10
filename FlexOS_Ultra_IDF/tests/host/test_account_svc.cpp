@@ -33,6 +33,7 @@ typedef struct {
 } ref_snap_t;
 void ref_acct_set_random(const unsigned char *bytes, int n);
 void ref_acct_set_key(const unsigned char *pub65);
+void ref_acct_on_random(void (*fn)());
 void ref_svc_begin();
 int ref_svc_request_code(const char *label);
 void ref_svc_cancel();
@@ -96,6 +97,9 @@ static const Impl kPort = {
     "C", flex_account_begin, flex_account_request_code, flex_account_cancel, flex_account_linked, flex_account_usable, []() { return (int)flex_account_state(); },
     []() { return (int)flex_account_link_state(); }, from_port, flex_account_request_validation, flex_account_report_rejected, flex_account_copy_bearer, flex_account_forget_local,
     flex_account_step, []() { account_ops_netstub_power_cycle(); flex_account_test_power_cycle(); }};
+static flex_account_cfg_t g_cfg = {"1.0.0"};
+static flex_account_ops_t g_ops_nl;   // las operaciones sin cerrojo (lock / unlock / log a NULL: una sola tarea)
+static Impl kPortNL;
 static const Impl *cur;   // la que corre ahora (los ganchos del servidor la usan)
 
 // ------------------------------ servidor simulado ------------------------------
@@ -121,6 +125,8 @@ struct Server {
     int pollStatus = 0;   // != 0: la consulta contesta este codigo sin cuerpo
     int envFault = 0;     // defecto de los sobres firmados (ver envelope_faulty)
     int sessFault = 0;    // defecto de la respuesta de la sesion
+    unsigned long stallMs = 0;   // el cuerpo de la respuesta tarda tanto en llegar (0xFFFFFFFF = nunca)
+    int bodyLen = 0;      // != 0: los cuerpos miden EXACTAMENTE esto (el sobre firmado se ajusta con un campo de relleno)
     int hookSession = 0;  // 1 = desvincular dentro de la peticion de sesion, 2 = cancelar, 3 = pedir validacion
     int hookPoll = 0;     // 1 = cancelar dentro de la consulta, 2 = desvincular
 };
@@ -177,9 +183,11 @@ static std::string queryParam(const std::string &url, const char *k)
 }
 // Defectos del cuerpo (1-9: sobre; 10: truncado; 11: sin Content-Length; 12: demasiado grande; 13: basura; 14: vacio; 15: carga con otro proposito; 16: carga con codigo
 // de otra huella; 17: carga sin codigo)
+static std::string fit_envelope(const std::string &payload, int target);
 static void apply_body_fault(NetResponse &rs, int fault, const std::string &payload)
 {
-    rs.body = envelope(payload, fault >= 1 && fault <= 5 ? fault : 0);
+    rs.body = S.bodyLen && !fault ? fit_envelope(payload, S.bodyLen) : envelope(payload, fault >= 1 && fault <= 5 ? fault : 0);
+    rs.stallMs = S.stallMs;
     if (fault == 10) {
         rs.cutAt = rs.body.size() / 2;
     } else if (fault == 11) {
@@ -192,10 +200,30 @@ static void apply_body_fault(NetResponse &rs, int fault, const std::string &payl
         rs.body = "<html>no es JSON</html>";
     } else if (fault == 14) {
         rs.body.clear();
+    } else if (fault == 18) {   // demasiado grande Y sin Content-Length
+        std::string big = payload;
+        big.insert(big.size() - 1, std::string(",\"pad\":\"") + std::string(9000, 'x') + "\"");
+        rs.body = envelope(big);
+        rs.chunked = true;
     }
 }
+// Un sobre firmado que mida exactamente `target` bytes (si no se puede, el mas cercano por arriba)
+static std::string fit_envelope(const std::string &payload, int target)
+{
+    for (int pad = 0; pad < 9500; pad++) {
+        std::string pl = payload;
+        pl.insert(pl.size() - 1, pad ? std::string(",\"pad\":\"") + std::string((size_t)pad > 9 ? (size_t)pad - 9 : 0, 'x') + "\"" : "");
+        std::string e = envelope(pl);
+        if ((int)e.size() >= target) {
+            return e;
+        }
+    }
+    return envelope(payload);
+}
+static void obs_prog(const char *what);
 static NetResponse serve(const NetRequest &rq)
 {
+    obs_prog("net");
     NetResponse rs;
     if (!rq.url.compare(0, strlen(CODE_URL), CODE_URL)) {
         S.codeCalls++;
@@ -261,6 +289,7 @@ static NetResponse serve(const NetRequest &rq)
     if (rq.url == SESSION_URL) {
         S.sessionCalls++;
         rs.latencyMs = S.latencyMs;
+        rs.stallMs = S.stallMs;
         if (S.hookSession == 1) {
             S.hookSession = 0;
             cur->forget();
@@ -325,6 +354,13 @@ static NetResponse serve(const NetRequest &rq)
             rs.cutAt = rs.body.size() / 2;
         } else if (S.sessFault == 10) {
             rs.body += "  trailing";
+        } else if (S.sessFault == 11) {   // demasiado grande Y sin Content-Length
+            rs.body.insert(rs.body.size() - 1, std::string(",\"pad\":\"") + std::string(9000, 'x') + "\"");
+            rs.chunked = true;
+        }
+        if (S.bodyLen && !S.sessFault && (int)rs.body.size() < S.bodyLen) {
+            size_t extra = (size_t)S.bodyLen - rs.body.size();
+            rs.body.insert(rs.body.size() - 1, extra > 9 ? std::string(",\"pad\":\"") + std::string(extra - 9, 'x') + "\"" : std::string());
         }
         return rs;
     }
@@ -339,7 +375,7 @@ enum Kind {
 };
 enum Srv {
     SK_SESSION, SK_PENDING, SK_EXPIRE, SK_POSTFAIL, SK_POLLFAIL, SK_FAILERR, SK_TLSERR, SK_LATENCY, SK_POSTSTATUS, SK_POLLSTATUS, SK_ENVFAULT, SK_SESSFAULT, SK_HOOKSESS, SK_HOOKPOLL,
-    SK_ADDR, SK_DISPLAY, SK_CONFLICTS
+    SK_ADDR, SK_DISPLAY, SK_CONFLICTS, SK_STALL, SK_BODYLEN
 };
 enum PlanAct { PA_WIFI_OFF, PA_WIFI_ON, PA_MEM_LOW, PA_MEM_OK, PA_CANCEL, PA_FORGET, PA_REQVAL };
 struct Act {
@@ -355,6 +391,8 @@ struct Plan {
 struct Script {
     std::string name;
     std::vector<Act> acts;
+    std::vector<unsigned char> rnd;   // el aleatorio exacto (vacio: una secuencia fija)
+    Script &random(std::vector<unsigned char> v) { rnd = v; return *this; }
     Script &step(long n, long ms = 100) { acts.push_back({K_STEP, n, ms, ""}); return *this; }
     Script &wifi(bool on) { acts.push_back({K_WIFI, on, 0, ""}); return *this; }
     Script &req(const char *label) { acts.push_back({K_REQ, 0, 0, label ? label : "\x01"}); return *this; }   // "\x01" = NULL
@@ -443,6 +481,18 @@ static void observe(const std::string &tag)
     log_line(fmt("  TASKS creates=%u %s | srv code=%d sess=%d", gNetTaskCreates - t.creates0, tasks.c_str(), S.codeCalls, S.sessionCalls));
 }
 
+static int g_no_obs;   // dentro de begin / reinicio el servicio tiene el cerrojo: no se puede pedir la foto
+static void obs_prog(const char *what)
+{
+    if (g_no_obs || !gTrace) {
+        return;
+    }
+    Snap s = cur->snap();
+    log_line(fmt("  PRG %s st=%d pr=%d lk=%d stage='%s' err='%s'", what, s.state, s.progress, s.linked, s.stage.c_str(), s.error.c_str()));
+}
+static void obs_random() { obs_prog("random"); }
+static void obs_nvs() { obs_prog("nvs"); }
+
 static void plan_apply(PlanAct w)
 {
     switch (w) {
@@ -492,7 +542,13 @@ static void world_reset(const Script &sc, unsigned long clock0)
         x = x * 1664525u + 1013904223u;
         rnd[i] = (unsigned char)(x >> 24);
     }
-    ref_acct_set_random(rnd, sizeof(rnd));
+    if (sc.rnd.empty()) {
+        ref_acct_set_random(rnd, sizeof(rnd));
+    } else {
+        ref_acct_set_random(sc.rnd.data(), (int)sc.rnd.size());
+    }
+    ref_acct_on_random(obs_random);
+    gNetOnNvsBegin = obs_nvs;
     account_ops_netstub_power_cycle();
 }
 
@@ -500,6 +556,7 @@ static void run(const Impl &im, const Script &sc, Trace &tr, unsigned long clock
 {
     cur = &im;
     gTrace = &tr;
+    flex_account_set(&g_cfg, &im == &kPortNL ? &g_ops_nl : account_ops_netstub());
     world_reset(sc, clock0);
     tr.t0 = gNetNowMs;
     tr.creates0 = gNetTaskCreates;
@@ -507,7 +564,9 @@ static void run(const Impl &im, const Script &sc, Trace &tr, unsigned long clock
     tr.net_seen = 0;
     tr.plans.clear();
     gNetOnDelay = on_delay;
+    g_no_obs++;
     im.power_cycle();   // arranque de fabrica de esta ejecucion
+    g_no_obs--;
     observe("boot");
     for (size_t i = 0; i < sc.acts.size(); i++) {
         const Act &a = sc.acts[i];
@@ -537,8 +596,8 @@ static void run(const Impl &im, const Script &sc, Trace &tr, unsigned long clock
         case K_REQVAL: im.req_validation(); break;
         case K_REJECTED: im.report_rejected(); break;
         case K_FORGET: im.forget(); break;
-        case K_POWER: im.power_cycle(); break;
-        case K_BEGIN: im.begin(); break;
+        case K_POWER: g_no_obs++; im.power_cycle(); g_no_obs--; break;
+        case K_BEGIN: g_no_obs++; im.begin(); g_no_obs--; break;
         case K_SRV:
             switch ((Srv)a.a) {
             case SK_SESSION: S.session = (int)a.b; break;
@@ -558,6 +617,8 @@ static void run(const Impl &im, const Script &sc, Trace &tr, unsigned long clock
             case SK_ADDR: S.address = a.s; break;
             case SK_DISPLAY: S.display = a.s; break;
             case SK_CONFLICTS: S.postConflicts = (int)a.b; break;
+            case SK_STALL: S.stallMs = (unsigned long)a.b; break;
+            case SK_BODYLEN: S.bodyLen = (int)a.b; break;
             }
             break;
         case K_MEM:
@@ -587,10 +648,12 @@ static void run(const Impl &im, const Script &sc, Trace &tr, unsigned long clock
         case K_NVSWIPE: netstubNvsWipe(); break;
         case K_CLOCK: netstubAdvance((unsigned long)a.a); break;
         case K_BEARER: {
-            char b[80];
-            memset(b, 0x55, sizeof(b));
+            // buffer del tamano EXACTO en el monton: escribir un byte de mas es un desbordamiento que AddressSanitizer ve
+            char *b = (char *)malloc(a.a > 0 ? (size_t)a.a : 1);
+            memset(b, 0x55, a.a > 0 ? (size_t)a.a : 1);
             bool ok = im.copy_bearer(b, (size_t)a.a);
-            log_line(fmt("  bearer cap=%ld -> %d '%s' [%d]", a.a, (int)ok, ok || b[0] == 0 ? b : "(intacto)", (int)(unsigned char)b[0]));
+            log_line(fmt("  bearer cap=%ld -> %d '%.64s' [%d]", a.a, (int)ok, ok && a.a > 0 ? b : "(sin copia)", a.a > 0 ? (int)(unsigned char)b[0] : -1));
+            free(b);
             break;
         }
         case K_PLAN:
@@ -602,6 +665,8 @@ static void run(const Impl &im, const Script &sc, Trace &tr, unsigned long clock
         observe(fmt("#%zu k=%d", i, (int)a.k));
     }
     gNetOnDelay = nullptr;
+    gNetOnNvsBegin = nullptr;
+    ref_acct_on_random(nullptr);
 }
 
 // Cobertura de los guiones: pares (estado del flujo, estado del vinculo) alcanzados y cuantas peticiones de cada tipo salieron
@@ -622,11 +687,11 @@ static void tally(const Trace &t)
 }
 
 // Compara las dos ejecuciones; devuelve false (y dice la primera diferencia) si no coinciden
-static bool compare(const Script &sc, unsigned long clock0 = 1000)
+static bool compare(const Script &sc, unsigned long clock0 = 1000, bool nolock = false)
 {
     Trace a, b;
     run(kRef, sc, a, clock0);
-    run(kPort, sc, b, clock0);
+    run(nolock ? kPortNL : kPort, sc, b, clock0);
     tally(b);
     size_t n = std::min(a.lines.size(), b.lines.size());
     for (size_t i = 0; i < n; i++) {
@@ -751,17 +816,79 @@ static std::vector<Script> named()
     add("enlace: desvincular en la consulta").wifi(true).link().srv(SK_PENDING, 1000).srv(SK_HOOKPOLL, 2).req("FlexOS Ultra").step(1);
     add("enlace: estado 404 de la consulta").wifi(true).srv(SK_POLLSTATUS, 404).req("FlexOS Ultra").step(1).srv(SK_POLLSTATUS, 503).req("FlexOS Ultra").step(1);
     add("enlace: se guarda sin NVS").wifi(true).srv(SK_PENDING, 1).plan(PA_FORGET, 2500).req("FlexOS Ultra").step(1);
-    for (int f = 1; f <= 17; f++) {
+    for (int f = 1; f <= 18; f++) {
         add(fmt("sobre defectuoso %d (enlace)", f)).wifi(true).srv(SK_ENVFAULT, f).req("FlexOS Ultra").step(1).srv(SK_ENVFAULT, 0).link();
     }
-    for (int f = 1; f <= 17; f++) {
+    for (int f = 1; f <= 18; f++) {
         add(fmt("sobre defectuoso %d (consulta)", f)).wifi(true).srv(SK_PENDING, 0).req("FlexOS Ultra").srv(SK_ENVFAULT, 0).step(1).srv(SK_ENVFAULT, f).srv(SK_PENDING, 1).req("FlexOS Ultra").step(1);
     }
-    for (int f = 0; f <= 10; f++) {
+    for (int f = 0; f <= 11; f++) {
         add(fmt("respuesta de sesion defectuosa %d", f)).wifi(true).link().power().srv(SK_SESSFAULT, f).step(60).step(400).srv(SK_SESSFAULT, 0).reqval().step(5);
     }
     add("direccion y nombre cambian en la validacion")
         .wifi(true).link().step(50).srv(SK_ADDR, 0, "nueva@flex").srv(SK_DISPLAY, 0, "Otro Nombre").reqval().step(5).srv(SK_DISPLAY, 0, "").reqval().step(5);
+
+    // ---- las esperas tras un fallo de red y el Wi-Fi que vuelve a mitad (flanco): lo que queda de la espera no se acorta, ni se alarga ----
+    {
+        static const long EL[] = {2000, 20000, 29000, 29900, 30000, 30100, 45000, 90000};
+        for (long el : EL) {
+            // un fallo (espera de 30 s) y el Wi-Fi se va y vuelve cuando han pasado `el` ms desde el fallo
+            Script &sc = add(fmt("flanco tras 1 fallo, a los %ld ms", el));
+            sc.wifi(true).link().power().srv(SK_SESSION, SM_DOWN).step(45).step((el - 1000) / 100).wifi(false).step(10).wifi(true).step(1200);
+            // tres fallos seguidos (espera de 2 min) y el mismo flanco
+            Script &sc3 = add(fmt("flanco tras 3 fallos, a los %ld ms", el));
+            sc3.wifi(true).link().power().srv(SK_SESSION, SM_DOWN).step(1000).step((el - 1000) / 100).wifi(false).step(10).wifi(true).step(2500);
+        }
+        // el Wi-Fi que entra y sale con una validacion reciente: el intervalo minimo entre intentos
+        for (long gap : {1000L, 25000L, 29900L, 30000L, 30100L}) {
+            add(fmt("intervalo minimo entre intentos, flanco a los %ld ms", gap))
+                .wifi(true).link().power().step(60).wifi(false).step(5).wifi(true).step((gap - 500) / 100).wifi(false).step(5).wifi(true).step(1200);
+        }
+    }
+    // ---- el freno de los 401 de Flex Cloud, en sus fronteras ----
+    add("rechazos: 60 s exactos").wifi(true).link().power().step(50).rejected().step(600).rejected().step(3);
+    add("rechazos: 59,9 s").wifi(true).link().power().step(50).rejected().step(599).rejected().step(3);
+    add("rechazos: 60,1 s").wifi(true).link().power().step(50).rejected().step(601).rejected().step(3);
+    add("rechazos con el reloj ya avanzado").wifi(true).link().power().step(400).rejected().step(100).rejected().step(3).step(550).rejected().step(3);
+    // ---- la NVS en sus fronteras ----
+    add("NVS: direccion de 6 caracteres").nvsput("b", "linked", "1").nvsput("s", "token", "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ").nvsput("s", "address", "a@flex").power().wifi(true).step(100);
+    add("NVS: direccion de 5 caracteres").nvsput("b", "linked", "1").nvsput("s", "token", "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ").nvsput("s", "address", "@flex").power();
+    add("NVS: token de 42 caracteres").nvsput("b", "linked", "1").nvsput("s", "token", "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO").nvsput("s", "address", "ana@flex").power();
+    add("NVS: token de 44 caracteres").nvsput("b", "linked", "1").nvsput("s", "token", "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQR").nvsput("s", "address", "ana@flex").power();
+    add("NVS: id de instalacion a cero").nvsput("i", "installId", "0").power().wifi(true).link();
+    // ---- direccion y nombre en el borde de sus buffers (48 y 64): una cota mal puesta escribe un byte de mas ----
+    for (int len = 44; len <= 50; len++) {
+        std::string addr = std::string((size_t)len - 5, 'a') + "@flex";
+        add(fmt("direccion de %d caracteres", len)).wifi(true).srv(SK_ADDR, 0, addr.c_str()).link().power().step(60).srv(SK_ADDR, 0, "otra@flex").reqval().step(5);
+        add(fmt("direccion de %d caracteres en la validacion", len)).wifi(true).link().step(30).srv(SK_ADDR, 0, addr.c_str()).reqval().step(5);
+    }
+    for (int len = 60; len <= 66; len++) {
+        std::string nm((size_t)len, 'n');
+        add(fmt("nombre de %d caracteres", len)).wifi(true).srv(SK_DISPLAY, 0, nm.c_str()).link().power().step(60);
+        add(fmt("nombre de %d caracteres en la validacion", len)).wifi(true).link().step(30).srv(SK_DISPLAY, 0, nm.c_str()).reqval().step(5);
+    }
+    // ---- cuerpos de EXACTAMENTE el tamano limite (8 192 bytes) y sus vecinos ----
+    for (int t = 8189; t <= 8195; t++) {
+        add(fmt("cuerpo de %d bytes (enlace)", t)).wifi(true).srv(SK_BODYLEN, t).req("FlexOS Ultra").step(1);
+        add(fmt("cuerpo de %d bytes (validacion)", t)).wifi(true).link().power().srv(SK_BODYLEN, t).step(60).step(40);
+    }
+    // ---- el cuerpo que no llega: tarda, o no llega nunca (la lectura espera de 10 en 10 ms y se rinde a los 15 s) ----
+    for (long ms : {2000L, 14990L, 15000L, 15005L, 15500L, 0xFFFFFFFFL}) {
+        add(fmt("cuerpo de la sesion tarda %ld ms", ms)).wifi(true).link().power().srv(SK_STALL, ms).step(60).step(40);
+        add(fmt("cuerpo del enlace tarda %ld ms", ms)).wifi(true).srv(SK_STALL, ms).req("FlexOS Ultra").step(1);
+    }
+    // ---- el aleatorio exacto: un id de instalacion repetido o a cero se vuelve a sortear ----
+    {
+        std::vector<unsigned char> v = {1, 0, 0, 0};
+        for (int i = 0; i < 32; i++) v.push_back((unsigned char)(i * 3 + 7));
+        for (unsigned char b : std::vector<unsigned char>{1, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0}) v.push_back(b);
+        Script &sc = add("id de instalacion: 409 con aleatorios repetidos y a cero");
+        sc.random(v).wifi(true).srv(SK_CONFLICTS, 1).req("FlexOS Ultra").step(1);
+        Script &sc2 = add("id de instalacion: arranque con aleatorio a cero");
+        sc2.random({0, 0, 0, 0, 5, 0, 0, 0}).wifi(true).step(5);
+        Script &sc3 = add("id de instalacion: desvincular con aleatorios repetidos");
+        sc3.random(v).wifi(true).link().forget().link();
+    }
     add("reloj: saltos de tiempo").wifi(true).link().clock(1000).step(5).clock(7 * 3600 * 1000).step(5).clock(1000).step(30);
     return v;
 }
@@ -838,6 +965,51 @@ static Script random_script(int idx)
     return s;
 }
 
+// Antes de arrancar (ni flexAccountBegin ni flex_account_begin se han llamado) las dos dicen "sin cuenta" y rechazan las peticiones; sin operaciones el servicio no hace nada
+static void t_prebegin()
+{
+    for (int phase = 0; phase < 3; phase++) {   // 0: operaciones puestas; 1: set(NULL, ops); 2: set(cfg, NULL)
+        if (phase == 1) {
+            flex_account_set(NULL, account_ops_netstub());
+        } else if (phase == 2) {
+            flex_account_set(&g_cfg, NULL);
+        } else {
+            flex_account_set(&g_cfg, account_ops_netstub());
+        }
+        char b1[48], b2[48];
+        memset(b1, 'x', sizeof(b1));
+        memset(b2, 'x', sizeof(b2));
+        bool r1 = kRef.request_code("x"), r2 = kPort.request_code("x");
+        bool l1 = kRef.linked(), l2 = kPort.linked(), u1 = kRef.usable(), u2 = kPort.usable();
+        int s1 = kRef.state(), s2 = kPort.state(), k1 = kRef.link_state(), k2 = kPort.link_state();
+        Snap a = kRef.snap(), c = kPort.snap();
+        bool c1 = kRef.copy_bearer(b1, sizeof(b1)), c2 = kPort.copy_bearer(b2, sizeof(b2));
+        kRef.cancel();
+        kPort.cancel();
+        kRef.req_validation();
+        kPort.req_validation();
+        kRef.report_rejected();
+        kPort.report_rejected();
+        CHECK(!r1 && !r2 && !l1 && !l2 && !u1 && !u2, "antes de arrancar (fase %d): rechaza, sin cuenta, no usable", phase);
+        CHECK(s1 == s2 && k1 == k2 && s2 == FLEX_ACCOUNT_UNLINKED && k2 == FLEX_LINK_UNLINKED, "antes de arrancar (fase %d): UNLINKED", phase);
+        CHECK(a.state == c.state && a.link == c.link && a.progress == c.progress && a.linked == c.linked && !c.linked && a.stage == c.stage && a.error == c.error && a.addr == c.addr,
+              "antes de arrancar (fase %d): la foto es la de 'sin cuenta' (%d/%d)", phase, a.state, c.state);
+        CHECK(!c1 && !c2, "antes de arrancar: no hay credencial que copiar");
+        flex_account_snapshot_t z;
+        memset(&z, 0x55, sizeof(z));
+        flex_account_snapshot(&z);
+        CHECK(z.state == FLEX_ACCOUNT_UNLINKED && z.link == FLEX_LINK_UNLINKED && !z.linked && !z.stage[0] && !z.code[0] && !z.flex_address[0] && z.progress == 0,
+              "antes de arrancar (fase %d): la foto esta a cero", phase);
+        flex_account_snapshot(NULL);   // no revienta
+        flex_account_request_validation();
+        flex_account_report_rejected();
+        flex_account_cancel();
+        flex_account_forget_local();
+        flex_account_step();
+    }
+    flex_account_set(&g_cfg, account_ops_netstub());
+}
+
 int main()
 {
     printf("=== Flex Account · servicio en C contra el Arduino ===\n");
@@ -846,6 +1018,13 @@ int main()
     flex_account_test_set_key(gKey.pub.data());
     static const flex_account_cfg_t cfg = {"1.0.0"};
     flex_account_set(&cfg, account_ops_netstub());
+    g_ops_nl = *account_ops_netstub();
+    g_ops_nl.lock = nullptr;
+    g_ops_nl.unlock = nullptr;
+    g_ops_nl.log = nullptr;
+    kPortNL = kPort;
+    kPortNL.name = "C sin cerrojo";
+    t_prebegin();
 
     int named_ok = 0;
     std::vector<Script> sc = named();
@@ -855,6 +1034,13 @@ int main()
         }
     }
     printf("-- %d/%zu escenarios con nombre identicos --\n", named_ok, sc.size());
+    {
+        int nl_ok = 0;
+        for (const Script &s2 : sc) {
+            if (compare(s2, 1000, true)) nl_ok++;
+        }
+        printf("-- %d/%zu escenarios identicos con operaciones sin cerrojo --\n", nl_ok, sc.size());
+    }
 
     // El mismo guion con el reloj a punto de dar la vuelta (los 32 bits de millis() se acaban en 49,7 dias): el C, que hace todas las cuentas de tiempo con diferencias sin
     // signo, tiene que contar lo mismo que con el reloj en 1000

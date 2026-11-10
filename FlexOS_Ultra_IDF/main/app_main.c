@@ -2,6 +2,7 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "flex_bus.h"
+#include "flex_account_port.h"
 #include "flex_core.h"
 #include "flex_i2c.h"
 #include "flex_ntp.h"
@@ -64,6 +65,10 @@ void app_main(void)
 
     // La hora de antes del apagado (aproximada hasta sincronizar), ANTES de la interfaz: nunca arranca en 1970 ni en la semilla si hay una mejor
     flex_ntp_boot_load();
+
+    // Flex Account: carga la cuenta guardada (la fila de Ajustes y la pantalla de la cuenta la leen desde el primer cuadro) y crea su tarea. No enciende el Wi-Fi ni abre
+    // ninguna conexion: la cuenta se valida sola cuando llegue la red
+    flex_account_start();
 
     err = flex_i2c_init();
     if (err == ESP_OK) {

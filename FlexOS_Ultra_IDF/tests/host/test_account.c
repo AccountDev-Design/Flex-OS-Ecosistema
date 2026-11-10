@@ -54,6 +54,7 @@ int ref_acct_sha256(const unsigned char *d, unsigned long n, unsigned char *out)
 const char *ref_acct_link_label(int l);
 const char *ref_acct_verdict_detail(int v);
 int ref_tls_room(unsigned long internal_free, unsigned long block);
+const char *ref_cloud_root_ca(void);
 const char *ref_tls_reason(int e, char *out, unsigned long cap);
 const char *ref_tls_phase(int dns, unsigned el, unsigned hs, unsigned cn, char *out, unsigned long cap);
 int ref_url_host(const char *url, char *out, unsigned long cap);
@@ -475,9 +476,27 @@ static void t_edges(void)
     }
 }
 
+// Las raices de confianza que embebe la placa (flex_net/certs/cloud_root_bundle.pem) son EXACTAMENTE las de Arduino (FlexOS_CloudTLS.cpp)
+static void t_roots(void)
+{
+    FILE *f = fopen("../../components/flex_net/certs/cloud_root_bundle.pem", "rb");
+    CHECK(f != NULL);
+    if (!f) return;
+    static char buf[40000];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    buf[n] = 0;
+    fclose(f);
+    const char *ref = ref_cloud_root_ca();
+    CHECK(strlen(ref) == n && !memcmp(ref, buf, n));   // las raices de la placa son las de Arduino
+    int certs = 0;
+    for (const char *p = buf; (p = strstr(p, "BEGIN CERTIFICATE")); p++) certs++;
+    CHECK(certs == 11);
+}
+
 int main(void)
 {
     key_setup();
+    t_roots();
     t_edges();
     t_simple();
     t_b64();
